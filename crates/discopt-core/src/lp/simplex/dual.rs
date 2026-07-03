@@ -16,7 +16,7 @@
 #![allow(clippy::needless_range_loop)]
 
 use super::linsolve::{FeralLU, LinearSolver};
-use super::primal::{solve_lp_cols, solve_lp_scaled};
+use super::primal::{solve_lp_cols, solve_lp_cols_warm};
 use super::scaling::{ScaledLp, Scaling};
 use super::sparse::SparseCols;
 use super::{LpSolve, LpStatus, SimplexOptions};
@@ -106,8 +106,12 @@ fn solve_csc_core(
     match start {
         Some(basis) => match PreparedDual::prepare_cols(sp, m, n, c, l, u, basis, opts) {
             Some(p) => p.reoptimize(l, u, b, opts),
-            // Unusable warm basis (wrong size / singular / dual-infeasible): cold.
-            None => solve_lp_cols(sp.clone(), m, n, c, l, u, b, opts),
+            // Warm basis rejected by the dual (wrong size / singular /
+            // dual-infeasible). cert:T1.4: try a *primal* warm re-solve from the
+            // same basis first — a coefficient-patched child is usually still
+            // primal-feasible, so phase 2 finishes in a few pivots — and only fall
+            // to the full cold two-phase solve if that basis is unusable too.
+            None => solve_lp_cols_warm(sp.clone(), m, n, c, l, u, b, basis, opts),
         },
         None => solve_lp_cols(sp.clone(), m, n, c, l, u, b, opts),
     }
@@ -145,7 +149,10 @@ pub fn solve_lp_warm_scaled_csc(
 ) -> LpSolve {
     match PreparedDual::prepare(lp, start, opts, sp) {
         Some(p) => p.reoptimize(lp.l, lp.u, b, opts),
-        None => solve_lp_scaled(lp, b, opts), // safe fallback — always correct
+        // cert:T1.4: try a primal warm re-solve from the inherited basis before the
+        // full cold solve (same rationale as the CSC path above). Safe: falls to
+        // cold two-phase whenever the warm basis is unusable.
+        None => solve_lp_cols_warm(sp.clone(), lp.m, lp.n, lp.c, lp.l, lp.u, b, start, opts),
     }
 }
 

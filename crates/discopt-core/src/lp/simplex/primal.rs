@@ -76,6 +76,41 @@ pub fn solve_lp_cols(
     Simplex::new_from_cols(cols, m, n, c, l, u, b, opts).run()
 }
 
+/// Warm-started primal solve from an inherited `start` basis (cert:T1.4).
+///
+/// The incremental McCormick B&B changes only the node's box, so a child LP
+/// differs from its parent by a few McCormick row *coefficients* over a *subset*
+/// box — the parent's basis is usually still **primal-feasible** but no longer
+/// dual-optimal. The dual simplex cannot repair that (it requires dual
+/// feasibility on entry — see `dual.rs`), so its warm path rejects the basis and
+/// cold-refactorizes. This entry instead runs a **primal** re-solve: it ingests
+/// `start`, factorizes it, and — iff the basis is nonsingular AND primal-feasible
+/// — skips phase 1 and runs primal phase 2 directly (a handful of pivots). On any
+/// doubt (malformed/singular basis, artificial basic, primal-infeasible) it falls
+/// back to the full cold two-phase solve. **Sound by construction:** phase 2 from
+/// a primal-feasible basis converges to the true LP optimum, and every other case
+/// takes the trusted cold path — the warm shortcut can only change speed.
+#[allow(clippy::too_many_arguments)]
+pub fn solve_lp_cols_warm(
+    cols: SparseCols,
+    m: usize,
+    n: usize,
+    c: &[f64],
+    l: &[f64],
+    u: &[f64],
+    b: &[f64],
+    start: &Basis,
+    opts: &SimplexOptions,
+) -> LpSolve {
+    let s = Simplex::new_from_cols(cols, m, n, c, l, u, b, opts);
+    match s.run_warm(start) {
+        Ok(sol) => sol,
+        // Unusable warm basis → the genuine cold two-phase solve on the same
+        // matrix (handed back so no clone / no stale state is reused).
+        Err(cols_back) => Simplex::new_from_cols(cols_back, m, n, c, l, u, b, opts).run(),
+    }
+}
+
 /// Whether `x` satisfies the box `l ≤ x ≤ u` and the equalities `A x = b` to a
 /// small absolute/relative tolerance. Used as the final feasibility audit before
 /// certifying an `Optimal` solve so incremental `x_B` drift (Harris bound
@@ -474,6 +509,76 @@ impl<'a> Simplex<'a> {
             Err(s) => s,
         };
         self.assemble(st, &art_sign)
+    }
+
+    /// Warm-started phase-2-only run from an inherited `start` basis (cert:T1.4).
+    ///
+    /// Returns `Ok(solution)` iff the warm basis is nonsingular AND primal-feasible
+    /// (then a primal phase-2 optimizes the real objective from it). Otherwise
+    /// returns `Err(self.cols)` — handing the owned matrix back so the caller can
+    /// run the trusted cold two-phase solve on a fresh solver (no clone, no stale
+    /// state). This never establishes feasibility from an infeasible warm basis;
+    /// phase 1 is left entirely to the cold fallback, so the result is always the
+    /// true LP optimum (or the cold path's verdict).
+    fn run_warm(mut self, start: &Basis) -> Result<LpSolve, SparseCols> {
+        let (m, n) = (self.m, self.n);
+        // Reject a malformed or non-structural warm basis → cold. A warm basic
+        // column must be a real column (an artificial can never be inherited).
+        if start.basic_vars.len() != m
+            || start.col_status.len() != n
+            || start.basic_vars.iter().any(|&j| j >= n)
+        {
+            return Err(self.cols);
+        }
+        // Ingest nonbasic status for the real columns; pin every artificial to 0
+        // (phase-2 config) and nonbasic.
+        self.stat[..n].copy_from_slice(&start.col_status);
+        for i in 0..m {
+            let art = n + i;
+            self.stat[art] = AT_LOWER;
+            self.slot_of[art] = -1;
+            self.lb[art] = 0.0;
+            self.ub[art] = 0.0;
+        }
+        // Basis slots: reset column→slot map, then install the inherited basis.
+        for s in self.slot_of.iter_mut() {
+            *s = -1;
+        }
+        for (slot, &j) in start.basic_vars.iter().enumerate() {
+            self.slot_of[j] = slot as i64;
+            self.stat[j] = BASIC; // keep stat consistent with basic_vars
+        }
+        self.basis = start.basic_vars.clone();
+        // Artificials pinned to 0, so their sign never enters a basic column.
+        let art_sign = vec![1.0; m];
+        // Nonsingular? A singular inherited basis → cold.
+        if self.refactorize(&art_sign).is_err() {
+            return Err(self.cols);
+        }
+        // Primal-feasible? Compute x_B and check every basic value lies within its
+        // column's bounds. If not, phase 1 is required — hand back to the cold path.
+        let xb = match self.basic_values(&art_sign) {
+            Ok(v) => v,
+            Err(()) => return Err(self.cols),
+        };
+        let ftol = 1e-7;
+        let feasible = self.basis.iter().enumerate().all(|(slot, &j)| {
+            let v = xb[slot];
+            v >= self.lb[j] - ftol && v <= self.ub[j] + ftol
+        });
+        if !feasible {
+            if std::env::var("DISCOPT_T14_DBG").is_ok() { eprintln!("T14 REJECT primal-infeasible"); }
+            return Err(self.cols);
+        }
+        if std::env::var("DISCOPT_T14_DBG").is_ok() { eprintln!("T14 ACCEPT"); }
+        // Warm basis is nonsingular + primal-feasible → primal phase 2 only.
+        let mut cost2 = vec![0.0; self.na];
+        cost2[..n].copy_from_slice(self.c);
+        let st = match self.simplex_loop(&cost2, &art_sign, false) {
+            Ok(()) => LpStatus::Optimal,
+            Err(s) => s,
+        };
+        Ok(self.assemble(st, &art_sign))
     }
 
     /// Primal simplex iterations for the given `cost`. Returns Ok(()) at
