@@ -118,7 +118,7 @@ experiment may run.
 | T1.1 entry experiment (kill criterion) | done (kill did NOT fire) | (this PR) | All uncovered families are closed-form box-affine → proceed to T1.2. Bonus: engine already validates on mixed int+cont (ex1263) and maximize |
 | T1.2 patch-table term coverage | in progress — monomial family landed | (this PR) | Dir. (a) differential neutrality. Steps 0–1 done: 42-row robust baseline + differential-neutrality checker + monomial p≥2 coverage (NEUTRAL: sound on all 42, node-improving; nvs17 perf-gated pending T1.4). Remaining families (trilinear/univariate/fractional) + T1.4 warm-start under parallel derivation |
 | T1.3 scope-gate widening | done | (this PR) | Widened gate to `ok` + general root-cut-pool (built whenever engine active) + skip fast path during pool capture. dispatch 9843→3 restored; nvs13 55→19, nvs17 205→61. NEUTRAL / adversarial 10 / smoke 211. Fast engine now on the general spatial path |
-| T1.4 basis inheritance | **ESCALATED — decision needed (§14)** | — | Quick fix (route into run_dual) is UNSOUND (would miscertify; regression test forbids it). Real fix = warm-start ingestion in primal.rs (medium effort, soundness-critical). T1.3 already gave the engine on the spatial path node-neutral; T1.4 is the wall-time lever. Invest now or defer? |
+| T1.4 basis inheritance | non-lever (measured); re-scoped | — | Warm-primal built + sound (42/42 tests) but INERT: run_warm never called — the dual warm start already succeeds / nrows guard routes to ordinary cold. Node LP warm-start is not the bottleneck (nvs17 2 n/s). Real lever = OBBT/per-call-rebuild re-profile (T1.6). Parked patch |
 | T1.5 evaluator-cache routing | already realized (PR #316) | #316 | primal_heuristics diving already routed through cached_evaluator (the −22% gear4 win); remaining sites are one-time (convex fast path) or autodiff-unsafe. Low residual value |
 | T1.6 bookkeeping → Rust | not started | — | blocked by T1.5 profile |
 | Phase 2 entry experiment | **locked** (§0.1.2) | — | unlocks on Phase 1 done |
@@ -1045,6 +1045,27 @@ per-node wall on the instances it newly moves onto the incremental path.
 > amortization does not transfer. **Decision needed** (see §0.8): invest in the
 > warm-primal now, or defer T1.4 — Phase 1's *wall-time* win is gated on it, but
 > T1.3 already delivered the engine on the spatial path with node-neutrality.
+>
+> **RESULT (2026-07-02, §0.4) — implemented, sound, but INERT; the premise does
+> not hold. Reverted.** Built `solve_lp_cols_warm` + `run_warm` in `primal.rs`
+> (phase-2-only from a nonsingular + primal-feasible inherited basis, else cold)
+> and routed `dual.rs`'s prepare-`None` fallbacks to it. It is **sound** — `cargo
+> test simplex` 42/42 and the forbidding `dual_infeasible_warm_start_falls_back_to_cold`
+> stayed green. But a counter (`DISCOPT_T14_DBG`) showed **`run_warm` is never
+> called** on an nvs17 spatial solve (0 accept / 0 reject) while the Python engine
+> stored a warm basis 18×. So the warm basis never reaches the dual-infeasible
+> fallback: either the dual `prepare` **actually succeeds** (the incremental node
+> LP is dual-feasible — the coefficient patch did *not* break dual feasibility as
+> hypothesized), or the Python `nrows` guard (`mccormick_lp.py:443-447`, now
+> toggled by the T1.3 root-pool cuts changing the row count) routes the node to the
+> *ordinary* cold path. Either way the node LP warm-start is **not the
+> bottleneck** — nvs17 runs at ~2 nodes/s with the dual warm start already working.
+> The dominant per-node cost is elsewhere: the fresh profile in §1 named **OBBT's
+> inner loop (~23 LP solves/node on gear4) and per-call relaxation rebuilds**, not
+> the node LP solve. **Re-scope: T1.4 (node-LP warm-start) is a non-lever; the real
+> per-node lever is a re-profile → OBBT / per-call-rebuild reduction (T1.6 /
+> perf-plan Stage 2), or fixing the `nrows` guard so a stored basis reaches the
+> dual warm path.** Implementation parked in `docs/dev/data/t14-warm-primal-patch.diff`.
 
 **T1.5 — Evaluator-cache routing (perf-plan Stage 1, validated).**
 Route the ~18 direct `NLPEvaluator(model)` sites (list in performance-plan §3;
