@@ -134,6 +134,8 @@ experiment may run.
 | Phase 3 zerohalf build (native {0,½}-CG separator) | done — **sound; lever INERT on graphpart (measured)**; code parked on branch `cert-p3-zerohalf` (PR #427 closed unmerged), NOT on main | finding only | A validity-GREEN heuristic zero-half separator was built (400-system + binary-dense property tests: no feasible point cut). ON/OFF on graphpart: **gap_closed 0.000, `incorrect_count=0`** — the predicted 0.6–0.9 did NOT land: discopt's root LP optimum is a ⅓-partition vertex where every {0,½} combo is *tight, not violated* (exhaustive GF(2) nullspace search: viol=0.0000), and `root_off` already sits at SCIP's separators-off floor. Root cause = **LP vertex geometry (½-cuttable vs ⅓), not cut depth**. Follow-on = separate at a ½-valued/pre-crossover point. The inert separator is NOT merged (no dead flag on main); preserved on the branch for the follow-on. See §7 "Phase 3 zerohalf — build results" |
 | Phase 4 re-profile (entry experiment) | done — **rank recorded** | #442 | 8 run / 0 skipped. Ranked build order: **1) CSE (op-dup 31–37% on nvs17/clay), 2) Q-extraction (coupled to CSE), 3) V-segments DE-PRIORITIZED (0 defvars in all 1,558 text `.nl`; defined-var-heavy set is binary-`.nl` discopt can't parse), 4) symmetry DO-NOT-BUILD (0 orbits)**. CC5 FALSIFIED (XLA ≤1.2% of wall); dominant wall = separation. See §8 "Phase 4 — re-profile results" |
 | Phase 4 T-CSE/V-segments | **CSE unlocked; V-segments/symmetry de-scoped** (§0.1.2) | — | build order fixed by the re-profile above; CSE first (bound-neutral), Q-extraction second |
+| Phase 4 build 1 — CSE/hash-consing | **done — bound-neutral** | (this PR) | Content-addressed interning in `ExprArena` (`expr.rs`), wired into the `.nl` parser and Python `convert_expr`. DAG node count ↓ **68.9% nvs17, 64.8% clay0303hfsg, 34.2% ex1252, 34.0% casctanks, 0.0% gear4** (panel total −48.4%); gear4 0% confirms the re-profile prediction. Cert-neutrality **NEUTRAL** (42 certifying instances, node_count exactly unchanged, objective to tol). See §8 "Phase 4 CSE — build results" |
+| Phase 4 items 2–4 (V-segments, Q-extract, symmetry) | **locked** (§0.1.2) | — | independent; item 2 (V-segments) is the natural follow-on |
 | Phase 5 | **locked** (§0.1.2) | — | requires post-Phase-1 re-profile |
 
 **Phase 0 — DONE & gated** (cert0 green: root_gap coverage 0.909 ≥ 0.90, incorrect 0).
@@ -984,6 +986,65 @@ as a per-node multiplier on that cost. Recommend scoping Phase 4 down to **CSE
 This experiment measures only (no solver math changed; the harness reads existing
 introspection hooks) — bound-neutral by construction; the sound solves on the panel
 (nvs17, gear4, st_e38 optimal) all satisfy `bound ≤ oracle`. No correctness gate applies.
+### Phase 4 CSE — build results (2026-07-03)
+
+Built **build item 1**: content-addressed hash-consing (structural interning) in the
+Rust expression arena. `ExprArena` gains an opt-in intern table
+(`HashMap<StructuralKey, ExprId>`, keyed lookup only — no ordering-sensitive
+iteration, so id assignment stays deterministic/byte-reproducible) and an
+`intern(node)` method that returns an existing id for any structurally-identical node
+instead of appending a duplicate. `StructuralKey` captures op + operand ids + literal
+payload (scalar constants keyed by exact `f64::to_bits`, so `0.0`/`-0.0` never merge;
+different shapes/types never share a key). **Commutative operands are NOT reordered**
+(`a+b` and `b+a` intern separately) — correctness over completeness. Interning is
+enabled only during construction and disabled before the model leaves the parser, so
+downstream mutating passes (presolve/reformulation) keep plain-append `add` semantics
+untouched — the raw `add` is unchanged. Wired into both construction paths: the `.nl`
+parser (`nl_parser.rs::parse_nl`) and the Python DAG converter
+(`expr_bindings.rs::convert_expr`). Escape hatch `DISCOPT_DISABLE_CSE` reverts to the
+pre-CSE build (used to measure the lever; also a fallback).
+
+**Dedup is semantic-preserving by construction:** two nodes share an id only when
+their `StructuralKey`s are equal, i.e. same op, same operand ids, same literal
+payload/shape — and arena evaluation is a pure function of that structure. Rust tests
+assert (a) building the same subexpression twice returns the same id and appends no
+duplicate, (b) structurally-different expressions (different var index / op / operand
+order / `±0.0`) get different ids, and (c) **evaluation-equivalence**: an interned
+build evaluates identically to the naive (non-interned) build of the same expression
+on 200 random points to 1e-12, while having strictly fewer nodes.
+
+**The lever — DAG node count, CSE off vs on** (panel `.nl` parsed via
+`discopt._rust.parse_nl_file`, `n_nodes`):
+
+| instance | naive nodes | CSE nodes | dup removed | % reduction |
+|---|---:|---:|---:|---:|
+| nvs17 | 753 | 234 | 519 | **68.9%** |
+| clay0303hfsg | 2135 | 752 | 1383 | **64.8%** |
+| ex1252 | 336 | 221 | 115 | 34.2% |
+| casctanks | 3124 | 2062 | 1062 | 34.0% |
+| gear4 | 17 | 17 | 0 | **0.0%** |
+| **panel total** | **6365** | **3286** | **3079** | **48.4%** |
+
+The reduction exceeds the re-profile's 31–37% *operator*-dup estimate because the
+count also folds duplicate leaf/constant nodes (bound constants, repeated
+coefficients). **gear4 = 0.0%** confirms the re-profile prediction exactly (no
+structural sharing there) — a clean sanity check that the interner only fuses genuine
+duplicates. The value is a per-node multiplier on downstream separation/eval cost
+(smaller JAX compile, fewer lifted-LP rows, cheaper FBBT sweeps), per the re-profile.
+
+**Build-time note (measured, honest):** interning adds a small per-node hashing tax at
+*parse* time (nvs17 ~30µs→183µs; clay ~169→221µs; casctanks ~504→624µs; ex1252 is
+slightly faster). This is a one-time construction cost on the ~10²–10³ µs scale,
+amortized many-fold by the smaller DAG across the whole solve; CSE's payoff is the
+node-count multiplier downstream, not parse speed (as the re-profile states).
+
+**Correctness gate — BOUND-NEUTRAL, PASS.** `scripts/check_cert_neutrality.py`
+reports **NEUTRAL** across the 42-row certifying panel: node_count **exactly
+unchanged** vs `cert-baseline.jsonl` on every instance and objective equal to
+tolerance. `cargo test -p discopt-core` green (incl. `presolve_determinism`, 4/4),
+`cargo clippy --lib` clean, the new CSE unit/property tests pass. Because the interner
+only merges structurally-identical nodes, the relaxation math is bit-for-bit the same
+— the smaller arena is a representation change, not a math change.
 
 ---
 

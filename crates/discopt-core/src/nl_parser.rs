@@ -358,7 +358,7 @@ fn parse_expr(
     // Numeric constant: n<value>
     if let Some(rest) = line.strip_prefix('n') {
         let val = parse_f64(rest)?;
-        return Ok(arena.add(ExprNode::Constant(val)));
+        return Ok(arena.intern(ExprNode::Constant(val)));
     }
 
     // Variable reference: v<index>
@@ -398,7 +398,7 @@ fn parse_opcode(
             // o0: add
             let left = parse_expr(reader, arena, var_nodes)?;
             let right = parse_expr(reader, arena, var_nodes)?;
-            Ok(arena.add(ExprNode::BinaryOp {
+            Ok(arena.intern(ExprNode::BinaryOp {
                 op: BinOp::Add,
                 left,
                 right,
@@ -408,7 +408,7 @@ fn parse_opcode(
             // o1: subtract
             let left = parse_expr(reader, arena, var_nodes)?;
             let right = parse_expr(reader, arena, var_nodes)?;
-            Ok(arena.add(ExprNode::BinaryOp {
+            Ok(arena.intern(ExprNode::BinaryOp {
                 op: BinOp::Sub,
                 left,
                 right,
@@ -418,7 +418,7 @@ fn parse_opcode(
             // o2: multiply
             let left = parse_expr(reader, arena, var_nodes)?;
             let right = parse_expr(reader, arena, var_nodes)?;
-            Ok(arena.add(ExprNode::BinaryOp {
+            Ok(arena.intern(ExprNode::BinaryOp {
                 op: BinOp::Mul,
                 left,
                 right,
@@ -428,7 +428,7 @@ fn parse_opcode(
             // o3: divide
             let left = parse_expr(reader, arena, var_nodes)?;
             let right = parse_expr(reader, arena, var_nodes)?;
-            Ok(arena.add(ExprNode::BinaryOp {
+            Ok(arena.intern(ExprNode::BinaryOp {
                 op: BinOp::Div,
                 left,
                 right,
@@ -438,7 +438,7 @@ fn parse_opcode(
             // o5: power
             let base = parse_expr(reader, arena, var_nodes)?;
             let exp = parse_expr(reader, arena, var_nodes)?;
-            Ok(arena.add(ExprNode::BinaryOp {
+            Ok(arena.intern(ExprNode::BinaryOp {
                 op: BinOp::Pow,
                 left: base,
                 right: exp,
@@ -448,7 +448,7 @@ fn parse_opcode(
         16 => {
             // o16: unary negation
             let operand = parse_expr(reader, arena, var_nodes)?;
-            Ok(arena.add(ExprNode::UnaryOp {
+            Ok(arena.intern(ExprNode::UnaryOp {
                 op: UnOp::Neg,
                 operand,
             }))
@@ -458,7 +458,7 @@ fn parse_opcode(
         37 => {
             // o37: tanh
             let arg = parse_expr(reader, arena, var_nodes)?;
-            Ok(arena.add(ExprNode::FunctionCall {
+            Ok(arena.intern(ExprNode::FunctionCall {
                 func: MathFunc::Tanh,
                 args: vec![arg],
             }))
@@ -466,7 +466,7 @@ fn parse_opcode(
         38 => {
             // o38: tan
             let arg = parse_expr(reader, arena, var_nodes)?;
-            Ok(arena.add(ExprNode::FunctionCall {
+            Ok(arena.intern(ExprNode::FunctionCall {
                 func: MathFunc::Tan,
                 args: vec![arg],
             }))
@@ -474,7 +474,7 @@ fn parse_opcode(
         39 => {
             // o39: sqrt
             let arg = parse_expr(reader, arena, var_nodes)?;
-            Ok(arena.add(ExprNode::FunctionCall {
+            Ok(arena.intern(ExprNode::FunctionCall {
                 func: MathFunc::Sqrt,
                 args: vec![arg],
             }))
@@ -482,7 +482,7 @@ fn parse_opcode(
         40 => {
             // o40: sinh
             let arg = parse_expr(reader, arena, var_nodes)?;
-            Ok(arena.add(ExprNode::FunctionCall {
+            Ok(arena.intern(ExprNode::FunctionCall {
                 func: MathFunc::Sinh,
                 args: vec![arg],
             }))
@@ -490,7 +490,7 @@ fn parse_opcode(
         41 => {
             // o41: sin
             let arg = parse_expr(reader, arena, var_nodes)?;
-            Ok(arena.add(ExprNode::FunctionCall {
+            Ok(arena.intern(ExprNode::FunctionCall {
                 func: MathFunc::Sin,
                 args: vec![arg],
             }))
@@ -498,7 +498,7 @@ fn parse_opcode(
         42 => {
             // o42: log10
             let arg = parse_expr(reader, arena, var_nodes)?;
-            Ok(arena.add(ExprNode::FunctionCall {
+            Ok(arena.intern(ExprNode::FunctionCall {
                 func: MathFunc::Log10,
                 args: vec![arg],
             }))
@@ -506,7 +506,7 @@ fn parse_opcode(
         43 => {
             // o43: log (natural)
             let arg = parse_expr(reader, arena, var_nodes)?;
-            Ok(arena.add(ExprNode::FunctionCall {
+            Ok(arena.intern(ExprNode::FunctionCall {
                 func: MathFunc::Log,
                 args: vec![arg],
             }))
@@ -514,7 +514,7 @@ fn parse_opcode(
         44 => {
             // o44: exp
             let arg = parse_expr(reader, arena, var_nodes)?;
-            Ok(arena.add(ExprNode::FunctionCall {
+            Ok(arena.intern(ExprNode::FunctionCall {
                 func: MathFunc::Exp,
                 args: vec![arg],
             }))
@@ -522,7 +522,7 @@ fn parse_opcode(
         45 => {
             // o45: cosh
             let arg = parse_expr(reader, arena, var_nodes)?;
-            Ok(arena.add(ExprNode::FunctionCall {
+            Ok(arena.intern(ExprNode::FunctionCall {
                 func: MathFunc::Cosh,
                 args: vec![arg],
             }))
@@ -530,7 +530,7 @@ fn parse_opcode(
         46 => {
             // o46: cos
             let arg = parse_expr(reader, arena, var_nodes)?;
-            Ok(arena.add(ExprNode::FunctionCall {
+            Ok(arena.intern(ExprNode::FunctionCall {
                 func: MathFunc::Cos,
                 args: vec![arg],
             }))
@@ -538,7 +538,7 @@ fn parse_opcode(
         47 => {
             // o47: atanh
             let arg = parse_expr(reader, arena, var_nodes)?;
-            Ok(arena.add(ExprNode::FunctionCall {
+            Ok(arena.intern(ExprNode::FunctionCall {
                 func: MathFunc::Atanh,
                 args: vec![arg],
             }))
@@ -546,7 +546,7 @@ fn parse_opcode(
         49 => {
             // o49: atan
             let arg = parse_expr(reader, arena, var_nodes)?;
-            Ok(arena.add(ExprNode::FunctionCall {
+            Ok(arena.intern(ExprNode::FunctionCall {
                 func: MathFunc::Atan,
                 args: vec![arg],
             }))
@@ -554,7 +554,7 @@ fn parse_opcode(
         50 => {
             // o50: asinh
             let arg = parse_expr(reader, arena, var_nodes)?;
-            Ok(arena.add(ExprNode::FunctionCall {
+            Ok(arena.intern(ExprNode::FunctionCall {
                 func: MathFunc::Asinh,
                 args: vec![arg],
             }))
@@ -562,7 +562,7 @@ fn parse_opcode(
         51 => {
             // o51: asin
             let arg = parse_expr(reader, arena, var_nodes)?;
-            Ok(arena.add(ExprNode::FunctionCall {
+            Ok(arena.intern(ExprNode::FunctionCall {
                 func: MathFunc::Asin,
                 args: vec![arg],
             }))
@@ -570,7 +570,7 @@ fn parse_opcode(
         52 => {
             // o52: acosh
             let arg = parse_expr(reader, arena, var_nodes)?;
-            Ok(arena.add(ExprNode::FunctionCall {
+            Ok(arena.intern(ExprNode::FunctionCall {
                 func: MathFunc::Acosh,
                 args: vec![arg],
             }))
@@ -578,7 +578,7 @@ fn parse_opcode(
         53 => {
             // o53: acos
             let arg = parse_expr(reader, arena, var_nodes)?;
-            Ok(arena.add(ExprNode::FunctionCall {
+            Ok(arena.intern(ExprNode::FunctionCall {
                 func: MathFunc::Acos,
                 args: vec![arg],
             }))
@@ -592,7 +592,7 @@ fn parse_opcode(
             for _ in 0..count {
                 terms.push(parse_expr(reader, arena, var_nodes)?);
             }
-            Ok(arena.add(ExprNode::SumOver { terms }))
+            Ok(arena.intern(ExprNode::SumOver { terms }))
         }
         // ── Binary operators (class 2) ──
         //
@@ -626,7 +626,7 @@ fn parse_opcode(
         15 => {
             // o15: abs
             let arg = parse_expr(reader, arena, var_nodes)?;
-            Ok(arena.add(ExprNode::FunctionCall {
+            Ok(arena.intern(ExprNode::FunctionCall {
                 func: MathFunc::Abs,
                 args: vec![arg],
             }))
@@ -662,6 +662,23 @@ pub fn parse_nl(content: &str) -> Result<ModelRepr, NlParseError> {
             shape: vec![],
         });
         var_nodes.push(id);
+    }
+
+    // Phase 4 CSE (hash-consing): intern expression nodes as they are built so
+    // that structurally-identical subexpressions (AMPL emits many — bounds
+    // constants, repeated products, shared nonlinear terms) collapse to a single
+    // arena node. Seeded from the variable nodes above (interning trivially by
+    // block index). Semantic-preserving by construction (see `ExprArena::intern`).
+    // Disabled again before the model leaves the parser so downstream mutating
+    // passes (presolve/reformulation) keep plain append semantics.
+    //
+    // `DISCOPT_DISABLE_CSE` is a measurement/escape hatch: when set, the arena is
+    // built with plain append (pre-CSE behavior). Because interning only ever
+    // merges structurally-identical nodes, the two builds are evaluation-identical;
+    // the flag exists to quantify the node-count lever and as a safety fallback.
+    let cse_enabled = std::env::var_os("DISCOPT_DISABLE_CSE").is_none();
+    if cse_enabled {
+        arena.enable_interning();
     }
 
     // Storage for parsed nonlinear constraint/objective expressions.
@@ -1046,14 +1063,14 @@ pub fn parse_nl(content: &str) -> Result<ModelRepr, NlParseError> {
                 if (coeff - 1.0).abs() < 1e-15 {
                     lin_terms.push(var_nodes[vi]);
                 } else if (coeff + 1.0).abs() < 1e-15 {
-                    let neg = arena.add(ExprNode::UnaryOp {
+                    let neg = arena.intern(ExprNode::UnaryOp {
                         op: UnOp::Neg,
                         operand: var_nodes[vi],
                     });
                     lin_terms.push(neg);
                 } else {
-                    let c = arena.add(ExprNode::Constant(coeff));
-                    let prod = arena.add(ExprNode::BinaryOp {
+                    let c = arena.intern(ExprNode::Constant(coeff));
+                    let prod = arena.intern(ExprNode::BinaryOp {
                         op: BinOp::Mul,
                         left: c,
                         right: var_nodes[vi],
@@ -1067,7 +1084,7 @@ pub fn parse_nl(content: &str) -> Result<ModelRepr, NlParseError> {
             if lin_terms.len() == 1 {
                 Some(lin_terms[0])
             } else {
-                Some(arena.add(ExprNode::SumOver { terms: lin_terms }))
+                Some(arena.intern(ExprNode::SumOver { terms: lin_terms }))
             }
         };
 
@@ -1082,7 +1099,7 @@ pub fn parse_nl(content: &str) -> Result<ModelRepr, NlParseError> {
                 if is_zero_constant(&arena, nl) {
                     lin
                 } else {
-                    arena.add(ExprNode::BinaryOp {
+                    arena.intern(ExprNode::BinaryOp {
                         op: BinOp::Add,
                         left: nl,
                         right: lin,
@@ -1091,7 +1108,7 @@ pub fn parse_nl(content: &str) -> Result<ModelRepr, NlParseError> {
             }
             (Some(nl), None) => nl,
             (None, Some(lin)) => lin,
-            (None, None) => arena.add(ExprNode::Constant(0.0)),
+            (None, None) => arena.intern(ExprNode::Constant(0.0)),
         }
     };
 
@@ -1106,7 +1123,7 @@ pub fn parse_nl(content: &str) -> Result<ModelRepr, NlParseError> {
                 if is_zero_constant(&arena, nl) {
                     lin
                 } else {
-                    arena.add(ExprNode::BinaryOp {
+                    arena.intern(ExprNode::BinaryOp {
                         op: BinOp::Add,
                         left: nl,
                         right: lin,
@@ -1115,7 +1132,7 @@ pub fn parse_nl(content: &str) -> Result<ModelRepr, NlParseError> {
             }
             (Some(nl), None) => nl,
             (None, Some(lin)) => lin,
-            (None, None) => arena.add(ExprNode::Constant(0.0)),
+            (None, None) => arena.intern(ExprNode::Constant(0.0)),
         };
 
         let cb = &con_bounds[ci];
@@ -1193,6 +1210,11 @@ pub fn parse_nl(content: &str) -> Result<ModelRepr, NlParseError> {
             ub: vec![ub],
         });
     }
+
+    // Construction is complete: drop the intern table so downstream passes that
+    // append nodes via `arena.add` (presolve, reformulation) see plain, unshared
+    // append semantics — no lingering hash-consing behavior.
+    arena.disable_interning();
 
     Ok(ModelRepr {
         arena,
