@@ -89,7 +89,7 @@ in non-default configs; loud ingestion gaps. **P3** = hygiene.
 | C-16 | P0 | presolve/aggregate | positional bound resync after variable-removing pass fuses unrelated variables' bounds → false "infeasible" / silent optimum cut, DEFAULT path | fixed |
 | C-17 | P0 | alphaBB bound | node bound uses sampled (non-rigorous) α + center-only PSD check → false "optimal", default path for small nonconvex; deterministic repro confirms (spike width ≤ 0.006 → α=0, bound 0.0, true min −3.5) | fixed |
 | C-13 | P0 | solver.py bounds | serial convex path trusts under-converged NLP objective as node lower bound → false "optimal" | fixed |
-| C-1 | P0 | solver.py status | false "infeasible" from non-rigorous NLP fathoms (solve_model path) | open |
+| C-1 | P0 | solver.py status | false "infeasible" from non-rigorous NLP fathoms (solve_model path) | fixed |
 | C-4 | P1 | mir.rs cuts | integer-MIR applied with fractional integer lower bound → invalid cut | open |
 | C-2 | P1 | milp_driver status | false "Infeasible" when deadline orphans deferred nodes | open |
 | C-19 | P1 | relax_tan | pole-straddling interval classified as one branch → secant across a pole, invalid envelope | open |
@@ -428,7 +428,54 @@ else-branch return `status="unknown"` (bound=None, gap_certified=False) instead 
   still returns `"infeasible"` (add/keep a test asserting this).
 - Standing gates (§0.3) pass.
 
-**Log:** —
+**Log:**
+- 2026-07-03 — **CONFIRMED then FIXED.** Static confirm: `solve_model`'s finalize
+  else-branch (now `solver.py:~6656-6672`) declared `status="infeasible"` whenever
+  the tree exhausted with no incumbent, checking only `max_nodes`/`time_limit` — it
+  consulted no rigor flag. `grep _unconverged_fathom` confirms that flag lives
+  ONLY in `_solve_nlp_bb` (5 occurrences, all in `7006..7960`), never in the
+  `solve_model` batch loop.
+- **Dynamic confirm (decisive).** A genuinely feasible nonconvex MINLP
+  (`x*y>=1`, feasible x=y=1; integer `z` to keep it on the spatial B&B batch path)
+  in which every node NLP fails non-rigorously (constraint-violating "optimal"
+  iterate → `_INFEASIBILITY_SENTINEL`) and no rigorous bound exists
+  (`mccormick_bounds="none"` + interval bound stubbed to −inf), with the tree
+  driven to `is_finished()` + no incumbent — the exact state the Rust
+  fathom-at-tight-box path (`tree_manager.rs:511/537`) produces when every leaf
+  carries a non-rigorous sentinel. Pre-fix: `status="infeasible"` on the feasible
+  model (the false certificate). This is the worst-class error. Note: reaching this
+  tree-state through the *full* end-to-end path is guarded in practice — a sentinel
+  node is not pruned without an incumbent (`tree_manager.rs:318`), so it keeps
+  branching → `node_limit`/`time_limit`, not `infeasible` — but the finalize LOGIC
+  itself was unsound and the state IS reachable via the Rust tight-box fathom, so
+  the fix hardens the logic regardless.
+- **Fix** (`solver.py`, per the card). Added a `_nonrigorous_fathom` flag
+  (initialized False alongside `_gap_certified`) with a single authoritative,
+  path-agnostic sweep after each batch's node loop, before `import_results`: any
+  node entering the tree with the failure sentinel but WITHOUT the rigorous
+  `node_infeasible_mask` (empty McCormick/LP relaxation over the finite box) sets
+  the flag. The finalize else-branch gains an `elif _nonrigorous_fathom:` arm that
+  returns `status="unknown"` (`_gap_certified=False`) instead of `"infeasible"`,
+  mirroring `_solve_nlp_bb`'s `_unconverged_fathom` semantics exactly. Covers
+  convex + nonconvex, batch + serial in one place. No rigorous check was weakened:
+  a node fathomed via `node_infeasible_mask` or a real `SolveStatus.INFEASIBLE`
+  still yields `"infeasible"`. `SolveResult.__post_init__` already handles
+  `"unknown"` (its `status != "infeasible"` finite-bound downgrade clears the
+  meaningless bound/gap).
+- **Regression tests** (`python/tests/test_c1_nlp_fathom_infeasible.py`,
+  `@pytest.mark.smoke`, sub-second, fail-before/pass-after verified by stashing the
+  fix): `test_nonrigorous_fathom_is_not_reported_infeasible` (the decisive repro —
+  pre-fix returns `"infeasible"`, post-fix `"unknown"`; asserts the class, not a
+  named instance) and `test_rigorous_infeasibility_is_preserved` (empty-box
+  `x>=5 ∧ x<=1` still returns `"infeasible"` — the fix must not downgrade a genuine
+  certificate).
+- **Gates:** ruff check + format clean; mypy (pre-commit) passed; `pytest -m smoke`
+  195 passed / 1 skipped / 0 failed (includes the 2 new tests); adversarial
+  `test_adversarial_recent_fixes.py -m slow` 10 passed. No Rust touched. No
+  correctness assertion weakened (`incorrect_count` unaffected; the change only
+  turns an unsound `"infeasible"` into a sound `"unknown"`). PR: #444.
+
+**Status:** open → fixed.
 
 ---
 
