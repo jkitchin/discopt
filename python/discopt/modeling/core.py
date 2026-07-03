@@ -27,6 +27,7 @@ Example::
 from __future__ import annotations
 
 import builtins as _builtins
+import warnings
 from dataclasses import dataclass
 from enum import Enum
 from typing import (
@@ -64,12 +65,25 @@ class VarType(Enum):
     BINARY : str
         Binary variable restricted to ``{0, 1}``.
     INTEGER : str
-        General integer variable (default bounds: ``[0, 1e6]``).
+        General integer variable. A user-supplied ``lb``/``ub`` is honored
+        exactly; an *unspecified* bound falls back to the finite defaults
+        ``[0, 1e6]`` and emits a ``UserWarning`` (see :meth:`Model.integer`),
+        because a silent default box can cut a true optimum that lies below 0
+        or above 1e6 (correctness issue C-6).
     """
 
     CONTINUOUS = "continuous"
     BINARY = "binary"
     INTEGER = "integer"
+
+
+# Finite fallback bounds for a general-integer variable whose lb/ub is left
+# unspecified. B&B requires a bounded integer domain, so we substitute these —
+# but LOUDLY (a UserWarning names the variable and the imposed range) rather
+# than silently truncating the user's problem (correctness issue C-6). A
+# user-provided bound is always honored exactly and never replaced by these.
+_INTEGER_DEFAULT_LB = 0.0
+_INTEGER_DEFAULT_UB = 1e6
 
 
 # ─────────────────────────────────────────────────────────────
@@ -1704,8 +1718,8 @@ class Model:
         self,
         name: str,
         shape: Union[int, tuple[int, ...]] = ...,
-        lb: Union[float, np.ndarray] = ...,
-        ub: Union[float, np.ndarray] = ...,
+        lb: Optional[Union[float, np.ndarray]] = ...,
+        ub: Optional[Union[float, np.ndarray]] = ...,
         over: None = ...,
     ) -> Variable: ...
 
@@ -1714,8 +1728,8 @@ class Model:
         self,
         name: str,
         shape: Union[int, tuple[int, ...]] = ...,
-        lb: Union[float, np.ndarray] = ...,
-        ub: Union[float, np.ndarray] = ...,
+        lb: Optional[Union[float, np.ndarray]] = ...,
+        ub: Optional[Union[float, np.ndarray]] = ...,
         *,
         over: "_SetBase",
     ) -> "IndexedVar": ...
@@ -1724,8 +1738,8 @@ class Model:
         self,
         name: str,
         shape: Union[int, tuple[int, ...]] = (),
-        lb: Union[float, np.ndarray] = 0,
-        ub: Union[float, np.ndarray] = 1e6,
+        lb: Optional[Union[float, np.ndarray]] = None,
+        ub: Optional[Union[float, np.ndarray]] = None,
         over=None,
     ) -> Union[Variable, "IndexedVar"]:
         """
@@ -1737,15 +1751,30 @@ class Model:
             Variable name (must be unique in the model).
         shape : int or tuple of int, default ()
             Scalar ``()`` or tuple for array variables.
-        lb : float or numpy.ndarray, default 0
-            Lower bound.
-        ub : float or numpy.ndarray, default 1e6
-            Upper bound.
+        lb : float or numpy.ndarray, optional
+            Lower bound. Honored **exactly** when supplied. When omitted, the
+            finite fallback ``0`` is used and a ``UserWarning`` is emitted (see
+            below).
+        ub : float or numpy.ndarray, optional
+            Upper bound. Honored **exactly** when supplied. When omitted, the
+            finite fallback ``1e6`` is used and a ``UserWarning`` is emitted.
 
         Returns
         -------
         Variable
             Integer-valued variable.
+
+        Notes
+        -----
+        Branch-and-bound needs a bounded integer domain, so an *unspecified*
+        ``lb``/``ub`` falls back to ``[0, 1e6]``. Previously this substitution
+        was silent, so a model whose true optimum needed a negative integer or
+        one above ``1e6`` was quietly truncated and the wrong optimum reported
+        as certified (correctness issue C-6). The fallback is now applied
+        **loudly** — a ``UserWarning`` names the variable and the imposed
+        range — and it **never** overrides a bound you provide. Pass explicit
+        ``lb``/``ub`` (e.g. ``lb=-5, ub=10``) to silence the warning and to
+        solve the problem you actually mean.
 
         Examples
         --------
@@ -1753,14 +1782,48 @@ class Model:
         >>> batch = m.integer("batch", shape=(3,), lb=1, ub=100)
         >>> n = m.integer("n", over=plants, lb=0, ub=10)  # indexed integer
         """
+        lb, ub = self._resolve_integer_defaults(name, lb, ub)
         if over is not None:
             _require_no_shape(shape, "integer")
-            return self._make_indexed_var(name, VarType.INTEGER, over, lb, ub, 0.0, 1e6)
+            return self._make_indexed_var(
+                name, VarType.INTEGER, over, lb, ub, _INTEGER_DEFAULT_LB, _INTEGER_DEFAULT_UB
+            )
         if isinstance(shape, int):
             shape = (shape,)
         self._check_name(name)
         var = Variable(name, VarType.INTEGER, shape, lb, ub, self)
         return self._register_variable(var)
+
+    @staticmethod
+    def _resolve_integer_defaults(name, lb, ub):
+        """Substitute finite fallback integer bounds for unspecified sides, loudly.
+
+        Returns the (possibly-substituted) ``(lb, ub)``. A ``None`` side is
+        replaced with the finite fallback (``0`` / ``1e6``) and recorded so a
+        single ``UserWarning`` can name exactly which side(s) discopt had to
+        default. A user-provided bound is passed through unchanged and never
+        warns (correctness issue C-6).
+        """
+        defaulted: list[str] = []
+        if lb is None:
+            lb = _INTEGER_DEFAULT_LB
+            defaulted.append(f"lb={_INTEGER_DEFAULT_LB:g}")
+        if ub is None:
+            ub = _INTEGER_DEFAULT_UB
+            defaulted.append(f"ub={_INTEGER_DEFAULT_UB:g}")
+        if defaulted:
+            warnings.warn(
+                f"integer variable '{name}': no explicit "
+                f"{' and '.join(defaulted)} supplied; discopt is imposing the "
+                f"finite default integer bound(s) so branch-and-bound has a "
+                f"bounded domain. This default box silently cuts any optimum "
+                f"below {_INTEGER_DEFAULT_LB:g} or above {_INTEGER_DEFAULT_UB:g}. "
+                f"Pass explicit lb/ub to solve the intended problem and silence "
+                f"this warning.",
+                UserWarning,
+                stacklevel=3,
+            )
+        return lb, ub
 
     def _make_indexed_param(self, name, index_set, value) -> "IndexedParam":
         """Build an :class:`IndexedParam` backed by one flat parameter over *index_set*."""
