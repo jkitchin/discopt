@@ -649,7 +649,7 @@ existing fbbt_fp tests green; standing gates pass.
   4.0 ≫ FEAS_TOL is still caught — guards against over-loosening).
 - **Gates:** `cargo test -p discopt-core` 373 lib + 4 + 1 doctest green, no
   warnings. Python default path is unaffected (`fbbt_fixed_point` is off by
-  default); smoke + adversarial run in CI. PR: (pending).
+  default); smoke 211 + adversarial 10 green locally. PR: #403.
 
 ---
 
