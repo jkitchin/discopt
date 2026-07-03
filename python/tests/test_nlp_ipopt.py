@@ -122,12 +122,11 @@ class TestConstrainedNLP:
 _SOLVABLE_EXAMPLES = [
     ("simple_minlp", examples.example_simple_minlp),
     ("pooling_haverly", examples.example_pooling_haverly),
-]
-
-# Reactor design is highly nonlinear (Arrhenius kinetics) and may converge
-# to local infeasibility from an arbitrary midpoint start.  We test it
-# separately with a looser status assertion.
-_HARD_EXAMPLES = [
+    # reactor_design used to be quarantined as a "hard example" with a loosened
+    # assertion that accepted INFEASIBLE — masking the fact that its heat balance
+    # was provably infeasible (T[2] >= 940 K vs a 750 K limit). With that fixed
+    # (E3) the model is feasible, so it takes the real OPTIMAL/ITERATION_LIMIT
+    # check like the others.
     ("reactor_design", examples.example_reactor_design),
 ]
 
@@ -157,21 +156,6 @@ class TestExampleModels:
         result = solve_nlp_from_model(m, options={"max_iter": 3000})
         if result.status == SolveStatus.OPTIMAL:
             assert np.isfinite(result.objective)
-
-    @pytest.mark.parametrize("name,factory", _HARD_EXAMPLES, ids=[e[0] for e in _HARD_EXAMPLES])
-    def test_hard_example_runs_without_error(self, name, factory):
-        """Hard nonlinear models run without crashing; any terminal status is OK."""
-        m = factory()
-        result = solve_nlp_from_model(m, options={"max_iter": 3000})
-        assert result.status in (
-            SolveStatus.OPTIMAL,
-            SolveStatus.ITERATION_LIMIT,
-            SolveStatus.INFEASIBLE,
-            SolveStatus.ERROR,  # some cyipopt versions return ERROR for hard problems
-        )
-        assert result.x is not None
-        if result.status != SolveStatus.ERROR:
-            assert np.all(np.isfinite(result.x))
 
 
 # ─────────────────────────────────────────────────────────────

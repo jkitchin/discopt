@@ -59,10 +59,11 @@ def example_pooling_haverly():
     # z = direct flow from source 2 to product 1
     z = m.continuous("z_direct", lb=0, ub=100)
 
-    # Pool quality (bilinear: this is what makes it nonconvex)
-    # q = quality in pool = (quality_A * y[0] + quality_B * y[1]) / (y[0] + y[1])
-    # We reformulate using the p-formulation: p = q * total_flow
-    p = m.continuous("pool_quality_flow", lb=0, ub=300)
+    # Pool quality (bilinear: this is what makes it nonconvex). p is the pool
+    # sulfur CONCENTRATION (quality), bounded by the source qualities [1, 3].
+    # Modelling p as the concentration (not the sulfur *mass*) is what keeps the
+    # product specs from vanishing when the pool is bypassed — see below (E1).
+    p = m.continuous("pool_sulfur_concentration", lb=0.0, ub=3.0)
 
     # Source qualities
     quality = np.array([3.0, 1.0, 2.0])  # sulfur content
@@ -81,14 +82,23 @@ def example_pooling_haverly():
     # Pool mass balance
     m.subject_to(y[0] + y[1] == x[0] + x[1], name="pool_mass_balance")
 
-    # Pool quality balance (bilinear: p = quality[0]*y[0] + quality[1]*y[1])
-    m.subject_to(p == quality[0] * y[0] + quality[1] * y[1], name="pool_quality_balance")
-
-    # Product quality specs (bilinear: p * fraction <= spec * flow)
-    m.subject_to(p * x[0] <= 2.5 * x[0] * (y[0] + y[1]), name="product0_sulfur_spec")
+    # Pool quality balance (bilinear): concentration * pool inflow = sulfur mass in.
     m.subject_to(
-        p * x[1] + quality[2] * z <= 1.5 * (x[1] + z) * (y[0] + y[1]), name="product1_sulfur_spec"
+        p * (y[0] + y[1]) == quality[0] * y[0] + quality[1] * y[1],
+        name="pool_quality_balance",
     )
+
+    # Product quality specs: sulfur delivered <= spec * total flow to the product.
+    # Product 0 draws only pool flow (at concentration p); product 1 draws the pool
+    # stream x1 (at concentration p) plus the direct source-2 stream z (concentration
+    # quality[2]). Using the concentration p directly — rather than clearing a
+    # 1/(y0+y1) denominator by multiplying the spec through by the pool flow — keeps
+    # both constraints binding even when the pool is bypassed (pool flow -> 0). The
+    # original mass form multiplied through by (y0+y1), so an all-direct solution
+    # satisfied the spec vacuously (0 <= 0) and shipped 2 %-sulfur product against a
+    # 1.5 % spec, certifying a false optimum of 500 (true Haverly-I optimum 400) (E1).
+    m.subject_to(p * x[0] <= 2.5 * x[0], name="product0_sulfur_spec")
+    m.subject_to(p * x[1] + quality[2] * z <= 1.5 * (x[1] + z), name="product1_sulfur_spec")
 
     # Product demand
     m.subject_to(x[0] <= 100, name="product0_demand")
@@ -262,9 +272,16 @@ def example_reactor_design():
             name=f"conversion_stage{i}",
         )
 
-    # Heat balance: adiabatic temperature rise
+    # Heat balance: adiabatic temperature rise per stage.
+    # ΔT = -dH·X/Cp is intensive (independent of the feed rate F), so the original
+    # `F/(Cp*F)` was a needless division-by-variable that merely cancels to 1/Cp.
+    # With the original dH=-80000 the rise is 320 K/stage, which forces
+    # T[2] >= 940 K against the 750 K material limit below — the model was provably
+    # infeasible. A moderate exotherm keeps the 3-stage cascade within limits (E3).
     Cp = 75.0  # J/(mol·K)
-    dH = -80000.0  # J/mol (exothermic)
+    dH = -30000.0  # J/mol (exothermic)
+    conversion = 0.3  # fractional conversion per stage
+    delta_T = -dH * conversion / Cp  # adiabatic rise per stage, K (= 120 K)
     for i in range(3):
         if i == 0:
             m.subject_to(
@@ -272,8 +289,8 @@ def example_reactor_design():
                 name="feed_temp",
             )
         else:
-            # Temperature rises due to reaction
-            m.subject_to(T[i] == T[i - 1] - dH * 0.3 * F / (Cp * F), name=f"heat_balance_stage{i}")
+            # Temperature rises due to reaction (constant adiabatic increment).
+            m.subject_to(T[i] == T[i - 1] + delta_T, name=f"heat_balance_stage{i}")
 
     # Material limit on temperature
     m.subject_to([T[i] <= 750 for i in range(3)], name="max_temperature")
@@ -427,23 +444,29 @@ def example_logical_constraints():
     returns = np.array([12.0, 8.0, 15.0, 6.0])
     m.maximize(dm.sum(lambda i: returns[i] * invest[i], over=range(4)))
 
-    # Budget constraint (at most 3 projects active)
-    m.subject_to(dm.atmost(3, active), name="budget")
+    # Budget constraint (at most 3 projects active). Propositional-logic
+    # constraints go through m.logical(), not m.subject_to() (which takes
+    # algebraic Constraints only) (E2).
+    m.logical(dm.atmost(3, active), name="budget")
 
-    # Project 3 requires project 0 (precedence)
-    m.subject_to(dm.land(~active[3], active[0]), name="precedence")
+    # Project 3 requires project 0 (precedence): the implication a3 -> a0, i.e.
+    # lor(~a3, a0). The original land(~a3, a0) instead *asserts* both ~a3 and a0
+    # unconditionally (forcing project 3 off and project 0 on), not the
+    # requirement being modelled (E2).
+    m.logical(dm.lor(~active[3], active[0]), name="precedence")
 
     # At least one of projects 0 or 1 must be active
-    m.subject_to(dm.lor(active[0], active[1]), name="require_one")
+    m.logical(dm.lor(active[0], active[1]), name="require_one")
 
     # Investment only allowed if project is active (indicator constraints)
     for i in range(4):
         m.if_then(active[i].variable, [invest[i] >= 10, invest[i] <= 80])
 
-    # Disjunction: project 2 is either high-intensity (≥50) or low-intensity (≤20)
-    d_high = m.disjunct("project2_high")
+    # Disjunction: project 2 is either high-intensity (≥50) or low-intensity (≤20).
+    # Disjunct blocks are created with make_disjunct() (E2).
+    d_high = m.make_disjunct("project2_high")
     d_high.subject_to(invest[2] >= 50)
-    d_low = m.disjunct("project2_low")
+    d_low = m.make_disjunct("project2_low")
     d_low.subject_to(invest[2] <= 20)
     m.add_disjunction([d_high, d_low], name="project2_mode")
 
