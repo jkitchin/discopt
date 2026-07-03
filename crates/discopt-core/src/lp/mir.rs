@@ -5,19 +5,31 @@
 //! directly from the model's `≤` rows — basis-free, so it fires on constraint
 //! structure the tableau does not expose.
 //!
-//! For a single row `Σ_j a_j x_j ≤ b` (shifted to `x'_j = x_j − l_j ≥ 0`) with
-//! `f = b' − ⌊b'⌋ ∈ (0,1)`, the MIR inequality is
-//! `Σ_j γ_j x'_j ≤ ⌊b'⌋` with, for `f_j = a_j − ⌊a_j⌋`:
+//! For a single row `Σ_j a_j x_j ≤ b` we first reformulate every variable to a
+//! nonnegative variable `y_j ≥ 0` by *bound substitution*: per column we choose
+//! either the **lower** bound (`y_j = x_j − l_j`, coefficient `a_j`) or, when the
+//! variable is pressed near its **upper** bound, the **upper** complement
+//! (`y_j = u_j − x_j`, coefficient `−a_j`, with `a_j u_j` folded into the rhs).
+//! Both keep the row in the form `Σ ã_j y_j ≤ b̃` with `y_j ≥ 0`, and an integer
+//! `x_j` stays integer under complementation only when `u_j` is integral — so we
+//! complement an integer column only then. Complementation is the standard
+//! Marchand–Wolsey strengthening: it changes *which* facet the MIR function
+//! produces, and on rows whose LP point sits at an upper bound the complemented
+//! cut is the violated one.
 //!
-//! - integer `j`: `γ_j = ⌊a_j⌋ + max(0, f_j − f)/(1 − f)`;
-//! - continuous `j`: `γ_j = min(a_j, 0)/(1 − f)`.
+//! With `f = b̃' − ⌊b̃'⌋ ∈ (0,1)` the MIR inequality on the reformulated row is
+//! `Σ_j γ_j y_j ≤ ⌊b̃'⌋` with, for `f_j = ã_j − ⌊ã_j⌋`:
+//!
+//! - integer `j`: `γ_j = ⌊ã_j⌋ + max(0, f_j − f)/(1 − f)`;
+//! - continuous `j`: `γ_j = min(ã_j, 0)/(1 − f)`.
 //!
 //! Single-row MIR is only as strong as the row's scaling, so each row is tried
-//! at several scalings `δ` (1, and `1/|a_j|` for each integer column) and the
-//! most-violated valid cut is kept. The result is mapped back to the original
-//! `x` (`x' = x − l`). Every cut is valid for the row's integer hull regardless
-//! of the scaling or the (interior) point it was separated at, so soundness is
-//! independent of the relaxation solver.
+//! at several scalings `δ` (1, and `1/|a_j|` for each integer column) and — for
+//! both the all-lower substitution and the near-bound (per-column upper-vs-lower)
+//! substitution — the most-violated valid cut is kept. The result is mapped back
+//! to the original `x`. Every cut is valid for the row's integer hull regardless
+//! of the scaling, the complementation choice, or the (interior) point it was
+//! separated at, so soundness is independent of the relaxation solver.
 
 /// A separated MIR cut `coeffs · x ≤ rhs` over the structural variables.
 pub struct MirCut {
@@ -53,17 +65,119 @@ fn mir_row(a: &[f64], b: f64, integrality: &[bool]) -> Option<(Vec<f64>, f64)> {
     Some((g, b.floor()))
 }
 
+/// Tolerance within which an integer column's upper bound must sit to an
+/// integer for its complement `u_j − x_j` to remain integer-valued.
+const INT_UB_TOL: f64 = 1e-6;
+
+/// Whether the LP point is within `frac` of the way up the `[l, u]` box, i.e.
+/// close enough to the upper bound that complementing there is worth trying.
+fn near_upper(xj: f64, lj: f64, uj: f64) -> bool {
+    if !uj.is_finite() || uj <= lj {
+        return false;
+    }
+    // Strictly above the box midpoint ⇒ nearer the upper bound.
+    xj - lj > 0.5 * (uj - lj)
+}
+
+/// Apply single-row MIR to `row` under a fixed per-column bound-substitution
+/// `comp` (`comp[j]` = complement column `j` at its upper bound), at scaling
+/// `d`, and return the resulting cut over the *original* `x` together with its
+/// violation at `x`, or `None` if no valid, sufficiently violated cut results.
+///
+/// # Soundness
+/// Under `y_j = u_j − x_j` (for complemented `j`) and `y_j = x_j − l_j`
+/// (otherwise), every `y_j ≥ 0`, and the row becomes `Σ ã_j y_j ≤ b̃` with
+/// `ã_j = −a_j` (complemented) or `a_j`, and `b̃ = b − Σ_{comp} a_j u_j −
+/// Σ_{not comp} a_j l_j`. MIR is valid for this nonnegative row, and mapping the
+/// cut `Σ γ_j y_j ≤ r` back through the (affine, invertible) substitution yields
+/// a valid inequality in `x`. Any integer-feasible `x` maps to a feasible `y`
+/// (integer when `x_j` and, for complemented integer columns, `u_j` are), so the
+/// cut removes no integer-feasible point of the row.
+#[allow(clippy::too_many_arguments)]
+fn mir_under_substitution(
+    row: &[f64],
+    b: f64,
+    l: &[f64],
+    u: &[f64],
+    integrality: &[bool],
+    comp: &[bool],
+    x: &[f64],
+    d: f64,
+    tol: f64,
+    max_dynamism: f64,
+) -> Option<(Vec<f64>, f64, f64)> {
+    let n = row.len();
+    // Reformulated coefficients ã_j and the shift folded into the rhs.
+    let mut a_ref = vec![0.0_f64; n];
+    let mut b_ref = b;
+    for j in 0..n {
+        if comp[j] {
+            a_ref[j] = -row[j];
+            b_ref -= row[j] * u[j];
+        } else {
+            a_ref[j] = row[j];
+            b_ref -= row[j] * l[j];
+        }
+    }
+    // Scale, then apply the MIR function in the nonnegative y-space.
+    let a_scaled: Vec<f64> = a_ref.iter().map(|&aj| aj * d).collect();
+    let (g, r) = mir_row(&a_scaled, b_ref * d, integrality)?;
+
+    // Point value of y_j and violation of `Σ g_j y_j ≤ r` at x.
+    let yj = |j: usize| if comp[j] { u[j] - x[j] } else { x[j] - l[j] };
+    let viol: f64 = (0..n).map(|j| g[j] * yj(j)).sum::<f64>() - r;
+    if viol <= tol {
+        return None;
+    }
+
+    // Map the cut `Σ g_j y_j ≤ r` back to the original x. For complemented j,
+    // g_j y_j = g_j(u_j − x_j) = −g_j x_j + g_j u_j, so the coefficient on x_j is
+    // −g_j and the constant g_j u_j moves to the rhs as −g_j u_j; for a lower
+    // column g_j y_j = g_j x_j − g_j l_j, so coefficient g_j and rhs += g_j l_j.
+    let mut coeffs = vec![0.0_f64; n];
+    let mut rhs = r;
+    for j in 0..n {
+        if comp[j] {
+            coeffs[j] = -g[j];
+            rhs -= g[j] * u[j];
+        } else {
+            coeffs[j] = g[j];
+            rhs += g[j] * l[j];
+        }
+    }
+
+    let max_c = coeffs.iter().fold(0.0_f64, |acc, &v| acc.max(v.abs()));
+    let min_c = coeffs
+        .iter()
+        .filter(|&&v| v.abs() > tol)
+        .fold(f64::INFINITY, |a, &v| a.min(v.abs()));
+    if max_c == 0.0
+        || max_c > MAX_ABS_COEFF
+        || rhs.abs() > MAX_ABS_COEFF
+        || (min_c.is_finite() && max_c / min_c > max_dynamism)
+        || !coeffs.iter().all(|v| v.is_finite())
+        || !rhs.is_finite()
+    {
+        return None;
+    }
+    Some((coeffs, rhs, viol))
+}
+
 /// Separate MIR cuts from the `≤` rows `a_ub · x ≤ b_ub` at point `x`.
 ///
-/// `a_ub` is row-major `m × n`; `l` are the variable lower bounds (used to
-/// shift to `x' ≥ 0`; upper-bound complementation is a future strengthening);
-/// `integrality[j]` marks integer columns. Returns the most violated valid MIR
-/// cut per row (over the original `x`), subject to a violation threshold and
-/// numerical guards.
+/// `a_ub` is row-major `m × n`; `l`/`u` are the variable lower/upper bounds
+/// (used to reformulate each column to a nonnegative variable via lower shift or
+/// upper complement — see the module docs); `integrality[j]` marks integer
+/// columns. Returns the most violated valid MIR cut per row (over the original
+/// `x`), subject to a violation threshold and numerical guards. Both the
+/// all-lower substitution and the per-column near-bound substitution are tried at
+/// every candidate scaling, and the strongest valid cut is kept.
+#[allow(clippy::too_many_arguments)]
 pub fn separate_mir(
     a_ub: &[f64],
     b_ub: &[f64],
     l: &[f64],
+    u: &[f64],
     integrality: &[bool],
     x: &[f64],
     tol: f64,
@@ -79,8 +193,6 @@ pub fn separate_mir(
     for i in 0..m {
         let row = &a_ub[i * n..(i + 1) * n];
         let b = b_ub[i];
-        // Shifted rhs for x' = x - l:  Σ a_j (l_j + x'_j) ≤ b.
-        let b_shift = b - (0..n).map(|j| row[j] * l[j]).sum::<f64>();
 
         // Candidate scalings: 1, then 1/|a_j| for each integer column.
         let mut deltas = vec![1.0_f64];
@@ -90,36 +202,48 @@ pub fn separate_mir(
             }
         }
 
+        // All-lower substitution (the original behaviour).
+        let comp_lower = vec![false; n];
+        // Near-bound substitution: complement columns whose LP point sits near a
+        // finite upper bound. Integer columns are complemented only when their
+        // upper bound is integral, so the complemented variable stays integer.
+        let mut comp_near = vec![false; n];
+        for j in 0..n {
+            if row[j].abs() <= tol {
+                continue;
+            }
+            if !near_upper(x[j], l[j], u[j]) {
+                continue;
+            }
+            if integrality[j] && (u[j] - u[j].round()).abs() > INT_UB_TOL {
+                continue;
+            }
+            comp_near[j] = true;
+        }
+        let mut patterns: Vec<&[bool]> = vec![&comp_lower];
+        if comp_near.iter().any(|&c| c) {
+            patterns.push(&comp_near);
+        }
+
         let mut best: Option<(Vec<f64>, f64, f64)> = None; // (coeffs, rhs, violation)
-        for &d in &deltas {
-            let a_scaled: Vec<f64> = row.iter().map(|&aj| aj * d).collect();
-            let (g, r) = match mir_row(&a_scaled, b_shift * d, integrality) {
-                Some(v) => v,
-                None => continue,
-            };
-            // Violation on x':  Σ g_j (x_j - l_j) - r  (cut is ≤, so >0 ⇒ cut).
-            let viol: f64 = (0..n).map(|j| g[j] * (x[j] - l[j])).sum::<f64>() - r;
-            if viol <= tol {
-                continue;
-            }
-            // Map back to original x:  Σ g_j x_j ≤ r + Σ g_j l_j.
-            let rhs = r + (0..n).map(|j| g[j] * l[j]).sum::<f64>();
-            let max_c = g.iter().fold(0.0_f64, |acc, &v| acc.max(v.abs()));
-            let min_c = g
-                .iter()
-                .filter(|&&v| v.abs() > tol)
-                .fold(f64::INFINITY, |a, &v| a.min(v.abs()));
-            if max_c == 0.0
-                || max_c > MAX_ABS_COEFF
-                || rhs.abs() > MAX_ABS_COEFF
-                || (min_c.is_finite() && max_c / min_c > max_dynamism)
-                || !g.iter().all(|v| v.is_finite())
-                || !rhs.is_finite()
-            {
-                continue;
-            }
-            if best.as_ref().map(|bst| viol > bst.2).unwrap_or(true) {
-                best = Some((g, rhs, viol));
+        for &comp in &patterns {
+            for &d in &deltas {
+                if let Some((coeffs, rhs, viol)) = mir_under_substitution(
+                    row,
+                    b,
+                    l,
+                    u,
+                    integrality,
+                    comp,
+                    x,
+                    d,
+                    tol,
+                    max_dynamism,
+                ) {
+                    if best.as_ref().map(|bst| viol > bst.2).unwrap_or(true) {
+                        best = Some((coeffs, rhs, viol));
+                    }
+                }
             }
         }
         if let Some((coeffs, rhs, _)) = best {
@@ -138,10 +262,10 @@ mod tests {
     }
 
     /// Exhaustively check a `≤` cut excludes no integer-feasible point of the
-    /// row `Σ a x ≤ b` over integer x in `[0, hi]`.
-    fn assert_valid_le(coeffs: &[f64], rhs: f64, a: &[f64], b: f64, hi: &[i64]) {
+    /// row `Σ a x ≤ b` over integer x in `[lo, hi]`.
+    fn assert_valid_le_box(coeffs: &[f64], rhs: f64, a: &[f64], b: f64, lo: &[i64], hi: &[i64]) {
         let n = a.len();
-        let mut idx = vec![0i64; n];
+        let mut idx = lo.to_vec();
         loop {
             let xv: Vec<f64> = idx.iter().map(|&v| v as f64).collect();
             if dot(a, &xv) <= b + 1e-9 {
@@ -150,20 +274,26 @@ mod tests {
                     "cut {coeffs:?} <= {rhs} excludes feasible {xv:?}"
                 );
             }
-            // increment mixed-radix
+            // increment mixed-radix over [lo, hi]
             let mut k = 0;
             while k < n {
                 idx[k] += 1;
                 if idx[k] <= hi[k] {
                     break;
                 }
-                idx[k] = 0;
+                idx[k] = lo[k];
                 k += 1;
             }
             if k == n {
                 break;
             }
         }
+    }
+
+    /// `assert_valid_le_box` over the `[0, hi]` box (lower bound zero).
+    fn assert_valid_le(coeffs: &[f64], rhs: f64, a: &[f64], b: f64, hi: &[i64]) {
+        let lo = vec![0i64; a.len()];
+        assert_valid_le_box(coeffs, rhs, a, b, &lo, hi);
     }
 
     #[test]
@@ -173,8 +303,9 @@ mod tests {
         let b = 1.5;
         let l = [0.0, 0.0];
         let integ = [true, true];
+        let u = [1.0, 1.0];
         let x = [0.75, 0.75]; // fractional relaxation point, violates x0+x1<=1
-        let cuts = separate_mir(&a, &[b], &l, &integ, &x, 1e-7, 1e9);
+        let cuts = separate_mir(&a, &[b], &l, &u, &integ, &x, 1e-7, 1e9);
         assert_eq!(cuts.len(), 1);
         np_close(&cuts[0].coeffs, &[1.0, 1.0]);
         assert!((cuts[0].rhs - 1.0).abs() < 1e-9);
@@ -191,8 +322,9 @@ mod tests {
         let b = 3.0;
         let l = [0.0, 0.0];
         let integ = [true, true];
+        let u = [2.0, 2.0];
         let x = [0.75, 0.75];
-        let cuts = separate_mir(&a, &[b], &l, &integ, &x, 1e-7, 1e9);
+        let cuts = separate_mir(&a, &[b], &l, &u, &integ, &x, 1e-7, 1e9);
         assert_eq!(cuts.len(), 1);
         assert!(dot(&cuts[0].coeffs, &x) > cuts[0].rhs + 1e-6);
         assert_valid_le(&cuts[0].coeffs, cuts[0].rhs, &a, b, &[2, 2]);
@@ -216,12 +348,125 @@ mod tests {
             // rhs that is usually fractional
             let b = next() * 10.0 - 2.0;
             let l = [0.0; 3];
+            let u = [2.0; 3];
             let integ = [true, true, true];
             let x: Vec<f64> = (0..n).map(|_| next() * 2.0).collect();
-            for cut in separate_mir(&a, &[b], &l, &integ, &x, 1e-7, 1e9) {
+            for cut in separate_mir(&a, &[b], &l, &u, &integ, &x, 1e-7, 1e9) {
                 assert_valid_le(&cut.coeffs, cut.rhs, &a, b, &hi);
             }
         }
+    }
+
+    /// Strong random-validity property test that specifically exercises the
+    /// upper-bound complementation path: mixed-sign nonzero *lower* bounds,
+    /// per-column *finite upper* bounds, LP points pushed near the upper bound
+    /// (so complementation actually fires), and a mix of integer/continuous
+    /// columns. Every emitted cut must exclude no integer-feasible point of the
+    /// row over the full `[l, u]` integer box.
+    #[test]
+    fn mir_validity_random_complemented_rows() {
+        let mut state: u64 = 0x0bad_c0de_dead_beef;
+        let mut next = || {
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            ((state >> 11) as f64) / ((1u64 << 53) as f64)
+        };
+        let mut n_cuts_checked = 0usize;
+        for _ in 0..600 {
+            let n = 3;
+            // Mixed-sign, sometimes-fractional coefficients.
+            let a: Vec<f64> = (0..n)
+                .map(|_| (next() * 8.0 - 4.0).round() + (next() - 0.5))
+                .collect();
+            // Mixed-sign integer lower bounds in [-2, 1]; width 1..=4 above.
+            let lo_i: Vec<i64> = (0..n).map(|_| (next() * 4.0).floor() as i64 - 2).collect();
+            let hi_i: Vec<i64> = (0..n)
+                .map(|k| lo_i[k] + 1 + (next() * 4.0).floor() as i64)
+                .collect();
+            let l: Vec<f64> = lo_i.iter().map(|&v| v as f64).collect();
+            let u: Vec<f64> = hi_i.iter().map(|&v| v as f64).collect();
+            // Some columns continuous (integrality off).
+            let integ: Vec<bool> = (0..n).map(|_| next() > 0.35).collect();
+            let b = next() * 14.0 - 6.0;
+            // LP point pushed toward the upper bound for most columns, so the
+            // near-bound complementation pattern is selected.
+            let x: Vec<f64> = (0..n)
+                .map(|k| {
+                    let t = if next() > 0.25 {
+                        0.6 + 0.4 * next() // near upper
+                    } else {
+                        next()
+                    };
+                    l[k] + t * (u[k] - l[k])
+                })
+                .collect();
+            for cut in separate_mir(&a, &[b], &l, &u, &integ, &x, 1e-7, 1e9) {
+                assert_valid_le_box(&cut.coeffs, cut.rhs, &a, b, &lo_i, &hi_i);
+                n_cuts_checked += 1;
+            }
+        }
+        // Ensure the path is actually exercised (not vacuously passing).
+        assert!(
+            n_cuts_checked > 20,
+            "expected many cuts to validate, got {n_cuts_checked}"
+        );
+    }
+
+    /// The complemented cut must be at least as strong as (dominate or tie) the
+    /// non-complemented cut on a row whose LP point sits at an upper bound — the
+    /// exact case complementation is FOR. Constructed so all-lower substitution
+    /// yields no violated cut while upper complementation does. This fails if the
+    /// complementation path is removed (only the weaker/empty cut would remain).
+    #[test]
+    fn complemented_cut_dominates_at_upper_bound() {
+        // Row: -3 x0 + x1 <= -4.5, x0,x1 integer in [0,3], LP point near the
+        // upper bound at x = (2.7, 2.7). The all-lower MIR substitution finds no
+        // violated cut here (δ-scan exhausted), but complementing both columns
+        // at their upper bound yields the valid cut -x0 + (2/3) x1 <= -1, which
+        // the LP point violates by 0.1. This is exactly the regime upper-bound
+        // complementation is FOR; it fails if the complementation path is removed
+        // (only the empty/weaker all-lower result would remain).
+        let a = [-3.0, 1.0];
+        let b = -4.5;
+        let l = [0.0, 0.0];
+        let u = [3.0, 3.0];
+        let integ = [true, true];
+        let x = [2.7, 2.7];
+
+        // With complementation enabled (the shipped behaviour).
+        let cuts = separate_mir(&a, &[b], &l, &u, &integ, &x, 1e-7, 1e9);
+        assert_eq!(cuts.len(), 1, "complementation should yield a cut");
+        let c = &cuts[0];
+        assert_valid_le(&c.coeffs, c.rhs, &a, b, &[3, 3]);
+        let comp_viol = dot(&c.coeffs, &x) - c.rhs;
+        assert!(
+            comp_viol > 1e-6,
+            "complemented cut {:?} <= {} must separate x* {x:?} (viol {comp_viol})",
+            c.coeffs,
+            c.rhs
+        );
+
+        // Baseline: force the all-lower substitution only (no complementation),
+        // by claiming there is no finite upper bound. This is the pre-change
+        // behaviour; it must NOT separate x* here — so the complemented cut is
+        // strictly stronger (dominates) on this row.
+        let no_ub = [f64::INFINITY, f64::INFINITY];
+        let base = separate_mir(&a, &[b], &l, &no_ub, &integ, &x, 1e-7, 1e9);
+        let base_viol = base
+            .iter()
+            .map(|k| dot(&k.coeffs, &x) - k.rhs)
+            .fold(f64::NEG_INFINITY, f64::max);
+        assert!(
+            base.is_empty() || base_viol <= 1e-6,
+            "non-complemented MIR unexpectedly separated x* (viol {base_viol}); \
+             test no longer isolates complementation"
+        );
+        // The complemented cut is at least as violated as anything all-lower found.
+        assert!(
+            comp_viol >= base_viol - 1e-9,
+            "complemented cut ({comp_viol}) weaker than all-lower ({base_viol})"
+        );
     }
 
     #[test]
@@ -232,8 +477,9 @@ mod tests {
         let b = 1.5;
         let l = [0.0, 0.0];
         let integ = [true, false];
+        let u = [2.0, f64::INFINITY]; // y continuous with no finite upper bound
         let x = [1.4, 0.0];
-        let cuts = separate_mir(&a, &[b], &l, &integ, &x, 1e-7, 1e9);
+        let cuts = separate_mir(&a, &[b], &l, &u, &integ, &x, 1e-7, 1e9);
         assert_eq!(cuts.len(), 1);
         assert!((cuts[0].coeffs[1]).abs() < 1e-9); // continuous y dropped
         assert!((cuts[0].coeffs[0] - 1.0).abs() < 1e-9 && (cuts[0].rhs - 1.0).abs() < 1e-9);

@@ -285,9 +285,10 @@ class TestMirCuts:
         a = np.array([[1.0, 1.0]])
         b = np.array([1.5])
         lb = np.array([0.0, 0.0])
+        ub = np.array([1.0, 1.0])
         integ = np.array([True, True])
         x = np.array([0.75, 0.75])
-        res = rust.mir_cuts_py(a, b, lb, integ, x)
+        res = rust.mir_cuts_py(a, b, lb, ub, integ, x)
         assert res is not None
         coeffs, rhs = np.asarray(res[0]), np.asarray(res[1])
         np.testing.assert_allclose(coeffs[0], [1.0, 1.0], atol=1e-9)

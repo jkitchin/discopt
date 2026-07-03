@@ -10343,7 +10343,16 @@ def _separate_mir_cuts(lp_data, x_vertex, n_orig, int_idx, a_ub_orig, b_ub_orig,
     entries set, slacks zero) or ``None`` when the binding is unavailable, the
     structural lower bounds are not finite (the MIR shift needs them), or no cut
     is produced. Only the integer-constrained structural columns are marked
-    integral, so the cuts are sound."""
+    integral, so the cuts are sound.
+
+    Upper bounds are passed through so the separator can apply upper-bound
+    complementation (Marchand-Wolsey bound substitution) on columns whose vertex
+    value sits near the upper bound; non-finite upper bounds disable
+    complementation for that column and fall back to the lower-shift. The columns
+    here are the model's *original* declared variables, so there are no
+    product-aux (lifted ``w = x*y``) columns to mark integer at this call site;
+    that lift lives in the McCormick relaxation layer (see cmir_cuts.py) and is
+    tracked separately."""
     if a_ub_orig is None or np.asarray(a_ub_orig).shape[0] == 0:
         return None
     try:
@@ -10353,12 +10362,19 @@ def _separate_mir_cuts(lp_data, x_vertex, n_orig, int_idx, a_ub_orig, b_ub_orig,
     lo = np.asarray(lp_data.x_l, dtype=np.float64)[:n_orig]
     if not np.all(np.isfinite(lo)):
         return None  # MIR's lower-bound shift requires finite lower bounds
+    # Upper bounds drive per-column upper-bound complementation; a non-finite
+    # ub[j] (or one missing) simply disables complementation for that column
+    # (the Rust separator treats +inf as "no upper bound"). This is sound: with
+    # no complementation the column falls back to the lower-shift substitution.
+    hi = np.asarray(lp_data.x_u, dtype=np.float64)[:n_orig].copy()
+    hi[~np.isfinite(hi)] = np.inf
     integ = np.zeros(n_orig, dtype=bool)
     integ[[j for j in int_idx if j < n_orig]] = True
     res = mir_cuts_py(
         np.ascontiguousarray(a_ub_orig, dtype=np.float64),
         np.ascontiguousarray(b_ub_orig, dtype=np.float64),
         np.ascontiguousarray(lo),
+        np.ascontiguousarray(hi),
         integ,
         np.ascontiguousarray(np.asarray(x_vertex, dtype=np.float64)[:n_orig]),
     )
