@@ -87,7 +87,7 @@ in non-default configs; loud ingestion gaps. **P3** = hygiene.
 | ID | Priority | Area | Summary | Status |
 |---|---|---|---|---|
 | C-16 | P0 | presolve/aggregate | positional bound resync after variable-removing pass fuses unrelated variables' bounds → false "infeasible" / silent optimum cut, DEFAULT path | fixed |
-| C-17 | P0 | alphaBB bound | node bound uses sampled (non-rigorous) α + center-only PSD check → false "optimal", default path for small nonconvex; deterministic repro confirms (spike width ≤ 0.006 → α=0, bound 0.0, true min −3.5) | confirmed |
+| C-17 | P0 | alphaBB bound | node bound uses sampled (non-rigorous) α + center-only PSD check → false "optimal", default path for small nonconvex; deterministic repro confirms (spike width ≤ 0.006 → α=0, bound 0.0, true min −3.5) | fixed |
 | C-13 | P0 | solver.py bounds | serial convex path trusts under-converged NLP objective as node lower bound → false "optimal" | open |
 | C-1 | P0 | solver.py status | false "infeasible" from non-rigorous NLP fathoms (solve_model path) | open |
 | C-4 | P1 | mir.rs cuts | integer-MIR applied with fractional integer lower bound → invalid cut | open |
@@ -259,8 +259,51 @@ locks the class so a future revert to sampled α fails CI immediately.
   incorrect_count must not.
 - Standing gates pass.
 
-**Log:** 2026-07-03 — CONFIRMED open P0 via deterministic spike repro
-(solver-core review, `docs/dev/solver-core-review.md` §1). Status open→confirmed.
+**Regression test (committed):** `python/tests/test_alphabb_bound_soundness.py`
+— rewritten to build REAL models so alpha is derived rigorously as in
+production. `test_c17_spike_bound_is_sound` ports the `s ∈ {0.006, 0.003,
+0.0015}` spike and asserts the node bound is `≤` the dense-grid box minimum;
+`test_c17_sampled_alpha_would_have_been_unsound` pins that the OLD sampled α
+collapses to 0 while the rigorous α is finite-and-large, so the fix is
+load-bearing (not vacuous); `test_random_box_panel_never_exceeds_true_min`
+sweeps 100 random sub-boxes (differential-bound). All `@pytest.mark.smoke`,
+sub-second, calling `_compute_alphabb_bound` directly. Red-before verified: the
+pre-fix path returns `−1e-9` on the `s=0.006` spike while the true min is
+`−3.5` (assertion fails on old code, passes on new).
+
+**Fix (this PR):** routed the alphaBB node bound through
+`alphabb.rigorous_alpha` (sound interval Hessian + per-row interval-Gershgorin
+eigenvalue bound), computed **per node box** (not a sampled root α reused at
+every node). `_compute_alphabb_bound(evaluator, model, alphabb_expr, node_lb,
+node_ub)` now derives α internally and **abstains** (`−inf`, no bound emitted)
+whenever `rigorous_alpha` returns a `+inf` entry (unbounded/indefinite interval
+Hessian → convexity uncertifiable). The center-only PSD gate (the unsound gate)
+is removed — rigorous α makes `L` provably convex over the whole box by
+construction, so no fast path can fathom on an unsound value; the center Hessian
+is retained ONLY to pick a FISTA step size (tightness, never validity). Setup
+now stashes the internally-minimized objective EXPRESSION (`-obj` for maximize)
+instead of a root α. Sites: `solver.py` `_compute_alphabb_bound`,
+`_alphabb_node_box` (new), the setup block, and both call sites (batch + serial).
+Also moved the `inf−inf` row-radius subtraction inside `rigorous_alpha`'s
+`errstate` block (benign RuntimeWarning hygiene, now hit per-node).
+
+**Node-count impact (measured):** on the representative alphaBB e2e (the spike,
+s=0.2 — wide enough that the old sampled α was *accidentally* sound there) the
+fix converged in **5 nodes vs 21 old** — rigorous per-node α tightens as boxes
+shrink, so it was *faster* here, not slower. On the narrow spike (s=0.006) the
+old path was a false optimal (bound 0.0 > true −3.5); the new path is sound. On
+the default MINLPLib corpus the alphaBB path is not engaged at all (the LP/MILP
+relaxer is the bound source; `alphabb_calls=0` across the tested nonconvex
+instances), so blast radius is confined to small nonconvex models with a
+transcendental objective the MILP cannot linearize.
+
+**Log:**
+- 2026-07-03 — CONFIRMED open P0 via deterministic spike repro
+  (solver-core review, `docs/dev/solver-core-review.md` §1). Status open→confirmed.
+- 2026-07-03 — FIXED. Routed through `rigorous_alpha` per node box + abstain;
+  dropped center-only PSD gate. Repro red-before confirmed; standing gates green
+  (smoke 203p/1s, adversarial 10p, alphabb/convex/bound 967p, ruff+mypy clean).
+  Status confirmed→fixed. PR #426.
 
 ---
 

@@ -303,9 +303,11 @@ def rigorous_alpha(expr, model, box=None):
     h_lo = np.asarray(iad.hess.lo, dtype=float)
     h_hi = np.asarray(iad.hess.hi, dtype=float)
     abs_max = np.maximum(np.abs(h_lo), np.abs(h_hi))
-    # Per-row off-diagonal radius = sum of |.| over the row minus the diagonal.
-    row_radius = abs_max.sum(axis=1) - np.abs(np.diag(abs_max))
     with np.errstate(invalid="ignore"):
+        # Per-row off-diagonal radius = sum of |.| over the row minus the diagonal.
+        # ``inf - inf`` on an abstaining (unbounded) row yields NaN, mapped to +inf
+        # below; suppress the benign RuntimeWarning for the whole computation.
+        row_radius = abs_max.sum(axis=1) - np.abs(np.diag(abs_max))
         gershgorin_lo = np.diag(h_lo) - row_radius
         alpha = np.maximum(0.0, -0.5 * gershgorin_lo)
     # NaN arises from inf - inf at abstaining nodes; treat as unbounded.

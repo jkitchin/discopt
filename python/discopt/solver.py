@@ -474,7 +474,27 @@ def _estimate_alpha_fd(evaluator, lb, ub, n_samples=30):
     return np.full(n, alpha_scalar)
 
 
-def _compute_alphabb_bound(evaluator, node_lb, node_ub, alpha):
+def _alphabb_node_box(model, node_lb, node_ub):
+    """Build the ``{Variable: Interval}`` box ``rigorous_alpha`` expects.
+
+    Mirrors the flat->box translation used by :func:`_compute_interval_bound`
+    so the interval Hessian is enclosed over *this node's* box rather than the
+    root box.
+    """
+    from discopt._jax.convexity.interval import Interval
+
+    box = {}
+    offset = 0
+    for v in model._variables:
+        sz = v.size
+        lo = np.asarray(node_lb[offset : offset + sz], dtype=np.float64).reshape(v.shape)
+        hi = np.asarray(node_ub[offset : offset + sz], dtype=np.float64).reshape(v.shape)
+        box[v] = Interval(lo, hi)
+        offset += sz
+    return box
+
+
+def _compute_alphabb_bound(evaluator, model, alphabb_expr, node_lb, node_ub):
     """Compute a valid lower bound by minimizing the alphaBB underestimator.
 
     L(x) = f(x) - sum_i alpha_i * (x_i - lb_i) * (ub_i - x_i)
@@ -487,11 +507,25 @@ def _compute_alphabb_bound(evaluator, node_lb, node_ub, alpha):
     NEGATIVE, which flips L into an over-estimator and yields an invalid
     (too-high) "lower bound".
 
+    Soundness (C-17). ``alpha`` is derived from :func:`rigorous_alpha`, which
+    uses a *sound* interval enclosure of the Hessian over ``[node_lb, node_ub]``
+    and a rigorous per-row interval-Gershgorin eigenvalue bound. That guarantees
+    ``Hessian(f) + 2 diag(alpha)`` is PSD over the WHOLE box, so L is provably
+    convex there and its supporting hyperplane is a valid underestimator. The
+    previous implementation instead used a SAMPLED alpha (Hessian evaluated at a
+    fixed set of interior points) and checked convexity only at the box center;
+    a negative-curvature band narrower than the sample spacing passed the gate
+    with alpha too small, making L nonconvex over the box and the "lower bound"
+    exceed ``min_box f`` -> false optimal. We now ABSTAIN whenever
+    ``rigorous_alpha`` cannot certify convexity (unbounded/indefinite interval
+    Hessian -> a ``+inf`` entry), returning ``-inf`` so the caller falls back to
+    whatever other VALID bound exists rather than a guessed one.
+
     Returns a valid lower bound on min f over [node_lb, node_ub] (a supporting
     hyperplane of the convex L; see below), or -inf when the box is unbounded / so
-    wide that alphaBB is numerically meaningless, or the evaluator cannot supply
-    derivatives, or alpha did not convexify L (in which case alphaBB abstains and
-    the caller's interval / LP relaxation bounds stand).
+    wide that alphaBB is numerically meaningless, the evaluator cannot supply
+    derivatives, or ``rigorous_alpha`` abstains (in which case alphaBB emits no
+    bound and the caller's interval / LP relaxation bounds stand).
     """
     node_lb = np.asarray(node_lb, dtype=np.float64)
     node_ub = np.asarray(node_ub, dtype=np.float64)
@@ -517,7 +551,24 @@ def _compute_alphabb_bound(evaluator, node_lb, node_ub, alpha):
     if np.any(node_ub < node_lb):
         return -np.inf
 
-    alpha = np.asarray(alpha, dtype=np.float64)
+    # Rigorous, per-node alpha from a SOUND interval Hessian over THIS box
+    # (C-17). ``rigorous_alpha`` returns ``+inf`` for any variable whose row of
+    # the interval Hessian is unbounded/indefinite -> it cannot certify
+    # convexity, so we ABSTAIN rather than emit a guessed (possibly invalid)
+    # bound. Building the enclosure over the node box (not the root box) also
+    # tightens alpha as B&B subdivides.
+    from discopt._jax.alphabb import rigorous_alpha
+
+    try:
+        box = _alphabb_node_box(model, node_lb, node_ub)
+        alpha = np.asarray(rigorous_alpha(alphabb_expr, model, box), dtype=np.float64)
+    except (ValueError, ArithmeticError, RuntimeError, KeyError, IndexError, TypeError) as e:
+        logger.debug("rigorous alphaBB alpha failed: %s", e)
+        return -np.inf
+    if not np.all(np.isfinite(alpha)):
+        # Interval Hessian unbounded/indefinite -> convexity uncertifiable.
+        return -np.inf
+
     n = node_lb.shape[0]
     center = 0.5 * (node_lb + node_ub)
 
@@ -532,7 +583,7 @@ def _compute_alphabb_bound(evaluator, node_lb, node_ub, alpha):
     # cannot supply them, abstain (sound: the caller's interval/LP bounds stand).
     grad_f = getattr(evaluator, "evaluate_gradient", None)
     hess_f = getattr(evaluator, "evaluate_hessian", None)
-    if grad_f is None or hess_f is None:
+    if grad_f is None:
         return -np.inf
 
     def L(x):
@@ -544,19 +595,22 @@ def _compute_alphabb_bound(evaluator, node_lb, node_ub, alpha):
         # d/dx_i [alpha_i (x_i-lb_i)(ub_i-x_i)] = alpha_i (lb_i + ub_i - 2 x_i).
         return np.asarray(grad_f(x), dtype=np.float64) - alpha * (node_lb + node_ub - 2.0 * x)
 
-    # alphaBB chooses alpha so L's Hessian Hf + 2 diag(alpha) is PSD on the box.
-    # Confirm at the center; if the perturbation did not convexify L there, abstain
-    # rather than trust a supporting hyperplane that needs convexity to be valid.
+    # Convexity of L is GUARANTEED by construction: ``rigorous_alpha`` bounds the
+    # interval Hessian over the whole box so Hf + 2 diag(alpha) is PSD everywhere
+    # in [node_lb, node_ub]. We therefore do NOT re-gate on a center-only Hessian
+    # (that check was the C-17 bug — it passed on sampled alpha that left L
+    # nonconvex off-center). The center Hessian is used only to pick a FISTA step
+    # size for the anchor search (tightness, never validity): the supporting
+    # hyperplane of a convex L is a valid underestimator at ANY anchor, so a poor
+    # step at worst loosens the bound, never invalidates it.
+    lipschitz = 0.0
     try:
-        Hf = np.asarray(hess_f(center), dtype=np.float64)
+        Hf = np.asarray(hess_f(center), dtype=np.float64) if hess_f is not None else None
+        if Hf is not None and Hf.shape == (n, n) and np.all(np.isfinite(Hf)):
+            eigs = np.linalg.eigvalsh(0.5 * (Hf + Hf.T) + 2.0 * np.diag(alpha))
+            lipschitz = float(np.abs(eigs).max())  # >= ||Hessian(L)||_2 at the center
     except (ValueError, ArithmeticError, RuntimeError):
-        return -np.inf
-    if Hf.shape != (n, n) or not np.all(np.isfinite(Hf)):
-        return -np.inf
-    eigs = np.linalg.eigvalsh(0.5 * (Hf + Hf.T) + 2.0 * np.diag(alpha))
-    if float(eigs.min()) < -1e-7:
-        return -np.inf
-    lipschitz = float(np.abs(eigs).max())  # >= ||Hessian(L)||_2 at the center
+        lipschitz = 0.0
 
     # Deterministic FISTA projected gradient toward argmin_box L (tightness only).
     x_hat = center.copy()
@@ -4166,7 +4220,7 @@ def solve_model(
     # bound, alphaBB would only ever be a fallback on nodes the LP relaxer
     # declines; on the corpus that never changes the certified result (A/B: 0
     # regressions), so skipping the estimate is sound and removes the ~2s setup.
-    _alphabb_alpha = None
+    _alphabb_expr = None
     _use_alphabb = False
     _alphabb_eligible = n_vars <= 50 and not _model_is_convex and hasattr(evaluator, "_obj_fn")
 
@@ -4571,16 +4625,19 @@ def solve_model(
     # (and the per-node alphaBB it enables) is skipped. ``DISCOPT_ALPHABB_WITH_LP=1``
     # forces the estimate even under the LP relaxer (A/B / fallback safety).
     _alphabb_force = _tuning().alphabb_with_lp
-    if _alphabb_eligible and (_mc_lp_relaxer is None or _alphabb_force):
-        try:
-            from discopt._jax.alphabb import estimate_alpha as _estimate_alpha_jax
-
-            _alphabb_alpha = np.asarray(
-                _estimate_alpha_jax(evaluator._obj_fn, lb, ub, n_samples=100)
-            )
-            _use_alphabb = bool(np.any(_alphabb_alpha > 1e-8))
-        except (ValueError, ArithmeticError, RuntimeError) as e:
-            logger.debug("JAX alphaBB estimation failed: %s", e)
+    if (
+        _alphabb_eligible
+        and (_mc_lp_relaxer is None or _alphabb_force)
+        and model._objective is not None
+    ):
+        # C-17: the node bound is derived from ``rigorous_alpha`` (sound interval
+        # Hessian) per node box, NOT a sampled root alpha. We only need the
+        # internally-minimized objective EXPRESSION here; the per-node alpha is
+        # (re)computed rigorously inside ``_compute_alphabb_bound``.
+        # ``evaluate_objective``/``_obj_fn`` minimize ``-f`` for a maximize model,
+        # so the expression whose Hessian must be convexified is likewise negated.
+        _alphabb_expr = -model._objective.expression if _obj_negate else model._objective.expression
+        _use_alphabb = True
 
     # Soundness guard (issue #120): the McCormick "nlp" objective bound is a
     # valid dual bound only for convex models. The bound solver evaluates the
@@ -5086,7 +5143,7 @@ def solve_model(
                             node_lb_i = np.array(batch_lb[i])
                             node_ub_i = np.array(batch_ub[i])
                             relax_lb = _compute_alphabb_bound(
-                                evaluator, node_lb_i, node_ub_i, _alphabb_alpha
+                                evaluator, model, _alphabb_expr, node_lb_i, node_ub_i
                             )
                             result_lbs[i] = max(result_lbs[i], relax_lb)
                         except (ValueError, ArithmeticError, RuntimeError) as e:
@@ -5340,7 +5397,7 @@ def solve_model(
                     if _use_alphabb:
                         try:
                             relax_lb = _compute_alphabb_bound(
-                                evaluator, node_lb, node_ub, _alphabb_alpha
+                                evaluator, model, _alphabb_expr, node_lb, node_ub
                             )
                             if _model_is_convex:
                                 nlp_lb = max(nlp_lb, relax_lb)
