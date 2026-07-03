@@ -208,24 +208,9 @@ def relax_atan(x, lb, ub):
 
 
 def relax_asin(x, lb, ub):
+    # asin''(x) = x*(1-x**2)**(-3/2): convex on [0,1], concave on [-1,0]
+    # (mirror of acos; same curvature layout as sinh). See C-32.
     f = jnp.arcsin
-    case1_cv = _secant(f, x, lb, ub)
-    case1_cc = f(x)
-    case2_cv = f(x)
-    case2_cc = _secant(f, x, lb, ub)
-    sec_neg = _secant(f, x, lb, 0.0)
-    sec_pos = _secant(f, x, 0.0, ub)
-    case3_cv = jnp.where(x >= 0, sec_pos, f(x))
-    case3_cc = jnp.where(x >= 0, f(x), sec_neg)
-    is_concave = lb >= 0
-    is_convex = ub <= 0
-    cv = jnp.where(is_concave, case1_cv, jnp.where(is_convex, case2_cv, case3_cv))
-    cc = jnp.where(is_concave, case1_cc, jnp.where(is_convex, case2_cc, case3_cc))
-    return cv, cc
-
-
-def relax_acos(x, lb, ub):
-    f = jnp.arccos
     case1_cv = f(x)
     case1_cc = _secant(f, x, lb, ub)
     case2_cv = _secant(f, x, lb, ub)
@@ -238,6 +223,25 @@ def relax_acos(x, lb, ub):
     is_concave = ub <= 0
     cv = jnp.where(is_convex, case1_cv, jnp.where(is_concave, case2_cv, case3_cv))
     cc = jnp.where(is_convex, case1_cc, jnp.where(is_concave, case2_cc, case3_cc))
+    return cv, cc
+
+
+def relax_acos(x, lb, ub):
+    # acos''(x) = -x*(1-x**2)**(-3/2): concave on [0,1], convex on [-1,0]
+    # (mirror of asin; same curvature layout as tanh). See C-32.
+    f = jnp.arccos
+    case1_cv = _secant(f, x, lb, ub)
+    case1_cc = f(x)
+    case2_cv = f(x)
+    case2_cc = _secant(f, x, lb, ub)
+    sec_neg = _secant(f, x, lb, 0.0)
+    sec_pos = _secant(f, x, 0.0, ub)
+    case3_cv = jnp.where(x >= 0, sec_pos, f(x))
+    case3_cc = jnp.where(x >= 0, f(x), sec_neg)
+    is_concave = lb >= 0
+    is_convex = ub <= 0
+    cv = jnp.where(is_concave, case1_cv, jnp.where(is_convex, case2_cv, case3_cv))
+    cc = jnp.where(is_concave, case1_cc, jnp.where(is_convex, case2_cc, case3_cc))
     return cv, cc
 
 

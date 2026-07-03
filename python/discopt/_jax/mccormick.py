@@ -474,44 +474,26 @@ def relax_atan(x, lb, ub):
 def relax_asin(x, lb, ub):
     """McCormick relaxation of asin(x) on [lb, ub] (subset of [-1, 1]).
 
-    asin is convex on [-1, 0] and concave on [0, 1].
+    asin''(x) = x*(1 - x**2)**(-3/2), so asin is convex on [0, 1] and
+    concave on [-1, 0] (mirror image of acos). On the convex branch the
+    function itself is the underestimator (cv) and the secant the
+    overestimator (cc); on the concave branch the roles reverse. This is
+    the same curvature layout as sinh (convex on [0, inf)).
     Returns (cv, cc).
     """
     f = jnp.arcsin
 
-    case1_cv = _secant(f, x, lb, ub)
-    case1_cc = f(x)
-
-    case2_cv = f(x)
-    case2_cc = _secant(f, x, lb, ub)
-
-    sec_neg = _secant(f, x, lb, 0.0)
-    sec_pos = _secant(f, x, 0.0, ub)
-    case3_cv = jnp.where(x >= 0, sec_pos, f(x))
-    case3_cc = jnp.where(x >= 0, f(x), sec_neg)
-
-    is_concave = lb >= 0
-    is_convex = ub <= 0
-
-    cv = jnp.where(is_concave, case1_cv, jnp.where(is_convex, case2_cv, case3_cv))
-    cc = jnp.where(is_concave, case1_cc, jnp.where(is_convex, case2_cc, case3_cc))
-    return cv, cc
-
-
-def relax_acos(x, lb, ub):
-    """McCormick relaxation of acos(x) on [lb, ub] (subset of [-1, 1]).
-
-    acos is concave on [-1, 0] and convex on [0, 1] (decreasing).
-    Returns (cv, cc).
-    """
-    f = jnp.arccos
-
+    # Case 1: lb >= 0 -> convex: cv = f(x), cc = secant
     case1_cv = f(x)
     case1_cc = _secant(f, x, lb, ub)
 
+    # Case 2: ub <= 0 -> concave: cv = secant, cc = f(x)
     case2_cv = _secant(f, x, lb, ub)
     case2_cc = f(x)
 
+    # Case 3: lb < 0 < ub -> straddles the inflection at 0. Split at 0:
+    # positive (convex) side -> f(x)/sec_pos; negative (concave) side ->
+    # sec_neg/f(x).
     sec_neg = _secant(f, x, lb, 0.0)
     sec_pos = _secant(f, x, 0.0, ub)
     case3_cv = jnp.where(x >= 0, f(x), sec_neg)
@@ -522,6 +504,44 @@ def relax_acos(x, lb, ub):
 
     cv = jnp.where(is_convex, case1_cv, jnp.where(is_concave, case2_cv, case3_cv))
     cc = jnp.where(is_convex, case1_cc, jnp.where(is_concave, case2_cc, case3_cc))
+    return cv, cc
+
+
+def relax_acos(x, lb, ub):
+    """McCormick relaxation of acos(x) on [lb, ub] (subset of [-1, 1]).
+
+    acos''(x) = -x*(1 - x**2)**(-3/2), so acos is concave on [0, 1] and
+    convex on [-1, 0] (mirror image of asin). acos is decreasing, but the
+    secant/tangent under- vs over-estimator roles depend only on curvature,
+    not on the sign of the slope. On the concave branch the secant is the
+    underestimator (cv) and the function the overestimator (cc); on the
+    convex branch the roles reverse. Same curvature layout as tanh
+    (concave on [0, inf)).
+    Returns (cv, cc).
+    """
+    f = jnp.arccos
+
+    # Case 1: lb >= 0 -> concave: cv = secant, cc = f(x)
+    case1_cv = _secant(f, x, lb, ub)
+    case1_cc = f(x)
+
+    # Case 2: ub <= 0 -> convex: cv = f(x), cc = secant
+    case2_cv = f(x)
+    case2_cc = _secant(f, x, lb, ub)
+
+    # Case 3: lb < 0 < ub -> straddles the inflection at 0. Split at 0:
+    # positive (concave) side -> sec_pos/f(x); negative (convex) side ->
+    # f(x)/sec_neg.
+    sec_neg = _secant(f, x, lb, 0.0)
+    sec_pos = _secant(f, x, 0.0, ub)
+    case3_cv = jnp.where(x >= 0, sec_pos, f(x))
+    case3_cc = jnp.where(x >= 0, f(x), sec_neg)
+
+    is_concave = lb >= 0
+    is_convex = ub <= 0
+
+    cv = jnp.where(is_concave, case1_cv, jnp.where(is_convex, case2_cv, case3_cv))
+    cc = jnp.where(is_concave, case1_cc, jnp.where(is_convex, case2_cc, case3_cc))
     return cv, cc
 
 

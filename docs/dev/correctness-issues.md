@@ -117,7 +117,7 @@ in non-default configs; loud ingestion gaps. **P3** = hygiene.
 | C-29 | P0 | classify/extract | vector-body constraint collapses to one summed row ("array var treated as sum") → infeasible point certified optimal, DEFAULT path (= CORE-1, modeling M1) | confirmed |
 | C-30 | P0 | classify/extract | maximize sense lost on `sum(const·var)` bodies (raises `ValueError` not `_NotLinearError`, mis-routes to sense-dropping fallback) → returns 0 instead of true max (= CORE-2, ro ADJ-1) | confirmed |
 | C-31 | P0 | presolve/FBBT | FBBT collapses an array-variable block to element-0's bounds and stamps them on every element → cuts feasible points AND false "infeasible"; chains into invalid conflict cuts AND (broadened) into the certified LP dual bound via `_fbbt_argument_box` (= TG-1) | fixed |
-| C-32 | P0 | relaxation/mccormick | `relax_asin`/`relax_acos` inverted curvature regime → unsound convex envelope (cv > f) in the LIVE JAX layer → invalid dual bound (= NM-1) | confirmed |
+| C-32 | P0 | relaxation/mccormick | `relax_asin`/`relax_acos` inverted curvature regime → unsound convex envelope (cv > f) in the LIVE JAX layer → invalid dual bound (= NM-1) | fixed |
 | C-33 | P0 | solver.py fallback | pure-continuous fallback certifies a nonconvex model's local optimum with `gap_certified=True` (= SC-1), DEFAULT path | fixed |
 | C-34 | P0 | gdp_reformulate | even-power bound over a zero-straddling base uses endpoint-only bounds (omits interior min at 0) → invalid aux box → false optimal (= FR-1), DEFAULT path | fixed |
 | C-35 | P1 | oa.py / gdpopt_loa | non-rigorous NLP failure → unconditional no-good cut → possible false infeasible/optimal (= OA-1, opt-in OA/LOA path) | open |
@@ -1452,7 +1452,34 @@ whether any test/benchmark instance uses asin/acos (if so the risk is not latent
 differential-bound checks per §0. NM-2 (numpy compiler leaf drops the box) is tracked
 separately in `numpy-mccormick-review.md` and gates activation of the numpy backend.
 
-**Log:** —
+**Log:** 2026-07-03 — FIXED (branch `fix-c32-asin-acos-curvature`, PR #<TBD>).
+Confirmed the inverted regime on **both** backends first: off-diagonal fuzz over
+`[-0.99,0.99]` sub-boxes gave **3997/4000 crossing boxes, worst 0.235** for each of
+asin/acos; the literal repro `relax_asin(0.5)` on `[0.1,0.9]` returned `cv=0.609968 >
+true=0.523599`. Root cause: `relax_asin` was a copy of the `tanh` layout
+(concave-on-positive) and `relax_acos` a copy of the `sinh` layout
+(convex-on-positive) — exactly swapped, since `asin''(x)=x(1−x²)^{−3/2}` makes asin
+**convex on [0,1]** / concave on [−1,0] and acos the mirror. Fix (both
+`_jax/mccormick.py` and `_numpy/mccormick.py`): set `is_convex = lb>=0` for asin
+(mirror `sinh`) and `is_concave = lb>=0` for acos (mirror `tanh`), with the
+straddling case3 split at the inflection x=0 (positive convex/concave branch uses
+f(x)/sec, negative branch reversed); corrected the wrong docstrings. No safety guard
+weakened — this is a pure regime correction. After the fix: **0 crossings** on both
+backends over the same fuzz; repro `cv=0.523599 == true`. Regression test:
+`python/tests/test_asin_acos_envelope_c32.py` (`@pytest.mark.unit`+`smoke`, sub-second,
+both backends) — calls the primitives DIRECTLY on **off-diagonal** boxes (one-signed,
+zero-straddling) plus a 500-sub-box property test asserting no crossing; proven RED on
+pre-fix (34 failed) and GREEN after (34 passed). Scope check: `envelopes.py` has no
+asin/acos (only asinh/acosh, separately defined and sound); `atan`/`tanh`/`sinh`/
+`sigmoid` regimes verified correct — the inversion was confined to these two
+functions, no wider class. No in-repo `.nl` corpus instance uses the asin/acos opcodes
+(`o51`/`o53`), so the false-optimum risk was **latent** (never tripped by a benchmark),
+consistent with why the diagonal-only soundness harness missed it. Gates: smoke green
+(the only 3 failures — `test_tightening.py::test_c31_*` — are the still-open C-31 issue
+and fail identically on the pristine base, i.e. pre-existing, not a regression);
+adversarial suite 10/10; ruff clean; mypy error is a pre-existing env stub mismatch
+present on the base. C-19 (`relax_tan` pole) left to its own issue — not touched here
+to keep the PR scoped to one issue.
 
 ---
 
