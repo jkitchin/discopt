@@ -116,7 +116,7 @@ in non-default configs; loud ingestion gaps. **P3** = hygiene.
 | C-28 | P2 | nn/readers/sklearn | sklearn classifier semantics silently embed logits / wrong base_score | in progress (nn-module-plan T-N1.2) |
 | C-29 | P0 | classify/extract | vector-body constraint collapses to one summed row ("array var treated as sum") → infeasible point certified optimal, DEFAULT path (= CORE-1, modeling M1) | confirmed |
 | C-30 | P0 | classify/extract | maximize sense lost on `sum(const·var)` bodies (raises `ValueError` not `_NotLinearError`, mis-routes to sense-dropping fallback) → returns 0 instead of true max (= CORE-2, ro ADJ-1) | confirmed |
-| C-31 | P0 | presolve/FBBT | FBBT collapses an array-variable block to element-0's bounds and stamps them on every element → cuts feasible points AND false "infeasible"; chains into invalid conflict cuts AND (broadened) into the certified LP dual bound via `_fbbt_argument_box` (= TG-1) | confirmed |
+| C-31 | P0 | presolve/FBBT | FBBT collapses an array-variable block to element-0's bounds and stamps them on every element → cuts feasible points AND false "infeasible"; chains into invalid conflict cuts AND (broadened) into the certified LP dual bound via `_fbbt_argument_box` (= TG-1) | fixed |
 | C-32 | P0 | relaxation/mccormick | `relax_asin`/`relax_acos` inverted curvature regime → unsound convex envelope (cv > f) in the LIVE JAX layer → invalid dual bound (= NM-1) | confirmed |
 | C-33 | P0 | solver.py fallback | pure-continuous fallback certifies a nonconvex model's local optimum with `gap_certified=True` (= SC-1), DEFAULT path | fixed |
 | C-34 | P0 | gdp_reformulate | even-power bound over a zero-straddling base uses endpoint-only bounds (omits interior min at 0) → invalid aux box → false optimal (= FR-1), DEFAULT path | confirmed |
@@ -1312,33 +1312,65 @@ elements. The claim "a valid outer bound for every element of the block" is fals
 - Chained: `find_conflict_cuts` on a model with the above `x` and a free binary
   returns two cuts that together make the binary infeasible.
 
-**Fix:** element-aware FBBT for array blocks — per-scalar intervals from the Rust
-engine, or a Python interim guard applying a block interval only to elements whose
-*original* bounds equal element-0's, and never deriving `infeasible` from a collapsed
-block. Fixing this fixes the chained conflict-cut invalidity (CF-1). Details:
-`tightening-conflict-warmstart-iis-review.md`. NOTE: `test_tightening.py:68` uses only
-*homogeneous* array bounds, which is exactly why CI is blind — the regression test
-must use heterogeneous bounds.
+**Fix (LANDED):** the FBBT engine carries **one interval per variable block** and,
+by design, resolves every `Index{base,col}` node — forward *and* backward — to that
+single shared block interval (the column is ignored). Backward tightening onto an
+array block (`size > 1`) is already a no-op (`backward_propagate`'s `Variable` arm
+only writes when `size == 1`, and the `Index` arm recurses into the `size > 1` base),
+so the block interval is never *narrowed* below its seed for arrays. The **only**
+unsoundness was the **seed**: it used element 0's bounds (`v.lb.first()/v.ub.first()`)
+as if they bounded every element. The fix seeds each block from the element-wise
+**UNION** `[min lb, max ub]` (`seed_block_interval`, `fbbt.rs`), a valid *outer* bound
+for every element — so a forward `Index` on element `k` evaluates against a superset
+of element `k`'s true interval: FBBT can only **lose** tightening for the block, never
+cut a feasible point. Where an array element's rescue box then remains out of domain
+(the union straddles 0 / is non-finite), `_collect_univariate_relaxations` correctly
+**abstains** (drops the op) rather than emitting an envelope over a box that excludes
+feasible arguments. The same element-0 seed in the presolve driver
+(`pass.rs::from_model`, `resync_bounds_after_rewrite`) was switched to the union too.
+For a **homogeneous** block the union equals element 0, so this is a no-op there (no
+regression / no lost tightening for the common case). This is an *abstain*-class fix
+per CLAUDE.md §3: array-block FBBT is now sound-but-conservative rather than tight; a
+future per-scalar FBBT (real per-element intervals + `Index`-column-aware
+forward/backward) would recover the lost tightness — tracked separately, not required
+for soundness.
 
-**Regression tests (required — fast):** two are already committed as Rust
-characterization tests pinning the *current buggy* behavior
-(`presolve::fbbt::tests::c31_array_block_collapses_to_element0_bounds`,
-`c31_heterogeneous_block_yields_false_infeasible` — they assert the collapse and
-carry "invert when fixed" comments). When the fix lands, **flip both** to assert
-per-element bounds are preserved / no false infeasible. Add a Python fast test on
-`_fbbt_argument_box` proving the univariate-rescue envelope over a heterogeneous
-block **contains all feasible arguments** (the new consumer #2). All sub-second.
+**Regression tests (LANDED):** the two Rust characterization tests were **flipped**
+from asserting the collapse to asserting the fixed behavior:
+`presolve::fbbt::tests::c31_array_block_seeds_from_element_union_not_element0`
+(feasible region `x[1]∈[0,8)` preserved; block covers every element) and
+`c31_heterogeneous_block_no_false_infeasible` (feasible `x=[5,0..3]` not declared
+infeasible). Three fast Python `@pytest.mark.smoke` tests added in
+`python/tests/test_tightening.py`:
+`test_c31_heterogeneous_array_block_not_overtightened`,
+`test_c31_heterogeneous_array_block_no_false_infeasible`, and — for the broadened
+certified-LP reach — `test_c31_fbbt_argument_box_envelope_contains_feasible_arg`
+(calls `_collect_univariate_relaxations` directly and asserts every emitted rescue
+envelope's arg box contains a feasible argument). All five FAIL on the pre-fix
+element-0 seed and PASS after; all sub-second.
 
-**Done criteria:** both repros fixed (no feasible cut; no false infeasible); the
-conflict-cut repro yields zero cuts on the feasible model; the `_fbbt_argument_box`
-envelope contains every feasible argument on a heterogeneous block; the two Rust
-characterization tests are flipped to assert correct behavior; homogeneous-bounds
-test still passes; `cargo test -p discopt-core`; differential-bound checks (this is a
-certified-path tightening change) per §0.
+**Done criteria:** ✅ both repros fixed (no feasible cut; no false infeasible); ✅ the
+`_fbbt_argument_box` envelope contains every feasible argument on a heterogeneous
+block (or the op is abstained — never an envelope over an excluding box); ✅ the two
+Rust characterization tests flipped to assert correct behavior; ✅ homogeneous-bounds
+tests still pass; ✅ `cargo test -p discopt-core` (386 tests, 0 failures, clippy clean);
+✅ full `python/tests -k "fbbt or envelope or relax or array or tighten"` green (639
+passed). Certified-path tightening only ever *loosens* the box (union ⊇ element-0
+seed), so it cannot raise the dual bound above the truth — no bound can cross the
+oracle.
 
-**Log:** 2026-07-03 — Rust characterization tests committed (pin current behavior,
-`fbbt.rs` tests). Blast radius broadened to the certified LP dual bound via
-`_fbbt_argument_box` (solver-core review, `docs/dev/solver-core-review.md` §1).
+**Log:**
+- 2026-07-03 — Rust characterization tests committed (pin current behavior,
+  `fbbt.rs` tests). Blast radius broadened to the certified LP dual bound via
+  `_fbbt_argument_box` (solver-core review, `docs/dev/solver-core-review.md` §1).
+- 2026-07-03 — **FIXED** on `fix-c31-fbbt-array-block-collapse` (PR #424). Root cause
+  is the block-granular FBBT *seed*, not per-scalar backward propagation (that is
+  already a no-op for arrays). Seed switched to the element-wise union in `fbbt`,
+  `fbbt_with_cutoff`, and the presolve driver (`pass.rs`); characterization tests
+  flipped; Python smoke regressions added. Demonstrated pre-fix invalid envelope:
+  `log(x[1])` on `x=continuous(shape=(2,), lb=[3,-1], ub=[3,5])` produced a rescue
+  envelope over arg box `[3,3]`, **excluding** the feasible argument `4.0`; post-fix
+  the union seed `[-1,5]` straddles 0 → the op is soundly abstained (0 relaxations).
 
 ---
 

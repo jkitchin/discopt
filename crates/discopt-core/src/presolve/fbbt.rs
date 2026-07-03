@@ -1087,6 +1087,36 @@ fn snap_integral_bounds(model: &ModelRepr, var_bounds: &mut [Interval]) {
 // Fixed-point FBBT
 // ─────────────────────────────────────────────────────────────
 
+/// Seed a variable BLOCK's FBBT interval from its element-wise bounds.
+///
+/// The FBBT engine carries **one interval per variable block** (an array
+/// variable of `size > 1` is a single `var_bounds` slot). An `Index` node that
+/// selects element `k` resolves — in both forward and backward propagation — to
+/// this single shared block interval, so the interval must be a valid *outer*
+/// bound for **every** element of the block, not any one element's.
+///
+/// C-31: the previous seed used `v.lb.first()/v.ub.first()` — element 0's bounds
+/// — and stamped them onto the whole block. On heterogeneous per-element bounds
+/// that interval EXCLUDES feasible points of the other elements: a forward
+/// `Index` on element `k != 0` then evaluates against element 0's (wrong)
+/// interval, cutting feasible arguments and, on a genuine mismatch, declaring a
+/// feasible model infeasible. That collapsed box reaches the certified LP dual
+/// bound via `_fbbt_argument_box` (`milp_relaxation.py`), so the envelope built
+/// over it can be invalid. Seeding from the element-wise UNION
+/// (`min` lower, `max` upper) restores soundness: the block interval then
+/// contains every element's feasible interval, so interval arithmetic over it is
+/// a superset — FBBT can only *lose* tightening for the block, never cut a
+/// feasible point. For a homogeneous block the union equals element 0, so this
+/// is a no-op there (no regression for the common case).
+pub(crate) fn seed_block_interval(v: &crate::expr::VarInfo) -> Interval {
+    if v.lb.is_empty() || v.ub.is_empty() {
+        return Interval::new(f64::NEG_INFINITY, f64::INFINITY);
+    }
+    let lo = v.lb.iter().copied().fold(f64::INFINITY, f64::min);
+    let hi = v.ub.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+    Interval::new(lo, hi)
+}
+
 /// Run FBBT to fixed-point on a model with an optional incumbent cutoff.
 ///
 /// When `incumbent_bound` is `Some(bound)`, an additional synthetic constraint
@@ -1102,16 +1132,7 @@ pub fn fbbt_with_cutoff(
     incumbent_bound: Option<f64>,
 ) -> Vec<Interval> {
     let n_vars = model.variables.len();
-    let mut var_bounds: Vec<Interval> = model
-        .variables
-        .iter()
-        .map(|v| {
-            Interval::new(
-                v.lb.first().copied().unwrap_or(f64::NEG_INFINITY),
-                v.ub.first().copied().unwrap_or(f64::INFINITY),
-            )
-        })
-        .collect();
+    let mut var_bounds: Vec<Interval> = model.variables.iter().map(seed_block_interval).collect();
 
     // Determine the objective cutoff constraint (if any).
     let obj_cutoff: Option<(ExprId, Interval)> = incumbent_bound.map(|bound| {
@@ -1197,17 +1218,9 @@ pub fn fbbt_with_cutoff(
 /// Returns tightened variable bounds (indexed by variable index, not offset).
 pub fn fbbt(model: &ModelRepr, max_iter: usize, tol: f64) -> Vec<Interval> {
     let n_vars = model.variables.len();
-    let mut var_bounds: Vec<Interval> = model
-        .variables
-        .iter()
-        .map(|v| {
-            // Use the first element's bounds (scalar variables).
-            Interval::new(
-                v.lb.first().copied().unwrap_or(f64::NEG_INFINITY),
-                v.ub.first().copied().unwrap_or(f64::INFINITY),
-            )
-        })
-        .collect();
+    // C-31: seed each block from the element-wise union of its bounds (a valid
+    // outer bound for every element), NOT element 0 — see `seed_block_interval`.
+    let mut var_bounds: Vec<Interval> = model.variables.iter().map(seed_block_interval).collect();
 
     for _ in 0..max_iter {
         let old_bounds = var_bounds.clone();
@@ -2384,16 +2397,21 @@ mod tests {
         );
     }
 
-    // ── C-31 (=TG-1) — FBBT collapses an array-variable block to element-0's ──
+    // ── C-31 (=TG-1) — FBBT array-block seeding (FIXED) ──
     //
-    // `fbbt()` seeds ONE `Interval` per variable *block* from `v.lb.first()` /
-    // `v.ub.first()` (fbbt.rs:1204-1208), and `eval_node_interval` resolves every
-    // `Index{base,col}` node to that single block interval (fbbt.rs:513-516 —
-    // the column is ignored). So an array variable with heterogeneous per-element
-    // bounds has element 0's (tighter) bounds illegally propagated onto every
-    // other element. The card C-31 documents two failure modes; both are pinned
-    // here. These assert the *current buggy behaviour* so the bug is captured in
-    // Rust; when C-31 is fixed (element-aware FBBT), INVERT these assertions.
+    // `fbbt()` carries ONE `Interval` per variable *block*, and `eval_node_interval`
+    // resolves every `Index{base,col}` node to that single shared block interval
+    // (the column is ignored). The old seed used `v.lb.first()`/`v.ub.first()` —
+    // element 0's bounds — so an array variable with heterogeneous per-element
+    // bounds had element 0's (tighter) bounds illegally propagated onto every
+    // other element, cutting feasible points and (on a genuine mismatch) declaring
+    // a feasible model infeasible. FIX (`seed_block_interval`): seed each block
+    // from the element-wise UNION [min lb, max ub], a valid outer bound for every
+    // element — so the block interval never excludes a feasible argument. These
+    // two tests assert the FIXED behaviour (no feasible cut; no false infeasible);
+    // they FAIL on the pre-fix element-0 seed. See also the Python-side consumer
+    // test `test_c31_fbbt_argument_box_envelope_contains_feasible` which pins the
+    // certified-LP-relaxation reach (`_fbbt_argument_box` / `milp_relaxation.py`).
 
     /// Build a single continuous array variable block `x` of `size` with the given
     /// element-wise bounds, plus a constraint on element `col`: `x[col] {sense} rhs`.
@@ -2440,14 +2458,14 @@ mod tests {
     }
 
     #[test]
-    fn c31_array_block_collapses_to_element0_bounds() {
-        // x is a length-2 continuous array with element 0 fixed near element 1's
-        // feasible interval but DIFFERENT bounds: lb=[8,0], ub=[10,10]. Element 1
-        // is genuinely free in [0,10]. Constraint touches element 1 trivially:
-        // `x[1] >= 0` (always satisfiable). Element-aware FBBT would leave
-        // x[1] ∈ [0,10]. The buggy collapse seeds the whole block from element 0
-        // → the returned block interval is element-0's [8,10], erasing the
-        // feasible region x[1] ∈ [0,8).
+    fn c31_array_block_seeds_from_element_union_not_element0() {
+        // x is a length-2 continuous array with heterogeneous per-element bounds:
+        // lb=[8,0], ub=[10,10]. Element 1 is genuinely free in [0,10]. Constraint
+        // touches element 1 trivially: `x[1] >= 0` (always satisfiable). The old
+        // C-31 collapse seeded the whole block from element 0 → [8,10], erasing
+        // the feasible region x[1] ∈ [0,8). The fix seeds each block from the
+        // element-wise UNION [min lb, max ub] = [0,10], a valid outer bound for
+        // every element, so the feasible region is preserved.
         let model = array_var_model(
             vec![8.0, 0.0],
             vec![10.0, 10.0],
@@ -2456,30 +2474,37 @@ mod tests {
             0.0,
         );
         let bounds = fbbt(&model, 8, 1e-9);
-        // One interval per BLOCK (n_vars here = variables.len() == 1), NOT per
-        // scalar element — itself a symptom of the collapse.
+        // One interval per BLOCK (n_vars here = variables.len() == 1).
         assert_eq!(
             bounds.len(),
             1,
             "fbbt returns one interval per block, not per element"
         );
-        // BUG (C-31): element 1's lower bound is stamped as 8.0 (element 0's),
-        // not its true 0.0. When fixed, this must become `bounds[0].lo <= 0.0`.
+        // C-31 FIXED: the block interval must be the element-wise union outer
+        // bound, so its lower bound is element 1's 0.0 — NOT element-0's 8.0.
+        // A lower bound above 0.0 would cut the feasible region x[1] ∈ [0,8).
         assert!(
-            (bounds[0].lo - 8.0).abs() < 1e-9,
-            "C-31: block collapsed to element-0 lb=8, got {:?} (invert when fixed)",
+            bounds[0].lo <= 0.0 + 1e-9,
+            "C-31: block must not collapse to element-0 lb=8; feasible x[1]∈[0,8) \
+             would be cut. got {:?}",
+            bounds[0]
+        );
+        assert!(
+            bounds[0].hi >= 10.0 - 1e-9,
+            "C-31: block upper bound must cover every element (10.0), got {:?}",
             bounds[0]
         );
     }
 
     #[test]
-    fn c31_heterogeneous_block_yields_false_infeasible() {
+    fn c31_heterogeneous_block_no_false_infeasible() {
         // x length-2: lb=[5,0], ub=[5,3]. Element 0 is fixed at 5; element 1 is
         // free in [0,3]. Constraint `x[1] <= 3` is trivially satisfiable
         // (x=[5, 0..3] is feasible), so FBBT must NOT report infeasible.
-        // The collapse seeds the block from element 0 → [5,5]; the Index on
-        // element 1 resolves to [5,5]; intersecting with the constraint output
-        // (-inf, 3] is empty → FBBT falsely declares the whole model infeasible.
+        // The old C-31 collapse seeded the block from element 0 → [5,5]; the
+        // Index on element 1 resolved to [5,5]; intersecting with (-inf,3] was
+        // empty → false infeasible. The union seed [0,5] intersected with
+        // (-inf,3] is [0,3] → feasible.
         let model = array_var_model(
             vec![5.0, 0.0],
             vec![5.0, 3.0],
@@ -2488,13 +2513,12 @@ mod tests {
             3.0,
         );
         let bounds = fbbt(&model, 8, 1e-9);
-        // BUG (C-31): a feasible model is reported infeasible (all-empty bounds).
-        // "FBBT never reports feasible as infeasible" is violated. When C-31 is
-        // fixed this must become `assert!(!bounds.iter().any(|b| b.is_empty()))`.
+        // C-31 FIXED: a feasible model must NOT be reported infeasible.
+        // "FBBT never reports feasible as infeasible."
         assert!(
-            bounds.iter().all(|b| b.is_empty()),
-            "C-31: expected the buggy false-infeasible (all-empty) collapse, got {:?} \
-             (invert this assertion when C-31 is fixed)",
+            !bounds.iter().any(|b| b.is_empty()),
+            "C-31: feasible model x=[5, 0..3] must not be declared infeasible, \
+             got {:?}",
             bounds
         );
     }
