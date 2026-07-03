@@ -39,6 +39,7 @@ References
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from typing import Optional, Sequence
 
@@ -47,6 +48,8 @@ import numpy as np
 from discopt._jax.presolve.protocol import make_python_delta
 from discopt.nn.bounds import LayerBounds, propagate_bounds
 from discopt.nn.network import Activation, NetworkDefinition
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -123,27 +126,16 @@ def tighten_network(
         ``network.input_bounds``; must be provided together with
         ``input_lb``.
     """
-    # Snapshot the network's input bounds so we can restore them; we
-    # do not mutate the input network's input_bounds in place because
-    # callers may continue to use the original.
     used_lb: Optional[np.ndarray]
     used_ub: Optional[np.ndarray]
     if input_lb is not None or input_ub is not None:
         if input_lb is None or input_ub is None:
             raise ValueError("input_lb and input_ub must both be set or both None")
-        # propagate_bounds() reads network.input_bounds, so swap in the
-        # caller's box and propagate, then restore.
-        original = network.input_bounds
-        network.input_bounds = (
-            np.asarray(input_lb, dtype=np.float64).copy(),
-            np.asarray(input_ub, dtype=np.float64).copy(),
-        )
-        try:
-            layer_bounds = propagate_bounds(network)
-        finally:
-            network.input_bounds = original
+        # Feed the caller's box directly via the ``input_bounds`` override
+        # (T-N0.2) instead of mutating and restoring network.input_bounds.
         used_lb = np.asarray(input_lb, dtype=np.float64)
         used_ub = np.asarray(input_ub, dtype=np.float64)
+        layer_bounds = propagate_bounds(network, input_bounds=(used_lb, used_ub))
     else:
         layer_bounds = propagate_bounds(network)
         used_lb = (
@@ -178,14 +170,17 @@ class NNPresolvePass:
     NN is embedded in a Python ``Model`` whose variables include the
     network's input layer.
 
-    The pass is *informational* in v0: it computes activations and dead
-    masks, surfacing them through the delta's
-    ``structure.implications`` (one entry per dead-zero neuron) so a
-    downstream big-M formulation can drop the corresponding binary
-    indicator. Bound writeback to the input variables is also
-    performed if a tighter box can be derived from the network's
-    structure (currently only when activations themselves trigger
-    further reverse propagation; left as future work for v1).
+    The pass is *informational* in v0 and is not wired into any solve
+    path: no orchestrator constructs it, and ``run()`` performs **no
+    bound writeback** to the model. It computes activation bounds and
+    dead-ReLU masks and surfaces them on the returned delta under the
+    ``nn_implications``/``nn_neurons_dead`` keys (one entry per dead
+    neuron) purely for inspection; the orchestrator treats these unknown
+    keys as inert. Wiring this into ``run_root_presolve(python_passes=...)``
+    so dead-ReLU implications can fix big-M binaries after root
+    tightening is future work (v1), tracked in the nn-module plan
+    (T-N2.2); it requires the entry experiment that measures whether
+    root FBBT/OBBT tightens NN input boxes enough to kill neurons.
 
     :param network: the embedded :class:`NetworkDefinition`.
     :param input_block_index: variable block index of the input layer
@@ -232,9 +227,12 @@ class NNPresolvePass:
                 result = tighten_network(self.network, input_lb=input_lb, input_ub=input_ub)
             else:
                 result = tighten_network(self.network)
-        except Exception:
-            # Network can throw if input_bounds is missing or shapes
-            # don't match. Abstain rather than break the orchestrator.
+        except ValueError as exc:
+            # The only expected failures are a missing input_bounds and
+            # weight/bias/box shape mismatches, both of which surface as
+            # ValueError (propagate_bounds and numpy affine ops). Abstain
+            # rather than break the orchestrator, but leave a trace.
+            logger.debug("NNPresolvePass abstaining: %s", exc)
             return delta
 
         self.last_result = result
