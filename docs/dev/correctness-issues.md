@@ -473,7 +473,7 @@ else-branch return `status="unknown"` (bound=None, gap_certified=False) instead 
   195 passed / 1 skipped / 0 failed (includes the 2 new tests); adversarial
   `test_adversarial_recent_fixes.py -m slow` 10 passed. No Rust touched. No
   correctness assertion weakened (`incorrect_count` unaffected; the change only
-  turns an unsound `"infeasible"` into a sound `"unknown"`). PR: TBD.
+  turns an unsound `"infeasible"` into a sound `"unknown"`). PR: #444.
 
 **Status:** open → fixed.
 
