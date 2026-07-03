@@ -94,7 +94,7 @@ in non-default configs; loud ingestion gaps. **P3** = hygiene.
 | C-2 | P1 | milp_driver status | false "Infeasible" when deadline orphans deferred nodes | fixed |
 | C-19 | P1 | relax_tan | pole-straddling interval classified as one branch → secant across a pole, invalid envelope | open |
 | C-5 | P1 | .nl parser | floor/ceil/round/trunc→identity, intdiv→div, all silent | fixed |
-| C-6 | P1 | modeling API | integer vars silently clamped to [0, 1e6] | open |
+| C-6 | P1 | modeling API | integer vars silently clamped to [0, 1e6] | fixed |
 | C-18 | P1 | midpoint bound | `mccormick_bounds="midpoint"` returns u(mid), not a lower bound (opt-in mode) | open |
 | C-20 | P2 | fbbt_fp.rs | watch-list FBBT declares infeasibility with zero tolerance (opt-in engine) | fixed |
 | C-15 | P2 | obbt.py | `run_obbt` variant tightens to raw LP vertex, no NS safe-bound clamp | fixed |
@@ -762,7 +762,53 @@ never silently report a default-box-active optimum as certified.
 warn visibly (option b), or raise (option c); a test locks the chosen behavior;
 docs updated; standing gates pass.
 
-**Log:** —
+**Log:** 2026-07-03, status open→fixed (branch `fix-c6-integer-var-silent-clamp`,
+PR #448). **Confirmed** the mechanism precisely: user-provided `lb`/`ub` were
+*already* honored exactly (a repro with `integer("n", lb=-5, ub=10)` → stored
+`[-5, 10]`; `ub=5e6` → stored `5e6`) — the bug was the *silent* substitution of
+the finite default `[0, 1e6]` whenever a bound was left unspecified, so a model
+needing a negative or >1e6 integer was truncated with no diagnostic. Two of the
+six regression assertions were **red before / green after**
+(`test_unspecified_integer_bounds_warn_loudly`,
+`test_partial_bounds_default_only_missing_side`); the four
+bounds-honored assertions were green on both sides (they lock in that the fix
+does not regress the already-correct explicit-bound path).
+
+**Fix — chose option (b), refined per the loud-default principle:** changed the
+`integer(...)` signature defaults from `lb=0, ub=1e6` to `lb=None, ub=None`, and
+added `Model._resolve_integer_defaults`, which substitutes the finite fallbacks
+(`_INTEGER_DEFAULT_LB=0.0`, `_INTEGER_DEFAULT_UB=1e6`) **only for a `None`
+(unspecified) side** and emits a `UserWarning` naming the variable and the imposed
+range. A user-provided bound (any explicit value, including `0` / `1e6`) is passed
+through unchanged and never warns — the default can never override or narrow a
+declared bound. The finite fallback is kept (not ±inf per option (a)) so B&B still
+receives a bounded integer domain; making the substitution loud rather than
+removing it avoids touching any downstream solver assumption about integer
+boundedness. The indexed (`over=`) path already resolved `None`→default via
+`resolve_indexed_values`, so it inherits the same behavior; `_make_indexed_var`
+now receives the shared `_INTEGER_DEFAULT_*` constants. Overload signatures updated
+to `Optional[...]`. Docstrings and the `VarType.INTEGER` doc (`core.py:67`) updated
+to describe the honored-exactly / loud-default contract. Internal `.integer(...)`
+callers (`llm/tools.py`, `solvers/milp_pounce.py`) all pass explicit bounds, so
+none newly warn.
+
+**Regression test (named):** `python/tests/test_c6_integer_default_bounds.py` —
+six `@pytest.mark.smoke` unit tests calling the modeling API directly (sub-second,
+no `Model.solve()`): negative bounds honored exactly, large ub not clamped,
+explicit bounds do NOT warn, unspecified bounds WARN loudly (with finite fallback),
+partial (lb-only) warns for the defaulted side while honoring lb exactly, and the
+indexed path honors negative bounds. Encodes the class (silent default box), not a
+named instance.
+
+**Gates:** `pytest -m smoke` 345 passed/1 skipped; adversarial
+`test_adversarial_recent_fixes.py -m slow` 10 passed; `pytest -k "integer or
+modeling or bound or variable"` 617 passed/1 skipped/2 xfailed; C-6 file 6 passed.
+`ruff check` + `ruff format --check` clean on both files. No Rust touched.
+`incorrect_count=0` (no false certificate; nothing weakened — the fix strictly adds
+a diagnostic and honors input). mypy blocked only by a **pre-existing** env mismatch
+(installed numpy ships Python-3.12 `type` statement syntax in `__init__.pyi:737`
+while `[tool.mypy] python_version = "3.10"`) — reproduces identically on the
+unmodified tree, unrelated to this change.
 
 ---
 
