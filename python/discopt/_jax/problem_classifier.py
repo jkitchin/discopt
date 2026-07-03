@@ -205,13 +205,20 @@ def _extract_linear_coefficients(expr, model: Model, n: int):
     c = np.zeros(n, dtype=np.float64)
     const = 0.0
 
-    def _walk(node, scale=1.0):
+    def _walk(node, scale=1.0, allow_array=False):
+        # ``allow_array`` is True only inside a ``sum(...)`` reduction, where a
+        # size>1 (sub)expression contributes a single scalar row (its element sum
+        # with a *uniform* scale). Outside a sum, encountering a size>1 array node
+        # in scalar position means the whole body is vector-valued: the algebraic
+        # extractor would collapse it to one summed row (C-29), certifying an
+        # infeasible point. Refuse instead so extract_lp_data() routes the body to
+        # the per-component autodiff extractor (one LP row per element).
         nonlocal const
 
         if isinstance(node, Constant):
             val = node.value
-            if val.ndim == 0:
-                const += scale * float(val)
+            if val.ndim == 0 or val.size == 1:
+                const += scale * float(val.reshape(()))
             else:
                 raise _NotLinearError("Array constant in unexpected position")
             return
@@ -220,10 +227,15 @@ def _extract_linear_coefficients(expr, model: Model, n: int):
             offset = _compute_var_offset(node, model)
             if node.size == 1:
                 c[offset] += scale
-            else:
-                # Array variable treated as sum when used as scalar
+            elif allow_array:
+                # Inside sum(): sum(scale * x) = scale * Σ x_j (uniform scale).
                 for j in range(node.size):
                     c[offset + j] += scale
+            else:
+                raise _NotLinearError(
+                    "Array variable in scalar position (vector-valued body); "
+                    "routing to the per-component extractor"
+                )
             return
 
         if isinstance(node, IndexExpression):
@@ -246,46 +258,50 @@ def _extract_linear_coefficients(expr, model: Model, n: int):
 
         if isinstance(node, BinaryOp):
             if node.op == "+":
-                _walk(node.left, scale)
-                _walk(node.right, scale)
+                _walk(node.left, scale, allow_array)
+                _walk(node.right, scale, allow_array)
                 return
             if node.op == "-":
-                _walk(node.left, scale)
-                _walk(node.right, -scale)
+                _walk(node.left, scale, allow_array)
+                _walk(node.right, -scale, allow_array)
                 return
             if node.op == "*":
-                # One side must be constant for linearity
+                # One side must be a scalar constant for linearity. A size>1 array
+                # constant here raises _NotLinearError from _eval_const (the scale
+                # would differ per element), which routes to the per-component
+                # extractor rather than collapsing.
                 if _is_const_expr(node.left):
                     cval = _eval_const(node.left)
-                    _walk(node.right, scale * cval)
+                    _walk(node.right, scale * cval, allow_array)
                     return
                 if _is_const_expr(node.right):
                     cval = _eval_const(node.right)
-                    _walk(node.left, scale * cval)
+                    _walk(node.left, scale * cval, allow_array)
                     return
                 raise _NotLinearError("Product of two variable expressions")
             if node.op == "/":
                 if _is_const_expr(node.right):
                     cval = _eval_const(node.right)
-                    _walk(node.left, scale / cval)
+                    _walk(node.left, scale / cval, allow_array)
                     return
                 raise _NotLinearError("Division by variable expression")
             raise _NotLinearError(f"Non-linear operator: {node.op}")
 
         if isinstance(node, UnaryOp):
             if node.op == "neg":
-                _walk(node.operand, -scale)
+                _walk(node.operand, -scale, allow_array)
                 return
             raise _NotLinearError(f"Non-linear unary op: {node.op}")
 
         if isinstance(node, SumOverExpression):
             for term in node.terms:
-                _walk(term, scale)
+                _walk(term, scale, allow_array)
             return
 
         if isinstance(node, SumExpression):
-            # Sum of an array variable or expression
-            _walk(node.operand, scale)
+            # sum(expr) reduces expr to a scalar: element-collapse is legitimate
+            # here (uniform scale), so allow array nodes beneath this point.
+            _walk(node.operand, scale, allow_array=True)
             return
 
         if isinstance(node, MatMulExpression):
@@ -353,13 +369,18 @@ def _extract_quadratic_coefficients(expr, model: Model, n: int):
             return offset + int(flat_idx)
         return None
 
-    def _walk(node, scale=1.0):
+    def _walk(node, scale=1.0, allow_array=False):
+        # See _extract_linear_coefficients._walk: ``allow_array`` is True only
+        # inside a sum() reduction, where a size>1 array variable legitimately
+        # collapses to a single scalar term. Outside a sum, an array variable in
+        # scalar position means a vector-valued body that must NOT be collapsed to
+        # one row (C-29) — refuse so the caller routes to the autodiff extractor.
         nonlocal const
 
         if isinstance(node, Constant):
             val = node.value
-            if val.ndim == 0:
-                const += scale * float(val)
+            if val.ndim == 0 or val.size == 1:
+                const += scale * float(val.reshape(()))
             else:
                 raise _NotQuadraticError("Array constant in unexpected position")
             return
@@ -370,6 +391,11 @@ def _extract_quadratic_coefficients(expr, model: Model, n: int):
                 c[idx] += scale
                 return
             if isinstance(node, Variable) and node.size > 1:
+                if not allow_array:
+                    raise _NotQuadraticError(
+                        "Array variable in scalar position (vector-valued body); "
+                        "routing to the per-component extractor"
+                    )
                 offset = _compute_var_offset(node, model)
                 for j in range(node.size):
                     c[offset + j] += scale
@@ -378,22 +404,22 @@ def _extract_quadratic_coefficients(expr, model: Model, n: int):
 
         if isinstance(node, BinaryOp):
             if node.op == "+":
-                _walk(node.left, scale)
-                _walk(node.right, scale)
+                _walk(node.left, scale, allow_array)
+                _walk(node.right, scale, allow_array)
                 return
             if node.op == "-":
-                _walk(node.left, scale)
-                _walk(node.right, -scale)
+                _walk(node.left, scale, allow_array)
+                _walk(node.right, -scale, allow_array)
                 return
             if node.op == "*":
                 # Check: const * expr, expr * const, or var * var
                 if _is_const_expr(node.left):
                     cval = _eval_const(node.left)
-                    _walk(node.right, scale * cval)
+                    _walk(node.right, scale * cval, allow_array)
                     return
                 if _is_const_expr(node.right):
                     cval = _eval_const(node.right)
-                    _walk(node.left, scale * cval)
+                    _walk(node.left, scale * cval, allow_array)
                     return
                 # var * var => quadratic term
                 # Q is the Hessian: f = 0.5 x'Qx, so d²(c*xi*xj)/dxi dxj = c,
@@ -431,7 +457,7 @@ def _extract_quadratic_coefficients(expr, model: Model, n: int):
             if node.op == "/":
                 if _is_const_expr(node.right):
                     cval = _eval_const(node.right)
-                    _walk(node.left, scale / cval)
+                    _walk(node.left, scale / cval, allow_array)
                     return
                 raise _NotQuadraticError("Division by variable expression")
             if node.op == "**":
@@ -444,7 +470,7 @@ def _extract_quadratic_coefficients(expr, model: Model, n: int):
                             Q[idx, idx] += 2.0 * scale  # x^2 = 0.5 * 2 * x^2
                             return
                     if abs(pval - 1.0) < 1e-12:
-                        _walk(node.left, scale)
+                        _walk(node.left, scale, allow_array)
                         return
                     if abs(pval) < 1e-12:
                         const += scale
@@ -454,17 +480,18 @@ def _extract_quadratic_coefficients(expr, model: Model, n: int):
 
         if isinstance(node, UnaryOp):
             if node.op == "neg":
-                _walk(node.operand, -scale)
+                _walk(node.operand, -scale, allow_array)
                 return
             raise _NotQuadraticError(f"Non-linear unary op: {node.op}")
 
         if isinstance(node, SumOverExpression):
             for term in node.terms:
-                _walk(term, scale)
+                _walk(term, scale, allow_array)
             return
 
         if isinstance(node, SumExpression):
-            _walk(node.operand, scale)
+            # sum(expr) reduces to a scalar: array collapse legitimate below here.
+            _walk(node.operand, scale, allow_array=True)
             return
 
         if isinstance(node, MatMulExpression):
@@ -563,10 +590,23 @@ def _is_const_expr(expr) -> bool:
 
 
 def _eval_const(expr) -> float:  # type: ignore[return-value]
-    """Evaluate a constant expression to a float scalar."""
+    """Evaluate a constant expression to a float scalar.
+
+    Raises ``_NotLinearError`` (NOT ``ValueError``) on a non-scalar array
+    constant. C-30: a raw ``ValueError`` from ``float(v.item())`` on a size>1
+    array (e.g. ``sum(np.array([1,1]) * x)``) used to abort the algebraic walk
+    and mis-route to a fallback that dropped the objective sense. Refusing with
+    ``_NotLinearError`` routes such bodies to the row- and sense-correct autodiff
+    extractor instead.
+    """
     if isinstance(expr, Constant):
         v = expr.value
-        return float(v) if v.ndim == 0 else float(v.item())
+        if v.ndim == 0 or v.size == 1:
+            return float(v.reshape(()))
+        raise _NotLinearError(
+            "Non-scalar array constant cannot be evaluated as a scalar coefficient; "
+            "routing to the per-component extractor"
+        )
     if isinstance(expr, BinaryOp):
         lv = _eval_const(expr.left)
         r = _eval_const(expr.right)
@@ -1204,6 +1244,7 @@ def _extract_lp_data_autodiff(model: Model) -> LPData:
     import jax.numpy as jnp
 
     from discopt._jax.dag_compiler import compile_constraint, compile_objective
+    from discopt.modeling.core import ObjectiveSense
 
     n_orig = sum(v.size for v in model._variables)
     obj_fn = compile_objective(model)
@@ -1273,6 +1314,17 @@ def _extract_lp_data_autodiff(model: Model) -> LPData:
     c_full = jnp.concatenate([c, jnp.zeros(n_slack)])
     x_l = jnp.concatenate([x_l_orig, jnp.zeros(n_slack)])
     x_u = jnp.concatenate([x_u_orig, jnp.full(n_slack, jnp.inf)])
+
+    # Handle objective sense: negate for maximization (solvers always minimize).
+    # C-30: this autodiff fallback previously dropped the maximize negation that
+    # every other extractor applies (extract_lp_data_algebraic:743,
+    # _extract_lp_data_from_repr:927, _extract_qp_data_autodiff:1375), so a
+    # `maximize` model routed here (e.g. a vector `sum(const*var)` body that the
+    # algebraic walk refuses) was silently minimized and returned 0.
+    assert model._objective is not None
+    if model._objective.sense == ObjectiveSense.MAXIMIZE:
+        c_full = -c_full
+        obj_const = -obj_const
 
     return LPData(
         c=c_full,

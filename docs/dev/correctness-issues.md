@@ -114,8 +114,8 @@ in non-default configs; loud ingestion gaps. **P3** = hygiene.
 | C-26 | P1 | nn/tree_ensemble | tree big-M invalid for out-of-box thresholds → cuts feasible points | in progress (nn-module-plan T-N0.3) |
 | C-27 | P2 | nn/readers/onnx | ONNX reader silently mis-reads Gemm attrs / residual Add / branched graphs | in progress (nn-module-plan T-N1.1) |
 | C-28 | P2 | nn/readers/sklearn | sklearn classifier semantics silently embed logits / wrong base_score | in progress (nn-module-plan T-N1.2) |
-| C-29 | P0 | classify/extract | vector-body constraint collapses to one summed row ("array var treated as sum") → infeasible point certified optimal, DEFAULT path (= CORE-1, modeling M1) | confirmed |
-| C-30 | P0 | classify/extract | maximize sense lost on `sum(const·var)` bodies (raises `ValueError` not `_NotLinearError`, mis-routes to sense-dropping fallback) → returns 0 instead of true max (= CORE-2, ro ADJ-1) | confirmed |
+| C-29 | P0 | classify/extract | vector-body constraint collapses to one summed row ("array var treated as sum") → infeasible point certified optimal, DEFAULT path (= CORE-1, modeling M1) | fixed |
+| C-30 | P0 | classify/extract | maximize sense lost on `sum(const·var)` bodies (raises `ValueError` not `_NotLinearError`, mis-routes to sense-dropping fallback) → returns 0 instead of true max (= CORE-2, ro ADJ-1) | fixed |
 | C-31 | P0 | presolve/FBBT | FBBT collapses an array-variable block to element-0's bounds and stamps them on every element → cuts feasible points AND false "infeasible"; chains into invalid conflict cuts AND (broadened) into the certified LP dual bound via `_fbbt_argument_box` (= TG-1) | fixed |
 | C-32 | P0 | relaxation/mccormick | `relax_asin`/`relax_acos` inverted curvature regime → unsound convex envelope (cv > f) in the LIVE JAX layer → invalid dual bound (= NM-1) | confirmed |
 | C-33 | P0 | solver.py fallback | pure-continuous fallback certifies a nonconvex model's local optimum with `gap_certified=True` (= SC-1), DEFAULT path | fixed |
@@ -1285,7 +1285,27 @@ points; algebraic-vs-autodiff extraction agree (rows, matrix, objective, sense) 
 property-test panel of vectorized affine models; `_eval_const` non-scalar → `_NotLinearError`;
 standing gates; `incorrect_count ≤ 0`.
 
-**Log:** —
+**Log:** 2026-07-03 **fixed** (branch `fix-c29-c30-linear-body-classify`, with C-30).
+Confirmed first: LP `min Σa+Σb s.t. a+b>=1` (shape (2,), box [0,1]) certified **1.0**
+at the elementwise-infeasible point `a=b=[0.25,0.25]` (`a+b=0.5<1`), true **2.0**; MILP
+set-cover `y+z>=1` (shape (3,) binaries) certified **1.0**, true **3.0**. Root cause:
+the algebraic walkers `_extract_linear_coefficients`/`_extract_quadratic_coefficients`
+collapsed a size>1 array variable in *scalar* position into one summed row, and the
+constraint loop appends exactly one row per `Constraint`, so a vector body `a+b>=1`
+became `Σa+Σb>=1`. **Fix (Stage 1, sound-minimal):** both `_walk`s now carry an
+`allow_array` flag — True only under a `SumExpression` (where element-collapse with a
+*uniform* scale is a legitimate reduction), False elsewhere; an array node in scalar
+position raises `_NotLinearError`/`_NotQuadraticError` so `extract_lp_data`'s dispatcher
+routes the body to the per-component autodiff extractor (one LP row per element). Also
+`_eval_const` now raises `_NotLinearError` (not `ValueError`) on a non-scalar array
+constant. Legit `sum(array_var)` bodies still take the fast algebraic single-row path
+(bound-neutral guard test). Post-fix: both repros certify 2.0 / 3.0 at elementwise-
+feasible points. Regression: `python/tests/test_c29_c30_linear_body_classify.py`
+(`test_c29_vector_body_not_collapsed_to_single_row`,
+`test_c29_solve_certifies_feasible_point`, `test_c29_milp_set_cover_vector_body`,
+`test_legit_sum_stays_on_fast_algebraic_path`), all `@pytest.mark.smoke`, red-before/
+green-after. Gates: smoke 297 passed (only the 3 pre-existing C-31 tests fail — separate
+Rust FBBT bug, out of scope), adversarial 10 passed, ruff clean. PR #___.
 
 ---
 
@@ -1315,7 +1335,26 @@ add a regression asserting `extract_lp_data(maximize_model).c` is negated.
 **Done criteria:** the maximize repro returns 4.0 and negated `c`; the sense-negation
 audit lands with a regression test; standing gates.
 
-**Log:** —
+**Log:** 2026-07-03 **fixed** (branch `fix-c29-c30-linear-body-classify`, with C-29).
+Confirmed first: `maximize dm.sum([1,1]·x) s.t. dm.sum([1,1]·x)<=4`, `x∈[0,10]²`
+certified **1.5e-08** at `x≈[0,0]`, true **4.0**; `extract_lp_data(m).c == [1,1,0]`
+un-negated. Two-part root cause: (1) `_eval_const` raised a raw `ValueError` on the
+size-2 array constant, aborting the algebraic walk; (2) the fallback it landed in —
+`_extract_lp_data_autodiff` — was the ONLY extractor that never applied the maximize
+negation (`extract_lp_data_algebraic:743`, `_extract_lp_data_from_repr:927`,
+`_extract_qp_data_autodiff:1375` all do), so it emitted `c=[1,1,0]` and the solver
+minimized a maximize model. **Fix:** `_eval_const` now raises `_NotLinearError` on a
+non-scalar array (C-29 change), AND `_extract_lp_data_autodiff` now negates `c`/
+`obj_const` for `ObjectiveSense.MAXIMIZE` — closing the sense-dropping gap for *every*
+body that routes to the autodiff LP fallback, not just this one. Audited all six
+sense-negation sites: the autodiff LP extractor was the sole omission. Post-fix: repro
+certifies **4.0** with `c=[-1,-1,0]`. Regression:
+`test_c30_eval_const_refuses_array_with_notlinear`,
+`test_c30_maximize_sense_preserved_in_extracted_c`,
+`test_c30_autodiff_extractor_applies_maximize_sense`,
+`test_c30_solve_maximize_returns_true_max` in
+`python/tests/test_c29_c30_linear_body_classify.py`, all `@pytest.mark.smoke`,
+red-before/green-after. Gates as for C-29. PR #___.
 
 ---
 
