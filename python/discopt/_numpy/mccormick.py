@@ -13,9 +13,13 @@ import numpy as jnp
 def _secant(f, x, lb, ub):
     f_lb = f(lb)
     f_ub = f(ub)
-    slope = (f_ub - f_lb) / (ub - lb)
+    width = ub - lb
+    degenerate = jnp.abs(width) < 1e-15
+    # Guard the divisor so the degenerate branch never evaluates 0/0.
+    safe_width = jnp.where(degenerate, 1.0, width)
+    slope = (f_ub - f_lb) / safe_width
     line = f_lb + slope * (x - lb)
-    return jnp.where(jnp.abs(ub - lb) < 1e-15, f(x), line)
+    return jnp.where(degenerate, f(x), line)
 
 
 def relax_bilinear(x, y, x_lb, x_ub, y_lb, y_ub):
@@ -52,12 +56,30 @@ def _relax_reciprocal(y, y_lb, y_ub):
 
 
 def relax_div(x, y, x_lb, x_ub, y_lb, y_ub):
-    recip_cv, _recip_cc = _relax_reciprocal(y, y_lb, y_ub)
+    # C-23: the bilinear composition x*(1/y) is only sound when the denominator
+    # relaxation collapses to a point (y_lb == y_ub -> 1/y exact: constant,
+    # variable, or affine denominator). For a nonlinear denominator (y_lb != y_ub)
+    # reciprocating the midpoint yields cv > f, an invalid underestimator; fall
+    # back to the sound interval enclosure [x_lb,x_ub] * [1/y_ub, 1/y_lb].
     recip_lb = 1.0 / y_ub
     recip_ub = 1.0 / y_lb
     recip_lb_sorted = jnp.minimum(recip_lb, recip_ub)
     recip_ub_sorted = jnp.maximum(recip_lb, recip_ub)
-    return relax_bilinear(x, recip_cv, x_lb, x_ub, recip_lb_sorted, recip_ub_sorted)
+
+    recip_cv, _recip_cc = _relax_reciprocal(y, y_lb, y_ub)
+    tight_cv, tight_cc = relax_bilinear(x, recip_cv, x_lb, x_ub, recip_lb_sorted, recip_ub_sorted)
+
+    p1 = x_lb * recip_lb_sorted
+    p2 = x_lb * recip_ub_sorted
+    p3 = x_ub * recip_lb_sorted
+    p4 = x_ub * recip_ub_sorted
+    encl_cv = jnp.minimum(jnp.minimum(p1, p2), jnp.minimum(p3, p4))
+    encl_cc = jnp.maximum(jnp.maximum(p1, p2), jnp.maximum(p3, p4))
+
+    denom_is_point = jnp.abs(y_ub - y_lb) < 1e-12
+    cv = jnp.where(denom_is_point, tight_cv, encl_cv)
+    cc = jnp.where(denom_is_point, tight_cc, encl_cc)
+    return cv, cc
 
 
 def relax_pow(x, lb, ub, n):
@@ -171,10 +193,15 @@ def relax_cos(x, lb, ub):
 
 
 def relax_tan(x, lb, ub):
+    # C-19: abstain (return the no-information envelope) when [lb, ub] straddles
+    # a tan pole at pi/2 + k*pi; a secant across a pole is not a valid envelope.
     f = jnp.tan
     mid = 0.5 * (lb + ub)
     k = jnp.round(mid / jnp.pi)
     center = k * jnp.pi
+    lo_pole = center - 0.5 * jnp.pi
+    hi_pole = center + 0.5 * jnp.pi
+    pole_free = (lb > lo_pole) & (ub < hi_pole)
     case1_cv = f(x)
     case1_cc = _secant(f, x, lb, ub)
     case2_cv = _secant(f, x, lb, ub)
@@ -187,6 +214,10 @@ def relax_tan(x, lb, ub):
     is_concave_half = ub <= center
     cv = jnp.where(is_convex_half, case1_cv, jnp.where(is_concave_half, case2_cv, case3_cv))
     cc = jnp.where(is_convex_half, case1_cc, jnp.where(is_concave_half, case2_cc, case3_cc))
+    neg_inf = -jnp.inf * jnp.ones_like(cv)
+    pos_inf = jnp.inf * jnp.ones_like(cc)
+    cv = jnp.where(pole_free, cv, neg_inf)
+    cc = jnp.where(pole_free, cc, pos_inf)
     return cv, cc
 
 

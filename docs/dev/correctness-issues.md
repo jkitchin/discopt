@@ -645,7 +645,7 @@ via `solve_milp`. Gates: `cargo test -p discopt-core` 390 passed / 0 failed;
 
 ---
 
-## C-19 (P1) — `relax_tan` classifies pole-straddling intervals as a single convex/concave branch → secant across a pole
+## C-19 (P1, FIXED) — `relax_tan` classifies pole-straddling intervals as a single convex/concave branch → secant across a pole
 
 **Area:** `python/discopt/_jax/mccormick.py:393-436`. Centers on the nearest
 inflection `center = round(mid/π)·π` and classifies via `lb ≥ center` /
@@ -672,7 +672,27 @@ not), `cv ≤ tan ≤ cc` holds wherever tan is defined and finite envelopes are
 returned; a tan-containing MINLP with pole-straddling initial bounds solves to the
 known optimum; standing gates pass.
 
-**Log:** —
+**Log:** 2026-07-03 — CONFIRMED then FIXED (status open→fixed). Direct-call repro
+on the pre-fix code: `relax_tan` on `[1.4,1.8]` (straddles π/2≈1.5708) draws a
+secant through `tan(1.4)=+5.8` and `tan(1.8)=−4.3` across the pole → `max(cv−f) ≈
++2.7e5` on the branch (invalid underestimator); the mirror `[−1.8,−1.4]` gives
+`max(f−cc) ≈ +2.7e5`. **Fix:** detect the branch spanning the box (nearest
+inflection `center=k·π`, bounding poles `center±π/2`) and abstain — return the
+no-information envelope `(−inf,+inf)` — whenever an endpoint reaches or crosses a
+pole (`pole_free = (lb > center−π/2) & (ub < center+π/2)`). Pole-free boxes keep
+the tight branch envelope. Also hardened `_secant` so the degenerate `lb==ub`
+branch never evaluates `0/0` (was only guarded *after* the division). Applied to
+BOTH backends — the JAX `_jax/mccormick.py` (in scope) and the ported
+`_numpy/mccormick.py` (the NM-4 twin noted in the 2026-07-03 reconciliation) — so
+the class is closed on both. **After:** every pole-straddling box abstains (no
+finite crossing envelope); all pole-free branches (incl. k=±1 at `[3.3,4.6]`,
+`[−4.6,−3.3]`) remain sound to 1e-7. **Regression test:**
+`python/tests/test_tan_pole_envelope_c19.py` (`@pytest.mark.smoke`, sub-second,
+both backends): literal `[1.4,1.8]` repro, pole-straddling never-crosses,
+pole-free stays-tight, and a random-sub-box property test over `[−5,5]` — 14 red
+before, all green after. **Gates:** targeted `-k "tan or div or envelope or relax
+or mccormick or convex"` 1366 passed / 0 failed; ruff + format clean; mypy clean
+on the changed modules. PR: (pending).
 
 ---
 
@@ -1248,7 +1268,7 @@ product range and is never NaN; standing gates pass.
 
 ---
 
-## C-23 (P1) — `relax_div` produces an invalid convex underestimator for nonlinear denominators (ESCALATED from P3)
+## C-23 (P1, FIXED) — `relax_div` produces an invalid convex underestimator for nonlinear denominators (ESCALATED from P3)
 
 **Area:** `python/discopt/_jax/mccormick.py:119-135` (`relax_div`), wired at
 `relaxation_compiler.py:719-726`. Also `:102-116` (`_relax_reciprocal` sets
@@ -1302,6 +1322,37 @@ unchanged; standing gates pass.
 variable/affine-only test coverage masked the nonlinear-denominator defect; the
 diagonal-vs-composite blind spot is the same one that hid C-32/NM-1
 (solver-core review, `docs/dev/solver-core-review.md` §1).
+
+2026-07-03 — FIXED (status confirmed→fixed). **Confirmed** via the full compiler
+(the `relaxation_harness`): pre-fix worst `cv−f` = **+0.80** on `1/(x*y)`, **+1.15**
+on `1/(x*x)`, **+0.71** on `x/(y*z)`, plus `1/sqrt(x*y)`, `(x+1)/(x*y)`,
+`1/(x*y+1)` all `cv>f`; controls `1/x`, `x/y`, `1/(x+y)` sound. **Fix chosen:** the
+tight bilinear composition `x·(1/y)` is retained **only where the denominator
+relaxation collapses to a point** (`|y_ub−y_lb|<1e-12` — constant / variable /
+affine denominator, where `1/y` is exact and the composition is sound & tight).
+For a **non-degenerate (nonlinear) denominator interval** the midpoint-reciprocal
+crosses the function, so we abstain to the **sound interval enclosure**
+`[x_lb,x_ub] · [1/y_ub, 1/y_lb]` (a constant `[cv,cc]` that brackets `x/y` at every
+point, both denominator signs) — the "sound construction / fall back to interval
+bounds" the card sanctions. This is looser than a perfect composite envelope but
+never emits `cv>f`; spatial branching shrinks the denominator interval → the
+enclosure tightens. (The by-hand bivariate-McCormick composite was prototyped and
+**rejected** — brute-force truth sampling showed it still crossed by up to +11, so
+it was not shipped; the enclosure is provably sound to machine-epsilon.) Applied to
+BOTH `_jax/mccormick.py` (in scope) and the ported `_numpy/mccormick.py`. Also
+hardened `_secant` against `0/0` on the degenerate branch. **After:** every listed
+nonlinear-denominator case is sound to ≤3.6e-15 (`cv≤f≤cc`); the `1/(x*y)` repro
+flips from `cv=1.334>1.0` to sound; controls stay exactly tight; point-denominator
+`3/2` stays `cv=cc=1.5`. **Regression test:**
+`python/tests/test_div_nonlinear_denominator_c23.py` (`@pytest.mark.smoke`,
+sub-second, both backends): literal repro, non-degenerate never-crosses (pos & neg
+denom), point-denominator tightness, random-sub-box property test, plus a
+full-compiler containment layer over `1/(x*y)`, `x/(y*z)`, `1/(x*x)`,
+`1/sqrt(x*y)`, `(x+1)/(x*y)`, `1/(x*y+1)` + the `1/x`/`x/y`/`1/(x+y)` controls —
+the reciprocal-/division-of-nonlinear-inner case the harness previously omitted.
+36 assertions red before, all green after. **Gates:** targeted `-k` suite 1366
+passed / 0 failed; ruff + format clean; mypy clean on the changed modules. PR:
+(pending).
 
 ---
 
