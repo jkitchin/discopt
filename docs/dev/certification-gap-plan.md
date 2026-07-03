@@ -116,7 +116,7 @@ experiment may run.
 | T0.4 soundness harness | done | (this PR) | utils/soundness.py: assert_bound_sound + assert_cut_valid; flags planted-invalid cut, passes McCormick envelope sweep |
 | T0.5 baseline + cert0 gate | done | (this PR) | cert-baseline.jsonl (global50+panel, 55 rows); [gates.cert0] passes: coverage 0.909 ≥ 0.90, incorrect 0. Phase 0 complete |
 | T1.1 entry experiment (kill criterion) | done (kill did NOT fire) | (this PR) | All uncovered families are closed-form box-affine → proceed to T1.2. Bonus: engine already validates on mixed int+cont (ex1263) and maximize |
-| T1.2 patch-table term coverage | in progress — monomial family landed | (this PR) | Dir. (a) differential neutrality. Steps 0–1 done: 42-row robust baseline + differential-neutrality checker + monomial p≥2 coverage (NEUTRAL: sound on all 42, node-improving; nvs17 perf-gated pending T1.4). Remaining families (trilinear/univariate/fractional) + T1.4 warm-start under parallel derivation |
+| T1.2 patch-table term coverage | monomial landed; families derived | (this PR) | Dir. (a) differential neutrality. Monomial p≥2 coverage landed (NEUTRAL). Trilinear/multilinear, univariate exp/log/sqrt, fractional all derived + verified to 1e-9 (scripts/t12_*.py) — integration is mechanical, deferred (value comes with the OBBT wall-time follow-on) |
 | T1.3 scope-gate widening | done | (this PR) | Widened gate to `ok` + general root-cut-pool (built whenever engine active) + skip fast path during pool capture. dispatch 9843→3 restored; nvs13 55→19, nvs17 205→61. NEUTRAL / adversarial 10 / smoke 211. Fast engine now on the general spatial path |
 | T1.4 basis inheritance | non-lever (measured); re-scoped | — | Warm-primal built + sound (42/42 tests) but INERT: run_warm never called — the dual warm start already succeeds / nrows guard routes to ordinary cold. Node LP warm-start is not the bottleneck (nvs17 2 n/s). Real lever = OBBT/per-call-rebuild re-profile (T1.6). Parked patch |
 | T1.5 evaluator-cache routing | already realized (PR #316) | #316 | primal_heuristics diving already routed through cached_evaluator (the −22% gear4 win); remaining sites are one-time (convex fast path) or autodiff-unsafe. Low residual value |
@@ -125,6 +125,26 @@ experiment may run.
 | Phase 3 entry experiment (0b) | **locked** (§0.1.2) | — | unlocks on Phase 0 done |
 | Phase 4 T-CSE/V-segments | **locked** (§0.1.2) | — | may parallel Phase 1 once specced |
 | Phase 5 | **locked** (§0.1.2) | — | requires post-Phase-1 re-profile |
+
+**Phase 0 — DONE & gated** (cert0 green: root_gap coverage 0.909 ≥ 0.90, incorrect 0).
+
+**Phase 1 — structural + correctness exit MET; performance exit PENDING one
+follow-on.** Landed & sound: T1.2 monomial coverage, **T1.3 (the enabler — the
+incremental engine now runs on the general spatial path, node-neutral)**; T1.5 was
+already merged (#316); every other patch-table family is derived + verified to
+1e-9. Correctness exit met: differential neutrality is **NEUTRAL** across the
+42-row certifying subset (`check_cert_neutrality.py` — objective correct, still
+optimal, node one-directional) and `incorrect_count = 0`. **Performance exit
+(s/node ↓ ≥ 2×) NOT met and correctly diagnosed as out of the T1.x scope:** the
+per-node cost is dominated by **OBBT's inner LP loop** (~10 cold-built probe
+solves/node), not the node relaxation — a bound-neutral follow-on (warm-start
+OBBT's probes; the parked `t14-warm-primal-patch.diff` is the right tool since the
+probes change only the objective over a fixed box). T1.4 and T1.6 were both
+*measured* to be non-levers. Per §0.7 the phase is not fully "done" (perf gate not
+green), but its structural goal — a single general node engine — is delivered and
+its correctness gate is green. **The measurement discipline falsified four plan
+premises before any unsound/ineffective code shipped** (T1.2 sign-regime, T1.3
+per-node separation, T1.4 dual-warm-repair, T1.6 Python-tax).
 
 ---
 

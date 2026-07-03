@@ -758,6 +758,15 @@ def evaluate_phase_gate(
         elif metric == "median_nodes_per_second":
             nps = [r.nodes_per_second for r in discopt_results if r.nodes_per_second is not None]
             actual = float(np.median(nps)) if nps else 0.0
+        elif metric == "median_seconds_per_node":
+            # Median wall seconds per B&B node over rows that opened a tree
+            # (cert:T1.x performance exit). Lower is better.
+            spn = [
+                r.wall_time / r.node_count
+                for r in discopt_results
+                if r.node_count > 0 and r.wall_time not in (None, float("inf"))
+            ]
+            actual = float(np.median(spn)) if spn else float("nan")
         elif metric == "python_orchestration_fraction" or metric == "rust_tree_overhead_fraction":
             profile = layer_profiling_summary(discopt_results)
             if metric == "python_orchestration_fraction":
