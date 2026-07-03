@@ -63,8 +63,6 @@ learned = ["equinox>=0.13.8", "optax>=0.1"]
 # *code-generate* JAX relaxation closures offline; it is never imported on the
 # solver hot path. See docs/notebooks/symbolic_envelopes.ipynb.
 sympy = ["sympy>=1.12"]
-doe = ["openpyxl>=3.1"]
-doe-gui = ["discopt[doe]", "streamlit>=1.30", "pandas>=2.0"]
 dev = [
     "pytest",
     "pytest-timeout",
@@ -83,7 +81,7 @@ dev = [
     "onnx>=1.14",
     "onnxruntime>=1.16",
 ]
-all = ["discopt[pounce,ipopt,cutest,llm,gnn,nn,ml,doe,doe-gui,sympy,pyomo]"]
+all = ["discopt[pounce,ipopt,cutest,llm,gnn,nn,ml,sympy,pyomo]"]
 
 [project.scripts]
 discopt = "discopt.cli:main"
@@ -96,12 +94,6 @@ discopt-gams = "discopt.gams.link:main"
 [project.entry-points."pyomo.solvers"]
 discopt = "discopt.pyomo.solver"
 
-# CLI plugin subcommands (see the protocol in discopt/cli.py). The doe entry
-# will move to the standalone discopt-doe package when the module is extracted
-# (#389); registering the in-tree module here exercises the same mechanism.
-[project.entry-points."discopt.cli"]
-doe = "discopt.doe.cli"
-
 [tool.maturin]
 manifest-path = "crates/discopt-python/Cargo.toml"
 python-source = "python"
@@ -113,7 +105,6 @@ include = [
     "Cargo.lock",
     "crates/**/*.rs",
     "crates/**/*.toml",
-    "python/discopt/doe/gui/discopt-logo.png",
     "python/discopt/gams/data/*.gms",
     "python/discopt/gams/data/manifest.json",
 ]

@@ -129,3 +129,26 @@ class TestLaziness:
         with pytest.raises(SystemExit) as exc:
             _main_with([FakeEntryPoint("fake", mod), never], ["fake"])
         assert exc.value.code == 0
+
+
+# Issue #433 regression: the DOE extraction (#410) left stale `doe` references in
+# pyproject.toml (extras, `all`, the `discopt.cli` entry point, a phantom maturin
+# include). They caused a spurious plugin-load warning on every `discopt help`.
+# Guard against them (and future extractions) reappearing.
+def test_pyproject_has_no_stale_doe_references():
+    import pathlib
+
+    root = pathlib.Path(__file__).resolve().parents[2]
+    pyproject = root / "pyproject.toml"
+    if not pyproject.exists():  # running from an installed wheel, not the repo
+        pytest.skip("pyproject.toml not present (installed context)")
+    text = pyproject.read_text()
+    stale = [
+        'doe = ["openpyxl',  # the `doe` extra
+        "doe-gui = ",  # the `doe-gui` extra
+        "doe,doe-gui",  # the `all` aggregate
+        "discopt.doe.cli",  # the core `discopt.cli` entry point (moved to discopt-doe)
+        "doe/gui/discopt-logo.png",  # the phantom maturin include (file removed by #410)
+    ]
+    found = [s for s in stale if s in text]
+    assert not found, f"stale DOE references survive in pyproject.toml (issue #433): {found}"
