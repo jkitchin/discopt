@@ -106,8 +106,14 @@ def fbbt_box(model: Model, *, max_iter: int = 20, tol: float = 1e-9) -> BoundTig
     block_ub = np.asarray(block_ub, dtype=np.float64)
 
     # Expand each block's [lo, hi] to its scalar slots; intersect with originals.
-    # The block bound is a valid outer bound for every element of the block, so
-    # the intersection can only tighten — never loosen — and stays sound.
+    # The Rust FBBT engine seeds each block from the element-wise UNION of its
+    # bounds (`seed_block_interval`, C-31), so the returned block interval is a
+    # valid *outer* bound for EVERY element of the block — stamping it onto every
+    # scalar slot and intersecting with the originals can only tighten, never
+    # loosen, and never excludes a feasible point. (Pre-C-31 the engine seeded
+    # from element 0 only, so on a heterogeneous array block this stamp cut the
+    # feasible region of the other elements and could reach the certified LP
+    # dual bound via `_fbbt_argument_box`.)
     new_lb = orig_lb_arr.copy()
     new_ub = orig_ub_arr.copy()
     offset = 0

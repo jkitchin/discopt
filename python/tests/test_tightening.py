@@ -195,3 +195,92 @@ def test_bilinear_product_equality_skips_when_var_in_remainder():
 
     tl, tu = _run_bilinear_rule(m)
     assert tu[1] == np.inf  # not this rule's pattern; left for other machinery
+
+
+# ─────────────────────────────────────────────────────────────
+# C-31 (P0) — FBBT array-block collapse reaching the certified LP dual bound.
+#
+# The Rust FBBT engine carries one interval per variable BLOCK. Pre-fix it
+# seeded that interval from element 0's bounds and stamped it onto every scalar
+# slot, so on a HETEROGENEOUS per-element array block the box excluded the
+# feasible region of the other elements. That collapsed box reaches the certified
+# LP dual bound via `_fbbt_argument_box` (`milp_relaxation.py`), where an envelope
+# built over a box that excludes feasible arguments is unsound. The fix seeds
+# each block from the element-wise UNION [min lb, max ub] — a valid outer bound
+# for every element — so no feasible point is ever cut. These tests fail on the
+# element-0 seed and pass on the union seed.
+# ─────────────────────────────────────────────────────────────
+
+
+@pytest.mark.smoke
+def test_c31_heterogeneous_array_block_not_overtightened():
+    """A heterogeneous array block must keep every element's own feasible range."""
+    m = dm.Model("c31_over")
+    # x[0] ∈ [8,10] (tight), x[1] ∈ [0,10] (free). Element-0 collapse would stamp
+    # [8,10] onto x[1], erasing the feasible region x[1] ∈ [0,8).
+    x = m.continuous("x", shape=(2,), lb=np.array([8.0, 0.0]), ub=np.array([10.0, 10.0]))
+    m.minimize(x[0])
+    m.subject_to(x[1] >= 0.0)
+    res = fbbt_box(m)
+    assert not res.infeasible
+    # The block interval must be a valid outer bound for EVERY element: x[1]'s
+    # feasible point 0.0 must remain inside the box (pre-fix lb[1] was 8.0).
+    feasible_pt = np.array([9.0, 0.0])
+    assert np.all(res.lb - 1e-9 <= feasible_pt), f"cut feasible point, lb={res.lb}"
+    assert np.all(feasible_pt <= res.ub + 1e-9), f"cut feasible point, ub={res.ub}"
+    assert res.lb[1] <= 0.0 + 1e-9, f"C-31: x[1] lb collapsed to element-0, got {res.lb[1]}"
+
+
+@pytest.mark.smoke
+def test_c31_heterogeneous_array_block_no_false_infeasible():
+    """A feasible heterogeneous-block model must not be reported infeasible."""
+    m = dm.Model("c31_infeas")
+    # x[0] fixed at 5; x[1] ∈ [0,3]. x=[5, 0..3] is feasible. Element-0 collapse
+    # stamps [5,5] onto x[1]; intersecting with x[1] <= 3 is empty → false infeasible.
+    x = m.continuous("x", shape=(2,), lb=np.array([5.0, 0.0]), ub=np.array([5.0, 3.0]))
+    m.minimize(x[0])
+    m.subject_to(x[1] <= 3.0)
+    res = fbbt_box(m)
+    assert not res.infeasible, f"C-31: feasible model declared infeasible, lb={res.lb} ub={res.ub}"
+    # The feasible point x=[5, 1] must remain inside the box.
+    feasible_pt = np.array([5.0, 1.0])
+    assert np.all(res.lb - 1e-9 <= feasible_pt)
+    assert np.all(feasible_pt <= res.ub + 1e-9)
+
+
+@pytest.mark.smoke
+def test_c31_fbbt_argument_box_envelope_contains_feasible_arg():
+    """The univariate-rescue envelope (certified LP path) must not exclude a
+    feasible argument of a heterogeneous array block.
+
+    `_collect_univariate_relaxations` builds a McCormick envelope over the FBBT
+    argument box for out-of-domain univariate ops (issue #219 rescue). Pre-fix,
+    a `log` on a heterogeneous array element got element-0's collapsed box, which
+    excluded the element's true feasible arguments → an invalid envelope in the
+    certified LP relaxation. Post-fix the union seed keeps the element's box, so
+    the op either (a) has an envelope whose arg box CONTAINS every feasible
+    argument, or (b) is soundly abstained (dropped) — never an envelope over a
+    box that excludes a feasible argument.
+    """
+    import discopt._jax.milp_relaxation as mr
+    from discopt.modeling import log as dlog
+
+    m = dm.Model("c31_env")
+    # x[0] fixed at [3,3] (in log domain); x[1] raw box [-1,5] straddles 0 → log
+    # out of domain raw → FBBT-rescue path fires. Element-0 collapse would give
+    # the log arg box [3,3], excluding x[1]'s feasible arguments in (0,5].
+    x = m.continuous("x", shape=(2,), lb=np.array([3.0, -1.0]), ub=np.array([3.0, 5.0]))
+    m.minimize(dlog(x[1]) + x[0])
+
+    flat_lb = np.array([3.0, -1.0])
+    flat_ub = np.array([3.0, 5.0])
+    relax, _var_map, _bounds = mr._collect_univariate_relaxations(
+        m, 2, flat_lb, flat_ub, start_col=2
+    )
+    # A feasible argument for x[1] under the model is any value in (0, 5], e.g. 4.0.
+    for r in relax:
+        assert r.arg_lb - 1e-9 <= 4.0 <= r.arg_ub + 1e-9, (
+            f"C-31: univariate-rescue envelope arg box [{r.arg_lb}, {r.arg_ub}] "
+            "excludes the feasible argument 4.0 → invalid envelope in the "
+            "certified LP relaxation"
+        )

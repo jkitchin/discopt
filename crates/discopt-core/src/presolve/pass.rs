@@ -74,19 +74,16 @@ pub struct PresolveContext {
 }
 
 impl PresolveContext {
-    /// Initialise a context from a model. The bounds vector is filled
-    /// from each variable block's first scalar `lb`/`ub`, matching
-    /// `fbbt_with_cutoff`'s convention.
+    /// Initialise a context from a model. The bounds vector is filled with one
+    /// interval per variable BLOCK, seeded from the element-wise UNION of that
+    /// block's bounds (`seed_block_interval`), matching `fbbt`/`fbbt_with_cutoff`.
+    /// C-31: seeding from element 0 alone collapsed heterogeneous array blocks
+    /// onto element-0's interval, cutting feasible points of the other elements.
     pub fn from_model(model: ModelRepr) -> Self {
         let bounds: Vec<Interval> = model
             .variables
             .iter()
-            .map(|v| {
-                Interval::new(
-                    v.lb.first().copied().unwrap_or(f64::NEG_INFINITY),
-                    v.ub.first().copied().unwrap_or(f64::INFINITY),
-                )
-            })
+            .map(super::fbbt::seed_block_interval)
             .collect();
         Self {
             model,
@@ -122,13 +119,17 @@ impl PresolveContext {
         let shrank = n < self.bounds.len();
         let mut new_bounds = Vec::with_capacity(n);
         for (i, v) in self.model.variables.iter().enumerate() {
-            let lb = v.lb.first().copied().unwrap_or(f64::NEG_INFINITY);
-            let ub = v.ub.first().copied().unwrap_or(f64::INFINITY);
+            // C-31: seed from the element-wise union, not element 0, so a
+            // heterogeneous array block is a valid outer bound for every element.
+            let declared = super::fbbt::seed_block_interval(v);
             if !shrank && i < self.bounds.len() {
                 let prior = self.bounds[i];
-                new_bounds.push(Interval::new(prior.lo.max(lb), prior.hi.min(ub)));
+                new_bounds.push(Interval::new(
+                    prior.lo.max(declared.lo),
+                    prior.hi.min(declared.hi),
+                ));
             } else {
-                new_bounds.push(Interval::new(lb, ub));
+                new_bounds.push(declared);
             }
         }
         self.bounds = new_bounds;
