@@ -122,12 +122,12 @@ experiment may run.
 | T1.5 evaluator-cache routing | already realized (PR #316) | #316 | primal_heuristics diving already routed through cached_evaluator (the −22% gear4 win); remaining sites are one-time (convex fast path) or autodiff-unsafe. Low residual value |
 | T1.6 bookkeeping → Rust | non-lever (measured); re-scoped | — | Re-profile: Python per-node tax is minor (0.5s); LP solves dominate (3.84s / ~10-per-node, OBBT probes cold-built). T1.6 premise falsified. Real lever = warm-start OBBT's probe LPs (the parked warm-primal applies — objective-only change over fixed box). Follow-on, not a T1.x item |
 | T2.0 reduction-layer correctness pre-flight | todo — **blocking** | — | C-16 (P0) first, then C-15/C-20/C-21; see §14 Phase 2 |
-| T2.1 Phase 2 entry experiment (kill criterion) | specced — next up | — | offline root-loop replay on the worst-20; §14 Phase 2 |
+| T2.1 Phase 2 entry experiment (kill criterion) | **DONE → NO-GO** (provisional) | #407 | (a) FAILS: median root-gap reduction 4.7% ≪ 25% on the 6 uncertified; (b) borderline/incomplete. Do NOT build T2.3–T2.5; re-scope to Phases 3–4. Revisit when the per-node engine is faster (13/20 finished). See T2.1 RESULTS block |
 | T2.2 OBBT persistent LP + warm probes | (a)+(b) done; (c) skipped | #406 | Per-sweep CSC built once + warm-primal probes (t14 patch applied). Differential **NEUTRAL** (warm==cold ≤4.3e-12, tightenings identical, cert-neutrality NEUTRAL). Root-OBBT umbrella: ex1252a 1.54×, ex1252 1.89×, st_e38 1.92×. ex1252a < 2× → residual is the JAX envelope rebuild (Phase 4/5), not the LP loop. See the T2.2-DONE block below |
-| T2.3 root fixpoint loop | **locked** on T2.1 results (§0.1.2) | — | stage list comes from T2.1's table |
-| T2.4 per-node `reduce_node()` | **locked** on T2.1 results (§0.1.2) | — | needs node-LP duals exposed (T2.4a) |
-| T2.5 OBBT escalation policy | locked on T2.4 | — | replaces the solver.py:4749 class gate |
-| T2.6 cert2 gate wiring + default-on | after T2.3–T2.5 | — | adds `[suites.global50]`; 3 green nightlies before flip |
+| T2.3 root fixpoint loop | **NOT BUILT** (T2.1 NO-GO) | — | kill criterion fired on the primary metric; do not build until T2.1 is revisited and passes |
+| T2.4 per-node `reduce_node()` | **NOT BUILT** (T2.1 NO-GO) | — | same; needs node-LP duals exposed (T2.4a) if ever revisited |
+| T2.5 OBBT escalation policy | **NOT BUILT** (T2.1 NO-GO) | — | same |
+| T2.6 cert2 gate wiring + default-on | **moot** (T2.3–T2.5 not built) | — | residual gap re-scoped to Phases 3–4 |
 | Phase 3 entry experiment (0b) | **locked** (§0.1.2) | — | unlocks on Phase 0 done |
 | Phase 4 T-CSE/V-segments | **locked** (§0.1.2) | — | may parallel Phase 1 once specced |
 | Phase 5 | **locked** (§0.1.2) | — | requires post-Phase-1 re-profile |
@@ -1331,6 +1331,56 @@ importing discopt; standalone runnable).
 - **Deliverable:** the per-stage marginal table, the derived stage
   include/exclude list, and a calibrated loop budget appended to this section.
   T2.3–T2.5 unlock only once it is here.
+
+**T2.1 — RESULTS / VERDICT (2026-07-03): NO-GO on the T2.3–T2.5 reduction loop.
+Provisional; revisit when the per-node engine is faster (see caveat).**
+Script: `discopt_benchmarks/scripts/t21_root_loop_replay.py` (offline replay:
+incumbent harvest → cutoff-free baseline root → cutoff-aware reduce loop with
+per-stage marginal attribution → projected tightened-box re-solve → oracle-cutoff
+diagnostic; inline `assert_bound_sound` after every stage). **No P0 soundness
+violation on any instance run.**
+
+- **Criterion (a) — root-gap reduction on the six *uncertified* instances
+  (COMPLETE, 6/6):**
+
+  | instance | base gap | final gap | rel. reduction |
+  |---|---|---|---|
+  | tspn05    | 0.1227 | 0.1227 | 0.0% |
+  | tanksize  | 1.0000 | 0.3075 | 69.3% |
+  | casctanks | 10.064 | 9.817  | 2.5% |
+  | tls2      | 0.8645 | 0.8050 | 6.9% |
+  | st_e36    | 0.2378 | 0.2378 | 0.0% |
+  | nvs05     | 0.8768 | 0.5915 | 32.5% |
+
+  Sorted `[0, 0, 2.5, 6.9, 32.5, 69.3]` → **median 4.7% ≪ 25% threshold →
+  (a) FAILS.** The reduction loop does **not** move the bound-limited tail — the
+  exact instances it exists to help. (Only tanksize/nvs05 respond; the other four
+  are ≤ 7%, i.e. the McCormick bound is far from the incumbent and reduction
+  cannot close it — a relaxation-strength problem, not a reduction problem.)
+
+- **Criterion (b) — tree-opening certified instances closing within 10 nodes
+  (PARTIAL, 7 of 13 evaluable):** closed = st_e38 (100%), st_miqp2 (100%),
+  st_miqp1 (15→1 node, 100%); not closed (0% gap move) = clay0303hfsg, st_test1,
+  st_testgr3, m3; skipped = st_miqp5 (binary `.nl`, unsupported); **not run**
+  (harvest+2×60 s solves too slow to finish in budget) = cvxnonsep_nsig30,
+  st_miqp4, cvxnonsep_psig40r, fac2, cvxnonsep_psig30, flay03m. On the completed
+  set that is 3 closed / 7 = 43% (or as low as 3/13 = 23% if all remaining are
+  tree-opening non-closers) — **straddling the 30% bar; not conclusively decided.**
+
+- **Verdict:** the *primary* criterion (a) fails decisively, and (b) — a secondary
+  metric (already-certified instances closing faster) — is at best borderline. The
+  evidence does **not** justify building the T2.3–T2.5 root-reduction loop. Per the
+  loop-level kill criterion above, the residual gap re-scopes to **relaxation / cut
+  strength (Phases 3–4)**, which is where the bound is actually lost.
+
+- **Caveat (why "provisional" / revisit):** the experiment as specced — two 60 s
+  tree solves per instance across the *20 slowest* instances — is too expensive to
+  run to completion (only 13/20 finished before the budget was spent; st_e36 alone
+  took 404 s for a 2-var problem). The NO-GO rests on (a)'s dominant, complete
+  signal; (b) was left incomplete. **Revisit T2.1 when the per-node engine is fast
+  enough to complete the full panel cheaply** (a tighter probe budget or a smaller
+  panel would also make it a practical repeatable gate). T2.3–T2.5 remain **not
+  built** in the meantime.
 
 **T2.2 — Make OBBT affordable: persistent probe LP + warm-started probes (the
 B1 fix; may run parallel to T2.1).**
