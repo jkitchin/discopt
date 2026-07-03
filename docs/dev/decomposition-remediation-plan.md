@@ -572,8 +572,30 @@ One PR, no behaviour change:
 
 ## Decision log (append per contract §0.7)
 
-- *(empty — filled by the implementing agent: T3.3 NGBD spike result; T2.3 warm-start
-  backend capability; any gate that failed and the remediation.)*
+- **Phase 0 (done):** T0.1 required distinguishing a recourse-NLP *failure* from
+  *infeasibility*; the NLP backend maps a local infeasibility verdict to
+  ``ERROR`` (indistinguishable from a numerical failure), so an explicit elastic
+  feasibility-phase NLP (``benders/_feasibility.py``) was built to certify
+  infeasibility before excluding a point. T0.2 refined: an all-binary master
+  *can* enforce a master-only nonlinear constraint via no-good cuts (existing
+  behaviour, kept); only a non-binary master rejects it. T0.3's defensive
+  "recourse_fail on v≈0" clause initially regressed
+  ``test_bound_active_recourse_is_sound[1000.0]`` (a master rounding to
+  ``y≈5e-10`` makes the recourse *tinily* infeasible — a legitimate feasibility
+  cut, not a solver failure); fixed by firing ``recourse_fail`` only when the
+  slack LP itself fails, and letting the T0.4 progress guard handle vacuous cuts.
+- **Phase 1 (T1.1–T1.3 done; T1.4 deferred):** T1.1 stores the constraint matrix
+  sparse (scipy CSR) with single-row equalities; T1.2 makes the Lagrangian
+  subproblem block-separable through the parallel comm layer (backend-independent
+  bound); T1.3 generalises Benders to per-block multicut (B=1 is numerically the
+  old single-cut solver). **T1.4 (INDEPENDENT_BLOCKS parallel per-block solve)
+  deferred:** it requires extracting a standalone sub-``Model`` per block, which
+  means expression-DAG surgery (rebuilding block-restricted constraint/objective
+  expressions against fresh variables) — a correctness risk disproportionate to a
+  performance-only win, since the current ``INDEPENDENT_BLOCKS`` path already
+  solves the model correctly (monolithically). Revisit once a safe
+  ``Model.subset(vars, constraints)`` primitive exists in the modeling layer.
+- *(pending: T3.3 NGBD spike result; T2.3 warm-start backend capability.)*
 
 ## References
 
