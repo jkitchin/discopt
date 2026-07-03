@@ -19,6 +19,10 @@ Two input conventions appear here:
 
 from __future__ import annotations
 
+import logging
+
+logger = logging.getLogger(__name__)
+
 
 def connected_components(n: int, cliques: list[list[int]]) -> tuple[list[int], int]:
     """Union-find connected components over variable-index *cliques*.
@@ -30,6 +34,7 @@ def connected_components(n: int, cliques: list[list[int]]) -> tuple[list[int], i
     convention of the decomposition structure layer. ``O(n + E·α)``.
     """
     parent = list(range(n))
+    size = [1] * n
 
     def find(i: int) -> int:
         while parent[i] != i:
@@ -38,9 +43,16 @@ def connected_components(n: int, cliques: list[list[int]]) -> tuple[list[int], i
         return i
 
     def union(i: int, j: int) -> None:
+        # Union by size (matches the Rust kernel). The final block ids are
+        # relabelled by ascending first-seen member, so the chosen root does not
+        # affect the output — this is a pure worst-case speedup.
         ri, rj = find(i), find(j)
-        if ri != rj:
-            parent[ri] = rj
+        if ri == rj:
+            return
+        if size[ri] < size[rj]:
+            ri, rj = rj, ri
+        parent[rj] = ri
+        size[ri] += size[rj]
 
     for clique in cliques:
         if len(clique) <= 1:
@@ -72,23 +84,31 @@ def bearing_blocks(n: int, cliques: list[list[int]]) -> int:
     return len(bearing)
 
 
-def bridge_cliques(cliques: list[list[int]], n: int, budget: int) -> set[int]:
-    """Indices of cliques whose sole removal raises the bearing-component count.
+def bridge_cliques_status(cliques: list[list[int]], n: int, budget: int) -> tuple[set[int], bool]:
+    """Bridge-constraint scan with an explicit truncation flag.
 
-    This is the graph core of the "bridge-constraint" coupling heuristic: a
-    constraint is coupling when dropping it alone disconnects the model. Guarded
-    by *budget* (an estimate of the scan cost); returns ``set()`` when the model
-    is already separable, when nothing qualifies, or when the scan would exceed
-    the budget. ``O(m · (n + E))`` when it runs.
+    Returns ``(coupling_indices, truncated)`` where ``truncated`` is True iff the
+    ``O(m·(n+E))`` scan was skipped because its estimated cost exceeded *budget*
+    (so ``set()`` means "no coupling found", not "gave up" — S3). A truncated
+    scan is logged at WARNING so it is never silent.
     """
     nontrivial = [c for c in cliques if len(c) >= 2]
     base = bearing_blocks(n, cliques)
     if base >= 2:
         # Already separable; no single coupling clique is needed.
-        return set()
+        return set(), False
     est = len(nontrivial) * (n + sum(len(c) for c in nontrivial))
     if est > budget:
-        return set()
+        logger.warning(
+            "bridge-constraint scan skipped: estimated cost %d exceeds budget %d "
+            "(%d constraints, %d vars); coupling not auto-detected — annotate with "
+            "model.mark_coupling(...) or install the hypergraph detector.",
+            est,
+            budget,
+            len(nontrivial),
+            n,
+        )
+        return set(), True
     coupling: set[int] = set()
     for i, clique in enumerate(cliques):
         if len(clique) < 2:
@@ -96,6 +116,17 @@ def bridge_cliques(cliques: list[list[int]], n: int, budget: int) -> set[int]:
         without = [c for j, c in enumerate(cliques) if j != i]
         if bearing_blocks(n, without) > base:
             coupling.add(i)
+    return coupling, False
+
+
+def bridge_cliques(cliques: list[list[int]], n: int, budget: int) -> set[int]:
+    """Indices of cliques whose sole removal raises the bearing-component count.
+
+    Thin wrapper over :func:`bridge_cliques_status` that drops the truncation
+    flag (kept for backward compatibility). Prefer the ``_status`` variant when
+    the caller needs to distinguish "no coupling" from "scan too large".
+    """
+    coupling, _ = bridge_cliques_status(cliques, n, budget)
     return coupling
 
 

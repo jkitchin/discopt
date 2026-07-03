@@ -20,8 +20,12 @@ from __future__ import annotations
 
 import json
 import xml.sax.saxutils as _xml
+from typing import TYPE_CHECKING
 
 from discopt.decomposition.graph.base import ModelGraph
+
+if TYPE_CHECKING:
+    from discopt.decomposition.structure import DecompositionStructure
 
 _FORMATS = ("json", "dot", "graphml", "metis")
 
@@ -115,4 +119,79 @@ def _to_metis(n: int, edges: list[tuple[int, int]]) -> str:
     return "\n".join(lines)
 
 
-__all__ = ["export_graph"]
+# ── GCG .dec interchange (T4.2) ───────────────────────────────
+
+
+def _constraint_id(model, i: int) -> str:
+    """Stable identifier for constraint ``i``: its name, else ``c{i}``."""
+    name = getattr(model._constraints[i], "name", None)
+    return name if name else f"c{i}"
+
+
+def write_dec(structure, model, path: str) -> None:
+    """Write a GCG-style ``.dec`` file for *structure* over *model*.
+
+    Emits ``NBLOCKS``, one ``BLOCK k`` section listing that block's constraint
+    identifiers, and a ``MASTERCONSS`` section for the coupling rows — the format
+    SCIP/GCG read and write, so a discopt decomposition can be handed to (or taken
+    from) that toolchain.
+    """
+    block_of_constraint = structure.block_of_constraint
+    coupling = set(structure.coupling_constraints)
+    n_blocks = structure.num_blocks
+    per_block: list[list[str]] = [[] for _ in range(n_blocks)]
+    master: list[str] = []
+    for i in range(len(model._constraints)):
+        if i in coupling:
+            master.append(_constraint_id(model, i))
+            continue
+        b = block_of_constraint[i]
+        if b is not None and b >= 0:
+            per_block[b].append(_constraint_id(model, i))
+    lines = ["NBLOCKS", str(n_blocks)]
+    for b in range(n_blocks):
+        lines.append(f"BLOCK {b + 1}")
+        lines.extend(per_block[b])
+    lines.append("MASTERCONSS")
+    lines.extend(master)
+    with open(path, "w") as fh:
+        fh.write("\n".join(lines) + "\n")
+
+
+def read_dec(path: str, model) -> "DecompositionStructure":
+    """Read a GCG ``.dec`` file and return a ``DecompositionStructure``.
+
+    The ``MASTERCONSS`` become the coupling rows; blocks are recomputed from the
+    non-coupling constraints (so the partition is always internally consistent
+    with the model, regardless of how the file grouped them).
+    """
+    from discopt.decomposition.structure import detect_decomposition
+
+    id_to_index = {_constraint_id(model, i): i for i in range(len(model._constraints))}
+    master_ids: list[str] = []
+    section = None
+    with open(path) as fh:
+        for raw in fh:
+            line = raw.strip()
+            if not line:
+                continue
+            upper = line.upper()
+            if upper == "NBLOCKS":
+                section = "nblocks"
+                continue
+            if upper.startswith("BLOCK"):
+                section = "block"
+                continue
+            if upper == "MASTERCONSS":
+                section = "master"
+                continue
+            if section == "nblocks":
+                section = None  # skip the count line
+                continue
+            if section == "master":
+                master_ids.append(line)
+    coupling = [id_to_index[m] for m in master_ids if m in id_to_index]
+    return detect_decomposition(model, coupling=coupling)
+
+
+__all__ = ["export_graph", "read_dec", "write_dec"]

@@ -629,6 +629,22 @@ One PR, no behaviour change:
   feasible-recourse point. **T3.3 (NGBD spike) not run** in this session (it is
   experiment-only and gates further NGBD work; no NGBD code was written, per the
   contract's "do not code past a spike" rule).
+- **Phase 4 (T4.2 + T4.3 partial + S3 done; T4.1 deferred):** T4.3 added
+  union-by-size to the Python union-find (output-identical, pure speedup); S3 is
+  fixed — the bridge scan now logs a WARNING and reports ``detection_truncated``
+  on ``DecompositionStructure`` when it exceeds the budget, so "no coupling" is
+  no longer silently confused with "gave up". T4.2 shipped ``.dec`` read/write
+  interop (GCG format) with a ``detect_decomposition(model, dec_file=...)``
+  short-circuit, round-trip tested. **T4.1 (KaHyPar hypergraph partitioner)
+  deferred:** ``kahypar`` is not installable in this environment, so the
+  partitioner could not be exercised — writing an untested code path that never
+  runs is worse than deferring; the ``.dec`` interop (T4.2) already lets an
+  external GCG/KaHyPar run supply a multi-row border. **Rust CC wiring / mincut.rs
+  rename deferred:** the Rust ``decomp_connected_components`` binding takes edge
+  pairs with an unverified label convention (wiring it risks the determinism
+  ordering the whole structure layer depends on), and the file rename needs a
+  full maturin rebuild for a cosmetic change — both low-value/higher-risk than
+  the shipped items.
 
 ## References
 
