@@ -271,3 +271,36 @@ def _contains_uncertain_param(expr, param_names: set[str]) -> bool:
     if isinstance(expr, SumOverExpression):
         return any(_contains_uncertain_param(t, param_names) for t in expr.terms)
     return False
+
+
+def assert_no_uncertain_params_remain(model, param_names: set[str], *, kind: str) -> None:
+    """Refuse loudly if any uncertain parameter survived robustification (RO-2).
+
+    A correct robust counterpart eliminates every uncertain parameter (by
+    worst-case substitution, an SOC/dual penalty, etc.). If one remains, the
+    expression pattern was silently left at its nominal value — the user asked
+    for a robust model and would get a non-robust one. This universal post-check
+    turns every unsupported-pattern gap (RO-2, RO-4, RO-5, RO-6, RO-8) from a
+    silent wrong answer into a loud ``NotImplementedError`` at ``formulate()``
+    time, per the development philosophy (refuse loudly over silent approximation).
+    """
+    from discopt.modeling.core import Constraint
+
+    leftovers: list[str] = []
+    for con in model._constraints:
+        if isinstance(con, Constraint) and _contains_uncertain_param(con.body, param_names):
+            leftovers.append(con.name or "<unnamed constraint>")
+    obj = model._objective
+    if obj is not None and _contains_uncertain_param(obj.expression, param_names):
+        leftovers.append("<objective>")
+
+    if leftovers:
+        raise NotImplementedError(
+            f"The {kind} robust counterpart could not robustify uncertain "
+            f"parameter(s) appearing in {leftovers}. The expression pattern in "
+            "those terms is not supported by this formulation, so they were left "
+            "at their nominal value — which would silently produce a NON-robust "
+            "model. Rewrite the uncertain terms into a supported pattern (e.g. a "
+            "linear/affine dependence on the parameter) or use a different "
+            "uncertainty set. Refusing to return a silently non-robust model."
+        )
