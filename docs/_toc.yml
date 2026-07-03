@@ -15,6 +15,7 @@ parts:
       - file: notebooks/robust_adjustable
       - file: notebooks/tutorial_multiobjective
       - file: notebooks/complementarity_mpec
+      - file: notebooks/bilevel
       - file: notebooks/pooling_pq
       - file: notebooks/geometric_programming
   - caption: "Tutorials \u2014 Solver Backends"

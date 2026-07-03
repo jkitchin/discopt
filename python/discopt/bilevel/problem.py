@@ -6,14 +6,18 @@ the **leader's** objective and constraints, describes the follower separately, a
 calls :meth:`~BilevelProblem.formulate`, which rewrites the model in place into a
 single-level MPEC that ``model.solve()`` handles.
 
-Phase 1 scope (``docs/dev/bilevel-module-plan.md`` §1): **optimistic** bilevel with
-a lower level that is **affine in the follower variables** (an LP in ``y``), via the
-KKT reformulation (:mod:`~discopt.bilevel.kkt`). Everything the reduction is unsound
-for is refused loudly rather than silently approximated:
+Scope (``docs/dev/bilevel-module-plan.md`` §1): **optimistic** bilevel with a lower
+level that is **convex in the follower variables** (an LP or convex-QP in ``y``), via
+either the KKT reformulation (:mod:`~discopt.bilevel.kkt`, ``method="kkt"``) or the
+strong-duality reformulation (:mod:`~discopt.bilevel.strong_duality`,
+``method="strong_duality"``). Finite follower-variable bounds are folded into the
+KKT system automatically. Everything the reduction is unsound for is refused loudly
+rather than silently approximated:
 
 * integer follower variables — KKT does not characterize integer optima;
-* a lower level that is *nonlinear in* ``y`` — Phase 1 handles the LP case; convex
-  QP/NLP lower levels are Phase 2 (the gate names the offending expression);
+* a lower level that is **nonconvex in** ``y`` — refused outright; a non-quadratic
+  (variable-dependent curvature) lower level is refused pending the full convexity
+  certifier (the gate names the offending expression);
 * pessimistic semantics.
 
 Example
@@ -100,6 +104,7 @@ class BilevelProblem:
         lower_constraints: list[Constraint],
         lower_sense: str = "min",
         prefix: str = "bl",
+        include_follower_bounds: bool = True,
     ):
         self.model = model
         self.upper_vars = list(upper_vars)
@@ -108,9 +113,13 @@ class BilevelProblem:
         self.lower_constraints = list(lower_constraints)
         self.lower_sense = lower_sense
         self.prefix = prefix
+        self.include_follower_bounds = include_follower_bounds
         self._formulated = False
         self.kkt: _kkt.KKTSystem | None = None
         self.strong_duality: _sd.StrongDualitySystem | None = None
+        # The full lower constraint set actually reformulated (user constraints +
+        # synthesized finite follower-variable bounds); populated in formulate().
+        self.lower_constraints_full: list[Constraint] = list(lower_constraints)
 
         self._validate_inputs()
 
@@ -189,6 +198,36 @@ class BilevelProblem:
                 f"makes the lower feasible set nonconvex); got curvature '{status}'."
             )
 
+    # ── follower variable bounds are follower constraints ──────────────
+
+    _BIG = 1e19  # discopt's "unbounded" sentinel is 9.999e19; treat |b| >= 1e19 as ∞
+
+    def _follower_bound_constraints(self) -> list[Constraint]:
+        """Synthesize KKT constraints for each *finite* follower-variable bound.
+
+        A follower's variable bounds are part of *its* feasible region, so they must
+        enter the KKT system — otherwise the reformulation is wrong whenever the
+        follower optimum sits on a bound. Emits ``lb - y <= 0`` and/or ``y - ub <= 0``
+        for finite bounds (skipping the ±sentinel that means "unbounded").
+        """
+        cons: list[Constraint] = []
+        for v in self.lower_vars:
+            lb = float(v.lb)
+            ub = float(v.ub)
+            if lb > -self._BIG:
+                cons.append(
+                    Constraint(
+                        Constant(lb) - v, sense="<=", rhs=0.0, name=f"{self.prefix}_{v.name}_lb"
+                    )
+                )
+            if ub < self._BIG:
+                cons.append(
+                    Constraint(
+                        v - Constant(ub), sense="<=", rhs=0.0, name=f"{self.prefix}_{v.name}_ub"
+                    )
+                )
+        return cons
+
     # ── build ─────────────────────────────────────────────────────────
 
     def formulate(self, *, method: str = "kkt", mpec_method: str = "gdp") -> None:
@@ -222,6 +261,12 @@ class BilevelProblem:
 
         self._gate_convexity()
 
+        # Follower variable bounds are follower constraints: fold finite ones in so
+        # the KKT system is complete (user constraints first, so multipliers[0:k]
+        # remain aligned with the user's lower_constraints).
+        extra = self._follower_bound_constraints() if self.include_follower_bounds else []
+        self.lower_constraints_full = list(self.lower_constraints) + extra
+
         if method == "kkt":
             if mpec_method not in ("gdp", "sos1"):
                 raise ValueError(
@@ -233,7 +278,7 @@ class BilevelProblem:
                 self.model,
                 lower_vars=self.lower_vars,
                 lower_objective=self.lower_objective,
-                lower_constraints=self.lower_constraints,
+                lower_constraints=self.lower_constraints_full,
                 lower_sense=self.lower_sense,
                 prefix=self.prefix,
             )
@@ -247,7 +292,7 @@ class BilevelProblem:
                 self.model,
                 lower_vars=self.lower_vars,
                 lower_objective=self.lower_objective,
-                lower_constraints=self.lower_constraints,
+                lower_constraints=self.lower_constraints_full,
                 lower_sense=self.lower_sense,
                 prefix=self.prefix,
             )

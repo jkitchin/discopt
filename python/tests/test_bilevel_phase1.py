@@ -128,8 +128,10 @@ def test_kkt_satisfied_at_follower_optimum(build, xs):
     for xv in xs:
         y_star, mu = _follower_oracle(d, A, b_of_x(xv), bounds=[(0.0, 10.0)])
         assign = {x: xv, y: float(y_star[0])}
-        for k, mv in enumerate(bl.kkt.multipliers):
-            assign[mv] = float(mu[k])
+        # oracle mu aligns with the user constraints (first); finite follower-bound
+        # multipliers are 0 at these interior optima and default to 0 in _eval.
+        for k, muv in enumerate(mu):
+            assign[bl.kkt.multipliers[k]] = float(muv)
 
         # stationarity ∂L/∂y == 0
         for c in bl.kkt.stationarity:
@@ -151,8 +153,8 @@ def test_stationarity_actually_binds():
     xv = 1.5
     y_star, mu = _follower_oracle(d, A, b_of_x(xv), bounds=[(0.0, 10.0)])
     assign = {x: xv, y: float(y_star[0])}
-    for k, mv in enumerate(bl.kkt.multipliers):
-        assign[mv] = float(mu[k])
+    for k, muv in enumerate(mu):
+        assign[bl.kkt.multipliers[k]] = float(muv)
     # correct: ~0
     assert abs(_eval(bl.kkt.stationarity[0].body, m, assign)) < 1e-7
     # perturb μ0 -> stationarity residual must move by exactly the coefficient (-1)
@@ -180,10 +182,12 @@ def test_structure_and_leader_objective_preserved():
         lower_constraints=[x + y >= 3, y <= 2 * x],
     )
     bl.formulate(method="kkt", mpec_method="gdp")
-    # one multiplier per lower constraint; one stationarity row per lower var
-    assert len(bl.kkt.multipliers) == 2
+    # one multiplier per lower constraint (2 user + 2 finite follower bounds y in
+    # [0,10]); one stationarity row per lower var; all four are inequalities.
+    assert len(bl.lower_constraints_full) == 4
+    assert len(bl.kkt.multipliers) == 4
     assert len(bl.kkt.stationarity) == 1
-    assert len(bl.kkt.comp_pairs) == 2  # both inequalities
+    assert len(bl.kkt.comp_pairs) == 4
     # leader objective untouched
     assert m._objective.expression is leader_obj
     assert m._objective.sense == leader_sense
@@ -192,7 +196,7 @@ def test_structure_and_leader_objective_preserved():
 def test_equality_lower_constraint_uses_free_multiplier_no_complementarity():
     m = Model("eq")
     x = m.continuous("x", lb=0, ub=10)
-    y = m.continuous("y", lb=-10, ub=10)
+    y = m.continuous("y")  # unbounded follower -> no synthesized bound constraints
     m.minimize(x + y)
     bl = BilevelProblem(
         m,

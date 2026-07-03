@@ -69,7 +69,8 @@ def test_strong_duality_structure():
     m, x, y, bl, *_ = _lp_instance("strong_duality")
     assert bl.strong_duality is not None
     assert bl.kkt is None
-    assert len(bl.strong_duality.multipliers) == 2
+    # 2 user constraints + 2 finite follower bounds (y in [0,10])
+    assert len(bl.strong_duality.multipliers) == 4
     assert len(bl.strong_duality.stationarity) == 1
     assert bl.strong_duality.strong_duality.name.endswith("strong_duality")
     # no disjunction / either-or constraints were emitted (single bilinear equality)
@@ -81,8 +82,8 @@ def test_strong_duality_satisfied_at_follower_optimum():
     for xv in [1.2, 1.8, 2.5]:
         y_star, mu = _lp_follower(d, A, b_of_x(xv), bounds=[(0.0, 10.0)])
         assign = {x: xv, y: float(y_star[0])}
-        for k, mv in enumerate(bl.strong_duality.multipliers):
-            assign[mv] = float(mu[k])
+        for k, muv in enumerate(mu):  # user-constraint duals; bound duals are 0 here
+            assign[bl.strong_duality.multipliers[k]] = float(muv)
         # stationarity == 0 and the aggregate strong-duality equality == 0
         assert abs(_eval(bl.strong_duality.stationarity[0].body, m, assign)) < 1e-7
         assert abs(_eval(bl.strong_duality.strong_duality.body, m, assign)) < 1e-7
@@ -97,14 +98,14 @@ def test_kkt_and_strong_duality_agree_on_lp():
     y_star, mu = _lp_follower(d, A, b_of_x(xv), bounds=[(0.0, 10.0)])
 
     ak = {xk: xv, yk: float(y_star[0])}
-    for i, mv in enumerate(bl_k.kkt.multipliers):
-        ak[mv] = float(mu[i])
-    for p in bl_k.kkt.comp_pairs:  # per-row complementarity ~ 0
+    for i, muv in enumerate(mu):
+        ak[bl_k.kkt.multipliers[i]] = float(muv)
+    for p in bl_k.kkt.comp_pairs:  # per-row complementarity ~ 0 (bound duals = 0)
         assert abs(_eval(p.f, m_k, ak) * _eval(p.g, m_k, ak)) < 1e-7
 
     as_ = {xs: xv, ys: float(y_star[0])}
-    for i, mv in enumerate(bl_s.strong_duality.multipliers):
-        as_[mv] = float(mu[i])
+    for i, muv in enumerate(mu):
+        as_[bl_s.strong_duality.multipliers[i]] = float(muv)
     assert abs(_eval(bl_s.strong_duality.strong_duality.body, m_s, as_)) < 1e-7  # aggregate ~ 0
 
 
@@ -156,6 +157,57 @@ def test_convex_qp_via_strong_duality_accepted():
     )
     bl.formulate(method="strong_duality")
     assert bl.strong_duality is not None
+
+
+# ---------------------------------------------------------------------------
+# 2b. Follower variable bounds enter the KKT (correctness at an active bound).
+# ---------------------------------------------------------------------------
+
+
+def test_active_follower_bound_gets_its_multiplier():
+    # Follower: min_y y  s.t.  y <= 8,  y in [2, 10]. Optimum y*=2 sits on the
+    # lower bound, so the reformulation MUST carry a bound multiplier or it would
+    # exclude the true follower optimum.
+    m = Model("bnd")
+    x = m.continuous("x", lb=0, ub=10)
+    y = m.continuous("y", lb=2, ub=10)
+    m.minimize(x - y)
+    bl = BilevelProblem(
+        m, upper_vars=[x], lower_vars=[y], lower_objective=y, lower_constraints=[y <= 8]
+    )
+    bl.formulate(method="kkt")
+    # constraints: [y<=8 (user), 2-y<=0 (lb), y-10<=0 (ub)]
+    assert len(bl.lower_constraints_full) == 3
+    # at y*=2 the lower bound is active: μ_lb = 1, others 0 -> stationarity 1+μ0-μ_lb+μ_ub = 0
+    mu_lb = bl.kkt.multipliers[1]  # order: user, lb, ub
+    assign = {x: 5.0, y: 2.0, mu_lb: 1.0}
+    assert abs(_eval(bl.kkt.stationarity[0].body, m, assign)) < 1e-9
+    # its complementarity 0 <= μ_lb ⊥ (y - 2) >= 0 holds (y-2 = 0)
+    lb_pair = bl.kkt.comp_pairs[1]
+    assert abs(_eval(lb_pair.f, m, assign) * _eval(lb_pair.g, m, assign)) < 1e-9
+
+
+def test_without_bound_handling_active_bound_optimum_is_excluded():
+    # The same instance with the fix OFF: stationarity 1 + μ0 == 0 has no μ0 >= 0
+    # solution, so y*=2 would be (wrongly) infeasible in the reformulation.
+    m = Model("bnd_off")
+    x = m.continuous("x", lb=0, ub=10)
+    y = m.continuous("y", lb=2, ub=10)
+    m.minimize(x - y)
+    bl = BilevelProblem(
+        m,
+        upper_vars=[x],
+        lower_vars=[y],
+        lower_objective=y,
+        lower_constraints=[y <= 8],
+        include_follower_bounds=False,
+    )
+    bl.formulate(method="kkt")
+    assert len(bl.lower_constraints_full) == 1
+    # stationarity is 1 + μ0; with the only multiplier μ0 >= 0 it can never be 0.
+    for mu0 in (0.0, 5.0):
+        assign = {x: 5.0, y: 2.0, bl.kkt.multipliers[0]: mu0}
+        assert _eval(bl.kkt.stationarity[0].body, m, assign) >= 1.0 - 1e-9
 
 
 # ---------------------------------------------------------------------------
