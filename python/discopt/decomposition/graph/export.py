@@ -7,13 +7,17 @@ cover the immediate needs:
 - ``"json"``   — a node-link dict, easy to consume anywhere.
 - ``"dot"``    — Graphviz, for quick rendering.
 - ``"graphml"``— for graph-analysis tools (Gephi, networkx, igraph).
-- ``"metis"``  — the input format for the METIS/KaHyPar partitioners the block
-  detector will call in Phase 2.
+- ``"metis"``  — the graph input format for the METIS/KaHyPar partitioners; feed
+  it to an external partitioner to obtain a bordered-block-diagonal ordering,
+  then re-import the result via the GCG-style ``.dec`` reader (:func:`read_dec`).
 
 Exports operate on the **variable dependency graph** (variable vertices, edges =
-co-occurrence in a constraint), which is what partitioners and community
-detection consume. The bipartite incidence is available via the ``bipartite``
-flag for visualization.
+co-occurrence in a constraint), which is what partitioners consume. The bipartite
+incidence is available via the ``bipartite`` flag for visualization.
+
+``.dec`` interchange (:func:`write_dec` / :func:`read_dec`) round-trips a resolved
+decomposition to/from the format SCIP and GCG use, so an external partitioner or
+GCG run can supply the block/border structure.
 """
 
 from __future__ import annotations

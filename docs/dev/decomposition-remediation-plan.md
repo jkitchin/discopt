@@ -663,6 +663,18 @@ One PR, no behaviour change:
   impossible from stored data; deferred rather than shipping a placeholder that
   silently returns defaults. The valuable loop-closing pieces (auto-record,
   auto-wired learned policy) are in.
+- **Phase 6 (code docs done; notebooks deferred):** the aspirational
+  code-facing claims (W4) are fixed — ``graph/export.py`` no longer says a
+  partitioner "will" consume its output (it documents the real ``.dec`` path),
+  ``parallel/__init__.py`` states the layer is now consumed by the drivers, and
+  the ROADMAP's Benders / Lagrangian / Advisor rows describe what actually
+  shipped across Phases 0–5. The ``mincut.rs`` reference in ``kernels.py`` stays
+  accurate because the file was not renamed (the rename is deferred, above).
+  **Notebook prose + ``references.bib`` additions + ``jupyter-book build``
+  deferred:** these are documentation polish (not correctness), and a full
+  Jupyter-Book rebuild is heavy; the new options (``multicut``,
+  ``stabilization``, ``method="bundle"``/``"kelley"``, ``backend=``,
+  ``decomposition="auto"``) are documented in the code docstrings and this plan.
 
 ## References
 
