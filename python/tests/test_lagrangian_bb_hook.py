@@ -113,8 +113,7 @@ def test_bound_can_beat_lp_relaxation():
         lb, ub = flat_bounds(m)
         lin = extract_linear(m)
         n = lin.n
-        A = np.array(lin.rows_coeff)
-        rhs = np.array(lin.rows_rhs)
+        A, rhs, _ = lin.rows_leq()
         lp = solve_lp(
             lin.c, A_ub=A, b_ub=rhs, bounds=[(float(lb[i]), float(ub[i])) for i in range(n)]
         )

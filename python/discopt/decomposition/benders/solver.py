@@ -213,9 +213,12 @@ def solve_benders(
     lb_all, ub_all = flat_bounds(model)
 
     # Split rows into master-only and recourse (any nonzero recourse coeff).
+    # The recourse LP is a ``<=`` problem, so use the ``<=``-canonical view
+    # (equalities expanded, ``>=`` flipped) — identical to the classic row set.
+    A_leq, b_leq, _src_leq = lin.rows_leq()
     A_m_rows, b_m_rows = [], []  # master-only, over master cols
     Ax_rows, Ay_rows, r_rows = [], [], []  # recourse: A_x (master), A_y (sub), rhs
-    for vec, rhs in zip(lin.rows_coeff, lin.rows_rhs):
+    for vec, rhs in zip(A_leq, b_leq):
         sub_part = vec[scols] if len(scols) else np.zeros(0)
         if sub_part.size and np.any(np.abs(sub_part) > 0):
             Ax_rows.append(vec[mcols])

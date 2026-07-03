@@ -165,3 +165,26 @@ def test_equality_coupling_sound_and_feasible(method):
             assert recomputed == pytest.approx(r.objective, abs=1e-3)
     if r.status == "optimal":
         assert r.objective == pytest.approx(best, abs=1e-3)
+
+
+# ── Phase 1 (T1.2): block-separable subproblem via the parallel backend ──
+
+
+@pytest.mark.parametrize("model_fn", [_two_block_conflict, lambda: _equality_coupling_gap()[0]])
+def test_backend_determinism(model_fn):
+    """The relaxed subproblem now separates across blocks and runs on a chosen
+    backend. Results reduce in a fixed (backend-independent) order, so the
+    ``threads`` backend must reproduce the ``sequential`` bound/objective exactly.
+    """
+    seq = solve_lagrangian(model_fn(), backend="sequential", time_limit=30)
+    thr = solve_lagrangian(model_fn(), backend="threads", time_limit=30)
+    assert seq.bound == thr.bound
+    assert seq.objective == thr.objective
+    assert seq.status == thr.status
+
+
+def test_threads_backend_matches_optimum():
+    r = solve_lagrangian(_two_block_conflict(), backend="threads", time_limit=30)
+    assert r.status == "optimal"
+    assert r.objective == pytest.approx(5.0, abs=ABS_TOL)
+    assert r.bound <= r.objective + ABS_TOL

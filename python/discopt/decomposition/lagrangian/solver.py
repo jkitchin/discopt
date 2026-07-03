@@ -59,6 +59,7 @@ class LagrangianConfig:
     initial_step: float = 1.5  # Polyak alpha
     patience: int = 8  # non-improving iters before halving alpha
     recover_every: int = 1  # run primal recovery every k iterations
+    backend: str = "sequential"  # per-block execution: "sequential" | "threads"
 
 
 def solve_lagrangian(
@@ -70,6 +71,7 @@ def solve_lagrangian(
     max_iterations: int = 200,
     method: str = "subgradient",
     nlp_solver: str = "pounce",
+    backend: str = "sequential",
     config: LagrangianConfig | None = None,
     **_ignored,
 ) -> SolveResult:
@@ -84,6 +86,11 @@ def solve_lagrangian(
         constraints can be annotated with ``model.mark_coupling(...)``.
     method : {"subgradient", "bundle"}
         Dual maximization method.
+    backend : {"sequential", "threads"}
+        Execution backend for the per-block relaxed subproblem solves. The
+        relaxed subproblem separates across the detected blocks; ``"threads"``
+        solves them concurrently (results reduced in block order, so the dual
+        bound is identical to ``"sequential"``).
 
     Returns
     -------
@@ -99,6 +106,7 @@ def solve_lagrangian(
         max_iterations=max_iterations,
         method=method,
         prefer_pounce=(nlp_solver == "pounce"),
+        backend=backend,
     )
     if cfg.method not in ("subgradient", "bundle"):
         raise ValueError(f"Unknown method={cfg.method!r}; choose 'subgradient' or 'bundle'.")
@@ -119,56 +127,141 @@ def solve_lagrangian(
             "Annotate them with model.mark_coupling(...), or use Model.solve()."
         )
 
-    # Partition rows into coupling (dualized) and block (kept).
-    Ac_rows, rc_rows = [], []
-    Ab_rows, rb_rows = [], []
-    for vec, rhs, src in zip(lin.rows_coeff, lin.rows_rhs, lin.rows_source):
-        if src in coupling_src:
-            Ac_rows.append(vec)
-            rc_rows.append(rhs)
-        else:
-            Ab_rows.append(vec)
-            rb_rows.append(rhs)
+    # ── coupling rows (dualized) ─────────────────────────────────
+    # Built from the *native* rows so an equality coupling constraint keeps a
+    # single **free** multiplier (``free_mask``) instead of two nonnegative ones
+    # — half the dual dimension (T1.2). ``>=`` rows are flipped to ``<=`` so
+    # their multiplier stays ``>= 0``.
+    dense = lin.dense()
+    Ac_rows, rc_rows, free_rows = [], [], []
+    for i, sense in enumerate(lin.sense):
+        if lin.row_source[i] not in coupling_src:
+            continue
+        row = dense[i]
+        bi = float(lin.b[i])
+        if sense == ">=":
+            Ac_rows.append(-row)
+            rc_rows.append(-bi)
+            free_rows.append(False)
+        elif sense == "==":
+            Ac_rows.append(row)
+            rc_rows.append(bi)
+            free_rows.append(True)
+        else:  # "<="
+            Ac_rows.append(row)
+            rc_rows.append(bi)
+            free_rows.append(False)
     A_c = np.array(Ac_rows) if Ac_rows else np.zeros((0, n))
     r_c = np.array(rc_rows) if rc_rows else np.zeros(0)
-    A_b = np.array(Ab_rows) if Ab_rows else np.zeros((0, n))
-    r_b = np.array(rb_rows) if rb_rows else np.zeros(0)
+    free_mask = np.array(free_rows, dtype=bool)
     m_coup = A_c.shape[0]
 
     lb_all, ub_all = flat_bounds(model)
-    bounds = [(float(lb_all[i]), float(ub_all[i])) for i in range(n)]
     integrality = np.zeros(n, dtype=np.int32)
     off = 0
     for v in model._variables:
         if v.var_type in (VarType.BINARY, VarType.INTEGER):
-            for i in range(v.size):
-                integrality[off + i] = 1
+            integrality[off : off + v.size] = 1
         off += v.size
 
-    def _subproblem(lam: np.ndarray):
-        """Return (L_bound, z, residual) for the relaxation at multipliers lam."""
-        c_lag = lin.c + (A_c.T @ lam if m_coup else np.zeros(n))
+    # ── block partition (the relaxed subproblem separates across blocks) ──
+    # Column blocks are the connected components of the non-coupling constraint
+    # graph (every variable belongs to exactly one). Each non-coupling row lies
+    # entirely in one block, so the relaxed subproblem
+    # ``min (c + A_c^T λ)·z s.t. block rows`` decomposes into independent
+    # per-block MILPs whose bounds sum to the monolithic relaxation bound.
+    flat_of: dict[str, tuple[int, int]] = {}
+    _o = 0
+    for v in model._variables:
+        flat_of[v.name] = (_o, v.size)
+        _o += v.size
+    num_blocks = max(1, structure.num_blocks)
+    col_blocks: list[list[int]] = [[] for _ in range(num_blocks)]
+    for v in model._variables:
+        b = structure.block_of_var.get(v.name, 0)
+        o, sz = flat_of[v.name]
+        col_blocks[b].extend(range(o, o + sz))
+    col_arrays = [np.array(cb, dtype=int) for cb in col_blocks]
+
+    # Block ``<=`` rows (equalities expanded), each restricted to its block cols.
+    A_leq, b_leq, src_leq = lin.rows_leq()
+    blk_A_rows: list[list[np.ndarray]] = [[] for _ in range(num_blocks)]
+    blk_r_rows: list[list[float]] = [[] for _ in range(num_blocks)]
+    for vec, rhs, src in zip(A_leq, b_leq, src_leq):
+        if src in coupling_src:
+            continue
+        b = structure.block_of_constraint[src]
+        if b < 0:
+            continue  # references no variable
+        cols = col_arrays[b]
+        support = np.nonzero(np.abs(vec) > 0)[0]
+        assert set(support.tolist()) <= set(cols.tolist()), "non-coupling row spans blocks"
+        blk_A_rows[b].append(vec[cols])
+        blk_r_rows[b].append(rhs)
+
+    block_A = [
+        (np.array(rows) if rows else np.zeros((0, col_arrays[b].size)))
+        for b, rows in enumerate(blk_A_rows)
+    ]
+    block_r = [np.array(rr) if rr else np.zeros(0) for rr in blk_r_rows]
+    block_bounds = [[(float(lb_all[j]), float(ub_all[j])) for j in cols] for cols in col_arrays]
+    block_intg = [integrality[cols] for cols in col_arrays]
+    # Execute biggest blocks first (straggler avoidance); results reduce in this
+    # fixed order regardless of backend, so the bound is backend-independent.
+    exec_order = sorted(range(num_blocks), key=lambda b: (-col_arrays[b].size, b))
+
+    from discopt.decomposition.parallel.comm import select_backend
+
+    comm = select_backend(cfg.backend)
+
+    def _solve_block(b: int):
+        cols = col_arrays[b]
+        if cols.size == 0:
+            return (0.0, np.zeros(0), cols)
+        cb = c_lag_global[cols]
+        A_ub = block_A[b] if block_A[b].shape[0] else None
+        b_ub = block_r[b] if block_A[b].shape[0] else None
         res = milp(
-            c_lag,
-            A_ub=A_b if A_b.shape[0] else None,
-            b_ub=r_b if A_b.shape[0] else None,
-            bounds=bounds,
-            integrality=integrality,
+            cb,
+            A_ub=A_ub,
+            b_ub=b_ub,
+            bounds=block_bounds[b],
+            integrality=block_intg[b],
             time_limit=max(1.0, cfg.time_limit - (time.time() - t0)),
             gap_tolerance=cfg.gap_tolerance,
         )
         if res.x is None:
-            return None, None, None
-        z = np.asarray(res.x, dtype=np.float64)
-        # Rigorous lower bound on the relaxed subproblem objective.
+            return None
         sub_lb = (
             res.bound
             if res.bound is not None
             else (res.objective if res.status == SolveStatus.OPTIMAL else None)
         )
         if sub_lb is None:
-            return None, z, None
-        L = float(sub_lb) - float(lam @ r_c) + lin.c_offset
+            return None
+        return (float(sub_lb), np.asarray(res.x, dtype=np.float64), cols)
+
+    # ``c_lag_global`` is set per call before dispatching the block solves.
+    c_lag_global = lin.c.copy()
+
+    def _subproblem(lam: np.ndarray):
+        """Return (L_bound, z, residual) for the relaxation at multipliers lam.
+
+        Solves the per-block relaxed MILPs on the configured backend and sums
+        their rigorous dual bounds. Returns ``(None, ...)`` if any block cannot
+        certify a bound (same contract as the monolithic version)."""
+        nonlocal c_lag_global
+        c_lag_global = lin.c + (A_c.T @ lam if m_coup else np.zeros(n))
+        results = comm.map(exec_order, _solve_block)
+        if any(res is None for res in results):
+            return None, None, None
+        z = np.zeros(n, dtype=np.float64)
+        sub_total = 0.0
+        for sub_lb, zb, cols in results:  # results are in exec_order (fixed)
+            sub_total += sub_lb
+            if cols.size:
+                z[cols] = zb
+        L = sub_total - float(lam @ r_c) + lin.c_offset
         residual = (A_c @ z - r_c) if m_coup else np.zeros(0)
         return L, z, residual
 
@@ -183,8 +276,8 @@ def solve_lagrangian(
             offp += v.size
         flb, fub = restricted_bounds(model, fixed) if fixed else (lb_all.copy(), ub_all.copy())
         rbnds = [(float(flb[i]), float(fub[i])) for i in range(n)]
-        A_all = np.vstack([A_b, A_c]) if (A_b.shape[0] or A_c.shape[0]) else None
-        b_all = np.concatenate([r_b, r_c]) if (A_b.shape[0] or A_c.shape[0]) else None
+        A_all = A_leq if A_leq.shape[0] else None
+        b_all = b_leq if A_leq.shape[0] else None
         res = lp(lin.c, A_ub=A_all, b_ub=b_all, bounds=rbnds)
         if res.status != SolveStatus.OPTIMAL or res.x is None:
             return None, None
@@ -240,13 +333,16 @@ def solve_lagrangian(
                 break
             target = best_UB if np.isfinite(best_UB) else best_L + max(1.0, abs(best_L))
             step = alpha * max(target - L, 1e-9) / gnorm2
-            lam = np.maximum(0.0, lam + step * residual)
+            lam = lam + step * residual
+            # Project only the inequality (nonnegative) multipliers; equality
+            # coupling rows carry a free multiplier (T1.2).
+            lam[~free_mask] = np.maximum(0.0, lam[~free_mask])
             if stall >= cfg.patience:
                 alpha *= 0.5
                 stall = 0
         else:  # bundle / cutting-plane (Kelley)
             cuts.append((L, residual.copy(), lam.copy()))
-            lam = _bundle_step(lp, cuts, m_coup)
+            lam = _bundle_step(lp, cuts, m_coup, free_mask)
 
     # Promote to optimal if bounds already met.
     if status == "iteration_limit" and np.isfinite(best_UB) and best_L > -np.inf:
@@ -277,12 +373,20 @@ def solve_lagrangian(
     )
 
 
-def _bundle_step(lp, cuts: list[tuple[float, np.ndarray, np.ndarray]], m_coup: int) -> np.ndarray:
-    """Maximize the cutting-plane model of L over the multiplier box [0, λmax].
+def _bundle_step(
+    lp,
+    cuts: list[tuple[float, np.ndarray, np.ndarray]],
+    m_coup: int,
+    free_mask: np.ndarray | None = None,
+) -> np.ndarray:
+    """Maximize the cutting-plane model of L over the multiplier box.
 
-    max_{λ∈[0,λmax], η}  η   s.t.  η <= L_k + g_k^T (λ - λ_k)  for each cut k.
-    Encoded as an LP minimizing -η.
+    max_{λ∈box, η}  η   s.t.  η <= L_k + g_k^T (λ - λ_k)  for each cut k.
+    Encoded as an LP minimizing -η. Inequality-row multipliers are bounded to
+    ``[0, λmax]``; equality-row (free) multipliers to ``[-λmax, λmax]``.
     """
+    if free_mask is None:
+        free_mask = np.zeros(m_coup, dtype=bool)
     ncol = m_coup + 1  # [lam..., eta]
     c = np.zeros(ncol)
     c[-1] = -1.0
@@ -295,8 +399,12 @@ def _bundle_step(lp, cuts: list[tuple[float, np.ndarray, np.ndarray]], m_coup: i
         rhs.append(float(L_k - g_k @ lam_k))
     A_ub = np.array(rows)
     b_ub = np.array(rhs)
-    bounds = [(0.0, _LAMBDA_MAX)] * m_coup + [(-_BIG, _BIG)]
+    bounds = [
+        (-_LAMBDA_MAX, _LAMBDA_MAX) if free_mask[i] else (0.0, _LAMBDA_MAX) for i in range(m_coup)
+    ] + [(-_BIG, _BIG)]
     res = lp(c, A_ub=A_ub, b_ub=b_ub, bounds=bounds)
     if res.x is None:
         return cuts[-1][2]  # fall back to last lambda
-    return np.maximum(0.0, np.asarray(res.x[:m_coup], dtype=np.float64))
+    lam = np.asarray(res.x[:m_coup], dtype=np.float64)
+    lam[~free_mask] = np.maximum(0.0, lam[~free_mask])
+    return lam
