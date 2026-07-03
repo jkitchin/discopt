@@ -5382,16 +5382,41 @@ def solve_model(
                         _active_cb,
                         opts,
                         nlp_solver=nlp_solver,
+                        convex=_model_is_convex,
                     )
 
                 result_ids[i] = int(batch_ids[i])
+
+                # C-13: default a convex node to "trusted" (valid NLP lower bound);
+                # the ITERATION_LIMIT branch below clears it when the node NLP did
+                # not converge to a KKT point, which decertifies the gap after every
+                # bound source has had its chance (mirrors the nonconvex finalize).
+                _serial_nlp_trusted = True
 
                 if nlp_result is not None and nlp_result.status in (
                     SolveStatus.OPTIMAL,
                     SolveStatus.ITERATION_LIMIT,
                 ):
                     nlp_obj = float(nlp_result.objective)
-                    nlp_lb = nlp_obj
+                    # C-13: for a CONVEX model the node NLP objective is used as a
+                    # rigorous lower bound — but that is legitimate only when the
+                    # solve actually converged to a KKT point (SolveStatus.OPTIMAL).
+                    # An interior-point iterate stopped at ITERATION_LIMIT can sit
+                    # strictly ABOVE the true node minimum (non-KKT, unconverged
+                    # duals), so its objective is NOT a valid lower bound; trusting
+                    # it can fathom the subtree holding the optimum while the gap
+                    # stays certified → false "optimal". The polish-retry inside
+                    # _solve_node_nlp (convex=True above) already tried to reach KKT;
+                    # if it still returned ITERATION_LIMIT, ABSTAIN from the NLP
+                    # bound (fall back to the valid relaxation/interval bounds
+                    # accumulated in convex_lb, or -inf → node stays open at its
+                    # inherited parent bound, fathoming nothing) and decertify the
+                    # gap. This mirrors the batch path's _batch_trusted guard
+                    # (roadmap P0.3) and _solve_nlp_bb's ITERATION_LIMIT decertify.
+                    _serial_nlp_trusted = (not _model_is_convex) or (
+                        nlp_result.status == SolveStatus.OPTIMAL
+                    )
+                    nlp_lb = nlp_obj if _serial_nlp_trusted else -np.inf
                     convex_lb = -np.inf  # accumulate valid convex lower bound
 
                     if _use_alphabb:
@@ -5590,6 +5615,20 @@ def solve_model(
                         result_lbs[i] = _INFEASIBILITY_SENTINEL
                     elif result_lbs[i] >= _SENTINEL_THRESHOLD:
                         _gap_certified = False
+
+                # C-13: convex node whose NLP objective was NOT a valid lower bound
+                # (non-KKT ITERATION_LIMIT, unrescued by the polish-retry).  The
+                # bound was already abstained above (nlp_lb=-inf, so the node imports
+                # at its inherited parent bound — no unsound fathom), but the gap can
+                # no longer be certified optimal: an under-converged relaxation
+                # objective proves nothing about the subtree, and for a convex model
+                # the NLP objective is typically the ONLY bound source (alphaBB is
+                # nonconvex-only; McCormick/LP relaxers are usually absent).
+                # Decertify unconditionally on any untrusted convex node — the same
+                # conservative guard the batch path applies via _batch_trusted
+                # (roadmap P0.3) and that _solve_nlp_bb applies on ITERATION_LIMIT.
+                if _model_is_convex and not node_infeasible_mask[i] and not _serial_nlp_trusted:
+                    _gap_certified = False
         jax_time += time.perf_counter() - t_jax_start
 
         if np.any(node_infeasible_mask):

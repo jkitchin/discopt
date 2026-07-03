@@ -88,7 +88,7 @@ in non-default configs; loud ingestion gaps. **P3** = hygiene.
 |---|---|---|---|---|
 | C-16 | P0 | presolve/aggregate | positional bound resync after variable-removing pass fuses unrelated variables' bounds → false "infeasible" / silent optimum cut, DEFAULT path | fixed |
 | C-17 | P0 | alphaBB bound | node bound uses sampled (non-rigorous) α + center-only PSD check → false "optimal", default path for small nonconvex; deterministic repro confirms (spike width ≤ 0.006 → α=0, bound 0.0, true min −3.5) | fixed |
-| C-13 | P0 | solver.py bounds | serial convex path trusts under-converged NLP objective as node lower bound → false "optimal" | open |
+| C-13 | P0 | solver.py bounds | serial convex path trusts under-converged NLP objective as node lower bound → false "optimal" | fixed |
 | C-1 | P0 | solver.py status | false "infeasible" from non-rigorous NLP fathoms (solve_model path) | open |
 | C-4 | P1 | mir.rs cuts | integer-MIR applied with fractional integer lower bound → invalid cut | open |
 | C-2 | P1 | milp_driver status | false "Infeasible" when deadline orphans deferred nodes | open |
@@ -352,7 +352,38 @@ convex models can decertify too.
   if none exists).
 - Standing gates pass.
 
-**Log:** —
+**Log:** 2026-07-03 — **CONFIRMED then FIXED** (branch `fix-c13-convex-nlp-bound`).
+*Confirm (static):* the serial `solve_model` node loop seeds `nlp_lb = nlp_obj`
+whenever the node NLP status is `OPTIMAL` **or** `ITERATION_LIMIT`
+(`solver.py:5312-5317`), with no `_batch_trusted`-equivalent trust check; for a
+convex model that value flows into `result_lbs[i]` and thence `tree.import_results`
+as the rigorous node lower bound, and the only serial node-loop decertify block was
+gated `if not _model_is_convex` (`:5528`), so it never fired for convex models. The
+serial `_solve_node_nlp` was not even passed `convex=`, so the convex polish-retry
+in `_solve_node_nlp_pounce` never ran. The batch path (`:5016`) and `_solve_nlp_bb`
+(`:7411`) both already decertify this exact case — the serial `solve_model` path was
+the gap. *Confirm (dynamic):* forcing every convex serial node NLP to report
+`ITERATION_LIMIT` (non-KKT) on a convex MINLP solved with `nlp_bb=False, batch_size=1`
+returned `status="optimal", gap_certified=True` (false certificate) on pre-fix code.
+Reachability: a *nonlinear* convex MINLP normally auto-routes to `_solve_nlp_bb`
+(`:3843`), but `nlp_bb=False` (or `lazy_constraints`) forces the `solve_model` serial
+loop — user-reachable. *Fix:* (1) pass `convex=_model_is_convex` to the serial
+`_solve_node_nlp` so the existing convex polish-retry gets its chance to reach KKT;
+(2) for a convex node compute `_serial_nlp_trusted = (not convex) or status==OPTIMAL`
+— when untrusted, ABSTAIN from the NLP bound (`nlp_lb=-inf`, so the node imports at
+its inherited parent bound and fathoms nothing — no unsound prune) and decertify the
+gap after every bound source (mirrors the batch `_batch_trusted` guard and
+`_solve_nlp_bb`). Discards the bound rather than trusting it (option 1 of the Fix
+sketch); OPTIMAL convex nodes and all nonconvex nodes are untouched.
+*Regression test:* `python/tests/test_c13_serial_convex_nlp_bound.py`
+(`@pytest.mark.smoke`, sub-second): `test_serial_convex_iteration_limit_does_not_certify`
+is RED before the fix (asserts NOT `optimal`+`gap_certified`) / GREEN after;
+`test_serial_convex_inflated_bound_never_crosses_primal` pins the dual-≤-primal and
+dual-≤-true-optimum invariants under an above-optimum inflated objective;
+`test_serial_convex_converged_still_certifies` is the bound-neutral control (all-OPTIMAL
+convex solve still certifies, node_count unchanged 3→3). Existing
+`test_p03_trust_gate.py` (batch guard + `_solve_nlp_bb` serial) still green (10/10).
+Status: `open` → `fixed`. PR: #443.
 
 ---
 
