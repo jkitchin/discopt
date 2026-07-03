@@ -511,6 +511,64 @@ where discopt is already tight (the §7 no-offtarget-regression gate).
 This entry experiment measures only (it builds no cut plumbing, changes no solver
 math) — bound-neutral by construction; no correctness gate applies.
 
+### Phase 3 aggregation — build 1 results (2026-07-03)
+
+Built the native Marchand–Wolsey aggregation c-MIR separator (build item 2, the
+smallest sound slice): `crates/discopt-core/src/lp/aggregation.rs`
+(`separate_aggregation_mir`). It pairs `≤` rows with **nonnegative** weights
+`λ_i = |a_kt|`, `λ_k = |a_it|` to cancel one column `t` (the MW continuous-cancel
+target; falls back to a fractional column on a fully-lifted all-integer LP), forms
+the valid implied aggregate, and applies the **existing** complemented MIR
+(`mir.rs::separate_mir`, PR #415) to it — MIR is reused verbatim, never
+reimplemented. Wired behind `DISCOPT_CMIR_AGGREGATION` (**default-off**) into the
+LP-spatial engine's node-cut separator (`_jax/lp_spatial_bb.py::_separate_node_cuts`)
+and exposed as `aggregation_mir_cuts_py`.
+
+**Correctness (primary gate) — PASS.** `aggregation_validity_random_systems`:
+500 random 2/3-row systems (mixed integer/continuous, mixed-sign finite bounds,
+~30% fully-integer to exercise the fractional-fallback, LP points forced to
+violate) assert **no** integer/continuous-feasible point of the *original full
+system* is ever cut (>20 cuts validated, non-vacuous). Plus a
+fails-before/passes-after witness (`aggregation_finds_cut_single_row_mir_misses`)
+where single-row MIR finds nothing but 2-row aggregation cancelling the continuous
+variable separates `x*`. At scale (3,000 random systems via the Python binding):
+aggregation found a violated cut in **1,703**; in **30** of those single-row MIR
+found *nothing* — the regime aggregation is for.
+
+**Lever (ON vs OFF) — no bound change on the in-scope panel; SOUND, self-disables.**
+The separator runs in the LP-spatial engine, scoped to *pure-integer* models, so
+the measurable panel is that subset of §7's 0b panel: `ex1263a`,
+`graphpart_2pm-0044-0044`, `graphpart_2g-0044-1601`, `graphpart_2pm-0055-0055`
+(ex1263/fac1–3 carry continuous vars → out of scope). Equal 400-node budget,
+`cut_rounds=3`, 60 s cap
+(`discopt_benchmarks/scripts/p3_cmir_aggregation_onoff.py`, raw JSON
+`results/p3_cmir_aggregation_onoff_20260703T155324.json`):
+
+| instance | opt | bound OFF | bound ON | nodes OFF | nodes ON | Δbound |
+|---|---:|---:|---:|---:|---:|---:|
+| ex1263a | 19.6 | 19.6 | 19.6 | 400 | 400 | +0 |
+| graphpart_2pm-0044-0044 | −13 | −13 | −13 | 31 | 31 | +0 |
+| graphpart_2g-0044-1601 | −9.541e5 | −9.541e5 | −9.541e5 | 12 | 12 | +0 |
+| graphpart_2pm-0055-0055 | −20 | −20 | −20 | 207 | 207 | +0 |
+
+`incorrect_count = 0` on every row (uncapped ON solves certify the oracle; the
+dual bound never crosses opt). **Δbound = +0 everywhere**: on this panel the
+LP-spatial engine's McCormick relaxation is *already* at/near the optimum at the
+root (bound = opt on graphpart), so neither single-row MIR nor aggregation finds a
+violated cut there — the separator correctly self-disables (no cut, no
+regression). This is a **different, tighter relaxation** than the default-path
+`root_bound` the 0b verdict measured the 0% gap on; the bound-moving lever the 0b
+table identified lives on the **default path's** lifted McCormick relaxer, not the
+LP-spatial engine.
+
+**Re-scope (measurement wins, per §0.4):** build 1 lands the proven, sound,
+default-off separator + its native MIR reuse + the validity gate. The follow-on
+(build 1b) is to wire `aggregation_mir_cuts_py` into the **default-path** McCormick
+cut hook (the `cmir_cuts.py::separate_cmir` call site / the relaxer used off the
+LP-spatial engine) where 0b measured the 0% root-gap, and re-run the ON/OFF panel
+including ex1263/fac1–3 there. Cut-pool aging/efficacy on the default path (build
+item 3) remains as originally scoped.
+
 ---
 
 ## 8. Phase 4 — Stop losing structure (~3–5 EW, medium risk)

@@ -140,6 +140,33 @@ def _separate_node_cuts(A, b, bounds, x, ncol, c, max_cuts=12):
         cuts.extend(mc)
     except Exception:
         pass
+    # Native Marchand–Wolsey aggregation c-MIR (cert:P3). DEFAULT-OFF, gated by
+    # DISCOPT_CMIR_AGGREGATION. Pairs <= rows with nonnegative weights to cancel a
+    # column, then applies the native Rust complemented MIR to the aggregate —
+    # valid by construction (nonnegative row combo + valid MIR; proven by the Rust
+    # aggregation_validity_random_systems property test). Every column here is an
+    # integer-valued (structural or product-aux) column, so the separator's
+    # fractional-column fallback picks the cancel target. It only ADDS valid cuts.
+    try:
+        from discopt.solver import _cmir_aggregation_enabled
+
+        if _cmir_aggregation_enabled():
+            from discopt._rust import aggregation_mir_cuts_py
+
+            res = aggregation_mir_cuts_py(
+                np.ascontiguousarray(np.asarray(A, dtype=np.float64)),
+                np.ascontiguousarray(np.asarray(b, dtype=np.float64).ravel()),
+                np.ascontiguousarray(lb.astype(np.float64)),
+                np.ascontiguousarray(ub.astype(np.float64)),
+                np.ascontiguousarray(is_int),
+                np.ascontiguousarray(np.asarray(x, dtype=np.float64).ravel()),
+            )
+            if res is not None:
+                acoef, arhs = np.asarray(res[0]), np.asarray(res[1])
+                for i in range(min(acoef.shape[0], max_cuts)):
+                    cuts.append((acoef[i][:ncol], float(arhs[i])))
+    except Exception:
+        pass
     return cuts
 
 
