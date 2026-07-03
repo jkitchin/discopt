@@ -17,11 +17,28 @@ findings marked **[BY INSPECTION]** are unambiguous from control flow.
 
 ## 1. Summary of findings
 
+> **✅ RESOLVED C1, C2, C3** — `python/tests/test_dae_c1c2c3.py` (this PR).
+> - **C1** (`mol.py:_get_left_value`): sign fixed to `u[0] + dz*bc_val`, symmetric
+>   with the right boundary. A linear field now reconstructs the true left boundary
+>   (0.0, was 0.333) with zero second derivative.
+> - **C2** (`collocation.py:_quadrature_weights`): Radau weights now come from an
+>   interpolatory Vandermonde moment solve on the collocation points only — correct
+>   for all ncp (sum=1, exact to degree 2·ncp−2), and unchanged vs the old scipy
+>   values for ncp≥2. `integral(1)` over `[0,3]` is 3.0 for ncp=1..5 (was 1.5 at
+>   ncp=1). Also drops the per-call `scipy.integrate.quad`.
+> - **C3** (`collocation.py`, `finite_difference.py`): both transcribers now refuse
+>   loudly — a shared `validate_ode_rhs_keys` requires the RHS to key exactly the
+>   declared states (naming missing/unknown keys), and a second-order state with no
+>   `set_second_order_ode()` raises. No more silent no-dynamics models.
+>
+> Verified fails-before/passes-after (11 tests fail on the pre-fix code). The full
+> finding text is preserved below.
+
 | # | Severity | Component | Finding |
 |---|----------|-----------|---------|
-| C1 | **P0 correctness** | `mol.py` | Left Neumann BC has a **sign error**; any nonzero-flux left BC yields a wrong PDE solution [CONFIRMED] |
-| C2 | **P0 correctness** | `collocation.py` | `integral()` is wrong by **exactly 2×** for Radau `ncp=1` [CONFIRMED] |
-| C3 | **P0 correctness** | `collocation.py`, `finite_difference.py` | Two silent no-dynamics paths: (a) `add_second_order_state` without an RHS, (b) RHS dict key typo — both build a model with **no dynamics constraints**, no error [CONFIRMED] |
+| C1 | **P0 correctness** — ✅ RESOLVED | `mol.py` | Left Neumann BC has a **sign error**; any nonzero-flux left BC yields a wrong PDE solution [CONFIRMED] |
+| C2 | **P0 correctness** — ✅ RESOLVED | `collocation.py` | `integral()` is wrong by **exactly 2×** for Radau `ncp=1` [CONFIRMED] |
+| C3 | **P0 correctness** — ✅ RESOLVED | `collocation.py`, `finite_difference.py` | Two silent no-dynamics paths: (a) `add_second_order_state` without an RHS, (b) RHS dict key typo — both build a model with **no dynamics constraints**, no error [CONFIRMED] |
 | C4 | P1 | `mol.py` | `npts=1` crashes with an opaque `ValueError` [CONFIRMED] |
 | C5 | P1 | `finite_difference.py` | Forward Euler + algebraic DAE: off-by-one index alignment between `z_k` and the grid point where the ODE is evaluated [BY INSPECTION] |
 | R1–R7 | P1–P2 | all | Missing validation and API guards (§3) |

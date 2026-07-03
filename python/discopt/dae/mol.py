@@ -427,10 +427,12 @@ class MOLBuilder:
         bc_val = bc.eval(t) if not callable(bc.value) else bc.value(t)
         if bc.type == "dirichlet":
             return bc_val
-        # Neumann: -du/dz = bc_val at left boundary (outward normal)
-        # Ghost point: u_ghost = u[0] - dz * bc_val  (forward approx)
-        # bc_val is the outward normal derivative = -du/dz at left
-        return u[0] - dz * bc_val
+        # Neumann: bc_val = du/dn = outward normal derivative at the left
+        # boundary. The outward normal points in -z, so du/dz|_boundary = -bc_val.
+        # First-order Taylor from the first interior point u[0] (at z0 + dz):
+        #   u(z0) ≈ u[0] - dz * (du/dz) = u[0] - dz * (-bc_val) = u[0] + dz * bc_val
+        # Symmetric with the right boundary (_get_right_value, also `+`). (C1)
+        return u[0] + dz * bc_val
 
     def _get_right_value(self, fv: FieldVar, t, k: int, n: int, u, dz: float):
         """Get the field value to the right of interior point k.

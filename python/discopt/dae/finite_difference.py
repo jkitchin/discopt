@@ -18,6 +18,7 @@ from discopt.dae.collocation import (
     ControlVar,
     StateVar,
     _SecondOrderInfo,
+    validate_ode_rhs_keys,
 )
 
 
@@ -253,7 +254,18 @@ class FDBuilder:
             self._build_second_order_wrapper()
 
         # Add FD constraints
-        if self._ode_rhs is None and not self._second_order_info:
+        # C3(a): second-order state(s) declared but no acceleration RHS set → the
+        # wrapper that populates `_ode_rhs` was never built, so dynamics would be
+        # silently skipped. Refuse loudly.
+        if self._second_order_info and self._second_order_rhs is None:
+            raise RuntimeError(
+                "Second-order state(s) "
+                f"{[i.position_name for i in self._second_order_info]} were declared with "
+                "add_second_order_state() but no second-order ODE was set. "
+                "Call set_second_order_ode()."
+            )
+
+        if self._ode_rhs is None:
             raise RuntimeError("No ODE RHS set. Call set_ode() or set_second_order_ode().")
 
         tp = self.time_points()
@@ -268,10 +280,11 @@ class FDBuilder:
                     alg_k = self._algebraic_dict_at(k - 1)
                     ctrl_k = self._control_dict_at(k - 1)
                     derivs = rhs_fn(tp[k], states_k, alg_k, ctrl_k)
+                    validate_ode_rhs_keys(
+                        derivs.keys(), self._states, builder="finite-difference ODE"
+                    )
 
                     for sv in self._states:
-                        if sv.name not in derivs:
-                            continue
                         var = self._vars[sv.name]
                         if sv.n_components == 1:
                             lhs = (var[k] - var[k - 1]) / h_k
@@ -288,10 +301,11 @@ class FDBuilder:
                     alg_k = self._algebraic_dict_at(k)
                     ctrl_k = self._control_dict_at(k)
                     derivs = rhs_fn(tp[k], states_k, alg_k, ctrl_k)
+                    validate_ode_rhs_keys(
+                        derivs.keys(), self._states, builder="finite-difference ODE"
+                    )
 
                     for sv in self._states:
-                        if sv.name not in derivs:
-                            continue
                         var = self._vars[sv.name]
                         if sv.n_components == 1:
                             lhs = (var[k + 1] - var[k]) / h_k
@@ -308,10 +322,11 @@ class FDBuilder:
                     alg_k = self._algebraic_dict_at(k - 1)
                     ctrl_k = self._control_dict_at(k - 1)
                     derivs = rhs_fn(tp[k], states_k, alg_k, ctrl_k)
+                    validate_ode_rhs_keys(
+                        derivs.keys(), self._states, builder="finite-difference ODE"
+                    )
 
                     for sv in self._states:
-                        if sv.name not in derivs:
-                            continue
                         var = self._vars[sv.name]
                         if sv.n_components == 1:
                             lhs = (var[k + 1] - var[k - 1]) / h_span
@@ -328,9 +343,8 @@ class FDBuilder:
                 alg_k = self._algebraic_dict_at(k - 1)
                 ctrl_k = self._control_dict_at(k - 1)
                 derivs = rhs_fn(tp[k], states_k, alg_k, ctrl_k)
+                validate_ode_rhs_keys(derivs.keys(), self._states, builder="finite-difference ODE")
                 for sv in self._states:
-                    if sv.name not in derivs:
-                        continue
                     var = self._vars[sv.name]
                     if sv.n_components == 1:
                         lhs = (var[k] - var[k - 1]) / h_k
