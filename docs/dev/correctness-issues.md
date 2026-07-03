@@ -986,7 +986,7 @@ standing gates pass.
   `TestSchurPassthrough` (POUNCE Schur-block) fails identically with this fix
   stashed, and the `test_relaxation_coverage`/`test_qp_pounce` cases pass in
   isolation (test-ordering artifacts); `incorrect_count` unaffected (no correctness
-  assertion weakened — the fix strictly REMOVES a false-bound path). PR: <PR>.
+  assertion weakened — the fix strictly REMOVES a false-bound path). PR: #449.
 
 **Status:** open → fixed.
 
