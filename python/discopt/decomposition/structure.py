@@ -71,6 +71,7 @@ class DecompositionStructure:
     coupling_constraints: list[int]
     is_separable: bool
     source: str
+    detection_truncated: bool = False
 
     @property
     def num_blocks(self) -> int:
@@ -143,16 +144,17 @@ def _detect_bridge_coupling(
     model: Model,
     constraint_cliques: list[list[int]],
     n: int,
-) -> set[int]:
+) -> tuple[set[int], bool]:
     """Bridge-constraint heuristic: a constraint whose sole removal disconnects.
 
     A constraint is coupling when dropping it raises the number of
     constraint-bearing components. Delegates the graph scan to
-    :func:`discopt.decomposition.graph.kernels.bridge_cliques`, guarded by
-    ``_BRIDGE_SCAN_BUDGET``; returns ``set()`` when the model is already
-    separable, when nothing qualifies, or when the scan is too large.
+    :func:`discopt.decomposition.graph.kernels.bridge_cliques_status`, guarded by
+    ``_BRIDGE_SCAN_BUDGET``. Returns ``(coupling_indices, truncated)``; a
+    ``truncated`` scan (too large) logs a WARNING so "no coupling" is never
+    silently confused with "gave up" (S3).
     """
-    return kernels.bridge_cliques(constraint_cliques, n, _BRIDGE_SCAN_BUDGET)
+    return kernels.bridge_cliques_status(constraint_cliques, n, _BRIDGE_SCAN_BUDGET)
 
 
 def detect_decomposition(
@@ -160,13 +162,20 @@ def detect_decomposition(
     *,
     complicating: list[str] | None = None,
     coupling: list[int] | None = None,
+    dec_file: str | None = None,
 ) -> DecompositionStructure:
     """Resolve the decomposition structure of *model*.
 
     Annotations on the model take precedence; explicit ``complicating`` /
-    ``coupling`` arguments override both. See the module docstring for the
-    auto-detection rules.
+    ``coupling`` arguments override both. ``dec_file`` short-circuits to a GCG
+    ``.dec`` file (its ``MASTERCONSS`` become the coupling rows). See the module
+    docstring for the auto-detection rules.
     """
+    if dec_file is not None:
+        from discopt.decomposition.graph.export import read_dec
+
+        return read_dec(dec_file, model)
+
     var_names = [v.name for v in model._variables]
     name_to_idx = {nm: i for i, nm in enumerate(var_names)}
     n = len(var_names)
@@ -177,6 +186,7 @@ def detect_decomposition(
 
     # ── coupling constraints ──
     src_parts = []
+    detection_truncated = False
     if coupling is not None:
         coupling_set = set(coupling)
         src_parts.append("annotated")
@@ -185,7 +195,9 @@ def detect_decomposition(
         if coupling_set:
             src_parts.append("annotated")
         else:
-            coupling_set = _detect_bridge_coupling(model, constraint_cliques, n)
+            coupling_set, detection_truncated = _detect_bridge_coupling(
+                model, constraint_cliques, n
+            )
             if coupling_set:
                 src_parts.append("detected")
 
@@ -238,6 +250,7 @@ def detect_decomposition(
         coupling_constraints=sorted(coupling_set),
         is_separable=num_blocks >= 2,
         source=source,
+        detection_truncated=detection_truncated,
     )
 
 

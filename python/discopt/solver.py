@@ -2280,6 +2280,8 @@ def solve_model(
     mccormick_bounds: str = "auto",
     gdp_method: str = "big-m",
     decomposition: Optional[str] = None,
+    decomposition_structure=None,
+    record_decomposition: bool = False,
     lagrangian_bound: bool = False,
     lagrangian_frequency: int = 1,
     initial_point: Optional[np.ndarray] = None,
@@ -2905,6 +2907,7 @@ def solve_model(
 
             return solve_benders(
                 model,
+                structure=decomposition_structure,
                 time_limit=time_limit,
                 gap_tolerance=gap_tolerance,
                 max_iterations=max_nodes,
@@ -2915,14 +2918,49 @@ def solve_model(
 
             return solve_lagrangian(
                 model,
+                structure=decomposition_structure,
                 time_limit=time_limit,
                 gap_tolerance=gap_tolerance,
                 max_iterations=max_nodes,
                 nlp_solver=nlp_solver,
             )
-        raise ValueError(
-            f"Unknown decomposition={decomposition!r}; choose 'benders' or 'lagrangian'."
-        )
+        if decomposition == "auto":
+            # Consult the advisor, log its reasoning, and dispatch its
+            # recommendation. A NONE / no-benefit recommendation falls through to
+            # the normal monolithic solve below (W1).
+            from discopt.decomposition import analyze_decomposition
+            from discopt.decomposition.advisor.types import MethodKind
+            from discopt.decomposition.learning import record_outcome
+            from discopt.decomposition.learning.store import RecordStore
+
+            _store_path = os.environ.get("DISCOPT_DECOMP_STORE")
+            _store = (
+                RecordStore(path=_store_path) if (_store_path or record_decomposition) else None
+            )
+            advisor = analyze_decomposition(model, store=_store)
+            expl = advisor.recommendation()
+            logger.info("decomposition='auto' recommendation:\n%s", expl.render("text"))
+            if expl.recommendation is not MethodKind.NONE:
+                decomposed = advisor.decompose()
+                result = decomposed.solve(
+                    time_limit=time_limit,
+                    gap_tolerance=gap_tolerance,
+                    max_iterations=max_nodes,
+                    nlp_solver=nlp_solver,
+                )
+                if _store is not None:
+                    try:
+                        record_outcome(advisor, _store, chosen=decomposed.method)
+                    except Exception as exc:  # noqa: BLE001 - telemetry is best-effort
+                        logger.debug("decomposition telemetry failed: %s", exc)
+                assert isinstance(result, SolveResult)
+                return result
+            # else: fall through to the monolithic solve path.
+        elif decomposition not in ("benders", "lagrangian"):
+            raise ValueError(
+                f"Unknown decomposition={decomposition!r}; choose 'benders', "
+                "'lagrangian', or 'auto'."
+            )
 
     # --- Deprecated compatibility route: OA is a MINLP solver strategy, not a GDP method. ---
     if gdp_method == "oa":

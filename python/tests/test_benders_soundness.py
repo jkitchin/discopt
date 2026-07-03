@@ -195,3 +195,58 @@ def test_bound_is_valid_for_maximize():
     assert r.objective == pytest.approx(7.0, abs=1e-3)
     # Upper bound on a maximize never below the achieved objective.
     assert r.bound >= r.objective - 1e-4
+
+
+# ── Phase 0 correctness (C3, C4) ──────────────────────────────
+
+
+def test_c3_unbounded_recourse_reported():
+    """A recourse LP that is unbounded below at a feasible master point means the
+    full problem is unbounded — report it, do not stall (C3).
+
+    ``min y - w`` with binary ``y`` first-stage and continuous ``w >= 0`` with no
+    upper bound and no cost floor: the recourse ``min -w`` is unbounded below.
+    """
+    m = dm.Model("unb")
+    y = m.binary("y")
+    w = m.continuous("w", lb=0.0, ub=None)
+    m.first_stage(y)
+    m.minimize(y - w)
+    m.subject_to(w >= y)
+    r = solve_benders(m, time_limit=30)
+    assert r.status == "unbounded"
+
+
+def test_c4_progress_guard_no_spin(monkeypatch):
+    """If the LP backend returns no duals, cuts cannot separate the master point;
+    the solver must bail out quickly instead of spinning to max_iterations (C4)."""
+    import discopt.decomposition.benders.solver as bsolver
+
+    m = dm.Model("guard")
+    y = m.binary("y")
+    x = m.continuous("x", lb=0, ub=5)
+    m.first_stage(y)
+    m.minimize(x + y)
+    m.subject_to(x + y >= 1)
+
+    # Force the recourse dual generator to strip duals so every cut is degenerate.
+    real_get = bsolver.__dict__  # noqa: F841 (kept for clarity)
+    from discopt.solvers import lp_backend
+
+    real_lp = lp_backend.get_lp_solver
+
+    def stripped_lp(*a, **k):
+        solver = real_lp(*a, **k)
+
+        def wrapped(*aa, **kk):
+            res = solver(*aa, **kk)
+            res.dual_values = None
+            res.reduced_costs = None
+            return res
+
+        return wrapped
+
+    monkeypatch.setattr(lp_backend, "get_lp_solver", stripped_lp)
+    r = solve_benders(m, time_limit=30, max_iterations=500)
+    # Must terminate quickly via the stall guard, not run all 500 iterations.
+    assert r.wall_time < 20

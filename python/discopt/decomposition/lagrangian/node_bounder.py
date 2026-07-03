@@ -96,8 +96,9 @@ class LagrangianNodeBounder:
             return None
 
         n = lin.n
+        A_leq, b_leq, src_leq = lin.rows_leq()
         Ac_rows, rc_rows, Ab_rows, rb_rows = [], [], [], []
-        for vec, rhs, src in zip(lin.rows_coeff, lin.rows_rhs, lin.rows_source):
+        for vec, rhs, src in zip(A_leq, b_leq, src_leq):
             if src in coupling_src:
                 Ac_rows.append(vec)
                 rc_rows.append(rhs)

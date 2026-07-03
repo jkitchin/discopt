@@ -130,6 +130,50 @@ class IntegerProjectionGenerator:
         ]
 
 
+class OuterApproximationGenerator:
+    """A convex MINLP → Outer Approximation (Duran & Grossmann 1986).
+
+    On a *convex* MINLP, OA's per-constraint linearizations dominate GBD's
+    aggregated single cut, so OA typically needs fewer major iterations. This
+    generator fires on a nonlinear model with integer variables whose recourse
+    the convexity classifier accepts as convex, and proposes OA as a
+    proven-equivalent alternative that outranks GBD in scoring. Nonconvex models
+    are left to GBD's heuristic mode.
+    """
+
+    name = "outer-approximation"
+
+    def applicable(self, report: StructureReport) -> bool:
+        return report.model_is_nonlinear and report.num_integer > 0
+
+    def generate(self, model, report: StructureReport) -> list[Candidate]:
+        from discopt._jax.convexity import classify_oa_cut_convexity
+
+        try:
+            conv = classify_oa_cut_convexity(model)
+            is_convex = conv.objective_is_convex and all(conv.constraint_mask)
+        except Exception:  # noqa: BLE001 - a classifier failure just skips OA
+            return []
+        if not is_convex:
+            return []
+        # Reuse the integer-projection structure so scoring sees the same block
+        # structure as GBD; dispatch routes OA to the whole-model solver.
+        structure = detect_decomposition(model)
+        return [
+            Candidate(
+                method=MethodKind.OUTER_APPROXIMATION,
+                structure=structure,
+                provenance="convex-MINLP outer approximation",
+                est_soundness=Soundness.PROVEN_EQUIVALENT,
+                notes=(
+                    "convex MINLP: OA per-constraint cuts dominate GBD's aggregated "
+                    "cut (Duran & Grossmann 1986), usually fewer iterations",
+                    "exact for convex models (recourse verified convex)",
+                ),
+            )
+        ]
+
+
 class CouplingGenerator:
     """A few coupling constraints link otherwise-independent blocks → Lagrangian.
 
@@ -168,6 +212,7 @@ DEFAULT_GENERATORS: tuple[CandidateGenerator, ...] = (
     MonolithicGenerator(),
     IndependentBlockGenerator(),
     IntegerProjectionGenerator(),
+    OuterApproximationGenerator(),
     CouplingGenerator(),
 )
 

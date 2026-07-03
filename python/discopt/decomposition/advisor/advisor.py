@@ -51,11 +51,21 @@ class DecompositionAdvisor:
         analyzer: StructureAnalyzer | None = None,
         scorer: Scorer | None = None,
         policy: Policy | None = None,
+        store=None,
     ) -> None:
         self._model = model
         self._analyzer = analyzer or StructureAnalyzer()
         self._scorer = scorer or Scorer()
-        self._policy = policy or RuleBasedPolicy()
+        # When a telemetry store is supplied (and no explicit policy), wrap the
+        # rule-based policy with the instance-based learned policy so past solves
+        # inform the recommendation (W2). It defers to the rules until the store
+        # holds enough near-neighbours.
+        if policy is None and store is not None:
+            from discopt.decomposition.learning.policies import InstanceBasedPolicy
+
+            self._policy: Policy = InstanceBasedPolicy(store, base=RuleBasedPolicy())
+        else:
+            self._policy = policy or RuleBasedPolicy()
         self._explainer = Explainer(self._policy)
         self._report: StructureReport | None = None
         self._candidates: list[Candidate] | None = None
@@ -182,13 +192,15 @@ class DecompositionAdvisor:
         return next((c for c in cands if c.method is method), None)
 
 
-def analyze_decomposition(model) -> DecompositionAdvisor:
+def analyze_decomposition(model, *, store=None) -> DecompositionAdvisor:
     """Analyze *model* and return a :class:`DecompositionAdvisor`.
 
     The public entry point to the advisor's analysis surface. Does not solve or
-    modify the model.
+    modify the model. When *store* (a
+    :class:`~discopt.decomposition.learning.store.RecordStore`) is given, the
+    advisor consults it via the instance-based learned policy (W2).
     """
-    return DecompositionAdvisor(model)
+    return DecompositionAdvisor(model, store=store)
 
 
 __all__ = ["DecompositionAdvisor", "analyze_decomposition"]

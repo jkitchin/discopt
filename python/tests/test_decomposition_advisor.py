@@ -196,3 +196,39 @@ def test_decompose_returns_decomposed_model():
     dcmp = adv.decompose()
     assert dcmp.method is MethodKind.BENDERS
     assert dcmp.num_blocks == 2
+
+
+# ── Phase 3 (T3.2): OA candidate for convex MINLP ─────────────
+
+
+def _convex_minlp_localizing():
+    """Convex MINLP whose binaries localize two convex recourse blocks."""
+    m = dm.Model("cvx_oa")
+    b = [m.binary(f"b{i}") for i in range(2)]
+    x = [m.continuous(f"x{i}", lb=0, ub=5) for i in range(2)]
+    for i in range(2):
+        m.subject_to(x[i] * x[i] <= 4 * b[i])  # convex
+    m.subject_to(b[0] + b[1] >= 1)
+    m.minimize(sum(x) + 2 * sum(b))
+    return m
+
+
+def test_oa_candidate_generated_and_outranks_gbd():
+    adv = analyze_decomposition(_convex_minlp_localizing())
+    methods = {c.method for c in adv.candidates()}
+    assert MethodKind.OUTER_APPROXIMATION in methods
+    assert MethodKind.GENERALIZED_BENDERS in methods
+    # OA is proven-equivalent (convex) and outranks GBD, so it is recommended.
+    assert adv.recommendation().recommendation is MethodKind.OUTER_APPROXIMATION
+
+
+def test_oa_not_offered_for_nonconvex():
+    """A nonconvex MINLP must not get a (proven-equivalent) OA candidate."""
+    m = dm.Model("noncvx")
+    b = m.binary("b")
+    x = m.continuous("x", lb=-5, ub=5)
+    m.subject_to(x * x >= 1 + b)  # nonconvex feasible region (concave <=0 form)
+    m.minimize(x + b)
+    adv = analyze_decomposition(m)
+    methods = {c.method for c in adv.candidates()}
+    assert MethodKind.OUTER_APPROXIMATION not in methods

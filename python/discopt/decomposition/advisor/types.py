@@ -28,6 +28,7 @@ class MethodKind(Enum):
     INDEPENDENT_BLOCKS = "independent_blocks"
     BENDERS = "benders"
     GENERALIZED_BENDERS = "generalized_benders"
+    OUTER_APPROXIMATION = "outer_approximation"
     LAGRANGIAN = "lagrangian"
     # Registered for later phases (see design doc §5):
     DANTZIG_WOLFE = "dantzig_wolfe"
@@ -45,6 +46,7 @@ class MethodKind(Enum):
             MethodKind.INDEPENDENT_BLOCKS: "Independent blocks",
             MethodKind.BENDERS: "Classical Benders",
             MethodKind.GENERALIZED_BENDERS: "Generalized Benders",
+            MethodKind.OUTER_APPROXIMATION: "Outer approximation",
             MethodKind.LAGRANGIAN: "Lagrangian relaxation",
             MethodKind.DANTZIG_WOLFE: "Dantzig-Wolfe",
             MethodKind.COLUMN_GENERATION: "Column generation",

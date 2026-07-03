@@ -39,7 +39,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from discopt.decomposition._linear import extract_linear, solution_dict
+from discopt.decomposition._linear import extract_linear, relative_gap, solution_dict
 from discopt.decomposition.structure import (
     DecompositionStructure,
     detect_decomposition,
@@ -67,10 +67,29 @@ class BendersConfig:
 
     time_limit: float = 3600.0
     gap_tolerance: float = 1e-4
-    max_iterations: int = 100
+    # One Benders cut is added per iteration, so 100 is far too few for real
+    # instances; runtime stays bounded by ``time_limit`` regardless (T0.4).
+    max_iterations: int = 500
     prefer_pounce: bool = False
     feas_tol: float = 1e-6
     eta_floor: float = _ETA_FLOOR
+    # Multicut: give each independent recourse block its own eta variable and
+    # cut (T1.3). Reduces to the classic single-cut solver when the recourse does
+    # not separate (one block). ``backend`` runs the per-block recourse solves
+    # sequentially or on a thread pool.
+    multicut: bool = True
+    backend: str = "sequential"
+    # Separation-point stabilization (T2.2): "inout" separates cuts at an
+    # interior point x_sep = alpha*x* + (1-alpha)*x_center in addition to the
+    # cut at x* (which still drives the incumbent and guarantees progress), so
+    # correctness is unchanged and only the cut set is enriched. "none" is the
+    # classic Kelley separation.
+    stabilization: str = "none"
+    stab_alpha: float = 0.5
+    # Cut management (T2.3): drop an optimality cut whose slack has stayed large
+    # for this many consecutive master solves (feasibility cuts are kept forever).
+    cut_purge_after: int = 20
+    cut_slack_tol: float = 1e-3
 
 
 def _model_is_linear(model: Model) -> bool:
@@ -211,9 +230,12 @@ def solve_benders(
     lb_all, ub_all = flat_bounds(model)
 
     # Split rows into master-only and recourse (any nonzero recourse coeff).
+    # The recourse LP is a ``<=`` problem, so use the ``<=``-canonical view
+    # (equalities expanded, ``>=`` flipped) — identical to the classic row set.
+    A_leq, b_leq, _src_leq = lin.rows_leq()
     A_m_rows, b_m_rows = [], []  # master-only, over master cols
     Ax_rows, Ay_rows, r_rows = [], [], []  # recourse: A_x (master), A_y (sub), rhs
-    for vec, rhs in zip(lin.rows_coeff, lin.rows_rhs):
+    for vec, rhs in zip(A_leq, b_leq):
         sub_part = vec[scols] if len(scols) else np.zeros(0)
         if sub_part.size and np.any(np.abs(sub_part) > 0):
             Ax_rows.append(vec[mcols])
@@ -225,27 +247,73 @@ def solve_benders(
 
     A_m = np.array(A_m_rows) if A_m_rows else np.zeros((0, n_master))
     b_m = np.array(b_m_rows) if b_m_rows else np.zeros(0)
-    A_x = np.array(Ax_rows) if Ax_rows else np.zeros((0, n_master))
-    A_y = np.array(Ay_rows) if Ay_rows else np.zeros((0, len(scols)))
-    r = np.array(r_rows) if r_rows else np.zeros(0)
 
     c_master = lin.c[mcols]
-    c_sub = lin.c[scols] if len(scols) else np.zeros(0)
-
     master_bounds = [(float(lb_all[i]), float(ub_all[i])) for i in mcols]
-    sub_bounds = [(float(lb_all[i]), float(ub_all[i])) for i in scols]
 
-    # Accumulated cuts on (x, eta): coeff_x (n_master,), coeff_eta, rhs (<=).
+    # ── partition the recourse into independent blocks (T1.3 multicut) ──
+    # Two sub-variables share a block iff they co-occur in a recourse row; the
+    # blocks are the connected components of that graph. Each block gets its own
+    # eta and its own cut, so a separable recourse converges in far fewer
+    # iterations. With one block this is exactly the classic single-cut solver.
+    ny = len(scols)
+    if cfg.multicut and ny:
+        from discopt.decomposition.graph import kernels
+
+        row_positions = [[int(i) for i in np.nonzero(np.abs(ay) > 0)[0]] for ay in Ay_rows]
+        sub_cliques = [pos for pos in row_positions if pos]
+        block_of_pos, n_blocks = kernels.connected_components(ny, sub_cliques)
+    else:
+        row_positions = [[int(i) for i in np.nonzero(np.abs(ay) > 0)[0]] for ay in Ay_rows]
+        block_of_pos = [0] * ny
+        n_blocks = 1
+    n_blocks = max(1, n_blocks)
+
+    pos_of_block: list[list[int]] = [[] for _ in range(n_blocks)]
+    for k in range(ny):
+        pos_of_block[block_of_pos[k]].append(k)
+    rows_of_block: list[list[int]] = [[] for _ in range(n_blocks)]
+    for i, pos in enumerate(row_positions):
+        b = block_of_pos[pos[0]] if pos else 0
+        rows_of_block[b].append(i)
+
+    class _Block:
+        __slots__ = ("bid", "cols", "c_sub", "sub_bounds", "A_x", "A_y", "r")
+
+        def __init__(self, bid: int, positions: list[int], row_idx: list[int]):
+            self.bid = bid
+            self.cols = np.array([scols[k] for k in positions], dtype=int)
+            self.c_sub = lin.c[self.cols] if self.cols.size else np.zeros(0)
+            self.sub_bounds = [(float(lb_all[j]), float(ub_all[j])) for j in self.cols]
+            self.A_x = (
+                np.array([Ax_rows[i] for i in row_idx]) if row_idx else np.zeros((0, n_master))
+            )
+            self.A_y = (
+                np.array([Ay_rows[i][positions] for i in row_idx])
+                if row_idx
+                else np.zeros((0, len(positions)))
+            )
+            self.r = np.array([r_rows[i] for i in row_idx]) if row_idx else np.zeros(0)
+
+    blocks = [_Block(b, pos_of_block[b], rows_of_block[b]) for b in range(n_blocks)]
+
+    from discopt.decomposition.parallel.comm import select_backend
+
+    comm = select_backend(cfg.backend)
+
+    # Accumulated cuts, each on ``(x, eta_b)``: (block_id, coeff_x, coeff_eta, rhs).
+    cut_block: list[int] = []
     cut_x: list[np.ndarray] = []
     cut_eta: list[float] = []
     cut_rhs: list[float] = []
 
     def _solve_master(with_eta: bool):
-        ncol = n_master + (1 if with_eta else 0)
+        n_eta = n_blocks if with_eta else 0
+        ncol = n_master + n_eta
         c = np.zeros(ncol)
         c[:n_master] = c_master
         if with_eta:
-            c[-1] = 1.0
+            c[n_master:] = 1.0  # min c_x·x + sum_b eta_b
         rows, rhs = [], []
         if A_m.shape[0]:
             pad = np.zeros((A_m.shape[0], ncol))
@@ -256,7 +324,7 @@ def solve_benders(
             cm = np.zeros((len(cut_x), ncol))
             for k in range(len(cut_x)):
                 cm[k, :n_master] = cut_x[k]
-                cm[k, -1] = cut_eta[k]
+                cm[k, n_master + cut_block[k]] = cut_eta[k]
             rows.append(cm)
             rhs.append(np.array(cut_rhs))
         A_ub = np.vstack(rows) if rows else None
@@ -265,7 +333,7 @@ def solve_benders(
         integrality = np.zeros(ncol, dtype=np.int32)
         integrality[:n_master] = part.master_int.astype(np.int32)
         if with_eta:
-            bounds.append((cfg.eta_floor, _BIG))
+            bounds.extend([(cfg.eta_floor, _BIG)] * n_blocks)
         res = milp(
             c,
             A_ub=A_ub,
@@ -277,13 +345,10 @@ def solve_benders(
         )
         return res
 
-    def _recourse(x_hat: np.ndarray):
-        """Return ('opt', Q, y, lam, rc, bnds) or ('infeas', v, None, lam, rc, bnds).
-
-        ``lam`` are the recourse row duals, ``rc`` the variable reduced costs,
-        and ``bnds`` the recourse column bounds — together they reconstruct the
-        *complete* LP dual objective for a soundly-anchored cut.
-        """
+    def _recourse_block(blk: "_Block", x_hat: np.ndarray):
+        """Classify one recourse block's LP at x̂ (kinds as in the single-block
+        docstring: ``opt`` / ``unbounded`` / ``infeas`` / ``recourse_fail``)."""
+        A_x, A_y, r, sub_bounds, c_sub = blk.A_x, blk.A_y, blk.r, blk.sub_bounds, blk.c_sub
         rhs = r - (A_x @ x_hat if A_x.shape[0] else np.zeros(0))
         res = dual_lp(
             c_sub,
@@ -310,15 +375,19 @@ def solve_benders(
                 rc,
                 sub_bounds,
             )
-        # Feasibility subproblem: min 1^T s s.t. A_y y - s <= rhs, s >= 0.
+        if res.status == SolveStatus.UNBOUNDED:
+            return "unbounded", None, None, None, None, sub_bounds
         m_rec = A_y.shape[0]
-        ny = len(scols)
-        Afeas = np.zeros((m_rec, ny + m_rec))
-        Afeas[:, :ny] = A_y
-        Afeas[:, ny:] = -np.eye(m_rec)
-        c_feas = np.concatenate([np.zeros(ny), np.ones(m_rec)])
+        nyb = len(blk.cols)
+        Afeas = np.zeros((m_rec, nyb + m_rec))
+        Afeas[:, :nyb] = A_y
+        Afeas[:, nyb:] = -np.eye(m_rec)
+        c_feas = np.concatenate([np.zeros(nyb), np.ones(m_rec)])
         bnds = list(sub_bounds) + [(0.0, _BIG)] * m_rec
         fres = dual_lp(c_feas, A_ub=Afeas, b_ub=rhs, bounds=bnds)
+        if fres.status != SolveStatus.OPTIMAL:
+            return "recourse_fail", None, None, None, None, bnds
+        v = float(fres.objective) if fres.objective is not None else 0.0
         lam = (
             np.asarray(fres.dual_values, dtype=np.float64)
             if fres.dual_values is not None
@@ -329,10 +398,14 @@ def solve_benders(
             if fres.reduced_costs is not None
             else None
         )
-        v = float(fres.objective) if fres.objective is not None else 0.0
         return "infeas", v, None, lam, rc, bnds
 
-    def _dual_const(lam, rc, col_bounds) -> float:
+    def _recourse_all(x_hat: np.ndarray):
+        """Solve every block's recourse at x̂ on the configured backend, in block
+        order (deterministic regardless of backend)."""
+        return comm.map(blocks, lambda blk: _recourse_block(blk, x_hat))
+
+    def _dual_const(blk: "_Block", lam, rc, col_bounds) -> float:
         """The y-independent part of the *complete* LP dual objective,
         ``lam^T r + sum_j rc_j * (lb_j if rc_j>0 else ub_j)``.
 
@@ -352,6 +425,7 @@ def solve_benders(
         slack's ``_BIG`` upper bound) would otherwise inject a ``rc * 1e20``
         term and corrupt the cut constant.
         """
+        r = blk.r
         d = float(lam @ r) if lam.size and r.size else 0.0
         if rc is not None:
             for j, rcj in enumerate(rc):
@@ -365,29 +439,37 @@ def solve_benders(
                         d += rcj * ubj
         return d
 
-    def _add_opt_cut(lam, rc, col_bounds):
-        # Optimality cut = the complete LP dual objective as a function of y:
-        #     eta >= lam^T(r - A_x y) + bound_terms = const + s^T y,
-        # with s = -A_x^T lam and const = _dual_const(...). Valid for any
-        # dual-feasible (lam, rc) by weak duality, so it never over-cuts even
-        # with POUNCE's interior-point duals.  s^T y - eta <= -const.
-        s = -(A_x.T @ lam) if A_x.shape[0] else np.zeros(n_master)
-        const = _dual_const(lam, rc, col_bounds)
+    def _add_opt_cut(blk: "_Block", lam, rc, col_bounds):
+        # Optimality cut on this block's eta = the complete LP dual objective:
+        #     eta_b >= lam^T(r - A_x y) + bound_terms = const + s^T y,
+        # with s = -A_x^T lam. Valid for any dual-feasible (lam, rc) by weak
+        # duality.  s^T x - eta_b <= -const.
+        s = -(blk.A_x.T @ lam) if blk.A_x.shape[0] else np.zeros(n_master)
+        const = _dual_const(blk, lam, rc, col_bounds)
+        cut_block.append(blk.bid)
         cut_x.append(s.copy())
         cut_eta.append(-1.0)
         cut_rhs.append(-const)
+        return blk.bid, s, -1.0, -const
 
-    def _add_feas_cut(lam, rc, col_bounds):
-        # Feasibility cut = the complete dual objective of the slack-min
-        # subproblem (the min infeasibility v(y)) as a function of y:
-        #     v_D(y) = lam^T(r - A_x y) + bound_terms <= 0.
-        # v_D <= v(y) (weak duality) and v_D(ŷ) = v(ŷ) > 0 excludes ŷ, while every
-        # recourse-feasible y (v(y) = 0) satisfies it.  s^T y <= -const.
-        s = -(A_x.T @ lam) if A_x.shape[0] else np.zeros(n_master)
-        const = _dual_const(lam, rc, col_bounds)
+    def _add_feas_cut(blk: "_Block", lam, rc, col_bounds):
+        # Feasibility cut for this block: the min-infeasibility dual objective
+        #     v_D(y) = lam^T(r - A_x y) + bound_terms <= 0  (excludes ŷ).
+        s = -(blk.A_x.T @ lam) if blk.A_x.shape[0] else np.zeros(n_master)
+        const = _dual_const(blk, lam, rc, col_bounds)
+        cut_block.append(blk.bid)
         cut_x.append(s.copy())
         cut_eta.append(0.0)
         cut_rhs.append(-const)
+        return blk.bid, s, 0.0, -const
+
+    def _cut_separates(cut, x_hat, eta_vec) -> bool:
+        # A cut ``s·x + eta_coef·eta_b <= rhs`` separates (x̂, η̂_b) iff violated
+        # there beyond tolerance. A cut that does not separate makes no progress.
+        bid, s, eta_coef, rhs = cut
+        eta_b = float(eta_vec[bid]) if bid < len(eta_vec) else -np.inf
+        lhs = float(s @ x_hat) + eta_coef * eta_b
+        return bool(lhs > rhs + cfg.feas_tol)
 
     # ── initialize: feasible master point (no eta) ──
     init = _solve_master(with_eta=False)
@@ -397,15 +479,70 @@ def solve_benders(
         return SolveResult(status="error", wall_time=time.time() - t0)
     x_hat = np.asarray(init.x[:n_master], dtype=np.float64)
 
-    kind, val, y_star, lam, rc, bnds = _recourse(x_hat)
-    if kind == "opt":
-        _add_opt_cut(lam, rc, bnds)
-    else:
-        _add_feas_cut(lam, rc, bnds)
+    results = _recourse_all(x_hat)
+    if any(r is not None and r[0] == "recourse_fail" for r in results):
+        results = _recourse_all(x_hat)  # retry once
+        if any(r is not None and r[0] == "recourse_fail" for r in results):
+            logger.warning("Benders recourse solve failed twice at the initial point.")
+            return SolveResult(status="error", wall_time=time.time() - t0)
+    for r in results:
+        if r[0] == "unbounded":
+            return SolveResult(status="unbounded", wall_time=time.time() - t0)
+    for blk, res in zip(blocks, results):
+        kind = res[0]
+        if kind == "opt":
+            _add_opt_cut(blk, res[3], res[4], res[5])
+        elif kind == "infeas":
+            _add_feas_cut(blk, res[3], res[4], res[5])
 
     best_ub = np.inf
     incumbent_full: np.ndarray | None = None
     status = "iteration_limit"
+    stall = 0  # consecutive non-separating iterations (T0.4 progress guard)
+    x_center: np.ndarray | None = None  # in-out stabilization centre (T2.2)
+    cut_streak: list[int] = [0] * len(cut_x)  # per-cut large-slack streak (T2.3)
+
+    def _add_inout_cuts(x_star: np.ndarray):
+        """Separate additional cuts at the interior point
+        ``x_sep = alpha*x* + (1-alpha)*x_center`` (T2.2). These are extra valid
+        global underestimators; the x* cuts already added drive the incumbent and
+        guarantee progress, so this only enriches the master."""
+        if cfg.stabilization != "inout" or x_center is None or cfg.stab_alpha >= 1.0:
+            return
+        x_sep = cfg.stab_alpha * x_star + (1.0 - cfg.stab_alpha) * x_center
+        sep_results = _recourse_all(x_sep)
+        for blk, res in zip(blocks, sep_results):
+            if res is None or res[0] in ("recourse_fail", "unbounded"):
+                continue  # a fractional x_sep block issue: just skip stabilization
+            if res[0] == "opt":
+                _add_opt_cut(blk, res[3], res[4], res[5])
+            elif res[0] == "infeas":
+                _add_feas_cut(blk, res[3], res[4], res[5])
+
+    def _purge_stale_cuts(x_star: np.ndarray, eta_vec: np.ndarray) -> None:
+        """Drop optimality cuts whose slack has stayed large for many master
+        solves (T2.3); feasibility cuts (eta_coef 0) are kept forever."""
+        while len(cut_streak) < len(cut_x):
+            cut_streak.append(0)
+        keep_idx = []
+        for k in range(len(cut_x)):
+            slack = cut_rhs[k] - (
+                float(cut_x[k] @ x_star) + cut_eta[k] * float(eta_vec[cut_block[k]])
+            )
+            if slack > cfg.cut_slack_tol:
+                cut_streak[k] += 1
+            else:
+                cut_streak[k] = 0
+            drop = cut_eta[k] == -1.0 and cut_streak[k] >= cfg.cut_purge_after
+            if not drop:
+                keep_idx.append(k)
+        if len(keep_idx) != len(cut_x):
+            logger.debug("Benders purged %d stale cuts", len(cut_x) - len(keep_idx))
+            cut_block[:] = [cut_block[k] for k in keep_idx]
+            cut_x[:] = [cut_x[k] for k in keep_idx]
+            cut_eta[:] = [cut_eta[k] for k in keep_idx]
+            cut_rhs[:] = [cut_rhs[k] for k in keep_idx]
+            cut_streak[:] = [cut_streak[k] for k in keep_idx]
 
     for _it in range(cfg.max_iterations):
         if time.time() - t0 > cfg.time_limit:
@@ -421,25 +558,66 @@ def solve_benders(
             status = "error"
             break
         x_hat = np.asarray(mres.x[:n_master], dtype=np.float64)
+        eta_vec = np.asarray(mres.x[n_master : n_master + n_blocks], dtype=np.float64)
+        if x_center is None:
+            x_center = x_hat.copy()  # first stabilization centre (T2.2)
         lb = mres.bound if mres.bound is not None else mres.objective
         lower_bound = (float(lb) + lin.c_offset) if lb is not None else None
 
-        kind, val, y_star, lam, rc, bnds = _recourse(x_hat)
-        if kind == "opt":
-            full_obj = float(c_master @ x_hat + val + lin.c_offset)
-            if full_obj < best_ub:
-                best_ub = full_obj
-                x_full = np.zeros(lin.n)
-                x_full[mcols] = x_hat
-                if len(scols):
-                    x_full[scols] = y_star
+        results = _recourse_all(x_hat)
+        if any(r is not None and r[0] == "recourse_fail" for r in results):
+            results = _recourse_all(x_hat)  # retry once (T0.3)
+            if any(r is not None and r[0] == "recourse_fail" for r in results):
+                logger.warning("Benders recourse solve failed twice; stopping.")
+                break
+        for r in results:
+            if r[0] == "unbounded":
+                return SolveResult(status="unbounded", wall_time=time.time() - t0)
+
+        # Incumbent: only when every block's recourse is optimal (feasible).
+        if all(res[0] == "opt" for res in results):
+            total = float(c_master @ x_hat + lin.c_offset)
+            x_full = np.zeros(lin.n)
+            x_full[mcols] = x_hat
+            for blk, res in zip(blocks, results):
+                total += res[1]
+                if blk.cols.size:
+                    x_full[blk.cols] = res[2]
+            if total < best_ub:
+                best_ub = total
                 incumbent_full = x_full
-            _add_opt_cut(lam, rc, bnds)
+                x_center = x_hat.copy()  # move stabilization centre to incumbent
+
+        # Per-block cuts; track whether any of them separates the master point.
+        separated = False
+        for blk, res in zip(blocks, results):
+            if res[0] == "opt":
+                cut = _add_opt_cut(blk, res[3], res[4], res[5])
+            else:  # infeas
+                cut = _add_feas_cut(blk, res[3], res[4], res[5])
+            if _cut_separates(cut, x_hat, eta_vec):
+                separated = True
+
+        # In-out: enrich the master with cuts separated at the interior point.
+        _add_inout_cuts(x_hat)
+        # Cut management: drop long-stale optimality cuts.
+        _purge_stale_cuts(x_hat, eta_vec)
+
+        if separated:
+            stall = 0
         else:
-            _add_feas_cut(lam, rc, bnds)
+            stall += 1
+            logger.warning(
+                "Benders iteration %d added no separating cut "
+                "(degenerate or missing duals); stall=%d.",
+                _it,
+                stall,
+            )
+            if stall >= 2:
+                break
 
         if np.isfinite(best_ub) and lower_bound is not None:
-            gap = (best_ub - lower_bound) / (abs(best_ub) + 1e-10)
+            gap = relative_gap(best_ub, lower_bound)
             if gap <= cfg.gap_tolerance:
                 status = "optimal"
                 break
@@ -451,6 +629,14 @@ def solve_benders(
         lb = final.bound if final.bound is not None else final.objective
         if lb is not None:
             bound = float(lb) + lin.c_offset
+        # The eta floor keeps the master bounded before cuts arrive; if any
+        # block's eta still sits on it, that block's recourse is not yet
+        # underestimated and the master "bound" is the floor — withhold it (T0.5).
+        if final.x is not None and len(final.x) >= n_master + n_blocks:
+            eta_final = np.asarray(final.x[n_master : n_master + n_blocks], dtype=np.float64)
+            if np.any(eta_final <= cfg.eta_floor + 1.0):
+                logger.warning("Benders eta floor still active; withholding bound.")
+                bound = None
 
     if status == "infeasible":
         return SolveResult(status="infeasible", wall_time=time.time() - t0, gap_certified=True)
@@ -458,7 +644,7 @@ def solve_benders(
     objective = None if not np.isfinite(best_ub) else best_ub
     # Promote to optimal if the final master bound already meets the incumbent.
     if status == "iteration_limit" and objective is not None and bound is not None:
-        if (objective - bound) / (abs(objective) + 1e-10) <= cfg.gap_tolerance:
+        if relative_gap(objective, bound) <= cfg.gap_tolerance:
             status = "optimal"
 
     # Map the internal-minimization values back to the model's sense. For a
@@ -470,7 +656,7 @@ def solve_benders(
     reported_bound = None if bound is None else bound * sense_flip
     reported_gap: float | None = None
     if reported_obj is not None and reported_bound is not None:
-        reported_gap = abs(reported_obj - reported_bound) / (abs(reported_obj) + 1e-10)
+        reported_gap = abs(relative_gap(reported_obj, reported_bound))
 
     x_dict = solution_dict(model, incumbent_full) if incumbent_full is not None else None
 

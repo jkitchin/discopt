@@ -209,3 +209,85 @@ def test_pounce_only_no_highspy(monkeypatch):
     assert r.status == "optimal"
     assert r.objective == pytest.approx(5.0, abs=ABS_TOL)
     assert r.bound is not None and r.bound <= r.objective + 1e-4
+
+
+# ── Phase 1 (T1.3): multicut Benders ──────────────────────────
+
+
+def _two_block_facility():
+    """One binary gates two independent recourse blocks (x-block, z-block).
+    y must be built; block A needs >=4, block B needs >=6 -> optimum 5+4+6=15."""
+    m = dm.Model("mc2")
+    y = m.binary("y")
+    x = m.continuous("x", shape=(2,), lb=0, ub=10)
+    z = m.continuous("z", shape=(2,), lb=0, ub=10)
+    m.first_stage(y)
+    m.subject_to(x[0] + x[1] >= 4 * y)
+    m.subject_to(x[0] <= 10 * y)
+    m.subject_to(x[1] <= 10 * y)
+    m.subject_to(z[0] + z[1] >= 6 * y)
+    m.subject_to(z[0] <= 10 * y)
+    m.subject_to(z[1] <= 10 * y)
+    m.subject_to(y >= 1)
+    m.minimize(5 * y + (x[0] + x[1]) + (z[0] + z[1]))
+    return m
+
+
+def _count_master_solves(model, **cfg_kw):
+    import discopt.solvers.lp_backend as lpb
+    from discopt.decomposition.benders.solver import BendersConfig
+
+    real = lpb.get_milp_solver
+    box = {"n": 0}
+
+    def counted(*a, **k):
+        solver = real(*a, **k)
+
+        def w(*aa, **kk):
+            box["n"] += 1
+            return solver(*aa, **kk)
+
+        return w
+
+    lpb.get_milp_solver = counted
+    try:
+        r = solve_benders(model, config=BendersConfig(time_limit=30, max_iterations=500, **cfg_kw))
+    finally:
+        lpb.get_milp_solver = real
+    return r, box["n"]
+
+
+def test_multicut_matches_single_cut_optimum():
+    r_multi, n_multi = _count_master_solves(_two_block_facility(), multicut=True)
+    r_single, n_single = _count_master_solves(_two_block_facility(), multicut=False)
+    assert r_multi.status == "optimal" and r_single.status == "optimal"
+    assert r_multi.objective == pytest.approx(15.0, abs=1e-3)
+    assert r_single.objective == pytest.approx(15.0, abs=1e-3)
+    # Multicut never needs more master solves than single-cut.
+    assert n_multi <= n_single
+
+
+def test_multicut_backend_determinism():
+    from discopt.decomposition.benders.solver import BendersConfig
+
+    seq = solve_benders(_two_block_facility(), config=BendersConfig(backend="sequential"))
+    thr = solve_benders(_two_block_facility(), config=BendersConfig(backend="threads"))
+    assert seq.objective == thr.objective
+    assert seq.bound == thr.bound
+    assert seq.status == thr.status
+
+
+# ── Phase 2 (T2.2): in-out separation ─────────────────────────
+
+
+def test_inout_stabilization_matches_optimum():
+    """In-out separation adds interior cuts on top of the x* cuts, so the
+    certified optimum is unchanged."""
+    from discopt.decomposition.benders.solver import BendersConfig
+
+    none = solve_benders(_two_block_facility(), config=BendersConfig(stabilization="none"))
+    inout = solve_benders(_two_block_facility(), config=BendersConfig(stabilization="inout"))
+    assert none.status == inout.status == "optimal"
+    assert none.objective == pytest.approx(inout.objective, abs=1e-3)
+    assert inout.objective == pytest.approx(15.0, abs=1e-3)
+    assert inout.bound is not None and inout.bound <= inout.objective + 1e-3
