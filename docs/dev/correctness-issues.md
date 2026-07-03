@@ -1,11 +1,34 @@
 # Correctness issue backlog — audit findings, loop-executable
 
-**Date:** 2026-07-02
-**Status:** complete backlog — all six audit reports incorporated (24 issues)
+**Date:** 2026-07-02 (updated 2026-07-03: +NN C-25..C-28, +Fable-review core P0s
+C-29..C-32, +solver-core review C-33..C-35; C-17 confirmed, C-23 escalated)
+**Status:** complete backlog — 35 issues. C-1..C-24 from the six-agent core audit;
+C-25..C-28 from the NN module remediation (`docs/dev/nn-module-plan.md`); C-29..C-32
+are the four core-soundness P0s the Fable submodule reviews surfaced that the core
+audit missed (CORE-1/CORE-2/TG-1/NM-1); C-33..C-35 from the solver-core review.
 **Source:** six-agent soundness audit of the relaxation math, presolve/FBBT, B&B
-status logic, cut validity, `.nl`/IR ingestion, and LP/dual-bound layers.
+status logic, cut validity, `.nl`/IR ingestion, and LP/dual-bound layers; plus the
+Fable per-submodule reviews (`docs/dev/review-execution-plan.md`) and the solver-core
+review (`docs/dev/solver-core-review.md`).
 **Companion:** `docs/dev/certification-gap-plan.md` (performance). This file is
 correctness only.
+
+> **2026-07-03 reconciliation.** The Fable submodule reviews independently re-found
+> some issues here and surfaced core-soundness P0s the six-agent audit missed. Folded
+> in as **C-29** (=CORE-1, vector-body collapse), **C-30** (=CORE-2, maximize-sense
+> loss), **C-31** (=TG-1, FBBT array collapse), **C-32** (=NM-1, `asin`/`acos`
+> inverted curvature). The solver-core review added **C-33** (=SC-1, pure-continuous
+> fallback certifies a nonconvex model), **C-34** (=FR-1, even-power bound over a
+> zero-straddling base), **C-35** (=OA-1, unconditional no-good cut); it **confirmed
+> C-17** with a deterministic repro, **broadened C-31** (now reaches the certified LP
+> dual bound via `_fbbt_argument_box`, not just conflict cuts), and **escalated C-23**
+> P3→P1 (`relax_div` is unsound for *nonlinear* denominators). It also verified the
+> **convexity certifier and convex fast-path SOUND** under 901-certificate fuzz — the
+> highest-stakes gate holds; do not re-audit without new evidence. Pre-existing
+> overlaps cross-linked in-line: C-6 (integer clamp) ↔ gams CD-1; C-11 (`__ne__`) ↔
+> modeling M4; C-19 (`relax_tan` pole) confirmed on the numpy backend too (= NM-4).
+> **Note the C-25..C-28 range is the NN backlog** — do not confuse with the CORE
+> findings (C-29..C-32).
 
 ---
 
@@ -27,8 +50,21 @@ order (§1). For EACH issue:
    - `pytest -m slow python/tests/test_adversarial_recent_fixes.py` — 0 failures
    - `cargo test -p discopt-core` when Rust was touched — 0 failures
    - `incorrect_count ≤ 0` on the affected suite (never weaken this)
-   - every fix includes a NEW regression test that fails before the fix and passes
-     after (name it in the Log).
+   - **every fix ships with a NEW *fast* regression test — mandatory, not optional.**
+     It must (a) **fail before** the fix and **pass after** (prove it red on the
+     pre-fix code — ideally land the test first, red, then the fix, green); (b) be
+     **fast**: a `@pytest.mark.smoke` unit test (or a `cargo test` unit test for Rust)
+     that runs **sub-second** by calling the buggy function/relaxation/bound
+     **directly** on the repro input rather than a full `Model.solve()` where a direct
+     call suffices — so it runs in CI on every PR and locks the class against future
+     regression; (c) encode the **specific false-certificate class**, not just the
+     named instance (§2 of CLAUDE.md) — e.g. the off-diagonal soundness harness for
+     C-32, the nonlinear-denominator containment for C-23, the whole-box α check for
+     C-17, the heterogeneous-block FBBT for C-31 — so a future refactor that
+     reintroduces the bug in any guise trips it; (d) be **named in the Log**. Where a
+     repro already exists (C-17 spike, C-23 `1/(x*y)`, C-31 characterization tests,
+     C-33 double-well, C-34 `x**4`), port it verbatim. Do not close an issue without
+     this test committed.
 4. **Update this file in the same PR:** status (`open` → `confirmed` → `fixed` /
    `false-positive` / `wontfix+reason`), Log entry, PR number.
 5. One issue per PR, titled `fix(correctness): <ID> <summary>`.
@@ -51,7 +87,7 @@ in non-default configs; loud ingestion gaps. **P3** = hygiene.
 | ID | Priority | Area | Summary | Status |
 |---|---|---|---|---|
 | C-16 | P0 | presolve/aggregate | positional bound resync after variable-removing pass fuses unrelated variables' bounds → false "infeasible" / silent optimum cut, DEFAULT path | fixed |
-| C-17 | P0 | alphaBB bound | node bound uses sampled (non-rigorous) α + center-only PSD check → false "optimal", default path for small nonconvex | open |
+| C-17 | P0 | alphaBB bound | node bound uses sampled (non-rigorous) α + center-only PSD check → false "optimal", default path for small nonconvex; deterministic repro confirms (spike width ≤ 0.006 → α=0, bound 0.0, true min −3.5) | confirmed |
 | C-13 | P0 | solver.py bounds | serial convex path trusts under-converged NLP objective as node lower bound → false "optimal" | open |
 | C-1 | P0 | solver.py status | false "infeasible" from non-rigorous NLP fathoms (solve_model path) | open |
 | C-4 | P1 | mir.rs cuts | integer-MIR applied with fractional integer lower bound → invalid cut | open |
@@ -71,13 +107,20 @@ in non-default configs; loud ingestion gaps. **P3** = hygiene.
 | C-3 | P2 | solver.py incumbent | unrounded integer incumbent survives if terminal polish throws | open |
 | C-11 | P2 | modeling API | missing `__ne__` → `x != y` silently evaluates False | open |
 | C-22 | P3 | fbbt.rs interval | `interval_mul` NaN endpoints on 0·∞ (lost tightening, not unsound) | open |
-| C-23 | P3 | mccormick.py | `_relax_reciprocal` wrong concavity label for negative denominators (latent) | open |
+| C-23 | P1 | mccormick.py | ESCALATED (was P3): `relax_div` produces an invalid convex underestimator (cv > f) for **nonlinear** denominators (`1/(x*y)` cv=1.334 > true 1.0) — the "harmless" label held only for variable/affine denominators; `_relax_reciprocal` also mislabels concavity for negative denominators (= DIV-1) | confirmed |
 | C-24 | P3 | mccormick.py | secants produce NaN on infinite bounds; soundness leans on downstream filters | open |
 | C-12 | P3 | .nl parser | range-split renumbers constraints vs source indices | open |
 | C-25 | P1 | nn/formulations | scaling + bound-propagation domain mismatch cuts the true optimum on scaled embedded NNs | in progress (nn-module-plan T-N0.2) |
 | C-26 | P1 | nn/tree_ensemble | tree big-M invalid for out-of-box thresholds → cuts feasible points | in progress (nn-module-plan T-N0.3) |
 | C-27 | P2 | nn/readers/onnx | ONNX reader silently mis-reads Gemm attrs / residual Add / branched graphs | in progress (nn-module-plan T-N1.1) |
 | C-28 | P2 | nn/readers/sklearn | sklearn classifier semantics silently embed logits / wrong base_score | in progress (nn-module-plan T-N1.2) |
+| C-29 | P0 | classify/extract | vector-body constraint collapses to one summed row ("array var treated as sum") → infeasible point certified optimal, DEFAULT path (= CORE-1, modeling M1) | confirmed |
+| C-30 | P0 | classify/extract | maximize sense lost on `sum(const·var)` bodies (raises `ValueError` not `_NotLinearError`, mis-routes to sense-dropping fallback) → returns 0 instead of true max (= CORE-2, ro ADJ-1) | confirmed |
+| C-31 | P0 | presolve/FBBT | FBBT collapses an array-variable block to element-0's bounds and stamps them on every element → cuts feasible points AND false "infeasible"; chains into invalid conflict cuts AND (broadened) into the certified LP dual bound via `_fbbt_argument_box` (= TG-1) | confirmed |
+| C-32 | P0 | relaxation/mccormick | `relax_asin`/`relax_acos` inverted curvature regime → unsound convex envelope (cv > f) in the LIVE JAX layer → invalid dual bound (= NM-1) | confirmed |
+| C-33 | P0 | solver.py fallback | pure-continuous fallback certifies a nonconvex model's local optimum with `gap_certified=True` (= SC-1), DEFAULT path | confirmed |
+| C-34 | P0 | gdp_reformulate | even-power bound over a zero-straddling base uses endpoint-only bounds (omits interior min at 0) → invalid aux box → false optimal (= FR-1), DEFAULT path | confirmed |
+| C-35 | P1 | oa.py / gdpopt_loa | non-rigorous NLP failure → unconditional no-good cut → possible false infeasible/optimal (= OA-1, opt-in OA/LOA path) | open |
 
 ---
 
@@ -178,13 +221,21 @@ curvature lives at an unsampled interior point passes the gate while L is
 nonconvex → the "lower bound" can exceed `min_box f` → fathoms the node holding
 the true optimum → **wrong answer certified optimal**.
 
-**Reproduce/confirm:**
-1. Static: read `_compute_alphabb_bound` and confirm the α source is
-   `estimate_alpha` and the PSD check is center-only.
-2. Dynamic: construct a low-dim objective with a sharp negative-curvature spike
-   off-center (e.g. `f(x)=x⁴ − c·exp(−k(x−a)²)` tuned so center Hessian is PSD
-   with the sampled α); assert `_compute_alphabb_bound > min_box f` (direct grid
-   check). Deterministic seed for the sampler.
+**Reproduce/confirm:** CONFIRMED 2026-07-03 (solver-core review) with a
+deterministic repro. `f(x) = ½x² − B·exp(−(x−a)²/2s²)` on `[−2,2]`, B=4, a=1;
+sweep the spike width `s`:
+
+| s | sampled α | needed α (true) | H(center) | alphaBB "bound" | true box min | invalid? |
+|---|---|---|---|---|---|---|
+| 0.006  | 0.000 | 24,791  | 1.0 (passes gate) | 0.000 | −3.500 | +3.5 |
+| 0.003  | 0.000 | 99,168  | 1.0 | 0.000 | −3.500 | yes |
+| 0.0015 | 0.000 | 396,674 | 1.0 | 0.000 | −3.500 | yes |
+
+The narrow negative-curvature band falls between all deterministic sample points →
+α=0; the center Hessian (=1.0) passes the gate; the function returns 0.0 as a
+"valid lower bound" while the true minimum is −3.5. In B&B this fathoms the node
+holding the true optimum → wrong answer certified optimal. (Repro script was saved
+under the review scratchpad; re-derive it as the regression fixture — see below.)
 
 **Fix:** replace `estimate_alpha` with `rigorous_alpha` in the node-bound path,
 and drop the center-only PSD gate (rigorous α guarantees convexity by
@@ -192,15 +243,24 @@ construction; when it abstains — unbounded interval Hessian — return no boun
 rather than a guessed one). Keep `estimate_alpha` only for non-certifying
 heuristic uses, renamed/flagged accordingly.
 
+**Regression test (required — fast, add in the fix PR):** port the `s=0.006` spike
+repro into a `@pytest.mark.smoke` unit test that (a) asserts the OLD path returns a
+bound > true box minimum (documents the bug, xfail-until-fixed), and (b) asserts the
+NEW `rigorous_alpha` path returns a bound ≤ true box minimum (or abstains). Sub-second;
+no full solve needed — call `_compute_alphabb_bound` directly on the root box. This
+locks the class so a future revert to sampled α fails CI immediately.
+
 **Done criteria:**
 - The adversarial construction returns a bound ≤ true box minimum (or no bound).
 - Differential bound test on a panel of nonconvex ≤50-var instances: alphaBB bound
   never exceeds the oracle box minimum across 100 random boxes each.
+- The fast regression test above is committed and passes.
 - Benchmarks: node counts may increase (weaker but sound bounds) — acceptable;
   incorrect_count must not.
 - Standing gates pass.
 
-**Log:** —
+**Log:** 2026-07-03 — CONFIRMED open P0 via deterministic spike repro
+(solver-core review, `docs/dev/solver-core-review.md` §1). Status open→confirmed.
 
 ---
 
@@ -868,22 +928,60 @@ product range and is never NaN; standing gates pass.
 
 ---
 
-## C-23 (P3) — `_relax_reciprocal` labels `1/y` convex on (−∞,0); it is concave there (latent)
+## C-23 (P1) — `relax_div` produces an invalid convex underestimator for nonlinear denominators (ESCALATED from P3)
 
-**Area:** `python/discopt/_jax/mccormick.py:102-116` (sets `cv=1/y, cc=secant` on
-the negative branch — inverted). Currently benign: `relax_div` (`:135`) uses only
-the exact-value side with correct bounds, and `relax_fractional`
-(`envelopes.py:156-161`) min/max-combines away the bad branch. Latent trap for any
-future caller trusting `recip_cc`. The correct implementation already exists at
-`envelopes.py:578` (`relax_reciprocal`).
+**Area:** `python/discopt/_jax/mccormick.py:119-135` (`relax_div`), wired at
+`relaxation_compiler.py:719-726`. Also `:102-116` (`_relax_reciprocal` sets
+`cv=1/y, cc=secant` on the negative branch — inverted concavity label).
 
-**Fix:** branch on `y_ub < 0` and swap cv/cc (match `envelopes.py:578`); add the
-envelope property test `cv ≤ 1/y ≤ cc` on negative intervals.
+**Escalation (2026-07-03, solver-core review = DIV-1):** the "latent/harmless"
+verdict was **falsified**. `relax_div` composes `x/y = x·(1/y)` and evaluates the
+reciprocal at `mid_r = ½(cv_r + cc_r)` — the midpoint of the *denominator's
+relaxation interval*. When the denominator is a bare variable or affine its
+relaxation point-collapses (`cv_r = cc_r`), so `1/mid_r` is exact → sound (the only
+case C-23/NM originally tested). When the denominator is **nonlinear** (`x*y`,
+`x*x`, `sqrt(x*y)`, `x*y+1`, …) `cv_r ≠ cc_r` even at a point, so `mid_r ≠` the true
+denominator and `1/mid_r` sits **above** the true `1/(·)` → the "convex
+underestimator" `cv > f` → invalid dual bound.
 
-**Done criteria:** property test green on positive AND negative branches; existing
-div/fractional relaxation tests unchanged; standing gates pass.
+**Reproduce/confirm (VERIFIED):** `1/(x*y)` on `[0.3,2]×[0.4,1.8]` at (1,1):
+compiler returns `cv = 1.334`, true `f = 1.0` (worst over box +0.80); `cv > f` at
+**3000/3000** sampled points. Reproduced on `x/(y*z)` (+1.52), `(x+1)/(x*y)` (+1.24),
+`1/(x*x)` (+1.15), `1/sqrt(x*y)` (+0.23), `1/(x*y+1)` (+0.07). `1/x`, `1/(x+y)`,
+`x/y`, `1/exp(x)` stay sound. Instrumented root cause: for `1/(x*y)` at (1,1) the
+denominator relax returns `[cv_r=0.499, cc_r=1.0]`, `mid_r=0.75`,
+`_relax_reciprocal → cv=1.334`.
 
-**Log:** —
+**Reachability:** writes the invalid value into `result_lbs[i]` (`solver.py:5054`)
+under opt-in `mccormick_bounds="nlp"` only; default `auto` mode routes to the Rust
+`MccormickLPRelaxer`, which does not use JAX `relax_div`. The #120 decertification
+is currently the *only* backstop preventing a wrong pruned answer — the relaxation
+itself is unsound and must be fixed at the math level, not left to a downstream
+guard (CLAUDE.md §3).
+
+**Fix:** `relax_div`/`_relax_reciprocal` must apply the monotone-composition rule
+over the inner interval rather than reciprocating its midpoint — for `1/y` with
+`y∈[cv_r,cc_r]>0` (convex, decreasing), the valid convex underestimator of the
+composite is `1/cc_r` (evaluate the decreasing outer envelope at the concave
+over-estimator of the inner), not `1/mid_r`. Also branch on `y_ub < 0` and swap
+cv/cc for the negative branch (match `envelopes.py:578`).
+
+**Regression test (required — fast):** add the `1/(x*y)` containment repro to the
+relaxation soundness harness (`relaxation_harness.py`), which currently omits
+**reciprocal-/division-of-nonlinear-inner** — that omission is why CI was blind.
+Sub-second: sample cv/cc over the box and assert `cv ≤ f ≤ cc` at every grid point,
+on `1/(x*y)`, `x/(y*z)`, `1/(x*x)`, `1/sqrt(x*y)`, plus the sound `1/x`/`x/y` cases
+as controls. Fails before, passes after.
+
+**Done criteria:** the containment harness (incl. the new nonlinear-denominator
+operators) is green — `cv ≤ f ≤ cc` at every sampled point; the `1/(x*y)` repro
+flips from `cv=1.334>1.0` to sound; existing div/fractional relaxation tests
+unchanged; standing gates pass.
+
+**Log:** 2026-07-03 — ESCALATED P3→P1 and status open→confirmed. The
+variable/affine-only test coverage masked the nonlinear-denominator defect; the
+diagonal-vs-composite blind spot is the same one that hid C-32/NM-1
+(solver-core review, `docs/dev/solver-core-review.md` §1).
 
 ---
 
@@ -1109,7 +1207,312 @@ single-leaf 0-d `squeeze()` crash via `value.reshape(len(feature), -1)`.)
 
 ---
 
+## C-29 (P0) — Vector-body constraint collapses to one summed row (DEFAULT path)
+
+**Origin:** Fable solver-core-extraction review (CORE-1) and modeling review (M1).
+**Area:** `python/discopt/_jax/problem_classifier.py:224-226`
+(`_extract_linear_coefficients`, the "Array variable treated as sum" branch) and
+`:614` (`_extract_constraints_algebraic` appends exactly one row per `Constraint`
+object). The quadratic walker `_extract_quadratic_coefficients` (`:372` region) has
+the identical branch.
+**Reachability:** DEFAULT `m.solve()` on any LP/MILP/QP written with numpy-vectorized
+bodies — the idiom the modeling API's own docstrings teach.
+
+**Mechanism:** a vector-valued constraint body (`a + b <= 1` with `a,b` shape `(2,)`)
+is one `Constraint` whose body is array-valued; the extractor sums every element
+into a single coefficient and appends one row, so `a + b <= 1` is extracted as
+`Σa + Σb <= 1`. The correct autodiff extractor (`_extract_lp_data_autodiff`) is
+row-per-component but is bypassed because the algebraic path *succeeds* (wrongly).
+
+**Reproduce/confirm (VERIFIED):**
+- LP `min Σa+Σb s.t. a+b>=1` (shape (2,), box [0,1]) → objective **1.0**, true
+  **2.0**; the returned point is infeasible by the model's own `NLPEvaluator`.
+- MILP set-cover `min Σy+Σz s.t. y+z>=1` (shape (3,) binaries) → **1.0**, true **3.0**.
+- The scalar-loop form of the identical model solves correctly on the same path.
+
+**Fix:** Stage 1 (minimal, safe) — in both walkers, raise `_NotLinearError` on any
+array-shaped node in scalar position (delete the "treated as sum" branches); make
+`_eval_const` raise `_NotLinearError` (not `ValueError`) on a non-scalar. Affected
+models then route to the row-correct autodiff extractor. Stage 2 (restore speed) —
+teach the algebraic extractor to expand array bodies into per-element rows, verified
+bound-neutral against the autodiff extractor. Details: `solver-core-extraction-review.md` §3.
+
+**Done criteria:** the three repros return the true optima with elementwise-feasible
+points; algebraic-vs-autodiff extraction agree (rows, matrix, objective, sense) on a
+property-test panel of vectorized affine models; `_eval_const` non-scalar → `_NotLinearError`;
+standing gates; `incorrect_count ≤ 0`.
+
+**Log:** —
+
+---
+
+## C-30 (P0) — Maximize sense lost on `sum(const·var)` bodies
+
+**Origin:** Fable solver-core-extraction review (CORE-2) and ro review (ADJ-1).
+**Area:** `python/discopt/_jax/problem_classifier.py:259,569`
+(`_extract_linear_coefficients` → `_eval_const` calls `float(v.item())` on a size-2
+array and raises `ValueError`, not `_NotLinearError`), plus the fallback that catches
+it and drops the objective sense.
+
+**Mechanism:** `dm.sum(c * x)` recurses `SumExpression → BinaryOp("*") → _eval_const(Const([1,1]))`
+which raises a raw `ValueError`; the algebraic path aborts and falls over to a
+fallback that does **not** apply the maximize negation. `extract_lp_data` returns
+`c = [1,1,0]` (un-negated) for a *maximize* model, so the solver minimizes and returns 0.
+
+**Reproduce/confirm (VERIFIED):** `maximize dm.sum([1,1]·x) s.t. dm.sum([1,1]·x) <= 4`,
+`x∈[0,10]²` → objective **1.5e-08** at `x≈[0,0]`, true **4.0**. `extract_lp_data(m).c`
+is `[1,1,0]` un-negated. Scalar / `x[0]+x[1]` / `A@x` / `dm.sum(x)` forms all correct.
+
+**Fix:** raising `_NotLinearError` on the non-scalar `_eval_const` (C-29 Stage 1)
+routes this to the autodiff extractor, which handles sense — so C-29's fix largely
+subsumes this. ALSO audit every `except _NotLinearError`/`except Exception` around
+the extractors to confirm the fallback applies objective sense and row expansion;
+add a regression asserting `extract_lp_data(maximize_model).c` is negated.
+
+**Done criteria:** the maximize repro returns 4.0 and negated `c`; the sense-negation
+audit lands with a regression test; standing gates.
+
+**Log:** —
+
+---
+
+## C-31 (P0) — FBBT collapses an array-variable block to element-0's bounds
+
+**Origin:** Fable tightening/conflict review (TG-1, CF-1).
+**Area:** Rust `crates/discopt-core/src/presolve/fbbt.rs:1204-1208` (seeds each
+variable's interval from element-0's bounds, `v.lb.first()/v.ub.first()`, returns one
+`Interval` per block; the identical seeding is also at `fbbt_with_cutoff`
+`fbbt.rs:1105-1111`, and `eval_node_interval` `fbbt.rs:513-516` ignores the column) +
+`python/discopt/tightening.py:114-121` (stamps that single interval onto every scalar
+slot of the block).
+**Consumers (broadened 2026-07-03, solver-core review):**
+(1) `conflict.py:81-85` — uses `fbbt_box(...).infeasible` as its infeasibility oracle
+→ invalid no-good cuts (documented reach);
+(2) **NEW — the certified LP dual bound.** `_fbbt_argument_box`
+(`milp_relaxation.py:4338-4352`) intersects the FBBT box with the node box and builds
+a McCormick univariate-rescue envelope over it. `_fbbt_argument_box` is sound on its
+own logic (`fbbt_box`/`tightening.py:65` uses no objective cutoff — verified), so an
+envelope over it is valid **provided `fbbt_box` is correct** — but `fbbt_box` *is* the
+collapse bug, so on heterogeneous per-element array bounds it omits feasible arguments
+→ **invalid envelope feeding the certified LP relaxation bound**, not merely invalid
+conflict cuts. This makes fixing `fbbt_box` more urgent than the original card stated.
+(3) Reaches `probing.rs:78,90` via the same seeding.
+**Reachability:** any array variable with heterogeneous per-element bounds (DAE
+initial conditions, per-index box) through the presolve path.
+
+**Mechanism:** element 0's (tighter) bound is illegally propagated onto the other
+elements. The claim "a valid outer bound for every element of the block" is false.
+
+**Reproduce/confirm (VERIFIED):**
+- Over-tighten: `x=continuous(shape=(2,), lb=[8,0], ub=[10,10])` → `fbbt_box` returns
+  `lb=[8,8]`, deleting the feasible region `x[1]∈[0,8)`.
+- **False infeasible:** `x=continuous(shape=(2,), lb=[5,0], ub=[5,3])` → `fbbt_box`
+  returns `infeasible=True` (element 1 gets element-0's `lb=5` vs its own `ub=3`),
+  though `x=[5, 0..3]` is feasible — violates "FBBT never reports feasible as infeasible."
+- Chained: `find_conflict_cuts` on a model with the above `x` and a free binary
+  returns two cuts that together make the binary infeasible.
+
+**Fix:** element-aware FBBT for array blocks — per-scalar intervals from the Rust
+engine, or a Python interim guard applying a block interval only to elements whose
+*original* bounds equal element-0's, and never deriving `infeasible` from a collapsed
+block. Fixing this fixes the chained conflict-cut invalidity (CF-1). Details:
+`tightening-conflict-warmstart-iis-review.md`. NOTE: `test_tightening.py:68` uses only
+*homogeneous* array bounds, which is exactly why CI is blind — the regression test
+must use heterogeneous bounds.
+
+**Regression tests (required — fast):** two are already committed as Rust
+characterization tests pinning the *current buggy* behavior
+(`presolve::fbbt::tests::c31_array_block_collapses_to_element0_bounds`,
+`c31_heterogeneous_block_yields_false_infeasible` — they assert the collapse and
+carry "invert when fixed" comments). When the fix lands, **flip both** to assert
+per-element bounds are preserved / no false infeasible. Add a Python fast test on
+`_fbbt_argument_box` proving the univariate-rescue envelope over a heterogeneous
+block **contains all feasible arguments** (the new consumer #2). All sub-second.
+
+**Done criteria:** both repros fixed (no feasible cut; no false infeasible); the
+conflict-cut repro yields zero cuts on the feasible model; the `_fbbt_argument_box`
+envelope contains every feasible argument on a heterogeneous block; the two Rust
+characterization tests are flipped to assert correct behavior; homogeneous-bounds
+test still passes; `cargo test -p discopt-core`; differential-bound checks (this is a
+certified-path tightening change) per §0.
+
+**Log:** 2026-07-03 — Rust characterization tests committed (pin current behavior,
+`fbbt.rs` tests). Blast radius broadened to the certified LP dual bound via
+`_fbbt_argument_box` (solver-core review, `docs/dev/solver-core-review.md` §1).
+
+---
+
+## C-32 (P0) — `relax_asin`/`relax_acos` inverted curvature → unsound envelope in the LIVE JAX layer
+
+**Origin:** Fable numpy-mccormick review (NM-1). **This audit's McCormick pass
+(C-18/19/23/24) missed it.**
+**Area:** `python/discopt/_jax/mccormick.py:474-524` (LIVE) and the numpy port
+`python/discopt/_numpy/mccormick.py:210-241`. `arcsin''(x)=x(1−x²)^{−3/2}`, so arcsin
+is **convex on [0,1]** and concave on [−1,0] (acos mirrored); the code sets
+`is_concave = lb≥0` — treating the convex region as concave — and swaps cv/cc. The
+docstrings ("asin is convex on [-1,0]") are themselves wrong.
+
+**Mechanism:** the convex under-estimator `cv` is returned *above* the function →
+cuts feasible points below → invalid dual bound → risk of certifying a wrong optimum.
+
+**Reproduce/confirm (VERIFIED, live JAX):** `relax_asin(0.5)` on `[0.1,0.9]` returns
+`cv=0.609968 > true=0.523599` (gap 0.086) on **both** the JAX and numpy primitives.
+Off-diagonal fuzz over `[-0.99,0.99]` sub-boxes: **7,493 crossings**, worst 0.216.
+
+**Why both audits missed it:** the relaxation soundness suite evaluates on the
+diagonal `relax_fn(x, x, lb, ub)`, where a univariate-of-a-bare-variable relaxation
+collapses to a degenerate interval (`_secant → f(x)`), so the buggy branch is never
+exercised; and `asin(x*y)` routes via the sound multivariate bilinear path.
+
+**Fix:** swap the regime flags so `lb≥0` is the *convex* case for asin (mirror acos)
+in **both** `mccormick.py` files; correct the docstrings. THEN extend the soundness
+harness to sample **off-diagonal** (`x_cv ≠ x_cc`, univariate over non-degenerate
+boxes) so this class can never hide again. Also fix the related C-19 (`relax_tan`
+pole-straddling) — confirmed live on the numpy backend during this reconciliation —
+while in the same file. Details: `numpy-mccormick-review.md`.
+
+**Done criteria:** off-diagonal fuzz shows `cv ≤ arcsin ≤ cc` with zero crossings for
+asin/acos (the repro flips to sound); the harness now samples off-diagonal; check
+whether any test/benchmark instance uses asin/acos (if so the risk is not latent);
+differential-bound checks per §0. NM-2 (numpy compiler leaf drops the box) is tracked
+separately in `numpy-mccormick-review.md` and gates activation of the numpy backend.
+
+**Log:** —
+
+---
+
+## C-33 (P0) — Pure-continuous fallback certifies a nonconvex model's local optimum (DEFAULT path)
+
+**Origin:** solver-core review (SC-1).
+**Area:** `python/discopt/solver.py:3716-3738` (the pure-continuous fallback that
+routes to a single NLP solve); certificate emitted at `:6889-6896`.
+**Reachability:** DEFAULT path — fires when `skip_convex_check or not
+_pure_continuous_convexity_known`. No opt-in flag required.
+
+**Mechanism:** when a pure-continuous model's convexity is **unknown** (classifier
+abstained, or `skip_convex_check` set), the fallback solves one NLP and emits its
+local optimum **with `gap_certified=True`** — treating "convexity not established" as
+if it were "convex." For a nonconvex model the local optimum is not the global
+optimum, so a wrong answer is certified. This is distinct from the convex fast path
+(`:3651`, which correctly gates on a *rigorous* verdict and is verified sound); the
+bug is that this *fallback* path certifies without that gate.
+
+**Reproduce/confirm (VERIFIED):** nonconvex double-well objective → returns
+`objective=-37, bound=-37, gap_certified=True`; the true global minimum is **−64**.
+The certificate is false.
+
+**Fix:** the fallback must **withhold** `gap_certified` unless
+`_pure_continuous_convexity_known and _pure_continuous_is_convex`. When convexity is
+unknown or `skip_convex_check` is set, fall through to spatial B&B (or return
+`gap_certified=False`), never a certified single NLP. Do not weaken the certificate
+to "trust the NLP" — refuse to certify (CLAUDE.md §1, §3).
+
+**Regression test (required — fast):** a `@pytest.mark.smoke` test that solves the
+double-well model and asserts `gap_certified is False` (or the true −64 via B&B) —
+and, as a control, that a genuinely convex pure-continuous model still returns
+`gap_certified=True` (guards against over-correcting into never certifying). One
+short `Model.solve()` each; add an xfail-until-fixed variant asserting the current
+false `gap_certified=True` to pin the bug.
+
+**Done criteria:** the double-well returns `gap_certified=False` or −64; the convex
+control still certifies; no node-count/objective drift on the certifying panel for
+models that were already convex; standing gates pass.
+
+**Log:** 2026-07-03 — VERIFIED new default-path P0 (solver-core review §1).
+
+---
+
+## C-34 (P0) — Even-power bound over a zero-straddling base uses endpoint-only bounds (DEFAULT path)
+
+**Origin:** solver-core review (FR-1).
+**Area:** `python/discopt/_jax/gdp_reformulate.py:493-506` (the `**` arm of
+`_bound_expression`). Feeds the aux box at `factorable_reform.py:254` and the
+denominator-clearing path at `:707`.
+**Reachability:** DEFAULT reformulation path for any model with an even power `p≥4`
+of a subexpression whose interval straddles 0.
+
+**Mechanism:** only `p==2` gets the straddle-aware `[0, max(lb², ub²)]`. For `p≥4`
+over a base whose box straddles 0 the code returns `[min(lb**p, ub**p),
+max(lb**p, ub**p)]` — endpoint-only — which **omits the interior minimum at 0**. So
+`_bound_expression(x**4)` on `[−2,2]` returns `[16,16]` when the true range is
+`[0,16]`. The bogus lower bound 16 propagates into the aux variable's box and into
+denominator clearing → an invalid relaxation box → the true optimum can be cut.
+
+**Reproduce/confirm (VERIFIED e2e):** `min (x−0.5)²+(y−1)² s.t. x**4·y ≤ 1` returns
+`objective=0.25` at x=1; the true optimum is **0** at x=0.5 (feasible: `0.5**4·1 =
+0.0625 ≤ 1`). The reformulation's bad `x**4` box cut off x=0.5.
+
+**Fix:** for even `p` over a zero-straddling base, return `[0, max(lb**p, ub**p)]`
+(the interior min at 0), generalizing the `p==2` branch to all even powers. For a
+base that does not straddle 0, endpoint bounds are correct (monotone on the branch).
+
+**Regression test (required — fast):** a unit test asserting
+`_bound_expression(x**4)` on `[−2,2]` → `[0,16]` (and `x**6` → `[0,64]`), plus the
+end-to-end repro asserting the `x**4·y ≤ 1` model returns 0 at x=0.5. Both
+sub-second; add an xfail-until-fixed variant pinning the current `[16,16]`.
+
+**Done criteria:** `_bound_expression` returns the interior-inclusive bound for all
+even powers over zero-straddling bases; the e2e repro returns 0 at x=0.5;
+non-straddling and odd-power cases unchanged; standing gates + differential-bound
+checks per §0.
+
+**Log:** 2026-07-03 — VERIFIED new default-path P0 (solver-core review §1).
+
+---
+
+## C-35 (P1) — OA/LOA emits an unconditional no-good cut on non-rigorous NLP failure (opt-in)
+
+**Origin:** solver-core review (OA-1).
+**Area:** `python/discopt/oa.py:209-236, 893-931, 916` and
+`python/discopt/gdpopt_loa.py:314-370, 225`.
+**Reachability:** opt-in OA/ECP/LOA solve paths only (not default B&B).
+
+**Mechanism:** when the per-configuration NLP subproblem fails to converge, the code
+adds an **unconditional** integer no-good cut excluding that configuration — treating
+"NLP did not converge" as "this configuration is infeasible." A local NLP failure is
+not a proof of infeasibility, so a feasible (possibly optimal) configuration can be
+permanently excluded → false infeasible, or a worse configuration certified optimal.
+
+**Reproduce/confirm:** construct a GDP/OA instance where the optimal disjunct's NLP
+is hard to converge from the default start (tight/ill-conditioned) while a suboptimal
+disjunct converges easily; assert the OA/LOA path returns the suboptimal objective or
+"infeasible" while `Model.solve()` (B&B) returns the true optimum. (Not yet built —
+build during the fix.)
+
+**Fix:** make the no-good cut **conditional on a rigorous infeasibility proof** (e.g.
+an infeasibility certificate / feasibility-restoration failure), not on NLP
+non-convergence. On mere non-convergence, either retry from alternative starts or
+**withhold** the cut and downgrade certification, never exclude the configuration.
+
+**Regression test (required — fast):** the constructed instance above as a unit test
+asserting the OA/LOA path matches the B&B optimum (no spurious exclusion); a
+sub-second GDP. Fails before, passes after.
+
+**Done criteria:** the instance returns the true optimum on the OA/LOA path; no
+no-good cut is emitted without a rigorous infeasibility proof; existing OA/LOA tests
+unchanged; standing gates pass.
+
+**Log:** 2026-07-03 — new opt-in P1 (solver-core review §2).
+
+---
+
 ## Verified-correct (do not re-audit)
+
+From the solver-core review (2026-07-03) — the highest-stakes gate:
+- **The convexity certifier and convex fast-path are SOUND.** `certify_convex` /
+  `classify_model` never certified a nonconvex function convex across **901
+  non-abstaining certificates** in a 4,000-trial fuzz (each cross-checked against the
+  sampled Hessian spectrum, 0 false). The interval-Gershgorin eigenvalue layer is
+  rigorous (Higham inflation, outward rounding, ±∞ on non-finite Hessian); the
+  interval-Hessian AD correctly seeds the Variable leaf from the box. The convex fast
+  path (`solver.py:3651`) and MIQP path (`:3619`) fire only on a rigorous verdict;
+  `skip_convex_check` only downgrades certification. Pattern recognizers
+  (quad-over-linear, geo-mean, perspective, norm2, softplus, 1/x) are Jensen-clean.
+  Do not re-audit this surface without new evidence. *(C-33's pure-continuous
+  fallback is a separate, non-gated path — that is the bug, not this gate.)*
+- The JAX relaxation-compiler Variable leaf is correct (returns `(x_cv, x_cc)`; box
+  enters via the call convention) — 0 containment violations on broad composite fuzz.
+  (The **numpy** compiler drops the box — NM-2 — but is compiled-but-unused.)
 
 From the B&B audit:
 - Global-LB soundness: `update_global_lower_bound` scans by node status, not the
