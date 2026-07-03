@@ -22,7 +22,7 @@ impl fmt::Display for ExprId {
 }
 
 /// Binary arithmetic operators.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum BinOp {
     /// Addition (`left + right`).
     Add,
@@ -37,7 +37,7 @@ pub enum BinOp {
 }
 
 /// Unary operators.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum UnOp {
     /// Arithmetic negation (`-x`).
     Neg,
@@ -46,7 +46,7 @@ pub enum UnOp {
 }
 
 /// Named mathematical functions.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum MathFunc {
     /// Exponential function (`e^x`).
     Exp,
@@ -116,7 +116,7 @@ pub enum MathFunc {
 /// Slices use Python semantics: `start`, `stop`, `step` may be `None` to mean
 /// "default for the direction of `step`", and negative values are interpreted
 /// relative to the axis length. A step of zero is rejected at construction.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum IndexElem {
     /// A scalar index along this axis (e.g. `i` in `x[i, :]`).
     Scalar(usize),
@@ -142,7 +142,7 @@ impl IndexElem {
 }
 
 /// Indexing specification for array access.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum IndexSpec {
     /// Single scalar index: `x[i]`
     Scalar(usize),
@@ -235,12 +235,78 @@ pub enum ExprNode {
 // Arena
 // ─────────────────────────────────────────────────────────────
 
+/// Content-addressed structural key for hash-consing (CSE) of arena nodes.
+///
+/// Two nodes with equal [`StructuralKey`]s are *structurally identical*: same
+/// operator, same operand [`ExprId`]s (in order — commutative operands are **not**
+/// reordered, so `a+b` and `b+a` intern separately; correctness over completeness),
+/// and same literal payload. Interning a node whose key already exists returns the
+/// existing id, which is sound because arena evaluation is a pure function of node
+/// structure + operand ids (see [`ExprArena::evaluate`]). Scalar constants are keyed
+/// by their exact IEEE-754 bit pattern (`f64::to_bits`) so `0.0`/`-0.0` and any NaN
+/// bit patterns never falsely merge. Different shapes/types never share a key.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum StructuralKey {
+    Constant(u64),
+    ConstantArray(Vec<u64>, Vec<usize>),
+    /// Variable identity is its block index (name is metadata, not identity).
+    Variable(usize),
+    /// Parameter identity is (name, value bits, shape).
+    Parameter(String, Vec<u64>, Vec<usize>),
+    BinaryOp(BinOp, ExprId, ExprId),
+    UnaryOp(UnOp, ExprId),
+    FunctionCall(MathFunc, Vec<ExprId>),
+    Index(ExprId, IndexSpec),
+    MatMul(ExprId, ExprId),
+    Sum(ExprId, Option<usize>),
+    SumOver(Vec<ExprId>),
+}
+
+impl StructuralKey {
+    /// Derive the structural key for a node. All operand ids referenced are the
+    /// (already-interned) child ids, so equal keys imply semantic equivalence.
+    fn of(node: &ExprNode) -> Self {
+        match node {
+            ExprNode::Constant(v) => StructuralKey::Constant(v.to_bits()),
+            ExprNode::ConstantArray(data, shape) => StructuralKey::ConstantArray(
+                data.iter().map(|v| v.to_bits()).collect(),
+                shape.clone(),
+            ),
+            ExprNode::Variable { index, .. } => StructuralKey::Variable(*index),
+            ExprNode::Parameter { name, value, shape } => StructuralKey::Parameter(
+                name.clone(),
+                value.iter().map(|v| v.to_bits()).collect(),
+                shape.clone(),
+            ),
+            ExprNode::BinaryOp { op, left, right } => StructuralKey::BinaryOp(*op, *left, *right),
+            ExprNode::UnaryOp { op, operand } => StructuralKey::UnaryOp(*op, *operand),
+            ExprNode::FunctionCall { func, args } => {
+                StructuralKey::FunctionCall(*func, args.clone())
+            }
+            ExprNode::Index { base, index } => StructuralKey::Index(*base, index.clone()),
+            ExprNode::MatMul { left, right } => StructuralKey::MatMul(*left, *right),
+            ExprNode::Sum { operand, axis } => StructuralKey::Sum(*operand, *axis),
+            ExprNode::SumOver { terms } => StructuralKey::SumOver(terms.clone()),
+        }
+    }
+}
+
 /// Arena allocator for expression nodes.
 ///
 /// All nodes live here; everything else holds [`ExprId`] handles.
+///
+/// Hash-consing (CSE): when interning is enabled via [`ExprArena::enable_interning`],
+/// [`ExprArena::intern`] deduplicates structurally-identical nodes so that building the
+/// same subexpression twice returns the same [`ExprId`]. The raw [`ExprArena::add`] is
+/// **unchanged** — it always appends a fresh node — so post-construction passes
+/// (presolve, reformulation) that rely on fresh-node semantics are unaffected.
 #[derive(Debug, Clone)]
 pub struct ExprArena {
     nodes: Vec<ExprNode>,
+    /// Content-address → existing id, populated only while interning is enabled.
+    /// Keyed lookup only (never iterated on an ordering-sensitive path), so
+    /// node-id assignment stays deterministic and byte-reproducible.
+    intern: Option<std::collections::HashMap<StructuralKey, ExprId>>,
 }
 
 impl Default for ExprArena {
@@ -252,14 +318,48 @@ impl Default for ExprArena {
 impl ExprArena {
     /// Create an empty arena.
     pub fn new() -> Self {
-        Self { nodes: Vec::new() }
+        Self {
+            nodes: Vec::new(),
+            intern: None,
+        }
     }
 
     /// Create an arena with pre-allocated capacity.
     pub fn with_capacity(cap: usize) -> Self {
         Self {
             nodes: Vec::with_capacity(cap),
+            intern: None,
         }
+    }
+
+    /// Enable content-addressed hash-consing for subsequent [`ExprArena::intern`]
+    /// calls. Seeds the intern table from any nodes already present so that
+    /// interning a node equal to a pre-existing one returns that existing id.
+    /// Idempotent. Interning is a *construction-time* optimization; disable it
+    /// (or simply stop calling `intern`) before mutating passes that append nodes
+    /// they intend to keep distinct.
+    pub fn enable_interning(&mut self) {
+        if self.intern.is_some() {
+            return;
+        }
+        let mut map = std::collections::HashMap::with_capacity(self.nodes.len());
+        // First occurrence of each structural key wins (lowest id), matching the
+        // append order and keeping the mapping deterministic.
+        for (i, node) in self.nodes.iter().enumerate() {
+            map.entry(StructuralKey::of(node)).or_insert(ExprId(i));
+        }
+        self.intern = Some(map);
+    }
+
+    /// Disable hash-consing. Subsequent [`ExprArena::intern`] calls append like
+    /// [`ExprArena::add`]. Existing node ids are untouched.
+    pub fn disable_interning(&mut self) {
+        self.intern = None;
+    }
+
+    /// Whether hash-consing is currently enabled.
+    pub fn interning_enabled(&self) -> bool {
+        self.intern.is_some()
     }
 
     /// Insert a node and return its id.
@@ -267,6 +367,30 @@ impl ExprArena {
         let id = ExprId(self.nodes.len());
         self.nodes.push(node);
         id
+    }
+
+    /// Content-addressed insert: if interning is enabled and a structurally
+    /// identical node already exists, returns its existing id without appending;
+    /// otherwise appends (via [`ExprArena::add`]) and records the mapping. With
+    /// interning disabled this is exactly [`ExprArena::add`].
+    ///
+    /// Semantic-preserving by construction: two nodes share an id only when their
+    /// [`StructuralKey`]s are equal, i.e. same op, same operand ids, and same literal
+    /// payload/shape — so the deduped node evaluates identically to the duplicate it
+    /// replaces (both are pure functions of the same structure). Operands are assumed
+    /// to already be interned; the caller (a bottom-up build) guarantees this.
+    pub fn intern(&mut self, node: ExprNode) -> ExprId {
+        if self.intern.is_some() {
+            let key = StructuralKey::of(&node);
+            if let Some(&id) = self.intern.as_ref().unwrap().get(&key) {
+                return id;
+            }
+            let id = self.add(node);
+            self.intern.as_mut().unwrap().insert(key, id);
+            id
+        } else {
+            self.add(node)
+        }
     }
 
     /// Retrieve a node by id.
@@ -1866,5 +1990,231 @@ mod tests {
     fn test_default_arena() {
         let arena = ExprArena::default();
         assert!(arena.is_empty());
+    }
+
+    // ─────────────────────────────────────────────────────────────
+    // Phase 4 CSE / hash-consing (structural interning)
+    // ─────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_intern_same_subexpr_returns_same_id() {
+        // Building the identical subexpression twice returns the SAME id and
+        // does not append a duplicate node.
+        let mut arena = ExprArena::new();
+        arena.enable_interning();
+        let x = arena.intern(ExprNode::Variable {
+            name: "x".into(),
+            index: 0,
+            size: 1,
+            shape: vec![],
+        });
+        let c2 = arena.intern(ExprNode::Constant(2.0));
+        let c2_again = arena.intern(ExprNode::Constant(2.0));
+        assert_eq!(c2, c2_again, "identical constants must intern to one id");
+
+        let prod1 = arena.intern(ExprNode::BinaryOp {
+            op: BinOp::Mul,
+            left: c2,
+            right: x,
+        });
+        let prod2 = arena.intern(ExprNode::BinaryOp {
+            op: BinOp::Mul,
+            left: c2_again,
+            right: x,
+        });
+        assert_eq!(prod1, prod2, "identical products must intern to one id");
+        // Nodes present: x, c2, prod  → exactly 3 (no duplicate constant/product).
+        assert_eq!(arena.len(), 3);
+    }
+
+    #[test]
+    fn test_intern_structurally_different_get_different_ids() {
+        let mut arena = ExprArena::new();
+        arena.enable_interning();
+        let x = arena.intern(ExprNode::Variable {
+            name: "x".into(),
+            index: 0,
+            size: 1,
+            shape: vec![],
+        });
+        let y = arena.intern(ExprNode::Variable {
+            name: "y".into(),
+            index: 1,
+            size: 1,
+            shape: vec![],
+        });
+        // Different variable indices → different ids.
+        assert_ne!(x, y);
+        // Different operator over the same operands → different ids.
+        let add = arena.intern(ExprNode::BinaryOp {
+            op: BinOp::Add,
+            left: x,
+            right: y,
+        });
+        let mul = arena.intern(ExprNode::BinaryOp {
+            op: BinOp::Mul,
+            left: x,
+            right: y,
+        });
+        assert_ne!(add, mul);
+        // Different operand ORDER is NOT merged (commutative operands not reordered).
+        let add_rev = arena.intern(ExprNode::BinaryOp {
+            op: BinOp::Add,
+            left: y,
+            right: x,
+        });
+        assert_ne!(add, add_rev, "operand order is not canonicalized");
+        // Constants distinguished bit-exactly: 0.0 vs -0.0 must not merge.
+        let cp = arena.intern(ExprNode::Constant(0.0));
+        let cn = arena.intern(ExprNode::Constant(-0.0));
+        assert_ne!(cp, cn, "+0.0 and -0.0 must not intern together");
+    }
+
+    #[test]
+    fn test_intern_disabled_appends_like_add() {
+        let mut arena = ExprArena::new();
+        // No enable_interning → intern must behave exactly like add.
+        let a = arena.intern(ExprNode::Constant(1.0));
+        let b = arena.intern(ExprNode::Constant(1.0));
+        assert_ne!(a, b, "with interning off, duplicates are distinct nodes");
+        assert_eq!(arena.len(), 2);
+        assert!(!arena.interning_enabled());
+    }
+
+    #[test]
+    fn test_intern_seeds_from_existing_nodes() {
+        // A node added BEFORE enabling interning is found by a later intern of an
+        // equal node (enable seeds the table from pre-existing nodes).
+        let mut arena = ExprArena::new();
+        let c = arena.add(ExprNode::Constant(7.0));
+        arena.enable_interning();
+        let c2 = arena.intern(ExprNode::Constant(7.0));
+        assert_eq!(c, c2);
+        assert_eq!(arena.len(), 1);
+    }
+
+    /// Build a moderately deep expression with heavy structural sharing, once
+    /// with interning ON and once with interning OFF, then assert both arenas
+    /// evaluate the same objective id to within 1e-12 on random points — the
+    /// deduped arena must be evaluation-equivalent to the naive one. Returns the
+    /// (deduped_len, naive_len) node counts so the test can also assert dedup
+    /// actually removed nodes.
+    fn build_shared_expr(intern: bool) -> (ExprArena, ExprId) {
+        let mut a = ExprArena::new();
+        // Three variables, added first (identity by index).
+        let vars: Vec<ExprId> = (0..3)
+            .map(|i| {
+                a.add(ExprNode::Variable {
+                    name: format!("x{i}"),
+                    index: i,
+                    size: 1,
+                    shape: vec![],
+                })
+            })
+            .collect();
+        if intern {
+            a.enable_interning();
+        }
+        // Helper builders that go through intern (a no-op append when disabled).
+        let mk = |a: &mut ExprArena, n: ExprNode| a.intern(n);
+
+        // Common subexpression t = x0*x1 + x2, built repeatedly.
+        let build_t = |a: &mut ExprArena| -> ExprId {
+            let p = mk(
+                a,
+                ExprNode::BinaryOp {
+                    op: BinOp::Mul,
+                    left: vars[0],
+                    right: vars[1],
+                },
+            );
+            mk(
+                a,
+                ExprNode::BinaryOp {
+                    op: BinOp::Add,
+                    left: p,
+                    right: vars[2],
+                },
+            )
+        };
+        // Build t four separate times; with interning they collapse to one.
+        let t1 = build_t(&mut a);
+        let t2 = build_t(&mut a);
+        let t3 = build_t(&mut a);
+        let t4 = build_t(&mut a);
+
+        // f = exp(t1) + exp(t2) + t3*t4  (exp(t1)==exp(t2) structurally)
+        let e1 = mk(
+            &mut a,
+            ExprNode::FunctionCall {
+                func: MathFunc::Exp,
+                args: vec![t1],
+            },
+        );
+        let e2 = mk(
+            &mut a,
+            ExprNode::FunctionCall {
+                func: MathFunc::Exp,
+                args: vec![t2],
+            },
+        );
+        let sum_e = mk(
+            &mut a,
+            ExprNode::BinaryOp {
+                op: BinOp::Add,
+                left: e1,
+                right: e2,
+            },
+        );
+        let prod_t = mk(
+            &mut a,
+            ExprNode::BinaryOp {
+                op: BinOp::Mul,
+                left: t3,
+                right: t4,
+            },
+        );
+        let f = mk(
+            &mut a,
+            ExprNode::BinaryOp {
+                op: BinOp::Add,
+                left: sum_e,
+                right: prod_t,
+            },
+        );
+        (a, f)
+    }
+
+    #[test]
+    fn test_intern_evaluation_equivalence_random_points() {
+        let (deduped, f_dedup) = build_shared_expr(true);
+        let (naive, f_naive) = build_shared_expr(false);
+
+        // Dedup must have strictly fewer nodes (structural sharing realized).
+        assert!(
+            deduped.len() < naive.len(),
+            "hash-consing should remove duplicate nodes: deduped={} naive={}",
+            deduped.len(),
+            naive.len()
+        );
+
+        // Deterministic LCG so the test is reproducible (no rand dependency).
+        let mut state: u64 = 0x1234_5678_9abc_def0;
+        let mut next = || {
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            // Map to [-2, 2].
+            ((state >> 11) as f64 / (1u64 << 53) as f64) * 4.0 - 2.0
+        };
+        for _ in 0..200 {
+            let x = [next(), next(), next()];
+            let vd = deduped.evaluate(f_dedup, &x);
+            let vn = naive.evaluate(f_naive, &x);
+            assert!(
+                (vd - vn).abs() <= 1e-12 * (1.0 + vn.abs()),
+                "deduped {vd} != naive {vn} at x={x:?}"
+            );
+        }
     }
 }
