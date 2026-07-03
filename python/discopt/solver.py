@@ -3829,6 +3829,26 @@ def solve_model(
         # under the time limit. The user-requested skip_convex_check path keeps its
         # local-only result on any non-error status. (issue #266)
         if _cont_result.status != "error":
+            # C-33/SC-1 (P0, DEFAULT path): reaching this fallback means convexity
+            # was NOT established — either the user set skip_convex_check, or the
+            # classifier abstained (`not _pure_continuous_convexity_known`). The
+            # KNOWN-convex case already returned via the convex fast path above
+            # (line ~3745), so a *convex* certificate can never be lost here.
+            # On a nonconvex model the single NLP finds only a LOCAL optimum, which
+            # is not global — emitting it with gap_certified=True (and bound set to
+            # the local objective) is a FALSE optimality certificate (a nonconvex
+            # double-well returned obj=-50 certified while the true min was -78).
+            # Withhold the certificate: keep the feasible incumbent (objective, x)
+            # but strip the fabricated dual bound/gap and mark it uncertified. Do
+            # NOT weaken this into "trust the NLP" — refuse to certify (CLAUDE.md
+            # §1, §3). Genuine infeasibility from _solve_continuous is a rigorous
+            # nonlinear-tightening / NLP-infeasibility claim, not a gap, so leave it.
+            if _cont_result.status != "infeasible":
+                _cont_result.gap_certified = False
+                _cont_result.bound = None
+                _cont_result.root_bound = None
+                _cont_result.gap = None
+                _cont_result.root_gap = None
             return _cont_result
         logger.info(
             "Local NLP on convexity-unknown continuous model returned error; "
