@@ -121,7 +121,13 @@ experiment may run.
 | T1.4 basis inheritance | non-lever (measured); re-scoped | — | Warm-primal built + sound (42/42 tests) but INERT: run_warm never called — the dual warm start already succeeds / nrows guard routes to ordinary cold. Node LP warm-start is not the bottleneck (nvs17 2 n/s). Real lever = OBBT/per-call-rebuild re-profile (T1.6). Parked patch |
 | T1.5 evaluator-cache routing | already realized (PR #316) | #316 | primal_heuristics diving already routed through cached_evaluator (the −22% gear4 win); remaining sites are one-time (convex fast path) or autodiff-unsafe. Low residual value |
 | T1.6 bookkeeping → Rust | non-lever (measured); re-scoped | — | Re-profile: Python per-node tax is minor (0.5s); LP solves dominate (3.84s / ~10-per-node, OBBT probes cold-built). T1.6 premise falsified. Real lever = warm-start OBBT's probe LPs (the parked warm-primal applies — objective-only change over fixed box). Follow-on, not a T1.x item |
-| Phase 2 entry experiment | **locked** (§0.1.2) | — | unlocks on Phase 1 done |
+| T2.0 reduction-layer correctness pre-flight | todo — **blocking** | — | C-16 (P0) first, then C-15/C-20/C-21; see §14 Phase 2 |
+| T2.1 Phase 2 entry experiment (kill criterion) | specced — next up | — | offline root-loop replay on the worst-20; §14 Phase 2 |
+| T2.2 OBBT persistent LP + warm probes | specced (may parallel T2.1) | — | the Phase-1 perf follow-on relocated here; parked t14 patch applies |
+| T2.3 root fixpoint loop | **locked** on T2.1 results (§0.1.2) | — | stage list comes from T2.1's table |
+| T2.4 per-node `reduce_node()` | **locked** on T2.1 results (§0.1.2) | — | needs node-LP duals exposed (T2.4a) |
+| T2.5 OBBT escalation policy | locked on T2.4 | — | replaces the solver.py:4749 class gate |
+| T2.6 cert2 gate wiring + default-on | after T2.3–T2.5 | — | adds `[suites.global50]`; 3 green nightlies before flip |
 | Phase 3 entry experiment (0b) | **locked** (§0.1.2) | — | unlocks on Phase 0 done |
 | Phase 4 T-CSE/V-segments | **locked** (§0.1.2) | — | may parallel Phase 1 once specced |
 | Phase 5 | **locked** (§0.1.2) | — | requires post-Phase-1 re-profile |
@@ -145,6 +151,13 @@ green), but its structural goal — a single general node engine — is delivere
 its correctness gate is green. **The measurement discipline falsified four plan
 premises before any unsound/ineffective code shipped** (T1.2 sign-regime, T1.3
 per-node separation, T1.4 dual-warm-repair, T1.6 Python-tax).
+
+**Phase 2 — specced to task granularity (2026-07-02, maintainer-directed); see
+§14 "Phase 2 tasks".** The OBBT wall-time follow-on flagged in T1.6's conclusion
+is relocated there as T2.2 (Phase 2 multiplies OBBT call volume, so its cost is a
+Phase 2 prerequisite); `[gates.cert1]`'s two perf criteria stay informational
+until T2.2 lands. Per §0.1.2, T2.3–T2.5 remain locked until the T2.1 entry
+experiment's results are recorded in §14.
 
 ---
 
@@ -247,19 +260,19 @@ heuristic suite (incumbents are not the problem — the *proof* is).
 
 ## 2. Gap table vs SCIP/BARON
 
-| Capability | SCIP/BARON | discopt today | Gap type |
-|---|---|---|---|
-| Envelope library (factorable core) | reference | at parity (relaxation-catalog §8) | none |
-| Node relaxation reuse / warm start | always (bound patch + dual simplex) | exists, gated to pure-int minimize | **wiring** |
-| Per-node language cost | native | 58% JAX + 42% Python per node | **architecture** |
-| Root reduce↔relax↔separate fixpoint | core loop (branch-and-reduce) | single-shot passes, budget-gated | **orchestration** |
-| Per-node cheap reduction (FBBT+cutoff, DBBT/marginals) | every node | components exist, mostly root-only | **wiring** |
-| Aggregation / c-MIR cuts | workhorse (97–169× nodes) | absent (current cuts net-negative) | **missing + quality** |
-| Cut pool w/ aging on default path | yes | opt-in path only | wiring |
-| CSE / defined-variable sharing | preserved & exploited | discarded | **missing** |
-| Quadratic/structure recognition in core | yes | Python-side convexity only | missing |
-| Root-gap instrumentation | n/a (internal) | schema exists, never populated | missing |
-| Parallel tree search | partial | no | out of scope here |
+| Capability                                             | SCIP/BARON                          | discopt today                      | Gap type              |
+|--------------------------------------------------------|-------------------------------------|------------------------------------|-----------------------|
+| Envelope library (factorable core)                     | reference                           | at parity (relaxation-catalog §8)  | none                  |
+| Node relaxation reuse / warm start                     | always (bound patch + dual simplex) | exists, gated to pure-int minimize | **wiring**            |
+| Per-node language cost                                 | native                              | 58% JAX + 42% Python per node      | **architecture**      |
+| Root reduce↔relax↔separate fixpoint                    | core loop (branch-and-reduce)       | single-shot passes, budget-gated   | **orchestration**     |
+| Per-node cheap reduction (FBBT+cutoff, DBBT/marginals) | every node                          | components exist, mostly root-only | **wiring**            |
+| Aggregation / c-MIR cuts                               | workhorse (97–169× nodes)           | absent (current cuts net-negative) | **missing + quality** |
+| Cut pool w/ aging on default path                      | yes                                 | opt-in path only                   | wiring                |
+| CSE / defined-variable sharing                         | preserved & exploited               | discarded                          | **missing**           |
+| Quadratic/structure recognition in core                | yes                                 | Python-side convexity only         | missing               |
+| Root-gap instrumentation                               | n/a (internal)                      | schema exists, never populated     | missing               |
+| Parallel tree search                                   | partial                             | no                                 | out of scope here     |
 
 ---
 
@@ -361,6 +374,19 @@ experiment and by falling back to cold rebuild per term type (never per instance
 ---
 
 ## 6. Phase 2 — Branch-and-reduce orchestration (~4–6 EW, medium–high risk, highest bound leverage)
+
+> **2026-07-02 — specced to task granularity in §14 ("Phase 2 tasks"), which
+> supersedes this narrative where they differ.** A code recon (three verified
+> anchor reports) corrected two premises below, recorded per §0.4: (1) a
+> reduce↔re-relax fixpoint already exists *inside* `obbt_tighten_root`
+> (obbt.py:1691, ≤3 rounds, envelope rebuild each sweep) — the gaps are the
+> missing incumbent cutoff at the root (solver.py:3891 runs structural OBBT with
+> `incumbent_cutoff=None`), the missing re-separation stage, per-node wiring, and
+> OBBT's per-probe LP cost (bottleneck B1); (2) item 1's "incumbent cutoff from
+> the root heuristics, which already run first" is wrong for the current code —
+> the root OBBT block (solver.py:3835) runs at presolve time, *before* any
+> incumbent exists; the cutoff-aware loop therefore integrates at the end of
+> iteration 0 (post-root-heuristics), see T2.3.
 
 **Hypothesis:** iterating the *existing* reduction components to a fixed point at the
 root, and running the cheap subset at every node, closes most instances at or near
@@ -529,6 +555,16 @@ cut_node_reduction  = { min = 2.0,  suite = "integer_product", metric = "node_ra
 no_offtarget_regression = { max = 1.05, suite = "global50", metric = "wall_ratio_vs_baseline" }
 ```
 
+> **Wiring corrections (2026-07-02 recon, per §0.4):** (1) no `[suites.global50]`
+> table exists in `benchmarks.toml` — the panel lives only as
+> `config/baron_global50.txt`; T2.6 must define the suite before any cert gate on
+> it can resolve. (2) `geomean_time_ratio_vs_baron` was never implemented; the
+> existing metric is `geomean_ratio_vs_baron` (metrics.py:331, dispatch :743-746)
+> — cert2 uses that name. (3) cert1's `node_count_drift` was superseded by the
+> out-of-band differential check (`scripts/check_cert_neutrality.py` against the
+> 42-row `cert-baseline.jsonl`), per the T1.2 resolution — there is no
+> `certifying_panel` suite and none is needed.
+
 ## 12. Out of scope (deliberately)
 
 - **New envelope math** — the catalog shows parity; effort there is not the gap.
@@ -560,13 +596,16 @@ no_offtarget_regression = { max = 1.05, suite = "global50", metric = "wall_ratio
 
 ---
 
-## 14. Handoff appendix — executable task breakdown (Phases 0–1)
+## 14. Handoff appendix — executable task breakdown (Phases 0–2)
 
 Phases 0 and 1 need no further discovery and are specified here to task granularity.
 Phases 2–5 are *deliberately not* specced to this level: each begins with an entry
 experiment (§6–§9) whose result determines the work items; the implementing agent
 runs the experiment first and writes the task list from its output, in this file,
 before coding. **Read §3 (verification regimes) before starting any task.**
+*(Amended 2026-07-02: Phase 2 is now specced below at maintainer direction —
+"Phase 2 tasks" — with its coding tasks T2.3–T2.5 still conditional on T2.1's
+recorded results, preserving §0.1.2.)*
 
 ### Phase 0 tasks
 
@@ -1126,6 +1165,327 @@ Rust tree manager. Data-driven: only what the profile names.
 > node-to-node). Alternatively route OBBT through the incremental engine. This is
 > the perf-plan's Stage-3 / follow-on territory, not a T1.x per-node-engine item —
 > flagged for a maintainer decision on whether to pursue within this plan.
+
+### Phase 2 tasks — branch-and-reduce orchestration (specced 2026-07-02)
+
+*Speccing note.* The maintainer directed a task-level Phase 2 spec (2026-07-02).
+§0.1.2 still binds the *coding*: **T2.3–T2.5 are locked until T2.1's results
+table is recorded in this section.** Two tasks are exempt from that lock and may
+start immediately: **T2.0** (correctness-first work under
+`correctness-issues.md` §0 — the loop would amplify open bugs in exactly the
+passes it iterates) and **T2.2** (the Phase-1 perf follow-on measured and
+flagged in T1.6's conclusion, relocated here because Phase 2 multiplies OBBT
+call volume; a same-math change under the differential regime). This section
+supersedes the §6 narrative where they differ.
+
+**Verification regimes (per §3 / §0.2.6):**
+- **T2.2** — differential form (the T1.2 direction-(a) resolution): per-probe
+  bound equality vs the cold path to 1e-9 on a sampled A/B set;
+  `scripts/check_cert_neutrality.py` reports **NEUTRAL** (objective to tol,
+  still optimal, node one-directional); NS safe-bound clamping untouched.
+- **T2.3–T2.5** — bound-changing: every stage behind a flag (default OFF), the
+  T0.4 differential bound test (`utils/soundness.py::assert_bound_sound`) +
+  feasible-point sampling (`assert_cut_valid` for cuts; box-containment sampling
+  for reductions) per family, `incorrect_count = 0` on the full panel, the
+  adversarial suite green, and **3 consecutive green nightlies before any
+  default-on flip** (T2.6).
+
+**Binding negative results (do not relitigate):** OBBT-on-aux / `cascade_aux`
+is measured-dead (perf-plan §6: neutral-to-regressive, and nvs22 *fails to
+certify* with it on) — it stays default-off and is not a loop stage. gear4 is
+reduction-resistant (cutoff-OBBT + integer probing to a fixpoint stalls at a
+2.46 M box) — it is **not** a Phase 2 gate probe; gates are panel-wide.
+Branching is out of scope (§12). The `python_time`/`rust_time` result fields
+are accounting artifacts (§1 correction) — measure with the T0.3 timers
+(`reduce/…`, `separate/…` on `solver_stats`) and wall clock.
+
+**Anchors (verified 2026-07-02 by three recon reports; line numbers current on
+`cert-phase0`).**
+Python — `_jax/obbt.py`: `run_obbt_on_relaxation` :712 (the workhorse; NS-safe
+vertex clamp :909/:944, `_OBBT_NS_GUARD` :52, conditioning guard
+`_OBBT_COND_LIMIT` :39→`require_ns` :826), `dbbt_on_relaxation` :962 (one LP →
+reduced costs tighten all vars; **no-ops without a finite cutoff**),
+`obbt_tighten_root` :1528 (root AND per-node entry; internal ≤3-round
+reduce↔rebuild fixpoint :1691, envelope rebuild via
+`build_milp_relaxation(bound_override=…)` :1699/:1741; relaxer built with
+`build_incremental=False` :1652), candidate set = all columns in index order
+:860-863 (**no scoring**). `solver.py`: root sequence = Rust FBBT :3786 →
+nonlinear FBBT :3819 → root OBBT :3835-3924 (gate :3871-3884; budget
+`min(clamp(0.1·TL, 2, 15), remaining)` :3890; **no incumbent cutoff** :3891);
+root-box snapshot :3930-3931; root cut pool init :4086, PSD branch :4342-4404,
+general (T1.3) branch :4405-4452, inherited at :5087/:5357; per-node FBBT
+`_tighten_node_bounds_with_status` :4817; per-node OBBT class gate :4749-4753
+(`_dependent_var_names` + n ≤ 100; constants :211-215; budget :4754-4755; call
+:4865-4874; skipped on the root batch :4855); incumbent-improvement
+`fbbt_with_cutoff` (Phase C3) :6340-6378; Phase C OBBT-on-improvement
+:6301-6338; RC-fixing exists root-only on the MILP path :9974/:10019/:10904.
+`_jax/mccormick_lp.py`: `solve_at_node` :549, separation chain :742-778,
+`MccormickLPResult` :188 (**status/lower_bound/x only — no duals exposed to the
+caller**), incremental probe :340/:409.
+Rust — `fbbt_with_cutoff` `presolve/fbbt.rs:1098` (PyO3
+`expr_bindings.rs:443-457`; returns per-block lb/ub arrays); binary probing
+`presolve/probing.rs:41/:51` (**root-only** presolve pass; default pass list
+`expr_bindings.rs:672-681`); ordered Python-driven pass list = `presolve()`
+`expr_bindings.rs:617`; RC-fixing kernel `presolve/duality.rs:85`
+(`ReducedCostInfo` :56-65; PyO3 via `presolve(reduced_cost_info=…)` :703) plus
+the node-level MILP-driver implementation `bnb/milp_driver.rs:1249` (gap slack,
+inward rounding — the pattern to mirror); `tree_manager.rs` `NodeResult` :28-37
+has no tightened-bounds field (children inherit boxes the driver writes before
+export); the warm-primal patch is parked in
+`docs/dev/data/t14-warm-primal-patch.diff` (adds `solve_lp_cols_warm` to
+`primal.rs`, hunks at :76/:476; rewires the `dual.rs:106-114/:145-152` cold
+fallbacks); `solve_lp_warm_csc_py` (`lp_bindings.rs:411`) already returns
+`(status, x, obj, iters, col_status, basic_vars, dual, ray)`.
+*(Two Phase-1 anchor corrections found during recon: the per-node OBBT gate is
+solver.py:4749, not :4765; `solve_at_node` is mccormick_lp.py:549 and the
+separation chain :742-778, not :524/:708-731.)*
+
+**What exists vs what is missing (the recon in one table):**
+
+| Mechanism | Exists today | Missing (= the Phase 2 work) |
+|---|---|---|
+| reduce↔re-relax fixpoint | inside `obbt_tighten_root` (≤3 rounds) | solver-level loop with re-separation; incumbent cutoff at root; probing/Rust-FBBT stages (T2.3) |
+| incumbent-aware FBBT | Rust + PyO3; fires only on incumbent *improvement* | at every spatial node, cheap (T2.4) |
+| DBBT | `dbbt_on_relaxation` (extra LP + exact-dual oracle) | free variant from the node LP *just solved* (T2.4; needs duals exposed) |
+| integer RC-fixing | Rust MILP driver per node; root-only MILP path in Python | spatial path per node (kernel exists, T2.4) |
+| probing | root presolve pass | (per-node probing deliberately NOT planned — in-tree cost unproven) |
+| OBBT variable selection | none — all vars, index order | width × dual-activity top-k scoring (T2.5) |
+| OBBT LP engine | cold rebuild per probe (B1: 23 solves/node, scipy churn) | persistent per-sweep LP + warm-primal probes (T2.2) |
+| node duals → Python | computed, consumed internally only | surface on `MccormickLPResult` (T2.4a) |
+| gates/suites | cert0, cert1 | `[suites.global50]`, `[gates.cert2]`, 2 metrics (T2.6) |
+
+---
+
+**T2.0 — Reduction-layer correctness pre-flight (blocking; per
+`correctness-issues.md` §0).**
+The root loop re-runs presolve every iteration and multiplies OBBT/FBBT volume,
+so open bugs in those passes go from latent to load-bearing. Fix in order, each
+per its issue card (regression test that fails before / passes after; standing
+gates green):
+1. **C-16 (P0)** — presolve aggregate bound-resync fuses unrelated variables'
+   bounds (`presolve/pass.rs:104-124`; DEFAULT path). T2.3 re-invokes
+   `presolve()` in a loop; this lands first, unconditionally.
+2. **C-15 (P2)** — `run_obbt` tightens to the raw LP vertex without the NS
+   clamp (`obbt.py:667-701`); NS-clamp it, or delete it if dead (deletion
+   preferred per the card). Standing rule for all of Phase 2: **every
+   tightening uses the NS-safe bound, never the raw LP objective** — this is
+   the C-15 failure class.
+3. **C-20 (P2)** — `fbbt_fp.rs:148` zero-tolerance emptiness → false
+   infeasible; fix before any loop configuration may enable
+   `fbbt_fixed_point`.
+4. **C-21 (P2)** — `IncrementalMcCormickLP._validate` probes only `lb ≥ 0`
+   boxes; harden sign regimes before T2.2(c) routes OBBT through the
+   incremental engine.
+
+**T2.1 — Entry experiment: offline root-loop replay with per-stage attribution
+(kill criterion; ~2–3 days).**
+Script `discopt_benchmarks/scripts/t21_root_loop_replay.py`, house style per
+t11/t12 (task-ID docstring; `JAX_PLATFORMS=cpu` + `JAX_ENABLE_X64=1` set before
+importing discopt; standalone runnable).
+- **Panel:** the 20 worst global50 instances by wall ratio vs BARON from
+  `results/baron_vs_discopt_global50_20260618T033058.json`: tspn05, tanksize,
+  casctanks, tls2, st_e36, clay0303hfsg, st_e38, st_test1, st_testgr3,
+  st_miqp2, st_miqp5, m3, cvxnonsep_nsig30, st_miqp4, st_miqp1,
+  cvxnonsep_psig40r, fac2, nvs05, cvxnonsep_psig30, flay03m. The six
+  *uncertified* rows (tspn05, tanksize, casctanks, tls2, st_e36, nvs05 —
+  `feasible`/`time_limit` at budget) are the substantive bound-limited tail;
+  the rest are certified-but-slow. Caveats: several are not in the bundled
+  61-file corpus — load via `dm.from_nl` with the MINLPLib snapshot
+  (`~/Dropbox/projects/discopt-minlp-benchmark/minlplib/nl/`; resolution logic
+  `runner.py:382`); BARON rows with `status="unknown"` at ~20 ms are not
+  reference optima — the oracle is `docs/dev/data/cert-optima.json` /
+  `minlplib.solu`.
+- **Procedure per instance:**
+  1. Harvest an incumbent honestly: a short discopt solve (5–10 s), record the
+     incumbent (or none-found — see risk 3 below).
+  2. Baseline root state: run today's root sequence once (Rust presolve → FBBT
+     → structural `obbt_tighten_root`) and record root bound/gap (T0.1
+     semantics).
+  3. Replay the loop offline, deterministic stage order, each stage measured
+     *marginally* per iteration: S1 `presolve()` ordered passes incl. probing →
+     S2 `fbbt_with_cutoff(incumbent)` → S3 `obbt_tighten_root(incumbent_cutoff=…)`
+     (DBBT runs inside when a cutoff is present) → S4 envelope re-derivation
+     (`build_milp_relaxation(bound_override=…)`) + re-separation (capture the
+     pool via `solve_at_node(..., separate=True, out_cuts=…)`) → root bound;
+     iterate until the bound moves < tol or a budget is spent.
+  4. Record per stage/iteration: root gap, wall, Σ log bound-widths (box
+     volume), #bounds tightened.
+  5. Projected tree effect: apply the final tightened box as variable bounds
+     and re-solve at a fixed budget (60 s); record node_count/status/objective
+     vs an untightened re-solve at the same budget.
+  6. Oracle-cutoff variant (diagnostic only, clearly labeled): repeat with
+     cutoff = known optimum + tol, bounding the best case reduction can ever
+     deliver here.
+- **Soundness instrumentation inline:** after every stage,
+  `assert_bound_sound` with `known_optimum_oracle` (bound ≤ oracle + tol); the
+  tightened-box re-solve must reproduce the reference objective to tol. Any
+  violation is a P0 stop (§0.6) — it means an existing reduction pass is
+  unsound.
+- **Kill criteria:** *per-stage* — a stage whose marginal relative root-gap
+  movement is < 5% on every panel instance is dropped from T2.3's loop (record
+  it here). *Loop-level* — if the full loop achieves neither (a) median
+  relative root-gap reduction ≥ 25% on the six uncertified instances nor (b) a
+  projected ≥ 30% of the tree-opening certified instances closing within 10
+  nodes, Phase 2's premise is falsified: stop, record here, and re-scope (the
+  residual gap is then relaxation/cut strength — Phases 3–4 territory).
+- **Deliverable:** the per-stage marginal table, the derived stage
+  include/exclude list, and a calibrated loop budget appended to this section.
+  T2.3–T2.5 unlock only once it is here.
+
+**T2.2 — Make OBBT affordable: persistent probe LP + warm-started probes (the
+B1 fix; may run parallel to T2.1).**
+Evidence: bottleneck-profile B1 (gear4: 92,061 probe LP solves, 23/node, 90%
+from `obbt.py:712`; scipy CSR realloc per solve ≈ 33% of wall;
+`build_milp_relaxation` called 2.4×/node redundantly from `obbt.py:1528`;
+ex1252/ex1252a spend 32–49 s in root OBBT over ≤ 3 nodes); T1.6 re-profile
+(OBBT probes cold-built, ~10 LP solves/node on nvs17). Three sub-items, in
+order:
+- **(a) Per-sweep, not per-probe, LP builds.** Within one OBBT sweep the box is
+  fixed — assemble the std-form CSC once per sweep; per probe change only the
+  objective vector (min/max x_j). Then eliminate the redundant
+  `build_milp_relaxation` calls beyond the one genuine per-sweep rebuild.
+- **(b) Warm-start consecutive probes.** Objective-only changes over a fixed
+  box ⇒ the previous probe's optimal basis stays primal-feasible ⇒ apply the
+  parked `t14-warm-primal-patch.diff` (`solve_lp_cols_warm`: primal phase-2
+  from an ingested basis, cold two-phase fallback otherwise) and pass probe k's
+  `(col_status, basic_vars)` into probe k+1 via `solve_lp_warm_csc_py`. The
+  patch is measured sound (42/42 simplex tests incl. the forbidding
+  dual-infeasible-fallback test) and was inert on the node-to-node path — the
+  probe loop is exactly where T1.6's conclusion said it applies.
+- **(c) Optionally** route OBBT through the incremental engine
+  (`build_incremental=True` at `obbt.py:1652`, engaged only when `ok=True`) —
+  only if the post-(a)/(b) profile still names the rebuild; requires C-21
+  (T2.0.4) first.
+Soundness constraints: the NS vertex clamp and conditioning guard
+(`require_ns`) apply unchanged to warm-solved probes; `ok=False`/cold fallbacks
+never weakened; any warm solve returning non-Optimal status → cold re-solve of
+that probe.
+- **Test (differential regime):** A/B harness — on ≥ 200 sampled probes across
+  ≥ 5 panel instances, warm bound == cold bound to 1e-9 and the *applied
+  tightenings* are identical; `check_cert_neutrality.py` NEUTRAL; smoke +
+  adversarial green.
+- **Measured targets (falsifiable):** gear4 OBBT umbrella 23.2 s → ≤ 8 s;
+  ex1252a root-OBBT wall ≥ 2× down; if after (a)+(b) OBBT is still the top
+  consumer, record here and re-profile before attempting (c).
+
+**T2.3 — Root fixpoint loop (LOCKED until T2.1's table is recorded above).**
+Build: new module `python/discopt/_jax/root_reduce.py` —
+`run_root_fixpoint(model, lb, ub, *, incumbent_cutoff, deadline, tol, stages)
+→ RootReduceResult` — deterministic stage order taken from T2.1's include list;
+every stage deadline-aware and tighten-only (intersection, the solver.py:3914
+pattern). Two integration points in `solver.py` (per the §6 correction note):
+1. the existing structural (no-cutoff) root OBBT at presolve time (:3835) stays
+   as-is;
+2. the cutoff-aware fixpoint runs at the **end of iteration 0** — after the
+   root heuristics have produced an incumbent, where the root bound is
+   snapshotted (T0.1) and the general root cut pool is captured (:4405) — and
+   refreshes `_root_cut_pool` and the incremental engine's base structure from
+   the final tightened box, so every in-tree node inherits the tightened root.
+Budget: a fraction of the time limit calibrated by T2.1 (starting point 15%,
+hard per-stage deadlines); loop exits on bound move < tol or budget spent.
+Flags: `root_fixpoint` config option + `DISCOPT_ROOT_FIXPOINT` env, default OFF
+until T2.6. Constraints: `cascade_aux` stays off; the pass order is fixed (no
+adaptive reordering — determinism); no stage may loosen a bound; cutoff-using
+stages no-op soundly when no incumbent exists.
+- **Test:** unit — a synthetic bilinear model where the round-2 envelope on the
+  round-1-tightened box provably improves the root bound (regression: fails
+  with the loop off); soundness — per-stage `assert_bound_sound` vs the
+  cert-optima oracle on the replay panel; every captured cut through
+  `assert_cut_valid` on sampled feasible points; full panel `incorrect = 0`;
+  nightly A/B with the flag on.
+- **Exit signal (informational until T2.6):** `root_gap_ratio_vs_baron` on the
+  evaluable global50 rows trends toward ≤ 1.3.
+
+**T2.4 — Per-node cheap reduction: one `reduce_node()` call (LOCKED until
+T2.1's table is recorded above).**
+- **(a) Expose node-LP marginals (prerequisite, bound-neutral):** extend
+  `MccormickLPResult` (mccormick_lp.py:188) with `dual`, `col_status`, and
+  `safe_bound` — all already computed internally / returned by
+  `solve_lp_warm_csc_py`'s 8-tuple; plumbing only, additive fields, no math
+  change (assert exact neutrality).
+- **(b) `reduce_node(node_lb, node_ub, lp_result, cutoff)`** on the spatial
+  path, called after each node LP solve, unifying three cheap, sound moves:
+  (i) Rust `fbbt_with_cutoff` on the node box (per-block mapping as in
+  solver.py:6355-6370 — today it fires only on incumbent improvement);
+  (ii) DBBT from the just-solved node LP's reduced costs (d = c − Aᵀy from the
+  returned `dual`; **z = `safe_bound`, never the raw LP objective** — the C-15
+  rule; reuse `dbbt_on_relaxation`'s rc_tol/eps guards) — zero extra LP solves;
+  (iii) integer reduced-cost fixing via the `duality.rs:85` kernel semantics
+  (inward rounding, positive gap slack — mirror `milp_driver.rs:1249`).
+- **(c) Feed the tightened box forward:** into the incremental engine's patch
+  (`inc.assemble(lb, ub)`) and the child boxes at export (follow the MILP
+  driver's `out.tightened` pattern; `NodeResult` needs no schema change if
+  Python applies tightenings before export).
+Flag: `node_reduce` config + env, default OFF until T2.6.
+- **Test (bound-changing regime):** per-family differential test — on fixed
+  node boxes captured from panel runs, the reduced box never excludes a
+  sampled feasible point better than the cutoff, and the node bound stays
+  ≤ oracle; property test — 200 random boxes/cutoffs, better-than-cutoff
+  sampled points always retained; A/B on global50 — node_count expected ↓,
+  wall ratio vs baseline ≤ 1.05 on non-target classes (the no-offtarget
+  guard); adversarial + smoke; `incorrect = 0`.
+
+**T2.5 — Uniform OBBT escalation policy (locked on T2.4).**
+Replace the per-node OBBT model-class gate (solver.py:4749-4753:
+`_dependent_var_names` present + n ≤ 100) with one policy for all spatial
+models: rank variables by `bound-width × |reduced cost|` (duals from T2.4a,
+widths from the node box); run OBBT on the top-k, only at nodes where the
+relative gap exceeds θ and depth ≤ d, inside the existing
+`_pn_obbt_budget_total` machinery (:4754-4755). Feed the same scoring into root
+OBBT's `candidate_idxs` (obbt.py:860-863 — currently all variables in index
+order). Defaults (k, θ, d) are calibrated from T2.1/T2.4 A/B data — record the
+calibration table here; no per-class forks, no named-instance tuning.
+- **Test:** the policy only *selects where* already-verified reductions run, so
+  the primary risk is performance: A/B on global50 with no-offtarget wall
+  regression ≤ 1.05; the previously-gated class (`_dependent_var_names`
+  instances) must not regress in node_count when the class gate is removed;
+  `incorrect = 0`.
+
+**T2.6 — Gate wiring, nightlies, default-on (last).**
+1. `benchmarks.toml`: add `[suites.global50]`
+   (`instance_list = "config/baron_global50.txt"`) — every cert gate references
+   this suite but no suite table exists (recon flag); add `[gates.cert2]` per
+   §11 with the corrections recorded there (existing `geomean_ratio_vs_baron`
+   metric name; new `closed_within_10_nodes_fraction` metric fn + dispatch at
+   metrics.py:706 for the "≥ 30% close within 10 nodes" criterion).
+2. Reference data: `root_gap_ratio_vs_baron` must count only BARON rows with a
+   usable root bound (many rows in the 2026-06-18 comparison are
+   `status="unknown"` at ~20 ms); re-run the BARON comparison if coverage is
+   too thin to evaluate the gate honestly.
+3. Flag flips: with T2.3–T2.5 individually green, enable jointly on nightlies;
+   **3 consecutive green nightlies** (full panel, `incorrect = 0`, adversarial
+   suite, differential checks) before any default flips.
+4. After default-on: rebuild `cert-baseline.jsonl` via `gen_cert_baseline.py`
+   (node counts legitimately change; the new baseline becomes the Phase 3+
+   neutrality reference), update §0.8 and this section.
+- **Phase 2 exit gate (= §6):** `root_gap_ratio_vs_baron ≤ 1.3` evaluable and
+  green on global50; ≥ 30% of currently-tree-opening instances close within 10
+  nodes; `geomean_ratio_vs_baron ≤ 2.5`; `incorrect = 0` throughout.
+
+**Sequencing.**
+
+```
+T2.0 (correctness pre-flight)
+  ├─► T2.1 (entry experiment) ──► T2.3 (root loop) ──► T2.4 (reduce_node) ──► T2.5 (escalation) ──► T2.6 (gates/default-on)
+  └─► T2.2 (OBBT cost; parallel with T2.1) ────────────┘   (T2.3/T2.5 assume affordable OBBT)
+```
+
+Estimated effort: T2.0 ~2–4 d; T2.1 ~2–3 d; T2.2 ~1 EW; T2.3 ~1–2 EW;
+T2.4 ~1–2 EW; T2.5 ~3–5 d; T2.6 ~2–3 d — consistent with §6's 4–6 EW.
+
+**Phase-2-specific risks.**
+1. **False certificate** (the catastrophic mode; nvs22 #277 / st_ph10 #306):
+   every tightening goes through NS-safe bounds + existing guards;
+   feasible-point sampling per family; 3 green nightlies before default-on.
+2. **Loop overhead that doesn't pay for itself:** budgets calibrated by T2.1;
+   the ≤ 1.05 no-offtarget-regression criterion is binding; every stage is
+   individually killable by its < 5% criterion.
+3. **No incumbent:** the cutoff-dependent stages (DBBT, cutoff-FBBT,
+   RC-fixing) must no-op soundly without one (they already do) — the loop
+   degrades to its structural subset; never fabricate a cutoff.
+4. **Determinism:** time-based budgets make node counts non-deterministic at
+   the margin — all neutrality/regression checks use the differential form
+   (the T1.2 resolution), never exact node equality.
 
 ### Ground rules for the implementing agent
 
