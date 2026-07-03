@@ -132,7 +132,8 @@ experiment may run.
 | Phase 3 1c reachability entry experiment | done — **NO-GO / re-scope** | #(prior) | Cuts made reachable+armed close ~0% (median gap-closed 0.000, best +0.55% on ex1263a) vs SCIP ~1.0. Residual is separator DEPTH, not plumbing. Do NOT build the Rust cut-callback seam yet. See §7 "Phase 3 1c" |
 | Phase 3 1d separator-family attribution | done — **build zerohalf** | #420 | SCIP per-separator attribution (`scripts/p3_1d_separator_attribution.py`): on graphpart `zerohalf` alone closes 60–86% of the reachable root gap and is the sole load-bearing family (leave-one-out 15–53%); every other cut family (flowcover/aggregation/cmir/clique/…) closes 0. Build target = native zero-half separator; expected ~0.6–0.9 root-gap close. See §7 "Phase 3 1d" |
 | Phase 3 zerohalf build (native {0,½}-CG separator) | done — **sound; lever INERT on graphpart (measured)**; code parked on branch `cert-p3-zerohalf` (PR #427 closed unmerged), NOT on main | finding only | A validity-GREEN heuristic zero-half separator was built (400-system + binary-dense property tests: no feasible point cut). ON/OFF on graphpart: **gap_closed 0.000, `incorrect_count=0`** — the predicted 0.6–0.9 did NOT land: discopt's root LP optimum is a ⅓-partition vertex where every {0,½} combo is *tight, not violated* (exhaustive GF(2) nullspace search: viol=0.0000), and `root_off` already sits at SCIP's separators-off floor. Root cause = **LP vertex geometry (½-cuttable vs ⅓), not cut depth**. Follow-on = separate at a ½-valued/pre-crossover point. The inert separator is NOT merged (no dead flag on main); preserved on the branch for the follow-on. See §7 "Phase 3 zerohalf — build results" |
-| Phase 4 T-CSE/V-segments | **locked** (§0.1.2) | — | may parallel Phase 1 once specced |
+| Phase 4 re-profile (entry experiment) | done — **rank recorded** | #442 | 8 run / 0 skipped. Ranked build order: **1) CSE (op-dup 31–37% on nvs17/clay), 2) Q-extraction (coupled to CSE), 3) V-segments DE-PRIORITIZED (0 defvars in all 1,558 text `.nl`; defined-var-heavy set is binary-`.nl` discopt can't parse), 4) symmetry DO-NOT-BUILD (0 orbits)**. CC5 FALSIFIED (XLA ≤1.2% of wall); dominant wall = separation. See §8 "Phase 4 — re-profile results" |
+| Phase 4 T-CSE/V-segments | **CSE unlocked; V-segments/symmetry de-scoped** (§0.1.2) | — | build order fixed by the re-profile above; CSE first (bound-neutral), Q-extraction second |
 | Phase 5 | **locked** (§0.1.2) | — | requires post-Phase-1 re-profile |
 
 **Phase 0 — DONE & gated** (cert0 green: root_gap coverage 0.909 ≥ 0.90, incorrect 0).
@@ -862,6 +863,127 @@ change otherwise.
 **Correctness gate:** CSE and V-segment preservation are bound-neutral — exact
 node_count/objective equality vs baseline; Q-extraction validated by evaluating both
 forms on random points to 1e-12; symmetry fixing under the differential-bound test.
+
+### Phase 4 — re-profile results (2026-07-03)
+
+The §9 note ("the profile changes after Phases 1–2 — re-profile before committing")
+demanded this before building any Phase 4 item. Measurement-only harness
+`discopt_benchmarks/scripts/p4_reprofile_structure_loss.py` (arena introspection via
+`PyModelRepr.get_node`/`arena_len`/`detect_symmetries`/`is_*_quadratic`;
+`SolveResult.solver_stats` reduce/*+separate/* timers; XLA compiles via the existing
+`perf/measure.count_xla_compiles`). Panel = 8 text-`.nl` instances (5 named probes +
+3 larger-DAG general/quadratic). Per-instance 90 s solve cap, `JAX_PLATFORMS=cpu`,
+x64. **8 run, 0 skipped.** Raw JSON:
+`discopt_benchmarks/results/p4_reprofile_structure_loss_20260703T210635.json` and
+`results/p4_xla_compiles_probe.json`.
+
+**Cost breakdown + per-lever potential:**
+
+| instance | DAG nodes | dup% (all) | **op-dup%** (lever 1, actionable) | defvars (lever 2) | quad? (lever 3) | orbits (lever 4) | wall (s) | s/node | XLA % of wall | where the wall goes (solver_stats) |
+|---|---:|---:|---:|---:|:--:|---:|---:|---:|---:|---|
+| nvs17 | 753 | 68.9 | **37.2** | 0 | deg-2 obj | 0 | 79.1 | 0.85 | 0.1% | separate: edge_concave 32.9 + psd 21.5 + univar_sq 8.0 |
+| ex1252 | 336 | 34.2 | 11.6 | 0 | deg-2 (40 con) | 0 | 98.9 | 1.39 | 0.1% | separate/univar_sq 27.6 + reduce/obbt 7.0 |
+| ex1252a | 282 | 35.8 | 13.8 | 0 | deg-2 (31 con) | 0 | 66.9 | 4.46 | 0.1% | separate/univar_sq 10.5 + reduce/obbt 1.9 |
+| gear4 | 17 | 0.0 | **0.0** | 0 | deg-2 obj | 0 | 49.8 | 0.008 | ~0 | reduce/obbt 14.1 + fbbt 1.3 (6045 nodes — CC3) |
+| st_e38 | 46 | 15.2 | 4.3 | 0 | deg-3 | 0 | 2.3 | 0.78 | ~0 | tiny (3 nodes) |
+| clay0303hfsg | 2135 | 64.8 | **31.1** | 0 | deg-2 obj | 0 | 73.9 | 0.23 | 1.2% | (no separate timers; MILP path) |
+| casctanks | 3124 | 34.0 | 13.1 | 0 | bilinear | 0 | 97.4* | 3.14 | 0.5% | reduce/fbbt 4.0 + univar_sq 1.0 (*hit cap) |
+| heatexch_gen1 | 798 | 29.7 | 8.0 | 0 | deg-2 obj | 0 | 171* | 57 | ~0 | reduce/fbbt 0.6 (*hit cap) |
+
+("op-dup%" = duplicate **operator** nodes as a fraction of the DAG, i.e. duplicates
+excluding constant literals; the all-in dup% is inflated by repeated constants —
+e.g. nvs17's `2.0` literal appears 112× — which CSE would collapse but which cost
+~nothing to evaluate. The op-dup fraction is the actionable per-node/relaxation-cost
+lever.)
+
+**Per-lever verdict (measured potential):**
+
+- **Lever 1 — CSE/hash-consing: REAL and the only broadly-present structure loss.**
+  Operator-node duplication is **31–37% of the DAG on the general-nonconvex class**
+  (nvs17 37.2%, clay0303hfsg 31.1%) and 8–14% elsewhere; **0% on gear4** (its DAG is
+  already tiny — gear4 is a node-count/CC3 instance, not a structure-loss one). The
+  arena's `add` never dedups (`expr.rs`), confirmed by direct walk. This dedup would
+  shrink every downstream consumer (JAX trace, lifted LP rows, FBBT sweep, and the
+  **separation** work that dominates wall — see below).
+- **Lever 2 — `.nl` defined variables (V segments): NO APPLICABLE INSTANCE + a
+  separate parse blocker. Premise does not hold on the readable corpus.** Every one
+  of the 8 panel instances (and **all 1,558 text-`g` `.nl` files in the MINLPLib
+  snapshot**, verified by scanning the "common exprs: b,c,o,c1,o1" header field)
+  reports **0 defined variables** — the MINLPLib text export emits none. The
+  defined-variable-heavy instances (ACOPF, densitymod, milinfract, portfol_*, …) are
+  **all binary-`b`-encoded**, which `nl_parser.rs` rejects outright ("binary .nl
+  format not supported") — discopt cannot even *load* them. And when a `g`-format
+  file *did* carry a defined-var reference, `nl_parser.rs:347-352` would raise
+  "variable index out of range" (the parser drops the V body and cannot resolve a
+  reference to `n_vars + j`). So lever 2 has **zero measurable payoff on anything
+  discopt can read today**; the prerequisite is binary-`.nl` support, not V-segment
+  preservation.
+- **Lever 3 — Q-matrix extraction: structure is present but NOT the bottleneck.**
+  6 of 8 instances carry recognized degree-2 structure (`is_*_quadratic` True; nvs17
+  21 bilinear + 7 monomial terms, casctanks 60 bilinear, clay/ex1252 many quadratic
+  constraints) with no coefficient extraction. This *is* real unrecognized structure
+  — but the wall it would save is the convexity/PSD + edge-concave separation, which
+  is already the dominant cost (nvs17 `separate/psd` 21.5 s + `edge_concave` 32.9 s).
+  Q-extraction is a **strength/quality lever bundled with lever 1**, not an
+  independent win: it only pays once the DAG it reads is deduped.
+- **Lever 4 — symmetry/orbit fixing: NO PANEL SIGNAL.** `detect_symmetries` finds
+  **0 nontrivial orbits on all 8 instances** (variables examined 2–500). No
+  exploitable orbits on this panel → lowest priority; do not build speculatively.
+
+**Premise check — Phase 4's headline premise is PARTLY FALSIFIED, and one sub-premise
+(CC5, from §9) is FULLY FALSIFIED:**
+
+1. **CC5 / "the ex1252 class spends ~14 compiles × ~1 s ≈ the whole solve" is
+   FALSIFIED (per §0.4).** Measured exact XLA compiles: nvs17 **8 @ 0.029 s
+   (0.1% of wall)**, ex1252 **7 @ 0.025 s (0.1%)**, ex1252a **5 @ 0.021 s (0.1%)**,
+   clay0303hfsg 17 @ 0.408 s (1.2%), casctanks 6 @ 0.226 s (0.5%). JAX compilation is
+   **≤1.2% of wall everywhere** — the evaluator-cache fix (perf-plan §1 correction)
+   already amortized it; §1's "compile resolved" note is confirmed at the solve level.
+   **The ex1252 per-node cost (1.4–4.5 s/node) is per-node relaxation/separation
+   work, not compile.** Phase 5's compile item and any "compile-once" framing keyed
+   to ex1252 are moot.
+2. **The dominant wall cost is SEPARATION, not raw DAG-walk/compile.** `solver_stats`
+   attributes nvs17's 79 s almost entirely to `separate/edge_concave` (32.9 s) +
+   `separate/psd` (21.5 s) + `separate/univariate_square` (8.0 s); ex1252's 99 s to
+   `separate/univariate_square` (27.6 s) + `reduce/obbt` (7.0 s). CSE (lever 1) helps
+   *because* it shrinks the DAG those separators walk per node — so its payoff is a
+   multiplier on the separation cost, exactly the C4-as-multiplier framing — but the
+   deduplication itself is not the headline; the separation loop is.
+
+**RANKED build order (with evidence):**
+
+1. **Lever 1 — CSE / hash-consing in the Rust arena. BUILD FIRST.** It is the only
+   Phase-4 lever with broad, measured potential: **31–37% duplicate operator nodes on
+   the general-nonconvex class** (nvs17, clay0303hfsg), 8–14% on the rest. It is
+   bound-neutral by construction (semantic-preserving dedup), so it lands under the
+   exact-equality gate with no relaxation risk, and it shrinks the per-node
+   separation/FBBT/lift work that the profile shows *is* the wall. Ship it with the
+   op-dup metric (not the const-inflated all-dup number) as the exit gauge.
+2. **Lever 3 — Q-matrix extraction. BUILD SECOND, coupled to lever 1.** Real
+   unrecognized degree-2 structure on 6/8 instances, but its payoff (cheaper
+   convexity/PSD + RLT) only materializes on a deduped DAG and feeds the same
+   separation loop lever 1 shrinks. Not an independent win; sequence after CSE.
+3. **Lever 2 — `.nl` defined variables (V segments). DE-PRIORITIZE / re-scope.**
+   **Zero applicable instances** in the entire readable corpus (0 defined vars in all
+   1,558 text `.nl`); the defined-var-heavy set is binary-`.nl` that discopt cannot
+   parse at all. The real prerequisite is **binary-`.nl` reader support** (a parser
+   gap, tracked separately), not V-segment preservation. Building V-segment handling
+   now optimizes a code path no readable instance exercises.
+4. **Lever 4 — symmetry/orbit fixing. DO NOT BUILD (no panel signal).** 0 nontrivial
+   orbits on all 8 instances. Revisit only if a symmetry-bearing class enters the
+   gate panel.
+
+**Net:** Phase 4 is **not** the multiplier §8 assumed across the board — its premise
+holds *only* for lever 1 (CSE), is bundled-secondary for lever 3, and is falsified
+for levers 2 and 4 on the readable corpus. The largest wall lever exposed by this
+re-profile is **separation cost** (edge_concave/psd/univariate_square), which is
+Phase 3 / relaxation-strength territory, not structure preservation; CSE's value is
+as a per-node multiplier on that cost. Recommend scoping Phase 4 down to **CSE
+(+ coupled Q-extraction)** and moving binary-`.nl` support to the parser backlog.
+
+This experiment measures only (no solver math changed; the harness reads existing
+introspection hooks) — bound-neutral by construction; the sound solves on the panel
+(nvs17, gear4, st_e38 optimal) all satisfy `bound ≤ oracle`. No correctness gate applies.
 
 ---
 
