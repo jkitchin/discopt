@@ -129,6 +129,8 @@ experiment may run.
 | T2.5 OBBT escalation policy | **NOT BUILT** (T2.1 NO-GO) | — | same |
 | T2.6 cert2 gate wiring + default-on | **moot** (T2.3–T2.5 not built) | — | residual gap re-scoped to Phases 3–4 |
 | Phase 3 entry experiment (0b) | done — **GO on c-MIR** | (this PR) | SCIP root-bound proxy (`scripts/p3_0b_scip_rootbound.py`): median root gap closed **discopt 0.0 vs SCIP 1.0** over 8 (graphpart/ex1263/fac). SEPARATOR-QUALITY, not relaxation/branching → build native aggregation/c-MIR (§7 part 2). See §7 "0b RESULTS / VERDICT (2026-07-03)" |
+| Phase 3 1c reachability entry experiment | done — **NO-GO / re-scope** | #(prior) | Cuts made reachable+armed close ~0% (median gap-closed 0.000, best +0.55% on ex1263a) vs SCIP ~1.0. Residual is separator DEPTH, not plumbing. Do NOT build the Rust cut-callback seam yet. See §7 "Phase 3 1c" |
+| Phase 3 1d separator-family attribution | done — **build zerohalf** | (this PR) | SCIP per-separator attribution (`scripts/p3_1d_separator_attribution.py`): on graphpart `zerohalf` alone closes 60–86% of the reachable root gap and is the sole load-bearing family (leave-one-out 15–53%); every other cut family (flowcover/aggregation/cmir/clique/…) closes 0. Build target = native zero-half separator; expected ~0.6–0.9 root-gap close. See §7 "Phase 3 1d" |
 | Phase 4 T-CSE/V-segments | **locked** (§0.1.2) | — | may parallel Phase 1 once specced |
 | Phase 5 | **locked** (§0.1.2) | — | requires post-Phase-1 re-profile |
 
@@ -705,6 +707,71 @@ math-neutral): it changes no default behavior and is not a shipping feature.
 This experiment measures only; the one code toggle it adds is default-off and
 math-neutral (with it unset the `:3327` reroute is unchanged) — bound-neutral by
 construction on the default path, so no correctness gate is weakened.
+
+### Phase 3 1d — separator-family attribution (2026-07-03)
+
+The strength spike the 1c NO-GO demanded: 1c proved the residual is separator
+*depth*, not plumbing, but did not say *which* family SCIP uses. This experiment
+attributes SCIP's ~100% root close on the graphpart / integer-product class to
+specific separators, so the next build targets the right cut instead of guessing.
+
+**Method (SCIP-side only, pyscipopt / SCIP 10.0, `scripts/p3_1d_separator_attribution.py`):**
+root-only (node limit 1), **presolve DISABLED** (`presolving/maxrounds=0`) so the
+separator set is the *only* mover of the root bound — a clean attribution. Two
+anchors per instance — all-separators-OFF (LP floor) and all-ON (full SCIP root)
+— then, over all 26 families this SCIP build exposes: **only-one-on** (disable
+all, enable exactly F at default freq → gap F closes alone) and **leave-one-out**
+(all on, disable F → marginal gap lost). Gap-closed anchored on THIS build:
+`(bound − all_off)/(opt − all_off)`, `opt` from `minlplib.solu`. Panel = the 0b/1c
+set (ex1263, ex1263a, 3 small graphparts; fac1–3 dropped — already ~1.0). 60 s
+cap. **5 run, 0 skipped**; raw JSON
+`results/p3_1d_separator_attribution_20260703T180253.json`.
+
+only-one-on root-gap-closed (fraction of reachable root gap closed by F alone):
+
+| instance | all_off→all_on gc | **zerohalf** | gomory | gomorymi | strongcg | any other cut family |
+|---|---:|---:|---:|---:|---:|---:|
+| graphpart_2pm-0044-0044 | 1.000 | **0.667** | 0 | 0 | 0 | 0 |
+| graphpart_2g-0044-1601 | 0.734 | **0.858** | 0 | 0 | 0 | 0 |
+| graphpart_2pm-0055-0055 | 0.650 | **0.600** | 0 | 0 | 0 | 0 |
+| ex1263 | 0.000 | 0 | 0 | 0 | 0 | 0 (root LP already 19.1 vs opt 19.6; nothing to cut) |
+| ex1263a | 1.000 | 0 | 0 | 0 | 0 | `rapidlearning`=1.0 — a **primal heuristic**, not a cut |
+
+leave-one-out marginal loss (gap lost when F removed from the full set):
+
+| instance | **zerohalf** | gomory | gomorymi | strongcg |
+|---|---:|---:|---:|---:|
+| graphpart_2pm-0044-0044 | **0.533** | 0.333 | 0.167 | 0 |
+| graphpart_2g-0044-1601 | **0.153** | −0.124 | −0.114 | 0.112 |
+| graphpart_2pm-0055-0055 | **0.383** | 0.050 | −0.017 | 0.050 |
+
+Aggregate (median over the 5): only-one-on **zerohalf 0.600**, every other cut
+family 0.000; leave-one-out **zerohalf 0.153**, all others ≤0.05. On no instance
+does flowcover / aggregation / cmir / clique / knapsackcover / rlt / mcf /
+impliedbounds close *anything*.
+
+**VERDICT — the family that carries the bound is `zerohalf` ({0,½}-Chvátal–Gomory
+cuts). Build target: a native zero-half separator.** On the graphpart class
+zerohalf alone closes **60–86%** of the reachable root gap and is the single
+load-bearing family under leave-one-out (15–53% marginal); gomory / gomorymi /
+strongcg are secondary and partly redundant with it (negative marginal on
+2g-0044-1601 → SCIP's selection trades them off against zerohalf). Expected
+magnitude if discopt gains a working zerohalf separator on this class: **~0.6–0.9
+of the root gap** the whole Phase-3 line has been chasing, i.e. the bulk of
+SCIP's edge — *not* the flow-cover / lifted-aggregation / deeper-c-MIR guesses the
+1b/1c notes floated, and not the aggregation c-MIR already built in #416 (which
+closes 0 here). This is a **single-family** target, not diffuse: one separator
+(zerohalf) matches most of SCIP on graphpart.
+
+**Scope notes for the build:** (i) zerohalf needs the *integer* constraint rows
+(these graphparts read as ~48 int + 1 cont), which the class already carries;
+(ii) the two non-graphpart panel members are *not* separator-depth problems and
+should not distract the build — ex1263's root LP is already tight (0% closable at
+root by anything), and ex1263a's "close" is a primal heuristic (`rapidlearning`)
+finding the incumbent, not a cut. So the zerohalf build's measurable target is
+the pure-integer graphpart subset, exactly where 0b/1c measured the 0% discopt
+close. Measurement-only spike: touches no discopt solver code, so no correctness
+gate applies.
 
 ---
 
