@@ -14,6 +14,7 @@ constraints, keeping the reformulation inside the certified global path.
 
 from __future__ import annotations
 
+from discopt.bilevel.problem import BilevelProblem
 from discopt.bilevel.symbolic_diff import diff, grad
 
-__all__ = ["diff", "grad"]
+__all__ = ["BilevelProblem", "diff", "grad"]

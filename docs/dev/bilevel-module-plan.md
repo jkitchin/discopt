@@ -199,9 +199,21 @@ already uses.
 | Phase | Deliverable | Acceptance | Docs |
 |---|---|---|---|
 | **0 ✅ DONE** | `symbolic_diff.py` + differential-test harness (`test_bilevel_symbolic_diff.py`) | symbolic ∂/∂x matches `jax.grad` to 1e-9 over a fuzz of random DAGs (all node types); nonsmooth points documented/excluded — **29 tests pass, ruff clean** | module + function docstrings with runnable examples; the differential test as executable documentation |
-| **1** | `strong_duality.py` + `BilevelProblem` for **LP–LP** bilevel; convexity/integer gates | Bard's linear bilevel examples and the classic linear bilevel (known optima) certified correct; KKT and strong-duality agree on LP lower levels | `docs/notebooks/bilevel.ipynb` skeleton + first worked LP-bilevel example with `{cite:p}` citations |
-| **2** | `kkt.py` for **convex-QP / convex-NLP** lower level | Toy convex-lower-level instances certified against a brute-force/analytic follower response; `mpec` `gdp` path gives `gap_certified=True` | notebook: convex-lower-level example; `example_bilevel_*` added to the modeling gallery |
+| **1 ✅ DONE** | `BilevelProblem` (`problem.py`) + `kkt.py` — the **KKT reformulation** for an LP-in-`y` lower level; integer/nonconvex/pessimistic gates | the emitted stationarity + primal + dual + complementarity conditions exactly characterize follower optimality — validated against an independent **scipy follower-LP oracle** (min & max followers, several leader `x`), stationarity shown to bind, all gates enforced — **11 tests pass, ruff clean**. End-to-end *certified* solve of Bard's instances → CI (needs Rust+pounce). | module/API docstrings with a worked toll example (the seed for the notebook) |
+| **2** | `strong_duality.py` (LP strong-duality reformulation) + extend the convexity gate to the **convexity certifier** for convex-QP/NLP lower levels | KKT ≡ strong-duality on LP lower levels; convex-lower-level instances certified against a brute-force/analytic follower; `mpec` `gdp` path gives `gap_certified=True` | `docs/notebooks/bilevel.ipynb` skeleton + first worked LP-bilevel example with `{cite:p}` citations; `example_bilevel_*` added to the modeling gallery |
 | **3** | Advisor hook; MI-upper-level examples (facility interdiction, toll-setting) | end-to-end gallery examples with `validate()` + pinned optima; refusal tests for nonconvex/integer/pessimistic | notebook complete; `_toc.yml` entry; `docs/references.bib` entries; **`jupyter-book build docs/` zero warnings** |
+
+**Re-scope note (2026-07-03, after Phase 0 landed).** The original plan put LP
+strong-duality in Phase 1 and the KKT reformulation in Phase 2. With Phase 0's
+symbolic differentiator done and tested, the **KKT path became the lower-risk, higher-
+reuse next step**: it consumes `symbolic_diff` directly, needs no separate linear-
+coefficient extraction, handles LP *and* (later) convex-nonlinear lower levels
+uniformly, and — critically — its correctness is checkable **without the global
+solver** via a scipy follower-LP oracle (the strong-duality equality is bilinear and
+only meaningfully testable end-to-end). So Phase 1 now delivers `BilevelProblem` + the
+KKT reformulation for LP lower levels; **strong-duality moves to Phase 2** as the
+LP-case cross-check, alongside lifting the affine-in-`y` gate to the full convexity
+certifier for convex QP/NLP. Reality-drove-the-plan, recorded per CLAUDE.md §4.
 
 Each phase ships with fails-before/passes-after tests per the merged loop protocol
 (fast, class-not-instance), and each reformulation is a **bound-changing** change, so
