@@ -2515,9 +2515,11 @@ def solve_model(
         Requires at least one continuous variable; falls back to
         ``"none"`` for pure-integer nonconvex models (the ``"nlp"`` fallback
         would be unsound — issue #120),
-        ``"midpoint"`` evaluates the convex underestimator at midpoint
-        (heuristic, not a valid global lower bound — use with caution),
         ``"none"`` disables.
+        (The former ``"midpoint"`` mode was removed in correctness issue C-18:
+        it returned the underestimator's value at the box midpoint, which is not
+        a valid lower bound on the box minimum, so it could certify a wrong
+        optimum. Selecting it now raises ``ValueError``.)
     gdp_method : str, default "big-m"
         Reformulation method for disjunctive constraints:
         ``"big-m"`` (default) or ``"hull"`` (convex hull).
@@ -2602,6 +2604,35 @@ def solve_model(
             f"Unknown nlp_solver={nlp_solver!r}. Choose one of "
             f"{sorted(_valid_nlp_solvers)}. (The 'ripopt' backend was replaced "
             "by 'pounce', a pure-Rust port of Ipopt.)"
+        )
+
+    # C-18: the "midpoint" mode returned the McCormick underestimator's VALUE at
+    # the box midpoint, u(mid), and fed it into the node lower bound as if it were
+    # a bound. But u(mid) <= f(mid) does NOT imply u(mid) <= min_box f: for x**2
+    # on [1, 3] the mode returns 3.0 while the true box minimum is 1.0, so it can
+    # fathom the node holding the true optimum -> false "optimal". The only sound
+    # cheap way to turn the convex underestimator into a bound is to *minimize* it
+    # over the box, which is exactly what mccormick_bounds="nlp" already does.
+    # Rather than ship a non-bound that claims to be a bound, the mode is removed
+    # and rejected loudly. Use "lp" for a valid global spatial bound on nonconvex
+    # models, or "nlp" for the convex-model relaxation bound. See
+    # docs/dev/correctness-issues.md (C-18).
+    _valid_mccormick_bounds = {"auto", "nlp", "lp", "none"}
+    if mccormick_bounds not in _valid_mccormick_bounds:
+        if mccormick_bounds == "midpoint":
+            raise ValueError(
+                "mccormick_bounds='midpoint' has been removed (correctness issue "
+                "C-18): it evaluated the convex underestimator at the box midpoint "
+                "and returned that value as a lower bound, but u(midpoint) is NOT a "
+                "valid lower bound on the box minimum (e.g. for x**2 on [1, 3] it "
+                "returns 3.0 while the true minimum is 1.0), so it could certify a "
+                "wrong optimum. Use mccormick_bounds='lp' for a valid global "
+                "spatial bound on nonconvex models with continuous variables, or "
+                "'nlp' for the convex-model relaxation bound."
+            )
+        raise ValueError(
+            f"Unknown mccormick_bounds={mccormick_bounds!r}. Choose one of "
+            f"{sorted(_valid_mccormick_bounds)}."
         )
 
     # Root PSD cut-pool levers: resolve the explicit kwargs against the env-var
@@ -4253,7 +4284,7 @@ def solve_model(
         logger.debug("convex-objective node bound enabled (n_vars=%d)", n_vars)
 
     # --- McCormick relaxation bounds ---
-    _mc_obj_eval = None  # BatchRelaxationEvaluator for midpoint bounds
+    _mc_obj_eval = None  # BatchRelaxationEvaluator for the McCormick "nlp" bound
     _mc_obj_relax_fn = None  # raw relaxation fn for NLP bounds
     _mc_con_relax_fns: list[Callable] | None = None
     _mc_obj_relax_fn_np = None  # numpy-backed relaxation, when supported
@@ -4672,7 +4703,7 @@ def solve_model(
         )
         _mc_mode = "none"
 
-    if _mc_mode in ("midpoint", "nlp") and model._objective is not None:
+    if _mc_mode == "nlp" and model._objective is not None:
         from discopt._jax.batch_evaluator import BatchRelaxationEvaluator
         from discopt._jax.relaxation_compiler import (
             compile_constraint_relaxation,
@@ -5194,8 +5225,9 @@ def solve_model(
                     lb_jax = jnp.array(batch_lb, dtype=jnp.float64)
                     ub_jax = jnp.array(batch_ub, dtype=jnp.float64)
                     # Use NLP mode only periodically to avoid per-node IPM overhead.
-                    # Midpoint mode is NOT a valid lower bound (cv(mid) >= min f(x)
-                    # is not guaranteed), so skip McCormick on non-NLP iterations.
+                    # (The removed "midpoint" mode returned cv(mid), which is NOT a
+                    # valid lower bound on the box minimum — correctness issue C-18;
+                    # "nlp" is now the only McCormick objective-bound mode here.)
                     _use_mc_nlp = (
                         _mc_mode == "nlp"
                         and _mc_obj_relax_fn is not None
@@ -5216,20 +5248,6 @@ def solve_model(
                                 deadline=t_start + time_limit,
                                 obj_relax_fn_numpy=_mc_obj_relax_fn_np,
                                 con_relax_fns_numpy=_mc_con_relax_fns_np,
-                            )
-                        )
-                    elif _mc_mode != "nlp":
-                        from discopt._jax.mccormick_nlp import (
-                            evaluate_midpoint_bound_batch,
-                        )
-
-                        assert _mc_obj_relax_fn is not None
-                        mc_lbs = np.asarray(
-                            evaluate_midpoint_bound_batch(
-                                _mc_obj_relax_fn,
-                                lb_jax,
-                                ub_jax,
-                                negate=_mc_negate,
                             )
                         )
                     else:
@@ -5470,18 +5488,10 @@ def solve_model(
                                     obj_relax_fn_numpy=_mc_obj_relax_fn_np,
                                     con_relax_fns_numpy=_mc_con_relax_fns_np,
                                 )
-                            elif _mc_mode != "nlp":
-                                from discopt._jax.mccormick_nlp import (
-                                    evaluate_midpoint_bound,
-                                )
-
-                                mc_lb = evaluate_midpoint_bound(
-                                    _mc_obj_relax_fn,
-                                    lb_j,
-                                    ub_j,
-                                    negate=_mc_negate,
-                                )
                             else:
+                                # The removed "midpoint" mode returned cv(mid),
+                                # which is NOT a valid lower bound (C-18); "nlp" is
+                                # the only McCormick objective-bound mode.
                                 mc_lb = -np.inf
                             if np.isfinite(mc_lb):
                                 if _model_is_convex:
