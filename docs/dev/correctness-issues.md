@@ -120,7 +120,7 @@ in non-default configs; loud ingestion gaps. **P3** = hygiene.
 | C-32 | P0 | relaxation/mccormick | `relax_asin`/`relax_acos` inverted curvature regime → unsound convex envelope (cv > f) in the LIVE JAX layer → invalid dual bound (= NM-1) | fixed |
 | C-33 | P0 | solver.py fallback | pure-continuous fallback certifies a nonconvex model's local optimum with `gap_certified=True` (= SC-1), DEFAULT path | fixed |
 | C-34 | P0 | gdp_reformulate | even-power bound over a zero-straddling base uses endpoint-only bounds (omits interior min at 0) → invalid aux box → false optimal (= FR-1), DEFAULT path | fixed |
-| C-35 | P1 | oa.py / gdpopt_loa | non-rigorous NLP failure → unconditional no-good cut → possible false infeasible/optimal (= OA-1, opt-in OA/LOA path) | open |
+| C-35 | P1 | oa.py / gdpopt_loa | non-rigorous NLP failure → unconditional no-good cut → possible false infeasible/optimal (= OA-1, opt-in OA/LOA path) | fixed |
 
 ---
 
@@ -1995,8 +1995,9 @@ checks per §0.
 
 ---
 
-## C-35 (P1) — OA/LOA emits an unconditional no-good cut on non-rigorous NLP failure (opt-in)
+## C-35 (P1) — OA/LOA emits an unconditional no-good cut on non-rigorous NLP failure (opt-in) — **FIXED**
 
+**Status:** fixed (PR: see Log).
 **Origin:** solver-core review (OA-1).
 **Area:** `python/discopt/oa.py:209-236, 893-931, 916` and
 `python/discopt/gdpopt_loa.py:314-370, 225`.
@@ -2027,7 +2028,62 @@ sub-second GDP. Fails before, passes after.
 no-good cut is emitted without a rigorous infeasibility proof; existing OA/LOA tests
 unchanged; standing gates pass.
 
-**Log:** 2026-07-03 — new opt-in P1 (solver-core review §2).
+**Log:**
+- 2026-07-03 — new opt-in P1 (solver-core review §2).
+- 2026-07-03 — **CONFIRMED then FIXED.** Confirmed both false-certificate classes
+  on pre-fix code with a direct `solve_oa` repro (monkeypatching the fixed-integer
+  NLP subproblem to fail *non-rigorously*, as a diverged/iteration-limited local
+  NLP does):
+  * **False infeasible** — a feasible model `min (x-0.5)^2+3y s.t. x+y>=0.3` (true
+    opt x=0.5,y=0,obj=0) returned `status="infeasible", gap_certified=True` when
+    every NLP subproblem merely failed.
+  * **False optimal** — same model with only the *optimal* config's (y=0) NLP
+    failing returned `status="optimal", objective=3.0` (the suboptimal y=1),
+    certified, because the no-good cut excluded the optimal config.
+
+  Root cause was structural: `_solve_nlp_subproblem` collapses *every* non-optimal
+  outcome (diverged / iteration-limit-without-feasible / error / exception) to
+  `(None, None)`, and the loop's `else` branch treated that as "infeasible" and
+  emitted an **unconditional** no-good cut. The NLP layer never even produces a
+  rigorous infeasible verdict (`nlp_ipopt._IPOPT_STATUS_MAP` deliberately maps
+  IPOPT status 2 `Infeasible_Problem_Detected` → `ERROR`), so *every* no-good cut
+  in this branch was unsound.
+
+  **Fix** (`python/discopt/solvers/oa.py`, `python/discopt/solvers/gdpopt_loa.py`):
+  added `_fixed_subproblem_rigorously_infeasible(...)` — a *sufficient, rigorous*
+  infeasibility test (currently: no free continuous variables remaining ⇒ the
+  fixed point is the sole candidate, so a constraint violation there is a complete
+  proof). The no-good cut is now emitted **only** when that test passes;
+  certification is preserved for genuinely-provable exclusions (e.g. all-integer
+  models). On a non-rigorous failure the cut is **withheld**, the configuration is
+  recorded as unresolved (OA gradient cuts at the master point are still added —
+  those never cut a feasible point), the loop breaks soundly if the master
+  re-proposes an unresolved config (anti-cycling without exclusion), and the result
+  is downgraded: `gap_certified=False`, never a certified `optimal`, and never a
+  certified `infeasible` (a new `status="unknown"` is returned instead when there
+  is no incumbent). No rigorous check was weakened.
+
+  **Note (scope, per §0 rule 7):** the fix showed the bug is slightly *broader*
+  than the card framing — OA's `optimal` certification on ordinary MINLPs with an
+  infeasible integer config was also resting on the unsound no-good logic. The
+  rigorous no-continuous-freedom check preserves certification for those (the one
+  existing test that momentarily flipped `optimal`→`feasible`,
+  `test_oa_maximize_linear_objective_is_not_the_minimum`, is green again). Blast
+  radius was a single test; the OA convergence guarantee is not touched broadly, so
+  no escalation was needed. A future, more general rigorous infeasibility prover
+  (interval/FBBT over the fixed box; feasibility-restoration certificate) would let
+  the no-good cut fire in more cases — tracked as a follow-on, not required for
+  soundness (withholding is always sound).
+
+  **Regression test:** `python/tests/test_c35_oa_nogood_nlp_failure.py` (4 tests,
+  `@pytest.mark.smoke`, sub-second, calls `solve_oa`/`solve_gdpopt_loa` directly):
+  no false infeasible (OA + LOA), no false optimal (OA), AND certification IS
+  preserved when the infeasible config is rigorously provable (all-integer case).
+  Red before the fix (3 fail), green after (4 pass).
+
+  **Gates:** smoke 197 passed / 1 skipped; adversarial 10 passed; OA/LOA/gdpopt/
+  nogood/benders 165 passed / 2 skipped; ruff clean; mypy clean on changed files;
+  no Rust touched. PR: (filled at PR creation).
 
 ---
 
