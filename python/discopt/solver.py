@@ -2935,9 +2935,7 @@ def solve_model(
 
             _store_path = os.environ.get("DISCOPT_DECOMP_STORE")
             _store = (
-                RecordStore(path=_store_path)
-                if (_store_path or record_decomposition)
-                else None
+                RecordStore(path=_store_path) if (_store_path or record_decomposition) else None
             )
             advisor = analyze_decomposition(model, store=_store)
             expl = advisor.recommendation()

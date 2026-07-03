@@ -206,8 +206,8 @@ def test_summary_is_string():
 
 
 def test_dec_roundtrip_lossless(tmp_path):
-    from discopt.decomposition.structure import detect_decomposition
     from discopt.decomposition.graph.export import read_dec, write_dec
+    from discopt.decomposition.structure import detect_decomposition
 
     m = dm.Model("blocks")
     x = m.binary("x", shape=(4,))
