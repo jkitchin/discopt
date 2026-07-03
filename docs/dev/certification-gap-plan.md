@@ -640,6 +640,72 @@ ready*; it is simply unreachable on the class that needs it until the cut seam
 exists. Build 1b ships the instrumentation (the per-source cut counter +
 solve-path visibility) that made this diagnosable and will verify the fix.
 
+### Phase 3 1c — cut-reachability entry experiment (2026-07-03)
+
+The decisive spike before building any invasive Rust cut seam (1b's candidate
+lever (i)). It answers: *if the integer-product / graphpart class is made to run
+the cut-enabled path — so aggregation c-MIR + the existing Gomory/cover/clique
+separators actually fire at the root — does the root dual bound close a material
+fraction of the 0b gap toward SCIP's ~100%?* If yes → GO (build the Rust cut
+seam). If cuts fire but the bound barely moves → NO-GO / re-scope (the slice is
+too shallow; SCIP's edge is deeper cuts or a lifted formulation).
+
+**Lever (least-invasive, experiment-scoped, default-OFF, math-neutral when off):**
+env `DISCOPT_P3_FORCE_CUT_PATH=1` (`solver.py::_p3_force_cut_path_enabled`) SKIPS
+the `nlp_solver→"simplex"` reroute at `solver.py:3327`, so the reformulated big-M
+MILP stays on the self-hosted `_solve_milp_bb` path with `prefer_pounce=True` —
+which turns the integer cut loop on (`_gomory_enabled(True)` → `_cut_int_idx`
+populated → `_root_cover_cut_loop` runs GMI/MIR/aggregation/cover). Combined with
+`DISCOPT_CMIR_AGGREGATION=1`. Harness
+`discopt_benchmarks/scripts/p3_1c_cut_reachability.py`; raw
+`results/p3_1c_cut_reachability_panel_20260703T173743.json` (merged from 3
+per-instance runs). Equal 2000-node budget, 90 s cap, panel = 5 (ex1263, ex1263a,
+3 small graphparts; fac1–3 skipped — already ~1.0 closed, and route to
+spatial-McCormick which this lever does not touch). **5 run, 0 skipped.**
+
+| instance | opt | root OFF | root ON | gap-closed ON | cuts ON | path ON |
+|---|---:|---:|---:|---:|---:|---|
+| ex1263 | 19.6 | 19.063 | 19.063 | 0.000 | **0** | _solve_milp_bb |
+| ex1263a | 19.6 | 19.063 | 19.066 | **0.0055** | **8** | _solve_milp_bb |
+| graphpart_2pm-0044-0044 | −13 | −16 | −16 | 0.000 | **0** | _solve_milp_bb |
+| graphpart_2g-0044-1601 | −9.541e5 | −1.026e6 | −1.026e6 | 0.000 | **0** | _solve_milp_bb |
+| graphpart_2pm-0055-0055 | −20 | −25 | −25 | 0.000 | **0** | _solve_milp_bb |
+
+`incorrect_count = 0` on every row (uncapped ON solve certifies the oracle; dual
+bound never crosses opt). Gap-closed anchored at discopt's own OFF root-LP floor
+(no SCIP anchor per run): `(root_on − root_off)/(opt − root_off)`.
+
+**Verdict — NO-GO / RE-SCOPE. Reachability was the wrong diagnosis; the slice is
+too shallow.** The lever *works*: with it on, **all 5** instances route to
+`_solve_milp_bb` (vs `_solve_milp_simplex` on the default path) and the cut loop
+runs fully armed — a live probe on ex1263/graphpart confirms it enters with
+`int_idx_len` 93–120, binaries present, `prefer_pounce=True`. But once reachable
+and armed, **the separators find almost nothing**: cover, clique, Gomory,
+single-row MIR, and 2-row aggregation c-MIR together fire **0 cuts on 4 of 5
+instances** and only 8 on ex1263a — and the root bound moves accordingly:
+**median gap-closed = 0.000**, best case ex1263a **+0.55%**, against SCIP's
+**~1.000** on this exact class (0b). On graphpart_2pm-0044-0044 the root LP has a
+real gap (root −16 vs opt −13) and *still* no separator can cut the LP optimum.
+
+So the 0b/1b hypothesis "the cut seam is unreachable → build it and the class
+closes" is **falsified** by direct measurement: making cuts reachable is
+necessary but nowhere near sufficient. The residual is **separator depth**, not
+plumbing — SCIP's ~100% here comes from cuts our current slice does not produce
+(flow-cover, deeper multi-row / lifted aggregation, GUB/knapsack lifting) and/or
+a lifted formulation, not from the cover/clique/GMI/1-row-MIR/2-row-c-MIR family
+we have. **Do NOT build the invasive Rust `_solve_milp_simplex` cut-callback seam
+(1b lever (i)) yet** — it would make the same too-shallow cuts reachable in a
+faster engine and close ≤0.55% of the gap. Re-scope Phase 3 build item 2 to
+*separator strength* (the depth SCIP actually uses), pinned by its own entry
+experiment (e.g. inject SCIP's *specific* cut rounds and read which families
+carry the graphpart bound), before any engine-seam work. The
+`DISCOPT_P3_FORCE_CUT_PATH` toggle is an experiment lever only (default-OFF,
+math-neutral): it changes no default behavior and is not a shipping feature.
+
+This experiment measures only; the one code toggle it adds is default-off and
+math-neutral (with it unset the `:3327` reroute is unchanged) — bound-neutral by
+construction on the default path, so no correctness gate is weakened.
+
 ---
 
 ## 8. Phase 4 — Stop losing structure (~3–5 EW, medium risk)
