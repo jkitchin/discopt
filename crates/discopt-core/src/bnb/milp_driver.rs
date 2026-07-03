@@ -146,6 +146,43 @@ pub struct MilpOptions {
     pub simplex: SimplexOptions,
 }
 
+/// Map the search's terminal state to a [`MilpStatus`]. Pure so it can be
+/// unit-tested against the exact orphaned-node scenario (C-2) without driving a
+/// full solve.
+///
+/// The C-2 invariant lives here: `Infeasible` is returned **only** on a rigorous
+/// empty-tree proof — `tree_finished && !search_incomplete`. `search_incomplete`
+/// is true whenever a node was deferred un-solved (deadline), which leaves it
+/// popped off the heap and `Evaluated`, invisible to the tree's `open_count()`.
+/// In that case `tree_finished` can read `true` over a subtree that was never
+/// searched, so the honest terminus is a limit status, never a false
+/// "infeasible".
+fn decide_status(
+    unbounded: bool,
+    has_inc: bool,
+    tree_finished: bool,
+    search_incomplete: bool,
+    gap_closed: bool,
+    gap_certified: bool,
+    node_limit_hit: bool,
+) -> MilpStatus {
+    if unbounded {
+        MilpStatus::Unbounded
+    } else if !has_inc {
+        if tree_finished && !search_incomplete {
+            MilpStatus::Infeasible
+        } else {
+            MilpStatus::NodeLimit
+        }
+    } else if (tree_finished || gap_closed) && gap_certified {
+        MilpStatus::Optimal
+    } else if node_limit_hit {
+        MilpStatus::NodeLimit
+    } else {
+        MilpStatus::Feasible
+    }
+}
+
 /// Solve `min cᵀx + obj_const s.t. A x = b, l ≤ x ≤ u` with `integer_cols`
 /// integer-constrained, by Rust-internal warm-started-simplex branch and bound.
 pub fn solve_milp(lp: &LpView<'_>, b: &[f64], obj_const: f64, opts: &MilpOptions) -> MilpResult {
@@ -218,6 +255,14 @@ pub fn solve_milp(lp: &LpView<'_>, b: &[f64], obj_const: f64, opts: &MilpOptions
     let mut lp_iters = 0usize;
     let mut unbounded = false;
     let mut gap_certified = true;
+    // C-2: set whenever a node is dropped un-solved (deadline deferral). A
+    // deferred node was already popped off the heap and left `Evaluated`, so it
+    // is invisible to `open_count()` — `is_finished()` can then read `true` even
+    // though that node's subtree was never searched. Without this flag, an empty
+    // tree with no incumbent is mislabeled `Infeasible` (a false certificate)
+    // when the real terminus is a time-limit cut-off. The no-incumbent status
+    // branch gates on this so a deadline yields a limit status, not `Infeasible`.
+    let mut search_incomplete = false;
 
     // Original constraint rows (before any cuts) are the knapsack candidates for
     // cover separation; later rows are themselves cuts.
@@ -519,10 +564,19 @@ pub fn solve_milp(lp: &LpView<'_>, b: &[f64], obj_const: f64, opts: &MilpOptions
             if out.deferred {
                 // Deadline hit before this node's LP solve. Skip it entirely: do
                 // not import a result, so the node keeps its parent-inherited
-                // bound and stays a valid open node. The gap cannot be certified
-                // once any node went unsolved, and the loop-top deadline check
-                // breaks the search on the next iteration.
+                // bound. The gap cannot be certified once any node went unsolved,
+                // and the loop-top deadline check breaks the search on the next
+                // iteration.
+                //
+                // C-2: the node was popped off the heap by `export_batch` and is
+                // now stuck `Evaluated`, so `open_count()` no longer sees it. If
+                // the rest of this final batch fathoms rigorously and no incumbent
+                // exists, `is_finished()` would read `true` and the driver would
+                // return `Infeasible` — a false certificate, since this node's
+                // subtree was never searched. Record that the search was cut short
+                // so the no-incumbent status resolves to a limit status instead.
                 gap_certified = false;
+                search_incomplete = true;
                 continue;
             }
             if out.unbounded {
@@ -599,21 +653,15 @@ pub fn solve_milp(lp: &LpView<'_>, b: &[f64], obj_const: f64, opts: &MilpOptions
         Some((xi, oi)) if oi < INFEAS_SENTINEL - 1.0 => (xi.to_vec(), oi, true),
         _ => (vec![0.0; ns], f64::INFINITY, false),
     };
-    let status = if unbounded {
-        MilpStatus::Unbounded
-    } else if !has_inc {
-        if tm.is_finished() {
-            MilpStatus::Infeasible
-        } else {
-            MilpStatus::NodeLimit
-        }
-    } else if (tm.is_finished() || tm.gap() <= opts.gap_tol) && gap_certified {
-        MilpStatus::Optimal
-    } else if stats.total_nodes >= opts.max_nodes {
-        MilpStatus::NodeLimit
-    } else {
-        MilpStatus::Feasible
-    };
+    let status = decide_status(
+        unbounded,
+        has_inc,
+        tm.is_finished(),
+        search_incomplete,
+        tm.gap() <= opts.gap_tol,
+        gap_certified,
+        stats.total_nodes >= opts.max_nodes,
+    );
 
     MilpResult {
         status,
@@ -1863,6 +1911,88 @@ mod tests {
         };
         let r = solve_milp(&lp, &[1.0], 0.0, &opts(1, vec![0]));
         assert_eq!(r.status, MilpStatus::Infeasible);
+    }
+
+    // ---- C-2: deadline that orphans a deferred node must NOT report Infeasible ----
+    //
+    // These drive the terminal-status logic (`decide_status`) directly, which is
+    // where the false certificate lived: when the last batch fathoms rigorously
+    // and no incumbent exists, a deferred (un-solved) node has been popped off the
+    // heap and left `Evaluated`, so the tree reads `is_finished() == true`. The
+    // pre-fix code returned `Infeasible` unconditionally on that branch — a false
+    // "infeasible" on a time-limit termination whose orphaned subtree may contain
+    // the optimum. The fix gates `Infeasible` on `!search_incomplete`.
+
+    #[test]
+    fn c2_deferred_node_orphaned_by_deadline_is_not_infeasible() {
+        // Empty tree, no incumbent, but a node was deferred un-solved: the search
+        // was cut short by the deadline, so the honest status is a limit status,
+        // NEVER Infeasible. This is the exact scenario the C-2 card describes.
+        let status = decide_status(
+            /*unbounded=*/ false, /*has_inc=*/ false,
+            /*tree_finished=*/ true, // open_count()==0 because the orphan is Evaluated
+            /*search_incomplete=*/ true, // a node was deferred un-solved
+            /*gap_closed=*/ false,
+            /*gap_certified=*/ false, // gap is correctly decertified on defer
+            /*node_limit_hit=*/ false,
+        );
+        assert_ne!(
+            status,
+            MilpStatus::Infeasible,
+            "deferred-node orphaning must not yield a false Infeasible certificate"
+        );
+        assert_eq!(status, MilpStatus::NodeLimit);
+    }
+
+    #[test]
+    fn c2_genuine_infeasible_still_reported_when_search_complete() {
+        // Rigorous empty-tree proof: every node fathomed, nothing deferred. The
+        // Infeasible certificate must survive the fix — do not weaken it.
+        let status = decide_status(
+            /*unbounded=*/ false, /*has_inc=*/ false, /*tree_finished=*/ true,
+            /*search_incomplete=*/ false, // no node was ever dropped un-solved
+            /*gap_closed=*/ false, /*gap_certified=*/ true,
+            /*node_limit_hit=*/ false,
+        );
+        assert_eq!(
+            status,
+            MilpStatus::Infeasible,
+            "a rigorously drained empty tree must still certify Infeasible"
+        );
+    }
+
+    #[test]
+    fn c2_end_to_end_genuine_infeasible_unaffected() {
+        // The full-driver infeasible path (no deferral) is unchanged: x0 ∈ [2,5]
+        // integer with x0 ≤ 1 is genuinely infeasible and no deadline is set, so
+        // `search_incomplete` stays false and the status is Infeasible.
+        let a = [1.0, 1.0];
+        let c = [1.0, 0.0];
+        let l = [2.0, 0.0];
+        let u = [5.0, INF];
+        let lp = LpView {
+            a: &a,
+            m: 1,
+            n: 2,
+            c: &c,
+            l: &l,
+            u: &u,
+        };
+        let r = solve_milp(&lp, &[1.0], 0.0, &opts(1, vec![0]));
+        assert_eq!(r.status, MilpStatus::Infeasible);
+    }
+
+    #[test]
+    fn c2_deferred_with_incumbent_reports_feasible_not_infeasible() {
+        // Orthogonal guard: a deferred node with an incumbent present is a
+        // time-limited feasible solve, not Infeasible (that branch never touched
+        // `has_inc==true`, but pin it so a future refactor can't regress it).
+        let status = decide_status(
+            /*unbounded=*/ false, /*has_inc=*/ true, /*tree_finished=*/ false,
+            /*search_incomplete=*/ true, /*gap_closed=*/ false,
+            /*gap_certified=*/ false, /*node_limit_hit=*/ false,
+        );
+        assert_eq!(status, MilpStatus::Feasible);
     }
 
     #[test]

@@ -91,7 +91,7 @@ in non-default configs; loud ingestion gaps. **P3** = hygiene.
 | C-13 | P0 | solver.py bounds | serial convex path trusts under-converged NLP objective as node lower bound → false "optimal" | fixed |
 | C-1 | P0 | solver.py status | false "infeasible" from non-rigorous NLP fathoms (solve_model path) | fixed |
 | C-4 | P1 | mir.rs cuts | integer-MIR applied with fractional integer lower bound → invalid cut | open |
-| C-2 | P1 | milp_driver status | false "Infeasible" when deadline orphans deferred nodes | open |
+| C-2 | P1 | milp_driver status | false "Infeasible" when deadline orphans deferred nodes | fixed |
 | C-19 | P1 | relax_tan | pole-straddling interval classified as one branch → secant across a pole, invalid envelope | open |
 | C-5 | P1 | .nl parser | floor/ceil/round/trunc→identity, intdiv→div, all silent | open |
 | C-6 | P1 | modeling API | integer vars silently clamped to [0, 1e6] | open |
@@ -563,7 +563,43 @@ popped, so `open_count` would still miss it.)
 - `gap_certified` remains false in the deferred case.
 - Standing gates pass.
 
-**Log:** —
+**Status:** fixed.
+
+**Log:** 2026-07-03 — CONFIRMED statically at all three code sites: `export_batch`
+(`tree_manager.rs:233`) marks a dispatched node `Evaluated` and pops its heap
+entry; the deferral path (`milp_driver.rs`, `out.deferred`) drops the node's
+result without re-import, so it is stranded `Evaluated`; `open_count()`
+(`pool.rs`) counts only `Pending`, so the orphan is invisible and `is_finished()`
+reads `true`; the `!has_inc` status branch returned `Infeasible` unconditionally —
+a false certificate on a time-limit termination. (Confirmed the *real* damage is
+scoped to the Infeasible label, not a false Optimal: `gap_certified` is already
+correctly false on the deferral path.) A deferred-node time-out is inconclusive,
+not proven-infeasible; `python/discopt/infeasibility.py` treats `status ==
+"infeasible"` as a *proof*, so the false label propagates.
+
+FIX (minimal, per the card sketch): added `search_incomplete: bool` on the driver,
+set alongside the existing `gap_certified = false` whenever a node is deferred
+un-solved. The terminal-status decision was extracted into a pure `decide_status`
+helper so it is unit-testable in isolation; its no-incumbent branch now returns
+`Infeasible` **only** on `tree_finished && !search_incomplete` (a rigorous
+empty-tree proof), else a limit status (`NodeLimit`, mapped to `"node_limit"` at
+`lp_bindings.rs`, which the Python layer treats as inconclusive). Reused the
+existing `NodeLimit` variant rather than adding a `TimeLimit` arm — no new enum
+arm, no Python-mapping churn; the card permits either. The rigorous-infeasible
+path (`search_incomplete == false`) is untouched. `gap_certified` still goes false
+on defer.
+
+Regression tests (`crates/discopt-core/src/bnb/milp_driver.rs`, module `tests`,
+sub-second, direct calls into `decide_status`): `c2_deferred_node_orphaned_by_
+deadline_is_not_infeasible` (RED before fix: returned `Infeasible`; GREEN after:
+`NodeLimit` — verified by temporarily reverting the `&& !search_incomplete` gate),
+`c2_genuine_infeasible_still_reported_when_search_complete` (the rigorous path is
+not weakened), `c2_deferred_with_incumbent_reports_feasible_not_infeasible`
+(orthogonal guard), and end-to-end `c2_end_to_end_genuine_infeasible_unaffected`
+via `solve_milp`. Gates: `cargo test -p discopt-core` 390 passed / 0 failed;
+`cargo clippy -p discopt-core --lib` 0 warnings; `maturin develop --release` built;
+`pytest -m smoke` 193 passed / 1 skipped; adversarial suite 10 passed;
+`incorrect_count = 0`. PR: (fix-c2-milp-driver-deadline-infeasible).
 
 ---
 
