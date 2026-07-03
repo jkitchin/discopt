@@ -52,7 +52,7 @@ _OBBT_COND_LIMIT = 1e10
 _OBBT_NS_GUARD = 1e-6
 
 
-def _ns_safe_lp_lower_bound(c, dual_values, A_ub, b_ub, lo, hi, *, rc_snap_tol=0.0):
+def _ns_safe_lp_lower_bound(c, dual_values, A_ub, b_ub, lo, hi, *, rc_snap_tol=0.0, n_eq=0):
     """Neumaier-Shcherbina rigorous lower bound on ``min c^T x`` over the box LP.
 
     The LP is ``min c^T x  s.t.  A_ub x <= b_ub,  lo <= x <= hi``. For *any*
@@ -94,6 +94,15 @@ def _ns_safe_lp_lower_bound(c, dual_values, A_ub, b_ub, lo, hi, *, rc_snap_tol=0
     nonzero reduced cost on an infinite-bound column exceeds the tol, is NOT
     snapped, and correctly yields ``None`` -- so the tol also guards against
     masking real unboundedness.
+
+    ``n_eq`` (default ``0``) marks the last ``n_eq`` rows of ``(A_ub, b_ub)`` as
+    *equality* rows (``A_eq x == b_eq``, appended after the inequality rows —
+    the simplex/HiGHS ``dual_values`` order). An equality contributes
+    ``v^T(A_eq x - b_eq) == 0`` for every feasible ``x`` regardless of the sign
+    of ``v``, so its multiplier is *free*: only the leading inequality block is
+    clamped to ``>= 0``. Clamping an equality multiplier would still be sound
+    (it just picks a different valid ``y``) but needlessly weakens ``g``; leaving
+    it free keeps the bound as tight as the vertex duals allow.
     """
     import scipy.sparse as sp
 
@@ -102,7 +111,14 @@ def _ns_safe_lp_lower_bound(c, dual_values, A_ub, b_ub, lo, hi, *, rc_snap_tol=0
     y = np.array(dual_values, dtype=np.float64)  # copy: must not mutate caller's duals
     if y.size == 0:
         return None
-    np.clip(-y, 0.0, None, out=y)  # y := max(-row_dual, 0) >= 0
+    # HiGHS reports ``rc = c - A^T·dual`` so the weak-duality multiplier is
+    # ``-dual``. Inequality (``<=``) rows require a non-negative multiplier for
+    # ``g(y) <= min`` to hold; the trailing ``n_eq`` equality rows carry a
+    # free-sign multiplier and are left unclamped.
+    y = -y
+    n_ub = y.size - int(n_eq)
+    if n_ub > 0:
+        np.clip(y[:n_ub], 0.0, None, out=y[:n_ub])  # inequality rows: max(-dual, 0)
     c = np.asarray(c, dtype=np.float64)
     if A_ub is None or b_ub is None:
         rc = c.copy()
@@ -140,6 +156,25 @@ def _ns_safe_lp_lower_bound(c, dual_values, A_ub, b_ub, lo, hi, *, rc_snap_tol=0
     # (~n * eps * magnitude); keeps g a rigorous under-estimate.
     margin = 1e-10 * (1.0 + abs(const) + float(np.abs(contrib).sum()))
     return g - margin
+
+
+def _max_abs(x) -> float:
+    """Largest finite absolute entry of ``x`` (0.0 for ``None``/empty).
+
+    Used to gauge an OBBT projection LP's conditioning (coefficient spread) so
+    the caller can require the rigorous NS-safe bound on ill-conditioned systems.
+    """
+    if x is None:
+        return 0.0
+    import scipy.sparse as sp
+
+    if sp.issparse(x):
+        return float(np.abs(x.data).max()) if x.nnz else 0.0
+    arr = np.asarray(x, dtype=np.float64)
+    if arr.size == 0:
+        return 0.0
+    finite = arr[np.isfinite(arr)]
+    return float(np.abs(finite).max()) if finite.size else 0.0
 
 
 def _equilibrate_rows(A_ub, b_ub):
@@ -558,7 +593,13 @@ def run_obbt(
     # ``run_obbt_on_relaxation`` / ``get_exact_lp_solver`` (issue #145). The IPM
     # is never used here; if no exact (Rust simplex / HiGHS) oracle is available
     # the pass is a sound no-op. ``prefer_pounce`` is kept for compatibility.
-    _lp = get_exact_lp_solver()
+    # Prefer the dual-exposing exact oracle: its vertex duals let every
+    # tightening be clamped to the rigorous Neumaier-Shcherbina safe bound
+    # (C-15), so an ill-conditioned LP whose reported vertex drifts *above* the
+    # true projection can no longer over-tighten and cut feasible points.
+    _dual_lp = get_exact_dual_lp_solver()
+    _lp = _dual_lp or get_exact_lp_solver()
+    _use_ns = _dual_lp is not None
     if _lp is None:
         eff_lb = lb if lb is not None else _get_var_bounds(model)[0].copy()
         eff_ub = ub if ub is not None else _get_var_bounds(model)[1].copy()
@@ -612,6 +653,42 @@ def run_obbt(
             total_lp_time=0.0,
         )
 
+    # Conditioning guard + NS-safe clamp setup (C-15). The reported LP vertex
+    # can drift *above* the true projection on an ill-conditioned system and
+    # over-tighten a bound, cutting feasible (possibly optimal) points. Every
+    # tightening below is clamped to the rigorous Neumaier-Shcherbina bound ``g``
+    # (sound at any conditioning); on an ill-conditioned LP we additionally
+    # *require* that safe bound, leaving a variable untightened rather than
+    # trusting a non-rigorous vertex. ``dual_values`` are ordered inequality rows
+    # then equality rows, so the NS eval stacks ``[A_ub; A_eq]`` and marks the
+    # ``A_eq`` rows as free-multiplier via ``n_eq``.
+    _bound_vals = np.concatenate([lb, ub]) if n_vars else np.array([], dtype=np.float64)
+    _cond = max(
+        _max_abs(A_ub),
+        _max_abs(b_ub),
+        _max_abs(A_eq),
+        _max_abs(b_eq),
+        _max_abs(_bound_vals),
+    )
+    require_ns = _cond > _OBBT_COND_LIMIT
+    if require_ns and not _use_ns:
+        return ObbtResult(
+            tightened_lb=lb,
+            tightened_ub=ub,
+            n_lp_solves=0,
+            n_tightened=0,
+            total_lp_time=0.0,
+        )
+    _ns_parts_A = [p for p in (A_ub, A_eq) if p is not None]
+    _ns_parts_b = [p for p in (b_ub, b_eq) if p is not None]
+    _ns_A = np.vstack(_ns_parts_A) if _ns_parts_A else None
+    _ns_b = (
+        np.concatenate([np.asarray(p, dtype=np.float64) for p in _ns_parts_b])
+        if _ns_parts_b
+        else None
+    )
+    _ns_neq = 0 if A_eq is None else int(np.asarray(A_eq).shape[0])
+
     # Identify candidate variables
     candidates = []
     for i in range(n_vars):
@@ -642,6 +719,25 @@ def run_obbt(
             return remaining
         return min(time_limit_per_lp, remaining)
 
+    def _ns_clamp(c_vec: np.ndarray, raw: float, result) -> Optional[float]:
+        """Clamp a raw LP-vertex objective ``min c_vec^T x`` to the NS-safe bound.
+
+        Returns the value to tighten to (the raw vertex when it is trustworthy,
+        else the rigorous under-estimate ``g``), or ``None`` when no safe bound
+        is available on an ill-conditioned LP (``require_ns``) — the caller then
+        leaves the bound untightened. See ``_ns_safe_lp_lower_bound``.
+        """
+        if not _use_ns:
+            return raw
+        g = _ns_safe_lp_lower_bound(
+            c_vec, getattr(result, "dual_values", None), _ns_A, _ns_b, lb, ub, n_eq=_ns_neq
+        )
+        if g is None:
+            return None if require_ns else raw
+        if raw > g + _OBBT_NS_GUARD * (1.0 + abs(raw)):
+            return float(g)
+        return raw
+
     for var_idx in candidates:
         lp_time_limit = _lp_time_limit()
         if lp_time_limit is None and deadline is not None:
@@ -664,11 +760,11 @@ def run_obbt(
         n_lp_solves += 1
         total_lp_time += result.wall_time
 
-        if result.status == SolveStatus.OPTIMAL:
+        if result.status == SolveStatus.OPTIMAL and result.objective is not None:
             warm_basis = result.basis
-            new_lb = result.objective
+            new_lb = _ns_clamp(c, float(result.objective), result)
             if new_lb is not None and new_lb > lb[var_idx] + 1e-8:
-                lb[var_idx] = new_lb
+                lb[var_idx] = min(new_lb, ub[var_idx])  # never cross the upper bound
                 bounds_list[var_idx] = (float(lb[var_idx]), float(ub[var_idx]))
                 n_tightened += 1
 
@@ -692,13 +788,17 @@ def run_obbt(
         n_lp_solves += 1
         total_lp_time += result.wall_time
 
-        if result.status == SolveStatus.OPTIMAL:
+        if result.status == SolveStatus.OPTIMAL and result.objective is not None:
             warm_basis = result.basis
-            new_ub = -result.objective if result.objective is not None else None
-            if new_ub is not None and new_ub < ub[var_idx] - 1e-8:
-                ub[var_idx] = new_ub
-                bounds_list[var_idx] = (float(lb[var_idx]), float(ub[var_idx]))
-                n_tightened += 1
+            # ``g`` bounds ``min(-x_i)`` from below, so ``-g`` is the sound
+            # (looser) upper bound on ``x_i`` when the vertex is untrustworthy.
+            lp_min = _ns_clamp(c, float(result.objective), result)
+            if lp_min is not None:
+                new_ub = -lp_min
+                if new_ub < ub[var_idx] - 1e-8:
+                    ub[var_idx] = max(new_ub, lb[var_idx])  # never cross the lower bound
+                    bounds_list[var_idx] = (float(lb[var_idx]), float(ub[var_idx]))
+                    n_tightened += 1
 
     return ObbtResult(
         tightened_lb=lb,
@@ -798,17 +898,6 @@ def run_obbt_on_relaxation(
     # Refuse to tighten over a numerically ill-conditioned relaxation: an OBBT
     # bound from such an LP is not rigorous and can prune feasible points (see
     # ``_OBBT_COND_LIMIT``). Returning the box untightened is sound.
-    def _max_abs(x) -> float:
-        if x is None:
-            return 0.0
-        if sp.issparse(x):
-            return float(np.abs(x.data).max()) if x.nnz else 0.0
-        arr = np.asarray(x, dtype=np.float64)
-        if arr.size == 0:
-            return 0.0
-        finite = arr[np.isfinite(arr)]
-        return float(np.abs(finite).max()) if finite.size else 0.0
-
     _bound_vals = np.array([v for pair in bounds for v in pair], dtype=np.float64)
     _cond = max(_max_abs(A_ub), _max_abs(b_ub), _max_abs(_bound_vals))
     # Conditioning guard. The raw vertex objective from an ill-conditioned LP can

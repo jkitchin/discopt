@@ -61,7 +61,7 @@ in non-default configs; loud ingestion gaps. **P3** = hygiene.
 | C-6 | P1 | modeling API | integer vars silently clamped to [0, 1e6] | open |
 | C-18 | P1 | midpoint bound | `mccormick_bounds="midpoint"` returns u(mid), not a lower bound (opt-in mode) | open |
 | C-20 | P2 | fbbt_fp.rs | watch-list FBBT declares infeasibility with zero tolerance (opt-in engine) | open |
-| C-15 | P2 | obbt.py | `run_obbt` variant tightens to raw LP vertex, no NS safe-bound clamp | open |
+| C-15 | P2 | obbt.py | `run_obbt` variant tightens to raw LP vertex, no NS safe-bound clamp | fixed |
 | C-14 | P2 | milp_driver | LP-infeasible fathom trusts status alone; Farkas ray never verified | open |
 | C-21 | P2 | incremental MC | soundness-gate validation boxes never exercise negative/zero-spanning bounds | open |
 | C-7 | P2 | .nl parser | defined variables (V segments) discarded → hard parse error | open |
@@ -687,7 +687,37 @@ code — deletion is the better fix if nothing calls it).
 optimistic LP objective, the applied bound never exceeds the NS bound) or the dead
 function is removed; standing gates pass.
 
-**Log:** —
+**Log:**
+- 2026-07-02 — **CONFIRMED (not dead) then FIXED.** Static confirm: `run_obbt`
+  applied `result.objective` (raw LP vertex) with only a `+1e-8` gate; the NS
+  clamp + conditioning guard lived only in `run_obbt_on_relaxation`. Reachability:
+  `run_obbt` is **live** — called from the AMP path (`solvers/amp.py:1897,1941`)
+  and heavily tested — so deletion is off the table; routed the tightening
+  through the NS-safe bound instead.
+- **Fix.** `run_obbt` now (a) resolves its oracle via `get_exact_dual_lp_solver`
+  (vertex duals), (b) applies the `_cond > _OBBT_COND_LIMIT` → `require_ns`
+  conditioning guard mirroring `run_obbt_on_relaxation`, and (c) clamps every
+  min/max tightening to the Neumaier–Shcherbina safe bound `g` via a new
+  `_ns_clamp` closure. `_ns_safe_lp_lower_bound` gained an `n_eq` parameter so
+  the trailing **equality** rows (`run_obbt` sees `A_eq`, unlike the relaxation
+  variant) keep a *free-sign* multiplier while inequality rows stay clamped
+  `≥ 0`; `n_eq=0` default is byte-identical for the existing callers (DBBT,
+  `run_obbt_on_relaxation`). The local `_max_abs` in `run_obbt_on_relaxation`
+  was hoisted to module scope and reused. Equilibration was deliberately **not**
+  added here — the NS bound `g(y)` is a rigorous under-estimate for *any* duals
+  regardless of conditioning, so the clamp restores soundness on its own.
+- **Regression tests** (`python/tests/test_obbt.py::TestC15NsSafeClamp`,
+  fail-before/pass-after verified): `test_optimistic_vertex_is_clamped` (fake
+  oracle reports an optimistic vertex 5.0 with inactive duals → clamped to the
+  NS bound ~0, feasible region not cut; patches both oracle seams so it
+  discriminates the pre-fix path), and `test_ns_safe_lower_bound_free_equality_multiplier`
+  (equality `x==2`: `n_eq=1` recovers the tight bound 2.0 vs 0.0 when clamped as
+  `<=`, both rigorous under-estimates of the true min). Updated
+  `test_total_time_limit_stops_before_all_variables` to patch the new preferred
+  seam.
+- **Gates:** `test_obbt.py` 48 passed; `test_amp` 135, `test_amp_integration` +
+  `test_lp_backend_select` 17; `pytest -m smoke` 211 passed / 1 skipped;
+  adversarial suite 10 passed; ruff clean. PR: #402 (→ main; supersedes #401).
 
 ---
 
