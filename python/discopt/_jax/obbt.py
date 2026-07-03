@@ -218,6 +218,137 @@ def _equilibrate_rows(A_ub, b_ub):
     return A_arr * d[:, None], b_arr * d
 
 
+def _simplex_available() -> bool:
+    """Whether the pure-Rust CSC warm-start simplex binding is importable."""
+    try:
+        from discopt.solvers.lp_simplex import SIMPLEX_AVAILABLE
+
+        return bool(SIMPLEX_AVAILABLE)
+    except ImportError:
+        return False
+
+
+class _PersistentProbeLP:
+    """A per-sweep OBBT projection LP whose structure is assembled **once**.
+
+    Within one OBBT sweep the inequality system ``A_ub x <= b_ub`` (already
+    equilibrated, cutoff row appended) is *fixed* — only the objective ``c``
+    (``+e_j`` / ``-e_j`` per probe) and, as tightenings accumulate, the variable
+    box change. Building the standard form ``[A_ub | I_m] z = b`` in CSC once and
+    re-solving per probe with a swapped objective (T2.2(a)) removes the
+    per-probe ``sp.csc_matrix`` / dense ``a_std`` marshalling that dominated the
+    OBBT wall clock (bottleneck-profile B1: scipy CSR realloc per solve ≈ 33% of
+    wall).
+
+    Each :meth:`solve` optionally ingests the previous probe's optimal basis
+    ``(col_status, basic_vars)`` (T2.2(b)); because consecutive probes differ
+    only in the objective over a (weakly) shrinking box, that basis is usually
+    still **primal-feasible**, so the Rust ``solve_lp_cols_warm`` path finishes
+    in a primal phase-2 (a handful of pivots) — and, whenever the warm basis is
+    unusable or a box tightening made it primal-infeasible, falls to the trusted
+    cold two-phase solve on the same matrix. The returned objective is the exact
+    vertex optimum either way, so warming can only change speed, never the
+    tightening (the differential-neutrality invariant). A non-``optimal`` status
+    is surfaced unchanged; the caller then drops the warm basis for that probe.
+
+    This entry is used only when the pure-Rust simplex binding is importable
+    (the exact-oracle requirement of OBBT); the caller keeps the seam-based
+    fallback for the POUNCE-only / no-backend configurations.
+    """
+
+    __slots__ = ("_n", "_m", "_indptr", "_indices", "_data", "_b")
+
+    def __init__(self, A_ub, b_ub, n_total: int):
+        import scipy.sparse as sp
+
+        n = int(n_total)
+        if A_ub is not None and b_ub is not None and np.size(b_ub) > 0:
+            a_struct = (
+                sp.csc_matrix(A_ub)
+                if sp.issparse(A_ub)
+                else sp.csc_matrix(np.asarray(A_ub, dtype=np.float64).reshape(-1, n))
+            )
+            b_vec = np.asarray(b_ub, dtype=np.float64).ravel()
+        else:
+            a_struct = sp.csc_matrix((0, n), dtype=np.float64)
+            b_vec = np.zeros(0, dtype=np.float64)
+        m = a_struct.shape[0]
+        # Standard form ``[A_ub | I_m] z = b`` (one slack per inequality row),
+        # assembled once in CSC and reused for every probe in the sweep.
+        if m > 0:
+            a_std = sp.hstack(
+                [a_struct, sp.identity(m, format="csc", dtype=np.float64)], format="csc"
+            ).tocsc()
+        else:
+            a_std = a_struct.tocsc()
+        self._n = n
+        self._m = m
+        self._indptr = np.ascontiguousarray(a_std.indptr, dtype=np.int64)
+        self._indices = np.ascontiguousarray(a_std.indices, dtype=np.int64)
+        self._data = np.ascontiguousarray(a_std.data, dtype=np.float64)
+        self._b = np.ascontiguousarray(b_vec, dtype=np.float64)
+
+    def solve(self, c, lb_arr, ub_arr, warm_basis):
+        """Solve ``min c^T x  s.t.  A_ub x <= b_ub, lb <= x <= ub`` at this box.
+
+        Returns ``(status, objective, dual_values, basis, wall_time)`` — ``status``
+        a :class:`SolveStatus`, ``objective``/``dual_values`` ``None`` on any
+        non-optimal exit, ``basis`` the optimal ``(col_status, basic_vars)`` tuple
+        to thread into the next probe, ``wall_time`` the elapsed solve seconds.
+        """
+        import time as _time
+
+        from discopt._rust import solve_lp_warm_csc_py
+
+        n, m = self._n, self._m
+        c_std = np.concatenate([np.asarray(c, dtype=np.float64).ravel(), np.zeros(m)])
+        lb_std = np.concatenate([np.asarray(lb_arr, dtype=np.float64), np.zeros(m)])
+        ub_std = np.concatenate(
+            [np.asarray(ub_arr, dtype=np.float64), np.full(m, 1e20, dtype=np.float64)]
+        )
+        if warm_basis is not None:
+            cs0 = np.ascontiguousarray(warm_basis[0], dtype=np.int8)
+            bv0 = np.ascontiguousarray(warm_basis[1], dtype=np.int64)
+        else:
+            cs0 = None
+            bv0 = None
+        t0 = _time.perf_counter()
+        status, _x_full, obj, _iters, cs, bv, dual, _ray = solve_lp_warm_csc_py(
+            np.ascontiguousarray(c_std),
+            m,
+            n + m,
+            self._indptr,
+            self._indices,
+            self._data,
+            self._b,
+            np.ascontiguousarray(lb_std),
+            np.ascontiguousarray(ub_std),
+            cs0,
+            bv0,
+            1e-9,
+            100_000,
+        )
+        wall = _time.perf_counter() - t0
+        status_map = {
+            "optimal": SolveStatus.OPTIMAL,
+            "infeasible": SolveStatus.INFEASIBLE,
+            "unbounded": SolveStatus.UNBOUNDED,
+            "iter_limit": SolveStatus.ITERATION_LIMIT,
+            "numerical": SolveStatus.ERROR,
+        }
+        st = status_map.get(status, SolveStatus.ERROR)
+        if st != SolveStatus.OPTIMAL:
+            return st, None, None, None, wall
+        # Row duals in HiGHS order (inequality rows, then the appended cutoff row);
+        # the equilibration is folded into the CSC matrix, so ``dual`` matches the
+        # ``A_ub``/``b_ub`` the caller holds. Attach only when finite (a consumer
+        # degrades to the raw vertex when a multiplier is non-finite).
+        y = np.asarray(dual, dtype=np.float64)
+        dual_values = y if (y.shape[0] == m and np.all(np.isfinite(y))) else None
+        basis = (np.asarray(cs, dtype=np.int8), np.asarray(bv, dtype=np.int64))
+        return SolveStatus.OPTIMAL, float(obj), dual_values, basis, wall
+
+
 def solve_lp(**kwargs):
     """Module-level default LP solve (HiGHS-first, POUNCE fallback).
 
@@ -959,6 +1090,50 @@ def run_obbt_on_relaxation(
     def _bounds_list() -> list[tuple[float, float]]:
         return [(float(lb_arr[i]), float(ub_arr[i])) for i in range(n_total)]
 
+    # T2.2(a)/(b): assemble the std-form CSC once per sweep (the box is fixed
+    # modulo the tightenings this loop accumulates) and warm-start each probe
+    # from the previous probe's optimal basis. Used only with the exact Rust
+    # simplex oracle; POUNCE-only / no-binding configurations keep the seam-based
+    # cold path below. The persistent LP folds the equilibrated ``A_ub``/``b_ub``
+    # (cutoff row already appended) into a CSC built once; per probe only the
+    # objective and (as bounds tighten) the box change. The warm basis is
+    # primal-checked in Rust and falls to a cold two-phase solve when unusable,
+    # so warming can only change speed, never the (differential-neutral) bound.
+    _probe_lp = _PersistentProbeLP(A_ub, b_ub, n_total) if _simplex_available() else None
+
+    def _solve_probe(c):
+        """Solve ``min c^T x`` over the current box; returns ``(status, obj, duals)``.
+
+        Threads the warm basis probe→probe (persistent path) and accumulates the
+        LP wall time. Non-optimal exits drop the warm basis so the next probe
+        cold-starts. Signature-compatible objective/dual reporting across both the
+        persistent CSC path and the seam fallback, so the NS-clamp logic below is
+        identical regardless of which oracle ran.
+        """
+        nonlocal warm_basis, n_lp_solves, total_lp_time
+        n_lp_solves += 1
+        if _probe_lp is not None:
+            st, obj, duals, basis, wall = _probe_lp.solve(c, lb_arr, ub_arr, warm_basis)
+            total_lp_time += wall
+            if st == SolveStatus.OPTIMAL and obj is not None:
+                warm_basis = basis
+                return st, obj, duals
+            warm_basis = None
+            return st, None, None
+        result = _lp(
+            c=c,
+            A_ub=A_ub,
+            b_ub=b_ub,
+            bounds=_bounds_list(),
+            warm_basis=warm_basis,
+            time_limit=time_limit_per_lp,
+        )
+        total_lp_time += result.wall_time
+        if result.status == SolveStatus.OPTIMAL and result.objective is not None:
+            warm_basis = result.basis
+            return result.status, float(result.objective), getattr(result, "dual_values", None)
+        return result.status, None, None
+
     for var_idx in candidate_idxs:
         if deadline is not None and _time.perf_counter() >= deadline:
             break
@@ -971,25 +1146,13 @@ def run_obbt_on_relaxation(
         # min x_i
         c = np.zeros(n_total, dtype=np.float64)
         c[var_idx] = 1.0
-        result = _lp(
-            c=c,
-            A_ub=A_ub,
-            b_ub=b_ub,
-            bounds=_bounds_list(),
-            warm_basis=warm_basis,
-            time_limit=time_limit_per_lp,
-        )
-        n_lp_solves += 1
-        total_lp_time += result.wall_time
-        if result.status == SolveStatus.OPTIMAL and result.objective is not None:
-            warm_basis = result.basis
-            new_lb = float(result.objective)
+        status, objective, dual_values = _solve_probe(c)
+        if status == SolveStatus.OPTIMAL and objective is not None:
+            new_lb = objective
             if _use_ns:
                 # Distrust the vertex only when the rigorous safe bound sits well
                 # below it (ill-conditioned basis); otherwise keep it bit-for-bit.
-                g = _ns_safe_lp_lower_bound(
-                    c, getattr(result, "dual_values", None), A_ub, b_ub, lb_arr, ub_arr
-                )
+                g = _ns_safe_lp_lower_bound(c, dual_values, A_ub, b_ub, lb_arr, ub_arr)
                 if g is None:
                     if require_ns:
                         # Ill-conditioned LP and no rigorous safe bound available:
@@ -1007,26 +1170,14 @@ def run_obbt_on_relaxation(
 
         # max x_i (minimize -x_i)
         c[var_idx] = -1.0
-        result = _lp(
-            c=c,
-            A_ub=A_ub,
-            b_ub=b_ub,
-            bounds=_bounds_list(),
-            warm_basis=warm_basis,
-            time_limit=time_limit_per_lp,
-        )
-        n_lp_solves += 1
-        total_lp_time += result.wall_time
-        if result.status == SolveStatus.OPTIMAL and result.objective is not None:
-            warm_basis = result.basis
-            lp_min = float(result.objective)  # = min(-x_i) = -max(x_i)
+        status, objective, dual_values = _solve_probe(c)
+        if status == SolveStatus.OPTIMAL and objective is not None:
+            lp_min = objective  # = min(-x_i) = -max(x_i)
             if _use_ns:
                 # Same guard: ``g`` bounds ``min(-x_i)`` from below, so when the
                 # vertex sits well above it the basis is ill-conditioned and the
                 # safe bound ``-g`` is the sound (looser) upper bound on ``x_i``.
-                g = _ns_safe_lp_lower_bound(
-                    c, getattr(result, "dual_values", None), A_ub, b_ub, lb_arr, ub_arr
-                )
+                g = _ns_safe_lp_lower_bound(c, dual_values, A_ub, b_ub, lb_arr, ub_arr)
                 if g is None:
                     if require_ns:
                         lp_min = None

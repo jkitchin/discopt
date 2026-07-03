@@ -123,7 +123,7 @@ experiment may run.
 | T1.6 bookkeeping → Rust | non-lever (measured); re-scoped | — | Re-profile: Python per-node tax is minor (0.5s); LP solves dominate (3.84s / ~10-per-node, OBBT probes cold-built). T1.6 premise falsified. Real lever = warm-start OBBT's probe LPs (the parked warm-primal applies — objective-only change over fixed box). Follow-on, not a T1.x item |
 | T2.0 reduction-layer correctness pre-flight | todo — **blocking** | — | C-16 (P0) first, then C-15/C-20/C-21; see §14 Phase 2 |
 | T2.1 Phase 2 entry experiment (kill criterion) | specced — next up | — | offline root-loop replay on the worst-20; §14 Phase 2 |
-| T2.2 OBBT persistent LP + warm probes | specced (may parallel T2.1) | — | the Phase-1 perf follow-on relocated here; parked t14 patch applies |
+| T2.2 OBBT persistent LP + warm probes | (a)+(b) done; (c) skipped | #406 | Per-sweep CSC built once + warm-primal probes (t14 patch applied). Differential **NEUTRAL** (warm==cold ≤4.3e-12, tightenings identical, cert-neutrality NEUTRAL). Root-OBBT umbrella: ex1252a 1.54×, ex1252 1.89×, st_e38 1.92×. ex1252a < 2× → residual is the JAX envelope rebuild (Phase 4/5), not the LP loop. See the T2.2-DONE block below |
 | T2.3 root fixpoint loop | **locked** on T2.1 results (§0.1.2) | — | stage list comes from T2.1's table |
 | T2.4 per-node `reduce_node()` | **locked** on T2.1 results (§0.1.2) | — | needs node-LP duals exposed (T2.4a) |
 | T2.5 OBBT escalation policy | locked on T2.4 | — | replaces the solver.py:4749 class gate |
@@ -1367,6 +1367,33 @@ that probe.
 - **Measured targets (falsifiable):** gear4 OBBT umbrella 23.2 s → ≤ 8 s;
   ex1252a root-OBBT wall ≥ 2× down; if after (a)+(b) OBBT is still the top
   consumer, record here and re-profile before attempting (c).
+
+**T2.2 — DONE (2026-07-03, PR #406).**
+- **(a)** `_PersistentProbeLP` in `obbt.py`: `run_obbt_on_relaxation` assembles the
+  std-form CSC `[A_ub | I_m]` once per sweep from the already-equilibrated/cutoff
+  system; each probe changes only the objective (and the box as tightenings
+  accumulate). The one genuine per-sweep `build_milp_relaxation` rebuild is left
+  intact (bounds move each round — not redundant).
+- **(b)** The parked `t14-warm-primal-patch.diff` applied cleanly (`solve_lp_cols_warm`
+  in `primal.rs`; `dual.rs` warm-reject fallbacks rewired to primal phase-2). Probe
+  k's `(col_status, basic_vars)` threads into probe k+1. NS clamp / `require_ns` /
+  `ok=False` cold fallbacks unchanged; non-Optimal warm solve → cold re-solve.
+- **(c) SKIPPED:** its precondition C-21 was open at authoring time, and the
+  post-(a)/(b) re-profile shows the LP loop is no longer the sole top consumer.
+- **Differential regime: NEUTRAL.** A/B harness `scripts/t22_obbt_ab.py`: 534 warm
+  probe solves across 10 models — warm bound == cold bound to ≤4.3e-12, applied
+  tightenings identical on every config; `check_cert_neutrality.py` NEUTRAL (42
+  rows, max |Δobj| 8.9e-16, node_count unchanged). Regression test
+  `python/tests/test_obbt_warm_probes.py` (fails on injected divergence).
+- **Measured (T0.3 timers + wall), warm vs forced-cold, identical tightenings:**
+  ex1252a 1.54× (301→196 ms), ex1252 1.89×, st_e38 1.92×, gear4 1.24×. ex1252a
+  fell short of the ≥2× target → re-profiled per the spec: the LP side (B1) is down
+  as intended; the residual root-OBBT time is ~50/50 LP probes vs the genuine JAX
+  envelope rebuild (`build_milp_relaxation` autodiff) — Phase 4/5 territory, not the
+  OBBT LP loop. gear4 is reduction-resistant (known negative result), not a gate probe.
+- **Gates:** `cargo test -p discopt-core` 376/0 (simplex 42/42), `pytest -m smoke`
+  211/1-skip, adversarial 10, `test_obbt.py` 48, `test_obbt_warm_probes.py` 14,
+  ruff clean; `incorrect_count` not regressed.
 
 **T2.3 — Root fixpoint loop (LOCKED until T2.1's table is recorded above).**
 Build: new module `python/discopt/_jax/root_reduce.py` —
