@@ -60,6 +60,10 @@ _PREC = {"+": 1, "-": 1, "*": 2, "/": 2, "@": 2, "**": 4}
 
 def _fmt_num(v: float) -> str:
     f = float(v)
+    if not np.isfinite(f):  # int(inf) raises OverflowError (L6)
+        if np.isnan(f):
+            return r"\mathrm{nan}"
+        return r"\infty" if f > 0 else r"-\infty"
     if f == int(f) and abs(f) < 1e15:
         return str(int(f))
     return f"{f:.6g}"
@@ -103,7 +107,17 @@ def expr_to_latex(e: Any, parent_prec: int = 0) -> str:
         if isinstance(e, IndexExpression):
             idx = e.index
             idx_s = ",".join(str(i) for i in idx) if isinstance(idx, tuple) else str(idx)
-            return f"{expr_to_latex(e.base, 5)}_{{{idx_s}}}"
+            base = e.base
+            # Merge a trailing-digit variable subscript with the index so `y1[0]`
+            # renders as a single subscript `y_{1,0}` rather than the invalid
+            # double subscript `y_{1}_{0}` (a MathJax error) (L5).
+            if isinstance(base, Variable):
+                mm = re.fullmatch(r"([A-Za-z]+)(\d+)", base.name)
+                if mm:
+                    return f"{mm.group(1)}_{{{mm.group(2)},{idx_s}}}"
+                return f"{_sym(base.name)}_{{{idx_s}}}"
+            # Brace-wrap any other base so its own subscripts nest validly.
+            return f"{{{expr_to_latex(base, 5)}}}_{{{idx_s}}}"
         if isinstance(e, BinaryOp):
             return _binop_to_latex(e, parent_prec)
         if isinstance(e, UnaryOp):
@@ -153,6 +167,16 @@ def _constraint_to_latex(c: Any) -> str:
     """Render a constraint. Constraints are normalised to ``body sense 0``; when the
     body is a top-level subtraction ``L - R`` we un-normalise to ``L sense R`` for a
     natural reading (e.g. ``x + 5y >= 4`` instead of ``4 - (x + 5y) <= 0``)."""
+    # Non-arithmetic constraint types (indicator / disjunctive / SOS / logical,
+    # from if_then/either_or/m.logical) carry no .body/.sense — render a readable
+    # placeholder instead of raising AttributeError and crashing the whole model
+    # display / Jupyter _repr_ (L1).
+    if not (hasattr(c, "sense") and hasattr(c, "body")):
+        kind = type(c).__name__.lstrip("_")
+        label = getattr(c, "name", None)
+        text = f"{kind}: {label}" if label else kind
+        escaped = text.replace("_", r"\_")
+        return rf"\text{{[{escaped}]}}"
     sense = {"<=": r"\le", ">=": r"\ge", "==": "="}.get(c.sense, c.sense)
     body = c.body
     if isinstance(body, BinaryOp) and body.op == "-":

@@ -172,7 +172,14 @@ class Expression:
 
     def _repr_latex_(self):
         """Jupyter/IPython LaTeX rendering."""
-        return f"${self}$"
+        # Render the expression DAG as real math rather than wrapping the plain
+        # repr in $...$ (which shows broken math in Jupyter) (L8).
+        try:
+            from discopt.modeling.latex import expr_to_latex
+
+            return f"${expr_to_latex(self)}$"
+        except Exception:
+            return f"${self}$"
 
 
 class Constant(Expression):
