@@ -44,7 +44,9 @@
 
 use std::collections::VecDeque;
 
-use super::fbbt::{backward_propagate, forward_propagate, snap_integral_interval, Interval};
+use super::fbbt::{
+    backward_propagate, forward_propagate, snap_integral_interval, Interval, FEAS_TOL,
+};
 use crate::expr::{ConstraintSense, ExprArena, ExprId, ExprNode, ModelRepr, VarType};
 
 /// Per-pass statistics from watch-list FBBT.
@@ -145,7 +147,16 @@ pub fn fbbt_fixed_point(
             ConstraintSense::Eq => Interval::point(constr.rhs),
         };
         let body_bound = node_bounds[constr.body.0];
-        if body_bound.intersect(&output_bound).is_empty() {
+        // cert:C-20. Declare infeasibility only when the violation exceeds the
+        // feasibility tolerance, matching the main engine (fbbt.rs:1138-1140 /
+        // :1229-1231). A strict `lo > hi` check mistakes the ~1e-8 residuals that
+        // GDP hull perspective forms leave at integer faces (see fbbt.rs:74-87)
+        // for real infeasibility — a false "infeasible" when this opt-in engine
+        // is enabled.
+        if body_bound
+            .intersect(&output_bound)
+            .is_empty_beyond(FEAS_TOL)
+        {
             stats.infeasible = true;
             for b in bounds.iter_mut() {
                 *b = Interval::empty();
@@ -178,7 +189,11 @@ pub fn fbbt_fixed_point(
                 bounds[v] = snap_integral_interval(bounds[v]);
             }
             let cur = bounds[v];
-            if cur.is_empty() {
+            // cert:C-20. Same tolerance-aware rule as the constraint check above:
+            // an eps-empty variable interval (~1e-8 residual) is numerical noise,
+            // not infeasibility. The main engine has no strict per-variable check
+            // here at all; gate this one on FEAS_TOL to avoid a false "infeasible".
+            if cur.is_empty_beyond(FEAS_TOL) {
                 stats.infeasible = true;
                 for b in bounds.iter_mut() {
                     *b = Interval::empty();
@@ -441,5 +456,72 @@ mod tests {
         let stats = fbbt_fixed_point(&model, &mut bounds, FbbtFpOptions::default());
         assert!(stats.infeasible);
         assert!(bounds[0].is_empty());
+    }
+
+    // cert:C-20 regression: the watch-list engine declared infeasibility with a
+    // strict `lo > hi`, so an eps-residual equality (the ~1e-8 noise GDP hull
+    // perspective forms leave at integer faces) was a false "infeasible". It must
+    // agree with the main engine (fbbt.rs), which uses `is_empty_beyond(FEAS_TOL)`.
+
+    /// Build `x == (1.0 - eps)` with `x` fixed at `1.0`; the body forward-props to
+    /// a point `eps` off the rhs.
+    fn eps_residual_equality_model(eps: f64) -> ModelRepr {
+        let mut arena = ExprArena::new();
+        let x = scalar_var(&mut arena, "x", 0);
+        ModelRepr {
+            arena,
+            objective: x,
+            objective_sense: ObjectiveSense::Minimize,
+            constraints: vec![ConstraintRepr {
+                body: x,
+                sense: ConstraintSense::Eq,
+                rhs: 1.0 - eps,
+                name: None,
+            }],
+            variables: vec![vinfo("x", 0, 1.0, 1.0)],
+            n_vars: 1,
+        }
+    }
+
+    #[test]
+    fn c20_eps_residual_equality_matches_main_engine_feasible() {
+        let eps = 5e-7; // < FEAS_TOL (1e-6): numerical noise, not infeasibility.
+
+        // Main engine tolerates it (bounds not collapsed to empty).
+        let main_bounds = crate::presolve::fbbt::fbbt(&eps_residual_equality_model(eps), 100, 1e-9);
+        assert!(
+            !main_bounds.iter().any(|b| b.is_empty()),
+            "main engine (reference) should treat the eps residual as feasible"
+        );
+
+        // Watch-list engine must agree — false "infeasible" before the fix.
+        let model = eps_residual_equality_model(eps);
+        let mut bounds: Vec<Interval> = model
+            .variables
+            .iter()
+            .map(|v| Interval::new(v.lb[0], v.ub[0]))
+            .collect();
+        let stats = fbbt_fixed_point(&model, &mut bounds, FbbtFpOptions::default());
+        assert!(
+            !stats.infeasible,
+            "C-20: eps-residual equality falsely reported infeasible by the watch-list engine"
+        );
+        assert!(!bounds.iter().any(|b| b.is_empty()));
+    }
+
+    #[test]
+    fn c20_real_infeasibility_still_detected() {
+        // Guard against over-loosening: a residual >> FEAS_TOL stays infeasible.
+        let model = eps_residual_equality_model(4.0); // x fixed at 1, requires == -3
+        let mut bounds: Vec<Interval> = model
+            .variables
+            .iter()
+            .map(|v| Interval::new(v.lb[0], v.ub[0]))
+            .collect();
+        let stats = fbbt_fixed_point(&model, &mut bounds, FbbtFpOptions::default());
+        assert!(
+            stats.infeasible,
+            "a genuine residual (4.0 >> FEAS_TOL) must still be detected as infeasible"
+        );
     }
 }
