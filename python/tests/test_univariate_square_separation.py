@@ -53,6 +53,11 @@ def _solve_root_bound(model, square_separate: bool, ub: float = 100.0):
     os.environ["DISCOPT_SQUARE_SEPARATE"] = "1" if square_separate else "0"
     try:
         relaxer = mc.MccormickLPRelaxer(model)
+        # Exercise the separating (cold) path directly. Since cert:T1.3 the
+        # incremental fast path returns *before* the per-node separation chain and
+        # instead inherits cuts captured once into the root pool; a unit test of the
+        # separator itself must run the path that actually separates.
+        relaxer._inc = None
         lb = np.array([0.0], dtype=np.float64)
         hi = np.array([ub], dtype=np.float64)
         res = relaxer.solve_at_node(lb, hi, time_limit=10.0)

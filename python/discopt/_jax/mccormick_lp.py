@@ -453,6 +453,15 @@ class MccormickLPRelaxer:
                         cut_rows = list(zip(a_rows, b_rows))
             A, b, bounds = inc.assemble(lb, ub, cut_rows=cut_rows)
             nrows = int(A.shape[0])
+            # Densification guard (Issue #20), same cap as the cold path below.
+            # T1.3 widened the fast path to any model, so a large multilinear lift
+            # can now reach it; decline an oversize node here too rather than force
+            # a multi-GB dense solve. Sound: no bound is returned, so the caller
+            # keeps the rigorous alphaBB/interval underestimator (identical to the
+            # cold-path decline). Falling back to the cold build would only hit the
+            # same guard, so return the oversize verdict directly.
+            if (inc.ncol + nrows) * nrows > _MAX_RELAX_DENSE_CELLS:
+                return MccormickLPResult(status="skipped_oversize")
             in_basis = (
                 self._inc_warm_basis
                 if (self._inc_warm_basis is not None and self._inc_basis_nrows == nrows)
