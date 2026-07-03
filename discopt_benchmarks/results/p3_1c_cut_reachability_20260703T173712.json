@@ -1,0 +1,123 @@
+{
+  "task": "cert:P3.1c",
+  "generated": "20260703T173712",
+  "panel": [
+    "ex1263a",
+    "graphpart_2pm-0055-0055"
+  ],
+  "cap_seconds": 90.0,
+  "budget_nodes": 2000,
+  "n_run": 2,
+  "n_skipped": 0,
+  "incorrect_count": 0,
+  "any_cut_fired": true,
+  "rows": [
+    {
+      "instance": "ex1263a",
+      "status": "run",
+      "oracle": 19.6,
+      "off": {
+        "status": "node_limit",
+        "objective": null,
+        "bound": 19.063333333333333,
+        "root_bound": 19.063333333333333,
+        "node_count": 2015,
+        "wall": 45.36161099979654,
+        "cuts_all": {},
+        "cuts_total": 0.0,
+        "path": {
+          "_solve_milp_simplex": 1,
+          "_solve_milp_bb": 1
+        }
+      },
+      "on": {
+        "status": "feasible",
+        "objective": 22.299999999999915,
+        "bound": 19.066310674461867,
+        "root_bound": 19.066310674461867,
+        "node_count": 2003,
+        "wall": 75.68336533335969,
+        "cuts_all": {
+          "cuts/gomory": 8.0
+        },
+        "cuts_total": 8.0,
+        "path": {
+          "_solve_milp_bb": 1
+        }
+      },
+      "on_full": {
+        "status": "feasible",
+        "objective": 21.299999999999596,
+        "bound": 19.066310674461867,
+        "root_bound": 19.066310674461867,
+        "node_count": 2451,
+        "wall": 90.81753529189155,
+        "cuts_all": {
+          "cuts/gomory": 8.0
+        },
+        "cuts_total": 8.0,
+        "path": {
+          "_solve_milp_bb": 1
+        }
+      },
+      "cuts_fired": true,
+      "cuts_total_on": 8.0,
+      "gap_closed_off": 0.0,
+      "gap_closed_on": 0.00554784061217655,
+      "solve_path_on": "_solve_milp_bb",
+      "incorrect_on": false,
+      "bad_bound": false
+    },
+    {
+      "instance": "graphpart_2pm-0055-0055",
+      "status": "run",
+      "oracle": -20.0,
+      "off": {
+        "status": "optimal",
+        "objective": -20.0,
+        "bound": -20.0,
+        "root_bound": -25.0,
+        "node_count": 235,
+        "wall": 1.2685574577189982,
+        "cuts_all": {},
+        "cuts_total": 0.0,
+        "path": {
+          "_solve_milp_simplex": 1
+        }
+      },
+      "on": {
+        "status": "feasible",
+        "objective": -20.0,
+        "bound": -25.0,
+        "root_bound": -25.0,
+        "node_count": 377,
+        "wall": 93.03519704192877,
+        "cuts_all": {},
+        "cuts_total": 0.0,
+        "path": {
+          "_solve_milp_bb": 1
+        }
+      },
+      "on_full": {
+        "status": "feasible",
+        "objective": -20.0,
+        "bound": -25.0,
+        "root_bound": -25.0,
+        "node_count": 377,
+        "wall": 93.15625670785084,
+        "cuts_all": {},
+        "cuts_total": 0.0,
+        "path": {
+          "_solve_milp_bb": 1
+        }
+      },
+      "cuts_fired": false,
+      "cuts_total_on": 0.0,
+      "gap_closed_off": 0.0,
+      "gap_closed_on": 0.0,
+      "solve_path_on": "_solve_milp_bb",
+      "incorrect_on": false,
+      "bad_bound": false
+    }
+  ]
+}

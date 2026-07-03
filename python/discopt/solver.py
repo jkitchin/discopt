@@ -2078,6 +2078,29 @@ def _cmir_aggregation_enabled() -> bool:
     return val.lower() not in ("0", "", "false", "no", "off")
 
 
+def _p3_force_cut_path_enabled() -> bool:
+    """cert:P3.1c experiment toggle (``DISCOPT_P3_FORCE_CUT_PATH``, default-OFF).
+
+    The Phase 3 1b measurement (``certification-gap-plan.md`` §7) found the
+    integer-product / graphpart class routes *away* from any cut seam: the
+    big-M reformulation rewrites ``nlp_solver`` from ``"pounce"`` to
+    ``"simplex"`` (``:3327``), sending the model to the monolithic Rust
+    ``_solve_milp_simplex`` engine, which has no root/per-node cut loop — so the
+    aggregation c-MIR / Gomory / cover separators never run. This flag is a
+    **cut-reachability entry-experiment lever only**: when set, it SKIPS that
+    ``nlp_solver→"simplex"`` reroute, keeping the model on the self-hosted
+    ``_solve_milp_bb`` path (``prefer_pounce=True``, which enables the integer
+    cut loop via ``_gomory_enabled``). It measures whether making cuts *reachable*
+    closes the 0b root gap (GO), before any invasive Rust cut-seam refactor.
+
+    Default-OFF and math-neutral when off: with the flag unset the reroute is
+    unchanged, so default dispatch/behavior is bit-for-bit identical."""
+    val = os.environ.get("DISCOPT_P3_FORCE_CUT_PATH")
+    if val is None:
+        return False
+    return val.lower() not in ("0", "", "false", "no", "off")
+
+
 def _apply_auto_cut_policy(model: "Model", relaxer) -> None:
     """Choose at most one QCQP cut family by structure + size, in place.
 
@@ -3325,7 +3348,15 @@ def solve_model(
                 # simplex binding is unavailable.
                 presolve = False
                 if nlp_solver == "pounce":
-                    nlp_solver = "simplex"
+                    # cert:P3.1c cut-reachability experiment (default-OFF): keep the
+                    # reformulated MILP on the self-hosted _solve_milp_bb path (which
+                    # has the root cut loop) instead of rerouting to the cut-less
+                    # monolithic Rust _solve_milp_simplex engine, so the aggregation
+                    # c-MIR / Gomory / cover separators can actually fire on this
+                    # class. Math-neutral when the flag is unset. See
+                    # _p3_force_cut_path_enabled / certification-gap-plan.md §7.
+                    if not _p3_force_cut_path_enabled():
+                        nlp_solver = "simplex"
     except Exception as _ipx_exc:  # pragma: no cover - defensive
         logger.debug("integer-bilinear reformulation skipped: %s", _ipx_exc)
 
