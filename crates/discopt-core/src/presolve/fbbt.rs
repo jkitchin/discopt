@@ -115,11 +115,28 @@ pub fn interval_sub(a: &Interval, b: &Interval) -> Interval {
 }
 
 /// `[a,b] * [c,d]` using all four endpoint products.
+///
+/// A finite `0` endpoint multiplied by an infinite endpoint yields `0 * ±∞ =
+/// NaN` in IEEE-754. By the interval-multiplication convention the product of a
+/// zero factor with any interval (including an unbounded one) is `0`, so we map
+/// those NaN corner products to `0` (C-22). This keeps `interval_mul` a sound,
+/// finite outer enclosure — e.g. `[0,0] * [-∞,∞] = [0,0]` rather than the
+/// `[NaN,NaN]` that would silently discard downstream tightening. NaN can arise
+/// here *only* from `0 * ±∞`; every other operand pair is finite×finite (never
+/// NaN) or a genuine ±∞ product, so the substitution never masks a real value.
 pub fn interval_mul(a: &Interval, b: &Interval) -> Interval {
-    let p1 = a.lo * b.lo;
-    let p2 = a.lo * b.hi;
-    let p3 = a.hi * b.lo;
-    let p4 = a.hi * b.hi;
+    let prod = |x: f64, y: f64| {
+        let p = x * y;
+        if p.is_nan() {
+            0.0
+        } else {
+            p
+        }
+    };
+    let p1 = prod(a.lo, b.lo);
+    let p2 = prod(a.lo, b.hi);
+    let p3 = prod(a.hi, b.lo);
+    let p4 = prod(a.hi, b.hi);
     Interval::new(p1.min(p2).min(p3).min(p4), p1.max(p2).max(p3).max(p4))
 }
 
@@ -1323,6 +1340,106 @@ mod tests {
         let r = interval_mul(&a, &b);
         assert!((r.lo - (-8.0)).abs() < 1e-15);
         assert!((r.hi - 12.0).abs() < 1e-15);
+    }
+
+    #[test]
+    fn c22_interval_mul_zero_times_entire_is_zero() {
+        // C-22: [0,0] * [-inf, inf]. Each corner product is 0 * (±inf) = NaN.
+        // Before the fix, f64::min/max propagate NaN and the result is [NaN, NaN]
+        // — a "lost tightening" bug (any variable intersected with a NaN interval
+        // keeps its stale bound). By the interval convention 0 * anything = 0, so
+        // the sound, informative enclosure is [0, 0].
+        let a = Interval::point(0.0);
+        let b = Interval::entire();
+        let r = interval_mul(&a, &b);
+        assert!(!r.lo.is_nan() && !r.hi.is_nan(), "result must not be NaN");
+        assert_eq!(r.lo, 0.0);
+        assert_eq!(r.hi, 0.0);
+    }
+
+    #[test]
+    fn c22_interval_mul_never_nan_and_encloses_true_product() {
+        // C-22 property test: over a grid of intervals including infinite
+        // endpoints and zero-width [0,0] factors, interval_mul must (a) never
+        // produce NaN endpoints and (b) contain the true product of every pair
+        // of representative points drawn from the two intervals (rigorous
+        // outer enclosure). A NaN endpoint fails containment silently, so we
+        // check both explicitly.
+        let ninf = f64::NEG_INFINITY;
+        let pinf = f64::INFINITY;
+        let bounds = [ninf, -3.0, -1.0, 0.0, 1.0, 2.5, pinf];
+        for &alo in &bounds {
+            for &ahi in &bounds {
+                if alo > ahi {
+                    continue;
+                }
+                for &blo in &bounds {
+                    for &bhi in &bounds {
+                        if blo > bhi {
+                            continue;
+                        }
+                        let a = Interval::new(alo, ahi);
+                        let b = Interval::new(blo, bhi);
+                        let r = interval_mul(&a, &b);
+                        assert!(
+                            !r.lo.is_nan() && !r.hi.is_nan(),
+                            "interval_mul({a:?}, {b:?}) produced NaN: {r:?}"
+                        );
+                        assert!(r.lo <= r.hi, "interval_mul({a:?}, {b:?}) => {r:?}");
+                        // Containment: probe *finite* points from each factor and
+                        // require the product lies within the result interval.
+                        // A finite point drawn from an unbounded factor is still
+                        // a member of that interval, so its product must be
+                        // enclosed. (Degenerate point-at-infinity intervals like
+                        // [-inf,-inf] have no finite members and are excluded by
+                        // finite_probes returning empty.)
+                        let a_pts = finite_probes(alo, ahi);
+                        let b_pts = finite_probes(blo, bhi);
+                        for &x in &a_pts {
+                            for &y in &b_pts {
+                                let p = x * y;
+                                assert!(
+                                    p >= r.lo - 1e-6 && p <= r.hi + 1e-6,
+                                    "product {p} of {x}*{y} escaped {r:?} \
+                                     for a={a:?} b={b:?}"
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Genuine finite members of `[lo, hi]` used as containment witnesses in
+    /// the C-22 property test. Every returned value satisfies `lo <= v <= hi`.
+    /// Unbounded sides are probed with a large finite magnitude (still a member);
+    /// a degenerate point-at-infinity interval (e.g. `[-inf,-inf]`) has no finite
+    /// members and returns empty.
+    fn finite_probes(lo: f64, hi: f64) -> Vec<f64> {
+        let mut pts = Vec::new();
+        if lo.is_finite() {
+            pts.push(lo);
+        } else if lo == f64::NEG_INFINITY && hi > f64::NEG_INFINITY {
+            // A large-magnitude negative member, but never above hi.
+            let cap = if hi.is_finite() { hi } else { 1e6 };
+            pts.push((-1e6_f64).min(cap));
+        }
+        if hi.is_finite() {
+            pts.push(hi);
+        } else if hi == f64::INFINITY && lo < f64::INFINITY {
+            // A large-magnitude positive member, but never below lo.
+            let floor = if lo.is_finite() { lo } else { -1e6 };
+            pts.push((1e6_f64).max(floor));
+        }
+        if lo.is_finite() && hi.is_finite() && (hi - lo).abs() > 1e-15 {
+            pts.push(lo + (hi - lo) * 0.5);
+        }
+        // Include 0 when it is a member — exercises the 0 * ±∞ corner.
+        if lo <= 0.0 && hi >= 0.0 {
+            pts.push(0.0);
+        }
+        pts
     }
 
     #[test]

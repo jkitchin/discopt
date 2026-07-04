@@ -106,7 +106,7 @@ in non-default configs; loud ingestion gaps. **P3** = hygiene.
 | C-10 | P2 | lp_spatial cuts | GMI cuts appended without rhs safety margin (opt-in path) | open |
 | C-3 | P2 | solver.py incumbent | unrounded integer incumbent survives if terminal polish throws | fixed |
 | C-11 | P2 | modeling API | missing `__ne__` → `x != y` silently evaluates False | fixed |
-| C-22 | P3 | fbbt.rs interval | `interval_mul` NaN endpoints on 0·∞ (lost tightening, not unsound) | open |
+| C-22 | P3 | fbbt.rs interval | `interval_mul` NaN endpoints on 0·∞ (lost tightening, not unsound) | fixed |
 | C-23 | P1 | mccormick.py | ESCALATED (was P3): `relax_div` produces an invalid convex underestimator (cv > f) for **nonlinear** denominators (`1/(x*y)` cv=1.334 > true 1.0) — the "harmless" label held only for variable/affine denominators; `_relax_reciprocal` also mislabels concavity for negative denominators (= DIV-1) | fixed |
 | C-24 | P3 | mccormick.py | secants produce NaN on infinite bounds; soundness leans on downstream filters | open |
 | C-12 | P3 | .nl parser | range-split renumbers constraints vs source indices | fixed (documented) |
@@ -1412,7 +1412,33 @@ convention).
 test over random intervals incl. infinite endpoints: result contains the true
 product range and is never NaN; standing gates pass.
 
-**Log:** —
+**Log:**
+- 2026-07-03 — **CONFIRMED then FIXED** (`open`→`fixed`). Confirmed via a new
+  Rust unit test: `interval_mul([0,0], entire())` returned `[NaN, NaN]` on the
+  pre-fix code (each corner is `0 * ±∞ = NaN`; `f64::min/max` then propagate NaN),
+  and a grid property test over infinite-endpoint intervals hit NaN endpoints.
+  Verified fail-before (both tests red on pre-fix) / pass-after by reverting the
+  guard. As the card predicted the defect is *lost tightening* (a variable
+  intersected with a `[NaN,NaN]` interval keeps its stale bound — sound but weak),
+  not an unsound bound; the fix restores the tightening.
+- **Fix** (`presolve/fbbt.rs`, `interval_mul`): map NaN corner products to `0`.
+  NaN here can arise *only* from `0 * ±∞`, whose interval-convention value is `0`;
+  every other operand pair is finite×finite or a genuine ±∞ product, so the
+  substitution never masks a real value. Result: `[0,0]·[−∞,∞] = [0,0]`. Minimal,
+  local; no other operator touched (`interval_div`'s `inv_b` path routes through
+  `interval_mul`, so it inherits the fix). Comment documents the convention.
+- **Regression tests** (`presolve::fbbt::tests`, sub-second, call `interval_mul`
+  directly): `c22_interval_mul_zero_times_entire_is_zero` (the exact `[0,0]·entire`
+  repro) and `c22_interval_mul_never_nan_and_encloses_true_product` (grid over
+  intervals incl. ±∞ endpoints and zero-width factors — asserts never-NaN,
+  `lo ≤ hi`, and rigorous containment of the true product at finite witness
+  points). Both fail before / pass after.
+- **Gates:** `cargo test -p discopt-core` 383 lib + 4 integration + 1 doctest
+  green, no warnings; `cargo clippy -p discopt-core --lib` clean; my added code is
+  `cargo fmt`-clean (the single pre-existing fmt drift at `fbbt.rs:2597` is in the
+  C-31 test block, on `main`, untouched — out of scope). `maturin develop
+  --release` OK; `pytest -m smoke` 193 passed/1 skipped; adversarial suite 10
+  passed; `incorrect_count = 0`. PR: (pending).
 
 ---
 
