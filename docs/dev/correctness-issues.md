@@ -105,7 +105,7 @@ in non-default configs; loud ingestion gaps. **P3** = hygiene.
 | C-9 | P2 | .nl parser | nlvo>nlvc integer-block classification unverified | fixed |
 | C-10 | P2 | lp_spatial cuts | GMI cuts appended without rhs safety margin (opt-in path) | open |
 | C-3 | P2 | solver.py incumbent | unrounded integer incumbent survives if terminal polish throws | fixed |
-| C-11 | P2 | modeling API | missing `__ne__` → `x != y` silently evaluates False | open |
+| C-11 | P2 | modeling API | missing `__ne__` → `x != y` silently evaluates False | fixed |
 | C-22 | P3 | fbbt.rs interval | `interval_mul` NaN endpoints on 0·∞ (lost tightening, not unsound) | open |
 | C-23 | P1 | mccormick.py | ESCALATED (was P3): `relax_div` produces an invalid convex underestimator (cv > f) for **nonlinear** denominators (`1/(x*y)` cv=1.334 > true 1.0) — the "harmless" label held only for variable/affine denominators; `_relax_reciprocal` also mislabels concavity for negative denominators (= DIV-1) | fixed |
 | C-24 | P3 | mccormick.py | secants produce NaN on infinite bounds; soundness leans on downstream filters | open |
@@ -1375,7 +1375,27 @@ error.
 **Done criteria:** test asserting the TypeError; standing gates pass (check no
 internal code relies on expression `!=`).
 
-**Log:** —
+**Log:** 2026-07-03 — **CONFIRMED then FIXED** (PR: fix-c11-modeling-api).
+Repro before: `bool(x != 0)` returned `False` (a plain bool, no Constraint, no
+error) — verified `x != 0`, `x != y`, `(x+1) != 2`, `v[0] != 0` all silently
+yielded `False`. Root cause exactly as carded: `Expression.__eq__`
+(`core.py:157`) builds a Constraint, and with no `__ne__` Python's default
+`__ne__` computes `not <truthy Constraint>` → `False`. Fix: added
+`Expression.__ne__` raising `TypeError("'!=' is not a valid constraint
+operator …")` (loud refusal, per CLAUDE.md §3 — mirrors the C-6 "no silent
+transformation" pattern). Placed on the `Expression` base so every node type
+(Variable/BinaryOp/UnaryOp/IndexExpression/…) inherits it. Confirmed no internal
+code depends on `Expression`-level `!=` (all `!=` hits across `modeling/` and
+`_jax/` operate on scalars/str/enums/ndarrays, none on Expression objects).
+`__hash__` unaffected — defining `__ne__` (unlike `__eq__`) does not null
+`__hash__`; `Variable.__hash__` still works and a Variable remains dict/set-usable.
+Repro after: all four `!=` forms raise `TypeError`; `==` still returns a
+Constraint. Regression test: `python/tests/test_c11_ne_guard.py` (6 smoke tests,
+fail-before 4/6 → pass-after 6/6, sub-second, direct API calls). Gates: `pytest
+-m smoke` 484 passed / 1 skipped / 0 failed; adversarial suite 10 passed / 0
+failed; `pytest -k "modeling or api or variable or constraint or model"` 629
+passed / 1 skipped / 0 failed; ruff + ruff-format clean; mypy clean on core.py
+(pre-existing numpy-stub / unrelated-module errors only); incorrect_count 0.
 
 ---
 
