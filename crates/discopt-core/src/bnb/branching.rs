@@ -447,6 +447,18 @@ pub fn select_spatial_branch_variable(
             continue; // Fixed variable, skip.
         }
         let relative_width = width / global_width;
+        if !relative_width.is_finite() {
+            // An unbounded dimension (infinite node width, or an infinite global
+            // range) yields NaN/inf here. Such a dimension is NOT spatially
+            // branchable: bisecting an infinite interval never shrinks its
+            // normalized width. Skip it deterministically. Without this, a NaN
+            // relative width silently defeats both the `< SPATIAL_MIN_WIDTH`
+            // "too tight" filter (NaN < x is false) and the `> best_width`
+            // selection (NaN > x is false), so the variable is neither skipped
+            // as fixed nor selected — the root dead-ends unbranched and the
+            // tree falsely certifies (issue #467).
+            continue;
+        }
         if relative_width < SPATIAL_MIN_WIDTH {
             continue; // Domain already very tight.
         }
@@ -522,6 +534,12 @@ pub fn select_spatial_integer_branch_variable(
             continue; // Fixed at root, skip.
         }
         let relative_width = width / global_width;
+        if !relative_width.is_finite() {
+            // Unbounded integer dimension (infinite node or global width): not
+            // spatially branchable. Skip deterministically so a NaN/inf relative
+            // width cannot defeat the `> best_rel_width` selection (issue #467).
+            continue;
+        }
         if relative_width > best_rel_width {
             best_rel_width = relative_width;
             best_idx = Some(idx);
@@ -885,5 +903,65 @@ mod tests {
         // Right: x1 >= 5
         assert_eq!(right.lb[1], 5.0);
         assert_eq!(right.ub[1], 8.0); // unchanged
+    }
+
+    #[test]
+    fn test_spatial_branch_skips_unbounded_dimension() {
+        // Issue #467: an unbounded continuous dimension yields a NaN relative
+        // width (inf/inf) that silently defeats both filters; it must be skipped,
+        // and a coexisting FINITE dimension must still be selected.
+        // x0 = [-5, inf] (unbounded), x1 = [-5, 5] (finite).
+        let node_lb = vec![-5.0, -5.0];
+        let node_ub = vec![f64::INFINITY, 5.0];
+        let global_lb = vec![-5.0, -5.0];
+        let global_ub = vec![f64::INFINITY, 5.0];
+        let sel = select_spatial_branch_variable(
+            &node_lb,
+            &node_ub,
+            &global_lb,
+            &global_ub,
+            &[],
+            &[],
+            false,
+        );
+        assert!(sel.is_some(), "the finite dimension x1 must be branchable");
+        assert_eq!(
+            sel.unwrap().0.var_index,
+            1,
+            "must branch the finite dim, not the unbounded one"
+        );
+
+        // Both dimensions unbounded → no branchable dimension at all.
+        let none = select_spatial_branch_variable(
+            &[-5.0, f64::NEG_INFINITY],
+            &[f64::INFINITY, 5.0],
+            &[-5.0, f64::NEG_INFINITY],
+            &[f64::INFINITY, 5.0],
+            &[],
+            &[],
+            false,
+        );
+        assert!(
+            none.is_none(),
+            "an all-unbounded box has no spatial branch direction"
+        );
+    }
+
+    #[test]
+    fn test_spatial_integer_branch_skips_unbounded_dimension() {
+        // Issue #467: an unbounded integer dimension must not be selected via a
+        // NaN/inf relative width.
+        let cols = vec![true];
+        let none = select_spatial_integer_branch_variable(
+            &[0.0],
+            &[f64::INFINITY],
+            &[0.0],
+            &[f64::INFINITY],
+            &cols,
+        );
+        assert!(
+            none.is_none(),
+            "an unbounded integer dimension is not branchable"
+        );
     }
 }

@@ -150,3 +150,80 @@ def _himmel16_model():
     m.subject_to(-(x[13] + x[14] + x[15] + x[16] + x[17] + x[18]) - objvar == 0.0)
     m.minimize(objvar)
     return m
+
+
+def _camel_semiinfinite(lb0, ub0, lb1, ub1, name):
+    """Six-hump-camel-style nonconvex objective (2*x0^2 - 1.05*x0^4 + x0^6/6
+    - x0*x1 + x1^2) over a box that may leave a variable one-sided-unbounded.
+
+    The true global minimum over the whole plane is 0.0 at the origin. On a
+    finite box the spatial B&B certifies it; on a semi-infinite box a
+    continuous variable has an unbounded side, so the ROOT cannot be spatially
+    branched (no finite branching direction) and no relaxation establishes a
+    finite dual bound. The tree must then NOT certify the local minimum 0.2986
+    (or any local point) as the global optimum.
+    """
+    m = discopt.Model(name)
+    x0 = m.continuous("x0", lb=lb0, ub=ub0)
+    x1 = m.continuous("x1", lb=lb1, ub=ub1)
+    m.minimize(2 * x0**2 - 1.05 * x0**4 + (1.0 / 6.0) * x0**6 - x0 * x1 + x1**2)
+    return m
+
+
+@pytest.mark.smoke
+def test_467_free_variable_root_not_falsely_optimal_nlp_route():
+    """#467: both continuous vars one-sided-unbounded (x0=[-5,inf], x1=[-inf,5]).
+
+    ``_origin_has_finite_continuous_var`` is False, so the McCormick-LP guard
+    falls the solve back to the NLP relaxation. The root cannot be spatially
+    branched and no valid dual bound is established. The Rust tree previously
+    fathomed the root and collapsed ``global_lower_bound`` to the local-minimum
+    incumbent (0.2986), certifying it ``optimal`` with gap 0 — a false optimal.
+    The honest verdict is NOT optimal (feasible/unknown).
+    """
+    r = _camel_semiinfinite(-5.0, float("inf"), float("-inf"), 5.0, "c467_nlp").solve(
+        time_limit=6.0, daemon=False
+    )
+    assert r.status != "optimal", (
+        f"free-variable root falsely certified optimal: status={r.status} "
+        f"obj={r.objective} bound={r.bound}"
+    )
+    assert not getattr(r, "gap_certified", False), (
+        f"free-variable root falsely reports gap_certified: bound={r.bound}"
+    )
+
+
+@pytest.mark.smoke
+def test_467_free_variable_root_not_falsely_optimal_lp_route():
+    """#467: one var finite (x1=[-5,5]), one semi-infinite (x0=[-5,inf]).
+
+    ``_origin_has_finite_continuous_var`` is True (x1 is finite), so the guard
+    does NOT fall back — the McCormick-LP spatial path runs. It still collapses:
+    the LP relaxer honestly abstains on the unbounded nonlinear column (x0), so
+    the root carries no finite bound and cannot be branched to a finite bound.
+    This exercises the second (LP) route into the same Rust fathom/collapse. The
+    verdict must NOT be a certified optimal.
+    """
+    r = _camel_semiinfinite(-5.0, float("inf"), -5.0, 5.0, "c467_lp").solve(
+        time_limit=6.0, daemon=False
+    )
+    assert r.status != "optimal", (
+        f"semi-infinite root falsely certified optimal (LP route): status={r.status} "
+        f"obj={r.objective} bound={r.bound}"
+    )
+    assert not getattr(r, "gap_certified", False), (
+        f"semi-infinite root falsely reports gap_certified (LP route): bound={r.bound}"
+    )
+
+
+@pytest.mark.smoke
+def test_467_finite_box_control_still_certifies_optimal():
+    """#467 control: the SAME objective over a finite box [-5,5]^2 must still
+    certify the true global optimum 0.0. This guards against the fix
+    over-firing and downgrading a validly-certified finite-box solve."""
+    r = _camel_semiinfinite(-5.0, 5.0, -5.0, 5.0, "c467_ctrl").solve(time_limit=10.0, daemon=False)
+    assert r.status == "optimal", f"finite-box control lost certification: status={r.status}"
+    assert r.objective is not None and abs(r.objective) <= 1e-3, (
+        f"finite-box control missed the true optimum 0.0: obj={r.objective}"
+    )
+    assert getattr(r, "gap_certified", False), "finite-box control lost gap_certified"

@@ -5673,10 +5673,21 @@ def solve_model(
                 # the chance to certify optimality before we decide to
                 # decertify the gap.
                 #   * -inf  : no bound source produced a finite lower bound this
-                #             round, so the node stays OPEN at -inf and is floored
-                #             at its inherited parent bound on import (still a valid
-                #             global lower bound). It fathoms nothing, so it does NOT
-                #             taint the tree — leave the gap certifiable (#138).
+                #             round. A NON-ROOT node stays OPEN at -inf and is
+                #             floored at its inherited parent bound on import (still
+                #             a valid global lower bound); it fathoms nothing, so it
+                #             does NOT taint the tree — leave the gap certifiable
+                #             (#138). The ROOT has no parent to floor against: if it
+                #             also has no finite spatial-branch direction (an
+                #             unbounded-below / free-variable root), the Rust tree
+                #             cannot branch it and would previously fathom it and
+                #             collapse `global_lower_bound` to the incumbent, falsely
+                #             certifying a local/near-feasible point as optimal. That
+                #             collapse is now blocked in the Rust tree
+                #             (`bound_unresolved` in `tree_manager.rs`, issue #467):
+                #             the global bound is pinned at -inf, so the gap is
+                #             infinite and the run downgrades to "feasible" via the
+                #             existing status logic. No Python change is needed here.
                 #   * non-finite (and not -inf): coerce to the infeasibility
                 #             sentinel so the Rust tree prunes it cleanly.
                 #   * >= sentinel (issue #27a): a node pruned with no rigorous
@@ -5691,7 +5702,11 @@ def solve_model(
                 #             downgrades to "feasible" instead of lying.
                 if not _model_is_convex and not node_infeasible_mask[i]:
                     if result_lbs[i] == -np.inf:
-                        pass  # open node, floored at parent bound — does not taint
+                        # Non-root: stays open, floored at the parent bound on
+                        # import — does not taint. Root with no branch direction:
+                        # the Rust tree pins the global bound at -inf instead of
+                        # collapsing to the incumbent (#467), so this remains sound.
+                        pass
                     elif not np.isfinite(result_lbs[i]):
                         result_lbs[i] = _INFEASIBILITY_SENTINEL
                     elif result_lbs[i] >= _SENTINEL_THRESHOLD:
@@ -6842,7 +6857,19 @@ def solve_model(
         if model._objective.sense == ObjectiveSense.MAXIMIZE:
             obj_val = -obj_val
 
-        search_closed = _gap_converged(tree, gap_tolerance) or tree.is_finished()
+        # An unresolved tree bound (a node fathomed with no branch direction and no
+        # valid finite dual bound — an unbounded-below / free-variable root) means
+        # the search cannot certify optimality even though `is_finished()` is True
+        # (no node can be branched further). The Rust tree pins `global_lower_bound`
+        # at -inf in that case (issue #467); do not let `is_finished()` alone
+        # certify. `_gap_converged` already returns False on the -inf bound, so
+        # require it (not the bare `is_finished()`) whenever the bound is unresolved.
+        _bound_unresolved = bool(tree.stats().get("bound_unresolved", False))
+        if _bound_unresolved:
+            _gap_certified = False
+        search_closed = _gap_converged(tree, gap_tolerance) or (
+            tree.is_finished() and not _bound_unresolved
+        )
         if search_closed and _gap_certified:
             status = "optimal"
         else:
