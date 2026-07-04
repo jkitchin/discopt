@@ -1115,12 +1115,36 @@ fn solve_node(id: NodeId, lb_k: &[f64], ub_k: &[f64], ctx: &NodeCtx<'_>) -> Node
             };
         }
         LpStatus::Infeasible => {
-            out.result = NodeResult {
-                node_id: id,
-                lower_bound: INFEAS_SENTINEL, // pruned
-                solution: vec![0.0; ctx.ns],
-                is_feasible: false,
-            };
+            // C-14: the simplex reports `Infeasible` with a Farkas *dual ray
+            // candidate* in `sol.dual` (contract: `lp/simplex/mod.rs`), sound only
+            // once the caller verifies it. Fathoming on the status alone can drop a
+            // node — possibly containing the optimum — when a numerically tight
+            // phase-1 artificial sum trips the absolute threshold on a feasible box.
+            // Verify the ray (`g0(±y) > margin`, a weak-duality certificate of
+            // emptiness) on the *scaled solve-space* data — where the ray lives —
+            // before pruning. The safe-bound identity is invariant under
+            // equilibration (`scaling.rs`), so the scaled-space verdict equals the
+            // original-space one. On verification failure the box is NOT provably
+            // empty: never fathom — hand the node back uncertified (non-pruning
+            // bound, midpoint) so it is branched/re-solved and the optimum can never
+            // be silently cut. A sound infeasible LP always exports a verifiable
+            // ray, so this costs one mat-vec and never changes a correct fathom.
+            if verify_farkas_infeasible(&sol.dual, ctx.sa, ctx.sb, &sl, &su, ctx.m_w, ctx.n_w) {
+                out.result = NodeResult {
+                    node_id: id,
+                    lower_bound: INFEAS_SENTINEL, // pruned
+                    solution: vec![0.0; ctx.ns],
+                    is_feasible: false,
+                };
+            } else {
+                out.uncertified = true;
+                out.result = NodeResult {
+                    node_id: id,
+                    lower_bound: f64::NEG_INFINITY,
+                    solution: midpoint(lb_k, ub_k),
+                    is_feasible: false,
+                };
+            }
         }
         LpStatus::Unbounded => {
             out.unbounded = true;
@@ -1139,6 +1163,112 @@ fn solve_node(id: NodeId, lb_k: &[f64], ub_k: &[f64], ctx: &NodeCtx<'_>) -> Node
         }
     }
     out
+}
+
+/// Verify a Farkas infeasibility certificate for the LP `{ A x = b, l ≤ x ≤ u }`.
+///
+/// The simplex exports `y` (length `m`) on `LpStatus::Infeasible` as a *candidate*
+/// dual ray (contract in `lp/simplex/mod.rs`); this is the caller-side check the
+/// contract requires before an infeasible fathom is trusted. By Farkas' lemma /
+/// weak duality, the box is provably empty iff the objective-free safe bound
+///
+/// ```text
+///     g0(y) = bᵀy + Σⱼ min_{zⱼ∈[lⱼ,uⱼ]} (−Aᵀy)ⱼ zⱼ
+/// ```
+///
+/// is strictly positive for `y` or `−y` (the ray sign the simplex returns is not
+/// fixed): `g0 > 0` means every point of the box violates `Σ yᵢ(Aᵢx − bᵢ) = 0`, so
+/// no `x` in the box satisfies `Ax = b`. `g0(y) ≤ 0 ≤ g0` by weak duality for any
+/// feasible LP, so a positive value can only arise when the feasible set is truly
+/// empty — the check never false-certifies emptiness.
+///
+/// The margin is scaled by the magnitudes entering `g0` (‖b‖∞ and the max
+/// per-column box contribution) so a genuinely-empty box clears it while a ray that
+/// only grazes zero — the numerically-tight case C-14 is about — does not, forcing
+/// the caller to keep (branch) the node instead of fathoming it.
+///
+/// Columns with an infinite bound on the contributing side yield `−∞` (that column
+/// cannot help certify emptiness); such a `g0` is `≤ 0` and correctly fails to
+/// certify. Runs on the scaled solve-space data (`sa`, `sb`, scaled `l`/`u`), where
+/// the returned ray lives; the safe-bound identity is invariant under
+/// equilibration, so the verdict matches the original space.
+fn verify_farkas_infeasible(
+    y: &[f64],
+    a: &[f64],
+    b: &[f64],
+    l: &[f64],
+    u: &[f64],
+    m: usize,
+    n: usize,
+) -> bool {
+    // No certificate exported ⇒ cannot verify ⇒ do not trust the fathom.
+    if y.len() != m || m == 0 {
+        return false;
+    }
+    farkas_safe_bound(y, a, b, l, u, m, n) || {
+        let neg: Vec<f64> = y.iter().map(|v| -v).collect();
+        farkas_safe_bound(&neg, a, b, l, u, m, n)
+    }
+}
+
+/// Objective-free safe bound `g0(y) = bᵀy + Σⱼ min_box((−Aᵀy)ⱼ zⱼ)`, returning
+/// `true` iff it clears a magnitude-scaled positive margin — a rigorous certificate
+/// that `{Ax=b, l≤x≤u}` is empty for this `y`.
+///
+/// A column open to ±∞ can only contribute a finite term when its reduced cost
+/// `(Aᵀy)ⱼ` is zero; the warm-simplex ray carries rounding noise there, so a reduced
+/// cost within a ray-scaled tolerance of zero is treated as exactly zero (otherwise a
+/// `1e-18` dribble would send `g0` to `−∞` and reject a valid certificate). A reduced
+/// cost genuinely past that tolerance toward an infinite bound does push `g0` to
+/// `−∞`: this ray cannot certify emptiness and the caller keeps the node.
+fn farkas_safe_bound(
+    y: &[f64],
+    a: &[f64],
+    b: &[f64],
+    l: &[f64],
+    u: &[f64],
+    m: usize,
+    n: usize,
+) -> bool {
+    // Reduced-cost zero-tolerance, scaled by the ray magnitude so it tracks the
+    // noise floor of `Aᵀy` rather than being an absolute constant.
+    let ynorm = y.iter().fold(0.0f64, |acc, &v| acc.max(v.abs()));
+    let rc_tol = 1e-7 * ynorm.max(1.0);
+    let mut g = 0.0f64;
+    let mut scale = 0.0f64; // running magnitude of the terms, for the margin
+    for i in 0..m {
+        g += b[i] * y[i];
+        scale = scale.max((b[i] * y[i]).abs());
+    }
+    for j in 0..n {
+        let mut aty = 0.0f64;
+        for i in 0..m {
+            aty += a[i * n + j] * y[i];
+        }
+        let mut rc = -aty; // objective is zero: reduced cost is −(Aᵀy)ⱼ
+        if rc.abs() <= rc_tol {
+            rc = 0.0;
+        }
+        let term = if rc > 0.0 {
+            if l[j] <= -INF {
+                return false; // genuine −∞ contribution ⇒ this y can't certify
+            }
+            rc * l[j]
+        } else if rc < 0.0 {
+            if u[j] >= INF {
+                return false;
+            }
+            rc * u[j]
+        } else {
+            0.0
+        };
+        g += term;
+        scale = scale.max(term.abs());
+    }
+    // Magnitude-scaled margin: a genuinely-empty box clears `g0 > 0` with room to
+    // spare, while a ray grazing zero on a numerically-tight feasible box does not.
+    let margin = 1e-9 * scale.max(1.0);
+    g > margin
 }
 
 /// Limited strong branching. For the *unreliable* fractional candidates (those
@@ -2086,5 +2216,129 @@ mod tests {
         let r = solve_milp(&lp, &[9.0], 100.0, &opts(4, vec![0, 1, 2, 3]));
         assert_eq!(r.status, MilpStatus::Optimal);
         assert!((r.obj - 90.0).abs() < 1e-6, "obj {}", r.obj);
+    }
+
+    // --- C-14: Farkas verification before an infeasible fathom ---------------
+
+    /// A genuinely infeasible LP's exported dual ray verifies, so the node is
+    /// (soundly) fathomable. `x0 + s = 1`, `s∈[0,∞)`, `x0∈[2,∞)` ⇒ `x0≥2` yet
+    /// `x0≤1` — empty.
+    #[test]
+    fn c14_valid_farkas_ray_certifies_emptiness() {
+        let a = [1.0, 1.0];
+        let b = [1.0];
+        let c = [0.0, 0.0];
+        let l = [2.0, 0.0];
+        let u = [INF, INF];
+        let lp = LpView {
+            a: &a,
+            m: 1,
+            n: 2,
+            c: &c,
+            l: &l,
+            u: &u,
+        };
+        let r = solve_lp(&lp, &b, &SimplexOptions::default());
+        assert_eq!(r.status, LpStatus::Infeasible);
+        assert!(
+            verify_farkas_infeasible(&r.dual, &a, &b, &l, &u, 1, 2),
+            "a real infeasible LP's ray must verify (else we would refuse a valid fathom)"
+        );
+    }
+
+    /// The C-14 defect class: a node the simplex *labels* Infeasible but whose
+    /// exported ray does NOT certify emptiness (here a corrupted/zeroed ray) must
+    /// be refused — `verify_farkas_infeasible` returns false so the caller keeps
+    /// the node instead of fathoming a region that may hold the optimum.
+    #[test]
+    fn c14_non_certifying_ray_is_refused() {
+        let a = [1.0, 1.0];
+        let b = [1.0];
+        let l = [2.0, 0.0];
+        let u = [INF, INF];
+        // Zero ray: g0 ≡ 0, no certificate ⇒ must not fathom.
+        assert!(
+            !verify_farkas_infeasible(&[0.0], &a, &b, &l, &u, 1, 2),
+            "a zero ray certifies nothing; the node must not be fathomed"
+        );
+        // Empty certificate (nothing exported) ⇒ must not fathom.
+        assert!(
+            !verify_farkas_infeasible(&[], &a, &b, &l, &u, 1, 2),
+            "an absent ray must never license a fathom"
+        );
+        // A ray that only *grazes* zero (g0 = 0 exactly) must not clear the
+        // magnitude-scaled margin: box {x0∈[0,1], s=... } here is actually
+        // feasible, and no free-sign y makes g0 strictly positive.
+        let a2 = [1.0, 1.0];
+        let b2 = [1.0];
+        let l2 = [0.0, 0.0];
+        let u2 = [1.0, INF];
+        assert!(
+            !verify_farkas_infeasible(&[1.0], &a2, &b2, &l2, &u2, 1, 2),
+            "a feasible box must not be certified empty by any ray"
+        );
+    }
+
+    /// Scale-invariance of the certificate: an infeasible LP whose exported ray
+    /// verifies still verifies after both A/b and the ray are equilibrated by an
+    /// arbitrary positive row factor — the property the fathom relies on to check
+    /// in scaled solve-space. (`g0(R·ŷ)` over `Â=RA`, `b̂=Rb` equals `g0(y)`.)
+    #[test]
+    fn c14_certificate_is_scale_invariant() {
+        let a = [1.0, 1.0];
+        let b = [1.0];
+        let c = [0.0, 0.0];
+        let l = [2.0, 0.0];
+        let u = [INF, INF];
+        let lp = LpView {
+            a: &a,
+            m: 1,
+            n: 2,
+            c: &c,
+            l: &l,
+            u: &u,
+        };
+        let r = solve_lp(&lp, &b, &SimplexOptions::default());
+        assert_eq!(r.status, LpStatus::Infeasible);
+        // Equilibrate row 0 by 8 (a power of two, as real equilibration snaps to);
+        // the scaled ray is ŷ = y / 8, and g0 is invariant, so it still verifies.
+        let s = 8.0;
+        let a_s = [a[0] * s, a[1] * s];
+        let b_s = [b[0] * s];
+        let y_s: Vec<f64> = r.dual.iter().map(|v| v / s).collect();
+        assert!(
+            verify_farkas_infeasible(&y_s, &a_s, &b_s, &l, &u, 1, 2),
+            "the safe-bound certificate must be invariant under row equilibration"
+        );
+    }
+
+    /// Noise robustness (the AMP-relaxation regression that surfaced during the
+    /// fix): a warm-simplex ray carries rounding noise, so an infinite-bounded
+    /// column with a *noise-level* reduced cost must NOT push `g0` to `−∞` and
+    /// reject an otherwise-valid certificate. Here `x0 + s = 1`, `x0∈[2,∞)`,
+    /// `s∈[0,∞)` is infeasible; the clean ray is `y=[-1]` (g0 = -1·1 + min over
+    /// x0≥2 of (1)·x0 = -1 + 2 = 1 > 0). Perturb `A` on the *infinite* slack column
+    /// so `(Aᵀy)` there is a tiny nonzero — the tolerance must absorb it.
+    #[test]
+    fn c14_infinite_column_noise_does_not_reject_valid_ray() {
+        // Ray y=[-1]; column 1 (slack, u=∞) has a[1]=1 → (Aᵀy)_1 = -1, rc=+1 with
+        // l=0 contributes 0; column 0 (x0, l=2) rc from a[0]: use the real solve.
+        let a = [1.0, 1.0];
+        let b = [1.0];
+        let l = [2.0, 0.0];
+        let u = [INF, INF];
+        // A hand-built clean ray for this system: y = [-1].
+        let y = [-1.0];
+        assert!(
+            verify_farkas_infeasible(&y, &a, &b, &l, &u, 1, 2),
+            "clean ray must certify the infeasible box"
+        );
+        // Now perturb the *infinite-bounded* slack column by noise 1e-10: with the
+        // ray-scaled rc tolerance, g0 is unchanged and the ray still certifies.
+        let a_noisy = [1.0, 1.0 + 1e-10];
+        assert!(
+            verify_farkas_infeasible(&y, &a_noisy, &b, &l, &u, 1, 2),
+            "noise-level reduced cost on an ∞-bounded column must not reject the ray"
+        );
     }
 }

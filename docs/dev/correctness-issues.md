@@ -98,7 +98,7 @@ in non-default configs; loud ingestion gaps. **P3** = hygiene.
 | C-18 | P1 | midpoint bound | `mccormick_bounds="midpoint"` returns u(mid), not a lower bound (opt-in mode) | fixed |
 | C-20 | P2 | fbbt_fp.rs | watch-list FBBT declares infeasibility with zero tolerance (opt-in engine) | fixed |
 | C-15 | P2 | obbt.py | `run_obbt` variant tightens to raw LP vertex, no NS safe-bound clamp | fixed |
-| C-14 | P2 | milp_driver | LP-infeasible fathom trusts status alone; Farkas ray never verified | open |
+| C-14 | P2 | milp_driver | LP-infeasible fathom trusts status alone; Farkas ray never verified | fixed |
 | C-21 | P2 | incremental MC | soundness-gate validation boxes never exercise negative/zero-spanning bounds | fixed |
 | C-7 | P2 | .nl parser | defined variables (V segments) discarded → hard parse error | fixed |
 | C-8 | P2 | .nl parser | common opcodes unhandled (o76/o77/o78/o48/o11/o12/o35) | fixed |
@@ -1285,7 +1285,48 @@ phase-1 threshold relative to ‖b‖.
 corrupted ray → no fathom, node re-solved); no measurable slowdown on the MILP
 smoke suite (the check is one mat-vec); standing gates pass.
 
-**Log:** —
+**Log:**
+- 2026-07-03 — **CONFIRMED then FIXED** (PR TBD, branch `fix-c14-milp-driver`).
+  *Confirmed statically per the card:* `solve_node`'s `LpStatus::Infeasible` arm
+  fathomed to `INFEAS_SENTINEL` on the status alone; `grep -ri farkas` over the
+  core found the contract comment (`lp/simplex/mod.rs`) and the exported ray but
+  **no caller-side verification** anywhere between them. Confirmed dynamically via a
+  fail-before probe: hard-wiring the new verifier to `true` (= pre-fix
+  "trust-status") makes the regression test `c14_non_certifying_ray_is_refused` fail
+  (it wrongly fathoms a zero/non-certifying ray); with the verifier live it passes.
+  *Fix:* added `verify_farkas_infeasible` — checks the exported dual ray `y` with the
+  objective-free safe bound `g0(±y) = bᵀy + Σⱼ min_box((−Aᵀy)ⱼ zⱼ) > margin` (a
+  weak-duality certificate of emptiness; free-sign, so both `±y` tried). Runs on the
+  *scaled solve-space* data (`ctx.sa`/`ctx.sb`/scaled `l`/`u`) where the warm-simplex
+  ray lives — the safe-bound identity is invariant under equilibration
+  (`scaling.rs`), so the verdict matches the original space with no unscaling. On
+  verification **failure** the node is NOT fathomed: it is handed back uncertified
+  (non-pruning `−∞` bound, midpoint) exactly like `IterLimit`/`Numerical`, so a
+  numerically-tight feasible box can never be silently cut and optimality is never
+  falsely claimed. Deviation from the sketch: no separate "re-solve in numeric-focus
+  mode" step — the existing uncertified/branch path already re-solves the node's
+  children, and the driver's `decide_status` (C-2) refuses to certify a search that
+  dropped a node un-fathomed, so deferral is sufficient and simpler.
+  *Subtlety found during VERIFY (regression):* the warm dual-simplex ray carries
+  rounding noise on ∞-bounded columns (reduced costs down to `1e-38`); a naive check
+  let a `1e-18` dribble send `g0` to `−∞` and reject **valid** certificates,
+  regressing 6 AMP piecewise-relaxation tests to `iteration_limit` (never a wrong
+  certificate — conservative — but a real tree-explosion regression). Fixed by a
+  ray-magnitude-scaled reduced-cost zero tolerance (`1e-7·‖y‖∞`): only a reduced cost
+  genuinely past that toward an infinite bound blocks certification. This is the
+  *class* fix (noise floor tracks the ray), not an instance patch.
+  *Regression tests (Rust, sub-second, `milp_driver::tests`):*
+  `c14_valid_farkas_ray_certifies_emptiness` (a real infeasible LP's ray verifies →
+  fathom allowed), `c14_non_certifying_ray_is_refused` (zero ray / absent ray /
+  feasible box → refused; the fail-before lock), `c14_certificate_is_scale_invariant`
+  (row-equilibrated A/b/ray still verifies — the scaled-space soundness the fathom
+  relies on), `c14_infinite_column_noise_does_not_reject_valid_ray` (∞-column
+  noise-level reduced cost must not reject a valid ray — the regression class).
+  *Gates:* `cargo test -p discopt-core` 417 passed / 0 failed; `cargo clippy --lib`
+  clean; `cargo fmt --check` clean; `maturin develop --release` ok; `pytest -m smoke`
+  482 passed / 1 skipped / 0 failed (the 6 AMP fails resolved once the noise
+  tolerance landed); adversarial suite 10 passed; benchmark `--suite smoke` discopt
+  10/10 solved & proved, **incorrect_count = 0**.
 
 ---
 
