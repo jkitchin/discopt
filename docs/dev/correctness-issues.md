@@ -1586,7 +1586,7 @@ non-finite, at the `_secant`/envelope level rather than relying on callers.
 NaN; grep-audit that no caller special-cases NaN envelopes anymore; standing gates
 pass.
 
-**Log:** 2026-07-03 — CONFIRMED and FIXED (status open→fixed, PR #<pending>).
+**Log:** 2026-07-03 — CONFIRMED and FIXED (status open→fixed, PR #462).
 Repro (pre-fix): `_secant(x²,x=0,lb=−2,ub=+∞)=NaN`; `relax_square`/`relax_exp`/
 `relax_cosh` return `cc=NaN` on any half-infinite box; `relax_bilinear` with an
 ∞ factor bound returns `cv=NaN`; `relax_pow` odd on `[−2,+∞)` returns NaN. A NaN
