@@ -40,6 +40,7 @@ Correctness is pinned by a differential test against ``jax.grad``
 from __future__ import annotations
 
 import math
+from typing import TypeGuard
 
 from discopt.modeling.core import (
     BinaryOp,
@@ -68,7 +69,7 @@ def _const(v: float) -> Constant:
     return Constant(float(v))
 
 
-def _is_const(e: Expression) -> bool:
+def _is_const(e: Expression) -> TypeGuard[Constant]:
     return isinstance(e, Constant) and e.value.ndim == 0
 
 
@@ -218,7 +219,7 @@ def diff(expr: Expression, wrt: Variable, *, _memo: dict | None = None) -> Expre
     if not isinstance(expr, Expression):
         # Bare python/numpy scalars are constants -> derivative 0.
         return _const(0.0)
-    memo = {} if _memo is None else _memo
+    memo: dict[int, Expression] = {} if _memo is None else _memo
     key = id(expr)
     cached = memo.get(key)
     if cached is not None:

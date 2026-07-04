@@ -41,7 +41,7 @@ def worst_case_distribution(nominal_probs, costs, budget: float) -> np.ndarray:
         raise ValueError("nominal_probs and costs must have the same shape")
     if budget < 0:
         raise ValueError("budget must be nonnegative")
-    p = p0.copy()
+    p: np.ndarray = p0.copy()
     movable = min(budget / 2.0, 1.0)  # total mass we may relocate
 
     order = np.argsort(c)  # ascending cost: donors first, receivers last

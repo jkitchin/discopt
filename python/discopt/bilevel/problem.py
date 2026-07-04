@@ -39,6 +39,8 @@ Example
 
 from __future__ import annotations
 
+from typing import TypeGuard
+
 import numpy as np
 
 from discopt.bilevel import kkt as _kkt
@@ -50,7 +52,7 @@ from discopt.mpec import reformulate_gdp, reformulate_sos1
 __all__ = ["BilevelProblem"]
 
 
-def _is_const(expr: Expression) -> bool:
+def _is_const(expr: Expression) -> TypeGuard[Constant]:
     return isinstance(expr, Constant) and expr.value.ndim == 0
 
 

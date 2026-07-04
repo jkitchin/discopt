@@ -14,6 +14,8 @@ model. Phase 0 (``docs/dev/stochastic-module-plan.md`` §3.3) provides:
 
 from __future__ import annotations
 
+from typing import cast
+
 import numpy as np
 
 from discopt.modeling.core import Constant, Expression, Model
@@ -46,7 +48,7 @@ class Expectation(RiskMeasure):
 
     def build(self, model, first_stage_cost, scenario_costs, probs) -> Expression:
         exp = _weighted_sum([(float(p), c) for p, c in zip(probs, scenario_costs)])
-        return first_stage_cost + exp
+        return cast(Expression, first_stage_cost + exp)
 
 
 class CVaR(RiskMeasure):
@@ -65,12 +67,12 @@ class CVaR(RiskMeasure):
     def build(self, model, first_stage_cost, scenario_costs, probs) -> Expression:
         inv = 1.0 / (1.0 - self.alpha)
         eta = model.continuous(f"{self.prefix}_eta")  # VaR (free)
-        tail_pairs = []
+        tail_pairs: list[tuple[float, Expression]] = []
         for s, (c, p) in enumerate(zip(scenario_costs, probs)):
             u = model.continuous(f"{self.prefix}_u{s}", lb=0.0)
             model.subject_to(u >= c - eta, name=f"{self.prefix}_shortfall{s}")
             tail_pairs.append((float(p) * inv, u))
-        return first_stage_cost + eta + _weighted_sum(tail_pairs)
+        return cast(Expression, first_stage_cost + eta + _weighted_sum(tail_pairs))
 
 
 class MeanCVaR(RiskMeasure):
@@ -87,7 +89,10 @@ class MeanCVaR(RiskMeasure):
         zero = Constant(0.0)
         exp = Expectation().build(model, zero, scenario_costs, probs)
         cvar = CVaR(self.alpha, prefix=self.prefix).build(model, zero, scenario_costs, probs)
-        return first_stage_cost + Constant(1.0 - self.lam) * exp + Constant(self.lam) * cvar
+        return cast(
+            Expression,
+            first_stage_cost + Constant(1.0 - self.lam) * exp + Constant(self.lam) * cvar,
+        )
 
 
 def chance_constraint(
@@ -112,7 +117,7 @@ def chance_constraint(
         raise ValueError(f"epsilon must be in [0, 1), got {epsilon}")
     probs = np.asarray(probs, float)
     zs = []
-    cov_pairs = []
+    cov_pairs: list[tuple[float, Expression]] = []
     for s, (g, p) in enumerate(zip(scenario_bodies, probs)):
         z = model.binary(f"{prefix}_z{s}")
         model.subject_to(g <= Constant(float(big_m)) * z, name=f"{prefix}_link{s}")

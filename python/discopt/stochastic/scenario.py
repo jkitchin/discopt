@@ -46,7 +46,7 @@ class ScenarioSet:
                 f"scenario probabilities must sum to 1, got {total:.6g}. "
                 f"(Use ScenarioSet.from_samples for equal-weight SAA scenarios.)"
             )
-        self.scenarios = list(scenarios)
+        self.scenarios: list[Scenario] = list(scenarios)
         self.seed = seed  # provenance for SAA (None if explicit)
         self.n_sampled = n_sampled
 
@@ -95,5 +95,5 @@ class ScenarioSet:
     def __iter__(self):
         return iter(self.scenarios)
 
-    def __getitem__(self, i) -> Scenario:
+    def __getitem__(self, i: int) -> Scenario:
         return self.scenarios[i]
