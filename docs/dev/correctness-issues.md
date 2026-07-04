@@ -103,7 +103,7 @@ in non-default configs; loud ingestion gaps. **P3** = hygiene.
 | C-7 | P2 | .nl parser | defined variables (V segments) discarded → hard parse error | fixed |
 | C-8 | P2 | .nl parser | common opcodes unhandled (o76/o77/o78/o48/o11/o12/o35) | fixed |
 | C-9 | P2 | .nl parser | nlvo>nlvc integer-block classification unverified | fixed |
-| C-10 | P2 | lp_spatial cuts | GMI cuts appended without rhs safety margin (opt-in path) | open |
+| C-10 | P2 | lp_spatial cuts | GMI cuts appended without rhs safety margin (opt-in path) | fixed |
 | C-3 | P2 | solver.py incumbent | unrounded integer incumbent survives if terminal polish throws | fixed |
 | C-11 | P2 | modeling API | missing `__ne__` → `x != y` silently evaluates False | fixed |
 | C-22 | P3 | fbbt.rs interval | `interval_mul` NaN endpoints on 0·∞ (lost tightening, not unsound) | fixed |
@@ -1008,7 +1008,43 @@ for the ≤ form), matching `_augment_lpdata_with_gomory_cuts`.
 cut rounds enabled (enumerate feasible integer points in a small box; none
 violated); standing gates pass.
 
-**Log:** —
+**Log:**
+- 2026-07-03 — **CONFIRMED then FIXED.** Confirmed dynamically (not just by static
+  read): drove the incremental-McCormick node LP of a small all-integer bilinear
+  model (`a*b + c >= 10`, box `[0,6]×[0,5]×[0,4]`) through the actual
+  `_separate_node_cuts` GMI branch and reproduced the raw crossover-vertex GMI cut
+  independently. The emitted GMI cut's `<=` rhs was **byte-identical** to the raw
+  Rust GMI rhs (`-6.000000000000001`) — no safety margin, exactly as the card
+  predicts. Every other GMI consumer relaxes by `1e-7·(1+‖row‖₁)`; this path did
+  not, so a cut whose boundary passes through a feasible integer point could shave
+  it under the ~1e-12 float error the crossover vertex carries.
+- **Fix (per the card sketch).** `lp_spatial_bb.py:_separate_node_cuts` GMI branch
+  now adds `margin = 1e-7*(1+‖row‖₁)` to each cut's `<=` rhs before appending —
+  matching `solver.py:_augment_lpdata_with_gomory_cuts` / `cmir_cuts.py`. Sound by
+  construction: the margin only ever moves the cut *outward* (relaxes the
+  constraint), so it can never remove a feasible point; it only forgoes cutting an
+  ~1e-7-thin sliver. The cMIR/aggregation branches already carried their own
+  margins and were left untouched. No validity check weakened; no other path
+  changed.
+- **Regression tests** (`python/tests/test_lp_spatial_bb.py`, `@pytest.mark.smoke`,
+  sub-second, direct calls into `_separate_node_cuts` — no full solve; verified
+  RED-before/GREEN-after by stashing the fix):
+  `test_c10_lp_spatial_gmi_cut_carries_safety_margin` (reconstructs the raw GMI
+  cut and asserts the emitted rhs is relaxed outward by *exactly* the margin — RED
+  pre-fix: emitted == raw, no margin) and `test_c10_no_feasible_integer_point_is_cut`
+  (encodes the class invariant: enumerates every integer-feasible point of the
+  model and asserts no emitted node cut violates it). The first test pins the
+  emission contract so any future revert to a raw-rhs append trips CI immediately.
+- **Gates:** C-10 tests 2 passed (RED-before confirmed via `git stash`); cut suite
+  (`test_{cutting_planes,cover_cuts,conflict_cuts,clique_cuts,constraint_cuts,rlt_cuts,auto_cut_policy,cut_recognizer,lp_spatial_bb}`)
+  135 passed; `-k "mccormick or relax or spatial" -m "not slow"` 693 passed / 1
+  skipped; `pytest -m smoke` 480 passed / 1 skipped; adversarial
+  `test_adversarial_recent_fixes.py -m slow` 10 passed; `ruff check` +
+  `ruff format --check` clean; pre-commit `mypy` passed. No Rust touched (no
+  `cargo test`). `incorrect_count` unchanged (0 failures across all suites; no
+  correctness assertion weakened). PR: (pending).
+
+**Status:** open → fixed.
 
 ---
 
