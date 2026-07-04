@@ -12,6 +12,19 @@ The release procedure that produces these entries is documented in
 
 ### Removed
 
+- **AC-OPF and pooling application builders extracted to the `discopt-apps`
+  plugin** (`refactor`, #431). `python/discopt/opf.py` (rectangular AC-OPF:
+  `build_ac_opf_rectangular`, `ACOPF`, `Bus`, `Line`, `admittance_matrix`,
+  `two_bus_example`) and `python/discopt/pooling.py` (pq-formulation:
+  `build_pq_formulation`, `PoolingProblem`, `Input`, `Pool`, `Output`,
+  `haverly_hpp1`), their tests, and the `ac_opf`/`pooling_pq` doc notebooks now
+  live in the standalone
+  [discopt-apps](https://github.com/jkitchin/discopt-apps) package, mirroring
+  the course extraction (#430). Because discopt is a namespace package,
+  `pip install discopt-apps` restores `discopt.opf` and `discopt.pooling`
+  imports unchanged. These are pure builders over `discopt.modeling.core`; no
+  core solver behavior changes. (The in-core
+  `discopt.modeling.examples.example_pooling_haverly` example stays.)
 - **DOE module extracted to the `discopt-doe` plugin** (`refactor!`, #389).
   `python/discopt/doe/` (design, screening, FIM, identifiability,
   discrimination, workbook CLI, Streamlit GUI), its 19 test files, 11 doc
