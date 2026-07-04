@@ -1438,7 +1438,7 @@ product range and is never NaN; standing gates pass.
   `cargo fmt`-clean (the single pre-existing fmt drift at `fbbt.rs:2597` is in the
   C-31 test block, on `main`, untouched — out of scope). `maturin develop
   --release` OK; `pytest -m smoke` 193 passed/1 skipped; adversarial suite 10
-  passed; `incorrect_count = 0`. PR: (pending).
+  passed; `incorrect_count = 0`. PR: #460.
 
 ---
 
