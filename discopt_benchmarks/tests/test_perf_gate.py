@@ -116,3 +116,48 @@ def test_panel_instances_are_vendored():
 
     missing = [i.name for i in PANEL if not os.path.exists(i.path)]
     assert missing == [], f"panel instances not vendored: {missing}"
+
+
+# ─────────────────── honest T0.3 timers (item 4) ───────────────────
+class TestHonestTimers:
+    """PerfRecord must carry the honest per-family ``solver_stats`` timers so
+    reports attribute cost with them, not the residual rust_time/python_time
+    split (bottleneck-profile-2026-07-02 §1 item 4)."""
+
+    def test_solver_stats_defaults_to_none(self):
+        # A record built without the field (older baselines / existing call sites)
+        # still constructs and serialises — the field is trailing/defaulted.
+        rec = _rec("gear4")
+        assert rec.solver_stats is None
+        assert "solver_stats" in rec.to_json()
+        assert rec.to_json()["solver_stats"] is None
+
+    def test_solver_stats_round_trips(self):
+        stats = {"reduce/obbt": 0.42, "reduce/fbbt": 0.11, "separate/gomory": 0.07}
+        rec = PerfRecord(
+            instance="gear4",
+            status="optimal",
+            objective=1.6434,
+            bound=1.6434,
+            wall_time=10.0,
+            node_count=100,
+            jax_time=1.0,
+            rust_time=0.0,
+            python_time=1.0,
+            subnlp_calls=0,
+            xla_compile_count=5,
+            xla_compile_seconds=0.1,
+            time_to_first_incumbent=1.0,
+            solver_stats=stats,
+        )
+        assert rec.to_json()["solver_stats"] == stats
+
+    def test_gate_ignores_solver_stats(self, monkeypatch):
+        # The honest timers are informational: an identical run with wildly
+        # different (advisory) per-family seconds must not trip a hard gate.
+        monkeypatch.setattr(gate_mod, "PANEL", [_GEAR4])
+        base = _rec("gear4", obj=1.6434, bound=1.6434, nodes=5921, compiles=5)
+        cur = _rec("gear4", obj=1.6434, bound=1.6434, nodes=5921, compiles=5)
+        cur.solver_stats = {"reduce/obbt": 999.0}
+        corr, regr, warn = check_gate([cur], _base(base))
+        assert corr == [] and regr == []

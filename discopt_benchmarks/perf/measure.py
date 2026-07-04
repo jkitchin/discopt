@@ -4,6 +4,17 @@ Captures the cost-center metrics the plan flagged as missing — **XLA compile
 count/seconds** and **time-to-first-incumbent** — alongside the built-in
 ``jax_time / rust_time / python_time / node_count`` split, so a regression can be
 attributed to a cost center without a manual profiling session.
+
+**Layer attribution — use ``solver_stats``, not the residual split.** Per
+``docs/dev/bottleneck-profile-2026-07-02.md`` §1 item 4 / §4, the
+``rust_time``/``python_time`` fields are *residual accounting artifacts*:
+``rust_time`` excludes the per-node LP binding calls and POUNCE, and
+``python_time`` is a residual that absorbs root OBBT's JAX work and Rust
+presolve. They are retained here for continuity but must **not** be used to
+attribute cost to a layer or gated on. The honest T0.3 timers live on
+``PerfRecord.solver_stats`` (the directly-instrumented ``reduce/{family}`` and
+``separate/{family}`` per-family seconds from ``SolveResult.solver_stats``);
+reports and any layer-fraction analysis should read those.
 """
 
 from __future__ import annotations
@@ -29,12 +40,22 @@ class PerfRecord:
     wall_time: float
     node_count: int
     jax_time: float
+    # ``rust_time``/``python_time`` are RESIDUAL accounting artifacts, not honest
+    # layer timers — do not attribute cost to a layer with them or gate on them
+    # (bottleneck-profile-2026-07-02 §1 item 4). Honest per-family attribution is
+    # ``solver_stats`` below.
     rust_time: float
     python_time: float
     subnlp_calls: int
     xla_compile_count: int
     xla_compile_seconds: float
     time_to_first_incumbent: float | None
+    # Honest T0.3 per-family timers from ``SolveResult.solver_stats``:
+    # ``reduce/{family}`` (FBBT, per-node OBBT, …) and ``separate/{family}``
+    # (cut families) directly-instrumented seconds. ``None`` when the solve
+    # surfaced no non-zero family. Trailing/defaulted so older baselines that
+    # predate this field still load.
+    solver_stats: dict[str, float] | None = None
 
     @property
     def nodes_per_second(self) -> float | None:
@@ -136,4 +157,5 @@ def measure_solve(nl_path: str, time_limit: float, gap_tolerance: float = 1e-4) 
         xla_compile_count=compiles.count,
         xla_compile_seconds=round(compiles.seconds, 3),
         time_to_first_incumbent=first_inc.get("t"),
+        solver_stats=(dict(_stats) if (_stats := getattr(r, "solver_stats", None)) else None),
     )
