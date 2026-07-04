@@ -100,16 +100,16 @@ in non-default configs; loud ingestion gaps. **P3** = hygiene.
 | C-15 | P2 | obbt.py | `run_obbt` variant tightens to raw LP vertex, no NS safe-bound clamp | fixed |
 | C-14 | P2 | milp_driver | LP-infeasible fathom trusts status alone; Farkas ray never verified | open |
 | C-21 | P2 | incremental MC | soundness-gate validation boxes never exercise negative/zero-spanning bounds | fixed |
-| C-7 | P2 | .nl parser | defined variables (V segments) discarded → hard parse error | open |
-| C-8 | P2 | .nl parser | common opcodes unhandled (o76/o77/o78/o48/o11/o12/o35) | open |
-| C-9 | P2 | .nl parser | nlvo>nlvc integer-block classification unverified | open |
+| C-7 | P2 | .nl parser | defined variables (V segments) discarded → hard parse error | fixed |
+| C-8 | P2 | .nl parser | common opcodes unhandled (o76/o77/o78/o48/o11/o12/o35) | fixed |
+| C-9 | P2 | .nl parser | nlvo>nlvc integer-block classification unverified | fixed |
 | C-10 | P2 | lp_spatial cuts | GMI cuts appended without rhs safety margin (opt-in path) | open |
 | C-3 | P2 | solver.py incumbent | unrounded integer incumbent survives if terminal polish throws | fixed |
 | C-11 | P2 | modeling API | missing `__ne__` → `x != y` silently evaluates False | open |
 | C-22 | P3 | fbbt.rs interval | `interval_mul` NaN endpoints on 0·∞ (lost tightening, not unsound) | open |
 | C-23 | P1 | mccormick.py | ESCALATED (was P3): `relax_div` produces an invalid convex underestimator (cv > f) for **nonlinear** denominators (`1/(x*y)` cv=1.334 > true 1.0) — the "harmless" label held only for variable/affine denominators; `_relax_reciprocal` also mislabels concavity for negative denominators (= DIV-1) | fixed |
 | C-24 | P3 | mccormick.py | secants produce NaN on infinite bounds; soundness leans on downstream filters | open |
-| C-12 | P3 | .nl parser | range-split renumbers constraints vs source indices | open |
+| C-12 | P3 | .nl parser | range-split renumbers constraints vs source indices | fixed (documented) |
 | C-25 | P1 | nn/formulations | scaling + bound-propagation domain mismatch cuts the true optimum on scaled embedded NNs | in progress (nn-module-plan T-N0.2) |
 | C-26 | P1 | nn/tree_ensemble | tree big-M invalid for out-of-box thresholds → cuts feasible points | in progress (nn-module-plan T-N0.3) |
 | C-27 | P2 | nn/readers/onnx | ONNX reader silently mis-reads Gemm attrs / residual Add / branched graphs | in progress (nn-module-plan T-N1.1) |
@@ -855,7 +855,38 @@ constraint (or export one from AMPL/Pyomo); `parse_nl` currently errors.
 values as an independent evaluation (e.g. Pyomo) at 3 random points; corpus still
 parses; standing gates pass.
 
-**Log:** —
+**Log:**
+- 2026-07-03 — **CONFIRMED then FIXED.** Confirmed with a hand-crafted `.nl`
+  carrying one defined variable `V2 = 2·v0 + v1²` referenced by the objective as
+  `min v2`: pre-fix `parse_nl` errored `"variable index 2 out of range"` (the V
+  handler read the defining expression into `let _expr = …` and dropped it, never
+  growing `var_nodes`). No MINLPLib instance (in-repo 61-file corpus nor the full
+  ~4,800-file snapshot) emits V segments — MINLPLib is exported without common
+  subexpressions — but AMPL/Pyomo direct exports emit them routinely, so this
+  rejected a large real slice.
+- **Fix** (`nl_parser.rs`, `b'V'` segment handler): the defined var is now INLINED.
+  Read the `n_linear` `(var_index, coeff)` pairs and the nonlinear body, build
+  `linear_part + body` (same +1/−1 coeff shortcuts as `build_linear`, dropping a
+  zero-constant body), and push the resulting `ExprId` onto `var_nodes` at the
+  defined var's index. `.nl` numbers defined vars sequentially from `n_vars`, so
+  the push lands at the next `var_nodes` slot; a later `v<idx>` (idx ≥ n_vars)
+  reference resolves to the inlined subexpression. Chained references (a defined
+  var referencing an earlier defined var) work because the body is parsed against
+  the already-grown `var_nodes`. Out-of-sequence / redefining indices and linear
+  terms referencing not-yet-defined indices are refused with a `Parse` error
+  rather than guessed (never a silent mis-map). CSE/sharing of the inlined nodes
+  is handled for free by the arena's Phase-4 interning; the correctness fix is the
+  inlining itself.
+- **Regression tests** (`nl_parser::tests`, fail-before/pass-after verified):
+  `test_defined_variable_inlined_and_evaluated` (`2x + y²` checked at 3 points:
+  (3,4)→22, (0,5)→25, (−1,2)→2) and `test_defined_variable_chained_reference`
+  (`V1 = v0+1`, `V2 = v1·v1`, objective `v2 = (v0+1)²`, at v0=3→16). Both error
+  on the pre-fix parser and pass after. Corpus lock `test_minlplib_corpus_all_parse`
+  (all 61 in-repo `.nl` still parse) added in the same PR.
+- **Gates:** `cargo test -p discopt-core` 408 lib + 4 determinism + 1 doctest
+  green; clippy clean; `rustfmt --check` clean on `nl_parser.rs`; `maturin develop
+  --release` OK; smoke 478 passed / 1 skipped; adversarial 10 passed;
+  `incorrect_count` unchanged (0). PR: (this PR).
 
 ---
 
@@ -877,7 +908,40 @@ error with named message unless trivially constant-guarded.
 **Done criteria:** parser tests for each added opcode (value-checked against
 direct evaluation); named errors for any still-unsupported ones; standing gates.
 
-**Log:** —
+**Log:**
+- 2026-07-03 — **CONFIRMED then FIXED.** Confirmed every listed opcode hit the
+  `_ => UnknownOpcode` fallthrough and aborted the parse (fail-before tests red).
+  Of the whole ~4,800-file MINLPLib snapshot only `o11` occurs (once, `fuzzy.nl`);
+  the rest are emitted by AMPL/Pyomo direct exports (o77 for `x**2` routinely).
+  Authoritative opcode numbers cross-checked against MathOptInterface.jl's
+  `opcode.jl` and Couenne's `readnl/nl2e.cpp` (OP1POW=`pow(L,R.const)`,
+  OP2POW=`pow(L,2)`, OPCPOW=`pow(L.const,R)`; MINLIST=11/MAXLIST=12 use the o54
+  count-line wire format).
+- **Fix** (`nl_parser.rs::parse_opcode`):
+  - `o76`/`o77`/`o78` → `BinOp::Pow` with the correct operand order (o76 base then
+    constant power; o77 base with a synthesized `Constant(2.0)`; o78 constant base
+    then exponent — constants arrive as ordinary `n<val>` leaves).
+  - `o11`/`o12` → folded into a **left-nested tree of binary** `MathFunc::Min`/`Max`
+    rather than a single n-ary `FunctionCall`. Rationale (soundness): every IR
+    consumer (`evaluate`, `evaluate_node`, FBBT) treats `Min`/`Max` as strictly
+    binary (`args[0]`,`args[1]`) — an n-ary call would silently drop `args[2..]`, a
+    silent misparse. The nested-binary fold is exactly equivalent and uses only the
+    sound binary semantics; no evaluator/FBBT/relaxation change needed (keeps the
+    fix inside the parser card's scope). Zero-arg lists are refused.
+  - `o48` atan2 and `o35` if-then-else → **loud** `UnsupportedOpcode` (no sound IR
+    representation; Atan2 is not in `MathFunc` and single-arg `atan` would be a
+    silent misparse), mirroring the C-5 refusal policy. Operands are deliberately
+    not consumed (the error aborts the parse).
+- **Regression tests** (`nl_parser::tests`, fail-before/pass-after verified):
+  `test_o77_2pow_is_square_not_unknown` (3²=9), `test_o76_1pow_is_power_with_constant_exponent`
+  (2³=8), `test_o78_cpow_is_constant_base_to_var_power` (2³=8),
+  `test_o11_minlist_is_minimum` (min{5,2,8}=2), `test_o12_maxlist_is_maximum`
+  (max{5,2,8}=8 — this is the one that caught the n-ary-vs-binary trap and forced
+  the nested-fold), `test_o48_atan2_refused_not_misparsed`,
+  `test_o35_if_refused_not_misparsed` (both assert the named `UnsupportedOpcode`).
+- **Gates:** same run as C-7 (shared PR): core 408+4+1 green, clippy clean, fmt
+  clean on the file, smoke 478/1-skip, adversarial 10, `incorrect_count`=0.
+  PR: (this PR).
 
 ---
 
@@ -901,7 +965,27 @@ integrality vectors.
 **Done criteria:** integrality vector matches the reference on the new corpus
 instance + 2 more header-shape variants; standing gates pass.
 
-**Log:** —
+**Log:**
+- 2026-07-03 — **ALREADY FIXED (by PR #310), now CONFIRMED + LOCKED.** The
+  `nlvo > nlvc` objective-only integer block is already correctly typed in the
+  code: `nl_parser.rs` sizes the objective-only nonlinear group as `[nlvc, nlvo)`
+  (not the wrong `(nlvo − nlvb)`-sized formula) when `nlvo > nlvc`, and stamps its
+  last `nlvoi` entries `Integer`. This landed in `fix(nl-parser): type
+  objective-only integer vars when nlvo > nlvc (false-feasible) (#310)` on
+  2026-06-23 — for `ex1252a`, whose 3 binaries (b22..b24) the old formula left
+  Continuous, relaxing integrality and admitting a false-feasible incumbent. The
+  card was never flipped from `open`.
+- **Confirmation.** The card's real bug is the *missing test*, not a live misparse:
+  a fresh regression test (below) that encodes the `nlvo>nlvc` header shape passes
+  on the current code and — verified by reverting the `#310` branch to the old
+  `(nlvo − nlvb)` sizing — fails (the objective-only integers slip to Continuous).
+- **Regression test** (`nl_parser::tests::test_nlvo_gt_nlvc_objective_only_integer_block_typed`):
+  header shape `nlvb=1 < nlvc=2 < nlvo=4`, `nlvoi=2`; asserts vars 2,3 are
+  `Integer` (the obj-only nl integer tail) and 0,1 `Continuous`. This is the
+  specific false-feasible class (integrality silently dropped), not the named
+  `ex1252a` instance, so a future refactor reintroducing the mis-sizing trips it.
+- **Gates:** shared PR run with C-7/C-8 (core 408+4+1, clippy/fmt clean, smoke
+  478/1-skip, adversarial 10, `incorrect_count`=0). Status open→fixed. PR: (this PR).
 
 ---
 
@@ -1432,7 +1516,25 @@ external mappings survive. No urgency; document until then.
 **Done criteria:** `source_row` populated + one test, OR a documented note in the
 parser module header; standing gates pass.
 
-**Log:** —
+**Log:**
+- 2026-07-03 — **FIXED via the documented-note option** (the card's explicit
+  alternative to `source_row`). Confirmed the behavior: range constraints (and any
+  two-finite-bound constraint not flagged as an explicit range) are split into two
+  `ConstraintRepr` rows, so a split shifts all subsequent constraints' positions
+  vs the source `.nl` row index. It is internally self-consistent (bodies/senses/
+  RHS correct) and no current solver path maps results back to source rows by
+  index, so there is no live mis-certification — hence P3.
+- **Why the note, not `source_row`:** threading a mandatory `source_row` field
+  through `ConstraintRepr` would touch **132 construction sites across 24 files**
+  (presolve passes, AMP, bindings, tests) — far wider than a P3 hygiene item and
+  risky to soundness-critical presolve, for zero current benefit. The card
+  sanctions the note as sufficient; the note names the exact prerequisite
+  (`source_row` at each split site) for any *future* feature that needs source-row
+  alignment (AMPL duals, `.sol` suffixes, round-trip writer).
+- **Fix:** added a `# Constraint numbering (C-12)` section to the `nl_parser.rs`
+  module header documenting the split-renumbering, its self-consistency, and the
+  future-work prerequisite. No code/behavior change; standing gates unaffected
+  (shared PR run with C-7/C-8/C-9). Status open→fixed (documented). PR: (this PR).
 
 ---
 

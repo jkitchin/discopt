@@ -4,6 +4,21 @@
 //! Parses the header, expression DAG segments (C, O), variable/constraint bounds
 //! (b, r), linear Jacobian/gradient terms (J, G), and initial point (x).
 //!
+//! # Constraint numbering (C-12)
+//!
+//! A range constraint `l <= body <= u` is split into two [`ConstraintRepr`] rows
+//! (`body >= l` and `body <= u`), and any constraint with two finite bounds not
+//! flagged as an explicit range is likewise split. As a result, the index of a
+//! constraint in [`ModelRepr::constraints`] does **not** in general equal its
+//! original row index in the source `.nl` file: every split shifts all subsequent
+//! constraints by one. The model is internally self-consistent — bodies, senses,
+//! and RHS values are correct — so nothing in the current solver path depends on
+//! source-index alignment. This note exists because any *future* feature that maps
+//! results back to source rows by index (e.g. AMPL constraint duals, `.sol`
+//! suffixes, or a round-trip writer) must first thread a `source_row` field through
+//! `ConstraintRepr` at each split site here, rather than assuming a 1:1 mapping.
+//! Tracked as correctness-issue C-12 (P3, hygiene — no current mis-certification).
+//!
 //! # Example
 //! ```
 //! use discopt_core::nl_parser::parse_nl;
@@ -594,6 +609,83 @@ fn parse_opcode(
             }
             Ok(arena.intern(ExprNode::SumOver { terms }))
         }
+        // o11: minlist / o12: maxlist — n-ary min/max. Same wire format as o54
+        // (a count line, then that many operand expressions). The IR's Min/Max
+        // functions are evaluated as strictly BINARY (args[0], args[1]) in every
+        // consumer (evaluate/evaluate_node/FBBT), so an n-ary FunctionCall would
+        // silently drop args[2..] — a silent misparse. We therefore fold the list
+        // into a left-nested tree of binary Min/Max, which is exactly equivalent
+        // and uses only the sound binary semantics. (C-8)
+        11 | 12 => {
+            let count_line = reader.next_line()?;
+            let count = parse_usize(count_line.trim())?;
+            if count == 0 {
+                return Err(NlParseError::Parse(format!(
+                    "min/max list (o{opcode}) with zero arguments"
+                )));
+            }
+            let func = if opcode == 11 {
+                MathFunc::Min
+            } else {
+                MathFunc::Max
+            };
+            let mut acc = parse_expr(reader, arena, var_nodes)?;
+            for _ in 1..count {
+                let next = parse_expr(reader, arena, var_nodes)?;
+                acc = arena.intern(ExprNode::FunctionCall {
+                    func,
+                    args: vec![acc, next],
+                });
+            }
+            Ok(acc)
+        }
+        // ── Power forms (class 2/1) — all map to BinOp::Pow (C-8). ──
+        // The .nl operand order (Gay, "Writing .nl Files"; cf. Couenne nl2e.cpp
+        // OP1POW/OP2POW/OPCPOW): o76 = base^const (base expr then constant power),
+        // o77 = base^2 (unary), o78 = const^exp (constant base then exponent expr).
+        // Constants arrive as ordinary `n<value>` leaves via parse_expr.
+        76 => {
+            // o76 OP1POW: base ^ constant-power
+            let base = parse_expr(reader, arena, var_nodes)?;
+            let exp = parse_expr(reader, arena, var_nodes)?;
+            Ok(arena.intern(ExprNode::BinaryOp {
+                op: BinOp::Pow,
+                left: base,
+                right: exp,
+            }))
+        }
+        77 => {
+            // o77 OP2POW: base ^ 2 (unary)
+            let base = parse_expr(reader, arena, var_nodes)?;
+            let two = arena.intern(ExprNode::Constant(2.0));
+            Ok(arena.intern(ExprNode::BinaryOp {
+                op: BinOp::Pow,
+                left: base,
+                right: two,
+            }))
+        }
+        78 => {
+            // o78 OPCPOW: constant-base ^ exponent
+            let base = parse_expr(reader, arena, var_nodes)?;
+            let exp = parse_expr(reader, arena, var_nodes)?;
+            Ok(arena.intern(ExprNode::BinaryOp {
+                op: BinOp::Pow,
+                left: base,
+                right: exp,
+            }))
+        }
+        // o48 atan2 (binary) and o35 if-then-else (ternary) have no sound IR
+        // representation — refuse loudly rather than drop operands or misuse the
+        // single-argument atan. (C-8; mirrors the C-5 refusal policy.) The error
+        // aborts the parse, so we deliberately do NOT consume operands.
+        48 => Err(NlParseError::UnsupportedOpcode {
+            name: "atan2",
+            opcode: 48,
+        }),
+        35 => Err(NlParseError::UnsupportedOpcode {
+            name: "if",
+            opcode: 35,
+        }),
         // ── Binary operators (class 2) ──
         //
         // C-5: floor/ceil/round/trunc/intdiv have NO sound representation in the IR.
@@ -1010,18 +1102,110 @@ pub fn parse_nl(content: &str) -> Result<ModelRepr, NlParseError> {
                 }
             }
             b'V' => {
-                // Common (defined) variables: V<index> <arity> <linear_terms>
-                // Skip these for now.
+                // Common (defined) variables: V<index> <n_linear> <k>
+                //   <var_index> <coeff>   (n_linear lines: the linear part)
+                //   <nonlinear expression tree>
+                // The defined variable's value is `linear_part + nonlinear_body`.
+                // Its index is `n_vars + position` and references to it (`v<idx>`
+                // with idx >= n_vars) appear in later C/O/V segments. (C-7)
+                //
+                // We INLINE it: build the defining expression and push it onto
+                // `var_nodes` at its index, so a later `v<idx>` resolves to the
+                // subexpression. Defined vars only ever reference *earlier* vars /
+                // defined vars, so parsing the body before the push is sound.
+                // (CSE/sharing is a separate performance upgrade; inlining is the
+                // correctness fix — it makes AMPL/Pyomo common-subexpression .nl
+                // parse instead of erroring on the reference.)
                 let parts = split_ws(&line[1..]);
                 if parts.len() >= 2 {
-                    let _vi = parse_usize(parts[0])?;
-                    let arity = parse_usize(parts[1])?;
-                    // Read arity linear terms then one expression
-                    for _ in 0..arity {
-                        let _vl = reader.next_line()?;
+                    let vi = parse_usize(parts[0])?;
+                    let n_linear = parse_usize(parts[1])?;
+                    // Read the n_linear (var_index, coeff) pairs of the linear part.
+                    let mut lin_pairs: Vec<(usize, f64)> = Vec::with_capacity(n_linear);
+                    for _ in 0..n_linear {
+                        let vl = reader.next_line()?;
+                        let lp = split_ws(vl);
+                        if lp.len() >= 2 {
+                            lin_pairs.push((parse_usize(lp[0])?, parse_f64(lp[1])?));
+                        }
                     }
-                    // Read the expression body
-                    let _expr = parse_expr(&mut reader, &mut arena, &var_nodes)?;
+                    // Read the nonlinear body (may reference earlier defined vars).
+                    let body = parse_expr(&mut reader, &mut arena, &var_nodes)?;
+
+                    // Build linear part: Σ coeff·v_j (reusing +1/-1 shortcuts).
+                    let mut lin_terms: Vec<ExprId> = Vec::with_capacity(lin_pairs.len());
+                    for (lvi, coeff) in lin_pairs {
+                        if coeff == 0.0 {
+                            continue;
+                        }
+                        let operand = if lvi < var_nodes.len() {
+                            var_nodes[lvi]
+                        } else {
+                            return Err(NlParseError::Parse(format!(
+                                "defined variable V{vi} references variable index {lvi} \
+                                 which is not yet defined (n_vars+defined so far = {})",
+                                var_nodes.len()
+                            )));
+                        };
+                        if (coeff - 1.0).abs() < 1e-15 {
+                            lin_terms.push(operand);
+                        } else if (coeff + 1.0).abs() < 1e-15 {
+                            lin_terms.push(arena.intern(ExprNode::UnaryOp {
+                                op: UnOp::Neg,
+                                operand,
+                            }));
+                        } else {
+                            let c = arena.intern(ExprNode::Constant(coeff));
+                            lin_terms.push(arena.intern(ExprNode::BinaryOp {
+                                op: BinOp::Mul,
+                                left: c,
+                                right: operand,
+                            }));
+                        }
+                    }
+                    let lin_part: Option<ExprId> = if lin_terms.is_empty() {
+                        None
+                    } else if lin_terms.len() == 1 {
+                        Some(lin_terms[0])
+                    } else {
+                        Some(arena.intern(ExprNode::SumOver { terms: lin_terms }))
+                    };
+
+                    // Combine: linear + nonlinear body (dropping a zero-constant
+                    // body so a purely-linear defined var stays clean).
+                    let defined_expr = match lin_part {
+                        Some(lin) => {
+                            if is_zero_constant(&arena, body) {
+                                lin
+                            } else {
+                                arena.intern(ExprNode::BinaryOp {
+                                    op: BinOp::Add,
+                                    left: body,
+                                    right: lin,
+                                })
+                            }
+                        }
+                        None => body,
+                    };
+
+                    // Push at the defined var's index. .nl numbers defined vars
+                    // sequentially from n_vars, matching var_nodes' next slot.
+                    if vi == var_nodes.len() {
+                        var_nodes.push(defined_expr);
+                    } else if vi < var_nodes.len() {
+                        // Out-of-order redefinition would silently mis-map later
+                        // references — refuse rather than guess.
+                        return Err(NlParseError::Parse(format!(
+                            "defined variable V{vi} redefines an existing index \
+                             (expected the next sequential index {})",
+                            var_nodes.len()
+                        )));
+                    } else {
+                        return Err(NlParseError::Parse(format!(
+                            "defined variable V{vi} is out of sequence (expected index {})",
+                            var_nodes.len()
+                        )));
+                    }
                 }
             }
             b'S' => {
@@ -2346,5 +2530,341 @@ mod tests {
     fn test_intdiv_opcode_refused_not_real_div() {
         // o55 intdiv: pre-fix rewrote to real Div (7 intdiv 2 -> 3.5 instead of 3).
         assert_unsupported(&nl_with_binary_obj("o55\n"), "intdiv", 55);
+    }
+
+    // ─── C-8: common opcodes o76/o77/o78 (power forms), o11/o12 (min/max),
+    //          o48 (atan2 — refuse), o35 (if — refuse) ─────────────────────
+    //
+    // Pre-fix, every one of these hit the `_ => UnknownOpcode` fallthrough and the
+    // parse aborted with a bare "unknown opcode" error, rejecting a large slice of
+    // AMPL/Pyomo-exported .nl (AMPL emits o77 for `x**2` routinely, o76 for `x**n`).
+    // Fixed opcodes now parse to the correct IR; genuinely unrepresentable ones
+    // (atan2, if) refuse loudly via UnsupportedOpcode (never silent misparse).
+
+    /// Build a single-objective .nl whose objective is an n-ary op over v0..v{n-1}.
+    /// `opcode` is e.g. "o11" (minlist) or "o12" (maxlist).
+    fn nl_with_nary_obj(opcode: &str, n: usize) -> String {
+        let mut s = String::new();
+        s.push_str("g3 1 1 0\n");
+        s.push_str(&format!(" {n} 0 1 0 0\n"));
+        s.push_str(" 0 1\n");
+        s.push_str(" 0 0\n");
+        s.push_str(&format!(" 0 {n} 0\n"));
+        s.push_str(" 0 0 0 1\n");
+        s.push_str(" 0 0\n");
+        s.push_str(" 0 0\n");
+        s.push_str(" 0 0\n");
+        s.push_str(" 0 0 0 0 0\n");
+        s.push_str("O0 0\n");
+        s.push_str(opcode);
+        s.push('\n');
+        s.push_str(&format!("{n}\n")); // n-ary count line
+        for i in 0..n {
+            s.push_str(&format!("v{i}\n"));
+        }
+        s.push_str("b\n");
+        for _ in 0..n {
+            s.push_str("3\n");
+        }
+        s
+    }
+
+    #[test]
+    fn test_o77_2pow_is_square_not_unknown() {
+        // o77 (OP2POW): unary `x^2`. Pre-fix: UnknownOpcode(77) -> parse fails.
+        // Post-fix: parses to Pow(v0, 2); (3)^2 = 9.
+        let model = parse_nl(&nl_with_unary_obj("o77\n")).expect("o77 must parse");
+        let val = model.evaluate_objective(&[3.0]);
+        assert!(
+            (val - 9.0).abs() < 1e-12,
+            "o77 x^2 at 3 must be 9, got {val}"
+        );
+    }
+
+    #[test]
+    fn test_o76_1pow_is_power_with_constant_exponent() {
+        // o76 (OP1POW): `base ^ const`. Stream: o76, <base expr>, n<const>.
+        // Build min x^3 as objective: o76 / v0 / n3. (2)^3 = 8.
+        let mut s = String::new();
+        s.push_str("g3 1 1 0\n");
+        s.push_str(" 1 0 1 0 0\n");
+        s.push_str(" 0 1\n");
+        s.push_str(" 0 0\n");
+        s.push_str(" 0 1 0\n");
+        s.push_str(" 0 0 0 1\n");
+        s.push_str(" 0 0\n");
+        s.push_str(" 0 0\n");
+        s.push_str(" 0 0\n");
+        s.push_str(" 0 0 0 0 0\n");
+        s.push_str("O0 0\n");
+        s.push_str("o76\n");
+        s.push_str("v0\n");
+        s.push_str("n3\n");
+        s.push_str("b\n");
+        s.push_str("3\n");
+        let model = parse_nl(&s).expect("o76 must parse");
+        let val = model.evaluate_objective(&[2.0]);
+        assert!(
+            (val - 8.0).abs() < 1e-12,
+            "o76 x^3 at 2 must be 8, got {val}"
+        );
+    }
+
+    #[test]
+    fn test_o78_cpow_is_constant_base_to_var_power() {
+        // o78 (OPCPOW): `const ^ exp`. Stream: o78, n<const>, <exp expr>.
+        // Build min 2^x: o78 / n2 / v0. 2^3 = 8.
+        let mut s = String::new();
+        s.push_str("g3 1 1 0\n");
+        s.push_str(" 1 0 1 0 0\n");
+        s.push_str(" 0 1\n");
+        s.push_str(" 0 0\n");
+        s.push_str(" 0 1 0\n");
+        s.push_str(" 0 0 0 1\n");
+        s.push_str(" 0 0\n");
+        s.push_str(" 0 0\n");
+        s.push_str(" 0 0\n");
+        s.push_str(" 0 0 0 0 0\n");
+        s.push_str("O0 0\n");
+        s.push_str("o78\n");
+        s.push_str("n2\n");
+        s.push_str("v0\n");
+        s.push_str("b\n");
+        s.push_str("3\n");
+        let model = parse_nl(&s).expect("o78 must parse");
+        let val = model.evaluate_objective(&[3.0]);
+        assert!(
+            (val - 8.0).abs() < 1e-12,
+            "o78 2^x at 3 must be 8, got {val}"
+        );
+    }
+
+    #[test]
+    fn test_o11_minlist_is_minimum() {
+        // o11 (MINLIST): n-ary min. min over {v0,v1,v2} at (5,2,8) = 2.
+        let model = parse_nl(&nl_with_nary_obj("o11", 3)).expect("o11 must parse");
+        let val = model.evaluate_objective(&[5.0, 2.0, 8.0]);
+        assert!((val - 2.0).abs() < 1e-12, "o11 min must be 2, got {val}");
+    }
+
+    #[test]
+    fn test_o12_maxlist_is_maximum() {
+        // o12 (MAXLIST): n-ary max. max over {v0,v1,v2} at (5,2,8) = 8.
+        let model = parse_nl(&nl_with_nary_obj("o12", 3)).expect("o12 must parse");
+        let val = model.evaluate_objective(&[5.0, 2.0, 8.0]);
+        assert!((val - 8.0).abs() < 1e-12, "o12 max must be 8, got {val}");
+    }
+
+    #[test]
+    fn test_o48_atan2_refused_not_misparsed() {
+        // o48 (atan2): binary; no Atan2 in the IR. Must refuse loudly rather than
+        // silently drop an operand or misuse single-arg atan.
+        assert_unsupported(&nl_with_binary_obj("o48\n"), "atan2", 48);
+    }
+
+    #[test]
+    fn test_o35_if_refused_not_misparsed() {
+        // o35 (OPIFnl): if-then-else; not representable. Refuse loudly.
+        // 3 operands (cond, then, else); the error aborts before they are consumed.
+        let mut s = String::new();
+        s.push_str("g3 1 1 0\n");
+        s.push_str(" 3 0 1 0 0\n");
+        s.push_str(" 0 1\n");
+        s.push_str(" 0 0\n");
+        s.push_str(" 0 3 0\n");
+        s.push_str(" 0 0 0 1\n");
+        s.push_str(" 0 0\n");
+        s.push_str(" 0 0\n");
+        s.push_str(" 0 0\n");
+        s.push_str(" 0 0 0 0 0\n");
+        s.push_str("O0 0\n");
+        s.push_str("o35\n");
+        s.push_str("v0\n");
+        s.push_str("v1\n");
+        s.push_str("v2\n");
+        s.push_str("b\n");
+        s.push_str("3\n");
+        s.push_str("3\n");
+        s.push_str("3\n");
+        assert_unsupported(&s, "if", 35);
+    }
+
+    // ─── C-7: defined variables (V segments) are inlined, not discarded ─────
+    //
+    // Pre-fix, a V segment was parsed then dropped (never pushed to `var_nodes`),
+    // so any later `v<idx>` reference to a defined var (idx >= n_vars) hit the
+    // "variable index out of range" error and the whole instance failed to parse.
+    // Post-fix, the defined var's expression (linear part + nonlinear body) is
+    // inlined into `var_nodes` so references resolve to the subexpression.
+
+    /// A .nl with one defined variable `V2 = 2*v0 + v1^2` (n_vars=2, so the
+    /// defined var occupies index 2), referenced by the objective as `min v2`.
+    ///   objective(x, y) = 2x + y^2
+    fn defined_var_nl() -> String {
+        let mut s = String::new();
+        s.push_str("g3 1 1 0\n");
+        s.push_str(" 2 0 1 0 0\n"); // 2 real vars, 0 cons, 1 obj
+        s.push_str(" 0 1\n"); // 0 nl cons, 1 nl obj
+        s.push_str(" 0 0\n");
+        s.push_str(" 0 2 0\n"); // 2 nl vars in objs
+        s.push_str(" 0 0 0 1\n");
+        s.push_str(" 0 0\n");
+        s.push_str(" 0 0\n");
+        s.push_str(" 0 0\n");
+        s.push_str(" 0 1 0 0 0\n"); // 1 common expr (defined var referenced in objs)
+                                    // V2: defined var, 1 linear term (2*v0), then nonlinear body v1^2.
+        s.push_str("V2 1 0\n");
+        s.push_str("0 2\n"); // linear part: coeff 2 on v0
+        s.push_str("o5\n"); // nonlinear body: pow
+        s.push_str("v1\n");
+        s.push_str("n2\n");
+        // O0: minimize, objective = v2 (the defined variable)
+        s.push_str("O0 0\n");
+        s.push_str("v2\n");
+        s.push_str("b\n");
+        s.push_str("3\n");
+        s.push_str("3\n");
+        s
+    }
+
+    #[test]
+    fn test_defined_variable_inlined_and_evaluated() {
+        // Pre-fix: parse_nl errors ("variable index 2 out of range").
+        // Post-fix: v2 inlines to 2*v0 + v1^2; at (x=3, y=4): 6 + 16 = 22.
+        let model = parse_nl(&defined_var_nl()).expect("defined-var .nl must parse");
+        let val = model.evaluate_objective(&[3.0, 4.0]);
+        assert!(
+            (val - 22.0).abs() < 1e-12,
+            "defined var 2*x + y^2 at (3,4) must be 22, got {val}"
+        );
+        // Independent-evaluation cross-check at two more points.
+        let v2 = model.evaluate_objective(&[0.0, 5.0]); // 0 + 25
+        assert!((v2 - 25.0).abs() < 1e-12, "at (0,5) expected 25, got {v2}");
+        let v3 = model.evaluate_objective(&[-1.0, 2.0]); // -2 + 4
+        assert!((v3 - 2.0).abs() < 1e-12, "at (-1,2) expected 2, got {v3}");
+    }
+
+    #[test]
+    fn test_defined_variable_chained_reference() {
+        // A defined var referencing an EARLIER defined var must resolve.
+        // n_vars=1 (v0). V1 = v0 + 1 (index 1). V2 = v1 * v1 (index 2, refs v1).
+        // objective = v2 = (v0 + 1)^2. At v0=3: 16.
+        let mut s = String::new();
+        s.push_str("g3 1 1 0\n");
+        s.push_str(" 1 0 1 0 0\n");
+        s.push_str(" 0 1\n");
+        s.push_str(" 0 0\n");
+        s.push_str(" 0 1 0\n");
+        s.push_str(" 0 0 0 1\n");
+        s.push_str(" 0 0\n");
+        s.push_str(" 0 0\n");
+        s.push_str(" 0 0\n");
+        s.push_str(" 0 2 0 0 0\n"); // 2 common exprs
+                                    // V1 = v0 + 1  (0 linear terms; nonlinear body o0 v0 n1)
+        s.push_str("V1 0 0\n");
+        s.push_str("o0\n");
+        s.push_str("v0\n");
+        s.push_str("n1\n");
+        // V2 = v1 * v1  (references the earlier defined var v1)
+        s.push_str("V2 0 0\n");
+        s.push_str("o2\n");
+        s.push_str("v1\n");
+        s.push_str("v1\n");
+        s.push_str("O0 0\n");
+        s.push_str("v2\n");
+        s.push_str("b\n");
+        s.push_str("3\n");
+        let model = parse_nl(&s).expect("chained defined-var .nl must parse");
+        let val = model.evaluate_objective(&[3.0]);
+        assert!(
+            (val - 16.0).abs() < 1e-12,
+            "(v0+1)^2 at 3 must be 16, got {val}"
+        );
+    }
+
+    // ─── C-9: objective-only nonlinear integer block when nlvo > nlvc ───────
+    //
+    // AMPL edge case (ex1252a): when more nonlinear vars live in objectives than
+    // constraints (nlvb < nlvc < nlvo), the objective-only nonlinear group is
+    // [nlvc, nlvo) and its integer tail is the LAST nlvoi of that group. The old
+    // `(nlvo - nlvb)`-sized formula placed the tail out of range, silently leaving
+    // those variables Continuous — relaxing integrality, enlarging the feasible set,
+    // and admitting a false-feasible incumbent below the true optimum. Locked here.
+    #[test]
+    fn test_nlvo_gt_nlvc_objective_only_integer_block_typed() {
+        // Header shape: nlvb=1 < nlvc=2 < nlvo=4, nlvoi=2 (last 2 of the obj-only
+        // group [2,4) are integer). n_vars=4. Expect vars 2,3 Integer; 0,1 Continuous.
+        let mut s = String::new();
+        s.push_str("g3 1 1 0\n");
+        s.push_str(" 4 1 1 0 0\n"); // 4 vars, 1 con, 1 obj
+        s.push_str(" 1 1\n"); // 1 nl con, 1 nl obj
+        s.push_str(" 0 0\n");
+        s.push_str(" 2 4 1\n"); // nlvc=2, nlvo=4, nlvb=1
+        s.push_str(" 0 0 0 1\n");
+        s.push_str(" 0 0 0 0 2\n"); // line 6: ... nlvoi=2 (obj-only nl integers)
+        s.push_str(" 4 4\n");
+        s.push_str(" 0 0\n");
+        s.push_str(" 0 0 0 0 0\n");
+        // O0: minimize v0 + v1 + v2 + v3 (nl so the vars register as nonlinear)
+        s.push_str("O0 0\n");
+        s.push_str("o54\n");
+        s.push_str("4\n");
+        s.push_str("v0\n");
+        s.push_str("v1\n");
+        s.push_str("v2\n");
+        s.push_str("v3\n");
+        // C0: nl part references v0,v1 (nlvc=2)
+        s.push_str("C0\n");
+        s.push_str("o0\n");
+        s.push_str("v0\n");
+        s.push_str("v1\n");
+        s.push_str("x4\n");
+        s.push_str("0 0\n");
+        s.push_str("1 0\n");
+        s.push_str("2 0\n");
+        s.push_str("3 0\n");
+        s.push_str("r\n");
+        s.push_str("1 10\n");
+        s.push_str("b\n");
+        s.push_str("0 0 5\n");
+        s.push_str("0 0 5\n");
+        s.push_str("0 0 5\n");
+        s.push_str("0 0 5\n");
+        let model = parse_nl(&s).expect("nlvo>nlvc .nl must parse");
+        assert_eq!(model.variables[0].var_type, VarType::Continuous, "v0");
+        assert_eq!(model.variables[1].var_type, VarType::Continuous, "v1");
+        assert_eq!(
+            model.variables[2].var_type,
+            VarType::Integer,
+            "v2 must be integer (obj-only nl integer tail); regression would leave it Continuous"
+        );
+        assert_eq!(model.variables[3].var_type, VarType::Integer, "v3");
+    }
+
+    // ─── Corpus regression: all in-repo MINLPLib .nl still parse ────────────
+    #[test]
+    fn test_minlplib_corpus_all_parse() {
+        // Zero-regression guard for the parser changes (C-7/C-8): every .nl in the
+        // 61-file corpus must still parse. Path is resolved relative to the crate.
+        let dir = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../python/tests/data/minlplib_nl"
+        );
+        let entries =
+            std::fs::read_dir(dir).unwrap_or_else(|e| panic!("cannot read corpus dir {dir}: {e}"));
+        let mut n_parsed = 0usize;
+        for entry in entries {
+            let path = entry.unwrap().path();
+            if path.extension().and_then(|e| e.to_str()) != Some("nl") {
+                continue;
+            }
+            let p = path.to_string_lossy().to_string();
+            parse_nl_file(&p).unwrap_or_else(|e| panic!("corpus file {p} failed to parse: {e}"));
+            n_parsed += 1;
+        }
+        assert!(
+            n_parsed >= 61,
+            "expected >= 61 corpus .nl, parsed {n_parsed}"
+        );
     }
 }
