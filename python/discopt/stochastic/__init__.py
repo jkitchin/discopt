@@ -11,6 +11,7 @@ Phase 0 ships the scenario layer, risk measures, and the extensive-form
 from __future__ import annotations
 
 from discopt.stochastic.extensive_form import ExtensiveForm, build_extensive_form
+from discopt.stochastic.lshaped import LShapedResult, solve_lshaped
 from discopt.stochastic.risk import CVaR, Expectation, MeanCVaR, RiskMeasure, chance_constraint
 from discopt.stochastic.scenario import Scenario, ScenarioSet
 
@@ -24,4 +25,6 @@ __all__ = [
     "chance_constraint",
     "ExtensiveForm",
     "build_extensive_form",
+    "LShapedResult",
+    "solve_lshaped",
 ]
