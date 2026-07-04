@@ -171,6 +171,17 @@ class Expression:
     def __eq__(self, other):
         return Constraint(self - _wrap(other), sense="==", rhs=0.0)
 
+    def __ne__(self, other):
+        # ``!=`` is not a valid optimization-constraint operator. Because
+        # ``__eq__`` is overridden to build a Constraint, Python's default
+        # ``__ne__`` would evaluate ``not <truthy Constraint>`` → ``False``
+        # *silently*, mis-encoding the user's intent (correctness issue C-11).
+        # Refuse loudly instead of silently transforming the model (CLAUDE.md §3).
+        raise TypeError(
+            "'!=' is not a valid constraint operator on modeling expressions. "
+            "Use '==', '<=', or '>=' to build a constraint."
+        )
+
     # ── Indexing for array variables ──
 
     def __getitem__(self, idx):
