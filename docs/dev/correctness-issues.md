@@ -121,7 +121,7 @@ in non-default configs; loud ingestion gaps. **P3** = hygiene.
 | C-33 | P0 | solver.py fallback | pure-continuous fallback certifies a nonconvex model's local optimum with `gap_certified=True` (= SC-1), DEFAULT path | fixed |
 | C-34 | P0 | gdp_reformulate | even-power bound over a zero-straddling base uses endpoint-only bounds (omits interior min at 0) → invalid aux box → false optimal (= FR-1), DEFAULT path | fixed |
 | C-35 | P1 | oa.py / gdpopt_loa | non-rigorous NLP failure → unconditional no-good cut → possible false infeasible/optimal (= OA-1, opt-in OA/LOA path) | fixed |
-| C-36 | P3 | convexity/interval.py | Python `interval_mul` yields NaN on 0·∞ (`RuntimeWarning: invalid value encountered in multiply`), same 0·∞ class as C-22 but a SEPARATE Python code path (`python/discopt/_jax/convexity/interval.py:171`); lost tightening, not unsound | open |
+| C-36 | P3 | convexity/interval.py | Python `interval_mul` yields NaN on 0·∞ (`RuntimeWarning: invalid value encountered in multiply`), same 0·∞ class as C-22 but a SEPARATE Python code path (`python/discopt/_jax/convexity/interval.py:171`); lost tightening, not unsound | fixed |
 
 ---
 
@@ -2473,7 +2473,7 @@ From the LP/dual-bound audit:
 
 ---
 
-## C-36 (P3) — Python `interval_mul` yields NaN on 0·∞ (separate path from C-22)
+## C-36 (P3, FIXED) — Python `interval_mul` yields NaN on 0·∞ (separate path from C-22)
 
 **Area:** `python/discopt/_jax/convexity/interval.py` (≈ line 171).
 **Class:** same `0·∞ → NaN` interval-arithmetic defect as C-22, but a **distinct
@@ -2511,3 +2511,47 @@ it is a separate module with its own tests and consumers.
 **Log:**
 - (filed) — surfaced during C-22 (#460) verification; carded P3 as the same 0·∞
   class on the Python interval path. Status `open`.
+- 2026-07-03 — CONFIRMED then FIXED (PR #465). Status `open` → `fixed`.
+  - **Repro (RED):** `Interval.point(0.0) * Interval.from_bounds(-inf, inf)` →
+    `[nan, nan]` with four `RuntimeWarning: invalid value encountered in multiply`
+    at `interval.py:171-174`; `[0,5]·[-inf,inf]` also `[nan,nan]` (should be
+    `[-inf,inf]`).
+  - **STEP 0 — consumer semantics (verdict: sound-but-weak, P3 HOLDS; no
+    escalation).** Audited every reachable convexity/certificate consumer of
+    `Interval`; each gates on `np.isfinite`, and `np.isfinite(NaN) is False`
+    *identically* to `±inf`, so a NaN Hessian endpoint forces abstention exactly
+    as an unbounded one does — no consumer treats NaN as finite/definite:
+    - `certificate.py:81` — `if not (np.all(np.isfinite(hess.lo)) and
+      np.all(np.isfinite(hess.hi))): return None` (abstain → treated non-convex).
+      The rank-1 fast path (`:90`) and 2×2 PSD path likewise guard on finiteness.
+    - `eigenvalue.py:101-102` `gershgorin_lambda_min` returns `-inf` on any
+      non-finite entry (`-inf >= -PSD_TOL` is False → never certifies convex);
+      `:124-125` `gershgorin_lambda_max` returns `+inf` (never certifies concave);
+      `psd_2x2_sufficient` `:156` guards on `isfinite` too.
+    Verdict: NaN and `±inf` are handled the same (UNKNOWN/abstain); the bug is
+    *lost tightening* (a consumer keeps its looser prior interval), never a wrong
+    verdict. P3 confirmed; no unsound path exists on this module.
+  - **Fix:** `interval.py::__mul__` now maps NaN corner products to `0` via a new
+    `_nan_corner_to_zero` helper (`np.nan_to_num(x, nan=0.0, posinf=inf,
+    neginf=-inf)` — replaces NaN only, leaves genuine ±∞ corners untouched) before
+    the min/max, under `np.errstate(invalid="ignore")`. NaN there can arise ONLY
+    from `0·±∞` (interval-convention value `0`); all other pairs are finite×finite
+    or genuine ±∞. `[0,0]·[-∞,∞] → [0,0]` (up to the module's ±1-ULP outward
+    round), `[0,5]·[-∞,∞] → [-∞,∞]`. Existing `_round_down`/`_round_up` kept.
+    `__truediv__`/`__pow__` inherit the fix (both route through `__mul__`; `__pow__`
+    n==2 special-case was already NaN-safe via its `zero_in` clamp — no change).
+  - **Regression test (RED→GREEN):** `TestC36MulZeroTimesInfinity` in
+    `python/tests/test_convexity_interval.py` (4 `@pytest.mark.smoke` sub-second
+    unit tests calling `__mul__` directly): the `[0,0]·entire → [0,0]` repro; the
+    `[0,5]·entire → [-∞,∞]` non-clamp case; a `warnings.simplefilter("error")`
+    guard proving the `RuntimeWarning` is GONE; and a grid property test over ±∞
+    endpoints / zero-width factors asserting never-NaN, `lo ≤ hi`, and rigorous
+    product containment (mirrors Rust `c22_interval_mul_never_nan_and_encloses…`).
+    All 4 fail on pre-fix code, pass after.
+  - **Gates:** `pytest -k "interval or convex or certif or curvature"` 771
+    passed / 5 skipped; `pytest -m smoke` 496 passed / 1 skipped (the 3
+    `test_c31_*` fails are a stale prebuilt `_rust.so` in the shared venv — those
+    tests hit the Rust FBBT path, not this Python module, and are green on `main`);
+    adversarial suite 10 passed; ruff + ruff-format clean; `incorrect_count = 0`;
+    the `RuntimeWarning: invalid value encountered in multiply` from `interval.py`
+    is gone. No Rust touched.
