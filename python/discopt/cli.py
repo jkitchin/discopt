@@ -7,7 +7,6 @@ Usage:
     discopt daemon {serve|stop|status}    # warm solve daemon (auto-spawned by solve)
     discopt convert input.gms output.nl
     discopt install-skills [--project-scope] [--dev] [--force]
-    discopt tutor [list|start|resume|next|reset|install] ...
 
 Developer-only commands (``lit-scan``, ``adversary``, ``search-arxiv``,
 ``search-openalex``, ``write-report``) live under ``discopt-dev`` in
@@ -475,7 +474,6 @@ _BUILTIN_COMMANDS = frozenset(
         "gams-daemon",
         "gams-verify",
         "install-skills",
-        "tutor",
         "help",
     }
 )
@@ -623,17 +621,13 @@ def main():
     )
     p_skills.set_defaults(func=_cmd_install_skills)
 
-    # The tutor subparser and plugin subcommands can pull heavy optional deps
+    # Plugin subcommands can pull heavy optional deps
     # (e.g. ``discopt.doe.cli`` ~0.4 s: streamlit/pandas), so register them
     # lazily -- only for their own command or when full help is requested. This
     # keeps every other command (notably ``discopt solve``) at the light CLI
     # floor; built-in commands never even scan the entry-point metadata.
     _argv1 = sys.argv[1] if len(sys.argv) > 1 else None
     _want_all = _argv1 in (None, "help", "-h", "--help")
-    if _want_all or _argv1 == "tutor":
-        from discopt.tutor import add_subparser as _add_tutor_subparser
-
-        _add_tutor_subparser(subparsers)
 
     plugin_runners = {}
     if _want_all or _argv1 not in _BUILTIN_COMMANDS:
@@ -665,10 +659,6 @@ def main():
     if args.command == "help":
         parser.print_help()
         return
-    if args.command == "tutor":
-        from discopt.tutor import run as _run_tutor
-
-        sys.exit(_run_tutor(args) or 0)
     runner = plugin_runners.get(args.command)
     if runner is not None:
         sys.exit(runner(args) or 0)

@@ -60,7 +60,7 @@ discopt followed a 4-phase development plan. Phases 1-4 are complete. Phases 5-7
 | Release engineering               | Done        | Published on PyPI, maturin build, CI auto-publish on tags |
 | Tiered Python test suite          | Done        | Fast PR-tier + full + integration markers (#69)           |
 | Examiner / KKT validator          | Done        | `Model.solve(validate=True)`, dual recovery (#55, #83)    |
-| Optimization course + tutor CLI   | Done        | 30-lesson curriculum + `discopt tutor` (#85)              |
+| Optimization course + tutor CLI   | Done        | 30-lesson curriculum + `discopt tutor` (#85); now the discopt-course plugin (#430) |
 
 ## Phase 5: Problem Class Coverage
 
