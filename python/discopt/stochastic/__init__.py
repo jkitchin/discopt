@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from discopt.stochastic.extensive_form import ExtensiveForm, build_extensive_form
 from discopt.stochastic.lshaped import LShapedResult, solve_lshaped
+from discopt.stochastic.ph import PHResult, progressive_hedging, quadratic_subproblem_solver
 from discopt.stochastic.risk import CVaR, Expectation, MeanCVaR, RiskMeasure, chance_constraint
 from discopt.stochastic.scenario import Scenario, ScenarioSet
 
@@ -27,4 +28,7 @@ __all__ = [
     "build_extensive_form",
     "LShapedResult",
     "solve_lshaped",
+    "PHResult",
+    "progressive_hedging",
+    "quadratic_subproblem_solver",
 ]

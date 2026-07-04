@@ -49,6 +49,7 @@ def solve_lshaped(
     recourse_builder,
     first_stage_cost: Expression | None = None,
     risk=None,
+    method: str = "auto",
     solve: bool = True,
     **benders_kwargs,
 ) -> LShapedResult:
@@ -59,10 +60,16 @@ def solve_lshaped(
     keyword arguments are forwarded to
     :func:`discopt.decomposition.solve_benders`.
 
+    ``method`` selects the per-node engine: ``"benders"`` (classical L-shaped, LP
+    recourse), ``"gbd"`` (Generalized Benders — **convex-nonlinear recourse**), or
+    ``"auto"`` (``solve_benders`` auto-dispatches to GBD when the model is nonlinear).
+
     Set ``solve=False`` to build the weighted extensive form and its decomposition
     structure without invoking the (backend-dependent) Benders solve — useful for
     inspecting or asserting the decomposition.
     """
+    if method not in ("auto", "benders", "gbd"):
+        raise ValueError(f"method must be 'auto', 'benders', or 'gbd', got {method!r}")
     risk = risk or Expectation()
     if not isinstance(risk, Expectation):
         raise NotImplementedError(
@@ -89,9 +96,14 @@ def solve_lshaped(
 
     result = None
     if solve:
-        from discopt.decomposition import solve_benders
+        if method == "gbd":
+            from discopt.decomposition import solve_gbd
 
-        result = solve_benders(model, structure=structure, **benders_kwargs)
+            result = solve_gbd(model, structure=structure, **benders_kwargs)
+        else:  # "auto" / "benders" — solve_benders auto-dispatches to GBD if nonlinear
+            from discopt.decomposition import solve_benders
+
+            result = solve_benders(model, structure=structure, **benders_kwargs)
 
     return LShapedResult(
         extensive_form=ef,
