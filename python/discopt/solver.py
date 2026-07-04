@@ -4292,6 +4292,16 @@ def solve_model(
     # single authoritative per-batch sweep below (any sentinel-without-proof node)
     # and consumed in the finalize else-branch.
     _nonrigorous_fathom = False
+    # #467 sub-bug #3: set True when the ROOT batch (iteration 0 — the whole
+    # feasible region) is rigorously proven infeasible (every root node carries a
+    # ``node_infeasible_mask`` empty-box / empty-relaxation certificate — the same
+    # rigor the terminal ``infeasible`` verdict already trusts). A soft incumbent
+    # accepted only within tolerance that lies inside a region the search RIGOROUSLY
+    # proved infeasible must NOT be certified ``optimal``; the terminal logic
+    # discards such an incumbent (unless it is itself rigorously feasible, which
+    # would mean the root proof over-tightened — then the incumbent stands and no
+    # false ``infeasible`` is emitted).
+    _root_rigorously_infeasible = False
 
     # Sense-derived negation flag for the internal (minimization) B&B. Unlike
     # ``_mc_negate`` below — which is only assigned correctly inside the
@@ -5748,6 +5758,25 @@ def solve_model(
                 result_lbs[i] = _INFEASIBILITY_SENTINEL
                 result_feas[i] = False
 
+        # #467 sub-bug #3: the ROOT batch covers the whole feasible region. If
+        # EVERY root node is rigorously infeasible-masked (empty box / empty
+        # relaxation over a finite box — the rigorous certificate, not a soft
+        # failure sentinel), the model is rigorously proven infeasible at the root.
+        # A within-tolerance-only incumbent found by the primal heuristic then lies
+        # inside a region the search proved infeasible; the terminal logic must not
+        # certify it ``optimal`` (ex7_3_6: FBBT proves the root empty by ~2e-6 > the
+        # 1e-6 FBBT tolerance, yet a pump point at ~1.2e-4 residual was certified).
+        # Gated on iteration 0 and n_batch >= 1 so it reflects the root, not a deep
+        # subtree; ``_nonrigorous_fathom`` guarantees only rigorous certificates are
+        # trusted for the eventual ``infeasible`` verdict.
+        if (
+            iteration == 0
+            and n_batch >= 1
+            and bool(np.all(node_infeasible_mask[:n_batch]))
+            and not _nonrigorous_fathom
+        ):
+            _root_rigorously_infeasible = True
+
         # --- Objective-gating priority branching (issue #184) ---
         # The global dual bound is the minimum over the open frontier, so it stays
         # pinned at a structural 0 until *every* shallow node has had the binaries
@@ -6760,6 +6789,58 @@ def solve_model(
         sol_array, obj_val = incumbent
         # Filter out bogus incumbents from infeasible NLP relaxations
         if obj_val >= _SENTINEL_THRESHOLD:
+            incumbent = None
+
+    # #467 sub-bug #3: rigorous infeasibility proof wins over a soft incumbent.
+    # When the root (whole feasible region) was rigorously proven infeasible, an
+    # incumbent is only trustworthy if it is ITSELF rigorously feasible (at the
+    # solver's constraint-feasibility tolerance, evaluated over ALL constraints).
+    # If it is not, it is a spurious primal-heuristic point inside a region the
+    # search proved empty — discard it so control falls to the terminal
+    # infeasibility/unknown logic below (which reports ``infeasible`` for a
+    # rigorous proof, ``unknown`` for a non-rigorous one). If the incumbent IS
+    # rigorously feasible, the root proof must have over-tightened: keep the
+    # incumbent and NEVER report ``infeasible`` (guards the worst-class error, a
+    # false infeasible on a truly-feasible model).
+    if incumbent is not None and _root_rigorously_infeasible:
+        # Verify against the ORIGINAL (pre-reform) constraints. The factorable
+        # reform rewrites the model in terms of lifted aux variables; an incumbent
+        # can satisfy every reformed constraint (the aux defining equalities plus
+        # the rewritten bodies) while violating an ORIGINAL constraint by more than
+        # tolerance (ex7_3_6: reformed set feasible at 1e-4, but original C0 is
+        # violated by ~1.2e-4). Checking the reformed ``evaluator`` would mask that,
+        # so use the pre-reform model over the incumbent's original-variable slice
+        # (the first ``_prereform_nvars`` flat entries — aux columns are appended
+        # after the originals). When no reform ran, ``evaluator``/``cl_list`` ARE
+        # the original constraints, so fall back to them.
+        _inc_feasible = True
+        try:
+            if _prereform_model is not None:
+                _pf_eval = _make_evaluator(_prereform_model)
+                _pf_cl, _pf_cu = _infer_constraint_bounds(_prereform_model, _pf_eval)
+                if _pf_cl:
+                    _inc_feasible = _check_constraint_feasibility(
+                        _pf_eval,
+                        np.array(sol_array)[:_prereform_nvars],
+                        _pf_cl,
+                        _pf_cu,
+                    )
+            elif cl_list:
+                _inc_feasible = _check_constraint_feasibility(
+                    evaluator, np.array(sol_array), cl_list, cu_list
+                )
+        except Exception as _pf_exc:  # pragma: no cover - defensive
+            # If the original-model re-check cannot be built, be conservative and
+            # do NOT discard the incumbent (never risk a false infeasible).
+            logger.debug("prereform incumbent re-check skipped: %s", _pf_exc)
+            _inc_feasible = True
+        if not _inc_feasible:
+            logger.debug(
+                "Discarding within-tolerance-only incumbent (obj=%.6g): the root was "
+                "rigorously proven infeasible and this point violates the ORIGINAL "
+                "constraints beyond tolerance (#467 sub-bug #3).",
+                obj_val,
+            )
             incumbent = None
 
     if incumbent is not None:

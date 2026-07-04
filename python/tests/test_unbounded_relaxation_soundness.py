@@ -227,3 +227,115 @@ def test_467_finite_box_control_still_certifies_optimal():
         f"finite-box control missed the true optimum 0.0: obj={r.objective}"
     )
     assert getattr(r, "gap_certified", False), "finite-box control lost gap_certified"
+
+
+# ---------------------------------------------------------------------------
+# #467 sub-bug #3: a rigorous infeasibility proof must win over a soft,
+# within-tolerance-only incumbent. Differential — BOTH directions:
+#   (a) genuinely INFEASIBLE + a near-boundary pump incumbent -> NOT optimal.
+#   (b) genuinely FEASIBLE with a within-tolerance boundary optimum -> stays
+#       optimal/feasible; the fix must NEVER flip it to infeasible (the
+#       worst-class error: a false infeasible on a truly-feasible model).
+# ---------------------------------------------------------------------------
+
+
+def _feasible_boundary_model():
+    """Feasible: minimize (x-1)^2+(y-1)^2 s.t. x+y<=2, x,y in [0,2]. The global
+    optimum (1,1) sits ON the constraint boundary, so the incumbent is accepted
+    only within tolerance — exactly the shape the fix must NOT reject."""
+    m = discopt.Model("feas_boundary")
+    x = m.continuous("x", lb=0.0, ub=2.0)
+    y = m.continuous("y", lb=0.0, ub=2.0)
+    m.subject_to(x + y <= 2.0)
+    m.minimize((x - 1.0) ** 2 + (y - 1.0) ** 2)
+    return m
+
+
+def _feasible_bilinear_boundary_model():
+    """Feasible bilinear: minimize x+y s.t. x*y>=4, x,y in [1,3]. Optimum on the
+    x*y=4 boundary (e.g. x=y=2). Guards against a false infeasible when a
+    nonlinear constraint is active at the optimum."""
+    m = discopt.Model("feas_bilinear")
+    x = m.continuous("x", lb=1.0, ub=3.0)
+    y = m.continuous("y", lb=1.0, ub=3.0)
+    m.subject_to(x * y >= 4.0)
+    m.minimize(x + y)
+    return m
+
+
+def _infeasible_bilinear_model():
+    """Infeasible: x*y<=1 with x,y in [2,3] (so x*y in [4,9] > 1). FBBT proves the
+    box empty; there is no feasible point."""
+    m = discopt.Model("infeas_bilinear")
+    x = m.continuous("x", lb=2.0, ub=3.0)
+    y = m.continuous("y", lb=2.0, ub=3.0)
+    m.subject_to(x * y <= 1.0)
+    m.minimize(x + y)
+    return m
+
+
+@pytest.mark.smoke
+def test_467sub3_feasible_boundary_not_flipped_to_infeasible():
+    """(b) false-infeasible guard: a feasible model with a within-tolerance
+    boundary optimum must stay optimal/feasible — NEVER infeasible."""
+    r = _feasible_boundary_model().solve(time_limit=6.0, daemon=False)
+    assert r.status != "infeasible", (
+        f"false infeasible on a truly-feasible model: status={r.status} obj={r.objective}"
+    )
+    assert r.objective is not None and abs(r.objective) <= 1e-3, (
+        f"feasible boundary model lost its optimum: status={r.status} obj={r.objective}"
+    )
+
+
+@pytest.mark.smoke
+def test_467sub3_feasible_bilinear_boundary_not_flipped_to_infeasible():
+    """(b) false-infeasible guard with an active NONLINEAR constraint at the
+    optimum. Must not be reported infeasible."""
+    r = _feasible_bilinear_boundary_model().solve(time_limit=6.0, daemon=False)
+    assert r.status != "infeasible", (
+        f"false infeasible on a truly-feasible bilinear model: status={r.status} obj={r.objective}"
+    )
+    assert r.objective is not None and r.objective <= 4.0 + 1e-2, (
+        f"feasible bilinear model lost its optimum (~4.0): status={r.status} obj={r.objective}"
+    )
+
+
+@pytest.mark.smoke
+def test_467sub3_infeasible_bilinear_never_optimal():
+    """(a) a rigorously infeasible model must NEVER be certified optimal. Either
+    infeasible (rigorous) or a resource-limited non-optimal status is acceptable;
+    a false optimal is not."""
+    r = _infeasible_bilinear_model().solve(time_limit=6.0, daemon=False)
+    assert r.status != "optimal", (
+        f"rigorously-infeasible model falsely certified optimal: status={r.status} "
+        f"obj={r.objective}"
+    )
+
+
+@pytest.mark.slow
+def test_467sub3_ex7_3_6_not_false_optimal():
+    """(a) the real repro (MINLPLib ex7_3_6, oracle =inf=): FBBT proves the root
+    empty by ~2e-6 while a feasibility-pump point at ~1.2e-4 original-constraint
+    residual was previously certified ``optimal``. The fix must make the verdict
+    NOT optimal (infeasible with enough budget; otherwise time_limit/unknown —
+    both acceptable). Skips if the instance is not cached locally."""
+    import os as _os
+
+    nl = _os.path.expanduser("~/.cache/discopt/minlplib/current/nl/ex7_3_6.nl")
+    if not _os.path.exists(nl):
+        pytest.skip("ex7_3_6.nl not cached locally")
+    from discopt.modeling.core import from_nl
+
+    r = from_nl(nl).solve(time_limit=20.0, daemon=False)
+    assert r.status != "optimal", (
+        f"ex7_3_6 (infeasible) falsely certified optimal: status={r.status} obj={r.objective}"
+    )
+    # The rigorous outcome is ``infeasible`` (a certified conclusion — for which
+    # gap_certified=True is correct). A resource-limited ``time_limit``/``unknown``
+    # is also acceptable (not a false optimal). What must never happen: an
+    # ``optimal``, or an ``infeasible`` verdict that still reports a feasible point.
+    assert r.status in ("infeasible", "time_limit", "unknown"), (
+        f"ex7_3_6 unexpected status {r.status} (obj={r.objective})"
+    )
+    if r.status == "infeasible":
+        assert r.objective is None, f"ex7_3_6 reported infeasible with an objective {r.objective}"
