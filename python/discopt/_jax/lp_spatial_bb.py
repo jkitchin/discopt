@@ -131,7 +131,16 @@ def _separate_node_cuts(A, b, bounds, x, ncol, c, max_cuts=12):
         gc = _separate_gomory_cuts(lp, xv, ncol, list(range(ncol)), max_cuts=max_cuts)
         if gc is not None:
             for i in range(len(gc[1])):  # GMI returns coeffs·x >= rhs -> negate to <=
-                cuts.append((-np.asarray(gc[0][i])[:ncol], -float(gc[1][i])))
+                row = -np.asarray(gc[0][i])[:ncol]
+                # GMI validity holds only up to machine precision (gomory.rs:31); the
+                # raw crossover vertex the cut separates carries ~1e-12 float error, so
+                # a cut whose boundary passes through a feasible integer point could
+                # shave it. Relax the <= rhs outward by the same safe margin every
+                # other GMI consumer uses (solver.py _augment_lpdata_with_gomory_cuts,
+                # cmir_cuts.py) — C-10. Sound: it only ever moves the cut AWAY from the
+                # feasible region, never removing a feasible point.
+                margin = 1e-7 * (1.0 + float(np.abs(row).sum()))
+                cuts.append((row, -float(gc[1][i]) + margin))
     except Exception:
         pass
     # complemented-MIR (multi-row aggregation)
