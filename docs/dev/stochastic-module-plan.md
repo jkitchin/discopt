@@ -217,6 +217,16 @@ engine change carries a dedicated differential test.
 
 ## 7. Documentation & examples
 
+> **✅ DONE** — `docs/notebooks/stochastic_programming.ipynb` ships: motivation
+> (two-stage recourse, distributional sibling of RO), a worked newsvendor extensive
+> form, CVaR + chance-constraint risk measures, the L-shaped decomposition, progressive
+> hedging (converges to the expected-value decision), and SAA statistical bounds — all
+> code cells execute **solver-free** (verified end-to-end in sequence), with `{cite:p}`
+> citations in every markdown cell. Registered in `docs/_toc.yml`; `references.bib`
+> entries added (Birge–Louveaux, Kall–Wallace, Van Slyke–Wets, Rockafellar–Uryasev,
+> Rockafellar–Wets, Mak–Morton–Wood, Shapiro–Dentcheva–Ruszczyński). The
+> `jupyter-book build` zero-warning check runs in CI (not installed locally).
+
 Per the repo's Jupyter Book policy (CLAUDE.md → *Documentation*), the module ships
 user-facing docs, worked examples, and citations that build with **zero warnings**,
 and the examples are pinned by a test so they cannot rot.
