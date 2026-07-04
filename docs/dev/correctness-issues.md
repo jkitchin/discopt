@@ -104,7 +104,7 @@ in non-default configs; loud ingestion gaps. **P3** = hygiene.
 | C-8 | P2 | .nl parser | common opcodes unhandled (o76/o77/o78/o48/o11/o12/o35) | open |
 | C-9 | P2 | .nl parser | nlvo>nlvc integer-block classification unverified | open |
 | C-10 | P2 | lp_spatial cuts | GMI cuts appended without rhs safety margin (opt-in path) | open |
-| C-3 | P2 | solver.py incumbent | unrounded integer incumbent survives if terminal polish throws | open |
+| C-3 | P2 | solver.py incumbent | unrounded integer incumbent survives if terminal polish throws | fixed |
 | C-11 | P2 | modeling API | missing `__ne__` → `x != y` silently evaluates False | open |
 | C-22 | P3 | fbbt.rs interval | `interval_mul` NaN endpoints on 0·∞ (lost tightening, not unsound) | open |
 | C-23 | P1 | mccormick.py | ESCALATED (was P3): `relax_div` produces an invalid convex underestimator (cv > f) for **nonlinear** denominators (`1/(x*y)` cv=1.334 > true 1.0) — the "harmless" label held only for variable/affine denominators; `_relax_reciprocal` also mislabels concavity for negative denominators (= DIV-1) | fixed |
@@ -1227,7 +1227,51 @@ minimum round-and-verify on the polish exception path before reporting.
 exactly-integral integer variables and passes feasibility at standard tol;
 standing gates pass.
 
-**Log:** —
+**Log:**
+- 2026-07-03 — **CONFIRMED then FIXED.** Static confirm: `tree.inject_incumbent`
+  (`tree_manager.rs:724`) stores the solution vector verbatim after only an
+  objective-improvement check — no integrality snap — and the warm-start /
+  node-injection gates accept any coordinate within `1e-5` of an integer. The
+  reported `x_dict` is built from that raw vector at each finalizer; the terminal
+  KKT polish rounds integers only *inside* its own accept branch, so if the polish
+  raises / returns non-OPTIMAL / is not adopted, the fractional coordinate is
+  certified. **Dynamic repro** (fails-before): a MIQP warm-started with
+  `n=2.999997`, terminal polish monkeypatched to raise → reported `n =
+  2.999999999997271` (residual 2.7e-12, NOT integral); with the fix → `n = 3.0`
+  exactly. Verified fail-before/pass-after by stashing the fix.
+- **Fix** (`solver.py`): new `_round_incumbent_integers(sol_flat, int_offsets,
+  int_sizes, evaluator=None, cl_list=None, cu_list=None)` helper snaps every
+  discrete coordinate *within the `1e-5` integrality tol* of an integer to that
+  integer (a perturbation no larger than the tol the point already satisfied),
+  leaves genuinely-fractional coordinates untouched (snapping them would fabricate
+  an unproven point), and — when an evaluator + constraint bounds are supplied —
+  re-verifies the rounded point at `1e-4`; it returns `(rounded, feasible)` and the
+  caller adopts the rounded point only when `feasible` (else keeps the
+  already-verified unrounded point, so no infeasible "integral" point is ever
+  certified). Wired into **all four** incumbent finalizers: `solve_model`,
+  `_solve_nlp_bb` (both with the constraint re-check), and `_solve_milp_bb` /
+  `_solve_miqp_bb` (integers are branch-fixed to `[k,k]` before each node solve, so
+  a stored `k±ε` is a numeric artifact and rounding to `k` cannot move a linear row
+  by more than the integrality tol — documented at each site). No safety mechanism
+  weakened; the round-and-verify is strictly additive over the existing polish.
+- **Regression test** (`python/tests/test_c3_incumbent_rounding.py`, all
+  `@pytest.mark.smoke`, fail-before/pass-after verified by stashing the fix):
+  `test_c3_round_incumbent_snaps_near_integral` (in-tol snap, input not mutated,
+  continuous untouched), `test_c3_round_incumbent_leaves_genuinely_fractional_untouched`
+  (a 2.4 is left alone — never fabricate an unproven point),
+  `test_c3_round_incumbent_rejects_when_rounding_breaks_feasibility` (rounding that
+  violates a constraint returns `feasible=False` so the caller must not adopt), and
+  the end-to-end `test_c3_fractional_integer_does_not_survive_polish_failure`
+  (polish forced to raise + near-integral incumbent injected → reported integer is
+  exactly integral). The first three encode the *class* (round-and-verify contract)
+  by calling the helper directly, sub-second.
+- **Gates:** `pytest -m smoke` 482 passed / 1 skipped / 0 failed; adversarial
+  `test_adversarial_recent_fixes.py -m slow` 10 passed; the incumbent/solver/
+  certif/gap/bound selection 727 passed / 2 xfailed / 0 failed;
+  `test_c3_incumbent_rounding.py` 4 passed. `ruff check` + `ruff format --check`
+  clean; `pre-commit run mypy` passed. No Rust touched. `incorrect_count`
+  unchanged (0 failures; no correctness assertion weakened). PR: __PR__.
+**Status:** open → fixed.
 
 ---
 

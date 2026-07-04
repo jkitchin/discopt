@@ -945,6 +945,62 @@ def _is_integer_feasible_solution(x, int_offsets, int_sizes, tol=1e-5):
     return True
 
 
+def _round_incumbent_integers(
+    sol_flat,
+    int_offsets,
+    int_sizes,
+    evaluator=None,
+    cl_list=None,
+    cu_list=None,
+    integrality_tol=1e-5,
+    feas_tol=1e-4,
+):
+    """Snap near-integral discrete coordinates of a reported incumbent to exact
+    integers, verifying the rounded point stays feasible.
+
+    C-3: the batched JAX IPM leaves integer columns a few digits short of exact
+    (e.g. ``2.999997``); such a point still passes the ``1e-5`` integrality gate
+    at injection and is stored verbatim as the tree incumbent. The terminal KKT
+    polish / dual-recovery re-solve normally rounds and re-solves it, but that
+    step is *best-effort and guarded* — if it raises, is skipped, or returns a
+    non-adopted result, the raw near-integral coordinates are reported as-is,
+    yielding a certified "optimal" whose integer variables are fractional.
+
+    This rounds every discrete coordinate that is within ``integrality_tol`` of
+    an integer to that integer (a perturbation no larger than the integrality
+    tolerance the point already satisfied) and, when an evaluator + constraint
+    bounds are supplied, checks the rounded point against the constraints at
+    ``feas_tol``. A coordinate that is *not* within tolerance of any integer is
+    left untouched — snapping a genuinely fractional value would fabricate a
+    point the search never proved feasible.
+
+    Returns ``(rounded, feasible)``:
+      * ``rounded`` — a copy of ``sol_flat`` with in-tolerance integer columns
+        snapped exactly. ``sol_flat`` is never mutated.
+      * ``feasible`` — ``True`` if no evaluator was supplied (nothing to check)
+        or the rounded point satisfies the constraints within ``feas_tol``;
+        ``False`` if rounding broke feasibility. The caller must not certify a
+        rounded point that reports ``False``.
+    """
+    rounded = np.asarray(sol_flat, dtype=float).copy()
+    changed = False
+    for off, sz in zip(int_offsets, int_sizes):
+        for j in range(off, off + int(sz)):
+            xj = rounded[j]
+            if not np.isfinite(xj):
+                continue
+            nearest = round(float(xj))
+            if xj != nearest and abs(xj - nearest) <= integrality_tol:
+                rounded[j] = float(nearest)
+                changed = True
+    if not changed:
+        return rounded, True
+    if evaluator is None or not cl_list:
+        return rounded, True
+    feasible = _check_constraint_feasibility(evaluator, rounded, cl_list, cu_list, tol=feas_tol)
+    return rounded, feasible
+
+
 def _structural_linear_row_mask(model, sizes, m):
     """Boolean mask (length ``m``) of Jacobian rows whose body is structurally affine.
 
@@ -6693,6 +6749,18 @@ def solve_model(
 
     if incumbent is not None:
         sol_flat = np.array(sol_array)
+        # C-3: snap near-integral discrete coordinates to exact integers before
+        # reporting. The tree incumbent can carry a coordinate a few digits shy
+        # of integral (it passed the 1e-5 injection gate); the terminal polish
+        # below rounds+re-solves it, but is best-effort — if it raises or is not
+        # adopted the raw fractional value would be certified. Round up front so
+        # the reported point is exactly integral regardless of the polish
+        # outcome, only when the rounded point stays feasible.
+        _rounded_inc, _rounded_feas = _round_incumbent_integers(
+            sol_flat, int_offsets, int_sizes, evaluator, cl_list, cu_list
+        )
+        if _rounded_feas:
+            sol_flat = _rounded_inc
         x_dict = _unpack_solution(model, sol_flat)
 
         # Refine the incumbent's continuous variables with a KKT-accurate
@@ -7933,6 +8001,14 @@ def _solve_nlp_bb(
 
     if incumbent is not None:
         sol_flat = np.array(sol_array)
+        # C-3: snap near-integral discrete coordinates to exact integers before
+        # reporting; the dual-recovery re-solve below is best-effort and does
+        # not guarantee the reported primal is rounded (see helper docstring).
+        _rounded_inc, _rounded_feas = _round_incumbent_integers(
+            sol_flat, int_offsets, int_sizes, evaluator, cl_list, cu_list
+        )
+        if _rounded_feas:
+            sol_flat = _rounded_inc
         x_dict = _unpack_solution(model, sol_flat)
 
         # Recover relaxation duals at the incumbent by re-solving the NLP with
@@ -11569,6 +11645,15 @@ def _solve_milp_bb(
 
     if incumbent is not None:
         sol_flat = np.array(sol_array)
+        # C-3: snap near-integral discrete coordinates to exact integers. In the
+        # MILP path each integer was branch-fixed to [k, k] before the node LP
+        # solved, so a stored k±ε is a numeric artifact and rounding to k
+        # restores exactly the point the LP was solving — it cannot move a
+        # linear row by more than the integrality tol. The dual-recovery
+        # re-solve does not round the reported primal, so round here.
+        _rounded_inc, _rounded_feas = _round_incumbent_integers(sol_flat, int_offsets, int_sizes)
+        if _rounded_feas:
+            sol_flat = _rounded_inc
         x_dict = _unpack_solution(model, sol_flat)
 
         # Recover relaxation duals at the integer-feasible incumbent by
@@ -11966,6 +12051,13 @@ def _solve_miqp_bb(
 
     if incumbent is not None:
         sol_flat = np.array(sol_array)
+        # C-3: snap near-integral discrete coordinates to exact integers (see the
+        # MILP-BB path). Integers are branch-fixed before each node QP solve, so
+        # rounding a stored k±ε restores the fixed point; the dual-recovery
+        # re-solve does not round the reported primal.
+        _rounded_inc, _rounded_feas = _round_incumbent_integers(sol_flat, int_offsets, int_sizes)
+        if _rounded_feas:
+            sol_flat = _rounded_inc
         x_dict = _unpack_solution(model, sol_flat)
 
         # Recover relaxation duals at the integer-feasible incumbent by
