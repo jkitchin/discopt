@@ -55,6 +55,16 @@ def _round_up(x: Number) -> np.ndarray:
     return np.nextafter(x, np.float64(np.inf))
 
 
+def _nan_corner_to_zero(x: Number) -> np.ndarray:
+    """Replace ``NaN`` corner products with ``0``, preserving ±inf (C-36).
+
+    Used by :meth:`Interval.__mul__`, where a NaN corner can arise *only*
+    from ``0 * ±∞``, whose interval-convention value is ``0``. ``±inf`` is
+    left untouched so genuine unbounded corners still dominate the min/max.
+    """
+    return np.nan_to_num(x, nan=0.0, posinf=np.inf, neginf=-np.inf)
+
+
 # ──────────────────────────────────────────────────────────────────────
 # Interval
 # ──────────────────────────────────────────────────────────────────────
@@ -168,10 +178,25 @@ class Interval:
         other = _as_interval(other)
         # The four corner products enclose the result on any sign
         # combination; pick element-wise min/max to handle all cases.
-        a = self.lo * other.lo
-        b = self.lo * other.hi
-        c = self.hi * other.lo
-        d = self.hi * other.hi
+        #
+        # A finite ``0`` endpoint times an infinite endpoint gives
+        # ``0 * ±∞ = NaN`` in IEEE-754, and ``np.minimum``/``np.maximum``
+        # then propagate that NaN, collapsing the interval to ``[NaN, NaN]``
+        # (C-36). By the interval-multiplication convention the product of a
+        # zero factor with any interval — including an unbounded one — is
+        # ``0``, so we map those NaN corners to ``0`` before the min/max.
+        # NaN can arise here *only* from ``0 * ±∞``; every other operand pair
+        # is finite×finite (never NaN) or a genuine ±∞ product, so the
+        # substitution never masks a real value. The result stays a rigorous
+        # outer enclosure that never excludes a point: ``[0,0]·[−∞,∞] = [0,0]``
+        # (correct) while ``[0,5]·[−∞,∞] = [−∞,∞]`` (the ±∞ corners still
+        # dominate). Genuine ±∞ corners are left untouched — only NaN is
+        # replaced.
+        with np.errstate(invalid="ignore"):
+            a = _nan_corner_to_zero(self.lo * other.lo)
+            b = _nan_corner_to_zero(self.lo * other.hi)
+            c = _nan_corner_to_zero(self.hi * other.lo)
+            d = _nan_corner_to_zero(self.hi * other.hi)
         lo = np.minimum(np.minimum(a, b), np.minimum(c, d))
         hi = np.maximum(np.maximum(a, b), np.maximum(c, d))
         return Interval(_round_down(lo), _round_up(hi))
