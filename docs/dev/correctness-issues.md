@@ -108,7 +108,7 @@ in non-default configs; loud ingestion gaps. **P3** = hygiene.
 | C-11 | P2 | modeling API | missing `__ne__` → `x != y` silently evaluates False | fixed |
 | C-22 | P3 | fbbt.rs interval | `interval_mul` NaN endpoints on 0·∞ (lost tightening, not unsound) | fixed |
 | C-23 | P1 | mccormick.py | ESCALATED (was P3): `relax_div` produces an invalid convex underestimator (cv > f) for **nonlinear** denominators (`1/(x*y)` cv=1.334 > true 1.0) — the "harmless" label held only for variable/affine denominators; `_relax_reciprocal` also mislabels concavity for negative denominators (= DIV-1) | fixed |
-| C-24 | P3 | mccormick.py | secants produce NaN on infinite bounds; soundness leans on downstream filters | open |
+| C-24 | P3 | mccormick.py | secants produce NaN on infinite bounds; soundness leans on downstream filters | fixed |
 | C-12 | P3 | .nl parser | range-split renumbers constraints vs source indices | fixed (documented) |
 | C-25 | P1 | nn/formulations | scaling + bound-propagation domain mismatch cuts the true optimum on scaled embedded NNs | in progress (nn-module-plan T-N0.2) |
 | C-26 | P1 | nn/tree_ensemble | tree big-M invalid for out-of-box thresholds → cuts feasible points | in progress (nn-module-plan T-N0.3) |
@@ -1622,7 +1622,34 @@ non-finite, at the `_secant`/envelope level rather than relying on callers.
 NaN; grep-audit that no caller special-cases NaN envelopes anymore; standing gates
 pass.
 
-**Log:** —
+**Log:** 2026-07-03 — CONFIRMED and FIXED (status open→fixed, PR #462).
+Repro (pre-fix): `_secant(x²,x=0,lb=−2,ub=+∞)=NaN`; `relax_square`/`relax_exp`/
+`relax_cosh` return `cc=NaN` on any half-infinite box; `relax_bilinear` with an
+∞ factor bound returns `cv=NaN`; `relax_pow` odd on `[−2,+∞)` returns NaN. A NaN
+is not a valid envelope — every `cv≤f` / `f≤cc` soundness comparison is False for
+NaN, so an unguarded consumer silently gets an unsafe bound.
+Fix (envelope level, per the sketch): `_secant` gained a `fallback` arg and
+returns it (not NaN) whenever either bound is non-finite; every call site passes
+the sign matching its role (`+∞` for the concave-overestimator `cc`, `−∞` for the
+convex-underestimator `cv`), so the envelope degrades to the sound no-information
+bracket `−∞ ≤ f ≤ +∞`. `relax_bilinear` replaces its whole envelope with
+`(−∞,+∞)` when any factor bound is non-finite (its NaN came from `inf−inf` in the
+affine terms, not from `_secant`). `relax_div`/`_relax_reciprocal` inherit the
+fix through `relax_bilinear` and the reciprocal's finite `1/±∞→0` bounds; the
+sin/cos wide-interval path already returned `[−1,1]` and is unchanged. Curvature
+regimes (C-32) and division math (C-23) left untouched to avoid collision — only
+the ±∞-vs-NaN behaviour changed. Verified: finite random sub-box soundness for
+all univariate + bilinear + odd-power relaxations unchanged (0 crossings, 0 NaN);
+half-infinite boxes now bracket at all sampled interior points with 0 NaN.
+On the downstream filters: the `isfinite` guards in `mccormick_nlp.py`/
+`mccormick_lp.py` are NOT dead after this fix — they still (correctly) drop the
+distinct *singularity* NaN class (`1/(x³·sin x)` at wide bounds) that has nothing
+to do with infinite bounds; removing them would weaken a real safety guard
+(CLAUDE.md §1/§3), so they stay. Regression test:
+`python/tests/test_c24_infinite_bound_envelope.py` (5 `@pytest.mark.smoke` cases,
+sub-second, direct primitive calls) — fails-before (5 red on pre-fix) /
+passes-after. Encodes the class (every secant-using primitive + bilinear + power),
+not a named instance.
 
 ---
 

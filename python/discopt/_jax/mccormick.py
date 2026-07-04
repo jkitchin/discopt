@@ -20,10 +20,20 @@ import jax.numpy as jnp
 # ---------------------------------------------------------------------------
 
 
-def _secant(f, x, lb, ub):
+def _secant(f, x, lb, ub, fallback=jnp.inf):
     """Secant line of f between (lb, f(lb)) and (ub, f(ub)) evaluated at x.
 
-    When lb == ub, falls back to f(x) to avoid division by zero.
+    When ``lb == ub``, falls back to ``f(x)`` to avoid division by zero.
+
+    When either bound is non-finite the secant is undefined
+    (``slope = (f(ub) - f(lb)) / (ub - lb)`` becomes ``inf/inf`` = ``NaN``): a
+    secant is only a valid envelope over a *bounded* interval. Rather than leak a
+    NaN (which is not a valid over-/under-estimator and silently defeats every
+    downstream ``cv <= f`` / ``f <= cc`` soundness check), we return an explicit
+    *no-information* value ``fallback``. Callers pass ``+inf`` when the secant
+    plays the concave-overestimator (``cc``) role and ``-inf`` when it plays the
+    convex-underestimator (``cv``) role, so the resulting envelope still brackets
+    ``f`` (``-inf <= f <= +inf``) without fabricating a finite bound. See C-24.
     """
     f_lb = f(lb)
     f_ub = f(ub)
@@ -35,7 +45,10 @@ def _secant(f, x, lb, ub):
     slope = (f_ub - f_lb) / safe_width
     line = f_lb + slope * (x - lb)
     # Degenerate case: lb ≈ ub -> just return f(x)
-    return jnp.where(degenerate, f(x), line)
+    line = jnp.where(degenerate, f(x), line)
+    # Non-finite bound: the secant carries no information -> explicit fallback.
+    both_finite = jnp.isfinite(lb) & jnp.isfinite(ub)
+    return jnp.where(both_finite, line, fallback)
 
 
 # ---------------------------------------------------------------------------
@@ -66,6 +79,15 @@ def relax_bilinear(x, y, x_lb, x_ub, y_lb, y_ub):
     # bound at interior points; clamping tightens the relaxation.
     both_nonneg = (x_lb >= 0.0) & (y_lb >= 0.0)
     cv = jnp.where(both_nonneg, jnp.maximum(cv, x_lb * y_lb), cv)
+
+    # The McCormick envelope of x*y is only valid over a *bounded* box: with a
+    # non-finite factor bound the affine terms carry ``inf*·`` / ``inf - inf`` =
+    # ``NaN`` (an invalid, non-bracketing value). Replace the whole envelope with
+    # an explicit no-information bracket (cv=-inf, cc=+inf) rather than leaking a
+    # NaN a downstream consumer might use unguarded. See C-24.
+    all_finite = jnp.isfinite(x_lb) & jnp.isfinite(x_ub) & jnp.isfinite(y_lb) & jnp.isfinite(y_ub)
+    cv = jnp.where(all_finite, cv, -jnp.inf)
+    cc = jnp.where(all_finite, cc, jnp.inf)
 
     return cv, cc
 
@@ -209,7 +231,7 @@ def relax_pow(x, lb, ub, n):
     case1_cc = _secant(f, x, lb, ub)
 
     # Case 2: ub <= 0 -> fully concave: cv = secant, cc = f(x)
-    case2_cv = _secant(f, x, lb, ub)
+    case2_cv = _secant(f, x, lb, ub, fallback=-jnp.inf)
     case2_cc = f(x)
 
     # Case 3: lb < 0 < ub -> inflection at 0
@@ -217,8 +239,8 @@ def relax_pow(x, lb, ub, n):
     # - x >= 0: f is convex -> cv = f(x), cc = secant on [0, ub]
     # - x < 0:  f is concave -> cv = secant on [lb, 0], cc = f(x)
     zero = jnp.zeros_like(x)
-    sec_neg = _secant(f, x, lb, zero)
-    sec_pos = _secant(f, x, zero, ub)
+    sec_neg = _secant(f, x, lb, zero, fallback=-jnp.inf)  # concave-half cv role
+    sec_pos = _secant(f, x, zero, ub)  # convex-half cc role
     case3_cv = jnp.where(x >= 0, f(x), sec_neg)
     case3_cc = jnp.where(x >= 0, sec_pos, f(x))
 
@@ -292,7 +314,7 @@ def relax_sqrt(x, lb, ub):
     Returns (cv, cc).
     """
     cc = jnp.sqrt(x)
-    cv = _secant(jnp.sqrt, x, lb, ub)
+    cv = _secant(jnp.sqrt, x, lb, ub, fallback=-jnp.inf)
     return cv, cc
 
 
@@ -303,7 +325,7 @@ def relax_log(x, lb, ub):
     Returns (cv, cc).
     """
     cc = jnp.log(x)
-    cv = _secant(jnp.log, x, lb, ub)
+    cv = _secant(jnp.log, x, lb, ub, fallback=-jnp.inf)
     return cv, cc
 
 
@@ -314,7 +336,7 @@ def relax_log2(x, lb, ub):
     Returns (cv, cc).
     """
     cc = jnp.log2(x)
-    cv = _secant(jnp.log2, x, lb, ub)
+    cv = _secant(jnp.log2, x, lb, ub, fallback=-jnp.inf)
     return cv, cc
 
 
@@ -325,7 +347,7 @@ def relax_log10(x, lb, ub):
     Returns (cv, cc).
     """
     cc = jnp.log10(x)
-    cv = _secant(jnp.log10, x, lb, ub)
+    cv = _secant(jnp.log10, x, lb, ub, fallback=-jnp.inf)
     return cv, cc
 
 
@@ -474,12 +496,12 @@ def relax_tan(x, lb, ub):
     case1_cc = _secant(f, x, lb, ub)
 
     # Case 2: ub <= center -> concave half: cv = secant, cc = f(x)
-    case2_cv = _secant(f, x, lb, ub)
+    case2_cv = _secant(f, x, lb, ub, fallback=-jnp.inf)
     case2_cc = f(x)
 
     # Case 3: lb < center < ub -> piecewise
-    sec_neg = _secant(f, x, lb, center)
-    sec_pos = _secant(f, x, center, ub)
+    sec_neg = _secant(f, x, lb, center, fallback=-jnp.inf)  # concave-half cv role
+    sec_pos = _secant(f, x, center, ub)  # convex-half cc role
     case3_cv = jnp.where(x >= center, f(x), sec_neg)
     case3_cc = jnp.where(x >= center, sec_pos, f(x))
 
@@ -513,7 +535,7 @@ def relax_atan(x, lb, ub):
     f = jnp.arctan
 
     # Case 1: lb >= 0 -> concave: cv = secant, cc = f(x)
-    case1_cv = _secant(f, x, lb, ub)
+    case1_cv = _secant(f, x, lb, ub, fallback=-jnp.inf)
     case1_cc = f(x)
 
     # Case 2: ub <= 0 -> convex: cv = f(x), cc = secant
@@ -521,8 +543,8 @@ def relax_atan(x, lb, ub):
     case2_cc = _secant(f, x, lb, ub)
 
     # Case 3: lb < 0 < ub -> mixed
-    sec_neg = _secant(f, x, lb, 0.0)
-    sec_pos = _secant(f, x, 0.0, ub)
+    sec_neg = _secant(f, x, lb, 0.0)  # convex-half cc role (x < 0)
+    sec_pos = _secant(f, x, 0.0, ub, fallback=-jnp.inf)  # concave-half cv role (x >= 0)
     case3_cv = jnp.where(x >= 0, sec_pos, f(x))
     case3_cc = jnp.where(x >= 0, f(x), sec_neg)
 
@@ -546,19 +568,19 @@ def relax_asin(x, lb, ub):
     """
     f = jnp.arcsin
 
-    # Case 1: lb >= 0 -> convex: cv = f(x), cc = secant
+    # Case 1: lb >= 0 -> convex: cv = f(x), cc = secant (cc/overestimator role)
     case1_cv = f(x)
     case1_cc = _secant(f, x, lb, ub)
 
-    # Case 2: ub <= 0 -> concave: cv = secant, cc = f(x)
-    case2_cv = _secant(f, x, lb, ub)
+    # Case 2: ub <= 0 -> concave: cv = secant (cv/underestimator role), cc = f(x)
+    case2_cv = _secant(f, x, lb, ub, fallback=-jnp.inf)
     case2_cc = f(x)
 
     # Case 3: lb < 0 < ub -> straddles the inflection at 0. Split at 0:
     # positive (convex) side -> f(x)/sec_pos; negative (concave) side ->
     # sec_neg/f(x).
-    sec_neg = _secant(f, x, lb, 0.0)
-    sec_pos = _secant(f, x, 0.0, ub)
+    sec_neg = _secant(f, x, lb, 0.0, fallback=-jnp.inf)  # cv role (x < 0 concave half)
+    sec_pos = _secant(f, x, 0.0, ub)  # cc role (x >= 0 convex half)
     case3_cv = jnp.where(x >= 0, f(x), sec_neg)
     case3_cc = jnp.where(x >= 0, sec_pos, f(x))
 
@@ -584,19 +606,19 @@ def relax_acos(x, lb, ub):
     """
     f = jnp.arccos
 
-    # Case 1: lb >= 0 -> concave: cv = secant, cc = f(x)
-    case1_cv = _secant(f, x, lb, ub)
+    # Case 1: lb >= 0 -> concave: cv = secant (cv/underestimator role), cc = f(x)
+    case1_cv = _secant(f, x, lb, ub, fallback=-jnp.inf)
     case1_cc = f(x)
 
-    # Case 2: ub <= 0 -> convex: cv = f(x), cc = secant
+    # Case 2: ub <= 0 -> convex: cv = f(x), cc = secant (cc/overestimator role)
     case2_cv = f(x)
     case2_cc = _secant(f, x, lb, ub)
 
     # Case 3: lb < 0 < ub -> straddles the inflection at 0. Split at 0:
     # positive (concave) side -> sec_pos/f(x); negative (convex) side ->
     # f(x)/sec_neg.
-    sec_neg = _secant(f, x, lb, 0.0)
-    sec_pos = _secant(f, x, 0.0, ub)
+    sec_neg = _secant(f, x, lb, 0.0)  # cc role (x < 0 convex half)
+    sec_pos = _secant(f, x, 0.0, ub, fallback=-jnp.inf)  # cv role (x >= 0 concave half)
     case3_cv = jnp.where(x >= 0, sec_pos, f(x))
     case3_cc = jnp.where(x >= 0, f(x), sec_neg)
 
@@ -624,11 +646,11 @@ def relax_sinh(x, lb, ub):
     case1_cv = f(x)
     case1_cc = _secant(f, x, lb, ub)
 
-    case2_cv = _secant(f, x, lb, ub)
+    case2_cv = _secant(f, x, lb, ub, fallback=-jnp.inf)
     case2_cc = f(x)
 
-    sec_neg = _secant(f, x, lb, 0.0)
-    sec_pos = _secant(f, x, 0.0, ub)
+    sec_neg = _secant(f, x, lb, 0.0, fallback=-jnp.inf)  # concave-half cv role (x < 0)
+    sec_pos = _secant(f, x, 0.0, ub)  # convex-half cc role (x >= 0)
     case3_cv = jnp.where(x >= 0, f(x), sec_neg)
     case3_cc = jnp.where(x >= 0, sec_pos, f(x))
 
@@ -659,14 +681,14 @@ def relax_tanh(x, lb, ub):
     """
     f = jnp.tanh
 
-    case1_cv = _secant(f, x, lb, ub)
+    case1_cv = _secant(f, x, lb, ub, fallback=-jnp.inf)
     case1_cc = f(x)
 
     case2_cv = f(x)
     case2_cc = _secant(f, x, lb, ub)
 
-    sec_neg = _secant(f, x, lb, 0.0)
-    sec_pos = _secant(f, x, 0.0, ub)
+    sec_neg = _secant(f, x, lb, 0.0)  # convex-half cc role (x < 0)
+    sec_pos = _secant(f, x, 0.0, ub, fallback=-jnp.inf)  # concave-half cv role (x >= 0)
     case3_cv = jnp.where(x >= 0, sec_pos, f(x))
     case3_cc = jnp.where(x >= 0, f(x), sec_neg)
 
@@ -689,7 +711,7 @@ def relax_sigmoid(x, lb, ub):
     f = jnn.sigmoid
 
     # Case 1: lb >= 0 → concave region
-    case1_cv = _secant(f, x, lb, ub)
+    case1_cv = _secant(f, x, lb, ub, fallback=-jnp.inf)
     case1_cc = f(x)
 
     # Case 2: ub <= 0 → convex region
@@ -697,8 +719,8 @@ def relax_sigmoid(x, lb, ub):
     case2_cc = _secant(f, x, lb, ub)
 
     # Case 3: lb < 0 < ub → mixed
-    sec_neg = _secant(f, x, lb, 0.0)
-    sec_pos = _secant(f, x, 0.0, ub)
+    sec_neg = _secant(f, x, lb, 0.0)  # convex-half cc role (x < 0)
+    sec_pos = _secant(f, x, 0.0, ub, fallback=-jnp.inf)  # concave-half cv role (x >= 0)
     case3_cv = jnp.where(x >= 0, sec_pos, f(x))
     case3_cc = jnp.where(x >= 0, f(x), sec_neg)
 
