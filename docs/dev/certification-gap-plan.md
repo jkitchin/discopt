@@ -135,7 +135,8 @@ experiment may run.
 | Phase 4 re-profile (entry experiment) | done — **rank recorded** | #442 | 8 run / 0 skipped. Ranked build order: **1) CSE (op-dup 31–37% on nvs17/clay), 2) Q-extraction (coupled to CSE), 3) V-segments DE-PRIORITIZED (0 defvars in all 1,558 text `.nl`; defined-var-heavy set is binary-`.nl` discopt can't parse), 4) symmetry DO-NOT-BUILD (0 orbits)**. CC5 FALSIFIED (XLA ≤1.2% of wall); dominant wall = separation. See §8 "Phase 4 — re-profile results" |
 | Phase 4 T-CSE/V-segments | **CSE unlocked; V-segments/symmetry de-scoped** (§0.1.2) | — | build order fixed by the re-profile above; CSE first (bound-neutral), Q-extraction second |
 | Phase 4 build 1 — CSE/hash-consing | **done — bound-neutral** | (this PR) | Content-addressed interning in `ExprArena` (`expr.rs`), wired into the `.nl` parser and Python `convert_expr`. DAG node count ↓ **68.9% nvs17, 64.8% clay0303hfsg, 34.2% ex1252, 34.0% casctanks, 0.0% gear4** (panel total −48.4%); gear4 0% confirms the re-profile prediction. Cert-neutrality **NEUTRAL** (42 certifying instances, node_count exactly unchanged, objective to tol). See §8 "Phase 4 CSE — build results" |
-| Phase 4 items 2–4 (V-segments, Q-extract, symmetry) | **locked** (§0.1.2) | — | independent; item 2 (V-segments) is the natural follow-on |
+| Phase 4 build 3 — Q-matrix extraction | **done — (A) bound-neutral, (B) flagged bound-changing** | (this PR) | Exact `extract_quadratic(expr,n,model)` in `quadratic_form.py` (exact-or-abstain, validated 1e-12 on 250 pts/inst + 14 non-quadratic rejections). Consumer: PSD-on-Q convexity certificate wired into `certify_convex` behind `DISCOPT_PSD_QFORM` (**default-OFF**); sound tightening, never mis-certifies (30 indefinite-Q seeds), strict refinement of the rigorous path. Flag-off is byte-identical → cert-neutral. See §8 "Phase 4 Q-extraction — build results" |
+| Phase 4 items 2 & 4 (V-segments, symmetry) | **locked / de-scoped** (§0.1.2) | — | V-segments de-prioritized (0 defvars in text `.nl`); symmetry DO-NOT-BUILD (0 orbits) per the re-profile. RLT/edge-concave rewire onto `extract_quadratic` scoped as bound-neutral follow-on |
 | Phase 5 | **locked** (§0.1.2) | — | requires post-Phase-1 re-profile |
 
 **Phase 0 — DONE & gated** (cert0 green: root_gap coverage 0.909 ≥ 0.90, incorrect 0).
@@ -1045,6 +1046,71 @@ tolerance. `cargo test -p discopt-core` green (incl. `presolve_determinism`, 4/4
 `cargo clippy --lib` clean, the new CSE unit/property tests pass. Because the interner
 only merges structurally-identical nodes, the relaxation math is bit-for-bit the same
 — the smaller arena is a representation change, not a math change.
+
+### Phase 4 Q-extraction — build results (2026-07-03)
+
+Built **build item 3** (ranked #2 by the re-profile): exact Q-matrix coefficient
+extraction in the IR, plus the first sound consumer (the PSD-on-Q convexity
+certificate). Two clearly separated correctness regimes, per §3 / CLAUDE.md §5.
+
+**(A) Exact extraction — BOUND-NEUTRAL foundation.**
+`python/discopt/_jax/quadratic_form.py`: `extract_quadratic(expr, n, model) ->
+Optional[(Q, c, d)]` returns the symmetric `Q`, linear `c`, constant `d` with
+`expr == xᵀQx + cᵀx + d` **exactly, or `None`** (abstain). It layers on the
+existing trusted polynomial walker `milp_relaxation._expr_to_polynomial`
+(fed `term_classifier.distribute_products`) — the same machinery the edge-concave
+collector already uses — and additionally rejects any degree-≥3 monomial. Flat
+indexing is the identical prefix-sum layout the convexity certificate uses
+(`interval_ad._var_offset` == `term_classifier._compute_var_offset`), so a `Q`
+here is directly consistent with `certify_convex`'s coordinate system. Symmetric
+split: `Q_ij = Q_ji = ½·coeff` (i≠j), `Q_ii = coeff`. Helpers `quadratic_is_psd`
+/ `quadratic_is_nsd` do the exact `eigvalsh` test.
+
+*Validation (`test_quadratic_form.py`, 39 tests):* random quadratics reconstruct
+to **1e-12 on 250 points/instance** across 12 seeds; the symmetric-split, affine,
+and constant sub-cases are pinned; **14 non-quadratic shapes** (cube, quartic,
+trilinear, `x²·y`, exp/log/sin/sqrt, bilinear-with-transcendental, var-in-
+denominator, fractional power, `abs`, reciprocal) all return `None` — never a
+mis-extracted `Q`; out-of-range flat index abstains; PSD/NSD helpers match
+`eigvalsh` on 20 random symmetric matrices.
+
+**(B) Convexity certificate via PSD-on-Q — BOUND-CHANGING, flag default-OFF.**
+Wired into `convexity/certificate.py::certify_convex` behind
+**`DISCOPT_PSD_QFORM`** (default `0`). On a purely quadratic body the Hessian is
+the *constant* matrix `2·Q`, so `λ_min(Q) ≥ 0` is a rigorous, box-independent
+convexity proof — strictly tighter than the conservative interval-Hessian +
+Gershgorin row-sum enclosure (which abstains on tight-but-PSD matrices, e.g.
+`Q` with all off-diagonals 0.99, `λ_min≈0.01`). On any abstention (non-quadratic
+body, indefinite `Q`, non-finite `Q`) it returns `None` and **falls through to the
+existing rigorous path unchanged** — it never assumes convex. Because it can prove
+*more* bodies convex, it changes node relaxations/counts → shipped behind a flag
+per the bound-changing regime.
+
+*Differential/soundness result (`test_psd_qform_convexity.py`, 78 pass / 4 skip):*
+(1) **No mis-certification** — 30 random *indefinite* `Q` (both eigen-signs,
+away from 0) never read as CONVEX/CONCAVE with the flag ON. (2) **Strict
+refinement** — over 30 random PSD/NSD/indefinite cases the flag-ON verdict never
+flips a flag-OFF verdict; it only turns `None` into a verdict, and always agrees
+with a direct `eigvalsh` check (20 seeds). (3) **Non-quadratic bodies are
+identical on/off** (flag only touches the purely quadratic case). (4) Flag default
+reproduces the conservative abstention. Full `-k "convex or quadratic or rlt or
+edge_concave or qmatrix or psd"` suite: **786 pass / 5 skip / 2 xfail** with the
+flag default-off.
+
+**Bound-neutrality of the default (flag OFF):** the PSD path is behind
+`_psd_qform_enabled()` (only active when `DISCOPT_PSD_QFORM ∈ {1,true,yes,on}`), so
+with the flag unset `certify_convex` is byte-for-byte the prior function — the
+`check_cert_neutrality.py` panel is unaffected. Enabling and validating on nightlies
+(differential-bound + feasible-point + `incorrect_count=0`) is the follow-on before
+default-on.
+
+**Scoped as follow-on (proven partial > unproven whole, §8):** RLT and edge-concave
+already extract quadratic coefficients via `_expr_to_polynomial` (`edge_concave.py::
+collect_edge_concave_quadratics`, `rlt_cuts.py`), so rerouting them through
+`extract_quadratic` would at best be a bound-neutral refactor with no payoff (same
+coefficients, same verdict) and at worst risk a subtle drift; it is not shipped in
+this PR. The value there is a *faster path to the same relaxation*, which must be
+proven exactly bound-neutral (node_count/objective unchanged) — a separate task.
 
 ---
 
