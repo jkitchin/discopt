@@ -121,6 +121,7 @@ in non-default configs; loud ingestion gaps. **P3** = hygiene.
 | C-33 | P0 | solver.py fallback | pure-continuous fallback certifies a nonconvex model's local optimum with `gap_certified=True` (= SC-1), DEFAULT path | fixed |
 | C-34 | P0 | gdp_reformulate | even-power bound over a zero-straddling base uses endpoint-only bounds (omits interior min at 0) → invalid aux box → false optimal (= FR-1), DEFAULT path | fixed |
 | C-35 | P1 | oa.py / gdpopt_loa | non-rigorous NLP failure → unconditional no-good cut → possible false infeasible/optimal (= OA-1, opt-in OA/LOA path) | fixed |
+| C-36 | P3 | convexity/interval.py | Python `interval_mul` yields NaN on 0·∞ (`RuntimeWarning: invalid value encountered in multiply`), same 0·∞ class as C-22 but a SEPARATE Python code path (`python/discopt/_jax/convexity/interval.py:171`); lost tightening, not unsound | open |
 
 ---
 
@@ -2469,3 +2470,44 @@ From the LP/dual-bound audit:
   feasibility audit before certifying. Crossover moves only in the null space of
   A and cᵀ, so cut derivation never inherits an objective drift.
 
+
+---
+
+## C-36 (P3) — Python `interval_mul` yields NaN on 0·∞ (separate path from C-22)
+
+**Area:** `python/discopt/_jax/convexity/interval.py` (≈ line 171).
+**Class:** same `0·∞ → NaN` interval-arithmetic defect as C-22, but a **distinct
+code path**: C-22 fixed the *Rust* FBBT `interval_mul`
+(`crates/discopt-core/src/presolve/fbbt.rs`); this is the independent *Python*
+interval module used by the convexity/relaxation layer. Fixing C-22 does **not**
+fix this one.
+
+**Symptom / evidence:** surfaced by the C-22 agent's adversarial run as
+`RuntimeWarning: invalid value encountered in multiply` originating at
+`convexity/interval.py:171`. A product corner `0 * ±∞` evaluates to IEEE-754 NaN
+and `min`/`max` over the four corners propagate it, so an interval that touches
+zero times an unbounded interval becomes `[NaN, NaN]`.
+
+**Severity (P3 — sound but weak, pending confirmation):** as with C-22, a
+`[NaN, NaN]` interval is *lost information*, not an unsound bound — downstream
+comparisons against NaN are all false, so a consumer keeps its prior (looser)
+interval rather than adopting a wrong tighter one. **This must be re-confirmed on
+this path**, though: if any convexity/relaxation consumer treats a NaN endpoint as
+`0`/finite (rather than ignoring it), the classification could flip — verify the
+consumer semantics before downgrading confidence. No unsound path is *known*
+today.
+
+**Fix (mirror C-22):** in `interval_mul`, map NaN corner products to `0` — NaN can
+arise there only from `0 · ±∞`, whose interval-convention value is `0`; every other
+operand pair is finite×finite or a genuine ±∞ product. The result is a strictly
+tighter (never looser) enclosure and cannot exclude a feasible point. Add a
+property test (grid over ±∞ endpoints / zero-width factors: never-NaN, `lo ≤ hi`,
+rigorous product containment), mirroring
+`c22_interval_mul_never_nan_and_encloses_true_product`.
+
+**Provenance:** discovered by the C-22 fix (#460); filed as a separate item because
+it is a separate module with its own tests and consumers.
+
+**Log:**
+- (filed) — surfaced during C-22 (#460) verification; carded P3 as the same 0·∞
+  class on the Python interval path. Status `open`.
