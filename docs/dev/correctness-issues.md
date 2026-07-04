@@ -1270,7 +1270,7 @@ standing gates pass.
   certif/gap/bound selection 727 passed / 2 xfailed / 0 failed;
   `test_c3_incumbent_rounding.py` 4 passed. `ruff check` + `ruff format --check`
   clean; `pre-commit run mypy` passed. No Rust touched. `incorrect_count`
-  unchanged (0 failures; no correctness assertion weakened). PR: __PR__.
+  unchanged (0 failures; no correctness assertion weakened). PR: #456.
 **Status:** open → fixed.
 
 ---
