@@ -44,6 +44,7 @@ _GALLERY = [
     "example_transportation",
     "example_assignment",
     "example_multicommodity_flow",
+    "example_bilevel_toll",
 ]
 
 

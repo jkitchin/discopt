@@ -801,6 +801,44 @@ def example_multicommodity_flow():
 
 
 # ═══════════════════════════════════════════════════════════════
+# EXAMPLE: Bilevel toll setting (Stackelberg)
+#
+# A road authority (leader) sets a toll `t` on a tolled arc to
+# maximize revenue `t * f`. A driver population (follower) then
+# chooses the flow `f` on that arc to minimize its own convex
+# congestion-plus-toll cost. The follower is a convex QP in `f`,
+# so it is replaced by its KKT conditions (an MPEC) via
+# `discopt.bilevel.BilevelProblem`. Unconstrained follower optimum
+# is f = 5 - t, giving revenue t(5 - t), maximized at t = 2.5.
+# ═══════════════════════════════════════════════════════════════
+
+
+def example_bilevel_toll():
+    from discopt.bilevel import BilevelProblem
+
+    m = dm.Model("bilevel_toll")
+    t = m.continuous("toll", lb=0, ub=5)  # leader: toll on the tolled arc
+    f = m.continuous("flow", lb=0, ub=8)  # follower: flow on the tolled arc
+
+    # Leader maximizes toll revenue t * f  ->  minimize -(t * f).
+    m.minimize(-(t * f))
+
+    # Follower minimizes congestion cost 0.5 f^2 - 5 f (desired free-flow 5)
+    # plus the toll it pays, t * f. Convex QP in f (Hessian = 1).
+    bl = BilevelProblem(
+        m,
+        upper_vars=[t],
+        lower_vars=[f],
+        lower_objective=0.5 * f * f - 5 * f + t * f,
+        lower_constraints=[],  # only the follower's flow bounds (folded in as KKT)
+    )
+    bl.formulate(method="kkt", mpec_method="gdp")
+
+    print(m)
+    return m
+
+
+# ═══════════════════════════════════════════════════════════════
 # Run all examples that don't require the solver backend
 # ═══════════════════════════════════════════════════════════════
 
