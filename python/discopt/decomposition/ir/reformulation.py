@@ -84,21 +84,18 @@ class DecomposedModel:
     var_map: VariableMapping
     certificate: SoundnessCertificate
     source_model: object = field(repr=False, default=None)
+    # Set by ``solve()`` to the driver's ``SolveResult`` so ``summary()`` can
+    # surface the *authoritative* soundness (the driver may resolve an UNKNOWN
+    # certificate to exact — #391 item 1). ``None`` until solved.
+    last_result: object = field(repr=False, default=None, compare=False)
 
     @property
     def num_blocks(self) -> int:
         """Number of subproblem blocks."""
         return len(self.subproblems)
 
-    def solve(self, **config):
-        """Run the coordinated solve, dispatching to the shipping driver.
-
-        Returns a ``SolveResult`` in the original variable space. ``NONE`` and
-        ``INDEPENDENT_BLOCKS`` fall back to the monolithic ``Model.solve`` (the
-        per-block *parallel* solve is Phase 6); Benders/GBD/Lagrangian dispatch to
-        their drivers with this decomposition's ``structure``.
-        """
-        self.certificate.assert_sound()
+    def _dispatch(self, **config):
+        """Run the coordinated solve and return the driver's ``SolveResult``."""
         model = self.source_model
         if self.method in (MethodKind.NONE, MethodKind.INDEPENDENT_BLOCKS):
             return model.solve(**config)
@@ -114,6 +111,29 @@ class DecomposedModel:
         if self.method is MethodKind.LAGRANGIAN:
             return solve_lagrangian(model, structure=self.structure, **config)
         raise NotImplementedError(f"no reformulation driver for {self.method.label}")
+
+    def solve(self, **config):
+        """Run the coordinated solve, dispatching to the shipping driver.
+
+        Returns a ``SolveResult`` in the original variable space. ``NONE`` and
+        ``INDEPENDENT_BLOCKS`` fall back to the monolithic ``Model.solve`` (the
+        per-block *parallel* solve is Phase 6); Benders/GBD/Lagrangian dispatch to
+        their drivers with this decomposition's ``structure``.
+
+        The soundness certificate is enforced as a **post-condition** (#391 item
+        1): after the driver returns, :meth:`SoundnessCertificate.check_result`
+        raises if a merely-``RELAXATION``/``UNKNOWN`` certificate came back
+        ``gap_certified=True`` without the finite dual bound a real proof leaves —
+        the failure mode of a future driver that did not self-police. The driver's
+        ``gap_certified`` is then the authoritative signal (see :meth:`summary`).
+        """
+        self.certificate.assert_sound()
+        result = self._dispatch(**config)
+        # Contract check: the advisory certificate must not be out-claimed by the
+        # driver. Raises on an unearned certified gap.
+        self.certificate.check_result(result)
+        self.last_result = result
+        return result
 
     def schedule(self):
         """Return the :class:`SchedulingGraph` over this decomposition's blocks."""
@@ -134,19 +154,46 @@ class DecomposedModel:
         from discopt.decomposition.parallel.comm import select_backend
 
         comm = select_backend(backend)
+        # ``execution_order()`` returns *block ids* (``ScheduledTask.block_id``),
+        # which are not guaranteed to equal list positions — only
+        # ``build_decomposition`` happens to assign ``block_id == enumerate
+        # index``. Resolve block id → position explicitly so a non-contiguous or
+        # reordered block-id set maps correctly instead of silently mis-indexing
+        # (or raising ``IndexError``). See #391 item 2.
+        pos_of_block = {sp.block_id: k for k, sp in enumerate(self.subproblems)}
+        if len(pos_of_block) != len(self.subproblems):
+            raise ValueError(
+                "map_subproblems: subproblem block_ids are not unique "
+                f"({[sp.block_id for sp in self.subproblems]}); cannot reduce "
+                "results back into block order."
+            )
         order = self.schedule().execution_order()
-        reordered = [self.subproblems[i] for i in order]
+        reordered = [self.subproblems[pos_of_block[b]] for b in order]
         exec_results = comm.map(reordered, solve_block)
         results: list = [None] * len(self.subproblems)
-        for k, i in enumerate(order):
-            results[i] = exec_results[k]
+        for k, b in enumerate(order):
+            results[pos_of_block[b]] = exec_results[k]
         return results
 
     def summary(self) -> str:
-        """Human-readable multi-line description of the decomposition."""
+        """Human-readable multi-line description of the decomposition.
+
+        Before a solve, the certificate's *static* level is shown. After a solve,
+        the driver's ``gap_certified`` is authoritative (#391 item 1): a GBD run
+        whose convexity gate resolved an ``UNKNOWN`` certificate to an exact solve
+        is reported as ``proven equivalent`` here, so the certificate no longer
+        disagrees with the run it certified.
+        """
+        cert_line = self.certificate.summary()
+        if self.last_result is not None:
+            effective = self.certificate.effective_level(self.last_result)
+            # effective_level only differs from the static level when the driver
+            # certified optimality, so this branch is exactly the driver-upgrade.
+            if effective is not self.certificate.level:
+                cert_line += f" [driver certified optimality → {effective.value}]"
         lines = [
             f"DecomposedModel: {self.method.label}",
-            f"  {self.certificate.summary()}",
+            f"  {cert_line}",
         ]
         if self.master is not None:
             lines.append(f"  {self.master.summary()}")

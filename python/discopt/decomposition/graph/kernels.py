@@ -261,6 +261,77 @@ def _articulation_and_bridges_py(
     return articulation_points, bridges
 
 
+def _connected_components_edges_py(n: int, edges: list[tuple[int, int]]) -> tuple[list[int], int]:
+    """Pure-Python reference for the Rust ``decomp_connected_components`` kernel.
+
+    The public :func:`connected_components` above takes *clique* lists (the form
+    the structure layer produces); the Rust ``decomp_connected_components`` binding
+    takes an *edge* list. This is the edge-list oracle that mirrors it bit-for-bit
+    — union-find with union-by-size, then components relabelled in ascending
+    first-seen-vertex order (the same convention as the Rust kernel). It is the
+    reference the Rust↔Python CC parity test compares against (#391 item 4).
+    """
+    return connected_components(n, [[a, b] for a, b in edges])
+
+
+def _strongly_connected_components_py(n: int, arcs: list[tuple[int, int]]) -> tuple[list[int], int]:
+    """Pure-Python reference for the Rust ``decomp_strongly_connected_components``.
+
+    An iterative Tarjan that mirrors ``crates/discopt-core/src/decomp/components.rs``
+    exactly: SCC ids are assigned in the order roots are *finalized* (a reverse
+    topological order of the condensation), and the traversal is iterative so deep
+    graphs are safe. Bit-for-bit oracle for the Rust SCC kernel (#391 item 4).
+    """
+    adj: list[list[int]] = [[] for _ in range(n)]
+    for a, b in arcs:
+        adj[a].append(b)
+
+    UNSET = -1
+    index = [UNSET] * n
+    low = [0] * n
+    on_stack = [False] * n
+    comp = [UNSET] * n
+    scc_stack: list[int] = []
+    idx = 0
+    ncomp = 0
+
+    for s in range(n):
+        if index[s] != UNSET:
+            continue
+        work: list[list[int]] = [[s, 0]]  # [vertex, next-neighbor-index]
+        while work:
+            v, ci = work[-1]
+            if ci == 0:
+                index[v] = idx
+                low[v] = idx
+                idx += 1
+                scc_stack.append(v)
+                on_stack[v] = True
+            nbrs = adj[v]
+            if ci < len(nbrs):
+                work[-1][1] += 1
+                w = nbrs[ci]
+                if index[w] == UNSET:
+                    work.append([w, 0])
+                elif on_stack[w] and index[w] < low[v]:
+                    low[v] = index[w]
+            else:
+                if low[v] == index[v]:
+                    while True:
+                        w = scc_stack.pop()
+                        on_stack[w] = False
+                        comp[w] = ncomp
+                        if w == v:
+                            break
+                    ncomp += 1
+                work.pop()
+                if work:
+                    p = work[-1][0]
+                    if low[v] < low[p]:
+                        low[p] = low[v]
+    return comp, ncomp
+
+
 __all__ = [
     "articulation_and_bridges",
     "bearing_blocks",

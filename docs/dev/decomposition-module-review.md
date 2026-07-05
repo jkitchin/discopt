@@ -65,6 +65,35 @@ certificate.
   analysis-only — `Model.solve()` never silently applies a decomposition (opt-in
   `decomposition=`/`lagrangian_bound=` only); `assert_sound()` refuses `HEURISTIC`.
 
+## 2b. Advisor review follow-ups (#391 / from the #388 review — landed)
+
+Hardening/clarity items from the Decomposition Advisor review; none were
+correctness blockers (the advisor was already sound — the drivers +
+`SolveResult.__post_init__` self-police), these close the latent gaps:
+
+1. **Certificate is now a checked post-condition, not just advice.** `is_sound()`
+   stays permissive (`RELAXATION`/`UNKNOWN` may run; only `HEURISTIC` is refused),
+   but `SoundnessCertificate.check_result` — called by `DecomposedModel.solve()`
+   after the driver returns — **raises** if a `RELAXATION`/`UNKNOWN` certificate
+   comes back `gap_certified=True` without the finite dual `bound` a real proof
+   leaves (the failure mode of a future driver that did not self-police). The
+   docstring now states the certificate is *advisory* and the driver's
+   `status`/`bound`/`gap_certified` is the contract. `effective_level(result)` /
+   `summary()` surface the driver's `gap_certified` as authoritative, so GBD's
+   `UNKNOWN → exact` resolution no longer disagrees with the attached certificate.
+2. **`map_subproblems` keys results by `block_id`, not list position.** An explicit
+   `{block_id: position}` map replaces `self.subproblems[block_id]` (latent
+   `IndexError`/mis-map for non-contiguous block ids); duplicate ids are refused
+   loudly. Regression: non-contiguous/unordered block ids.
+3. **Learning override positively tested.** Added a case where the learner's voted
+   method is a *viable* candidate and the recommendation actually flips (the prior
+   test only covered the safe no-op fallback).
+4. **Rust CC/SCC kernels: parity test added (not dropped).** Kept — CC is a live
+   speed-path candidate for `structure.py` (which calls the Python CC today) and
+   SCC is the documented stage/dual-dependency kernel. Added pure-Python edge-list
+   CC and iterative-Tarjan SCC references and a Rust↔Python parity test (fixed +
+   randomized) mirroring `test_articulation_rust_matches_python_reference`.
+
 ## 3. SOTA
 
 At or above the correctness bar of commercial/open-source Benders. CPLEX/Gurobi

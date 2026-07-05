@@ -191,6 +191,45 @@ def test_instance_policy_promotes_viable_neighbor_winner():
     assert rec.candidate.method is MethodKind.BENDERS
 
 
+def test_instance_policy_flips_to_voted_viable_candidate():
+    # #391 item 3: the *positive* override — the learner's voted method IS a
+    # viable candidate (present, sound, score > 0), so the recommendation must
+    # actually FLIP from the rule-based pick to the voted one. Exercised at the
+    # policy seam with two synthetic viable candidates so the flip is deterministic
+    # and independent of what the generator cascade happens to produce.
+    from discopt.decomposition.advisor.scoring import ScoreVector
+    from discopt.decomposition.advisor.selection import RuleBasedPolicy, SelectionContext
+    from discopt.decomposition.advisor.types import Candidate, Soundness
+
+    report = StructureAnalyzer().analyze(_benders_model())
+    ctx = SelectionContext(report=report)
+
+    # Two viable candidates: BENDERS scores higher (the rule-based pick),
+    # LAGRANGIAN is viable but lower-scored.
+    benders = Candidate(MethodKind.BENDERS, None, "test", Soundness.PROVEN_EQUIVALENT)
+    lagr = Candidate(MethodKind.LAGRANGIAN, None, "test", Soundness.RELAXATION)
+    scored = [
+        (benders, ScoreVector(aggregate=1.5, confidence=1.0)),
+        (lagr, ScoreVector(aggregate=0.8, confidence=1.0)),
+    ]
+
+    # Baseline: the rule-based policy recommends BENDERS.
+    base_reco = next(r for r in RuleBasedPolicy().rank(scored, ctx) if r.recommended)
+    assert base_reco.candidate.method is MethodKind.BENDERS
+
+    # Seed the store with LAGRANGIAN winners on the identical instance → the
+    # learner votes LAGRANGIAN, which IS viable here → the pick flips.
+    store = RecordStore()
+    for i in range(4):
+        store.append(build_record([], report, MethodKind.LAGRANGIAN, timestamp=float(i)))
+    policy = InstanceBasedPolicy(store, min_records=3)
+    ranked = policy.rank(scored, ctx)
+    reco = next(r for r in ranked if r.recommended)
+    assert reco.candidate.method is MethodKind.LAGRANGIAN
+    # Exactly one candidate is recommended after the override.
+    assert sum(r.recommended for r in ranked) == 1
+
+
 # ── Phase 5 (T5.2): store auto-wires the learned policy ───────
 
 

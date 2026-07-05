@@ -157,6 +157,42 @@ def test_map_subproblems_executes_big_first():
     assert order == [1, 2, 0]  # descending size
 
 
+def test_map_subproblems_handles_noncontiguous_block_ids():
+    # #391 item 2: map_subproblems must key results by block_id, not by list
+    # position. With non-contiguous/unordered block_ids, the old positional code
+    # (``self.subproblems[block_id]``) either IndexErrors or silently mis-maps.
+    from discopt.decomposition.ir.models import SubproblemModel
+
+    dcmp = analyze_decomposition(_independent_blocks_model()).decompose()
+    # Unordered, non-contiguous block ids (7 > len(subproblems)); big-first
+    # execution order will yield block ids, which must not be used as indices.
+    dcmp.subproblems = [
+        SubproblemModel(7, ("a",)),  # size 1
+        SubproblemModel(3, ("b", "c", "d")),  # size 3 → executes first
+        SubproblemModel(5, ("e", "f")),  # size 2
+    ]
+    # Each block reports its own id; results must come back in *block order*
+    # (the list order of subproblems), i.e. [7, 3, 5].
+    results = dcmp.map_subproblems(lambda sp: sp.block_id, backend="sequential")
+    assert results == [7, 3, 5]
+
+    # Execution order is still big-first (by size), independent of block id.
+    order = []
+    dcmp.map_subproblems(lambda sp: order.append(sp.block_id), backend="sequential")
+    assert order == [3, 5, 7]  # sizes 3, 2, 1
+
+
+def test_map_subproblems_rejects_duplicate_block_ids():
+    # #391 item 2: a duplicate block_id makes the block-order reduce ambiguous;
+    # refuse loudly rather than silently drop a result.
+    from discopt.decomposition.ir.models import SubproblemModel
+
+    dcmp = analyze_decomposition(_independent_blocks_model()).decompose()
+    dcmp.subproblems = [SubproblemModel(0, ("a",)), SubproblemModel(0, ("b",))]
+    with pytest.raises(ValueError, match="not unique"):
+        dcmp.map_subproblems(lambda sp: sp.block_id, backend="sequential")
+
+
 def test_map_subproblems_threads_and_sequential_agree():
     dcmp = analyze_decomposition(_independent_blocks_model()).decompose()
     seq = dcmp.map_subproblems(lambda sp: sp.size, backend="sequential")
