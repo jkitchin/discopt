@@ -110,8 +110,8 @@ in non-default configs; loud ingestion gaps. **P3** = hygiene.
 | C-23 | P1 | mccormick.py | ESCALATED (was P3): `relax_div` produces an invalid convex underestimator (cv > f) for **nonlinear** denominators (`1/(x*y)` cv=1.334 > true 1.0) — the "harmless" label held only for variable/affine denominators; `_relax_reciprocal` also mislabels concavity for negative denominators (= DIV-1) | fixed |
 | C-24 | P3 | mccormick.py | secants produce NaN on infinite bounds; soundness leans on downstream filters | fixed |
 | C-12 | P3 | .nl parser | range-split renumbers constraints vs source indices | fixed (documented) |
-| C-25 | P1 | nn/formulations | scaling + bound-propagation domain mismatch cuts the true optimum on scaled embedded NNs | in progress (nn-module-plan T-N0.2) |
-| C-26 | P1 | nn/tree_ensemble | tree big-M invalid for out-of-box thresholds → cuts feasible points | in progress (nn-module-plan T-N0.3) |
+| C-25 | P1 | nn/formulations | scaling + bound-propagation domain mismatch cuts the true optimum on scaled embedded NNs | fixed (#411, nn-module-plan T-N0.2; verified #413) |
+| C-26 | P1 | nn/tree_ensemble | tree big-M invalid for out-of-box thresholds → cuts feasible points | fixed (#411, nn-module-plan T-N0.3; verified #413) |
 | C-27 | P2 | nn/readers/onnx | ONNX reader silently mis-reads Gemm attrs / residual Add / branched graphs | fixed (T-N1.1, PR #411; onnxruntime-oracle tests in `test_nn_reader_fixes.py`) |
 | C-28 | P2 | nn/readers/sklearn | sklearn classifier semantics silently embed logits / wrong base_score | fixed (T-N1.2, PR #411; sklearn-oracle tests in `test_nn_reader_fixes.py`) |
 | C-29 | P0 | classify/extract | vector-body constraint collapses to one summed row ("array var treated as sum") → infeasible point certified optimal, DEFAULT path (= CORE-1, modeling M1) | fixed |
@@ -1689,7 +1689,7 @@ parser module header; standing gates pass.
 
 ---
 
-## C-25 (P1) — Embedded-NN scaling propagates bounds in the wrong (unscaled) domain → infeasible or true optimum cut
+## C-25 (P1, FIXED) — Embedded-NN scaling propagates bounds in the wrong (unscaled) domain → infeasible or true optimum cut
 
 **Area:** `python/discopt/nn/formulations/full_space.py:72`,
 `python/discopt/nn/formulations/relu_bigm.py:73`. `propagate_bounds(net)` runs on
@@ -1738,10 +1738,21 @@ No behavior change when scaling is None/identity.
 **Log:**
 - 2026-07-03 — Filed from the 2026-07-03 nn-module review (finding F1). Fix owned
   by nn-module-plan T-N0.2 (same effort); status tracked there.
+- 2026-07-05 — **FIXED.** Landed in PR #411 (commit `df96f1a`): `relu_bigm.py`
+  and `full_space.py` now propagate through the scaled input box
+  (`propagate_bounds(net, input_bounds=(s_lo, s_hi))`); the old `tighten_network`
+  mutate-and-restore hack was removed. Re-verified under #413 with the T-N0.1
+  harness: fail-before/pass-after confirmed by temporarily reverting the scaled
+  propagation (8 scaling cases → infeasible/cut; restored → all pass). Concrete
+  differential-soundness repro (relu net, `x_factor=0.1`, true `relu(10·input)`):
+  certified max **10.000000** = enumerated 10.0 (was 1.0 on the buggy code);
+  incumbent-consistent, not-cut; pinned feasible-point sweep 0/30 cut.
+  Regression tests: `python/tests/test_nn_formulation_fixes.py::test_*scaling*`
+  (positive and negative `x_factor`, full_space + relu_bigm).
 
 ---
 
-## C-26 (P1) — Tree-ensemble big-M is invalid for thresholds outside the declared feature box → cuts feasible points
+## C-26 (P1, FIXED) — Tree-ensemble big-M is invalid for thresholds outside the declared feature box → cuts feasible points
 
 **Area:** `python/discopt/nn/formulations/tree_ensemble.py:79,98-111`. The per-leaf
 constraints use `M_j = ub_j − lb_j`, which keeps a non-selected leaf's constraint
@@ -1782,6 +1793,17 @@ when selected, and are strictly tighter LP relaxations. Drop the unused
 **Log:**
 - 2026-07-03 — Filed from the 2026-07-03 nn-module review (finding F2). Fix owned
   by nn-module-plan T-N0.3 (same effort); status tracked there.
+- 2026-07-05 — **FIXED.** Landed in PR #411 (commit `df96f1a`):
+  `tree_ensemble.py` now uses per-constraint tight big-M `max(ub_j − thr, 0)`
+  (left) / `max(thr+eps − lb_j, 0)` (right), which is inert for `z=0` at any
+  threshold position (clamped to 0 for out-of-box thresholds) and strictly
+  tighter than the old per-feature `ub−lb`. Re-verified under #413: fail-before/
+  pass-after confirmed by temporarily reverting to the per-feature M (out-of-box
+  ensemble → **infeasible**; restored → optimal). Differential-soundness repro
+  (thresholds 1.5 and −0.5 outside box `[0,1]`): certified min **6.499999** ≈
+  enumerated 6.5; pinned feasible-point sweep 0/40 cut. Regression tests:
+  `test_nn_formulation_fixes.py::test_tree_out_of_box_{fixed_input,optimum}` plus
+  `test_tree_in_box_unchanged` (no-behavior-change on in-box thresholds).
 
 ---
 
