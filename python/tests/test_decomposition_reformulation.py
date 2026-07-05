@@ -128,6 +128,103 @@ def test_certificate_relaxation_is_sound():
     cert.assert_sound()  # does not raise
 
 
+# ── #391 item 1: certificate post-condition + authoritative driver signal ──
+
+
+class _FakeResult:
+    """A driver result that *bypasses* ``SolveResult.__post_init__`` — the way a
+    non-self-policing future driver could smuggle an unearned certificate past the
+    permissive ``is_sound()`` gate."""
+
+    def __init__(self, status, gap_certified, bound):
+        self.status = status
+        self.gap_certified = gap_certified
+        self.bound = bound
+
+
+def test_check_result_raises_on_unearned_certified_gap():
+    # A RELAXATION certificate returning gap_certified=True with NO finite bound
+    # is an unearned certificate: check_result must refuse it (#391 item 1).
+    cert = SoundnessCertificate(MethodKind.LAGRANGIAN, Soundness.RELAXATION, "dual bound")
+    with pytest.raises(AssertionError, match="without a finite dual bound"):
+        cert.check_result(_FakeResult(status="optimal", gap_certified=True, bound=None))
+    with pytest.raises(AssertionError):
+        cert.check_result(_FakeResult(status="optimal", gap_certified=True, bound=float("-inf")))
+
+
+def test_check_result_accepts_proven_certified_gap():
+    # UNKNOWN certificate + driver-proved certified gap (finite bound) → allowed:
+    # this is exactly GBD's UNKNOWN→exact resolution.
+    cert = SoundnessCertificate(MethodKind.GENERALIZED_BENDERS, Soundness.UNKNOWN, "convex?")
+    cert.check_result(_FakeResult(status="optimal", gap_certified=True, bound=3.14))  # no raise
+
+
+def test_check_result_ignores_uncertified_and_infeasible():
+    cert = SoundnessCertificate(MethodKind.LAGRANGIAN, Soundness.RELAXATION, "dual bound")
+    # gap_certified=False → nothing to check.
+    cert.check_result(_FakeResult(status="feasible", gap_certified=False, bound=None))
+    # infeasibility certificate legitimately carries bound=None.
+    cert.check_result(_FakeResult(status="infeasible", gap_certified=True, bound=None))
+    # PROVEN_EQUIVALENT certificates may certify freely.
+    ok = SoundnessCertificate(MethodKind.BENDERS, Soundness.PROVEN_EQUIVALENT, "exact")
+    ok.check_result(_FakeResult(status="optimal", gap_certified=True, bound=None))
+
+
+def test_effective_level_surfaces_driver_verdict():
+    # UNKNOWN certificate whose driver certified optimality → authoritative
+    # PROVEN_EQUIVALENT (GBD UNKNOWN→exact disagreement fixed).
+    cert = SoundnessCertificate(MethodKind.GENERALIZED_BENDERS, Soundness.UNKNOWN, "convex?")
+    proved = _FakeResult(status="optimal", gap_certified=True, bound=1.0)
+    unproved = _FakeResult(status="time_limit", gap_certified=False, bound=None)
+    assert cert.effective_level(proved) is Soundness.PROVEN_EQUIVALENT
+    assert cert.effective_level(unproved) is Soundness.UNKNOWN
+    # A relaxation not certified stays a relaxation.
+    lag = SoundnessCertificate(MethodKind.LAGRANGIAN, Soundness.RELAXATION, "dual bound")
+    assert lag.effective_level(unproved) is Soundness.RELAXATION
+
+
+def test_solve_runs_postcondition_and_raises_on_bad_driver(monkeypatch):
+    # A driver that (wrongly) reports a certified gap without a bound must be
+    # caught by solve()'s post-condition, not silently trusted. Lagrangian is a
+    # RELAXATION certificate.
+    monkeypatch.setattr(
+        refmod,
+        "solve_lagrangian",
+        lambda model, **kw: _FakeResult(status="optimal", gap_certified=True, bound=None),
+    )
+    dcmp = analyze_decomposition(_coupled_model()).decompose()
+    assert dcmp.certificate.level is Soundness.RELAXATION
+    with pytest.raises(AssertionError, match="#391 item 1"):
+        dcmp.solve()
+
+
+def test_solve_records_last_result_and_summary_surfaces_verdict(monkeypatch):
+    # After a GBD solve that certified optimality, summary() must report the
+    # driver's authoritative verdict, not the stale UNKNOWN certificate.
+    monkeypatch.setattr(
+        refmod,
+        "solve_gbd",
+        lambda model, **kw: _FakeResult(status="optimal", gap_certified=True, bound=2.0),
+    )
+    m = _benders_model()
+    gbd_cand = Candidate(
+        MethodKind.GENERALIZED_BENDERS,
+        None,
+        "test",
+        Soundness.UNKNOWN,
+    )
+    dcmp = build_decomposition(m, gbd_cand)
+    # Force UNKNOWN (a nonconvex-ish path) so the driver-upgrade is observable.
+    dcmp.certificate = SoundnessCertificate(
+        MethodKind.GENERALIZED_BENDERS, Soundness.UNKNOWN, "recourse not verified convex"
+    )
+    res = dcmp.solve()
+    assert dcmp.last_result is res
+    s = dcmp.summary()
+    assert "driver certified optimality" in s
+    assert "proven_equivalent" in s
+
+
 # ── solve() dispatch (monkeypatched drivers) ───────────────────
 
 

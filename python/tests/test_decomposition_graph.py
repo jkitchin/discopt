@@ -130,6 +130,98 @@ def test_rust_kernels_reject_out_of_range_vertices():
             fn(3, [(0, 5)])  # vertex 5 is out of range for n=3
 
 
+def _normalize_scc_labels(comp):
+    """Canonicalize SCC labels to a partition signature (label-value independent).
+
+    Two labelings are equivalent iff they induce the same partition. We compare
+    the *partition* (which vertices share a component) rather than raw ids so a
+    genuine divergence is caught while a benign relabeling is not — but the Rust
+    and Python kernels also share the exact id-assignment convention, so the raw
+    lists match too (asserted separately).
+    """
+    canon: dict[int, int] = {}
+    out = []
+    for c in comp:
+        if c not in canon:
+            canon[c] = len(canon)
+        out.append(canon[c])
+    return out
+
+
+def test_cc_rust_matches_python_reference():
+    # The Rust ``decomp_connected_components`` (edge-list) must be bit-for-bit
+    # equivalent to the pure-Python edge-list reference. #391 item 4: the kernel
+    # is a future speed path for structure.py's block detection; a silent labeling
+    # divergence would change Benders/Lagrangian block detection.
+    rust = kernels._rust_kernels()
+    if rust is None:
+        pytest.skip("Rust extension not built")
+    graphs = [
+        (4, [(0, 1), (1, 2), (2, 3)]),  # single chain
+        (4, [(0, 1), (2, 3)]),  # two blocks
+        (3, []),  # all isolated
+        (5, [(0, 1), (1, 2), (2, 0), (3, 4)]),  # triangle + edge
+        (6, [(0, 1), (1, 0), (2, 3)]),  # duplicate edge + a block + isolated
+        (5, [(4, 0), (0, 2)]),  # first-seen ordering not vertex 0
+    ]
+    for n, edges in graphs:
+        got = [int(x) for x in rust.decomp_connected_components(n, edges)]
+        ref, _ = kernels._connected_components_edges_py(n, edges)
+        assert got == ref, f"CC divergence on n={n}, edges={edges}: {got} != {ref}"
+
+
+def test_scc_rust_matches_python_reference():
+    # The Rust ``decomp_strongly_connected_components`` must be bit-for-bit
+    # equivalent to the pure-Python Tarjan reference (same finalize-order id
+    # convention). #391 item 4: SCC underpins stage/dual-dependency ordering; a
+    # divergence would mis-detect mutually-dependent stages.
+    rust = kernels._rust_kernels()
+    if rust is None:
+        pytest.skip("Rust extension not built")
+    graphs = [
+        (3, [(0, 1), (1, 2), (2, 0)]),  # one cycle
+        (3, [(0, 1), (1, 2)]),  # DAG: three SCCs
+        (4, [(0, 1), (1, 0), (1, 2), (2, 3), (3, 2)]),  # two cycles, one-way link
+        (5, [(0, 1), (1, 2), (2, 0), (2, 3), (3, 4), (4, 3)]),  # nested cycles
+        (4, []),  # all singletons
+        (5, [(0, 0), (0, 1), (1, 2), (2, 1)]),  # self-loop + cycle
+    ]
+    for n, arcs in graphs:
+        got = [int(x) for x in rust.decomp_strongly_connected_components(n, arcs)]
+        ref, _ = kernels._strongly_connected_components_py(n, arcs)
+        # Same partition …
+        assert _normalize_scc_labels(got) == _normalize_scc_labels(ref), (
+            f"SCC partition divergence on n={n}, arcs={arcs}: {got} vs {ref}"
+        )
+        # … and the exact shared id convention (finalize order).
+        assert got == ref, f"SCC label divergence on n={n}, arcs={arcs}: {got} != {ref}"
+
+
+def test_cc_scc_rust_matches_python_reference_randomized():
+    # Randomized parity over many small graphs (mirrors the articulation parity
+    # test's intent for CC/SCC). #391 item 4.
+    import random
+
+    rust = kernels._rust_kernels()
+    if rust is None:
+        pytest.skip("Rust extension not built")
+    rng = random.Random(391)
+    for _ in range(200):
+        n = rng.randint(1, 9)
+        m = rng.randint(0, 2 * n)
+        undirected = [
+            (rng.randrange(n), rng.randrange(n)) for _ in range(m)
+        ]  # CC: undirected edges
+        cc_got = [int(x) for x in rust.decomp_connected_components(n, undirected)]
+        cc_ref, _ = kernels._connected_components_edges_py(n, undirected)
+        assert cc_got == cc_ref, f"CC divergence n={n}, edges={undirected}"
+
+        directed = [(rng.randrange(n), rng.randrange(n)) for _ in range(m)]  # SCC: arcs
+        scc_got = [int(x) for x in rust.decomp_strongly_connected_components(n, directed)]
+        scc_ref, _ = kernels._strongly_connected_components_py(n, directed)
+        assert scc_got == scc_ref, f"SCC divergence n={n}, arcs={directed}"
+
+
 def test_dependency_edges_star_expansion_for_wide_cliques():
     # a width-5 clique with max_clique_expand=3 becomes a star (4 edges),
     # not a full clique (10 edges).
