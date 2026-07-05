@@ -1,10 +1,18 @@
 # MO Module Review — Correctness, Thoroughness, Performance, and SOTA Assessment
 
-> STATUS: IN PROGRESS — 4/10 findings resolved (MO1–MO4). The correctness /
-> method-fidelity cluster is closed: MO1 (NBI axis, prior PR), MO2 (AUGMECON2 —
-> lexicographic payoff + bypass), MO3 (Pareto dedup), MO4 (stable hypervolume
-> reference). Remaining open: MO5 (sweep recompilation), MO6–MO10 (P2/P3
-> robustness/perf/API gaps).
+> STATUS: COMPLETE — all 10 findings resolved as of this PR
+> (`fix-mo-tail-mo5-mo10`, 2026-07-05). MO1–MO4 (correctness / method fidelity)
+> closed in prior PRs. This PR closes the tail: **MO5** (compile each objective
+> once per sweep — bound-neutral, verified bit-identical fronts; recompiles on an
+> 11-point bi-objective weighted-sum sweep dropped 26 → 0 legacy
+> `compile_expression` calls, 2 param-agnostic compiles = one per objective),
+> **MO6** (honor a supplied `ideal` without recomputing anchors), **MO7**
+> (`total_time_limit` budget + large-grid warning on all five sweeps), **MO8**
+> (identity-based constraint cleanup), **MO9** (drop the dead `senses_list` arg
+> from `_payoff_matrix`), **MO10** (AMP parameter-in-constraint drop — CONFIRMED
+> as a real, sound-but-weak behavior; deferred to the solver-integration Phase 3
+> per the plan, tracked below). Tests: `test_mo_tail_mo5_mo10.py`. Cert-baseline
+> NEUTRAL (mo is off the B&B solve path).
 
 **Date:** 2026-07-03
 **Scope:** `python/discopt/mo/` (`scalarization.py`, `nbi.py`, `pareto.py`,
@@ -39,8 +47,12 @@ and test blind spots.
 | MO2 | P2 method-fidelity — ✅ RESOLVED | `scalarization.py` | The `epsilon_constraint` implementation was **AUGMECON, not AUGMECON2**: the bypass/jump acceleration that defines AUGMECON2 was absent, and the payoff table was not built lexicographically as Mavrotas prescribes [BY INSPECTION]. **FIXED — both features implemented** (see §3). `test_mo_augmecon2.py` |
 | MO3 | P2 — ✅ RESOLVED | `pareto.py` | `filtered()` kept **duplicate points** (identical objective vectors from different scalarization parameters survived weak-dominance filtering) [CONFIRMED]. **FIXED — tolerance-aware dedup in `filtered()`.** `test_mo_pareto.py::TestFilteredDedup` |
 | MO4 | P2 (doc/API) — ✅ RESOLVED | `indicators.py` | Default hypervolume reference was **front-dependent** — comparing two fronts via `front.hypervolume()` silently compared against different references [CONFIRMED: 2.16 vs 0.08 for nested fronts]. **FIXED — `common_reference(*fronts)` helper + loud docstring warning.** `test_mo_indicators.py::TestCommonReference` |
-| MO5 | P2 perf | `utils.py`, sweep loops | `evaluate_expression` recompiles (JAX trace) each objective per call — k compilations per accepted point per sweep, plus k² for the payoff table, of the *same* k expressions |
-| MO6–MO10 | P2–P3 | various | Robustness/API gaps (§3) |
+| MO5 | P2 perf — ✅ RESOLVED | `utils.py`, sweep loops | `evaluate_expression` recompiled (JAX trace) each objective per call — k compilations per accepted point per sweep, plus k² for the payoff table, of the *same* k expressions [CONFIRMED: 26 recompiles on an 11-point bi-objective weighted-sum sweep]. **FIXED — `ObjectiveEvaluator` compiles each objective once (param-agnostic) and reuses it across the payoff table + every point; bound-neutral, fronts bit-identical before/after.** `test_mo_tail_mo5_mo10.py::TestMO5CompileCache` |
+| MO6 | P3 — ✅ RESOLVED | `scalarization.py` | `weighted_sum(ideal=...)` without `anchors` discarded the ideal and recomputed both [CONFIRMED: 1 `ideal_point` call with `normalize=False`]. **FIXED — anchors computed only when actually needed to estimate the nadir; supplied ideal honored.** `TestMO6HonorIdeal` |
+| MO7 | P2 — ✅ RESOLVED | all five sweeps | No overall time budget; `n_points**(k-1)` full solves possible with no warning. **FIXED — `total_time_limit=` returns the partial front tagged `".../truncated"`; warns when the grid exceeds ~200 subproblems.** `TestMO7TimeBudget` |
+| MO8 | P2 — ✅ RESOLVED | scalarizers | `del model._constraints[saved_n:]` positional slice could drop rows appended by other code during the sweep. **FIXED — track each added constraint by identity and remove exactly those.** `TestMO8IdentityCleanup` |
+| MO9 | P3 — ✅ RESOLVED | `nbi.py` | `_payoff_matrix` took a `senses_list` it never used. **FIXED — dead parameter removed.** `TestMO9DeadArg` |
+| MO10 | P2 (solver-integration) — ◻︎ CONFIRMED, DEFERRED | AMP linearizer | Parameter-carrying scalarization constraints are dropped from AMP's MILP relaxation with a per-constraint warning (observed live in NBI/NNC runs). Sound (dropping rows only loosens a relaxation) but the *defining* scalarization constraint is absent from the relaxation. This is a **bound-changing solver-core fix** (substitute the `Parameter`'s current value into the relaxation) requiring the differential-bound protocol; per the plan §3(Phase 3) it is design-first and out of scope for this by-inspection tail PR. Tracked for the solver-integration round. |
 
 Checked and found **correct** (no action):
 
@@ -199,38 +211,67 @@ silently. Fix: document loudly; add
 `hypervolume(fronts..., reference=None)`-style shared-reference helper or a
 `ParetoFront.compare(other)` that constructs one common reference from the union.
 
-### MO5. Repeated JAX recompilation in sweeps
+### MO5. Repeated JAX recompilation in sweeps — ✅ RESOLVED (`TestMO5CompileCache`)
 
-`evaluate_expression` calls `compile_expression` per invocation;
-`_collect_objectives_at_x` calls it k times per accepted point, `_payoff_matrix`
-k² times. Each is a fresh DAG walk + trace of expressions that never change during
-a sweep. Fix: compile the k objectives once per sweep (via
-`compile_expression_params`, which is parameter-value-agnostic) and reuse; this
-also removes the per-point Python DAG-walk cost. Measure before/after on a
-21-point sweep per the house rule.
+**FIXED.** `evaluate_expression` still recompiles per call, but the sweep path
+no longer uses it: a new `ObjectiveEvaluator` (`utils.py`) compiles each
+objective once via `compile_expression_params` (parameter-value-agnostic) and
+evaluates against the model's current parameter snapshot on each call. It is
+threaded through `_collect_objectives_at_x`, `_payoff_matrix`, `nadir_point`, and
+`lexicographic_payoff`, so all five sweeps compile each objective exactly once
+instead of k per point (plus k² for the payoff table).
+
+**Verification (bound-neutral perf).** On an 11-point bi-objective weighted-sum
+sweep, legacy `compile_expression` calls dropped **26 → 0** and
+`compile_expression_params` is called exactly k=2 times (one per objective).
+Fronts are **bit-identical** before/after across all five methods
+(`weighted_sum`, `epsilon_constraint`, `weighted_tchebycheff`, NBI, NNC) for both
+k=2 and k=3 toys (max abs diff 0.0). Since mo is off the B&B solve path,
+cert-baseline neutrality is exact.
+
+The original finding text:
+
+> `evaluate_expression` calls `compile_expression` per invocation;
+> `_collect_objectives_at_x` calls it k times per accepted point, `_payoff_matrix`
+> k² times. Each is a fresh DAG walk + trace of expressions that never change during
+> a sweep. Fix: compile the k objectives once per sweep (via
+> `compile_expression_params`, which is parameter-value-agnostic) and reuse.
 
 ### MO6–MO10 (smaller, [BY INSPECTION])
 
-- **MO6.** `weighted_sum(ideal=...)` without `anchors` silently *recomputes* both
+- **MO6.** ✅ RESOLVED (`TestMO6HonorIdeal`). `weighted_sum(ideal=...)` without
+  `anchors` no longer discards the ideal: anchors are computed only when actually
+  needed to estimate the nadir (`normalize=True` and no `nadir` supplied). With
+  `normalize=False` or an explicit `nadir`, a supplied `ideal` is honored with
+  **zero** anchor solves (was 1 on baseline). Original finding:
+  `weighted_sum(ideal=...)` without `anchors` silently *recomputes* both
   (the provided ideal is discarded) — surprising and costs k solves; accept
   ideal-only when `normalize=False`, or document.
-- **MO7.** No overall time budget: a sweep issues `n_points^(k-1)` solves each with
+- **MO7.** ✅ RESOLVED (`TestMO7TimeBudget`). No overall time budget: a sweep issues `n_points^(k-1)` solves each with
   the full per-solve `time_limit` (default 3600 s) — a 20-point bi-objective sweep
   can legitimately take 20 hours with no warning and no partial-result return.
-  Add `total_time_limit` (stop the sweep, return the partial front with a status
-  note) and warn when `n_points ** (k-1)` exceeds a threshold.
-- **MO8.** Scalarizer side effects accumulate: every call leaves its aux
-  slacks/`t`/parameters on the model permanently (documented), so comparing three
-  methods on one model triples the dangling variables; there is no cleanup API
-  because the modeling layer has no variable/constraint removal (see
-  modeling-review Phase 4 — this is a concrete consumer for it). Also
+  **FIXED —** all five sweeps take `total_time_limit=`; on expiry the sweep stops
+  and returns the partial front with `method` tagged `".../truncated"`, and a
+  warning fires when the subproblem count (`len(weights)` or `n_points**(k-1)`)
+  exceeds ~200.
+- **MO8.** ✅ RESOLVED (`TestMO8IdentityCleanup`). The brittle positional
+  `del model._constraints[saved_n_cons:]` in every scalarizer `finally` is
+  replaced with identity-based removal: each added constraint is tracked and
+  exactly those objects are removed, so a row appended by other code during a
+  solve survives (test simulates this). (The dangling aux-variable side effect is
+  unchanged — it needs modeling-layer variable removal, modeling-review Phase 4 —
+  and remains documented in the module docstring.) Original finding:
+  Scalarizer side effects accumulate: every call leaves its aux
+  slacks/`t`/parameters on the model permanently (documented) … Also
   `del model._constraints[saved_n_cons:]` in the `finally` assumes nothing else
   appended constraints during the sweep — brittle if callbacks/reformulations ever
   mutate `_constraints` at solve time; slice out exactly the constraints added by
   identity instead.
-- **MO9.** `_payoff_matrix` takes a `senses_list` argument it never uses (dead
-  parameter — confusing given how sense-critical this code is).
-- **MO10.** Parameter-carrying constraints are dropped from AMP's MILP relaxation
+- **MO9.** ✅ RESOLVED (`TestMO9DeadArg`). `_payoff_matrix` took a `senses_list`
+  argument it never used; the dead parameter is removed (sense-normalization is
+  the caller's job, which owns the ideal/nadir/span). Signature is now
+  `(model, objectives, anchors, evaluator=None)`.
+- **MO10.** ◻︎ CONFIRMED, DEFERRED. Parameter-carrying constraints are dropped from AMP's MILP relaxation
   with a per-constraint warning ("cannot be linearized safely: Cannot linearize
   Parameter"), observed live during the NBI k=3 runs. Sound (dropping rows only
   loosens a relaxation) but it means every ε-constraint/NBI/NNC/Tchebycheff
@@ -239,6 +280,14 @@ also removes the per-point Python DAG-walk cost. Measure before/after on a
   Worth a targeted fix in the AMP linearizer: a `Parameter` is a constant at
   relaxation-build time; substitute its current value (and rebuild per sweep
   iteration, or thread it as a bound shift) instead of omitting the row.
+  **Status:** re-confirmed live in this PR's neutrality run (`AMP: omitting
+  constraint _mo_nbi_eq_1 … Cannot linearize Parameter`). This is a
+  **bound-changing solver-core change** (it alters the MILP relaxation the B&B
+  sees) and therefore requires the CLAUDE.md §5 differential-bound protocol; per
+  the plan §7 Phase 3 it is design-first and out of scope for this by-inspection
+  tail PR. Deferred and tracked for the AMP/solver-integration round; the current
+  behavior is **sound** (dropping rows only loosens the relaxation), so it does
+  not gate closing the mo review.
 
 ---
 

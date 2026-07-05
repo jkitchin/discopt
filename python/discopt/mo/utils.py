@@ -66,12 +66,81 @@ def evaluate_expression(expr, model, x_dict: dict[str, np.ndarray]) -> float:
 
     Compiles ``expr`` through the JAX DAG compiler using the model's current
     parameter values, then calls it on the flat solution vector.
+
+    .. note::
+
+       This compiles ``expr`` afresh on every call (a full Expression-DAG walk
+       plus a JAX trace). Inside a scalarization sweep the same ``k`` objective
+       expressions are evaluated many times; use an :class:`ObjectiveEvaluator`
+       (via :func:`objective_evaluator`) to compile each objective once and
+       reuse it, which is what the sweep helpers do (MO5).
     """
     from discopt._jax.dag_compiler import compile_expression
 
     fn = compile_expression(expr, model)
     x_flat = _flatten_solution(model, x_dict)
     return float(np.asarray(fn(x_flat)))
+
+
+class ObjectiveEvaluator:
+    """Compile a fixed list of objective expressions once and reuse them.
+
+    :func:`evaluate_expression` recompiles its expression (an Expression-DAG
+    walk plus a JAX trace) on every call. During a scalarization sweep the same
+    ``k`` objectives are cross-evaluated at every accepted point and, ``k``
+    times per anchor, for the payoff table — a full recompile each time of
+    expressions that never change (MO5). This helper compiles each objective's
+    *parameter-agnostic* callable once (via
+    :func:`~discopt._jax.dag_compiler.compile_expression_params`) and evaluates
+    it against the model's *current* parameter snapshot on each call.
+
+    The result is numerically identical to :func:`evaluate_expression`:
+    ``compile_expression`` is exactly ``compile_expression_params`` composed
+    with a fresh parameter snapshot, so threading the snapshot per call
+    reproduces the legacy value bit-for-bit while eliminating the redundant DAG
+    walks and traces.
+
+    The evaluator is keyed by object identity (``id(expr)``); pass the same
+    ``Expression`` objects used to build the sweep. It reads
+    ``model._parameters`` fresh on every :meth:`at` call, so scalarizers that
+    mutate ``Parameter.value`` between solves (ε-constraint, Tchebycheff, NBI,
+    NNC) see the current values.
+    """
+
+    def __init__(self, model, objectives: list) -> None:
+        from discopt._jax.dag_compiler import _build_param_index, compile_expression_params
+
+        self._model = model
+        self._objectives = list(objectives)
+        param_index = _build_param_index(model)
+        # One compiled param-agnostic callable per objective, keyed by identity.
+        self._fns = [compile_expression_params(e, model, param_index) for e in self._objectives]
+        self._by_id = {id(e): fn for e, fn in zip(self._objectives, self._fns)}
+
+    def _snapshot(self) -> tuple:
+        from discopt._jax.dag_compiler import _snapshot_params
+
+        return _snapshot_params(self._model)
+
+    def at(self, index: int, x_dict: dict[str, np.ndarray]) -> float:
+        """Evaluate objective ``index`` at solution ``x_dict``."""
+        x_flat = _flatten_solution(self._model, x_dict)
+        params = self._snapshot()
+        return float(np.asarray(self._fns[index](x_flat, params)))
+
+    def vector_at(self, x_dict: dict[str, np.ndarray]) -> np.ndarray:
+        """Evaluate all objectives at ``x_dict``, returning a ``(k,)`` array."""
+        x_flat = _flatten_solution(self._model, x_dict)
+        params = self._snapshot()
+        return np.array(
+            [float(np.asarray(fn(x_flat, params))) for fn in self._fns],
+            dtype=np.float64,
+        )
+
+
+def objective_evaluator(model, objectives: list) -> ObjectiveEvaluator:
+    """Build a reusable :class:`ObjectiveEvaluator` for ``objectives``."""
+    return ObjectiveEvaluator(model, objectives)
 
 
 def ideal_point(
@@ -161,6 +230,7 @@ def nadir_point(
     anchors: list[dict[str, np.ndarray]],
     *,
     senses: Optional[Iterable[str]] = None,
+    evaluator: Optional["ObjectiveEvaluator"] = None,
 ) -> np.ndarray:
     """Payoff-table estimate of the nadir point.
 
@@ -180,6 +250,10 @@ def nadir_point(
         Solution dicts returned by :func:`ideal_point`, length ``k``.
     senses : iterable of {"min", "max"}, optional
         One sense per objective; default is all ``"min"``.
+    evaluator : ObjectiveEvaluator, optional
+        Pre-built evaluator over the same ``objectives`` (compiled once). If
+        omitted, a fresh one is built. Passing a shared evaluator avoids
+        recompiling the objectives (MO5).
 
     Returns
     -------
@@ -191,10 +265,11 @@ def nadir_point(
     if len(anchors) != k:
         raise ValueError(f"Expected {k} anchors, got {len(anchors)}")
 
+    if evaluator is None:
+        evaluator = ObjectiveEvaluator(model, objectives)
     payoff = np.zeros((k, k), dtype=np.float64)  # payoff[i, j] = f_j at anchor i
     for i in range(k):
-        for j in range(k):
-            payoff[i, j] = evaluate_expression(objectives[j], model, anchors[i])
+        payoff[i, :] = evaluator.vector_at(anchors[i])
 
     nadir = np.zeros(k, dtype=np.float64)
     for j in range(k):
@@ -265,7 +340,19 @@ def lexicographic_payoff(
     k = len(objectives)
     signs = [1.0 if s == "min" else -1.0 for s in senses_list]
     saved_objective = model._objective
-    saved_n_cons = len(model._constraints)
+    tracked_cons: list = []  # lexicographic tolerance constraints, by identity
+    # Compile each objective once and reuse across all lexicographic passes and
+    # the payoff-table fill (MO5). The lexicographic passes add constraints (not
+    # parameters), so the parameter index captured here stays valid.
+    evaluator = ObjectiveEvaluator(model, objectives)
+
+    def _drop_tracked() -> None:
+        # Remove exactly the tolerance constraints we added, by identity (MO8),
+        # rather than a positional slice that could also drop rows appended by
+        # something else during a solve.
+        ids = {id(c) for c in tracked_cons}
+        model._constraints[:] = [c for c in model._constraints if id(c) not in ids]
+        tracked_cons.clear()
 
     payoff = np.zeros((k, k), dtype=np.float64)
     anchors: list[Optional[dict[str, np.ndarray]]] = [None] * k
@@ -294,26 +381,26 @@ def lexicographic_payoff(
             result = None
             for pos, j in enumerate(order):
                 result = _solve(objectives[j], senses_list[j])
-                fj_opt = evaluate_expression(objectives[j], model, result.x)
+                fj_opt = evaluator.at(j, result.x)
                 # Pin f_j at its optimum for the subsequent passes, in the
                 # min-convention: sign_j * f_j <= sign_j * fj_opt + lex_tol.
                 if pos < len(order) - 1:
                     con = signs[j] * objectives[j] <= signs[j] * fj_opt + lex_tol
                     model.subject_to(con, name=f"_mo_lex_{i}_{j}")
+                    tracked_cons.append(con)
                     fixed_bounds.append((j, fj_opt))
             # The inner loop always ran at least once (k >= 1) and _solve
             # raises on failure, so result carries a feasible solution here.
             assert result is not None and result.x is not None
             # Record the payoff row from the final (fully-refined) anchor.
             anchors[i] = {kk: np.asarray(v).copy() for kk, v in result.x.items()}
-            for j in range(k):
-                payoff[i, j] = evaluate_expression(objectives[j], model, result.x)
+            payoff[i, :] = evaluator.vector_at(result.x)
             # Drop this primary's lexicographic tolerance constraints before
             # the next primary.
-            del model._constraints[saved_n_cons:]
+            _drop_tracked()
     finally:
         model._objective = saved_objective
-        del model._constraints[saved_n_cons:]
+        _drop_tracked()
 
     ideal = np.array([payoff[i, i] for i in range(k)], dtype=np.float64)
     return ideal, payoff, [a for a in anchors if a is not None]
