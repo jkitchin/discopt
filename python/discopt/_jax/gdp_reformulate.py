@@ -326,7 +326,7 @@ def _compute_big_m_lp(
     # always appended *after* the originals, so the first ``n_vars`` scalar
     # columns are exactly the original variables that ``c_vec`` indexes — take
     # only those.
-    bounds_list = []
+    bounds_list: list[tuple[float, float]] = []
     for v in model._variables:
         if len(bounds_list) >= n_vars:
             break
