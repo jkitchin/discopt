@@ -20,9 +20,45 @@ the stakes are solver-wide, not module-local.
 | # | Severity | Component | Finding |
 |---|----------|-----------|---------|
 | GP-1 ✅ RESOLVED 1dc3278 | **P0 correctness** | `gp/__init__.py:classify_gp` + auto path | Fast-path constraint families (`m.constraint(...)`, `add_linear_constraints`) live only in the Rust builder and are **invisible to `classify_gp`** — the auto-GP path solves the model **without them** and certifies the wrong optimum [CONFIRMED: 0.1 vs true 0.5]. **FIXED (X-1):** `classify_gp` returns `None` when `model._has_builder_only_rows()`, so the model falls back to spatial B&B (which sees the builder rows); repro now solves 0.5. Regression: `test_x1_builder_resident_rows.py::test_gp1_*`. |
-| GP-2 | **P1** | `gp/__init__.py:solve_gp` | Certified GP optima are returned with **`gap_certified=False`** (and non-optimal statuses carry a log-space `gap` with `bound=None`) [CONFIRMED] |
-| GP-3 | P2 recognition | `posynomial.py` | No distribution of products over sums: `2*(h*w + h*d) <= 10` is refused — the textbook Boyd box-volume GP written naturally **silently misses the fast path** [CONFIRMED] |
-| GP-4 | P2 recognition | `posynomial.py` | `dm.sum(..., over=set)` (`SumOverExpression`) is refused — the natural indexed form of a posynomial never classifies [CONFIRMED] |
+| GP-2 ✅ RESOLVED | **P1** | `gp/__init__.py:solve_gp` | Certified GP optima are returned with **`gap_certified=False`** (and non-optimal statuses carry a log-space `gap` with `bound=None`) [CONFIRMED] **[see STATUS below]** |
+| GP-3 ✅ RESOLVED | P2 recognition | `posynomial.py` | No distribution of products over sums: `2*(h*w + h*d) <= 10` is refused — the textbook Boyd box-volume GP written naturally **silently misses the fast path** [CONFIRMED] **[see STATUS below]** |
+| GP-4 ✅ RESOLVED | P2 recognition | `posynomial.py` | `dm.sum(..., over=set)` (`SumOverExpression`) is refused — the natural indexed form of a posynomial never classifies [CONFIRMED] **[see STATUS below]** |
+
+> **STATUS (2026-07-05, PR `fix(gp): GP-2/GP-3/GP-4`, #413, branch
+> `fix-gp-cluster-gp2-gp3-gp4`).** GP-1 resolved earlier under root finding X-1.
+> GP-2/GP-3/GP-4 now resolved.
+>
+> - **GP-2 (P1) — RESOLVED.** `solve_gp` builds the `SolveResult` in one shot with
+>   its final fields, mapping the convex optimum back to x-space as `bound`, so
+>   `SolveResult.__post_init__` validates the real bound rather than silently
+>   downgrading `gap_certified` off a transient `bound=None`. **Certification is
+>   rigorous and claimed ONLY when** (a) the model classified as an *exact* GP
+>   (`gp is not None` ⇒ exact posynomial/monomial transform, no approximation) AND
+>   (b) the convex solve returned `"optimal"` with (c) a finite recovered
+>   objective. Any other status → `bound=None`, `gap=None`, `gap_certified=False`,
+>   `convex_fast_path=False` (a sound under-claim; never a fabricated/log-unit
+>   bound). Soundness argument: a GP is a *convex* program in `y = log x` and the
+>   transform here is exact, so a certified-optimal convex solve *is* a certified
+>   global optimum with zero gap — the claim is a theorem, not a heuristic. Also
+>   attaches `_model` (GP-6 rider). Tests: `TestGP2Certification` (two positive
+>   cases fail on main; two negative cases pin no-over-claim).
+> - **GP-3 (P2) — RESOLVED.** `_flatten_sum_terms` distributes `const*(sum)` /
+>   `monomial*(sum)` (`(Σaᵢ)(Σbⱼ)=Σaᵢbⱼ`, exactly posynomial-preserving) under a
+>   ≤64-term budget (`_MAX_DISTRIBUTE_TERMS`); over-budget → refuse (spatial B&B
+>   fallback, sound). Factored Boyd box-volume GP now classifies + solves to the
+>   same certified optimum as the expanded form. Negatives: signomial-in-product
+>   and oversized product-of-sums refuse. `TestGP3Distribution`.
+> - **GP-4 (P2) — RESOLVED.** `_flatten_sum_terms` recurses into
+>   `SumOverExpression.terms`; the top-level rejection in `is_posynomial` is
+>   removed. Indexed `dm.sum(..., over=set)` posynomials classify + solve (in the
+>   objective and in constraints). Negatives: indexed-`sin` and indexed-signomial
+>   refuse. `TestGP4IndexedSum`.
+>
+> **Cert-baseline neutrality:** zero of the 41 `cert-baseline.jsonl` instances
+> classify as GP before OR after (all carry integer / non-positive-lb variables →
+> `classify_gp` early-bails), so the changed recognizer is never reached for any
+> of them — routing, `node_count`, `objective`, `status`, `gap_certified`
+> provably unchanged; `incorrect_count == 0`.
 | GP-5 | P2 | `solver.py` auto-path guard | The auto-path guard checks incumbent/node/iteration callbacks but **not `lazy_constraints`**; a GP-shaped model with a lazy-constraint generator auto-routes to GP and silently ignores it (explicit `solver="gp"` at least warns). `initial_solution` is likewise silently dropped on both GP paths [BY INSPECTION] |
 | GP-6–GP-9 | P3 | various | Result-object and hygiene items (§4) |
 

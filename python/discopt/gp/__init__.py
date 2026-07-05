@@ -424,31 +424,60 @@ def solve_gp(model: Model, **solve_kwargs) -> Optional[SolveResult]:
         # Streaming solve (callback/iterator) is not supported for GP.
         raise TypeError("solve_gp does not support streaming solve options")
 
-    result = SolveResult(status=log_result.status)
-    result.wall_time = log_result.wall_time
-    result.bound = None
-    result.gap = log_result.gap
-
+    x_values: Optional[dict[str, np.ndarray]] = None
+    objective: Optional[float] = None
     if log_result.x is not None and "y" in log_result.x:
         y_values = np.asarray(log_result.x["y"], dtype=np.float64).reshape(-1)
-        result.x = gp.recover_x(y_values)
-        result.objective = gp.objective_value(y_values)
+        x_values = gp.recover_x(y_values)
+        objective = gp.objective_value(y_values)
 
-    # The log-space program is convex and equivalent to the original GP, so an
-    # ``optimal`` log-space solution is the *global* optimum of the GP. Its
-    # objective is therefore simultaneously the best incumbent and a valid lower
-    # bound (a zero-gap, single-NLP solve). Only assert this when the convex
-    # solve actually converged — on a limit/infeasible status we must not
-    # fabricate a bound (correctness invariant). Guarded on a finite objective
-    # so a NaN/inf recovery never poses as a certified optimum.
-    if (
-        log_result.status == "optimal"
-        and result.objective is not None
-        and math.isfinite(result.objective)
-    ):
-        result.bound = result.objective
-        result.gap = 0.0
-        result.convex_fast_path = True
+    # The log-space program is convex and *exactly* equivalent to the original
+    # GP: ``classify_gp`` accepts only an exact posynomial/monomial transform
+    # (no approximation), and under ``y = log x`` a posynomial becomes a convex
+    # sum-of-exponentials. Hence a converged (``optimal``) log-space solution is
+    # a *certified global optimum* of the GP — its recovered objective is
+    # simultaneously the best incumbent and a valid global lower bound, so the
+    # gap is exactly zero and the result is genuinely certified.
+    #
+    # This certification is claimed ONLY when all of the following hold, so we
+    # never over-claim on a non-optimal / degenerate case:
+    #   (a) the model classified as a GP — guaranteed here, since ``gp`` is
+    #       non-None, i.e. an *exact* transform, not an approximation;
+    #   (b) the convex solve returned status ``"optimal"`` (a certified-optimal
+    #       convex solve, not a limit/infeasible/error termination);
+    #   (c) a finite objective was recovered (a NaN/inf recovery certifies
+    #       nothing and must never pose as an optimum).
+    # On any other status we leave ``bound=None`` and ``gap=None`` (an
+    # under-claim, which stays sound) rather than fabricate a bound in the wrong
+    # (log-space) units.
+    certified = (
+        log_result.status == "optimal" and objective is not None and math.isfinite(objective)
+    )
+    if certified:
+        bound: Optional[float] = objective
+        gap: Optional[float] = 0.0
+    else:
+        bound = None
+        gap = None
+
+    # Construct the result in one shot with its final fields so
+    # ``SolveResult.__post_init__`` validates the *actual* bound. Building it
+    # with a transient ``bound=None`` and patching afterwards would let
+    # ``__post_init__`` silently downgrade ``gap_certified`` to ``False`` (the
+    # GP-2 bug). A certified GP optimum thus correctly keeps
+    # ``gap_certified=True``.
+    result = SolveResult(
+        status=log_result.status,
+        objective=objective,
+        bound=bound,
+        gap=gap,
+        x=x_values,
+        node_count=0,
+        wall_time=log_result.wall_time,
+        convex_fast_path=certified,
+        gap_certified=certified,
+        _model=model,
+    )
     return result
 
 
