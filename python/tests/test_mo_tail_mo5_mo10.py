@@ -21,20 +21,18 @@ from __future__ import annotations
 
 import warnings
 
+import discopt._jax.dag_compiler as dag_compiler
 import discopt.modeling as dm
 import numpy as np
 import pytest
-
-import discopt._jax.dag_compiler as dag_compiler
 from discopt.mo import (
     ParetoFront,
-    ParetoPoint,
     objective_evaluator,
     weighted_sum,
 )
 from discopt.mo.scalarization import (
-    _TimeBudget,
     _tag,
+    _TimeBudget,
     _warn_large_grid,
     epsilon_constraint,
     weighted_tchebycheff,
@@ -214,9 +212,7 @@ class TestMO7TimeBudget:
     def test_total_time_limit_truncates_sweep(self):
         """A zero budget returns a partial front tagged '/truncated'."""
         m, objs = _biobj_qp()
-        front = weighted_sum(
-            m, objs, n_weights=21, total_time_limit=0.0, time_limit=10
-        )
+        front = weighted_sum(m, objs, n_weights=21, total_time_limit=0.0, time_limit=10)
         assert front.method.endswith("/truncated")
         # Anchors are computed before the loop budget check, so the front may be
         # empty; the tag is the load-bearing assertion.
