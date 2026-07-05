@@ -1570,36 +1570,51 @@ def _invoke_pre_import_callbacks(
 
         # --- Lazy constraints ---
         if lazy_constraints is not None:
+            # Invoking the user's callback is the only step allowed to fail
+            # softly: a user-code error is logged and the node proceeds as
+            # normal (no cut, no rejection). Everything AFTER the callback —
+            # rejecting the node and inserting the cut — is our own code and
+            # must NOT be swallowed. INT-1/INT-4 (#413): the previous broad
+            # ``except`` wrapped the ``_cut_pool.add`` too, so an
+            # ``AttributeError`` (e.g. a ``None`` cut pool) was downgraded to a
+            # warning AND the rejection that followed it was lost, letting the
+            # excluded integer-feasible point become the incumbent.
             try:
                 cuts = lazy_constraints(ctx, model)
-                if cuts:
-                    for cut in cuts:
-                        coeffs, rhs, sense = cut_result_to_dense(cut, model)
-                        _cut_pool.add(LinearCut(coeffs=coeffs, rhs=rhs, sense=sense))
-                    # Mark as infeasible so it does not become incumbent.
-                    result_lbs[i] = _INFEASIBILITY_SENTINEL
-                    logger.info(
-                        "Lazy constraint callback added %d cut(s) at node %d",
-                        len(cuts),
-                        int(result_ids[i]),
-                    )
-                    continue  # skip incumbent callback for cut-separated nodes
             except Exception as e:
                 logger.warning("Lazy constraint callback raised an exception: %s", e)
+                cuts = None
+            if cuts:
+                # Reject the node FIRST: even if cut insertion below were to
+                # fail, the point the cuts exclude must never be accepted as an
+                # incumbent. This assignment precedes any fallible cut math.
+                result_lbs[i] = _INFEASIBILITY_SENTINEL
+                for cut in cuts:
+                    coeffs, rhs, sense = cut_result_to_dense(cut, model)
+                    _cut_pool.add(LinearCut(coeffs=coeffs, rhs=rhs, sense=sense))
+                logger.info(
+                    "Lazy constraint callback added %d cut(s) at node %d",
+                    len(cuts),
+                    int(result_ids[i]),
+                )
+                continue  # skip incumbent callback for cut-separated nodes
 
         # --- Incumbent callback ---
         if incumbent_callback is not None:
+            solution = _unpack_solution(model, result_sols[i])
+            # Only the user callback may fail softly; the rejection that acts on
+            # its verdict is our code and stays OUTSIDE the swallow (INT-1, #413).
             try:
-                solution = _unpack_solution(model, result_sols[i])
                 accept = incumbent_callback(ctx, model, solution)
-                if accept is False:
-                    result_lbs[i] = _INFEASIBILITY_SENTINEL
-                    logger.info(
-                        "Incumbent callback rejected solution at node %d",
-                        int(result_ids[i]),
-                    )
             except Exception as e:
                 logger.warning("Incumbent callback raised an exception: %s", e)
+                accept = None
+            if accept is False:
+                result_lbs[i] = _INFEASIBILITY_SENTINEL
+                logger.info(
+                    "Incumbent callback rejected solution at node %d",
+                    int(result_ids[i]),
+                )
 
 
 def _unpack_solution(model: Model, x_flat: np.ndarray):
@@ -3714,6 +3729,29 @@ def solve_model(
 
     # --- Explicit NLP-BB override: bypass specialized solvers ---
     if nlp_bb is True and not _pure_continuous:
+        # INT-1 (#413): the NLP-BB path cannot honor a callback that REJECTS an
+        # integer-feasible point. It has no per-node cut-application mechanism
+        # (the augmented-evaluator cut pool is spatial-B&B-only) and its primal
+        # heuristics (feasibility pump, RENS, diving, sub-NLP) inject incumbents
+        # directly via ``tree.inject_incumbent`` WITHOUT consulting the callback
+        # — so a lazy constraint's cut or an incumbent-callback's ``False`` would
+        # be silently dropped and the excluded point accepted as the optimum.
+        # Refuse loudly rather than return a wrong answer (CLAUDE.md §3); these
+        # callbacks are supported on the spatial-B&B path (``nlp_bb=False``).
+        if lazy_constraints is not None or incumbent_callback is not None:
+            _rejected = []
+            if lazy_constraints is not None:
+                _rejected.append("lazy_constraints")
+            if incumbent_callback is not None:
+                _rejected.append("incumbent_callback")
+            raise ValueError(
+                f"{' and '.join(_rejected)} cannot be used with nlp_bb=True: the "
+                "NLP-BB path cannot enforce a callback that rejects an integer-"
+                "feasible point (its primal heuristics inject incumbents without "
+                "consulting the callback, and it has no per-node cut application). "
+                "Use nlp_bb=False (spatial branch-and-bound) for these callbacks, "
+                "or omit nlp_bb to auto-select a path that honors them."
+            )
         return _solve_nlp_bb(
             model,
             time_limit,
@@ -3999,9 +4037,13 @@ def solve_model(
     # --- NLP-BB auto-select for convex MINLPs (nlp_bb=None) ---
     # Placed after problem classifier so MILP/MIQP use their specialized
     # (faster) solvers. Only genuinely nonlinear convex MINLPs reach here.
-    # Also skip when lazy constraints are provided (they need the cut pool
-    # infrastructure from the full spatial B&B loop).
-    if nlp_bb is None and lazy_constraints is None:
+    # Also skip when a rejecting user callback is provided: the NLP-BB path
+    # cannot honor a lazy constraint or an incumbent-callback rejection (no
+    # per-node cut application; its primal heuristics inject incumbents without
+    # consulting the callback — INT-1, #413). Fall through to the spatial-B&B
+    # loop, which enforces both correctly, rather than silently drop the
+    # rejection and accept the excluded point.
+    if nlp_bb is None and lazy_constraints is None and incumbent_callback is None:
         if not _root_convexity_known:
             _root_convexity_known, _root_is_convex, _root_constraint_mask = (
                 _classify_model_convexity(
@@ -7902,22 +7944,20 @@ def _solve_nlp_bb(
                         logger.debug("Fractional diving failed: %s", e)
 
         # --- User callbacks ---
+        # INT-1 (#413): the NLP-BB path cannot honor a callback that rejects an
+        # integer-feasible point — it has no per-node cut application and its
+        # primal heuristics inject incumbents without consulting the callback.
+        # ``solve_model`` refuses these callbacks before routing here (explicit
+        # ``nlp_bb=True`` raises; auto-select falls through to spatial B&B). This
+        # is a fail-loud backstop: if a rejecting callback ever reaches this path
+        # it is a routing bug, and we must NOT silently drop the rejection (which
+        # would accept the excluded point as the optimum) by calling
+        # ``_invoke_pre_import_callbacks`` with a ``None`` cut pool.
         if lazy_constraints is not None or incumbent_callback is not None:
-            _invoke_pre_import_callbacks(
-                model=model,
-                tree=tree,
-                t_start=t_start,
-                result_ids=result_ids,
-                result_lbs=result_lbs,
-                result_sols=result_sols,
-                result_feas=result_feas,
-                n_batch=n_batch,
-                int_offsets=int_offsets,
-                int_sizes=int_sizes,
-                n_vars=n_vars,
-                lazy_constraints=lazy_constraints,
-                incumbent_callback=incumbent_callback,
-                _cut_pool=None,
+            raise AssertionError(
+                "lazy_constraints/incumbent_callback reached the NLP-BB path, "
+                "which cannot enforce them (INT-1, #413). This is a routing bug: "
+                "solve_model should have refused or rerouted to spatial B&B."
             )
 
         # Import results back to Rust tree

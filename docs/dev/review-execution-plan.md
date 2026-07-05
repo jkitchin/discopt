@@ -171,6 +171,11 @@ last.** "Default path" = a plain `m.solve()` on an idiomatic model.
 - **EX-1** (export) — `.nl` Jacobian non-conformant with ASL (breaks BARON/Couenne/
   SCIP comparisons).
 - **INT-1** (infra/solver.py) — `nlp_bb=True` + `lazy_constraints` swallow-and-accept.
+  ✅ RESOLVED (#413): the NLP-BB path cannot honor a rejecting callback (no per-node
+  cut application; primal heuristics inject incumbents without consulting it), so it
+  now refuses `lazy_constraints`/`incumbent_callback` loudly; auto-select routes them
+  to spatial B&B (which honors them). `_invoke_pre_import_callbacks` reordered
+  reject-before-add with a narrowed `except`.
 - **MP-1** (mpec) — `tighten_complementarity_bounds` overwrites a positive lb → hides
   infeasibility.
 - **DC-S1** (decomposition) — unbounded recourse populates an invalid `bound`.
@@ -289,7 +294,7 @@ Legend: ⬜ open · ◧ in-progress · ✅ resolved · ◻︎ not-reproduced.
 | 2 | RO-1, RO-2, RO-3 | ro | ⬜ |
 | 2 | C1, C2, C3 | dae | ⬜ |
 | 2 | EX-1 | export | ✅ — union-based J/G/k/header sparsity; nonlinear-only vars get a 0-coeff `J` entry; pure-constant bodies move to r-section rhs (`n0` body, no longer counted nonlinear). Byte-level structural parity with Pyomo's writer on a 4-case corpus; `TestNLWriterJacobianConformance` in `test_nl_writer.py`; #413 |
-| 2 | INT-1 | infra/solver | ⬜ |
+| 2 | INT-1 | infra/solver | ✅ — NLP-BB path now REFUSES `lazy_constraints`/`incumbent_callback` loudly (it cannot enforce a rejection: no per-node cut application + primal heuristics inject incumbents without consulting the callback), and auto-select routes them to spatial B&B which honors them; `_invoke_pre_import_callbacks` reordered to reject-before-add with a narrowed `except` so a programming error can no longer swallow a lost rejection. Tests `TestInt1NlpBbLazyRejection` in `test_callbacks.py`; #413 |
 | 2 | MP-1 | mpec | ⬜ |
 | 2 | DC-S1 | decomposition | ⬜ |
 | 2 | OA-1=C-35 | solver-core | ⬜ |
