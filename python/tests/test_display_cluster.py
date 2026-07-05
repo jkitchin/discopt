@@ -22,7 +22,15 @@ import discopt.modeling as dm
 import numpy as np
 import pytest
 from discopt.mo.nbi import _quasi_normal
-from discopt.modeling.latex import _fmt_num, expr_to_latex, model_to_latex
+from discopt.modeling.core import Constant, MatMulExpression
+from discopt.modeling.latex import (
+    _escape_html,
+    _fmt_num,
+    _latex_text,
+    expr_to_latex,
+    model_to_html,
+    model_to_latex,
+)
 
 pytestmark = pytest.mark.smoke
 
@@ -104,3 +112,97 @@ def test_l1_indicator_constraint_renders_without_crashing():
     m.minimize(z)
     m.if_then(a, [z >= 5], name="impl")
     assert isinstance(model_to_latex(m), str)
+
+
+# ----------------------------------------------------------------------------- L2
+def test_l2_fast_api_constraints_render():
+    """Fast-path constraints live only in the Rust builder; the renderer must route
+    through the X-1 primitive so they show up (previously "0 constraints")."""
+    m = dm.Model("fast")
+    plants = m.set("plants", ["pitt", "sf"])
+    x = m.continuous("x", over=plants, lb=0, ub=10)
+    m.minimize(dm.sum(x[p] for p in plants))
+    m.constraint(plants, lambda p: x[p] <= 1, name="cap", fast=True)
+    # Precondition: these rows are NOT on the Python constraint list.
+    assert len(m._constraints) == 0
+    tex = model_to_latex(m)
+    # Both fast-path rows must appear as real constraints (pre-fix: neither did).
+    assert r"\text{subject to}" in tex
+    assert r"x_{0} \le 1" in tex
+    assert r"x_{1} \le 1" in tex
+    # And the HTML header count must include them (pre-fix: "0 constraints").
+    html = model_to_html(m)
+    assert "2 constraints" in html
+    assert isinstance(m._repr_latex_(), str)
+
+
+def test_l2_fast_api_only_model_repr_does_not_crash():
+    m = dm.Model("fastonly")
+    s = m.set("s", [0, 1])
+    x = m.continuous("x", over=s, lb=0, ub=5)
+    m.constraint(s, lambda i: 2 * x[i] <= 3, name="c", fast=True)
+    assert isinstance(model_to_latex(m), str)
+    assert isinstance(model_to_html(m), str)
+
+
+# ----------------------------------------------------------------------------- L3
+def test_l3_sum_over_expression_renders_as_sum():
+    m = dm.Model("l3sum")
+    s = m.set("s", [0, 1, 2])
+    y = m.continuous("y", over=s, lb=0)
+    tex = expr_to_latex(dm.sum(y[i] for i in s))
+    assert r"\sum" in tex  # a real summation, not the raw `Σ[3 terms]` repr
+    assert "Σ" not in tex
+    assert "y_{0}" in tex and "y_{2}" in tex
+
+
+def test_l3_parameter_renders_as_escaped_symbol():
+    m = dm.Model("l3param")
+    price = m.parameter("price_A", value=50.0)
+    tex = expr_to_latex(price)
+    assert tex == r"price\_A"  # escaped underscore, not the `param(price_A)` repr
+    assert "param(" not in tex
+
+
+# ----------------------------------------------------------------------------- L4
+def test_l4_negation_parenthesised_under_power():
+    m = dm.Model("l4neg")
+    x = m.continuous("x", lb=-5, ub=5)
+    assert expr_to_latex((-x) ** 2) == r"\left(-x\right)^{2}"
+
+
+def test_l4_sum_parenthesised_under_power():
+    m = dm.Model("l4sum")
+    s = m.set("s", [0, 1])
+    y = m.continuous("y", over=s, lb=0)
+    tex = expr_to_latex(dm.sum(y[i] for i in s) ** 2)
+    assert tex.startswith(r"\left(") and tex.endswith(r"\right)^{2}")
+
+
+def test_l4_matmul_parenthesised_under_power():
+    m = dm.Model("l4mm")
+    s = m.set("s", [0, 1, 2])
+    v = m.continuous("v", over=s, lb=0)
+    A = Constant(np.array([[1.0, 2.0, 3.0]]))
+    tex = expr_to_latex(MatMulExpression(A, v) ** 2)
+    assert tex.startswith(r"\left(") and tex.endswith(r"\right)^{2}")
+
+
+# ----------------------------------------------------------------------------- L7
+def test_l7_latex_text_escapes_math_specials_no_html_entities():
+    out = _latex_text("a & b_c%d#e")
+    # LaTeX specials escaped, wrapped in \text{}, and NO HTML entity injected.
+    assert out == r"\text{a \& b\_c\%d\#e}"
+    assert "&amp;" not in out
+
+
+def test_l7_escape_html_is_html_only():
+    assert _escape_html("x<y&z") == "x&lt;y&amp;z"
+
+
+def test_l7_unknown_node_fallback_stays_math_safe():
+    # A stray non-expression object falls through to the escaped \text{} fallback.
+    tex = expr_to_latex("raw_string & <tag>")
+    assert tex.startswith(r"\text{")
+    assert "&amp;" not in tex  # must not inject HTML entities into math mode
+    assert r"\_" in tex  # underscore LaTeX-escaped
