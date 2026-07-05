@@ -257,7 +257,7 @@ Legend: ⬜ open · ◧ in-progress · ✅ resolved · ◻︎ not-reproduced.
 |------|-------|--------|--------|
 | root X-1 | GP-1, VAL-1, EX-2, M12 ✅ · classifier/extractor ◻︎ not-reproduced (already builder-aware via Rust repr) · FR-2 (Tier-2, out of scope) | gp/validation/export/modeling/solver-core | ✅ 1dc3278 — test_x1_builder_resident_rows |
 | root X-2 | CORE-1=C-29, TG-1=C-31, CF-1, GAMS bounds | solver-core/tightening/conflict/export | ⬜ |
-| root X-3 | M2 = INT-2 | modeling/infra | ⬜ |
+| root X-3 | M2 = INT-2 | modeling/infra | ✅ — `from_nl` clamps+preserves parsed binary lb/ub; test `TestFromNlBinaryBoundsX3` in `test_nl_reconstruction.py` |
 | 0 | LLM-1 | llm | ⬜ |
 | 1 | CORE-2=C-30 | solver-core | ⬜ |
 | 1 | SC-1=C-33, FR-1=C-34 (DEFAULT-path P0s) | solver-core | ⬜ |
@@ -311,6 +311,24 @@ consumers through the shared `discopt.export._common` row iterator plus
   shared iterator is nonetheless the canonical home should a future consumer need it.)
 - **FR-2** — a Tier-2 X-1 extension (nlp_evaluator / `nlp_ipopt.py:254` blind to builder
   rows in the *dual*/relaxation path); tracked separately, out of scope for this PR.
+
+**X-3 resolution notes (`from_nl` binary-bounds drop = M2 = INT-2).** Reproduced on
+this branch's base (`origin/main`): `from_nl` reads each column's parsed `lb/ub` but
+the `binary` branch called `m.binary(name, shape=shape)`, which hardcodes `[0, 1]` and
+ignores them — so a `.nl` binary fixed to 1 (`lb == ub == 1`, routine Pyomo/presolve
+output) re-imported as free `[0, 1]`. Repro: `to_nl`→`from_nl` of `min x + 10·y`
+(x∈[0,5], y binary fixed to 1) reconstructed `y` as `lb=0, ub=1` and solved to `~0.0`
+(y un-fixed to 0) instead of the true `10.0`. **Fix** (`modeling/core.py`, `from_nl`):
+after `m.binary(...)`, stamp the parsed bounds onto the variable, clamped into `[0, 1]`
+for soundness (`np.clip(..., 0, 1)`, broadcast to shape) — general to all binary
+columns and all shapes, not keyed to any instance; continuous/integer branches already
+preserved their bounds. After the fix the reconstructed `y` carries `lb=ub=1` and the
+round-trip solves to `10.0`. Regression: `TestFromNlBinaryBoundsX3` in
+`python/tests/test_nl_reconstruction.py` (fails-before verified by stashing the core
+fix: both cases assert the dropped bound, `0.0 == 1.0`). This closes both **M2**
+(modeling review) and **INT-2** (infra/interop review, which adds the Pyomo-bridge and
+MINLPLib-corpus impact surface). Cert-baseline neutrality: exact (no baseline instance
+carried a bound-binding fixed binary that was being dropped).
 
 **Verified SOUND (not findings, do not re-audit without new evidence):** the
 convexity certifier + convex fast-path (901-certificate fuzz, 0 false), the JAX

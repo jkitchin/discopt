@@ -3739,7 +3739,14 @@ def from_nl(path: str) -> Model:
         if vt == "continuous":
             m.continuous(name, shape=shape, lb=lb, ub=ub)
         elif vt == "binary":
-            m.binary(name, shape=shape)
+            var = m.binary(name, shape=shape)
+            # Preserve the parsed bounds (X-3 / M2 / INT-2): `Model.binary` hardcodes
+            # ``[0, 1]``, so a bound-narrowed or fixed binary (e.g. ``lb == ub == 1``,
+            # routine Pyomo/presolve output) would silently un-fix, giving the wrong
+            # optimum on the round-trip. Clamp the parsed bounds into ``[0, 1]`` (a
+            # binary column is 0/1 by definition) and stamp them onto the variable.
+            var.lb = np.broadcast_to(np.clip(np.asarray(lb, dtype=np.float64), 0.0, 1.0), shape)
+            var.ub = np.broadcast_to(np.clip(np.asarray(ub, dtype=np.float64), 0.0, 1.0), shape)
         elif vt == "integer":
             m.integer(name, shape=shape, lb=lb, ub=ub)
 
