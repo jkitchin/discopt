@@ -255,7 +255,7 @@ Legend: ⬜ open · ◧ in-progress · ✅ resolved · ◻︎ not-reproduced.
 
 | Tier | ID(s) | Module | Status |
 |------|-------|--------|--------|
-| root X-1 | GP-1, VAL-1, EX-2, M12 ✅ · classifier/extractor ◻︎ not-reproduced (already builder-aware via Rust repr) · FR-2 (Tier-2, out of scope) | gp/validation/export/modeling/solver-core | ✅ (test_x1_builder_resident_rows; PR #<TBD>) |
+| root X-1 | GP-1, VAL-1, EX-2, M12 ✅ · classifier/extractor ◻︎ not-reproduced (already builder-aware via Rust repr) · FR-2 (Tier-2, out of scope) | gp/validation/export/modeling/solver-core | ✅ 1dc3278 — test_x1_builder_resident_rows |
 | root X-2 | CORE-1=C-29, TG-1=C-31, CF-1, GAMS bounds | solver-core/tightening/conflict/export | ⬜ |
 | root X-3 | M2 = INT-2 | modeling/infra | ⬜ |
 | 0 | LLM-1 | llm | ⬜ |
