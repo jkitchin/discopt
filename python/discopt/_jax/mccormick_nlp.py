@@ -186,8 +186,6 @@ def solve_mccormick_relaxation_nlp(
     negate: bool = False,
     max_iter: int = 50,
     deadline: float | None = None,
-    obj_relax_fn_numpy: Optional[Callable] = None,
-    con_relax_fns_numpy: Optional[list[Callable]] = None,
 ) -> float:
     """Solve a convex NLP over McCormick relaxations for a tight lower bound.
 
@@ -259,8 +257,6 @@ def solve_mccormick_batch(
     negate: bool = False,
     max_iter: int = 50,
     deadline: float | None = None,
-    obj_relax_fn_numpy: Optional[Callable] = None,
-    con_relax_fns_numpy: Optional[list[Callable]] = None,
 ) -> jnp.ndarray:
     """Solve McCormick relaxation NLPs for a batch of nodes via vmap.
 
@@ -311,8 +307,6 @@ def solve_mccormick_batch(
             negate=negate,
             max_iter=max_iter,
             deadline=deadline,
-            obj_relax_fn_numpy=obj_relax_fn_numpy,
-            con_relax_fns_numpy=con_relax_fns_numpy,
         )
         result_list.append(val)
 

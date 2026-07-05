@@ -151,13 +151,15 @@ last.** "Default path" = a plain `m.solve()` on an idiomatic model.
   `mccormick_bounds="nlp"` only, but the relaxation math is unsound and must be fixed
   at the math level. Extend the containment harness to nonlinear denominators.
 - **NN-1** (nn) — scaling ignored in bound propagation → unsound big-M → wrong optimum.
-- **NM-1=C-32** (`_numpy`/`_jax` McCormick) — `relax_asin`/`relax_acos` inverted
+- **NM-1=C-32** (`_jax` McCormick) — `relax_asin`/`relax_acos` inverted
   curvature → **unsound convex envelope in the LIVE JAX relaxation layer** (cv sits
-  above the function) → invalid dual bound. Fix both `mccormick.py` files + docstrings;
+  above the function) → invalid dual bound. Fix `_jax/mccormick.py` + docstrings;
   extend the soundness harness to sample off-diagonal (diagonal-only masking hid it).
-- **NM-2** (`_numpy` McCormick) — compiler leaf drops the box → numpy relaxation
-  collapses to the exact nonconvex function (latent: numpy backend compiled-but-
-  unused). Keep the numpy backend disabled until NM-1+NM-2 are green.
+- **NM-2** (`_numpy` McCormick) — ✅ **RESOLVED by deletion** (#413). The compiler
+  leaf dropped the box → numpy relaxation collapsed to the exact nonconvex function,
+  but the backend was compiled-but-unused (params accepted, never consumed). Deleted
+  the whole dead backend rather than porting it — behavior-preserving; see
+  `numpy-mccormick-review.md` §4.
 - **GP-1** (gp), **VAL-1** (validation) — *closed by X-1.*
 - *The convexity certifier + convex fast-path were audited and verified **SOUND**
   (901-certificate fuzz, 0 false) — see `solver-core-review.md`. Not a finding.*
@@ -290,7 +292,8 @@ Legend: ⬜ open · ◧ in-progress · ✅ resolved · ◻︎ not-reproduced.
 | 1 | SC-1=C-33, FR-1=C-34 (DEFAULT-path P0s) | solver-core | ⬜ |
 | 1 | C-17 (confirmed), DIV-1=C-23 | solver-core | ⬜ |
 | 1 | NN-1, NN-2 | nn | ⬜ |
-| 1 | NM-1=C-32 (live JAX + numpy), NM-2 | _numpy/_jax McCormick | ⬜ |
+| 1 | NM-1=C-32 (live JAX) | _jax McCormick | ⬜ |
+| 1 | NM-2 | _numpy McCormick (deleted) | ✅ — deleted the dead, compiled-but-unused `discopt._numpy` backend (behavior-preserving: params accepted but never consumed; POUNCE builds the bound from the JAX relaxation alone). Removed `_numpy/` pkg, `solver.py` compile block + 2 call sites, dead `obj/con_relax_fns_numpy` params in `_jax/mccormick_nlp.py`, numpy `_BACKENDS` id in C19/C23/C32 envelope tests, stale mypy override; #413 |
 | 2 | RO-1, RO-2, RO-3 | ro | ⬜ |
 | 2 | C1, C2, C3 | dae | ⬜ |
 | 2 | EX-1 | export | ✅ — union-based J/G/k/header sparsity; nonlinear-only vars get a 0-coeff `J` entry; pure-constant bodies move to r-section rhs (`n0` body, no longer counted nonlinear). Byte-level structural parity with Pyomo's writer on a 4-case corpus; `TestNLWriterJacobianConformance` in `test_nl_writer.py`; #413 |
