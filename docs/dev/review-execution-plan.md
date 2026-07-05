@@ -293,7 +293,7 @@ Legend: ⬜ open · ◧ in-progress · ✅ resolved · ◻︎ not-reproduced.
 | 2 | MP-1 | mpec | ⬜ |
 | 2 | DC-S1 | decomposition | ⬜ |
 | 2 | OA-1=C-35 | solver-core | ⬜ |
-| 2 | M3 | modeling | ⬜ |
+| 2 | M3 | modeling | ✅ `test_m3_cross_model_ownership` — validate() rejects index-incompatible cross-model leaves |
 | 3 | MO1–MO4 | mo | ⬜ |
 | 3 | E1–E3, L1–L8, M4–M8 | modeling/examples/latex | ⬜ |
 | 4 | Rust-1 (dual/ray unscale), Rust-2 (numpy panic), P2/P3 across all | all | ⬜ |
