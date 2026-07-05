@@ -127,13 +127,30 @@ class TestComputeBigM:
         # Lower bound of body = 0 - 3 = -3, so M = -(-3) * 1.01 = 3.03
         assert M == pytest.approx(3.0 * 1.01)
 
-    def test_infinite_bounds_use_default(self):
+    def test_large_finite_bounds_use_true_bound(self):
+        # GDP-1 (#413): a variable left at the large-but-FINITE default bounds
+        # (±~1e20) has a valid (large) big-M equal to that finite bound. The old
+        # behavior shrank it to _DEFAULT_BIG_M (1e4), which is NOT a valid
+        # over-estimate and cut feasible points of the active disjunct → a
+        # false-infeasible certificate. Correctness first: use the true finite
+        # bound, even though a huge M weakens the LP relaxation.
         m = dm.Model("t")
-        x = m.continuous("x")  # lb=-1e20, ub=1e20
+        x = m.continuous("x")  # lb≈-1e20, ub≈1e20 (finite defaults)
+        ub = float(np.max(x.ub))
         con = Constraint(body=x, sense="<=", rhs=0.0)
         M = _compute_big_m(con, m)
-        # Should fallback to default 1e4
-        assert M == pytest.approx(1e4 * 1.01)
+        assert M == pytest.approx(ub * 1.01)
+        assert M >= ub  # M must over-estimate the body's reachable max
+
+    def test_truly_infinite_bounds_refuse_loudly(self):
+        # GDP-1 (#413): a genuinely unbounded body has NO valid finite big-M.
+        # Silently substituting a default M would cut feasible points, so the
+        # reformulation must refuse loudly instead.
+        m = dm.Model("t")
+        x = m.continuous("x", lb=-np.inf, ub=np.inf)
+        con = Constraint(body=x, sense="<=", rhs=0.0)
+        with pytest.raises(ValueError, match="unbounded|finite"):
+            _compute_big_m(con, m)
 
 
 # ── Indicator constraint reformulation ──

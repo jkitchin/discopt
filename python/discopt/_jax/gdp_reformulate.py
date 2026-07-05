@@ -169,8 +169,22 @@ def _compute_big_m(
     For a constraint ``body sense 0``, we need an upper bound on ``body``
     (for ``<=``), a lower bound (for ``>=``), or both (for ``==``).
 
-    Uses interval arithmetic over the expression tree to get tight M.
-    Falls back to *default* if any bound is infinite.
+    Uses interval arithmetic over the expression tree to get the tightest
+    valid M. **Correctness rule (GDP-1, #413):** M *must* be a valid
+    over-estimate of the body over the true variable domain — a big-M that is
+    too small turns the inactive disjunct's relaxed constraint into a real
+    constraint and can cut feasible points of the *active* disjunct, producing
+    a false-infeasible / wrong-optimum certificate. Therefore:
+
+    - When the relevant body bound is **finite** (even if very large, e.g. a
+      variable left at the default ±1e20), that finite bound *is* a valid M and
+      is used as-is. A large M weakens the LP relaxation (a *performance* cost),
+      but correctness comes first — we never shrink a valid finite M to a
+      smaller ``default`` just because it exceeds a "looks infinite" threshold.
+    - When the relevant body bound is **truly non-finite** (``±inf``), no valid
+      finite M exists, so we **refuse loudly** rather than silently substitute
+      ``default`` (which is not a valid over-estimate and would cut feasible
+      points). The caller must supply a finite bound on the offending variable.
 
     Parameters
     ----------
@@ -179,36 +193,65 @@ def _compute_big_m(
     model : Model
         Model containing variable bound information.
     default : float
-        Fallback M value when bounds are infinite.
+        Fallback M used only when the body is provably bounded by ``default``
+        (i.e. the interval bound is finite and no tighter value is available).
+        It is never used to *replace* a larger finite bound, and never used to
+        paper over an infinite bound.
 
     Returns
     -------
     float
-        A finite big-M value.
+        A valid (over-estimating) big-M value.
+
+    Raises
+    ------
+    ValueError
+        If the constraint body is unbounded in the direction the big-M must
+        cover (no valid finite M exists).
     """
     lo, hi = _bound_expression(constraint.body, model)
 
-    # Treat bounds >= 1e15 as effectively infinite (default variable bounds are 1e20)
-    _INF_THRESH = 1e15
+    def _require_finite_upper() -> float:
+        # Valid M for a ``body <= 0`` disjunct: any value >= max body. The
+        # interval upper bound ``hi`` is exactly that. Finite (even if huge) ⇒
+        # valid; non-finite ⇒ no valid finite M exists.
+        if np.isfinite(hi):
+            return abs(hi)
+        raise _unbounded_big_m_error(constraint, "above")
+
+    def _require_finite_lower() -> float:
+        # Valid M for a ``body >= 0`` disjunct: any value >= -min(body) = |lo|.
+        if np.isfinite(lo):
+            return abs(lo)
+        raise _unbounded_big_m_error(constraint, "below")
 
     if constraint.sense == "<=":
-        # body <= 0 is the active constraint; when deactivated we need body <= M
-        # so M = upper bound of body
-        M = hi if np.isfinite(hi) and abs(hi) < _INF_THRESH else default
+        M = _require_finite_upper()
     elif constraint.sense == ">=":
-        # body >= 0 is active; when deactivated body >= -M
-        # so M = -lower_bound of body = abs(lo)
-        M = -lo if np.isfinite(lo) and abs(lo) < _INF_THRESH else default
+        M = _require_finite_lower()
     elif constraint.sense == "==":
-        # Need both directions
-        M_hi = hi if np.isfinite(hi) and abs(hi) < _INF_THRESH else default
-        M_lo = -lo if np.isfinite(lo) and abs(lo) < _INF_THRESH else default
-        M = max(M_hi, M_lo)
+        # Need to cover both directions.
+        M = max(_require_finite_upper(), _require_finite_lower())
     else:
         M = default
 
-    # Ensure M is positive and add small safety margin
+    # Ensure M is positive and add small safety margin. ``default`` is a floor
+    # (a body whose valid bound is tiny still needs a nonzero M), never a cap.
     return max(abs(M), 1e-8) * 1.01
+
+
+def _unbounded_big_m_error(constraint: Constraint, direction: str) -> ValueError:
+    """Build the loud-refusal error for an unbounded big-M (GDP-1, #413)."""
+    cname = getattr(constraint, "name", None) or "<unnamed>"
+    return ValueError(
+        f"GDP big-M reformulation cannot bound the body of constraint "
+        f"{cname!r} from {direction}: its interval enclosure is unbounded, so "
+        f"no valid finite big-M exists. A too-small big-M would cut feasible "
+        f"points of the active disjunct and yield a false certificate. Add a "
+        f"finite bound to the variable(s) in this disjunct/indicator (e.g. "
+        f"m.continuous(..., lb=..., ub=...)), or use the 'hull' reformulation "
+        f"(method='hull'), which does not require a finite big-M."
+    )
 
 
 def _compute_big_m_lp(
@@ -271,11 +314,27 @@ def _compute_big_m_lp(
     # come back *too small* and cut off feasible points of the inactive
     # disjunct — the exact unsoundness the "exact oracle only" comment above
     # guards against. Read each element's own bound.
+    #
+    # GDP-2 (#413): ``lp_data`` (its ``c_vec``/``A_ub``/``A_eq`` and ``n_vars``)
+    # is precomputed from the ORIGINAL model, before the reformulation appends
+    # selector/aux binaries. But ``model`` here is the *mutated* ``new_model``
+    # that already carries those aux vars, so iterating all of
+    # ``model._variables`` yields MORE scalar columns than ``n_vars``. Passing a
+    # ``bounds`` list longer than ``c``/``A`` desynchronizes the LP dimensions
+    # and crashes the exact LP backend (``copy_from_slice`` length mismatch),
+    # breaking every mbigm disjunction that adds a selector. The aux vars are
+    # always appended *after* the originals, so the first ``n_vars`` scalar
+    # columns are exactly the original variables that ``c_vec`` indexes — take
+    # only those.
     bounds_list = []
     for v in model._variables:
+        if len(bounds_list) >= n_vars:
+            break
         lb_flat = np.asarray(v.lb, dtype=np.float64).ravel()
         ub_flat = np.asarray(v.ub, dtype=np.float64).ravel()
         for i in range(v.size):
+            if len(bounds_list) >= n_vars:
+                break
             lb_i = float(lb_flat[i]) if lb_flat.size == v.size else float(lb_flat.flat[0])
             ub_i = float(ub_flat[i]) if ub_flat.size == v.size else float(ub_flat.flat[0])
             bounds_list.append((lb_i, ub_i))
@@ -1336,11 +1395,27 @@ def _reformulate_sos(
         ub_val = hi_v
         lb_val = lo_v
 
-        # Clamp to finite values for big-M
+        # GDP-1 (#413): the linking constraint ``x_i <= ub_i * z_i`` uses
+        # ``ub_i`` as the value x_i may take when z_i=1. A too-small ``ub_i``
+        # (e.g. clamping an infinite bound to ``_DEFAULT_BIG_M``) would cap the
+        # variable below its true range and cut feasible SOS points — a false
+        # certificate. A large *finite* bound is a valid cap; a truly infinite
+        # bound has no valid finite cap, so refuse loudly instead of clamping.
+        vname = getattr(v, "name", None) or f"variable {i}"
         if not np.isfinite(ub_val):
-            ub_val = _DEFAULT_BIG_M
+            raise ValueError(
+                f"SOS{sc.sos_type} reformulation cannot bound {vname!r} from "
+                f"above (upper bound is infinite), so the linking big-M would "
+                f"be invalid and could cut feasible points. Add a finite upper "
+                f"bound to this variable."
+            )
         if not np.isfinite(lb_val):
-            lb_val = -_DEFAULT_BIG_M
+            raise ValueError(
+                f"SOS{sc.sos_type} reformulation cannot bound {vname!r} from "
+                f"below (lower bound is infinite), so the linking big-M would "
+                f"be invalid and could cut feasible points. Add a finite lower "
+                f"bound to this variable."
+            )
 
         # x_i - ub_i * z_i <= 0
         new_cons.append(
