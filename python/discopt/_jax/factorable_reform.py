@@ -1346,6 +1346,7 @@ def canonicalize_entropy(model: Model) -> Model:
         new_model = Model(model.name)
         new_model._variables = list(model._variables)
         new_model._parameters = list(model._parameters)
+        new_model._rebuild_name_index()  # keep the name cache in sync (M7)
         new_model._objective = new_objective
         new_model._constraints = new_constraints
         return new_model
@@ -1385,6 +1386,7 @@ def _factorable_reformulate_inner(model: Model, *, clear_only: bool = False) -> 
         new_model = Model(model.name)
         new_model._variables = list(model._variables)
         new_model._parameters = list(model._parameters)
+        new_model._rebuild_name_index()  # keep the name cache in sync (M7)
         new_model._objective = model._objective
 
         lifter = _Lifter(new_model)

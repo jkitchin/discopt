@@ -184,7 +184,7 @@ def measure_solve(model, oracle):
     out = {}
     t0 = time.perf_counter()
     try:
-        res = model.solve(time_limit=TIME_CAP, gap=1e-4)
+        res = model.solve(time_limit=TIME_CAP, gap_tolerance=1e-4)
     except Exception as e:
         out["solve_status"] = f"solve_error:{type(e).__name__}:{str(e)[:80]}"
         out["wall_seconds"] = round(time.perf_counter() - t0, 3)

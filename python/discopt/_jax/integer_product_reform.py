@@ -474,6 +474,7 @@ def expand_integer_products(model: Model, implied=frozenset()) -> Model:
         new_model = Model(model.name)
         new_model._variables = list(model._variables)
         new_model._parameters = list(model._parameters)
+        new_model._rebuild_name_index()  # keep the name cache in sync (M7)
         new_model._objective = model._objective
         exp = _Expander(new_model, implied=implied, participation=_participation(model, implied))
 

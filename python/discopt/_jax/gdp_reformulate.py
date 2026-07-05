@@ -90,6 +90,7 @@ def reformulate_gdp(
     # Copy variables (share the same Variable objects so expressions still work)
     new_model._variables = list(model._variables)
     new_model._parameters = list(model._parameters)
+    new_model._rebuild_name_index()  # keep the name cache in sync (M7)
     new_model._objective = model._objective
 
     # Track auxiliary binaries added by the reformulation

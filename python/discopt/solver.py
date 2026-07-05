@@ -2442,6 +2442,82 @@ def _scoped_deep_recursion(fn: _F) -> _F:
     return cast(_F, wrapper)
 
 
+# Backend-specific keyword arguments that ``solve_model`` forwards through its
+# own ``**kwargs`` to an optional backend (AMP / gurobi / mip-nlp / GP / the
+# lp-spatial path). These are NOT named parameters of ``solve_model`` but are
+# legitimately accepted — the kwarg-validation guard (M6) must allow them so a
+# real backend option is never rejected as a typo. Sourced from every
+# ``kwargs.get``/``kwargs.pop`` site in this module plus the AMP option list.
+_BACKEND_PASSTHROUGH_KWARGS: frozenset[str] = frozenset(
+    {
+        # lp-spatial diagnostic path
+        "lp_spatial",
+        "lp_spatial_cut_rounds",
+        # gurobi backend
+        "gurobi_options",
+        # mip-nlp (OA/ECP/LOA) backend
+        "mip_nlp_method",
+        "mip_nlp_options",
+        "equality_relaxation",
+        "ecp_mode",
+        "feasibility_cuts",
+        "milp_solver",
+        # AMP backend option keys (see ``amp_option_keys`` in solve_model)
+        "rel_gap",
+        "abs_tol",
+        "max_iter",
+        "n_init_partitions",
+        "partition_method",
+        "iteration_callback",
+        "milp_time_limit",
+        "milp_gap_tolerance",
+        "presolve_bt",
+        "presolve_bt_algo",
+        "presolve_bt_time_limit",
+        "presolve_bt_mip_time_limit",
+        "apply_partitioning",
+        "disc_var_pick",
+        "partition_scaling_factor",
+        "partition_scaling_factor_update",
+        "disc_add_partition_method",
+        "disc_abs_width_tol",
+        "convhull_formulation",
+        "convhull_ebd",
+        "convhull_ebd_encoding",
+        "use_start_as_incumbent",
+        "obbt_at_root",
+        "obbt_with_cutoff",
+        "alphabb_cutoff_obbt",
+        "obbt_time_limit",
+    }
+)
+
+
+@functools.lru_cache(maxsize=1)
+def solve_model_accepted_kwargs() -> frozenset[str]:
+    """The complete set of keyword names ``Model.solve`` may forward to the solver.
+
+    Union of (a) ``solve_model``'s own named parameters and (b) the curated
+    backend-passthrough keys forwarded through its ``**kwargs``. Used by
+    ``Model.solve`` to reject a misspelled/unknown keyword loudly (M6) instead of
+    silently swallowing it — a swallowed ``gap_tolerence=…`` leaves the solver at
+    the default gap while the user believes it was tightened (a results-integrity
+    hazard). ``inspect.signature`` follows ``functools.wraps`` through the two
+    decorators to the real signature.
+    """
+    import inspect
+
+    params = inspect.signature(solve_model).parameters
+    named = {
+        name
+        for name, p in params.items()
+        if p.kind in (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY)
+    }
+    # ``model`` is the positional target, not a forwardable option; drop it.
+    named.discard("model")
+    return frozenset(named | _BACKEND_PASSTHROUGH_KWARGS)
+
+
 @_scoped_deep_recursion
 @_scoped_tuning
 def solve_model(
