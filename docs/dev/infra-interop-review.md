@@ -21,7 +21,7 @@ round-trip correctly).
 
 | # | Severity | Component | Finding |
 |---|----------|-----------|---------|
-| INT-1 | **P1 correctness** | `solver.py:7479` + `1461-1478` | On the **NLP-BB path**, `_invoke_pre_import_callbacks` is called with `_cut_pool=None` while forwarding a live `lazy_constraints` callback. `_cut_pool.add(...)` raises `AttributeError`, swallowed by the broad `except`; because `.add` precedes the node-rejection line inside the `try`, the rejection is **also lost** — the integer-feasible point the cut meant to exclude is **accepted as incumbent** [CONFIRMED: code path + agent end-to-end repro returns `y=0` instead of `y=1`] |
+| INT-1 | **P1 correctness** | `solver.py:7479` + `1461-1478` | On the **NLP-BB path**, `_invoke_pre_import_callbacks` is called with `_cut_pool=None` while forwarding a live `lazy_constraints` callback. `_cut_pool.add(...)` raises `AttributeError`, swallowed by the broad `except`; because `.add` precedes the node-rejection line inside the `try`, the rejection is **also lost** — the integer-feasible point the cut meant to exclude is **accepted as incumbent** [CONFIRMED: code path + agent end-to-end repro returns `y=0` instead of `y=1`]. **✅ RESOLVED (#413): the NLP-BB path cannot enforce a rejecting callback (no per-node cut application; its primal heuristics — feasibility pump, RENS, diving, sub-NLP — inject incumbents via `tree.inject_incumbent` without consulting the callback), so it now REFUSES `lazy_constraints`/`incumbent_callback` loudly (explicit `nlp_bb=True` raises `ValueError`; auto-select `nlp_bb=None` falls through to spatial B&B, which honors both). `_invoke_pre_import_callbacks` reordered to reject-before-add and its `except` narrowed to wrap only the user-callback call, so a programming error (e.g. a `None` cut pool) surfaces instead of silently dropping a rejection. Regression `TestInt1NlpBbLazyRejection` in `test_callbacks.py`. NOTE: a *separate* pre-existing defect surfaced during confirm — the feasibility-pump/RENS heuristics inject incumbents WITHOUT consulting the callbacks on BOTH paths, so a lazy/incumbent rejection is silently bypassed whenever a heuristic finds the excluded point at the root (reproduces on `origin/main`, spatial path included); tracked as a follow-up, not INT-1.** |
 | INT-2 | **P1 correctness** | `modeling/core.py:3629-3630` (`from_nl`) | Binary columns drop the `.nl`'s `lb/ub` (the integer branch keeps them). A `.nl` binary with `lb=ub=1` re-imports as free `[0,1]` → wrong optimum. **Hits the Pyomo `SolverFactory('discopt')` bridge and any `from_nl` of a MINLPLib instance with fixed binaries** [CONFIRMED; = modeling-review M2, here with corpus/bridge impact] **✅ RESOLVED (X-3, #413): `from_nl` now stamps the parsed lb/ub onto the binary column, clamped into `[0,1]`; closes M2 = INT-2 in one change. Regression `TestFromNlBinaryBoundsX3` in `test_nl_reconstruction.py`.** |
 | INT-3 | P2 | `pyomo/solver.py:164-171` | Pyomo bridge stores the **incumbent** in `problem.lower_bound` and the **dual bound** in `upper_bound` — swapped for minimize (incumbent is an *upper* bound). Only observable with a nonzero gap; misreports `SolverResults` bounds but does not corrupt the loaded primal [CONFIRMED by logic] |
 | INT-4 | P2 | `callbacks.py` + `solver.py:1470-1477` | The same swallow-before-reject ordering means **any** exception in `cut_result_to_dense` (e.g. a cut referencing an unknown variable) drops the cut *and* accepts the node — a malformed user cut yields silent acceptance rather than a loud error [CONFIRMED by inspection] |
@@ -68,6 +68,28 @@ guard. **Fix:** either build a real cut pool on the NLP-BB path, or **refuse
 loudly** when `lazy_constraints` is combined with `nlp_bb=True` (per the
 "refuse rather than silently approximate" rule); and move the node-rejection
 *before* the `.add` so a cut-construction error can never yield acceptance (INT-4).
+
+> **STATUS — ✅ RESOLVED (#413).** Chose the loud refusal: confirm-first showed the
+> NLP-BB path has NO way to honor a rejecting callback — it has no per-node cut
+> application (the augmented-evaluator cut pool is spatial-B&B-only) *and* its primal
+> heuristics (feasibility pump, RENS, fractional diving, sub-NLP) inject incumbents
+> directly via `tree.inject_incumbent` without ever consulting the callback. Building
+> a no-op cut pool would fix only the swallow while the heuristic bypass still returns
+> the excluded point, so per CLAUDE.md §3 the path now refuses: explicit
+> `nlp_bb=True` + `lazy_constraints`/`incumbent_callback` raises a clear `ValueError`;
+> auto-select (`nlp_bb=None`) skips NLP-BB when either callback is set and falls
+> through to spatial B&B (which honors them, verified on the nonlinear-knapsack
+> fixture). `_invoke_pre_import_callbacks` (shared with the spatial path) was
+> hardened: the node-rejection now precedes any fallible cut insertion, and the
+> `except` wraps ONLY the user-callback invocation, so a `None`-cut-pool
+> `AttributeError` (or any of our own errors after the callback) can no longer be
+> downgraded to a warning that also loses the rejection (closes INT-4's ordering
+> concern too). Regression `TestInt1NlpBbLazyRejection` in `test_callbacks.py`
+> (fails-before/passes-after verified by stashing). Cert-baseline: NEUTRAL, 41/41
+> `nodes N->N`, `|Δobj|=0`. **Follow-up (separate finding, reproduces on `origin/main`):
+> the feasibility-pump/RENS heuristics bypass the lazy/incumbent callbacks on the
+> spatial path too when they find the excluded point at the root — a broader
+> heuristic-vs-callback contract gap, out of scope for INT-1.**
 
 **INT-2** is modeling-review M2, but the infra pass adds the impact surface: it is
 inherited by the Pyomo `SolverFactory('discopt')` bridge and by any direct
