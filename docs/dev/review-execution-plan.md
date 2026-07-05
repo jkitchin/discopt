@@ -288,7 +288,7 @@ Legend: ⬜ open · ◧ in-progress · ✅ resolved · ◻︎ not-reproduced.
 | 1 | NM-1=C-32 (live JAX + numpy), NM-2 | _numpy/_jax McCormick | ⬜ |
 | 2 | RO-1, RO-2, RO-3 | ro | ⬜ |
 | 2 | C1, C2, C3 | dae | ⬜ |
-| 2 | EX-1 | export | ⬜ |
+| 2 | EX-1 | export | ✅ — union-based J/G/k/header sparsity; nonlinear-only vars get a 0-coeff `J` entry; pure-constant bodies move to r-section rhs (`n0` body, no longer counted nonlinear). Byte-level structural parity with Pyomo's writer on a 4-case corpus; `TestNLWriterJacobianConformance` in `test_nl_writer.py`; #413 |
 | 2 | INT-1 | infra/solver | ⬜ |
 | 2 | MP-1 | mpec | ⬜ |
 | 2 | DC-S1 | decomposition | ⬜ |
