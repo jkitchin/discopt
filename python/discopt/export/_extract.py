@@ -141,6 +141,64 @@ def extract_linear_terms(
     return coeffs, const
 
 
+def _scalar_constant(value: np.ndarray, context: str) -> float:
+    """Collapse a constant array to a single scalar, or raise.
+
+    A constant in a scalar-required position must be genuinely scalar: a
+    0-d array or a 1-element array (which broadcasts to a scalar). A
+    multi-element array cannot be silently collapsed to its first element
+    (finding EX-7, #413) — that produces a wrong exported model — so we
+    raise loudly instead. Reduction contexts (``sum``) must not route here;
+    they sum the full array via :func:`_eval_constant_array` instead.
+    """
+    if value.ndim == 0 or value.size == 1:
+        return float(value.reshape(()) if value.ndim == 0 else value.flat[0])
+    raise ValueError(
+        f"Array-valued constant of shape {value.shape} appears in a scalar "
+        f"position ({context}) and cannot be collapsed to a single value. "
+        "Wrap it in a reduction (e.g. sum(...)) or index a single element."
+    )
+
+
+def _eval_constant_array(expr: Expression) -> np.ndarray:
+    """Evaluate a constant (variable-free) expression to its full ndarray.
+
+    Unlike :func:`_get_constant_value`, this preserves array shape and
+    broadcasting so a reduction context can sum every element rather than
+    silently keeping only the first (finding EX-7, #413). Callers must have
+    established ``_is_constant(expr)`` first.
+    """
+    result: np.ndarray
+    if isinstance(expr, Constant):
+        result = expr.value
+    elif isinstance(expr, UnaryOp):
+        if expr.op != "neg":
+            raise ValueError(f"Cannot evaluate unary '{expr.op}' as constant.")
+        result = -_eval_constant_array(expr.operand)
+    elif isinstance(expr, BinaryOp):
+        left = _eval_constant_array(expr.left)
+        right = _eval_constant_array(expr.right)
+        if expr.op == "+":
+            result = left + right
+        elif expr.op == "-":
+            result = left - right
+        elif expr.op == "*":
+            result = left * right
+        elif expr.op == "/":
+            result = left / right
+        elif expr.op == "**":
+            result = left**right
+        else:
+            raise ValueError(f"Cannot evaluate binary '{expr.op}' as constant.")
+    elif isinstance(expr, SumOverExpression):
+        result = np.asarray(sum(_eval_constant_array(t).sum() for t in expr.terms), dtype=float)
+    elif isinstance(expr, SumExpression):
+        result = np.asarray(_eval_constant_array(expr.operand).sum(), dtype=float)
+    else:
+        raise ValueError(f"Expression type '{type(expr).__name__}' is not constant.")
+    return result
+
+
 def _extract_linear_recursive(
     expr: Expression,
     coeffs: dict[int, float],
@@ -150,8 +208,7 @@ def _extract_linear_recursive(
 ) -> float:
     """Recursively extract linear terms. Returns the constant contribution."""
     if isinstance(expr, Constant):
-        val = float(expr.value) if expr.value.ndim == 0 else float(expr.value.flat[0])
-        return multiplier * val
+        return multiplier * _scalar_constant(expr.value, "constant term")
 
     if isinstance(expr, Variable) or isinstance(expr, IndexExpression):
         idx = _var_index(expr, flat_vars, model_vars)
@@ -227,6 +284,11 @@ def _extract_linear_recursive(
         return total_const
 
     if isinstance(expr, SumExpression):
+        # A pure-constant operand is reduced over all its elements: sum the
+        # full array rather than routing a multi-element Constant into the
+        # scalar handler (finding EX-7, #413).
+        if _is_constant(expr.operand):
+            return multiplier * float(_eval_constant_array(expr.operand).sum())
         return _extract_linear_recursive(expr.operand, coeffs, multiplier, flat_vars, model_vars)
 
     raise ValueError(
@@ -284,8 +346,7 @@ def _extract_quad_recursive(
 ) -> float:
     """Recursively extract quadratic and linear terms."""
     if isinstance(expr, Constant):
-        val = float(expr.value) if expr.value.ndim == 0 else float(expr.value.flat[0])
-        return multiplier * val
+        return multiplier * _scalar_constant(expr.value, "constant term")
 
     if isinstance(expr, (Variable, IndexExpression)):
         idx = _var_index(expr, flat_vars, model_vars)
@@ -428,6 +489,9 @@ def _extract_quad_recursive(
         return total
 
     if isinstance(expr, SumExpression):
+        # Reduce a pure-constant operand over all elements (finding EX-7, #413).
+        if _is_constant(expr.operand):
+            return multiplier * float(_eval_constant_array(expr.operand).sum())
         return _extract_quad_recursive(
             expr.operand, quad, linear, multiplier, flat_vars, model_vars
         )
@@ -472,7 +536,7 @@ def _is_constant(expr: Expression) -> bool:
 def _get_constant_value(expr: Expression) -> float:
     """Evaluate a constant expression (no variables) to a float."""
     if isinstance(expr, Constant):
-        return float(expr.value) if expr.value.ndim == 0 else float(expr.value.flat[0])
+        return _scalar_constant(expr.value, "constant coefficient/operand")
     if isinstance(expr, UnaryOp):
         if expr.op == "neg":
             return -_get_constant_value(expr.operand)
@@ -491,4 +555,8 @@ def _get_constant_value(expr: Expression) -> float:
         if expr.op == "**":
             return float(left**right)
         raise ValueError(f"Cannot evaluate binary '{expr.op}' as constant.")
+    if isinstance(expr, (SumExpression, SumOverExpression)):
+        # A reduction of a constant collapses to a genuine scalar (its sum),
+        # so it is well-defined even in a scalar-required position.
+        return float(_eval_constant_array(expr).sum())
     raise ValueError(f"Expression type '{type(expr).__name__}' is not constant.")
