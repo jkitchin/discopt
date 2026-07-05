@@ -203,9 +203,24 @@ class TestBudgetUncertaintySet:
     def test_A_b_shapes(self, vector_param):
         k = 3
         unc = budget_uncertainty_set(vector_param, delta=1.0, gamma=1.0)
-        # A should have shape (2k + 2, k): k box-upper, k box-lower, 2 budget
-        assert unc.A.shape == (2 * k + 2, k)
-        assert unc.b.shape == (2 * k + 2,)
+        # RO-3: the exact compact lifted (ξ, u) representation lives in R^{2k}.
+        # Rows: k (ξ_j - δ u_j ≤ 0) + k (-ξ_j - δ u_j ≤ 0) + 1 (Σu ≤ Γ)
+        #       + k (u_j ≤ 1) + k (-u_j ≤ 0) = 4k + 1; columns = 2k.
+        assert unc.A.shape == (4 * k + 1, 2 * k)
+        assert unc.b.shape == (4 * k + 1,)
+        # n_param records the true parameter dimension (first k columns are ξ).
+        assert unc.n_param == k
+
+    def test_budget_support_is_bertsimas_sim_not_box(self, vector_param):
+        # RO-3 regression: the stored set must be the TRUE budget set, so the
+        # support in a mixed-sign direction equals the B–S value, not the box.
+        from discopt.ro.formulations.polyhedral import _support_function_lp
+
+        unc = budget_uncertainty_set(vector_param, delta=1.0, gamma=1.0)
+        coeff = np.zeros(unc.A.shape[1])
+        coeff[:3] = [1.0, -1.0, 0.0]  # mixed-sign; box would give 2.0
+        sf = _support_function_lp(coeff, unc.A, unc.b, maximize=True)
+        assert sf == pytest.approx(1.0, abs=1e-4)
 
 
 # ---------------------------------------------------------------------------

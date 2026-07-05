@@ -206,14 +206,19 @@ class PolyhedralUncertaintySet(UncertaintySet):
     _delta: np.ndarray | None
     _gamma: float | None
     _is_budget: bool
+    _n_param: int | None
 
     def __init__(self, parameter, A, b) -> None:  # type: ignore[no-untyped-def]
         super().__init__(parameter)
         A = np.asarray(A, dtype=np.float64)
         b = np.asarray(b, dtype=np.float64)
         k = int(np.prod(parameter.value.shape)) if parameter.value.ndim > 0 else 1
-        if A.ndim != 2 or A.shape[1] != k:
-            raise ValueError(f"A must have shape (m, {k}), got {A.shape}")
+        # A may live in a lifted space (columns = k parameter dims followed by
+        # auxiliary/lift dims), so its column count is a multiple-of / at least k;
+        # the direct (unlifted) case has exactly k columns. Both are accepted;
+        # the formulation keys off _n_param (the true parameter dimension).
+        if A.ndim != 2 or A.shape[1] < k:
+            raise ValueError(f"A must have shape (m, >= {k}), got {A.shape}")
         if b.shape != (A.shape[0],):
             raise ValueError(f"b must have shape ({A.shape[0]},), got {b.shape}")
         self.A = A
@@ -221,6 +226,14 @@ class PolyhedralUncertaintySet(UncertaintySet):
         self._delta = None
         self._gamma = None
         self._is_budget = False
+        self._n_param = None
+
+    @property
+    def n_param(self) -> int:
+        """True parameter dimension (first ``n_param`` columns of ``A`` are ξ)."""
+        if self._n_param is not None:
+            return self._n_param
+        return int(np.prod(self.parameter.value.shape)) if self.parameter.value.ndim > 0 else 1
 
     @property
     def kind(self) -> str:
@@ -238,8 +251,29 @@ def budget_uncertainty_set(parameter, delta, gamma: float) -> PolyhedralUncertai
             \\sum_j \\frac{|\\xi_j|}{\\delta_j} \\le \\Gamma
         \\right\\}
 
-    which is equivalent to a polyhedral set via auxiliary sign variables.
-    This function encodes the full polyhedral representation.
+    (Bertsimas & Sim, 2004). This is stored via the exact **lifted polyhedral
+    representation** in the joint space :math:`z = (\\xi, u) \\in \\mathbb{R}^{2k}`:
+
+    .. math::
+        \\xi_j - \\delta_j u_j \\le 0,\\quad
+        -\\xi_j - \\delta_j u_j \\le 0,\\quad
+        \\sum_j u_j \\le \\Gamma,\\quad
+        0 \\le u_j \\le 1 .
+
+    Projecting out :math:`u` recovers the budget set exactly: :math:`u_j`
+    upper-bounds :math:`|\\xi_j|/\\delta_j`, so :math:`\\sum_j u_j \\le \\Gamma`
+    enforces :math:`\\sum_j |\\xi_j|/\\delta_j \\le \\Gamma`, and :math:`u_j \\le 1`
+    enforces the box :math:`|\\xi_j| \\le \\delta_j`. This lift is linear and
+    **polynomial-size** (``5k + 1`` rows in ``2k`` variables) — it is the
+    compact Bertsimas–Sim form, NOT the exponential ``2^k``-facet
+    ξ-only representation. The polyhedral robust counterpart dualizes it
+    exactly (the support function ``max_{ξ∈U} c^T ξ`` equals the true B–S
+    protection ``max Σ_{|S|≤Γ} |c_j| δ_j``).
+
+    The prior implementation stored only the all-plus / all-minus budget
+    facets (``Σ ξ_j/δ_j ≤ Γ`` and its negation) which is a strict *superset*
+    of the true set — over-conservative by up to a factor of 2 in mixed-sign
+    directions (RO-3). The lifted form above is exact.
 
     Parameters
     ----------
@@ -254,6 +288,10 @@ def budget_uncertainty_set(parameter, delta, gamma: float) -> PolyhedralUncertai
     Returns
     -------
     PolyhedralUncertaintySet
+        With ``A, b`` over the lifted ``(ξ, u)`` space and
+        ``_is_budget=True``, ``_delta``, ``_gamma``, ``_n_param`` (= k, the
+        true parameter dimension; the first ``k`` columns of ``A`` are the
+        ξ-block, the remaining ``k`` are the auxiliary ``u``-block).
     """
     from discopt.modeling.core import Parameter
 
@@ -271,38 +309,42 @@ def budget_uncertainty_set(parameter, delta, gamma: float) -> PolyhedralUncertai
     if not (0 <= gamma <= k):
         raise ValueError(f"gamma must be in [0, {k}], got {gamma}")
 
-    # Build polyhedral representation for the budget set.
-    # Variables: ξ ∈ R^k.
-    # Constraints:
-    #   ξ_j ≤  δ_j  (k constraints)
-    #  -ξ_j ≤  δ_j  (k constraints)
-    #   Σ ξ_j/δ_j ≤ Γ  ... but this is not directly linear without
-    #   auxiliary variables for |ξ_j|.
+    # Exact lifted representation of the Bertsimas–Sim budget set, in the
+    # joint variable z = (ξ, u) ∈ R^{2k}. Every constraint is linear in z, so
+    # the existing polyhedral LP-duality reformulation dualizes it exactly.
     #
-    # Standard polyhedral lift: introduce u_j ≥ 0 with u_j ≥ ξ_j/δ_j,
-    # u_j ≥ -ξ_j/δ_j, Σ u_j ≤ Γ. This doubles the dimension.
-    # For the reformulation we only need to encode the support function
-    # h(x) = max_{ξ∈U} c(ξ)^T x; the lift is handled by the formulation.
-    # For the base PolyhedralUncertaintySet, we represent the box facets
-    # together with the budget constraint via the lifted representation
-    # ξ = δ_j u_j where u ∈ [-1,1]^k with Σ|u_j| ≤ Γ.
+    #   ξ_j - δ_j u_j ≤ 0        (k rows)   u_j ≥  ξ_j/δ_j
+    #  -ξ_j - δ_j u_j ≤ 0        (k rows)   u_j ≥ -ξ_j/δ_j   ⇒ u_j ≥ |ξ_j|/δ_j
+    #   Σ_j u_j       ≤ Γ        (1 row)    budget
+    #   u_j           ≤ 1        (k rows)   box: |ξ_j| ≤ δ_j
+    #  -u_j           ≤ 0        (k rows)   u_j ≥ 0
     #
-    # We store the box constraints directly; the budget constraint is
-    # carried as a separate attribute for the formulation to use.
+    # The objective of the support function has zero coefficient on the u
+    # block; the formulation pads coeff(x) with zeros over columns k..2k-1.
     I_k = np.eye(k)
-    # Box: ξ_j ≤ δ_j, -ξ_j ≤ δ_j  →  A = [I; -I], b = [δ; δ]
-    A_box = np.vstack([I_k, -I_k])
-    b_box = np.concatenate([delta, delta])
-    # Budget: Σ ξ_j/δ_j ≤ Γ and Σ -ξ_j/δ_j ≤ Γ (symmetric)
-    inv_delta = 1.0 / delta
-    A_budget = np.vstack([inv_delta[None, :], -inv_delta[None, :]])
-    b_budget = np.array([gamma, gamma])
+    Z_k = np.zeros((k, k))
+    D = np.diag(delta)
 
-    A = np.vstack([A_box, A_budget])
-    b = np.concatenate([b_box, b_budget])
+    rows = [
+        np.hstack([I_k, -D]),  # ξ_j - δ_j u_j ≤ 0
+        np.hstack([-I_k, -D]),  # -ξ_j - δ_j u_j ≤ 0
+        np.hstack([np.zeros((1, k)), np.ones((1, k))]),  # Σ u_j ≤ Γ
+        np.hstack([Z_k, I_k]),  # u_j ≤ 1
+        np.hstack([Z_k, -I_k]),  # -u_j ≤ 0
+    ]
+    rhs = [
+        np.zeros(k),
+        np.zeros(k),
+        np.array([gamma]),
+        np.ones(k),
+        np.zeros(k),
+    ]
+    A = np.vstack(rows)
+    b = np.concatenate(rhs)
 
     unc = PolyhedralUncertaintySet(parameter, A, b)
     unc._delta = delta  # stored for compact reformulation
     unc._gamma = gamma
     unc._is_budget = True
+    unc._n_param = k  # true parameter dimension (A has 2k columns: ξ then u)
     return unc
