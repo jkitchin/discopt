@@ -1180,6 +1180,62 @@ byte-identical across backends (degenerate-LP dual), so an operator can pin the 
 POUNCE path if a future instance ever shows a cut-selection difference; soundness holds
 either way.
 
+### Phase D — H-D1 NLP-incumbent lever: NO-GO (2026-07-05)
+
+The Phase-D profile also flagged a *second* POUNCE cost centre distinct from the
+separation LPs above: the **NLP-incumbent solves** (feasibility_pump, node_nlp_attempt,
+subnlp), ~2.3 s each on ex1252a. H-D1 asked whether these are *redundant* work discopt
+could elide (warm-seeding / dedup across the pump + node + subnlp passes).
+
+**Entry experiment (run before any implementation, per §0.4):** measured cross-pass
+redundancy at **13.5 %** (< the 30 % GO threshold) and a warm-seed speedup of **≈1.0×**
+(< the 1.3× threshold). Both kill criteria fired → **H-D1 is a NO-GO; the
+NLP-incumbent-dedup lever is NOT built.** The incumbent NLPs are genuine, non-redundant
+local solves — the cost is *inside the subsolver*, not in discopt's orchestration of it.
+
+### Phase D — POUNCE-vs-Ipopt on identical incumbent NLPs (2026-07-05)
+
+Before filing a POUNCE follow-up for that in-subsolver cost, we verified it is not a
+discopt-side artefact by A/B-ing the **same** NLP subproblems against Ipopt (cyipopt
+1.7.0) vs POUNCE (0.8.0). Both backends are driven through discopt's shared
+cyipopt-compatible callback adapter and the identical `solve_nlp(evaluator, x0,
+constraint_bounds, options)` entry, so the only variable is the solver. Monkeypatch-only
+instrumentation, **no solver-math change**. `JAX_PLATFORMS=cpu`, `JAX_ENABLE_X64=1`,
+threads=1, in-process (no daemon). Instances ex1252a / heatexch_gen1 / ex1252 / casctanks
+/ st_e31.
+
+**Level 1 (end-to-end, NLP-solve wall / count per backend):** the incumbent NLPs are
+dramatically cheaper under Ipopt on every instance —
+
+| instance | ipopt NLP-wall / n | pounce NLP-wall / n | per-solve |
+|---|---|---|---|
+| ex1252a       | 6.4 s / 137 | 34.8 s / 47 | ~16× |
+| heatexch_gen1 | 16.2 s / 36 | 71.4 s / 8  | ~20× |
+| ex1252        | 5.2 s / 52  | 26.0 s / 23 | ~9×  |
+| casctanks     | 9.2 s / 73  | 19.0 s / 21 | ~7×  |
+| st_e31        | 3.3 s / 91  | 11.7 s / 52 | ~6×  |
+
+(POUNCE runs fewer, far slower solves; on ex1252a/heatexch it exhausts the wall on a
+handful of NLPs and explores 3–29 nodes to Ipopt's 17–63.)
+
+**Level 2 (apples-to-apples per-solve replay from the identical x0):** captured the
+expensive (>0.5 s) POUNCE subproblems live and re-solved each with both backends.
+Pooled over **57** subproblems: `t_pounce/t_ipopt` **median 7.1×, mean 8.0×, 93 %
+≥3×**. Restricting to the **24** subproblems where *both* backends converge to the
+**same** optimum (both `OPTIMAL`, |Δobj| ≤ 1e-5 rel): **median 10.9×, min 3.6×, max
+12.9×** — every one ≥3.6×. casctanks and st_e31 are 100 % same-optimum / 0 non-OPTIMAL
+(clean isolation); ex1252a / heatexch_gen1 / ex1252 mix in a **multimodality caveat** —
+on the harder NLPs both solvers hit their iteration budget and land on *different* local
+optima, so those solves measure solver-choice divergence, not pure speed.
+
+**Verdict — POUNCE perf problem: YES, worth filing.** On the clean same-optimum subset
+POUNCE is a large, systematic outlier (≥3.6×, median ~11× slower than Ipopt reaching the
+*identical* KKT point), a genuine solver-speed gap — not a discopt orchestration lever
+(the H-D1 NO-GO above rules out the redundancy hypothesis). A minimal, self-contained
+reproducer was drafted (casctanks incumbent NLP, n=560/m=577: POUNCE 0.454 s / 33 iters
+vs Ipopt 0.039 s, same obj 8.7904272, **11.6×**) for a POUNCE issue. The multimodality
+caveat is noted so the filing does not over-claim on the harder instances.
+
 ---
 
 ## 9. Phase 5 — The JAX residual (~2–4 EW, scope set by data)
