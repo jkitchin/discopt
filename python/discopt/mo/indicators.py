@@ -35,6 +35,94 @@ def _flip_reference(reference: np.ndarray, senses: np.ndarray) -> np.ndarray:
     return np.asarray(senses * reference, dtype=np.float64)
 
 
+def _default_reference(front: ParetoFront, *, margin_frac: float = 0.01) -> np.ndarray:
+    """Front-dependent default hypervolume reference (original senses).
+
+    Uses the front's nadir (if available) or its per-objective worst value,
+    inflated by ``margin_frac`` of the per-objective range in the unfavorable
+    direction so every point strictly dominates the reference.
+
+    .. warning::
+
+       This reference is **derived from a single front** and is therefore
+       *front-dependent*: two fronts for the same problem generally get
+       different references, so their hypervolumes are **not comparable**. To
+       compare fronts, build one shared reference with
+       :func:`common_reference` and pass it explicitly.
+    """
+    senses = front._senses_array()
+    if front.nadir is not None:
+        ref_orig = np.asarray(front.nadir, dtype=np.float64).copy()
+    else:
+        objs = front.objectives()
+        ref_orig = np.array(
+            [objs[:, j].max() if senses[j] > 0 else objs[:, j].min() for j in range(front.k)],
+            dtype=np.float64,
+        )
+    objs = front.objectives()
+    obj_min = objs.min(axis=0)
+    obj_max = objs.max(axis=0)
+    margin = margin_frac * np.maximum(obj_max - obj_min, 1.0)
+    return np.asarray(ref_orig + senses * margin, dtype=np.float64)
+
+
+def common_reference(*fronts: ParetoFront, margin_frac: float = 0.01) -> np.ndarray:
+    """Build one shared hypervolume reference from several fronts.
+
+    The natural way to *compare* fronts (e.g. ``weighted_sum`` vs ``nbi`` on
+    the same problem) is to score every front against the **same** reference
+    point. This helper constructs such a reference from the union of the
+    fronts' points: the per-objective worst value seen across *all* fronts,
+    inflated by ``margin_frac`` of the union range in the unfavorable direction
+    so every point of every front strictly dominates it.
+
+    Pass the returned array as the ``reference=`` argument of
+    :func:`hypervolume` (or :meth:`ParetoFront.hypervolume`) for each front to
+    obtain comparable numbers.
+
+    Parameters
+    ----------
+    *fronts : ParetoFront
+        Fronts to compare. Must share the same number of objectives and the
+        same senses; at least one must be non-empty.
+    margin_frac : float, default 0.01
+        Fraction of the union per-objective range added as margin.
+
+    Returns
+    -------
+    numpy.ndarray
+        Shape ``(k,)`` reference point in the original senses of the fronts.
+
+    Raises
+    ------
+    ValueError
+        If no fronts are supplied, they disagree on ``k`` or ``senses``, or
+        every front is empty.
+    """
+    if not fronts:
+        raise ValueError("common_reference requires at least one front")
+    k = fronts[0].k
+    senses = fronts[0].senses
+    for f in fronts[1:]:
+        if f.k != k:
+            raise ValueError(f"fronts disagree on number of objectives: {k} vs {f.k}")
+        if f.senses != senses:
+            raise ValueError("fronts must have the same senses")
+    all_objs = [f.objectives() for f in fronts if f.n > 0]
+    if not all_objs:
+        raise ValueError("all fronts are empty; cannot build a reference")
+    stacked = np.vstack(all_objs)
+    senses_arr = fronts[0]._senses_array()
+    worst = np.array(
+        [stacked[:, j].max() if senses_arr[j] > 0 else stacked[:, j].min() for j in range(k)],
+        dtype=np.float64,
+    )
+    obj_min = stacked.min(axis=0)
+    obj_max = stacked.max(axis=0)
+    margin = margin_frac * np.maximum(obj_max - obj_min, 1.0)
+    return np.asarray(worst + senses_arr * margin, dtype=np.float64)
+
+
 def _hv_2d(points: np.ndarray, reference: np.ndarray) -> float:
     """Exact 2-D hypervolume for minimization.
 
@@ -157,6 +245,15 @@ def hypervolume(
         uses the nadir (if available) or the per-objective worst value of
         the front, inflated by 1 % of the range, so every returned
         hypervolume is positive.
+
+        .. warning::
+
+           The default (``reference=None``) reference is **front-dependent**:
+           it is derived from *this* front's own nadir/worst values, so two
+           fronts for the same problem get **different** references and their
+           default hypervolumes are **not comparable**. To compare fronts,
+           build one shared reference with :func:`common_reference` and pass it
+           as ``reference=`` to every front.
     method : {"auto", "exact", "mc"}, default "auto"
         ``"auto"`` uses exact HSO for ``k <= 3`` and Monte-Carlo otherwise.
     n_samples : int
@@ -176,23 +273,7 @@ def hypervolume(
     pts_min = _to_min_form(front)
 
     if reference is None:
-        if front.nadir is not None:
-            ref_orig = front.nadir.copy()
-        else:
-            ref_orig = np.array(
-                [
-                    front.objectives()[:, j].max()
-                    if senses[j] > 0
-                    else front.objectives()[:, j].min()
-                    for j in range(front.k)
-                ],
-                dtype=np.float64,
-            )
-        # Inflate by 1% of range in the unfavorable direction.
-        obj_min = front.objectives().min(axis=0)
-        obj_max = front.objectives().max(axis=0)
-        margin = 0.01 * np.maximum(obj_max - obj_min, 1.0)
-        ref_orig = ref_orig + senses * margin
+        ref_orig = _default_reference(front)
     else:
         ref_orig = np.asarray(reference, dtype=np.float64)
 

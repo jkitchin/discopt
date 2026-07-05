@@ -45,6 +45,7 @@ you intend to reuse it for other solves.
 """
 
 from discopt.mo.indicators import (
+    common_reference,
     epsilon_indicator,
     hypervolume,
     igd,
@@ -87,6 +88,7 @@ __all__ = [
     "normalized_normal_constraint",
     # Indicators
     "hypervolume",
+    "common_reference",
     "igd",
     "spread",
     "epsilon_indicator",

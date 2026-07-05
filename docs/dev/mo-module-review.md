@@ -1,5 +1,11 @@
 # MO Module Review — Correctness, Thoroughness, Performance, and SOTA Assessment
 
+> STATUS: IN PROGRESS — 4/10 findings resolved (MO1–MO4). The correctness /
+> method-fidelity cluster is closed: MO1 (NBI axis, prior PR), MO2 (AUGMECON2 —
+> lexicographic payoff + bypass), MO3 (Pareto dedup), MO4 (stable hypervolume
+> reference). Remaining open: MO5 (sweep recompilation), MO6–MO10 (P2/P3
+> robustness/perf/API gaps).
+
 **Date:** 2026-07-03
 **Scope:** `python/discopt/mo/` (`scalarization.py`, `nbi.py`, `pareto.py`,
 `indicators.py`, `utils.py`, `__init__.py` — 1,783 lines) and its tests
@@ -30,9 +36,9 @@ and test blind spots.
 | # | Severity | Component | Finding |
 |---|----------|-----------|---------|
 | MO1 | **P1 method-correctness** — ✅ RESOLVED | `nbi.py:128` | NBI quasi-normal computed with the **wrong axis** (`phi.sum(axis=1)` instead of `axis=0`) — deviates from the cited Das–Dennis (1998) formula for k ≥ 3; invisible at k = 2 by symmetry [CONFIRMED] |
-| MO2 | P2 method-fidelity | `scalarization.py` | The `epsilon_constraint` implementation is **AUGMECON, not AUGMECON2**: the bypass/jump acceleration that defines AUGMECON2 is absent, and the payoff table is not built lexicographically as Mavrotas prescribes [BY INSPECTION] |
-| MO3 | P2 | `pareto.py` | `filtered()` keeps **duplicate points** (identical objective vectors from different scalarization parameters survive weak-dominance filtering) [CONFIRMED] |
-| MO4 | P2 (doc/API) | `indicators.py` | Default hypervolume reference is **front-dependent** — comparing two fronts via `front.hypervolume()` silently compares against different references [CONFIRMED: 2.16 vs 0.08 for nested fronts] |
+| MO2 | P2 method-fidelity — ✅ RESOLVED | `scalarization.py` | The `epsilon_constraint` implementation was **AUGMECON, not AUGMECON2**: the bypass/jump acceleration that defines AUGMECON2 was absent, and the payoff table was not built lexicographically as Mavrotas prescribes [BY INSPECTION]. **FIXED — both features implemented** (see §3). `test_mo_augmecon2.py` |
+| MO3 | P2 — ✅ RESOLVED | `pareto.py` | `filtered()` kept **duplicate points** (identical objective vectors from different scalarization parameters survived weak-dominance filtering) [CONFIRMED]. **FIXED — tolerance-aware dedup in `filtered()`.** `test_mo_pareto.py::TestFilteredDedup` |
+| MO4 | P2 (doc/API) — ✅ RESOLVED | `indicators.py` | Default hypervolume reference was **front-dependent** — comparing two fronts via `front.hypervolume()` silently compared against different references [CONFIRMED: 2.16 vs 0.08 for nested fronts]. **FIXED — `common_reference(*fronts)` helper + loud docstring warning.** `test_mo_indicators.py::TestCommonReference` |
 | MO5 | P2 perf | `utils.py`, sweep loops | `evaluate_expression` recompiles (JAX trace) each objective per call — k compilations per accepted point per sweep, plus k² for the payoff table, of the *same* k expressions |
 | MO6–MO10 | P2–P3 | various | Robustness/API gaps (§3) |
 
@@ -105,7 +111,30 @@ end-to-end tri-objective test (the suite currently has none — §5).
 
 ## 3. Methodological and robustness gaps
 
-### MO2. "AUGMECON2" is actually AUGMECON
+### MO2. "AUGMECON2" is actually AUGMECON — ✅ RESOLVED (`test_mo_augmecon2.py`)
+
+> **✅ RESOLVED — AUGMECON2 implemented (both features), not renamed.** The scope
+> check found this a *bounded* change, so the honest path was to make the code
+> match the name rather than rename to `augmecon`:
+> - **Lexicographic payoff table** — new `utils.lexicographic_payoff()` +
+>   `utils.nadir_from_payoff()`; `epsilon_constraint` uses it by default
+>   (`payoff="lexicographic"`, opt-out `"simple"`). For each objective as
+>   lexicographic primary it optimizes that objective, then pins it (tolerance
+>   constraint) and optimizes the rest in order — Pareto-optimal anchors, so the
+>   nadir is not inflated/truncated by alternative optima. Regression:
+>   `test_lexicographic_differs_from_simple_under_alternative_optima` — the
+>   simple payoff reports nadir(f2) ≈ 3 (alternative-optimum junk) where the
+>   lexicographic payoff reports the true Pareto-worst 2.0.
+> - **Bypass / jump acceleration** — new `bypass=True` (default; requires
+>   `augmented`). The innermost ε-axis is swept worst→best; a subproblem's
+>   innermost slack `s` skips `floor(s/step)` cells that provably reproduce the
+>   same optimum. Exact (only known-redundant cells are skipped). Regression:
+>   `test_bypass_skips_cells_same_front` — on a bi-objective binary knapsack
+>   step front, bypass does 6 solves vs 15 exhaustive and returns the **same**
+>   nondominated set.
+> The `"augmecon2"` front tag is now honest. `payoff="simple", bypass=False`
+> recovers the old AUGMECON behavior for A/B comparison. The full finding text
+> is preserved below.
 
 The front tag and docstring say AUGMECON2 [Mavrotas 2009/2013], and the augmented
 slack objective with range normalization is implemented correctly. But the two
@@ -129,7 +158,15 @@ Fix: either implement both (rename stays) or rename the tag/docs to `augmecon`
 valuable of the two for correctness of *coverage*; the bypass is the perf win.
 Both are well-specified in the cited papers.
 
-### MO3. Fronts accumulate duplicate points
+### MO3. Fronts accumulate duplicate points — ✅ RESOLVED (`test_mo_pareto.py::TestFilteredDedup`)
+
+> **✅ RESOLVED.** `ParetoFront.filtered()` now collapses tolerance-equal
+> duplicate objective vectors (via `np.allclose`, default `dedup_tol=1e-8`,
+> tunable) **before** the weak-dominance filter, keeping the first occurrence
+> and its `scalarization_params`. Repro before: the 3+1+1 front returned
+> `filtered().n == 4`; after: `== 2` (one representative of the triple + the
+> distinct point; the dominated point dropped). Genuinely-distinct near points
+> (differing by 1e-4) are preserved at the default tolerance. Full text below.
 
 `filtered()` removes only strictly dominated points; identical objective vectors
 (the same optimum found at several weights — routine for anchors and flat regions)
@@ -139,7 +176,19 @@ misleading summaries. Fix: tolerance-based dedup in `filtered()` (keep first
 occurrence; `np.allclose` on objective vectors with a documented tol), preserving
 `scalarization_params` of the kept representative.
 
-### MO4. Default hypervolume reference is front-dependent
+### MO4. Default hypervolume reference is front-dependent — ✅ RESOLVED (`test_mo_indicators.py::TestCommonReference`)
+
+> **✅ RESOLVED.** Two changes: (1) a new `indicators.common_reference(*fronts)`
+> helper (exported from `discopt.mo`) builds one shared reference from the union
+> of the fronts' points (per-objective union-worst + 1 % margin), so scoring
+> every front against it gives **comparable** numbers; (2) the `hypervolume()`
+> docstring (and the `ParetoFront.hypervolume` delegate) now carry a loud
+> `.. warning::` that the default `reference=None` is front-dependent and
+> **not** comparable across fronts — use `common_reference`. Regression
+> `test_default_reference_is_front_dependent` pins the pathology (the worse
+> front scores higher under defaults); `test_shared_reference_is_comparable`
+> shows the dominating front scores ≥ the dominated one under the shared
+> reference. Max- and min-sense both covered. Full text below.
 
 `front.hypervolume()` with no reference derives one from the front's own
 nadir/worst + 1 % margin. Two fronts for the *same problem* therefore get
