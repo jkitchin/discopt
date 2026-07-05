@@ -16,12 +16,18 @@ import numpy as np
 
 from discopt.mo.pareto import ParetoFront, ParetoPoint
 from discopt.mo.scalarization import (
+    _add_tracked,
     _collect_objectives_at_x,
     _default_names,
+    _remove_tracked,
     _simplex_lattice,
+    _tag,
+    _TimeBudget,
     _unique_name,
+    _warn_large_grid,
 )
 from discopt.mo.utils import (
+    ObjectiveEvaluator,
     _as_senses,
     _x_to_var_dict,
     ideal_point,
@@ -45,20 +51,22 @@ def _payoff_matrix(
     model,
     objectives: list,
     anchors: list[dict[str, np.ndarray]],
-    senses_list: list[str],
+    evaluator: Optional[ObjectiveEvaluator] = None,
 ) -> np.ndarray:
-    """Payoff matrix: ``Phi[i, j]`` = normalized ``g_j`` at anchor ``i``.
+    """Raw payoff matrix: ``raw[i, j]`` = ``f_j`` (original sense) at anchor ``i``.
 
-    Objectives are mapped into the minimization convention and normalized
-    by the ideal/nadir range (columns are in ``[0, 1]``-ish).
+    Pass a shared :class:`~discopt.mo.utils.ObjectiveEvaluator` to reuse the
+    objectives' compiled callables (MO5); if omitted, one is built here. The
+    sense-normalization into the minimization convention is done by the caller
+    (which owns the ideal/nadir/span), so this function does not take a
+    ``senses`` argument (removed as a dead parameter — MO9).
     """
-    from discopt.mo.utils import evaluate_expression
-
+    if evaluator is None:
+        evaluator = ObjectiveEvaluator(model, objectives)
     k = len(objectives)
     raw = np.zeros((k, k), dtype=np.float64)
     for i in range(k):
-        for j in range(k):
-            raw[i, j] = evaluate_expression(objectives[j], model, anchors[i])
+        raw[i, :] = evaluator.vector_at(anchors[i])
     return raw
 
 
@@ -80,6 +88,7 @@ def normal_boundary_intersection(
     nadir: Optional[np.ndarray] = None,
     anchors: Optional[list[dict[str, np.ndarray]]] = None,
     t_ub: float = 1e6,
+    total_time_limit: Optional[float] = None,
     **solve_kwargs,
 ) -> ParetoFront:
     """NBI scalarization sweep [Das & Dennis 1998].
@@ -98,6 +107,10 @@ def normal_boundary_intersection(
     approximately uniformly spaced for convex fronts. A post-hoc dominance
     filter removes points that the quasi-normal ray intersects in a
     dominated region.
+
+    Supports ``total_time_limit`` (overall wall-clock budget; on expiry the
+    sweep returns the partial front tagged ``"nbi/truncated"``) and warns when
+    the grid exceeds ~200 subproblems (MO7).
     """
     senses_list = _as_senses(senses, len(objectives))
     names = _default_names(objectives, objective_names)
@@ -106,7 +119,13 @@ def normal_boundary_intersection(
         raise ValueError("Need at least 2 objectives")
 
     saved_obj = model._objective
-    saved_n_cons = len(model._constraints)
+    tracked_cons: list = []
+    budget = _TimeBudget(total_time_limit)
+    _warn_large_grid(n_points ** (k - 1), "normal_boundary_intersection")
+    # Compile each objective once and reuse across the nadir estimate, the
+    # payoff matrix, and every accepted point (MO5). Aux t/b parameters are
+    # appended later; objectives do not reference them, so this stays valid.
+    evaluator = ObjectiveEvaluator(model, objectives)
 
     try:
         if ideal is None or anchors is None:
@@ -120,7 +139,9 @@ def normal_boundary_intersection(
         else:
             ideal_arr = np.asarray(ideal, dtype=np.float64)
         if nadir is None:
-            nadir_arr = nadir_point(model, objectives, anchors, senses=senses_list)
+            nadir_arr = nadir_point(
+                model, objectives, anchors, senses=senses_list, evaluator=evaluator
+            )
         else:
             nadir_arr = np.asarray(nadir, dtype=np.float64)
 
@@ -130,7 +151,7 @@ def normal_boundary_intersection(
 
         # Payoff in normalized min-form. At the i-th anchor, g_i = 0 and the
         # other g_j are in [0, 1]-ish.
-        raw_payoff = _payoff_matrix(model, objectives, anchors, senses_list)
+        raw_payoff = _payoff_matrix(model, objectives, anchors, evaluator)
         phi = np.zeros((k, k), dtype=np.float64)
         for i in range(k):
             for j in range(k):
@@ -153,9 +174,11 @@ def normal_boundary_intersection(
         # i.e. g_j(x) - t * n_hat[j] - b_j == 0.
         for j in range(k):
             g_expr = signs[j] * (objectives[j] - float(ideal_arr[j])) / float(span[j])
-            model.subject_to(
+            _add_tracked(
+                model,
                 g_expr - float(n_hat[j]) * t_var - b_params[j] == 0,
-                name=f"_mo_nbi_eq_{j}",
+                f"_mo_nbi_eq_{j}",
+                tracked_cons,
             )
 
         # Objective: max t  →  minimize -t
@@ -166,6 +189,8 @@ def normal_boundary_intersection(
         last_x: Optional[dict[str, np.ndarray]] = None
 
         for w in weights:
+            if budget.expired():
+                break
             w_normed = w / max(w.sum(), 1e-12)
             b_vec = phi.T @ w_normed  # shape (k,)
             for j in range(k):
@@ -181,7 +206,7 @@ def normal_boundary_intersection(
 
             if result.x is None:
                 continue
-            obj_vec = _collect_objectives_at_x(objectives, model, result.x)
+            obj_vec = _collect_objectives_at_x(objectives, model, result.x, evaluator)
             points.append(
                 ParetoPoint(
                     x={k: np.asarray(v).copy() for k, v in result.x.items()},
@@ -194,11 +219,11 @@ def normal_boundary_intersection(
             last_x = result.x
     finally:
         model._objective = saved_obj
-        del model._constraints[saved_n_cons:]
+        _remove_tracked(model, tracked_cons)
 
     front = ParetoFront(
         points=points,
-        method="nbi",
+        method=_tag("nbi", budget),
         objective_names=names,
         senses=senses_list,
         ideal=ideal_arr,
@@ -224,6 +249,7 @@ def normalized_normal_constraint(
     ideal: Optional[np.ndarray] = None,
     nadir: Optional[np.ndarray] = None,
     anchors: Optional[list[dict[str, np.ndarray]]] = None,
+    total_time_limit: Optional[float] = None,
     **solve_kwargs,
 ) -> ParetoFront:
     """NNC scalarization sweep [Messac et al. 2003].
@@ -235,6 +261,10 @@ def normalized_normal_constraint(
 
     Returned points are sense-correct; normalization is handled internally
     by the ideal/nadir range.
+
+    Supports ``total_time_limit`` (overall wall-clock budget; on expiry the
+    sweep returns the partial front tagged ``"nnc/truncated"``) and warns when
+    the grid exceeds ~200 subproblems (MO7).
     """
     senses_list = _as_senses(senses, len(objectives))
     names = _default_names(objectives, objective_names)
@@ -243,7 +273,13 @@ def normalized_normal_constraint(
         raise ValueError("Need at least 2 objectives")
 
     saved_obj = model._objective
-    saved_n_cons = len(model._constraints)
+    tracked_cons: list = []
+    budget = _TimeBudget(total_time_limit)
+    _warn_large_grid(n_points ** (k - 1), "normalized_normal_constraint")
+    # Compile each objective once and reuse across the nadir estimate, the
+    # payoff matrix, and every accepted point (MO5). Aux xp parameters are
+    # appended later; objectives do not reference them, so this stays valid.
+    evaluator = ObjectiveEvaluator(model, objectives)
 
     try:
         if ideal is None or anchors is None:
@@ -257,7 +293,9 @@ def normalized_normal_constraint(
         else:
             ideal_arr = np.asarray(ideal, dtype=np.float64)
         if nadir is None:
-            nadir_arr = nadir_point(model, objectives, anchors, senses=senses_list)
+            nadir_arr = nadir_point(
+                model, objectives, anchors, senses=senses_list, evaluator=evaluator
+            )
         else:
             nadir_arr = np.asarray(nadir, dtype=np.float64)
 
@@ -266,7 +304,7 @@ def normalized_normal_constraint(
         span = np.where(np.abs(span) < 1e-12, 1.0, span)
 
         # Normalized anchors in min-form (k anchor vectors of length k).
-        raw_payoff = _payoff_matrix(model, objectives, anchors, senses_list)
+        raw_payoff = _payoff_matrix(model, objectives, anchors, evaluator)
         norm_anchors = np.zeros((k, k), dtype=np.float64)
         for i in range(k):
             for j in range(k):
@@ -296,7 +334,7 @@ def normalized_normal_constraint(
             lhs = float(normals[i, 0]) * (g_exprs[0] - xp_params[0])
             for j in range(1, k):
                 lhs = lhs + float(normals[i, j]) * (g_exprs[j] - xp_params[j])
-            model.subject_to(lhs <= 0, name=f"_mo_nnc_normal_{i}")
+            _add_tracked(model, lhs <= 0, f"_mo_nnc_normal_{i}", tracked_cons)
 
         # Objective: minimize g_{k-1}(x).
         model.minimize(g_exprs[-1])
@@ -305,6 +343,8 @@ def normalized_normal_constraint(
         last_x: Optional[dict[str, np.ndarray]] = None
 
         for w in weights:
+            if budget.expired():
+                break
             w_normed = w / max(w.sum(), 1e-12)
             xp = (w_normed[:, None] * norm_anchors).sum(axis=0)  # shape (k,)
             for j in range(k):
@@ -320,7 +360,7 @@ def normalized_normal_constraint(
 
             if result.x is None:
                 continue
-            obj_vec = _collect_objectives_at_x(objectives, model, result.x)
+            obj_vec = _collect_objectives_at_x(objectives, model, result.x, evaluator)
             points.append(
                 ParetoPoint(
                     x={k: np.asarray(v).copy() for k, v in result.x.items()},
@@ -333,11 +373,11 @@ def normalized_normal_constraint(
             last_x = result.x
     finally:
         model._objective = saved_obj
-        del model._constraints[saved_n_cons:]
+        _remove_tracked(model, tracked_cons)
 
     front = ParetoFront(
         points=points,
-        method="nnc",
+        method=_tag("nnc", budget),
         objective_names=names,
         senses=senses_list,
         ideal=ideal_arr,

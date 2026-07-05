@@ -66,9 +66,11 @@ from discopt.mo.scalarization import (
     weighted_tchebycheff,
 )
 from discopt.mo.utils import (
+    ObjectiveEvaluator,
     ideal_point,
     nadir_point,
     normalize_objectives,
+    objective_evaluator,
 )
 
 __all__ = [
@@ -80,6 +82,8 @@ __all__ = [
     "nadir_point",
     "normalize_objectives",
     "filter_nondominated",
+    "ObjectiveEvaluator",
+    "objective_evaluator",
     # Scalarizations
     "weighted_sum",
     "epsilon_constraint",
