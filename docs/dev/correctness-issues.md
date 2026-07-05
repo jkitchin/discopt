@@ -112,8 +112,8 @@ in non-default configs; loud ingestion gaps. **P3** = hygiene.
 | C-12 | P3 | .nl parser | range-split renumbers constraints vs source indices | fixed (documented) |
 | C-25 | P1 | nn/formulations | scaling + bound-propagation domain mismatch cuts the true optimum on scaled embedded NNs | in progress (nn-module-plan T-N0.2) |
 | C-26 | P1 | nn/tree_ensemble | tree big-M invalid for out-of-box thresholds → cuts feasible points | in progress (nn-module-plan T-N0.3) |
-| C-27 | P2 | nn/readers/onnx | ONNX reader silently mis-reads Gemm attrs / residual Add / branched graphs | in progress (nn-module-plan T-N1.1) |
-| C-28 | P2 | nn/readers/sklearn | sklearn classifier semantics silently embed logits / wrong base_score | in progress (nn-module-plan T-N1.2) |
+| C-27 | P2 | nn/readers/onnx | ONNX reader silently mis-reads Gemm attrs / residual Add / branched graphs | fixed (T-N1.1, PR #411; onnxruntime-oracle tests in `test_nn_reader_fixes.py`) |
+| C-28 | P2 | nn/readers/sklearn | sklearn classifier semantics silently embed logits / wrong base_score | fixed (T-N1.2, PR #411; sklearn-oracle tests in `test_nn_reader_fixes.py`) |
 | C-29 | P0 | classify/extract | vector-body constraint collapses to one summed row ("array var treated as sum") → infeasible point certified optimal, DEFAULT path (= CORE-1, modeling M1) | fixed |
 | C-30 | P0 | classify/extract | maximize sense lost on `sum(const·var)` bodies (raises `ValueError` not `_NotLinearError`, mis-routes to sense-dropping fallback) → returns 0 instead of true max (= CORE-2, ro ADJ-1) | fixed |
 | C-31 | P0 | presolve/FBBT | FBBT collapses an array-variable block to element-0's bounds and stamps them on every element → cuts feasible points AND false "infeasible"; chains into invalid conflict cuts AND (broadened) into the certified LP dual bound via `_fbbt_argument_box` (= TG-1) | fixed |
@@ -1823,9 +1823,21 @@ residual-Add-as-zero-bias path).
 - Coverage omit for `onnx_reader.py` removed once these tests exist (T-N4.1).
 - Standing gates pass.
 
+**Status: FIXED** (T-N1.1, merged in PR #411, 2026-07-03).
+
 **Log:**
 - 2026-07-03 — Filed from the 2026-07-03 nn-module review (finding F3). Fix owned
   by nn-module-plan T-N1.1 (same effort); status tracked there.
+- 2026-07-05 — Verified fixed. Reader (`onnx_reader.py`) folds Gemm `alpha`/`beta`
+  into weight/bias, raises `ValueError` on `transA=1`, checks the MatMul weight is
+  `input[1]`, and threads a single data tensor from `graph.input[0]` so any
+  residual/branch topology raises `non-sequential`. Before/after repro (isolated
+  pre-#411 reader vs current): a `Gemm(alpha=2.0, beta=0.5)` graph diverged from
+  `onnxruntime` by **max|Δ| = 0.684** on the old reader; the current reader matches
+  to **1.6e-07**. Refusal paths confirmed: `transA=1` and a two-branch joining-Add
+  both raise, `transB=1` round-trips. Regression tests
+  `test_nn_reader_fixes.py::TestOnnxReaderHardening` (4 tests, onnxruntime oracle)
+  all green. Docs-only close-out on branch `fix-nn-c27-c28-readers` (#413).
 
 ---
 
@@ -1869,9 +1881,25 @@ single-leaf 0-d `squeeze()` crash via `value.reshape(len(feature), -1)`.)
   `DecisionTreeRegressor` loads and predicts.
 - Standing gates pass.
 
+**Status: FIXED** (T-N1.2, merged in PR #411, 2026-07-03).
+
 **Log:**
 - 2026-07-03 — Filed from the 2026-07-03 nn-module review (finding F4). Fix owned
   by nn-module-plan T-N1.2 (same effort); status tracked there.
+- 2026-07-05 — Verified fixed. `load_sklearn_mlp` now reads `out_activation_`
+  (`identity`→LINEAR, `logistic`→SIGMOID final layer, `softmax`→`ValueError`);
+  `load_sklearn_tree`/`load_sklearn_ensemble` raise `TypeError` on classifiers via
+  `sklearn.base.is_classifier`; and `_sklearn_tree_to_decision_tree` uses
+  `reshape(node_count, -1)` instead of `squeeze()` (fixes the single-leaf 0-d
+  crash). Before/after repro (isolated pre-#411 reader vs current): a binary
+  `MLPClassifier` embedded LINEAR logits diverging from `predict_proba[:, 1]` by
+  **max|Δ| = 3.93**; the current reader embeds SIGMOID and matches to **1.1e-16**.
+  Old single-leaf `DecisionTreeRegressor` raised `TypeError: len() of unsized
+  object`; now loads and predicts 3.5. Old `GradientBoostingClassifier` loaded
+  silently with `base_score=0.0` (wrong); now raises a loud `TypeError`.
+  Regression tests `test_nn_reader_fixes.py::TestSklearnReaderFixes` (6 tests,
+  sklearn oracle) all green. Docs-only close-out on branch
+  `fix-nn-c27-c28-readers` (#413).
 
 ---
 

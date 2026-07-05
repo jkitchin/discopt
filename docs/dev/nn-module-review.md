@@ -20,8 +20,8 @@ activations and yields a certified-optimal answer to the wrong problem.
 |---|----------|-----------|---------|
 | NN-1 | **P0 correctness** | `bounds.py:propagate_bounds` via `relu_bigm.py:73`, `full_space.py:72` | Bound propagation runs in the **unscaled** input space, but the first affine layer consumes the **scaled** input. With any non-identity `scaling`, the pre-activation bounds are wrong, so the big-M constants and `zhat` variable bounds are too tight → feasible ReLU activations cut → **wrong certified optimum** [CONFIRMED, independently re-run: relu net returns 1.0, true 10.0] |
 | NN-2 | **P1 silent-wrong** | `formulations/tree_ensemble.py:39-133` | `TreeEnsembleFormulation` accepts and stores `scaling` but **never applies it** — split thresholds compare against raw inputs, outputs omit `y_factor/y_offset`. Any non-trivial scaling → wrong predictions/optimum, no error [CONFIRMED] |
-| NN-3 | P1 silent-wrong | `readers/onnx_reader.py:104-121` | ONNX `Gemm` reads only `transB`; **ignores `alpha`, `beta`, `transA`**. `alpha≠1`/`beta≠1` (legal, emitted by some exporters/quantizers) → weights/biases wrong by a scalar, no error [SUSPECTED — trace confirmed, no live ONNX repro] |
-| NN-4 | P2 | `readers/onnx_reader.py:66-129` | `MatMul` weight-orientation assumed (`x @ W`, weight = the initializer operand); node **chaining not verified** (list order assumed to be a chain, no output→input tensor check); `Reshape`/`Flatten` skipped blindly. Mis-loads a non-sequential or `W @ x` graph [SUSPECTED] |
+| NN-3 (=C-27) | P1 silent-wrong | `readers/onnx_reader.py:104-121` | ONNX `Gemm` reads only `transB`; **ignores `alpha`, `beta`, `transA`**. `alpha≠1`/`beta≠1` (legal, emitted by some exporters/quantizers) → weights/biases wrong by a scalar, no error [**FIXED** PR #411: `alpha`/`beta` folded, `transA=1` raises; live-onnxruntime repro confirmed the divergence, max\|Δ\|=0.684 → 1.6e-07] |
+| NN-4 (=C-27) | P2 | `readers/onnx_reader.py:66-129` | `MatMul` weight-orientation assumed (`x @ W`, weight = the initializer operand); node **chaining not verified** (list order assumed to be a chain, no output→input tensor check); `Reshape`/`Flatten` skipped blindly. Mis-loads a non-sequential or `W @ x` graph [**FIXED** PR #411: MatMul weight verified `input[1]`, single-tensor dataflow chain → non-sequential/residual/branch raises] |
 | NN-5 | P3 float | `bounds.py:80-81` | Interval propagation uses round-to-nearest, no outward rounding — a bound-achieving vertex can land an epsilon outside the interval. Absorbed by solver tol in practice; note only [SUSPECTED] |
 | NN-6 | P3 | `tree_ensemble.py:98-111` | Right-split big-M `M_j = ub−lb` omits `split_eps`, cutting the `[lb, lb+eps)` sliver. Harmless at `eps=1e-6` [VERIFIED by inspection] |
 
@@ -99,13 +99,25 @@ fixed, and invisible to CI because every scaling test uses the identity transfor
 | NN-1 | Propagate bounds through the scaled input box (`input_box=` arg to `propagate_bounds`, or set `net.input_bounds` to the scaled corners before propagation); ensure `presolve.py`'s dead-ReLU path uses the same scaled bounds | Non-identity-scaling repro returns 10.0 (returns 1.0 on main); identity-scaling tests unchanged; big-M ≥ true pre-activation range asserted on a fuzz of scalings |
 | NN-2 | `TreeEnsembleFormulation`: apply `scaling` (scale split thresholds + output offset/factor) or raise `NotImplementedError` when scaling is passed | Scaled-tree model gives correct predictions/optimum, or refuses loudly; identity case unchanged |
 
-### Phase 2 — reader hardening (PR `fix(nn): NN-3..NN-4`)
+### Phase 2 — reader hardening (PR `fix(nn): NN-3..NN-4`) — ✅ DONE (PR #411)
 
-NN-3: validate `alpha==1 and beta==1 and transA==0` in `Gemm`, else raise (or apply
-them). NN-4: verify `MatMul` weight orientation and that consecutive nodes actually
+NN-3 (=C-27): validate `alpha==1 and beta==1 and transA==0` in `Gemm`, else raise (or apply
+them). NN-4 (=C-27): verify `MatMul` weight orientation and that consecutive nodes actually
 chain (output tensor of *k* = input of *k+1*), raise on a non-sequential graph;
 validate that skipped `Reshape`/`Flatten` are genuine no-ops. Add ONNX fixtures with
 `alpha≠1` and a non-chain graph.
+
+**Resolved (PR #411, 2026-07-03; verified 2026-07-05).** ONNX (C-27): Gemm
+`alpha`/`beta` folded into weight/bias, `transA=1` raises, MatMul weight verified
+as `input[1]`, single-data-tensor dataflow chain from `graph.input[0]` → any
+residual/branch topology raises `non-sequential`. sklearn (C-28,
+`sklearn_reader.py`, carded separately in `correctness-issues.md`): `load_sklearn_mlp`
+honors `out_activation_` (identity→LINEAR, logistic→SIGMOID, softmax→`ValueError`);
+tree/ensemble readers raise `TypeError` on classifiers (kills the silent
+logit/log-odds/`base_score` mis-embed); single-leaf `reshape` fixes the 0-d crash.
+Fidelity vs onnxruntime/sklearn oracles in `test_nn_reader_fixes.py`
+(before/after: Gemm 0.684→1.6e-07; MLPClassifier logit-vs-proba 3.93→1.1e-16;
+GBClassifier silent `base_score=0` → loud `TypeError`).
 
 ### Phase 3 — rigor (PR `fix(nn): NN-5..NN-6`)
 
