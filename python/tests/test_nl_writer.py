@@ -55,10 +55,15 @@ class TestNLWriterLinear:
 
         nl = m.to_nl()
         assert "r\n" in nl
-        # <= 10 -> type 1, >= 1 -> type 2, == 5 -> type 4
+        # The body constant is carried in the r-section rhs (ASL convention),
+        # NOT baked into the C body with rhs 0.  Discopt normalizes:
+        #   x <= 10  -> (x - 10) <= 0        -> type 1, rhs 10
+        #   x >= 1   -> (1 - x) <= 0         -> type 1, rhs -1  (i.e. -x <= -1)
+        #   x == 5   -> (x - 5) == 0         -> type 4, rhs 5
         r_section = nl[nl.index("r\n") :]
-        assert "1 0.0" in r_section  # <= 0 (normalized: x - 10 <= 0)
-        assert "4 0.0" in r_section  # == 0 (normalized: x - 5 == 0)
+        assert "1 10.0" in r_section  # x <= 10
+        assert "1 -1.0" in r_section  # -x <= -1  (x >= 1)
+        assert "4 5.0" in r_section  # x == 5
 
 
 class TestNLWriterNonlinear:
@@ -351,6 +356,185 @@ class TestNLWriterFile:
         assert outpath.exists()
         content = outpath.read_text()
         assert content.startswith("g3")
+
+
+def _nl_structure(nl: str) -> dict:
+    """Extract the header/k/J/G structural counts from a .nl text.
+
+    Returns a dict with:
+      - ``header_jac_nz``  : header line-7 Jacobian nonzero count
+      - ``header_nl_cons`` : header line-2 nonlinear-constraint count
+      - ``j_lengths``      : {con_idx: declared J-block length}
+      - ``j_entries``      : {con_idx: [(var_idx, coeff), ...]}  actual rows
+      - ``k_cumulative``   : the k-section cumulative per-column counts
+      - ``g_length``       : declared G0 length (or 0 if absent)
+    """
+    lines = [ln.split("#")[0].split("\t")[0].strip() for ln in nl.split("\n")]
+    out: dict = {"j_lengths": {}, "j_entries": {}, "k_cumulative": [], "g_length": 0}
+    out["header_nl_cons"] = int(lines[2].split()[0])
+    out["header_jac_nz"] = int(lines[7].split()[0])
+    i = 0
+    while i < len(lines):
+        ln = lines[i]
+        if ln.startswith("k") and ln[1:].isdigit():
+            n = int(ln[1:])
+            for j in range(n):
+                out["k_cumulative"].append(int(lines[i + 1 + j]))
+            i += n + 1
+            continue
+        if ln[:1] == "J" and len(ln) > 1 and ln[1].isdigit():
+            ci, cnt = ln[1:].split()
+            ci, cnt = int(ci), int(cnt)
+            out["j_lengths"][ci] = cnt
+            rows = []
+            for j in range(cnt):
+                vi, co = lines[i + 1 + j].split()
+                rows.append((int(vi), float(co)))
+            out["j_entries"][ci] = rows
+            i += cnt + 1
+            continue
+        if ln[:1] == "G" and len(ln) > 1 and ln[1].isdigit():
+            out["g_length"] = int(ln.split()[1])
+        i += 1
+    return out
+
+
+class TestNLWriterJacobianConformance:
+    """EX-1 (#413): ASL-conformant Jacobian structure.
+
+    A variable appearing ONLY nonlinearly in a constraint must still get a
+    (zero-coefficient) J entry, and the header nonzero count, the k
+    cumulative-column-count section, and the J blocks must all be computed
+    from that same union sparsity so they agree.
+    """
+
+    def _ex1_model(self):
+        # exp(x) + y <= 5  (x appears ONLY nonlinearly);  x + y <= 3
+        m = dm.Model("ex1")
+        x = m.continuous("x", lb=0, ub=5)
+        y = m.continuous("y", lb=0, ub=5)
+        m.minimize(x + y)
+        m.subject_to(dm.exp(x) + y <= 5)
+        m.subject_to(x + y <= 3)
+        return m
+
+    def test_nonlinear_only_var_gets_zero_j_entry(self):
+        nl = self._ex1_model().to_nl()
+        s = _nl_structure(nl)
+        # C0 = exp(x)+y<=5: J block must list BOTH x (var 0, coeff 0) and y.
+        assert 0 in s["j_entries"]
+        c0 = dict(s["j_entries"][0])
+        assert c0.get(0) == 0.0, f"x (var 0) missing its 0-coeff J entry: {s['j_entries'][0]}"
+        assert 1 in c0  # y appears linearly
+        assert s["j_lengths"][0] == 2
+
+    def test_header_k_j_counts_agree(self):
+        nl = self._ex1_model().to_nl()
+        s = _nl_structure(nl)
+        sum_j = sum(s["j_lengths"].values())
+        # header nnz == total J entries emitted
+        assert s["header_jac_nz"] == sum_j, (s["header_jac_nz"], sum_j)
+        assert s["header_jac_nz"] == 4  # 2 (C0: x,y) + 2 (C1: x,y)
+        # k-section: cumulative col-0 count == number of constraints touching x.
+        # Both C0 (nonlinear x) and C1 (linear x) touch col 0 => 2.
+        assert s["k_cumulative"][0] == 2, s["k_cumulative"]
+        # Final implied column total (header) equals sum(J) — full agreement.
+        assert s["k_cumulative"][-1] <= s["header_jac_nz"]
+
+    def test_pure_linear_constraint_not_counted_nonlinear(self):
+        # C1 (x+y<=3) is linear; only C0 is nonlinear.
+        nl = self._ex1_model().to_nl()
+        s = _nl_structure(nl)
+        assert s["header_nl_cons"] == 1
+
+    def test_constant_moves_to_rhs_body_is_n0(self):
+        # The pure-constant body of x+y<=3 becomes an n0 body with rhs 3.
+        nl = self._ex1_model().to_nl()
+        assert "C1\nn0\n" in nl
+        r_section = nl[nl.index("r\n") :]
+        assert "1 5.0" in r_section  # exp(x)+y <= 5
+        assert "1 3.0" in r_section  # x + y   <= 3
+
+    def test_no_double_count_var_linear_and_nonlinear(self):
+        # x appears both linearly and nonlinearly in the same constraint;
+        # it must be counted ONCE in the header/J/k.
+        m = dm.Model("mixed")
+        x = m.continuous("x", lb=0, ub=5)
+        y = m.continuous("y", lb=0, ub=5)
+        m.minimize(x + y)
+        m.subject_to(x * x + x + y <= 5)  # x nonlinear (x*x) AND linear (+x)
+        s = _nl_structure(m.to_nl())
+        assert s["j_lengths"][0] == 2  # {x, y}, not 3
+        assert s["header_jac_nz"] == 2
+
+    def test_roundtrip_solve_matches(self, tmp_path):
+        m = self._ex1_model()
+        nl_path = tmp_path / "ex1.nl"
+        m.to_nl(str(nl_path))
+        m2 = dm.from_nl(str(nl_path))
+        r1 = m.solve()
+        r2 = m2.solve()
+        assert r1.status == r2.status == "optimal"
+        assert abs(r1.objective - r2.objective) < 1e-6
+
+    @pytest.mark.parametrize(
+        "kind",
+        ["linear-only", "nl-only-var", "mixed-lin-nl", "obj-nonlinear"],
+    )
+    def test_structural_match_pyomo(self, kind):
+        pyo = pytest.importorskip("pyomo.environ")
+        import tempfile
+
+        def build_discopt():
+            m = dm.Model("t")
+            x = m.continuous("x", lb=0.1, ub=5)
+            y = m.continuous("y", lb=0, ub=5)
+            if kind == "linear-only":
+                m.minimize(x + 2 * y)
+                m.subject_to(x + y <= 3)
+            elif kind == "nl-only-var":
+                m.minimize(x + y)
+                m.subject_to(dm.exp(x) + y <= 5)
+                m.subject_to(x + y <= 3)
+            elif kind == "mixed-lin-nl":
+                m.minimize(x + y)
+                m.subject_to(x * x + x + y <= 5)
+            else:  # obj-nonlinear
+                m.minimize(dm.log(x) + y)
+                m.subject_to(x + y <= 4)
+            return m.to_nl()
+
+        def build_pyomo():
+            m = pyo.ConcreteModel()
+            m.x = pyo.Var(bounds=(0.1, 5))
+            m.y = pyo.Var(bounds=(0, 5))
+            if kind == "linear-only":
+                m.o = pyo.Objective(expr=m.x + 2 * m.y)
+                m.c = pyo.Constraint(expr=m.x + m.y <= 3)
+            elif kind == "nl-only-var":
+                m.o = pyo.Objective(expr=m.x + m.y)
+                m.c0 = pyo.Constraint(expr=pyo.exp(m.x) + m.y <= 5)
+                m.c1 = pyo.Constraint(expr=m.x + m.y <= 3)
+            elif kind == "mixed-lin-nl":
+                m.o = pyo.Objective(expr=m.x + m.y)
+                m.c = pyo.Constraint(expr=m.x * m.x + m.x + m.y <= 5)
+            else:
+                m.o = pyo.Objective(expr=pyo.log(m.x) + m.y)
+                m.c = pyo.Constraint(expr=m.x + m.y <= 4)
+            f = tempfile.mktemp(suffix=".nl")
+            m.write(f, format="nl", io_options={"symbolic_solver_labels": False})
+            return open(f).read()
+
+        ds = _nl_structure(build_discopt())
+        ps = _nl_structure(build_pyomo())
+        assert ds["header_jac_nz"] == ps["header_jac_nz"]
+        assert ds["header_nl_cons"] == ps["header_nl_cons"]
+        assert ds["j_lengths"] == ps["j_lengths"]
+        assert ds["k_cumulative"] == ps["k_cumulative"]
+        assert ds["g_length"] == ps["g_length"]
+        # J entries: same (var, coeff) sets per constraint.
+        for ci in ds["j_entries"]:
+            assert set(ds["j_entries"][ci]) == set(ps["j_entries"][ci]), ci
 
 
 class TestNLWriterRoundTrip:

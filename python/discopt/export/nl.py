@@ -140,6 +140,12 @@ class _NLWriter:
         self._obj_nonlinear: Expression | None = None
         self._con_linear: list[dict[int, float]] = []  # per constraint
         self._con_nonlinear: list[Expression | None] = []
+        # Variables referenced by each constraint's nonlinear body (excluding
+        # pure constants). The Jacobian sparsity of a constraint is the UNION of
+        # its linear vars and these; a nonlinear-only var gets a 0-coefficient
+        # J entry (ASL convention). Filled by _decompose_expressions.
+        self._con_nl_vars: list[set[int]] = []
+        self._obj_nl_vars: set[int] = set()  # vars in the objective nonlinear body
         self._con_bounds: list[tuple[int, float, float]] = []  # (type, lb, ub)
         # Header discrete/nonlinear counts, filled by _reorder_vars_canonical.
         self._nlvc_total = 0  # total nonlinear vars in constraints (incl. both)
@@ -155,6 +161,7 @@ class _NLWriter:
         self._build_var_map()
         self._decompose_expressions()
         self._reorder_vars_canonical()
+        self._compute_nl_vars()
         buf = io.StringIO()
         self._write_header(buf)
         self._write_C_sections(buf)
@@ -296,29 +303,79 @@ class _NLWriter:
         self._nbv = len(lin_bin)
         self._niv = len(lin_int)
 
+    # ── Jacobian sparsity (union of linear + nonlinear vars per constraint) ──
+
+    def _compute_nl_vars(self):
+        """Resolve each constraint's nonlinear-body variable indices.
+
+        Must run *after* :meth:`_reorder_vars_canonical` so ``_var_index`` is
+        final (nonlinear expressions resolve their variable indices lazily
+        through it). Stored in ``_con_nl_vars`` and used by the header, ``k``,
+        and ``J`` writers so all three agree on one sparsity pattern.
+        """
+        self._con_nl_vars = []
+        for nl in self._con_nonlinear:
+            vs: set[int] = set()
+            if nl is not None:
+                self._collect_var_indices(nl, vs)
+            self._con_nl_vars.append(vs)
+        obj_vs: set[int] = set()
+        if self._obj_nonlinear is not None:
+            self._collect_var_indices(self._obj_nonlinear, obj_vs)
+        self._obj_nl_vars = obj_vs
+
+    def _jac_cols(self, i: int) -> dict[int, float]:
+        """Full Jacobian row for constraint ``i``: ``{var_idx: coeff}``.
+
+        The ASL convention: every variable appearing in the constraint —
+        linearly *or* nonlinearly — gets an entry carrying its linear
+        coefficient (``0.0`` for a variable that appears only nonlinearly).
+        This single union map is the source of truth for the header nonzero
+        count, the ``k`` cumulative-column-count section, and the ``J`` block,
+        so all three are guaranteed to agree.
+        """
+        cols = dict(self._con_linear[i])
+        for vi in self._con_nl_vars[i]:
+            cols.setdefault(vi, 0.0)
+        return cols
+
+    def _obj_grad_cols(self) -> dict[int, float]:
+        """Full objective gradient: ``{var_idx: coeff}`` (0.0 for nonlinear-only).
+
+        The ``G`` section and the header gradient-nonzero count are both built
+        from this union of the objective's linear vars and its nonlinear-body
+        vars, so they agree.
+        """
+        cols = dict(self._obj_linear)
+        for vi in self._obj_nl_vars:
+            cols.setdefault(vi, 0.0)
+        return cols
+
     # ── Decompose expressions into linear + nonlinear parts ──
 
     def _decompose_expressions(self):
         """Split objective and constraints into linear and nonlinear parts."""
         obj = self.model._objective
         if obj is not None:
-            linear, nonlinear = self._split_expr(obj.expression)
+            # Objectives have no r-section rhs, so the constant offset stays in
+            # the O body (re-attached as an additive node).
+            linear, nonlinear, const_offset = self._split_expr(obj.expression)
             self._obj_linear = linear
-            self._obj_nonlinear = nonlinear
+            self._obj_nonlinear = self._attach_const(nonlinear, const_offset)
         self._decompose_builder_objective()
 
         for con in self.model._constraints:
             # Determine constraint bound type (shared by every scalar row this
             # constraint expands into).
-            rhs = con.rhs
+            rhs = float(con.rhs)
             if con.sense == "<=":
-                bnd = (1, 0.0, float(rhs))  # body <= rhs
+                base_bnd = (1, 0.0, rhs)  # body <= rhs
             elif con.sense == ">=":
-                bnd = (2, float(rhs), 0.0)  # body >= rhs (stored as <=)
+                base_bnd = (2, rhs, 0.0)  # body >= rhs
             elif con.sense == "==":
-                bnd = (4, float(rhs), float(rhs))
+                base_bnd = (4, rhs, rhs)
             else:
-                bnd = (3, 0.0, 0.0)  # free (unreachable in practice)
+                base_bnd = (3, 0.0, 0.0)  # free (unreachable in practice)
 
             # Vectorized constraints (e.g. DAE/collocation bodies built from
             # matrix products and broadcasting) carry an array-valued body that
@@ -326,12 +383,47 @@ class _NLWriter:
             # expression per output element before linear/nonlinear splitting.
             bodies = self._scalarize_body(con.body)
             for body in bodies:
-                linear, nonlinear = self._split_expr(body)
+                linear, nonlinear, const_offset = self._split_expr(body)
                 self._con_linear.append(linear)
                 self._con_nonlinear.append(nonlinear)
-                self._con_bounds.append(bnd)
+                self._con_bounds.append(self._offset_bound(base_bnd, const_offset))
 
         self._decompose_builder_blocks()
+
+    @staticmethod
+    def _attach_const(nl: Expression | None, const_offset: float) -> Expression | None:
+        """Re-attach a constant offset to a nonlinear body (for objectives).
+
+        Constraints carry the constant in the r-section rhs, but the objective
+        has no rhs — so its constant offset is added back as an ``x + const``
+        node (or a bare ``Constant`` when there is no variable part).
+        """
+        if const_offset == 0.0:
+            return nl
+        if nl is None:
+            return Constant(const_offset)
+        return BinaryOp("+", nl, Constant(const_offset))
+
+    @staticmethod
+    def _offset_bound(
+        bnd: tuple[int, float, float], const_offset: float
+    ) -> tuple[int, float, float]:
+        """Move a body constant offset into the constraint bound.
+
+        The split peels the constant out of the body, so ``body <sense> rhs``
+        becomes ``(body - const) <sense> (rhs - const)``. Subtract the offset
+        from whichever numeric bound(s) the sense uses.
+        """
+        if const_offset == 0.0:
+            return bnd
+        btype, lb, ub = bnd
+        if btype == 1:  # <= ub
+            return (btype, lb, ub - const_offset)
+        if btype == 2:  # >= lb
+            return (btype, lb - const_offset, ub)
+        if btype in (0, 4):  # range / equality: both bounds carry rhs
+            return (btype, lb - const_offset, ub - const_offset)
+        return bnd  # free: nothing to shift
 
     def _decompose_builder_objective(self):
         """Recover a linear or quadratic objective that lives only in the builder.
@@ -627,11 +719,30 @@ class _NLWriter:
         # Opaque scalar leaf (e.g. Parameter): leave intact.
         return self._obj0(expr)
 
-    def _split_expr(self, expr: Expression) -> tuple[dict[int, float], Expression | None]:
-        """Split an expression into linear terms {var_idx: coeff} and nonlinear remainder."""
+    def _split_expr(self, expr: Expression) -> tuple[dict[int, float], Expression | None, float]:
+        """Split an expression into linear, variable-referencing nonlinear, and constant.
+
+        Returns ``(linear, nonlinear, const_offset)`` where:
+
+        - ``linear`` is ``{var_idx: coeff}`` for the linear terms,
+        - ``nonlinear`` is the variable-referencing nonlinear remainder (or
+          ``None`` if there is none), and
+        - ``const_offset`` is the accumulated constant contribution.
+
+        The constant is peeled out separately (rather than folded into the
+        nonlinear body) so callers can carry it in the ``r``-section rhs
+        instead of an ``n<const>`` node in the constraint body. Keeping the
+        nonlinear body free of a pure constant is what lets a constraint like
+        ``x + y <= 3`` (which discopt normalizes to ``x + y - 3 <= 0``) be
+        emitted as a genuinely *linear* constraint with an ``n0`` body — the
+        ASL convention (nonlinear constraints must be the first ``n_nl_cons``
+        and carry the only non-``n0`` bodies).
+        """
         linear: dict[int, float] = {}
         nonlinear_terms: list[Expression] = []
-        self._collect_linear(expr, 1.0, linear, nonlinear_terms)
+        const_acc: list[float] = [0.0]
+        self._collect_linear(expr, 1.0, linear, nonlinear_terms, const_acc)
+        const_offset = const_acc[0]
         if nonlinear_terms:
             if len(nonlinear_terms) == 1:
                 nl_expr = nonlinear_terms[0]
@@ -639,8 +750,8 @@ class _NLWriter:
                 nl_expr = nonlinear_terms[0]
                 for t in nonlinear_terms[1:]:
                     nl_expr = BinaryOp("+", nl_expr, t)
-            return linear, nl_expr
-        return linear, None
+            return linear, nl_expr, const_offset
+        return linear, None, const_offset
 
     def _collect_linear(
         self,
@@ -648,8 +759,14 @@ class _NLWriter:
         coeff: float,
         linear: dict[int, float],
         nonlinear: list[Expression],
+        const_acc: list[float],
     ):
         """Collect linear terms ``{var_idx: coeff}`` and segregate nonlinear ones.
+
+        Constant contributions accumulate into ``const_acc[0]`` (a 1-element
+        list used as a mutable float cell) rather than the ``nonlinear`` list,
+        so a pure constant never lands in the emitted nonlinear body — the
+        caller folds it into the r-section rhs instead.
 
         Driven by an explicit ``(expr, coeff)`` work stack rather than recursion:
         a body built with ``sum()`` of many terms is a deeply left-nested chain
@@ -665,8 +782,10 @@ class _NLWriter:
             if isinstance(node, Constant):
                 val = float(node.value)
                 if val != 0.0:
-                    # A nonzero constant contributes a constant offset.
-                    nonlinear.append(Constant(val * c))
+                    # A nonzero constant contributes a constant offset. Keep it
+                    # out of the nonlinear body: callers fold it into the
+                    # r-section rhs so a constant-only body stays ``n0``.
+                    const_acc[0] += val * c
                 continue
 
             if isinstance(node, Variable):
@@ -761,25 +880,24 @@ class _NLWriter:
         n_cons = len(self._con_linear)
         n_objs = 1 if self.model._objective else 0
 
-        # Count nonlinear constraints and objectives
-        n_nl_cons = sum(1 for nl in self._con_nonlinear if nl is not None)
+        # A constraint counts as nonlinear only when its nonlinear body
+        # references at least one variable. Since _split_expr peels pure
+        # constants out into the r-section rhs, a constant-only body leaves
+        # _con_nonlinear[i] is None (and _con_nl_vars[i] empty), so it is
+        # correctly counted as linear (ASL requires nonlinear constraints to be
+        # the first n_nl_cons rows and carry the only non-n0 bodies).
+        n_nl_cons = sum(1 for vs in self._con_nl_vars if vs)
         n_nl_objs = 1 if self._obj_nonlinear is not None else 0
 
-        # Count Jacobian nonzeros (linear + nonlinear vars in each constraint)
-        n_jac_nz = sum(len(lin) for lin in self._con_linear)
-        # Add nonlinear variable references in constraints
-        for nl in self._con_nonlinear:
-            if nl is not None:
-                vs: set[int] = set()
-                self._collect_var_indices(nl, vs)
-                n_jac_nz += len(vs)
+        # Count Jacobian nonzeros from the SAME union sparsity the k and J
+        # sections use: for each constraint, |union(linear vars, nonlinear
+        # vars)|. A variable appearing both linearly and nonlinearly is counted
+        # once; a nonlinear-only variable is counted (with a 0 coefficient in J).
+        n_jac_nz = sum(len(self._jac_cols(i)) for i in range(len(self._con_linear)))
 
-        # Count objective gradient nonzeros
-        n_grad_nz = len(self._obj_linear)
-        if self._obj_nonlinear is not None:
-            vs2: set[int] = set()
-            self._collect_var_indices(self._obj_nonlinear, vs2)
-            n_grad_nz += len(vs2)
+        # Objective gradient nonzeros: union of the objective's linear vars and
+        # its nonlinear-body vars (same de-duplication).
+        n_grad_nz = len(self._obj_grad_cols())
 
         # Line 0: format marker
         buf.write(f"g3 1 1 0\t# problem {self.model.name}\n")
@@ -910,37 +1028,55 @@ class _NLWriter:
     # ── k section (Jacobian column counts) ──
 
     def _write_k_section(self, buf: io.StringIO):
+        """Cumulative per-column Jacobian nonzero counts.
+
+        Built from the SAME union sparsity (:meth:`_jac_cols`) the ``J`` blocks
+        and the header nonzero count use, so all three agree. A single pass over
+        the constraint rows accumulates a per-column tally (fixes EX-9's former
+        ``O(n_vars x n_cons)`` nested scan). ASL reads the ``k`` section as the
+        cumulative count of nonzeros in columns ``0 .. n_vars-2``; the final
+        (``n_vars-1``-th) column total is implied by the header nonzero count.
+        """
         if self._n_total <= 1:
             buf.write("k0\n")
             return
+        per_col = [0] * self._n_total
+        for i in range(len(self._con_linear)):
+            for col in self._jac_cols(i):
+                per_col[col] += 1
         buf.write(f"k{self._n_total - 1}\n")
         cumulative = 0
         for col in range(self._n_total - 1):
-            count = 0
-            for lin in self._con_linear:
-                if col in lin:
-                    count += 1
-            cumulative += count
+            cumulative += per_col[col]
             buf.write(f"{cumulative}\n")
 
     # ── J sections (linear Jacobian terms) ──
 
     def _write_J_sections(self, buf: io.StringIO):
-        for i, lin in enumerate(self._con_linear):
-            if not lin:
+        """Per-constraint Jacobian blocks (ASL convention).
+
+        Each block lists *every* variable appearing in the constraint —
+        linearly or nonlinearly — with its linear coefficient (``0`` for a
+        variable that appears only nonlinearly). This is the union sparsity the
+        header and ``k`` section are computed from.
+        """
+        for i in range(len(self._con_linear)):
+            cols = self._jac_cols(i)
+            if not cols:
                 continue
-            buf.write(f"J{i} {len(lin)}\n")
-            for var_idx in sorted(lin.keys()):
-                buf.write(f"{var_idx} {lin[var_idx]}\n")
+            buf.write(f"J{i} {len(cols)}\n")
+            for var_idx in sorted(cols.keys()):
+                buf.write(f"{var_idx} {cols[var_idx]}\n")
 
     # ── G section (linear objective gradient) ──
 
     def _write_G_section(self, buf: io.StringIO):
-        if not self._obj_linear:
+        cols = self._obj_grad_cols()
+        if not cols:
             return
-        buf.write(f"G0 {len(self._obj_linear)}\n")
-        for var_idx in sorted(self._obj_linear.keys()):
-            buf.write(f"{var_idx} {self._obj_linear[var_idx]}\n")
+        buf.write(f"G0 {len(cols)}\n")
+        for var_idx in sorted(cols.keys()):
+            buf.write(f"{var_idx} {cols[var_idx]}\n")
 
     # ── Expression → .nl opcode encoding ──
 

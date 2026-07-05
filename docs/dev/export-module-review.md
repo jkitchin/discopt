@@ -19,7 +19,7 @@ comparison this repository exists to make.
 
 | # | Severity | Component | Finding |
 |---|----------|-----------|---------|
-| EX-1 | **P0 interop** | `nl.py` | `.nl` Jacobian structure is **non-conformant with the ASL convention**: variables appearing only nonlinearly in a constraint get no zero-coefficient J entry, so the header nonzero count, the k section, and the J sections mutually disagree (4 vs 1 vs 3 on a 2-var model). Pyomo's writer on the same model emits `J0 2 / 0 0 / 1 1` and consistent counts [CONFIRMED by direct diff] |
+| EX-1 ✅ RESOLVED | **P0 interop** | `nl.py` | `.nl` Jacobian structure is **non-conformant with the ASL convention**: variables appearing only nonlinearly in a constraint get no zero-coefficient J entry, so the header nonzero count, the k section, and the J sections mutually disagree (4 vs 1 vs 3 on a 2-var model). Pyomo's writer on the same model emits `J0 2 / 0 0 / 1 1` and consistent counts [CONFIRMED by direct diff]. **FIXED (#413):** the header nnz, the `k` section, and every `J` block are now built from one union sparsity per constraint (`_jac_cols` = `linear vars ∪ nonlinear vars`), so a nonlinear-only var gets a 0-coeff `J` entry and all three agree; the objective gradient (`G`) uses the same union. Pure-constant bodies are peeled to the r-section rhs (body becomes `n0`, no longer counted nonlinear — ASL requires nonlinear cons to be the first `n_nl_cons`). EX-9 folded in: `k` section is now a single-pass per-column tally. Byte-level structural parity with Pyomo's writer on a 4-case corpus (linear-only / nonlinear-only-var / mixed-lin+nl / objective-nonlinear); in-house round-trip + solve unchanged. Regression: `TestNLWriterJacobianConformance` in `python/tests/test_nl_writer.py`. |
 | EX-2 ✅ RESOLVED 1dc3278 | **P0 silent-wrong** | `mps.py`, `lp.py`, `gams.py` | **Builder-resident models export as empty/zero models**: fast-API constraint rows and `add_linear_objective` are invisible — MPS emits a ROWS section with only OBJ, LP emits `obj: 0`, GAMS emits `obj_var =e= 0`. Only `nl.py` handles builder blocks [CONFIRMED]. **FIXED (X-1):** MPS/LP/GAMS now emit builder rows via `export._common.iter_builder_linear_rows` and recover a builder-resident linear/quadratic objective via `export._common.builder_objective` (was `obj: 0`). Exported MPS round-trips through HiGHS to the true optimum (3.0). Regression: `test_x1_builder_resident_rows.py::test_ex2_*`. |
 | EX-3 | **P0 silent-wrong** | `mps.py:158`, `lp.py:127`, `gams.py:163` | **Fixed binaries lose their fixing** in all three formats (the binary branch ignores `lb`/`ub` entirely: `BV BND`, implicit LP binary, no GAMS bounds). Writer-side sibling of the `from_nl` import bug (modeling-review M2); `.nl`'s b-section is correct [CONFIRMED] |
 | EX-4 | ✅ RESOLVED (X-2 residual) | `gams.py:176-191` | **Heterogeneous per-element array bounds are silently dropped entirely** (written only when uniform) — a DAE-style model with `u[0]` pinned to 1 via bounds exports with **no bounds at all**; the `.nl` control correctly writes `4 1.0` [CONFIRMED]. **FIXED**: `to_gams` now emits per-element `.lo('k')`/`.up('k')` at 1-based labels (uniform still compacted to one domain-wide line); `from_gams` parses concrete-label bounds so heterogeneous bounds round-trip. Tests `test_gams_export_preserves_heterogeneous_array_bounds` + `test_gams_roundtrip_preserves_per_element_bounds` (`test_x2_residual_array_bounds.py`). |
@@ -27,7 +27,7 @@ comparison this repository exists to make.
 | EX-6 | P1 | `gams.py` | No scalarization pass: vector/broadcast constraint bodies and `SumExpression`/`MatMul` render as scalar-syntax garbage (`(x)` for `sum(x)`, `(A * x)` for `A@x`), and unknown nodes are written **into the file** as `<unsupported:…>` instead of raising — export "succeeds", GAMS compile fails later (or worse) [BY INSPECTION] |
 | EX-7 | P2 | `_extract.py:153,475` | Array-valued `Constant` in a scalar position silently collapses to its **first element** (`value.flat[0]`); `sum(constant_vector)` likewise returns the first element rather than the sum [BY INSPECTION] |
 | EX-8 | P2 | `mps.py`/`lp.py`/`gams.py` | Constraint-name hygiene: duplicates never checked (duals/rows silently collide), `_sanitize_name` handles only space/dash — indexed-family names like `cap[pitt]` corrupt LP files (brackets delimit quadratic sections) and break GAMS |
-| EX-9 | P3 | `nl.py:912-924` | k-section built by an O(n_vars × n_cons) nested scan — quadratic build time on large models (also wrong per EX-1; fix together) |
+| EX-9 ✅ RESOLVED (with EX-1) | P3 | `nl.py` | k-section built by an O(n_vars × n_cons) nested scan — quadratic build time on large models (also wrong per EX-1; fix together). **FIXED (#413):** `_write_k_section` now accumulates a per-column nonzero tally in a single pass over the constraint rows (O(nnz)); shares the union sparsity with the header/`J` fix. |
 
 Checked and found **correct** (worth as much as the findings):
 
@@ -57,7 +57,18 @@ Checked and found **correct** (worth as much as the findings):
 
 ---
 
-## 2. The `.nl` conformance bug (EX-1) in detail
+## 2. The `.nl` conformance bug (EX-1) in detail — ✅ RESOLVED (#413)
+
+> **STATUS: RESOLVED.** Implemented as described below, with one refinement:
+> rather than "keep constants in the C body", a *pure-constant* nonlinear body
+> is peeled into the r-section rhs (body → `n0`), matching Pyomo exactly and
+> keeping the ASL requirement that nonlinear constraints are the first
+> `n_nl_cons` rows and carry the only non-`n0` bodies. A body that *does*
+> reference a variable keeps its constant folded via the rhs the same way.
+> Byte-level structural parity with Pyomo verified on the acceptance corpus;
+> in-house round-trip + solve unchanged. Regression:
+> `TestNLWriterJacobianConformance` in `python/tests/test_nl_writer.py`.
+
 
 Reproduction (2 variables, `exp(x) + y <= 5` and `x + y <= 3`):
 
