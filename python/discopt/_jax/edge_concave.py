@@ -31,10 +31,47 @@ a vertex-hull "underestimator" that cuts off true points, so detection
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from itertools import product
 
 import numpy as np
+
+
+def _separation_lp_solver():
+    """Return the LP solver for the vertex-hull separation LP.
+
+    Phase-D lever (``perf-d1``): route the edge-concave separation LP through the
+    in-house pure-Rust warm simplex (``lp_simplex.solve_lp``) instead of a cold
+    POUNCE IPM solve per call, controlled by ``DISCOPT_SEPARATION_LP_SIMPLEX``
+    (default ``"1"`` — ON). The off-switch (``"0"``) restores the POUNCE path.
+
+    Soundness is independent of which backend is used: only the dual *slope* ``A``
+    is consumed and the intercept ``B`` is recomputed to the exact validity
+    boundary over the box vertices, so the derived cut bounds ``q`` everywhere for
+    ANY slope (see the module + :func:`separate_edge_concave_quadratic` docstrings).
+    The two backends can disagree on the slope on a *degenerate* vertex-hull LP
+    (the IPM returns an analytic-center dual, the simplex a vertex dual), so this
+    routing is not byte-for-byte identical to POUNCE — the derived cut can differ
+    (both sound). It is validated node-neutral on the cert baseline before shipping.
+    """
+    use_simplex = os.environ.get("DISCOPT_SEPARATION_LP_SIMPLEX", "1").strip().lower() not in (
+        "0",
+        "false",
+        "no",
+        "off",
+    )
+    if use_simplex:
+        try:
+            from discopt.solvers.lp_simplex import SIMPLEX_AVAILABLE, solve_lp
+
+            if SIMPLEX_AVAILABLE:
+                return solve_lp
+        except ImportError:
+            pass
+    from discopt.solvers.lp_pounce import solve_lp
+
+    return solve_lp
 
 
 @dataclass(frozen=True)
@@ -164,15 +201,18 @@ def separate_edge_concave_quadratic(
     edge-concavity), so the cut is sound; it is returned only when ``q_star``
     violates it.
 
-    The vertex-hull LP is solved with the pure-Rust POUNCE IPM (issue #356 — no
-    SciPy/HiGHS). Only the dual *slope* ``A`` is taken from POUNCE; the intercept
-    ``B`` is recomputed to the exact validity boundary over the vertices
-    (``minᵥ(q(v)−A·v)`` under / ``maxᵥ`` over), so by edge-concavity the cut
-    bounds ``q`` everywhere for ANY slope — robust to POUNCE's analytic-center
-    dual / sign / scale. ``None`` if POUNCE is unavailable or did not converge.
+    The vertex-hull LP is solved with the in-house pure-Rust warm simplex by
+    default (Phase-D lever ``perf-d1``; ``DISCOPT_SEPARATION_LP_SIMPLEX=0`` restores
+    the POUNCE IPM — see :func:`_separation_lp_solver`). Only the dual *slope* ``A``
+    is taken from the LP; the intercept ``B`` is recomputed to the exact validity
+    boundary over the vertices (``minᵥ(q(v)−A·v)`` under / ``maxᵥ`` over), so by
+    edge-concavity the cut bounds ``q`` everywhere for ANY slope — robust to the
+    backend's dual / sign / scale. ``None`` if no backend is available or the LP
+    did not converge.
     """
     from discopt.solvers import SolveStatus
-    from discopt.solvers.lp_pounce import solve_lp
+
+    solve_lp = _separation_lp_solver()
 
     n = len(block.var_idxs)
     if n < 2 or not (np.all(np.isfinite(lb[:n])) and np.all(np.isfinite(ub[:n]))):

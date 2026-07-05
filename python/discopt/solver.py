@@ -1737,7 +1737,21 @@ def _strong_branch_lp(
     try:
         from discopt.solvers.lp_backend import get_lp_solver
 
-        solve_lp = get_lp_solver(prefer_pounce)
+        # Phase-D lever (perf-d1): the strong-branch score reads only the child LP
+        # *objective* bound (never its vertex), so route these repeated LPs through
+        # the in-house warm simplex instead of a cold POUNCE IPM solve per call.
+        # Controlled by DISCOPT_SEPARATION_LP_SIMPLEX (default ON); the off-switch
+        # ("0") restores the caller-selected backend (POUNCE under nlp_solver=
+        # "pounce"). Node-neutrality is validated on the cert baseline: the simplex
+        # vertex optimum and the IPM analytic-center objective agree to LP
+        # tolerance, so the argmax branch decision is unchanged.
+        _sb_simplex = os.environ.get("DISCOPT_SEPARATION_LP_SIMPLEX", "1").strip().lower() not in (
+            "0",
+            "false",
+            "no",
+            "off",
+        )
+        solve_lp = get_lp_solver(prefer_pounce=prefer_pounce and not _sb_simplex)
     except ImportError:
         return None  # strong branching is optional; fall back to pseudocosts
 
