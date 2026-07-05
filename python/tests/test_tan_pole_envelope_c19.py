@@ -15,7 +15,7 @@ spatial branching to shrink the box below the pole spacing. Pole-free boxes keep
 the tight branch envelope.
 
 These tests call ``relax_tan`` DIRECTLY on straddling and pole-free boxes so the
-buggy branch is exercised, on BOTH the JAX and numpy backends. The property test
+buggy branch is exercised on the JAX backend. The property test
 encodes the false-certificate CLASS (a finite envelope that crosses ``tan`` on a
 pole-straddling box), not a single named box.
 """
@@ -23,7 +23,6 @@ pole-straddling box), not a single named box.
 import numpy as np
 import pytest
 from discopt._jax import mccormick as jm
-from discopt._numpy import mccormick as nm
 
 pytestmark = [pytest.mark.unit, pytest.mark.smoke]
 
@@ -33,7 +32,6 @@ _POLE_GUARD = 5e-3
 
 _BACKENDS = [
     pytest.param(jm, id="jax"),
-    pytest.param(nm, id="numpy"),
 ]
 
 

@@ -16,7 +16,7 @@ non-degenerate — never emitting ``cv > f``.
 
 Two layers of coverage:
   1. Direct primitive test on ``relax_div`` with a non-degenerate denominator
-     interval (JAX and numpy backends).
+     interval (JAX backend).
   2. Full-compiler containment on ``1/(x*y)``, ``x/(y*z)``, ``1/(x*x)``,
      ``1/sqrt(x*y)`` plus the sound ``1/x`` / ``x/y`` controls — the
      reciprocal-/division-of-nonlinear-inner case the harness previously omitted.
@@ -25,7 +25,6 @@ Two layers of coverage:
 import numpy as np
 import pytest
 from discopt._jax import mccormick as jm
-from discopt._numpy import mccormick as nm
 from relaxation_harness import build_relaxation, evaluate
 
 pytestmark = [pytest.mark.unit, pytest.mark.smoke]
@@ -34,7 +33,6 @@ TOL = 1e-7
 
 _BACKENDS = [
     pytest.param(jm, id="jax"),
-    pytest.param(nm, id="numpy"),
 ]
 
 

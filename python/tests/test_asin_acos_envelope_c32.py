@@ -11,13 +11,12 @@ These tests call the relaxation primitives DIRECTLY on OFF-DIAGONAL boxes (a
 grid of x-values spread across a non-degenerate box, plus randomized sub-boxes
 of [-1, 1]) so the buggy branch is exercised. On the pre-fix code every
 crossing assertion fails; after the fix `cv <= f <= cc` holds with zero
-crossings on BOTH the JAX and numpy backends.
+crossings on the JAX backend.
 """
 
 import numpy as np
 import pytest
 from discopt._jax import mccormick as jm
-from discopt._numpy import mccormick as nm
 
 pytestmark = [pytest.mark.unit, pytest.mark.smoke]
 
@@ -25,7 +24,6 @@ TOL = 1e-9
 
 _BACKENDS = [
     pytest.param(jm, id="jax"),
-    pytest.param(nm, id="numpy"),
 ]
 
 

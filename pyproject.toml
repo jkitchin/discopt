@@ -136,10 +136,6 @@ module = "discopt._jax.relaxation_compiler"
 disable_error_code = ["misc", "attr-defined"]
 
 [[tool.mypy.overrides]]
-module = "discopt._numpy.relaxation_compiler"
-disable_error_code = ["misc", "attr-defined"]
-
-[[tool.mypy.overrides]]
 module = "discopt._jax.nlp_evaluator"
 disable_error_code = ["misc", "no-any-return", "assignment"]
 

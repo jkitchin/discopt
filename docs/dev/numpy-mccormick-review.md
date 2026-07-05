@@ -27,7 +27,7 @@ direct route to an invalid bound the instant the path is exercised.
 | # | Severity | Loc | Finding |
 |---|----------|-----|---------|
 | NM-1 | **P0 soundness (live)** | `_numpy/mccormick.py:210-241` **and** `_jax/mccormick.py:474-524` | `relax_asin`/`relax_acos` have **inverted curvature regimes**. `arcsin''(x)=x(1−x²)^{−3/2}` so arcsin is **convex on [0,1]**, but the code sets `is_concave = lb≥0` and swaps cv/cc. The convex under-estimator sits **above** the function → cuts feasible points → invalid bound. **Present in the live JAX primitive** [CONFIRMED both: `relax_asin(0.5)` on `[0.1,0.9]` returns cv=0.609968 > true=0.523599, gap 0.086] |
-| NM-2 | **P0 soundness (latent)** | `relaxation_compiler.py:164-181` | The numpy compiler's `Variable` leaf returns `(x_cv, x_cc)` and **never reads the box `lb/ub`**. Under the real calling convention (`relax_fn(x, x, lb, ub)` → leaf sees `(x,x)`), the whole tree collapses and returns the **exact nonconvex function** as its own "relaxation" [CONFIRMED: `x*y` on `[1,5]²` at (3,3) → numpy cv=cc=9.0 (the true product); JAX cv=5.0 (real underestimator)] |
+| NM-2 | ✅ **RESOLVED by deletion** (was P0 soundness, latent) | ~~`relaxation_compiler.py:164-181`~~ (deleted) | The numpy compiler's `Variable` leaf returned `(x_cv, x_cc)` and **never read the box `lb/ub`**. Under the real calling convention (`relax_fn(x, x, lb, ub)` → leaf sees `(x,x)`), the whole tree collapsed and returned the **exact nonconvex function** as its own "relaxation" [CONFIRMED: `x*y` on `[1,5]²` at (3,3) → numpy cv=cc=9.0 (the true product); JAX cv=5.0 (real underestimator)]. **The entire `discopt._numpy` backend has been deleted** (see §4) — the "avoid JAX compile overhead" motivation was stale and the backend was compiled-but-unused, so deletion is behavior-preserving and removes the latent-unsound path outright. |
 | NM-3 | P3 robustness | `_numpy/mccormick.py` `_secant`/primitives | No `lb>ub` guard — an inverted box yields a finite envelope from a negative-width secant with no loud refusal (`lb==ub` degeneracy *is* handled correctly). Callers currently pass valid boxes [SUSPECTED] |
 
 ### Reachability (why these are latent today)
@@ -76,12 +76,9 @@ sound. Extend the relaxation soundness harness to sample **off-diagonal**
 (`x_cv ≠ x_cc`, and univariate over non-degenerate boxes) so this class can never
 hide again — the diagonal-only convention is exactly what masked NM-1.
 
-**Phase 2 — `fix(correctness): NM-2`.** The numpy `Variable` leaf must return the
-box bounds `(lb[offset], ub[offset])` like the JAX compiler. **Acceptance:** `x*y`
-on `[1,5]²` at (3,3) gives numpy cv=5.0 (matching JAX), not 9.0; then re-run the
-composite fuzz (now non-vacuous) — every primitive/composite `under ≤ true ≤ over`.
-Do **not** wire the numpy backend into the live solve path until both NM-1 and NM-2
-are green, since NM-2's fix makes NM-1 live.
+**Phase 2 — `fix(correctness): NM-2`.** ✅ **RESOLVED by deletion** (issue #413,
+branch `del-nm2-dead-numpy-backend`). Rather than fix the numpy `Variable` leaf and
+re-fuzz, the whole dead backend was removed — see §4.
 
 **Phase 3 — NM-3.** Loud refusal on `lb>ub` in `_secant`/primitives.
 
@@ -90,3 +87,44 @@ relaxation layer; a model using `asin`/`acos` over a real box can get an invalid
 dual bound. Verify whether any test/benchmark instance uses `asin`/`acos` (if so
 the risk is not merely latent). NM-2 is Tier 1 for *activation-gating* — keep the
 numpy backend disabled until fixed.
+
+## 4. NM-2 resolution — deleted the dead numpy backend (2026-07-05)
+
+**Decision:** delete, not port. The `discopt._numpy` backend was a ~⅓-complete
+parallel copy of the JAX McCormick relaxation whose sole stated motivation
+("avoid JAX trace/compile overhead") is stale — the relaxation NLP is now solved
+by POUNCE (pure-Rust), which has no JAX compile floor. The backend was
+**compiled-but-unused**, so deleting it is behavior-preserving.
+
+**Reachability evidence (all references were dead produce-side plumbing):**
+
+- `solver.py` compiled the numpy relaxations (`from discopt._numpy.relaxation_compiler
+  import compile_objective_relaxation/compile_constraint_relaxation/supported_for_model`)
+  into `_mc_obj_relax_fn_np` / `_mc_con_relax_fns_np` and passed them as
+  `obj_relax_fn_numpy=` / `con_relax_fns_numpy=` into `solve_mccormick_batch` and
+  `solve_mccormick_relaxation_nlp`.
+- In `_jax/mccormick_nlp.py`, both functions **accepted** those params but **never
+  read them**: `solve_mccormick_batch` only forwarded them down to
+  `solve_mccormick_relaxation_nlp`, which ignored them entirely — the bound is
+  produced by `_solve_relaxation_with_pounce(obj_relax_fn, …)` from the **JAX**
+  `obj_relax_fn` alone. No live consumer of the numpy relaxation existed for any
+  bound or result.
+- The only other references were three envelope regression tests
+  (`test_tan_pole_envelope_c19`, `test_asin_acos_envelope_c32`,
+  `test_div_nonlinear_denominator_c23`) that parametrized `_BACKENDS = [jax, numpy]`.
+  These assert envelope soundness (`cv ≤ f ≤ cc`); the JAX param fully covers the
+  live path, so only the `numpy` param was removed — JAX coverage is retained.
+
+**Deleted:** the `python/discopt/_numpy/` package (`__init__.py`, `mccormick.py`,
+`relaxation_compiler.py`); the `solver.py` compile/import block and the two
+`obj_relax_fn_numpy=`/`con_relax_fns_numpy=` call sites plus the
+`_mc_obj_relax_fn_np`/`_mc_con_relax_fns_np` locals; the dead
+`obj_relax_fn_numpy`/`con_relax_fns_numpy` params + forwarding in
+`_jax/mccormick_nlp.py`; the numpy `id`s from `_BACKENDS` in the three envelope
+tests; and the stale `discopt._numpy.relaxation_compiler` mypy override in
+`pyproject.toml`.
+
+**Verification:** cert-baseline neutral (dead-code deletion → any node/objective
+change would prove something was live); `grep -rn "_numpy" python/` returns only
+unrelated numpy-array references; imports clean; smoke + adversarial +
+relaxation/mccormick test subset green.
