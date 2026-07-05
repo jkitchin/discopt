@@ -252,8 +252,8 @@ class TestReformulateGDP:
 
         new_m = reformulate_gdp(m)
         # Original vars should be in new model
-        assert x in new_m._variables
-        assert y in new_m._variables
+        assert any(x is _v for _v in new_m._variables)
+        assert any(y is _v for _v in new_m._variables)
 
 
 # ── Disjunctive constraint reformulation ──
@@ -1280,7 +1280,7 @@ class TestIfElse:
         m = dm.Model("ie")
         x = m.continuous("x", lb=-5, ub=5)
         w = m.if_else(x >= 0, x, -x)
-        assert w in m._variables
+        assert any(w is _v for _v in m._variables)
         assert w.var_type == VarType.CONTINUOUS
         disj = [c for c in m._constraints if isinstance(c, _DisjunctiveConstraint)]
         assert len(disj) == 1
@@ -1292,7 +1292,7 @@ class TestIfElse:
         m = dm.Model("ie")
         x = m.continuous("x", lb=-5, ub=5)
         w = dm.if_else(x >= 0, x, -x)
-        assert w in m._variables
+        assert any(w is _v for _v in m._variables)
 
     def test_aux_bounds_enclose_both_branches(self):
         """Aux variable bounds soundly enclose both branch images."""

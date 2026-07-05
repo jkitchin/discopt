@@ -3499,21 +3499,26 @@ class Model:
             if np.any(var.lb > var.ub):
                 raise ValueError(f"Variable '{var.name}' has lb > ub at some index")
 
-        # Duplicate constraint names are a silent results-integrity hazard (M5):
+        # Duplicate constraint names are a results-integrity hazard (M5):
         # ``SolveResult.constraint_duals`` is keyed by constraint name, so two
-        # rows sharing a name collide there. Reject them loudly. Unnamed
-        # constraints (``name is None``) are exempt — anonymity is allowed.
+        # rows sharing a name collide there. WARN (do not reject): indexed/array
+        # constraint families legitimately reuse a base name (e.g. a GAMS
+        # ``supply(i)`` equation loads as several ``supply`` rows), so a hard
+        # error would break valid models. The real fix — disambiguating
+        # ``constraint_duals`` for same-named indexed rows — is tracked as a
+        # follow-up (#413, M5). Unnamed constraints (``name is None``) are exempt.
         con_names: set = set()
         for c in self._constraints:
             cname = getattr(c, "name", None)
             if cname is None:
                 continue
             if cname in con_names:
-                raise ValueError(
-                    f"Duplicate constraint name: '{cname}'. Constraint names must be "
-                    "unique because result.constraint_duals is keyed by name; two "
-                    "rows sharing a name would collide. Give each a distinct name "
-                    "(or leave it unnamed)."
+                warnings.warn(
+                    f"Duplicate constraint name: '{cname}'. result.constraint_duals "
+                    "is keyed by name, so rows sharing a name collide there "
+                    "(expected for indexed/array constraint families). Give distinct "
+                    "names if you need per-row duals. (M5, #413)",
+                    stacklevel=2,
                 )
             con_names.add(cname)
 
