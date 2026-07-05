@@ -204,9 +204,7 @@ def test_467_free_variable_root_not_falsely_optimal_lp_route():
     This exercises the second (LP) route into the same Rust fathom/collapse. The
     verdict must NOT be a certified optimal.
     """
-    r = _camel_semiinfinite(-5.0, float("inf"), -5.0, 5.0, "c467_lp").solve(
-        time_limit=6.0
-    )
+    r = _camel_semiinfinite(-5.0, float("inf"), -5.0, 5.0, "c467_lp").solve(time_limit=6.0)
     assert r.status != "optimal", (
         f"semi-infinite root falsely certified optimal (LP route): status={r.status} "
         f"obj={r.objective} bound={r.bound}"
