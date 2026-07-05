@@ -67,6 +67,14 @@ pub fn solve_lp_batch(
                 };
                 let mut sol = solve_lp_scaled(&view, &b_s, opts);
                 scaling.unscale_x(&mut sol.x);
+                // Map the certificate vectors back to the original space too, so a
+                // batch solve is observationally identical to `solve_lp` (which
+                // unscales all three). A scaled dual/ray checked against the
+                // unscaled A/b would make the Neumaier–Shcherbina safe bound or the
+                // Farkas verification spuriously fail — exactly on the ill-scaled
+                // LPs where the certificate matters most (Rust-1).
+                scaling.unscale_dual(&mut sol.dual);
+                scaling.unscale_ray(&mut sol.ray);
                 sol
             };
             map_instances(instances, solve_one)
@@ -233,6 +241,106 @@ mod tests {
             let single = solve_lp(&lp, b, &opts());
             assert_eq!(sol.status, single.status);
             assert!((sol.obj - single.obj).abs() < 1e-9);
+        }
+    }
+
+    // Rust-1 regression: on the shared-scaling path the batch must return the
+    // dual/ray in the *original* (unscaled) space — bit-identical to what the
+    // single-solve `solve_lp` returns, which unscales them. Before the fix the
+    // batch left `dual`/`ray` in scaled space, so a caller verifying the
+    // Neumaier–Shcherbina safe bound or the Farkas ray against the unscaled A/b
+    // would silently see a wrong certificate.
+    #[test]
+    fn batch_unscales_dual_like_single_solve() {
+        // Wide-range coefficients force equilibration (the scaled branch). Bounded
+        // feasible instances → Optimal, so `dual` (the row multipliers) is nonempty.
+        let a = [1e8, 1.0, 1.0, 1e8, 1.0, 0.0, 0.0, 1.0];
+        let (m, n) = (2, 4);
+        let c = [1.0, 1.0, 0.0, 0.0];
+        let l = vec![0.0; 4];
+        let u = vec![1e6, 1e6, INF, INF];
+        let instances: Vec<LpInstance> = [(2e8, 1.0), (1e8, 2.0)]
+            .iter()
+            .map(|&(b0, b1)| LpInstance {
+                b: vec![b0, b1],
+                l: l.clone(),
+                u: u.clone(),
+            })
+            .collect();
+
+        let batched = solve_lp_batch(&a, m, n, &c, &instances, &opts());
+        // The scaled branch must actually be taken for this to test anything.
+        assert!(Scaling::from_matrix(&a, m, n).is_some());
+
+        for (inst, got) in instances.iter().zip(&batched) {
+            let lp = LpView {
+                a: &a,
+                m,
+                n,
+                c: &c,
+                l: &inst.l,
+                u: &inst.u,
+            };
+            let single = solve_lp(&lp, &inst.b, &opts());
+            assert_eq!(got.status, single.status);
+            assert_eq!(
+                got.dual.len(),
+                single.dual.len(),
+                "dual length mismatch batch vs single"
+            );
+            for (gb, gs) in got.dual.iter().zip(&single.dual) {
+                assert!(
+                    (gb - gs).abs() < 1e-9,
+                    "batch dual {gb} != single (unscaled) dual {gs}"
+                );
+            }
+        }
+    }
+
+    // Rust-1 regression, ray arm: an infeasible ill-scaled instance yields a
+    // Farkas ray; the batch must unscale it to match the single solve.
+    #[test]
+    fn batch_unscales_ray_like_single_solve() {
+        // x0 - x1 = b0 and x0 - x1 = b1 with b0 != b1 (and equal columns via the
+        // ill-scaled block) is contradictory → Infeasible with a Farkas ray.
+        // Use a wide-range matrix so the scaled branch runs.
+        let a = [1e8, -1e8, 1.0, -1.0];
+        let (m, n) = (2, 2);
+        let c = [0.0, 0.0];
+        let l = vec![0.0, 0.0];
+        let u = vec![INF, INF];
+        // Row0: 1e8 x0 - 1e8 x1 = 1e8  → x0 - x1 = 1.
+        // Row1:     x0 -     x1 = 5     → x0 - x1 = 5.  Contradiction.
+        let instances = vec![LpInstance {
+            b: vec![1e8, 5.0],
+            l: l.clone(),
+            u: u.clone(),
+        }];
+
+        let batched = solve_lp_batch(&a, m, n, &c, &instances, &opts());
+        assert!(Scaling::from_matrix(&a, m, n).is_some());
+
+        let inst = &instances[0];
+        let lp = LpView {
+            a: &a,
+            m,
+            n,
+            c: &c,
+            l: &inst.l,
+            u: &inst.u,
+        };
+        let single = solve_lp(&lp, &inst.b, &opts());
+        let got = &batched[0];
+        assert_eq!(got.status, single.status);
+        // Whichever certificate vector the status populates, batch must match the
+        // unscaled single solve element-for-element.
+        assert_eq!(got.dual.len(), single.dual.len());
+        assert_eq!(got.ray.len(), single.ray.len());
+        for (gb, gs) in got.dual.iter().zip(&single.dual) {
+            assert!((gb - gs).abs() < 1e-9, "batch dual {gb} != single {gs}");
+        }
+        for (gb, gs) in got.ray.iter().zip(&single.ray) {
+            assert!((gb - gs).abs() < 1e-9, "batch ray {gb} != single {gs}");
         }
     }
 

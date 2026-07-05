@@ -99,8 +99,8 @@ path is used instead.
 |----|----------|-----|---------|
 | FR-2 | P1 latent | `nlp_evaluator.py:199-201` | Builds from `model._constraints` only — blind to builder-resident rows (X-1 class). Latent on the default path (saved by the Rust representation) but **live** for `nlp_ipopt.py:254` and the examiner. |
 | OA-1 (C-35) | P1 opt-in | `oa.py:209-236,893-931,916`; `gdpopt_loa.py:314-370,225` | Non-rigorous NLP failure → **unconditional** no-good cut → possible false infeasible/optimal. Opt-in OA/LOA path only. |
-| Rust-1 | P3 latent | `lp/batch.rs:68-70` | `solve_lp_batch` does not unscale the returned dual/ray; caller currently discards them, so latent. |
-| Rust-2 | P3 robustness | `crates/discopt-python/…expr_bindings.rs:372,379` | Panics on non-contiguous numpy input instead of raising a Python error. |
+| Rust-1 | P3 latent — **FIXED** | `lp/simplex/batch.rs:68-70` | `solve_lp_batch` did not unscale the returned dual/ray; caller currently discards them, so latent. **FIXED (option a)** — the shared-scaling branch now calls `unscale_dual`/`unscale_ray` after `unscale_x`, mirroring the single-solve `solve_lp` (`primal.rs`), so the certificate is returned in the original space and a future consumer is sound. Confirmed: batch dual `−0.671` vs true unscaled `−0.00131` before (factor-512 error); equal to <1e-9 after. Regression: `batch_unscales_{dual,ray}_like_single_solve`. Cert-baseline NEUTRAL (dual/ray currently discarded — no solve change). |
+| Rust-2 | P3 robustness — **FIXED** | `crates/discopt-python/…expr_bindings.rs:371-372,377-379` | Panicked on non-contiguous numpy input (`as_slice().unwrap()` → `None`) as an opaque `pyo3_runtime.PanicException` across FFI. **FIXED** — `evaluate_objective`/`evaluate_constraint` now materialize a contiguous `Vec` (`as_array().iter().copied().collect()`, the file's established pattern), accepting strided/transposed input. Confirmed: `np.ones(2n)[::2]` panicked at `:372` before, returns the correct value after. Regression: `test_evaluate_{objective,constraint}_noncontiguous_input` in `test_rust_ir.py`. Cert-baseline NEUTRAL (error path only). |
 
 ---
 
