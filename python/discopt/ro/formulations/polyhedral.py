@@ -93,10 +93,19 @@ class PolyhedralRobustFormulation:
             for pname, unc in unc_map.items():
                 nominal = unc.parameter.value
                 nominal_flat = nominal.ravel()
-                k = len(nominal_flat)
-                A_poly = unc.A  # (n_rows, k)
+                k = len(nominal_flat)  # true parameter dimension
+                A_poly = unc.A  # (n_rows, n_lifted)
                 b_poly = unc.b  # (n_rows,)
                 n_rows = A_poly.shape[0]
+                # The polytope may live in a lifted space z = (ξ, aux): its first
+                # `k` columns are the parameter perturbation ξ (which carry the real
+                # coefficients coeff_j(x)); any remaining columns are auxiliary lift
+                # variables with zero objective coefficient. Dualizing over the full
+                # lifted A is exact — this is how the compact Bertsimas–Sim budget
+                # set (uncertainty.budget_uncertainty_set) is represented (RO-3).
+                n_lifted = A_poly.shape[1]
+                if n_lifted < k:  # pragma: no cover - guarded at construction
+                    raise ValueError(f"polytope for {pname!r} has {n_lifted} columns < {k} params")
 
                 # Isolate this parameter: substitute all OTHER params to nominal.
                 expr_isolated = expr
@@ -133,7 +142,8 @@ class PolyhedralRobustFormulation:
                     # All coefficients are constants: compute the worst-case
                     # value numerically via LP (the old approach, but correct
                     # here since the coefficients don't depend on x).
-                    coeff_vals = np.array([_eval_constant_expr(c) for c in coeff_exprs])
+                    coeff_vals = np.zeros(n_lifted)
+                    coeff_vals[:k] = [_eval_constant_expr(c) for c in coeff_exprs]
                     wc_offset = _support_function_lp(coeff_vals, A_poly, b_poly, maximize)
                     result = BinaryOp("+", result, Constant(np.array(wc_offset)))
                 else:
@@ -149,19 +159,22 @@ class PolyhedralRobustFormulation:
                         )
                         lam_vars.append(lv)
 
-                    # Duality constraints: A^T lam = coeff(x)
-                    # For each j in 0..k-1: sum_i A[i,j] * lam[i] = coeff_j(x)
-                    for j in range(k):
+                    # Duality constraints: A^T lam = coeff(z), over the full
+                    # lifted space z=(ξ,aux). Columns 0..k-1 carry coeff_j(x);
+                    # lifted columns k..n_lifted-1 have zero objective coefficient
+                    # (aux variables), so their duality RHS is 0.
+                    for j in range(n_lifted):
+                        coeff_j_expr = coeff_exprs[j] if j < k else Constant(np.array(0.0))
                         # Build sum_i A[i,j] * lam[i]
                         dual_sum = _build_weighted_sum(lam_vars, A_poly[:, j])
                         if maximize:
                             # A^T lam = coeff  =>  coeff - A^T lam == 0
-                            eq_body = BinaryOp("-", coeff_exprs[j], dual_sum)
+                            eq_body = BinaryOp("-", coeff_j_expr, dual_sum)
                         else:
                             # Minimizing: worst case is min coeff^T xi,
                             # dual: max_{lam>=0, A^T lam = -coeff} -b^T lam
                             # equivalently: A^T lam = -coeff
-                            eq_body = BinaryOp("+", coeff_exprs[j], dual_sum)
+                            eq_body = BinaryOp("+", coeff_j_expr, dual_sum)
                         new_constraints.append(
                             Constraint(
                                 body=eq_body,

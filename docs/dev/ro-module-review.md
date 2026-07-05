@@ -37,17 +37,35 @@ wrong bound in the global solver.
 >   loudly; the blessed `p @ x` / constant-coeff patterns still formulate cleanly.
 >
 > Verified fails-before/passes-after (4 tests fail on the pre-fix code); 96 ro
-> tests pass. **Still open:** RO-3 is *sound but over-conservative* (protects a
-> superset — not a false certificate), and RO-4/RO-5/RO-6 cases that silently
+> tests pass. **Still open:** RO-4/RO-5/RO-6 cases that silently
 > *substitute the wrong value* (rather than leaving a parameter) are not caught by
-> the guard; both are follow-ups, not blocking soundness holes. The full finding
+> the guard; follow-ups, not blocking soundness holes. The full finding
 > text is preserved below.
+>
+> **✅ RESOLVED RO-3** — `python/tests/test_ro_soundness.py::test_ro3_*` +
+> `test_robust_uncertainty.py` (#413). `budget_uncertainty_set` stored only the
+> all-plus/all-minus budget facets (2 of the 2^k) — a strict *superset* of the true
+> Bertsimas–Sim set, so the counterpart was SOUND but up to 2× over-conservative in
+> mixed-sign directions. It now stores the **exact compact lifted `(ξ,u)`
+> representation** (`5k+1` rows in `2k` vars — polynomial, NOT the exponential
+> `2^k`-facet ξ-only form): `ξ_j − δ_j u_j ≤ 0`, `−ξ_j − δ_j u_j ≤ 0`,
+> `Σ u_j ≤ Γ`, `0 ≤ u_j ≤ 1`. The existing polyhedral LP-duality reformulation
+> dualizes it exactly — the formulation pads `coeff(x)` with zeros over the
+> auxiliary `u`-block (keyed off the new `PolyhedralUncertaintySet.n_param`); the
+> `_delta/_gamma/_is_budget` attributes are no longer dead. Differential test both
+> directions: **(a)** the fixed solution is robust at every in-set realization
+> (10,927 exhaustive samples; worst slack 4e-8) — no under-protection; **(b)**
+> support of `[1,−1]` = **1.0** (was 2.0), price-of-robustness Γ=0/1/2 → **3.0/2.0/1.5**
+> matching the closed-form B–S optimum. Cert-baseline NEUTRAL (`discopt.ro` is never
+> imported on the solve path). This closes the last shipped ro soundness/method
+> hole; the SOTA plan below (coefficient extraction everywhere, cutting-set global RO)
+> is unaffected.
 
 | # | Severity | Component | Finding |
 |---|----------|-----------|---------|
 | RO-1 | **P0 soundness** — ✅ RESOLVED | `formulations/_common.py` (box path) | Sign-tracking assumes the parameter's variable coefficient is **nonnegative**; with a variable that can be negative the "robust" counterpart **under-protects** — returned solution violates the constraint at in-set realizations [CONFIRMED] |
 | RO-2 | **P0 soundness** — ✅ RESOLVED | `formulations/ellipsoidal.py` | Only the literal `p @ x` / `x @ p` MatMul pattern is robustified; every other appearance of the parameter (`p * x`, `dm.sum(p*x)`, RHS `h(x) <= p`) is **left at nominal with zero penalty — silently non-robust** [CONFIRMED: constraint object provably unchanged; scalar case returns the nominal optimum] |
-| RO-3 | **P0 method** | `uncertainty.py:budget_uncertainty_set` + `polyhedral.py` | The stored `A,b` has only the all-plus/all-minus budget facets (2 of the 2^k needed); the compact `_is_budget/_delta/_gamma` attributes are **never read** by any formulation — the "Bertsimas–Sim" counterpart protects against a strict superset, **2× over-conservative** in mixed-sign directions at k=2 [CONFIRMED: support of [1,−1] = 2.0 vs true 1.0] |
+| RO-3 | **P0 method** — ✅ RESOLVED | `uncertainty.py:budget_uncertainty_set` + `polyhedral.py` | The stored `A,b` had only the all-plus/all-minus budget facets (2 of the 2^k needed); the compact `_is_budget/_delta/_gamma` attributes were **never read** — the "Bertsimas–Sim" counterpart protected against a strict superset, **2× over-conservative** in mixed-sign directions at k=2 [CONFIRMED: support of [1,−1] = 2.0 vs true 1.0]. **FIXED (#413)**: stores the exact compact lifted `(ξ,u)` polytope (`5k+1` rows, `2k` vars); polyhedral dual pads `coeff(x)` over the `u`-block. Post-fix support [1,−1]=1.0, still robust at every in-set realization (10,927-sample exhaustive check, worst slack 4e-8), price-of-robustness Γ=0/1/2 → 3.0/2.0/1.5 |
 | RO-4 | **P1 soundness** | `_common.py` | Division/power propagate sign **without flipping**: `c/p` substitutes the wrong bound (non-conservative); non-monotone dependence (`p**2` on a straddling interval) picks the wrong endpoint [BY INSPECTION — mechanism unambiguous] |
 | RO-5 | P1 soundness | `polyhedral.py:_eval_constant_expr` | Unknown node types (SumExpression, MatMul, FunctionCall, IndexExpression) **evaluate to 0.0 silently** — a constant-coefficient constraint written with any of those shapes gets **zero protection** [BY INSPECTION] |
 | RO-6 | P1 | `_common.py` (documented) | `np.sign(np.sum(value))` collapses constant **vectors** to one scalar sign — mixed-sign coefficient vectors get the wrong bound per-component (documented in ROADMAP, but ships silent) |

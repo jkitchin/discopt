@@ -217,6 +217,60 @@ def test_c3_unbounded_recourse_reported():
     assert r.status == "unbounded"
 
 
+# ── DC-S1 (decomposition-review, confirm-first) ───────────────
+#
+# DC-S1 was SUSPECTED against the pre-#409 tree: an unbounded-below recourse LP
+# reported ``bound = _ETA_FLOOR (-1e12)`` (an invalid populated bound when the
+# true optimum is below the floor). PR #409 ("Decomposition module remediation",
+# 2026-07-03 — same day as the review) added (1) distinct ``unbounded`` recourse
+# detection and (2) the T0.5 eta-floor-withholding guard. These tests pin BOTH
+# halves of the finding so the fix cannot silently regress. DC-S1 is
+# NOT-REPRODUCED on the current tree; these are the confirming evidence.
+
+
+def test_dcs1_unbounded_recourse_withholds_bound():
+    """The exact DC-S1 review repro (min y - x, x in [0, 1e30], x >= y).
+
+    x's recourse is unbounded below, so the true optimum is -inf. The solver must
+    report ``status="unbounded"`` with ``bound=None`` (never the -1e12 floor as a
+    valid-looking bound).
+    """
+    m = dm.Model("dcs1")
+    y = m.integer("y", shape=(1,), lb=0, ub=1)  # complicating -> master
+    x = m.continuous("x", shape=(1,), lb=0.0, ub=1e30)  # recourse
+    m.minimize(y[0] - x[0])
+    m.subject_to(x[0] >= y[0], name="couple")
+    r = solve_benders(m, max_iterations=50, time_limit=30)
+    assert r.status == "unbounded"
+    assert r.bound is None
+    assert r.gap_certified is False
+
+
+def test_dcs1_bounded_recourse_below_eta_floor_withholds_bound():
+    """The second DC-S1 sub-case: a BOUNDED recourse whose true optimum is below
+    the -1e12 eta floor must NOT report the floor as a valid bound.
+
+    ``min y + x`` with ``x in [-5e12, 0]`` (bounded) has optimum -5e12 < -1e12.
+    The T0.5 guard detects the eta variable still resting on the floor and
+    withholds the bound (``bound=None``); the incumbent objective is still
+    correct, and ``gap_certified`` stays ``False`` — no invalid certificate.
+    """
+    import warnings
+
+    m = dm.Model("dcs1b")
+    y = m.integer("y", shape=(1,), lb=0, ub=1)
+    x = m.continuous("x", shape=(1,), lb=-5e12, ub=0.0)
+    m.minimize(y[0] + x[0])
+    m.subject_to(x[0] >= -5e12, name="c")
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        r = solve_benders(m, max_iterations=50, time_limit=30)
+    # The incumbent is the true optimum, but the dual bound is withheld (floor).
+    assert r.objective == pytest.approx(-5e12, rel=1e-6)
+    assert r.bound is None, f"invalid populated bound {r.bound} (eta floor leaked)"
+    assert r.gap_certified is False
+
+
 def test_c4_progress_guard_no_spin(monkeypatch):
     """If the LP backend returns no duals, cuts cannot separate the master point;
     the solver must bail out quickly instead of spinning to max_iterations (C4)."""
