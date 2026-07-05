@@ -303,7 +303,7 @@ Legend: ⬜ open · ◧ in-progress · ✅ resolved · ◻︎ not-reproduced.
 | 2 | DC-S1 | decomposition | ⬜ |
 | 2 | OA-1=C-35 | solver-core | ⬜ |
 | 2 | M3 | modeling | ✅ `test_m3_cross_model_ownership` — validate() rejects index-incompatible cross-model leaves |
-| 3 | MO1–MO4 | mo | ⬜ |
+| 3 | MO1–MO4 ✅ · MO5–MO10 ⬜ | mo | ◧ — MO1 (NBI axis, prior PR) ✅; **MO2** (AUGMECON2: lexicographic payoff + bypass) ✅, **MO3** (Pareto dedup) ✅, **MO4** (stable HV reference `common_reference`) ✅ — `test_mo_augmecon2.py`, `test_mo_pareto.py::TestFilteredDedup`, `test_mo_indicators.py::TestCommonReference`; cert-baseline NEUTRAL (mo off the solve path). MO5–MO10 (perf/robustness) open. |
 | 3 | E1–E3, L1–L8, M4–M8 | modeling/examples/latex | ⬜ |
 | 4 | Rust-1 (dual/ray unscale), Rust-2 (numpy panic), P2/P3 across all | all | ⬜ |
 

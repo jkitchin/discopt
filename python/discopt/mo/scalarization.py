@@ -25,6 +25,8 @@ from discopt.mo.utils import (
     _x_to_var_dict,
     evaluate_expression,
     ideal_point,
+    lexicographic_payoff,
+    nadir_from_payoff,
     nadir_point,
 )
 
@@ -283,13 +285,15 @@ def epsilon_constraint(
     delta: float = 1e-3,
     warm_start: bool = True,
     filter: bool = True,
+    payoff: str = "lexicographic",
+    bypass: bool = True,
     ideal: Optional[np.ndarray] = None,
     nadir: Optional[np.ndarray] = None,
     anchors: Optional[list[dict[str, np.ndarray]]] = None,
     slack_ub: float = 1e6,
     **solve_kwargs,
 ) -> ParetoFront:
-    """Epsilon-constraint sweep with optional AUGMECON2 augmentation.
+    """Epsilon-constraint sweep — AUGMECON2 [Mavrotas & Florios 2013].
 
     Minimizes the *primary* objective subject to
     ``f_i <= epsilon_i`` (for minimize-sense non-primary objectives;
@@ -298,10 +302,28 @@ def epsilon_constraint(
     ``-delta * sum(s_i / r_i)`` on them so every returned point is strictly
     Pareto-optimal [Mavrotas 2009].
 
+    The two features that make this AUGMECON2 rather than plain AUGMECON are
+    both on by default:
+
+    * **Lexicographic payoff table** (``payoff="lexicographic"``): the
+      ideal/nadir range is computed from a lexicographically-optimized payoff
+      table (:func:`~discopt.mo.utils.lexicographic_payoff`), whose rows are
+      Pareto-optimal, avoiding the inflated / truncated ε-grid a plain
+      single-objective payoff produces under alternative optima
+      [Miettinen 1999]. Pass ``payoff="simple"`` for the original
+      :func:`~discopt.mo.utils.ideal_point` / ``nadir_point`` behavior.
+    * **Bypass / jump acceleration** (``bypass=True``): after each solve, the
+      innermost objective's optimal slack is used to skip the ε-grid cells that
+      would provably reproduce the same solution, sweeping the innermost axis
+      from best to worst. This is exact — it only skips subproblems whose
+      optimum is already known — and yields fewer solves on flat front regions.
+      Requires ``augmented=True``. Pass ``bypass=False`` for the exhaustive
+      grid.
+
     Epsilon grids are uniform over ``[ideal_i, nadir_i]`` of the non-primary
-    objectives, using ``n_points`` divisions per axis (total
-    ``n_points ** (k - 1)`` subproblems for ``k`` objectives). For ``k = 2``,
-    this is simply ``n_points`` solves.
+    objectives, using ``n_points`` divisions per axis (up to
+    ``n_points ** (k - 1)`` subproblems for ``k`` objectives; fewer with
+    ``bypass``). For ``k = 2``, this is at most ``n_points`` solves.
 
     Parameters follow the same conventions as :func:`weighted_sum`.
     """
@@ -312,25 +334,48 @@ def epsilon_constraint(
         raise ValueError("Need at least 2 objectives")
     if not 0 <= primary < k:
         raise ValueError(f"primary={primary} not in range [0, {k})")
+    if payoff not in ("lexicographic", "simple"):
+        raise ValueError(f"payoff must be 'lexicographic' or 'simple', got {payoff!r}")
+    use_bypass = bool(bypass) and augmented
 
     saved_obj = model._objective
     saved_n_cons = len(model._constraints)
 
     try:
-        if ideal is None or anchors is None:
-            ideal_arr, anchors = ideal_point(
+        if ideal is not None and nadir is not None:
+            ideal_arr = np.asarray(ideal, dtype=np.float64)
+            nadir_arr = np.asarray(nadir, dtype=np.float64)
+        elif payoff == "lexicographic":
+            ideal_arr, payoff_mat, anchors = lexicographic_payoff(
                 model,
                 objectives,
                 senses=senses_list,
                 warm_start=warm_start,
                 **solve_kwargs,
             )
+            if ideal is not None:
+                ideal_arr = np.asarray(ideal, dtype=np.float64)
+            nadir_arr = (
+                np.asarray(nadir, dtype=np.float64)
+                if nadir is not None
+                else nadir_from_payoff(payoff_mat, senses=senses_list)
+            )
         else:
-            ideal_arr = np.asarray(ideal, dtype=np.float64)
-        if nadir is None:
-            nadir_arr = nadir_point(model, objectives, anchors, senses=senses_list)
-        else:
-            nadir_arr = np.asarray(nadir, dtype=np.float64)
+            if ideal is None or anchors is None:
+                ideal_arr, anchors = ideal_point(
+                    model,
+                    objectives,
+                    senses=senses_list,
+                    warm_start=warm_start,
+                    **solve_kwargs,
+                )
+            else:
+                ideal_arr = np.asarray(ideal, dtype=np.float64)
+            nadir_arr = (
+                np.asarray(nadir, dtype=np.float64)
+                if nadir is not None
+                else nadir_point(model, objectives, anchors, senses=senses_list)
+            )
 
         non_primary = [i for i in range(k) if i != primary]
         # Parameters for each non-primary epsilon.
@@ -373,53 +418,100 @@ def epsilon_constraint(
             if penalty is not None:
                 scalarized = scalarized - penalty
 
-        # Epsilon grid. For each non-primary objective, a grid of n_points
-        # values in [ideal_i, nadir_i] (in original sense).
-        grids = []
+        # Epsilon grid per non-primary axis, oriented from WORST to BEST value
+        # (nadir -> ideal in min-convention). AUGMECON2 sweeps the innermost
+        # axis in this direction so that a subproblem's slack tells us how many
+        # of the *next* (tighter) ε cells reproduce the same solution and can be
+        # skipped ("bypass"). Grid values are stored in min-convention units
+        # (sign_i * f_i) so step sizes are positive and comparable to slacks.
+        min_grids = []  # min-convention grid values, worst -> best
         for i in non_primary:
-            lo, hi = float(ideal_arr[i]), float(nadir_arr[i])
-            if senses_list[i] == "max":
-                lo, hi = hi, lo  # so that grid goes from worst to best
-            grid = np.linspace(lo, hi, n_points)
-            grids.append(grid)
-        if len(non_primary) == 1:
-            eps_grid = grids[0][:, None]
-        else:
-            mesh = np.meshgrid(*grids, indexing="ij")
-            eps_grid = np.column_stack([m.reshape(-1) for m in mesh])
+            lo_min = float(signs[i] * ideal_arr[i])
+            hi_min = float(signs[i] * nadir_arr[i])
+            # In min-convention, ideal <= nadir; worst is the larger value.
+            worst, best = max(lo_min, hi_min), min(lo_min, hi_min)
+            min_grids.append(np.linspace(worst, best, n_points))
+
+        # Step size of the innermost axis (last non-primary), in min-convention.
+        inner_axis = len(non_primary) - 1
+        inner_grid = min_grids[inner_axis]
+        inner_step = abs(float(inner_grid[0] - inner_grid[1])) if n_points > 1 else 0.0
 
         points: list[ParetoPoint] = []
         last_x: Optional[dict[str, np.ndarray]] = None
 
-        for eps_vec in eps_grid:
-            for idx, i in enumerate(non_primary):
-                eps_params[idx].value = np.asarray(float(eps_vec[idx]))
-            model.minimize(scalarized)
+        def _run_solve(min_eps_vec):
+            """Set ε parameters from min-convention values and solve.
 
+            Returns ``(result, wall, obj_vec, slack_inner)`` or
+            ``(None, wall, None, None)`` on infeasibility.
+            """
+            nonlocal last_x
+            for idx in range(len(non_primary)):
+                i = non_primary[idx]
+                # Convert min-convention grid value back to original sense.
+                eps_params[idx].value = np.asarray(float(signs[i] * min_eps_vec[idx]))
+            model.minimize(scalarized)
             kwargs = dict(solve_kwargs)
             if warm_start and last_x is not None and "initial_solution" not in kwargs:
                 kwargs["initial_solution"] = _x_to_var_dict(model, last_x)
-
             t0 = time.perf_counter()
             result = model.solve(**kwargs)
             wall = time.perf_counter() - t0
-
             if result.x is None:
-                continue
+                return None, wall, None, None
             obj_vec = _collect_objectives_at_x(objectives, model, result.x)
+            # Innermost slack (min-convention): eps_inner - sign*f_inner >= 0.
+            i_inner = non_primary[inner_axis]
+            slack_inner = float(min_eps_vec[inner_axis] - signs[i_inner] * obj_vec[i_inner])
+            last_x = result.x
+            return result, wall, obj_vec, slack_inner
+
+        def _record(result, wall, obj_vec, min_eps_vec):
             params_record = {
-                "epsilon": {f"f{i + 1}": float(e) for i, e in zip(non_primary, eps_vec)}
+                "epsilon": {
+                    f"f{i + 1}": float(signs[i] * min_eps_vec[idx])
+                    for idx, i in enumerate(non_primary)
+                }
             }
             points.append(
                 ParetoPoint(
-                    x={k: np.asarray(v).copy() for k, v in result.x.items()},
+                    x={kk: np.asarray(v).copy() for kk, v in result.x.items()},
                     objectives=obj_vec,
                     status=result.status,
                     wall_time=wall,
                     scalarization_params=params_record,
                 )
             )
-            last_x = result.x
+
+        # Iterate the outer axes exhaustively; sweep the innermost axis with the
+        # bypass jump when enabled.
+        from itertools import product
+
+        outer_axes = list(range(len(non_primary) - 1))
+        outer_ranges = [range(len(min_grids[a])) for a in outer_axes]
+        for outer_idx in product(*outer_ranges) if outer_axes else [()]:
+            inner_pos = 0
+            while inner_pos < len(inner_grid):
+                min_eps_vec = [0.0] * len(non_primary)
+                for a, gi in zip(outer_axes, outer_idx):
+                    min_eps_vec[a] = float(min_grids[a][gi])
+                min_eps_vec[inner_axis] = float(inner_grid[inner_pos])
+
+                result, wall, obj_vec, slack_inner = _run_solve(min_eps_vec)
+                if result is None:
+                    # Infeasible: tightening the innermost ε further stays
+                    # infeasible, so abandon the rest of this inner sweep.
+                    break
+                _record(result, wall, obj_vec, min_eps_vec)
+
+                if use_bypass and inner_step > 0 and slack_inner is not None:
+                    # The slack covers floor(slack/step) additional cells that
+                    # would reproduce this solution; jump past them.
+                    jump = int(np.floor(max(slack_inner, 0.0) / inner_step))
+                    inner_pos += max(jump, 0) + 1
+                else:
+                    inner_pos += 1
     finally:
         model._objective = saved_obj
         # Trim constraints we added (leaves aux vars and parameters in place).

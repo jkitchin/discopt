@@ -7,6 +7,7 @@ import pytest
 from discopt.mo import (
     ParetoFront,
     ParetoPoint,
+    common_reference,
     epsilon_indicator,
     hypervolume,
     igd,
@@ -105,6 +106,70 @@ class TestHypervolumeSenses:
         f_max = _front([[3.0, 1.0], [2.0, 2.0], [1.0, 3.0]], senses=("max", "max"))
         hv_max = hypervolume(f_max, reference=np.array([0.0, 0.0]))
         assert hv_max == pytest.approx(6.0)
+
+
+class TestCommonReference:
+    """MO4: the default HV reference is front-dependent (incomparable across
+    fronts); ``common_reference`` builds one shared reference so two fronts for
+    the same problem are comparable.
+    """
+
+    @pytest.mark.smoke
+    def test_default_reference_is_front_dependent(self):
+        # Two nested fronts. Under the default (front-derived) reference their
+        # hypervolumes are computed against DIFFERENT references, so they are
+        # not comparable -- the better (dominating) front can score LOWER.
+        better = _front([[0.0, 2.0], [1.0, 1.0], [2.0, 0.0]])
+        worse = _front([[0.0, 4.0], [2.0, 2.0], [4.0, 0.0]])
+        hv_better_default = better.hypervolume()
+        hv_worse_default = worse.hypervolume()
+        # The pathology: the worse front scores strictly higher under defaults
+        # (its self-derived reference box is larger). This is the MO4 bug.
+        assert hv_worse_default > hv_better_default
+
+    @pytest.mark.smoke
+    def test_shared_reference_is_comparable(self):
+        better = _front([[0.0, 2.0], [1.0, 1.0], [2.0, 0.0]])
+        worse = _front([[0.0, 4.0], [2.0, 2.0], [4.0, 0.0]])
+        ref = common_reference(better, worse)
+        hv_better = better.hypervolume(reference=ref)
+        hv_worse = worse.hypervolume(reference=ref)
+        # Against a SHARED reference the dominating front scores at least as
+        # high, restoring comparability.
+        assert hv_better >= hv_worse
+
+    @pytest.mark.smoke
+    def test_reference_dominates_all_points(self):
+        f1 = _front([[0.0, 2.0], [2.0, 0.0]])
+        f2 = _front([[1.0, 3.0], [3.0, 1.0]])
+        ref = common_reference(f1, f2)
+        # Every point of every front must strictly dominate the reference so
+        # each contributes positive hypervolume.
+        for f in (f1, f2):
+            assert f.hypervolume(reference=ref) > 0.0
+            assert np.all(f.objectives() < ref[None, :])
+
+    @pytest.mark.smoke
+    def test_max_sense_shared_reference(self):
+        f1 = _front([[3.0, 1.0], [1.0, 3.0]], senses=("max", "max"))
+        f2 = _front([[2.0, 1.0], [1.0, 2.0]], senses=("max", "max"))
+        ref = common_reference(f1, f2)
+        # Max-sense: reference must be BELOW all points (worse in max sense).
+        for f in (f1, f2):
+            assert np.all(f.objectives() > ref[None, :])
+            assert f.hypervolume(reference=ref) > 0.0
+
+    @pytest.mark.smoke
+    def test_incompatible_fronts_raise(self):
+        f_min = _front([[0.0, 2.0]], senses=("min", "min"))
+        f_max = _front([[0.0, 2.0]], senses=("min", "max"))
+        with pytest.raises(ValueError):
+            common_reference(f_min, f_max)
+        with pytest.raises(ValueError):
+            common_reference()
+        empty = _front(np.zeros((0, 2)))
+        with pytest.raises(ValueError):
+            common_reference(empty)
 
 
 class TestIGD:
