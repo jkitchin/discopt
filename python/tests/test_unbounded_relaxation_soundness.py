@@ -221,7 +221,14 @@ def test_467_finite_box_control_still_certifies_optimal():
     """#467 control: the SAME objective over a finite box [-5,5]^2 must still
     certify the true global optimum 0.0. This guards against the fix
     over-firing and downgrading a validly-certified finite-box solve."""
-    r = _camel_semiinfinite(-5.0, 5.0, -5.0, 5.0, "c467_ctrl").solve(time_limit=10.0, daemon=False)
+    # Generous time_limit (60s): this is the only #467 guard that REQUIRES a
+    # certified `optimal`, and the finite-box three-hump-camel is a borderline
+    # nonconvex certification (~1.7s uninstrumented). Under the coverage-
+    # instrumented CI job (Python-heavy B&B loop, 2-3x slower on a shared runner)
+    # a 10s budget intermittently timed out -> `feasible` -> false test failure.
+    # The headroom keeps the correctness guard intact without the timing flake;
+    # a valid solve certifies long before 60s.
+    r = _camel_semiinfinite(-5.0, 5.0, -5.0, 5.0, "c467_ctrl").solve(time_limit=60.0, daemon=False)
     assert r.status == "optimal", f"finite-box control lost certification: status={r.status}"
     assert r.objective is not None and abs(r.objective) <= 1e-3, (
         f"finite-box control missed the true optimum 0.0: obj={r.objective}"
