@@ -224,9 +224,15 @@ it converts a class of deep-compile errors into immediate one-line errors.
   ignored). Warn/raise on unused keys.
 - **M11.** `land()`/`lor()` skip the `_wrap_logical` validation their operator
   equivalents perform; `land(y1, 5)` builds a malformed tree that fails downstream.
-- **M12.** `num_constraints` counts `Constraint` *objects*, not scalar rows, and
-  excludes `_builder_linear_blocks` rows — `summary()` under-reports vectorized and
-  fast-path models. Cosmetic but misleading; count flattened rows.
+- **M12. ✅ RESOLVED (X-1).** `num_constraints` counted `Constraint` *objects*, not
+  scalar rows, and excluded `_builder_linear_blocks` rows — `summary()` under-reported
+  fast-path models (a fast-API-only model reported `0`). **FIXED:** `num_constraints`
+  now adds `Model._num_builder_constraint_rows()` (the builder blocks' scalar-row
+  count); `Model._has_builder_only_rows()` was added as the shared predicate. Regression:
+  `test_x1_builder_resident_rows.py::test_m12_*`. (The residual sub-item — counting
+  *vectorized* expression `Constraint` objects as their flattened row count — is a
+  cosmetic display nit tracked under modeling, separate from the fast-path correctness
+  hazard closed here.)
 
 ---
 

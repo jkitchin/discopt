@@ -14,6 +14,7 @@ from pathlib import Path
 
 import numpy as np
 
+from discopt.export._common import builder_objective, iter_builder_linear_rows
 from discopt.export._extract import (
     extract_linear_terms,
     extract_quadratic_terms,
@@ -63,15 +64,26 @@ def to_mps(model: Model, path: str | Path | None = None) -> str | None:
     obj_row_name = "OBJ"
     lines.append(f" N  {obj_row_name}")
 
-    # Constraints
-    constraint_row_names: list[str] = []
+    # Constraints — both expression-path rows and fast-API / builder-resident rows
+    # (X-1: rows from `add_linear_constraints` / the `Model.constraint` fast path
+    # live only in the Rust builder; without them the export is an empty model).
+    mvars = model._variables
+    row_senses: list[str] = []
+    con_data: list[tuple[dict[int, float], float]] = []
+    constraint_row_names = []
     for i, con in enumerate(model._constraints):
-        row_name = con.name if con.name else f"C{i}"
-        # Sanitize: MPS names should be alphanumeric-ish
-        row_name = _sanitize_name(row_name)
+        row_name = _sanitize_name(con.name if con.name else f"C{i}")
+        lin, const = extract_linear_terms(con.body, flat_vars, model_vars=mvars)
         constraint_row_names.append(row_name)
+        row_senses.append(con.sense)
+        con_data.append((lin, -const))
+    for j, brow in enumerate(iter_builder_linear_rows(model)):
+        row_name = _sanitize_name(brow.name if brow.name else f"B{j}")
+        constraint_row_names.append(row_name)
+        row_senses.append(brow.sense)
+        con_data.append((dict(brow.coeffs), brow.rhs))
 
-        sense = con.sense
+    for row_name, sense in zip(constraint_row_names, row_senses):
         if sense == "<=":
             lines.append(f" L  {row_name}")
         elif sense == ">=":
@@ -84,30 +96,25 @@ def to_mps(model: Model, path: str | Path | None = None) -> str | None:
     # COLUMNS
     lines.append("COLUMNS")
 
-    # Build objective linear coefficients
+    # Build objective linear/quadratic coefficients. A builder-resident objective
+    # (`add_linear_objective` / `add_quadratic_objective`, X-1) leaves a zero
+    # placeholder in `model._objective` — recover its real coefficients rather than
+    # emit `obj: 0`.
     assert model._objective is not None
-    obj_expr = model._objective.expression
-    mvars = model._variables
-    try:
+    builder_obj = builder_objective(model)
+    if builder_obj is not None:
+        obj_linear, obj_quad_map, obj_const, _obj_sense = builder_obj
+        obj_quad = obj_quad_map or {}
+    else:
+        obj_expr = model._objective.expression
         obj_quad, obj_linear, obj_const = extract_quadratic_terms(
             obj_expr, flat_vars, model_vars=mvars
         )
-    except ValueError:
-        raise
 
     has_quad = len(obj_quad) > 0
 
-    # Build constraint coefficients
-    con_data: list[tuple[dict[int, float], float]] = []
-    for con in model._constraints:
-        # Constraint body is normalized: body sense 0.0
-        # So body <= 0 means body <= 0, i.e., the RHS in MPS is 0.
-        # But we need to extract linear terms and separate constant.
-        lin, const = extract_linear_terms(con.body, flat_vars, model_vars=mvars)
-        # body = sum(coeff * var) + const sense 0
-        # => sum(coeff * var) sense -const
-        rhs = -const
-        con_data.append((lin, rhs))
+    # Constraint coefficients (`con_data`) were assembled above from both
+    # expression-path and builder-resident rows.
 
     # Track which variables are integer/binary for MARKER sections
     int_marker_open = False
@@ -225,7 +232,11 @@ def to_mps(model: Model, path: str | Path | None = None) -> str | None:
     # The OBJSENSE section (extension) or RANGES trick is used.
     # Let's use the OBJSENSE extension supported by most solvers.
     assert model._objective is not None
-    if model._objective.sense == ObjectiveSense.MAXIMIZE:
+    if builder_obj is not None:
+        is_max = str(builder_obj[3]).lower().startswith("max")
+    else:
+        is_max = model._objective.sense == ObjectiveSense.MAXIMIZE
+    if is_max:
         # Insert OBJSENSE MAX after NAME
         lines.insert(1, "OBJSENSE MAX")
 

@@ -3175,9 +3175,40 @@ class Model:
             v.size for v in self._variables if v.var_type in (VarType.INTEGER, VarType.BINARY)
         )
 
+    def _has_builder_only_rows(self) -> bool:
+        """True if the model carries linear rows/objective living only in the builder.
+
+        The fast-construction API (``add_linear_constraints`` / the
+        ``Model.constraint`` linear fast path) and ``add_linear_objective`` /
+        ``add_quadratic_objective`` emit rows/objective directly into the Rust
+        builder; they are **not** mirrored in ``self._constraints`` /
+        ``self._objective``. Consumers that read only those Python-side collections
+        (classifiers, extractors, exporters, the validation examiner) must consult
+        this predicate — a ``True`` return means they would otherwise see a strict
+        subset of the model. See ``docs/dev/review-execution-plan.md`` §1 (X-1).
+        """
+        from discopt.export._common import has_builder_only_rows
+
+        return has_builder_only_rows(self)
+
+    def _num_builder_constraint_rows(self) -> int:
+        """Count the scalar constraint rows that live only in the Rust builder."""
+        blocks = getattr(self, "_builder_linear_blocks", None)
+        if not blocks:
+            return 0
+        return int(builtins_sum(int(A.shape[0]) for A, *_ in blocks))
+
     @property
     def num_constraints(self) -> int:
-        return len(self._constraints)
+        """Total scalar constraint rows, including fast-API / builder-resident rows.
+
+        Counts both expression-path rows in ``self._constraints`` and the
+        builder-resident linear rows emitted by ``add_linear_constraints`` / the
+        ``Model.constraint`` linear fast path (X-1). Before this fix the fast-path
+        rows were invisible, so a model built entirely through the fast API reported
+        ``0`` constraints.
+        """
+        return len(self._constraints) + self._num_builder_constraint_rows()
 
     def summary(self) -> str:
         """

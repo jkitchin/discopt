@@ -212,6 +212,15 @@ def classify_gp(model: Model) -> Optional[GPStructure]:
     """
     if model._objective is None:
         return None
+    # X-1: fast-API (`m.constraint(...)` linear fast path / `add_linear_constraints`)
+    # rows and `add_linear_objective`/`add_quadratic_objective` live only in the Rust
+    # builder, invisible to the posynomial recogniser below. Recognising the model as
+    # a GP here would solve the log-space reformulation WITHOUT those rows/objective —
+    # a wrong certificate on the default solve path (GP-1). A general linear row is
+    # GP-representable only in special sign patterns, so refuse (return None) and let
+    # the model fall back to spatial B&B, which sees the builder rows.
+    if model._has_builder_only_rows():
+        return None
     if not _all_variables_positive_continuous(model):
         return None
     # Reject models carrying non-algebraic constraint kinds (indicator,

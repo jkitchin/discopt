@@ -255,7 +255,7 @@ Legend: ⬜ open · ◧ in-progress · ✅ resolved · ◻︎ not-reproduced.
 
 | Tier | ID(s) | Module | Status |
 |------|-------|--------|--------|
-| root X-1 | GP-1, VAL-1, EX-2, M12, classifier, FR-2 | gp/validation/export/modeling/solver-core | ⬜ |
+| root X-1 | GP-1, VAL-1, EX-2, M12 ✅ · classifier/extractor ◻︎ not-reproduced (already builder-aware via Rust repr) · FR-2 (Tier-2, out of scope) | gp/validation/export/modeling/solver-core | ✅ 1dc3278 — test_x1_builder_resident_rows |
 | root X-2 | CORE-1=C-29, TG-1=C-31, CF-1, GAMS bounds | solver-core/tightening/conflict/export | ⬜ |
 | root X-3 | M2 = INT-2 | modeling/infra | ⬜ |
 | 0 | LLM-1 | llm | ⬜ |
@@ -279,6 +279,38 @@ Legend: ⬜ open · ◧ in-progress · ✅ resolved · ◻︎ not-reproduced.
 *(Expand per-finding as the loop proceeds; the authoritative per-finding detail
 stays in each module's review doc. Solver-core findings: `solver-core-review.md`;
 the C-IDs are also carded in `correctness-issues.md`.)*
+
+**X-1 resolution notes (builder-resident-rows blind spot).** All four confirmed
+findings reproduced on `origin/main` and were closed by routing the affected
+consumers through the shared `discopt.export._common` row iterator plus
+`Model._has_builder_only_rows()`:
+- **GP-1** (P0, confirmed) — `classify_gp` recognised a fast-API GP-shaped model and
+  solved the log-space reformulation WITHOUT the builder rows (`m.solve()` returned
+  `0.1`; true optimum `0.5`). Fix: `classify_gp` returns `None` when
+  `model._has_builder_only_rows()` (refuse → fall back to spatial B&B, which sees the
+  builder rows). Both the `m.constraint(...)` fast path and `add_linear_constraints`
+  variants now solve `0.5`.
+- **VAL-1** (P0, confirmed) — the examiner (`examine`) certified `x=[0,0]` against a
+  builder-resident `x[0] >= 3` floor as `passed=True` (0 constraints seen). Fix: a new
+  `primal_con_feas (builder rows)` check evaluates the builder linear rows directly in
+  the examiner's flat-variable frame; the violating point is now `passed=False`. The
+  fix only *adds* coverage — no existing check was relaxed. (The dual-side KKT machinery
+  still reads expression rows only — full dual coverage of builder rows is FR-2, Tier-2.)
+- **EX-2** (P0, confirmed) — MPS/LP/GAMS export of a fast-API-only model emitted an
+  empty model (ROWS = `N OBJ` only, LP `Subject To` empty, GAMS `obj_var =e= 0`). Fix:
+  MPS/LP/GAMS now emit the builder rows via `iter_builder_linear_rows`; the exported MPS
+  round-trips through HiGHS to the true optimum (3.0).
+- **M12** (confirmed) — `num_constraints` / `summary` reported `0` for a fast-API-only
+  model. Fix: `num_constraints` adds `_num_builder_constraint_rows()`.
+- **classifier / extractor** (◻︎ NOT REPRODUCED) — `classify_problem` and the public
+  `extract_lp_data`/`extract_qp_data`/`extract_qcp_data` already route fast-API models
+  through the Rust `model_to_repr` path (`_extract_*_from_repr`), which *is* builder-aware
+  (`repr.n_constraints == 1`, `A_eq` carries the row). The `*_algebraic` variants are
+  blind but are only reached as a fallback when the repr path raises; fast-API models
+  always carry a `_builder`, so the repr path wins. No wrong answer reproduced. (The
+  shared iterator is nonetheless the canonical home should a future consumer need it.)
+- **FR-2** — a Tier-2 X-1 extension (nlp_evaluator / `nlp_ipopt.py:254` blind to builder
+  rows in the *dual*/relaxation path); tracked separately, out of scope for this PR.
 
 **Verified SOUND (not findings, do not re-audit without new evidence):** the
 convexity certifier + convex fast-path (901-certificate fuzz, 0 false), the JAX
