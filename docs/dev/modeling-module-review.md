@@ -24,7 +24,7 @@ unambiguous from control flow.
 | # | Severity | Component | Finding |
 |---|----------|-----------|---------|
 | M1 | **P0 correctness** | `_jax/problem_classifier.py` (contract defined by `modeling/core.py`) | Vector (broadcast) constraints are silently **aggregated into one summed row** on the LP/MILP algebraic extraction path → solver returns an **infeasible point certified "optimal"** [CONFIRMED] |
-| M2 | **P0 correctness** | `core.py:3630` (`from_nl`) | Binary variables are re-created with default `[0,1]` bounds, **discarding the parsed `.nl` bounds** — a fixed binary silently un-fixes; affects `from_nl` and the `from_pyomo` round-trip [CONFIRMED] |
+| M2 | **P0 correctness** | `core.py:3630` (`from_nl`) | Binary variables are re-created with default `[0,1]` bounds, **discarding the parsed `.nl` bounds** — a fixed binary silently un-fixes; affects `from_nl` and the `from_pyomo` round-trip [CONFIRMED] **✅ RESOLVED (X-3, #413): `from_nl` now stamps the parsed lb/ub onto the binary, clamped into `[0,1]`; regression `TestFromNlBinaryBoundsX3` in `test_nl_reconstruction.py`.** |
 | M3 | **P0 correctness** | `core.py` (no ownership check) | Expressions mixing variables from **two different models** are silently accepted; the foreign variable **aliases by flat index** onto a same-index variable of the solved model → silently wrong answer [CONFIRMED] |
 | M4 | P1 | `core.py:157` | `Expression.__eq__` returns a `Constraint`, so `expr in seq` is **always True**, `Constraint == Constraint` is always True, and all non-`Variable` expressions are unhashable [CONFIRMED] |
 | M5 | P1 | `core.py:1910,1933` | `subject_to` **mutates** the passed `Constraint` in place (`c.name = name`); re-adding the same object renames the earlier row; duplicate constraint names are never validated though `constraint_duals` is keyed by name [CONFIRMED] |
@@ -139,6 +139,18 @@ to **2.0** with the binary at 0. Silently wrong on round-trip; also poisons
 Intersect with `[0,1]` for soundness. Regression test: `.nl` round-trip of a model
 with a fixed binary must preserve the optimum; also parse a hand-written `.nl` with
 `b`-section bounds `1 1` on a binary column.
+
+**✅ RESOLVED (X-3, #413).** Implemented exactly as prescribed: after
+`var = m.binary(name, shape=shape)`, `from_nl` sets
+`var.lb = np.broadcast_to(np.clip(lb, 0, 1), shape)` and likewise for `ub`
+(the clip keeps a binary column inside `[0,1]`; the broadcast handles array
+binaries). Reproduced on `origin/main` (a `min x + 10·y` fixture with `y` fixed to 1
+round-tripped to `~0.0` with `y=0` instead of `10.0`); after the fix the reconstructed
+`y` carries `lb=ub=1` and the solve returns `10.0`. Regression:
+`TestFromNlBinaryBoundsX3` in `python/tests/test_nl_reconstruction.py` — a `to_nl`→
+`from_nl` round-trip (asserts bounds survive + correct solve, `@pytest.mark.smoke`) and
+a writer-emitted `.nl` re-parse (asserts the `b`-section `1 1` binary bound survives).
+Fails-before verified by stashing the core fix. Closes infra INT-2 (same root).
 
 ### M3. Cross-model expressions are silently accepted and alias by index
 

@@ -561,3 +561,85 @@ class TestFromNlIntegration:
             np.testing.assert_allclose(np.array(grad), [6.0, 8.0], atol=1e-10)
         finally:
             os.unlink(path)
+
+
+class TestFromNlBinaryBoundsX3:
+    """X-3 / M2 / INT-2: ``from_nl`` must preserve parsed binary-variable bounds.
+
+    ``Model.binary`` hardcodes ``[0, 1]``; before the fix, ``from_nl`` rebuilt
+    binary columns as free ``[0, 1]`` and dropped a bound-narrowed or fixed binary
+    (``lb == ub == 1`` — routine Pyomo/presolve output). A fixed binary silently
+    un-fixed, giving the wrong optimum on any ``from_nl`` / ``from_pyomo`` /
+    ``SolverFactory('discopt')`` round-trip. See issue #413.
+    """
+
+    def _fixed_binary_nl(self) -> str:
+        """A .nl for ``min x + 10*y``, x in [0,5] continuous, y binary FIXED to 1.
+
+        Emitted by the project's own ``to_nl`` writer so the header's binary count
+        and the ``b`` section's fixed-bound record are exactly what the Rust parser
+        expects; the writer is the source of the ``.nl`` files a user round-trips.
+        The binary column ``y`` carries the fixed bound ``1 1``. True optimum:
+        x=0, y=1 -> objective 10.
+        """
+        import discopt.modeling as dm
+
+        m = dm.Model("fixbin_fixture")
+        m.continuous("x", lb=0.0, ub=5.0)
+        y = m.binary("y")
+        y.lb = np.broadcast_to(np.asarray(1.0), ())
+        y.ub = np.broadcast_to(np.asarray(1.0), ())
+        m.minimize(m._variables[0] + 10.0 * y)
+        m.subject_to(m._variables[0] >= 0.0)
+        return m.to_nl()
+
+    def test_hand_written_fixed_binary_nl_preserves_bounds(self, tmp_path):
+        """A .nl binary column with fixed bounds ``1 1`` re-imports fixed, not free."""
+        import discopt.modeling as dm
+
+        nl_text = self._fixed_binary_nl()
+        path = tmp_path / "fixedbin.nl"
+        path.write_text(nl_text)
+
+        # Sanity: the Rust parser itself carries the fixed bound.
+        nl = parse_nl_string(nl_text)
+        bidx = next(i for i, t in enumerate(nl.var_types()) if t == "binary")
+        assert float(nl.var_lb(bidx)[0]) == 1.0
+        assert float(nl.var_ub(bidx)[0]) == 1.0
+
+        m = dm.from_nl(str(path))
+        yvar = next(v for v in m._variables if v.var_type.name == "BINARY")
+        # The parsed lb/ub must survive the rebuild (was [0, 1] before the fix).
+        assert float(np.asarray(yvar.lb).reshape(-1)[0]) == 1.0
+        assert float(np.asarray(yvar.ub).reshape(-1)[0]) == 1.0
+
+    @pytest.mark.smoke
+    def test_to_nl_from_nl_roundtrip_fixed_binary_solves_correctly(self, tmp_path):
+        """Round-trip a model whose optimum needs a fixed binary; solve must match."""
+        import discopt.modeling as dm
+
+        m = dm.Model("fixbin")
+        x = m.continuous("x", lb=0.0, ub=5.0)
+        y = m.binary("y")
+        # Fix y to 1 via bound narrowing (as presolve / a fixed Pyomo binary would).
+        y.lb = np.broadcast_to(np.asarray(1.0), ())
+        y.ub = np.broadcast_to(np.asarray(1.0), ())
+        m.minimize(x + 10.0 * y)
+        m.subject_to(x >= 0.0)
+
+        r0 = m.solve()
+        assert abs(r0.objective - 10.0) < 1e-4, f"baseline optimum wrong: {r0.objective}"
+
+        path = tmp_path / "fixbin.nl"
+        m.to_nl(str(path))
+
+        m2 = dm.from_nl(str(path))
+        yvar = next(v for v in m2._variables if v.var_type.name == "BINARY")
+        assert float(np.asarray(yvar.lb).reshape(-1)[0]) == 1.0, "binary lb dropped on round-trip"
+        assert float(np.asarray(yvar.ub).reshape(-1)[0]) == 1.0, "binary ub dropped on round-trip"
+
+        r1 = m2.solve()
+        # Before the fix this returned ~0.0 with y un-fixed to 0 -> wrong optimum.
+        assert abs(r1.objective - 10.0) < 1e-4, (
+            f"round-trip optimum {r1.objective} != 10.0: fixed binary was un-fixed"
+        )
