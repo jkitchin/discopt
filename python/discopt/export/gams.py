@@ -172,25 +172,64 @@ class _GamsWriter:
                 if ub_val < 1e18:
                     lines.append(f"{var.name}.up = {ub_val};")
             else:
-                # Check if bounds are uniform
-                if lb_arr.size > 0 and np.all(lb_arr == lb_arr.flat[0]):
-                    lb_val = float(lb_arr.flat[0])
-                    if lb_val > -1e18:
-                        if var.name in self._var_sets:
-                            dom = ", ".join(s[0] for s in self._var_sets[var.name])
-                            lines.append(f"{var.name}.lo({dom}) = {lb_val};")
-                        else:
-                            lines.append(f"{var.name}.lo = {lb_val};")
-                if ub_arr.size > 0 and np.all(ub_arr == ub_arr.flat[0]):
-                    ub_val = float(ub_arr.flat[0])
-                    if ub_val < 1e18:
-                        if var.name in self._var_sets:
-                            dom = ", ".join(s[0] for s in self._var_sets[var.name])
-                            lines.append(f"{var.name}.up({dom}) = {ub_val};")
-                        else:
-                            lines.append(f"{var.name}.up = {ub_val};")
+                # X-2 (#413) / EX-4: an array-variable block is NOT a scalar.
+                # The previous code only emitted a bound when it was UNIFORM
+                # across every element (`np.all(arr == arr.flat[0])`); on
+                # heterogeneous per-element bounds it silently dropped the bound
+                # *entirely*, exporting e.g. a DAE model with pinned initial
+                # conditions as an unbounded (or default-Positive) variable —
+                # GAMS then solves a different model than discopt. Emit the
+                # uniform case compactly over the whole domain and, when
+                # heterogeneous, emit one line per element at its 1-based label.
+                self._write_array_bound(lines, var, lb_arr, "lo", -1e18, np.greater)
+                self._write_array_bound(lines, var, ub_arr, "up", 1e18, np.less)
 
         lines.append("")
+
+    def _element_label(self, var: Variable, k: int) -> str:
+        """1-based, quoted GAMS label(s) for flat element ``k`` of ``var``.
+
+        Multi-dimensional variables produce a comma-separated tuple of labels
+        matching the declared set domains (e.g. ``'1', '2'``); flat/1-D
+        variables produce a single ``'k+1'``.
+        """
+        idx = np.unravel_index(k, var.shape)
+        return ", ".join(f"'{i + 1}'" for i in np.atleast_1d(idx))
+
+    def _write_array_bound(self, lines, var, arr, kind, inf_sentinel, cmp):
+        """Emit ``.lo``/``.up`` bounds for an array variable, per element.
+
+        ``kind`` is ``"lo"`` or ``"up"``; ``cmp(value, inf_sentinel)`` decides
+        whether the bound is finite enough to emit (``np.greater`` for lower,
+        ``np.less`` for upper). Uniform bounds are compacted to one domain-wide
+        assignment; heterogeneous bounds are written one element at a time so no
+        per-element bound is ever dropped (X-2 / EX-4).
+        """
+        flat = np.asarray(arr, dtype=np.float64).ravel()
+        if flat.size == 0:
+            return
+        has_dom = var.name in self._var_sets
+        dom = ", ".join(s[0] for s in self._var_sets[var.name]) if has_dom else None
+
+        if np.all(flat == flat[0]):
+            val = float(flat[0])
+            if bool(cmp(val, inf_sentinel)):
+                target = f"{var.name}.{kind}({dom})" if has_dom else f"{var.name}.{kind}"
+                lines.append(f"{target} = {val};")
+            return
+
+        # Heterogeneous: one assignment per element at its 1-based label. When
+        # the variable was declared over a set domain we address elements by
+        # label; otherwise (no set info) fall back to a plain scalar name, which
+        # only occurs for the degenerate size-1 arrays handled above.
+        for k in range(flat.size):
+            val = float(flat[k])
+            if not bool(cmp(val, inf_sentinel)):
+                continue
+            if has_dom:
+                lines.append(f"{var.name}.{kind}({self._element_label(var, k)}) = {val};")
+            else:
+                lines.append(f"{var.name}.{kind} = {val};")
 
     def _write_equations(self, lines: list[str]):
         """Write equation declarations and definitions."""

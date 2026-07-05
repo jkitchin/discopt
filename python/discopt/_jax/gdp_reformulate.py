@@ -261,13 +261,24 @@ def _compute_big_m_lp(
 
     c_vec, offset = coeffs
 
-    # Build variable bounds
+    # Build variable bounds, one entry per *flat scalar element* (aligned with
+    # the column offsets produced by `_extract_body_coeffs`, which are
+    # cumulative `v.size` + flat index). X-2 (#413): an array variable block is
+    # NOT a scalar — the previous seed read element 0's bounds
+    # (`v.lb.flat[0]`/`v.ub.flat[0]`) and stamped them onto every element. On
+    # heterogeneous per-element bounds that shrinks the LP box for elements
+    # whose true bounds are wider than element 0's, so the LP-optimum big-M can
+    # come back *too small* and cut off feasible points of the inactive
+    # disjunct — the exact unsoundness the "exact oracle only" comment above
+    # guards against. Read each element's own bound.
     bounds_list = []
     for v in model._variables:
-        lb_val = float(np.asarray(v.lb, dtype=np.float64).flat[0])
-        ub_val = float(np.asarray(v.ub, dtype=np.float64).flat[0])
-        for _ in range(v.size):
-            bounds_list.append((lb_val, ub_val))
+        lb_flat = np.asarray(v.lb, dtype=np.float64).ravel()
+        ub_flat = np.asarray(v.ub, dtype=np.float64).ravel()
+        for i in range(v.size):
+            lb_i = float(lb_flat[i]) if lb_flat.size == v.size else float(lb_flat.flat[0])
+            ub_i = float(ub_flat[i]) if ub_flat.size == v.size else float(ub_flat.flat[0])
+            bounds_list.append((lb_i, ub_i))
 
     _INF_THRESH = 1e15
 

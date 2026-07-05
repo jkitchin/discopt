@@ -87,6 +87,28 @@ position and routes to the row-correct autodiff path; FBBT carries per-scalar
 intervals). Add an array-variable-with-heterogeneous-bounds fixture to the shared
 test utilities so every such site is exercised.
 
+**✅ RESOLVED — residual sweep + two fixes.** The two P0s (CORE-1=C-29 extractor,
+TG-1=C-31 FBBT `seed_block_interval`) landed on main. The residual sweep for
+`.flat[0]`/`.first()`/`lb[0]`/block-as-scalar reads of array-variable **bounds**:
+
+| Site | Reads | Verdict |
+|------|-------|---------|
+| `export/gams.py:176-191` | array bounds emitted **only when uniform** (`np.all(arr==arr.flat[0])`) | **BUG (EX-4)** — heterogeneous per-element bounds silently dropped *entirely*; repro `x[0]∈[0,1],x[1]∈[2,5]` → 0 bound lines. **FIXED** (`_write_array_bound`: per-element `.lo`/`.up` at 1-based labels, uniform still compacted). `from_gams` taught to parse concrete-label `x.lo('1')` bounds (round-trip green). |
+| `_jax/gdp_reformulate.py:267-268` | `_compute_big_m_lp` seeds LP box from element 0's bounds, stamps onto all `v.size` slots | **BUG** — collapses heterogeneous block; repro `x1∈[0,10]` with `x0∈[0,1]` → big-M **1.01** (true 10). Too-small M cuts feasible points of inactive disjunct (opt-in `mbigm`/auto path). **FIXED** (per-flat-element bounds; now 10.1 == sound interval path). |
+| `_extract.py:42-55` `_flatten_variables` | scalar branch `.flat[0]` for `shape==()/(1,)`; array branch already `.flat[k]` | benign — size-1 has one element; array path per-element. |
+| `_extract.py:153,287,475` | `Constant.value.flat[0]` in scalar position | out of scope — array-**Constant** collapse (EX-7, P2), not array-**variable bounds**. Filed separately. |
+| `estimate.py:367` | `result.value(var).flat[0]` extracting an estimated parameter | out of scope — solution-value read; the whole FIM/estimate machinery assumes *scalar* parameters (one FIM row per name), so an array param is mishandled structurally, not merely at `.flat[0]`. Not a bounds collapse. |
+| `symmetry.rs:110-111` | `vinfo.lb.first()/ub.first()` | benign — guarded by `if vinfo.size != 1 { continue; }`; only scalars reach it. |
+| `fbbt.rs` | `seed_block_interval` (was `v.lb.first()`) | already **FIXED** (C-31): element-wise union seed. |
+
+Shared fixture `heterogeneous_array_bounds` added to `python/tests/conftest.py`;
+regression tests in `python/tests/test_x2_residual_array_bounds.py` (fails-before /
+passes-after verified by stash). Cert-baseline neutrality: EXACT (nodes X->X,
+|Δobj|=0 on all 41), `incorrect_count==0`. **Pre-existing, out of scope:**
+`from_gams` cannot parse a concrete quoted label in an *equation body* (`x('1')`
+as an expression atom) — independent of bounds, present on main; filed for a
+future `from_gams` PR, not an X-2 bounds finding.
+
 ### X-3 — `from_nl` binary bounds drop (corpus + Pyomo bridge)
 **modeling M2 = infra INT-2**: `from_nl` rebuilds binary columns as free `[0,1]`,
 discarding parsed `lb/ub`. Hits `from_pyomo`, the `SolverFactory('discopt')` bridge,
@@ -256,7 +278,7 @@ Legend: ⬜ open · ◧ in-progress · ✅ resolved · ◻︎ not-reproduced.
 | Tier | ID(s) | Module | Status |
 |------|-------|--------|--------|
 | root X-1 | GP-1, VAL-1, EX-2, M12 ✅ · classifier/extractor ◻︎ not-reproduced (already builder-aware via Rust repr) · FR-2 (Tier-2, out of scope) | gp/validation/export/modeling/solver-core | ✅ 1dc3278 — test_x1_builder_resident_rows |
-| root X-2 | CORE-1=C-29, TG-1=C-31, CF-1, GAMS bounds | solver-core/tightening/conflict/export | ⬜ |
+| root X-2 | CORE-1=C-29 ✅, TG-1=C-31 ✅, CF-1 ✅ (on main) · **residual**: GAMS/export per-element bounds ✅ + gdp big-M LP element-0 collapse ✅ · sweep otherwise clean | solver-core/tightening/conflict/export/gdp | ✅ — sweep + 2 residual fixes; `test_x2_residual_array_bounds.py`, shared `heterogeneous_array_bounds` fixture |
 | root X-3 | M2 = INT-2 | modeling/infra | ✅ — `from_nl` clamps+preserves parsed binary lb/ub; test `TestFromNlBinaryBoundsX3` in `test_nl_reconstruction.py` |
 | 0 | LLM-1 | llm | ⬜ |
 | 1 | CORE-2=C-30 | solver-core | ⬜ |

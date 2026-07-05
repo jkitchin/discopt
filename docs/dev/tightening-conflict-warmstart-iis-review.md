@@ -106,3 +106,14 @@ a heterogeneous-array univariate-rescue model to confirm the envelope is now val
 from but rhyming with the extraction "array-as-sum" bug (solver-core CORE-1): both
 come from code that assumes a variable block is scalar. Worth a codebase sweep for
 other `.first()`/`.flat[0]`/`treat-block-as-scalar` sites on array variables.
+
+**✅ Sweep done (X-2 residual, #413).** The requested sweep found two more
+real block-as-scalar-on-bounds sites (both fixed): `export/gams.py` dropped
+heterogeneous array bounds entirely (EX-4), and `_jax/gdp_reformulate.py`'s
+LP-optimum big-M (`_compute_big_m_lp`) seeded the LP box from element 0's bounds
+and stamped them onto every element — a too-small big-M that cuts feasible points
+of the inactive disjunct (opt-in `mbigm`/auto GDP path). All other `.flat[0]`/
+`.first()` hits were benign (size-1 scalars, guarded `size != 1` in `symmetry.rs`,
+or array-Constant collapse EX-7 which is a separate non-bounds P2). See
+`review-execution-plan.md` §1 (X-2) for the full sweep table and
+`test_x2_residual_array_bounds.py` for the regressions.
