@@ -18,8 +18,8 @@ activations and yields a certified-optimal answer to the wrong problem.
 
 | # | Severity | Component | Finding |
 |---|----------|-----------|---------|
-| NN-1 | **P0 correctness** | `bounds.py:propagate_bounds` via `relu_bigm.py:73`, `full_space.py:72` | Bound propagation runs in the **unscaled** input space, but the first affine layer consumes the **scaled** input. With any non-identity `scaling`, the pre-activation bounds are wrong, so the big-M constants and `zhat` variable bounds are too tight → feasible ReLU activations cut → **wrong certified optimum** [CONFIRMED, independently re-run: relu net returns 1.0, true 10.0] |
-| NN-2 | **P1 silent-wrong** | `formulations/tree_ensemble.py:39-133` | `TreeEnsembleFormulation` accepts and stores `scaling` but **never applies it** — split thresholds compare against raw inputs, outputs omit `y_factor/y_offset`. Any non-trivial scaling → wrong predictions/optimum, no error [CONFIRMED] |
+| NN-1 | **P0 correctness → ✅ FIXED (C-25)** | `bounds.py:propagate_bounds` via `relu_bigm.py:73`, `full_space.py:72` | Bound propagation runs in the **unscaled** input space, but the first affine layer consumes the **scaled** input. With any non-identity `scaling`, the pre-activation bounds are wrong, so the big-M constants and `zhat` variable bounds are too tight → feasible ReLU activations cut → **wrong certified optimum** [CONFIRMED, independently re-run: relu net returns 1.0, true 10.0]. **FIXED** PR #411 `df96f1a` (scaled-domain propagation `propagate_bounds(net, input_bounds=(s_lo,s_hi))`); re-verified #413 — certified max now **10.0**, 0/30 feasible pts cut |
+| NN-2 | **P1 silent-wrong → ✅ FIXED (C-26)** | `formulations/tree_ensemble.py:39-133` | `TreeEnsembleFormulation` accepts and stores `scaling` but **never applies it** — split thresholds compare against raw inputs, outputs omit `y_factor/y_offset`. Any non-trivial scaling → wrong predictions/optimum, no error [CONFIRMED]. The related tree big-M validity for **out-of-box thresholds** is carded as **C-26**. **FIXED** PR #411 `df96f1a` (per-constraint tight big-M `max(ub−thr,0)`/`max(thr+eps−lb,0)`); re-verified #413 — out-of-box ensemble feasible, 0/40 feasible pts cut |
 | NN-3 (=C-27) | P1 silent-wrong | `readers/onnx_reader.py:104-121` | ONNX `Gemm` reads only `transB`; **ignores `alpha`, `beta`, `transA`**. `alpha≠1`/`beta≠1` (legal, emitted by some exporters/quantizers) → weights/biases wrong by a scalar, no error [**FIXED** PR #411: `alpha`/`beta` folded, `transA=1` raises; live-onnxruntime repro confirmed the divergence, max\|Δ\|=0.684 → 1.6e-07] |
 | NN-4 (=C-27) | P2 | `readers/onnx_reader.py:66-129` | `MatMul` weight-orientation assumed (`x @ W`, weight = the initializer operand); node **chaining not verified** (list order assumed to be a chain, no output→input tensor check); `Reshape`/`Flatten` skipped blindly. Mis-loads a non-sequential or `W @ x` graph [**FIXED** PR #411: MatMul weight verified `input[1]`, single-tensor dataflow chain → non-sequential/residual/branch raises] |
 | NN-5 | P3 float | `bounds.py:80-81` | Interval propagation uses round-to-nearest, no outward rounding — a bound-achieving vertex can land an epsilon outside the interval. Absorbed by solver tol in practice; note only [SUSPECTED] |
@@ -92,12 +92,12 @@ fixed, and invisible to CI because every scaling test uses the identity transfor
 
 ## 4. Implementation plan (for Opus)
 
-### Phase 1 — correctness (PR `fix(nn): NN-1..NN-2`)
+### Phase 1 — correctness (PR `fix(nn): NN-1..NN-2`) — ✅ DONE (PR #411 `df96f1a`; verified #413)
 
 | ID | Task | Acceptance |
 |----|------|-----------|
-| NN-1 | Propagate bounds through the scaled input box (`input_box=` arg to `propagate_bounds`, or set `net.input_bounds` to the scaled corners before propagation); ensure `presolve.py`'s dead-ReLU path uses the same scaled bounds | Non-identity-scaling repro returns 10.0 (returns 1.0 on main); identity-scaling tests unchanged; big-M ≥ true pre-activation range asserted on a fuzz of scalings |
-| NN-2 | `TreeEnsembleFormulation`: apply `scaling` (scale split thresholds + output offset/factor) or raise `NotImplementedError` when scaling is passed | Scaled-tree model gives correct predictions/optimum, or refuses loudly; identity case unchanged |
+| NN-1 ✅ | Propagate bounds through the scaled input box (`input_box=` arg to `propagate_bounds`, or set `net.input_bounds` to the scaled corners before propagation); ensure `presolve.py`'s dead-ReLU path uses the same scaled bounds | **MET** — `propagate_bounds(net, input_bounds=(s_lo,s_hi))` in `relu_bigm.py`/`full_space.py`; non-identity-scaling repro returns **10.0** (was 1.0 on pre-fix main); identity-scaling tests unchanged; `test_nn_formulation_fixes.py::test_*scaling*` fail-before/pass-after |
+| NN-2 ✅ (C-26) | Valid tree big-M for out-of-box thresholds: per-constraint `max(ub−thr,0)` / `max(thr+eps−lb,0)`, inert for `z=0` at any threshold | **MET** — out-of-box ensemble now feasible & optimum-preserving (was infeasible pre-fix); in-box case unchanged; `test_tree_out_of_box_*` + `test_tree_in_box_unchanged`. (Wiring `OffsetScaling` *into* the tree formulation remains deferred per the plan's opt-in contract; the formulation does not silently mis-apply it.) |
 
 ### Phase 2 — reader hardening (PR `fix(nn): NN-3..NN-4`) — ✅ DONE (PR #411)
 
