@@ -31,7 +31,9 @@ from discopt.modeling.core import (
     FunctionCall,
     IndexExpression,
     MatMulExpression,
+    Parameter,
     SumExpression,
+    SumOverExpression,
     UnaryOp,
     Variable,
 )
@@ -56,6 +58,14 @@ _FUNC_LATEX = {
 
 # Binary-operator precedence (higher binds tighter) for minimal parenthesisation.
 _PREC = {"+": 1, "-": 1, "*": 2, "/": 2, "@": 2, "**": 4}
+
+# Precedence of the non-BinaryOp nodes that also produce operator-like output, so
+# they parenthesise when a tighter-binding parent requires it (L4). Unary minus and
+# an unbounded ``\sum`` bind as loosely as additive ops (a following ``^2`` or a
+# ``\cdot`` must wrap them); a matrix product binds like other multiplicative ops.
+_NEG_PREC = 1
+_SUM_PREC = 1
+_MATMUL_PREC = 2
 
 
 def _fmt_num(v: float) -> str:
@@ -120,9 +130,14 @@ def expr_to_latex(e: Any, parent_prec: int = 0) -> str:
             return f"{{{expr_to_latex(base, 5)}}}_{{{idx_s}}}"
         if isinstance(e, BinaryOp):
             return _binop_to_latex(e, parent_prec)
+        if isinstance(e, Parameter):
+            return _sym(e.name)
         if isinstance(e, UnaryOp):
             if e.op == "neg":
-                return f"-{expr_to_latex(e.operand, 3)}"
+                # Unary minus binds loosely: parenthesise under a tighter parent so
+                # `(-x)**2` renders `\left(-x\right)^{2}`, not the wrong `-x^{2}` (L4).
+                inner = f"-{expr_to_latex(e.operand, 3)}"
+                return _paren(inner, _NEG_PREC, parent_prec)
             if e.op == "abs":
                 return rf"\left|{expr_to_latex(e.operand)}\right|"
             return rf"\mathrm{{{e.op}}}\!\left({expr_to_latex(e.operand)}\right)"
@@ -136,14 +151,52 @@ def expr_to_latex(e: Any, parent_prec: int = 0) -> str:
             args = ", ".join(expr_to_latex(a) for a in e.args)
             return rf"\mathrm{{{_sym(str(e.name))}}}\!\left({args}\right)"
         if isinstance(e, MatMulExpression):
-            return f"{expr_to_latex(e.left, 2)}\\,{expr_to_latex(e.right, 2)}"
+            mm_left = expr_to_latex(e.left, _MATMUL_PREC)
+            mm_right = expr_to_latex(e.right, _MATMUL_PREC)
+            return _paren(rf"{mm_left}\,{mm_right}", _MATMUL_PREC, parent_prec)
         if isinstance(e, SumExpression):
-            return rf"\textstyle\sum {expr_to_latex(e.operand, 3)}"
+            inner = rf"\textstyle\sum {expr_to_latex(e.operand, 3)}"
+            return _paren(inner, _SUM_PREC, parent_prec)
+        if isinstance(e, SumOverExpression):
+            return _sum_over_to_latex(e, parent_prec)
         if isinstance(e, Expression):
-            return _escape_text(repr(e))
-        return _fmt_num(e) if _is_number(e) else _escape_text(str(e))
+            return _latex_text(repr(e))
+        return _fmt_num(e) if _is_number(e) else _latex_text(str(e))
     except Exception:
-        return _escape_text(repr(e))
+        return _latex_text(repr(e))
+
+
+def _paren(inner: str, own_prec: int, parent_prec: int) -> str:
+    """Wrap *inner* in ``\\left(...\\right)`` when a tighter-binding parent needs it."""
+    if own_prec < parent_prec:
+        return rf"\left({inner}\right)"
+    return inner
+
+
+# Cap on the number of explicit terms shown in a fully-expanded indexed summation
+# before an ellipsis; keeps a large `dm.sum(..., over=...)` from flooding the render.
+_SUM_OVER_MAX_TERMS = 8
+
+
+def _sum_over_to_latex(e: Any, parent_prec: int) -> str:
+    """Render a ``SumOverExpression`` (``dm.sum(expr(i) for i in set)``) as a proper
+    ``\\sum`` of its expanded terms, rather than the raw ``Σ[N terms]`` repr (L3).
+
+    ``SumOverExpression`` stores only the already-expanded term list (no symbolic
+    index set survives expansion), so the faithful render is the explicit sum of
+    those terms; long sums are truncated with ``+ \\cdots`` so the display stays
+    compact. The whole group parenthesises under a tighter parent (e.g. ``(...)^2``).
+    """
+    terms = list(getattr(e, "terms", []) or [])
+    if not terms:
+        return r"\textstyle\sum \left(\ \right)"
+    shown = terms[:_SUM_OVER_MAX_TERMS]
+    parts = [expr_to_latex(t, 2) for t in shown]
+    joined = " + ".join(parts)
+    if len(terms) > _SUM_OVER_MAX_TERMS:
+        joined += r" + \cdots"
+    inner = rf"\textstyle\sum \left( {joined} \right)"
+    return _paren(inner, _SUM_PREC, parent_prec)
 
 
 def _binop_to_latex(e: Any, parent_prec: int) -> str:
@@ -185,6 +238,41 @@ def _constraint_to_latex(c: Any) -> str:
     return f"{expr_to_latex(body)} {sense} {rhs}"
 
 
+def _linear_row_to_latex(row: Any) -> str:
+    """Render a builder-resident linear row (``export._common.LinearRow``) as
+    ``sum(coeff * var[idx]) sense rhs`` (L2).
+
+    These rows come from the fast-construction API (``Model.constraint`` fast path /
+    ``add_linear_constraints``); they live only in ``model._builder_linear_blocks``
+    and never reach ``model._constraints``. Rendering them keeps the display honest.
+    """
+    sense = {"<=": r"\le", ">=": r"\ge", "==": "="}.get(row.sense, row.sense)
+    terms = getattr(row, "terms", None)
+    if terms:
+        pieces: list[str] = []
+        for var, local, coeff in terms:
+            # A vector variable's element uses its flat local index as a subscript;
+            # a scalar carries no index.
+            base = _sym(var.name)
+            sym = base if getattr(var, "size", 1) <= 1 else f"{base}_{{{local}}}"
+            if coeff == 1.0:
+                term = sym
+            elif coeff == -1.0:
+                term = f"-{sym}"
+            else:
+                term = rf"{_fmt_num(coeff)}\,{sym}"
+            if pieces and not term.startswith("-"):
+                pieces.append(f"+ {term}")
+            elif pieces:
+                pieces.append(f"- {term[1:]}")
+            else:
+                pieces.append(term)
+        body = " ".join(pieces) if pieces else "0"
+    else:
+        body = "0"
+    return f"{body} {sense} {_fmt_num(row.rhs)}"
+
+
 def _var_domain_to_latex(v: Any) -> str:
     vtype = v.var_type.value if hasattr(v.var_type, "value") else str(v.var_type)
     lb = float(np.min(v.lb))
@@ -207,6 +295,29 @@ def _var_domain_to_latex(v: Any) -> str:
     return rng or rf"{name} \in {domain}"
 
 
+def _all_constraint_rows(model: Any) -> tuple[list, list]:
+    """Return ``(expression_constraint_rows, builder_linear_rows)`` for *model*.
+
+    The expression rows are the *full* ``model._constraints`` list — including the
+    non-arithmetic GDP/indicator/SOS/logical constraint objects that render as an
+    L1 placeholder (``iter_all_rows`` filters those out, but the display must keep
+    showing them). The builder rows come from the shared X-1 primitive
+    ``export._common.iter_all_rows`` so builder-resident fast-path rows appear too
+    (L2). The import is local to avoid a heavyweight import at module load and to
+    keep the display resilient: if the export helper is unavailable or the model is
+    malformed, fall back to the expression-path constraints alone rather than
+    crashing a Jupyter ``_repr_``.
+    """
+    expr_rows = list(getattr(model, "_constraints", []) or [])
+    try:
+        from discopt.export._common import iter_builder_linear_rows
+
+        builder_rows = list(iter_builder_linear_rows(model))
+    except Exception:
+        builder_rows = []
+    return expr_rows, builder_rows
+
+
 def model_to_latex(model: Any, max_rows: int | None = None, env: str = "aligned") -> str:
     """Render *model* to a LaTeX ``aligned`` block in standard PSE form.
 
@@ -221,14 +332,21 @@ def model_to_latex(model: Any, max_rows: int | None = None, env: str = "aligned"
     else:
         rows.append(r"& \text{find} \quad && x \\")
 
-    cons = list(getattr(model, "_constraints", []) or [])
-    shown = cons if max_rows is None else cons[:max_rows]
-    for i, c in enumerate(shown):
+    # Route through the shared X-1 primitive so builder-resident fast-path rows
+    # (Model.constraint fast path / add_linear_constraints) render too — reading only
+    # `_constraints` would silently hide them and misrepresent the model (L2).
+    expr_rows, builder_rows = _all_constraint_rows(model)
+    renderers = [(_constraint_to_latex, c) for c in expr_rows] + [
+        (_linear_row_to_latex, r) for r in builder_rows
+    ]
+    n_cons = len(renderers)
+    shown = renderers if max_rows is None else renderers[:max_rows]
+    for i, (render, c) in enumerate(shown):
         lead = r"\text{subject to}" if i == 0 else ""
-        rows.append(rf"& {lead} \quad && {_constraint_to_latex(c)} \\")
-    if max_rows is not None and len(cons) > max_rows:
+        rows.append(rf"& {lead} \quad && {render(c)} \\")
+    if max_rows is not None and n_cons > max_rows:
         lead = r"\text{subject to}" if not shown else ""
-        rows.append(rf"& {lead} \quad && \vdots \quad (\text{{{len(cons)} constraints}}) \\")
+        rows.append(rf"& {lead} \quad && \vdots \quad (\text{{{n_cons} constraints}}) \\")
 
     variables = list(getattr(model, "_variables", []) or [])
     rows.extend(_variable_rows(variables, max_rows))
@@ -259,11 +377,14 @@ def model_to_html(model: Any, max_rows: int | None = None) -> str:
     notebook's MathJax. Falls back gracefully to showing the LaTeX source."""
     name = getattr(model, "name", "model")
     n_v = len(getattr(model, "_variables", []) or [])
-    n_c = len(getattr(model, "_constraints", []) or [])
+    # Count builder-resident fast-path rows too, so the header count matches the
+    # rendered body and does not misreport a fast-API model as "0 constraints" (L2).
+    expr_rows, builder_rows = _all_constraint_rows(model)
+    n_c = len(expr_rows) + len(builder_rows)
     latex = model_to_latex(model, max_rows=max_rows)
     return (
         f'<div class="discopt-model">'
-        f'<div style="font-weight:600">Model <code>{_escape_text(str(name))}</code>'
+        f'<div style="font-weight:600">Model <code>{_escape_html(str(name))}</code>'
         f' <span style="color:#888;font-weight:400">'
         f"({n_v} variable{'s' if n_v != 1 else ''}, "
         f"{n_c} constraint{'s' if n_c != 1 else ''})</span></div>"
@@ -272,7 +393,38 @@ def model_to_html(model: Any, max_rows: int | None = None) -> str:
     )
 
 
-def _escape_text(s: str) -> str:
+# LaTeX special characters that must be escaped when arbitrary text appears in a
+# math environment (inside `\text{...}` or a fallback). Ordered so the backslash
+# substitution runs first and does not re-escape the escapes it introduces.
+_LATEX_ESCAPES = (
+    ("\\", r"\textbackslash{}"),
+    ("&", r"\&"),
+    ("%", r"\%"),
+    ("$", r"\$"),
+    ("#", r"\#"),
+    ("_", r"\_"),
+    ("{", r"\{"),
+    ("}", r"\}"),
+    ("~", r"\textasciitilde{}"),
+    ("^", r"\textasciicircum{}"),
+)
+
+
+def _latex_text(s: str) -> str:
+    """Render arbitrary prose safely inside a math environment as ``\\text{...}``.
+
+    Escapes the LaTeX specials (``% _ # & $ { } \\ ~ ^``) so an unknown-node repr or
+    a stray string cannot break math mode, and — unlike the old shared escaper —
+    never injects HTML entities (``&amp;``) into a LaTeX ``aligned`` block (L7).
+    """
+    out = s
+    for ch, rep in _LATEX_ESCAPES:
+        out = out.replace(ch, rep)
+    return rf"\text{{{out}}}"
+
+
+def _escape_html(s: str) -> str:
+    """HTML-escape ``< > &`` for text placed in the HTML chrome (not math) (L7)."""
     return (
         s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
         if "<" in s or ">" in s or "&" in s

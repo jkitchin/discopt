@@ -33,7 +33,7 @@ unambiguous from control flow.
 | M8–M12 | P2 | various | Robustness/API gaps (§4) |
 | G1–G15 | **P0–P2** | `gams_parser.py` | Fifteen verified defect classes; the five worst silently build a *different model* than the GAMS source and let the solver certify it (§6.1) |
 | E1–E3 | **P0/P1** — ✅ RESOLVED | `examples.py` | Haverly pooling example is mathematically wrong (certified optimum 1390 vs the classic 400); `example_logical_constraints` crashes (never built by any test); `example_reactor_design` is provably infeasible (§6.2) |
-| L1–L8 | P1–P3 | `latex.py` | `to_latex`/Jupyter `_repr_` **crashes** on any model with `if_then`/`either_or`/`logical`; fast-path constraint families render as zero constraints; several precedence/escaping defects (§6.3) |
+| L1–L8 | P1–P3 — ✅ RESOLVED | `latex.py` | `to_latex`/Jupyter `_repr_` **crashes** on any model with `if_then`/`either_or`/`logical`; fast-path constraint families render as zero constraints; several precedence/escaping defects (§6.3). **All eight fixed** (L1/L5/L6/L8 display-cluster PR; L2/L3/L4/L7 #413) — L6's slice-in-index rendering is the only residual sub-item. |
 | I1–I2 | P2 | `implicit.py` | Absolute-only Newton tolerance falsely NaN-fails well-posed scaled residuals; build-time probe uses wrong `u` length for vector inputs (§6.4) |
 
 Checked and found **sound** (no action): the constraint-normalization convention
@@ -400,20 +400,43 @@ tables, comma'd data, unquoted labels, lowercase-consistent names).
 >   instead of `int(inf)` raising `OverflowError`.
 > - **L8**: `Expression._repr_latex_` now renders the DAG via `expr_to_latex`.
 >
-> Verified fails-before/passes-after. **Still open** (this PR did not touch them):
-> L2 (fast-path rows invisible — part of the X-1 builder-rows root), L3
-> (`SumOverExpression`/`Parameter`), L4 (precedence on non-BinaryOp nodes), L6's
-> slice rendering, L7 (HTML vs LaTeX escaping).
+> Verified fails-before/passes-after.
+>
+> **✅ RESOLVED L2, L3, L4, L7** — `python/tests/test_display_cluster.py`
+> (`fix-latex-tail-l2-l3-l4-l7`, #413). All four confirmed (fails-before on
+> `origin/main`) then fixed in `latex.py`:
+> - **L2**: `model_to_latex`/`model_to_html` route through the X-1 primitive
+>   (`export._common.iter_builder_linear_rows`) so builder-resident fast-path rows
+>   (`Model.constraint` fast path / `add_linear_constraints`) render as real
+>   constraints and the HTML header count includes them (was "0 constraints"). The
+>   L1 GDP/non-arithmetic placeholder rows keep rendering from the full
+>   `_constraints` list (which `iter_all_rows` filters out).
+> - **L3**: `expr_to_latex` now handles `SumOverExpression` (renders a proper
+>   `\sum(t_1 + … )` of its expanded terms, capped at 8 then `+ \cdots`, instead of
+>   the raw `Σ[N terms]` repr) and `Parameter` (escaped `\_` symbol via `_sym`,
+>   instead of `param(price_A)`).
+> - **L4**: `parent_prec` is threaded through UnaryOp (neg), `SumExpression`,
+>   `SumOverExpression`, and `MatMulExpression` via a `_paren` helper, so each
+>   parenthesises under a tighter-binding parent — `(-x)**2` → `\left(-x\right)^{2}`
+>   (was `-x^{2}`), `dm.sum(...)**2` and `(A@x)**2` wrapped (were unparenthesised).
+> - **L7 (CONFIRMED real)**: the conflated `_escape_text` is split into `_latex_text`
+>   (math-mode: escapes `% _ # & $ { } \ ~ ^` and wraps in `\text{}`, injects no HTML
+>   entities) and `_escape_html` (HTML chrome only). Math-mode fallbacks no longer
+>   emit `&amp;` and now escape `_`/`%`/`#`.
+>
+> Off the solve path (display only); smoke 545 passed, `incorrect_count == 0`.
+> **Still open** from this cluster: L6's slice rendering (the `_fmt_num` inf guard
+> half of L6 is already ✅ above; slice-in-index rendering is untouched).
 
 | ID | Loc | Finding |
 |----|-----|---------|
 | L1 | `:152-161` — ✅ RESOLVED | **`to_latex`/`_repr_latex_`/`_repr_html_` crash on any model containing `if_then`/`either_or`/`m.logical` constraints** [VERIFIED]: `_constraint_to_latex` reads `.sense`/`.body` on `_IndicatorConstraint` et al. Merely *displaying* such a model in Jupyter raises `AttributeError`. |
-| L2 | `:200-209` | **Fast-path constraint families are invisible** [VERIFIED]: renderer reads only `_constraints`, so a `m.constraint(...)` model renders "(1 variable, 0 constraints)" — a display that misrepresents the model. |
-| L3 | `:26-37` | **`SumOverExpression` and `Parameter` unhandled** [VERIFIED]: the dominant `dm.sum(..., over=...)` pattern renders as literal `Σ[6 terms]`; `Parameter` as `param(price_A)` with a bare `_` in math mode. |
-| L4 | `:109-127` | **Precedence bugs on non-BinaryOp nodes** [VERIFIED]: `(-x)**2` → `-x^{2}`; `dm.sum(x)**2` → `\sum x^{2}`; `(A@x)**2` → `A\,x^{2}` — all mathematically wrong renderings (UnaryOp/Sum/MatMul ignore `parent_prec`). |
+| L2 | `:200-209` — ✅ RESOLVED | **Fast-path constraint families are invisible** [VERIFIED]: renderer reads only `_constraints`, so a `m.constraint(...)` model renders "(1 variable, 0 constraints)" — a display that misrepresents the model. **Fixed** (#413): renderer routes through `export._common.iter_builder_linear_rows` (X-1); builder rows now render + count. |
+| L3 | `:26-37` — ✅ RESOLVED | **`SumOverExpression` and `Parameter` unhandled** [VERIFIED]: the dominant `dm.sum(..., over=...)` pattern renders as literal `Σ[6 terms]`; `Parameter` as `param(price_A)` with a bare `_` in math mode. **Fixed** (#413): `\sum(...)` render + escaped `Parameter` symbol. |
+| L4 | `:109-127` — ✅ RESOLVED | **Precedence bugs on non-BinaryOp nodes** [VERIFIED]: `(-x)**2` → `-x^{2}`; `dm.sum(x)**2` → `\sum x^{2}`; `(A@x)**2` → `A\,x^{2}` — all mathematically wrong renderings (UnaryOp/Sum/MatMul ignore `parent_prec`). **Fixed** (#413): `parent_prec` threaded via `_paren` → correct parenthesisation. |
 | L5 | `:103-106` | **Invalid LaTeX double subscript** [VERIFIED]: variable `y1` indexed → `y_{1}_{0}` (MathJax error box). |
 | L6 | `:103-105, :61-65` | Slices render as `slice(None, None, None)`; `_fmt_num(inf)` raises `OverflowError` (reachable bare via `_constraint_to_latex`) [VERIFIED]. |
-| L7 | `:251-256` | `_escape_text` conflates HTML and LaTeX escaping regimes (inserts `&amp;` into `aligned` math; leaves `%`, `_`, `#` unescaped) [SUSPECTED]. |
+| L7 | `:251-256` — ✅ RESOLVED | `_escape_text` conflates HTML and LaTeX escaping regimes (inserts `&amp;` into `aligned` math; leaves `%`, `_`, `#` unescaped) [SUSPECTED → CONFIRMED real]. **Fixed** (#413): split into `_latex_text` (math-mode escaping, no HTML entities) + `_escape_html` (HTML chrome only). |
 | L8 | `core.py:173-175` | `Expression._repr_latex_` wraps the plain repr in `$...$` instead of calling `expr_to_latex` — bare expressions display as broken math in Jupyter [BY INSPECTION]. |
 
 ### 6.4 `implicit.py`
