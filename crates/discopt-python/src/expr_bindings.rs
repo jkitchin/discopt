@@ -367,16 +367,25 @@ impl PyModelRepr {
     }
 
     /// Evaluate the objective at a given point x.
+    ///
+    /// Accepts non-contiguous input (e.g. a strided/sliced or transposed numpy
+    /// view): the values are materialized into a contiguous buffer rather than
+    /// requiring a zero-copy slice. `as_slice()` returns `None` for a
+    /// non-contiguous array, and unwrapping it panicked across the FFI boundary
+    /// (Rust-2); collecting the elements evaluates the point instead.
     fn evaluate_objective(&self, x: numpy::PyReadonlyArray1<f64>) -> f64 {
-        let x_arr = x.as_array();
-        self.inner.evaluate_objective(x_arr.as_slice().unwrap())
+        let x_vec: Vec<f64> = x.as_array().iter().copied().collect();
+        self.inner.evaluate_objective(&x_vec)
     }
 
     /// Evaluate constraint body at a given point x.
+    ///
+    /// Accepts non-contiguous input by materializing a contiguous buffer (see
+    /// [`Self::evaluate_objective`]); Rust-2.
     fn evaluate_constraint(&self, i: usize, x: numpy::PyReadonlyArray1<f64>) -> f64 {
-        let x_arr = x.as_array();
+        let x_vec: Vec<f64> = x.as_array().iter().copied().collect();
         self.inner
-            .evaluate_expr(self.inner.constraints[i].body, x_arr.as_slice().unwrap())
+            .evaluate_expr(self.inner.constraints[i].body, &x_vec)
     }
 
     /// Run FBBT (Feasibility-Based Bound Tightening) on the model.
