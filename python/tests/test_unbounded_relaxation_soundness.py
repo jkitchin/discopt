@@ -182,7 +182,7 @@ def test_467_free_variable_root_not_falsely_optimal_nlp_route():
     The honest verdict is NOT optimal (feasible/unknown).
     """
     r = _camel_semiinfinite(-5.0, float("inf"), float("-inf"), 5.0, "c467_nlp").solve(
-        time_limit=6.0, daemon=False
+        time_limit=6.0
     )
     assert r.status != "optimal", (
         f"free-variable root falsely certified optimal: status={r.status} "
@@ -205,7 +205,7 @@ def test_467_free_variable_root_not_falsely_optimal_lp_route():
     verdict must NOT be a certified optimal.
     """
     r = _camel_semiinfinite(-5.0, float("inf"), -5.0, 5.0, "c467_lp").solve(
-        time_limit=6.0, daemon=False
+        time_limit=6.0
     )
     assert r.status != "optimal", (
         f"semi-infinite root falsely certified optimal (LP route): status={r.status} "
@@ -228,7 +228,7 @@ def test_467_finite_box_control_still_certifies_optimal():
     # a 10s budget intermittently timed out -> `feasible` -> false test failure.
     # The headroom keeps the correctness guard intact without the timing flake;
     # a valid solve certifies long before 60s.
-    r = _camel_semiinfinite(-5.0, 5.0, -5.0, 5.0, "c467_ctrl").solve(time_limit=60.0, daemon=False)
+    r = _camel_semiinfinite(-5.0, 5.0, -5.0, 5.0, "c467_ctrl").solve(time_limit=60.0)
     assert r.status == "optimal", f"finite-box control lost certification: status={r.status}"
     assert r.objective is not None and abs(r.objective) <= 1e-3, (
         f"finite-box control missed the true optimum 0.0: obj={r.objective}"
@@ -285,7 +285,7 @@ def _infeasible_bilinear_model():
 def test_467sub3_feasible_boundary_not_flipped_to_infeasible():
     """(b) false-infeasible guard: a feasible model with a within-tolerance
     boundary optimum must stay optimal/feasible — NEVER infeasible."""
-    r = _feasible_boundary_model().solve(time_limit=6.0, daemon=False)
+    r = _feasible_boundary_model().solve(time_limit=6.0)
     assert r.status != "infeasible", (
         f"false infeasible on a truly-feasible model: status={r.status} obj={r.objective}"
     )
@@ -298,7 +298,7 @@ def test_467sub3_feasible_boundary_not_flipped_to_infeasible():
 def test_467sub3_feasible_bilinear_boundary_not_flipped_to_infeasible():
     """(b) false-infeasible guard with an active NONLINEAR constraint at the
     optimum. Must not be reported infeasible."""
-    r = _feasible_bilinear_boundary_model().solve(time_limit=6.0, daemon=False)
+    r = _feasible_bilinear_boundary_model().solve(time_limit=6.0)
     assert r.status != "infeasible", (
         f"false infeasible on a truly-feasible bilinear model: status={r.status} obj={r.objective}"
     )
@@ -312,7 +312,7 @@ def test_467sub3_infeasible_bilinear_never_optimal():
     """(a) a rigorously infeasible model must NEVER be certified optimal. Either
     infeasible (rigorous) or a resource-limited non-optimal status is acceptable;
     a false optimal is not."""
-    r = _infeasible_bilinear_model().solve(time_limit=6.0, daemon=False)
+    r = _infeasible_bilinear_model().solve(time_limit=6.0)
     assert r.status != "optimal", (
         f"rigorously-infeasible model falsely certified optimal: status={r.status} "
         f"obj={r.objective}"
@@ -333,7 +333,7 @@ def test_467sub3_ex7_3_6_not_false_optimal():
         pytest.skip("ex7_3_6.nl not cached locally")
     from discopt.modeling.core import from_nl
 
-    r = from_nl(nl).solve(time_limit=20.0, daemon=False)
+    r = from_nl(nl).solve(time_limit=20.0)
     assert r.status != "optimal", (
         f"ex7_3_6 (infeasible) falsely certified optimal: status={r.status} obj={r.objective}"
     )

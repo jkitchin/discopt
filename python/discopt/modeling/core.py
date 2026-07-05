@@ -29,9 +29,11 @@ from __future__ import annotations
 import builtins as _builtins
 import warnings
 from dataclasses import dataclass
+from dataclasses import replace as _dc_replace
 from enum import Enum
 from typing import (
     TYPE_CHECKING,
+    Any,
     Callable,
     Iterator,
     Optional,
@@ -96,6 +98,12 @@ _INTEGER_DEFAULT_UB = 1e6
 # ─────────────────────────────────────────────────────────────
 
 
+# Sentinel for "static shape not yet computed" on a composite node, so a cached
+# ``None`` ("computed, but unknowable") is distinguishable from "never computed"
+# (M8 shape inference). A unique object, never a valid shape.
+_UNSET_SHAPE: Any = object()
+
+
 class Expression:
     """
     Base class for all mathematical expressions in a discopt model.
@@ -123,6 +131,13 @@ class Expression:
     # gufunc, which sees the Expression as a 0-d object and raises
     # ``ValueError: Input operand 1 does not have enough dimensions``.
     __array_ufunc__ = None
+
+    # Cached static shape for composite nodes (populated at construction by
+    # ``BinaryOp``/``UnaryOp`` where inferable; see M8). Class default of the
+    # ``_UNSET_SHAPE`` sentinel means "not computed" so a cached ``None``
+    # ("computed, unknown") is distinguishable. Leaf nodes (Variable/Constant/
+    # Parameter) carry their own ``.shape`` and are handled in ``_known_shape``.
+    _shape: Any = _UNSET_SHAPE
 
     def __add__(self, other):
         return BinaryOp("+", self, _wrap(other))
@@ -181,6 +196,33 @@ class Expression:
             "'!=' is not a valid constraint operator on modeling expressions. "
             "Use '==', '<=', or '>=' to build a constraint."
         )
+
+    # ── Hashing / boolean context (M4) ──
+    #
+    # ``__eq__`` is overloaded to *build a Constraint* (the modeling DSL —
+    # ``x == 5`` yields ``x - 5 == 0``), which is intentional and matches
+    # Pyomo/cvxpy. But that overload has two silent, dangerous consequences we
+    # must neutralize:
+    #
+    #   1. Defining ``__eq__`` makes every ``Expression`` subclass unhashable by
+    #      default (Python sets ``__hash__`` to ``None``), so ``{u + v: 1}`` and
+    #      ``expr in some_set`` blow up or misbehave. We restore **identity
+    #      hashing** (``id(self)``) so expressions behave sanely as set/dict keys
+    #      — two syntactically identical expressions are distinct objects, which
+    #      is the only sound choice given value-equality is unavailable.
+    #   2. ``expr in [other]`` / ``if expr:`` route through ``__eq__``/``__bool__``
+    #      and would evaluate the truthiness of the *Constraint* returned by
+    #      ``==``, which is always truthy — so ``u in [v]`` is silently ``True``
+    #      for any expressions. Making membership sound requires the container to
+    #      short-circuit on identity, which Python's ``in`` does *before* calling
+    #      ``__eq__`` only when the objects are identical; for distinct objects it
+    #      still calls ``__eq__``. We therefore also raise in ``Constraint.__bool__``
+    #      (below) so ``if x == 5:`` / ``u in [v]`` fail loudly instead of lying.
+    #
+    # NOTE: identity hashing does NOT change the ``==``-builds-a-Constraint
+    # overload — that remains the modeling API. It only fixes set/dict/`in`
+    # semantics for expressions used as keys.
+    __hash__ = object.__hash__
 
     # ── Indexing for array variables ──
 
@@ -291,6 +333,53 @@ class IndexExpression(Expression):
         return f"{self.base}[{self.index}]"
 
 
+def _known_shape(node: "Expression") -> Optional[tuple[int, ...]]:
+    """Best-effort static shape of an expression, or ``None`` when unknown (M8).
+
+    Deliberately *conservative*: it returns a concrete shape only for the nodes
+    whose shape follows unambiguously from numpy broadcast rules — leaves
+    (``Variable``/``Constant``/``Parameter``) and element-wise ``BinaryOp`` /
+    ``UnaryOp`` compositions thereof (whose shape is cached at construction). For
+    every other node (indexing, matmul, reductions, function calls, custom calls,
+    indexed containers, …) it returns ``None`` = "don't know", so the caller must
+    treat ``None`` as "cannot check" and never raise. This guarantees the M8
+    shape guard only ever fires on a *provably* incompatible pair and never
+    rejects a valid model (cert-baseline neutral).
+    """
+    cached = getattr(node, "_shape", _UNSET_SHAPE)
+    if cached is not _UNSET_SHAPE:
+        # ``cached`` is either a concrete shape tuple or ``None`` (computed-unknown).
+        return None if cached is None else tuple(cached)
+    if isinstance(node, Variable):
+        return node.shape
+    if isinstance(node, Constant):
+        return tuple(node.value.shape)
+    if isinstance(node, Parameter):
+        return node.shape
+    return None
+
+
+def _broadcast_shapes(
+    op: str, s_left: tuple[int, ...], s_right: tuple[int, ...]
+) -> tuple[int, ...]:
+    """Numpy broadcast of two *known* shapes, raising a clear error on mismatch.
+
+    Only called when both operand shapes are known (M8). A broadcast failure is a
+    genuine build-time error — the same operation would blow up deep in the JAX
+    NLPEvaluator with an opaque traceback, or (worse) be silently mis-extracted —
+    so raise here with both operand shapes named.
+    """
+    try:
+        return tuple(int(d) for d in np.broadcast_shapes(s_left, s_right))
+    except ValueError:
+        raise ValueError(
+            f"Incompatible operand shapes for '{op}': {s_left} and {s_right} do "
+            f"not broadcast (numpy broadcasting rules). Check the shapes of the "
+            f"two operands — a shaped variable/parameter must broadcast against "
+            f"the other side of the operation."
+        ) from None
+
+
 class BinaryOp(Expression):
     """Binary operation: a op b."""
 
@@ -298,6 +387,16 @@ class BinaryOp(Expression):
         self.op = op
         self.left = left
         self.right = right
+        # Static shape inference + build-time shape check (M8). When BOTH operand
+        # shapes are statically known, verify they broadcast and cache the result
+        # so compositions stay O(1). If either is unknown, the shape is unknown
+        # (``None``) and we do not check — conservative, never a false rejection.
+        s_left = _known_shape(left)
+        s_right = _known_shape(right)
+        if s_left is not None and s_right is not None:
+            self._shape = _broadcast_shapes(op, s_left, s_right)
+        else:
+            self._shape = None
 
     def __repr__(self):
         return f"({self.left} {self.op} {self.right})"
@@ -309,6 +408,9 @@ class UnaryOp(Expression):
     def __init__(self, op: str, operand: Expression):
         self.op = op
         self.operand = operand
+        # ``neg``/``abs`` are element-wise and shape-preserving: propagate the
+        # operand's known shape so it flows into a subsequent BinaryOp check (M8).
+        self._shape = _known_shape(operand)
 
     def __repr__(self):
         return f"{self.op}({self.operand})"
@@ -1077,7 +1179,7 @@ class ConstraintSense(Enum):
     EQ = "=="
 
 
-@dataclass
+@dataclass(eq=False)
 class Constraint:
     """
     A single constraint in the model.
@@ -1113,6 +1215,22 @@ class Constraint:
 
     def __repr__(self):
         return f"{self.body} {self.sense} {self.rhs}"
+
+    def __bool__(self):
+        # A Constraint has no boolean value. Because ``Expression.__eq__`` builds
+        # a Constraint (the modeling DSL), ``if x == 5:``, ``u in [v]`` (which
+        # truth-tests ``u == v``), and ``assert expr == other`` would otherwise
+        # silently evaluate this object as truthy — a footgun that masks logic
+        # errors (M4). Refuse loudly instead (the cvxpy approach). Use
+        # ``m.subject_to(...)`` to add the constraint to the model, or compare the
+        # constraint's ``.body``/``.sense``/``.rhs`` fields to test structure.
+        raise TypeError(
+            "A Constraint has no truth value. '==', '<=', '>=' on modeling "
+            "expressions build a Constraint (they do not compare values), so "
+            "using one in a boolean context (if/while/assert, 'in', bool()) is "
+            "almost always a mistake. Add it with m.subject_to(...); to test an "
+            "expression's identity use 'is' or a set/dict keyed by the object."
+        )
 
 
 @dataclass
@@ -1517,6 +1635,13 @@ class Model:
         self.name = name
         self._variables: list[Variable] = []
         self._parameters: list[Parameter] = []
+        # Persistent set of declared variable/parameter names for O(1)
+        # uniqueness checks (M7). Rebuilding ``{v.name ...} | {p.name ...}`` on
+        # every declaration made model construction O(n²); this set is updated
+        # incrementally at each registration site instead. Must stay in sync
+        # with ``_variables``/``_parameters`` — every append to those lists that
+        # introduces a name also adds it here.
+        self._names: set[str] = set()
         self._constraints: list[Constraint] = []
         self._objective: Optional[Objective] = None
         self._builder = None  # Optional PyModelBuilder, lazy-initialized
@@ -1632,9 +1757,20 @@ class Model:
 
     # ── Variable constructors ──
 
+    def _rebuild_name_index(self) -> None:
+        """Recompute the persistent ``_names`` cache from the current lists (M7).
+
+        Call after any bulk reassignment of ``_variables``/``_parameters`` that
+        bypasses the registration sites (e.g. the reformulation passes that build
+        a new ``Model`` with ``new_model._variables = list(model._variables)``),
+        so a later ``_check_name`` on that model stays correct.
+        """
+        self._names = {v.name for v in self._variables} | {p.name for p in self._parameters}
+
     def _register_variable(self, var: "Variable") -> "Variable":
         """Append a variable and register it with the Rust builder if active."""
         self._variables.append(var)
+        self._names.add(var.name)  # keep the O(1) name set in sync (M7)
         if self._builder is not None:
             var._builder_idx = self._builder.add_variable(
                 var.name,
@@ -1908,6 +2044,7 @@ class Model:
         self._check_name(name)
         flat = Parameter(name, arr, self)
         self._parameters.append(flat)
+        self._names.add(name)  # keep the O(1) name set in sync (M7)
         return IndexedParam(flat, index_set)
 
     @overload
@@ -1957,6 +2094,7 @@ class Model:
         self._check_name(name)
         param = Parameter(name, value, self)
         self._parameters.append(param)
+        self._names.add(name)  # keep the O(1) name set in sync (M7)
         return param
 
     # ── Objective ──
@@ -2053,8 +2191,30 @@ class Model:
         ...              name="adjacent_limits")
         """
         if isinstance(constraint, Constraint):
-            constraint.name = name
-            self._constraints.append(constraint)
+            # M5: never let ``subject_to`` corrupt an earlier row or clobber a
+            # name the caller set. The corruption case is *re-adding the same
+            # object* (or one already carrying a different name): stamping
+            # ``constraint.name`` in place would rename the earlier model row and
+            # overwrite the caller's own name. In those cases store an
+            # independent copy so each row is self-contained. For the common case
+            # — a fresh, unnamed constraint added once — stamp the name in place
+            # so the object the caller holds *is* the object in the model
+            # (identity that ``mark_coupling`` and other object-keyed APIs rely
+            # on). ``_dc_replace`` is only paid when it is actually needed.
+            already_added = getattr(constraint, "_added_to", None) is not None
+            has_own_name = constraint.name is not None and constraint.name != name
+            if already_added or has_own_name:
+                # Re-add of an already-placed object, or one the caller already
+                # named: copy so we never rename the earlier row nor clobber the
+                # caller's name. O(1) — no scan of ``_constraints``.
+                self._constraints.append(_dc_replace(constraint, name=name))
+            else:
+                # First placement of a fresh, unnamed constraint: stamp in place
+                # (preserving object identity for object-keyed APIs) and record
+                # that it now belongs to a model so a later re-add copies instead.
+                constraint.name = name
+                constraint._added_to = id(self)
+                self._constraints.append(constraint)
             return
         if isinstance(constraint, bool):
             raise TypeError(
@@ -2075,8 +2235,8 @@ class Model:
                     f"Expected Constraint (from <=, >=, == on expressions), "
                     f"got {type(c)} at position {k}."
                 )
-            c.name = f"{name}_{k}" if name else None
-            self._constraints.append(c)
+            # Copy-on-name here too (M5): never mutate the caller's list elements.
+            self._constraints.append(_dc_replace(c, name=f"{name}_{k}" if name else None))
 
     def constraint(self, index_set, rule, name: Optional[str] = None, fast: bool = True):
         """Add a family of constraints indexed by a named set.
@@ -3102,6 +3262,32 @@ class Model:
         """
         self.validate()
 
+        # Reject misspelled / unknown solve() keyword arguments loudly (M6).
+        # ``**kwargs`` is forwarded verbatim to ``solve_model`` and its backends,
+        # which historically only *warned* (or silently swallowed) unknown keys —
+        # so ``m.solve(gap_tolerence=1e-3)`` ran at the DEFAULT gap while the user
+        # believed they had tightened it (a results-integrity hazard). Validate
+        # against the union of solve_model's parameters and the curated
+        # backend-passthrough set; an unknown key raises TypeError with a
+        # near-match suggestion (CLAUDE.md §3: loud refusal over silent swallow).
+        if kwargs:
+            from discopt.solver import solve_model_accepted_kwargs
+
+            allowed = solve_model_accepted_kwargs()
+            unknown = [k for k in kwargs if k not in allowed]
+            if unknown:
+                import difflib
+
+                bad = unknown[0]
+                close = difflib.get_close_matches(bad, sorted(allowed), n=1, cutoff=0.6)
+                hint = f" Did you mean '{close[0]}'?" if close else ""
+                raise TypeError(
+                    f"solve() got an unexpected keyword argument '{bad}'.{hint} "
+                    f"Unknown solver options are rejected rather than silently "
+                    f"ignored (a swallowed option would leave the solver at its "
+                    f"default while you believe it was set)."
+                )
+
         # Opt-in Gauss-Newton objective Hessian (issue #98). Read by
         # ``solver._make_evaluator`` when (re)building the NLPEvaluator; toggling
         # it participates in the evaluator-cache fingerprint.
@@ -3313,6 +3499,24 @@ class Model:
             if np.any(var.lb > var.ub):
                 raise ValueError(f"Variable '{var.name}' has lb > ub at some index")
 
+        # Duplicate constraint names are a silent results-integrity hazard (M5):
+        # ``SolveResult.constraint_duals`` is keyed by constraint name, so two
+        # rows sharing a name collide there. Reject them loudly. Unnamed
+        # constraints (``name is None``) are exempt — anonymity is allowed.
+        con_names: set = set()
+        for c in self._constraints:
+            cname = getattr(c, "name", None)
+            if cname is None:
+                continue
+            if cname in con_names:
+                raise ValueError(
+                    f"Duplicate constraint name: '{cname}'. Constraint names must be "
+                    "unique because result.constraint_duals is keyed by name; two "
+                    "rows sharing a name would collide. Give each a distinct name "
+                    "(or leave it unnamed)."
+                )
+            con_names.add(cname)
+
         self._check_ownership()
 
     # ── Model statistics ──
@@ -3479,9 +3683,14 @@ class Model:
         return to_nl(self, path)
 
     def _check_name(self, name: str):
-        """Ensure variable/parameter name is unique."""
-        existing = {v.name for v in self._variables} | {p.name for p in self._parameters}
-        if name in existing:
+        """Ensure variable/parameter name is unique.
+
+        Consults the persistent ``self._names`` set (kept in sync at every
+        registration site) for an O(1) check instead of rebuilding the full name
+        set from ``_variables``/``_parameters`` on every declaration (M7 — that
+        rebuild was O(n) per call, O(n²) over a model build).
+        """
+        if name in self._names:
             raise ValueError(f"Name '{name}' already used in model")
 
 

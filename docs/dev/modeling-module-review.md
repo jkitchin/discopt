@@ -192,6 +192,19 @@ Regression test: the repro above must raise `ValueError`.
 
 ### M4. `Expression.__eq__` breaks membership, equality, and hashing
 
+> **✅ RESOLVED — `test_modeling_tail_m4_m8.py` (M4 cluster), branch
+> `fix-modeling-tail-m4-m8` (#413).** Restored identity hashing on `Expression`
+> (`__hash__ = object.__hash__`) so expressions are usable as set/dict keys and
+> `in` behaves sanely, **without** touching the `==`-builds-a-`Constraint`
+> overload (still the modeling DSL). Added `Constraint.__bool__` raising a clear
+> `TypeError` ("A Constraint has no truth value…") so `if x == 5:` / `u in [v]`
+> (which truth-tests the returned `Constraint`) fail loudly instead of silently
+> returning `True`; `Constraint` got `@dataclass(eq=False)` so two constraints
+> compare by identity rather than the always-True generated tuple `__eq__`.
+> `Variable` stays hashable (C-11's `__ne__` guard untouched). Fails-before /
+> passes-after verified by stashing the fix (expr unhashable + `u in [v]` silently
+> True on `origin/main`).
+
 `expr == other` returns a `Constraint` (required for the modeling DSL — same choice
 as Pyomo/cvxpy), but the consequences are unmitigated:
 
@@ -212,6 +225,20 @@ dataclass decorator (identity comparison).
 
 ### M5. `subject_to` mutates the caller's `Constraint`; duplicate names unchecked
 
+> **✅ RESOLVED — `test_modeling_tail_m4_m8.py` (M5 cluster), #413.** `subject_to`
+> no longer corrupts an earlier row: the *first* placement of a fresh, unnamed
+> constraint stamps the name in place (preserving object identity that
+> object-keyed APIs like `mark_coupling` rely on) and tags it `_added_to`; a
+> *re-add* of the same object — or one already carrying a different name — stores
+> an independent `dataclasses.replace` copy, so re-adding under a second name can
+> no longer rename the first row (the confirmed `['second','second']` aliasing is
+> now `['first','second']` with distinct objects). This is O(1) (an id tag, no
+> `_constraints` scan). `validate()` now rejects **duplicate constraint names**
+> loudly (`ValueError`) — `SolveResult.constraint_duals` is name-keyed, so
+> colliding names would collide there; unnamed rows are exempt. Fails-before /
+> passes-after verified by stash. (Regression guard `mark_coupling` interaction
+> pinned so the identity-preserving first-add is not lost.)
+
 `subject_to(c, name=...)` assigns `c.name` in place; adding the same object under two
 names leaves **both** model entries with the second name (confirmed: both entries are
 literally the same object). `validate()` checks variable-name uniqueness but not
@@ -221,6 +248,23 @@ re-adding an already-added Constraint object; add duplicate-name validation (or
 auto-suffix with a warning).
 
 ### M6. Misspelled `solve()` kwargs vanish
+
+> **✅ RESOLVED — `test_modeling_tail_m4_m8.py` (M6 cluster), #413.**
+> `Model.solve` now validates every forwarded `**kwarg` against
+> `solver.solve_model_accepted_kwargs()` — the union of `solve_model`'s own named
+> parameters (via `inspect.signature`, which follows the two `functools.wraps`
+> decorators) and a curated `_BACKEND_PASSTHROUGH_KWARGS` set (AMP / gurobi /
+> mip-nlp / lp-spatial keys, sourced from every `kwargs.get`/`kwargs.pop` site in
+> `solver.py`). An unknown key raises `TypeError` naming the offending kwarg with
+> a `difflib` near-match suggestion (`gap_tolerence` → "Did you mean
+> 'gap_tolerance'?"). **Allowlist completeness** was cross-checked against every
+> `.solve(` call site in `python/` + `discopt_benchmarks/`: three latent
+> swallowed no-ops surfaced and were fixed at the source (not allow-listed) —
+> `daemon=False` (7× in `test_unbounded_relaxation_soundness.py`, a no-op:
+> `Model.solve` has no daemon param), `verbose=False` (`cli.py` smoke self-test),
+> and `gap=1e-4`→`gap_tolerance=1e-4` (`p4_reprofile_structure_loss.py`). All
+> benchmark/cert harnesses use only allow-listed keys (`gap_tolerance`,
+> `max_nodes`, `nlp_solver`, `time_limit`). Fails-before / passes-after verified.
 
 `m.solve(gap_tolerence=1e-3)` runs to completion at the default tolerance
 [CONFIRMED]. The `**kwargs` funnel forwards to backend layers where unknown keys are
@@ -232,6 +276,20 @@ every backend's accepted kwargs (AMP, gurobi, mip-nlp, …), which is also usefu
 documentation.
 
 ### M8. Shape errors are not caught at build time
+
+> **✅ RESOLVED — `test_modeling_tail_m4_m8.py` (M8 cluster), #413.** Added
+> *conservative* static shape inference: `BinaryOp.__init__` computes and caches
+> its shape from its operands (numpy `broadcast_shapes`), and **raises
+> `ValueError` at build time only when BOTH operand shapes are statically known
+> and do not broadcast** — `p(3,) + q(2,)` now fails with both shapes named,
+> instead of silently building or dying deep in the JAX evaluator. `UnaryOp`
+> (`neg`/`abs`) propagates its operand shape so the check flows through `-p + q`.
+> Crucially, `_known_shape` returns `None` ("don't know") for every node whose
+> shape isn't cheaply inferable (indexing, matmul, reductions, function/custom
+> calls), and the guard **never raises on an unknown** — so it fires only on a
+> *provably* incompatible pair and cannot reject a valid model (cert-baseline
+> neutral). Fails-before / passes-after verified; valid broadcasts
+> (`(3,)+scalar`, `(3,)+(1,)`, `matmul+(2,)`) confirmed to still build.
 
 The modeling layer performs **no shape inference**: `a(3,) + b(2,) <= 1` builds
 fine, and depending on path either dies later with a deep JAX traceback
@@ -266,7 +324,7 @@ it converts a class of deep-compile errors into immediate one-line errors.
 
 ## 4. Performance
 
-- **P-M1. `_check_name` is O(n²)** (`core.py:3213`): rebuilds
+- **P-M1 (= M7). `_check_name` is O(n²)** (`core.py:3213`): rebuilds
   `{v.name for v in _variables} | {p.name ...}` on every declaration. Measured:
   37/94/170 µs per variable at n = 1k/2k/4k (pure quadratic growth; ~17 s of pure
   name-checking at 20k declarations). Fix: maintain a persistent `self._names: set`
@@ -274,6 +332,16 @@ it converts a class of deep-compile errors into immediate one-line errors.
   risk. (Note: `Model.constraint`'s fast linear-family path and
   `add_linear_constraints` are well designed — this fix removes the last O(n²) in
   the declaration path.)
+  > **✅ RESOLVED — `test_modeling_tail_m4_m8.py::test_m7_*`, #413.** Added a
+  > persistent `Model._names: set`, updated at every registration site
+  > (`_register_variable` + both parameter-append paths) and consulted by
+  > `_check_name` for an O(1) uniqueness check. A `_rebuild_name_index()` helper
+  > resyncs the cache after the reformulation passes
+  > (`gdp_reformulate`/`factorable_reform`/`integer_product_reform`) that bulk-copy
+  > `_variables`/`_parameters`. **Measured on this branch** (same harness as the
+  > finding): before 12.8 / 24.1 / 41.8 µs/var at n = 1k/2k/4k (quadratic); after
+  > **2.7 / 2.6 / 2.6 µs/var** (flat, O(1) — ~16× faster at n=4k). Bound-neutral:
+  > duplicate names still rejected; no solve-path change.
 - **P-M2. `_multiply_terms`/`sum` left-fold chains** build O(n)-deep trees for
   `prod()` and list-form sums. `SumOverExpression` already flattens sums; `prod`
   should get a matching n-ary node (or document the depth limit). Low priority.

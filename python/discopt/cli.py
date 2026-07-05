@@ -123,7 +123,7 @@ def _cmd_test(_args):
         x = m.continuous("x", lb=0, ub=10)
         m.minimize(x)
         m.subject_to(x >= 1)
-        result = m.solve(verbose=False)
+        result = m.solve()
         obj = float(result.objective)
         if abs(obj - 1.0) > 1e-3:
             errors.append(f"Solve sanity: expected objective ~1.0, got {obj}")
