@@ -138,6 +138,7 @@ experiment may run.
 | Phase 4 build 3 — Q-matrix extraction | **done — (A) bound-neutral, (B) flagged bound-changing** | (this PR) | Exact `extract_quadratic(expr,n,model)` in `quadratic_form.py` (exact-or-abstain, validated 1e-12 on 250 pts/inst + 14 non-quadratic rejections). Consumer: PSD-on-Q convexity certificate wired into `certify_convex` behind `DISCOPT_PSD_QFORM` (**default-OFF**); sound tightening, never mis-certifies (30 indefinite-Q seeds), strict refinement of the rigorous path. Flag-off is byte-identical → cert-neutral. See §8 "Phase 4 Q-extraction — build results" |
 | Phase 4 items 2 & 4 (V-segments, symmetry) | **locked / de-scoped** (§0.1.2) | — | V-segments de-prioritized (0 defvars in text `.nl`); symmetry DO-NOT-BUILD (0 orbits) per the re-profile. RLT/edge-concave rewire onto `extract_quadratic` scoped as bound-neutral follow-on |
 | Phase 5 | **locked** (§0.1.2) | — | requires post-Phase-1 re-profile |
+| Phase D — separation/strong-branch LP → warm in-house simplex (`perf-d1`) | **done — bound-neutral, default-ON** | (this PR) | Re-profile: **POUNCE subsolver is the #1 wall** (nvs17 ~239 cold POUNCE-LP solves / 6.3 s ≈ 40% of wall). Routed edge-concave separation + strong-branch LPs to `lp_simplex.solve_lp` under `DISCOPT_SEPARATION_LP_SIMPLEX` (default ON). Cert-baseline **NEUTRAL** (41/41 exact node_count, Δobj 0, incorrect 0); nvs17 equal-budget 93 nodes both flags. T0.4: 37 cuts / 14,800 checks, no invalid cut. Win: nvs17 POUNCE 848→0, wall 60.3 s (TL) → 38.1 s (optimal), s/node 0.826→0.409 (**2.02×**); nvs13 2.67×. See §8 "Phase D re-profile" |
 
 **Phase 0 — DONE & gated** (cert0 green: root_gap coverage 0.909 ≥ 0.90, incorrect 0).
 
@@ -1111,6 +1112,73 @@ collect_edge_concave_quadratics`, `rlt_cuts.py`), so rerouting them through
 coefficients, same verdict) and at worst risk a subtle drift; it is not shipped in
 this PR. The value there is a *faster path to the same relaxation*, which must be
 proven exactly bound-neutral (node_count/objective unchanged) — a separate task.
+
+### Phase D re-profile (2026-07-05) — the POUNCE subsolver is the #1 wall lever
+
+Re-profile on current `main` (post-CSE/Q-extraction/Rust-1). The §8 re-profile named
+"separation cost" as the dominant wall; this Phase-D pass attributes *where inside
+separation the time goes* — the **POUNCE subsolver**, called cold once per
+separation/strong-branch LP:
+
+- **nvs17**: `separate_edge_concave_quadratic → lp_pounce.solve_lp` = **85 calls /
+  4.86 s**; strong-branching → `lp_pounce.solve_lp` = **154 calls / 2.22 s**. Together
+  **~239 cold POUNCE-LP solves / 6.3 s ≈ 40% of nvs17 wall**, while the in-house Rust
+  simplex (`solve_lp_warm_py`) solves the same LPs at ~4–15 ms.
+- **Levers A/B/C status recorded:** CSE (Phase-4 lever 1) is **done and NOT a wall
+  lever by itself** (it shrinks the DAG the separators walk, but the separator's own
+  subsolver cost dominates); Q-extraction (lever 3) done/flagged; the earlier per-node
+  warm-start / Python-tax levers (T1.4/T1.6) were **measured dead**. The live lever is
+  the **separation/strong-branch subsolver backend**.
+
+**Lever taken (`perf-d1`): route the separation + strong-branch LPs to the warm
+in-house simplex.** The edge-concave separator hard-coded `lp_pounce.solve_lp`
+(`edge_concave.py`); strong branching used `get_lp_solver(prefer_pounce=nlp_solver==
+"pounce")`, i.e. POUNCE on the default `nlp_solver="pounce"`. Both now route to
+`lp_simplex.solve_lp` under `DISCOPT_SEPARATION_LP_SIMPLEX` (default **ON**; `"0"`
+restores POUNCE).
+
+**Confirm-first (does the routing preserve the derived output?).** Captured ≥50 of
+each LP on nvs17 + nvs11/12/13 during a live solve and solved each with *both*
+backends:
+- *Edge-concave (load-bearing output = the derived cut, not the vertex):* the two
+  backends **disagree on the dual slope** on the degenerate vertex-hull LP (|ΔA|∞ up to
+  1e10; IPM analytic-center dual vs simplex vertex dual) — but the separator recomputes
+  the intercept `B` to the exact validity boundary, so **both cuts are sound for any
+  slope**, and on the captured panel the **cut verdict matched 239/239** (every LP was
+  `noviol` for both — these instances produce no edge-concave cut). So the routing is
+  *not* byte-identical to POUNCE (different valid slope on a degenerate LP); its
+  neutrality is decided empirically, not by vertex identity.
+- *Strong-branch (load-bearing output = the objective bound used in the argmax score):*
+  objective agreement to LP tolerance (|Δobj| median 4.6e-6, max 1.1e-4 over 457 LPs);
+  the small wobble did not flip any branch argmax.
+
+**Result — strictly bound-neutral, measured:**
+- **Cert-baseline neutrality (`check_cert_neutrality.py`, `JAX_PLATFORMS=cpu`,
+  `JAX_ENABLE_X64=1`, flag ON): NEUTRAL.** All **41/41** certifying instances
+  `node_count` EXACTLY unchanged and `|Δobj| = 0.00e+00`, all `optimal` →
+  `incorrect_count = 0`. nvs17 (not in the baseline) verified separately: at a
+  generous budget both flag states finish `optimal` at **exactly 93 nodes, obj
+  −1100.4** — the branch decisions are identical.
+- **T0.4 soundness harness through the new path: PASS.** 37 real edge-concave cuts
+  derived via the simplex slope (nvs14/nvs11), **14,800 feasible-point validity checks,
+  no invalid cut** (the intercept-recompute keeps every cut sound regardless of slope).
+- **Measured win (POUNCE calls / wall / s-node), `nlp_solver="pounce"`, 60 s cap:**
+
+  | instance | POUNCE calls OFF→ON | wall OFF → ON | s/node OFF → ON | note |
+  |---|---:|---|---|---|
+  | nvs17 | 848 → **0** | 60.3 s (TL, feasible) → **38.1 s (optimal)** | 0.826 → **0.409 (2.02×)** | now certifies within budget |
+  | nvs13 | 164 → **0** | 3.86 s → **1.44 s** | 0.203 → **0.076 (2.67×)** | |
+  | nvs11/12/14 | 0 → 0 | unchanged | unchanged | no separation/SB POUNCE calls; neutral |
+
+  nvs17's 73→93 node difference at the 60 s cap is the *timeout truncating the slower
+  OFF run mid-search*, not a bound change (equal-budget node count is identical, above).
+
+**Shipped default-ON** (strictly bound-neutral: node_count + objective exactly
+unchanged on the cert panel and nvs17). A documented off-switch
+(`DISCOPT_SEPARATION_LP_SIMPLEX=0`) is retained because the edge-concave slope is not
+byte-identical across backends (degenerate-LP dual), so an operator can pin the legacy
+POUNCE path if a future instance ever shows a cut-selection difference; soundness holds
+either way.
 
 ---
 
