@@ -150,13 +150,18 @@ def test_m5_object_identity_preserved_for_first_add():
 
 
 @pytest.mark.smoke
-def test_m5_duplicate_constraint_names_rejected():
+def test_m5_duplicate_constraint_names_warn():
+    """Duplicate constraint names *warn* (not raise): indexed/array constraint
+    families legitimately reuse a base name, so a hard error would break valid
+    models. The warning still surfaces the ``constraint_duals`` name-collision
+    hazard. (Rejecting broke the GAMS ``supply(i)`` transport family — CI-caught.)
+    """
     m = Model()
     b = m.continuous("b", lb=0, ub=10)
     m.minimize(b)
     m.subject_to(b <= 1, name="dup")
     m.subject_to(b >= 0, name="dup")
-    with pytest.raises(ValueError, match="Duplicate constraint name"):
+    with pytest.warns(UserWarning, match="Duplicate constraint name"):
         m.validate()
 
 
@@ -168,6 +173,43 @@ def test_m5_unnamed_constraints_allowed():
     m.subject_to(d <= 1)
     m.subject_to(d >= 0)
     m.validate()  # anonymous rows are exempt from the uniqueness rule
+
+
+@pytest.mark.smoke
+def test_m5_gams_indexed_equation_family_names_uniquely():
+    """A GAMS indexed equation ``supply(i)`` expands to one row per index; each
+    row must get a distinct name (``supply[p1]``, ``supply[p2]``) so the M5
+    duplicate-name check does not spuriously reject a legitimate model and
+    ``constraint_duals`` name-keying stays sound (regression for the gams-link CI
+    failure). Without per-index naming all rows were named ``supply`` and
+    ``validate()`` raised.
+    """
+    src = """
+Sets i / p1, p2 /
+     j / m1, m2 / ;
+Parameter cap(i) / p1 20, p2 30 / ;
+Parameter dem(j) / m1 25, m2 15 / ;
+Table c(i,j)
+          m1   m2
+    p1     2    3
+    p2     4    1 ;
+Positive Variable x(i,j) ;
+Free Variable z ;
+Equations cost, supply(i), demand(j) ;
+cost..      z =e= sum((i,j), c(i,j) * x(i,j)) ;
+supply(i).. sum(j, x(i,j)) =l= cap(i) ;
+demand(j).. sum(i, x(i,j)) =g= dem(j) ;
+Model transport / all / ;
+Solve transport using LP minimizing z ;
+"""
+    from discopt.modeling.gams_parser import parse_gams
+
+    m = parse_gams(src)
+    names = [c.name for c in m._constraints]
+    # Each indexed row has its own key-qualified name; no duplicates.
+    assert names == ["supply[p1]", "supply[p2]", "demand[m1]", "demand[m2]"]
+    assert len(names) == len(set(names))
+    m.validate()  # must not raise a spurious duplicate-name error
 
 
 # ─────────────────────────────────────────────────────────────

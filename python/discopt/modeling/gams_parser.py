@@ -1615,7 +1615,16 @@ class _ModelBuilder:
                             continue
                     lhs_expr = self._build_expr(eqdef.lhs, env)
                     rhs_expr = self._build_expr(eqdef.rhs, env)
-                    self._add_constraint(m, lhs_expr, eqdef.sense, rhs_expr, eqdef.name)
+                    # A GAMS indexed equation ``eq(i)`` expands to one *distinct*
+                    # constraint row per index tuple, each with its own dual — so
+                    # name each row by its index key (``supply[p1]``, ``supply[p2]``)
+                    # rather than reusing the bare equation name for every row.
+                    # Distinct names keep ``result.constraint_duals`` (name-keyed)
+                    # sound and avoid a spurious duplicate-name collision; this
+                    # matches ``Model.constraint``'s own ``name[key]`` convention.
+                    key_label = ".".join(str(v) for v in combo)
+                    row_name = f"{eqdef.name}[{key_label}]" if eqdef.name else None
+                    self._add_constraint(m, lhs_expr, eqdef.sense, rhs_expr, row_name)
             else:
                 # Scalar equation — dollar condition on scalar is unusual but handle it
                 if eqdef.dollar_cond is not None:
