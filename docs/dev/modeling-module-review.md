@@ -154,6 +154,22 @@ Fails-before verified by stashing the core fix. Closes infra INT-2 (same root).
 
 ### M3. Cross-model expressions are silently accepted and alias by index
 
+> **✅ RESOLVED — `test_m3_cross_model_ownership.py`** (branch
+> `fix-m3-cross-model-ownership`, PR for #413/M3). `Model.validate()` (called by
+> `solve()`) now walks the objective + every constraint body (including the
+> indicator/disjunctive/SOS/logical families) via `_iter_owned_leaves` and rejects
+> any `Variable`/`Parameter` that is **index-incompatible** with the model being
+> solved. The invariant is *index-slot identity* — `self._variables[leaf._index]
+> is leaf` (or the leaf is one of this model's own objects) — **not** an
+> `owner is self` test: a legitimate model rebuild that *shares* the original
+> Variable objects (e.g. `reformulate_gdp`, which sets
+> `new_model._variables = list(model._variables)` then adds aux binaries) stays
+> index-compatible and must pass, while a genuinely foreign leaf is rejected loudly
+> with a `ValueError` naming the offending variable and both models. The cross-model
+> repro below now raises at solve time; single-model models (constants, scalars,
+> numpy broadcasts, parameters, matmuls, GDP reformulation) are unaffected
+> (cert-baseline neutral). Fails-before/passes-after verified by stashing the fix.
+
 No layer checks that variables in an objective/constraint belong to the model being
 solved. Variables carry a flat `_index` local to their own model, so a foreign
 variable **aliases whatever variable of the solved model has the same index**.

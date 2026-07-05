@@ -761,6 +761,70 @@ def _find_owning_model(*exprs: Expression) -> Optional["Model"]:
     return None
 
 
+def _iter_model_leaves(*exprs: Expression):
+    """Yield every ``Variable`` / ``Parameter`` leaf reachable from *exprs*.
+
+    Walks the expression DAG(s) and surfaces the model-owning leaf nodes
+    (``Variable`` and ``Parameter``, both of which carry a ``.model`` back-
+    reference). ``Constant`` leaves — scalars, numpy arrays, broadcasts — carry
+    no model and are simply not yielded, so an ownership check built on this
+    walker never trips on legitimate constants. Used by the cross-model
+    ownership guard (finding M3) to detect a variable/parameter that belongs to
+    a different :class:`Model` than the one it is being solved in.
+    """
+    stack = list(exprs)
+    while stack:
+        node = stack.pop()
+        if isinstance(node, (Variable, Parameter)):
+            yield node
+        elif isinstance(node, IndexExpression):
+            stack.append(node.base)
+        elif isinstance(node, BinaryOp):
+            stack.extend((node.left, node.right))
+        elif isinstance(node, UnaryOp):
+            stack.append(node.operand)
+        elif isinstance(node, FunctionCall):
+            stack.extend(node.args)
+        elif isinstance(node, CustomCall):
+            stack.extend(node.args)
+        elif isinstance(node, MatMulExpression):
+            stack.extend((node.left, node.right))
+        elif isinstance(node, SumExpression):
+            stack.append(node.operand)
+        elif isinstance(node, SumOverExpression):
+            stack.extend(node.terms)
+        # Constant (and anything without children) contributes no owning leaf.
+
+
+def _logical_backing_vars(expr) -> list:
+    """Collect the backing ``Variable`` objects under a ``LogicalExpression`` tree.
+
+    ``BooleanVar`` wraps a binary ``Variable`` (``.variable``); the composite
+    logical nodes (``LogicalAnd``/``LogicalOr``/…) hold child logical
+    expressions. Returns the flat list of backing variables so the ownership
+    guard can check them too.
+    """
+    out: list = []
+    stack = [expr]
+    while stack:
+        node = stack.pop()
+        if isinstance(node, BooleanVar):
+            if isinstance(node.variable, Variable):
+                out.append(node.variable)
+            else:
+                # Indexed BooleanVar wraps an IndexExpression over a Variable.
+                out.extend(_iter_model_leaves(node.variable))
+        elif isinstance(node, (LogicalAnd, LogicalOr, LogicalEquivalent)):
+            stack.extend((node.left, node.right))
+        elif isinstance(node, LogicalNot):
+            stack.append(node.operand)
+        elif isinstance(node, LogicalImplies):
+            stack.extend((node.antecedent, node.consequent))
+        elif isinstance(node, (LogicalAtLeast, LogicalAtMost, LogicalExactly)):
+            stack.extend(node.operands)
+    return out
+
+
 def if_else(
     condition: "Constraint",
     then_value: Union[Expression, float],
@@ -3138,6 +3202,94 @@ class Model:
 
     # ── Validation ──
 
+    def _iter_owned_leaves(self):
+        """Yield every ``Variable``/``Parameter`` leaf referenced by this model.
+
+        Walks the objective expression and every constraint body (including the
+        indicator/disjunctive/SOS/logical constraint families) so the ownership
+        guard (M3) sees the same leaves the solver will eventually lower to the
+        flat Rust variable vector.
+        """
+        if self._objective is not None:
+            yield from _iter_model_leaves(self._objective.expression)
+
+        def _from_constraint(c):
+            if isinstance(c, Constraint):
+                yield from _iter_model_leaves(c.body)
+            elif isinstance(c, _IndicatorConstraint):
+                yield from _iter_model_leaves(c.indicator)
+                yield from _from_constraint(c.constraint)
+            elif isinstance(c, _DisjunctiveConstraint):
+                for disjunct in c.disjuncts:
+                    for sub in disjunct:
+                        yield from _from_constraint(sub)
+            elif isinstance(c, _SOSConstraint):
+                yield from _iter_model_leaves(*c.variables)
+            elif isinstance(c, _LogicalConstraint):
+                yield from _iter_model_leaves(*_logical_backing_vars(c.expression))
+            elif hasattr(c, "body"):
+                # Unknown arithmetic-bodied constraint type: still walk its body.
+                yield from _iter_model_leaves(c.body)
+
+        for c in self._constraints:
+            yield from _from_constraint(c)
+
+    def _check_ownership(self):
+        """Reject expressions that reference a variable/parameter of another model.
+
+        A :class:`Variable` carries a flat ``_index`` into *its own* model's
+        variable vector. When the solver lowers this model it addresses each
+        leaf by that flat index, so the precise soundness invariant is:
+
+            ``self._variables[leaf._index] is leaf``
+
+        i.e. the leaf's flat index must address *that very object* in the model
+        being solved. A leaf from a foreign model has an index that addresses a
+        **different** object (or is out of range) → it would silently **alias by
+        flat index** onto this model's same-index variable, a wrong answer rather
+        than an error (review finding M3). Raise loudly instead (CLAUDE.md §3).
+
+        This index-slot identity is deliberately *not* an ``owner is self`` test:
+        legitimate model rebuilds (e.g. ``reformulate_gdp``) construct a new
+        ``Model`` that **shares** the original ``Variable`` objects in the same
+        order — index-compatible, so those must pass — while adding new aux
+        variables of their own. The identity check accepts both and rejects only
+        a genuinely foreign, index-incompatible leaf. One O(DAG) walk per solve.
+        """
+        # Object-identity membership sets for O(1) lookup. For variables, index
+        # equality is the real invariant; the identity set is the fast primary
+        # check, with the index-slot check as the precise diagnostic.
+        var_ids = {id(v) for v in self._variables}
+        param_ids = {id(p) for p in self._parameters}
+        n_vars = len(self._variables)
+        for leaf in self._iter_owned_leaves():
+            if isinstance(leaf, Parameter):
+                if id(leaf) in param_ids:
+                    continue
+            else:  # Variable
+                if id(leaf) in var_ids:
+                    continue
+                idx = getattr(leaf, "_index", None)
+                # An index that happens to address this very object is also fine
+                # (shared-object rebuilds), but that is already covered by the id
+                # set above; reaching here means the object is not in this model.
+                if idx is not None and 0 <= idx < n_vars and self._variables[idx] is leaf:
+                    continue
+            # Foreign leaf: index-incompatible with the model being solved.
+            owner = getattr(leaf, "model", None)
+            kind = "parameter" if isinstance(leaf, Parameter) else "variable"
+            own_name = getattr(owner, "name", None) or "<unknown>"
+            self_name = getattr(self, "name", None) or "<unnamed>"
+            raise ValueError(
+                f"Cross-model reference: {kind} '{leaf.name}' belongs to a "
+                f"different model ('{own_name}'), not to model '{self_name}' being "
+                f"solved. Variables/parameters carry a flat index local to their "
+                f"own model, so mixing them across models would silently alias by "
+                f"index and produce a wrong answer. Rebuild the offending "
+                f"expression using only variables/parameters declared on model "
+                f"'{self_name}'."
+            )
+
     def validate(self):
         """
         Validate model consistency.
@@ -3146,7 +3298,9 @@ class Model:
         ------
         ValueError
             If the objective is not set, variable names are not unique,
-            or variable bounds are inconsistent (lb > ub).
+            variable bounds are inconsistent (lb > ub), or any objective/
+            constraint references a variable/parameter owned by a *different*
+            model (which would silently alias by flat index — finding M3).
         """
         if self._objective is None:
             raise ValueError("No objective set. Call m.minimize() or m.maximize().")
@@ -3158,6 +3312,8 @@ class Model:
             names.add(var.name)
             if np.any(var.lb > var.ub):
                 raise ValueError(f"Variable '{var.name}' has lb > ub at some index")
+
+        self._check_ownership()
 
     # ── Model statistics ──
 
