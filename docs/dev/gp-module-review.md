@@ -19,7 +19,7 @@ the stakes are solver-wide, not module-local.
 
 | # | Severity | Component | Finding |
 |---|----------|-----------|---------|
-| GP-1 | **P0 correctness** | `gp/__init__.py:classify_gp` + auto path | Fast-path constraint families (`m.constraint(...)`, `add_linear_constraints`) live only in the Rust builder and are **invisible to `classify_gp`** — the auto-GP path solves the model **without them** and certifies the wrong optimum [CONFIRMED: 0.1 vs true 0.5] |
+| GP-1 ✅ RESOLVED | **P0 correctness** | `gp/__init__.py:classify_gp` + auto path | Fast-path constraint families (`m.constraint(...)`, `add_linear_constraints`) live only in the Rust builder and are **invisible to `classify_gp`** — the auto-GP path solves the model **without them** and certifies the wrong optimum [CONFIRMED: 0.1 vs true 0.5]. **FIXED (X-1):** `classify_gp` returns `None` when `model._has_builder_only_rows()`, so the model falls back to spatial B&B (which sees the builder rows); repro now solves 0.5. Regression: `test_x1_builder_resident_rows.py::test_gp1_*`. |
 | GP-2 | **P1** | `gp/__init__.py:solve_gp` | Certified GP optima are returned with **`gap_certified=False`** (and non-optimal statuses carry a log-space `gap` with `bound=None`) [CONFIRMED] |
 | GP-3 | P2 recognition | `posynomial.py` | No distribution of products over sums: `2*(h*w + h*d) <= 10` is refused — the textbook Boyd box-volume GP written naturally **silently misses the fast path** [CONFIRMED] |
 | GP-4 | P2 recognition | `posynomial.py` | `dm.sum(..., over=set)` (`SumOverExpression`) is refused — the natural indexed form of a posynomial never classifies [CONFIRMED] |

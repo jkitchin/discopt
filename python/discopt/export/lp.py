@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from discopt.export._common import builder_objective, iter_builder_linear_rows
 from discopt.export._extract import (
     extract_linear_terms,
     extract_quadratic_terms,
@@ -57,16 +58,26 @@ def to_lp(model: Model, path: str | Path | None = None) -> str | None:
     lines.append(f"\\ Problem: {model.name}")
     lines.append("")
 
-    # Objective section
+    # Objective section. A builder-resident objective (`add_linear_objective` /
+    # `add_quadratic_objective`, X-1) leaves a zero placeholder in `model._objective`
+    # — recover its real coefficients and sense rather than emit `obj: 0`.
     assert model._objective is not None
-    sense = model._objective.sense
-    if sense == ObjectiveSense.MINIMIZE:
+    builder_obj = builder_objective(model)
+    if builder_obj is not None:
+        obj_linear, obj_quad_map, obj_const, builder_sense = builder_obj
+        obj_quad = obj_quad_map or {}
+        is_min = not str(builder_sense).lower().startswith("max")
+    else:
+        obj_expr = model._objective.expression
+        obj_quad, obj_linear, obj_const = extract_quadratic_terms(
+            obj_expr, flat_vars, model_vars=mvars
+        )
+        is_min = model._objective.sense == ObjectiveSense.MINIMIZE
+
+    if is_min:
         lines.append("Minimize")
     else:
         lines.append("Maximize")
-
-    obj_expr = model._objective.expression
-    obj_quad, obj_linear, obj_const = extract_quadratic_terms(obj_expr, flat_vars, model_vars=mvars)
 
     obj_str = _format_linear_expr(obj_linear, var_names, obj_const)
     if not obj_str:
@@ -94,20 +105,24 @@ def to_lp(model: Model, path: str | Path | None = None) -> str | None:
 
     lines.append("")
 
-    # Subject To section
+    # Subject To section. Emit both expression-path rows and fast-API /
+    # builder-resident rows (X-1: rows from `add_linear_constraints` / the
+    # `Model.constraint` fast path live only in the Rust builder; without them the
+    # LP would have an empty `Subject To`).
     lines.append("Subject To")
+    rows: list[tuple[str, dict[int, float], str, float]] = []
     for i, con in enumerate(model._constraints):
-        con_name = con.name if con.name else f"c{i}"
-        con_name = con_name.replace(" ", "_").replace("-", "_")
-
+        con_name = (con.name if con.name else f"c{i}").replace(" ", "_").replace("-", "_")
         lin, const = extract_linear_terms(con.body, flat_vars, model_vars=mvars)
-        rhs = -const
+        rows.append((con_name, lin, con.sense, -const))
+    for j, brow in enumerate(iter_builder_linear_rows(model)):
+        con_name = (brow.name if brow.name else f"b{j}").replace(" ", "_").replace("-", "_")
+        rows.append((con_name, dict(brow.coeffs), brow.sense, brow.rhs))
 
+    for con_name, lin, sense_str, rhs in rows:
         expr_str = _format_linear_expr(lin, var_names, 0.0)
         if not expr_str:
             expr_str = "0"
-
-        sense_str = con.sense
         if sense_str == "<=":
             lp_sense = "<="
         elif sense_str == ">=":
@@ -116,7 +131,6 @@ def to_lp(model: Model, path: str | Path | None = None) -> str | None:
             lp_sense = "="
         else:
             raise ValueError(f"Unknown constraint sense: {sense_str}")
-
         lines.append(f"  {con_name}: {expr_str} {lp_sense} {_fmt_val(rhs)}")
 
     lines.append("")
