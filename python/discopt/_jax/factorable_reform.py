@@ -71,6 +71,28 @@ _ZERO_MARGIN = 1e-9
 _INF_THRESH = 1e15
 
 
+def _lift_zero_spanning_factors_enabled() -> bool:
+    """R4 feature flag (``DISCOPT_LIFT_ZERO_SPANNING_FACTORS``, default OFF).
+
+    When a product ``f(x)·g(x)`` has a *non-atomic* factor ``f`` whose interval
+    spans 0, the factorable reform already lifts ``w == f`` to a bounded aux (via
+    :func:`_prelift_blowup_products`). But the default spatial-branching policy
+    then *deprioritizes* every lifted aux column (``solver.py`` — a product aux
+    ``w = x_i·x_j`` cannot shrink its own envelope, so bisecting it is wasteful).
+    For a zero-*spanning* factor that reasoning is inverted: branching ``w`` at 0
+    splits the sign of the factor, and the McCormick envelope of the product
+    ``w·g`` (with ``g ≥ 0``) responds sharply — it is the only move that un-pins
+    the bound (st_e36: root −304.5, pinned for every x-box, jumps to ≈ optimum
+    once ``w`` is split at 0; see uncertified-tail-plan §3 R4). This flag marks
+    those specific auxes so the solver keeps them branchable. Default OFF keeps
+    the reform byte-identical (no tagging, so the deprioritization set is
+    unchanged).
+    """
+    import os
+
+    return os.environ.get("DISCOPT_LIFT_ZERO_SPANNING_FACTORS", "0") == "1"
+
+
 # The factorable-reform walkers (``_find_clearable_denominator``, ``_lift_expr``,
 # the ``has_factorable_work`` scanners, ...) recurse one Python frame per
 # expression node.  ``from_nl`` rebuilds a sum/product of N terms as a left-deep
@@ -242,6 +264,11 @@ class _Lifter:
         self._expr_cache: dict[tuple[str, float | None], Variable] = {}
         self.aux_constraints: list[Constraint] = []
         self._counter = 0
+        # R4: names of lifted product-factor auxes whose interval spans 0. These
+        # are the only auxes worth keeping as spatial-branching candidates (see
+        # ``_lift_zero_spanning_factors_enabled``). Populated only when the flag
+        # is on, so the default reform is byte-identical.
+        self.zero_spanning_factor_auxes: set[str] = set()
 
     def monomial(self, leaf: Expression, flat_index: int, exp: int) -> Variable | None:
         """Return an aux variable equal to ``leaf**exp`` (creating it on first
@@ -441,6 +468,17 @@ def _prelift_blowup_products(expr: Expression, model: Model, lifter: "_Lifter") 
                     if w is not None:
                         new_factors.append(w)
                         changed = True
+                        # R4: a *product factor* whose lifted aux interval spans 0
+                        # is the branch-responsive one (splitting w at 0 flips the
+                        # factor's sign, tightening the product envelope). Tag it so
+                        # the solver keeps it a spatial-branching candidate instead
+                        # of deprioritizing it with the pure-product auxes. Flag-
+                        # gated: no tagging when off, so the reform is unchanged.
+                        if _lift_zero_spanning_factors_enabled():
+                            w_lo = float(np.min(w.lb))
+                            w_hi = float(np.max(w.ub))
+                            if w_lo < 0.0 < w_hi:
+                                lifter.zero_spanning_factor_auxes.add(w.name)
                         continue
                     new_factors.append(f_lifted)
                 else:
@@ -1441,6 +1479,10 @@ def _factorable_reformulate_inner(model: Model, *, clear_only: bool = False) -> 
         # Defining equalities for the aux variables come first so downstream
         # bound propagation sees them early.
         new_model._constraints = lifter.aux_constraints + rebuilt
+        # R4: surface the zero-spanning product-factor auxes (if any were tagged
+        # under the flag) so the solver can keep them branchable. Always set the
+        # attribute (empty by default) for a stable, easy-to-read contract.
+        new_model._zero_spanning_factor_auxes = set(lifter.zero_spanning_factor_auxes)
         return new_model
     except Exception:  # pragma: no cover - defensive: never break a solve
         return model

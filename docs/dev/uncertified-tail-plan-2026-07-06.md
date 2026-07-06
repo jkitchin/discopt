@@ -368,6 +368,88 @@ under-branched signal are **nvs05, nvs09, tls2**.
   them — that would give hda its first dual bound. If not, file the
   relaxation-coverage gap as its own issue; do not force it into R4.
 
+#### R4 RESULTS / VERDICT (2026-07-06) — SHIPPED (flagged, default-OFF)
+
+**Verdict: GO — st_e36 certifies at 60 s with the flag ON. Root cause refined
+vs the plan (measurement beat plan, CLAUDE.md §0.4).**
+
+*Relaxation-catalog precondition (§0.4):* the zero-spanning-factor lift **already
+exists** — `_prelift_blowup_products` (relaxation-catalog §3 "repeated-factor
+lifting") lifts every multi-term factor of a blow-up product to a bounded aux
+`w == f`. On st_e36 it already produces `_fr_aux_0 == f1` (box `[-23, 21.25]`,
+spans 0) and rewrites C0 as the multilinear product
+`_fr_aux_0·_fr_aux_1·…·_fr_aux_4 == 0`. So R4 is **not** "build a lift" and **not**
+new envelope math (F5 kill stands). It is **one branch-policy line**.
+
+*Entry experiment (hand-lift, then the real path):* KILL CRITERION **not** fired.
+Hand-lifting `f1` and splitting `w` at 0: the `w ≤ 0` child's root bound jumps
+**−304.50 → −247.91 (≈ optimum −246.0) and certifies in 5 nodes / 1.0 s**; the pin
+does not survive lifting. Then the decisive diagnostic on the *real* solver path:
+the **exact reformed model** (`_fr_aux_0` already present) solved standalone
+certifies in **7 nodes**, but inside `from_nl(...).solve()` it stalls at −304.49.
+Same model, same aux bounds — the only difference is `solver.py`'s
+`set_branch_deprioritized`, which deprioritizes **every** lifted aux column from
+spatial branching (rationale: a product aux `w = x_i·x_j` can't shrink its own
+envelope). That rationale is **inverted for a zero-spanning FACTOR**: branching
+`w` at 0 flips the factor's sign and sharply tightens the `w·g` McCormick
+envelope — the one move that un-pins the bound. FBBT/OBBT do *not* recover it
+(interval arithmetic decorrelates `x0²` from `−6x0`; naive `[-23,21.25]`,
+root-OBBT `[-8,6.25]`, but the pin is a branching problem, not a bound problem).
+
+*The change (exact, minimal — one lever):*
+`factorable_reform.py` tags the zero-spanning product-factor auxes
+(`_lift_zero_spanning_factors_enabled()`, env `DISCOPT_LIFT_ZERO_SPANNING_FACTORS`,
+**default OFF**) and surfaces them as `Model._zero_spanning_factor_auxes`;
+`solver.py` removes those columns from the branch-deprioritized set so they stay
+spatial-branching candidates. Relaxation math and feasible set are **untouched** —
+the lift is present flag on OR off; only branch *ordering* changes (always sound).
+
+*st_e36 flag ON, root-bound-vs-box (why it un-pins):*
+
+| box (x0 × x1) | reform root bound | note |
+|---|---:|---|
+| full `[3,5.5]×[15,25]`, `w∈[-8,6.25]` | −304.50 | pinned (w not yet split) |
+| after 1 w-split, child `w∈[-8,0]` | **−247.91** | ≈ optimum; certifies 5 nodes |
+| child `w∈[0,6.25]` | −304.50 | loose half; optimum on w=0 boundary |
+
+*st_e36 acceptance:* flag **ON → `optimal`, bound −246.02, 153 nodes, ~16–18 s**
+(≤ 60 s ✓); flag **OFF → `feasible`, bound −304.49, pinned** (baseline, 23.8 % gap).
+
+*Gates (all green):*
+- **Differential bound** (st_e36 + 2 witnesses): root bound identical ON/OFF
+  (relaxation unchanged); certified bound ON ≥ OFF **and** ≤ oracle every box —
+  st_e36 −304.50→−246.18 (≤ −246.0); synthA −32.69→−31.12 (≤ −16.44);
+  synthB −39.80→−21.54 (≤ −20.31). No false certificate.
+- **Feasible-point sampling** (20 000 pts): the lift `w == f(x)` is an exact
+  identity substitution — `C0(orig) − C0(lifted) ≡ 0`; cuts no feasible point.
+- **Flag OFF byte-identical:** `check_cert_neutrality.py` — all 41 certifying
+  instances `nodes X→X`, `|Δobj| = 0` → **NEUTRAL**.
+- **Out-of-panel witnesses:** the F5-style corpus scan (1610 MINLPLib `.nl`,
+  ≤200 KB) finds the zero-spanning *product-factor* structure **only in st_e36** —
+  it is genuinely rare (needs the blow-up prelift). Generality is therefore shown
+  on **2 structurally-distinct synthetic witnesses** (synthA: quadratic factor;
+  synthB: bilinear factor), each un-pinned hugely and sound (above). No
+  instance-keyed code; the tag is purely structural (any lifted product factor
+  whose box spans 0).
+- pytest `test_factorable_reform.py::*r4*` (4 tests), ruff, mypy (touched files):
+  clean.
+
+*Acceptance not met (honest):* **nvs05/nvs09 root gap unchanged** — the flag tags
+**no** aux for them (identical bound ON/OFF). Their stall is a *different*
+structure (nvs09's objective is a `log·log` product that can't even be
+linearized; nvs05 a loose multilinear/signomial), **not** a zero-spanning product
+factor. R4's lever is specific to the st_e36 class; nvs05/nvs09 fall outside it
+and remain for R2/R3b or a separate relaxation-coverage item.
+
+*hda:* out of R4 scope — hda tags no zero-spanning product factor; its 23 omitted
+rows are a `log(<general expr>)`/`x**expr` **relaxation-coverage** gap
+(`_LIFTABLE_CALL_OUTER = {sqrt, exp}` deliberately excludes `log`, which needs a
+certified positive argument lower bound). Filed as its own issue (#517); not
+forced.
+
+*Default flip:* NOT in this PR — flag stays OFF until 3 consecutive green
+nightlies per §0.1.
+
 ### R5 — Zerohalf at a pre-crossover point (optional, parallel; targets #280 graphpart)
 
 - **Basis:** cert-gap-plan §7/§0.8 — a validity-GREEN native {0,½}-CG

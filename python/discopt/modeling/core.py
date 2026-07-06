@@ -1670,6 +1670,12 @@ class Model:
         self._names: set[str] = set()
         self._constraints: list[Constraint] = []
         self._objective: Optional[Objective] = None
+        # R4: names of lifted product-factor auxes whose interval spans 0, set by
+        # the factorable reform under ``DISCOPT_LIFT_ZERO_SPANNING_FACTORS`` so the
+        # solver keeps them as spatial-branching candidates (see
+        # ``factorable_reform._lift_zero_spanning_factors_enabled``). Empty by
+        # default, so it never changes behaviour with the flag off.
+        self._zero_spanning_factor_auxes: set[str] = set()
         self._builder = None  # Optional PyModelBuilder, lazy-initialized
         self._aux_counter = 0  # monotonic suffix for if_else auxiliary names
         # Complementarity conditions added via ``complementarity()``; recorded
