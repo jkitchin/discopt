@@ -514,10 +514,13 @@ def test_on_error_pauses_only_on_failure():
     assert res.status == "optimal"
     assert ok.hits == [], "on-error session paused on a successful solve"
 
+    # time_limit=0.0 fails deterministically: the loop's first elapsed check
+    # breaks immediately, so even a fully warm solve cannot certify (a small
+    # positive limit races the JAX cache and flakes on fast machines).
     fail = RecordingFrontend()
     debug.attach(DebugSession(fail, enter_on_error=True))
     try:
-        res = _spatial_model().solve(time_limit=0.05)
+        res = _spatial_model().solve(time_limit=0.0)
     finally:
         debug.detach()
     assert res.status != "optimal"
