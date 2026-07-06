@@ -292,3 +292,89 @@ two nvs24 fallback LPs: 10.9 s → 5.5 s and 2.4 s → 2.2 s. Cert-baseline
 the false integer-MILP premise; the LP itself is genuinely hard for the warm path.
 
 **Artifacts:** `python/discopt/solvers/milp_simplex.py` (the pure-LP short-circuit).
+
+---
+
+## 8. THRU-2a — cost-aware PSD moment-cut gate (2026-07-06)
+
+**Verdict: SHIPPED, flagged default-OFF. The §4 per-round-delta mechanism is
+FALSIFIED and re-derived.** §4 recommended a gate that "after the first PSD round,
+measures the LP delta; if `Δ ≤ τ·(1+|lb|)`, abandons PSD." Instrumenting the actual
+per-round LP bound-delta in `_separate_psd` (release build) **falsifies that
+premise**:
+
+- nvs17 root, PSD round-0 delta = **+5.87e4** (LP jumps −65792 → −2522); median
+  per-round *relative* delta ≈ **8e-3** across 379 rounds; a τ=1e-3 diminishing-
+  returns cutoff skips only **9%** of rounds. PSD's per-round deltas are **large,
+  not ~0** — the opposite of the §4 premise.
+
+**Why THRU-1's "PSD contributes 0% of the bound" is still true, mechanistically.**
+The *certified root_bound* is bit-identical with/without PSD because on this
+**box-QCQP class the targeted RLT stage cannot fire** (no linear constraints:
+`_separate_rlt` adds **+0.00** after PSD on every node measured) — so PSD is the
+*only* stage that closes the node-LP McCormick gap, and when PSD is off,
+**branching** closes the same gap to the same bound. PSD is therefore **not
+node-inert**; it is **substitutable by branching at lower wall cost**. Unbudgeted
+PSD (≈60% of wall, 8 rounds × every node) *starves the tree search*. The correct
+general signal is PSD's **wall-share**, not its bound-delta.
+
+**Implementation (general, sound, adaptive).** `_separate_psd` gains a cost-aware
+gate (`_jax/mccormick_lp.py`, flag `psd_cost_gate` / `DISCOPT_PSD_COST_GATE`,
+default OFF):
+1. **Per-node wall budget:** measure the first cut re-solve's wall
+   (`base_solve_wall`); stop the PSD loop once cumulative PSD wall this node exceeds
+   `budget × base_solve_wall` (default `budget=1.0`). This caps PSD exactly where it
+   dwarfs the node solve (the pathology) and leaves it long where it is cheap.
+2. **Diminishing returns:** abandon the remaining rounds once a round's LP delta
+   `Δ ≤ tau·(1+|lb_before|)` (default `tau=1e-4`).
+Keys only on observed per-node cost/bound-delta — never on instance name/shape
+(§0.2). **Sound by construction:** the gate only ever *drops* valid cuts, which can
+only loosen the relaxation — it can never cut a feasible point or push the bound
+above the optimum. The gate-off path is bit-identical to the pre-THRU-2a loop.
+
+**Scope: PSD only.** §4 point 2 also proposed pairing univariate-square under the
+same gate. Measured: extending the identical gate to `_separate_univariate_square`
+**over-reaches onto non-QCQP instances** — tspn05 (a TSP-with-neighborhoods, not
+QCQP) flips **optimal → feasible** (39 → 225 nodes) because its lifted distance
+squares need those tangents. Reverted; the shipped gate touches PSD only. This
+trims nvs17's headline from the 2.1× that square-gating gave to **1.6×**, but keeps
+the no-off-target guarantee.
+
+**Flag-ON panel (production path, gate wired into `_separate_psd`):**
+
+| instance | OFF | ON (gate) | oracle | dual bound (ON) | crosses? |
+|---|---|---|---|---:|---|
+| **nvs17** | 38.3 s optimal | **23.6 s (1.6×)** optimal @ −1100.4 | −1100.4 | −1100.41 | no |
+| **nvs19** | 60.1 s, 73 nodes, inc −1098.2 | 60.1 s, 215 nodes, inc **−1098.2** | −1098.4 | −1102.10 | no |
+| **nvs23** | 60.1 s, 9 nodes, root 18.7 s | 60.6 s, **69 nodes, root 8.0 s** | −1125.2 | −1130.50 | no |
+| **nvs24** | 81.6 s **TL, no incumbent, root ⊘** | 63.5 s **feasible, root CONVERGES 23.5 s** | −1033.2 | −1035.66 | no |
+
+nvs24's root now converges to a valid bound and the tree finds an incumbent where
+the baseline finds none. nvs19 is the **PSD-helps** case (base gets the better
+incumbent −1098.2 in fewer nodes): the adaptive gate **preserves it** — same
+incumbent −1098.2, node throughput up, bound unchanged. (nvs24 root here is 23.5 s,
+not the §3 prototype's 6.7 s: that prototype *also* turned square off entirely;
+the PSD-only gate leaves square on, and square is now nvs24's residual root cost —
+`separate/univariate_square` 45.8 s — a re-scoped follow-on, not a PSD lever.)
+
+**Gates.** Flag-OFF cert-baseline **NEUTRAL** (41/41 node_count exact, |Δobj|=0 —
+default path provably untouched). Flag-ON cert panel: **41/41 stay optimal,
+incorrect_count = 0, no dual bound crosses its oracle**; the only node_count change
+is nvs13 (19→49, an on-class IQCQP, still optimal @ −585.2 — the expected
+bound-changing effect, not a soundness or off-target regression). No-off-target on
+non-QCQP holds (tspn05/dispatch back to identical node_count once square is
+excluded). `pytest -m smoke` 617 passed; adversarial 10 passed;
+`test_solver_tuning` 29 passed; pre-commit mypy **Passed**.
+
+**Falsification recorded (measurement beats plan, §0.4):** §4's "per-round PSD
+bound-delta < τ → abandon" gate is **void** — the deltas are large every round
+because PSD is the sole gap-closer on box-QCQP (RLT inert without linear
+constraints). The real lever is PSD's *wall-share vs. branching*, implemented as a
+per-node wall budget. §4's "pair univariate-square under the same gate" is
+**void** — square-gating regresses non-QCQP tspn05 (optimal→feasible); shipped
+PSD-only.
+
+**Artifacts:** `python/discopt/solver_tuning.py` (`psd_cost_gate*` fields),
+`python/discopt/_jax/mccormick_lp.py::_separate_psd` (the gated loop),
+`python/tests/test_solver_tuning.py` (defaults/env/validation + soundness
+regression test).

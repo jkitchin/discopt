@@ -1453,14 +1453,38 @@ class MccormickLPRelaxer:
                     milp._A_ub = np.vstack([np.asarray(milp._A_ub), R])
                     milp._b_ub = np.concatenate([milp._b_ub, b])
 
+            # Cost-aware gate (THRU-2a, DISCOPT_PSD_COST_GATE, default OFF). PSD
+            # separation dominates the QCQP node wall (~60% on nvs17/19/24) while
+            # the certified bound is set by McCormick+RLT and recovered by branching
+            # when PSD is absent, so unbudgeted PSD starves the tree search. When on,
+            # cap this node's PSD wall to ``budget × base_solve_wall`` and abandon on
+            # per-round diminishing returns. SOUND: dropping cuts can only loosen the
+            # relaxation — never cut a feasible point or cross the optimum. Keying is
+            # purely on observed per-node cost/bound-delta (§0.2, general). The gate
+            # only ever *shortens* the loop, so the default (gate-off) path below is
+            # bit-identical to the pre-THRU-2a code.
+            _tun = _tuning()
+            _gate = _tun.psd_cost_gate
+            _gate_budget = _tun.psd_cost_gate_budget
+            _gate_tau = _tun.psd_cost_gate_tau
+            _psd_t0 = time.perf_counter()
+            _base_solve_wall: Optional[float] = None
             for _round in range(max_rounds):
                 if deadline is not None and time.perf_counter() >= deadline:
+                    break
+                if (
+                    _gate
+                    and _base_solve_wall is not None
+                    and (time.perf_counter() - _psd_t0) > _gate_budget * _base_solve_wall
+                ):
+                    # Per-node PSD wall budget spent — stop feeding the search.
                     break
                 cuts = separate_psd_cuts_on_relaxation(
                     varmap, np.asarray(res.x, dtype=np.float64), n_total
                 )
                 if not cuts:
                     break
+                _lb_before = res.objective if _gate else None
                 # ``coeffs . z >= rhs``  ->  ``(-coeffs) . z <= -rhs`` for A_ub<=b_ub.
                 _append([-c.coeffs for c in cuts], [-c.rhs for c in cuts])
                 _tl = (
@@ -1468,10 +1492,18 @@ class MccormickLPRelaxer:
                     if deadline is None
                     else max(deadline - time.perf_counter(), _SOLVE_DEADLINE_FLOOR_S)
                 )
+                _solve_t0 = time.perf_counter()
                 new_res = milp.solve(time_limit=_tl, backend=self._backend)
+                if _gate and _base_solve_wall is None:
+                    _base_solve_wall = max(time.perf_counter() - _solve_t0, 1e-4)
                 if new_res.status != "optimal" or new_res.objective is None:
                     break
                 res = new_res
+                if _gate and _lb_before is not None:
+                    _delta = new_res.objective - _lb_before
+                    if _delta <= _gate_tau * (1.0 + abs(_lb_before)):
+                        # Diminishing returns — abandon the remaining PSD rounds.
+                        break
             return res
         except Exception:
             return res

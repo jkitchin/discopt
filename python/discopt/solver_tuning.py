@@ -42,6 +42,11 @@ def _env_int(name: str, default: int) -> int:
     return default if raw is None else int(raw)
 
 
+def _env_float(name: str, default: float) -> float:
+    raw = os.environ.get(name)
+    return default if raw is None else float(raw)
+
+
 @dataclass(frozen=True)
 class SolverTuning:
     """Advanced relaxation / branch-and-bound tuning for :meth:`Model.solve`.
@@ -94,6 +99,41 @@ class SolverTuning:
         default_factory=lambda: _env_flag("DISCOPT_EDGE_CONCAVE", default=True)
     )
     """Edge-concave aggregation cuts (``DISCOPT_EDGE_CONCAVE``, default on)."""
+
+    # --- cost-aware PSD moment-cut gate (THRU-2a, default OFF) -----------------
+    psd_cost_gate: bool = field(
+        default_factory=lambda: _env_flag("DISCOPT_PSD_COST_GATE", default=False)
+    )
+    """Adaptive cost-aware gate on the per-node PSD (moment) cut separation loop
+    (``DISCOPT_PSD_COST_GATE``, default OFF). PSD separation dominates the QCQP
+    root wall (~60% on nvs17/19/24 per THRU-1) while the certified bound is set by
+    McCormick+RLT and reached by branching when PSD is absent, so unbudgeted PSD
+    *starves the tree search*. When on, this bounds the wall each node's PSD loop
+    may spend to :attr:`psd_cost_gate_budget` × that node's own base LP-solve wall,
+    and abandons the loop early once a round's relative LP-bound improvement falls
+    below :attr:`psd_cost_gate_tau` (diminishing returns). It gates ONLY the PSD
+    (moment-cut) loop — the univariate-square separator was measured to over-reach
+    onto non-QCQP instances (tspn05 optimal→feasible), so it is left untouched.
+    Keys purely on observed per-node cost/bound-delta — never on instance
+    name/shape (§0.2). SOUND by construction: dropping valid cuts can only loosen
+    the relaxation, never cut a feasible point or cross the optimum. Bound-changing
+    → default-OFF until nightly green (CLAUDE.md §5)."""
+
+    psd_cost_gate_budget: float = field(
+        default_factory=lambda: _env_float("DISCOPT_PSD_COST_GATE_BUDGET", 1.0)
+    )
+    """PSD wall budget per node as a multiple of that node's base LP-solve wall
+    (``DISCOPT_PSD_COST_GATE_BUDGET``, default 1.0). The PSD loop stops once its
+    cumulative wall this node exceeds ``budget × base_solve_wall``. Only consulted
+    when :attr:`psd_cost_gate` is on."""
+
+    psd_cost_gate_tau: float = field(
+        default_factory=lambda: _env_float("DISCOPT_PSD_COST_GATE_TAU", 1e-4)
+    )
+    """Relative diminishing-returns threshold for the PSD loop
+    (``DISCOPT_PSD_COST_GATE_TAU``, default 1e-4). A round whose LP-bound
+    improvement ``Δ ≤ tau × (1 + |lb_before|)`` abandons the remaining PSD rounds
+    at that node. Only consulted when :attr:`psd_cost_gate` is on."""
 
     # --- branch-and-bound / bound levers --------------------------------------
     alphabb_with_lp: bool = field(
@@ -157,6 +197,10 @@ class SolverTuning:
             raise ValueError(
                 f"node_bound_mode must be 'lp' or 'milp', got {self.node_bound_mode!r}"
             )
+        if self.psd_cost_gate_budget <= 0:
+            raise ValueError(f"psd_cost_gate_budget must be > 0, got {self.psd_cost_gate_budget}")
+        if self.psd_cost_gate_tau < 0:
+            raise ValueError(f"psd_cost_gate_tau must be >= 0, got {self.psd_cost_gate_tau}")
 
     def replace(self, **changes) -> SolverTuning:
         """Return a copy with ``changes`` applied (validated)."""
