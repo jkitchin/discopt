@@ -345,6 +345,22 @@ overwritten:
    its re-solves through `lp_pounce._solve_core` on the nvs09 path
    (92.6 % of that instance's wall). The flag covered edge-concave and
    strong-branching call sites only.
+7. **"F1 (LNS enumeration budget) removes tls2's ~15 s root cost"**
+   (§1.1 "via RENS the root of tls2"; §7 F1 acceptance "tls2 root −≥15 s").
+   *Correction (F1 implementation, `perf-f1-lns-enumeration-budget`, pounce
+   0.7.0, M4 Pro):* on this machine tls2 never enters the `local_branching`
+   enumeration path at its root — an instrumented solve records **0**
+   `subnlp` calls / **0** `local_branching` invocations, and the single
+   in-tree `local_branching` call costs 1.36 s. tls2's ~25 s root sink is
+   **`rens` itself (2 calls = 25.7 s)** — RENS's own nested `_solve_nlp_bb`
+   root/heuristic phase — which F1 does not own. Budgeting the enumeration
+   correctly bounds fac2 (1665→158 sub-NLPs, 23.5 s→5.8 s) and flay03m
+   (3330→395, 47.8 s→6.8 s), both still certifying with identical node
+   count/objective, but leaves tls2's root unchanged (25.6 s→25.1 s). The
+   tls2 root lever is **F4** (budget-gate the root heuristic NLP phase), not
+   F1; the §7 F1 tls2 line is reassigned to F4. F1's class win (the
+   `sum_r C(n,r)` enumeration blow-up on the ≤12-binary early-incumbent
+   class) is confirmed and delivered.
 
 ---
 

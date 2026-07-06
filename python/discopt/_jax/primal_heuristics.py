@@ -9,6 +9,7 @@ and re-solves the resulting NLP.
 from __future__ import annotations
 
 import itertools
+import math
 import time
 from dataclasses import dataclass, field
 from typing import Callable, Optional
@@ -1423,6 +1424,20 @@ def _local_branching_submip(
     return cand
 
 
+# Fallback estimate (seconds) for one enumeration sub-NLP before any round has
+# been measured. The profiled sub-NLP mean on the 12-binary flay/fac class is
+# ~14 ms (bottleneck-profile-2026-07-05 §1.1); 15 ms is the conservative prior
+# used to predict a round's cost when no measurement exists yet.
+_LB_SUBNLP_PRIOR_S = 0.015
+
+# Minimum remaining budget (seconds) before it is worth dispatching the truncated
+# neighbourhood to the bounded sub-MIP. A nested ``solve_model`` re-pays a fixed
+# setup/JIT/root tax measured at ~1.6-2 s on this class (F4 territory); launching
+# it with less than this is nearly all tax and no search, so below the threshold
+# we truncate the enumeration outright rather than blow the slice on startup cost.
+_LB_SUBMIP_MIN_BUDGET_S = 2.5
+
+
 def local_branching(
     model: Model,
     x_incumbent: np.ndarray,
@@ -1437,6 +1452,10 @@ def local_branching(
     submip_time_limit: float = 2.0,
     submip_max_nodes: int = 1000,
     submip_gap_tolerance: float = 1e-4,
+    deadline: Optional[float] = None,
+    node_bound: Optional[float] = None,
+    incumbent_obj: Optional[float] = None,
+    gap_tolerance: float = 1e-4,
 ) -> Optional[tuple[np.ndarray, float]]:
     """Local branching: search the Hamming-radius-``k`` neighbourhood of a binary
     incumbent for a better feasible point.
@@ -1453,8 +1472,28 @@ def local_branching(
     restricted problem with a bounded budget (with a recursion guard so the
     sub-solve never re-enters the LNS layer).
 
+    Budget enforcement (F1, bottleneck-profile-2026-07-05 §1.1). The enumeration
+    branch issues ``sum_r C(n_bin, r<=k)`` sub-NLPs — 79 at k=2, 1586 at k=5 for
+    12 binaries — which historically ignored its ``submip_time_limit`` slice and
+    the solver's absolute ``deadline`` entirely (fac2: 1665 sub-NLPs = 84 % of
+    wall; flay03m: 3330 = 96 %). It now:
+
+    1. honours a hard absolute ``deadline`` in addition to the per-call slice,
+       polling before every sub-NLP (~14 ms each — polling is free);
+    2. predicts each radius round's cost as ``C(n_bin, r) x measured_mean`` and,
+       when the round cannot fit the remaining budget, truncates the enumeration
+       rather than blowing past it — dispatching the *unexplored* neighbourhood
+       to the bounded :func:`_local_branching_submip` so the search is not simply
+       abandoned; and
+    3. skips the whole search when the incumbent already matches the node
+       relaxation ``node_bound`` within ``gap_tolerance`` (nothing to improve).
+
+    This is budget enforcement only: the neighbourhood, the k-schedule policy,
+    and the soundness of every proposed point are unchanged. Only proposes
+    incumbents — the dual bound is untouched.
+
     Returns the best feasible ``(x, obj)`` found in the neighbourhood, or
-    ``None``. Only proposes incumbents — the dual bound is untouched.
+    ``None``.
     """
     int_mask = _get_integer_mask(model)
     lb0, ub0 = _get_variable_bounds(model)
@@ -1466,10 +1505,33 @@ def local_branching(
 
     k = max(1, min(k, len(binary_idx)))
 
+    # (3) Nothing to improve: the incumbent already sits at the node relaxation
+    # bound within tolerance, so no point in the Hamming ball can beat it. Skip
+    # the whole search (heuristic-only; the dual bound is untouched either way).
+    if (
+        node_bound is not None
+        and incumbent_obj is not None
+        and np.isfinite(node_bound)
+        and np.isfinite(incumbent_obj)
+    ):
+        abs_gap = incumbent_obj - float(node_bound)
+        denom = max(abs(incumbent_obj), abs(float(node_bound)), 1e-10)
+        if abs_gap <= 1e-9 or abs_gap / denom <= gap_tolerance:
+            return None
+
+    # Absolute wall past which no further sub-NLP may start. The effective budget
+    # is the tighter of the caller's per-call slice and the solver's deadline.
+    slice_deadline = time.perf_counter() + max(0.0, float(submip_time_limit))
+    if deadline is not None and np.isfinite(deadline):
+        effective_deadline = min(slice_deadline, float(deadline))
+    else:
+        effective_deadline = slice_deadline
+
     # Scalable sub-MIP variant for large binary blocks.
     if len(binary_idx) > max_binaries:
         if evaluator is None:
             evaluator = cached_evaluator(model)
+        remaining = max(0.0, effective_deadline - time.perf_counter())
         return _local_branching_submip(
             model,
             x_incumbent,
@@ -1480,7 +1542,7 @@ def local_branching(
             integer_tol=integer_tol,
             feas_tol=feas_tol,
             evaluator=evaluator,
-            time_limit=submip_time_limit,
+            time_limit=min(float(submip_time_limit), remaining),
             max_nodes=submip_max_nodes,
             gap_tolerance=submip_gap_tolerance,
         )
@@ -1493,14 +1555,43 @@ def local_branching(
     k = max(1, min(k, len(binary_idx)))
 
     best: Optional[tuple[np.ndarray, float]] = None
+    # Rolling mean sub-NLP wall used to predict the next round's cost. Seeded with
+    # the profiled prior; refined from every measured sub-NLP.
+    mean_subnlp_s = _LB_SUBNLP_PRIOR_S
+    n_measured = 0
+    # Highest radius whose full enumeration we could afford. If the budget runs
+    # out mid-schedule we hand the *unexplored* radii to the bounded sub-MIP so
+    # the neighbourhood is still searched, just not by brute force.
+    truncated_at: Optional[int] = None
+
     # Enumerate flip sets of size 0..k (size 0 re-evaluates the incumbent itself).
     for radius in range(k + 1):
+        # (2) Predict this round's cost and stop enumerating if it cannot fit the
+        # remaining budget. C(n, 0)=1 (re-evaluate incumbent) is always cheap and
+        # always worth doing; larger radii are gated.
+        remaining = effective_deadline - time.perf_counter()
+        if remaining <= 0.0:
+            truncated_at = radius
+            break
+        round_calls = math.comb(len(binary_idx), radius)
+        predicted = round_calls * mean_subnlp_s
+        if radius >= 1 and predicted > remaining:
+            # Cannot afford the full round; hand the rest to the bounded sub-MIP.
+            truncated_at = radius
+            break
+
         for flip in itertools.combinations(binary_idx, radius):
+            # (1) Poll the deadline before every sub-NLP (they are ~14 ms, so
+            # per-iteration polling is free). Never start one past the budget.
+            if time.perf_counter() >= effective_deadline:
+                truncated_at = radius
+                break
             seed = x_inc.copy()
             for i in binary_idx:
                 seed[i] = incumbent_bits[i]
             for i in flip:
                 seed[i] = 1.0 - incumbent_bits[i]
+            _t0 = time.perf_counter()
             found = subnlp(
                 model,
                 seed,
@@ -1510,6 +1601,39 @@ def local_branching(
                 integer_tol=integer_tol,
                 feas_tol=feas_tol,
             )
+            # Refine the rolling mean from the measured sub-NLP wall.
+            n_measured += 1
+            mean_subnlp_s += (time.perf_counter() - _t0 - mean_subnlp_s) / n_measured
             if found is not None and (best is None or found[1] < best[1]):
                 best = found
+        else:
+            # Inner loop completed without a budget break; continue the schedule.
+            continue
+        # Inner loop broke on the deadline: stop the whole enumeration.
+        truncated_at = radius
+        break
+
+    # If the budget cut the enumeration short, search the unexplored Hamming
+    # ball (radius >= truncated_at, up to k) via the bounded sub-MIP, which adds
+    # the Hamming cut as one linear constraint instead of enumerating C(n, r)
+    # flips. This keeps the neighbourhood covered without blowing the deadline.
+    if truncated_at is not None and truncated_at <= k:
+        remaining = effective_deadline - time.perf_counter()
+        if remaining >= _LB_SUBMIP_MIN_BUDGET_S:
+            submip = _local_branching_submip(
+                model,
+                x_inc,
+                binary_idx,
+                k=k,
+                backend=backend,
+                nlp_options=nlp_options,
+                integer_tol=integer_tol,
+                feas_tol=feas_tol,
+                evaluator=evaluator,
+                time_limit=min(float(submip_time_limit), remaining),
+                max_nodes=submip_max_nodes,
+                gap_tolerance=submip_gap_tolerance,
+            )
+            if submip is not None and (best is None or submip[1] < best[1]):
+                best = submip
     return best
