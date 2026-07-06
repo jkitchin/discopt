@@ -361,6 +361,41 @@ overwritten:
    F1; the §7 F1 tls2 line is reassigned to F4. F1's class win (the
    `sum_r C(n,r)` enumeration blow-up on the ≤12-binary early-incumbent
    class) is confirmed and delivered.
+8. **"F3 collapses nvs09's separation cost ~10–50× (nodes/s ≥10×, share
+   <20 %)"** (§7 F3 acceptance; §1.3 "the same swap that gave 10–50× on the
+   other separators applies"). *Correction (F3 implementation,
+   `perf-f3-multilinear-separator-simplex`, pounce 0.7.0, M4 Pro):* the entry
+   experiment falsifies the uniform-10× premise for **this** LP class. The
+   multilinear hull LP is `min/max f(v)·λ s.t. Vᵀλ = x*, 1ᵀλ = 1, λ ≥ 0` with
+   `2^n` λ columns — **not** a row-augmented re-solve, so the "warm" in the
+   swap is cold-simplex-vs-IPM, exactly like #484's edge-concave routing (no
+   cross-call basis reuse; `lp_simplex.solve_lp` is documented cold). On
+   nvs09, `n`≈10 → **1024-column** hull LPs: a per-LP A/B shows the cold Rust
+   simplex is **bimodal** — it solves ~81 % of them in **≈1 ms (100× faster
+   than POUNCE's ~150 ms)** but on the remaining ~19 % (degenerate/
+   ill-conditioned widest LPs) it **stalls to its 100 000-pivot default
+   (~1.6 s)**, worse than POUNCE. (Bonus soundness note: the hull LP's
+   feasible set `{λ ≥ 0, Σλ = 1}` is a simplex — *provably bounded* — so
+   POUNCE's occasional `UNBOUNDED` verdict on the wide LP is a numerical
+   false-negative that **drops a valid cut**; the exact simplex recovers it,
+   and the intercept-recompute keeps every cut valid regardless of engine.)
+   The sound fix is F2's philosophy applied to the *cold* path: a size-derived
+   pivot cap → POUNCE per-LP fallback (F2's guard only covers the *warm* dual
+   re-solve, so the plan's "F2 protects the new traffic" holds only partially).
+   Result on nvs09 @60 s: simplex serves 564/698 hull LPs in 3.8 s (6.4 % of
+   wall), but the **128 POUNCE fallbacks cost 44.3 s (73 %)** — that hard
+   subset is *irreducible* (POUNCE is the better engine for it), so the
+   separation share stays ~89 % and the wall floor does not move 10×. Measured
+   deltas: **nodes/s 2.62 → 3.65 (1.4×)**, **bound@60 s −59.24 → −57.67
+   (strictly tighter, valid vs the −43.134 oracle)**, incumbent unchanged.
+   The `<20 %` share / `≥10×` nodes/s targets are **not met** and were premised
+   on separation being removable *overhead*; on nvs09 it is intrinsic bound
+   work whose hard tail is IPM-favourable. The class win (the ≤4-arity-cap
+   narrow hull LPs, ~81 % here, → ~100× per LP) is real and sound; the residual
+   nvs09 wall is the wide-LP IPM cost (a POUNCE-engine question, cf. F6/upstream
+   jkitchin/pounce#182), not a routing one. Cert panel: **provably byte-identical**
+   — no certifying instance reaches the multilinear separator (0 calls at 60 s
+   on all 41, incl. the heavy cvxnonsep/fac2/tspn05/flay02m).
 
 ---
 
