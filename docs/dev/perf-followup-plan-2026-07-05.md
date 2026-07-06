@@ -487,6 +487,32 @@ worktrees/sessions if desired, but each in its own PR.
 - **Acceptance:** stated after the entry experiment (record the numbers in
   the PR); do not pre-commit a wall target for a task whose scope is
   conditional.
+- **Status: RE-SCOPED then KILLED at the entry experiment — nothing shipped**
+  (branch `perf-f6-tree-warmstart-nlp`, pounce 0.7.0 RELEASE wheel, M-series
+  arm64; profile §5 item 11). F6 was re-scoped away from the "POUNCE engine
+  gap" (proven a *debug-build artifact* — a release POUNCE is ~1.1× Ipopt with
+  fewer iters, pounce#182 comment 4889424028) to the maintainer-endorsed
+  lever: **warm-start incumbent NLPs across the B&B tree** (thread the parent
+  node's converged primal + duals + μ into the child NLP via POUNCE's
+  `Problem.solve(x0, lagrange=, zl=, zu=)` + `warm_start_init_point`/`mu_init`).
+  Entry experiment (real captured parent→child NLP pairs from live 60 s nvs05
+  and tls2 B&B runs, cold vs warm re-solve): warm-start is **incumbent-quality
+  safe** (every replay reached the identical KKT point / objective) but its
+  **iteration count fails the kill criterion on the class** — **tls2 uniformly
+  worse (8/8 pairs, median cold/warm 0.58×, i.e. warm needs ~1.7× more iters);
+  nvs05 helps only on ≤2-bound-diff pairs (2.29×) and flips to a net loss on
+  realistic ≤4-bound pairs**, and the only positive recipe (`x + duals + μ`) is
+  exactly the one that is catastrophic on tls2 (dropping μ or the duals makes
+  nvs05 merely neutral). Per the plan's "<1.3× median ⇒ warm-start is not the
+  lever" kill criterion the task stops. Retry sub-audit: alternative-start
+  retries *rescue* only 2.4% (nvs05) / 0.2% (tls2) of nodes — below the 15%
+  "material" and 5% "cap it" thresholds — so the retry policy is left unchanged
+  (F4 already deadline-polls between retries). Per CLAUDE.md §3 (no dead flags)
+  **no warm-start API, feature flag, or `NLPResult.mu` field was added and no
+  solver code changed.** The nvs05/tls2 stall is a weak-bound / branch-and-
+  reduce problem (as F5 also concluded), not a per-node NLP speed problem —
+  re-scope under the cert-gap-plan branch-and-reduce roadmap. pounce#182 closes
+  as a resolved build artifact.
 
 ### F7 — Fixed-tax trims  (lowest priority)
 
@@ -530,9 +556,14 @@ worktrees/sessions if desired, but each in its own PR.
 - **More CSE/DAG-shrinking for Class A**: the DAG walk is not where the
   seconds are (except hda's churn note, profile §6 — secondary to B10).
 - **Blaming POUNCE per-solve latency on Class A / flay03m / st_e36 / nvs09**:
-  falsified (profile §1, verdict table). The POUNCE engine work is real but
-  lives upstream (jkitchin/pounce#182) and only governs the nvs05/tls2/hda
-  class (F6).
+  falsified (profile §1, verdict table). The "POUNCE engine gap" (Phase-D
+  7–11× vs Ipopt) was itself falsified as a **debug-build artifact** — a
+  release POUNCE is ~1.1× Ipopt with fewer iters (pounce#182 comment
+  4889424028; profile §5 item 11). There is no per-solve engine gap to close,
+  upstream or down. **Warm-starting node NLPs across the tree (F6)** was the
+  endorsed alternative and was **killed at its entry experiment** (worse
+  iteration count on tls2, fragile on nvs05); nvs05/tls2 are a weak-bound /
+  branch-and-reduce problem, not a node-NLP-speed problem.
 - **`rens=False` or disabling heuristics as a "fix" for B7**: measured to
   relocate the cost, not remove it (fac2 27.3 s, flay03m 91.7 s).
 - **Polling inside XLA compiles** (F4): not possible; gate entry instead.
