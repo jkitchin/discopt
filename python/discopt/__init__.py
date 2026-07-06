@@ -220,3 +220,50 @@ def chat(llm_model: str | None = None, verbose: bool = True):
     from discopt.llm.chat import chat as _chat
 
     return _chat(llm_model=llm_model, verbose=verbose)
+
+
+# Opt-in eager imports (F7, perf-followup-plan §2). The first ``solve()`` in a
+# fresh process lazily loads ~0.4 s of solve-path modules (jax.numpy, scipy
+# sparse/linalg, and the discopt._jax / discopt.solvers relaxation+NLP stack);
+# measured lazy-import cumtime 0.41 s (m3) / 0.42 s (nvs13) on the first solve.
+# For batch/CLI/benchmark harnesses that pay import cost once and solve many
+# instances, moving that tax to ``import discopt`` time drops the first-solve
+# lazy-import tax to ~0.03 s (m3/nvs13). This is purely relocating import work
+# — it changes no solver math (bound-neutral: node_count and certified
+# objective are byte-identical with it on or off).
+#
+# Default OFF so a bare ``import discopt`` stays fast/lazy (jax-free code paths,
+# e.g. the GAMS LP/MILP link, must not pay the multi-second jax import). Opt in
+# with ``DISCOPT_EAGER_IMPORTS=1``. Every import is guarded: optional deps
+# (jax, scipy, pounce) may be absent, and a failure here must never break
+# ``import discopt`` — the eager path is a pure optimization whose absence only
+# costs the lazy re-import at first solve.
+def _eager_import_solve_path() -> None:
+    import importlib
+
+    # Ordered from the heaviest external deps (which dominate the lazy-import
+    # tax) to the discopt solve-path modules that pull them in.
+    for _name in (
+        "jax.numpy",
+        "scipy.sparse",
+        "scipy.linalg",
+        "scipy.sparse.linalg",
+        "discopt.solver",
+        "discopt._jax.milp_relaxation",
+        "discopt._jax.primal_heuristics",
+        "discopt._jax.nonlinear_bound_tightening",
+        "discopt._jax.convexity",
+        "discopt.solvers.nlp_pounce",
+        "discopt.solvers.lp_pounce",
+        "discopt.solvers.amp",
+    ):
+        try:
+            importlib.import_module(_name)
+        except Exception:
+            # Optional dependency missing or a submodule import error: skip
+            # silently. The lazy path will surface any real error at solve time.
+            pass
+
+
+if _os.environ.get("DISCOPT_EAGER_IMPORTS", "0") == "1":
+    _eager_import_solve_path()
