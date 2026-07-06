@@ -6705,6 +6705,12 @@ def solve_model(
                             submip_time_limit=_lb_slice,
                             submip_max_nodes=1000,
                             submip_gap_tolerance=gap_tolerance,
+                            # F1: hand the enumeration a hard budget (profile
+                            # §1.1) so it cannot blow past the slice/deadline.
+                            deadline=_deadline,
+                            node_bound=_lns_lb,
+                            incumbent_obj=float(_lns_inc[1]),
+                            gap_tolerance=gap_tolerance,
                         )
                         if _lb is not None:
                             _x_lb, _obj_lb = _lb
@@ -8230,6 +8236,12 @@ def _solve_nlp_bb(
                                 submip_time_limit=_lb_slice,
                                 submip_max_nodes=1000,
                                 submip_gap_tolerance=gap_tolerance,
+                                # F1: hand the enumeration a hard budget (profile
+                                # §1.1) so it cannot blow past the slice/deadline.
+                                deadline=_lns_deadline,
+                                node_bound=_lns_lb,
+                                incumbent_obj=float(_lns_inc[1]),
+                                gap_tolerance=gap_tolerance,
                             )
                             if _lb is not None:
                                 _x_lb, _obj_lb = _lb
