@@ -166,7 +166,11 @@ The hard tail is unchanged by design:
 - **hda** — no zero-spanning product factor to tag; its 23 omitted rows are a
   `log(<general expr>)` / `x**expr` relaxation-coverage gap
   (`_LIFTABLE_CALL_OUTER = {sqrt, exp}` deliberately excludes `log`). Filed as
-  **#517**; not forced into R4.
+  **#517**; not forced into R4. **TD-B (§5) investigated the `log`-argument lift
+  and KILLED it**: the reform pass is gated off on hda (convexity classification
+  times out on 722 vars), the reform's root LP is pre-existingly infeasible, and
+  the no-bound flowsheet class's log arguments all span zero (unrelaxable). Still
+  no dual bound.
 - **tanksize, tls2** — reduction-responsive (T2.1/R1) but need R2's root fixpoint
   loop, which is deferred (its generality arm passed but its value is broad
   small-MINLP root closure, not the hard tail).
@@ -188,9 +192,111 @@ The hard tail is unchanged by design:
 | **R5** (zerohalf pre-crossover) | **NOT BUILT** | optional / opportunistic; graphpart cut geometry (cert-gap-plan §7) — out of this arc |
 | **F5 / F6** | **KILLED (prior)** | envelope math / node-NLP warm-start are not the tail's levers (perf-followup-results-2026-07-06 §5) |
 | **V2** (this doc) | **DONE** | gate wiring + flag-ON tally: proved-optimal 42 → 43 |
+| **TD-B** (`log(<expr>)` call-argument lift, §5) | **KILLED** (its own entry experiment) | hda gets no bound: reform gated off (classify timeout, 722 vars) + pre-existing root-LP infeasibility + 17/23 omitted rows outside a `log`-arg lift; no-bound flowsheet class's log args span zero; contvar *regresses* (timeout). Mechanism sound but no bound benefit → not shipped; #517 |
 
-**Follow-ups filed:** **#517** (hda / `log`-argument relaxation-coverage gap);
+**Follow-ups filed:** **#517** (hda / `log`-argument relaxation-coverage gap —
+TD-B (§5) re-scoped it to the true blockers: reform gating on large models + the
+reform's root-LP infeasibility on hda; the `log`-arg lift is *not* the lever);
 R2 remains available if the small-MINLP root-closure value is prioritized later.
 
 **Default flip (R4):** NOT in this arc — `DISCOPT_LIFT_ZERO_SPANNING_FACTORS`
 stays OFF until 3 consecutive green nightlies per §0.1.
+
+---
+
+## 5. TD-B — lift `log(<expr>)` call arguments for relaxation coverage (KILLED by entry experiment; #517)
+
+**Track:** deeper-tail relaxation-coverage arm — close the gap that leaves **hda**
+(and the no-bound flowsheet class) with NO dual bound by extending the factorable
+reform's liftable-call set (`factorable_reform._LIFTABLE_CALL_OUTER = {sqrt, exp}`)
+to `log`-family, lifting `w == <inner expr>` (FBBT-bounded) and relaxing the outer
+`log(w)` over the aux with the existing concave-log secant/tangent envelope, guarded
+by a certified strictly-positive argument lower bound.
+
+**Regime:** bound-changing (a reformulation changes the relaxation). Feature flag
+`DISCOPT_LIFT_CALL_ARGUMENTS`, default OFF, was the plan.
+
+### 5.1 Entry experiment (run BEFORE building — it gated, and killed, the task)
+
+**hda baseline (flag-OFF, stock `main`):** `status=time_limit, bound=None,
+node_count=7` at 20–60 s — the tree has no dual bound and can never fathom.
+Confirmed the 23 omitted rows via the `AMP: omitting constraint … cannot be
+linearized safely` path:
+
+| bucket | count | example |
+|---|---|---|
+| `Cannot linearize FunctionCall: log(<expr>)` | 6 | `log((0.333333·4^(0.0001+0.333·x0)) − 0.333333)`; `log(((x99/x156)·x100)/x159)` |
+| `Cannot linearize FunctionCall: sqrt(<expr>)` | 3 | `sqrt(((x56/x57)·x54)/x55)` (already in `_LIFTABLE_CALL_OUTER`) |
+| `Cannot decompose product` | 6 | `(1/(…·sqrt(…)·(…)^-1.5+1))²` |
+| `Cannot linearize non-constant division: x/(x^0.230769)` | 6 | `x246/(x204^0.230769)` |
+| `Cannot linearize power expression: (1−x)^-1.544` | 2 | `(1−x43)^-1.544` |
+
+So the **`log` rows are only 6 of 23** dropped rows; the other 17 are
+divisions / fractional powers / products entirely outside a `log`-argument lift.
+
+**Hand-lift result — KILL CRITERION FIRED (hda gets NO finite bound):**
+
+1. **The reform pass never runs on hda.** `factorable_reformulate` is gated behind
+   `has_factorable_work(model) and _classify_model_convexity(model) == (ok=True,
+   convex=False)` (`solver.py:3565/3597`). On hda (722 vars) the convexity
+   classifier **exhausts its time budget** → `ok=False` → the whole
+   `_LIFTABLE_CALL_OUTER` machinery is dead on hda regardless of what is added to
+   it. (Measured: `has_factorable_work=True`, `classify → ok=False`.)
+2. **Forcing the reform on still yields no bound.** With the gate bypassed and the
+   `log`-lift patched in, 3 of the 6 log rows lift (`log_fired=3`; the other 3 are
+   `nvars=1` and contain a *variable-exponent* `4^(…x0)` the lift correctly leaves
+   alone). The root McCormick LP is **`infeasible` on the root box** — and this is
+   **pre-existing**: stock (unpatched) reform already returns `infeasible` on hda's
+   root box. Separately, `MccormickLPRelaxer` declines the bound because
+   `_has_unbounded_nonlinear_col` is True (262 nonlinear columns, many with `±inf`
+   bounds from the 17 still-dropped rows). Result: `bound=None` either way.
+3. **The no-bound flowsheet class is structurally unrelaxable by this lift.** Every
+   multivariate `log(<expr>)` row in the target class has an argument interval that
+   **spans zero** (`lo ≤ 0`), so `log` has no finite convex underestimator and the
+   lift must abstain soundly: heatexch_gen1 8/8, heatexch_gen2 10/10, heatexch_gen3
+   50/50, beuster 4/4, 4stufen 4/4 span-zero (0 liftable). This is exactly the
+   obstacle #517 anticipated ("`log` needs a certified strictly-positive argument
+   lower bound that interval arithmetic does not always supply").
+
+### 5.2 Out-of-panel — no witness benefits; one regresses
+
+Corpus scan (`~/Dropbox/projects/discopt-minlp-benchmark/minlplib/nl`) for
+multivariate `log(<expr>)` rows and end-to-end solves (flag ON vs OFF):
+
+| instance | log-lift fires? | flag-OFF | flag-ON | verdict |
+|---|---|---|---|---|
+| ex6_2_14 (4 var) | yes (12 args) | feasible, **bound=None** | feasible, **bound=None** (nodes 2031→507) | no bound; log args are ratios `x/(x+y)→0` (loose) and appear in `log(w)·x` products that stay nonlinear |
+| ex6_2_12 (4 var) | yes (10 args) | feasible, **bound=None** | feasible, **bound=None** | same structure |
+| contvar (296 var) | yes (36 args) | feasible, **bound=173 560** | **TIMEOUT** (>90 s vs 30 s) | already had a bound; lift adds 36+ aux columns → per-node LP blowup → **REGRESSION** |
+| heatexch_gen1/2/3, beuster, 4stufen | no (abstain, span-zero) | — | — | structurally unrelaxable (§5.1.3) |
+
+No instance in the corpus scan gains a finite dual bound it lacked; contvar shows
+the shipped lift would *regress* an instance that already certifies-progress. The
+lift mechanism itself is **sound** (unit-verified: `log(x·y)` over `x,y∈[1,3]` →
+`log(w)`, `w==x·y`, `w∈[1,9]>0`, exact bilinear defining equality) — but soundness
+without a bound benefit, plus a measured regression, fails the acceptance bar.
+
+### 5.3 Verdict and what remains
+
+**KILLED — no source change to the relaxation shipped** (shipping the `log`-lift
+would be dead on the target class, useless on the witnesses, and a regression on
+contvar; per Dev-Philosophy #3 / #4 and the plan §0.3 kill protocol, a lift that
+cannot produce a bound is not shipped). hda's no-bound has **three independent
+causes**, none of which the `log`-argument lift addresses:
+
+1. **Gating** — convexity classification times out on 722 vars, so the reform
+   (and any liftable-call extension) never runs. *This is the first-order blocker;
+   a call-argument lift cannot help until the reform is reachable on large models.*
+2. **Pre-existing root infeasibility** — stock reform makes hda's root McCormick LP
+   `infeasible` (a valid relaxation of a feasible box must not be infeasible). A
+   separate correctness concern, filed as a note on #517.
+3. **Coverage breadth** — 17 of 23 omitted rows are divisions / fractional powers /
+   products, not `log` arguments; and the no-bound flowsheet class's log arguments
+   span zero (unrelaxable). Even a perfect `log`-lift touches at most 6/23 hda rows.
+
+**#517 disposition:** the `log(<general expr>)` relaxation-coverage lift is
+**not the lever for hda / the no-bound flowsheet class**. #517 stays open, re-scoped
+to the true blockers (reform gating on large models + the reform's root-infeasibility
+on hda). The `x**expr` (variable-exponent) rows are likewise out of scope: hda's
+`4^(0.0001+0.333·x0)` needs the `exp(expr·log x)` signomial path with `x_lb>0`, a
+separate treatment.
