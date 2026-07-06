@@ -3681,6 +3681,8 @@ def test_fixed_nlp_candidate_manager_scheduling_modes():
 def test_external_primal_candidate_hook_validation_accepts_and_rejects():
     from discopt.solvers.oa import _validate_external_primal_candidates
 
+    assert _validate_external_primal_candidates([], n_vars=2) == []
+
     valid = _validate_external_primal_candidates(
         [{"point": [1.0, 0.0], "objective": 2.5, "provider": "unit"}],
         n_vars=2,

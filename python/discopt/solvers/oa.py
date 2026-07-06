@@ -141,6 +141,8 @@ def _validate_external_primal_candidates(
         except (TypeError, ValueError):
             items = _external_hook_items(value, hook_name=hook_name, item_name="candidate")
         else:
+            if arr.ndim == 1 and arr.size == 0:
+                return []
             if arr.ndim == 1:
                 items = [arr]
             elif arr.ndim == 2:
