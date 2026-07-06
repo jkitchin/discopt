@@ -163,6 +163,8 @@ fn opts(n_struct: usize, integer_cols: Vec<usize>, tl: f64) -> MilpOptions {
             tol: 1e-9,
             max_iter: 100_000,
             deadline: None,
+            warm_stall_guard: true,
+            warm_stall_cap_override: None,
         },
     }
 }

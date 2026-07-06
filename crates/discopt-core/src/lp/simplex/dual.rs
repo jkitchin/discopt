@@ -9,9 +9,13 @@
 //! [`solve_lp_warm`] factorizes the given basis, checks dual feasibility, and
 //! runs dual pivots to primal feasibility (= optimality, since dual feasibility
 //! is maintained). On *any* difficulty — a dual-infeasible starting basis, a
-//! failed dual ratio test, a singular/over-updated factorization, or the
-//! iteration cap — it falls back to a cold [`super::primal::solve_lp`], so the
-//! result is always correct; warm-start only ever saves time, never risks it.
+//! failed dual ratio test, a singular/over-updated factorization, the iteration
+//! cap, or the **stall guard** (discopt F2:
+//! [`SimplexOptions::warm_stall_guard`](super::SimplexOptions::warm_stall_guard),
+//! a size-derived pivot budget that bounds a floating-point degenerate stall near
+//! the feasibility tolerance) — it falls back to a cold
+//! [`super::primal::solve_lp`], so the result is always correct; warm-start only
+//! ever saves time, never risks it.
 
 #![allow(clippy::needless_range_loop)]
 
@@ -352,10 +356,28 @@ impl<'a> PreparedDual<'a> {
         // was the iteration cap → cold fallback; Bland resolves it in place.
         let mut stall = 0usize;
         let bland_threshold = 2 * (n + 1);
+        // Warm-restart **stall guard** (discopt F2). Bland's rule above makes the
+        // dual loop cycle-free in exact arithmetic, but a warm re-solve after a
+        // row-append can still spin near the *feasibility tolerance* in floating
+        // point — the leaving-row violation oscillates just above `tol` (nvs01: the
+        // two 8.7 s calls reached `max_iter` = 100 000 pivots, one with every pivot
+        // degenerate and Bland engaged, the other with almost none flagged
+        // degenerate so Bland never triggered). A cold solve of the same LP costs
+        // ~5 ms. So we cap the *warm* loop at a size-derived budget well above any
+        // healthy solve (≤25 pivots on this class) and, on trip, hand off to the
+        // cold fallback the numerical-breakdown path already uses — returning the
+        // identical optimum. The full `max_iter` remains the hard backstop when the
+        // guard is disabled. Bland still runs below the cap, so the common case is
+        // untouched; the cap only bounds the pathological tail.
+        let stall_cap = if opts.warm_stall_guard {
+            opts.warm_stall_cap(m, n)
+        } else {
+            opts.max_iter
+        };
         // The loop index is the pivot count: each completed iteration performs one
         // pivot, and every early return happens at the loop top (before this
         // iteration's pivot), so `pivots` is exactly the number performed so far.
-        for pivots in 0..opts.max_iter {
+        for pivots in 0..stall_cap {
             let bland = stall > bland_threshold;
             // Poll the wall-clock deadline (see SimplexOptions::deadline). On a
             // timeout we abandon the warm dual re-solve and request the cold
@@ -678,7 +700,15 @@ impl<'a> PreparedDual<'a> {
                 stall = 0;
             }
         }
-        None // iteration cap → cold fallback
+        // Loop exhausted the pivot budget without converging. When the stall guard
+        // set a size-derived cap below `max_iter`, this is a *stall trip* (F2):
+        // record it so the cold-fallback it triggers is auditable and its
+        // bound-neutrality (same optimum via the cold path) is measurable. When the
+        // guard is off, `stall_cap == max_iter` and this is the plain iteration cap.
+        if opts.warm_stall_guard && stall_cap < opts.max_iter {
+            crate::profile::incr(crate::profile::Ctr::DualStallTrips);
+        }
+        None // stall cap / iteration cap → cold fallback
     }
 }
 
@@ -1330,5 +1360,259 @@ mod tests {
             warm.iters, 0,
             "precondition should have forced cold fallback"
         );
+    }
+
+    // ----- F2: warm dual-simplex stall guard --------------------------------
+
+    /// Minimal parser for the captured stall fixture (a flat JSON of number
+    /// arrays produced by the F2 capture hook). Returns the CSC + LP data + basis.
+    #[allow(clippy::type_complexity)]
+    fn parse_stall_fixture(
+        json: &str,
+    ) -> (
+        usize,
+        usize,
+        Vec<usize>,
+        Vec<usize>,
+        Vec<f64>,
+        Vec<f64>,
+        Vec<f64>,
+        Vec<f64>,
+        Vec<f64>,
+        Vec<usize>,
+        Vec<i8>,
+    ) {
+        fn field<'a>(json: &'a str, key: &str) -> &'a str {
+            let k = format!("\"{key}\":");
+            let start = json.find(&k).expect("key present") + k.len();
+            &json[start..]
+        }
+        fn scalar(json: &str, key: &str) -> usize {
+            let s = field(json, key);
+            let end = s.find([',', '}']).unwrap();
+            s[..end].trim().parse().unwrap()
+        }
+        fn arr_f64(json: &str, key: &str) -> Vec<f64> {
+            let s = field(json, key);
+            let open = s.find('[').unwrap() + 1;
+            let close = s[open..].find(']').unwrap() + open;
+            s[open..close]
+                .split(',')
+                .filter(|t| !t.trim().is_empty())
+                .map(|t| t.trim().parse().unwrap())
+                .collect()
+        }
+        fn arr_usize(json: &str, key: &str) -> Vec<usize> {
+            arr_f64(json, key).into_iter().map(|x| x as usize).collect()
+        }
+        fn arr_i8(json: &str, key: &str) -> Vec<i8> {
+            arr_f64(json, key).into_iter().map(|x| x as i8).collect()
+        }
+        (
+            scalar(json, "m"),
+            scalar(json, "n"),
+            arr_usize(json, "col_ptr"),
+            arr_usize(json, "row_idx"),
+            arr_f64(json, "vals"),
+            arr_f64(json, "c"),
+            arr_f64(json, "l"),
+            arr_f64(json, "u"),
+            arr_f64(json, "b"),
+            arr_usize(json, "basic_vars"),
+            arr_i8(json, "col_status"),
+        )
+    }
+
+    // The captured nvs01 warm re-solve (117×142, tangent-augmented) is the LP+basis
+    // that, in the production release solve, grinds to `max_iter` = 100 000 pivots
+    // (~8.7 s, twice — F2 entry experiment) before cold-falling-back, while a cold
+    // solve of the same LP is optimal in ~5 ms. This replay asserts the invariant
+    // the guard relies on: **a warm re-solve from this exact basis returns the same
+    // optimum as a cold solve of the same LP** — so cold-falling-back on a stall
+    // (whatever the trigger) never changes the value a caller consumes. Both the
+    // default (guarded) and guard-off options are checked; both must agree with the
+    // cold optimum, since the only thing the guard changes is *who* computes it.
+    #[test]
+    fn warm_stall_guard_recovers_captured_nvs01_optimum() {
+        let json = include_str!("testdata/nvs01_warm_stall_lp.json");
+        let (m, n, col_ptr, row_idx, vals, c, l, u, b, basic_vars, col_status) =
+            parse_stall_fixture(json);
+        let sp = SparseCols::from_csc(col_ptr, row_idx, vals);
+        let start = Basis {
+            col_status,
+            basic_vars,
+        };
+
+        // Ground truth: a cold solve of exactly this LP.
+        let cold = solve_lp_cols(sp.clone(), m, n, &c, &l, &u, &b, &opts());
+        assert_eq!(
+            cold.status,
+            LpStatus::Optimal,
+            "cold solve of the captured LP should be optimal"
+        );
+
+        // The guard's size-derived cap is well below `max_iter` for this LP (so a
+        // real stall would trip it rather than grind the full 100 000 pivots).
+        let guarded = opts();
+        assert!(guarded.warm_stall_guard, "guard on by default");
+        let cap = guarded.warm_stall_cap(m, n);
+        assert!(
+            cap < guarded.max_iter,
+            "stall cap {cap} must be below max_iter {} to bound the tail",
+            guarded.max_iter
+        );
+
+        // Guarded and unguarded warm re-solves from the captured basis must BOTH
+        // return the cold optimum (either the warm loop converges, or it falls back
+        // to cold — the guard only affects which, never the value).
+        let mut unguarded = guarded.clone();
+        unguarded.warm_stall_guard = false;
+        for (label, o) in [("guarded", &guarded), ("unguarded", &unguarded)] {
+            let prep = PreparedDual::prepare_cols(&sp, m, n, &c, &l, &u, &start, o)
+                .expect("captured basis is dual-feasible (it was a real warm start)");
+            let warm = prep.reoptimize(&l, &u, &b, o);
+            assert_eq!(
+                warm.status,
+                LpStatus::Optimal,
+                "{label} warm re-solve of the captured LP must be optimal"
+            );
+            assert!(
+                (warm.obj - cold.obj).abs() <= 1e-6 * (1.0 + cold.obj.abs()),
+                "{label} obj {} must equal cold obj {} (bound-neutral)",
+                warm.obj,
+                cold.obj
+            );
+        }
+    }
+
+    // A healthy warm re-solve (a one-bound branch from a clean optimum) converges in
+    // a handful of pivots — far below the stall cap — so the guard is inert: same
+    // optimum, dual path actually runs (iters > 0, not a fallback), and the guarded
+    // and unguarded results are bit-identical.
+    #[test]
+    fn warm_stall_guard_inert_on_healthy_lp() {
+        let a = [1.0, 1.0, 1.0, 0.0, 1.0, 3.0, 0.0, 1.0];
+        let (m, n) = (2, 4);
+        let b = [4.0, 6.0];
+        let c = [-1.0, -2.0, 0.0, 0.0];
+        let l = [0.0; 4];
+        let u = [5.0, 5.0, INF, INF];
+        let lp = LpView {
+            a: &a,
+            m,
+            n,
+            c: &c,
+            l: &l,
+            u: &u,
+        };
+        let cold = solve_lp(&lp, &b, &opts());
+        assert_eq!(cold.status, LpStatus::Optimal);
+
+        let u2 = [5.0, 0.5, INF, INF];
+        let lp2 = LpView {
+            a: &a,
+            m,
+            n,
+            c: &c,
+            l: &l,
+            u: &u2,
+        };
+        let mut unguarded = opts();
+        unguarded.warm_stall_guard = false;
+        let bare = solve_lp_warm(&lp2, &b, &cold.basis, &unguarded);
+        let guarded = solve_lp_warm(&lp2, &b, &cold.basis, &opts());
+        assert_eq!(guarded.status, LpStatus::Optimal);
+        assert!(
+            guarded.iters >= 1,
+            "healthy warm dual should run its pivots (not fall back)"
+        );
+        // The guard changed nothing: same status, same pivot count, same objective.
+        assert_eq!(bare.status, guarded.status);
+        assert_eq!(
+            bare.iters, guarded.iters,
+            "guard must be inert on a healthy solve (identical pivots)"
+        );
+        assert_eq!(
+            bare.obj, guarded.obj,
+            "guard must be bit-identical on a healthy solve"
+        );
+    }
+
+    // Auditability: the `DualStallTrips` LP-stats counter increments exactly when
+    // the warm loop exhausts its (capped) pivot budget and cold-falls-back, and NOT
+    // when it converges normally — so a benchmark run can verify the guard fired on
+    // the pathological class and stayed inert elsewhere. Profiling is a
+    // process-global flag, so the test drives the counter directly and only reads
+    // deltas it caused (robust to parallel tests: no other test provokes a trip).
+    //
+    // The trip is forced with a tiny explicit `warm_stall_cap_override` on a warm
+    // re-solve that genuinely needs several pivots — a deterministic stand-in for
+    // the production stall (whose 100 000-pivot grind is instance-specific), while
+    // the *value* returned is still asserted equal to a cold solve (bound-neutral).
+    #[test]
+    fn warm_stall_guard_trip_counter_fires_only_on_stall() {
+        crate::profile::set_enabled(true);
+
+        // A warm re-solve that takes several dual pivots (many bounds tightened at
+        // once), so a cap of 1 pivot is hit while a cold solve of the same LP is
+        // trivially optimal — exactly the guard's stall→cold-fallback contract.
+        let a = [1.0, 1.0, 1.0, 0.0, 1.0, 3.0, 0.0, 1.0];
+        let hb = [4.0, 6.0];
+        let hc = [-1.0, -2.0, 0.0, 0.0];
+        let hl = [0.0; 4];
+        let hu = [5.0, 5.0, INF, INF];
+        let lp = LpView {
+            a: &a,
+            m: 2,
+            n: 4,
+            c: &hc,
+            l: &hl,
+            u: &hu,
+        };
+        let cold0 = solve_lp(&lp, &hb, &opts());
+        assert_eq!(cold0.status, LpStatus::Optimal);
+        let u2 = [0.5, 0.5, INF, INF];
+        let lp2 = LpView {
+            a: &a,
+            m: 2,
+            n: 4,
+            c: &hc,
+            l: &hl,
+            u: &u2,
+        };
+        let cold_ref = solve_lp(&lp2, &hb, &opts());
+        assert_eq!(cold_ref.status, LpStatus::Optimal);
+
+        // Guarded with a 1-pivot cap: the warm loop can't converge in one pivot, so
+        // it trips and cold-falls-back to the SAME optimum.
+        let mut capped = opts();
+        capped.warm_stall_cap_override = Some(1);
+        assert_eq!(capped.warm_stall_cap(2, 4), 1, "override honored");
+        let before = crate::profile::counter(crate::profile::Ctr::DualStallTrips);
+        let trip = solve_lp_warm(&lp2, &hb, &cold0.basis, &capped);
+        let after_stall = crate::profile::counter(crate::profile::Ctr::DualStallTrips);
+        assert_eq!(
+            after_stall - before,
+            1,
+            "the 1-pivot-capped warm re-solve must trip the guard exactly once"
+        );
+        assert_eq!(trip.status, LpStatus::Optimal);
+        assert!(
+            (trip.obj - cold_ref.obj).abs() <= 1e-9,
+            "tripped warm obj {} must equal cold obj {} (bound-neutral)",
+            trip.obj,
+            cold_ref.obj
+        );
+
+        // Default cap (size-derived, ~600 pivots here): the same re-solve converges
+        // in a few pivots, far below the cap — no trip.
+        let _ = solve_lp_warm(&lp2, &hb, &cold0.basis, &opts());
+        let after_healthy = crate::profile::counter(crate::profile::Ctr::DualStallTrips);
+        assert_eq!(
+            after_healthy, after_stall,
+            "a healthy warm solve under the default cap must not trip the guard"
+        );
+
+        crate::profile::set_enabled(false);
     }
 }
