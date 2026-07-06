@@ -1,0 +1,196 @@
+# Uncertified-tail plan — V2 results (2026-07-06)
+
+**Status:** measured. The V2 gate-wiring + measurement-of-record task of
+`docs/dev/uncertified-tail-plan-2026-07-06.md` §3 V2 (and cert-gap-plan §11 /
+§14 T2.6 items 1–2). Two parts: (1) wire the long-missing
+`[suites.global50]` / `[gates.cert2]`; (2) the flag-ON BARON re-run that tallies
+what the tail plan's R-series actually shipped.
+
+**Headline (honest):** **R4 (#518) is the only shipped tail win.** With
+`DISCOPT_LIFT_ZERO_SPANNING_FACTORS=1` (default OFF), **st_e36** moves
+feasible/TL → **optimal** (153 nodes, ~17 s), lifting **proved-optimal 42 → 43**
+vs the 2026-07-06 V1 baseline. This is *not* the plan's original ≥46 target —
+that assumed R2 + R3b landed. R3b was killed by its own entry experiment (which
+also revealed R3a's fingerprint was measured on the wrong model — the
+factorable-only reform, not the integer-bilinear model the tree actually
+branches — so the tail is relaxation-limited, not selection-limited), R2 is
+deferred (broad, non-tail), R5 was not built, and F5/F6 were
+already killed. The hard branch-and-reduce / no-bound tail (nvs05, nvs09, hda,
+tanksize, casctanks, …) is **unchanged** — those need deeper lifting /
+relaxation coverage (#517), out of this plan's scope.
+
+**Method.** `discopt_benchmarks/scripts/global_opt_baron_vs_discopt.py
+--time-limit 60 --out-dir reports`, 61 vendored MINLPLib `.nl`, discopt
+(isolated subprocess, **release** maturin build) vs full-license BARON via
+GAMS 53, MINLPLib `primalbound` oracle, abs=1e-6/rel=1e-4. **Release POUNCE**
+(4.7 MB `_pounce.abi3.so`) — the debug-build artifact (pounce#182) does not
+apply. The flag-ON run sets `DISCOPT_LIFT_ZERO_SPANNING_FACTORS=1` in the
+environment; it propagates to every discopt subprocess through the worker's
+`env=dict(os.environ, …)`. Reports:
+
+- flag-ON (this run): `reports/global_opt_baron_vs_discopt_2026-07-06T06-15-16.{json,md}`
+- V1 baseline (flag-OFF, on main): `reports/global_opt_baron_vs_discopt_2026-07-06T03-25-20.json`
+
+---
+
+## 1. Gate wiring (Part 1)
+
+Every `[gates.cert*]` in `benchmarks.toml` named `suite = "global50"`, but no
+`[suites.global50]` table existed (the recon flag in cert-gap-plan §11 "Wiring
+corrections 2026-07-02"). V2 closes that.
+
+**`[suites.global50]`** — points at the vendored `config/baron_global50.txt`
+(50 instances). 49 have a `.nl` in the local corpus
+(`python/tests/data/minlplib_nl/`) and run with no `--fetch`; st_miqp5 is listed
+but ships only as a binary `.nl` discopt cannot parse (R1 skipped it for the same
+reason), so the suite resolves to 49 locally / 50 with `--fetch`. 60 s
+per-instance cap matches the measurement of record.
+
+**`[gates.cert2]`** — wired per §11 with the recorded corrections:
+
+| criterion | metric | bound | notes |
+|---|---|---|---|
+| `zero_incorrect` | `incorrect_count` | max 0 | the zero-slack correctness gate (live) |
+| `root_gap_vs_baron` | `root_gap_ratio_vs_baron` | max 1.3 | computed from A3's now-live `SolveResult.bound` (null before A3) |
+| `geomean_vs_baron` | `geomean_ratio_vs_baron` | max 2.5 | **existing** metric name (§11 correction 2 — `geomean_time_ratio_vs_baron` was never implemented) |
+| `tree_closed_fraction` | `closed_within_10_nodes_fraction` | min 0.30 | new T2.6 metric + dispatch; the "≥ 30% close within 10 nodes" exit |
+
+**Reference-bound caveat (§14 T2.6 item 3).** Many BARON rows carry no usable
+root/dual bound (`status="unknown"` at ~20 ms), so their `root_gap` is `None`.
+`root_gap_ratio` excludes null-`root_gap` rows from **both** numerator and
+denominator, guards the denominator with `>1e-10`, and skips a non-finite
+discopt gap — it never divides by a non-bound. When no instance has a usable
+bound on both sides it returns NaN → the gate reads NaN → fail (an honest "not
+evaluable", never a spuriously-passing empty mean). Docstring records this.
+
+**New metric — `closed_within_10_nodes_fraction`.** Denominator = rows that
+reached a *proven* optimum (`status == OPTIMAL`); numerator = the subset that did
+so in ≤ 10 B&B nodes (`node_count == 0`, e.g. a root fathom / convex fast path,
+counts as the tightest close). A feasible-only (uncertified-tail) or errored row
+is not in the denominator — the metric measures how tightly the proofs close,
+not the proof rate.
+
+**Tests (all green, 6 new).** `discopt_benchmarks/tests/test_cert_instrumentation.py`:
+a fixture with known node counts (0, 7, 10, 153) → known fraction 0.75; the
+boundary (node_count == 10 closes, 11 does not, 0 is tightest); the
+denominator-is-proved-only guard (a 900-node *feasible* row does not dilute);
+empty/tail-only → 0.0; the `[suites.global50]` + `[gates.cert2]` config presence;
+and end-to-end `evaluate_phase_gate('cert2', …)` dispatch of the new metric
+(0.75 → passes ≥ 0.30) with the zero-slack correctness guard.
+
+**cert2 is informational until the R-flags flip default-on** (3 green nightlies,
+out of V2 scope): T2.3–T2.5 are not built and R4 ships default-OFF, so
+`root_gap_vs_baron` / `geomean_vs_baron` are not expected to pass on `main` yet.
+`zero_incorrect` is the live gate.
+
+---
+
+## 2. The measurement of record (Part 2) — flag-ON BARON re-run
+
+### 2.1 baseline (V1, flag-OFF) → V2 (flag-ON)
+
+| metric | V1 baseline (flag-OFF) | **V2 (flag-ON)** | Δ |
+|---|---:|---:|---:|
+| proved optimal | 42 | **43** | **+1** (st_e36) |
+| correct (`ok`) | 51 | 51 | — |
+| `GAP` (honest suboptimal) | 1 | 1 | — |
+| `n/a` (no oracle / no incumbent) | 9 | 9 | — |
+| **VIOLATIONS** | 0 | **0** | — (hard gate) |
+| uncertified tail (not proved-opt) | 19 | **18** | **−1** |
+| rows with a live dual bound | 51 / 61 | 51 / 61 | — (A3) |
+| total discopt wall | 1130.0 s (18.8 min) | **1094.8 s (18.2 min)** | −35 s (st_e36 faster) |
+
+Exactly **one** instance changed status — **st_e36** (feasible → optimal).
+Everything else is bit-for-bit the V1 baseline (same status, same verdict), as
+the single-instance thesis predicted (§2.4).
+
+### 2.2 Hard gates (all hold)
+
+- **0 correctness violations** — no run claimed a certified global at the wrong
+  value, returned an incumbent better than the proven global, or reported a dual
+  bound crossing its oracle. The A3 bound-vs-oracle check is live on **51/61**
+  rows and found **0 crossings**.
+- **No certification lost** — proved-optimal *increased* 42 → 43; the set of
+  baseline-proved instances is a subset of the flag-ON proved set (0 lost).
+- **`time_limit` contract holds** — cap = 60·1.1 + 5 = **71 s**; **0 instances
+  over cap** (slowest is bchoco08 at 66.7 s, a hard time_limit both ways).
+- **Bound-vs-oracle clean** — 0 dual bounds cross the oracle (checked above).
+
+### 2.3 The st_e36 row (the one instance that moves)
+
+In the full flag-ON run st_e36 is `optimal`, obj −246.0, bound −246.02, **153
+nodes, 15.8 s** (was `feasible`/TL, bound −304.49, 883 nodes, 60.1 s in the V1
+baseline). The cheap single-instance flag-OFF↔ON confirmation (same build, BARON
+skipped) reproduced the delta independently:
+
+| flag | status | bound | nodes | wall |
+|---|---|---:|---:|---:|
+| OFF | feasible (TL) | −304.49 | 883 | 60.2 s |
+| **ON** | **optimal** | **−246.0** | 153 | **17.3 s** |
+
+This is exactly the R4/#518 acceptance: branching the zero-spanning product
+factor `w = f1` (removed from the branch-deprioritized set only when the flag is
+on) un-pins the McCormick product bound. Relaxation math and feasible set are
+untouched — only branch *ordering* changes, always sound.
+
+### 2.4 Why one flag-ON full run is sufficient (no separate flag-OFF full run)
+
+R4 already proved flag-OFF is **byte-identical** to the V1 baseline on the
+41-instance cert panel (`check_cert_neutrality.py`: all `nodes X→X`, `|Δobj|=0`,
+NEUTRAL). The F5-style corpus scan (1610 MINLPLib `.nl` ≤ 200 KB) found the
+zero-spanning product-factor structure **only in st_e36**, so the flag tags an
+aux — and therefore changes behaviour — on **exactly one** instance. The V1
+baseline JSON is the flag-OFF full tally; the flag-ON run differs from it only at
+st_e36. The §2.3 single-instance flag-OFF↔ON delta confirms the difference is
+confined there.
+
+---
+
+## 3. What did NOT move — and why (honest scope)
+
+The uncertified tail shrank by exactly one (19 → 18: st_e36 left). The remaining
+**18** are unchanged vs the V1 baseline (same status, same bound):
+
+```
+4stufen  bchoco06  bchoco07  bchoco08  beuster  casctanks  contvar  hda
+heatexch_gen1  heatexch_gen2  heatexch_gen3  nvs05  nvs09  tanksize  tls2
+tspn08  tspn10  tspn12
+```
+
+The hard tail is unchanged by design:
+
+- **nvs05 / nvs09** — R4 tags **no** aux (bound identical ON/OFF). Their stall is
+  a different structure (nvs09: `log·log` product that can't be linearized;
+  nvs05: loose multilinear/signomial), not a zero-spanning product factor. R4's
+  lever is specific to the st_e36 class.
+- **hda** — no zero-spanning product factor to tag; its 23 omitted rows are a
+  `log(<general expr>)` / `x**expr` relaxation-coverage gap
+  (`_LIFTABLE_CALL_OUTER = {sqrt, exp}` deliberately excludes `log`). Filed as
+  **#517**; not forced into R4.
+- **tanksize, tls2** — reduction-responsive (T2.1/R1) but need R2's root fixpoint
+  loop, which is deferred (its generality arm passed but its value is broad
+  small-MINLP root closure, not the hard tail).
+- **casctanks, 4stufen, bchoco06/07/08, beuster, contvar, heatexch_gen1/2/3,
+  tspn08/10/12** — Class H (BARON-also-hard); this plan treats them as
+  beneficiaries, not gates. Unchanged.
+
+---
+
+## 4. Ledger of R-tasks (shipped / killed / deferred)
+
+| task | outcome | evidence |
+|---|---|---|
+| **R1** (T2.1 root-loop replay revisit) | **DONE → GO on R2** | full panel completes (19/20, loop-median 0.27 s); no P0 on 51 instances; generality arm 9/29=31%≥20% (cert-gap-plan §14 T2.1-revisit) |
+| **R2** (root fixpoint loop + reduce_node) | **DEFERRED** | unlocked by R1 but broad / non-tail; value is small-MINLP root closure, not the hard tail — not built in this arc |
+| **R3a** (responsiveness fingerprint) | **DONE — verdict BUILD R3b** | overlap 1/6 < 4 → BUILD; but the fingerprint was measured on the factorable-only reform (a methodology flaw R3b later caught); #515 |
+| **R3b** (responsiveness-aware branching) | **KILLED** (its own entry experiment) | force-branching the "responsive" var made it *worse* (nvs05 821→853, nvs09 bound worsened, tls2 unchanged); the branched model is 15-var integer-bilinear where R3a's columns don't exist → relaxation-limited, defer to R4; #516 |
+| **R4** (zero-spanning-factor lifting) | **SHIPPED (flagged, default-OFF)** | st_e36 feasible/TL → optimal (153 nodes, ~17 s); differential-bound + 20 000-pt feasible sampling + flag-OFF byte-identical all green; #518 |
+| **R5** (zerohalf pre-crossover) | **NOT BUILT** | optional / opportunistic; graphpart cut geometry (cert-gap-plan §7) — out of this arc |
+| **F5 / F6** | **KILLED (prior)** | envelope math / node-NLP warm-start are not the tail's levers (perf-followup-results-2026-07-06 §5) |
+| **V2** (this doc) | **DONE** | gate wiring + flag-ON tally: proved-optimal 42 → 43 |
+
+**Follow-ups filed:** **#517** (hda / `log`-argument relaxation-coverage gap);
+R2 remains available if the small-MINLP root-closure value is prioritized later.
+
+**Default flip (R4):** NOT in this arc — `DISCOPT_LIFT_ZERO_SPANNING_FACTORS`
+stays OFF until 3 consecutive green nightlies per §0.1.
