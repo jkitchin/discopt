@@ -14,6 +14,8 @@ Attacks the debugger the way a hostile (or merely clumsy) user/agent would:
 
 from __future__ import annotations
 
+import time as _time
+
 import discopt as do
 import numpy as np
 import pytest
@@ -21,6 +23,7 @@ from discopt import debug
 from discopt.debug.context import DebugContext
 from discopt.debug.engine import Control, DebugCommandEngine
 from discopt.debug.session import DebugSession
+from discopt.solver import _solve_milp_bb
 
 # ── fakes ───────────────────────────────────────────────────────────────────
 
@@ -453,3 +456,410 @@ def test_raising_frontend_on_python_path_detaches_cleanly():
 
     res = _spatial_model().solve(time_limit=20.0)
     assert res.status == "optimal"
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Sweep 2 — orthogonal axes: trace invariants at every checkpoint, coverage of
+# ALL four instrumented loops (spatial / NLP-BB / MILP-BB / MIQP-BB) plus the
+# Rust fast-path, stateful chaos fuzzing during live solves, and odd model
+# classes (continuous-only, infeasible, maximize).
+# ═════════════════════════════════════════════════════════════════════════════
+
+
+class TraceFrontend:
+    """Walks every checkpoint (stepi) recording (cp, bound, incumbent, iter)."""
+
+    def __init__(self):
+        self.trace = []
+
+    def interact(self, ctx, session):
+        self.trace.append((ctx.checkpoint.value, ctx.best_bound, ctx.incumbent_obj, ctx.iteration))
+        if ctx.checkpoint.value == "terminated":
+            return Control.CONTINUE
+        return Control.STEPI
+
+
+def _assert_trace_invariants(trace):
+    """Certificate + lifecycle invariants that must hold at EVERY checkpoint,
+    not just at the end of the solve (internal min sense throughout):
+    bound never crosses the incumbent, the dual bound never regresses, the
+    incumbent never worsens, iterations are monotone, TERMINATED fires exactly
+    once and last, INCUMBENT_FOUND always carries an incumbent."""
+    assert trace, "no checkpoints fired"
+    cps = [t[0] for t in trace]
+    assert cps[-1] == "terminated", f"trace did not end at terminated: {cps[-5:]}"
+    assert cps.count("terminated") == 1
+    prev_bound = -np.inf
+    prev_inc = np.inf
+    prev_iter = 0
+    for cp, bound, inc, it in trace:
+        if inc is not None and np.isfinite(bound):
+            assert bound <= inc + 1e-6 * max(1.0, abs(inc)), (
+                f"UNSOUND at {cp}: bound {bound} crossed incumbent {inc}"
+            )
+        if np.isfinite(bound):
+            assert bound >= prev_bound - 1e-9, f"dual bound regressed at {cp}"
+            prev_bound = max(prev_bound, bound)
+        if inc is not None:
+            assert inc <= prev_inc + 1e-9, f"incumbent worsened at {cp}"
+            prev_inc = min(prev_inc, inc)
+        if cp == "incumbent_found":
+            assert inc is not None, "incumbent_found fired without an incumbent"
+        assert it >= prev_iter or cp == "terminated"
+        prev_iter = max(prev_iter, it)
+
+
+def _traced_solve(model, **solve_kwargs):
+    fe = TraceFrontend()
+    debug.attach(DebugSession(fe))
+    try:
+        res = model.solve(time_limit=20.0, **solve_kwargs)
+    finally:
+        debug.detach()
+    return res, fe.trace
+
+
+# ── models routing to each instrumented loop ─────────────────────────────────
+
+
+def _convex_minlp():
+    """Convex MINLP for the NLP-BB loop (loop 2, via nlp_bb=True). The
+    (z - 1.5)^2 term makes the root NLP relaxation fractional in z, so the
+    loop must branch (a root-integral model would fathom immediately and
+    never reach the BEFORE_IMPORT steer point)."""
+    m = do.Model("adv2_nlpbb")
+    x = m.continuous("x", lb=0.0, ub=4.0)
+    y = m.continuous("y", lb=0.0, ub=4.0)
+    z = m.integer("z", lb=0, ub=3)
+    m.subject_to(x + y + z <= 4.0)
+    m.minimize((x - 1.5) ** 2 + (y - 2.5) ** 2 + (z - 1.5) ** 2)
+    return m
+
+
+def _nested_heuristic_minlp():
+    """Convex MINLP whose NLP-BB run launches a nested solve_model heuristic
+    (restricted sub-MINLP): the regression probe for outermost-solve
+    suppression. Root-integral in z, so the outer loop is short and the
+    nested solve dominates the trace if suppression is broken."""
+    m = do.Model("adv2_nested")
+    x = m.continuous("x", lb=0.0, ub=4.0)
+    y = m.continuous("y", lb=0.0, ub=4.0)
+    z = m.integer("z", lb=0, ub=3)
+    m.subject_to(x + y + z <= 4.0)
+    m.minimize((x - 1.5) ** 2 + (y - 2.5) ** 2 + 0.5 * z)
+    return m
+
+
+def _miqp_model():
+    """Convex MIQP routing to the MIQP-BB loop (loop 4)."""
+    m = do.Model("adv2_miqp")
+    x = m.continuous("x", lb=-5.0, ub=5.0)
+    y = m.continuous("y", lb=-5.0, ub=5.0)
+    z = m.integer("z", lb=0, ub=4)
+    m.subject_to(x + y + z >= 2.0)
+    m.minimize(x * x + y * y + 0.3 * z)
+    return m
+
+
+def _run_milp_bb(model):
+    """Drive the fallback-only Python MILP-BB loop (loop 3) directly."""
+    return _solve_milp_bb(model, 20.0, 1e-6, 8, "best_first", 100_000, _time.perf_counter())
+
+
+def _milp_model():
+    """Small MILP for driving the Python MILP-BB loop (loop 3) directly."""
+    m = do.Model("adv2_milp")
+    xs = [m.integer(f"x{i}", lb=0, ub=1) for i in range(8)]
+    vals = [7, 5, 4, 6, 3, 5, 8, 2]
+    wts = [4, 3, 3, 4, 2, 3, 5, 1]
+    m.subject_to(sum(w * xi for w, xi in zip(wts, xs)) <= 11)
+    m.maximize(sum(v * xi for v, xi in zip(vals, xs)))
+    return m
+
+
+def _infeasible_bilinear():
+    """Infeasible only after branching (FBBT alone cannot prove it): needs
+    x*y >= 0.5 with x + y <= 1 on [0,1]^2 (max of x*y is 0.25)."""
+    m = do.Model("adv2_infeas")
+    x = m.continuous("x", lb=0.0, ub=1.0)
+    y = m.continuous("y", lb=0.0, ub=1.0)
+    m.subject_to(x * y >= 0.5)
+    m.subject_to(x + y <= 1.0)
+    m.minimize(x + y)
+    return m
+
+
+# ── trace invariants across every loop ───────────────────────────────────────
+
+
+@pytest.mark.smoke
+@pytest.mark.requires_pounce
+def test_trace_invariants_spatial_loop():
+    res, trace = _traced_solve(_spatial_model())
+    assert res.status == "optimal"
+    _assert_trace_invariants(trace)
+
+
+@pytest.mark.smoke
+@pytest.mark.requires_pounce
+def test_trace_invariants_spatial_maximize():
+    res, trace = _traced_solve(_spatial_model_max())
+    assert res.status == "optimal"
+    _assert_trace_invariants(trace)
+
+
+@pytest.mark.smoke
+@pytest.mark.requires_pounce
+def test_trace_invariants_nlp_bb_loop():
+    res, trace = _traced_solve(_convex_minlp(), nlp_bb=True)
+    assert res.status == "optimal"
+    _assert_trace_invariants(trace)
+
+
+@pytest.mark.smoke
+@pytest.mark.requires_pounce
+def test_trace_invariants_miqp_loop():
+    res, trace = _traced_solve(_miqp_model())
+    assert res.status == "optimal"
+    _assert_trace_invariants(trace)
+
+
+@pytest.mark.smoke
+def test_trace_invariants_rust_fast_path():
+    res, trace = _traced_solve(_pure_milp_model(), nlp_solver="simplex")
+    assert res.status == "optimal"
+    _assert_trace_invariants(trace)
+
+
+@pytest.mark.smoke
+def test_trace_invariants_milp_bb_loop_direct():
+    """Loop 3 (_solve_milp_bb) is fallback-only, so drive it directly."""
+    fe = TraceFrontend()
+    debug.attach(DebugSession(fe))
+    try:
+        res = _run_milp_bb(_milp_model())
+    finally:
+        debug.detach()
+    assert res.status == "optimal"
+    _assert_trace_invariants(fe.trace)
+
+
+# ── per-loop: no-op neutrality, quit statuses, inject wiring ─────────────────
+
+
+@pytest.mark.smoke
+@pytest.mark.requires_pounce
+def test_nlp_bb_no_op_debugger_is_bound_neutral():
+    base = _convex_minlp().solve(time_limit=20.0, nlp_bb=True)
+    debug.attach(DebugSession(WalkFrontend()))
+    try:
+        dbg = _convex_minlp().solve(time_limit=20.0, nlp_bb=True)
+    finally:
+        debug.detach()
+    assert dbg.node_count == base.node_count
+    assert dbg.objective == base.objective
+
+
+@pytest.mark.smoke
+@pytest.mark.requires_pounce
+def test_miqp_no_op_debugger_is_bound_neutral():
+    base = _miqp_model().solve(time_limit=20.0)
+    debug.attach(DebugSession(WalkFrontend()))
+    try:
+        dbg = _miqp_model().solve(time_limit=20.0)
+    finally:
+        debug.detach()
+    assert dbg.node_count == base.node_count
+    assert dbg.objective == base.objective
+
+
+@pytest.mark.smoke
+@pytest.mark.requires_pounce
+def test_quit_early_not_false_infeasible_nlp_bb():
+    debug.attach(DebugSession(QuitFrontend()))
+    try:
+        res = _convex_minlp().solve(time_limit=20.0, nlp_bb=True)
+    finally:
+        debug.detach()
+    assert res.status not in ("infeasible", "optimal"), (
+        f"NLP-BB quit produced a false '{res.status}'"
+    )
+
+
+@pytest.mark.smoke
+@pytest.mark.requires_pounce
+def test_quit_early_not_false_infeasible_miqp():
+    debug.attach(DebugSession(QuitFrontend()))
+    try:
+        res = _miqp_model().solve(time_limit=20.0)
+    finally:
+        debug.detach()
+    assert res.status not in ("infeasible", "optimal"), (
+        f"MIQP-BB quit produced a false '{res.status}'"
+    )
+
+
+@pytest.mark.smoke
+def test_quit_early_not_false_infeasible_milp_bb_direct():
+    debug.attach(DebugSession(QuitFrontend()))
+    try:
+        res = _run_milp_bb(_milp_model())
+    finally:
+        debug.detach()
+    assert res.status not in ("infeasible", "optimal"), (
+        f"MILP-BB quit produced a false '{res.status}'"
+    )
+
+
+@pytest.mark.smoke
+@pytest.mark.requires_pounce
+def test_inject_on_nlp_bb_keeps_certificate(capsys):
+    """Loop 2 wires a validator: inject validates and cannot corrupt."""
+    base = _convex_minlp().solve(time_limit=20.0, nlp_bb=True)
+    script = ["stop-at steer", "continue", "inject 0", "continue"]
+    debug.attach(debug.make_session(script=script))
+    try:
+        res = _convex_minlp().solve(time_limit=20.0, nlp_bb=True)
+    finally:
+        debug.detach()
+    err = capsys.readouterr().err
+    assert "inject node[0]" in err
+    assert res.status == "optimal"
+    assert res.objective == pytest.approx(base.objective, rel=1e-6, abs=1e-6)
+
+
+@pytest.mark.smoke
+@pytest.mark.requires_pounce
+def test_inject_refused_on_miqp_loop(capsys):
+    """Loop 4 wires NO validator: inject must refuse loudly, not trust."""
+    base = _miqp_model().solve(time_limit=20.0)
+    script = ["stop-at steer", "continue", "inject 0", "continue"]
+    debug.attach(debug.make_session(script=script))
+    try:
+        res = _miqp_model().solve(time_limit=20.0)
+    finally:
+        debug.detach()
+    err = capsys.readouterr().err
+    assert "no candidate validator" in err, "MIQP inject did not refuse"
+    assert res.status == "optimal"
+    assert res.objective == pytest.approx(base.objective, rel=1e-6, abs=1e-6)
+
+
+# ── chaos: deterministic command storm during a live solve ──────────────────
+
+
+@pytest.mark.smoke
+@pytest.mark.requires_pounce
+def test_chaos_command_storm_keeps_certificate():
+    """Rotate through the full command surface (inspection, breakpoints,
+    watches, steering, garbage) at every checkpoint of a live solve. The
+    certificate must survive and every command must return."""
+    base = _spatial_model().solve(time_limit=20.0)
+
+    commands = [
+        "info",
+        "print incumbent",
+        "print bound",
+        "print gap",
+        "print nodes",
+        "print node 0",
+        "print relax 0",
+        "break if gap<0.3",
+        "tbreak 2",
+        "watch bound",
+        "hint 0 0",
+        "inject 0",
+        "break",
+        "print node -1",
+        "break del 2",
+        "stop-at process",
+        "help",
+        "notacommand",
+        "break if x||y",
+    ]
+
+    class ChaosFrontend:
+        def __init__(self):
+            self.n = 0
+            self.executed = 0
+
+        def interact(self, ctx, session):
+            for _ in range(3):
+                cmd = commands[self.n % len(commands)]
+                self.n += 1
+                res = session.engine.execute(cmd, ctx, session)
+                assert res is not None, cmd
+                self.executed += 1
+            if ctx.checkpoint.value == "terminated":
+                return Control.CONTINUE
+            return Control.STEPI
+
+    fe = ChaosFrontend()
+    debug.attach(DebugSession(fe))
+    try:
+        res = _spatial_model().solve(time_limit=30.0)
+    finally:
+        debug.detach()
+    assert fe.executed >= 15, "chaos frontend barely engaged"
+    assert res.status == "optimal"
+    assert res.objective == pytest.approx(base.objective, rel=1e-6, abs=1e-6)
+    if res.bound is not None and res.objective is not None:
+        assert res.bound <= res.objective + 1e-6
+
+
+# ── odd model classes ────────────────────────────────────────────────────────
+
+
+@pytest.mark.smoke
+@pytest.mark.requires_pounce
+def test_debugger_silent_on_continuous_path():
+    """A continuous NLP routes around all instrumented loops: an attached
+    debugger must simply never fire (documented gap), not crash the solve."""
+    m = do.Model("adv2_cont")
+    x = m.continuous("x", lb=0.0, ub=3.0)
+    m.minimize((x - 1.0) ** 2)
+    fe = TraceFrontend()
+    debug.attach(DebugSession(fe))
+    try:
+        res = m.solve(time_limit=20.0)
+    finally:
+        debug.detach()
+    assert res.status == "optimal"
+    assert fe.trace == [], "continuous path unexpectedly fired checkpoints"
+
+
+@pytest.mark.smoke
+@pytest.mark.requires_pounce
+def test_infeasible_model_traced_and_on_error():
+    """Certified infeasibility under full stepping: trace invariants hold,
+    the verdict survives the debugger, and on-error pauses with the reason."""
+    res, trace = _traced_solve(_infeasible_bilinear())
+    assert res.status in ("infeasible", "unknown")
+    if trace:
+        _assert_trace_invariants(trace)
+
+    fe = TraceFrontend()
+    debug.attach(DebugSession(fe, enter_on_error=True))
+    try:
+        res2 = _infeasible_bilinear().solve(time_limit=20.0)
+    finally:
+        debug.detach()
+    assert res2.status == res.status
+    if trace:  # the loop ran, so TERMINATED fired with a non-optimal status
+        assert [t[0] for t in fe.trace] == ["terminated"]
+
+
+@pytest.mark.smoke
+@pytest.mark.requires_pounce
+def test_nested_heuristic_solves_are_suppressed():
+    """The NLP-BB path launches nested solve_model heuristics (restricted
+    sub-MINLPs). Only the OUTERMOST solve may fire checkpoints: nested solves
+    interleaving into the session would collide breakpoints, break trace
+    monotonicity, and let `quit` kill a heuristic instead of the solve.
+    Regression: this model produced TWO `terminated` events before the
+    outermost-solve guard."""
+    res, trace = _traced_solve(_nested_heuristic_minlp(), nlp_bb=True)
+    assert res.status == "optimal"
+    cps = [t[0] for t in trace]
+    assert cps.count("terminated") == 1, f"nested solve leaked checkpoints: {cps}"
+    _assert_trace_invariants(trace)

@@ -30,6 +30,7 @@ from discopt._rust import PyTreeManager
 from discopt.constants import INFEASIBILITY_SENTINEL as _INFEASIBILITY_SENTINEL
 from discopt.constants import SENTINEL_THRESHOLD as _SENTINEL_THRESHOLD
 from discopt.constants import STARTING_POINT_CLIP as _SPC
+from discopt.debug import outermost_solve as _debug_outermost_solve
 from discopt.modeling.core import (
     Constraint,
     CustomCall,
@@ -2565,6 +2566,7 @@ def solve_model_accepted_kwargs() -> frozenset[str]:
 
 @_scoped_deep_recursion
 @_scoped_tuning
+@_debug_outermost_solve
 def solve_model(
     model: Model,
     time_limit: float = 3600.0,

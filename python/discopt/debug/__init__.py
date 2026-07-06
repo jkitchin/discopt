@@ -23,10 +23,17 @@ certificate — see :mod:`discopt.debug.steer`.
 The active session is **thread-local**: attaching in one thread never affects
 solves running in other threads, so concurrent solves can each carry their own
 debugger (or none). Attach in the same thread that calls ``solve()``.
+
+Only the **outermost** solve is instrumented: the solver runs nested
+``solve_model`` calls internally (restricted sub-MINLP heuristics, warm-start
+solves), and letting those fire into the user's session would interleave two
+solves' checkpoints, collide breakpoint state, and make ``quit`` kill a
+heuristic instead of the user's solve. See :func:`outermost_solve`.
 """
 
 from __future__ import annotations
 
+import functools
 import threading
 from typing import TYPE_CHECKING, Any, Callable, Optional
 
@@ -50,6 +57,7 @@ __all__ = [
     "fire_rust",
     "rust_hook",
     "make_session",
+    "outermost_solve",
 ]
 
 # Thread-local active session. ``None`` => detached => fire() is a no-op.
@@ -60,6 +68,34 @@ _TLS = threading.local()
 
 def _active() -> Optional[DebugSession]:
     return getattr(_TLS, "session", None)
+
+
+def _suppressed() -> bool:
+    """True inside a NESTED solve (depth > 1): checkpoints stay silent there."""
+    return getattr(_TLS, "depth", 0) > 1
+
+
+def outermost_solve(fn: Callable) -> Callable:
+    """Decorator for ``solve_model``: instrument only the outermost solve.
+
+    The solver calls ``solve_model`` recursively for heuristic sub-solves
+    (restricted sub-MINLPs, warm starts). Without this guard those inner
+    solves fire checkpoints into the user's session — interleaved pauses from
+    a solve the user did not start, colliding iteration breakpoints, and a
+    ``quit`` that kills a heuristic while the real solve keeps running.
+    ``fire``/``fire_rust``/``rust_hook`` no-op whenever the depth exceeds 1.
+    """
+
+    @functools.wraps(fn)
+    def wrapper(*args: Any, **kwargs: Any) -> Any:
+        depth = getattr(_TLS, "depth", 0)
+        _TLS.depth = depth + 1
+        try:
+            return fn(*args, **kwargs)
+        finally:
+            _TLS.depth = depth
+
+    return wrapper
 
 
 def attach(session: Optional[DebugSession] = None, **kwargs: Any) -> "_AttachGuard":
@@ -150,6 +186,8 @@ def fire(
     session = _active()
     if session is None:
         return False
+    if _suppressed():  # nested heuristic sub-solve: stay silent
+        return False
     ctx = DebugContext.build(
         checkpoint,
         tree=tree,
@@ -178,7 +216,7 @@ def fire_rust(state: dict) -> bool:
     ``False`` — matching the Rust guard that only installs a hook when attached.
     """
     session = _active()
-    if session is None:
+    if session is None or _suppressed():
         return False
     return session.on_checkpoint(DebugContext.from_rust(state))
 
@@ -187,9 +225,10 @@ def rust_hook() -> "Optional[Callable[[dict], bool]]":
     """Return the callable to pass as ``solve_milp_py(debug_hook=…)``, or None.
 
     A debugger must be attached *now* for a hook to be installed, so the Rust
-    search stays bound-neutral whenever no debugger is present.
+    search stays bound-neutral whenever no debugger is present. Nested
+    heuristic sub-solves get no hook either (outermost-solve rule).
     """
-    if _active() is None:
+    if _active() is None or _suppressed():
         return None
     return fire_rust
 
