@@ -117,6 +117,24 @@ ORACLE: dict[str, float] = {
     "flay03m": 48.98979486,
 }
 
+# R1 revisit (2026-07-06): extra oracles for out-of-panel instances (the
+# Class-P tail additions nvs09/hda and the 30-instance generality sample) load
+# from an optional JSON map via ``--extra-oracle`` so the panel script itself
+# stays a faithful record of the T2.1 panel. These are ``=opt=`` values from
+# minlplib.solu (firm lower-bound oracles in the minimized sense) — the same
+# oracle the inline ``assert_sound`` soundness check uses; nothing about the
+# check is relaxed.
+
+
+def load_extra_oracle(path: str | None) -> None:
+    if not path:
+        return
+    import json
+
+    with open(path) as fh:
+        ORACLE.update({str(k): float(v) for k, v in json.load(fh).items()})
+
+
 # global50 config default. discopt reports a valid dual (lower) bound in the
 # internally minimized sense; the oracle is that sense too.
 SND_TOL = 1e-4  # soundness slack (relative-scaled below)
@@ -296,6 +314,7 @@ def replay_instance(
     resolve_s: float,
     max_iters: int,
     oracle_variant: bool,
+    tree_budget_s: float = 60.0,
 ) -> dict:
     result: dict = {"name": name, "status": "ok"}
     oracle = ORACLE.get(name)
@@ -431,7 +450,7 @@ def replay_instance(
     result["loop"] = {k: v for k, v in loop.items() if k not in ("final_lb", "final_ub")}
 
     # ---- 5. Projected tree effect: tightened re-solve vs untightened -------
-    tree_budget = 60.0
+    tree_budget = tree_budget_s
     # untightened baseline re-solve
     m_un = dm.from_nl(path)
     t = time.perf_counter()
@@ -601,6 +620,23 @@ def main() -> None:
     ap.add_argument("--obbt-stage-s", type=float, default=10.0)
     ap.add_argument("--max-iters", type=int, default=4)
     ap.add_argument(
+        "--tree-budget-s",
+        type=float,
+        default=60.0,
+        help="budget for each of the two step-5 tree re-solves (untightened / "
+        "tightened). The 2026-07-03 run's incompleteness came from 2x60s tree "
+        "solves x 20 instances; shrink this to finish the panel cheaply — it is "
+        "a BUDGET knob only, the reduce-loop attribution (criterion (a)) is "
+        "unaffected.",
+    )
+    ap.add_argument(
+        "--extra-oracle",
+        default=None,
+        help="path to a JSON map {instance: opt} of extra =opt= oracles for "
+        "out-of-panel instances (Class-P tail nvs09/hda + the generality "
+        "sample). Merged into ORACLE; the soundness check is unchanged.",
+    )
+    ap.add_argument(
         "--per-instance-cap-s",
         type=float,
         default=240.0,
@@ -613,6 +649,7 @@ def main() -> None:
         help="append one JSON record per completed instance (survives a kill)",
     )
     args = ap.parse_args()
+    load_extra_oracle(args.extra_oracle)
 
     panel = PANEL if args.instances is None else [s.strip() for s in args.instances.split(",")]
 
@@ -659,6 +696,7 @@ def main() -> None:
                 resolve_s=60.0,
                 max_iters=args.max_iters,
                 oracle_variant=not args.no_oracle_variant,
+                tree_budget_s=args.tree_budget_s,
             )
             wall = time.perf_counter() - t0
             r["total_wall"] = wall

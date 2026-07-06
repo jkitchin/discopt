@@ -122,11 +122,11 @@ experiment may run.
 | T1.5 evaluator-cache routing | already realized (PR #316) | #316 | primal_heuristics diving already routed through cached_evaluator (the −22% gear4 win); remaining sites are one-time (convex fast path) or autodiff-unsafe. Low residual value |
 | T1.6 bookkeeping → Rust | non-lever (measured); re-scoped | — | Re-profile: Python per-node tax is minor (0.5s); LP solves dominate (3.84s / ~10-per-node, OBBT probes cold-built). T1.6 premise falsified. Real lever = warm-start OBBT's probe LPs (the parked warm-primal applies — objective-only change over fixed box). Follow-on, not a T1.x item |
 | T2.0 reduction-layer correctness pre-flight | todo — **blocking** | — | C-16 (P0) first, then C-15/C-20/C-21; see §14 Phase 2 |
-| T2.1 Phase 2 entry experiment (kill criterion) | **DONE → NO-GO** (provisional) | #408 | (a) FAILS: median root-gap reduction 4.7% ≪ 25% on the 6 uncertified; (b) borderline/incomplete. Do NOT build T2.3–T2.5; re-scope to Phases 3–4. Revisit when the per-node engine is faster (13/20 finished). See T2.1 RESULTS block |
+| T2.1 Phase 2 entry experiment (kill criterion) | **REVISITED (2026-07-06) → GO** (supersedes provisional NO-GO) | #408, R1 | Full panel now completes (19/20, loop-median 0.27 s); **no P0 on 51 instances**. (a) still FAILS on the Class-P tail (panel median 7.4%, 2/6 responsive) BUT the R1 OR-rule's generality arm PASSES: out-of-panel responsive 9/29=31% (≥20%). Loop = {S2 cutoff-FBBT, S3 cutoff-OBBT}; drop S1/S4; budget ≈10% of limit. Scope: broad small-MINLP root closure, NOT the hard tail. See "T2.1-revisit RESULTS / VERDICT (2026-07-06)" block |
 | T2.2 OBBT persistent LP + warm probes | (a)+(b) done; (c) skipped | #406 | Per-sweep CSC built once + warm-primal probes (t14 patch applied). Differential **NEUTRAL** (warm==cold ≤4.3e-12, tightenings identical, cert-neutrality NEUTRAL). Root-OBBT umbrella: ex1252a 1.54×, ex1252 1.89×, st_e38 1.92×. ex1252a < 2× → residual is the JAX envelope rebuild (Phase 4/5), not the LP loop. See the T2.2-DONE block below |
-| T2.3 root fixpoint loop | **NOT BUILT** (T2.1 NO-GO) | — | kill criterion fired on the primary metric; do not build until T2.1 is revisited and passes |
-| T2.4 per-node `reduce_node()` | **NOT BUILT** (T2.1 NO-GO) | — | same; needs node-LP duals exposed (T2.4a) if ever revisited |
-| T2.5 OBBT escalation policy | **NOT BUILT** (T2.1 NO-GO) | — | same |
+| T2.3 root fixpoint loop | **UNLOCKED** (T2.1-revisit GO) → R2 | — | build per §14 spec; stage list {S2 cutoff-FBBT, S3 cutoff-OBBT}; drop S1/S4; budget ≈10% of limit (S2≈15%/S3≈85%); §0.2 generality gate (no instance-keyed code) |
+| T2.4 per-node `reduce_node()` | **UNLOCKED** (T2.1-revisit GO) → R2 | — | build per §14 spec; needs node-LP duals exposed (T2.4a); C-15 rule z=safe_bound |
+| T2.5 OBBT escalation policy | **UNLOCKED** (T2.1-revisit GO) → R2 | — | build per §14 spec (width×\|RC\| top-k scoring) |
 | T2.6 cert2 gate wiring + default-on | **moot** (T2.3–T2.5 not built) | — | residual gap re-scoped to Phases 3–4 |
 | Phase 3 entry experiment (0b) | done — **GO on c-MIR** | (this PR) | SCIP root-bound proxy (`scripts/p3_0b_scip_rootbound.py`): median root gap closed **discopt 0.0 vs SCIP 1.0** over 8 (graphpart/ex1263/fac). SEPARATOR-QUALITY, not relaxation/branching → build native aggregation/c-MIR (§7 part 2). See §7 "0b RESULTS / VERDICT (2026-07-03)" |
 | Phase 3 1c reachability entry experiment | done — **NO-GO / re-scope** | #(prior) | Cuts made reachable+armed close ~0% (median gap-closed 0.000, best +0.55% on ex1263a) vs SCIP ~1.0. Residual is separator DEPTH, not plumbing. Do NOT build the Rust cut-callback seam yet. See §7 "Phase 3 1c" |
@@ -2126,6 +2126,104 @@ violation on any instance run.**
   enough to complete the full panel cheaply** (a tighter probe budget or a smaller
   panel would also make it a practical repeatable gate). T2.3–T2.5 remain **not
   built** in the meantime.
+
+**T2.1-revisit — RESULTS / VERDICT (2026-07-06): GO on the T2.3–T2.5 reduction
+loop (carried by the out-of-panel generality arm; the Class-P tail arm still
+fails). Supersedes the 2026-07-03 PROVISIONAL NO-GO above.**
+Task R1 of `docs/dev/uncertified-tail-plan-2026-07-06.md`. Re-ran the *existing*
+`discopt_benchmarks/scripts/t21_root_loop_replay.py` on the post-F1–F7 `main`
+engine (release POUNCE `_pounce.abi3.so` 4.73 MB, release discopt `_rust.so`
+2.81 MB — pounce#182 lesson honored). **The revisit condition was met:** the full
+20-instance panel now runs *to completion* (19/20; `st_miqp5` binary `.nl`
+skipped, same as before) — the 2026-07-03 run finished only 13/20 (st_e36 alone
+404 s). Loop-median wall is now **0.27 s** per instance. **No P0 soundness
+violation on any of the 51 instances run** (panel 19 + tail nvs09/hda + 29 of the
+30 out-of-panel; every stage's inline `assert_bound_sound` passed, every
+tightened-box re-solve reproduced its `=opt=` oracle to tol — deltas ≤ 1.5e-4).
+
+*Budget knob change (recorded per §0.6 — soundness checks untouched):* added
+three arguments to the script — `--extra-oracle <json>` (loads `=opt=` oracles for
+out-of-panel instances into the same `ORACLE` map the soundness check reads),
+`--tree-budget-s` (the step-5 projected-tree re-solve budget, previously a
+hardcoded `60.0`; the 2026-07-03 incompleteness was 2×60 s tree solves × 20
+instances — ran the revisit at 15–20 s), and merged the extra-oracle at startup.
+No stage, tolerance, or `assert_sound` logic was altered. Panel run:
+`--harvest-s 8 --loop-budget-s 30 --obbt-stage-s 10 --tree-budget-s 20`.
+
+- **Per-instance classification** (responsive ≥25 % rel. root-gap reduction,
+  marginal 5–25 %, resistant <5 %). Panel 6 *uncertified* rows:
+
+  | instance | base gap | final gap | % reduction | class |
+  |---|---|---|---|---|
+  | tspn05    | 0.1227 | 0.1227 | 0.0%  | resistant |
+  | tanksize  | 1.0000 | 0.3056 | 69.4% | **responsive** |
+  | casctanks | 4.5863 | 4.2201 | 8.0%  | marginal |
+  | tls2      | 0.8645 | 0.8050 | 6.9%  | marginal |
+  | st_e36    | 0.2378 | 0.2378 | 0.0%  | resistant |
+  | nvs05     | 0.8768 | 0.5915 | 32.5% | **responsive** |
+
+  Median = **7.4 %** (2026-07-03: 4.7 %) ≪ 25 % → **primary criterion (a) still
+  FAILS.** Criterion (b) is now *complete* (13/13 certified rows, vs 7/13 in
+  2026-07-03): 1 of 13 closes ≤10 nodes by reduction = **7.7 %** ≪ 30 %. On the
+  panel's own metrics the loop is **still a NO-GO** — the four hardest uncertified
+  rows (tspn05/st_e36 0 %, casctanks/tls2 ≤8 %) do not respond; only
+  tanksize/nvs05 do, unchanged from 2026-07-03. (`cvxnonsep_psig40r`, `fac2`
+  report no root bound in the cold harness build — `no-bound`, excluded from the
+  median as before.)
+
+- **Class-P tail decision set** (hda/nvs05/nvs09/st_e36/tanksize/tls2):
+  responsive = **2** (nvs05 32.5 %, tanksize 69.4 %); tls2 marginal (6.9 %);
+  st_e36 & hda resistant (0.0 %; hda *does* get a cold root bound of gap 9.84 in
+  the harness — its solver-path "no dual bound" is the 23 omitted rows, an R4
+  concern); **nvs09 = no-bound** (the cold cutoff-free relaxer returns no LP
+  bound; it still solves 95 nodes — a harness relaxation-coverage gap, not
+  reduction data). **2 < 3 → the Class-P-tail arm of the R1 rule FAILS.**
+
+- **Out-of-panel generality sample** (§0.2 check): 30 nonlinear MINLPLib
+  instances with `=opt=` oracles, drawn size-spread (1–55 vars) from
+  `problems_small.txt` topped up from `problems_short.txt` (the curated
+  `problems_small.txt` holds only 14 usable names — too few for a 30-sample);
+  **29 ran** (autocorr_bern25-19 hit a parser `RecursionError` — labeled skipped,
+  not dropped). **Responsive = 9/29 = 31.0 %** (prob03, nvs12 72 %, ex1223a,
+  ex5_2_2_case1, pooling_haverly1tp, gkocis 60 %, ramsey, pooling_adhya1stp,
+  wastewater04m2); marginal 3, resistant 14, no-bound 3. Discounting
+  wastewater04m2 (its incumbent was `none_found→oracle`, i.e. an oracle-cutoff
+  best-case, not an honest harvest) → **8/29 = 27.6 %**, still **≥ 20 %**. All
+  nine reproduce their oracle to tol (no false close). **→ the out-of-panel arm
+  of the R1 rule PASSES.**
+
+- **Per-stage marginal include/exclude** (max marginal rel-gap move over all 48
+  instances that produced a bound; a stage <5 % on every instance is dropped):
+  - **S1 presolve — DROP** (0.0 % everywhere; the Rust root presolve already ran
+    at baseline, so its marginal loop contribution is nil).
+  - **S2 `fbbt_with_cutoff` — INCLUDE** (up to 100 %; moves ≥5 % on 12 instances
+    incl. tanksize, tls2, nvs05).
+  - **S3 `obbt_tighten_root(cutoff)` — INCLUDE** (up to 100 %; the primary lever;
+    moves ≥5 % on 13 instances incl. all four closers).
+  - **S4 envelope-rebuild + re-separation — DROP** (0.0 % everywhere; consistent
+    with the Phase-3 1c/zerohalf NO-GOs — re-separation adds no root bound here).
+  → **R2's loop = {S2 cutoff-FBBT, S3 cutoff-OBBT}; drop S1 and S4.**
+
+- **Calibrated loop budget** (median stage wall as a share of the ~0.27 s loop):
+  S3 OBBT 58.6 %, S1 20.3 %, S2 10.7 %, S4 10.4 %. With S1/S4 dropped, fund only
+  the two INCLUDE stages: **S2 ≈ 15 %, S3 ≈ 85 % of the loop budget; loop budget
+  ≈ 10 % of the node/time limit** (the loop converges in ≤2 iters and is cheap
+  now — the 15 % starting point in the T2.3 spec is comfortably affordable and
+  can be trimmed to ~10 %). S3 keeps its own inner OBBT deadline (`--obbt-stage-s`
+  analogue).
+
+- **VERDICT — R2 GO.** The R1 decision rule is an OR: build R2 if the responsive
+  class has **≥3 Class-P-tail instances (got 2 → fails)** OR **≥20 % of the
+  out-of-panel sample (got 31 %, ≥20 %+ even after the honest discount to 27.6 %
+  → passes)**. The OR is satisfied → **GO**. Honest scope caveat (not a hedge —
+  the record must state it): the loop does **not** crack the hard uncertified
+  tail (panel median still 7.4 %; tspn05/st_e36/casctanks/tls2 unmoved) — its
+  value is *broad small-MINLP root closure*, not the Class-P six. R2 must
+  therefore be built to the §0.2 generality gate (panel-wide, no instance-keyed
+  code), not tuned to tanksize/nvs05; its acceptance is the out-of-panel win rate
+  reproduced under the flag, and R3b/R4 remain the levers for st_e36-class
+  pinning (which reduction provably does not touch). T2.3–T2.5 are **UNLOCKED**;
+  build per the §14 spec with the stage list {S2,S3} and budget above.
 
 **T2.2 — Make OBBT affordable: persistent probe LP + warm-started probes (the
 B1 fix; may run parallel to T2.1).**

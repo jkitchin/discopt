@@ -1,6 +1,10 @@
 # Closing the uncertified tail — branch-and-reduce revisit + bound-responsiveness plan (2026-07-06)
 
-**Status:** planned (no task started)
+**Status:** R1 DONE (2026-07-06) → **GO on R2** (out-of-panel generality arm,
+9/29=31%≥20%; Class-P-tail arm fails at 2/6). Loop = {S2 cutoff-FBBT, S3
+cutoff-OBBT}; drop S1/S4; budget ≈10% of limit. No soundness violation on 51
+instances. See cert-gap-plan §14 "T2.1-revisit RESULTS / VERDICT (2026-07-06)".
+R2–R5, V2 not started.
 **Basis:** `docs/dev/perf-followup-results-2026-07-06.md` (V1: the tail that
 F1–F7 did not move), `docs/dev/certification-gap-plan.md` §6 + §14 "Phase 2
 tasks" (the branch-and-reduce spec and its **T2.1 NO-GO — provisional**
@@ -109,6 +113,19 @@ correctness pre-flight) is COMPLETE** — C-15/C-16/C-20/C-21 are all `fixed` in
 ## §3 Tasks
 
 ### R1 — T2.1 revisit: complete the root-loop replay on the post-F1–F7 engine
+
+**STATUS: DONE (2026-07-06) → GO on R2.** Full 20-instance panel replayed to
+completion (19/20; st_miqp5 binary `.nl` skipped) on post-F1–F7 `main`; loop
+median 0.27 s/instance (2026-07-03 could not finish — st_e36 alone 404 s). **No
+P0 soundness violation on any of 51 instances** (panel + tail nvs09/hda + 29/30
+out-of-panel). Verdicts: (1) Class-P-tail responsive = 2 (nvs05 32.5%, tanksize
+69.4%) < 3 → tail arm fails; (2) out-of-panel responsive = 9/29 = 31% ≥ 20% →
+generality arm passes; the OR-rule → **GO**. Stage list {S2 cutoff-FBBT, S3
+cutoff-OBBT}; S1/S4 dropped (<5% everywhere); budget ≈10% of limit (S2≈15%,
+S3≈85%). Honest scope: the loop does NOT crack the hard tail (panel median still
+7.4%); its value is broad small-MINLP root closure. Script budget knobs added
+(`--extra-oracle`, `--tree-budget-s`); soundness checks untouched. Full table in
+cert-gap-plan §14 "T2.1-revisit RESULTS / VERDICT (2026-07-06)".
 
 - **Why reopened:** T2.1's NO-GO is explicitly *provisional* with the revisit
   condition "when the per-node engine is fast enough to complete the full
