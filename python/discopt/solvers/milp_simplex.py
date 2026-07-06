@@ -329,6 +329,33 @@ def solve_milp(
     # is attached now, so the pure-Rust search stays bound-neutral otherwise.
     from discopt import debug as _debug
 
+    # Pure-LP short-circuit (THRU-2b): when there are no integer columns this is a
+    # plain LP, yet the MILP driver still runs its integer-search machinery — root
+    # cut rounds, GMI, primal heuristics, strong branching. With no integer
+    # variables none of that can fire (GMI needs a fractional integer; the
+    # heuristics round nothing; there is no candidate to branch on), so it is pure
+    # overhead on the root LP whose optimum/infeasibility is the whole answer. This
+    # path is the fallback the McCormick node relaxer reaches when the warm sparse
+    # simplex breaks down numerically on a hard, ill-conditioned lifted LP
+    # (``solve_lp_warm_csc_py`` -> ``numerical`` at iters=0); the driver's LP
+    # presolve then decides it, but the wasted cut/heuristic passes inflate the
+    # solve (nvs24 node LP 10.9 s -> 5.5 s with the machinery off). Turning the
+    # machinery off on a genuine LP is bound-neutral by construction: the root LP
+    # optimum and the infeasibility verdict are unchanged — only inert integer-side
+    # work is skipped. It never triggers when ``int_cols`` is non-empty.
+    _pure_lp = int(int_cols.size) == 0
+    _lp_kwargs: dict = (
+        dict(
+            root_cuts=0,
+            cut_rounds=0,
+            gmi_cuts=False,
+            heuristics=False,
+            strong_branch=False,
+        )
+        if _pure_lp
+        else {}
+    )
+
     status, x_full, obj, bound, nodes, _iters = solve_milp_py(
         np.ascontiguousarray(c_std),
         np.ascontiguousarray(a_std),
@@ -342,6 +369,7 @@ def solve_milp(
         float(gap_tolerance),
         time_limit_s=0.0 if time_limit is None else max(0.0, float(time_limit)),
         debug_hook=_debug.rust_hook(),
+        **_lp_kwargs,
     )
 
     if status == "infeasible":
