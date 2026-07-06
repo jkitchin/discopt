@@ -518,6 +518,137 @@ def test_entropy_domain_guard_rejects_negative_lb():
     assert not _has_entropy(out._objective.expression)
 
 
+# --------------------------------------------------------------------------- #
+# R4 — zero-spanning product-factor lift (DISCOPT_LIFT_ZERO_SPANNING_FACTORS)  #
+# --------------------------------------------------------------------------- #
+#
+# A product ``f(x)·g(x)`` whose non-atomic factor ``f`` has an interval spanning
+# 0 already gets ``f`` lifted to a bounded aux ``w == f`` (via the blow-up
+# prelift). The default spatial-branching policy deprioritizes every lifted aux
+# (a product aux ``w = x_i·x_j`` cannot shrink its own envelope). For a
+# zero-spanning FACTOR that reasoning is inverted: branching ``w`` at 0 splits
+# the factor's sign and tightens the ``w·g`` McCormick envelope — the only move
+# that un-pins the bound. The flag tags those auxes so the solver keeps them
+# branchable. Default OFF => no tagging => byte-identical branching set.
+
+
+def _st_e36_shaped(name="zsf"):
+    """A 2-var st_e36-shaped model: a product of a zero-spanning quadratic factor
+    ``f = x^2 - 6x - 11 + 0.8y`` (∋ 0 on the box) and a strictly-positive
+    sum-of-squares product ``g``, constrained ``f·g == 0``. Since ``g > 0`` the
+    feasible set is exactly ``f == 0``; the objective's box-min off the manifold
+    pins the McCormick product bound until ``f``'s lifted aux is split at 0.
+    NOT the named instance — built here so the test is a class probe, not an
+    instance hack."""
+    m = dm.Model(name)
+    x = m.continuous("x", lb=3.0, ub=5.5)
+    y = m.continuous("y", lb=15.0, ub=25.0)
+    m.minimize(2 * x**2 + 0.008 * y**3 - 3.2 * x * y - 2 * y)
+    f = x**2 - 6 * x - 11 + 0.8 * y
+    g = (
+        ((-0.62 * y + 3.25 * x) ** 2 + (-6.35 + 0.2 * y + x) ** 2)
+        * ((-0.66 * y + 3.55 * x) ** 2 + (-6.85 + 0.2 * y + x) ** 2)
+        * ((-0.7 * y + 3.6 * x) ** 2 + (-7.1 + 0.2 * y + x) ** 2)
+        * ((-0.82 * y + 3.8 * x) ** 2 + (-7.9 + 0.2 * y + x) ** 2)
+    )
+    m.subject_to(f * g == 0)
+    m.subject_to(-0.2 * x * y + 0.6 * y + dm.exp(x - 3) - 1 <= 0)
+    return m
+
+
+def test_r4_default_off_no_tagging(monkeypatch):
+    """Flag OFF (default): no aux is tagged, so the branching set is unchanged."""
+    monkeypatch.delenv("DISCOPT_LIFT_ZERO_SPANNING_FACTORS", raising=False)
+    m = _st_e36_shaped()
+    assert has_factorable_work(m)
+    m2 = factorable_reformulate(m)
+    # The lift still happens (the aux exists) — only the *tagging* is gated.
+    assert _aux_names(m2), "the zero-spanning factor should still be lifted"
+    assert getattr(m2, "_zero_spanning_factor_auxes", set()) == set()
+
+
+def test_r4_flag_on_tags_zero_spanning_factor(monkeypatch):
+    """Flag ON: the zero-spanning product-factor aux is tagged for branching."""
+    monkeypatch.setenv("DISCOPT_LIFT_ZERO_SPANNING_FACTORS", "1")
+    m = _st_e36_shaped()
+    m2 = factorable_reformulate(m)
+    tagged = getattr(m2, "_zero_spanning_factor_auxes", set())
+    assert tagged, "a zero-spanning product factor must be tagged when the flag is on"
+    # Every tagged aux really spans 0 over its lifted box.
+    for v in m2._variables:
+        if v.name in tagged:
+            import numpy as np
+
+            lo, hi = float(np.min(v.lb)), float(np.max(v.ub))
+            assert lo < 0.0 < hi, f"tagged aux {v.name} box [{lo},{hi}] must span 0"
+
+
+def test_r4_positive_factor_not_tagged(monkeypatch):
+    """A product whose lifted factors are all strictly one-signed (never span 0)
+    tags nothing — the flag must not indiscriminately mark every product aux."""
+    monkeypatch.setenv("DISCOPT_LIFT_ZERO_SPANNING_FACTORS", "1")
+    m = dm.Model("pos_factors")
+    x = m.continuous("x", lb=1.0, ub=3.0)
+    y = m.continuous("y", lb=1.0, ub=3.0)
+    # Both factors are sums of squares plus a positive constant => strictly > 0.
+    f = (x + y) ** 2 + (x - 0.5 * y) ** 2 + 1.0
+    g = (
+        ((0.5 * x + y) ** 2 + (x + 0.3 * y) ** 2 + 1.0)
+        * ((0.4 * x + y) ** 2 + (x + 0.2 * y) ** 2 + 1.0)
+        * ((0.3 * x + y) ** 2 + (x + 0.1 * y) ** 2 + 1.0)
+    )
+    m.minimize(x + y)
+    m.subject_to(f * g <= 5000.0)
+    if has_factorable_work(m):
+        m2 = factorable_reformulate(m)
+        for v in m2._variables:
+            if v.name in getattr(m2, "_zero_spanning_factor_auxes", set()):
+                import numpy as np
+
+                lo, hi = float(np.min(v.lb)), float(np.max(v.ub))
+                assert lo < 0.0 < hi  # any tagged aux must genuinely span 0
+
+
+@pytest.mark.correctness
+@pytest.mark.slow
+def test_r4_flag_on_unpins_pinned_product(monkeypatch):
+    """The st_e36-shaped pinned-product model: with the flag OFF the product's
+    McCormick bound is pinned at a box-min constant far below the optimum; with
+    it ON the zero-spanning factor aux becomes branchable and the bound climbs to
+    (essentially) the optimum. Asserts the *lever* (bound un-pinning) and
+    soundness — not a wall-clock certification race, which is machine-dependent.
+
+    The pin (OFF) is ≈ -304.5; the optimum is ≈ -246.0. A ≥ 25 % relative gap
+    reduction (the R4 acceptance threshold) is the falsifiable claim.
+    """
+    monkeypatch.setenv("DISCOPT_LIFT_ZERO_SPANNING_FACTORS", "1")
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        r_on = _st_e36_shaped().solve(time_limit=60, gap_tolerance=1e-4)
+    monkeypatch.setenv("DISCOPT_LIFT_ZERO_SPANNING_FACTORS", "0")
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        r_off = _st_e36_shaped().solve(time_limit=20, gap_tolerance=1e-4)
+
+    assert r_on.bound is not None and r_off.bound is not None
+    assert r_on.objective is not None and r_off.objective is not None
+    opt = r_on.objective  # both reach the same incumbent (the true optimum)
+    # Soundness (both paths): the dual bound never crosses the optimum (min).
+    assert r_on.bound <= opt + 1e-4, "ON bound must not exceed the optimum (false cert)"
+    assert r_off.bound <= opt + 1e-4, "OFF bound must not exceed the optimum"
+    # Non-regression: ON is at least as tight as OFF.
+    assert r_on.bound >= r_off.bound - 1e-4, "ON bound must not regress vs OFF"
+    # The lever: ON reduces the root/OFF gap to the optimum by >= 25 %.
+    gap_off = abs(opt - r_off.bound)
+    gap_on = abs(opt - r_on.bound)
+    assert gap_off > 1e-3, "probe must actually be pinned with the flag OFF"
+    reduction = (gap_off - gap_on) / gap_off
+    assert reduction >= 0.25, (
+        f"flag ON must un-pin the bound >= 25 % "
+        f"(OFF gap {gap_off:.3f} -> ON gap {gap_on:.3f}, reduction {reduction:.1%})"
+    )
+
+
 def test_entropy_canonicalized_in_constraint_body():
     """The rewrite fires in constraint bodies too, not just the objective."""
     m = dm.Model("entcon")

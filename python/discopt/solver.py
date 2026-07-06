@@ -4793,6 +4793,25 @@ def solve_model(
                         _dep_cols_set: set = set()
                         if _prereform_model is not None and n_vars > _prereform_nvars:
                             _dep_cols_set.update(range(_prereform_nvars, n_vars))
+                        # R4 (DISCOPT_LIFT_ZERO_SPANNING_FACTORS): a lifted aux
+                        # ``w = f(x)`` for a *product factor* whose interval spans 0
+                        # is branch-responsive — splitting w at 0 flips the factor's
+                        # sign and tightens the product's McCormick envelope, the one
+                        # move that un-pins the bound (st_e36). Keep those columns
+                        # branchable by removing them from the deprioritized set. The
+                        # flag gates the reform's tagging, so this set is empty (no
+                        # behaviour change) unless the flag is on.
+                        _zsf_names = getattr(model, "_zero_spanning_factor_auxes", None)
+                        if _zsf_names:
+                            _name_to_col = {}
+                            _col = 0
+                            for _v in model._variables:
+                                _name_to_col[_v.name] = _col
+                                _col += _v.size
+                            _zsf_cols = {
+                                _name_to_col[_nm] for _nm in _zsf_names if _nm in _name_to_col
+                            }
+                            _dep_cols_set.difference_update(_zsf_cols)
                         if _dependent_var_names:
                             from discopt._jax.dependent_vars import (
                                 dependent_columns_for_model,
