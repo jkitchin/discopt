@@ -346,7 +346,9 @@ class IncrementalMcCormickLP:
             return None, None, None
         return float(result.objective), np.asarray(result.x, dtype=float), out_basis
 
-    def solve_assembled_full(self, A, b, bounds, in_basis=None, c_override=None):
+    def solve_assembled_full(
+        self, A, b, bounds, in_basis=None, c_override=None, *, return_cert=False
+    ):
         """Like :meth:`solve_assembled`, but return the terminal *status* too so a
         caller can tell a (certified) ``infeasible`` apart from any other
         non-optimal verdict (time limit / numerical error).
@@ -363,24 +365,44 @@ class IncrementalMcCormickLP:
         makes the raw vertex objective drift high. ``farkas_certified`` is ``True``
         only when an ``"infeasible"`` verdict was independently proven by a
         verified Farkas dual ray; a caller can then fathom rigorously without any
-        second (HiGHS/equilibration) solve."""
+        second (HiGHS/equilibration) solve.
+
+        When ``return_cert`` is set the tuple is extended to
+        ``(..., farkas_certified, cert)`` with the :class:`LpWarmCert` carrying the
+        node LP's row duals / column status / safe bound (cert:T2.4a) -- a pure
+        side-channel; ``bound``/``x`` are computed identically whether or not it is
+        requested."""
         from discopt.solvers import SolveStatus
-        from discopt.solvers.milp_simplex import solve_lp_warm_std
+        from discopt.solvers.milp_simplex import LpWarmCert, solve_lp_warm_std
 
         cobj = self.c if c_override is None else np.asarray(c_override, dtype=np.float64)
+        _empty = LpWarmCert(safe_bound=None, farkas_certified=False)
+
+        def _ret(status, bound, x, out_basis, farkas, cert=_empty):
+            if return_cert:
+                return status, bound, x, out_basis, farkas, cert
+            return status, bound, x, out_basis, farkas
+
         try:
             result, out_basis, cert = solve_lp_warm_std(
                 cobj, sp.csr_matrix(A), b, bounds, in_basis=in_basis, return_cert=True
             )
         except Exception:
-            return "other", None, None, None, False
+            return _ret("other", None, None, None, False)
         if result is None:
-            return "other", None, None, None, False
+            return _ret("other", None, None, None, False)
         if result.status == SolveStatus.INFEASIBLE:
-            return "infeasible", None, None, None, bool(cert.farkas_certified)
+            return _ret("infeasible", None, None, None, bool(cert.farkas_certified), cert)
         if result.status != SolveStatus.OPTIMAL or result.bound is None:
-            return "other", None, None, None, False
-        return "optimal", float(result.bound), np.asarray(result.x, dtype=float), out_basis, False
+            return _ret("other", None, None, None, False)
+        return _ret(
+            "optimal",
+            float(result.bound),
+            np.asarray(result.x, dtype=float),
+            out_basis,
+            False,
+            cert,
+        )
 
     def solve(self, lb, ub, in_basis=None, c_override=None, cut_rows=None):
         """Solve the McCormick LP over [lb,ub] (plus optional cut rows); return

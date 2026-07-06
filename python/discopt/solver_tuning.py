@@ -128,6 +128,24 @@ class SolverTuning:
     )
     """Warm-start the node LP from the parent basis (``DISCOPT_LP_WARMSTART``)."""
 
+    # --- branch-and-reduce (cert:T2.3 / T2.4, default OFF until T2.6) ----------
+    root_fixpoint: bool = field(
+        default_factory=lambda: _env_flag("DISCOPT_ROOT_FIXPOINT", default=False)
+    )
+    """Run the cutoff-aware root branch-and-reduce fixpoint (cert:T2.3) at the end
+    of iteration 0: iterate {FBBT-with-cutoff, OBBT/DBBT-with-cutoff} to a fixpoint
+    on the root box, refreshing the root cut pool + incremental engine base from the
+    tightened box. ``DISCOPT_ROOT_FIXPOINT``, default OFF (bound-changing; unlocked
+    by the R1 GO, flipped default-on only after nightly-green per T2.6)."""
+
+    node_reduce: bool = field(
+        default_factory=lambda: _env_flag("DISCOPT_NODE_REDUCE", default=False)
+    )
+    """Run the per-node cheap reduction (cert:T2.4b ``reduce_node``) after each
+    spatial node LP solve: cutoff-FBBT + free DBBT from the node LP reduced costs
+    (z = safe_bound, the C-15 rule) + integer RC-fixing, feeding the tightened box
+    to the child boxes. ``DISCOPT_NODE_REDUCE``, default OFF (bound-changing)."""
+
     def __post_init__(self) -> None:
         if self.rlt_quad_max < 1:
             raise ValueError(f"rlt_quad_max must be >= 1, got {self.rlt_quad_max}")
