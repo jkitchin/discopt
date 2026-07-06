@@ -184,6 +184,18 @@ worktrees/sessions if desired, but each in its own PR.
 - **Regime/gates:** script-only; smoke gate. **Blocks V1** (V1's report should
   carry live bounds).
 - **Acceptance:** a 2-instance `--instances` run emits non-null bounds.
+- **Status: DONE** (branch `fix-a3-benchmark-bound-oracle`). Worker reads
+  `getattr(res, "bound", None)` (the `.lower_bound` attr never existed; `None`
+  now means "no dual bound" post-A2, not "read failed"). Added
+  `bound_violates_oracle(bound, known, maximize)` and threaded the reported
+  bound into `classify()` — a dual bound crossing the oracle (`bound > opt` for
+  min, `bound < opt` for max, beyond tol) is now a `VIOLATION` even with a
+  correct/absent incumbent, and the violation report distinguishes a bad bound
+  from a bad incumbent. Tests in
+  `discopt_benchmarks/tests/test_nl_solvers_verdict.py` (6 new: bound-crossing
+  → VIOLATION both senses, fires without an incumbent, valid-LB-stays-GAP,
+  None-bound backward-compat, the predicate, and the worker-attr regression).
+  Script-only; ruff clean.
 
 ### F1 — Budget `local_branching`'s enumeration path  (B7; the #1 wall lever)
 
