@@ -243,6 +243,27 @@ use the `memory_heavy` marker selection when running with tighter caps.
 
 The full Python test suite remains available with `make test-all`.
 
+## Plugins
+
+discopt keeps its core lean and ships domain-specific application builders and
+teaching tools as separate **plugin packages**. Each is a PEP 420 namespace
+package: once installed, its modules import under `discopt.<name>` unchanged,
+and any CLI verbs it registers (through the `"discopt.cli"` entry-point group)
+become available as `discopt <subcommand>`. None are on PyPI yet — install
+directly from the repository.
+
+| Plugin | Install | Provides |
+|---|---|---|
+| **[discopt-doe](https://github.com/jkitchin/discopt-doe)** | `pip install "git+https://github.com/jkitchin/discopt-doe.git"` | Model-based **design of experiments** — D/A/E-optimality, identifiability, model discrimination — as a `discopt doe ...` CLI loop (templates/new/status/fit/extend/gui) around an `.xlsx` workbook, with an optional Streamlit GUI. |
+| **[discopt-apps](https://github.com/jkitchin/discopt-apps)** | `pip install "git+https://github.com/jkitchin/discopt-apps.git"` | **Application builders** for the modeling language: AC optimal power flow (`discopt.opf`) and pooling (`discopt.pooling`). |
+| **[discopt-course](https://github.com/jkitchin/discopt-course)** | `pip install "git+https://github.com/jkitchin/discopt-course.git"` | An **optimization course** plus an interactive `discopt tutor ...` CLI (`discopt.course`) that walks through modeling and solving exercises. |
+
+```bash
+# Example: add the design-of-experiments plugin
+pip install "git+https://github.com/jkitchin/discopt-doe.git"
+discopt doe --help          # the plugin's verbs are now under the `discopt` CLI
+```
+
 ## Command-Line Interface
 
 After installation, the `discopt` command is available on your PATH:
@@ -257,9 +278,10 @@ discopt install-skills   # Install Claude Code slash commands and agents
 External packages can add subcommands through the `"discopt.cli"` entry-point
 group (see the protocol notes in `python/discopt/cli.py`). For example, the
 [discopt-doe](https://github.com/jkitchin/discopt-doe) plugin
-(`pip install discopt-doe`) adds `discopt doe ...` — a model-based
-design-of-experiments loop (templates/new/status/fit/extend/gui) around an
-`.xlsx` workbook, with an optional Streamlit GUI.
+(`pip install "git+https://github.com/jkitchin/discopt-doe.git"`) adds
+`discopt doe ...` — a model-based design-of-experiments loop
+(templates/new/status/fit/extend/gui) around an `.xlsx` workbook, with an
+optional Streamlit GUI. See [Plugins](#plugins) above for the full list.
 
 A separate `discopt-dev` script ships developer-only commands used from inside
 a discopt source checkout (literature scanner, adversary tester, the arXiv /
