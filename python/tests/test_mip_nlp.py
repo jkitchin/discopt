@@ -38,6 +38,13 @@ def _continuous_model(name="mip_nlp_continuous"):
     return m
 
 
+def _convex_general_nlp_model(name="shot_direct_nlp"):
+    m = dm.Model(name)
+    x = m.continuous("x", lb=0.0, ub=2.0)
+    m.minimize(dm.exp(x))
+    return m
+
+
 def _gdp_model(name="mip_nlp_gdp_route"):
     m = dm.Model(name)
     x = m.continuous("x", lb=0, ub=10)
@@ -139,6 +146,15 @@ def _miqp_style_model(name="shot_miqp_style"):
     m = dm.Model(name)
     x = m.continuous("x", lb=-2, ub=2)
     y = m.binary("y")
+    m.minimize((x - 1) ** 2 + y)
+    return m
+
+
+def _miqcqp_style_model(name="shot_miqcqp_style"):
+    m = dm.Model(name)
+    x = m.continuous("x", lb=-2, ub=2)
+    y = m.binary("y")
+    m.subject_to(x**2 + y <= 3.0)
     m.minimize((x - 1) ** 2 + y)
     return m
 
@@ -1926,7 +1942,7 @@ def test_mip_nlp_shot_profile_options_validate_and_attach_trace(monkeypatch):
     monkeypatch.setattr(oa_module, "solve_oa", fake_solve_oa)
 
     result = solve_mip_nlp(
-        _binary_model("shot_profile_options"),
+        _convex_binary_nonlinear_model("shot_profile_options"),
         method="oa",
         mip_nlp_options={
             "mip_nlp_profile": "shot",
@@ -1942,7 +1958,7 @@ def test_mip_nlp_shot_profile_options_validate_and_attach_trace(monkeypatch):
             "integer_bilinear_strategy": "binary-expansion",
             "integer_bilinear_max_bits": 8,
             "quadratic_extraction": "native",
-            "direct_quadratic_routing": "safe",
+            "direct_quadratic_routing": "auto",
             "rootsearch_strategy": "toms748",
             "fixed_nlp_strategy": "solution-pool",
             "solution_pool_capacity": 5,
@@ -1970,7 +1986,7 @@ def test_mip_nlp_shot_profile_options_validate_and_attach_trace(monkeypatch):
     assert cfg.integer_bilinear_strategy == "binary_expansion"
     assert cfg.integer_bilinear_max_bits == 8
     assert cfg.quadratic_extraction == "native"
-    assert cfg.direct_quadratic_routing == "safe"
+    assert cfg.direct_quadratic_routing == "auto"
     assert cfg.rootsearch_strategy == "toms748"
     assert cfg.fixed_nlp_strategy == "solution_pool"
     assert cfg.solution_pool_capacity == 5
@@ -2032,6 +2048,265 @@ def test_mip_nlp_shot_single_tree_rejects_non_gurobi_backend():
         )
 
 
+def test_mip_nlp_shot_direct_nlp_routes_to_continuous_solver(monkeypatch):
+    import discopt.solver as solver_module
+    from discopt.solvers.mip_nlp import solve_mip_nlp
+
+    calls = {}
+
+    monkeypatch.setattr(
+        solver_module,
+        "_classify_model_convexity",
+        lambda *args, **kwargs: (True, True, []),
+    )
+
+    def fake_solve_continuous(
+        model,
+        time_limit,
+        ipopt_options,
+        t_start,
+        nlp_solver,
+        initial_point=None,
+    ):
+        del model, ipopt_options, t_start, initial_point
+        calls["time_limit"] = time_limit
+        calls["nlp_solver"] = nlp_solver
+        return SolveResult(status="optimal", objective=1.0, bound=1.0, gap=0.0)
+
+    monkeypatch.setattr(solver_module, "_solve_continuous", fake_solve_continuous)
+
+    result = solve_mip_nlp(
+        _convex_general_nlp_model("shot_direct_nlp_route"),
+        method="oa",
+        mip_nlp_options={"mip_nlp_profile": "shot"},
+        time_limit=12.0,
+        nlp_solver="pounce",
+    )
+
+    assert calls == {"time_limit": 12.0, "nlp_solver": "pounce"}
+    assert result.convex_fast_path is True
+    assert result.mip_nlp_trace["method"] == "direct"
+    assert result.mip_nlp_trace["selected_strategy"] == "direct_nlp"
+    assert result.mip_nlp_trace["strategy_selection"]["problem_class"] == "nlp"
+
+
+def test_mip_nlp_shot_direct_milp_routes_to_requested_backend(monkeypatch):
+    import discopt.solver as solver_module
+    from discopt.solvers.mip_nlp import solve_mip_nlp
+
+    calls = {}
+
+    def fake_solve_milp_highs(model, t_start, time_limit=None, gap_tolerance=1e-4):
+        del model, t_start
+        calls["backend"] = "highs"
+        calls["time_limit"] = time_limit
+        calls["gap_tolerance"] = gap_tolerance
+        return SolveResult(status="optimal", objective=0.0, bound=0.0, gap=0.0)
+
+    monkeypatch.setattr(solver_module, "_solve_milp_highs", fake_solve_milp_highs)
+
+    result = solve_mip_nlp(
+        _binary_model("shot_direct_milp_route"),
+        method="oa",
+        mip_nlp_options={"mip_nlp_profile": "shot", "milp_solver": "highs"},
+        time_limit=7.0,
+        gap_tolerance=5e-5,
+    )
+
+    assert calls == {"backend": "highs", "time_limit": 7.0, "gap_tolerance": 5e-5}
+    assert result.mip_nlp_trace["selected_strategy"] == "direct_milp"
+    assert result.mip_nlp_trace["strategy_selection"]["backend"] == "highs"
+    assert result.mip_nlp_trace["summary"]["selected_strategy"] == "direct_milp"
+
+
+def test_mip_nlp_shot_direct_miqp_routes_when_convex(monkeypatch):
+    import discopt.solver as solver_module
+    from discopt.solvers.mip_nlp import solve_mip_nlp
+
+    calls = {}
+
+    monkeypatch.setattr(
+        solver_module,
+        "_classify_model_convexity",
+        lambda *args, **kwargs: (True, True, []),
+    )
+
+    def fake_solve_qp_highs(model, t_start, time_limit=None):
+        del model, t_start
+        calls["backend"] = "highs"
+        calls["time_limit"] = time_limit
+        return SolveResult(status="optimal", objective=1.0, bound=1.0, gap=0.0)
+
+    monkeypatch.setattr(solver_module, "_solve_qp_highs", fake_solve_qp_highs)
+
+    result = solve_mip_nlp(
+        _miqp_style_model("shot_direct_miqp_route"),
+        method="oa",
+        mip_nlp_options={"mip_nlp_profile": "shot", "milp_solver": "highs"},
+        time_limit=9.0,
+    )
+
+    assert calls == {"backend": "highs", "time_limit": 9.0}
+    assert result.mip_nlp_trace["selected_strategy"] == "direct_miqp"
+    assert result.mip_nlp_trace["strategy_selection"]["problem_class"] == "miqp"
+
+
+def test_mip_nlp_shot_direct_qcp_routes_to_gurobi_when_requested(monkeypatch):
+    import discopt.solver as solver_module
+    from discopt.solvers.mip_nlp import solve_mip_nlp
+
+    calls = {}
+
+    monkeypatch.setattr(
+        solver_module,
+        "_classify_model_convexity",
+        lambda *args, **kwargs: (True, True, []),
+    )
+
+    def fake_solve_qcp_gurobi(model, t_start, time_limit=None, gap_tolerance=1e-4):
+        del model, t_start
+        calls["backend"] = "gurobi"
+        calls["time_limit"] = time_limit
+        calls["gap_tolerance"] = gap_tolerance
+        return SolveResult(status="optimal", objective=0.0, bound=0.0, gap=0.0)
+
+    monkeypatch.setattr(solver_module, "_solve_qcp_gurobi", fake_solve_qcp_gurobi)
+
+    result = solve_mip_nlp(
+        _quadratic_partition_model("shot_direct_qcp_route"),
+        method="oa",
+        mip_nlp_options={"mip_nlp_profile": "shot", "milp_solver": "gurobi"},
+        time_limit=8.0,
+        gap_tolerance=1e-5,
+    )
+
+    assert calls == {"backend": "gurobi", "time_limit": 8.0, "gap_tolerance": 1e-5}
+    assert result.mip_nlp_trace["selected_strategy"] == "direct_qcp"
+    assert result.mip_nlp_trace["strategy_selection"]["backend"] == "gurobi"
+
+
+def test_mip_nlp_shot_direct_miqcqp_routes_to_gurobi_when_requested(monkeypatch):
+    import discopt.solver as solver_module
+    from discopt.solvers.mip_nlp import solve_mip_nlp
+
+    calls = {}
+
+    monkeypatch.setattr(
+        solver_module,
+        "_classify_model_convexity",
+        lambda *args, **kwargs: (True, True, []),
+    )
+
+    def fake_solve_qcp_gurobi(model, t_start, time_limit=None, gap_tolerance=1e-4):
+        del model, t_start
+        calls["backend"] = "gurobi"
+        calls["time_limit"] = time_limit
+        calls["gap_tolerance"] = gap_tolerance
+        return SolveResult(status="optimal", objective=1.0, bound=1.0, gap=0.0)
+
+    monkeypatch.setattr(solver_module, "_solve_qcp_gurobi", fake_solve_qcp_gurobi)
+
+    result = solve_mip_nlp(
+        _miqcqp_style_model("shot_direct_miqcqp_route"),
+        method="oa",
+        mip_nlp_options={"mip_nlp_profile": "shot", "milp_solver": "gurobi"},
+        time_limit=8.0,
+        gap_tolerance=1e-5,
+    )
+
+    assert calls == {"backend": "gurobi", "time_limit": 8.0, "gap_tolerance": 1e-5}
+    assert result.mip_nlp_trace["selected_strategy"] == "direct_miqcqp"
+    assert result.mip_nlp_trace["strategy_selection"]["problem_class"] == "miqcqp"
+
+
+def test_mip_nlp_shot_direct_qcp_falls_back_without_gurobi(monkeypatch):
+    import discopt.solvers.oa as oa_module
+    from discopt.solvers.mip_nlp import solve_mip_nlp
+
+    calls = {}
+
+    def fake_solve_oa(model, **kwargs):
+        del model
+        calls.update(kwargs)
+        return SolveResult(status="optimal", objective=0.0, bound=0.0, gap=0.0)
+
+    monkeypatch.setattr(oa_module, "solve_oa", fake_solve_oa)
+
+    result = solve_mip_nlp(
+        _quadratic_partition_model("shot_direct_qcp_fallback"),
+        method="oa",
+        mip_nlp_options={"mip_nlp_profile": "shot", "milp_solver": "highs"},
+    )
+
+    assert calls["milp_solver"] == "highs"
+    assert result.mip_nlp_trace["selected_strategy"] == "oa"
+    attempt = result.mip_nlp_trace["strategy_selection"]["direct_attempt"]
+    assert attempt["candidate_strategy"] == "direct_qcp"
+    assert attempt["fallback_reason"] == "requires_milp_solver_gurobi"
+
+
+@pytest.mark.parametrize(
+    ("convexity_result", "fallback_reason"),
+    [
+        ((True, False, []), "nonconvex_model"),
+        ((False, False, None), "convexity_unknown"),
+    ],
+)
+def test_mip_nlp_shot_direct_miqp_falls_back_when_convexity_not_certified(
+    monkeypatch,
+    convexity_result,
+    fallback_reason,
+):
+    import discopt.solver as solver_module
+    import discopt.solvers.oa as oa_module
+    from discopt.solvers.mip_nlp import solve_mip_nlp
+
+    calls = {}
+
+    monkeypatch.setattr(
+        solver_module,
+        "_classify_model_convexity",
+        lambda *args, **kwargs: convexity_result,
+    )
+
+    def fail_direct(*args, **kwargs):
+        raise AssertionError("direct QP backend should not run without convexity proof")
+
+    def fake_solve_oa(model, **kwargs):
+        del model
+        calls.update(kwargs)
+        return SolveResult(status="optimal", objective=0.0, bound=0.0, gap=0.0)
+
+    monkeypatch.setattr(solver_module, "_solve_qp_highs", fail_direct)
+    monkeypatch.setattr(oa_module, "solve_oa", fake_solve_oa)
+
+    result = solve_mip_nlp(
+        _miqp_style_model("shot_direct_miqp_convexity_fallback"),
+        method="oa",
+        mip_nlp_options={"mip_nlp_profile": "shot", "milp_solver": "highs"},
+    )
+
+    assert calls["milp_solver"] == "highs"
+    assert result.mip_nlp_trace["selected_strategy"] == "oa"
+    attempt = result.mip_nlp_trace["strategy_selection"]["direct_attempt"]
+    assert attempt["candidate_strategy"] == "direct_miqp"
+    assert attempt["fallback_reason"] == fallback_reason
+
+
+def test_mip_nlp_shot_rejects_unimplemented_safe_direct_routing_mode():
+    from discopt.solvers.mip_nlp import solve_mip_nlp
+
+    with pytest.raises(ValueError, match="direct_quadratic_routing"):
+        solve_mip_nlp(
+            _miqp_style_model("shot_direct_safe_rejected"),
+            method="oa",
+            mip_nlp_options={
+                "mip_nlp_profile": "shot",
+                "direct_quadratic_routing": "safe",
+            },
+        )
+
+
 @pytest.mark.parametrize(
     ("model_factory", "options", "trace_key", "trace_value"),
     [
@@ -2066,9 +2341,9 @@ def test_mip_nlp_shot_single_tree_rejects_non_gurobi_backend():
         (_miqp_style_model, {"quadratic_extraction": "native"}, "quadratic_extraction", "native"),
         (
             _miqp_style_model,
-            {"direct_quadratic_routing": "safe"},
+            {"direct_quadratic_routing": "off"},
             "direct_quadratic_routing",
-            "safe",
+            "off",
         ),
     ],
 )

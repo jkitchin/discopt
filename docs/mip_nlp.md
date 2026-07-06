@@ -126,7 +126,7 @@ Accepted SHOT-profile controls are:
 | `integer_bilinear_strategy` | `"auto"`, `"off"`, `"binary_expansion"`, `"mccormick"` |
 | `integer_bilinear_max_bits` | Positive integer or `None` |
 | `quadratic_extraction` | `"auto"`, `"off"`, `"native"`, `"relaxation"` |
-| `direct_quadratic_routing` | `"auto"`, `"off"`, `"safe"` |
+| `direct_quadratic_routing` | `"auto"`, `"off"` |
 | `rootsearch_strategy` | `"auto"`, `"none"`, `"bisection"`, `"toms748"` |
 | `fixed_nlp_strategy` | `"auto"`, `"none"`, `"always"`, `"adaptive"`, `"iteration"`, `"time"`, `"solution_pool"` |
 | `solution_pool_capacity`, `hyperplane_max_per_iter` | Positive integer or `None` |
@@ -152,6 +152,18 @@ solves an integrality-relaxed master before each integer master iteration and
 records the phase state under each iteration's `relaxation_phase` trace entry.
 Failures fall back to the existing OA/ECP path with details in the iteration
 trace.
+
+`direct_quadratic_routing="auto"` enables SHOT-profile direct strategy routing
+before the multi-tree OA/GOA fallback. Despite the historical option name, this
+gate covers every currently implemented direct class: continuous convex NLP,
+LP/MILP, convex QP/MIQP, and convex QCP/QCQP/MIQCP/MIQCQP. Convexity-sensitive
+classes route directly only when the classifier proves known convexity; unknown
+or nonconvex models fall back to OA/GOA and record the fallback reason in
+`result.mip_nlp_trace["strategy_selection"]["direct_attempt"]`.
+`direct_quadratic_routing="off"` disables these direct routes. QCP-class direct
+routing currently requires an explicit `milp_solver="gurobi"` request; with
+`milp_solver="auto"` those models fall back to the normal MIP-NLP path instead
+of probing an optional commercial backend.
 
 SHOT-profile runs also maintain an internal provenance-aware interior-point
 store for feasible relaxation, incumbent, and initial-POA points. Reusable
