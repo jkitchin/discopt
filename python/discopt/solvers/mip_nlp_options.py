@@ -100,7 +100,7 @@ _AUTO_OFF_ON = frozenset({"auto", "off", "on"})
 _PARTITION_STRATEGIES = frozenset({"auto", "off", "static", "adaptive"})
 _INTEGER_BILINEAR_STRATEGIES = frozenset({"auto", "off", "binary_expansion", "mccormick"})
 _QUADRATIC_EXTRACTION_STRATEGIES = frozenset({"auto", "off", "native", "relaxation"})
-_DIRECT_QUADRATIC_ROUTING = frozenset({"auto", "off", "safe"})
+_DIRECT_QUADRATIC_ROUTING = frozenset({"auto", "off"})
 _ROOTSEARCH_STRATEGIES = frozenset({"auto", "none", "bisection", "toms748"})
 _FIXED_NLP_STRATEGIES = frozenset(
     {"auto", "none", "always", "adaptive", "iteration", "time", "solution_pool"}

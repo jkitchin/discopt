@@ -1958,7 +1958,7 @@ def test_mip_nlp_shot_profile_options_validate_and_attach_trace(monkeypatch):
             "integer_bilinear_strategy": "binary-expansion",
             "integer_bilinear_max_bits": 8,
             "quadratic_extraction": "native",
-            "direct_quadratic_routing": "safe",
+            "direct_quadratic_routing": "auto",
             "rootsearch_strategy": "toms748",
             "fixed_nlp_strategy": "solution-pool",
             "solution_pool_capacity": 5,
@@ -1986,7 +1986,7 @@ def test_mip_nlp_shot_profile_options_validate_and_attach_trace(monkeypatch):
     assert cfg.integer_bilinear_strategy == "binary_expansion"
     assert cfg.integer_bilinear_max_bits == 8
     assert cfg.quadratic_extraction == "native"
-    assert cfg.direct_quadratic_routing == "safe"
+    assert cfg.direct_quadratic_routing == "auto"
     assert cfg.rootsearch_strategy == "toms748"
     assert cfg.fixed_nlp_strategy == "solution_pool"
     assert cfg.solution_pool_capacity == 5
@@ -2243,6 +2243,68 @@ def test_mip_nlp_shot_direct_qcp_falls_back_without_gurobi(monkeypatch):
     attempt = result.mip_nlp_trace["strategy_selection"]["direct_attempt"]
     assert attempt["candidate_strategy"] == "direct_qcp"
     assert attempt["fallback_reason"] == "requires_milp_solver_gurobi"
+
+
+@pytest.mark.parametrize(
+    ("convexity_result", "fallback_reason"),
+    [
+        ((True, False, []), "nonconvex_model"),
+        ((False, False, None), "convexity_unknown"),
+    ],
+)
+def test_mip_nlp_shot_direct_miqp_falls_back_when_convexity_not_certified(
+    monkeypatch,
+    convexity_result,
+    fallback_reason,
+):
+    import discopt.solver as solver_module
+    import discopt.solvers.oa as oa_module
+    from discopt.solvers.mip_nlp import solve_mip_nlp
+
+    calls = {}
+
+    monkeypatch.setattr(
+        solver_module,
+        "_classify_model_convexity",
+        lambda *args, **kwargs: convexity_result,
+    )
+
+    def fail_direct(*args, **kwargs):
+        raise AssertionError("direct QP backend should not run without convexity proof")
+
+    def fake_solve_oa(model, **kwargs):
+        del model
+        calls.update(kwargs)
+        return SolveResult(status="optimal", objective=0.0, bound=0.0, gap=0.0)
+
+    monkeypatch.setattr(solver_module, "_solve_qp_highs", fail_direct)
+    monkeypatch.setattr(oa_module, "solve_oa", fake_solve_oa)
+
+    result = solve_mip_nlp(
+        _miqp_style_model("shot_direct_miqp_convexity_fallback"),
+        method="oa",
+        mip_nlp_options={"mip_nlp_profile": "shot", "milp_solver": "highs"},
+    )
+
+    assert calls["milp_solver"] == "highs"
+    assert result.mip_nlp_trace["selected_strategy"] == "oa"
+    attempt = result.mip_nlp_trace["strategy_selection"]["direct_attempt"]
+    assert attempt["candidate_strategy"] == "direct_miqp"
+    assert attempt["fallback_reason"] == fallback_reason
+
+
+def test_mip_nlp_shot_rejects_unimplemented_safe_direct_routing_mode():
+    from discopt.solvers.mip_nlp import solve_mip_nlp
+
+    with pytest.raises(ValueError, match="direct_quadratic_routing"):
+        solve_mip_nlp(
+            _miqp_style_model("shot_direct_safe_rejected"),
+            method="oa",
+            mip_nlp_options={
+                "mip_nlp_profile": "shot",
+                "direct_quadratic_routing": "safe",
+            },
+        )
 
 
 @pytest.mark.parametrize(
