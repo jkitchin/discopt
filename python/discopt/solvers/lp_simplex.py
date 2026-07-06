@@ -63,6 +63,7 @@ def solve_lp(
     bounds: Optional[list[tuple[float, float]]] = None,
     time_limit: Optional[float] = None,
     warm_basis: Optional[object] = None,  # accepted for compatibility; ignored
+    max_iter: Optional[int] = None,
     **_kwargs: Any,
 ) -> LPResult:
     """Solve ``min c^T x  s.t.  A_ub x <= b_ub, A_eq x == b_eq, bounds`` exactly.
@@ -83,6 +84,14 @@ def solve_lp(
     equilibrates internally). The row duals come straight from the optimal basis
     (``y = B⁻ᵀ c_B``, exact at the vertex), and the reduced costs are
     ``c − A_ubᵀ y_ub − A_eqᵀ y_eq``.
+
+    ``max_iter`` caps the (cold) pivot count. It is *soundness-neutral*: within
+    the cap the returned optimum is exactly the vertex optimum (a rigorous
+    bound); if the cap is hit the status is ``ITERATION_LIMIT`` and no objective
+    is returned, so a caller that wants a robust result must fall back (never a
+    wrong bound). This lets a caller bound the rare cold-stall on a wide,
+    ill-conditioned LP (the F3 multilinear vertex-hull LP: ``2^n`` λ columns)
+    without waiting for the 100 000-pivot default.
     """
     from discopt._rust import solve_lp_warm_py
 
@@ -119,12 +128,16 @@ def solve_lp(
     lb_std = np.concatenate([lb, np.zeros(m)])
     ub_std = np.concatenate([ub, np.full(m_ub, 1e20), np.zeros(m_eq)])
 
+    _warm_kw: dict[str, Any] = {}
+    if max_iter is not None:
+        _warm_kw["max_iter"] = int(max_iter)
     status, x_full, obj, _iters, _cs, _bv, dual, _ray = solve_lp_warm_py(
         np.ascontiguousarray(c_std),
         np.ascontiguousarray(a_std),
         np.ascontiguousarray(b_vec),
         np.ascontiguousarray(lb_std),
         np.ascontiguousarray(ub_std),
+        **_warm_kw,
     )
 
     status_map = {

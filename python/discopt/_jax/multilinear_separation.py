@@ -28,10 +28,41 @@ so the loop can stop at any round and the bound stays valid.
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from itertools import product
 
 import numpy as np
+
+# Cold-simplex pivot cap for the multilinear vertex-hull LP. The hull LP has
+# ``2^n`` λ columns and ``n+1`` rows; on the widest ones (``n``≈10 → 1024
+# columns) the *cold* Rust simplex either converges in a few hundred pivots
+# (≈1 ms — ~100× faster than the POUNCE IPM's ~150 ms) or, on a degenerate/
+# ill-conditioned instance, spins to its 100 000-pivot default (≈1.6 s) — the
+# same stall class F2 guarded on the *warm* dual path, but the standalone hull
+# LP is solved cold. The two regimes are cleanly separated (hundreds vs 10⁵
+# pivots), so a small absolute cap detects a stall in ≈tens of ms; on a cap trip
+# (or any non-optimal exit) we fall back to POUNCE for that single LP, so no LP
+# is ever slower than the pre-F3 POUNCE baseline while the converging majority
+# gets the simplex win. The cap grows slowly with rows (``n+1``) for headroom.
+_HULL_SIMPLEX_STALL_K = 100
+_HULL_SIMPLEX_STALL_C = 500
+_HULL_SIMPLEX_STALL_MAX = 3000
+
+
+def _separation_lp_simplex_enabled() -> bool:
+    """Whether F3 routes the hull LP to the Rust simplex (env, default ON).
+
+    Honors the same ``DISCOPT_SEPARATION_LP_SIMPLEX`` flag as the edge-concave
+    separator (:func:`discopt._jax.edge_concave._separation_lp_solver`) and
+    strong branching; ``"0"`` restores the POUNCE-IPM-only path.
+    """
+    return os.environ.get("DISCOPT_SEPARATION_LP_SIMPLEX", "1").strip().lower() not in (
+        "0",
+        "false",
+        "no",
+        "off",
+    )
 
 
 @dataclass(frozen=True)
@@ -52,39 +83,71 @@ def _solve_envelope(verts: np.ndarray, fv: np.ndarray, x_star: np.ndarray, maxim
     """Return ``(env_value, a, b)`` of the (concave if maximize) vertex envelope.
 
     The supporting-hyperplane LP ``min/max f(v)·λ s.t. Vᵀλ = x*, 1ᵀλ = 1, λ ≥ 0``
-    is solved with the pure-Rust POUNCE IPM (issue #356 — no SciPy/HiGHS). Only
-    the dual *slope* ``a`` (the marginals on the ``Vᵀλ = x*`` rows) is taken from
-    POUNCE; the intercept ``b`` is then recomputed to the exact validity boundary
-    over the box vertices — ``b = minᵥ(f(v) − a·v)`` (under) / ``maxᵥ`` (over).
-    Because a multilinear function attains its box extrema at vertices, the
-    resulting hyperplane ``a·x + b`` under/over-estimates ``f`` *everywhere*, so
-    the cut is rigorously valid for ANY slope — robust to POUNCE's analytic-center
-    dual on a degenerate LP (a different facet, still valid) or any dual sign/scale
-    convention. ``None`` if POUNCE is unavailable or the solve did not converge.
+    is solved with the in-house pure-Rust warm simplex by default (F3 lever;
+    ``DISCOPT_SEPARATION_LP_SIMPLEX=0`` restores the POUNCE IPM — see
+    :func:`_separation_lp_simplex_enabled`). The simplex is tried first with a
+    size-derived pivot cap; on a cap trip or any non-optimal exit it falls back
+    to POUNCE for that LP, so no single LP is slower than the pre-F3 POUNCE
+    baseline. Only the dual *slope* ``a`` (the marginals on the ``Vᵀλ = x*``
+    rows) is taken from whichever engine converged; the intercept ``b`` is then
+    recomputed to the exact validity boundary over the box vertices —
+    ``b = minᵥ(f(v) − a·v)`` (under) / ``maxᵥ`` (over). Because a multilinear
+    function attains its box extrema at vertices, the resulting hyperplane
+    ``a·x + b`` under/over-estimates ``f`` *everywhere*, so the cut is rigorously
+    valid for ANY slope — robust to the backend's analytic-center dual on a
+    degenerate LP (a different facet, still valid) or any dual sign/scale
+    convention. ``None`` if no backend is available or neither engine converged.
     """
     from discopt.solvers import SolveStatus
-    from discopt.solvers.lp_pounce import solve_lp
 
     n = verts.shape[1]
     m = verts.shape[0]
     a_eq = np.vstack([verts.T, np.ones(m)])
     b_eq = np.append(x_star, 1.0)
     c = -fv if maximize else fv
-    try:
-        res = solve_lp(c, A_eq=a_eq, b_eq=b_eq, bounds=[(0.0, np.inf)] * m)
-    except ImportError:  # pragma: no cover - POUNCE is a core dependency
-        return None
-    if res.status != SolveStatus.OPTIMAL or res.dual_values is None:
-        return None
-    duals = np.asarray(res.dual_values, dtype=np.float64)
-    if duals.shape[0] != n + 1 or not np.all(np.isfinite(duals)):
-        return None
+    bounds = [(0.0, np.inf)] * m
+
+    duals: np.ndarray | None = None
+    if _separation_lp_simplex_enabled():
+        try:
+            from discopt.solvers.lp_simplex import SIMPLEX_AVAILABLE
+            from discopt.solvers.lp_simplex import solve_lp as _simplex_solve_lp
+
+            if SIMPLEX_AVAILABLE:
+                cap = min(
+                    _HULL_SIMPLEX_STALL_K * (n + 1) + _HULL_SIMPLEX_STALL_C,
+                    _HULL_SIMPLEX_STALL_MAX,
+                )
+                res = _simplex_solve_lp(c, A_eq=a_eq, b_eq=b_eq, bounds=bounds, max_iter=int(cap))
+                if res.status == SolveStatus.OPTIMAL and res.dual_values is not None:
+                    _d = np.asarray(res.dual_values, dtype=np.float64)
+                    if _d.shape[0] == n + 1 and np.all(np.isfinite(_d)):
+                        duals = _d
+        except ImportError:
+            duals = None
+    if duals is None:
+        # POUNCE path: the off-switch, or the per-LP fallback when the capped
+        # simplex stalled / returned a non-usable dual (validity is unaffected —
+        # the intercept is recomputed from the vertices below for ANY slope).
+        from discopt.solvers.lp_pounce import solve_lp as _pounce_solve_lp
+
+        try:
+            res = _pounce_solve_lp(c, A_eq=a_eq, b_eq=b_eq, bounds=bounds)
+        except ImportError:  # pragma: no cover - POUNCE is a core dependency
+            return None
+        if res.status != SolveStatus.OPTIMAL or res.dual_values is None:
+            return None
+        _d = np.asarray(res.dual_values, dtype=np.float64)
+        if _d.shape[0] != n + 1 or not np.all(np.isfinite(_d)):
+            return None
+        duals = _d
+
     a = -duals[:n] if maximize else duals[:n]
     if not np.all(np.isfinite(a)):
         return None
     # Recompute the intercept to the exact validity boundary over the vertices,
     # so ``a·v + b`` bounds ``f(v)`` at every vertex (hence everywhere) — this is
-    # what makes the cut sound without trusting POUNCE's reported intercept/scale.
+    # what makes the cut sound without trusting the engine's reported intercept/scale.
     resid = fv - verts @ a  # f(v) − a·v
     if maximize:  # concave overestimator: a·v + b >= f(v)  ->  b = maxᵥ(f(v)−a·v)
         b = float(np.max(resid))

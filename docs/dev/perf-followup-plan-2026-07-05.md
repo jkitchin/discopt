@@ -317,6 +317,26 @@ worktrees/sessions if desired, but each in its own PR.
   test (`DISCOPT_SEPARATION_LP_SIMPLEX=0` restores the old path).
 - **Acceptance:** nvs09 separation share <20 % of wall; nodes/s ≥ 10× prior;
   bound at 60 s strictly better than −59.24 (it may now certify; fine).
+- **Status: DONE with a falsified premise** (branch
+  `perf-f3-multilinear-separator-simplex`, pounce 0.7.0, M4 Pro; profile §5
+  item 8). The entry experiment falsified the uniform-10× assumption for this
+  LP class: the `2^n`-column hull LP is cold-simplex-vs-IPM (no warm re-use,
+  like #484), and on nvs09's 1024-column LPs the cold simplex is **bimodal** —
+  ~81 % solve in ≈1 ms (≈100× vs POUNCE's ~150 ms), ~19 % stall to the
+  100 000-pivot default. The kill-criterion "state the revised number" branch
+  applies. Implemented soundly: mirror #484's env
+  (`DISCOPT_SEPARATION_LP_SIMPLEX`, default ON) + intercept-recompute in
+  `multilinear_separation._solve_envelope`, plus a size-derived cold-simplex
+  pivot cap → POUNCE per-LP fallback (F2's warm-only guard does not cover the
+  cold hull LP). Measured nvs09 @60 s: **nodes/s 2.62 → 3.65 (1.4×, not 10×)**;
+  **bound −59.24 → −57.67 (strictly tighter, valid vs the −43.134 oracle)**;
+  separation share stays ~89 % because 128 wide-LP POUNCE fallbacks (44 s) are
+  IPM-favourable and irreducible by routing (a POUNCE-engine matter, cf. F6 /
+  jkitchin/pounce#182). The `<20 %`/`≥10×` targets are **not met**; the class
+  win (narrow hull LPs, ~81 % here → ~100× per LP) is real and sound. Cert
+  panel provably byte-identical (0 multilinear-separator calls at 60 s on all
+  41 certifying instances). Off-switch + soundness + fallback locked by
+  `python/tests/test_f3_multilinear_separation_lp_backend.py` (7 tests).
 
 ### F4 — Budget-gate the root heuristic NLP/compile phase  (B10 + §4; restores the `time_limit` contract)
 
