@@ -3148,6 +3148,7 @@ class Model:
         validate: bool = False,
         gauss_newton: bool = False,
         tuning: Optional["SolverTuning"] = None,
+        debug: Any = None,
         **kwargs,
     ) -> Union[SolveResult, Iterator["SolveUpdate"]]:
         r"""
@@ -3271,6 +3272,18 @@ class Model:
             step (iteration path) without changing the KKT point converged to.
             Silently falls back to the exact dense Hessian when the objective
             is not a recognized sum of squares (or the model maximizes).
+        debug : bool, str, or DebugSession, optional
+            Attach the interactive branch-and-bound debugger (a "pdb for B&B").
+            ``True`` / ``"repl"`` drops into a human REPL at the first
+            checkpoint; ``"on-error"`` enters only at termination when the
+            outcome is not a certified optimum (limit hit, interrupted,
+            "unknown", or certified infeasible) — not supported on the
+            pure-Rust MILP fast-path, whose hook carries no final status; a
+            ready-made :class:`discopt.debug.DebugSession` uses a custom
+            frontend. ``None`` (default) leaves the solve untouched —
+            fire-sites short-circuit on a module-global check, so a detached
+            solve is bound-neutral. Currently instruments the spatial-McCormick
+            B&B path (nonconvex MINLP / continuous). See :mod:`discopt.debug`.
         \*\*kwargs
             Additional keyword arguments passed to the solver backend.
 
@@ -3347,29 +3360,43 @@ class Model:
         from discopt._jax.deadline import deadline_scope
         from discopt.solver import solve_model
 
+        # Attach the interactive B&B debugger if requested. The fire-sites in
+        # the solve loop short-circuit on a module-global ``None`` check, so a
+        # detached solve (``debug=None``) is unaffected. ``debug`` may be True,
+        # "repl", "on-error", or a ready-made ``DebugSession``.
+        _debug_guard = None
+        if debug is not None and debug is not False:
+            from discopt import debug as _dbg
+
+            _debug_guard = _dbg.attach(_dbg.make_session(debug))
+
         # Install a process-global wall-clock deadline that JAX-compiled
         # while_loops (LP/QP/NLP IPM) can poll via host callback so they
         # self-terminate within ``time_limit + ε`` instead of running to
         # XLA convergence after Python's budget is gone (issue #80).
-        with deadline_scope(time_limit):
-            result = solve_model(
-                self,
-                time_limit=time_limit,
-                gap_tolerance=gap_tolerance,
-                threads=threads,
-                deterministic=deterministic,
-                partitions=partitions,
-                branching_policy=branching_policy,
-                initial_point=_x0_flat,
-                skip_convex_check=skip_convex_check,
-                nlp_bb=nlp_bb,
-                lazy_constraints=lazy_constraints,
-                incumbent_callback=incumbent_callback,
-                node_callback=node_callback,
-                solver=solver,
-                tuning=tuning,
-                **kwargs,
-            )
+        try:
+            with deadline_scope(time_limit):
+                result = solve_model(
+                    self,
+                    time_limit=time_limit,
+                    gap_tolerance=gap_tolerance,
+                    threads=threads,
+                    deterministic=deterministic,
+                    partitions=partitions,
+                    branching_policy=branching_policy,
+                    initial_point=_x0_flat,
+                    skip_convex_check=skip_convex_check,
+                    nlp_bb=nlp_bb,
+                    lazy_constraints=lazy_constraints,
+                    incumbent_callback=incumbent_callback,
+                    node_callback=node_callback,
+                    solver=solver,
+                    tuning=tuning,
+                    **kwargs,
+                )
+        finally:
+            if _debug_guard is not None:
+                _debug_guard.__exit__(None, None, None)
 
         # Attach model reference and auto-generate LLM explanation
         result._model = self

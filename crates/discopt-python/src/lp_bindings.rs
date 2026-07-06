@@ -11,7 +11,10 @@
 // type-complexity lints don't meaningfully apply to these binding shims.
 #![allow(clippy::too_many_arguments, clippy::type_complexity)]
 
-use discopt_core::bnb::milp_driver::{solve_milp as core_solve_milp, MilpOptions, MilpStatus};
+use discopt_core::bnb::milp_driver::{
+    solve_milp_hooked as core_solve_milp_hooked, MilpCheckpoint, MilpDebugControl, MilpDebugHook,
+    MilpDebugState, MilpOptions, MilpStatus,
+};
 use discopt_core::lp::aggregation::separate_aggregation_mir;
 use discopt_core::lp::basis::{recover_basis, Basis, BASIC};
 use discopt_core::lp::crossover::{crossover_to_vertex, LpView};
@@ -26,6 +29,7 @@ use numpy::{
 };
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
+use pyo3::types::{PyDict, PyList};
 
 /// Push an interior LP optimum `x` to a vertex of the optimal face.
 ///
@@ -649,6 +653,85 @@ pub fn solve_lp_batch_py<'py>(
 /// form (structural columns `[0, n_struct)`, slacks after). Returns
 /// `(status, x[n_struct], obj, bound, nodes, lp_iters)` where status is one of
 /// `optimal`, `feasible`, `infeasible`, `unbounded`, `node_limit`.
+/// Adapter that lets an attached Python debugger drive the Rust MILP search.
+///
+/// Holds a GIL-independent handle (`Py<PyAny>`, which is `Send + Sync`) to a
+/// Python callable. `checkpoint` re-acquires the GIL — the solve runs under
+/// `py.allow_threads`, so the search thread does not hold it — builds a plain
+/// state dict, calls the callable, and maps a truthy return to `Stop`. A hook
+/// that raises is reported and treated as `Continue`, so a buggy debugger can
+/// never corrupt the solve — EXCEPT `KeyboardInterrupt`, which stops the
+/// search and is stashed in `pending` so `solve_milp_py` re-raises it after
+/// the solve returns (Ctrl-C must abort the solve, not be swallowed).
+struct PyMilpHook {
+    callback: Py<PyAny>,
+    pending: std::sync::Mutex<Option<PyErr>>,
+}
+
+impl MilpDebugHook for PyMilpHook {
+    fn checkpoint(&self, state: &MilpDebugState<'_>) -> MilpDebugControl {
+        Python::with_gil(|py| {
+            let cp = match state.checkpoint {
+                MilpCheckpoint::IterStart => "iter_start",
+                MilpCheckpoint::AfterSelect => "after_select",
+                MilpCheckpoint::AfterProcess => "after_process",
+                MilpCheckpoint::IncumbentFound => "incumbent_found",
+                MilpCheckpoint::Terminated => "terminated",
+            };
+            let d = PyDict::new(py);
+            let _ = d.set_item("checkpoint", cp);
+            let _ = d.set_item("iteration", state.iteration);
+            let _ = d.set_item("nodes", state.total_nodes);
+            let _ = d.set_item("open_nodes", state.open_nodes);
+            let _ = d.set_item("incumbent", state.incumbent);
+            let _ = d.set_item("bound", state.bound);
+            let _ = d.set_item("gap", state.gap);
+            let _ = d.set_item("elapsed", state.elapsed);
+            // Node-box inspection at AfterSelect: marshal the batch's boxes/ids
+            // as plain nested lists (best-effort; skipped on any conversion
+            // error since inspection is non-critical).
+            if let (Some(lbs), Some(ubs), Some(ids)) =
+                (state.batch_lb, state.batch_ub, state.batch_ids)
+            {
+                let rows = |boxes: &[Vec<f64>]| -> Option<Bound<'_, PyList>> {
+                    let r: Vec<Bound<'_, PyList>> = boxes
+                        .iter()
+                        .map(|row| PyList::new(py, row.iter().copied()).ok())
+                        .collect::<Option<Vec<_>>>()?;
+                    PyList::new(py, r).ok()
+                };
+                if let (Some(py_lb), Some(py_ub)) = (rows(lbs), rows(ubs)) {
+                    let _ = d.set_item("batch_lb", py_lb);
+                    let _ = d.set_item("batch_ub", py_ub);
+                    let id_vec: Vec<usize> = ids.iter().map(|n| n.0).collect();
+                    if let Ok(id_list) = PyList::new(py, id_vec) {
+                        let _ = d.set_item("batch_ids", id_list);
+                    }
+                    let _ = d.set_item("n_vars", state.n_vars);
+                }
+            }
+            match self.callback.bind(py).call1((d,)) {
+                Ok(ret) => {
+                    if ret.is_truthy().unwrap_or(false) {
+                        MilpDebugControl::Stop
+                    } else {
+                        MilpDebugControl::Continue
+                    }
+                }
+                Err(e) => {
+                    if e.is_instance_of::<pyo3::exceptions::PyKeyboardInterrupt>(py) {
+                        *self.pending.lock().unwrap() = Some(e);
+                        MilpDebugControl::Stop
+                    } else {
+                        e.print(py);
+                        MilpDebugControl::Continue
+                    }
+                }
+            }
+        })
+    }
+}
+
 #[pyfunction]
 #[pyo3(signature = (c, a, b, lb, ub, integer_cols, n_struct, obj_const=0.0,
                     max_nodes=1_000_000, gap_tol=1e-6, tol=1e-9, root_cuts=16,
@@ -656,7 +739,7 @@ pub fn solve_lp_batch_py<'py>(
                     max_pool_cuts=128, heuristics=true, presolve=true, strong_branch=true,
                     node_propagation=false, reduced_cost_fixing=true,
                     sb_max_cands=6, sb_node_budget=48,
-                    time_limit_s=0.0))]
+                    time_limit_s=0.0, debug_hook=None))]
 pub fn solve_milp_py<'py>(
     py: Python<'py>,
     c: PyReadonlyArray1<'py, f64>,
@@ -684,6 +767,7 @@ pub fn solve_milp_py<'py>(
     sb_max_cands: usize,
     sb_node_budget: usize,
     time_limit_s: f64,
+    debug_hook: Option<Py<PyAny>>,
 ) -> PyResult<(String, Bound<'py, PyArray1<f64>>, f64, f64, usize, usize)> {
     let dims = a.shape();
     let (m, n) = (dims[0], dims[1]);
@@ -740,6 +824,14 @@ pub fn solve_milp_py<'py>(
             warm_stall_cap_override: None,
         },
     };
+    // Wrap an attached Python debugger (if any) as a core hook. It is created
+    // before releasing the GIL and re-acquires it per checkpoint; when absent,
+    // the search runs the untouched (bound-neutral) path.
+    let hook = debug_hook.map(|cb| PyMilpHook {
+        callback: cb,
+        pending: std::sync::Mutex::new(None),
+    });
+    let hook_ref: Option<&dyn MilpDebugHook> = hook.as_ref().map(|h| h as &dyn MilpDebugHook);
     let res = py.allow_threads(|| {
         let lp = LpView {
             a: &a_owned,
@@ -749,13 +841,22 @@ pub fn solve_milp_py<'py>(
             l: &l_owned,
             u: &u_owned,
         };
-        let r = core_solve_milp(&lp, &b_owned, obj_const, &opts);
+        let r = core_solve_milp_hooked(&lp, &b_owned, obj_const, &opts, hook_ref);
         // Emit the per-phase / pivot profile to stderr when DISCOPT_PROFILE is set
         // (no-op otherwise). solve_milp has returned, so its function-scoped phase
         // timers have recorded. Engine perf work (issue #332) reads this.
         discopt_core::profile::dump();
         r
     });
+    // Re-raise a KeyboardInterrupt captured by the debug hook: Ctrl-C during an
+    // attached debug session aborts the solve (graceful search stop above) and
+    // then propagates as the exception the caller expects, instead of being
+    // silently converted into a normal-looking partial result.
+    if let Some(h) = hook.as_ref() {
+        if let Some(err) = h.pending.lock().unwrap().take() {
+            return Err(err);
+        }
+    }
     let status = match res.status {
         MilpStatus::Optimal => "optimal",
         MilpStatus::Feasible => "feasible",

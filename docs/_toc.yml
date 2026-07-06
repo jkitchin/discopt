@@ -66,6 +66,7 @@ parts:
       - file: notebooks/pyomo_solver
       - file: pyomo_solver
       - file: notebooks/callbacks
+      - file: notebooks/interactive_debugger
   - caption: Solver Backends
     chapters:
       - file: notebooks/qp_solver

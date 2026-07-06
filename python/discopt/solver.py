@@ -30,6 +30,7 @@ from discopt._rust import PyTreeManager
 from discopt.constants import INFEASIBILITY_SENTINEL as _INFEASIBILITY_SENTINEL
 from discopt.constants import SENTINEL_THRESHOLD as _SENTINEL_THRESHOLD
 from discopt.constants import STARTING_POINT_CLIP as _SPC
+from discopt.debug import outermost_solve as _debug_outermost_solve
 from discopt.modeling.core import (
     Constraint,
     CustomCall,
@@ -2619,6 +2620,7 @@ def solve_model_accepted_kwargs() -> frozenset[str]:
 
 @_scoped_deep_recursion
 @_scoped_tuning
+@_debug_outermost_solve
 def solve_model(
     model: Model,
     time_limit: float = 3600.0,
@@ -5304,9 +5306,54 @@ def solve_model(
             _pn_obbt_budget_total,
         )
 
+    from discopt import debug as _debug
+
+    def _debug_validate_candidate(
+        x,
+        _ev=evaluator,
+        _cl=cl_list,
+        _cu=cu_list,
+        _ioff=int_offsets,
+        _isz=int_sizes,
+    ):
+        """Validate a debugger-injected candidate against the ORIGINAL problem.
+
+        ``inject_incumbent`` trusts its caller (no feasibility re-check), so
+        the debugger's ``inject`` steer must verify integrality + constraint
+        feasibility here and hand the tree the point's true evaluated
+        objective — never a relaxation bound (CLAUDE.md §1). Returns
+        ``(feasible, x_validated, obj)``; pure reads only.
+        """
+        xv = np.asarray(x, dtype=np.float64).copy()
+        if _ioff and not _is_integer_feasible_solution(xv, _ioff, _isz):
+            return False, xv, float("nan")
+        for _o, _s in zip(_ioff, _isz):
+            xv[_o : _o + _s] = np.round(xv[_o : _o + _s])
+        if _cl and not _check_constraint_feasibility(_ev, xv, _cl, _cu):
+            return False, xv, float("nan")
+        _obj = float(_ev.evaluate_objective(xv))
+        if not np.isfinite(_obj) or _obj >= _SENTINEL_THRESHOLD:
+            return False, xv, float("nan")
+        return True, xv, _obj
+
+    # Set when the interactive debugger's `quit` breaks the search loop: a
+    # user-interrupted exit proves nothing, so the status decision below must
+    # not fall through to a certified "infeasible"/"optimal".
+    _debug_quit = False
     while True:
         elapsed = time.perf_counter() - t_start
         if elapsed >= time_limit:
+            break
+
+        # Interactive debugger: top-of-iteration checkpoint (no-op when detached).
+        if _debug.fire(
+            _debug.Checkpoint.ITER_START,
+            tree=tree,
+            model=model,
+            iteration=iteration,
+            elapsed=elapsed,
+        ):
+            _debug_quit = True
             break
 
         # Update per-iteration time budget for NLP subproblem solves (issue #5).
@@ -5320,6 +5367,20 @@ def solve_model(
 
         n_batch = len(batch_ids)
         if n_batch == 0:
+            break
+
+        # Interactive debugger: nodes selected — boxes/ids now available.
+        if _debug.fire(
+            _debug.Checkpoint.AFTER_SELECT,
+            tree=tree,
+            model=model,
+            iteration=iteration,
+            elapsed=elapsed,
+            batch_lb=batch_lb,
+            batch_ub=batch_ub,
+            batch_ids=batch_ids,
+        ):
+            _debug_quit = True
             break
 
         node_infeasible_mask = np.zeros(n_batch, dtype=bool)
@@ -6931,11 +6992,42 @@ def solve_model(
                 if np.isfinite(_obj_i) and _obj_i < _SENTINEL_THRESHOLD:
                     tree.inject_incumbent(xr, _obj_i)
 
+        # Interactive debugger: steer point — relaxations solved, results not
+        # yet imported. Safe-steer (inject incumbent / branch hint) applies here;
+        # `inject` candidates are validated by _debug_validate_candidate.
+        if _debug.fire(
+            _debug.Checkpoint.BEFORE_IMPORT,
+            tree=tree,
+            model=model,
+            iteration=iteration,
+            elapsed=time.perf_counter() - t_start,
+            batch_lb=batch_lb,
+            batch_ub=batch_ub,
+            batch_ids=batch_ids,
+            result_lbs=result_lbs,
+            result_sols=result_sols,
+            result_feas=result_feas,
+            validator=_debug_validate_candidate,
+        ):
+            _debug_quit = True
+            break
+
         # Import results back to Rust tree
         t_rust_start = time.perf_counter()
         tree.import_results(result_ids, result_lbs, result_sols, result_feas)
         tree.process_evaluated()
         rust_time += time.perf_counter() - t_rust_start
+
+        # Interactive debugger: prune/branch/fathom applied by the tree.
+        if _debug.fire(
+            _debug.Checkpoint.AFTER_PROCESS,
+            tree=tree,
+            model=model,
+            iteration=iteration,
+            elapsed=time.perf_counter() - t_start,
+        ):
+            _debug_quit = True
+            break
 
         # Did the incumbent strictly improve this iteration, from ANY source?
         # proc_stats["incumbent_updates"] counts only incumbents found in the
@@ -6953,6 +7045,16 @@ def solve_model(
         _incumbent_improved = _inc_obj_now < _last_tighten_inc - 1e-9
         if _incumbent_improved:
             _last_tighten_inc = _inc_obj_now
+            # Interactive debugger: new-incumbent event checkpoint.
+            if _debug.fire(
+                _debug.Checkpoint.INCUMBENT_FOUND,
+                tree=tree,
+                model=model,
+                iteration=iteration,
+                elapsed=time.perf_counter() - t_start,
+            ):
+                _debug_quit = True
+                break
 
         # --- Periodic OBBT with incumbent cutoff (Phase C) ---
         # When a new incumbent is found and bounds are still wide,
@@ -7296,12 +7398,32 @@ def solve_model(
             # _unconverged_fathom. Conservative by design: soundness over capability.
             status = "unknown"
             _gap_certified = False
+        elif _debug_quit:
+            # Interactive debugger `quit`: the user interrupted the search, so
+            # the tree is NOT exhausted and neither infeasibility nor optimality
+            # was proven (a false "infeasible" here is the worst-class error).
+            # Report "unknown", uncertified.
+            status = "unknown"
+            _gap_certified = False
         else:
             # Tree exhausted with no feasible node and every fathom was a valid
             # certificate (empty McCormick/LP relaxation over a finite box or
             # SolveStatus.INFEASIBLE): infeasibility *is* a certified conclusion, so
             # leave _gap_certified untouched.
             status = "infeasible"
+
+    # Interactive debugger: terminal checkpoint. Fired after the status
+    # decision so ``debug="on-error"`` sessions can key on the outcome:
+    # ``error`` is the non-"optimal" status ("time_limit", "unknown",
+    # "infeasible", ...), or None on a certified optimum.
+    _debug.fire(
+        _debug.Checkpoint.TERMINATED,
+        tree=tree,
+        model=model,
+        iteration=iteration,
+        elapsed=wall_time,
+        error=None if status == "optimal" else status,
+    )
 
     from discopt.modeling.core import ObjectiveSense
 
@@ -7871,9 +7993,54 @@ def _solve_nlp_bb(
         if improved:
             _heur_state["found"] += 1
 
+    from discopt import debug as _debug
+
+    def _debug_validate_candidate(
+        x,
+        _ev=evaluator,
+        _cl=cl_list,
+        _cu=cu_list,
+        _ioff=int_offsets,
+        _isz=int_sizes,
+    ):
+        """Validate a debugger-injected candidate against the ORIGINAL problem.
+
+        ``inject_incumbent`` trusts its caller (no feasibility re-check), so
+        the debugger's ``inject`` steer must verify integrality + constraint
+        feasibility here and hand the tree the point's true evaluated
+        objective — never a relaxation bound (CLAUDE.md §1). Returns
+        ``(feasible, x_validated, obj)``; pure reads only.
+        """
+        xv = np.asarray(x, dtype=np.float64).copy()
+        if _ioff and not _is_integer_feasible_solution(xv, _ioff, _isz):
+            return False, xv, float("nan")
+        for _o, _s in zip(_ioff, _isz):
+            xv[_o : _o + _s] = np.round(xv[_o : _o + _s])
+        if _cl and not _check_constraint_feasibility(_ev, xv, _cl, _cu):
+            return False, xv, float("nan")
+        _obj = float(_ev.evaluate_objective(xv))
+        if not np.isfinite(_obj) or _obj >= _SENTINEL_THRESHOLD:
+            return False, xv, float("nan")
+        return True, xv, _obj
+
+    # Set when the interactive debugger's `quit` breaks the search loop: a
+    # user-interrupted exit proves nothing, so the status decision below must
+    # not fall through to a certified "infeasible"/"optimal".
+    _debug_quit = False
     while True:
         elapsed = time.perf_counter() - t_start
         if elapsed >= time_limit:
+            break
+
+        # Interactive debugger: top-of-iteration checkpoint (no-op when detached).
+        if _debug.fire(
+            _debug.Checkpoint.ITER_START,
+            tree=tree,
+            model=model,
+            iteration=iteration,
+            elapsed=elapsed,
+        ):
+            _debug_quit = True
             break
 
         # Update per-iteration time budget for NLP subproblem solves (issue #5).
@@ -7887,6 +8054,20 @@ def _solve_nlp_bb(
 
         n_batch = len(batch_ids)
         if n_batch == 0:
+            break
+
+        # Interactive debugger: nodes selected — boxes/ids now available.
+        if _debug.fire(
+            _debug.Checkpoint.AFTER_SELECT,
+            tree=tree,
+            model=model,
+            iteration=iteration,
+            elapsed=elapsed,
+            batch_lb=batch_lb,
+            batch_ub=batch_ub,
+            batch_ids=batch_ids,
+        ):
+            _debug_quit = True
             break
 
         # Tighten node bounds via constraint propagation (FBBT).
@@ -8236,11 +8417,41 @@ def _solve_nlp_bb(
                 "solve_model should have refused or rerouted to spatial B&B."
             )
 
+        # Interactive debugger: steer point — relaxations solved, not imported.
+        # `inject` candidates are validated by _debug_validate_candidate.
+        if _debug.fire(
+            _debug.Checkpoint.BEFORE_IMPORT,
+            tree=tree,
+            model=model,
+            iteration=iteration,
+            elapsed=time.perf_counter() - t_start,
+            batch_lb=batch_lb,
+            batch_ub=batch_ub,
+            batch_ids=batch_ids,
+            result_lbs=result_lbs,
+            result_sols=result_sols,
+            result_feas=result_feas,
+            validator=_debug_validate_candidate,
+        ):
+            _debug_quit = True
+            break
+
         # Import results back to Rust tree
         t_rust_start = time.perf_counter()
         tree.import_results(result_ids, result_lbs, result_sols, result_feas)
         tree.process_evaluated()
         rust_time += time.perf_counter() - t_rust_start
+
+        # Interactive debugger: prune/branch/fathom applied by the tree.
+        if _debug.fire(
+            _debug.Checkpoint.AFTER_PROCESS,
+            tree=tree,
+            model=model,
+            iteration=iteration,
+            elapsed=time.perf_counter() - t_start,
+        ):
+            _debug_quit = True
+            break
 
         # --- Node callback ---
         if node_callback is not None:
@@ -8555,11 +8766,31 @@ def _solve_nlp_bb(
             # proven — soundness over capability.
             status = "unknown"
             _gap_certified = False
+        elif _debug_quit:
+            # Interactive debugger `quit`: the user interrupted the search, so
+            # the tree is NOT exhausted and neither infeasibility nor optimality
+            # was proven (a false "infeasible" here is the worst-class error).
+            # Report "unknown", uncertified.
+            status = "unknown"
+            _gap_certified = False
         else:
             # Tree exhausted with no feasible node and every fathom was a valid
             # certificate (FBBT-empty box or SolveStatus.INFEASIBLE): infeasibility
             # *is* a certified conclusion, so leave _gap_certified untouched.
             status = "infeasible"
+
+    # Interactive debugger: terminal checkpoint. Fired after the status
+    # decision so ``debug="on-error"`` sessions can key on the outcome:
+    # ``error`` is the non-"optimal" status ("time_limit", "unknown",
+    # "infeasible", ...), or None on a certified optimum.
+    _debug.fire(
+        _debug.Checkpoint.TERMINATED,
+        tree=tree,
+        model=model,
+        iteration=iteration,
+        elapsed=wall_time,
+        error=None if status == "optimal" else status,
+    )
 
     # Negate bound back for maximization
     bound_val = stats["global_lower_bound"]
@@ -11598,6 +11829,12 @@ def _solve_milp_simplex(
     # bounding the wasted time before fallback to a few seconds.
     _remaining = float(time_limit) - (time.perf_counter() - t_start)
     _milp_budget = max(0.5, min(0.5 * _remaining, _SIMPLEX_MILP_BUDGET_CAP_S))
+    # Interactive debugger: install the Rust checkpoint hook only when a debugger
+    # is attached now (bound-neutral otherwise). This is the pure-Rust MILP
+    # fast-path — the hook fires the same node-lifecycle checkpoints as the
+    # Python-driven loops, across the PyO3 boundary.
+    from discopt import debug as _debug
+
     status, x_struct, obj, bound, nodes, _lp_iters = solve_milp_py(
         np.ascontiguousarray(lp_data.c, dtype=np.float64),
         A,
@@ -11610,9 +11847,30 @@ def _solve_milp_simplex(
         int(max_nodes),
         float(gap_tolerance),
         time_limit_s=float(_milp_budget),
+        debug_hook=_debug.rust_hook(),
     )
     wall_time = time.perf_counter() - t_start
     maximize = model._objective is not None and model._objective.sense == ObjectiveSense.MAXIMIZE
+
+    def _debug_stopped_result() -> Optional[SolveResult]:
+        """Partial, uncertified result when the interactive debugger's `quit`
+        stopped the Rust search. Returned at the defer sites below instead of
+        ``None`` so the caller does NOT fall back to another engine — the user
+        asked the solve to stop, not to restart elsewhere. ``None`` (the normal
+        case) preserves the plain defer-to-fallback behavior."""
+        _sess = _debug.current()
+        if _sess is None or not _sess.stop_requested:
+            return None
+        _bv = None
+        if np.isfinite(bound):
+            _bv = -bound if maximize else bound
+        return SolveResult(
+            status="unknown",
+            bound=_bv,
+            wall_time=wall_time,
+            node_count=nodes,
+            gap_certified=False,
+        )
 
     if status in ("optimal", "feasible"):
         x_arr = np.asarray(x_struct, dtype=np.float64)
@@ -11651,7 +11909,7 @@ def _solve_milp_simplex(
                 "deferring to a sound engine",
                 status,
             )
-            return None
+            return _debug_stopped_result()
         x_dict = _unpack_solution(model, x_arr)
         obj_val = -obj if maximize else obj
         bound_val = None
@@ -11718,8 +11976,10 @@ def _solve_milp_simplex(
         # back to the robust spatial / POUNCE path — which, e.g., solves nvs12's
         # integer-bilinear reformulation in ~0.4 s where this engine stalls
         # (issue #291). A genuine incumbent is returned via the optimal/feasible
-        # branch above, so deferral only discards a no-solution result.
-        return None
+        # branch above, so deferral only discards a no-solution result. On a
+        # debugger `quit` this instead surfaces the uncertified partial state
+        # (no fallback engine resumes a solve the user stopped).
+        return _debug_stopped_result()
     return SolveResult(status="infeasible", wall_time=wall_time, node_count=nodes)
 
 
@@ -11994,9 +12254,26 @@ def _solve_milp_bb(
     # Root-node certification instrumentation (cert:T0.1).
     _root_time: Optional[float] = None
     _root_glb_internal: Optional[float] = None
+    from discopt import debug as _debug
+
+    # Set when the interactive debugger's `quit` breaks the search loop: a
+    # user-interrupted exit proves nothing, so the status decision below must
+    # not fall through to a certified "infeasible"/"optimal".
+    _debug_quit = False
     while True:
         elapsed = time.perf_counter() - t_start
         if elapsed >= time_limit:
+            break
+
+        # Interactive debugger: top-of-iteration checkpoint (no-op when detached).
+        if _debug.fire(
+            _debug.Checkpoint.ITER_START,
+            tree=tree,
+            model=model,
+            iteration=iteration,
+            elapsed=elapsed,
+        ):
+            _debug_quit = True
             break
 
         t_rust_start = time.perf_counter()
@@ -12005,6 +12282,20 @@ def _solve_milp_bb(
 
         n_batch = len(batch_ids)
         if n_batch == 0:
+            break
+
+        # Interactive debugger: nodes selected — boxes/ids now available.
+        if _debug.fire(
+            _debug.Checkpoint.AFTER_SELECT,
+            tree=tree,
+            model=model,
+            iteration=iteration,
+            elapsed=elapsed,
+            batch_lb=batch_lb,
+            batch_ub=batch_ub,
+            batch_ids=batch_ids,
+        ):
+            _debug_quit = True
             break
 
         t_jax_start = time.perf_counter()
@@ -12061,10 +12352,38 @@ def _solve_milp_bb(
 
         jax_time += time.perf_counter() - t_jax_start
 
+        # Interactive debugger: steer point — relaxations solved, not imported.
+        if _debug.fire(
+            _debug.Checkpoint.BEFORE_IMPORT,
+            tree=tree,
+            model=model,
+            iteration=iteration,
+            elapsed=time.perf_counter() - t_start,
+            batch_lb=batch_lb,
+            batch_ub=batch_ub,
+            batch_ids=batch_ids,
+            result_lbs=result_lbs,
+            result_sols=result_sols,
+            result_feas=result_feas,
+        ):
+            _debug_quit = True
+            break
+
         t_rust_start = time.perf_counter()
         tree.import_results(result_ids, result_lbs, result_sols, result_feas)
         tree.process_evaluated()
         rust_time += time.perf_counter() - t_rust_start
+
+        # Interactive debugger: prune/branch/fathom applied by the tree.
+        if _debug.fire(
+            _debug.Checkpoint.AFTER_PROCESS,
+            tree=tree,
+            model=model,
+            iteration=iteration,
+            elapsed=time.perf_counter() - t_start,
+        ):
+            _debug_quit = True
+            break
 
         # Root-node certification snapshot (cert:T0.1).
         if iteration == 0:
@@ -12084,6 +12403,7 @@ def _solve_milp_bb(
 
     wall_time = time.perf_counter() - t_start
     python_time = wall_time - rust_time - jax_time
+
     stats = tree.stats()
     incumbent = tree.incumbent()
 
@@ -12156,10 +12476,30 @@ def _solve_milp_bb(
         elif wall_time >= time_limit:
             status = "time_limit"
             _gap_certified = False
+        elif _debug_quit:
+            # Interactive debugger `quit`: the user interrupted the search, so
+            # the tree is NOT exhausted and neither infeasibility nor optimality
+            # was proven (a false "infeasible" here is the worst-class error).
+            # Report "unknown", uncertified.
+            status = "unknown"
+            _gap_certified = False
         else:
             # Tree exhausted with no feasible node: infeasibility *is* a certified
             # conclusion, so leave _gap_certified untouched.
             status = "infeasible"
+
+    # Interactive debugger: terminal checkpoint. Fired after the status
+    # decision so ``debug="on-error"`` sessions can key on the outcome:
+    # ``error`` is the non-"optimal" status ("time_limit", "unknown",
+    # "infeasible", ...), or None on a certified optimum.
+    _debug.fire(
+        _debug.Checkpoint.TERMINATED,
+        tree=tree,
+        model=model,
+        iteration=iteration,
+        elapsed=wall_time,
+        error=None if status == "optimal" else status,
+    )
 
     from discopt.modeling.core import ObjectiveSense
 
@@ -12415,9 +12755,26 @@ def _solve_miqp_bb(
     # Root-node certification instrumentation (cert:T0.1).
     _root_time: Optional[float] = None
     _root_glb_internal: Optional[float] = None
+    from discopt import debug as _debug
+
+    # Set when the interactive debugger's `quit` breaks the search loop: a
+    # user-interrupted exit proves nothing, so the status decision below must
+    # not fall through to a certified "infeasible"/"optimal".
+    _debug_quit = False
     while True:
         elapsed = time.perf_counter() - t_start
         if elapsed >= time_limit:
+            break
+
+        # Interactive debugger: top-of-iteration checkpoint (no-op when detached).
+        if _debug.fire(
+            _debug.Checkpoint.ITER_START,
+            tree=tree,
+            model=model,
+            iteration=iteration,
+            elapsed=elapsed,
+        ):
+            _debug_quit = True
             break
 
         t_rust_start = time.perf_counter()
@@ -12426,6 +12783,20 @@ def _solve_miqp_bb(
 
         n_batch = len(batch_ids)
         if n_batch == 0:
+            break
+
+        # Interactive debugger: nodes selected — boxes/ids now available.
+        if _debug.fire(
+            _debug.Checkpoint.AFTER_SELECT,
+            tree=tree,
+            model=model,
+            iteration=iteration,
+            elapsed=elapsed,
+            batch_lb=batch_lb,
+            batch_ub=batch_ub,
+            batch_ids=batch_ids,
+        ):
+            _debug_quit = True
             break
 
         t_jax_start = time.perf_counter()
@@ -12467,10 +12838,38 @@ def _solve_miqp_bb(
 
         jax_time += time.perf_counter() - t_jax_start
 
+        # Interactive debugger: steer point — relaxations solved, not imported.
+        if _debug.fire(
+            _debug.Checkpoint.BEFORE_IMPORT,
+            tree=tree,
+            model=model,
+            iteration=iteration,
+            elapsed=time.perf_counter() - t_start,
+            batch_lb=batch_lb,
+            batch_ub=batch_ub,
+            batch_ids=batch_ids,
+            result_lbs=result_lbs,
+            result_sols=result_sols,
+            result_feas=result_feas,
+        ):
+            _debug_quit = True
+            break
+
         t_rust_start = time.perf_counter()
         tree.import_results(result_ids, result_lbs, result_sols, result_feas)
         tree.process_evaluated()
         rust_time += time.perf_counter() - t_rust_start
+
+        # Interactive debugger: prune/branch/fathom applied by the tree.
+        if _debug.fire(
+            _debug.Checkpoint.AFTER_PROCESS,
+            tree=tree,
+            model=model,
+            iteration=iteration,
+            elapsed=time.perf_counter() - t_start,
+        ):
+            _debug_quit = True
+            break
 
         # Root-node certification snapshot (cert:T0.1).
         if iteration == 0:
@@ -12490,6 +12889,7 @@ def _solve_miqp_bb(
 
     wall_time = time.perf_counter() - t_start
     python_time = wall_time - rust_time - jax_time
+
     stats = tree.stats()
     incumbent = tree.incumbent()
 
@@ -12567,10 +12967,30 @@ def _solve_miqp_bb(
         elif wall_time >= time_limit:
             status = "time_limit"
             _gap_certified = False
+        elif _debug_quit:
+            # Interactive debugger `quit`: the user interrupted the search, so
+            # the tree is NOT exhausted and neither infeasibility nor optimality
+            # was proven (a false "infeasible" here is the worst-class error).
+            # Report "unknown", uncertified.
+            status = "unknown"
+            _gap_certified = False
         else:
             # Tree exhausted with no feasible node: infeasibility *is* a certified
             # conclusion, so leave _gap_certified untouched.
             status = "infeasible"
+
+    # Interactive debugger: terminal checkpoint. Fired after the status
+    # decision so ``debug="on-error"`` sessions can key on the outcome:
+    # ``error`` is the non-"optimal" status ("time_limit", "unknown",
+    # "infeasible", ...), or None on a certified optimum.
+    _debug.fire(
+        _debug.Checkpoint.TERMINATED,
+        tree=tree,
+        model=model,
+        iteration=iteration,
+        elapsed=wall_time,
+        error=None if status == "optimal" else status,
+    )
 
     from discopt.modeling.core import ObjectiveSense
 

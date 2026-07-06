@@ -72,6 +72,79 @@ pub struct MilpResult {
     pub lp_iters: usize,
 }
 
+/// A node-lifecycle checkpoint fired to an attached [`MilpDebugHook`].
+///
+/// Mirrors the Python-side `discopt.debug.Checkpoint` so the pure-Rust MILP
+/// fast-path is inspectable by the same debugger that drives the spatial /
+/// MIQP / NLP-BB loops.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MilpCheckpoint {
+    /// Top of a batch iteration.
+    IterStart,
+    /// The batch of open nodes was just exported — their boxes are available.
+    AfterSelect,
+    /// After the batch's results were imported and prune/branch/fathom ran.
+    AfterProcess,
+    /// A strictly-better incumbent was just adopted.
+    IncumbentFound,
+    /// Once, after the search loop exits (final / limit / infeasible).
+    Terminated,
+}
+
+/// Aggregate solver state passed to a debug hook at a checkpoint. Read-only.
+///
+/// The `batch_*` fields are populated only at [`MilpCheckpoint::AfterSelect`],
+/// where the current batch of open-node boxes is in scope; they are `None`
+/// elsewhere. The lifetime `'a` borrows those boxes from the export batch.
+#[derive(Debug, Clone, Copy)]
+pub struct MilpDebugState<'a> {
+    /// Which checkpoint fired.
+    pub checkpoint: MilpCheckpoint,
+    /// Batch-iteration counter (0-based), mirroring the Python loops.
+    pub iteration: usize,
+    /// Total B&B nodes created so far.
+    pub total_nodes: usize,
+    /// Open nodes remaining in the frontier.
+    pub open_nodes: usize,
+    /// Incumbent objective (internal min sense), or `None` if none yet.
+    pub incumbent: Option<f64>,
+    /// Global lower (dual) bound.
+    pub bound: f64,
+    /// Current relative optimality gap.
+    pub gap: f64,
+    /// Wall-clock seconds since the solve started.
+    pub elapsed: f64,
+    /// Number of structural variables (box length reference).
+    pub n_vars: usize,
+    /// Per-node lower-bound boxes of the exported batch (AfterSelect only).
+    pub batch_lb: Option<&'a [Vec<f64>]>,
+    /// Per-node upper-bound boxes of the exported batch (AfterSelect only).
+    pub batch_ub: Option<&'a [Vec<f64>]>,
+    /// Node ids of the exported batch (AfterSelect only).
+    pub batch_ids: Option<&'a [NodeId]>,
+}
+
+/// What a debug hook tells the search to do after a checkpoint.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MilpDebugControl {
+    /// Keep searching.
+    Continue,
+    /// Stop the search now (graceful — a valid uncertified result is built).
+    Stop,
+}
+
+/// A debugger attached to the Rust MILP search. Implemented on the Python side
+/// by a GIL-reacquiring adapter over a Python callable. Must be `Sync` because
+/// the solve runs under `Python::allow_threads`.
+///
+/// **Zero effect when absent:** every fire-site is gated on `Option::is_some`,
+/// so a `None` hook leaves the search bit-for-bit identical (bound-neutral).
+pub trait MilpDebugHook: Sync {
+    /// Called at each fired checkpoint; return [`MilpDebugControl::Stop`] to
+    /// end the search gracefully.
+    fn checkpoint(&self, state: &MilpDebugState<'_>) -> MilpDebugControl;
+}
+
 /// Options for the MILP driver.
 pub struct MilpOptions {
     /// Number of structural (model) variables; columns `[n_struct, n)` are slacks.
@@ -186,6 +259,19 @@ fn decide_status(
 /// Solve `min cᵀx + obj_const s.t. A x = b, l ≤ x ≤ u` with `integer_cols`
 /// integer-constrained, by Rust-internal warm-started-simplex branch and bound.
 pub fn solve_milp(lp: &LpView<'_>, b: &[f64], obj_const: f64, opts: &MilpOptions) -> MilpResult {
+    solve_milp_hooked(lp, b, obj_const, opts, None)
+}
+
+/// [`solve_milp`] with an optional interactive-debugger hook. When `hook` is
+/// `None` this is bit-for-bit identical to a plain solve (all fire-sites
+/// short-circuit); the `solve_milp` wrapper above passes `None`.
+pub fn solve_milp_hooked(
+    lp: &LpView<'_>,
+    b: &[f64],
+    obj_const: f64,
+    opts: &MilpOptions,
+    hook: Option<&dyn MilpDebugHook>,
+) -> MilpResult {
     crate::profile::init_from_env();
     crate::profile::reset();
     let n = lp.n;
@@ -435,7 +521,44 @@ pub fn solve_milp(lp: &LpView<'_>, b: &[f64], obj_const: f64, opts: &MilpOptions
     // change branching choice / cut tightness / early incumbents, never a
     // bound's validity.
     let _t_search = crate::profile::Timer::new(crate::profile::Phase::SearchLoop);
+
+    // Interactive debugger bookkeeping. `dbg_iter` mirrors the Python loops'
+    // iteration counter; `dbg_last_inc` tracks the incumbent so the
+    // `IncumbentFound` event fires exactly on a strict improvement. When `hook`
+    // is `None` the macro below expands to `false` and nothing is read.
+    let mut dbg_iter: usize = 0;
+    let mut dbg_last_inc: f64 = f64::INFINITY;
+    macro_rules! fire_dbg {
+        ($cp:expr) => {{
+            if let Some(h) = hook {
+                let s = tm.stats();
+                let inc = tm.incumbent().map(|(_, v)| v);
+                let state = MilpDebugState {
+                    checkpoint: $cp,
+                    iteration: dbg_iter,
+                    total_nodes: s.total_nodes,
+                    open_nodes: s.open_nodes,
+                    incumbent: inc,
+                    bound: s.global_lower_bound,
+                    gap: s.gap,
+                    elapsed: t_start.elapsed().as_secs_f64(),
+                    n_vars: ns,
+                    batch_lb: None,
+                    batch_ub: None,
+                    batch_ids: None,
+                };
+                matches!(h.checkpoint(&state), MilpDebugControl::Stop)
+            } else {
+                false
+            }
+        }};
+    }
+
     'search: loop {
+        if fire_dbg!(MilpCheckpoint::IterStart) {
+            gap_certified = false;
+            break;
+        }
         if tm.is_finished() || tm.gap() <= opts.gap_tol {
             break;
         }
@@ -452,6 +575,31 @@ pub fn solve_milp(lp: &LpView<'_>, b: &[f64], obj_const: f64, opts: &MilpOptions
         let batch = tm.export_batch(64);
         if batch.node_ids.is_empty() {
             break;
+        }
+
+        // Interactive debugger: nodes selected — expose the batch's boxes/ids so
+        // `print node <i>` works on this pure-Rust path too. Gated on the hook.
+        if let Some(h) = hook {
+            let s = tm.stats();
+            let inc = tm.incumbent().map(|(_, v)| v);
+            let state = MilpDebugState {
+                checkpoint: MilpCheckpoint::AfterSelect,
+                iteration: dbg_iter,
+                total_nodes: s.total_nodes,
+                open_nodes: s.open_nodes,
+                incumbent: inc,
+                bound: s.global_lower_bound,
+                gap: s.gap,
+                elapsed: t_start.elapsed().as_secs_f64(),
+                n_vars: ns,
+                batch_lb: Some(&batch.lb),
+                batch_ub: Some(&batch.ub),
+                batch_ids: Some(&batch.node_ids),
+            };
+            if matches!(h.checkpoint(&state), MilpDebugControl::Stop) {
+                gap_certified = false;
+                break 'search;
+            }
         }
 
         // Equilibration scaling for the working matrix, computed once per batch
@@ -622,6 +770,23 @@ pub fn solve_milp(lp: &LpView<'_>, b: &[f64], obj_const: f64, opts: &MilpOptions
         tm.import_results(&results);
         tm.process_evaluated();
 
+        // Interactive debugger: post prune/branch/fathom, plus the new-incumbent
+        // event on a strict improvement (from any source this batch).
+        if let Some(v) = tm.incumbent().map(|(_, v)| v) {
+            if v < dbg_last_inc - 1e-9 {
+                dbg_last_inc = v;
+                if fire_dbg!(MilpCheckpoint::IncumbentFound) {
+                    gap_certified = false;
+                    break 'search;
+                }
+            }
+        }
+        if fire_dbg!(MilpCheckpoint::AfterProcess) {
+            gap_certified = false;
+            break 'search;
+        }
+        dbg_iter += 1;
+
         // Fold this batch's newly-found global cuts into the shared matrix.
         // Stored node bases are extended lazily on their next solve, so children
         // warm-start through the dual simplex from the cut-augmented basis.
@@ -643,6 +808,10 @@ pub fn solve_milp(lp: &LpView<'_>, b: &[f64], obj_const: f64, opts: &MilpOptions
             slack_u = u_w[ns..].to_vec();
         }
     }
+
+    // Interactive debugger: terminal checkpoint (return value is advisory only —
+    // the solve is already over, so its control is ignored).
+    let _ = fire_dbg!(MilpCheckpoint::Terminated);
 
     let stats = tm.stats();
     let bound = stats.global_lower_bound;
@@ -2001,6 +2170,56 @@ mod tests {
         let r = solve_milp(&lp, &[9.0], 0.0, &opts(4, vec![0, 1, 2, 3]));
         assert_eq!(r.status, MilpStatus::Optimal);
         assert!((r.obj - (-10.0)).abs() < 1e-6, "obj {}", r.obj);
+    }
+
+    /// A no-op debug hook must be bound-neutral: identical status / obj / nodes
+    /// vs. no hook (CLAUDE.md §5), while still firing at least one checkpoint.
+    #[test]
+    fn debug_hook_is_bound_neutral() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct Counter(AtomicUsize);
+        impl MilpDebugHook for Counter {
+            fn checkpoint(&self, _s: &MilpDebugState<'_>) -> MilpDebugControl {
+                self.0.fetch_add(1, Ordering::Relaxed);
+                MilpDebugControl::Continue
+            }
+        }
+
+        // A knapsack big enough to branch (multiple nodes, an incumbent event).
+        let a = [5.0, 3.0, 2.0, 4.0, 3.0, 5.0, 1.0];
+        let c = [-8.0, -5.0, -3.0, -6.0, -4.0, -7.0, 0.0];
+        let l = [0.0; 7];
+        let u = [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, INF];
+        let lp = LpView {
+            a: &a,
+            m: 1,
+            n: 7,
+            c: &c,
+            l: &l,
+            u: &u,
+        };
+        let base = solve_milp(&lp, &[10.0], 0.0, &opts(6, vec![0, 1, 2, 3, 4, 5]));
+
+        let hook = Counter(AtomicUsize::new(0));
+        let hooked = solve_milp_hooked(
+            &lp,
+            &[10.0],
+            0.0,
+            &opts(6, vec![0, 1, 2, 3, 4, 5]),
+            Some(&hook),
+        );
+
+        assert_eq!(base.status, hooked.status);
+        assert_eq!(base.nodes, hooked.nodes, "node count drifted with hook");
+        assert!(
+            (base.obj - hooked.obj).abs() < 1e-12,
+            "obj drifted with hook"
+        );
+        assert!(
+            hook.0.load(Ordering::Relaxed) > 0,
+            "hook never fired — checkpoints not wired"
+        );
     }
 
     #[test]
