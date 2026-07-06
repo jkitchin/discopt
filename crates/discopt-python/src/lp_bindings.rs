@@ -644,9 +644,12 @@ pub fn solve_lp_batch_py<'py>(
 /// `py.allow_threads`, so the search thread does not hold it — builds a plain
 /// state dict, calls the callable, and maps a truthy return to `Stop`. A hook
 /// that raises is reported and treated as `Continue`, so a buggy debugger can
-/// never corrupt the solve.
+/// never corrupt the solve — EXCEPT `KeyboardInterrupt`, which stops the
+/// search and is stashed in `pending` so `solve_milp_py` re-raises it after
+/// the solve returns (Ctrl-C must abort the solve, not be swallowed).
 struct PyMilpHook {
     callback: Py<PyAny>,
+    pending: std::sync::Mutex<Option<PyErr>>,
 }
 
 impl MilpDebugHook for PyMilpHook {
@@ -676,8 +679,13 @@ impl MilpDebugHook for PyMilpHook {
                     }
                 }
                 Err(e) => {
-                    e.print(py);
-                    MilpDebugControl::Continue
+                    if e.is_instance_of::<pyo3::exceptions::PyKeyboardInterrupt>(py) {
+                        *self.pending.lock().unwrap() = Some(e);
+                        MilpDebugControl::Stop
+                    } else {
+                        e.print(py);
+                        MilpDebugControl::Continue
+                    }
                 }
             }
         })
@@ -776,7 +784,10 @@ pub fn solve_milp_py<'py>(
     // Wrap an attached Python debugger (if any) as a core hook. It is created
     // before releasing the GIL and re-acquires it per checkpoint; when absent,
     // the search runs the untouched (bound-neutral) path.
-    let hook = debug_hook.map(|cb| PyMilpHook { callback: cb });
+    let hook = debug_hook.map(|cb| PyMilpHook {
+        callback: cb,
+        pending: std::sync::Mutex::new(None),
+    });
     let hook_ref: Option<&dyn MilpDebugHook> = hook.as_ref().map(|h| h as &dyn MilpDebugHook);
     let res = py.allow_threads(|| {
         let lp = LpView {
@@ -794,6 +805,15 @@ pub fn solve_milp_py<'py>(
         discopt_core::profile::dump();
         r
     });
+    // Re-raise a KeyboardInterrupt captured by the debug hook: Ctrl-C during an
+    // attached debug session aborts the solve (graceful search stop above) and
+    // then propagates as the exception the caller expects, instead of being
+    // silently converted into a normal-looking partial result.
+    if let Some(h) = hook.as_ref() {
+        if let Some(err) = h.pending.lock().unwrap().take() {
+            return Err(err);
+        }
+    }
     let status = match res.status {
         MilpStatus::Optimal => "optimal",
         MilpStatus::Feasible => "feasible",

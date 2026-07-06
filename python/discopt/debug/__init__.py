@@ -19,10 +19,15 @@ Programmatic / notebook use::
 
 Correctness note: debugger steering can never invalidate the solver's
 certificate — see :mod:`discopt.debug.steer`.
+
+The active session is **thread-local**: attaching in one thread never affects
+solves running in other threads, so concurrent solves can each carry their own
+debugger (or none). Attach in the same thread that calls ``solve()``.
 """
 
 from __future__ import annotations
 
+import threading
 from typing import TYPE_CHECKING, Any, Callable, Optional
 
 from .checkpoints import Checkpoint
@@ -47,33 +52,38 @@ __all__ = [
     "make_session",
 ]
 
-# Module-global active session. ``None`` => detached => fire() is a no-op.
-_ACTIVE: Optional[DebugSession] = None
+# Thread-local active session. ``None`` => detached => fire() is a no-op.
+# Thread-local (not module-global) so concurrent solves in different threads
+# never share a frontend or stop each other.
+_TLS = threading.local()
+
+
+def _active() -> Optional[DebugSession]:
+    return getattr(_TLS, "session", None)
 
 
 def attach(session: Optional[DebugSession] = None, **kwargs: Any) -> "_AttachGuard":
     """Attach a debugger session for the duration of a ``with`` block (or until
-    :func:`detach`). With no argument, builds a default REPL session.
+    :func:`detach`). With no argument, builds a default REPL session. The
+    attachment is thread-local: only solves on this thread see the debugger.
     """
-    global _ACTIVE
     if session is None:
         session = make_session(**kwargs)
-    _ACTIVE = session
+    _TLS.session = session
     return _AttachGuard(session)
 
 
 def detach() -> None:
-    """Remove the active debugger; subsequent ``fire`` calls are no-ops."""
-    global _ACTIVE
-    _ACTIVE = None
+    """Remove this thread's active debugger; subsequent ``fire`` calls are no-ops."""
+    _TLS.session = None
 
 
 def current() -> Optional[DebugSession]:
-    return _ACTIVE
+    return _active()
 
 
 def is_attached() -> bool:
-    return _ACTIVE is not None
+    return _active() is not None
 
 
 def make_session(
@@ -86,10 +96,16 @@ def make_session(
 
     ``kind`` may be ``True`` / ``"repl"`` (human REPL), ``"json"`` (agent
     protocol on stdin/stdout), ``"on-error"``, or a ready-made
-    :class:`DebugSession` (returned as-is).
+    :class:`DebugSession` (returned as-is). Anything else raises ``ValueError``
+    — a typo like ``debug="jsn"`` must not silently fall back to the REPL.
     """
     if isinstance(kind, DebugSession):
         return kind
+    if kind is not True and kind not in ("repl", "json", "on-error"):
+        raise ValueError(
+            f"debug: unknown mode {kind!r} (expected True, 'repl', 'json', "
+            "'on-error', or a DebugSession)"
+        )
     enter_on_error = kind == "on-error"
     if frontend is None:
         if kind == "json":
@@ -131,7 +147,7 @@ def fire(
         ``True`` if the user requested the solve stop (``quit``); the loop
         should ``break`` promptly. Always ``False`` when detached.
     """
-    session = _ACTIVE
+    session = _active()
     if session is None:
         return False
     ctx = DebugContext.build(
@@ -161,7 +177,7 @@ def fire_rust(state: dict) -> bool:
     ``True`` to stop the search (``quit``). A no-op / detached debugger returns
     ``False`` — matching the Rust guard that only installs a hook when attached.
     """
-    session = _ACTIVE
+    session = _active()
     if session is None:
         return False
     return session.on_checkpoint(DebugContext.from_rust(state))
@@ -173,7 +189,7 @@ def rust_hook() -> "Optional[Callable[[dict], bool]]":
     A debugger must be attached *now* for a hook to be installed, so the Rust
     search stays bound-neutral whenever no debugger is present.
     """
-    if _ACTIVE is None:
+    if _active() is None:
         return None
     return fire_rust
 

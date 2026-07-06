@@ -571,3 +571,91 @@ def test_json_result_ok_flag():
     assert results[1]["ok"] is False
     assert results[2]["ok"] is False
     assert results[3]["ok"] is True
+
+
+# ── nits: run-N one-shot, strict make_session ────────────────────────────────
+
+
+@pytest.mark.unit
+def test_run_is_one_shot_and_break_del_clears_temp():
+    """`run N` pauses once at iteration N without leaving a breakpoint behind,
+    and `break del N` clears one-shot breaks too."""
+    eng = DebugCommandEngine()
+    sess = DebugSession(RecordingFrontend())
+    ctx0 = DebugContext.build(debug.Checkpoint.ITER_START, tree=FakeTree(), iteration=0)
+    res = eng.execute("run 3", ctx0, sess)
+    assert res.control is Control.CONTINUE
+    assert 3 in eng.temp_breaks and 3 not in eng.iter_breaks
+    ctx3 = DebugContext.build(debug.Checkpoint.ITER_START, tree=FakeTree(), iteration=3)
+    assert eng.hit_reason(ctx3) == "iteration 3"
+    assert eng.hit_reason(ctx3) is None  # consumed: nothing left behind
+    # break del also clears a pending one-shot
+    eng.execute("run 7", ctx0, sess)
+    eng.execute("break del 7", ctx0, sess)
+    ctx7 = DebugContext.build(debug.Checkpoint.ITER_START, tree=FakeTree(), iteration=7)
+    assert eng.hit_reason(ctx7) is None
+
+
+@pytest.mark.unit
+def test_make_session_rejects_unknown_mode():
+    """A typo'd debug= string raises instead of silently opening the REPL."""
+    with pytest.raises(ValueError, match="unknown mode"):
+        debug.make_session("jsn")
+    with pytest.raises(ValueError, match="unknown mode"):
+        debug.make_session("onerror")
+    # The documented forms still work.
+    assert debug.make_session(True) is not None
+    assert debug.make_session("on-error").enter_on_error is True
+
+
+# ── nits: thread-local attachment ────────────────────────────────────────────
+
+
+@pytest.mark.unit
+def test_attachment_is_thread_local():
+    """Attaching in one thread must not leak into another: each thread's solves
+    see only its own session."""
+    import threading
+
+    sess = DebugSession(RecordingFrontend())
+    debug.attach(sess)
+    try:
+        seen_in_thread = []
+
+        def worker():
+            seen_in_thread.append(debug.current())
+            # Attaching in the worker must not clobber the main thread either.
+            debug.attach(DebugSession(RecordingFrontend()))
+            debug.detach()
+
+        t = threading.Thread(target=worker)
+        t.start()
+        t.join()
+        assert seen_in_thread == [None], "main-thread session leaked into worker"
+        assert debug.current() is sess, "worker attach/detach clobbered main thread"
+    finally:
+        debug.detach()
+
+
+# ── nits: Ctrl-C on the pure-Rust path aborts, not swallowed ─────────────────
+
+
+@pytest.mark.smoke
+def test_rust_milp_keyboard_interrupt_aborts():
+    """KeyboardInterrupt raised by the frontend on the pure-Rust MILP path
+    stops the search and re-raises — it must not be swallowed into a
+    normal-looking result."""
+
+    class InterruptFrontend:
+        def interact(self, ctx, session):
+            raise KeyboardInterrupt
+
+    debug.attach(DebugSession(InterruptFrontend()))
+    try:
+        with pytest.raises(KeyboardInterrupt):
+            _pure_milp_model().solve(time_limit=15.0, nlp_solver="simplex")
+    finally:
+        debug.detach()
+    # The debugger machinery is still healthy afterward.
+    res = _pure_milp_model().solve(time_limit=15.0, nlp_solver="simplex")
+    assert res.status == "optimal"

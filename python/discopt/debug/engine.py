@@ -195,8 +195,10 @@ def _cmd_detach(engine, args, ctx, session):
 
 def _cmd_run(engine, args, ctx, session):
     if not args:
-        return CommandResult(["usage: run N"])
-    engine.iter_breaks.add(int(args[0]))
+        return CommandResult(["usage: run N"], ok=False)
+    # One-shot (temp) break: `run N` means "pause once at iteration N", not
+    # "leave a breakpoint at N behind".
+    engine.temp_breaks.add(int(args[0]))
     return CommandResult([f"running to iteration {int(args[0])}"], control=Control.CONTINUE)
 
 
@@ -231,6 +233,7 @@ def _cmd_break(engine, args, ctx, session):
         return CommandResult([f"break on {args[1]}"])
     if head == "del":
         engine.iter_breaks.discard(int(args[1]))
+        engine.temp_breaks.discard(int(args[1]))
         return CommandResult([f"removed break {int(args[1])}"])
     if head == "clear":
         what = args[1] if len(args) > 1 else "all"
