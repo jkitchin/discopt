@@ -396,6 +396,48 @@ overwritten:
    jkitchin/pounce#182), not a routing one. Cert panel: **provably byte-identical**
    — no certifying instance reaches the multilinear separator (0 calls at 60 s
    on all 41, incl. the heavy cvxnonsep/fac2/tspn05/flay02m).
+9. **"F4: gate the root heuristic NLP by a fitted `compile ~ f(model size)`
+   curve; contvar 221 s"** (§4; §7 F4 mechanism/acceptance). *Correction (F4
+   implementation, `perf-f4-root-budget-gate`, pounce 0.7.0, M-series arm64):*
+   two premises fell to the entry experiment.
+   (a) **The 221 s contvar overrun does not reproduce on this build:** contvar
+   now returns in **60.7 s** (root 29.3 s) at `time_limit=60` — already within
+   the §0.7 envelope. The 221 s was pounce 0.8.0 / an earlier snapshot; the
+   reproducing overrun on this build is **heatexch_gen3 (80.7 s)** and, at
+   `time_limit=60`, **hda (64.2 s)**. The measurement wins.
+   (b) **Compile time is not a function of cheap model size** (the plan asked
+   for a fitted curve). First-time sparse-Hessian XLA compile, standalone, over
+   7 MINLPLib models: tls2 0.15 s (n=37, dense), fac2 0.15 s (n=66, dense),
+   heatexch_gen1 1.1 s, hda 2.5 s (n=722), casctanks 5.0 s, heatexch_gen3 49 s
+   (n=580), **contvar 186 s (n=296)**. Regressing `log(compile)` on `n_vars`
+   gives **R² = 0.002** (contvar at n=296 compiles ~74× slower than hda at
+   n=722); the same model varies 2.5→8.3 s run-to-run. The cost is governed by
+   the DAG's shape/depth (contvar's nested `log/exp/division` chains), not any
+   cheap scalar, and is not predictable in advance. Consequently the compile
+   estimate is a **conservative floor** (dense path → 0.5 s; sparse
+   compressed-HVP path, uncompiled → a 15 s risk-headroom constant), not a point
+   predictor — used only to gate *primal-heuristic* entry, where over-estimating
+   merely skips a heuristic (sound; never touches the dual bound).
+   (c) **The real overrun on this build is not one uninterruptible compile but
+   repeated post-deadline heuristic-NLP launches** that each overrun their own
+   `max_wall_time` clamp (a nominal 3 s POUNCE solve runs ~10–15 s because each
+   IPM iteration's exact Hessian is expensive). The fix gates *entry* into every
+   root heuristic NLP by the remaining budget (a self-calibrating worst-case
+   observed per-solve cost) and threads the absolute deadline into the looping
+   heuristics (`diving`/`rins` poll before each sub-NLP; the multistart caps its
+   extra starts by the observed per-start cost). Result: **heatexch_gen3
+   80.7 → 60.9 s**, **contvar 60.7 s (unchanged)**, **hda 64.2 → 64.1 s**;
+   full 61-instance panel at `time_limit=30`: **61/61 within §0.7** with **0
+   objective changes and 0 lost incumbents** vs the gate-off baseline.
+   (d) **KILL-CRITERION HIT (a second overrun site):** the out-of-panel large
+   flowsheet **super3t** overruns `time_limit=30` at **74 s ungated / 40 s
+   gated** — but its residual overrun is **not** a heuristic NLP (an instrumented
+   solve makes **zero** `solve_nlp` calls). Its root time is spent in
+   `_jax/term_classifier._compute_var_offset` — the McCormick relaxation
+   term-classification build, an uninterruptible O(n·terms) pass that predates
+   the heuristic phase. This is a **distinct overrun site** outside F4's scope
+   (F4 halves it as a side effect but cannot close it); it needs its own
+   entry/streaming gate and is filed as F4 follow-up **#507**.
 
 ---
 

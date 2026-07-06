@@ -1421,6 +1421,7 @@ def _solve_root_node_multistart(
     n_random=None,
     convex=False,
     deadline=None,
+    observe_cost=None,
 ):
     """Solve root NLP relaxation from multiple starting points.
 
@@ -1447,20 +1448,36 @@ def _solve_root_node_multistart(
     best_feasible = False
     best_obj = np.inf
     last_result = None
+    # Rolling mean of observed per-start wall (self-calibrating). On the
+    # expensive-Hessian class a single start can run many seconds and OVERRUN its
+    # own ``max_wall_time`` clamp (the exact Hessian per IPM iteration is slow), so
+    # a start launched with a few seconds nominally left still runs ~10 s past the
+    # deadline (F4, heatexch_gen3). Refusing to *launch* a further start when the
+    # time left cannot absorb one typical start is the only reliable cap. The FIRST
+    # start always runs, so the relaxation bound this routine provides is preserved
+    # — only the *extra* diversification starts (a primal-quality heuristic: a
+    # better local optimum of the SAME relaxation) are capped. Sound: capping extra
+    # starts never changes the dual bound.
+    _max_start_wall = 0.0
 
     for _start_idx, x0 in enumerate(starting_points):
         # Deadline enforcement: each NLP start is a full local solve (seconds on
-        # large models). Without a stop the multistart can run all ~N starts well
-        # past a tight ``time_limit`` (heatexch_gen3: 14 starts × ~4.4 s = 62 s
-        # under a 15 s budget). Always run the first start (we must return some
-        # iterate), then stop launching new starts once the deadline has passed,
-        # and shrink each start's own wall budget to the time actually left.
+        # large models). Always run the first start (we must return some iterate),
+        # then stop launching new starts once the deadline has passed OR the time
+        # left cannot absorb another WORST-CASE-so-far start, and shrink each
+        # start's own wall budget to the time actually left. The worst-case (max)
+        # rather than the mean is used because a single start can OVERRUN its own
+        # ``max_wall_time`` clamp by ~10 s on the expensive-Hessian class, so once
+        # one long start is observed, no further start is launched unless the time
+        # left can absorb one of that size — that is what keeps the ``time_limit``
+        # contract (heatexch_gen3, F4).
         if deadline is not None and _start_idx > 0:
             _ms_remaining = deadline - time.perf_counter()
-            if _ms_remaining <= 0.0:
+            if _ms_remaining <= max(_DEADLINE_NODE_FLOOR_S, _max_start_wall):
                 break
             options = dict(options)
             options["max_wall_time"] = max(_ms_remaining, _DEADLINE_NODE_FLOOR_S)
+        _t_start_nlp = time.perf_counter()
         nlp_result = _solve_node_nlp(
             evaluator,
             x0,
@@ -1470,6 +1487,14 @@ def _solve_root_node_multistart(
             options,
             nlp_solver=nlp_solver,
         )
+        _start_wall = time.perf_counter() - _t_start_nlp
+        _max_start_wall = max(_max_start_wall, _start_wall)
+        # Publish each start's wall to the caller's budget-gate cost tracker so
+        # downstream root heuristics (subnlp, diving) know how expensive one NLP
+        # solve is on this model even when no relaxation candidate ever ran the
+        # feasibility pump (the no-relaxation flowsheet class, F4).
+        if observe_cost is not None:
+            observe_cost(_start_wall)
         last_result = nlp_result
         if nlp_result.status not in (SolveStatus.OPTIMAL, SolveStatus.ITERATION_LIMIT):
             continue
@@ -5155,6 +5180,70 @@ def solve_model(
     iteration = 0
     _deadline = t_start + time_limit
 
+    # --- F4: root-heuristic NLP/compile budget gate --------------------------
+    # ``solve(time_limit=T)`` is a contract. On the no-relaxation flowsheet class
+    # (contvar, heatexch_gen3, hda) the root PRIMAL-HEURISTIC phase blows past it
+    # two ways (bottleneck-profile-2026-07-05 §4):
+    #   (a) the *first* heuristic NLP forces an uninterruptible first-time XLA
+    #       compile of the sparse Lagrangian Hessian — up to ~3x the whole budget
+    #       on a deep DAG, and no deadline poll can fire inside a jit compile;
+    #   (b) once compiled, each per-node/heuristic NLP solve still runs many
+    #       seconds and OVERRUNS its own ``max_wall_time`` clamp (the exact
+    #       Hessian per IPM iteration is expensive), so families that launch an
+    #       NLP without first checking the deadline (diving, extra pump rounds,
+    #       node-diving) accumulate tens of seconds past T.
+    # Gate ENTRY (compiles cannot be interrupted). Every gated call is a primal
+    # heuristic, so skipping one is always sound: it can change which incumbent is
+    # found and when (node counts may shift) but never the dual bound or the
+    # returned optimum. Off switch: ``DISCOPT_ROOT_BUDGET_GATE=0``.
+    _root_budget_gate_on = os.environ.get("DISCOPT_ROOT_BUDGET_GATE", "1") != "0"
+    # Worst-case observed root/heuristic NLP wall (self-calibrating per model +
+    # machine); seeds a default until the first solve is measured. Used to refuse
+    # launching a new heuristic NLP when the time left cannot absorb another
+    # solve of the largest size seen so far. The *max* (not mean) is deliberate:
+    # a heuristic NLP can OVERRUN its own ``max_wall_time`` clamp by ~10 s on the
+    # expensive-Hessian class, so once one long solve is observed we must not
+    # launch another unless that much budget remains. A dict so the nested
+    # closures can mutate it without a ``nonlocal`` dance.
+    _heur_nlp_cost = {"max": 0.0, "default": 2.0}
+
+    def _observe_heur_nlp(wall: float) -> None:
+        """Record an observed heuristic/root NLP wall for the entry gate."""
+        if wall >= 0.0 and wall > _heur_nlp_cost["max"]:
+            _heur_nlp_cost["max"] = float(wall)
+
+    def _mean_heur_nlp_cost() -> float:
+        if _heur_nlp_cost["max"] <= 0.0:
+            return _heur_nlp_cost["default"]
+        return _heur_nlp_cost["max"]
+
+    def _root_heur_nlp_entry_ok(_ev=None) -> bool:
+        """Whether a compile-/solve-triggering root heuristic NLP may start now.
+
+        Returns False when either the deadline has effectively passed (no room to
+        absorb even one typical solve) or the evaluator's Hessian kernel is not
+        yet compiled and the estimated first-time compile does not fit the
+        remaining budget. Both cases skip a *primal heuristic* only — never the
+        dual-bound path — so refusing is always sound (§0.3 heuristic-policy).
+        """
+        if not _root_budget_gate_on:
+            return True
+        _remaining = _deadline - time.perf_counter()
+        # No budget left to absorb even one typical (already-compiled) solve.
+        if _remaining <= max(_DEADLINE_NODE_FLOOR_S, _mean_heur_nlp_cost()):
+            return False
+        # First-time compile risk: an uninterruptible XLA compile can dwarf the
+        # whole budget and cannot be polled once entered, so only enter when the
+        # (conservative, measured) estimate fits the time left.
+        if _ev is not None:
+            try:
+                _compile_est = _ev.hessian_compile_estimate_s()
+            except Exception:
+                _compile_est = 0.0
+            if _compile_est > 0.0 and _remaining < _compile_est:
+                return False
+        return True
+
     # Root-node certification instrumentation (cert:T0.1). Snapshot the tree's
     # global lower bound (internal minimization sense) and the elapsed wall
     # clock at the moment the root node has been fully processed (end of
@@ -5629,6 +5718,7 @@ def solve_model(
                         opts,
                         nlp_solver,
                         deadline=_deadline,
+                        observe_cost=_observe_heur_nlp,
                     )
                 elif iteration > 0 and _node_nlp_due:
                     # Warm-start from parent solution if available
@@ -6135,18 +6225,20 @@ def solve_model(
                 if result_lbs[i] < _SENTINEL_THRESHOLD and result_lbs[i] < best_root_obj:
                     best_root_obj = result_lbs[i]
                     best_root_idx = i
-            if best_root_idx is not None:
+            if best_root_idx is not None and _root_heur_nlp_entry_ok(evaluator):
                 try:
                     from discopt._jax.primal_heuristics import feasibility_pump
 
+                    _t_fp = time.perf_counter()
                     fp_sol = feasibility_pump(
                         model,
                         result_sols[best_root_idx],
                         max_rounds=5,
                         backend=_resolve_heuristic_backend(nlp_solver),
                         evaluator=evaluator,
-                        deadline=t_start + time_limit,
+                        deadline=_deadline,
                     )
+                    _observe_heur_nlp(time.perf_counter() - _t_fp)
                     if fp_sol is not None:
                         fp_obj = float(evaluator.evaluate_objective(fp_sol))
                         fp_feas = not cl_list or _check_constraint_feasibility(
@@ -6176,10 +6268,15 @@ def solve_model(
                 # improve the current incumbent are injected (``inject_incumbent``
                 # enforces strict improvement), so a worse seed can never regress
                 # the reported solution.
-                if _mc_lp_relaxer is not None and not _model_is_convex:
+                if (
+                    _mc_lp_relaxer is not None
+                    and not _model_is_convex
+                    and _root_heur_nlp_entry_ok(_active_evaluator)
+                ):
                     try:
                         from discopt._jax.primal_heuristics import feasibility_pump
 
+                        _t_relax = time.perf_counter()
                         _relax_opts = dict(opts)
                         _relax_opts["max_wall_time"] = max(
                             _DEADLINE_NODE_FLOOR_S,
@@ -6194,6 +6291,7 @@ def solve_model(
                             nlp_solver,
                             n_random=0,
                             deadline=_deadline,
+                            observe_cost=_observe_heur_nlp,
                         )
                         if (
                             _root_relax is not None
@@ -6207,7 +6305,7 @@ def solve_model(
                                 max_rounds=5,
                                 backend=_resolve_heuristic_backend(nlp_solver),
                                 evaluator=evaluator,
-                                deadline=t_start + time_limit,
+                                deadline=_deadline,
                             )
                             if fp_sol2 is not None:
                                 fp_obj2 = float(evaluator.evaluate_objective(fp_sol2))
@@ -6226,6 +6324,8 @@ def solve_model(
                                     )
                     except Exception as e:
                         logger.debug("NLP-relaxation feasibility pump failed: %s", e)
+                    finally:
+                        _observe_heur_nlp(time.perf_counter() - _t_relax)
 
                 # --- Integer local search (1-opt + 2-opt) ---
                 # Two roles, both at the root:
@@ -6287,17 +6387,20 @@ def solve_model(
                 if (
                     best_root_idx is not None
                     and tree.incumbent() is None
-                    and (time.perf_counter() - t_start) < time_limit
+                    and _root_heur_nlp_entry_ok(evaluator)
                 ):
                     try:
                         from discopt._jax.primal_heuristics import fractional_diving
 
+                        _t_dive = time.perf_counter()
                         dv = fractional_diving(
                             model,
                             result_sols[best_root_idx],
                             backend=_resolve_heuristic_backend(nlp_solver),
                             evaluator=evaluator,
+                            deadline=_deadline,
                         )
+                        _observe_heur_nlp(time.perf_counter() - _t_dive)
                         if dv is not None:
                             _x_dv, _obj_dv = dv
                             _obj_dv = float(_obj_dv)
@@ -6323,6 +6426,11 @@ def solve_model(
             and _subnlp_calls < subnlp_max_calls
             and (iteration == 0 or iteration % max(1, subnlp_frequency) == 0)
             and not _root_optimum_proven()
+            # F4: the SubNLP heuristic launches one or more full NLP solves that
+            # overrun their own ``max_wall_time`` on the expensive-Hessian class;
+            # do not even start it when the budget is exhausted (it is a primal
+            # heuristic, so skipping is sound and never touches the dual bound).
+            and _root_heur_nlp_entry_ok(evaluator)
         ):
             from discopt._jax.primal_heuristics import subnlp as _subnlp
 
@@ -6332,10 +6440,15 @@ def solve_model(
             # relaxation/midpoint seeds miss (prob07: 162070 -> 154990). No-op
             # when the model carries no initial values. Sound: subnlp re-verifies
             # feasibility and inject_incumbent enforces strict improvement.
-            if iteration == 0 and _subnlp_calls < subnlp_max_calls:
+            if (
+                iteration == 0
+                and _subnlp_calls < subnlp_max_calls
+                and _root_heur_nlp_entry_ok(evaluator)
+            ):
                 _gseed = _gams_initial_seed(model, lb, ub)
                 if _gseed is not None:
                     _subnlp_calls += 1
+                    _t_sn_g = time.perf_counter()
                     try:
                         _sn = _subnlp(
                             model,
@@ -6351,6 +6464,7 @@ def solve_model(
                     except Exception as _e:
                         logger.debug("subnlp (gams seed) raised: %s", _e)
                         _sn = None
+                    _observe_heur_nlp(time.perf_counter() - _t_sn_g)
                     if _sn is not None:
                         _x_sn, _obj_sn = _sn
                         _subnlp_feasible += 1
@@ -6366,11 +6480,17 @@ def solve_model(
             ]
             _cands_sn.sort(key=lambda t: t[1])
             # Fall back to bound midpoint if no relaxation produced a usable point.
-            if not _cands_sn and iteration == 0:
+            # F4: gate this single fallback solve on the budget too — on the
+            # no-relaxation class ``_cands_sn`` is always empty (every bound is a
+            # sentinel), so this is the subnlp that fires, and it OVERRUNS its
+            # nominal budget on the expensive-Hessian models. Skipping is sound
+            # (primal heuristic).
+            if not _cands_sn and iteration == 0 and _root_heur_nlp_entry_ok(evaluator):
                 _lb_c = np.clip(lb, -_SPC, _SPC)
                 _ub_c = np.clip(ub, -_SPC, _SPC)
                 _x_seed = 0.5 * (_lb_c + _ub_c)
                 _subnlp_calls += 1
+                _t_sn_mid = time.perf_counter()
                 try:
                     _sn = _subnlp(
                         model,
@@ -6386,6 +6506,7 @@ def solve_model(
                 except Exception as _e:
                     logger.debug("subnlp raised: %s", _e)
                     _sn = None
+                _observe_heur_nlp(time.perf_counter() - _t_sn_mid)
                 if _sn is not None:
                     _x_sn, _obj_sn = _sn
                     _subnlp_feasible += 1
@@ -6406,15 +6527,17 @@ def solve_model(
                     if _loop_idx > 0 and _root_optimum_proven():
                         break
                     # Deadline enforcement: each subnlp is a round-and-repair NLP
-                    # search (seconds on large models). At the root ``_try_idxs``
-                    # can hold many candidates, so without a stop the loop runs
-                    # well past a tight ``time_limit``. Always attempt the first
-                    # candidate (a feasible incumbent is the primary goal, worth a
-                    # small overrun); only the *extra* candidates are deadline-gated
-                    # so the loop cannot run well past a tight ``time_limit``. Each
-                    # call's own wall budget is clamped to the time left (floored).
+                    # search (seconds on large models) that also OVERRUNS its own
+                    # ``max_wall_time`` clamp on the expensive-Hessian class (a
+                    # nominal 3 s budget ran ~15 s on heatexch_gen3, F4). At the
+                    # root ``_try_idxs`` can hold many candidates, so without a stop
+                    # the loop runs well past a tight ``time_limit``. Gate EVERY
+                    # candidate (including the first) on the shared budget check:
+                    # once the time left cannot absorb another worst-case solve,
+                    # stop launching. Skipping subnlp is always sound (primal
+                    # heuristic; the dual bound is untouched).
                     _sn_remaining = _deadline - time.perf_counter()
-                    if _loop_idx > 0 and _sn_remaining <= 0.0:
+                    if not _root_heur_nlp_entry_ok(evaluator):
                         break
                     _subnlp_calls += 1
                     # The first candidate gets a full (un-clamped) budget so one
@@ -6426,6 +6549,7 @@ def solve_model(
                         if _loop_idx == 0
                         else min(3.0, max(_DEADLINE_NODE_FLOOR_S, _sn_remaining))
                     )
+                    _t_sn = time.perf_counter()
                     try:
                         _sn = _subnlp(
                             model,
@@ -6438,6 +6562,7 @@ def solve_model(
                     except Exception as _e:
                         logger.debug("subnlp raised: %s", _e)
                         _sn = None
+                    _observe_heur_nlp(time.perf_counter() - _t_sn)
                     if _sn is None:
                         continue
                     _x_sn, _obj_sn = _sn
@@ -6462,6 +6587,9 @@ def solve_model(
             and _subnlp_calls < subnlp_max_calls
             and not _root_optimum_proven()
             and _improver_allowed(_HEUR_COST["enumerate"])
+            # F4: the binary-seed enumeration issues up to 2**k full sub-NLPs; do
+            # not start it when the budget is exhausted (primal heuristic — sound).
+            and _root_heur_nlp_entry_ok(evaluator)
         ):
             _enum_inc0 = tree.incumbent()
             _enum_had_inc = _enum_inc0 is not None and np.isfinite(_enum_inc0[1])
@@ -6534,6 +6662,8 @@ def solve_model(
                 _inc_box is not None
                 and np.isfinite(_inc_box[1])
                 and _inc_box[1] < _last_box_inc_obj - 1e-9
+                # F4: don't launch the box-search sub-NLPs past the budget.
+                and _root_heur_nlp_entry_ok(evaluator)
             ):
                 _last_box_inc_obj = float(_inc_box[1])
                 from discopt._jax.primal_heuristics import integer_box_search
@@ -6618,18 +6748,21 @@ def solve_model(
                 if (
                     _lns_best_idx is not None
                     and iteration % max(1, subnlp_frequency) == 0
-                    and (_deadline - time.perf_counter()) > _DEADLINE_NODE_FLOOR_S
+                    and _root_heur_nlp_entry_ok(evaluator)
                 ):
                     _lns_dive_calls += 1
                     try:
                         from discopt._jax.primal_heuristics import fractional_diving
 
+                        _t_ndive = time.perf_counter()
                         _dv = fractional_diving(
                             model,
                             result_sols[_lns_best_idx],
                             backend=_lns_backend,
                             evaluator=evaluator,
+                            deadline=_deadline,
                         )
+                        _observe_heur_nlp(time.perf_counter() - _t_ndive)
                         if _dv is not None:
                             _x_dv, _obj_dv = _dv
                             _obj_dv = float(_obj_dv)
@@ -6663,6 +6796,7 @@ def solve_model(
                             result_sols[_lns_best_idx],
                             backend=_lns_backend,
                             evaluator=evaluator,
+                            deadline=_deadline,
                         )
                         if _ri is not None:
                             _x_ri, _obj_ri = _ri
@@ -8069,6 +8203,9 @@ def _solve_nlp_bb(
                             result_sols[best_root_idx],
                             backend=_resolve_heuristic_backend(nlp_solver),
                             evaluator=evaluator,
+                            # F4: poll the absolute deadline between dive sub-NLPs so
+                            # the ~n_int-solve dive cannot run past a tight limit.
+                            deadline=t_start + time_limit,
                         )
                         if dv is not None:
                             dv_sol, dv_obj = dv
@@ -8195,6 +8332,7 @@ def _solve_nlp_bb(
                                 result_sols[_lns_best_idx],
                                 backend=_lns_backend,
                                 evaluator=evaluator,
+                                deadline=_lns_deadline,
                             )
                             if _ri is not None:
                                 _x_ri, _obj_ri = _ri
@@ -8631,11 +8769,24 @@ def _solve_node_nlp_pounce(
     # Deterministic off-center fallback start (no RNG: determinism by default).
     off_center = lb_c + 0.382 * (ub_c - lb_c)
 
+    # F4: each ``_attempt`` is a full POUNCE solve that OVERRUNS its own
+    # ``max_wall_time`` clamp on the expensive-Hessian class (a nominal few-second
+    # budget ran ~10 s on heatexch_gen3), so a first attempt plus two alternative-
+    # start retries can push a single node NLP tens of seconds past a tight
+    # ``time_limit``. Poll an absolute deadline derived from the caller's remaining
+    # budget (``max_wall_time``) between retries and stop once it has passed. This
+    # never weakens correctness: a skipped retry only leaves the (already-computed)
+    # first-attempt result, and a node whose NLP failed stays OPEN at its inherited
+    # parent bound — a valid global lower bound — so the dual bound is untouched.
+    _t_node_entry = time.perf_counter()
+    _retry_deadline = _t_node_entry + max(_DEADLINE_NODE_FLOOR_S, float(caller_limit))
     result = _attempt(np.asarray(x0, dtype=np.float64), opts)
     if result.status not in (SolveStatus.OPTIMAL, SolveStatus.ITERATION_LIMIT):
         for alt in (midpoint, off_center):
             if np.allclose(alt, x0, atol=1e-12):
                 continue
+            if time.perf_counter() >= _retry_deadline:
+                break
             retry = _attempt(alt, opts)
             if retry.status in (SolveStatus.OPTIMAL, SolveStatus.ITERATION_LIMIT):
                 result = retry
