@@ -5386,7 +5386,7 @@ def solve_model(
     # the LP-relaxer spatial path (the only path exposing node-LP marginals) and
     # behind the flag, default OFF until T2.6.
     _node_reduce_enabled = _tuning().node_reduce and _mc_lp_relaxer is not None
-    _node_reduce_fn = None
+    _node_reduce_fn: Any = None
     if _node_reduce_enabled:
         try:
             from discopt._jax.node_reduce import reduce_node as _node_reduce_fn
