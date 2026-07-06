@@ -79,9 +79,15 @@ class DebugSession:
         return self._stop_requested
 
     def _should_pause(self, ctx: "DebugContext") -> bool:
-        # on-error sessions only ever pause at a failed termination.
+        # on-error sessions only ever pause at a failed termination. The solve
+        # loops pass ``error=<non-"optimal" status>`` at their TERMINATED fire
+        # (None on a certified optimum), so this triggers on limit hits,
+        # debugger interrupts, "unknown", and certified infeasibility.
         if self.enter_on_error:
-            return ctx.checkpoint is Checkpoint.TERMINATED and bool(ctx.extra.get("error"))
+            if ctx.checkpoint is Checkpoint.TERMINATED and ctx.extra.get("error"):
+                ctx.extra["reason"] = f"on-error: {ctx.extra['error']}"
+                return True
+            return False
 
         # Explicit breakpoint hit always pauses (and records the reason).
         reason = self.engine.hit_reason(ctx)

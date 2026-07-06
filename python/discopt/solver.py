@@ -7025,15 +7025,6 @@ def solve_model(
     wall_time = time.perf_counter() - t_start
     python_time = wall_time - rust_time - jax_time
 
-    # Interactive debugger: terminal checkpoint (final/limit/infeasible state).
-    _debug.fire(
-        _debug.Checkpoint.TERMINATED,
-        tree=tree,
-        model=model,
-        iteration=iteration,
-        elapsed=wall_time,
-    )
-
     stats = tree.stats()
     incumbent = tree.incumbent()
 
@@ -7246,6 +7237,19 @@ def solve_model(
             # SolveStatus.INFEASIBLE): infeasibility *is* a certified conclusion, so
             # leave _gap_certified untouched.
             status = "infeasible"
+
+    # Interactive debugger: terminal checkpoint. Fired after the status
+    # decision so ``debug="on-error"`` sessions can key on the outcome:
+    # ``error`` is the non-"optimal" status ("time_limit", "unknown",
+    # "infeasible", ...), or None on a certified optimum.
+    _debug.fire(
+        _debug.Checkpoint.TERMINATED,
+        tree=tree,
+        model=model,
+        iteration=iteration,
+        elapsed=wall_time,
+        error=None if status == "optimal" else status,
+    )
 
     from discopt.modeling.core import ObjectiveSense
 
@@ -8447,15 +8451,6 @@ def _solve_nlp_bb(
     wall_time = time.perf_counter() - t_start
     python_time = wall_time - rust_time - jax_time
 
-    # Interactive debugger: terminal checkpoint (final/limit/infeasible state).
-    _debug.fire(
-        _debug.Checkpoint.TERMINATED,
-        tree=tree,
-        model=model,
-        iteration=iteration,
-        elapsed=wall_time,
-    )
-
     stats = tree.stats()
     incumbent = tree.incumbent()
 
@@ -8596,6 +8591,19 @@ def _solve_nlp_bb(
             # certificate (FBBT-empty box or SolveStatus.INFEASIBLE): infeasibility
             # *is* a certified conclusion, so leave _gap_certified untouched.
             status = "infeasible"
+
+    # Interactive debugger: terminal checkpoint. Fired after the status
+    # decision so ``debug="on-error"`` sessions can key on the outcome:
+    # ``error`` is the non-"optimal" status ("time_limit", "unknown",
+    # "infeasible", ...), or None on a certified optimum.
+    _debug.fire(
+        _debug.Checkpoint.TERMINATED,
+        tree=tree,
+        model=model,
+        iteration=iteration,
+        elapsed=wall_time,
+        error=None if status == "optimal" else status,
+    )
 
     # Negate bound back for maximization
     bound_val = stats["global_lower_bound"]
@@ -12196,15 +12204,6 @@ def _solve_milp_bb(
     wall_time = time.perf_counter() - t_start
     python_time = wall_time - rust_time - jax_time
 
-    # Interactive debugger: terminal checkpoint (final/limit/infeasible state).
-    _debug.fire(
-        _debug.Checkpoint.TERMINATED,
-        tree=tree,
-        model=model,
-        iteration=iteration,
-        elapsed=wall_time,
-    )
-
     stats = tree.stats()
     incumbent = tree.incumbent()
 
@@ -12288,6 +12287,19 @@ def _solve_milp_bb(
             # Tree exhausted with no feasible node: infeasibility *is* a certified
             # conclusion, so leave _gap_certified untouched.
             status = "infeasible"
+
+    # Interactive debugger: terminal checkpoint. Fired after the status
+    # decision so ``debug="on-error"`` sessions can key on the outcome:
+    # ``error`` is the non-"optimal" status ("time_limit", "unknown",
+    # "infeasible", ...), or None on a certified optimum.
+    _debug.fire(
+        _debug.Checkpoint.TERMINATED,
+        tree=tree,
+        model=model,
+        iteration=iteration,
+        elapsed=wall_time,
+        error=None if status == "optimal" else status,
+    )
 
     from discopt.modeling.core import ObjectiveSense
 
@@ -12678,15 +12690,6 @@ def _solve_miqp_bb(
     wall_time = time.perf_counter() - t_start
     python_time = wall_time - rust_time - jax_time
 
-    # Interactive debugger: terminal checkpoint (final/limit/infeasible state).
-    _debug.fire(
-        _debug.Checkpoint.TERMINATED,
-        tree=tree,
-        model=model,
-        iteration=iteration,
-        elapsed=wall_time,
-    )
-
     stats = tree.stats()
     incumbent = tree.incumbent()
 
@@ -12775,6 +12778,19 @@ def _solve_miqp_bb(
             # Tree exhausted with no feasible node: infeasibility *is* a certified
             # conclusion, so leave _gap_certified untouched.
             status = "infeasible"
+
+    # Interactive debugger: terminal checkpoint. Fired after the status
+    # decision so ``debug="on-error"`` sessions can key on the outcome:
+    # ``error`` is the non-"optimal" status ("time_limit", "unknown",
+    # "infeasible", ...), or None on a certified optimum.
+    _debug.fire(
+        _debug.Checkpoint.TERMINATED,
+        tree=tree,
+        model=model,
+        iteration=iteration,
+        elapsed=wall_time,
+        error=None if status == "optimal" else status,
+    )
 
     from discopt.modeling.core import ObjectiveSense
 

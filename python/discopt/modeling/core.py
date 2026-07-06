@@ -3249,9 +3249,12 @@ class Model:
         debug : bool, str, or DebugSession, optional
             Attach the interactive branch-and-bound debugger (a "pdb for B&B").
             ``True`` / ``"repl"`` drops into a human REPL at the first
-            checkpoint; ``"on-error"`` enters only if the solve fails or hits a
-            limit; a ready-made :class:`discopt.debug.DebugSession` uses a
-            custom frontend. ``None`` (default) leaves the solve untouched —
+            checkpoint; ``"on-error"`` enters only at termination when the
+            outcome is not a certified optimum (limit hit, interrupted,
+            "unknown", or certified infeasible) — not supported on the
+            pure-Rust MILP fast-path, whose hook carries no final status; a
+            ready-made :class:`discopt.debug.DebugSession` uses a custom
+            frontend. ``None`` (default) leaves the solve untouched —
             fire-sites short-circuit on a module-global check, so a detached
             solve is bound-neutral. Currently instruments the spatial-McCormick
             B&B path (nonconvex MINLP / continuous). See :mod:`discopt.debug`.

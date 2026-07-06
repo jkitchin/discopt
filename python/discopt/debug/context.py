@@ -141,7 +141,9 @@ class DebugContext:
 
         The Rust ``solve_milp`` fast-path has no ``PyTreeManager``, so this path
         carries aggregate scalars only (no per-node batch arrays, no steer
-        handle — inspection and flow control only).
+        handle — inspection and flow control only). The Rust hook also carries
+        no final status, so ``extra["error"]`` is never set and ``"on-error"``
+        sessions do not trigger on this path (documented in ``Model.solve``).
         """
         cp = Checkpoint(str(state["checkpoint"]))
         inc = state.get("incumbent")

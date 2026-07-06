@@ -1,8 +1,11 @@
 """Checkpoint vocabulary for the interactive branch-and-bound debugger.
 
 The debugger reframes pounce's IPM-iteration phases as a B&B *node lifecycle*.
-Each solve loop fires the subset of checkpoints it actually reaches; the JSON
-``hello`` handshake advertises which are live for the active path.
+Every member below is fired by at least one instrumented solve loop, so the
+JSON ``hello`` handshake (which advertises all members) never promises a pause
+point that cannot fire. Candidate future checkpoints (e.g. after per-node
+FBBT/OBBT tightening, after the per-node relaxation solve) are added here only
+together with their fire-sites — no dead vocabulary.
 """
 
 from __future__ import annotations
@@ -18,8 +21,6 @@ class Checkpoint(str, Enum):
 
     ITER_START = "iter_start"  # top of a batch iteration
     AFTER_SELECT = "after_select"  # open-node boxes/ids exported from the tree
-    AFTER_TIGHTEN = "after_tighten"  # per-node FBBT/OBBT applied to boxes
-    AFTER_BOUND = "after_bound"  # per-node relaxation solved (sols/bounds/feas)
     BEFORE_IMPORT = "before_import"  # steer point: inject incumbent / branch hint
     AFTER_PROCESS = "after_process"  # prune/branch/fathom applied by the tree
     INCUMBENT_FOUND = "incumbent_found"  # event: a strictly better incumbent
@@ -39,9 +40,6 @@ ALIASES: dict[str, Checkpoint] = {
     "start": Checkpoint.ITER_START,
     "sel": Checkpoint.AFTER_SELECT,
     "select": Checkpoint.AFTER_SELECT,
-    "tighten": Checkpoint.AFTER_TIGHTEN,
-    "bound": Checkpoint.AFTER_BOUND,
-    "relax": Checkpoint.AFTER_BOUND,
     "steer": Checkpoint.BEFORE_IMPORT,
     "import": Checkpoint.BEFORE_IMPORT,
     "process": Checkpoint.AFTER_PROCESS,

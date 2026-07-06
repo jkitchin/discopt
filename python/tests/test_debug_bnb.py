@@ -495,3 +495,79 @@ def test_rust_milp_quit_stops_early():
     # never a false "optimal"/"infeasible", and no fallback engine silently
     # resumes a solve the user quit.
     assert res.status in ("feasible", "node_limit", "time_limit", "unknown")
+
+
+# ── on-error mode & protocol honesty ─────────────────────────────────────────
+
+
+@pytest.mark.smoke
+@pytest.mark.requires_pounce
+def test_on_error_pauses_only_on_failure():
+    """``debug="on-error"``: no pause on a certified optimum; exactly one
+    pause at TERMINATED when the solve fails (error = the final status)."""
+    ok = RecordingFrontend()
+    debug.attach(DebugSession(ok, enter_on_error=True))
+    try:
+        res = _spatial_model().solve(time_limit=20.0)
+    finally:
+        debug.detach()
+    assert res.status == "optimal"
+    assert ok.hits == [], "on-error session paused on a successful solve"
+
+    fail = RecordingFrontend()
+    debug.attach(DebugSession(fail, enter_on_error=True))
+    try:
+        res = _spatial_model().solve(time_limit=0.05)
+    finally:
+        debug.detach()
+    assert res.status != "optimal"
+    assert fail.hits == ["terminated"], f"expected one terminated pause, got {fail.hits}"
+
+
+@pytest.mark.unit
+def test_handshake_advertises_only_wired_checkpoints():
+    """Every checkpoint in the hello handshake has a live fire-site — no dead
+    vocabulary a client could wait on forever."""
+    from discopt.debug.jsonproto import JsonFrontend
+
+    hello = JsonFrontend()._hello()
+    assert hello["checkpoints"] == [
+        "iter_start",
+        "after_select",
+        "before_import",
+        "after_process",
+        "incumbent_found",
+        "terminated",
+    ]
+
+
+@pytest.mark.unit
+def test_stop_at_unwired_checkpoint_errors_cleanly():
+    eng = DebugCommandEngine()
+    sess = DebugSession(RecordingFrontend())
+    ctx = DebugContext.build(debug.Checkpoint.ITER_START, tree=FakeTree(), iteration=0)
+    res = eng.execute("stop-at tighten", ctx, sess)
+    assert res.ok is False
+    assert any("error" in line for line in res.output)
+
+
+@pytest.mark.smoke
+@pytest.mark.requires_pounce
+def test_json_result_ok_flag():
+    """Agents can branch on ``ok``: False for unknown/unavailable commands,
+    True for successful ones."""
+    res, events = _drive_json(
+        _spatial_model(),
+        [
+            {"cmd": "bogus", "id": 1},
+            {"cmd": "inject", "args": ["0"], "id": 2},  # no batch at iter_start
+            {"cmd": "info", "id": 3},
+            "continue",
+            "continue",
+        ],
+    )
+    assert res.status == "optimal"
+    results = {e["request_id"]: e for e in events if e["event"] == "result"}
+    assert results[1]["ok"] is False
+    assert results[2]["ok"] is False
+    assert results[3]["ok"] is True

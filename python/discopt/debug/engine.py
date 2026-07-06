@@ -39,6 +39,7 @@ class CommandResult:
     output: list[str] = field(default_factory=list)
     control: Control = Control.NONE
     data: Optional[dict] = None  # structured payload for the JSON frontend
+    ok: bool = True  # False when the command failed (unknown / raised / unavailable)
 
     def line(self, text: str) -> "CommandResult":
         self.output.append(text)
@@ -136,11 +137,11 @@ class DebugCommandEngine:
 
         handler = _DISPATCH.get(cmd)
         if handler is None:
-            return CommandResult([f"unknown command: {cmd!r} (try 'help')"])
+            return CommandResult([f"unknown command: {cmd!r} (try 'help')"], ok=False)
         try:
             return handler(self, args, ctx, session)
         except Exception as exc:  # keep the prompt alive on user error
-            return CommandResult([f"error: {exc}"])
+            return CommandResult([f"error: {exc}"], ok=False)
 
 
 # ── individual command handlers ────────────────────────────────────────────
@@ -329,14 +330,15 @@ def _cmd_watch(engine, args, ctx, session):
 
 def _cmd_inject(engine, args, ctx, session):
     if ctx.steer is None or ctx.result_sols is None:
-        return CommandResult(["inject unavailable at this checkpoint"])
+        return CommandResult(["inject unavailable at this checkpoint"], ok=False)
     if not ctx.steer.can_inject:
         return CommandResult(
             [
                 "inject unavailable: this solve path wires no candidate validator, "
                 "so a point's true feasibility/objective cannot be verified "
                 "(refusing — certificate safety)"
-            ]
+            ],
+            ok=False,
         )
     i = int(args[0])
     sol = np.asarray(ctx.result_sols[i], dtype=np.float64)
@@ -350,7 +352,7 @@ def _cmd_inject(engine, args, ctx, session):
 
 def _cmd_hint(engine, args, ctx, session):
     if ctx.steer is None:
-        return CommandResult(["hint unavailable at this checkpoint"])
+        return CommandResult(["hint unavailable at this checkpoint"], ok=False)
     node_id, var = int(args[0]), int(args[1])
     ctx.steer.hint([node_id], [var])
     return CommandResult([f"branch hint: node {node_id} -> var {var}"])

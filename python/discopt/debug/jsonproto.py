@@ -13,7 +13,8 @@ Wire format (all newline-delimited JSON on a single stream):
 * at each pause the frontend emits a ``pause`` event (or a ``terminated`` event
   at the final checkpoint), then reads command objects until one resumes;
 * each command yields a ``result`` event echoing the client's ``id`` as
-  ``request_id``.
+  ``request_id``; ``ok`` is ``false`` when the command failed (unknown verb,
+  raised, or unavailable at this checkpoint), so agents can branch on it.
 
 Input commands are either a bare string (``"continue"``) or an object
 (``{"cmd": "print", "args": ["node", "0"], "id": 7}``); ``{"cmd": "break if
@@ -128,7 +129,7 @@ class JsonFrontend:
             "event": "result",
             "request_id": req_id,
             "command": command,
-            "ok": True,
+            "ok": res.ok,
             "output": res.output,
             "data": res.data,
         }
