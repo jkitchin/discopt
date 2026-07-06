@@ -5186,9 +5186,21 @@ def solve_model(
             _pn_obbt_budget_total,
         )
 
+    from discopt import debug as _debug
+
     while True:
         elapsed = time.perf_counter() - t_start
         if elapsed >= time_limit:
+            break
+
+        # Interactive debugger: top-of-iteration checkpoint (no-op when detached).
+        if _debug.fire(
+            _debug.Checkpoint.ITER_START,
+            tree=tree,
+            model=model,
+            iteration=iteration,
+            elapsed=elapsed,
+        ):
             break
 
         # Update per-iteration time budget for NLP subproblem solves (issue #5).
@@ -5202,6 +5214,19 @@ def solve_model(
 
         n_batch = len(batch_ids)
         if n_batch == 0:
+            break
+
+        # Interactive debugger: nodes selected — boxes/ids now available.
+        if _debug.fire(
+            _debug.Checkpoint.AFTER_SELECT,
+            tree=tree,
+            model=model,
+            iteration=iteration,
+            elapsed=elapsed,
+            batch_lb=batch_lb,
+            batch_ub=batch_ub,
+            batch_ids=batch_ids,
+        ):
             break
 
         node_infeasible_mask = np.zeros(n_batch, dtype=bool)
@@ -6762,11 +6787,38 @@ def solve_model(
                 if np.isfinite(_obj_i) and _obj_i < _SENTINEL_THRESHOLD:
                     tree.inject_incumbent(xr, _obj_i)
 
+        # Interactive debugger: steer point — relaxations solved, results not
+        # yet imported. Safe-steer (inject incumbent / branch hint) applies here.
+        if _debug.fire(
+            _debug.Checkpoint.BEFORE_IMPORT,
+            tree=tree,
+            model=model,
+            iteration=iteration,
+            elapsed=time.perf_counter() - t_start,
+            batch_lb=batch_lb,
+            batch_ub=batch_ub,
+            batch_ids=batch_ids,
+            result_lbs=result_lbs,
+            result_sols=result_sols,
+            result_feas=result_feas,
+        ):
+            break
+
         # Import results back to Rust tree
         t_rust_start = time.perf_counter()
         tree.import_results(result_ids, result_lbs, result_sols, result_feas)
         tree.process_evaluated()
         rust_time += time.perf_counter() - t_rust_start
+
+        # Interactive debugger: prune/branch/fathom applied by the tree.
+        if _debug.fire(
+            _debug.Checkpoint.AFTER_PROCESS,
+            tree=tree,
+            model=model,
+            iteration=iteration,
+            elapsed=time.perf_counter() - t_start,
+        ):
+            break
 
         # Did the incumbent strictly improve this iteration, from ANY source?
         # proc_stats["incumbent_updates"] counts only incumbents found in the
@@ -6784,6 +6836,15 @@ def solve_model(
         _incumbent_improved = _inc_obj_now < _last_tighten_inc - 1e-9
         if _incumbent_improved:
             _last_tighten_inc = _inc_obj_now
+            # Interactive debugger: new-incumbent event checkpoint.
+            if _debug.fire(
+                _debug.Checkpoint.INCUMBENT_FOUND,
+                tree=tree,
+                model=model,
+                iteration=iteration,
+                elapsed=time.perf_counter() - t_start,
+            ):
+                break
 
         # --- Periodic OBBT with incumbent cutoff (Phase C) ---
         # When a new incumbent is found and bounds are still wide,
@@ -6924,6 +6985,15 @@ def solve_model(
     # --- Build result ---
     wall_time = time.perf_counter() - t_start
     python_time = wall_time - rust_time - jax_time
+
+    # Interactive debugger: terminal checkpoint (final/limit/infeasible state).
+    _debug.fire(
+        _debug.Checkpoint.TERMINATED,
+        tree=tree,
+        model=model,
+        iteration=iteration,
+        elapsed=wall_time,
+    )
 
     stats = tree.stats()
     incumbent = tree.incumbent()
