@@ -81,6 +81,8 @@ pub struct MilpResult {
 pub enum MilpCheckpoint {
     /// Top of a batch iteration.
     IterStart,
+    /// The batch of open nodes was just exported — their boxes are available.
+    AfterSelect,
     /// After the batch's results were imported and prune/branch/fathom ran.
     AfterProcess,
     /// A strictly-better incumbent was just adopted.
@@ -90,8 +92,12 @@ pub enum MilpCheckpoint {
 }
 
 /// Aggregate solver state passed to a debug hook at a checkpoint. Read-only.
+///
+/// The `batch_*` fields are populated only at [`MilpCheckpoint::AfterSelect`],
+/// where the current batch of open-node boxes is in scope; they are `None`
+/// elsewhere. The lifetime `'a` borrows those boxes from the export batch.
 #[derive(Debug, Clone, Copy)]
-pub struct MilpDebugState {
+pub struct MilpDebugState<'a> {
     /// Which checkpoint fired.
     pub checkpoint: MilpCheckpoint,
     /// Batch-iteration counter (0-based), mirroring the Python loops.
@@ -108,6 +114,14 @@ pub struct MilpDebugState {
     pub gap: f64,
     /// Wall-clock seconds since the solve started.
     pub elapsed: f64,
+    /// Number of structural variables (box length reference).
+    pub n_vars: usize,
+    /// Per-node lower-bound boxes of the exported batch (AfterSelect only).
+    pub batch_lb: Option<&'a [Vec<f64>]>,
+    /// Per-node upper-bound boxes of the exported batch (AfterSelect only).
+    pub batch_ub: Option<&'a [Vec<f64>]>,
+    /// Node ids of the exported batch (AfterSelect only).
+    pub batch_ids: Option<&'a [NodeId]>,
 }
 
 /// What a debug hook tells the search to do after a checkpoint.
@@ -128,7 +142,7 @@ pub enum MilpDebugControl {
 pub trait MilpDebugHook: Sync {
     /// Called at each fired checkpoint; return [`MilpDebugControl::Stop`] to
     /// end the search gracefully.
-    fn checkpoint(&self, state: &MilpDebugState) -> MilpDebugControl;
+    fn checkpoint(&self, state: &MilpDebugState<'_>) -> MilpDebugControl;
 }
 
 /// Options for the MILP driver.
@@ -528,6 +542,10 @@ pub fn solve_milp_hooked(
                     bound: s.global_lower_bound,
                     gap: s.gap,
                     elapsed: t_start.elapsed().as_secs_f64(),
+                    n_vars: ns,
+                    batch_lb: None,
+                    batch_ub: None,
+                    batch_ids: None,
                 };
                 matches!(h.checkpoint(&state), MilpDebugControl::Stop)
             } else {
@@ -557,6 +575,31 @@ pub fn solve_milp_hooked(
         let batch = tm.export_batch(64);
         if batch.node_ids.is_empty() {
             break;
+        }
+
+        // Interactive debugger: nodes selected — expose the batch's boxes/ids so
+        // `print node <i>` works on this pure-Rust path too. Gated on the hook.
+        if let Some(h) = hook {
+            let s = tm.stats();
+            let inc = tm.incumbent().map(|(_, v)| v);
+            let state = MilpDebugState {
+                checkpoint: MilpCheckpoint::AfterSelect,
+                iteration: dbg_iter,
+                total_nodes: s.total_nodes,
+                open_nodes: s.open_nodes,
+                incumbent: inc,
+                bound: s.global_lower_bound,
+                gap: s.gap,
+                elapsed: t_start.elapsed().as_secs_f64(),
+                n_vars: ns,
+                batch_lb: Some(&batch.lb),
+                batch_ub: Some(&batch.ub),
+                batch_ids: Some(&batch.node_ids),
+            };
+            if matches!(h.checkpoint(&state), MilpDebugControl::Stop) {
+                gap_certified = false;
+                break 'search;
+            }
         }
 
         // Equilibration scaling for the working matrix, computed once per batch
@@ -2137,7 +2180,7 @@ mod tests {
 
         struct Counter(AtomicUsize);
         impl MilpDebugHook for Counter {
-            fn checkpoint(&self, _s: &MilpDebugState) -> MilpDebugControl {
+            fn checkpoint(&self, _s: &MilpDebugState<'_>) -> MilpDebugControl {
                 self.0.fetch_add(1, Ordering::Relaxed);
                 MilpDebugControl::Continue
             }

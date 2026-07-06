@@ -29,7 +29,7 @@ use numpy::{
 };
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
-use pyo3::types::PyDict;
+use pyo3::types::{PyDict, PyList};
 
 /// Push an interior LP optimum `x` to a vertex of the optimal face.
 ///
@@ -653,10 +653,11 @@ struct PyMilpHook {
 }
 
 impl MilpDebugHook for PyMilpHook {
-    fn checkpoint(&self, state: &MilpDebugState) -> MilpDebugControl {
+    fn checkpoint(&self, state: &MilpDebugState<'_>) -> MilpDebugControl {
         Python::with_gil(|py| {
             let cp = match state.checkpoint {
                 MilpCheckpoint::IterStart => "iter_start",
+                MilpCheckpoint::AfterSelect => "after_select",
                 MilpCheckpoint::AfterProcess => "after_process",
                 MilpCheckpoint::IncumbentFound => "incumbent_found",
                 MilpCheckpoint::Terminated => "terminated",
@@ -670,6 +671,29 @@ impl MilpDebugHook for PyMilpHook {
             let _ = d.set_item("bound", state.bound);
             let _ = d.set_item("gap", state.gap);
             let _ = d.set_item("elapsed", state.elapsed);
+            // Node-box inspection at AfterSelect: marshal the batch's boxes/ids
+            // as plain nested lists (best-effort; skipped on any conversion
+            // error since inspection is non-critical).
+            if let (Some(lbs), Some(ubs), Some(ids)) =
+                (state.batch_lb, state.batch_ub, state.batch_ids)
+            {
+                let rows = |boxes: &[Vec<f64>]| -> Option<Bound<'_, PyList>> {
+                    let r: Vec<Bound<'_, PyList>> = boxes
+                        .iter()
+                        .map(|row| PyList::new(py, row.iter().copied()).ok())
+                        .collect::<Option<Vec<_>>>()?;
+                    PyList::new(py, r).ok()
+                };
+                if let (Some(py_lb), Some(py_ub)) = (rows(lbs), rows(ubs)) {
+                    let _ = d.set_item("batch_lb", py_lb);
+                    let _ = d.set_item("batch_ub", py_ub);
+                    let id_vec: Vec<usize> = ids.iter().map(|n| n.0).collect();
+                    if let Ok(id_list) = PyList::new(py, id_vec) {
+                        let _ = d.set_item("batch_ids", id_list);
+                    }
+                    let _ = d.set_item("n_vars", state.n_vars);
+                }
+            }
             match self.callback.bind(py).call1((d,)) {
                 Ok(ret) => {
                     if ret.is_truthy().unwrap_or(false) {

@@ -137,11 +137,12 @@ class DebugContext:
 
     @classmethod
     def from_rust(cls, state: dict) -> "DebugContext":
-        """Build a context from the pure-Rust MILP hook's aggregate state dict.
+        """Build a context from the pure-Rust MILP hook's state dict.
 
-        The Rust ``solve_milp`` fast-path has no ``PyTreeManager``, so this path
-        carries aggregate scalars only (no per-node batch arrays, no steer
-        handle — inspection and flow control only). The Rust hook also carries
+        The Rust ``solve_milp`` fast-path has no ``PyTreeManager`` (so no steer
+        handle — inspection and flow control only), but at the ``after_select``
+        checkpoint the hook marshals the batch's per-node boxes/ids, so
+        ``print node <i>`` / ``print nodes`` work here too. The Rust hook carries
         no final status, so ``extra["error"]`` is never set and ``"on-error"``
         sessions do not trigger on this path (documented in ``Model.solve``).
         """
@@ -154,6 +155,15 @@ class DebugContext:
         )
         gap = state.get("gap")
         gap = float(gap) if gap is not None and np.isfinite(gap) else None
+
+        # Batch boxes are present only at after_select (nested lists from Rust).
+        b_lb = state.get("batch_lb")
+        b_ub = state.get("batch_ub")
+        b_ids = state.get("batch_ids")
+        batch_lb = np.asarray(b_lb, dtype=np.float64) if b_lb is not None else None
+        batch_ub = np.asarray(b_ub, dtype=np.float64) if b_ub is not None else None
+        batch_ids = np.asarray(b_ids, dtype=np.int64) if b_ids is not None else None
+
         return cls(
             checkpoint=cp,
             iteration=int(state.get("iteration", 0)),
@@ -163,4 +173,7 @@ class DebugContext:
             incumbent_obj=inc_obj,
             best_bound=float(state.get("bound", -np.inf)),
             gap=gap,
+            batch_lb=batch_lb,
+            batch_ub=batch_ub,
+            batch_ids=batch_ids,
         )
