@@ -491,5 +491,7 @@ def test_rust_milp_quit_stops_early():
         res = _pure_milp_model().solve(time_limit=15.0, nlp_solver="simplex")
     finally:
         debug.detach()
-    # Aborted before proving optimality -> a valid, non-"optimal" partial result.
-    assert res.status in ("feasible", "node_limit", "time_limit")
+    # Aborted before proving optimality -> a valid, uncertified partial result:
+    # never a false "optimal"/"infeasible", and no fallback engine silently
+    # resumes a solve the user quit.
+    assert res.status in ("feasible", "node_limit", "time_limit", "unknown")

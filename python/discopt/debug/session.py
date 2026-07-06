@@ -63,7 +63,12 @@ class DebugSession:
     def on_checkpoint(self, ctx: "DebugContext") -> bool:
         """Handle a checkpoint; return True if the solve should stop now."""
         if self._detached:
-            return self._stop_requested
+            # A detached session is inert. Returning _stop_requested here would
+            # let a stale session (quit during an earlier solve, then reused)
+            # kill every future solve at its first checkpoint — the quit that
+            # triggered the stop already propagated True through the non-
+            # detached path below.
+            return False
         # Derive the new_incumbent event for event breakpoints.
         if ctx.checkpoint is Checkpoint.INCUMBENT_FOUND:
             ctx.event = "new_incumbent"

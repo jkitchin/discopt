@@ -5216,6 +5216,10 @@ def solve_model(
             return False, xv, float("nan")
         return True, xv, _obj
 
+    # Set when the interactive debugger's `quit` breaks the search loop: a
+    # user-interrupted exit proves nothing, so the status decision below must
+    # not fall through to a certified "infeasible"/"optimal".
+    _debug_quit = False
     while True:
         elapsed = time.perf_counter() - t_start
         if elapsed >= time_limit:
@@ -5229,6 +5233,7 @@ def solve_model(
             iteration=iteration,
             elapsed=elapsed,
         ):
+            _debug_quit = True
             break
 
         # Update per-iteration time budget for NLP subproblem solves (issue #5).
@@ -5255,6 +5260,7 @@ def solve_model(
             batch_ub=batch_ub,
             batch_ids=batch_ids,
         ):
+            _debug_quit = True
             break
 
         node_infeasible_mask = np.zeros(n_batch, dtype=bool)
@@ -6832,6 +6838,7 @@ def solve_model(
             result_feas=result_feas,
             validator=_debug_validate_candidate,
         ):
+            _debug_quit = True
             break
 
         # Import results back to Rust tree
@@ -6848,6 +6855,7 @@ def solve_model(
             iteration=iteration,
             elapsed=time.perf_counter() - t_start,
         ):
+            _debug_quit = True
             break
 
         # Did the incumbent strictly improve this iteration, from ANY source?
@@ -6874,6 +6882,7 @@ def solve_model(
                 iteration=iteration,
                 elapsed=time.perf_counter() - t_start,
             ):
+                _debug_quit = True
                 break
 
         # --- Periodic OBBT with incumbent cutoff (Phase C) ---
@@ -7222,6 +7231,13 @@ def solve_model(
             # worst-class error: a feasible model declared infeasible). Report
             # "unknown" instead, exactly as the _solve_nlp_bb path does with
             # _unconverged_fathom. Conservative by design: soundness over capability.
+            status = "unknown"
+            _gap_certified = False
+        elif _debug_quit:
+            # Interactive debugger `quit`: the user interrupted the search, so
+            # the tree is NOT exhausted and neither infeasibility nor optimality
+            # was proven (a false "infeasible" here is the worst-class error).
+            # Report "unknown", uncertified.
             status = "unknown"
             _gap_certified = False
         else:
@@ -7829,6 +7845,10 @@ def _solve_nlp_bb(
             return False, xv, float("nan")
         return True, xv, _obj
 
+    # Set when the interactive debugger's `quit` breaks the search loop: a
+    # user-interrupted exit proves nothing, so the status decision below must
+    # not fall through to a certified "infeasible"/"optimal".
+    _debug_quit = False
     while True:
         elapsed = time.perf_counter() - t_start
         if elapsed >= time_limit:
@@ -7842,6 +7862,7 @@ def _solve_nlp_bb(
             iteration=iteration,
             elapsed=elapsed,
         ):
+            _debug_quit = True
             break
 
         # Update per-iteration time budget for NLP subproblem solves (issue #5).
@@ -7868,6 +7889,7 @@ def _solve_nlp_bb(
             batch_ub=batch_ub,
             batch_ids=batch_ids,
         ):
+            _debug_quit = True
             break
 
         # Tighten node bounds via constraint propagation (FBBT).
@@ -8230,6 +8252,7 @@ def _solve_nlp_bb(
             result_feas=result_feas,
             validator=_debug_validate_candidate,
         ):
+            _debug_quit = True
             break
 
         # Import results back to Rust tree
@@ -8246,6 +8269,7 @@ def _solve_nlp_bb(
             iteration=iteration,
             elapsed=time.perf_counter() - t_start,
         ):
+            _debug_quit = True
             break
 
         # --- Node callback ---
@@ -8558,6 +8582,13 @@ def _solve_nlp_bb(
             # declared infeasible). Conservative by design: if any fathom was
             # unconverged we forgo certifying infeasibility we might otherwise have
             # proven — soundness over capability.
+            status = "unknown"
+            _gap_certified = False
+        elif _debug_quit:
+            # Interactive debugger `quit`: the user interrupted the search, so
+            # the tree is NOT exhausted and neither infeasibility nor optimality
+            # was proven (a false "infeasible" here is the worst-class error).
+            # Report "unknown", uncertified.
             status = "unknown"
             _gap_certified = False
         else:
@@ -11613,6 +11644,26 @@ def _solve_milp_simplex(
     wall_time = time.perf_counter() - t_start
     maximize = model._objective is not None and model._objective.sense == ObjectiveSense.MAXIMIZE
 
+    def _debug_stopped_result() -> Optional[SolveResult]:
+        """Partial, uncertified result when the interactive debugger's `quit`
+        stopped the Rust search. Returned at the defer sites below instead of
+        ``None`` so the caller does NOT fall back to another engine — the user
+        asked the solve to stop, not to restart elsewhere. ``None`` (the normal
+        case) preserves the plain defer-to-fallback behavior."""
+        _sess = _debug.current()
+        if _sess is None or not _sess.stop_requested:
+            return None
+        _bv = None
+        if np.isfinite(bound):
+            _bv = -bound if maximize else bound
+        return SolveResult(
+            status="unknown",
+            bound=_bv,
+            wall_time=wall_time,
+            node_count=nodes,
+            gap_certified=False,
+        )
+
     if status in ("optimal", "feasible"):
         x_arr = np.asarray(x_struct, dtype=np.float64)
         xo = x_arr[:n_orig]
@@ -11650,7 +11701,7 @@ def _solve_milp_simplex(
                 "deferring to a sound engine",
                 status,
             )
-            return None
+            return _debug_stopped_result()
         x_dict = _unpack_solution(model, x_arr)
         obj_val = -obj if maximize else obj
         bound_val = None
@@ -11717,8 +11768,10 @@ def _solve_milp_simplex(
         # back to the robust spatial / POUNCE path — which, e.g., solves nvs12's
         # integer-bilinear reformulation in ~0.4 s where this engine stalls
         # (issue #291). A genuine incumbent is returned via the optimal/feasible
-        # branch above, so deferral only discards a no-solution result.
-        return None
+        # branch above, so deferral only discards a no-solution result. On a
+        # debugger `quit` this instead surfaces the uncertified partial state
+        # (no fallback engine resumes a solve the user stopped).
+        return _debug_stopped_result()
     return SolveResult(status="infeasible", wall_time=wall_time, node_count=nodes)
 
 
@@ -11995,6 +12048,10 @@ def _solve_milp_bb(
     _root_glb_internal: Optional[float] = None
     from discopt import debug as _debug
 
+    # Set when the interactive debugger's `quit` breaks the search loop: a
+    # user-interrupted exit proves nothing, so the status decision below must
+    # not fall through to a certified "infeasible"/"optimal".
+    _debug_quit = False
     while True:
         elapsed = time.perf_counter() - t_start
         if elapsed >= time_limit:
@@ -12008,6 +12065,7 @@ def _solve_milp_bb(
             iteration=iteration,
             elapsed=elapsed,
         ):
+            _debug_quit = True
             break
 
         t_rust_start = time.perf_counter()
@@ -12029,6 +12087,7 @@ def _solve_milp_bb(
             batch_ub=batch_ub,
             batch_ids=batch_ids,
         ):
+            _debug_quit = True
             break
 
         t_jax_start = time.perf_counter()
@@ -12099,6 +12158,7 @@ def _solve_milp_bb(
             result_sols=result_sols,
             result_feas=result_feas,
         ):
+            _debug_quit = True
             break
 
         t_rust_start = time.perf_counter()
@@ -12114,6 +12174,7 @@ def _solve_milp_bb(
             iteration=iteration,
             elapsed=time.perf_counter() - t_start,
         ):
+            _debug_quit = True
             break
 
         # Root-node certification snapshot (cert:T0.1).
@@ -12215,6 +12276,13 @@ def _solve_milp_bb(
             _gap_certified = False
         elif wall_time >= time_limit:
             status = "time_limit"
+            _gap_certified = False
+        elif _debug_quit:
+            # Interactive debugger `quit`: the user interrupted the search, so
+            # the tree is NOT exhausted and neither infeasibility nor optimality
+            # was proven (a false "infeasible" here is the worst-class error).
+            # Report "unknown", uncertified.
+            status = "unknown"
             _gap_certified = False
         else:
             # Tree exhausted with no feasible node: infeasibility *is* a certified
@@ -12477,6 +12545,10 @@ def _solve_miqp_bb(
     _root_glb_internal: Optional[float] = None
     from discopt import debug as _debug
 
+    # Set when the interactive debugger's `quit` breaks the search loop: a
+    # user-interrupted exit proves nothing, so the status decision below must
+    # not fall through to a certified "infeasible"/"optimal".
+    _debug_quit = False
     while True:
         elapsed = time.perf_counter() - t_start
         if elapsed >= time_limit:
@@ -12490,6 +12562,7 @@ def _solve_miqp_bb(
             iteration=iteration,
             elapsed=elapsed,
         ):
+            _debug_quit = True
             break
 
         t_rust_start = time.perf_counter()
@@ -12511,6 +12584,7 @@ def _solve_miqp_bb(
             batch_ub=batch_ub,
             batch_ids=batch_ids,
         ):
+            _debug_quit = True
             break
 
         t_jax_start = time.perf_counter()
@@ -12566,6 +12640,7 @@ def _solve_miqp_bb(
             result_sols=result_sols,
             result_feas=result_feas,
         ):
+            _debug_quit = True
             break
 
         t_rust_start = time.perf_counter()
@@ -12581,6 +12656,7 @@ def _solve_miqp_bb(
             iteration=iteration,
             elapsed=time.perf_counter() - t_start,
         ):
+            _debug_quit = True
             break
 
         # Root-node certification snapshot (cert:T0.1).
@@ -12687,6 +12763,13 @@ def _solve_miqp_bb(
             _gap_certified = False
         elif wall_time >= time_limit:
             status = "time_limit"
+            _gap_certified = False
+        elif _debug_quit:
+            # Interactive debugger `quit`: the user interrupted the search, so
+            # the tree is NOT exhausted and neither infeasibility nor optimality
+            # was proven (a false "infeasible" here is the worst-class error).
+            # Report "unknown", uncertified.
+            status = "unknown"
             _gap_certified = False
         else:
             # Tree exhausted with no feasible node: infeasibility *is* a certified
