@@ -499,6 +499,68 @@ overwritten:
     product, or spatial branching on x0) — re-scope under the branch-and-
     reduce roadmap (cert-gap-plan), not the relaxation-envelope catalog. No
     feature flag added; no relaxation code changed.
+11. **"POUNCE is ~7–11× slower per solve than Ipopt (engine gap), and warm-
+    starting incumbent NLPs across the B&B tree will cut node-NLP wall on the
+    nvs05/tls2 class"** (§1.6 B12; §5 item 1's "engine gap"; plan §2 F6;
+    jkitchin/pounce#182). *Correction — the engine gap was a debug-build
+    artifact, and the re-scoped warm-start lever HIT ITS KILL CRITERION
+    (F6 entry experiment, `perf-f6-tree-warmstart-nlp`, pounce 0.7.0 RELEASE
+    wheel = 4.7 MB `_pounce*.so`, M-series arm64; no code shipped).*
+    (a) **The "7–11× vs Ipopt" engine gap is not real on a release build.**
+    pounce#182 comment 4889424028 (and our own release-wheel profiling)
+    established a *release* POUNCE is ~1.1× Ipopt with *fewer* iterations; the
+    Phase-D 7–11× A/B was measured against a debug POUNCE. So there is **no
+    per-solve engine gap to close** — the only discopt-side lever the POUNCE
+    maintainer endorsed is warm-starting node NLPs across the tree.
+    (b) **discopt does currently solve every node/incumbent NLP cold** (entry
+    experiment part 1, confirmed): grepped the whole node-NLP path
+    (`nlp_pounce.solve_nlp`, `_solve_node_nlp`/`_solve_node_nlp_pounce`, the
+    shared `_IpoptCallbacks` adapter) — **zero** occurrences of `lagrange`,
+    `zl`/`zu`, `mu_init`, or `warm_start_init_point`. Only the parent *primal*
+    is threaded (`x0 = clip(parent_sol, child_box)`); the parent's converged
+    duals and barrier μ are discarded. So the lever exists in principle.
+    (c) **Prototyping the warm start on real parent→child NLP pairs falsified
+    the win.** Captured the actual converged node NLPs (primal x, `mult_g`,
+    `mult_x_L/U`, μ from POUNCE `info`) from live 60 s nvs05 and tls2 B&B runs,
+    then re-solved each child (parent + one tightened bound) COLD vs WARM
+    (`Problem.solve(x0=parent_x, lagrange=mult_g, zl=, zu=,
+    warm_start_init_point='yes', mu_init=parent_μ)`). Every replay reached the
+    **same KKT point** (identical objective to ≤1e-4) — so warm-start is
+    incumbent-quality-*safe* — but the **iteration count went the wrong way on
+    the class:**
+    - **tls2 (one of the two F6 targets): warm-start is UNIFORMLY WORSE — 8/8
+      parent→child pairs slower.** Full-recipe median ratio cold/warm = **0.58**
+      (warm takes ~1.7× *more* iters: 126 cold vs 277 warm summed); even the
+      primal-only recipe (just `warm_start_init_point='yes'`, no duals) is
+      0.77 (163 warm). tls2's KKT points sit at bound-active vertices a warm
+      interior iterate approaches *slower* than a fresh centered start.
+    - **nvs05: the full recipe helps only on the narrowest pairs and is
+      fragile.** For pairs differing in ≤2 bounds, cold/warm median = 2.29×
+      (5/5 better, 80→38 iters) — a real but narrow win; widen the pairing to
+      ≤4 changed bounds and it flips to a **net loss** (94 cold → 181 warm, one
+      pair 31→153). Dropping `mu_init` (`warm_nomu`) or the duals
+      (`warm_xonly`) collapses the nvs05 gain to neutral (median 1.00×), so the
+      only positive recipe is exactly the one that is catastrophic on tls2.
+    Kill criterion (plan §2 F6: "<1.3× median ⇒ warm-start is not the lever;
+    child boxes differ too much / nonconvex restart lands elsewhere") **fires**
+    on tls2 (0.58×, all pairs worse) and on nvs05's realistic pairing.
+    (d) **Retry-policy sub-audit (entry experiment part 3):** the
+    alternative-start retry issues ~1.7–1.9 NLP/node, but retries that actually
+    *rescue* a node (first attempt fails → retry accepts) are **2.4% of nodes
+    on nvs05, 0.2% on tls2** — far below the 15% "material" threshold, and well
+    below even the 5% "cap it" threshold. Since the primary lever is dead the
+    retry policy is left unchanged (F4 already added deadline-polling between
+    retries); no retry-cap shipped.
+    **Conclusion:** F6 as re-scoped cannot help this class. Threading parent
+    KKT/μ state is either quality-neutral-but-iteration-negative (tls2) or a
+    fragile narrow win that reverses on realistic box changes (nvs05); no
+    single recipe is a safe class-wide accelerator, so per CLAUDE.md §3 (no
+    dead flags) **no warm-start API, flag, or `mu` field was shipped**. The
+    real nvs05/tls2 lever is the one F5 already re-scoped to: their stall is a
+    weak-bound / branch-and-reduce problem (cert-gap-plan), not a per-node NLP
+    speed problem — faster nodes would not close the gap. Node-NLP work on this
+    class closes as **not-a-lever**; the upstream engine item (pounce#182) is
+    resolved as a build artifact.
 
 ---
 
