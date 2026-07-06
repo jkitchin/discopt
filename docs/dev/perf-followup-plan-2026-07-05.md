@@ -141,6 +141,21 @@ worktrees/sessions if desired, but each in its own PR.
 
 ### A2 — `best_bound = 1e30` sentinel leaks into the public callback API  (P2, correctness/API)
 
+- **Status: DONE** (branch `fix-a2-sentinel-callback-audit`). The full audit found
+  the sentinel could still escape through `SolveResult.bound`/`.gap` and
+  `root_bound`/`root_gap` (the callback surface was already fixed by A1/#498): the
+  result-assembly paths (`solver.py` spatial ~7137, nlp_bb ~8380) set
+  `bound_val = stats["global_lower_bound"]` and only guarded with `np.isfinite`,
+  which passes the finite `1e30`. Fixed centrally in `SolveResult.__post_init__`
+  (`modeling/core.py`) — the single chokepoint every construction path funnels
+  through — by mapping any sentinel-magnitude `bound`/`root_bound` (either sense) to
+  `None` and clearing its gap. Callback `gap` is now gated on `best_bound is not
+  None` at all three `CallbackContext` sites. Bound-neutral: node_count and
+  certified objective exactly unchanged on the nonconvex cert subset; the one
+  intended output delta is the no-relaxation class now reporting `bound=None`
+  instead of `1e30`. Tests: `test_a2_sentinel_bound_api.py` (6),
+  `test_nonrigorous_fathom_decertifies_optimal.py` (5, incl. the previously-untested
+  false-*optimal* decertification lock).
 - **Evidence** (profile §6): on the no-relaxation class (hda, heatexch_gen3)
   `node_callback` receives `best_bound = 1e30` instead of "no bound".
 - **Implementation sketch:** at the callback marshaling site, map the
