@@ -194,6 +194,100 @@ correctness pre-flight) is COMPLETE** — C-15/C-16/C-20/C-21 are all `fixed` in
   responsiveness is flat (no variable moves the bound > 1 % — that class is
   purely relaxation-limited → R4 territory).
 
+#### R3a RESULTS / VERDICT (2026-07-06)
+
+**Harness:** `discopt_benchmarks/scripts/r3a_responsiveness_fingerprint.py`
+(reuses `t21_root_loop_replay.root_lp_bound` for the fingerprint; branching read
+from a new behavior-neutral Rust counter `PyTreeManager.branch_var_counts()`
+armed via `solver._R3A_BRANCH_COUNT_SINK`). Release POUNCE verified
+(`_pounce.abi3.so` = 4.7 MB). Both measurements are taken in the *reformed* flat
+variable space (factorable lift appends `_fr_aux_*` after the originals), so
+`score(v)` and branch-frequency index the same columns. Instrumentation
+neutrality confirmed: st_e36 node count / objective / bound bit-identical with
+the sink on vs off (87 nodes, −246.0, −304.49044273); `cargo test -p
+discopt-core` bnb suite 75/75 green.
+
+**`score(v) = |root_bound(better half) − root_bound(full box)|`** (internally-
+minimized sense, so the "better" half is the one that *raises* the root bound).
+`maxΔ%` = max `score` relative to `max(1, |root_bound|)`. `flat` = `maxΔ% < 1 %`.
+One 60 s instrumented solve per instance for the branch counts.
+
+| instance | cls | root LP bound | top-3 responsive (by score) | top-3 branched (by freq) | overlap | maxΔ% | flat? |
+|---|---|---:|---|---|:--:|--:|:--:|
+| st_e36 | P | −304.5 | **x0**, _fr_aux_0, x1 | **x0**, _fr_aux_0, _fr_aux_1 | **2/3** | 24.8 % | no |
+| nvs05 | P | 0.675 | _fr_aux_3, x0, _fr_aux_0 | x0, x1, x3 | 1/3 | (near-0 bound) | no |
+| nvs09 | P | −72.9 | _fr_aux_1, x2, x0 | x2, x3, x1 | 1/3 | 38.3 % | no |
+| tanksize | P | **none** | — | x0, x1, x2 | 0/3 | 0.0 % | **YES** |
+| tls2 | P | ≈0 | x5, x4, x15 | x31, x35, x24 | **0/3** | (near-0 bound) | no |
+| hda | P | **none** | — | x719, x709 | 0/3 | 0.0 % | **YES** |
+| casctanks | H | **none** | — | x244, x245, x243 | 0/3 | 0.0 % | **YES** |
+| 4stufen | H | 10 604 | x129, x130, x131 | x114, x117, x111 | 0/3 | 17.0 % | no |
+| beuster | H | 5 942 | x156, x155, x154 | x122, x132, x131 | 0/3 | 31.9 % | no |
+| heatexch_gen1 | H | **none** | — | x107, x104, x100 | 0/3 | 0.0 % | **YES** |
+| bchoco06 | H | **none** | — | x9, x8, x0 | 0/3 | 0.0 % | **YES** |
+
+(For nvs05/tls2 the root LP bound is ≈0, so the `maxΔ%` denominator `max(1,|b|)`
+inflates the relative move; the **absolute** score is large — nvs05 `_fr_aux_3`
+score 288, tls2 x5 score 5.66 — so neither is flat. `flat` is driven entirely by
+the **no-root-bound** instances, not by any real bound that fails to move.)
+
+**Two distinct Class-P sub-classes, not one:**
+
+1. **Responsive-but-under-branched — the R3b lever (nvs05, nvs09, tls2).** A root
+   bound exists, responsive variables exist, but the top responsive variables are
+   *not* the top-branched. **tls2 is the clearest case in the whole panel:**
+   overlap **0/3** — its most-responsive variables `x5`/`x4` (score 5.66/5.01)
+   are branched **2/2** times, while its three most-branched columns `x31`/`x35`/
+   `x24` (123/98/87 branches) have **score exactly 0** — the policy spends its
+   entire branching budget on variables that provably do not move the root bound.
+   nvs05/nvs09 show the same shape more mildly (the single most-responsive column
+   is a lifted `_fr_aux_*` that is **never branched** — nvs05 `_fr_aux_3` score
+   288, 0 branches; nvs09 `_fr_aux_1` score 27.9, 0 branches).
+
+2. **Relaxation-limited / no-root-bound — R4 territory, not R3b (tanksize, hda).**
+   The cold McCormick relaxation produces **no LP bound at all** (the AMP
+   constraint-omission class — hda's 23 unlinearizable rows per bottleneck-
+   profile §3; tanksize's `4243.28/(x0·x1)` and other non-constant divisions).
+   Responsiveness is *undefined* (there is no bound for box-halving to move), so
+   these are flagged **flat → R4**, exactly as the kill criterion prescribes.
+   Branching selection cannot be their lever; they need relaxation coverage
+   (R4 lifting), not a branching score.
+
+**st_e36 — the F5 prediction is REFUTED (measurement beats plan, §0.4).** F5
+(bottleneck-profile §3/§5) predicted x0 responsive / x1 branched — "the tree
+branches 897 nodes on x1 while the responsive x0 is never split." On the
+post-F1–F7 engine this **does not reproduce**: x0 is the top responsive variable
+(score 75.6) **and** the top-branched variable (**267** branches vs x1's 14).
+The tree already spends most of its budget on the responsive variable; the
+overlap is **2/3** (x0 + `_fr_aux_0`, the 2nd-most-responsive lifted column,
+which is now also branched, 56×). So st_e36 is *not* a selection-limited
+instance — its residual gap is the zero-spanning-factor product relaxation (R4),
+consistent with F5's own re-scoping conclusion. This is the one Class-P instance
+that "already branches the responsive vars."
+
+**Class-H (context only, not a gate):** 4stufen/beuster are responsive-but-
+under-branched (overlap 0/3; responsive `x129`.../`x156`... never branched) — R3b
+beneficiaries. casctanks/heatexch_gen1/bchoco06 are no-root-bound / flat → R4.
+
+**KILL-CRITERION EVALUATION.** Class-P instances already branching the responsive
+variables (overlap ≥ 2/3): **1 of 6** (st_e36 only). SKIP requires ≥ 4. Not met.
+Relaxation-limited (flat) Class-P instances flagged for **R4**: **tanksize, hda**
+(both no-root-bound). The three Class-P instances with a live, responsive-but-
+under-branched signal are **nvs05, nvs09, tls2**.
+
+> **VERDICT: BUILD R3b.** Selection *is* a lever on nvs05/nvs09/tls2 — the
+> current policy demonstrably branches non-responsive columns while the
+> responsive ones (including lifted `_fr_aux_*` products) go untouched (tls2:
+> the top-3 branched have score 0; nvs05/nvs09: the top-responsive `_fr_aux_*` is
+> never branched). Scope R3b to *raise the branching priority of high-`score`
+> columns, including lifted aux variables* (which R4 also needs branchable — the
+> two tasks reinforce). Exclude tanksize/hda from R3b's acceptance (no bound to
+> respond to → R4). st_e36 already branches its responsive variable, so R3b is
+> not expected to help it; its lever is R4 (zero-spanning-factor lifting). The
+> §12 branching-exclusion reopen is thereby *narrowed*, not broadened: the win is
+> confined to the pinned/loose-product class R3 was scoped for, with a live
+> per-instance signal, not a general branching-rule project.
+
 **R3b — Conditional build: responsiveness-aware spatial branching score
 (flagged).**
 - **Mechanism:** blend a bound-responsiveness term into the *spatial*
