@@ -547,6 +547,34 @@ nightlies per §0.1.
 
 ### V2 — Gate wiring + the measurement of record
 
+**STATUS: DONE (2026-07-06). Honest target revised 42 → 43 (not the plan's ≥46,
+which assumed R2+R3b landed).** Full write-up:
+`docs/dev/uncertified-tail-plan-results-2026-07-06.md`. Summary:
+
+- **Gate wiring (Part 1) — landed.** `[suites.global50]` added to
+  `benchmarks.toml` (`instance_list = "config/baron_global50.txt"`, the panel
+  every cert gate named but had no table for); `[gates.cert2]` added per
+  cert-gap-plan §11 with the recorded corrections (`root_gap_ratio_vs_baron`
+  from A3's live `SolveResult.bound`; existing `geomean_ratio_vs_baron` name;
+  new `closed_within_10_nodes_fraction` metric fn + dispatch in `metrics.py`).
+  Reference-bound caveat handled: the root-gap ratio counts only BARON rows with
+  a usable bound (null-`root_gap` rows excluded both sides, `>1e-10` denominator
+  guard). 6 new tests (metric fn + gate wiring), all green. cert2 is
+  informational until the R-flags flip default-on (out of V2 scope).
+- **Measurement of record (Part 2) — flag-ON BARON re-run.** `proved-optimal
+  42 → 43` (**st_e36** only: feasible/TL → optimal, 153 nodes, ~17 s, with
+  `DISCOPT_LIFT_ZERO_SPANNING_FACTORS=1`). Correct-count and the four hard gates
+  (0 violations; no certification lost; time-limit contract; bound-vs-oracle
+  clean) all hold. R4 is the **only shipped tail win**; a single flag-ON full run
+  suffices because the corpus scan found the zero-spanning structure only in
+  st_e36 and flag-OFF is byte-identical to the V1 baseline on the 41-instance
+  cert panel.
+- **Why not ≥46:** R2 deferred (broad, non-tail); R3b killed by its own entry
+  experiment (the tail is relaxation-limited, not selection-limited); R5 not
+  built; F5/F6 killed. The plan's ≥46 assumed R2+R3b landed. tanksize/nvs05/
+  nvs09/tls2 and the hard no-bound tail (hda, casctanks, …) are unchanged —
+  deeper lifting / relaxation coverage (#517), out of scope.
+
 1. **Wire the long-missing suite/gate** (cert-gap-plan §14 T2.6 items 1–2):
    `[suites.global50]` in `benchmarks.toml` + `[gates.cert2]`
    (`root_gap_ratio_vs_baron ≤ 1.3` — computed from A3's now-live bound

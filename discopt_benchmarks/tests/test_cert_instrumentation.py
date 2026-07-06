@@ -13,8 +13,10 @@ Pins the producers added to make the certification loop measurable:
 from __future__ import annotations
 
 import os
+from pathlib import Path
 
 import pytest
+import tomllib
 
 os.environ.setdefault("JAX_PLATFORMS", "cpu")
 os.environ.setdefault("JAX_ENABLE_X64", "1")
@@ -23,6 +25,7 @@ from benchmarks.metrics import (  # noqa: E402
     BenchmarkResults,
     SolveResult,
     SolveStatus,
+    closed_within_10_nodes_fraction,
     evaluate_phase_gate,
     root_gap_populated_fraction,
     root_gap_ratio,
@@ -197,9 +200,6 @@ def test_root_gap_populated_fraction():
 
 
 def _load_cert0_gate_config():
-    import tomllib
-    from pathlib import Path
-
     toml = Path(__file__).resolve().parents[1] / "config" / "benchmarks.toml"
     with open(toml, "rb") as fh:
         return tomllib.load(fh)["gates"]["cert0"]
@@ -256,3 +256,97 @@ def test_cert0_gate_fails_on_incorrect():
     assert by["zero_incorrect"].actual >= 1
     assert not by["zero_incorrect"].passed
     assert not ok
+
+
+# ─────────────────────── T2.6: closed_within_10_nodes_fraction ───────────────────────
+
+def _opt(name: str, nodes: int) -> SolveResult:
+    """A proved-optimal discopt row with a given node count."""
+    return SolveResult(
+        instance=name, solver="discopt", status=SolveStatus.OPTIMAL,
+        objective=1.0, bound=1.0, node_count=nodes,
+    )
+
+
+def test_closed_within_10_nodes_fraction_known_counts():
+    """A fixture with known node counts yields the known fraction: of 4 proved
+    rows, 3 close in ≤ 10 nodes (0, 7, 10) and 1 does not (153) → 3/4 = 0.75."""
+    rows = [_opt("root_fathom", 0), _opt("cheap", 7), _opt("edge", 10), _opt("st_e36", 153)]
+    assert closed_within_10_nodes_fraction(rows) == pytest.approx(0.75)
+
+
+def test_closed_within_10_nodes_fraction_boundary_and_zero():
+    """node_count == threshold counts as closed; a run that opens 11 nodes does
+    not; node_count == 0 (root fathom / convex fast path) is the tightest close."""
+    assert closed_within_10_nodes_fraction([_opt("x", 10)]) == pytest.approx(1.0)
+    assert closed_within_10_nodes_fraction([_opt("x", 11)]) == pytest.approx(0.0)
+    assert closed_within_10_nodes_fraction([_opt("x", 0)]) == pytest.approx(1.0)
+
+
+def test_closed_within_10_nodes_fraction_denominator_is_proved_only():
+    """The denominator is *proved-optimal* rows only — feasible (uncertified
+    tail) and errored rows are excluded, so a large feasible tree does not dilute
+    the metric. Of the two OPTIMAL rows here (both ≤ 10 nodes) the fraction is
+    1.0 even though a feasible 900-node row is present."""
+    rows = [
+        _opt("a", 3),
+        _opt("b", 8),
+        SolveResult(instance="tail", solver="discopt", status=SolveStatus.FEASIBLE,
+                    objective=1.0, bound=0.0, node_count=900),
+        SolveResult(instance="err", solver="discopt", status=SolveStatus.ERROR),
+    ]
+    assert closed_within_10_nodes_fraction(rows) == pytest.approx(1.0)
+
+
+def test_closed_within_10_nodes_fraction_empty_is_zero():
+    """No proved-optimal rows → 0.0 (an honest 'nothing closed', not a NaN)."""
+    assert closed_within_10_nodes_fraction([]) == pytest.approx(0.0)
+    tail_only = [SolveResult(instance="t", solver="discopt", status=SolveStatus.FEASIBLE,
+                             objective=1.0, node_count=500)]
+    assert closed_within_10_nodes_fraction(tail_only) == pytest.approx(0.0)
+
+
+def _load_cert2_gate_config():
+    toml = Path(__file__).resolve().parents[1] / "config" / "benchmarks.toml"
+    with open(toml, "rb") as fh:
+        return tomllib.load(fh)["gates"]["cert2"]
+
+
+def test_cert2_suite_and_gate_wired():
+    """[suites.global50] resolves and [gates.cert2] wires the T2.6 metrics with
+    the recorded corrections (existing geomean_ratio_vs_baron name; new
+    closed_within_10_nodes_fraction; root_gap_ratio_vs_baron; zero-slack incorrect)."""
+    toml = Path(__file__).resolve().parents[1] / "config" / "benchmarks.toml"
+    with open(toml, "rb") as fh:
+        cfg = tomllib.load(fh)
+
+    # Every cert gate references suite "global50" — the suite table must exist.
+    assert "global50" in cfg["suites"]
+    assert cfg["suites"]["global50"]["instance_list"] == "config/baron_global50.txt"
+
+    crit = _load_cert2_gate_config()["criteria"]
+    assert crit["root_gap_vs_baron"]["metric"] == "root_gap_ratio_vs_baron"
+    assert crit["root_gap_vs_baron"]["max"] == 1.3
+    assert crit["geomean_vs_baron"]["metric"] == "geomean_ratio_vs_baron"
+    assert crit["tree_closed_fraction"]["metric"] == "closed_within_10_nodes_fraction"
+    assert crit["tree_closed_fraction"]["min"] == 0.30
+    assert crit["zero_incorrect"]["metric"] == "incorrect_count"
+    assert crit["zero_incorrect"]["max"] == 0
+
+
+def test_cert2_gate_dispatch_evaluates_new_metric():
+    """evaluate_phase_gate dispatches closed_within_10_nodes_fraction — a panel
+    where 3/4 proved rows close in ≤ 10 nodes reads 0.75 and passes the ≥ 0.30
+    criterion; the zero-slack correctness guard also passes on a correct panel."""
+    gate = _load_cert2_gate_config()
+    rows = [_opt("root_fathom", 0), _opt("cheap", 7), _opt("edge", 10), _opt("st_e36", 153)]
+    bench = BenchmarkResults(suite="cert2", timestamp="t")
+    for r in rows:
+        bench.add_result(r)
+    optima = {r.instance: 1.0 for r in rows}
+    ok, crits = evaluate_phase_gate("cert2", bench, gate, known_optima=optima)
+    by = {c.name: c for c in crits}
+    assert by["tree_closed_fraction"].actual == pytest.approx(0.75)
+    assert by["tree_closed_fraction"].passed
+    assert by["zero_incorrect"].actual == 0
+    assert by["zero_incorrect"].passed
