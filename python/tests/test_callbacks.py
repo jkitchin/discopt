@@ -442,3 +442,125 @@ class TestCallbackContext:
         )
         assert ctx.incumbent_obj is None
         assert ctx.gap is None
+
+    def test_none_best_bound(self):
+        # A1: best_bound is Optional — None when no certified global bound exists.
+        ctx = CallbackContext(
+            node_count=5,
+            incumbent_obj=3.0,
+            best_bound=None,
+            gap=None,
+            elapsed_time=0.1,
+            x_relaxation=np.zeros(2),
+            node_bound=1.0,
+        )
+        assert ctx.best_bound is None
+
+
+class TestCertifiedCallbackBound:
+    """A1: the callback's ``best_bound`` must never over-report the certified
+    global dual bound. ``_certified_callback_bound`` maps the Rust tree's raw
+    ``global_lower_bound`` to the value that is safe to surface.
+    """
+
+    def test_valid_minimize_passthrough(self):
+        from discopt.solver import _certified_callback_bound
+
+        assert _certified_callback_bound(5.32, True, False) == 5.32
+
+    def test_maximize_is_negated(self):
+        from discopt.solver import _certified_callback_bound
+
+        # Internal minimization tracks -obj: a lower bound L on -obj is an upper
+        # bound -L on obj. A raw min-sense bound must be negated for MAXIMIZE.
+        assert _certified_callback_bound(-52.89, True, True) == 52.89
+
+    def test_tainted_tree_reports_none(self):
+        from discopt.solver import _certified_callback_bound
+
+        # A non-rigorous fathom removed an unproven subtree; the surviving
+        # frontier minimum may sit above the true certified bound (nvs05:
+        # global_lower_bound = 5.32 on a tainted tree whose rigorous bound is
+        # 1.35). Never surface it.
+        assert _certified_callback_bound(5.32, False, False) is None
+        assert _certified_callback_bound(-52.89, False, True) is None
+
+    def test_neg_inf_root_reports_none(self):
+        from discopt.solver import _certified_callback_bound
+
+        # Unbounded / free-variable root (#467): the tree pins the bound at -inf.
+        assert _certified_callback_bound(-np.inf, True, False) is None
+
+    def test_failure_sentinel_reports_none(self):
+        from discopt.constants import SENTINEL_THRESHOLD
+        from discopt.solver import _certified_callback_bound
+
+        # The 1e30 no-relaxation sentinel (hda/heatexch class) is "no bound",
+        # not a numeric bound — must not leak through the API as a huge number.
+        assert _certified_callback_bound(SENTINEL_THRESHOLD, True, False) is None
+        assert _certified_callback_bound(None, True, False) is None
+
+
+class TestCallbackBoundSoundness:
+    """A1 regression: the callback's ``best_bound`` is a *certified* global dual
+    bound. It must (1) be on the correct side of the objective for the sense and
+    (2) never over-report relative to the final ``SolveResult.bound``. The
+    pre-fix code surfaced the raw internal min-sense ``global_lower_bound`` with
+    no sense negation and no taint gate, so both invariants failed.
+    """
+
+    def test_maximize_best_bound_is_a_valid_upper_bound(self):
+        # A small NON-NAMED nonconvex MAXIMIZE MINLP. For a maximize, every
+        # certified best_bound is an UPPER bound (>= the achievable objective).
+        # Pre-fix reported the un-negated internal bound (a lower bound on -obj,
+        # i.e. NEGATIVE here) and this assertion fails; post-fix it passes.
+        m = discopt.Model("cb_max_bound")
+        n = m.integer("n", lb=1, ub=6)
+        x = m.continuous("x", lb=0.0, ub=5.0)
+        m.maximize(x * n - (x - 2.0) ** 2 * n)  # nonconvex
+        m.subject_to(x + n <= 8.0)
+
+        bounds: list = []
+
+        def cb(ctx, _model):
+            bounds.append(ctx.best_bound)
+
+        res = m.solve(time_limit=15, gap_tolerance=1e-4, node_callback=cb)
+        assert res.status in ("optimal", "feasible")
+        assert res.objective is not None
+        finite = [b for b in bounds if b is not None and np.isfinite(b)]
+        assert finite, "expected at least one certified best_bound in the trace"
+        # Every certified upper bound must be >= the achievable objective.
+        for b in finite:
+            assert b >= res.objective - 1e-6, (
+                f"maximize best_bound {b} below objective {res.objective}: "
+                "callback under-/wrong-signed the certified bound"
+            )
+
+    def test_best_bound_never_exceeds_final_certified_bound(self):
+        # A tiny-budget spatial solve that exits feasible with an open frontier.
+        # The running certified best_bound must never exceed what the final
+        # SolveResult certifies (both are the same certified global bound; the
+        # callback is a snapshot of it). Over-reporting = the A1 bug.
+        m = discopt.Model("cb_min_bound")
+        n = m.integer("n", lb=1, ub=20)
+        x = m.continuous("x", lb=0.01, ub=20.0)
+        m.minimize((x - n) ** 2 * n - 10.0 * x / n)  # nonconvex product/reciprocal
+        m.subject_to(x * n >= 12.0)
+        m.subject_to(x + n <= 30.0)
+
+        bounds: list = []
+
+        def cb(ctx, _model):
+            bounds.append(ctx.best_bound)
+
+        res = m.solve(time_limit=5, gap_tolerance=1e-4, node_callback=cb)
+        assert res.status in ("optimal", "feasible")
+        finite = [b for b in bounds if b is not None and np.isfinite(b)]
+        if res.bound is not None and np.isfinite(res.bound):
+            for b in finite:
+                # MINIMIZE: a certified lower bound never exceeds the finally
+                # certified lower bound by more than solver tolerance.
+                assert b <= res.bound + 1e-4, (
+                    f"callback best_bound {b} over-reports the final certified bound {res.bound}"
+                )

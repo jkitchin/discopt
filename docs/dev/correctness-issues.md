@@ -122,6 +122,7 @@ in non-default configs; loud ingestion gaps. **P3** = hygiene.
 | C-34 | P0 | gdp_reformulate | even-power bound over a zero-straddling base uses endpoint-only bounds (omits interior min at 0) → invalid aux box → false optimal (= FR-1), DEFAULT path | fixed |
 | C-35 | P1 | oa.py / gdpopt_loa | non-rigorous NLP failure → unconditional no-good cut → possible false infeasible/optimal (= OA-1, opt-in OA/LOA path) | fixed |
 | C-36 | P3 | convexity/interval.py | Python `interval_mul` yields NaN on 0·∞ (`RuntimeWarning: invalid value encountered in multiply`), same 0·∞ class as C-22 but a SEPARATE Python code path (`python/discopt/_jax/convexity/interval.py:171`); lost tightening, not unsound | fixed |
+| C-37 | P2 | solver.py callback API | `CallbackContext.best_bound` surfaced the raw tree `global_lower_bound` with no sense-negation and no taint gate → **over-reported** the certified global bound on a non-rigorously-fathomed tree (nvs05: callback 5.32 vs the rigorous `SolveResult.bound` 1.35) and reported a wrong-signed bound for MAXIMIZE; API-surface soundness (the reported `SolveResult.bound` was already correct) | fixed (A1) |
 
 ---
 
@@ -2605,3 +2606,78 @@ it is a separate module with its own tests and consumers.
     adversarial suite 10 passed; ruff + ruff-format clean; `incorrect_count = 0`;
     the `RuntimeWarning: invalid value encountered in multiply` from `interval.py`
     is gone. No Rust touched.
+
+---
+
+## C-37 (P2, FIXED — A1) — `CallbackContext.best_bound` over-reports the certified global dual bound on a tainted tree
+
+**Area:** `python/discopt/solver.py` — the three `CallbackContext(...)` construction
+sites (lazy-constraint helper `_invoke_pre_import_callbacks`, and the two
+`node_callback` sites in `solve_model` and `_solve_nlp_bb`).
+
+**Origin:** filed by the A1 entry experiment
+(`docs/dev/perf-followup-plan-2026-07-05.md` §2 A1) after its **kill criterion
+fired**. A1's evidence (profile §6) was that on nvs05@60 s the `node_callback`
+trace ends with `best_bound = 5.32` while `SolveResult.bound = 1.348` (reported
+gap 75.4 %). The plan named two possibilities: (a) the final result under-adopts
+the tree's frontier bound, or (b) the callback's `best_bound` was never a
+certified global bound (over-reporting). The entry experiment proved **(b)**.
+
+**Diagnosis (printed evidence):** on nvs05 (MINIMIZE, opt 5.470934) at the 60 s
+time-limit exit:
+- `SolveResult.bound = 1.3481188` (the rigorous root-relaxation fallback, #138) —
+  this is **correct and sound**: `1.348 ≤ 5.470934` (never crosses the oracle).
+- `stats["global_lower_bound"] = 5.32` = the minimum over the *surviving* open
+  frontier. But the run made **89 non-rigorous sentinel fathoms** (a node NLP that
+  merely failed/diverged, sentinel-pruned with no FBBT infeasibility proof —
+  `solver.py:5814`/`5842`; 7 such prunes already in a 20 s run). Each removes an
+  **unproven** subtree from the frontier. A pruned-but-unproven subtree is *not*
+  proven suboptimal, so the surviving-frontier minimum (5.32) may sit strictly
+  **above** the true certified global bound. Reporting it claims a dual bound the
+  search never proved.
+
+The final result-assembly path already handles this correctly: it drops the tree
+bound to `None` whenever the tree is tainted (`_tree_bound_valid = _gap_certified`,
+`solver.py:7107`/`8336`) and falls back to the rigorous root relaxation — hence the
+sound 1.348. The **callback API** did not: it surfaced the raw
+`stats["global_lower_bound"]` directly, with no taint gate and (a second, latent
+defect) **no maximize-sense negation** — for a MAXIMIZE the internal minimization
+tracks `-obj`, so the raw value is a lower bound on `-obj` (an *upper* bound on
+`obj` only after negating); the callback reported it un-negated, i.e. wrong-signed.
+
+**Severity (P2 — API-surface soundness, not a false certificate):** the reported
+`SolveResult.status`/`bound` were always correct, so no run ever *certified* a
+wrong answer. But `best_bound` is a public field (`CallbackContext`, used by the
+benchmark trajectory recorder and `profile_instance.py`); an over-reported /
+wrong-signed dual bound mis-scores gaps in monitoring and benchmark tooling and
+violates the invariant that a *global dual bound* never crosses the optimum.
+
+**Fix:** new helper `_certified_callback_bound(global_lower_bound,
+tree_bound_valid, is_maximize) -> Optional[float]` maps the raw tree bound to the
+value safe to surface: `None` when the tree is tainted (`tree_bound_valid` False),
+when the bound is the failure/`1e30` sentinel, or when it is non-finite (`-inf`
+root, #467); otherwise the sense-corrected bound (negated for MAXIMIZE). All three
+construction sites route through it (the lazy-constraint helper takes a new
+`tree_bound_valid=_gap_certified` kwarg; the two node_callback sites already have
+`_gap_certified` in scope). `CallbackContext.best_bound` is retyped
+`float | None`. Invariant established: **the callback's `best_bound` never exceeds
+what the final `SolveResult.bound` would certify.**
+
+**Verification:** nvs05@60 s — `SolveResult.bound` unchanged at 1.348 (the fix does
+not touch the reported bound, only the callback surface); callback trace now
+reports the honest climbing bound up to the first non-rigorous fathom (max 2.04),
+then `None` (no certified global bound), never 5.32.
+
+- **Regression tests** (`python/tests/test_callbacks.py`,
+  `TestCertifiedCallbackBound` + `TestCallbackBoundSoundness`): unit tests for the
+  helper (minimize passthrough, maximize negation, tainted→None, `-inf`→None,
+  sentinel→None) and two integration tests — a small NON-NAMED nonconvex MAXIMIZE
+  MINLP asserting every certified `best_bound` is a valid upper bound
+  (`>= objective`), and a tiny-budget minimize solve asserting the running
+  `best_bound` never exceeds the final `SolveResult.bound`. 6 of 7 fail on pre-fix
+  code (ImportError on the helper; the maximize wrong-sign assertion), all pass
+  after.
+- **Note for A2:** C-37 gates the *tainted-tree* and *sense* over-reporting. A2
+  (the `1e30` sentinel → `None` at the callback boundary) is complementary and
+  already partly covered here (the sentinel branch of the helper); A2 remains a
+  separate PR for the full no-relaxation-class audit of `best_bound` consumers.

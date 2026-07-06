@@ -11,7 +11,8 @@ Example
 >>> from discopt.callbacks import CallbackContext, CutResult, NodeCallback
 >>>
 >>> def my_logger(ctx: CallbackContext, model: discopt.Model) -> None:
-...     print(f"Node {ctx.node_count}: bound={ctx.best_bound:.4f}")
+...     bb = "n/a" if ctx.best_bound is None else f"{ctx.best_bound:.4f}"
+...     print(f"Node {ctx.node_count}: bound={bb}")
 >>>
 >>> result = m.solve(node_callback=my_logger)
 """
@@ -43,8 +44,15 @@ class CallbackContext:
     incumbent_obj : float or None
         Best feasible objective value found so far, or None if no
         incumbent exists yet.
-    best_bound : float
-        Best (tightest) lower bound across all open nodes.
+    best_bound : float or None
+        The certified global dual bound of the search so far (a lower bound for
+        a MINIMIZE, an upper bound for a MAXIMIZE), or ``None`` when no such
+        bound has been certified yet. ``None`` is reported whenever the tree
+        bound is not (yet) a rigorous global bound — e.g. a node was fathomed
+        non-rigorously (an NLP failure with no infeasibility proof), an
+        unbounded/free root leaves the bound at ``-inf``, or the relaxation
+        omits rows so no dual bound exists. Never over-reports: this value never
+        exceeds what the final ``SolveResult.bound`` would certify (A1).
     gap : float or None
         Relative optimality gap, or None if no incumbent exists.
     elapsed_time : float
@@ -57,7 +65,7 @@ class CallbackContext:
 
     node_count: int
     incumbent_obj: float | None
-    best_bound: float
+    best_bound: float | None
     gap: float | None
     elapsed_time: float
     x_relaxation: np.ndarray
