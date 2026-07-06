@@ -43,6 +43,8 @@ class FakeTree:
     def inject_incumbent(self, sol, obj):
         if self._inc is None or obj < self._inc[1]:
             self._inc = (np.asarray(sol, dtype=float), float(obj))
+            return True
+        return False
 
     def set_branch_hints(self, ids, vhint):
         self.hint = (list(ids), list(vhint))
@@ -63,7 +65,26 @@ class RecordingFrontend:
         return self._control
 
 
-def _batch_ctx(tree, checkpoint):
+def _true_obj(x):
+    """The 'true objective' the fake validator evaluates: sum + 2.9."""
+    return float(np.sum(x)) + 2.9
+
+
+def _fake_validator(feasible=True):
+    """Validator double matching discopt.debug.steer.Validator: the candidate
+    is 'feasible' iff requested, and its true objective is _true_obj(x) — which
+    deliberately differs from the relaxation bound in result_lbs."""
+
+    def validate(x):
+        xv = np.asarray(x, dtype=np.float64).copy()
+        if not feasible:
+            return False, xv, float("nan")
+        return True, xv, _true_obj(xv)
+
+    return validate
+
+
+def _batch_ctx(tree, checkpoint, validator=None):
     return DebugContext.build(
         checkpoint,
         tree=tree,
@@ -72,9 +93,10 @@ def _batch_ctx(tree, checkpoint):
         batch_lb=np.array([[0.0, 0.0]]),
         batch_ub=np.array([[1.0, 1.0]]),
         batch_ids=np.array([11]),
-        result_lbs=np.array([3.9]),
+        result_lbs=np.array([3.5]),
         result_sols=np.array([[0.5, 0.5]]),
         result_feas=np.array([True]),
+        validator=validator,
     )
 
 
@@ -123,29 +145,67 @@ def test_iteration_breakpoint_and_tbreak_one_shot():
 
 
 @pytest.mark.unit
-def test_inject_adopts_improving_incumbent():
+def test_inject_adopts_validated_true_objective_not_relax_bound():
+    """An adopted incumbent carries the validator's TRUE objective, never the
+    relaxation bound in result_lbs (which would fabricate an incumbent)."""
     tree = FakeTree(inc=(np.array([1.0, 2.0]), 5.05))
-    ctx = _batch_ctx(tree, debug.Checkpoint.BEFORE_IMPORT)
-    adopted = ctx.steer.inject(ctx.result_sols[0], float(ctx.result_lbs[0]))
+    ctx = _batch_ctx(tree, debug.Checkpoint.BEFORE_IMPORT, validator=_fake_validator())
+    adopted, obj, reason = ctx.steer.inject(ctx.result_sols[0])
     assert adopted is True
+    assert reason == "adopted"
+    # true objective 3.9 = _true_obj([0.5, 0.5]); relax bound is 3.5.
+    assert obj == pytest.approx(3.9)
     assert tree.incumbent()[1] == pytest.approx(3.9)
+    assert tree.incumbent()[1] != pytest.approx(float(ctx.result_lbs[0]))
 
 
 @pytest.mark.unit
-def test_inject_rejects_worse_incumbent():
+def test_inject_rejects_non_improving_candidate():
     tree = FakeTree(inc=(np.array([1.0, 2.0]), 1.0))
-    ctx = _batch_ctx(tree, debug.Checkpoint.BEFORE_IMPORT)
-    adopted = ctx.steer.inject(ctx.result_sols[0], 9.9)
+    ctx = _batch_ctx(tree, debug.Checkpoint.BEFORE_IMPORT, validator=_fake_validator())
+    adopted, obj, reason = ctx.steer.inject(ctx.result_sols[0])
     assert adopted is False
+    assert obj == pytest.approx(3.9)
+    assert "not strictly improving" in reason
     assert tree.incumbent()[1] == pytest.approx(1.0)
+
+
+@pytest.mark.unit
+def test_inject_rejects_infeasible_candidate():
+    """A candidate the validator rules infeasible never reaches the tree."""
+    tree = FakeTree(inc=(np.array([1.0, 2.0]), 5.05))
+    validator = _fake_validator(feasible=False)
+    ctx = _batch_ctx(tree, debug.Checkpoint.BEFORE_IMPORT, validator=validator)
+    adopted, obj, reason = ctx.steer.inject(ctx.result_sols[0])
+    assert adopted is False
+    assert obj is None
+    assert "infeasible" in reason
+    assert tree.incumbent()[1] == pytest.approx(5.05)  # untouched
+
+
+@pytest.mark.unit
+def test_inject_refuses_without_validator():
+    """No validator wired => inject refuses loudly rather than trusting the
+    caller (certificate safety, CLAUDE.md §1)."""
+    tree = FakeTree()
+    ctx = _batch_ctx(tree, debug.Checkpoint.BEFORE_IMPORT)  # validator=None
+    assert ctx.steer.can_inject is False
+    with pytest.raises(RuntimeError, match="no candidate validator"):
+        ctx.steer.inject(ctx.result_sols[0])
+    # The engine command reports it as unavailable instead of raising.
+    eng = DebugCommandEngine()
+    sess = DebugSession(RecordingFrontend())
+    res = eng.execute("inject 0", ctx, sess)
+    assert any("inject unavailable" in line for line in res.output)
+    assert tree.incumbent() is None  # nothing was injected
 
 
 @pytest.mark.unit
 def test_inject_refuses_nonfinite():
     tree = FakeTree()
-    ctx = _batch_ctx(tree, debug.Checkpoint.BEFORE_IMPORT)
+    ctx = _batch_ctx(tree, debug.Checkpoint.BEFORE_IMPORT, validator=_fake_validator())
     with pytest.raises(ValueError):
-        ctx.steer.inject(np.array([np.nan, 0.0]), 1.0)
+        ctx.steer.inject(np.array([np.nan, 0.0]))
 
 
 @pytest.mark.unit
@@ -238,6 +298,32 @@ def test_no_op_debugger_is_bound_neutral():
 
     assert dbg.node_count == base.node_count
     assert dbg.objective == base.objective  # exact, not approx
+
+
+@pytest.mark.smoke
+@pytest.mark.requires_pounce
+def test_inject_cannot_corrupt_certificate(capsys):
+    """Regression for the unvalidated-inject hole: steering ``inject`` at the
+    BEFORE_IMPORT checkpoint must never change the certified optimum. The
+    candidate (a relaxation solution) is validated against the original
+    problem; an infeasible point is rejected outright, and a feasible one is
+    injected with its true evaluated objective — so the certificate is
+    identical either way. Before the fix, the relaxation *bound* was adopted
+    as the incumbent objective and the solve certified a wrong optimum."""
+    base = _spatial_model().solve(time_limit=20.0)
+    assert base.status == "optimal"
+
+    script = ["stop-at steer", "continue", "inject 0", "continue"]
+    debug.attach(debug.make_session(script=script))
+    try:
+        res = _spatial_model().solve(time_limit=20.0)
+    finally:
+        debug.detach()
+
+    err = capsys.readouterr().err
+    assert "inject node[0]" in err, "the inject command never ran"
+    assert res.status == "optimal"
+    assert res.objective == pytest.approx(base.objective, rel=1e-6, abs=1e-6)
 
 
 @pytest.mark.smoke

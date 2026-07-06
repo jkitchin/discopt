@@ -118,6 +118,7 @@ def fire(
     result_feas: Any = None,
     event: Optional[str] = None,
     error: Any = None,
+    validator: Any = None,
 ) -> bool:
     """Fire a checkpoint. **Hot path** — returns immediately when detached.
 
@@ -146,6 +147,7 @@ def fire(
         result_sols=result_sols,
         result_feas=result_feas,
         event=event,
+        validator=validator,
     )
     if error is not None:
         ctx.extra["error"] = error

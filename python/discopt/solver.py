@@ -5188,6 +5188,34 @@ def solve_model(
 
     from discopt import debug as _debug
 
+    def _debug_validate_candidate(
+        x,
+        _ev=evaluator,
+        _cl=cl_list,
+        _cu=cu_list,
+        _ioff=int_offsets,
+        _isz=int_sizes,
+    ):
+        """Validate a debugger-injected candidate against the ORIGINAL problem.
+
+        ``inject_incumbent`` trusts its caller (no feasibility re-check), so
+        the debugger's ``inject`` steer must verify integrality + constraint
+        feasibility here and hand the tree the point's true evaluated
+        objective — never a relaxation bound (CLAUDE.md §1). Returns
+        ``(feasible, x_validated, obj)``; pure reads only.
+        """
+        xv = np.asarray(x, dtype=np.float64).copy()
+        if _ioff and not _is_integer_feasible_solution(xv, _ioff, _isz):
+            return False, xv, float("nan")
+        for _o, _s in zip(_ioff, _isz):
+            xv[_o : _o + _s] = np.round(xv[_o : _o + _s])
+        if _cl and not _check_constraint_feasibility(_ev, xv, _cl, _cu):
+            return False, xv, float("nan")
+        _obj = float(_ev.evaluate_objective(xv))
+        if not np.isfinite(_obj) or _obj >= _SENTINEL_THRESHOLD:
+            return False, xv, float("nan")
+        return True, xv, _obj
+
     while True:
         elapsed = time.perf_counter() - t_start
         if elapsed >= time_limit:
@@ -6788,7 +6816,8 @@ def solve_model(
                     tree.inject_incumbent(xr, _obj_i)
 
         # Interactive debugger: steer point — relaxations solved, results not
-        # yet imported. Safe-steer (inject incumbent / branch hint) applies here.
+        # yet imported. Safe-steer (inject incumbent / branch hint) applies here;
+        # `inject` candidates are validated by _debug_validate_candidate.
         if _debug.fire(
             _debug.Checkpoint.BEFORE_IMPORT,
             tree=tree,
@@ -6801,6 +6830,7 @@ def solve_model(
             result_lbs=result_lbs,
             result_sols=result_sols,
             result_feas=result_feas,
+            validator=_debug_validate_candidate,
         ):
             break
 
@@ -7771,6 +7801,34 @@ def _solve_nlp_bb(
 
     from discopt import debug as _debug
 
+    def _debug_validate_candidate(
+        x,
+        _ev=evaluator,
+        _cl=cl_list,
+        _cu=cu_list,
+        _ioff=int_offsets,
+        _isz=int_sizes,
+    ):
+        """Validate a debugger-injected candidate against the ORIGINAL problem.
+
+        ``inject_incumbent`` trusts its caller (no feasibility re-check), so
+        the debugger's ``inject`` steer must verify integrality + constraint
+        feasibility here and hand the tree the point's true evaluated
+        objective — never a relaxation bound (CLAUDE.md §1). Returns
+        ``(feasible, x_validated, obj)``; pure reads only.
+        """
+        xv = np.asarray(x, dtype=np.float64).copy()
+        if _ioff and not _is_integer_feasible_solution(xv, _ioff, _isz):
+            return False, xv, float("nan")
+        for _o, _s in zip(_ioff, _isz):
+            xv[_o : _o + _s] = np.round(xv[_o : _o + _s])
+        if _cl and not _check_constraint_feasibility(_ev, xv, _cl, _cu):
+            return False, xv, float("nan")
+        _obj = float(_ev.evaluate_objective(xv))
+        if not np.isfinite(_obj) or _obj >= _SENTINEL_THRESHOLD:
+            return False, xv, float("nan")
+        return True, xv, _obj
+
     while True:
         elapsed = time.perf_counter() - t_start
         if elapsed >= time_limit:
@@ -8157,6 +8215,7 @@ def _solve_nlp_bb(
             )
 
         # Interactive debugger: steer point — relaxations solved, not imported.
+        # `inject` candidates are validated by _debug_validate_candidate.
         if _debug.fire(
             _debug.Checkpoint.BEFORE_IMPORT,
             tree=tree,
@@ -8169,6 +8228,7 @@ def _solve_nlp_bb(
             result_lbs=result_lbs,
             result_sols=result_sols,
             result_feas=result_feas,
+            validator=_debug_validate_candidate,
         ):
             break
 

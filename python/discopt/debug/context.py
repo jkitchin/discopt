@@ -91,12 +91,15 @@ class DebugContext:
         result_sols: Any = None,
         result_feas: Any = None,
         event: Optional[str] = None,
+        validator: Any = None,
     ) -> "DebugContext":
         """Construct a context by reading aggregate state from the Rust tree.
 
         Only pure reads (``tree.stats()`` / ``tree.incumbent()``) are performed,
         so building a context never perturbs the search — a no-op debugger is
-        bound-neutral.
+        bound-neutral. ``validator`` is the solve loop's candidate-validation
+        closure (see :data:`discopt.debug.steer.Validator`); the ``inject``
+        steer is available only at checkpoints that wire one.
         """
         from .steer import DebugSteer
 
@@ -128,7 +131,7 @@ class DebugContext:
             result_sols=result_sols,
             result_feas=result_feas,
             event=event,
-            steer=DebugSteer(tree, model) if tree is not None else None,
+            steer=DebugSteer(tree, model, validator=validator) if tree is not None else None,
             model=model,
         )
 

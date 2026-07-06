@@ -163,7 +163,7 @@ def _cmd_help(engine, args, ctx, session):
             "        break (list) | break del N | break clear [cond|events]",
             "watch:  watch <target> | watch | watch clear",
             "look:   info(i) | print(p) incumbent|bound|gap|stats|nodes|node <i>|relax <i>",
-            "steer:  inject <i>   (adopt relax sol of batch node i as incumbent)",
+            "steer:  inject <i>   (validate relax sol of batch node i; adopt if feasible)",
             "        hint <node_id> <var>",
             f"metrics: {', '.join(sorted(ctx.metrics()))}",
             f"checkpoints: {', '.join(c.value for c in Checkpoint)}",
@@ -330,13 +330,22 @@ def _cmd_watch(engine, args, ctx, session):
 def _cmd_inject(engine, args, ctx, session):
     if ctx.steer is None or ctx.result_sols is None:
         return CommandResult(["inject unavailable at this checkpoint"])
+    if not ctx.steer.can_inject:
+        return CommandResult(
+            [
+                "inject unavailable: this solve path wires no candidate validator, "
+                "so a point's true feasibility/objective cannot be verified "
+                "(refusing — certificate safety)"
+            ]
+        )
     i = int(args[0])
     sol = np.asarray(ctx.result_sols[i], dtype=np.float64)
-    obj = float(ctx.result_lbs[i])
-    adopted = ctx.steer.inject(sol, obj)
-    return CommandResult(
-        [f"inject node[{i}] obj={_fmt(obj)}: {'adopted' if adopted else 'rejected by tree'}"]
-    )
+    # The candidate is validated against the ORIGINAL problem (integrality,
+    # constraints, true objective) — never trusted with its relaxation bound.
+    adopted, obj, reason = ctx.steer.inject(sol)
+    if obj is None:
+        return CommandResult([f"inject node[{i}]: {reason}"])
+    return CommandResult([f"inject node[{i}] obj={_fmt(obj)}: {reason}"])
 
 
 def _cmd_hint(engine, args, ctx, session):

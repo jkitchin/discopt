@@ -62,7 +62,7 @@ def _capabilities() -> dict[str, Any]:
     """What this debugger build can do — clients branch on these, not version."""
     return {
         "inspect": True,
-        "safe_steer": True,  # inject (tree-validated) + branch hint
+        "safe_steer": True,  # inject (validated vs original problem) + branch hint
         "mutate_iterate": False,  # certificate-safe: no node-box/bound edits
         "conditional_breakpoints": "compound_and",  # '&&' only; no '||'/grouping
         "event_breakpoints": True,
