@@ -1502,6 +1502,43 @@ def _solve_root_node_multistart(
     return last_result
 
 
+def _certified_callback_bound(
+    global_lower_bound: Optional[float],
+    tree_bound_valid: bool,
+    is_maximize: bool,
+) -> Optional[float]:
+    """The certified global dual bound to surface on the callback API.
+
+    A1 (correctness): the callback's ``best_bound`` must never exceed the bound
+    the final :class:`SolveResult` would certify. The Rust tree's raw
+    ``global_lower_bound`` is the minimum over the *surviving* open frontier, but
+    a non-rigorously-fathomed node (an NLP that merely failed/diverged and was
+    sentinel-pruned with no infeasibility proof — solver.py:5814/5842) removes an
+    unproven subtree from that frontier. Its subtree is not proven suboptimal, so
+    the surviving-frontier minimum may sit strictly *above* the true certified
+    global bound. Reporting it then over-reports a dual bound the search never
+    proved (nvs05: tree ``global_lower_bound = 5.32`` on a tainted tree whose
+    rigorous bound is 1.35 — reported bound must stay 1.35). The final
+    result-assembly path already drops the tree bound in exactly this case
+    (``_tree_bound_valid``); the callback must mirror it.
+
+    Returns the sense-corrected certified bound (for a MAXIMIZE the internal
+    minimization tracks ``-obj``, so a lower bound ``L`` on ``-obj`` is an upper
+    bound ``-L`` on ``obj``), or ``None`` when no certified bound exists: the
+    tree is tainted (``tree_bound_valid`` False), or the bound is the failure
+    sentinel / non-finite (``-inf`` root, or the ``1e30`` no-relaxation
+    sentinel). ``None`` matches the ``Optional`` convention already used by
+    ``incumbent_obj``/``gap``.
+    """
+    if not tree_bound_valid:
+        return None
+    if global_lower_bound is None or not np.isfinite(global_lower_bound):
+        return None
+    if abs(global_lower_bound) >= _SENTINEL_THRESHOLD:
+        return None
+    return -global_lower_bound if is_maximize else global_lower_bound
+
+
 def _invoke_pre_import_callbacks(
     *,
     model,
@@ -1518,6 +1555,7 @@ def _invoke_pre_import_callbacks(
     lazy_constraints,
     incumbent_callback,
     _cut_pool,
+    tree_bound_valid=True,
 ):
     """Check lazy constraints and incumbent callbacks before importing results.
 
@@ -1541,6 +1579,13 @@ def _invoke_pre_import_callbacks(
     stats = tree.stats()
     elapsed = time.perf_counter() - t_start
 
+    from discopt.modeling.core import ObjectiveSense as _ObjectiveSense
+
+    _cb_is_max = model._objective is not None and model._objective.sense == _ObjectiveSense.MAXIMIZE
+    _cb_bound = _certified_callback_bound(
+        stats.get("global_lower_bound"), tree_bound_valid, _cb_is_max
+    )
+
     for i in range(n_batch):
         if result_lbs[i] >= _SENTINEL_THRESHOLD:
             continue  # skip infeasible nodes
@@ -1561,7 +1606,7 @@ def _invoke_pre_import_callbacks(
         ctx = CallbackContext(
             node_count=stats["total_nodes"],
             incumbent_obj=inc_obj,
-            best_bound=stats.get("global_lower_bound", -np.inf),
+            best_bound=_cb_bound,
             gap=stats.get("gap"),
             elapsed_time=elapsed,
             x_relaxation=result_sols[i].copy(),
@@ -6667,6 +6712,7 @@ def solve_model(
                 lazy_constraints=lazy_constraints,
                 incumbent_callback=incumbent_callback,
                 _cut_pool=_cut_pool,
+                tree_bound_valid=_gap_certified,
             )
 
         # Convex-objective node bound (applied at the single point every node's
@@ -6833,11 +6879,17 @@ def solve_model(
                     if result_lbs[i] < result_lbs[best_idx]:
                         best_idx = i
                 from discopt.callbacks import CallbackContext
+                from discopt.modeling.core import ObjectiveSense as _ObjSense
 
+                _cb_is_max = (
+                    model._objective is not None and model._objective.sense == _ObjSense.MAXIMIZE
+                )
                 ctx = CallbackContext(
                     node_count=stats_snap["total_nodes"],
                     incumbent_obj=inc_obj_cb,
-                    best_bound=stats_snap.get("global_lower_bound", -np.inf),
+                    best_bound=_certified_callback_bound(
+                        stats_snap.get("global_lower_bound"), _gap_certified, _cb_is_max
+                    ),
                     gap=stats_snap.get("gap"),
                     elapsed_time=time.perf_counter() - t_start,
                     x_relaxation=result_sols[best_idx].copy(),
@@ -8030,11 +8082,17 @@ def _solve_nlp_bb(
                     if result_lbs[i] < result_lbs[best_idx]:
                         best_idx = i
                 from discopt.callbacks import CallbackContext
+                from discopt.modeling.core import ObjectiveSense as _ObjSense
 
+                _cb_is_max = (
+                    model._objective is not None and model._objective.sense == _ObjSense.MAXIMIZE
+                )
                 ctx = CallbackContext(
                     node_count=stats_snap["total_nodes"],
                     incumbent_obj=inc_obj_cb,
-                    best_bound=stats_snap.get("global_lower_bound", -np.inf),
+                    best_bound=_certified_callback_bound(
+                        stats_snap.get("global_lower_bound"), _gap_certified, _cb_is_max
+                    ),
                     gap=stats_snap.get("gap"),
                     elapsed_time=time.perf_counter() - t_start,
                     x_relaxation=result_sols[best_idx].copy(),

@@ -285,7 +285,7 @@ class BenchmarkRunner:
                             [
                                 float(ctx.elapsed_time),
                                 int(ctx.node_count),
-                                float(ctx.best_bound),
+                                (None if ctx.best_bound is None else float(ctx.best_bound)),
                                 (None if ctx.incumbent_obj is None else float(ctx.incumbent_obj)),
                             ]
                         )
