@@ -346,3 +346,64 @@ def test_json_protocol_handshake_and_events():
     # the whole stream is strict-JSON clean (no Infinity/NaN).
     for e in events:
         _json.loads(_json.dumps(e, allow_nan=False))
+
+
+# ── pure-Rust MILP fast-path (PyO3 checkpoint hook) ──────────────────────────
+
+
+def _pure_milp_model():
+    """A pure binary knapsack that routes to the Rust ``solve_milp`` fast-path
+    (``nlp_solver='simplex'``) — the loop that runs entirely in Rust."""
+    m = do.Model("dbg_milp")
+    xs = [m.integer(f"x{i}", lb=0, ub=1) for i in range(10)]
+    vals = [8, 5, 3, 6, 4, 7, 9, 2, 5, 6]
+    wts = [5, 3, 2, 4, 3, 5, 6, 1, 2, 4]
+    m.subject_to(sum(w * xi for w, xi in zip(wts, xs)) <= 14)
+    m.maximize(sum(v * xi for v, xi in zip(vals, xs)))
+    return m
+
+
+@pytest.mark.smoke
+def test_rust_milp_hook_fires_across_pyo3():
+    fe = RecordingFrontend(walk=True)
+    debug.attach(DebugSession(fe))
+    try:
+        res = _pure_milp_model().solve(time_limit=15.0, nlp_solver="simplex")
+    finally:
+        debug.detach()
+    assert res.status == "optimal"
+    seen = set(fe.hits)
+    # the Rust hook fires the aggregate checkpoints (no per-node batch on this path)
+    assert "iter_start" in seen
+    assert "after_process" in seen
+    assert "terminated" in seen
+
+
+@pytest.mark.smoke
+def test_rust_milp_hook_is_bound_neutral():
+    """A no-op debugger must not perturb the pure-Rust MILP search."""
+    base = _pure_milp_model().solve(time_limit=15.0, nlp_solver="simplex")
+
+    debug.attach(DebugSession(RecordingFrontend(control=Control.CONTINUE)))
+    try:
+        dbg = _pure_milp_model().solve(time_limit=15.0, nlp_solver="simplex")
+    finally:
+        debug.detach()
+
+    assert dbg.node_count == base.node_count
+    assert dbg.objective == base.objective
+
+
+@pytest.mark.smoke
+def test_rust_milp_quit_stops_early():
+    class QuitFrontend:
+        def interact(self, ctx, session):
+            return Control.QUIT
+
+    debug.attach(DebugSession(QuitFrontend()))
+    try:
+        res = _pure_milp_model().solve(time_limit=15.0, nlp_solver="simplex")
+    finally:
+        debug.detach()
+    # Aborted before proving optimality -> a valid, non-"optimal" partial result.
+    assert res.status in ("feasible", "node_limit", "time_limit")

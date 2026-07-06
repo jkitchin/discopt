@@ -11530,6 +11530,12 @@ def _solve_milp_simplex(
     # bounding the wasted time before fallback to a few seconds.
     _remaining = float(time_limit) - (time.perf_counter() - t_start)
     _milp_budget = max(0.5, min(0.5 * _remaining, _SIMPLEX_MILP_BUDGET_CAP_S))
+    # Interactive debugger: install the Rust checkpoint hook only when a debugger
+    # is attached now (bound-neutral otherwise). This is the pure-Rust MILP
+    # fast-path — the hook fires the same node-lifecycle checkpoints as the
+    # Python-driven loops, across the PyO3 boundary.
+    from discopt import debug as _debug
+
     status, x_struct, obj, bound, nodes, _lp_iters = solve_milp_py(
         np.ascontiguousarray(lp_data.c, dtype=np.float64),
         A,
@@ -11542,6 +11548,7 @@ def _solve_milp_simplex(
         int(max_nodes),
         float(gap_tolerance),
         time_limit_s=float(_milp_budget),
+        debug_hook=_debug.rust_hook(),
     )
     wall_time = time.perf_counter() - t_start
     maximize = model._objective is not None and model._objective.sense == ObjectiveSense.MAXIMIZE

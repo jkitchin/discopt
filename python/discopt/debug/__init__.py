@@ -23,7 +23,7 @@ certificate — see :mod:`discopt.debug.steer`.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any, Callable, Optional
 
 from .checkpoints import Checkpoint
 from .context import DebugContext
@@ -42,6 +42,8 @@ __all__ = [
     "current",
     "is_attached",
     "fire",
+    "fire_rust",
+    "rust_hook",
     "make_session",
 ]
 
@@ -148,6 +150,30 @@ def fire(
     if error is not None:
         ctx.extra["error"] = error
     return session.on_checkpoint(ctx)
+
+
+def fire_rust(state: dict) -> bool:
+    """Checkpoint entry for the pure-Rust MILP hook (see ``lp_bindings.rs``).
+
+    Called across the PyO3 boundary with an aggregate state dict. Returns
+    ``True`` to stop the search (``quit``). A no-op / detached debugger returns
+    ``False`` — matching the Rust guard that only installs a hook when attached.
+    """
+    session = _ACTIVE
+    if session is None:
+        return False
+    return session.on_checkpoint(DebugContext.from_rust(state))
+
+
+def rust_hook() -> "Optional[Callable[[dict], bool]]":
+    """Return the callable to pass as ``solve_milp_py(debug_hook=…)``, or None.
+
+    A debugger must be attached *now* for a hook to be installed, so the Rust
+    search stays bound-neutral whenever no debugger is present.
+    """
+    if _ACTIVE is None:
+        return None
+    return fire_rust
 
 
 class _AttachGuard:

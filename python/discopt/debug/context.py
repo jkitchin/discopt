@@ -131,3 +131,31 @@ class DebugContext:
             steer=DebugSteer(tree, model) if tree is not None else None,
             model=model,
         )
+
+    @classmethod
+    def from_rust(cls, state: dict) -> "DebugContext":
+        """Build a context from the pure-Rust MILP hook's aggregate state dict.
+
+        The Rust ``solve_milp`` fast-path has no ``PyTreeManager``, so this path
+        carries aggregate scalars only (no per-node batch arrays, no steer
+        handle — inspection and flow control only).
+        """
+        cp = Checkpoint(str(state["checkpoint"]))
+        inc = state.get("incumbent")
+        inc_obj = (
+            float(inc)
+            if inc is not None and np.isfinite(inc) and float(inc) < _SENTINEL_THRESHOLD
+            else None
+        )
+        gap = state.get("gap")
+        gap = float(gap) if gap is not None and np.isfinite(gap) else None
+        return cls(
+            checkpoint=cp,
+            iteration=int(state.get("iteration", 0)),
+            elapsed=float(state.get("elapsed", 0.0)),
+            node_count=int(state.get("nodes", 0)),
+            open_nodes=int(state.get("open_nodes", 0)),
+            incumbent_obj=inc_obj,
+            best_bound=float(state.get("bound", -np.inf)),
+            gap=gap,
+        )

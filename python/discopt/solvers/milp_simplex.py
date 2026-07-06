@@ -315,6 +315,10 @@ def solve_milp(
     else:
         int_cols = np.zeros(0, dtype=np.int64)
 
+    # Interactive debugger: install the Rust checkpoint hook only when a debugger
+    # is attached now, so the pure-Rust search stays bound-neutral otherwise.
+    from discopt import debug as _debug
+
     status, x_full, obj, bound, nodes, _iters = solve_milp_py(
         np.ascontiguousarray(c_std),
         np.ascontiguousarray(a_std),
@@ -327,6 +331,7 @@ def solve_milp(
         int(max_nodes),
         float(gap_tolerance),
         time_limit_s=0.0 if time_limit is None else max(0.0, float(time_limit)),
+        debug_hook=_debug.rust_hook(),
     )
 
     if status == "infeasible":
