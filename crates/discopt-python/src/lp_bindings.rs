@@ -305,6 +305,10 @@ pub fn solve_lp_py<'py>(
         tol,
         max_iter,
         deadline: None,
+        // F2: warm dual-simplex stall guard on by default (size-derived cap →
+        // cold fallback on trip; bound-neutral). Cold-only entry points ignore it.
+        warm_stall_guard: true,
+        warm_stall_cap_override: None,
     };
     let sol = simplex_solve_lp(&lp, b.as_slice()?, &opts);
     let status = match sol.status {
@@ -431,6 +435,10 @@ pub fn solve_lp_warm_py<'py>(
         tol,
         max_iter,
         deadline: None,
+        // F2: warm dual-simplex stall guard on by default (size-derived cap →
+        // cold fallback on trip; bound-neutral). Cold-only entry points ignore it.
+        warm_stall_guard: true,
+        warm_stall_cap_override: None,
     };
     let b_slice = b.as_slice()?;
 
@@ -506,6 +514,10 @@ pub fn solve_lp_warm_csc_py<'py>(
         tol,
         max_iter,
         deadline: None,
+        // F2: warm dual-simplex stall guard on by default (size-derived cap →
+        // cold fallback on trip; bound-neutral). Cold-only entry points ignore it.
+        warm_stall_guard: true,
+        warm_stall_cap_override: None,
     };
     let start = match (start_col_status, start_basic_vars) {
         (Some(cs), Some(bv)) => build_extended_basis(cs.as_slice()?, bv.as_slice()?, n, m),
@@ -601,6 +613,10 @@ pub fn solve_lp_batch_py<'py>(
         tol,
         max_iter,
         deadline: None,
+        // F2: warm dual-simplex stall guard on by default (size-derived cap →
+        // cold fallback on trip; bound-neutral). Cold-only entry points ignore it.
+        warm_stall_guard: true,
+        warm_stall_cap_override: None,
     };
     // The solve touches no Python objects, so release the GIL to let the core's
     // rayon workers run the batch concurrently without contending on it.
@@ -719,6 +735,9 @@ pub fn solve_milp_py<'py>(
             // The MILP driver clones this and injects its own wall-clock deadline
             // from `time_limit_s`, so the base options leave it unset.
             deadline: None,
+            // F2: warm dual-simplex stall guard (size-derived cap → cold fallback).
+            warm_stall_guard: true,
+            warm_stall_cap_override: None,
         },
     };
     let res = py.allow_threads(|| {

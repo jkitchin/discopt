@@ -117,6 +117,14 @@ counters!(
     // pre-empt by escalating in place). The ratio is the escalation headroom.
     DualWarmSolves,
     DualColdFallbacks,
+    // Warm dual-simplex stall-guard trips (discopt F2): a warm re-solve that hit
+    // the size-derived stall cap (K·(m+n)+C ≤ max_iter) and abandoned the warm
+    // basis for a cold re-solve of the *same* LP. A subset of DualColdFallbacks
+    // (those caused specifically by the stall guard, not a numerical breakdown).
+    // > 0 on the pathological append-and-re-solve class (nvs01), = 0 on the
+    // healthy majority — so the guard's action is auditable and its
+    // bound-neutrality (same optimum, cold path) is measurable.
+    DualStallTrips,
 );
 
 #[inline(always)]
@@ -168,6 +176,23 @@ pub fn reset() {
     for a in PCOUNT.iter().chain(PNANOS.iter()).chain(CVALS.iter()) {
         a.store(0, Ordering::Relaxed);
     }
+}
+
+/// Current value of a counter. Mainly for tests/observability: lets a caller
+/// read a counter (e.g. [`Ctr::DualStallTrips`]) without going through [`dump`]
+/// (which prints to stderr and resets). Reads 0 when profiling was never enabled,
+/// since [`incr`] only accumulates while [`enabled`] holds.
+#[inline]
+pub fn counter(c: Ctr) -> u64 {
+    CVALS[c as usize].load(Ordering::Relaxed)
+}
+
+/// Force the profiling flag on/off. Test-only: production toggles it exactly once
+/// via [`init_from_env`]. Exposed so a Rust test can deterministically observe a
+/// [`counter`] without setting the `DISCOPT_PROFILE` env var process-wide.
+#[cfg(test)]
+pub fn set_enabled(on: bool) {
+    ENABLED.store(on, Ordering::Relaxed);
 }
 
 /// Print the accumulated table to stderr when profiling is enabled, then reset.

@@ -168,6 +168,8 @@ fn main() {
             tol: 1e-9,
             max_iter: cap,
             deadline: None,
+            warm_stall_guard: true,
+            warm_stall_cap_override: None,
         };
         let sol = solve_lp(&lp, &b, &opts);
         let basis = &sol.basis.basic_vars;
