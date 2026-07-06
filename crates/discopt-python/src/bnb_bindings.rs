@@ -245,6 +245,21 @@ impl PyTreeManager {
         Ok(dict)
     }
 
+    /// R3a measurement accessor (temporary, behavior-neutral): per-variable
+    /// branch frequency as an int64 array of length n_vars. Element `i` is the
+    /// number of branching events (integer or spatial) that split flat column
+    /// `i`. Used by the responsiveness-fingerprint experiment; does not affect
+    /// any solver decision.
+    fn branch_var_counts<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<i64>> {
+        let counts: Vec<i64> = self
+            .inner
+            .branch_var_counts()
+            .iter()
+            .map(|&c| c as i64)
+            .collect();
+        PyArray1::from_vec(py, counts)
+    }
+
     /// Get the current incumbent solution, if any.
     ///
     /// Returns (solution_array, objective_value) or None.

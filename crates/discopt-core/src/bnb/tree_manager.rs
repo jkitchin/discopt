@@ -142,6 +142,13 @@ pub struct TreeManager {
     /// `global_lower_bound = -inf` so `gap() = ∞` and the search reports
     /// feasible/unknown rather than a false optimal (issue #467).
     bound_unresolved: bool,
+    /// R3a measurement counter (temporary, behavior-neutral): per-variable
+    /// branch frequency. Incremented once per branching event (integer or
+    /// spatial) with the branched flat column index. Length `n_vars`. Read by
+    /// the responsiveness-fingerprint experiment to compare actually-branched
+    /// variables against the box-shrink responsiveness ranking. Does not affect
+    /// any branching or bounding decision.
+    branch_var_counts: Vec<usize>,
 }
 
 impl TreeManager {
@@ -182,6 +189,20 @@ impl TreeManager {
             spatial_integer_cols,
             branch_deprioritized,
             bound_unresolved: false,
+            branch_var_counts: vec![0; n_vars],
+        }
+    }
+
+    /// R3a measurement accessor (temporary): per-variable branch frequency,
+    /// length `n_vars`. See [`Self::branch_var_counts`].
+    pub fn branch_var_counts(&self) -> &[usize] {
+        &self.branch_var_counts
+    }
+
+    /// Increment the R3a branch counter for a branched flat column index.
+    fn record_branch_var(&mut self, var_index: usize) {
+        if let Some(c) = self.branch_var_counts.get_mut(var_index) {
+            *c += 1;
         }
     }
 
@@ -446,6 +467,7 @@ impl TreeManager {
                 self.pool.add(left);
                 self.pool.add(right);
                 stats.branched += 1;
+                self.record_branch_var(decision.var_index);
             } else if self.nonconvex && int_feasible {
                 // No fractional integer variable, but nonconvex mode: branch
                 // spatially. Independent continuous variables and integer
@@ -523,6 +545,7 @@ impl TreeManager {
                         self.pool.add(left);
                         self.pool.add(right);
                         stats.branched += 1;
+                        self.record_branch_var(dep_decision.var_index);
                     } else {
                         // No branching direction remains. Whether this fathom is
                         // sound depends on the node's dual bound:
@@ -557,9 +580,11 @@ impl TreeManager {
                     self.pool.add(left);
                     self.pool.add(right);
                     stats.branched += 1;
+                    self.record_branch_var(sidx);
                 } else {
                     // Continuous bisection wins.
                     let (cont_decision, _) = cont.unwrap();
+                    let cont_var = cont_decision.var_index;
                     let parent = self.pool.get(result.node_id).clone();
                     self.pool.get_mut(result.node_id).status = NodeStatus::Branched;
                     let (left, right) =
@@ -567,6 +592,7 @@ impl TreeManager {
                     self.pool.add(left);
                     self.pool.add(right);
                     stats.branched += 1;
+                    self.record_branch_var(cont_var);
                 }
             } else {
                 // No fractional variable found — treat as fathomed. This branch

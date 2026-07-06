@@ -43,6 +43,14 @@ from discopt.solver_tuning import reset_current as _reset_tuning
 from discopt.solver_tuning import set_current as _set_tuning
 from discopt.solvers import SolveStatus
 
+# R3a measurement sink (temporary, behavior-neutral). When set to a mutable
+# dict by an experiment harness, the nonconvex B&B path stores the Rust tree's
+# per-variable branch-frequency vector under key "branch_var_counts" just before
+# building its result. This is instrumentation only: it never influences a
+# branching, bounding, or feasibility decision. Left as ``None`` in all normal
+# solves so there is zero overhead and no observable behavior change.
+_R3A_BRANCH_COUNT_SINK: Optional[dict] = None
+
 # ``solve_nlp`` (cyipopt) is imported lazily at its nonlinear-path call site in
 # ``_solve_continuous`` so a pure LP/MILP/MIQP solve does not pull in the JAX-
 # backed NLPEvaluator that ``nlp_ipopt`` imports at module scope.
@@ -7202,6 +7210,17 @@ def solve_model(
     stats = tree.stats()
     incumbent = tree.incumbent()
 
+    # R3a instrumentation: export the per-variable branch-frequency vector when
+    # an experiment harness has armed the sink. Behavior-neutral; guarded so a
+    # missing accessor (older extension build) degrades silently.
+    if _R3A_BRANCH_COUNT_SINK is not None:
+        try:
+            _R3A_BRANCH_COUNT_SINK["branch_var_counts"] = np.asarray(
+                tree.branch_var_counts()
+            ).tolist()
+        except Exception as _e:  # pragma: no cover - diagnostics only
+            logger.debug("R3a branch_var_counts capture failed: %s", _e)
+
     if incumbent is not None:
         sol_array, obj_val = incumbent
         # Filter out bogus incumbents from infeasible NLP relaxations
@@ -8640,6 +8659,18 @@ def _solve_nlp_bb(
 
     stats = tree.stats()
     incumbent = tree.incumbent()
+
+    # R3a instrumentation (behavior-neutral): export the per-variable branch
+    # frequency when the diagnostic sink is armed. Mirrors the capture in the
+    # McCormick-LP nonconvex driver so alphaBB/NLP-path instances (e.g. tls2)
+    # are covered too.
+    if _R3A_BRANCH_COUNT_SINK is not None:
+        try:
+            _R3A_BRANCH_COUNT_SINK["branch_var_counts"] = np.asarray(
+                tree.branch_var_counts()
+            ).tolist()
+        except Exception as _e:  # pragma: no cover - diagnostics only
+            logger.debug("R3a branch_var_counts capture failed: %s", _e)
 
     if incumbent is not None:
         sol_array, obj_val = incumbent
@@ -12407,6 +12438,16 @@ def _solve_milp_bb(
     stats = tree.stats()
     incumbent = tree.incumbent()
 
+    # R3a instrumentation (behavior-neutral): export per-variable branch
+    # frequency when the diagnostic sink is armed (integer B&B drivers too).
+    if _R3A_BRANCH_COUNT_SINK is not None:
+        try:
+            _R3A_BRANCH_COUNT_SINK["branch_var_counts"] = np.asarray(
+                tree.branch_var_counts()
+            ).tolist()
+        except Exception as _e:  # pragma: no cover - diagnostics only
+            logger.debug("R3a branch_var_counts capture failed: %s", _e)
+
     if incumbent is not None:
         sol_array, obj_val = incumbent
         if obj_val >= _SENTINEL_THRESHOLD:
@@ -12892,6 +12933,16 @@ def _solve_miqp_bb(
 
     stats = tree.stats()
     incumbent = tree.incumbent()
+
+    # R3a instrumentation (behavior-neutral): export per-variable branch
+    # frequency when the diagnostic sink is armed (integer B&B drivers too).
+    if _R3A_BRANCH_COUNT_SINK is not None:
+        try:
+            _R3A_BRANCH_COUNT_SINK["branch_var_counts"] = np.asarray(
+                tree.branch_var_counts()
+            ).tolist()
+        except Exception as _e:  # pragma: no cover - diagnostics only
+            logger.debug("R3a branch_var_counts capture failed: %s", _e)
 
     if incumbent is not None:
         sol_array, obj_val = incumbent
