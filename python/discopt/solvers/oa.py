@@ -25,6 +25,7 @@ import logging
 import time
 import warnings
 from collections import Counter
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Optional, cast
 
@@ -86,6 +87,223 @@ _CUT_SOURCE_ORDER = (
 _INITIAL_POA_PHASES = frozenset({"auto", "initial"})
 _PERIODIC_RELAXATION_PHASES = frozenset({"periodic"})
 _SHOT_MASTER_FEATURE_BACKEND = "gurobi"
+
+
+def _normalize_optional_hook(name: str, hook: Any) -> Any:
+    if hook is not None and not callable(hook):
+        raise ValueError(f"{name} must be callable or None, got {type(hook).__name__}.")
+    return hook
+
+
+def _validate_hook_bool(name: str, value: Any) -> bool:
+    if not isinstance(value, bool):
+        raise ValueError(f"{name} must be a boolean, got {value!r}.")
+    return bool(value)
+
+
+def _finite_hook_float(name: str, value: Any) -> float:
+    try:
+        out = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{name} must be a finite number, got {value!r}.") from exc
+    if not np.isfinite(out):
+        raise ValueError(f"{name} must be finite, got {value!r}.")
+    return out
+
+
+def _external_hook_items(value: Any, *, hook_name: str, item_name: str) -> list[Any]:
+    if value is None:
+        return []
+    if isinstance(value, Mapping):
+        return [value]
+    try:
+        return list(value)
+    except TypeError as exc:
+        raise ValueError(
+            f"{hook_name} must return None or an iterable of {item_name} payloads."
+        ) from exc
+
+
+def _validate_external_primal_candidates(
+    value: Any,
+    *,
+    n_vars: int,
+    hook_name: str = "external_primal_candidate_hook",
+) -> list[dict[str, object]]:
+    if value is None:
+        return []
+    items: list[Any]
+    if isinstance(value, Mapping):
+        items = [value]
+    else:
+        try:
+            arr = np.asarray(value, dtype=np.float64)
+        except (TypeError, ValueError):
+            items = _external_hook_items(value, hook_name=hook_name, item_name="candidate")
+        else:
+            if arr.ndim == 1:
+                items = [arr]
+            elif arr.ndim == 2:
+                items = [row for row in arr]
+            else:
+                raise ValueError(
+                    f"{hook_name} returned candidate array with {arr.ndim} dimensions; "
+                    "expected a 1-D point or 2-D point matrix."
+                )
+
+    out: list[dict[str, object]] = []
+    for idx, item in enumerate(items):
+        if isinstance(item, Mapping):
+            if "point" not in item:
+                raise ValueError(f"{hook_name} candidate {idx} must include a 'point' entry.")
+            raw_point = item["point"]
+            objective = item.get("objective")
+            provider = item.get("provider")
+            nlp_source = item.get("nlp_source", "active")
+        else:
+            raw_point = item
+            objective = None
+            provider = None
+            nlp_source = "active"
+
+        point = np.asarray(raw_point, dtype=np.float64).reshape(-1)
+        if point.shape != (int(n_vars),):
+            raise ValueError(
+                f"{hook_name} candidate {idx} point has length {point.size}; "
+                f"expected {int(n_vars)}."
+            )
+        if not np.all(np.isfinite(point)):
+            raise ValueError(f"{hook_name} candidate {idx} point must contain only finite values.")
+        payload: dict[str, object] = {
+            "point": point.copy(),
+            "source": "external",
+            "nlp_source": str(nlp_source),
+        }
+        if objective is not None:
+            payload["objective"] = _finite_hook_float(
+                f"{hook_name} candidate {idx} objective",
+                objective,
+            )
+        if provider is not None:
+            payload["provider"] = str(provider)
+        out.append(payload)
+    return out
+
+
+def _validate_external_hyperplanes(
+    value: Any,
+    *,
+    n_vars: int,
+    hook_name: str = "external_hyperplane_hook",
+) -> list[dict[str, object]]:
+    out: list[dict[str, object]] = []
+    for idx, item in enumerate(
+        _external_hook_items(value, hook_name=hook_name, item_name="hyperplane")
+    ):
+        if not isinstance(item, Mapping):
+            raise ValueError(
+                f"{hook_name} hyperplane {idx} must be a dict with coefficients and rhs."
+            )
+        coeffs_raw = item.get("coefficients", item.get("coeffs"))
+        if coeffs_raw is None:
+            raise ValueError(
+                f"{hook_name} hyperplane {idx} must include 'coefficients' or 'coeffs'."
+            )
+        if "rhs" not in item:
+            raise ValueError(f"{hook_name} hyperplane {idx} must include 'rhs'.")
+        coeffs = np.asarray(coeffs_raw, dtype=np.float64).reshape(-1)
+        if coeffs.shape != (int(n_vars),):
+            raise ValueError(
+                f"{hook_name} hyperplane {idx} has {coeffs.size} coefficients; "
+                f"expected {int(n_vars)}."
+            )
+        if not np.all(np.isfinite(coeffs)):
+            raise ValueError(
+                f"{hook_name} hyperplane {idx} coefficients must contain only finite values."
+            )
+        if np.linalg.norm(coeffs) < 1e-12:
+            raise ValueError(f"{hook_name} hyperplane {idx} coefficients must be nonzero.")
+        rhs = _finite_hook_float(f"{hook_name} hyperplane {idx} rhs", item["rhs"])
+        support = None
+        if item.get("supporting_point") is not None:
+            support = np.asarray(item["supporting_point"], dtype=np.float64).reshape(-1)
+            if support.shape != (int(n_vars),):
+                raise ValueError(
+                    f"{hook_name} hyperplane {idx} supporting_point has length "
+                    f"{support.size}; expected {int(n_vars)}."
+                )
+            if not np.all(np.isfinite(support)):
+                raise ValueError(
+                    f"{hook_name} hyperplane {idx} supporting_point must contain "
+                    "only finite values."
+                )
+        constraint_id = item.get("constraint_id")
+        if constraint_id is not None:
+            constraint_id = int(constraint_id)
+            if constraint_id < 0:
+                raise ValueError(f"{hook_name} hyperplane {idx} constraint_id must be nonnegative.")
+        objective_id = item.get("objective_id")
+        violation = item.get("violation")
+        payload: dict[str, object] = {
+            "coefficients": coeffs.copy(),
+            "rhs": rhs,
+            "relaxable": _validate_hook_bool(
+                f"{hook_name} hyperplane {idx} relaxable",
+                item.get("relaxable", True),
+            ),
+            "global_valid": _validate_hook_bool(
+                f"{hook_name} hyperplane {idx} global_valid",
+                item.get("global_valid", True),
+            ),
+            "local_valid": _validate_hook_bool(
+                f"{hook_name} hyperplane {idx} local_valid",
+                item.get("local_valid", True),
+            ),
+            "supporting_point": None if support is None else support.copy(),
+            "violation": (
+                None
+                if violation is None
+                else _finite_hook_float(f"{hook_name} hyperplane {idx} violation", violation)
+            ),
+            "constraint_id": constraint_id,
+            "objective_id": None if objective_id is None else str(objective_id),
+        }
+        out.append(payload)
+    return out
+
+
+def _validate_external_dual_bound(
+    value: Any,
+    *,
+    hook_name: str = "external_dual_bound_hook",
+) -> Optional[dict[str, object]]:
+    if value is None:
+        return None
+    if isinstance(value, Mapping):
+        if "bound" not in value:
+            raise ValueError(f"{hook_name} must return a number or a dict with a 'bound' entry.")
+        bound = value["bound"]
+        global_valid = value.get("global_valid", True)
+        provider = value.get("provider")
+    else:
+        bound = value
+        global_valid = True
+        provider = None
+    payload: dict[str, object] = {
+        "bound": _finite_hook_float(f"{hook_name} bound", bound),
+        "global_valid": _validate_hook_bool(f"{hook_name} global_valid", global_valid),
+    }
+    if provider is not None:
+        payload["provider"] = str(provider)
+    return payload
+
+
+def _validate_external_termination(
+    value: Any,
+    *,
+    hook_name: str = "termination_hook",
+) -> bool:
+    return _validate_hook_bool(f"{hook_name} return value", value)
 
 
 def _float_tuple(values) -> tuple[float, ...]:
@@ -4353,6 +4571,10 @@ def solve_oa(
     integer_to_binary: bool = False,
     mip_nlp_profile: str = "default",
     mip_nlp_shot_config: Optional[MIPNLPShotConfig] = None,
+    external_primal_candidate_hook: Any = None,
+    external_hyperplane_hook: Any = None,
+    external_dual_bound_hook: Any = None,
+    termination_hook: Any = None,
     **kwargs,
 ) -> SolveResult:
     """Solve a MINLP via Outer Approximation.
@@ -4471,6 +4693,13 @@ def solve_oa(
         generated binary variables. Unbounded or impractically bounded general
         integers raise a diagnostic when this option is combined with
         ``add_no_good_cuts``.
+    external_primal_candidate_hook, external_hyperplane_hook, external_dual_bound_hook,
+    termination_hook : callable, optional
+        Opt-in event hooks for the multi-tree OA loop. Hooks receive a read-only
+        context dictionary with iteration, elapsed time, current bound/incumbent
+        data, and candidate points where relevant. Returned payloads are
+        validated before they can add external fixed-NLP candidates, master cuts,
+        dual-bound updates, or request user termination.
 
     Returns
     -------
@@ -4502,6 +4731,19 @@ def solve_oa(
         "num_solution_iteration",
         num_solution_iteration,
     )
+    external_primal_candidate_hook = _normalize_optional_hook(
+        "external_primal_candidate_hook",
+        external_primal_candidate_hook,
+    )
+    external_hyperplane_hook = _normalize_optional_hook(
+        "external_hyperplane_hook",
+        external_hyperplane_hook,
+    )
+    external_dual_bound_hook = _normalize_optional_hook(
+        "external_dual_bound_hook",
+        external_dual_bound_hook,
+    )
+    termination_hook = _normalize_optional_hook("termination_hook", termination_hook)
     heuristic_nonconvex = bool(heuristic_nonconvex)
     solution_pool = bool(solution_pool)
     shot_solution_pool_degraded_reason: Optional[str] = None
@@ -4662,6 +4904,10 @@ def solve_oa(
     fixed_nlp_call_count = 0
     fixed_nlp_call_source_counts: Counter[str] = Counter()
     fixed_nlp_call_status_counts: Counter[str] = Counter()
+    external_hook_call_counts: Counter[str] = Counter()
+    external_hook_accept_counts: Counter[str] = Counter()
+    external_hook_reject_counts: Counter[str] = Counter()
+    external_hook_error_counts: Counter[str] = Counter()
     repaired_assignment_keys: set[tuple[float, ...]] = set()
     active_reduction_cut_indices: set[int] = set()
     reduction_cut_incumbent_key: Optional[float] = None
@@ -4734,6 +4980,243 @@ def solve_oa(
         after = cut_provenance.source_counts()
         return {source: int(after.get(source, 0) - before.get(source, 0)) for source in after}
 
+    def _user_bound(value: Optional[float]) -> Optional[float]:
+        traced = _trace_value(value)
+        return None if traced is None else float(_obj_sign * traced)
+
+    def _absolute_gap_value() -> Optional[float]:
+        if _trace_value(LB) is None or _trace_value(UB) is None:
+            return None
+        return abs(float(UB) - float(LB))
+
+    def _external_hook_context(
+        event: str,
+        *,
+        iteration: int,
+        master_point: Optional[np.ndarray] = None,
+        solution_points: Optional[list[np.ndarray]] = None,
+    ) -> dict[str, object]:
+        points = [] if solution_points is None else solution_points
+        return {
+            "event": event,
+            "iteration": int(iteration),
+            "elapsed": float(time.perf_counter() - t_start),
+            "is_minimization": bool(_obj_sign > 0),
+            "current_dual_bound": _user_bound(LB),
+            "current_primal_bound": _user_bound(UB),
+            "relative_gap": _trace_value(_compute_gap(LB, UB)),
+            "absolute_gap": _trace_value(_absolute_gap_value()),
+            "incumbent": None if incumbent is None else incumbent.copy(),
+            "incumbent_objective": _user_bound(incumbent_obj),
+            "master_point": None if master_point is None else master_point.copy(),
+            "solution_points": [point.copy() for point in points],
+            "n_vars": int(n_vars),
+            "n_constraints": int(n_cons),
+            "mip_count": int(mip_count),
+            "nlp_subproblem_count": int(nlp_subproblem_count),
+            "feasibility_subproblem_count": int(feasibility_subproblem_count),
+            "cut_count": int(len(oa_A_rows)),
+            "provenance_cut_count": int(len(cut_provenance.records)),
+        }
+
+    def _call_external_hook(name: str, hook: Any, context: dict[str, object]) -> Any:
+        external_hook_call_counts[name] += 1
+        try:
+            return hook(context)
+        except Exception as exc:
+            external_hook_error_counts[name] += 1
+            raise RuntimeError(f"{name} failed during MIP-NLP solve: {exc}") from exc
+
+    def _external_hook_counter_dict(counter: Counter[str]) -> dict[str, int]:
+        return {str(key): int(value) for key, value in sorted(counter.items())}
+
+    def _external_hooks_summary() -> dict[str, object]:
+        return {
+            "call_counts": _external_hook_counter_dict(external_hook_call_counts),
+            "accepted_counts": _external_hook_counter_dict(external_hook_accept_counts),
+            "rejected_counts": _external_hook_counter_dict(external_hook_reject_counts),
+            "error_counts": _external_hook_counter_dict(external_hook_error_counts),
+        }
+
+    def _maybe_run_termination_hook(iteration: int) -> Optional[dict[str, object]]:
+        if termination_hook is None:
+            return None
+        event_name = "termination"
+        raw = _call_external_hook(
+            event_name,
+            termination_hook,
+            _external_hook_context(event_name, iteration=iteration),
+        )
+        requested = _validate_external_termination(raw)
+        if requested:
+            external_hook_accept_counts[event_name] += 1
+        else:
+            external_hook_reject_counts[event_name] += 1
+        return {
+            "hook": event_name,
+            "status": "terminate" if requested else "continue",
+            "requested": bool(requested),
+        }
+
+    def _maybe_update_external_dual_bound(
+        iteration: int,
+        *,
+        master_point: Optional[np.ndarray],
+    ) -> Optional[dict[str, object]]:
+        if external_dual_bound_hook is None:
+            return None
+        event_name = "external_dual_bound"
+        raw = _call_external_hook(
+            event_name,
+            external_dual_bound_hook,
+            _external_hook_context(
+                event_name,
+                iteration=iteration,
+                master_point=master_point,
+            ),
+        )
+        payload = _validate_external_dual_bound(raw)
+        if payload is None:
+            external_hook_reject_counts[event_name] += 1
+            return {"hook": event_name, "status": "no_output", "bound": None}
+
+        user_bound = float(cast(float, payload["bound"]))
+        internal_bound = float(_obj_sign * user_bound)
+        comparison_bound = certified_LB if bool(payload["global_valid"]) else heuristic_LB
+        if internal_bound <= comparison_bound + 1e-12:
+            external_hook_reject_counts[event_name] += 1
+            return {
+                "hook": event_name,
+                "status": "not_improving",
+                "bound": user_bound,
+                "global_valid": bool(payload["global_valid"]),
+                "provider": payload.get("provider"),
+            }
+
+        if bool(payload["global_valid"]):
+            updated = _promote_certified_bound(internal_bound, "external")
+        else:
+            updated = _record_heuristic_bound(internal_bound, "external")
+        if updated:
+            external_hook_accept_counts[event_name] += 1
+        else:
+            external_hook_reject_counts[event_name] += 1
+        return {
+            "hook": event_name,
+            "status": "bound_updated" if updated else "not_improving",
+            "bound": user_bound,
+            "global_valid": bool(payload["global_valid"]),
+            "provider": payload.get("provider"),
+        }
+
+    def _maybe_add_external_hyperplanes(
+        iteration: int,
+        *,
+        solution_points: list[np.ndarray],
+    ) -> Optional[dict[str, object]]:
+        nonlocal local_cut_added
+        if external_hyperplane_hook is None:
+            return None
+        event_name = "external_hyperplane"
+        master_point = solution_points[0] if solution_points else None
+        raw = _call_external_hook(
+            event_name,
+            external_hyperplane_hook,
+            _external_hook_context(
+                event_name,
+                iteration=iteration,
+                master_point=master_point,
+                solution_points=solution_points,
+            ),
+        )
+        payloads = _validate_external_hyperplanes(raw, n_vars=n_vars)
+        if not payloads:
+            external_hook_reject_counts[event_name] += 1
+            return {"hook": event_name, "status": "no_output", "cuts_added": 0}
+
+        cuts_before = len(oa_A_rows)
+        local_added = 0
+        for payload in payloads:
+            support = payload["supporting_point"]
+            if support is None:
+                support = master_point
+            global_valid = bool(payload["global_valid"])
+            _append_master_cut(
+                oa_A_rows,
+                oa_b_rows,
+                payload["coefficients"],
+                float(cast(float, payload["rhs"])),
+                oa_cut_relaxable,
+                relaxable=bool(payload["relaxable"]),
+                cut_provenance=cut_provenance,
+                source="external",
+                global_valid=global_valid,
+                local_valid=bool(payload["local_valid"]),
+                supporting_point=support,
+                violation=cast(Optional[float], payload["violation"]),
+                constraint_id=cast(Optional[int], payload["constraint_id"]),
+                objective_id=cast(Optional[str], payload["objective_id"]),
+            )
+            if not global_valid:
+                local_added += 1
+        added = int(len(oa_A_rows) - cuts_before)
+        if local_added:
+            local_cut_added = True
+        external_hook_accept_counts[event_name] += added
+        return {
+            "hook": event_name,
+            "status": "cuts_added" if added else "no_new_cuts",
+            "cuts_added": added,
+            "local_cuts_added": int(local_added),
+        }
+
+    def _maybe_add_external_primal_candidates(
+        iteration: int,
+        *,
+        master_point: Optional[np.ndarray],
+        solution_points: list[np.ndarray],
+    ) -> Optional[dict[str, object]]:
+        if external_primal_candidate_hook is None:
+            return None
+        event_name = "external_primal_candidate"
+        raw = _call_external_hook(
+            event_name,
+            external_primal_candidate_hook,
+            _external_hook_context(
+                event_name,
+                iteration=iteration,
+                master_point=master_point,
+                solution_points=solution_points,
+            ),
+        )
+        payloads = _validate_external_primal_candidates(raw, n_vars=n_vars)
+        if not payloads:
+            external_hook_reject_counts[event_name] += 1
+            return {"hook": event_name, "status": "no_output", "candidates_added": 0}
+        manager_payloads: list[dict[str, object]] = []
+        for payload in payloads:
+            manager_payload = dict(payload)
+            if manager_payload.get("objective") is not None:
+                objective_hint = cast(float, manager_payload["objective"])
+                manager_payload["objective"] = float(_obj_sign * objective_hint)
+            manager_payloads.append(manager_payload)
+        added = fixed_nlp_manager.add_external_candidates(
+            manager_payloads,
+            iteration=int(iteration),
+            provider="external_primal_candidate_hook",
+        )
+        rejected = int(len(payloads) - added)
+        external_hook_accept_counts[event_name] += int(added)
+        if rejected:
+            external_hook_reject_counts[event_name] += rejected
+        return {
+            "hook": event_name,
+            "status": "candidates_added" if added else "no_new_candidates",
+            "candidates_requested": int(len(payloads)),
+            "candidates_added": int(added),
+            "candidates_rejected": rejected,
+        }
+
     def _build_mip_nlp_trace(final_reason: Optional[str]) -> dict[str, object]:
         final_lb = _trace_value(certified_LB)
         final_heuristic_lb = _trace_value(heuristic_LB)
@@ -4765,6 +5248,8 @@ def solve_oa(
             summary["mip_solution_limit"] = shot_solution_limit_state.as_trace_dict()
         if shot_unsupported_backend_features:
             summary["unsupported_backend_features"] = sorted(shot_unsupported_backend_features)
+        if external_hook_call_counts:
+            summary["external_hooks"] = _external_hooks_summary()
         fixed_nlp_candidates_added = sum(fixed_nlp_manager.added_source_counts.values())
         summary["fixed_nlp_candidate_count"] = int(fixed_nlp_candidates_added)
         summary["fixed_nlp_candidate_source_counts"] = {
@@ -5689,6 +6174,40 @@ def solve_oa(
         feasibility_before = feasibility_subproblem_count
         lb_before = _trace_value(LB)
         ub_before = _trace_value(UB)
+        external_hook_events: list[dict[str, object]] = []
+        termination_event = _maybe_run_termination_hook(iteration)
+        if termination_event is not None:
+            external_hook_events.append(termination_event)
+            if termination_event["requested"]:
+                termination_reason = "user_termination"
+                trace_iterations.append(
+                    {
+                        "index": int(iteration),
+                        "master_status": "not_run",
+                        "lb_before": lb_before,
+                        "ub_before": ub_before,
+                        "lb": _trace_value(LB),
+                        "ub": _trace_value(UB),
+                        "gap": _trace_value(_compute_gap(LB, UB)),
+                        "cuts_added": 0,
+                        "cuts_total": int(len(oa_A_rows)),
+                        "provenance_cuts_added": 0,
+                        "provenance_cuts_total": int(len(cut_provenance.records)),
+                        "cuts_added_by_source": _cut_source_delta(cut_source_counts_before),
+                        "nlp_subproblem_count": 0,
+                        "feasibility_subproblem_count": 0,
+                        "solution_pool_candidates": 0,
+                        "node_count": 0,
+                        "repair_actions": [],
+                        "reduction_cuts": [],
+                        "relaxation_phase": _shot_disabled_relaxation_trace(),
+                        "convex_bounding": None,
+                        "master_controls": {},
+                        "external_hooks": external_hook_events,
+                        "termination_reason": termination_reason,
+                    }
+                )
+                break
         reduction_cut_events: list[dict[str, object]] = []
         reduction_cut_event = _maybe_add_primal_reduction_cut(iteration)
         if reduction_cut_event is not None:
@@ -5860,6 +6379,7 @@ def solve_oa(
                     "reduction_cuts": reduction_cut_events,
                     "relaxation_phase": relaxation_phase_record,
                     "master_controls": {},
+                    "external_hooks": external_hook_events,
                     "termination_reason": termination_reason,
                 }
             )
@@ -5938,6 +6458,7 @@ def solve_oa(
                     "relaxation_phase": relaxation_phase_record,
                     "convex_bounding": convex_bounding_record,
                     "master_controls": master_control_trace,
+                    "external_hooks": external_hook_events,
                     "termination_reason": termination_reason,
                 }
             )
@@ -5981,6 +6502,7 @@ def solve_oa(
                     "relaxation_phase": relaxation_phase_record,
                     "convex_bounding": convex_bounding_record,
                     "master_controls": master_control_trace,
+                    "external_hooks": external_hook_events,
                     "termination_reason": termination_reason,
                 }
             )
@@ -6032,6 +6554,7 @@ def solve_oa(
                         "relaxation_phase": relaxation_phase_record,
                         "convex_bounding": convex_bounding_record,
                         "master_controls": master_control_trace,
+                        "external_hooks": external_hook_events,
                         "termination_reason": termination_reason,
                     }
                 )
@@ -6084,6 +6607,7 @@ def solve_oa(
                     "relaxation_phase": relaxation_phase_record,
                     "convex_bounding": convex_bounding_record,
                     "master_controls": master_control_trace,
+                    "external_hooks": external_hook_events,
                     "termination_reason": "master_unbounded",
                 }
             )
@@ -6098,6 +6622,26 @@ def solve_oa(
                     _promote_certified_bound(master_bound, "primary_master")
                 else:
                     _record_heuristic_bound(master_bound, "primary_master")
+
+        master_solution_points = _master_solution_candidates(
+            master_result,
+            n_vars,
+            solution_pool=solution_pool,
+            num_solution_iteration=num_solution_iteration,
+        )
+        primary_master_point = master_solution_points[0] if master_solution_points else None
+        external_dual_event = _maybe_update_external_dual_bound(
+            iteration,
+            master_point=primary_master_point,
+        )
+        if external_dual_event is not None:
+            external_hook_events.append(external_dual_event)
+        external_hyperplane_event = _maybe_add_external_hyperplanes(
+            iteration,
+            solution_points=master_solution_points,
+        )
+        if external_hyperplane_event is not None:
+            external_hook_events.append(external_hyperplane_event)
 
         nlp_initial_point = None
         if (
@@ -6156,16 +6700,16 @@ def solve_oa(
                     sequence=idx,
                     integer_assignment=fixed_nlp_manager.assignment_key(point),
                 )
-                for idx, point in enumerate(
-                    _master_solution_candidates(
-                        master_result,
-                        n_vars,
-                        solution_pool=solution_pool,
-                        num_solution_iteration=num_solution_iteration,
-                    )
-                )
+                for idx, point in enumerate(master_solution_points)
             ]
         else:
+            external_primal_event = _maybe_add_external_primal_candidates(
+                iteration,
+                master_point=primary_master_point,
+                solution_points=master_solution_points,
+            )
+            if external_primal_event is not None:
+                external_hook_events.append(external_primal_event)
             fixed_nlp_manager.add_master_result(
                 master_result,
                 iteration=int(iteration),
@@ -6196,6 +6740,7 @@ def solve_oa(
             "relaxation_phase": relaxation_phase_record,
             "convex_bounding": convex_bounding_record,
             "master_controls": master_control_trace,
+            "external_hooks": external_hook_events,
         }
         stop_after_master_pool = False
         pool_integer_assignments_seen: set[tuple[float, ...]] = set()
