@@ -231,3 +231,64 @@ the OBBT loop (that's gear4's separate lever).
   the cProfile Rust/pounce bucket attribution on nvs24.
 - Raw per-instance JSON was produced in the session scratchpad (regenerate with
   the harness above; every table names its instance + config).
+
+---
+
+## 7. THRU-2b follow-up — the "integer-MILP node solve" was a mis-attribution (2026-07-06)
+
+**Verdict: RE-SCOPE.** THRU-1's "Secondary engineering target" (§4) claimed the
+nvs24 per-node relaxation is solved as an **integer MILP** (`solve_milp_py`,
+~10 s/node) because the McCormick relaxation "retains integrality" and the pure-LP
+warm fast path (`milp_relaxation.py:326`) is bypassed. Re-measuring on
+`origin/main` (post R2/#524) **falsifies the mechanism**: the node relaxation is
+already a **pure LP** — there is no integer node B&B on any default (or even
+`node_bound_mode=milp`) configuration.
+
+**What actually happens on nvs24 (instrumented, release build):**
+
+1. Integrality is dropped at every node. `mccormick_lp.py:738` routes on
+   `self._rlt_applicable or self._lp_node_bound`; on nvs24 **both** are true
+   (`node_bound_mode="lp"` is the default since #257, *and* RLT applies to its
+   quadratic constraints), so `milp._integrality = None` unconditionally. Patch
+   counters over a 40 s solve: **13/13 node solves have `integrality is None`; 0
+   integer-MILP node solves.** Forcing `DISCOPT_NODE_BOUND_MODE=milp` does not
+   change this (RLT still forces the LP path). *There is no config under which
+   nvs24's node relaxation is an integer MILP.*
+2. The `solve_milp_py` calls THRU-1's cProfile attributed to an "integer-MILP node
+   solve" are **pure LPs** (`int_cols` empty, `nint=0`), reached through the
+   *fallback* in `MilpRelaxationModel.solve` (`milp_relaxation.py:375`): the warm
+   sparse simplex (`solve_lp_warm_csc_py`) breaks down with
+   `status=numerical` **at `iters=0`** (a factorization/setup failure, *not* an
+   iteration-limit — raising `max_iter` to 1e6 does not help) on 2–3 hard,
+   ill-conditioned lifted node LPs; the equilibrated sparse retry
+   (`_solve_lp_warm_equilibrated`) also returns `numerical`; the code then falls
+   through to the robust dense `solve_milp` (LP presolve → decides them), at
+   2–11 s each. So the 30 s / 3-call bucket = **the dense-cold LP fallback for LPs
+   the warm simplex cannot factorize**, not integer branching.
+3. Across the class: nvs17 **0** dense fallbacks (warm + equilibrated retry rescue
+   all 9 hard LPs of 1129), nvs21 **0**, nvs19 **2**, nvs24 **2–3**. The fallback
+   is rare and only bites the nvs19/nvs24 tail.
+
+**Falsification recorded:** the §4 "Secondary engineering target" premise ("swap
+the integer-MILP node solve for an LP → 10 s → sub-second, bound-neutral") is
+**void** — the swap it proposes is already in place. The residual sink is a
+*numerical robustness* gap in the warm sparse simplex (no LP presolve on that
+path), which the dense `solve_milp` covers correctly but slowly. Making those 2–3
+LPs sub-second requires **LP presolve on the warm sparse simplex** (a Rust change
+to `lp/simplex`, not in THRU-2b scope) — filed as a re-scoped follow-on. It is
+*not* the nvs24 wall lever regardless: nvs24 is dominated by PSD + univariate-square
+separation (§2), addressed by the THRU-1 PSD gate, not by these fallback LPs.
+
+**Shipped (the one sound, in-scope, bound-neutral sub-fix):** when the fallback LP
+has **no integer columns** (a genuine LP), `milp_simplex.solve_milp` now runs
+`solve_milp_py` with the integer-search machinery **off** (`root_cuts=0`,
+`cut_rounds=0`, `gmi_cuts=False`, `heuristics=False`, `strong_branch=False`). With
+no integers none of that machinery can fire (GMI needs a fractional integer;
+heuristics round nothing; nothing to branch on), so it is pure overhead on the
+root LP that is the entire answer. Bound-neutral by construction. Measured on the
+two nvs24 fallback LPs: 10.9 s → 5.5 s and 2.4 s → 2.2 s. Cert-baseline
+**NEUTRAL** (41/41 instances, node_count exactly unchanged, |Δobj| = 0). It does
+**not** hit the THRU-2b "sub-second node solve" acceptance — that target rested on
+the false integer-MILP premise; the LP itself is genuinely hard for the warm path.
+
+**Artifacts:** `python/discopt/solvers/milp_simplex.py` (the pure-LP short-circuit).
