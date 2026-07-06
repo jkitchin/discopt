@@ -300,3 +300,112 @@ to the true blockers (reform gating on large models + the reform's root-infeasib
 on hda). The `x**expr` (variable-exponent) rows are likewise out of scope: hda's
 `4^(0.0001+0.333·x0)` needs the `exp(expr·log x)` signomial path with `x_lb>0`, a
 separate treatment.
+## 6. TD-A — deeper-tail loose-product lift (nvs05/nvs09) · **BUILD (nvs09), KILL (nvs05)**
+
+**Track:** deeper-tail follow-on to §3 ("unchanged tail"): extend the factorable
+lift to the nvs05/nvs09 loose-product structure R4 does not tag. Bound-changing
+regime (§0.1). Flag `DISCOPT_LIFT_LOOSE_PRODUCTS`, **default OFF**.
+
+### Entry experiment (diagnose → hand-lift → measure) — the kill gate
+
+**Diagnosed structure (measurement beat the plan's characterisation):**
+
+- **nvs09** (all-integer, x0..x9 ∈ {3..9}): the objective is a *separable* sum of
+  **squared univariate logs** minus a signomial:
+  `Σ_i [ log(x_i−2)² + log(10−x_i)² ] − (∏_i x_i)^0.2`. It is **not** a "log·log
+  product" in the multivariate sense — each `log(·)²` is `pow(log(·), 2)`, an
+  *integer power of a univariate call*. `distribute_products` expands it to the
+  `log·log` product the MILP linearizer cannot decompose ("Cannot decompose
+  product: log·log"), so the whole objective is **dropped** → feasibility
+  objective, root bound from the fallback NLP/αBB path only (**69.0 %** root gap).
+- **nvs05** (welded-beam): a rational + sqrt signomial. Its objective
+  `1.10471·x0²·x1 + 0.04811·x2·x3·(14+x1)` is a monomial + trilinear the RLT hull
+  already relaxes; all constraints are already lifted (free auxes x4..x7 hold the
+  ratios/sqrts). No dropped/loose product remains in the objective.
+
+**Hand-lift + measurement (root bound; oracle nvs05 5.471, nvs09 −43.134):**
+
+| instance | native root bound | hand-lifted root bound | root gap native → lifted | rel. gap reduction | verdict |
+|---|---:|---:|---:|---:|---|
+| **nvs09** | −72.90 (69.0 %) | **−54.83 (27.1 %)** | 69.0 % → 27.1 % | **60.7 %** | **PASS** (≥ 25 %) |
+| **nvs05** | 0.674 (87.7 %) | 0.674 (unchanged) | — | **0 %** | **KILL** (criterion #2) |
+
+- **nvs09 hand-lift:** introduce `u_i == log(x_i−2)`, `v_i == log(10−x_i)` as
+  bounded auxes (`u,v ∈ [0, log 7]` on x ∈ [3,9] — strictly positive log args, no
+  sign change, so the nvs09 kill clause does *not* fire) and rewrite each squared
+  log as the exact univariate square `u²`/`v²`. Root bound −72.90 → −54.83, a
+  **60.7 % relative** gap reduction — well over the 25 % bar. Sound: −54.83 ≤
+  oracle −43.13 (no crossing).
+- **nvs05 KILL (criterion #2 — "already exactly relaxed; gap is elsewhere"):**
+  the *objective-only* relaxation over the native box equals **0.674 and is
+  certified optimal** — i.e. `min x0²·x1 + …` over the box is exactly 0.674,
+  achieved at the corner x0=x1=0.01. The objective envelope is not loose; the
+  87.7 % root gap is entirely that the **constraints do not push x0,x1,x2,x3 up
+  from the box corner at the root** (the true optimum is x0=0.68, x1=2.79). That
+  is a **bound-tightening / branch-and-reduce (OBBT)** problem — exactly R1's
+  "nvs05 = 32.5 % reduction-responsive" finding — **not** a lifting problem. No
+  product-factor lift moves it. Recorded and STOPPED for nvs05.
+
+### The general structure (not instance-keyed)
+
+The lift keys on **`g(x)**n`** where `g` is a *single-argument transcendental*
+(`log`/`log2`/`log10`/`exp`/`sqrt`/`sin`/`cos`/`tan`/`atan`/`tanh`/`log1p`) whose
+base is **not a bare variable** and `n` is a **positive integer ≥ 2**. It lifts
+`t == g(x)` (a bounded aux via the existing `_Lifter.expression`) and rewrites the
+node as the monomial `t**n` — relaxed exactly (even `n`, `relax_square`) or
+3-regime (odd `n`) by the existing monomial path. **Reuses the existing hull
+machinery; rebuilds nothing** (relaxation-catalog do-not-rebuild rule honoured).
+
+**Out-of-panel witnesses (corpus scan, 1226 `.nl` ≤ 150 KB, structurally
+distinct):** the same `pow(call, int≥2)` structure appears in **mathopt5_1**
+(`sin(x)**3`), **mathopt5_6** (`sin(x)**2`), **mathopt3** (`sin(x)**2`) — the
+lift fires on all three (`t == sin(x)`), confirming it is not log-specific. (Only
+nvs09 shows a *large* bound move; mathopt5_6 has an additional unrelated
+`sqrt(abs(x))` block that still drops its bound — that is a separate coverage gap,
+not a lift failure.)
+
+### Implementation (flagged, default OFF)
+
+`python/discopt/_jax/factorable_reform.py`:
+- `_lift_loose_products_enabled()` — env flag `DISCOPT_LIFT_LOOSE_PRODUCTS`
+  (default `"0"`).
+- `_liftable_call_power_base()` — the structural matcher (`call ** int≥2`,
+  non-atomic base).
+- `_prelift_call_powers()` — a pre-pass (runs *before* `distribute_products` so
+  the `**` node is intact) that lifts `g(x)**n → t**n`; a flag-gated identity
+  no-op when OFF.
+- `_scan_for_liftable_call_power()` + one gated line in
+  `_has_factorable_work_inner()` so the reform fires on instances whose *only*
+  liftable term is this structure.
+- Wired as the first step of both the constraint and objective reform paths.
+
+### Gates (BOUND-CHANGING, §0.1) — all green
+
+- **Differential bound (nvs09):** flag ON root bound (−54.83) ≥ OFF (−72.90) AND
+  ≤ oracle (−43.13); a ≥ 25 % relative reduction asserted (60.7 %).
+  `test_tda_nvs09_root_bound_tightens`.
+- **Feasible-point sampling (2000 pts):** the lift `t == g(x)` is an exact
+  identity — the lifted objective at `(x, t=g(x))` equals the original at `x`
+  (max err < 1e-6) and every aux equality holds (residual < 1e-6); cuts no
+  feasible point. `test_tda_lift_is_exact_identity_feasible_sampling`.
+- **Flag-OFF byte-identical:** `check_cert_neutrality.py` **NEUTRAL** — all 41
+  cert-panel instances `nodes X→X`, `|Δobj| = 0` (the new code is an identity
+  no-op when the flag is off).
+- **Suite:** `pytest -m smoke` 614 passed / 14 skipped; adversarial slow 10
+  passed; `test_factorable_reform.py` 65 (+5 TD-A) passed; ruff check + format
+  clean; mypy clean (numpy-stub env mismatch excepted). No Rust touched.
+
+### Acceptance
+
+**nvs09 root gap 69.0 % → 27.1 % (60.7 % relative reduction) with the flag ON —
+meets the ≥ 25 % bar.** At 60 s nvs09 is still `feasible` (per-node cost of the
+`(∏x_i)^0.2` 10-way signomial is the remaining limiter, 7 nodes) — the win is a
+*materially tighter dual bound*, not (yet) certification, which the acceptance
+allows ("a materially tighter bound is the bar; certifying is a bonus"). **nvs05
+is honestly KILLED** — its gap is OBBT/branch-and-reduce (R2 territory), not a
+lifting problem. Flag stays OFF pending 3 green nightlies per §0.1.
+
+**Ledger addition:** **TD-A** (loose-product / call-power lift) — **BUILD
+(nvs09, flagged default-OFF) / KILL (nvs05)**; nvs09 root gap 69.0 % → 27.1 %;
+witnesses mathopt5_1/5_6/mathopt3; PR — see title
+`perf(relaxation): TD-A — lift loose-product factors (nvs05/nvs09, flagged)`.
