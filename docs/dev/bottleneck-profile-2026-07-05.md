@@ -438,6 +438,67 @@ overwritten:
    the heuristic phase. This is a **distinct overrun site** outside F4's scope
    (F4 halves it as a side effect but cannot close it); it needs its own
    entry/streaming gate and is filed as F4 follow-up **#507**.
+10. **"F5: st_e36's root bound is pinned by a variable-box-independent
+    even-power composite envelope; thread the argument interval into
+    `relax_pow` to lift it"** (§3 st_e36 row; §7 F5; plan §2 F5).
+    *Correction — KILL CRITERION HIT (F5 entry experiment,
+    `perf-f5-composite-power-envelope`, pounce 0.7.0, M4 Pro; no code
+    shipped):* the F5 premise is **falsified on three independent grounds**;
+    the composite even-power envelope is *not* the defect and building the
+    flag would be a dead lever (CLAUDE.md §3).
+    (a) **The pinned bound is the objective's own true box-minimum, and the
+    objective has no `±(inner)²` composite at all.** st_e36's objective is a
+    plain polynomial `2·x0² + 0.008·x1³ − 3.2·x0·x1 − 2·x1`. Its true
+    minimum over the box (ignoring constraint C0), by dense sampling, is
+    **−304.5000 for x1 ∈ [15,25], [20,25], AND [24,25]** — bit-identical
+    because the minimizer is the shared corner `(x0=5.5, x1=25)` (obj
+    −304.5). The measured discopt root bound `−304.5000003055` matches this
+    to 7 digits, i.e. **the relaxation is already essentially exact for the
+    objective**; there is no envelope slack on the pinning term. The bound is
+    box-independent because the *objective's argmin-over-box* is
+    box-independent, not because any envelope discards interval information.
+    (b) **st_e36's only `(inner)²` composites live in constraint C0 and all
+    carry coefficient `+1` (convex), whose true convex under-envelope equals
+    the function itself.** C0 `= f1·(f2·f3·f4·f5)` with `f1 =
+    x0²−6x0−11+0.8x1` and `f2..f5 = (affine)² + (affine)²` (sums of squares,
+    strictly ≥ 0). A scipy convex-hull LP over the graph of a representative
+    factor `(−0.62·x1+3.25·x0)²` gives, at the box center, `true convex
+    under-envelope = f(center)` to machine precision on **both** [15,25]
+    (1.99516) and [24,25] (1.89751) — **gap 0**; the values differ only
+    because the query point moves. For a *convex* composite the convex
+    underestimator is exact and there is nothing to tighten. (The
+    box-dependent side is the *concave* over-envelope / secant, and only a
+    *negative*-coefficient square `−(inner)²` would have a box-dependent
+    *under*-envelope — which st_e36 does not contain: verified the −(inner)²
+    under-envelope does move, −53.30 → −21.02, but that structure is absent.)
+    Moreover `mccormick.py::relax_pow`'s even branch already returns
+    `cv = mid²` with `mid = ½(cv_l+cc_l)` — it **already threads the
+    composite argument's interval** `[cv_l, cc_l]` and reproduces the exact
+    convex-hull value; the "variable-box-independent fallback" the plan
+    posited does not exist on this path.
+    (c) **st_e36 never calls `relax_pow` and the pin survives a perfect
+    square envelope: C0's relaxed interval spans 0 on every box because f1
+    crosses 0.** Instrumenting `relax_pow` records **0 calls** on st_e36's
+    root solve — the default LP relaxer lifts each `(inner)²` to an aux and
+    separates it via `_separate_univariate_square` (interval-dependent
+    already), so the F5 target line (`mccormick.py:203`) is not even on
+    st_e36's path. Independently, `f1 = x0²−6x0−11+0.8x1` ranges over
+    `[−8.0,6.25]` / `[−4.0,6.25]` / `[−0.8,6.25]` on the three boxes — it
+    **spans 0 on all of them** — so `C0 = f1·(positive)` relaxes to an
+    interval spanning 0 regardless of how tight the `+(inner)²` factors are.
+    No even-power envelope can exclude the objective corner `(5.5,25)` (where
+    C0 = 374 442 ≠ 0, corner infeasible) while f1's own relaxation still
+    admits 0. The bound *does* respond to the box — but through the variables
+    that enter the objective/f1 **linearly/quadratically**: shrinking x0 to
+    [5,5.5] lifts −304.5 → **−246.0**, to [3,3.5] → −182.7; fixing x1 = 22 →
+    −278.9. That is branch-and-reduce on the *product/quadratic* structure
+    (cert-gap-plan territory), not a composite-power-envelope fix.
+    **Conclusion:** F5 as specified cannot help this class; the flag would be
+    inert. The real st_e36 lever is tightening the **product-of-factors /
+    f1-quadratic-crossing** relaxation of C0 (RLT/edge-concave on the lifted
+    product, or spatial branching on x0) — re-scope under the branch-and-
+    reduce roadmap (cert-gap-plan), not the relaxation-envelope catalog. No
+    feature flag added; no relaxation code changed.
 
 ---
 
