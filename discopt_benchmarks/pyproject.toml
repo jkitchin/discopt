@@ -68,6 +68,8 @@ select = ["E", "F", "W", "I", "N", "UP", "B", "A", "C4", "SIM", "TCH"]
 "tests/test_qcqp_scoreboard.py" = ["N806"]
 # A is the constraint matrix in the engine baseline harness (standard LP notation).
 "bench_engine.py" = ["N806"]
+# A/A_new/A_ub are LP constraint matrices in the CUT-1 cut-injection harness.
+"scripts/cut1_cmir_oracle_injection.py" = ["N803", "N806"]
 
 [tool.coverage.run]
 source = ["benchmarks", "utils"]

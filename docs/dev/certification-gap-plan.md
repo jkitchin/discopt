@@ -128,10 +128,11 @@ experiment may run.
 | T2.4 per-node `reduce_node()` | **UNLOCKED** (T2.1-revisit GO) → R2 | — | build per §14 spec; needs node-LP duals exposed (T2.4a); C-15 rule z=safe_bound |
 | T2.5 OBBT escalation policy | **UNLOCKED** (T2.1-revisit GO) → R2 | — | build per §14 spec (width×\|RC\| top-k scoring) |
 | T2.6 cert2 gate wiring + default-on | **moot** (T2.3–T2.5 not built) | — | residual gap re-scoped to Phases 3–4 |
-| Phase 3 entry experiment (0b) | done — **GO on c-MIR** | (this PR) | SCIP root-bound proxy (`scripts/p3_0b_scip_rootbound.py`): median root gap closed **discopt 0.0 vs SCIP 1.0** over 8 (graphpart/ex1263/fac). SEPARATOR-QUALITY, not relaxation/branching → build native aggregation/c-MIR (§7 part 2). See §7 "0b RESULTS / VERDICT (2026-07-03)" |
+| Phase 3 entry experiment (0b) | done — GO on c-MIR **(SUPERSEDED by CUT-1, 2026-07-06 → NO-GO)** | (prior) | SCIP root-bound *proxy* (`scripts/p3_0b_scip_rootbound.py`): median root gap closed discopt 0.0 vs SCIP 1.0 over 8 (graphpart/ex1263/fac). CUT-1 replaced the proxy with a direct injection of SCIP's actual c-MIR cut coefficients into discopt's LP + a real-relaxation measurement; on nvs17/19/24 discopt's *default* root already closes 99.9% (≥ SCIP's cut-root), and injected cuts close ≤1.8%. See §7 "0b RESULTS / VERDICT (2026-07-03)" and "CUT-1 …(2026-07-06)" |
 | Phase 3 1c reachability entry experiment | done — **NO-GO / re-scope** | #(prior) | Cuts made reachable+armed close ~0% (median gap-closed 0.000, best +0.55% on ex1263a) vs SCIP ~1.0. Residual is separator DEPTH, not plumbing. Do NOT build the Rust cut-callback seam yet. See §7 "Phase 3 1c" |
 | Phase 3 1d separator-family attribution | done — **build zerohalf** | #420 | SCIP per-separator attribution (`scripts/p3_1d_separator_attribution.py`): on graphpart `zerohalf` alone closes 60–86% of the reachable root gap and is the sole load-bearing family (leave-one-out 15–53%); every other cut family (flowcover/aggregation/cmir/clique/…) closes 0. Build target = native zero-half separator; expected ~0.6–0.9 root-gap close. See §7 "Phase 3 1d" |
 | Phase 3 zerohalf build (native {0,½}-CG separator) | done — **sound; lever INERT on graphpart (measured)**; code parked on branch `cert-p3-zerohalf` (PR #427 closed unmerged), NOT on main | finding only | A validity-GREEN heuristic zero-half separator was built (400-system + binary-dense property tests: no feasible point cut). ON/OFF on graphpart: **gap_closed 0.000, `incorrect_count=0`** — the predicted 0.6–0.9 did NOT land: discopt's root LP optimum is a ⅓-partition vertex where every {0,½} combo is *tight, not violated* (exhaustive GF(2) nullspace search: viol=0.0000), and `root_off` already sits at SCIP's separators-off floor. Root cause = **LP vertex geometry (½-cuttable vs ⅓), not cut depth**. Follow-on = separate at a ½-valued/pre-crossover point. The inert separator is NOT merged (no dead flag on main); preserved on the branch for the follow-on. See §7 "Phase 3 zerohalf — build results" |
+| CUT-1 aggregation/c-MIR oracle-injection entry experiment | done — **NO-GO / re-scope (relaxation-mismatch)** | (this PR) | Injected SCIP's *actual* aggregation/c-MIR cut coefficients into discopt's root lifted McCormick LP on nvs17/19/24 (`scripts/cut1_cmir_oracle_injection.py`, pyscipopt 6.2.1/SCIP 10.0). Gap-closed **≤1.8% (nvs17), 0% (nvs19/nvs24)** — kill criterion (<15% on ≥2/3) fires. Decisive: discopt's **default** root already closes **99.9%** on nvs17/19 (nvs17 root −1105.89 is *tighter* than SCIP's cut-root −1105.10); `DISCOPT_CMIR_AGGREGATION=1` gives a bit-identical bound (separator self-disables — nothing violated). The native aggregation-c-MIR separator already exists (`lp/aggregation.rs`+`mir.rs` w/ upper-bound complementation done, PRs #415/#416); it is **inert on this class** because the relaxation is already tight. nvs24 residual = root-fixpoint solve COST (Phase 1/2/4), not cuts. SCIP's 119–244× cut win is SCIP-vs-SCIP (its weak no-cut LP), not a discopt gap. Do NOT build the §7 part-2 separator for this family. See §7 "CUT-1 …(2026-07-06)" + `docs/dev/cut-engine-entry-2026-07-06.md` |
 | Phase 4 re-profile (entry experiment) | done — **rank recorded** | #442 | 8 run / 0 skipped. Ranked build order: **1) CSE (op-dup 31–37% on nvs17/clay), 2) Q-extraction (coupled to CSE), 3) V-segments DE-PRIORITIZED (0 defvars in all 1,558 text `.nl`; defined-var-heavy set is binary-`.nl` discopt can't parse), 4) symmetry DO-NOT-BUILD (0 orbits)**. CC5 FALSIFIED (XLA ≤1.2% of wall); dominant wall = separation. See §8 "Phase 4 — re-profile results" |
 | Phase 4 T-CSE/V-segments | **CSE unlocked; V-segments/symmetry de-scoped** (§0.1.2) | — | build order fixed by the re-profile above; CSE first (bound-neutral), Q-extraction second |
 | Phase 4 build 1 — CSE/hash-consing | **done — bound-neutral** | (this PR) | Content-addressed interning in `ExprArena` (`expr.rs`), wired into the `.nl` parser and Python `convert_expr`. DAG node count ↓ **68.9% nvs17, 64.8% clay0303hfsg, 34.2% ex1252, 34.0% casctanks, 0.0% gear4** (panel total −48.4%); gear4 0% confirms the re-profile prediction. Cert-neutrality **NEUTRAL** (42 certifying instances, node_count exactly unchanged, objective to tol). See §8 "Phase 4 CSE — build results" |
@@ -445,6 +446,15 @@ rather than new reductions, and why it lands after Phase 0's harness.
 ---
 
 ## 7. Phase 3 — Cut engine quality: aggregation c-MIR + a default-path cut pool (~4–6 EW, medium risk)
+
+> **STATUS (2026-07-06): the integer-product-family cut build is CLOSED as NO-GO
+> (relaxation-mismatch).** CUT-1 (block below) measured that discopt's default root
+> relaxation already closes 99.9% of the root gap on nvs17/19 — at/above SCIP's
+> cut-loaded root — and that injecting SCIP's *own* aggregation/c-MIR cuts closes
+> ≤1.8%. The native aggregation-c-MIR separator already exists (`lp/aggregation.rs`,
+> `lp/mir.rs`) and self-disables (nothing violated). Do not build against this class;
+> re-aim at throughput (Phase 1/2) + structure (Phase 4). The graphpart/zerohalf line
+> is a separate, still-open cut-*context* follow-on (see the zerohalf block).
 
 Adopted from `scip-gap-closing-plan.md` Phases 0b/1 with its gates intact; scoped
 here as the general mechanism for the integer-product/MILP-relaxation class (#280
@@ -841,6 +851,61 @@ inequalities are tight. **The gap is which LP vertex the relaxation optimum occu
 A measured shortfall, not a failure: the separator is correct and the non-movement is
 now explained and localized (vertex geometry, not cut depth) — redirecting the next
 Phase-3 step from "build a stronger cut" to "separate at a cuttable point."
+
+---
+
+### Phase 3 CUT-1 — aggregation/c-MIR oracle-injection entry experiment (2026-07-06)
+
+The decisive test the 0b GO deferred and 1c/zerohalf circled: **inject SCIP's own
+aggregation/complemented-MIR cut coefficients into discopt's root LP and measure the
+closure**, on the integer-product family SCIP's c-MIR is the workhorse for
+(nvs17/19/24; `scip-gap-closing-plan.md` §1.3). 0b measured only a *proxy* (SCIP's
+root bound); CUT-1 measured the real thing. Full write-up:
+`docs/dev/cut-engine-entry-2026-07-06.md`. Script
+`discopt_benchmarks/scripts/cut1_cmir_oracle_injection.py`; oracle pyscipopt 6.2.1 /
+SCIP 10.0.
+
+**VERDICT — NO-GO (relaxation-mismatch).** Two independent measurements:
+
+1. **discopt's default root already dominates SCIP-with-cuts on this family.** Root
+   gap closed vs SCIP's separators-off LP floor: nvs17 **discopt 0.9991** (root
+   −1105.89, *tighter* than SCIP's cut-root −1105.10), nvs19 **discopt 0.9990**
+   (parity, −1104.24 vs −1104.48). discopt reaches this with **no** MIR/aggregation
+   cut — via McCormick + on-demand multilinear hull + RLT-1 + PSD/minor cuts +
+   iterated lifted-FBBT. `DISCOPT_CMIR_AGGREGATION=1` gives a **bit-identical** root
+   (the already-built `lp/aggregation.rs` separator finds nothing violated and
+   self-disables). nvs24's root fixpoint does not converge at node 1 in 280 s — its
+   residual is relaxation-solve **cost** (Phase 1/2/4), not cut strength.
+
+2. **Injecting SCIP's actual c-MIR cuts closes ≤1.8% / 0% / 0%.** SCIP emits 5/1/1
+   c-MIR rows on nvs17/19/24; mapped into discopt's lifted column space (auxvar→
+   monomial resolved from SCIP's McCormick-envelope + `minor` PSD-triple row names +
+   a numeric anchor) and appended to discopt's root LP, they move the bound
+   +12.67/0/0 — **gap-closed 0.0178 / 0 / 0**. The kill criterion (<15% on ≥2 of 3)
+   fires. This is the same failure mode as zerohalf on graphpart: the cut is *valid
+   but tight, not violated* at discopt's LP vertex — a relaxation-mismatch, not cut
+   depth.
+
+**SCIP's cut ablation is SCIP-vs-SCIP.** Re-measured node reduction from SCIP's cuts:
+nvs17 119×, nvs19 132×, nvs24 244× — but relative to SCIP's *own* weak no-cut LP
+(trivial floor −6404 on nvs17 vs discopt's root −1105.9). Reading it as a 100×
+discopt cut gap was the premise error; discopt already starts where SCIP's cut loop
+ends on this family.
+
+**Build feasibility (§7 part 2): the separator already exists and is inert here.**
+`lp/aggregation.rs` (MW 2-row aggregation, PR #416) + `lp/mir.rs` (MIR with
+upper-bound complementation **already implemented** — the plan's "mir.rs:59 lacks
+complementation" note is stale, PR #415) + `lp/cut_select.rs`. There is no 4–6 EW
+build to green-light; CUT-1 shows a build against this class would be inert.
+
+**Re-scope (measurement wins, §0.4):** do NOT build the §7 part-2 aggregation-c-MIR
+separator for the integer-product family. Keep the sound default-off separator
+parked (may help a class whose LP optimum *is* c-MIR-cuttable — unproven, not this
+one). Re-aim the nvs17/19/24 residual at per-node/root-fixpoint **throughput**
+(Phase 1/2) and structure (Phase 4), where the nvs24 measurement points. The §7
+"cut engine quality" line is, for the measured integer-product class, **closed as a
+relaxation-mismatch** — discopt's relaxation, not its cut set, is what SCIP's cuts
+are compensating for, and discopt's is already stronger.
 
 ---
 
