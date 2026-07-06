@@ -35,7 +35,7 @@ from __future__ import annotations
 
 import functools
 import threading
-from typing import TYPE_CHECKING, Any, Callable, Optional
+from typing import TYPE_CHECKING, Any, Callable, Optional, ParamSpec, TypeVar
 
 from .checkpoints import Checkpoint
 from .context import DebugContext
@@ -75,7 +75,11 @@ def _suppressed() -> bool:
     return getattr(_TLS, "depth", 0) > 1
 
 
-def outermost_solve(fn: Callable) -> Callable:
+_P = ParamSpec("_P")
+_R = TypeVar("_R")
+
+
+def outermost_solve(fn: Callable[_P, _R]) -> Callable[_P, _R]:
     """Decorator for ``solve_model``: instrument only the outermost solve.
 
     The solver calls ``solve_model`` recursively for heuristic sub-solves
@@ -87,7 +91,7 @@ def outermost_solve(fn: Callable) -> Callable:
     """
 
     @functools.wraps(fn)
-    def wrapper(*args: Any, **kwargs: Any) -> Any:
+    def wrapper(*args: _P.args, **kwargs: _P.kwargs) -> _R:
         depth = getattr(_TLS, "depth", 0)
         _TLS.depth = depth + 1
         try:
