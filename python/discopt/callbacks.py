@@ -54,7 +54,9 @@ class CallbackContext:
         omits rows so no dual bound exists. Never over-reports: this value never
         exceeds what the final ``SolveResult.bound`` would certify (A1).
     gap : float or None
-        Relative optimality gap, or None if no incumbent exists.
+        Relative optimality gap, or None if no incumbent exists — and also None
+        whenever ``best_bound`` is None, since a gap against a non-bound (a
+        tainted tree or the failure sentinel) is meaningless (A2).
     elapsed_time : float
         Wall-clock seconds since solve started.
     x_relaxation : numpy.ndarray

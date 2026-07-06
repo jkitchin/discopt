@@ -44,6 +44,8 @@ from typing import (
 
 import numpy as np
 
+from discopt.constants import SENTINEL_THRESHOLD as _SENTINEL_THRESHOLD
+
 if TYPE_CHECKING:
     from discopt.modeling.indexed import IndexedParam, IndexedVar
     from discopt.modeling.sets import _SetBase
@@ -1437,6 +1439,30 @@ class SolveResult:
     _sensitivity: Optional[np.ndarray] = None
 
     def __post_init__(self) -> None:
+        # A2 (correctness/API): the failure/no-relaxation sentinel must never
+        # escape through the public bound/gap surface. Internally the solver
+        # stores ``INFEASIBILITY_SENTINEL`` (``1e30``) as the "lower bound" of a
+        # node whose relaxation failed or was declared infeasible, and on the
+        # no-relaxation class (a model whose relaxation omits rows, so no dual
+        # bound is ever produced) the tree's ``global_lower_bound`` stays at that
+        # sentinel. It is *finite* (``np.isfinite(1e30)`` is True), so the
+        # existing non-finite guard below does not catch it, and a raw
+        # result-assembly path would surface ``bound=1e30`` — and a ``gap``
+        # computed from it — as if it were a real dual bound. Map any
+        # sentinel-magnitude bound (either sense, so ``-1e30`` from a MAXIMIZE
+        # negation too) to ``None`` at this single chokepoint that every
+        # ``SolveResult`` construction passes through, so no public consumer
+        # (``.bound``/``.gap``, the callback, commentary, the dashboard, the
+        # benchmark JSON) ever does arithmetic on it. This is a
+        # representation/reporting normalisation only — the internal sentinel is
+        # unchanged. ``root_bound``/``root_gap`` get the same treatment.
+        if self.bound is not None and abs(self.bound) >= _SENTINEL_THRESHOLD:
+            self.bound = None
+            self.gap = None
+        if self.root_bound is not None and abs(self.root_bound) >= _SENTINEL_THRESHOLD:
+            self.root_bound = None
+            self.root_gap = None
+
         # Soundness guard: a *certified* optimality gap requires a finite dual
         # bound. A non-finite bound (``±inf``) or an absent bound (``None``)
         # certifies nothing about optimality — e.g. a ``time_limit`` termination

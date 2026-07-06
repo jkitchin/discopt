@@ -1502,6 +1502,31 @@ def _solve_root_node_multistart(
     return last_result
 
 
+def _nonrigorous_sentinel_fathom(node_lower_bound: float, node_infeasible: bool) -> bool:
+    """Whether a nonconvex node is being fathomed *non-rigorously* (issue #27a).
+
+    A node carrying the failure sentinel (``result_lbs[i] >= SENTINEL_THRESHOLD``)
+    but *without* a rigorous infeasibility proof (``node_infeasible`` False — no
+    empty McCormick/LP relaxation over the finite box, no
+    ``SolveStatus.INFEASIBLE``) is pruned without being proven suboptimal: its
+    local NLP merely failed / diverged, or its optimum violated the original
+    constraints, neither of which rules out a better point in the subtree. The
+    Rust tree still mechanically cuts that subtree by bound (``1e30 >=``
+    incumbent, ``tree_manager.rs``), so the *gap* it reports is not certified.
+    When this returns True the caller must set ``_gap_certified = False`` so the
+    terminal verdict downgrades from "optimal" to "feasible" — a non-rigorous
+    fathom can never certify global optimality.
+
+    A rigorously-infeasible node (``node_infeasible`` True) does NOT decertify:
+    an empty relaxation over the box is a valid emptiness proof, so pruning it is
+    sound. Extracted from the two twin call sites (serial + batch nonconvex
+    finalize) as a pure predicate so the decertification decision is unit
+    testable; the behaviour is byte-for-byte the previous inline logic
+    (bound-neutral).
+    """
+    return node_lower_bound >= _SENTINEL_THRESHOLD and not node_infeasible
+
+
 def _certified_callback_bound(
     global_lower_bound: Optional[float],
     tree_bound_valid: bool,
@@ -1607,7 +1632,11 @@ def _invoke_pre_import_callbacks(
             node_count=stats["total_nodes"],
             incumbent_obj=inc_obj,
             best_bound=_cb_bound,
-            gap=stats.get("gap"),
+            # A2: the gap is only meaningful against a certified dual bound. When
+            # ``best_bound`` is None (tainted tree / failure sentinel), the raw
+            # ``stats["gap"]`` was computed from that same non-bound, so surface
+            # None rather than a gap derived from the sentinel.
+            gap=(stats.get("gap") if _cb_bound is not None else None),
             elapsed_time=elapsed,
             x_relaxation=result_sols[i].copy(),
             node_bound=float(result_lbs[i]),
@@ -5529,7 +5558,7 @@ def solve_model(
                         pass
                     elif not np.isfinite(result_lbs[i]):
                         result_lbs[i] = _INFEASIBILITY_SENTINEL
-                    elif result_lbs[i] >= _SENTINEL_THRESHOLD and not node_infeasible_mask[i]:
+                    elif _nonrigorous_sentinel_fathom(result_lbs[i], node_infeasible_mask[i]):
                         # Soundness guard (issue #27a, batch parity with the
                         # serial path): a node carrying the failure sentinel
                         # without an FBBT infeasibility proof is pruned without
@@ -5855,7 +5884,7 @@ def solve_model(
                         pass
                     elif not np.isfinite(result_lbs[i]):
                         result_lbs[i] = _INFEASIBILITY_SENTINEL
-                    elif result_lbs[i] >= _SENTINEL_THRESHOLD:
+                    elif _nonrigorous_sentinel_fathom(result_lbs[i], node_infeasible_mask[i]):
                         _gap_certified = False
 
                 # C-13: convex node whose NLP objective was NOT a valid lower bound
@@ -6884,13 +6913,16 @@ def solve_model(
                 _cb_is_max = (
                     model._objective is not None and model._objective.sense == _ObjSense.MAXIMIZE
                 )
+                _cb_bound = _certified_callback_bound(
+                    stats_snap.get("global_lower_bound"), _gap_certified, _cb_is_max
+                )
                 ctx = CallbackContext(
                     node_count=stats_snap["total_nodes"],
                     incumbent_obj=inc_obj_cb,
-                    best_bound=_certified_callback_bound(
-                        stats_snap.get("global_lower_bound"), _gap_certified, _cb_is_max
-                    ),
-                    gap=stats_snap.get("gap"),
+                    best_bound=_cb_bound,
+                    # A2: no certified bound -> no meaningful gap (the raw gap was
+                    # derived from the same non-bound). See the pre-import site.
+                    gap=(stats_snap.get("gap") if _cb_bound is not None else None),
                     elapsed_time=time.perf_counter() - t_start,
                     x_relaxation=result_sols[best_idx].copy(),
                     node_bound=float(result_lbs[best_idx]),
@@ -8087,13 +8119,16 @@ def _solve_nlp_bb(
                 _cb_is_max = (
                     model._objective is not None and model._objective.sense == _ObjSense.MAXIMIZE
                 )
+                _cb_bound = _certified_callback_bound(
+                    stats_snap.get("global_lower_bound"), _gap_certified, _cb_is_max
+                )
                 ctx = CallbackContext(
                     node_count=stats_snap["total_nodes"],
                     incumbent_obj=inc_obj_cb,
-                    best_bound=_certified_callback_bound(
-                        stats_snap.get("global_lower_bound"), _gap_certified, _cb_is_max
-                    ),
-                    gap=stats_snap.get("gap"),
+                    best_bound=_cb_bound,
+                    # A2: no certified bound -> no meaningful gap (the raw gap was
+                    # derived from the same non-bound). See the pre-import site.
+                    gap=(stats_snap.get("gap") if _cb_bound is not None else None),
                     elapsed_time=time.perf_counter() - t_start,
                     x_relaxation=result_sols[best_idx].copy(),
                     node_bound=float(result_lbs[best_idx]),
