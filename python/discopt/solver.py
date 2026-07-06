@@ -7769,9 +7769,21 @@ def _solve_nlp_bb(
         if improved:
             _heur_state["found"] += 1
 
+    from discopt import debug as _debug
+
     while True:
         elapsed = time.perf_counter() - t_start
         if elapsed >= time_limit:
+            break
+
+        # Interactive debugger: top-of-iteration checkpoint (no-op when detached).
+        if _debug.fire(
+            _debug.Checkpoint.ITER_START,
+            tree=tree,
+            model=model,
+            iteration=iteration,
+            elapsed=elapsed,
+        ):
             break
 
         # Update per-iteration time budget for NLP subproblem solves (issue #5).
@@ -7785,6 +7797,19 @@ def _solve_nlp_bb(
 
         n_batch = len(batch_ids)
         if n_batch == 0:
+            break
+
+        # Interactive debugger: nodes selected — boxes/ids now available.
+        if _debug.fire(
+            _debug.Checkpoint.AFTER_SELECT,
+            tree=tree,
+            model=model,
+            iteration=iteration,
+            elapsed=elapsed,
+            batch_lb=batch_lb,
+            batch_ub=batch_ub,
+            batch_ids=batch_ids,
+        ):
             break
 
         # Tighten node bounds via constraint propagation (FBBT).
@@ -8131,11 +8156,37 @@ def _solve_nlp_bb(
                 "solve_model should have refused or rerouted to spatial B&B."
             )
 
+        # Interactive debugger: steer point — relaxations solved, not imported.
+        if _debug.fire(
+            _debug.Checkpoint.BEFORE_IMPORT,
+            tree=tree,
+            model=model,
+            iteration=iteration,
+            elapsed=time.perf_counter() - t_start,
+            batch_lb=batch_lb,
+            batch_ub=batch_ub,
+            batch_ids=batch_ids,
+            result_lbs=result_lbs,
+            result_sols=result_sols,
+            result_feas=result_feas,
+        ):
+            break
+
         # Import results back to Rust tree
         t_rust_start = time.perf_counter()
         tree.import_results(result_ids, result_lbs, result_sols, result_feas)
         tree.process_evaluated()
         rust_time += time.perf_counter() - t_rust_start
+
+        # Interactive debugger: prune/branch/fathom applied by the tree.
+        if _debug.fire(
+            _debug.Checkpoint.AFTER_PROCESS,
+            tree=tree,
+            model=model,
+            iteration=iteration,
+            elapsed=time.perf_counter() - t_start,
+        ):
+            break
 
         # --- Node callback ---
         if node_callback is not None:
@@ -8311,6 +8362,15 @@ def _solve_nlp_bb(
     # --- Build result ---
     wall_time = time.perf_counter() - t_start
     python_time = wall_time - rust_time - jax_time
+
+    # Interactive debugger: terminal checkpoint (final/limit/infeasible state).
+    _debug.fire(
+        _debug.Checkpoint.TERMINATED,
+        tree=tree,
+        model=model,
+        iteration=iteration,
+        elapsed=wall_time,
+    )
 
     stats = tree.stats()
     incumbent = tree.incumbent()
@@ -11866,9 +11926,21 @@ def _solve_milp_bb(
     # Root-node certification instrumentation (cert:T0.1).
     _root_time: Optional[float] = None
     _root_glb_internal: Optional[float] = None
+    from discopt import debug as _debug
+
     while True:
         elapsed = time.perf_counter() - t_start
         if elapsed >= time_limit:
+            break
+
+        # Interactive debugger: top-of-iteration checkpoint (no-op when detached).
+        if _debug.fire(
+            _debug.Checkpoint.ITER_START,
+            tree=tree,
+            model=model,
+            iteration=iteration,
+            elapsed=elapsed,
+        ):
             break
 
         t_rust_start = time.perf_counter()
@@ -11877,6 +11949,19 @@ def _solve_milp_bb(
 
         n_batch = len(batch_ids)
         if n_batch == 0:
+            break
+
+        # Interactive debugger: nodes selected — boxes/ids now available.
+        if _debug.fire(
+            _debug.Checkpoint.AFTER_SELECT,
+            tree=tree,
+            model=model,
+            iteration=iteration,
+            elapsed=elapsed,
+            batch_lb=batch_lb,
+            batch_ub=batch_ub,
+            batch_ids=batch_ids,
+        ):
             break
 
         t_jax_start = time.perf_counter()
@@ -11933,10 +12018,36 @@ def _solve_milp_bb(
 
         jax_time += time.perf_counter() - t_jax_start
 
+        # Interactive debugger: steer point — relaxations solved, not imported.
+        if _debug.fire(
+            _debug.Checkpoint.BEFORE_IMPORT,
+            tree=tree,
+            model=model,
+            iteration=iteration,
+            elapsed=time.perf_counter() - t_start,
+            batch_lb=batch_lb,
+            batch_ub=batch_ub,
+            batch_ids=batch_ids,
+            result_lbs=result_lbs,
+            result_sols=result_sols,
+            result_feas=result_feas,
+        ):
+            break
+
         t_rust_start = time.perf_counter()
         tree.import_results(result_ids, result_lbs, result_sols, result_feas)
         tree.process_evaluated()
         rust_time += time.perf_counter() - t_rust_start
+
+        # Interactive debugger: prune/branch/fathom applied by the tree.
+        if _debug.fire(
+            _debug.Checkpoint.AFTER_PROCESS,
+            tree=tree,
+            model=model,
+            iteration=iteration,
+            elapsed=time.perf_counter() - t_start,
+        ):
+            break
 
         # Root-node certification snapshot (cert:T0.1).
         if iteration == 0:
@@ -11956,6 +12067,16 @@ def _solve_milp_bb(
 
     wall_time = time.perf_counter() - t_start
     python_time = wall_time - rust_time - jax_time
+
+    # Interactive debugger: terminal checkpoint (final/limit/infeasible state).
+    _debug.fire(
+        _debug.Checkpoint.TERMINATED,
+        tree=tree,
+        model=model,
+        iteration=iteration,
+        elapsed=wall_time,
+    )
+
     stats = tree.stats()
     incumbent = tree.incumbent()
 
@@ -12287,9 +12408,21 @@ def _solve_miqp_bb(
     # Root-node certification instrumentation (cert:T0.1).
     _root_time: Optional[float] = None
     _root_glb_internal: Optional[float] = None
+    from discopt import debug as _debug
+
     while True:
         elapsed = time.perf_counter() - t_start
         if elapsed >= time_limit:
+            break
+
+        # Interactive debugger: top-of-iteration checkpoint (no-op when detached).
+        if _debug.fire(
+            _debug.Checkpoint.ITER_START,
+            tree=tree,
+            model=model,
+            iteration=iteration,
+            elapsed=elapsed,
+        ):
             break
 
         t_rust_start = time.perf_counter()
@@ -12298,6 +12431,19 @@ def _solve_miqp_bb(
 
         n_batch = len(batch_ids)
         if n_batch == 0:
+            break
+
+        # Interactive debugger: nodes selected — boxes/ids now available.
+        if _debug.fire(
+            _debug.Checkpoint.AFTER_SELECT,
+            tree=tree,
+            model=model,
+            iteration=iteration,
+            elapsed=elapsed,
+            batch_lb=batch_lb,
+            batch_ub=batch_ub,
+            batch_ids=batch_ids,
+        ):
             break
 
         t_jax_start = time.perf_counter()
@@ -12339,10 +12485,36 @@ def _solve_miqp_bb(
 
         jax_time += time.perf_counter() - t_jax_start
 
+        # Interactive debugger: steer point — relaxations solved, not imported.
+        if _debug.fire(
+            _debug.Checkpoint.BEFORE_IMPORT,
+            tree=tree,
+            model=model,
+            iteration=iteration,
+            elapsed=time.perf_counter() - t_start,
+            batch_lb=batch_lb,
+            batch_ub=batch_ub,
+            batch_ids=batch_ids,
+            result_lbs=result_lbs,
+            result_sols=result_sols,
+            result_feas=result_feas,
+        ):
+            break
+
         t_rust_start = time.perf_counter()
         tree.import_results(result_ids, result_lbs, result_sols, result_feas)
         tree.process_evaluated()
         rust_time += time.perf_counter() - t_rust_start
+
+        # Interactive debugger: prune/branch/fathom applied by the tree.
+        if _debug.fire(
+            _debug.Checkpoint.AFTER_PROCESS,
+            tree=tree,
+            model=model,
+            iteration=iteration,
+            elapsed=time.perf_counter() - t_start,
+        ):
+            break
 
         # Root-node certification snapshot (cert:T0.1).
         if iteration == 0:
@@ -12362,6 +12534,16 @@ def _solve_miqp_bb(
 
     wall_time = time.perf_counter() - t_start
     python_time = wall_time - rust_time - jax_time
+
+    # Interactive debugger: terminal checkpoint (final/limit/infeasible state).
+    _debug.fire(
+        _debug.Checkpoint.TERMINATED,
+        tree=tree,
+        model=model,
+        iteration=iteration,
+        elapsed=wall_time,
+    )
+
     stats = tree.stats()
     incumbent = tree.incumbent()
 
