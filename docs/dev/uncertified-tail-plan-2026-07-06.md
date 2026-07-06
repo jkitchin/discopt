@@ -328,6 +328,81 @@ under-branched signal are **nvs05, nvs09, tls2**.
   st_e36 in ~5 nodes if x0 is branched); no panel regression.
 - **Effort:** ~1–2 EW.
 
+#### R3b RESULTS / VERDICT (2026-07-06) — ENTRY EXPERIMENT KILLED; defer to R4
+
+**KILL CRITERION FIRED. R3b is NOT the lever on nvs05/nvs09/tls2.** Per §0.3 the
+entry experiment (force-branch the responsive variable; require node reduction on
+≥ 2 of nvs05/nvs09/tls2) was run *before* finalizing the build. It failed on
+**0 of 3**. The prototype implementation (a Rust bound-responsiveness weight
+blended into the spatial score, `score = relative_width · (1 + λ·norm_resp)`,
+default-OFF flag `DISCOPT_RESPONSIVE_BRANCHING`, wired through a root-only
+box-shrink McCormick-LP fingerprint) was reverted — no dead flag ships (CLAUDE.md
+§3). Release POUNCE verified (`_pounce.abi3.so` = 4.7 MB).
+
+**Force-branch measurements (post-F1–F7 `main`, 60 s, one instrumented solve each;
+weights injected one-hot on the R3a-responsive column, λ = 50 to strongly force
+selection):**
+
+| instance | baseline nodes / bound / gap | forced-responsive nodes / bound / gap | node Δ | bound Δ |
+|---|---|---|---|---|
+| nvs05 | 821 / 1.348 / 75.4 % | **853** / 1.348 / 75.4 % (force x0) | **+32 (worse)** | none — bound frozen |
+| nvs09 | 221 / −57.67 / 33.7 % | 191 / −59.72 / 38.5 % (force x2); 223 / −59.32 / 37.5 % (force x0) | −30 / +2 | **bound WORSENED** |
+| tls2 | 1823 / — / — (no bound) | **1823** / — / — (force x5) | **0 (identical)** | n/a |
+
+No instance reduced nodes *and* improved (or held) its bound; nvs05 froze, nvs09's
+bound got *worse*, tls2 was byte-identical. Kill criterion (§0.3 / task R3b:
+"reduce node count on ≥ 2 of the 3") → **0/3 → STOP.**
+
+**Root cause — the R3a fingerprint was measured in a different variable space than
+the live solve branches (measurement beats plan, §0.4):**
+
+1. **The live solve applies a *second* reformulation R3a's fingerprint did not.**
+   R3a's `reformed_model_and_names` applies only `factorable_reformulate`
+   (nvs05 → 12 vars, nvs09 → 12 vars). `solver.solve_model` then *also* applies
+   the **integer-bilinear exact reformulation** (`integer_product_reform`,
+   solver.py ~L3787), so the tree actually branches nvs05 in **15**-var space and
+   nvs09 in a larger space. The R3a per-column scores (nvs05 `_fr_aux_3` = 288,
+   x0 = 177; nvs09 `_fr_aux_1` = 27.9) index columns that **do not exist in the
+   space the solver branches**. R3a's own note that it "reproduces the reform
+   gating faithfully" is thus incomplete — it captured the factorable lift but
+   not the integer-bilinear lift that follows it.
+
+2. **On the *actual* branched model the McCormick-LP responsiveness signal is
+   absent or flat:**
+   - **nvs05 (15-var):** the McCormick LP returns **no objective bound at all**
+     on the full box (`solve_at_node(separate=True)` → `lower_bound=None`, even
+     with RLT level-1 and a 2 s budget) — the integer-bilinear-reformed model's
+     bound comes from a different path (the exact-MILP relaxation), not a
+     box-shrinkable McCormick LP. Responsiveness is *undefined*; forcing x0
+     leaves the bound frozen at 1.348 (root-gap-limited → R4).
+   - **nvs09:** the box-shrink fingerprint is **uniform** — halving *any*
+     candidate moves the root bound the identical −72.90 → −67.50 (score 5.3976
+     for all 10 candidates, bit-identical). There is no differential signal to
+     rank on; a responsiveness blend is a no-op-to-harmful (forcing worsened the
+     bound).
+   - **tls2:** does **not take the McCormick-LP nonconvex spatial path at all**
+     (`set_nonconvex` never true on this instance; it routes elsewhere and finds
+     no dual bound in 60 s). The spatial-branching score — the only thing R3b
+     touches — is never consulted, so the lever is structurally inapplicable.
+     Forcing x5 gave byte-identical 1823 nodes.
+
+**st_e36 was already excluded by R3a (already branches its responsive x0 → R4).**
+
+> **VERDICT: R3b NOT BUILT — deferred to R4.** On the models the solver actually
+> branches, nvs05/nvs09/tls2 are **relaxation-limited, not selection-limited**:
+> nvs05 has no box-shrinkable McCormick bound, nvs09's responsiveness is flat, and
+> tls2 doesn't spatial-branch. This is exactly the class the plan scopes to **R4**
+> (zero-spanning-factor / product-relaxation lifting — §1 already names nvs05/nvs09
+> "residual = product relaxation, 70–88 % root gap"). Branching *selection* cannot
+> move a bound that does not respond to any box split. The §12 branching-exclusion
+> reopen is therefore **closed for this class**: the F5-derived selection lever does
+> not survive contact with the post-integer-bilinear-reform solve. No code shipped;
+> the plan record is the deliverable. **Follow-on for R4:** R4's entry experiment
+> should measure responsiveness on the *final* (integer-bilinear-reformed) model,
+> not the factorable-only space, and target nvs05's missing McCormick bound
+> directly (lift the zero-spanning product factor so a box-shrinkable auxiliary
+> exists).
+
 ### R4 — Zero-spanning-factor lifting (factorable-reformulation extension, flagged)
 
 - **Evidence:** F5's root-cause on st_e36 — `C0 = f1·(positive expr)` with
