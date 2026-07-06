@@ -1073,6 +1073,7 @@ def diving(
     integer_tol: float = 1e-5,
     feas_tol: float = 1e-6,
     evaluator: Optional[NLPEvaluator] = None,
+    deadline: Optional[float] = None,
 ) -> Optional[tuple[np.ndarray, float]]:
     """Diving heuristic: progressively fix one fractional integer and re-solve.
 
@@ -1114,6 +1115,17 @@ def diving(
 
     try:
         for _ in range(budget):
+            # Each dive step is a full continuous NLP solve. On the no-relaxation
+            # flowsheet class those solves are seconds each and (worse) overrun
+            # their own ``max_wall_time`` because each IPM iteration's exact
+            # Hessian is expensive — so ``budget`` unpolled dives blow a tight
+            # ``time_limit`` (heatexch_gen3: diving alone ran tens of seconds past
+            # the deadline, F4). Poll the absolute deadline before launching each
+            # sub-NLP and stop the dive when it has passed. Skipping the remaining
+            # dive steps is always sound: diving is a primal heuristic and never
+            # affects the dual bound.
+            if deadline is not None and time.perf_counter() >= deadline:
+                return None
             try:
                 res = backend(evaluator, x_cur, options=opts)
             except BaseException:
@@ -1178,6 +1190,7 @@ def rins(
     integer_tol: float = 1e-5,
     feas_tol: float = 1e-6,
     evaluator: Optional[NLPEvaluator] = None,
+    deadline: Optional[float] = None,
 ) -> Optional[tuple[np.ndarray, float]]:
     """RINS (Relaxation Induced Neighborhood Search).
 
@@ -1226,6 +1239,7 @@ def rins(
             nlp_options=nlp_options,
             integer_tol=integer_tol,
             feas_tol=feas_tol,
+            deadline=deadline,
         )
     finally:
         for v, (lb_v, ub_v) in zip(model._variables, saved):

@@ -380,6 +380,27 @@ worktrees/sessions if desired, but each in its own PR.
   `time_limit=5` returns within the §0.7 envelope. §0.4 gates.
 - **Acceptance:** contvar wall ≤ 66 s; heatexch_gen3 ≤ 66 s; hda root phase
   ≤ 50 % of budget; §0.7 holds on the full 61-instance panel.
+- **Status: DONE, two premises falsified** (branch `perf-f4-root-budget-gate`,
+  pounce 0.7.0, M-series arm64; profile §5 item 9). (1) The 221 s contvar
+  overrun does not reproduce on this build — contvar is 60.7 s, already inside
+  the envelope; the reproducing overruns are heatexch_gen3 (80.7 s) and hda
+  (64.2 s). (2) Compile time is **not** a function of cheap model size
+  (`log(compile)` vs `n_vars`: R² = 0.002; contvar n=296 → 186 s vs hda n=722 →
+  2.5 s; noisy run-to-run), so the estimate is a conservative *floor* (dense
+  0.5 s; uncompiled sparse 15 s risk-headroom), not a fitted curve. The overrun
+  on this build is repeated **post-deadline heuristic-NLP launches** (each
+  overrunning its own `max_wall_time`), fixed by gating *entry* into every root
+  heuristic NLP on the remaining budget + threading the absolute deadline into
+  the looping heuristics (`diving`/`rins` poll each sub-NLP; multistart caps
+  extra starts by observed per-start cost). Result: **heatexch_gen3
+  80.7 → 60.9 s**, contvar 60.7 s, hda 64.2 → 64.1 s; **full panel 61/61 within
+  §0.7 at TL=30 with 0 objective changes / 0 lost incumbents** vs gate-off. hda
+  root is 42 s (70 % of a 60 s budget) — the ≤50 % target is **not** met, but
+  hda's *wall* respects the contract; its root is Rust presolve + re-tracing,
+  not the gated heuristics. **Kill-criterion hit:** the out-of-panel flowsheet
+  super3t overruns via a *second* site (`term_classifier._compute_var_offset`
+  relaxation build, 0 `solve_nlp` calls) — outside F4's scope; filed as F4
+  follow-up #507. Off switch: `DISCOPT_ROOT_BUDGET_GATE=0`.
 
 ### F5 — Even-power composite envelopes for the pinning class  (B11; bound-changing)
 

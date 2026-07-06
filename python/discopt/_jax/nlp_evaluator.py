@@ -40,6 +40,68 @@ from discopt.modeling.core import Constraint, Model, ObjectiveSense
 _DENSE_JACOBIAN_COMPILE_LIMIT = 1_000_000
 
 
+# --- First-time Lagrangian-Hessian XLA compile-cost model (F4) ------------------
+# The first evaluate_hessian_values call forces an uninterruptible first-time XLA
+# compile. The root-heuristic budget gate (solver.py) needs an a-priori estimate
+# of that cost, from cheap model-size features available before the compile runs.
+#
+# Measured (docs/dev/perf-followup-plan-2026-07-05.md F4 entry experiment; M-series
+# arm64, JAX 0.10.2, pounce 0.7.0). First-compile wall vs model size, per path:
+#
+#   path    instance         n_vars  hess_nnz   compile_s
+#   dense   tls2                 37        16       0.15
+#   dense   fac2                 66       972       0.15
+#   sparse  heatexch_gen1       112       164       ~1.0
+#   sparse  hda                 722      1094       2.5–8.3   (noisy across runs)
+#   sparse  casctanks           500       820       3.7–5.0
+#   sparse  heatexch_gen3       580      1020      46–49
+#   sparse  contvar             296      1168     186
+#
+# FALSIFICATION (§0.6): the plan hypothesized a clean compile ~ f(n_vars, nnz)
+# curve. It does not exist. Regressing log(compile) on n_vars gives R^2 = 0.002
+# (essentially zero — contvar at n=296 compiles ~74x slower than hda at n=722),
+# and the same instance's compile varies 2.5s->8.3s run to run. The cost is
+# governed by the *shape/depth* of the lifted DAG (contvar's deep nested
+# log/exp/division chains), not by any cheap size scalar, and is not reliably
+# predictable in advance.
+#
+# Consequently the estimate is deliberately CONSERVATIVE, not a point predictor:
+#   * DENSE path: bounded and always cheap in the measured range -> small constant.
+#   * SPARSE (compressed-HVP) path with the kernel not yet compiled: the compile
+#     is potentially very large (up to ~3x a 60s budget) and unpredictable, so the
+#     estimate returns a large floor. The gate then only enters when there is
+#     ample budget headroom, and skips (soundly — it is a primal heuristic) when
+#     there is not. The conservative floor is what preserves the time_limit
+#     contract; a precise number is neither available nor needed, because being
+#     wrong high only skips a heuristic (never affects the dual bound).
+_HESSIAN_COMPILE_DENSE_S = 0.5
+# Floor for the risky first sparse compile. The compile can be arbitrarily large
+# (measured 1s->186s cold, R^2~0 vs any cheap size feature) and cannot be polled
+# once entered, so this is a *risk headroom*, not a point estimate: the gate only
+# starts a first sparse compile when at least this much budget remains. Chosen so
+# the in-solve first heuristic still runs on a normal (tens-of-seconds) budget —
+# the measured in-solve first compile is a few seconds — while a tight budget
+# (e.g. time_limit=5) refuses to gamble the whole contract on an unbounded
+# compile. A single policy constant on the whole no-relaxation class, not tuned
+# per instance. Over-estimating only skips a primal heuristic (sound).
+_HESSIAN_COMPILE_SPARSE_FLOOR_S = 15.0
+
+
+def estimate_hessian_compile_s(n_vars: int, hessian_nnz: int, use_sparse: bool) -> float:
+    """Conservative estimate of the first-time Hessian XLA compile wall (seconds).
+
+    See the module-level comment for the measured basis and why this is a
+    conservative floor rather than a point predictor (the compile is not reliably
+    predictable from cheap size features; R^2 ~ 0 vs n_vars). Used only to gate
+    entry into *primal-heuristic* NLPs, so an over-estimate merely skips a
+    heuristic (always sound) and never touches the dual bound.
+    """
+    if not use_sparse:
+        return _HESSIAN_COMPILE_DENSE_S
+    # Sparse compressed-HVP path: unpredictable and potentially budget-dwarfing.
+    return _HESSIAN_COMPILE_SPARSE_FLOOR_S
+
+
 def evaluator_fingerprint(model: Model) -> tuple:
     """Structural fingerprint of a model for evaluator-cache validity.
 
@@ -165,6 +227,15 @@ class NLPEvaluator:
 
         # Variable count (flat).
         self._n_variables = sum(v.size for v in model._variables)
+
+        # Whether the Lagrangian-Hessian XLA kernel has been traced+compiled yet.
+        # The first ``evaluate_hessian_values`` call triggers an *uninterruptible*
+        # first-time XLA compile (seconds-to-minutes on large flowsheet DAGs);
+        # once done, subsequent calls hit the warm XLA cache in microseconds.
+        # The root-heuristic budget gate (solver.py) reads this flag to decide
+        # whether entering a compile-triggering NLP fits the remaining wall
+        # budget — see :meth:`hessian_kernel_compiled`.
+        self._hessian_compiled = False
 
         # Parameter plumbing: capture identity order so snapshots stay aligned
         # even if model._parameters is later extended (caching in solver.py
@@ -748,8 +819,14 @@ class NLPEvaluator:
         if values_fn is not None:
             x64 = np.asarray(x, dtype=np.float64)
             lam64 = np.asarray(lambda_, dtype=np.float64)
-            return values_fn(x64, float(obj_factor), lam64, self._current_params())
+            out = values_fn(x64, float(obj_factor), lam64, self._current_params())
+            # The first call above forces the (possibly very slow) first-time XLA
+            # compile of the sparse-Hessian kernel; mark it so the budget gate can
+            # treat later calls as free.
+            self._hessian_compiled = True
+            return out
         h = self.evaluate_lagrangian_hessian(x, obj_factor, lambda_)
+        self._hessian_compiled = True
         return h[self._hess_rows, self._hess_cols].astype(np.float64)
 
     def _use_sparse_hessian(self) -> bool:
@@ -830,6 +907,40 @@ class NLPEvaluator:
                 self._jac_rows = np.array([], dtype=np.intp)
                 self._jac_cols = np.array([], dtype=np.intp)
             self._hess_rows, self._hess_cols = np.tril_indices(n)
+
+    def hessian_kernel_compiled(self) -> bool:
+        """Whether the first-time Lagrangian-Hessian XLA compile has already run.
+
+        The first :meth:`evaluate_hessian_values` call forces an uninterruptible
+        first-time XLA compile that, on large flowsheet DAGs, can exceed a whole
+        `time_limit` budget (bottleneck-profile-2026-07-05 §4). Once compiled,
+        later Hessian evaluations hit the warm XLA cache. The root-heuristic
+        budget gate uses this to decide whether entering a compile-triggering NLP
+        can still respect the deadline.
+        """
+        return bool(self._hessian_compiled)
+
+    def hessian_compile_estimate_s(self) -> float:
+        """Estimated wall seconds of the *first* Lagrangian-Hessian XLA compile.
+
+        Returns ``0.0`` when the kernel is already compiled (the cost is spent).
+        Otherwise returns a model-size estimate from a measured curve fit on
+        MINLPLib instances (see :data:`HESSIAN_COMPILE_FIT` and
+        docs/dev/perf-followup-plan-2026-07-05.md F4). The estimate is a general
+        function of ``n_variables`` and the Hessian nnz — never keyed to an
+        instance name — used only to gate *primal-heuristic* entry, so an
+        over- or under-estimate can never affect the dual bound or the returned
+        optimum (skipping a heuristic is always sound).
+        """
+        if self._hessian_compiled:
+            return 0.0
+        pattern = self.sparsity_pattern
+        hnnz = int(pattern.hessian_nnz) if pattern is not None else 0
+        return estimate_hessian_compile_s(
+            n_vars=self._n_variables,
+            hessian_nnz=hnnz,
+            use_sparse=self._use_sparse_hessian(),
+        )
 
     @property
     def n_variables(self) -> int:
