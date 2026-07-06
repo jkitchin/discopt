@@ -442,6 +442,31 @@ worktrees/sessions if desired, but each in its own PR.
 - **Acceptance:** st_e36 root bound strictly improves when x1's box shrinks;
   st_e36 certifies ≪897 nodes (profile predicts ~5–10). Default flip only
   after two green nightlies.
+- **Status: KILLED at the entry experiment — premise falsified, nothing
+  shipped** (branch `perf-f5-composite-power-envelope`, pounce 0.7.0,
+  M4 Pro; profile §5 item 10). The composite even-power envelope is **not**
+  st_e36's defect, on three grounds: (a) the pinned root bound
+  `−304.5000003055` *is* the objective's own true box-minimum (a plain
+  polynomial `2x0²+0.008x1³−3.2x0x1−2x1` whose argmin is the shared corner
+  `(5.5,25)`; dense-sampled box-min = −304.5000 for all of [15,25]/[20,25]/
+  [24,25]) — the relaxation is already essentially exact for the objective,
+  so there is no envelope slack to recover; (b) every `(inner)²` in st_e36
+  (all in constraint C0) has coefficient **+1** (convex), whose true convex
+  under-envelope *equals the function* (scipy convex-hull LP: gap 0 on both
+  boxes) — and `relax_pow`'s even branch already threads the argument
+  interval and returns exactly that, so the "variable-box-independent
+  fallback" the task posited does not exist; (c) st_e36 makes **0**
+  `relax_pow` calls (the LP relaxer lifts squares to auxes) and, decisively,
+  `f1 = x0²−6x0−11+0.8x1` spans 0 on **every** box (`[−8,6.25]`/`[−4,6.25]`/
+  `[−0.8,6.25]`), so `C0 = f1·(positive)` relaxes to an interval spanning 0
+  regardless of the square factors' tightness — no even-power envelope can
+  cut the corner. The bound *does* move with the box, but via the objective/
+  f1 quadratic-bilinear structure (shrink x0→[5,5.5] lifts −304.5→−246.0;
+  fix x1=22→−278.9), i.e. a **branch-and-reduce / product-relaxation**
+  lever, not an envelope one. Per CLAUDE.md §3 (no dead flags) the
+  `DISCOPT_COMPOSITE_POW_ENVELOPE` flag was **not** added and no relaxation
+  code changed. Re-scope st_e36 under the branch-and-reduce roadmap
+  (cert-gap-plan): tighten C0's product-of-factors / f1-crossing relaxation.
 
 ### F6 — Node-NLP volume/engine on the nvs05/tls2 class  (B12; paired with upstream)
 
