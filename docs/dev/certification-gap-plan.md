@@ -124,8 +124,8 @@ experiment may run.
 | T2.0 reduction-layer correctness pre-flight | todo — **blocking** | — | C-16 (P0) first, then C-15/C-20/C-21; see §14 Phase 2 |
 | T2.1 Phase 2 entry experiment (kill criterion) | **REVISITED (2026-07-06) → GO** (supersedes provisional NO-GO) | #408, R1 | Full panel now completes (19/20, loop-median 0.27 s); **no P0 on 51 instances**. (a) still FAILS on the Class-P tail (panel median 7.4%, 2/6 responsive) BUT the R1 OR-rule's generality arm PASSES: out-of-panel responsive 9/29=31% (≥20%). Loop = {S2 cutoff-FBBT, S3 cutoff-OBBT}; drop S1/S4; budget ≈10% of limit. Scope: broad small-MINLP root closure, NOT the hard tail. See "T2.1-revisit RESULTS / VERDICT (2026-07-06)" block |
 | T2.2 OBBT persistent LP + warm probes | (a)+(b) done; (c) skipped | #406 | Per-sweep CSC built once + warm-primal probes (t14 patch applied). Differential **NEUTRAL** (warm==cold ≤4.3e-12, tightenings identical, cert-neutrality NEUTRAL). Root-OBBT umbrella: ex1252a 1.54×, ex1252 1.89×, st_e38 1.92×. ex1252a < 2× → residual is the JAX envelope rebuild (Phase 4/5), not the LP loop. See the T2.2-DONE block below |
-| T2.3 root fixpoint loop | **UNLOCKED** (T2.1-revisit GO) → R2 | — | build per §14 spec; stage list {S2 cutoff-FBBT, S3 cutoff-OBBT}; drop S1/S4; budget ≈10% of limit (S2≈15%/S3≈85%); §0.2 generality gate (no instance-keyed code) |
-| T2.4 per-node `reduce_node()` | **UNLOCKED** (T2.1-revisit GO) → R2 | — | build per §14 spec; needs node-LP duals exposed (T2.4a); C-15 rule z=safe_bound |
+| T2.3 root fixpoint loop | **built — flagged default-OFF** (R2) | (this PR) | `_jax/root_reduce.py::run_root_fixpoint` {S2 cutoff-FBBT, S3 cutoff-OBBT}, integrated at end of iteration 0 (solver.py); tighten-only intersection, ≤2 rounds, ≈10% budget; `root_fixpoint`/`DISCOPT_ROOT_FIXPOINT` OFF. No-offtarget gate + cut-pool re-capture opt-in only. Flag-OFF cert-baseline **NEUTRAL** (41/41 node_count exact, Δobj 0). Node A/B: wastewater04m2 479→159 (root). See §14 "R2 build-results" |
+| T2.4 per-node `reduce_node()` | **built — flagged default-OFF** (R2) | (this PR) | T2.4a marginals on `MccormickLPResult` (bound-neutral, additive `dual`/`col_status`/`safe_bound`/`reduced_costs`); T2.4b `_jax/node_reduce.py::reduce_node` (cutoff-FBBT + free DBBT z=safe_bound + integer RC-fixing); T2.4c `PyTreeManager.set_node_bounds` feeds child boxes. `node_reduce`/`DISCOPT_NODE_REDUCE` OFF. 200-box property test green. See §14 "R2 build-results" |
 | T2.5 OBBT escalation policy | **UNLOCKED** (T2.1-revisit GO) → R2 | — | build per §14 spec (width×\|RC\| top-k scoring) |
 | T2.6 cert2 gate wiring + default-on | **moot** (T2.3–T2.5 not built) | — | residual gap re-scoped to Phases 3–4 |
 | Phase 3 entry experiment (0b) | done — GO on c-MIR **(SUPERSEDED by CUT-1, 2026-07-06 → NO-GO)** | (prior) | SCIP root-bound *proxy* (`scripts/p3_0b_scip_rootbound.py`): median root gap closed discopt 0.0 vs SCIP 1.0 over 8 (graphpart/ex1263/fac). CUT-1 replaced the proxy with a direct injection of SCIP's actual c-MIR cut coefficients into discopt's LP + a real-relaxation measurement; on nvs17/19/24 discopt's *default* root already closes 99.9% (≥ SCIP's cut-root), and injected cuts close ≤1.8%. See §7 "0b RESULTS / VERDICT (2026-07-03)" and "CUT-1 …(2026-07-06)" |
@@ -2409,6 +2409,81 @@ Flag: `node_reduce` config + env, default OFF until T2.6.
   sampled points always retained; A/B on global50 — node_count expected ↓,
   wall ratio vs baseline ≤ 1.05 on non-target classes (the no-offtarget
   guard); adversarial + smoke; `incorrect = 0`.
+
+**T2.3/T2.4 — R2 build-results (2026-07-06, this PR; flagged default-OFF).**
+Built exactly to the R1 GO spec above: `_jax/root_reduce.py::run_root_fixpoint`
+(S2 cutoff-FBBT → S3 cutoff-OBBT, tighten-only intersection, ≤2 rounds, ≈10% of
+the limit budget, S3 keeps its own inner OBBT deadline) integrated at the **end of
+iteration 0** in `solver.py` (after the root heuristics, where the root bound is
+snapshotted); `_jax/node_reduce.py::reduce_node` (T2.4b) on the spatial node-LP
+path unifying (i) cutoff-FBBT, (ii) **free DBBT from the just-solved node LP's
+reduced costs `d = c − Aᵀy` with `z = safe_bound` — the C-15 rule, never the raw
+LP objective** — zero extra LP solves, (iii) integer RC-fixing (inward rounding,
+mirroring `duality.rs:85` / `milp_driver.rs:1249`); the tightened node box is fed
+to the children via the new `PyTreeManager.set_node_bounds` PyO3 binding (T2.4c,
+before `process_evaluated`). T2.4a exposes the node-LP marginals additively on
+`MccormickLPResult` (`dual`/`col_status`/`safe_bound`/`reduced_costs`), requested
+only when `want_marginals=True`. Flags `root_fixpoint`/`node_reduce`
+(+ `DISCOPT_ROOT_FIXPOINT`/`DISCOPT_NODE_REDUCE` env), **default OFF**;
+`cascade_aux` stays off (measured-dead).
+
+- **Flag-OFF cert-baseline: byte-identical / NEUTRAL.** `check_cert_neutrality.py`
+  over the 41-row certifying panel: every row `node_count X→X` **exactly
+  unchanged**, `|Δobj| = 0.00e+00`, still optimal → NEUTRAL, exit 0. The default
+  path never requests `want_marginals` (verified: 0 marginal-requesting solves
+  flags-OFF), so T2.4a is bit-identical and both loops are inert with the flags
+  off. This is the hard §0.2.5 gate — met with zero slack.
+
+- **Node-count A/B (both flags ON vs OFF), the reduce-responsive class:**
+
+  | instance | nodes OFF | nodes ON | wall ratio | obj (ON) | oracle | note |
+  |---|---:|---:|---:|---:|---:|---|
+  | **ex1224** | **53** | **5** | **0.76** | −0.943470 | −0.943470 | 10.6× fewer nodes (attribution: root-only 53→5, node-only 53→13, both 5); bound −0.9434705 (tighter than OFF −0.9435073), does NOT cross oracle; both `optimal` |
+  | **wastewater04m2** | **479** | **351** | 1.00 | (no dual bound) | — | 1.4× fewer nodes at a 30 s budget (root arm alone: 479→159) |
+  | ex1223 | 9 | 9 | 0.37 | — | — | same nodes, 2.7× faster wall |
+
+  ex1224 is the branch-and-reduce closure the task targets (nvs24-class node
+  collapse): the cutoff-OBBT root fixpoint + per-node DBBT contract the tree from
+  53 to 5 nodes with a *tighter* certified root bound. wastewater04m2 responds on
+  the root arm (479→159). No global50 instance moved a node **into** a worse count.
+
+- **No-offtarget guard (≤1.05 wall on non-target classes): PASS.** Across the
+  20-instance A/B (gkocis, nvs24, ex5_2_2_case1, pooling_haverly1tp,
+  pooling_adhya1stp, ex1252, st_e38, ex1263, nvs14, ex1224, ex1225, ex1264,
+  ex1266, nvs10, nvs11, nvs13, prob02, util, wastewater04m2, ex1223) the flags are
+  **inert on the non-responsive class** (node_count unchanged) with wall ratios in
+  [0.37, 1.03] on every non-trivial (>0.5 s) instance — no instance regresses
+  wall > 5%. (Sub-second instances show ±2× ratio noise on a <0.5 s solve, e.g.
+  ex5_2_2_case1 0.2→0.4 s, nvs10 0.1→0.1 s — not a wall regression.) The
+  **key fix**: the root cut-pool re-capture on the tightened box costs an
+  irreducible separating solve (measured +3.7 s on pooling_adhya1stp, NOT bounded
+  by the LP `time_limit`), so it is **opt-in only** (`DISCOPT_ROOT_FIXPOINT_REPOOL`);
+  the default flagged path keeps the still-valid wider-box pool (a cut valid over a
+  box is valid over every sub-box → sound), which removed the +38% regression
+  (pooling_adhya1stp 8.9 s OFF → 8.7 s both). A no-offtarget *gap gate*
+  (`_ROOT_FIXPOINT_MIN_GAP`) skips the fixpoint when the root is already tight.
+
+- **Differential + feasible-point soundness: GREEN.** 0 oracle crossings across
+  the whole A/B panel (`bound ≤ oracle + tol` on every ON row; ex1224 bound
+  −0.9434705 ≤ opt −0.94347). Property test `test_reduce_node_retains_better_than
+  _cutoff_points` (200 random boxes/cutoffs): DBBT/RC-fixing is tighten-only and a
+  better-than-cutoff point is never cut. `run_root_fixpoint` unit tests: tighten-only
+  (subset box), no-cutoff structural no-op sound, and the **round-2 improvement**
+  test (a second fixpoint round on the round-1-tightened envelope tightens strictly
+  more — the loop, not a one-shot pass, is load-bearing).
+
+- **Gates.** `pytest -m smoke` python/tests **617 passed / 14 skipped / 0 fail**;
+  adversarial `test_adversarial_recent_fixes.py` **10 passed**;
+  `cargo test -p discopt-core` **424+4+1 passed / 0 fail** (the `set_node_bounds`
+  PyO3 binding); `ruff check` + `ruff format --check` clean; `mypy` clean on the
+  new modules; `test_r2_branch_and_reduce.py` **7 passed**.
+
+- **Honest scope (per R1's caveat, not a hedge).** The win is *broad small-MINLP
+  root closure* (ex1224 the exemplar), NOT the hard uncertified tail: nvs05 in the
+  full solver routes to the alphaBB path (`_mc_lp_relaxer=None`, so the flags are
+  inert there by construction), and nvs09/nvs24 do not close (Class-P tail —
+  R3b/R4 territory, which reduction provably does not touch). The default flip
+  stays for T2.6 (nightly-green gate); this PR ships the flags default-OFF.
 
 **T2.5 — Uniform OBBT escalation policy (locked on T2.4).**
 Replace the per-node OBBT model-class gate (solver.py:4749-4753:

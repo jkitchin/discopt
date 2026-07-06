@@ -187,11 +187,25 @@ def _lifted_lp_fbbt(
 
 @dataclass
 class MccormickLPResult:
-    """Outcome of one LP-form McCormick relaxation solve."""
+    """Outcome of one LP-form McCormick relaxation solve.
+
+    The ``dual`` / ``col_status`` / ``safe_bound`` / ``reduced_costs`` fields are
+    additive node-LP marginals (cert:T2.4a), populated only on the incremental
+    fast path (``_try_incremental_node``) and only when the caller requests them
+    (``want_marginals=True``). They are a pure side-channel for per-node
+    duality-based reduction (cert:T2.4b ``reduce_node``); they never influence the
+    reported ``lower_bound``/``x`` (those are byte-identical whether or not the
+    marginals are computed), so a solve that does not request them is unchanged.
+    """
 
     status: str
     lower_bound: Optional[float] = None
     x: Optional[np.ndarray] = None  # first ``n_orig`` columns of the LP solution
+    # cert:T2.4a marginals (incremental fast path only; None otherwise).
+    dual: Optional[np.ndarray] = None  # row duals y of the std-form node LP
+    col_status: Optional[np.ndarray] = None  # final std-form column status (warm basis)
+    safe_bound: Optional[float] = None  # Neumaier-Shcherbina safe LP lower bound (== lower_bound)
+    reduced_costs: Optional[np.ndarray] = None  # d_j = c_j - (A^T y)_j for the ORIGINAL columns
 
 
 class MccormickLPRelaxer:
@@ -411,6 +425,8 @@ class MccormickLPRelaxer:
         node_lb: np.ndarray,
         node_ub: np.ndarray,
         inherited_cuts: Optional[tuple],
+        *,
+        want_marginals: bool = False,
     ) -> Optional["MccormickLPResult"]:
         """Incremental McCormick node solve: patch the cached structure + warm-start,
         instead of a cold ``build_milp_relaxation`` + equilibration. Returns a
@@ -418,7 +434,12 @@ class MccormickLPRelaxer:
         build. Sound: the patched matrix is validated equal to the cold build at
         construction, so the pure-LP value is a valid lower bound (integrality is
         branched by the outer tree); the inherited root cut pool is appended only
-        when its column layout matches exactly (a mismatch is skipped — sound)."""
+        when its column layout matches exactly (a mismatch is skipped — sound).
+
+        When ``want_marginals`` is set, the returned result additionally carries the
+        node LP's row duals, safe bound, and the ORIGINAL-column reduced costs
+        (cert:T2.4a). Those are computed from the same solve — no extra LP — and
+        never change ``lower_bound``/``x``."""
         inc = self._inc
         if inc is None:
             return None
@@ -467,9 +488,14 @@ class MccormickLPRelaxer:
                 if (self._inc_warm_basis is not None and self._inc_basis_nrows == nrows)
                 else None
             )
-            status, bound, x_full, basis, farkas_certified = inc.solve_assembled_full(
-                A, b, bounds, in_basis=in_basis
+            _solved = inc.solve_assembled_full(
+                A, b, bounds, in_basis=in_basis, return_cert=want_marginals
             )
+            if want_marginals:
+                status, bound, x_full, basis, farkas_certified, cert = _solved
+            else:
+                status, bound, x_full, basis, farkas_certified = _solved
+                cert = None
         except Exception:
             logger.debug("incremental McCormick node failed; cold fallback", exc_info=True)
             return None
@@ -478,7 +504,30 @@ class MccormickLPRelaxer:
             self._inc_warm_basis = basis
             self._inc_basis_nrows = nrows
             x_orig = np.asarray(x_full, dtype=np.float64)[: self._n_orig]
-            return MccormickLPResult(status="optimal", lower_bound=float(bound), x=x_orig)
+            res = MccormickLPResult(status="optimal", lower_bound=float(bound), x=x_orig)
+            if want_marginals and cert is not None and cert.dual is not None:
+                # Original-column reduced costs d_j = c_j - (A^T y)_j from THIS solve
+                # (no extra LP). ``A`` is the constraint matrix (m x ncol) and ``y``
+                # the row duals of the std-form ``[A | I] z = b`` system, so it has
+                # one entry per row of ``A``. Only the first ``n_orig`` structural
+                # columns are needed by DBBT / RC-fixing (aux columns are branched
+                # by the tree, never reduced here).
+                try:
+                    y = np.asarray(cert.dual, dtype=np.float64)
+                    n0 = self._n_orig
+                    A_arr = np.asarray(A, dtype=np.float64)
+                    if A_arr.ndim == 2 and A_arr.shape[0] == y.shape[0] and A_arr.shape[1] >= n0:
+                        c_full = np.asarray(inc.c, dtype=np.float64)
+                        rc = c_full[:n0] - (A_arr[:, :n0].T @ y)
+                        res.reduced_costs = rc
+                        res.dual = y
+                        res.col_status = cert.col_status
+                        res.safe_bound = (
+                            float(cert.safe_bound) if cert.safe_bound is not None else float(bound)
+                        )
+                except Exception:
+                    logger.debug("node-LP marginal extraction failed (non-fatal)", exc_info=True)
+            return res
 
         if status == "infeasible":
             # An empty McCormick polytope over a FINITE box is a rigorous
@@ -565,6 +614,7 @@ class MccormickLPRelaxer:
         separate: bool = True,
         out_cuts: Optional[list] = None,
         psd_max_rounds: int = 8,
+        want_marginals: bool = False,
     ) -> MccormickLPResult:
         """Solve the McCormick LP relaxation restricted to the given bound box.
 
@@ -601,7 +651,9 @@ class MccormickLPRelaxer:
         # populated once the incremental engine is active — exactly why the T1.3
         # gate flip collapsed the spatial bound (dispatch 3 → 9843).
         if out_cuts is None:
-            _fast = self._try_incremental_node(node_lb, node_ub, inherited_cuts)
+            _fast = self._try_incremental_node(
+                node_lb, node_ub, inherited_cuts, want_marginals=want_marginals
+            )
             if _fast is not None:
                 return _fast
 

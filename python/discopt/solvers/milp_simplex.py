@@ -52,10 +52,20 @@ class LpWarmCert(NamedTuple):
       simplex's Farkas dual-ray candidate was independently verified to prove the
       feasible set empty (a rigorous fathoming proof). ``False`` otherwise — the
       caller must then fall back rather than trust the bare verdict.
+    * ``dual`` — on an ``optimal`` solve, the simplex's row-dual vector ``y`` (one
+      entry per constraint row of the *standard-form* ``[A_ub | I] z = b`` system,
+      so ``len(dual) == m``). ``None`` when unavailable. Additive side-channel for
+      duality-based bound tightening (cert:T2.4a); it never changes the reported
+      objective/bound (those are computed identically whether or not it is read).
+    * ``col_status`` — on an ``optimal`` solve, the final column-status vector for
+      the standard-form columns (structural first, then slacks) — the warm-start
+      basis to thread into a downstream re-solve. ``None`` when unavailable.
     """
 
     safe_bound: Optional[float]
     farkas_certified: bool
+    dual: Optional[np.ndarray] = None
+    col_status: Optional[np.ndarray] = None
 
 
 def _fbbt_eq_bounds(
@@ -470,7 +480,14 @@ def solve_lp_warm_std(
                 ),
                 (np.asarray(cs), np.asarray(bv)),
                 LpWarmCert(
-                    safe_bound=(None if safe is None else float(safe)), farkas_certified=False
+                    safe_bound=(None if safe is None else float(safe)),
+                    farkas_certified=False,
+                    # Additive marginals (cert:T2.4a): row duals ``y`` and the final
+                    # column status. Reduced costs ``d = c - A^T y`` are derived by
+                    # the consumer from ``dual``; exposing the raw dual keeps this a
+                    # pure plumbing change (no new math here).
+                    dual=np.asarray(dual, dtype=np.float64) if dual is not None else None,
+                    col_status=np.asarray(cs) if cs is not None else None,
                 ),
             )
         if status == "infeasible":

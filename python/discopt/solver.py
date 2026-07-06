@@ -222,6 +222,11 @@ _PER_NODE_OBBT_BUDGET_FRAC = 0.6
 _PER_NODE_OBBT_PER_NODE_S = 3.0
 _PER_NODE_OBBT_PER_LP_S = 0.3
 _PER_NODE_OBBT_ROUNDS = 3
+# Root branch-and-reduce fixpoint (cert:T2.3) no-offtarget gate: skip the loop when
+# the relative gap between the root dual bound and the incumbent cutoff is at/below
+# this — an already-tight root has nothing to close, so running it would only add
+# wall cost on the already-fast class (the §14 T2.4 ≤1.05 no-offtarget guard).
+_ROOT_FIXPOINT_MIN_GAP = 1e-4
 # Auto build-time level-1 RLT gate. ``rlt="auto"`` (the default) leaves build-time
 # level-1 RLT off, but its root-bound tightening certifies several small nonconvex
 # instances the per-node-only policy leaves open (nvs05: a 6.94 incumbent with a
@@ -1068,6 +1073,47 @@ def _cached_structural_linear_mask(evaluator, m):
     except Exception:
         pass
     return mask
+
+
+def _reduce_node_and_stage(
+    reduce_node_fn,
+    model,
+    i,
+    batch_lb,
+    batch_ub,
+    lp_result,
+    tree,
+    cutoff,
+    pending,
+):
+    """Run per-node reduce (cert:T2.4b) and stage the tightened child box.
+
+    Calls ``reduce_node`` on node ``i``'s box using the just-solved node LP's
+    marginals (``lp_result`` carries ``reduced_costs``/``safe_bound`` when the LP
+    requested them) plus cutoff-FBBT. On a strictly smaller box it updates
+    ``batch_lb[i]``/``batch_ub[i]`` (so downstream branching/hints see the tighter
+    box) and records it in ``pending[i]`` for the ``set_node_bounds`` child export.
+    Returns True iff the reduction proved the node infeasible under the cutoff (a
+    rigorous fathom). Tighten-only: any failure leaves the box unchanged."""
+    try:
+        cur_lb = np.asarray(batch_lb[i], dtype=np.float64)
+        cur_ub = np.asarray(batch_ub[i], dtype=np.float64)
+        res = reduce_node_fn(model, cur_lb, cur_ub, lp_result, cutoff)
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.debug("reduce_node failed at node %d: %s", i, exc)
+        return False
+    if res.infeasible:
+        return True
+    if res.n_tightened > 0:
+        new_lb = np.maximum(cur_lb, res.lb)
+        new_ub = np.minimum(cur_ub, res.ub)
+        # Guard against an empty box from float noise (fathom).
+        if np.any(new_lb > new_ub + 1e-9):
+            return True
+        batch_lb[i] = new_lb.tolist()
+        batch_ub[i] = new_ub.tolist()
+        pending[i] = (new_lb, new_ub)
+    return False
 
 
 def _tighten_node_bounds_with_status(evaluator, node_lb, node_ub, cl_list, cu_list, max_rounds=3):
@@ -5333,6 +5379,24 @@ def solve_model(
             _pn_obbt_budget_total,
         )
 
+    # --- Per-node cheap reduction (cert:T2.4b, flag default OFF) ---
+    # After each node LP solve, run reduce_node (cutoff-FBBT + free DBBT from the
+    # node LP reduced costs + integer RC-fixing) and feed the tightened box to the
+    # child nodes via ``tree.set_node_bounds`` before the tree branches. Gated to
+    # the LP-relaxer spatial path (the only path exposing node-LP marginals) and
+    # behind the flag, default OFF until T2.6.
+    _node_reduce_enabled = _tuning().node_reduce and _mc_lp_relaxer is not None
+    _node_reduce_fn: Any = None
+    if _node_reduce_enabled:
+        try:
+            from discopt._jax.node_reduce import reduce_node as _node_reduce_fn
+
+            logger.debug("per-node reduce_node enabled (cert:T2.4b)")
+        except Exception as _nr_exc:  # pragma: no cover - defensive
+            logger.debug("reduce_node import failed; disabling node reduce: %s", _nr_exc)
+            _node_reduce_enabled = False
+            _node_reduce_fn = None
+
     from discopt import debug as _debug
 
     def _debug_validate_candidate(
@@ -5411,6 +5475,21 @@ def solve_model(
             break
 
         node_infeasible_mask = np.zeros(n_batch, dtype=bool)
+
+        # Per-node reduce (cert:T2.4b) staging for THIS batch: the incumbent cutoff
+        # and a {batch_index: (lb, ub)} map of reduced child boxes, applied via
+        # set_node_bounds just before the tree branches (below).
+        _nr_pending: dict = {}
+        _nr_cutoff = None
+        if _node_reduce_enabled:
+            _nr_inc = tree.incumbent()
+            _nr_cutoff = (
+                float(_nr_inc[1])
+                if _nr_inc is not None
+                and np.isfinite(_nr_inc[1])
+                and _nr_inc[1] < _SENTINEL_THRESHOLD
+                else None
+            )
 
         # Apply the current global box to each exported node (issue: cutoff
         # tightening was dead). Phase C (incumbent-cutoff OBBT) and Phase C3
@@ -5700,6 +5779,7 @@ def solve_model(
                             time_limit=max(_node_remaining, _DEADLINE_NODE_FLOOR_S),
                             inherited_cuts=_root_cut_pool,
                             separate=True,
+                            want_marginals=_node_reduce_enabled,
                         )
                     except Exception as e:
                         logger.debug("McCormick LP failed at node %d: %s", i, e)
@@ -5725,6 +5805,27 @@ def solve_model(
                             result_feas[i] = False
                         else:
                             result_lbs[i] = max(result_lbs[i], float(mc_res.lower_bound))
+                    # --- Per-node reduce (cert:T2.4b) ---
+                    # Reduce the node box from THIS solve's marginals (no extra LP)
+                    # plus cutoff-FBBT, and stage the tightened box for the child
+                    # export (applied via set_node_bounds before process_evaluated).
+                    if _node_reduce_enabled and _node_reduce_fn is not None:
+                        _nr_res = _reduce_node_and_stage(
+                            _node_reduce_fn,
+                            model,
+                            i,
+                            batch_lb,
+                            batch_ub,
+                            mc_res,
+                            tree,
+                            _nr_cutoff,
+                            _nr_pending,
+                        )
+                        if _nr_res:
+                            node_infeasible_mask[i] = True
+                            result_lbs[i] = _INFEASIBILITY_SENTINEL
+                            result_feas[i] = False
+                            continue
             if not _model_is_convex:
                 for i in range(n_batch):
                     if result_lbs[i] == -np.inf:
@@ -5986,10 +6087,39 @@ def solve_model(
                             time_limit=max(_deadline - time.perf_counter(), _DEADLINE_NODE_FLOOR_S),
                             inherited_cuts=_root_cut_pool,
                             separate=True,
+                            want_marginals=_node_reduce_enabled,
                         )
                     except Exception as e:
                         logger.debug("McCormick LP failed at node %d: %s", int(batch_ids[i]), e)
                         mc_lp_res = None
+                    if (
+                        _node_reduce_enabled
+                        and _node_reduce_fn is not None
+                        and mc_lp_res is not None
+                        and mc_lp_res.status != "infeasible"
+                    ):
+                        # Per-node reduce (cert:T2.4b): tighten this node's box from
+                        # the marginals + cutoff-FBBT and stage the child box.
+                        if _reduce_node_and_stage(
+                            _node_reduce_fn,
+                            model,
+                            i,
+                            batch_lb,
+                            batch_ub,
+                            mc_lp_res,
+                            tree,
+                            _nr_cutoff,
+                            _nr_pending,
+                        ):
+                            node_infeasible_mask[i] = True
+                            result_lbs[i] = _INFEASIBILITY_SENTINEL
+                            result_feas[i] = False
+                            continue
+                        # The serial path uses ``node_lb``/``node_ub`` locals for
+                        # the subsequent branching/feasibility logic; refresh them
+                        # from the (possibly) reduced batch box.
+                        node_lb = np.asarray(batch_lb[i], dtype=np.float64)
+                        node_ub = np.asarray(batch_ub[i], dtype=np.float64)
                     if mc_lp_res is not None and mc_lp_res.status == "infeasible":
                         # The McCormick LP is a valid OUTER relaxation of this
                         # node's subtree: if the (larger) relaxed feasible set is
@@ -7039,6 +7169,26 @@ def solve_model(
             _debug_quit = True
             break
 
+        # Feed per-node reduced boxes forward to the children (cert:T2.4c). Applied
+        # BEFORE process_evaluated so the tree branches from the contracted box and
+        # every child inherits the reduction. Only nodes still open (not fathomed
+        # this round) are updated; each staged box is a subset of the node's box, so
+        # the contraction removes no feasible integer point (tree_manager.rs:792).
+        if _node_reduce_enabled and _nr_pending:
+            t_rust_start = time.perf_counter()
+            for _bi, (_nlb, _nub) in _nr_pending.items():
+                if node_infeasible_mask[_bi] or result_lbs[_bi] >= _SENTINEL_THRESHOLD:
+                    continue
+                try:
+                    tree.set_node_bounds(
+                        int(batch_ids[_bi]),
+                        np.asarray(_nlb, dtype=np.float64),
+                        np.asarray(_nub, dtype=np.float64),
+                    )
+                except Exception as _sb_exc:  # pragma: no cover - defensive
+                    logger.debug("set_node_bounds failed at node %d: %s", _bi, _sb_exc)
+            rust_time += time.perf_counter() - t_rust_start
+
         # Import results back to Rust tree
         t_rust_start = time.perf_counter()
         tree.import_results(result_ids, result_lbs, result_sols, result_feas)
@@ -7209,6 +7359,118 @@ def solve_model(
             _root_glb_snap = tree.stats().get("global_lower_bound")
             if _root_glb_snap is not None and np.isfinite(_root_glb_snap):
                 _root_glb_internal = float(_root_glb_snap)
+
+        # --- Root branch-and-reduce fixpoint (cert:T2.3, flag default OFF) ---
+        # At the END of iteration 0 the root heuristics have run, so an incumbent
+        # cutoff may exist. Iterate the R1 reduce stages {S2 cutoff-FBBT, S3
+        # cutoff-OBBT} to a fixpoint on the ROOT box, then intersect the tightened
+        # box into the global lb/ub (which every in-tree node inherits, 5425) and
+        # re-capture the root cut pool from the tightened box. Tighten-only and
+        # deadline-bounded; a failure leaves the search unchanged. Unlocked by the
+        # R1 GO (cert-gap-plan §14 "T2.1-revisit … 2026-07-06"); default OFF until
+        # T2.6's nightly-green flip.
+        if (
+            iteration == 0
+            and _tuning().root_fixpoint
+            and _mc_lp_relaxer is not None
+            and model._objective is not None
+        ):
+            try:
+                from discopt._jax.root_reduce import run_root_fixpoint
+
+                _rf_inc = tree.incumbent()
+                _rf_cutoff = (
+                    float(_rf_inc[1])
+                    if _rf_inc is not None
+                    and np.isfinite(_rf_inc[1])
+                    and _rf_inc[1] < _SENTINEL_THRESHOLD
+                    else None
+                )
+                # No-offtarget gate (§14 T2.4 ≤1.05 wall guard): skip the fixpoint
+                # when the root is already tight — the relative gap between the root
+                # dual bound and the incumbent cutoff is below a small threshold, so
+                # reduction has nothing to close and the loop would only add wall
+                # cost on the already-fast class (e.g. instances that close at ≤10
+                # nodes). When there is no incumbent yet OR no root bound, run it
+                # (the structural/finitizing value can still help).
+                _rf_gap_ok = True
+                if _rf_cutoff is not None and _root_glb_internal is not None:
+                    _rf_lo = float(_root_glb_internal)
+                    if np.isfinite(_rf_lo):
+                        _rf_rel_gap = abs(_rf_cutoff - _rf_lo) / (1.0 + abs(_rf_cutoff))
+                        _rf_gap_ok = _rf_rel_gap > _ROOT_FIXPOINT_MIN_GAP
+                # R1 budget: ~10% of the time limit (loop converges in <=2 iters,
+                # S3 OBBT gets ~85% of it inside the loop). Hard deadline-bounded.
+                _rf_budget = min(max(time_limit * 0.10, 1.0), max(_remaining_budget(), 0.0))
+                if _rf_gap_ok and _rf_budget > _DEADLINE_NODE_FLOOR_S:
+                    _rf_res = run_root_fixpoint(
+                        model,
+                        np.asarray(lb, dtype=np.float64),
+                        np.asarray(ub, dtype=np.float64),
+                        incumbent_cutoff=_rf_cutoff,
+                        deadline=time.perf_counter() + _rf_budget,
+                        tol=1e-6,
+                        prefer_pounce=nlp_solver == "pounce",
+                        superposition=(relaxation_arithmetic == "superposition"),
+                        measure_bound=False,
+                    )
+                    if _rf_res.infeasible:
+                        # The relaxation excludes every point better than the
+                        # incumbent cutoff -> the incumbent is optimal. Nothing to
+                        # tighten; the tree certifies on the next termination check.
+                        logger.info(
+                            "Root fixpoint proved no improving point below the "
+                            "incumbent cutoff (root reduce)"
+                        )
+                    elif _rf_res.n_tightened > 0:
+                        # Intersect tighten-only into the global box.
+                        lb = np.maximum(np.asarray(lb, dtype=np.float64), _rf_res.lb)
+                        ub = np.minimum(np.asarray(ub, dtype=np.float64), _rf_res.ub)
+                        logger.info(
+                            "Root fixpoint tightened %d bounds over %d round(s) (cutoff=%s)",
+                            _rf_res.n_tightened,
+                            _rf_res.n_rounds,
+                            "none" if _rf_cutoff is None else f"{_rf_cutoff:.6g}",
+                        )
+                        # The existing root cut pool (captured on the WIDER root box)
+                        # stays valid after tightening — a cut valid over a box is
+                        # valid over any sub-box — so every in-tree node keeps
+                        # inheriting sound cuts with NO refresh needed for soundness.
+                        # A refresh on the tightened box can only *strengthen* the
+                        # pool, but it costs a full separating solve (irreducible ~1s
+                        # floor on a large lifted relaxation, not bounded by the LP
+                        # time_limit — measured +3.7s on pooling_adhya1stp), which is
+                        # a no-offtarget-guard violation (§14 T2.4 ≤1.05 wall). So the
+                        # refresh is opt-in only (DISCOPT_ROOT_FIXPOINT_REPOOL=1) for a
+                        # future strength A/B; the default flagged path skips it and
+                        # keeps the still-valid pool.
+                        if (
+                            getattr(_mc_lp_relaxer, "_inc", None) is not None
+                            and os.environ.get("DISCOPT_ROOT_FIXPOINT_REPOOL") == "1"
+                            and _remaining_budget() > _DEADLINE_NODE_FLOOR_S
+                        ):
+                            try:
+                                _rf_chunks: list = []
+                                _mc_lp_relaxer.solve_at_node(
+                                    np.asarray(lb, dtype=np.float64),
+                                    np.asarray(ub, dtype=np.float64),
+                                    time_limit=max(_remaining_budget(), _DEADLINE_NODE_FLOOR_S),
+                                    out_cuts=_rf_chunks,
+                                )
+                                if _rf_chunks and _rf_chunks[0] is not None:
+                                    _A_rf, _b_rf = _rf_chunks[0]
+                                    if _A_rf is not None and _A_rf.shape[0] > 0:
+                                        if _A_rf.shape[0] > _root_cut_max:
+                                            _A_rf = _A_rf[-_root_cut_max:]
+                                            _b_rf = _b_rf[-_root_cut_max:]
+                                        _root_cut_pool = (_A_rf, _b_rf)
+                            except Exception as _rf_pool_exc:  # pragma: no cover
+                                logger.debug(
+                                    "root-fixpoint cut-pool refresh skipped: %s",
+                                    _rf_pool_exc,
+                                )
+            except Exception as _rf_exc:  # pragma: no cover - defensive
+                logger.debug("root fixpoint reduce skipped: %s", _rf_exc)
 
         iteration += 1
 

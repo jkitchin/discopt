@@ -199,6 +199,27 @@ impl PyTreeManager {
         Ok(())
     }
 
+    /// Replace a node's structural variable bounds with reduction-tightened ones
+    /// (cert:T2.4c), so its children inherit the contracted box.
+    ///
+    /// A sound contraction only — the caller must pass a box that is a SUBSET of
+    /// the node's current box (per-node `reduce_node` guarantees this: it only
+    /// intersects). Called on the spatial path AFTER the node LP + `reduce_node`,
+    /// BEFORE `process_evaluated` branches the node. `lb`/`ub` are flat per-variable
+    /// arrays of length `n_vars`; a length mismatch is a no-op inside Rust.
+    fn set_node_bounds(
+        &mut self,
+        node_id: i64,
+        lb: PyReadonlyArray1<f64>,
+        ub: PyReadonlyArray1<f64>,
+    ) -> PyResult<()> {
+        let nid = NodeId(node_id as usize);
+        let lb_v: Vec<f64> = lb.as_array().to_vec();
+        let ub_v: Vec<f64> = ub.as_array().to_vec();
+        self.inner.set_node_bounds(nid, lb_v, ub_v);
+        Ok(())
+    }
+
     /// Process all evaluated nodes: prune, check integrality, branch.
     ///
     /// Returns a dict with {pruned, fathomed, branched, incumbent_updates,
