@@ -261,3 +261,88 @@ def test_scripted_repl_end_to_end(capsys):
     err = capsys.readouterr().err
     assert "paused at" in err
     assert "discopt-dbg" in err
+
+
+# ── JSON agent protocol ──────────────────────────────────────────────────────
+
+
+def _drive_json(model, commands):
+    """Run ``model`` under the JSON frontend fed ``commands``; return events."""
+    import json as _json
+
+    from discopt.debug.jsonproto import JsonFrontend
+
+    it = iter(commands)
+
+    def read():
+        try:
+            c = next(it)
+        except StopIteration:
+            return None
+        return c if isinstance(c, str) else _json.dumps(c)
+
+    events: list[dict] = []
+    fe = JsonFrontend(read_fn=read, write_fn=events.append)
+    debug.attach(DebugSession(fe))
+    try:
+        res = model.solve(time_limit=20.0)
+    finally:
+        debug.detach()
+    return res, events
+
+
+@pytest.mark.unit
+def test_json_command_parsing_forms():
+    from discopt.debug.jsonproto import _parse_command
+
+    assert _parse_command("continue") == ("continue", None)
+    assert _parse_command('"continue"') == ("continue", None)
+    assert _parse_command('{"cmd": "print", "args": ["node", "0"], "id": 7}') == (
+        "print node 0",
+        7,
+    )
+    assert _parse_command('{"cmd": "break if gap<0.2", "id": 8}') == (
+        "break if gap<0.2",
+        8,
+    )
+    cmd, rid = _parse_command('{"nope": 1, "id": 3}')
+    assert cmd is None and rid == 3
+
+
+@pytest.mark.smoke
+@pytest.mark.requires_pounce
+def test_json_protocol_handshake_and_events():
+    import json as _json
+
+    res, events = _drive_json(
+        _spatial_model(),
+        [
+            {"cmd": "info", "id": 1},
+            {"cmd": "break", "args": ["if", "nodes>=2"], "id": 2},
+            "continue",
+            {"cmd": "print", "args": ["bound"], "id": 3},
+            "continue",
+            "continue",
+        ],
+    )
+    assert res.status == "optimal"
+
+    # hello handshake is first and self-describing.
+    hello = events[0]
+    assert hello["event"] == "hello"
+    assert hello["protocol"] == "discopt-dbg/1"
+    assert "iter_start" in hello["checkpoints"]
+    assert "new_incumbent" in hello["events"]
+    assert hello["capabilities"]["mutate_iterate"] is False
+    assert hello["capabilities"]["safe_steer"] is True
+
+    kinds = [e["event"] for e in events]
+    assert "pause" in kinds
+    assert "terminated" in kinds
+    # request_id is echoed on results.
+    results = {e["request_id"]: e for e in events if e["event"] == "result"}
+    assert results[1]["command"] == "info"
+    assert results[3]["output"] == ["bound = 1.04943"]
+    # the whole stream is strict-JSON clean (no Infinity/NaN).
+    for e in events:
+        _json.loads(_json.dumps(e, allow_nan=False))

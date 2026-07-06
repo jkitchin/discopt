@@ -82,16 +82,22 @@ def make_session(
 ) -> DebugSession:
     """Build a :class:`DebugSession` from a ``debug=`` argument.
 
-    ``kind`` may be ``True`` / ``"repl"`` (human REPL), ``"on-error"``, or a
-    ready-made :class:`DebugSession` (returned as-is).
+    ``kind`` may be ``True`` / ``"repl"`` (human REPL), ``"json"`` (agent
+    protocol on stdin/stdout), ``"on-error"``, or a ready-made
+    :class:`DebugSession` (returned as-is).
     """
     if isinstance(kind, DebugSession):
         return kind
     enter_on_error = kind == "on-error"
     if frontend is None:
-        from .repl import ReplFrontend
+        if kind == "json":
+            from .jsonproto import JsonFrontend
 
-        frontend = ReplFrontend(script=script)
+            frontend = JsonFrontend()
+        else:
+            from .repl import ReplFrontend
+
+            frontend = ReplFrontend(script=script)
     return DebugSession(frontend, enter_on_error=enter_on_error)
 
 
