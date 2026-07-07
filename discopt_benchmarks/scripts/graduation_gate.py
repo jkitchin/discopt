@@ -147,25 +147,37 @@ def run_cert_neutrality(arm: str, env_on: dict[str, str]) -> CertResult:
     the committed ``cert-baseline.jsonl`` and exits non-zero on any violation. For
     a bound-changing flag, a *node_count* change on a cert instance carrying the
     flag's structure is expected and NOT a soundness fault, but a changed
-    *objective* or a lost *optimal* status is. Because the underlying check enforces
-    objective-to-tolerance and still-optimal unconditionally (its perf-class node
-    guard is separate), we run it as-is and classify: objective/status/missing
-    violations are hard fails; a lone node_regression is downgraded to a perf note
-    for a bound-changing flag."""
+    *objective* or a lost *optimal* status is.
+
+    The objective check is **regime-aware** (the CUTOFF-SOUND-1 fix). For a
+    *bound-neutral* flag the underlying ``check_neutrality`` demands byte-
+    reproducibility (~1e-8). For a *bound-changing* flag that would be a category
+    error: the flag legitimately alters the search, so its certified objective may
+    drift beyond 1e-8 while staying within *correctness* tolerance and not crossing
+    the true optimum (the ex1225 31.0 / st_e38 shape — a drift *toward* =opt=). We
+    therefore pass the ``bound_changing`` regime and the ``cert-optima.json`` oracle
+    down to ``check_neutrality``, which flags an objective only when it disagrees
+    with the TRUE optimum beyond correctness tolerance (a genuine false certificate).
+    node_regression is downgraded to a perf note for a bound-changing flag."""
     regime = gs.ARMS.get(arm, {}).get("regime", "bound_changing")
     env = dict(os.environ, JAX_PLATFORMS="cpu", JAX_ENABLE_X64="1")
     env.update(env_on)
     # Emit machine-readable violations by importing the util in the subprocess and
     # dumping JSON — reusing check_cert_neutrality's own runner + baseline so we do
-    # not fork its logic.
+    # not fork its logic. The oracle (cert-optima.json) lets the bound-changing
+    # objective check bracket against the TRUE optimum, not byte-identity.
     worker = (
         "import json, sys\n"
         f"sys.path.insert(0, {str(_BENCH_ROOT)!r}); sys.path.insert(0, {str(_REPO)!r})\n"
+        "from pathlib import Path\n"
         "from benchmarks.runner import BenchmarkConfig, BenchmarkRunner, SolverConfig\n"
-        "from scripts.gen_cert_baseline import _instance_budgets\n"
+        "from scripts.gen_cert_baseline import _instance_budgets, _CERT_OPTIMA\n"
         "from utils.cert_neutrality import check_neutrality, load_baseline\n"
         "from scripts.check_cert_neutrality import _CERT_BASELINE, _KNOWN_PERF_GATED\n"
         "baseline = load_baseline(_CERT_BASELINE)\n"
+        "_op = Path(_CERT_OPTIMA)\n"
+        "oracle = json.loads(_op.read_text()) if _op.exists() else {}\n"
+        f"regime = {regime!r}\n"
         "budgets = _instance_budgets(60.0)\n"
         "solver = SolverConfig(name='discopt', command='', solver_type='internal')\n"
         "new_rows = {}\n"
@@ -174,7 +186,8 @@ def run_cert_neutrality(arm: str, env_on: dict[str, str]) -> CertResult:
         "        time_limit=int(budgets.get(name, 60)), num_runs=1, solvers=[solver])\n"
         "    res = BenchmarkRunner(cfg)._run_discopt(solver, name, 0)\n"
         "    new_rows[name] = res.to_dict()\n"
-        "viol = check_neutrality(new_rows, baseline, known_perf_gated=_KNOWN_PERF_GATED)\n"
+        "viol = check_neutrality(new_rows, baseline, known_perf_gated=_KNOWN_PERF_GATED,\n"
+        "    regime=regime, oracle=oracle)\n"
         "print('CERTJSON:' + json.dumps([{'instance': v.instance, 'kind': v.kind,\n"
         "    'detail': v.detail} for v in viol]))\n"
     )
