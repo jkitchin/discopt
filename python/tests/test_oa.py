@@ -1,22 +1,10 @@
-"""Tests for the general-purpose Outer Approximation (OA) solver.
-
-Requires highspy for the MILP master problem.
-"""
+"""Tests for the general-purpose Outer Approximation (OA) solver."""
 
 import logging
 
 import discopt.modeling as dm
 import numpy as np
 import pytest
-
-try:
-    import highspy  # noqa: F401
-
-    HAS_HIGHS = True
-except ImportError:
-    HAS_HIGHS = False
-
-pytestmark = pytest.mark.skipif(not HAS_HIGHS, reason="highspy not installed")
 
 ABS_TOL = 1e-3
 REL_TOL = 1e-3
@@ -783,6 +771,7 @@ class TestOARobustnessOptions:
         m = dm.Model("no_good_option")
         y = m.binary("y")
         m.minimize(y)
+        m.subject_to(y <= 0.25)
 
         no_good_calls = []
 
@@ -835,6 +824,7 @@ class TestOARobustnessOptions:
         y = m.binary("y")
         z = m.integer("z", lb=0, ub=3)
         m.minimize(y + z)
+        m.subject_to(y + z <= 0.5)
 
         no_good_calls = []
 
@@ -887,6 +877,7 @@ class TestOARobustnessOptions:
         y = m.binary("y")
         z = m.integer("z", lb=0, ub=3)
         m.minimize(y + z)
+        m.subject_to(y + z <= 0.5)
 
         no_good_expansions = []
 
@@ -1092,6 +1083,7 @@ class TestOARobustnessOptions:
         m = dm.Model("no_good_certified_bound")
         y = m.binary("y")
         m.minimize(y)
+        m.subject_to(y <= 0.25)
 
         master_points = [np.array([1.0]), np.array([0.0])]
         master_bounds = [0.0, 0.0]

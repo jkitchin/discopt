@@ -81,7 +81,7 @@ _LP_NLP_BB_OPTION_KEYS = frozenset(
     }
 )
 _DIRECT_ROUTABLE_METHODS = frozenset({"oa", "ecp", "goa"})
-_DIRECT_BACKENDS = frozenset({"auto", "gurobi", "highs", "pounce", "simplex"})
+_DIRECT_BACKENDS = frozenset({"auto", "gurobi", "pounce", "simplex"})
 
 
 def _apply_shot_profile_reformulations(
@@ -275,8 +275,6 @@ def _try_direct_lp(
     t_start = time.perf_counter()
     if backend == "gurobi":
         result = solver_module._solve_lp_gurobi(model, t_start, time_limit)
-    elif backend == "highs":
-        result = solver_module._solve_lp_highs(model, t_start, time_limit)
     elif backend == "pounce":
         result = solver_module._solve_lp_pounce(model, t_start, time_limit)
     elif backend == "simplex":
@@ -326,8 +324,6 @@ def _try_direct_milp(
     result = None
     if backend == "gurobi":
         result = solver_module._solve_milp_gurobi(model, t_start, time_limit, gap_tolerance)
-    elif backend == "highs":
-        result = solver_module._solve_milp_highs(model, t_start, time_limit, gap_tolerance)
     elif backend == "simplex":
         result = solver_module._solve_milp_simplex(
             model,
@@ -349,20 +345,17 @@ def _try_direct_milp(
             node_engine="simplex",
         )
     else:
-        if nlp_solver != "pounce":
-            result = solver_module._solve_milp_highs(model, t_start, time_limit, gap_tolerance)
-        if result is None:
-            result = solver_module._solve_milp_bb(
-                model,
-                time_limit,
-                gap_tolerance,
-                16,
-                "best_first",
-                max_iterations,
-                t_start,
-                prefer_pounce=nlp_solver == "pounce",
-                node_engine="simplex" if nlp_solver == "pounce" else "pounce",
-            )
+        result = solver_module._solve_milp_bb(
+            model,
+            time_limit,
+            gap_tolerance,
+            16,
+            "best_first",
+            max_iterations,
+            t_start,
+            prefer_pounce=nlp_solver == "pounce",
+            node_engine="simplex" if nlp_solver == "pounce" else "pounce",
+        )
     if result is None:
         return None, _direct_attempt(
             problem_class=problem_class,
@@ -419,15 +412,6 @@ def _try_direct_qp(
     result = None
     if backend == "gurobi":
         result = solver_module._solve_qp_gurobi(model, t_start, time_limit, gap_tolerance)
-    elif backend == "highs":
-        result = solver_module._solve_qp_highs(model, t_start, time_limit)
-        if result is None:
-            return None, _direct_attempt(
-                problem_class=problem_class,
-                candidate_strategy=strategy,
-                backend=backend,
-                fallback_reason="direct_backend_unavailable",
-            )
     elif backend == "pounce" and not is_miqp:
         result = solver_module._solve_qp_pounce(model, t_start, time_limit)
         if result is None:
@@ -438,19 +422,16 @@ def _try_direct_qp(
                 fallback_reason="direct_backend_unavailable",
             )
     elif is_miqp:
-        if backend == "auto" and nlp_solver != "pounce":
-            result = solver_module._solve_qp_highs(model, t_start, time_limit)
-        if result is None:
-            result = solver_module._solve_miqp_bb(
-                model,
-                time_limit,
-                gap_tolerance,
-                16,
-                "best_first",
-                max_iterations,
-                t_start,
-                prefer_pounce=nlp_solver == "pounce" or backend == "pounce",
-            )
+        result = solver_module._solve_miqp_bb(
+            model,
+            time_limit,
+            gap_tolerance,
+            16,
+            "best_first",
+            max_iterations,
+            t_start,
+            prefer_pounce=nlp_solver == "pounce" or backend == "pounce",
+        )
     else:
         result = solver_module._solve_qp(
             model,

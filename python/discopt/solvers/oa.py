@@ -557,9 +557,8 @@ def _require_solution_pool_backend(milp_solver: str) -> None:
 def _qp_regularization_backend_error(add_regularization: str) -> RuntimeError:
     return RuntimeError(
         f"OA {add_regularization} regularization requires a QP/MIQP-capable backend "
-        "for the regularized master. Install highspy or choose "
-        "a linear regularization mode such as add_regularization='level_L1', "
-        "'level_L_infinity', or 'grad_lag'."
+        "for integer regularized masters. Choose a linear regularization mode such "
+        "as add_regularization='level_L1', 'level_L_infinity', or 'grad_lag'."
     )
 
 
@@ -3202,7 +3201,7 @@ def _solve_master_milp(
     except ImportError as e:
         raise ImportError(
             "OA solver requires a MILP backend for the master. Install one of: "
-            "pip install highspy  |  pip install pounce-solver  |  pip install gurobipy"
+            "pip install pounce-solver  |  pip install gurobipy"
         ) from e
 
     master = _build_master_milp_data(
@@ -3766,7 +3765,7 @@ def _require_lp_nlp_bb_gurobi_backend(milp_solver: str) -> None:
         raise RuntimeError(
             "mip_nlp_method='lp_nlp_bb' requires milp_solver='gurobi' because "
             "LP/NLP branch-and-bound uses single-tree lazy constraint callbacks. "
-            "Backends 'auto', 'highs', 'pounce', and 'simplex' do not expose the "
+            "Backends 'auto', 'pounce', and 'simplex' do not expose the "
             "required persistent lazy-cut capability."
         )
 
@@ -4742,8 +4741,8 @@ def solve_oa(
     cycling_check : bool
         Stop when the master repeats a fixed-integer assignment.
     milp_solver : str
-        MILP backend for OA master problems: ``"auto"``, ``"highs"``,
-        ``"pounce"``, ``"simplex"``, or ``"gurobi"``.
+        MILP backend for OA master problems: ``"auto"``, ``"pounce"``,
+        ``"simplex"``, or ``"gurobi"``.
     solution_pool : bool
         When true, request multiple Gurobi master MILP solutions per OA
         iteration and solve fixed-NLP subproblems for each selected integer

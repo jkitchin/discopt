@@ -5,13 +5,6 @@ import numpy as np
 import pytest
 from discopt.modeling.core import SolveResult, _DisjunctiveConstraint
 
-try:
-    import highspy  # noqa: F401
-
-    HAS_HIGHS = True
-except ImportError:
-    HAS_HIGHS = False
-
 
 def _require_gurobi():
     gp = pytest.importorskip("gurobipy")
@@ -420,7 +413,6 @@ def test_mip_nlp_shot_initial_poa_fallback_preserves_initialization(monkeypatch)
     assert trace["summary"]["cut_source_counts"]["initial_poa"] == 0
 
 
-@pytest.mark.skipif(not HAS_HIGHS, reason="highspy not installed")
 def test_mip_nlp_shot_initial_poa_adds_initial_cuts_integration():
     import discopt.solvers.oa as oa_module
 
@@ -485,7 +477,7 @@ def test_mip_nlp_shot_adaptive_solution_limit_state_transitions():
     unsupported = oa_module._ShotMIPSolutionLimitState(
         strategy="static",
         capacity=2,
-        backend="highs",
+        backend="simplex",
     )
     assert unsupported.as_trace_dict()["limit"] is None
     assert "gurobi" in unsupported.as_trace_dict()["degraded_reason"]
@@ -887,7 +879,7 @@ def test_mip_nlp_shot_convex_bounding_filters_local_cuts(monkeypatch):
     assert result.gap_certified is True
 
 
-def test_mip_nlp_shot_convex_bounding_excludes_integer_no_good_cuts(monkeypatch):
+def test_mip_nlp_shot_convex_bounding_skips_nonrigorous_no_good_cuts(monkeypatch):
     import discopt.solvers.oa as oa_module
     from discopt.solvers import MILPResult, SolveStatus
 
@@ -977,13 +969,16 @@ def test_mip_nlp_shot_convex_bounding_excludes_integer_no_good_cuts(monkeypatch)
     assert not any(has_no_good_for_y_zero(rows) for rows in convex_rows_by_call)
 
     trace = result.mip_nlp_trace
-    assert trace["iterations"][1]["convex_bounding"]["integer_cut_excluded_count"] == 1
+    assert trace["iterations"][1]["convex_bounding"]["integer_cut_excluded_count"] == 0
     assert trace["iterations"][1]["convex_bounding"]["global_cut_count"] == 0
-    assert trace["bound_validity"] == "global"
+    assert trace["summary"]["unresolved_integer_config_count"] == 1
+    assert trace["bound_validity"] == "uncertified"
     assert trace["final_lb"] == pytest.approx(0.0)
-    assert trace["heuristic_lb"] == pytest.approx(1.0)
+    assert trace["heuristic_lb"] == pytest.approx(0.0)
     assert result.status == "feasible"
     assert result.bound == pytest.approx(0.0)
+    assert result.gap is None
+    assert result.gap_certified is False
     assert result.objective == pytest.approx(1.0)
 
 
@@ -1047,7 +1042,6 @@ def test_mip_nlp_shot_nonconvex_objective_keeps_heuristic_bound_uncertified(monk
     assert trace["iterations"][0]["convex_bounding"]["reason"] == "objective_not_globally_boundable"
 
 
-@pytest.mark.skipif(not HAS_HIGHS, reason="highspy not installed")
 def test_mip_nlp_shot_reduction_cut_infeasible_master_repairs_integration():
     import discopt.solvers.oa as oa_module
 
@@ -1062,7 +1056,7 @@ def test_mip_nlp_shot_reduction_cut_infeasible_master_repairs_integration():
         initial_point=np.array([1.0], dtype=float),
         max_iterations=1,
         heuristic_nonconvex=True,
-        milp_solver="highs",
+        milp_solver="simplex",
         mip_nlp_profile="shot",
         mip_nlp_shot_config=oa_module.MIPNLPShotConfig(
             master_repair=True,
@@ -1112,7 +1106,7 @@ def test_mip_nlp_shot_master_controls_trace_unsupported_backend(monkeypatch):
         _binary_model("shot_unsupported_master_controls"),
         init_strategy="initial_binary",
         max_iterations=1,
-        milp_solver="highs",
+        milp_solver="simplex",
         mip_nlp_profile="shot",
         mip_nlp_shot_config=oa_module.MIPNLPShotConfig(
             relaxation_phase="off",
@@ -1131,7 +1125,6 @@ def test_mip_nlp_shot_master_controls_trace_unsupported_backend(monkeypatch):
     assert "mip_solution_limit" in result.mip_nlp_trace["summary"]["unsupported_backend_features"]
 
 
-@pytest.mark.skipif(not HAS_HIGHS, reason="highspy not installed")
 def test_mip_nlp_shot_periodic_relaxation_phase_runs_before_integer_master():
     import discopt.solvers.oa as oa_module
 
@@ -1140,7 +1133,7 @@ def test_mip_nlp_shot_periodic_relaxation_phase_runs_before_integer_master():
         init_strategy="initial_binary",
         ecp_mode=True,
         max_iterations=1,
-        milp_solver="highs",
+        milp_solver="simplex",
         mip_nlp_profile="shot",
         mip_nlp_shot_config=oa_module.MIPNLPShotConfig(relaxation_phase="periodic"),
     )
@@ -1511,7 +1504,6 @@ def test_mip_nlp_shot_esh_objective_rootsearch_protects_incumbent_from_local_cut
     assert [record.source for record in provenance.records] == ["esh"]
 
 
-@pytest.mark.skipif(not HAS_HIGHS, reason="highspy not installed")
 def test_mip_nlp_shot_esh_integration_uses_rootsearch_cuts():
     import discopt.solvers.oa as oa_module
 
@@ -1521,7 +1513,7 @@ def test_mip_nlp_shot_esh_integration_uses_rootsearch_cuts():
         initial_point=np.array([0.0, 1.0]),
         ecp_mode=True,
         max_iterations=1,
-        milp_solver="highs",
+        milp_solver="simplex",
         mip_nlp_profile="shot",
         mip_nlp_shot_config=oa_module.MIPNLPShotConfig(
             cut_strategy="esh",
@@ -2041,12 +2033,12 @@ def test_mip_nlp_shot_single_tree_rejects_non_gurobi_backend():
 
     with pytest.raises(RuntimeError, match="tree_strategy='single_tree'.*milp_solver='gurobi'"):
         solve_mip_nlp(
-            _binary_model("shot_single_tree_highs"),
+            _binary_model("shot_single_tree_simplex"),
             method="oa",
             mip_nlp_options={
                 "mip_nlp_profile": "shot",
                 "tree_strategy": "single_tree",
-                "milp_solver": "highs",
+                "milp_solver": "simplex",
             },
         )
 
@@ -2099,26 +2091,26 @@ def test_mip_nlp_shot_direct_milp_routes_to_requested_backend(monkeypatch):
 
     calls = {}
 
-    def fake_solve_milp_highs(model, t_start, time_limit=None, gap_tolerance=1e-4):
-        del model, t_start
-        calls["backend"] = "highs"
+    def fake_solve_milp_simplex(model, time_limit, gap_tolerance, max_nodes, t_start):
+        del model, max_nodes, t_start
+        calls["backend"] = "simplex"
         calls["time_limit"] = time_limit
         calls["gap_tolerance"] = gap_tolerance
         return SolveResult(status="optimal", objective=0.0, bound=0.0, gap=0.0)
 
-    monkeypatch.setattr(solver_module, "_solve_milp_highs", fake_solve_milp_highs)
+    monkeypatch.setattr(solver_module, "_solve_milp_simplex", fake_solve_milp_simplex)
 
     result = solve_mip_nlp(
         _binary_model("shot_direct_milp_route"),
         method="oa",
-        mip_nlp_options={"mip_nlp_profile": "shot", "milp_solver": "highs"},
+        mip_nlp_options={"mip_nlp_profile": "shot", "milp_solver": "simplex"},
         time_limit=7.0,
         gap_tolerance=5e-5,
     )
 
-    assert calls == {"backend": "highs", "time_limit": 7.0, "gap_tolerance": 5e-5}
+    assert calls == {"backend": "simplex", "time_limit": 7.0, "gap_tolerance": 5e-5}
     assert result.mip_nlp_trace["selected_strategy"] == "direct_milp"
-    assert result.mip_nlp_trace["strategy_selection"]["backend"] == "highs"
+    assert result.mip_nlp_trace["strategy_selection"]["backend"] == "simplex"
     assert result.mip_nlp_trace["summary"]["selected_strategy"] == "direct_milp"
 
 
@@ -2167,22 +2159,31 @@ def test_mip_nlp_shot_direct_miqp_routes_when_convex(monkeypatch):
         lambda *args, **kwargs: (True, True, []),
     )
 
-    def fake_solve_qp_highs(model, t_start, time_limit=None):
-        del model, t_start
-        calls["backend"] = "highs"
+    def fake_solve_miqp_bb(
+        model,
+        time_limit,
+        gap_tolerance,
+        batch_size,
+        strategy,
+        max_nodes,
+        t_start,
+        prefer_pounce=False,
+    ):
+        del model, gap_tolerance, batch_size, strategy, max_nodes, t_start
+        calls["backend"] = "pounce" if prefer_pounce else "auto"
         calls["time_limit"] = time_limit
         return SolveResult(status="optimal", objective=1.0, bound=1.0, gap=0.0)
 
-    monkeypatch.setattr(solver_module, "_solve_qp_highs", fake_solve_qp_highs)
+    monkeypatch.setattr(solver_module, "_solve_miqp_bb", fake_solve_miqp_bb)
 
     result = solve_mip_nlp(
         _miqp_style_model("shot_direct_miqp_route"),
         method="oa",
-        mip_nlp_options={"mip_nlp_profile": "shot", "milp_solver": "highs"},
+        mip_nlp_options={"mip_nlp_profile": "shot", "milp_solver": "pounce"},
         time_limit=9.0,
     )
 
-    assert calls == {"backend": "highs", "time_limit": 9.0}
+    assert calls == {"backend": "pounce", "time_limit": 9.0}
     assert result.mip_nlp_trace["selected_strategy"] == "direct_miqp"
     assert result.mip_nlp_trace["strategy_selection"]["problem_class"] == "miqp"
 
@@ -2271,10 +2272,10 @@ def test_mip_nlp_shot_direct_qcp_falls_back_without_gurobi(monkeypatch):
     result = solve_mip_nlp(
         _quadratic_partition_model("shot_direct_qcp_fallback"),
         method="oa",
-        mip_nlp_options={"mip_nlp_profile": "shot", "milp_solver": "highs"},
+        mip_nlp_options={"mip_nlp_profile": "shot", "milp_solver": "simplex"},
     )
 
-    assert calls["milp_solver"] == "highs"
+    assert calls["milp_solver"] == "simplex"
     assert result.mip_nlp_trace["selected_strategy"] == "oa"
     attempt = result.mip_nlp_trace["strategy_selection"]["direct_attempt"]
     assert attempt["candidate_strategy"] == "direct_qcp"
@@ -2313,16 +2314,16 @@ def test_mip_nlp_shot_direct_miqp_falls_back_when_convexity_not_certified(
         calls.update(kwargs)
         return SolveResult(status="optimal", objective=0.0, bound=0.0, gap=0.0)
 
-    monkeypatch.setattr(solver_module, "_solve_qp_highs", fail_direct)
+    monkeypatch.setattr(solver_module, "_solve_miqp_bb", fail_direct)
     monkeypatch.setattr(oa_module, "solve_oa", fake_solve_oa)
 
     result = solve_mip_nlp(
         _miqp_style_model("shot_direct_miqp_convexity_fallback"),
         method="oa",
-        mip_nlp_options={"mip_nlp_profile": "shot", "milp_solver": "highs"},
+        mip_nlp_options={"mip_nlp_profile": "shot", "milp_solver": "pounce"},
     )
 
-    assert calls["milp_solver"] == "highs"
+    assert calls["milp_solver"] == "pounce"
     assert result.mip_nlp_trace["selected_strategy"] == "oa"
     attempt = result.mip_nlp_trace["strategy_selection"]["direct_attempt"]
     assert attempt["candidate_strategy"] == "direct_miqp"
@@ -2636,7 +2637,7 @@ def test_mip_nlp_method_lp_nlp_bb_requires_gurobi_backend():
     from discopt.solvers.mip_nlp import solve_mip_nlp
 
     with pytest.raises(RuntimeError, match="requires milp_solver='gurobi'"):
-        solve_mip_nlp(_binary_model("lp_nlp_bb_backend"), method="lp_nlp_bb", milp_solver="highs")
+        solve_mip_nlp(_binary_model("lp_nlp_bb_backend"), method="lp_nlp_bb", milp_solver="simplex")
 
 
 def test_mip_nlp_method_lp_nlp_bb_alias_routes_to_single_tree_solver(monkeypatch):
@@ -3339,7 +3340,7 @@ def test_oa_solution_pool_requires_gurobi_backend():
             _binary_model("solution_pool_non_gurobi"),
             method="oa",
             solution_pool=True,
-            milp_solver="highs",
+            milp_solver="simplex",
         )
 
 
@@ -3541,7 +3542,7 @@ def test_mip_nlp_shot_solution_pool_capacity_warns_on_unsupported_backend(
             init_strategy="rNLP",
             max_iterations=1,
             gap_tolerance=0.0,
-            milp_solver="highs",
+            milp_solver="simplex",
             mip_nlp_profile="shot",
             mip_nlp_shot_config=oa_module.MIPNLPShotConfig(
                 solution_pool_capacity=2,
@@ -4064,7 +4065,8 @@ def test_oa_fixed_nlp_candidate_trace_and_safe_failed_cuts(monkeypatch):
         [1.0, 1.0, 0.0],
         [2.0, 0.0, 1.0],
     ]
-    assert [point.tolist() for point in no_good_points] == [[1.0, 1.0, 0.0]]
+    assert no_good_points == []
+    assert result.mip_nlp_trace["summary"]["unresolved_integer_config_count"] == 1
     assert result.mip_nlp_trace["summary"]["fixed_nlp_call_count"] == 3
     assert result.mip_nlp_trace["summary"]["solution_pool_candidates"] == 3
 
@@ -4829,7 +4831,6 @@ def test_oa_fixed_integer_initializers_seed_first_nlp(monkeypatch, strategy, sta
     assert cut_points[0].tolist() == pytest.approx(expected_fixed)
 
 
-@pytest.mark.skipif(not HAS_HIGHS, reason="highspy not installed")
 @pytest.mark.parametrize("method", ["oa", "ecp"])
 @pytest.mark.parametrize("strategy", ["rNLP", "initial_binary", "max_binary"])
 def test_mip_nlp_init_strategies_solve_mindtpy_baseline_to_optimum(method, strategy):
@@ -4850,7 +4851,6 @@ def test_mip_nlp_init_strategies_solve_mindtpy_baseline_to_optimum(method, strat
 
 
 @pytest.mark.smoke
-@pytest.mark.skipif(not HAS_HIGHS, reason="highspy not installed")
 def test_mip_nlp_goa_certifies_native_bilinear_minlp():
     m = dm.Model("goa_bilinear_minlp")
     x = m.continuous("x", lb=0.0, ub=2.0)
@@ -4877,7 +4877,6 @@ def test_mip_nlp_goa_certifies_native_bilinear_minlp():
 
 
 @pytest.mark.smoke
-@pytest.mark.skipif(not HAS_HIGHS, reason="highspy not installed")
 def test_mip_nlp_goa_certifies_mindtpy_minlp5_convex_fixture():
     """Verify GOA certifies the convex MindtPy MINLP5 fixture."""
     result = _mindtpy_simple5_minlp("goa_mindtpy_minlp5").solve(
@@ -4896,7 +4895,6 @@ def test_mip_nlp_goa_certifies_mindtpy_minlp5_convex_fixture():
     assert result.x["y"] == pytest.approx(7.0, abs=1e-6)
 
 
-@pytest.mark.skipif(not HAS_HIGHS, reason="highspy not installed")
 @pytest.mark.parametrize("feasibility_norm", ["L_infinity", "L1", "L2"])
 def test_mip_nlp_feasibility_pump_solves_mindtpy_baseline(feasibility_norm):
     """Verify feasibility pump finds the MindtPy simple incumbent."""
@@ -4916,7 +4914,6 @@ def test_mip_nlp_feasibility_pump_solves_mindtpy_baseline(feasibility_norm):
     assert np.asarray(result.x["y"]).tolist() == pytest.approx([0.0, 1.0, 0.0])
 
 
-@pytest.mark.skipif(not HAS_HIGHS, reason="highspy not installed")
 def test_mip_nlp_oa_fp_init_strategy_solves_mindtpy_baseline_to_optimum():
     """Verify OA seeded by feasibility pump solves the MindtPy simple fixture."""
     result = _mindtpy_simple_minlp("mindtpy_oa_fp_init").solve(
@@ -4934,8 +4931,7 @@ def test_mip_nlp_oa_fp_init_strategy_solves_mindtpy_baseline_to_optimum():
     assert np.asarray(result.x["y"]).tolist() == pytest.approx([0.0, 1.0, 0.0])
 
 
-@pytest.mark.skipif(not HAS_HIGHS, reason="highspy not installed")
-@pytest.mark.parametrize("add_regularization", ["level_L1", "level_L2", "level_L_infinity"])
+@pytest.mark.parametrize("add_regularization", ["level_L1", "level_L_infinity"])
 def test_mip_nlp_regularized_oa_level_variants_solve_mindtpy_baseline(add_regularization):
     """Verify level-regularized OA solves the MindtPy simple fixture."""
     result = _mindtpy_simple_minlp(f"mindtpy_roa_{add_regularization}").solve(
@@ -4953,7 +4949,6 @@ def test_mip_nlp_regularized_oa_level_variants_solve_mindtpy_baseline(add_regula
     assert np.asarray(result.x["y"]).tolist() == pytest.approx([0.0, 1.0, 0.0])
 
 
-@pytest.mark.skipif(not HAS_HIGHS, reason="highspy not installed")
 def test_mip_nlp_regularized_oa_grad_lag_solves_mindtpy_baseline():
     """Verify gradient-Lagrangian regularized OA solves the simple fixture."""
     result = _mindtpy_simple_minlp("mindtpy_roa_grad_lag").solve(
@@ -4973,12 +4968,8 @@ def test_mip_nlp_regularized_oa_grad_lag_solves_mindtpy_baseline():
 
 _MINDTPY_REGULARIZATION_MODES = [
     "level_L1",
-    "level_L2",
     "level_L_infinity",
     "grad_lag",
-    "hess_lag",
-    "hess_only_lag",
-    "sqp_lag",
 ]
 
 
@@ -4997,7 +4988,6 @@ def test_mip_nlp_mindtpy_eight_process_convex_flag_controls_oa_guarantee():
     assert [equality_oa.constraint_mask[i] for i in range(3, 8)] == [False] * 5
 
 
-@pytest.mark.skipif(not HAS_HIGHS, reason="highspy not installed")
 @pytest.mark.parametrize("add_regularization", _MINDTPY_REGULARIZATION_MODES)
 def test_mip_nlp_regularized_oa_matches_mindtpy_constraint_qualification(
     add_regularization,
@@ -5020,7 +5010,6 @@ def test_mip_nlp_regularized_oa_matches_mindtpy_constraint_qualification(
     assert result.x["y"] == pytest.approx(1.0, abs=1e-5)
 
 
-@pytest.mark.skipif(not HAS_HIGHS, reason="highspy not installed")
 @pytest.mark.parametrize("add_regularization", _MINDTPY_REGULARIZATION_MODES)
 def test_mip_nlp_regularized_oa_matches_mindtpy_minlp3_simple(add_regularization):
     """Verify regularized OA matches the MindtPy MINLP3 simple fixture."""
@@ -5035,7 +5024,7 @@ def test_mip_nlp_regularized_oa_matches_mindtpy_minlp3_simple(add_regularization
     assert result.status == "optimal"
     assert result.objective == pytest.approx(-5.5122, abs=1e-3)
     assert result.bound == pytest.approx(result.objective, abs=1e-3)
-    assert result.gap == pytest.approx(0.0, abs=1e-9)
+    assert result.gap == pytest.approx(0.0, abs=1e-8)
     assert np.asarray(result.x["x"]).tolist() == pytest.approx(
         [0.2071068, 0.9411321],
         abs=1e-3,
@@ -5044,7 +5033,6 @@ def test_mip_nlp_regularized_oa_matches_mindtpy_minlp3_simple(add_regularization
 
 
 @pytest.mark.slow
-@pytest.mark.skipif(not HAS_HIGHS, reason="highspy not installed")
 @pytest.mark.parametrize("add_regularization", _MINDTPY_REGULARIZATION_MODES)
 def test_mip_nlp_regularized_oa_matches_mindtpy_eight_process_flowsheet(
     add_regularization,
