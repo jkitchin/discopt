@@ -117,11 +117,22 @@ structural proofs, not tuning failures). No heuristic work reaches them.
      (~60–80 integer instances, cap-off vs cap-on) flips
      `DISCOPT_ILS_SOLVE_CAP` default if **0 incumbents lost**; keep `=0` as
      the escape hatch. Expected: integer class 2.5–3× by default.
-  2. **G1.2 stand up the nightly graduation gate**: a scheduled run of
-     `generality_sweep.py` (N≈100 held-out, seeded) + the cert panel +
-     `incorrect_count = 0`, with per-flag ON arms. Three consecutive green →
-     a flag is *eligible*; flips happen in reviewed PRs. Without this, stop
-     shipping default-OFF flags at all.
+  2. **G1.2 stand up the nightly graduation gate** — **DONE** (see
+     `docs/dev/flag-graduation-protocol.md`). `generality_sweep.py` now has
+     per-flag `ARMS` (each parked flag isolated, everything else default-OFF —
+     the isolation the N=20 pilot lacked) + `run_arm`/`arm_stats`;
+     `graduation_gate.py` is the wrapper: per flag it runs the held-out arm +
+     the cert-panel neutrality check (fresh subprocess with the flag ON) +
+     `incorrect_count = 0`/no-oracle-cross, emits a machine-readable verdict
+     (`{flag, eligible, benefit_fraction, regression_rate, soundness_ok,
+     cert_neutral, notes}`), and appends it to
+     `docs/dev/data/graduation-ledger.jsonl` so 3-consecutive-green is
+     checkable. Corpus honesty (§4): the full held-out gate runs locally on a
+     corpus machine (`make graduation-gate` / documented cron); GitHub CI runs
+     only the cert-neutrality + `incorrect_count` subset over the vendored 61
+     panel (`.github/workflows/graduation-gate.yml`, `--ci-subset`). Three
+     consecutive green → a flag is *eligible*; flips happen in reviewed PRs.
+     Without this, stop shipping default-OFF flags at all.
   3. **G1.3 PSD gate → default-ON** after its single-flag arm is clean
      (its 10 % regression rate must be re-measured in isolation — the pilot
      bundled it with R2; nvs13 19→49-node regression is the known cost).
