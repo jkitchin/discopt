@@ -185,6 +185,28 @@ class SolverTuning:
     improvement ``Δ ≤ tau × (1 + |lb_before|)`` abandons the remaining rounds at
     that node. Only consulted when :attr:`square_cost_gate` is on."""
 
+    # --- root-cut-pool inheritance (THRU-4, default OFF) -----------------------
+    cut_inherit: bool = field(
+        default_factory=lambda: _env_flag("DISCOPT_CUT_INHERIT", default=False)
+    )
+    """Root-cut-pool inheritance for the per-node square/PSD separation loops
+    (``DISCOPT_CUT_INHERIT``, default **OFF**). THRU-3 measured that the two
+    per-node point separators — the univariate-square tangent loop and the PSD
+    (moment) loop — are the dominant per-node cost on dense integer QPs (nvs24:
+    73% + 12% of the solve wall), each re-deriving cuts via up to 8 full MILP
+    re-solves at EVERY node; with both off, nvs24 runs 9→309 nodes (36×) with
+    the dual bound at TL essentially unchanged. When on, the root separates the
+    full cut chain ONCE (unchanged root behaviour), the accepted rows are stored
+    in the root cut pool, and every node *inherits* the pool instead of
+    re-running the square/PSD separation loops. SOUND: the inherited square
+    tangents (``s ≥ 2·x0·x − x0²``) and PSD eigencuts (``vᵀMv ≥ 0``) are valid at
+    every feasible lifted point independent of the node box, and every other
+    captured family is valid over the ROOT box, hence over every descendant
+    sub-box; skipping per-node re-separation only *loosens* the node relaxation
+    (never cuts a feasible point). See
+    ``docs/dev/thru4-cut-inheritance-2026-07-07.md`` for the per-family validity
+    classification and measurements."""
+
     # --- branch-and-bound / bound levers --------------------------------------
     alphabb_with_lp: bool = field(
         default_factory=lambda: _env_flag("DISCOPT_ALPHABB_WITH_LP", default=False)

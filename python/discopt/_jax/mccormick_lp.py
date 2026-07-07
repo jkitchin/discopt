@@ -260,6 +260,18 @@ class MccormickLPRelaxer:
         # (budget or diminishing-returns early-exit). Pure instrumentation; used to
         # prove the default-OFF gate actually engages. Zero on the default path.
         self._square_gate_fires: int = 0
+        # Root-cut-pool inheritance counters (THRU-4, ``DISCOPT_CUT_INHERIT``).
+        # Pure instrumentation — never affects control flow or the emitted cuts:
+        #   * inherited_nodes / inherited_rows: node solves that appended the
+        #     root pool (and how many rows in total), across the cold AND fast
+        #     paths;
+        #   * skipped_separations: node solves where the square/PSD point
+        #     separators were skipped in favour of the inherited pool.
+        self._pool_stats: dict[str, int] = {
+            "inherited_nodes": 0,
+            "inherited_rows": 0,
+            "skipped_separations": 0,
+        }
         # Spatial-BB uses standard McCormick globally — no partitioning here.
         self._disc = DiscretizationState(partitions={})
         self._n_orig = sum(v.size for v in model._variables)
@@ -476,6 +488,8 @@ class MccormickLPRelaxer:
                         and len(b_rows) == a_rows.shape[0]
                     ):
                         cut_rows = list(zip(a_rows, b_rows))
+                        self._pool_stats["inherited_nodes"] += 1
+                        self._pool_stats["inherited_rows"] += len(cut_rows)
             A, b, bounds = inc.assemble(lb, ub, cut_rows=cut_rows)
             nrows = int(A.shape[0])
             # Densification guard (Issue #20), same cap as the cold path below.
@@ -663,6 +677,7 @@ class MccormickLPRelaxer:
         out_cuts: Optional[list] = None,
         psd_max_rounds: int = 8,
         want_marginals: bool = False,
+        skip_pool_separators: bool = False,
     ) -> MccormickLPResult:
         """Solve the McCormick LP relaxation restricted to the given bound box.
 
@@ -683,6 +698,17 @@ class MccormickLPRelaxer:
         * ``out_cuts``: when a list is supplied, the rows the separation chain
           appended at THIS call are pushed onto it as ``(A_rows, b_rows)`` — used
           to capture the root pool once and replay it at every node.
+        * ``skip_pool_separators``: skip ONLY the two point-separation loops the
+          root pool already covers — the univariate-square tangent loop and the
+          PSD (moment) loop — while keeping the rest of the chain. Set by the
+          driver at non-pool node solves under ``DISCOPT_CUT_INHERIT`` (THRU-4):
+          those loops each re-derive the pool's cut families via up to 8 full
+          MILP re-solves per node (73% + 12% of the nvs24 solve wall, THRU-3),
+          and every cut they emit is valid independent of the node box (a square
+          tangent under-estimates ``x**2`` everywhere; a PSD eigencut
+          ``vᵀMv ≥ 0`` holds wherever ``X = x xᵀ``), so the inherited root pool
+          already supplies the family and skipping re-separation only *loosens*
+          this node's relaxation — never cuts a feasible point.
         """
         # Phase-B fast path: incremental patch + warm-started solve, reusing the
         # structure built once at construction instead of a per-node cold rebuild +
@@ -844,6 +870,8 @@ class MccormickLPRelaxer:
             _ia, _ib = inherited_cuts
             if _ia is not None and _sparse_cols(_ia) == n_total:
                 _append_relax_rows(milp, _ia, _ib)
+                self._pool_stats["inherited_nodes"] += 1
+                self._pool_stats["inherited_rows"] += _sparse_rows(_ia)
         _n_base_rows = 0 if milp._A_ub is None else _sparse_rows(milp._A_ub)
 
         res = milp.solve(time_limit=_remaining(), backend=self._backend)
@@ -866,9 +894,17 @@ class MccormickLPRelaxer:
             # Univariate squares ``s = x**2``: the static envelope cuts only at the
             # box endpoints, so deep inside a wide box the convex underestimator is
             # slack. Add the exact supporting tangent at the LP point each round.
-            _t = time.perf_counter()
-            res = self._separate_univariate_square(milp, varmap, res, _deadline)
-            _st["univariate_square"] += time.perf_counter() - _t
+            # Under root-pool inheritance (THRU-4, ``skip_pool_separators``) the
+            # inherited pool already carries the root's tangents and this loop —
+            # up to 8 full MILP re-solves — is skipped; every tangent is a global
+            # underestimator of ``x**2``, so the pool rows stay valid on any
+            # sub-box and skipping only loosens the node bound (sound).
+            if skip_pool_separators:
+                self._pool_stats["skipped_separations"] += 1
+            else:
+                _t = time.perf_counter()
+                res = self._separate_univariate_square(milp, varmap, res, _deadline)
+                _st["univariate_square"] += time.perf_counter() - _t
             # Convex/concave composite lifts (#358): add the exact supporting
             # hyperplane at the LP point, closing the gap the fixed reference-point
             # gradient cuts leave. Inert unless the convex claimer lifted a node.
@@ -877,10 +913,14 @@ class MccormickLPRelaxer:
             _st["convex"] += time.perf_counter() - _t
             # PSD (moment) cuts: enforce M = [[1,x^T],[x,X]] >= 0 over fully-lifted
             # cliques. Each cut v^T M v >= 0 is valid for every feasible point
-            # (X = x x^T), so adding them only tightens the bound.
-            _t = time.perf_counter()
-            res = self._separate_psd(milp, varmap, res, _deadline, max_rounds=psd_max_rounds)
-            _st["psd"] += time.perf_counter() - _t
+            # (X = x x^T), so adding them only tightens the bound. Skipped under
+            # root-pool inheritance (THRU-4): the eigencuts are valid wherever the
+            # lifting relations hold — independent of the node box — so the
+            # inherited root pool already supplies the family.
+            if not skip_pool_separators:
+                _t = time.perf_counter()
+                res = self._separate_psd(milp, varmap, res, _deadline, max_rounds=psd_max_rounds)
+                _st["psd"] += time.perf_counter() - _t
             # Targeted RLT (constraint-factor x bound-factor) cuts.
             _t = time.perf_counter()
             res = self._separate_rlt(milp, varmap, res, _deadline)
