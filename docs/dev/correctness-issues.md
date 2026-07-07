@@ -90,6 +90,7 @@ in non-default configs; loud ingestion gaps. **P3** = hygiene.
 | C-17 | P0 | alphaBB bound | node bound uses sampled (non-rigorous) α + center-only PSD check → false "optimal", default path for small nonconvex; deterministic repro confirms (spike width ≤ 0.006 → α=0, bound 0.0, true min −3.5) | fixed |
 | C-13 | P0 | solver.py bounds | serial convex path trusts under-converged NLP objective as node lower bound → false "optimal" | fixed |
 | C-1 | P0 | solver.py status | false "infeasible" from non-rigorous NLP fathoms (solve_model path) | fixed |
+| C-38 | P0 | bounding/QCP | `kall_circles_c8a` certified `optimal` obj=3.6142 (bound=3.6142, 3 nodes) when the true optimum is 2.5409 — a false-optimal certificate on the DEFAULT (all-flags-OFF) path; surfaced by the G1.3 graduation gate (2026-07-07) | open |
 | C-4 | P1 | mir.rs cuts | integer-MIR applied with fractional integer lower bound → invalid cut | fixed |
 | C-2 | P1 | milp_driver status | false "Infeasible" when deadline orphans deferred nodes | fixed |
 | C-19 | P1 | relax_tan | pole-straddling interval classified as one branch → secant across a pole, invalid envelope | fixed |
@@ -2681,3 +2682,43 @@ then `None` (no certified global bound), never 5.32.
   (the `1e30` sentinel → `None` at the callback boundary) is complementary and
   already partly covered here (the sentinel branch of the helper); A2 remains a
   separate PR for the full no-relaxation-class audit of `best_bound` consumers.
+
+## C-38 (P0, OPEN) — `kall_circles_c8a` certified false-optimal on the DEFAULT path
+
+**Area:** bounding / spatial B&B on QCP (circle-packing), all flags OFF.
+
+**Surfaced by:** the G1.3–G1.5 flag-graduation gate run (2026-07-07,
+`docs/dev/flag-graduation-run-2026-07-07.md`). `kall_circles_c8a` was the sole
+held-out instance flagging a soundness violation, and it did so **in every arm,
+with the flag-ON solve byte-identical to the flag-OFF control** — i.e. the fault
+is the OFF (default) path, not any parked flag.
+
+**Reproduce/confirm:**
+```
+DISCOPT_* all default (OFF)
+python -c "from discopt.modeling.core import from_nl; \
+  r=from_nl('kall_circles_c8a.nl').solve(time_limit=25, gap_tolerance=1e-4); \
+  print(r.status, r.objective, r.bound, r.node_count)"
+# -> optimal  3.6142347590  3.6142347420  3
+```
+MINLPLib oracle: `=best= 2.5409191380`, `=bestdual= 2.5409129340`. discopt
+certifies `optimal` at obj = **3.6142** with dual bound **3.6142** in **3 nodes** —
+both the incumbent and the dual bound sit ~42 % **above** the true optimum 2.5409.
+A dual bound that exceeds the true minimum is an invalid underestimator (certificate
+invariant `bound ≤ true_opt` violated), and the reported optimum is wrong. This is
+a genuine false-optimality certificate on the default serial path.
+
+**Why P0:** wrong certified answer in the default configuration (CLAUDE.md §1;
+the P0 bar is "can report a wrong certified answer in a reachable configuration").
+
+**Not fixed here.** Out of scope for the G1 graduation task (this is a
+default-path bounding bug, present with every flag OFF, likely in the QCP
+McCormick/RLT + node-bound machinery for this circle-packing structure — a
+bounding-strength / node-bound-validity issue, not a heuristic flag). It is
+recorded here so it is tracked, and it is a **blocker for graduating any of the
+five bound-changing flags**: the held-out arm's soundness check runs on the shared
+OFF control too, so this contamination forces `soundness_ok=False` on every arm
+until it is fixed. Confirmed independent of the flags: `psd_cost_gate`,
+`lift_zero_spanning`, and `lift_loose_products` each reproduce the *identical*
+false-optimal (obj 3.6142, 3 nodes), and `root_fixpoint`/`node_reduce` change only
+node_count/status without curing the wrong bound.
