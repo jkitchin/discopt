@@ -91,6 +91,7 @@ in non-default configs; loud ingestion gaps. **P3** = hygiene.
 | C-13 | P0 | solver.py bounds | serial convex path trusts under-converged NLP objective as node lower bound → false "optimal" | fixed |
 | C-1 | P0 | solver.py status | false "infeasible" from non-rigorous NLP fathoms (solve_model path) | fixed |
 | C-38 | P0 | bounding/QCP | `kall_circles_c8a` certified `optimal` obj=3.6142 (bound=3.6142, 3 nodes) when the true optimum is 2.5409 — a false-optimal certificate on the DEFAULT (all-flags-OFF) path; surfaced by the G1.3 graduation gate (2026-07-07) | **fixed** (`docs/dev/c38-fix-2026-07-07.md`): McCormick-LP `infeasible` now fathoms only on a verified Farkas ray; uncertified false-infeasible no longer prunes the optimum-containing node |
+| C-40 | P0 | presolve/cutoff-FBBT | `util` (MBQCP) certified `optimal` obj=1072.96 (bound=1072.96, 3 nodes) when the true optimum is 999.58 — a false-optimal certificate on the DEFAULT (all-flags-OFF) path; distinct mechanism from C-38 (Farkas fix already present) | **fixed** (`docs/dev/c40-fix-2026-07-07.md`): the incumbent-cutoff FBBT bound-map mis-indexed a `_model_repr` that returned 144 intervals for a 145-column flat model, wrote a **crossed** `lb>ub` global box in place, and swallowed the resulting OOB — the corrupted global box then emptied the optimum-containing child at the cutoff clamp (`solver.py:5527`) and fathomed it. Fix: apply cutoff-FBBT only on a provably 1:1-aligned repr (len==n_vars ∧ all-scalar blocks) and commit only a crossing-free intersection; a misaligned repr forgoes the optional tightening (valid, looser box) |
 | C-4 | P1 | mir.rs cuts | integer-MIR applied with fractional integer lower bound → invalid cut | fixed |
 | C-2 | P1 | milp_driver status | false "Infeasible" when deadline orphans deferred nodes | fixed |
 | C-19 | P1 | relax_tan | pole-straddling interval classified as one branch → secant across a pole, invalid envelope | fixed |
@@ -2737,3 +2738,49 @@ until it is fixed. Confirmed independent of the flags: `psd_cost_gate`,
 `lift_zero_spanning`, and `lift_loose_products` each reproduce the *identical*
 false-optimal (obj 3.6142, 3 nodes), and `root_fixpoint`/`node_reduce` change only
 node_count/status without curing the wrong bound.
+
+## C-40 (P0, FIXED — `docs/dev/c40-fix-2026-07-07.md`) — `util` (MBQCP) certified false-optimal on the DEFAULT path
+
+**Resolution (2026-07-07, branch `fix-c40-util`).** Root cause is a class-(b)
+unsound presolve/bound-tightening — distinct from C-38 (the McCormick-LP Farkas fix
+is already present; `util` still failed after it). `util` is MBQCP (145 vars, 28
+binary, four bilinear product constraints, linear objective); the DEFAULT path
+certified `status="optimal"` at `obj = bound = 1072.9614` in 3 nodes while the
+MINLPLib oracle is `=opt= 999.5787502` — the certified dual (lower) bound 1072.96
+exceeds a feasible objective, an impossible underestimator.
+
+Per-node trace: the root McCormick-LP bound on the OBBT-tightened box is a *valid*
+999.55, and the oracle point (obj 999.58, mapped via `util.col`) survives every
+root reduction. The tree branches the root (bound 943.66) into two children; both
+are reported to the Rust tree as `_INFEASIBILITY_SENTINEL` and fathomed, so the
+frontier dual bound collapses to the incumbent 1072.96 and the tree certifies
+`optimal`. The child containing the oracle is fathomed at
+`solver.py:5527` — the child-node cutoff clamp, which intersects each child box with
+the global `lb`/`ub` and fathoms an empty intersection. That global box was
+**corrupted**: `lb > ub` on ~17 variables (e.g. `lb[68]=104.22 > ub[68]=2.2`), so
+the intersection with the oracle-containing child (which has `x[68]=1.2` inside its
+own box) is empty.
+
+The corruption source is the per-incumbent **cutoff-FBBT** block (`solver.py`, the
+`_model_repr.fbbt_with_cutoff` phase). `fbbt_with_cutoff` returned **144** intervals
+while the flat B&B has **145** columns (a reformulated/eliminated repr layout); the
+block→flat map `fbbt_lbs[bi]` → `lb[flat_idx]` then read a *misaligned* variable's
+bound, wrote a crossed `lb>ub` box **in place**, and — with the write done in place
+and the resulting index-out-of-bounds swallowed by the surrounding `except` — left
+the global box corrupted.
+
+**Fix (general, no name/shape special-case).** Apply the *optional* cutoff-FBBT
+tightening only when the repr layout provably aligns 1:1 with the flat columns
+(exactly `n_vars` intervals AND every model block scalar), and commit only a
+crossing-free intersection (`max`/`min` into candidate arrays; commit only if no
+`lb>ub`). A misaligned repr forgoes the tightening — a valid, looser box, sound by
+construction (CLAUDE.md §3): never a lost bound, never a corrupted box, never a
+fathomed feasible region.
+
+**After:** `util` certifies `status="feasible"`, `bound≈999.28 ≤ 999.58` (valid
+underestimator), no false `optimal`. Regression test
+`python/tests/test_c40_util_false_optimal.py` (vendored `util.nl`, CI-visible)
+fails on `main` (bound 1072.96) and passes after. MBQCP/MIQCP/QCP-class scan
+(12 instances) shows no false optima. Note: the 144-vs-145 repr length is a latent
+`model_to_repr` layout divergence; the fix soundly guards around it — a follow-up
+to *restore* the tightening by aligning the repr layout is tracked in the fix doc.

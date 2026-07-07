@@ -7310,30 +7310,58 @@ def solve_model(
                         fbbt_lbs, fbbt_ubs = _model_repr.fbbt_with_cutoff(
                             max_iter=10, tol=1e-8, incumbent_bound=float(inc_obj)
                         )
-                        fbbt_lbs = np.asarray(fbbt_lbs)
-                        fbbt_ubs = np.asarray(fbbt_ubs)
-                        # Map per-block bounds to flat bounds array
-                        n_tightened = 0
-                        flat_idx = 0
-                        for bi, vinfo in enumerate(model._variables):
-                            if vinfo.size != 1:
-                                flat_idx += vinfo.size
-                                continue
-                            for j in range(vinfo.size):
-                                new_lo = fbbt_lbs[bi]
-                                new_hi = fbbt_ubs[bi]
-                                if new_lo > lb[flat_idx] + 1e-10:
-                                    lb[flat_idx] = new_lo
-                                    n_tightened += 1
-                                if new_hi < ub[flat_idx] - 1e-10:
-                                    ub[flat_idx] = new_hi
-                                    n_tightened += 1
-                                flat_idx += 1
-                        if n_tightened > 0:
-                            logger.info(
-                                "FBBT tightened %d bounds (incumbent=%.6g)",
-                                n_tightened,
-                                inc_obj,
+                        fbbt_lbs = np.asarray(fbbt_lbs, dtype=np.float64)
+                        fbbt_ubs = np.asarray(fbbt_ubs, dtype=np.float64)
+                        # C-40: apply cutoff-FBBT bounds only when the Rust repr's
+                        # variable layout provably aligns 1:1 with the flat B&B
+                        # columns — i.e. it returns exactly ``n_vars`` intervals and
+                        # every model block is scalar (block index == flat column).
+                        # ``_model_repr`` can carry a reformulated/eliminated variable
+                        # set whose length differs from ``model._variables`` (measured
+                        # 144 vs 145 on ``util``); the old ``fbbt_lbs[bi]`` → ``lb[flat]``
+                        # map then reads a *misaligned* variable's bound, writes a
+                        # crossed ``lb>ub`` box, and — with the write done in place and
+                        # the OOB swallowed — leaves the GLOBAL box corrupted. That
+                        # corrupted box empties the intersection at the child-node
+                        # cutoff clamp below, fathoming the optimum-containing node and
+                        # certifying a false optimal (C-40). Forgoing this *optional*
+                        # tightening on a misaligned repr keeps a valid, looser box —
+                        # sound by construction (CLAUDE.md §3), never a lost bound.
+                        _all_scalar = all(v.size == 1 for v in model._variables)
+                        _aligned = (
+                            fbbt_lbs.shape == (n_vars,)
+                            and fbbt_ubs.shape == (n_vars,)
+                            and _all_scalar
+                        )
+                        if _aligned:
+                            # Intersect into a candidate box; commit only if it stays
+                            # consistent (no crossed bound). FBBT lower bounds and
+                            # upper bounds are each valid, so ``max``/``min`` against
+                            # the current box only tightens — a crossing would mean the
+                            # region is empty under the cutoff, which the tree proves
+                            # via node relaxations, not via an in-place box write.
+                            cand_lb = np.maximum(lb, fbbt_lbs)
+                            cand_ub = np.minimum(ub, fbbt_ubs)
+                            if not np.any(cand_lb > cand_ub + 1e-9):
+                                n_tightened = int(
+                                    np.count_nonzero(cand_lb > lb + 1e-10)
+                                    + np.count_nonzero(cand_ub < ub - 1e-10)
+                                )
+                                lb = cand_lb
+                                ub = cand_ub
+                                if n_tightened > 0:
+                                    logger.info(
+                                        "FBBT tightened %d bounds (incumbent=%.6g)",
+                                        n_tightened,
+                                        inc_obj,
+                                    )
+                        else:
+                            logger.debug(
+                                "Cutoff-FBBT skipped: repr layout misaligned "
+                                "(returned %d intervals, flat n_vars=%d, all_scalar=%s)",
+                                fbbt_lbs.shape[0] if fbbt_lbs.ndim == 1 else -1,
+                                n_vars,
+                                _all_scalar,
                             )
                     except Exception as e:
                         logger.debug("FBBT with cutoff failed: %s", e)
