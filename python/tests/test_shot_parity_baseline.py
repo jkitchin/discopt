@@ -4,6 +4,7 @@ from pathlib import Path
 
 
 def _load_baseline_module():
+    """Load the baseline script as a module for direct helper testing."""
     path = Path(__file__).resolve().parents[2] / "scripts" / "shot_parity_baseline.py"
     spec = importlib.util.spec_from_file_location("shot_parity_baseline", path)
     module = importlib.util.module_from_spec(spec)
@@ -14,6 +15,7 @@ def _load_baseline_module():
 
 
 def test_shot_parity_fixture_set_covers_issue_acceptance_classes():
+    """Verify the fixture set covers the issue's accepted problem classes."""
     module = _load_baseline_module()
 
     fixtures = module.fixture_specs()
@@ -26,8 +28,14 @@ def test_shot_parity_fixture_set_covers_issue_acceptance_classes():
     assert any(f.expected_certification == "heuristic" for f in fixtures)
     assert all("time_limit" in fixture.solve_options for fixture in fixtures)
 
+    by_key = {fixture.key: fixture for fixture in fixtures}
+    assert by_key["convex_minlp"].solve_options["mip_nlp_profile"] == "shot"
+    assert by_key["convex_minlp"].solve_options["direct_quadratic_routing"] == "off"
+    assert by_key["miqp"].solve_options["mip_nlp_profile"] == "shot"
+
 
 def test_shot_unavailable_result_records_explicit_caveat(tmp_path):
+    """Verify unavailable SHOT rows preserve the diagnostic caveat."""
     module = _load_baseline_module()
 
     result = module.unavailable_shot_result("not built", tmp_path / "SHOT")
@@ -40,6 +48,7 @@ def test_shot_unavailable_result_records_explicit_caveat(tmp_path):
 
 
 def test_collect_baseline_empty_selection_has_stable_schema(tmp_path):
+    """Verify empty fixture selections still emit a stable baseline schema."""
     module = _load_baseline_module()
 
     baseline = module.collect_baseline(
@@ -56,6 +65,7 @@ def test_collect_baseline_empty_selection_has_stable_schema(tmp_path):
 
 
 def test_shot_status_does_not_treat_optimality_caveat_as_optimal():
+    """Verify SHOT caveats keep feasible results uncertified."""
     module = _load_baseline_module()
     output = """
     Feasible primal solution found to convex problem.
@@ -73,6 +83,7 @@ def test_shot_status_does_not_treat_optimality_caveat_as_optimal():
 
 
 def test_shot_status_recognizes_global_optimality_report():
+    """Verify SHOT global optimality reports are parsed as certified."""
     module = _load_baseline_module()
     output = """
     Terminated since absolute gap met requirements.
@@ -91,6 +102,7 @@ def test_shot_status_recognizes_global_optimality_report():
 
 
 def test_shot_osrl_metrics_prefer_structured_bounds(tmp_path):
+    """Verify structured OSrL metrics are parsed for SHOT bounds and gaps."""
     module = _load_baseline_module()
     osrl_path = tmp_path / "result.osrl"
     osrl_path.write_text(

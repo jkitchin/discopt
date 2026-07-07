@@ -51,6 +51,7 @@ class Fixture:
 
 
 def _convex_nlp() -> dm.Model:
+    """Build the convex continuous NLP fixture."""
     m = dm.Model("shot_convex_nlp_quadratic")
     x = m.continuous("x", lb=0.0, ub=4.0)
     m.subject_to(x >= 0.25)
@@ -59,6 +60,7 @@ def _convex_nlp() -> dm.Model:
 
 
 def _convex_minlp() -> dm.Model:
+    """Build the convex binary MINLP fixture."""
     m = dm.Model("shot_convex_minlp_onoff")
     x = m.continuous("x", lb=0.0, ub=4.0)
     y = m.binary("y")
@@ -69,6 +71,7 @@ def _convex_minlp() -> dm.Model:
 
 
 def _miqp() -> dm.Model:
+    """Build the convex MIQP-style fixture."""
     m = dm.Model("shot_miqp_binary_quadratic")
     x = m.continuous("x", lb=0.0, ub=3.0)
     y = m.binary("y")
@@ -78,6 +81,7 @@ def _miqp() -> dm.Model:
 
 
 def _nonconvex_fp() -> dm.Model:
+    """Build the nonconvex feasibility-pump fixture."""
     m = dm.Model("shot_nonconvex_fp_uncertified")
     x = m.continuous("x", lb=0.0, ub=2.0)
     y = m.binary("y")
@@ -86,6 +90,7 @@ def _nonconvex_fp() -> dm.Model:
 
 
 def fixture_specs() -> list[Fixture]:
+    """Return the curated solver parity fixture definitions."""
     return [
         Fixture(
             key="convex_nlp",
@@ -108,6 +113,7 @@ def fixture_specs() -> list[Fixture]:
                 "solver": "mip-nlp",
                 "mip_nlp_method": "oa",
                 "mip_nlp_profile": "shot",
+                "direct_quadratic_routing": "off",
                 "time_limit": 30,
                 "max_nodes": 100,
             },
@@ -118,9 +124,14 @@ def fixture_specs() -> list[Fixture]:
             title="Convex MIQP-style model",
             problem_class="MIQP",
             convexity="convex",
-            intent="quadratic objective with one binary decision and direct routing pressure",
+            intent="SHOT-profile direct MIQP routing with one binary decision",
             builder=_miqp,
-            solve_options={"time_limit": 30, "max_nodes": 100},
+            solve_options={
+                "solver": "mip-nlp",
+                "mip_nlp_profile": "shot",
+                "time_limit": 30,
+                "max_nodes": 100,
+            },
             expected_certification="global",
         ),
         Fixture(
@@ -142,6 +153,7 @@ def fixture_specs() -> list[Fixture]:
 
 
 def _json_float(value: object) -> object:
+    """Convert numeric values to finite JSON scalars when possible."""
     if value is None:
         return None
     if isinstance(value, (int, str, bool)):
@@ -156,12 +168,14 @@ def _json_float(value: object) -> object:
 
 
 def _tail(text: str, limit: int = 4000) -> str:
+    """Return text unchanged or trimmed to its final limit characters."""
     if len(text) <= limit:
         return text
     return text[-limit:]
 
 
 def summarize_discopt_result(fixture: Fixture, result, elapsed: float) -> dict[str, object]:
+    """Serialize a discopt solve result into the baseline result schema."""
     payload = serialize_result(result)
     trace = payload.get("mip_nlp_trace") or {}
     bound_validity = trace.get("bound_validity")
@@ -193,6 +207,7 @@ def summarize_discopt_result(fixture: Fixture, result, elapsed: float) -> dict[s
 
 
 def run_discopt(fixture: Fixture) -> dict[str, object]:
+    """Solve one fixture with discopt and return a baseline result row."""
     model = fixture.builder()
     start = time.perf_counter()
     try:
@@ -216,6 +231,7 @@ def run_discopt(fixture: Fixture) -> dict[str, object]:
 
 
 def discover_shot_executable(explicit: str | None, shot_root: Path) -> str | None:
+    """Locate an executable SHOT binary from args, env, checkout, or PATH."""
     candidates: list[str | Path] = []
     if explicit:
         candidates.append(explicit)
@@ -242,6 +258,7 @@ def discover_shot_executable(explicit: str | None, shot_root: Path) -> str | Non
 
 
 def unavailable_shot_result(reason: str, shot_root: Path) -> dict[str, object]:
+    """Build the baseline row used when SHOT cannot be executed."""
     return {
         "backend": "SHOT",
         "available": False,
@@ -258,6 +275,7 @@ def unavailable_shot_result(reason: str, shot_root: Path) -> dict[str, object]:
 
 
 def _parse_shot_metric(patterns: Iterable[str], text: str) -> float | None:
+    """Return the first numeric SHOT metric matched by the regex patterns."""
     for pattern in patterns:
         match = re.search(pattern, text, flags=re.IGNORECASE)
         if match:
@@ -272,6 +290,7 @@ _SHOT_NUMBER = r"([-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?)"
 
 
 def _parse_shot_bound_pair(text: str) -> tuple[float | None, float | None]:
+    """Parse SHOT's stdout dual/primal objective bound pair."""
     match = re.search(
         rf"objective bound\s*\([^)]*\)\s*\[dual,\s*primal\]\s*:\s*"
         rf"\[\s*{_SHOT_NUMBER}\s*,\s*{_SHOT_NUMBER}\s*\]",
@@ -284,6 +303,7 @@ def _parse_shot_bound_pair(text: str) -> tuple[float | None, float | None]:
 
 
 def _parse_shot_gap_pair(text: str) -> tuple[float | None, float | None]:
+    """Parse SHOT's stdout absolute/relative objective gap pair."""
     match = re.search(
         rf"objective gap\s+absolute\s*/\s*relative\s*:\s*"
         rf"{_SHOT_NUMBER}\s*/\s*{_SHOT_NUMBER}",
@@ -296,6 +316,7 @@ def _parse_shot_gap_pair(text: str) -> tuple[float | None, float | None]:
 
 
 def _parse_shot_osrl_metrics(path: Path) -> dict[str, float]:
+    """Extract known SHOT certification metrics from an OSrL file."""
     if not path.exists():
         return {}
     try:
@@ -327,6 +348,7 @@ def _parse_shot_osrl_metrics(path: Path) -> dict[str, float]:
 
 
 def _shot_output_denies_optimality_proof(text: str) -> bool:
+    """Return whether SHOT output explicitly withholds optimality proof."""
     lowered = text.lower()
     return any(
         phrase in lowered
@@ -340,6 +362,7 @@ def _shot_output_denies_optimality_proof(text: str) -> bool:
 
 
 def _shot_output_reports_time_limit(text: str) -> bool:
+    """Return whether SHOT output reports time-limit termination."""
     lowered = text.lower()
     return any(
         phrase in lowered
@@ -355,6 +378,7 @@ def _shot_output_reports_time_limit(text: str) -> bool:
 
 
 def _parse_shot_status(text: str, returncode: int) -> str:
+    """Classify SHOT status from combined output and return code."""
     if returncode != 0:
         return "error"
     lowered = text.lower()
@@ -376,6 +400,7 @@ def _parse_shot_status(text: str, returncode: int) -> str:
 
 
 def _parse_shot_gap_certified(text: str, status: str, returncode: int) -> bool | None:
+    """Infer whether SHOT's parsed result carries a global gap certificate."""
     if returncode != 0:
         return False
     if _shot_output_denies_optimality_proof(text):
@@ -388,6 +413,7 @@ def _parse_shot_gap_certified(text: str, status: str, returncode: int) -> bool |
 
 
 def _shot_certification_caveat(gap_certified: bool | None) -> str:
+    """Describe the parsed SHOT certification state for the baseline row."""
     if gap_certified is True:
         return "SHOT reports a globally optimal primal solution; parsed from stdout/OSrL"
     if gap_certified is False:
@@ -401,6 +427,7 @@ def run_shot(
     shot_root: Path,
     workdir: Path,
 ) -> dict[str, object]:
+    """Export one fixture to NL, run SHOT, and parse its baseline row."""
     if executable is None:
         return unavailable_shot_result(
             "No built SHOT executable found. Set SHOT_EXECUTABLE or build the local checkout.",
@@ -514,6 +541,7 @@ def collect_baseline(
     shot_root: Path = Path("/home/bernalde/repos/SHOT"),
     workdir: Path | None = None,
 ) -> dict[str, object]:
+    """Run selected fixtures and return the full parity baseline document."""
     specs = fixture_specs()
     if fixture_keys is not None:
         unknown = sorted(fixture_keys - {fixture.key for fixture in specs})
@@ -562,6 +590,7 @@ def collect_baseline(
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
+    """Parse command-line options for baseline generation."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--output",
@@ -600,6 +629,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
 
 
 def main(argv: list[str] | None = None) -> int:
+    """Generate and write the SHOT parity baseline JSON file."""
     args = parse_args(sys.argv[1:] if argv is None else argv)
     keys = None
     if args.fixtures:

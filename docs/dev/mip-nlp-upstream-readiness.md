@@ -11,10 +11,14 @@ before opening the final upstream PR from `bernalde:feature/mip-nlp-solver` to
 - Child PR base: `bernalde:feature/mip-nlp-solver`.
 - Final upstream path: one later PR from `bernalde:feature/mip-nlp-solver` into
   `jkitchin:main`.
-- Current upstream baseline checked for this gate: `upstream/main` at `5d593ae`.
-- Fork `main` was synced with `upstream/main` by merge commit `35a63db`.
+- Current upstream baseline checked for this gate: `upstream/main` at
+  `4fd2d0e`.
+- Fork `main` was last synced with `upstream/main` by merge commit `35a63db`.
 - Integration branch includes that synced fork-main merge by merge commit
-  `14db514`.
+  `14db514` and currently points at `245a55a`.
+- `feature/mip-nlp-solver` does not yet contain current `upstream/main`
+  (`4fd2d0e`). Sync the integration branch with `jkitchin:main` before opening
+  the final upstream PR.
 
 ## Child issue disposition
 
@@ -30,6 +34,25 @@ before opening the final upstream PR from `bernalde:feature/mip-nlp-solver` to
 | #118 | Global OA routing | #129 | Merged into `feature/mip-nlp-solver` |
 | #119 | LP/NLP branch-and-bound method | #130 | Merged into `feature/mip-nlp-solver` |
 | #120 | MIP-NLP solution-pool support | #131 | Merged into `feature/mip-nlp-solver` |
+| #138 | SHOT parity audit and benchmark baseline | #155 | Merged into `feature/mip-nlp-solver` |
+| #139 | SHOT MIP-NLP profile and trace foundation | #154 | Merged into `feature/mip-nlp-solver` |
+| #140 | Unified MIP-NLP cut provenance | #156 | Merged into `feature/mip-nlp-solver` |
+| #141 | SHOT reformulation controls | #157 | Merged into `feature/mip-nlp-solver` |
+| #142 | Initial POA and relaxation-phase seeding | #158 | Merged into `feature/mip-nlp-solver` |
+| #143 | Interior-point and rootsearch services | #159 | Merged into `feature/mip-nlp-solver` |
+| #144 | ESH and objective-rootsearch hyperplanes | #160 | Merged into `feature/mip-nlp-solver` |
+| #145 | SHOT-style MultiTree master orchestration | #161 | Merged into `feature/mip-nlp-solver` |
+| #146 | Fixed-NLP candidate manager | #162 | Merged into `feature/mip-nlp-solver` |
+| #147 | General-integer no-good cuts and solution-pool parity | #165 | Merged into `feature/mip-nlp-solver` |
+| #148 | Master repair and nonconvex reduction cuts | #166 | Merged into `feature/mip-nlp-solver` |
+| #149 | Convex bounding master for nonconvex/local-cut runs | #167 | Merged into `feature/mip-nlp-solver` |
+| #150 | SingleTree callback parity | #168 | Merged into `feature/mip-nlp-solver` |
+| #151 | Direct NLP/LP/MILP/MIQP/QCP/MIQCQP routing | #169 | Merged into `feature/mip-nlp-solver` |
+| #152 | External MIP-NLP event hooks | #170 | Merged into `feature/mip-nlp-solver` |
+| #153 | Integration docs, benchmark refresh, and release checklist | This PR | Merge this checklist/docs PR before upstream readiness signoff |
+
+Supporting guard PR #164 also landed on `feature/mip-nlp-solver` to keep local
+SHOT cuts from excluding known incumbents.
 
 ## Pyomo MindtPy fixture disposition
 
@@ -50,37 +73,92 @@ into discopt without a separate license and attribution review.
 
 ## Validation commands
 
-Run these before opening the upstream PR:
+Run these default-CI and release-documentation checks before opening the
+upstream PR:
 
 ```bash
-python -m ruff check python/
-python -m ruff format --check python/
-PYTHONPATH=python python -m pytest python/tests/test_mip_nlp.py python/tests/test_oa.py -q
+ruff check python/
+ruff format --check python/
+pytest python/tests/test_mip_nlp.py python/tests/test_oa.py python/tests/test_shot_parity_baseline.py -q
+PYTHONPATH=python python scripts/shot_parity_baseline.py \
+  --output docs/dev/data/shot-parity-baseline.json
 make test
 make docs
 ```
 
-Optional solver-specific checks depend on installed commercial or compiled
-backends:
+Run these broader release gates when the integration branch is ready for the
+upstream PR:
 
 ```bash
-PYTHONPATH=python python -m pytest python/tests/test_gurobi_backend.py -q
+make test-all
 make test-amp-fast
 make test-correctness
+make bench-smoke
+make perf-gate
+```
+
+Optional solver-specific checks depend on installed commercial, compiled, or
+external backends:
+
+```bash
+pytest python/tests/test_gurobi_backend.py -q
+pytest python/tests/test_mip_nlp.py -q -k "gurobi or single_tree or solution_pool"
+SHOT_EXECUTABLE=/home/bernalde/repos/SHOT/build/SHOT \
+PYTHONPATH=python python scripts/shot_parity_baseline.py \
+  --output docs/dev/data/shot-parity-baseline.json \
+  --workdir /tmp/discopt-shot-baseline
+make gams-verify
 ```
 
 If a solver extra is unavailable, record the skipped backend and the reason in
 the upstream PR body. Do not mark a backend as validated when the command
 skipped because Gurobi, cyipopt, Ipopt libraries, or another optional dependency
-was unavailable.
+was unavailable. Default CI must remain free of commercial solver requirements.
+In particular, the Gurobi-backed `tree_strategy="single_tree"` callback path and
+direct QCP/QCQP/MIQCP/MIQCQP routing are only mock-verified in default CI unless
+these optional Gurobi checks run on a licensed machine. If they cannot run,
+label those paths as not end-to-end validated in the upstream PR body.
+
+Likewise, the committed SHOT parity baseline may record SHOT as unavailable
+when no executable is supplied. If a live SHOT executable is not used for the
+release gate, state that continuous head-to-head SHOT parity was not part of CI
+and keep the comparison scoped to discopt's native reimplementation plus the
+stored baseline caveat.
+
+## Release caveats to record
+
+The upstream PR body or release notes should explicitly record these caveats:
+
+- The child PRs were reviewed from the author account as maintainer-quality
+  COMMENT reviews, but they did not receive a formal non-author GitHub APPROVE.
+  The upstream PR must receive an independent maintainer review before merging.
+- Licensed Gurobi coverage is required to claim end-to-end validation of
+  single-tree callbacks, solution-pool behavior, and direct QCP/QCQP/MIQCP/MIQCQP
+  routing. Otherwise, describe those paths as default-CI mock-verified only.
+- Live SHOT head-to-head parity is optional and requires a built SHOT
+  executable. If unavailable, describe the committed SHOT rows as unavailable
+  and do not claim continuous SHOT parity coverage in CI.
+- The SHOT-profile controls `nonlinear_partitioning`, `quadratic_partitioning`,
+  `absolute_value_auxiliaries`, `monomial_extraction`,
+  `signomial_extraction`, and `quadratic_extraction` are accepted and traced as
+  policy controls but do not yet independently change solve behavior beyond the
+  active native paths documented in `docs/mip_nlp.md`.
+- The temporary coverage floor remains the project-wide 65% floor tracked by
+  #87, and the docs build currently succeeds with warnings tracked by #172.
 
 ## Upstream PR gate
 
 Before opening the upstream PR:
 
-1. Confirm `feature/mip-nlp-solver` contains the current `jkitchin:main` tip.
-2. Confirm all child PRs in the table above are merged or explicitly deferred.
-3. Run the validation commands above on the integration branch.
-4. Post the validation results on issue #121.
-5. Open one upstream PR from `bernalde:feature/mip-nlp-solver` to
-   `jkitchin:main`.
+1. Sync `bernalde:main` with current `jkitchin:main`, then merge that updated
+   main into `feature/mip-nlp-solver`.
+2. Confirm `feature/mip-nlp-solver` contains the current `jkitchin:main` tip.
+3. Confirm all child PRs in the table above are merged or explicitly deferred.
+4. Regenerate `docs/dev/data/shot-parity-baseline.json` and keep the SHOT rows
+   only if a built SHOT executable was actually used.
+5. Run the validation commands above on the integration branch and record exact
+   skipped optional backends.
+6. Record the release caveats above in the upstream PR body or release notes.
+7. Post the validation results on issue #121.
+8. Open one upstream PR from `bernalde:feature/mip-nlp-solver` to
+   `jkitchin:main` and request independent maintainer review before merging.

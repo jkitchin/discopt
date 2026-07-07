@@ -15,7 +15,7 @@
           "bound_validity": "global",
           "certification_caveat": "none",
           "convex_fast_path": true,
-          "elapsed_seconds": 0.445793,
+          "elapsed_seconds": 0.499205,
           "gap": null,
           "gap_certified": true,
           "mip_count": 0,
@@ -30,7 +30,7 @@
           },
           "status": "optimal",
           "trace_summary": null,
-          "wall_time_seconds": 0.185242
+          "wall_time_seconds": 0.061356
         },
         {
           "available": false,
@@ -58,22 +58,23 @@
         {
           "available": true,
           "backend": "discopt",
-          "bound": 0.050000001146704956,
+          "bound": 0.050000001146700515,
           "bound_validity": "global",
           "certification_caveat": "none",
           "convex_fast_path": false,
-          "elapsed_seconds": 0.779502,
+          "elapsed_seconds": 1.648551,
           "gap": 0.0,
           "gap_certified": true,
-          "mip_count": 3,
+          "mip_count": 101,
           "nlp_bb": false,
           "node_count": 0,
           "objective": 0.05,
           "solution": {
-            "x": 1.9999999997133238,
+            "x": 1.9999999997133249,
             "y": 1.0
           },
           "solve_options": {
+            "direct_quadratic_routing": "off",
             "max_nodes": 100,
             "mip_nlp_method": "oa",
             "mip_nlp_profile": "shot",
@@ -82,13 +83,88 @@
           },
           "status": "optimal",
           "trace_summary": {
-            "cut_count": 12,
+            "convex_bounding_bound_update_count": 0,
+            "convex_bounding_solve_count": 0,
+            "cut_count": 111,
+            "cut_source_counts": {
+              "ecp": 0,
+              "esh": 0,
+              "external": 0,
+              "feasibility": 0,
+              "initial_poa": 1,
+              "integer": 0,
+              "oa": 2,
+              "objective": 9,
+              "objective_rootsearch": 0,
+              "reduction": 0,
+              "relaxation_phase": 0
+            },
             "feasibility_subproblem_count": 0,
-            "mip_count": 3,
-            "nlp_subproblem_count": 3,
-            "solution_pool_candidates": 3
+            "fixed_nlp_call_count": 2,
+            "fixed_nlp_call_source_counts": {
+              "lp_relaxation": 1,
+              "mip_optimum": 1
+            },
+            "fixed_nlp_call_status_counts": {
+              "optimal": 2
+            },
+            "fixed_nlp_candidate_count": 2,
+            "fixed_nlp_candidate_source_counts": {
+              "lp_relaxation": 1,
+              "mip_optimum": 1
+            },
+            "fixed_nlp_scheduler": {
+              "added_source_counts": {
+                "lp_relaxation": 1,
+                "mip_optimum": 1
+              },
+              "candidate_limit": 5,
+              "deduplicate_used_assignments": true,
+              "iteration_frequency": 1,
+              "pending": 0,
+              "skipped_duplicates": 99,
+              "strategy": "adaptive",
+              "time_frequency": 0.0
+            },
+            "initial_poa_cuts": 3,
+            "initial_poa_provenance_cuts": 2,
+            "interior_point_count": 4,
+            "interior_point_source_counts": {
+              "incumbent": 2,
+              "initial_poa": 1,
+              "nlp_relaxation": 1
+            },
+            "local_cut_count": 0,
+            "master_repair_attempt_count": 0,
+            "master_repair_failure_count": 0,
+            "master_repair_loop_count": 0,
+            "master_repair_success_count": 0,
+            "mip_count": 101,
+            "mip_solution_limit": {
+              "capacity": 5,
+              "degraded_reason": "mip_solution_limit_strategy requires milp_solver='gurobi'",
+              "enabled": true,
+              "last_update_reason": "cuts_added",
+              "limit": null,
+              "raw_limit": 1,
+              "strategy": "adaptive",
+              "supported": false,
+              "updates": 0
+            },
+            "nlp_subproblem_count": 2,
+            "provenance_cut_count": 12,
+            "reduction_cut_added_count": 0,
+            "reduction_cut_skipped_count": 0,
+            "selected_backend": "auto",
+            "selected_strategy": "oa",
+            "solution_pool_candidates": 1,
+            "unsupported_backend_features": [
+              "mip_solution_limit",
+              "mip_start",
+              "objective_cutoff"
+            ]
           },
-          "wall_time_seconds": 0.773626
+          "wall_time_seconds": 1.576943
         },
         {
           "available": false,
@@ -109,7 +185,7 @@
     {
       "convexity": "convex",
       "expected_certification": "global",
-      "intent": "quadratic objective with one binary decision and direct routing pressure",
+      "intent": "SHOT-profile direct MIQP routing with one binary decision",
       "key": "miqp",
       "problem_class": "MIQP",
       "results": [
@@ -120,7 +196,7 @@
           "bound_validity": "global",
           "certification_caveat": "none",
           "convex_fast_path": false,
-          "elapsed_seconds": 0.071592,
+          "elapsed_seconds": 0.055129,
           "gap": 0.0,
           "gap_certified": true,
           "mip_count": 0,
@@ -133,11 +209,20 @@
           },
           "solve_options": {
             "max_nodes": 100,
+            "mip_nlp_profile": "shot",
+            "solver": "mip-nlp",
             "time_limit": 30
           },
           "status": "optimal",
-          "trace_summary": null,
-          "wall_time_seconds": 0.029009
+          "trace_summary": {
+            "cut_count": null,
+            "mip_count": 0,
+            "nlp_subproblem_count": 0,
+            "selected_backend": "auto",
+            "selected_strategy": "direct_miqp",
+            "solution_pool_candidates": 0
+          },
+          "wall_time_seconds": 0.018919
         },
         {
           "available": false,
@@ -169,7 +254,7 @@
           "bound_validity": "heuristic",
           "certification_caveat": "reported incumbent is not supported by a certified finite dual bound",
           "convex_fast_path": false,
-          "elapsed_seconds": 0.13506,
+          "elapsed_seconds": 0.116207,
           "gap": null,
           "gap_certified": false,
           "mip_count": 0,
@@ -191,9 +276,10 @@
             "cut_count": null,
             "mip_count": 0,
             "nlp_subproblem_count": 0,
+            "selected_strategy": "fp",
             "solution_pool_candidates": 0
           },
-          "wall_time_seconds": 0.134431
+          "wall_time_seconds": 0.114946
         },
         {
           "available": false,
@@ -212,10 +298,10 @@
       "title": "Nonconvex heuristic MINLP"
     }
   ],
-  "generated_at": "2026-06-30T15:47:28.807049+00:00",
+  "generated_at": "2026-07-07T11:01:48.822095+00:00",
   "schema_version": 1,
   "shot_executable": null,
   "shot_root": "/home/bernalde/repos/SHOT",
-  "workdir": "/tmp/discopt-shot-baseline-7nc1s9dp",
+  "workdir": "/tmp/discopt-shot-baseline-wiu1zu0v",
   "workdir_persistent": false
 }
