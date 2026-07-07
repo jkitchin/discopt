@@ -1,0 +1,1531 @@
+{
+  "time_limit": 60.0,
+  "timestamp": "2026-07-07T11-06-06",
+  "rows": [
+    {
+      "instance": "4stufen",
+      "known": 116329.6706,
+      "maximize": false,
+      "discopt": {
+        "status": "time_limit",
+        "objective": null,
+        "lower_bound": 19020.498520801193,
+        "gap": null,
+        "node_count": 63,
+        "wall_time": 62.648355500306934,
+        "error": null
+      },
+      "baron": {
+        "status": "SKIPPED",
+        "objective": null,
+        "lower_bound": null,
+        "gap": null,
+        "node_count": 0,
+        "wall_time": 0.0,
+        "error": null
+      },
+      "d_verdict": "n/a",
+      "b_verdict": "n/a"
+    },
+    {
+      "instance": "alan",
+      "known": 2.925,
+      "maximize": false,
+      "discopt": {
+        "status": "optimal",
+        "objective": 2.924999998301341,
+        "lower_bound": 2.924999998301341,
+        "gap": 0.0,
+        "node_count": 21,
+        "wall_time": 0.1687729163095355,
+        "error": null
+      },
+      "baron": {
+        "status": "SKIPPED",
+        "objective": null,
+        "lower_bound": null,
+        "gap": null,
+        "node_count": 0,
+        "wall_time": 0.0,
+        "error": null
+      },
+      "d_verdict": "ok",
+      "b_verdict": "n/a"
+    },
+    {
+      "instance": "bchoco06",
+      "known": null,
+      "maximize": true,
+      "discopt": {
+        "status": "time_limit",
+        "objective": null,
+        "lower_bound": null,
+        "gap": null,
+        "node_count": 31,
+        "wall_time": 62.28345879167318,
+        "error": null
+      },
+      "baron": {
+        "status": "SKIPPED",
+        "objective": null,
+        "lower_bound": null,
+        "gap": null,
+        "node_count": 0,
+        "wall_time": 0.0,
+        "error": null
+      },
+      "d_verdict": "n/a",
+      "b_verdict": "n/a"
+    },
+    {
+      "instance": "bchoco07",
+      "known": null,
+      "maximize": true,
+      "discopt": {
+        "status": "time_limit",
+        "objective": null,
+        "lower_bound": null,
+        "gap": null,
+        "node_count": 7,
+        "wall_time": 62.845650541596115,
+        "error": null
+      },
+      "baron": {
+        "status": "SKIPPED",
+        "objective": null,
+        "lower_bound": null,
+        "gap": null,
+        "node_count": 0,
+        "wall_time": 0.0,
+        "error": null
+      },
+      "d_verdict": "n/a",
+      "b_verdict": "n/a"
+    },
+    {
+      "instance": "bchoco08",
+      "known": null,
+      "maximize": true,
+      "discopt": {
+        "status": "time_limit",
+        "objective": null,
+        "lower_bound": null,
+        "gap": null,
+        "node_count": 15,
+        "wall_time": 65.60487295873463,
+        "error": null
+      },
+      "baron": {
+        "status": "SKIPPED",
+        "objective": null,
+        "lower_bound": null,
+        "gap": null,
+        "node_count": 0,
+        "wall_time": 0.0,
+        "error": null
+      },
+      "d_verdict": "n/a",
+      "b_verdict": "n/a"
+    },
+    {
+      "instance": "beuster",
+      "known": 116329.6706,
+      "maximize": false,
+      "discopt": {
+        "status": "time_limit",
+        "objective": null,
+        "lower_bound": 6351.565076176493,
+        "gap": null,
+        "node_count": 31,
+        "wall_time": 61.05215129069984,
+        "error": null
+      },
+      "baron": {
+        "status": "SKIPPED",
+        "objective": null,
+        "lower_bound": null,
+        "gap": null,
+        "node_count": 0,
+        "wall_time": 0.0,
+        "error": null
+      },
+      "d_verdict": "n/a",
+      "b_verdict": "n/a"
+    },
+    {
+      "instance": "casctanks",
+      "known": 9.163479388,
+      "maximize": false,
+      "discopt": {
+        "status": "time_limit",
+        "objective": null,
+        "lower_bound": -90.17862929102458,
+        "gap": null,
+        "node_count": 127,
+        "wall_time": 64.19884141720831,
+        "error": null
+      },
+      "baron": {
+        "status": "SKIPPED",
+        "objective": null,
+        "lower_bound": null,
+        "gap": null,
+        "node_count": 0,
+        "wall_time": 0.0,
+        "error": null
+      },
+      "d_verdict": "n/a",
+      "b_verdict": "n/a"
+    },
+    {
+      "instance": "chance",
+      "known": 29.89437816,
+      "maximize": false,
+      "discopt": {
+        "status": "optimal",
+        "objective": 29.894378154271102,
+        "lower_bound": 29.894378154271102,
+        "gap": 0.0,
+        "node_count": 0,
+        "wall_time": 0.38776008412241936,
+        "error": null
+      },
+      "baron": {
+        "status": "SKIPPED",
+        "objective": null,
+        "lower_bound": null,
+        "gap": null,
+        "node_count": 0,
+        "wall_time": 0.0,
+        "error": null
+      },
+      "d_verdict": "ok",
+      "b_verdict": "n/a"
+    },
+    {
+      "instance": "clay0303hfsg",
+      "known": 26669.10957,
+      "maximize": false,
+      "discopt": {
+        "status": "optimal",
+        "objective": 26669.10955143382,
+        "lower_bound": 26669.109551433936,
+        "gap": 0.0,
+        "node_count": 229,
+        "wall_time": 25.249535416718572,
+        "error": null
+      },
+      "baron": {
+        "status": "SKIPPED",
+        "objective": null,
+        "lower_bound": null,
+        "gap": null,
+        "node_count": 0,
+        "wall_time": 0.0,
+        "error": null
+      },
+      "d_verdict": "ok",
+      "b_verdict": "n/a"
+    },
+    {
+      "instance": "contvar",
+      "known": 809149.8272,
+      "maximize": false,
+      "discopt": {
+        "status": "feasible",
+        "objective": 809149.8138136583,
+        "lower_bound": 174044.7144558017,
+        "gap": 0.7849042149123167,
+        "node_count": 63,
+        "wall_time": 60.80020304210484,
+        "error": null
+      },
+      "baron": {
+        "status": "SKIPPED",
+        "objective": null,
+        "lower_bound": null,
+        "gap": null,
+        "node_count": 0,
+        "wall_time": 0.0,
+        "error": null
+      },
+      "d_verdict": "ok",
+      "b_verdict": "n/a"
+    },
+    {
+      "instance": "cvxnonsep_nsig30",
+      "known": 130.6287126,
+      "maximize": false,
+      "discopt": {
+        "status": "optimal",
+        "objective": 130.62871116925294,
+        "lower_bound": 130.61841392487688,
+        "gap": 7.882808727819201e-05,
+        "node_count": 165,
+        "wall_time": 2.7570066670887172,
+        "error": null
+      },
+      "baron": {
+        "status": "SKIPPED",
+        "objective": null,
+        "lower_bound": null,
+        "gap": null,
+        "node_count": 0,
+        "wall_time": 0.0,
+        "error": null
+      },
+      "d_verdict": "ok",
+      "b_verdict": "n/a"
+    },
+    {
+      "instance": "cvxnonsep_psig30",
+      "known": 78.99885434,
+      "maximize": false,
+      "discopt": {
+        "status": "optimal",
+        "objective": 78.9988543529429,
+        "lower_bound": 78.99179874365787,
+        "gap": 8.9312555104815e-05,
+        "node_count": 89,
+        "wall_time": 1.3770153750665486,
+        "error": null
+      },
+      "baron": {
+        "status": "SKIPPED",
+        "objective": null,
+        "lower_bound": null,
+        "gap": null,
+        "node_count": 0,
+        "wall_time": 0.0,
+        "error": null
+      },
+      "d_verdict": "ok",
+      "b_verdict": "n/a"
+    },
+    {
+      "instance": "cvxnonsep_psig40r",
+      "known": 86.5451047,
+      "maximize": false,
+      "discopt": {
+        "status": "optimal",
+        "objective": 86.5452799516496,
+        "lower_bound": 86.53872191349262,
+        "gap": 7.423014759247372e-05,
+        "node_count": 95,
+        "wall_time": 4.151557791978121,
+        "error": null
+      },
+      "baron": {
+        "status": "SKIPPED",
+        "objective": null,
+        "lower_bound": null,
+        "gap": null,
+        "node_count": 0,
+        "wall_time": 0.0,
+        "error": null
+      },
+      "d_verdict": "ok",
+      "b_verdict": "n/a"
+    },
+    {
+      "instance": "dispatch",
+      "known": 3155.287927,
+      "maximize": false,
+      "discopt": {
+        "status": "optimal",
+        "objective": 3155.2879266989703,
+        "lower_bound": 3155.072917127798,
+        "gap": 6.814261523911746e-05,
+        "node_count": 3,
+        "wall_time": 0.4755614581517875,
+        "error": null
+      },
+      "baron": {
+        "status": "SKIPPED",
+        "objective": null,
+        "lower_bound": null,
+        "gap": null,
+        "node_count": 0,
+        "wall_time": 0.0,
+        "error": null
+      },
+      "d_verdict": "ok",
+      "b_verdict": "n/a"
+    },
+    {
+      "instance": "ex1221",
+      "known": 7.667180069,
+      "maximize": false,
+      "discopt": {
+        "status": "optimal",
+        "objective": 7.6671800711443945,
+        "lower_bound": 7.667180058272593,
+        "gap": 1.3747612131369656e-09,
+        "node_count": 5,
+        "wall_time": 0.613023541867733,
+        "error": null
+      },
+      "baron": {
+        "status": "SKIPPED",
+        "objective": null,
+        "lower_bound": null,
+        "gap": null,
+        "node_count": 0,
+        "wall_time": 0.0,
+        "error": null
+      },
+      "d_verdict": "ok",
+      "b_verdict": "n/a"
+    },
+    {
+      "instance": "ex1222",
+      "known": 1.076543083,
+      "maximize": false,
+      "discopt": {
+        "status": "optimal",
+        "objective": 1.0765430648177292,
+        "lower_bound": 1.0765430463031964,
+        "gap": 0.0,
+        "node_count": 1,
+        "wall_time": 0.41427725041285157,
+        "error": null
+      },
+      "baron": {
+        "status": "SKIPPED",
+        "objective": null,
+        "lower_bound": null,
+        "gap": null,
+        "node_count": 0,
+        "wall_time": 0.0,
+        "error": null
+      },
+      "d_verdict": "ok",
+      "b_verdict": "n/a"
+    },
+    {
+      "instance": "ex1224",
+      "known": -0.9434705,
+      "maximize": false,
+      "discopt": {
+        "status": "optimal",
+        "objective": -0.9434704910762214,
+        "lower_bound": -0.9435072710857,
+        "gap": 3.677330332119144e-05,
+        "node_count": 53,
+        "wall_time": 2.2723040408454835,
+        "error": null
+      },
+      "baron": {
+        "status": "SKIPPED",
+        "objective": null,
+        "lower_bound": null,
+        "gap": null,
+        "node_count": 0,
+        "wall_time": 0.0,
+        "error": null
+      },
+      "d_verdict": "ok",
+      "b_verdict": "n/a"
+    },
+    {
+      "instance": "ex1225",
+      "known": 31.0,
+      "maximize": false,
+      "discopt": {
+        "status": "optimal",
+        "objective": 30.999999951817372,
+        "lower_bound": 30.999999951817376,
+        "gap": 0.0,
+        "node_count": 7,
+        "wall_time": 1.2347830422222614,
+        "error": null
+      },
+      "baron": {
+        "status": "SKIPPED",
+        "objective": null,
+        "lower_bound": null,
+        "gap": null,
+        "node_count": 0,
+        "wall_time": 0.0,
+        "error": null
+      },
+      "d_verdict": "ok",
+      "b_verdict": "n/a"
+    },
+    {
+      "instance": "ex1226",
+      "known": -17.0,
+      "maximize": false,
+      "discopt": {
+        "status": "optimal",
+        "objective": -17.000000003900116,
+        "lower_bound": -17.000000023491527,
+        "gap": 1.1524359503259587e-09,
+        "node_count": 5,
+        "wall_time": 0.5385857499204576,
+        "error": null
+      },
+      "baron": {
+        "status": "SKIPPED",
+        "objective": null,
+        "lower_bound": null,
+        "gap": null,
+        "node_count": 0,
+        "wall_time": 0.0,
+        "error": null
+      },
+      "d_verdict": "ok",
+      "b_verdict": "n/a"
+    },
+    {
+      "instance": "fac2",
+      "known": 331837498.2,
+      "maximize": false,
+      "discopt": {
+        "status": "optimal",
+        "objective": 331837498.18201375,
+        "lower_bound": 331837497.8338103,
+        "gap": 0.0,
+        "node_count": 69,
+        "wall_time": 6.736725499853492,
+        "error": null
+      },
+      "baron": {
+        "status": "SKIPPED",
+        "objective": null,
+        "lower_bound": null,
+        "gap": null,
+        "node_count": 0,
+        "wall_time": 0.0,
+        "error": null
+      },
+      "d_verdict": "ok",
+      "b_verdict": "n/a"
+    },
+    {
+      "instance": "flay02m",
+      "known": 37.94733192,
+      "maximize": false,
+      "discopt": {
+        "status": "optimal",
+        "objective": 37.947331863834606,
+        "lower_bound": 37.94733180456952,
+        "gap": 0.0,
+        "node_count": 7,
+        "wall_time": 0.5538010410964489,
+        "error": null
+      },
+      "baron": {
+        "status": "SKIPPED",
+        "objective": null,
+        "lower_bound": null,
+        "gap": null,
+        "node_count": 0,
+        "wall_time": 0.0,
+        "error": null
+      },
+      "d_verdict": "ok",
+      "b_verdict": "n/a"
+    },
+    {
+      "instance": "flay03m",
+      "known": 48.98979486,
+      "maximize": false,
+      "discopt": {
+        "status": "optimal",
+        "objective": 48.98979479383545,
+        "lower_bound": 48.98979470823029,
+        "gap": 0.0,
+        "node_count": 111,
+        "wall_time": 7.32409125007689,
+        "error": null
+      },
+      "baron": {
+        "status": "SKIPPED",
+        "objective": null,
+        "lower_bound": null,
+        "gap": null,
+        "node_count": 0,
+        "wall_time": 0.0,
+        "error": null
+      },
+      "d_verdict": "ok",
+      "b_verdict": "n/a"
+    },
+    {
+      "instance": "gbd",
+      "known": 2.2,
+      "maximize": false,
+      "discopt": {
+        "status": "optimal",
+        "objective": 2.199999982504936,
+        "lower_bound": 2.199999982504936,
+        "gap": 0.0,
+        "node_count": 3,
+        "wall_time": 0.14908312493935227,
+        "error": null
+      },
+      "baron": {
+        "status": "SKIPPED",
+        "objective": null,
+        "lower_bound": null,
+        "gap": null,
+        "node_count": 0,
+        "wall_time": 0.0,
+        "error": null
+      },
+      "d_verdict": "ok",
+      "b_verdict": "n/a"
+    },
+    {
+      "instance": "gkocis",
+      "known": -1.923098738,
+      "maximize": false,
+      "discopt": {
+        "status": "optimal",
+        "objective": -1.9230987798770212,
+        "lower_bound": -1.9230988280923489,
+        "gap": 0.0,
+        "node_count": 5,
+        "wall_time": 0.7370092500932515,
+        "error": null
+      },
+      "baron": {
+        "status": "SKIPPED",
+        "objective": null,
+        "lower_bound": null,
+        "gap": null,
+        "node_count": 0,
+        "wall_time": 0.0,
+        "error": null
+      },
+      "d_verdict": "ok",
+      "b_verdict": "n/a"
+    },
+    {
+      "instance": "hda",
+      "known": -5964.534084,
+      "maximize": false,
+      "discopt": {
+        "status": "time_limit",
+        "objective": null,
+        "lower_bound": null,
+        "gap": null,
+        "node_count": 7,
+        "wall_time": 65.17324233287945,
+        "error": null
+      },
+      "baron": {
+        "status": "SKIPPED",
+        "objective": null,
+        "lower_bound": null,
+        "gap": null,
+        "node_count": 0,
+        "wall_time": 0.0,
+        "error": null
+      },
+      "d_verdict": "n/a",
+      "b_verdict": "n/a"
+    },
+    {
+      "instance": "heatexch_gen1",
+      "known": 154895.933,
+      "maximize": false,
+      "discopt": {
+        "status": "time_limit",
+        "objective": null,
+        "lower_bound": 100499.99999999991,
+        "gap": null,
+        "node_count": 63,
+        "wall_time": 62.16235316591337,
+        "error": null
+      },
+      "baron": {
+        "status": "SKIPPED",
+        "objective": null,
+        "lower_bound": null,
+        "gap": null,
+        "node_count": 0,
+        "wall_time": 0.0,
+        "error": null
+      },
+      "d_verdict": "n/a",
+      "b_verdict": "n/a"
+    },
+    {
+      "instance": "heatexch_gen2",
+      "known": 635838.8464,
+      "maximize": false,
+      "discopt": {
+        "status": "feasible",
+        "objective": 676410.9816093397,
+        "lower_bound": null,
+        "gap": null,
+        "node_count": 147,
+        "wall_time": 61.208427666220814,
+        "error": null
+      },
+      "baron": {
+        "status": "SKIPPED",
+        "objective": null,
+        "lower_bound": null,
+        "gap": null,
+        "node_count": 0,
+        "wall_time": 0.0,
+        "error": null
+      },
+      "d_verdict": "GAP",
+      "b_verdict": "n/a"
+    },
+    {
+      "instance": "heatexch_gen3",
+      "known": 64843.69761,
+      "maximize": false,
+      "discopt": {
+        "status": "time_limit",
+        "objective": null,
+        "lower_bound": null,
+        "gap": null,
+        "node_count": 15,
+        "wall_time": 61.435835250187665,
+        "error": null
+      },
+      "baron": {
+        "status": "SKIPPED",
+        "objective": null,
+        "lower_bound": null,
+        "gap": null,
+        "node_count": 0,
+        "wall_time": 0.0,
+        "error": null
+      },
+      "d_verdict": "n/a",
+      "b_verdict": "n/a"
+    },
+    {
+      "instance": "m3",
+      "known": 37.8,
+      "maximize": false,
+      "discopt": {
+        "status": "optimal",
+        "objective": 37.79999966997884,
+        "lower_bound": 37.79999951039201,
+        "gap": 0.0,
+        "node_count": 61,
+        "wall_time": 4.174682250246406,
+        "error": null
+      },
+      "baron": {
+        "status": "SKIPPED",
+        "objective": null,
+        "lower_bound": null,
+        "gap": null,
+        "node_count": 0,
+        "wall_time": 0.0,
+        "error": null
+      },
+      "d_verdict": "ok",
+      "b_verdict": "n/a"
+    },
+    {
+      "instance": "nvs01",
+      "known": 12.46966882,
+      "maximize": false,
+      "discopt": {
+        "status": "optimal",
+        "objective": 12.46966882156821,
+        "lower_bound": 12.46966880809854,
+        "gap": 1.080194672104233e-09,
+        "node_count": 17,
+        "wall_time": 3.0887217088602483,
+        "error": null
+      },
+      "baron": {
+        "status": "SKIPPED",
+        "objective": null,
+        "lower_bound": null,
+        "gap": null,
+        "node_count": 0,
+        "wall_time": 0.0,
+        "error": null
+      },
+      "d_verdict": "ok",
+      "b_verdict": "n/a"
+    },
+    {
+      "instance": "nvs02",
+      "known": 5.964184523,
+      "maximize": false,
+      "discopt": {
+        "status": "optimal",
+        "objective": 5.96418452307,
+        "lower_bound": 5.96418452307,
+        "gap": 0.0,
+        "node_count": 101,
+        "wall_time": 0.13330275006592274,
+        "error": null
+      },
+      "baron": {
+        "status": "SKIPPED",
+        "objective": null,
+        "lower_bound": null,
+        "gap": null,
+        "node_count": 0,
+        "wall_time": 0.0,
+        "error": null
+      },
+      "d_verdict": "ok",
+      "b_verdict": "n/a"
+    },
+    {
+      "instance": "nvs03",
+      "known": 16.0,
+      "maximize": false,
+      "discopt": {
+        "status": "optimal",
+        "objective": 16.0,
+        "lower_bound": 15.99999972676511,
+        "gap": 1.707718066956687e-08,
+        "node_count": 5,
+        "wall_time": 0.42135116597637534,
+        "error": null
+      },
+      "baron": {
+        "status": "SKIPPED",
+        "objective": null,
+        "lower_bound": null,
+        "gap": null,
+        "node_count": 0,
+        "wall_time": 0.0,
+        "error": null
+      },
+      "d_verdict": "ok",
+      "b_verdict": "n/a"
+    },
+    {
+      "instance": "nvs04",
+      "known": 0.72,
+      "maximize": false,
+      "discopt": {
+        "status": "optimal",
+        "objective": 0.720000000000006,
+        "lower_bound": 0.7199999473599988,
+        "gap": 5.264000713101069e-08,
+        "node_count": 5,
+        "wall_time": 0.4876568750478327,
+        "error": null
+      },
+      "baron": {
+        "status": "SKIPPED",
+        "objective": null,
+        "lower_bound": null,
+        "gap": null,
+        "node_count": 0,
+        "wall_time": 0.0,
+        "error": null
+      },
+      "d_verdict": "ok",
+      "b_verdict": "n/a"
+    },
+    {
+      "instance": "nvs05",
+      "known": 5.470934108,
+      "maximize": false,
+      "discopt": {
+        "status": "feasible",
+        "objective": 5.47093412640568,
+        "lower_bound": 1.348118846767416,
+        "gap": 0.7535852533371464,
+        "node_count": 733,
+        "wall_time": 60.22935925005004,
+        "error": null
+      },
+      "baron": {
+        "status": "SKIPPED",
+        "objective": null,
+        "lower_bound": null,
+        "gap": null,
+        "node_count": 0,
+        "wall_time": 0.0,
+        "error": null
+      },
+      "d_verdict": "ok",
+      "b_verdict": "n/a"
+    },
+    {
+      "instance": "nvs06",
+      "known": 1.7703125,
+      "maximize": false,
+      "discopt": {
+        "status": "optimal",
+        "objective": 1.7703125002341187,
+        "lower_bound": 1.7703124984296874,
+        "gap": 8.870256221212425e-10,
+        "node_count": 5,
+        "wall_time": 1.6039277920499444,
+        "error": null
+      },
+      "baron": {
+        "status": "SKIPPED",
+        "objective": null,
+        "lower_bound": null,
+        "gap": null,
+        "node_count": 0,
+        "wall_time": 0.0,
+        "error": null
+      },
+      "d_verdict": "ok",
+      "b_verdict": "n/a"
+    },
+    {
+      "instance": "nvs07",
+      "known": 4.0,
+      "maximize": false,
+      "discopt": {
+        "status": "optimal",
+        "objective": 4.0,
+        "lower_bound": 4.0,
+        "gap": 0.0,
+        "node_count": 5,
+        "wall_time": 0.041860208846628666,
+        "error": null
+      },
+      "baron": {
+        "status": "SKIPPED",
+        "objective": null,
+        "lower_bound": null,
+        "gap": null,
+        "node_count": 0,
+        "wall_time": 0.0,
+        "error": null
+      },
+      "d_verdict": "ok",
+      "b_verdict": "n/a"
+    },
+    {
+      "instance": "nvs08",
+      "known": 23.44972735,
+      "maximize": false,
+      "discopt": {
+        "status": "optimal",
+        "objective": 23.449727353351044,
+        "lower_bound": 23.449382312131643,
+        "gap": 1.4713797977099544e-05,
+        "node_count": 57,
+        "wall_time": 1.0513565000146627,
+        "error": null
+      },
+      "baron": {
+        "status": "SKIPPED",
+        "objective": null,
+        "lower_bound": null,
+        "gap": null,
+        "node_count": 0,
+        "wall_time": 0.0,
+        "error": null
+      },
+      "d_verdict": "ok",
+      "b_verdict": "n/a"
+    },
+    {
+      "instance": "nvs09",
+      "known": -43.13433692,
+      "maximize": false,
+      "discopt": {
+        "status": "feasible",
+        "objective": -43.13433691803531,
+        "lower_bound": -57.680145993208754,
+        "gap": 0.337221112331312,
+        "node_count": 221,
+        "wall_time": 60.05631833290681,
+        "error": null
+      },
+      "baron": {
+        "status": "SKIPPED",
+        "objective": null,
+        "lower_bound": null,
+        "gap": null,
+        "node_count": 0,
+        "wall_time": 0.0,
+        "error": null
+      },
+      "d_verdict": "ok",
+      "b_verdict": "n/a"
+    },
+    {
+      "instance": "nvs10",
+      "known": -310.8,
+      "maximize": false,
+      "discopt": {
+        "status": "optimal",
+        "objective": -310.79999999999995,
+        "lower_bound": -310.79999999999995,
+        "gap": 0.0,
+        "node_count": 5,
+        "wall_time": 0.0873126252554357,
+        "error": null
+      },
+      "baron": {
+        "status": "SKIPPED",
+        "objective": null,
+        "lower_bound": null,
+        "gap": null,
+        "node_count": 0,
+        "wall_time": 0.0,
+        "error": null
+      },
+      "d_verdict": "ok",
+      "b_verdict": "n/a"
+    },
+    {
+      "instance": "nvs11",
+      "known": -431.0,
+      "maximize": false,
+      "discopt": {
+        "status": "optimal",
+        "objective": -431.0,
+        "lower_bound": -431.0,
+        "gap": 0.0,
+        "node_count": 39,
+        "wall_time": 0.42489937506616116,
+        "error": null
+      },
+      "baron": {
+        "status": "SKIPPED",
+        "objective": null,
+        "lower_bound": null,
+        "gap": null,
+        "node_count": 0,
+        "wall_time": 0.0,
+        "error": null
+      },
+      "d_verdict": "ok",
+      "b_verdict": "n/a"
+    },
+    {
+      "instance": "nvs12",
+      "known": -481.2,
+      "maximize": false,
+      "discopt": {
+        "status": "optimal",
+        "objective": -481.20000000000016,
+        "lower_bound": -481.20000000000016,
+        "gap": 0.0,
+        "node_count": 195,
+        "wall_time": 1.6021957080811262,
+        "error": null
+      },
+      "baron": {
+        "status": "SKIPPED",
+        "objective": null,
+        "lower_bound": null,
+        "gap": null,
+        "node_count": 0,
+        "wall_time": 0.0,
+        "error": null
+      },
+      "d_verdict": "ok",
+      "b_verdict": "n/a"
+    },
+    {
+      "instance": "nvs13",
+      "known": -585.2,
+      "maximize": false,
+      "discopt": {
+        "status": "optimal",
+        "objective": -585.2,
+        "lower_bound": -585.2000011714,
+        "gap": 2.0017087463537884e-09,
+        "node_count": 49,
+        "wall_time": 2.2692656670697033,
+        "error": null
+      },
+      "baron": {
+        "status": "SKIPPED",
+        "objective": null,
+        "lower_bound": null,
+        "gap": null,
+        "node_count": 0,
+        "wall_time": 0.0,
+        "error": null
+      },
+      "d_verdict": "ok",
+      "b_verdict": "n/a"
+    },
+    {
+      "instance": "nvs14",
+      "known": -40358.15477,
+      "maximize": false,
+      "discopt": {
+        "status": "optimal",
+        "objective": -40358.1547693,
+        "lower_bound": -40358.1547693,
+        "gap": 0.0,
+        "node_count": 325,
+        "wall_time": 0.2861521663144231,
+        "error": null
+      },
+      "baron": {
+        "status": "SKIPPED",
+        "objective": null,
+        "lower_bound": null,
+        "gap": null,
+        "node_count": 0,
+        "wall_time": 0.0,
+        "error": null
+      },
+      "d_verdict": "ok",
+      "b_verdict": "n/a"
+    },
+    {
+      "instance": "nvs15",
+      "known": 1.0,
+      "maximize": false,
+      "discopt": {
+        "status": "optimal",
+        "objective": 1.0,
+        "lower_bound": 1.0,
+        "gap": 0.0,
+        "node_count": 7,
+        "wall_time": 0.06036358326673508,
+        "error": null
+      },
+      "baron": {
+        "status": "SKIPPED",
+        "objective": null,
+        "lower_bound": null,
+        "gap": null,
+        "node_count": 0,
+        "wall_time": 0.0,
+        "error": null
+      },
+      "d_verdict": "ok",
+      "b_verdict": "n/a"
+    },
+    {
+      "instance": "oaer",
+      "known": -1.923098514,
+      "maximize": false,
+      "discopt": {
+        "status": "optimal",
+        "objective": -1.9230983037453937,
+        "lower_bound": -1.923098601139822,
+        "gap": 0.0,
+        "node_count": 3,
+        "wall_time": 1.1834212075918913,
+        "error": null
+      },
+      "baron": {
+        "status": "SKIPPED",
+        "objective": null,
+        "lower_bound": null,
+        "gap": null,
+        "node_count": 0,
+        "wall_time": 0.0,
+        "error": null
+      },
+      "d_verdict": "ok",
+      "b_verdict": "n/a"
+    },
+    {
+      "instance": "st_e13",
+      "known": 2.0,
+      "maximize": false,
+      "discopt": {
+        "status": "optimal",
+        "objective": 2.0,
+        "lower_bound": 1.9999999825187809,
+        "gap": 0.0,
+        "node_count": 3,
+        "wall_time": 0.47115774964913726,
+        "error": null
+      },
+      "baron": {
+        "status": "SKIPPED",
+        "objective": null,
+        "lower_bound": null,
+        "gap": null,
+        "node_count": 0,
+        "wall_time": 0.0,
+        "error": null
+      },
+      "d_verdict": "ok",
+      "b_verdict": "n/a"
+    },
+    {
+      "instance": "st_e29",
+      "known": -0.9434705,
+      "maximize": false,
+      "discopt": {
+        "status": "optimal",
+        "objective": -0.9434704910762214,
+        "lower_bound": -0.9435072710857,
+        "gap": 3.677330332119144e-05,
+        "node_count": 53,
+        "wall_time": 3.0341386669315398,
+        "error": null
+      },
+      "baron": {
+        "status": "SKIPPED",
+        "objective": null,
+        "lower_bound": null,
+        "gap": null,
+        "node_count": 0,
+        "wall_time": 0.0,
+        "error": null
+      },
+      "d_verdict": "ok",
+      "b_verdict": "n/a"
+    },
+    {
+      "instance": "st_e36",
+      "known": -246.0,
+      "maximize": false,
+      "discopt": {
+        "status": "optimal",
+        "objective": -246.0,
+        "lower_bound": -246.01879639837531,
+        "gap": 7.640812347689022e-05,
+        "node_count": 153,
+        "wall_time": 16.2568882079795,
+        "error": null
+      },
+      "baron": {
+        "status": "SKIPPED",
+        "objective": null,
+        "lower_bound": null,
+        "gap": null,
+        "node_count": 0,
+        "wall_time": 0.0,
+        "error": null
+      },
+      "d_verdict": "ok",
+      "b_verdict": "n/a"
+    },
+    {
+      "instance": "st_e38",
+      "known": 7197.727149,
+      "maximize": false,
+      "discopt": {
+        "status": "optimal",
+        "objective": 7197.727116839705,
+        "lower_bound": 7197.727116826533,
+        "gap": 0.0,
+        "node_count": 3,
+        "wall_time": 0.6030559591017663,
+        "error": null
+      },
+      "baron": {
+        "status": "SKIPPED",
+        "objective": null,
+        "lower_bound": null,
+        "gap": null,
+        "node_count": 0,
+        "wall_time": 0.0,
+        "error": null
+      },
+      "d_verdict": "ok",
+      "b_verdict": "n/a"
+    },
+    {
+      "instance": "st_miqp1",
+      "known": 281.0,
+      "maximize": false,
+      "discopt": {
+        "status": "optimal",
+        "objective": 280.9999999906497,
+        "lower_bound": 280.9999999906497,
+        "gap": 0.0,
+        "node_count": 15,
+        "wall_time": 0.1441669575870037,
+        "error": null
+      },
+      "baron": {
+        "status": "SKIPPED",
+        "objective": null,
+        "lower_bound": null,
+        "gap": null,
+        "node_count": 0,
+        "wall_time": 0.0,
+        "error": null
+      },
+      "d_verdict": "ok",
+      "b_verdict": "n/a"
+    },
+    {
+      "instance": "st_miqp2",
+      "known": 2.0,
+      "maximize": false,
+      "discopt": {
+        "status": "optimal",
+        "objective": 2.0,
+        "lower_bound": 2.0,
+        "gap": 0.0,
+        "node_count": 9,
+        "wall_time": 0.14680537534877658,
+        "error": null
+      },
+      "baron": {
+        "status": "SKIPPED",
+        "objective": null,
+        "lower_bound": null,
+        "gap": null,
+        "node_count": 0,
+        "wall_time": 0.0,
+        "error": null
+      },
+      "d_verdict": "ok",
+      "b_verdict": "n/a"
+    },
+    {
+      "instance": "st_miqp3",
+      "known": -6.0,
+      "maximize": false,
+      "discopt": {
+        "status": "optimal",
+        "objective": -6.0,
+        "lower_bound": -6.0,
+        "gap": 0.0,
+        "node_count": 1,
+        "wall_time": 0.13911199988797307,
+        "error": null
+      },
+      "baron": {
+        "status": "SKIPPED",
+        "objective": null,
+        "lower_bound": null,
+        "gap": null,
+        "node_count": 0,
+        "wall_time": 0.0,
+        "error": null
+      },
+      "d_verdict": "ok",
+      "b_verdict": "n/a"
+    },
+    {
+      "instance": "st_miqp4",
+      "known": -4574.0,
+      "maximize": false,
+      "discopt": {
+        "status": "optimal",
+        "objective": -4574.000004423649,
+        "lower_bound": -4574.000004423649,
+        "gap": 0.0,
+        "node_count": 3,
+        "wall_time": 0.14930287515744567,
+        "error": null
+      },
+      "baron": {
+        "status": "SKIPPED",
+        "objective": null,
+        "lower_bound": null,
+        "gap": null,
+        "node_count": 0,
+        "wall_time": 0.0,
+        "error": null
+      },
+      "d_verdict": "ok",
+      "b_verdict": "n/a"
+    },
+    {
+      "instance": "st_test1",
+      "known": 0.0,
+      "maximize": false,
+      "discopt": {
+        "status": "optimal",
+        "objective": -1.6495994490692313e-08,
+        "lower_bound": -1.6495994490692313e-08,
+        "gap": 0.0,
+        "node_count": 15,
+        "wall_time": 0.15158516727387905,
+        "error": null
+      },
+      "baron": {
+        "status": "SKIPPED",
+        "objective": null,
+        "lower_bound": null,
+        "gap": null,
+        "node_count": 0,
+        "wall_time": 0.0,
+        "error": null
+      },
+      "d_verdict": "ok",
+      "b_verdict": "n/a"
+    },
+    {
+      "instance": "st_testgr3",
+      "known": -20.59,
+      "maximize": false,
+      "discopt": {
+        "status": "optimal",
+        "objective": -20.59,
+        "lower_bound": -20.59070709795548,
+        "gap": 3.434181425354089e-05,
+        "node_count": 549,
+        "wall_time": 0.21676962496712804,
+        "error": null
+      },
+      "baron": {
+        "status": "SKIPPED",
+        "objective": null,
+        "lower_bound": null,
+        "gap": null,
+        "node_count": 0,
+        "wall_time": 0.0,
+        "error": null
+      },
+      "d_verdict": "ok",
+      "b_verdict": "n/a"
+    },
+    {
+      "instance": "tanksize",
+      "known": 1.268643754,
+      "maximize": false,
+      "discopt": {
+        "status": "feasible",
+        "objective": 1.2686437480322943,
+        "lower_bound": 0.8680315476476382,
+        "gap": 0.31577990354346364,
+        "node_count": 451,
+        "wall_time": 60.087795750238,
+        "error": null
+      },
+      "baron": {
+        "status": "SKIPPED",
+        "objective": null,
+        "lower_bound": null,
+        "gap": null,
+        "node_count": 0,
+        "wall_time": 0.0,
+        "error": null
+      },
+      "d_verdict": "ok",
+      "b_verdict": "n/a"
+    },
+    {
+      "instance": "tls2",
+      "known": 5.3,
+      "maximize": false,
+      "discopt": {
+        "status": "time_limit",
+        "objective": null,
+        "lower_bound": null,
+        "gap": null,
+        "node_count": 1887,
+        "wall_time": 60.461395542137325,
+        "error": null
+      },
+      "baron": {
+        "status": "SKIPPED",
+        "objective": null,
+        "lower_bound": null,
+        "gap": null,
+        "node_count": 0,
+        "wall_time": 0.0,
+        "error": null
+      },
+      "d_verdict": "n/a",
+      "b_verdict": "n/a"
+    },
+    {
+      "instance": "tspn05",
+      "known": 191.2552078,
+      "maximize": false,
+      "discopt": {
+        "status": "optimal",
+        "objective": 191.25520768494184,
+        "lower_bound": 191.25288274907072,
+        "gap": 1.215420076587872e-05,
+        "node_count": 39,
+        "wall_time": 19.530149083118886,
+        "error": null
+      },
+      "baron": {
+        "status": "SKIPPED",
+        "objective": null,
+        "lower_bound": null,
+        "gap": null,
+        "node_count": 0,
+        "wall_time": 0.0,
+        "error": null
+      },
+      "d_verdict": "ok",
+      "b_verdict": "n/a"
+    },
+    {
+      "instance": "tspn08",
+      "known": 290.5668539,
+      "maximize": false,
+      "discopt": {
+        "status": "feasible",
+        "objective": 290.5668537474048,
+        "lower_bound": null,
+        "gap": null,
+        "node_count": 1,
+        "wall_time": 17.909853290766478,
+        "error": null
+      },
+      "baron": {
+        "status": "SKIPPED",
+        "objective": null,
+        "lower_bound": null,
+        "gap": null,
+        "node_count": 0,
+        "wall_time": 0.0,
+        "error": null
+      },
+      "d_verdict": "ok",
+      "b_verdict": "n/a"
+    },
+    {
+      "instance": "tspn10",
+      "known": 225.1260716,
+      "maximize": false,
+      "discopt": {
+        "status": "feasible",
+        "objective": 225.1260713973292,
+        "lower_bound": null,
+        "gap": null,
+        "node_count": 1,
+        "wall_time": 15.630885958205909,
+        "error": null
+      },
+      "baron": {
+        "status": "SKIPPED",
+        "objective": null,
+        "lower_bound": null,
+        "gap": null,
+        "node_count": 0,
+        "wall_time": 0.0,
+        "error": null
+      },
+      "d_verdict": "ok",
+      "b_verdict": "n/a"
+    },
+    {
+      "instance": "tspn12",
+      "known": 262.6473957,
+      "maximize": false,
+      "discopt": {
+        "status": "feasible",
+        "objective": 262.64739525060224,
+        "lower_bound": null,
+        "gap": null,
+        "node_count": 1,
+        "wall_time": 14.332488667219877,
+        "error": null
+      },
+      "baron": {
+        "status": "SKIPPED",
+        "objective": null,
+        "lower_bound": null,
+        "gap": null,
+        "node_count": 0,
+        "wall_time": 0.0,
+        "error": null
+      },
+      "d_verdict": "ok",
+      "b_verdict": "n/a"
+    }
+  ]
+}
