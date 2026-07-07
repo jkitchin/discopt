@@ -114,6 +114,37 @@ If a solver extra is unavailable, record the skipped backend and the reason in
 the upstream PR body. Do not mark a backend as validated when the command
 skipped because Gurobi, cyipopt, Ipopt libraries, or another optional dependency
 was unavailable. Default CI must remain free of commercial solver requirements.
+In particular, the Gurobi-backed `tree_strategy="single_tree"` callback path and
+direct QCP/QCQP/MIQCP/MIQCQP routing are only mock-verified in default CI unless
+these optional Gurobi checks run on a licensed machine. If they cannot run,
+label those paths as not end-to-end validated in the upstream PR body.
+
+Likewise, the committed SHOT parity baseline may record SHOT as unavailable
+when no executable is supplied. If a live SHOT executable is not used for the
+release gate, state that continuous head-to-head SHOT parity was not part of CI
+and keep the comparison scoped to discopt's native reimplementation plus the
+stored baseline caveat.
+
+## Release caveats to record
+
+The upstream PR body or release notes should explicitly record these caveats:
+
+- The child PRs were reviewed from the author account as maintainer-quality
+  COMMENT reviews, but they did not receive a formal non-author GitHub APPROVE.
+  The upstream PR must receive an independent maintainer review before merging.
+- Licensed Gurobi coverage is required to claim end-to-end validation of
+  single-tree callbacks, solution-pool behavior, and direct QCP/QCQP/MIQCP/MIQCQP
+  routing. Otherwise, describe those paths as default-CI mock-verified only.
+- Live SHOT head-to-head parity is optional and requires a built SHOT
+  executable. If unavailable, describe the committed SHOT rows as unavailable
+  and do not claim continuous SHOT parity coverage in CI.
+- The SHOT-profile controls `nonlinear_partitioning`, `quadratic_partitioning`,
+  `absolute_value_auxiliaries`, `monomial_extraction`,
+  `signomial_extraction`, and `quadratic_extraction` are accepted and traced as
+  policy controls but do not yet independently change solve behavior beyond the
+  active native paths documented in `docs/mip_nlp.md`.
+- The temporary coverage floor remains the project-wide 65% floor tracked by
+  #87, and the docs build currently succeeds with warnings tracked by #172.
 
 ## Upstream PR gate
 
@@ -127,6 +158,7 @@ Before opening the upstream PR:
    only if a built SHOT executable was actually used.
 5. Run the validation commands above on the integration branch and record exact
    skipped optional backends.
-6. Post the validation results on issue #121.
-7. Open one upstream PR from `bernalde:feature/mip-nlp-solver` to
-   `jkitchin:main`.
+6. Record the release caveats above in the upstream PR body or release notes.
+7. Post the validation results on issue #121.
+8. Open one upstream PR from `bernalde:feature/mip-nlp-solver` to
+   `jkitchin:main` and request independent maintainer review before merging.
