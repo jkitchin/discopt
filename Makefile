@@ -90,6 +90,7 @@ CUTEST_ENV      := $(CUTEST_PREFIX)/env.sh
         bench-cutest bench-cutest-smoke setup-cutest check-cutest \
         docs docs-open notebooks \
         gams-build gams-register gams-install gams-test gams-verify \
+        graduation-gate graduation-gate-ci \
         bench-lp-smoke bench-qp-smoke bench-milp-smoke bench-miqp-smoke bench-minlp-smoke bench-global-smoke \
         bench-lp-full bench-qp-full bench-milp-full bench-miqp-full bench-minlp-full bench-global-full \
         bench-smoke-all bench-full-all bench-all bench-global-baron bench-global-nlsolvers
@@ -789,6 +790,43 @@ gate-small: build
 		--workers $(BENCH_WORKERS) --mem-limit-mb 0 \
 		--scaled-out-dir $(BENCH_OUT_DIR)/small_gate_$(TS) \
 		--gate small
+
+# ── Flag-graduation gate (G1.2) ──────────────────────────────────────────────
+# The reusable per-flag validation instrument that lets parked default-OFF
+# capabilities flip to default-ON on evidence. Two invocations:
+#
+#   make graduation-gate      FULL gate — held-out per-flag arm + cert-neutrality
+#                             + ledger append. Needs the MINLPLib corpus in
+#                             ~/Dropbox/projects/discopt-minlp-benchmark (a corpus
+#                             machine only — GitHub CI does NOT have it). This is
+#                             the nightly graduation run. Schedule it via cron, e.g.
+#                             (a machine with the corpus, from the repo root):
+#                               17 4 * * *  cd /path/to/discopt && \
+#                                 PYTHONPATH=$PWD/python JAX_PLATFORMS=cpu \
+#                                 JAX_ENABLE_X64=1 make graduation-gate >> \
+#                                 reports/graduation-nightly.log 2>&1
+#
+#   make graduation-gate-ci   CI SUBSET — cert-neutrality + incorrect_count over
+#                             the VENDORED cert panel only (no corpus, no ledger).
+#                             Mirrors .github/workflows/graduation-gate.yml so it
+#                             can be reproduced locally.
+#
+# See docs/dev/flag-graduation-protocol.md for the protocol.
+
+GRAD_FLAGS ?= root_fixpoint,node_reduce,psd_cost_gate,lift_zero_spanning,lift_loose_products
+GRAD_N     ?= 100
+GRAD_SEED  ?= 0
+GRAD_TL    ?= 30
+
+graduation-gate: build
+	@echo "==> Flag-graduation gate (FULL): held-out arm + cert-neutrality + ledger"
+	PYTHONPATH=$(PROJECT_DIR)/python $(PYTHON) discopt_benchmarks/scripts/graduation_gate.py \
+		--flags $(GRAD_FLAGS) --n $(GRAD_N) --seed $(GRAD_SEED) --time-limit $(GRAD_TL)
+
+graduation-gate-ci: build
+	@echo "==> Flag-graduation gate (CI SUBSET): cert-neutrality over the vendored panel"
+	PYTHONPATH=$(PROJECT_DIR)/python $(PYTHON) discopt_benchmarks/scripts/graduation_gate.py \
+		--flags $(GRAD_FLAGS) --ci-subset
 
 # ── Dashboard (local web UI) ─────────────────────────────────────────────────
 

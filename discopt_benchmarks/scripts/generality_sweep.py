@@ -102,6 +102,68 @@ FLAGS_ON = {
 }
 CAPABILITIES = ("branch_reduce", "psd_gate")
 
+# --------------------------------------------------------------------------- #
+# Per-flag ARMS (G1.2) — the isolation the N=20 pilot lacked.
+#
+# The pilot bundled ALL flags together (FLAGS_ON), so a benefit could not be
+# attributed to a single capability and its regression rate was contaminated by
+# its neighbours (e.g. the nvs13 19->49-node regression is PSD's, but the bundle
+# hid it inside branch-and-reduce's numbers). The flag-graduation gate needs each
+# capability's benefit-fraction / regression-rate / soundness measured in
+# ISOLATION: one arm per parked flag, each setting exactly that capability's env
+# flags (everything else at its default OFF), plus an ``off`` control and the
+# ``all`` bundle for a bundle-vs-isolated cross-check.
+#
+# Each arm names:
+#   - ``env``          the exact env flags it sets (empty for the OFF control);
+#   - ``struct_attr``  which ``Row`` structural-prevalence attribute gates it
+#                      (only structure-carrying instances score the arm), or None
+#                      for the whole-sample arms (off / all);
+#   - ``regime``       ``bound_neutral`` (must be cert byte-identical) or
+#                      ``bound_changing`` (may legitimately change nodes/bound; the
+#                      differential + oracle-bracket soundness check applies). This
+#                      selects which neutrality check the gate runs for the flag.
+ARMS: dict[str, dict] = {
+    "off": {"env": {}, "struct_attr": None, "regime": "control"},
+    "root_fixpoint": {
+        "env": {"DISCOPT_ROOT_FIXPOINT": "1"},
+        "struct_attr": "reduce_struct",
+        "regime": "bound_changing",
+    },
+    "node_reduce": {
+        "env": {"DISCOPT_NODE_REDUCE": "1"},
+        "struct_attr": "reduce_struct",
+        "regime": "bound_changing",
+    },
+    "psd_cost_gate": {
+        "env": {"DISCOPT_PSD_COST_GATE": "1"},
+        "struct_attr": "psd_struct",
+        "regime": "bound_changing",
+    },
+    "lift_zero_spanning": {
+        "env": {"DISCOPT_LIFT_ZERO_SPANNING_FACTORS": "1"},
+        "struct_attr": None,  # structure is a runtime property; no cheap static proxy
+        "regime": "bound_changing",
+    },
+    "lift_loose_products": {
+        "env": {"DISCOPT_LIFT_LOOSE_PRODUCTS": "1"},
+        "struct_attr": None,
+        "regime": "bound_changing",
+    },
+    "all": {"env": dict(FLAGS_ON), "struct_attr": None, "regime": "bound_changing"},
+}
+
+# The parked flags that graduation targets (excludes the ``off`` control and the
+# ``all`` bundle cross-check). These are the arms a graduation verdict is emitted
+# for.
+GRADUATION_ARMS = (
+    "root_fixpoint",
+    "node_reduce",
+    "psd_cost_gate",
+    "lift_zero_spanning",
+    "lift_loose_products",
+)
+
 # correctness tolerance (matches conftest abs=1e-6, rel=1e-4)
 ATOL, RTOL = 1e-6, 1e-4
 
@@ -612,6 +674,10 @@ def geomean(xs: Sequence[float | None]) -> float | None:
     return math.exp(statistics.fmean(math.log(x) for x in vals))
 
 
+def pct_or_dash(x: object) -> str:
+    return f"{x * 100:.0f}%" if isinstance(x, (int, float)) else "—"
+
+
 # --------------------------------------------------------------------------- #
 # orchestration + reporting
 # --------------------------------------------------------------------------- #
@@ -684,6 +750,127 @@ def per_capability_stats(rows: list[Row], structattr: str) -> CapStats:
         benefit_instances=[r.instance for r in scored if r.cmp.verdict == BENEFIT],
         regression_instances=[r.instance for r in scored if r.cmp.verdict == REGRESS],
     )
+
+
+# --------------------------------------------------------------------------- #
+# Per-flag ARMS runner (G1.2) — reusable by graduation_gate.py.
+#
+# Solves each selected instance once for the OFF control and once per requested
+# arm, then tallies per-arm CapStats (restricted to the arm's structure-carrying
+# instances when it has a static structural proxy; whole-sample otherwise). Also
+# collects soundness violations across ALL arms (any oracle crossing / false
+# optimal, in any config, is a P0 — the arm's env flags cannot excuse it).
+# --------------------------------------------------------------------------- #
+@dataclass
+class ArmRow:
+    """One instance solved under the OFF control + one arm's flags."""
+
+    instance: str
+    probtype: str
+    nvars: int
+    oracle: float
+    dual: float | None
+    maximize: bool
+    psd_struct: bool
+    reduce_struct: bool
+    off: SolveRun
+    on: SolveRun  # the arm's ON solve
+    cmp: Compare
+    violations: list[Violation]
+
+
+def _arm_struct_ok(arm: str, inst: Instance) -> bool:
+    """Does this instance carry the arm's target structure? Arms with no cheap
+    static proxy (lifts, all, off) score every instance."""
+    attr = ARMS[arm]["struct_attr"]
+    if attr is None:
+        return True
+    return bool(getattr(inst, attr))
+
+
+def arm_stats(rows: list[ArmRow], arm: str) -> CapStats:
+    """Benefit/regression/soundness tally for one arm, restricted to the arm's
+    structure-carrying instances (whole-sample when the arm has no static proxy).
+    Mirrors :func:`per_capability_stats` but over ArmRows."""
+    attr = ARMS[arm]["struct_attr"]
+    sub = [r for r in rows if (attr is None or getattr(r, attr))]
+    scored = [r for r in sub if not (r.off.error or r.on.error)]
+    n = len(scored)
+    benefit = sum(r.cmp.verdict == BENEFIT for r in scored)
+    regress = sum(r.cmp.verdict == REGRESS for r in scored)
+    node_ratios = [r.cmp.node_ratio for r in scored if r.cmp.node_ratio is not None]
+    wall_ratios = [r.cmp.wall_ratio for r in scored if r.cmp.wall_ratio is not None]
+    return CapStats(
+        structural_prevalence=len(sub),
+        scored=n,
+        benefit_count=benefit,
+        regression_count=regress,
+        benefit_fraction=(benefit / n) if n else None,
+        regression_rate=(regress / n) if n else None,
+        geomean_node_ratio=geomean(node_ratios),
+        geomean_wall_ratio=geomean(wall_ratios),
+        benefit_instances=[r.instance for r in scored if r.cmp.verdict == BENEFIT],
+        regression_instances=[r.instance for r in scored if r.cmp.verdict == REGRESS],
+    )
+
+
+def run_arm(
+    instances: list[Instance],
+    nl_dir: Path,
+    arm: str,
+    tl: float,
+    off_cache: dict[str, SolveRun] | None = None,
+    progress: bool = True,
+) -> list[ArmRow]:
+    """Solve every instance OFF (control) and ON (this arm's env flags).
+
+    ``off_cache`` lets callers reuse one OFF control solve across multiple arms
+    (the OFF solve is identical for every arm, so a per-flag sweep pays for it
+    once). Mutated in place with each computed control run.
+    """
+    env_on = ARMS[arm]["env"]
+    rows: list[ArmRow] = []
+    for idx, inst in enumerate(instances, 1):
+        nl_path = nl_dir / f"{inst.name}.nl"
+        maximize = nl_is_maximize(nl_path)
+        if off_cache is not None and inst.name in off_cache:
+            off = off_cache[inst.name]
+        else:
+            off = run_discopt(nl_path, tl, extra_env=None)
+            if off_cache is not None:
+                off_cache[inst.name] = off
+        on = run_discopt(nl_path, tl, extra_env=(env_on or None))
+        viol = check_soundness(inst, off, "off", maximize) + check_soundness(
+            inst, on, arm, maximize
+        )
+        cmp = compare(off, on, inst.name)
+        rows.append(
+            ArmRow(
+                instance=inst.name,
+                probtype=inst.probtype,
+                nvars=inst.nvars,
+                oracle=inst.oracle,
+                dual=inst.dual,
+                maximize=maximize,
+                psd_struct=inst.psd_struct,
+                reduce_struct=inst.reduce_struct,
+                off=off,
+                on=on,
+                cmp=cmp,
+                violations=viol,
+            )
+        )
+        if progress:
+            vtag = "  !!VIOL" if viol else ""
+            struct = "★" if _arm_struct_ok(arm, inst) else "·"
+            print(
+                f"[{arm}] [{idx:2}/{len(instances)}] {inst.name:22} {struct} "
+                f"OFF {off.status[:8]:8} {off.node_count:5}n {off.wall_time:5.1f}s | "
+                f"ON {on.status[:8]:8} {on.node_count:5}n {on.wall_time:5.1f}s "
+                f"-> {cmp.verdict}{vtag}",
+                flush=True,
+            )
+    return rows
 
 
 def verdict_line(name: str, stats: CapStats, total_n: int) -> str:
@@ -978,6 +1165,17 @@ def main() -> int:
         action="store_true",
         help="print the selected instance list and structural prevalence, then exit (no solves)",
     )
+    ap.add_argument(
+        "--arms",
+        type=str,
+        default=None,
+        help=(
+            "comma-separated per-flag arms to run in ISOLATION instead of the "
+            f"bundled OFF-vs-ON sweep (choices: {','.join(GRADUATION_ARMS)},all). "
+            "Each arm sets only its capability's env flags; the OFF control is "
+            "shared across arms. Emits a per-arm CapStats JSON."
+        ),
+    )
     args = ap.parse_args()
 
     corpus = Path(os.path.expanduser(args.corpus))
@@ -1014,6 +1212,70 @@ def main() -> int:
                 flush=True,
             )
         return 0
+
+    # --- Per-flag arms mode (G1.2) --------------------------------------- #
+    if args.arms:
+        requested = [a.strip() for a in args.arms.split(",") if a.strip()]
+        unknown = [a for a in requested if a not in ARMS or a == "off"]
+        if unknown:
+            print(f"# ERROR: unknown/invalid arm(s): {unknown}", file=sys.stderr)
+            return 2
+        off_cache: dict[str, SolveRun] = {}
+        arms_out: dict[str, dict] = {}
+        total_viol = 0
+        for arm in requested:
+            arm_rows = run_arm(instances, nl_dir, arm, args.time_limit, off_cache=off_cache)
+            stats = arm_stats(arm_rows, arm)
+            viol = [asdict(v) for r in arm_rows for v in r.violations]
+            total_viol += len(viol)
+            arms_out[arm] = {
+                "env": ARMS[arm]["env"],
+                "regime": ARMS[arm]["regime"],
+                "struct_attr": ARMS[arm]["struct_attr"],
+                "stats": asdict(stats),
+                "violations": viol,
+                "rows": [
+                    {
+                        "instance": r.instance,
+                        "probtype": r.probtype,
+                        "nvars": r.nvars,
+                        "off": asdict(r.off),
+                        "on": asdict(r.on),
+                        "verdict": r.cmp.verdict,
+                        "node_ratio": r.cmp.node_ratio,
+                        "wall_ratio": r.cmp.wall_ratio,
+                        "reasons": r.cmp.reasons,
+                    }
+                    for r in arm_rows
+                ],
+            }
+        payload = {
+            "timestamp": ts,
+            "mode": "arms",
+            "n_requested": args.n,
+            "n_selected": len(instances),
+            "seed": args.seed,
+            "time_limit": args.time_limit,
+            "max_vars": args.max_vars,
+            "selection_meta": selection_meta,
+            "instances": [i.name for i in instances],
+            "arms": arms_out,
+            "n_violations": total_viol,
+        }
+        js = out_dir / f"generality_arms_{ts}.json"
+        js.write_text(json.dumps(payload, indent=2))
+        print("", flush=True)
+        for arm in requested:
+            s = arms_out[arm]["stats"]
+            print(
+                f"# arm {arm:20} scored {s['scored']:3} "
+                f"benefit {pct_or_dash(s['benefit_fraction'])} "
+                f"regression {pct_or_dash(s['regression_rate'])} "
+                f"viol {len(arms_out[arm]['violations'])}",
+                flush=True,
+            )
+        print(f"# ARMS JSON: {js}", flush=True)
+        return 1 if total_viol else 0
 
     rows: list[Row] = []
     for idx, inst in enumerate(instances, 1):
