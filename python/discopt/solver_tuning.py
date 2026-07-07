@@ -157,6 +157,28 @@ class SolverTuning:
     node_nlp_stride: int = field(default_factory=lambda: _env_int("DISCOPT_NODE_NLP_STRIDE", 4))
     """Solve the node NLP every k-th node (``DISCOPT_NODE_NLP_STRIDE``, default 4)."""
 
+    ils_solve_cap: int = field(default_factory=lambda: _env_int("DISCOPT_ILS_SOLVE_CAP", 2))
+    """Sub-NLP solve cap for the ``integer_local_search`` objective-descent
+    (``DISCOPT_ILS_SOLVE_CAP``, **default 2 = ON** since ILS-DEFAULT, #530-followup).
+
+    ``integer_local_search._objective_improve`` runs a first-improvement coordinate
+    descent over ``int_idx × {±1,±2}``, each move a full continuous-repair sub-NLP,
+    re-sweeping until its wall deadline. VOLUME-1 (#530) measured its incumbent hit
+    rate at **0 %** on every ILS-firing panel instance (the incumbent is already
+    found by the root multistart's first start) — the descent issues *hundreds* of
+    no-op sub-NLPs. This caps a single descent to ``ils_solve_cap × max(1, n_int)``
+    sub-NLP solves (a full first-improvement sweep or two — where any real gain
+    lands), keyed on the integer dimension, never an instance name (§0.2).
+
+    Default 2, broad-validated on a held-out integer MINLPLib sample
+    (``docs/dev/ils-default-validation-2026-07-06.md``): 0 lost incumbents, 0
+    soundness violations, geomean speedup on the ILS-firing subset. Set
+    ``DISCOPT_ILS_SOLVE_CAP=0`` (or ``ils_solve_cap=0``) to restore the old
+    UNCAPPED behavior — the debugging escape hatch, not a dead flag. Sound: capping
+    this descent only ever *weakens* the incumbent it might find (every point is
+    sub-NLP-verified and re-verified by ``inject_incumbent``); it never touches the
+    dual bound or the certificate (heuristic-policy regime, CLAUDE.md §5)."""
+
     obj_branch_priority: bool = field(
         default_factory=lambda: _env_flag("DISCOPT_OBJ_BRANCH_PRIORITY", default=False)
     )
@@ -193,6 +215,8 @@ class SolverTuning:
             raise ValueError(f"multilinear_rlt_max must be >= 1, got {self.multilinear_rlt_max}")
         if self.node_nlp_stride < 1:
             raise ValueError(f"node_nlp_stride must be >= 1, got {self.node_nlp_stride}")
+        if self.ils_solve_cap < 0:
+            raise ValueError(f"ils_solve_cap must be >= 0 (0 = uncapped), got {self.ils_solve_cap}")
         if self.node_bound_mode not in ("lp", "milp"):
             raise ValueError(
                 f"node_bound_mode must be 'lp' or 'milp', got {self.node_bound_mode!r}"

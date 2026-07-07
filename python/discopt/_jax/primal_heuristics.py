@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import itertools
 import math
-import os
 import time
 from dataclasses import dataclass, field
 from typing import Callable, Optional
@@ -33,23 +32,27 @@ from discopt.solvers import NLPResult, SolveStatus
 # incumbent — it can never inject a wrong one (inject_incumbent re-verifies).
 _HEURISTIC_NLP_MAX_ITER = 300
 
-# VOLUME-1 (docs/dev/nlp-solve-volume-2026-07-06.md): the objective-improvement
+# VOLUME-1 (docs/dev/nlp-solve-volume-2026-07-06.md) + ILS-DEFAULT
+# (docs/dev/ils-default-validation-2026-07-06.md): the objective-improvement
 # coordinate descent inside ``integer_local_search`` (``_objective_improve``) is
 # the single dominant NLP-solve SOURCE on the easy-panel instances BARON solves
 # sub-second — nvs06 runs 888 sub-NLP solves there (of 911 total), nvs08 779,
 # ex1224 217 — and its measured incumbent-improvement HIT RATE is 0 % on every
 # one of them (the incumbent is already found by the root multistart's first
 # start). Left uncapped, the descent keeps re-sweeping ``int_idx × {±1,±2}``
-# until its wall deadline (~9 s), issuing hundreds of no-op sub-NLPs. This flag
-# caps the number of sub-NLP solves the descent may issue to
-# ``_ILS_SOLVE_CAP_MULT × n_int`` (a small multiple of the integer dimension —
-# enough for a full first-improvement sweep or two, which is where any real gain
-# lands, but not the hundreds-of-solves plateau). Default OFF (0 ⇒ unlimited =
-# current behavior); set ``DISCOPT_ILS_SOLVE_CAP`` to a positive integer to arm
-# it. Sound: capping this descent only ever *weakens* the incumbent it might
-# find (the descent injects sub-NLP-verified points that B&B still re-verifies),
-# and it never touches the dual bound or the certificate.
-_ILS_SOLVE_CAP_MULT = int(os.environ.get("DISCOPT_ILS_SOLVE_CAP", "0"))
+# until its wall deadline (~9 s), issuing hundreds of no-op sub-NLPs. The cap
+# limits the number of sub-NLP solves a single descent may issue to
+# ``ils_solve_cap × n_int`` (a small multiple of the integer dimension — enough
+# for a full first-improvement sweep or two, which is where any real gain lands,
+# but not the hundreds-of-solves plateau). The value lives on
+# :class:`~discopt.solver_tuning.SolverTuning` (``ils_solve_cap``, **default 2 =
+# ON** as of ILS-DEFAULT, broad-validated on a held-out integer sample), with the
+# legacy ``DISCOPT_ILS_SOLVE_CAP`` env var as its default source; set it to 0 to
+# restore the old UNCAPPED behavior (the debugging escape hatch). Read per-solve
+# via ``solver_tuning.current()`` so it is per-``Model`` and thread-safe. Sound:
+# capping this descent only ever *weakens* the incumbent it might find (the
+# descent injects sub-NLP-verified points that B&B still re-verifies), and it
+# never touches the dual bound or the certificate.
 
 
 @dataclass
@@ -619,13 +622,17 @@ def integer_local_search(
         candidate and never affects the dual bound or certification."""
         bx = _round_clip(x_feas)
         best_x, best_obj = np.asarray(x_feas, dtype=np.float64).copy(), float(obj_feas)
-        # VOLUME-1 sub-NLP solve cap (default OFF). When armed, cap the number of
-        # continuous-repair sub-NLP solves this descent may issue to
-        # ``_ILS_SOLVE_CAP_MULT × n_int`` — a full first-improvement sweep or two
-        # — instead of re-sweeping until the wall deadline. Only the *extra*
-        # no-op solves past a couple of sweeps are cut (measured 0 % hit rate on
-        # the easy panel); the descent still injects any better point it finds.
-        _solve_cap = _ILS_SOLVE_CAP_MULT * max(1, n_int) if _ILS_SOLVE_CAP_MULT > 0 else None
+        # VOLUME-1 / ILS-DEFAULT sub-NLP solve cap (default ON, mult 2). Cap the
+        # number of continuous-repair sub-NLP solves this descent may issue to
+        # ``ils_solve_cap × n_int`` — a full first-improvement sweep or two —
+        # instead of re-sweeping until the wall deadline. Only the *extra* no-op
+        # solves past a couple of sweeps are cut (measured 0 % hit rate); the
+        # descent still injects any better point it finds. ``ils_solve_cap=0``
+        # restores the old uncapped behavior (escape hatch). Read per-solve.
+        from discopt import solver_tuning as _st
+
+        _ils_cap_mult = _st.current().ils_solve_cap
+        _solve_cap = _ils_cap_mult * max(1, n_int) if _ils_cap_mult > 0 else None
         _solves_used = 0
         improved = True
         while improved and time.perf_counter() < deadline:
