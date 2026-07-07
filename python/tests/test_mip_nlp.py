@@ -2119,6 +2119,39 @@ def test_mip_nlp_shot_direct_milp_routes_to_requested_backend(monkeypatch):
     assert result.mip_nlp_trace["summary"]["selected_strategy"] == "direct_milp"
 
 
+def test_mip_nlp_external_hooks_skip_shot_direct_routing(monkeypatch):
+    import discopt.solvers.oa as oa_module
+    from discopt.solvers.mip_nlp import solve_mip_nlp
+
+    calls = {}
+
+    def hook(ctx):
+        del ctx
+        return []
+
+    def fake_solve_oa(model, **kwargs):
+        del model
+        calls.update(kwargs)
+        return SolveResult(status="optimal", objective=0.0, bound=0.0, gap=0.0)
+
+    monkeypatch.setattr(oa_module, "solve_oa", fake_solve_oa)
+
+    result = solve_mip_nlp(
+        _binary_model("shot_hook_direct_fallback"),
+        method="oa",
+        mip_nlp_options={
+            "mip_nlp_profile": "shot",
+            "external_primal_candidate_hook": hook,
+        },
+    )
+
+    assert calls["external_primal_candidate_hook"] is hook
+    assert result.mip_nlp_trace["selected_strategy"] == "oa"
+    attempt = result.mip_nlp_trace["strategy_selection"]["direct_attempt"]
+    assert attempt["fallback_reason"] == "external_hooks_requested"
+    assert attempt["external_hooks"] == ["external_primal_candidate_hook"]
+
+
 def test_mip_nlp_shot_direct_miqp_routes_when_convex(monkeypatch):
     import discopt.solver as solver_module
     from discopt.solvers.mip_nlp import solve_mip_nlp
@@ -3643,6 +3676,277 @@ def test_fixed_nlp_candidate_manager_scheduling_modes():
         elapsed=0.0,
         has_solution_pool_candidate=True,
     )
+
+
+def test_external_primal_candidate_hook_validation_accepts_and_rejects():
+    from discopt.solvers.oa import _validate_external_primal_candidates
+
+    assert _validate_external_primal_candidates([], n_vars=2) == []
+
+    valid = _validate_external_primal_candidates(
+        [{"point": [1.0, 0.0], "objective": 2.5, "provider": "unit"}],
+        n_vars=2,
+    )
+
+    assert valid[0]["source"] == "external"
+    assert valid[0]["objective"] == pytest.approx(2.5)
+    assert valid[0]["provider"] == "unit"
+    assert np.asarray(valid[0]["point"]).tolist() == [1.0, 0.0]
+
+    with pytest.raises(ValueError, match="candidate 0 point has length 1; expected 2"):
+        _validate_external_primal_candidates([[1.0]], n_vars=2)
+    with pytest.raises(ValueError, match="candidate 0 point must contain only finite"):
+        _validate_external_primal_candidates([[np.inf, 0.0]], n_vars=2)
+
+
+def test_external_hyperplane_hook_validation_accepts_and_rejects():
+    from discopt.solvers.oa import _validate_external_hyperplanes
+
+    valid = _validate_external_hyperplanes(
+        [
+            {
+                "coefficients": [1.0, -1.0],
+                "rhs": 0.5,
+                "global_valid": False,
+                "supporting_point": [2.0, 1.0],
+            }
+        ],
+        n_vars=2,
+    )
+
+    assert np.asarray(valid[0]["coefficients"]).tolist() == [1.0, -1.0]
+    assert valid[0]["rhs"] == pytest.approx(0.5)
+    assert valid[0]["global_valid"] is False
+
+    with pytest.raises(ValueError, match="must include 'coefficients' or 'coeffs'"):
+        _validate_external_hyperplanes([{"rhs": 1.0}], n_vars=2)
+    with pytest.raises(ValueError, match="coefficients must be nonzero"):
+        _validate_external_hyperplanes([{"coefficients": [0.0, 0.0], "rhs": 1.0}], n_vars=2)
+
+
+def test_external_dual_bound_hook_validation_accepts_and_rejects():
+    from discopt.solvers.oa import _validate_external_dual_bound
+
+    valid = _validate_external_dual_bound(
+        {"bound": 1.25, "global_valid": False, "provider": "unit"}
+    )
+
+    assert valid["bound"] == pytest.approx(1.25)
+    assert valid["global_valid"] is False
+    assert valid["provider"] == "unit"
+
+    with pytest.raises(ValueError, match="bound must be finite"):
+        _validate_external_dual_bound(np.nan)
+    with pytest.raises(ValueError, match="global_valid must be a boolean"):
+        _validate_external_dual_bound({"bound": 1.0, "global_valid": "yes"})
+
+
+def test_external_termination_hook_validation_accepts_and_rejects():
+    from discopt.solvers.oa import _validate_external_termination
+
+    assert _validate_external_termination(True) is True
+    assert _validate_external_termination(False) is False
+
+    with pytest.raises(ValueError, match="return value must be a boolean"):
+        _validate_external_termination("stop")
+
+
+def test_oa_external_hooks_add_candidate_cut_and_bound(monkeypatch):
+    import discopt.solvers.oa as oa_module
+    from discopt.solvers import MILPResult, SolveStatus
+
+    m = _binary_model("external_hooks")
+    seen_events = []
+
+    def fake_master(*args, **kwargs):
+        del args, kwargs
+        return MILPResult(
+            status=SolveStatus.OPTIMAL,
+            x=np.array([0.0], dtype=float),
+            objective=0.0,
+            bound=-100.0,
+        )
+
+    def fake_nlp_subproblem(
+        evaluator,
+        lb,
+        ub,
+        int_indices,
+        x_master,
+        nlp_solver,
+        initial_point=None,
+        return_attempt=False,
+    ):
+        del evaluator, lb, ub, int_indices, nlp_solver, initial_point
+        point = np.asarray(x_master, dtype=float).copy()
+        if point[0] < 0.5:
+            attempt = oa_module._NLPAttempt(
+                x=None,
+                objective=None,
+                multipliers=None,
+                status=SolveStatus.INFEASIBLE,
+            )
+        else:
+            attempt = oa_module._NLPAttempt(
+                x=point,
+                objective=0.25,
+                multipliers=None,
+                status=SolveStatus.OPTIMAL,
+            )
+        if return_attempt:
+            return attempt
+        return attempt.x, attempt.objective
+
+    def primal_hook(ctx):
+        seen_events.append(ctx["event"])
+        assert ctx["solution_points"][0].tolist() == [0.0]
+        return [{"point": [1.0], "objective": 0.25, "provider": "unit"}]
+
+    def hyperplane_hook(ctx):
+        seen_events.append(ctx["event"])
+        assert ctx["master_point"].tolist() == [0.0]
+        return [{"coefficients": [1.0], "rhs": 0.75, "provider": "unit"}]
+
+    def dual_bound_hook(ctx):
+        seen_events.append(ctx["event"])
+        assert ctx["current_dual_bound"] == pytest.approx(-100.0)
+        return {"bound": -10.0, "provider": "unit"}
+
+    monkeypatch.setattr(oa_module, "_solve_nlp_relaxation", lambda *args, **kwargs: (None, None))
+    monkeypatch.setattr(oa_module, "_solve_master_milp", fake_master)
+    monkeypatch.setattr(oa_module, "_solve_nlp_subproblem", fake_nlp_subproblem)
+    monkeypatch.setattr(oa_module, "_solve_feasibility_subproblem", lambda *args, **kwargs: None)
+    monkeypatch.setattr(oa_module, "_add_oa_cuts", lambda *args, **kwargs: None)
+
+    result = oa_module.solve_oa(
+        m,
+        init_strategy="rNLP",
+        max_iterations=1,
+        gap_tolerance=0.0,
+        external_primal_candidate_hook=primal_hook,
+        external_hyperplane_hook=hyperplane_hook,
+        external_dual_bound_hook=dual_bound_hook,
+    )
+
+    assert seen_events == [
+        "external_dual_bound",
+        "external_hyperplane",
+        "external_primal_candidate",
+    ]
+    trace = result.mip_nlp_trace
+    summary = trace["summary"]
+    assert trace["certified_bound_source"] == "external"
+    assert summary["cut_source_counts"]["external"] == 1
+    assert summary["fixed_nlp_candidate_source_counts"]["external"] == 1
+    assert summary["fixed_nlp_call_source_counts"]["external"] == 1
+    assert summary["external_hooks"]["accepted_counts"] == {
+        "external_dual_bound": 1,
+        "external_hyperplane": 1,
+        "external_primal_candidate": 1,
+    }
+    calls = trace["iterations"][0]["fixed_nlp_calls"]
+    assert [call["source"] for call in calls] == ["mip_optimum", "external"]
+    assert trace["iterations"][0]["external_hooks"][1]["cuts_added"] == 1
+
+
+def test_oa_external_primal_hook_orders_maximize_objective_hints(monkeypatch):
+    import discopt.solvers.oa as oa_module
+    from discopt.solvers import MILPResult, SolveStatus
+
+    m = dm.Model("external_hook_maximize_objective")
+    x = m.binary("x", shape=(2,))
+    m.maximize(x[0] + 2.0 * x[1])
+    fixed_nlp_points = []
+
+    def fake_master(*args, **kwargs):
+        del args, kwargs
+        return MILPResult(
+            status=SolveStatus.OPTIMAL,
+            x=np.array([0.0, 0.0], dtype=float),
+            objective=0.0,
+            bound=-10.0,
+        )
+
+    def fake_nlp_subproblem(
+        evaluator,
+        lb,
+        ub,
+        int_indices,
+        x_master,
+        nlp_solver,
+        initial_point=None,
+        return_attempt=False,
+    ):
+        del evaluator, lb, ub, int_indices, nlp_solver, initial_point
+        point = np.asarray(x_master, dtype=float).copy()
+        fixed_nlp_points.append(point.tolist())
+        attempt = oa_module._NLPAttempt(
+            x=point,
+            objective=float(-(point[0] + 2.0 * point[1])),
+            multipliers=None,
+            status=SolveStatus.OPTIMAL,
+        )
+        if return_attempt:
+            return attempt
+        return attempt.x, attempt.objective
+
+    def primal_hook(ctx):
+        assert ctx["is_minimization"] is False
+        return [
+            {"point": [1.0, 0.0], "objective": 1.0},
+            {"point": [0.0, 1.0], "objective": 2.0},
+        ]
+
+    monkeypatch.setattr(oa_module, "_solve_nlp_relaxation", lambda *args, **kwargs: (None, None))
+    monkeypatch.setattr(oa_module, "_solve_master_milp", fake_master)
+    monkeypatch.setattr(oa_module, "_solve_nlp_subproblem", fake_nlp_subproblem)
+    monkeypatch.setattr(oa_module, "_solve_feasibility_subproblem", lambda *args, **kwargs: None)
+    monkeypatch.setattr(oa_module, "_add_oa_cuts", lambda *args, **kwargs: None)
+
+    oa_module.solve_oa(
+        m,
+        init_strategy="rNLP",
+        max_iterations=1,
+        gap_tolerance=0.0,
+        external_primal_candidate_hook=primal_hook,
+    )
+
+    assert fixed_nlp_points == [[0.0, 0.0], [0.0, 1.0], [1.0, 0.0]]
+
+
+def test_oa_termination_hook_stops_before_master(monkeypatch):
+    import discopt.solvers.oa as oa_module
+
+    m = _binary_model("external_termination")
+    contexts = []
+
+    def fail_master(*args, **kwargs):
+        del args, kwargs
+        raise AssertionError("master solve should not run after user termination")
+
+    def termination_hook(ctx):
+        contexts.append(ctx)
+        return True
+
+    monkeypatch.setattr(oa_module, "_solve_nlp_relaxation", lambda *args, **kwargs: (None, None))
+    monkeypatch.setattr(oa_module, "_solve_master_milp", fail_master)
+    monkeypatch.setattr(oa_module, "_add_oa_cuts", lambda *args, **kwargs: None)
+
+    result = oa_module.solve_oa(
+        m,
+        init_strategy="rNLP",
+        max_iterations=3,
+        termination_hook=termination_hook,
+    )
+
+    assert contexts[0]["event"] == "termination"
+    trace = result.mip_nlp_trace
+    assert trace["termination_reason"] == "user_termination"
+    assert trace["iterations"][0]["master_status"] == "not_run"
+    assert trace["iterations"][0]["external_hooks"] == [
+        {"hook": "termination", "status": "terminate", "requested": True}
+    ]
+    assert trace["summary"]["external_hooks"]["accepted_counts"] == {"termination": 1}
 
 
 def test_oa_fixed_nlp_candidate_trace_and_safe_failed_cuts(monkeypatch):

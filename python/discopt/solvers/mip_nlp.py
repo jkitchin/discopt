@@ -22,6 +22,14 @@ SUPPORTED_METHODS = _IMPLEMENTED_METHODS | frozenset(_RESERVED_METHOD_ISSUES)
 _METHOD_ALIASES = {
     "lp/nlp-bb": "lp_nlp_bb",
 }
+_EVENT_HOOK_OPTION_KEYS = frozenset(
+    {
+        "external_primal_candidate_hook",
+        "external_hyperplane_hook",
+        "external_dual_bound_hook",
+        "termination_hook",
+    }
+)
 _OA_OPTION_KEYS = frozenset(
     {
         "equality_relaxation",
@@ -42,6 +50,7 @@ _OA_OPTION_KEYS = frozenset(
         "milp_solver",
         "solution_pool",
         "num_solution_iteration",
+        *_EVENT_HOOK_OPTION_KEYS,
         *FP_OPTION_KEYS,
     }
 )
@@ -546,6 +555,14 @@ def _try_solve_shot_direct_strategy(
     from discopt._jax.problem_classifier import ProblemClass, classify_problem
 
     backend = _normalize_direct_backend(options)
+    requested_hooks = sorted(key for key in _EVENT_HOOK_OPTION_KEYS if options.get(key) is not None)
+    if requested_hooks:
+        return None, {
+            "candidate_strategy": "direct",
+            "backend": backend,
+            "fallback_reason": "external_hooks_requested",
+            "external_hooks": requested_hooks,
+        }
     try:
         problem_class = classify_problem(model)
     except Exception as exc:
