@@ -95,12 +95,11 @@ Useful OA options include:
 ## Experimental SHOT profile
 
 `mip_nlp_profile="shot"` enables validated SHOT-parity controls and attaches a
-structured `result.mip_nlp_trace` payload. The profile is experimental: some
-controls already attach SHOT-style initialization, rootsearch, and ESH cut
-behavior, while others are validated and traced so later PRs can add repair,
-convex-bounding, reformulation policy, and adaptive master behavior behind a
-stable interface. Default MIP-NLP behavior is unchanged when the profile is not
-set.
+structured `result.mip_nlp_trace` payload. The profile is experimental, but the
+public option names and trace envelope are stable enough for integration testing:
+some options route active behavior, and the rest are validated and recorded so a
+run cannot silently ignore requested SHOT policy. Default MIP-NLP behavior is
+unchanged when the profile is not set.
 
 ```python
 result = model.solve(
@@ -116,24 +115,31 @@ result = model.solve(
 
 Accepted SHOT-profile controls are:
 
-| Option | Accepted values |
-| --- | --- |
-| `tree_strategy` | `"auto"`, `"multi_tree"`, `"single_tree"` |
-| `cut_strategy` | `"auto"`, `"oa"`, `"ecp"`, `"esh"` |
-| `objective_epigraph`, `anti_epigraph` | `"auto"`, `"off"`, `"on"` |
-| `nonlinear_partitioning`, `quadratic_partitioning` | `"auto"`, `"off"`, `"static"`, `"adaptive"` |
-| `absolute_value_auxiliaries`, `monomial_extraction`, `signomial_extraction` | `"auto"`, `"off"`, `"on"` |
-| `integer_bilinear_strategy` | `"auto"`, `"off"`, `"binary_expansion"`, `"mccormick"` |
-| `integer_bilinear_max_bits` | Positive integer or `None` |
-| `quadratic_extraction` | `"auto"`, `"off"`, `"native"`, `"relaxation"` |
-| `direct_quadratic_routing` | `"auto"`, `"off"` |
-| `rootsearch_strategy` | `"auto"`, `"none"`, `"bisection"`, `"toms748"` |
-| `fixed_nlp_strategy` | `"auto"`, `"none"`, `"always"`, `"adaptive"`, `"iteration"`, `"time"`, `"solution_pool"` |
-| `solution_pool_capacity`, `hyperplane_max_per_iter` | Positive integer or `None` |
-| `hyperplane_selection_factor` | Floating-point factor in `(0, 1]` |
-| `relaxation_phase` | `"auto"`, `"off"`, `"initial"`, `"periodic"` |
-| `mip_solution_limit_strategy` | `"auto"`, `"none"`, `"static"`, `"adaptive"`, `"force_optimal"` |
-| `convex_bounding`, `master_repair`, `reduction_cuts` | Boolean |
+| Option | Default | Accepted values | Purpose |
+| --- | --- | --- | --- |
+| `tree_strategy` | `"multi_tree"` | `"auto"`, `"multi_tree"`, `"single_tree"` | Select the standard multi-tree loop or the Gurobi-backed single-tree callback path. |
+| `cut_strategy` | `"auto"` | `"auto"`, `"oa"`, `"ecp"`, `"esh"` | Choose ordinary OA/ECP separation or SHOT-style extended supporting hyperplanes. |
+| `objective_epigraph` | `"auto"` | `"auto"`, `"off"`, `"on"` | Permit the objective-defining-equality epigraph pass for minimization objectives. |
+| `anti_epigraph` | `"auto"` | `"auto"`, `"off"`, `"on"` | Permit the corresponding anti-epigraph pass for maximization objectives. |
+| `nonlinear_partitioning` | `"auto"` | `"auto"`, `"off"`, `"static"`, `"adaptive"` | Record SHOT nonlinear-partitioning policy; GOA/AMP owns the active partitioning implementation. |
+| `quadratic_partitioning` | `"auto"` | `"auto"`, `"off"`, `"static"`, `"adaptive"` | Record SHOT quadratic-partitioning policy for quadratic relaxation routing. |
+| `absolute_value_auxiliaries` | `"auto"` | `"auto"`, `"off"`, `"on"` | Record whether SHOT-style absolute-value auxiliaries are requested. |
+| `monomial_extraction` | `"auto"` | `"auto"`, `"off"`, `"on"` | Record monomial extraction policy; current relaxations already classify integer-power terms where supported. |
+| `signomial_extraction` | `"auto"` | `"auto"`, `"off"`, `"on"` | Record signomial extraction policy for positive-domain monomial/posynomial recognition. |
+| `integer_bilinear_strategy` | `"auto"` | `"auto"`, `"off"`, `"binary_expansion"`, `"mccormick"` | Select the policy for bounded integer-factor bilinear terms. |
+| `integer_bilinear_max_bits` | `12` | Positive integer or `None` | Cap binary expansion width for integer-bilinear reformulations. |
+| `quadratic_extraction` | `"auto"` | `"auto"`, `"off"`, `"native"`, `"relaxation"` | Record whether quadratic structure should be used natively or relaxed. |
+| `direct_quadratic_routing` | `"auto"` | `"auto"`, `"off"` | Try direct NLP/LP/MILP/QP/QCP-class routing before OA/GOA fallback when safe. |
+| `rootsearch_strategy` | `"auto"` | `"auto"`, `"none"`, `"bisection"`, `"toms748"` | Select the segment search used to move from stored interiors toward violated candidates. |
+| `fixed_nlp_strategy` | `"adaptive"` | `"auto"`, `"none"`, `"always"`, `"adaptive"`, `"iteration"`, `"time"`, `"solution_pool"` | Schedule fixed-integer NLP calls from master, relaxation, pool, rootsearch, or external candidates. |
+| `solution_pool_capacity` | `None` | Positive integer or `None` | Request and cap Gurobi master solution-pool candidates for fixed-NLP processing. |
+| `hyperplane_max_per_iter` | `None` | Positive integer or `None` | Cap selected ESH/objective-rootsearch hyperplanes per iteration. |
+| `hyperplane_selection_factor` | `1.0` | Floating-point factor in `(0, 1]` | Keep the top fraction of candidate hyperplanes by violation. |
+| `relaxation_phase` | `"auto"` | `"auto"`, `"off"`, `"initial"`, `"periodic"` | Run the integrality-relaxed POA seeding pass initially or before each integer master iteration. |
+| `mip_solution_limit_strategy` | `"adaptive"` | `"auto"`, `"none"`, `"static"`, `"adaptive"`, `"force_optimal"` | Request Gurobi `SolutionLimit` behavior for SHOT-style early master solves. |
+| `convex_bounding` | `False` | Boolean | Record certified-bound policy intent; the trace reports secondary certified-bound solves whenever local cuts make the primary bound heuristic. |
+| `master_repair` | `False` | Boolean | Retry infeasible SHOT-profile masters with safe control resets and cut slacks. |
+| `reduction_cuts` | `False` | Boolean | Add local primal reduction cuts on heuristic nonconvex masters when the objective row is exact. |
 
 Passing one of these controls without `mip_nlp_profile="shot"` raises a
 `ValueError`, which prevents accidental no-op configuration.
@@ -208,6 +214,13 @@ row when the master objective row is exact. These reduction cuts are traced as
 local, non-global cuts, so reported bounds remain heuristic unless a separate
 certified bounding path is active.
 
+When local ESH, reduction, external, or integer-exclusion cuts make the primary
+master bound heuristic, the SHOT profile builds a secondary certified-bound
+master from globally valid provenance rows only. Its per-iteration
+`convex_bounding` trace records whether the solve was attempted, which local or
+integer cuts were excluded, whether a certified bound was updated, and why the
+step was skipped or unavailable.
+
 `fixed_nlp_strategy="solution_pool"` or an explicit `solution_pool_capacity`
 uses the Gurobi solution-pool candidate ingestion path when
 `milp_solver="gurobi"`. Fixed-NLP candidates are ordered deterministically from
@@ -228,9 +241,42 @@ events, source counts, node counts, and whether an incumbent MIP start was
 applied. Non-Gurobi MILP backends are explicitly MultiTree-only for this profile
 until they expose equivalent persistent callback support.
 
-The remaining reformulation and convex-bounding controls are validated and
-traced under the SHOT profile so follow-up SHOT parity PRs can attach behavior
-without changing the public option names.
+Multi-tree OA also exposes optional external event hooks:
+`external_primal_candidate_hook`, `external_hyperplane_hook`,
+`external_dual_bound_hook`, and `termination_hook`. Each hook receives a
+read-only context with iteration, elapsed time, incumbent and bound data, master
+points, candidate points, and current cut/NLP counters. Returned payloads are
+validated before they can add fixed-NLP candidates, add master cuts, update a
+dual bound, or request termination. If external hooks are present, SHOT direct
+routing falls back to the OA/GOA loop so those events are not bypassed.
+
+The stable `result.mip_nlp_trace` top-level fields are:
+
+| Field | Meaning |
+| --- | --- |
+| `schema_version`, `solver`, `method`, `profile` | Trace envelope identity. |
+| `shot_options` | Normalized SHOT-profile controls for the run. |
+| `selected_strategy`, `strategy_selection` | Strategy chosen by the MIP-NLP facade, including direct-routing fallback details when applicable. |
+| `iterations` | Per-iteration records for multi-tree or single-tree execution. |
+| `summary` | Aggregated counts for MIP/NLP solves, cuts, candidates, callbacks, hooks, and degraded backend features. |
+| `termination_reason` | Internal reason for stopping, such as `gap`, `time_limit`, `iteration_limit`, `master_infeasible`, or `user_termination`. |
+| `master_bound_valid`, `gap_certified`, `bound_validity` | Certification state for the reported bound and gap. `bound_validity` is `global`, `heuristic`, or `unavailable`. |
+| `final_lb`, `final_ub`, `final_gap` | Certified bound, incumbent, and relative gap when available. |
+| `heuristic_lb`, `heuristic_gap` | Best heuristic master bound and gap when local cuts are present. |
+| `certified_bound_source`, `heuristic_bound_source` | Source that last improved each bound, for example `primary_master`, `initial_poa`, `convex_bounding`, or `external`. |
+| `initial_poa` | Initial relaxation-phase status, cuts, bound update, stored interiors, and fallback reason. |
+| `solution_pool_degraded_reason` | Reason a requested solution-pool strategy could not be applied on the selected backend. |
+
+Multi-tree iteration records include `index`, `master_status`, `lb_before`,
+`ub_before`, `lb`, `ub`, `gap`, cut/provenance counts,
+`cuts_added_by_source`, NLP and feasibility-subproblem counts,
+`solution_pool_candidates`, `fixed_nlp_candidates`, `fixed_nlp_calls`,
+`fixed_nlp_scheduler`, `node_count`, `relaxation_phase`, `master_controls`,
+`convex_bounding`, `repair_actions`, `reduction_cuts`, `external_hooks`,
+optional `esh` hyperplane/rootsearch events, and an iteration-local
+`termination_reason` when the loop stops there. Single-tree traces use the same
+envelope and record callback-specific `callback_events`, `callback_stats`, node
+counts, `mip_start_applied`, and cut-source summaries.
 
 Top-level aliases override duplicate entries in `mip_nlp_options`:
 

@@ -26,6 +26,11 @@ def test_shot_parity_fixture_set_covers_issue_acceptance_classes():
     assert any(f.expected_certification == "heuristic" for f in fixtures)
     assert all("time_limit" in fixture.solve_options for fixture in fixtures)
 
+    by_key = {fixture.key: fixture for fixture in fixtures}
+    assert by_key["convex_minlp"].solve_options["mip_nlp_profile"] == "shot"
+    assert by_key["convex_minlp"].solve_options["direct_quadratic_routing"] == "off"
+    assert by_key["miqp"].solve_options["mip_nlp_profile"] == "shot"
+
 
 def test_shot_unavailable_result_records_explicit_caveat(tmp_path):
     module = _load_baseline_module()
