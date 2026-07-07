@@ -256,6 +256,10 @@ class MccormickLPRelaxer:
             "psd": 0.0,
             "rlt": 0.0,
         }
+        # THRU-3: count of nodes where the DISCOPT_SQUARE_COST_GATE gate fired
+        # (budget or diminishing-returns early-exit). Pure instrumentation; used to
+        # prove the default-OFF gate actually engages. Zero on the default path.
+        self._square_gate_fires: int = 0
         # Spatial-BB uses standard McCormick globally — no partitioning here.
         self._disc = DiscretizationState(partitions={})
         self._n_orig = sum(v.size for v in model._variables)
@@ -1244,9 +1248,34 @@ class MccormickLPRelaxer:
                     milp._b_ub = np.concatenate([milp._b_ub, b])
 
             tol = 1e-7
+            # Cost-aware gate (THRU-3, DISCOPT_SQUARE_COST_GATE, default OFF). This
+            # per-node loop is the ungated twin of the PSD loop (THRU-2a): both run
+            # up to 8 full MILP re-solves per node, and THRU-3 measured *this* one —
+            # not PSD — as the dominant per-node cost on dense integer-product QPs
+            # (nvs24/nvs19). When on, cap this node's square-separation wall to
+            # ``budget × base_solve_wall`` and abandon on per-round diminishing
+            # returns. SOUND: dropping tangent cuts can only loosen the relaxation —
+            # never cut a feasible point or cross the optimum. The gate only ever
+            # *shortens* the loop, so the default (gate-off) path is bit-identical to
+            # the pre-THRU-3 code. Keys purely on observed per-node cost/bound-delta
+            # (§0.2, general). See docs/dev/thru3-node-decomp-2026-07-07.md.
+            _tun = _tuning()
+            _gate = _tun.square_cost_gate
+            _gate_budget = _tun.square_cost_gate_budget
+            _gate_tau = _tun.square_cost_gate_tau
+            _sq_t0 = time.perf_counter()
+            _base_solve_wall: Optional[float] = None
             for _round in range(8):
                 # Each round costs a full re-solve; stop once the budget is spent.
                 if deadline is not None and time.perf_counter() >= deadline:
+                    break
+                if (
+                    _gate
+                    and _base_solve_wall is not None
+                    and (time.perf_counter() - _sq_t0) > _gate_budget * _base_solve_wall
+                ):
+                    # Per-node square-separation wall budget spent — stop.
+                    self._square_gate_fires += 1
                     break
                 x = np.asarray(res.x, dtype=np.float64)
                 rows: list[np.ndarray] = []
@@ -1268,16 +1297,26 @@ class MccormickLPRelaxer:
                         rhs.append(x0 * x0)
                 if not rows:
                     break
+                _lb_before = res.objective if _gate else None
                 _append(rows, rhs)
                 _tl = (
                     None
                     if deadline is None
                     else max(deadline - time.perf_counter(), _SOLVE_DEADLINE_FLOOR_S)
                 )
+                _solve_t0 = time.perf_counter()
                 new_res = milp.solve(time_limit=_tl, backend=self._backend)
+                if _gate and _base_solve_wall is None:
+                    _base_solve_wall = max(time.perf_counter() - _solve_t0, 1e-4)
                 if new_res.status != "optimal" or new_res.objective is None:
                     break
                 res = new_res
+                if _gate and _lb_before is not None:
+                    _delta = new_res.objective - _lb_before
+                    if _delta <= _gate_tau * (1.0 + abs(_lb_before)):
+                        # Diminishing returns — abandon the remaining rounds.
+                        self._square_gate_fires += 1
+                        break
             return res
         except Exception:
             return res

@@ -7935,6 +7935,11 @@ def solve_model(
         for _sfam, _stime in _mc_lp_relaxer._sep_timers.items():
             if _stime > 0.0:
                 _solver_stats[f"separate/{_sfam}"] = float(_stime)
+        # THRU-3: surface the square-gate fire count so the default-OFF gate is
+        # proven to engage when enabled (0 on the default path).
+        _sqf = int(getattr(_mc_lp_relaxer, "_square_gate_fires", 0))
+        if _sqf > 0:
+            _solver_stats["gate/square_fires"] = float(_sqf)
 
     return SolveResult(
         status=status,
