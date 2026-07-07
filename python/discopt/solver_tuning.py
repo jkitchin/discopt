@@ -100,24 +100,32 @@ class SolverTuning:
     )
     """Edge-concave aggregation cuts (``DISCOPT_EDGE_CONCAVE``, default on)."""
 
-    # --- cost-aware PSD moment-cut gate (THRU-2a, default OFF) -----------------
+    # --- cost-aware PSD moment-cut gate (THRU-2a; G1.3 graduated default-ON) ----
     psd_cost_gate: bool = field(
-        default_factory=lambda: _env_flag("DISCOPT_PSD_COST_GATE", default=False)
+        default_factory=lambda: _env_flag("DISCOPT_PSD_COST_GATE", default=True)
     )
     """Adaptive cost-aware gate on the per-node PSD (moment) cut separation loop
-    (``DISCOPT_PSD_COST_GATE``, default OFF). PSD separation dominates the QCQP
-    root wall (~60% on nvs17/19/24 per THRU-1) while the certified bound is set by
-    McCormick+RLT and reached by branching when PSD is absent, so unbudgeted PSD
-    *starves the tree search*. When on, this bounds the wall each node's PSD loop
-    may spend to :attr:`psd_cost_gate_budget` × that node's own base LP-solve wall,
-    and abandons the loop early once a round's relative LP-bound improvement falls
-    below :attr:`psd_cost_gate_tau` (diminishing returns). It gates ONLY the PSD
+    (``DISCOPT_PSD_COST_GATE``, default **ON** since G1.3; ``DISCOPT_PSD_COST_GATE=0``
+    is the escape hatch). PSD separation dominates the QCQP root wall (~60% on
+    nvs17/19/24 per THRU-1) while the certified bound is set by McCormick+RLT and
+    reached by branching when PSD is absent, so unbudgeted PSD *starves the tree
+    search*. When on, this bounds the wall each node's PSD loop may spend to
+    :attr:`psd_cost_gate_budget` × that node's own base LP-solve wall, and abandons
+    the loop early once a round's relative LP-bound improvement falls below
+    :attr:`psd_cost_gate_tau` (diminishing returns). It gates ONLY the PSD
     (moment-cut) loop — the univariate-square separator was measured to over-reach
     onto non-QCQP instances (tspn05 optimal→feasible), so it is left untouched.
     Keys purely on observed per-node cost/bound-delta — never on instance
     name/shape (§0.2). SOUND by construction: dropping valid cuts can only loosen
-    the relaxation, never cut a feasible point or cross the optimum. Bound-changing
-    → default-OFF until nightly green (CLAUDE.md §5)."""
+    the relaxation, never cut a feasible point or cross the optimum.
+
+    Graduated to default-ON (G1.3-redo, post-C-38) on gate evidence: the isolated
+    held-out arm (N=40, seed 0, tl 25 s) verdicts eligible — 0 soundness
+    violations, cert-neutral (bound-changing regime), regression 0 % — plus the
+    bound-changing verification (differential dual bound a valid underestimator
+    that never crosses =opt= on nvs17/ex5_3_3; feasible-point sample recovers the
+    identical incumbent ON vs OFF). See
+    ``docs/dev/flag-graduation-redo-2026-07-07.md``."""
 
     psd_cost_gate_budget: float = field(
         default_factory=lambda: _env_float("DISCOPT_PSD_COST_GATE_BUDGET", 1.0)

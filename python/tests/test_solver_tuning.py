@@ -38,8 +38,9 @@ def test_defaults_match_legacy_env_defaults():
     assert t.rlt is False
     assert t.lifted_fbbt is False
     assert t.trilinear_nested is False
-    # THRU-2a cost-aware PSD gate: default OFF, budget 1.0, tau 1e-4.
-    assert t.psd_cost_gate is False
+    # THRU-2a cost-aware PSD gate: default ON since G1.3 (graduated, gate-validated
+    # post-C-38); budget 1.0, tau 1e-4.
+    assert t.psd_cost_gate is True
     assert t.psd_cost_gate_budget == 1.0
     assert t.psd_cost_gate_tau == 1e-4
 
@@ -59,6 +60,8 @@ def test_defaults_match_legacy_env_defaults():
         ("DISCOPT_SQUARE_SEPARATE", "0", "square_separate", False),
         ("DISCOPT_LP_WARMSTART", "0", "lp_warmstart", False),
         ("DISCOPT_PSD_COST_GATE", "1", "psd_cost_gate", True),
+        # G1.3: graduated default-ON, so "0" is the escape hatch that restores OFF.
+        ("DISCOPT_PSD_COST_GATE", "0", "psd_cost_gate", False),
         ("DISCOPT_PSD_COST_GATE_BUDGET", "0.25", "psd_cost_gate_budget", 0.25),
         ("DISCOPT_PSD_COST_GATE_TAU", "1e-3", "psd_cost_gate_tau", 1e-3),
     ],
@@ -197,6 +200,17 @@ def test_psd_cost_gate_is_sound_and_bound_valid():
         MccormickLPRelaxer(_build())  # constructs without error under the flag
     finally:
         reset_current(token)
+
+
+def test_psd_cost_gate_default_on_and_escape_hatch(monkeypatch):
+    """G1.3 (post-C-38): the cost-aware PSD gate is ON by default, and
+    ``DISCOPT_PSD_COST_GATE=0`` is the escape hatch that restores the old OFF
+    behavior. Env is resolved at construction, so a fresh ``SolverTuning`` picks up
+    the hatch."""
+    monkeypatch.delenv("DISCOPT_PSD_COST_GATE", raising=False)
+    assert SolverTuning().psd_cost_gate is True  # on by default
+    monkeypatch.setenv("DISCOPT_PSD_COST_GATE", "0")
+    assert SolverTuning().psd_cost_gate is False  # hatch restores off
 
 
 def test_ils_cap_read_site_consults_published_tuning():
