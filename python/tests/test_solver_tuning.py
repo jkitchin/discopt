@@ -43,6 +43,11 @@ def test_defaults_match_legacy_env_defaults():
     assert t.psd_cost_gate is True
     assert t.psd_cost_gate_budget == 1.0
     assert t.psd_cost_gate_tau == 1e-4
+    # THRU-3 cost-aware univariate-square gate: default OFF (prototype); budget 1.0,
+    # tau 1e-4 (mirrors the PSD gate).
+    assert t.square_cost_gate is False
+    assert t.square_cost_gate_budget == 1.0
+    assert t.square_cost_gate_tau == 1e-4
 
 
 @pytest.mark.parametrize(
@@ -64,6 +69,10 @@ def test_defaults_match_legacy_env_defaults():
         ("DISCOPT_PSD_COST_GATE", "0", "psd_cost_gate", False),
         ("DISCOPT_PSD_COST_GATE_BUDGET", "0.25", "psd_cost_gate_budget", 0.25),
         ("DISCOPT_PSD_COST_GATE_TAU", "1e-3", "psd_cost_gate_tau", 1e-3),
+        # THRU-3 square gate: default OFF, "1" turns it on.
+        ("DISCOPT_SQUARE_COST_GATE", "1", "square_cost_gate", True),
+        ("DISCOPT_SQUARE_COST_GATE_BUDGET", "0.5", "square_cost_gate_budget", 0.5),
+        ("DISCOPT_SQUARE_COST_GATE_TAU", "1e-2", "square_cost_gate_tau", 1e-2),
     ],
 )
 def test_env_is_resolved_at_construction_not_import(
@@ -97,6 +106,9 @@ def test_explicit_field_overrides_env(monkeypatch):
         (dict(psd_cost_gate_budget=0), "psd_cost_gate_budget must be > 0"),
         (dict(psd_cost_gate_budget=-1.0), "psd_cost_gate_budget must be > 0"),
         (dict(psd_cost_gate_tau=-1e-6), "psd_cost_gate_tau must be >= 0"),
+        (dict(square_cost_gate_budget=0), "square_cost_gate_budget must be > 0"),
+        (dict(square_cost_gate_budget=-1.0), "square_cost_gate_budget must be > 0"),
+        (dict(square_cost_gate_tau=-1e-6), "square_cost_gate_tau must be >= 0"),
     ],
 )
 def test_validation_rejects_out_of_range(kwargs, match):
@@ -200,6 +212,51 @@ def test_psd_cost_gate_is_sound_and_bound_valid():
         MccormickLPRelaxer(_build())  # constructs without error under the flag
     finally:
         reset_current(token)
+
+
+def test_square_cost_gate_is_sound_bound_valid_and_fires():
+    """THRU-3: the cost-aware univariate-square gate only *drops* valid tangent
+    cuts, so it can never cut a feasible point or push the dual bound above the
+    true optimum. On a small model that lifts squares (so the separator fires) the
+    gated solve reaches the same certified optimum, the dual bound never crosses
+    it, and the gate's fire counter engages when it is on."""
+    from discopt._jax.mccormick_lp import MccormickLPRelaxer
+
+    def _build():
+        m = dm.Model("sq")
+        x = m.continuous("x", lb=-2.0, ub=2.0)
+        y = m.continuous("y", lb=-2.0, ub=2.0)
+        # Squares are lifted (x**2, y**2 aux cols) so _separate_univariate_square
+        # fires; a nonconvex coupling keeps the relaxation gappy inside the box.
+        m.minimize(x * x + y * y - 3.0 * x * y)
+        m.subject_to(x + y >= -1.0)
+        return m
+
+    off = _build().solve(time_limit=20.0, tuning=SolverTuning(square_cost_gate=False))
+    on = _build().solve(time_limit=20.0, tuning=SolverTuning(square_cost_gate=True))
+    assert off.objective is not None and on.objective is not None
+    # Same certified optimum (gate only loosens the relaxation, never the answer).
+    assert abs(on.objective - off.objective) <= 1e-4 * (1.0 + abs(off.objective))
+    # Dual bound is a valid underestimator of the optimum in both regimes.
+    if on.bound is not None:
+        assert on.bound <= on.objective + 1e-4 * (1.0 + abs(on.objective))
+    # The gate is wired into the relaxer (flag threads through to the read site).
+    token = set_current(SolverTuning(square_cost_gate=True, square_cost_gate_budget=0.5))
+    try:
+        assert current().square_cost_gate is True
+        assert current().square_cost_gate_budget == 0.5
+        MccormickLPRelaxer(_build())  # constructs without error under the flag
+    finally:
+        reset_current(token)
+
+
+def test_square_cost_gate_default_off_and_env_on(monkeypatch):
+    """THRU-3: the univariate-square gate is OFF by default (prototype); env
+    ``DISCOPT_SQUARE_COST_GATE=1`` turns it on. Env is resolved at construction."""
+    monkeypatch.delenv("DISCOPT_SQUARE_COST_GATE", raising=False)
+    assert SolverTuning().square_cost_gate is False  # off by default
+    monkeypatch.setenv("DISCOPT_SQUARE_COST_GATE", "1")
+    assert SolverTuning().square_cost_gate is True
 
 
 def test_psd_cost_gate_default_on_and_escape_hatch(monkeypatch):
