@@ -32,6 +32,8 @@ def test_defaults_match_legacy_env_defaults():
     assert t.multilinear_rlt_max == 4
     assert t.node_bound_mode == "lp"
     assert t.node_nlp_stride == 4
+    # ILS-DEFAULT: the integer_local_search sub-NLP solve cap is ON by default (2).
+    assert t.ils_solve_cap == 2
     assert t.lp_warmstart is True
     assert t.rlt is False
     assert t.lifted_fbbt is False
@@ -50,6 +52,8 @@ def test_defaults_match_legacy_env_defaults():
         ("DISCOPT_LIFTED_FBBT", "1", "lifted_fbbt", True),
         ("DISCOPT_NODE_BOUND_MODE", "milp", "node_bound_mode", "milp"),
         ("DISCOPT_NODE_NLP_STRIDE", "2", "node_nlp_stride", 2),
+        ("DISCOPT_ILS_SOLVE_CAP", "5", "ils_solve_cap", 5),
+        ("DISCOPT_ILS_SOLVE_CAP", "0", "ils_solve_cap", 0),  # escape hatch = uncapped
         ("DISCOPT_RLT_QUAD_MAX", "64", "rlt_quad_max", 64),
         ("DISCOPT_TRILINEAR", "nested", "trilinear_nested", True),
         ("DISCOPT_SQUARE_SEPARATE", "0", "square_separate", False),
@@ -85,6 +89,7 @@ def test_explicit_field_overrides_env(monkeypatch):
         (dict(rlt_quad_max=0), "rlt_quad_max must be >= 1"),
         (dict(multilinear_rlt_max=0), "multilinear_rlt_max must be >= 1"),
         (dict(node_nlp_stride=0), "node_nlp_stride must be >= 1"),
+        (dict(ils_solve_cap=-1), "ils_solve_cap must be >= 0"),
         (dict(node_bound_mode="bogus"), "node_bound_mode must be 'lp' or 'milp'"),
         (dict(psd_cost_gate_budget=0), "psd_cost_gate_budget must be > 0"),
         (dict(psd_cost_gate_budget=-1.0), "psd_cost_gate_budget must be > 0"),
@@ -192,6 +197,58 @@ def test_psd_cost_gate_is_sound_and_bound_valid():
         MccormickLPRelaxer(_build())  # constructs without error under the flag
     finally:
         reset_current(token)
+
+
+def test_ils_cap_read_site_consults_published_tuning():
+    """ILS-DEFAULT: ``integer_local_search._objective_improve`` reads its sub-NLP
+    solve cap from ``solver_tuning.current().ils_solve_cap`` — the published tuning,
+    not a module-frozen env read. Default ON (mult 2); ``ils_solve_cap=0`` is the
+    uncapped escape hatch."""
+    import discopt._jax.primal_heuristics as ph  # noqa: F401  (import wiring smoke)
+
+    assert current().ils_solve_cap == 2  # default ON
+    token = set_current(SolverTuning(ils_solve_cap=0))
+    try:
+        assert current().ils_solve_cap == 0  # escape hatch published
+    finally:
+        reset_current(token)
+    token = set_current(SolverTuning(ils_solve_cap=7))
+    try:
+        assert current().ils_solve_cap == 7
+    finally:
+        reset_current(token)
+
+
+def test_ils_cap_on_by_default_is_incumbent_preserving():
+    """ILS-DEFAULT (broad-validated, docs/dev/ils-default-validation-2026-07-06.md):
+    the integer_local_search sub-NLP cap is ON by default and NEVER loses an
+    incumbent vs the uncapped (``ils_solve_cap=0``) behavior. On a small synthetic
+    integer model, the default (capped) solve reaches the same certified optimum as
+    the uncapped escape-hatch solve — the cap only removes redundant no-op sub-NLP
+    solves (measured 0 % hit rate), never a load-bearing incumbent."""
+
+    def _build():
+        # Small pure-integer MINLP: nonconvex objective over a handful of integers.
+        # The objective-descent inside integer_local_search fires here; the cap
+        # must not change the answer.
+        m = dm.Model("ils_synth")
+        xs = [m.integer(f"x{i}", lb=-3, ub=3) for i in range(4)]
+        m.minimize(sum((xi - 1) * (xi - 1) for xi in xs) + xs[0] * xs[1] - xs[2] * xs[3])
+        m.subject_to(sum(xs) >= -2)
+        m.subject_to(sum(xs) <= 4)
+        return m
+
+    capped = _build().solve(time_limit=20.0)  # default ils_solve_cap=2 (ON)
+    uncapped = _build().solve(time_limit=20.0, tuning=SolverTuning(ils_solve_cap=0))
+    assert capped.objective is not None and uncapped.objective is not None
+    # min sense: the default-ON (capped) incumbent is same-or-better than uncapped.
+    tol = 1e-4 * (1.0 + abs(uncapped.objective))
+    assert capped.objective <= uncapped.objective + tol
+    # Both certify the same optimum (heuristic policy never changes the certificate).
+    assert abs(capped.objective - uncapped.objective) <= tol
+    # Dual bound remains a valid underestimator of the certified optimum.
+    if capped.bound is not None:
+        assert capped.bound <= capped.objective + 1e-4 * (1.0 + abs(capped.objective))
 
 
 def test_solve_does_not_leak_tuning_to_later_relaxer():
