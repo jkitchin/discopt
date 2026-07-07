@@ -557,15 +557,25 @@ def _st_e36_shaped(name="zsf"):
     return m
 
 
-def test_r4_default_off_no_tagging(monkeypatch):
-    """Flag OFF (default): no aux is tagged, so the branching set is unchanged."""
+def test_r4_default_on_tags_and_escape_hatch(monkeypatch):
+    """G1.5 (post-C-38): the R4 zero-spanning-factor lift is ON by default, and
+    ``DISCOPT_LIFT_ZERO_SPANNING_FACTORS=0`` is the escape hatch that restores the
+    old byte-identical (no-tagging) branching set. The lift itself always happens
+    (the aux exists); only the *tagging* is what the flag gates."""
+    # Default (env absent): ON — the zero-spanning factor aux is tagged.
     monkeypatch.delenv("DISCOPT_LIFT_ZERO_SPANNING_FACTORS", raising=False)
     m = _st_e36_shaped()
     assert has_factorable_work(m)
     m2 = factorable_reformulate(m)
-    # The lift still happens (the aux exists) — only the *tagging* is gated.
     assert _aux_names(m2), "the zero-spanning factor should still be lifted"
-    assert getattr(m2, "_zero_spanning_factor_auxes", set()) == set()
+    assert getattr(m2, "_zero_spanning_factor_auxes", set()), (
+        "default-ON must tag the zero-spanning product factor for branching"
+    )
+    # Escape hatch: "0" restores the old no-tagging behavior (aux still lifted).
+    monkeypatch.setenv("DISCOPT_LIFT_ZERO_SPANNING_FACTORS", "0")
+    m_off = factorable_reformulate(_st_e36_shaped())
+    assert _aux_names(m_off), "the aux is still lifted with the hatch on"
+    assert getattr(m_off, "_zero_spanning_factor_auxes", set()) == set()
 
 
 def test_r4_flag_on_tags_zero_spanning_factor(monkeypatch):

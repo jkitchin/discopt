@@ -72,7 +72,8 @@ _INF_THRESH = 1e15
 
 
 def _lift_zero_spanning_factors_enabled() -> bool:
-    """R4 feature flag (``DISCOPT_LIFT_ZERO_SPANNING_FACTORS``, default OFF).
+    """R4 feature flag (``DISCOPT_LIFT_ZERO_SPANNING_FACTORS``, default **ON** since
+    G1.5; ``DISCOPT_LIFT_ZERO_SPANNING_FACTORS=0`` is the escape hatch).
 
     When a product ``f(x)·g(x)`` has a *non-atomic* factor ``f`` whose interval
     spans 0, the factorable reform already lifts ``w == f`` to a bounded aux (via
@@ -84,13 +85,23 @@ def _lift_zero_spanning_factors_enabled() -> bool:
     ``w·g`` (with ``g ≥ 0``) responds sharply — it is the only move that un-pins
     the bound (st_e36: root −304.5, pinned for every x-box, jumps to ≈ optimum
     once ``w`` is split at 0; see uncertified-tail-plan §3 R4). This flag marks
-    those specific auxes so the solver keeps them branchable. Default OFF keeps
-    the reform byte-identical (no tagging, so the deprioritization set is
-    unchanged).
+    those specific auxes so the solver keeps them branchable.
+
+    Structure-gated: where no product has a zero-spanning non-atomic factor, no aux
+    is tagged and the reform is byte-identical (inert) — so this flag is a free win
+    on-structure (st_e36 feasible→optimal) and invisible elsewhere. Graduated to
+    default-ON (G1.5-redo, post-C-38) on gate evidence: the isolated held-out arm
+    (N=40, seed 0, tl 25 s) verdicts eligible — 0 soundness violations, cert-neutral
+    (bound-changing regime), regression 3.8 % (1 off-structure timing artifact, ≪
+    the 10 % ceiling) — plus the bound-changing verification (differential dual
+    bound tighter but still ≤ =opt= on st_e36: −304.5 → −246.02 ≤ −246.0;
+    feasible-point sample recovers the identical incumbent ON vs OFF). See
+    ``docs/dev/flag-graduation-redo-2026-07-07.md``. ``=0`` restores the old
+    byte-identical (no-tagging) behavior.
     """
     import os
 
-    return os.environ.get("DISCOPT_LIFT_ZERO_SPANNING_FACTORS", "0") == "1"
+    return os.environ.get("DISCOPT_LIFT_ZERO_SPANNING_FACTORS", "1") != "0"
 
 
 def _lift_loose_products_enabled() -> bool:
