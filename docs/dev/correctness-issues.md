@@ -90,7 +90,7 @@ in non-default configs; loud ingestion gaps. **P3** = hygiene.
 | C-17 | P0 | alphaBB bound | node bound uses sampled (non-rigorous) α + center-only PSD check → false "optimal", default path for small nonconvex; deterministic repro confirms (spike width ≤ 0.006 → α=0, bound 0.0, true min −3.5) | fixed |
 | C-13 | P0 | solver.py bounds | serial convex path trusts under-converged NLP objective as node lower bound → false "optimal" | fixed |
 | C-1 | P0 | solver.py status | false "infeasible" from non-rigorous NLP fathoms (solve_model path) | fixed |
-| C-38 | P0 | bounding/QCP | `kall_circles_c8a` certified `optimal` obj=3.6142 (bound=3.6142, 3 nodes) when the true optimum is 2.5409 — a false-optimal certificate on the DEFAULT (all-flags-OFF) path; surfaced by the G1.3 graduation gate (2026-07-07) | open |
+| C-38 | P0 | bounding/QCP | `kall_circles_c8a` certified `optimal` obj=3.6142 (bound=3.6142, 3 nodes) when the true optimum is 2.5409 — a false-optimal certificate on the DEFAULT (all-flags-OFF) path; surfaced by the G1.3 graduation gate (2026-07-07) | **fixed** (`docs/dev/c38-fix-2026-07-07.md`): McCormick-LP `infeasible` now fathoms only on a verified Farkas ray; uncertified false-infeasible no longer prunes the optimum-containing node |
 | C-4 | P1 | mir.rs cuts | integer-MIR applied with fractional integer lower bound → invalid cut | fixed |
 | C-2 | P1 | milp_driver status | false "Infeasible" when deadline orphans deferred nodes | fixed |
 | C-19 | P1 | relax_tan | pole-straddling interval classified as one branch → secant across a pole, invalid envelope | fixed |
@@ -2683,7 +2683,22 @@ then `None` (no certified global bound), never 5.32.
   already partly covered here (the sentinel branch of the helper); A2 remains a
   separate PR for the full no-relaxation-class audit of `best_bound` consumers.
 
-## C-38 (P0, OPEN) — `kall_circles_c8a` certified false-optimal on the DEFAULT path
+## C-38 (P0, FIXED — `docs/dev/c38-fix-2026-07-07.md`) — `kall_circles_c8a` certified false-optimal on the DEFAULT path
+
+**Resolution (2026-07-07, branch `fix-c38-kall-circles`).** Root cause is a class-(a)
+unsound per-node relaxation: the in-house warm-started dual simplex returns a
+*numerical false* `infeasible` (with `farkas_certified=False`) on the ill-conditioned
+lifted McCormick relaxation of the reverse-convex non-overlap constraints, and
+`mccormick_lp.py` trusted that uncertified verdict to fathom the node holding the true
+optimum. Fix: a McCormick-LP `infeasible` fathoms a node **only** when backed by a
+verified Farkas ray (the sole rigorous proof of LP emptiness); an uncertified
+`infeasible` is inconclusive (no fathom — node stays open on its valid parent bound and
+branches). Default-path dual bound on `kall_circles_c8a` is now `-1e-9 ≤ 2.5409` (valid);
+class scan of 10 `kall_circles_*`/`kall_congruentcircles_*` instances shows no false
+optima; 41-panel cert-neutrality byte-identical. Regression:
+`python/tests/test_c38_kall_circles_false_optimal.py`.
+
+
 
 **Area:** bounding / spatial B&B on QCP (circle-packing), all flags OFF.
 

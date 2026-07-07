@@ -540,10 +540,43 @@ class MccormickLPRelaxer:
             # infeasible-trust path dropped the cold path's independent cross-check.
             if farkas_certified:
                 return MccormickLPResult(status="infeasible")
+            # No verified Farkas ray. When the solve was WARM-STARTED, the verdict is
+            # untrustworthy: the in-house dual simplex can converge from a stale
+            # cross-node basis to a *false* ``infeasible`` on a feasible LP whose ray
+            # does not certify emptiness (C-38: kall_circles_c8a — the warm basis of
+            # one node's box, reused on a sibling's, drove a spurious infeasible that
+            # fathomed the sub-box holding the true optimum, both prematurely
+            # terminating the search AND certifying a false-optimal dual bound). A
+            # cold solve of the IDENTICAL assembled system (``in_basis=None``) is
+            # authoritative — the warm-start artifact vanishes — so re-solve cold once
+            # before concluding. A genuine emptiness re-emerges as a Farkas-certified
+            # infeasible (fathom); a false one re-solves to ``optimal`` (keep the node
+            # with its valid bound). This restores both soundness and completeness.
+            if in_basis is not None:
+                try:
+                    (
+                        c_status,
+                        c_bound,
+                        c_x,
+                        _c_basis,
+                        c_farkas,
+                    ) = inc.solve_assembled_full(A, b, bounds, in_basis=None)
+                except Exception:
+                    c_status = None
+                    c_bound = None
+                    c_x = None
+                    c_farkas = False
+                if c_status == "optimal" and c_bound is not None and np.isfinite(c_bound):
+                    x_orig = np.asarray(c_x, dtype=np.float64)[: self._n_orig]
+                    return MccormickLPResult(status="optimal", lower_bound=float(c_bound), x=x_orig)
+                if c_status == "infeasible" and c_farkas:
+                    return MccormickLPResult(status="infeasible")
+                # Cold solve inconclusive (uncertified infeasible / numerical): fall
+                # through to the equilibration re-verify below.
             # The ray did not verify (an ill-conditioned candidate): fall back to
-            # the equilibration re-verify, mirroring the cold path's
-            # false-infeasible guard (trust a raw infeasible only after an exact,
-            # feasible-set-preserving rescale recovers no feasible point).
+            # the equilibration re-verify, which fathoms ONLY on a verified Farkas
+            # ray and otherwise defers to the cold rebuild (never trusts an
+            # uncertified infeasible — see :meth:`_reverify_incremental_infeasible`).
             return self._reverify_incremental_infeasible(inc, A, b, bounds)
 
         # time_limit / unbounded / numerical error: no certified verdict — fall back
@@ -554,48 +587,59 @@ class MccormickLPRelaxer:
         self, inc, A: np.ndarray, b: np.ndarray, bounds: np.ndarray
     ) -> Optional["MccormickLPResult"]:
         """Confirm an incremental ``infeasible`` verdict soundly, without a cold
-        rebuild, when the simplex's Farkas ray did not already certify it. Mirrors
-        the cold path's false-infeasible guard: a well-scaled LP's infeasible
-        verdict is trusted directly; an ill-conditioned one (coefficient spread
-        ``> _RELAX_FALSE_INFEAS_TRIGGER``) is re-solved once with exact
-        geometric-mean equilibration (feasible-set-preserving) before being
-        accepted. The equilibrated re-solve also yields a fresh Farkas ray, so a
-        recovered infeasible is preferentially confirmed by that certificate.
+        rebuild, when the simplex's Farkas ray did not already certify it. A node
+        fathom on ``infeasible`` is rigorous ONLY when a *verified Farkas dual ray*
+        proves the lifted polytope empty; the raw simplex verdict is not itself a
+        proof. So this re-solves once with exact geometric-mean equilibration (a
+        feasible-set-preserving rescale) and accepts ``infeasible`` **only** when
+        that solve returns a verified Farkas ray. If the equilibrated solve recovers
+        a feasible point, that was a false infeasible (return it as ``optimal``).
+        Any other outcome — infeasible with no Farkas ray, or a solver failure —
+        yields ``None`` (cold fallback), NOT a fathom.
 
-        Returns ``MccormickLPResult(status="infeasible")`` to fathom, an
-        ``"optimal"`` result if equilibration recovers a feasible point (a false
-        infeasible), or ``None`` (cold fallback) if the re-verify itself fails."""
+        C-38 rationale: the in-house simplex returns *numerical false* ``infeasible``
+        on ill-conditioned lifted McCormick LPs that HiGHS proves feasible, and it
+        does so with no Farkas ray both cold AND after equilibration (coefficient
+        spread as low as ~1e2 — well under any conditioning heuristic). The old
+        ``if not ill: return infeasible`` and ``if status=="infeasible": return
+        infeasible`` both trusted such an uncertified verdict and fathomed the
+        sub-box containing the true optimum, certifying a false-optimal dual bound
+        (kall_circles_c8a: 3.6142 > true opt 2.5409). A conditioning heuristic is not
+        a soundness proof — only a Farkas ray is — so an uncertified infeasible must
+        never fathom.
+
+        Returns ``MccormickLPResult(status="infeasible")`` (Farkas-certified) to
+        fathom, an ``"optimal"`` result if equilibration recovers a feasible point,
+        or ``None`` (cold fallback) otherwise."""
         import scipy.sparse as sp
 
-        from discopt._jax.milp_relaxation import (
-            _RELAX_FALSE_INFEAS_TRIGGER,
-            equilibrate_relaxation_lp,
-        )
+        from discopt._jax.milp_relaxation import equilibrate_relaxation_lp
 
         try:
             a_csr = sp.csr_matrix(A)
-            nz = np.abs(a_csr.data)
-            nz = nz[nz != 0.0]
-            ill = bool(
-                nz.size
-                and np.isfinite(nz).all()
-                and nz.max() / nz.min() > _RELAX_FALSE_INFEAS_TRIGGER
-            )
         except Exception:
-            ill = True  # be conservative: re-verify rather than trust
-        if not ill:
-            return MccormickLPResult(status="infeasible")
+            return None
 
         try:
             bl = [(float(bounds[i, 0]), float(bounds[i, 1])) for i in range(bounds.shape[0])]
             c2, a2, b2, bd2, col_scale = equilibrate_relaxation_lp(inc.c, a_csr, b, bl, None)
-            status, bound, x_s, _, _farkas = inc.solve_assembled_full(
+            status, bound, x_s, _, farkas = inc.solve_assembled_full(
                 a2, b2, np.asarray(bd2, dtype=np.float64), in_basis=None, c_override=c2
             )
         except Exception:
             return None  # re-verify failed -> trusted cold rebuild
         if status == "infeasible":
-            return MccormickLPResult(status="infeasible")
+            # Fathom ONLY on a verified Farkas ray; an uncertified infeasible is not a
+            # rigorous emptiness proof and must not prune (C-38). Cold fallback lets
+            # the driver keep the node open on its inherited (valid) parent bound.
+            if farkas:
+                return MccormickLPResult(status="infeasible")
+            logger.debug(
+                "incremental McCormick infeasible not Farkas-certified after "
+                "equilibration; declining fathom (cold fallback) to avoid a "
+                "false-infeasible prune"
+            )
+            return None
         if status == "optimal" and bound is not None and np.isfinite(bound):
             # False infeasible recovered: map the scaled point back (x = D·x'). The
             # equilibrated basis has different scaling, so don't carry it as a warm
@@ -877,9 +921,32 @@ class MccormickLPRelaxer:
         #    relaxation returns "unbounded" above (not "optimal"), so this is never
         #    a fabricated finite bound.
         if res.status == "infeasible":
-            # Sound: ``milp.solve`` equilibration-verified it (and Farkas-certified
-            # it when ``res.farkas_certified``).
-            return MccormickLPResult(status="infeasible")
+            # A node fathom on ``infeasible`` is rigorous ONLY when the verdict is
+            # backed by a *verified Farkas dual ray* (``res.farkas_certified``): the
+            # ray is an independent certificate that the lifted McCormick polytope is
+            # empty. The warm/equilibrated in-house simplex can otherwise return a
+            # *numerical false* ``infeasible`` on an ill-conditioned lifted relaxation
+            # that is in fact feasible — and it does so with NO Farkas ray (C-38:
+            # kall_circles_c8a's reverse-convex non-overlap relaxation, coefficient
+            # spread only ~1e2–1e4, is declared infeasible cold AND after
+            # equilibration though HiGHS proves it feasible; trusting that fathomed
+            # the sub-box holding the true optimum and certified a false-optimal dual
+            # bound 3.6142 > true opt 2.5409). ``milp.solve``'s equilibration
+            # re-verify only fires above a 1e3 spread and, even when it does, the same
+            # simplex can re-confirm the false infeasible — so equilibration is not a
+            # sufficient guard. A verified Farkas ray is the only rigorous proof of LP
+            # emptiness, so without it the verdict is not a proof and must NOT fathom:
+            # report a non-fathoming status so the driver keeps the node open on its
+            # inherited (valid) parent bound and branches, exactly as for an
+            # ``iteration_limit``/``numerical`` exit. This forgoes a *possible* prune,
+            # never a valid bound — sound by construction.
+            if res.farkas_certified:
+                return MccormickLPResult(status="infeasible")
+            logger.debug(
+                "McCormick LP node reported infeasible without a Farkas certificate; "
+                "treating as inconclusive (no fathom) to avoid a false-infeasible prune"
+            )
+            return MccormickLPResult(status="numerical")
         if res.status != "optimal" or res.x is None:
             return MccormickLPResult(status=res.status)
 
