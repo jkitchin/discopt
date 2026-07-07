@@ -1538,6 +1538,7 @@ def test_mip_nlp_shot_esh_integration_uses_rootsearch_cuts():
 
 
 def _mindtpy_simple_minlp(name="mindtpy_init_strategy"):
+    """Native port of Pyomo MindtPy's simple MINLP baseline fixture."""
     m = dm.Model(name)
     x = m.continuous("x", shape=(2,), lb=0, ub=4)
     y = m.binary("y", shape=(3,))
@@ -1613,9 +1614,11 @@ def _mindtpy_eight_process_flowsheet(name="mindtpy_eight_process", *, convex=Tru
     y = m.binary("y", shape=(8,))
 
     def x_stream(stream):
+        """Return the flowsheet stream variable using one-based stream labels."""
         return x[stream - 2]
 
     def y_unit(unit):
+        """Return the unit-selection binary using one-based unit labels."""
         return y[unit - 1]
 
     m.subject_to(1.5 * x_stream(9) + x_stream(10) == x_stream(8))
@@ -3025,6 +3028,7 @@ def test_lp_nlp_bb_linear_objective_constant_offsets_certified_bound(monkeypatch
 
 
 def test_lp_nlp_bb_gurobi_solves_mindtpy_fixture_if_available():
+    """Verify Gurobi LP/NLP-BB solves the MindtPy simple fixture."""
     _require_gurobi()
 
     result = _mindtpy_simple_minlp("lp_nlp_bb_gurobi_mindtpy").solve(
@@ -3121,6 +3125,7 @@ def test_mip_nlp_method_fp_routes_to_standalone_feasibility_pump(monkeypatch):
     ],
 )
 def test_mip_nlp_method_fp_rejects_unsupported_mindtpy_options(option, value, match):
+    """Verify unsupported MindtPy FP options fail with explicit messages."""
     from discopt.solvers.mip_nlp import solve_mip_nlp
 
     with pytest.raises(ValueError, match=match):
@@ -4129,6 +4134,7 @@ def test_oa_regularization_rejects_ecp_mode():
 
 
 def test_oa_derivative_regularization_rejects_fp_init_on_constrained_models():
+    """Verify derivative regularization rejects FP init on MindtPy constraints."""
     from discopt.solvers.oa import solve_oa
 
     with pytest.raises(ValueError, match="init_strategy='fp'.*does not provide"):
@@ -4827,6 +4833,7 @@ def test_oa_fixed_integer_initializers_seed_first_nlp(monkeypatch, strategy, sta
 @pytest.mark.parametrize("method", ["oa", "ecp"])
 @pytest.mark.parametrize("strategy", ["rNLP", "initial_binary", "max_binary"])
 def test_mip_nlp_init_strategies_solve_mindtpy_baseline_to_optimum(method, strategy):
+    """Verify OA/ECP init strategies solve the MindtPy simple baseline."""
     result = _mindtpy_simple_minlp(f"mindtpy_{method}_{strategy}").solve(
         solver="mip-nlp",
         mip_nlp_method=method,
@@ -4872,6 +4879,7 @@ def test_mip_nlp_goa_certifies_native_bilinear_minlp():
 @pytest.mark.smoke
 @pytest.mark.skipif(not HAS_HIGHS, reason="highspy not installed")
 def test_mip_nlp_goa_certifies_mindtpy_minlp5_convex_fixture():
+    """Verify GOA certifies the convex MindtPy MINLP5 fixture."""
     result = _mindtpy_simple5_minlp("goa_mindtpy_minlp5").solve(
         solver="mip-nlp",
         mip_nlp_method="goa",
@@ -4891,6 +4899,7 @@ def test_mip_nlp_goa_certifies_mindtpy_minlp5_convex_fixture():
 @pytest.mark.skipif(not HAS_HIGHS, reason="highspy not installed")
 @pytest.mark.parametrize("feasibility_norm", ["L_infinity", "L1", "L2"])
 def test_mip_nlp_feasibility_pump_solves_mindtpy_baseline(feasibility_norm):
+    """Verify feasibility pump finds the MindtPy simple incumbent."""
     result = _mindtpy_simple_minlp(f"mindtpy_fp_{feasibility_norm}").solve(
         solver="mip-nlp",
         mip_nlp_method="fp",
@@ -4909,6 +4918,7 @@ def test_mip_nlp_feasibility_pump_solves_mindtpy_baseline(feasibility_norm):
 
 @pytest.mark.skipif(not HAS_HIGHS, reason="highspy not installed")
 def test_mip_nlp_oa_fp_init_strategy_solves_mindtpy_baseline_to_optimum():
+    """Verify OA seeded by feasibility pump solves the MindtPy simple fixture."""
     result = _mindtpy_simple_minlp("mindtpy_oa_fp_init").solve(
         solver="mip-nlp",
         mip_nlp_method="oa",
@@ -4927,6 +4937,7 @@ def test_mip_nlp_oa_fp_init_strategy_solves_mindtpy_baseline_to_optimum():
 @pytest.mark.skipif(not HAS_HIGHS, reason="highspy not installed")
 @pytest.mark.parametrize("add_regularization", ["level_L1", "level_L2", "level_L_infinity"])
 def test_mip_nlp_regularized_oa_level_variants_solve_mindtpy_baseline(add_regularization):
+    """Verify level-regularized OA solves the MindtPy simple fixture."""
     result = _mindtpy_simple_minlp(f"mindtpy_roa_{add_regularization}").solve(
         solver="mip-nlp",
         mip_nlp_method="oa",
@@ -4944,6 +4955,7 @@ def test_mip_nlp_regularized_oa_level_variants_solve_mindtpy_baseline(add_regula
 
 @pytest.mark.skipif(not HAS_HIGHS, reason="highspy not installed")
 def test_mip_nlp_regularized_oa_grad_lag_solves_mindtpy_baseline():
+    """Verify gradient-Lagrangian regularized OA solves the simple fixture."""
     result = _mindtpy_simple_minlp("mindtpy_roa_grad_lag").solve(
         solver="mip-nlp",
         mip_nlp_method="oa",
@@ -4971,6 +4983,7 @@ _MINDTPY_REGULARIZATION_MODES = [
 
 
 def test_mip_nlp_mindtpy_eight_process_convex_flag_controls_oa_guarantee():
+    """Verify convex flag selection controls eight-process OA certification."""
     from discopt._jax.convexity import classify_oa_cut_convexity
 
     convex = _mindtpy_eight_process_flowsheet("mindtpy_eight_process_convex", convex=True)
@@ -4989,6 +5002,7 @@ def test_mip_nlp_mindtpy_eight_process_convex_flag_controls_oa_guarantee():
 def test_mip_nlp_regularized_oa_matches_mindtpy_constraint_qualification(
     add_regularization,
 ):
+    """Verify regularized OA matches the MindtPy constraint-qualification case."""
     result = _mindtpy_constraint_qualification_example(f"mindtpy_cq_{add_regularization}").solve(
         solver="mip-nlp",
         mip_nlp_method="oa",
@@ -5009,6 +5023,7 @@ def test_mip_nlp_regularized_oa_matches_mindtpy_constraint_qualification(
 @pytest.mark.skipif(not HAS_HIGHS, reason="highspy not installed")
 @pytest.mark.parametrize("add_regularization", _MINDTPY_REGULARIZATION_MODES)
 def test_mip_nlp_regularized_oa_matches_mindtpy_minlp3_simple(add_regularization):
+    """Verify regularized OA matches the MindtPy MINLP3 simple fixture."""
     result = _mindtpy_simple3_minlp(f"mindtpy_simple3_{add_regularization}").solve(
         solver="mip-nlp",
         mip_nlp_method="oa",
@@ -5034,6 +5049,7 @@ def test_mip_nlp_regularized_oa_matches_mindtpy_minlp3_simple(add_regularization
 def test_mip_nlp_regularized_oa_matches_mindtpy_eight_process_flowsheet(
     add_regularization,
 ):
+    """Verify regularized OA matches the MindtPy eight-process fixture."""
     result = _mindtpy_eight_process_flowsheet(f"mindtpy_eight_process_{add_regularization}").solve(
         solver="mip-nlp",
         mip_nlp_method="oa",
