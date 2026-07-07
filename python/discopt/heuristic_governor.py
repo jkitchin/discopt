@@ -42,11 +42,18 @@ certificate. B&B stays exhaustive; the governor only decides whether to *spend*
 effort looking for a better incumbent, and every injected point is re-verified
 downstream. The dual bound is never touched.
 
-Default-**OFF**: the governor is inert unless ``DISCOPT_HEURISTIC_GOVERNOR`` is
-set to a truthy value (``1``/``true``/``on``). With it off, :meth:`allowed`
-returns ``True`` for every source and the solve path is byte-identical to the
-pre-governor behaviour. Graduation to default-ON goes through the G1.2 flag
-gate, not this module.
+Default-**ON** since G2-graduate (broad held-out validation,
+``docs/dev/g2-graduate-validation-2026-07-07.md``): the governor throttles RENS
+by default. ``DISCOPT_HEURISTIC_GOVERNOR=0`` (or ``off``/``false``/``no``) is the
+escape hatch — it restores the pre-governor behaviour byte-for-byte
+(:meth:`allowed` returns ``True`` for every source, :meth:`record` is a no-op).
+The flip is heuristic-policy (CLAUDE.md §5): throttling a 0 %-hit primal
+heuristic never changes a certified objective, a dual bound, or a load-bearing
+incumbent — it only saves the RENS nested-B&B wall (33 % of finished easy-class
+solve time). The held-out validation spanned diverse classes including the
+convex-nonseparable ``cvxnonsep_*`` family (the class that narrowed the governed
+set to ``rens`` only): 0 certified-objective degradations, 0 lost incumbents,
+0 soundness violations.
 """
 
 from __future__ import annotations
@@ -91,7 +98,20 @@ GOVERNED_SOURCES = frozenset({"rens"})
 
 
 def _governor_enabled() -> bool:
-    return os.environ.get("DISCOPT_HEURISTIC_GOVERNOR", "0").lower() in ("1", "true", "on", "yes")
+    """Whether the governor is active.
+
+    Default-**ON** since G2-graduate: the flag is enabled unless explicitly turned
+    off. ``DISCOPT_HEURISTIC_GOVERNOR=0`` (also ``off``/``false``/``no``/empty) is
+    the escape hatch that restores the pre-governor byte-identical behaviour — a
+    graduated default, never a dead flag.
+    """
+    return os.environ.get("DISCOPT_HEURISTIC_GOVERNOR", "1").lower() not in (
+        "0",
+        "off",
+        "false",
+        "no",
+        "",
+    )
 
 
 @dataclass
