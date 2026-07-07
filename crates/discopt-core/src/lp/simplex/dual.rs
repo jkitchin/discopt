@@ -9,15 +9,19 @@
 //! [`solve_lp_warm`] factorizes the given basis, checks dual feasibility, and
 //! runs dual pivots to primal feasibility (= optimality, since dual feasibility
 //! is maintained). On *any* difficulty — a dual-infeasible starting basis, a
-//! failed dual ratio test, a singular/over-updated factorization, or the
-//! iteration cap — it falls back to a cold [`super::primal::solve_lp`], so the
-//! result is always correct; warm-start only ever saves time, never risks it.
+//! failed dual ratio test, a singular/over-updated factorization, the iteration
+//! cap, or the **stall guard** (discopt F2:
+//! [`SimplexOptions::warm_stall_guard`](super::SimplexOptions::warm_stall_guard),
+//! a size-derived pivot budget that bounds a floating-point degenerate stall near
+//! the feasibility tolerance) — it falls back to a cold
+//! [`super::primal::solve_lp`], so the result is always correct; warm-start only
+//! ever saves time, never risks it.
 
 #![allow(clippy::needless_range_loop)]
 
 use super::linsolve::{FeralLU, LinearSolver};
-use super::primal::solve_lp_scaled;
-use super::scaling::ScaledLp;
+use super::primal::{solve_lp_cols, solve_lp_cols_warm};
+use super::scaling::{ScaledLp, Scaling};
 use super::sparse::SparseCols;
 use super::{LpSolve, LpStatus, SimplexOptions};
 use crate::lp::basis::{Basis, AT_LOWER, AT_UPPER, BASIC};
@@ -39,9 +43,81 @@ pub fn solve_lp_warm(lp: &LpView<'_>, b: &[f64], start: &Basis, opts: &SimplexOp
             let view = scaled.view();
             let mut sol = solve_lp_warm_scaled(&view, scaled.b(), start, opts);
             scaled.unscale_x(&mut sol.x);
+            // Map the certificate vectors back to the original space too (see the
+            // matching note in `primal::solve_lp`): the duals/Farkas ray are in
+            // scaled coordinates and must align with the unscaled A/b the caller
+            // checks against.
+            scaled.unscale_dual(&mut sol.dual);
+            scaled.unscale_ray(&mut sol.ray);
             sol
         }
         None => solve_lp_warm_scaled(lp, b, start, opts),
+    }
+}
+
+/// Sparse-native warm LP solve from a CSC matrix: equilibrate (sparse factors +
+/// in-place scaling, `O(nnz)`), warm dual-simplex re-optimize from `start` (or
+/// cold-solve when absent / the basis is unusable), then map the solution and
+/// certificates back through the scaling. The whole path avoids materializing the
+/// dense `m×n` matrix that [`solve_lp_warm`] builds via `from_dense` — the lifted
+/// relaxations are ~0.3% dense, so this is the difference between scanning 54M
+/// entries and touching ~19k per solve. `start` is `(col_status, basic_vars)`.
+#[allow(clippy::too_many_arguments)]
+pub fn solve_lp_warm_csc(
+    mut sp: SparseCols,
+    m: usize,
+    n: usize,
+    c: &[f64],
+    l: &[f64],
+    u: &[f64],
+    b: &[f64],
+    start: Option<&Basis>,
+    opts: &SimplexOptions,
+) -> LpSolve {
+    match Scaling::from_sparse(&sp, m, n) {
+        Some(scaling) => {
+            scaling.scale_cols(&mut sp);
+            let c_s = scaling.scale_c(c);
+            let b_s = scaling.scale_b(b);
+            let l_s = scaling.scale_lower(l);
+            let u_s = scaling.scale_upper(u);
+            let mut sol = solve_csc_core(&sp, m, n, &c_s, &l_s, &u_s, &b_s, start, opts);
+            // Map x and the dual/Farkas/primal-ray certificates back to the
+            // original space (see the matching note in `solve_lp_warm`).
+            scaling.unscale_x(&mut sol.x);
+            scaling.unscale_dual(&mut sol.dual);
+            scaling.unscale_ray(&mut sol.ray);
+            sol
+        }
+        None => solve_csc_core(&sp, m, n, c, l, u, b, start, opts),
+    }
+}
+
+/// Warm dual (or cold) solve of an already-scaled CSC LP. Shared by the scaled and
+/// unscaled branches of [`solve_lp_warm_csc`].
+#[allow(clippy::too_many_arguments)]
+fn solve_csc_core(
+    sp: &SparseCols,
+    m: usize,
+    n: usize,
+    c: &[f64],
+    l: &[f64],
+    u: &[f64],
+    b: &[f64],
+    start: Option<&Basis>,
+    opts: &SimplexOptions,
+) -> LpSolve {
+    match start {
+        Some(basis) => match PreparedDual::prepare_cols(sp, m, n, c, l, u, basis, opts) {
+            Some(p) => p.reoptimize(l, u, b, opts),
+            // Warm basis rejected by the dual (wrong size / singular /
+            // dual-infeasible). cert:T1.4: try a *primal* warm re-solve from the
+            // same basis first — a coefficient-patched child is usually still
+            // primal-feasible, so phase 2 finishes in a few pivots — and only fall
+            // to the full cold two-phase solve if that basis is unusable too.
+            None => solve_lp_cols_warm(sp.clone(), m, n, c, l, u, b, basis, opts),
+        },
+        None => solve_lp_cols(sp.clone(), m, n, c, l, u, b, opts),
     }
 }
 
@@ -77,12 +153,11 @@ pub fn solve_lp_warm_scaled_csc(
 ) -> LpSolve {
     match PreparedDual::prepare(lp, start, opts, sp) {
         Some(p) => p.reoptimize(lp.l, lp.u, b, opts),
-        None => solve_lp_scaled(lp, b, opts), // safe fallback — always correct
+        // cert:T1.4: try a primal warm re-solve from the inherited basis before the
+        // full cold solve (same rationale as the CSC path above). Safe: falls to
+        // cold two-phase whenever the warm basis is unusable.
+        None => solve_lp_cols_warm(sp.clone(), lp.m, lp.n, lp.c, lp.l, lp.u, b, start, opts),
     }
-}
-
-fn col(a: &[f64], m: usize, n: usize, j: usize) -> Vec<f64> {
-    (0..m).map(|i| a[i * n + j]).collect()
 }
 
 /// A basis factorization prepared once for repeated dual re-optimizations that
@@ -102,7 +177,6 @@ fn col(a: &[f64], m: usize, n: usize, j: usize) -> Vec<f64> {
 /// fractional, hence basic, variable), so the precondition verified at `prepare`
 /// holds for every `reoptimize` from the same basis.
 pub struct PreparedDual<'a> {
-    a: &'a [f64],
     m: usize,
     n: usize,
     c: &'a [f64],
@@ -124,7 +198,7 @@ impl<'a> PreparedDual<'a> {
         opts: &SimplexOptions,
         sp: &'a SparseCols,
     ) -> Option<Self> {
-        let (a, m, n, l, u, c) = (lp.a, lp.m, lp.n, lp.l, lp.u, lp.c);
+        let (m, n, l, u, c) = (lp.m, lp.n, lp.l, lp.u, lp.c);
         if start.basic_vars.len() != m {
             return None;
         }
@@ -184,7 +258,6 @@ impl<'a> PreparedDual<'a> {
         }
 
         Some(PreparedDual {
-            a,
             m,
             n,
             c,
@@ -196,22 +269,43 @@ impl<'a> PreparedDual<'a> {
         })
     }
 
+    /// As [`Self::prepare`] but from a borrowed CSC matrix + bound/cost slices
+    /// instead of a dense [`LpView`] — the sparse-native warm path. Identical
+    /// preconditions and factorization (both already build the basis from `sp`).
+    #[allow(clippy::too_many_arguments)]
+    pub fn prepare_cols(
+        sp: &'a SparseCols,
+        m: usize,
+        n: usize,
+        c: &'a [f64],
+        l: &'a [f64],
+        u: &'a [f64],
+        start: &Basis,
+        opts: &SimplexOptions,
+    ) -> Option<Self> {
+        let lp = LpView {
+            a: &[],
+            m,
+            n,
+            c,
+            l,
+            u,
+        };
+        Self::prepare(&lp, start, opts, sp)
+    }
+
     /// Dual re-optimization from the prepared basis for bounds `l`/`u` and rhs
     /// `b`, returning a valid solution. On any numerical difficulty it cold-solves
     /// the same LP, so the result is always correct.
     pub fn reoptimize(&self, l: &[f64], u: &[f64], b: &[f64], opts: &SimplexOptions) -> LpSolve {
+        crate::profile::incr(crate::profile::Ctr::DualWarmSolves);
         match self.run_dual(l, u, b, opts) {
             Some(sol) => sol,
+            // Cold fallback from the prepared CSC matrix (clone is O(nnz), paid only
+            // on the rare numerical-breakdown path) — no dense matrix is kept.
             None => {
-                let lp = LpView {
-                    a: self.a,
-                    m: self.m,
-                    n: self.n,
-                    c: self.c,
-                    l,
-                    u,
-                };
-                solve_lp_scaled(&lp, b, opts)
+                crate::profile::incr(crate::profile::Ctr::DualColdFallbacks);
+                solve_lp_cols(self.sp.clone(), self.m, self.n, self.c, l, u, b, opts)
             }
         }
     }
@@ -219,7 +313,7 @@ impl<'a> PreparedDual<'a> {
     /// The dual pivots, on a fresh clone of the prepared factorization/basis.
     /// `None` requests the cold fallback (numerical breakdown or iteration cap).
     fn run_dual(&self, l: &[f64], u: &[f64], b: &[f64], opts: &SimplexOptions) -> Option<LpSolve> {
-        let (a, m, n, c, sp) = (self.a, self.m, self.n, self.c, &self.sp);
+        let (m, n, c, sp) = (self.m, self.n, self.c, &self.sp);
         let tol = opts.tol;
         // Clone the pristine prepared state; the loop mutates these in place.
         let mut lu = self.lu.clone();
@@ -254,10 +348,37 @@ impl<'a> PreparedDual<'a> {
         // pricing. Pricing only chooses *which* primal-infeasible row leaves, never
         // affects correctness (any infeasible basic var is a valid leaving choice).
         let mut gamma = vec![1.0f64; m];
+        // Anti-cycling: consecutive degenerate dual pivots (entering reduced cost
+        // ≈ 0 → no dual-objective progress) accumulate `stall`; once it crosses the
+        // threshold the pivot rules switch to Bland's smallest-index selection
+        // (both leaving row and entering column), which is guaranteed cycle-free.
+        // A productive pivot resets the count. Without this the only cycle escape
+        // was the iteration cap → cold fallback; Bland resolves it in place.
+        let mut stall = 0usize;
+        let bland_threshold = 2 * (n + 1);
+        // Warm-restart **stall guard** (discopt F2). Bland's rule above makes the
+        // dual loop cycle-free in exact arithmetic, but a warm re-solve after a
+        // row-append can still spin near the *feasibility tolerance* in floating
+        // point — the leaving-row violation oscillates just above `tol` (nvs01: the
+        // two 8.7 s calls reached `max_iter` = 100 000 pivots, one with every pivot
+        // degenerate and Bland engaged, the other with almost none flagged
+        // degenerate so Bland never triggered). A cold solve of the same LP costs
+        // ~5 ms. So we cap the *warm* loop at a size-derived budget well above any
+        // healthy solve (≤25 pivots on this class) and, on trip, hand off to the
+        // cold fallback the numerical-breakdown path already uses — returning the
+        // identical optimum. The full `max_iter` remains the hard backstop when the
+        // guard is disabled. Bland still runs below the cap, so the common case is
+        // untouched; the cap only bounds the pathological tail.
+        let stall_cap = if opts.warm_stall_guard {
+            opts.warm_stall_cap(m, n)
+        } else {
+            opts.max_iter
+        };
         // The loop index is the pivot count: each completed iteration performs one
         // pivot, and every early return happens at the loop top (before this
         // iteration's pivot), so `pivots` is exactly the number performed so far.
-        for pivots in 0..opts.max_iter {
+        for pivots in 0..stall_cap {
+            let bland = stall > bland_threshold;
             // Poll the wall-clock deadline (see SimplexOptions::deadline). On a
             // timeout we abandon the warm dual re-solve and request the cold
             // fallback by returning None; the cold primal solve re-checks the
@@ -282,37 +403,85 @@ impl<'a> PreparedDual<'a> {
             // feasibility, confirm with an *exact* recompute before declaring
             // optimality, and verify dual feasibility on *exact* reduced costs —
             // so a drifted increment can never return a wrong optimum.
-            let (r, to_lower, delta) = match select_leaving(m, &basis, l, u, &gamma, &xb, tol) {
-                Some(sel) => sel,
-                None => {
-                    xb = recompute_basic_values(&mut lu, sp, b, n, l, u, &stat)?;
-                    since_refresh = 0;
-                    match select_leaving(m, &basis, l, u, &gamma, &xb, tol) {
-                        Some(sel) => sel,
-                        None => {
-                            dvec = recompute_reduced_costs(&mut lu, sp, c, n, &basis)?;
-                            if dual_feasible(n, &stat, l, u, &dvec, tol) {
-                                return Some(assemble(
-                                    n,
-                                    m,
-                                    &basis,
-                                    &slot_of,
-                                    &stat,
-                                    &xb,
-                                    c,
-                                    l,
-                                    u,
-                                    LpStatus::Optimal,
-                                    pivots,
-                                ));
+            let (r, to_lower, delta) =
+                match select_leaving(m, &basis, l, u, &gamma, &xb, tol, bland) {
+                    Some(sel) => sel,
+                    None => {
+                        xb = recompute_basic_values(&mut lu, sp, b, n, l, u, &stat)?;
+                        since_refresh = 0;
+                        match select_leaving(m, &basis, l, u, &gamma, &xb, tol, bland) {
+                            Some(sel) => sel,
+                            None => {
+                                dvec = recompute_reduced_costs(&mut lu, sp, c, n, &basis)?;
+                                if dual_feasible(n, &stat, l, u, &dvec, tol) {
+                                    // In-engine refined recovery (discopt#364): if the
+                                    // working factor's growth signal flags possible digit
+                                    // loss, recompute x_B from a fresh, refinement-polished
+                                    // factorization and re-verify primal feasibility on the
+                                    // sharper values. If the sharper x_B reveals an
+                                    // infeasibility the drifted one hid, hand to the robust
+                                    // cold solve rather than certify a wrong optimum;
+                                    // otherwise certify with the sharper x_B. Sound either
+                                    // way — the decision is only ever made *more* accurate,
+                                    // and the common (benign-growth) path is untouched.
+                                    let refined_xb: Option<Vec<f64>> =
+                                        if lu.growth().is_some_and(|g| g > GROWTH_REFINE_TRIGGER) {
+                                            crate::profile::incr(
+                                                crate::profile::Ctr::RefinedRecoveryAttemptsDual,
+                                            );
+                                            match refined_basic_values(
+                                                sp, b, n, m, l, u, &basis, &stat,
+                                            ) {
+                                                Some(xb_r) => {
+                                                    if select_leaving(
+                                                        m, &basis, l, u, &gamma, &xb_r, tol, bland,
+                                                    )
+                                                    .is_some()
+                                                    {
+                                                        crate::profile::incr(
+                                                    crate::profile::Ctr::RefinedRecoveryRescuesDual,
+                                                );
+                                                        return None; // sharper x_B infeasible → cold fallback
+                                                    }
+                                                    Some(xb_r)
+                                                }
+                                                None => None, // fresh factor failed; keep the exact x_B
+                                            }
+                                        } else {
+                                            None
+                                        };
+                                    let xb_final: &[f64] = refined_xb.as_deref().unwrap_or(&xb);
+                                    // Row duals `y = B⁻ᵀ c_B` for the safe dual bound;
+                                    // empty (caller falls back) if the btran fails.
+                                    let mut y: Vec<f64> = basis.iter().map(|&j| c[j]).collect();
+                                    let dual = if lu.btran(&mut y).is_ok() {
+                                        y
+                                    } else {
+                                        Vec::new()
+                                    };
+                                    return Some(assemble(
+                                        n,
+                                        m,
+                                        &basis,
+                                        &slot_of,
+                                        &stat,
+                                        xb_final,
+                                        c,
+                                        l,
+                                        u,
+                                        LpStatus::Optimal,
+                                        pivots,
+                                        dual,
+                                        Vec::new(),
+                                    ));
+                                }
+                                // Exact reduced costs reveal dual infeasibility (a drifted
+                                // pivot): hand off to the robust cold solve.
+                                return None;
                             }
-                            // Exact reduced costs reveal dual infeasibility (a drifted
-                            // pivot): hand off to the robust cold solve.
-                            return None;
                         }
                     }
-                }
-            };
+                };
 
             // Pivot row ρ = e_rᵀ B⁻¹, then α_rj = ρ·A_j for every nonbasic j (kept
             // for both the ratio test and the incremental reduced-cost update). No
@@ -342,6 +511,10 @@ impl<'a> PreparedDual<'a> {
                 cand = build_candidates(n, &stat, l, u, &alpha_r, &dvec, to_lower, tol);
                 if cand.is_empty() {
                     xb = recompute_basic_values(&mut lu, sp, b, n, l, u, &stat)?;
+                    // Farkas dual ray: the leaving row's `ρ = eᵣᵀ B⁻¹`. With the
+                    // ratio test finding no entering column, `ρ` (or `−ρ`) is a
+                    // direction along which `bᵀy` beats the box-max of `(Aᵀy)ᵀz`,
+                    // certifying primal infeasibility — the caller verifies it.
                     return Some(assemble(
                         n,
                         m,
@@ -354,27 +527,45 @@ impl<'a> PreparedDual<'a> {
                         u,
                         LpStatus::Infeasible,
                         pivots,
+                        rho.clone(),
+                        Vec::new(),
                     ));
                 }
             }
             cand.sort_by(|x, y| x.1.partial_cmp(&y.1).unwrap_or(std::cmp::Ordering::Equal));
-            // Walk breakpoints, flipping finite-bounded ones until `delta` is closed.
-            // The last candidate is always taken as the entering column (never
-            // flipped), so even if the bound gaps can't fully close `delta` the step
-            // is a valid dual pivot and the search makes progress.
-            let mut slope = 0.0f64;
-            let mut q = cand[cand.len() - 1].0;
-            let mut flips: Vec<usize> = Vec::new();
-            let last = cand.len() - 1;
-            for (idx, &(j, _ratio, aj)) in cand.iter().enumerate() {
-                let gap = u[j] - l[j];
-                slope += aj * gap;
-                if idx == last || gap >= INF || slope >= delta - tol {
-                    q = j; // this breakpoint enters the basis; stop flipping
-                    break;
+            let (q, flips): (usize, Vec<usize>) = if bland {
+                // Bland (anti-cycling): the plain min-ratio dual pivot with the
+                // smallest-index tie-break and NO bound flips (a short step). The
+                // long-step bound-flipping below can revisit a basis under
+                // degeneracy; the smallest-index rule provably cannot cycle.
+                let min_ratio = cand[0].1;
+                let q = cand
+                    .iter()
+                    .filter(|&&(_, ratio, _)| ratio <= min_ratio + tol)
+                    .map(|&(j, _, _)| j)
+                    .min()
+                    .expect("cand is non-empty");
+                (q, Vec::new())
+            } else {
+                // Walk breakpoints, flipping finite-bounded ones until `delta` is
+                // closed. The last candidate is always taken as the entering column
+                // (never flipped), so even if the bound gaps can't fully close
+                // `delta` the step is a valid dual pivot and the search progresses.
+                let mut slope = 0.0f64;
+                let mut q = cand[cand.len() - 1].0;
+                let mut flips: Vec<usize> = Vec::new();
+                let last = cand.len() - 1;
+                for (idx, &(j, _ratio, aj)) in cand.iter().enumerate() {
+                    let gap = u[j] - l[j];
+                    slope += aj * gap;
+                    if idx == last || gap >= INF || slope >= delta - tol {
+                        q = j; // this breakpoint enters the basis; stop flipping
+                        break;
+                    }
+                    flips.push(j); // fully traversed → flip to the opposite bound
                 }
-                flips.push(j); // fully traversed → flip to the opposite bound
-            }
+                (q, flips)
+            };
             // Apply the bound flips (no basis change); their effect on x_B and the
             // reduced costs is realized by the next iteration's exact recompute.
             for &j in &flips {
@@ -386,8 +577,10 @@ impl<'a> PreparedDual<'a> {
             }
 
             // Entering column α = B⁻¹A_q for the Devex weight update (and reused as
-            // the raw column for the product-form basis update).
-            let raw_q = col(a, m, n, q);
+            // the raw column for the product-form basis update). Scattered from the
+            // CSC view into a dense buffer (O(nnz_q)), not read from a dense matrix.
+            let mut raw_q = vec![0.0; m];
+            sp.scatter(q, &mut raw_q);
             let mut alpha = raw_q.clone();
             if lu.ftran(&mut alpha).is_err() {
                 return None;
@@ -418,6 +611,12 @@ impl<'a> PreparedDual<'a> {
 
             // Pivot: q enters at slot r; leaving var pinned at the violated bound.
             let leaving = basis[r];
+
+            // Degeneracy for anti-cycling: a dual pivot makes no dual-objective
+            // progress when the entering variable's reduced cost is ≈ 0 (a
+            // zero-length dual step). Consecutive such pivots are what cycle;
+            // captured here (before `dvec[q]` is zeroed) and fed to `stall` below.
+            let degenerate = dvec[q].abs() <= tol;
 
             // Incremental reduced-cost update (rank-1): d_j −= (d_q/piv)·α_rj for
             // every nonbasic j; the entering q becomes basic (0) and the leaving
@@ -487,8 +686,29 @@ impl<'a> PreparedDual<'a> {
             } else {
                 since_refresh += 1;
             }
+
+            // Anti-cycling bookkeeping: a degenerate pivot advances the stall count
+            // (and, once over the threshold, keeps Bland engaged); any productive
+            // pivot resets it. Count Bland-mode pivots for observability.
+            if bland {
+                crate::profile::incr(crate::profile::Ctr::DualBlandActivations);
+            }
+            if degenerate {
+                stall += 1;
+                crate::profile::incr(crate::profile::Ctr::DualDegeneratePivots);
+            } else {
+                stall = 0;
+            }
         }
-        None // iteration cap → cold fallback
+        // Loop exhausted the pivot budget without converging. When the stall guard
+        // set a size-derived cap below `max_iter`, this is a *stall trip* (F2):
+        // record it so the cold-fallback it triggers is auditable and its
+        // bound-neutrality (same optimum via the cold path) is measurable. When the
+        // guard is off, `stall_cap == max_iter` and this is the plain iteration cap.
+        if opts.warm_stall_guard && stall_cap < opts.max_iter {
+            crate::profile::incr(crate::profile::Ctr::DualStallTrips);
+        }
+        None // stall cap / iteration cap → cold fallback
     }
 }
 
@@ -496,15 +716,16 @@ impl<'a> PreparedDual<'a> {
 /// The soundness anchor for the incremental dual loop: the maintained `xb` is
 /// refreshed from this on a cadence and whenever optimality/infeasibility is
 /// claimed, so a drifted increment never decides the returned result.
-fn recompute_basic_values(
-    lu: &mut FeralLU,
+/// The right-hand side the basic-variable solve runs against:
+/// `b − Σ_{nonbasic} A_j x_j` (so that `B x_B = rhs`).
+fn reduced_rhs(
     sp: &SparseCols,
     b: &[f64],
     n: usize,
     l: &[f64],
     u: &[f64],
     stat: &[i8],
-) -> Option<Vec<f64>> {
+) -> Vec<f64> {
     let mut xb = b.to_vec();
     for j in 0..n {
         if stat[j] != BASIC {
@@ -523,9 +744,62 @@ fn recompute_basic_values(
             }
         }
     }
+    xb
+}
+
+fn recompute_basic_values(
+    lu: &mut FeralLU,
+    sp: &SparseCols,
+    b: &[f64],
+    n: usize,
+    l: &[f64],
+    u: &[f64],
+    stat: &[i8],
+) -> Option<Vec<f64>> {
+    let mut xb = reduced_rhs(sp, b, n, l, u, stat);
     if lu.ftran(&mut xb).is_err() {
         return None;
     }
+    Some(xb)
+}
+
+/// Growth high-water ratio (feral#93) above which the optimality gate re-solves
+/// `x_B` with a fresh refinement-polished factorization before certifying. A
+/// benign basis has growth ≈ 1; only a factor that lost digits (≫ 1) pays for the
+/// refined recompute, so well-conditioned nodes — the overwhelming majority — are
+/// untouched.
+const GROWTH_REFINE_TRIGGER: f64 = 1e4;
+
+/// Recompute `x_B` for the final basis via a **fresh** numeric-focus factorization
+/// with iterative refinement (discopt#364). The dual's working factor accumulates
+/// Forrest–Tomlin update error across pivots; a fresh factor of the same basis
+/// carries none of it, and refinement then polishes the residual `b − B·x`, so the
+/// optimality decision is made on the sharpest `x_B` available — recovered *inside*
+/// the engine rather than by handing off to another solver. Returns `None` if the
+/// fresh factorization or refined solve fails (the caller keeps its existing `x_B`).
+#[allow(clippy::too_many_arguments)]
+fn refined_basic_values(
+    sp: &SparseCols,
+    b: &[f64],
+    n: usize,
+    m: usize,
+    l: &[f64],
+    u: &[f64],
+    basis: &[usize],
+    stat: &[i8],
+) -> Option<Vec<f64>> {
+    let cols: Vec<Vec<f64>> = basis
+        .iter()
+        .map(|&j| {
+            let mut col = vec![0.0; m];
+            sp.scatter(j, &mut col);
+            col
+        })
+        .collect();
+    let mut lu = FeralLU::new().with_numeric_focus();
+    lu.factorize(m, &cols).ok()?;
+    let mut xb = reduced_rhs(sp, b, n, l, u, stat);
+    lu.ftran_refined(&mut xb).ok()?;
     Some(xb)
 }
 
@@ -554,6 +828,7 @@ fn recompute_reduced_costs(
 /// `None` if every basic variable is within its bounds (primal feasible). Returns
 /// `(slot, to_lower, violation)` where `to_lower` is the bound the leaving
 /// variable is pinned at. Pricing only — choosing any infeasible row is valid.
+#[allow(clippy::too_many_arguments)]
 fn select_leaving(
     m: usize,
     basis: &[usize],
@@ -562,9 +837,12 @@ fn select_leaving(
     gamma: &[f64],
     xb: &[f64],
     tol: f64,
+    bland: bool,
 ) -> Option<(usize, bool, f64)> {
     let mut r = None;
     let mut best_score = 0.0f64;
+    // Bland's rule tracks the smallest *variable* index among infeasible rows.
+    let mut best_var = usize::MAX;
     let mut to_lower = true;
     let mut delta = 0.0f64;
     for i in 0..m {
@@ -577,9 +855,18 @@ fn select_leaving(
             None
         };
         if let Some((v, lo)) = viol {
-            let score = v * v / gamma[i];
-            if score > best_score {
-                best_score = score;
+            // Bland (anti-cycling): smallest variable index. Devex (default):
+            // largest bound-violation steepest-edge score. Either choice is a
+            // *valid* leaving row — any primal-infeasible basic var may leave — so
+            // this only affects the pivot path, never correctness.
+            let take = if bland {
+                bi < best_var
+            } else {
+                v * v / gamma[i] > best_score
+            };
+            if take {
+                best_score = v * v / gamma[i];
+                best_var = bi;
                 r = Some(i);
                 to_lower = lo;
                 delta = v;
@@ -665,6 +952,8 @@ fn assemble(
     u: &[f64],
     status: LpStatus,
     pivots: usize,
+    dual: Vec<f64>,
+    ray: Vec<f64>,
 ) -> LpSolve {
     let mut x = vec![0.0; n];
     for j in 0..n {
@@ -690,6 +979,8 @@ fn assemble(
             basic_vars,
         },
         iters: pivots,
+        dual,
+        ray,
     }
 }
 
@@ -700,6 +991,32 @@ mod tests {
 
     fn opts() -> SimplexOptions {
         SimplexOptions::default()
+    }
+
+    #[test]
+    fn bland_leaving_selects_smallest_variable_index() {
+        // Two primal-infeasible basic rows with equal Devex scores: slot 0 holds
+        // variable 5, slot 1 holds variable 2, both 1 below their lower bound.
+        let m = 2;
+        let basis = [5usize, 2usize];
+        let l = vec![0.0; 6];
+        let u = vec![10.0; 6];
+        let gamma = [1.0, 1.0];
+        let xb = [-1.0, -1.0];
+
+        // Devex: equal scores, so the first infeasible slot (0) wins.
+        let dev = select_leaving(m, &basis, &l, &u, &gamma, &xb, 1e-7, false).unwrap();
+        assert_eq!(dev.0, 0, "Devex should take the first equal-score slot");
+        assert!(dev.1, "both violate the lower bound → leave toward lower");
+
+        // Bland: the smallest *variable* index wins — variable 2 sits in slot 1.
+        let bl = select_leaving(m, &basis, &l, &u, &gamma, &xb, 1e-7, true).unwrap();
+        assert_eq!(bl.0, 1, "Bland must pick slot 1 (variable 2 < variable 5)");
+
+        // Both modes agree there is no leaving row once feasible.
+        let feasible = [1.0, 1.0];
+        assert!(select_leaving(m, &basis, &l, &u, &gamma, &feasible, 1e-7, false).is_none());
+        assert!(select_leaving(m, &basis, &l, &u, &gamma, &feasible, 1e-7, true).is_none());
     }
 
     // Solve cold, then perturb one bound and re-solve warm from the cold basis;
@@ -750,6 +1067,63 @@ mod tests {
         assert!(
             warm.iters >= 1,
             "dual warm-start did not run (fell back to cold)"
+        );
+    }
+
+    // After a warm dual re-optimization the exported row duals must still satisfy
+    // the safe-bound identity `bᵀy + Σ min_box((c−Aᵀy)z) ≈ obj` — i.e. the dual
+    // path populates `LpSolve::dual` correctly, not just the primal cold path.
+    #[test]
+    fn warm_optimal_exports_duals_matching_objective() {
+        let a = [1.0, 1.0, 1.0, 0.0, 1.0, 3.0, 0.0, 1.0];
+        let (m, n) = (2, 4);
+        let b = [4.0, 6.0];
+        let c = [-1.0, -2.0, 0.0, 0.0];
+        let l = [0.0; 4];
+        let u = [5.0, 5.0, INF, INF];
+        let lp = LpView {
+            a: &a,
+            m,
+            n,
+            c: &c,
+            l: &l,
+            u: &u,
+        };
+        let cold = solve_lp(&lp, &b, &opts());
+        assert_eq!(cold.status, LpStatus::Optimal);
+
+        // Tighten x1 ≤ 0.5 and re-solve warm from the cold basis (dual pivots run).
+        let u2 = [5.0, 0.5, INF, INF];
+        let lp2 = LpView {
+            a: &a,
+            m,
+            n,
+            c: &c,
+            l: &l,
+            u: &u2,
+        };
+        let warm = solve_lp_warm(&lp2, &b, &cold.basis, &opts());
+        assert_eq!(warm.status, LpStatus::Optimal);
+        assert_eq!(warm.dual.len(), m);
+        // Safe bound from the warm-path duals reproduces the warm objective.
+        let mut g = b
+            .iter()
+            .zip(&warm.dual)
+            .map(|(bi, yi)| bi * yi)
+            .sum::<f64>();
+        for j in 0..n {
+            let aty: f64 = (0..m).map(|i| a[i * n + j] * warm.dual[i]).sum();
+            let rc = c[j] - aty;
+            if rc > 0.0 {
+                g += rc * l[j];
+            } else if rc < 0.0 && u2[j] < INF {
+                g += rc * u2[j];
+            }
+        }
+        assert!(
+            (g - warm.obj).abs() < 1e-7,
+            "safe bound {g} vs warm obj {}",
+            warm.obj
         );
     }
 
@@ -986,5 +1360,259 @@ mod tests {
             warm.iters, 0,
             "precondition should have forced cold fallback"
         );
+    }
+
+    // ----- F2: warm dual-simplex stall guard --------------------------------
+
+    /// Minimal parser for the captured stall fixture (a flat JSON of number
+    /// arrays produced by the F2 capture hook). Returns the CSC + LP data + basis.
+    #[allow(clippy::type_complexity)]
+    fn parse_stall_fixture(
+        json: &str,
+    ) -> (
+        usize,
+        usize,
+        Vec<usize>,
+        Vec<usize>,
+        Vec<f64>,
+        Vec<f64>,
+        Vec<f64>,
+        Vec<f64>,
+        Vec<f64>,
+        Vec<usize>,
+        Vec<i8>,
+    ) {
+        fn field<'a>(json: &'a str, key: &str) -> &'a str {
+            let k = format!("\"{key}\":");
+            let start = json.find(&k).expect("key present") + k.len();
+            &json[start..]
+        }
+        fn scalar(json: &str, key: &str) -> usize {
+            let s = field(json, key);
+            let end = s.find([',', '}']).unwrap();
+            s[..end].trim().parse().unwrap()
+        }
+        fn arr_f64(json: &str, key: &str) -> Vec<f64> {
+            let s = field(json, key);
+            let open = s.find('[').unwrap() + 1;
+            let close = s[open..].find(']').unwrap() + open;
+            s[open..close]
+                .split(',')
+                .filter(|t| !t.trim().is_empty())
+                .map(|t| t.trim().parse().unwrap())
+                .collect()
+        }
+        fn arr_usize(json: &str, key: &str) -> Vec<usize> {
+            arr_f64(json, key).into_iter().map(|x| x as usize).collect()
+        }
+        fn arr_i8(json: &str, key: &str) -> Vec<i8> {
+            arr_f64(json, key).into_iter().map(|x| x as i8).collect()
+        }
+        (
+            scalar(json, "m"),
+            scalar(json, "n"),
+            arr_usize(json, "col_ptr"),
+            arr_usize(json, "row_idx"),
+            arr_f64(json, "vals"),
+            arr_f64(json, "c"),
+            arr_f64(json, "l"),
+            arr_f64(json, "u"),
+            arr_f64(json, "b"),
+            arr_usize(json, "basic_vars"),
+            arr_i8(json, "col_status"),
+        )
+    }
+
+    // The captured nvs01 warm re-solve (117×142, tangent-augmented) is the LP+basis
+    // that, in the production release solve, grinds to `max_iter` = 100 000 pivots
+    // (~8.7 s, twice — F2 entry experiment) before cold-falling-back, while a cold
+    // solve of the same LP is optimal in ~5 ms. This replay asserts the invariant
+    // the guard relies on: **a warm re-solve from this exact basis returns the same
+    // optimum as a cold solve of the same LP** — so cold-falling-back on a stall
+    // (whatever the trigger) never changes the value a caller consumes. Both the
+    // default (guarded) and guard-off options are checked; both must agree with the
+    // cold optimum, since the only thing the guard changes is *who* computes it.
+    #[test]
+    fn warm_stall_guard_recovers_captured_nvs01_optimum() {
+        let json = include_str!("testdata/nvs01_warm_stall_lp.json");
+        let (m, n, col_ptr, row_idx, vals, c, l, u, b, basic_vars, col_status) =
+            parse_stall_fixture(json);
+        let sp = SparseCols::from_csc(col_ptr, row_idx, vals);
+        let start = Basis {
+            col_status,
+            basic_vars,
+        };
+
+        // Ground truth: a cold solve of exactly this LP.
+        let cold = solve_lp_cols(sp.clone(), m, n, &c, &l, &u, &b, &opts());
+        assert_eq!(
+            cold.status,
+            LpStatus::Optimal,
+            "cold solve of the captured LP should be optimal"
+        );
+
+        // The guard's size-derived cap is well below `max_iter` for this LP (so a
+        // real stall would trip it rather than grind the full 100 000 pivots).
+        let guarded = opts();
+        assert!(guarded.warm_stall_guard, "guard on by default");
+        let cap = guarded.warm_stall_cap(m, n);
+        assert!(
+            cap < guarded.max_iter,
+            "stall cap {cap} must be below max_iter {} to bound the tail",
+            guarded.max_iter
+        );
+
+        // Guarded and unguarded warm re-solves from the captured basis must BOTH
+        // return the cold optimum (either the warm loop converges, or it falls back
+        // to cold — the guard only affects which, never the value).
+        let mut unguarded = guarded.clone();
+        unguarded.warm_stall_guard = false;
+        for (label, o) in [("guarded", &guarded), ("unguarded", &unguarded)] {
+            let prep = PreparedDual::prepare_cols(&sp, m, n, &c, &l, &u, &start, o)
+                .expect("captured basis is dual-feasible (it was a real warm start)");
+            let warm = prep.reoptimize(&l, &u, &b, o);
+            assert_eq!(
+                warm.status,
+                LpStatus::Optimal,
+                "{label} warm re-solve of the captured LP must be optimal"
+            );
+            assert!(
+                (warm.obj - cold.obj).abs() <= 1e-6 * (1.0 + cold.obj.abs()),
+                "{label} obj {} must equal cold obj {} (bound-neutral)",
+                warm.obj,
+                cold.obj
+            );
+        }
+    }
+
+    // A healthy warm re-solve (a one-bound branch from a clean optimum) converges in
+    // a handful of pivots — far below the stall cap — so the guard is inert: same
+    // optimum, dual path actually runs (iters > 0, not a fallback), and the guarded
+    // and unguarded results are bit-identical.
+    #[test]
+    fn warm_stall_guard_inert_on_healthy_lp() {
+        let a = [1.0, 1.0, 1.0, 0.0, 1.0, 3.0, 0.0, 1.0];
+        let (m, n) = (2, 4);
+        let b = [4.0, 6.0];
+        let c = [-1.0, -2.0, 0.0, 0.0];
+        let l = [0.0; 4];
+        let u = [5.0, 5.0, INF, INF];
+        let lp = LpView {
+            a: &a,
+            m,
+            n,
+            c: &c,
+            l: &l,
+            u: &u,
+        };
+        let cold = solve_lp(&lp, &b, &opts());
+        assert_eq!(cold.status, LpStatus::Optimal);
+
+        let u2 = [5.0, 0.5, INF, INF];
+        let lp2 = LpView {
+            a: &a,
+            m,
+            n,
+            c: &c,
+            l: &l,
+            u: &u2,
+        };
+        let mut unguarded = opts();
+        unguarded.warm_stall_guard = false;
+        let bare = solve_lp_warm(&lp2, &b, &cold.basis, &unguarded);
+        let guarded = solve_lp_warm(&lp2, &b, &cold.basis, &opts());
+        assert_eq!(guarded.status, LpStatus::Optimal);
+        assert!(
+            guarded.iters >= 1,
+            "healthy warm dual should run its pivots (not fall back)"
+        );
+        // The guard changed nothing: same status, same pivot count, same objective.
+        assert_eq!(bare.status, guarded.status);
+        assert_eq!(
+            bare.iters, guarded.iters,
+            "guard must be inert on a healthy solve (identical pivots)"
+        );
+        assert_eq!(
+            bare.obj, guarded.obj,
+            "guard must be bit-identical on a healthy solve"
+        );
+    }
+
+    // Auditability: the `DualStallTrips` LP-stats counter increments exactly when
+    // the warm loop exhausts its (capped) pivot budget and cold-falls-back, and NOT
+    // when it converges normally — so a benchmark run can verify the guard fired on
+    // the pathological class and stayed inert elsewhere. Profiling is a
+    // process-global flag, so the test drives the counter directly and only reads
+    // deltas it caused (robust to parallel tests: no other test provokes a trip).
+    //
+    // The trip is forced with a tiny explicit `warm_stall_cap_override` on a warm
+    // re-solve that genuinely needs several pivots — a deterministic stand-in for
+    // the production stall (whose 100 000-pivot grind is instance-specific), while
+    // the *value* returned is still asserted equal to a cold solve (bound-neutral).
+    #[test]
+    fn warm_stall_guard_trip_counter_fires_only_on_stall() {
+        crate::profile::set_enabled(true);
+
+        // A warm re-solve that takes several dual pivots (many bounds tightened at
+        // once), so a cap of 1 pivot is hit while a cold solve of the same LP is
+        // trivially optimal — exactly the guard's stall→cold-fallback contract.
+        let a = [1.0, 1.0, 1.0, 0.0, 1.0, 3.0, 0.0, 1.0];
+        let hb = [4.0, 6.0];
+        let hc = [-1.0, -2.0, 0.0, 0.0];
+        let hl = [0.0; 4];
+        let hu = [5.0, 5.0, INF, INF];
+        let lp = LpView {
+            a: &a,
+            m: 2,
+            n: 4,
+            c: &hc,
+            l: &hl,
+            u: &hu,
+        };
+        let cold0 = solve_lp(&lp, &hb, &opts());
+        assert_eq!(cold0.status, LpStatus::Optimal);
+        let u2 = [0.5, 0.5, INF, INF];
+        let lp2 = LpView {
+            a: &a,
+            m: 2,
+            n: 4,
+            c: &hc,
+            l: &hl,
+            u: &u2,
+        };
+        let cold_ref = solve_lp(&lp2, &hb, &opts());
+        assert_eq!(cold_ref.status, LpStatus::Optimal);
+
+        // Guarded with a 1-pivot cap: the warm loop can't converge in one pivot, so
+        // it trips and cold-falls-back to the SAME optimum.
+        let mut capped = opts();
+        capped.warm_stall_cap_override = Some(1);
+        assert_eq!(capped.warm_stall_cap(2, 4), 1, "override honored");
+        let before = crate::profile::counter(crate::profile::Ctr::DualStallTrips);
+        let trip = solve_lp_warm(&lp2, &hb, &cold0.basis, &capped);
+        let after_stall = crate::profile::counter(crate::profile::Ctr::DualStallTrips);
+        assert_eq!(
+            after_stall - before,
+            1,
+            "the 1-pivot-capped warm re-solve must trip the guard exactly once"
+        );
+        assert_eq!(trip.status, LpStatus::Optimal);
+        assert!(
+            (trip.obj - cold_ref.obj).abs() <= 1e-9,
+            "tripped warm obj {} must equal cold obj {} (bound-neutral)",
+            trip.obj,
+            cold_ref.obj
+        );
+
+        // Default cap (size-derived, ~600 pivots here): the same re-solve converges
+        // in a few pivots, far below the cap — no trip.
+        let _ = solve_lp_warm(&lp2, &hb, &cold0.basis, &opts());
+        let after_healthy = crate::profile::counter(crate::profile::Ctr::DualStallTrips);
+        assert_eq!(
+            after_healthy, after_stall,
+            "a healthy warm solve under the default cap must not trip the guard"
+        );
+
+        crate::profile::set_enabled(false);
     }
 }

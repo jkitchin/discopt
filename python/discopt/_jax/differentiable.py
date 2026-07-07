@@ -320,13 +320,13 @@ def _dispatch_nlp_solve(nlp_solver: str, evaluator, x0, options: dict):
     forward there without any in-trace solve.
     """
     if nlp_solver in ("ipm", "pounce"):
-        from discopt.solvers.nlp_pounce import solve_nlp
+        from discopt.solvers.nlp_pounce import solve_nlp as _solve_nlp_pounce
 
-        return solve_nlp(evaluator, x0, options=options)
+        return _solve_nlp_pounce(evaluator, x0, options=options)
     elif nlp_solver == "ipopt":
-        from discopt.solvers.nlp_ipopt import solve_nlp
+        from discopt.solvers.nlp_ipopt import solve_nlp as _solve_nlp_ipopt
 
-        return solve_nlp(evaluator, x0, options=options)
+        return _solve_nlp_ipopt(evaluator, x0, options=options)
     else:
         raise ValueError(f"Unknown nlp_solver: {nlp_solver!r}. Use 'ipm', 'pounce', or 'ipopt'.")
 

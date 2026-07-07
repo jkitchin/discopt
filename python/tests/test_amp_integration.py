@@ -26,6 +26,7 @@ Sections:
 
 from __future__ import annotations
 
+import itertools
 import logging
 import os
 import warnings
@@ -3508,7 +3509,6 @@ class TestCurrentCodeWeaknesses:
 
     def test_amp_time_limit_with_incumbent_returns_feasible(self, monkeypatch):
         """Timing out after finding an incumbent should not hide the feasible point."""
-        import itertools
 
         from discopt._jax.milp_relaxation import MilpRelaxationResult
         from discopt.solvers import amp as amp_mod
@@ -3685,17 +3685,14 @@ class TestCurrentCodeWeaknesses:
             pytest.fail(f"OBBT crashed on bilinear model: {e}")
 
     def test_existing_milp_solver_available(self):
-        """HiGHS MILP solver must be available for AMP to use."""
+        """A matrix-form MILP solver must be available for AMP to use (the
+        self-hosted Rust simplex B&B; HiGHS was removed, issue #356)."""
         try:
-            from discopt.solvers.milp_highs import solve_milp  # noqa: F401
+            from discopt.solvers.milp_simplex import solve_milp  # noqa: F401
 
             assert callable(solve_milp)
         except ImportError:
-            # Try alternative import path
-            try:
-                import highspy  # noqa: F401
-            except ImportError:
-                pytest.skip("HiGHS not available")
+            pytest.skip("Rust simplex MILP binding not built")
 
     def test_relaxation_compiler_handles_bilinear(self):
         """Relaxation compiler must handle BinaryOp('*', Variable, Variable)."""

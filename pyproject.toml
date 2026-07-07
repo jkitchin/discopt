@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "discopt"
-version = "0.4.1.dev0"
+version = "0.6.0.dev0"
 description = "Hybrid MINLP solver combining Rust and JAX"
 requires-python = ">=3.10"
 authors = [{name = "John Kitchin"}]
@@ -28,7 +28,7 @@ dependencies = [
     "jaxlib>=0.4",
     "numpy>=1.24",
     "scipy>=1.10",
-    "pounce-solver>=0.6",
+    "pounce-solver>=0.7",
 ]
 
 [project.urls]
@@ -40,9 +40,8 @@ Issues = "https://github.com/jkitchin/discopt/issues"
 [project.optional-dependencies]
 # POUNCE is now a core dependency (the default NLP/IPM engine); this extra is
 # kept as a no-op alias for back-compat with `pip install discopt[pounce]`.
-pounce = ["pounce-solver>=0.6"]
+pounce = ["pounce-solver>=0.7"]
 ipopt = ["cyipopt>=1.4"]
-highs = ["highspy"]
 cutest = ["pycutest>=1.8.0"]
 # GAMS solver link: the expert-level GAMS Python API (GMO/GEV). Ships with a
 # GAMS system; also on PyPI. Required only to run discopt *as* a GAMS solver.
@@ -64,8 +63,6 @@ learned = ["equinox>=0.13.8", "optax>=0.1"]
 # *code-generate* JAX relaxation closures offline; it is never imported on the
 # solver hot path. See docs/notebooks/symbolic_envelopes.ipynb.
 sympy = ["sympy>=1.12"]
-doe = ["openpyxl>=3.1"]
-doe-gui = ["discopt[doe]", "streamlit>=1.30", "pandas>=2.0"]
 dev = [
     "pytest",
     "pytest-timeout",
@@ -76,11 +73,15 @@ dev = [
     # local `pip install -e .[dev]` cannot drift from CI.
     "ruff==0.14.6",
     "mypy==2.1.0",
-    "highspy",
     "pre-commit",
     "pyomo>=6.7",
+    # NN-embedding readers are covered by test_nn_reader_fixes.py (T-N4.1 removed
+    # onnx_reader.py from the coverage omit), so the ONNX toolchain must be present
+    # for `pip install -e .[dev]` and CI to exercise it.
+    "onnx>=1.14",
+    "onnxruntime>=1.16",
 ]
-all = ["discopt[pounce,ipopt,highs,cutest,llm,gnn,nn,ml,doe,doe-gui,sympy,pyomo]"]
+all = ["discopt[pounce,ipopt,cutest,llm,gnn,nn,ml,sympy,pyomo]"]
 
 [project.scripts]
 discopt = "discopt.cli:main"
@@ -104,7 +105,6 @@ include = [
     "Cargo.lock",
     "crates/**/*.rs",
     "crates/**/*.toml",
-    "python/discopt/doe/gui/discopt-logo.png",
     "python/discopt/gams/data/*.gms",
     "python/discopt/gams/data/manifest.json",
 ]
@@ -112,7 +112,7 @@ include = [
 [tool.ruff]
 line-length = 100
 target-version = "py310"
-extend-exclude = ["adversary/", "python/discopt/course/"]
+extend-exclude = ["adversary/"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "W"]
@@ -133,10 +133,6 @@ disable_error_code = "misc"
 
 [[tool.mypy.overrides]]
 module = "discopt._jax.relaxation_compiler"
-disable_error_code = ["misc", "attr-defined"]
-
-[[tool.mypy.overrides]]
-module = "discopt._numpy.relaxation_compiler"
 disable_error_code = ["misc", "attr-defined"]
 
 [[tool.mypy.overrides]]
@@ -262,7 +258,6 @@ source = ["discopt"]
 branch = true
 omit = [
     "python/discopt/solvers/sipopt.py",
-    "python/discopt/nn/readers/onnx_reader.py",
 ]
 
 [tool.coverage.report]

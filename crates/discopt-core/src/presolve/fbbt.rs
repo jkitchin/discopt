@@ -115,11 +115,28 @@ pub fn interval_sub(a: &Interval, b: &Interval) -> Interval {
 }
 
 /// `[a,b] * [c,d]` using all four endpoint products.
+///
+/// A finite `0` endpoint multiplied by an infinite endpoint yields `0 * ±∞ =
+/// NaN` in IEEE-754. By the interval-multiplication convention the product of a
+/// zero factor with any interval (including an unbounded one) is `0`, so we map
+/// those NaN corner products to `0` (C-22). This keeps `interval_mul` a sound,
+/// finite outer enclosure — e.g. `[0,0] * [-∞,∞] = [0,0]` rather than the
+/// `[NaN,NaN]` that would silently discard downstream tightening. NaN can arise
+/// here *only* from `0 * ±∞`; every other operand pair is finite×finite (never
+/// NaN) or a genuine ±∞ product, so the substitution never masks a real value.
 pub fn interval_mul(a: &Interval, b: &Interval) -> Interval {
-    let p1 = a.lo * b.lo;
-    let p2 = a.lo * b.hi;
-    let p3 = a.hi * b.lo;
-    let p4 = a.hi * b.hi;
+    let prod = |x: f64, y: f64| {
+        let p = x * y;
+        if p.is_nan() {
+            0.0
+        } else {
+            p
+        }
+    };
+    let p1 = prod(a.lo, b.lo);
+    let p2 = prod(a.lo, b.hi);
+    let p3 = prod(a.hi, b.lo);
+    let p4 = prod(a.hi, b.hi);
     Interval::new(p1.min(p2).min(p3).min(p4), p1.max(p2).max(p3).max(p4))
 }
 
@@ -1087,6 +1104,36 @@ fn snap_integral_bounds(model: &ModelRepr, var_bounds: &mut [Interval]) {
 // Fixed-point FBBT
 // ─────────────────────────────────────────────────────────────
 
+/// Seed a variable BLOCK's FBBT interval from its element-wise bounds.
+///
+/// The FBBT engine carries **one interval per variable block** (an array
+/// variable of `size > 1` is a single `var_bounds` slot). An `Index` node that
+/// selects element `k` resolves — in both forward and backward propagation — to
+/// this single shared block interval, so the interval must be a valid *outer*
+/// bound for **every** element of the block, not any one element's.
+///
+/// C-31: the previous seed used `v.lb.first()/v.ub.first()` — element 0's bounds
+/// — and stamped them onto the whole block. On heterogeneous per-element bounds
+/// that interval EXCLUDES feasible points of the other elements: a forward
+/// `Index` on element `k != 0` then evaluates against element 0's (wrong)
+/// interval, cutting feasible arguments and, on a genuine mismatch, declaring a
+/// feasible model infeasible. That collapsed box reaches the certified LP dual
+/// bound via `_fbbt_argument_box` (`milp_relaxation.py`), so the envelope built
+/// over it can be invalid. Seeding from the element-wise UNION
+/// (`min` lower, `max` upper) restores soundness: the block interval then
+/// contains every element's feasible interval, so interval arithmetic over it is
+/// a superset — FBBT can only *lose* tightening for the block, never cut a
+/// feasible point. For a homogeneous block the union equals element 0, so this
+/// is a no-op there (no regression for the common case).
+pub(crate) fn seed_block_interval(v: &crate::expr::VarInfo) -> Interval {
+    if v.lb.is_empty() || v.ub.is_empty() {
+        return Interval::new(f64::NEG_INFINITY, f64::INFINITY);
+    }
+    let lo = v.lb.iter().copied().fold(f64::INFINITY, f64::min);
+    let hi = v.ub.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+    Interval::new(lo, hi)
+}
+
 /// Run FBBT to fixed-point on a model with an optional incumbent cutoff.
 ///
 /// When `incumbent_bound` is `Some(bound)`, an additional synthetic constraint
@@ -1102,16 +1149,7 @@ pub fn fbbt_with_cutoff(
     incumbent_bound: Option<f64>,
 ) -> Vec<Interval> {
     let n_vars = model.variables.len();
-    let mut var_bounds: Vec<Interval> = model
-        .variables
-        .iter()
-        .map(|v| {
-            Interval::new(
-                v.lb.first().copied().unwrap_or(f64::NEG_INFINITY),
-                v.ub.first().copied().unwrap_or(f64::INFINITY),
-            )
-        })
-        .collect();
+    let mut var_bounds: Vec<Interval> = model.variables.iter().map(seed_block_interval).collect();
 
     // Determine the objective cutoff constraint (if any).
     let obj_cutoff: Option<(ExprId, Interval)> = incumbent_bound.map(|bound| {
@@ -1197,17 +1235,9 @@ pub fn fbbt_with_cutoff(
 /// Returns tightened variable bounds (indexed by variable index, not offset).
 pub fn fbbt(model: &ModelRepr, max_iter: usize, tol: f64) -> Vec<Interval> {
     let n_vars = model.variables.len();
-    let mut var_bounds: Vec<Interval> = model
-        .variables
-        .iter()
-        .map(|v| {
-            // Use the first element's bounds (scalar variables).
-            Interval::new(
-                v.lb.first().copied().unwrap_or(f64::NEG_INFINITY),
-                v.ub.first().copied().unwrap_or(f64::INFINITY),
-            )
-        })
-        .collect();
+    // C-31: seed each block from the element-wise union of its bounds (a valid
+    // outer bound for every element), NOT element 0 — see `seed_block_interval`.
+    let mut var_bounds: Vec<Interval> = model.variables.iter().map(seed_block_interval).collect();
 
     for _ in 0..max_iter {
         let old_bounds = var_bounds.clone();
@@ -1310,6 +1340,106 @@ mod tests {
         let r = interval_mul(&a, &b);
         assert!((r.lo - (-8.0)).abs() < 1e-15);
         assert!((r.hi - 12.0).abs() < 1e-15);
+    }
+
+    #[test]
+    fn c22_interval_mul_zero_times_entire_is_zero() {
+        // C-22: [0,0] * [-inf, inf]. Each corner product is 0 * (±inf) = NaN.
+        // Before the fix, f64::min/max propagate NaN and the result is [NaN, NaN]
+        // — a "lost tightening" bug (any variable intersected with a NaN interval
+        // keeps its stale bound). By the interval convention 0 * anything = 0, so
+        // the sound, informative enclosure is [0, 0].
+        let a = Interval::point(0.0);
+        let b = Interval::entire();
+        let r = interval_mul(&a, &b);
+        assert!(!r.lo.is_nan() && !r.hi.is_nan(), "result must not be NaN");
+        assert_eq!(r.lo, 0.0);
+        assert_eq!(r.hi, 0.0);
+    }
+
+    #[test]
+    fn c22_interval_mul_never_nan_and_encloses_true_product() {
+        // C-22 property test: over a grid of intervals including infinite
+        // endpoints and zero-width [0,0] factors, interval_mul must (a) never
+        // produce NaN endpoints and (b) contain the true product of every pair
+        // of representative points drawn from the two intervals (rigorous
+        // outer enclosure). A NaN endpoint fails containment silently, so we
+        // check both explicitly.
+        let ninf = f64::NEG_INFINITY;
+        let pinf = f64::INFINITY;
+        let bounds = [ninf, -3.0, -1.0, 0.0, 1.0, 2.5, pinf];
+        for &alo in &bounds {
+            for &ahi in &bounds {
+                if alo > ahi {
+                    continue;
+                }
+                for &blo in &bounds {
+                    for &bhi in &bounds {
+                        if blo > bhi {
+                            continue;
+                        }
+                        let a = Interval::new(alo, ahi);
+                        let b = Interval::new(blo, bhi);
+                        let r = interval_mul(&a, &b);
+                        assert!(
+                            !r.lo.is_nan() && !r.hi.is_nan(),
+                            "interval_mul({a:?}, {b:?}) produced NaN: {r:?}"
+                        );
+                        assert!(r.lo <= r.hi, "interval_mul({a:?}, {b:?}) => {r:?}");
+                        // Containment: probe *finite* points from each factor and
+                        // require the product lies within the result interval.
+                        // A finite point drawn from an unbounded factor is still
+                        // a member of that interval, so its product must be
+                        // enclosed. (Degenerate point-at-infinity intervals like
+                        // [-inf,-inf] have no finite members and are excluded by
+                        // finite_probes returning empty.)
+                        let a_pts = finite_probes(alo, ahi);
+                        let b_pts = finite_probes(blo, bhi);
+                        for &x in &a_pts {
+                            for &y in &b_pts {
+                                let p = x * y;
+                                assert!(
+                                    p >= r.lo - 1e-6 && p <= r.hi + 1e-6,
+                                    "product {p} of {x}*{y} escaped {r:?} \
+                                     for a={a:?} b={b:?}"
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Genuine finite members of `[lo, hi]` used as containment witnesses in
+    /// the C-22 property test. Every returned value satisfies `lo <= v <= hi`.
+    /// Unbounded sides are probed with a large finite magnitude (still a member);
+    /// a degenerate point-at-infinity interval (e.g. `[-inf,-inf]`) has no finite
+    /// members and returns empty.
+    fn finite_probes(lo: f64, hi: f64) -> Vec<f64> {
+        let mut pts = Vec::new();
+        if lo.is_finite() {
+            pts.push(lo);
+        } else if lo == f64::NEG_INFINITY && hi > f64::NEG_INFINITY {
+            // A large-magnitude negative member, but never above hi.
+            let cap = if hi.is_finite() { hi } else { 1e6 };
+            pts.push((-1e6_f64).min(cap));
+        }
+        if hi.is_finite() {
+            pts.push(hi);
+        } else if hi == f64::INFINITY && lo < f64::INFINITY {
+            // A large-magnitude positive member, but never below lo.
+            let floor = if lo.is_finite() { lo } else { -1e6 };
+            pts.push((1e6_f64).max(floor));
+        }
+        if lo.is_finite() && hi.is_finite() && (hi - lo).abs() > 1e-15 {
+            pts.push(lo + (hi - lo) * 0.5);
+        }
+        // Include 0 when it is a member — exercises the 0 * ±∞ corner.
+        if lo <= 0.0 && hi >= 0.0 {
+            pts.push(0.0);
+        }
+        pts
     }
 
     #[test]
@@ -2381,6 +2511,132 @@ mod tests {
             bounds[1].lo <= 1e-9 && bounds[1].hi >= 1.0 - 1e-9,
             "eps residual must leave the binary free, got {:?}",
             bounds[1]
+        );
+    }
+
+    // ── C-31 (=TG-1) — FBBT array-block seeding (FIXED) ──
+    //
+    // `fbbt()` carries ONE `Interval` per variable *block*, and `eval_node_interval`
+    // resolves every `Index{base,col}` node to that single shared block interval
+    // (the column is ignored). The old seed used `v.lb.first()`/`v.ub.first()` —
+    // element 0's bounds — so an array variable with heterogeneous per-element
+    // bounds had element 0's (tighter) bounds illegally propagated onto every
+    // other element, cutting feasible points and (on a genuine mismatch) declaring
+    // a feasible model infeasible. FIX (`seed_block_interval`): seed each block
+    // from the element-wise UNION [min lb, max ub], a valid outer bound for every
+    // element — so the block interval never excludes a feasible argument. These
+    // two tests assert the FIXED behaviour (no feasible cut; no false infeasible);
+    // they FAIL on the pre-fix element-0 seed. See also the Python-side consumer
+    // test `test_c31_fbbt_argument_box_envelope_contains_feasible` which pins the
+    // certified-LP-relaxation reach (`_fbbt_argument_box` / `milp_relaxation.py`).
+
+    /// Build a single continuous array variable block `x` of `size` with the given
+    /// element-wise bounds, plus a constraint on element `col`: `x[col] {sense} rhs`.
+    fn array_var_model(
+        lb: Vec<f64>,
+        ub: Vec<f64>,
+        col: usize,
+        sense: ConstraintSense,
+        rhs: f64,
+    ) -> ModelRepr {
+        let size = lb.len();
+        let mut arena = ExprArena::new();
+        let xvar = arena.add(ExprNode::Variable {
+            name: "x".into(),
+            index: 0,
+            size,
+            shape: vec![size],
+        });
+        let idx = arena.add(ExprNode::Index {
+            base: xvar,
+            index: IndexSpec::Scalar(col),
+        });
+        ModelRepr {
+            arena,
+            objective: idx,
+            objective_sense: ObjectiveSense::Minimize,
+            constraints: vec![ConstraintRepr {
+                body: idx,
+                sense,
+                rhs,
+                name: Some("c".into()),
+            }],
+            variables: vec![VarInfo {
+                name: "x".into(),
+                var_type: VarType::Continuous,
+                offset: 0,
+                size,
+                shape: vec![size],
+                lb,
+                ub,
+            }],
+            n_vars: size,
+        }
+    }
+
+    #[test]
+    fn c31_array_block_seeds_from_element_union_not_element0() {
+        // x is a length-2 continuous array with heterogeneous per-element bounds:
+        // lb=[8,0], ub=[10,10]. Element 1 is genuinely free in [0,10]. Constraint
+        // touches element 1 trivially: `x[1] >= 0` (always satisfiable). The old
+        // C-31 collapse seeded the whole block from element 0 → [8,10], erasing
+        // the feasible region x[1] ∈ [0,8). The fix seeds each block from the
+        // element-wise UNION [min lb, max ub] = [0,10], a valid outer bound for
+        // every element, so the feasible region is preserved.
+        let model = array_var_model(
+            vec![8.0, 0.0],
+            vec![10.0, 10.0],
+            1,
+            ConstraintSense::Ge,
+            0.0,
+        );
+        let bounds = fbbt(&model, 8, 1e-9);
+        // One interval per BLOCK (n_vars here = variables.len() == 1).
+        assert_eq!(
+            bounds.len(),
+            1,
+            "fbbt returns one interval per block, not per element"
+        );
+        // C-31 FIXED: the block interval must be the element-wise union outer
+        // bound, so its lower bound is element 1's 0.0 — NOT element-0's 8.0.
+        // A lower bound above 0.0 would cut the feasible region x[1] ∈ [0,8).
+        assert!(
+            bounds[0].lo <= 0.0 + 1e-9,
+            "C-31: block must not collapse to element-0 lb=8; feasible x[1]∈[0,8) \
+             would be cut. got {:?}",
+            bounds[0]
+        );
+        assert!(
+            bounds[0].hi >= 10.0 - 1e-9,
+            "C-31: block upper bound must cover every element (10.0), got {:?}",
+            bounds[0]
+        );
+    }
+
+    #[test]
+    fn c31_heterogeneous_block_no_false_infeasible() {
+        // x length-2: lb=[5,0], ub=[5,3]. Element 0 is fixed at 5; element 1 is
+        // free in [0,3]. Constraint `x[1] <= 3` is trivially satisfiable
+        // (x=[5, 0..3] is feasible), so FBBT must NOT report infeasible.
+        // The old C-31 collapse seeded the block from element 0 → [5,5]; the
+        // Index on element 1 resolved to [5,5]; intersecting with (-inf,3] was
+        // empty → false infeasible. The union seed [0,5] intersected with
+        // (-inf,3] is [0,3] → feasible.
+        let model = array_var_model(
+            vec![5.0, 0.0],
+            vec![5.0, 3.0],
+            1,
+            ConstraintSense::Le,
+            3.0,
+        );
+        let bounds = fbbt(&model, 8, 1e-9);
+        // C-31 FIXED: a feasible model must NOT be reported infeasible.
+        // "FBBT never reports feasible as infeasible."
+        assert!(
+            !bounds.iter().any(|b| b.is_empty()),
+            "C-31: feasible model x=[5, 0..3] must not be declared infeasible, \
+             got {:?}",
+            bounds
         );
     }
 }

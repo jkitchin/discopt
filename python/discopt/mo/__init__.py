@@ -45,6 +45,7 @@ you intend to reuse it for other solves.
 """
 
 from discopt.mo.indicators import (
+    common_reference,
     epsilon_indicator,
     hypervolume,
     igd,
@@ -65,9 +66,11 @@ from discopt.mo.scalarization import (
     weighted_tchebycheff,
 )
 from discopt.mo.utils import (
+    ObjectiveEvaluator,
     ideal_point,
     nadir_point,
     normalize_objectives,
+    objective_evaluator,
 )
 
 __all__ = [
@@ -79,6 +82,8 @@ __all__ = [
     "nadir_point",
     "normalize_objectives",
     "filter_nondominated",
+    "ObjectiveEvaluator",
+    "objective_evaluator",
     # Scalarizations
     "weighted_sum",
     "epsilon_constraint",
@@ -87,6 +92,7 @@ __all__ = [
     "normalized_normal_constraint",
     # Indicators
     "hypervolume",
+    "common_reference",
     "igd",
     "spread",
     "epsilon_indicator",

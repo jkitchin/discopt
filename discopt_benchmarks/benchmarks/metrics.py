@@ -48,6 +48,13 @@ class SolveResult:
     root_gap: Optional[float] = None        # (UB - LB_root) / |UB| at root
     root_time: Optional[float] = None       # Time spent at root node
 
+    # Bound trajectory (cert:T0.2): downsampled (t, node, bound, incumbent)
+    # tuples recorded during the solve when trajectory recording is opted in.
+    # None when not recorded. ``t`` is elapsed seconds; ``bound`` is the best
+    # dual bound (non-decreasing for min sense); ``incumbent`` the best
+    # objective (None until the first incumbent is found).
+    trajectory: Optional[list[list[float]]] = None
+
     # Layer profiling (discopt-specific)
     rust_time_fraction: Optional[float] = None
     jax_time_fraction: Optional[float] = None
@@ -413,11 +420,41 @@ def root_gap_analysis(
     }
 
 
+def root_gap_populated_fraction(results: list[SolveResult]) -> float:
+    """Fraction of discopt rows carrying a non-null ``root_gap`` (cert:T0.5).
+
+    The Phase 0 exit metric: with the T0.1 producer wired, ``root_gap`` must be
+    populated on ≥ 90% of rows so ``root_gap_ratio_vs_baron`` is evaluable. The
+    denominator is every row (so an unpopulated timeout/error counts against
+    coverage); returns 0.0 for an empty set.
+    """
+    if not results:
+        return 0.0
+    populated = sum(1 for r in results if r.root_gap is not None)
+    return populated / len(results)
+
+
 def root_gap_ratio(
     results_a: list[SolveResult],
     results_b: list[SolveResult],
 ) -> float:
-    """Mean ratio of root gaps: solver_a / solver_b on common instances."""
+    """Mean ratio of root gaps: solver_a / solver_b on common instances.
+
+    This is the metric behind ``root_gap_ratio_vs_baron`` (``[gates.cert2]``).
+    ``SolveResult.root_gap`` is ``(UB − LB_root)/|UB|`` at the root; A3 wired the
+    certified dual bound onto ``SolveResult.bound`` (null before A3), which makes
+    ``root_gap`` — and therefore this ratio — evaluable against a BARON reference.
+
+    Reference-bound caveat (cert-gap-plan §14 T2.6 item 3): many BARON rows carry
+    no usable root/dual bound (e.g. ``status="unknown"`` at ~20 ms), so their
+    ``root_gap`` is ``None``. Those rows are **excluded from both numerator and
+    denominator** by the ``root_gap is not None`` filter, so the ratio is never
+    divided by a non-bound. The ``gaps_b[inst] > 1e-10`` guard drops instances
+    where BARON's root gap is ~0 (division would blow up / is meaningless), and a
+    non-finite discopt gap is skipped defensively. Returns NaN when no instance
+    has a usable bound on both sides — the gate then reads NaN → fail (an honest
+    "not evaluable" rather than a spuriously-passing empty mean).
+    """
     gaps_a = {r.instance: r.root_gap for r in results_a if r.root_gap is not None}
     gaps_b = {r.instance: r.root_gap for r in results_b if r.root_gap is not None}
     common = set(gaps_a.keys()) & set(gaps_b.keys())
@@ -425,9 +462,39 @@ def root_gap_ratio(
         return float("nan")
     ratios = []
     for inst in common:
-        if gaps_b[inst] > 1e-10:
+        if gaps_b[inst] > 1e-10 and math.isfinite(gaps_a[inst]):
             ratios.append(gaps_a[inst] / gaps_b[inst])
     return float(np.mean(ratios)) if ratios else float("nan")
+
+
+def closed_within_10_nodes_fraction(
+    results: list[SolveResult],
+    node_threshold: int = 10,
+) -> float:
+    """Fraction of *proved-optimal* rows that certified within ``node_threshold``
+    B&B nodes — the T2.6 metric for the Phase-2 exit criterion "≥ 30% of
+    currently-tree-opening instances close within 10 nodes" (cert-gap-plan §6/§14).
+
+    Rationale: BARON closes most of the global50 panel at 0–9 nodes; the branch-
+    and-reduce goal is for discopt to certify (prove optimality) at the root or in
+    a handful of nodes rather than opening a large tree. The denominator is every
+    row that reached a *proven optimum* (``status == OPTIMAL`` with a node count);
+    the numerator is the subset that did so in ``≤ node_threshold`` nodes. A row
+    that only found a feasible incumbent (uncertified tail) or errored is not in
+    the denominator — the metric measures *how tightly* the proofs close, not the
+    proof rate. Returns 0.0 for an empty set of proved rows.
+
+    ``node_count == 0`` rows are counted as closed (a convex fast-path / root
+    fathom proves optimality without opening a tree — the tightest possible close).
+    """
+    proved = [
+        r for r in results
+        if r.status == SolveStatus.OPTIMAL and r.node_count is not None
+    ]
+    if not proved:
+        return 0.0
+    closed = sum(1 for r in proved if r.node_count <= node_threshold)
+    return closed / len(proved)
 
 
 def node_count_reduction(
@@ -723,6 +790,10 @@ def evaluate_phase_gate(
             ref_solver = metric.replace("geomean_ratio_vs_", "")
             if reference_solvers and ref_solver in reference_solvers:
                 actual = geometric_mean_ratio(discopt_results, reference_solvers[ref_solver])
+        elif metric == "root_gap_populated_fraction":
+            actual = root_gap_populated_fraction(discopt_results)
+        elif metric == "closed_within_10_nodes_fraction":
+            actual = closed_within_10_nodes_fraction(discopt_results)
         elif metric.startswith("root_gap_ratio_vs_"):
             ref_solver = metric.replace("root_gap_ratio_vs_", "")
             if reference_solvers and ref_solver in reference_solvers:
@@ -735,6 +806,15 @@ def evaluate_phase_gate(
         elif metric == "median_nodes_per_second":
             nps = [r.nodes_per_second for r in discopt_results if r.nodes_per_second is not None]
             actual = float(np.median(nps)) if nps else 0.0
+        elif metric == "median_seconds_per_node":
+            # Median wall seconds per B&B node over rows that opened a tree
+            # (cert:T1.x performance exit). Lower is better.
+            spn = [
+                r.wall_time / r.node_count
+                for r in discopt_results
+                if r.node_count > 0 and r.wall_time not in (None, float("inf"))
+            ]
+            actual = float(np.median(spn)) if spn else float("nan")
         elif metric == "python_orchestration_fraction" or metric == "rust_tree_overhead_fraction":
             profile = layer_profiling_summary(discopt_results)
             if metric == "python_orchestration_fraction":

@@ -95,3 +95,68 @@ class TestParetoFront:
     def test_senses_array(self):
         front = _make_front([[0, 2]], senses=("min", "max"))
         np.testing.assert_allclose(front._senses_array(), [1.0, -1.0])
+
+
+class TestFilteredDedup:
+    """MO3: filtered() must collapse tolerance-equal duplicate objective vectors.
+
+    Weak dominance keeps every copy of an identical objective vector (equal
+    points do not strictly dominate one another), so without an explicit dedup
+    a front with three identical anchors survives as three points -- inflating
+    ``n`` and distorting spacing metrics.
+    """
+
+    @pytest.mark.smoke
+    def test_exact_duplicates_collapsed(self):
+        # 3 identical + 1 distinct + 1 dominated (MO3 repro: 3+1+1).
+        objs = [[1.0, 1.0], [1.0, 1.0], [1.0, 1.0], [0.0, 2.0], [3.0, 3.0]]
+        front = _make_front(objs)
+        kept = front.filtered()
+        # Want exactly 2: one representative of the triple + the distinct
+        # point; the dominated (3, 3) is dropped. (Pre-fix: 4.)
+        assert kept.n == 2
+        kept_objs = sorted(tuple(p.objectives) for p in kept.points)
+        assert kept_objs == [(0.0, 2.0), (1.0, 1.0)]
+
+    @pytest.mark.smoke
+    def test_dedup_keeps_first_occurrence_params(self):
+        pts = [
+            ParetoPoint(
+                x={},
+                objectives=np.array([1.0, 1.0]),
+                status="optimal",
+                wall_time=0.0,
+                scalarization_params={"weights": [0.2, 0.8]},
+            ),
+            ParetoPoint(
+                x={},
+                objectives=np.array([1.0, 1.0]),
+                status="optimal",
+                wall_time=0.0,
+                scalarization_params={"weights": [0.5, 0.5]},
+            ),
+        ]
+        front = ParetoFront(
+            points=pts, method="test", objective_names=["f1", "f2"], senses=["min", "min"]
+        )
+        kept = front.filtered()
+        assert kept.n == 1
+        # First occurrence's params are preserved.
+        assert kept.points[0].scalarization_params == {"weights": [0.2, 0.8]}
+
+    @pytest.mark.smoke
+    def test_genuinely_distinct_near_points_preserved(self):
+        # Two points differing by 1e-4 must NOT be merged at the default 1e-8 tol.
+        objs = [[1.0, 1.0], [1.0 + 1e-4, 1.0 - 1e-4], [0.0, 2.0]]
+        front = _make_front(objs)
+        kept = front.filtered()
+        assert kept.n == 3
+
+    @pytest.mark.smoke
+    def test_dedup_tol_is_tunable(self):
+        objs = [[1.0, 1.0], [1.0 + 1e-4, 1.0 - 1e-4]]
+        front = _make_front(objs)
+        # A looser tolerance collapses the near-duplicate pair.
+        assert front.filtered(dedup_tol=1e-3).n == 1
+        # The default keeps them distinct.
+        assert front.filtered().n == 2

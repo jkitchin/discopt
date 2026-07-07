@@ -199,6 +199,27 @@ impl PyTreeManager {
         Ok(())
     }
 
+    /// Replace a node's structural variable bounds with reduction-tightened ones
+    /// (cert:T2.4c), so its children inherit the contracted box.
+    ///
+    /// A sound contraction only — the caller must pass a box that is a SUBSET of
+    /// the node's current box (per-node `reduce_node` guarantees this: it only
+    /// intersects). Called on the spatial path AFTER the node LP + `reduce_node`,
+    /// BEFORE `process_evaluated` branches the node. `lb`/`ub` are flat per-variable
+    /// arrays of length `n_vars`; a length mismatch is a no-op inside Rust.
+    fn set_node_bounds(
+        &mut self,
+        node_id: i64,
+        lb: PyReadonlyArray1<f64>,
+        ub: PyReadonlyArray1<f64>,
+    ) -> PyResult<()> {
+        let nid = NodeId(node_id as usize);
+        let lb_v: Vec<f64> = lb.as_array().to_vec();
+        let ub_v: Vec<f64> = ub.as_array().to_vec();
+        self.inner.set_node_bounds(nid, lb_v, ub_v);
+        Ok(())
+    }
+
     /// Process all evaluated nodes: prune, check integrality, branch.
     ///
     /// Returns a dict with {pruned, fathomed, branched, incumbent_updates,
@@ -231,7 +252,8 @@ impl PyTreeManager {
 
     /// Get aggregate tree statistics as a dict.
     ///
-    /// Returns {total_nodes, open_nodes, incumbent_value, global_lower_bound, gap}.
+    /// Returns {total_nodes, open_nodes, incumbent_value, global_lower_bound,
+    /// gap, bound_unresolved}.
     fn stats<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
         let s = self.inner.stats();
         let dict = PyDict::new(py);
@@ -240,7 +262,23 @@ impl PyTreeManager {
         dict.set_item("incumbent_value", s.incumbent_value)?;
         dict.set_item("global_lower_bound", s.global_lower_bound)?;
         dict.set_item("gap", s.gap)?;
+        dict.set_item("bound_unresolved", s.bound_unresolved)?;
         Ok(dict)
+    }
+
+    /// R3a measurement accessor (temporary, behavior-neutral): per-variable
+    /// branch frequency as an int64 array of length n_vars. Element `i` is the
+    /// number of branching events (integer or spatial) that split flat column
+    /// `i`. Used by the responsiveness-fingerprint experiment; does not affect
+    /// any solver decision.
+    fn branch_var_counts<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<i64>> {
+        let counts: Vec<i64> = self
+            .inner
+            .branch_var_counts()
+            .iter()
+            .map(|&c| c as i64)
+            .collect();
+        PyArray1::from_vec(py, counts)
     }
 
     /// Get the current incumbent solution, if any.

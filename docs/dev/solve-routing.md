@@ -54,7 +54,7 @@ classify_problem(model)                                   [problem_classifier.py
   │
   ├─ LP    ───────────────────────────► _solve_lp        → HiGHS | POUNCE (nlp_solver="pounce")
   │
-  ├─ QP    convex?     ──► _solve_qp     (single QP, global)
+  ├─ QP    convex?     ──► _solve_qp     (POUNCE; HiGHS-free, #359; JAX-IPM last resort)
   │        indefinite? ──► force_spatial ─────────────────┐ (→ Subtree A)
   │
   ├─ MILP  nlp_solver="simplex"  ──► _solve_milp_simplex  (monolithic Rust B&B; defers on stall)
@@ -62,7 +62,7 @@ classify_problem(model)                                   [problem_classifier.py
   │        else ─────────────────► _solve_milp_bb         (Rust tree; node-LP = warm simplex | POUNCE-IPM)
   │
   ├─ MIQP  convexity check (eigenvalue):
-  │          convex    ──► _solve_qp_highs (if not pounce) → else _solve_miqp_bb
+  │          convex    ──► _solve_miqp_bb  (self-hosted B&B, POUNCE node QPs; HiGHS-free, #359)
   │          nonconvex ──► fall through (→ Subtree A)   (a convex MIQP solver would false-certify)
   │
   └─ NLP / MINLP cascade:                          (ipm/sparse_ipm nlp_solver → POUNCE here)

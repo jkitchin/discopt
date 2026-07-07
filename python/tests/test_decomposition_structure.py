@@ -200,3 +200,41 @@ def test_summary_is_string():
     s = detect_decomposition(m)
     assert isinstance(s.summary(), str)
     assert "DecompositionStructure" in s.summary()
+
+
+# ── Phase 4 (T4.2, S3): .dec interop and truncation flag ──────
+
+
+def test_dec_roundtrip_lossless(tmp_path):
+    from discopt.decomposition.graph.export import read_dec, write_dec
+    from discopt.decomposition.structure import detect_decomposition
+
+    m = dm.Model("blocks")
+    x = m.binary("x", shape=(4,))
+    m.minimize(2 * x[0] + 3 * x[1] + 2 * x[2] + 4 * x[3])
+    m.subject_to(x[0] + x[1] >= 1)
+    m.subject_to(x[2] + x[3] >= 1)
+    conf = x[0] + x[2] <= 1
+    m.subject_to(conf)
+    m.mark_coupling(conf)
+
+    s1 = detect_decomposition(m)
+    path = str(tmp_path / "model.dec")
+    write_dec(s1, m, path)
+    s2 = read_dec(path, m)
+    assert s1.coupling_constraints == s2.coupling_constraints
+    assert s1.num_blocks == s2.num_blocks
+    # dec_file short-circuit path matches read_dec.
+    s3 = detect_decomposition(m, dec_file=path)
+    assert s3.coupling_constraints == s1.coupling_constraints
+
+
+def test_detection_truncated_defaults_false():
+    from discopt.decomposition.structure import detect_decomposition
+
+    m = dm.Model("small")
+    x = m.continuous("x", lb=0, ub=1)
+    m.subject_to(x <= 1)
+    m.minimize(x)
+    s = detect_decomposition(m)
+    assert s.detection_truncated is False

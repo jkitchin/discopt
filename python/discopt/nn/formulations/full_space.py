@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 import numpy as np
 
 import discopt.modeling as dm
-from discopt.nn.bounds import propagate_bounds
+from discopt.nn.bounds import propagate_bounds, scaled_output_bounds
 from discopt.nn.network import Activation, NetworkDefinition
 from discopt.nn.scaling import OffsetScaling
 
@@ -66,11 +66,6 @@ class FullSpaceFormulation:
         net = self._network
         pfx = self._prefix
 
-        # Compute bounds if available
-        layer_bounds = None
-        if net.input_bounds is not None:
-            layer_bounds = propagate_bounds(net)
-
         # Create input variables
         if net.input_bounds is not None:
             lb, ub = net.input_bounds
@@ -78,7 +73,10 @@ class FullSpaceFormulation:
         else:
             inputs = m.continuous(f"{pfx}_input", shape=(net.input_size,))
 
-        # Handle input scaling
+        # Handle input scaling. The layers consume the *scaled* input, so bounds
+        # must be propagated over the scaled box, not net.input_bounds (F1 /
+        # T-N0.2). When scaling is None, the layers consume the raw inputs.
+        layer_bounds = None
         if self._scaling is not None:
             sc = self._scaling
             if net.input_bounds is not None:
@@ -90,6 +88,7 @@ class FullSpaceFormulation:
                 scaled_in = m.continuous(
                     f"{pfx}_scaled_input", shape=(net.input_size,), lb=s_lo, ub=s_hi
                 )
+                layer_bounds = propagate_bounds(net, input_bounds=(s_lo, s_hi))
             else:
                 scaled_in = m.continuous(f"{pfx}_scaled_input", shape=(net.input_size,))
             for j in range(net.input_size):
@@ -99,6 +98,8 @@ class FullSpaceFormulation:
                 )
             prev_z = scaled_in
         else:
+            if net.input_bounds is not None:
+                layer_bounds = propagate_bounds(net)
             prev_z = inputs
 
         # Build each layer
@@ -157,10 +158,16 @@ class FullSpaceFormulation:
 
         # Handle output scaling
         if self._scaling is not None:
-            outputs = m.continuous(f"{pfx}_output", shape=(net.output_size,))
+            sc = self._scaling
+            # Free output bounds (T-N0.4): the last layer's propagated
+            # post-activation bounds map through the affine output scaling.
+            out_lb, out_ub = scaled_output_bounds(
+                layer_bounds, sc.y_offset, sc.y_factor, net.output_size
+            )
+            outputs = m.continuous(f"{pfx}_output", shape=(net.output_size,), lb=out_lb, ub=out_ub)
             for j in range(net.output_size):
                 m.subject_to(
-                    outputs[j] == prev_z[j] * self._scaling.y_factor[j] + self._scaling.y_offset[j],
+                    outputs[j] == prev_z[j] * sc.y_factor[j] + sc.y_offset[j],
                     name=f"{pfx}_scale_out_{j}",
                 )
         else:

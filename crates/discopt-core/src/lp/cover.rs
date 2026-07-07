@@ -209,7 +209,14 @@ mod tests {
         let c = [0.0; 4];
         let l = [0.0; 4];
         let u = [1.0, 1.0, 1.0, 1e20];
-        let lp = LpView { a: &a, m: 1, n: 4, c: &c, l: &l, u: &u };
+        let lp = LpView {
+            a: &a,
+            m: 1,
+            n: 4,
+            c: &c,
+            l: &l,
+            u: &u,
+        };
         let x = [0.6, 0.6, 0.6, 0.0];
         let is_int = [true, true, true, false];
         let cuts = separate_cover(&lp, &[9.0], &x, 3, &is_int, 1, 1e-9);
@@ -221,7 +228,12 @@ mod tests {
         let nnz: Vec<usize> = (0..3).filter(|&j| cut.coeffs[j].abs() > 1e-9).collect();
         assert_eq!(nnz.len(), 3, "lifting should pull in the third item");
         for &j in &nnz {
-            assert!((cut.coeffs[j] - (-1.0)).abs() < 1e-9, "coeff[{}]={}", j, cut.coeffs[j]);
+            assert!(
+                (cut.coeffs[j] - (-1.0)).abs() < 1e-9,
+                "coeff[{}]={}",
+                j,
+                cut.coeffs[j]
+            );
         }
         assert!((cut.rhs - (-1.0)).abs() < 1e-9, "rhs {}", cut.rhs);
     }
@@ -233,7 +245,14 @@ mod tests {
         let c = [0.0; 3];
         let l = [0.0; 3];
         let u = [1.0, 1.0, 1e20];
-        let lp = LpView { a: &a, m: 1, n: 3, c: &c, l: &l, u: &u };
+        let lp = LpView {
+            a: &a,
+            m: 1,
+            n: 3,
+            c: &c,
+            l: &l,
+            u: &u,
+        };
         let x = [0.6, 0.6, 0.0];
         let is_int = [true, true, false];
         let cuts = separate_cover(&lp, &[9.0], &x, 2, &is_int, 1, 1e-9);

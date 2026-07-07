@@ -100,6 +100,41 @@ class _SecondOrderInfo:
     initial_velocity: float | np.ndarray | None = None
 
 
+def validate_ode_rhs_keys(deriv_keys, states, *, builder: str) -> None:
+    """Require the ODE RHS to supply a derivative for *exactly* the states.
+
+    Shared by the collocation and finite-difference transcribers (C3). A missing
+    key silently drops a differential state's dynamics, leaving it unconstrained
+    (an under-determined transcription the solver will happily "optimize"); an
+    unknown key is a user typo the caller expects to have taken effect. Both are
+    refused loudly rather than approximated silently — per the development
+    philosophy, a wrong certificate is worse than a loud error.
+
+    Parameters
+    ----------
+    deriv_keys : iterable of str
+        Keys of the dict returned by the user's RHS callable.
+    states : iterable
+        The declared differential states (each with a ``.name``).
+    builder : str
+        Human-readable transcriber name, for the error message.
+    """
+    expected = {sv.name for sv in states}
+    got = set(deriv_keys)
+    missing = expected - got
+    unknown = got - expected
+    if missing or unknown:
+        parts = []
+        if missing:
+            parts.append(f"no derivative supplied for state(s) {sorted(missing)}")
+        if unknown:
+            parts.append(f"unknown key(s) {sorted(unknown)} match no declared state")
+        raise ValueError(
+            f"{builder} RHS keys do not match the declared states "
+            f"(expected exactly {sorted(expected)}): " + "; ".join(parts) + "."
+        )
+
+
 class DAEBuilder:
     """Transcribe an ODE/DAE system into algebraic constraints via collocation.
 
@@ -470,11 +505,19 @@ class DAEBuilder:
         A = self._A
         rhs_fn = self._ode_rhs
 
-        if rhs_fn is None and not self._second_order_info:
-            raise RuntimeError("No ODE RHS set. Call set_ode() or set_second_order_ode().")
+        # C3(a): second-order state(s) declared but no acceleration RHS set. The
+        # wrapper that would populate `_ode_rhs` was never built, so dynamics
+        # would be silently skipped. Refuse loudly.
+        if self._second_order_info and self._second_order_rhs is None:
+            raise RuntimeError(
+                "Second-order state(s) "
+                f"{[i.position_name for i in self._second_order_info]} were declared with "
+                "add_second_order_state() but no second-order ODE was set. "
+                "Call set_second_order_ode()."
+            )
 
         if rhs_fn is None:
-            return
+            raise RuntimeError("No ODE RHS set. Call set_ode() or set_second_order_ode().")
 
         tp = self._element_points()  # (nfe, ncp+1)
         t_arg = Constant(np.asarray(tp[:, 1:], dtype=np.float64))  # (nfe, ncp)
@@ -483,11 +526,11 @@ class DAEBuilder:
 
         states_vec, alg_vec, ctrl_vec = self._build_vec_dicts()
         derivs = rhs_fn(t_arg, states_vec, alg_vec, ctrl_vec)
+        # C3(b): every differential state must get a derivative, and no stray keys.
+        validate_ode_rhs_keys(derivs.keys(), self._states, builder="collocation ODE")
 
         constraints = []
         for sv in self._states:
-            if sv.name not in derivs:
-                continue
             var = self._vars[sv.name]
             if sv.n_components == 1:
                 # LHS shape (nfe, ncp) = var @ A.T
@@ -890,22 +933,19 @@ class DAEBuilder:
         if cs.scheme == "radau":
             from discopt.dae.polynomials import radau_roots
 
+            # Interpolatory (Radau IIA) quadrature weights on the collocation
+            # points ONLY: solve the Vandermonde moment system
+            #   sum_j w_j * cp_j^k = ∫_0^1 t^k dt = 1/(k+1),  k = 0..ncp-1
+            # This is exact for all ncp (including ncp=1) and, because the points
+            # are Gauss-Radau, is exact to degree 2*ncp-2. The previous
+            # implementation integrated the Lagrange basis over the *full* node
+            # set [0, cp...] and dropped node 0's weight — only valid when that
+            # weight is 0 (ncp >= 2); at ncp=1 it under-integrated by 2x. (C2)
             cp = radau_roots(cs.ncp)
-            # Compute weights by integrating the Lagrange basis on [0, 1]
-            # for the full node set [0, cp[0], ..., cp[ncp-1]]
-            nodes = np.concatenate([[0.0], cp])
-            weights = np.zeros(cs.ncp)
-            for j in range(cs.ncp):
-                # Integrate L_{j+1}(t) from 0 to 1 (basis for collocation points)
-                from scipy.integrate import quad
-
-                from discopt.dae.polynomials import lagrange_basis
-
-                def basis_fn(t, jj=j + 1):
-                    return lagrange_basis(nodes, t, jj)
-
-                weights[j], _ = quad(basis_fn, 0, 1)
-            return weights
+            k = np.arange(cs.ncp)
+            vander = cp[np.newaxis, :] ** k[:, np.newaxis]  # (ncp, ncp), rows=powers
+            moments = 1.0 / (k + 1.0)
+            return np.linalg.solve(vander, moments)
         else:
             _, w_gl = np.polynomial.legendre.leggauss(cs.ncp)
             return w_gl / 2.0  # transform from [-1,1] to [0,1]

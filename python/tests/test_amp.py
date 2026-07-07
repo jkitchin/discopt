@@ -1195,50 +1195,6 @@ def test_tan_range_rejects_near_asymptote_endpoints():
     assert _tan_range(near_asymptote - 1e-5, near_asymptote) is None
 
 
-def test_issue71_milp_wrapper_accepts_nonfatal_highs_warnings():
-    """HiGHS passModel warnings from tiny AMP rows must not discard valid bounds."""
-    from discopt.solvers import SolveStatus
-    from discopt.solvers.milp_highs import solve_milp
-
-    result = solve_milp(
-        c=np.array([1.0], dtype=np.float64),
-        A_ub=np.array([[1e-15]], dtype=np.float64),
-        b_ub=np.array([1e-30], dtype=np.float64),
-        bounds=[(1e-30, 1.0)],
-    )
-
-    assert result.status == SolveStatus.OPTIMAL
-    assert result.objective is not None
-
-
-def test_milp_wrapper_bails_on_fatal_run_status(monkeypatch):
-    """A fatal HiGHS run status must not fall through to getSolution()."""
-    from discopt.solvers import SolveStatus, milp_highs
-
-    class FakeHighs:
-        def setOptionValue(self, *args):
-            pass
-
-        def passModel(self, lp):
-            del lp
-            return milp_highs.highspy.HighsStatus.kOk
-
-        def run(self):
-            return milp_highs.highspy.HighsStatus.kError
-
-        def getModelStatus(self):
-            return milp_highs.highspy.HighsModelStatus.kOptimal
-
-        def getSolution(self):
-            raise AssertionError("getSolution should not be called after fatal run status")
-
-    monkeypatch.setattr(milp_highs.highspy, "Highs", FakeHighs)
-
-    result = milp_highs.solve_milp(c=np.array([1.0], dtype=np.float64), bounds=[(0.0, 1.0)])
-
-    assert result.status == SolveStatus.ERROR
-
-
 def test_tan_abs_minlptests_objective_linearizes_without_fallback(caplog):
     """The nlp_004-style tan/abs objective should keep a valid MILP objective."""
     m = Model("tan_abs_obj")

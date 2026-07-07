@@ -138,10 +138,10 @@ class TestGDPoptLOA:
         assert result.gap is None
 
 
-class TestMILPHiGHS:
+class TestMILPSimplex:
     def test_simple_milp(self):
         """Simple knapsack-style MILP."""
-        from discopt.solvers.milp_highs import solve_milp
+        from discopt.solvers.milp_simplex import solve_milp
 
         # max 5x + 4y s.t. x + y <= 5, x,y integer in [0, 5]
         result = solve_milp(
@@ -158,7 +158,7 @@ class TestMILPHiGHS:
 
     def test_lp_fallback(self):
         """Without integrality, degenerates to LP."""
-        from discopt.solvers.milp_highs import solve_milp
+        from discopt.solvers.milp_simplex import solve_milp
 
         result = solve_milp(
             c=np.array([1.0, 1.0]),
@@ -171,7 +171,7 @@ class TestMILPHiGHS:
 
     def test_infeasible(self):
         """Infeasible MILP."""
-        from discopt.solvers.milp_highs import solve_milp
+        from discopt.solvers.milp_simplex import solve_milp
 
         result = solve_milp(
             c=np.array([1.0]),

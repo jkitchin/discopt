@@ -1,11 +1,11 @@
-"""Rust-internal warm-started-simplex MILP solver vs HiGHS (roadmap P4).
+"""Rust-internal warm-started-simplex MILP solver vs POUNCE (roadmap P4).
 
 ``discopt._rust.solve_milp_py`` runs the whole pure-MILP branch-and-bound in
 Rust: the existing tree manager, with each node's LP solved by the bounded
 simplex — root cold, children warm-started (dual simplex) from the basis they
 inherit from their parent. This is the B&B correctness gate: on random MILPs its
-optimum must match HiGHS (``incorrect_count == 0``, within 1e-4), and it must
-detect infeasibility.
+optimum must match the POUNCE B&B reference (``incorrect_count == 0``, within
+1e-4; HiGHS was removed, issue #356), and it must detect infeasibility.
 
 The solver consumes standard form ``A x = b`` with explicit slack columns; the
 helper here slacks a ``≤`` MILP so the same instance can be sent to both
@@ -22,7 +22,6 @@ if not hasattr(rust, "solve_milp_py"):
     pytest.skip("simplex MILP binding not built", allow_module_level=True)
 
 from discopt.solvers import SolveStatus  # noqa: E402
-from discopt.solvers.milp_highs import solve_milp as highs_milp  # noqa: E402
 
 
 def _slack_standard_form(c, A_ub, b_ub, lb, ub):
@@ -51,9 +50,12 @@ def _solve_simplex(c, A_ub, b_ub, lb, ub, integer_cols):
     )
 
 
-class TestMilpSimplexVsHighs:
+class TestMilpSimplexVsPounce:
     @pytest.mark.parametrize("seed", list(range(30)))
-    def test_matches_highs(self, seed):
+    def test_matches_pounce(self, seed):
+        pytest.importorskip("pounce")
+        from discopt.solvers.milp_pounce import solve_milp as ref_milp
+
         rng = np.random.default_rng(seed)
         n, m = 4, 3
         c = rng.integers(-5, 6, n).astype(float)
@@ -64,11 +66,13 @@ class TestMilpSimplexVsHighs:
         integer_cols = list(range(n))
 
         status, x, obj, _bound, _nodes, _it = _solve_simplex(c, A, b, lb, ub, integer_cols)
-        hi = highs_milp(c=c, A_ub=A, b_ub=b, bounds=[(0, 5)] * n, integrality=np.ones(n))
+        hi = ref_milp(c=c, A_ub=A, b_ub=b, bounds=[(0, 5)] * n, integrality=np.ones(n))
         if hi.status != SolveStatus.OPTIMAL:
             return
         assert status in ("optimal", "feasible"), f"seed={seed}: {status}"
-        assert abs(obj - hi.objective) < 1e-4, f"seed={seed}: simplex {obj} vs HiGHS {hi.objective}"
+        assert abs(obj - hi.objective) < 1e-4, (
+            f"seed={seed}: simplex {obj} vs POUNCE {hi.objective}"
+        )
 
     def test_binary_knapsack(self):
         c = np.array([-10.0, -9.0, -8.0, -1.0])
@@ -91,7 +95,7 @@ class TestMilpSimplexVsHighs:
 
 class TestModelSolveSimplex:
     """End-to-end: Model.solve(nlp_solver="simplex") routes a pure MILP to the
-    Rust warm-started-simplex engine and matches HiGHS."""
+    Rust warm-started-simplex engine and matches the POUNCE default."""
 
     def _knapsack(self):
         import discopt.modeling as dm
@@ -126,7 +130,7 @@ class TestModelSolveSimplex:
             ys = [m2.binary(f"x{i}") for i in range(n)]
             m2.minimize(-sum(int(v[i]) * ys[i] for i in range(n)))
             m2.subject_to(sum(int(w[i]) * ys[i] for i in range(n)) <= cap)
-            r_h = m2.solve(use_highs_milp=True, time_limit=30)
+            r_h = m2.solve(nlp_solver="pounce", time_limit=30)
 
             assert r_s.status == "optimal"
             if r_h.status == "optimal":
@@ -200,3 +204,69 @@ class TestMILPBoundChannel:
         assert res.bound == -3.0 and res.objective == 5.0
         # The result type carries both channels independently.
         assert res.bound < res.objective
+
+
+class TestPureLpShortCircuit:
+    """THRU-2b: ``solve_milp`` with no integer columns is a plain LP, so the
+    driver's integer-search machinery (root cuts / GMI / heuristics / strong
+    branching) must be turned off — it is inert on an LP and only adds overhead
+    (this is the dense-cold fallback the McCormick node relaxer reaches when the
+    warm sparse simplex breaks down numerically). The optimum/infeasibility
+    verdict is unchanged; only the wasted integer-side work is skipped."""
+
+    def test_pure_lp_runs_with_machinery_off(self, monkeypatch):
+        """A no-integer solve routes ``solve_milp_py`` with the MILP machinery
+        off; a solve WITH integers keeps it on. Fails before THRU-2b (the old
+        code always passed the machinery-on defaults)."""
+        import discopt._rust as _rust
+        from discopt.solvers import milp_simplex
+
+        captured: list[dict] = []
+        _orig = _rust.solve_milp_py
+
+        def _spy(*args, **kwargs):
+            captured.append(dict(kwargs))
+            return _orig(*args, **kwargs)
+
+        # ``solve_milp`` does ``from discopt._rust import solve_milp_py`` at call
+        # time, so patch the source module attribute (not ``milp_simplex``).
+        monkeypatch.setattr(_rust, "solve_milp_py", _spy)
+
+        c = np.array([-1.0, -1.0])
+        A = np.array([[2.0, 1.0], [1.0, 2.0]])
+        b = np.array([3.0, 3.0])
+        bounds = [(0.0, 10.0), (0.0, 10.0)]
+
+        # Pure LP (integrality=None): machinery must be off.
+        milp_simplex.solve_milp(c=c, A_ub=A, b_ub=b, bounds=bounds, integrality=None)
+        assert captured, "solve_milp_py was not called"
+        lp_kw = captured[-1]
+        assert lp_kw.get("root_cuts") == 0
+        assert lp_kw.get("cut_rounds") == 0
+        assert lp_kw.get("gmi_cuts") is False
+        assert lp_kw.get("heuristics") is False
+        assert lp_kw.get("strong_branch") is False
+
+        # Genuine MILP (integer columns present): machinery must stay ON, i.e. the
+        # short-circuit kwargs are NOT injected (Rust defaults apply).
+        captured.clear()
+        milp_simplex.solve_milp(c=c, A_ub=A, b_ub=b, bounds=bounds, integrality=np.array([1, 1]))
+        milp_kw = captured[-1]
+        assert "root_cuts" not in milp_kw
+        assert "gmi_cuts" not in milp_kw
+        assert "heuristics" not in milp_kw
+
+    def test_pure_lp_optimum_is_bound_neutral(self):
+        """The short-circuit must return the exact LP optimum — a fractional
+        vertex the integer machinery would otherwise never reach (correctness
+        guard on the speed change)."""
+        from discopt.solvers import milp_simplex
+
+        # max x0 + x1 s.t. 2x0+x1<=3, x0+2x1<=3, 0<=x<=10 -> x=(1,1), obj=2.
+        c = np.array([-1.0, -1.0])
+        A = np.array([[2.0, 1.0], [1.0, 2.0]])
+        b = np.array([3.0, 3.0])
+        r = milp_simplex.solve_milp(c=c, A_ub=A, b_ub=b, bounds=[(0.0, 10.0)] * 2, integrality=None)
+        assert r.status == SolveStatus.OPTIMAL
+        assert r.objective == pytest.approx(-2.0, abs=1e-6)
+        assert r.bound is not None and r.bound <= r.objective + 1e-9

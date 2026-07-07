@@ -74,19 +74,16 @@ pub struct PresolveContext {
 }
 
 impl PresolveContext {
-    /// Initialise a context from a model. The bounds vector is filled
-    /// from each variable block's first scalar `lb`/`ub`, matching
-    /// `fbbt_with_cutoff`'s convention.
+    /// Initialise a context from a model. The bounds vector is filled with one
+    /// interval per variable BLOCK, seeded from the element-wise UNION of that
+    /// block's bounds (`seed_block_interval`), matching `fbbt`/`fbbt_with_cutoff`.
+    /// C-31: seeding from element 0 alone collapsed heterogeneous array blocks
+    /// onto element-0's interval, cutting feasible points of the other elements.
     pub fn from_model(model: ModelRepr) -> Self {
         let bounds: Vec<Interval> = model
             .variables
             .iter()
-            .map(|v| {
-                Interval::new(
-                    v.lb.first().copied().unwrap_or(f64::NEG_INFINITY),
-                    v.ub.first().copied().unwrap_or(f64::INFINITY),
-                )
-            })
+            .map(super::fbbt::seed_block_interval)
             .collect();
         Self {
             model,
@@ -106,18 +103,33 @@ impl PresolveContext {
         if self.bounds.len() == n {
             return;
         }
+        // cert:C-16 (P0). A *growing* pass appends auxiliary variables at the end,
+        // leaving every existing variable's index unchanged — so the accumulated
+        // `bounds[i]` tightening still refers to variable i and is intersected with
+        // its new declared bounds. A *shrinking* pass (a variable-removing pass,
+        // e.g. aggregation) renumbers later variables *down*, so `bounds[i]` (old
+        // variable i) no longer refers to new variable i; intersecting them
+        // positionally FUSES two unrelated variables' intervals — an empty
+        // intersection was reported as a false "infeasible", a tighter one silently
+        // cut the survivor's true optimum (the C-16 default-path bug). A removing
+        // pass writes each survivor's correct bounds into the new model, so on a
+        // shrink rebuild `bounds` from the new model directly (the stale positional
+        // tightening it drops is re-derived by the fixpoint loop) rather than
+        // intersecting a mis-aligned vector.
+        let shrank = n < self.bounds.len();
         let mut new_bounds = Vec::with_capacity(n);
         for (i, v) in self.model.variables.iter().enumerate() {
-            let lb = v.lb.first().copied().unwrap_or(f64::NEG_INFINITY);
-            let ub = v.ub.first().copied().unwrap_or(f64::INFINITY);
-            // Preserve any tightening already in `bounds` for
-            // pre-existing variables; new aux vars take the model's
-            // declared bounds.
-            if i < self.bounds.len() {
+            // C-31: seed from the element-wise union, not element 0, so a
+            // heterogeneous array block is a valid outer bound for every element.
+            let declared = super::fbbt::seed_block_interval(v);
+            if !shrank && i < self.bounds.len() {
                 let prior = self.bounds[i];
-                new_bounds.push(Interval::new(prior.lo.max(lb), prior.hi.min(ub)));
+                new_bounds.push(Interval::new(
+                    prior.lo.max(declared.lo),
+                    prior.hi.min(declared.hi),
+                ));
             } else {
-                new_bounds.push(Interval::new(lb, ub));
+                new_bounds.push(declared);
             }
         }
         self.bounds = new_bounds;

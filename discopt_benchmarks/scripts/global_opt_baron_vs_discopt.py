@@ -95,18 +95,45 @@ def _claims_global(status: str) -> bool:
 OK, GAP, VIOLATION, NA = "ok", "GAP", "VIOLATION", "n/a"
 
 
-def classify(status: str, obj: float | None, known: float | None, maximize: bool) -> str:
+def bound_violates_oracle(bound: float | None, known: float | None, maximize: bool) -> bool:
+    """Does the reported *dual bound* cross the known global optimum?
+
+    The certificate invariant (CLAUDE.md): a valid dual bound never crosses the
+    oracle — for a minimize problem the lower bound must satisfy ``bound <= opt``;
+    for maximize the upper bound must satisfy ``bound >= opt``. A bound on the
+    wrong side of the proven global (beyond tolerance) is an invalid bound — a
+    false certificate seed — regardless of whether the incumbent is correct.
+    None bound / no oracle → cannot judge → not a violation.
+    """
+    if bound is None or known is None or math.isnan(known):
+        return False
+    tol = RTOL * max(1.0, abs(known)) + ATOL
+    return (bound < known - tol) if maximize else (bound > known + tol)
+
+
+def classify(
+    status: str,
+    obj: float | None,
+    known: float | None,
+    maximize: bool,
+    bound: float | None = None,
+) -> str:
     """Honest correctness verdict against the proven global.
 
     - ``ok``        : incumbent matches the known global within tolerance.
-    - ``VIOLATION`` : the non-negotiable red line — either the solver *claimed*
-                      a certified global with the wrong value, or it returned an
-                      incumbent strictly *better* than the proven global (an
-                      impossible bound, i.e. a relaxation/incumbent bug).
+    - ``VIOLATION`` : the non-negotiable red line — the solver *claimed* a
+                      certified global with the wrong value, returned an incumbent
+                      strictly *better* than the proven global, or reported a
+                      *dual bound that crosses the oracle* (an impossible bound,
+                      i.e. a relaxation/incumbent/bound bug).
     - ``GAP``       : an honest feasible/uncertified incumbent that is *worse*
                       than the global — a convergence gap, not a correctness bug.
     - ``n/a``       : no oracle, or no incumbent returned.
     """
+    # An invalid dual bound is a VIOLATION even when the incumbent is fine or
+    # absent — it is the core certificate failure.
+    if bound_violates_oracle(bound, known, maximize):
+        return VIOLATION
     if obj is None or known is None or math.isnan(known):
         return NA
     if matches(obj, known):
@@ -151,7 +178,11 @@ try:
     model = from_nl(nl)
     res = model.solve(time_limit=tl, gap_tolerance=1e-4)
     dt = time.perf_counter() - t0
-    lb = getattr(res, "lower_bound", None)
+    # A3: SolveResult exposes the certified dual bound as ``.bound`` (there is no
+    # ``.lower_bound`` attribute — the old name silently read None on every run).
+    # After A2, ``.bound`` is None on the no-relaxation class rather than a 1e30
+    # sentinel, so a None here means "no dual bound", not "read failed".
+    lb = getattr(res, "bound", None)
     print(json.dumps({
         "ok": True,
         "status": str(getattr(res, "status", "")),
@@ -317,8 +348,20 @@ def tri(v: bool | None) -> str:
 
 
 def finalize(row: Row) -> Row:
-    row.d_verdict = classify(row.discopt.status, row.discopt.objective, row.known, row.maximize)
-    row.b_verdict = classify(row.baron.status, row.baron.objective, row.known, row.maximize)
+    row.d_verdict = classify(
+        row.discopt.status,
+        row.discopt.objective,
+        row.known,
+        row.maximize,
+        row.discopt.lower_bound,
+    )
+    row.b_verdict = classify(
+        row.baron.status,
+        row.baron.objective,
+        row.known,
+        row.maximize,
+        row.baron.lower_bound,
+    )
     return row
 
 
@@ -355,8 +398,9 @@ def write_report(rows: list[Row], tl: float, out_dir: Path, ts: str) -> Path:
         "| `GAP` | honest feasible/uncertified incumbent **worse** than the "
         "global — a convergence gap in the time budget, *not* a correctness bug |",
         "| `VIOLATION` | **the non-negotiable red line**: solver claimed a "
-        "certified global with the wrong value, or returned an incumbent "
-        "strictly *better* than the proven global (impossible → bug) |",
+        "certified global with the wrong value, returned an incumbent "
+        "strictly *better* than the proven global, or reported a **dual bound "
+        "crossing the oracle** (all impossible → bug) |",
         "| `n/a` | no oracle, or no incumbent returned (e.g. parser error) |",
         "",
         "## Correctness summary",
@@ -391,10 +435,15 @@ def write_report(rows: list[Row], tl: float, out_dir: Path, ts: str) -> Path:
     if viol:
         lines += ["", "## ⚠️ discopt correctness VIOLATIONS", ""]
         for r in viol:
-            lines.append(
-                f"- **{r.instance}**: discopt {r.discopt.objective} "
-                f"(status {r.discopt.status}) vs proven global {r.known}"
+            bad_bound = bound_violates_oracle(r.discopt.lower_bound, r.known, r.maximize)
+            reason = (
+                f"dual bound {fmt(r.discopt.lower_bound).strip()} crosses the proven "
+                f"global {fmt(r.known).strip()} (invalid bound)"
+                if bad_bound
+                else f"incumbent {r.discopt.objective} (status {r.discopt.status}) "
+                f"vs proven global {r.known}"
             )
+            lines.append(f"- **{r.instance}**: {reason}")
 
     gaps = [r for r in rows if r.d_verdict == GAP]
     if gaps:

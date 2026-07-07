@@ -10,8 +10,77 @@ The release procedure that produces these entries is documented in
 
 ## [Unreleased]
 
+### Removed
+
+- **AC-OPF and pooling application builders extracted to the `discopt-apps`
+  plugin** (`refactor`, #431). `python/discopt/opf.py` (rectangular AC-OPF:
+  `build_ac_opf_rectangular`, `ACOPF`, `Bus`, `Line`, `admittance_matrix`,
+  `two_bus_example`) and `python/discopt/pooling.py` (pq-formulation:
+  `build_pq_formulation`, `PoolingProblem`, `Input`, `Pool`, `Output`,
+  `haverly_hpp1`), their tests, and the `ac_opf`/`pooling_pq` doc notebooks now
+  live in the standalone
+  [discopt-apps](https://github.com/jkitchin/discopt-apps) package, mirroring
+  the course extraction (#430). Because discopt is a namespace package,
+  `pip install discopt-apps` restores `discopt.opf` and `discopt.pooling`
+  imports unchanged. These are pure builders over `discopt.modeling.core`; no
+  core solver behavior changes. (The in-core
+  `discopt.modeling.examples.example_pooling_haverly` example stays.)
+- **DOE module extracted to the `discopt-doe` plugin** (`refactor!`, #389).
+  `python/discopt/doe/` (design, screening, FIM, identifiability,
+  discrimination, workbook CLI, Streamlit GUI), its 19 test files, 11 doc
+  notebooks, notebook build scripts, and the doe skill/agents now live in the
+  standalone [discopt-doe](https://github.com/jkitchin/discopt-doe) package.
+  Because discopt is a namespace package, `pip install discopt-doe` restores
+  `discopt.doe` imports and the `discopt doe` subcommand unchanged. The
+  `doe`/`doe-gui` extras are gone — use `discopt-doe[gui,ml]`. discopt ≤0.5.x
+  is the last line with DOE built in.
+
 ### Added
 
+- **Public parametric-compilation API** (`feat(api)`, #389). New
+  `discopt.parametric` module — the stable contract for external plugins
+  (discopt-doe, discopt-mkm, ...) that compile model expressions into
+  JAX-differentiable functions of `(x_flat, p_flat)`: `compile_expression`,
+  `compile_response_function`, `extract_x_flat`, `flatten_params`,
+  `param_total_size`, `variable_total_size`, `variable_slices`. The in-tree
+  DOE module and `discopt.estimate` now consume this API instead of reaching
+  into `discopt._jax` internals.
+- **Generic CLI plugin subcommands** (`feat(cli)`, #389). External packages
+  can register subcommands via the `"discopt.cli"` entry-point group (name =
+  subcommand; value = module exposing `add_subparser(subparsers)` and
+  `run(args)`). Plugin modules load lazily — only for their own subcommand or
+  full help — and built-in names cannot be shadowed. The in-tree `discopt doe`
+  subcommand now registers through this mechanism, ahead of its extraction to
+  the standalone `discopt-doe` package (#389).
+
+### Changed
+
+- Version bumped to 0.6.0.dev0; 0.6.0 will be the first release with the DOE
+  module extracted to the `discopt-doe` plugin package.
+
+## [0.5.0] - 2026-07-01
+
+### Added
+
+- **Implicit-function expression node** (`feat(modeling)`, #379). `m.implicit(
+  residual, u_inputs, n_unknowns, x0=)` defines a vector `v` by a square system
+  `g(u, v) = 0`, compiled to a differentiable JAX inner solve (Newton forward;
+  implicit-function-theorem derivatives via `jax.lax.custom_root`, which supports
+  the higher-order AD the NLP Hessian needs). Rides on `CustomCall`, so it is
+  **local-NLP-only** (no global certificate) and rejects integers. The core-side
+  primitive for implicit variable-aggregation of irreducible cyclic blocks;
+  documented in `docs/notebooks/implicit_function_node.ipynb`.
+- **Hardened pure-Rust LP engine** (`feat(lp)`, #368). Numeric-focus LU with
+  in-engine iterative refinement and condition/growth signals (via `feral`
+  0.12.0), primal + dual refined recovery on a drifted-Optimal, dual-simplex
+  anti-cycling (Bland + stall counter), and **EXPAND anti-degeneracy** (Gill et
+  al.) in the Harris ratio test — ~15× fewer degenerate pivots on the
+  lifted-relaxation corpus, validated soundness-neutral against the gauntlet and
+  a BARON head-to-head.
+- **Namespace-package support** (`feat(packaging)`). `discopt` now extends its
+  `__path__` via `pkgutil.extend_path`, so external distributions (e.g. a
+  `discopt-aggregation` plugin) can contribute submodules under the `discopt.*`
+  namespace from a separate location on `sys.path` without modifying the core.
 - **Set & index abstractions** (`feat(modeling)`). A Pyomo/JuMP-style named-set
   layer for sparse models, implemented as a pure-Python desugaring over the
   existing flat model (no solver/backend changes). Completes the Phase 7
@@ -186,6 +255,13 @@ The release procedure that produces these entries is documented in
 
 ### Changed
 
+- **`feral` pinned to the crates.io 0.12.0 release** (`chore(deps)`, #375),
+  carrying the LU-hardening APIs (element-growth getters, unsymmetric-LU
+  condition estimate, richer `update()` instability signal) the numeric-focus
+  simplex consumes; replaces the temporary git-rev pin.
+- **Minimum `pounce-solver` bumped to 0.7** (`chore(deps)`). The interior-point
+  KKT solve (`solve_lp_kkt`) the differentiable LP/QP layers and crossover use
+  after the JAX LP-IPM retirement requires POUNCE ≥ 0.7.
 - **POUNCE is now the default single-solve NLP backend** (`feat(solvers)`).
   For single continuous solves the `ipm` default is promoted to a KKT-valid
   backend via `_default_nlp_solver()`, resolving to POUNCE when installed and
@@ -201,6 +277,14 @@ The release procedure that produces these entries is documented in
 
 ### Removed
 
+- **BREAKING: the JAX LP interior-point method is retired** (`refactor(lp)!`,
+  #368, #371, #373). The MILP/MINLP node LP relaxations and the standalone LP
+  path now use the pure-Rust simplex (degrading to POUNCE); `nlp_solver` governs
+  only the NLP subproblem solver. `discopt._jax.lp_ipm` was deleted. This
+  completes retirement of the LP fallback chain (`Rust simplex → HiGHS → POUNCE
+  → JAX-IPM`).
+- **HiGHS removed from the LP/MILP path** (`feat(solvers)`, #356) and the QP path
+  (`qp_highs`, #359) — the pure-Rust core is the sole LP/MILP engine.
 - **BREAKING: removed the deprecated `ripopt` aliases** (`feat(solvers)!`). The
   old in-repo Rust IPM crate `ripopt` was already superseded by POUNCE; the
   remaining compatibility shims are gone: the `discopt.solvers.nlp_ripopt`
@@ -210,6 +294,13 @@ The release procedure that produces these entries is documented in
 
 ### Fixed
 
+- **Sound lower bounds for `log²`/`exp²` objectives** (`fix(relax)`, #372, closes
+  #369). The objective linearizer now registers squares of *any* lifted
+  univariate call (not just trig), so a mixed objective like nvs09's
+  `Σ log(·)² − (∏x)^0.2` produces a sound lower bound instead of falling back to
+  a feasibility objective with no bound.
+- **Pytest virtual-address cap raised 16 → 32 GB** (`ci`, #360) so JAX/XLA
+  compilation no longer aborts with `std::bad_alloc` / exit 134 in CI.
 - **Decomposition stage annotation on indexed variables** (`fix(decomposition)`).
   `model.first_stage(y[i])` / `set_stage` / `set_block` on an indexed element
   (`y[i]`) stringified to a stray key (`"y[3][0]"`) that never matched the
@@ -359,6 +450,7 @@ git log v0.2.0..v0.2.1
 
 Going forward, every release will have a section above with curated entries.
 
-[Unreleased]: https://github.com/jkitchin/discopt/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/jkitchin/discopt/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/jkitchin/discopt/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/jkitchin/discopt/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/jkitchin/discopt/compare/v0.2.5...v0.3.0

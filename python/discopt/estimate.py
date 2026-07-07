@@ -13,7 +13,9 @@ Quick Start
 
 See Also
 --------
-discopt.doe : Optimal design of experiments using the same Experiment interface.
+discopt.doe : Optimal design of experiments using the same Experiment
+    interface, provided by the standalone ``discopt-doe`` plugin
+    (``pip install discopt-doe``).
 """
 
 from __future__ import annotations
@@ -273,7 +275,7 @@ def estimate_parameters(
         Parameters to hold fixed during the estimation. After
         ``create_model``, the variable's lower and upper bounds are both
         set to the supplied value so the solver cannot move it. Used
-        internally by :func:`discopt.doe.profile_likelihood` and useful
+        by ``discopt.doe.profile_likelihood`` (discopt-doe plugin) and useful
         standalone for sub-model fits and one-at-a-time sensitivity
         studies.
     solver_options : dict, optional
@@ -416,8 +418,12 @@ def _compute_estimation_fim(
     import jax
     import jax.numpy as jnp
 
-    from discopt._jax.differentiable import _compile_parametric_node
-    from discopt._jax.parametric import extract_x_flat
+    from discopt.parametric import (
+        compile_expression,
+        extract_x_flat,
+        flatten_params,
+        variable_slices,
+    )
 
     model = em.model
     x_flat = extract_x_flat(result, model)
@@ -426,7 +432,7 @@ def _compute_estimation_fim(
     # These are functions of x_flat (variables include the unknown params)
     response_fns = []
     for name in em.response_names:
-        fn = _compile_parametric_node(em.responses[name], model)
+        fn = compile_expression(em.responses[name], model)
         response_fns.append(fn)
 
     # We need the Jacobian of responses w.r.t. the unknown parameter
@@ -434,24 +440,14 @@ def _compute_estimation_fim(
     # we compute d(responses)/d(x_flat) and extract the relevant columns.
 
     # Find indices of unknown parameter variables in x_flat
-    param_indices = []
-    for name, var in em.unknown_parameters.items():
-        offset = 0
-        for v in model._variables:
-            if v is var:
-                for i in range(v.size):
-                    param_indices.append(offset + i)
-                break
-            offset += v.size
+    slices = variable_slices(model)
+    param_indices: list[int] = []
+    for var in em.unknown_parameters.values():
+        sl = slices[var.name]
+        param_indices.extend(range(sl.start, sl.stop))
 
     # Build a dummy p_flat (model may or may not have Parameters)
-    p_parts = []
-    for p in model._parameters:
-        p_parts.append(np.asarray(p.value, dtype=np.float64).ravel())
-    if p_parts:
-        p_flat = jnp.array(np.concatenate(p_parts), dtype=jnp.float64)
-    else:
-        p_flat = jnp.zeros(0, dtype=jnp.float64)
+    p_flat = flatten_params(model)
 
     def response_vector(x_flat_arg):
         return jnp.stack([fn(x_flat_arg, p_flat) for fn in response_fns])

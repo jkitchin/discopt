@@ -56,10 +56,12 @@ only path. Each instance falls into one of three pinned buckets:
   this corpus has been closed.
 
 Most instances are vendored under ``data/minlplib_nl/`` and run in the PR-fast
-job. Two vendored negative controls (``casctanks``, ``heatexch_gen3``) classify
-in ~2 minutes — past the 120 s per-test timeout — so they live in ``NEGATIVE_SLOW``
-and are marked ``slow`` (deselected on the PR-fast / coverage path, exercised in
-full / slow runs). A few large negative controls (``super1``..``super3t``)
+job. The negative controls that classify too slowly for the PR-fast per-test
+budget (``casctanks`` / ``heatexch_gen3`` at ~2 min, ``hda`` at ~90 s, and the
+mid-weight ``contvar`` / ``bchoco07`` / ``bchoco08`` at ~5-10 s) live in
+``NEGATIVE_SLOW`` and are marked ``slow`` (deselected on the PR-fast / coverage
+path, exercised in full / slow runs, so their non-convex soundness coverage is
+preserved). A few large negative controls (``super1``..``super3t``)
 classify in tens of seconds and are left in the local MINLPLib cache only; they
 are exercised when present (``--instances super1,super2,super3,super3t`` via
 ``fetch_minlplib``) and skipped otherwise.
@@ -87,7 +89,6 @@ NEGATIVE = (
     # heat-exchanger / scheduling / supply-chain instances (MINLPLib convex=False)
     "4stufen",
     "beuster",
-    "contvar",
     "ex1224",
     "gkocis",
     "st_e29",
@@ -99,25 +100,31 @@ NEGATIVE = (
     "heatexch_gen1",
     "heatexch_gen2",
     "oaer",
-    # hda: signomial equilibrium constraints; its convex structure is in
-    # log-space, explicitly out of scope for #40 — discopt soundly stays
-    # non-convex here, which is the behaviour we pin.
-    "hda",
     # batch chocolate scheduling (power-law sizing + big-M); unlabelled in the
-    # current MINLPLib snapshot, genuine non-convexities.
+    # current MINLPLib snapshot, genuine non-convexities. bchoco06 classifies
+    # fast; the larger 07/08 DAGs are in NEGATIVE_SLOW.
     "bchoco06",
-    "bchoco07",
-    "bchoco08",
 )
 
 # Slow vendored negative controls: same soundness gate as ``NEGATIVE`` but each
-# classifies in ~2 minutes (dense Hessian / large signomial DAGs), which exceeds
-# the PR-fast job's 120 s per-test timeout. Marked ``@pytest.mark.slow`` so the
-# PR-fast and coverage jobs deselect them; still vendored and exercised in full /
-# slow runs, preserving their non-convex soundness coverage.
+# classifies too slowly for the PR-fast per-test budget — from ~5 s (dense DAGs)
+# up to ~2 minutes (``casctanks`` / ``heatexch_gen3``). Marked
+# ``@pytest.mark.slow`` so the PR-fast and coverage jobs deselect them; still
+# vendored and exercised in full / slow runs, preserving their non-convex
+# soundness coverage.
 NEGATIVE_SLOW = (
     "casctanks",
     "heatexch_gen3",
+    # hda: signomial equilibrium constraints; its convex structure is in
+    # log-space, explicitly out of scope for #40 — discopt soundly stays
+    # non-convex here. Classifies in ~90 s (large signomial DAG), so it lives
+    # on the slow path rather than the 120 s PR-fast budget.
+    "hda",
+    # contvar (~10 s) and the larger batch-chocolate DAG bchoco08/07 (~5-6 s):
+    # correct non-convex verdicts, but too slow for the PR-fast budget.
+    "contvar",
+    "bchoco07",
+    "bchoco08",
 )
 
 # Large negative controls kept in the local cache only (not vendored: each

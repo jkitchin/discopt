@@ -71,6 +71,112 @@ _ZERO_MARGIN = 1e-9
 _INF_THRESH = 1e15
 
 
+def _lift_zero_spanning_factors_enabled() -> bool:
+    """R4 feature flag (``DISCOPT_LIFT_ZERO_SPANNING_FACTORS``, default **ON** since
+    G1.5; ``DISCOPT_LIFT_ZERO_SPANNING_FACTORS=0`` is the escape hatch).
+
+    When a product ``f(x)·g(x)`` has a *non-atomic* factor ``f`` whose interval
+    spans 0, the factorable reform already lifts ``w == f`` to a bounded aux (via
+    :func:`_prelift_blowup_products`). But the default spatial-branching policy
+    then *deprioritizes* every lifted aux column (``solver.py`` — a product aux
+    ``w = x_i·x_j`` cannot shrink its own envelope, so bisecting it is wasteful).
+    For a zero-*spanning* factor that reasoning is inverted: branching ``w`` at 0
+    splits the sign of the factor, and the McCormick envelope of the product
+    ``w·g`` (with ``g ≥ 0``) responds sharply — it is the only move that un-pins
+    the bound (st_e36: root −304.5, pinned for every x-box, jumps to ≈ optimum
+    once ``w`` is split at 0; see uncertified-tail-plan §3 R4). This flag marks
+    those specific auxes so the solver keeps them branchable.
+
+    Structure-gated: where no product has a zero-spanning non-atomic factor, no aux
+    is tagged and the reform is byte-identical (inert) — so this flag is a free win
+    on-structure (st_e36 feasible→optimal) and invisible elsewhere. Graduated to
+    default-ON (G1.5-redo, post-C-38) on gate evidence: the isolated held-out arm
+    (N=40, seed 0, tl 25 s) verdicts eligible — 0 soundness violations, cert-neutral
+    (bound-changing regime), regression 3.8 % (1 off-structure timing artifact, ≪
+    the 10 % ceiling) — plus the bound-changing verification (differential dual
+    bound tighter but still ≤ =opt= on st_e36: −304.5 → −246.02 ≤ −246.0;
+    feasible-point sample recovers the identical incumbent ON vs OFF). See
+    ``docs/dev/flag-graduation-redo-2026-07-07.md``. ``=0`` restores the old
+    byte-identical (no-tagging) behavior.
+    """
+    import os
+
+    return os.environ.get("DISCOPT_LIFT_ZERO_SPANNING_FACTORS", "1") != "0"
+
+
+def _lift_loose_products_enabled() -> bool:
+    """TD-A feature flag (``DISCOPT_LIFT_LOOSE_PRODUCTS``, default OFF).
+
+    Extends the factorable lift to an integer power of a *non-atomic univariate
+    function call* — ``g(x)**n`` with ``g`` a transcendental (``log``, ``sin``,
+    …) whose argument is not a bare variable and ``n`` a positive integer ``≥ 2``.
+
+    The MILP objective/constraint linearizer bounds a power only when its base is
+    a bare variable index (the monomial path) or when the power is a *fractional*
+    power of a lifted composite (``_lift_objective_atoms``). An *integer* power of
+    a call falls through both: ``distribute_products`` expands ``g(x)**2`` into the
+    product ``g(x)·g(x)``, which ``_decompose_product`` cannot decompose (both
+    factors are transcendental), so the whole term is dropped and the model loses
+    its dual bound (nvs09: ``Cannot decompose product: log·log`` → feasibility
+    objective, 69 % root gap; mathopt5_6: ``sin·sin`` → no bound at all).
+
+    The lift introduces ``t == g(x)`` (a bounded aux via :meth:`_Lifter.expression`
+    — ``t`` inherits ``g``'s FBBT interval, e.g. ``log(x-2) ∈ [0, log 7]`` for
+    ``x ∈ [3, 9]``) and rewrites the node as the *monomial* ``t**n``, which the
+    existing monomial-secant / even-power envelope relaxes exactly (even ``n``) or
+    3-regime (odd ``n``). This is an exact identity substitution (``t == g(x)``),
+    so it cuts no feasible point; it only replaces a *dropped* term with a
+    relaxable one. Default OFF keeps the reform byte-identical.
+
+    Entry-experiment measurement (nvs09 hand-lift): root bound −72.90 → −54.83
+    (root gap 69.0 % → 27.1 %, a 60.7 % relative reduction, ≥ 25 % bar). nvs05 was
+    killed separately — its objective monomial is already exactly relaxed (the
+    box-minimum 0.674 equals the root bound), so its gap is constraint-driven box
+    reduction (OBBT/branch-and-reduce), not a lifting problem. See
+    ``docs/dev/uncertified-tail-plan-results-2026-07-06.md`` §TD-A.
+    """
+    import os
+
+    return os.environ.get("DISCOPT_LIFT_LOOSE_PRODUCTS", "0") == "1"
+
+
+# Transcendental univariate calls whose integer power TD-A lifts. Restricted to
+# single-argument functions with a monotone/bounded envelope so ``t == g(x)``
+# always yields a finite aux interval; excludes ``abs``/``sign`` (non-smooth) and
+# n-ary ``min``/``max``/``prod``/``norm`` (not univariate).
+_LIFTABLE_CALL_POWER_FUNCS = frozenset(
+    {"log", "log2", "log10", "exp", "sqrt", "sin", "cos", "tan", "atan", "tanh", "log1p"}
+)
+
+
+def _liftable_call_power_base(expr: Expression, model: Model) -> tuple[FunctionCall, int] | None:
+    """If *expr* is ``g(x)**n`` with ``g`` a single-argument transcendental over a
+    *non-atomic* argument (not a bare variable) and ``n`` a positive integer
+    ``≥ 2``, return ``(g_call, n)``; otherwise ``None``.
+
+    A bare-variable base (``x**n``) is already the monomial path and must not be
+    lifted; a fractional power is handled by ``_lift_objective_atoms`` directly.
+    """
+    if not isinstance(expr, BinaryOp) or expr.op != "**":
+        return None
+    if not isinstance(expr.right, Constant):
+        return None
+    exp_val = float(expr.right.value)
+    n = int(exp_val)
+    if exp_val != n or n < 2:
+        return None
+    base = expr.left
+    if not isinstance(base, FunctionCall):
+        return None
+    if base.func_name not in _LIFTABLE_CALL_POWER_FUNCS or len(base.args) != 1:
+        return None
+    # A univariate call over a bare variable (``sin(x)**2``) is still worth
+    # lifting: the linearizer drops it exactly the same way (the base is a call,
+    # not a variable index). Only require that the call is not itself trivially a
+    # constant.
+    return base, n
+
+
 # The factorable-reform walkers (``_find_clearable_denominator``, ``_lift_expr``,
 # the ``has_factorable_work`` scanners, ...) recurse one Python frame per
 # expression node.  ``from_nl`` rebuilds a sum/product of N terms as a left-deep
@@ -242,6 +348,11 @@ class _Lifter:
         self._expr_cache: dict[tuple[str, float | None], Variable] = {}
         self.aux_constraints: list[Constraint] = []
         self._counter = 0
+        # R4: names of lifted product-factor auxes whose interval spans 0. These
+        # are the only auxes worth keeping as spatial-branching candidates (see
+        # ``_lift_zero_spanning_factors_enabled``). Populated only when the flag
+        # is on, so the default reform is byte-identical.
+        self.zero_spanning_factor_auxes: set[str] = set()
 
     def monomial(self, leaf: Expression, flat_index: int, exp: int) -> Variable | None:
         """Return an aux variable equal to ``leaf**exp`` (creating it on first
@@ -441,6 +552,17 @@ def _prelift_blowup_products(expr: Expression, model: Model, lifter: "_Lifter") 
                     if w is not None:
                         new_factors.append(w)
                         changed = True
+                        # R4: a *product factor* whose lifted aux interval spans 0
+                        # is the branch-responsive one (splitting w at 0 flips the
+                        # factor's sign, tightening the product envelope). Tag it so
+                        # the solver keeps it a spatial-branching candidate instead
+                        # of deprioritizing it with the pure-product auxes. Flag-
+                        # gated: no tagging when off, so the reform is unchanged.
+                        if _lift_zero_spanning_factors_enabled():
+                            w_lo = float(np.min(w.lb))
+                            w_hi = float(np.max(w.ub))
+                            if w_lo < 0.0 < w_hi:
+                                lifter.zero_spanning_factor_auxes.add(w.name)
                         continue
                     new_factors.append(f_lifted)
                 else:
@@ -460,6 +582,60 @@ def _prelift_blowup_products(expr: Expression, model: Model, lifter: "_Lifter") 
         if operand is expr.operand:
             return expr
         return UnaryOp(expr.op, operand)
+    return expr
+
+
+def _prelift_call_powers(expr: Expression, model: Model, lifter: "_Lifter") -> Expression:
+    """TD-A pre-pass: lift an integer power of a univariate call ``g(x)**n`` (n >= 2)
+    to the monomial ``t**n`` with ``t == g(x)`` a bounded aux, *before*
+    ``distribute_products`` expands ``g(x)**2`` into the ``g(x)·g(x)`` product the
+    downstream ``_decompose_product`` cannot linearize (so the term is dropped and
+    the model loses its dual bound — nvs09 ``log·log``, mathopt5_6 ``sin·sin``).
+
+    Runs bottom-up so a call whose argument itself contains a power-of-call is
+    lifted inside out. Identity-preserving when nothing matches (returns the same
+    object), so a model without this structure is byte-for-byte unchanged; the
+    whole pass is a no-op unless ``DISCOPT_LIFT_LOOSE_PRODUCTS`` is set (the caller
+    gates it, but the walker also short-circuits on the flag for safety).
+
+    Sound: ``t == g(x)`` is an exact identity substitution over ``g``'s FBBT box,
+    so no feasible point is cut; the rewrite only replaces a *dropped* transcen-
+    dental power with a relaxable monomial.
+    """
+    if not _lift_loose_products_enabled():
+        return expr
+    if isinstance(expr, BinaryOp):
+        call_power = _liftable_call_power_base(expr, model)
+        if call_power is not None:
+            g_call, n = call_power
+            # Recurse into the call argument first (it may hide another such power).
+            inner_arg = _prelift_call_powers(g_call.args[0], model, lifter)
+            rebuilt_call = (
+                g_call if inner_arg is g_call.args[0] else FunctionCall(g_call.func_name, inner_arg)
+            )
+            t = lifter.expression(rebuilt_call)
+            if isinstance(t, Variable):
+                return BinaryOp("**", t, Constant(float(n)))
+            # Aux could not be bounded (unbounded argument): leave as-is (the term
+            # stays dropped exactly as before — never unsound).
+            if rebuilt_call is not g_call:
+                return BinaryOp("**", rebuilt_call, expr.right)
+            return expr
+        left = _prelift_call_powers(expr.left, model, lifter)
+        right = _prelift_call_powers(expr.right, model, lifter)
+        if left is expr.left and right is expr.right:
+            return expr
+        return BinaryOp(expr.op, left, right)
+    if isinstance(expr, UnaryOp):
+        operand = _prelift_call_powers(expr.operand, model, lifter)
+        if operand is expr.operand:
+            return expr
+        return UnaryOp(expr.op, operand)
+    if isinstance(expr, FunctionCall):
+        new_args = [_prelift_call_powers(a, model, lifter) for a in expr.args]
+        if all(na is oa for na, oa in zip(new_args, expr.args)):
+            return expr
+        return FunctionCall(expr.func_name, *new_args)
     return expr
 
 
@@ -826,6 +1002,10 @@ def _has_factorable_work_inner(model: Model) -> bool:
     def scan(expr: Expression) -> bool:
         if _find_clearable_denominator(expr, model) is not None:
             return True
+        # TD-A: scan for ``g(x)**n`` on the *pre-distribute* tree — distribution
+        # would collapse it into the ``g·g`` product that hides the structure.
+        if _lift_loose_products_enabled() and _scan_for_liftable_call_power(expr, model):
+            return True
         dist = distribute_products(expr)
         if _scan_for_mixed_product(dist, model):
             return True
@@ -893,6 +1073,24 @@ def _scan_for_liftable_call(expr: Expression, model: Model) -> bool:
         )
     if isinstance(expr, UnaryOp):
         return _scan_for_liftable_call(expr.operand, model)
+    return False
+
+
+def _scan_for_liftable_call_power(expr: Expression, model: Model) -> bool:
+    """True if *expr* contains an integer power ``g(x)**n`` (n >= 2) of a univariate
+    transcendental call — the TD-A lift target. Scans the *pre-distribute* tree
+    (``distribute_products`` would collapse ``g(x)**2`` into ``g·g`` and hide it).
+    """
+    if _liftable_call_power_base(expr, model) is not None:
+        return True
+    if isinstance(expr, BinaryOp):
+        return _scan_for_liftable_call_power(expr.left, model) or _scan_for_liftable_call_power(
+            expr.right, model
+        )
+    if isinstance(expr, UnaryOp):
+        return _scan_for_liftable_call_power(expr.operand, model)
+    if isinstance(expr, FunctionCall):
+        return any(_scan_for_liftable_call_power(a, model) for a in expr.args)
     return False
 
 
@@ -1346,6 +1544,7 @@ def canonicalize_entropy(model: Model) -> Model:
         new_model = Model(model.name)
         new_model._variables = list(model._variables)
         new_model._parameters = list(model._parameters)
+        new_model._rebuild_name_index()  # keep the name cache in sync (M7)
         new_model._objective = new_objective
         new_model._constraints = new_constraints
         return new_model
@@ -1385,6 +1584,7 @@ def _factorable_reformulate_inner(model: Model, *, clear_only: bool = False) -> 
         new_model = Model(model.name)
         new_model._variables = list(model._variables)
         new_model._parameters = list(model._parameters)
+        new_model._rebuild_name_index()  # keep the name cache in sync (M7)
         new_model._objective = model._objective
 
         lifter = _Lifter(new_model)
@@ -1414,6 +1614,7 @@ def _factorable_reformulate_inner(model: Model, *, clear_only: bool = False) -> 
                 else:
                     rebuilt.append(Constraint(distribute_products(body), sense, c.rhs, c.name))
                 continue
+            body = _prelift_call_powers(body, new_model, lifter)
             body = _prelift_blowup_products(body, new_model, lifter)
             body = distribute_products(body)
             body = _lift_objective_atoms(body, new_model, lifter)
@@ -1427,7 +1628,8 @@ def _factorable_reformulate_inner(model: Model, *, clear_only: bool = False) -> 
         # power of a polynomial base); division clearing is meaningless for an
         # objective so only the lifts apply.
         if not clear_only and new_model._objective is not None:
-            obj_expr = _prelift_blowup_products(new_model._objective.expression, new_model, lifter)
+            obj_expr = _prelift_call_powers(new_model._objective.expression, new_model, lifter)
+            obj_expr = _prelift_blowup_products(obj_expr, new_model, lifter)
             obj_expr = distribute_products(obj_expr)
             obj_expr = _lift_objective_atoms(obj_expr, new_model, lifter)
             lifted_obj = _lift_expr(obj_expr, new_model, lifter)
@@ -1439,6 +1641,10 @@ def _factorable_reformulate_inner(model: Model, *, clear_only: bool = False) -> 
         # Defining equalities for the aux variables come first so downstream
         # bound propagation sees them early.
         new_model._constraints = lifter.aux_constraints + rebuilt
+        # R4: surface the zero-spanning product-factor auxes (if any were tagged
+        # under the flag) so the solver can keep them branchable. Always set the
+        # attribute (empty by default) for a stable, easy-to-read contract.
+        new_model._zero_spanning_factor_auxes = set(lifter.zero_spanning_factor_auxes)
         return new_model
     except Exception:  # pragma: no cover - defensive: never break a solve
         return model

@@ -150,8 +150,47 @@ def _const_scalar(expr: Expression) -> Optional[float]:
     return None
 
 
+# Maximum number of additive terms a single distribution may produce. A
+# monomial distributed over an n-term posynomial yields n terms; nested products
+# of posynomials multiply. Bounding the expansion keeps recognition cheap and
+# refuses (falls back to spatial B&B, which is sound) rather than blowing up on a
+# pathological product-of-sums. 64 comfortably covers textbook GPs.
+_MAX_DISTRIBUTE_TERMS = 64
+
+
+def _count_sum_terms(expr: Expression) -> int:
+    """Count the additive terms ``expr`` would flatten into (for the budget).
+
+    Mirrors the additive structure walked by :func:`_flatten_sum_terms`:
+    ``+``/``-`` add their children's counts, ``neg`` is transparent, a product
+    with a summand factor multiplies the two factors' counts, and a
+    :class:`SumOverExpression` sums its terms' counts. Everything else counts as
+    one leaf term.
+    """
+    if isinstance(expr, BinaryOp) and expr.op in ("+", "-"):
+        return _count_sum_terms(expr.left) + _count_sum_terms(expr.right)
+    if isinstance(expr, UnaryOp) and expr.op == "neg":
+        return _count_sum_terms(expr.operand)
+    if isinstance(expr, BinaryOp) and expr.op == "*":
+        return _count_sum_terms(expr.left) * _count_sum_terms(expr.right)
+    if isinstance(expr, SumOverExpression):
+        return sum(_count_sum_terms(t) for t in expr.terms)
+    return 1
+
+
 def _flatten_sum_terms(expr: Expression, scale: float, out: list[tuple[float, Expression]]) -> None:
-    """Flatten a +/-/neg tree into ``(signed_scale, leaf_term)`` pairs."""
+    """Flatten a +/-/neg/product/indexed-sum tree into ``(signed_scale, leaf_term)`` pairs.
+
+    Beyond the plain additive tree (``+``/``-``/``neg``), this distributes a
+    product ``a * b`` when either factor is itself a sum — e.g.
+    ``2 * (h*w + h*d)`` becomes ``2*h*w + 2*h*d`` — and recurses into a
+    :class:`SumOverExpression` (an indexed ``dm.sum(..., over=set)``). Both are
+    exactly additive/posynomial-preserving rewrites, so recognition stays sound;
+    they only *broaden* which surface syntaxes classify. Products whose
+    distribution would exceed :data:`_MAX_DISTRIBUTE_TERMS` are left intact as a
+    single leaf (``_parse_monomial`` will then reject them, and the model falls
+    back to spatial B&B — sound but slower).
+    """
     if isinstance(expr, BinaryOp) and expr.op == "+":
         _flatten_sum_terms(expr.left, scale, out)
         _flatten_sum_terms(expr.right, scale, out)
@@ -163,6 +202,30 @@ def _flatten_sum_terms(expr: Expression, scale: float, out: list[tuple[float, Ex
     if isinstance(expr, UnaryOp) and expr.op == "neg":
         _flatten_sum_terms(expr.operand, -scale, out)
         return
+    if isinstance(expr, SumOverExpression):
+        # An indexed reduction ``sum_i term_i`` is a plain additive sum of its
+        # element expressions; recurse so the natural indexed posynomial form
+        # classifies (GP-4).
+        for term in expr.terms:
+            _flatten_sum_terms(term, scale, out)
+        return
+    if isinstance(expr, BinaryOp) and expr.op == "*":
+        # Distribute a product over a sum when doing so is a bounded expansion.
+        # ``(Σ a_i)(Σ b_j) = Σ_ij a_i b_j`` is posynomial-preserving; guard the
+        # term count so a pathological product-of-sums refuses instead of
+        # exploding.
+        left_terms = _count_sum_terms(expr.left)
+        right_terms = _count_sum_terms(expr.right)
+        product_terms = left_terms * right_terms
+        if (left_terms > 1 or right_terms > 1) and product_terms <= _MAX_DISTRIBUTE_TERMS:
+            left_pairs: list[tuple[float, Expression]] = []
+            right_pairs: list[tuple[float, Expression]] = []
+            _flatten_sum_terms(expr.left, 1.0, left_pairs)
+            _flatten_sum_terms(expr.right, 1.0, right_pairs)
+            for ls, lt in left_pairs:
+                for rs, rt in right_pairs:
+                    out.append((scale * ls * rs, BinaryOp("*", lt, rt)))
+            return
     out.append((scale, expr))
 
 
@@ -260,11 +323,9 @@ def is_posynomial(expr: Expression, model: Model) -> Optional[PosynomialForm]:
     is sound: a non-``None`` return is a genuine posynomial on the
     strictly-positive box declared by the model's variable bounds.
     """
-    # ``SumOverExpression`` (vectorised reductions) are not handled here; the
-    # caller works with the scalar expansion. Reject defensively.
-    if isinstance(expr, SumOverExpression):
-        return None
-
+    # ``SumOverExpression`` (an indexed ``dm.sum(..., over=set)`` reduction) is a
+    # plain additive sum of its element expressions; :func:`_flatten_sum_terms`
+    # recurses into it (GP-4), so no top-level rejection is needed.
     terms: list[tuple[float, Expression]] = []
     _flatten_sum_terms(expr, 1.0, terms)
 

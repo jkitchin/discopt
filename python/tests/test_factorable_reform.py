@@ -31,6 +31,7 @@ from discopt._jax.term_classifier import classify_nonlinear_terms
 from discopt.modeling.core import FunctionCall, Variable
 
 _DATA = Path(__file__).parent / "data" / "minlplib"
+_NL_DATA = Path(__file__).parent / "data" / "minlplib_nl"
 
 
 def _aux_names(model):
@@ -518,6 +519,147 @@ def test_entropy_domain_guard_rejects_negative_lb():
     assert not _has_entropy(out._objective.expression)
 
 
+# --------------------------------------------------------------------------- #
+# R4 — zero-spanning product-factor lift (DISCOPT_LIFT_ZERO_SPANNING_FACTORS)  #
+# --------------------------------------------------------------------------- #
+#
+# A product ``f(x)·g(x)`` whose non-atomic factor ``f`` has an interval spanning
+# 0 already gets ``f`` lifted to a bounded aux ``w == f`` (via the blow-up
+# prelift). The default spatial-branching policy deprioritizes every lifted aux
+# (a product aux ``w = x_i·x_j`` cannot shrink its own envelope). For a
+# zero-spanning FACTOR that reasoning is inverted: branching ``w`` at 0 splits
+# the factor's sign and tightens the ``w·g`` McCormick envelope — the only move
+# that un-pins the bound. The flag tags those auxes so the solver keeps them
+# branchable. Default OFF => no tagging => byte-identical branching set.
+
+
+def _st_e36_shaped(name="zsf"):
+    """A 2-var st_e36-shaped model: a product of a zero-spanning quadratic factor
+    ``f = x^2 - 6x - 11 + 0.8y`` (∋ 0 on the box) and a strictly-positive
+    sum-of-squares product ``g``, constrained ``f·g == 0``. Since ``g > 0`` the
+    feasible set is exactly ``f == 0``; the objective's box-min off the manifold
+    pins the McCormick product bound until ``f``'s lifted aux is split at 0.
+    NOT the named instance — built here so the test is a class probe, not an
+    instance hack."""
+    m = dm.Model(name)
+    x = m.continuous("x", lb=3.0, ub=5.5)
+    y = m.continuous("y", lb=15.0, ub=25.0)
+    m.minimize(2 * x**2 + 0.008 * y**3 - 3.2 * x * y - 2 * y)
+    f = x**2 - 6 * x - 11 + 0.8 * y
+    g = (
+        ((-0.62 * y + 3.25 * x) ** 2 + (-6.35 + 0.2 * y + x) ** 2)
+        * ((-0.66 * y + 3.55 * x) ** 2 + (-6.85 + 0.2 * y + x) ** 2)
+        * ((-0.7 * y + 3.6 * x) ** 2 + (-7.1 + 0.2 * y + x) ** 2)
+        * ((-0.82 * y + 3.8 * x) ** 2 + (-7.9 + 0.2 * y + x) ** 2)
+    )
+    m.subject_to(f * g == 0)
+    m.subject_to(-0.2 * x * y + 0.6 * y + dm.exp(x - 3) - 1 <= 0)
+    return m
+
+
+def test_r4_default_on_tags_and_escape_hatch(monkeypatch):
+    """G1.5 (post-C-38): the R4 zero-spanning-factor lift is ON by default, and
+    ``DISCOPT_LIFT_ZERO_SPANNING_FACTORS=0`` is the escape hatch that restores the
+    old byte-identical (no-tagging) branching set. The lift itself always happens
+    (the aux exists); only the *tagging* is what the flag gates."""
+    # Default (env absent): ON — the zero-spanning factor aux is tagged.
+    monkeypatch.delenv("DISCOPT_LIFT_ZERO_SPANNING_FACTORS", raising=False)
+    m = _st_e36_shaped()
+    assert has_factorable_work(m)
+    m2 = factorable_reformulate(m)
+    assert _aux_names(m2), "the zero-spanning factor should still be lifted"
+    assert getattr(m2, "_zero_spanning_factor_auxes", set()), (
+        "default-ON must tag the zero-spanning product factor for branching"
+    )
+    # Escape hatch: "0" restores the old no-tagging behavior (aux still lifted).
+    monkeypatch.setenv("DISCOPT_LIFT_ZERO_SPANNING_FACTORS", "0")
+    m_off = factorable_reformulate(_st_e36_shaped())
+    assert _aux_names(m_off), "the aux is still lifted with the hatch on"
+    assert getattr(m_off, "_zero_spanning_factor_auxes", set()) == set()
+
+
+def test_r4_flag_on_tags_zero_spanning_factor(monkeypatch):
+    """Flag ON: the zero-spanning product-factor aux is tagged for branching."""
+    monkeypatch.setenv("DISCOPT_LIFT_ZERO_SPANNING_FACTORS", "1")
+    m = _st_e36_shaped()
+    m2 = factorable_reformulate(m)
+    tagged = getattr(m2, "_zero_spanning_factor_auxes", set())
+    assert tagged, "a zero-spanning product factor must be tagged when the flag is on"
+    # Every tagged aux really spans 0 over its lifted box.
+    for v in m2._variables:
+        if v.name in tagged:
+            import numpy as np
+
+            lo, hi = float(np.min(v.lb)), float(np.max(v.ub))
+            assert lo < 0.0 < hi, f"tagged aux {v.name} box [{lo},{hi}] must span 0"
+
+
+def test_r4_positive_factor_not_tagged(monkeypatch):
+    """A product whose lifted factors are all strictly one-signed (never span 0)
+    tags nothing — the flag must not indiscriminately mark every product aux."""
+    monkeypatch.setenv("DISCOPT_LIFT_ZERO_SPANNING_FACTORS", "1")
+    m = dm.Model("pos_factors")
+    x = m.continuous("x", lb=1.0, ub=3.0)
+    y = m.continuous("y", lb=1.0, ub=3.0)
+    # Both factors are sums of squares plus a positive constant => strictly > 0.
+    f = (x + y) ** 2 + (x - 0.5 * y) ** 2 + 1.0
+    g = (
+        ((0.5 * x + y) ** 2 + (x + 0.3 * y) ** 2 + 1.0)
+        * ((0.4 * x + y) ** 2 + (x + 0.2 * y) ** 2 + 1.0)
+        * ((0.3 * x + y) ** 2 + (x + 0.1 * y) ** 2 + 1.0)
+    )
+    m.minimize(x + y)
+    m.subject_to(f * g <= 5000.0)
+    if has_factorable_work(m):
+        m2 = factorable_reformulate(m)
+        for v in m2._variables:
+            if v.name in getattr(m2, "_zero_spanning_factor_auxes", set()):
+                import numpy as np
+
+                lo, hi = float(np.min(v.lb)), float(np.max(v.ub))
+                assert lo < 0.0 < hi  # any tagged aux must genuinely span 0
+
+
+@pytest.mark.correctness
+@pytest.mark.slow
+def test_r4_flag_on_unpins_pinned_product(monkeypatch):
+    """The st_e36-shaped pinned-product model: with the flag OFF the product's
+    McCormick bound is pinned at a box-min constant far below the optimum; with
+    it ON the zero-spanning factor aux becomes branchable and the bound climbs to
+    (essentially) the optimum. Asserts the *lever* (bound un-pinning) and
+    soundness — not a wall-clock certification race, which is machine-dependent.
+
+    The pin (OFF) is ≈ -304.5; the optimum is ≈ -246.0. A ≥ 25 % relative gap
+    reduction (the R4 acceptance threshold) is the falsifiable claim.
+    """
+    monkeypatch.setenv("DISCOPT_LIFT_ZERO_SPANNING_FACTORS", "1")
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        r_on = _st_e36_shaped().solve(time_limit=60, gap_tolerance=1e-4)
+    monkeypatch.setenv("DISCOPT_LIFT_ZERO_SPANNING_FACTORS", "0")
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        r_off = _st_e36_shaped().solve(time_limit=20, gap_tolerance=1e-4)
+
+    assert r_on.bound is not None and r_off.bound is not None
+    assert r_on.objective is not None and r_off.objective is not None
+    opt = r_on.objective  # both reach the same incumbent (the true optimum)
+    # Soundness (both paths): the dual bound never crosses the optimum (min).
+    assert r_on.bound <= opt + 1e-4, "ON bound must not exceed the optimum (false cert)"
+    assert r_off.bound <= opt + 1e-4, "OFF bound must not exceed the optimum"
+    # Non-regression: ON is at least as tight as OFF.
+    assert r_on.bound >= r_off.bound - 1e-4, "ON bound must not regress vs OFF"
+    # The lever: ON reduces the root/OFF gap to the optimum by >= 25 %.
+    gap_off = abs(opt - r_off.bound)
+    gap_on = abs(opt - r_on.bound)
+    assert gap_off > 1e-3, "probe must actually be pinned with the flag OFF"
+    reduction = (gap_off - gap_on) / gap_off
+    assert reduction >= 0.25, (
+        f"flag ON must un-pin the bound >= 25 % "
+        f"(OFF gap {gap_off:.3f} -> ON gap {gap_on:.3f}, reduction {reduction:.1%})"
+    )
+
+
 def test_entropy_canonicalized_in_constraint_body():
     """The rewrite fires in constraint bodies too, not just the objective."""
     m = dm.Model("entcon")
@@ -785,3 +927,201 @@ def test_nvs01_certifies_with_sound_bound():
     assert r.objective == pytest.approx(12.4697, abs=1e-2)
     assert r.bound is not None
     assert r.bound <= r.objective + 1e-4  # sound dual bound
+
+
+# ---------------------------------------------------------------------------
+# TD-A: lift an integer power of a univariate call ``g(x)**n`` to ``t**n``
+# (t == g(x)), flag ``DISCOPT_LIFT_LOOSE_PRODUCTS`` (default OFF).
+# ---------------------------------------------------------------------------
+
+
+def _squared_log_model():
+    """An nvs09-shaped probe (not the named instance): a separable sum of squared
+    logs whose ``distribute_products`` form is the ``log·log`` product the MILP
+    linearizer drops. Two integer vars keep it small and certifiable."""
+    import math
+
+    m = dm.Model("sqlog")
+    xs = [m.integer(f"x{i}", lb=3, ub=9) for i in range(2)]
+    obj = 0
+    for x in xs:
+        obj = obj + dm.log(x - 2) ** 2 + dm.log(10 - x) ** 2
+    m.minimize(obj)
+    return m, xs, math
+
+
+def test_tda_flag_off_leaves_call_power_untouched(monkeypatch):
+    """Flag OFF: ``g(x)**n`` is NOT lifted (reform byte-identical to baseline)."""
+    monkeypatch.delenv("DISCOPT_LIFT_LOOSE_PRODUCTS", raising=False)
+    m, _xs, _ = _squared_log_model()
+    # The squared-log alone is not factorable work with the flag off.
+    assert not has_factorable_work(m)
+
+
+def test_tda_flag_on_lifts_call_power(monkeypatch):
+    """Flag ON: each ``log(·)**2`` is lifted to a ``t**2`` monomial with an aux
+    ``t == log(·)`` (bounded by the log's FBBT interval)."""
+    monkeypatch.setenv("DISCOPT_LIFT_LOOSE_PRODUCTS", "1")
+    m, _xs, _ = _squared_log_model()
+    assert has_factorable_work(m)
+    m2 = factorable_reformulate(m)
+    assert m2 is not m
+    auxes = _aux_names(m2)
+    # 2 vars * 2 logs each -> 4 lifted univariate-call auxes.
+    assert len(auxes) == 4, f"expected 4 call auxes, got {auxes}"
+
+    # Every aux is a bounded continuous var (t == log(arg)) with a finite box.
+    import numpy as np
+
+    for v in m2._variables:
+        if v.name in auxes:
+            lo, hi = float(np.min(v.lb)), float(np.max(v.ub))
+            assert np.isfinite(lo) and np.isfinite(hi)
+            assert lo <= hi
+
+
+def test_tda_lift_is_exact_identity_feasible_sampling(monkeypatch):
+    """Feasible-point sampling: the lift ``t == g(x)`` cuts no feasible point.
+
+    For random x in the box, the lifted objective evaluated at (x, t = g(x))
+    equals the original objective at x, and every aux-defining equality holds —
+    i.e. the reformulation is an exact identity substitution, never a relaxation
+    that could exclude a feasible point.
+    """
+    import numpy as np
+    from discopt._jax.dag_compiler import compile_expression
+
+    monkeypatch.setenv("DISCOPT_LIFT_LOOSE_PRODUCTS", "1")
+    m, _xs, math = _squared_log_model()
+    m2 = factorable_reformulate(m)
+
+    f_orig = compile_expression(m._objective.expression, m)
+    f_lift = compile_expression(m2._objective.expression, m2)
+    # aux-defining equalities: body == 0 for each ``t - g(x)``.
+    aux_bodies = [
+        (c.body, compile_expression(c.body, m2))
+        for c in m2._constraints
+        if any(vn in _aux_names(m2) for vn in _referenced_names(c.body))
+    ]
+
+    orig_vars = [v.name for v in m._variables]
+    lift_vars = [v.name for v in m2._variables]
+    aux_names = set(_aux_names(m2))
+
+    rng = np.random.default_rng(0)
+    max_obj_err = 0.0
+    max_aux_resid = 0.0
+    for _ in range(2000):
+        # sample the original (non-aux) variables over their integer box
+        xvals = {vn: float(rng.integers(3, 10)) for vn in orig_vars}
+        # derive the aux values t = log(arg) so the point is feasible in m2
+        full = dict(xvals)
+        # solve aux defs in order (they are t - log(arg) = 0, arg over base vars)
+        for v in m2._variables:
+            if v.name in aux_names:
+                full.setdefault(v.name, 0.0)
+        # fixpoint once: evaluate each aux body to recover t (t appears linearly)
+        for body, _fn in aux_bodies:
+            # body = t - g(x); set t = g(x)
+            t_name, g_val = _solve_aux_body(body, full, m2)
+            if t_name is not None:
+                full[t_name] = g_val
+        x_orig = np.array([xvals[vn] for vn in orig_vars], dtype=float)
+        x_lift = np.array([full[vn] for vn in lift_vars], dtype=float)
+        o0 = float(f_orig(x_orig))
+        o1 = float(f_lift(x_lift))
+        max_obj_err = max(max_obj_err, abs(o0 - o1))
+        for body, fn in aux_bodies:
+            max_aux_resid = max(max_aux_resid, abs(float(fn(x_lift))))
+    assert max_obj_err < 1e-6, f"lifted objective diverged from original: {max_obj_err}"
+    assert max_aux_resid < 1e-6, f"aux equality violated at t=g(x): {max_aux_resid}"
+
+
+@pytest.mark.correctness
+@pytest.mark.slow
+def test_tda_nvs09_root_bound_tightens(monkeypatch):
+    """nvs09: the flag ON tightens the root bound >= 25 % relative vs OFF, and the
+    ON bound never crosses the oracle (-43.134, min sense) — the TD-A acceptance.
+    """
+    nl = _NL_DATA / "nvs09.nl"
+    if not nl.exists():
+        pytest.skip("nvs09.nl not vendored")
+    oracle = -43.1343369200
+
+    monkeypatch.setenv("DISCOPT_LIFT_LOOSE_PRODUCTS", "1")
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        r_on = dm.from_nl(str(nl)).solve(time_limit=8)
+    monkeypatch.setenv("DISCOPT_LIFT_LOOSE_PRODUCTS", "0")
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        r_off = dm.from_nl(str(nl)).solve(time_limit=8)
+
+    assert r_on.root_bound is not None and r_off.root_bound is not None
+    # Soundness: neither root bound crosses the oracle (min: bound <= optimum).
+    assert r_off.root_bound <= oracle + 1e-4
+    assert r_on.root_bound <= oracle + 1e-4
+    # ON is at least as tight (higher) as OFF.
+    assert r_on.root_bound >= r_off.root_bound - 1e-6
+    gap_off = abs(oracle - r_off.root_bound)
+    gap_on = abs(oracle - r_on.root_bound)
+    reduction = (gap_off - gap_on) / gap_off
+    assert reduction >= 0.25, (
+        f"flag ON must tighten nvs09 root gap >= 25 % "
+        f"(OFF {r_off.root_bound:.2f} -> ON {r_on.root_bound:.2f}, reduction {reduction:.1%})"
+    )
+
+
+def test_tda_generalizes_to_sin_power(monkeypatch):
+    """The lift keys on the *structure* (call ** int), not a named function: a
+    ``sin(x)**2`` term is lifted the same way ``log(x-2)**2`` is (mathopt witness
+    family). Demonstrates the rule is not log-specific."""
+    monkeypatch.setenv("DISCOPT_LIFT_LOOSE_PRODUCTS", "1")
+    m = dm.Model("sinpow")
+    x = m.continuous("x", lb=-1.0, ub=2.0)
+    m.minimize(dm.sin(x) ** 2 + 0.1 * x)
+    assert has_factorable_work(m)
+    m2 = factorable_reformulate(m)
+    assert m2 is not m
+    assert len(_aux_names(m2)) == 1, "sin(x)**2 must lift one aux t == sin(x)"
+
+
+def _referenced_names(expr):
+    names = set()
+
+    def walk(e):
+        if isinstance(e, Variable):
+            names.add(e.name)
+        for a in ("left", "right", "operand"):
+            if hasattr(e, a) and getattr(e, a) is not None:
+                walk(getattr(e, a))
+        if hasattr(e, "args") and getattr(e, "args", None):
+            try:
+                for k in e.args:
+                    walk(k)
+            except TypeError:
+                pass
+
+    walk(expr)
+    return names
+
+
+def _solve_aux_body(body, values, model):
+    """Given an aux-defining body ``t - g(x) == 0`` and a dict of base-var values,
+    return (t_name, g_value) by evaluating g at the base values."""
+    import numpy as np
+    from discopt._jax.dag_compiler import compile_expression
+    from discopt.modeling.core import BinaryOp
+
+    # body is ``t - g(x)`` (a subtraction with t the aux on the left leaf).
+    if not (isinstance(body, BinaryOp) and body.op == "-"):
+        return None, None
+    left = body.left
+    if not isinstance(left, Variable):
+        return None, None
+    t_name = left.name
+    g_expr = body.right
+    fn = compile_expression(g_expr, model)
+    lift_vars = [v.name for v in model._variables]
+    xv = np.array([values.get(vn, 0.0) for vn in lift_vars], dtype=float)
+    return t_name, float(fn(xv))

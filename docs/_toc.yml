@@ -15,6 +15,8 @@ parts:
       - file: notebooks/robust_adjustable
       - file: notebooks/tutorial_multiobjective
       - file: notebooks/complementarity_mpec
+      - file: notebooks/bilevel
+      - file: notebooks/stochastic_programming
       - file: notebooks/pooling_pq
       - file: notebooks/geometric_programming
   - caption: "Tutorials \u2014 Solver Backends"
@@ -23,6 +25,7 @@ parts:
       - file: mip_nlp
       - file: notebooks/tutorial_benders
       - file: notebooks/tutorial_lagrangian
+      - file: notebooks/decomposition_advisor
       - file: notebooks/amp_global_minlp
       - file: notebooks/tutorial_solver_pounce
       - file: notebooks/tutorial_pounce_sipopt
@@ -58,11 +61,13 @@ parts:
       - file: notebooks/symbolic_envelopes
       - file: notebooks/suspect_head_to_head
       - file: notebooks/nlp_bb
+      - file: notebooks/implicit_function_node
       - file: notebooks/export_formats
       - file: notebooks/model_representations
       - file: notebooks/pyomo_solver
       - file: pyomo_solver
       - file: notebooks/callbacks
+      - file: notebooks/interactive_debugger
   - caption: Solver Backends
     chapters:
       - file: notebooks/qp_solver
@@ -75,18 +80,8 @@ parts:
       - file: notebooks/nn_embedding
       - file: notebooks/ac_opf
       - file: notebooks/decision_focused_learning
-      - file: notebooks/estimation_and_doe
+      - file: notebooks/estimation
       - file: notebooks/tutorial_estimation
-      - file: notebooks/tutorial_doe
-      - file: notebooks/doe_cli
-      - file: notebooks/tutorial_batch_doe
-      - file: notebooks/mixture-designs
-      - file: notebooks/latin-designs
-      - file: notebooks/factor-screening
-      - file: notebooks/active-learning
-      - file: notebooks/model-based-active-learning
-      - file: notebooks/identifiability-estimability
-      - file: notebooks/model-discrimination
   - caption: API Reference
     chapters:
       - file: api

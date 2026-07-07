@@ -11,20 +11,25 @@
 // type-complexity lints don't meaningfully apply to these binding shims.
 #![allow(clippy::too_many_arguments, clippy::type_complexity)]
 
-use discopt_core::bnb::milp_driver::{solve_milp as core_solve_milp, MilpOptions, MilpStatus};
+use discopt_core::bnb::milp_driver::{
+    solve_milp_hooked as core_solve_milp_hooked, MilpCheckpoint, MilpDebugControl, MilpDebugHook,
+    MilpDebugState, MilpOptions, MilpStatus,
+};
+use discopt_core::lp::aggregation::separate_aggregation_mir;
 use discopt_core::lp::basis::{recover_basis, Basis, BASIC};
 use discopt_core::lp::crossover::{crossover_to_vertex, LpView};
 use discopt_core::lp::gomory::separate_gomory;
 use discopt_core::lp::mir::separate_mir;
 use discopt_core::lp::simplex::{
-    solve_lp as simplex_solve_lp, solve_lp_batch, solve_lp_warm, LpInstance, LpStatus,
-    SimplexOptions,
+    solve_lp as simplex_solve_lp, solve_lp_batch, solve_lp_warm, solve_lp_warm_csc, LpInstance,
+    LpStatus, SimplexOptions, SparseCols,
 };
 use numpy::{
     PyArray1, PyArray2, PyArrayMethods, PyReadonlyArray1, PyReadonlyArray2, PyUntypedArrayMethods,
 };
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
+use pyo3::types::{PyDict, PyList};
 
 /// Push an interior LP optimum `x` to a vertex of the optimal face.
 ///
@@ -162,17 +167,20 @@ pub fn gomory_cuts_py<'py>(
 
 /// Separate MIR cuts from the `≤` rows `a_ub · x ≤ b_ub` at point `x`.
 ///
-/// `a_ub` is C-contiguous `m × n`; `lb` the length-`n` lower bounds;
-/// `integrality` a length-`n` bool array. Returns `(coeffs, rhs)` — a `k × n`
-/// array and length-`k` rhs, the cuts `coeffs[i] · x ≤ rhs[i]` over the
-/// structural variables — or `None` when no cut is produced.
+/// `a_ub` is C-contiguous `m × n`; `lb`/`ub` the length-`n` lower/upper bounds
+/// (used for the lower-shift / upper-complement bound substitution — pass `+inf`
+/// in `ub[j]` to disable complementation for column `j`); `integrality` a
+/// length-`n` bool array. Returns `(coeffs, rhs)` — a `k × n` array and length-`k`
+/// rhs, the cuts `coeffs[i] · x ≤ rhs[i]` over the structural variables — or
+/// `None` when no cut is produced.
 #[pyfunction]
-#[pyo3(signature = (a_ub, b_ub, lb, integrality, x, tol=1e-7, max_dynamism=1e7))]
+#[pyo3(signature = (a_ub, b_ub, lb, ub, integrality, x, tol=1e-7, max_dynamism=1e7))]
 pub fn mir_cuts_py<'py>(
     py: Python<'py>,
     a_ub: PyReadonlyArray2<'py, f64>,
     b_ub: PyReadonlyArray1<'py, f64>,
     lb: PyReadonlyArray1<'py, f64>,
+    ub: PyReadonlyArray1<'py, f64>,
     integrality: PyReadonlyArray1<'py, bool>,
     x: PyReadonlyArray1<'py, f64>,
     tol: f64,
@@ -187,6 +195,7 @@ pub fn mir_cuts_py<'py>(
         a_flat,
         b_ub.as_slice()?,
         lb.as_slice()?,
+        ub.as_slice()?,
         integrality.as_slice()?,
         x.as_slice()?,
         tol,
@@ -201,6 +210,66 @@ pub fn mir_cuts_py<'py>(
     for cut in &cuts {
         flat.extend_from_slice(&cut.coeffs);
         rhs.push(cut.rhs);
+    }
+    let coeffs = PyArray1::from_vec(py, flat).reshape([k, n])?;
+    Ok(Some((coeffs, PyArray1::from_vec(py, rhs))))
+}
+
+/// Separate Marchand–Wolsey aggregation c-MIR cuts from the `≤` rows
+/// `a_ub · x ≤ b_ub` at point `x`.
+///
+/// Pairs rows with nonnegative weights to cancel a continuous variable, forms the
+/// valid implied aggregate row, and applies the same complemented MIR as
+/// [`mir_cuts_py`] to it — so every cut is valid for the original feasible set (a
+/// nonnegative row combination of `≤` rows plus a valid MIR; see
+/// `discopt_core::lp::aggregation`). `a_ub` is C-contiguous `m × n`; `lb`/`ub` are
+/// length-`n` bounds (`+inf` in `ub[j]` disables complementation for column `j`);
+/// `integrality` a length-`n` bool array. Returns `(coeffs, rhs)` — a `k × n`
+/// array and length-`k` rhs, the cuts `coeffs[i] · x ≤ rhs[i]` over the structural
+/// variables, ordered most-violated-first — or `None` when no cut is produced.
+#[pyfunction]
+#[pyo3(signature = (a_ub, b_ub, lb, ub, integrality, x, tol=1e-7, max_dynamism=1e7))]
+pub fn aggregation_mir_cuts_py<'py>(
+    py: Python<'py>,
+    a_ub: PyReadonlyArray2<'py, f64>,
+    b_ub: PyReadonlyArray1<'py, f64>,
+    lb: PyReadonlyArray1<'py, f64>,
+    ub: PyReadonlyArray1<'py, f64>,
+    integrality: PyReadonlyArray1<'py, bool>,
+    x: PyReadonlyArray1<'py, f64>,
+    tol: f64,
+    max_dynamism: f64,
+) -> PyResult<Option<(Bound<'py, PyArray2<f64>>, Bound<'py, PyArray1<f64>>)>> {
+    let dims = a_ub.shape();
+    let n = dims[1];
+    let a_flat = a_ub
+        .as_slice()
+        .map_err(|_| PyValueError::new_err("`a_ub` must be C-contiguous"))?;
+    let mut cuts = separate_aggregation_mir(
+        a_flat,
+        b_ub.as_slice()?,
+        lb.as_slice()?,
+        ub.as_slice()?,
+        integrality.as_slice()?,
+        x.as_slice()?,
+        tol,
+        max_dynamism,
+    );
+    if cuts.is_empty() {
+        return Ok(None);
+    }
+    // Most-violated first, deterministic tie-break by insertion order.
+    cuts.sort_by(|p, q| {
+        q.violation
+            .partial_cmp(&p.violation)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    let k = cuts.len();
+    let mut flat = Vec::with_capacity(k * n);
+    let mut rhs = Vec::with_capacity(k);
+    for ac in &cuts {
+        flat.extend_from_slice(&ac.cut.coeffs);
+        rhs.push(ac.cut.rhs);
     }
     let coeffs = PyArray1::from_vec(py, flat).reshape([k, n])?;
     Ok(Some((coeffs, PyArray1::from_vec(py, rhs))))
@@ -240,6 +309,10 @@ pub fn solve_lp_py<'py>(
         tol,
         max_iter,
         deadline: None,
+        // F2: warm dual-simplex stall guard on by default (size-derived cap →
+        // cold fallback on trip; bound-neutral). Cold-only entry points ignore it.
+        warm_stall_guard: true,
+        warm_stall_cap_override: None,
     };
     let sol = simplex_solve_lp(&lp, b.as_slice()?, &opts);
     let status = match sol.status {
@@ -316,7 +389,14 @@ fn build_extended_basis(cs: &[i8], bv: &[i64], n: usize, m: usize) -> Option<Bas
 /// (`solve_lp_warm` cold-falls-back internally), and the dual simplex converges
 /// to the LP optimum just like a cold solve — so the returned objective (hence
 /// any relaxation bound built on it) is unchanged; the basis only changes speed.
-/// Returns `(status, x, obj, iters, col_status, basic_vars)`.
+/// Returns `(status, x, obj, iters, col_status, basic_vars, dual, ray)`.
+///
+/// `dual` (length `m`) and `ray` (length `n`) are *certificate candidates* a
+/// caller verifies before trusting (see [`LpSolve::dual`]/[`LpSolve::ray`]): at
+/// `optimal` `dual` is the row duals (feed to a Neumaier–Shcherbina safe bound),
+/// at `infeasible` `dual` is a Farkas ray, at `unbounded` `ray` is a primal ray.
+/// They are mapped back from any internal equilibration, so they are consistent
+/// with the `a`/`b`/`lb`/`ub` passed in. Each is empty when not applicable.
 #[pyfunction]
 #[pyo3(signature = (c, a, b, lb, ub, start_col_status=None, start_basic_vars=None,
                     tol=1e-9, max_iter=100_000))]
@@ -339,6 +419,8 @@ pub fn solve_lp_warm_py<'py>(
     usize,
     Bound<'py, PyArray1<i8>>,
     Bound<'py, PyArray1<i64>>,
+    Bound<'py, PyArray1<f64>>,
+    Bound<'py, PyArray1<f64>>,
 )> {
     let dims = a.shape();
     let (m, n) = (dims[0], dims[1]);
@@ -357,6 +439,10 @@ pub fn solve_lp_warm_py<'py>(
         tol,
         max_iter,
         deadline: None,
+        // F2: warm dual-simplex stall guard on by default (size-derived cap →
+        // cold fallback on trip; bound-neutral). Cold-only entry points ignore it.
+        warm_stall_guard: true,
+        warm_stall_cap_override: None,
     };
     let b_slice = b.as_slice()?;
 
@@ -383,6 +469,92 @@ pub fn solve_lp_warm_py<'py>(
         sol.iters,
         PyArray1::from_vec(py, sol.basis.col_status),
         PyArray1::from_vec(py, basic_vars_i64),
+        PyArray1::from_vec(py, sol.dual),
+        PyArray1::from_vec(py, sol.ray),
+    ))
+}
+
+/// Sparse-native counterpart of [`solve_lp_warm_py`]: the constraint matrix is
+/// passed as CSC (`col_ptr`/`row_idx`/`vals`, column-major) instead of a dense
+/// `m × n` array, so the ~0.3%-dense lifted relaxations are never materialized
+/// dense on either side of the boundary. `n` is the total column count (structural
+/// + slacks, matching the CSC). Returns the same
+/// `(status, x, obj, iters, col_status, basic_vars, dual, ray)` 8-tuple as
+/// [`solve_lp_warm_py`], with the certificates mapped back from any equilibration.
+#[pyfunction]
+#[pyo3(signature = (c, m, n, col_ptr, row_idx, vals, b, lb, ub,
+                    start_col_status=None, start_basic_vars=None, tol=1e-9, max_iter=100_000))]
+#[allow(clippy::too_many_arguments)]
+pub fn solve_lp_warm_csc_py<'py>(
+    py: Python<'py>,
+    c: PyReadonlyArray1<'py, f64>,
+    m: usize,
+    n: usize,
+    col_ptr: PyReadonlyArray1<'py, i64>,
+    row_idx: PyReadonlyArray1<'py, i64>,
+    vals: PyReadonlyArray1<'py, f64>,
+    b: PyReadonlyArray1<'py, f64>,
+    lb: PyReadonlyArray1<'py, f64>,
+    ub: PyReadonlyArray1<'py, f64>,
+    start_col_status: Option<PyReadonlyArray1<'py, i8>>,
+    start_basic_vars: Option<PyReadonlyArray1<'py, i64>>,
+    tol: f64,
+    max_iter: usize,
+) -> PyResult<(
+    String,
+    Bound<'py, PyArray1<f64>>,
+    f64,
+    usize,
+    Bound<'py, PyArray1<i8>>,
+    Bound<'py, PyArray1<i64>>,
+    Bound<'py, PyArray1<f64>>,
+    Bound<'py, PyArray1<f64>>,
+)> {
+    let col_ptr: Vec<usize> = col_ptr.as_slice()?.iter().map(|&x| x as usize).collect();
+    let row_idx: Vec<usize> = row_idx.as_slice()?.iter().map(|&x| x as usize).collect();
+    let vals_v: Vec<f64> = vals.as_slice()?.to_vec();
+    let sp = SparseCols::from_csc(col_ptr, row_idx, vals_v);
+    let opts = SimplexOptions {
+        tol,
+        max_iter,
+        deadline: None,
+        // F2: warm dual-simplex stall guard on by default (size-derived cap →
+        // cold fallback on trip; bound-neutral). Cold-only entry points ignore it.
+        warm_stall_guard: true,
+        warm_stall_cap_override: None,
+    };
+    let start = match (start_col_status, start_basic_vars) {
+        (Some(cs), Some(bv)) => build_extended_basis(cs.as_slice()?, bv.as_slice()?, n, m),
+        _ => None,
+    };
+    let sol = solve_lp_warm_csc(
+        sp,
+        m,
+        n,
+        c.as_slice()?,
+        lb.as_slice()?,
+        ub.as_slice()?,
+        b.as_slice()?,
+        start.as_ref(),
+        &opts,
+    );
+    let status = match sol.status {
+        LpStatus::Optimal => "optimal",
+        LpStatus::Infeasible => "infeasible",
+        LpStatus::Unbounded => "unbounded",
+        LpStatus::IterLimit => "iter_limit",
+        LpStatus::Numerical => "numerical",
+    };
+    let basic_vars_i64: Vec<i64> = sol.basis.basic_vars.iter().map(|&v| v as i64).collect();
+    Ok((
+        status.to_string(),
+        PyArray1::from_vec(py, sol.x),
+        sol.obj,
+        sol.iters,
+        PyArray1::from_vec(py, sol.basis.col_status),
+        PyArray1::from_vec(py, basic_vars_i64),
+        PyArray1::from_vec(py, sol.dual),
+        PyArray1::from_vec(py, sol.ray),
     ))
 }
 
@@ -445,6 +617,10 @@ pub fn solve_lp_batch_py<'py>(
         tol,
         max_iter,
         deadline: None,
+        // F2: warm dual-simplex stall guard on by default (size-derived cap →
+        // cold fallback on trip; bound-neutral). Cold-only entry points ignore it.
+        warm_stall_guard: true,
+        warm_stall_cap_override: None,
     };
     // The solve touches no Python objects, so release the GIL to let the core's
     // rayon workers run the batch concurrently without contending on it.
@@ -477,6 +653,85 @@ pub fn solve_lp_batch_py<'py>(
 /// form (structural columns `[0, n_struct)`, slacks after). Returns
 /// `(status, x[n_struct], obj, bound, nodes, lp_iters)` where status is one of
 /// `optimal`, `feasible`, `infeasible`, `unbounded`, `node_limit`.
+/// Adapter that lets an attached Python debugger drive the Rust MILP search.
+///
+/// Holds a GIL-independent handle (`Py<PyAny>`, which is `Send + Sync`) to a
+/// Python callable. `checkpoint` re-acquires the GIL — the solve runs under
+/// `py.allow_threads`, so the search thread does not hold it — builds a plain
+/// state dict, calls the callable, and maps a truthy return to `Stop`. A hook
+/// that raises is reported and treated as `Continue`, so a buggy debugger can
+/// never corrupt the solve — EXCEPT `KeyboardInterrupt`, which stops the
+/// search and is stashed in `pending` so `solve_milp_py` re-raises it after
+/// the solve returns (Ctrl-C must abort the solve, not be swallowed).
+struct PyMilpHook {
+    callback: Py<PyAny>,
+    pending: std::sync::Mutex<Option<PyErr>>,
+}
+
+impl MilpDebugHook for PyMilpHook {
+    fn checkpoint(&self, state: &MilpDebugState<'_>) -> MilpDebugControl {
+        Python::with_gil(|py| {
+            let cp = match state.checkpoint {
+                MilpCheckpoint::IterStart => "iter_start",
+                MilpCheckpoint::AfterSelect => "after_select",
+                MilpCheckpoint::AfterProcess => "after_process",
+                MilpCheckpoint::IncumbentFound => "incumbent_found",
+                MilpCheckpoint::Terminated => "terminated",
+            };
+            let d = PyDict::new(py);
+            let _ = d.set_item("checkpoint", cp);
+            let _ = d.set_item("iteration", state.iteration);
+            let _ = d.set_item("nodes", state.total_nodes);
+            let _ = d.set_item("open_nodes", state.open_nodes);
+            let _ = d.set_item("incumbent", state.incumbent);
+            let _ = d.set_item("bound", state.bound);
+            let _ = d.set_item("gap", state.gap);
+            let _ = d.set_item("elapsed", state.elapsed);
+            // Node-box inspection at AfterSelect: marshal the batch's boxes/ids
+            // as plain nested lists (best-effort; skipped on any conversion
+            // error since inspection is non-critical).
+            if let (Some(lbs), Some(ubs), Some(ids)) =
+                (state.batch_lb, state.batch_ub, state.batch_ids)
+            {
+                let rows = |boxes: &[Vec<f64>]| -> Option<Bound<'_, PyList>> {
+                    let r: Vec<Bound<'_, PyList>> = boxes
+                        .iter()
+                        .map(|row| PyList::new(py, row.iter().copied()).ok())
+                        .collect::<Option<Vec<_>>>()?;
+                    PyList::new(py, r).ok()
+                };
+                if let (Some(py_lb), Some(py_ub)) = (rows(lbs), rows(ubs)) {
+                    let _ = d.set_item("batch_lb", py_lb);
+                    let _ = d.set_item("batch_ub", py_ub);
+                    let id_vec: Vec<usize> = ids.iter().map(|n| n.0).collect();
+                    if let Ok(id_list) = PyList::new(py, id_vec) {
+                        let _ = d.set_item("batch_ids", id_list);
+                    }
+                    let _ = d.set_item("n_vars", state.n_vars);
+                }
+            }
+            match self.callback.bind(py).call1((d,)) {
+                Ok(ret) => {
+                    if ret.is_truthy().unwrap_or(false) {
+                        MilpDebugControl::Stop
+                    } else {
+                        MilpDebugControl::Continue
+                    }
+                }
+                Err(e) => {
+                    if e.is_instance_of::<pyo3::exceptions::PyKeyboardInterrupt>(py) {
+                        *self.pending.lock().unwrap() = Some(e);
+                        MilpDebugControl::Stop
+                    } else {
+                        e.print(py);
+                        MilpDebugControl::Continue
+                    }
+                }
+            }
+        })
+    }
+}
+
 #[pyfunction]
 #[pyo3(signature = (c, a, b, lb, ub, integer_cols, n_struct, obj_const=0.0,
                     max_nodes=1_000_000, gap_tol=1e-6, tol=1e-9, root_cuts=16,
@@ -484,7 +739,7 @@ pub fn solve_lp_batch_py<'py>(
                     max_pool_cuts=128, heuristics=true, presolve=true, strong_branch=true,
                     node_propagation=false, reduced_cost_fixing=true,
                     sb_max_cands=6, sb_node_budget=48,
-                    time_limit_s=0.0))]
+                    time_limit_s=0.0, debug_hook=None))]
 pub fn solve_milp_py<'py>(
     py: Python<'py>,
     c: PyReadonlyArray1<'py, f64>,
@@ -512,6 +767,7 @@ pub fn solve_milp_py<'py>(
     sb_max_cands: usize,
     sb_node_budget: usize,
     time_limit_s: f64,
+    debug_hook: Option<Py<PyAny>>,
 ) -> PyResult<(String, Bound<'py, PyArray1<f64>>, f64, f64, usize, usize)> {
     let dims = a.shape();
     let (m, n) = (dims[0], dims[1]);
@@ -563,8 +819,19 @@ pub fn solve_milp_py<'py>(
             // The MILP driver clones this and injects its own wall-clock deadline
             // from `time_limit_s`, so the base options leave it unset.
             deadline: None,
+            // F2: warm dual-simplex stall guard (size-derived cap → cold fallback).
+            warm_stall_guard: true,
+            warm_stall_cap_override: None,
         },
     };
+    // Wrap an attached Python debugger (if any) as a core hook. It is created
+    // before releasing the GIL and re-acquires it per checkpoint; when absent,
+    // the search runs the untouched (bound-neutral) path.
+    let hook = debug_hook.map(|cb| PyMilpHook {
+        callback: cb,
+        pending: std::sync::Mutex::new(None),
+    });
+    let hook_ref: Option<&dyn MilpDebugHook> = hook.as_ref().map(|h| h as &dyn MilpDebugHook);
     let res = py.allow_threads(|| {
         let lp = LpView {
             a: &a_owned,
@@ -574,13 +841,22 @@ pub fn solve_milp_py<'py>(
             l: &l_owned,
             u: &u_owned,
         };
-        let r = core_solve_milp(&lp, &b_owned, obj_const, &opts);
+        let r = core_solve_milp_hooked(&lp, &b_owned, obj_const, &opts, hook_ref);
         // Emit the per-phase / pivot profile to stderr when DISCOPT_PROFILE is set
         // (no-op otherwise). solve_milp has returned, so its function-scoped phase
         // timers have recorded. Engine perf work (issue #332) reads this.
         discopt_core::profile::dump();
         r
     });
+    // Re-raise a KeyboardInterrupt captured by the debug hook: Ctrl-C during an
+    // attached debug session aborts the solve (graceful search stop above) and
+    // then propagates as the exception the caller expects, instead of being
+    // silently converted into a normal-looking partial result.
+    if let Some(h) = hook.as_ref() {
+        if let Some(err) = h.pending.lock().unwrap().take() {
+            return Err(err);
+        }
+    }
     let status = match res.status {
         MilpStatus::Optimal => "optimal",
         MilpStatus::Feasible => "feasible",

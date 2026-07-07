@@ -1447,18 +1447,75 @@ def _solve_fixed_nlp_subproblem_attempt(
             return_attempt=True,
         )
     except TypeError as exc:
-        if "return_attempt" not in str(exc):
+        message = str(exc)
+        if "return_attempt" not in message and "initial_point" not in message:
             raise
-        result = _solve_nlp_subproblem(
-            evaluator,
-            lb,
-            ub,
-            int_indices,
-            x_master,
-            nlp_solver,
-            initial_point=initial_point,
-        )
+        try:
+            result = _solve_nlp_subproblem(
+                evaluator,
+                lb,
+                ub,
+                int_indices,
+                x_master,
+                nlp_solver,
+                initial_point=initial_point,
+            )
+        except TypeError as fallback_exc:
+            fallback_message = str(fallback_exc)
+            if "initial_point" not in fallback_message:
+                raise
+            result = _solve_nlp_subproblem(
+                evaluator,
+                lb,
+                ub,
+                int_indices,
+                x_master,
+                nlp_solver,
+            )
     return _coerce_nlp_attempt(result)
+
+
+def _fixed_subproblem_rigorously_infeasible(
+    evaluator,
+    lb,
+    ub,
+    int_indices,
+    x_master,
+    tol: float = 1e-6,
+) -> bool:
+    """Return true only when the fixed-integer NLP is provably infeasible.
+
+    A local NLP failure is not enough to justify excluding the integer
+    assignment. This check certifies infeasibility only for the all-fixed case,
+    where evaluating the single remaining point is a complete feasibility test.
+    """
+    sub_lb = lb.copy()
+    sub_ub = ub.copy()
+    for idx in int_indices:
+        val = _round_integral_to_bounds(x_master[idx], lb[idx], ub[idx])
+        sub_lb[idx] = val
+        sub_ub[idx] = val
+
+    if not np.all(sub_lb >= sub_ub - 1e-12):
+        return False
+
+    if evaluator.n_constraints == 0:
+        return False
+
+    try:
+        from discopt.solvers.nlp_ipopt import _infer_constraint_bounds
+
+        cl, cu = _infer_constraint_bounds(evaluator)
+        x_point = np.array(
+            [0.5 * (sub_lb[i] + sub_ub[i]) for i in range(evaluator.n_variables)],
+            dtype=np.float64,
+        )
+        cons = np.asarray(evaluator.evaluate_constraints(x_point), dtype=np.float64)
+        if not np.all(np.isfinite(cons)):
+            return False
+        return bool(np.any(cons < cl - tol) or np.any(cons > cu + tol))
+    except Exception:
+        return False
 
 
 def _regularization_requires_derivatives(add_regularization: Optional[str]) -> bool:
@@ -2690,6 +2747,11 @@ def _add_esh_cuts(
     trace["cuts_added"] = int(len(selected))
     trace["local_cuts_added"] = int(local_added)
     return len(selected), trace
+
+
+def _int_config_key(x_master, int_indices) -> tuple[int, ...]:
+    """Return a canonical key for the integer part of a master solution."""
+    return tuple(int(round(float(x_master[idx]))) for idx in int_indices)
 
 
 def _add_no_good_cut(
@@ -4839,6 +4901,10 @@ def solve_oa(
     incumbent = None
     incumbent_obj = None
     integer_assignments_seen: set[tuple[float, ...]] = set()
+    # Local NLP failures do not prove fixed-integer infeasibility. Track those
+    # assignments so final certification is downgraded instead of adding an
+    # unsound no-good cut.
+    unresolved_int_configs: set[tuple[int, ...]] = set()
     incumbent_progress: list[float] = []
     termination_reason = None
     incumbent_derivative_data: Optional[_DerivativeRegularizationData] = None
@@ -5223,7 +5289,8 @@ def solve_oa(
         final_lb = _trace_value(certified_LB)
         final_heuristic_lb = _trace_value(heuristic_LB)
         final_ub = _trace_value(UB)
-        bound_valid = bool(final_lb is not None)
+        has_unresolved = bool(unresolved_int_configs)
+        bound_valid = bool(final_lb is not None and not has_unresolved)
         final_gap = (
             _trace_value(_compute_gap(certified_LB, UB))
             if bound_valid and final_ub is not None
@@ -5240,6 +5307,7 @@ def solve_oa(
             "mip_count": int(mip_count),
             "nlp_subproblem_count": int(nlp_subproblem_count),
             "feasibility_subproblem_count": int(feasibility_subproblem_count),
+            "unresolved_integer_config_count": int(len(unresolved_int_configs)),
             "cut_count": int(len(oa_A_rows)),
             "provenance_cut_count": int(len(cut_provenance.records)),
             "local_cut_count": int(local_cut_count),
@@ -5323,7 +5391,9 @@ def solve_oa(
         summary["convex_bounding_bound_update_count"] = sum(
             1 for record in convex_bounding_records if bool(record.get("bound_updated"))
         )
-        if final_lb is not None:
+        if has_unresolved:
+            bound_validity = "uncertified"
+        elif final_lb is not None:
             bound_validity = "global"
         elif final_heuristic_lb is not None:
             bound_validity = "heuristic"
@@ -6932,7 +7002,16 @@ def solve_oa(
                     cut_provenance=cut_provenance,
                 )
             else:
-                # NLP infeasible for this integer assignment
+                # NLP returned no feasible point for this integer assignment.
+                # A no-good cut is sound only when the fixed subproblem is
+                # rigorously infeasible; local NLP failures stay unresolved.
+                rigorously_infeasible = _fixed_subproblem_rigorously_infeasible(
+                    evaluator,
+                    decomp.lb,
+                    decomp.ub,
+                    decomp.int_indices,
+                    x_master,
+                )
                 if feasibility_cuts:
                     feasibility_subproblem_count += 1
                     x_feas = _solve_feasibility_subproblem(
@@ -6965,6 +7044,7 @@ def solve_oa(
                 }
                 if (
                     safe_integer_cut_status
+                    and rigorously_infeasible
                     and add_no_good_cuts
                     and (not decomp.general_integer_indices or integer_binary_expansion is not None)
                 ):
@@ -6978,6 +7058,19 @@ def solve_oa(
                         cut_provenance=cut_provenance,
                         integer_binary_expansion=integer_binary_expansion,
                     )
+                elif safe_integer_cut_status and not rigorously_infeasible:
+                    config_key = _int_config_key(x_master, decomp.int_indices)
+                    already_seen = config_key in unresolved_int_configs
+                    unresolved_int_configs.add(config_key)
+                    if already_seen:
+                        logger.info(
+                            "OA: integer configuration %s unresolved by NLP "
+                            "(non-rigorous failure) and re-proposed; stopping without "
+                            "a no-good cut",
+                            config_key,
+                        )
+                        termination_reason = "nonrigorous_nlp_failure"
+                        stop_after_master_pool = True
 
                 # Also add OA cuts at master point
                 _add_oa_cuts(
@@ -7021,6 +7114,9 @@ def solve_oa(
                 gap * 100,
                 len(oa_A_rows),
             )
+
+            if stop_after_master_pool:
+                break
 
             if incumbent_obj is not None:
                 incumbent_progress.append(float(UB))
@@ -7090,8 +7186,17 @@ def solve_oa(
         else:
             final_reason = "iteration_limit"
 
+    # C-35: if any integer configuration was left unresolved by a non-rigorous
+    # NLP failure, the search is incomplete - we deliberately did NOT exclude
+    # those configurations, so neither optimality nor infeasibility is proved.
+    # Downgrade certification; never report a *certified* "infeasible" in this
+    # state (an unresolved configuration might be the feasible/optimal one).
+    has_unresolved = len(unresolved_int_configs) > 0
+    if has_unresolved:
+        reported_gap = None
+
     if incumbent is not None and incumbent_obj is not None:
-        status = "optimal" if _certified_gap_converged() else "feasible"
+        status = "optimal" if _certified_gap_converged() and not has_unresolved else "feasible"
         if termination_reason in {"cycling", "stalling"}:
             status = "feasible"
         return SolveResult(
@@ -7104,7 +7209,24 @@ def solve_oa(
             mip_count=mip_count,
             subnlp_calls=nlp_subproblem_count,
             mip_nlp_trace=_build_mip_nlp_trace(final_reason),
-            gap_certified=bool(reported_gap is not None),
+            gap_certified=bool(reported_gap is not None and not has_unresolved),
+        )
+
+    if has_unresolved:
+        # No feasible incumbent AND unresolved configurations: we cannot certify
+        # infeasibility (a merely-diverged subproblem is not a proof). Report an
+        # uncertified, inconclusive status instead of a false "infeasible".
+        return SolveResult(
+            status="unknown",
+            objective=None,
+            bound=(_obj_sign * bound if bound is not None else None),
+            gap=None,
+            x={},
+            wall_time=wall_time,
+            mip_count=mip_count,
+            subnlp_calls=nlp_subproblem_count,
+            mip_nlp_trace=_build_mip_nlp_trace(final_reason),
+            gap_certified=False,
         )
 
     return SolveResult(

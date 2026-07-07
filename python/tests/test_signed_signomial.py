@@ -43,6 +43,7 @@ def _box(n):
     return jnp.asarray(u_lb), jnp.asarray(u_ub)
 
 
+@pytest.mark.slow
 def test_soundness_cv_below_cc_above():
     """cv(u) <= s(u) <= cc(u) for many random signed signomials and samples."""
     rng = np.random.default_rng(0)
@@ -60,6 +61,7 @@ def test_soundness_cv_below_cc_above():
                 assert float(cc) >= float(s) - 1e-9
 
 
+@pytest.mark.slow
 def test_curvature_cv_convex_cc_concave():
     """Midpoint Jensen check: cv convex, cc concave along random chords."""
     rng = np.random.default_rng(1)

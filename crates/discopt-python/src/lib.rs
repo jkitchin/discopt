@@ -10,6 +10,7 @@ use pyo3::prelude::*;
 
 mod batch;
 mod bnb_bindings;
+mod decomp_bindings;
 mod expr_bindings;
 mod lp_bindings;
 mod nl_bindings;
@@ -35,9 +36,23 @@ fn _rust(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(lp_bindings::recover_basis_py, m)?)?;
     m.add_function(wrap_pyfunction!(lp_bindings::gomory_cuts_py, m)?)?;
     m.add_function(wrap_pyfunction!(lp_bindings::mir_cuts_py, m)?)?;
+    m.add_function(wrap_pyfunction!(lp_bindings::aggregation_mir_cuts_py, m)?)?;
     m.add_function(wrap_pyfunction!(lp_bindings::solve_lp_py, m)?)?;
     m.add_function(wrap_pyfunction!(lp_bindings::solve_lp_warm_py, m)?)?;
+    m.add_function(wrap_pyfunction!(lp_bindings::solve_lp_warm_csc_py, m)?)?;
     m.add_function(wrap_pyfunction!(lp_bindings::solve_lp_batch_py, m)?)?;
     m.add_function(wrap_pyfunction!(lp_bindings::solve_milp_py, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        decomp_bindings::decomp_connected_components,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
+        decomp_bindings::decomp_strongly_connected_components,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
+        decomp_bindings::decomp_articulation_and_bridges,
+        m
+    )?)?;
     Ok(())
 }

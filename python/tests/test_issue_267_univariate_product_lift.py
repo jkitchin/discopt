@@ -265,6 +265,7 @@ def test_inscribedsquare02_constraints_not_dropped(caplog):
     assert not omitted, f"inscribedsquare02 constraints dropped: {omitted}"
 
 
+@pytest.mark.slow
 def test_inscribedsquare02_finite_valid_bound():
     m = _inscribedsquare02_model()
     r = m.solve(time_limit=20, gap_tolerance=1e-4)

@@ -27,10 +27,13 @@ Example::
 from __future__ import annotations
 
 import builtins as _builtins
+import warnings
 from dataclasses import dataclass
+from dataclasses import replace as _dc_replace
 from enum import Enum
 from typing import (
     TYPE_CHECKING,
+    Any,
     Callable,
     Iterator,
     Optional,
@@ -40,6 +43,8 @@ from typing import (
 )
 
 import numpy as np
+
+from discopt.constants import SENTINEL_THRESHOLD as _SENTINEL_THRESHOLD
 
 if TYPE_CHECKING:
     from discopt.modeling.indexed import IndexedParam, IndexedVar
@@ -64,12 +69,25 @@ class VarType(Enum):
     BINARY : str
         Binary variable restricted to ``{0, 1}``.
     INTEGER : str
-        General integer variable (default bounds: ``[0, 1e6]``).
+        General integer variable. A user-supplied ``lb``/``ub`` is honored
+        exactly; an *unspecified* bound falls back to the finite defaults
+        ``[0, 1e6]`` and emits a ``UserWarning`` (see :meth:`Model.integer`),
+        because a silent default box can cut a true optimum that lies below 0
+        or above 1e6 (correctness issue C-6).
     """
 
     CONTINUOUS = "continuous"
     BINARY = "binary"
     INTEGER = "integer"
+
+
+# Finite fallback bounds for a general-integer variable whose lb/ub is left
+# unspecified. B&B requires a bounded integer domain, so we substitute these —
+# but LOUDLY (a UserWarning names the variable and the imposed range) rather
+# than silently truncating the user's problem (correctness issue C-6). A
+# user-provided bound is always honored exactly and never replaced by these.
+_INTEGER_DEFAULT_LB = 0.0
+_INTEGER_DEFAULT_UB = 1e6
 
 
 # ─────────────────────────────────────────────────────────────
@@ -80,6 +98,12 @@ class VarType(Enum):
 #   (1) A Rust-side expression graph for structure detection
 #   (2) A JAX-traceable function for evaluation and autodiff
 # ─────────────────────────────────────────────────────────────
+
+
+# Sentinel for "static shape not yet computed" on a composite node, so a cached
+# ``None`` ("computed, but unknowable") is distinguishable from "never computed"
+# (M8 shape inference). A unique object, never a valid shape.
+_UNSET_SHAPE: Any = object()
 
 
 class Expression:
@@ -109,6 +133,13 @@ class Expression:
     # gufunc, which sees the Expression as a 0-d object and raises
     # ``ValueError: Input operand 1 does not have enough dimensions``.
     __array_ufunc__ = None
+
+    # Cached static shape for composite nodes (populated at construction by
+    # ``BinaryOp``/``UnaryOp`` where inferable; see M8). Class default of the
+    # ``_UNSET_SHAPE`` sentinel means "not computed" so a cached ``None``
+    # ("computed, unknown") is distinguishable. Leaf nodes (Variable/Constant/
+    # Parameter) carry their own ``.shape`` and are handled in ``_known_shape``.
+    _shape: Any = _UNSET_SHAPE
 
     def __add__(self, other):
         return BinaryOp("+", self, _wrap(other))
@@ -157,6 +188,44 @@ class Expression:
     def __eq__(self, other):
         return Constraint(self - _wrap(other), sense="==", rhs=0.0)
 
+    def __ne__(self, other):
+        # ``!=`` is not a valid optimization-constraint operator. Because
+        # ``__eq__`` is overridden to build a Constraint, Python's default
+        # ``__ne__`` would evaluate ``not <truthy Constraint>`` → ``False``
+        # *silently*, mis-encoding the user's intent (correctness issue C-11).
+        # Refuse loudly instead of silently transforming the model (CLAUDE.md §3).
+        raise TypeError(
+            "'!=' is not a valid constraint operator on modeling expressions. "
+            "Use '==', '<=', or '>=' to build a constraint."
+        )
+
+    # ── Hashing / boolean context (M4) ──
+    #
+    # ``__eq__`` is overloaded to *build a Constraint* (the modeling DSL —
+    # ``x == 5`` yields ``x - 5 == 0``), which is intentional and matches
+    # Pyomo/cvxpy. But that overload has two silent, dangerous consequences we
+    # must neutralize:
+    #
+    #   1. Defining ``__eq__`` makes every ``Expression`` subclass unhashable by
+    #      default (Python sets ``__hash__`` to ``None``), so ``{u + v: 1}`` and
+    #      ``expr in some_set`` blow up or misbehave. We restore **identity
+    #      hashing** (``id(self)``) so expressions behave sanely as set/dict keys
+    #      — two syntactically identical expressions are distinct objects, which
+    #      is the only sound choice given value-equality is unavailable.
+    #   2. ``expr in [other]`` / ``if expr:`` route through ``__eq__``/``__bool__``
+    #      and would evaluate the truthiness of the *Constraint* returned by
+    #      ``==``, which is always truthy — so ``u in [v]`` is silently ``True``
+    #      for any expressions. Making membership sound requires the container to
+    #      short-circuit on identity, which Python's ``in`` does *before* calling
+    #      ``__eq__`` only when the objects are identical; for distinct objects it
+    #      still calls ``__eq__``. We therefore also raise in ``Constraint.__bool__``
+    #      (below) so ``if x == 5:`` / ``u in [v]`` fail loudly instead of lying.
+    #
+    # NOTE: identity hashing does NOT change the ``==``-builds-a-Constraint
+    # overload — that remains the modeling API. It only fixes set/dict/`in`
+    # semantics for expressions used as keys.
+    __hash__ = object.__hash__
+
     # ── Indexing for array variables ──
 
     def __getitem__(self, idx):
@@ -172,7 +241,14 @@ class Expression:
 
     def _repr_latex_(self):
         """Jupyter/IPython LaTeX rendering."""
-        return f"${self}$"
+        # Render the expression DAG as real math rather than wrapping the plain
+        # repr in $...$ (which shows broken math in Jupyter) (L8).
+        try:
+            from discopt.modeling.latex import expr_to_latex
+
+            return f"${expr_to_latex(self)}$"
+        except Exception:
+            return f"${self}$"
 
 
 class Constant(Expression):
@@ -259,6 +335,53 @@ class IndexExpression(Expression):
         return f"{self.base}[{self.index}]"
 
 
+def _known_shape(node: "Expression") -> Optional[tuple[int, ...]]:
+    """Best-effort static shape of an expression, or ``None`` when unknown (M8).
+
+    Deliberately *conservative*: it returns a concrete shape only for the nodes
+    whose shape follows unambiguously from numpy broadcast rules — leaves
+    (``Variable``/``Constant``/``Parameter``) and element-wise ``BinaryOp`` /
+    ``UnaryOp`` compositions thereof (whose shape is cached at construction). For
+    every other node (indexing, matmul, reductions, function calls, custom calls,
+    indexed containers, …) it returns ``None`` = "don't know", so the caller must
+    treat ``None`` as "cannot check" and never raise. This guarantees the M8
+    shape guard only ever fires on a *provably* incompatible pair and never
+    rejects a valid model (cert-baseline neutral).
+    """
+    cached = getattr(node, "_shape", _UNSET_SHAPE)
+    if cached is not _UNSET_SHAPE:
+        # ``cached`` is either a concrete shape tuple or ``None`` (computed-unknown).
+        return None if cached is None else tuple(cached)
+    if isinstance(node, Variable):
+        return node.shape
+    if isinstance(node, Constant):
+        return tuple(node.value.shape)
+    if isinstance(node, Parameter):
+        return node.shape
+    return None
+
+
+def _broadcast_shapes(
+    op: str, s_left: tuple[int, ...], s_right: tuple[int, ...]
+) -> tuple[int, ...]:
+    """Numpy broadcast of two *known* shapes, raising a clear error on mismatch.
+
+    Only called when both operand shapes are known (M8). A broadcast failure is a
+    genuine build-time error — the same operation would blow up deep in the JAX
+    NLPEvaluator with an opaque traceback, or (worse) be silently mis-extracted —
+    so raise here with both operand shapes named.
+    """
+    try:
+        return tuple(int(d) for d in np.broadcast_shapes(s_left, s_right))
+    except ValueError:
+        raise ValueError(
+            f"Incompatible operand shapes for '{op}': {s_left} and {s_right} do "
+            f"not broadcast (numpy broadcasting rules). Check the shapes of the "
+            f"two operands — a shaped variable/parameter must broadcast against "
+            f"the other side of the operation."
+        ) from None
+
+
 class BinaryOp(Expression):
     """Binary operation: a op b."""
 
@@ -266,6 +389,16 @@ class BinaryOp(Expression):
         self.op = op
         self.left = left
         self.right = right
+        # Static shape inference + build-time shape check (M8). When BOTH operand
+        # shapes are statically known, verify they broadcast and cache the result
+        # so compositions stay O(1). If either is unknown, the shape is unknown
+        # (``None``) and we do not check — conservative, never a false rejection.
+        s_left = _known_shape(left)
+        s_right = _known_shape(right)
+        if s_left is not None and s_right is not None:
+            self._shape = _broadcast_shapes(op, s_left, s_right)
+        else:
+            self._shape = None
 
     def __repr__(self):
         return f"({self.left} {self.op} {self.right})"
@@ -277,6 +410,9 @@ class UnaryOp(Expression):
     def __init__(self, op: str, operand: Expression):
         self.op = op
         self.operand = operand
+        # ``neg``/``abs`` are element-wise and shape-preserving: propagate the
+        # operand's known shape so it flows into a subsequent BinaryOp check (M8).
+        self._shape = _known_shape(operand)
 
     def __repr__(self):
         return f"{self.op}({self.operand})"
@@ -729,6 +865,70 @@ def _find_owning_model(*exprs: Expression) -> Optional["Model"]:
     return None
 
 
+def _iter_model_leaves(*exprs: Expression):
+    """Yield every ``Variable`` / ``Parameter`` leaf reachable from *exprs*.
+
+    Walks the expression DAG(s) and surfaces the model-owning leaf nodes
+    (``Variable`` and ``Parameter``, both of which carry a ``.model`` back-
+    reference). ``Constant`` leaves — scalars, numpy arrays, broadcasts — carry
+    no model and are simply not yielded, so an ownership check built on this
+    walker never trips on legitimate constants. Used by the cross-model
+    ownership guard (finding M3) to detect a variable/parameter that belongs to
+    a different :class:`Model` than the one it is being solved in.
+    """
+    stack = list(exprs)
+    while stack:
+        node = stack.pop()
+        if isinstance(node, (Variable, Parameter)):
+            yield node
+        elif isinstance(node, IndexExpression):
+            stack.append(node.base)
+        elif isinstance(node, BinaryOp):
+            stack.extend((node.left, node.right))
+        elif isinstance(node, UnaryOp):
+            stack.append(node.operand)
+        elif isinstance(node, FunctionCall):
+            stack.extend(node.args)
+        elif isinstance(node, CustomCall):
+            stack.extend(node.args)
+        elif isinstance(node, MatMulExpression):
+            stack.extend((node.left, node.right))
+        elif isinstance(node, SumExpression):
+            stack.append(node.operand)
+        elif isinstance(node, SumOverExpression):
+            stack.extend(node.terms)
+        # Constant (and anything without children) contributes no owning leaf.
+
+
+def _logical_backing_vars(expr) -> list:
+    """Collect the backing ``Variable`` objects under a ``LogicalExpression`` tree.
+
+    ``BooleanVar`` wraps a binary ``Variable`` (``.variable``); the composite
+    logical nodes (``LogicalAnd``/``LogicalOr``/…) hold child logical
+    expressions. Returns the flat list of backing variables so the ownership
+    guard can check them too.
+    """
+    out: list = []
+    stack = [expr]
+    while stack:
+        node = stack.pop()
+        if isinstance(node, BooleanVar):
+            if isinstance(node.variable, Variable):
+                out.append(node.variable)
+            else:
+                # Indexed BooleanVar wraps an IndexExpression over a Variable.
+                out.extend(_iter_model_leaves(node.variable))
+        elif isinstance(node, (LogicalAnd, LogicalOr, LogicalEquivalent)):
+            stack.extend((node.left, node.right))
+        elif isinstance(node, LogicalNot):
+            stack.append(node.operand)
+        elif isinstance(node, LogicalImplies):
+            stack.extend((node.antecedent, node.consequent))
+        elif isinstance(node, (LogicalAtLeast, LogicalAtMost, LogicalExactly)):
+            stack.extend(node.operands)
+    return out
+
+
 def if_else(
     condition: "Constraint",
     then_value: Union[Expression, float],
@@ -981,7 +1181,7 @@ class ConstraintSense(Enum):
     EQ = "=="
 
 
-@dataclass
+@dataclass(eq=False)
 class Constraint:
     """
     A single constraint in the model.
@@ -1017,6 +1217,22 @@ class Constraint:
 
     def __repr__(self):
         return f"{self.body} {self.sense} {self.rhs}"
+
+    def __bool__(self):
+        # A Constraint has no boolean value. Because ``Expression.__eq__`` builds
+        # a Constraint (the modeling DSL), ``if x == 5:``, ``u in [v]`` (which
+        # truth-tests ``u == v``), and ``assert expr == other`` would otherwise
+        # silently evaluate this object as truthy — a footgun that masks logic
+        # errors (M4). Refuse loudly instead (the cvxpy approach). Use
+        # ``m.subject_to(...)`` to add the constraint to the model, or compare the
+        # constraint's ``.body``/``.sense``/``.rhs`` fields to test structure.
+        raise TypeError(
+            "A Constraint has no truth value. '==', '<=', '>=' on modeling "
+            "expressions build a Constraint (they do not compare values), so "
+            "using one in a boolean context (if/while/assert, 'in', bool()) is "
+            "almost always a mistake. Add it with m.subject_to(...); to test an "
+            "expression's identity use 'is' or a set/dict keyed by the object."
+        )
 
 
 @dataclass
@@ -1125,6 +1341,17 @@ class SolveResult:
         Time spent in JAX (NLP evaluations, autodiff).
     python_time : float
         Time spent in Python orchestration.
+    root_bound : float or None
+        Strongest rigorous dual bound proved at the root box, in the reported
+        objective sense. None if no root relaxation was built.
+    root_gap : float or None
+        Relative gap of ``root_bound`` against the final incumbent
+        (``|objective - root_bound| / max(1, |objective|)``). None when either
+        the root bound or the incumbent is unavailable.
+    root_time : float or None
+        Wall-clock seconds elapsed when the root node was fathomed/branched.
+    solver_stats : dict of str to float, or None
+        Per-family reduction/separation timers (cumulative seconds), or None.
     convex_fast_path : bool
         True if the problem was detected as convex and solved with a
         single NLP call (no Branch & Bound), guaranteeing global optimality.
@@ -1151,6 +1378,27 @@ class SolveResult:
     rust_time: float = 0.0
     jax_time: float = 0.0
     python_time: float = 0.0
+
+    # Root-node certification instrumentation (Phase 0 / cert:T0.1). These
+    # describe the state of the search at the moment the root node is fathomed
+    # or branched — the point that governs whether the solver certifies at the
+    # root (like BARON) or opens a tree. ``root_bound`` is the strongest
+    # rigorous dual bound proved at the root box, in the *reported* objective
+    # sense (already negated for MAXIMIZE, mirroring ``bound``). ``root_gap`` is
+    # the relative gap ``|objective - root_bound| / max(1, |objective|)`` of
+    # that bound against the final incumbent, using the same floored abs/rel
+    # convention as ``gap``. ``root_time`` is the wall-clock seconds elapsed
+    # from the whole-solve clock to that moment. All three are ``None`` when
+    # the path never builds a root relaxation (e.g. an early infeasibility exit).
+    root_bound: Optional[float] = None
+    root_gap: Optional[float] = None
+    root_time: Optional[float] = None
+
+    # Per-family reduction/separation timers (cert:T0.3). A flat dict of
+    # phase-name -> cumulative seconds across the solve, e.g.
+    # ``{"reduce/fbbt": .., "reduce/obbt": .., "separate/psd": .., ...}``. Pure
+    # instrumentation (never affects solver math); None when nothing was timed.
+    solver_stats: Optional[dict[str, float]] = None
 
     # KKT duals at the returned point, when the underlying solver exposes them.
     # ``constraint_duals`` is keyed by Constraint.name; entries with a vector
@@ -1195,6 +1443,30 @@ class SolveResult:
     _sensitivity: Optional[np.ndarray] = None
 
     def __post_init__(self) -> None:
+        # A2 (correctness/API): the failure/no-relaxation sentinel must never
+        # escape through the public bound/gap surface. Internally the solver
+        # stores ``INFEASIBILITY_SENTINEL`` (``1e30``) as the "lower bound" of a
+        # node whose relaxation failed or was declared infeasible, and on the
+        # no-relaxation class (a model whose relaxation omits rows, so no dual
+        # bound is ever produced) the tree's ``global_lower_bound`` stays at that
+        # sentinel. It is *finite* (``np.isfinite(1e30)`` is True), so the
+        # existing non-finite guard below does not catch it, and a raw
+        # result-assembly path would surface ``bound=1e30`` — and a ``gap``
+        # computed from it — as if it were a real dual bound. Map any
+        # sentinel-magnitude bound (either sense, so ``-1e30`` from a MAXIMIZE
+        # negation too) to ``None`` at this single chokepoint that every
+        # ``SolveResult`` construction passes through, so no public consumer
+        # (``.bound``/``.gap``, the callback, commentary, the dashboard, the
+        # benchmark JSON) ever does arithmetic on it. This is a
+        # representation/reporting normalisation only — the internal sentinel is
+        # unchanged. ``root_bound``/``root_gap`` get the same treatment.
+        if self.bound is not None and abs(self.bound) >= _SENTINEL_THRESHOLD:
+            self.bound = None
+            self.gap = None
+        if self.root_bound is not None and abs(self.root_bound) >= _SENTINEL_THRESHOLD:
+            self.root_bound = None
+            self.root_gap = None
+
         # Soundness guard: a *certified* optimality gap requires a finite dual
         # bound. A non-finite bound (``±inf``) or an absent bound (``None``)
         # certifies nothing about optimality — e.g. a ``time_limit`` termination
@@ -1393,8 +1665,21 @@ class Model:
         self.name = name
         self._variables: list[Variable] = []
         self._parameters: list[Parameter] = []
+        # Persistent set of declared variable/parameter names for O(1)
+        # uniqueness checks (M7). Rebuilding ``{v.name ...} | {p.name ...}`` on
+        # every declaration made model construction O(n²); this set is updated
+        # incrementally at each registration site instead. Must stay in sync
+        # with ``_variables``/``_parameters`` — every append to those lists that
+        # introduces a name also adds it here.
+        self._names: set[str] = set()
         self._constraints: list[Constraint] = []
         self._objective: Optional[Objective] = None
+        # R4: names of lifted product-factor auxes whose interval spans 0, set by
+        # the factorable reform under ``DISCOPT_LIFT_ZERO_SPANNING_FACTORS`` so the
+        # solver keeps them as spatial-branching candidates (see
+        # ``factorable_reform._lift_zero_spanning_factors_enabled``). Empty by
+        # default, so it never changes behaviour with the flag off.
+        self._zero_spanning_factor_auxes: set[str] = set()
         self._builder = None  # Optional PyModelBuilder, lazy-initialized
         self._aux_counter = 0  # monotonic suffix for if_else auxiliary names
         # Complementarity conditions added via ``complementarity()``; recorded
@@ -1508,9 +1793,20 @@ class Model:
 
     # ── Variable constructors ──
 
+    def _rebuild_name_index(self) -> None:
+        """Recompute the persistent ``_names`` cache from the current lists (M7).
+
+        Call after any bulk reassignment of ``_variables``/``_parameters`` that
+        bypasses the registration sites (e.g. the reformulation passes that build
+        a new ``Model`` with ``new_model._variables = list(model._variables)``),
+        so a later ``_check_name`` on that model stays correct.
+        """
+        self._names = {v.name for v in self._variables} | {p.name for p in self._parameters}
+
     def _register_variable(self, var: "Variable") -> "Variable":
         """Append a variable and register it with the Rust builder if active."""
         self._variables.append(var)
+        self._names.add(var.name)  # keep the O(1) name set in sync (M7)
         if self._builder is not None:
             var._builder_idx = self._builder.add_variable(
                 var.name,
@@ -1669,8 +1965,8 @@ class Model:
         self,
         name: str,
         shape: Union[int, tuple[int, ...]] = ...,
-        lb: Union[float, np.ndarray] = ...,
-        ub: Union[float, np.ndarray] = ...,
+        lb: Optional[Union[float, np.ndarray]] = ...,
+        ub: Optional[Union[float, np.ndarray]] = ...,
         over: None = ...,
     ) -> Variable: ...
 
@@ -1679,8 +1975,8 @@ class Model:
         self,
         name: str,
         shape: Union[int, tuple[int, ...]] = ...,
-        lb: Union[float, np.ndarray] = ...,
-        ub: Union[float, np.ndarray] = ...,
+        lb: Optional[Union[float, np.ndarray]] = ...,
+        ub: Optional[Union[float, np.ndarray]] = ...,
         *,
         over: "_SetBase",
     ) -> "IndexedVar": ...
@@ -1689,8 +1985,8 @@ class Model:
         self,
         name: str,
         shape: Union[int, tuple[int, ...]] = (),
-        lb: Union[float, np.ndarray] = 0,
-        ub: Union[float, np.ndarray] = 1e6,
+        lb: Optional[Union[float, np.ndarray]] = None,
+        ub: Optional[Union[float, np.ndarray]] = None,
         over=None,
     ) -> Union[Variable, "IndexedVar"]:
         """
@@ -1702,15 +1998,30 @@ class Model:
             Variable name (must be unique in the model).
         shape : int or tuple of int, default ()
             Scalar ``()`` or tuple for array variables.
-        lb : float or numpy.ndarray, default 0
-            Lower bound.
-        ub : float or numpy.ndarray, default 1e6
-            Upper bound.
+        lb : float or numpy.ndarray, optional
+            Lower bound. Honored **exactly** when supplied. When omitted, the
+            finite fallback ``0`` is used and a ``UserWarning`` is emitted (see
+            below).
+        ub : float or numpy.ndarray, optional
+            Upper bound. Honored **exactly** when supplied. When omitted, the
+            finite fallback ``1e6`` is used and a ``UserWarning`` is emitted.
 
         Returns
         -------
         Variable
             Integer-valued variable.
+
+        Notes
+        -----
+        Branch-and-bound needs a bounded integer domain, so an *unspecified*
+        ``lb``/``ub`` falls back to ``[0, 1e6]``. Previously this substitution
+        was silent, so a model whose true optimum needed a negative integer or
+        one above ``1e6`` was quietly truncated and the wrong optimum reported
+        as certified (correctness issue C-6). The fallback is now applied
+        **loudly** — a ``UserWarning`` names the variable and the imposed
+        range — and it **never** overrides a bound you provide. Pass explicit
+        ``lb``/``ub`` (e.g. ``lb=-5, ub=10``) to silence the warning and to
+        solve the problem you actually mean.
 
         Examples
         --------
@@ -1718,14 +2029,48 @@ class Model:
         >>> batch = m.integer("batch", shape=(3,), lb=1, ub=100)
         >>> n = m.integer("n", over=plants, lb=0, ub=10)  # indexed integer
         """
+        lb, ub = self._resolve_integer_defaults(name, lb, ub)
         if over is not None:
             _require_no_shape(shape, "integer")
-            return self._make_indexed_var(name, VarType.INTEGER, over, lb, ub, 0.0, 1e6)
+            return self._make_indexed_var(
+                name, VarType.INTEGER, over, lb, ub, _INTEGER_DEFAULT_LB, _INTEGER_DEFAULT_UB
+            )
         if isinstance(shape, int):
             shape = (shape,)
         self._check_name(name)
         var = Variable(name, VarType.INTEGER, shape, lb, ub, self)
         return self._register_variable(var)
+
+    @staticmethod
+    def _resolve_integer_defaults(name, lb, ub):
+        """Substitute finite fallback integer bounds for unspecified sides, loudly.
+
+        Returns the (possibly-substituted) ``(lb, ub)``. A ``None`` side is
+        replaced with the finite fallback (``0`` / ``1e6``) and recorded so a
+        single ``UserWarning`` can name exactly which side(s) discopt had to
+        default. A user-provided bound is passed through unchanged and never
+        warns (correctness issue C-6).
+        """
+        defaulted: list[str] = []
+        if lb is None:
+            lb = _INTEGER_DEFAULT_LB
+            defaulted.append(f"lb={_INTEGER_DEFAULT_LB:g}")
+        if ub is None:
+            ub = _INTEGER_DEFAULT_UB
+            defaulted.append(f"ub={_INTEGER_DEFAULT_UB:g}")
+        if defaulted:
+            warnings.warn(
+                f"integer variable '{name}': no explicit "
+                f"{' and '.join(defaulted)} supplied; discopt is imposing the "
+                f"finite default integer bound(s) so branch-and-bound has a "
+                f"bounded domain. This default box silently cuts any optimum "
+                f"below {_INTEGER_DEFAULT_LB:g} or above {_INTEGER_DEFAULT_UB:g}. "
+                f"Pass explicit lb/ub to solve the intended problem and silence "
+                f"this warning.",
+                UserWarning,
+                stacklevel=3,
+            )
+        return lb, ub
 
     def _make_indexed_param(self, name, index_set, value) -> "IndexedParam":
         """Build an :class:`IndexedParam` backed by one flat parameter over *index_set*."""
@@ -1735,6 +2080,7 @@ class Model:
         self._check_name(name)
         flat = Parameter(name, arr, self)
         self._parameters.append(flat)
+        self._names.add(name)  # keep the O(1) name set in sync (M7)
         return IndexedParam(flat, index_set)
 
     @overload
@@ -1784,6 +2130,7 @@ class Model:
         self._check_name(name)
         param = Parameter(name, value, self)
         self._parameters.append(param)
+        self._names.add(name)  # keep the O(1) name set in sync (M7)
         return param
 
     # ── Objective ──
@@ -1819,6 +2166,39 @@ class Model:
         """
         self._objective = Objective(_wrap(expr), ObjectiveSense.MAXIMIZE)
 
+    def implicit(
+        self,
+        residual: Callable,
+        u_inputs: Sequence,
+        n_unknowns: int,
+        x0=None,
+        *,
+        tol: float = 1e-10,
+        max_iter: int = 50,
+        name: str = "implicit",
+    ) -> Expression:
+        """Define a vector ``v`` implicitly by ``residual(u, v) = 0`` (issue #379).
+
+        ``v`` (length ``n_unknowns``) is compiled to a differentiable JAX inner
+        solve (Newton forward, implicit-function-theorem derivatives), returned
+        as an expression node you index (``v[i]``) and use like any other. It
+        rides on :func:`custom`, so a model containing it is solved on the
+        **local NLP path only** (no global certificate) and integers are
+        rejected. ``u_inputs`` are the model expressions the block depends on
+        (the DAG edges into the solve); they are required, not inferred.
+
+        See :func:`discopt.modeling.implicit` for parameter details.
+
+        Examples
+        --------
+        >>> u = m.continuous("u", lb=0.1, ub=100.0)
+        >>> v = m.implicit(lambda U, V: [V[0] ** 2 - U[0]], [u], n_unknowns=1)
+        >>> m.minimize((v[0] - 3.0) ** 2)   # v = sqrt(u); optimum at u = 9
+        """
+        from discopt.modeling.implicit import implicit as _implicit
+
+        return _implicit(residual, u_inputs, n_unknowns, x0, tol=tol, max_iter=max_iter, name=name)
+
     # ── Constraints ──
 
     def subject_to(
@@ -1847,8 +2227,30 @@ class Model:
         ...              name="adjacent_limits")
         """
         if isinstance(constraint, Constraint):
-            constraint.name = name
-            self._constraints.append(constraint)
+            # M5: never let ``subject_to`` corrupt an earlier row or clobber a
+            # name the caller set. The corruption case is *re-adding the same
+            # object* (or one already carrying a different name): stamping
+            # ``constraint.name`` in place would rename the earlier model row and
+            # overwrite the caller's own name. In those cases store an
+            # independent copy so each row is self-contained. For the common case
+            # — a fresh, unnamed constraint added once — stamp the name in place
+            # so the object the caller holds *is* the object in the model
+            # (identity that ``mark_coupling`` and other object-keyed APIs rely
+            # on). ``_dc_replace`` is only paid when it is actually needed.
+            already_added = getattr(constraint, "_added_to", None) is not None
+            has_own_name = constraint.name is not None and constraint.name != name
+            if already_added or has_own_name:
+                # Re-add of an already-placed object, or one the caller already
+                # named: copy so we never rename the earlier row nor clobber the
+                # caller's name. O(1) — no scan of ``_constraints``.
+                self._constraints.append(_dc_replace(constraint, name=name))
+            else:
+                # First placement of a fresh, unnamed constraint: stamp in place
+                # (preserving object identity for object-keyed APIs) and record
+                # that it now belongs to a model so a later re-add copies instead.
+                constraint.name = name
+                constraint._added_to = id(self)
+                self._constraints.append(constraint)
             return
         if isinstance(constraint, bool):
             raise TypeError(
@@ -1869,8 +2271,8 @@ class Model:
                     f"Expected Constraint (from <=, >=, == on expressions), "
                     f"got {type(c)} at position {k}."
                 )
-            c.name = f"{name}_{k}" if name else None
-            self._constraints.append(c)
+            # Copy-on-name here too (M5): never mutate the caller's list elements.
+            self._constraints.append(_dc_replace(c, name=f"{name}_{k}" if name else None))
 
     def constraint(self, index_set, rule, name: Optional[str] = None, fast: bool = True):
         """Add a family of constraints indexed by a named set.
@@ -2070,6 +2472,18 @@ class Model:
             if cname:
                 self._coupling_keys.add(cname)
         return self
+
+    def analyze_decomposition(self):
+        """Analyze this model's decomposition structure (does not solve or modify).
+
+        Returns a
+        :class:`~discopt.decomposition.advisor.DecompositionAdvisor` exposing the
+        structure report, discovered decomposition candidates, block partition,
+        and graph views/exports. See ``docs/design/decomposition-advisor.md``.
+        """
+        from discopt.decomposition import analyze_decomposition
+
+        return analyze_decomposition(self)
 
     # ── Fast construction API (direct arena building) ──
 
@@ -2744,6 +3158,7 @@ class Model:
         validate: bool = False,
         gauss_newton: bool = False,
         tuning: Optional["SolverTuning"] = None,
+        debug: Any = None,
         **kwargs,
     ) -> Union[SolveResult, Iterator["SolveUpdate"]]:
         r"""
@@ -2907,6 +3322,18 @@ class Model:
             step (iteration path) without changing the KKT point converged to.
             Silently falls back to the exact dense Hessian when the objective
             is not a recognized sum of squares (or the model maximizes).
+        debug : bool, str, or DebugSession, optional
+            Attach the interactive branch-and-bound debugger (a "pdb for B&B").
+            ``True`` / ``"repl"`` drops into a human REPL at the first
+            checkpoint; ``"on-error"`` enters only at termination when the
+            outcome is not a certified optimum (limit hit, interrupted,
+            "unknown", or certified infeasible) — not supported on the
+            pure-Rust MILP fast-path, whose hook carries no final status; a
+            ready-made :class:`discopt.debug.DebugSession` uses a custom
+            frontend. ``None`` (default) leaves the solve untouched —
+            fire-sites short-circuit on a module-global check, so a detached
+            solve is bound-neutral. Currently instruments the spatial-McCormick
+            B&B path (nonconvex MINLP / continuous). See :mod:`discopt.debug`.
         \*\*kwargs
             Additional keyword arguments passed to the solver backend.
 
@@ -2923,6 +3350,32 @@ class Model:
             If *initial_solution* contains non-Variable keys.
         """
         self.validate()
+
+        # Reject misspelled / unknown solve() keyword arguments loudly (M6).
+        # ``**kwargs`` is forwarded verbatim to ``solve_model`` and its backends,
+        # which historically only *warned* (or silently swallowed) unknown keys —
+        # so ``m.solve(gap_tolerence=1e-3)`` ran at the DEFAULT gap while the user
+        # believed they had tightened it (a results-integrity hazard). Validate
+        # against the union of solve_model's parameters and the curated
+        # backend-passthrough set; an unknown key raises TypeError with a
+        # near-match suggestion (CLAUDE.md §3: loud refusal over silent swallow).
+        if kwargs:
+            from discopt.solver import solve_model_accepted_kwargs
+
+            allowed = solve_model_accepted_kwargs()
+            unknown = [k for k in kwargs if k not in allowed]
+            if unknown:
+                import difflib
+
+                bad = unknown[0]
+                close = difflib.get_close_matches(bad, sorted(allowed), n=1, cutoff=0.6)
+                hint = f" Did you mean '{close[0]}'?" if close else ""
+                raise TypeError(
+                    f"solve() got an unexpected keyword argument '{bad}'.{hint} "
+                    f"Unknown solver options are rejected rather than silently "
+                    f"ignored (a swallowed option would leave the solver at its "
+                    f"default while you believe it was set)."
+                )
 
         # Opt-in Gauss-Newton objective Hessian (issue #98). Read by
         # ``solver._make_evaluator`` when (re)building the NLPEvaluator; toggling
@@ -2957,29 +3410,43 @@ class Model:
         from discopt._jax.deadline import deadline_scope
         from discopt.solver import solve_model
 
+        # Attach the interactive B&B debugger if requested. The fire-sites in
+        # the solve loop short-circuit on a module-global ``None`` check, so a
+        # detached solve (``debug=None``) is unaffected. ``debug`` may be True,
+        # "repl", "on-error", or a ready-made ``DebugSession``.
+        _debug_guard = None
+        if debug is not None and debug is not False:
+            from discopt import debug as _dbg
+
+            _debug_guard = _dbg.attach(_dbg.make_session(debug))
+
         # Install a process-global wall-clock deadline that JAX-compiled
         # while_loops (LP/QP/NLP IPM) can poll via host callback so they
         # self-terminate within ``time_limit + ε`` instead of running to
         # XLA convergence after Python's budget is gone (issue #80).
-        with deadline_scope(time_limit):
-            result = solve_model(
-                self,
-                time_limit=time_limit,
-                gap_tolerance=gap_tolerance,
-                threads=threads,
-                deterministic=deterministic,
-                partitions=partitions,
-                branching_policy=branching_policy,
-                initial_point=_x0_flat,
-                skip_convex_check=skip_convex_check,
-                nlp_bb=nlp_bb,
-                lazy_constraints=lazy_constraints,
-                incumbent_callback=incumbent_callback,
-                node_callback=node_callback,
-                solver=solver,
-                tuning=tuning,
-                **kwargs,
-            )
+        try:
+            with deadline_scope(time_limit):
+                result = solve_model(
+                    self,
+                    time_limit=time_limit,
+                    gap_tolerance=gap_tolerance,
+                    threads=threads,
+                    deterministic=deterministic,
+                    partitions=partitions,
+                    branching_policy=branching_policy,
+                    initial_point=_x0_flat,
+                    skip_convex_check=skip_convex_check,
+                    nlp_bb=nlp_bb,
+                    lazy_constraints=lazy_constraints,
+                    incumbent_callback=incumbent_callback,
+                    node_callback=node_callback,
+                    solver=solver,
+                    tuning=tuning,
+                    **kwargs,
+                )
+        finally:
+            if _debug_guard is not None:
+                _debug_guard.__exit__(None, None, None)
 
         # Attach model reference and auto-generate LLM explanation
         result._model = self
@@ -3024,6 +3491,94 @@ class Model:
 
     # ── Validation ──
 
+    def _iter_owned_leaves(self):
+        """Yield every ``Variable``/``Parameter`` leaf referenced by this model.
+
+        Walks the objective expression and every constraint body (including the
+        indicator/disjunctive/SOS/logical constraint families) so the ownership
+        guard (M3) sees the same leaves the solver will eventually lower to the
+        flat Rust variable vector.
+        """
+        if self._objective is not None:
+            yield from _iter_model_leaves(self._objective.expression)
+
+        def _from_constraint(c):
+            if isinstance(c, Constraint):
+                yield from _iter_model_leaves(c.body)
+            elif isinstance(c, _IndicatorConstraint):
+                yield from _iter_model_leaves(c.indicator)
+                yield from _from_constraint(c.constraint)
+            elif isinstance(c, _DisjunctiveConstraint):
+                for disjunct in c.disjuncts:
+                    for sub in disjunct:
+                        yield from _from_constraint(sub)
+            elif isinstance(c, _SOSConstraint):
+                yield from _iter_model_leaves(*c.variables)
+            elif isinstance(c, _LogicalConstraint):
+                yield from _iter_model_leaves(*_logical_backing_vars(c.expression))
+            elif hasattr(c, "body"):
+                # Unknown arithmetic-bodied constraint type: still walk its body.
+                yield from _iter_model_leaves(c.body)
+
+        for c in self._constraints:
+            yield from _from_constraint(c)
+
+    def _check_ownership(self):
+        """Reject expressions that reference a variable/parameter of another model.
+
+        A :class:`Variable` carries a flat ``_index`` into *its own* model's
+        variable vector. When the solver lowers this model it addresses each
+        leaf by that flat index, so the precise soundness invariant is:
+
+            ``self._variables[leaf._index] is leaf``
+
+        i.e. the leaf's flat index must address *that very object* in the model
+        being solved. A leaf from a foreign model has an index that addresses a
+        **different** object (or is out of range) → it would silently **alias by
+        flat index** onto this model's same-index variable, a wrong answer rather
+        than an error (review finding M3). Raise loudly instead (CLAUDE.md §3).
+
+        This index-slot identity is deliberately *not* an ``owner is self`` test:
+        legitimate model rebuilds (e.g. ``reformulate_gdp``) construct a new
+        ``Model`` that **shares** the original ``Variable`` objects in the same
+        order — index-compatible, so those must pass — while adding new aux
+        variables of their own. The identity check accepts both and rejects only
+        a genuinely foreign, index-incompatible leaf. One O(DAG) walk per solve.
+        """
+        # Object-identity membership sets for O(1) lookup. For variables, index
+        # equality is the real invariant; the identity set is the fast primary
+        # check, with the index-slot check as the precise diagnostic.
+        var_ids = {id(v) for v in self._variables}
+        param_ids = {id(p) for p in self._parameters}
+        n_vars = len(self._variables)
+        for leaf in self._iter_owned_leaves():
+            if isinstance(leaf, Parameter):
+                if id(leaf) in param_ids:
+                    continue
+            else:  # Variable
+                if id(leaf) in var_ids:
+                    continue
+                idx = getattr(leaf, "_index", None)
+                # An index that happens to address this very object is also fine
+                # (shared-object rebuilds), but that is already covered by the id
+                # set above; reaching here means the object is not in this model.
+                if idx is not None and 0 <= idx < n_vars and self._variables[idx] is leaf:
+                    continue
+            # Foreign leaf: index-incompatible with the model being solved.
+            owner = getattr(leaf, "model", None)
+            kind = "parameter" if isinstance(leaf, Parameter) else "variable"
+            own_name = getattr(owner, "name", None) or "<unknown>"
+            self_name = getattr(self, "name", None) or "<unnamed>"
+            raise ValueError(
+                f"Cross-model reference: {kind} '{leaf.name}' belongs to a "
+                f"different model ('{own_name}'), not to model '{self_name}' being "
+                f"solved. Variables/parameters carry a flat index local to their "
+                f"own model, so mixing them across models would silently alias by "
+                f"index and produce a wrong answer. Rebuild the offending "
+                f"expression using only variables/parameters declared on model "
+                f"'{self_name}'."
+            )
+
     def validate(self):
         """
         Validate model consistency.
@@ -3032,7 +3587,9 @@ class Model:
         ------
         ValueError
             If the objective is not set, variable names are not unique,
-            or variable bounds are inconsistent (lb > ub).
+            variable bounds are inconsistent (lb > ub), or any objective/
+            constraint references a variable/parameter owned by a *different*
+            model (which would silently alias by flat index — finding M3).
         """
         if self._objective is None:
             raise ValueError("No objective set. Call m.minimize() or m.maximize().")
@@ -3044,6 +3601,31 @@ class Model:
             names.add(var.name)
             if np.any(var.lb > var.ub):
                 raise ValueError(f"Variable '{var.name}' has lb > ub at some index")
+
+        # Duplicate constraint names are a results-integrity hazard (M5):
+        # ``SolveResult.constraint_duals`` is keyed by constraint name, so two
+        # rows sharing a name collide there. WARN (do not reject): indexed/array
+        # constraint families legitimately reuse a base name (e.g. a GAMS
+        # ``supply(i)`` equation loads as several ``supply`` rows), so a hard
+        # error would break valid models. The real fix — disambiguating
+        # ``constraint_duals`` for same-named indexed rows — is tracked as a
+        # follow-up (#413, M5). Unnamed constraints (``name is None``) are exempt.
+        con_names: set = set()
+        for c in self._constraints:
+            cname = getattr(c, "name", None)
+            if cname is None:
+                continue
+            if cname in con_names:
+                warnings.warn(
+                    f"Duplicate constraint name: '{cname}'. result.constraint_duals "
+                    "is keyed by name, so rows sharing a name collide there "
+                    "(expected for indexed/array constraint families). Give distinct "
+                    "names if you need per-row duals. (M5, #413)",
+                    stacklevel=2,
+                )
+            con_names.add(cname)
+
+        self._check_ownership()
 
     # ── Model statistics ──
 
@@ -3061,9 +3643,40 @@ class Model:
             v.size for v in self._variables if v.var_type in (VarType.INTEGER, VarType.BINARY)
         )
 
+    def _has_builder_only_rows(self) -> bool:
+        """True if the model carries linear rows/objective living only in the builder.
+
+        The fast-construction API (``add_linear_constraints`` / the
+        ``Model.constraint`` linear fast path) and ``add_linear_objective`` /
+        ``add_quadratic_objective`` emit rows/objective directly into the Rust
+        builder; they are **not** mirrored in ``self._constraints`` /
+        ``self._objective``. Consumers that read only those Python-side collections
+        (classifiers, extractors, exporters, the validation examiner) must consult
+        this predicate — a ``True`` return means they would otherwise see a strict
+        subset of the model. See ``docs/dev/review-execution-plan.md`` §1 (X-1).
+        """
+        from discopt.export._common import has_builder_only_rows
+
+        return has_builder_only_rows(self)
+
+    def _num_builder_constraint_rows(self) -> int:
+        """Count the scalar constraint rows that live only in the Rust builder."""
+        blocks = getattr(self, "_builder_linear_blocks", None)
+        if not blocks:
+            return 0
+        return int(builtins_sum(int(A.shape[0]) for A, *_ in blocks))
+
     @property
     def num_constraints(self) -> int:
-        return len(self._constraints)
+        """Total scalar constraint rows, including fast-API / builder-resident rows.
+
+        Counts both expression-path rows in ``self._constraints`` and the
+        builder-resident linear rows emitted by ``add_linear_constraints`` / the
+        ``Model.constraint`` linear fast path (X-1). Before this fix the fast-path
+        rows were invisible, so a model built entirely through the fast API reported
+        ``0`` constraints.
+        """
+        return len(self._constraints) + self._num_builder_constraint_rows()
 
     def summary(self) -> str:
         """
@@ -3178,9 +3791,14 @@ class Model:
         return to_nl(self, path)
 
     def _check_name(self, name: str):
-        """Ensure variable/parameter name is unique."""
-        existing = {v.name for v in self._variables} | {p.name for p in self._parameters}
-        if name in existing:
+        """Ensure variable/parameter name is unique.
+
+        Consults the persistent ``self._names`` set (kept in sync at every
+        registration site) for an O(1) check instead of rebuilding the full name
+        set from ``_variables``/``_parameters`` on every declaration (M7 — that
+        rebuild was O(n) per call, O(n²) over a model build).
+        """
+        if name in self._names:
             raise ValueError(f"Name '{name}' already used in model")
 
 
@@ -3387,7 +4005,7 @@ def exactly(k: int, *args: LogicalExpression) -> LogicalExactly:
 class Disjunct:
     """A named block of constraints activated by a boolean indicator.
 
-    Created via :meth:`Model.disjunct`, not directly.
+    Created via :meth:`Model.make_disjunct`, not directly.
 
     Parameters
     ----------
@@ -3482,10 +4100,12 @@ class SolveUpdate:
 
 def from_pyomo(pyomo_model) -> Model:
     """
-    Import a Pyomo ConcreteModel as a discopt Model.
+    Import a Pyomo ``ConcreteModel`` as a discopt :class:`Model`.
 
-    Supports Var, Constraint, Objective, Param, Set.
-    GDP (Disjunct/Disjunction) is mapped to :meth:`Model.either_or`.
+    The bridge round-trips the Pyomo model through a temporary AMPL ``.nl`` file
+    (the same translation the ``SolverFactory('discopt')`` plugin uses) and reads
+    it back with :func:`from_nl`. Continuous, integer and binary variables,
+    linear/nonlinear constraints, and the objective are supported.
 
     Parameters
     ----------
@@ -3495,13 +4115,50 @@ def from_pyomo(pyomo_model) -> Model:
     Returns
     -------
     Model
+        A discopt ``Model`` ready to ``.solve()``. Its variables/constraints are
+        in the ``.nl`` column/row order, which may differ from the Pyomo model's
+        declaration order.
 
     Raises
     ------
-    NotImplementedError
-        Pyomo import is a Phase 4 feature.
+    ImportError
+        If Pyomo is not installed (``pip install discopt[pyomo]``).
+    ValueError
+        If the Pyomo model has no variables to import.
+
+    Examples
+    --------
+    >>> import pyomo.environ as pyo
+    >>> m = pyo.ConcreteModel()
+    >>> m.x = pyo.Var(bounds=(0, 10))
+    >>> m.obj = pyo.Objective(expr=(m.x - 3) ** 2)
+    >>> dmodel = dm.from_pyomo(m)  # doctest: +SKIP
+    >>> dmodel.solve().objective  # doctest: +SKIP
+    0.0
     """
-    raise NotImplementedError("Pyomo import requires pyomo bridge (Phase 4)")
+    try:
+        import pyomo.environ  # noqa: F401
+    except ImportError as exc:  # pragma: no cover - exercised only without pyomo
+        raise ImportError(
+            "from_pyomo requires Pyomo. Install it with 'pip install discopt[pyomo]'."
+        ) from exc
+
+    import os
+    import tempfile
+
+    from discopt.pyomo import _writer
+
+    # Round-trip through a temporary .nl file. write_nl disables presolve/scaling so
+    # the emitted columns are exactly the model's variables in the original space,
+    # which is what from_nl reconstructs into a discopt Model.
+    with tempfile.TemporaryDirectory(prefix="discopt_from_pyomo_") as workdir:
+        nl_path = os.path.join(workdir, "model.nl")
+        cols, _rows, _eliminated = _writer.write_nl(pyomo_model, nl_path)
+        if not cols:
+            raise ValueError(
+                "from_pyomo: the Pyomo model has no variables to import (nothing to solve)."
+            )
+        return from_nl(nl_path)
 
 
 def from_nl(path: str) -> Model:
@@ -3555,7 +4212,14 @@ def from_nl(path: str) -> Model:
         if vt == "continuous":
             m.continuous(name, shape=shape, lb=lb, ub=ub)
         elif vt == "binary":
-            m.binary(name, shape=shape)
+            var = m.binary(name, shape=shape)
+            # Preserve the parsed bounds (X-3 / M2 / INT-2): `Model.binary` hardcodes
+            # ``[0, 1]``, so a bound-narrowed or fixed binary (e.g. ``lb == ub == 1``,
+            # routine Pyomo/presolve output) would silently un-fix, giving the wrong
+            # optimum on the round-trip. Clamp the parsed bounds into ``[0, 1]`` (a
+            # binary column is 0/1 by definition) and stamp them onto the variable.
+            var.lb = np.broadcast_to(np.clip(np.asarray(lb, dtype=np.float64), 0.0, 1.0), shape)
+            var.ub = np.broadcast_to(np.clip(np.asarray(ub, dtype=np.float64), 0.0, 1.0), shape)
         elif vt == "integer":
             m.integer(name, shape=shape, lb=lb, ub=ub)
 

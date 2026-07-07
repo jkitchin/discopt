@@ -163,8 +163,24 @@ class ParetoFront:
 
     # ── Filtering ──
 
-    def filtered(self) -> "ParetoFront":
-        """Return a new front containing only strictly nondominated points."""
+    def filtered(self, *, dedup_tol: float = 1e-8) -> "ParetoFront":
+        """Return a new front containing only strictly nondominated points.
+
+        Duplicate points -- identical objective vectors produced by different
+        scalarization parameters, routine at anchors and on flat front regions
+        -- are collapsed to a single representative before the weak-dominance
+        filter runs. Weak dominance keeps *all* copies of an equal objective
+        vector (no strict component distinguishes them), which inflates
+        ``self.n`` and distorts spacing metrics; the dedup fixes that.
+
+        Parameters
+        ----------
+        dedup_tol : float, default 1e-8
+            Absolute tolerance for treating two objective vectors as identical
+            (via :func:`numpy.allclose` with ``atol=rtol=dedup_tol``). The first
+            occurrence in point order is kept, preserving its
+            ``scalarization_params``.
+        """
         objs = self.objectives()
         if objs.size == 0:
             return ParetoFront(
@@ -175,8 +191,25 @@ class ParetoFront:
                 ideal=self.ideal,
                 nadir=self.nadir,
             )
+        # Collapse tolerance-equal duplicate objective vectors, keeping the
+        # first occurrence (and its scalarization_params). This is done before
+        # the dominance filter because weak dominance keeps every copy of an
+        # identical vector (equal points do not strictly dominate each other).
+        unique_points: list[ParetoPoint] = []
+        unique_objs: list[np.ndarray] = []
+        for p in self.points:
+            row = np.asarray(p.objectives, dtype=np.float64)
+            is_dup = any(
+                np.allclose(row, kept_row, rtol=dedup_tol, atol=dedup_tol)
+                for kept_row in unique_objs
+            )
+            if not is_dup:
+                unique_points.append(p)
+                unique_objs.append(row)
+
+        objs = np.vstack(unique_objs)
         mask = filter_nondominated(objs, senses=self._senses_array())
-        kept = [p for p, keep in zip(self.points, mask) if keep]
+        kept = [p for p, keep in zip(unique_points, mask) if keep]
         return ParetoFront(
             points=kept,
             method=self.method,

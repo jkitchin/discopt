@@ -38,7 +38,9 @@ If no model is given, ask the user to paste their model code or provide a file p
 - If one variable has known bounds, suggest tightening those bounds
 - If the bilinear term can be reformulated (e.g., x*y with y binary is just indicator), suggest the reformulation
 - For quality-blending / pooling structure (bilinear product = quality × flow),
-  point to `discopt.pooling` (pq-formulation with pq-cuts that tighten McCormick).
+  point to the pq-formulation builder (pq-cuts that tighten McCormick) in the
+  standalone `discopt-apps` plugin (`pip install discopt-apps`; #431):
+  `from discopt.pooling import build_pq_formulation`.
 
 ### Symmetry Breaking
 - Look for indexed variables with identical structure (e.g., identical machines, identical facilities)

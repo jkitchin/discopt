@@ -227,9 +227,11 @@ class TestObbtBasic:
             clock["now"] += 0.11
             return LPResult(status=SolveStatus.OPTIMAL, objective=0.0, wall_time=0.11)
 
-        # OBBT now resolves its LP oracle through ``get_exact_lp_solver`` (it
-        # must use an exact simplex backend for sound tightening — see #145),
-        # so patch that seam rather than the module-level ``solve_lp``.
+        # OBBT resolves its LP oracle through the exact-oracle seams (it must use
+        # an exact simplex backend for sound tightening — see #145); since C-15 it
+        # prefers ``get_exact_dual_lp_solver`` (vertex duals feed the NS-safe
+        # clamp), falling back to ``get_exact_lp_solver``. Patch both.
+        monkeypatch.setattr(obbt_mod, "get_exact_dual_lp_solver", lambda: fake_solve_lp)
         monkeypatch.setattr(obbt_mod, "get_exact_lp_solver", lambda: fake_solve_lp)
 
         result = run_obbt(m, time_limit_per_lp=1.0, total_time_limit=0.2)
@@ -776,3 +778,113 @@ class TestReverseFbbtFromAux:
         # The true optimum x=y=2 (obj 4) must remain inside the cascade box.
         assert on.lb[0] <= 2.0 + 1e-6 <= on.ub[0]
         assert on.lb[1] <= 2.0 + 1e-6 <= on.ub[1]
+
+
+# ─────────────────────────────────────────────────────────────
+# C-15: run_obbt must clamp the raw LP vertex to the NS-safe bound
+# ─────────────────────────────────────────────────────────────
+
+
+class TestC15NsSafeClamp:
+    """`run_obbt` tightens through the Neumaier-Shcherbina safe bound, never the
+    raw (possibly optimistic) LP vertex — the C-15 fix. Before the fix the
+    model-linear variant applied ``result.objective`` directly, so an
+    ill-conditioned solve reporting a vertex *above* the true projection could
+    cut off feasible points.
+    """
+
+    def _fake_optimistic_solver(self):
+        """An LP oracle that reports OPTIMAL with an *optimistic* objective whose
+        duals (via NS) prove a much looser true bound. min-x claims obj 5.0 while
+        the constraint is inactive (dual 0 ⇒ safe bound at the box lower bound);
+        max-x claims max=3 while the box allows 10.
+        """
+
+        def _fake(
+            c,
+            A_ub=None,
+            b_ub=None,
+            A_eq=None,
+            b_eq=None,
+            bounds=None,
+            warm_basis=None,
+            time_limit=None,
+            **kw,
+        ):
+            c = np.asarray(c, dtype=np.float64)
+            n_rows = 0 if b_ub is None else int(np.size(b_ub))
+            duals = np.zeros(n_rows, dtype=np.float64)  # claim all rows inactive
+            # Direction: +1 on some column ⇒ min x_i; -1 ⇒ max x_i (min -x_i).
+            if c.max() > 0:
+                obj = 5.0  # optimistic min: true min is 0 at the box corner
+            else:
+                obj = -3.0  # optimistic max: min(-x)=-3 ⇒ max x=3, true max is 8
+            return LPResult(
+                status=SolveStatus.OPTIMAL,
+                x=np.zeros(len(c)),
+                objective=obj,
+                dual_values=duals,
+                reduced_costs=None,
+                basis=None,
+                iterations=0,
+                wall_time=0.0,
+                infeasibility_certificate=None,
+            )
+
+        return _fake
+
+    def test_optimistic_vertex_is_clamped(self, monkeypatch):
+        import discopt._jax.obbt as obbt_mod
+
+        m = Model("c15")
+        m.continuous("x", lb=0.0, ub=10.0)
+        m.continuous("y", lb=0.0, ub=10.0)
+        x, y = m._variables[0], m._variables[1]
+        m.minimize(x)
+        m.subject_to(x + y <= 8.0)  # a genuine 2-var row (won't fold to a bound)
+
+        fake = self._fake_optimistic_solver()
+        # Patch BOTH getters: pre-fix run_obbt used get_exact_lp_solver (no NS
+        # clamp → would apply obj 5.0); post-fix uses get_exact_dual_lp_solver
+        # (NS clamp → rejects it). Patching both makes this fail-before/pass-after.
+        monkeypatch.setattr(obbt_mod, "get_exact_lp_solver", lambda: fake)
+        monkeypatch.setattr(obbt_mod, "get_exact_dual_lp_solver", lambda: fake)
+
+        result = run_obbt(m)
+
+        # The optimistic vertex (5.0) is clamped to the NS-safe bound (~0), so the
+        # feasible region x ∈ [0, 5) is NOT cut. Pre-fix this asserted 5.0.
+        assert result.tightened_lb[0] < 1e-6, (
+            f"raw optimistic vertex was trusted: lb={result.tightened_lb[0]}"
+        )
+        # Likewise the spurious max-tightening (to 3) is rejected; ub stays 10.
+        assert result.tightened_ub[0] > 10.0 - 1e-6, (
+            f"raw optimistic vertex cut the upper bound: ub={result.tightened_ub[0]}"
+        )
+
+    def test_ns_safe_lower_bound_free_equality_multiplier(self):
+        """`_ns_safe_lp_lower_bound` treats trailing ``n_eq`` rows as equalities
+        with a *free-sign* multiplier — sound and tighter than clamping them.
+        LP: min x s.t. x == 2, x ∈ [0, 5] ⇒ true min = 2.
+        """
+        from discopt._jax.obbt import _ns_safe_lp_lower_bound
+
+        c = np.array([1.0])
+        A = np.array([[1.0]])
+        b = np.array([2.0])
+        lo = np.array([0.0])
+        hi = np.array([5.0])
+        dual = np.array([1.0])  # HiGHS convention y_eq = +1 (rc = c - Aᵀy_eq = 0)
+
+        # Treated as an inequality (default): the clamp forces y = max(-1, 0) = 0,
+        # giving the valid-but-loose bound 0.
+        g_ineq = _ns_safe_lp_lower_bound(c, dual, A, b, lo, hi)
+        assert g_ineq is not None
+        assert abs(g_ineq - 0.0) < 1e-9
+
+        # Treated as an equality (free multiplier): recovers the tight bound 2.
+        g_eq = _ns_safe_lp_lower_bound(c, dual, A, b, lo, hi, n_eq=1)
+        assert g_eq is not None
+        assert abs(g_eq - 2.0) < 1e-6
+        # Both must be rigorous under-estimates of the true min (= 2).
+        assert g_ineq <= 2.0 + 1e-9 and g_eq <= 2.0 + 1e-9

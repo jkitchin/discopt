@@ -17,6 +17,7 @@ that fits the per-node call shape in :mod:`discopt.solver`.
 from __future__ import annotations
 
 import logging
+import os
 import time
 from dataclasses import dataclass
 from typing import Optional
@@ -186,11 +187,25 @@ def _lifted_lp_fbbt(
 
 @dataclass
 class MccormickLPResult:
-    """Outcome of one LP-form McCormick relaxation solve."""
+    """Outcome of one LP-form McCormick relaxation solve.
+
+    The ``dual`` / ``col_status`` / ``safe_bound`` / ``reduced_costs`` fields are
+    additive node-LP marginals (cert:T2.4a), populated only on the incremental
+    fast path (``_try_incremental_node``) and only when the caller requests them
+    (``want_marginals=True``). They are a pure side-channel for per-node
+    duality-based reduction (cert:T2.4b ``reduce_node``); they never influence the
+    reported ``lower_bound``/``x`` (those are byte-identical whether or not the
+    marginals are computed), so a solve that does not request them is unchanged.
+    """
 
     status: str
     lower_bound: Optional[float] = None
     x: Optional[np.ndarray] = None  # first ``n_orig`` columns of the LP solution
+    # cert:T2.4a marginals (incremental fast path only; None otherwise).
+    dual: Optional[np.ndarray] = None  # row duals y of the std-form node LP
+    col_status: Optional[np.ndarray] = None  # final std-form column status (warm basis)
+    safe_bound: Optional[float] = None  # Neumaier-Shcherbina safe LP lower bound (== lower_bound)
+    reduced_costs: Optional[np.ndarray] = None  # d_j = c_j - (A^T y)_j for the ORIGINAL columns
 
 
 class MccormickLPRelaxer:
@@ -210,6 +225,7 @@ class MccormickLPRelaxer:
         psd_cuts: bool = False,
         rlt_cuts: bool = False,
         rlt_level1: bool = False,
+        build_incremental: bool = True,
     ) -> None:
         self._model = model
         self._terms: NonlinearTerms = classify_nonlinear_terms(model)
@@ -228,6 +244,18 @@ class MccormickLPRelaxer:
         # path); "auto" keeps HiGHS->POUNCE. Falls back automatically if the
         # Rust binding is unavailable.
         self._backend = backend
+        # Per-family separation timers (cert:T0.3). Accumulated across every
+        # ``solve_at_node`` call for this relaxer instance; surfaced on the final
+        # SolveResult.solver_stats. Pure instrumentation — never affects control
+        # flow or the emitted cuts.
+        self._sep_timers: dict[str, float] = {
+            "multilinear": 0.0,
+            "edge_concave": 0.0,
+            "univariate_square": 0.0,
+            "convex": 0.0,
+            "psd": 0.0,
+            "rlt": 0.0,
+        }
         # Spatial-BB uses standard McCormick globally — no partitioning here.
         self._disc = DiscretizationState(partitions={})
         self._n_orig = sum(v.size for v in model._variables)
@@ -305,6 +333,54 @@ class MccormickLPRelaxer:
             nl_cols.add(int(base))
         self._nonlinear_cols = nl_cols
 
+        # Incremental McCormick fast path (Phase B throughput). The default
+        # ``solve_at_node`` cold-rebuilds the relaxation (``build_milp_relaxation``)
+        # and re-equilibrates it every node — together ~half the spatial-B&B wall
+        # clock. ``IncrementalMcCormickLP`` builds the LP *structure* once and per
+        # node patches only the box-dependent product rows in closed form (numpy),
+        # then warm-starts the Rust simplex (no equilibration). Its patched matrix
+        # is validated row-for-row against the cold build at construction
+        # (``IncrementalMcCormickLP._validate``), so the LP bound is sound; the fast
+        # path is a strict valid relaxation and ``solve_at_node`` falls back to the
+        # cold build for any node out of scope (near-unbounded box, unsupported
+        # term, build/solve failure). Disable with ``DISCOPT_INCREMENTAL_MC=0``.
+        self._inc = None
+        self._inc_warm_basis = None
+        self._inc_basis_nrows = -1
+        # ``build_incremental=False`` skips this (the structure build + its
+        # row-for-row validation cold-build the relaxation a handful of times) for
+        # callers that only want the relaxer's model/terms/disc and never invoke
+        # ``solve_at_node`` (e.g. structural OBBT), avoiding wasted cold builds.
+        if build_incremental and os.environ.get("DISCOPT_INCREMENTAL_MC", "1") != "0":
+            try:
+                from discopt._jax.incremental_mccormick import IncrementalMcCormickLP
+
+                # Scope gate (cert:T1.3): gate ONLY on the constructor's row-for-row
+                # self-validation (`ok`), for ANY model — any variable mix, any
+                # objective sense. The prior `_is_in_scope` (pure-integer, minimize)
+                # was a conservative rollout limit inherited from the opt-in
+                # lp_spatial engine (#355), not a soundness boundary: the fast path
+                # solves the *McCormick LP relaxation* (a valid lower bound for
+                # continuous, mixed, and integer models alike), and `_validate`
+                # proves the patched rows reproduce the cold `build_milp_relaxation`
+                # exactly; any uncovered term (univariate/NN-embedding smooth
+                # activations, RLT-lifted rows, …) makes `_validate` fail → `ok=False`
+                # → the trusted cold build runs unchanged.
+                #
+                # A first attempt at this widening collapsed the spatial bound
+                # (``dispatch`` 3 → 9843 nodes) because the fast path returns before
+                # the per-node separation chain and no root cut pool was built off
+                # the PSD path. That is fixed by the *general* root-cut-pool capture
+                # in solver.py (built whenever ``_inc`` is set) which the fast path
+                # inherits; and by skipping the fast path during pool capture
+                # (``out_cuts``) so the pool actually separates. Bound-changing
+                # behaviour is verified by the differential-neutrality check.
+                _inc = IncrementalMcCormickLP(model, self._terms)
+                if _inc.ok:
+                    self._inc = _inc
+            except Exception:
+                self._inc = None
+
     @property
     def nonlinear_columns(self) -> frozenset[int]:
         """Original-variable flat columns in any nonlinear term (product,
@@ -344,6 +420,234 @@ class MccormickLPRelaxer:
             or self._has_affine_power
         )
 
+    def _try_incremental_node(
+        self,
+        node_lb: np.ndarray,
+        node_ub: np.ndarray,
+        inherited_cuts: Optional[tuple],
+        *,
+        want_marginals: bool = False,
+    ) -> Optional["MccormickLPResult"]:
+        """Incremental McCormick node solve: patch the cached structure + warm-start,
+        instead of a cold ``build_milp_relaxation`` + equilibration. Returns a
+        :class:`MccormickLPResult` on success or ``None`` to fall back to the cold
+        build. Sound: the patched matrix is validated equal to the cold build at
+        construction, so the pure-LP value is a valid lower bound (integrality is
+        branched by the outer tree); the inherited root cut pool is appended only
+        when its column layout matches exactly (a mismatch is skipped — sound).
+
+        When ``want_marginals`` is set, the returned result additionally carries the
+        node LP's row duals, safe bound, and the ORIGINAL-column reduced costs
+        (cert:T2.4a). Those are computed from the same solve — no extra LP — and
+        never change ``lower_bound``/``x``."""
+        inc = self._inc
+        if inc is None:
+            return None
+        lb = np.asarray(node_lb, dtype=np.float64).ravel()
+        ub = np.asarray(node_ub, dtype=np.float64).ravel()
+        if lb.size != inc.n or ub.size != inc.n:
+            return None
+        # No valid finite McCormick envelope over a near-unbounded box on a
+        # nonlinear column: route to the cold path (clamp + HiGHS unboundedness
+        # cross-check). Mirrors the cold-path conditioning guard.
+        if self._nonlinear_cols:
+            idx = np.fromiter(self._nonlinear_cols, dtype=int)
+            if np.any(np.abs(lb[idx]) >= _RELAX_NUMERIC_CAP) or np.any(
+                np.abs(ub[idx]) >= _RELAX_NUMERIC_CAP
+            ):
+                return None
+        try:
+            cut_rows = None
+            if inherited_cuts is not None:
+                a_rows, b_rows = inherited_cuts
+                if a_rows is not None and len(a_rows) > 0:
+                    a_rows = np.asarray(a_rows, dtype=np.float64)
+                    b_rows = np.asarray(b_rows, dtype=np.float64).ravel()
+                    # Apply the root cut pool only when its column layout matches the
+                    # incremental structure exactly; a mismatch would address the
+                    # wrong columns (skipping is sound — fewer cuts only loosen).
+                    if (
+                        a_rows.ndim == 2
+                        and a_rows.shape[1] == inc.ncol
+                        and len(b_rows) == a_rows.shape[0]
+                    ):
+                        cut_rows = list(zip(a_rows, b_rows))
+            A, b, bounds = inc.assemble(lb, ub, cut_rows=cut_rows)
+            nrows = int(A.shape[0])
+            # Densification guard (Issue #20), same cap as the cold path below.
+            # T1.3 widened the fast path to any model, so a large multilinear lift
+            # can now reach it; decline an oversize node here too rather than force
+            # a multi-GB dense solve. Sound: no bound is returned, so the caller
+            # keeps the rigorous alphaBB/interval underestimator (identical to the
+            # cold-path decline). Falling back to the cold build would only hit the
+            # same guard, so return the oversize verdict directly.
+            if (inc.ncol + nrows) * nrows > _MAX_RELAX_DENSE_CELLS:
+                return MccormickLPResult(status="skipped_oversize")
+            in_basis = (
+                self._inc_warm_basis
+                if (self._inc_warm_basis is not None and self._inc_basis_nrows == nrows)
+                else None
+            )
+            _solved = inc.solve_assembled_full(
+                A, b, bounds, in_basis=in_basis, return_cert=want_marginals
+            )
+            if want_marginals:
+                status, bound, x_full, basis, farkas_certified, cert = _solved
+            else:
+                status, bound, x_full, basis, farkas_certified = _solved
+                cert = None
+        except Exception:
+            logger.debug("incremental McCormick node failed; cold fallback", exc_info=True)
+            return None
+
+        if status == "optimal" and bound is not None and np.isfinite(bound):
+            self._inc_warm_basis = basis
+            self._inc_basis_nrows = nrows
+            x_orig = np.asarray(x_full, dtype=np.float64)[: self._n_orig]
+            res = MccormickLPResult(status="optimal", lower_bound=float(bound), x=x_orig)
+            if want_marginals and cert is not None and cert.dual is not None:
+                # Original-column reduced costs d_j = c_j - (A^T y)_j from THIS solve
+                # (no extra LP). ``A`` is the constraint matrix (m x ncol) and ``y``
+                # the row duals of the std-form ``[A | I] z = b`` system, so it has
+                # one entry per row of ``A``. Only the first ``n_orig`` structural
+                # columns are needed by DBBT / RC-fixing (aux columns are branched
+                # by the tree, never reduced here).
+                try:
+                    y = np.asarray(cert.dual, dtype=np.float64)
+                    n0 = self._n_orig
+                    A_arr = np.asarray(A, dtype=np.float64)
+                    if A_arr.ndim == 2 and A_arr.shape[0] == y.shape[0] and A_arr.shape[1] >= n0:
+                        c_full = np.asarray(inc.c, dtype=np.float64)
+                        rc = c_full[:n0] - (A_arr[:, :n0].T @ y)
+                        res.reduced_costs = rc
+                        res.dual = y
+                        res.col_status = cert.col_status
+                        res.safe_bound = (
+                            float(cert.safe_bound) if cert.safe_bound is not None else float(bound)
+                        )
+                except Exception:
+                    logger.debug("node-LP marginal extraction failed (non-fatal)", exc_info=True)
+            return res
+
+        if status == "infeasible":
+            # An empty McCormick polytope over a FINITE box is a rigorous
+            # infeasibility proof for this node's subtree (the relaxation is a valid
+            # outer approximation), so the node is fathomed WITHOUT a cold rebuild.
+            # A *verified Farkas dual ray* (issue #356) makes that verdict rigorous
+            # with no second solve at all: the ray is an independent certificate
+            # that the lifted LP's feasible set is empty, so when it checks out we
+            # fathom directly — closing the #355-review gap where the incremental
+            # infeasible-trust path dropped the cold path's independent cross-check.
+            if farkas_certified:
+                return MccormickLPResult(status="infeasible")
+            # No verified Farkas ray. When the solve was WARM-STARTED, the verdict is
+            # untrustworthy: the in-house dual simplex can converge from a stale
+            # cross-node basis to a *false* ``infeasible`` on a feasible LP whose ray
+            # does not certify emptiness (C-38: kall_circles_c8a — the warm basis of
+            # one node's box, reused on a sibling's, drove a spurious infeasible that
+            # fathomed the sub-box holding the true optimum, both prematurely
+            # terminating the search AND certifying a false-optimal dual bound). A
+            # cold solve of the IDENTICAL assembled system (``in_basis=None``) is
+            # authoritative — the warm-start artifact vanishes — so re-solve cold once
+            # before concluding. A genuine emptiness re-emerges as a Farkas-certified
+            # infeasible (fathom); a false one re-solves to ``optimal`` (keep the node
+            # with its valid bound). This restores both soundness and completeness.
+            if in_basis is not None:
+                try:
+                    (
+                        c_status,
+                        c_bound,
+                        c_x,
+                        _c_basis,
+                        c_farkas,
+                    ) = inc.solve_assembled_full(A, b, bounds, in_basis=None)
+                except Exception:
+                    c_status = None
+                    c_bound = None
+                    c_x = None
+                    c_farkas = False
+                if c_status == "optimal" and c_bound is not None and np.isfinite(c_bound):
+                    x_orig = np.asarray(c_x, dtype=np.float64)[: self._n_orig]
+                    return MccormickLPResult(status="optimal", lower_bound=float(c_bound), x=x_orig)
+                if c_status == "infeasible" and c_farkas:
+                    return MccormickLPResult(status="infeasible")
+                # Cold solve inconclusive (uncertified infeasible / numerical): fall
+                # through to the equilibration re-verify below.
+            # The ray did not verify (an ill-conditioned candidate): fall back to
+            # the equilibration re-verify, which fathoms ONLY on a verified Farkas
+            # ray and otherwise defers to the cold rebuild (never trusts an
+            # uncertified infeasible — see :meth:`_reverify_incremental_infeasible`).
+            return self._reverify_incremental_infeasible(inc, A, b, bounds)
+
+        # time_limit / unbounded / numerical error: no certified verdict — fall back
+        # to the trusted cold build.
+        return None
+
+    def _reverify_incremental_infeasible(
+        self, inc, A: np.ndarray, b: np.ndarray, bounds: np.ndarray
+    ) -> Optional["MccormickLPResult"]:
+        """Confirm an incremental ``infeasible`` verdict soundly, without a cold
+        rebuild, when the simplex's Farkas ray did not already certify it. A node
+        fathom on ``infeasible`` is rigorous ONLY when a *verified Farkas dual ray*
+        proves the lifted polytope empty; the raw simplex verdict is not itself a
+        proof. So this re-solves once with exact geometric-mean equilibration (a
+        feasible-set-preserving rescale) and accepts ``infeasible`` **only** when
+        that solve returns a verified Farkas ray. If the equilibrated solve recovers
+        a feasible point, that was a false infeasible (return it as ``optimal``).
+        Any other outcome — infeasible with no Farkas ray, or a solver failure —
+        yields ``None`` (cold fallback), NOT a fathom.
+
+        C-38 rationale: the in-house simplex returns *numerical false* ``infeasible``
+        on ill-conditioned lifted McCormick LPs that HiGHS proves feasible, and it
+        does so with no Farkas ray both cold AND after equilibration (coefficient
+        spread as low as ~1e2 — well under any conditioning heuristic). The old
+        ``if not ill: return infeasible`` and ``if status=="infeasible": return
+        infeasible`` both trusted such an uncertified verdict and fathomed the
+        sub-box containing the true optimum, certifying a false-optimal dual bound
+        (kall_circles_c8a: 3.6142 > true opt 2.5409). A conditioning heuristic is not
+        a soundness proof — only a Farkas ray is — so an uncertified infeasible must
+        never fathom.
+
+        Returns ``MccormickLPResult(status="infeasible")`` (Farkas-certified) to
+        fathom, an ``"optimal"`` result if equilibration recovers a feasible point,
+        or ``None`` (cold fallback) otherwise."""
+        import scipy.sparse as sp
+
+        from discopt._jax.milp_relaxation import equilibrate_relaxation_lp
+
+        try:
+            a_csr = sp.csr_matrix(A)
+        except Exception:
+            return None
+
+        try:
+            bl = [(float(bounds[i, 0]), float(bounds[i, 1])) for i in range(bounds.shape[0])]
+            c2, a2, b2, bd2, col_scale = equilibrate_relaxation_lp(inc.c, a_csr, b, bl, None)
+            status, bound, x_s, _, farkas = inc.solve_assembled_full(
+                a2, b2, np.asarray(bd2, dtype=np.float64), in_basis=None, c_override=c2
+            )
+        except Exception:
+            return None  # re-verify failed -> trusted cold rebuild
+        if status == "infeasible":
+            # Fathom ONLY on a verified Farkas ray; an uncertified infeasible is not a
+            # rigorous emptiness proof and must not prune (C-38). Cold fallback lets
+            # the driver keep the node open on its inherited (valid) parent bound.
+            if farkas:
+                return MccormickLPResult(status="infeasible")
+            logger.debug(
+                "incremental McCormick infeasible not Farkas-certified after "
+                "equilibration; declining fathom (cold fallback) to avoid a "
+                "false-infeasible prune"
+            )
+            return None
+        if status == "optimal" and bound is not None and np.isfinite(bound):
+            # False infeasible recovered: map the scaled point back (x = D·x'). The
+            # equilibrated basis has different scaling, so don't carry it as a warm
+            # start (the ``nrows`` guard would reject it anyway).
+            x_orig = (np.asarray(x_s, dtype=np.float64) * col_scale)[: self._n_orig]
+            return MccormickLPResult(status="optimal", lower_bound=float(bound), x=x_orig)
+        return None
+
     def solve_at_node(
         self,
         node_lb: np.ndarray,
@@ -354,6 +658,7 @@ class MccormickLPRelaxer:
         separate: bool = True,
         out_cuts: Optional[list] = None,
         psd_max_rounds: int = 8,
+        want_marginals: bool = False,
     ) -> MccormickLPResult:
         """Solve the McCormick LP relaxation restricted to the given bound box.
 
@@ -375,6 +680,27 @@ class MccormickLPRelaxer:
           appended at THIS call are pushed onto it as ``(A_rows, b_rows)`` — used
           to capture the root pool once and replay it at every node.
         """
+        # Phase-B fast path: incremental patch + warm-started solve, reusing the
+        # structure built once at construction instead of a per-node cold rebuild +
+        # equilibration. Sound (validated patch == cold build; a valid relaxation),
+        # and it carries the inherited (root RLT/PSD) cut pool so it keeps the
+        # default path's bound strength. Returns ``None`` for any out-of-scope node,
+        # falling through to the trusted cold build below.
+        #
+        # cert:T1.3: skip the fast path when *capturing* a cut pool (``out_cuts``
+        # set). The fast path returns before the per-node separation chain, so it
+        # would capture nothing; a pool-building call must run the cold, separating
+        # path. Regular nodes (``out_cuts is None``) still take the fast path and
+        # inherit the pool this captures. Without this, the root cut pool is never
+        # populated once the incremental engine is active — exactly why the T1.3
+        # gate flip collapsed the spatial bound (dispatch 3 → 9843).
+        if out_cuts is None:
+            _fast = self._try_incremental_node(
+                node_lb, node_ub, inherited_cuts, want_marginals=want_marginals
+            )
+            if _fast is not None:
+                return _fast
+
         try:
             milp, varmap = build_milp_relaxation(
                 self._model,
@@ -519,25 +845,42 @@ class MccormickLPRelaxer:
         res = milp.solve(time_limit=_remaining(), backend=self._backend)
 
         if separate:
+            _st = self._sep_timers  # cert:T0.3 per-family separation timers
             # On-demand separation of the exact multilinear hull for products with
             # more factors than the dense RLT cap (those carry only the loose
             # recursive chain). Every separated cut is a supporting hyperplane of
             # the convex/concave envelope, hence valid; adding them only tightens
             # the bound, so the loop is sound at any round.
+            _t = time.perf_counter()
             res = self._separate_multilinear(milp, varmap, res, _deadline)
+            _st["multilinear"] += time.perf_counter() - _t
             # Edge-concave / edge-convex quadratic blocks: tighten the joint
             # vertex-polyhedral envelope (cuts on bilinear/square auxes).
+            _t = time.perf_counter()
             res = self._separate_edge_concave(milp, varmap, res, _deadline)
+            _st["edge_concave"] += time.perf_counter() - _t
             # Univariate squares ``s = x**2``: the static envelope cuts only at the
             # box endpoints, so deep inside a wide box the convex underestimator is
             # slack. Add the exact supporting tangent at the LP point each round.
+            _t = time.perf_counter()
             res = self._separate_univariate_square(milp, varmap, res, _deadline)
+            _st["univariate_square"] += time.perf_counter() - _t
+            # Convex/concave composite lifts (#358): add the exact supporting
+            # hyperplane at the LP point, closing the gap the fixed reference-point
+            # gradient cuts leave. Inert unless the convex claimer lifted a node.
+            _t = time.perf_counter()
+            res = self._separate_convex(milp, varmap, res, _deadline)
+            _st["convex"] += time.perf_counter() - _t
             # PSD (moment) cuts: enforce M = [[1,x^T],[x,X]] >= 0 over fully-lifted
             # cliques. Each cut v^T M v >= 0 is valid for every feasible point
             # (X = x x^T), so adding them only tightens the bound.
+            _t = time.perf_counter()
             res = self._separate_psd(milp, varmap, res, _deadline, max_rounds=psd_max_rounds)
+            _st["psd"] += time.perf_counter() - _t
             # Targeted RLT (constraint-factor x bound-factor) cuts.
+            _t = time.perf_counter()
             res = self._separate_rlt(milp, varmap, res, _deadline)
+            _st["rlt"] += time.perf_counter() - _t
 
         # Capture the rows the separation chain just appended, for the root cut
         # pool. Stated over this node's lifted column space (``n_total`` columns).
@@ -548,105 +891,103 @@ class MccormickLPRelaxer:
                     (_A[_n_base_rows:].copy(), np.asarray(milp._b_ub)[_n_base_rows:].copy())
                 )
 
-        # Soundness guard: a floating-point simplex "infeasible" verdict is NOT
-        # a proof that the relaxed feasible set is empty. The spatial-B&B driver
-        # treats a relaxation "infeasible" as a RIGOROUS fathom (it prunes the
-        # node's whole subtree), so an unverified false-infeasible silently
-        # fathoms a *feasible* node and certifies a suboptimal incumbent — a
-        # false-optimal. The fast Rust simplex can be fooled here: a fractional
-        # power x**p with |p| large over a domain reaching toward 0 (e.g.
-        # x in [1e-3, 200], p=-3.5) lifts to an LP whose tangent slopes and aux
-        # bounds span >1e13, and the simplex reports it infeasible while HiGHS
-        # solves it correctly. Re-verify any non-HiGHS "infeasible" with HiGHS
-        # before trusting it; on disagreement adopt HiGHS's (valid) bound so the
-        # node branches instead of being wrongly pruned.
-        if res.status == "infeasible" and self._backend != "auto":
-            verify = milp.solve(time_limit=_remaining(), backend="auto")
-            if verify.status != "infeasible":
-                res = verify
+        # Rigorous bound / fathom from pure-Rust certificates (issue #356) — no
+        # HiGHS cross-check. The four failure modes the old ``milp.solve(
+        # backend="auto")`` guards protected against (false infeasible, unconverged
+        # non-optimal, too-high optimal, fabricated-finite unbounded) are now
+        # handled by the certificate the warm simplex itself produces:
+        #
+        #  * infeasible  -> ``milp.solve`` already re-verifies the verdict with an
+        #    exact, feasible-set-preserving equilibration re-solve (pure Rust) — the
+        #    same soundness bar the incremental path's ``_reverify`` accepts — and
+        #    surfaces ``farkas_certified`` when a verified Farkas dual ray
+        #    additionally proves the lifted polytope empty. Either is sound to
+        #    fathom (the McCormick relaxation is a valid outer approximation); this
+        #    is the pure-Rust replacement for the old HiGHS cross-check.
+        #  * unbounded / iteration_limit / numerical -> no certified finite bound,
+        #    so report the status with no lower bound and let the driver branch.
+        #  * optimal -> use the Neumaier–Shcherbina *safe* lower bound built from
+        #    the simplex's own row duals (``res.safe_bound``), which is ``<=`` the
+        #    true LP optimum at *any* conditioning — a drifted vertex objective can
+        #    never be reported as the bound, so the too-high failure class is
+        #    eliminated by construction rather than caught by a second solve. When
+        #    no safe bound is computable (the lifted LP has a free variable — e.g.
+        #    the objective epigraph — whose reduced cost makes the safe-bound box
+        #    term unbounded), fall back to the warm simplex's vertex objective: it
+        #    equilibrates internally (so a wide coefficient spread is handled in the
+        #    factorization, not left to drift the vertex) and verifies dual
+        #    feasibility on exact reduced costs before declaring optimal, so its
+        #    reported optimum is the converged LP value. A genuinely unbounded
+        #    relaxation returns "unbounded" above (not "optimal"), so this is never
+        #    a fabricated finite bound.
+        if res.status == "infeasible":
+            # A node fathom on ``infeasible`` is rigorous ONLY when the verdict is
+            # backed by a *verified Farkas dual ray* (``res.farkas_certified``): the
+            # ray is an independent certificate that the lifted McCormick polytope is
+            # empty. The warm/equilibrated in-house simplex can otherwise return a
+            # *numerical false* ``infeasible`` on an ill-conditioned lifted relaxation
+            # that is in fact feasible — and it does so with NO Farkas ray (C-38:
+            # kall_circles_c8a's reverse-convex non-overlap relaxation, coefficient
+            # spread only ~1e2–1e4, is declared infeasible cold AND after
+            # equilibration though HiGHS proves it feasible; trusting that fathomed
+            # the sub-box holding the true optimum and certified a false-optimal dual
+            # bound 3.6142 > true opt 2.5409). ``milp.solve``'s equilibration
+            # re-verify only fires above a 1e3 spread and, even when it does, the same
+            # simplex can re-confirm the false infeasible — so equilibration is not a
+            # sufficient guard. A verified Farkas ray is the only rigorous proof of LP
+            # emptiness, so without it the verdict is not a proof and must NOT fathom:
+            # report a non-fathoming status so the driver keeps the node open on its
+            # inherited (valid) parent bound and branches, exactly as for an
+            # ``iteration_limit``/``numerical`` exit. This forgoes a *possible* prune,
+            # never a valid bound — sound by construction.
+            if res.farkas_certified:
+                return MccormickLPResult(status="infeasible")
+            logger.debug(
+                "McCormick LP node reported infeasible without a Farkas certificate; "
+                "treating as inconclusive (no fathom) to avoid a false-infeasible prune"
+            )
+            return MccormickLPResult(status="numerical")
+        if res.status != "optimal" or res.x is None:
+            return MccormickLPResult(status=res.status)
 
-        # Soundness guard: a non-optimal termination (``iteration_limit`` /
-        # ``time_limit``) returns the solver's *unconverged* objective. For the
-        # warm-started simplex that value is a primal incumbent — an UPPER bound
-        # on the LP optimum — and the backend reports ``bound == objective``, so
-        # there is no salvageable dual bound. Trusting it as a lower bound is
-        # unsound: nvs22 on its FBBT-tightened box stalls the simplex at
-        # ``iteration_limit`` reporting 8.31 while HiGHS solves the same LP to
-        # 2.55 (true optimum 6.06). Re-verify a non-optimal fast-backend result
-        # with HiGHS and adopt it only if HiGHS converges to optimality.
-        if res.status not in ("optimal", "infeasible") and self._backend != "auto":
-            verify = milp.solve(time_limit=_remaining(), backend="auto")
-            if verify.status == "optimal":
-                res = verify
+        if self._backend == "auto":
+            # HiGHS/POUNCE already returns a trustworthy optimum; keep the legacy
+            # behaviour (no certificate is produced on that path).
+            bound: Optional[float] = res.objective
+        elif res.safe_bound is not None:
+            # The common pure-LP warm-simplex path: rigorous safe bound.
+            bound = res.safe_bound
+        elif milp._integrality is not None:
+            # Integer-aware node bound (non-default ``node_bound_mode="milp"``):
+            # the engine's own B&B dual bound is the valid lower bound here.
+            bound = res.bound
+        elif self._nonlinear_cols and self._has_unbounded_nonlinear_col(milp):
+            # A nonlinear-participating variable is still unbounded at this node, so
+            # the McCormick/RLT envelope may be genuinely UNBOUNDED — and the fast
+            # simplex can fabricate a finite "optimal" there (himmel16 with RLT
+            # cuts). With no computable safe bound (free variable) we cannot certify
+            # the vertex is not too high, so decline: report no bound and let the
+            # driver branch, rather than trust a fabricated value that would fathom
+            # the optimal region. (Pure-Rust replacement of the old HiGHS
+            # unbounded-relaxation cross-check.)
+            bound = None
+        elif self._max_finite_magnitude(milp) <= _LIFT_MAX_CROSS_TERM_ARG_MAGNITUDE:
+            # Pure-LP with a free variable but a bounded relaxation: trust the
+            # internally-equilibrated, dual-feasibility-verified vertex objective
+            # only when well-conditioned (mirrors the old guard's conditioning gate
+            # — below it the vertex carries no meaningful drift).
+            bound = res.objective
+        else:
+            # Free variable AND ill-conditioned beyond where the fast simplex is
+            # reliable, with no computable safe bound: decline (branch) rather than
+            # risk a too-high vertex value (pure-Rust replacement of the old
+            # too-high-optimal HiGHS cross-check).
+            bound = None
 
-        # Soundness guard (residual conditioning): even after the bound clamp
-        # above, an LP whose constraint/coefficient magnitudes remain large can
-        # still fool the fast simplex into a wrong "optimal" -- a dual bound that
-        # is too HIGH, the most dangerous unsoundness (a too-high lower bound
-        # fathoms feasible nodes and certifies a suboptimal incumbent). When the
-        # relaxation is still ill-conditioned above the magnitude where the
-        # simplex is unreliable (the same ``_LIFT_MAX_CROSS_TERM_ARG_MAGNITUDE``
-        # line the cut builders abstain at), cross-check the optimum with HiGHS
-        # and adopt its value whenever it is lower. Adopting only a LOWER bound
-        # can never cause an unsound fathom, and the gate keeps this off the
-        # common well-scaled fast path (no extra solve).
-        if (
-            res.status == "optimal"
-            and self._backend != "auto"
-            and res.objective is not None
-            and self._max_finite_magnitude(milp) > _LIFT_MAX_CROSS_TERM_ARG_MAGNITUDE
-        ):
-            verify = milp.solve(time_limit=_remaining(), backend="auto")
-            if (
-                verify.status == "optimal"
-                and verify.objective is not None
-                and verify.objective < res.objective - 1e-6
-            ):
-                res = verify
-
-        # Soundness guard (unbounded relaxation): a McCormick/RLT envelope is only
-        # a valid relaxation when the participating variables have FINITE bounds.
-        # When a nonlinear-term variable is still unbounded at this node (e.g. the
-        # root box before FBBT could not bound it), the lifted aux is effectively
-        # free and the relaxation is genuinely UNBOUNDED — it carries no valid
-        # finite lower bound. The fast Rust simplex mis-handles the unbounded ray
-        # and fabricates a finite "optimal" (himmel16: simplex returns 0.0 / RLT
-        # cuts -0.6749 where HiGHS correctly returns "unbounded"); trusting that
-        # finite value as a lower bound is a too-high bound that fathoms feasible
-        # nodes and certifies a suboptimal incumbent — a false-"optimal", the
-        # worst failure class. When any nonlinear-participating column is
-        # unbounded, cross-check the fast "optimal" with HiGHS and adopt HiGHS's
-        # verdict; on "unbounded" the no-bound result below lets the driver
-        # branch (and decertify the gap) instead of certifying a fabricated
-        # bound. Gated on free nonlinear columns, so it is a no-op once FBBT /
-        # branching has bounded the box (the common case).
-        if (
-            res.status == "optimal"
-            and self._backend != "auto"
-            and self._nonlinear_cols
-            and self._has_unbounded_nonlinear_col(milp)
-        ):
-            verify = milp.solve(time_limit=_remaining(), backend="auto")
-            if verify.status == "unbounded" or (
-                verify.status == "optimal"
-                and verify.objective is not None
-                and res.objective is not None
-                and verify.objective < res.objective - 1e-6
-            ):
-                res = verify
-
-        # A valid lower bound on the original problem requires the relaxation LP
-        # to be solved to OPTIMALITY; any other terminal status yields no
-        # certified bound, so report the status with no lower bound and let the
-        # spatial-B&B driver branch instead of fathoming on an unconverged value.
-        if res.status != "optimal" or res.objective is None or res.x is None:
+        if bound is None or not np.isfinite(bound):
             return MccormickLPResult(status=res.status)
         x_orig = np.asarray(res.x)[: self._n_orig].copy()
-        return MccormickLPResult(
-            status=res.status,
-            lower_bound=float(res.objective),
-            x=x_orig,
-        )
+        return MccormickLPResult(status="optimal", lower_bound=float(bound), x=x_orig)
 
     def _lifted_fbbt_rebuild(self, milp, node_lb, node_ub):
         """Tighten the node box via lifted-LP FBBT and rebuild the relaxation.
@@ -741,10 +1082,11 @@ class MccormickLPRelaxer:
     def _max_finite_magnitude(milp) -> float:
         """Largest finite magnitude across the LP's data (cost, rows, RHS, bounds).
 
-        A cheap conditioning proxy used to gate the HiGHS cross-check: well-scaled
-        relaxations stay on the fast simplex path, ill-conditioned ones get
-        re-verified. Non-finite entries (the +/-inf bounds left by the clamp) are
-        ignored.
+        A cheap conditioning proxy used only on the rare free-variable LPs where
+        the Neumaier–Shcherbina safe bound is not computable: below the threshold a
+        dual-feasible optimal vertex carries no meaningful drift and is trusted;
+        above it the bound is declined. Non-finite entries (the +/-inf bounds left
+        by the clamp) are ignored.
         """
         import scipy.sparse as sp
 
@@ -940,6 +1282,119 @@ class MccormickLPRelaxer:
         except Exception:
             return res
 
+    def _separate_convex(self, milp, varmap, res, deadline):
+        """Tighten lifted convex/concave composite nodes by supporting-hyperplane
+        separation at the LP point (issue #358 Phase 2).
+
+        A convex subexpression ``g`` lifted to aux ``d`` (the #358 claimer) carries
+        only a few static gradient cuts at fixed reference points, so deep inside
+        the box ``d >= g(x)`` is slack. Each round add the EXACT supporting tangent
+        at the current LP point ``x0``:
+
+            convex:  d >= g(x0) + ∇g(x0)·(x − x0)
+            concave: d <= g(x0) + ∇g(x0)·(x − x0)
+
+        A tangent of a convex (resp. secant-free concave) function is a global
+        under- (over-) estimator, so no feasible point is ever cut — the bound
+        stays sound at every round. Sound no-op on any failure.
+        """
+        relaxations = varmap.get("composite_multivar_relaxations") or []
+        specs = [
+            r
+            for r in relaxations
+            if getattr(r, "value_fn", None) is not None
+            and getattr(r, "grad_fn", None) is not None
+            and r.idxs
+        ]
+        if not specs:
+            return res
+        if res is None or res.status != "optimal" or res.x is None:
+            return res
+        try:
+            import jax.numpy as jnp
+            import scipy.sparse as sp
+
+            n_total = len(milp._c)
+            n_orig = self._n_orig
+
+            def _append(rows: list[np.ndarray], rhs: list[float]) -> None:
+                R = np.asarray(rows, dtype=np.float64)
+                b = np.asarray(rhs, dtype=np.float64)
+                if milp._A_ub is None:
+                    milp._A_ub, milp._b_ub = R, b
+                elif sp.issparse(milp._A_ub):
+                    milp._A_ub = sp.vstack([milp._A_ub, sp.csr_matrix(R)], format="csr")
+                    milp._b_ub = np.concatenate([milp._b_ub, b])
+                else:
+                    milp._A_ub = np.vstack([np.asarray(milp._A_ub), R])
+                    milp._b_ub = np.concatenate([milp._b_ub, b])
+
+            tol = 1e-7
+            for _round in range(8):
+                if deadline is not None and time.perf_counter() >= deadline:
+                    break
+                x = np.asarray(res.x, dtype=np.float64)
+                xv = jnp.asarray(x[:n_orig], dtype=jnp.float64)
+                rows: list[np.ndarray] = []
+                rhs: list[float] = []
+                for r in specs:
+                    aux = r.aux_col
+                    if aux >= x.size:
+                        continue
+                    d = float(x[aux])
+                    try:
+                        gval = float(jnp.reshape(r.value_fn(xv), ()))
+                        grad = np.asarray(r.grad_fn(xv), dtype=np.float64).ravel()
+                    except Exception:
+                        continue
+                    if not np.isfinite(gval) or not all(
+                        j < grad.size and np.isfinite(grad[j]) for j in r.idxs
+                    ):
+                        continue
+                    # Conditioning guard (#358): a cut whose coefficients have blown
+                    # up (steep gradient on a wide box) fools the fast simplex into a
+                    # garbage bound. Skip it — the static cuts still bound ``d`` and
+                    # the relaxation stays sound, just looser at this point.
+                    if any(
+                        abs(float(grad[j])) > _LIFT_MAX_CROSS_TERM_ARG_MAGNITUDE for j in r.idxs
+                    ):
+                        continue
+                    # ``slope·x0`` with x0 the LP point restricted to dependent cols.
+                    slope_dot_x0 = float(sum(float(grad[j]) * float(x[j]) for j in r.idxs))
+                    if r.curvature == "convex":
+                        # slack iff the LP put d below g at x0; cut d >= g(x0)+∇g·(x−x0)
+                        # i.e. ∇g·x − d <= ∇g·x0 − g(x0).
+                        if gval - d > tol * max(1.0, abs(gval)):
+                            row = np.zeros(n_total)
+                            for j in r.idxs:
+                                row[j] += float(grad[j])
+                            row[aux] += -1.0
+                            rows.append(row)
+                            rhs.append(slope_dot_x0 - gval)
+                    else:  # concave: d <= g(x0)+∇g·(x−x0)  ->  −∇g·x + d <= g(x0)−∇g·x0
+                        if d - gval > tol * max(1.0, abs(gval)):
+                            row = np.zeros(n_total)
+                            for j in r.idxs:
+                                row[j] += -float(grad[j])
+                            row[aux] += 1.0
+                            rows.append(row)
+                            rhs.append(gval - slope_dot_x0)
+                if not rows:
+                    break
+                _append(rows, rhs)
+                _tl = (
+                    None
+                    if deadline is None
+                    else max(deadline - time.perf_counter(), _SOLVE_DEADLINE_FLOOR_S)
+                )
+                new_res = milp.solve(time_limit=_tl, backend=self._backend)
+                if new_res.status != "optimal" or new_res.objective is None:
+                    break
+                res = new_res
+            return res
+        except Exception:
+            return res
+
     def _separate_rlt(self, milp, varmap, res, deadline):
         """Separate targeted RLT (constraint-factor x bound-factor) cuts.
 
@@ -1065,14 +1520,38 @@ class MccormickLPRelaxer:
                     milp._A_ub = np.vstack([np.asarray(milp._A_ub), R])
                     milp._b_ub = np.concatenate([milp._b_ub, b])
 
+            # Cost-aware gate (THRU-2a, DISCOPT_PSD_COST_GATE, default OFF). PSD
+            # separation dominates the QCQP node wall (~60% on nvs17/19/24) while
+            # the certified bound is set by McCormick+RLT and recovered by branching
+            # when PSD is absent, so unbudgeted PSD starves the tree search. When on,
+            # cap this node's PSD wall to ``budget × base_solve_wall`` and abandon on
+            # per-round diminishing returns. SOUND: dropping cuts can only loosen the
+            # relaxation — never cut a feasible point or cross the optimum. Keying is
+            # purely on observed per-node cost/bound-delta (§0.2, general). The gate
+            # only ever *shortens* the loop, so the default (gate-off) path below is
+            # bit-identical to the pre-THRU-2a code.
+            _tun = _tuning()
+            _gate = _tun.psd_cost_gate
+            _gate_budget = _tun.psd_cost_gate_budget
+            _gate_tau = _tun.psd_cost_gate_tau
+            _psd_t0 = time.perf_counter()
+            _base_solve_wall: Optional[float] = None
             for _round in range(max_rounds):
                 if deadline is not None and time.perf_counter() >= deadline:
+                    break
+                if (
+                    _gate
+                    and _base_solve_wall is not None
+                    and (time.perf_counter() - _psd_t0) > _gate_budget * _base_solve_wall
+                ):
+                    # Per-node PSD wall budget spent — stop feeding the search.
                     break
                 cuts = separate_psd_cuts_on_relaxation(
                     varmap, np.asarray(res.x, dtype=np.float64), n_total
                 )
                 if not cuts:
                     break
+                _lb_before = res.objective if _gate else None
                 # ``coeffs . z >= rhs``  ->  ``(-coeffs) . z <= -rhs`` for A_ub<=b_ub.
                 _append([-c.coeffs for c in cuts], [-c.rhs for c in cuts])
                 _tl = (
@@ -1080,10 +1559,18 @@ class MccormickLPRelaxer:
                     if deadline is None
                     else max(deadline - time.perf_counter(), _SOLVE_DEADLINE_FLOOR_S)
                 )
+                _solve_t0 = time.perf_counter()
                 new_res = milp.solve(time_limit=_tl, backend=self._backend)
+                if _gate and _base_solve_wall is None:
+                    _base_solve_wall = max(time.perf_counter() - _solve_t0, 1e-4)
                 if new_res.status != "optimal" or new_res.objective is None:
                     break
                 res = new_res
+                if _gate and _lb_before is not None:
+                    _delta = new_res.objective - _lb_before
+                    if _delta <= _gate_tau * (1.0 + abs(_lb_before)):
+                        # Diminishing returns — abandon the remaining PSD rounds.
+                        break
             return res
         except Exception:
             return res

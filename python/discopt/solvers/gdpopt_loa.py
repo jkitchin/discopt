@@ -46,8 +46,8 @@ def solve_gdpopt_loa(
     nlp_solver : str
         NLP solver backend for subproblems (``"ipm"``, ``"pounce"``, ``"ipopt"``).
     milp_solver : str
-        MILP backend for LOA master problems: ``"auto"``, ``"highs"``,
-        ``"pounce"``, ``"simplex"``, or ``"gurobi"``.
+        MILP backend for LOA master problems: ``"auto"``, ``"pounce"``,
+        ``"simplex"``, or ``"gurobi"`` (HiGHS was removed, issue #356).
 
     Returns
     -------
@@ -156,6 +156,13 @@ def solve_gdpopt_loa(
     incumbent = None
     incumbent_obj = None
 
+    # C-35: integer configurations whose fixed-integer NLP subproblem failed to
+    # resolve *non-rigorously* (diverged / iteration limit / error). A local NLP
+    # failure is NOT a proof of infeasibility, so we must NOT exclude such a
+    # configuration with a no-good cut. Tracked to refuse certification and to
+    # break the loop soundly if the master re-proposes an unresolved config.
+    unresolved_int_configs: set[tuple[int, ...]] = set()
+
     for iteration in range(max_iterations):
         elapsed = time.perf_counter() - t_start
         if elapsed >= time_limit:
@@ -221,9 +228,16 @@ def solve_gdpopt_loa(
                 oa_convexity.objective_is_convex,
             )
         else:
-            # NLP infeasible → add no-good cut
-            _add_no_good_cut(x_master, int_indices, oa_A_rows, oa_b_rows, n_vars)
-            # Also try OA cuts at master point
+            # C-35: the fixed-integer NLP subproblem returned no feasible point.
+            # A no-good cut is only SOUND when this configuration is RIGOROUSLY
+            # infeasible/dominated. A local NLP that merely failed to converge is
+            # NOT such a proof (the NLP layer never emits a rigorous
+            # infeasibility verdict). Split on a rigorous check.
+            rigorously_infeasible = _fixed_subproblem_rigorously_infeasible(
+                evaluator, sub_lb, sub_ub
+            )
+
+            # OA cuts at master point (valid supporting linearizations either way).
             _add_oa_cuts(
                 evaluator,
                 x_master,
@@ -235,6 +249,27 @@ def solve_gdpopt_loa(
                 oa_convexity.constraint_mask,
                 oa_convexity.objective_is_convex,
             )
+
+            if rigorously_infeasible:
+                # Proven infeasible ⇒ the no-good cut is valid (and provides the
+                # anti-cycling exclusion). Certification is preserved.
+                _add_no_good_cut(x_master, int_indices, oa_A_rows, oa_b_rows, n_vars)
+            else:
+                # Non-rigorous failure ⇒ do NOT exclude this configuration.
+                # Record it as unresolved (result not certified) and break
+                # soundly if the master re-proposes it (avoids cycling without
+                # the anti-cycling no-good cut).
+                config_key = _int_config_key(x_master, int_indices)
+                already_seen = config_key in unresolved_int_configs
+                unresolved_int_configs.add(config_key)
+                if already_seen:
+                    logger.info(
+                        "LOA: integer configuration %s unresolved by NLP "
+                        "(non-rigorous failure) and re-proposed; stopping without "
+                        "a no-good cut (result not certified)",
+                        config_key,
+                    )
+                    break
 
         # d. Check convergence
         gap = _compute_gap(LB, UB)
@@ -256,8 +291,14 @@ def solve_gdpopt_loa(
     bound = LB if master_bound_valid and LB > -1e19 else None
     reported_gap = gap if bound is not None and UB < 1e19 else None
 
+    # C-35: unresolved configurations mean the search is incomplete — we did not
+    # exclude them, so neither optimality nor infeasibility is proved. Downgrade
+    # certification and never report a *certified* "infeasible" in this state.
+    has_unresolved = len(unresolved_int_configs) > 0
+
     if incumbent is not None:
-        status = "optimal" if gap <= gap_tolerance else "feasible"
+        certified = (gap <= gap_tolerance) and not has_unresolved
+        status = "optimal" if certified else "feasible"
         x_dict = _build_x_dict(incumbent, reformulated)
         return SolveResult(
             status=status,
@@ -266,6 +307,20 @@ def solve_gdpopt_loa(
             gap=reported_gap,
             x=x_dict,
             wall_time=wall_time,
+            gap_certified=not has_unresolved,
+        )
+
+    if has_unresolved:
+        # No feasible incumbent AND unresolved configurations: cannot certify
+        # infeasibility (a diverged subproblem is not a proof).
+        return SolveResult(
+            status="unknown",
+            objective=None,
+            bound=bound,
+            gap=None,
+            x={},
+            wall_time=wall_time,
+            gap_certified=False,
         )
 
     return SolveResult(
@@ -370,6 +425,36 @@ def _solve_nlp_subproblem(evaluator, sub_lb, sub_ub, nlp_solver: str) -> np.ndar
     return None
 
 
+def _fixed_subproblem_rigorously_infeasible(evaluator, sub_lb, sub_ub, tol: float = 1e-6) -> bool:
+    """RIGOROUSLY decide whether the fixed-integer subproblem is infeasible.
+
+    C-35: a no-good cut is only sound when the excluded configuration is proved
+    infeasible/dominated. A local NLP that merely failed to converge is not such
+    a proof. Sufficient rigorous condition: when there are NO free continuous
+    variables (every variable pinned, ``sub_lb == sub_ub``), the subproblem has
+    a single candidate point; a constraint violation there proves infeasibility.
+    Otherwise return False (do not claim rigorous infeasibility).
+    """
+    sub_lb = np.asarray(sub_lb, dtype=np.float64)
+    sub_ub = np.asarray(sub_ub, dtype=np.float64)
+    if not np.all(sub_lb >= sub_ub - 1e-12):
+        return False
+    if evaluator.n_constraints == 0:
+        return False
+    try:
+        from discopt.solvers.nlp_ipopt import _infer_constraint_bounds
+
+        model = getattr(evaluator, "_model", None)
+        c_lb, c_ub = _infer_constraint_bounds(model)
+        x_point = 0.5 * (sub_lb + sub_ub)
+        cons = np.asarray(evaluator.evaluate_constraints(x_point), dtype=np.float64)
+        if not np.all(np.isfinite(cons)):
+            return False
+        return bool(np.any(cons < c_lb - tol) or np.any(cons > c_ub + tol))
+    except Exception:
+        return False
+
+
 class _BoundsProxy:
     """Wraps an NLPEvaluator with overridden variable bounds."""
 
@@ -467,6 +552,11 @@ def _add_oa_cuts(
         # This cut is: coeffs @ x <= rhs (underestimates the objective)
         oa_A_rows.append(obj_cut.coeffs.copy())
         oa_b_rows.append(obj_cut.rhs)
+
+
+def _int_config_key(x_master, int_indices) -> tuple[int, ...]:
+    """Canonical hashable key for the integer part of a master solution."""
+    return tuple(int(round(x_master[idx])) for idx in int_indices)
 
 
 def _add_no_good_cut(x_master, int_indices, oa_A_rows, oa_b_rows, n_vars):

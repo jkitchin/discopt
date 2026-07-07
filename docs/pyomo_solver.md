@@ -84,5 +84,24 @@ order**, `Model.solve` runs, and the solution is mapped back by index. Consequen
 - Models Pyomo can write to `.nl` but whose operators discopt's reader does not
   support return a structured `error` result with a message rather than crashing.
 
-A future direct in-memory translator (`from_pyomo`) may replace the `.nl`
+## Importing a Pyomo model as a discopt `Model`
+
+To get a native discopt `Model` from a Pyomo `ConcreteModel` (rather than just
+solving it), use `discopt.modeling.from_pyomo`:
+
+```python
+import pyomo.environ as pyo
+import discopt.modeling as dm
+
+m = pyo.ConcreteModel()
+m.x = pyo.Var(bounds=(0, 10))
+m.obj = pyo.Objective(expr=(m.x - 3) ** 2)
+
+dmodel = dm.from_pyomo(m)   # a discopt Model
+result = dmodel.solve()
+```
+
+`from_pyomo` reuses the same temporary `.nl` round-trip as the solver plugin, so
+variables/constraints come back in `.nl` column/row order (names differ from the
+Pyomo model). A future direct in-memory translator may replace the `.nl`
 round-trip without changing this interface.

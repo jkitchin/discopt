@@ -65,6 +65,41 @@ def _square_aux_bounds(li, ui):
     return 0.0, max(li * li, ui * ui)
 
 
+def _monomial_rows(li, ui, p):
+    """The 3 envelope rows for ``s = x**p`` over a *sign-definite* box ``[li,ui]``
+    (2 endpoint tangents + 1 secant), each ``(coeff_on_x, coeff_on_s, rhs)`` of an
+    ``... <= rhs`` row. Generalizes :func:`_square_rows` (p=2) to any integer
+    power ``p >= 2``.
+
+    On a sign-definite box ``x**p`` is monotone and single-convexity: convex when
+    ``p`` is even or ``li >= 0``; concave when ``p`` is odd and ``ui <= 0``. In the
+    convex case the two endpoint tangents underestimate and the secant
+    overestimates (exactly the ``x**2`` pattern); in the concave case the roles
+    flip. Reproduces ``build_milp_relaxation`` row-for-row (validated).
+    """
+    fl, fu = li**p, ui**p
+    dfl, dfu = p * li ** (p - 1), p * ui ** (p - 1)
+    slope = (fu - fl) / (ui - li)
+    convex = (p % 2 == 0) or (li >= 0.0)
+    if convex:
+        return [
+            (dfl, -1.0, dfl * li - fl),  # s >= f'(li)*x - (f'(li)*li - f(li))  tangent at li
+            (dfu, -1.0, dfu * ui - fu),  # tangent at ui
+            (-slope, 1.0, fl - slope * li),  # s <= secant  (overestimator)
+        ]
+    return [
+        (-dfl, 1.0, fl - dfl * li),  # s <= tangent at li  (overestimator)
+        (-dfu, 1.0, fu - dfu * ui),  # tangent at ui
+        (slope, -1.0, slope * li - fl),  # s >= secant  (underestimator)
+    ]
+
+
+def _monomial_aux_bounds(li, ui, p):
+    """min/max of ``x**p`` over a sign-definite ``[li,ui]`` (monotone there)."""
+    a, b = li**p, ui**p
+    return (a, b) if a <= b else (b, a)
+
+
 class IncrementalMcCormickLP:
     """Build the McCormick LP structure once; patch box-dependent rows per node."""
 
@@ -72,6 +107,7 @@ class IncrementalMcCormickLP:
         self.ok = False
         self.model = model
         self.terms = terms
+        self._validated_regimes = frozenset()  # sign regimes _validate exercised
         try:
             self._build_structure()
             self._validate()
@@ -97,10 +133,25 @@ class IncrementalMcCormickLP:
 
     def _build_structure(self):
         n = len(self.model._variables)
-        # probe box: distinct, strictly positive bounds so every McCormick
-        # coefficient is nonzero -> row support reveals {factors, aux} cleanly.
-        lb_p = np.array([1.0 + 0.0 * k for k in range(n)])
-        ub_p = np.array([7.0 + 1.0 * k for k in range(n)])
+        # Per-variable ROOT sign regime (cert:T1.2). A monomial ``x**p`` has a
+        # box-*sign*-dependent row structure (3 rows on a sign-definite box, 4/2
+        # when the box strictly spans zero), so it can be patched only when the
+        # variable's root box is sign-definite — which branching preserves, since
+        # it only shrinks boxes. ``+1`` = ``lb>=0``, ``-1`` = ``ub<=0``, ``0`` =
+        # spans zero (any monomial on such a var is unmappable below).
+        root_lb = np.array([float(np.min(v.lb)) for v in self.model._variables])
+        root_ub = np.array([float(np.max(v.ub)) for v in self.model._variables])
+        self._root_sign = np.where(root_lb >= 0.0, 1, np.where(root_ub <= 0.0, -1, 0))
+        # probe box: distinct, strictly *sign-matched* bounds so every McCormick
+        # coefficient is nonzero (row support reveals {factors, aux} cleanly) and
+        # the cached convex/concave power rows match the cold build's regime.
+        lb_p = np.empty(n)
+        ub_p = np.empty(n)
+        for k in range(n):
+            if self._root_sign[k] < 0:
+                lb_p[k], ub_p[k] = -(7.0 + k), -1.0
+            else:
+                lb_p[k], ub_p[k] = 1.0, 7.0 + k
         A, b, bnds, c, info, _ = self._full_build(lb_p, ub_p)
         self.n = n
         self.ncol = A.shape[1]
@@ -109,7 +160,7 @@ class IncrementalMcCormickLP:
         self.base_b = b.copy()
         self.base_bounds = bnds.copy()
         self.bilinear = dict(info.get("bilinear", {}))
-        self.monomial = {k: v for k, v in info.get("monomial", {}).items() if k[1] == 2}
+        self.monomial = dict(info.get("monomial", {}))  # any integer power p >= 2
 
         # map each product to its row indices (support subset of {factors, aux})
         supp = [set(np.nonzero(np.abs(A[k]) > _TOL)[0]) for k in range(A.shape[0])]
@@ -119,17 +170,20 @@ class IncrementalMcCormickLP:
             if len(rows) != 4:
                 raise ValueError(f"bilinear ({i},{j}) -> {len(rows)} rows, expected 4")
             self.bilin_rows[(i, j, a)] = rows
-        self.sq_rows = {}
-        for (i, _p), a in self.monomial.items():
+        # monomial x_i**p, any p >= 2, gated on a sign-definite root box.
+        self.mono_rows = {}
+        for (i, p), a in self.monomial.items():
+            if self._root_sign[i] == 0:
+                raise ValueError(f"monomial x_{i}^{p}: root box spans zero (unmappable)")
             rows = [k for k in range(A.shape[0]) if a in supp[k] and supp[k] <= {i, a}]
             if len(rows) != 3:
-                raise ValueError(f"square x_{i}^2 -> {len(rows)} rows, expected 3")
-            self.sq_rows[(i, a)] = rows
+                raise ValueError(f"monomial x_{i}^{p} -> {len(rows)} rows, expected 3")
+            self.mono_rows[(i, a, p)] = rows
         # the union of all product rows must be exactly the box-dependent rows
         self._prod_rows = set()
         for rs in self.bilin_rows.values():
             self._prod_rows |= set(rs)
-        for rs in self.sq_rows.values():
+        for rs in self.mono_rows.values():
             self._prod_rows |= set(rs)
 
     # -- per-node patch ---------------------------------------------------- #
@@ -150,14 +204,14 @@ class IncrementalMcCormickLP:
                 A[k, a] = cw
                 b[k] = rhs
             bounds[a, 0], bounds[a, 1] = _bilinear_aux_bounds(li, ui, lj, uj)
-        for (i, a), rows in self.sq_rows.items():
+        for (i, a, p), rows in self.mono_rows.items():
             li, ui = lb[i], ub[i]
-            for k, (ci, cs, rhs) in zip(rows, _square_rows(i, a, li, ui)):
+            for k, (ci, cs, rhs) in zip(rows, _monomial_rows(li, ui, p)):
                 A[k] = 0.0
                 A[k, i] = ci
                 A[k, a] = cs
                 b[k] = rhs
-            bounds[a, 0], bounds[a, 1] = _square_aux_bounds(li, ui)
+            bounds[a, 0], bounds[a, 1] = _monomial_aux_bounds(li, ui, p)
         return A, b, bounds
 
     # -- soundness gate ---------------------------------------------------- #
@@ -168,13 +222,85 @@ class IncrementalMcCormickLP:
         rows = np.hstack([np.round(A, 6), np.round(b, 6).reshape(-1, 1)])
         return sorted(map(tuple, rows.tolist()))
 
-    def _validate(self, trials=4):
-        rng_boxes = [
-            (np.array([0.0] * self.n), np.array([3.0 + (k % 3)] * self.n)) for k in range(trials)
-        ]
-        # a couple of asymmetric boxes too
-        rng_boxes.append((np.arange(self.n, dtype=float), np.arange(self.n, dtype=float) + 5))
+    @staticmethod
+    def _box_sign_regime(lo, hi):
+        """Classify a single variable's box ``[lo,hi]`` into a sign regime label so
+        the validation set can prove it spans several. ``"pos"`` (``lo>0``),
+        ``"neg"`` (``hi<0``), ``"span"`` (``lo<0<hi``, strictly crosses zero),
+        ``"degen"`` (``lo==hi``), ``"zero_lb"`` (``lo==0<hi``, the boundary)."""
+        if lo == hi:
+            return "degen"
+        if lo == 0.0:
+            return "zero_lb"
+        if lo > 0.0:
+            return "pos"
+        if hi <= 0.0:
+            return "neg"
+        return "span"
+
+    def _validation_boxes(self):
+        """The validation boxes fed to :meth:`_validate`, as ``(lo, hi)`` pairs.
+
+        Every box is a *reachable* B&B sub-box of the root: branching only shrinks a
+        box, so a var that is sign-definite at the root (``_root_sign != 0``) keeps
+        that sign — a positive var never gets ``lb<0``, a negative var never gets
+        ``ub>0``. A **spanning** var (``_root_sign==0``), however, carries no
+        monomial (gated out in :meth:`_build_structure`) and its real nodes DO carry
+        negative / zero-spanning bounds, so the boxes below deliberately drive those
+        vars through negative-lb, zero-spanning (``lb<0<ub``), mixed-sign and
+        degenerate (``lb==ub``) regimes — exactly the sign regimes that dominate
+        real nodes and that the earlier ``lb>=0``-only set never exercised (C-21).
+        """
+        # Per trial, ``kind`` says how each spanning var sits relative to zero;
+        # sign-definite vars follow their root sign with a varying width/offset.
+        kinds = ["shift_pos", "zero_lb", "span", "neg", "span_wide", "degen"]
+        boxes = []
+        for t, kind in enumerate(kinds):
+            w = 2.0 + (t % 3)
+            lo = np.empty(self.n)
+            hi = np.empty(self.n)
+            for i in range(self.n):
+                if self._root_sign[i] < 0:
+                    # Negative-definite root: stay ub<=0 (reachable sub-box).
+                    hi[i] = -0.5 - 0.3 * i
+                    lo[i] = hi[i] - w
+                elif self._root_sign[i] > 0:
+                    # Positive-definite root: stay lb>=0 (reachable sub-box). Even
+                    # trials touch the lb==0 boundary.
+                    lo[i] = (0.5 + 0.3 * i) if (t % 2) else 0.0
+                    hi[i] = lo[i] + w
+                else:
+                    # Spanning root: exercise the negative / zero-spanning regimes
+                    # that real nodes reach and the old validation set never did.
+                    off = 0.2 * i
+                    if kind == "shift_pos":
+                        lo[i], hi[i] = 0.5 + off, 0.5 + off + w
+                    elif kind == "zero_lb":
+                        lo[i], hi[i] = 0.0, w
+                    elif kind == "span":
+                        lo[i], hi[i] = -(1.0 + off), 1.0 + off
+                    elif kind == "neg":
+                        hi[i] = -0.5 - off
+                        lo[i] = hi[i] - w
+                    elif kind == "span_wide":
+                        lo[i], hi[i] = -(2.0 + off + w), 1.5 + off
+                    else:  # degen
+                        lo[i] = hi[i] = -0.5 - off
+            boxes.append((lo, hi))
+        return boxes
+
+    def _validate(self):
+        # Reachable, sign-diverse validation boxes (C-21 / cert:T1.2): each box is a
+        # sub-box of the root (so the patched convex/concave power rows are compared
+        # against a cold build in the *same* regime), but spanning vars are driven
+        # through negative-lb, zero-spanning, mixed-sign and degenerate boxes — the
+        # sign regimes real nodes reach. The patched row-set + aux bounds must
+        # reproduce the cold ``build_milp_relaxation`` exactly on every one.
+        rng_boxes = self._validation_boxes()
+        regimes = set()
         for lb, ub in rng_boxes:
+            for i in range(self.n):
+                regimes.add(self._box_sign_regime(float(lb[i]), float(ub[i])))
             Ap, bp, bdp = self._patch(lb, ub)
             Af, bf, bdf, _, _, _ = self._full_build(lb, ub)
             if Ap.shape != Af.shape:
@@ -183,6 +309,7 @@ class IncrementalMcCormickLP:
                 raise ValueError("row-set mismatch")
             if not np.allclose(bdp, bdf, atol=1e-6, rtol=1e-6):
                 raise ValueError("bounds mismatch")
+        self._validated_regimes = frozenset(regimes)
         self.ok = True
 
     # -- solve ------------------------------------------------------------- #
@@ -218,6 +345,64 @@ class IncrementalMcCormickLP:
         if result is None or result.status != SolveStatus.OPTIMAL or result.objective is None:
             return None, None, None
         return float(result.objective), np.asarray(result.x, dtype=float), out_basis
+
+    def solve_assembled_full(
+        self, A, b, bounds, in_basis=None, c_override=None, *, return_cert=False
+    ):
+        """Like :meth:`solve_assembled`, but return the terminal *status* too so a
+        caller can tell a (certified) ``infeasible`` apart from any other
+        non-optimal verdict (time limit / numerical error).
+
+        Returns ``(status, bound, x, out_basis, farkas_certified)`` where
+        ``status`` is one of ``"optimal"``, ``"infeasible"`` (the LP feasible set
+        is empty over this box — a rigorous fathoming proof, since the McCormick
+        polytope is a valid outer approximation), or ``"other"`` (no certified
+        verdict). ``bound``/``x`` are populated only for ``"optimal"``.
+
+        ``bound`` is the **Neumaier–Shcherbina safe lower bound** built from the
+        simplex's own row duals (issue #356) — sound at any conditioning, so it is
+        never above the true LP optimum even when an ill-conditioned lifted basis
+        makes the raw vertex objective drift high. ``farkas_certified`` is ``True``
+        only when an ``"infeasible"`` verdict was independently proven by a
+        verified Farkas dual ray; a caller can then fathom rigorously without any
+        second (HiGHS/equilibration) solve.
+
+        When ``return_cert`` is set the tuple is extended to
+        ``(..., farkas_certified, cert)`` with the :class:`LpWarmCert` carrying the
+        node LP's row duals / column status / safe bound (cert:T2.4a) -- a pure
+        side-channel; ``bound``/``x`` are computed identically whether or not it is
+        requested."""
+        from discopt.solvers import SolveStatus
+        from discopt.solvers.milp_simplex import LpWarmCert, solve_lp_warm_std
+
+        cobj = self.c if c_override is None else np.asarray(c_override, dtype=np.float64)
+        _empty = LpWarmCert(safe_bound=None, farkas_certified=False)
+
+        def _ret(status, bound, x, out_basis, farkas, cert=_empty):
+            if return_cert:
+                return status, bound, x, out_basis, farkas, cert
+            return status, bound, x, out_basis, farkas
+
+        try:
+            result, out_basis, cert = solve_lp_warm_std(
+                cobj, sp.csr_matrix(A), b, bounds, in_basis=in_basis, return_cert=True
+            )
+        except Exception:
+            return _ret("other", None, None, None, False)
+        if result is None:
+            return _ret("other", None, None, None, False)
+        if result.status == SolveStatus.INFEASIBLE:
+            return _ret("infeasible", None, None, None, bool(cert.farkas_certified), cert)
+        if result.status != SolveStatus.OPTIMAL or result.bound is None:
+            return _ret("other", None, None, None, False)
+        return _ret(
+            "optimal",
+            float(result.bound),
+            np.asarray(result.x, dtype=float),
+            out_basis,
+            False,
+            cert,
+        )
 
     def solve(self, lb, ub, in_basis=None, c_override=None, cut_rows=None):
         """Solve the McCormick LP over [lb,ub] (plus optional cut rows); return

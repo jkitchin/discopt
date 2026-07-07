@@ -13,7 +13,7 @@ constraint ``x2 <= x1`` implies the argument is ``>= 1 > 0``.
 This module provides a ``LinearContext`` that holds the model's
 linear relaxation (variable bounds + linear inequality and equality
 constraints) and can answer range queries on affine expressions via
-two scipy ``linprog`` calls. The range is a sound enclosure over the
+two pure-Rust POUNCE LP solves. The range is a sound enclosure over the
 intersection of the box with the linear relaxation, so the resulting
 sign label is mathematically valid as a premise of a DCP rule.
 
@@ -41,6 +41,22 @@ from discopt.modeling.core import (
     UnaryOp,
     Variable,
 )
+
+# Relative margin widening the POUNCE-IPM affine-range enclosure so it stays a
+# sound outer bound despite the interior-point optimum's small tolerance (#356).
+_LP_ENCLOSURE_MARGIN = 1e-7
+
+# Per-solve wall-clock cap for the POUNCE affine-range LP. POUNCE's interior-point
+# method is pathologically slow on the ill-conditioned LPs some convexity probes
+# produce (hda's signomial-equilibrium rows), and convexity analysis issues many
+# such probes, so an unbounded solve can hang the whole (CI-visible) analysis.
+# Bounding it is sound: a non-optimal result falls back to the box-only enclosure
+# below, which is a valid (looser) outer bound — convexity then abstains rather
+# than mis-proves, exactly the conservative direction. Well-conditioned probes
+# solve far inside this budget (~milliseconds), so proven-convex detection is
+# unaffected; only the pathological ill-conditioned probes hit the cap and abstain.
+_LP_POUNCE_TIME_LIMIT = 0.5
+
 
 # ──────────────────────────────────────────────────────────────────────
 # Affine coefficient extraction
@@ -194,9 +210,8 @@ class LinearContext:
         """Sound enclosure of ``coeffs · x + const`` over the relaxation.
 
         Uses the declared variable bounds as a free box-only enclosure;
-        invokes ``scipy.optimize.linprog`` only when linear constraints
-        are present, since the box-only bound is already optimal
-        otherwise.
+        invokes the pure-Rust POUNCE LP only when linear constraints are
+        present, since the box-only bound is already optimal otherwise.
         """
         # Box-only enclosure is optimal when there are no linear rows.
         lo_box, hi_box = _box_range(coeffs, self.lb, self.ub)
@@ -205,13 +220,11 @@ class LinearContext:
         if self.A_ub.size == 0 and self.A_eq.size == 0:
             return lo_box, hi_box
 
-        from scipy.optimize import linprog
+        from discopt.solvers import SolveStatus
+        from discopt.solvers.lp_pounce import solve_lp
 
-        # Replace ±inf in variable bounds with None for linprog's API.
-        bounds = [
-            (None if not np.isfinite(lo) else float(lo), None if not np.isfinite(hi) else float(hi))
-            for lo, hi in zip(self.lb, self.ub)
-        ]
+        # ``bounds`` as (lo, hi) tuples; POUNCE maps ±inf via its own sentinel.
+        bounds = [(float(lo), float(hi)) for lo, hi in zip(self.lb, self.ub)]
 
         A_ub = self.A_ub if self.A_ub.size else None
         b_ub = self.b_ub if self.b_ub.size else None
@@ -219,30 +232,40 @@ class LinearContext:
         b_eq = self.b_eq if self.b_eq.size else None
 
         try:
-            lo_res = linprog(
+            lo_res = solve_lp(
                 coeffs,
                 A_ub=A_ub,
                 b_ub=b_ub,
                 A_eq=A_eq,
                 b_eq=b_eq,
                 bounds=bounds,
-                method="highs",
+                time_limit=_LP_POUNCE_TIME_LIMIT,
             )
-            hi_res = linprog(
+            hi_res = solve_lp(
                 -coeffs,
                 A_ub=A_ub,
                 b_ub=b_ub,
                 A_eq=A_eq,
                 b_eq=b_eq,
                 bounds=bounds,
-                method="highs",
+                time_limit=_LP_POUNCE_TIME_LIMIT,
             )
-        except (ValueError, RuntimeError):
+        except (ValueError, RuntimeError, ImportError):
             return lo_box, hi_box
 
-        lo = float(lo_res.fun) + const if lo_res.success else lo_box
-        hi = -float(hi_res.fun) + const if hi_res.success else hi_box
-        # Intersect with the box-only enclosure; linprog errors only widen.
+        # POUNCE is an interior-point method, so the reported optimum carries a
+        # small tolerance; widen each side by a magnitude-scaled margin so the
+        # range stays a *sound* enclosure (lo ≤ true min, hi ≥ true max) rather
+        # than risk an over-tight one that would misclassify convexity (#356).
+        lo = lo_box
+        if lo_res.status == SolveStatus.OPTIMAL and lo_res.objective is not None:
+            f = float(lo_res.objective)
+            lo = f - _LP_ENCLOSURE_MARGIN * (1.0 + abs(f)) + const
+        hi = hi_box
+        if hi_res.status == SolveStatus.OPTIMAL and hi_res.objective is not None:
+            f = -float(hi_res.objective)
+            hi = f + _LP_ENCLOSURE_MARGIN * (1.0 + abs(f)) + const
+        # Intersect with the box-only enclosure; LP errors / margins only widen.
         return max(lo, lo_box), min(hi, hi_box)
 
 

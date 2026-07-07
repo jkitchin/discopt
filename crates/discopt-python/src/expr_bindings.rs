@@ -367,16 +367,25 @@ impl PyModelRepr {
     }
 
     /// Evaluate the objective at a given point x.
+    ///
+    /// Accepts non-contiguous input (e.g. a strided/sliced or transposed numpy
+    /// view): the values are materialized into a contiguous buffer rather than
+    /// requiring a zero-copy slice. `as_slice()` returns `None` for a
+    /// non-contiguous array, and unwrapping it panicked across the FFI boundary
+    /// (Rust-2); collecting the elements evaluates the point instead.
     fn evaluate_objective(&self, x: numpy::PyReadonlyArray1<f64>) -> f64 {
-        let x_arr = x.as_array();
-        self.inner.evaluate_objective(x_arr.as_slice().unwrap())
+        let x_vec: Vec<f64> = x.as_array().iter().copied().collect();
+        self.inner.evaluate_objective(&x_vec)
     }
 
     /// Evaluate constraint body at a given point x.
+    ///
+    /// Accepts non-contiguous input by materializing a contiguous buffer (see
+    /// [`Self::evaluate_objective`]); Rust-2.
     fn evaluate_constraint(&self, i: usize, x: numpy::PyReadonlyArray1<f64>) -> f64 {
-        let x_arr = x.as_array();
+        let x_vec: Vec<f64> = x.as_array().iter().copied().collect();
         self.inner
-            .evaluate_expr(self.inner.constraints[i].body, x_arr.as_slice().unwrap())
+            .evaluate_expr(self.inner.constraints[i].body, &x_vec)
     }
 
     /// Run FBBT (Feasibility-Based Bound Tightening) on the model.
@@ -925,6 +934,15 @@ pub fn model_to_repr(
         param_expr_ids.insert(py_id, expr_id);
     }
 
+    // Phase 4 CSE (hash-consing): intern nodes built by `convert_expr` for the
+    // objective and constraints so that structurally-identical subexpressions
+    // (repeated products, shared nonlinear terms, common constants) collapse to a
+    // single arena node instead of being duplicated per occurrence. Seeded from the
+    // variable/parameter/builder nodes already in the arena. Semantic-preserving by
+    // construction (see `ExprArena::intern`); disabled before the model leaves this
+    // function so downstream passes keep plain append semantics.
+    arena.enable_interning();
+
     // Determine objective: builder's objective takes priority, fall back to model._objective.
     let py_objective = model.getattr("_objective")?;
     let (objective, objective_sense) = if let Some(obj_id) = builder_objective {
@@ -1008,6 +1026,10 @@ pub fn model_to_repr(
         });
     }
 
+    // Construction complete: drop the intern table so downstream mutating passes
+    // (presolve/reformulation) see plain, unshared append semantics.
+    arena.disable_interning();
+
     let inner = ModelRepr {
         arena,
         objective,
@@ -1074,9 +1096,9 @@ fn convert_expr(
             let arr: numpy::PyReadonlyArrayDyn<f64> = value_obj.extract()?;
             let shape: Vec<usize> = arr.as_array().shape().to_vec();
             if data.len() == 1 {
-                Ok(arena.add(ExprNode::Constant(data[0])))
+                Ok(arena.intern(ExprNode::Constant(data[0])))
             } else {
-                Ok(arena.add(ExprNode::ConstantArray(data, shape)))
+                Ok(arena.intern(ExprNode::ConstantArray(data, shape)))
             }
         }
         "BinaryOp" => {
@@ -1097,7 +1119,7 @@ fn convert_expr(
             let right = obj.getattr("right")?;
             let left_id = convert_expr(_py, &left, arena, var_ids, param_ids)?;
             let right_id = convert_expr(_py, &right, arena, var_ids, param_ids)?;
-            Ok(arena.add(ExprNode::BinaryOp {
+            Ok(arena.intern(ExprNode::BinaryOp {
                 op,
                 left: left_id,
                 right: right_id,
@@ -1116,7 +1138,7 @@ fn convert_expr(
             };
             let operand = obj.getattr("operand")?;
             let operand_id = convert_expr(_py, &operand, arena, var_ids, param_ids)?;
-            Ok(arena.add(ExprNode::UnaryOp {
+            Ok(arena.intern(ExprNode::UnaryOp {
                 op,
                 operand: operand_id,
             }))
@@ -1154,16 +1176,14 @@ fn convert_expr(
                 "norm1" => MathFunc::Norm1,
                 "norminf" => MathFunc::NormInf,
                 // General integer-order p-norm "norm{p}" (p != 1, 2, inf).
-                other if other.starts_with("norm") => {
-                    match other["norm".len()..].parse::<u32>() {
-                        Ok(p) if p >= 1 => MathFunc::NormP(p),
-                        _ => {
-                            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
-                                "Unknown MathFunc: {func_str}"
-                            )));
-                        }
+                other if other.starts_with("norm") => match other["norm".len()..].parse::<u32>() {
+                    Ok(p) if p >= 1 => MathFunc::NormP(p),
+                    _ => {
+                        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                            "Unknown MathFunc: {func_str}"
+                        )));
                     }
-                }
+                },
                 _ => {
                     return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
                         "Unknown MathFunc: {func_str}"
@@ -1176,14 +1196,14 @@ fn convert_expr(
             for a in &py_args_tuple {
                 args.push(convert_expr(_py, a, arena, var_ids, param_ids)?);
             }
-            Ok(arena.add(ExprNode::FunctionCall { func, args }))
+            Ok(arena.intern(ExprNode::FunctionCall { func, args }))
         }
         "IndexExpression" => {
             let base = obj.getattr("base")?;
             let base_id = convert_expr(_py, &base, arena, var_ids, param_ids)?;
             let py_index = obj.getattr("index")?;
             let index_spec = convert_index_spec(&py_index)?;
-            Ok(arena.add(ExprNode::Index {
+            Ok(arena.intern(ExprNode::Index {
                 base: base_id,
                 index: index_spec,
             }))
@@ -1193,7 +1213,7 @@ fn convert_expr(
             let right = obj.getattr("right")?;
             let left_id = convert_expr(_py, &left, arena, var_ids, param_ids)?;
             let right_id = convert_expr(_py, &right, arena, var_ids, param_ids)?;
-            Ok(arena.add(ExprNode::MatMul {
+            Ok(arena.intern(ExprNode::MatMul {
                 left: left_id,
                 right: right_id,
             }))
@@ -1202,7 +1222,7 @@ fn convert_expr(
             let operand = obj.getattr("operand")?;
             let operand_id = convert_expr(_py, &operand, arena, var_ids, param_ids)?;
             let axis: Option<usize> = obj.getattr("axis")?.extract()?;
-            Ok(arena.add(ExprNode::Sum {
+            Ok(arena.intern(ExprNode::Sum {
                 operand: operand_id,
                 axis,
             }))
@@ -1214,7 +1234,7 @@ fn convert_expr(
             for t in &py_terms_list {
                 terms.push(convert_expr(_py, t, arena, var_ids, param_ids)?);
             }
-            Ok(arena.add(ExprNode::SumOver { terms }))
+            Ok(arena.intern(ExprNode::SumOver { terms }))
         }
         other => Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(format!(
             "Unknown expression type: {other}"

@@ -131,13 +131,49 @@ def _separate_node_cuts(A, b, bounds, x, ncol, c, max_cuts=12):
         gc = _separate_gomory_cuts(lp, xv, ncol, list(range(ncol)), max_cuts=max_cuts)
         if gc is not None:
             for i in range(len(gc[1])):  # GMI returns coeffs·x >= rhs -> negate to <=
-                cuts.append((-np.asarray(gc[0][i])[:ncol], -float(gc[1][i])))
+                row = -np.asarray(gc[0][i])[:ncol]
+                # GMI validity holds only up to machine precision (gomory.rs:31); the
+                # raw crossover vertex the cut separates carries ~1e-12 float error, so
+                # a cut whose boundary passes through a feasible integer point could
+                # shave it. Relax the <= rhs outward by the same safe margin every
+                # other GMI consumer uses (solver.py _augment_lpdata_with_gomory_cuts,
+                # cmir_cuts.py) — C-10. Sound: it only ever moves the cut AWAY from the
+                # feasible region, never removing a feasible point.
+                margin = 1e-7 * (1.0 + float(np.abs(row).sum()))
+                cuts.append((row, -float(gc[1][i]) + margin))
     except Exception:
         pass
     # complemented-MIR (multi-row aggregation)
     try:
         mc = separate_cmir(A, b, x, lb, ub, is_int, max_cuts=max_cuts)
         cuts.extend(mc)
+    except Exception:
+        pass
+    # Native Marchand–Wolsey aggregation c-MIR (cert:P3). DEFAULT-OFF, gated by
+    # DISCOPT_CMIR_AGGREGATION. Pairs <= rows with nonnegative weights to cancel a
+    # column, then applies the native Rust complemented MIR to the aggregate —
+    # valid by construction (nonnegative row combo + valid MIR; proven by the Rust
+    # aggregation_validity_random_systems property test). Every column here is an
+    # integer-valued (structural or product-aux) column, so the separator's
+    # fractional-column fallback picks the cancel target. It only ADDS valid cuts.
+    try:
+        from discopt.solver import _cmir_aggregation_enabled
+
+        if _cmir_aggregation_enabled():
+            from discopt._rust import aggregation_mir_cuts_py
+
+            res = aggregation_mir_cuts_py(
+                np.ascontiguousarray(np.asarray(A, dtype=np.float64)),
+                np.ascontiguousarray(np.asarray(b, dtype=np.float64).ravel()),
+                np.ascontiguousarray(lb.astype(np.float64)),
+                np.ascontiguousarray(ub.astype(np.float64)),
+                np.ascontiguousarray(is_int),
+                np.ascontiguousarray(np.asarray(x, dtype=np.float64).ravel()),
+            )
+            if res is not None:
+                acoef, arhs = np.asarray(res[0]), np.asarray(res[1])
+                for i in range(min(acoef.shape[0], max_cuts)):
+                    cuts.append((acoef[i][:ncol], float(arhs[i])))
     except Exception:
         pass
     return cuts

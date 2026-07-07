@@ -65,6 +65,11 @@ pub struct TreeStats {
     pub global_lower_bound: f64,
     /// Current optimality gap (relative).
     pub gap: f64,
+    /// True when a node was fathomed with no branching direction and no valid
+    /// finite dual bound (an unbounded-below / spatially-unbranchable root). The
+    /// tree bound is pinned at -inf and the search must NOT be certified optimal
+    /// even though `open_nodes == 0` (issue #467).
+    pub bound_unresolved: bool,
 }
 
 /// Internal buffer for results waiting to be processed.
@@ -127,6 +132,23 @@ pub struct TreeManager {
     /// all-false unless registered via [`Self::set_branch_deprioritized`].
     /// Fallback in [`select_spatial_branch_variable`] preserves completeness.
     branch_deprioritized: Vec<bool>,
+    /// Set true (and never cleared within a solve) when a node is fathomed with
+    /// no branching direction AND no validly-established finite dual bound (its
+    /// `local_lower_bound` is still `-inf`/sentinel — e.g. an unbounded-below,
+    /// spatially-unbranchable root). Such a subtree is genuinely UNRESOLVED: no
+    /// relaxation proved a lower bound and there is no finite dimension to branch
+    /// on, so the tree must NOT declare `global_lower_bound := incumbent` and
+    /// certify optimality. When set, [`Self::update_global_lower_bound`] forces
+    /// `global_lower_bound = -inf` so `gap() = ∞` and the search reports
+    /// feasible/unknown rather than a false optimal (issue #467).
+    bound_unresolved: bool,
+    /// R3a measurement counter (temporary, behavior-neutral): per-variable
+    /// branch frequency. Incremented once per branching event (integer or
+    /// spatial) with the branched flat column index. Length `n_vars`. Read by
+    /// the responsiveness-fingerprint experiment to compare actually-branched
+    /// variables against the box-shrink responsiveness ranking. Does not affect
+    /// any branching or bounding decision.
+    branch_var_counts: Vec<usize>,
 }
 
 impl TreeManager {
@@ -166,6 +188,21 @@ impl TreeManager {
             nonconvex: false,
             spatial_integer_cols,
             branch_deprioritized,
+            bound_unresolved: false,
+            branch_var_counts: vec![0; n_vars],
+        }
+    }
+
+    /// R3a measurement accessor (temporary): per-variable branch frequency,
+    /// length `n_vars`. See [`Self::branch_var_counts`].
+    pub fn branch_var_counts(&self) -> &[usize] {
+        &self.branch_var_counts
+    }
+
+    /// Increment the R3a branch counter for a branched flat column index.
+    fn record_branch_var(&mut self, var_index: usize) {
+        if let Some(c) = self.branch_var_counts.get_mut(var_index) {
+            *c += 1;
         }
     }
 
@@ -256,7 +293,19 @@ impl TreeManager {
                 "import_results: node {:?} not in Evaluated status",
                 result.node_id
             );
-            node.local_lower_bound = result.lower_bound;
+            // Floor the imported bound at the node's inherited (parent) lower
+            // bound rather than overwriting it. A child's box is a subset of its
+            // parent's, so the parent's lower bound is itself a valid lower bound
+            // for the child (parent_lb <= min over parent box <= min over child
+            // box). Both `result.lower_bound` and the inherited value are therefore
+            // valid lower bounds, and the tighter (larger) one is the sound choice.
+            // This is what keeps the tree's `global_lower_bound` a usable dual
+            // bound: when the Python orchestrator cannot bound a node (the NLP
+            // objective is not a valid bound on a nonconvex node, or the per-node
+            // relaxation hit the deadline) it imports `-inf`; without this floor a
+            // single such open node would drag `global_lower_bound` to `-inf` and
+            // discard the bound the parent already proved.
+            node.local_lower_bound = result.lower_bound.max(node.local_lower_bound);
             // Store solution for warm-starting children.
             node.parent_solution = Some(result.solution.clone());
         }
@@ -418,6 +467,7 @@ impl TreeManager {
                 self.pool.add(left);
                 self.pool.add(right);
                 stats.branched += 1;
+                self.record_branch_var(decision.var_index);
             } else if self.nonconvex && int_feasible {
                 // No fractional integer variable, but nonconvex mode: branch
                 // spatially. Independent continuous variables and integer
@@ -495,8 +545,28 @@ impl TreeManager {
                         self.pool.add(left);
                         self.pool.add(right);
                         stats.branched += 1;
+                        self.record_branch_var(dep_decision.var_index);
                     } else {
-                        // Every domain is tight; fathom.
+                        // No branching direction remains. Whether this fathom is
+                        // sound depends on the node's dual bound:
+                        //   * finite `local_lower_bound`: a valid relaxation bound
+                        //     WAS established and every domain is tight, so the node
+                        //     is genuinely resolved — fathom as before (this is the
+                        //     honest root-close case, e.g. `chance`/`st_miqp3`).
+                        //   * non-finite (`-inf`/sentinel): no relaxation ever proved
+                        //     a lower bound AND there is no finite dimension to branch
+                        //     on (an unbounded-below, spatially-unbranchable root).
+                        //     The subtree is UNRESOLVED; fathoming it and letting the
+                        //     global bound collapse to the incumbent would falsely
+                        //     certify a local/near-feasible point as the global
+                        //     optimum (issue #467). Mark the tree bound unresolved so
+                        //     `update_global_lower_bound` pins `global_lower_bound` at
+                        //     -inf (gap = ∞ → feasible/unknown, never optimal). Still
+                        //     fathom the node so the driver cannot infinite-loop on a
+                        //     node it can neither branch nor bound.
+                        if !self.pool.get(result.node_id).local_lower_bound.is_finite() {
+                            self.bound_unresolved = true;
+                        }
                         self.pool.get_mut(result.node_id).status = NodeStatus::Fathomed;
                         stats.fathomed += 1;
                     }
@@ -510,9 +580,11 @@ impl TreeManager {
                     self.pool.add(left);
                     self.pool.add(right);
                     stats.branched += 1;
+                    self.record_branch_var(sidx);
                 } else {
                     // Continuous bisection wins.
                     let (cont_decision, _) = cont.unwrap();
+                    let cont_var = cont_decision.var_index;
                     let parent = self.pool.get(result.node_id).clone();
                     self.pool.get_mut(result.node_id).status = NodeStatus::Branched;
                     let (left, right) =
@@ -520,9 +592,25 @@ impl TreeManager {
                     self.pool.add(left);
                     self.pool.add(right);
                     stats.branched += 1;
+                    self.record_branch_var(cont_var);
                 }
             } else {
-                // No fractional variable found — treat as fathomed.
+                // No fractional variable found — treat as fathomed. This branch
+                // is reached when the node produced no integer branch decision AND
+                // was not routed into the nonconvex spatial-branch block above —
+                // in particular when its bound is UNTRUSTED (`node_lb` non-finite),
+                // which forces `int_feasible = false`. An untrusted, unbranched
+                // node is not resolved: no relaxation proved a finite lower bound
+                // and (here) there was no branch direction, so fathoming it and
+                // letting `global_lower_bound` collapse to the incumbent would
+                // falsely certify a local/near-feasible incumbent as the global
+                // optimum on an unbounded-below / free-variable root (issue #467).
+                // Flag the tree bound unresolved so `update_global_lower_bound`
+                // pins the global bound at -inf (gap = ∞ → feasible/unknown). A
+                // trusted (finite-bound) node here IS resolved and stays certifiable.
+                if !trusted {
+                    self.bound_unresolved = true;
+                }
                 self.pool.get_mut(result.node_id).status = NodeStatus::Fathomed;
                 stats.fathomed += 1;
                 // Only a trusted (finite-bound, solver-verified) node may become
@@ -543,6 +631,16 @@ impl TreeManager {
 
     /// Recompute the global lower bound as the minimum over all open nodes.
     fn update_global_lower_bound(&mut self) {
+        // An unresolved subtree (a node fathomed with no branching direction and
+        // no valid finite bound) genuinely bounds the objective at -inf. Pin the
+        // global lower bound there and skip the min-over-open computation: neither
+        // the `min_lb == INFINITY → incumbent` collapse nor any finite open-node
+        // minimum may override an honest -inf, or the tree would certify a false
+        // optimal on an unbranchable, unbounded-below root (issue #467).
+        if self.bound_unresolved {
+            self.global_lower_bound = f64::NEG_INFINITY;
+            return;
+        }
         let mut min_lb = f64::INFINITY;
         for i in 0..self.pool.total_count() {
             let node = self.pool.get(NodeId(i));
@@ -609,6 +707,7 @@ impl TreeManager {
             incumbent_value: self.incumbent_value,
             global_lower_bound: self.global_lower_bound,
             gap: self.gap(),
+            bound_unresolved: self.bound_unresolved,
         }
     }
 
@@ -901,6 +1000,78 @@ mod tests {
         );
         assert!((tm.global_lower_bound - 1.92).abs() < 1e-12);
         assert!(tm.gap() >= 0.0);
+    }
+
+    #[test]
+    fn test_unresolved_bound_not_collapsed_to_incumbent() {
+        // Issue #467: a node fathomed with no branching direction and no valid
+        // finite dual bound (an unbounded-below / spatially-unbranchable root)
+        // must NOT let the tree declare `global_lower_bound := incumbent`. The
+        // bound must stay -inf so the gap is infinite and the search reports
+        // feasible/unknown, never a false optimal.
+        let mut tm = TreeManager::new(
+            1,
+            vec![f64::NEG_INFINITY],
+            vec![f64::INFINITY],
+            vec![],
+            SelectionStrategy::BestFirst,
+        );
+        tm.initialize();
+        // An incumbent was injected (e.g. a local NLP / feasibility-pump point).
+        tm.incumbent_value = 0.2986;
+        tm.incumbent_solution = Some(vec![0.0]);
+        // The (only) node was fathomed with no valid bound: mark it Fathomed with
+        // a -inf local bound and flag the tree bound unresolved, mirroring the
+        // no-branch-candidate / untrusted-node fathom sites in `process_evaluated`.
+        {
+            let node = tm.pool.get_mut(NodeId(0));
+            node.local_lower_bound = f64::NEG_INFINITY;
+            node.status = NodeStatus::Fathomed;
+        }
+        tm.bound_unresolved = true;
+
+        tm.update_global_lower_bound();
+
+        assert_eq!(
+            tm.global_lower_bound,
+            f64::NEG_INFINITY,
+            "unresolved subtree must keep global_lower_bound at -inf, not the incumbent"
+        );
+        assert_eq!(
+            tm.gap(),
+            f64::INFINITY,
+            "an unresolved -inf bound must yield an infinite gap (never a certified 0)"
+        );
+    }
+
+    #[test]
+    fn test_resolved_root_close_still_collapses_to_incumbent() {
+        // Contrast to the #467 case: when the bound is NOT flagged unresolved (a
+        // node was closed with a valid finite bound), the standard
+        // "all nodes closed → global_lower_bound = incumbent" behaviour must be
+        // preserved (the honest root-close, e.g. `chance`/`st_miqp3`).
+        let mut tm = TreeManager::new(
+            1,
+            vec![0.0],
+            vec![1.0],
+            vec![VarBranchInfo {
+                offset: 0,
+                size: 1,
+                is_integer: true,
+            }],
+            SelectionStrategy::BestFirst,
+        );
+        tm.initialize();
+        tm.incumbent_value = -6.0;
+        {
+            let node = tm.pool.get_mut(NodeId(0));
+            node.local_lower_bound = -6.0;
+            node.status = NodeStatus::Fathomed;
+        }
+        // bound_unresolved stays false.
+        tm.update_global_lower_bound();
+        assert!((tm.global_lower_bound - (-6.0)).abs() < 1e-12);
+        assert!(tm.gap() < 1e-9);
     }
 
     #[test]

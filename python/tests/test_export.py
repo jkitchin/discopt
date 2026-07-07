@@ -6,6 +6,7 @@ import tempfile
 from pathlib import Path
 
 import discopt.modeling as dm
+import numpy as np
 import pytest
 from discopt.export import to_lp, to_mps
 from discopt.export._extract import (
@@ -13,6 +14,7 @@ from discopt.export._extract import (
     extract_quadratic_terms,
     flatten_variables,
 )
+from discopt.modeling.core import Constant
 
 pytestmark = pytest.mark.unit
 
@@ -187,6 +189,74 @@ class TestExtractQuadraticTerms:
         assert len(quad) == 0
         assert linear.get(0, 0.0) == pytest.approx(3.0)
         assert linear.get(1, 0.0) == pytest.approx(2.0)
+
+
+# ─────────────────────────────────────────────────────────────
+# EX-7 (#413): array-valued Constant must not collapse to flat[0]
+# ─────────────────────────────────────────────────────────────
+
+
+class TestArrayConstantCollapse:
+    """Finding EX-7: an array-valued Constant in a scalar position silently
+    collapsed to its first element (``value.flat[0]``), so ``sum(constant_vector)``
+    returned the first element instead of the true sum, corrupting the export.
+    """
+
+    def _scalar_model(self):
+        m = dm.Model("ex7")
+        x = m.continuous("x", lb=0, ub=10)
+        return m, x
+
+    def test_sum_of_constant_vector_linear(self):
+        """sum([1,2,3,4]) must contribute 10.0, not 1.0."""
+        m, x = self._scalar_model()
+        flat = flatten_variables(m)
+        expr = x + dm.sum(Constant(np.array([1.0, 2.0, 3.0, 4.0])))
+        coeffs, const = extract_linear_terms(expr, flat, model_vars=m._variables)
+        assert const == pytest.approx(10.0)
+        assert coeffs.get(0, 0.0) == pytest.approx(1.0)
+
+    def test_sum_of_constant_vector_quadratic(self):
+        """Same reduction through the quadratic extractor."""
+        m, x = self._scalar_model()
+        flat = flatten_variables(m)
+        expr = x + dm.sum(Constant(np.array([1.0, 2.0, 3.0, 4.0])))
+        quad, linear, const = extract_quadratic_terms(expr, flat, model_vars=m._variables)
+        assert const == pytest.approx(10.0)
+        assert linear.get(0, 0.0) == pytest.approx(1.0)
+
+    def test_sum_of_scaled_constant_vector(self):
+        """A nested constant sub-DAG (2 * [1,2,3]) reduces to 12.0, not 2.0."""
+        m, x = self._scalar_model()
+        flat = flatten_variables(m)
+        expr = x + dm.sum(2.0 * Constant(np.array([1.0, 2.0, 3.0])))
+        _, const = extract_linear_terms(expr, flat, model_vars=m._variables)
+        assert const == pytest.approx(12.0)
+
+    def test_size_one_array_constant_still_scalar(self):
+        """A size-1 array constant broadcasts to a scalar and is accepted."""
+        m, x = self._scalar_model()
+        flat = flatten_variables(m)
+        _, const = extract_linear_terms(
+            x + Constant(np.array([5.0])), flat, model_vars=m._variables
+        )
+        assert const == pytest.approx(5.0)
+
+    def test_multi_element_array_in_scalar_slot_raises(self):
+        """A genuine array-in-scalar-slot must raise, not silently drop elements."""
+        m, x = self._scalar_model()
+        flat = flatten_variables(m)
+        with pytest.raises(ValueError, match="scalar position"):
+            extract_linear_terms(
+                x + Constant(np.array([1.0, 2.0, 3.0])), flat, model_vars=m._variables
+            )
+
+    def test_array_constant_coefficient_raises(self):
+        """An array constant multiplying a variable is not a scalar coefficient."""
+        m, x = self._scalar_model()
+        flat = flatten_variables(m)
+        with pytest.raises(ValueError, match="scalar position"):
+            extract_linear_terms(Constant(np.array([2.0, 3.0])) * x, flat, model_vars=m._variables)
 
 
 # ─────────────────────────────────────────────────────────────

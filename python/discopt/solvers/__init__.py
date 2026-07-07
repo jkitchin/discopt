@@ -96,6 +96,12 @@ class QPResult:
 
     ``infeasibility_certificate`` is populated (when available) on an
     ``INFEASIBLE`` result to witness *why* the QP is infeasible.
+
+    ``kkt_error`` is the solver's final KKT residual when it reports one
+    (interior-point backends only; ``None`` for vertex solvers like HiGHS that
+    reach an exact optimum). Consumers gate a POUNCE-first default on it: a
+    nonzero residual flags an unconverged "optimal" (issue #145) so the caller
+    can degrade to a vertex solver instead of trusting a drifted objective.
     """
 
     status: SolveStatus
@@ -109,6 +115,7 @@ class QPResult:
     iterations: int = 0
     wall_time: float = 0.0
     infeasibility_certificate: Optional[InfeasibilityCertificate] = None
+    kkt_error: Optional[float] = None
 
 
 @dataclass

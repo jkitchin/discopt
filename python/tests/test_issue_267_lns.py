@@ -217,3 +217,98 @@ def test_local_branching_no_improvement_returns_none():
         submip_max_nodes=1000,
     )
     assert result is None
+
+
+# ─────────────────────────────────────────────────────────────
+# F1 — enumeration budget (bottleneck-profile-2026-07-05 §1.1)
+#
+# The ≤``max_binaries`` enumeration branch issues ``sum_r C(n_bin, r<=k)`` full
+# sub-NLPs — 79 at k=2, 1586 at k=5 for 12 binaries — and historically ignored
+# both its per-call slice and the solver's absolute deadline (fac2: 1665 sub-NLPs
+# = 84 % of wall). These tests lock in the budget enforcement: a hard deadline is
+# honoured, and the search is skipped when the incumbent already matches the node
+# bound. General (non-named) ≤12-binary models only.
+# ─────────────────────────────────────────────────────────────
+
+
+def test_local_branching_enumeration_honors_deadline(monkeypatch):
+    """A ≤12-binary model with an early incumbent + a 1 s deadline must return
+    within the budget and issue far fewer sub-NLPs than the unbudgeted count.
+
+    Fail-before: the unbudgeted enumeration issues ``sum_r C(12, r<=5)`` = 1586
+    sub-NLPs regardless of any deadline; at ~3 ms each that is ~4.8 s, blowing a
+    1 s deadline. After the F1 budget, the flip loop polls the deadline every
+    sub-NLP and truncates, so it returns in ~1 s with ≪1586 calls.
+    """
+    import math
+    import time
+
+    import discopt._jax.primal_heuristics as ph
+
+    n = 12  # exactly at the cap -> the enumeration path (not the sub-MIP)
+    m, _ = _knapsack_model(n)
+    ev = NLPEvaluator(m)
+    incumbent = np.zeros(n)
+    incumbent[:2] = 1.0  # a poor early incumbent -> the search has work to do
+
+    unbudgeted_k5 = sum(math.comb(n, r) for r in range(5 + 1))
+    assert unbudgeted_k5 == 1586  # the arithmetic the profile measured
+
+    calls = {"n": 0}
+    real_subnlp = ph.subnlp
+
+    def counting_slow_subnlp(*a, **k):
+        calls["n"] += 1
+        time.sleep(0.003)  # ~3 ms: 1586 of these would be ~4.8 s (> 1 s deadline)
+        return real_subnlp(*a, **k)
+
+    monkeypatch.setattr(ph, "subnlp", counting_slow_subnlp)
+
+    deadline = time.perf_counter() + 1.0
+    t0 = time.perf_counter()
+    local_branching(
+        m,
+        incumbent,
+        k=5,
+        evaluator=ev,
+        max_binaries=12,
+        # A slice large enough NOT to be the limiting factor; the deadline is.
+        submip_time_limit=10.0,
+        submip_max_nodes=500,
+        deadline=deadline,
+    )
+    elapsed = time.perf_counter() - t0
+
+    # Budget honoured: returned within the deadline envelope (§0.7 style: +~20 %).
+    assert elapsed <= 1.2, f"local_branching overran its 1 s deadline: {elapsed:.2f} s"
+    # And it issued strictly fewer sub-NLPs than the unbudgeted enumeration.
+    assert calls["n"] < unbudgeted_k5, (
+        f"enumeration was not truncated: {calls['n']} sub-NLPs "
+        f"(unbudgeted would be {unbudgeted_k5})"
+    )
+
+
+def test_local_branching_skips_when_incumbent_matches_node_bound():
+    """When the incumbent objective already equals the node relaxation bound
+    within ``gap_tolerance``, there is nothing to improve, so the search is
+    skipped entirely (zero sub-NLPs) and ``None`` is returned."""
+    n = 12
+    m, _ = _knapsack_model(n)
+    ev = NLPEvaluator(m)
+    optimum = np.ones(n)  # global optimum, obj = -n
+    inc_obj = float(ev.evaluate_objective(optimum))
+    assert inc_obj == pytest.approx(-float(n))
+
+    # Node bound equal to the incumbent objective -> gap closed -> skip.
+    result = local_branching(
+        m,
+        optimum,
+        k=5,
+        evaluator=ev,
+        max_binaries=12,
+        submip_time_limit=3.0,
+        node_bound=inc_obj,
+        incumbent_obj=inc_obj,
+        gap_tolerance=1e-4,
+    )
+    assert result is None

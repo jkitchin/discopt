@@ -698,11 +698,19 @@ class _Parser:
     # ── Domain parsing ──
 
     def _parse_domain(self) -> list[str]:
-        """Parse (i, j, k) domain list, consuming parens."""
+        """Parse (i, j, k) domain list, consuming parens.
+
+        Entries may be set/alias names (``x.lo(s1)``) or concrete quoted
+        element labels (``x.lo('1')`` / ``x.lo('1', '2')``). A quoted label is
+        captured verbatim; downstream (`_apply_bounds`) treats any entry that is
+        not a known set name as a literal single element, which is how
+        heterogeneous per-element bounds emitted by `to_gams` round-trip (X-2,
+        #413).
+        """
         self._expect(_Tok.SYMBOL, "(")
         names: list[str] = []
         while not self._match_sym(")"):
-            if self._cur().kind == _Tok.IDENT:
+            if self._cur().kind in (_Tok.IDENT, _Tok.STRING):
                 names.append(self._advance().value)
             elif self._match_sym(","):
                 self._advance()
@@ -1607,7 +1615,16 @@ class _ModelBuilder:
                             continue
                     lhs_expr = self._build_expr(eqdef.lhs, env)
                     rhs_expr = self._build_expr(eqdef.rhs, env)
-                    self._add_constraint(m, lhs_expr, eqdef.sense, rhs_expr, eqdef.name)
+                    # A GAMS indexed equation ``eq(i)`` expands to one *distinct*
+                    # constraint row per index tuple, each with its own dual — so
+                    # name each row by its index key (``supply[p1]``, ``supply[p2]``)
+                    # rather than reusing the bare equation name for every row.
+                    # Distinct names keep ``result.constraint_duals`` (name-keyed)
+                    # sound and avoid a spurious duplicate-name collision; this
+                    # matches ``Model.constraint``'s own ``name[key]`` convention.
+                    key_label = ".".join(str(v) for v in combo)
+                    row_name = f"{eqdef.name}[{key_label}]" if eqdef.name else None
+                    self._add_constraint(m, lhs_expr, eqdef.sense, rhs_expr, row_name)
             else:
                 # Scalar equation — dollar condition on scalar is unusual but handle it
                 if eqdef.dollar_cond is not None:
@@ -2181,10 +2198,19 @@ class _ModelBuilder:
                     if sn in self.set_elements:
                         index_sets.append(self.set_elements[sn])
                     else:
+                        matched = False
                         for k, v in self.set_elements.items():
                             if k.lower() == sn.lower():
                                 index_sets.append(v)
+                                matched = True
                                 break
+                        if not matched:
+                            # Concrete element label (e.g. `x.lo('1') = ...`):
+                            # not a set name, so treat it as a literal single
+                            # element for this dimension. This is how the
+                            # per-element bounds `to_gams` emits for
+                            # heterogeneous array blocks round-trip (X-2, #413).
+                            index_sets.append([sn])
                 for combo in itertools.product(*index_sets):
                     # Evaluate dollar condition on bound assignment
                     if b.dollar_cond is not None:

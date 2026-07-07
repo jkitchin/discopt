@@ -68,7 +68,10 @@ _OPERATORS = [
     ("log1p", dm.log1p, np.log1p, -0.5, 3.0),
     ("sigmoid", dm.sigmoid, lambda x: 1.0 / (1.0 + np.exp(-x)), -3.0, 3.0),
     ("softplus", dm.softplus, lambda x: np.log1p(np.exp(x)), -3.0, 3.0),
-    ("abs", dm.abs, np.abs, -2.0, 2.0),
+    # abs certifies via the exact piecewise spatial B&B, which is ~15 s (kink at
+    # 0); heavy for the PR-fast budget, so this one operator runs on the slow
+    # path. The other operators stay in the PR-fast set.
+    pytest.param("abs", dm.abs, np.abs, -2.0, 2.0, marks=pytest.mark.slow, id="abs"),
     ("pow2", _pow2, lambda x: x**2, -2.0, 2.0),
     ("pow3", _pow3, lambda x: x**3, -2.0, 2.0),
     ("pow_half", _pow_half, lambda x: x**0.5, 0.1, 4.0),
@@ -93,7 +96,11 @@ def _solve(build_fn, lb, ub, sense):
 
 
 @pytest.mark.relaxation
-@pytest.mark.parametrize("name,build_fn,ref_fn,lb,ub", _OPERATORS, ids=[o[0] for o in _OPERATORS])
+@pytest.mark.parametrize(
+    "name,build_fn,ref_fn,lb,ub",
+    _OPERATORS,
+    ids=[getattr(o, "id", None) or o[0] for o in _OPERATORS],
+)
 def test_operator_has_valid_tight_bound(name, build_fn, ref_fn, lb, ub):
     """Each operator solves to a certified global optimum matching brute force."""
     true_min, true_max = _brute_optima(ref_fn, lb, ub)
@@ -123,6 +130,7 @@ def test_bilinear_lifted_moment_bound():
     assert abs(float(res.objective)) < _TOL
 
 
+@pytest.mark.slow
 @pytest.mark.relaxation
 @pytest.mark.parametrize("lb,ub", [(-1.0, 1.0), (-2.0, 2.0), (-2.0, 3.0)])
 def test_abs_zero_crossing_certifies(lb, ub):

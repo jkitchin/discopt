@@ -1,0 +1,1351 @@
+{
+  "task": "cert:P3.1d",
+  "generated": "20260703T180253",
+  "panel": [
+    "ex1263",
+    "ex1263a",
+    "graphpart_2pm-0044-0044",
+    "graphpart_2g-0044-1601",
+    "graphpart_2pm-0055-0055"
+  ],
+  "cap_seconds": 60.0,
+  "presolve": "disabled (presolving/maxrounds=0)",
+  "scip_separators": [
+    "aggregation",
+    "cgmip",
+    "clique",
+    "closecuts",
+    "cmir",
+    "convexproj",
+    "disjunctive",
+    "eccuts",
+    "flowcover",
+    "flower",
+    "gauge",
+    "gomory",
+    "gomorymi",
+    "impliedbounds",
+    "interminor",
+    "intobj",
+    "knapsackcover",
+    "lagromory",
+    "mcf",
+    "minor",
+    "mixing",
+    "oddcycle",
+    "rapidlearning",
+    "rlt",
+    "strongcg",
+    "zerohalf"
+  ],
+  "n_run": 5,
+  "n_skipped": 0,
+  "aggregate_only_one_on_median_gap_closed": {
+    "aggregation": 0.0,
+    "cgmip": 0.0,
+    "clique": 0.0,
+    "closecuts": 0.0,
+    "cmir": 0.0,
+    "convexproj": 0.0,
+    "disjunctive": 0.0,
+    "eccuts": 0.0,
+    "flowcover": 0.0,
+    "flower": 0.0,
+    "gauge": 0.0,
+    "gomory": 0.0,
+    "gomorymi": 0.0,
+    "impliedbounds": 0.0,
+    "interminor": 0.0,
+    "intobj": 0.0,
+    "knapsackcover": 0.0,
+    "lagromory": 0.0,
+    "mcf": 0.0,
+    "minor": 0.0,
+    "mixing": 0.0,
+    "oddcycle": 0.0,
+    "rapidlearning": 0.0,
+    "rlt": 0.0,
+    "strongcg": 0.0,
+    "zerohalf": 0.5999999999999998
+  },
+  "aggregate_leave_one_out_median_marginal_loss": {
+    "aggregation": 0.0,
+    "cgmip": 0.0,
+    "clique": 0.0,
+    "closecuts": 0.0,
+    "cmir": 0.0,
+    "convexproj": 0.0,
+    "disjunctive": 0.0,
+    "eccuts": 0.0,
+    "flowcover": 0.0,
+    "flower": 0.0,
+    "gauge": 0.0,
+    "gomory": 0.0,
+    "gomorymi": 0.0,
+    "impliedbounds": 0.0,
+    "interminor": 0.0,
+    "intobj": 0.0,
+    "knapsackcover": 0.0,
+    "lagromory": 0.0,
+    "mcf": 0.0,
+    "minor": 0.0,
+    "mixing": 0.0,
+    "oddcycle": 0.0,
+    "rapidlearning": 0.0,
+    "rlt": 0.0,
+    "strongcg": 0.0,
+    "zerohalf": 0.15259925636062333
+  },
+  "rows": [
+    {
+      "instance": "ex1263",
+      "oracle_opt": 19.6,
+      "scip_all_off": 19.1,
+      "scip_all_on": 19.1,
+      "gap_closed_all_on": 0.0,
+      "only_one_on": {
+        "aggregation": {
+          "bound": 19.1,
+          "gap_closed": 0.0
+        },
+        "cgmip": {
+          "bound": 19.1,
+          "gap_closed": 0.0
+        },
+        "clique": {
+          "bound": 19.1,
+          "gap_closed": 0.0
+        },
+        "closecuts": {
+          "bound": 19.1,
+          "gap_closed": 0.0
+        },
+        "cmir": {
+          "bound": 19.1,
+          "gap_closed": 0.0
+        },
+        "convexproj": {
+          "bound": 19.1,
+          "gap_closed": 0.0
+        },
+        "disjunctive": {
+          "bound": 19.1,
+          "gap_closed": 0.0
+        },
+        "eccuts": {
+          "bound": 19.1,
+          "gap_closed": 0.0
+        },
+        "flowcover": {
+          "bound": 19.1,
+          "gap_closed": 0.0
+        },
+        "flower": {
+          "bound": 19.1,
+          "gap_closed": 0.0
+        },
+        "gauge": {
+          "bound": 19.1,
+          "gap_closed": 0.0
+        },
+        "gomory": {
+          "bound": 19.1,
+          "gap_closed": 0.0
+        },
+        "gomorymi": {
+          "bound": 19.1,
+          "gap_closed": 0.0
+        },
+        "impliedbounds": {
+          "bound": 19.1,
+          "gap_closed": 0.0
+        },
+        "interminor": {
+          "bound": 19.1,
+          "gap_closed": 0.0
+        },
+        "intobj": {
+          "bound": 19.1,
+          "gap_closed": 0.0
+        },
+        "knapsackcover": {
+          "bound": 19.1,
+          "gap_closed": 0.0
+        },
+        "lagromory": {
+          "bound": 19.1,
+          "gap_closed": 0.0
+        },
+        "mcf": {
+          "bound": 19.1,
+          "gap_closed": 0.0
+        },
+        "minor": {
+          "bound": 19.1,
+          "gap_closed": 0.0
+        },
+        "mixing": {
+          "bound": 19.1,
+          "gap_closed": 0.0
+        },
+        "oddcycle": {
+          "bound": 19.1,
+          "gap_closed": 0.0
+        },
+        "rapidlearning": {
+          "bound": 19.1,
+          "gap_closed": 0.0
+        },
+        "rlt": {
+          "bound": 19.1,
+          "gap_closed": 0.0
+        },
+        "strongcg": {
+          "bound": 19.1,
+          "gap_closed": 0.0
+        },
+        "zerohalf": {
+          "bound": 19.1,
+          "gap_closed": 0.0
+        }
+      },
+      "leave_one_out": {
+        "aggregation": {
+          "bound": 19.1,
+          "gap_closed": 0.0,
+          "marginal_loss": 0.0
+        },
+        "cgmip": {
+          "bound": 19.1,
+          "gap_closed": 0.0,
+          "marginal_loss": 0.0
+        },
+        "clique": {
+          "bound": 19.1,
+          "gap_closed": 0.0,
+          "marginal_loss": 0.0
+        },
+        "closecuts": {
+          "bound": 19.1,
+          "gap_closed": 0.0,
+          "marginal_loss": 0.0
+        },
+        "cmir": {
+          "bound": 19.1,
+          "gap_closed": 0.0,
+          "marginal_loss": 0.0
+        },
+        "convexproj": {
+          "bound": 19.1,
+          "gap_closed": 0.0,
+          "marginal_loss": 0.0
+        },
+        "disjunctive": {
+          "bound": 19.1,
+          "gap_closed": 0.0,
+          "marginal_loss": 0.0
+        },
+        "eccuts": {
+          "bound": 19.1,
+          "gap_closed": 0.0,
+          "marginal_loss": 0.0
+        },
+        "flowcover": {
+          "bound": 19.1,
+          "gap_closed": 0.0,
+          "marginal_loss": 0.0
+        },
+        "flower": {
+          "bound": 19.1,
+          "gap_closed": 0.0,
+          "marginal_loss": 0.0
+        },
+        "gauge": {
+          "bound": 19.1,
+          "gap_closed": 0.0,
+          "marginal_loss": 0.0
+        },
+        "gomory": {
+          "bound": 19.1,
+          "gap_closed": 0.0,
+          "marginal_loss": 0.0
+        },
+        "gomorymi": {
+          "bound": 19.1,
+          "gap_closed": 0.0,
+          "marginal_loss": 0.0
+        },
+        "impliedbounds": {
+          "bound": 19.1,
+          "gap_closed": 0.0,
+          "marginal_loss": 0.0
+        },
+        "interminor": {
+          "bound": 19.1,
+          "gap_closed": 0.0,
+          "marginal_loss": 0.0
+        },
+        "intobj": {
+          "bound": 19.1,
+          "gap_closed": 0.0,
+          "marginal_loss": 0.0
+        },
+        "knapsackcover": {
+          "bound": 19.1,
+          "gap_closed": 0.0,
+          "marginal_loss": 0.0
+        },
+        "lagromory": {
+          "bound": 19.1,
+          "gap_closed": 0.0,
+          "marginal_loss": 0.0
+        },
+        "mcf": {
+          "bound": 19.1,
+          "gap_closed": 0.0,
+          "marginal_loss": 0.0
+        },
+        "minor": {
+          "bound": 19.1,
+          "gap_closed": 0.0,
+          "marginal_loss": 0.0
+        },
+        "mixing": {
+          "bound": 19.1,
+          "gap_closed": 0.0,
+          "marginal_loss": 0.0
+        },
+        "oddcycle": {
+          "bound": 19.1,
+          "gap_closed": 0.0,
+          "marginal_loss": 0.0
+        },
+        "rapidlearning": {
+          "bound": 19.1,
+          "gap_closed": 0.0,
+          "marginal_loss": 0.0
+        },
+        "rlt": {
+          "bound": 19.1,
+          "gap_closed": 0.0,
+          "marginal_loss": 0.0
+        },
+        "strongcg": {
+          "bound": 19.1,
+          "gap_closed": 0.0,
+          "marginal_loss": 0.0
+        },
+        "zerohalf": {
+          "bound": 19.1,
+          "gap_closed": 0.0,
+          "marginal_loss": 0.0
+        }
+      },
+      "scip_status_off": "nodelimit",
+      "scip_status_on": "nodelimit",
+      "wall": 4.474353375378996,
+      "status": "run",
+      "note": ""
+    },
+    {
+      "instance": "ex1263a",
+      "oracle_opt": 19.6,
+      "scip_all_off": 19.1,
+      "scip_all_on": 19.6,
+      "gap_closed_all_on": 1.0,
+      "only_one_on": {
+        "aggregation": {
+          "bound": 19.1,
+          "gap_closed": 0.0
+        },
+        "cgmip": {
+          "bound": 19.1,
+          "gap_closed": 0.0
+        },
+        "clique": {
+          "bound": 19.1,
+          "gap_closed": 0.0
+        },
+        "closecuts": {
+          "bound": 19.1,
+          "gap_closed": 0.0
+        },
+        "cmir": {
+          "bound": 19.1,
+          "gap_closed": 0.0
+        },
+        "convexproj": {
+          "bound": 19.1,
+          "gap_closed": 0.0
+        },
+        "disjunctive": {
+          "bound": 19.1,
+          "gap_closed": 0.0
+        },
+        "eccuts": {
+          "bound": 19.1,
+          "gap_closed": 0.0
+        },
+        "flowcover": {
+          "bound": 19.1,
+          "gap_closed": 0.0
+        },
+        "flower": {
+          "bound": 19.1,
+          "gap_closed": 0.0
+        },
+        "gauge": {
+          "bound": 19.1,
+          "gap_closed": 0.0
+        },
+        "gomory": {
+          "bound": 19.1,
+          "gap_closed": 0.0
+        },
+        "gomorymi": {
+          "bound": 19.1,
+          "gap_closed": 0.0
+        },
+        "impliedbounds": {
+          "bound": 19.1,
+          "gap_closed": 0.0
+        },
+        "interminor": {
+          "bound": 19.1,
+          "gap_closed": 0.0
+        },
+        "intobj": {
+          "bound": 19.1,
+          "gap_closed": 0.0
+        },
+        "knapsackcover": {
+          "bound": 19.1,
+          "gap_closed": 0.0
+        },
+        "lagromory": {
+          "bound": 19.1,
+          "gap_closed": 0.0
+        },
+        "mcf": {
+          "bound": 19.1,
+          "gap_closed": 0.0
+        },
+        "minor": {
+          "bound": 19.1,
+          "gap_closed": 0.0
+        },
+        "mixing": {
+          "bound": 19.1,
+          "gap_closed": 0.0
+        },
+        "oddcycle": {
+          "bound": 19.1,
+          "gap_closed": 0.0
+        },
+        "rapidlearning": {
+          "bound": 19.6,
+          "gap_closed": 1.0
+        },
+        "rlt": {
+          "bound": 19.1,
+          "gap_closed": 0.0
+        },
+        "strongcg": {
+          "bound": 19.1,
+          "gap_closed": 0.0
+        },
+        "zerohalf": {
+          "bound": 19.1,
+          "gap_closed": 0.0
+        }
+      },
+      "leave_one_out": {
+        "aggregation": {
+          "bound": 19.6,
+          "gap_closed": 1.0,
+          "marginal_loss": 0.0
+        },
+        "cgmip": {
+          "bound": 19.6,
+          "gap_closed": 1.0,
+          "marginal_loss": 0.0
+        },
+        "clique": {
+          "bound": 19.6,
+          "gap_closed": 1.0,
+          "marginal_loss": 0.0
+        },
+        "closecuts": {
+          "bound": 19.6,
+          "gap_closed": 1.0,
+          "marginal_loss": 0.0
+        },
+        "cmir": {
+          "bound": 19.6,
+          "gap_closed": 1.0,
+          "marginal_loss": 0.0
+        },
+        "convexproj": {
+          "bound": 19.6,
+          "gap_closed": 1.0,
+          "marginal_loss": 0.0
+        },
+        "disjunctive": {
+          "bound": 19.6,
+          "gap_closed": 1.0,
+          "marginal_loss": 0.0
+        },
+        "eccuts": {
+          "bound": 19.6,
+          "gap_closed": 1.0,
+          "marginal_loss": 0.0
+        },
+        "flowcover": {
+          "bound": 19.6,
+          "gap_closed": 1.0,
+          "marginal_loss": 0.0
+        },
+        "flower": {
+          "bound": 19.6,
+          "gap_closed": 1.0,
+          "marginal_loss": 0.0
+        },
+        "gauge": {
+          "bound": 19.6,
+          "gap_closed": 1.0,
+          "marginal_loss": 0.0
+        },
+        "gomory": {
+          "bound": 19.600000000000005,
+          "gap_closed": 1.000000000000007,
+          "marginal_loss": -7.105427357601002e-15
+        },
+        "gomorymi": {
+          "bound": 19.6,
+          "gap_closed": 1.0,
+          "marginal_loss": 0.0
+        },
+        "impliedbounds": {
+          "bound": 19.6,
+          "gap_closed": 1.0,
+          "marginal_loss": 0.0
+        },
+        "interminor": {
+          "bound": 19.6,
+          "gap_closed": 1.0,
+          "marginal_loss": 0.0
+        },
+        "intobj": {
+          "bound": 19.6,
+          "gap_closed": 1.0,
+          "marginal_loss": 0.0
+        },
+        "knapsackcover": {
+          "bound": 19.6,
+          "gap_closed": 1.0,
+          "marginal_loss": 0.0
+        },
+        "lagromory": {
+          "bound": 19.6,
+          "gap_closed": 1.0,
+          "marginal_loss": 0.0
+        },
+        "mcf": {
+          "bound": 19.6,
+          "gap_closed": 1.0,
+          "marginal_loss": 0.0
+        },
+        "minor": {
+          "bound": 19.6,
+          "gap_closed": 1.0,
+          "marginal_loss": 0.0
+        },
+        "mixing": {
+          "bound": 19.6,
+          "gap_closed": 1.0,
+          "marginal_loss": 0.0
+        },
+        "oddcycle": {
+          "bound": 19.6,
+          "gap_closed": 1.0,
+          "marginal_loss": 0.0
+        },
+        "rapidlearning": {
+          "bound": 19.1,
+          "gap_closed": 0.0,
+          "marginal_loss": 1.0
+        },
+        "rlt": {
+          "bound": 19.6,
+          "gap_closed": 1.0,
+          "marginal_loss": 0.0
+        },
+        "strongcg": {
+          "bound": 19.6,
+          "gap_closed": 1.0,
+          "marginal_loss": 0.0
+        },
+        "zerohalf": {
+          "bound": 19.600000000000005,
+          "gap_closed": 1.000000000000007,
+          "marginal_loss": -7.105427357601002e-15
+        }
+      },
+      "scip_status_off": "nodelimit",
+      "scip_status_on": "nodelimit",
+      "wall": 0.9684923328459263,
+      "status": "run",
+      "note": ""
+    },
+    {
+      "instance": "graphpart_2pm-0044-0044",
+      "oracle_opt": -13.0,
+      "scip_all_off": -16.0,
+      "scip_all_on": -13.000000000000002,
+      "gap_closed_all_on": 0.9999999999999994,
+      "only_one_on": {
+        "aggregation": {
+          "bound": -16.0,
+          "gap_closed": 0.0
+        },
+        "cgmip": {
+          "bound": -16.0,
+          "gap_closed": 0.0
+        },
+        "clique": {
+          "bound": -16.0,
+          "gap_closed": 0.0
+        },
+        "closecuts": {
+          "bound": -16.0,
+          "gap_closed": 0.0
+        },
+        "cmir": {
+          "bound": -16.0,
+          "gap_closed": 0.0
+        },
+        "convexproj": {
+          "bound": -16.0,
+          "gap_closed": 0.0
+        },
+        "disjunctive": {
+          "bound": -16.0,
+          "gap_closed": 0.0
+        },
+        "eccuts": {
+          "bound": -16.0,
+          "gap_closed": 0.0
+        },
+        "flowcover": {
+          "bound": -16.0,
+          "gap_closed": 0.0
+        },
+        "flower": {
+          "bound": -16.0,
+          "gap_closed": 0.0
+        },
+        "gauge": {
+          "bound": -16.0,
+          "gap_closed": 0.0
+        },
+        "gomory": {
+          "bound": -16.0,
+          "gap_closed": 0.0
+        },
+        "gomorymi": {
+          "bound": -16.0,
+          "gap_closed": 0.0
+        },
+        "impliedbounds": {
+          "bound": -16.0,
+          "gap_closed": 0.0
+        },
+        "interminor": {
+          "bound": -16.0,
+          "gap_closed": 0.0
+        },
+        "intobj": {
+          "bound": -16.0,
+          "gap_closed": 0.0
+        },
+        "knapsackcover": {
+          "bound": -16.0,
+          "gap_closed": 0.0
+        },
+        "lagromory": {
+          "bound": -16.0,
+          "gap_closed": 0.0
+        },
+        "mcf": {
+          "bound": -16.0,
+          "gap_closed": 0.0
+        },
+        "minor": {
+          "bound": -16.0,
+          "gap_closed": 0.0
+        },
+        "mixing": {
+          "bound": -16.0,
+          "gap_closed": 0.0
+        },
+        "oddcycle": {
+          "bound": -16.0,
+          "gap_closed": 0.0
+        },
+        "rapidlearning": {
+          "bound": -16.0,
+          "gap_closed": 0.0
+        },
+        "rlt": {
+          "bound": -16.0,
+          "gap_closed": 0.0
+        },
+        "strongcg": {
+          "bound": -16.0,
+          "gap_closed": 0.0
+        },
+        "zerohalf": {
+          "bound": -13.999999999999991,
+          "gap_closed": 0.6666666666666696
+        }
+      },
+      "leave_one_out": {
+        "aggregation": {
+          "bound": -13.000000000000002,
+          "gap_closed": 0.9999999999999994,
+          "marginal_loss": 0.0
+        },
+        "cgmip": {
+          "bound": -13.000000000000002,
+          "gap_closed": 0.9999999999999994,
+          "marginal_loss": 0.0
+        },
+        "clique": {
+          "bound": -13.000000000000002,
+          "gap_closed": 0.9999999999999994,
+          "marginal_loss": 0.0
+        },
+        "closecuts": {
+          "bound": -13.000000000000002,
+          "gap_closed": 0.9999999999999994,
+          "marginal_loss": 0.0
+        },
+        "cmir": {
+          "bound": -13.000000000000002,
+          "gap_closed": 0.9999999999999994,
+          "marginal_loss": 0.0
+        },
+        "convexproj": {
+          "bound": -13.000000000000002,
+          "gap_closed": 0.9999999999999994,
+          "marginal_loss": 0.0
+        },
+        "disjunctive": {
+          "bound": -13.000000000000002,
+          "gap_closed": 0.9999999999999994,
+          "marginal_loss": 0.0
+        },
+        "eccuts": {
+          "bound": -13.000000000000002,
+          "gap_closed": 0.9999999999999994,
+          "marginal_loss": 0.0
+        },
+        "flowcover": {
+          "bound": -13.000000000000002,
+          "gap_closed": 0.9999999999999994,
+          "marginal_loss": 0.0
+        },
+        "flower": {
+          "bound": -13.000000000000002,
+          "gap_closed": 0.9999999999999994,
+          "marginal_loss": 0.0
+        },
+        "gauge": {
+          "bound": -13.000000000000002,
+          "gap_closed": 0.9999999999999994,
+          "marginal_loss": 0.0
+        },
+        "gomory": {
+          "bound": -13.999999999999991,
+          "gap_closed": 0.6666666666666696,
+          "marginal_loss": 0.3333333333333298
+        },
+        "gomorymi": {
+          "bound": -13.5,
+          "gap_closed": 0.8333333333333334,
+          "marginal_loss": 0.16666666666666607
+        },
+        "impliedbounds": {
+          "bound": -13.000000000000002,
+          "gap_closed": 0.9999999999999994,
+          "marginal_loss": 0.0
+        },
+        "interminor": {
+          "bound": -13.000000000000002,
+          "gap_closed": 0.9999999999999994,
+          "marginal_loss": 0.0
+        },
+        "intobj": {
+          "bound": -13.000000000000002,
+          "gap_closed": 0.9999999999999994,
+          "marginal_loss": 0.0
+        },
+        "knapsackcover": {
+          "bound": -13.000000000000002,
+          "gap_closed": 0.9999999999999994,
+          "marginal_loss": 0.0
+        },
+        "lagromory": {
+          "bound": -13.000000000000002,
+          "gap_closed": 0.9999999999999994,
+          "marginal_loss": 0.0
+        },
+        "mcf": {
+          "bound": -13.000000000000002,
+          "gap_closed": 0.9999999999999994,
+          "marginal_loss": 0.0
+        },
+        "minor": {
+          "bound": -13.000000000000002,
+          "gap_closed": 0.9999999999999994,
+          "marginal_loss": 0.0
+        },
+        "mixing": {
+          "bound": -13.000000000000002,
+          "gap_closed": 0.9999999999999994,
+          "marginal_loss": 0.0
+        },
+        "oddcycle": {
+          "bound": -13.000000000000002,
+          "gap_closed": 0.9999999999999994,
+          "marginal_loss": 0.0
+        },
+        "rapidlearning": {
+          "bound": -13.000000000000002,
+          "gap_closed": 0.9999999999999994,
+          "marginal_loss": 0.0
+        },
+        "rlt": {
+          "bound": -13.000000000000002,
+          "gap_closed": 0.9999999999999994,
+          "marginal_loss": 0.0
+        },
+        "strongcg": {
+          "bound": -12.999999999999996,
+          "gap_closed": 1.000000000000001,
+          "marginal_loss": -1.6653345369377348e-15
+        },
+        "zerohalf": {
+          "bound": -14.600000000000005,
+          "gap_closed": 0.466666666666665,
+          "marginal_loss": 0.5333333333333344
+        }
+      },
+      "scip_status_off": "nodelimit",
+      "scip_status_on": "nodelimit",
+      "wall": 4.171615291852504,
+      "status": "run",
+      "note": ""
+    },
+    {
+      "instance": "graphpart_2g-0044-1601",
+      "oracle_opt": -954077.0,
+      "scip_all_off": -1025886.0,
+      "scip_all_on": -973177.0,
+      "gap_closed_all_on": 0.7340166274422426,
+      "only_one_on": {
+        "aggregation": {
+          "bound": -1025886.0,
+          "gap_closed": 0.0
+        },
+        "cgmip": {
+          "bound": -1025886.0,
+          "gap_closed": 0.0
+        },
+        "clique": {
+          "bound": -1025886.0,
+          "gap_closed": 0.0
+        },
+        "closecuts": {
+          "bound": -1025886.0,
+          "gap_closed": 0.0
+        },
+        "cmir": {
+          "bound": -1025886.0,
+          "gap_closed": 0.0
+        },
+        "convexproj": {
+          "bound": -1025886.0,
+          "gap_closed": 0.0
+        },
+        "disjunctive": {
+          "bound": -1025886.0,
+          "gap_closed": 0.0
+        },
+        "eccuts": {
+          "bound": -1025886.0,
+          "gap_closed": 0.0
+        },
+        "flowcover": {
+          "bound": -1025886.0,
+          "gap_closed": 0.0
+        },
+        "flower": {
+          "bound": -1025886.0,
+          "gap_closed": 0.0
+        },
+        "gauge": {
+          "bound": -1025886.0,
+          "gap_closed": 0.0
+        },
+        "gomory": {
+          "bound": -1025886.0,
+          "gap_closed": 0.0
+        },
+        "gomorymi": {
+          "bound": -1025886.0,
+          "gap_closed": 0.0
+        },
+        "impliedbounds": {
+          "bound": -1025886.0,
+          "gap_closed": 0.0
+        },
+        "interminor": {
+          "bound": -1025886.0,
+          "gap_closed": 0.0
+        },
+        "intobj": {
+          "bound": -1025886.0,
+          "gap_closed": 0.0
+        },
+        "knapsackcover": {
+          "bound": -1025886.0,
+          "gap_closed": 0.0
+        },
+        "lagromory": {
+          "bound": -1025886.0,
+          "gap_closed": 0.0
+        },
+        "mcf": {
+          "bound": -1025886.0,
+          "gap_closed": 0.0
+        },
+        "minor": {
+          "bound": -1025886.0,
+          "gap_closed": 0.0
+        },
+        "mixing": {
+          "bound": -1025886.0,
+          "gap_closed": 0.0
+        },
+        "oddcycle": {
+          "bound": -1025886.0,
+          "gap_closed": 0.0
+        },
+        "rapidlearning": {
+          "bound": -1025886.0,
+          "gap_closed": 0.0
+        },
+        "rlt": {
+          "bound": -1025886.0,
+          "gap_closed": 0.0
+        },
+        "strongcg": {
+          "bound": -1025886.0,
+          "gap_closed": 0.0
+        },
+        "zerohalf": {
+          "bound": -964281.0,
+          "gap_closed": 0.8579008202314473
+        }
+      },
+      "leave_one_out": {
+        "aggregation": {
+          "bound": -973177.0,
+          "gap_closed": 0.7340166274422426,
+          "marginal_loss": 0.0
+        },
+        "cgmip": {
+          "bound": -973177.0,
+          "gap_closed": 0.7340166274422426,
+          "marginal_loss": 0.0
+        },
+        "clique": {
+          "bound": -973177.0,
+          "gap_closed": 0.7340166274422426,
+          "marginal_loss": 0.0
+        },
+        "closecuts": {
+          "bound": -973177.0,
+          "gap_closed": 0.7340166274422426,
+          "marginal_loss": 0.0
+        },
+        "cmir": {
+          "bound": -973177.0,
+          "gap_closed": 0.7340166274422426,
+          "marginal_loss": 0.0
+        },
+        "convexproj": {
+          "bound": -973177.0,
+          "gap_closed": 0.7340166274422426,
+          "marginal_loss": 0.0
+        },
+        "disjunctive": {
+          "bound": -973177.0,
+          "gap_closed": 0.7340166274422426,
+          "marginal_loss": 0.0
+        },
+        "eccuts": {
+          "bound": -973177.0,
+          "gap_closed": 0.7340166274422426,
+          "marginal_loss": 0.0
+        },
+        "flowcover": {
+          "bound": -973177.0,
+          "gap_closed": 0.7340166274422426,
+          "marginal_loss": 0.0
+        },
+        "flower": {
+          "bound": -973177.0,
+          "gap_closed": 0.7340166274422426,
+          "marginal_loss": 0.0
+        },
+        "gauge": {
+          "bound": -973177.0,
+          "gap_closed": 0.7340166274422426,
+          "marginal_loss": 0.0
+        },
+        "gomory": {
+          "bound": -964281.0,
+          "gap_closed": 0.8579008202314473,
+          "marginal_loss": -0.1238841927892047
+        },
+        "gomorymi": {
+          "bound": -965025.5,
+          "gap_closed": 0.8475330390341044,
+          "marginal_loss": -0.11351641159186177
+        },
+        "impliedbounds": {
+          "bound": -973177.0,
+          "gap_closed": 0.7340166274422426,
+          "marginal_loss": 0.0
+        },
+        "interminor": {
+          "bound": -973177.0,
+          "gap_closed": 0.7340166274422426,
+          "marginal_loss": 0.0
+        },
+        "intobj": {
+          "bound": -973177.0,
+          "gap_closed": 0.7340166274422426,
+          "marginal_loss": 0.0
+        },
+        "knapsackcover": {
+          "bound": -973177.0,
+          "gap_closed": 0.7340166274422426,
+          "marginal_loss": 0.0
+        },
+        "lagromory": {
+          "bound": -973177.0,
+          "gap_closed": 0.7340166274422426,
+          "marginal_loss": 0.0
+        },
+        "mcf": {
+          "bound": -973177.0,
+          "gap_closed": 0.7340166274422426,
+          "marginal_loss": 0.0
+        },
+        "minor": {
+          "bound": -973177.0,
+          "gap_closed": 0.7340166274422426,
+          "marginal_loss": 0.0
+        },
+        "mixing": {
+          "bound": -973177.0,
+          "gap_closed": 0.7340166274422426,
+          "marginal_loss": 0.0
+        },
+        "oddcycle": {
+          "bound": -973177.0,
+          "gap_closed": 0.7340166274422426,
+          "marginal_loss": 0.0
+        },
+        "rapidlearning": {
+          "bound": -973177.0,
+          "gap_closed": 0.7340166274422426,
+          "marginal_loss": 0.0
+        },
+        "rlt": {
+          "bound": -973177.0,
+          "gap_closed": 0.7340166274422426,
+          "marginal_loss": 0.0
+        },
+        "strongcg": {
+          "bound": -981201.5,
+          "gap_closed": 0.6222687963904246,
+          "marginal_loss": 0.11174783105181796
+        },
+        "zerohalf": {
+          "bound": -984135.0,
+          "gap_closed": 0.5814173710816193,
+          "marginal_loss": 0.15259925636062333
+        }
+      },
+      "scip_status_off": "nodelimit",
+      "scip_status_on": "nodelimit",
+      "wall": 4.80806591687724,
+      "status": "run",
+      "note": ""
+    },
+    {
+      "instance": "graphpart_2pm-0055-0055",
+      "oracle_opt": -20.0,
+      "scip_all_off": -24.999999999999996,
+      "scip_all_on": -21.75,
+      "gap_closed_all_on": 0.6499999999999998,
+      "only_one_on": {
+        "aggregation": {
+          "bound": -24.999999999999996,
+          "gap_closed": 0.0
+        },
+        "cgmip": {
+          "bound": -24.999999999999996,
+          "gap_closed": 0.0
+        },
+        "clique": {
+          "bound": -24.999999999999996,
+          "gap_closed": 0.0
+        },
+        "closecuts": {
+          "bound": -24.999999999999996,
+          "gap_closed": 0.0
+        },
+        "cmir": {
+          "bound": -24.999999999999996,
+          "gap_closed": 0.0
+        },
+        "convexproj": {
+          "bound": -24.999999999999996,
+          "gap_closed": 0.0
+        },
+        "disjunctive": {
+          "bound": -24.999999999999996,
+          "gap_closed": 0.0
+        },
+        "eccuts": {
+          "bound": -24.999999999999996,
+          "gap_closed": 0.0
+        },
+        "flowcover": {
+          "bound": -24.999999999999996,
+          "gap_closed": 0.0
+        },
+        "flower": {
+          "bound": -24.999999999999996,
+          "gap_closed": 0.0
+        },
+        "gauge": {
+          "bound": -24.999999999999996,
+          "gap_closed": 0.0
+        },
+        "gomory": {
+          "bound": -24.999999999999996,
+          "gap_closed": 0.0
+        },
+        "gomorymi": {
+          "bound": -24.999999999999996,
+          "gap_closed": 0.0
+        },
+        "impliedbounds": {
+          "bound": -24.999999999999996,
+          "gap_closed": 0.0
+        },
+        "interminor": {
+          "bound": -24.999999999999996,
+          "gap_closed": 0.0
+        },
+        "intobj": {
+          "bound": -24.999999999999996,
+          "gap_closed": 0.0
+        },
+        "knapsackcover": {
+          "bound": -24.999999999999996,
+          "gap_closed": 0.0
+        },
+        "lagromory": {
+          "bound": -24.999999999999996,
+          "gap_closed": 0.0
+        },
+        "mcf": {
+          "bound": -24.999999999999996,
+          "gap_closed": 0.0
+        },
+        "minor": {
+          "bound": -24.999999999999996,
+          "gap_closed": 0.0
+        },
+        "mixing": {
+          "bound": -24.999999999999996,
+          "gap_closed": 0.0
+        },
+        "oddcycle": {
+          "bound": -24.999999999999996,
+          "gap_closed": 0.0
+        },
+        "rapidlearning": {
+          "bound": -24.999999999999996,
+          "gap_closed": 0.0
+        },
+        "rlt": {
+          "bound": -24.999999999999996,
+          "gap_closed": 0.0
+        },
+        "strongcg": {
+          "bound": -24.999999999999996,
+          "gap_closed": 0.0
+        },
+        "zerohalf": {
+          "bound": -22.0,
+          "gap_closed": 0.5999999999999998
+        }
+      },
+      "leave_one_out": {
+        "aggregation": {
+          "bound": -21.75,
+          "gap_closed": 0.6499999999999998,
+          "marginal_loss": 0.0
+        },
+        "cgmip": {
+          "bound": -21.75,
+          "gap_closed": 0.6499999999999998,
+          "marginal_loss": 0.0
+        },
+        "clique": {
+          "bound": -21.75,
+          "gap_closed": 0.6499999999999998,
+          "marginal_loss": 0.0
+        },
+        "closecuts": {
+          "bound": -21.75,
+          "gap_closed": 0.6499999999999998,
+          "marginal_loss": 0.0
+        },
+        "cmir": {
+          "bound": -21.75,
+          "gap_closed": 0.6499999999999998,
+          "marginal_loss": 0.0
+        },
+        "convexproj": {
+          "bound": -21.75,
+          "gap_closed": 0.6499999999999998,
+          "marginal_loss": 0.0
+        },
+        "disjunctive": {
+          "bound": -21.75,
+          "gap_closed": 0.6499999999999998,
+          "marginal_loss": 0.0
+        },
+        "eccuts": {
+          "bound": -21.75,
+          "gap_closed": 0.6499999999999998,
+          "marginal_loss": 0.0
+        },
+        "flowcover": {
+          "bound": -21.75,
+          "gap_closed": 0.6499999999999998,
+          "marginal_loss": 0.0
+        },
+        "flower": {
+          "bound": -21.75,
+          "gap_closed": 0.6499999999999998,
+          "marginal_loss": 0.0
+        },
+        "gauge": {
+          "bound": -21.75,
+          "gap_closed": 0.6499999999999998,
+          "marginal_loss": 0.0
+        },
+        "gomory": {
+          "bound": -22.0,
+          "gap_closed": 0.5999999999999998,
+          "marginal_loss": 0.050000000000000044
+        },
+        "gomorymi": {
+          "bound": -21.66666666666666,
+          "gap_closed": 0.6666666666666676,
+          "marginal_loss": -0.01666666666666783
+        },
+        "impliedbounds": {
+          "bound": -21.75,
+          "gap_closed": 0.6499999999999998,
+          "marginal_loss": 0.0
+        },
+        "interminor": {
+          "bound": -21.75,
+          "gap_closed": 0.6499999999999998,
+          "marginal_loss": 0.0
+        },
+        "intobj": {
+          "bound": -21.75,
+          "gap_closed": 0.6499999999999998,
+          "marginal_loss": 0.0
+        },
+        "knapsackcover": {
+          "bound": -21.75,
+          "gap_closed": 0.6499999999999998,
+          "marginal_loss": 0.0
+        },
+        "lagromory": {
+          "bound": -21.75,
+          "gap_closed": 0.6499999999999998,
+          "marginal_loss": 0.0
+        },
+        "mcf": {
+          "bound": -21.75,
+          "gap_closed": 0.6499999999999998,
+          "marginal_loss": 0.0
+        },
+        "minor": {
+          "bound": -21.75,
+          "gap_closed": 0.6499999999999998,
+          "marginal_loss": 0.0
+        },
+        "mixing": {
+          "bound": -21.75,
+          "gap_closed": 0.6499999999999998,
+          "marginal_loss": 0.0
+        },
+        "oddcycle": {
+          "bound": -21.75,
+          "gap_closed": 0.6499999999999998,
+          "marginal_loss": 0.0
+        },
+        "rapidlearning": {
+          "bound": -21.75,
+          "gap_closed": 0.6499999999999998,
+          "marginal_loss": 0.0
+        },
+        "rlt": {
+          "bound": -21.75,
+          "gap_closed": 0.6499999999999998,
+          "marginal_loss": 0.0
+        },
+        "strongcg": {
+          "bound": -21.999999999999993,
+          "gap_closed": 0.6000000000000011,
+          "marginal_loss": 0.04999999999999871
+        },
+        "zerohalf": {
+          "bound": -23.66666666666666,
+          "gap_closed": 0.26666666666666733,
+          "marginal_loss": 0.38333333333333247
+        }
+      },
+      "scip_status_off": "nodelimit",
+      "scip_status_on": "nodelimit",
+      "wall": 8.061472916975617,
+      "status": "run",
+      "note": ""
+    }
+  ]
+}

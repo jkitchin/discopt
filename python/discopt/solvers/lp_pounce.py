@@ -1,6 +1,6 @@
 """POUNCE LP solver: solve a linear program through the pure-Rust IPM.
 
-Mirrors :func:`discopt.solvers.lp_highs.solve_lp` in signature and return
+Mirrors :func:`discopt.solvers.lp_simplex.solve_lp` in signature and return
 type so the two are drop-in interchangeable at call sites (OBBT, McCormick-LP,
 OA/GDP masters). POUNCE is an interior-point method, so for a degenerate or
 dual-degenerate LP it returns a point on the analytic center of the optimal
@@ -180,7 +180,7 @@ def solve_lp(
 ) -> LPResult:
     """Solve ``min c^T x`` s.t. linear constraints and bounds via POUNCE.
 
-    Same semantics as :func:`discopt.solvers.lp_highs.solve_lp`. ``bounds``
+    Same semantics as :func:`discopt.solvers.lp_simplex.solve_lp`. ``bounds``
     default to ``(0, +inf)`` per variable when ``None``.
 
     ``warm_basis`` is accepted for signature compatibility but ignored: an IPM
@@ -204,7 +204,7 @@ def solve_lp(
     c_arr = np.asarray(c, dtype=np.float64).ravel()
     n = len(c_arr)
 
-    # ---- validate dimensions (parity with lp_highs) -------------------------
+    # ---- validate dimensions (parity with lp_simplex) -------------------------
     if A_ub is not None:
         shape = A_ub.shape if sp.issparse(A_ub) else np.asarray(A_ub).shape
         if len(shape) != 2 or shape[1] != n:

@@ -159,7 +159,14 @@ pub fn tighten_bounds(lp: &LpView<'_>, b: &[f64], is_int: &[bool], tol: f64) -> 
 mod tests {
     use super::*;
 
-    fn view<'a>(a: &'a [f64], m: usize, n: usize, c: &'a [f64], l: &'a [f64], u: &'a [f64]) -> LpView<'a> {
+    fn view<'a>(
+        a: &'a [f64],
+        m: usize,
+        n: usize,
+        c: &'a [f64],
+        l: &'a [f64],
+        u: &'a [f64],
+    ) -> LpView<'a> {
         LpView { a, m, n, c, l, u }
     }
 
@@ -190,8 +197,14 @@ mod tests {
         let is_int = [true, true];
         let r = tighten_bounds(&view(&a, 2, 2, &c, &l, &u), &[1.0, 1.0], &is_int, 1e-9);
         assert!(!r.infeasible);
-        assert!((r.l[0] - 1.0).abs() < 1e-9 && (r.u[0] - 1.0).abs() < 1e-9, "x0 fixed to 1");
-        assert!((r.l[1] - 0.0).abs() < 1e-9 && (r.u[1] - 0.0).abs() < 1e-9, "x1 fixed to 0");
+        assert!(
+            (r.l[0] - 1.0).abs() < 1e-9 && (r.u[0] - 1.0).abs() < 1e-9,
+            "x0 fixed to 1"
+        );
+        assert!(
+            (r.l[1] - 0.0).abs() < 1e-9 && (r.u[1] - 0.0).abs() < 1e-9,
+            "x1 fixed to 0"
+        );
     }
 
     #[test]

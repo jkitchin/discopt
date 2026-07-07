@@ -179,6 +179,7 @@ def test_corpus_auto_route_matches_solve_gp(case: GPCase) -> None:
     assert auto_result.objective == pytest.approx(direct_result.objective, abs=1e-6)
 
 
+@pytest.mark.slow
 def test_bb_opt_out_skips_gp_fast_path() -> None:
     """``solver="bb"`` forces classic branch-and-bound, not the GP fast path."""
     model = _monomial_balance()

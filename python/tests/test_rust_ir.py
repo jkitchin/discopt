@@ -379,6 +379,35 @@ class TestEvaluation:
         # body = Constant(1) - (x1 + x2) = 1 - 3 - 4 = -6
         assert abs(val - (-6.0)) < 1e-14
 
+    def test_evaluate_objective_noncontiguous_input(self, simple_model):
+        """Rust-2: a non-contiguous numpy view must evaluate, not panic.
+
+        Before the fix the binding did ``as_slice().unwrap()``, which returns
+        ``None`` for a strided array → a Rust panic surfaced as an opaque
+        ``pyo3_runtime.PanicException`` across the FFI boundary (UB-adjacent).
+        A library must accept the input or raise a clean Python error; here we
+        accept it by materializing a contiguous buffer, so a strided view gives
+        the same value as its contiguous copy.
+        """
+        repr = model_to_repr(simple_model)
+        # x1^2 + x2^2 + x3 at (3, 4, 1) = 26; build (3,4,1) as every-other slot.
+        big = np.array([3.0, -1.0, 4.0, -1.0, 1.0, -1.0])
+        x_nc = big[::2]
+        assert not x_nc.flags["C_CONTIGUOUS"]
+        val = repr.evaluate_objective(x_nc)
+        assert abs(val - 26.0) < 1e-14
+        # Matches the contiguous copy exactly.
+        assert repr.evaluate_objective(np.ascontiguousarray(x_nc)) == val
+
+    def test_evaluate_constraint_noncontiguous_input(self, simple_model):
+        """Rust-2, constraint arm: strided input evaluates, does not panic."""
+        repr = model_to_repr(simple_model)
+        big = np.array([3.0, -1.0, 4.0, -1.0, 1.0, -1.0])
+        x_nc = big[::2]
+        assert not x_nc.flags["C_CONTIGUOUS"]
+        val = repr.evaluate_constraint(0, x_nc)
+        assert abs(val - (-6.0)) < 1e-14
+
 
 # ─────────────────────────────────────────────────────────────
 # Test: Example models from examples.py

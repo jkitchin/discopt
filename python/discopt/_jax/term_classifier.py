@@ -344,13 +344,20 @@ def distribute_products(
     even when the final expansion is small (e.g. a chain of small squared sums
     blew up to tens of millions of throwaway nodes).
 
-    ``protected_squares`` holds ``id()`` values of ``E**2`` nodes that must be
-    left intact rather than distributed.  The MILP relaxation lifts such a square
-    to a single auxiliary column with a univariate square envelope on the affine
-    residual ``E`` (issue #155); distributing it would re-expand ``E**2`` into the
-    catastrophic high-degree monomials the lift exists to avoid.  Preserving the
-    node's identity also lets the linearizer resolve it through its id-keyed map.
+    ``protected_squares`` holds ``id()`` values of nodes that must be left intact
+    rather than distributed.  Originally these were ``E**2`` affine-square nodes
+    (issue #155); it now also covers convex polynomial subexpressions the MILP
+    relaxation lifts whole to a single gradient-cut column (issue #358).  In both
+    cases distributing the node would re-expand it (catastrophic high-degree
+    monomials for a square; loss of the convex-lift identity for a sum) — and
+    preserving the node's identity lets the linearizer resolve it through its
+    id-keyed ``composite_var_map``.  A protected node of ANY operator is returned
+    intact, so the check is at the top rather than only on the ``**`` branch.
     """
+    # Any protected node (square lift #155, convex-subexpression lift #358) is
+    # returned with its identity intact so its id()-keyed claim survives.
+    if protected_squares is not None and id(expr) in protected_squares:
+        return expr
     if isinstance(expr, BinaryOp):
         if expr.op == "**" and isinstance(expr.right, Constant):
             # A protected power node (an issue-#155 affine square, or an affine

@@ -33,6 +33,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 import discopt
 import discopt._jax.mccormick_lp as mc
 import numpy as np
+import pytest
 
 
 def _bilinear_obj():
@@ -84,6 +85,7 @@ def test_has_unbounded_nonlinear_col_flags_free_bilinear_var():
     assert relaxer._has_unbounded_nonlinear_col(free)
 
 
+@pytest.mark.slow
 def test_himmel16_no_false_certification():
     """End-to-end: the largest-small-hexagon model with only pairwise-diameter
     constraints has a feasible self-intersecting solution at objvar=-0.866. The
@@ -148,3 +150,197 @@ def _himmel16_model():
     m.subject_to(-(x[13] + x[14] + x[15] + x[16] + x[17] + x[18]) - objvar == 0.0)
     m.minimize(objvar)
     return m
+
+
+def _camel_semiinfinite(lb0, ub0, lb1, ub1, name):
+    """Six-hump-camel-style nonconvex objective (2*x0^2 - 1.05*x0^4 + x0^6/6
+    - x0*x1 + x1^2) over a box that may leave a variable one-sided-unbounded.
+
+    The true global minimum over the whole plane is 0.0 at the origin. On a
+    finite box the spatial B&B certifies it; on a semi-infinite box a
+    continuous variable has an unbounded side, so the ROOT cannot be spatially
+    branched (no finite branching direction) and no relaxation establishes a
+    finite dual bound. The tree must then NOT certify the local minimum 0.2986
+    (or any local point) as the global optimum.
+    """
+    m = discopt.Model(name)
+    x0 = m.continuous("x0", lb=lb0, ub=ub0)
+    x1 = m.continuous("x1", lb=lb1, ub=ub1)
+    m.minimize(2 * x0**2 - 1.05 * x0**4 + (1.0 / 6.0) * x0**6 - x0 * x1 + x1**2)
+    return m
+
+
+@pytest.mark.smoke
+def test_467_free_variable_root_not_falsely_optimal_nlp_route():
+    """#467: both continuous vars one-sided-unbounded (x0=[-5,inf], x1=[-inf,5]).
+
+    ``_origin_has_finite_continuous_var`` is False, so the McCormick-LP guard
+    falls the solve back to the NLP relaxation. The root cannot be spatially
+    branched and no valid dual bound is established. The Rust tree previously
+    fathomed the root and collapsed ``global_lower_bound`` to the local-minimum
+    incumbent (0.2986), certifying it ``optimal`` with gap 0 — a false optimal.
+    The honest verdict is NOT optimal (feasible/unknown).
+    """
+    r = _camel_semiinfinite(-5.0, float("inf"), float("-inf"), 5.0, "c467_nlp").solve(
+        time_limit=6.0
+    )
+    assert r.status != "optimal", (
+        f"free-variable root falsely certified optimal: status={r.status} "
+        f"obj={r.objective} bound={r.bound}"
+    )
+    assert not getattr(r, "gap_certified", False), (
+        f"free-variable root falsely reports gap_certified: bound={r.bound}"
+    )
+
+
+@pytest.mark.smoke
+def test_467_free_variable_root_not_falsely_optimal_lp_route():
+    """#467: one var finite (x1=[-5,5]), one semi-infinite (x0=[-5,inf]).
+
+    ``_origin_has_finite_continuous_var`` is True (x1 is finite), so the guard
+    does NOT fall back — the McCormick-LP spatial path runs. It still collapses:
+    the LP relaxer honestly abstains on the unbounded nonlinear column (x0), so
+    the root carries no finite bound and cannot be branched to a finite bound.
+    This exercises the second (LP) route into the same Rust fathom/collapse. The
+    verdict must NOT be a certified optimal.
+    """
+    r = _camel_semiinfinite(-5.0, float("inf"), -5.0, 5.0, "c467_lp").solve(time_limit=6.0)
+    assert r.status != "optimal", (
+        f"semi-infinite root falsely certified optimal (LP route): status={r.status} "
+        f"obj={r.objective} bound={r.bound}"
+    )
+    assert not getattr(r, "gap_certified", False), (
+        f"semi-infinite root falsely reports gap_certified (LP route): bound={r.bound}"
+    )
+
+
+@pytest.mark.smoke
+def test_467_finite_box_control_still_certifies_optimal():
+    """#467 control: the SAME objective over a finite box [-5,5]^2 must still
+    certify the true global optimum 0.0. This guards against the fix
+    over-firing and downgrading a validly-certified finite-box solve."""
+    # Generous time_limit (60s): this is the only #467 guard that REQUIRES a
+    # certified `optimal`, and the finite-box three-hump-camel is a borderline
+    # nonconvex certification (~1.7s uninstrumented). Under the coverage-
+    # instrumented CI job (Python-heavy B&B loop, 2-3x slower on a shared runner)
+    # a 10s budget intermittently timed out -> `feasible` -> false test failure.
+    # The headroom keeps the correctness guard intact without the timing flake;
+    # a valid solve certifies long before 60s.
+    r = _camel_semiinfinite(-5.0, 5.0, -5.0, 5.0, "c467_ctrl").solve(time_limit=60.0)
+    assert r.status == "optimal", f"finite-box control lost certification: status={r.status}"
+    assert r.objective is not None and abs(r.objective) <= 1e-3, (
+        f"finite-box control missed the true optimum 0.0: obj={r.objective}"
+    )
+    assert getattr(r, "gap_certified", False), "finite-box control lost gap_certified"
+
+
+# ---------------------------------------------------------------------------
+# #467 sub-bug #3: a rigorous infeasibility proof must win over a soft,
+# within-tolerance-only incumbent. Differential — BOTH directions:
+#   (a) genuinely INFEASIBLE + a near-boundary pump incumbent -> NOT optimal.
+#   (b) genuinely FEASIBLE with a within-tolerance boundary optimum -> stays
+#       optimal/feasible; the fix must NEVER flip it to infeasible (the
+#       worst-class error: a false infeasible on a truly-feasible model).
+# ---------------------------------------------------------------------------
+
+
+def _feasible_boundary_model():
+    """Feasible: minimize (x-1)^2+(y-1)^2 s.t. x+y<=2, x,y in [0,2]. The global
+    optimum (1,1) sits ON the constraint boundary, so the incumbent is accepted
+    only within tolerance — exactly the shape the fix must NOT reject."""
+    m = discopt.Model("feas_boundary")
+    x = m.continuous("x", lb=0.0, ub=2.0)
+    y = m.continuous("y", lb=0.0, ub=2.0)
+    m.subject_to(x + y <= 2.0)
+    m.minimize((x - 1.0) ** 2 + (y - 1.0) ** 2)
+    return m
+
+
+def _feasible_bilinear_boundary_model():
+    """Feasible bilinear: minimize x+y s.t. x*y>=4, x,y in [1,3]. Optimum on the
+    x*y=4 boundary (e.g. x=y=2). Guards against a false infeasible when a
+    nonlinear constraint is active at the optimum."""
+    m = discopt.Model("feas_bilinear")
+    x = m.continuous("x", lb=1.0, ub=3.0)
+    y = m.continuous("y", lb=1.0, ub=3.0)
+    m.subject_to(x * y >= 4.0)
+    m.minimize(x + y)
+    return m
+
+
+def _infeasible_bilinear_model():
+    """Infeasible: x*y<=1 with x,y in [2,3] (so x*y in [4,9] > 1). FBBT proves the
+    box empty; there is no feasible point."""
+    m = discopt.Model("infeas_bilinear")
+    x = m.continuous("x", lb=2.0, ub=3.0)
+    y = m.continuous("y", lb=2.0, ub=3.0)
+    m.subject_to(x * y <= 1.0)
+    m.minimize(x + y)
+    return m
+
+
+@pytest.mark.smoke
+def test_467sub3_feasible_boundary_not_flipped_to_infeasible():
+    """(b) false-infeasible guard: a feasible model with a within-tolerance
+    boundary optimum must stay optimal/feasible — NEVER infeasible."""
+    r = _feasible_boundary_model().solve(time_limit=6.0)
+    assert r.status != "infeasible", (
+        f"false infeasible on a truly-feasible model: status={r.status} obj={r.objective}"
+    )
+    assert r.objective is not None and abs(r.objective) <= 1e-3, (
+        f"feasible boundary model lost its optimum: status={r.status} obj={r.objective}"
+    )
+
+
+@pytest.mark.smoke
+def test_467sub3_feasible_bilinear_boundary_not_flipped_to_infeasible():
+    """(b) false-infeasible guard with an active NONLINEAR constraint at the
+    optimum. Must not be reported infeasible."""
+    r = _feasible_bilinear_boundary_model().solve(time_limit=6.0)
+    assert r.status != "infeasible", (
+        f"false infeasible on a truly-feasible bilinear model: status={r.status} obj={r.objective}"
+    )
+    assert r.objective is not None and r.objective <= 4.0 + 1e-2, (
+        f"feasible bilinear model lost its optimum (~4.0): status={r.status} obj={r.objective}"
+    )
+
+
+@pytest.mark.smoke
+def test_467sub3_infeasible_bilinear_never_optimal():
+    """(a) a rigorously infeasible model must NEVER be certified optimal. Either
+    infeasible (rigorous) or a resource-limited non-optimal status is acceptable;
+    a false optimal is not."""
+    r = _infeasible_bilinear_model().solve(time_limit=6.0)
+    assert r.status != "optimal", (
+        f"rigorously-infeasible model falsely certified optimal: status={r.status} "
+        f"obj={r.objective}"
+    )
+
+
+@pytest.mark.slow
+def test_467sub3_ex7_3_6_not_false_optimal():
+    """(a) the real repro (MINLPLib ex7_3_6, oracle =inf=): FBBT proves the root
+    empty by ~2e-6 while a feasibility-pump point at ~1.2e-4 original-constraint
+    residual was previously certified ``optimal``. The fix must make the verdict
+    NOT optimal (infeasible with enough budget; otherwise time_limit/unknown —
+    both acceptable). Skips if the instance is not cached locally."""
+    import os as _os
+
+    nl = _os.path.expanduser("~/.cache/discopt/minlplib/current/nl/ex7_3_6.nl")
+    if not _os.path.exists(nl):
+        pytest.skip("ex7_3_6.nl not cached locally")
+    from discopt.modeling.core import from_nl
+
+    r = from_nl(nl).solve(time_limit=20.0)
+    assert r.status != "optimal", (
+        f"ex7_3_6 (infeasible) falsely certified optimal: status={r.status} obj={r.objective}"
+    )
+    # The rigorous outcome is ``infeasible`` (a certified conclusion — for which
+    # gap_certified=True is correct). A resource-limited ``time_limit``/``unknown``
+    # is also acceptable (not a false optimal). What must never happen: an
+    # ``optimal``, or an ``infeasible`` verdict that still reports a feasible point.
+    assert r.status in ("infeasible", "time_limit", "unknown"), (
+        f"ex7_3_6 unexpected status {r.status} (obj={r.objective})"
+    )
+    if r.status == "infeasible":
+        assert r.objective is None, f"ex7_3_6 reported infeasible with an objective {r.objective}"

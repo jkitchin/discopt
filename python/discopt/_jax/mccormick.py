@@ -20,17 +20,35 @@ import jax.numpy as jnp
 # ---------------------------------------------------------------------------
 
 
-def _secant(f, x, lb, ub):
+def _secant(f, x, lb, ub, fallback=jnp.inf):
     """Secant line of f between (lb, f(lb)) and (ub, f(ub)) evaluated at x.
 
-    When lb == ub, falls back to f(x) to avoid division by zero.
+    When ``lb == ub``, falls back to ``f(x)`` to avoid division by zero.
+
+    When either bound is non-finite the secant is undefined
+    (``slope = (f(ub) - f(lb)) / (ub - lb)`` becomes ``inf/inf`` = ``NaN``): a
+    secant is only a valid envelope over a *bounded* interval. Rather than leak a
+    NaN (which is not a valid over-/under-estimator and silently defeats every
+    downstream ``cv <= f`` / ``f <= cc`` soundness check), we return an explicit
+    *no-information* value ``fallback``. Callers pass ``+inf`` when the secant
+    plays the concave-overestimator (``cc``) role and ``-inf`` when it plays the
+    convex-underestimator (``cv``) role, so the resulting envelope still brackets
+    ``f`` (``-inf <= f <= +inf``) without fabricating a finite bound. See C-24.
     """
     f_lb = f(lb)
     f_ub = f(ub)
-    slope = (f_ub - f_lb) / (ub - lb)
+    width = ub - lb
+    degenerate = jnp.abs(width) < 1e-15
+    # Guard the divisor so the degenerate branch never evaluates 0/0 (which is a
+    # ZeroDivisionError on Python-float scalars and a NaN on arrays).
+    safe_width = jnp.where(degenerate, 1.0, width)
+    slope = (f_ub - f_lb) / safe_width
     line = f_lb + slope * (x - lb)
     # Degenerate case: lb ≈ ub -> just return f(x)
-    return jnp.where(jnp.abs(ub - lb) < 1e-15, f(x), line)
+    line = jnp.where(degenerate, f(x), line)
+    # Non-finite bound: the secant carries no information -> explicit fallback.
+    both_finite = jnp.isfinite(lb) & jnp.isfinite(ub)
+    return jnp.where(both_finite, line, fallback)
 
 
 # ---------------------------------------------------------------------------
@@ -61,6 +79,15 @@ def relax_bilinear(x, y, x_lb, x_ub, y_lb, y_ub):
     # bound at interior points; clamping tightens the relaxation.
     both_nonneg = (x_lb >= 0.0) & (y_lb >= 0.0)
     cv = jnp.where(both_nonneg, jnp.maximum(cv, x_lb * y_lb), cv)
+
+    # The McCormick envelope of x*y is only valid over a *bounded* box: with a
+    # non-finite factor bound the affine terms carry ``inf*·`` / ``inf - inf`` =
+    # ``NaN`` (an invalid, non-bracketing value). Replace the whole envelope with
+    # an explicit no-information bracket (cv=-inf, cc=+inf) rather than leaking a
+    # NaN a downstream consumer might use unguarded. See C-24.
+    all_finite = jnp.isfinite(x_lb) & jnp.isfinite(x_ub) & jnp.isfinite(y_lb) & jnp.isfinite(y_ub)
+    cv = jnp.where(all_finite, cv, -jnp.inf)
+    cc = jnp.where(all_finite, cc, jnp.inf)
 
     return cv, cc
 
@@ -117,22 +144,55 @@ def _relax_reciprocal(y, y_lb, y_ub):
 
 
 def relax_div(x, y, x_lb, x_ub, y_lb, y_ub):
-    """McCormick relaxation of x/y given bounds.
+    """McCormick relaxation of x/y given bounds on the numerator and denominator.
 
-    Requires 0 not in [y_lb, y_ub].
-    Uses the composition: x/y = x * (1/y) with bilinear relaxation.
+    In the compiler, ``[x_lb, x_ub] = [cv_num, cc_num]`` and
+    ``[y_lb, y_ub] = [cv_den, cc_den]`` are the *relaxation intervals* of the
+    numerator and denominator at the evaluation point, and ``x``/``y`` are points
+    inside them. Requires ``0`` not in ``[y_lb, y_ub]``.
 
-    Returns (cv, cc).
+    Two regimes (C-23):
+
+    - **Point/linear denominator** (``y_lb == y_ub``): the denominator relaxation
+      collapses to a point, so ``1/y`` is exact and the classic bilinear
+      composition ``x*(1/y)`` is sound and tight. This covers a constant, a bare
+      variable, or an affine denominator.
+    - **Nonlinear denominator** (``y_lb != y_ub``): the bilinear composition
+      reciprocated at the *midpoint* of the denominator interval is **not** a
+      valid envelope — ``1/mid`` sits above the true ``1/(.)`` on a curved
+      denominator, so the "convex underestimator" can exceed ``f`` (``cv > f``),
+      an invalid dual bound. We instead return the sound **interval enclosure**
+      of ``x/y`` over the box (``[x_lb,x_ub] * [1/y_ub, 1/y_lb]``): a constant
+      ``[cv, cc]`` with ``cv <= x/y <= cc`` at every point. This is looser but
+      never crosses the function; spatial branching tightens the box (and the
+      denominator interval) so the enclosure shrinks.
     """
-    # First get relaxation of 1/y
-    recip_cv, recip_cc = _relax_reciprocal(y, y_lb, y_ub)
-    recip_lb = 1.0 / y_ub  # min of 1/y when y > 0 (note swap)
+    # Sound reciprocal bounds over the denominator interval (0 excluded, so the
+    # two endpoints share a sign): 1/y is monotone-decreasing, hence the range is
+    # [1/y_ub, 1/y_lb] up to ordering.
+    recip_lb = 1.0 / y_ub
     recip_ub = 1.0 / y_lb
-    # Ensure correct ordering
     recip_lb_sorted = jnp.minimum(recip_lb, recip_ub)
     recip_ub_sorted = jnp.maximum(recip_lb, recip_ub)
-    # Use bilinear relaxation of x * recip
-    return relax_bilinear(x, recip_cv, x_lb, x_ub, recip_lb_sorted, recip_ub_sorted)
+
+    # Tight bilinear composition, valid only where the denominator relaxation
+    # collapses to a point (1/y exact).
+    recip_cv, _recip_cc = _relax_reciprocal(y, y_lb, y_ub)
+    tight_cv, tight_cc = relax_bilinear(x, recip_cv, x_lb, x_ub, recip_lb_sorted, recip_ub_sorted)
+
+    # Sound interval enclosure of x/y = [x_lb,x_ub] * [recip_lb,recip_ub],
+    # valid for a nonlinear (non-degenerate) denominator interval.
+    p1 = x_lb * recip_lb_sorted
+    p2 = x_lb * recip_ub_sorted
+    p3 = x_ub * recip_lb_sorted
+    p4 = x_ub * recip_ub_sorted
+    encl_cv = jnp.minimum(jnp.minimum(p1, p2), jnp.minimum(p3, p4))
+    encl_cc = jnp.maximum(jnp.maximum(p1, p2), jnp.maximum(p3, p4))
+
+    denom_is_point = jnp.abs(y_ub - y_lb) < 1e-12
+    cv = jnp.where(denom_is_point, tight_cv, encl_cv)
+    cc = jnp.where(denom_is_point, tight_cc, encl_cc)
+    return cv, cc
 
 
 # ---------------------------------------------------------------------------
@@ -171,7 +231,7 @@ def relax_pow(x, lb, ub, n):
     case1_cc = _secant(f, x, lb, ub)
 
     # Case 2: ub <= 0 -> fully concave: cv = secant, cc = f(x)
-    case2_cv = _secant(f, x, lb, ub)
+    case2_cv = _secant(f, x, lb, ub, fallback=-jnp.inf)
     case2_cc = f(x)
 
     # Case 3: lb < 0 < ub -> inflection at 0
@@ -179,8 +239,8 @@ def relax_pow(x, lb, ub, n):
     # - x >= 0: f is convex -> cv = f(x), cc = secant on [0, ub]
     # - x < 0:  f is concave -> cv = secant on [lb, 0], cc = f(x)
     zero = jnp.zeros_like(x)
-    sec_neg = _secant(f, x, lb, zero)
-    sec_pos = _secant(f, x, zero, ub)
+    sec_neg = _secant(f, x, lb, zero, fallback=-jnp.inf)  # concave-half cv role
+    sec_pos = _secant(f, x, zero, ub)  # convex-half cc role
     case3_cv = jnp.where(x >= 0, f(x), sec_neg)
     case3_cc = jnp.where(x >= 0, sec_pos, f(x))
 
@@ -254,7 +314,7 @@ def relax_sqrt(x, lb, ub):
     Returns (cv, cc).
     """
     cc = jnp.sqrt(x)
-    cv = _secant(jnp.sqrt, x, lb, ub)
+    cv = _secant(jnp.sqrt, x, lb, ub, fallback=-jnp.inf)
     return cv, cc
 
 
@@ -265,7 +325,7 @@ def relax_log(x, lb, ub):
     Returns (cv, cc).
     """
     cc = jnp.log(x)
-    cv = _secant(jnp.log, x, lb, ub)
+    cv = _secant(jnp.log, x, lb, ub, fallback=-jnp.inf)
     return cv, cc
 
 
@@ -276,7 +336,7 @@ def relax_log2(x, lb, ub):
     Returns (cv, cc).
     """
     cc = jnp.log2(x)
-    cv = _secant(jnp.log2, x, lb, ub)
+    cv = _secant(jnp.log2, x, lb, ub, fallback=-jnp.inf)
     return cv, cc
 
 
@@ -287,7 +347,7 @@ def relax_log10(x, lb, ub):
     Returns (cv, cc).
     """
     cc = jnp.log10(x)
-    cv = _secant(jnp.log10, x, lb, ub)
+    cv = _secant(jnp.log10, x, lb, ub, fallback=-jnp.inf)
     return cv, cc
 
 
@@ -393,11 +453,18 @@ def relax_cos(x, lb, ub):
 def relax_tan(x, lb, ub):
     """McCormick relaxation of tan(x) on [lb, ub].
 
-    Requires [lb, ub] within a single period (-pi/2, pi/2) + k*pi.
-    tan has an inflection point at k*pi: convex on [k*pi, pi/2+k*pi),
-    concave on (-pi/2+k*pi, k*pi].
+    ``tan`` is only continuous on an open branch ``(-pi/2 + k*pi, pi/2 + k*pi)``;
+    it diverges at each pole ``pi/2 + k*pi``. Within one branch it has an
+    inflection point at ``k*pi`` (convex on ``[k*pi, pi/2+k*pi)``, concave on
+    ``(-pi/2+k*pi, k*pi]``) and a valid convex/concave envelope can be drawn.
 
-    For the principal period (-pi/2, pi/2):
+    If ``[lb, ub]`` **straddles a pole** the branch classification below is not
+    applicable — a secant drawn across the pole is not a valid under/over
+    estimator (C-19). In that case we *abstain*, returning the no-information
+    envelope ``(-inf, +inf)`` (matching how other relaxations abstain), leaving
+    FBBT / spatial branching to shrink the box below the pole spacing.
+
+    For a pole-free interval within the principal period ``(-pi/2, pi/2)``:
     - lb >= 0: convex -> cv = tan(x), cc = secant
     - ub <= 0: concave -> cv = secant, cc = tan(x)
     - lb < 0 < ub: piecewise with separate secants per half
@@ -407,23 +474,34 @@ def relax_tan(x, lb, ub):
     f = jnp.tan
 
     # Shift to principal period by finding the nearest inflection point
-    # For simplicity, assume the interval is within one period.
-    # Determine the inflection point center = k*pi nearest to midpoint
+    # (center = k*pi nearest to the midpoint); the continuous branch spanning
+    # the box is (center - pi/2, center + pi/2).
     mid = 0.5 * (lb + ub)
     k = jnp.round(mid / jnp.pi)
     center = k * jnp.pi
+
+    # --- Pole detection (C-19) -------------------------------------------
+    # tan is finite and single-branch on the box iff both endpoints lie
+    # strictly inside the branch centered at ``center``, whose bounding poles
+    # are at ``center +/- pi/2``. Any box that reaches or crosses either pole
+    # (equivalently spans >= a full period, so it would contain a pole for some
+    # k) is not classifiable by the branch logic below and must abstain — a
+    # secant across a pole is neither a valid under- nor over-estimator.
+    lo_pole = center - 0.5 * jnp.pi
+    hi_pole = center + 0.5 * jnp.pi
+    pole_free = (lb > lo_pole) & (ub < hi_pole)
 
     # Case 1: lb >= center -> convex half: cv = f(x), cc = secant
     case1_cv = f(x)
     case1_cc = _secant(f, x, lb, ub)
 
     # Case 2: ub <= center -> concave half: cv = secant, cc = f(x)
-    case2_cv = _secant(f, x, lb, ub)
+    case2_cv = _secant(f, x, lb, ub, fallback=-jnp.inf)
     case2_cc = f(x)
 
     # Case 3: lb < center < ub -> piecewise
-    sec_neg = _secant(f, x, lb, center)
-    sec_pos = _secant(f, x, center, ub)
+    sec_neg = _secant(f, x, lb, center, fallback=-jnp.inf)  # concave-half cv role
+    sec_pos = _secant(f, x, center, ub)  # convex-half cc role
     case3_cv = jnp.where(x >= center, f(x), sec_neg)
     case3_cc = jnp.where(x >= center, sec_pos, f(x))
 
@@ -432,6 +510,13 @@ def relax_tan(x, lb, ub):
 
     cv = jnp.where(is_convex_half, case1_cv, jnp.where(is_concave_half, case2_cv, case3_cv))
     cc = jnp.where(is_convex_half, case1_cc, jnp.where(is_concave_half, case2_cc, case3_cc))
+
+    # Abstain across a pole: emit the no-information envelope (-inf, +inf)
+    # rather than a secant drawn through the singularity.
+    neg_inf = -jnp.inf * jnp.ones_like(cv)
+    pos_inf = jnp.inf * jnp.ones_like(cc)
+    cv = jnp.where(pole_free, cv, neg_inf)
+    cc = jnp.where(pole_free, cc, pos_inf)
 
     return cv, cc
 
@@ -450,7 +535,7 @@ def relax_atan(x, lb, ub):
     f = jnp.arctan
 
     # Case 1: lb >= 0 -> concave: cv = secant, cc = f(x)
-    case1_cv = _secant(f, x, lb, ub)
+    case1_cv = _secant(f, x, lb, ub, fallback=-jnp.inf)
     case1_cc = f(x)
 
     # Case 2: ub <= 0 -> convex: cv = f(x), cc = secant
@@ -458,8 +543,8 @@ def relax_atan(x, lb, ub):
     case2_cc = _secant(f, x, lb, ub)
 
     # Case 3: lb < 0 < ub -> mixed
-    sec_neg = _secant(f, x, lb, 0.0)
-    sec_pos = _secant(f, x, 0.0, ub)
+    sec_neg = _secant(f, x, lb, 0.0)  # convex-half cc role (x < 0)
+    sec_pos = _secant(f, x, 0.0, ub, fallback=-jnp.inf)  # concave-half cv role (x >= 0)
     case3_cv = jnp.where(x >= 0, sec_pos, f(x))
     case3_cc = jnp.where(x >= 0, f(x), sec_neg)
 
@@ -474,46 +559,28 @@ def relax_atan(x, lb, ub):
 def relax_asin(x, lb, ub):
     """McCormick relaxation of asin(x) on [lb, ub] (subset of [-1, 1]).
 
-    asin is convex on [-1, 0] and concave on [0, 1].
+    asin''(x) = x*(1 - x**2)**(-3/2), so asin is convex on [0, 1] and
+    concave on [-1, 0] (mirror image of acos). On the convex branch the
+    function itself is the underestimator (cv) and the secant the
+    overestimator (cc); on the concave branch the roles reverse. This is
+    the same curvature layout as sinh (convex on [0, inf)).
     Returns (cv, cc).
     """
     f = jnp.arcsin
 
-    case1_cv = _secant(f, x, lb, ub)
-    case1_cc = f(x)
-
-    case2_cv = f(x)
-    case2_cc = _secant(f, x, lb, ub)
-
-    sec_neg = _secant(f, x, lb, 0.0)
-    sec_pos = _secant(f, x, 0.0, ub)
-    case3_cv = jnp.where(x >= 0, sec_pos, f(x))
-    case3_cc = jnp.where(x >= 0, f(x), sec_neg)
-
-    is_concave = lb >= 0
-    is_convex = ub <= 0
-
-    cv = jnp.where(is_concave, case1_cv, jnp.where(is_convex, case2_cv, case3_cv))
-    cc = jnp.where(is_concave, case1_cc, jnp.where(is_convex, case2_cc, case3_cc))
-    return cv, cc
-
-
-def relax_acos(x, lb, ub):
-    """McCormick relaxation of acos(x) on [lb, ub] (subset of [-1, 1]).
-
-    acos is concave on [-1, 0] and convex on [0, 1] (decreasing).
-    Returns (cv, cc).
-    """
-    f = jnp.arccos
-
+    # Case 1: lb >= 0 -> convex: cv = f(x), cc = secant (cc/overestimator role)
     case1_cv = f(x)
     case1_cc = _secant(f, x, lb, ub)
 
-    case2_cv = _secant(f, x, lb, ub)
+    # Case 2: ub <= 0 -> concave: cv = secant (cv/underestimator role), cc = f(x)
+    case2_cv = _secant(f, x, lb, ub, fallback=-jnp.inf)
     case2_cc = f(x)
 
-    sec_neg = _secant(f, x, lb, 0.0)
-    sec_pos = _secant(f, x, 0.0, ub)
+    # Case 3: lb < 0 < ub -> straddles the inflection at 0. Split at 0:
+    # positive (convex) side -> f(x)/sec_pos; negative (concave) side ->
+    # sec_neg/f(x).
+    sec_neg = _secant(f, x, lb, 0.0, fallback=-jnp.inf)  # cv role (x < 0 concave half)
+    sec_pos = _secant(f, x, 0.0, ub)  # cc role (x >= 0 convex half)
     case3_cv = jnp.where(x >= 0, f(x), sec_neg)
     case3_cc = jnp.where(x >= 0, sec_pos, f(x))
 
@@ -522,6 +589,44 @@ def relax_acos(x, lb, ub):
 
     cv = jnp.where(is_convex, case1_cv, jnp.where(is_concave, case2_cv, case3_cv))
     cc = jnp.where(is_convex, case1_cc, jnp.where(is_concave, case2_cc, case3_cc))
+    return cv, cc
+
+
+def relax_acos(x, lb, ub):
+    """McCormick relaxation of acos(x) on [lb, ub] (subset of [-1, 1]).
+
+    acos''(x) = -x*(1 - x**2)**(-3/2), so acos is concave on [0, 1] and
+    convex on [-1, 0] (mirror image of asin). acos is decreasing, but the
+    secant/tangent under- vs over-estimator roles depend only on curvature,
+    not on the sign of the slope. On the concave branch the secant is the
+    underestimator (cv) and the function the overestimator (cc); on the
+    convex branch the roles reverse. Same curvature layout as tanh
+    (concave on [0, inf)).
+    Returns (cv, cc).
+    """
+    f = jnp.arccos
+
+    # Case 1: lb >= 0 -> concave: cv = secant (cv/underestimator role), cc = f(x)
+    case1_cv = _secant(f, x, lb, ub, fallback=-jnp.inf)
+    case1_cc = f(x)
+
+    # Case 2: ub <= 0 -> convex: cv = f(x), cc = secant (cc/overestimator role)
+    case2_cv = f(x)
+    case2_cc = _secant(f, x, lb, ub)
+
+    # Case 3: lb < 0 < ub -> straddles the inflection at 0. Split at 0:
+    # positive (concave) side -> sec_pos/f(x); negative (convex) side ->
+    # f(x)/sec_neg.
+    sec_neg = _secant(f, x, lb, 0.0)  # cc role (x < 0 convex half)
+    sec_pos = _secant(f, x, 0.0, ub, fallback=-jnp.inf)  # cv role (x >= 0 concave half)
+    case3_cv = jnp.where(x >= 0, sec_pos, f(x))
+    case3_cc = jnp.where(x >= 0, f(x), sec_neg)
+
+    is_concave = lb >= 0
+    is_convex = ub <= 0
+
+    cv = jnp.where(is_concave, case1_cv, jnp.where(is_convex, case2_cv, case3_cv))
+    cc = jnp.where(is_concave, case1_cc, jnp.where(is_convex, case2_cc, case3_cc))
     return cv, cc
 
 
@@ -541,11 +646,11 @@ def relax_sinh(x, lb, ub):
     case1_cv = f(x)
     case1_cc = _secant(f, x, lb, ub)
 
-    case2_cv = _secant(f, x, lb, ub)
+    case2_cv = _secant(f, x, lb, ub, fallback=-jnp.inf)
     case2_cc = f(x)
 
-    sec_neg = _secant(f, x, lb, 0.0)
-    sec_pos = _secant(f, x, 0.0, ub)
+    sec_neg = _secant(f, x, lb, 0.0, fallback=-jnp.inf)  # concave-half cv role (x < 0)
+    sec_pos = _secant(f, x, 0.0, ub)  # convex-half cc role (x >= 0)
     case3_cv = jnp.where(x >= 0, f(x), sec_neg)
     case3_cc = jnp.where(x >= 0, sec_pos, f(x))
 
@@ -576,14 +681,14 @@ def relax_tanh(x, lb, ub):
     """
     f = jnp.tanh
 
-    case1_cv = _secant(f, x, lb, ub)
+    case1_cv = _secant(f, x, lb, ub, fallback=-jnp.inf)
     case1_cc = f(x)
 
     case2_cv = f(x)
     case2_cc = _secant(f, x, lb, ub)
 
-    sec_neg = _secant(f, x, lb, 0.0)
-    sec_pos = _secant(f, x, 0.0, ub)
+    sec_neg = _secant(f, x, lb, 0.0)  # convex-half cc role (x < 0)
+    sec_pos = _secant(f, x, 0.0, ub, fallback=-jnp.inf)  # concave-half cv role (x >= 0)
     case3_cv = jnp.where(x >= 0, sec_pos, f(x))
     case3_cc = jnp.where(x >= 0, f(x), sec_neg)
 
@@ -606,7 +711,7 @@ def relax_sigmoid(x, lb, ub):
     f = jnn.sigmoid
 
     # Case 1: lb >= 0 → concave region
-    case1_cv = _secant(f, x, lb, ub)
+    case1_cv = _secant(f, x, lb, ub, fallback=-jnp.inf)
     case1_cc = f(x)
 
     # Case 2: ub <= 0 → convex region
@@ -614,8 +719,8 @@ def relax_sigmoid(x, lb, ub):
     case2_cc = _secant(f, x, lb, ub)
 
     # Case 3: lb < 0 < ub → mixed
-    sec_neg = _secant(f, x, lb, 0.0)
-    sec_pos = _secant(f, x, 0.0, ub)
+    sec_neg = _secant(f, x, lb, 0.0)  # convex-half cc role (x < 0)
+    sec_pos = _secant(f, x, 0.0, ub, fallback=-jnp.inf)  # concave-half cv role (x >= 0)
     case3_cv = jnp.where(x >= 0, sec_pos, f(x))
     case3_cc = jnp.where(x >= 0, f(x), sec_neg)
 

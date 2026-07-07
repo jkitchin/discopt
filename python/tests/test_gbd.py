@@ -191,6 +191,7 @@ def test_project_mu_sign_convention():
             assert out[k] == pytest.approx(mu[k])
 
 
+@pytest.mark.slow
 def test_lagrangian_anchor_sound_under_inexact_recourse(monkeypatch):
     """The GBD cut anchors at the Lagrangian dual value, not the NLP primal, so a
     *suboptimal* recourse solve cannot produce an unsound bound.
@@ -235,6 +236,7 @@ def test_lagrangian_anchor_sound_under_inexact_recourse(monkeypatch):
     assert not (r.status == "optimal" and r.objective is not None and r.objective > true_opt + 1e-2)
 
 
+@pytest.mark.slow
 def test_nonconvex_reports_no_bound():
     """A nonconvex (concave) objective must not produce a numeric lower bound;
     soundness gate -> bound is None even though a heuristic incumbent is found."""
@@ -377,3 +379,100 @@ def test_linear_objective_nonlinear_constraint():
     assert r.status == "optimal"
     assert r.objective == pytest.approx(-1.0, abs=ABS_TOL)
     assert r.bound is not None and r.bound <= r.objective + 1e-3
+
+
+# ── Phase 0 correctness (C1, C2) ──────────────────────────────
+
+
+def _quad_two_point():
+    """min x^2 + y ; y binary first-stage, x recourse, x + y >= 1. Optimum 1.0."""
+    m = dm.Model("quad_c1")
+    y = m.binary("y")
+    x = m.continuous("x", lb=0, ub=5)
+    m.first_stage(y)
+    m.minimize(x**2 + y)
+    m.subject_to(x + y >= 1)
+    return m
+
+
+def test_c1_transient_nlp_failure_retries(monkeypatch):
+    """A one-off recourse-NLP failure must not derail the solve (C1).
+
+    The first ``solve_nlp`` invocation raises; every later call delegates to the
+    real solver. The perturbed retry / phase-1 machinery must recover and still
+    reach the true optimum.
+    """
+    import discopt.solvers.nlp_pounce as npn
+
+    real = npn.solve_nlp
+    state = {"n": 0}
+
+    def flaky(evaluator, x0, *args, **kwargs):
+        state["n"] += 1
+        if state["n"] == 1:
+            raise RuntimeError("transient NLP failure")
+        return real(evaluator, x0, *args, **kwargs)
+
+    monkeypatch.setattr(npn, "solve_nlp", flaky)
+    r = solve_benders(_quad_two_point(), time_limit=30)
+    assert r.status == "optimal"
+    assert r.objective == pytest.approx(1.0, abs=ABS_TOL)
+    assert state["n"] >= 2  # the failure path was actually exercised
+
+
+def test_c1_persistent_failure_never_certifies(monkeypatch):
+    """If the recourse NLP is always broken, the solve must not fabricate a
+    certified answer (C1): no rigorous bound, not gap-certified."""
+    import discopt.solvers.nlp_pounce as npn
+
+    def always_raise(*args, **kwargs):
+        raise RuntimeError("NLP backend down")
+
+    monkeypatch.setattr(npn, "solve_nlp", always_raise)
+    r = solve_benders(_quad_two_point(), time_limit=30)
+    assert r.bound is None
+    assert not r.gap_certified
+    assert r.status != "optimal"
+
+
+def test_c1_recourse_failure_at_optimum_not_excluded(monkeypatch):
+    """The core C1 regression: a recourse solve that fails at the *optimal*
+    first-stage point must not be mistaken for infeasibility and excluded.
+
+    The recourse NLP (n vars) is forced to fail everywhere; the phase-1 NLP
+    (n+1 vars) still runs. Because infeasibility is never *certified*, the solver
+    must downgrade to heuristic mode (bound withheld, not gap-certified) rather
+    than no-good-cut away the optimum and report a wrong certified optimum.
+    """
+    import discopt.solvers.nlp_pounce as npn
+
+    real = npn.solve_nlp
+    n_master_plus_recourse = 2  # y + x
+
+    def fail_recourse_only(evaluator, x0, *args, **kwargs):
+        # Phase-1 adds one elastic variable, so its x0 is longer than the
+        # recourse solve's. Let phase-1 through; break the recourse solve.
+        if len(np.asarray(x0)) == n_master_plus_recourse:
+            raise RuntimeError("recourse solve broken")
+        return real(evaluator, x0, *args, **kwargs)
+
+    monkeypatch.setattr(npn, "solve_nlp", fail_recourse_only)
+    r = solve_benders(_quad_two_point(), time_limit=30)
+    # Never a *certified* wrong answer: bound withheld and not certified.
+    assert r.bound is None
+    assert not r.gap_certified
+
+
+def test_c2_master_only_nonlinear_nonbinary_rejected():
+    """A master-only nonlinear constraint with a *non-binary* integer master is
+    rejected up front (C2), not failed mid-solve. (The all-binary case is
+    supported and covered by ``test_master_only_nonlinear_constraint``.)"""
+    m = dm.Model("monl_int")
+    z = m.integer("z", lb=0, ub=4)
+    x = m.continuous("x", lb=0, ub=5)
+    m.first_stage(z)
+    m.minimize(z + x * x)
+    m.subject_to(z * z <= 9)  # master-only nonlinear, non-binary master
+    m.subject_to(x + z >= 1)
+    with pytest.raises(NotImplementedError, match="master-only nonlinear"):
+        solve_benders(m, time_limit=30)

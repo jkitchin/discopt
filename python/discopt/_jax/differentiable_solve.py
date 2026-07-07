@@ -100,15 +100,30 @@ class UnifiedDiffResult:
         return self.relaxation_obj
 
 
+def _lp_forward(lp_data) -> tuple[float, np.ndarray]:
+    """Forward LP solve for the differentiable path: POUNCE's interior-point KKT
+    solve, returning ``(obj, x)`` in the raw (no ``obj_const``) convention.
+
+    This is the same interior-point forward solver ``differentiable_lp`` uses for
+    its ``custom_jvp`` sensitivity (POUNCE returns the analytic center, so the KKT
+    system stays nonsingular). The pure-JAX ``lp_ipm_solve`` it replaced was
+    retired in #370 — differentiability comes from the implicit-KKT gradient, not
+    from the forward solver. Raises ``ImportError`` if POUNCE is unavailable (the
+    callers already wrap this in ``try``).
+    """
+    from discopt.solvers.lp_pounce import solve_lp_kkt
+
+    obj, x, *_ = solve_lp_kkt(lp_data.c, lp_data.A_eq, lp_data.b_eq, lp_data.x_l, lp_data.x_u)
+    return float(obj), np.asarray(x)
+
+
 def _solve_objective(model: Model, problem_class: ProblemClass) -> float | None:
     """Solve a model and return just the objective value."""
     try:
         if problem_class == ProblemClass.LP:
             lp_data = extract_lp_data(model)
-            from discopt._jax.lp_ipm import lp_ipm_solve
-
-            state = lp_ipm_solve(lp_data.c, lp_data.A_eq, lp_data.b_eq, lp_data.x_l, lp_data.x_u)
-            return float(state.obj) + lp_data.obj_const
+            lp_obj, _ = _lp_forward(lp_data)
+            return lp_obj + lp_data.obj_const
         elif problem_class == ProblemClass.QP:
             qp_data = extract_qp_data(model)
             from discopt._jax.qp_ipm import qp_ipm_solve
@@ -180,13 +195,11 @@ def differentiable_solve(
 
     if problem_class == ProblemClass.LP:
         lp_data = extract_lp_data(model)
-        from discopt._jax.lp_ipm import lp_ipm_solve
-
-        state = lp_ipm_solve(lp_data.c, lp_data.A_eq, lp_data.b_eq, lp_data.x_l, lp_data.x_u)
-        x_flat = np.asarray(state.x[:n_orig])
+        obj, x = _lp_forward(lp_data)
+        x_flat = np.asarray(x[:n_orig])
         return UnifiedDiffResult(
-            status="optimal" if int(state.converged) in (1, 2) else "iteration_limit",
-            objective=float(state.obj) + lp_data.obj_const,
+            status="optimal",
+            objective=obj + lp_data.obj_const,
             x=x_flat,
             x_dict=_unpack_solution(model, x_flat),
             problem_class=problem_class,
@@ -226,16 +239,7 @@ def differentiable_solve(
         try:
             if problem_class == ProblemClass.MILP:
                 lp_data = extract_lp_data(model)
-                from discopt._jax.lp_ipm import lp_ipm_solve
-
-                relax_state = lp_ipm_solve(
-                    lp_data.c,
-                    lp_data.A_eq,
-                    lp_data.b_eq,
-                    lp_data.x_l,
-                    lp_data.x_u,
-                )
-                relaxation_obj = float(relax_state.obj)
+                relaxation_obj, _ = _lp_forward(lp_data)
             else:
                 qp_data = extract_qp_data(model)
                 from discopt._jax.qp_ipm import qp_ipm_solve

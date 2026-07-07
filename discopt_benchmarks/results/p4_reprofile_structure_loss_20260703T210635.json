@@ -1,0 +1,438 @@
+{
+  "experiment": "phase4_reprofile_structure_loss",
+  "generated_utc": "20260703T210635",
+  "time_cap_seconds": 90.0,
+  "panel": [
+    "nvs17",
+    "ex1252",
+    "ex1252a",
+    "gear4",
+    "st_e38",
+    "clay0303hfsg",
+    "casctanks",
+    "heatexch_gen1"
+  ],
+  "n_run": 8,
+  "n_skipped": 0,
+  "skipped": [],
+  "rows": [
+    {
+      "instance": "nvs17",
+      "nl_path": "/Users/jkitchin/Dropbox/projects/discopt-minlp-benchmark/minlplib/nl/nvs17.nl",
+      "defined_vars_discarded": 0,
+      "load_seconds": 0.0019,
+      "load_status": "ok",
+      "dag_nodes": 753,
+      "n_vars": 7,
+      "n_constraints": 7,
+      "cse_duplicate_nodes": 519,
+      "cse_duplicate_frac": 0.6892,
+      "cse_duplicate_by_type": {
+        "constant": 239,
+        "binary_op": 249,
+        "unary_op": 31
+      },
+      "quadratic": {
+        "obj_quadratic": true,
+        "obj_bilinear": false,
+        "constraints_quadratic": 7,
+        "term_classes": {
+          "bilinear": 21,
+          "trilinear": 0,
+          "multilinear": 0,
+          "monomial": 7,
+          "general_nl": 0
+        }
+      },
+      "symmetry": {
+        "orbits_found": 0,
+        "total_orbit_members": 0,
+        "variables_examined": 7,
+        "detect_seconds": 0.0002
+      },
+      "fbbt_one_sweep_seconds": "err:TypeError",
+      "wall_seconds": 79.111,
+      "solve_status": "optimal",
+      "node_count": 93,
+      "objective": -1100.4000000000003,
+      "bound": -1100.4000022018004,
+      "xla_compile_count": null,
+      "xla_compile_seconds": null,
+      "seconds_per_node": 0.85066,
+      "solver_stats": {
+        "reduce/fbbt": 0.12463533505797386,
+        "separate/multilinear": 0.0010295403189957142,
+        "separate/edge_concave": 32.931821294594556,
+        "separate/univariate_square": 7.954982667695731,
+        "separate/convex": 0.0001330026425421238,
+        "separate/psd": 21.502866834867746,
+        "separate/rlt": 6.007589399814606e-05
+      },
+      "bound_le_oracle": true
+    },
+    {
+      "instance": "ex1252",
+      "nl_path": "/Users/jkitchin/Dropbox/projects/discopt-minlp-benchmark/minlplib/nl/ex1252.nl",
+      "defined_vars_discarded": 0,
+      "load_seconds": 0.0004,
+      "load_status": "ok",
+      "dag_nodes": 336,
+      "n_vars": 39,
+      "n_constraints": 43,
+      "cse_duplicate_nodes": 115,
+      "cse_duplicate_frac": 0.3423,
+      "cse_duplicate_by_type": {
+        "constant": 76,
+        "binary_op": 24,
+        "unary_op": 15
+      },
+      "quadratic": {
+        "obj_quadratic": false,
+        "obj_bilinear": false,
+        "constraints_quadratic": 40,
+        "term_classes": {
+          "bilinear": 9,
+          "trilinear": 0,
+          "multilinear": 0,
+          "monomial": 3,
+          "general_nl": 0
+        }
+      },
+      "symmetry": {
+        "orbits_found": 0,
+        "total_orbit_members": 0,
+        "variables_examined": 39,
+        "detect_seconds": 7e-05
+      },
+      "fbbt_one_sweep_seconds": "err:TypeError",
+      "wall_seconds": 98.856,
+      "solve_status": "feasible",
+      "node_count": 71,
+      "objective": 141443.2429448267,
+      "bound": null,
+      "xla_compile_count": null,
+      "xla_compile_seconds": null,
+      "seconds_per_node": 1.39234,
+      "solver_stats": {
+        "reduce/fbbt": 0.3975185011513531,
+        "reduce/obbt": 6.965244290418923,
+        "separate/multilinear": 0.00037687644362449646,
+        "separate/edge_concave": 0.00040825363248586655,
+        "separate/univariate_square": 27.634101461153477,
+        "separate/convex": 5.216524004936218e-05,
+        "separate/psd": 2.0668376237154007e-05,
+        "separate/rlt": 1.046154648065567e-05
+      }
+    },
+    {
+      "instance": "ex1252a",
+      "nl_path": "/Users/jkitchin/Dropbox/projects/discopt-minlp-benchmark/minlplib/nl/ex1252a.nl",
+      "defined_vars_discarded": 0,
+      "load_seconds": 0.0003,
+      "load_status": "ok",
+      "dag_nodes": 282,
+      "n_vars": 24,
+      "n_constraints": 34,
+      "cse_duplicate_nodes": 101,
+      "cse_duplicate_frac": 0.3582,
+      "cse_duplicate_by_type": {
+        "constant": 62,
+        "binary_op": 24,
+        "unary_op": 15
+      },
+      "quadratic": {
+        "obj_quadratic": false,
+        "obj_bilinear": false,
+        "constraints_quadratic": 31,
+        "term_classes": {
+          "bilinear": 9,
+          "trilinear": 0,
+          "multilinear": 0,
+          "monomial": 3,
+          "general_nl": 0
+        }
+      },
+      "symmetry": {
+        "orbits_found": 0,
+        "total_orbit_members": 0,
+        "variables_examined": 24,
+        "detect_seconds": 7e-05
+      },
+      "fbbt_one_sweep_seconds": "err:TypeError",
+      "wall_seconds": 66.85,
+      "solve_status": "feasible",
+      "node_count": 15,
+      "objective": 138694.63057019692,
+      "bound": null,
+      "xla_compile_count": null,
+      "xla_compile_seconds": null,
+      "seconds_per_node": 4.45668,
+      "solver_stats": {
+        "reduce/fbbt": 0.17756870994344354,
+        "reduce/obbt": 1.9323918744921684,
+        "separate/multilinear": 8.633174002170563e-05,
+        "separate/edge_concave": 0.00030695507302880287,
+        "separate/univariate_square": 10.510151043068618,
+        "separate/convex": 2.4835579097270966e-05,
+        "separate/psd": 1.0041985660791397e-05,
+        "separate/rlt": 0.005949749145656824
+      }
+    },
+    {
+      "instance": "gear4",
+      "nl_path": "/Users/jkitchin/Dropbox/projects/discopt-minlp-benchmark/minlplib/nl/gear4.nl",
+      "defined_vars_discarded": 0,
+      "load_seconds": 0.0001,
+      "load_status": "ok",
+      "dag_nodes": 17,
+      "n_vars": 6,
+      "n_constraints": 1,
+      "cse_duplicate_nodes": 0,
+      "cse_duplicate_frac": 0.0,
+      "cse_duplicate_by_type": {},
+      "quadratic": {
+        "obj_quadratic": true,
+        "obj_bilinear": false,
+        "constraints_quadratic": 0,
+        "term_classes": {
+          "bilinear": 0,
+          "trilinear": 0,
+          "multilinear": 0,
+          "monomial": 0,
+          "general_nl": 0
+        }
+      },
+      "symmetry": {
+        "orbits_found": 0,
+        "total_orbit_members": 0,
+        "variables_examined": 6,
+        "detect_seconds": 0.0
+      },
+      "fbbt_one_sweep_seconds": "err:TypeError",
+      "wall_seconds": 49.84,
+      "solve_status": "optimal",
+      "node_count": 6045,
+      "objective": 1.6434284641344497,
+      "bound": 1.6434284564686623,
+      "xla_compile_count": null,
+      "xla_compile_seconds": null,
+      "seconds_per_node": 0.00824,
+      "solver_stats": {
+        "reduce/fbbt": 1.3231522319838405,
+        "reduce/obbt": 14.079789684619755,
+        "separate/multilinear": 0.009803989436477423,
+        "separate/edge_concave": 0.005300300195813179,
+        "separate/univariate_square": 0.0030903285369277,
+        "separate/convex": 0.0033112233504652977,
+        "separate/psd": 0.023861555382609367,
+        "separate/rlt": 0.0013328823260962963
+      },
+      "bound_le_oracle": true
+    },
+    {
+      "instance": "st_e38",
+      "nl_path": "/Users/jkitchin/projects/discopt/.claude/worktrees/agent-a3853b934670ff950/python/tests/data/minlplib_nl/st_e38.nl",
+      "defined_vars_discarded": 0,
+      "load_seconds": 0.0001,
+      "load_status": "ok",
+      "dag_nodes": 46,
+      "n_vars": 4,
+      "n_constraints": 3,
+      "cse_duplicate_nodes": 7,
+      "cse_duplicate_frac": 0.1522,
+      "cse_duplicate_by_type": {
+        "constant": 5,
+        "binary_op": 2
+      },
+      "quadratic": {
+        "obj_quadratic": false,
+        "obj_bilinear": false,
+        "constraints_quadratic": 2,
+        "term_classes": {
+          "bilinear": 0,
+          "trilinear": 1,
+          "multilinear": 0,
+          "monomial": 3,
+          "general_nl": 0
+        }
+      },
+      "symmetry": {
+        "orbits_found": 0,
+        "total_orbit_members": 0,
+        "variables_examined": 4,
+        "detect_seconds": 2e-05
+      },
+      "fbbt_one_sweep_seconds": "err:TypeError",
+      "wall_seconds": 2.326,
+      "solve_status": "optimal",
+      "node_count": 3,
+      "objective": 7197.727116839705,
+      "bound": 7197.727116826533,
+      "xla_compile_count": null,
+      "xla_compile_seconds": null,
+      "seconds_per_node": 0.77539,
+      "solver_stats": {
+        "reduce/fbbt": 0.022282582707703114,
+        "separate/multilinear": 2.3749656975269318e-05,
+        "separate/edge_concave": 5.512591451406479e-05,
+        "separate/univariate_square": 0.003271416760981083,
+        "separate/convex": 3.6261044442653656e-06,
+        "separate/psd": 2.2086314857006073e-06,
+        "separate/rlt": 0.0001897485926747322
+      },
+      "bound_le_oracle": true
+    },
+    {
+      "instance": "clay0303hfsg",
+      "nl_path": "/Users/jkitchin/projects/discopt/.claude/worktrees/agent-a3853b934670ff950/python/tests/data/minlplib_nl/clay0303hfsg.nl",
+      "defined_vars_discarded": 0,
+      "load_seconds": 0.0016,
+      "load_status": "ok",
+      "dag_nodes": 2135,
+      "n_vars": 99,
+      "n_constraints": 150,
+      "cse_duplicate_nodes": 1383,
+      "cse_duplicate_frac": 0.6478,
+      "cse_duplicate_by_type": {
+        "constant": 720,
+        "binary_op": 609,
+        "unary_op": 54
+      },
+      "quadratic": {
+        "obj_quadratic": true,
+        "obj_bilinear": false,
+        "constraints_quadratic": 114,
+        "term_classes": {
+          "bilinear": 0,
+          "trilinear": 0,
+          "multilinear": 0,
+          "monomial": 0,
+          "general_nl": 0
+        }
+      },
+      "symmetry": {
+        "orbits_found": 0,
+        "total_orbit_members": 0,
+        "variables_examined": 99,
+        "detect_seconds": 1e-05
+      },
+      "fbbt_one_sweep_seconds": "err:TypeError",
+      "wall_seconds": 73.856,
+      "solve_status": "optimal",
+      "node_count": 325,
+      "objective": 26669.109551433856,
+      "bound": 26669.109551433798,
+      "xla_compile_count": null,
+      "xla_compile_seconds": null,
+      "seconds_per_node": 0.22725,
+      "solver_stats": {}
+    },
+    {
+      "instance": "casctanks",
+      "nl_path": "/Users/jkitchin/projects/discopt/.claude/worktrees/agent-a3853b934670ff950/python/tests/data/minlplib_nl/casctanks.nl",
+      "defined_vars_discarded": 0,
+      "load_seconds": 0.0068,
+      "load_status": "ok",
+      "dag_nodes": 3124,
+      "n_vars": 500,
+      "n_constraints": 517,
+      "cse_duplicate_nodes": 1062,
+      "cse_duplicate_frac": 0.3399,
+      "cse_duplicate_by_type": {
+        "constant": 653,
+        "binary_op": 57,
+        "unary_op": 272,
+        "sum_over": 80
+      },
+      "quadratic": {
+        "obj_quadratic": false,
+        "obj_bilinear": false,
+        "constraints_quadratic": 457,
+        "term_classes": {
+          "bilinear": 60,
+          "trilinear": 0,
+          "multilinear": 0,
+          "monomial": 0,
+          "general_nl": 0
+        }
+      },
+      "symmetry": {
+        "orbits_found": 0,
+        "total_orbit_members": 0,
+        "variables_examined": 500,
+        "detect_seconds": 7e-05
+      },
+      "fbbt_one_sweep_seconds": "err:TypeError",
+      "wall_seconds": 97.416,
+      "solve_status": "time_limit",
+      "node_count": 31,
+      "objective": null,
+      "bound": -90.17862929102458,
+      "xla_compile_count": null,
+      "xla_compile_seconds": null,
+      "seconds_per_node": 3.14244,
+      "solver_stats": {
+        "reduce/fbbt": 3.993171749636531,
+        "separate/multilinear": 7.091788575053215e-05,
+        "separate/edge_concave": 0.012665625661611557,
+        "separate/univariate_square": 1.0109580419957638,
+        "separate/convex": 2.3708678781986237e-05,
+        "separate/psd": 1.0329298675060272e-05,
+        "separate/rlt": 9.87248495221138e-06
+      }
+    },
+    {
+      "instance": "heatexch_gen1",
+      "nl_path": "/Users/jkitchin/projects/discopt/.claude/worktrees/agent-a3853b934670ff950/python/tests/data/minlplib_nl/heatexch_gen1.nl",
+      "defined_vars_discarded": 0,
+      "load_seconds": 0.0012,
+      "load_status": "ok",
+      "dag_nodes": 798,
+      "n_vars": 112,
+      "n_constraints": 120,
+      "cse_duplicate_nodes": 237,
+      "cse_duplicate_frac": 0.297,
+      "cse_duplicate_by_type": {
+        "constant": 173,
+        "binary_op": 16,
+        "unary_op": 48
+      },
+      "quadratic": {
+        "obj_quadratic": true,
+        "obj_bilinear": false,
+        "constraints_quadratic": 96,
+        "term_classes": {
+          "bilinear": 16,
+          "trilinear": 0,
+          "multilinear": 0,
+          "monomial": 0,
+          "general_nl": 0
+        }
+      },
+      "symmetry": {
+        "orbits_found": 0,
+        "total_orbit_members": 0,
+        "variables_examined": 112,
+        "detect_seconds": 3e-05
+      },
+      "fbbt_one_sweep_seconds": "err:TypeError",
+      "wall_seconds": 171.042,
+      "solve_status": "time_limit",
+      "node_count": 3,
+      "objective": null,
+      "bound": 100499.99999999991,
+      "xla_compile_count": null,
+      "xla_compile_seconds": null,
+      "seconds_per_node": 57.01398,
+      "solver_stats": {
+        "reduce/fbbt": 0.559395540971309,
+        "separate/multilinear": 8.206814527511597e-06,
+        "separate/edge_concave": 0.0010400009341537952,
+        "separate/univariate_square": 3.541354089975357e-06,
+        "separate/convex": 1.4593824744224548e-06,
+        "separate/psd": 1.2079253792762756e-06,
+        "separate/rlt": 5.830079317092896e-07
+      }
+    }
+  ]
+}

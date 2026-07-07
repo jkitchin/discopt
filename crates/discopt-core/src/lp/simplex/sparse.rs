@@ -9,6 +9,7 @@
 
 /// CSC storage of an `m × n` matrix: `col_ptr[j..j+1]` bounds column `j`'s
 /// nonzeros in `row_idx`/`vals`.
+#[derive(Clone)]
 pub struct SparseCols {
     col_ptr: Vec<usize>,
     row_idx: Vec<usize>,
@@ -50,6 +51,60 @@ impl SparseCols {
             col_ptr,
             row_idx,
             vals,
+        }
+    }
+
+    /// Read-only view of the raw CSC arrays (`col_ptr`, `row_idx`, `vals`). Lets
+    /// the equilibration sweeps read every nonzero in storage order (cache-
+    /// friendly) instead of striding the dense row-major matrix per column.
+    #[inline]
+    pub fn raw(&self) -> (&[usize], &[usize], &[f64]) {
+        (&self.col_ptr, &self.row_idx, &self.vals)
+    }
+
+    /// Build directly from caller-supplied CSC arrays (one `O(nnz)` move, no dense
+    /// `m·n` scan). `col_ptr` has length `n_cols + 1`; `row_idx`/`vals` are the
+    /// column-major nonzeros. The sparse-native ingestion path for the warm LP
+    /// solve, so a 0.3%-dense lifted relaxation is never materialized dense.
+    pub fn from_csc(col_ptr: Vec<usize>, row_idx: Vec<usize>, vals: Vec<f64>) -> Self {
+        debug_assert!(!col_ptr.is_empty());
+        debug_assert_eq!(*col_ptr.last().unwrap(), row_idx.len());
+        debug_assert_eq!(row_idx.len(), vals.len());
+        Self {
+            col_ptr,
+            row_idx,
+            vals,
+        }
+    }
+
+    /// Number of columns.
+    #[inline]
+    pub fn ncols(&self) -> usize {
+        self.col_ptr.len() - 1
+    }
+
+    /// Smallest and largest nonzero magnitude (for the equilibration trigger), or
+    /// `(inf, 0)` when all-zero. `O(nnz)`.
+    pub fn value_range(&self) -> (f64, f64) {
+        let (mut lo, mut hi) = (f64::INFINITY, 0.0f64);
+        for &v in &self.vals {
+            let av = v.abs();
+            if av > 0.0 {
+                lo = lo.min(av);
+                hi = hi.max(av);
+            }
+        }
+        (lo, hi)
+    }
+
+    /// Apply diagonal row/column scaling in place: `A[i,j] *= row[i] * col[j]`.
+    /// `O(nnz)` — the sparse analogue of `scaling::Scaling::scale_matrix`, with no
+    /// dense `m·n` copy.
+    pub fn scale_in_place(&mut self, row: &[f64], col: &[f64]) {
+        for (j, &cj) in col.iter().enumerate().take(self.ncols()) {
+            for k in self.col_ptr[j]..self.col_ptr[j + 1] {
+                self.vals[k] *= row[self.row_idx[k]] * cj;
+            }
         }
     }
 

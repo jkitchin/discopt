@@ -61,6 +61,42 @@ def _small_milp_with_continuous():
     return m, x, y, z
 
 
+def _nonlinear_knapsack():
+    """MINLP knapsack whose lazy callback actually fires at branch nodes.
+
+    max 4*x0 + 5*x1 + 6*x2 + 7*x3  s.t.  3*x0+4*x1+5*x2+6*x3 <= 9,  xi binary,
+    plus a genuine nonlinear term exp(z) (z>=0) to force the MINLP / NLP-BB
+    route. The LP relaxation is fractional, so B&B branches and integer-feasible
+    nodes reach the lazy-constraint callback (unlike a convex model whose primal
+    heuristics find the optimum at the root and never invoke the callback). The
+    unconstrained optimum is x=(0,1,1,0) (value 11); a lazy cut x1+x2<=1 excludes
+    it, making the true optimum x=(1,0,0,1) (value 11 as well but a distinct
+    point, so accepting the excluded (0,1,1,0) is observably wrong).
+    """
+    m = discopt.Model("nl_knap")
+    n = 4
+    xs = [m.binary(f"x{i}") for i in range(n)]
+    z = m.continuous("z", lb=0.0, ub=1.0)
+    v = [4, 5, 6, 7]
+    w = [3, 4, 5, 6]
+    m.minimize(-sum(v[i] * xs[i] for i in range(n)) + discopt.exp(z))
+    m.subject_to(sum(w[i] * xs[i] for i in range(n)) <= 9, name="cap")
+    m.subject_to(z >= 0.0, name="zpos")
+    return m, xs
+
+
+def _reject_0110_cut(xs):
+    """Lazy callback: exclude the integer point x=(0,1,1,0) via x1+x2<=1."""
+
+    def cb(ctx, model):
+        xr = [int(round(ctx.x_relaxation[i])) for i in range(4)]
+        if xr == [0, 1, 1, 0]:
+            return [CutResult(terms=[(xs[1], 1.0), (xs[2], 1.0)], sense="<=", rhs=1.0)]
+        return []
+
+    return cb
+
+
 # ── Unit tests for CutResult and cut_result_to_dense ──
 
 
@@ -171,27 +207,20 @@ class TestNodeCallback:
 @pytest.mark.integration
 class TestLazyConstraints:
     def test_lazy_cut_excludes_solution(self):
-        """Lazy constraints can exclude the otherwise-optimal solution.
+        """Lazy constraints exclude the otherwise-optimal integer point.
 
-        Without the cut, optimal is x=1, y=0 (obj=exp(0.7)~2.01).
-        The lazy constraint forces y=1, changing the optimal.
+        Uses the nonlinear-knapsack fixture whose LP relaxation is fractional so
+        B&B branches and the lazy callback actually fires at integer-feasible
+        nodes (a convex model's primal heuristics find the optimum at the root
+        and never invoke the callback). The cut x1+x2<=1 excludes (0,1,1,0), so
+        the returned solution must not be that point.
         """
-        m, x, y = _simple_milp()
-        cut_added = [False]
-
-        def lazy_cb(ctx, model):
-            sol = ctx.x_relaxation
-            # If y < 0.5 (y=0 in the integer solution), add cut y >= 1
-            if sol[1] < 0.5 and not cut_added[0]:
-                cut_added[0] = True
-                return [CutResult(terms=[(y, 1.0)], sense=">=", rhs=1.0)]
-            return []
-
-        result = m.solve(lazy_constraints=lazy_cb, time_limit=30)
-        # The cut forces y=1.
+        m, xs = _nonlinear_knapsack()
+        result = m.solve(lazy_constraints=_reject_0110_cut(xs), time_limit=30)
         if result.status in ("optimal", "feasible"):
             assert result.x is not None
-            assert result.x["y"] >= 0.5  # y should be 1
+            sol = [round(float(result.x[f"x{i}"])) for i in range(4)]
+            assert sol != [0, 1, 1, 0]  # the excluded point must not be accepted
 
     def test_empty_lazy_callback_is_noop(self):
         """An empty lazy callback should not change the optimal solution."""
@@ -207,24 +236,91 @@ class TestLazyConstraints:
 
 @pytest.mark.slow
 @needs_rust
+@pytest.mark.integration
+class TestInt1NlpBbLazyRejection:
+    """INT-1 (#413): on the NLP-BB path a lazy-constraint / incumbent-callback
+    rejection was silently swallowed (``_cut_pool`` was ``None``, so
+    ``_cut_pool.add`` raised an ``AttributeError`` caught by a broad ``except``
+    that ALSO dropped the node-rejection line that followed it), so the excluded
+    integer-feasible point was accepted as the incumbent — a wrong optimum.
+
+    The fix refuses these callbacks loudly on the NLP-BB path (the path cannot
+    enforce them: no per-node cut application and heuristics inject incumbents
+    without consulting the callback), and routes them to spatial B&B where the
+    rejection is honored. It also reorders ``_invoke_pre_import_callbacks`` so the
+    node-rejection precedes any fallible cut insertion and narrows the ``except``
+    so a programming error can no longer be swallowed.
+    """
+
+    def test_nlp_bb_true_with_lazy_constraints_refuses_loudly(self):
+        """Explicit ``nlp_bb=True`` + ``lazy_constraints`` must raise, not
+        silently drop the rejection and return the excluded point."""
+        m, xs = _nonlinear_knapsack()
+        with pytest.raises(ValueError, match="nlp_bb=True"):
+            m.solve(nlp_bb=True, lazy_constraints=_reject_0110_cut(xs), time_limit=30)
+
+    def test_nlp_bb_true_with_incumbent_callback_refuses_loudly(self):
+        """Explicit ``nlp_bb=True`` + ``incumbent_callback`` must raise: the
+        NLP-BB path cannot honor an incumbent rejection either."""
+        m, xs = _nonlinear_knapsack()
+        with pytest.raises(ValueError, match="nlp_bb=True"):
+            m.solve(
+                nlp_bb=True,
+                incumbent_callback=lambda ctx, model, sol: True,
+                time_limit=30,
+            )
+
+    def test_spatial_path_honors_lazy_rejection(self):
+        """``nlp_bb=False`` (spatial B&B) must EXCLUDE the rejected point — the
+        pre-fix NLP-BB bug returned exactly this excluded point."""
+        m, xs = _nonlinear_knapsack()
+        result = m.solve(nlp_bb=False, lazy_constraints=_reject_0110_cut(xs), time_limit=30)
+        assert result.status in ("optimal", "feasible")
+        sol = [round(float(result.x[f"x{i}"])) for i in range(4)]
+        assert sol != [0, 1, 1, 0], f"rejected point accepted as incumbent: {sol}"
+
+    def test_auto_select_with_lazy_routes_to_spatial_and_honors(self):
+        """Auto-select (no ``nlp_bb``) with a lazy callback must fall through to
+        spatial B&B (not the callback-blind NLP-BB auto path) and exclude the
+        rejected point."""
+        m, xs = _nonlinear_knapsack()
+        result = m.solve(lazy_constraints=_reject_0110_cut(xs), time_limit=30)
+        assert result.status in ("optimal", "feasible")
+        sol = [round(float(result.x[f"x{i}"])) for i in range(4)]
+        assert sol != [0, 1, 1, 0], f"rejected point accepted as incumbent: {sol}"
+
+    def test_nlp_bb_true_without_callbacks_still_works(self):
+        """The refusal must be narrow: ``nlp_bb=True`` without any rejecting
+        callback still solves normally."""
+        m, xs = _nonlinear_knapsack()
+        result = m.solve(nlp_bb=True, time_limit=30)
+        assert result.status in ("optimal", "feasible")
+        assert result.objective is not None
+
+
+@pytest.mark.slow
+@needs_rust
 @pytest.mark.slow
 @pytest.mark.integration
 class TestIncumbentCallback:
     def test_incumbent_rejection(self):
-        """Incumbent callback can reject solutions where y=0."""
-        m, x, y = _simple_milp()
+        """Incumbent callback can reject an integer-feasible point.
 
-        def reject_y0(ctx, model, solution):
-            # Reject solutions where y is 0
-            y_val = solution.get("y", np.array([0.0]))
-            if np.all(y_val < 0.5):
-                return False
-            return True
+        Uses the nonlinear-knapsack fixture (fractional relaxation → the callback
+        actually fires at branch nodes). Reject the point x=(0,1,1,0); the
+        returned solution must therefore differ from it.
+        """
+        m, xs = _nonlinear_knapsack()
 
-        result = m.solve(incumbent_callback=reject_y0, time_limit=30)
+        def reject_0110(ctx, model, solution):
+            xr = [round(float(np.ravel(solution[f"x{i}"])[0])) for i in range(4)]
+            return xr != [0, 1, 1, 0]
+
+        result = m.solve(incumbent_callback=reject_0110, time_limit=30)
         if result.status in ("optimal", "feasible"):
             assert result.x is not None
-            assert result.x["y"] >= 0.5
+            sol = [round(float(result.x[f"x{i}"])) for i in range(4)]
+            assert sol != [0, 1, 1, 0]
 
     def test_accept_all_is_noop(self):
         """Accepting all incumbents should behave identically to no callback."""
@@ -346,3 +442,125 @@ class TestCallbackContext:
         )
         assert ctx.incumbent_obj is None
         assert ctx.gap is None
+
+    def test_none_best_bound(self):
+        # A1: best_bound is Optional — None when no certified global bound exists.
+        ctx = CallbackContext(
+            node_count=5,
+            incumbent_obj=3.0,
+            best_bound=None,
+            gap=None,
+            elapsed_time=0.1,
+            x_relaxation=np.zeros(2),
+            node_bound=1.0,
+        )
+        assert ctx.best_bound is None
+
+
+class TestCertifiedCallbackBound:
+    """A1: the callback's ``best_bound`` must never over-report the certified
+    global dual bound. ``_certified_callback_bound`` maps the Rust tree's raw
+    ``global_lower_bound`` to the value that is safe to surface.
+    """
+
+    def test_valid_minimize_passthrough(self):
+        from discopt.solver import _certified_callback_bound
+
+        assert _certified_callback_bound(5.32, True, False) == 5.32
+
+    def test_maximize_is_negated(self):
+        from discopt.solver import _certified_callback_bound
+
+        # Internal minimization tracks -obj: a lower bound L on -obj is an upper
+        # bound -L on obj. A raw min-sense bound must be negated for MAXIMIZE.
+        assert _certified_callback_bound(-52.89, True, True) == 52.89
+
+    def test_tainted_tree_reports_none(self):
+        from discopt.solver import _certified_callback_bound
+
+        # A non-rigorous fathom removed an unproven subtree; the surviving
+        # frontier minimum may sit above the true certified bound (nvs05:
+        # global_lower_bound = 5.32 on a tainted tree whose rigorous bound is
+        # 1.35). Never surface it.
+        assert _certified_callback_bound(5.32, False, False) is None
+        assert _certified_callback_bound(-52.89, False, True) is None
+
+    def test_neg_inf_root_reports_none(self):
+        from discopt.solver import _certified_callback_bound
+
+        # Unbounded / free-variable root (#467): the tree pins the bound at -inf.
+        assert _certified_callback_bound(-np.inf, True, False) is None
+
+    def test_failure_sentinel_reports_none(self):
+        from discopt.constants import SENTINEL_THRESHOLD
+        from discopt.solver import _certified_callback_bound
+
+        # The 1e30 no-relaxation sentinel (hda/heatexch class) is "no bound",
+        # not a numeric bound — must not leak through the API as a huge number.
+        assert _certified_callback_bound(SENTINEL_THRESHOLD, True, False) is None
+        assert _certified_callback_bound(None, True, False) is None
+
+
+class TestCallbackBoundSoundness:
+    """A1 regression: the callback's ``best_bound`` is a *certified* global dual
+    bound. It must (1) be on the correct side of the objective for the sense and
+    (2) never over-report relative to the final ``SolveResult.bound``. The
+    pre-fix code surfaced the raw internal min-sense ``global_lower_bound`` with
+    no sense negation and no taint gate, so both invariants failed.
+    """
+
+    def test_maximize_best_bound_is_a_valid_upper_bound(self):
+        # A small NON-NAMED nonconvex MAXIMIZE MINLP. For a maximize, every
+        # certified best_bound is an UPPER bound (>= the achievable objective).
+        # Pre-fix reported the un-negated internal bound (a lower bound on -obj,
+        # i.e. NEGATIVE here) and this assertion fails; post-fix it passes.
+        m = discopt.Model("cb_max_bound")
+        n = m.integer("n", lb=1, ub=6)
+        x = m.continuous("x", lb=0.0, ub=5.0)
+        m.maximize(x * n - (x - 2.0) ** 2 * n)  # nonconvex
+        m.subject_to(x + n <= 8.0)
+
+        bounds: list = []
+
+        def cb(ctx, _model):
+            bounds.append(ctx.best_bound)
+
+        res = m.solve(time_limit=15, gap_tolerance=1e-4, node_callback=cb)
+        assert res.status in ("optimal", "feasible")
+        assert res.objective is not None
+        finite = [b for b in bounds if b is not None and np.isfinite(b)]
+        assert finite, "expected at least one certified best_bound in the trace"
+        # Every certified upper bound must be >= the achievable objective.
+        for b in finite:
+            assert b >= res.objective - 1e-6, (
+                f"maximize best_bound {b} below objective {res.objective}: "
+                "callback under-/wrong-signed the certified bound"
+            )
+
+    def test_best_bound_never_exceeds_final_certified_bound(self):
+        # A tiny-budget spatial solve that exits feasible with an open frontier.
+        # The running certified best_bound must never exceed what the final
+        # SolveResult certifies (both are the same certified global bound; the
+        # callback is a snapshot of it). Over-reporting = the A1 bug.
+        m = discopt.Model("cb_min_bound")
+        n = m.integer("n", lb=1, ub=20)
+        x = m.continuous("x", lb=0.01, ub=20.0)
+        m.minimize((x - n) ** 2 * n - 10.0 * x / n)  # nonconvex product/reciprocal
+        m.subject_to(x * n >= 12.0)
+        m.subject_to(x + n <= 30.0)
+
+        bounds: list = []
+
+        def cb(ctx, _model):
+            bounds.append(ctx.best_bound)
+
+        res = m.solve(time_limit=5, gap_tolerance=1e-4, node_callback=cb)
+        assert res.status in ("optimal", "feasible")
+        finite = [b for b in bounds if b is not None and np.isfinite(b)]
+        if res.bound is not None and np.isfinite(res.bound):
+            for b in finite:
+                # MINIMIZE: a certified lower bound never exceeds the finally
+                # certified lower bound by more than solver tolerance.
+                assert b <= res.bound + 1e-4, (
+                    f"callback best_bound {b} over-reports the final certified bound {res.bound}"
+                )

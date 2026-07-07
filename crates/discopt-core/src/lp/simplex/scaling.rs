@@ -35,6 +35,7 @@
 #![allow(clippy::needless_range_loop)]
 
 use crate::lp::crossover::LpView;
+use crate::lp::simplex::sparse::SparseCols;
 
 const INF: f64 = 1e20;
 
@@ -94,8 +95,27 @@ impl Scaling {
         if hi == 0.0 || hi / lo <= SCALE_TRIGGER {
             return None;
         }
-        let (row, col) = equilibrate(a, m, n);
+        let (row, col) = equilibrate(&SparseCols::from_dense(a, m, n), m, n);
         Some(Scaling { row, col, m, n })
+    }
+
+    /// Equilibration factors for an already-CSC matrix, or `None` when its dynamic
+    /// range is below [`SCALE_TRIGGER`]. The sparse-native entry: identical factors
+    /// to [`Self::from_matrix`] (zeros never affect a line's significant min/max),
+    /// with no dense `m·n` materialization anywhere on the path.
+    pub fn from_sparse(sp: &SparseCols, m: usize, n: usize) -> Option<Scaling> {
+        let (lo, hi) = sp.value_range();
+        if hi == 0.0 || hi / lo <= SCALE_TRIGGER {
+            return None;
+        }
+        let (row, col) = equilibrate(sp, m, n);
+        Some(Scaling { row, col, m, n })
+    }
+
+    /// Scale a CSC matrix in place by the same `R A C` factors — the sparse
+    /// analogue of [`Self::scale_matrix`], `O(nnz)` with no dense copy.
+    pub fn scale_cols(&self, sp: &mut SparseCols) {
+        sp.scale_in_place(&self.row, &self.col);
     }
 
     /// Scaled matrix `Â = R A C` (owned, row-major `m × n`).
@@ -124,14 +144,26 @@ impl Scaling {
     /// Scaled lower bounds `l̂ = C⁻¹ l` (infinite bounds preserved).
     pub fn scale_lower(&self, l: &[f64]) -> Vec<f64> {
         (0..self.n)
-            .map(|j| if l[j] <= -INF { l[j] } else { l[j] / self.col[j] })
+            .map(|j| {
+                if l[j] <= -INF {
+                    l[j]
+                } else {
+                    l[j] / self.col[j]
+                }
+            })
             .collect()
     }
 
     /// Scaled upper bounds `û = C⁻¹ u` (infinite bounds preserved).
     pub fn scale_upper(&self, u: &[f64]) -> Vec<f64> {
         (0..self.n)
-            .map(|j| if u[j] >= INF { u[j] } else { u[j] / self.col[j] })
+            .map(|j| {
+                if u[j] >= INF {
+                    u[j]
+                } else {
+                    u[j] / self.col[j]
+                }
+            })
             .collect()
     }
 
@@ -145,6 +177,26 @@ impl Scaling {
             }
             x[j] *= *c;
         }
+    }
+
+    /// Map scaled row duals (or a scaled Farkas ray) back to the original space in
+    /// place: `y_i ← r_i ŷ_i`. The scaled constraint `i` was multiplied by `r_i`,
+    /// so its multiplier scales by the same factor (equivalently, the safe dual
+    /// bound `bᵀy + Σⱼ min_box((c−Aᵀy)ⱼ zⱼ)` is invariant under this map — see the
+    /// module identity `b̂ᵀŷ = bᵀ(Rŷ)` and `ĉ − Âᵀŷ = C(c − Aᵀ(Rŷ))`).
+    pub fn unscale_dual(&self, y: &mut [f64]) {
+        for (i, r) in self.row.iter().enumerate() {
+            if i >= y.len() {
+                break;
+            }
+            y[i] *= *r;
+        }
+    }
+
+    /// Map a scaled primal ray back to the original space: identical column
+    /// transform to [`Self::unscale_x`] (the ray lives in the primal `x` space).
+    pub fn unscale_ray(&self, d: &mut [f64]) {
+        self.unscale_x(d);
     }
 }
 
@@ -196,20 +248,41 @@ impl ScaledLp {
     pub fn unscale_x(&self, x: &mut [f64]) {
         self.scaling.unscale_x(x);
     }
+
+    /// Map scaled row duals / a scaled Farkas ray back to the original space.
+    pub fn unscale_dual(&self, y: &mut [f64]) {
+        self.scaling.unscale_dual(y);
+    }
+
+    /// Map a scaled primal ray back to the original space.
+    pub fn unscale_ray(&self, d: &mut [f64]) {
+        self.scaling.unscale_ray(d);
+    }
 }
 
-/// Geometric-mean equilibration of the dense row-major `m × n` matrix `a`:
-/// alternating sweeps set each column/row factor to `1/sqrt(min·max)` of the
-/// current scaled magnitudes in that line, snapped to a power of two. Returns
-/// `(row, col)` factor vectors.
-fn equilibrate(a: &[f64], m: usize, n: usize) -> (Vec<f64>, Vec<f64>) {
+/// Geometric-mean equilibration of the `m × n` matrix `a`: alternating sweeps set
+/// each column/row factor to `1/sqrt(min·max)` of the current scaled magnitudes in
+/// that line, snapped to a power of two. Returns `(row, col)` factor vectors.
+///
+/// The sweeps read the matrix through a CSC view so they visit only the nonzeros,
+/// in cache-friendly storage order, rather than striding the dense row-major
+/// matrix per column — `O(nnz)` instead of `O(m·n)` cache-missing accesses, which
+/// was the dominant cost on the 0.3%-dense lifted McCormick relaxations (a
+/// zero-iteration solve of ex1252's 6908×7799 / 19k-nonzero relaxation spent
+/// seconds here alone). The factors are *bit-identical* to the old dense sweep: a
+/// zero entry never affects a line's significant min/max, so skipping the
+/// structural zeros changes nothing.
+fn equilibrate(sp: &SparseCols, m: usize, n: usize) -> (Vec<f64>, Vec<f64>) {
+    let (col_ptr, row_idx, vals) = sp.raw();
     let mut row = vec![1.0f64; m];
     let mut col = vec![1.0f64; n];
     for _ in 0..MAX_PASSES {
         let mut changed = false;
-        // Column sweep.
+        // Column sweep: column-major storage makes each column's nonzeros contiguous.
         for j in 0..n {
-            let (lo, hi) = line_lo_hi((0..m).map(|i| row[i] * a[i * n + j] * col[j]));
+            let (lo, hi) = line_lo_hi(
+                (col_ptr[j]..col_ptr[j + 1]).map(|k| row[row_idx[k]] * vals[k] * col[j]),
+            );
             if hi > 0.0 {
                 let f = nearest_pow2(1.0 / (lo * hi).sqrt());
                 if f != 1.0 {
@@ -218,12 +291,34 @@ fn equilibrate(a: &[f64], m: usize, n: usize) -> (Vec<f64>, Vec<f64>) {
                 }
             }
         }
-        // Row sweep.
+        // Row sweep: accumulate per-row significant lo/hi over the same nonzeros.
+        // Two O(nnz) passes mirror `line_lo_hi`'s noise floor — the per-row max
+        // first, then the min over entries within `MAX_LINE_RANGE` of it.
+        let mut rhi = vec![0.0f64; m];
+        for j in 0..n {
+            let cj = col[j];
+            for k in col_ptr[j]..col_ptr[j + 1] {
+                let i = row_idx[k];
+                let av = (row[i] * vals[k] * cj).abs();
+                if av > rhi[i] {
+                    rhi[i] = av;
+                }
+            }
+        }
+        let mut rlo = vec![f64::INFINITY; m];
+        for j in 0..n {
+            let cj = col[j];
+            for k in col_ptr[j]..col_ptr[j + 1] {
+                let i = row_idx[k];
+                let av = (row[i] * vals[k] * cj).abs();
+                if av > 0.0 && av >= rhi[i] * MAX_LINE_RANGE && av < rlo[i] {
+                    rlo[i] = av;
+                }
+            }
+        }
         for i in 0..m {
-            let base = i * n;
-            let (lo, hi) = line_lo_hi((0..n).map(|j| row[i] * a[base + j] * col[j]));
-            if hi > 0.0 {
-                let f = nearest_pow2(1.0 / (lo * hi).sqrt());
+            if rhi[i] > 0.0 {
+                let f = nearest_pow2(1.0 / (rlo[i] * rhi[i]).sqrt());
                 if f != 1.0 {
                     row[i] *= f;
                     changed = true;

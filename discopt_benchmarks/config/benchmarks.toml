@@ -79,6 +79,22 @@ sources = ["minlplib"]
 instance_list = "config/comparison_instances.txt"
 time_limit_seconds = 3600
 
+[suites.global50]
+# The certification panel every `[gates.cert*]` references (cert-gap-plan §11/§14
+# T2.6). Before this table existed, cert0/cert1/cert2 named `suite = "global50"`
+# with no suite to resolve it against — the recon flag in §11's "Wiring
+# corrections (2026-07-02)". The panel is the 50-instance BARON head-to-head set
+# vendored as `config/baron_global50.txt`. 49 of the 50 have a `.nl` in the local
+# corpus (`python/tests/data/minlplib_nl/`) and run out of the box with no
+# --fetch; st_miqp5 is listed but ships only as a binary `.nl` discopt cannot
+# parse (skipped by R1 for the same reason), so it resolves to 49 locally and to
+# all 50 with `--fetch`. 60 s per-instance cap matches the measurement of record
+# (`scripts/global_opt_baron_vs_discopt.py --time-limit 60`).
+description = "Certification panel: 50-instance BARON head-to-head set (cert-gap-plan §11)"
+sources = ["minlplib"]
+instance_list = "config/baron_global50.txt"
+time_limit_seconds = 60
+
 [suites.nightly]
 description = "Nightly CI regression suite"
 sources = ["minlplib"]
@@ -209,6 +225,61 @@ description = "Release gate (Month 48)"
   beats_couenne = { min = 1.0, suite = "comparison", metric = "solve_count_ratio_vs_couenne" }
   beats_bonmin = { min = 1.0, suite = "comparison", metric = "solve_count_ratio_vs_bonmin" }
   zero_incorrect = { max = 0, suite = "full", metric = "incorrect_count" }
+
+# Certification-gap plan (docs/dev/certification-gap-plan.md) phase gates.
+[gates.cert0]
+description = "Phase 0 → Phase 1 gate: certification observability (cert:T0.5)"
+
+  [gates.cert0.criteria]
+  # root_gap must be populated on >= 90% of rows so root_gap_ratio_vs_baron is
+  # evaluable (the T0.1 producer). Correctness stays a zero-slack gate.
+  root_gap_coverage = { min = 0.9, suite = "global50", metric = "root_gap_populated_fraction" }
+  zero_incorrect = { max = 0, suite = "global50", metric = "incorrect_count" }
+
+[gates.cert1]
+description = "Phase 1 gate: general node engine (cert:T1.x). Direction-(a) neutrality."
+# NOTE (2026-07-02): the §11 bound-neutrality criterion is verified out-of-band by
+# the DIFFERENTIAL check `discopt_benchmarks/scripts/check_cert_neutrality.py`
+# (objective correct + still-optimal + node one-directional vs cert-baseline.jsonl),
+# NOT by an exact node_count_drift metric — under direction (a) T1.3 legitimately
+# *improves* node_count on some instances (e.g. nvs13 55→19), so exact equality is
+# the wrong test. That check currently passes (NEUTRAL). The performance criteria
+# below (per §5/§11) are the Phase-1 wall-time exit and are NOT yet met: the
+# incremental engine is on the general spatial path node-neutral (T1.3), but the
+# dominant per-node cost is OBBT's inner LP loop (~10 cold-built probe solves/node),
+# a bound-neutral follow-on (warm-start OBBT probes) that this plan flags rather
+# than lands. Correctness criteria (below) DO pass.
+
+  [gates.cert1.criteria]
+  zero_incorrect = { max = 0, suite = "global50", metric = "incorrect_count" }
+  # Performance exit (§5) — pending the OBBT follow-on; informational until then.
+  interop_overhead = { max = 0.10, suite = "global50", metric = "python_orchestration_fraction" }
+  sec_per_node = { max = 0.018, suite = "global50", metric = "median_seconds_per_node" }
+
+[gates.cert2]
+description = "Phase 2 gate: branch-and-reduce (cert:T2.x). Root-gap vs BARON + tree closure."
+# Wiring per §11 with the 2026-07-02 recon corrections and the T2.6 additions
+# (cert-gap-plan §14 T2.6 items 1–2):
+#   * root_gap_vs_baron uses `root_gap_ratio_vs_baron`, which A3 made evaluable by
+#     wiring the certified dual bound onto `SolveResult.bound` (null before A3).
+#     The ratio counts ONLY BARON rows carrying a usable root/dual bound — many
+#     BARON rows are `status="unknown"` at ~20 ms with no bound to divide by; the
+#     metric fn skips a reference row whose `bound`/`root_gap` is None and floors
+#     the denominator, so it never divides by a non-bound (see metrics.py).
+#   * geomean_vs_baron uses the EXISTING `geomean_ratio_vs_baron` metric name
+#     (§11 correction 2 — `geomean_time_ratio_vs_baron` was never implemented).
+#   * closed_within_10_nodes_fraction is the new T2.6 metric for the §6 exit
+#     "≥ 30% of currently-tree-opening instances close within 10 nodes".
+# INFORMATIONAL until the R2/R3b/R4 flags are default-on (3 green nightlies, out
+# of V2 scope): T2.3–T2.5 are not built and R4 ships default-OFF, so the root-gap
+# and geomean criteria are not expected to pass on `main` yet. `zero_incorrect`
+# is the live zero-slack gate.
+
+  [gates.cert2.criteria]
+  zero_incorrect = { max = 0, suite = "global50", metric = "incorrect_count" }
+  root_gap_vs_baron = { max = 1.3, suite = "global50", metric = "root_gap_ratio_vs_baron" }
+  geomean_vs_baron = { max = 2.5, suite = "global50", metric = "geomean_ratio_vs_baron" }
+  tree_closed_fraction = { min = 0.30, suite = "global50", metric = "closed_within_10_nodes_fraction" }
 
 # ─────────────────────────────────────────────────────────────
 # SOLVER CONFIGURATIONS

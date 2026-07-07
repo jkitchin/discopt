@@ -23,6 +23,7 @@ from __future__ import annotations
 import itertools
 import logging
 import math
+import os
 from collections import Counter
 from dataclasses import dataclass
 from typing import Any, Callable, Optional, Union
@@ -264,6 +265,15 @@ class MilpRelaxationResult:
     objective: Optional[float] = None
     bound: Optional[float] = None
     x: Optional[np.ndarray] = None
+    # Pure-Rust certificate side-channel (issue #356), populated only on the
+    # warm-started-simplex pure-LP path. ``safe_bound`` is a Neumaier–Shcherbina
+    # safe lower bound from the simplex's own row duals — ``<=`` the true optimum
+    # at any conditioning, so a caller can fathom on it without an independent
+    # (HiGHS) cross-check. ``farkas_certified`` is ``True`` when an ``infeasible``
+    # verdict was independently proven by a verified Farkas dual ray. Both default
+    # to "unavailable" so the generic / MILP-B&B paths are unaffected.
+    safe_bound: Optional[float] = None
+    farkas_certified: bool = False
 
 
 class MilpRelaxationModel:
@@ -326,6 +336,16 @@ class MilpRelaxationModel:
             # a B&B node). Any other warm verdict is the true LP optimum.
             if warm is not None and warm.status != "infeasible":
                 return warm
+            # The bare warm simplex returned ``None`` (iter-limit/numerical) or a
+            # possibly-false ``infeasible`` on a badly-scaled LP. Retry with the
+            # SAME fast warm simplex on the geometric-mean-equilibrated LP — an
+            # exact, feasible-set-preserving rescale that yields the identical
+            # optimum (verified equal to the old cold ``solve_milp`` path) at warm
+            # speed. This replaces the 170x-slower cold MILP-B&B fallthrough that
+            # used to handle these ill-conditioned relaxation solves (nvs21).
+            equil = self._solve_lp_warm_equilibrated()
+            if equil is not None and equil.status in ("optimal", "infeasible", "unbounded"):
+                return equil
 
         # backend="auto": HiGHS if present, else POUNCE. backend="simplex" routes
         # to the warm-started-simplex B&B (falls back to auto if unavailable).
@@ -451,8 +471,8 @@ class MilpRelaxationModel:
             in_basis = self._warm_basis
 
         try:
-            result, out_basis = solve_lp_warm_std(
-                self._c, self._A_ub, self._b_ub, self._bounds, in_basis=in_basis
+            result, out_basis, cert = solve_lp_warm_std(
+                self._c, self._A_ub, self._b_ub, self._bounds, in_basis=in_basis, return_cert=True
             )
         except Exception:  # pragma: no cover - defensive; fall back to generic path
             return None
@@ -483,7 +503,86 @@ class MilpRelaxationModel:
         bound = None
         if result.bound is not None and self._objective_bound_valid:
             bound = float(result.bound) + self._obj_offset
-        return MilpRelaxationResult(status=status_str, objective=obj, bound=bound, x=result.x)
+        safe_bound = None
+        if cert.safe_bound is not None and self._objective_bound_valid:
+            safe_bound = float(cert.safe_bound) + self._obj_offset
+        return MilpRelaxationResult(
+            status=status_str,
+            objective=obj,
+            bound=bound,
+            x=result.x,
+            safe_bound=safe_bound,
+            farkas_certified=bool(cert.farkas_certified),
+        )
+
+    def _solve_lp_warm_equilibrated(self) -> Optional["MilpRelaxationResult"]:
+        """Warm-simplex re-solve on the *equilibrated* LP.
+
+        The bare warm simplex (:meth:`_solve_lp_warm`) returns ``None`` /
+        false-``infeasible`` on a badly-scaled relaxation (the lifted McCormick
+        envelope of a high-degree term spans many orders of magnitude — nvs21's
+        ``x1**4`` reaches ~1e9). The legacy fallback then cold-solved the same LP
+        through the MILP-B&B entry (``solve_milp``) — same Rust engine, no extra
+        robustness, ~170x slower. Geometric-mean (Ruiz) equilibration is an exact,
+        feasible-set-preserving rescaling, so solving the equilibrated LP with the
+        same fast warm simplex yields the *identical* optimum (verified equal to
+        the old cold path on nvs21) at warm speed. The objective value is invariant
+        under the rescaling; only the returned point maps back via ``col_scale``.
+        Returns the result, or ``None`` to defer to the generic path.
+        """
+        from discopt.solvers import SolveStatus
+
+        if self._A_ub is None:
+            return None
+        try:
+            from discopt.solvers.milp_simplex import solve_lp_warm_std
+        except Exception:  # pragma: no cover - binding absent
+            return None
+        try:
+            c_s, A_s, b_s, bounds_s, col_scale = equilibrate_relaxation_lp(
+                self._c, self._A_ub, self._b_ub, self._bounds, None
+            )
+            result, _, cert = solve_lp_warm_std(
+                c_s, sp.csr_matrix(A_s), b_s, bounds_s, in_basis=None, return_cert=True
+            )
+        except Exception:  # pragma: no cover - defensive
+            return None
+        if result is None:
+            return None
+        status_map = {
+            SolveStatus.OPTIMAL: "optimal",
+            SolveStatus.INFEASIBLE: "infeasible",
+            SolveStatus.UNBOUNDED: "unbounded",
+            SolveStatus.TIME_LIMIT: "time_limit",
+            SolveStatus.ITERATION_LIMIT: "iteration_limit",
+            SolveStatus.ERROR: "error",
+        }
+        status_str = status_map.get(result.status, str(result.status))
+        obj = None
+        if result.objective is not None and self._objective_bound_valid:
+            obj = float(result.objective) + self._obj_offset
+        bound = None
+        if result.bound is not None and self._objective_bound_valid:
+            bound = float(result.bound) + self._obj_offset
+        # Equilibration is objective-invariant, so the safe bound computed on the
+        # rescaled LP is a valid safe bound on the original objective (issue #356).
+        safe_bound = None
+        if cert.safe_bound is not None and self._objective_bound_valid:
+            safe_bound = float(cert.safe_bound) + self._obj_offset
+        # Map the scaled solution point back to the original variables (x = D x').
+        x_mapped = None
+        if result.x is not None:
+            x_mapped = np.asarray(result.x, dtype=np.float64) * np.asarray(
+                col_scale, dtype=np.float64
+            )
+        return MilpRelaxationResult(
+            status=status_str,
+            objective=obj,
+            bound=bound,
+            x=x_mapped,
+            safe_bound=safe_bound,
+            farkas_certified=bool(cert.farkas_certified),
+        )
 
 
 def sanitize_relaxation_for_conditioning(
@@ -3364,6 +3463,12 @@ class CompositeMultivarRelaxation:
     curvature: str
     lower_lines: tuple[tuple[tuple[tuple[int, float], ...], float], ...]
     upper_lines: tuple[tuple[tuple[tuple[int, float], ...], float], ...]
+    # Dependent original-variable columns and the compiled value/gradient of the
+    # lifted node, so a separator can add the exact supporting hyperplane at the LP
+    # point each round (issue #358 Phase 2). ``None`` disables LP-point separation.
+    idxs: tuple[int, ...] = ()
+    value_fn: Optional[Callable] = None
+    grad_fn: Optional[Callable] = None
 
 
 _COMPOSITE_CURV_TOL = 1e-9
@@ -3871,7 +3976,28 @@ def _should_claim_composite_multivar(expr: Expression, model: Model, n_orig: int
         if _get_flat_index(expr.left, model) is not None:
             return False  # bare-variable base → fractional-power path
         return len(_referenced_flat_indices(expr.left, model)) >= 2
+    # Convex polynomial subexpression claimer (issue #358): a sum/difference
+    # spanning >=2 variables. McCormick-decomposing a convex sum like
+    # ``3x**2 + 2y**2 + x*y`` term-by-term injects bilinear envelope slack on the
+    # cross terms; lifting the whole node and gradient-cutting it keeps it exact.
+    # This is only the STRUCTURAL pre-filter — the collector's classify_expr /
+    # interval-Hessian gate is the sound curvature filter, so a non-convex sum is
+    # certified UNKNOWN there and falls back to the term-by-term path. Gated by
+    # DISCOPT_CONVEX_CLAIMER while it is validated (issue #358 Phase 1).
+    if _convex_claimer_enabled() and isinstance(expr, BinaryOp) and expr.op in ("+", "-"):
+        return len(_referenced_flat_indices(expr, model)) >= 2
     return False
+
+
+def _convex_claimer_enabled() -> bool:
+    """Whether the convex polynomial subexpression claimer (#358) is on.
+
+    Default OFF while the vertical slice is validated; set ``DISCOPT_CONVEX_CLAIMER``
+    to a non-``0`` value to enable. The claim is sound regardless (the collector
+    only lifts a node it certifies CONVEX/CONCAVE), so the flag gates *tightness*
+    behaviour, not correctness.
+    """
+    return os.environ.get("DISCOPT_CONVEX_CLAIMER", "0") != "0"
 
 
 def _multivar_box_curvature(
@@ -4077,6 +4203,13 @@ def _collect_composite_multivar_relaxations(
         col_hi = float(np.asarray(iv.hi).ravel()[0])
         if not (np.isfinite(col_lo) and np.isfinite(col_hi)) or col_hi < col_lo:
             return
+        # Conditioning guard (#358): on a wide/ill-conditioned box the node's value
+        # range — and hence its gradient and the resulting cut coefficients — can
+        # explode, fooling the fast simplex into a garbage dual bound (nvs16 ~1e11).
+        # Abstain above the same magnitude where the cut builders abstain; the node
+        # then stays on the (sound) term-by-term path.
+        if max(abs(col_lo), abs(col_hi)) > _LIFT_MAX_CROSS_TERM_ARG_MAGNITUDE:
+            return
 
         try:
             f = compile_expression(expr, model)
@@ -4137,6 +4270,9 @@ def _collect_composite_multivar_relaxations(
                 curvature=curvature,
                 lower_lines=lower_lines,
                 upper_lines=upper_lines,
+                idxs=tuple(int(j) for j in idxs),
+                value_fn=f,
+                grad_fn=grad_f,
             )
         )
         bounds.append((col_lo, col_hi))
@@ -4144,6 +4280,11 @@ def _collect_composite_multivar_relaxations(
 
     def visit(expr: Expression) -> None:
         maybe_add(expr)
+        # A claimed node is a maximal convex/concave unit lifted whole; do not
+        # descend into its subtree (that would redundantly re-claim nested convex
+        # sums, e.g. the nested ``+``/``-`` tree of a convex quadratic objective).
+        if id(expr) in var_map:
+            return
         if isinstance(expr, BinaryOp):
             visit(expr.left)
             visit(expr.right)
@@ -4306,25 +4447,62 @@ def _collect_univariate_square_relaxations(
     all_bounds: list[tuple[float, float]],
     start_col: int,
 ) -> tuple[list[UnivariateSquareRelaxation], dict[tuple[int, int], int], list[tuple[float, float]]]:
-    """Collect squares of lifted trig calls and assign auxiliary columns."""
+    """Collect squares of lifted univariate calls and assign auxiliary columns.
+
+    Matches ``f(affine)**2`` for *any* univariate ``f`` already lifted into
+    ``univariate_var_map`` — ``log``, ``exp``, ``sqrt`` and the inverse-trig calls
+    as well as the ``sin``/``cos``/``tan`` this collector originally handled. The
+    square is bounded by the generic convex tangent/secant envelope emitted for
+    every ``UnivariateSquareRelaxation`` (``w = base**2`` over ``[base_lb,
+    base_ub]``), which is function-agnostic and sound for any lifted base; only
+    trig calls additionally get the tighter finite-domain / piecewise refinements
+    downstream. Without this, a ``log(.)**2`` (or ``exp(.)**2``) objective — e.g.
+    nvs09's ``Σ log(x-2)**2 + log(10-x)**2`` — left ``(base_col, 2)`` out of the
+    monomial map, so the whole objective failed to linearize and AMP fell back to
+    a feasibility objective, producing no lower bound (issue #369).
+    """
     relaxations: list[UnivariateSquareRelaxation] = []
     var_map: dict[tuple[int, int], int] = {}
     bounds: list[tuple[float, float]] = []
     col_idx = start_col
 
-    def maybe_add(expr: Expression) -> None:
-        nonlocal col_idx
-        if not (
-            isinstance(expr, BinaryOp)
-            and expr.op == "**"
+    def _square_base_col(expr: Expression) -> Optional[int]:
+        """Lifted-univariate base column if *expr* is a square of a lifted call.
+
+        Recognizes both the authored ``f(affine)**2`` and the distributed product
+        ``f(affine)*f(affine)`` — ``distribute_products`` rewrites ``f**2`` into
+        ``f*f``, which is the form the objective arrives in whenever a sibling term
+        triggers ``factorable_reform`` (nvs09's ``-(Πx)**0.2`` does), so matching
+        only the power form would miss ``log(.)**2`` there. Any univariate call
+        already lifted into ``univariate_var_map`` (trig, ``log``, ``exp``,
+        ``sqrt``, inverse-trig, ...) is eligible; an unlifted call has no
+        ``base_col`` and is skipped, so the generic square envelope only ever fires
+        over a base with a valid interval enclosure.
+        """
+        if not isinstance(expr, BinaryOp):
+            return None
+        if (
+            expr.op == "**"
             and isinstance(expr.left, FunctionCall)
-            and expr.left.func_name in {"sin", "cos", "tan"}
             and isinstance(expr.right, Constant)
             and float(expr.right.value) == 2.0
         ):
-            return
+            return univariate_var_map.get(id(expr.left))
+        if (
+            expr.op == "*"
+            and isinstance(expr.left, FunctionCall)
+            and isinstance(expr.right, FunctionCall)
+        ):
+            left_col = univariate_var_map.get(id(expr.left))
+            # Both factors must lift to the *same* aux column — a genuine square,
+            # not a bilinear ``log(a)*log(b)`` of two distinct univariate auxes.
+            if left_col is not None and univariate_var_map.get(id(expr.right)) == left_col:
+                return left_col
+        return None
 
-        base_col = univariate_var_map.get(id(expr.left))
+    def maybe_add(expr: Expression) -> None:
+        nonlocal col_idx
+        base_col = _square_base_col(expr)
         if base_col is None:
             return
         key = (base_col, 2)
@@ -6356,9 +6534,13 @@ def build_milp_relaxation(
     # ``**2`` intact (the affine-square envelope resolves them through
     # ``composite_var_map`` by original node id); every other ``(a+b)**2`` still
     # expands so the #154 sqrt/reciprocal lift can envelope each product term.
-    protected_squares = (
-        frozenset(affine_square_protected_ids) if affine_square_protected_ids else None
-    )
+    # Protect every composite-claimed node id (affine-square/power lifts AND the
+    # convex-subexpression lifts from #358) from `distribute_products`: the
+    # linearizer resolves a claimed node to its aux column by id, so the node must
+    # keep its identity through distribution or the claim is silently lost and the
+    # relaxation falls back to the loose term-by-term path.
+    _protected = set(affine_square_protected_ids) | set(composite_var_map)
+    protected_squares = frozenset(_protected) if _protected else None
     distributed_objective = (
         distribute_products(model._objective.expression, protected_squares)
         if model._objective is not None

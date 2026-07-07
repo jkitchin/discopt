@@ -219,6 +219,18 @@ def examine(
                 )
             )
 
+    # ── 2b. Fast-API / builder-resident row feasibility (X-1) ───────────────
+    # `add_linear_constraints` / the `Model.constraint` linear fast path emit rows
+    # only into the Rust builder, invisible to the NLPEvaluator (which reads
+    # `model._constraints`). Without this check the examiner would certify a point
+    # that grossly violates such a row (VAL-1). Evaluate those linear rows directly
+    # in the same flat-variable coordinate system as `x_flat` and fold their
+    # violations into primal feasibility. This adds coverage; it never relaxes an
+    # existing check.
+    builder_check = _check_builder_row_feas(model, x_flat, primal_feas_tol, show_tol)
+    if builder_check is not None:
+        checks.append(builder_check)
+
     # ── 3. Integrality ──────────────────────────────────────────────────────
     if is_integer.any():
         int_resid = np.where(is_integer, np.abs(x_flat - np.round(x_flat)), 0.0)
@@ -629,6 +641,48 @@ def _constraint_violations(body, sense_arr, rhs_arr):
     viol[eq] = np.abs(body[eq] - rhs_arr[eq])
     signed = body - rhs_arr
     return viol, signed
+
+
+def _check_builder_row_feas(model, x_flat, tol: float, show_tol: float):
+    """Primal feasibility of fast-API / builder-resident linear rows (X-1).
+
+    Returns ``None`` when the model has no such rows (no behaviour change for
+    expression-only models). Otherwise evaluates each row ``sum(a_i x_i) sense b``
+    at ``x_flat`` — which is in the same flat-variable ordering the rows are
+    decomposed into — and reports the aggregate feasibility as a
+    :class:`CheckResult`, so a point violating a fast-path row cannot be certified.
+    """
+    from discopt.export._common import iter_builder_linear_rows
+
+    rows = iter_builder_linear_rows(model)
+    if not rows:
+        return None
+    bodies = np.empty(len(rows), dtype=float)
+    senses = np.empty(len(rows), dtype=object)
+    rhs = np.empty(len(rows), dtype=float)
+    labels: list[str] = []
+    n = x_flat.size
+    for r, row in enumerate(rows):
+        val = 0.0
+        for idx, coeff in row.coeffs.items():
+            if 0 <= idx < n:
+                val += coeff * float(x_flat[idx])
+        bodies[r] = val
+        senses[r] = row.sense
+        rhs[r] = row.rhs
+        labels.append(row.name)
+    viol, _signed = _constraint_violations(bodies, senses, rhs)
+    return _build_check(
+        "primal_con_feas (builder rows)",
+        viol,
+        labels,
+        tol,
+        show_tol,
+        detail_template="row {label}: body={body:.6g} {sense} {rhs:.6g}",
+        body=bodies,
+        sense=senses,
+        rhs=rhs,
+    )
 
 
 def _build_check(

@@ -109,8 +109,8 @@ jobs:
       - name: Run pytest (PR-fast, parallel)
         run: |
           source .venv/bin/activate
-          # Keep worker count bounded so JAX compilation and AMP relaxations do
-          # not multiply peak memory unexpectedly.
+          # Keep worker count bounded so fork CI does not multiply JAX
+          # compilation and AMP relaxation memory unexpectedly.
           # --dist loadgroup keeps tests sharing a class on the same worker
           #   so xdist-incompatible fixtures stay serialized.
           # Coverage is intentionally dropped from the PR path — see the

@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import Optional
+from typing import Optional, Sequence
 
 import numpy as np
 
@@ -40,10 +40,27 @@ def solve_nlp(
     x0: np.ndarray,
     constraint_bounds: Optional[list[tuple[float, float]]] = None,
     options: Optional[dict] = None,
+    kkt_schur_block: Optional[Sequence[int]] = None,
+    ordering: Optional[Sequence[int]] = None,
 ) -> NLPResult:
     """Solve an NLP using pounce with the NLPEvaluator callbacks.
 
-    Same signature and semantics as :func:`discopt.solvers.nlp_ipopt.solve_nlp`.
+    Same signature and semantics as :func:`discopt.solvers.nlp_ipopt.solve_nlp`,
+    plus two optional structure-aware passthroughs to the underlying
+    ``pounce.Problem`` (see pounce#180).
+
+    Args:
+        kkt_schur_block: Optional sequence of **KKT-space indices** (``0..dim``,
+            block order ``x, slack, eq-dual, ineq-dual``) identifying a
+            block-triangular / Schur partition of the KKT system. Handed to
+            ``pounce.Problem.set_kkt_schur_block`` before solving; pounce falls
+            back to the full-space path transparently when the partition is
+            unsuitable, so the solution is unchanged and only factorization time
+            differs (Parker, Garcia & Bent, arXiv:2602.17968). Honored only on
+            the default FERAL + exact-Hessian path.
+        ordering: Optional sequence of KKT-space indices giving a custom
+            factorization ordering, handed to ``pounce.Problem.set_ordering``.
+            Correctness-safe for the same reason as ``kkt_schur_block``.
     """
     if not POUNCE_AVAILABLE:
         raise ImportError(
@@ -103,6 +120,30 @@ def solve_nlp(
         except (TypeError, ValueError, RuntimeError):
             _logger.debug("pounce option '%s' not accepted, skipping", key)
 
+    # Structure-aware KKT passthroughs (pounce#180). Both are correctness-safe:
+    # pounce transparently falls back to the full-space path when the partition
+    # or ordering is unsuitable, so only factorization time changes. Guarded so
+    # an older pounce without these methods degrades gracefully to the
+    # full-space solve rather than raising.
+    if kkt_schur_block is not None:
+        block = [int(i) for i in kkt_schur_block]
+        if hasattr(problem, "set_kkt_schur_block"):
+            try:
+                problem.set_kkt_schur_block(block)
+            except (TypeError, ValueError, RuntimeError):
+                _logger.debug("pounce rejected kkt_schur_block, using full space")
+        else:
+            _logger.debug("pounce has no set_kkt_schur_block; ignoring passthrough")
+    if ordering is not None:
+        order = [int(i) for i in ordering]
+        if hasattr(problem, "set_ordering"):
+            try:
+                problem.set_ordering(order)
+            except (TypeError, ValueError, RuntimeError):
+                _logger.debug("pounce rejected ordering, using default")
+        else:
+            _logger.debug("pounce has no set_ordering; ignoring passthrough")
+
     t0 = time.perf_counter()
     x, info = problem.solve(x0.astype(np.float64))
     wall_time = time.perf_counter() - t0
@@ -136,6 +177,8 @@ def solve_nlp_from_model(
     model: Model,
     x0: Optional[np.ndarray] = None,
     options: Optional[dict] = None,
+    kkt_schur_block: Optional[Sequence[int]] = None,
+    ordering: Optional[Sequence[int]] = None,
 ) -> NLPResult:
     """Convenience: create an NLPEvaluator from a model and solve with POUNCE.
 
@@ -146,6 +189,12 @@ def solve_nlp_from_model(
         model: A Model with objective and constraints set.
         x0: Initial point (n,). If None, uses midpoint of bounds clipped to [-100, 100].
         options: POUNCE/Ipopt options dict.
+        kkt_schur_block: Optional Schur/block-triangular KKT partition forwarded
+            to :func:`solve_nlp` (see its docstring). For an equality-only model,
+            ``discopt.aggregation.schur.kkt_schur_indices(model)`` produces a
+            suitable block. Correctness-safe: pounce falls back transparently.
+        ordering: Optional custom factorization ordering forwarded to
+            :func:`solve_nlp`.
 
     Returns:
         NLPResult with solution.
@@ -158,4 +207,10 @@ def solve_nlp_from_model(
         ub_clipped = np.clip(ub, -100.0, 100.0)
         x0 = 0.5 * (lb_clipped + ub_clipped)
 
-    return solve_nlp(evaluator, x0, options=options)
+    return solve_nlp(
+        evaluator,
+        x0,
+        options=options,
+        kkt_schur_block=kkt_schur_block,
+        ordering=ordering,
+    )

@@ -72,6 +72,79 @@ pub struct MilpResult {
     pub lp_iters: usize,
 }
 
+/// A node-lifecycle checkpoint fired to an attached [`MilpDebugHook`].
+///
+/// Mirrors the Python-side `discopt.debug.Checkpoint` so the pure-Rust MILP
+/// fast-path is inspectable by the same debugger that drives the spatial /
+/// MIQP / NLP-BB loops.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MilpCheckpoint {
+    /// Top of a batch iteration.
+    IterStart,
+    /// The batch of open nodes was just exported — their boxes are available.
+    AfterSelect,
+    /// After the batch's results were imported and prune/branch/fathom ran.
+    AfterProcess,
+    /// A strictly-better incumbent was just adopted.
+    IncumbentFound,
+    /// Once, after the search loop exits (final / limit / infeasible).
+    Terminated,
+}
+
+/// Aggregate solver state passed to a debug hook at a checkpoint. Read-only.
+///
+/// The `batch_*` fields are populated only at [`MilpCheckpoint::AfterSelect`],
+/// where the current batch of open-node boxes is in scope; they are `None`
+/// elsewhere. The lifetime `'a` borrows those boxes from the export batch.
+#[derive(Debug, Clone, Copy)]
+pub struct MilpDebugState<'a> {
+    /// Which checkpoint fired.
+    pub checkpoint: MilpCheckpoint,
+    /// Batch-iteration counter (0-based), mirroring the Python loops.
+    pub iteration: usize,
+    /// Total B&B nodes created so far.
+    pub total_nodes: usize,
+    /// Open nodes remaining in the frontier.
+    pub open_nodes: usize,
+    /// Incumbent objective (internal min sense), or `None` if none yet.
+    pub incumbent: Option<f64>,
+    /// Global lower (dual) bound.
+    pub bound: f64,
+    /// Current relative optimality gap.
+    pub gap: f64,
+    /// Wall-clock seconds since the solve started.
+    pub elapsed: f64,
+    /// Number of structural variables (box length reference).
+    pub n_vars: usize,
+    /// Per-node lower-bound boxes of the exported batch (AfterSelect only).
+    pub batch_lb: Option<&'a [Vec<f64>]>,
+    /// Per-node upper-bound boxes of the exported batch (AfterSelect only).
+    pub batch_ub: Option<&'a [Vec<f64>]>,
+    /// Node ids of the exported batch (AfterSelect only).
+    pub batch_ids: Option<&'a [NodeId]>,
+}
+
+/// What a debug hook tells the search to do after a checkpoint.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MilpDebugControl {
+    /// Keep searching.
+    Continue,
+    /// Stop the search now (graceful — a valid uncertified result is built).
+    Stop,
+}
+
+/// A debugger attached to the Rust MILP search. Implemented on the Python side
+/// by a GIL-reacquiring adapter over a Python callable. Must be `Sync` because
+/// the solve runs under `Python::allow_threads`.
+///
+/// **Zero effect when absent:** every fire-site is gated on `Option::is_some`,
+/// so a `None` hook leaves the search bit-for-bit identical (bound-neutral).
+pub trait MilpDebugHook: Sync {
+    /// Called at each fired checkpoint; return [`MilpDebugControl::Stop`] to
+    /// end the search gracefully.
+    fn checkpoint(&self, state: &MilpDebugState<'_>) -> MilpDebugControl;
+}
+
 /// Options for the MILP driver.
 pub struct MilpOptions {
     /// Number of structural (model) variables; columns `[n_struct, n)` are slacks.
@@ -146,9 +219,59 @@ pub struct MilpOptions {
     pub simplex: SimplexOptions,
 }
 
+/// Map the search's terminal state to a [`MilpStatus`]. Pure so it can be
+/// unit-tested against the exact orphaned-node scenario (C-2) without driving a
+/// full solve.
+///
+/// The C-2 invariant lives here: `Infeasible` is returned **only** on a rigorous
+/// empty-tree proof — `tree_finished && !search_incomplete`. `search_incomplete`
+/// is true whenever a node was deferred un-solved (deadline), which leaves it
+/// popped off the heap and `Evaluated`, invisible to the tree's `open_count()`.
+/// In that case `tree_finished` can read `true` over a subtree that was never
+/// searched, so the honest terminus is a limit status, never a false
+/// "infeasible".
+fn decide_status(
+    unbounded: bool,
+    has_inc: bool,
+    tree_finished: bool,
+    search_incomplete: bool,
+    gap_closed: bool,
+    gap_certified: bool,
+    node_limit_hit: bool,
+) -> MilpStatus {
+    if unbounded {
+        MilpStatus::Unbounded
+    } else if !has_inc {
+        if tree_finished && !search_incomplete {
+            MilpStatus::Infeasible
+        } else {
+            MilpStatus::NodeLimit
+        }
+    } else if (tree_finished || gap_closed) && gap_certified {
+        MilpStatus::Optimal
+    } else if node_limit_hit {
+        MilpStatus::NodeLimit
+    } else {
+        MilpStatus::Feasible
+    }
+}
+
 /// Solve `min cᵀx + obj_const s.t. A x = b, l ≤ x ≤ u` with `integer_cols`
 /// integer-constrained, by Rust-internal warm-started-simplex branch and bound.
 pub fn solve_milp(lp: &LpView<'_>, b: &[f64], obj_const: f64, opts: &MilpOptions) -> MilpResult {
+    solve_milp_hooked(lp, b, obj_const, opts, None)
+}
+
+/// [`solve_milp`] with an optional interactive-debugger hook. When `hook` is
+/// `None` this is bit-for-bit identical to a plain solve (all fire-sites
+/// short-circuit); the `solve_milp` wrapper above passes `None`.
+pub fn solve_milp_hooked(
+    lp: &LpView<'_>,
+    b: &[f64],
+    obj_const: f64,
+    opts: &MilpOptions,
+    hook: Option<&dyn MilpDebugHook>,
+) -> MilpResult {
     crate::profile::init_from_env();
     crate::profile::reset();
     let n = lp.n;
@@ -179,7 +302,11 @@ pub fn solve_milp(lp: &LpView<'_>, b: &[f64], obj_const: f64, opts: &MilpOptions
     // feasible solution and needs no postsolve; the tightened bounds seed both
     // the tree's global bounds and the node LPs. A proven-empty box ⇒ infeasible.
     let (base_l, base_u) = if opts.presolve {
-        let pr = tighten_bounds(lp, b, &is_int_full, opts.simplex.tol);
+        // cert:T0.3 — time root presolve bound reduction.
+        let pr = {
+            let _t = crate::profile::Timer::new(crate::profile::Phase::NodeReduce);
+            tighten_bounds(lp, b, &is_int_full, opts.simplex.tol)
+        };
         if pr.infeasible {
             return MilpResult {
                 status: MilpStatus::Infeasible,
@@ -214,6 +341,14 @@ pub fn solve_milp(lp: &LpView<'_>, b: &[f64], obj_const: f64, opts: &MilpOptions
     let mut lp_iters = 0usize;
     let mut unbounded = false;
     let mut gap_certified = true;
+    // C-2: set whenever a node is dropped un-solved (deadline deferral). A
+    // deferred node was already popped off the heap and left `Evaluated`, so it
+    // is invisible to `open_count()` — `is_finished()` can then read `true` even
+    // though that node's subtree was never searched. Without this flag, an empty
+    // tree with no incumbent is mislabeled `Infeasible` (a false certificate)
+    // when the real terminus is a time-limit cut-off. The no-incumbent status
+    // branch gates on this so a deadline yields a limit status, not `Infeasible`.
+    let mut search_incomplete = false;
 
     // Original constraint rows (before any cuts) are the knapsack candidates for
     // cover separation; later rows are themselves cuts.
@@ -386,7 +521,44 @@ pub fn solve_milp(lp: &LpView<'_>, b: &[f64], obj_const: f64, opts: &MilpOptions
     // change branching choice / cut tightness / early incumbents, never a
     // bound's validity.
     let _t_search = crate::profile::Timer::new(crate::profile::Phase::SearchLoop);
+
+    // Interactive debugger bookkeeping. `dbg_iter` mirrors the Python loops'
+    // iteration counter; `dbg_last_inc` tracks the incumbent so the
+    // `IncumbentFound` event fires exactly on a strict improvement. When `hook`
+    // is `None` the macro below expands to `false` and nothing is read.
+    let mut dbg_iter: usize = 0;
+    let mut dbg_last_inc: f64 = f64::INFINITY;
+    macro_rules! fire_dbg {
+        ($cp:expr) => {{
+            if let Some(h) = hook {
+                let s = tm.stats();
+                let inc = tm.incumbent().map(|(_, v)| v);
+                let state = MilpDebugState {
+                    checkpoint: $cp,
+                    iteration: dbg_iter,
+                    total_nodes: s.total_nodes,
+                    open_nodes: s.open_nodes,
+                    incumbent: inc,
+                    bound: s.global_lower_bound,
+                    gap: s.gap,
+                    elapsed: t_start.elapsed().as_secs_f64(),
+                    n_vars: ns,
+                    batch_lb: None,
+                    batch_ub: None,
+                    batch_ids: None,
+                };
+                matches!(h.checkpoint(&state), MilpDebugControl::Stop)
+            } else {
+                false
+            }
+        }};
+    }
+
     'search: loop {
+        if fire_dbg!(MilpCheckpoint::IterStart) {
+            gap_certified = false;
+            break;
+        }
         if tm.is_finished() || tm.gap() <= opts.gap_tol {
             break;
         }
@@ -403,6 +575,31 @@ pub fn solve_milp(lp: &LpView<'_>, b: &[f64], obj_const: f64, opts: &MilpOptions
         let batch = tm.export_batch(64);
         if batch.node_ids.is_empty() {
             break;
+        }
+
+        // Interactive debugger: nodes selected — expose the batch's boxes/ids so
+        // `print node <i>` works on this pure-Rust path too. Gated on the hook.
+        if let Some(h) = hook {
+            let s = tm.stats();
+            let inc = tm.incumbent().map(|(_, v)| v);
+            let state = MilpDebugState {
+                checkpoint: MilpCheckpoint::AfterSelect,
+                iteration: dbg_iter,
+                total_nodes: s.total_nodes,
+                open_nodes: s.open_nodes,
+                incumbent: inc,
+                bound: s.global_lower_bound,
+                gap: s.gap,
+                elapsed: t_start.elapsed().as_secs_f64(),
+                n_vars: ns,
+                batch_lb: Some(&batch.lb),
+                batch_ub: Some(&batch.ub),
+                batch_ids: Some(&batch.node_ids),
+            };
+            if matches!(h.checkpoint(&state), MilpDebugControl::Stop) {
+                gap_certified = false;
+                break 'search;
+            }
         }
 
         // Equilibration scaling for the working matrix, computed once per batch
@@ -515,10 +712,19 @@ pub fn solve_milp(lp: &LpView<'_>, b: &[f64], obj_const: f64, opts: &MilpOptions
             if out.deferred {
                 // Deadline hit before this node's LP solve. Skip it entirely: do
                 // not import a result, so the node keeps its parent-inherited
-                // bound and stays a valid open node. The gap cannot be certified
-                // once any node went unsolved, and the loop-top deadline check
-                // breaks the search on the next iteration.
+                // bound. The gap cannot be certified once any node went unsolved,
+                // and the loop-top deadline check breaks the search on the next
+                // iteration.
+                //
+                // C-2: the node was popped off the heap by `export_batch` and is
+                // now stuck `Evaluated`, so `open_count()` no longer sees it. If
+                // the rest of this final batch fathoms rigorously and no incumbent
+                // exists, `is_finished()` would read `true` and the driver would
+                // return `Infeasible` — a false certificate, since this node's
+                // subtree was never searched. Record that the search was cut short
+                // so the no-incumbent status resolves to a limit status instead.
                 gap_certified = false;
+                search_incomplete = true;
                 continue;
             }
             if out.unbounded {
@@ -564,6 +770,23 @@ pub fn solve_milp(lp: &LpView<'_>, b: &[f64], obj_const: f64, opts: &MilpOptions
         tm.import_results(&results);
         tm.process_evaluated();
 
+        // Interactive debugger: post prune/branch/fathom, plus the new-incumbent
+        // event on a strict improvement (from any source this batch).
+        if let Some(v) = tm.incumbent().map(|(_, v)| v) {
+            if v < dbg_last_inc - 1e-9 {
+                dbg_last_inc = v;
+                if fire_dbg!(MilpCheckpoint::IncumbentFound) {
+                    gap_certified = false;
+                    break 'search;
+                }
+            }
+        }
+        if fire_dbg!(MilpCheckpoint::AfterProcess) {
+            gap_certified = false;
+            break 'search;
+        }
+        dbg_iter += 1;
+
         // Fold this batch's newly-found global cuts into the shared matrix.
         // Stored node bases are extended lazily on their next solve, so children
         // warm-start through the dual simplex from the cut-augmented basis.
@@ -586,6 +809,10 @@ pub fn solve_milp(lp: &LpView<'_>, b: &[f64], obj_const: f64, opts: &MilpOptions
         }
     }
 
+    // Interactive debugger: terminal checkpoint (return value is advisory only —
+    // the solve is already over, so its control is ignored).
+    let _ = fire_dbg!(MilpCheckpoint::Terminated);
+
     let stats = tm.stats();
     let bound = stats.global_lower_bound;
     // An all-integer placeholder at an infeasible node can be fathomed by the
@@ -595,21 +822,15 @@ pub fn solve_milp(lp: &LpView<'_>, b: &[f64], obj_const: f64, opts: &MilpOptions
         Some((xi, oi)) if oi < INFEAS_SENTINEL - 1.0 => (xi.to_vec(), oi, true),
         _ => (vec![0.0; ns], f64::INFINITY, false),
     };
-    let status = if unbounded {
-        MilpStatus::Unbounded
-    } else if !has_inc {
-        if tm.is_finished() {
-            MilpStatus::Infeasible
-        } else {
-            MilpStatus::NodeLimit
-        }
-    } else if (tm.is_finished() || tm.gap() <= opts.gap_tol) && gap_certified {
-        MilpStatus::Optimal
-    } else if stats.total_nodes >= opts.max_nodes {
-        MilpStatus::NodeLimit
-    } else {
-        MilpStatus::Feasible
-    };
+    let status = decide_status(
+        unbounded,
+        has_inc,
+        tm.is_finished(),
+        search_incomplete,
+        tm.gap() <= opts.gap_tol,
+        gap_certified,
+        stats.total_nodes >= opts.max_nodes,
+    );
 
     MilpResult {
         status,
@@ -791,7 +1012,11 @@ fn solve_node(id: NodeId, lb_k: &[f64], ub_k: &[f64], ctx: &NodeCtx<'_>) -> Node
             l: &full_l,
             u: &full_u,
         };
-        let pr = tighten_bounds(&prop_lp, ctx.b_w, ctx.is_int_full, ctx.opts.simplex.tol);
+        let pr = {
+            // cert:T0.3 — time per-node FBBT/constraint propagation.
+            let _t = crate::profile::Timer::new(crate::profile::Phase::Fbbt);
+            tighten_bounds(&prop_lp, ctx.b_w, ctx.is_int_full, ctx.opts.simplex.tol)
+        };
         if pr.infeasible {
             // Proven-empty box ⇒ prune this node (a valid fathom, like an
             // infeasible LP). No incumbent, no basis, nothing to branch.
@@ -1059,12 +1284,36 @@ fn solve_node(id: NodeId, lb_k: &[f64], ub_k: &[f64], ctx: &NodeCtx<'_>) -> Node
             };
         }
         LpStatus::Infeasible => {
-            out.result = NodeResult {
-                node_id: id,
-                lower_bound: INFEAS_SENTINEL, // pruned
-                solution: vec![0.0; ctx.ns],
-                is_feasible: false,
-            };
+            // C-14: the simplex reports `Infeasible` with a Farkas *dual ray
+            // candidate* in `sol.dual` (contract: `lp/simplex/mod.rs`), sound only
+            // once the caller verifies it. Fathoming on the status alone can drop a
+            // node — possibly containing the optimum — when a numerically tight
+            // phase-1 artificial sum trips the absolute threshold on a feasible box.
+            // Verify the ray (`g0(±y) > margin`, a weak-duality certificate of
+            // emptiness) on the *scaled solve-space* data — where the ray lives —
+            // before pruning. The safe-bound identity is invariant under
+            // equilibration (`scaling.rs`), so the scaled-space verdict equals the
+            // original-space one. On verification failure the box is NOT provably
+            // empty: never fathom — hand the node back uncertified (non-pruning
+            // bound, midpoint) so it is branched/re-solved and the optimum can never
+            // be silently cut. A sound infeasible LP always exports a verifiable
+            // ray, so this costs one mat-vec and never changes a correct fathom.
+            if verify_farkas_infeasible(&sol.dual, ctx.sa, ctx.sb, &sl, &su, ctx.m_w, ctx.n_w) {
+                out.result = NodeResult {
+                    node_id: id,
+                    lower_bound: INFEAS_SENTINEL, // pruned
+                    solution: vec![0.0; ctx.ns],
+                    is_feasible: false,
+                };
+            } else {
+                out.uncertified = true;
+                out.result = NodeResult {
+                    node_id: id,
+                    lower_bound: f64::NEG_INFINITY,
+                    solution: midpoint(lb_k, ub_k),
+                    is_feasible: false,
+                };
+            }
         }
         LpStatus::Unbounded => {
             out.unbounded = true;
@@ -1083,6 +1332,112 @@ fn solve_node(id: NodeId, lb_k: &[f64], ub_k: &[f64], ctx: &NodeCtx<'_>) -> Node
         }
     }
     out
+}
+
+/// Verify a Farkas infeasibility certificate for the LP `{ A x = b, l ≤ x ≤ u }`.
+///
+/// The simplex exports `y` (length `m`) on `LpStatus::Infeasible` as a *candidate*
+/// dual ray (contract in `lp/simplex/mod.rs`); this is the caller-side check the
+/// contract requires before an infeasible fathom is trusted. By Farkas' lemma /
+/// weak duality, the box is provably empty iff the objective-free safe bound
+///
+/// ```text
+///     g0(y) = bᵀy + Σⱼ min_{zⱼ∈[lⱼ,uⱼ]} (−Aᵀy)ⱼ zⱼ
+/// ```
+///
+/// is strictly positive for `y` or `−y` (the ray sign the simplex returns is not
+/// fixed): `g0 > 0` means every point of the box violates `Σ yᵢ(Aᵢx − bᵢ) = 0`, so
+/// no `x` in the box satisfies `Ax = b`. `g0(y) ≤ 0 ≤ g0` by weak duality for any
+/// feasible LP, so a positive value can only arise when the feasible set is truly
+/// empty — the check never false-certifies emptiness.
+///
+/// The margin is scaled by the magnitudes entering `g0` (‖b‖∞ and the max
+/// per-column box contribution) so a genuinely-empty box clears it while a ray that
+/// only grazes zero — the numerically-tight case C-14 is about — does not, forcing
+/// the caller to keep (branch) the node instead of fathoming it.
+///
+/// Columns with an infinite bound on the contributing side yield `−∞` (that column
+/// cannot help certify emptiness); such a `g0` is `≤ 0` and correctly fails to
+/// certify. Runs on the scaled solve-space data (`sa`, `sb`, scaled `l`/`u`), where
+/// the returned ray lives; the safe-bound identity is invariant under
+/// equilibration, so the verdict matches the original space.
+fn verify_farkas_infeasible(
+    y: &[f64],
+    a: &[f64],
+    b: &[f64],
+    l: &[f64],
+    u: &[f64],
+    m: usize,
+    n: usize,
+) -> bool {
+    // No certificate exported ⇒ cannot verify ⇒ do not trust the fathom.
+    if y.len() != m || m == 0 {
+        return false;
+    }
+    farkas_safe_bound(y, a, b, l, u, m, n) || {
+        let neg: Vec<f64> = y.iter().map(|v| -v).collect();
+        farkas_safe_bound(&neg, a, b, l, u, m, n)
+    }
+}
+
+/// Objective-free safe bound `g0(y) = bᵀy + Σⱼ min_box((−Aᵀy)ⱼ zⱼ)`, returning
+/// `true` iff it clears a magnitude-scaled positive margin — a rigorous certificate
+/// that `{Ax=b, l≤x≤u}` is empty for this `y`.
+///
+/// A column open to ±∞ can only contribute a finite term when its reduced cost
+/// `(Aᵀy)ⱼ` is zero; the warm-simplex ray carries rounding noise there, so a reduced
+/// cost within a ray-scaled tolerance of zero is treated as exactly zero (otherwise a
+/// `1e-18` dribble would send `g0` to `−∞` and reject a valid certificate). A reduced
+/// cost genuinely past that tolerance toward an infinite bound does push `g0` to
+/// `−∞`: this ray cannot certify emptiness and the caller keeps the node.
+fn farkas_safe_bound(
+    y: &[f64],
+    a: &[f64],
+    b: &[f64],
+    l: &[f64],
+    u: &[f64],
+    m: usize,
+    n: usize,
+) -> bool {
+    // Reduced-cost zero-tolerance, scaled by the ray magnitude so it tracks the
+    // noise floor of `Aᵀy` rather than being an absolute constant.
+    let ynorm = y.iter().fold(0.0f64, |acc, &v| acc.max(v.abs()));
+    let rc_tol = 1e-7 * ynorm.max(1.0);
+    let mut g = 0.0f64;
+    let mut scale = 0.0f64; // running magnitude of the terms, for the margin
+    for i in 0..m {
+        g += b[i] * y[i];
+        scale = scale.max((b[i] * y[i]).abs());
+    }
+    for j in 0..n {
+        let mut aty = 0.0f64;
+        for i in 0..m {
+            aty += a[i * n + j] * y[i];
+        }
+        let mut rc = -aty; // objective is zero: reduced cost is −(Aᵀy)ⱼ
+        if rc.abs() <= rc_tol {
+            rc = 0.0;
+        }
+        let term = if rc > 0.0 {
+            if l[j] <= -INF {
+                return false; // genuine −∞ contribution ⇒ this y can't certify
+            }
+            rc * l[j]
+        } else if rc < 0.0 {
+            if u[j] >= INF {
+                return false;
+            }
+            rc * u[j]
+        } else {
+            0.0
+        };
+        g += term;
+        scale = scale.max(term.abs());
+    }
+    // Magnitude-scaled margin: a genuinely-empty box clears `g0 > 0` with room to
+    // spare, while a ray grazing zero on a numerically-tight feasible box does not.
+    let margin = 1e-9 * scale.max(1.0);
+    g > margin
 }
 
 /// Limited strong branching. For the *unreliable* fractional candidates (those
@@ -1817,6 +2172,56 @@ mod tests {
         assert!((r.obj - (-10.0)).abs() < 1e-6, "obj {}", r.obj);
     }
 
+    /// A no-op debug hook must be bound-neutral: identical status / obj / nodes
+    /// vs. no hook (CLAUDE.md §5), while still firing at least one checkpoint.
+    #[test]
+    fn debug_hook_is_bound_neutral() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct Counter(AtomicUsize);
+        impl MilpDebugHook for Counter {
+            fn checkpoint(&self, _s: &MilpDebugState<'_>) -> MilpDebugControl {
+                self.0.fetch_add(1, Ordering::Relaxed);
+                MilpDebugControl::Continue
+            }
+        }
+
+        // A knapsack big enough to branch (multiple nodes, an incumbent event).
+        let a = [5.0, 3.0, 2.0, 4.0, 3.0, 5.0, 1.0];
+        let c = [-8.0, -5.0, -3.0, -6.0, -4.0, -7.0, 0.0];
+        let l = [0.0; 7];
+        let u = [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, INF];
+        let lp = LpView {
+            a: &a,
+            m: 1,
+            n: 7,
+            c: &c,
+            l: &l,
+            u: &u,
+        };
+        let base = solve_milp(&lp, &[10.0], 0.0, &opts(6, vec![0, 1, 2, 3, 4, 5]));
+
+        let hook = Counter(AtomicUsize::new(0));
+        let hooked = solve_milp_hooked(
+            &lp,
+            &[10.0],
+            0.0,
+            &opts(6, vec![0, 1, 2, 3, 4, 5]),
+            Some(&hook),
+        );
+
+        assert_eq!(base.status, hooked.status);
+        assert_eq!(base.nodes, hooked.nodes, "node count drifted with hook");
+        assert!(
+            (base.obj - hooked.obj).abs() < 1e-12,
+            "obj drifted with hook"
+        );
+        assert!(
+            hook.0.load(Ordering::Relaxed) > 0,
+            "hook never fired — checkpoints not wired"
+        );
+    }
+
     #[test]
     fn general_integer_optimum() {
         // min -x0 - x1 s.t. x0 + x1 + s = 3 (s≥0), 0≤x≤2 integer.
@@ -1855,6 +2260,88 @@ mod tests {
         };
         let r = solve_milp(&lp, &[1.0], 0.0, &opts(1, vec![0]));
         assert_eq!(r.status, MilpStatus::Infeasible);
+    }
+
+    // ---- C-2: deadline that orphans a deferred node must NOT report Infeasible ----
+    //
+    // These drive the terminal-status logic (`decide_status`) directly, which is
+    // where the false certificate lived: when the last batch fathoms rigorously
+    // and no incumbent exists, a deferred (un-solved) node has been popped off the
+    // heap and left `Evaluated`, so the tree reads `is_finished() == true`. The
+    // pre-fix code returned `Infeasible` unconditionally on that branch — a false
+    // "infeasible" on a time-limit termination whose orphaned subtree may contain
+    // the optimum. The fix gates `Infeasible` on `!search_incomplete`.
+
+    #[test]
+    fn c2_deferred_node_orphaned_by_deadline_is_not_infeasible() {
+        // Empty tree, no incumbent, but a node was deferred un-solved: the search
+        // was cut short by the deadline, so the honest status is a limit status,
+        // NEVER Infeasible. This is the exact scenario the C-2 card describes.
+        let status = decide_status(
+            /*unbounded=*/ false, /*has_inc=*/ false,
+            /*tree_finished=*/ true, // open_count()==0 because the orphan is Evaluated
+            /*search_incomplete=*/ true, // a node was deferred un-solved
+            /*gap_closed=*/ false,
+            /*gap_certified=*/ false, // gap is correctly decertified on defer
+            /*node_limit_hit=*/ false,
+        );
+        assert_ne!(
+            status,
+            MilpStatus::Infeasible,
+            "deferred-node orphaning must not yield a false Infeasible certificate"
+        );
+        assert_eq!(status, MilpStatus::NodeLimit);
+    }
+
+    #[test]
+    fn c2_genuine_infeasible_still_reported_when_search_complete() {
+        // Rigorous empty-tree proof: every node fathomed, nothing deferred. The
+        // Infeasible certificate must survive the fix — do not weaken it.
+        let status = decide_status(
+            /*unbounded=*/ false, /*has_inc=*/ false, /*tree_finished=*/ true,
+            /*search_incomplete=*/ false, // no node was ever dropped un-solved
+            /*gap_closed=*/ false, /*gap_certified=*/ true,
+            /*node_limit_hit=*/ false,
+        );
+        assert_eq!(
+            status,
+            MilpStatus::Infeasible,
+            "a rigorously drained empty tree must still certify Infeasible"
+        );
+    }
+
+    #[test]
+    fn c2_end_to_end_genuine_infeasible_unaffected() {
+        // The full-driver infeasible path (no deferral) is unchanged: x0 ∈ [2,5]
+        // integer with x0 ≤ 1 is genuinely infeasible and no deadline is set, so
+        // `search_incomplete` stays false and the status is Infeasible.
+        let a = [1.0, 1.0];
+        let c = [1.0, 0.0];
+        let l = [2.0, 0.0];
+        let u = [5.0, INF];
+        let lp = LpView {
+            a: &a,
+            m: 1,
+            n: 2,
+            c: &c,
+            l: &l,
+            u: &u,
+        };
+        let r = solve_milp(&lp, &[1.0], 0.0, &opts(1, vec![0]));
+        assert_eq!(r.status, MilpStatus::Infeasible);
+    }
+
+    #[test]
+    fn c2_deferred_with_incumbent_reports_feasible_not_infeasible() {
+        // Orthogonal guard: a deferred node with an incumbent present is a
+        // time-limited feasible solve, not Infeasible (that branch never touched
+        // `has_inc==true`, but pin it so a future refactor can't regress it).
+        let status = decide_status(
+            /*unbounded=*/ false, /*has_inc=*/ true, /*tree_finished=*/ false,
+            /*search_incomplete=*/ true, /*gap_closed=*/ false,
+            /*gap_certified=*/ false, /*node_limit_hit=*/ false,
+        );
+        assert_eq!(status, MilpStatus::Feasible);
     }
 
     #[test]
@@ -1948,5 +2435,129 @@ mod tests {
         let r = solve_milp(&lp, &[9.0], 100.0, &opts(4, vec![0, 1, 2, 3]));
         assert_eq!(r.status, MilpStatus::Optimal);
         assert!((r.obj - 90.0).abs() < 1e-6, "obj {}", r.obj);
+    }
+
+    // --- C-14: Farkas verification before an infeasible fathom ---------------
+
+    /// A genuinely infeasible LP's exported dual ray verifies, so the node is
+    /// (soundly) fathomable. `x0 + s = 1`, `s∈[0,∞)`, `x0∈[2,∞)` ⇒ `x0≥2` yet
+    /// `x0≤1` — empty.
+    #[test]
+    fn c14_valid_farkas_ray_certifies_emptiness() {
+        let a = [1.0, 1.0];
+        let b = [1.0];
+        let c = [0.0, 0.0];
+        let l = [2.0, 0.0];
+        let u = [INF, INF];
+        let lp = LpView {
+            a: &a,
+            m: 1,
+            n: 2,
+            c: &c,
+            l: &l,
+            u: &u,
+        };
+        let r = solve_lp(&lp, &b, &SimplexOptions::default());
+        assert_eq!(r.status, LpStatus::Infeasible);
+        assert!(
+            verify_farkas_infeasible(&r.dual, &a, &b, &l, &u, 1, 2),
+            "a real infeasible LP's ray must verify (else we would refuse a valid fathom)"
+        );
+    }
+
+    /// The C-14 defect class: a node the simplex *labels* Infeasible but whose
+    /// exported ray does NOT certify emptiness (here a corrupted/zeroed ray) must
+    /// be refused — `verify_farkas_infeasible` returns false so the caller keeps
+    /// the node instead of fathoming a region that may hold the optimum.
+    #[test]
+    fn c14_non_certifying_ray_is_refused() {
+        let a = [1.0, 1.0];
+        let b = [1.0];
+        let l = [2.0, 0.0];
+        let u = [INF, INF];
+        // Zero ray: g0 ≡ 0, no certificate ⇒ must not fathom.
+        assert!(
+            !verify_farkas_infeasible(&[0.0], &a, &b, &l, &u, 1, 2),
+            "a zero ray certifies nothing; the node must not be fathomed"
+        );
+        // Empty certificate (nothing exported) ⇒ must not fathom.
+        assert!(
+            !verify_farkas_infeasible(&[], &a, &b, &l, &u, 1, 2),
+            "an absent ray must never license a fathom"
+        );
+        // A ray that only *grazes* zero (g0 = 0 exactly) must not clear the
+        // magnitude-scaled margin: box {x0∈[0,1], s=... } here is actually
+        // feasible, and no free-sign y makes g0 strictly positive.
+        let a2 = [1.0, 1.0];
+        let b2 = [1.0];
+        let l2 = [0.0, 0.0];
+        let u2 = [1.0, INF];
+        assert!(
+            !verify_farkas_infeasible(&[1.0], &a2, &b2, &l2, &u2, 1, 2),
+            "a feasible box must not be certified empty by any ray"
+        );
+    }
+
+    /// Scale-invariance of the certificate: an infeasible LP whose exported ray
+    /// verifies still verifies after both A/b and the ray are equilibrated by an
+    /// arbitrary positive row factor — the property the fathom relies on to check
+    /// in scaled solve-space. (`g0(R·ŷ)` over `Â=RA`, `b̂=Rb` equals `g0(y)`.)
+    #[test]
+    fn c14_certificate_is_scale_invariant() {
+        let a = [1.0, 1.0];
+        let b = [1.0];
+        let c = [0.0, 0.0];
+        let l = [2.0, 0.0];
+        let u = [INF, INF];
+        let lp = LpView {
+            a: &a,
+            m: 1,
+            n: 2,
+            c: &c,
+            l: &l,
+            u: &u,
+        };
+        let r = solve_lp(&lp, &b, &SimplexOptions::default());
+        assert_eq!(r.status, LpStatus::Infeasible);
+        // Equilibrate row 0 by 8 (a power of two, as real equilibration snaps to);
+        // the scaled ray is ŷ = y / 8, and g0 is invariant, so it still verifies.
+        let s = 8.0;
+        let a_s = [a[0] * s, a[1] * s];
+        let b_s = [b[0] * s];
+        let y_s: Vec<f64> = r.dual.iter().map(|v| v / s).collect();
+        assert!(
+            verify_farkas_infeasible(&y_s, &a_s, &b_s, &l, &u, 1, 2),
+            "the safe-bound certificate must be invariant under row equilibration"
+        );
+    }
+
+    /// Noise robustness (the AMP-relaxation regression that surfaced during the
+    /// fix): a warm-simplex ray carries rounding noise, so an infinite-bounded
+    /// column with a *noise-level* reduced cost must NOT push `g0` to `−∞` and
+    /// reject an otherwise-valid certificate. Here `x0 + s = 1`, `x0∈[2,∞)`,
+    /// `s∈[0,∞)` is infeasible; the clean ray is `y=[-1]` (g0 = -1·1 + min over
+    /// x0≥2 of (1)·x0 = -1 + 2 = 1 > 0). Perturb `A` on the *infinite* slack column
+    /// so `(Aᵀy)` there is a tiny nonzero — the tolerance must absorb it.
+    #[test]
+    fn c14_infinite_column_noise_does_not_reject_valid_ray() {
+        // Ray y=[-1]; column 1 (slack, u=∞) has a[1]=1 → (Aᵀy)_1 = -1, rc=+1 with
+        // l=0 contributes 0; column 0 (x0, l=2) rc from a[0]: use the real solve.
+        let a = [1.0, 1.0];
+        let b = [1.0];
+        let l = [2.0, 0.0];
+        let u = [INF, INF];
+        // A hand-built clean ray for this system: y = [-1].
+        let y = [-1.0];
+        assert!(
+            verify_farkas_infeasible(&y, &a, &b, &l, &u, 1, 2),
+            "clean ray must certify the infeasible box"
+        );
+        // Now perturb the *infinite-bounded* slack column by noise 1e-10: with the
+        // ray-scaled rc tolerance, g0 is unchanged and the ray still certifies.
+        let a_noisy = [1.0, 1.0 + 1e-10];
+        assert!(
+            verify_farkas_infeasible(&y, &a_noisy, &b, &l, &u, 1, 2),
+            "noise-level reduced cost on an ∞-bounded column must not reject the ray"
+        );
     }
 }

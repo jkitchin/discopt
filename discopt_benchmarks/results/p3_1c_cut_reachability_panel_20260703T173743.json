@@ -1,0 +1,281 @@
+{
+  "task": "cert:P3.1c",
+  "generated": "20260703T173743",
+  "note": "Merged from 3 per-instance runs (same code/env; split only to honor the per-call wall guardrail). Lever: DISCOPT_P3_FORCE_CUT_PATH=1 + DISCOPT_CMIR_AGGREGATION=1 (ON) vs default (OFF).",
+  "panel": [
+    "ex1263",
+    "ex1263a",
+    "graphpart_2pm-0044-0044",
+    "graphpart_2g-0044-1601",
+    "graphpart_2pm-0055-0055"
+  ],
+  "cap_seconds": 90.0,
+  "budget_nodes": 2000,
+  "n_run": 5,
+  "n_skipped": 0,
+  "incorrect_count": 0,
+  "any_cut_fired": true,
+  "rows": [
+    {
+      "instance": "ex1263",
+      "status": "run",
+      "oracle": 19.6,
+      "off": {
+        "status": "node_limit",
+        "objective": null,
+        "bound": 19.063333333333333,
+        "root_bound": 19.063333333333333,
+        "node_count": 2015,
+        "wall": 10.170177542138845,
+        "cuts_all": {},
+        "cuts_total": 0.0,
+        "path": {
+          "_solve_milp_simplex": 1,
+          "_solve_milp_bb": 1
+        }
+      },
+      "on": {
+        "status": "node_limit",
+        "objective": null,
+        "bound": 19.063333333333333,
+        "root_bound": 19.063333333333333,
+        "node_count": 2015,
+        "wall": 34.17152195889503,
+        "cuts_all": {},
+        "cuts_total": 0.0,
+        "path": {
+          "_solve_milp_bb": 1
+        }
+      },
+      "on_full": {
+        "status": "feasible",
+        "objective": 20.3,
+        "bound": 19.063333333333333,
+        "root_bound": 19.063333333333333,
+        "node_count": 20901,
+        "wall": 90.18070029234514,
+        "cuts_all": {},
+        "cuts_total": 0.0,
+        "path": {
+          "_solve_milp_bb": 1
+        }
+      },
+      "cuts_fired": false,
+      "cuts_total_on": 0.0,
+      "gap_closed_off": 0.0,
+      "gap_closed_on": 0.0,
+      "solve_path_on": "_solve_milp_bb",
+      "incorrect_on": false,
+      "bad_bound": false
+    },
+    {
+      "instance": "ex1263a",
+      "status": "run",
+      "oracle": 19.6,
+      "off": {
+        "status": "node_limit",
+        "objective": null,
+        "bound": 19.063333333333333,
+        "root_bound": 19.063333333333333,
+        "node_count": 2015,
+        "wall": 45.36161099979654,
+        "cuts_all": {},
+        "cuts_total": 0.0,
+        "path": {
+          "_solve_milp_simplex": 1,
+          "_solve_milp_bb": 1
+        }
+      },
+      "on": {
+        "status": "feasible",
+        "objective": 22.299999999999915,
+        "bound": 19.066310674461867,
+        "root_bound": 19.066310674461867,
+        "node_count": 2003,
+        "wall": 75.68336533335969,
+        "cuts_all": {
+          "cuts/gomory": 8.0
+        },
+        "cuts_total": 8.0,
+        "path": {
+          "_solve_milp_bb": 1
+        }
+      },
+      "on_full": {
+        "status": "feasible",
+        "objective": 21.299999999999596,
+        "bound": 19.066310674461867,
+        "root_bound": 19.066310674461867,
+        "node_count": 2451,
+        "wall": 90.81753529189155,
+        "cuts_all": {
+          "cuts/gomory": 8.0
+        },
+        "cuts_total": 8.0,
+        "path": {
+          "_solve_milp_bb": 1
+        }
+      },
+      "cuts_fired": true,
+      "cuts_total_on": 8.0,
+      "gap_closed_off": 0.0,
+      "gap_closed_on": 0.00554784061217655,
+      "solve_path_on": "_solve_milp_bb",
+      "incorrect_on": false,
+      "bad_bound": false
+    },
+    {
+      "instance": "graphpart_2pm-0044-0044",
+      "status": "run",
+      "oracle": -13.0,
+      "off": {
+        "status": "optimal",
+        "objective": -13.0,
+        "bound": -13.0,
+        "root_bound": -16.0,
+        "node_count": 63,
+        "wall": 0.4791534999385476,
+        "cuts_all": {},
+        "cuts_total": 0.0,
+        "path": {
+          "_solve_milp_simplex": 1
+        }
+      },
+      "on": {
+        "status": "optimal",
+        "objective": -13.000000766798689,
+        "bound": -13.000000766798689,
+        "root_bound": -16.0,
+        "node_count": 37,
+        "wall": 32.400037958752364,
+        "cuts_all": {},
+        "cuts_total": 0.0,
+        "path": {
+          "_solve_milp_bb": 1
+        }
+      },
+      "on_full": {
+        "status": "optimal",
+        "objective": -13.000000766798689,
+        "bound": -13.000000766798689,
+        "root_bound": -16.0,
+        "node_count": 37,
+        "wall": 32.22486733319238,
+        "cuts_all": {},
+        "cuts_total": 0.0,
+        "path": {
+          "_solve_milp_bb": 1
+        }
+      },
+      "cuts_fired": false,
+      "cuts_total_on": 0.0,
+      "gap_closed_off": 0.0,
+      "gap_closed_on": 0.0,
+      "solve_path_on": "_solve_milp_bb",
+      "incorrect_on": false,
+      "bad_bound": false
+    },
+    {
+      "instance": "graphpart_2g-0044-1601",
+      "status": "run",
+      "oracle": -954077.0,
+      "off": {
+        "status": "optimal",
+        "objective": -954077.0,
+        "bound": -954077.0,
+        "root_bound": -1025886.0,
+        "node_count": 13,
+        "wall": 0.3446220001205802,
+        "cuts_all": {},
+        "cuts_total": 0.0,
+        "path": {
+          "_solve_milp_simplex": 1
+        }
+      },
+      "on": {
+        "status": "feasible",
+        "objective": -954077.0629585518,
+        "bound": -1025886.0,
+        "root_bound": -1025886.0,
+        "node_count": 29,
+        "wall": 94.04691016720608,
+        "cuts_all": {},
+        "cuts_total": 0.0,
+        "path": {
+          "_solve_milp_bb": 1
+        }
+      },
+      "on_full": {
+        "status": "feasible",
+        "objective": -954077.0629585518,
+        "bound": -1025886.0,
+        "root_bound": -1025886.0,
+        "node_count": 29,
+        "wall": 93.89496245933697,
+        "cuts_all": {},
+        "cuts_total": 0.0,
+        "path": {
+          "_solve_milp_bb": 1
+        }
+      },
+      "cuts_fired": false,
+      "cuts_total_on": 0.0,
+      "gap_closed_off": 0.0,
+      "gap_closed_on": 0.0,
+      "solve_path_on": "_solve_milp_bb",
+      "incorrect_on": false,
+      "bad_bound": false
+    },
+    {
+      "instance": "graphpart_2pm-0055-0055",
+      "status": "run",
+      "oracle": -20.0,
+      "off": {
+        "status": "optimal",
+        "objective": -20.0,
+        "bound": -20.0,
+        "root_bound": -25.0,
+        "node_count": 235,
+        "wall": 1.2685574577189982,
+        "cuts_all": {},
+        "cuts_total": 0.0,
+        "path": {
+          "_solve_milp_simplex": 1
+        }
+      },
+      "on": {
+        "status": "feasible",
+        "objective": -20.0,
+        "bound": -25.0,
+        "root_bound": -25.0,
+        "node_count": 377,
+        "wall": 93.03519704192877,
+        "cuts_all": {},
+        "cuts_total": 0.0,
+        "path": {
+          "_solve_milp_bb": 1
+        }
+      },
+      "on_full": {
+        "status": "feasible",
+        "objective": -20.0,
+        "bound": -25.0,
+        "root_bound": -25.0,
+        "node_count": 377,
+        "wall": 93.15625670785084,
+        "cuts_all": {},
+        "cuts_total": 0.0,
+        "path": {
+          "_solve_milp_bb": 1
+        }
+      },
+      "cuts_fired": false,
+      "cuts_total_on": 0.0,
+      "gap_closed_off": 0.0,
+      "gap_closed_on": 0.0,
+      "solve_path_on": "_solve_milp_bb",
+      "incorrect_on": false,
+      "bad_bound": false
+    }
+  ]
+}

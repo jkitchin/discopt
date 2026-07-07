@@ -393,3 +393,134 @@ def test_gb8_nonconvex_withholds_bound():
     assert r.objective == pytest.approx(ref.objective, abs=1e-2)
     assert r.bound is None
     assert not r.gap_certified
+
+
+# ══════════════════════════════════════════════════════════════════════
+# Randomized soundness attacks on the Phase 0-5 code paths (fixed seeds).
+# Each asserts the cardinal invariant: a reported bound is valid, and a
+# *certified* answer is never wrong. Oracle = monolithic Model.solve().
+# ══════════════════════════════════════════════════════════════════════
+
+import numpy as np  # noqa: E402
+from discopt.decomposition.benders import solve_benders  # noqa: E402
+from discopt.decomposition.benders.solver import BendersConfig  # noqa: E402
+from discopt.decomposition.lagrangian import solve_lagrangian  # noqa: E402
+
+
+def _rand_two_stage(seed):
+    rng = np.random.default_rng(seed)
+    K = int(rng.integers(1, 4))
+    m = dm.Model(f"ts{seed}")
+    b = [m.binary(f"b{k}") for k in range(K)]
+    obj = 0
+    for k in range(K):
+        nk = int(rng.integers(1, 3))
+        x = m.continuous(f"x{k}", shape=(nk,), lb=0, ub=10)
+        d = float(rng.integers(1, 6))
+        m.subject_to(sum(x[i] for i in range(nk)) >= d * b[k])
+        for i in range(nk):
+            m.subject_to(x[i] <= 10 * b[k])
+            obj = obj + float(rng.uniform(0.5, 3.0)) * x[i]
+        obj = obj + float(rng.integers(1, 5)) * b[k]
+    need = 1 if K < 2 else int(rng.integers(1, K + 1))
+    m.subject_to(sum(b) >= need)
+    m.minimize(obj)
+    return m
+
+
+@pytest.mark.parametrize("seed", range(8))
+def test_rand_multicut_sound_and_deterministic(seed):
+    """Multicut/single/threads/in-out all reproduce the monolithic optimum with a
+    valid lower bound, and the two backends agree bit-for-bit."""
+    opt = float(_rand_two_stage(seed).solve(time_limit=30).objective)
+    variants = {
+        "mc_seq": dict(multicut=True, backend="sequential"),
+        "single": dict(multicut=False, backend="sequential"),
+        "mc_thr": dict(multicut=True, backend="threads"),
+        "inout": dict(multicut=True, stabilization="inout"),
+    }
+    res = {}
+    for name, kw in variants.items():
+        r = solve_benders(_rand_two_stage(seed), config=BendersConfig(time_limit=30, **kw))
+        res[name] = r
+        if r.bound is not None:
+            assert r.bound <= opt + 1e-2, f"{name}: unsound bound {r.bound} > opt {opt}"
+        if r.status == "optimal":
+            assert r.objective == pytest.approx(opt, abs=ABS), f"{name} wrong certified opt"
+    assert res["mc_seq"].objective == res["mc_thr"].objective  # determinism
+    assert res["mc_seq"].bound == res["mc_thr"].bound
+
+
+def _rand_gap(seed):
+    rng = np.random.default_rng(seed)
+    A, T = int(rng.integers(2, 4)), int(rng.integers(2, 4))
+    m = dm.Model(f"gap{seed}")
+    x = m.binary("x", shape=(A * T,))
+    cost = [[float(rng.integers(1, 9)) for _ in range(T)] for _ in range(A)]
+    w = [[float(rng.integers(1, 5)) for _ in range(T)] for _ in range(A)]
+    cap = [float(rng.integers(T, 2 * T + 2)) for _ in range(A)]
+    m.minimize(sum(cost[a][t] * x[a * T + t] for a in range(A) for t in range(T)))
+    for a in range(A):
+        m.subject_to(sum(w[a][t] * x[a * T + t] for t in range(T)) <= cap[a])
+    for t in range(T):
+        c = sum(x[a * T + t] for a in range(A)) == 1  # equality coupling (free multiplier)
+        m.subject_to(c)
+        m.mark_coupling(c)
+    return m
+
+
+@pytest.mark.parametrize("seed", range(6))
+@pytest.mark.parametrize("method", ["subgradient", "bundle", "kelley"])
+def test_rand_lagrangian_dual_is_valid_lower_bound(seed, method):
+    """The Lagrangian dual bound never exceeds the optimum (equality coupling
+    exercises the free-multiplier path), across all three dual methods, and the
+    two backends agree bit-for-bit."""
+    mono = _rand_gap(seed).solve(time_limit=30)
+    if mono.status != "optimal":
+        pytest.skip("degenerate instance")
+    opt = float(mono.objective)
+    seq = solve_lagrangian(_rand_gap(seed), method=method, backend="sequential", time_limit=15)
+    thr = solve_lagrangian(_rand_gap(seed), method=method, backend="threads", time_limit=15)
+    for r in (seq, thr):
+        if r.bound is not None:
+            assert r.bound <= opt + 1e-2, f"{method}: unsound dual bound {r.bound} > opt {opt}"
+        if r.status == "optimal":
+            assert r.objective == pytest.approx(opt, abs=ABS)
+        if r.objective is not None:
+            assert r.objective >= opt - ABS, "recovered incumbent below optimum (infeasible?)"
+    assert seq.bound == thr.bound and seq.objective == thr.objective  # determinism
+
+
+@pytest.mark.parametrize("fail_prob", [0.3, 0.6, 0.9])
+def test_c1_flaky_nlp_never_certifies_wrong(fail_prob, monkeypatch):
+    """A recourse NLP that fails randomly must NEVER yield a wrong *certified*
+    answer — the headline C1 invariant, attacked with high failure rates."""
+    import discopt.solvers.nlp_pounce as npn
+
+    m = dm.Model("c1adv")
+    b = [m.binary(f"b{k}") for k in range(2)]
+    obj = 0
+    for k in range(2):
+        x = m.continuous(f"x{k}", lb=0, ub=5)
+        m.subject_to(x * x <= 9 * b[k])
+        m.subject_to(x >= 1.5 * b[k])
+        obj = obj + x + (k + 1) * b[k]
+    m.subject_to(b[0] + b[1] >= 1)
+    m.minimize(obj)
+    opt = float(m.solve(time_limit=30).objective)
+
+    real = npn.solve_nlp
+    rng = np.random.default_rng(int(fail_prob * 100))
+
+    def flaky(evaluator, x0, *a, **k):
+        if rng.random() < fail_prob:
+            raise RuntimeError("adversarial transient NLP failure")
+        return real(evaluator, x0, *a, **k)
+
+    monkeypatch.setattr(npn, "solve_nlp", flaky)
+    # Rebuild a fresh model (solve may consume state); reuse m is fine here.
+    r = solve_benders(m, time_limit=25)
+    if r.gap_certified and r.status == "optimal" and r.objective is not None:
+        assert r.objective == pytest.approx(opt, abs=ABS), (
+            f"flaky NLP produced a WRONG certified answer {r.objective} (true {opt})"
+        )

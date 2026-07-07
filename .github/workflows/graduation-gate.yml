@@ -1,0 +1,61 @@
+name: Flag-graduation gate (CI subset)
+
+# G1.2 — the CI-runnable subset of the flag-graduation gate.
+#
+# The FULL gate (held-out per-flag arm + cert-neutrality + ledger append) needs
+# the ~4,800-instance MINLPLib corpus in ~/Dropbox/projects/discopt-minlp-benchmark,
+# which GitHub CI does NOT have. So CI runs only the cert-neutrality +
+# incorrect_count portion over the VENDORED cert panel (which IS in the repo) as a
+# regression guard: it proves that turning a parked flag ON does not change a
+# certified objective or lose an optimal status on the panel. It does NOT measure
+# held-out benefit and does NOT append a graduation verdict to the ledger — those
+# are nightly-only facts produced by `make graduation-gate` on a corpus machine.
+#
+# See docs/dev/flag-graduation-protocol.md for the local-full vs CI-subset split.
+
+on:
+  workflow_dispatch:
+  schedule:
+    # Weekly, Mondays 07:42 UTC. Off the PR-fast path (the cert re-solve is minutes).
+    - cron: "42 7 * * 1"
+
+jobs:
+  graduation-gate-ci-subset:
+    name: cert-neutrality regression guard (vendored panel)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y coinor-libipopt-dev liblapack-dev libblas-dev gfortran
+      - name: Install Python dependencies
+        run: |
+          python -m venv .venv
+          source .venv/bin/activate
+          pip install maturin
+          pip install numpy scipy "jax[cpu]" pytest pytest-timeout
+          pip install pounce-solver || echo "pounce-solver unavailable; cert panel may skip nonlinear instances"
+          maturin develop --release
+      - name: Run the graduation gate CI subset (cert-neutrality + incorrect_count)
+        run: |
+          source .venv/bin/activate
+          python discopt_benchmarks/scripts/graduation_gate.py \
+            --flags root_fixpoint,node_reduce,psd_cost_gate,lift_zero_spanning,lift_loose_products \
+            --ci-subset
+        env:
+          JAX_PLATFORMS: cpu
+          JAX_ENABLE_X64: "1"
+          PYTHONPATH: ${{ github.workspace }}/python
+      - name: Upload gate report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: graduation-gate-ci-subset
+          path: reports/graduation_gate_*.json
+          if-no-files-found: ignore

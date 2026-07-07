@@ -7,6 +7,21 @@ import numpy as np
 from discopt.nn.network import Activation, DenseLayer, NetworkDefinition
 
 
+def _linear_wb(linear) -> tuple[np.ndarray, np.ndarray]:
+    """Extract ``(W, b)`` from a ``torch.nn.Linear`` as float64 arrays.
+
+    ``W`` is transposed to ``(n_in, n_out)`` (discopt's convention). When the
+    layer was built with ``bias=False`` (``linear.bias is None``), a zero bias
+    of length ``n_out`` is returned instead of dereferencing ``None``.
+    """
+    W = linear.weight.detach().cpu().numpy().T.astype(np.float64)
+    if linear.bias is None:
+        b = np.zeros(W.shape[1], dtype=np.float64)
+    else:
+        b = linear.bias.detach().cpu().numpy().astype(np.float64)
+    return W, b
+
+
 def load_torch_sequential(
     model,
     input_bounds: tuple[np.ndarray, np.ndarray] | None = None,
@@ -44,16 +59,14 @@ def load_torch_sequential(
         if isinstance(child, nn.Linear):
             if pending_linear is not None:
                 # Previous linear had no activation -> LINEAR
-                W = pending_linear.weight.detach().cpu().numpy().T.astype(np.float64)
-                b = pending_linear.bias.detach().cpu().numpy().astype(np.float64)
+                W, b = _linear_wb(pending_linear)
                 layers.append(DenseLayer(W, b, Activation.LINEAR))
             pending_linear = child
 
         elif type(child) in _TORCH_ACT_MAP:
             if pending_linear is None:
                 raise ValueError(f"Activation {type(child).__name__} without preceding Linear")
-            W = pending_linear.weight.detach().cpu().numpy().T.astype(np.float64)
-            b = pending_linear.bias.detach().cpu().numpy().astype(np.float64)
+            W, b = _linear_wb(pending_linear)
             layers.append(DenseLayer(W, b, _TORCH_ACT_MAP[type(child)]))
             pending_linear = None
 
@@ -64,8 +77,7 @@ def load_torch_sequential(
 
     # Handle trailing linear without activation
     if pending_linear is not None:
-        W = pending_linear.weight.detach().cpu().numpy().T.astype(np.float64)
-        b = pending_linear.bias.detach().cpu().numpy().astype(np.float64)
+        W, b = _linear_wb(pending_linear)
         layers.append(DenseLayer(W, b, Activation.LINEAR))
 
     if not layers:

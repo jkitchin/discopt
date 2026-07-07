@@ -65,6 +65,10 @@ timed_phases!(
     NodeLpSolve,
     StrongBranch,
     SearchLoop,
+    // Bound-reduction phases (cert:T0.3): FBBT/constraint-propagation at the
+    // node (`Fbbt`) and at the root presolve (`NodeReduce`).
+    Fbbt,
+    NodeReduce,
     PriceBtran,
     PriceSweep,
     AlphaFtran,
@@ -80,6 +84,47 @@ counters!(
     BoundFlips,
     BlandActivations,
     Refactorizations,
+    // Numeric-focus iterative-refinement recovery (discopt#364), split by path so
+    // the two very different triggers can be told apart when measuring.
+    //
+    // Primal (audit-failure driven): a drifted "Optimal" failed the feasibility
+    // audit and triggered a fresh refined refactorization (Attempts); Rescues =
+    // how many the refined point pulled back to a sound Optimal (the rest stayed
+    // Numerical and fell back to cold, as before).
+    RefinedRecoveryAttemptsPrimal,
+    RefinedRecoveryRescuesPrimal,
+    // Dual (growth-gated): the working factor's growth signal flagged possible
+    // digit loss at the optimality gate, triggering a fresh refined recompute
+    // (Attempts); Rescues = how many revealed a hidden infeasibility and so
+    // *prevented* a wrong "Optimal" (returning None → cold solve). A non-rescue
+    // Attempt still certified Optimal, but with the sharper x_B values.
+    RefinedRecoveryAttemptsDual,
+    RefinedRecoveryRescuesDual,
+    // Dual-simplex anti-cycling (discopt#364): degenerate dual pivots (entering
+    // reduced cost ≈ 0 → no dual-objective progress) that accumulate the stall
+    // count, and how often that stall crossed the threshold and switched the dual
+    // to Bland's smallest-index rule to break a potential cycle.
+    DualDegeneratePivots,
+    DualBlandActivations,
+    // Primal EXPAND anti-degeneracy (discopt#364): degenerate blocking steps that
+    // were bumped up to the guaranteed EXPAND minimum step (breaking the stall in
+    // place instead of accumulating toward the Bland switch).
+    ExpandMinSteps,
+    // Warm dual-simplex reoptimizations (DualWarmSolves) and how many of them the
+    // dual could not solve and fell back to a cold primal re-solve (DualColdFallbacks
+    // — numerical breakdown / iteration cap on a *valid* warm start, i.e. the
+    // "engine swap" the framework-LP-error-handling policy of #376 would try to
+    // pre-empt by escalating in place). The ratio is the escalation headroom.
+    DualWarmSolves,
+    DualColdFallbacks,
+    // Warm dual-simplex stall-guard trips (discopt F2): a warm re-solve that hit
+    // the size-derived stall cap (K·(m+n)+C ≤ max_iter) and abandoned the warm
+    // basis for a cold re-solve of the *same* LP. A subset of DualColdFallbacks
+    // (those caused specifically by the stall guard, not a numerical breakdown).
+    // > 0 on the pathological append-and-re-solve class (nvs01), = 0 on the
+    // healthy majority — so the guard's action is auditable and its
+    // bound-neutrality (same optimum, cold path) is measurable.
+    DualStallTrips,
 );
 
 #[inline(always)]
@@ -131,6 +176,23 @@ pub fn reset() {
     for a in PCOUNT.iter().chain(PNANOS.iter()).chain(CVALS.iter()) {
         a.store(0, Ordering::Relaxed);
     }
+}
+
+/// Current value of a counter. Mainly for tests/observability: lets a caller
+/// read a counter (e.g. [`Ctr::DualStallTrips`]) without going through [`dump`]
+/// (which prints to stderr and resets). Reads 0 when profiling was never enabled,
+/// since [`incr`] only accumulates while [`enabled`] holds.
+#[inline]
+pub fn counter(c: Ctr) -> u64 {
+    CVALS[c as usize].load(Ordering::Relaxed)
+}
+
+/// Force the profiling flag on/off. Test-only: production toggles it exactly once
+/// via [`init_from_env`]. Exposed so a Rust test can deterministically observe a
+/// [`counter`] without setting the `DISCOPT_PROFILE` env var process-wide.
+#[cfg(test)]
+pub fn set_enabled(on: bool) {
+    ENABLED.store(on, Ordering::Relaxed);
 }
 
 /// Print the accumulated table to stderr when profiling is enabled, then reset.

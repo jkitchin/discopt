@@ -1,0 +1,118 @@
+{
+  "cap_seconds": 60.0,
+  "cut_rounds": 3,
+  "rows": [
+    {
+      "instance": "ex1263a",
+      "status": "run",
+      "oracle": 19.6,
+      "off": {
+        "status": "time_limit",
+        "objective": 121.0,
+        "bound": 19.6,
+        "node_count": 400,
+        "wall": 2.0125200827606022
+      },
+      "on": {
+        "status": "time_limit",
+        "objective": 121.0,
+        "bound": 19.6,
+        "node_count": 400,
+        "wall": 1.7540494580753148
+      },
+      "on_full": {
+        "status": "optimal",
+        "objective": 19.6,
+        "bound": 19.6,
+        "node_count": 1062,
+        "wall": 2.6942009166814387
+      },
+      "incorrect_on": false,
+      "bad_bound": false
+    },
+    {
+      "instance": "graphpart_2pm-0044-0044",
+      "status": "run",
+      "oracle": -13.0,
+      "off": {
+        "status": "optimal",
+        "objective": -13.000000000000002,
+        "bound": -13.000000000000002,
+        "node_count": 31,
+        "wall": 0.4240367501042783
+      },
+      "on": {
+        "status": "optimal",
+        "objective": -13.000000000000002,
+        "bound": -13.000000000000002,
+        "node_count": 31,
+        "wall": 0.42362208291888237
+      },
+      "on_full": {
+        "status": "optimal",
+        "objective": -13.000000000000002,
+        "bound": -13.000000000000002,
+        "node_count": 31,
+        "wall": 0.43551879189908504
+      },
+      "incorrect_on": false,
+      "bad_bound": false
+    },
+    {
+      "instance": "graphpart_2g-0044-1601",
+      "status": "run",
+      "oracle": -954077.0,
+      "off": {
+        "status": "optimal",
+        "objective": -954077.0000000001,
+        "bound": -954077.0000000001,
+        "node_count": 12,
+        "wall": 0.3430612916126847
+      },
+      "on": {
+        "status": "optimal",
+        "objective": -954077.0000000001,
+        "bound": -954077.0000000001,
+        "node_count": 12,
+        "wall": 0.344653207808733
+      },
+      "on_full": {
+        "status": "optimal",
+        "objective": -954077.0000000001,
+        "bound": -954077.0000000001,
+        "node_count": 12,
+        "wall": 0.3429137081839144
+      },
+      "incorrect_on": false,
+      "bad_bound": false
+    },
+    {
+      "instance": "graphpart_2pm-0055-0055",
+      "status": "run",
+      "oracle": -20.0,
+      "off": {
+        "status": "optimal",
+        "objective": -20.000000000000004,
+        "bound": -20.000000000000004,
+        "node_count": 207,
+        "wall": 3.2403413746505976
+      },
+      "on": {
+        "status": "optimal",
+        "objective": -20.000000000000004,
+        "bound": -20.000000000000004,
+        "node_count": 207,
+        "wall": 3.2930780830793083
+      },
+      "on_full": {
+        "status": "optimal",
+        "objective": -20.000000000000004,
+        "bound": -20.000000000000004,
+        "node_count": 207,
+        "wall": 3.238634125329554
+      },
+      "incorrect_on": false,
+      "bad_bound": false
+    }
+  ]
+}

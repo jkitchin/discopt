@@ -105,6 +105,91 @@ class TestArithmetic:
         assert neg.lo == -3.0 and neg.hi == 2.0
 
 
+class TestC36MulZeroTimesInfinity:
+    """C-36: ``Interval.__mul__`` must not leak NaN on ``0 · ±∞``.
+
+    A finite zero endpoint times an infinite endpoint is ``0 * ±∞ = NaN`` in
+    IEEE-754. Before the fix, ``np.minimum``/``np.maximum`` propagated that NaN
+    and the interval collapsed to ``[NaN, NaN]`` — every downstream comparison
+    against NaN is False, so the convexity certificate's ``np.isfinite`` gate
+    abstains (sound but weak: lost tightening). The interval convention makes
+    ``0 · [anything] = 0``, so the fix maps NaN corners to ``0`` while leaving
+    genuine ±∞ corners intact. These are the Python siblings of the Rust C-22
+    tests (PR #460).
+    """
+
+    @pytest.mark.smoke
+    def test_zero_point_times_entire_is_zero(self):
+        # The exact repro: [0,0] · [-inf, inf]. Every corner is 0 * (±inf) = NaN.
+        # Sound, informative enclosure is [0, 0] (up to one ULP of outward
+        # rounding), NOT [NaN, NaN].
+        a = Interval.point(0.0)
+        b = Interval.from_bounds(-np.inf, np.inf)
+        r = a * b
+        assert not np.isnan(r.lo) and not np.isnan(r.hi), "must not be NaN"
+        assert r.lo <= 0.0 <= r.hi, "must enclose 0"
+        # Tightest representable enclosure of the point 0: within one ULP.
+        assert abs(float(r.lo)) <= 1e-300 and abs(float(r.hi)) <= 1e-300
+
+    @pytest.mark.smoke
+    def test_zero_touching_times_entire_is_unbounded(self):
+        # [0,5] · [-inf, inf]: the 0-corners are NaN→0, but the genuine ±inf
+        # corners (5 * ±inf) still dominate → [-inf, +inf]. The fix must NOT
+        # clamp those infinities.
+        a = Interval.from_bounds(0.0, 5.0)
+        b = Interval.from_bounds(-np.inf, np.inf)
+        r = a * b
+        assert not np.isnan(r.lo) and not np.isnan(r.hi)
+        assert r.lo == -np.inf and r.hi == np.inf
+
+    @pytest.mark.smoke
+    def test_no_runtime_warning_on_zero_times_inf(self):
+        # The `RuntimeWarning: invalid value encountered in multiply` that the
+        # unguarded corner products raised must be gone.
+        a = Interval.point(0.0)
+        b = Interval.from_bounds(-np.inf, np.inf)
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            a * b  # no RuntimeWarning
+
+    @pytest.mark.smoke
+    def test_mul_never_nan_and_encloses_true_product(self):
+        # Grid over ±∞ endpoints and zero-width / zero-touching factors. For
+        # every valid pair the product must (a) never be NaN, (b) satisfy
+        # lo <= hi, and (c) rigorously enclose the true product of every pair of
+        # representative points drawn from the two intervals. A NaN endpoint
+        # would fail containment silently, so both are checked explicitly.
+        ninf, pinf = -np.inf, np.inf
+        bounds = [ninf, -3.0, -1.0, 0.0, 1.0, 2.5, pinf]
+        for alo in bounds:
+            for ahi in bounds:
+                if alo > ahi:
+                    continue
+                for blo in bounds:
+                    for bhi in bounds:
+                        if blo > bhi:
+                            continue
+                        a = Interval.from_bounds(alo, ahi)
+                        b = Interval.from_bounds(blo, bhi)
+                        r = a * b
+                        assert not np.isnan(r.lo) and not np.isnan(r.hi), (
+                            f"NaN endpoint for [{alo},{ahi}]*[{blo},{bhi}]"
+                        )
+                        assert r.lo <= r.hi, f"lo>hi for [{alo},{ahi}]*[{blo},{bhi}]"
+                        # True product set at the (finite) representative points.
+                        for x in (alo, ahi):
+                            for y in (blo, bhi):
+                                if not (np.isfinite(x) and np.isfinite(y)):
+                                    continue
+                                p = x * y
+                                assert r.lo <= p + 1e-9, (
+                                    f"{p} < lo {r.lo} for [{alo},{ahi}]*[{blo},{bhi}]"
+                                )
+                                assert p - 1e-9 <= r.hi, (
+                                    f"{p} > hi {r.hi} for [{alo},{ahi}]*[{blo},{bhi}]"
+                                )
+
+
 class TestPower:
     def test_square_nonneg_is_nonneg(self):
         a = Interval.from_bounds(1.0, 3.0)
