@@ -4662,6 +4662,16 @@ def solve_model(
     # warm LP solve instead of re-separating the PSD/RLT cuts from scratch. Stays
     # None unless the relaxer carries PSD cuts (the nvs* / box-QP regime).
     _root_cut_pool = None
+    # Root-cut-pool inheritance (THRU-4, ``DISCOPT_CUT_INHERIT`` /
+    # ``SolverTuning.cut_inherit``, default OFF). When on: (a) the general root
+    # cut pool below is captured even when the incremental engine is unavailable
+    # (the cold-path instances are exactly where THRU-3 measured the per-node
+    # separation drag), and (b) every node solve passes
+    # ``skip_pool_separators=True`` so the square/PSD point-separation loops —
+    # up to 8 full MILP re-solves per node each, 73%+12% of the nvs24 solve wall
+    # — are replaced by the inherited pool. Root behaviour is unchanged: the
+    # pool is separated with the full default chain on the root box.
+    _cut_inherit = _tuning().cut_inherit
     # The dual bound the root cut-pool relaxation proves over the whole feasible
     # region (a valid global lower bound for a MINIMIZE). The pool is separated for
     # its CUT ROWS, but the strengthened relaxation also yields a far tighter root
@@ -4999,7 +5009,7 @@ def solve_model(
                         except Exception as _pool_exc:  # pragma: no cover - defensive
                             logger.debug("root cut pool separation skipped: %s", _pool_exc)
                             _root_cut_pool = None
-                    elif getattr(_mc_lp_relaxer, "_inc", None) is not None:
+                    elif getattr(_mc_lp_relaxer, "_inc", None) is not None or _cut_inherit:
                         # Root cut pool for the GENERAL spatial path (cert:T1.3).
                         # When the incremental engine is active but PSD cuts are
                         # off, the fast path (which skips per-node separation) would
@@ -5012,6 +5022,13 @@ def solve_model(
                         # node. Sound: a cut valid over the root box is valid over
                         # every sub-box, so an inherited row never removes a
                         # feasible point.
+                        #
+                        # THRU-4 (``_cut_inherit``): additionally capture this pool
+                        # when the incremental engine is unavailable — cold-path
+                        # nodes are exactly where the per-node square/PSD point
+                        # separators dominate (nvs24: 73%+12% of the solve wall) —
+                        # so the node call sites below can skip those loops in
+                        # favour of the inherited pool (``skip_pool_separators``).
                         try:
                             _pool_chunks = []
                             _root_remaining = time_limit - (time.perf_counter() - t_start)
@@ -5795,6 +5812,10 @@ def solve_model(
                             inherited_cuts=_root_cut_pool,
                             separate=True,
                             want_marginals=_node_reduce_enabled,
+                            # THRU-4: with the root pool inherited, skip the per-node
+                            # square/PSD point-separation loops (sound: their cut
+                            # families are box-independent and already in the pool).
+                            skip_pool_separators=(_cut_inherit and _root_cut_pool is not None),
                         )
                     except Exception as e:
                         logger.debug("McCormick LP failed at node %d: %s", i, e)
@@ -6103,6 +6124,10 @@ def solve_model(
                             inherited_cuts=_root_cut_pool,
                             separate=True,
                             want_marginals=_node_reduce_enabled,
+                            # THRU-4: with the root pool inherited, skip the per-node
+                            # square/PSD point-separation loops (sound: their cut
+                            # families are box-independent and already in the pool).
+                            skip_pool_separators=(_cut_inherit and _root_cut_pool is not None),
                         )
                     except Exception as e:
                         logger.debug("McCormick LP failed at node %d: %s", int(batch_ids[i]), e)
@@ -7940,6 +7965,15 @@ def solve_model(
         _sqf = int(getattr(_mc_lp_relaxer, "_square_gate_fires", 0))
         if _sqf > 0:
             _solver_stats["gate/square_fires"] = float(_sqf)
+    # Root-cut-pool inheritance counters (THRU-4). Surfaced whenever a pool was
+    # built or inherited so both the fire-proof (pool populates + inherits) and
+    # the skip lever are observable on the final result.
+    if _root_cut_pool is not None:
+        _solver_stats["pool/size"] = float(_root_cut_pool[0].shape[0])
+    if _mc_lp_relaxer is not None and getattr(_mc_lp_relaxer, "_pool_stats", None):
+        for _pfam, _pcount in _mc_lp_relaxer._pool_stats.items():
+            if _pcount > 0:
+                _solver_stats[f"pool/{_pfam}"] = float(_pcount)
 
     return SolveResult(
         status=status,
