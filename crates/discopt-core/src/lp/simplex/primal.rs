@@ -1383,6 +1383,14 @@ impl<'a> Simplex<'a> {
                     let work_gate =
                         refac_work_budget > 0 && self.lu.ft_update_work() > refac_work_budget;
                     if need_refac || updates >= 48 || work_gate {
+                        // THRU-5: attribute the trigger (priority: FT-fail > cap > gate).
+                        crate::profile::incr(if need_refac {
+                            crate::profile::Ctr::RefacFtFail
+                        } else if updates >= 48 {
+                            crate::profile::Ctr::RefacCap
+                        } else {
+                            crate::profile::Ctr::RefacWorkGate
+                        });
                         crate::profile::incr(crate::profile::Ctr::Refactorizations);
                         let _t = crate::profile::Timer::new(crate::profile::Phase::Refactorize);
                         if self.refactorize(art_sign).is_err() {
