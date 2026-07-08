@@ -272,6 +272,22 @@ class TestUnknownExpressions:
         "expr_fn",
         [
             pytest.param(
+                lambda m: (lambda x: x * (x - 1.0))(m.continuous("x", lb=0.0, ub=2.0)),
+                id="product-affine-self-shift",
+            ),
+            pytest.param(
+                lambda m: (lambda x: (x**2 - 1.0) ** 2)(m.continuous("x", lb=-2.0, ub=2.0)),
+                id="quartic-double-well",
+            ),
+            pytest.param(
+                lambda m: (lambda x: (x - 1.0) ** 3)(m.continuous("x", lb=0.0, ub=2.0)),
+                id="shifted-cubic-inflection",
+            ),
+            pytest.param(
+                lambda m: dm.sigmoid(m.continuous("x", lb=-3.0, ub=3.0)),
+                id="sigmoid-mixed-curvature",
+            ),
+            pytest.param(
                 lambda m: (
                     (m.continuous("x", lb=-2.0, ub=2.0) ** 2) / m.continuous("y", lb=0.0, ub=2.0)
                 ),
@@ -288,9 +304,18 @@ class TestUnknownExpressions:
                 lambda m: m.continuous("x", lb=-2.0, ub=-0.5) ** -3,
                 id="negative-base-negative-odd-power",
             ),
+            pytest.param(
+                lambda m: dm.log(m.continuous("x", lb=-1.0, ub=2.0)),
+                id="log-zero-crossing-domain",
+            ),
+            pytest.param(
+                lambda m: dm.sqrt(m.continuous("x", lb=-1.0, ub=2.0)),
+                id="sqrt-negative-crossing-domain",
+            ),
         ],
     )
     def test_false_positive_regressions_stay_unknown(self, expr_fn):
+        """Classifier hardening lives here, even when MIP-NLP consumes it."""
         m = Model("test")
         assert classify_expr(expr_fn(m), m) == Curvature.UNKNOWN
 
