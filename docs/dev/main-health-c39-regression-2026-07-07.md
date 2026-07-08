@@ -124,9 +124,14 @@ to **3.3 s** single-threaded (matching the 3.4 s pre-C-39 baseline).
 `test_e3_reactor_is_feasible_not_infeasible` is a **pre-existing** straddler,
 **independent** of C-39: it is 90 s single-threaded on *both* `186430ce` (pre-C-39)
 and this branch, and its C-39 profile is empty (`infeas0 = 0`, `sys 13 s` — it is
-NLP/JAX-compile-bound). Not caused or worsened by this change; flagged as a separate
-perf/timeout follow-up (needs its own work or a `slow` marker / longer cap), not
-scoped into this restore-green PR.
+NLP/JAX-compile-bound). Not caused or worsened by this change. Because it is a
+false-infeasible **correctness** guard, it stays in the PR-fast tier (NOT marked
+`slow`); instead it carries a per-test `@pytest.mark.timeout(300)` so the slower CI
+runner's `--timeout=120` PR-fast cap cannot false-timeout it. pytest-timeout's
+per-test marker overrides the CLI value — verified: with `--timeout=30` the test runs
+the full 90 s and passes WITH the marker but `Failed: Timeout (>30s)` WITHOUT it.
+`--durations=0` confirms it is the *only* gallery straddler (every other gallery test
+< 1 s; e1 haverly 0.55 s), so only this one test is bumped.
 
 ## Part 3 — verification (every gate)
 
