@@ -33,12 +33,15 @@ point (default OFF until T2.6); this module is pure and flag-agnostic.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from typing import Optional
 
 import numpy as np
 
 from discopt.modeling.core import Model
+
+logger = logging.getLogger(__name__)
 
 # Guard tolerances mirror ``dbbt_on_relaxation`` (obbt.py) and the Rust
 # ``reduced_cost_fixing`` kernel (duality.rs) so the reduction is the same math.
@@ -168,7 +171,12 @@ def _fbbt_on_node(
             tol=tol,
             incumbent_bound=(float(cutoff) if cutoff is not None and np.isfinite(cutoff) else None),
         )
-    except Exception:
+    except Exception as exc:
+        # C-41: surface, never silently swallow — a swallowed error here is the
+        # exact compounding smell behind C-40 (a misaligned map that corrupts a
+        # box, then eats the resulting IndexError). Tighten-only: on any failure
+        # keep the node box unchanged (a valid, looser box).
+        logger.debug("node cutoff-FBBT skipped (build/solve failed): %s", exc)
         return lb, ub, 0, False
     finally:
         for v, (olb, oub) in zip(model._variables, saved):
@@ -177,15 +185,32 @@ def _fbbt_on_node(
 
     fbbt_lbs = np.asarray(fbbt_lbs, dtype=np.float64)
     fbbt_ubs = np.asarray(fbbt_ubs, dtype=np.float64)
+    # C-41: the block->flat map below reads ``fbbt_lbs[bi]`` (BLOCK-indexed: the
+    # Rust ``fbbt_with_cutoff`` returns one interval per ``model.variables`` block)
+    # and writes ``lb[flat]`` (FLAT scalar column). That is sound ONLY when the
+    # repr's block layout aligns 1:1 with ``model._variables`` — i.e. the returned
+    # array has exactly ``len(model._variables)`` entries. A builder-mode /
+    # reformulated repr can return a DIFFERENT block count (C-40: 144 for a
+    # 145-column model); ``fbbt_lbs[bi]`` would then read a *misaligned* variable's
+    # bound and write a crossed ``lb>ub`` box, wrongly fathoming the node. The old
+    # ``bi >= shape[0]`` check only guarded OOB, not this semantic misalignment.
+    # On a misaligned repr, forgo this *optional* tightening (a valid, looser box);
+    # mirrors solver.py:7443 and solvers/_root_presolve.py:43 (CLAUDE.md §3).
+    if fbbt_lbs.shape[0] != len(model._variables) or fbbt_ubs.shape[0] != len(model._variables):
+        logger.debug(
+            "node cutoff-FBBT skipped: repr layout misaligned "
+            "(returned %d/%d intervals, n_blocks=%d)",
+            fbbt_lbs.shape[0],
+            fbbt_ubs.shape[0],
+            len(model._variables),
+        )
+        return lb, ub, 0, False
     is_int = _is_int_mask(model, n)
     n_tight = 0
     flat = 0
     infeasible = False
     for bi, v in enumerate(model._variables):
         if v.size != 1:
-            flat += v.size
-            continue
-        if bi >= fbbt_lbs.shape[0] or bi >= fbbt_ubs.shape[0]:
             flat += v.size
             continue
         new_lo = float(fbbt_lbs[bi])

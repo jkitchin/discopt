@@ -222,3 +222,116 @@ def test_root_fixpoint_round_two_improves_bound():
     assert two.n_tightened >= one.n_tightened
     assert np.all(two.lb >= one.lb - 1e-9)
     assert np.all(two.ub <= one.ub + 1e-9)
+
+
+# --------------------------------------------------------------------------- #
+# C-41 — block<->flat cutoff-FBBT index-alignment guard                        #
+# --------------------------------------------------------------------------- #
+#
+# The Rust ``fbbt_with_cutoff`` returns one interval per ``model.variables``
+# BLOCK. Both ``node_reduce._fbbt_on_node`` and ``root_reduce._fbbt`` map that
+# block-indexed result onto the FLAT scalar box via ``fbbt_lbs[bi] -> lb[flat]``.
+# When a builder-mode / reformulated repr returns a block count that DIVERGES
+# from ``len(model._variables)`` (C-40: 144 for a 145-column model), a positional
+# read lands on the WRONG variable's bound and can write a crossed ``lb>ub`` box,
+# wrongly fathoming the optimum-containing node. C-41 adds the same 1:1-alignment
+# guard used at solver.py:7443 / solvers/_root_presolve.py:43: on a misaligned
+# repr, forgo the *optional* tightening (a valid, looser box), never corrupt it.
+#
+# These tests inject a deliberately misaligned FBBT result (a short array whose
+# positional values, if applied, would CROSS a variable's box) and assert the
+# guard forgoes the tightening. Pre-fix (positional apply with only an OOB skip)
+# these FAIL: the box is corrupted / the node is falsely fathomed.
+
+
+class _MisalignedRepr:
+    """A stand-in Rust repr whose ``fbbt_with_cutoff`` returns FEWER intervals
+    than the model has blocks (the C-40 144-vs-145 divergence), with the last
+    (misaligned) entry crafted to cross variable 1's box if applied positionally.
+    """
+
+    def __init__(self, n_blocks):
+        # n_blocks-1 intervals => guaranteed length mismatch. Entry 0 is a benign
+        # (loose) interval; the loop, unguarded, would still read fbbt[0] for the
+        # first scalar block. Make every returned lower bound cross that block's
+        # upper bound so an unguarded apply produces a crossed box (false fathom).
+        self._n = max(n_blocks - 1, 1)
+
+    def fbbt_with_cutoff(self, max_iter=10, tol=1e-8, incumbent_bound=None):
+        import numpy as _np
+
+        # Lower bounds far above the true box uppers -> any positional apply
+        # crosses (lb>ub). A correct guard never applies these.
+        lbs = _np.full(self._n, 1e9, dtype=float)
+        ubs = _np.full(self._n, -1e9, dtype=float)
+        return lbs, ubs
+
+
+@pytest.mark.smoke
+def test_node_reduce_misaligned_repr_forgoes_tightening():
+    """C-41: node cutoff-FBBT with a misaligned (short) repr must forgo the
+    tightening, not write a crossed box or falsely fathom the node."""
+    import discopt._jax.node_reduce as nr
+    import discopt._rust as _rust
+
+    m = _bilinear_model()  # 2 scalar blocks
+    lb = np.array([0.0, 0.0])
+    ub = np.array([4.0, 4.0])
+    r = MccormickLPRelaxer(m)
+    lpr = r.solve_at_node(lb, ub, want_marginals=True)
+
+    n_blocks = len(m._variables)
+    # ``_fbbt_on_node`` imports ``model_to_repr`` from ``discopt._rust`` locally,
+    # so patch it at the source module.
+    orig = _rust.model_to_repr
+
+    def _fake(model, builder):  # noqa: ARG001 - signature parity
+        return _MisalignedRepr(n_blocks)
+
+    _rust.model_to_repr = _fake
+    try:
+        res = nr.reduce_node(m, lb, ub, lpr, cutoff=-7.0, do_fbbt=True)
+    finally:
+        _rust.model_to_repr = orig
+
+    # The misaligned FBBT result is FORGONE: the box is unchanged by FBBT (DBBT
+    # may still tighten soundly), never crossed, never a false fathom.
+    assert not res.infeasible
+    assert np.all(res.lb >= lb - 1e-9)
+    assert np.all(res.ub <= ub + 1e-9)
+    assert np.all(res.lb <= res.ub + 1e-9)  # no crossed bound survived
+    # The optimum (x=4, y=0, obj -8 <= -7) is retained.
+    assert res.ub[0] >= 4.0 - 1e-6
+    assert res.lb[1] <= 0.0 + 1e-6
+
+
+@pytest.mark.smoke
+def test_root_reduce_misaligned_repr_forgoes_tightening():
+    """C-41: root cutoff-FBBT with a misaligned (short) repr must forgo the
+    tightening, not corrupt the root box or report a false infeasible."""
+    import discopt._jax.root_reduce as rr
+    import discopt._rust as _rust
+
+    m = _bilinear_model()
+    lb = np.array([0.0, 0.0])
+    ub = np.array([4.0, 4.0])
+    n_blocks = len(m._variables)
+    orig = _rust.model_to_repr
+
+    def _fake(model, builder):  # noqa: ARG001 - signature parity
+        return _MisalignedRepr(n_blocks)
+
+    _rust.model_to_repr = _fake
+    try:
+        new_lb, new_ub, n_tight, infeasible = rr._stage_fbbt_with_cutoff(
+            m, lb.copy(), ub.copy(), -8.0 + 1e-4, max_iter=5, tol=1e-8
+        )
+    finally:
+        _rust.model_to_repr = orig
+
+    # Misaligned repr -> tightening forgone: box unchanged, no false infeasible.
+    assert not infeasible
+    assert n_tight == 0
+    assert np.allclose(new_lb, lb)
+    assert np.allclose(new_ub, ub)
+    assert np.all(new_lb <= new_ub + 1e-9)

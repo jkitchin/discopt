@@ -38,6 +38,7 @@ flag-agnostic.
 
 from __future__ import annotations
 
+import logging
 import time
 from dataclasses import dataclass, field
 from typing import Optional
@@ -45,6 +46,8 @@ from typing import Optional
 import numpy as np
 
 from discopt.modeling.core import Model
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -131,7 +134,11 @@ def _stage_fbbt_with_cutoff(
                 else None
             ),
         )
-    except Exception:
+    except Exception as exc:
+        # C-41: surface, never silently swallow — a swallowed error here is the
+        # exact compounding smell behind C-40 (a misaligned map that corrupts a
+        # box, then eats the resulting IndexError). Tighten-only: keep the box.
+        logger.debug("root cutoff-FBBT skipped (build/solve failed): %s", exc)
         return lb, ub, 0, False
     finally:
         for v, (olb, oub) in zip(model._variables, saved):
@@ -140,15 +147,29 @@ def _stage_fbbt_with_cutoff(
 
     fbbt_lbs = np.asarray(fbbt_lbs, dtype=np.float64)
     fbbt_ubs = np.asarray(fbbt_ubs, dtype=np.float64)
+    # C-41: ``fbbt_lbs[bi]`` is BLOCK-indexed (one interval per ``model.variables``
+    # block) while ``lb[flat]`` is a FLAT scalar column. The map is sound ONLY when
+    # the repr returns exactly ``len(model._variables)`` intervals; a builder-mode /
+    # reformulated repr can diverge (C-40: 144 for a 145-column model), and the old
+    # ``bi >= shape[0]`` check guarded OOB, not this semantic misalignment — reading
+    # the wrong variable's bound and writing a crossed box. On a misaligned repr,
+    # forgo this *optional* tightening (a valid, looser box); mirrors solver.py:7443
+    # and solvers/_root_presolve.py:43 (CLAUDE.md §3).
+    if fbbt_lbs.shape[0] != len(model._variables) or fbbt_ubs.shape[0] != len(model._variables):
+        logger.debug(
+            "root cutoff-FBBT skipped: repr layout misaligned "
+            "(returned %d/%d intervals, n_blocks=%d)",
+            fbbt_lbs.shape[0],
+            fbbt_ubs.shape[0],
+            len(model._variables),
+        )
+        return lb, ub, 0, False
     is_int = _is_int_mask(model, n)
     n_tight = 0
     flat = 0
     infeasible = False
     for bi, v in enumerate(model._variables):
         if v.size != 1:
-            flat += v.size
-            continue
-        if bi >= fbbt_lbs.shape[0] or bi >= fbbt_ubs.shape[0]:
             flat += v.size
             continue
         new_lo = float(fbbt_lbs[bi])
