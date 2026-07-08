@@ -254,6 +254,26 @@ _AUTO_RLT_LEVEL1_MAX_VARS = 50
 # with this margin, so the convexity verdict (hence bound soundness) is never
 # borderline.
 _CONVEX_OBJ_PSD_TOL = 1e-6
+# Lazy re-separation, global-bound-stall governor (C-42 Part 2, THRU-4
+# follow-on; the relaxer-side stride net is ``_LAZY_RESEP_STRIDE`` in
+# ``mccormick_lp.py``). Active only under pool inheritance
+# (``DISCOPT_CUT_INHERIT`` with a captured root pool). All three constants are
+# GLOBAL — never tuned per instance:
+#   * ``_LAZY_RESEP_STALL_WINDOW``: node solves without any global-lower-bound
+#     improvement before re-separation is probed. Small enough to catch the
+#     tspn05-class freeze well inside its budget, large enough that the
+#     steadily-closing nvs19-class (bound moves every few nodes) never probes.
+#   * ``_LAZY_RESEP_PROBE_BUDGET``: node solves the probe may re-separate
+#     before concluding separation is bound-inert here (the nvs24 signature)
+#     and muting until the bound next moves — this caps the throughput cost of
+#     a wrong probe at ``budget / window`` of the node solves.
+#   * ``_LAZY_RESEP_GLB_EPS``: relative improvement that counts as progress;
+#     near-zero because the stall signature is an EXACTLY frozen bound.
+# Per-node alternatives (parent-bound stall, LP-gain productivity) were tried
+# and falsified by measurement — see ``docs/dev/c42-cut-inherit-fix-2026-07-07.md``.
+_LAZY_RESEP_STALL_WINDOW = 24
+_LAZY_RESEP_PROBE_BUDGET = 8
+_LAZY_RESEP_GLB_EPS = 1e-9
 # Floor on the time budget handed to the end-of-solve root-relaxation fallback
 # bound (issue #138). On a hard nonconvex minimize the B&B loop can consume the
 # entire `time_limit` and exit uncertified, leaving no time for the rigorous
@@ -5459,6 +5479,15 @@ def solve_model(
             return False, xv, float("nan")
         return True, xv, _obj
 
+    # Lazy re-separation governor state (C-42 Part 2; see the module-level
+    # ``_LAZY_RESEP_*`` constants). Touched only under active pool inheritance.
+    _lazy_glb_ref: Optional[float] = None
+    _lazy_armed = False
+    _lazy_stagnant_solves = 0
+    _lazy_probe_spent = 0
+    _lazy_mode = "idle"
+    _lazy_resep_fires = 0
+
     # Set when the interactive debugger's `quit` breaks the search loop: a
     # user-interrupted exit proves nothing, so the status decision below must
     # not fall through to a certified "infeasible"/"optimal".
@@ -5491,6 +5520,74 @@ def solve_model(
         n_batch = len(batch_ids)
         if n_batch == 0:
             break
+
+        # C-42 Part 2 — lazy re-separation, global-bound-stall governor. Under
+        # pool inheritance the square/PSD point separators are skipped at
+        # nodes; on the tspn05 class that skip is load-bearing for closure
+        # (#552: the tree's bound freezes and the certificate is lost at
+        # budget). The governor watches the tree's GLOBAL lower bound:
+        #   * ``idle``    — the bound improved within the last
+        #     ``_LAZY_RESEP_STALL_WINDOW`` node solves: keep the cheap
+        #     pool-only path (this is what preserves #551's 2–5× throughput
+        #     win on nvs19/nvs24);
+        #   * ``probing`` — the bound had been moving (the governor is ARMED
+        #     by a genuine in-tree improvement) and then stagnated for a full
+        #     window: re-enable the full separation pass for up to
+        #     ``_LAZY_RESEP_PROBE_BUDGET`` node solves;
+        #   * ``muted``   — the probe did not move the bound either (the
+        #     nvs24 signature: separation is measured bound-inert there):
+        #     return to pool-only until the bound next improves, which resets
+        #     the cycle (self-healing on phase changes).
+        # An improvement while ``probing`` REFRESHES the probe (separation is
+        # demonstrably moving the bound right now, so keep it engaged — this
+        # is what lets tspn05 close instead of rationing separation to an
+        # 8-in-32 duty cycle); a probe still exits after a full budget of
+        # improvement-free separated solves, which caps the cost of a
+        # misjudged lock-in. An improvement in any other mode resets to
+        # ``idle``. Enabling separation only ever TIGHTENS a node's relaxation
+        # (every cut is valid), so the governor is performance-only —
+        # soundness is unaffected in every state. Evaluated only under active
+        # pool inheritance: the default path reads no extra state and is
+        # byte-identical.
+        _lazy_probing = False
+        if _cut_inherit and _root_cut_pool is not None:
+            try:
+                _glb_now = float(tree.stats()["global_lower_bound"])
+            except Exception:  # pragma: no cover - defensive
+                _glb_now = -np.inf
+            if np.isfinite(_glb_now) and (
+                _lazy_glb_ref is None
+                or _glb_now > _lazy_glb_ref + _LAZY_RESEP_GLB_EPS * max(1.0, abs(_lazy_glb_ref))
+            ):
+                if _lazy_glb_ref is not None:
+                    # A genuine in-tree improvement (not the first finite
+                    # reference) ARMS the governor: a stall is only a
+                    # meaningful signal once the bound has demonstrably been
+                    # moving. A bound that has never moved since the root is
+                    # the pool-at-fixed-point signature (nvs24: the root pool
+                    # is separated to convergence and per-node re-separation
+                    # is measured bound-inert), where a probe only burns the
+                    # most expensive separation wall in the corpus; the
+                    # stride net remains the unconditional prober there.
+                    _lazy_armed = True
+                _lazy_glb_ref = _glb_now
+                _lazy_stagnant_solves = 0
+                _lazy_probe_spent = 0
+                if _lazy_mode != "probing":
+                    _lazy_mode = "idle"
+            if (
+                _lazy_mode == "idle"
+                and _lazy_armed
+                and _lazy_stagnant_solves >= _LAZY_RESEP_STALL_WINDOW
+            ):
+                _lazy_mode = "probing"
+            elif _lazy_mode == "probing" and _lazy_probe_spent >= _LAZY_RESEP_PROBE_BUDGET:
+                _lazy_mode = "muted"
+            _lazy_probing = _lazy_mode == "probing"
+            _lazy_stagnant_solves += n_batch
+            if _lazy_probing:
+                _lazy_probe_spent += n_batch
+                _lazy_resep_fires += n_batch
 
         # Interactive debugger: nodes selected — boxes/ids now available.
         if _debug.fire(
@@ -5814,8 +5911,11 @@ def solve_model(
                             want_marginals=_node_reduce_enabled,
                             # THRU-4: with the root pool inherited, skip the per-node
                             # square/PSD point-separation loops (sound: their cut
-                            # families are box-independent and already in the pool).
-                            skip_pool_separators=(_cut_inherit and _root_cut_pool is not None),
+                            # families are box-independent and already in the pool)
+                            # — unless the global-stall governor is probing (C-42).
+                            skip_pool_separators=(
+                                _cut_inherit and _root_cut_pool is not None and not _lazy_probing
+                            ),
                         )
                     except Exception as e:
                         logger.debug("McCormick LP failed at node %d: %s", i, e)
@@ -6126,8 +6226,11 @@ def solve_model(
                             want_marginals=_node_reduce_enabled,
                             # THRU-4: with the root pool inherited, skip the per-node
                             # square/PSD point-separation loops (sound: their cut
-                            # families are box-independent and already in the pool).
-                            skip_pool_separators=(_cut_inherit and _root_cut_pool is not None),
+                            # families are box-independent and already in the pool)
+                            # — unless the global-stall governor is probing (C-42).
+                            skip_pool_separators=(
+                                _cut_inherit and _root_cut_pool is not None and not _lazy_probing
+                            ),
                         )
                     except Exception as e:
                         logger.debug("McCormick LP failed at node %d: %s", int(batch_ids[i]), e)
@@ -7974,6 +8077,10 @@ def solve_model(
         for _pfam, _pcount in _mc_lp_relaxer._pool_stats.items():
             if _pcount > 0:
                 _solver_stats[f"pool/{_pfam}"] = float(_pcount)
+    # C-42 Part 2: node solves the global-bound-stall governor re-separated
+    # (driver-side; the relaxer's ``lazy_reseparations`` counts the stride net).
+    if _lazy_resep_fires > 0:
+        _solver_stats["pool/stall_reseparations"] = float(_lazy_resep_fires)
 
     return SolveResult(
         status=status,
