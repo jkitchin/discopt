@@ -230,13 +230,16 @@ def test_nvs22_cut_inherit_no_false_optimal():
     cover this: it fires only on the *no-certified-verdict* branch of the cold path,
     but here the pool-augmented solve SUCCEEDS with a (false) ``infeasible``.
 
-    The fix re-verifies every pool-augmented ``infeasible`` against a pool-free
-    solve (``solve_at_node`` in ``mccormick_lp.py``): the fathom is kept only if the
-    pool-free relaxation is also infeasible; otherwise the node is recovered on its
-    valid pool-free bound. So flag-ON is now sound — and in fact certifies the
-    oracle optimum. This test was a strict-xfail (it went XPASS the moment the fix
-    landed); it is now a plain passing regression. See
-    ``docs/dev/c43-nvs22-fix-graduate-2026-07-08.md``.
+    C-43 shipped a runtime *re-verify* guard (drop the pool and re-solve pool-free
+    when a pool-augmented ``infeasible`` is not also pool-free infeasible), which
+    made nvs22 sound but only by *catching* the false fathoms at runtime
+    (``pool/dropped_nodes`` fired ~21×). C-44 (#567) fixes the invalidity at the
+    SOURCE: the pool row is remapped from its root column identities onto each
+    node's re-lifted layout (``column_identities`` / ``_remap_pool_rows`` in
+    ``mccormick_lp.py``), so the row constrains the correct lifted variables and no
+    false fathom occurs. The re-verify is now INERT on nvs22
+    (``pool/dropped_nodes == 0``) — kept only as defense-in-depth. See
+    ``docs/dev/c44-column-identity-inherit-2026-07-08.md``.
     """
     nl = _CORPUS / "nvs22.nl"
     if not nl.exists():
@@ -246,25 +249,28 @@ def test_nvs22_cut_inherit_no_false_optimal():
     assert ref.objective == pytest.approx(6.0582200, rel=5e-3), (
         f"default-path nvs22 regressed: {ref.objective}"
     )
-    # Flag-ON must be SOUND. The hard invariant (C-43): no false certificate — the
-    # dual bound is a valid lower bound (<= oracle + tol), and if the search
+    # Flag-ON must be SOUND. The hard invariant (C-43/C-44): no false certificate —
+    # the dual bound is a valid lower bound (<= oracle + tol), and if the search
     # certifies, the objective is the oracle optimum (never the old 33.55).
     res = from_nl(str(nl)).solve(
         time_limit=25, gap_tolerance=1e-4, tuning=SolverTuning(cut_inherit=True)
     )
     assert res.bound is None or res.bound <= 6.0582200 + 1e-3, (
         f"nvs22 flag-ON dual bound {res.bound} crossed the oracle 6.0582 "
-        "(false bound — the C-43 pool-infeasible re-verify regressed)"
+        "(false bound — column-identity remap regressed)"
     )
-    if str(res.status) == "optimal":
-        assert res.objective == pytest.approx(6.0582200, rel=5e-3), (
-            f"nvs22 flag-ON FALSE-OPTIMAL: certified {res.objective} vs oracle 6.0582"
-        )
-    # The re-verify recovered at least one falsely-fathomed node (the mechanism
-    # under test); if it never fired, the guard is inert and the test is vacuous.
+    assert str(res.status) == "optimal", (
+        f"nvs22 flag-ON no longer certifies (C-44 should certify like default): {res.status}"
+    )
+    assert res.objective == pytest.approx(6.0582200, rel=5e-3), (
+        f"nvs22 flag-ON FALSE-OPTIMAL: certified {res.objective} vs oracle 6.0582"
+    )
+    # C-44: the source fix means the runtime re-verify is now INERT — the pool rows
+    # are valid on every sub-box after remap, so no node is ever falsely fathomed.
     stats = res.solver_stats or {}
-    assert stats.get("pool/dropped_nodes", 0) >= 1, (
-        f"C-43 pool-infeasible re-verify never fired on nvs22: {stats}"
+    assert stats.get("pool/dropped_nodes", 0) == 0, (
+        f"C-44: the pool-infeasible re-verify should be inert on nvs22 (source fix "
+        f"removes the false fathoms), but it fired: {stats}"
     )
 
 

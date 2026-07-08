@@ -117,7 +117,9 @@ def _root_pool_and_varmap():
     res = relaxer.solve_at_node(lb, ub, time_limit=30.0, out_cuts=chunks)
     assert res.status == "optimal", f"root solve failed: {res.status}"
     assert chunks, "root separation captured no cut pool"
-    A_pool, b_pool = chunks[0]
+    # C-44: solve_at_node now captures each chunk as (A, b, col_idents); the pool
+    # rows / rhs are the first two elements (identities are the remap tag).
+    A_pool, b_pool = chunks[0][0], chunks[0][1]
     A_pool = np.asarray(
         A_pool.todense() if hasattr(A_pool, "todense") else A_pool, dtype=np.float64
     )
