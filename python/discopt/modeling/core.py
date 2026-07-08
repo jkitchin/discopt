@@ -1428,6 +1428,10 @@ class SolveResult:
     subnlp_feasible: int = 0
     subnlp_incumbent_updates: int = 0
 
+    # Structured MIP-NLP decomposition trace. Populated by solver="mip-nlp"
+    # paths when iteration/provenance data is available.
+    mip_nlp_trace: Optional[dict[str, object]] = None
+
     # Examiner-style validation report (populated if validate=True).
     validation_report: Optional[object] = None
 
@@ -3249,10 +3253,50 @@ class Model:
             back to another backend. Pass Gurobi parameters through
             ``gurobi_options={...}``.
             Use ``solver="mip-nlp"`` to select the MIP-NLP decomposition
-            family. Current implemented ``mip_nlp_method`` values are ``"oa"``
-            and ``"ecp"``; ``"goa"``, ``"roa"``, ``"fp"``, and
-            ``"lp_nlp_bb"`` are reserved until their dedicated implementations
-            land.
+            family. Current implemented ``mip_nlp_method`` values are ``"oa"``,
+            ``"ecp"``, ``"fp"``, ``"goa"``, and ``"lp_nlp_bb"``; ``"roa"``
+            is reserved until its dedicated implementation lands. The
+            LP/NLP-BB method uses single-tree lazy OA cuts and currently
+            requires ``milp_solver="gurobi"``. Top-level OA/ECP options such
+            as ``equality_relaxation``,
+            ``ecp_mode``, ``feasibility_cuts``, ``heuristic_nonconvex``,
+            ``add_slack``, ``max_slack``, ``oa_penalty_factor``,
+            ``add_no_good_cuts``, ``integer_to_binary``, ``feasibility_norm``,
+            ``add_regularization``, ``level_coef``, ``stalling_limit``,
+            ``cycling_check``, ``solution_pool``, ``num_solution_iteration``,
+            and ``init_strategy``
+            take precedence over duplicate keys in ``mip_nlp_options``.
+            ``solution_pool`` currently requires ``milp_solver="gurobi"``.
+            Experimental SHOT-parity controls are accepted only with
+            ``mip_nlp_profile="shot"`` and include ``tree_strategy``,
+            ``cut_strategy``, ``objective_epigraph``, ``anti_epigraph``,
+            ``nonlinear_partitioning``, ``quadratic_partitioning``,
+            ``absolute_value_auxiliaries``, ``monomial_extraction``,
+            ``signomial_extraction``, ``integer_bilinear_strategy``,
+            ``integer_bilinear_max_bits``, ``quadratic_extraction``,
+            ``direct_quadratic_routing``, ``rootsearch_strategy``,
+            ``fixed_nlp_strategy``, ``solution_pool_capacity``,
+            ``hyperplane_max_per_iter``, ``hyperplane_selection_factor``,
+            ``relaxation_phase``, ``mip_solution_limit_strategy``,
+            ``convex_bounding``, ``master_repair``, and ``reduction_cuts``.
+            MIP-NLP runs attach a structured ``result.mip_nlp_trace`` payload.
+            For ``mip_nlp_method="goa"``,
+            convexity-certified MINLPs use OA's valid master bounds and other
+            models use AMP/global relaxations. AMP options such as ``rel_gap``,
+            ``abs_tol``, ``max_iter``, ``n_init_partitions``,
+            ``partition_method``, ``milp_time_limit``, ``milp_gap_tolerance``,
+            ``presolve_bt``, and ``convhull_formulation`` may also be passed as
+            top-level aliases. AMP-only options apply only on the nonconvex AMP
+            path and are ignored with a warning when GOA automatically hands a
+            convexity-certified model to OA.
+            Supported ``add_regularization`` values are
+            ``"level_L1"``, ``"level_L2"``, ``"level_L_infinity"``,
+            ``"grad_lag"``, ``"hess_lag"``, ``"hess_only_lag"``, and
+            ``"sqp_lag"``. Supported initialization strategies are ``"rNLP"``,
+            ``"initial_binary"``, ``"max_binary"``, and ``"fp"``.
+            The ``mip_nlp_method`` selector determines the
+            effective ``ecp_mode`` and cannot be overridden by
+            ``mip_nlp_options``.
         validate : bool, default False
             If True, run Examiner-style KKT validation on the returned
             point and attach the :class:`~discopt.validation.ExaminerReport`

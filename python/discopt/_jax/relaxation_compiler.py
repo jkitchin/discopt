@@ -565,20 +565,27 @@ def _compile_relax_node(
                     return fn
 
             # Trilinear pattern detection: x*y*z over 3 distinct scalar
-            # Variables. Routes to permutation-symmetric nested McCormick
-            # (relax_trilinear_exact) which is strictly tighter than the
-            # default single-ordering bilinear chain. Validity requires
-            # finite box bounds at runtime; otherwise the dispatch falls
-            # through to the bilinear path via `jnp.where`.
+            # Variables. The default deliberately stays on the legacy
+            # nested-bilinear recursion; the tighter bound-changing hull paths
+            # are opt-in via DISCOPT_TRILINEAR.
             #
-            # Opt-out: setting DISCOPT_TRILINEAR=nested in the environment
-            # skips this dispatch and uses the original nested-bilinear
-            # path. This is for debug / parity testing only and is not a
-            # public API.
-            _trilinear_disabled = _tuning().trilinear_nested
-            tri_offsets = None if _trilinear_disabled else _try_extract_trilinear_chain(expr, model)
+            # DISCOPT_TRILINEAR=meyer selects Meyer-Floudas/Rikun hull facets.
+            # DISCOPT_TRILINEAR=exact selects the historical permutation-
+            # symmetric nested McCormick path.
+            tuning = _tuning()
+            tri_offsets = (
+                _try_extract_trilinear_chain(expr, model)
+                if (tuning.trilinear_meyer or tuning.trilinear_exact)
+                and not tuning.trilinear_nested
+                else None
+            )
             if tri_offsets is not None:
-                from discopt._jax.envelopes import relax_trilinear_exact
+                if tuning.trilinear_exact:
+                    from discopt._jax.envelopes import relax_trilinear_exact as _relax_trilinear
+                else:
+                    from discopt._jax.envelopes import (
+                        relax_trilinear_meyer_floudas as _relax_trilinear,
+                    )
 
                 _ti, _tj, _tk = tri_offsets
 
@@ -594,7 +601,7 @@ def _compile_relax_node(
                     xv = 0.5 * (x_lb_ + x_ub_)
                     yv = 0.5 * (y_lb_ + y_ub_)
                     zv = 0.5 * (z_lb_ + z_ub_)
-                    return relax_trilinear_exact(
+                    return _relax_trilinear(
                         xv,
                         yv,
                         zv,

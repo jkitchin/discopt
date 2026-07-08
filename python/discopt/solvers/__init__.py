@@ -13,6 +13,7 @@ class SolveStatus(Enum):
     UNBOUNDED = "unbounded"
     ITERATION_LIMIT = "iteration_limit"
     TIME_LIMIT = "time_limit"
+    CUTOFF = "cutoff"
     ERROR = "error"
 
 
@@ -72,6 +73,8 @@ class MILPResult:
     MUST read ``bound``, never ``objective`` — using the incumbent as a lower
     bound can inflate the global LB past the true optimum and falsely certify
     optimality. ``bound`` is ``None`` when no valid dual bound is available.
+    ``solution_pool`` and ``solution_pool_objectives`` are populated only by
+    backends that explicitly expose multiple incumbent solutions.
     """
 
     status: SolveStatus
@@ -82,6 +85,9 @@ class MILPResult:
     node_count: int = 0
     iterations: int = 0
     wall_time: float = 0.0
+    solution_pool: Optional[list[np.ndarray]] = None
+    solution_pool_objectives: Optional[list[float]] = None
+    callback_stats: Optional[dict[str, object]] = None
 
 
 @dataclass

@@ -11,12 +11,16 @@ and are compatible with jax.jit, jax.grad, and jax.vmap.
 
 from __future__ import annotations
 
+from itertools import combinations
+
 import jax.numpy as jnp
 
 from discopt._jax.mccormick import (
     _secant,
     relax_bilinear,
 )
+
+_TRILINEAR_FACET_CANDIDATES = jnp.array(tuple(combinations(range(8), 4)), dtype=jnp.int32)
 
 
 def relax_trilinear(x, y, z, x_lb, x_ub, y_lb, y_ub, z_lb, z_ub):
@@ -116,6 +120,55 @@ def relax_trilinear_exact(x, y, z, x_lb, x_ub, y_lb, y_ub, z_lb, z_ub):
     cv = jnp.maximum(jnp.maximum(cv1, cv2), cv3)
     cc = jnp.minimum(jnp.minimum(cc1, cc2), cc3)
     return cv, cc
+
+
+def relax_trilinear_meyer_floudas(x, y, z, x_lb, x_ub, y_lb, y_ub, z_lb, z_ub):
+    """Meyer-Floudas/Rikun convex-hull relaxation for ``x * y * z``.
+
+    The hull of the trilinear graph over a box is represented by affine
+    facets through subsets of the eight box vertices. This implementation
+    enumerates the candidate four-vertex facets in pure JAX, keeps the global
+    lower and upper supporting planes, and evaluates the tightest bounds at
+    ``(x, y, z)``. The result is merged with the best-of-three nested
+    McCormick envelope, preserving the historical pointwise tightening used by
+    this module while adding the missing hull facets.
+    """
+    verts = jnp.stack(
+        [
+            jnp.stack([x_lb, y_lb, z_lb]),
+            jnp.stack([x_lb, y_lb, z_ub]),
+            jnp.stack([x_lb, y_ub, z_lb]),
+            jnp.stack([x_lb, y_ub, z_ub]),
+            jnp.stack([x_ub, y_lb, z_lb]),
+            jnp.stack([x_ub, y_lb, z_ub]),
+            jnp.stack([x_ub, y_ub, z_lb]),
+            jnp.stack([x_ub, y_ub, z_ub]),
+        ]
+    )
+    values = verts[:, 0] * verts[:, 1] * verts[:, 2]
+    ones = jnp.ones((verts.shape[0], 1), dtype=verts.dtype)
+    aug_verts = jnp.concatenate([verts, ones], axis=1)
+
+    a = aug_verts[_TRILINEAR_FACET_CANDIDATES]
+    b = values[_TRILINEAR_FACET_CANDIDATES]
+    det = jnp.linalg.det(a)
+    nonsingular = jnp.abs(det) > 1e-12
+    safe_a = jnp.where(nonsingular[:, None, None], a, jnp.eye(4, dtype=verts.dtype))
+    safe_b = jnp.where(nonsingular[:, None], b, jnp.zeros_like(b))
+    coeffs = jnp.linalg.solve(safe_a, safe_b[..., None]).squeeze(-1)
+
+    residual = aug_verts @ coeffs.T - values[:, None]
+    tol = 1e-9 * (1.0 + jnp.max(jnp.abs(values)))
+    lower_facet = nonsingular & jnp.all(residual <= tol, axis=0)
+    upper_facet = nonsingular & jnp.all(residual >= -tol, axis=0)
+
+    point = jnp.stack([x, y, z, jnp.array(1.0, dtype=verts.dtype)])
+    plane_values = coeffs @ point
+    hull_cv = jnp.max(jnp.where(lower_facet, plane_values, -jnp.inf))
+    hull_cc = jnp.min(jnp.where(upper_facet, plane_values, jnp.inf))
+
+    nested_cv, nested_cc = relax_trilinear_exact(x, y, z, x_lb, x_ub, y_lb, y_ub, z_lb, z_ub)
+    return jnp.maximum(hull_cv, nested_cv), jnp.minimum(hull_cc, nested_cc)
 
 
 def relax_fractional(x, y, x_lb, x_ub, y_lb, y_ub):

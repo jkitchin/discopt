@@ -97,6 +97,27 @@ class TestConvexExpressions:
         expr = dm.exp(2.0 * x) * (y ** (-4.0))
         assert classify_expr(expr, m) == Curvature.CONVEX
 
+    def test_exp_affine_times_positive_power_not_classified_convex(self):
+        m = Model("test")
+        x = m.continuous("x", lb=-5, ub=5)
+        y = m.continuous("y", lb=1, ub=10)
+        expr = dm.exp(2.0 * x) * (y**2.0)
+        assert classify_expr(expr, m) != Curvature.CONVEX
+
+    def test_exp_affine_times_power_without_positive_base_not_classified_convex(self):
+        m = Model("test")
+        x = m.continuous("x", lb=-5, ub=5)
+        y = m.continuous("y", lb=-1, ub=10)
+        expr = dm.exp(2.0 * x) * (y ** (-4.0))
+        assert classify_expr(expr, m) != Curvature.CONVEX
+
+    def test_exp_affine_times_nonaffine_reciprocal_not_classified_convex(self):
+        m = Model("test")
+        x = m.continuous("x", lb=-5, ub=5)
+        y = m.continuous("y", lb=-2, ub=2)
+        expr = dm.exp(2.0 * x) * ((y**2 + 1.0) ** (-1.0))
+        assert classify_expr(expr, m) != Curvature.CONVEX
+
     def test_exp_of_convex(self):
         """exp(convex) = convex because exp is convex & nondecreasing."""
         m = Model("test")
@@ -246,6 +267,57 @@ class TestUnknownExpressions:
         x = m.continuous("x", lb=0, ub=10)
         y = m.continuous("y", lb=1, ub=10)
         assert classify_expr(x / y, m) == Curvature.UNKNOWN
+
+    @pytest.mark.parametrize(
+        "expr_fn",
+        [
+            pytest.param(
+                lambda m: (lambda x: x * (x - 1.0))(m.continuous("x", lb=0.0, ub=2.0)),
+                id="product-affine-self-shift",
+            ),
+            pytest.param(
+                lambda m: (lambda x: (x**2 - 1.0) ** 2)(m.continuous("x", lb=-2.0, ub=2.0)),
+                id="quartic-double-well",
+            ),
+            pytest.param(
+                lambda m: (lambda x: (x - 1.0) ** 3)(m.continuous("x", lb=0.0, ub=2.0)),
+                id="shifted-cubic-inflection",
+            ),
+            pytest.param(
+                lambda m: dm.sigmoid(m.continuous("x", lb=-3.0, ub=3.0)),
+                id="sigmoid-mixed-curvature",
+            ),
+            pytest.param(
+                lambda m: (
+                    (m.continuous("x", lb=-2.0, ub=2.0) ** 2) / m.continuous("y", lb=0.0, ub=2.0)
+                ),
+                id="quadratic-over-zero-crossing-denominator",
+            ),
+            pytest.param(
+                lambda m: (lambda x, y: y * dm.exp(x / y))(
+                    m.continuous("x", lb=-2.0, ub=2.0),
+                    m.continuous("y", lb=0.0, ub=2.0),
+                ),
+                id="exp-perspective-zero-crossing-denominator",
+            ),
+            pytest.param(
+                lambda m: m.continuous("x", lb=-2.0, ub=-0.5) ** -3,
+                id="negative-base-negative-odd-power",
+            ),
+            pytest.param(
+                lambda m: dm.log(m.continuous("x", lb=-1.0, ub=2.0)),
+                id="log-zero-crossing-domain",
+            ),
+            pytest.param(
+                lambda m: dm.sqrt(m.continuous("x", lb=-1.0, ub=2.0)),
+                id="sqrt-negative-crossing-domain",
+            ),
+        ],
+    )
+    def test_false_positive_regressions_stay_unknown(self, expr_fn):
+        """Classifier hardening lives here, even when MIP-NLP consumes it."""
+        m = Model("test")
+        assert classify_expr(expr_fn(m), m) == Curvature.UNKNOWN
 
 
 class TestConstraintConvexity:

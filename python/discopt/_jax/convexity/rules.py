@@ -715,12 +715,14 @@ def _classify_power(
             # x^(-k) = 1/x^k: convex on (0, inf).
             return ExprInfo(Curvature.CONVEX, Sign.POS)
         if base.sign == Sign.NEG and base.curvature == Curvature.AFFINE:
-            # x^(-k) on x<0: sign alternates with parity of k, so does
-            # curvature. Even k → positive, convex. Odd k → negative,
-            # concave.
+            # Keep only the direct reciprocal verdict here. Higher odd negative
+            # powers on negative domains are left to the certificate path so the
+            # syntactic classifier does not over-certify sign-sensitive powers.
+            if k == 1:
+                return ExprInfo(Curvature.CONCAVE, Sign.NEG)
             if k % 2 == 0:
                 return ExprInfo(Curvature.CONVEX, Sign.POS)
-            return ExprInfo(Curvature.CONCAVE, Sign.NEG)
+            return ExprInfo(Curvature.UNKNOWN, Sign.NEG)
         return ExprInfo(Curvature.UNKNOWN, Sign.UNKNOWN)
 
     # Fractional 0 < n < 1 on nonneg domain: concave; result ≥ 0.

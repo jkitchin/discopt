@@ -65,6 +65,8 @@ def serialize_result(r: SolveResult) -> dict:
         val = _jsonify_arrays(getattr(r, name, None))
         if val is not None:
             out[name] = val
+    if r.mip_nlp_trace is not None:
+        out["mip_nlp_trace"] = r.mip_nlp_trace
     expl = getattr(r, "_explanation", None)
     if expl:
         out["explanation"] = str(expl)
@@ -80,6 +82,8 @@ def deserialize_result(d: dict) -> SolveResult:
     for name in _DICT_ARRAY_FIELDS:
         if d.get(name) is not None:
             kwargs[name] = {k: np.asarray(v) for k, v in d[name].items()}
+    if d.get("mip_nlp_trace") is not None:
+        kwargs["mip_nlp_trace"] = d["mip_nlp_trace"]
     r = SolveResult(**kwargs)
     if d.get("explanation"):
         r._explanation = d["explanation"]

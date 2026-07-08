@@ -2648,7 +2648,56 @@ _BACKEND_PASSTHROUGH_KWARGS: frozenset[str] = frozenset(
         "equality_relaxation",
         "ecp_mode",
         "feasibility_cuts",
+        "init_strategy",
+        "heuristic_nonconvex",
+        "add_slack",
+        "max_slack",
+        "oa_penalty_factor",
+        "OA_penalty_factor",
+        "add_no_good_cuts",
+        "integer_to_binary",
+        "feasibility_norm",
+        "add_regularization",
+        "level_coef",
+        "stalling_limit",
+        "cycling_check",
         "milp_solver",
+        "solution_pool",
+        "num_solution_iteration",
+        "mip_nlp_profile",
+        "tree_strategy",
+        "cut_strategy",
+        "objective_epigraph",
+        "anti_epigraph",
+        "nonlinear_partitioning",
+        "quadratic_partitioning",
+        "absolute_value_auxiliaries",
+        "monomial_extraction",
+        "signomial_extraction",
+        "integer_bilinear_strategy",
+        "integer_bilinear_max_bits",
+        "quadratic_extraction",
+        "direct_quadratic_routing",
+        "rootsearch_strategy",
+        "fixed_nlp_strategy",
+        "solution_pool_capacity",
+        "hyperplane_max_per_iter",
+        "hyperplane_selection_factor",
+        "relaxation_phase",
+        "mip_solution_limit_strategy",
+        "convex_bounding",
+        "master_repair",
+        "reduction_cuts",
+        "fp_iteration_limit",
+        "fp_cutoffdecr",
+        "fp_projcuts",
+        "fp_transfercuts",
+        "fp_projzerotol",
+        "fp_mipgap",
+        "fp_discrete_only",
+        "fp_main_norm",
+        "fp_norm_constraint",
+        "fp_norm_constraint_coef",
         # AMP backend option keys (see ``amp_option_keys`` in solve_model)
         "rel_gap",
         "abs_tol",
@@ -2883,7 +2932,7 @@ def solve_model(
         AMP algorithm with Gurobi as the MILP-master subsolver, use
         ``solver="amp", milp_solver="gurobi"``.
         Use ``"mip-nlp"`` to dispatch to the MIP-NLP decomposition family
-        (OA/ECP now; GOA/ROA/FP/LP-NLP-BB are reserved method selectors).
+        (OA/ECP/FP/GOA/LP-NLP-BB now; ROA is a reserved method selector).
         Use ``"gp"`` to dispatch to the geometric-programming fast path:
         the model is checked for GP structure (posynomial/monomial
         objective and constraints over strictly-positive continuous
@@ -2911,12 +2960,52 @@ def solve_model(
         ``"simplex"``, or ``"gurobi"`` (HiGHS was removed, issue #356).
     solver="mip-nlp" options
         The MIP-NLP backend accepts ``mip_nlp_method`` and
-        ``mip_nlp_options``. Current implemented methods are ``"oa"`` and
-        ``"ecp"``; ``"goa"``, ``"roa"``, ``"fp"``, and ``"lp_nlp_bb"`` raise
-        ``NotImplementedError`` until their dedicated implementations land.
+        ``mip_nlp_options``. Current implemented methods are ``"oa"``,
+        ``"ecp"``, ``"fp"``, ``"goa"``, and ``"lp_nlp_bb"``; ``"roa"`` raises
+        ``NotImplementedError`` until its dedicated implementation lands.
         Existing OA options ``equality_relaxation``, ``ecp_mode``,
-        ``feasibility_cuts``, and ``milp_solver`` may be passed as top-level
-        aliases.
+        ``feasibility_cuts``, ``heuristic_nonconvex``, ``add_slack``,
+        ``max_slack``, ``oa_penalty_factor``, ``add_no_good_cuts``,
+        ``integer_to_binary``, ``feasibility_norm``, ``add_regularization``,
+        ``level_coef``, ``stalling_limit``, ``cycling_check``,
+        ``solution_pool``, ``num_solution_iteration``, and ``milp_solver``
+        plus initialization option ``init_strategy`` may be passed as top-level
+        aliases and take precedence over duplicate keys in ``mip_nlp_options``.
+        ``solution_pool``
+        currently requires ``milp_solver="gurobi"``. For
+        ``mip_nlp_method="lp_nlp_bb"``, ``milp_solver="gurobi"`` is also
+        required because the single-tree LP/NLP branch-and-bound variant uses
+        lazy master callbacks.
+        Experimental SHOT-parity controls are accepted only with
+        ``mip_nlp_profile="shot"`` and include ``tree_strategy``,
+        ``cut_strategy``, ``objective_epigraph``, ``anti_epigraph``,
+        ``nonlinear_partitioning``, ``quadratic_partitioning``,
+        ``absolute_value_auxiliaries``, ``monomial_extraction``,
+        ``signomial_extraction``, ``integer_bilinear_strategy``,
+        ``integer_bilinear_max_bits``, ``quadratic_extraction``,
+        ``direct_quadratic_routing``, ``rootsearch_strategy``,
+        ``fixed_nlp_strategy``, ``solution_pool_capacity``,
+        ``hyperplane_max_per_iter``, ``hyperplane_selection_factor``,
+        ``relaxation_phase``, ``mip_solution_limit_strategy``,
+        ``convex_bounding``, ``master_repair``, and ``reduction_cuts``.
+        MIP-NLP runs attach a structured ``result.mip_nlp_trace`` payload.
+        For ``mip_nlp_method="goa"``, convexity-certified MINLPs use OA's
+        valid master bounds and other models use AMP/global relaxations.
+        AMP options such as ``rel_gap``, ``abs_tol``, ``max_iter``,
+        ``n_init_partitions``, ``partition_method``, ``milp_time_limit``,
+        ``milp_gap_tolerance``, ``presolve_bt``, and
+        ``convhull_formulation`` may also be passed as top-level aliases;
+        AMP-only options apply only on the nonconvex AMP path and are ignored
+        with a warning when GOA automatically hands a convexity-certified model
+        to OA.
+        Supported ``add_regularization`` values are ``"level_L1"``,
+        ``"level_L2"``, ``"level_L_infinity"``, ``"grad_lag"``,
+        ``"hess_lag"``, ``"hess_only_lag"``, and ``"sqp_lag"``.
+        Supported ``init_strategy`` values are ``"rNLP"``,
+        ``"initial_binary"``, ``"max_binary"``, and ``"fp"``. The
+        ``mip_nlp_method`` selector determines the effective ``ecp_mode`` and
+        cannot be overridden by ``mip_nlp_options``; a conflicting top-level
+        ``ecp_mode`` and explicit ``mip_nlp_method`` raises ``ValueError``.
 
     Returns
     -------
@@ -3107,15 +3196,57 @@ def solve_model(
         import warnings
 
         from discopt.solvers.mip_nlp import solve_mip_nlp
+        from discopt.solvers.mip_nlp_options import (
+            FP_OPTION_KEYS,
+            GOA_OPTION_KEYS,
+            MIP_NLP_PROFILE_OPTION_KEYS,
+            SHOT_OPTION_KEYS,
+        )
 
-        mip_nlp_method = kwargs.pop("mip_nlp_method", "oa")
+        mip_nlp_method = kwargs.pop("mip_nlp_method", None)
         mip_nlp_options = kwargs.pop("mip_nlp_options", None)
         mip_nlp_kwargs: dict[str, Any] = {}
-        for key in ("equality_relaxation", "ecp_mode", "feasibility_cuts", "milp_solver"):
+        for key in (
+            "equality_relaxation",
+            "ecp_mode",
+            "feasibility_cuts",
+            "init_strategy",
+            "heuristic_nonconvex",
+            "add_slack",
+            "max_slack",
+            "oa_penalty_factor",
+            "OA_penalty_factor",
+            "add_no_good_cuts",
+            "integer_to_binary",
+            "feasibility_norm",
+            "add_regularization",
+            "level_coef",
+            "stalling_limit",
+            "cycling_check",
+            "milp_solver",
+            "solution_pool",
+            "num_solution_iteration",
+            *MIP_NLP_PROFILE_OPTION_KEYS,
+            *SHOT_OPTION_KEYS,
+            *FP_OPTION_KEYS,
+        ):
             if key in kwargs:
                 mip_nlp_kwargs[key] = kwargs.pop(key)
+        if mip_nlp_method is None:
+            mip_nlp_method = "ecp" if bool(mip_nlp_kwargs.get("ecp_mode", False)) else "oa"
+
+        mip_nlp_method_key = (
+            mip_nlp_method.strip().lower().replace("-", "_")
+            if isinstance(mip_nlp_method, str)
+            else mip_nlp_method
+        )
+        if mip_nlp_method_key == "goa":
+            for key in sorted(GOA_OPTION_KEYS):
+                if key in kwargs:
+                    mip_nlp_kwargs[key] = kwargs.pop(key)
 
         gdp_methods = {"big-m", "hull", "mbigm", "auto"}
+        native_gdp_methods = {"loa"}
         if gdp_method == "oa":
             warnings.warn(
                 "gdp_method='oa' is deprecated for selecting MINLP OA. Use "
@@ -3127,13 +3258,18 @@ def solve_model(
             resolved_gdp_method = "big-m"
         elif gdp_method in gdp_methods:
             resolved_gdp_method = gdp_method
-        else:
-            warnings.warn(
-                f"solver='mip-nlp' does not use gdp_method={gdp_method!r} as a "
-                "MINLP algorithm selector; using 'big-m' for GDP reformulation.",
-                stacklevel=2,
+        elif gdp_method in native_gdp_methods:
+            allowed = ", ".join(sorted(gdp_methods))
+            raise ValueError(
+                f"gdp_method={gdp_method!r} conflicts with solver='mip-nlp'. "
+                "Use mip_nlp_method to select the MIP-NLP algorithm and reserve "
+                f"gdp_method for GDP reformulation methods: {allowed}."
             )
-            resolved_gdp_method = "big-m"
+        else:
+            allowed = ", ".join(sorted(gdp_methods | {"oa"}))
+            raise ValueError(
+                f"Unknown gdp_method={gdp_method!r} for solver='mip-nlp'. Choose one of: {allowed}."
+            )
 
         ignored_mip_nlp_options = []
 
@@ -3159,7 +3295,6 @@ def solve_model(
         _note_ignored_mip_nlp("decomposition", decomposition is not None)
         _note_ignored_mip_nlp("lagrangian_bound", lagrangian_bound is not False)
         _note_ignored_mip_nlp("lagrangian_frequency", lagrangian_frequency != 1)
-        _note_ignored_mip_nlp("initial_point", initial_point is not None)
         _note_ignored_mip_nlp("skip_convex_check", skip_convex_check is not False)
         _note_ignored_mip_nlp("nlp_bb", nlp_bb is not None)
         _note_ignored_mip_nlp("lazy_constraints", lazy_constraints is not None)
@@ -3199,6 +3334,7 @@ def solve_model(
             gap_tolerance=gap_tolerance,
             max_iterations=max_nodes,
             nlp_solver=nlp_solver,
+            initial_point=initial_point,
             **mip_nlp_kwargs,
         )
 
@@ -3450,6 +3586,11 @@ def solve_model(
 
         from discopt._jax.gdp_reformulate import reformulate_gdp
         from discopt.solvers.mip_nlp import solve_mip_nlp
+        from discopt.solvers.mip_nlp_options import (
+            FP_OPTION_KEYS,
+            MIP_NLP_PROFILE_OPTION_KEYS,
+            SHOT_OPTION_KEYS,
+        )
 
         warnings.warn(
             "gdp_method='oa' is deprecated for selecting MINLP OA. Use "
@@ -3461,7 +3602,29 @@ def solve_model(
 
         # Extract OA-specific kwargs that solve_model doesn't understand
         mip_nlp_kwargs = {}
-        for key in ("equality_relaxation", "ecp_mode", "feasibility_cuts", "milp_solver"):
+        for key in (
+            "equality_relaxation",
+            "ecp_mode",
+            "feasibility_cuts",
+            "init_strategy",
+            "heuristic_nonconvex",
+            "add_slack",
+            "max_slack",
+            "oa_penalty_factor",
+            "OA_penalty_factor",
+            "add_no_good_cuts",
+            "feasibility_norm",
+            "add_regularization",
+            "level_coef",
+            "stalling_limit",
+            "cycling_check",
+            "milp_solver",
+            "solution_pool",
+            "num_solution_iteration",
+            *MIP_NLP_PROFILE_OPTION_KEYS,
+            *SHOT_OPTION_KEYS,
+            *FP_OPTION_KEYS,
+        ):
             if key in kwargs:
                 mip_nlp_kwargs[key] = kwargs.pop(key)
 

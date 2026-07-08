@@ -1,20 +1,10 @@
-"""Tests for the general-purpose Outer Approximation (OA) solver.
+"""Tests for the general-purpose Outer Approximation (OA) solver."""
 
-Requires highspy for the MILP master problem.
-"""
+import logging
 
 import discopt.modeling as dm
 import numpy as np
 import pytest
-
-try:
-    import highspy  # noqa: F401
-
-    HAS_HIGHS = True
-except ImportError:
-    HAS_HIGHS = False
-
-pytestmark = pytest.mark.skipif(not HAS_HIGHS, reason="highspy not installed")
 
 ABS_TOL = 1e-3
 REL_TOL = 1e-3
@@ -26,7 +16,8 @@ INTEGRALITY_TOL = 1e-5
 
 def _solve_oa(model, **kwargs):
     """Solve model with OA and return result."""
-    defaults = dict(solver="mip-nlp", mip_nlp_method="oa", time_limit=60)
+    mip_nlp_method = "ecp" if kwargs.pop("ecp_mode", False) else "oa"
+    defaults = dict(solver="mip-nlp", mip_nlp_method=mip_nlp_method, time_limit=60)
     defaults.update(kwargs)
     return model.solve(**defaults)
 
@@ -44,6 +35,53 @@ def _assert_integer_feasible(result, int_var_names, model):
         vals = np.atleast_1d(result.x[name])
         for v in vals.flat:
             assert abs(v - round(v)) < INTEGRALITY_TOL, f"Variable {name} = {v} is not integral"
+
+
+def _assert_complete_optimal_result(result, expected_obj, var_names, abs_tol=ABS_TOL):
+    assert result.status == "optimal"
+    assert result.objective == pytest.approx(expected_obj, abs=abs_tol)
+    assert result.bound is not None
+    assert result.bound == pytest.approx(expected_obj, abs=abs_tol)
+    assert result.gap == pytest.approx(0.0, abs=1e-9)
+    for name in var_names:
+        assert name in result.x
+
+
+def _mindtpy_simple_minlp():
+    """Native version of Pyomo MindtPy's small APSE convex MINLP baseline."""
+    m = dm.Model("mindtpy_simple_minlp")
+    x = m.continuous("x", shape=(2,), lb=0, ub=4)
+    y = m.binary("y", shape=(3,))
+
+    m.subject_to((x[0] - 2) ** 2 - x[1] <= 0)
+    m.subject_to(x[0] - 2 * y[0] >= 0)
+    m.subject_to(x[0] - x[1] - 4 * (1 - y[1]) <= 0)
+    m.subject_to(x[0] - (1 - y[0]) >= 0)
+    m.subject_to(x[1] - y[1] >= 0)
+    m.subject_to(x[0] + x[1] >= 3 * y[2])
+    m.subject_to(y[0] + y[1] + y[2] >= 1)
+    m.minimize(y[0] + 1.5 * y[1] + 0.5 * y[2] + x[0] ** 2 + x[1] ** 2)
+    return m
+
+
+def _mindtpy_duran_grossmann_minlp():
+    """Native version of Pyomo MindtPy's Duran-Grossmann OA/ECP baseline."""
+    m = dm.Model("mindtpy_duran_grossmann")
+    x = m.continuous("x", shape=(4,), lb=0, ub=[2, 2, 1, 100])
+    y = m.binary("y", shape=(3,))
+
+    m.subject_to(0.8 * dm.log(x[1] + 1) + 0.96 * dm.log(x[0] - x[1] + 1) - 0.8 * x[2] >= 0)
+    m.subject_to(dm.log(x[1] + 1) + 1.2 * dm.log(x[0] - x[1] + 1) - x[2] - 2 * y[2] >= -2)
+    m.subject_to(
+        10 * x[0] - 7 * x[2] - 18 * dm.log(x[1] + 1) - 19.2 * dm.log(x[0] - x[1] + 1) + 10 - x[3]
+        <= 0
+    )
+    m.subject_to(x[1] - x[0] <= 0)
+    m.subject_to(x[1] - 2 * y[0] <= 0)
+    m.subject_to(x[0] - x[1] - 2 * y[1] <= 0)
+    m.subject_to(y[0] + y[1] <= 1)
+    m.minimize(5 * y[0] + 6 * y[1] + 8 * y[2] + x[3])
+    return m
 
 
 def test_compute_gap_uses_absolute_scale_near_zero():
@@ -127,6 +165,33 @@ class TestOAConvexMINLP:
         assert result.x["y"] == pytest.approx(1.0, abs=INTEGRALITY_TOL)
 
 
+class TestMindtPyBaselineParity:
+    """Native discopt coverage for the small Pyomo MindtPy OA/ECP baselines."""
+
+    @pytest.mark.parametrize(
+        ("builder", "expected_obj", "abs_tol"),
+        [
+            (_mindtpy_simple_minlp, 3.5, 1e-3),
+            (_mindtpy_duran_grossmann_minlp, 6.00976, 1e-3),
+        ],
+    )
+    @pytest.mark.parametrize("method", ["oa", "ecp"])
+    def test_small_mindtpy_baselines_report_complete_results(
+        self, builder, expected_obj, abs_tol, method
+    ):
+        model = builder()
+        result = model.solve(
+            solver="mip-nlp",
+            mip_nlp_method=method,
+            time_limit=60,
+            max_nodes=100,
+        )
+
+        _assert_complete_optimal_result(result, expected_obj, ["x", "y"], abs_tol=abs_tol)
+        _assert_integer_feasible(result, ["y"], model)
+        assert np.asarray(result.x["y"]).tolist() == pytest.approx([0.0, 1.0, 0.0])
+
+
 # ── Non-convex MINLP ─────────────────────────────────────────
 
 
@@ -186,14 +251,16 @@ class TestOANonConvex:
 class TestOAEdgeCases:
     """Edge cases and degenerate problems."""
 
-    def test_pure_nlp_no_integers(self):
-        """No integer variables: OA should solve a single NLP."""
-        m = dm.Model("pure_nlp")
-        x = m.continuous("x", lb=-5, ub=5)
-        m.minimize(x**2)
+    def test_no_discrete_short_circuit(self):
+        """No integer variables: MIP-NLP should solve one continuous NLP."""
+        m = dm.Model("no_discrete_short_circuit")
+        x = m.continuous("x", lb=0, ub=10)
+        m.subject_to(x**2 >= 1)
+        m.minimize(x)
 
         result = _solve_oa(m)
-        _assert_optimal(result, 0.0, abs_tol=0.01)
+        _assert_complete_optimal_result(result, 1.0, ["x"], abs_tol=0.01)
+        assert result.x["x"] == pytest.approx(1.0, abs=0.01)
 
     def test_pure_milp_all_linear(self):
         """All-linear MINLP: OA should converge in one iteration."""
@@ -217,6 +284,9 @@ class TestOAEdgeCases:
 
         result = _solve_oa(m)
         assert result.status == "infeasible"
+        assert result.objective is None
+        assert result.gap is None
+        assert result.x == {}
 
     @pytest.mark.slow
     def test_single_iteration_optimal(self):
@@ -311,6 +381,754 @@ class TestEqualityRelaxation:
         assert result.status in ("optimal", "feasible")
 
 
+class TestOARobustnessOptions:
+    """MindtPy-style OA robustness controls."""
+
+    def test_feasibility_norm_merit_values(self):
+        from discopt.solvers.oa import (
+            _constraint_violation_merit,
+            _decompose_model,
+            _normalize_feasibility_norm,
+        )
+
+        m = dm.Model("feasibility_norm_merit")
+        x = m.continuous("x", shape=(2,), lb=-10, ub=10)
+        m.subject_to(x[0] <= 0)
+        m.subject_to(x[1] >= 0)
+        m.minimize(x[0])
+
+        evaluator = _decompose_model(m).evaluator
+        point = np.array([3.0, -4.0], dtype=float)
+
+        assert _constraint_violation_merit(evaluator, point, "L1") == pytest.approx(7.0)
+        assert _constraint_violation_merit(evaluator, point, "L2") == pytest.approx(25.0)
+        assert _constraint_violation_merit(evaluator, point, "L_infinity") == pytest.approx(4.0)
+        assert _normalize_feasibility_norm("l-inf") == "L_infinity"
+        with pytest.raises(ValueError, match="Unknown feasibility_norm"):
+            _normalize_feasibility_norm("L0")
+
+    def test_master_slack_penalizes_and_relaxes_constraint_cuts(self, monkeypatch):
+        from discopt.solvers import MILPResult, SolveStatus, lp_backend
+        from discopt.solvers.oa import _solve_master_milp
+
+        captured = {}
+
+        def fake_solve_milp(**kwargs):
+            captured.update(kwargs)
+            return MILPResult(
+                status=SolveStatus.OPTIMAL,
+                x=np.zeros(2),
+                objective=0.0,
+                bound=0.0,
+            )
+
+        monkeypatch.setattr(
+            lp_backend,
+            "get_milp_solver",
+            lambda backend="auto": fake_solve_milp,
+        )
+
+        _solve_master_milp(
+            linear_A_rows=[],
+            linear_b_rows=[],
+            linear_senses=[],
+            oa_A_rows=[np.array([1.0])],
+            oa_b_rows=[2.0],
+            n_vars=1,
+            integrality=np.array([0], dtype=np.int32),
+            lb=np.array([0.0]),
+            ub=np.array([10.0]),
+            obj_coeffs=(np.array([0.0]), 0.0),
+            obj_is_linear=True,
+            objective_bound_valid=True,
+            time_limit=10,
+            gap_tolerance=1e-4,
+            add_slack=True,
+            max_slack=5.0,
+            oa_penalty_factor=17.0,
+        )
+
+        assert captured["c"].tolist() == pytest.approx([0.0, 17.0])
+        np.testing.assert_allclose(captured["A_ub"], np.array([[1.0, -1.0]]))
+        assert captured["b_ub"].tolist() == pytest.approx([2.0])
+        assert captured["bounds"] == [(0.0, 10.0), (0.0, 5.0)]
+        assert captured["integrality"].tolist() == [0, 0]
+
+    def test_master_slack_does_not_relax_no_good_cuts(self, monkeypatch):
+        from discopt.solvers import MILPResult, SolveStatus, lp_backend
+        from discopt.solvers.oa import _add_no_good_cut, _solve_master_milp
+
+        captured = {}
+
+        def fake_solve_milp(**kwargs):
+            captured.update(kwargs)
+            return MILPResult(
+                status=SolveStatus.OPTIMAL,
+                x=np.zeros(2),
+                objective=0.0,
+                bound=0.0,
+            )
+
+        monkeypatch.setattr(
+            lp_backend,
+            "get_milp_solver",
+            lambda backend="auto": fake_solve_milp,
+        )
+
+        oa_A_rows = []
+        oa_b_rows = []
+        oa_cut_relaxable = []
+        _add_no_good_cut(
+            np.array([1.0]),
+            [0],
+            oa_A_rows,
+            oa_b_rows,
+            n_vars=1,
+            oa_cut_relaxable=oa_cut_relaxable,
+        )
+
+        _solve_master_milp(
+            linear_A_rows=[],
+            linear_b_rows=[],
+            linear_senses=[],
+            oa_A_rows=oa_A_rows,
+            oa_b_rows=oa_b_rows,
+            n_vars=1,
+            integrality=np.array([1], dtype=np.int32),
+            lb=np.array([0.0]),
+            ub=np.array([1.0]),
+            obj_coeffs=(np.array([0.0]), 0.0),
+            obj_is_linear=True,
+            objective_bound_valid=True,
+            time_limit=10,
+            gap_tolerance=1e-4,
+            add_slack=True,
+            max_slack=5.0,
+            oa_penalty_factor=17.0,
+            oa_cut_relaxable=oa_cut_relaxable,
+        )
+
+        np.testing.assert_allclose(captured["A_ub"], np.array([[1.0, 0.0]]))
+        assert captured["b_ub"].tolist() == pytest.approx([0.0])
+
+    def test_no_good_cut_uses_binary_indices_only_for_mixed_assignment(self):
+        from discopt.solvers.oa import _add_no_good_cut
+
+        oa_A_rows = []
+        oa_b_rows = []
+        oa_cut_relaxable = []
+
+        added = _add_no_good_cut(
+            np.array([1.0, 2.0, 0.0]),
+            [0, 2],
+            oa_A_rows,
+            oa_b_rows,
+            n_vars=3,
+            oa_cut_relaxable=oa_cut_relaxable,
+        )
+
+        assert added is True
+        np.testing.assert_allclose(oa_A_rows[0], np.array([1.0, 0.0, -1.0]))
+        assert oa_b_rows == pytest.approx([0.0])
+        assert oa_cut_relaxable == [False]
+
+    def test_no_good_cut_skips_when_no_binary_indices(self):
+        from discopt.solvers.oa import _add_no_good_cut
+
+        oa_A_rows = []
+        oa_b_rows = []
+        oa_cut_relaxable = []
+
+        added = _add_no_good_cut(
+            np.array([2.0]),
+            [],
+            oa_A_rows,
+            oa_b_rows,
+            n_vars=1,
+            oa_cut_relaxable=oa_cut_relaxable,
+        )
+
+        assert added is False
+        assert oa_A_rows == []
+        assert oa_b_rows == []
+        assert oa_cut_relaxable == []
+
+    def test_no_good_cut_uses_integer_binary_expansion_for_bounded_integer(self):
+        from discopt.solvers.oa import (
+            _add_no_good_cut,
+            _build_integer_binary_expansion,
+            _decompose_model,
+        )
+
+        m = dm.Model("integer_binary_no_good")
+        y = m.binary("y")
+        z = m.integer("z", lb=0, ub=3)
+        m.minimize(y + z)
+        decomp = _decompose_model(m)
+        expansion = _build_integer_binary_expansion(decomp, enabled=True)
+        oa_A_rows = []
+        oa_b_rows = []
+        oa_cut_relaxable = []
+
+        added = _add_no_good_cut(
+            np.array([1.0, 2.0]),
+            decomp.binary_indices,
+            oa_A_rows,
+            oa_b_rows,
+            n_vars=decomp.n_vars,
+            oa_cut_relaxable=oa_cut_relaxable,
+            integer_binary_expansion=expansion,
+        )
+
+        assert added is True
+        np.testing.assert_allclose(oa_A_rows[0], np.array([1.0, 0.0, 0.0, -1.0, 1.0]))
+        assert oa_b_rows == pytest.approx([1.0])
+        assert oa_cut_relaxable == [False]
+
+    def test_master_data_links_integer_binary_expansion_columns(self):
+        from discopt.solvers.oa import (
+            _add_no_good_cut,
+            _build_integer_binary_expansion,
+            _build_master_milp_data,
+            _decompose_model,
+        )
+
+        m = dm.Model("integer_binary_master")
+        y = m.binary("y")
+        z = m.integer("z", lb=0, ub=3)
+        m.minimize(y + z)
+        decomp = _decompose_model(m)
+        expansion = _build_integer_binary_expansion(decomp, enabled=True)
+        oa_A_rows = []
+        oa_b_rows = []
+        _add_no_good_cut(
+            np.array([1.0, 2.0]),
+            decomp.binary_indices,
+            oa_A_rows,
+            oa_b_rows,
+            n_vars=decomp.n_vars,
+            integer_binary_expansion=expansion,
+        )
+
+        master = _build_master_milp_data(
+            decomp.linear_A_rows,
+            decomp.linear_b_rows,
+            decomp.linear_senses,
+            oa_A_rows,
+            oa_b_rows,
+            decomp.n_vars,
+            decomp.integrality,
+            decomp.lb,
+            decomp.ub,
+            decomp.obj_coeffs,
+            decomp.obj_is_linear,
+            decomp.master_bound_valid,
+            integer_binary_expansion=expansion,
+        )
+
+        assert len(master.c) == 4
+        assert master.bounds[2:] == [(0.0, 1.0), (0.0, 1.0)]
+        assert master.integrality.tolist() == [1, 1, 1, 1]
+        np.testing.assert_allclose(master.A_ub, np.array([[1.0, 0.0, -1.0, 1.0]]))
+        assert master.b_ub.tolist() == pytest.approx([1.0])
+        np.testing.assert_allclose(master.A_eq, np.array([[0.0, 1.0, -1.0, -2.0]]))
+        assert master.b_eq.tolist() == pytest.approx([0.0])
+
+    def test_integer_binary_expansion_rejects_unbounded_integer(self):
+        from discopt.solvers.oa import _build_integer_binary_expansion, _decompose_model
+
+        m = dm.Model("integer_binary_unbounded")
+        z = m.integer("z", lb=0, ub=3)
+        m.minimize(z)
+        decomp = _decompose_model(m)
+        decomp.ub[0] = 1e20
+
+        with pytest.raises(ValueError, match="requires finite practical bounds"):
+            _build_integer_binary_expansion(decomp, enabled=True)
+
+    def test_integer_to_binary_warns_when_no_good_cuts_disabled(self, caplog):
+        from discopt.solvers.mip_nlp import solve_mip_nlp
+
+        caplog.set_level(logging.WARNING, logger="discopt.solvers.oa")
+        m = dm.Model("integer_to_binary_noop_warning")
+        z = m.integer("z", lb=0, ub=3)
+        m.minimize(z)
+
+        result = solve_mip_nlp(
+            m,
+            method="oa",
+            add_no_good_cuts=False,
+            integer_to_binary=True,
+            max_iterations=1,
+        )
+
+        assert result.status == "optimal"
+        assert "integer_to_binary=True ignored because add_no_good_cuts=False" in caplog.text
+
+    def test_projection_no_good_cut_uses_binary_indices_for_binary_model(self):
+        from discopt.solvers.oa import (
+            _append_binary_no_good_projection_cut,
+            _decompose_model,
+        )
+
+        m = dm.Model("binary_projection_no_good")
+        y = m.binary("y", shape=(2,))
+        m.minimize(y[0] + y[1])
+        decomp = _decompose_model(m)
+        a_rows = []
+        b_rows = []
+
+        added = _append_binary_no_good_projection_cut(
+            decomp,
+            assignment=(1.0, 0.0),
+            n_master=2,
+            a_rows=a_rows,
+            b_rows=b_rows,
+        )
+
+        assert added is True
+        np.testing.assert_allclose(a_rows[0], np.array([1.0, -1.0]))
+        assert b_rows == pytest.approx([0.0])
+
+    def test_projection_no_good_cut_skips_mixed_integer_model(self):
+        from discopt.solvers.oa import (
+            _append_binary_no_good_projection_cut,
+            _decompose_model,
+        )
+
+        m = dm.Model("mixed_projection_no_good")
+        y = m.binary("y")
+        z = m.integer("z", lb=0, ub=3)
+        m.minimize(y + z)
+        decomp = _decompose_model(m)
+        a_rows = []
+        b_rows = []
+
+        added = _append_binary_no_good_projection_cut(
+            decomp,
+            assignment=(1.0, 2.0),
+            n_master=2,
+            a_rows=a_rows,
+            b_rows=b_rows,
+        )
+
+        assert added is False
+        assert a_rows == []
+        assert b_rows == []
+
+    def test_fp_projection_distance_can_include_continuous_variables(self, monkeypatch):
+        import discopt.solvers.lp_backend as lp_backend
+        from discopt.solvers import MILPResult, SolveStatus
+        from discopt.solvers.oa import _decompose_model, _solve_integer_projection_mip
+
+        m = dm.Model("fp_projection_all_vars")
+        x = m.continuous("x", lb=-1.0, ub=2.0)
+        y = m.binary("y")
+        z = m.integer("z", lb=-2, ub=3)
+        m.minimize(x + y + z)
+        decomp = _decompose_model(m)
+        captured = {}
+
+        def fake_solve_milp(**kwargs):
+            captured.update(kwargs)
+            return MILPResult(
+                status=SolveStatus.OPTIMAL,
+                x=np.zeros_like(kwargs["c"]),
+                objective=0.0,
+                bound=0.0,
+            )
+
+        monkeypatch.setattr(lp_backend, "get_milp_solver", lambda backend="auto": fake_solve_milp)
+
+        result = _solve_integer_projection_mip(
+            decomp,
+            target=np.array([5e-9, 0.3, 1.7], dtype=float),
+            seen_assignments=set(),
+            projection_norm="L1",
+            time_limit=10.0,
+            gap_tolerance=0.25,
+            discrete_only=False,
+            projzerotol=1e-8,
+        )
+
+        assert result is not None
+        assert len(captured["c"]) == 6
+        assert captured["c"][:3].tolist() == pytest.approx([0.0, 0.0, 0.0])
+        assert captured["c"][3:].tolist() == pytest.approx([1.0, 1.0, 1.0])
+        assert captured["integrality"][:3].tolist() == decomp.integrality.tolist()
+        assert captured["b_ub"][:2].tolist() == pytest.approx([0.0, 0.0])
+
+    @pytest.mark.parametrize(("enabled", "expected_calls"), [(False, 0), (True, 1)])
+    def test_no_good_cut_option_controls_infeasible_assignment(
+        self,
+        monkeypatch,
+        enabled,
+        expected_calls,
+    ):
+        import discopt.solvers.oa as oa_module
+        from discopt.solvers import MILPResult, SolveStatus
+
+        m = dm.Model("no_good_option")
+        y = m.binary("y")
+        m.minimize(y)
+        m.subject_to(y <= 0.25)
+
+        no_good_calls = []
+
+        monkeypatch.setattr(
+            oa_module,
+            "_solve_nlp_relaxation",
+            lambda *args, **kwargs: (np.array([0.5]), 0.5),
+        )
+        monkeypatch.setattr(oa_module, "_add_oa_cuts", lambda *args, **kwargs: None)
+        monkeypatch.setattr(
+            oa_module,
+            "_solve_master_milp",
+            lambda *args, **kwargs: MILPResult(
+                status=SolveStatus.OPTIMAL,
+                x=np.array([1.0]),
+                objective=1.0,
+                bound=0.0,
+            ),
+        )
+        monkeypatch.setattr(
+            oa_module,
+            "_solve_nlp_subproblem",
+            lambda *args, **kwargs: (None, None),
+        )
+        monkeypatch.setattr(
+            oa_module,
+            "_add_no_good_cut",
+            lambda *args, **kwargs: no_good_calls.append(args),
+        )
+
+        result = oa_module.solve_oa(
+            m,
+            max_iterations=1,
+            feasibility_cuts=False,
+            add_no_good_cuts=enabled,
+            cycling_check=False,
+        )
+
+        assert result.status == "infeasible"
+        assert len(no_good_calls) == expected_calls
+
+    def test_multitree_no_good_cut_skips_mixed_integer_model(
+        self,
+        monkeypatch,
+    ):
+        import discopt.solvers.oa as oa_module
+        from discopt.solvers import MILPResult, SolveStatus
+
+        m = dm.Model("mixed_no_good_option")
+        y = m.binary("y")
+        z = m.integer("z", lb=0, ub=3)
+        m.minimize(y + z)
+        m.subject_to(y + z <= 0.5)
+
+        no_good_calls = []
+
+        monkeypatch.setattr(
+            oa_module,
+            "_solve_nlp_relaxation",
+            lambda *args, **kwargs: (np.array([0.5, 1.5]), 2.0),
+        )
+        monkeypatch.setattr(oa_module, "_add_oa_cuts", lambda *args, **kwargs: None)
+        monkeypatch.setattr(
+            oa_module,
+            "_solve_master_milp",
+            lambda *args, **kwargs: MILPResult(
+                status=SolveStatus.OPTIMAL,
+                x=np.array([1.0, 2.0]),
+                objective=3.0,
+                bound=0.0,
+            ),
+        )
+        monkeypatch.setattr(
+            oa_module,
+            "_solve_nlp_subproblem",
+            lambda *args, **kwargs: (None, None),
+        )
+        monkeypatch.setattr(
+            oa_module,
+            "_add_no_good_cut",
+            lambda *args, **kwargs: no_good_calls.append(args),
+        )
+
+        result = oa_module.solve_oa(
+            m,
+            max_iterations=1,
+            feasibility_cuts=False,
+            add_no_good_cuts=True,
+            cycling_check=False,
+        )
+
+        assert result.status == "infeasible"
+        assert no_good_calls == []
+
+    def test_multitree_no_good_cut_uses_integer_binary_expansion_when_enabled(
+        self,
+        monkeypatch,
+    ):
+        import discopt.solvers.oa as oa_module
+        from discopt.solvers import MILPResult, SolveStatus
+
+        m = dm.Model("mixed_no_good_integer_binary")
+        y = m.binary("y")
+        z = m.integer("z", lb=0, ub=3)
+        m.minimize(y + z)
+        m.subject_to(y + z <= 0.5)
+
+        no_good_expansions = []
+
+        monkeypatch.setattr(
+            oa_module,
+            "_solve_nlp_relaxation",
+            lambda *args, **kwargs: (np.array([0.5, 1.5]), 2.0),
+        )
+        monkeypatch.setattr(oa_module, "_add_oa_cuts", lambda *args, **kwargs: None)
+        monkeypatch.setattr(
+            oa_module,
+            "_solve_master_milp",
+            lambda *args, **kwargs: MILPResult(
+                status=SolveStatus.OPTIMAL,
+                x=np.array([1.0, 2.0]),
+                objective=3.0,
+                bound=0.0,
+            ),
+        )
+        monkeypatch.setattr(
+            oa_module,
+            "_solve_nlp_subproblem",
+            lambda *args, **kwargs: (None, None),
+        )
+        monkeypatch.setattr(
+            oa_module,
+            "_add_no_good_cut",
+            lambda *args, **kwargs: no_good_expansions.append(
+                kwargs.get("integer_binary_expansion")
+            ),
+        )
+
+        result = oa_module.solve_oa(
+            m,
+            max_iterations=1,
+            feasibility_cuts=False,
+            add_no_good_cuts=True,
+            integer_to_binary=True,
+            cycling_check=False,
+        )
+
+        assert result.status == "infeasible"
+        assert len(no_good_expansions) == 1
+        assert no_good_expansions[0] is not None
+        assert no_good_expansions[0].bit_count == 2
+
+    def test_cycling_check_stops_repeated_integer_assignment(self, monkeypatch):
+        import discopt.solvers.oa as oa_module
+        from discopt.solvers import MILPResult, SolveStatus
+
+        m = dm.Model("cycling_check")
+        y = m.binary("y")
+        m.minimize(y)
+
+        master_calls = 0
+        nlp_calls = 0
+
+        def fake_master(*args, **kwargs):
+            nonlocal master_calls
+            master_calls += 1
+            return MILPResult(
+                status=SolveStatus.OPTIMAL,
+                x=np.array([1.0]),
+                objective=1.0,
+                bound=0.0,
+            )
+
+        def fake_nlp(*args, **kwargs):
+            nonlocal nlp_calls
+            nlp_calls += 1
+            return np.array([1.0]), 1.0
+
+        monkeypatch.setattr(
+            oa_module,
+            "_solve_nlp_relaxation",
+            lambda *args, **kwargs: (np.array([0.5]), 0.5),
+        )
+        monkeypatch.setattr(oa_module, "_add_oa_cuts", lambda *args, **kwargs: None)
+        monkeypatch.setattr(oa_module, "_solve_master_milp", fake_master)
+        monkeypatch.setattr(oa_module, "_solve_nlp_subproblem", fake_nlp)
+
+        result = oa_module.solve_oa(
+            m,
+            max_iterations=5,
+            add_no_good_cuts=False,
+            cycling_check=True,
+        )
+
+        assert result.status == "feasible"
+        assert master_calls == 2
+        assert nlp_calls == 1
+
+    def test_stalling_limit_stops_without_incumbent_progress(self, monkeypatch):
+        import discopt.solvers.oa as oa_module
+        from discopt.solvers import MILPResult, SolveStatus
+
+        m = dm.Model("stalling_limit")
+        y = m.binary("y")
+        m.minimize(y)
+
+        nlp_calls = 0
+
+        def fake_nlp(*args, **kwargs):
+            nonlocal nlp_calls
+            nlp_calls += 1
+            return np.array([1.0]), 1.0
+
+        monkeypatch.setattr(
+            oa_module,
+            "_solve_nlp_relaxation",
+            lambda *args, **kwargs: (np.array([0.5]), 0.5),
+        )
+        monkeypatch.setattr(oa_module, "_add_oa_cuts", lambda *args, **kwargs: None)
+        monkeypatch.setattr(
+            oa_module,
+            "_solve_master_milp",
+            lambda *args, **kwargs: MILPResult(
+                status=SolveStatus.OPTIMAL,
+                x=np.array([1.0]),
+                objective=1.0,
+                bound=0.0,
+            ),
+        )
+        monkeypatch.setattr(oa_module, "_solve_nlp_subproblem", fake_nlp)
+
+        result = oa_module.solve_oa(
+            m,
+            max_iterations=5,
+            add_no_good_cuts=False,
+            cycling_check=False,
+            stalling_limit=2,
+        )
+
+        assert result.status == "feasible"
+        assert nlp_calls == 2
+
+    def test_heuristic_nonconvex_enables_slack_and_uncertified_result(self, monkeypatch):
+        import discopt.solvers.oa as oa_module
+        from discopt.solvers import MILPResult, SolveStatus
+
+        m = dm.Model("heuristic_nonconvex_controls")
+        y = m.binary("y")
+        m.minimize(y)
+
+        cut_kwargs = []
+        master_kwargs = []
+
+        def fake_add_oa_cuts(*args, **kwargs):
+            cut_kwargs.append(kwargs)
+
+        def fake_master(*args, **kwargs):
+            master_kwargs.append(kwargs)
+            return MILPResult(
+                status=SolveStatus.OPTIMAL,
+                x=np.array([1.0]),
+                objective=1.0,
+                bound=1.0,
+            )
+
+        monkeypatch.setattr(
+            oa_module,
+            "_solve_nlp_relaxation",
+            lambda *args, **kwargs: (np.array([0.5]), 0.5),
+        )
+        monkeypatch.setattr(oa_module, "_add_oa_cuts", fake_add_oa_cuts)
+        monkeypatch.setattr(oa_module, "_solve_master_milp", fake_master)
+        monkeypatch.setattr(
+            oa_module,
+            "_solve_nlp_subproblem",
+            lambda *args, **kwargs: (np.array([1.0]), 1.0),
+        )
+
+        result = oa_module.solve_oa(
+            m,
+            max_iterations=1,
+            equality_relaxation=False,
+            add_slack=False,
+            heuristic_nonconvex=True,
+        )
+
+        assert result.status == "feasible"
+        assert result.bound is None
+        assert result.gap is None
+        assert cut_kwargs[0]["equality_relaxation"] is True
+        assert master_kwargs[0]["add_slack"] is True
+
+    def test_heuristic_nonconvex_nonlinear_objective_is_uncertified_end_to_end(self):
+        result = _solve_oa(
+            _mindtpy_simple_minlp(),
+            heuristic_nonconvex=True,
+            max_nodes=10,
+        )
+
+        assert result.status == "feasible"
+        assert result.objective == pytest.approx(3.5, abs=1e-3)
+        assert result.bound is None
+        assert result.gap is None
+
+    def test_no_good_cuts_preserve_certified_convex_bound(self, monkeypatch):
+        import discopt.solvers.oa as oa_module
+        from discopt.solvers import MILPResult, SolveStatus
+
+        m = dm.Model("no_good_certified_bound")
+        y = m.binary("y")
+        m.minimize(y)
+        m.subject_to(y <= 0.25)
+
+        master_points = [np.array([1.0]), np.array([0.0])]
+        master_bounds = [0.0, 0.0]
+
+        def fake_master(*args, **kwargs):
+            idx = min(fake_master.calls, len(master_points) - 1)
+            fake_master.calls += 1
+            return MILPResult(
+                status=SolveStatus.OPTIMAL,
+                x=master_points[idx],
+                objective=float(master_points[idx][0]),
+                bound=master_bounds[idx],
+            )
+
+        fake_master.calls = 0
+
+        def fake_nlp(*args, **kwargs):
+            x_master = np.asarray(args[4], dtype=float)
+            if x_master[0] > 0.5:
+                return None, None
+            return np.array([0.0]), 0.0
+
+        monkeypatch.setattr(
+            oa_module,
+            "_solve_nlp_relaxation",
+            lambda *args, **kwargs: (np.array([0.5]), 0.5),
+        )
+        monkeypatch.setattr(oa_module, "_add_oa_cuts", lambda *args, **kwargs: None)
+        monkeypatch.setattr(oa_module, "_add_feasibility_cuts", lambda *args, **kwargs: None)
+        monkeypatch.setattr(oa_module, "_solve_master_milp", fake_master)
+        monkeypatch.setattr(oa_module, "_solve_nlp_subproblem", fake_nlp)
+
+        result = oa_module.solve_oa(
+            m,
+            max_iterations=2,
+            feasibility_cuts=False,
+            add_no_good_cuts=True,
+        )
+
+        assert result.status == "optimal"
+        assert result.objective == pytest.approx(0.0)
+        assert result.bound == pytest.approx(0.0)
+        assert result.gap == pytest.approx(0.0)
+
+
 # ── Regression vs B&B ────────────────────────────────────────
 
 
@@ -369,3 +1187,30 @@ def test_oa_maximize_scalar_reaches_true_max():
     m.subject_to(x**2 <= 9)  # x <= 3
     r = _solve_oa(m)
     assert r.objective == pytest.approx(9.0, abs=ABS_TOL)
+
+
+def test_integer_to_binary_no_good_cuts_preserve_general_integer_optimum():
+    from discopt.solvers.mip_nlp import solve_mip_nlp
+
+    m = dm.Model("integer_to_binary_no_good_optimality")
+    z = m.integer("z", lb=0, ub=3)
+    m.minimize(z)
+    m.subject_to((z - 2) ** 2 <= 0.25)
+
+    result = solve_mip_nlp(
+        m,
+        method="oa",
+        init_strategy="initial_binary",
+        initial_point=np.array([0.0]),
+        add_no_good_cuts=True,
+        integer_to_binary=True,
+        max_iterations=8,
+        time_limit=60,
+    )
+
+    assert result.status == "optimal"
+    assert result.objective == pytest.approx(2.0, abs=ABS_TOL)
+    assert result.bound == pytest.approx(2.0, abs=ABS_TOL)
+    assert result.gap == pytest.approx(0.0, abs=1e-9)
+    assert result.x["z"] == pytest.approx(2.0, abs=INTEGRALITY_TOL)
+    assert result.mip_nlp_trace["summary"]["cut_source_counts"]["integer"] >= 1

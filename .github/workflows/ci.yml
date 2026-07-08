@@ -1,10 +1,12 @@
 name: CI
 
 on:
+  workflow_dispatch:
   push:
-    branches: [main]
+    branches: [main, feature/mip-nlp-solver]
   pull_request:
-    branches: [main]
+    branches: [main, feature/mip-nlp-solver]
+    types: [opened, synchronize, reopened, ready_for_review, labeled]
 
 # Cancel superseded runs on the same PR/branch — saves CI minutes when
 # pushes land in quick succession.
@@ -165,10 +167,8 @@ jobs:
       - name: Run pytest (PR-fast, parallel)
         run: |
           source .venv/bin/activate
-          # Use all 4 vCPUs of the ubuntu-latest runner. Peak memory stays well
-          # under the 16 GB runner (CPU-only JAX workers are ~1-2 GB RSS each),
-          # and the heaviest multi-minute solves now carry `slow` so they no
-          # longer pin a worker for the whole run.
+          # Keep worker count bounded so fork CI does not multiply JAX
+          # compilation and AMP relaxation memory unexpectedly.
           # --dist loadgroup keeps tests sharing a class on the same worker
           #   so xdist-incompatible fixtures stay serialized.
           # Coverage is intentionally dropped from the PR path — see the
@@ -183,7 +183,7 @@ jobs:
           JAX_PLATFORMS: cpu
           JAX_ENABLE_X64: "1"
           PYTEST_MEMORY_LIMIT_MB: "32768"
-          PYTEST_XDIST_WORKERS: "4"
+          PYTEST_XDIST_WORKERS: "2"
 
   python-coverage:
     name: Python coverage (3.12, ubuntu)
@@ -253,7 +253,7 @@ jobs:
           JAX_PLATFORMS: cpu
           JAX_ENABLE_X64: "1"
           PYTEST_MEMORY_LIMIT_MB: "32768"
-          PYTEST_XDIST_WORKERS: "4"
+          PYTEST_XDIST_WORKERS: "2"
       - name: Upload to Codecov
         if: always()
         uses: codecov/codecov-action@v5
