@@ -181,21 +181,31 @@ fn audit_feasibility(
 }
 
 /// Recover finite, *valid* upper bounds for the **slack** columns of the standard
-/// form `[A_ub | I] z = b` (discopt C-39). A `≤`-constraint LP's Farkas ray has row
-/// multipliers whose reduced cost on a slack `s_i ∈ [0, ∞)` selects its open upper
-/// side, collapsing the Neumaier–Shcherbina `g₀` to `−∞` — so a genuine
-/// infeasibility whose ray touches a slack would fail to certify. Each slack sits in
-/// exactly one row `i` with coefficient `+1`: `Σ_j A_ij x_j + s_i = b_i`, so
-/// `s_i = b_i − Σ_j A_ij x_j ≤ b_i − min_x Σ_j A_ij x_j` — a **finite** bound derived
-/// purely from the structural columns' *own* box, computed in one exact pass
-/// (`min_x A_ij x_j = A_ij·l_j` if `A_ij > 0`, else `A_ij·u_j`). This is a
-/// superset-preserving tightening (it only removes points already infeasible), so it
-/// can never make a *feasible* LP certify: sound by construction, and — unlike an
-/// iterative FBBT — exact (no accumulated division roundoff). Structural columns are
-/// all finitely bounded on the lifted McCormick relaxations, so slacks are the only
-/// open columns a `≤`-Farkas ray can select; when a structural side is genuinely open
-/// the row is skipped (its slack keeps `+∞` and the check bails that sign, staying
-/// conservative). Returns the slack upper bounds (`+∞` where not recoverable).
+/// form (discopt C-39, generalized). A Farkas ray has row multipliers whose reduced
+/// cost on a slack `s ∈ [0, ∞)` selects its open upper side, collapsing the
+/// Neumaier–Shcherbina `g₀` to `−∞` — so a genuine infeasibility whose ray touches a
+/// slack would fail to certify. A slack is a **single-entry** column: one nonzero
+/// `a` in some row `i` (`Σ_{k≠j} A_ik x_k + a·s_j = b_i`), so
+/// `s_j = (b_i − Σ_{k≠j} A_ik x_k) / a`, and its maximum over the box is
+/// `(b_i − min_x Σ_{k≠j} A_ik x_k)/a` for `a > 0` or
+/// `(b_i − max_x Σ_{k≠j} A_ik x_k)/a` for `a < 0` (dividing by the negative `a`
+/// flips the extreme).
+///
+/// The coefficient `a` is **general** (not just `±1`): geometric-mean equilibration
+/// scales each `≤`/`≥` slack column by its row/col factor (the AMP trig-square rows
+/// yield `−0.5` surplus slacks). The "other columns" sum is over **all** columns
+/// except `j` — structural *and* the many-entry slack-region columns — because the
+/// crate's standard form is not a clean `[A | ±I]`; the sum uses each column's own
+/// box (`min_x a·x = a·l` if `a>0` else `a·u`). We track, per row and per side, how
+/// many columns are **open** (unbounded on the extreme); a slack's bound is
+/// recoverable iff the only open column on the needed side is the slack itself
+/// (`open_count == 1` and this `j` is that open column) or there are none
+/// (`open_count == 0`). Otherwise `+∞` (the check bails that sign, conservative).
+///
+/// Exact (one pass, no iterative-FBBT division roundoff) and superset-preserving
+/// (removes only already-infeasible points), so it can never make a *feasible* LP
+/// certify: sound by construction. Returns the slack upper bounds (`+∞` where not
+/// recoverable).
 fn slack_upper_bounds(
     cols: &SparseCols,
     m: usize,
@@ -204,48 +214,100 @@ fn slack_upper_bounds(
     l: &[f64],
     u: &[f64],
 ) -> Vec<f64> {
-    // The last `m` columns of the standard form are the slacks (one per row); the
-    // first `n_struct = n − m` are structural. Accumulate `min_x (A x)_i` over the
-    // structural columns; a row with an open structural side leaves its slack `+∞`.
-    let n_struct = n.saturating_sub(m);
+    // Per-row min/max of `Σ_k A_ik x_k` over the box, accumulated over EVERY column
+    // (structural and slack-region) from that column's own bounds. `open_min/max`
+    // counts how many columns are unbounded on that extreme; `min/max_ax` sums the
+    // finite ones. To bound a single-entry slack `j` we need the sum over the OTHER
+    // columns, obtained by removing `j`'s own contribution below.
     let mut min_ax = vec![0.0f64; m];
-    let mut open_row = vec![false; m];
-    for j in 0..n_struct {
+    let mut max_ax = vec![0.0f64; m];
+    let mut open_min = vec![0u32; m];
+    let mut open_max = vec![0u32; m];
+    for j in 0..n {
         let (rows, vals) = cols.col(j);
         for (k, &i) in rows.iter().enumerate() {
             let a = vals[k];
             if a == 0.0 {
                 continue;
             }
-            // min over x_j ∈ [l_j, u_j] of a·x_j.
-            let term = if a > 0.0 {
+            // min side: a>0 → a·l_j (open if l_j = −∞); a<0 → a·u_j (open if u_j=+∞)
+            if a > 0.0 {
                 if l[j] <= -INF {
-                    open_row[i] = true;
-                    continue;
+                    open_min[i] += 1;
+                } else {
+                    min_ax[i] += a * l[j];
                 }
-                a * l[j]
+                if u[j] >= INF {
+                    open_max[i] += 1;
+                } else {
+                    max_ax[i] += a * u[j];
+                }
             } else {
                 if u[j] >= INF {
-                    open_row[i] = true;
-                    continue;
+                    open_min[i] += 1;
+                } else {
+                    min_ax[i] += a * u[j];
                 }
-                a * u[j]
-            };
-            min_ax[i] += term;
+                if l[j] <= -INF {
+                    open_max[i] += 1;
+                } else {
+                    max_ax[i] += a * l[j];
+                }
+            }
         }
     }
     let mut sub = vec![INF; n];
-    for j in n_struct..n {
-        // Only trust the derived bound when column `j` really is a slack: a single
-        // `+1` entry in some row `i` (the `[A_ub | I]` standard form). Anything else
-        // keeps `+∞` (the check then conservatively bails that sign), so a caller
-        // whose matrix is not this standard form can never get an unsound bound.
+    for j in 0..n {
+        // A slack is a single-entry column. Anything else keeps `+∞` (the check then
+        // conservatively bails that sign), so a caller whose matrix is not this
+        // standard form can never get an unsound bound.
         let (rows, vals) = cols.col(j);
-        if rows.len() == 1 && (vals[0] - 1.0).abs() < 1e-12 {
-            let i = rows[0];
-            if !open_row[i] {
-                // s_i = b_i − (A x)_i ≤ b_i − min_x (A x)_i.
-                sub[j] = b[i] - min_ax[i];
+        if rows.len() != 1 {
+            continue;
+        }
+        let i = rows[0];
+        let a = vals[0];
+        if a.abs() < 1e-30 {
+            continue;
+        }
+        // `s_j = (b_i − Σ_{k≠j} A_ik x_k)/a`. Maximizing s_j needs min (a>0) / max
+        // (a<0) of the OTHER columns' row sum. Remove j's own contribution to the
+        // row min/max (`j` is finite on the min side iff a>0? — compute exactly),
+        // and require every remaining column on that side be finite.
+        if a > 0.0 {
+            // min side: j contributes a·l_j (finite, since a>0 and l_j finite makes
+            // it counted in min_ax; if l_j = −∞ it was counted in open_min). Other
+            // columns finite iff removing j clears the min side: open_min[i] must be
+            // 0 (j finite here) or exactly 1 with that one being j (j open here).
+            let (j_open, j_term) = if l[j] <= -INF {
+                (true, 0.0)
+            } else {
+                (false, a * l[j])
+            };
+            let others_finite = if j_open {
+                open_min[i] == 1
+            } else {
+                open_min[i] == 0
+            };
+            if others_finite {
+                let min_other = min_ax[i] - j_term;
+                sub[j] = (b[i] - min_other) / a;
+            }
+        } else {
+            // a<0. max side: j contributes a·l_j (a<0 → j finite iff l_j finite).
+            let (j_open, j_term) = if l[j] <= -INF {
+                (true, 0.0)
+            } else {
+                (false, a * l[j])
+            };
+            let others_finite = if j_open {
+                open_max[i] == 1
+            } else {
+                open_max[i] == 0
+            };
+            if others_finite {
+                let max_other = max_ax[i] - j_term;
+                sub[j] = (b[i] - max_other) / a;
             }
         }
     }
@@ -260,8 +322,9 @@ fn slack_upper_bounds(
 /// magnitude-scaled margin keeping the strict inequality rigorous under rounding.
 /// A **slack** column `[0, ∞)` whose open upper side is selected would collapse `g₀`
 /// to `−∞`; an *exact* upper bound recovered from its defining row
-/// ([`slack_upper_bounds`]) makes the term finite, so a genuine infeasibility whose
-/// `≤`-ray touches a slack still certifies (mirrors the Python boundary's
+/// ([`slack_upper_bounds`], covering both `+1` and `−1` surplus slacks) makes the
+/// term finite, so a genuine infeasibility whose ray touches either a `≤`-slack or a
+/// `≥`-surplus-slack still certifies (mirrors the Python boundary's
 /// `_farkas_certified_std`; keeps the engine from returning `Numerical` where the
 /// cold/Python path rigorously fathoms). Sound: the slack bound is
 /// superset-preserving, so it can never make a *feasible* LP certify. A genuinely
@@ -1663,6 +1726,69 @@ mod tests {
             r.status,
             LpStatus::Infeasible,
             "feasible redundant-row LP must not be reported Infeasible"
+        );
+    }
+
+    /// A genuinely-infeasible node LP whose Farkas ray touches `−1` **surplus** slacks
+    /// (`≥`-constraints in `[A | −I]` standard form), the class that regressed the AMP
+    /// piecewise/trig-square relaxation solves after C-39 (main #554). The LP is
+    /// infeasible (HiGHS agrees, supplying a dual ray with `g₀ > 0`), but the C-39
+    /// slack recovery only knew `+1` slacks, so the ray's open surplus-slack term
+    /// collapsed `g₀` to `−∞`, the certification bailed, and the engine returned the
+    /// honest-but-non-fathoming `Numerical` instead of `Infeasible`. The MILP B&B then
+    /// could not prune the infeasible node, grinding to the node cap → the solve
+    /// reported `iteration_limit` where `optimal` was expected.
+    ///
+    /// Fixture: a captured node LP (`m=159, n=186`, 12 `−1` surplus slacks on the
+    /// `≥`-rows) from the trig-square piecewise relaxation of
+    /// `test_continuous_trig_square_uses_direct_piecewise_relaxation`. The `−1`
+    /// surplus-slack recovery (`s_i ≤ max_x (A x)_i − b_i`) makes the ray certify.
+    /// FAILS pre-fix (returns `Numerical`); passes after (`Infeasible`).
+    #[test]
+    fn c39_surplus_slack_infeasible_certifies() {
+        let json = include_str!("testdata/c39_surplus_slack_infeasible_lp.json");
+        let (m, n, col_ptr, row_idx, vals, c, l, u, b) = parse_lp_fixture(json);
+        let sp = SparseCols::from_csc(col_ptr, row_idx, vals);
+        let r = solve_lp_cols(sp, m, n, &c, &l, &u, &b, &SimplexOptions::default());
+        assert_eq!(
+            r.status,
+            LpStatus::Infeasible,
+            "genuinely-infeasible node LP with −1 surplus slacks (HiGHS-infeasible) \
+             must certify Infeasible via surplus-slack recovery, got {:?}",
+            r.status
+        );
+    }
+
+    /// A genuinely-infeasible node LP whose Farkas ray touches **scaled** surplus
+    /// slacks with coefficient `−0.5` (not just `±1`) — the perf regression the
+    /// `±1`-only recovery caused (main #558 follow-up). Geometric-mean equilibration
+    /// scales each `≥`-row slack by its row/col factor, so the surplus slacks appear
+    /// with coefficients like `−0.5`; the `±1`-only recovery left those columns open,
+    /// so `g₀` collapsed, the first-ray certification failed, and every such node LP
+    /// paid the full `drive_out_basic_artificials` loop (~34 ms) before returning
+    /// `Numerical` anyway — ~1500 wasted drive-outs made
+    /// `test_gas_square_difference_tightening_strengthens_root_relaxation` ~20×
+    /// slower (69 s vs 3.4 s single-threaded). The **general-coefficient** slack
+    /// recovery (`s_j ≤ (b_i − min/max_x Σ_{k≠j} A_ik x_k)/a`) certifies on the first
+    /// ray, so drive_out is never reached.
+    ///
+    /// Fixture: a captured node LP (`m=531, n=685`, mixed `−1` and `−0.5` scaled
+    /// surplus slacks) from the gas-square relaxation; HiGHS reports it infeasible
+    /// with `g₀ > 0`. FAILS pre-generalization (returns `Numerical` after a wasted
+    /// drive-out); passes after (`Infeasible`, first ray).
+    #[test]
+    fn c39_scaled_surplus_slack_infeasible_certifies() {
+        let json = include_str!("testdata/c39_scaled_surplus_slack_infeasible_lp.json");
+        let (m, n, col_ptr, row_idx, vals, c, l, u, b) = parse_lp_fixture(json);
+        let sp = SparseCols::from_csc(col_ptr, row_idx, vals);
+        let r = solve_lp_cols(sp, m, n, &c, &l, &u, &b, &SimplexOptions::default());
+        assert_eq!(
+            r.status,
+            LpStatus::Infeasible,
+            "genuinely-infeasible node LP with scaled (−0.5) surplus slacks \
+             (HiGHS-infeasible) must certify Infeasible via general-coefficient \
+             slack recovery, got {:?}",
+            r.status
         );
     }
 
