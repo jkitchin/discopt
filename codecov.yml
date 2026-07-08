@@ -1,0 +1,28 @@
+# Codecov configuration.
+#
+# Coverage is REPORTED but is NOT a blocking PR gate in this repo. The real
+# coverage floor (>=65% now; #87 tracks restoring to 85%) is enforced by
+# `--cov-fail-under=65` inside the label-gated `python-coverage` CI job
+# (.github/workflows/ci.yml), which runs on `main` pushes and on PRs tagged
+# `coverage`.
+#
+# The codecov status checks, by contrast, fire on EVERY PR. Without an uploaded
+# `coverage.xml` (the coverage job is skipped on unlabeled PRs) they cannot
+# compute a real comparison and default to FAILURE — a spurious red check /
+# alert on docs-only, results-only, and every unlabeled PR. Marking them
+# `informational` makes codecov post the coverage delta as a non-failing status,
+# eliminating the noise while keeping the report. Enforcement remains in the
+# coverage job's `--cov-fail-under`.
+coverage:
+  status:
+    project:
+      default:
+        informational: true
+    patch:
+      default:
+        informational: true
+
+# Keep the PR comment concise (it is not a failing check, just a summary).
+comment:
+  layout: "reach, diff, flags"
+  require_changes: true   # only comment when coverage actually changes
