@@ -5177,10 +5177,12 @@ def solve_model(
                             )
                             if _pool_chunks and _pool_chunks[0] is not None:
                                 # solve_at_node captures each separated chunk as a
-                                # (A, b) pair of upper-bound rows ``A x <= b`` over
-                                # the node's lifted column space; inherited_cuts
-                                # takes the same (A, b) form.
-                                _A_pool, _b_pool = _pool_chunks[0]
+                                # (A, b, col_idents) triple of upper-bound rows
+                                # ``A x <= b`` over the root's lifted column space
+                                # plus the per-column identity vector (C-44); a
+                                # node remaps the rows onto its own layout by those
+                                # identities. inherited_cuts takes the same form.
+                                _A_pool, _b_pool, _idents_pool = _pool_chunks[0]
                                 _n_pool = _A_pool.shape[0]
                                 if _n_pool > _root_cut_max:
                                     # Keep the last (most-recently separated, i.e.
@@ -5189,7 +5191,7 @@ def solve_model(
                                     # size so inheritance stays cheap.
                                     _A_pool = _A_pool[-_root_cut_max:]
                                     _b_pool = _b_pool[-_root_cut_max:]
-                                _root_cut_pool = (_A_pool, _b_pool)
+                                _root_cut_pool = (_A_pool, _b_pool, _idents_pool)
                                 # Keep the strengthened root bound: it is a valid
                                 # global lower bound (the pool relaxation holds over
                                 # the whole feasible region) and is far tighter than
@@ -5277,12 +5279,12 @@ def solve_model(
                             else:
                                 _root_sqpsd_frac = 0.0
                             if _pool_chunks and _pool_chunks[0] is not None:
-                                _A_pool, _b_pool = _pool_chunks[0]
+                                _A_pool, _b_pool, _idents_pool = _pool_chunks[0]
                                 _n_pool = _A_pool.shape[0]
                                 if _n_pool > _root_cut_max:
                                     _A_pool = _A_pool[-_root_cut_max:]
                                     _b_pool = _b_pool[-_root_cut_max:]
-                                _root_cut_pool = (_A_pool, _b_pool)
+                                _root_cut_pool = (_A_pool, _b_pool, _idents_pool)
                                 if (
                                     _pool_res is not None
                                     and _pool_res.lower_bound is not None
@@ -7858,12 +7860,12 @@ def solve_model(
                                     out_cuts=_rf_chunks,
                                 )
                                 if _rf_chunks and _rf_chunks[0] is not None:
-                                    _A_rf, _b_rf = _rf_chunks[0]
+                                    _A_rf, _b_rf, _idents_rf = _rf_chunks[0]
                                     if _A_rf is not None and _A_rf.shape[0] > 0:
                                         if _A_rf.shape[0] > _root_cut_max:
                                             _A_rf = _A_rf[-_root_cut_max:]
                                             _b_rf = _b_rf[-_root_cut_max:]
-                                        _root_cut_pool = (_A_rf, _b_rf)
+                                        _root_cut_pool = (_A_rf, _b_rf, _idents_rf)
                             except Exception as _rf_pool_exc:  # pragma: no cover
                                 logger.debug(
                                     "root-fixpoint cut-pool refresh skipped: %s",

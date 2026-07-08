@@ -58,7 +58,7 @@ def _sparse_cols(A) -> int:
 
 
 def _pool_has_rows(inherited_cuts: Optional[tuple]) -> bool:
-    """True iff ``inherited_cuts`` is a non-empty ``(A_rows, b_rows)`` pool.
+    """True iff ``inherited_cuts`` is a non-empty ``(A_rows, b_rows[, idents])`` pool.
 
     Sparse-safe row count: the pool ``A_rows`` is a scipy CSR matrix, whose
     ``len()`` is *ambiguous and raises* — so a naive ``len(A_rows) > 0`` check
@@ -70,6 +70,140 @@ def _pool_has_rows(inherited_cuts: Optional[tuple]) -> bool:
         return False
     a_rows = inherited_cuts[0]
     return a_rows is not None and _sparse_rows(a_rows) > 0
+
+
+# ── Column-identity-safe cut inheritance (C-44 / #567) ──────────────────────
+#
+# A root-pool row is stated by *column position* over the ROOT build's lifted
+# column layout. Per node the relaxation is re-built (cold path) or re-lifted by
+# lifted-FBBT, which can produce the *same column count* with *different column
+# semantics* — a given position that was ``x_2·x_5·x_8`` at the root can become
+# ``x_3·x_4`` at a node (measured on nvs22: 16–24 of 69 columns remap while the
+# count is unchanged). Appending a pool row by position onto such a node then
+# constrains the WRONG lifted variables → an invalid cut → a node holding the
+# true optimum can be falsely Farkas-fathomed (the C-43 mechanism). The
+# count-only guard (``sparse_cols == n_total``) cannot see this.
+#
+# The fix tags every pool row with the *identities* of the lifted columns it
+# references (the structural term key — the ``(i,j)`` bilinear pair, the
+# ``(i,p)`` monomial, the trilinear/multilinear tuple, the fractional power, the
+# univariate-square base) and, per node, remaps each row's coefficients from
+# root-column-identity → the node's current position for that SAME identity. A
+# row that references a column whose identity is absent or changed at the node is
+# INAPPLICABLE and is skipped (skipping an optional cut is always sound).
+
+
+def column_identities(varmap: dict, n_total: int, n_orig: int) -> tuple:
+    """Stable per-column identity keys for a lifted McCormick column layout.
+
+    Returns a tuple of length ``n_total``. Position ``k`` carries a hashable
+    identity that is *stable across builds* iff the column is either an original
+    model variable (``("orig", k)``, always fixed) or an aux lifted by a
+    structurally-keyed term map (bilinear ``(i,j)``, monomial ``(i,p)``,
+    trilinear/multilinear tuple, fractional power, or univariate square). Any
+    aux column not so claimed is tagged ``("opaque", k)`` — an identity that is
+    only ever equal to itself at the *same* position, so a pool row that
+    references it never remaps across a re-lifted layout and is skipped (sound).
+
+    The univariate-square key ``(base_col, 2)`` is resolved through the *base*
+    column's own identity, so a square of a lifted aux carries the aux's
+    structural identity rather than a raw (unstable) column index.
+    """
+    ident: list = [("orig", k) if k < n_orig else None for k in range(n_total)]
+    # Structurally-keyed aux maps: value is a column index, key is a stable
+    # structural term identity (independent of build order / Python ``id``).
+    for mapname in (
+        "bilinear",
+        "monomial",
+        "trilinear",
+        "multilinear",
+        "fractional_power",
+    ):
+        m = varmap.get(mapname) or {}
+        for key, col in m.items():
+            if isinstance(col, (int, np.integer)) and 0 <= int(col) < n_total:
+                ident[int(col)] = (mapname, key)
+    # Univariate square: key ``(base_col, 2)``; resolve the base to its identity
+    # (which may itself be a lifted aux) so the square is stably identified.
+    usq = varmap.get("univariate_square") or {}
+    for key, col in usq.items():
+        if not (isinstance(col, (int, np.integer)) and 0 <= int(col) < n_total):
+            continue
+        base = key[0] if isinstance(key, tuple) and key else None
+        base_id: object
+        if isinstance(base, (int, np.integer)) and 0 <= int(base) < n_total:
+            base_id = ident[int(base)]  # nested identity of the squared column
+        else:
+            base_id = base
+        ident[int(col)] = ("univariate_square", (base_id, key[1] if len(key) > 1 else 2))
+    # Any aux column left unclaimed: opaque, position-locked (never remaps).
+    for k in range(n_total):
+        if ident[k] is None:
+            ident[k] = ("opaque", k)
+    return tuple(ident)
+
+
+def _remap_pool_rows(a_rows, b_rows, root_idents, node_idents, ncol: int):
+    """Remap root-pool rows onto a node's column layout by column identity.
+
+    ``a_rows`` (dense 2-D array, one row per pooled cut over the ROOT layout) and
+    ``b_rows`` are remapped so each root column position is moved to the node
+    position that carries the SAME identity (``root_idents``/``node_idents`` are
+    the identity tuples from :func:`column_identities`). A row is emitted only if
+    EVERY column it references with a nonzero coefficient has its identity present
+    at the node; otherwise the row is inapplicable and is dropped (sound — fewer
+    cuts only loosen the relaxation).
+
+    Returns ``(A_remapped, b_remapped, n_kept, n_skipped)`` where ``A_remapped``
+    is an ``(n_kept, ncol)`` dense array in the NODE column space (or ``None`` if
+    no row survives)."""
+    a = np.atleast_2d(np.asarray(a_rows, dtype=np.float64))
+    b = np.asarray(b_rows, dtype=np.float64).ravel()
+    if a.size == 0 or a.shape[0] == 0:
+        return None, None, 0, 0
+    # node identity -> node column position (first wins; identities are unique
+    # per build by construction — orig cols are unique, structural keys unique,
+    # opaque keys carry their own position).
+    node_pos: dict = {}
+    for pos, key in enumerate(node_idents):
+        if key not in node_pos:
+            node_pos[key] = pos
+    n_root_cols = len(root_idents)
+    out_rows = []
+    out_b = []
+    n_skipped = 0
+    for r in range(a.shape[0]):
+        row = a[r]
+        nz = np.nonzero(np.abs(row) > 0.0)[0]
+        new_row = np.zeros(ncol, dtype=np.float64)
+        ok = True
+        for c in nz:
+            if c >= n_root_cols:
+                ok = False  # references a column absent from the root identity map
+                break
+            rid = root_idents[c]
+            # An opaque root column has no verifiable stable identity across builds
+            # (only its own position), so a nonzero coefficient on one cannot be
+            # soundly remapped — refuse the row. (In practice pool rows never touch
+            # opaque columns; this is defense-in-depth.)
+            if isinstance(rid, tuple) and rid and rid[0] == "opaque":
+                ok = False
+                break
+            tgt = node_pos.get(rid)
+            if tgt is None:
+                ok = False  # this lifted term is not present at the node → skip row
+                break
+            new_row[tgt] += row[c]
+        if ok:
+            out_rows.append(new_row)
+            out_b.append(b[r])
+        else:
+            n_skipped += 1
+    if not out_rows:
+        return None, None, 0, n_skipped
+    A_out = np.array(out_rows, dtype=np.float64)
+    b_out = np.array(out_b, dtype=np.float64)
+    return A_out, b_out, len(out_rows), n_skipped
 
 
 def _append_relax_rows(milp, A_rows, b_rows) -> None:
@@ -332,6 +466,9 @@ class MccormickLPRelaxer:
         self._pool_stats: dict[str, int] = {
             "inherited_nodes": 0,
             "inherited_rows": 0,
+            # C-44: pool rows dropped at a node because a lifted term they
+            # reference is absent/remapped there (column-identity skip — sound).
+            "inherited_rows_skipped": 0,
             "skipped_separations": 0,
             "dropped_nodes": 0,
             "lazy_reseparations": 0,
@@ -542,18 +679,49 @@ class MccormickLPRelaxer:
         try:
             cut_rows = None
             if inherited_cuts is not None:
-                a_rows, b_rows = inherited_cuts
-                if a_rows is not None and len(a_rows) > 0:
-                    a_rows = np.asarray(a_rows, dtype=np.float64)
+                a_rows = inherited_cuts[0]
+                b_rows = inherited_cuts[1]
+                root_idents = inherited_cuts[2] if len(inherited_cuts) > 2 else None
+                if a_rows is not None and _sparse_rows(a_rows) > 0:
+                    a_rows = _as_csr(a_rows).toarray()
                     b_rows = np.asarray(b_rows, dtype=np.float64).ravel()
-                    # Apply the root cut pool only when its column layout matches the
-                    # incremental structure exactly; a mismatch would address the
-                    # wrong columns (skipping is sound — fewer cuts only loosen).
-                    if (
+                    node_idents = getattr(inc, "col_identities", None)
+                    # A pool captured over a WIDER column layout than this incremental
+                    # structure carries (``a_rows.shape[1] != inc.ncol``) cannot be
+                    # applied here — decline the incremental path (fall to the cold
+                    # build, which re-lifts to the pool's own layout and can inherit
+                    # it there). This preserves the pre-C-44 routing (the count check
+                    # gated inheritance to the cold path on such models, e.g.
+                    # dispatch: pool 23 cols vs incremental 10 cols) while C-44 makes
+                    # the equal-count case IDENTITY-safe below.
+                    _count_ok = (
                         a_rows.ndim == 2
                         and a_rows.shape[1] == inc.ncol
                         and len(b_rows) == a_rows.shape[0]
-                    ):
+                    )
+                    if not _count_ok:
+                        return None
+                    # C-44: at the SAME column count, remap the root pool from its
+                    # ROOT column identities onto this structure's layout by matching
+                    # identity — the old count-only gate appended a row by position
+                    # even when a re-lift remapped which lifted variable each position
+                    # means (same count, different semantics → the C-43 false-fathom).
+                    # A row referencing a lifted term this layout does not carry at
+                    # that count is skipped (sound — fewer cuts only loosen).
+                    if root_idents is not None and node_idents is not None:
+                        A_rm, b_rm, n_kept, n_skip = _remap_pool_rows(
+                            a_rows, b_rows, root_idents, node_idents, inc.ncol
+                        )
+                        self._pool_stats["inherited_rows_skipped"] += n_skip
+                        if A_rm is not None and n_kept > 0:
+                            cut_rows = list(zip(A_rm, b_rm))
+                            self._pool_stats["inherited_nodes"] += 1
+                            self._pool_stats["inherited_rows"] += n_kept
+                    elif root_idents is None or node_idents is None:
+                        # Untagged pool or unavailable node identities (defensive
+                        # fallback): legacy count-gated positional append (we already
+                        # passed the equal-count precondition). Should not occur once
+                        # every capture tags idents and the structure builds them.
                         cut_rows = list(zip(a_rows, b_rows))
                         self._pool_stats["inherited_nodes"] += 1
                         self._pool_stats["inherited_rows"] += len(cut_rows)
@@ -1059,21 +1227,55 @@ class MccormickLPRelaxer:
                 return None
             return max(_deadline - time.perf_counter(), _SOLVE_DEADLINE_FLOOR_S)
 
-        # Root cut-pool inheritance (P1): append globally-valid cut rows separated
-        # once at the root instead of re-separating them every node. Sound — each
-        # pool row is a valid inequality at every feasible point regardless of the
-        # node box — but only column-aligned when the lifted layout is unchanged
-        # (a pinned child variable can pin/fold columns), so gate on a matching
-        # ``n_total`` and otherwise skip (fewer cuts only loosens the bound).
+        # Root cut-pool inheritance (P1 + C-44): append globally-valid cut rows
+        # separated once at the root instead of re-separating them every node.
+        # Each pool row is a valid inequality at every feasible point regardless
+        # of the node box — but it is stated over the ROOT's lifted column
+        # positions, and this node's re-built / re-lifted layout can carry
+        # *different* lifted variables at the same positions (same count,
+        # different semantics — the C-43 remapping). So instead of the old
+        # count-only gate (which appended a positionally-wrong row), remap each
+        # row from its ROOT column identities onto THIS build's column positions
+        # by :func:`column_identities`; a row referencing a lifted term this node
+        # does not carry is skipped (sound — fewer cuts only loosen the bound).
         _n_pre_pool_rows = 0 if milp._A_ub is None else _sparse_rows(milp._A_ub)
         _pool_rows_appended = 0
         if inherited_cuts is not None:
-            _ia, _ib = inherited_cuts
-            if _ia is not None and _sparse_cols(_ia) == n_total:
-                _append_relax_rows(milp, _ia, _ib)
-                _pool_rows_appended = _sparse_rows(_ia)
-                self._pool_stats["inherited_nodes"] += 1
-                self._pool_stats["inherited_rows"] += _pool_rows_appended
+            _ia = inherited_cuts[0]
+            _ib = inherited_cuts[1]
+            _root_idents = inherited_cuts[2] if len(inherited_cuts) > 2 else None
+            if _ia is not None and _sparse_rows(_ia) > 0:
+                _node_idents = None
+                try:
+                    _node_idents = column_identities(varmap, n_total, self._n_orig)
+                except Exception:
+                    logger.debug("node column-identity build failed; skipping pool", exc_info=True)
+                # Equal-count precondition (matches the legacy ``sparse_cols ==
+                # n_total`` gate): only inherit when the pool was captured over the
+                # same column count as this build, so C-44 stays behaviour-neutral on
+                # the layouts the legacy gate rejected and only *remaps* (never newly
+                # inherits) at equal count — exactly where the C-43 false-fathom lived.
+                _count_ok = _sparse_cols(_ia) == n_total
+                if _root_idents is not None and _node_idents is not None and _count_ok:
+                    _ia_dense = _as_csr(_ia).toarray()
+                    _A_rm, _b_rm, _n_kept, _n_skip = _remap_pool_rows(
+                        _ia_dense, _ib, _root_idents, _node_idents, n_total
+                    )
+                    self._pool_stats["inherited_rows_skipped"] += _n_skip
+                    if _A_rm is not None and _n_kept > 0:
+                        _append_relax_rows(milp, _A_rm, _b_rm)
+                        _pool_rows_appended = _n_kept
+                        self._pool_stats["inherited_nodes"] += 1
+                        self._pool_stats["inherited_rows"] += _pool_rows_appended
+                elif (_root_idents is None or _node_idents is None) and _count_ok:
+                    # Untagged pool or unavailable node identities (defensive
+                    # fallback): legacy count-gated positional append. Should not
+                    # occur once every capture site tags identities and the node
+                    # build produces them; kept so it degrades safely.
+                    _append_relax_rows(milp, _ia, _ib)
+                    _pool_rows_appended = _sparse_rows(_ia)
+                    self._pool_stats["inherited_nodes"] += 1
+                    self._pool_stats["inherited_rows"] += _pool_rows_appended
         _n_base_rows = 0 if milp._A_ub is None else _sparse_rows(milp._A_ub)
 
         res = milp.solve(time_limit=_remaining(), backend=self._backend)
@@ -1176,11 +1378,30 @@ class MccormickLPRelaxer:
 
         # Capture the rows the separation chain just appended, for the root cut
         # pool. Stated over this node's lifted column space (``n_total`` columns).
+        # C-44: tag the chunk with the per-column IDENTITIES of this build's
+        # layout (``column_identities``), so a node inheriting the pool can remap
+        # each row from these root-column identities onto its own (possibly
+        # re-lifted) column positions — or skip a row whose lifted term the node
+        # does not carry. The identity vector is captured from the SAME
+        # ``varmap`` the separated rows are stated over (post-FBBT-rebuild if that
+        # fired, since ``milp``/``varmap`` are swapped together above).
         if out_cuts is not None and milp._A_ub is not None:
             _A = _as_csr(milp._A_ub)
             if _A.shape[0] > _n_base_rows:
+                _n_total_cap = int(np.size(milp._c))
+                try:
+                    _idents = column_identities(varmap, _n_total_cap, self._n_orig)
+                except Exception:
+                    logger.debug(
+                        "column-identity capture failed; pool chunk untagged", exc_info=True
+                    )
+                    _idents = None
                 out_cuts.append(
-                    (_A[_n_base_rows:].copy(), np.asarray(milp._b_ub)[_n_base_rows:].copy())
+                    (
+                        _A[_n_base_rows:].copy(),
+                        np.asarray(milp._b_ub)[_n_base_rows:].copy(),
+                        _idents,
+                    )
                 )
 
         # Rigorous bound / fathom from pure-Rust certificates (issue #356) — no

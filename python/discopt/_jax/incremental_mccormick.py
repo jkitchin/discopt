@@ -162,6 +162,19 @@ class IncrementalMcCormickLP:
         self.bilinear = dict(info.get("bilinear", {}))
         self.monomial = dict(info.get("monomial", {}))  # any integer power p >= 2
 
+        # C-44: per-column identity vector for this fixed lifted layout. The
+        # incremental structure never rebuilds columns (``_patch`` only rewrites
+        # coefficients of existing rows), so this identity vector is stable across
+        # every node — a root cut pool (captured on the cold path over its own
+        # varmap) is remapped onto these positions by matching identity. Built
+        # from the same ``info`` (full varmap) the cold path returns.
+        try:
+            from discopt._jax.mccormick_lp import column_identities
+
+            self.col_identities = column_identities(info, self.ncol, self.n)
+        except Exception:
+            self.col_identities = None
+
         # map each product to its row indices (support subset of {factors, aux})
         supp = [set(np.nonzero(np.abs(A[k]) > _TOL)[0]) for k in range(A.shape[0])]
         self.bilin_rows = {}
