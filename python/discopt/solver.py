@@ -4845,16 +4845,38 @@ def solve_model(
     # warm LP solve instead of re-separating the PSD/RLT cuts from scratch. Stays
     # None unless the relaxer carries PSD cuts (the nvs* / box-QP regime).
     _root_cut_pool = None
+    # CUT-INHERIT-GRAD diagnostic: the fraction of the ONE root pool separation
+    # solve's wall spent in the square+PSD point-separation loops. Surfaced in
+    # ``solver_stats`` for observability; NOT the gate predicate (the entry
+    # experiment showed it does not separate win-from-neutral — the pool-fires
+    # signal does). ``None`` when no pool is separated.
+    _root_sqpsd_frac: Optional[float] = None
     # Root-cut-pool inheritance (THRU-4, ``DISCOPT_CUT_INHERIT`` /
-    # ``SolverTuning.cut_inherit``, default OFF). When on: (a) the general root
-    # cut pool below is captured even when the incremental engine is unavailable
-    # (the cold-path instances are exactly where THRU-3 measured the per-node
-    # separation drag), and (b) every node solve passes
-    # ``skip_pool_separators=True`` so the square/PSD point-separation loops —
-    # up to 8 full MILP re-solves per node each, 73%+12% of the nvs24 solve wall
-    # — are replaced by the inherited pool. Root behaviour is unchanged: the
-    # pool is separated with the full default chain on the root box.
-    _cut_inherit = _tuning().cut_inherit
+    # ``SolverTuning.cut_inherit``, **opt-in, default force-off**,
+    # CUT-INHERIT-GRAD). Tri-state resolution:
+    #   * ``_cut_inherit_mode is True``  — force ON  (env ``=1`` / ``cut_inherit=True``)
+    #   * ``_cut_inherit_mode is False`` — force OFF (env unset/``=0`` / ``cut_inherit=False``)
+    #     — the SHIPPED DEFAULT: byte-identical to pre-THRU-4 behaviour.
+    #   * ``_cut_inherit_mode is None``  — STRUCTURE-GATED opt-in (env ``=gated`` /
+    #     ``cut_inherit=None``): the pool is captured optimistically at the root and
+    #     inheritance engages iff a non-empty pool actually populates
+    #     (``_root_cut_pool is not None``). Validated broadly beneficial where it
+    #     fires, but NOT the default — a flag-path false-optimal on the MINLP
+    #     cold-path class (nvs22) blocks the flip (CLAUDE.md §1; see
+    #     ``docs/dev/cut-inherit-grad-2026-07-08.md``).
+    # When active: (a) the general root cut pool below is captured even when the
+    # incremental engine is unavailable (cold-path instances — nvs19/24 — are
+    # exactly where THRU-3 measured the per-node separation drag), and (b) every
+    # node solve passes ``skip_pool_separators=True`` so the square/PSD
+    # point-separation loops — up to 8 full MILP re-solves per node each — are
+    # replaced by the inherited pool. Root behaviour is unchanged. When the model
+    # carries no liftable square/PSD structure the pool stays empty and the gated
+    # path is byte-identical to force-OFF.
+    _cut_inherit_mode = _tuning().cut_inherit
+    # "Not forced off" — the condition under which the root pool is captured and
+    # (given a populated pool) inheritance is allowed to engage. Forced-ON and
+    # structure-gated both capture; only an explicit ``=0`` suppresses it.
+    _cut_inherit_enabled = _cut_inherit_mode is not False
     # The dual bound the root cut-pool relaxation proves over the whole feasible
     # region (a valid global lower bound for a MINIMIZE). The pool is separated for
     # its CUT ROWS, but the strengthened relaxation also yields a far tighter root
@@ -5192,7 +5214,7 @@ def solve_model(
                         except Exception as _pool_exc:  # pragma: no cover - defensive
                             logger.debug("root cut pool separation skipped: %s", _pool_exc)
                             _root_cut_pool = None
-                    elif getattr(_mc_lp_relaxer, "_inc", None) is not None or _cut_inherit:
+                    elif getattr(_mc_lp_relaxer, "_inc", None) is not None or _cut_inherit_enabled:
                         # Root cut pool for the GENERAL spatial path (cert:T1.3).
                         # When the incremental engine is active but PSD cuts are
                         # off, the fast path (which skips per-node separation) would
@@ -5206,7 +5228,8 @@ def solve_model(
                         # every sub-box, so an inherited row never removes a
                         # feasible point.
                         #
-                        # THRU-4 (``_cut_inherit``): additionally capture this pool
+                        # THRU-4/CUT-INHERIT-GRAD (``_cut_inherit_enabled``):
+                        # additionally capture this pool
                         # when the incremental engine is unavailable — cold-path
                         # nodes are exactly where the per-node square/PSD point
                         # separators dominate (nvs24: 73%+12% of the solve wall) —
@@ -5219,12 +5242,40 @@ def solve_model(
                                 max(time_limit * 0.25, 5.0),
                                 max(_root_remaining, _DEADLINE_NODE_FLOOR_S),
                             )
+                            # CUT-INHERIT-GRAD structure predicate: snapshot the
+                            # per-family separation timers BEFORE the root pool solve
+                            # so the square+PSD wall this ONE root separation spends is
+                            # isolable (no node solves have run yet, so the delta is
+                            # root-only). The fraction of the root pool solve's wall
+                            # consumed by the two point-separation loops is the
+                            # cheap, general, root-time feature that discriminates the
+                            # dense-integer-QP win class (loops dominate the node wall,
+                            # THRU-3: nvs24 73%+12%, nvs19 42%+20%) from the neutral
+                            # quadratic slice (loops fire but are not the bottleneck,
+                            # THRU-4-graduate wall ratio 1.004x). Keys on measured cost
+                            # only — never on instance name/shape (CLAUDE.md §2).
+                            _sep_before = dict(getattr(_mc_lp_relaxer, "_sep_timers", {}))
+                            _sqpsd_before = _sep_before.get("univariate_square", 0.0) + (
+                                _sep_before.get("psd", 0.0)
+                            )
+                            _pool_solve_t0 = time.perf_counter()
                             _pool_res = _mc_lp_relaxer.solve_at_node(
                                 _probe_lb,
                                 _probe_ub,
                                 time_limit=_pool_budget,
                                 out_cuts=_pool_chunks,
                             )
+                            _pool_solve_wall = time.perf_counter() - _pool_solve_t0
+                            _sep_after = getattr(_mc_lp_relaxer, "_sep_timers", {})
+                            _sqpsd_root_wall = (
+                                _sep_after.get("univariate_square", 0.0)
+                                + _sep_after.get("psd", 0.0)
+                                - _sqpsd_before
+                            )
+                            if _pool_solve_wall > 1e-9:
+                                _root_sqpsd_frac = max(0.0, _sqpsd_root_wall / _pool_solve_wall)
+                            else:
+                                _root_sqpsd_frac = 0.0
                             if _pool_chunks and _pool_chunks[0] is not None:
                                 _A_pool, _b_pool = _pool_chunks[0]
                                 _n_pool = _A_pool.shape[0]
@@ -5713,7 +5764,7 @@ def solve_model(
         # pool inheritance: the default path reads no extra state and is
         # byte-identical.
         _lazy_probing = False
-        if _cut_inherit and _root_cut_pool is not None:
+        if _cut_inherit_enabled and _root_cut_pool is not None:
             try:
                 _glb_now = float(tree.stats()["global_lower_bound"])
             except Exception:  # pragma: no cover - defensive
@@ -6077,7 +6128,9 @@ def solve_model(
                             # families are box-independent and already in the pool)
                             # — unless the global-stall governor is probing (C-42).
                             skip_pool_separators=(
-                                _cut_inherit and _root_cut_pool is not None and not _lazy_probing
+                                _cut_inherit_enabled
+                                and _root_cut_pool is not None
+                                and not _lazy_probing
                             ),
                         )
                     except Exception as e:
@@ -6392,7 +6445,9 @@ def solve_model(
                             # families are box-independent and already in the pool)
                             # — unless the global-stall governor is probing (C-42).
                             skip_pool_separators=(
-                                _cut_inherit and _root_cut_pool is not None and not _lazy_probing
+                                _cut_inherit_enabled
+                                and _root_cut_pool is not None
+                                and not _lazy_probing
                             ),
                         )
                     except Exception as e:
@@ -8236,6 +8291,23 @@ def solve_model(
     # the skip lever are observable on the final result.
     if _root_cut_pool is not None:
         _solver_stats["pool/size"] = float(_root_cut_pool[0].shape[0])
+    # CUT-INHERIT-GRAD: surface the structure predicate's root feature so the
+    # gate decision is verifiable from the outside (entry experiment + fire-proof).
+    if _root_sqpsd_frac is not None:
+        _solver_stats["pool/root_sqpsd_frac"] = float(_root_sqpsd_frac)
+    # CUT-INHERIT-GRAD gate decision (verifiable firing). ``mode``: 1 force-on,
+    # 0 force-off (env unset/``=0`` — the shipped default), -1 structure-gated
+    # opt-in (``=gated``/``cut_inherit=None``). ``gate_decision``: 1 iff
+    # inheritance actually engaged (not forced off AND a non-empty root pool was
+    # separated — the pool-fires predicate); the feature it keys on is the pool
+    # size, surfaced as ``pool/size`` above.
+    _gate_mode_code = (
+        1.0 if _cut_inherit_mode is True else (0.0 if _cut_inherit_mode is False else -1.0)
+    )
+    _solver_stats["pool/gate_mode"] = _gate_mode_code
+    _solver_stats["pool/gate_decision"] = (
+        1.0 if (_cut_inherit_enabled and _root_cut_pool is not None) else 0.0
+    )
     if _mc_lp_relaxer is not None and getattr(_mc_lp_relaxer, "_pool_stats", None):
         for _pfam, _pcount in _mc_lp_relaxer._pool_stats.items():
             if _pcount > 0:

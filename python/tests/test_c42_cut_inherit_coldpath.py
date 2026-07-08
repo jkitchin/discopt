@@ -146,6 +146,42 @@ def test_nvs06_cut_inherit_certifies_like_default():
     assert stats.get("pool/dropped_nodes", 0) >= 1, f"pool-drop retry never fired: {stats}"
 
 
+_CORPUS = Path.home() / "Dropbox" / "projects" / "discopt-minlp-benchmark" / "minlplib" / "nl"
+
+
+@pytest.mark.slow
+@pytest.mark.xfail(
+    reason="CUT-INHERIT-GRAD blocker: flag-ON false-optimal on the MINLP cold-path "
+    "class — nvs22 certifies 33.55 vs oracle 6.0582. The nvs06-class incumbent-"
+    "search reroute that C-42's pool-drop-retry does not cover (the pool solve "
+    "SUCCEEDS but the pre-tree pump is rerouted). Blocks the default-ON flip; the "
+    "flag stays opt-in until fixed. See docs/dev/cut-inherit-grad-2026-07-08.md.",
+    strict=True,
+)
+def test_nvs22_cut_inherit_no_false_optimal():
+    """Pins the CUT-INHERIT-GRAD graduation blocker. The DEFAULT (force-off) path
+    certifies nvs22's oracle optimum 6.0582 correctly; flag-ON currently returns a
+    FALSE-OPTIMAL 33.55. This xfail(strict) fails (i.e. flips to XPASS and the
+    suite goes red) the moment the flag-path reroute is fixed — the signal to
+    revisit the default-ON flip."""
+    nl = _CORPUS / "nvs22.nl"
+    if not nl.exists():
+        pytest.skip("nvs22 not in the local MINLPLib corpus")
+    # Sanity: the default (force-off) path is SOUND — this must always hold.
+    ref = from_nl(str(nl)).solve(time_limit=25, gap_tolerance=1e-4)
+    assert ref.objective == pytest.approx(6.0582200, rel=5e-3), (
+        f"default-path nvs22 regressed: {ref.objective}"
+    )
+    # Flag-ON currently produces a false certificate (this assertion is the xfail).
+    res = from_nl(str(nl)).solve(
+        time_limit=25, gap_tolerance=1e-4, tuning=SolverTuning(cut_inherit=True)
+    )
+    if str(res.status) == "optimal":
+        assert res.objective == pytest.approx(6.0582200, rel=5e-3), (
+            f"nvs22 flag-ON FALSE-OPTIMAL: certified {res.objective} vs oracle 6.0582"
+        )
+
+
 @pytest.mark.slow
 def test_tspn05_cut_inherit_certifies_via_lazy_reseparation():
     """The other #552 blocker: with inheritance-only, tspn05's bound stalls at

@@ -27,6 +27,7 @@ from __future__ import annotations
 import os
 from contextvars import ContextVar
 from dataclasses import dataclass, field, fields
+from typing import Optional
 
 
 def _env_flag(name: str, *, default: bool) -> bool:
@@ -34,6 +35,30 @@ def _env_flag(name: str, *, default: bool) -> bool:
     raw = os.environ.get(name)
     if raw is None:
         return default
+    return raw != "0"
+
+
+def _env_cut_inherit(name: str) -> Optional[bool]:
+    """``DISCOPT_CUT_INHERIT`` as a tri-state:
+
+    * unset ⇒ ``False`` — **force-off is the shipped default** (opt-in flag).
+      CUT-INHERIT-GRAD validated the structure gate as broadly beneficial where
+      it fires and byte-identical where it does not, BUT surfaced a flag-path
+      false-optimal on the pure-integer / MINLP cold-path class (nvs22 certifies
+      33.55 vs the oracle 6.058; the nvs06-class reroute C-42 only partially
+      fixed). Per CLAUDE.md §1 a false certificate blocks any default-ON flip, so
+      the gated behaviour stays OPT-IN until that soundness bug is fixed.
+    * ``"0"`` ⇒ ``False`` (explicit force-off, identical to unset today);
+    * ``"gated"`` / ``"auto"`` ⇒ ``None`` (structure-gated opt-in: inherit iff a
+      non-empty root pool is separated — the pool-fires predicate);
+    * anything else (e.g. ``"1"``) ⇒ ``True`` (force-on).
+    """
+    raw = os.environ.get(name)
+    if raw is None:
+        return False
+    low = raw.strip().lower()
+    if low in ("gated", "auto"):
+        return None
     return raw != "0"
 
 
@@ -198,25 +223,52 @@ class SolverTuning:
     improvement ``Δ ≤ tau × (1 + |lb_before|)`` abandons the remaining rounds at
     that node. Only consulted when :attr:`square_cost_gate` is on."""
 
-    # --- root-cut-pool inheritance (THRU-4, default OFF) -----------------------
-    cut_inherit: bool = field(
-        default_factory=lambda: _env_flag("DISCOPT_CUT_INHERIT", default=False)
+    # --- root-cut-pool inheritance (THRU-4, structure-gated default) -----------
+    cut_inherit: Optional[bool] = field(
+        default_factory=lambda: _env_cut_inherit("DISCOPT_CUT_INHERIT")
     )
-    """Root-cut-pool inheritance for the per-node square/PSD separation loops
-    (``DISCOPT_CUT_INHERIT``, default **OFF**). THRU-3 measured that the two
-    per-node point separators — the univariate-square tangent loop and the PSD
-    (moment) loop — are the dominant per-node cost on dense integer QPs (nvs24:
-    73% + 12% of the solve wall), each re-deriving cuts via up to 8 full MILP
-    re-solves at EVERY node; with both off, nvs24 runs 9→309 nodes (36×) with
-    the dual bound at TL essentially unchanged. When on, the root separates the
-    full cut chain ONCE (unchanged root behaviour), the accepted rows are stored
-    in the root cut pool, and every node *inherits* the pool instead of
-    re-running the square/PSD separation loops. SOUND: the inherited square
-    tangents (``s ≥ 2·x0·x − x0²``) and PSD eigencuts (``vᵀMv ≥ 0``) are valid at
-    every feasible lifted point independent of the node box, and every other
-    captured family is valid over the ROOT box, hence over every descendant
-    sub-box; skipping per-node re-separation only *loosens* the node relaxation
-    (never cuts a feasible point). See
+    """Root-cut-pool inheritance for the per-node square/PSD separation loops —
+    **tri-state, opt-in** (``DISCOPT_CUT_INHERIT``: unset / ``0`` ⇒ force-off = the
+    shipped default; ``gated``/``auto`` ⇒ structure-gated opt-in; ``1`` ⇒
+    force-on. Programmatically ``cut_inherit=None`` selects the structure gate.)
+
+    THRU-3 measured that the two per-node point separators — the univariate-square
+    tangent loop and the PSD (moment) loop — are the dominant per-node cost on the
+    cut-firing quadratic class (nvs24: 73% + 12% of the solve wall), each
+    re-deriving cuts via up to 8 full MILP re-solves at EVERY node. When active,
+    the root separates the full cut chain ONCE (unchanged root behaviour), the
+    accepted rows are stored in the root cut pool, and every node *inherits* the
+    pool instead of re-running the square/PSD separation loops.
+
+    **Structure gate (CUT-INHERIT-GRAD).** The activating predicate is *whether a
+    non-empty root cut pool is separated at the root* — a cheap, general,
+    root-time signal that keys on measured structure, never on instance
+    name/shape (CLAUDE.md §2). When the model carries the square/PSD-liftable
+    structure the pool populates and inheritance engages (measured broadly
+    beneficial: nvs17/19/23/24 1.6–5.4×, kall_circles 1.8–2.6×, knp3-12 ~4–9×,
+    dispatch 3.3×; nvs19 gains its certificate); when it does not, the pool is
+    empty, nothing is inherited or skipped, and the solve is **byte-identical to
+    the force-off path** (node_count + objective unchanged).
+
+    **Why still opt-in (default force-off).** The CUT-INHERIT-GRAD entry experiment
+    falsified THRU-4-graduate's "the 2–5× is specific to the dense integer-QP
+    class, broad flip is throughput-neutral" (that 1.004× was a TL=30s /
+    parallel-contention artifact; under clean serial measurement every pool-firing
+    instance benefits, so the honest gate is *pool-fires ⇒ ON*). BUT the same
+    validation surfaced a **flag-path false-optimal on the pure-integer / MINLP
+    cold-path class**: nvs22 certifies 33.55 against the oracle optimum 6.0582 —
+    an nvs06-class incumbent-search reroute that C-42 (#553) only partially fixed
+    (its pool-drop-retry does not trigger when the pool solve *succeeds* but the
+    pre-tree pump is rerouted). Per CLAUDE.md §1 a false certificate blocks any
+    default-ON flip, so the flag stays OPT-IN until that bug is fixed. See
+    ``docs/dev/cut-inherit-grad-2026-07-08.md``.
+
+    SOUND (where it fires cleanly): the inherited square tangents
+    (``s ≥ 2·x0·x − x0²``) and PSD eigencuts
+    (``vᵀMv ≥ 0``) are valid at every feasible lifted point independent of the
+    node box, and every other captured family is valid over the ROOT box, hence
+    over every descendant sub-box; skipping per-node re-separation only *loosens*
+    the node relaxation (never cuts a feasible point). See
     ``docs/dev/thru4-cut-inheritance-2026-07-07.md`` for the per-family validity
     classification and measurements."""
 
