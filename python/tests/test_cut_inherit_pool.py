@@ -21,7 +21,16 @@ Soundness invariants pinned here:
   node-level solves. A synthetic case demonstrates the hazard and asserts the
   flag-ON solve still certifies the true optimum that naive child-row
   inheritance would cut off.
-* **Default-off neutrality** — with the flag off, no pool-skip is performed.
+* **Force-off neutrality** — with ``cut_inherit=False`` (the shipped DEFAULT) no
+  pool-skip is performed.
+* **Structure gate (CUT-INHERIT-GRAD, OPT-IN)** — with ``cut_inherit=None`` (env
+  ``DISCOPT_CUT_INHERIT=gated``) the gate auto-engages iff a non-empty root pool is
+  separated (the pool-fires predicate): ON on a pool-firing dense QP, byte-identical
+  to force-off on a model that separates no square/PSD pool. The gate is validated
+  broadly beneficial where it fires but stays OPT-IN — the default-ON flip is
+  blocked by a flag-path false-optimal on the MINLP cold-path class (nvs22), see
+  ``docs/dev/cut-inherit-grad-2026-07-08.md``. Env precedence: unset/``0`` ⇒
+  force-off (default), ``gated``/``auto`` ⇒ structure-gated, ``1`` ⇒ force-on.
 """
 
 from __future__ import annotations
@@ -199,11 +208,83 @@ def test_box_dependent_child_rows_would_be_invalid_and_are_excluded():
 
 
 @pytest.mark.smoke
-def test_cut_inherit_default_off_no_skip():
-    """Default (flag off): the square/PSD separators run as before — no pool-skip."""
+def test_cut_inherit_force_off_no_skip():
+    """Force-off (``cut_inherit=False``): the square/PSD separators run as before —
+    no pool-skip, regardless of structure."""
     model = _build_dense_int_qp()
-    res = model.solve(time_limit=60)
+    res = model.solve(time_limit=60, tuning=SolverTuning(cut_inherit=False))
     opt, _ = _brute_force_opt()
     assert res.objective == pytest.approx(opt, abs=1e-5)
     stats = res.solver_stats or {}
     assert stats.get("pool/skipped_separations", 0) == 0
+    assert stats.get("pool/gate_decision", 0.0) == 0.0
+    assert stats.get("pool/gate_mode", 0.0) == 0.0  # forced off
+
+
+@pytest.mark.smoke
+def test_cut_inherit_structure_gated_fires_on_dense_qp():
+    """CUT-INHERIT-GRAD: the STRUCTURE-GATED opt-in (``cut_inherit=None``, env
+    ``DISCOPT_CUT_INHERIT=gated``) must auto-engage on a model that separates a
+    non-empty root pool — the pool-fires predicate. On the dense integer QP the
+    pool populates, so the gate decision is ON and the square/PSD separators are
+    skipped at nodes, while the certificate is preserved (bound <= optimum)."""
+    model = _build_dense_int_qp()
+    res = model.solve(time_limit=60, tuning=SolverTuning(cut_inherit=None))
+    opt, _ = _brute_force_opt()
+    assert res.objective == pytest.approx(opt, abs=1e-5)
+    if res.bound is not None:
+        assert res.bound <= opt + 1e-6, f"dual bound {res.bound} crossed the optimum {opt}"
+    stats = res.solver_stats or {}
+    assert stats.get("pool/size", 0) >= 1, f"root pool did not populate: {stats}"
+    assert stats.get("pool/gate_mode", 0.0) == -1.0, "expected structure-gated mode"
+    assert stats.get("pool/gate_decision", 0.0) == 1.0, (
+        f"structure gate did not engage on a pool-firing model: {stats}"
+    )
+    assert stats.get("pool/skipped_separations", 0) >= 1, (
+        f"gated-on solve did not skip any per-node separation: {stats}"
+    )
+
+
+def _build_linear_int() -> dm.Model:
+    m = dm.Model("linear_int")
+    x = m.integer("x", shape=(3,), lb=0, ub=5)
+    m.minimize(x[0] + 2 * x[1] + 3 * x[2])
+    m.subject_to(x[0] + x[1] + x[2] >= 4)
+    return m
+
+
+@pytest.mark.smoke
+def test_cut_inherit_structure_gated_inert_when_pool_empty():
+    """CUT-INHERIT-GRAD off-class: on a model with no liftable square/PSD structure
+    the root pool stays empty, so the structure gate does NOT engage and the solve
+    is byte-identical to force-off (same node_count + objective). A pure linear
+    integer model separates no square/PSD pool."""
+    res_gated = _build_linear_int().solve(time_limit=30, tuning=SolverTuning(cut_inherit=None))
+    res_off = _build_linear_int().solve(time_limit=30, tuning=SolverTuning(cut_inherit=False))
+    # Gate must not fire (empty/absent pool) and the two paths must be identical.
+    sg = res_gated.solver_stats or {}
+    assert sg.get("pool/gate_decision", 0.0) == 0.0, f"gate wrongly fired off-class: {sg}"
+    assert res_gated.node_count == res_off.node_count
+    assert res_gated.objective == pytest.approx(res_off.objective, abs=1e-9)
+
+
+@pytest.mark.smoke
+def test_cut_inherit_env_tristate_precedence(monkeypatch):
+    """The env override precedence (CUT-INHERIT-GRAD, opt-in default): unset ⇒
+    force-off (``False``, the shipped default — the gated flip is blocked by the
+    nvs22 flag-path false-optimal), ``=0`` ⇒ force-off, ``=gated``/``=auto`` ⇒
+    structure-gated opt-in (``None``), ``=1`` (any other non-``0``) ⇒ force-on."""
+    from discopt.solver_tuning import SolverTuning as ST
+
+    monkeypatch.delenv("DISCOPT_CUT_INHERIT", raising=False)
+    assert ST().cut_inherit is False  # default force-off (opt-in flag)
+    monkeypatch.setenv("DISCOPT_CUT_INHERIT", "0")
+    assert ST().cut_inherit is False  # explicit force-off
+    monkeypatch.setenv("DISCOPT_CUT_INHERIT", "gated")
+    assert ST().cut_inherit is None  # structure-gated opt-in
+    monkeypatch.setenv("DISCOPT_CUT_INHERIT", "auto")
+    assert ST().cut_inherit is None  # auto alias
+    monkeypatch.setenv("DISCOPT_CUT_INHERIT", "1")
+    assert ST().cut_inherit is True  # force-on
+    monkeypatch.setenv("DISCOPT_CUT_INHERIT", "yes")
+    assert ST().cut_inherit is True  # any other non-"0" ⇒ on
