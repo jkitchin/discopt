@@ -74,6 +74,16 @@ timed_phases!(
     AlphaFtran,
     FtUpdate,
     Refactorize,
+    // Warm dual-simplex node-LP phases (THRU-5): split the pure-LP node re-solve
+    // (`solve_lp_warm_csc`) into the one-time basis factorize + dual-feasibility
+    // verify (`DualPrepare`), the exact basic-value / reduced-cost recompute the
+    // loop seeds and periodically refreshes from (`DualRecompute`), and the dual
+    // pivot loop itself (`DualPivotLoop`). Instrumentation only; the existing
+    // simplex phases above cover the cold/primal path but not this warm dual one,
+    // which is the dominant per-node cost on the pure-LP node-bound path.
+    DualPrepare,
+    DualRecompute,
+    DualPivotLoop,
 );
 
 // Pivot categorization for the cold-primal simplex (degeneracy analysis).
@@ -125,6 +135,14 @@ counters!(
     // healthy majority — so the guard's action is auditable and its
     // bound-neutrality (same optimum, cold path) is measurable.
     DualStallTrips,
+    // THRU-5: split the primal refactorization trigger into its three causes so the
+    // wide-McCormick refactor thrash can be attributed. RefacFtFail = the FT
+    // (product-form) update returned Err (numerical bump breakdown → forced
+    // refactor); RefacCap = the hard 48-update cap; RefacWorkGate = the adaptive
+    // work gate (accumulated update work exceeded factor nnz × mult).
+    RefacFtFail,
+    RefacCap,
+    RefacWorkGate,
 );
 
 #[inline(always)]

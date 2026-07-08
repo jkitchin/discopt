@@ -47,6 +47,7 @@ os.environ["JAX_ENABLE_X64"] = "1"
 
 from pathlib import Path
 
+import pytest
 from discopt.modeling.core import from_nl
 
 _DATA = Path(__file__).parent / "data" / "minlplib"
@@ -55,6 +56,11 @@ _DATA = Path(__file__).parent / "data" / "minlplib"
 _UTIL_OPT = 999.5787502  # =opt= (the true global minimum)
 
 
+# The soundness check runs to the solver's own 60 s time_limit; with JAX compile
+# the wall is ~60-65 s, which straddles the 120 s PR-fast --timeout on slower CI
+# runners. The per-test marker overrides the CLI cap so this correctness guard
+# stays in the PR-fast tier (unmarked / CI-visible) without a false CI timeout.
+@pytest.mark.timeout(300)
 def test_util_dual_bound_is_valid():
     """The DEFAULT-path dual bound must not exceed the true optimum (no false
     underestimator), and no false ``optimal`` certificate may be issued."""

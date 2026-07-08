@@ -62,3 +62,29 @@ def pytest_configure(config):
     config.addinivalue_line(
         "markers", "relaxation: per-operator relaxation soundness/coverage audit"
     )
+
+
+def _cyipopt_available() -> bool:
+    """True iff the optional cyipopt/Ipopt stack imports cleanly."""
+    import importlib.util
+
+    try:
+        return importlib.util.find_spec("cyipopt") is not None
+    except (ImportError, ValueError):
+        return False
+
+
+def pytest_collection_modifyitems(config, items):
+    """Auto-skip ``requires_cyipopt`` tests when cyipopt/Ipopt is unavailable.
+
+    The optional Ipopt system stack is installed via apt in CI, which can fail on
+    a transient mirror outage. Marked tests should then SKIP (not ERROR) so a flaky
+    install can't red the suite; locally, the same guard means the stack is only
+    needed when actually running those tests.
+    """
+    if _cyipopt_available():
+        return
+    skip_no_cyipopt = pytest.mark.skip(reason="cyipopt/Ipopt not installed")
+    for item in items:
+        if "requires_cyipopt" in item.keywords:
+            item.add_marker(skip_no_cyipopt)

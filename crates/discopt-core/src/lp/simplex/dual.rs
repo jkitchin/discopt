@@ -198,6 +198,7 @@ impl<'a> PreparedDual<'a> {
         opts: &SimplexOptions,
         sp: &'a SparseCols,
     ) -> Option<Self> {
+        let _t_prep = crate::profile::Timer::new(crate::profile::Phase::DualPrepare);
         let (m, n, l, u, c) = (lp.m, lp.n, lp.l, lp.u, lp.c);
         if start.basic_vars.len() != m {
             return None;
@@ -333,8 +334,13 @@ impl<'a> PreparedDual<'a> {
 
         // Exact basic values and reduced costs — the soundness anchor. Maintained
         // incrementally through the loop and refreshed from these (see the doc).
-        let mut xb = recompute_basic_values(&mut lu, sp, b, n, l, u, &stat)?;
-        let mut dvec = recompute_reduced_costs(&mut lu, sp, c, n, &basis)?;
+        let mut xb;
+        let mut dvec;
+        {
+            let _t_rc = crate::profile::Timer::new(crate::profile::Phase::DualRecompute);
+            xb = recompute_basic_values(&mut lu, sp, b, n, l, u, &stat)?;
+            dvec = recompute_reduced_costs(&mut lu, sp, c, n, &basis)?;
+        }
         // Iterations since the last exact refresh; bound roundoff in the rank-1
         // updates by refreshing at least this often (still far cheaper than the
         // per-iteration full recompute it replaces).
@@ -377,6 +383,8 @@ impl<'a> PreparedDual<'a> {
         // The loop index is the pivot count: each completed iteration performs one
         // pivot, and every early return happens at the loop top (before this
         // iteration's pivot), so `pivots` is exactly the number performed so far.
+        // THRU-5: time the whole pivot loop (RAII, records on any return path).
+        let _t_loop = crate::profile::Timer::new(crate::profile::Phase::DualPivotLoop);
         for pivots in 0..stall_cap {
             let bland = stall > bland_threshold;
             // Poll the wall-clock deadline (see SimplexOptions::deadline). On a
@@ -511,25 +519,36 @@ impl<'a> PreparedDual<'a> {
                 cand = build_candidates(n, &stat, l, u, &alpha_r, &dvec, to_lower, tol);
                 if cand.is_empty() {
                     xb = recompute_basic_values(&mut lu, sp, b, n, l, u, &stat)?;
-                    // Farkas dual ray: the leaving row's `ρ = eᵣᵀ B⁻¹`. With the
-                    // ratio test finding no entering column, `ρ` (or `−ρ`) is a
-                    // direction along which `bᵀy` beats the box-max of `(Aᵀy)ᵀz`,
-                    // certifying primal infeasibility — the caller verifies it.
-                    return Some(assemble(
-                        n,
-                        m,
-                        &basis,
-                        &slot_of,
-                        &stat,
-                        &xb,
-                        c,
-                        l,
-                        u,
-                        LpStatus::Infeasible,
-                        pivots,
-                        rho.clone(),
-                        Vec::new(),
-                    ));
+                    // Farkas dual ray: the leaving row's `ρ = eᵣᵀ B⁻¹`. With the ratio
+                    // test finding no entering column, `ρ` (or `−ρ`) is a candidate
+                    // direction along which `bᵀy` beats the box-max of `(Aᵀy)ᵀz`. But a
+                    // warm re-solve on an ill-conditioned / cut-augmented LP can empty
+                    // the candidate set *numerically* on a feasible LP (discopt C-39:
+                    // kall_circles / nvs06-cut), so a returned `Infeasible` here can be
+                    // a numerical false-infeasible. Verify the ray *inside the engine*
+                    // (the same Neumaier–Shcherbina test the caller applies): only a
+                    // certified ray returns `Infeasible`; otherwise return `None` so the
+                    // caller cold-falls-back to the trusted two-phase primal solve
+                    // (which self-verifies its own phase-1 verdict), never emitting a
+                    // false `Infeasible`.
+                    if super::primal::farkas_ray_certifies_cols(&rho, sp, n, m, b, l, u) {
+                        return Some(assemble(
+                            n,
+                            m,
+                            &basis,
+                            &slot_of,
+                            &stat,
+                            &xb,
+                            c,
+                            l,
+                            u,
+                            LpStatus::Infeasible,
+                            pivots,
+                            rho.clone(),
+                            Vec::new(),
+                        ));
+                    }
+                    return None;
                 }
             }
             cand.sort_by(|x, y| x.1.partial_cmp(&y.1).unwrap_or(std::cmp::Ordering::Equal));

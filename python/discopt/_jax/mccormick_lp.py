@@ -100,6 +100,46 @@ _LIFTED_FBBT_ROUNDS = 30
 _LIFTED_FBBT_TOL = 1e-9
 _LIFTED_FBBT_UNPIN_EPS = 1e-6
 
+# Lazy re-separation, relaxer-side arm (C-42, the THRU-4 follow-on). Under
+# root-pool inheritance (``skip_pool_separators``) a node normally skips the
+# per-node square/PSD point-separation loops — sound (skipping only loosens)
+# but not free on every class: on tspn05-shape spatial models the inherited
+# pool alone leaves each node too loose to fathom, the tree's bound stalls,
+# and the certificate is lost at budget (THRU-4 graduation, #552). The full
+# trigger is split between two layers:
+#   (a) the DRIVER's global-bound-stall governor (``solver.py``,
+#       ``_LAZY_RESEP_STALL_WINDOW`` there): when the tree's global lower
+#       bound stagnates, it stops passing ``skip_pool_separators`` for a
+#       bounded probe of node solves, and mutes again if the probe does not
+#       move the bound;
+#   (b) this module's stride safety net: every ``_LAZY_RESEP_STRIDE``-th
+#       skip-eligible node solve runs the full separation pass regardless, so
+#       inheritance can never fully starve a class the governor misjudges.
+#
+# Two per-NODE signals were tried first and FALSIFIED by measurement
+# (2026-07-07, this branch — kept as a negative result per CLAUDE.md §4):
+#   * "node LP value fails to improve on the parent's bound" fires on 185/191
+#     nvs19 nodes — on the dense integer-QP class the node LP sitting at the
+#     parent bound is the NORMAL state (closure comes from branching depth),
+#     and the resulting re-separation destroys the 2–5× throughput win of
+#     #551 (nvs19 loses its 53 s certificate again);
+#   * "LP-value gain of the re-separation pass below a threshold" does not
+#     discriminate either: on nvs19 the per-fire LP gain is LARGE (median
+#     rel. gain 0.117) yet worthless for the 60 s certificate — separation
+#     there is bound-productive but wall-unproductive.
+# The discriminating signal is the GLOBAL bound's progress per wall spent,
+# which only the driver can see — hence the split above.
+#
+# The stride is GLOBAL — never tuned per instance. Firing more only tightens
+# a node's relaxation (every emitted cut is valid) and firing less only
+# loosens it, so the net affects performance, never soundness. Sized by
+# measurement: one separation pass on the dense integer-QP class costs
+# seconds (THRU-3: the loops are 73%+12% of the nvs24 solve wall), and a
+# 1-in-16 net measurably degraded nvs24's node throughput (49 -> 29 nodes at
+# the same 60 s budget); 1-in-64 keeps the starvation guarantee at a bounded
+# ~1.5 % worst-case node overhead.
+_LAZY_RESEP_STRIDE = 64
+
 
 def _lifted_lp_fbbt(
     A_ub: "object",
@@ -256,6 +296,34 @@ class MccormickLPRelaxer:
             "psd": 0.0,
             "rlt": 0.0,
         }
+        # THRU-3: count of nodes where the DISCOPT_SQUARE_COST_GATE gate fired
+        # (budget or diminishing-returns early-exit). Pure instrumentation; used to
+        # prove the default-OFF gate actually engages. Zero on the default path.
+        self._square_gate_fires: int = 0
+        # Root-cut-pool inheritance counters (THRU-4, ``DISCOPT_CUT_INHERIT``).
+        # Pure instrumentation — never affects control flow or the emitted cuts:
+        #   * inherited_nodes / inherited_rows: node solves that appended the
+        #     root pool (and how many rows in total), across the cold AND fast
+        #     paths;
+        #   * skipped_separations: node solves where the square/PSD point
+        #     separators were skipped in favour of the inherited pool;
+        #   * dropped_nodes: cold node solves where the pool-augmented system
+        #     produced no certified verdict and the pool rows were stripped for
+        #     a no-pool retry (C-42 — the pool is an accelerator, never a
+        #     dependency).
+        #   * lazy_reseparations: skip-eligible node solves where the lazy
+        #     trigger (bound stall vs the parent, or the stride safety net)
+        #     re-enabled the square/PSD separation pass (C-42 Part 2).
+        self._pool_stats: dict[str, int] = {
+            "inherited_nodes": 0,
+            "inherited_rows": 0,
+            "skipped_separations": 0,
+            "dropped_nodes": 0,
+            "lazy_reseparations": 0,
+        }
+        # Skip-eligible node-solve counter for the lazy-trigger stride net
+        # (see the module-level ``_LAZY_RESEP_STRIDE`` rationale).
+        self._lazy_skip_ctr: int = 0
         # Spatial-BB uses standard McCormick globally — no partitioning here.
         self._disc = DiscretizationState(partitions={})
         self._n_orig = sum(v.size for v in model._variables)
@@ -472,6 +540,8 @@ class MccormickLPRelaxer:
                         and len(b_rows) == a_rows.shape[0]
                     ):
                         cut_rows = list(zip(a_rows, b_rows))
+                        self._pool_stats["inherited_nodes"] += 1
+                        self._pool_stats["inherited_rows"] += len(cut_rows)
             A, b, bounds = inc.assemble(lb, ub, cut_rows=cut_rows)
             nrows = int(A.shape[0])
             # Densification guard (Issue #20), same cap as the cold path below.
@@ -659,6 +729,7 @@ class MccormickLPRelaxer:
         out_cuts: Optional[list] = None,
         psd_max_rounds: int = 8,
         want_marginals: bool = False,
+        skip_pool_separators: bool = False,
     ) -> MccormickLPResult:
         """Solve the McCormick LP relaxation restricted to the given bound box.
 
@@ -679,6 +750,19 @@ class MccormickLPRelaxer:
         * ``out_cuts``: when a list is supplied, the rows the separation chain
           appended at THIS call are pushed onto it as ``(A_rows, b_rows)`` — used
           to capture the root pool once and replay it at every node.
+        * ``skip_pool_separators``: skip ONLY the two point-separation loops the
+          root pool already covers — the univariate-square tangent loop and the
+          PSD (moment) loop — while keeping the rest of the chain. Set by the
+          driver at non-pool node solves under ``DISCOPT_CUT_INHERIT`` (THRU-4):
+          those loops each re-derive the pool's cut families via up to 8 full
+          MILP re-solves per node (73% + 12% of the nvs24 solve wall, THRU-3),
+          and every cut they emit is valid independent of the node box (a square
+          tangent under-estimates ``x**2`` everywhere; a PSD eigencut
+          ``vᵀMv ≥ 0`` holds wherever ``X = x xᵀ``), so the inherited root pool
+          already supplies the family and skipping re-separation only *loosens*
+          this node's relaxation — never cuts a feasible point. The driver's
+          global-stall governor and this module's stride net (C-42, see
+          ``_LAZY_RESEP_STRIDE``) selectively re-enable the pass.
         """
         # Phase-B fast path: incremental patch + warm-started solve, reusing the
         # structure built once at construction instead of a per-node cold rebuild +
@@ -834,15 +918,66 @@ class MccormickLPRelaxer:
         # once at the root instead of re-separating them every node. Sound — each
         # pool row is a valid inequality at every feasible point regardless of the
         # node box — but only column-aligned when the lifted layout is unchanged
-        # (a pinned child variable can fold columns), so gate on a matching
+        # (a pinned child variable can pin/fold columns), so gate on a matching
         # ``n_total`` and otherwise skip (fewer cuts only loosens the bound).
+        _n_pre_pool_rows = 0 if milp._A_ub is None else _sparse_rows(milp._A_ub)
+        _pool_rows_appended = 0
         if inherited_cuts is not None:
             _ia, _ib = inherited_cuts
             if _ia is not None and _sparse_cols(_ia) == n_total:
                 _append_relax_rows(milp, _ia, _ib)
+                _pool_rows_appended = _sparse_rows(_ia)
+                self._pool_stats["inherited_nodes"] += 1
+                self._pool_stats["inherited_rows"] += _pool_rows_appended
         _n_base_rows = 0 if milp._A_ub is None else _sparse_rows(milp._A_ub)
 
         res = milp.solve(time_limit=_remaining(), backend=self._backend)
+
+        # C-42: the inherited pool is an ACCELERATOR, never a dependency — a node
+        # solve must be no worse with it than without it. The warm/equilibrated
+        # in-house simplex can fail numerically on the pool-augmented system even
+        # though the pool rows are valid (nvs06: one valid root PSD eigencut flips
+        # the root node's integer-aware relaxation solve from ``optimal`` to an
+        # uncertified ``infeasible``/``iteration_limit`` — the C-38 failure class,
+        # now triggered by the extra row instead of a stale basis). Losing the
+        # node bound is what truncated the flag-ON B&B loop at the root (the
+        # driver's deliberately-skipped node NLP leaves the failure sentinel in
+        # place, the sentinel prunes the root non-rigorously, and the tree
+        # exhausts after one node). So: when pool rows were appended and the
+        # solve produced no certified verdict — not ``optimal`` and not a
+        # Farkas-certified ``infeasible`` — strip the pool rows and re-solve.
+        # Dropping valid rows only loosens the relaxation (sound), and the retry
+        # is byte-identical to the no-pool solve the default path performs, so
+        # the pool can perturb neither the incumbent search nor loop termination.
+        # The per-node square/PSD skip is likewise lifted for this node: its
+        # justification ("the pool already supplies the family") no longer holds
+        # once the pool is dropped here.
+        if _pool_rows_appended and not (
+            res.status == "optimal"
+            or (res.status == "infeasible" and getattr(res, "farkas_certified", False))
+        ):
+            _a_ub_cur = milp._A_ub
+            if _n_pre_pool_rows == 0 or _a_ub_cur is None:
+                milp._A_ub, milp._b_ub = None, None
+            else:
+                milp._A_ub = _a_ub_cur[:_n_pre_pool_rows]
+                milp._b_ub = np.asarray(milp._b_ub)[:_n_pre_pool_rows]
+            _n_base_rows = _n_pre_pool_rows
+            skip_pool_separators = False
+            self._pool_stats["dropped_nodes"] += 1
+            res = milp.solve(time_limit=_remaining(), backend=self._backend)
+
+        # Lazy re-separation, stride safety net (C-42): every
+        # ``_LAZY_RESEP_STRIDE``-th skip-eligible node solve runs the full
+        # square/PSD separation pass regardless of the driver's global-stall
+        # governor, so pool inheritance can never fully starve a class the
+        # governor misjudges. Separating more only tightens (each emitted cut
+        # is valid), so the net is performance-only — see the constants above.
+        if skip_pool_separators and separate:
+            self._lazy_skip_ctr += 1
+            if self._lazy_skip_ctr % _LAZY_RESEP_STRIDE == 0:
+                skip_pool_separators = False
+                self._pool_stats["lazy_reseparations"] += 1
 
         if separate:
             _st = self._sep_timers  # cert:T0.3 per-family separation timers
@@ -862,9 +997,17 @@ class MccormickLPRelaxer:
             # Univariate squares ``s = x**2``: the static envelope cuts only at the
             # box endpoints, so deep inside a wide box the convex underestimator is
             # slack. Add the exact supporting tangent at the LP point each round.
-            _t = time.perf_counter()
-            res = self._separate_univariate_square(milp, varmap, res, _deadline)
-            _st["univariate_square"] += time.perf_counter() - _t
+            # Under root-pool inheritance (THRU-4, ``skip_pool_separators``) the
+            # inherited pool already carries the root's tangents and this loop —
+            # up to 8 full MILP re-solves — is skipped; every tangent is a global
+            # underestimator of ``x**2``, so the pool rows stay valid on any
+            # sub-box and skipping only loosens the node bound (sound).
+            if skip_pool_separators:
+                self._pool_stats["skipped_separations"] += 1
+            else:
+                _t = time.perf_counter()
+                res = self._separate_univariate_square(milp, varmap, res, _deadline)
+                _st["univariate_square"] += time.perf_counter() - _t
             # Convex/concave composite lifts (#358): add the exact supporting
             # hyperplane at the LP point, closing the gap the fixed reference-point
             # gradient cuts leave. Inert unless the convex claimer lifted a node.
@@ -873,10 +1016,14 @@ class MccormickLPRelaxer:
             _st["convex"] += time.perf_counter() - _t
             # PSD (moment) cuts: enforce M = [[1,x^T],[x,X]] >= 0 over fully-lifted
             # cliques. Each cut v^T M v >= 0 is valid for every feasible point
-            # (X = x x^T), so adding them only tightens the bound.
-            _t = time.perf_counter()
-            res = self._separate_psd(milp, varmap, res, _deadline, max_rounds=psd_max_rounds)
-            _st["psd"] += time.perf_counter() - _t
+            # (X = x x^T), so adding them only tightens the bound. Skipped under
+            # root-pool inheritance (THRU-4): the eigencuts are valid wherever the
+            # lifting relations hold — independent of the node box — so the
+            # inherited root pool already supplies the family.
+            if not skip_pool_separators:
+                _t = time.perf_counter()
+                res = self._separate_psd(milp, varmap, res, _deadline, max_rounds=psd_max_rounds)
+                _st["psd"] += time.perf_counter() - _t
             # Targeted RLT (constraint-factor x bound-factor) cuts.
             _t = time.perf_counter()
             res = self._separate_rlt(milp, varmap, res, _deadline)
@@ -1244,9 +1391,34 @@ class MccormickLPRelaxer:
                     milp._b_ub = np.concatenate([milp._b_ub, b])
 
             tol = 1e-7
+            # Cost-aware gate (THRU-3, DISCOPT_SQUARE_COST_GATE, default OFF). This
+            # per-node loop is the ungated twin of the PSD loop (THRU-2a): both run
+            # up to 8 full MILP re-solves per node, and THRU-3 measured *this* one —
+            # not PSD — as the dominant per-node cost on dense integer-product QPs
+            # (nvs24/nvs19). When on, cap this node's square-separation wall to
+            # ``budget × base_solve_wall`` and abandon on per-round diminishing
+            # returns. SOUND: dropping tangent cuts can only loosen the relaxation —
+            # never cut a feasible point or cross the optimum. The gate only ever
+            # *shortens* the loop, so the default (gate-off) path is bit-identical to
+            # the pre-THRU-3 code. Keys purely on observed per-node cost/bound-delta
+            # (§0.2, general). See docs/dev/thru3-node-decomp-2026-07-07.md.
+            _tun = _tuning()
+            _gate = _tun.square_cost_gate
+            _gate_budget = _tun.square_cost_gate_budget
+            _gate_tau = _tun.square_cost_gate_tau
+            _sq_t0 = time.perf_counter()
+            _base_solve_wall: Optional[float] = None
             for _round in range(8):
                 # Each round costs a full re-solve; stop once the budget is spent.
                 if deadline is not None and time.perf_counter() >= deadline:
+                    break
+                if (
+                    _gate
+                    and _base_solve_wall is not None
+                    and (time.perf_counter() - _sq_t0) > _gate_budget * _base_solve_wall
+                ):
+                    # Per-node square-separation wall budget spent — stop.
+                    self._square_gate_fires += 1
                     break
                 x = np.asarray(res.x, dtype=np.float64)
                 rows: list[np.ndarray] = []
@@ -1268,16 +1440,26 @@ class MccormickLPRelaxer:
                         rhs.append(x0 * x0)
                 if not rows:
                     break
+                _lb_before = res.objective if _gate else None
                 _append(rows, rhs)
                 _tl = (
                     None
                     if deadline is None
                     else max(deadline - time.perf_counter(), _SOLVE_DEADLINE_FLOOR_S)
                 )
+                _solve_t0 = time.perf_counter()
                 new_res = milp.solve(time_limit=_tl, backend=self._backend)
+                if _gate and _base_solve_wall is None:
+                    _base_solve_wall = max(time.perf_counter() - _solve_t0, 1e-4)
                 if new_res.status != "optimal" or new_res.objective is None:
                     break
                 res = new_res
+                if _gate and _lb_before is not None:
+                    _delta = new_res.objective - _lb_before
+                    if _delta <= _gate_tau * (1.0 + abs(_lb_before)):
+                        # Diminishing returns — abandon the remaining rounds.
+                        self._square_gate_fires += 1
+                        break
             return res
         except Exception:
             return res

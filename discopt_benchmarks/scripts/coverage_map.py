@@ -1,23 +1,43 @@
 #!/usr/bin/env python
-"""PYPROF-1 coverage map: which solve path + which capabilities fire per instance.
+"""G3 coverage map: which solve path + which capabilities fire, per instance.
 
-Measurement-only. Monkeypatches (does NOT edit) the solver.py dispatch entry
-points and the recent-capability functions with call counters + a tighten
-detector, then solves one .nl instance and prints a coverage row:
+Measurement-only. Monkeypatches (does NOT edit) the *actual* solver.py dispatch
+targets and the current default-path capabilities with call/fire counters, then
+solves one ``.nl`` instance and emits a JSON coverage row.
 
-  instance | path | run_root_fixpoint(calls/tightened) | reduce_node(calls) |
-  PSD(calls) | wall | nodes
+Solve paths (mutually exclusive; the one that ran for this instance):
 
-"Path" is the first dispatch function actually entered (convex/GP fast path,
-QP/MIQP fast path, MILP driver _solve_milp_bb, or the general spatial
-_solve_nlp_bb McCormick LP-relaxer path).
+  amp           solver="amp"  -> discopt.solvers.amp.solve_amp
+  convex-fast   pure-continuous convex -> _solve_continuous (convex_fast_path)
+  lp / qp       classified LP/QP -> _solve_lp / _solve_qp
+  miqp-bb       convex MIQP  -> _solve_miqp_bb
+  milp-driver   classified MILP -> _solve_milp_bb
+  nlp-bb        convex MINLP -> _solve_nlp_bb
+  spatial       the fall-through McCormick spatial B&B loop *inside* solve_model
+                (this is where the governor / alphaBB / PSD-gate / zero-span lift
+                capabilities live). Detected by elimination: solve_model was
+                entered, none of the delegated paths above fired, and the result
+                was not the convex fast path.
 
-Run with DISCOPT_ROOT_FIXPOINT=1 DISCOPT_NODE_REDUCE=1 DISCOPT_PSD_COST_GATE=1
-to see whether the capabilities fire when *enabled* (they are default-OFF).
+Capabilities counted (the current default-path set on origin/main; the older
+run_root_fixpoint / reduce_node / DISCOPT_PSD_COST_GATE names do NOT exist here):
+
+  ils_calls           integer_local_search() invocations (VOLUME-1 ILS-capped)
+  pump/dive/rins/rens governed primal-heuristic fire counts (the effort governor
+    _calls             #541 gates the entry of these; a reachable-but-dark
+                      heuristic shows 0 here)
+  alphabb_alpha_calls rigorous_alpha() invocations (alphaBB bounding fired)
+  psd_gate_calls      _apply_auto_cut_policy() invocations (PSD/RLT auto policy)
+  psd_separate_calls  MccormickLPRelaxer._separate_psd() invocations
+  psd_enabled         auto-cut policy turned PSD on at least once
+  rlt_enabled         auto-cut policy turned RLT on at least once
+  zerospan_lift_fired model._zero_spanning_factor_auxes non-empty at solve end
+                      (R4 zero-spanning product-factor lift tagged an aux)
 
 Usage
 -----
   python coverage_map.py INST.nl --time-limit 60 --json out.json
+  python coverage_map.py INST.nl --solver amp        # force the AMP path
 """
 
 from __future__ import annotations
@@ -26,134 +46,231 @@ import argparse
 import json
 import time
 
-import numpy as np
-
-
-def _tightened(lb0, ub0, lb1, ub1) -> bool:
-    try:
-        return bool(np.any(np.asarray(lb1) > np.asarray(lb0) + 1e-12)) or bool(
-            np.any(np.asarray(ub1) < np.asarray(ub0) - 1e-12)
-        )
-    except Exception:
-        return False
-
 
 def run(args: argparse.Namespace) -> dict:
     import discopt.solver as solver_mod
     from discopt.modeling.core import from_nl
 
-    counters = {
-        "path": None,
-        "root_fixpoint_calls": 0,
-        "root_fixpoint_tightened": 0,
-        "reduce_node_calls": 0,
-        "reduce_node_tightened": 0,
-        "psd_calls": 0,
+    c = {
+        "delegated_path": None,  # amp/lp/qp/miqp-bb/milp-driver/nlp-bb/convex-fast
+        "alphabb_alpha_calls": 0,
+        "psd_gate_calls": 0,
+        "psd_separate_calls": 0,
+        "psd_enabled": False,
+        "rlt_enabled": False,
     }
+    errs: dict[str, str] = {}
 
-    # --- wrap dispatch entry points; first one hit records the path ---
-    def wrap_path(name, fn):
+    def mark_delegate(name, fn):
         def w(*a, **k):
-            if counters["path"] is None:
-                counters["path"] = name
+            # First delegated dispatch target wins.
+            if c["delegated_path"] is None:
+                c["delegated_path"] = name
             return fn(*a, **k)
 
         return w
 
-    for pathname, attr in [
-        ("spatial:_solve_nlp_bb", "_solve_nlp_bb"),
-        ("milp:_solve_milp_bb", "_solve_milp_bb"),
-        ("milp:_solve_milp_simplex", "_solve_milp_simplex"),
-        ("qp:_solve_qp", "_solve_qp"),
-        ("lp:_solve_lp", "_solve_lp"),
+    # --- wrap the real dispatch targets inside solver.py ---
+    for name, attr in [
+        ("lp", "_solve_lp"),
+        ("qp", "_solve_qp"),
+        ("miqp-bb", "_solve_miqp_bb"),
+        ("milp-driver", "_solve_milp_bb"),
+        ("nlp-bb", "_solve_nlp_bb"),
+        ("convex-fast", "_solve_continuous"),
     ]:
         if hasattr(solver_mod, attr):
-            setattr(solver_mod, attr, wrap_path(pathname, getattr(solver_mod, attr)))
+            setattr(solver_mod, attr, mark_delegate(name, getattr(solver_mod, attr)))
 
-    # convex fast path may be a nested closure; also detect via classify result
-    # by wrapping the convex solver if present.
-    for pathname, attr in [
-        ("convex:_solve_convex_nlp", "_solve_convex_nlp"),
-        ("convex:_solve_convex", "_solve_convex"),
-        ("gp:_solve_gp", "_solve_gp"),
-    ]:
-        if hasattr(solver_mod, attr):
-            setattr(solver_mod, attr, wrap_path(pathname, getattr(solver_mod, attr)))
-
-    # --- wrap capabilities ---
+    # AMP: wrap the module-level entry it imports.
     try:
-        import discopt._jax.root_reduce as root_reduce_mod
+        import discopt.solvers.amp as amp_mod
 
-        _orig_rf = root_reduce_mod.run_root_fixpoint
+        _orig_amp = amp_mod.solve_amp
 
-        def wrap_rf(model, lb, ub, *a, **k):
-            counters["root_fixpoint_calls"] += 1
-            lb0, ub0 = np.array(lb, float), np.array(ub, float)
-            res = _orig_rf(model, lb, ub, *a, **k)
-            if _tightened(lb0, ub0, getattr(res, "lb", lb0), getattr(res, "ub", ub0)):
-                counters["root_fixpoint_tightened"] += 1
-            return res
+        def w_amp(*a, **k):
+            if c["delegated_path"] is None:
+                c["delegated_path"] = "amp"
+            return _orig_amp(*a, **k)
 
-        root_reduce_mod.run_root_fixpoint = wrap_rf
-        # solver.py may have imported the name directly
-        if hasattr(solver_mod, "run_root_fixpoint"):
-            solver_mod.run_root_fixpoint = wrap_rf
+        amp_mod.solve_amp = w_amp
+    except Exception as e:  # pragma: no cover
+        errs["amp"] = str(e)
+
+    # NOTE on the governor: the effort governor `_root_heur_nlp_entry_ok`
+    # (#541) and the improver governor `_improver_allowed` are *local closures*
+    # in solve_model, so their per-decision throttle count is not observable from
+    # outside without tracing. We instead measure the governor's *effect*: the
+    # actual fire counts of the heuristics it gates (below). A heuristic that is
+    # reachable-but-dark on a path shows 0 calls; one the governor keeps
+    # throttling shows few calls relative to node_count.
+
+    # The governed root/primal heuristics. Wrapping each gives an actual fire
+    # count on this path: the effort governor (_root_heur_nlp_entry_ok, a closure
+    # we cannot patch) *gates the entry of these*, so a heuristic that is
+    # reachable-but-dark on a path shows 0 calls here, and one the governor keeps
+    # throttling shows few calls relative to nodes. ``ils_calls`` is the
+    # VOLUME-1-capped integer local search.
+    try:
+        import discopt._jax.primal_heuristics as ph
+
+        _heur_names = {
+            "ils_calls": "integer_local_search",
+            "pump_calls": "feasibility_pump",
+            "dive_calls": "fractional_diving",
+            "rins_calls": "rins",
+            "rens_calls": "rens",
+        }
+        for ckey, fname in _heur_names.items():
+            c.setdefault(ckey, 0)
+            if hasattr(ph, fname):
+                _orig = getattr(ph, fname)
+
+                def _mk(ckey, _orig):
+                    def w(*a, **k):
+                        c[ckey] += 1
+                        return _orig(*a, **k)
+
+                    return w
+
+                setattr(ph, fname, _mk(ckey, _orig))
     except Exception as e:
-        counters["_rf_wrap_err"] = str(e)
+        errs["heur"] = str(e)
 
+    # alphaBB rigorous alpha
     try:
-        import discopt._jax.node_reduce as node_reduce_mod
+        import discopt._jax.alphabb as ab
 
-        _orig_nr = node_reduce_mod.reduce_node
+        _orig_alpha = ab.rigorous_alpha
 
-        def wrap_nr(model, node_lb, node_ub, *a, **k):
-            counters["reduce_node_calls"] += 1
-            lb0, ub0 = np.array(node_lb, float), np.array(node_ub, float)
-            res = _orig_nr(model, node_lb, node_ub, *a, **k)
-            if _tightened(lb0, ub0, getattr(res, "lb", lb0), getattr(res, "ub", ub0)):
-                counters["reduce_node_tightened"] += 1
-            return res
+        def w_alpha(*a, **k):
+            c["alphabb_alpha_calls"] += 1
+            return _orig_alpha(*a, **k)
 
-        node_reduce_mod.reduce_node = wrap_nr
-        if hasattr(solver_mod, "reduce_node"):
-            solver_mod.reduce_node = wrap_nr
+        ab.rigorous_alpha = w_alpha
     except Exception as e:
-        counters["_nr_wrap_err"] = str(e)
+        errs["alphabb"] = str(e)
 
+    # PSD/RLT auto-cut policy (the "PSD gate")
     try:
-        import discopt._jax.mccormick_lp as mccormick_lp_mod
+        _orig_policy = solver_mod._apply_auto_cut_policy
 
-        if hasattr(mccormick_lp_mod, "MccormickLPRelaxer") and hasattr(
-            mccormick_lp_mod.MccormickLPRelaxer, "_separate_psd"
-        ):
-            _orig_psd = mccormick_lp_mod.MccormickLPRelaxer._separate_psd
+        def w_policy(model, relaxer):
+            c["psd_gate_calls"] += 1
+            _orig_policy(model, relaxer)
+            if getattr(relaxer, "_psd_cuts", False):
+                c["psd_enabled"] = True
+            if getattr(relaxer, "_rlt_cuts", False):
+                c["rlt_enabled"] = True
 
-            def wrap_psd(self, *a, **k):
-                counters["psd_calls"] += 1
+        solver_mod._apply_auto_cut_policy = w_policy
+    except Exception as e:
+        errs["psd_gate"] = str(e)
+
+    # zero-spanning product-factor lift (R4 / #538). The lift sets
+    # ``_zero_spanning_factor_auxes`` on the *reformulated* model created inside
+    # solve_model (not the model we hold), so wrap the reform and record when it
+    # tags an aux (that is the fire signal).
+    c["zerospan_lift_fired"] = False
+    try:
+        import discopt._jax.factorable_reform as fr
+
+        _orig_reform = fr.factorable_reformulate
+
+        def w_reform(model, **k):
+            out = _orig_reform(model, **k)
+            if getattr(out, "_zero_spanning_factor_auxes", None):
+                c["zerospan_lift_fired"] = True
+            return out
+
+        fr.factorable_reformulate = w_reform
+        # solver.py imports the name at call sites via ``from ... import``; also
+        # patch the module attr it resolves through.
+        if hasattr(solver_mod, "factorable_reformulate"):
+            solver_mod.factorable_reformulate = w_reform
+    except Exception as e:
+        errs["zerospan"] = str(e)
+
+    # PSD separator
+    try:
+        import discopt._jax.mccormick_lp as mlp
+
+        if hasattr(mlp.MccormickLPRelaxer, "_separate_psd"):
+            _orig_psd = mlp.MccormickLPRelaxer._separate_psd
+
+            def w_psd(self, *a, **k):
+                c["psd_separate_calls"] += 1
                 return _orig_psd(self, *a, **k)
 
-            mccormick_lp_mod.MccormickLPRelaxer._separate_psd = wrap_psd
+            mlp.MccormickLPRelaxer._separate_psd = w_psd
     except Exception as e:
-        counters["_psd_wrap_err"] = str(e)
+        errs["psd_sep"] = str(e)
+
+    # G2 effort governor (#541): process-lifetime singleton with a real
+    # throttled_events counter per governed source. Fresh subprocess = clean
+    # singleton, so snapshot() after the solve is the governor fire proof.
+    try:
+        from discopt.heuristic_governor import governor as _gov
+
+        _gov().reset()
+    except Exception as e:
+        errs["governor"] = str(e)
 
     model = from_nl(args.instance)
     t0 = time.perf_counter()
-    result = model.solve(time_limit=args.time_limit, gap_tolerance=1e-4)
+    solve_kwargs = {"time_limit": args.time_limit, "gap_tolerance": 1e-4}
+    if args.solver:
+        solve_kwargs["solver"] = args.solver
+    result = model.solve(**solve_kwargs)
     wall = time.perf_counter() - t0
+
+    try:
+        from discopt.heuristic_governor import governor as _gov
+
+        gov_snap = _gov().snapshot()
+    except Exception:
+        gov_snap = {}
+    gov_throttled = sum(int(s.get("throttled_events", 0)) for s in gov_snap.values())
+
+    # zero-spanning lift fires on the reformulated model (see wrap above);
+    # also honor a tag on the original model as a fallback.
+    zerospan = bool(c.get("zerospan_lift_fired")) or bool(
+        getattr(model, "_zero_spanning_factor_auxes", None)
+    )
+
+    # Resolve the path. A delegated target wins; else convex-fast if the result
+    # flagged it; else the fall-through spatial loop.
+    path = c["delegated_path"]
+    if path == "convex-fast" and not getattr(result, "convex_fast_path", False):
+        # _solve_continuous also runs as the pure-continuous non-convex fallback;
+        # only call it convex-fast when the result confirms it.
+        path = "continuous-fallback"
+    if path is None:
+        path = "spatial" if getattr(result, "convex_fast_path", False) is False else "convex-fast"
 
     return {
         "instance": args.instance,
-        "path": counters["path"],
-        "run_root_fixpoint_calls": counters["root_fixpoint_calls"],
-        "run_root_fixpoint_tightened": counters["root_fixpoint_tightened"],
-        "reduce_node_calls": counters["reduce_node_calls"],
-        "reduce_node_tightened": counters["reduce_node_tightened"],
-        "psd_calls": counters["psd_calls"],
+        "path": path,
+        "ils_calls": c.get("ils_calls", 0),
+        "pump_calls": c.get("pump_calls", 0),
+        "dive_calls": c.get("dive_calls", 0),
+        "rins_calls": c.get("rins_calls", 0),
+        "rens_calls": c.get("rens_calls", 0),
+        "alphabb_alpha_calls": c["alphabb_alpha_calls"],
+        "psd_gate_calls": c["psd_gate_calls"],
+        "psd_separate_calls": c["psd_separate_calls"],
+        "psd_enabled": c["psd_enabled"],
+        "rlt_enabled": c["rlt_enabled"],
+        "governor_snapshot": gov_snap,
+        "governor_throttled_events": gov_throttled,
+        "zerospan_lift_fired": zerospan,
         "wall_s": wall,
-        "node_count": result.node_count,
+        "node_count": getattr(result, "node_count", None),
         "status": str(result.status),
         "objective": None if result.objective is None else float(result.objective),
-        "_errs": {k: v for k, v in counters.items() if k.startswith("_")},
+        "bound": None if getattr(result, "bound", None) is None else float(result.bound),
+        "gap_certified": bool(getattr(result, "gap_certified", False)),
+        "_errs": errs,
     }
 
 
@@ -161,6 +278,7 @@ def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("instance")
     ap.add_argument("--time-limit", type=float, default=60.0)
+    ap.add_argument("--solver", default=None, help="force a solver family, e.g. 'amp'")
     ap.add_argument("--json", dest="json_out", default=None)
     args = ap.parse_args()
     rec = run(args)

@@ -156,6 +156,70 @@ class SolverTuning:
     improvement ``Δ ≤ tau × (1 + |lb_before|)`` abandons the remaining PSD rounds
     at that node. Only consulted when :attr:`psd_cost_gate` is on."""
 
+    # --- cost-aware univariate-square gate (THRU-3; default-OFF prototype) ------
+    square_cost_gate: bool = field(
+        default_factory=lambda: _env_flag("DISCOPT_SQUARE_COST_GATE", default=False)
+    )
+    """Adaptive cost-aware gate on the per-node univariate-square (``s = x**2``)
+    tangent-separation loop (``DISCOPT_SQUARE_COST_GATE``, default **OFF**).
+
+    THRU-3 measured this loop — not PSD — as the dominant per-node cost on the
+    dense integer-product QPs nvs19/nvs24: at defaults it runs up to 8 full MILP
+    re-solves per node with *no* budget (the PSD loop already has one, THRU-2a),
+    so it is the ungated twin that absorbs the node wall. Per THRU-3 controls
+    (60 s, seed default), turning off BOTH per-node separators lifts nvs24 from
+    9 → 309 nodes (36×) and nvs19 from 203 → 521 nodes while the dual bound at TL
+    barely moves (nvs24 -1035.66 → -1035.38; nvs19 -1102.1 → -1100.0, both still
+    valid underestimators of =opt= -1033.2 / -1098.4) — the certified bound is set
+    by McCormick+branching and recovered by the extra nodes. When on, this bounds
+    the wall each node's square loop may spend to :attr:`square_cost_gate_budget`
+    × that node's own base LP-solve wall, and abandons the loop once a round's
+    relative LP-bound improvement falls below :attr:`square_cost_gate_tau`. Keys
+    purely on observed per-node cost/bound-delta — never on instance name/shape
+    (§0.2). SOUND by construction: dropping valid tangent cuts can only loosen the
+    relaxation, never cut a feasible point or cross the optimum. The gate only ever
+    *shortens* the loop, so the default (gate-off) path is bit-identical to the
+    pre-THRU-3 code. Mirrors :attr:`psd_cost_gate`; see
+    ``docs/dev/thru3-node-decomp-2026-07-07.md``."""
+
+    square_cost_gate_budget: float = field(
+        default_factory=lambda: _env_float("DISCOPT_SQUARE_COST_GATE_BUDGET", 1.0)
+    )
+    """Univariate-square wall budget per node as a multiple of that node's base
+    LP-solve wall (``DISCOPT_SQUARE_COST_GATE_BUDGET``, default 1.0). The loop
+    stops once its cumulative wall this node exceeds ``budget × base_solve_wall``.
+    Only consulted when :attr:`square_cost_gate` is on."""
+
+    square_cost_gate_tau: float = field(
+        default_factory=lambda: _env_float("DISCOPT_SQUARE_COST_GATE_TAU", 1e-4)
+    )
+    """Relative diminishing-returns threshold for the univariate-square loop
+    (``DISCOPT_SQUARE_COST_GATE_TAU``, default 1e-4). A round whose LP-bound
+    improvement ``Δ ≤ tau × (1 + |lb_before|)`` abandons the remaining rounds at
+    that node. Only consulted when :attr:`square_cost_gate` is on."""
+
+    # --- root-cut-pool inheritance (THRU-4, default OFF) -----------------------
+    cut_inherit: bool = field(
+        default_factory=lambda: _env_flag("DISCOPT_CUT_INHERIT", default=False)
+    )
+    """Root-cut-pool inheritance for the per-node square/PSD separation loops
+    (``DISCOPT_CUT_INHERIT``, default **OFF**). THRU-3 measured that the two
+    per-node point separators — the univariate-square tangent loop and the PSD
+    (moment) loop — are the dominant per-node cost on dense integer QPs (nvs24:
+    73% + 12% of the solve wall), each re-deriving cuts via up to 8 full MILP
+    re-solves at EVERY node; with both off, nvs24 runs 9→309 nodes (36×) with
+    the dual bound at TL essentially unchanged. When on, the root separates the
+    full cut chain ONCE (unchanged root behaviour), the accepted rows are stored
+    in the root cut pool, and every node *inherits* the pool instead of
+    re-running the square/PSD separation loops. SOUND: the inherited square
+    tangents (``s ≥ 2·x0·x − x0²``) and PSD eigencuts (``vᵀMv ≥ 0``) are valid at
+    every feasible lifted point independent of the node box, and every other
+    captured family is valid over the ROOT box, hence over every descendant
+    sub-box; skipping per-node re-separation only *loosens* the node relaxation
+    (never cuts a feasible point). See
+    ``docs/dev/thru4-cut-inheritance-2026-07-07.md`` for the per-family validity
+    classification and measurements."""
+
     # --- branch-and-bound / bound levers --------------------------------------
     alphabb_with_lp: bool = field(
         default_factory=lambda: _env_flag("DISCOPT_ALPHABB_WITH_LP", default=False)
@@ -246,6 +310,12 @@ class SolverTuning:
             raise ValueError(f"psd_cost_gate_budget must be > 0, got {self.psd_cost_gate_budget}")
         if self.psd_cost_gate_tau < 0:
             raise ValueError(f"psd_cost_gate_tau must be >= 0, got {self.psd_cost_gate_tau}")
+        if self.square_cost_gate_budget <= 0:
+            raise ValueError(
+                f"square_cost_gate_budget must be > 0, got {self.square_cost_gate_budget}"
+            )
+        if self.square_cost_gate_tau < 0:
+            raise ValueError(f"square_cost_gate_tau must be >= 0, got {self.square_cost_gate_tau}")
 
     def replace(self, **changes) -> SolverTuning:
         """Return a copy with ``changes`` applied (validated)."""

@@ -510,6 +510,11 @@ pub fn solve_lp_warm_csc_py<'py>(
     Bound<'py, PyArray1<f64>>,
     Bound<'py, PyArray1<f64>>,
 )> {
+    // THRU-5: honor DISCOPT_PROFILE on the pure-LP node-bound path too. Instances
+    // that never call solve_milp_py (their node bound is a pure warm LP) would
+    // otherwise leave profiling uninitialized and dump() a no-op. Cheap; first call
+    // per process fixes the flag.
+    discopt_core::profile::init_from_env();
     let col_ptr: Vec<usize> = col_ptr.as_slice()?.iter().map(|&x| x as usize).collect();
     let row_idx: Vec<usize> = row_idx.as_slice()?.iter().map(|&x| x as usize).collect();
     let vals_v: Vec<f64> = vals.as_slice()?.to_vec();
@@ -538,6 +543,10 @@ pub fn solve_lp_warm_csc_py<'py>(
         start.as_ref(),
         &opts,
     );
+    // THRU-5: emit the per-node warm-dual phase profile to stderr when
+    // DISCOPT_PROFILE is set (no-op otherwise), so the pure-LP node-bound path
+    // (the dominant per-node cost) is visible alongside the solve_milp_py driver.
+    discopt_core::profile::dump();
     let status = match sol.status {
         LpStatus::Optimal => "optimal",
         LpStatus::Infeasible => "infeasible",

@@ -84,6 +84,12 @@ def test_e1_haverly_certifies_classic_optimum_400():
         assert conc1 <= 1.5 + 1e-4
 
 
+# ~90s NLP/JAX-compile-bound feasibility guard that straddles the 120s PR-fast
+# --timeout; the per-test marker overrides the CLI cap (identical runtime pre-C-39,
+# so not a C-39/#558 regression — a pre-existing straddler). Keep it in the PR-fast
+# tier (it is a correctness guard, not `slow`); the bump only prevents a false
+# CI timeout on the slower runner.
+@pytest.mark.timeout(300)
 def test_e3_reactor_is_feasible_not_infeasible():
     """The fixed reactor model is feasible (was provably infeasible)."""
     m = _build(examples.example_reactor_design)
