@@ -84,9 +84,23 @@ jobs:
           python -m pip install --upgrade pip
           pip install uv
       - name: Install system dependencies (Ipopt)
+        # Ipopt comes from the standard Ubuntu repos (coinor-libipopt-dev). The
+        # pre-baked packages.microsoft.com (azure-cli) apt source is unrelated and
+        # intermittently serves a bad Release file ("Clearsigned file isn't valid
+        # ... NOSPLIT"), which reds the whole job on a transient network hiccup.
+        # Drop that source (we don't use azure-cli), then retry update+install a
+        # few times with backoff so a transient mirror blip can't fail the suite.
+        # cyipopt tests auto-skip when Ipopt is absent (see conftest), so even a
+        # total install failure degrades to SKIP rather than ERROR.
         run: |
-          sudo apt-get update && sudo apt-get install -y --no-install-recommends \
-            coinor-libipopt-dev liblapack-dev libblas-dev gfortran
+          sudo rm -f /etc/apt/sources.list.d/microsoft-prod.list \
+                     /etc/apt/sources.list.d/azure-cli.list || true
+          for i in 1 2 3; do
+            sudo apt-get update && sudo apt-get install -y --no-install-recommends \
+              coinor-libipopt-dev liblapack-dev libblas-dev gfortran && break
+            echo "apt attempt $i failed; retrying in $((i * 15))s..." >&2
+            sleep $((i * 15))
+          done
       - name: Cache uv pip wheels
         uses: actions/cache@v4
         with:
@@ -150,9 +164,17 @@ jobs:
           python -m pip install --upgrade pip
           pip install uv
       - name: Install system dependencies (Ipopt)
+        # Same hardening as the python-fast job: drop the unrelated, flaky
+        # packages.microsoft.com apt source and retry update+install with backoff.
         run: |
-          sudo apt-get update && sudo apt-get install -y --no-install-recommends \
-            coinor-libipopt-dev liblapack-dev libblas-dev gfortran
+          sudo rm -f /etc/apt/sources.list.d/microsoft-prod.list \
+                     /etc/apt/sources.list.d/azure-cli.list || true
+          for i in 1 2 3; do
+            sudo apt-get update && sudo apt-get install -y --no-install-recommends \
+              coinor-libipopt-dev liblapack-dev libblas-dev gfortran && break
+            echo "apt attempt $i failed; retrying in $((i * 15))s..." >&2
+            sleep $((i * 15))
+          done
       - name: Cache uv pip wheels
         uses: actions/cache@v4
         with:
