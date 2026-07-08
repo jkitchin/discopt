@@ -113,6 +113,73 @@ def test_pool_drop_retry_recovers_the_node_bound(monkeypatch):
 
 
 @pytest.mark.smoke
+def test_pool_has_rows_is_sparse_safe():
+    """C-43: the pool ``A_rows`` is a scipy CSR matrix whose ``len()`` is ambiguous
+    and *raises*. The re-verify gate must count rows via ``.shape[0]`` (through
+    ``_pool_has_rows``), not ``len()`` — otherwise it throws on every pool node,
+    the driver swallows the exception and silently skips the node, and the pool
+    infeasible is never re-verified (masking the bug behind a crash rather than
+    fixing it). This asserts the helper is sparse-safe and truthful."""
+    import scipy.sparse as sp
+    from discopt._jax.mccormick_lp import _pool_has_rows
+
+    A = sp.csr_matrix(np.array([[1.0, -1.0, 0.0], [0.0, 1.0, -1.0]]))
+    b = np.array([0.5, 0.5])
+    # A naive len(A) would raise here — the whole point of the helper:
+    with pytest.raises(TypeError):
+        len(A)
+    assert _pool_has_rows((A, b)) is True
+    assert _pool_has_rows(None) is False
+    assert _pool_has_rows((sp.csr_matrix((0, 3)), np.zeros(0))) is False
+
+
+@pytest.mark.smoke
+def test_pool_infeasible_reverify_recovers_false_fathom(monkeypatch):
+    """C-43 mechanism: when the pool-augmented node solve fathoms a node as
+    ``infeasible`` but the pool-free relaxation of the SAME box is feasible, the
+    inherited pool row cut off a non-empty node (invalid on this sub-box). The
+    re-verify must drop the pool and recover the node instead of trusting the false
+    fathom. Fails before the C-43 fix (the false ``infeasible`` propagates); passes
+    after (``pool/dropped_nodes`` fires and a valid bound is returned)."""
+    relaxer, lb, ub, pool = _mini_qp_relaxer_and_pool()
+
+    baseline = relaxer.solve_at_node(lb, ub, time_limit=30.0)
+    assert baseline.status == "optimal" and baseline.lower_bound is not None
+
+    # Poison the FIRST relaxation solve of the next node call (the pool-augmented
+    # one) with a *Farkas-certified* infeasible — reproducing what an
+    # invalid-on-sub-box pool row does: the pool-augmented polytope certifies empty
+    # though the pool-free box is feasible. The pool-free re-solve then delegates.
+    from discopt._jax import milp_relaxation as _mr
+
+    milp_cls = _mr.MilpRelaxationModel
+    real_solve = milp_cls.solve
+    state = {"fail_next": True}
+
+    def flaky(self, *args, **kwargs):
+        if state["fail_next"]:
+            state["fail_next"] = False
+            r = SimpleNamespace(
+                status="infeasible", x=None, objective=None, bound=None, farkas_certified=True
+            )
+            return r
+        return real_solve(self, *args, **kwargs)
+
+    monkeypatch.setattr(milp_cls, "solve", flaky)
+
+    res = relaxer.solve_at_node(
+        lb, ub, time_limit=30.0, inherited_cuts=pool, skip_pool_separators=True
+    )
+    assert res.status == "optimal", (
+        f"pool-induced false infeasible was trusted: {res.status} "
+        "(C-43: a pool-augmented infeasible must be re-verified pool-free)"
+    )
+    assert res.lower_bound is not None
+    assert res.lower_bound >= baseline.lower_bound - 1e-6
+    assert relaxer._pool_stats["dropped_nodes"] == 1
+
+
+@pytest.mark.smoke
 def test_lazy_reseparation_stride_net_fires():
     """The relaxer-side safety net: every ``_LAZY_RESEP_STRIDE``-th
     skip-eligible node solve runs the full separation pass regardless of the
@@ -150,20 +217,27 @@ _CORPUS = Path.home() / "Dropbox" / "projects" / "discopt-minlp-benchmark" / "mi
 
 
 @pytest.mark.slow
-@pytest.mark.xfail(
-    reason="CUT-INHERIT-GRAD blocker: flag-ON false-optimal on the MINLP cold-path "
-    "class — nvs22 certifies 33.55 vs oracle 6.0582. The nvs06-class incumbent-"
-    "search reroute that C-42's pool-drop-retry does not cover (the pool solve "
-    "SUCCEEDS but the pre-tree pump is rerouted). Blocks the default-ON flip; the "
-    "flag stays opt-in until fixed. See docs/dev/cut-inherit-grad-2026-07-08.md.",
-    strict=True,
-)
 def test_nvs22_cut_inherit_no_false_optimal():
-    """Pins the CUT-INHERIT-GRAD graduation blocker. The DEFAULT (force-off) path
-    certifies nvs22's oracle optimum 6.0582 correctly; flag-ON currently returns a
-    FALSE-OPTIMAL 33.55. This xfail(strict) fails (i.e. flips to XPASS and the
-    suite goes red) the moment the flag-path reroute is fixed — the signal to
-    revisit the default-ON flip."""
+    """C-43 (#564) regression: the former CUT-INHERIT-GRAD graduation blocker.
+
+    Before this fix, flag-ON ``nvs22`` certified a FALSE-OPTIMAL ``33.55`` against
+    the oracle ``6.0582``: an inherited root cut-pool row is NOT valid on a
+    tightened sub-box (the "root-valid ⇒ globally-valid" premise is false for the
+    captured convex/square cut family here — a re-lifted child column changes what
+    the pool row addresses), so a node whose box contains the true optimum became
+    *Farkas-certified infeasible* once the pool was appended, falsely fathoming the
+    region and closing the tree around ``33.55``. C-42's pool-drop-retry did not
+    cover this: it fires only on the *no-certified-verdict* branch of the cold path,
+    but here the pool-augmented solve SUCCEEDS with a (false) ``infeasible``.
+
+    The fix re-verifies every pool-augmented ``infeasible`` against a pool-free
+    solve (``solve_at_node`` in ``mccormick_lp.py``): the fathom is kept only if the
+    pool-free relaxation is also infeasible; otherwise the node is recovered on its
+    valid pool-free bound. So flag-ON is now sound — and in fact certifies the
+    oracle optimum. This test was a strict-xfail (it went XPASS the moment the fix
+    landed); it is now a plain passing regression. See
+    ``docs/dev/c43-nvs22-fix-graduate-2026-07-08.md``.
+    """
     nl = _CORPUS / "nvs22.nl"
     if not nl.exists():
         pytest.skip("nvs22 not in the local MINLPLib corpus")
@@ -172,14 +246,26 @@ def test_nvs22_cut_inherit_no_false_optimal():
     assert ref.objective == pytest.approx(6.0582200, rel=5e-3), (
         f"default-path nvs22 regressed: {ref.objective}"
     )
-    # Flag-ON currently produces a false certificate (this assertion is the xfail).
+    # Flag-ON must be SOUND. The hard invariant (C-43): no false certificate — the
+    # dual bound is a valid lower bound (<= oracle + tol), and if the search
+    # certifies, the objective is the oracle optimum (never the old 33.55).
     res = from_nl(str(nl)).solve(
         time_limit=25, gap_tolerance=1e-4, tuning=SolverTuning(cut_inherit=True)
+    )
+    assert res.bound is None or res.bound <= 6.0582200 + 1e-3, (
+        f"nvs22 flag-ON dual bound {res.bound} crossed the oracle 6.0582 "
+        "(false bound — the C-43 pool-infeasible re-verify regressed)"
     )
     if str(res.status) == "optimal":
         assert res.objective == pytest.approx(6.0582200, rel=5e-3), (
             f"nvs22 flag-ON FALSE-OPTIMAL: certified {res.objective} vs oracle 6.0582"
         )
+    # The re-verify recovered at least one falsely-fathomed node (the mechanism
+    # under test); if it never fired, the guard is inert and the test is vacuous.
+    stats = res.solver_stats or {}
+    assert stats.get("pool/dropped_nodes", 0) >= 1, (
+        f"C-43 pool-infeasible re-verify never fired on nvs22: {stats}"
+    )
 
 
 @pytest.mark.slow

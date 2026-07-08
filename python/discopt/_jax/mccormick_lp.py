@@ -57,6 +57,21 @@ def _sparse_cols(A) -> int:
     return int(_as_csr(A).shape[1]) if A is not None else 0
 
 
+def _pool_has_rows(inherited_cuts: Optional[tuple]) -> bool:
+    """True iff ``inherited_cuts`` is a non-empty ``(A_rows, b_rows)`` pool.
+
+    Sparse-safe row count: the pool ``A_rows`` is a scipy CSR matrix, whose
+    ``len()`` is *ambiguous and raises* — so a naive ``len(A_rows) > 0`` check
+    throws and (when swallowed by the caller's node-solve guard) silently skips
+    the node. Use ``.shape[0]`` via :func:`_sparse_rows` instead. Used to gate
+    the C-43 pool-infeasible re-verification (only re-verify when a pool that
+    could have been appended was actually on offer)."""
+    if inherited_cuts is None:
+        return False
+    a_rows = inherited_cuts[0]
+    return a_rows is not None and _sparse_rows(a_rows) > 0
+
+
 def _append_relax_rows(milp, A_rows, b_rows) -> None:
     """Append ``A_rows z <= b_rows`` to a relaxation model's inequality block."""
     import scipy.sparse as sp
@@ -733,6 +748,134 @@ class MccormickLPRelaxer:
     ) -> MccormickLPResult:
         """Solve the McCormick LP relaxation restricted to the given bound box.
 
+        Thin wrapper around :meth:`_solve_at_node_impl` that enforces the C-43
+        pool-soundness invariant: **an inherited pool row may only accelerate the
+        node solve; it may never be the sole reason a node is fathomed.** When a
+        non-empty pool was on offer (``inherited_cuts`` present) and the
+        pool-augmented solve returns ``infeasible``, the node is re-solved WITHOUT
+        the pool; the ``infeasible`` fathom is kept only if the pool-free
+        relaxation is *also* infeasible.
+
+        Why (C-43, nvs22): the code assumed a cut separated at the ROOT box is
+        valid on every sub-box (so an inherited row could only tighten, never cut
+        a feasible point). That premise is **false for at least one captured cut
+        family** — measured on nvs22: a node whose box contains the true optimum
+        ``(x0,x1,x2,x3)=(5,1,1,2)`` becomes *Farkas-certified infeasible* once the
+        pool is appended, though the pool-free relaxation of the same box solves
+        to ``optimal``. The Farkas ray certifies the *pool-augmented* polytope is
+        empty, which is a real proof only if every pool row is valid on the box;
+        when a pool row is invalid there, it is a **false fathom** that closes the
+        tree around a suboptimal incumbent and certifies a false optimum
+        (nvs22: ``optimal 33.55`` vs oracle ``6.0582``). C-42 (#553) extended the
+        same "pool is an accelerator, never a dependency" guarantee to the
+        *no-certified-verdict* branch of the cold path; C-43 (#564) extends it to
+        the *Farkas-infeasible* branch across BOTH the incremental fast path and
+        the cold path — the branch C-42's cold-path-only, verdict-gated retry did
+        not cover. Re-solving pool-free only *loosens* the relaxation, so this can
+        never introduce a false fathom of its own; it only forgoes a possible (and
+        possibly-invalid) prune, then keeps the node open on its valid parent
+        bound. See ``docs/dev/c43-nvs22-fix-graduate-2026-07-08.md``.
+
+        See :meth:`_solve_at_node_impl` for the full parameter contract.
+        """
+        res = self._solve_at_node_impl(
+            node_lb,
+            node_ub,
+            time_limit,
+            inherited_cuts=inherited_cuts,
+            separate=separate,
+            out_cuts=out_cuts,
+            psd_max_rounds=psd_max_rounds,
+            want_marginals=want_marginals,
+            skip_pool_separators=skip_pool_separators,
+        )
+        # C-43 pool-infeasible re-verification. Only relevant when (a) this was a
+        # regular node solve (not a root pool-capture call, which passes no pool),
+        # (b) inherited pool rows were on offer, and (c) the augmented solve
+        # fathomed the node as infeasible. Re-solve the IDENTICAL box with no pool
+        # (and no pool-separator skip — a pool-free node must see the full chain,
+        # exactly like the default path); trust the ``infeasible`` fathom only when
+        # the pool-free relaxation confirms it. A pool row that is genuinely valid
+        # on this box cannot flip a feasible relaxation to empty, so on the common
+        # (sound-pool) case the re-solve re-confirms ``infeasible`` and the verdict
+        # stands — the cost is one extra LP on the *rare* pool-infeasible node, not
+        # on the hot feasible path. Not pre-gated on the pool's column width: a
+        # column-mismatched pool that was never appended yields an identical
+        # pool-free re-solve, so at worst this spends one extra LP re-confirming a
+        # genuine infeasible — it can never *keep* a false fathom, which is the
+        # invariant that matters.
+        #
+        # This is a runtime GUARD, not a root fix: the underlying defect is that a
+        # pool row stated over the root's lifted column layout can be applied at a
+        # node whose re-lifted/pinned layout changed the columns' meaning (same
+        # count, different semantics — column remapping), so the row is no longer
+        # valid there. #567 tracks the source fix (column-identity-safe inheritance)
+        # that would make this guard inert; until then it keeps the certificate
+        # sound. Part of the #396 backlog.
+        if out_cuts is None and res.status == "infeasible" and _pool_has_rows(inherited_cuts):
+            # Cheap first: the BASE McCormick relaxation (no separators, no pool) is
+            # the loosest valid outer approximation. If IT is already infeasible, the
+            # node's subtree is genuinely empty (a valid relaxation with an empty
+            # feasible set is a rigorous fathom) and the pool did not cause it — keep
+            # the original ``infeasible`` verdict without a full re-separated re-solve.
+            # This is the hot path for a *sound* pool (its infeasibles re-confirm here
+            # in one loose LP), so inheritance keeps its throughput where the pool is
+            # valid. Only when the base relaxation is FEASIBLE was the fathom
+            # pool-induced (a pool row cut the non-empty node empty) — then pay the
+            # full pool-free re-solve to recover the node with the tightest valid
+            # bound the default path would have produced.
+            base_free = self._solve_at_node_impl(
+                node_lb,
+                node_ub,
+                time_limit,
+                inherited_cuts=None,
+                separate=False,
+                out_cuts=None,
+                psd_max_rounds=psd_max_rounds,
+                want_marginals=False,
+                skip_pool_separators=False,
+            )
+            if base_free.status != "infeasible":
+                # The pool row(s) caused a FALSE fathom of a non-empty node. Re-solve
+                # pool-free WITH the full separation chain (byte-identical to the
+                # default path's node solve) so the recovered node carries a bound as
+                # tight as the pool-free tree would give, then trust that valid
+                # relaxation. Count the recovery — same role as C-42's
+                # ``dropped_nodes``.
+                pool_free = self._solve_at_node_impl(
+                    node_lb,
+                    node_ub,
+                    time_limit,
+                    inherited_cuts=None,
+                    separate=separate,
+                    out_cuts=None,
+                    psd_max_rounds=psd_max_rounds,
+                    want_marginals=want_marginals,
+                    skip_pool_separators=False,
+                )
+                self._pool_stats["dropped_nodes"] += 1
+                # Adopt the pool-free result unconditionally: it is a valid relaxation
+                # of the identical box (optimal → recovered node with a sound bound;
+                # infeasible → the *default-path* separators tightened the loose base
+                # to empty, a rigorous fathom, since every separated cut is valid).
+                return pool_free
+        return res
+
+    def _solve_at_node_impl(
+        self,
+        node_lb: np.ndarray,
+        node_ub: np.ndarray,
+        time_limit: Optional[float] = None,
+        *,
+        inherited_cuts: Optional[tuple] = None,
+        separate: bool = True,
+        out_cuts: Optional[list] = None,
+        psd_max_rounds: int = 8,
+        want_marginals: bool = False,
+        skip_pool_separators: bool = False,
+    ) -> MccormickLPResult:
+        """Solve the McCormick LP relaxation restricted to the given bound box.
+
         Returns a :class:`MccormickLPResult`. ``lower_bound`` is a valid lower
         bound on the original problem within this box (for minimization).
         ``x`` is the LP solution projected to the original variable columns.
@@ -740,11 +883,13 @@ class MccormickLPRelaxer:
 
         Global cut pool (P1, see ``docs/design/global-cut-pool.md``):
 
-        * ``inherited_cuts``: ``(A_rows, b_rows)`` of globally-valid cut rows
-          separated once at the root, appended to this node's relaxation before
-          solving. Applied only when the lifted column layout matches the pool's
-          (a tightened child box can pin/fold columns); a mismatch skips them,
-          which is sound (fewer cuts only loosens the bound).
+        * ``inherited_cuts``: ``(A_rows, b_rows)`` of cut rows separated once at
+          the root, appended to this node's relaxation before solving. Applied
+          only when the lifted column layout matches the pool's (a tightened child
+          box can pin/fold columns); a mismatch skips them, which is sound (fewer
+          cuts only loosens the bound). NOTE: a pool row is NOT assumed valid on
+          every sub-box — see :meth:`solve_at_node`, which re-verifies any
+          pool-augmented ``infeasible`` against a pool-free solve (C-43).
         * ``separate``: when ``False`` skip the per-node cut-separation chain (use
           the inherited pool instead of re-deriving cuts every node).
         * ``out_cuts``: when a list is supplied, the rows the separation chain
