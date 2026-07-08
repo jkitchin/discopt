@@ -565,17 +565,19 @@ def _compile_relax_node(
                     return fn
 
             # Trilinear pattern detection: x*y*z over 3 distinct scalar
-            # Variables. Routes to the Meyer-Floudas/Rikun convex-hull
-            # envelope by default, with debug selectors for the older
-            # best-of-three and nested-bilinear paths.
+            # Variables. The default deliberately stays on the legacy
+            # nested-bilinear recursion; the tighter bound-changing hull paths
+            # are opt-in via DISCOPT_TRILINEAR.
             #
-            # Opt-out: setting DISCOPT_TRILINEAR=nested in the environment
-            # skips this dispatch and uses the original nested-bilinear
-            # path. Setting DISCOPT_TRILINEAR=exact selects the historical
-            # permutation-symmetric nested McCormick path.
+            # DISCOPT_TRILINEAR=meyer selects Meyer-Floudas/Rikun hull facets.
+            # DISCOPT_TRILINEAR=exact selects the historical permutation-
+            # symmetric nested McCormick path.
             tuning = _tuning()
             tri_offsets = (
-                None if tuning.trilinear_nested else _try_extract_trilinear_chain(expr, model)
+                _try_extract_trilinear_chain(expr, model)
+                if (tuning.trilinear_meyer or tuning.trilinear_exact)
+                and not tuning.trilinear_nested
+                else None
             )
             if tri_offsets is not None:
                 if tuning.trilinear_exact:

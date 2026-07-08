@@ -177,7 +177,7 @@ def test_grad_through_cv():
 
 
 # ─────────────────────────────────────────────────────────────────────
-# Compiler-level dispatch — Model x*y*z routes through trilinear-exact
+# Compiler-level dispatch — tighter trilinear routes are explicit opt-ins
 # ─────────────────────────────────────────────────────────────────────
 
 
@@ -196,20 +196,20 @@ def _build_xyz_relaxation(x_lb, x_ub, y_lb, y_ub, z_lb, z_ub):
     return fn
 
 
-def test_compiler_dispatch_default_uses_exact(monkeypatch):
-    """Without DISCOPT_TRILINEAR=nested, the compiler picks trilinear-exact.
+def test_compiler_dispatch_meyer_is_opt_in(monkeypatch):
+    """The compiler uses the legacy nested path unless Meyer is selected.
 
     Tests the LP-relaxation entry point: x_cv = lb, x_cc = ub. Under this
     convention compositional McCormick yields a non-trivial bound interval,
-    and the exact path should produce strictly tighter bounds than the
-    single-ordering nested path on at least one mixed-sign box.
+    and the opt-in Meyer-Floudas path should produce strictly tighter bounds
+    than the default nested path on at least one mixed-sign box.
     """
     monkeypatch.delenv("DISCOPT_TRILINEAR", raising=False)
     box = (-1.5, 2.0, -2.0, 1.0, -1.0, 1.5)
-    fn_exact = _build_xyz_relaxation(*box)
+    fn_default = _build_xyz_relaxation(*box)
 
-    monkeypatch.setenv("DISCOPT_TRILINEAR", "nested")
-    fn_nested = _build_xyz_relaxation(*box)
+    monkeypatch.setenv("DISCOPT_TRILINEAR", "meyer")
+    fn_meyer = _build_xyz_relaxation(*box)
     monkeypatch.delenv("DISCOPT_TRILINEAR", raising=False)
 
     lb_arr = jnp.array([box[0], box[2], box[4]])
@@ -218,25 +218,25 @@ def test_compiler_dispatch_default_uses_exact(monkeypatch):
     # LP relaxation: x_cv = lb, x_cc = ub. The compositional convention
     # evaluates cv/cc at the *midpoint* of [x_cv, x_cc] (here, the box
     # midpoint), so soundness means cv ≤ f(midpoint) ≤ cc.
-    cv_e, cc_e = fn_exact(lb_arr, ub_arr, lb_arr, ub_arr)
-    cv_n, cc_n = fn_nested(lb_arr, ub_arr, lb_arr, ub_arr)
+    cv_m, cc_m = fn_meyer(lb_arr, ub_arr, lb_arr, ub_arr)
+    cv_n, cc_n = fn_default(lb_arr, ub_arr, lb_arr, ub_arr)
 
     mid = (lb_arr + ub_arr) * 0.5
     f_mid = float(mid[0] * mid[1] * mid[2])
     eps = 1e-7
-    assert float(cv_e) <= f_mid + eps
-    assert float(cc_e) >= f_mid - eps
+    assert float(cv_m) <= f_mid + eps
+    assert float(cc_m) >= f_mid - eps
     assert float(cv_n) <= f_mid + eps
     assert float(cc_n) >= f_mid - eps
 
-    # Exact at least as tight as nested.
-    assert float(cv_e) >= float(cv_n) - eps
-    assert float(cc_e) <= float(cc_n) + eps
+    # Meyer at least as tight as the default nested path.
+    assert float(cv_m) >= float(cv_n) - eps
+    assert float(cc_m) <= float(cc_n) + eps
     # And strictly tighter on at least one of cv / cc for this box.
-    cv_tightening = float(cv_e) - float(cv_n)
-    cc_tightening = float(cc_n) - float(cc_e)
+    cv_tightening = float(cv_m) - float(cv_n)
+    cc_tightening = float(cc_n) - float(cc_m)
     assert max(cv_tightening, cc_tightening) > 1e-6, (
-        "Exact and nested produced identical LP bounds — dispatch not engaging."
+        "Meyer and default nested produced identical LP bounds — dispatch not engaging."
     )
 
 

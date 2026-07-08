@@ -38,6 +38,8 @@ def test_defaults_match_legacy_env_defaults():
     assert t.rlt is False
     assert t.lifted_fbbt is False
     assert t.trilinear_nested is False
+    assert t.trilinear_meyer is False
+    assert t.trilinear_exact is False
     # THRU-2a cost-aware PSD gate: default ON since G1.3 (graduated, gate-validated
     # post-C-38); budget 1.0, tau 1e-4.
     assert t.psd_cost_gate is True
@@ -57,6 +59,8 @@ def test_defaults_match_legacy_env_defaults():
         ("DISCOPT_ILS_SOLVE_CAP", "0", "ils_solve_cap", 0),  # escape hatch = uncapped
         ("DISCOPT_RLT_QUAD_MAX", "64", "rlt_quad_max", 64),
         ("DISCOPT_TRILINEAR", "nested", "trilinear_nested", True),
+        ("DISCOPT_TRILINEAR", "meyer", "trilinear_meyer", True),
+        ("DISCOPT_TRILINEAR", "exact", "trilinear_exact", True),
         ("DISCOPT_SQUARE_SEPARATE", "0", "square_separate", False),
         ("DISCOPT_LP_WARMSTART", "0", "lp_warmstart", False),
         ("DISCOPT_PSD_COST_GATE", "1", "psd_cost_gate", True),
