@@ -145,8 +145,10 @@ def test_kelley_bound_indef_qp_valid_and_tight():
     m = dm.Model()
     x = m.continuous("x", 2, lb=0.0, ub=4.0)
     m.minimize(x[0] * x[1] - x[0] ** 2 + 2.0 * x[1])
+
     def f(z):
         return z[0] * z[1] - z[0] ** 2 + 2 * z[1]
+
     r = reduced_mccormick_lp_bound(m, [0.0, 0.0], [4.0, 4.0])
     tmin = _sampled_min(f, np.array([0.0, 0.0]), np.array([4.0, 4.0]), 2)
     assert r.status == "optimal"
@@ -159,8 +161,10 @@ def test_kelley_bound_valid_with_quadratic_constraint():
     x = m.continuous("x", 2, lb=-2.0, ub=3.0)
     m.minimize(x[0] ** 2 - 3.0 * x[0] * x[1])
     m.subject_to(x[0] * x[1] - 2.0 <= 0)
+
     def f(z):
         return z[0] ** 2 - 3 * z[0] * z[1]
+
     r = reduced_mccormick_lp_bound(m, [-2.0, -2.0], [3.0, 3.0])
     tmin = _sampled_min(
         f, np.array([-2.0, -2.0]), np.array([3.0, 3.0]), 2, feas=lambda z: z[0] * z[1] - 2.0 <= 0
