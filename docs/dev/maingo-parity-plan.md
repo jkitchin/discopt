@@ -415,7 +415,7 @@ remainder enclosure; kill if the enclosure blows up on the motivating model).
 | P1.3–P1.4 coverage | not started | P1.3 tight monomial hull (`x**n` via relax_pow, tighter than repeated-mult); P1.4 fractional powers/signomials. P1.1b: tight sigmoidal spanning envelope. |
 | P2.1 jit Kelley | not started | eager baseline: 12–23 s / 15 rounds (nvs19/24) |
 | P2.2 in-house LP | not started | de-risk: check `RefacFtTinyPivot` ≈ 0 on Kelley bases |
-| P2.3 mode wiring | not started | |
+| P2.3 mode wiring | **BLOCKED — NO-GO (2026-07-10)** | Wiring done on branch `feat/relax-space-p2.3` (`solver_tuning.relax_space` + env `DISCOPT_RELAX_SPACE`, reduced bound fed into both the batched and serial node loops, sound-or-refuse fallback). **Default byte-identical: PASS** (11-instance panel: node_count + certified objective identical for unset/lifted/auto). **Feasible-point soundness of the reduced bound: PASS** (74,015 samples, 0 cuts). **HARD GATE FAILURE — a FALSE OPTIMAL:** on `nvs22` (in-corpus MINLP, oracle 6.0582) reduced mode certifies **11.4393 as "optimal"**. Root cause is UPSTREAM, not the wiring: `reduced_mccormick_lp_bound` returns **false `infeasible`** on a node box that provably contains the feasible optimum (reproduced directly: box of half-width 1 around x\* → status `infeasible`), so the node holding the optimum is (correctly, per the status contract) fathomed. The reduced *bound* is sound on the boxes tested (≤ true box-min); the defect is the **infeasibility detection** for the equality-constrained division/sqrt intermediate class (nvs22 also has unbounded x4–x7 leaves the builder does NOT refuse). Reduced mode CANNOT be wired into the solver until the evaluator's soundness/scope guard is fixed (P0/P1 layer). nodes/s note: reduced is ~5× slower per node on st\_e36 (137 nodes @1.2 nps vs lifted 153 @5.8 nps) — speed was never the P2.3 justification (§0.1), but there is no speed win to offset the soundness break. |
 | P2.4 auto policy | blocked on P2.3 | |
 | P2.5 hybrid | deferred | |
 | P3.1 CustomCall relax | not started | prototype P3.3 first |
@@ -434,6 +434,17 @@ Prior falsifications binding on this plan (§4 of CLAUDE.md — measurements win
   root bounds on QPs.
 - The FT-storm motivation for reduced space is **gone** (#573 density route);
   §0.1's capability framing is the binding rationale.
+- **The reduced-space evaluator is NOT yet sound on the full library** (P2.3
+  falsification, 2026-07-10): `reduced_mccormick_lp_bound` returns false
+  `infeasible` on `nvs22` (equality-constrained division/sqrt intermediates,
+  unbounded leaves), which fathoms the node holding the optimum → false optimal.
+  The `build_reduced_relaxation` scope guard is too permissive (accepts unbounded
+  leaves + this equality class it cannot soundly declare infeasible). P2.3 mode
+  wiring is BLOCKED on a P0/P1-layer fix: either (a) refuse this class at build
+  time (unbounded leaf / equality-of-nonconvex-intermediate) so the solver falls
+  back to lifted, and/or (b) fix the infeasibility test to never report empty on a
+  non-empty relaxed set. Do NOT re-enable reduced wiring until a corpus-wide
+  false-infeasible / false-optimal sweep is clean.
 
 ## 8. What "parity" means at the end
 
