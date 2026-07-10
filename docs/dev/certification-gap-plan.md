@@ -138,6 +138,7 @@ experiment may run.
 | Phase 4 build 1 — CSE/hash-consing | **done — bound-neutral** | (this PR) | Content-addressed interning in `ExprArena` (`expr.rs`), wired into the `.nl` parser and Python `convert_expr`. DAG node count ↓ **68.9% nvs17, 64.8% clay0303hfsg, 34.2% ex1252, 34.0% casctanks, 0.0% gear4** (panel total −48.4%); gear4 0% confirms the re-profile prediction. Cert-neutrality **NEUTRAL** (42 certifying instances, node_count exactly unchanged, objective to tol). See §8 "Phase 4 CSE — build results" |
 | Phase 4 build 3 — Q-matrix extraction | **done — (A) bound-neutral, (B) flagged bound-changing** | (this PR) | Exact `extract_quadratic(expr,n,model)` in `quadratic_form.py` (exact-or-abstain, validated 1e-12 on 250 pts/inst + 14 non-quadratic rejections). Consumer: PSD-on-Q convexity certificate wired into `certify_convex` behind `DISCOPT_PSD_QFORM` (**default-OFF**); sound tightening, never mis-certifies (30 indefinite-Q seeds), strict refinement of the rigorous path. Flag-off is byte-identical → cert-neutral. See §8 "Phase 4 Q-extraction — build results" |
 | Phase 4 items 2 & 4 (V-segments, symmetry) | **locked / de-scoped** (§0.1.2) | — | V-segments de-prioritized (0 defvars in text `.nl`); symmetry DO-NOT-BUILD (0 orbits) per the re-profile. RLT/edge-concave rewire onto `extract_quadratic` scoped as bound-neutral follow-on |
+| STRUCT-1 verification (task #82) | **done — verified; commutative-normalization KILLED** | — | Independent re-measurement (2026-07-10) on 61 in-repo + 30 snapshot-draw instances: CSE live, median 25.0% node reduction (76/91 ≥10%); 0 defined vars / 0 V segments in all 1,558 text `.nl` (re-confirmed with the correct header field). NEW: commutative-normalized interning would fuse median 0.00% / max 0.5% extra — **do not build**. See §8 "Independent verification" note under CSE build results |
 | Phase 5 | **locked** (§0.1.2) | — | requires post-Phase-1 re-profile |
 | Phase D — separation/strong-branch LP → warm in-house simplex (`perf-d1`) | **done — bound-neutral, default-ON** | (this PR) | Re-profile: **POUNCE subsolver is the #1 wall** (nvs17 ~239 cold POUNCE-LP solves / 6.3 s ≈ 40% of wall). Routed edge-concave separation + strong-branch LPs to `lp_simplex.solve_lp` under `DISCOPT_SEPARATION_LP_SIMPLEX` (default ON). Cert-baseline **NEUTRAL** (41/41 exact node_count, Δobj 0, incorrect 0); nvs17 equal-budget 93 nodes both flags. T0.4: 37 cuts / 14,800 checks, no invalid cut. Win: nvs17 POUNCE 848→0, wall 60.3 s (TL) → 38.1 s (optimal), s/node 0.826→0.409 (**2.02×**); nvs13 2.67×. See §8 "Phase D re-profile" |
 | THRU-2b node-LP fast path | **RE-SCOPE (premise falsified); one bound-neutral sub-fix shipped** | (this PR) | THRU-1's "node solved as integer MILP → drop integrality → sub-second" premise is **void on `origin/main`**: integrality is already dropped at every node (`node_bound_mode="lp"` default *and* RLT force the LP path — 13/13 nvs24 node solves have `integrality is None`, 0 integer-MILP solves, even under `DISCOPT_NODE_BOUND_MODE=milp`). The `solve_milp_py` calls THRU-1's cProfile mis-labeled "integer-MILP node solve" are **pure LPs** (`nint=0`) reached through the dense-cold fallback (`milp_relaxation.py:375`) when the warm sparse simplex breaks down `numerical` at iters=0 (factorization failure, not iter-limit) on 2–3 hard lifted LPs. Rare (nvs17/nvs21 0 fallbacks; nvs19 2; nvs24 2–3) and not nvs24's wall lever (that's PSD+square sep, the THRU-1 PSD gate). Shipped: a pure-LP short-circuit in `milp_simplex.solve_milp` — when `int_cols` empty, run the driver with the integer-search machinery OFF (cuts/GMI/heuristics/strong-branch), bound-neutral by construction (nvs24 fallback LP 10.9→5.5 s). Cert-baseline **NEUTRAL** (41/41 node_count exact, |Δobj|=0). Real lever for the fallback = LP presolve on the warm sparse simplex (Rust `lp/simplex`; re-scoped follow-on). See `docs/dev/root-throughput-entry-2026-07-06.md` §7 |
@@ -1114,6 +1115,34 @@ tolerance. `cargo test -p discopt-core` green (incl. `presolve_determinism`, 4/4
 `cargo clippy --lib` clean, the new CSE unit/property tests pass. Because the interner
 only merges structurally-identical nodes, the relaxation math is bit-for-bit the same
 — the smaller arena is a representation change, not a math change.
+
+**Independent verification + commutative-normalization follow-on KILLED
+(2026-07-10, STRUCT-1 / task #82).** Re-measured on a fresh build with a wider
+panel — the full in-repo corpus (61 `.nl`) **plus a deterministic 30-instance
+text-`.nl` draw** (seed 82) from the MINLPLib snapshot; all 91 parsed:
+- **CSE lever confirmed live and general:** node reduction (naive vs interned,
+  via `DISCOPT_DISABLE_CSE`) **median 25.0%, mean 27.1%, 76/91 instances ≥10%**;
+  largest fo7_ar3_1 67.7%, clay0303hfsg 64.8%, sonet19v5 55.6%,
+  autocorr_bern60-30 44.5% (123,425 → 68,493 nodes). Entry-experiment kill
+  criterion (<10% median) decisively not met — the GO stands.
+- **V-segment de-scope re-confirmed independently:** correct header field
+  (line 10, `common exprs: b,c,o,c1,o1`) + body `V`-segment line scan over the
+  61-file in-repo corpus and **all 1,558 text-format snapshot files: 0 defined
+  variables, 0 V segments everywhere** (52 remaining snapshot files are
+  binary-`b` format the parser refuses). Lever 2 stays de-scoped; the
+  prerequisite remains binary-`.nl` reader support.
+- **NEW negative result — commutative-normalized interning is NOT a lever.**
+  The shipped `StructuralKey` deliberately does not reorder commutative
+  operands (`a+b` ≠ `b+a`, "correctness over completeness"). Measured the
+  duplication this leaves behind: a canonical re-hash of the interned arena
+  with sorted children for `+`/`*` (fixpoint via canonical child ids) fuses
+  **median 0.00%, mean 0.01%, max 0.5%** (hda: 15 of 2,785 nodes) additional
+  nodes on the 61-file corpus. `.nl` builds are ordering-consistent enough that
+  operand-order misses are noise — **do not build commutative normalization**
+  on corpus evidence; revisit only if a front-end that emits inconsistent
+  operand orders becomes a real source (would then need the same
+  bound-neutrality proof, since re-association can change nothing here but a
+  canonicalizing *rewrite* could).
 
 ### Phase 4 Q-extraction — build results (2026-07-03)
 
