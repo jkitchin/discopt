@@ -416,6 +416,19 @@ Stage 0 (gate) ─► Stage 1 (kill recompilation — the dominant measured cost
   above names the experiment that must confirm its premise *before* code, and the
   metric + correctness gate that must move *after* it.
 
+> **Falsified (2026-07-10, task #94 — A-UNBOUNDED, F9):** "Finitizing the unbounded
+> continuous vars on the nvs05/tanksize/casctanks certification-stall class is the
+> lever." FBBT already finitizes 100 % of them (nvs05 4/4, tanksize 26/26,
+> casctanks 296/296 — the constraints imply a bounded region), and the solver's root
+> OBBT already applies equivalent bounds, so FBBT-preconditioning closes **0**
+> additional gap end-to-end. nvs05's objective contains no unbounded var (root bound
+> 0.674 is a loose interval enclosure of `x0²·x1`; final 1.3521 is the F8 taint floor).
+> `DISCOPT_ROOT_FIXPOINT`+`DISCOPT_NODE_REDUCE` are inert (both gate on the McCormick-LP
+> relaxer this class routes away from). This is a **Lever-A (relaxation-strength)**
+> class, not bound-inference — consistent with DECOMP-1. Full record + reproduction:
+> `docs/dev/a-unbounded-entry-2026-07-10.md`; ledgered as F9 in
+> `gap-closing-execution-plan.md` §6.
+
 ## 9. Engine layer — density-aware LU route (#557): the nvs21 certificate loss
 
 > **Entry experiment (2026-07-10, task #77) — the conditioning-gate hypothesis is
