@@ -8,6 +8,8 @@ import numpy as np
 
 
 class SolveStatus(Enum):
+    """Terminal status of a solve (optimal, infeasible, unbounded, ...)."""
+
     OPTIMAL = "optimal"
     INFEASIBLE = "infeasible"
     UNBOUNDED = "unbounded"

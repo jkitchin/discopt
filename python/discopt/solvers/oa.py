@@ -4725,9 +4725,10 @@ def solve_oa(
         MindtPy FP controls that are explicitly unsupported in discopt's current
         FP implementation unless set to their no-op defaults. Non-default values
         raise ``ValueError`` rather than being silently ignored.
-    add_regularization : {None, "level_L1", "level_L2", "level_L_infinity",
-            "grad_lag", "hess_lag", "hess_only_lag", "sqp_lag"}
+    add_regularization : str or None
         Optional level-set regularized OA master before fixed-integer NLP solves.
+        One of ``None``, ``"level_L1"``, ``"level_L2"``, ``"level_L_infinity"``,
+        ``"grad_lag"``, ``"hess_lag"``, ``"hess_only_lag"``, or ``"sqp_lag"``.
         L1, L-infinity, and ``grad_lag`` are solved as MILPs; quadratic modes
         require a MIQP-capable QP backend. Derivative modes require NLP duals,
         and Hessian modes require Lagrangian Hessian access.
@@ -4756,13 +4757,18 @@ def solve_oa(
         generated binary variables. Unbounded or impractically bounded general
         integers raise a diagnostic when this option is combined with
         ``add_no_good_cuts``.
-    external_primal_candidate_hook, external_hyperplane_hook, external_dual_bound_hook,
+    external_primal_candidate_hook : callable, optional
+        Opt-in event hook for the multi-tree OA loop (see notes below).
+    external_hyperplane_hook : callable, optional
+        Opt-in event hook for the multi-tree OA loop (see notes below).
+    external_dual_bound_hook : callable, optional
+        Opt-in event hook for the multi-tree OA loop (see notes below).
     termination_hook : callable, optional
-        Opt-in event hooks for the multi-tree OA loop. Hooks receive a read-only
-        context dictionary with iteration, elapsed time, current bound/incumbent
-        data, and candidate points where relevant. Returned payloads are
-        validated before they can add external fixed-NLP candidates, master cuts,
-        dual-bound updates, or request user termination.
+        Opt-in event hook for the multi-tree OA loop. All four hooks receive a
+        read-only context dictionary with iteration, elapsed time, current
+        bound/incumbent data, and candidate points where relevant. Returned
+        payloads are validated before they can add external fixed-NLP candidates,
+        master cuts, dual-bound updates, or request user termination.
 
     Returns
     -------

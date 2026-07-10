@@ -141,7 +141,7 @@ def solve_via_daemon(
     run.
 
     ``hard_deadline`` (seconds, default ``None`` = no limit) additionally asks the
-    *daemon* to fork a watchdog that ``SIGKILL``s itself if this solve overruns,
+    *daemon* to fork a watchdog that ``SIGKILL``-s itself if this solve overruns,
     enforcing the limit even with no client waiting (orphaned worker) and even for
     a solver wedged in a C extension.
     """

@@ -3,7 +3,7 @@
 discopt can act as a **solver inside GAMS**: once registered, a GAMS user solves
 a model with discopt the same way they would call BARON, SCIP, or CONOPT:
 
-```gams
+```text
 option minlp = discopt;
 solve m using minlp minimizing z;
 ```
@@ -52,7 +52,7 @@ discopt gams-register          # writes ~/.gams/gamsconfig.yaml + the launcher
 
 Then, in any GAMS model:
 
-```gams
+```text
 option minlp = discopt;        // and/or lp/mip/nlp/... = discopt
 solve m using minlp minimizing z;
 ```

@@ -1176,6 +1176,8 @@ def norm(x: Expression, ord: Union[int, float, str] = 2) -> Expression:
 
 
 class ConstraintSense(Enum):
+    """Relational sense of a constraint (``<=``, ``>=``, or ``==``)."""
+
     LE = "<="
     GE = ">="
     EQ = "=="
@@ -1252,6 +1254,8 @@ class ConstraintList:
 
 
 class ObjectiveSense(Enum):
+    """Optimization direction of the objective (minimize or maximize)."""
+
     MINIMIZE = "minimize"
     MAXIMIZE = "maximize"
 
