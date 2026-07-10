@@ -1,0 +1,261 @@
+{
+  "arm": "lu_density_route",
+  "env": {
+    "DISCOPT_LU_DENSITY_ROUTE": "1"
+  },
+  "tl": 40.0,
+  "results": {
+    "nvs21": {
+      "instance": "nvs21",
+      "status": "optimal",
+      "objective": -5.684782607923295,
+      "bound": -5.685216256038941,
+      "node_count": 191,
+      "wall": 10.28,
+      "sense": "min"
+    },
+    "st_e36": {
+      "instance": "st_e36",
+      "status": "optimal",
+      "objective": -245.99999999999997,
+      "bound": -246.01879639837875,
+      "node_count": 153,
+      "wall": 7.659,
+      "sense": "min"
+    },
+    "nvs09": {
+      "instance": "nvs09",
+      "status": "feasible",
+      "objective": -43.13433691803531,
+      "bound": -58.727590275114444,
+      "node_count": 159,
+      "wall": 40.228,
+      "sense": "min"
+    },
+    "alkyl": {
+      "instance": "alkyl",
+      "status": "optimal",
+      "objective": -1.7649998792765358,
+      "bound": -1.7651560833301083,
+      "node_count": 29,
+      "wall": 1.889,
+      "sense": "min"
+    },
+    "tls2": {
+      "instance": "tls2",
+      "status": "time_limit",
+      "objective": null,
+      "bound": null,
+      "node_count": 1215,
+      "wall": 40.35,
+      "sense": "min"
+    },
+    "nvs03": {
+      "instance": "nvs03",
+      "status": "optimal",
+      "objective": 16.0,
+      "bound": 15.99999972676511,
+      "node_count": 5,
+      "wall": 0.363,
+      "sense": "min"
+    },
+    "nvs05": {
+      "instance": "nvs05",
+      "status": "feasible",
+      "objective": 5.47093412640568,
+      "bound": 1.3520892806701879,
+      "node_count": 625,
+      "wall": 40.165,
+      "sense": "min"
+    },
+    "nvs08": {
+      "instance": "nvs08",
+      "status": "optimal",
+      "objective": 23.449727353351044,
+      "bound": 23.449382312131643,
+      "node_count": 57,
+      "wall": 0.872,
+      "sense": "min"
+    },
+    "nvs10": {
+      "instance": "nvs10",
+      "status": "optimal",
+      "objective": -310.7999999999999,
+      "bound": -310.7999999999999,
+      "node_count": 5,
+      "wall": 0.08,
+      "sense": "min"
+    },
+    "nvs11": {
+      "instance": "nvs11",
+      "status": "optimal",
+      "objective": -430.99999999999966,
+      "bound": -430.99999999999966,
+      "node_count": 55,
+      "wall": 0.438,
+      "sense": "min"
+    },
+    "nvs12": {
+      "instance": "nvs12",
+      "status": "optimal",
+      "objective": -481.20000000000005,
+      "bound": -481.20000000000005,
+      "node_count": 231,
+      "wall": 1.414,
+      "sense": "min"
+    },
+    "nvs16": {
+      "instance": "nvs16",
+      "status": "optimal",
+      "objective": 0.703125,
+      "bound": 0.7031248950084752,
+      "node_count": 7,
+      "wall": 0.767,
+      "sense": "min"
+    },
+    "nvs18": {
+      "instance": "nvs18",
+      "status": "optimal",
+      "objective": -778.4,
+      "bound": -778.4000015578,
+      "node_count": 105,
+      "wall": 6.476,
+      "sense": "min"
+    },
+    "st_miqp1": {
+      "instance": "st_miqp1",
+      "status": "optimal",
+      "objective": 280.9999999906497,
+      "bound": 280.9999999906497,
+      "node_count": 15,
+      "wall": 0.133,
+      "sense": "min"
+    },
+    "st_miqp4": {
+      "instance": "st_miqp4",
+      "status": "optimal",
+      "objective": -4574.000004423649,
+      "bound": -4574.000004423649,
+      "node_count": 3,
+      "wall": 0.137,
+      "sense": "min"
+    },
+    "st_miqp5": {
+      "instance": "st_miqp5",
+      "status": "optimal",
+      "objective": -333.8888902488547,
+      "bound": -333.8888902488547,
+      "node_count": 1,
+      "wall": 0.136,
+      "sense": "min"
+    },
+    "st_test2": {
+      "instance": "st_test2",
+      "status": "optimal",
+      "objective": -9.25,
+      "bound": -9.25,
+      "node_count": 5,
+      "wall": 0.133,
+      "sense": "min"
+    },
+    "st_testgr1": {
+      "instance": "st_testgr1",
+      "status": "optimal",
+      "objective": -12.811600000000002,
+      "bound": -12.811600000000002,
+      "node_count": 105,
+      "wall": 0.154,
+      "sense": "min"
+    },
+    "ex5_2_2_case2": {
+      "instance": "ex5_2_2_case2",
+      "status": "feasible",
+      "objective": -600.000006187781,
+      "bound": -1151.8851934692605,
+      "node_count": 3,
+      "wall": 0.6,
+      "sense": "min"
+    },
+    "ex5_2_4": {
+      "instance": "ex5_2_4",
+      "status": "optimal",
+      "objective": -450.0000011369069,
+      "bound": -450.00000209765136,
+      "node_count": 3,
+      "wall": 0.435,
+      "sense": "min"
+    },
+    "ex7_2_2": {
+      "instance": "ex7_2_2",
+      "status": "feasible",
+      "objective": -0.38881143010195207,
+      "bound": -0.39749234462710814,
+      "node_count": 75,
+      "wall": 5.736,
+      "sense": "min"
+    },
+    "ex4_1_2": {
+      "instance": "ex4_1_2",
+      "status": "optimal",
+      "objective": -663.5000966105001,
+      "bound": -663.5000966114999,
+      "node_count": 3,
+      "wall": 0.521,
+      "sense": "min"
+    },
+    "ex4_1_8": {
+      "instance": "ex4_1_8",
+      "status": "optimal",
+      "objective": -16.73889318443983,
+      "bound": -16.740521631557268,
+      "node_count": 7,
+      "wall": 0.358,
+      "sense": "min"
+    },
+    "ex8_1_1": {
+      "instance": "ex8_1_1",
+      "status": "optimal",
+      "objective": -2.021806795967722,
+      "bound": -2.021968747474246,
+      "node_count": 5,
+      "wall": 0.397,
+      "sense": "min"
+    },
+    "st_bpaf1a": {
+      "instance": "st_bpaf1a",
+      "status": "optimal",
+      "objective": -45.37971091253482,
+      "bound": -45.37971142671955,
+      "node_count": 5,
+      "wall": 0.487,
+      "sense": "min"
+    },
+    "st_e29": {
+      "instance": "st_e29",
+      "status": "optimal",
+      "objective": -0.9434704910762214,
+      "bound": -0.9435072710855771,
+      "node_count": 53,
+      "wall": 2.163,
+      "sense": "min"
+    },
+    "st_e31": {
+      "instance": "st_e31",
+      "status": "feasible",
+      "objective": -2.000000008986581,
+      "bound": -3.0,
+      "node_count": 577,
+      "wall": 40.555,
+      "sense": "min"
+    },
+    "gbd": {
+      "instance": "gbd",
+      "status": "optimal",
+      "objective": 2.199999982504936,
+      "bound": 2.199999982504936,
+      "node_count": 3,
+      "wall": 0.134,
+      "sense": "min"
+    }
+  }
+}

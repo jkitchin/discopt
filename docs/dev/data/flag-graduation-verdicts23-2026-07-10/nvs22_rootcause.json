@@ -1,0 +1,42 @@
+{
+  "instance": "nvs22",
+  "finding": "DISCOPT_LU_DENSITY_ROUTE introduces an nvs22 certificate loss, NOT TL-sensitive",
+  "off": {
+    "TL40": {
+      "status": "optimal",
+      "node_count": 35,
+      "bound": 6.058219998999999,
+      "objective": 6.058219942618264
+    },
+    "TL60": {
+      "status": "optimal",
+      "node_count": 35,
+      "bound": 6.058219998999999,
+      "objective": 6.058219942618264
+    }
+  },
+  "route_only": {
+    "TL40": {
+      "status": "feasible",
+      "node_count": 37,
+      "bound": 6.0582199951512,
+      "objective": 6.0582199356118025
+    },
+    "TL60": {
+      "status": "feasible",
+      "node_count": 37,
+      "bound": 6.0582199951512,
+      "objective": 6.0582199356118025
+    }
+  },
+  "obj_branch_priority_plus_route": {
+    "TL60": {
+      "status": "feasible",
+      "node_count": 17,
+      "bound": 6.058219999999996,
+      "objective": 6.05821993806505
+    }
+  },
+  "oracle": 6.05822,
+  "note": "Both OFF and route are numerically correct to oracle (gap ~6e-8, within abs 1e-4). The route's 37-node tree never formally closes the gap (bound 6.0582199951512 vs incumbent 6.0582199356118, rel gap ~9.8e-9); OFF's 35-node tree does. Deterministic across TL=40 and TL=60 (byte-identical), so the loss is a hard cert loss, not a slower-certify."
+}
