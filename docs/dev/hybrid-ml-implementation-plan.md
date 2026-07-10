@@ -109,8 +109,8 @@ or certification guard (the gate loses — CLAUDE.md philosophy §1).
 | HM2.2 | done | (this branch) | `dae/fit.py`: Trajectory, fit_trajectories, TrajectoryFit |
 | HM2.3 | done | (this branch) | `test_dae_fit.py`: 4 tests (1 smoke) |
 | HM2.4 | done | (this branch) | `test_neural_dae_scale.py` slow gate; 1021 wts, 3 traj, passes |
-| HM3.1 | not started | | |
-| HM3.2 | not started | | |
+| HM3.1 | done | (this branch) | `neural_dae.ipynb` executes clean; 0 warnings from it; +toc, +3 bib keys |
+| HM3.2 | done | (this branch) | CLAUDE.md nn+dae bullets; `nn/__init__` regime docstring |
 | HM4.* | LOCKED | | entry experiments first (§8) |
 
 ---
@@ -494,4 +494,15 @@ first if it hurts, then propose separately).
 - 2026-07-10 (pre-plan): decomposition-needed premise falsified at 1021 weights ×
   3 trajectories (17 iters / 37 s full-space). Plan contains no decomposition
   work as a result.
-- (append here)
+- 2026-07-10 (HM1.4): the new `TrainableNetwork` API with Glorot init converges
+  the 1-6-1 prototype in **15** iters (vs the script's 19 with 0.5·randn init) to
+  the identical objective/rate law — init quality, not a regression. Thresholds
+  in tests keep the ≥2× margin on the measured values regardless.
+- 2026-07-10 (HM3.1): the "zero-warnings" jupyter-book gate cannot be met for the
+  *whole* book on current `main` — the baseline already emits ~120 warnings
+  (mostly autoapi "document isn't in any toctree" + pre-existing duplicate
+  citations). The neural_dae notebook and the new modules contribute **zero**
+  warnings. En route, found and fixed a latent bug: a **duplicate `Dempe2002`
+  bibtex entry** made pybtex stop registering every entry after it, so all late
+  keys (including the new Lueg2025/Chen2018/Schweidtmann2019) silently failed to
+  resolve. Removing the duplicate dropped the book's warning count 132 → 120.

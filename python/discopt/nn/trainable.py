@@ -3,7 +3,7 @@
 This module is the *training* counterpart to the frozen-network embedding in
 :mod:`discopt.nn.formulations`. Where a frozen formulation bakes trained weights
 into constraint coefficients (to *optimize over* a fixed surrogate), the classes
-here create the weights as decision ``Variable``s and emit ordinary symbolic
+here create the weights as decision ``Variable`` objects and emit ordinary symbolic
 expressions, so a surrogate can be *trained simultaneously* with the rest of a
 model — e.g. a neural network standing in for an unknown rate law inside a
 collocation-discretized DAE, trained as one sparse NLP (the simultaneous
@@ -14,7 +14,7 @@ Two regimes, one story:
 - **Frozen** (``discopt.nn.formulations`` / :func:`discopt.nn.add_predictor`):
   weights are constants; you optimize inputs/outputs of a fixed net, with global
   optimality guarantees.
-- **Trainable** (this module): weights are ``Variable``s; you fit them to data.
+- **Trainable** (this module): weights are ``Variable`` objects; you fit them to data.
   Trained weights bridge back to the frozen path via
   :meth:`TrainableNetwork.freeze`.
 
@@ -23,7 +23,7 @@ Design invariants (see ``docs/dev/hybrid-ml-implementation-plan.md`` §0.3):
 - Surrogates emit *symbolic* expressions (``dm.tanh`` etc.), never an opaque
   ``dm.custom`` callable — that would disable global certification, integer
   variables, and ``.nl`` export.
-- Layers are emitted in *matrix* form (array-shaped weight ``Variable``s and
+- Layers are emitted in *matrix* form (array-shaped weight ``Variable`` objects and
   ``@``), not per-neuron scalar loops.
 - Only **smooth** activations are allowed on the trainable path (LINEAR, TANH,
   SIGMOID, SOFTPLUS); RELU is refused loudly because a gradient-based NLP solver
@@ -97,7 +97,7 @@ class TrainableDense:
     """One dense layer with trainable weights: ``y = act(x @ W + b)``.
 
     The weight matrix ``W`` (shape ``(n_in, n_out)``) and bias ``b`` (shape
-    ``(n_out,)``) are created as continuous decision ``Variable``s on ``model``.
+    ``(n_out,)``) are created as continuous decision ``Variable`` objects on ``model``.
 
     Parameters
     ----------
@@ -364,7 +364,7 @@ class TrainableNetwork:
     ) -> "TrainableNetwork":
         """Build a trainable network seeded from a (pretrained) frozen definition.
 
-        The weights become fresh ``Variable``s bounded by ``weight_bounds``; the
+        The weights become fresh ``Variable`` objects bounded by ``weight_bounds``; the
         definition's values are returned by :meth:`initial_values_from_definition`
         so training can *fine-tune* from a pretrained start. This is how the
         existing readers (sklearn/torch/onnx) become *initializers* rather than

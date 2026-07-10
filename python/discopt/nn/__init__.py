@@ -1,9 +1,18 @@
-"""Neural network embedding for discopt optimization models.
+"""Neural network embedding and training for discopt optimization models.
 
-Embed trained neural networks as algebraic constraints in MINLP models,
-enabling optimization over ML surrogates with global optimality guarantees.
+This module spans two regimes of one hybrid-model story:
 
-Example
+- **Frozen** (``NetworkDefinition`` + ``NNFormulation`` / :func:`add_predictor`):
+  embed a *trained* network as algebraic constraints and optimize *over* it —
+  its weights are constants — with global optimality guarantees.
+- **Trainable** (:mod:`discopt.nn.trainable`: ``TrainableNetwork``,
+  ``TrainableDense``, ``TrainableKernelExpansion``, :func:`train`): the surrogate's
+  weights are decision ``Variable`` objects, so it can be *trained* jointly with a
+  physics model (e.g. a neural rate law inside a collocation DAE). Trained weights
+  bridge back to the frozen path via ``TrainableNetwork.freeze()`` /
+  ``from_definition()`` — train, freeze, then optimize.
+
+Example (frozen)
 -------
 >>> import discopt.modeling as dm
 >>> from discopt.nn import NNFormulation, NetworkDefinition, DenseLayer, Activation

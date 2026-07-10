@@ -3,7 +3,7 @@
 :func:`fit_trajectories` builds one collocation transcription
 (:class:`~discopt.dae.collocation.DAEBuilder`) per experimental trajectory on a
 *shared* model, wiring them all to the same right-hand side. When that RHS closes
-over a trainable surrogate's weight ``Variable``s (see
+over a trainable surrogate's weight ``Variable`` objects (see
 :mod:`discopt.nn.trainable`), the weights are shared across every trajectory and
 trained jointly — the simultaneous multi-experiment neural-DAE setup measured in
 ``scripts/hybrid_ml/exp_c_paper_scale.py``.
