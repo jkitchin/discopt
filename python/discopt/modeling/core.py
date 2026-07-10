@@ -1351,7 +1351,13 @@ class SolveResult:
     root_time : float or None
         Wall-clock seconds elapsed when the root node was fathomed/branched.
     solver_stats : dict of str to float, or None
-        Per-family reduction/separation timers (cumulative seconds), or None.
+        Instrumentation counters, or None. Two key families: per-family
+        reduction/separation timers (``reduce/<fam>`` / ``separate/<fam>``,
+        cumulative seconds) and per-source cut counts (``cuts/<source>``, added by
+        the P3.1b cut-measurement work and read by the ``p3_1*`` scripts) and
+        cut-pool gating telemetry (``pool/gate_*``, categorical decision codes). Only
+        the timer families are seconds and bounded by ``wall_time``; ``cuts/`` are
+        counts and ``pool/`` are decision codes.
     convex_fast_path : bool
         True if the problem was detected as convex and solved with a
         single NLP call (no Branch & Bound), guaranteeing global optimality.

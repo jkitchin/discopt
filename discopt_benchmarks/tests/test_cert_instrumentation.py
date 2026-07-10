@@ -164,9 +164,23 @@ def test_trajectory_off_by_default():
 
 @pytest.mark.smoke
 def test_reduction_separation_timers_present_and_bounded():
-    """On a spatial instance the per-family reduction/separation timers are
-    populated, non-negative, individually non-zero somewhere, and sum to no
-    more than the wall time (cert:T0.3)."""
+    """On a spatial instance ``solver_stats`` carries the instrumentation schema:
+    per-family reduction/separation *timers* (``reduce/`` / ``separate/``,
+    cumulative seconds) and per-source cut *counts* (``cuts/``, added by the P3.1b
+    cut-measurement work #417 and consumed by the p3_1* scripts). All values are
+    non-negative floats; the timers sum to no more than the wall time; at least one
+    timer is strictly positive (cert:T0.3).
+
+    Plus per-decision cut-pool telemetry (``pool/gate_*``, cut-inheritance gating).
+
+    NOTE (schema, not a weakening): the ``sum(values) <= wall_time`` invariant is
+    only meaningful for the *timer* families — ``cuts/`` values are counts and
+    ``pool/`` values are categorical decision codes, not seconds — so it is asserted
+    over the timer keys, and the non-timer keys are checked for non-negativity
+    separately. Before #417/#563 broadened the schema, ``solver_stats`` held timers
+    only; this test and the SolveResult docstring were the laggards. FOLLOW-UP:
+    categorical ``pool/`` telemetry arguably belongs in its own field rather than a
+    float-timer dict — tracked separately; this test pins the current shipped schema."""
     import discopt.modeling as dm
 
     runner, _ = _make_runner()
@@ -177,13 +191,19 @@ def test_reduction_separation_timers_present_and_bounded():
 
     stats = result.solver_stats
     assert stats is not None and len(stats) > 0
-    # Every entry is a non-negative float keyed under a reduce/ or separate/ family.
+    _TIMER_FAMILIES = ("reduce/", "separate/")
+    _NON_TIMER_FAMILIES = ("cuts/", "pool/")
+    _KNOWN = _TIMER_FAMILIES + _NON_TIMER_FAMILIES
+    # Every entry is a non-negative float in a known instrumentation family.
     assert all(isinstance(v, float) and v >= 0.0 for v in stats.values())
-    assert all(k.startswith(("reduce/", "separate/")) for k in stats)
-    # At least one timer is strictly positive (the solve did some separation).
-    assert any(v > 0.0 for v in stats.values())
-    # The instrumented phases are a subset of the wall clock.
-    assert sum(stats.values()) <= result.wall_time + 1e-6
+    assert all(k.startswith(_KNOWN) for k in stats), (
+        f"unexpected solver_stats keys: {[k for k in stats if not k.startswith(_KNOWN)]}"
+    )
+    timers = {k: v for k, v in stats.items() if k.startswith(_TIMER_FAMILIES)}
+    # At least one timer is strictly positive (the solve did some reduction/separation).
+    assert any(v > 0.0 for v in timers.values())
+    # The instrumented timer phases are a subset of the wall clock (counts excluded).
+    assert sum(timers.values()) <= result.wall_time + 1e-6
 
 
 # ─────────────────────────── T0.5 ───────────────────────────
