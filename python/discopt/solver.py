@@ -4761,6 +4761,30 @@ def solve_model(
         tree.set_nonconvex(True)
     _gap_certified = True
 
+    # --- B2-FIX (task #89): per-node taint accounting for the reported dual bound.
+    # A non-rigorous sentinel fathom (a node whose local NLP merely failed and that
+    # was pruned with no infeasibility proof) rightly decertifies *optimality*
+    # (issue #27a) — but the node's POP-TIME lower bound (inherited from its
+    # parent's rigorous relaxation solve; the Rust import floors every child at
+    # its parent's bound) remains a valid lower bound for that node's whole
+    # subtree forever. The rigorous global dual bound of a tainted tree is
+    # therefore  min(surviving-frontier bound, min over tainted nodes of their
+    # pop-time bound)  — NOT the bare frontier minimum (which may over-report:
+    # the unproven subtree was removed from it), and NOT nothing (discarding the
+    # whole tree bound under-reports: nvs05 reported 1.348 where the search had
+    # proven 4.87 — DECOMP-1 §3, "decertify-and-discard").
+    #   _taint_floor_internal: running min (internal minimization sense) of the
+    #     pop-time bounds of every node fathomed without a rigorous proof. +inf
+    #     while no such node exists. A -inf floor (root fathomed non-rigorously,
+    #     or a node never bounded) makes the recovery below discard the tree
+    #     bound — exactly the pre-fix conservative behavior.
+    #   _tree_bound_poisoned: True when a possibly-INVALID bound value entered
+    #     the tree itself (convex batch node whose non-KKT objective was kept as
+    #     its bound, roadmap P0.3). Then no frontier arithmetic is trustworthy
+    #     and the tree bound is discarded wholesale, as before.
+    _taint_floor_internal = np.inf
+    _tree_bound_poisoned = False
+
     # --- Soundness (C-1): distinguish a PROVEN-infeasible fathom from a merely
     # non-rigorous one, exactly as ``_solve_nlp_bb`` does with
     # ``_unconverged_fathom``. A node fathomed on an empty McCormick/LP
@@ -6095,8 +6119,13 @@ def solve_model(
             # A convex node whose relaxation objective is not KKT-valid (and
             # could not be polished) is not a valid lower bound; decertify the
             # gap rather than trust it (roadmap P0.3). Bounds are left as-is.
+            # B2-FIX (task #89): the possibly-invalid value stays in result_lbs
+            # and enters the tree as the node's bound, so the frontier minimum
+            # itself is no longer trustworthy — poison the tree bound (full
+            # discard at result build; the taint-floor recovery must not apply).
             if _model_is_convex and not bool(np.all(_batch_trusted)):
                 _gap_certified = False
+                _tree_bound_poisoned = True
             # Constraint feasibility post-check for batch IPM results.
             # When the IPM solution violates constraints (e.g. due to hitting
             # the iteration limit), mark the node as infeasible (SENTINEL).
@@ -6762,10 +6791,33 @@ def solve_model(
         # the authoritative guard and also catches the convex path (whose local NLP
         # objective is a valid bound but whose constraint-violating / failed nodes
         # still get sentinelled with no proof).
+        #
+        # B2-FIX (task #89): every such node also contributes its POP-TIME lower
+        # bound (still stored in the Rust pool — import_results has not run yet
+        # for this batch, so ``node_lower_bounds`` returns the bound the node was
+        # popped with, proved at its parent) to ``_taint_floor_internal``. That
+        # floor keeps the unproven subtree represented in the reported global
+        # dual bound after the sentinel import removes it from the frontier,
+        # instead of discarding the entire tree bound (DECOMP-1
+        # "decertify-and-discard"). Fetched lazily — zero Rust calls on a clean
+        # batch — and read-only, so node processing is byte-identical.
+        _taint_pop_lbs = None
         for i in range(n_batch):
             if result_lbs[i] >= _SENTINEL_THRESHOLD and not node_infeasible_mask[i]:
                 _nonrigorous_fathom = True
-                break
+                if _taint_pop_lbs is None:
+                    _taint_pop_lbs = np.asarray(
+                        tree.node_lower_bounds(np.asarray(result_ids, dtype=np.int64)),
+                        dtype=np.float64,
+                    )
+                _taint_floor_internal = min(_taint_floor_internal, float(_taint_pop_lbs[i]))
+                logger.debug(
+                    "Non-rigorous sentinel fathom at node %d (iteration %d): "
+                    "pop-time bound %.6g kept as a floor of the reported global bound",
+                    int(result_ids[i]),
+                    iteration,
+                    float(_taint_pop_lbs[i]),
+                )
 
         if np.any(node_infeasible_mask):
             for idx in np.flatnonzero(node_infeasible_mask):
@@ -8335,6 +8387,7 @@ def solve_model(
     if status == "feasible":
         _gap_certified = False
 
+    _bound_from_taint_recovery = False
     if not _gap_certified:
         gap_val = None
         # Keep the untainted tree bound on a feasible exit; recompute its gap. Only
@@ -8346,6 +8399,41 @@ def solve_model(
                 gap_val = abs(obj_val - bound_val) / max(1.0, abs(obj_val))
         else:
             bound_val = None
+            # B2-FIX (task #89): decertify-and-discard repair. The tree bound was
+            # decertified, but unless a possibly-invalid bound VALUE entered the
+            # tree (``_tree_bound_poisoned``), every number in the frontier is
+            # still a rigorous per-subtree bound — the only unsound step was
+            # *removing* sentinel-fathomed nodes without proof. Those subtrees
+            # are re-represented by ``_taint_floor_internal`` (the min of their
+            # pop-time bounds, each proved at the node's parent), so
+            #   min(frontier bound, taint floor)
+            # is a rigorous global dual bound: the frontier term covers every
+            # surviving open node, the floor covers every unproven removed
+            # subtree, and rigorously-fathomed regions need no term (their
+            # proofs stand). Report it instead of discarding the search's proof
+            # wholesale (DECOMP-1: nvs05 reported 1.348 where the tree had
+            # proved ~4.87). Stays UNCERTIFIED: the gap is recomputed for
+            # honesty but ``_gap_certified`` remains False and the
+            # re-certification block below is gated off for this bound — a
+            # tainted tree never upgrades to "optimal" via its own recovered
+            # bound (issue #27a's contract), only via an independently rigorous
+            # bound (root pool / root relaxation), exactly as before.
+            # The frontier term must itself be finite: a -inf frontier (e.g. the
+            # Rust tree pinned ``global_lower_bound`` at -inf because a node was
+            # fathomed unresolved WITHOUT passing through the sentinel sweep —
+            # issue #467's ``bound_unresolved``) means an unproven subtree has
+            # no floor entry, so the floor alone would over-report. -inf is then
+            # the honest frontier value and the recovery must stand down.
+            _glb_int = stats["global_lower_bound"]
+            if not _tree_bound_poisoned and _glb_int is not None and np.isfinite(_glb_int):
+                _rig_int = min(_taint_floor_internal, float(_glb_int))
+                if np.isfinite(_rig_int) and abs(_rig_int) < _SENTINEL_THRESHOLD:
+                    bound_val = (
+                        -_rig_int if model._objective.sense == ObjectiveSense.MAXIMIZE else _rig_int
+                    )
+                    _bound_from_taint_recovery = True
+                    if obj_val is not None and np.isfinite(obj_val):
+                        gap_val = abs(obj_val - bound_val) / max(1.0, abs(obj_val))
 
     # Root cut-pool bound: a rigorous global lower bound the strengthened root
     # relaxation already proved during setup (nvs19: -1156 vs the cut-less tree's
@@ -8362,6 +8450,9 @@ def solve_model(
         and (bound_val is None or not np.isfinite(bound_val) or _root_pool_bound > bound_val)
     ):
         bound_val = _root_pool_bound
+        # The pool bound is rigorous independently of the tree's taint, so it
+        # may re-certify below exactly as before (B2-FIX gate does not apply).
+        _bound_from_taint_recovery = False
         if obj_val is not None and np.isfinite(obj_val):
             gap_val = max(0.0, obj_val - bound_val) / max(1.0, abs(obj_val))
 
@@ -8378,15 +8469,21 @@ def solve_model(
     # *upper* bound, surfaced by negating (issue #267: inscribedsquare02, whose
     # objective square is finite only after FBBT bounds the free auxiliaries, used
     # to report ``bound=None`` because no maximize-side fallback existed).
+    # B2-FIX (task #89): a taint-recovered tree bound must not SHORT-CIRCUIT this
+    # fallback — pre-fix, every tainted exit reached it (the tree bound had been
+    # discarded to None) and could report a root-relaxation bound STRONGER than
+    # the taint floor (tanksize: floor 0.847 vs root relaxation 0.868). Run it in
+    # that case too and keep the tighter of the two rigorous bounds.
+    _rr_needed = bound_val is None or not np.isfinite(bound_val) or _bound_from_taint_recovery
     _rr_remaining = time_limit - (time.perf_counter() - t_start)
-    if (bound_val is None or not np.isfinite(bound_val)) and _rr_remaining <= 0.0:
+    if _rr_needed and _rr_remaining <= 0.0:
         # B&B consumed the whole limit and surfaced no bound. Spend a small bounded
         # slice on the rigorous root-relaxation fallback anyway so an uncertified
         # exit reports a sound dual bound instead of None (issue #138). Only ever
         # reached when the search produced nothing usable; the floor's own ~10%
         # internal budget keeps the wall-time overrun small.
         _rr_remaining = _ROOT_FALLBACK_FLOOR_S
-    if (bound_val is None or not np.isfinite(bound_val)) and _rr_remaining > 0.0:
+    if _rr_needed and _rr_remaining > 0.0:
         _is_maximize = model._objective.sense == ObjectiveSense.MAXIMIZE
         # Budget the fallback to the time actually left: it runs *after* the B&B
         # loop already consumed the limit, so passing the full ``time_limit`` here
@@ -8399,7 +8496,17 @@ def solve_model(
             # ``obj``. The relaxation is a valid outer approximation either way, so
             # the surfaced bound is rigorous and on the correct side of the
             # incumbent (a maximize upper bound is ``>= obj``).
-            bound_val = -_rr if _is_maximize else _rr
+            _rr_signed = -_rr if _is_maximize else _rr
+            # Keep the tighter rigorous bound (a MINIMIZE wants the larger lower
+            # bound, a MAXIMIZE the smaller upper bound). When the independently
+            # rigorous fallback wins, the taint-recovery gate lifts (it may
+            # re-certify below, exactly the pre-fix behavior).
+            if bound_val is None or not np.isfinite(bound_val):
+                bound_val = _rr_signed
+                _bound_from_taint_recovery = False
+            elif (_rr_signed <= bound_val) if _is_maximize else (_rr_signed >= bound_val):
+                bound_val = _rr_signed
+                _bound_from_taint_recovery = False
             if obj_val is not None and np.isfinite(obj_val):
                 gap_val = abs(bound_val - obj_val) / max(1.0, abs(obj_val))
 
@@ -8425,6 +8532,12 @@ def solve_model(
         and _bound_on_correct_side
         and gap_val is not None
         and gap_val <= gap_tolerance
+        # B2-FIX (task #89): a bound recovered from a TAINTED tree (frontier
+        # min floored by the tainted nodes' pop-time bounds) is reported but
+        # never re-certifies: #27a's contract is that a non-rigorous fathom
+        # can never upgrade the exit to "optimal". Independently rigorous
+        # bounds (root pool / root relaxation) still re-certify as before.
+        and not _bound_from_taint_recovery
     ):
         _gap_certified = True
         status = "optimal"
