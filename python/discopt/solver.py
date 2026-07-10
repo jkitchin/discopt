@@ -5687,6 +5687,29 @@ def solve_model(
             "(default), 'auto', or 'reduced'."
         )
     _reduced_space_active = _relax_space == "reduced" and model._objective is not None
+    # The reduced-space evaluator relaxes over the ORIGINAL degrees of freedom only
+    # (its whole premise — no auxiliary columns). Two adjustments are REQUIRED for a
+    # sound bound (task #69, P2.3 root cause #2):
+    #
+    #   1. Build the relaxation on the PRE-REFORMULATION model. When
+    #      ``factorable_reformulate`` ran (line ~3864), ``model`` is already the
+    #      LIFTED model: its ``_variables`` include the added dependent aux columns
+    #      (e.g. nvs22: 8 originals -> 15 lifted) and its constraints include their
+    #      defining equalities. Relaxing THAT through MCBox rebuilds the lifted
+    #      formulation — defeating the reduced-space purpose AND feeding the aux
+    #      columns' huge bounds (~1e8 on nvs22) into the Kelley LP, whose resulting
+    #      ~1e9-scaled basis the in-house simplex can mis-solve as spuriously
+    #      "infeasible" -> wrong node fathom -> FALSE OPTIMAL. Use ``_prereform_model``
+    #      (the true DOF) when it exists.
+    #   2. Slice every node box to the original columns ``[:_reduced_n_orig]``. Aux
+    #      columns are appended after the originals (comment at the reformulation
+    #      site), so the first ``_reduced_n_orig`` flat entries of every tree-exported
+    #      node box are exactly the original-variable sub-box.
+    _reduced_model = _prereform_model if _prereform_model is not None else model
+    if _prereform_model is not None:
+        _reduced_n_orig = int(_prereform_nvars)
+    else:
+        _reduced_n_orig = int(sum(v.size for v in model._variables))
     _reduced_bound_fn: Any = None
     if _reduced_space_active:
         try:
@@ -5701,9 +5724,9 @@ def solve_model(
             # surfaces here (status "unsupported") and we fall back for the whole
             # solve rather than paying the probe cost at every node.
             _rs_probe = _reduced_bound_fn(
-                model,
-                np.asarray(lb, dtype=np.float64),
-                np.asarray(ub, dtype=np.float64),
+                _reduced_model,
+                np.asarray(lb, dtype=np.float64)[:_reduced_n_orig],
+                np.asarray(ub, dtype=np.float64)[:_reduced_n_orig],
                 max_rounds=1,
             )
             if _rs_probe.status == "unsupported":
@@ -5745,12 +5768,16 @@ def solve_model(
         Correctness (plan §0.3, CLAUDE.md §1): only ``optimal``/``infeasible`` are
         acted on; a non-finite ``optimal`` bound is dropped (never trusted). This
         can only raise a node bound toward — never above — the true box optimum.
+
+        The node box spans the lifted space; slice to the original variables
+        (``[:_reduced_n_orig]``) — the reduced evaluator is defined over the
+        original variables only (see the setup block's rationale).
         """
         try:
             rb = _reduced_bound_fn(
-                model,
-                np.asarray(_node_lb, dtype=np.float64),
-                np.asarray(_node_ub, dtype=np.float64),
+                _reduced_model,
+                np.asarray(_node_lb, dtype=np.float64)[:_reduced_n_orig],
+                np.asarray(_node_ub, dtype=np.float64)[:_reduced_n_orig],
             )
         except Exception as _rb_exc:  # pragma: no cover - defensive
             logger.debug("reduced-space bound failed at node %d: %s", _i, _rb_exc)

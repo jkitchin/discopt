@@ -100,21 +100,17 @@ def test_default_paths_byte_identical(mode):
 _NVS22 = os.path.expanduser("~/Dropbox/projects/discopt-minlp-benchmark/minlplib/nl/nvs22.nl")
 
 
-@pytest.mark.xfail(
-    reason="P2.3 NO-GO: reduced_mccormick_lp_bound returns false-`infeasible` on a "
-    "node box that contains the feasible optimum of nvs22 (equality-constrained "
-    "division/sqrt intermediates + unbounded leaves the builder fails to refuse). "
-    "This fathoms the node holding the optimum -> false optimal (11.44 vs 6.06). "
-    "Reduced mode must NOT be wired into the solver until this UPSTREAM evaluator "
-    "soundness/scope bug is fixed (see docs/dev/maingo-parity-plan.md §7 P2.3).",
-    strict=True,
-)
 @pytest.mark.skipif(not os.path.exists(_NVS22), reason="MINLPLib corpus (nvs22.nl) not available")
 def test_reduced_bound_no_false_infeasible_nvs22():
-    """Regression pin for the P2.3 blocker: a valid outer relaxation must NEVER
-    report the relaxed feasible set empty on a box that contains a feasible point.
-    XFAIL(strict) until the reduced-space evaluator's infeasibility test / scope
-    guard is fixed; flip to a passing soundness test once it is."""
+    """Regression for the P2.3 blocker (task #69): the reduced-space evaluator must
+    NEVER report a box that contains a feasible point as ``infeasible`` (which would
+    fathom the node holding the optimum -> false optimal, 11.44 vs true 6.06).
+
+    Root cause was an INVALID cc subgradient of nvs22 con2's non-affine division
+    ``(A·x6)/((x2·x3)·(sum-of-squares))`` — the Kelley cut excluded the true optimum
+    by ~1.7e5. The sound-or-refuse fix refuses division by a non-affine denominator
+    (``UnsupportedRelaxation`` -> status ``unsupported`` -> the solver falls back to
+    lifted for this class). So this box must NOT come back ``infeasible``."""
     from discopt._jax.mccormick_subgradient import reduced_mccormick_lp_bound
 
     m = dm.from_nl(_NVS22)
@@ -128,10 +124,54 @@ def test_reduced_bound_no_false_infeasible_nvs22():
         lb[i], ub[i] = xstar[i] - span, xstar[i] + span
     assert np.all(lb <= xstar) and np.all(xstar <= ub)  # x* is inside the box
     rb = reduced_mccormick_lp_bound(m, lb, ub)
-    # A sound relaxation of a non-empty set is never "infeasible".
+    # Sound-or-refuse: refuses (unsupported) rather than emitting a bogus infeasible.
     assert rb.status != "infeasible", (
         f"FALSE-INFEASIBLE on a box containing feasible x* (bound={rb.bound})"
     )
+    assert rb.status == "unsupported", (
+        f"expected refusal on the non-affine-division class, got {rb.status}"
+    )
+
+
+@pytest.mark.skipif(not os.path.exists(_NVS22), reason="MINLPLib corpus (nvs22.nl) not available")
+def test_reduced_mode_certifies_nvs22_via_fallback():
+    """End-to-end: nvs22 (oracle 6.0582) must certify the CORRECT optimum in reduced
+    mode. Because its division/sqrt-equality class is refused, the whole solve falls
+    back to the lifted path — the point is that reduced mode NEVER produces the old
+    false optimal (11.44)."""
+    r = dm.from_nl(_NVS22).solve(time_limit=90, tuning=SolverTuning(relax_space="reduced"))
+    opt = 6.05822
+    if r.status == "optimal":
+        assert r.objective == pytest.approx(opt, abs=1e-2, rel=1e-3), (
+            f"reduced-mode nvs22 certified {r.objective} != oracle {opt}"
+        )
+    # Dual bound must remain a valid lower bound regardless of termination status.
+    if r.bound is not None and np.isfinite(r.bound):
+        assert r.bound <= opt + 1e-2, f"reduced-mode nvs22 bound {r.bound} above optimum {opt}"
+
+
+def test_reduced_refuses_non_affine_division():
+    """Sound-or-refuse unit test (class-level, not instance-keyed): division by a
+    NON-affine denominator is refused by the reduced-space builder, while division by
+    an AFFINE denominator is accepted. This is the general rule that fixes nvs22."""
+    from discopt._jax.mccormick_subgradient import (
+        UnsupportedRelaxation,
+        build_reduced_relaxation,
+    )
+
+    # non-affine denominator (x1*x2) -> refuse
+    m = dm.Model()
+    x = m.continuous("x", 3, lb=[1.0, 1.0, 1.0], ub=[5.0, 5.0, 5.0])
+    m.minimize(x[0] / (x[1] * x[2]))
+    with pytest.raises(UnsupportedRelaxation, match="non-affine denominator"):
+        build_reduced_relaxation(m, np.array([1.0, 1.0, 1.0]), np.array([5.0, 5.0, 5.0]))
+
+    # affine denominator (2*x1 + 3) -> accepted (sound reciprocal-of-affine)
+    m2 = dm.Model()
+    y = m2.continuous("y", 2, lb=[1.0, 1.0], ub=[5.0, 5.0])
+    m2.minimize(y[0] / (2.0 * y[1] + 3.0))
+    R = build_reduced_relaxation(m2, np.array([1.0, 1.0]), np.array([5.0, 5.0]))
+    assert R.n == 2
 
 
 def test_reduced_falls_back_on_unsupported_model():
