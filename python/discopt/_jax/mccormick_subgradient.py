@@ -40,6 +40,19 @@ class UnsupportedRelaxation(Exception):
     """Model is outside the sound reduced-space scope — caller falls back (α-BB/lifted)."""
 
 
+def _require_finite_box(lb, ub) -> None:
+    """McCormick envelopes require a FINITE box: over an unbounded variable the
+    product/composition envelopes degrade to non-information ``(-inf, +inf)`` and the
+    linearized cuts carry NaN/inf, which can corrupt (or crash) the LP and, worse,
+    let a node be fathomed on a bogus bound. Refuse rather than approximate — the
+    caller falls back to the lifted path (which handles unbounded columns via its own
+    guards). This is the sound-or-refuse contract."""
+    lb = np.asarray(lb, dtype=float)
+    ub = np.asarray(ub, dtype=float)
+    if not (np.all(np.isfinite(lb)) and np.all(np.isfinite(ub))):
+        raise UnsupportedRelaxation("reduced-space McCormick requires a finite box")
+
+
 def _scalar_const(expr) -> float:
     v = np.asarray(expr.value, dtype=float)
     if v.size != 1:
@@ -122,6 +135,7 @@ def build_reduced_relaxation(model, node_lb, node_ub) -> ReducedRelaxation:
     """
     lb = np.asarray(node_lb, dtype=float)
     ub = np.asarray(node_ub, dtype=float)
+    _require_finite_box(lb, ub)
     n = int(lb.size)
     negate = model._objective.sense == ObjectiveSense.MAXIMIZE
     obj_expr = model._objective.expression
@@ -156,6 +170,7 @@ def _build_jit_evaluator(model, lb, ub):
     underestimator (minimize form) value/subgradient; ``h`` (m,) / ``gh`` (m, n) are the
     per-constraint feasibility values/subgradients (``h_i <= 0`` relaxed). Raises
     :class:`UnsupportedRelaxation` on first call (compile) if out of MCBox scope."""
+    _require_finite_box(lb, ub)
     lbj, ubj = jnp.asarray(lb), jnp.asarray(ub)
     n = int(lb.size)
     negate = model._objective.sense == ObjectiveSense.MAXIMIZE

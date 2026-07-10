@@ -19,7 +19,9 @@ import discopt.modeling as dm
 import jax
 import jax.numpy as jnp
 import numpy as np
+import pytest
 from discopt._jax.mccormick_subgradient import (
+    UnsupportedRelaxation,
     build_reduced_relaxation,
     reduced_mccormick_lp_bound,
 )
@@ -215,3 +217,19 @@ def test_maximize_sense_valid_lower_bound():
         assert float(R.obj_under(jnp.asarray(x0))) <= -(-(x0[0] * x0[1])) + 1e-6 + 1e-6 * abs(
             x0[0] * x0[1]
         )
+
+
+def test_reduced_bound_refuses_unbounded_box():
+    # McCormick needs a finite box; an unbounded variable must refuse -> caller falls
+    # back to lifted (never a crash, never a bogus bound). Root cause of the nvs22
+    # unbounded-leaf class in the P2.3 gate.
+    import numpy as np
+
+    m = dm.Model()
+    x = m.continuous("x", 2, lb=0.5, ub=4.0)
+    m.minimize(x[0])
+    m.subject_to(x[0] * x[1] - 4.0 == 0)
+    r = reduced_mccormick_lp_bound(m, [0.5, -np.inf], [4.0, np.inf])
+    assert r.status == "unsupported"
+    with pytest.raises(UnsupportedRelaxation):
+        build_reduced_relaxation(m, np.array([0.5, -np.inf]), np.array([4.0, np.inf]))
