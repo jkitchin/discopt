@@ -27,9 +27,14 @@ from scripts.global_opt_baron_vs_discopt import (
     NA,
     OK,
     VIOLATION,
+    Row,
+    SolverRun,
     bound_violates_oracle,
     classify,
+    parse_baron_root,
+    root_gap_from,
 )
+from scripts.global_opt_baron_vs_discopt import write_report as write_baron_report
 from scripts.global_opt_nl_solvers import write_report
 
 pytestmark = pytest.mark.unit
@@ -130,3 +135,75 @@ def test_report_distinguishes_gap_from_violation(tmp_path):
     assert "| discopt | 0/1 | 1 | 0 | 0 |" in text
     assert "| scip | 1/1 | 0 | 0 | 0 |" in text
     assert "VIOLATION" in text  # legend still documents the red line
+
+
+# ─────────────────────────── TAIL-1c: root-gap instrumentation ───────────────
+
+
+def test_root_gap_from_definition_and_none_guards():
+    # |obj - root_bound| / max(1, |obj|); the max(1, ·) floor matches SolveResult.
+    assert root_gap_from(5.0, 4.0) == pytest.approx(0.2)
+    assert root_gap_from(0.5, 0.0) == pytest.approx(0.5)  # |obj|<1 → denom 1
+    assert root_gap_from(5.0, 5.0) == pytest.approx(0.0)  # closed at root
+    # Missing / non-finite inputs are an honest None, never a fabricated 0.
+    assert root_gap_from(None, 4.0) is None
+    assert root_gap_from(5.0, None) is None
+    assert root_gap_from(float("inf"), 4.0) is None
+    assert root_gap_from(5.0, float("nan")) is None
+
+
+# A real BARON-via-GAMS iteration log (lo=3). Iteration 1 is the root relaxation.
+_BARON_LOG_MIN = (
+    "  Iteration       Time (s)     Mem   Lower bound     Upper bound   Progress\n"
+    "          1           0.05    23MB     4.28320         4728.39        7.67%\n"
+    "        248           0.54    79MB     5.47093         5.47093      100.00%\n"
+    " Total no. of BaR iterations:     248\n"
+)
+
+
+def test_parse_baron_root_reads_iteration_one_min_sense():
+    rb, rt = parse_baron_root(_BARON_LOG_MIN, maximize=False)
+    assert rb == pytest.approx(4.2832)  # root lower bound
+    assert rt == pytest.approx(0.05)  # time to reach the root bound
+    # Iteration 248's bound (5.47093) must NOT leak in — only the root.
+    assert rb != pytest.approx(5.47093)
+
+
+def test_parse_baron_root_unnegates_for_maximize():
+    # For a maximize .nl, GAMS minimizes -objvar; the log's lower bound is
+    # internal-min sense, so the original-sense root bound is its negation.
+    rb, rt = parse_baron_root(_BARON_LOG_MIN, maximize=True)
+    assert rb == pytest.approx(-4.2832)
+    assert rt == pytest.approx(0.05)
+
+
+def test_parse_baron_root_absent_log_is_none():
+    # BARON solved in preprocessing / emitted no progress table → not measurable.
+    assert parse_baron_root("no iteration table here\n", maximize=False) == (None, None)
+    assert parse_baron_root("", maximize=False) == (None, None)
+
+
+def test_worker_emits_root_fields():
+    # The discopt subprocess worker must surface the solver-produced root bound /
+    # gap / time so the head-to-head report can populate them (TAIL-1c).
+    for key in ('"root_bound"', '"root_gap"', '"root_time"'):
+        assert key in DISCOPT_WORKER
+    assert 'getattr(res, "root_bound"' in DISCOPT_WORKER
+
+
+def test_report_populates_root_gap_ratio(tmp_path):
+    """The report's root-gap section carries per-solver root gaps and the
+    discopt/BARON ratio — the evaluable form of root_gap_ratio_vs_baron."""
+    d = SolverRun(status="feasible", objective=5.0, root_bound=1.0, root_time=1.5)
+    d.root_gap = root_gap_from(d.objective, d.root_bound)  # 0.8
+    b = SolverRun(status="1 Optimal", objective=5.0, root_bound=4.0, root_time=0.05)
+    b.root_gap = root_gap_from(b.objective, b.root_bound)  # 0.2
+    row = Row("probe", known=5.0, discopt=d, baron=b, maximize=False)
+    md = write_baron_report([row], tl=60, out_dir=tmp_path, ts="T")
+    text = md.read_text()
+    assert "Root-gap instrumentation (TAIL-1c)" in text
+    assert "root_gap_ratio_vs_baron" in text
+    # ratio = 0.8 / 0.2 = 4.0 renders in the row and the mean-ratio summary.
+    assert "4" in text
+    assert "discopt root_gap populated: **1/1**" in text
+    assert "BARON root_gap populated: **1/1**" in text
