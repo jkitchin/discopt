@@ -106,9 +106,9 @@ or certification guard (the gate loses — CLAUDE.md philosophy §1).
 | HM1.3 | done | (this branch) | `train()` local-solve wrapper (no Model.solve dispatch) |
 | HM1.4 | done | (this branch) | `test_nn_trainable.py`: 8 tests, 3 smoke-marked |
 | HM2.1 | done | (this branch) | `warm_start.unflatten_solution` |
-| HM2.2 | not started | | |
-| HM2.3 | not started | | |
-| HM2.4 | not started | | |
+| HM2.2 | done | (this branch) | `dae/fit.py`: Trajectory, fit_trajectories, TrajectoryFit |
+| HM2.3 | done | (this branch) | `test_dae_fit.py`: 4 tests (1 smoke) |
+| HM2.4 | done | (this branch) | `test_neural_dae_scale.py` slow gate; 1021 wts, 3 traj, passes |
 | HM3.1 | not started | | |
 | HM3.2 | not started | | |
 | HM4.* | LOCKED | | entry experiments first (§8) |

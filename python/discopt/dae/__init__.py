@@ -28,6 +28,7 @@ from discopt.dae.collocation import (
     align_time_grid,
 )
 from discopt.dae.finite_difference import FDBuilder
+from discopt.dae.fit import Trajectory, TrajectoryFit, fit_trajectories
 from discopt.dae.mol import BoundaryCondition, FieldVar, MOLBuilder, SpatialSet
 from discopt.dae.polynomials import (
     collocation_matrix,
@@ -47,7 +48,10 @@ __all__ = [
     "MOLBuilder",
     "SpatialSet",
     "StateVar",
+    "Trajectory",
+    "TrajectoryFit",
     "align_time_grid",
+    "fit_trajectories",
     "collocation_matrix",
     "collocation_matrix_2nd",
     "legendre_roots",
