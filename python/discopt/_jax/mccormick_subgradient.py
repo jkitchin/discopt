@@ -300,9 +300,12 @@ def reduced_mccormick_lp_bound(
                 status, bound_r, xr = "optimal", float(res.fun), np.asarray(res.x, dtype=float)
             else:
                 msg = (res.message or "").lower()
-                status = "infeasible" if "infeasible" in msg else (
-                    "unbounded" if "unbounded" in msg else "error"
-                )
+                if "infeasible" in msg:
+                    status = "infeasible"
+                elif "unbounded" in msg:
+                    status = "unbounded"
+                else:
+                    status = "error"
 
         if status == "infeasible":
             return ReducedBound(bound=np.inf, status="infeasible", rounds=r, history=history)
