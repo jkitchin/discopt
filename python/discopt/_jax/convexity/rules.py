@@ -253,8 +253,15 @@ def _hash_index(index: object) -> object:
         pass
     if isinstance(index, slice):
         return ("slice", index.start, index.stop, index.step)
+    if isinstance(index, tuple):
+        # Mixed subscripts like ``x[1:, 0]`` arrive as a tuple whose elements
+        # may themselves be unhashable (slices/arrays); surrogate element-wise.
+        return tuple(_hash_index(i) for i in index)
     try:
         arr = np.asarray(index)
+        if arr.dtype == object:
+            # tolist() would smuggle unhashable elements back into the key.
+            return ("id", id(index))
         return ("arr", arr.shape, tuple(arr.ravel().tolist()))
     except Exception:
         return ("id", id(index))

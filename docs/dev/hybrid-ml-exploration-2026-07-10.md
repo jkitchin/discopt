@@ -181,21 +181,94 @@ Deliberately *not* proposed: ReLU on the training path (nonsmooth; the paper
 uses softplus for the same reason), `CustomCall` wrapping, and any change to
 solver math.
 
-## 6. Open questions / next experiments (with kill criteria)
+## 6. Round-2 experiments — results (2026-07-10, same session)
 
-1. `gauss_newton=True` on experiment 1's objective — does the detector fire on
-   a `DAEBuilder.least_squares` sum? Kill: detector misses or GN slows solve.
-2. Schur weight-block experiment: same NLP, `kkt_schur_block` from model
-   structure; measure factorization time on a 10× larger instance. Kill: no
-   speedup on problems ≥ paper scale.
-3. Scale probe at paper scale (2×30 softplus, ~1000 weights, multi-trajectory):
-   does full-space POUNCE/IPOPT converge without decomposition? This measures
-   whether the paper's decomposition pain even reproduces here.
-4. Global solve of the GP-α variant on a small box. Kill: node count explodes
-   with no bound progress.
-5. Matrix-shaped NN emission (weights as `(n_in, n_out)` Variables through
-   `MatMulExpression`) — needed before any wide-net work; verify the DAG
-   supports Variable @ Variable matmul or add it.
+All five §6 questions were run to ground; experiment scripts are in
+`scripts/hybrid_ml/` (`hybrid_common.py` + `exp_*.py`). Results are measured.
+
+1. **Gauss-Newton detector: fires.** `NLPEvaluator(m, gauss_newton=True)` on the
+   experiment-1 model: `is_gauss_newton=True`, identical iterations (19) and
+   objective to all printed digits — expected, since the residuals are linear in
+   the collocation states so GN is exact — with evaluator build 0.78 s → 0.02 s
+   and solve wall 3.4 s → 1.9 s (compile savings). No kill.
+2. **Schur weight-block: environment-blocked, with findings.** The PyPI
+   `pounce-solver` 0.7.0 predates `set_kkt_schur_block`; the wrapper silently
+   degrades to full-space (by design). Worse, the `nlp_pounce.py:194` docstring
+   points to `discopt.aggregation.schur.kkt_schur_indices`, which exists nowhere
+   in the repo — stale reference, needs fixing. Given result 3 below, the Schur
+   experiment also matters less than §3 assumed at this scale.
+3. **Paper-scale probe: the decomposition pain does NOT reproduce (falsifies
+   §3's premise at this scale).** 1-30-30-1 softplus net (1021 weights,
+   matrix-emitted via `Variable @ Variable` — see 5), three trajectories
+   (cA0 ∈ {1.0, 0.8, 0.6}) sharing weights, 1381 variables total: full-space
+   POUNCE converges from a random Glorot init in **17 iterations / 37 s**,
+   rate-law RMSE 2 % relative, resimulation below the noise floor on all three
+   trajectories. Caveat: a benign 1-D-input rate law; the paper's harder case
+   studies may still need decomposition — but at this problem shape, full-space
+   is simply fine.
+4. **Certified global training: achieved, after fixing three crashes.**
+   - The *default* solve path cannot get there: the convexity classifier
+     abstains on exp-of-quadratic kernels, and for
+     continuous models with unknown convexity `solve()` routes to a
+     best-effort local NLP (`gap_certified=False`) regardless of
+     `nlp_bb=False` — there is no "force spatial" knob on that path today.
+   - `solver="amp"` crashed on DAE models: three call sites assume scalar
+     subscripts on `IndexExpression`s while `DAEBuilder` emits sliced ones
+     (`var[:, 1:]`). Fixed in this branch (see below). Post-fix, AMP *errors
+     cleanly* on vectorized models (its MILP builder + point evaluator are
+     scalar-constraint-only) — vectorized support in AMP is a real work item.
+   - **Scalarized** collocation (same math, one scalar equation per node,
+     cB eliminated by conservation; 4 RBF centers, nfe=6, ncp=2, 43 vars):
+     the global path runs — 127 nodes / 300 s, valid dual bound 0.010477 vs
+     incumbent 0.021576, `gap_certified=True` at scaled gap
+     (obj−bound)/(1+|obj|) ≈ 1.1 %. The warm-started **local optimum was
+     certified (near-)globally optimal** — the capability the paper's
+     local-only approach lacks. Bound quality is limited by AMP soundly
+     *omitting* `α·exp(−(x−c)²/2ℓ²)` products from its MILP relaxation
+     ("cannot be linearized safely"): a product-with-bounded-nonlinear-factor
+     envelope (kernel output ∈ (0,1], so McCormick over α×z applies) is the
+     concrete relaxation-catalog item that would tighten this.
+5. **Matrix-shaped NN emission: works today.** `Variable @ Variable` bilinear
+   matmul and the batched layer pattern
+   `dm.softplus(c[:, :, None] @ W1 + b1) @ W2` both compile and solve
+   (probes in session scratchpad; pattern used by experiment 3). The v1 API
+   should emit this form; the per-neuron scalar loop in the round-1 scripts is
+   what made the 24-unit net's wall time grow.
+
+### Bugs found and fixed in this branch (regression-tested)
+
+All one defect class: *structure-analysis code assumes an `IndexExpression`
+subscript is one integer per axis; DAE-transcribed models routinely carry
+slices.* Analysis paths must **abstain** (return None / classify not-linear) on
+non-scalar subscripts, never crash:
+
+- `_jax/nonlinear_bound_tightening.py` `FlatVariableMetadata.scalar_flat_index`
+  — crashed in AMP presolve (`TypeError: only int indices permitted`).
+- `_jax/convexity/rules.py` `_hash_index` — tuple subscripts containing slices
+  produced an unhashable surrogate via the object-array `tolist()` branch.
+- `solvers/amp.py` `_flat_var_index` + three sites in
+  `_jax/problem_classifier.py` — same pattern, same fix shape.
+
+Regression tests: `python/tests/test_tightening_sliced_index.py` (fails before
+the fixes, passes after). Suites run: tightening/FBBT files (25 passed), AMP
+(150 passed), convexity/classifier (123 passed), `pytest -m smoke` (631 passed,
+14 skipped). Not fixed (loud-refusal paths, wrong exception *type* only):
+`export/_extract.py:98`, `callbacks.py:212` — follow-up candidates.
+
+## 7. Remaining open questions
+
+1. Reproduce the paper's actual case studies (their DAE has algebraic states;
+   ours was ODE-only — `add_algebraic`/`set_algebraic` exist but are untested
+   in this hybrid context).
+2. AMP vectorized-constraint support (or an automatic scalarization pass for
+   the global path) — prerequisite for certified training of DAEBuilder models
+   without hand-scalarization.
+3. The α×kernel product envelope (see 4 above) — entry experiment: measure root
+   bound before/after on the scalarized instance.
+4. A "force spatial B&B" escape hatch (or classifier support for
+   exp-of-quadratic) so the default path can certify models like these.
+5. Multi-experiment API + trainable-surrogate layer (§5) — now unblocked by
+   result 5.
 
 References: arXiv:2504.04665 (Lueg et al. 2025); Biegler, *Nonlinear
 Programming* (2010) for the simultaneous/collocation background;

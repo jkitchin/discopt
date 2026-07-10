@@ -69,7 +69,16 @@ class FlatVariableMetadata:
             else:
                 if not isinstance(idx, tuple):
                     idx = (idx,)
-                flat_idx = int(np.ravel_multi_index(idx, base.shape))
+                # Only a fully scalar subscript (one integer per axis) addresses a
+                # single flat entry. Slices / None / partial indices (e.g. the
+                # vectorized ``var[:, 1:]`` expressions the DAE transcriber emits)
+                # cover many scalars, so no flat index exists for them.
+                if len(idx) != len(base.shape) or not all(
+                    isinstance(i, (int, np.integer)) for i in idx
+                ):
+                    return None
+                normalized = tuple(int(i) % s for i, s in zip(idx, base.shape))
+                flat_idx = int(np.ravel_multi_index(normalized, base.shape))
             return base_offset + flat_idx
 
         return None
