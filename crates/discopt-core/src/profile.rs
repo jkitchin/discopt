@@ -143,6 +143,19 @@ counters!(
     RefacFtFail,
     RefacCap,
     RefacWorkGate,
+    // ENGINE-1 (#557): split the `RefacFtFail` (feral `update` returned Err) trigger
+    // by its feral `RefactorCause`, so the decision fork "is the refactor
+    // accuracy-necessary or is the bail over-conservative?" is measured, not
+    // assumed. `Growth` = element-growth high-water exceeded `max_growth` (1e8) —
+    // the candidate over-conservative bail (a large but bounded growth may still
+    // give an accurate updated factor); `TinyPivot` = a bump/final diagonal pivot
+    // at/below `zero_pivot_tol·‖U₀‖∞` — genuine numerical breakdown, refactor
+    // necessary; `Singular` = the replacement column is rank-order dependent — a
+    // structural (not tunable) breakdown. Instrumentation only; read off
+    // `FeralLU::last_refactor()` at the same trigger site.
+    RefacFtGrowth,
+    RefacFtTinyPivot,
+    RefacFtSingular,
 );
 
 #[inline(always)]
