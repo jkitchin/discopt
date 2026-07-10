@@ -1,0 +1,163 @@
+[
+  {
+    "flag": "DISCOPT_LU_DENSITY_ROUTE",
+    "instance": "nvs21",
+    "off": {
+      "instance": "nvs21",
+      "status": "optimal",
+      "objective": -5.684782607923295,
+      "bound": -5.68521625604212,
+      "node_count": 195,
+      "wall": 9.984,
+      "sense": "min"
+    },
+    "on": {
+      "instance": "nvs21",
+      "status": "optimal",
+      "objective": -5.684782607923295,
+      "bound": -5.685216256038941,
+      "node_count": 191,
+      "wall": 9.709,
+      "sense": "min"
+    },
+    "changed": true
+  },
+  {
+    "flag": "DISCOPT_NODE_REDUCE",
+    "instance": "st_e36",
+    "off": {
+      "instance": "st_e36",
+      "status": "optimal",
+      "objective": -246.0,
+      "bound": -246.01879639837531,
+      "node_count": 153,
+      "wall": 17.355,
+      "sense": "min"
+    },
+    "on": {
+      "instance": "st_e36",
+      "status": "feasible",
+      "objective": -245.99999999999997,
+      "bound": -304.49999999999994,
+      "node_count": 75,
+      "wall": 8.97,
+      "sense": "min"
+    },
+    "changed": true
+  },
+  {
+    "flag": "DISCOPT_NODE_REDUCE",
+    "instance": "nvs21",
+    "off": {
+      "instance": "nvs21",
+      "status": "optimal",
+      "objective": -5.684782607923295,
+      "bound": -5.68521625604212,
+      "node_count": 195,
+      "wall": 9.984,
+      "sense": "min"
+    },
+    "on": {
+      "instance": "nvs21",
+      "status": "optimal",
+      "objective": -5.684782607923295,
+      "bound": -5.684782627987372,
+      "node_count": 29,
+      "wall": 1.324,
+      "sense": "min"
+    },
+    "changed": true
+  },
+  {
+    "flag": "DISCOPT_SQUARE_COST_GATE",
+    "instance": "nvs19",
+    "off": {
+      "instance": "nvs19",
+      "status": "feasible",
+      "objective": -1098.2,
+      "bound": -1102.8385175019384,
+      "node_count": 161,
+      "wall": 40.103,
+      "sense": "min"
+    },
+    "on": {
+      "instance": "nvs19",
+      "status": "feasible",
+      "objective": -1097.6,
+      "bound": -1103.4380115915135,
+      "node_count": 131,
+      "wall": 40.015,
+      "sense": "min"
+    },
+    "changed": true
+  },
+  {
+    "flag": "DISCOPT_OBJ_BRANCH_PRIORITY",
+    "instance": "nvs01",
+    "off": {
+      "instance": "nvs01",
+      "status": "optimal",
+      "objective": 12.46966882156821,
+      "bound": 12.46966880809854,
+      "node_count": 17,
+      "wall": 2.801,
+      "sense": "min"
+    },
+    "on": {
+      "instance": "nvs01",
+      "status": "optimal",
+      "objective": 12.46966882156821,
+      "bound": 12.469668698257443,
+      "node_count": 11,
+      "wall": 1.77,
+      "sense": "min"
+    },
+    "changed": true
+  },
+  {
+    "flag": "DISCOPT_OBJ_BRANCH_PRIORITY",
+    "instance": "nvs13",
+    "off": {
+      "instance": "nvs13",
+      "status": "optimal",
+      "objective": -585.2,
+      "bound": -585.2000011714,
+      "node_count": 45,
+      "wall": 1.986,
+      "sense": "min"
+    },
+    "on": {
+      "instance": "nvs13",
+      "status": "optimal",
+      "objective": -585.2,
+      "bound": -585.2000011714,
+      "node_count": 35,
+      "wall": 1.781,
+      "sense": "min"
+    },
+    "changed": true
+  },
+  {
+    "flag": "DISCOPT_LIFT_LOOSE_PRODUCTS",
+    "instance": "nvs09",
+    "off": {
+      "instance": "nvs09",
+      "status": "feasible",
+      "objective": -43.13433691803531,
+      "bound": -58.65050082502646,
+      "node_count": 191,
+      "wall": 40.181,
+      "sense": "min"
+    },
+    "on": {
+      "instance": "nvs09",
+      "status": "feasible",
+      "objective": -43.13433691803531,
+      "bound": -47.059466396195894,
+      "node_count": 121,
+      "wall": 41.657,
+      "sense": "min"
+    },
+    "changed": true
+  }
+]
