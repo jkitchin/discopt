@@ -37,6 +37,7 @@ tight monomial hull incl. odd-power-over-sign-spanning).
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import cast
 
 import jax
 import jax.numpy as jnp
@@ -259,7 +260,7 @@ def relax_through(fn, x, lb, ub) -> MCBox:
     returning a scalar MCBox. Returns the composite relaxation; ``jit``/``vmap``-able
     over ``x`` and the box.
     """
-    return fn(*mcbox_leaves(x, lb, ub))
+    return cast(MCBox, fn(*mcbox_leaves(x, lb, ub)))
 
 
 # functional intrinsic namespace (mirror of the methods, MC++-style free functions)
