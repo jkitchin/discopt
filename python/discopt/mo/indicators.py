@@ -82,7 +82,7 @@ def common_reference(*fronts: ParetoFront, margin_frac: float = 0.01) -> np.ndar
 
     Parameters
     ----------
-    *fronts : ParetoFront
+    \\*fronts : ParetoFront
         Fronts to compare. Must share the same number of objectives and the
         same senses; at least one must be non-empty.
     margin_frac : float, default 0.01

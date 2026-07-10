@@ -7,12 +7,12 @@ largely *non-load-bearing*. On a pooled panel + held-out replay (27 instances,
 #1) on **every** instance, while the expensive nested-B&B heuristics never
 improved it:
 
-============================  ======  ========  ===========
-source                        solves  wall%     incumbent hit-rate
-============================  ======  ========  ===========
-rens (nested B&B)                805     14.3 %   0 / 13   (0.0 %)
-rins (LNS dive)                  440     10.4 %   0 / 143  (0.0 %)
-============================  ======  ========  ===========
+=================  ======  ======  ==================
+source             solves  wall%   incumbent hit-rate
+=================  ======  ======  ==================
+rens (nested B&B)  805     14.3 %  0 / 13   (0.0 %)
+rins (LNS dive)    440     10.4 %  0 / 143  (0.0 %)
+=================  ======  ======  ==================
 
 On the 21 *finished* easy instances RENS alone is **33 % of total solve wall**
 at a 0 % hit rate. SCIP/BARON track per-heuristic success and throttle the

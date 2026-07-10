@@ -9,7 +9,7 @@ models.
 
 Where classical Benders (``solver.py``) handles a *linear* recourse LP, GBD
 handles a **convex nonlinear** recourse subproblem. The two-stage problem
-(internally minimizing) is
+(internally minimizing) is::
 
     min  f(x, y)
     s.t. g(x, y) <= 0            (coupling / recourse constraints)

@@ -2,6 +2,12 @@ title: discopt
 author: John Kitchin
 copyright: "2026, John Kitchin"
 logo: discopt-logo.png
+# Internal planning/design notes live under dev/ and design/; they are not book
+# pages, so keep them out of the Sphinx source tree (otherwise every one warns
+# "document isn't included in any toctree").
+exclude_patterns:
+  - dev
+  - design
 execute:
   execute_notebooks: "off"
 repository:

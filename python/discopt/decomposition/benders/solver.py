@@ -1,6 +1,6 @@
 """Classical Benders decomposition solver (v1: linear (MI)LP recourse).
 
-Algorithm (minimization, internally):
+Algorithm (minimization, internally)::
 
     min  c_x^T x + c_y^T y
     s.t. master-only rows           A_m x <= r_m

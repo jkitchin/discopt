@@ -88,9 +88,12 @@ def default_socket_path() -> Path:
 
 
 class DaemonServer(_CoreDaemonServer):
-    """Warm GAMS solver server. Wraps the historical ``(control_file, sysdir) ->
-    int`` solve callback into the core's ``request -> reply`` contract so the GAMS
-    link and its tests keep their signature."""
+    """Warm GAMS solver server.
+
+    Wraps the historical ``(control_file, sysdir) -> int`` solve callback into the
+    core's ``request -> reply`` contract so the GAMS link and its tests keep their
+    signature.
+    """
 
     def __init__(
         self,

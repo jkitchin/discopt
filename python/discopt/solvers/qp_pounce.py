@@ -111,8 +111,7 @@ def solve_qp(
 
     Raises:
         ImportError: If POUNCE is not installed.
-        ValueError: If dimensions are inconsistent, or ``integrality`` marks
-            any variable integer (POUNCE has no MIQP support).
+        ValueError: On inconsistent dimensions, or any integer-marked variable (no MIQP support).
     """
     if not POUNCE_AVAILABLE:
         raise ImportError(

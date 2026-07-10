@@ -1,6 +1,6 @@
 """Geometric programming: detection, log-space reformulation, and solve.
 
-A *geometric program* (GP) in standard form is
+A *geometric program* (GP) in standard form is::
 
     minimize    f_0(x)
     subject to  f_i(x) <= 1,    i = 1..m   (posynomial inequalities)
