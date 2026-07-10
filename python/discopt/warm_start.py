@@ -168,6 +168,50 @@ def validate_initial_solution(
     return x_flat
 
 
+def unflatten_solution(
+    model: Model,
+    x_flat: np.ndarray,
+) -> dict[Variable, np.ndarray]:
+    """Split a flat solution vector back into per-Variable arrays.
+
+    Inverse of :func:`validate_initial_solution`'s flattening: it uses the same
+    ordering contract — variables in ``model._variables`` declaration order, each
+    occupying ``v.size`` contiguous entries — so
+    ``unflatten_solution(m, validate_initial_solution(m, d))`` reproduces ``d``
+    (up to the bound clamping / integrality rounding that validation applies).
+
+    Parameters
+    ----------
+    model : Model
+        The model whose variables define the flat layout.
+    x_flat : np.ndarray
+        Flat solution vector of length ``sum(v.size for v in model._variables)``,
+        e.g. an ``NLPResult.x`` from :func:`discopt.solvers.nlp_pounce.solve_nlp`.
+
+    Returns
+    -------
+    dict[Variable, np.ndarray]
+        Maps each model Variable to its value, reshaped to ``v.shape``. Scalar
+        variables (``shape == ()``) map to a 0-d array.
+    """
+    x_flat = np.asarray(x_flat, dtype=np.float64).ravel()
+    n_vars = sum(v.size for v in model._variables)
+    if x_flat.shape != (n_vars,):
+        raise ValueError(
+            f"x_flat has length {x_flat.shape[0]}, expected {n_vars} "
+            "(sum of variable sizes in this model)"
+        )
+
+    out: dict[Variable, np.ndarray] = {}
+    offset = 0
+    for v in model._variables:
+        size = v.size
+        chunk = x_flat[offset : offset + size]
+        out[v] = chunk.reshape(v.shape) if v.shape != () else chunk.reshape(())
+        offset += size
+    return out
+
+
 def check_feasibility(
     model: Model,
     x_flat: np.ndarray,

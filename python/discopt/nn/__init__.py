@@ -32,6 +32,12 @@ from discopt.nn.presolve import (
     tighten_network,
 )
 from discopt.nn.scaling import OffsetScaling
+from discopt.nn.trainable import (
+    TrainableDense,
+    TrainableKernelExpansion,
+    TrainableNetwork,
+    train,
+)
 from discopt.nn.tree import DecisionTree, TreeEnsembleDefinition
 
 __all__ = [
@@ -45,11 +51,15 @@ __all__ = [
     "NNPresolveResult",
     "NetworkDefinition",
     "OffsetScaling",
+    "TrainableDense",
+    "TrainableKernelExpansion",
+    "TrainableNetwork",
     "TreeEnsembleDefinition",
     "TreeFormulation",
     "detect_dead_relus",
     "propagate_bounds",
     "tighten_network",
+    "train",
 ]
 
 

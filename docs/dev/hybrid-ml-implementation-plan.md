@@ -101,11 +101,11 @@ or certification guard (the gate loses — CLAUDE.md philosophy §1).
 |---|---|---|---|
 | HM0.1 | done | (this branch) | option (b): docstring corrected + pounce version TODO |
 | HM0.2 | done | (this branch) | ValueError refusals in `_extract.py`, `callbacks.py`; 2 tests |
-| HM1.1 | not started | | |
-| HM1.2 | not started | | |
-| HM1.3 | not started | | |
-| HM1.4 | not started | | |
-| HM2.1 | not started | | |
+| HM1.1 | done | (this branch) | `nn/trainable.py`: TrainableDense/Network, matrix emission, freeze bridge |
+| HM1.2 | done | (this branch) | TrainableKernelExpansion (RBF, 1-D, fixed hyperparams) |
+| HM1.3 | done | (this branch) | `train()` local-solve wrapper (no Model.solve dispatch) |
+| HM1.4 | done | (this branch) | `test_nn_trainable.py`: 8 tests, 3 smoke-marked |
+| HM2.1 | done | (this branch) | `warm_start.unflatten_solution` |
 | HM2.2 | not started | | |
 | HM2.3 | not started | | |
 | HM2.4 | not started | | |
