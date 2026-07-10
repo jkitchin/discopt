@@ -200,24 +200,35 @@ def reduced_mccormick_lp_bound(
 ) -> ReducedBound:
     """MAiNGO-style reduced-space lower bound: Kelley cutting planes on the MCBox
     relaxation, solved as an LP over the original variables (no auxiliary columns).
+
     The per-round value+subgradient evaluation is a single jitted MCBox pass with
-    explicit subgradients (P2.1). scipy/HiGHS scaffold for the inner LP; P2.2 wires the
-    in-house simplex."""
+    explicit subgradients (P2.1). The inner LP is solved on discopt's **in-house Rust
+    simplex** (P2.2), reusing one LP whose columns are fixed (``n_orig + 1``) and whose
+    rows only grow each Kelley round — the dual-simplex warm start the simplex already
+    exposes. These ``n_orig``-column bases are exactly the ones that do NOT trigger the
+    dense-lifted FT refactor storm (#557). Set ``DISCOPT_REDUCED_LP_BACKEND=scipy`` to
+    use scipy/HiGHS instead (debug/fallback); the simplex path also falls back to scipy
+    automatically if the Rust binding is unavailable.
+    """
+    import os
+
     import scipy.optimize as sopt
 
     lb = np.asarray(node_lb, dtype=float)
     ub = np.asarray(node_ub, dtype=float)
     try:
         evj, negate, n = _build_jit_evaluator(model, lb, ub)
-        _u, _gu, _h, _gh = evj(jnp.asarray(0.5 * (lb + ub)))  # compile + eager scope check
+        evj(jnp.asarray(0.5 * (lb + ub)))  # compile + eager scope check
     except UnsupportedRelaxation:
         return ReducedBound(bound=-np.inf, status="unsupported", rounds=0, history=[])
 
     c = np.zeros(n + 1)
-    c[n] = 1.0
+    c[n] = 1.0  # minimize the epigraph variable t
     bounds = [(float(lb[i]), float(ub[i])) for i in range(n)] + [(None, None)]
-    A: list = []
-    rhs: list = []
+    backend = "scipy" if os.environ.get("DISCOPT_REDUCED_LP_BACKEND") == "scipy" else "simplex"
+    milp = None
+    A_all: list = []
+    rhs_all: list = []
     xk = 0.5 * (lb + ub)
     prev, bound = -np.inf, -np.inf
     history: list = []
@@ -226,35 +237,76 @@ def reduced_mccormick_lp_bound(
     for r in range(1, max_rounds + 1):
         u_j, gu_j, h_j, gh_j = evj(jnp.asarray(xk))
         u0 = float(u_j)
+        new_rows: list = []
+        new_b: list = []
         g = np.asarray(gu_j, dtype=float)
         if np.all(np.isfinite(g)) and np.isfinite(u0):
             row = np.zeros(n + 1)
             row[:n] = g
-            row[n] = -1.0
-            A.append(row)
-            rhs.append(float(g @ xk - u0))
-        h_np = np.asarray(h_j, dtype=float)
-        gh_np = np.asarray(gh_j, dtype=float)
-        for h0, gg in zip(h_np, gh_np):
+            row[n] = -1.0  # t >= u0 + g.(x - xk)
+            new_rows.append(row)
+            new_b.append(float(g @ xk - u0))
+        for h0, gg in zip(np.asarray(h_j, dtype=float), np.asarray(gh_j, dtype=float)):
             if np.all(np.isfinite(gg)) and np.isfinite(h0):
                 row = np.zeros(n + 1)
                 row[:n] = gg
-                A.append(row)
-                rhs.append(float(gg @ xk - h0))
-
-        res = sopt.linprog(
-            c, A_ub=np.asarray(A), b_ub=np.asarray(rhs), bounds=bounds, method="highs"
-        )
-        if not res.success:
-            msg = (res.message or "").lower()
-            if "infeasible" in msg:
-                return ReducedBound(bound=np.inf, status="infeasible", rounds=r, history=history)
-            if "unbounded" in msg:
-                return ReducedBound(bound=-np.inf, status="unbounded", rounds=r, history=history)
+                new_rows.append(row)
+                new_b.append(float(gg @ xk - h0))
+        A_all.extend(new_rows)
+        rhs_all.extend(new_b)
+        if not A_all:  # nothing finite to cut on -> no valid bound
             break
-        bound = float(res.fun)
+
+        status, bound_r, xr = "error", None, None
+        if backend == "simplex":
+            try:
+                import scipy.sparse as sp
+
+                from discopt._jax.mccormick_lp import _append_relax_rows
+                from discopt._jax.milp_relaxation import MilpRelaxationModel
+
+                R = sp.csr_matrix(np.asarray(new_rows))
+                b = np.asarray(new_b, dtype=float)
+                if milp is None:
+                    milp = MilpRelaxationModel(c, R, b, bounds)
+                else:
+                    _append_relax_rows(milp, R, b)
+                mres = milp.solve(backend="simplex", time_limit=30.0)
+                st = str(mres.status).lower()
+                if "infeasible" in st:
+                    status = "infeasible"
+                elif "unbound" in st:
+                    status = "unbounded"
+                elif mres.objective is not None or mres.bound is not None:
+                    status = "optimal"
+                    bound_r = mres.objective if mres.objective is not None else mres.bound
+                    xr = np.asarray(mres.x, dtype=float)
+                else:
+                    raise RuntimeError(f"simplex status {st}")
+            except Exception:
+                backend = "scipy"  # fall back for this and subsequent rounds
+                milp = None
+        if backend == "scipy":
+            res = sopt.linprog(
+                c, A_ub=np.asarray(A_all), b_ub=np.asarray(rhs_all), bounds=bounds, method="highs"
+            )
+            if res.success:
+                status, bound_r, xr = "optimal", float(res.fun), np.asarray(res.x, dtype=float)
+            else:
+                msg = (res.message or "").lower()
+                status = "infeasible" if "infeasible" in msg else (
+                    "unbounded" if "unbounded" in msg else "error"
+                )
+
+        if status == "infeasible":
+            return ReducedBound(bound=np.inf, status="infeasible", rounds=r, history=history)
+        if status == "unbounded":
+            return ReducedBound(bound=-np.inf, status="unbounded", rounds=r, history=history)
+        if status != "optimal" or bound_r is None or xr is None:
+            break
+        bound = float(bound_r)
         history.append(bound)
-        xk = np.asarray(res.x[:n], dtype=float)
+        xk = xr[:n]
         if bound - prev < tol * (abs(bound) + 1.0):
             break
         prev = bound
