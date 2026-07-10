@@ -144,6 +144,29 @@ class TrainableDense:
         """Return the trainable weight variables ``[W, b]``."""
         return [self.W, self.b]
 
+    def n_parameters(self) -> int:
+        """Total number of scalar trainable parameters (``W`` plus ``b``)."""
+        return int(self.W.size + self.b.size)
+
+    def l2_penalty(self):
+        """Return ``sum(W**2) + sum(b**2)`` — an L2 regularization term."""
+        return dm.sum(self.W**2) + dm.sum(self.b**2)
+
+    def initial_values(
+        self,
+        seed: Union[int, np.random.Generator] = 0,
+        scale: float = 0.8,
+    ) -> dict[Variable, np.ndarray]:
+        """Glorot-style random initial weights for this layer (see
+        :meth:`TrainableNetwork.initial_values`)."""
+        rng = seed if isinstance(seed, np.random.Generator) else np.random.default_rng(seed)
+        lb, ub = self.weight_bounds
+        w_std = scale / np.sqrt(self.n_in)
+        return {
+            self.W: np.clip(rng.standard_normal((self.n_in, self.n_out)) * w_std, lb, ub),
+            self.b: np.clip(rng.standard_normal(self.n_out) * (0.3 * scale), lb, ub),
+        }
+
     def _affine(self, inputs: tuple):
         """Build the pre-activation ``x @ W + b`` from the input contract."""
         if len(inputs) == self.n_in:

@@ -12,6 +12,13 @@ This module spans two regimes of one hybrid-model story:
   bridge back to the frozen path via ``TrainableNetwork.freeze()`` /
   ``from_definition()`` — train, freeze, then optimize.
 
+The trainable regime is open: any object satisfying the :class:`Surrogate`
+protocol (a callable ``__call__(x) -> expression`` plus ``parameters`` /
+``n_parameters`` / ``l2_penalty`` / ``initial_values``) plugs into the hybrid
+pipeline, so custom surrogates — a Gaussian-process mean, a soft decision tree, a
+fixed-structure symbolic formula whose constants are trained in the NLP — work
+without new framework code. See :mod:`discopt.nn.surrogate`.
+
 Example (frozen)
 ----------------
 >>> import discopt.modeling as dm
@@ -41,6 +48,7 @@ from discopt.nn.presolve import (
     tighten_network,
 )
 from discopt.nn.scaling import OffsetScaling
+from discopt.nn.surrogate import Surrogate
 from discopt.nn.trainable import (
     TrainableDense,
     TrainableKernelExpansion,
@@ -60,6 +68,7 @@ __all__ = [
     "NNPresolveResult",
     "NetworkDefinition",
     "OffsetScaling",
+    "Surrogate",
     "TrainableDense",
     "TrainableKernelExpansion",
     "TrainableNetwork",

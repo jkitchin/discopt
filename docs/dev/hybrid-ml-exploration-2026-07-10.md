@@ -177,6 +177,17 @@ plus a `dae`-level convenience for multi-trajectory fitting (shared parameters
 across `DAEBuilder` instances) and a structure helper emitting
 `kkt_schur_block` indices for the weight block.
 
+> **Status (shipped).** The "common protocol" is now
+> `discopt.nn.surrogate.Surrogate` — a `runtime_checkable` `typing.Protocol`:
+> `__call__(x) -> expression` (the one load-bearing method) plus `parameters`,
+> `n_parameters`, `l2_penalty`, `initial_values`. `TrainableNetwork`,
+> `TrainableKernelExpansion`, and `TrainableDense` conform structurally; a custom
+> surrogate needs no inheritance. Verified end-to-end in
+> `test_surrogate_protocol.py`: a user-defined rational-rate surrogate (the
+> symbolic-regression bridge — fixed structure, constants trained in the NLP)
+> satisfies the protocol and recovers the true constants. The `.initialize`
+> reader adapter and the `dae`-level Schur helper remain future increments.
+
 Deliberately *not* proposed: ReLU on the training path (nonsmooth; the paper
 uses softplus for the same reason), `CustomCall` wrapping, and any change to
 solver math.

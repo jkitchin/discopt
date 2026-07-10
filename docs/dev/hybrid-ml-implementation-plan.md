@@ -111,6 +111,7 @@ or certification guard (the gate loses — CLAUDE.md philosophy §1).
 | HM2.4 | done | (this branch) | `test_neural_dae_scale.py` slow gate; 1021 wts, 3 traj, passes |
 | HM3.1 | done | (this branch) | `neural_dae.ipynb` executes clean; 0 warnings from it; +toc, +3 bib keys |
 | HM3.2 | done | (this branch) | CLAUDE.md nn+dae bullets; `nn/__init__` regime docstring |
+| HM5.1 | done | (this branch) | `nn/surrogate.py`: `Surrogate` runtime_checkable protocol; §5 shipped |
 | HM4.* | LOCKED | | entry experiments first (§8) |
 
 ---
@@ -175,12 +176,14 @@ any `discopt.nn` frozen-formulation change, AMP vectorized-constraint support
 ## 3. Module layout
 
 ```
+python/discopt/nn/surrogate.py      # NEW: Surrogate protocol (the contract; HM5.1)
 python/discopt/nn/trainable.py      # NEW: TrainableDense, TrainableNetwork,
                                     #      TrainableKernelExpansion, train()
 python/discopt/dae/fit.py           # NEW: Trajectory, fit_trajectories, TrajectoryFit
 python/discopt/warm_start.py        # ADD: unflatten_solution()
 python/discopt/nn/__init__.py       # export the new names (lazy, as existing style)
 python/discopt/dae/__init__.py      # export Trajectory, fit_trajectories
+python/tests/test_surrogate_protocol.py  # NEW (HM5.1)
 python/tests/test_nn_trainable.py   # NEW
 python/tests/test_dae_fit.py        # NEW
 docs/notebooks/neural_dae.ipynb     # NEW (HM3)
