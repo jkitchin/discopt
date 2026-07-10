@@ -224,7 +224,10 @@ def reduced_mccormick_lp_bound(
 
     c = np.zeros(n + 1)
     c[n] = 1.0  # minimize the epigraph variable t
-    bounds = [(float(lb[i]), float(ub[i])) for i in range(n)] + [(None, None)]
+    # t (epigraph) needs finite bounds for the in-house simplex; the Kelley cuts provide
+    # the real lower bound, so a wide inert box suffices (a None here yields NaN there).
+    T_BIG = 1e15
+    bounds = [(float(lb[i]), float(ub[i])) for i in range(n)] + [(-T_BIG, T_BIG)]
     backend = "scipy" if os.environ.get("DISCOPT_REDUCED_LP_BACKEND") == "scipy" else "simplex"
     milp = None
     A_all: list = []
@@ -278,8 +281,11 @@ def reduced_mccormick_lp_bound(
                 elif "unbound" in st:
                     status = "unbounded"
                 elif mres.objective is not None or mres.bound is not None:
+                    bv = mres.objective if mres.objective is not None else mres.bound
+                    if bv is None or not np.isfinite(bv) or mres.x is None:
+                        raise RuntimeError("simplex returned a non-finite bound")
                     status = "optimal"
-                    bound_r = mres.objective if mres.objective is not None else mres.bound
+                    bound_r = float(bv)
                     xr = np.asarray(mres.x, dtype=float)
                 else:
                     raise RuntimeError(f"simplex status {st}")
