@@ -46,29 +46,37 @@ jobs:
         run: |
           source .venv/bin/activate
           python -c "import cyipopt"
-      - name: Run opt-in AMP integration suite
+      # The AMP suite is split into two steps because two distinct failure modes
+      # share one root cause: the in-house MILP B&B is pathologically slow on the
+      # tan/abs cert instances (~24x nodes / 81% degenerate pivots vs HiGHS,
+      # tracked in #606), and JAX/XLA reserves address space that the per-test
+      # jax.clear_caches() fixture cannot return to the OS (only process death
+      # does). Packed into one long-lived worker, later tests run under
+      # accumulated XLA pressure that thrashes that already-slow B&B — a tan/abs
+      # cert that finishes in ~seconds in a fresh interpreter blew past the 300s
+      # harness timeout on the Linux runner (run 29126190059). So:
+      #
+      # STEP 1 (bulk, 186 tests): pytest-xdist -n 2 --dist=load. Spreading tests
+      # across worker processes bounds per-process XLA accumulation to ~1/N so no
+      # single interpreter degrades. -n 2 (not "auto") caps aggregate memory well
+      # under the 16 GB runner; --dist=load (not loadscope) spreads individual
+      # tests — the suite has no class/module/session-scoped fixtures, so per-test
+      # distribution is safe, whereas loadscope would keep a whole heavy class on
+      # one worker and re-accumulate. --forked (true per-test isolation) is NOT
+      # usable: it INTERNALERRORs with pytest-timeout when a test runs to the
+      # timeout, whereas xdist coordinates timeouts correctly.
+      #
+      # STEP 2 (cert, 4 tests, @pytest.mark.amp_cert_heavy): run SINGLE-PROCESS in
+      # a fresh interpreter with a generous --timeout=900. A fresh process has no
+      # accumulated XLA state, so the slow B&B runs at true speed (seconds, not
+      # 300s+). These stay real gating tests (unweakened assertions:
+      # status==optimal, gap_certified). This is deterministic — a fresh process
+      # removes the accumulation mechanism entirely, it does not merely widen a
+      # timeout budget and hope.
+      - name: Run AMP integration suite — bulk (xdist, process-distributed)
         run: |
           source .venv/bin/activate
-          # Distribute the ~190 tests across worker processes with pytest-xdist
-          # (--dist=load). Root cause of the historical CI flakiness: run
-          # single-process, the suite accumulates XLA address-space reservations
-          # across hundreds of JAX compilations, and later certification-sensitive
-          # tests (tan/abs nlp_004 gap certs, etc.) intermittently degrade to a
-          # feasible-not-optimal verdict or trip an XLA std::bad_alloc abort. The
-          # per-test jax.clear_caches() fixture reclaims compile caches but NOT the
-          # process's reserved address space, which only dies with the process.
-          # Splitting the run across N worker processes bounds per-process
-          # accumulation to ~1/N of the solves, so no single interpreter degrades.
-          # -n 2 is deliberate (not "auto"): each worker holds a full JAX/XLA
-          # runtime, so worker count is capped to keep aggregate memory well under
-          # the 16 GB runner. --dist=load spreads individual tests (the suite has
-          # no class/module/session-scoped fixtures, so per-test distribution is
-          # safe); loadscope would keep the 96-test heavy class on one worker and
-          # defeat the purpose. --forked (true per-test isolation) is NOT usable
-          # here: it deadlocks/INTERNALERRORs with pytest-timeout when a test runs
-          # to the timeout (the nlp3 xfail probe does), whereas xdist coordinates
-          # timeouts correctly.
-          scripts/run_memory_capped_pytest.sh pytest python/tests/test_amp_integration.py -v --timeout=300 -n 2 --dist=load -m "slow or integration or amp_benchmark or requires_cyipopt or memory_heavy"
+          scripts/run_memory_capped_pytest.sh pytest python/tests/test_amp_integration.py -v --timeout=300 -n 2 --dist=load -m "(slow or integration or amp_benchmark or requires_cyipopt or memory_heavy) and not amp_cert_heavy"
         env:
           JAX_PLATFORMS: cpu
           JAX_ENABLE_X64: "1"
@@ -76,6 +84,15 @@ jobs:
           # address-space regions, so a virtual-memory cap produces flaky
           # std::bad_alloc aborts (exit 134) unrelated to real RAM use. The
           # runner's kernel OOM-killer remains the safety net against a genuine
-          # resident-memory runaway; per-worker distribution above is the primary
-          # guard against address-space accumulation.
+          # resident-memory runaway; per-worker distribution is the primary guard
+          # against address-space accumulation.
+          PYTEST_MEMORY_LIMIT_MB: "0"
+      - name: Run AMP integration suite — heavy certification tests (isolated)
+        if: always()
+        run: |
+          source .venv/bin/activate
+          scripts/run_memory_capped_pytest.sh pytest python/tests/test_amp_integration.py -v --timeout=900 -p no:cacheprovider -m "(slow or integration or amp_benchmark or requires_cyipopt or memory_heavy) and amp_cert_heavy"
+        env:
+          JAX_PLATFORMS: cpu
+          JAX_ENABLE_X64: "1"
           PYTEST_MEMORY_LIMIT_MB: "0"

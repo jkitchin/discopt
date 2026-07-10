@@ -1788,6 +1788,7 @@ class TestAmpEndToEnd:
         assert abs(result.objective - MULTI2_OPTIMUM) <= 1e-3
 
     @pytest.mark.slow
+    @pytest.mark.amp_cert_heavy
     @pytest.mark.timeout(300)
     @pytest.mark.xfail(
         reason="nlp3 MILP exceeds test budget; tracked in #24",
@@ -2909,6 +2910,7 @@ class TestCurrentCodeWeaknesses:
         tol = 1e-6 + 1e-4 * abs(instance.expected_obj)
         assert abs(result.objective - instance.expected_obj) <= tol
 
+    @pytest.mark.amp_cert_heavy
     def test_amp_certifies_tan_abs_nlp_004_010_at_issue_gap(self):
         """The continuous tan/abs nlp_004 case should certify the issue-89 gap."""
         instance = MINLPTESTS_NLP_BY_ID["nlp_004_010"]
@@ -3114,6 +3116,7 @@ class TestCurrentCodeWeaknesses:
         tol = 1e-6 + 1e-4 * abs(instance.expected_obj)
         assert abs(result.objective - instance.expected_obj) <= tol
 
+    @pytest.mark.amp_cert_heavy
     @pytest.mark.parametrize("problem_id", ["nlp_mi_004_010", "nlp_mi_004_011"])
     def test_amp_certifies_tan_abs_integer_nlp_004_cases_at_issue_gap(self, problem_id):
         """The mixed-integer tan/abs nlp_004 cases should certify the issue-79 gap."""

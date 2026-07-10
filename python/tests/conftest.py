@@ -62,6 +62,14 @@ def pytest_configure(config):
     config.addinivalue_line(
         "markers", "relaxation: per-operator relaxation soundness/coverage audit"
     )
+    config.addinivalue_line(
+        "markers",
+        "amp_cert_heavy: AMP end-to-end certification tests whose in-house MILP "
+        "B&B is pathologically slow (#606) and thrashes under accumulated XLA "
+        "memory when packed into a shared multi-solve worker; the CI workflow "
+        "runs these in a separate single-process step (fresh interpreter, no "
+        "accumulation) so they execute at true speed as real gating tests",
+    )
 
 
 def _cyipopt_available() -> bool:
