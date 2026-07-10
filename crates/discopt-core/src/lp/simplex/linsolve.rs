@@ -137,6 +137,61 @@ enum Factored {
 /// also gates on sparsity, would not. Above it we defer to feral's heuristic.
 const FORCE_DENSE_M: usize = 256;
 
+/// Tiny-basis cutoff (mirrors feral's `M_TINY`): at or below this `m` a dense LU
+/// always wins and the density-aware route never diverts to sparse.
+const M_TINY: usize = 16;
+
+/// Choose the dense vs sparse LU route for an `m`×`m` basis with `nnz` stored
+/// entries — the discopt-side policy on top of feral's `should_use_dense_lu`.
+///
+/// **Default (OFF):** the historical policy — force dense for every `m ≤
+/// FORCE_DENSE_M`, else defer to feral's `should_use_dense_lu` (which itself is
+/// dense for `m ≤ 16`, dense if `m ≤ dense_threshold` and ≥ 25% dense, else
+/// sparse). Byte-identical to prior behavior.
+///
+/// **Density-aware route (`DISCOPT_LU_DENSITY_ROUTE=1`):** for the band
+/// `M_TINY < m ≤ FORCE_DENSE_M`, consult the *same* density gate feral uses
+/// (`nnz·4 ≥ m·m`, i.e. ≥ 25% dense) instead of forcing dense. Sparse-but-large
+/// bases (`nnz·4 < m·m`) then take feral's sparse LU. Motivation (#557): the
+/// wide lifted-McCormick node bases land at `m ≈ 200–256` but are only ~4% dense;
+/// forcing them dense pays an O(m³) refactor **and** triggers the dense FT
+/// update's `TinyPivot` refactor-every-pivot storm, whereas the sparse LU factors
+/// them ~13× faster and its FT update commits (measured on st_e36: a captured
+/// m=225 4.4%-dense node LP goes 62 ms → 4.6 ms, `RefacFtTinyPivot` 201/solve →
+/// ~0). Truly-dense small bases and `m ≤ M_TINY` still route dense (the density
+/// gate keeps them there), so the ~440 µs/iter sparse-symbolic overhead the
+/// dense cutoff was built to avoid is not paid on the bases that need dense.
+fn want_dense_route(m: usize, nnz: usize, params: &LuParams) -> bool {
+    route_dense_decision(m, nnz, params, density_route_enabled())
+}
+
+/// Pure routing decision (env flag passed in, so it is deterministically
+/// testable). See [`want_dense_route`] for the policy rationale.
+fn route_dense_decision(m: usize, nnz: usize, params: &LuParams, density_route: bool) -> bool {
+    // Off: preserve the exact historical routing.
+    if !density_route {
+        return m <= FORCE_DENSE_M || should_use_dense_lu(m, nnz, params);
+    }
+    // Density-aware: tiny always dense; the (M_TINY, FORCE_DENSE_M] band defers to
+    // the density gate; above FORCE_DENSE_M feral's heuristic decides (unchanged).
+    if m <= M_TINY {
+        return true;
+    }
+    if m <= FORCE_DENSE_M {
+        // feral's exact density criterion: dense iff at least a quarter dense.
+        // Saturating so a huge m can't overflow m·m / nnz·4.
+        return nnz.saturating_mul(4) >= m.saturating_mul(m);
+    }
+    should_use_dense_lu(m, nnz, params)
+}
+
+/// Whether the `DISCOPT_LU_DENSITY_ROUTE` density-aware LU route (#557) is on.
+/// Default off — the LU routing is byte-identical to the historical policy — so
+/// this is a real, opt-in performance knob, not a dead flag.
+fn density_route_enabled() -> bool {
+    std::env::var_os("DISCOPT_LU_DENSITY_ROUTE").is_some()
+}
+
 /// The retained basis matrix, in dense-column form, kept **in sync** with every
 /// [`update`](LinearSolver::update) so a refined solve or condition estimate can
 /// form the residual `r = b − B·x` against the matrix the factor *currently*
@@ -309,7 +364,7 @@ impl LinearSolver for FeralLU {
             .map(|c| c.iter().filter(|&&v| v != 0.0).count())
             .sum();
         self.lu = Some(
-            if m <= FORCE_DENSE_M || should_use_dense_lu(m, nnz, &params) {
+            if want_dense_route(m, nnz, &params) {
                 Factored::Dense(Box::new(
                     DenseLu::factor(cols, m, params).map_err(feral_err)?,
                 ))
@@ -335,7 +390,7 @@ impl LinearSolver for FeralLU {
         let nnz: usize = cols.iter().map(|c| c.len()).sum();
         // Densify once if either the dense LU branch needs it or numeric-focus
         // retention does; reuse the single dense copy for both.
-        let want_dense = m <= FORCE_DENSE_M || should_use_dense_lu(m, nnz, &params);
+        let want_dense = want_dense_route(m, nnz, &params);
         let dense = (want_dense || self.refine_enabled()).then(|| {
             let mut d = vec![vec![0.0; m]; m];
             for (slot, col) in cols.iter().enumerate() {
@@ -498,6 +553,40 @@ impl LinearSolver for DenseLU {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn route_default_off_is_historical() {
+        // Default (density_route=false) must reproduce the exact historical policy:
+        // dense for every m ≤ FORCE_DENSE_M regardless of density, else feral.
+        let p = LuParams::default();
+        // Wide, sparse McCormick-like band basis: historically forced dense.
+        assert!(route_dense_decision(225, 996 + 225, &p, false));
+        // A genuinely large sparse basis: feral routes it sparse either way.
+        assert!(!route_dense_decision(1000, 1000 * 4, &p, false));
+        // Tiny: dense.
+        assert!(route_dense_decision(8, 0, &p, false));
+    }
+
+    #[test]
+    fn route_density_on_diverts_sparse_band_only() {
+        let p = LuParams::default();
+        // The #557 target: m=225 at ~4.4% density → now SPARSE (was dense).
+        assert!(!route_dense_decision(225, 996 + 225, &p, true));
+        // A truly-dense small basis (≥25% dense) in the band → still DENSE.
+        let dense_nnz = 100 * 100 / 3; // ~33% dense
+        assert!(route_dense_decision(100, dense_nnz, &p, true));
+        // Exactly the 25% density boundary (nnz·4 == m·m) → dense (≥ gate).
+        assert!(route_dense_decision(100, 100 * 100 / 4, &p, true));
+        // Just below 25% → sparse.
+        assert!(!route_dense_decision(100, 100 * 100 / 4 - 1, &p, true));
+        // Tiny stays dense even at 0 nnz.
+        assert!(route_dense_decision(16, 0, &p, true));
+        // Above FORCE_DENSE_M: feral heuristic, unchanged by the flag.
+        assert_eq!(
+            route_dense_decision(300, 300, &p, true),
+            should_use_dense_lu(300, 300, &p)
+        );
+    }
 
     // Matrix-vector B·x with B[i][j] = cols[j][i].
     fn bmatvec(cols: &[Vec<f64>], x: &[f64]) -> Vec<f64> {
