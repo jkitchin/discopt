@@ -149,9 +149,42 @@ def build_reduced_relaxation(model, node_lb, node_ub) -> ReducedRelaxation:
     return ReducedRelaxation(obj_under=obj_under, con_feas=con_feas, negate=negate, n=n)
 
 
-def _np_grad(fn: Callable) -> Callable:
-    g = jax.grad(lambda z: fn(z))
-    return lambda x: np.asarray(g(jnp.asarray(x)), dtype=float)
+def _build_jit_evaluator(model, lb, ub):
+    """A single jitted fn ``x -> (u, gu, h, gh)`` for the reduced relaxation, using
+    MCBox's **explicit** rule-based subgradients (not ``jax.grad`` over the whole
+    construction — ~4 orders of magnitude faster, P2.1). ``u``/``gu`` are the objective
+    underestimator (minimize form) value/subgradient; ``h`` (m,) / ``gh`` (m, n) are the
+    per-constraint feasibility values/subgradients (``h_i <= 0`` relaxed). Raises
+    :class:`UnsupportedRelaxation` on first call (compile) if out of MCBox scope."""
+    lbj, ubj = jnp.asarray(lb), jnp.asarray(ub)
+    n = int(lb.size)
+    negate = model._objective.sense == ObjectiveSense.MAXIMIZE
+    obj_expr = model._objective.expression
+    cons = []
+    for c in model._constraints:
+        if not isinstance(c, Constraint):
+            raise UnsupportedRelaxation(f"non-Constraint {type(c).__name__}")
+        cons.append((c.body, c.sense))
+
+    def ev(x):
+        leaves = mcbox_leaves(x, lbj, ubj)
+        zo = _to_mcbox(obj_expr, leaves, model)
+        u = -zo.cc if negate else zo.cv
+        gu = -zo.sub_cc if negate else zo.sub_cv
+        hs, ghs = [], []
+        for body, sense in cons:
+            zb = _to_mcbox(body, leaves, model)
+            if sense in ("<=", "=="):
+                hs.append(zb.cv)
+                ghs.append(zb.sub_cv)
+            if sense in (">=", "=="):
+                hs.append(-zb.cc)
+                ghs.append(-zb.sub_cc)
+        h = jnp.stack(hs) if hs else jnp.zeros(0)
+        gh = jnp.stack(ghs) if ghs else jnp.zeros((0, n))
+        return u, gu, h, gh
+
+    return jax.jit(ev), negate, n
 
 
 @dataclass
@@ -167,19 +200,18 @@ def reduced_mccormick_lp_bound(
 ) -> ReducedBound:
     """MAiNGO-style reduced-space lower bound: Kelley cutting planes on the MCBox
     relaxation, solved as an LP over the original variables (no auxiliary columns).
-    scipy/HiGHS scaffold for the inner LP; P2 wires the in-house simplex."""
+    The per-round value+subgradient evaluation is a single jitted MCBox pass with
+    explicit subgradients (P2.1). scipy/HiGHS scaffold for the inner LP; P2.2 wires the
+    in-house simplex."""
     import scipy.optimize as sopt
-
-    try:
-        R = build_reduced_relaxation(model, node_lb, node_ub)
-    except UnsupportedRelaxation:
-        return ReducedBound(bound=-np.inf, status="unsupported", rounds=0, history=[])
 
     lb = np.asarray(node_lb, dtype=float)
     ub = np.asarray(node_ub, dtype=float)
-    n = R.n
-    gu = _np_grad(R.obj_under)
-    ghs = [_np_grad(h) for h in R.con_feas]
+    try:
+        evj, negate, n = _build_jit_evaluator(model, lb, ub)
+        _u, _gu, _h, _gh = evj(jnp.asarray(0.5 * (lb + ub)))  # compile + eager scope check
+    except UnsupportedRelaxation:
+        return ReducedBound(bound=-np.inf, status="unsupported", rounds=0, history=[])
 
     c = np.zeros(n + 1)
     c[n] = 1.0
@@ -192,18 +224,18 @@ def reduced_mccormick_lp_bound(
 
     r = 0
     for r in range(1, max_rounds + 1):
-        xj = jnp.asarray(xk)
-        u0 = float(R.obj_under(xj))
-        g = gu(xk)
+        u_j, gu_j, h_j, gh_j = evj(jnp.asarray(xk))
+        u0 = float(u_j)
+        g = np.asarray(gu_j, dtype=float)
         if np.all(np.isfinite(g)) and np.isfinite(u0):
             row = np.zeros(n + 1)
             row[:n] = g
             row[n] = -1.0
             A.append(row)
             rhs.append(float(g @ xk - u0))
-        for h, gh in zip(R.con_feas, ghs):
-            h0 = float(h(xj))
-            gg = gh(xk)
+        h_np = np.asarray(h_j, dtype=float)
+        gh_np = np.asarray(gh_j, dtype=float)
+        for h0, gg in zip(h_np, gh_np):
             if np.all(np.isfinite(gg)) and np.isfinite(h0):
                 row = np.zeros(n + 1)
                 row[:n] = gg
@@ -227,5 +259,5 @@ def reduced_mccormick_lp_bound(
             break
         prev = bound
 
-    dual = -bound if R.negate else bound
+    dual = -bound if negate else bound
     return ReducedBound(bound=dual, status="optimal", rounds=r, history=history)
