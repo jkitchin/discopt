@@ -30,17 +30,66 @@ cuts (the solver falls back to its normal relaxation). It is design-time
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
-import sympy as sp
+if TYPE_CHECKING:
+    import sympy as sp
 
-from discopt._jax.symbolic.constraint_cuts import (
-    ChainCoupling,
-    TermUnderestimator,
-    eliminate_chain_coupling,
-    power_term_underestimator,
-    verify_cut,
-)
+    from discopt._jax.symbolic.constraint_cuts import (
+        ChainCoupling,
+        TermUnderestimator,
+        eliminate_chain_coupling,
+        power_term_underestimator,
+        verify_cut,
+    )
+
+_SYMPY_LOADED = False
+
+
+def _ensure_sympy() -> None:
+    """Bind SymPy and the SymPy-backed ``constraint_cuts`` toolkit into module globals.
+
+    Deferred (PEP 562 spirit, see ``symbolic/__init__``): ``solver.py`` imports this
+    module on *every* solve to reach the SymPy-free
+    :func:`has_square_difference_candidate` pre-check, so a module-level
+    ``import sympy`` would charge the ~0.1 s SymPy import to every solve — including
+    MILP/MIQP models that provably cannot match any pattern (OVERHEAD-1, task #83).
+    Every entry point that touches SymPy calls this first; raising
+    :class:`ImportError` here preserves the "optional ``[sympy]`` extra" contract
+    (``solver.py`` catches it at the call site exactly as it caught the old
+    module-level import failure).
+    """
+    global _SYMPY_LOADED, sp
+    global ChainCoupling, TermUnderestimator
+    global eliminate_chain_coupling, power_term_underestimator, verify_cut
+    if _SYMPY_LOADED:
+        return
+    import sympy as _sp
+
+    from discopt._jax.symbolic.constraint_cuts import (
+        ChainCoupling as _ChainCoupling,
+    )
+    from discopt._jax.symbolic.constraint_cuts import (
+        TermUnderestimator as _TermUnderestimator,
+    )
+    from discopt._jax.symbolic.constraint_cuts import (
+        eliminate_chain_coupling as _eliminate_chain_coupling,
+    )
+    from discopt._jax.symbolic.constraint_cuts import (
+        power_term_underestimator as _power_term_underestimator,
+    )
+    from discopt._jax.symbolic.constraint_cuts import (
+        verify_cut as _verify_cut,
+    )
+
+    sp = _sp
+    ChainCoupling = _ChainCoupling
+    TermUnderestimator = _TermUnderestimator
+    eliminate_chain_coupling = _eliminate_chain_coupling
+    power_term_underestimator = _power_term_underestimator
+    verify_cut = _verify_cut
+    _SYMPY_LOADED = True
+
 
 # ---------------------------------------------------------------------------
 # DAG -> SymPy
@@ -108,6 +157,7 @@ class SympyModel:
 
 def model_to_sympy(model) -> SympyModel:
     """Translate a model's objective, ``==`` and ``<=``/``>=`` constraints to SymPy."""
+    _ensure_sympy()
     from discopt.modeling import core
 
     syms: dict = {}
@@ -224,6 +274,7 @@ class ProductTerm:
 
 def find_product_terms(objective: sp.Expr) -> list[ProductTerm]:
     """Find additive terms ``coef * x * (y**k - 1)`` with x linear, y in a power."""
+    _ensure_sympy()
     out: list[ProductTerm] = []
     # Keep the objective factored so the (y**k - 1) factor stays intact.
     for term in sp.Add.make_args(objective):
@@ -387,8 +438,12 @@ def recognize_and_derive_cuts(model, *, verify: bool = True) -> list[RecognizedC
     # Cheap pre-check before the expensive SymPy translation: the pattern needs a
     # nonlinear equality constraint. Without one (e.g. a dense-objective MIQP) the
     # recognizer is a guaranteed no-op, so skip ``model_to_sympy`` outright.
+    # NOTE: keep this *above* ``_ensure_sympy()`` — the no-candidate exit must not
+    # even import SymPy (that ~0.1 s module import was a fixed per-solve tax on
+    # every MILP/MIQP; OVERHEAD-1, task #83).
     if not has_square_difference_candidate(model):
         return []
+    _ensure_sympy()
     sm = model_to_sympy(model)
     classes, fixed = _canonicalize(sm.equalities, sm.symbols)
     reverse = {sym: key for key, sym in sm.symbols.items()}
@@ -588,6 +643,7 @@ def inject_complementarity(model) -> int:
     (``c < 0``) and must be rejected — it makes the whole non-negative box
     feasible, so the cut would illegally remove feasible points.
     """
+    _ensure_sympy()
     sm = model_to_sympy(model)
     handles = _handle_map(model)
     reverse = {sym: key for key, sym in sm.symbols.items()}
@@ -632,6 +688,7 @@ def inject_binary_products(model, *, min_factors: int = 3) -> int:
     the product) but the relaxation uses the Fortet hull, which is tighter than the
     nested-bilinear McCormick relaxation for ``n >= 3``. Returns the count applied.
     """
+    _ensure_sympy()
     sm = model_to_sympy(model)
     handles = _handle_map(model)
     reverse = {sym: key for key, sym in sm.symbols.items()}
@@ -707,6 +764,8 @@ def inject_gp_cuts(model, *, samples: int = 6) -> int:
     import math
 
     import discopt.modeling as dm
+
+    _ensure_sympy()
     from discopt._jax.symbolic.log_curvature import is_monomial
 
     sm = model_to_sympy(model)
@@ -835,6 +894,7 @@ def inject_gp_constraint_cuts(model, *, samples: int = 5, max_cuts: int = 12) ->
 
     import discopt.modeling as dm
 
+    _ensure_sympy()
     sm = model_to_sympy(model)
     handles = _handle_map(model)
     reverse = {sym: key for key, sym in sm.symbols.items()}
@@ -1012,6 +1072,7 @@ def inject_signed_signomial_constraint_cuts(model, *, samples: int = 5, max_cuts
 
     import discopt.modeling as dm
 
+    _ensure_sympy()
     sm = model_to_sympy(model)
     handles = _handle_map(model)
     reverse = {sym: key for key, sym in sm.symbols.items()}
