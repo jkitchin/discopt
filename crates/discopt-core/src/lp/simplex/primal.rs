@@ -1448,6 +1448,29 @@ impl<'a> Simplex<'a> {
                     if need_refac || updates >= 48 || work_gate {
                         // THRU-5: attribute the trigger (priority: FT-fail > cap > gate).
                         crate::profile::incr(if need_refac {
+                            // ENGINE-1 (#557): split the FT-fail by feral's own
+                            // RefactorCause so the "accuracy-necessary vs
+                            // over-conservative" fork is measured. No-op without
+                            // DISCOPT_PROFILE (last_refactor() is a cheap field read).
+                            if crate::profile::enabled() {
+                                use feral::RefactorCause::*;
+                                match self.lu.last_refactor().map(|(c, _)| c) {
+                                    Some(Growth) => {
+                                        crate::profile::incr(crate::profile::Ctr::RefacFtGrowth)
+                                    }
+                                    Some(TinyPivot) => {
+                                        crate::profile::incr(crate::profile::Ctr::RefacFtTinyPivot)
+                                    }
+                                    Some(Singular) => {
+                                        crate::profile::incr(crate::profile::Ctr::RefacFtSingular)
+                                    }
+                                    // UpdateBudget can't reach here (discopt's 48-cap
+                                    // trips first) and None means the dense path;
+                                    // leave the sub-split silent, the aggregate still
+                                    // counts it.
+                                    _ => {}
+                                }
+                            }
                             crate::profile::Ctr::RefacFtFail
                         } else if updates >= 48 {
                             crate::profile::Ctr::RefacCap
