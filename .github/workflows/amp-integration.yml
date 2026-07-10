@@ -13,8 +13,15 @@ on:
 jobs:
   amp-integration:
     name: AMP Alpine/incidence suite
+    # On PRs this suite is opt-in via the `amp-integration` label by default, to
+    # avoid spending ~13 min of runner time on every PR. To catch AMP breakage
+    # BEFORE it lands on main (the maintainer's stated pain point), set the repo
+    # variable AMP_INTEGRATION_ON_ALL_PRS=true (Settings > Secrets and variables >
+    # Actions > Variables) and the suite runs on every PR without a label. Push
+    # to main and the scheduled run are always enabled.
     if: >-
       github.event_name != 'pull_request' ||
+      vars.AMP_INTEGRATION_ON_ALL_PRS == 'true' ||
       contains(github.event.pull_request.labels.*.name, 'amp-integration')
     runs-on: ubuntu-latest
     timeout-minutes: 60
@@ -33,7 +40,7 @@ jobs:
           python -m venv .venv
           source .venv/bin/activate
           pip install maturin
-          pip install jax jaxlib numpy scipy highspy cyipopt pytest pytest-timeout
+          pip install jax jaxlib numpy scipy highspy cyipopt pytest pytest-timeout pytest-xdist
           maturin develop
       - name: Verify cyipopt is importable
         run: |
@@ -42,13 +49,33 @@ jobs:
       - name: Run opt-in AMP integration suite
         run: |
           source .venv/bin/activate
-          scripts/run_memory_capped_pytest.sh pytest python/tests/test_amp_integration.py -v --timeout=300 -m "slow or integration or amp_benchmark or requires_cyipopt or memory_heavy"
+          # Distribute the ~190 tests across worker processes with pytest-xdist
+          # (--dist=load). Root cause of the historical CI flakiness: run
+          # single-process, the suite accumulates XLA address-space reservations
+          # across hundreds of JAX compilations, and later certification-sensitive
+          # tests (tan/abs nlp_004 gap certs, etc.) intermittently degrade to a
+          # feasible-not-optimal verdict or trip an XLA std::bad_alloc abort. The
+          # per-test jax.clear_caches() fixture reclaims compile caches but NOT the
+          # process's reserved address space, which only dies with the process.
+          # Splitting the run across N worker processes bounds per-process
+          # accumulation to ~1/N of the solves, so no single interpreter degrades.
+          # -n 2 is deliberate (not "auto"): each worker holds a full JAX/XLA
+          # runtime, so worker count is capped to keep aggregate memory well under
+          # the 16 GB runner. --dist=load spreads individual tests (the suite has
+          # no class/module/session-scoped fixtures, so per-test distribution is
+          # safe); loadscope would keep the 96-test heavy class on one worker and
+          # defeat the purpose. --forked (true per-test isolation) is NOT usable
+          # here: it deadlocks/INTERNALERRORs with pytest-timeout when a test runs
+          # to the timeout (the nlp3 xfail probe does), whereas xdist coordinates
+          # timeouts correctly.
+          scripts/run_memory_capped_pytest.sh pytest python/tests/test_amp_integration.py -v --timeout=300 -n 2 --dist=load -m "slow or integration or amp_benchmark or requires_cyipopt or memory_heavy"
         env:
           JAX_PLATFORMS: cpu
           JAX_ENABLE_X64: "1"
-          # No prlimit --as cap: the suite runs single-process and accumulates
-          # XLA address-space reservations across hundreds of compilations, so a
-          # virtual-memory cap produces flaky std::bad_alloc aborts (exit 134)
-          # unrelated to real RAM use. The runner's kernel OOM-killer remains
-          # the safety net against a genuine resident-memory runaway.
+          # No prlimit --as cap: XLA reserves (but does not resident-commit) large
+          # address-space regions, so a virtual-memory cap produces flaky
+          # std::bad_alloc aborts (exit 134) unrelated to real RAM use. The
+          # runner's kernel OOM-killer remains the safety net against a genuine
+          # resident-memory runaway; per-worker distribution above is the primary
+          # guard against address-space accumulation.
           PYTEST_MEMORY_LIMIT_MB: "0"
