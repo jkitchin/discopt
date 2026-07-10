@@ -348,6 +348,7 @@ adversarial suite. Post the table to the tracking issue; update this §7.
 | F5 | OBBT-on-aux (`cascade_aux`) helps | neutral-to-regressive; nvs22 fails to certify | perf-plan §6 |
 | F6 | **LU condition estimate discriminates failing bases** | populations inverted (fail p50=16; healthy ≤1e16); growth no-signal; mechanism = 3× LP failure rate, not corruption | 2026-07-10, #77 |
 | F7 | gear4 is reducible by cutoff-OBBT/probing | stalls at 2.46M box; not a gate probe | plan §14 |
+| F8 | **The tainted tree "proved" its final frontier bound** (DECOMP-1 §3: nvs05 4.87, tanksize 0.881) | per-node accounting (B2-FIX, task #89): the rigorous bound of a tainted tree is min(frontier, tainted nodes' pop-time bounds); on nvs05 the earliest taint (iteration 2) floors it at **1.3521** and on tanksize at 0.8473 — the frontier value is NOT rigorous once those subtrees were removed unproven. The recoverable headroom is marginal (nvs05 1.3481→1.3521), not 3.6×. The real lever is preventing the unsound removal (bound sentinel-fathomed NLP-failure nodes with the always-valid interval bound so they branch instead — the McCormick-LP path already does this rescue), which is bound-changing and separately gated. | 2026-07-10, #89 |
 
 ## §7 Progress ledger (update per task; falsifications also to perf-plan §6)
 
@@ -363,4 +364,5 @@ adversarial suite. Post the table to the tracking issue; update this §7.
 | STRUCT-2 Q-extraction | queued | — |
 | OVERHEAD-1 startup floor | **in flight** (agent) | profiling |
 | TAIL-1 a/b/c | queued | do (c) first |
+| RELAX-1 centropy tangent cuts | **entry green → GO, implemented** | ex6_2_5 root bound `None`→−27791 (finite, valid ≤ oracle −70.75); 6/8 `ex6_2_*` unlock feasibility-fallback → valid bound; neutral on 30 non-centropy instances; PR open |
 | V-2 final validation | blocked (all) | baseline §1 banked |

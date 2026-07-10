@@ -90,6 +90,8 @@ The modeling API exposes builders for all of them, including `atan/asin/acos`
 | `if_else` | `dm.if_else` | lowers to max/min + aux var | GDP/big-M |
 | `prod(x)` | `dm.prod` | recursive McCormick fold (corner-product interval tracking) | valid for any factor sign; not the exact hull |
 | `norm(x, ord)` | `dm.norm` | norm-equivalence envelopes `max_i|x_i| ≤ ‖x‖_p ≤ Σ_i|x_i|` | L1/L2/L∞ in the IR (certified); other orders JAX-path only |
+| `entropy(x) = x·log x` | `FunctionCall("entropy", x)` | convex tangent-cut underestimator + secant over (univariate path) | convex on `x ≥ 0`; recovered from raw `x·log x` by `canonicalize_entropy` |
+| `centropy(x, y) = x·log(x/y)` | `FunctionCall("centropy", x, y)` | jointly-convex **supporting-hyperplane (gradient) cuts** on the composite-multivariate lift, with LP-point separation | jointly convex on `x ≥ 0, y > 0` (Boyd & Vandenberghe §3.2.6); claimed only when both args are affine and the domain is provable (RELAX-1) — unlocks the MINLPLib `ex6_2_*` entropy family |
 
 ---
 

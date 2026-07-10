@@ -1,0 +1,259 @@
+{
+  "arm": "off",
+  "env": {},
+  "tl": 40.0,
+  "results": {
+    "nvs21": {
+      "instance": "nvs21",
+      "status": "optimal",
+      "objective": -5.684782607923295,
+      "bound": -5.68521625604212,
+      "node_count": 195,
+      "wall": 8.956,
+      "sense": "min"
+    },
+    "st_e36": {
+      "instance": "st_e36",
+      "status": "optimal",
+      "objective": -246.0,
+      "bound": -246.01879639837531,
+      "node_count": 153,
+      "wall": 17.23,
+      "sense": "min"
+    },
+    "nvs09": {
+      "instance": "nvs09",
+      "status": "feasible",
+      "objective": -43.13433691803531,
+      "bound": -58.65050082502646,
+      "node_count": 191,
+      "wall": 40.453,
+      "sense": "min"
+    },
+    "tls2": {
+      "instance": "tls2",
+      "status": "time_limit",
+      "objective": null,
+      "bound": null,
+      "node_count": 1311,
+      "wall": 40.237,
+      "sense": "min"
+    },
+    "ringpack_10_1": {
+      "instance": "ringpack_10_1",
+      "status": "feasible",
+      "objective": -8.692986405129453,
+      "bound": -20.858217677612917,
+      "node_count": 127,
+      "wall": 41.209,
+      "sense": "min"
+    },
+    "kall_circles_c6b": {
+      "instance": "kall_circles_c6b",
+      "status": "feasible",
+      "objective": 2.575063259074003,
+      "bound": -1.000001381788337e-09,
+      "node_count": 31,
+      "wall": 50.169,
+      "sense": "min"
+    },
+    "st_e07": {
+      "instance": "st_e07",
+      "status": "optimal",
+      "objective": -400.0000040538907,
+      "bound": -400.0000040538907,
+      "node_count": 1,
+      "wall": 2.421,
+      "sense": "min"
+    },
+    "nvs06": {
+      "instance": "nvs06",
+      "status": "optimal",
+      "objective": 1.7703125002341187,
+      "bound": 1.7703124984296874,
+      "node_count": 5,
+      "wall": 1.334,
+      "sense": "min"
+    },
+    "nvs19": {
+      "instance": "nvs19",
+      "status": "feasible",
+      "objective": -1098.2,
+      "bound": -1102.8385175019384,
+      "node_count": 161,
+      "wall": 40.078,
+      "sense": "min"
+    },
+    "nvs24": {
+      "instance": "nvs24",
+      "status": "feasible",
+      "objective": -1031.7999999999997,
+      "bound": -1035.6600020723224,
+      "node_count": 7,
+      "wall": 53.192,
+      "sense": "min"
+    },
+    "nvs01": {
+      "instance": "nvs01",
+      "status": "optimal",
+      "objective": 12.46966882156821,
+      "bound": 12.46966880809854,
+      "node_count": 17,
+      "wall": 2.717,
+      "sense": "min"
+    },
+    "nvs02": {
+      "instance": "nvs02",
+      "status": "optimal",
+      "objective": 5.96418452307,
+      "bound": 5.96418452307,
+      "node_count": 337,
+      "wall": 0.163,
+      "sense": "min"
+    },
+    "nvs04": {
+      "instance": "nvs04",
+      "status": "optimal",
+      "objective": 0.720000000000006,
+      "bound": 0.7199999473599988,
+      "node_count": 5,
+      "wall": 0.463,
+      "sense": "min"
+    },
+    "nvs07": {
+      "instance": "nvs07",
+      "status": "optimal",
+      "objective": 4.0,
+      "bound": 4.0,
+      "node_count": 5,
+      "wall": 0.037,
+      "sense": "min"
+    },
+    "nvs13": {
+      "instance": "nvs13",
+      "status": "optimal",
+      "objective": -585.2,
+      "bound": -585.2000011714,
+      "node_count": 45,
+      "wall": 1.875,
+      "sense": "min"
+    },
+    "nvs15": {
+      "instance": "nvs15",
+      "status": "optimal",
+      "objective": 1.0,
+      "bound": 1.0,
+      "node_count": 7,
+      "wall": 0.054,
+      "sense": "min"
+    },
+    "nvs17": {
+      "instance": "nvs17",
+      "status": "optimal",
+      "objective": -1100.4000000000003,
+      "bound": -1100.4100022118205,
+      "node_count": 173,
+      "wall": 25.175,
+      "sense": "min"
+    },
+    "nvs23": {
+      "instance": "nvs23",
+      "status": "feasible",
+      "objective": -1124.8,
+      "bound": -1130.495879486534,
+      "node_count": 37,
+      "wall": 41.206,
+      "sense": "min"
+    },
+    "st_miqp2": {
+      "instance": "st_miqp2",
+      "status": "optimal",
+      "objective": 2.0,
+      "bound": 2.0,
+      "node_count": 9,
+      "wall": 0.152,
+      "sense": "min"
+    },
+    "st_miqp3": {
+      "instance": "st_miqp3",
+      "status": "optimal",
+      "objective": -6.0,
+      "bound": -6.0,
+      "node_count": 1,
+      "wall": 0.129,
+      "sense": "min"
+    },
+    "meanvarx": {
+      "instance": "meanvarx",
+      "status": "optimal",
+      "objective": 14.36923135631427,
+      "bound": 14.36923135631427,
+      "node_count": 17,
+      "wall": 0.236,
+      "sense": "min"
+    },
+    "alan": {
+      "instance": "alan",
+      "status": "optimal",
+      "objective": 2.924999998301341,
+      "bound": 2.924999998301341,
+      "node_count": 21,
+      "wall": 0.152,
+      "sense": "min"
+    },
+    "ex5_2_2_case1": {
+      "instance": "ex5_2_2_case1",
+      "status": "optimal",
+      "objective": -400.00000204222675,
+      "bound": -400.0000041260587,
+      "node_count": 3,
+      "wall": 0.508,
+      "sense": "min"
+    },
+    "ex5_3_2": {
+      "instance": "ex5_3_2",
+      "status": "optimal",
+      "objective": 1.864159520848939,
+      "bound": 1.8641594575931957,
+      "node_count": 19,
+      "wall": 3.232,
+      "sense": "min"
+    },
+    "ex7_2_1": {
+      "instance": "ex7_2_1",
+      "status": "feasible",
+      "objective": 1227.2258365749606,
+      "bound": 1111.0742597196686,
+      "node_count": 2065,
+      "wall": 40.074,
+      "sense": "min"
+    },
+    "ex4_1_1": {
+      "instance": "ex4_1_1",
+      "status": "optimal",
+      "objective": -7.487312364902362,
+      "bound": -7.4875244284025655,
+      "node_count": 49,
+      "wall": 0.44,
+      "sense": "min"
+    },
+    "alkyl": {
+      "instance": "alkyl",
+      "status": "optimal",
+      "objective": -1.764999879276536,
+      "bound": -1.7651560782283298,
+      "node_count": 29,
+      "wall": 2.901,
+      "sense": "min"
+    },
+    "st_e30": {
+      "instance": "st_e30",
+      "status": "optimal",
+      "objective": -1.5811388234321722,
+      "bound": -1.5811569828347167,
+      "node_count": 53,
+      "wall": 4.703,
+      "sense": "min"
+    }
+  }
+}

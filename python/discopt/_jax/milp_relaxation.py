@@ -111,6 +111,15 @@ _LIFT_MAX_ENVELOPE_SLOPE = 1e6
 # relaxation and is therefore always sound.
 _LIFT_MAX_CROSS_TERM_ARG_MAGNITUDE = 1e7
 
+# Multi-argument atoms that are *jointly convex* over their domain and therefore
+# admit a rigorous supporting-hyperplane (gradient) underestimator via the
+# composite-multivariate lift. Maps atom name → required argument count. The
+# convexity/domain licence is enforced by ``classify_expr`` in the collector, so
+# this table only names the candidate atoms (a structural pre-filter). Currently
+# just the GAMS relative-entropy intrinsic ``centropy(x, y) = x·log(x/y)`` (Boyd
+# & Vandenberghe §3.2.6), which powers the MINLPLib ``ex6_2_*`` entropy family.
+_JOINTLY_CONVEX_MULTIVAR_ATOMS: dict[str, int] = {"centropy": 2}
+
 
 def _envelope_slope_ok(slope: float) -> bool:
     """True when an envelope cut's slope is well-conditioned enough to emit.
@@ -3969,6 +3978,30 @@ def _should_claim_composite_multivar(expr: Expression, model: Model, n_orig: int
         except ValueError:
             pass
         return len(_referenced_flat_indices(arg, model)) >= 2
+    # Multi-argument *jointly-convex* atoms (the GAMS relative-entropy intrinsic
+    # ``centropy(x, y) = x·log(x/y)``, jointly convex on x≥0, y>0 — Boyd &
+    # Vandenberghe §3.2.6). No univariate/bilinear/monomial builder lifts these,
+    # so without a claim the linearizer raises "Cannot linearize FunctionCall"
+    # and the whole objective collapses to the feasibility fallback (no valid
+    # lower bound — the entire MINLPLib ``ex6_2_*`` entropy family). The collector's
+    # ``classify_expr`` gate licenses CONVEX only when *both* arguments are affine
+    # and the domain (x≥0, y>0) is provable on the box, so a supporting-hyperplane
+    # (gradient) cut of the compiled atom is a rigorous underestimator — the same
+    # tangent-cut soundness the univariate convex path relies on. When the two
+    # arguments collapse to a single original variable, ``len(idxs) < 2`` and the
+    # collector abstains (falls through to the term-by-term path); the multivariate
+    # case (≥2 vars), which is the entropy family, is what this claims.
+    if isinstance(expr, FunctionCall) and expr.func_name in _JOINTLY_CONVEX_MULTIVAR_ATOMS:
+        if len(expr.args) != _JOINTLY_CONVEX_MULTIVAR_ATOMS[expr.func_name]:
+            return False
+        for arg in expr.args:
+            try:
+                _linearize_affine_expr(arg, model, n_orig)
+            except ValueError:
+                # A non-affine inner argument breaks the atom∘affine convexity
+                # licence; do not claim (the classifier would abstain anyway).
+                return False
+        return len(_referenced_flat_indices(expr, model)) >= 2
     if isinstance(expr, BinaryOp) and expr.op == "**" and isinstance(expr.right, Constant):
         p = float(expr.right.value)
         if p == int(p):

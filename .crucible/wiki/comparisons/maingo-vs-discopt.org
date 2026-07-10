@@ -1,0 +1,171 @@
+#+TITLE: MAiNGO vs discopt
+#+FILETAGS: :comparison:maingo:discopt:mccormick:global-optimization:minlp:reduced-space:
+
+
+* MAiNGO vs discopt
+:PROPERTIES:
+:ARTICLE_TYPE: comparison
+:SOURCE_KEYS: bongartz2018maingo bongartz2017reducedspace najman2021linearization tsoukalas2014 mitsos2009 bongartz2026
+:STATUS: active
+:CREATED: 2026-07-09
+:UPDATED: 2026-07-09
+:END:
+
+[[file:../concepts/maingo-solver.org][MAiNGO]] and discopt are both deterministic global solvers for nonconvex MINLP
+built on the same theoretical foundation — [[file:../methods/mccormick-relaxations.org][McCormick relaxations]] in a
+[[file:../methods/spatial-branch-and-bound.org][spatial branch-and-bound]] with [[file:../methods/bound-tightening.org][bound tightening]]. That shared foundation makes
+MAiNGO the single most instructive architectural mirror for discopt: they differ
+less in *what math* they use than in *where in the variable space they apply it*
+and *how they implement the per-node engine*. This article maps the correspondences
+and the divergences.
+
+** Shared foundation
+
+- **McCormick relaxations as the bounding primitive.** Both derive convex/concave
+  relaxations from McCormick's factorable composition rules citep:mccormick1976 and
+  the multivariate generalization citep:tsoukalas2014. discopt implements the exact
+  Tsoukalas–Mitsos 2014 tightened composition rule in
+  =python/discopt/_jax/multivariate_mccormick.py=; MAiNGO implements it in MC++.
+- **Spatial branch-and-bound with a rigorous certificate.** Both target a proven
+  global optimum (dual bound ≤ incumbent), not just a good feasible point.
+- **OBBT + DBBT + FBBT range reduction** at nodes.
+- **Surrogate-embedded optimization as a first-class niche.** MAiNGO embeds ANNs
+  citep:schweidtmann2019ann, Gaussian processes, and trees; discopt has a parallel
+  [[file:../concepts/neural-network-embedding.org][neural-network embedding]] module (NNs and tree ensembles as algebraic
+  constraints). Both are in the OMLT/Melon lineage.
+
+** The central divergence: reduced-space propagation vs auxiliary-variable lifting
+
+This is the defining difference. MAiNGO's signature is that it **propagates
+McCormick relaxations through the model in the original (reduced) variable space,
+adding no auxiliary variables** citep:bongartz2017reducedspace,bongartz2026: the
+branch-and-bound tree branches only on the degrees of freedom, and intermediate
+quantities are hidden inside functions that return relaxations.
+
+discopt's **default** global path does the opposite. In
+=python/discopt/_jax/mccormick_lp.py= — whose own docstring reads "bilinears lifted
+to aux columns" — nonlinear terms are lifted into auxiliary LP columns, building a
+polyhedral relaxation in an *extended* variable space, exactly the
+[[file:../methods/auxiliary-variable-reformulation.org][auxiliary-variable method]] used by [[file:../concepts/baron-solver.org][BARON]], [[file:../concepts/couenne-solver.org][Couenne]], and [[file:../concepts/scip-solver.org][SCIP]]. So on its default
+path discopt sits in the AVM camp, *not* alongside MAiNGO — despite sharing the
+McCormick math.
+
+Notably, discopt already carries the machinery for MAiNGO's approach: besides the
+lifted-LP path it has multivariate-McCormick propagation
+(=multivariate_mccormick.py=) and a McCormick-NLP path (=mccormick_nlp.py=) that
+relaxes in a reduced space. The reduced-space route exists in discopt; it is simply
+not the default per-node bounding engine. Najman, Bongartz and Mitsos
+citep:najman2021linearization frame MC (reduced-space) and AVM (lifted) as
+endpoints of a spectrum that can be hybridized — a framing that maps directly onto
+discopt's having both toolchains.
+
+*Trade-off.* Reduced-space McCormick relaxations (MAiNGO) branch over far fewer
+variables but are weaker per node, because composed envelopes are not the convex
+hull of the whole expression. Lifted AVM relaxations (discopt default, BARON,
+Couenne) are tighter per node but branch over the full lifted variable set and
+build larger LPs.
+
+** Lower-bounding engine
+
+Both ultimately solve an LP for the node lower bound, but assemble and solve it
+differently:
+
+- **MAiNGO:** evaluate the McCormick relaxation, take subgradients, and *linearize*
+  each relaxation into affine cuts (supporting hyperplanes) to form an LP
+  citep:najman2021linearization; solve with CPLEX or CLP. The nonlinear convex
+  relaxation is never handed to an NLP solver by default.
+- **discopt:** build the lifted McCormick/RLT polyhedral relaxation and solve it
+  with an **in-house Rust dual simplex** (=crates/discopt-core/src/lp/simplex/=),
+  not an external LP library — a deliberate architectural bet distinct from MAiNGO's
+  reliance on CPLEX.
+
+** Implementation and platform
+
+| Dimension | MAiNGO | discopt |
+|-----------+--------+---------|
+| Core language | C++ | Rust core + Python orchestration |
+| Relaxation math | MC++ (McCormick + subgradients) | JAX DAG compiler (=_jax/=), autodiff |
+| Default variable space | reduced / original (no aux vars) | lifted / auxiliary-variable LP |
+| Node LP solver | CPLEX or CLP | in-house Rust dual simplex |
+| Interval arithmetic | FILIB++ | Rust FBBT / interval in =discopt-core= |
+| Local NLP (upper bound) | Ipopt, NLopt/SLSQP | JAX/cyipopt NLP relaxations |
+| Subgradients / AD | MC++ forward subgradient propagation | JAX =grad=/=jit=/=vmap= |
+| Parallelism / GPU | MPI B&B; GPU interval arithmetic (research) | JAX GPU acceleration for relaxations |
+| Modeling front-ends | ALE, C++, Python, GAMS | Python =discopt.modeling=, .nl parser |
+| Bound tightening | OBBT, DBBT, FBBT | OBBT, FBBT/presolve, cut inheritance |
+
+** Envelope coverage
+
+"Coverage" splits into three questions that answer differently: how many operators
+have envelopes, how tight those envelopes are, and how general the class of
+relaxable expressions is.
+
+- *Univariate function library — rough parity.* discopt supplies envelopes for a
+  broad intrinsic set (=exp=, =log/log2/log10=, =sqrt=, =x²=, integer/fractional
+  powers, =abs=, =sin=, =cos=, =tan=, =atan=, =asin=, =acos=, =sinh=, =cosh=,
+  =tanh=, =sigmoid=, =softplus=, =sign=, =asinh=, =acosh=, =atanh=, =erf=,
+  =log1p=). MC++ covers a comparably broad intrinsic set plus MAiNGO's per-function
+  custom relaxations. Neither has a decisive library-size edge on the factorable
+  core.
+- *Bilinear/multilinear tightness — discopt's lifted path is tighter per node.*
+  Both have the exact McCormick bilinear envelope (the convex hull). discopt's LP
+  path carries lifted product columns and produces the **exact multilinear hull via
+  RLT**, matching [[file:../concepts/baron-solver.org][BARON]]; trilinear/multilinear are exact there. MAiNGO's
+  reduced-space multilinear relaxations are built by *composition* and are **not**
+  the convex hull — looser per node by design, which is exactly what the MC↔AVM
+  hybridization citep:najman2021linearization buys back by selective lifting.
+  discopt's relaxation catalog records tightness as "at SOTA parity for the
+  factorable/polynomial core."
+- *Generality — MAiNGO wins on arbitrary code.* MC++ propagates McCormick
+  relaxations and subgradients through arbitrary factorable C++ code, so it relaxes
+  expressions outside a fixed operator table: implicit functions, general
+  algorithms/loops citep:mitsos2009, and embedded surrogates natively. discopt's
+  coverage is bounded by its DAG operator set and JAX relaxation rules — very broad,
+  but an envelope exists only for operators the compiler knows; its answer to
+  surrogates is the dedicated [[file:../concepts/neural-network-embedding.org][neural-network embedding]] module rather than "any
+  code."
+- *Count of specialized relaxation families — discopt is broader.* Beyond the core,
+  discopt carries rigorous α-BB (interval-Gershgorin Hessian), PSD/SOC cuts,
+  edge-concave aggregation, learned ICNN relaxations, piecewise McCormick, and
+  Taylor/Chebyshev/ellipsoidal models — more distinct strategies than MC++'s core.
+
+Net: the two cover the factorable core comparably and differ *in kind, not in
+amount* — discopt tighter and richer on structured polynomial relaxations, MAiNGO
+more general on arbitrary-code and implicit-function relaxations. This is a
+capability comparison from the catalog and the MAiNGO literature, not a measured
+head-to-head of envelope tightness; the clean experiment is a root-node dual-bound
+comparison on a shared instance set (the entry experiment in discopt issue #572).
+
+** Why the comparison matters for discopt performance
+
+The divergence is not academic — it bears directly on discopt's measured
+performance gap. discopt's investigation of its ~13× wall-time gap versus BARON on
+jointly-proved instances root-caused the dominant per-node cost to the in-house
+simplex refactorizing on nearly every pivot: the fixed-pivot-order Forrest–Tomlin
+LU update hits spurious zero pivots on the **wide dense columns that McCormick
+lifting places in the basis** (discopt issue #557; feral issue #112). Those dense
+columns are a direct consequence of the **auxiliary-variable lifting** discopt uses
+by default.
+
+MAiNGO's reduced-space propagation **structurally avoids introducing those columns
+at all** — there are no auxiliary variables to lift, so the pathological dense-column
+bases never form. This makes the MAiNGO architecture a genuine structural
+alternative to the LU-engine fix, and it is one discopt is unusually well positioned
+to explore because the reduced-space McCormick machinery already exists in the
+codebase (=multivariate_mccormick.py=, =mccormick_nlp.py=). The linearize-to-LP
+strategy citep:najman2021linearization and the MC/AVM hybridization it proposes are
+concrete templates: keep AVM where its tightness pays (dense-integer QP), fall back
+to reduced-space MC where lifting is what breaks the engine. The trade-off to weigh
+is MAiNGO's known weakness — reduced-space relaxations are looser per node, so a
+switch trades tighter bounds (fewer nodes) for a cheaper, better-conditioned
+per-node solve (more nodes, faster each).
+
+** Bottom line
+
+MAiNGO and discopt are close cousins with the same McCormick DNA and the same
+surrogate-embedding ambitions, split by one architectural axis: MAiNGO relaxes in
+the reduced space and leans on CPLEX; discopt relaxes in a lifted space by default
+and runs its own Rust simplex. Each choice sets up its own dominant cost — MAiNGO
+pays in looser per-node bounds, discopt pays in dense-column LP bases that stress
+its factorization. The reduced-space path MAiNGO pioneered is the most promising
+structural lever discopt has not yet pulled by default.

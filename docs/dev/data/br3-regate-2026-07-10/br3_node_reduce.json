@@ -1,0 +1,262 @@
+{
+  "arm": "node_reduce",
+  "env": {
+    "DISCOPT_NODE_REDUCE": "1",
+    "DISCOPT_LU_DENSITY_ROUTE": "1"
+  },
+  "tl": 40.0,
+  "results": {
+    "nvs21": {
+      "instance": "nvs21",
+      "status": "optimal",
+      "objective": -5.684782607923295,
+      "bound": -5.684782627987372,
+      "node_count": 35,
+      "wall": 1.365,
+      "sense": "min"
+    },
+    "st_e36": {
+      "instance": "st_e36",
+      "status": "feasible",
+      "objective": -246.0,
+      "bound": -304.49999999999994,
+      "node_count": 75,
+      "wall": 4.952,
+      "sense": "min"
+    },
+    "nvs09": {
+      "instance": "nvs09",
+      "status": "feasible",
+      "objective": -43.13433691803531,
+      "bound": -54.131208381602605,
+      "node_count": 159,
+      "wall": 40.307,
+      "sense": "min"
+    },
+    "tls2": {
+      "instance": "tls2",
+      "status": "time_limit",
+      "objective": null,
+      "bound": null,
+      "node_count": 1343,
+      "wall": 40.94,
+      "sense": "min"
+    },
+    "ringpack_10_1": {
+      "instance": "ringpack_10_1",
+      "status": "feasible",
+      "objective": -8.692986405129453,
+      "bound": -20.858217677612917,
+      "node_count": 95,
+      "wall": 40.525,
+      "sense": "min"
+    },
+    "kall_circles_c6b": {
+      "instance": "kall_circles_c6b",
+      "status": "feasible",
+      "objective": 2.575063259074003,
+      "bound": -1.000001381788337e-09,
+      "node_count": 31,
+      "wall": 50.347,
+      "sense": "min"
+    },
+    "st_e07": {
+      "instance": "st_e07",
+      "status": "optimal",
+      "objective": -400.0000040538907,
+      "bound": -400.0000040538907,
+      "node_count": 1,
+      "wall": 3.763,
+      "sense": "min"
+    },
+    "nvs06": {
+      "instance": "nvs06",
+      "status": "optimal",
+      "objective": 1.7703125002341187,
+      "bound": 1.7703124984296874,
+      "node_count": 5,
+      "wall": 0.706,
+      "sense": "min"
+    },
+    "nvs19": {
+      "instance": "nvs19",
+      "status": "feasible",
+      "objective": -1098.2,
+      "bound": -1103.0116448138926,
+      "node_count": 137,
+      "wall": 40.043,
+      "sense": "min"
+    },
+    "nvs24": {
+      "instance": "nvs24",
+      "status": "feasible",
+      "objective": -1031.7999999999997,
+      "bound": -1035.6600020723224,
+      "node_count": 7,
+      "wall": 51.608,
+      "sense": "min"
+    },
+    "nvs01": {
+      "instance": "nvs01",
+      "status": "optimal",
+      "objective": 12.46966882156821,
+      "bound": 12.469668808098536,
+      "node_count": 9,
+      "wall": 1.358,
+      "sense": "min"
+    },
+    "nvs02": {
+      "instance": "nvs02",
+      "status": "optimal",
+      "objective": 5.96418452307,
+      "bound": 5.96418452307,
+      "node_count": 337,
+      "wall": 0.158,
+      "sense": "min"
+    },
+    "nvs04": {
+      "instance": "nvs04",
+      "status": "optimal",
+      "objective": 0.720000000000006,
+      "bound": 0.7199999473599988,
+      "node_count": 5,
+      "wall": 0.457,
+      "sense": "min"
+    },
+    "nvs07": {
+      "instance": "nvs07",
+      "status": "optimal",
+      "objective": 4.0,
+      "bound": 4.0,
+      "node_count": 5,
+      "wall": 0.037,
+      "sense": "min"
+    },
+    "nvs13": {
+      "instance": "nvs13",
+      "status": "optimal",
+      "objective": -585.2,
+      "bound": -585.2000011714,
+      "node_count": 53,
+      "wall": 1.979,
+      "sense": "min"
+    },
+    "nvs15": {
+      "instance": "nvs15",
+      "status": "optimal",
+      "objective": 1.0,
+      "bound": 1.0,
+      "node_count": 7,
+      "wall": 0.052,
+      "sense": "min"
+    },
+    "nvs17": {
+      "instance": "nvs17",
+      "status": "optimal",
+      "objective": -1100.4000000000003,
+      "bound": -1100.4000022018004,
+      "node_count": 193,
+      "wall": 27.134,
+      "sense": "min"
+    },
+    "nvs23": {
+      "instance": "nvs23",
+      "status": "feasible",
+      "objective": -1124.8,
+      "bound": -1130.495879486534,
+      "node_count": 37,
+      "wall": 50.619,
+      "sense": "min"
+    },
+    "st_miqp2": {
+      "instance": "st_miqp2",
+      "status": "optimal",
+      "objective": 2.0,
+      "bound": 2.0,
+      "node_count": 9,
+      "wall": 0.226,
+      "sense": "min"
+    },
+    "st_miqp3": {
+      "instance": "st_miqp3",
+      "status": "optimal",
+      "objective": -6.0,
+      "bound": -6.0,
+      "node_count": 1,
+      "wall": 0.127,
+      "sense": "min"
+    },
+    "meanvarx": {
+      "instance": "meanvarx",
+      "status": "optimal",
+      "objective": 14.36923135631427,
+      "bound": 14.36923135631427,
+      "node_count": 17,
+      "wall": 0.237,
+      "sense": "min"
+    },
+    "alan": {
+      "instance": "alan",
+      "status": "optimal",
+      "objective": 2.924999998301341,
+      "bound": 2.924999998301341,
+      "node_count": 21,
+      "wall": 0.152,
+      "sense": "min"
+    },
+    "ex5_2_2_case1": {
+      "instance": "ex5_2_2_case1",
+      "status": "optimal",
+      "objective": -400.0000020422272,
+      "bound": -400.0000041260587,
+      "node_count": 3,
+      "wall": 0.471,
+      "sense": "min"
+    },
+    "ex5_3_2": {
+      "instance": "ex5_3_2",
+      "status": "optimal",
+      "objective": 1.864159520848939,
+      "bound": 1.8641594407102666,
+      "node_count": 19,
+      "wall": 4.289,
+      "sense": "min"
+    },
+    "ex7_2_1": {
+      "instance": "ex7_2_1",
+      "status": "feasible",
+      "objective": 1227.22583657496,
+      "bound": 1111.0742602155763,
+      "node_count": 2083,
+      "wall": 40.051,
+      "sense": "min"
+    },
+    "ex4_1_1": {
+      "instance": "ex4_1_1",
+      "status": "optimal",
+      "objective": -7.487312364902362,
+      "bound": -7.487671981669279,
+      "node_count": 39,
+      "wall": 0.425,
+      "sense": "min"
+    },
+    "alkyl": {
+      "instance": "alkyl",
+      "status": "optimal",
+      "objective": -1.7649998792765358,
+      "bound": -1.765151210163065,
+      "node_count": 39,
+      "wall": 3.679,
+      "sense": "min"
+    },
+    "st_e30": {
+      "instance": "st_e30",
+      "status": "optimal",
+      "objective": -1.5811387973200657,
+      "bound": -1.5811388336444845,
+      "node_count": 19,
+      "wall": 2.54,
+      "sense": "min"
+    }
+  }
+}
