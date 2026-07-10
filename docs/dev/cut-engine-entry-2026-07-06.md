@@ -186,3 +186,58 @@ against a lever that this experiment shows is not present.
   auxvar identity resolution, ablation node counts).
 - discopt: default `model.solve(max_nodes=1)` root bounds; `MccormickLPRelaxer` /
   `build_milp_relaxation` lifted-LP injection; `DISCOPT_CMIR_AGGREGATION` on/off.
+
+---
+
+## 7. Re-verification on current main (2026-07-10, task #81 / CUTS-1)
+
+CUTS-1 re-ran the mandatory entry experiment on current `main`
+(HEAD `059165fc`, `maturin develop --release`, pyscipopt 6.2.1 / SCIP 10.0) to
+re-check the GO/NO-GO before scheduling any separator build. **The verdict is
+unchanged: NO-GO.** Both legs of the kill criterion reproduce bit-for-bit.
+
+**Leg 1 — oracle injection (SCIP's own c-MIR cuts → discopt's root LP).** Re-ran
+`scripts/cut1_cmir_oracle_injection.py`; result identical to the 2026-07-06 run
+(raw `results/cut1_cmir_oracle_injection_20260710T161545.json`, byte-equal on
+`root_off`/`root_on`/`gap_closed`/cut counts):
+
+| instance | root_off | root_on (+SCIP c-MIR) | gap-closed | #cuts | #mapped |
+|---|---:|---:|---:|---:|---:|
+| nvs17 | −1811.10 | −1798.43 | **0.0178** | 5 | 2 |
+| nvs19 | −4556.70 | −4556.70 | **0.000** | 1 | 0 |
+| nvs24 | −12645.33 | −12645.33 | **0.000** | 1 | 0 |
+
+Kill criterion (< 15 % on ≥ 2/3) fires — ≤ 1.8 % on nvs17, 0 % on nvs19/nvs24.
+
+**Leg 2 — flag ON/OFF node counts on the default solve path (the task's ≥ 5×
+probe).** New harness `scratchpad/cuts1_nvs_onoff_nodes.py`, fresh subprocess per
+(instance, flag), equal 1500-node budget, 120 s cap:
+
+| instance | opt | bound OFF | nodes OFF | bound ON | nodes ON | identical? | incorrect? |
+|---|---:|---:|---:|---:|---:|:--:|:--:|
+| nvs17 | −1100.4 | −1100.41 | 173 | −1100.41 | 173 | **bit-identical** | no |
+| nvs19 | −1098.4 | −1098.40 | 287 | −1098.40 | 287 | **bit-identical** | no |
+| nvs24 | −1033.2 | −1035.66 | 11 | −1035.66 | 11 | **bit-identical** | no |
+
+`DISCOPT_CMIR_AGGREGATION=1` gives **0×** node reduction (bit-identical bound and
+node count) — far below the ≥ 5× GO threshold. The native separator self-disables
+because discopt's default root relaxation is already tight on this family; there is
+no violated aggregation c-MIR cut to emit. `incorrect_count = 0` (both flag states
+certify the oracle; the dual bound never crosses opt on any row).
+
+**Rust separators confirmed present and green** (task Phase-2 items 4 & 5 already
+exist): `cargo test -p discopt-core --lib -- aggregation mir` → 12 passed, incl.
+`mir::tests::complemented_cut_dominates_at_upper_bound` (upper-bound complementation
+— the "mir.rs:59 gap" is stale, done in #415), `aggregation_validity_random_systems`
+and `aggregation_finds_cut_single_row_mir_misses` (2-row Marchand–Wolsey aggregation,
+sound, #416).
+
+**Verdict — NO-GO stands; do not build.** The entry experiment falsifies the premise
+that aggregation/c-MIR is the lever for the nvs17/19/24 integer-product family: the
+capability already exists in Rust (`lp/aggregation.rs` + `lp/mir.rs`, default-off
+`DISCOPT_CMIR_AGGREGATION`), is sound, and is measurably inert here because discopt's
+spatial relaxation already sits at SCIP-with-cuts. Per CLAUDE.md §4 (measurement
+wins) and §2 (fix the class, not the instance — and here there is no class-wide gap
+to fix), no separator build is scheduled. nvs24's residual is root-fixpoint solve
+cost (Phase 1/2/4), not a missing cut. The parked separator stays default-off for a
+future, distinct class whose LP optimum *is* c-MIR-cuttable.

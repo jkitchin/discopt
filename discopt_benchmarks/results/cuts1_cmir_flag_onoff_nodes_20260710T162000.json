@@ -1,0 +1,56 @@
+[
+  {
+    "instance": "nvs17",
+    "opt": -1100.4,
+    "off": {
+      "status": "optimal",
+      "objective": -1100.4000000000003,
+      "bound": -1100.4100022118205,
+      "node_count": 173,
+      "wall": 29.331100249662995
+    },
+    "on": {
+      "status": "optimal",
+      "objective": -1100.4000000000003,
+      "bound": -1100.4100022118205,
+      "node_count": 173,
+      "wall": 32.953246999997646
+    }
+  },
+  {
+    "instance": "nvs19",
+    "opt": -1098.4,
+    "off": {
+      "status": "optimal",
+      "objective": -1098.4,
+      "bound": -1098.4000021978002,
+      "node_count": 287,
+      "wall": 100.35028341691941
+    },
+    "on": {
+      "status": "optimal",
+      "objective": -1098.4,
+      "bound": -1098.4000021978002,
+      "node_count": 287,
+      "wall": 98.5591939999722
+    }
+  },
+  {
+    "instance": "nvs24",
+    "opt": -1033.2,
+    "off": {
+      "status": "feasible",
+      "objective": -1031.7999999999997,
+      "bound": -1035.6600020723224,
+      "node_count": 11,
+      "wall": 126.39971795771271
+    },
+    "on": {
+      "status": "feasible",
+      "objective": -1031.7999999999997,
+      "bound": -1035.6600020723224,
+      "node_count": 11,
+      "wall": 128.82796362508088
+    }
+  }
+]
