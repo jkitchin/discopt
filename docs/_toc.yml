@@ -78,6 +78,7 @@ parts:
   - caption: Applications
     chapters:
       - file: notebooks/nn_embedding
+      - file: notebooks/neural_dae
       - file: notebooks/ac_opf
       - file: notebooks/decision_focused_learning
       - file: notebooks/estimation

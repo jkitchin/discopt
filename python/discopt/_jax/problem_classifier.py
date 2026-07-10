@@ -245,13 +245,22 @@ def _extract_linear_coefficients(expr, model: Model, n: int):
                 idx = node.index
                 if isinstance(idx, (int, np.integer)):
                     c[offset + int(idx)] += scale
-                elif isinstance(idx, tuple) and len(idx) == 1:
+                elif (
+                    isinstance(idx, tuple)
+                    and len(idx) == 1
+                    and isinstance(idx[0], (int, np.integer))
+                ):
                     c[offset + int(idx[0])] += scale
                 else:
                     # Multi-dimensional index: flatten
-                    flat_idx = np.ravel_multi_index(
-                        idx if isinstance(idx, tuple) else (idx,), var.shape
-                    )
+                    try:
+                        flat_idx = np.ravel_multi_index(
+                            idx if isinstance(idx, tuple) else (idx,), var.shape
+                        )
+                    except (TypeError, ValueError):
+                        # Sliced/partial subscript (vectorized term): this scalar
+                        # extractor cannot express it; classify as not-linear.
+                        raise _NotLinearError(f"non-scalar index {idx!r} on {var.name}") from None
                     c[offset + int(flat_idx)] += scale
                 return
             raise _NotLinearError(f"IndexExpression on non-variable: {type(node.base)}")
@@ -361,11 +370,14 @@ def _extract_quadratic_coefficients(expr, model: Model, n: int):
             idx = node.index
             if isinstance(idx, (int, np.integer)):
                 return offset + int(idx)
-            if isinstance(idx, tuple) and len(idx) == 1:
+            if isinstance(idx, tuple) and len(idx) == 1 and isinstance(idx[0], (int, np.integer)):
                 return offset + int(idx[0])
-            flat_idx = np.ravel_multi_index(
-                idx if isinstance(idx, tuple) else (idx,), node.base.shape
-            )
+            try:
+                flat_idx = np.ravel_multi_index(
+                    idx if isinstance(idx, tuple) else (idx,), node.base.shape
+                )
+            except (TypeError, ValueError):
+                return None  # sliced/partial subscript: not a scalar reference
             return offset + int(flat_idx)
         return None
 
@@ -540,11 +552,14 @@ def _try_extract_const_var(expr, model: Model):
             idx = expr.index
             if isinstance(idx, (int, np.integer)):
                 return (1.0, offset + int(idx))
-            if isinstance(idx, tuple) and len(idx) == 1:
+            if isinstance(idx, tuple) and len(idx) == 1 and isinstance(idx[0], (int, np.integer)):
                 return (1.0, offset + int(idx[0]))
-            flat_idx = np.ravel_multi_index(
-                idx if isinstance(idx, tuple) else (idx,), expr.base.shape
-            )
+            try:
+                flat_idx = np.ravel_multi_index(
+                    idx if isinstance(idx, tuple) else (idx,), expr.base.shape
+                )
+            except (TypeError, ValueError):
+                return None  # sliced/partial subscript: not a scalar reference
             return (1.0, offset + int(flat_idx))
         if isinstance(expr, Variable):
             return (1.0, _compute_var_offset(expr, model))

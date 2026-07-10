@@ -185,16 +185,21 @@ def solve_nlp_from_model(
     Same signature and semantics as
     :func:`discopt.solvers.nlp_ipopt.solve_nlp_from_model`.
 
+    ``kkt_schur_block`` and ``ordering`` are optional structure-aware
+    passthroughs to :func:`solve_nlp` (see its docstring for the full contract
+    and how to construct the KKT-space indices by hand). Both are
+    correctness-safe: pounce falls back to the full-space path transparently, so
+    the solution is unchanged and only factorization time differs. They require a
+    pounce build exposing ``Problem.set_kkt_schur_block`` / ``set_ordering``
+    (absent in pounce-solver 0.7.0, the current pin); until then they are silently
+    no-ops.
+
     Args:
         model: A Model with objective and constraints set.
         x0: Initial point (n,). If None, uses midpoint of bounds clipped to [-100, 100].
         options: POUNCE/Ipopt options dict.
-        kkt_schur_block: Optional Schur/block-triangular KKT partition forwarded
-            to :func:`solve_nlp` (see its docstring). For an equality-only model,
-            ``discopt.aggregation.schur.kkt_schur_indices(model)`` produces a
-            suitable block. Correctness-safe: pounce falls back transparently.
-        ordering: Optional custom factorization ordering forwarded to
-            :func:`solve_nlp`.
+        kkt_schur_block: Optional Schur/block-triangular KKT partition (see above).
+        ordering: Optional custom KKT-space factorization ordering (see above).
 
     Returns:
         NLPResult with solution.

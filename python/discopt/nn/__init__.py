@@ -1,10 +1,26 @@
-"""Neural network embedding for discopt optimization models.
+"""Neural network embedding and training for discopt optimization models.
 
-Embed trained neural networks as algebraic constraints in MINLP models,
-enabling optimization over ML surrogates with global optimality guarantees.
+This module spans two regimes of one hybrid-model story:
 
-Example
--------
+- **Frozen** (``NetworkDefinition`` + ``NNFormulation`` / :func:`add_predictor`):
+  embed a *trained* network as algebraic constraints and optimize *over* it —
+  its weights are constants — with global optimality guarantees.
+- **Trainable** (:mod:`discopt.nn.trainable`: ``TrainableNetwork``,
+  ``TrainableDense``, ``TrainableKernelExpansion``, :func:`train`): the surrogate's
+  weights are decision ``Variable`` objects, so it can be *trained* jointly with a
+  physics model (e.g. a neural rate law inside a collocation DAE). Trained weights
+  bridge back to the frozen path via ``TrainableNetwork.freeze()`` /
+  ``from_definition()`` — train, freeze, then optimize.
+
+The trainable regime is open: any object satisfying the :class:`Surrogate`
+protocol (a callable ``__call__(x) -> expression`` plus ``parameters`` /
+``n_parameters`` / ``l2_penalty`` / ``initial_values``) plugs into the hybrid
+pipeline, so custom surrogates — a Gaussian-process mean, a soft decision tree, a
+fixed-structure symbolic formula whose constants are trained in the NLP — work
+without new framework code. See :mod:`discopt.nn.surrogate`.
+
+Example (frozen)
+----------------
 >>> import discopt.modeling as dm
 >>> from discopt.nn import NNFormulation, NetworkDefinition, DenseLayer, Activation
 >>>
@@ -32,6 +48,13 @@ from discopt.nn.presolve import (
     tighten_network,
 )
 from discopt.nn.scaling import OffsetScaling
+from discopt.nn.surrogate import Surrogate
+from discopt.nn.trainable import (
+    TrainableDense,
+    TrainableKernelExpansion,
+    TrainableNetwork,
+    train,
+)
 from discopt.nn.tree import DecisionTree, TreeEnsembleDefinition
 
 __all__ = [
@@ -45,11 +68,16 @@ __all__ = [
     "NNPresolveResult",
     "NetworkDefinition",
     "OffsetScaling",
+    "Surrogate",
+    "TrainableDense",
+    "TrainableKernelExpansion",
+    "TrainableNetwork",
     "TreeEnsembleDefinition",
     "TreeFormulation",
     "detect_dead_relus",
     "propagate_bounds",
     "tighten_network",
+    "train",
 ]
 
 

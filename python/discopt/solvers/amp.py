@@ -221,7 +221,12 @@ def _flat_var_index(expr: Expression, model: Model) -> Optional[int]:
             return base_offset
         if not isinstance(idx, tuple):
             idx = (idx,)
-        return base_offset + int(np.ravel_multi_index(idx, base.shape))
+        # Sliced / partial subscripts (e.g. the DAE transcriber's ``var[:, 1:]``)
+        # address many scalars — no single flat index exists.
+        if len(idx) != len(base.shape) or not all(isinstance(i, (int, np.integer)) for i in idx):
+            return None
+        normalized = tuple(int(i) % s for i, s in zip(idx, base.shape))
+        return base_offset + int(np.ravel_multi_index(normalized, base.shape))
     return None
 
 
