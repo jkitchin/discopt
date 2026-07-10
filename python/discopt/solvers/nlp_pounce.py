@@ -185,23 +185,21 @@ def solve_nlp_from_model(
     Same signature and semantics as
     :func:`discopt.solvers.nlp_ipopt.solve_nlp_from_model`.
 
+    ``kkt_schur_block`` and ``ordering`` are optional structure-aware
+    passthroughs to :func:`solve_nlp` (see its docstring for the full contract
+    and how to construct the KKT-space indices by hand). Both are
+    correctness-safe: pounce falls back to the full-space path transparently, so
+    the solution is unchanged and only factorization time differs. They require a
+    pounce build exposing ``Problem.set_kkt_schur_block`` / ``set_ordering``
+    (absent in pounce-solver 0.7.0, the current pin); until then they are silently
+    no-ops.
+
     Args:
         model: A Model with objective and constraints set.
         x0: Initial point (n,). If None, uses midpoint of bounds clipped to [-100, 100].
         options: POUNCE/Ipopt options dict.
-        kkt_schur_block: Optional Schur/block-triangular KKT partition forwarded
-            to :func:`solve_nlp` (see its docstring). There is no repo helper that
-            builds this block; construct it by hand as KKT-space indices in block
-            order ``x, slack, eq-dual, ineq-dual`` — e.g. to pin a shared
-            parameter block (collocation training's surrogate weights), pass the
-            flat variable indices of those weights (see
-            :func:`discopt.warm_start.unflatten_solution` for the flat ordering).
-            Correctness-safe: pounce falls back transparently.
-            TODO: requires a pounce build exposing ``Problem.set_kkt_schur_block``
-            (absent in ``pounce-solver`` 0.7.0, the current pin); until then this
-            passthrough is silently a no-op.
-        ordering: Optional custom factorization ordering forwarded to
-            :func:`solve_nlp`.
+        kkt_schur_block: Optional Schur/block-triangular KKT partition (see above).
+        ordering: Optional custom KKT-space factorization ordering (see above).
 
     Returns:
         NLPResult with solution.

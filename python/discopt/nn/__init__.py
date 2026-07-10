@@ -13,7 +13,7 @@ This module spans two regimes of one hybrid-model story:
   ``from_definition()`` — train, freeze, then optimize.
 
 Example (frozen)
--------
+----------------
 >>> import discopt.modeling as dm
 >>> from discopt.nn import NNFormulation, NetworkDefinition, DenseLayer, Activation
 >>>
