@@ -43,7 +43,9 @@ const CUT_MAX_PARALLEL: f64 = 0.99;
 /// Terminal status of a MILP solve.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MilpStatus {
-    /// Proven optimal (gap closed, no uncertified node bounds).
+    /// Proven optimal: the final frontier gap (which folds in every valid
+    /// inherited bound, including the unresolved-fathom floor; #598) closed
+    /// within tolerance, with no search truncation.
     Optimal,
     /// A feasible incumbent found but optimality not proven (limit / numerical).
     Feasible,
@@ -224,17 +226,33 @@ pub struct MilpOptions {
 /// full solve.
 ///
 /// The C-2 invariant lives here: `Infeasible` is returned **only** on a rigorous
-/// empty-tree proof — `tree_finished && !search_incomplete`. `search_incomplete`
-/// is true whenever a node was deferred un-solved (deadline), which leaves it
-/// popped off the heap and `Evaluated`, invisible to the tree's `open_count()`.
-/// In that case `tree_finished` can read `true` over a subtree that was never
-/// searched, so the honest terminus is a limit status, never a false
+/// empty-tree proof — `tree_finished && !search_incomplete && !tree_unresolved`.
+/// `search_incomplete` is true whenever a node was deferred un-solved (deadline),
+/// which leaves it popped off the heap and `Evaluated`, invisible to the tree's
+/// `open_count()`. `tree_unresolved` is true whenever the tree fathomed a node
+/// without a proof (a failed relaxation with no branch direction left — the
+/// `bound_unresolved` pin of #467 or the `unresolved_floor` of #598): its
+/// subtree was never searched, so an empty tree is not an emptiness proof. In
+/// either case the honest terminus is a limit status, never a false
 /// "infeasible".
+///
+/// `Optimal` requires the final gap to actually be closed (`gap_closed` is
+/// computed from the tree's frontier bound, which already folds in the #598
+/// unresolved floor) with no search truncation (`gap_certified`). A finished
+/// tree does NOT imply a closed gap: an unresolved-floor fathom can drain the
+/// open set while the bound honestly stays below the incumbent, and that must
+/// exit `Feasible`, not `Optimal`. (Conversely, a rigorously drained tree with
+/// an incumbent always collapses the bound to the incumbent — gap 0 — so
+/// dropping the old `tree_finished ||` disjunct loses no true certificate.)
+// Eight orthogonal terminal-state bits; a parameter struct would only obscure
+// the truth table this function IS.
+#[allow(clippy::too_many_arguments)]
 fn decide_status(
     unbounded: bool,
     has_inc: bool,
     tree_finished: bool,
     search_incomplete: bool,
+    tree_unresolved: bool,
     gap_closed: bool,
     gap_certified: bool,
     node_limit_hit: bool,
@@ -242,12 +260,12 @@ fn decide_status(
     if unbounded {
         MilpStatus::Unbounded
     } else if !has_inc {
-        if tree_finished && !search_incomplete {
+        if tree_finished && !search_incomplete && !tree_unresolved {
             MilpStatus::Infeasible
         } else {
             MilpStatus::NodeLimit
         }
-    } else if (tree_finished || gap_closed) && gap_certified {
+    } else if gap_closed && gap_certified {
         MilpStatus::Optimal
     } else if node_limit_hit {
         MilpStatus::NodeLimit
@@ -340,6 +358,12 @@ pub fn solve_milp_hooked(
 
     let mut lp_iters = 0usize;
     let mut unbounded = false;
+    // False once the SEARCH was truncated (deadline deferral, node/time limit,
+    // debugger stop): the driver then reports a limit/feasible status, never
+    // `Optimal`. A node LP *failure* does NOT clear this (#598): the tree keeps
+    // failed nodes soundly accounted (parent-bound floor + branch, or the
+    // permanent `unresolved_floor`), so a closed gap stays a rigorous
+    // certificate — see the IterLimit/Numerical arm of `solve_node`.
     let mut gap_certified = true;
     // C-2: set whenever a node is dropped un-solved (deadline deferral). A
     // deferred node was already popped off the heap and left `Evaluated`, so it
@@ -712,9 +736,10 @@ pub fn solve_milp_hooked(
             if out.deferred {
                 // Deadline hit before this node's LP solve. Skip it entirely: do
                 // not import a result, so the node keeps its parent-inherited
-                // bound. The gap cannot be certified once any node went unsolved,
-                // and the loop-top deadline check breaks the search on the next
-                // iteration.
+                // bound. This is a search TRUNCATION (unlike a node-LP failure,
+                // which stays certifiable — see below), so the gap is not
+                // certified; the loop-top deadline check breaks the search on
+                // the next iteration.
                 //
                 // C-2: the node was popped off the heap by `export_batch` and is
                 // now stuck `Evaluated`, so `open_count()` no longer sees it. If
@@ -731,11 +756,19 @@ pub fn solve_milp_hooked(
                 hit_unbounded = true;
                 break;
             }
-            if out.uncertified {
-                // An untrusted (iter-limit/numerical) node bound: never claim
-                // optimality from this search.
-                gap_certified = false;
-            }
+            // An iter-limit/numerical node LP exit does NOT decertify the gap
+            // (#598). Such a node is handed back with a raw -inf bound and an
+            // untrusted midpoint solution; the tree keeps it SOUND end to end:
+            // `import_results` floors the -inf at the node's parent-inherited
+            // bound (valid over the child box), and `process_evaluated` only
+            // ever (a) prunes it against the incumbent using that valid bound,
+            // (b) branches it — its children re-solve fresh LPs, so the subtree
+            // stays searched and its bounds stay in the frontier minimum — or
+            // (c) when no branch direction remains, fathoms it into the
+            // tree's permanent `unresolved_floor`, which participates in
+            // `tm.gap()`. Every removal is therefore proof-backed or floored,
+            // so a closed gap is a rigorous certificate even after node-LP
+            // failures; withholding `Optimal` here was pure over-conservatism.
             if let Some(basis) = out.basis {
                 tm.set_node_basis(id, Some(basis));
             }
@@ -827,6 +860,10 @@ pub fn solve_milp_hooked(
         has_inc,
         tm.is_finished(),
         search_incomplete,
+        // A subtree was removed without proof (#467 -inf pin or #598 floor):
+        // an empty tree is then not an emptiness proof. The Optimal arm needs
+        // no such flag — the floor already participates in `tm.gap()`.
+        stats.bound_unresolved || stats.unresolved_floor.is_finite(),
         tm.gap() <= opts.gap_tol,
         gap_certified,
         stats.total_nodes >= opts.max_nodes,
@@ -942,8 +979,6 @@ struct NodeOutput {
     iters: usize,
     /// Relaxation was unbounded — the whole search terminates.
     unbounded: bool,
-    /// LP hit iter-limit / numerical breakdown — gap can't be certified.
-    uncertified: bool,
     /// The wall-clock deadline had already passed when this node was dequeued, so
     /// its (expensive) LP solve was skipped entirely. The reduce drops it without
     /// importing a result, leaving the node Evaluated with its parent-inherited
@@ -985,7 +1020,6 @@ fn solve_node(id: NodeId, lb_k: &[f64], ub_k: &[f64], ctx: &NodeCtx<'_>) -> Node
             tightened: None,
             iters: 0,
             unbounded: false,
-            uncertified: true,
             deferred: true,
         };
     }
@@ -1035,7 +1069,6 @@ fn solve_node(id: NodeId, lb_k: &[f64], ub_k: &[f64], ctx: &NodeCtx<'_>) -> Node
                 tightened: None,
                 iters: 0,
                 unbounded: false,
-                uncertified: false,
                 deferred: false,
             };
         }
@@ -1159,7 +1192,6 @@ fn solve_node(id: NodeId, lb_k: &[f64], ub_k: &[f64], ctx: &NodeCtx<'_>) -> Node
         tightened,
         iters: sol.iters,
         unbounded: false,
-        uncertified: false,
         deferred: false,
     };
 
@@ -1294,10 +1326,12 @@ fn solve_node(id: NodeId, lb_k: &[f64], ub_k: &[f64], ctx: &NodeCtx<'_>) -> Node
             // before pruning. The safe-bound identity is invariant under
             // equilibration (`scaling.rs`), so the scaled-space verdict equals the
             // original-space one. On verification failure the box is NOT provably
-            // empty: never fathom — hand the node back uncertified (non-pruning
-            // bound, midpoint) so it is branched/re-solved and the optimum can never
-            // be silently cut. A sound infeasible LP always exports a verifiable
-            // ray, so this costs one mat-vec and never changes a correct fathom.
+            // empty: never fathom — hand the node back with a raw -inf (non-pruning)
+            // bound and midpoint so it is branched/re-solved and the optimum can
+            // never be silently cut (same sound handling as the IterLimit /
+            // Numerical arm below). A sound infeasible LP always exports a
+            // verifiable ray, so this costs one mat-vec and never changes a
+            // correct fathom.
             if verify_farkas_infeasible(&sol.dual, ctx.sa, ctx.sb, &sl, &su, ctx.m_w, ctx.n_w) {
                 out.result = NodeResult {
                     node_id: id,
@@ -1306,7 +1340,6 @@ fn solve_node(id: NodeId, lb_k: &[f64], ub_k: &[f64], ctx: &NodeCtx<'_>) -> Node
                     is_feasible: false,
                 };
             } else {
-                out.uncertified = true;
                 out.result = NodeResult {
                     node_id: id,
                     lower_bound: f64::NEG_INFINITY,
@@ -1319,10 +1352,19 @@ fn solve_node(id: NodeId, lb_k: &[f64], ub_k: &[f64], ctx: &NodeCtx<'_>) -> Node
             out.unbounded = true;
         }
         LpStatus::IterLimit | LpStatus::Numerical => {
-            // Cannot trust a bound: never prune (could drop the optimum). Give a
-            // non-pruning bound and leave the node to be branched; the reduce
-            // marks the gap uncertified so we never claim optimality.
-            out.uncertified = true;
+            // Cannot trust this LP's bound: never prune off it (could drop the
+            // optimum). Hand the node back with a raw -inf (non-pruning) bound
+            // and the box midpoint. This stays fully SOUND without decertifying
+            // the whole search (#598): `import_results` floors the -inf at the
+            // node's parent-inherited bound — a valid bound over this child box,
+            // proved at the ancestor's LP solve — and `process_evaluated` then
+            // only prunes it against the incumbent on that valid bound, branches
+            // it (children re-solve fresh LPs, so the subtree stays searched), or
+            // — when nothing is left to branch — folds the valid bound into the
+            // tree's permanent `unresolved_floor`. The untrusted midpoint can
+            // never fathom the node as integer-feasible or become the incumbent
+            // (`PendingResult::bound_trusted` gates both), so a closed gap
+            // remains a rigorous optimality certificate.
             out.result = NodeResult {
                 node_id: id,
                 lower_bound: f64::NEG_INFINITY,
@@ -2279,7 +2321,7 @@ mod tests {
             /*unbounded=*/ false, /*has_inc=*/ false,
             /*tree_finished=*/ true, // open_count()==0 because the orphan is Evaluated
             /*search_incomplete=*/ true, // a node was deferred un-solved
-            /*gap_closed=*/ false,
+            /*tree_unresolved=*/ false, /*gap_closed=*/ false,
             /*gap_certified=*/ false, // gap is correctly decertified on defer
             /*node_limit_hit=*/ false,
         );
@@ -2298,6 +2340,7 @@ mod tests {
         let status = decide_status(
             /*unbounded=*/ false, /*has_inc=*/ false, /*tree_finished=*/ true,
             /*search_incomplete=*/ false, // no node was ever dropped un-solved
+            /*tree_unresolved=*/ false, // every removal was proof-backed
             /*gap_closed=*/ false, /*gap_certified=*/ true,
             /*node_limit_hit=*/ false,
         );
@@ -2336,10 +2379,60 @@ mod tests {
         // `has_inc==true`, but pin it so a future refactor can't regress it).
         let status = decide_status(
             /*unbounded=*/ false, /*has_inc=*/ true, /*tree_finished=*/ false,
-            /*search_incomplete=*/ true, /*gap_closed=*/ false,
-            /*gap_certified=*/ false, /*node_limit_hit=*/ false,
+            /*search_incomplete=*/ true, /*tree_unresolved=*/ false,
+            /*gap_closed=*/ false, /*gap_certified=*/ false,
+            /*node_limit_hit=*/ false,
         );
         assert_eq!(status, MilpStatus::Feasible);
+    }
+
+    // ---- #598 (B1-FIX): certification semantics of decide_status ----
+
+    #[test]
+    fn b1_gap_closed_certifies_optimal_without_tree_finished() {
+        // The certification criterion is the CLOSED FRONTIER GAP (which folds in
+        // every valid inherited bound and the unresolved floor), not tree
+        // exhaustion: a search that closed the gap mid-tree — even one whose
+        // node LPs failed along the way, since those nodes stay soundly
+        // accounted (parent-bound floor + branch / unresolved_floor) — is a
+        // rigorous optimum.
+        let status = decide_status(
+            /*unbounded=*/ false, /*has_inc=*/ true, /*tree_finished=*/ false,
+            /*search_incomplete=*/ false, /*tree_unresolved=*/ false,
+            /*gap_closed=*/ true, /*gap_certified=*/ true,
+            /*node_limit_hit=*/ false,
+        );
+        assert_eq!(status, MilpStatus::Optimal);
+    }
+
+    #[test]
+    fn b1_finished_tree_with_open_gap_is_feasible_not_optimal() {
+        // A drained tree whose gap did NOT close (an unresolved-floor fathom
+        // kept the honest bound below the incumbent) must exit Feasible. The
+        // pre-fix `(tree_finished || gap_closed)` disjunct would have stamped
+        // this Optimal — a false certificate.
+        let status = decide_status(
+            /*unbounded=*/ false, /*has_inc=*/ true, /*tree_finished=*/ true,
+            /*search_incomplete=*/ false, /*tree_unresolved=*/ true,
+            /*gap_closed=*/ false, /*gap_certified=*/ true,
+            /*node_limit_hit=*/ false,
+        );
+        assert_eq!(status, MilpStatus::Feasible);
+    }
+
+    #[test]
+    fn b1_unresolved_fathom_blocks_false_infeasible() {
+        // No incumbent and the tree drained, but a subtree was removed without
+        // proof (failed relaxation, nothing left to branch): the empty tree is
+        // NOT an emptiness proof — a limit status, never Infeasible.
+        let status = decide_status(
+            /*unbounded=*/ false, /*has_inc=*/ false, /*tree_finished=*/ true,
+            /*search_incomplete=*/ false, /*tree_unresolved=*/ true,
+            /*gap_closed=*/ false, /*gap_certified=*/ true,
+            /*node_limit_hit=*/ false,
+        );
+        assert_ne!(status, MilpStatus::Infeasible);
+        assert_eq!(status, MilpStatus::NodeLimit);
     }
 
     #[test]
