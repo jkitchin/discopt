@@ -1,0 +1,366 @@
+# Gap-Closing Execution Plan — discopt → BARON parity campaign
+
+**Status:** ACTIVE (wave 1 launched 2026-07-10)
+**Maintainer directive (2026-07-10, verbatim intent):** *"I don't want the cheapest
+path, I want the hard work required to close this gap. All of it."* and *"If BARON
+uses branch-and-reduce, we should have that implemented and on the hot solve path,
+not on an unmerged branch."*
+**Audience:** this document is written to be executed by Opus in stages, task by
+task, without additional context. Every task names its entry experiment, kill
+criterion, verification regime, and definition of done. Do not start a build step
+before its entry experiment's verdict is recorded in §7.
+
+This plan is the *execution layer* over the canonical roadmap
+(`docs/dev/certification-gap-plan.md`, whose §0 is a binding contract and §14 the
+master task list). Where this plan and that document disagree on *what to build*,
+that document wins; where they disagree on *sequencing/current state*, this plan
+is newer (2026-07-10) and wins.
+
+---
+
+## §0 Binding constraints (non-negotiable; copied intent from CLAUDE.md + cert-gap-plan §0)
+
+0.1 **Correctness before performance.** `incorrect_count ≤ 0` with zero slack on
+    every gate. The certificate invariant (dual bound never crossing the oracle;
+    `bound ≤ incumbent` for min) holds on every panel. Never weaken a validation,
+    fallback, guard, tolerance, or gate to make a task pass — if a goal can only
+    be met that way, the goal loses; stop and record it.
+0.2 **Fix the class, not the instance.** Named instances (nvs21, st_e36, gear4,
+    tls2, …) are gate probes only. No instance-keyed code, ever.
+0.3 **Entry experiment before implementation** (CLAUDE.md §4). State hypothesis,
+    evidence, experiment, kill criterion; run it; record the verdict in §7 before
+    building. A falsified hypothesis is banked progress — record it in §6 and in
+    `docs/dev/performance-plan.md` §6 house style.
+0.4 **Two verification regimes:**
+    - *Bound-neutral* (refactors, caching, retry-on-failure, marshaling):
+      `node_count` and certified `objective` **exactly unchanged** on the cert
+      panel (`discopt_benchmarks/scripts/check_cert_neutrality.py`). Any drift —
+      even apparent improvement — means the change is wrong.
+    - *Bound-changing* (relaxations, cuts, reductions, DAG changes): behind a
+      flag default-OFF; differential bound test (new ≥ old AND ≤ oracle on fixed
+      boxes); feasible-point sampling (no valid point cut); `incorrect_count = 0`
+      on the full panel; adversarial suite green; **3 consecutive green verdicts
+      before any default-ON flip** (T2.6 rule — independent held-out gate runs
+      with different instance draws/TLs count as verdicts).
+0.5 **Workflow.** Feature branch + PR per task, task ID in the title. Every PR:
+    `pytest -m smoke`, adversarial suite
+    (`pytest -m slow python/tests/test_adversarial_recent_fixes.py`),
+    `cargo test -p discopt-core` when Rust touched, regression test that fails
+    before/passes after. PR bodies via `--body-file` only. Perf claims carry the
+    measurement, not adjectives. Agents work in isolated worktrees; never touch
+    the maintainer's checkout.
+0.6 **Falsified hypotheses are binding** (§6). Do not relitigate them.
+0.7 **Concurrency hygiene.** When several agents run on one machine, gate
+    verdicts use deterministic metrics (node counts, objectives, status);
+    wall-clock comparisons run back-to-back and note possible contamination.
+
+---
+
+## §1 Measured baseline (2026-07-10, global50, TL=60s, defaults-only main)
+
+Full report: `global_opt_baron_vs_discopt_2026-07-10T11-32-04.md` (regenerable:
+`discopt_benchmarks/scripts/global_opt_baron_vs_discopt.py --time-limit 60`).
+
+- **Correctness: discopt VIOLATIONS 0** (ok 46, gap 0, n/a 4). BARON 0 (ok 49).
+- **Coverage: discopt certifies 43/50; BARON 49/50.**
+- **Speed decomposition** (43 co-certified):
+  - *Easy class* (BARON < 1 s; n=40): geomean **25.9×** — an artifact of
+    discopt's **fixed ~0.3–1 s per-solve floor** (median 1.02 s, p25 0.33 s):
+    imports + JAX init + compile, not the engine. → OVERHEAD-1.
+  - *Hard class* (BARON ≥ 1 s; n=3): geomean **4.2×** (clay0303hfsg 41.6×,
+    cvxnonsep_nsig30 4.4×, tspn05 **0.4× — discopt wins**). → engine + cuts +
+    branch-and-reduce fronts.
+- **The 7 non-certified:** nvs05, nvs09, tanksize (optimum found instantly,
+  dual bound stalls 60 s), casctanks, tls2 (BARON solves at ROOT, 0.0 s —
+  cut/presolve strength), st_miqp5 (binary `.nl`, parser refuses — coverage
+  gap, not solve gap), plus tls2/casctanks timeout.
+- **Why a week of perf work didn't move this number:** nearly all of it landed
+  flag-gated default-OFF (gates blocked by single-instance certificate losses),
+  or was capability (reduced-space, opt-in by measurement), or was mandatory
+  correctness (C-38..C-44). The blocking cert losses share one root: **LP-engine
+  failure behavior under the sparse route / shifted node streams** (§2 front A).
+
+**Campaign definition of done (measured, not vibes):**
+| metric | now | target |
+|---|---|---|
+| global50 incorrect_count | 0 | **0 (invariant)** |
+| global50 certified | 43/50 | **≥ 48/50** |
+| hard-class geomean vs BARON | 4.2× | **≤ 1.5×** |
+| easy-class median wall | 1.02 s | **≤ 0.35 s** |
+| root_gap_ratio_vs_baron gate | unevaluable (nulls) | **evaluable and ≤ 1.3** |
+| branch-and-reduce | unmerged branch | **default-ON on the hot path** |
+
+---
+
+## §2 Campaign structure — fronts and dependency DAG
+
+```
+A  Engine failure-robustness      A-2 dense retry ──────────┐
+                                                            ├─► BR-3 re-gates (node_reduce,
+BR Branch-and-reduce on hot path  BR-1 merge r2 ── BR-2 ────┤    square_cost_gate, obj_branch_priority)
+                                     │                      │
+                                     └─ root_fixpoint ON    │
+CUTS Cut strength                 CUTS-1 c-MIR ── CUTS-2 ───┼─► V-2 final global50 validation
+                                                            │
+STRUCT Structure preservation     STRUCT-1 CSE/V-seg ── STRUCT-2 Q-extraction
+                                                            │
+OVERHEAD Fixed floor              OVERHEAD-1 ───────────────┤
+                                                            │
+TAIL Certification stalls         TAIL-1 ───────────────────┘
+```
+
+Wave 1 (parallel, launched 2026-07-10): A-2, BR-1, CUTS-1, STRUCT-1, OVERHEAD-1.
+Wave 2 (auto-unblocked): BR-2 (after BR-1), BR-3 (after A-2 + BR-1), CUTS-2
+(after CUTS-1 + BR-1), STRUCT-2 (after STRUCT-1), TAIL-1 (anytime; cheap).
+Wave 3: V-2 final validation + default-ON graduations.
+
+Tracker mapping (session task IDs): A-2=#85, BR-1=#78, BR-2=#79, BR-3=#80,
+CUTS-1=#81, STRUCT-1=#82, OVERHEAD-1=#83, TAIL-1=#84.
+
+---
+
+## §3 Task specifications
+
+> Anchors below were verified 2026-07-02..07-10; line numbers drift — re-verify
+> with grep before editing, never edit blind.
+
+### A-2 — Failure-triggered dense LP retry (engine keystone) — IN FLIGHT
+
+**Context.** #557's density-gated sparse LU route (merged #573, flag
+`DISCOPT_LU_DENSITY_ROUTE`, default OFF) wins 1.7–7.8× on wide-McCormick bases
+but was blocked from graduating by an nvs21 certificate loss. Task #77's entry
+experiment **falsified the conditioning-gate hypothesis** (populations inverted:
+failing solves factorize *well-conditioned* bases, cond₁ p50=16; healthy solves
+run at 10¹⁰–10¹⁶; `growth` uniformly 1.0 — no signal) and **corrected the
+mechanism**: the sparse route triples the LP failure rate (39 vs 12 status=None
+exits); failed nodes retain loose-but-valid inherited bounds → final bound stuck
+→ `feasible` not `optimal`. Never a corrupted optimum; certification, not
+soundness, is what breaks.
+
+**Validated fix (entry experiment green, prototype data):** on sparse-route LP
+failure, retry that LP once via the dense route. Cures nvs21
+(stuck −1.59e7 → **optimal −5.685216**, 27/30 failures rescued), preserves
+st_e07 7.8× and nvs06; naive cold-retry erodes st_e36 1.69×→1.33× — production
+version must be leaner (warm retry only if the post-failure basis state is
+provably sound; if in any doubt, cold — sound-or-refuse).
+
+**Build.** Rust, LP-solve level (`crates/discopt-core/src/lp/simplex/`) so all
+callers inherit it; Python `_solve_lp_warm` None-branch acceptable fallback if
+Rust plumbing is awkward (state which and why). Behind the existing flag,
+default OFF. **Soundness invariant: the retry may only replace a FAILURE with a
+robust-path result — never accept/blend a suspect fast-path result.** Retry
+also fails → existing fallback chain unchanged.
+
+**Gates.** `cargo test -p discopt-core`; cert-neutrality flag OFF; #74
+graduation-gate re-run flag ON: nvs21 optimal→optimal, `incorrect_count=0`,
+st_e36-class wins quantified; regression test for the retained certificate.
+Record the #77 falsification in `performance-plan.md` §6 in the same PR.
+**Done when:** PR green + gate table in the PR body; flag default-ON eligible
+noted (flip in a separate PR after T2.6 verdicts).
+
+### BR-1 — Merge the branch-and-reduce loop; bank `root_fixpoint` default-ON — IN FLIGHT
+
+**Context.** The T2.3/T2.4 orchestration (root cutoff-FBBT↔cutoff-OBBT fixpoint
++ per-node `reduce_node()`, ~1,366 lines, flags `DISCOPT_ROOT_FIXPOINT` /
+`DISCOPT_NODE_REDUCE` default-OFF, tests
+`python/tests/test_r2_branch_and_reduce.py`) sits on branch
+`r2-branch-and-reduce-loop`, unmerged. The T2.0 correctness preflight is
+satisfied (C-16 and all listed P0/P1 = fixed in `correctness-issues.md`).
+`root_fixpoint` already has **green verdict 1 of 3** (#581 gate: 0 incorrect,
+0 cert loss, nodes 3731→3207 = −14%).
+
+**Build.** (1) Rebase onto current origin/main (conflicts expected in
+`solver.py` — reduced-space wiring landed near the node loop; flags stay OFF).
+(2) Full suite + cert-neutrality flags-OFF (byte-identical). (3) PR; merge on
+green. (4) Two more independent held-out gate runs (longer TL / different
+instance draw vs the #581 panel; methodology: shared OFF baseline, ON
+comparison, oracle cross-check vs `minlplib.solu`; criteria: incorrect=0, zero
+cert loss, drift ≤ abs 1e-4/rel 1e-3). (5) Both green → one-line default-ON PR
+for `DISCOPT_ROOT_FIXPOINT` citing all three verdicts. Any red → record the
+failing instance + mechanism; do not weaken.
+**Done when:** loop merged; root_fixpoint default-ON (or its blocker precisely
+recorded in §7).
+
+### BR-2 — Make the loop BARON-shaped (Phase-2 completion) — blocked by BR-1
+
+Five independent sub-builds, each its own flag + PR; all bound-changing regime
+except (c) which is differential:
+a) **T2.4a node-LP duals.** `MccormickLPResult` (`_jax/mccormick_lp.py` ~:188)
+   exposes status/lower_bound/x only — callers cannot run DBBT/RC-fixing per
+   node. Plumb duals/reduced costs through (backend already computes them).
+   Wiring-only PR, bound-neutral.
+b) **T2.5 OBBT escalation scoring.** OBBT candidates today = all columns in
+   index order (`_jax/obbt.py` ~:860, no scoring). Implement width×|reduced
+   cost| top-k selection (needs (a)); budget-aware escalation per cert-gap-plan
+   §14 T2.5 spec.
+c) **T2.2 warm/persistent OBBT probe LPs** — the measured per-node lever
+   (T1.6: the OBBT LP loop dominates per-node cost). Differential regime:
+   per-probe bound equality vs cold path to 1e-9 on a sampled A/B set;
+   `check_cert_neutrality.py` NEUTRAL.
+d) **In-tree probing.** `presolve/probing.rs` runs root-only (default pass list
+   `expr_bindings.rs` ~:672). Run bound-strengthening probing at nodes under a
+   depth/budget policy.
+e) **Root OBBT with incumbent cutoff.** Root sequence (`solver.py` ~:3835-3924)
+   runs OBBT without the cutoff; `fbbt_with_cutoff` exists
+   (`presolve/fbbt.rs:1098`). Feed the incumbent through.
+**Binding negatives:** OBBT-on-aux/`cascade_aux` is measured-dead; gear4 is
+reduction-resistant and is NOT a gate probe.
+**Done when:** each sub-flag has a green gate; the composite (all ON) passes
+the panel; default-ON flips proceed per T2.6.
+
+### BR-3 — Re-gate the nvs21/st_e36-blocked flags — blocked by A-2 + BR-1
+
+Re-run the #581 graduation gates for `node_reduce` (~10% faster, blocked by
+st_e36 cert loss), `square_cost_gate`, `obj_branch_priority` (nvs21-blocked)
+**with the dense retry ON**. Hypothesis: the cert losses are the same
+LP-failure mechanism A-2 cures. Each flag that goes green ×3 verdicts →
+default-ON PR. Any still-red flag: root-cause its residual loss (new entry
+experiment, not a tweak).
+**Done when:** every flag is either default-ON or has a §7-recorded blocker.
+
+### CUTS-1 — Aggregation c-MIR + MIR complementation — IN FLIGHT
+
+**Evidence.** SCIP ablations: aggregation/complemented-MIR = 97–169× node
+reduction on nvs17/19/24, growing with size (`scip-gap-closing-plan.md`).
+discopt's GMI + Python c-MIR are net-negative at equal node budget. Rust has
+GMI/MIR/cover + efficacy/orthogonality selection (`lp/cut_select.rs`) but no
+aggregation, and `mir.rs` ~:59 lacks upper-bound complementation.
+
+**Entry experiment (mandatory):** re-run/extend
+`discopt_benchmarks/scripts/cut1_cmir_oracle_injection.py` on current main —
+inject oracle aggregated c-MIR cuts on nvs17/19/24 at fixed node budget.
+**Kill criterion:** <5× node reduction on all three → separator build is dead;
+record and stop.
+**Build (on GO):** fix MIR complementation (+unit tests); implement SCIP-style
+bounded row aggregation (≤k rows, guided by the fractional point) + c-MIR on
+the aggregate, in Rust, wired into `cut_select.rs`; flag `DISCOPT_CMIR_AGG`
+default OFF. Every emitted cut validated by feasible-point sampling
+(`assert_cut_valid` or equivalent); differential bound test; panel + adversarial
+green. Measure nodes+wall on nvs17/19/24 + 10-instance integer-heavy draw.
+**Done when:** PR green with the ON/OFF table; graduation per T2.6.
+
+### CUTS-2 — Root cut fixpoint + pool aging on the default path — blocked by CUTS-1 + BR-1
+
+Integrate separation into the BR-1 root loop (reduce↔relax↔**separate**
+fixpoint — the full BARON root); move cut-pool aging from the opt-in path to
+default. Entry experiment: with CUTS-1 ON, does adding a separate-stage to the
+root fixpoint close root gap beyond either alone (measure root_gap on the
+TAIL-1 instrumentation)? Kill: no additional gap closed → keep loop and cuts
+independent.
+
+### STRUCT-1 — CSE/hash-consing + `.nl` V-segment preservation — IN FLIGHT
+
+**Context.** `expr.rs` ~:266 — `add` never dedups (no hash-consing); the `.nl`
+parser discards AMPL defined variables (V segments), so shared subexpressions
+duplicate into the DAG, JAX compile, lifted LP (duplicate aux columns), and
+every FBBT sweep. Multiplier on all other fronts.
+**Entry experiment:** duplication census on the 61-file in-repo corpus + 30
+snapshot instances: identical-subtree rate (hash over op/children/constants) +
+discarded V-segment counts. **Kill:** median dedup gain <10% of DAG nodes AND
+negligible V-segments → deprioritize.
+**Build (on GO):** (a) hash-consing at construction — try for exact
+bound-neutrality (byte-identical panel); if FP-order effects appear, demote to
+flag + bound-changing regime (report honestly which regime it landed in);
+(b) V-segment retention as shared DAG nodes — flag
+`DISCOPT_NL_DEFINED_VARS` default OFF, bound-changing regime. Measure DAG size,
+compile time, LP column count, FBBT sweep time, end-to-end wall on the
+most-duplicated instances.
+**Done when:** PRs green; payoff table recorded; graduation per T2.6.
+
+### STRUCT-2 — Quadratic/Q-matrix structure extraction — blocked by STRUCT-1
+
+Extract Q/bilinear structure in the Rust IR (today: degree checks only;
+convexity detection is Python-side). Drives relaxation choice + cut families
+from recognized structure (what SCIP/BARON do). Entry experiment: count global50
+instances whose objective/constraints are recognizable Q-forms and estimate
+bound improvement from PSD/eigen-based relaxation vs current path on 5 of them.
+Kill: <20% of panel recognizable or no bound delta → record, stop.
+
+### OVERHEAD-1 — Kill the fixed startup floor — IN FLIGHT
+
+**Evidence:** §1 easy-class decomposition. **Profile first** (importtime, JAX
+init, parse, first-compile vs warm, B&B; 5× repeats), then fix top contributors
+≥20% of floor only: lazy imports of heavy optional deps; persistent JAX
+compilation cache; deferred JAX init; a no-JAX fast path for provably
+linear/quadratic instances (strict structural certificate — sound-or-refuse on
+routing). Bound-neutral regime (byte-identical panel).
+**Binding negative:** the per-NODE Python tax is falsified as a lever (T1.6);
+this task is per-SOLVE fixed cost only.
+**Done when:** before/after easy-class table (median, p25, geomean vs recorded
+BARON times); target median ≤ 0.35 s.
+
+### TAIL-1 — Certification stalls, binary `.nl`, root-gap instrumentation — QUEUED
+
+a) **Stall decomposition** nvs05/nvs09/tanksize: optimum found instantly, dual
+   bound flat for 60 s. Per instance: which constraint/operator class keeps the
+   relaxation loose (nvs09 has log products; P1.3 tight monomial hulls were
+   deferred — revisit), does OBBT move the box, does the BR loop (flag ON) close
+   it? Fix the *operator class*. casctanks: revisit after A-2 + BR-2.
+   tls2: expected covered by CUTS-1 — verify, don't duplicate.
+b) **Binary `.nl` support** in the parser (st_miqp5 unreadable; +1 coverage).
+c) **Root-gap instrumentation:** populate `root_gap`/`root_time` in benchmark
+   results (currently null → the `root_gap_ratio_vs_baron ≤ 1.3` gate in
+   `benchmarks.toml` is unevaluable). Needed to measure BR/CUTS progress; do
+   this sub-task FIRST.
+
+### V-2 — Final validation — blocked by all fronts
+
+Re-run global50 (methodology of §1, same TLs) on defaults-only main after each
+default-ON graduation lands, and once at campaign end. Compare against §1
+baseline + the definition-of-done table. Also re-run the 3-way smoke and the
+adversarial suite. Post the table to the tracking issue; update this §7.
+
+---
+
+## §4 Sequencing rules
+
+1. A P0/P1 in `correctness-issues.md` touching a layer freezes perf work on
+   that layer until fixed (cert-gap-plan T2.0 rule). Backlog is clean as of
+   2026-07-10.
+2. Default-ON flips are one-line PRs, separate from feature PRs, citing 3 green
+   verdicts each.
+3. One task = one PR. Sub-builds in BR-2 are separate PRs.
+4. TAIL-1c (root-gap instrumentation) should land early — it is the measuring
+   stick for BR/CUTS.
+5. After every merged default-path change: `pytest -m smoke` + adversarial on
+   main before the next merge (keep main robustly green).
+
+## §5 Gate scripts and oracles
+
+- Cert panel + neutrality: `discopt_benchmarks/scripts/check_cert_neutrality.py`
+- Graduation gate: `discopt_benchmarks/scripts/graduation_gate.py` (else
+  replicate #581 methodology: shared OFF baseline, ON comparison, oracle
+  cross-check, tolerances abs 1e-4 / rel 1e-3, cert-loss = optimal→non-optimal)
+- Head-to-head: `discopt_benchmarks/scripts/global_opt_baron_vs_discopt.py`
+  (note: its `NL_DIR` is the 61-file in-repo corpus; st_miqp5 absent until
+  TAIL-1b — the 2026-07-10 run symlinked it from the snapshot)
+- Oracle: `~/Dropbox/projects/discopt-minlp-benchmark/minlplib.solu`
+- Adversarial: `pytest -m slow python/tests/test_adversarial_recent_fixes.py`
+
+## §6 Binding falsifications (do not relitigate)
+
+| # | falsified hypothesis | evidence | date |
+|---|---|---|---|
+| F1 | Warm-primal node LP warm-start is a lever | implemented sound, INERT | cert T1.4 |
+| F2 | Per-node Python tax is the lever | re-profile: OBBT LP loop dominates | cert T1.6 |
+| F3 | Reduced-space McCormick tightens root bounds (QP or pooling/bilinear) | P2.4 sweep: 0 wins, ties or looser | 2026-07-10 |
+| F4 | Cut-pool inheritance graduates broadly | ceiling confined to dense-QP; shipped structure-gated | THRU-4/C-44 |
+| F5 | OBBT-on-aux (`cascade_aux`) helps | neutral-to-regressive; nvs22 fails to certify | perf-plan §6 |
+| F6 | **LU condition estimate discriminates failing bases** | populations inverted (fail p50=16; healthy ≤1e16); growth no-signal; mechanism = 3× LP failure rate, not corruption | 2026-07-10, #77 |
+| F7 | gear4 is reducible by cutoff-OBBT/probing | stalls at 2.46M box; not a gate probe | plan §14 |
+
+## §7 Progress ledger (update per task; falsifications also to perf-plan §6)
+
+| task | state (2026-07-10) | verdict/notes |
+|---|---|---|
+| A-2 dense retry | **in flight** (agent) | entry green (prototype cures nvs21); building |
+| BR-1 merge + root_fixpoint | **in flight** (agent) | verdict 1/3 green (#581: −14% nodes, 0 loss) |
+| BR-2 a–e | queued (blocked BR-1) | — |
+| BR-3 re-gates | queued (blocked A-2+BR-1) | — |
+| CUTS-1 c-MIR | **in flight** (agent) | entry experiment running |
+| CUTS-2 root separate-stage | queued | — |
+| STRUCT-1 CSE/V-seg | **in flight** (agent) | entry experiment running |
+| STRUCT-2 Q-extraction | queued | — |
+| OVERHEAD-1 startup floor | **in flight** (agent) | profiling |
+| TAIL-1 a/b/c | queued | do (c) first |
+| V-2 final validation | blocked (all) | baseline §1 banked |
