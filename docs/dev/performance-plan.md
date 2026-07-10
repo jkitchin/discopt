@@ -472,6 +472,65 @@ Stage 0 (gate) ─► Stage 1 (kill recompilation — the dominant measured cost
 > Implemented in `lp/simplex/primal.rs` (`dense_retry`), counters
 > `LpDenseRetries`/`LpDenseRetryRescues`, still behind
 > `DISCOPT_LU_DENSITY_ROUTE` (default OFF).
+## Appendix B — per-solve fixed startup floor (OVERHEAD-1, task #83; 2026-07-10, `JAX_PLATFORMS=cpu`, x64)
+
+Decomposition of a fresh-process trivial solve (5× stable, ex1222/st_test1/gbd/alan/nvs01;
+timer convention of the global50 harness: starts **after** `import discopt`, so the
+measured window is `from_nl` + `solve()` and everything `solve()` lazily imports):
+
+| component | ms | in measured window? | class it hits |
+|---|---|---|---|
+| python+site+numpy+`import discopt` | ~110–130 | **no** (excluded by harness) | all |
+| `.nl` parse (`from_nl`) | 1–4 | yes | all |
+| `import jax` + devices + first tiny jit | ~240–300 | yes | nonlinear-relaxation class only — MILP/MIQP solves never import jax (measured) |
+| `import sympy` via `cut_recognizer` (solver.py structure-cut presolve) | ~100–120 | yes | **was: every solve**; now only models with a nonlinear `==` row (fixed this task) |
+| `import pounce` → `scipy.optimize` | ~125–150 | yes | every solve that reaches an NLP/QP relaxation or heuristic (incl. the MIQP node path `_pounce_qp_relaxation_nodes`) |
+| first-solve JAX trace/compile beyond imports | ~75 | yes | nonlinear class |
+| recurring engine work (trivial instance) | ~150 | yes | all (not floor) |
+
+Per-class in-window floor before the fix: MILP/MIQP ≈ 0.28–0.34 s (sympy 35–40%,
+pounce ~40%), nonlinear ≈ 0.55–0.65 s (jax ~40–45%, pounce ~25%, sympy ~18%).
+
+**Shipped (this task):** lazy SymPy in `cut_recognizer` behind its own sympy-free
+`has_square_difference_candidate` pre-check (the `symbolic/` package's lazy-SymPy
+invariant already mandated this). MILP/MIQP-class wall: st_test1 0.30→0.19 s,
+gbd 0.27→0.16 s, alan 0.34→0.23 s; ex1222 (no nonlinear `==` rows) 0.82→0.70 s.
+Verified **exactly bound-neutral** by a full differential over the 41-instance
+cert panel (pre-fix vs post-fix code, same machine, back-to-back): node_count,
+objective, and status bitwise-identical on all 41. (The committed
+`cert-baseline.jsonl` is stale vs current `main` on nvs02/nvs11/nvs12 —
+pre-existing at the branch base, confirmed by identical node counts with the
+fix reverted.)
+
+Easy-class panel (BARON-optimal-in-<1 s per the 2026-06-18 record → 30 local
+instances; TL=60, two back-to-back A/B interleaved runs each, loaded machine —
+load avg ~5–8 from sibling agents, identical conditions for A and B):
+
+| pass | median wall | p25 wall | geomean vs recorded BARON |
+|---|---|---|---|
+| before run 1 | 0.709 s | 0.273 s | 13.42× |
+| before run 2 | 0.770 s | 0.271 s | 13.75× |
+| after run 1 | 0.600 s | 0.163 s | 10.32× |
+| after run 2 | 0.570 s | 0.175 s | 10.42× |
+
+(−20% median, −37% p25, −23% geomean; every MIQP-class instance −32…−40%.)
+
+**Killed by the ≥20%-of-floor criterion (do not relitigate without new data):**
+- *Persistent JAX compilation cache* (`jax_compilation_cache_dir`): the cacheable
+  XLA-compile share of the floor is inside the ~75 ms trace+compile residue
+  (≈12% of the nonlinear-class floor; tracing, which dominates it, is not cached).
+- *Lazy-import surgery on `import discopt`* (scipy.sparse via `discopt.decomposition`
+  ≈63 ms): outside the harness window and ≈9% of the total user-facing floor.
+- *Deferring JAX init*: already the case — jax is imported only when a nonlinear
+  relaxation path runs; pure MILP/MIQP solves never touch it (measured).
+- *No-JAX fast path for linear/quadratic*: already exists (same measurement).
+
+**Out of repo (recorded, not actionable here):** (a) `import jax` ~240–300 ms is the
+single biggest remaining floor item on the nonlinear class — it is upstream cost
+(plugin discovery via `importlib.metadata` over the venv is a large slice);
+(b) `import pounce` spends ~90% of its ~140 ms importing `scipy.optimize` inside
+`pounce/_minimize.py` — a pounce-repo fix (defer scipy.optimize there) would cut
+~40% of the MILP/MIQP-class floor for every consumer.
 
 ## Appendix — raw measurement pass (2026-06-24, `JAX_PLATFORMS=cpu`, x64)
 
