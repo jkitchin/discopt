@@ -183,12 +183,23 @@ def test_kelley_bound_detects_infeasible_relaxation():
 
 
 def test_kelley_bound_unsupported_returns_flag_not_crash():
-    # division by a variable is still outside MCBox scope -> clean fallback, no crash
+    # a non-integer power is still outside MCBox scope -> clean fallback, no crash
+    # (variable division x/y is now supported via the sign-definite reciprocal, P1.2)
+    m = dm.Model()
+    x = m.continuous("x", 1, lb=0.5, ub=3.0)
+    m.minimize(x[0] ** 1.5)
+    r = reduced_mccormick_lp_bound(m, [0.5], [3.0])
+    assert r.status == "unsupported"  # falls back cleanly; no partial/invalid bound
+
+
+def test_kelley_bound_variable_division_sound():
+    # P1.2: min x/y over [1,3]x[1,3] -> reduced-space McCormick certifies the true min 1/3
     m = dm.Model()
     x = m.continuous("x", 2, lb=1.0, ub=3.0)
     m.minimize(x[0] / x[1])
     r = reduced_mccormick_lp_bound(m, [1.0, 1.0], [3.0, 3.0])
-    assert r.status == "unsupported"  # falls back cleanly; no partial/invalid bound
+    assert r.status == "optimal"
+    assert r.bound <= 1.0 / 3.0 + 1e-4  # valid lower bound on the true min 1/3
 
 
 def test_maximize_sense_valid_lower_bound():

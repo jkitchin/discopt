@@ -25,7 +25,9 @@ Design (validated by the P0.1 entry experiment):
   incoming subgradients. This avoids ``jax.grad`` over a possibly-nonconvex composite.
 
 Scope: affine arithmetic, general bilinear product (all sign regimes), integer powers
-via sign-agnostic repeated multiplication, constant division, the provably-convex-
+via sign-agnostic repeated multiplication, constant division and sign-definite
+variable division (x/y via the reciprocal; no-info bracket when y crosses 0), the
+provably-convex-
 envelope intrinsics exp/log/log2/log10/sqrt/softplus/abs (kernel-chain subgradient),
 and (P1.1) the S-shaped intrinsics tanh/atan/sigmoid/sinh — tight kernel-chain on a
 box that doesn't span the inflection, a sound constant-envelope fallback (jnp.where)
@@ -103,7 +105,7 @@ class MCBox:
 
     def __truediv__(self, o):
         if isinstance(o, MCBox):
-            raise UnsupportedMcboxOp("division by a non-constant (P1: sign-definite reciprocal)")
+            return _bilinear(self, _reciprocal(o))  # x/y = x * (1/y), sign-definite y
         c = jnp.asarray(o, dtype=jnp.float64)
         return _scalar_mul(self, 1.0 / c)
 
@@ -121,9 +123,8 @@ class MCBox:
             out = out * self
         return out
 
-    # -- univariate intrinsics: only envelopes whose cv is provably convex, so the
-    #    kernel-chain subgradient is valid. Regime/S-shaped ops (tanh/atan/sigmoid/
-    #    sinh) need per-regime subgradient selection -> P1.1 (refuse for now). --
+    # -- univariate intrinsics with provably-convex envelopes: the kernel-chain
+    #    subgradient is valid directly (see _univariate). --
     def exp(self):
         return _univariate(self, "exp", jnp.exp)
 
@@ -225,6 +226,53 @@ def _univariate(a, name, scalar_f, monotone_inc=True):
         e = (scalar_f(a.lo), scalar_f(a.hi))
         interval = (jnp.where((a.lo < 0) & (a.hi > 0), 0.0, jnp.minimum(*e)), jnp.maximum(*e))
     return _univariate_kernel(a, kernel, interval)
+
+
+def _recip_kernel(cvg, ccg, lb, ub):
+    """Composition kernel for 1/y over a SIGN-DEFINITE box (0 not in [lb, ub]).
+
+    y>0: 1/y is convex decreasing -> cv = 1/cc_g (value at the cc branch, the
+    argmin of the decreasing envelope), cc = secant at cv_g. y<0: 1/y is concave
+    decreasing -> cv = secant at cc_g, cc = 1/cv_g. The secant is the chord of 1/y
+    on [lb, ub]. Differentiable in (cv_g, cc_g), so the kernel-chain subgradient is
+    valid (cv is convex in both sign regimes)."""
+    # McCormick mid-rule clamp: the operand's relaxation values bracket the true y in
+    # [lb, ub], but a loose inner relaxation (e.g. y*y) can push cv_g below lb / cc_g
+    # above ub; clamp into the valid interval first (still valid bounds on y, and where
+    # 1/y is defined) so the reciprocal never extrapolates the secant / 1/(.) outside
+    # the domain. Preserves soundness; gradient saturates on the clamped region.
+    cvg = jnp.clip(cvg, lb, ub)
+    ccg = jnp.clip(ccg, lb, ub)
+    width = ub - lb
+    slope = (1.0 / ub - 1.0 / lb) / jnp.where(jnp.abs(width) > 1e-12, width, 1.0)
+
+    def sec(t):
+        return 1.0 / lb + slope * (t - lb)
+
+    pos = lb > 0.0
+    cv = jnp.where(pos, 1.0 / ccg, sec(ccg))
+    cc = jnp.where(pos, sec(cvg), 1.0 / cvg)
+    return cv, cc
+
+
+def _reciprocal(b):
+    """1/b as an MCBox. Sound-or-refuse: if the denominator interval crosses zero
+    the reciprocal is unbounded, so return a no-information bracket (-inf, +inf)
+    (any downstream consumer of a non-finite bracket refuses); jit-safe via
+    ``jnp.where``. Degenerate (lo==hi) reduces to the exact constant 1/lo."""
+    lo, hi = b.lo, b.hi
+    interval = (1.0 / hi, 1.0 / lo)  # 1/y is decreasing: min at hi, max at lo
+    r = _univariate_kernel(b, _recip_kernel, interval)
+    crosses = (lo <= 0.0) & (hi >= 0.0)
+    zero = jnp.zeros_like(b.sub_cv)
+    return MCBox(
+        jnp.where(crosses, -jnp.inf, r.cv),
+        jnp.where(crosses, jnp.inf, r.cc),
+        jnp.where(crosses, -jnp.inf, r.lo),
+        jnp.where(crosses, jnp.inf, r.hi),
+        jnp.where(crosses, zero, r.sub_cv),
+        jnp.where(crosses, zero, r.sub_cc),
+    )
 
 
 def _sigmoidal(a, name, scalar_f):

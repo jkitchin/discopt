@@ -78,7 +78,8 @@ def _to_mcbox(expr, leaves, model):
                 if c == 0.0:
                     raise UnsupportedRelaxation("division by zero constant")
                 return _to_mcbox(expr.left, leaves, model) * (1.0 / c)
-            raise UnsupportedRelaxation("division by a non-constant")
+            # variable division via the sign-definite reciprocal (P1.2)
+            return _to_mcbox(expr.left, leaves, model) / _to_mcbox(expr.right, leaves, model)
         if op == "**":
             if not isinstance(expr.right, (Constant, Parameter)):
                 raise UnsupportedRelaxation("non-constant exponent")
