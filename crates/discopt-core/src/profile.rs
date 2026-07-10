@@ -156,6 +156,14 @@ counters!(
     RefacFtGrowth,
     RefacFtTinyPivot,
     RefacFtSingular,
+    // #85 failure-triggered dense retry (density-aware LU route, #557): a node LP
+    // that failed (Numerical/IterLimit) on the sparse route was re-solved once,
+    // cold, with the route suppressed (Retries), and how many of those retries
+    // reached a terminal certificate — Optimal/Infeasible/Unbounded — instead of
+    // failing again (Rescues). The gap Retries − Rescues falls through to the
+    // existing fallback chain exactly as before the retry existed.
+    LpDenseRetries,
+    LpDenseRetryRescues,
 );
 
 #[inline(always)]

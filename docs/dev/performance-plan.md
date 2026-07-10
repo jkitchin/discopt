@@ -416,6 +416,63 @@ Stage 0 (gate) ─► Stage 1 (kill recompilation — the dominant measured cost
   above names the experiment that must confirm its premise *before* code, and the
   metric + correctness gate that must move *after* it.
 
+## 9. Engine layer — density-aware LU route (#557): the nvs21 certificate loss
+
+> **Entry experiment (2026-07-10, task #77) — the conditioning-gate hypothesis is
+> falsified; the mechanism is the LP failure rate, and the fix is
+> failure-triggered (task #85).**
+>
+> Context: the `DISCOPT_LU_DENSITY_ROUTE` route (routes m∈(16,256] sparse
+> McCormick bases to feral's sparse LU; #573) failed its graduation gate on one
+> instance: **nvs21** goes `optimal` → `feasible` with the route ON — same
+> correct incumbent (−5.68478…), but the final dual bound sticks at
+> **−15 901 749** (vs −5.68522 OFF). Hypothesis under test: the offending bases
+> are ill-conditioned, so a factorization-time condition estimate can divert
+> them to the dense LU.
+>
+> Instrumented every sparse factorization (feral `condition_estimate_1`
+> Hager–Higham κ₁ + `growth()`, incl. mid-solve refactorizations) and attributed
+> them to their LP solve's outcome:
+>
+> | population (route ON) | n(fact) | κ₁ p50 | p90 | p99 | max |
+> |---|---|---|---|---|---|
+> | nvs21, factorizations in FAILING LP solves (`Numerical`/`IterLimit`) | 59 | **1.6e1** | 1.5e9 | 7.6e18 | 7.6e18 |
+> | nvs21, factorizations in OPTIMAL LP solves | 391 | 2.1e5 | 3.1e7 | 2.4e9 | 1.0e10 |
+> | st_e36 (certifies optimal), OPTIMAL solves | 832 | 2.8e6 | **7.9e10** | 3.3e12 | **3.2e13** |
+> | nvs06 (certifies optimal), OPTIMAL solves | 72 | 5.0e8 | 7.5e12 | — | **1.2e16** |
+>
+> 1. **The populations are inverted, not merely overlapping**: most failing
+>    solves factorize *beautifully conditioned* bases (κ₁ p50 = 16), while
+>    healthy instances routinely succeed at κ₁ 10¹⁰–10¹⁶. No threshold — let
+>    alone one with the required ≥2-orders margin — separates them. A gate tight
+>    enough to catch nvs21's failures diverts essentially everything (killing
+>    the st_e36-class win); a gate loose enough to spare the healthy population
+>    catches 2 of 39 failures. `growth()` is 1.0 uniformly — zero signal.
+>    **Conditioning-gate: KILLED.** The failures develop during the *iteration*
+>    (a κ₁=8 basis factorizes cleanly, then the solve breaks), invisible at
+>    factorization time.
+> 2. **The −1.6e7 values are not corrupted LP optima.** They appear in the
+>    route-OFF run too — they are legitimately loose early lifted-McCormick
+>    relaxation bounds. The pathology is that the node carrying one never gets
+>    closed.
+> 3. **The real ON-vs-OFF delta is the LP failure rate**: `Numerical`/`IterLimit`
+>    exits 39 ON vs 12 OFF (3.25×). A node whose LP fails is abandoned with its
+>    inherited loose bound → final bound stuck → certificate lost. Sound (the
+>    bound stays valid) but uncertified.
+>
+> **Consequence (task #85):** the fix is **failure-triggered, not predictive** —
+> when a solve fails with the route ON, re-solve that LP once, cold, with the
+> route suppressed (the robust dense-preferring path). It uses the failure
+> signal the solve already reports, needs no tunable threshold, and is sound by
+> construction (only ever replaces a *failure*; never accepts or blends a
+> suspect fast-path result; cold because the failed run's warm state is exactly
+> what is in doubt). Validated: nvs21 ON → `optimal`, bound −5.68522, 30
+> retries / 27 rescues; st_e36 win preserved at 1.65× (24.8 s → 15.0 s);
+> panel: 10/10 `optimal→optimal`, node counts identical, incorrect_count 0.
+> Implemented in `lp/simplex/primal.rs` (`dense_retry`), counters
+> `LpDenseRetries`/`LpDenseRetryRescues`, still behind
+> `DISCOPT_LU_DENSITY_ROUTE` (default OFF).
+
 ## Appendix — raw measurement pass (2026-06-24, `JAX_PLATFORMS=cpu`, x64)
 
 Built-in split (first pass):
