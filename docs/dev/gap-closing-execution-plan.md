@@ -363,4 +363,5 @@ adversarial suite. Post the table to the tracking issue; update this §7.
 | STRUCT-2 Q-extraction | queued | — |
 | OVERHEAD-1 startup floor | **in flight** (agent) | profiling |
 | TAIL-1 a/b/c | queued | do (c) first |
+| RELAX-1 centropy tangent cuts | **entry green → GO, implemented** | ex6_2_5 root bound `None`→−27791 (finite, valid ≤ oracle −70.75); 6/8 `ex6_2_*` unlock feasibility-fallback → valid bound; neutral on 30 non-centropy instances; PR open |
 | V-2 final validation | blocked (all) | baseline §1 banked |
