@@ -24,13 +24,13 @@ Design (validated by the P0.1 entry experiment):
   cc_g)`` (a local, well-defined derivative of a known operator) contracted with the
   incoming subgradients. This avoids ``jax.grad`` over a possibly-nonconvex composite.
 
-Scope (P0.2): affine arithmetic, general bilinear product (all sign regimes), integer
-powers via sign-agnostic repeated multiplication, constant division, and the
-provably-convex-envelope intrinsics exp/log/log2/log10/sqrt/softplus/abs — for these
-the kernel-chain subgradient is valid. The S-shaped intrinsics (tanh/atan/sigmoid/sinh)
-have a non-convex cv over a sign-spanning box, so they raise
-:class:`UnsupportedMcboxOp` until P1.1 adds per-regime subgradient selection. Anything
-else also refuses (sound-or-refuse). P1 extends coverage (trig, fractional powers, the
+Scope: affine arithmetic, general bilinear product (all sign regimes), integer powers
+via sign-agnostic repeated multiplication, constant division, the provably-convex-
+envelope intrinsics exp/log/log2/log10/sqrt/softplus/abs (kernel-chain subgradient),
+and (P1.1) the S-shaped intrinsics tanh/atan/sigmoid/sinh — tight kernel-chain on a
+box that doesn't span the inflection, a sound constant-envelope fallback (jnp.where)
+on a spanning box (valid but loose; P1.1b can add the tight tangent envelope). Anything
+else refuses (sound-or-refuse). P1 continues coverage (trig, fractional powers, the
 tight monomial hull incl. odd-power-over-sign-spanning).
 """
 
@@ -145,20 +145,21 @@ class MCBox:
     def abs(self):
         return _univariate(self, "abs", jnp.abs, monotone_inc=False)
 
-    def _p1(self, name):
-        raise UnsupportedMcboxOp(f"{name}: S-shaped envelope needs per-regime subgradient (P1.1)")
-
+    # S-shaped (single inflection at 0, monotone increasing): P1.1 per-regime. On a
+    # box that does NOT span the inflection the cv is convex, so the kernel-chain
+    # subgradient is valid; on a spanning box the kernel's cv is non-convex (issue
+    # #51), so a sound convex fallback (constant f(lo)) is selected by jnp.where.
     def tanh(self):
-        return self._p1("tanh")
+        return _sigmoidal(self, "tanh", jnp.tanh)
 
     def atan(self):
-        return self._p1("atan")
+        return _sigmoidal(self, "atan", jnp.arctan)
 
     def sigmoid(self):
-        return self._p1("sigmoid")
+        return _sigmoidal(self, "sigmoid", jax.nn.sigmoid)
 
     def sinh(self):
-        return self._p1("sinh")
+        return _sigmoidal(self, "sinh", jnp.sinh)
 
 
 # ---------------------------------------------------------------- helpers
@@ -224,6 +225,35 @@ def _univariate(a, name, scalar_f, monotone_inc=True):
         e = (scalar_f(a.lo), scalar_f(a.hi))
         interval = (jnp.where((a.lo < 0) & (a.hi > 0), 0.0, jnp.minimum(*e)), jnp.maximum(*e))
     return _univariate_kernel(a, kernel, interval)
+
+
+def _sigmoidal(a, name, scalar_f):
+    """S-shaped intrinsic (single inflection at 0, monotone increasing).
+
+    NON-spanning box (``lo>=0`` or ``hi<=0``): the composition kernel's cv is convex
+    (verified) -> use it with the kernel-chain subgradient. SPANNING box (``lo<0<hi``):
+    the kernel's cv is a valid but non-convex underestimator (issue #51), so its
+    kernel-chain "subgradient" would not support it. Select instead a sound convex
+    fallback -- the constant ``f(lo)`` underestimator (``f`` increasing => ``f>=f(lo)``)
+    with the constant ``f(hi)`` overestimator -- via ``jnp.where`` so the whole op stays
+    jit/vmap-able. Loose on spanning boxes; P1.1b can add the tight tangent envelope.
+    The interval is ``[f(lo), f(hi)]`` (monotone increasing) in both regimes.
+    """
+    kernel = _COMPOSITION_RULES.get(name)
+    if kernel is None:
+        raise UnsupportedMcboxOp(f"no composition kernel for '{name}'")
+    f_lo, f_hi = scalar_f(a.lo), scalar_f(a.hi)
+    ns = _univariate_kernel(a, kernel, (f_lo, f_hi))  # valid (convex) when non-spanning
+    spanning = (a.lo < 0.0) & (a.hi > 0.0)
+    zero = jnp.zeros_like(a.sub_cv)
+    return MCBox(
+        jnp.where(spanning, f_lo, ns.cv),
+        jnp.where(spanning, f_hi, ns.cc),
+        f_lo,
+        f_hi,
+        jnp.where(spanning, zero, ns.sub_cv),
+        jnp.where(spanning, zero, ns.sub_cc),
+    )
 
 
 def _univariate_kernel(a, kernel, interval):

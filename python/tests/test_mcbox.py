@@ -95,7 +95,7 @@ def test_odd_power_spanning_zero_is_sound():
     _check(lambda x: x**3, lambda v: v[0] ** 3, [-2.0], [2.0])
 
 
-# ---- univariate intrinsics (only provably-convex envelopes; S-shaped -> P1.1) ----
+# ---- univariate intrinsics (convex-envelope ops + non-spanning S-shaped, P1.1) ----
 @pytest.mark.parametrize(
     "name,fn,f,lb,ub",
     [
@@ -106,18 +106,31 @@ def test_odd_power_spanning_zero_is_sound():
         ("sqrt", lambda x: mc.sqrt(x), lambda v: np.sqrt(v[0]), [0.1], [5.0]),
         ("softplus", lambda x: mc.softplus(x), lambda v: np.logaddexp(v[0], 0.0), [-2.0], [2.0]),
         ("abs", lambda x: mc.abs(x), lambda v: np.abs(v[0]), [-2.0], [3.0]),
+        # S-shaped over NON-spanning boxes (P1.1: kernel-chain valid there)
+        ("tanh+", lambda x: mc.tanh(x), lambda v: np.tanh(v[0]), [0.2], [1.8]),
+        ("tanh-", lambda x: mc.tanh(x), lambda v: np.tanh(v[0]), [-1.8], [-0.2]),
+        ("atan+", lambda x: mc.atan(x), lambda v: np.arctan(v[0]), [0.2], [2.0]),
+        ("sigmoid-", lambda x: mc.sigmoid(x), lambda v: 1 / (1 + np.exp(-v[0])), [-2.0], [-0.2]),
+        ("sinh+", lambda x: mc.sinh(x), lambda v: np.sinh(v[0]), [0.2], [1.5]),
     ],
 )
 def test_univariate(name, fn, f, lb, ub):
     _check(fn, f, lb, ub)
 
 
-@pytest.mark.parametrize("op", ["tanh", "atan", "sigmoid", "sinh"])
-def test_sshaped_refused_until_p1(op):
-    with pytest.raises(UnsupportedMcboxOp):
-        relax_through(
-            lambda x: getattr(mc, op)(x), jnp.array([0.5]), jnp.array([-1.0]), jnp.array([1.0])
-        )
+@pytest.mark.parametrize(
+    "op,f",
+    [
+        ("tanh", np.tanh),
+        ("atan", np.arctan),
+        ("sigmoid", lambda t: 1 / (1 + np.exp(-t))),
+        ("sinh", np.sinh),
+    ],
+)
+def test_sshaped_spanning_sound_but_loose(op, f):
+    # P1.1: over a sign-spanning box the S-shaped cv/cc fall back to the sound
+    # constant envelope (jnp.where) — valid bracket + valid (zero) subgradient.
+    _check(lambda x: getattr(mc, op)(x), lambda v: f(v[0]), [-1.5], [1.5])
 
 
 # ---- composite (the P0.1 function + a richer one) ----
