@@ -190,9 +190,16 @@ def solve_nlp_from_model(
         x0: Initial point (n,). If None, uses midpoint of bounds clipped to [-100, 100].
         options: POUNCE/Ipopt options dict.
         kkt_schur_block: Optional Schur/block-triangular KKT partition forwarded
-            to :func:`solve_nlp` (see its docstring). For an equality-only model,
-            ``discopt.aggregation.schur.kkt_schur_indices(model)`` produces a
-            suitable block. Correctness-safe: pounce falls back transparently.
+            to :func:`solve_nlp` (see its docstring). There is no repo helper that
+            builds this block; construct it by hand as KKT-space indices in block
+            order ``x, slack, eq-dual, ineq-dual`` — e.g. to pin a shared
+            parameter block (collocation training's surrogate weights), pass the
+            flat variable indices of those weights (see
+            :func:`discopt.warm_start.unflatten_solution` for the flat ordering).
+            Correctness-safe: pounce falls back transparently.
+            TODO: requires a pounce build exposing ``Problem.set_kkt_schur_block``
+            (absent in ``pounce-solver`` 0.7.0, the current pin); until then this
+            passthrough is silently a no-op.
         ordering: Optional custom factorization ordering forwarded to
             :func:`solve_nlp`.
 

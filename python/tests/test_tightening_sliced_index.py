@@ -11,9 +11,8 @@ subscript addresses many scalars — the contract answer is ``None``, not a
 crash.
 """
 
-import numpy as np
-
 import discopt.modeling as dm
+import numpy as np
 from discopt._jax.nonlinear_bound_tightening import (
     build_flat_variable_metadata,
     tighten_nonlinear_bounds,
@@ -56,6 +55,48 @@ def test_tighten_nonlinear_bounds_survives_sliced_constraints():
     # Tightening never widens the box.
     assert np.all(out_lb >= lb - 1e-12)
     assert np.all(out_ub <= ub + 1e-12)
+
+
+def test_export_var_index_refuses_sliced_subscript_loudly():
+    """`export/_extract._var_index` must raise ValueError (not TypeError) on a slice.
+
+    This is a *refusal* path, not an analysis path: a single variable reference
+    genuinely cannot be a sliced subscript, so the contract is a clear
+    ValueError naming the variable and subscript — never a bare
+    ``TypeError: only int indices permitted`` from np.ravel_multi_index.
+    """
+    import pytest
+    from discopt.export._extract import _var_index, flatten_variables
+
+    m, x, _ = _dae_like_model()
+    flat_vars = flatten_variables(m)
+    model_vars = list(m._variables)
+
+    # Scalar element still resolves.
+    assert _var_index(x[1, 1], flat_vars, model_vars) == 3
+    # Sliced subscript is refused with an actionable message.
+    with pytest.raises(ValueError, match=r"Non-scalar subscript.*'x'"):
+        _var_index(x[:, 1], flat_vars, model_vars)
+    with pytest.raises(ValueError, match=r"Non-scalar subscript.*'x'"):
+        _var_index(x[1:, 0], flat_vars, model_vars)
+
+
+def test_cut_result_to_dense_refuses_sliced_subscript_loudly():
+    """`callbacks.cut_result_to_dense` must raise ValueError on a sliced cut key."""
+    import pytest
+    from discopt.callbacks import CutResult, cut_result_to_dense
+
+    m, x, _ = _dae_like_model()
+
+    # A scalar element key works.
+    ok = CutResult(terms=[(x[1, 1], 1.0)], sense="<=", rhs=0.0)
+    coeffs, rhs, sense = cut_result_to_dense(ok, m)
+    assert coeffs[3] == 1.0
+
+    # A sliced key is refused with an actionable message.
+    bad = CutResult(terms=[(x[:, 1], 1.0)], sense="<=", rhs=0.0)
+    with pytest.raises(ValueError, match=r"Non-scalar subscript.*'x'"):
+        cut_result_to_dense(bad, m)
 
 
 def test_convexity_struct_hash_survives_sliced_subscripts():

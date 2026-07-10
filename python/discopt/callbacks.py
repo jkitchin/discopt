@@ -209,6 +209,17 @@ def cut_result_to_dense(
             if isinstance(idx, (int, np.integer)):
                 flat_idx = int(idx)
             elif isinstance(idx, tuple):
+                # A sliced/partial subscript addresses many scalars; a cut term
+                # key must name exactly one. Refuse loudly rather than let
+                # np.ravel_multi_index raise a bare TypeError.
+                if len(idx) != len(base.shape) or not all(
+                    isinstance(i, (int, np.integer)) for i in idx
+                ):
+                    raise ValueError(
+                        f"Non-scalar subscript {idx!r} on variable '{base.name}' "
+                        f"(shape {base.shape}) cannot be a cut term key; only a "
+                        "single scalar element is allowed."
+                    )
                 flat_idx = int(np.ravel_multi_index(idx, base.shape))
             else:
                 flat_idx = int(idx)

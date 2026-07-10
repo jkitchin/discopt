@@ -99,8 +99,8 @@ or certification guard (the gate loses — CLAUDE.md philosophy §1).
 
 | Task | Status | PR | Notes |
 |---|---|---|---|
-| HM0.1 | not started | | |
-| HM0.2 | not started | | |
+| HM0.1 | done | (this branch) | option (b): docstring corrected + pounce version TODO |
+| HM0.2 | done | (this branch) | ValueError refusals in `_extract.py`, `callbacks.py`; 2 tests |
 | HM1.1 | not started | | |
 | HM1.2 | not started | | |
 | HM1.3 | not started | | |
