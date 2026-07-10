@@ -283,7 +283,7 @@ impl PyTreeManager {
     /// Get aggregate tree statistics as a dict.
     ///
     /// Returns {total_nodes, open_nodes, incumbent_value, global_lower_bound,
-    /// gap, bound_unresolved}.
+    /// gap, bound_unresolved, unresolved_floor}.
     fn stats<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
         let s = self.inner.stats();
         let dict = PyDict::new(py);
@@ -293,6 +293,7 @@ impl PyTreeManager {
         dict.set_item("global_lower_bound", s.global_lower_bound)?;
         dict.set_item("gap", s.gap)?;
         dict.set_item("bound_unresolved", s.bound_unresolved)?;
+        dict.set_item("unresolved_floor", s.unresolved_floor)?;
         Ok(dict)
     }
 

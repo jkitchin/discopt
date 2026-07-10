@@ -70,6 +70,12 @@ pub struct TreeStats {
     /// tree bound is pinned at -inf and the search must NOT be certified optimal
     /// even though `open_nodes == 0` (issue #467).
     pub bound_unresolved: bool,
+    /// Minimum valid inherited bound over subtrees removed without proof (a
+    /// failed-relaxation node with no branch direction left; #598). `+inf` when
+    /// none. Already folded into `global_lower_bound`; exposed so drivers can
+    /// tell "tree drained rigorously" (may certify `Infeasible` on an empty
+    /// tree) from "tree drained with unproven removals" (may not).
+    pub unresolved_floor: f64,
 }
 
 /// Internal buffer for results waiting to be processed.
@@ -78,6 +84,17 @@ struct PendingResult {
     node_id: NodeId,
     solution: Vec<f64>,
     is_feasible: bool,
+    /// Whether the imported result carried its **own** finite relaxation bound
+    /// (recorded from the RAW `NodeResult::lower_bound`, before
+    /// [`TreeManager::import_results`] floors it at the parent-inherited bound).
+    /// `false` means the node's relaxation FAILED (LP iter-limit / numerical
+    /// breakdown, or the orchestrator could not bound it and imported `-inf`):
+    /// the node's `local_lower_bound` is then only the parent's floor — still a
+    /// valid bound for pruning and for the global frontier minimum, but the
+    /// attached `solution` is an untrusted placeholder (e.g. the bound-box
+    /// midpoint) that must never fathom the node as integer-feasible or become
+    /// the incumbent (#598).
+    bound_trusted: bool,
 }
 
 /// Record of a branching decision at a node, used for retroactive
@@ -142,6 +159,19 @@ pub struct TreeManager {
     /// `global_lower_bound = -inf` so `gap() = ∞` and the search reports
     /// feasible/unknown rather than a false optimal (issue #467).
     bound_unresolved: bool,
+    /// Running minimum over the *valid inherited bounds* of nodes that were
+    /// fathomed with an UNTRUSTED result and no branching direction left (#598):
+    /// the node's own relaxation failed (raw import `-inf`, floored at the
+    /// parent's bound by [`Self::import_results`]) and its box had no remaining
+    /// branchable dimension, so its subtree was removed without a proof. Unlike
+    /// the [`Self::bound_unresolved`] case, a finite valid bound for that subtree
+    /// *was* established (at an ancestor), so the honest global dual bound is the
+    /// frontier minimum floored at this value — not a wholesale `-inf` pin.
+    /// `+inf` when no such fathom occurred. Folded into
+    /// [`Self::update_global_lower_bound`]; the gap can then only close (and the
+    /// search only certify) if every such removed subtree is provably within
+    /// tolerance of the incumbent — which is exactly the rigorous criterion.
+    unresolved_floor: f64,
     /// R3a measurement counter (temporary, behavior-neutral): per-variable
     /// branch frequency. Incremented once per branching event (integer or
     /// spatial) with the branched flat column index. Length `n_vars`. Read by
@@ -189,6 +219,7 @@ impl TreeManager {
             spatial_integer_cols,
             branch_deprioritized,
             bound_unresolved: false,
+            unresolved_floor: f64::INFINITY,
             branch_var_counts: vec![0; n_vars],
         }
     }
@@ -314,6 +345,12 @@ impl TreeManager {
                 node_id: r.node_id,
                 solution: r.solution.clone(),
                 is_feasible: r.is_feasible,
+                // Recorded from the RAW imported bound, before the floor above:
+                // a non-finite raw bound means the node's own relaxation failed
+                // and the floored `local_lower_bound` is only the inherited
+                // parent bound (valid for pruning, but the solution is an
+                // untrusted placeholder). See `PendingResult::bound_trusted`.
+                bound_trusted: r.lower_bound.is_finite(),
             }));
     }
 
@@ -359,13 +396,20 @@ impl TreeManager {
             }
 
             // 2. Check if solution is integer-feasible. A node whose LP failed
-            // (iteration limit / numerical) carries a non-finite bound and an
-            // untrusted solution (the bound-box midpoint); it must never be
-            // fathomed or promoted to the incumbent off that point — only
-            // branched, so its subtree is still explored. (The driver already
-            // decertifies the gap for such nodes.) is_integer_feasible(midpoint)
-            // can spuriously be true when bounds are integral, so gate on a
-            // finite, trusted bound first.
+            // (iteration limit / numerical) carries an untrusted solution (the
+            // bound-box midpoint); it must never be fathomed or promoted to the
+            // incumbent off that point — only branched, so its subtree is still
+            // explored. is_integer_feasible(midpoint) can spuriously be true
+            // when bounds are integral, so the fathom/promote arm below gates on
+            // `bound_trusted` — the RAW imported bound was finite, i.e. the
+            // node's own relaxation actually produced this bound and solution.
+            // (`node_lb` alone cannot detect a failed node: import_results
+            // floors the raw `-inf` at the parent-inherited bound, so a failed
+            // node below a solved ancestor carries a finite — valid, but
+            // inherited — bound. Fathoming on it would remove an unexplored
+            // subtree, and promoting it would inject a FALSE incumbent whose
+            // "objective" is the parent's lower bound at an unverified point;
+            // #598.)
             let trusted = node_lb.is_finite();
             let int_feasible = trusted
                 && (result.is_feasible
@@ -380,7 +424,7 @@ impl TreeManager {
                     // incumbent from node_lb here.
                     // Fall through to branching (step 3) to spatially branch
                     // on continuous variables.
-                } else {
+                } else if result.bound_trusted {
                     // Convex mode: NLP local optimum = global optimum for the
                     // continuous subproblem.  Fathom the node.
                     self.pool.get_mut(result.node_id).status = NodeStatus::Fathomed;
@@ -392,6 +436,15 @@ impl TreeManager {
                         stats.incumbent_updates += 1;
                     }
                     continue;
+                } else {
+                    // Failed-relaxation node whose box MIDPOINT happens to be
+                    // integral (typically: branching already fixed every integer
+                    // variable). `node_lb` is the parent's inherited bound, not
+                    // this box's objective, and the midpoint is not verified
+                    // feasible — fathoming/promoting here is the false-incumbent
+                    // path described above. Fall through to branching; if no
+                    // branch direction remains, the no-decision arm below
+                    // fathoms it into `unresolved_floor` (#598).
                 }
             }
 
@@ -610,13 +663,25 @@ impl TreeManager {
                 // trusted (finite-bound) node here IS resolved and stays certifiable.
                 if !trusted {
                     self.bound_unresolved = true;
+                } else if !result.bound_trusted {
+                    // The node's own relaxation FAILED (raw import -inf) but a
+                    // valid finite bound for its box was inherited from an
+                    // ancestor (`import_results` floor), and no branch direction
+                    // remains — its subtree is removed UNPROVEN. Keep the global
+                    // dual bound honest by flooring it permanently at this
+                    // node's valid inherited bound (#598): the gap can then only
+                    // close if this removed subtree is provably within tolerance
+                    // of the incumbent, which keeps a gap-closed exit rigorous
+                    // without pinning the whole tree bound at -inf.
+                    self.unresolved_floor = self.unresolved_floor.min(node_lb);
                 }
                 self.pool.get_mut(result.node_id).status = NodeStatus::Fathomed;
                 stats.fathomed += 1;
-                // Only a trusted (finite-bound, solver-verified) node may become
-                // the incumbent. A failed LP's untrusted bound-box midpoint must
-                // not — it would corrupt the incumbent with a -inf objective.
-                if trusted && node_lb < self.incumbent_value {
+                // Only a node that produced its OWN trusted bound may become the
+                // incumbent. A failed relaxation's untrusted bound-box midpoint
+                // must not — its floored `node_lb` is the parent's lower bound,
+                // not an objective achieved at a verified-feasible point (#598).
+                if result.bound_trusted && trusted && node_lb < self.incumbent_value {
                     self.incumbent_value = node_lb;
                     self.incumbent_solution = Some(result.solution.clone());
                     stats.incumbent_updates += 1;
@@ -641,7 +706,11 @@ impl TreeManager {
             self.global_lower_bound = f64::NEG_INFINITY;
             return;
         }
-        let mut min_lb = f64::INFINITY;
+        // Seed the frontier minimum with the unresolved-fathom floor (#598): a
+        // subtree removed without proof still constrains the global dual bound
+        // at its valid inherited bound, permanently. `+inf` (no such fathom)
+        // leaves the computation unchanged.
+        let mut min_lb = self.unresolved_floor;
         for i in 0..self.pool.total_count() {
             let node = self.pool.get(NodeId(i));
             match node.status {
@@ -708,6 +777,7 @@ impl TreeManager {
             global_lower_bound: self.global_lower_bound,
             gap: self.gap(),
             bound_unresolved: self.bound_unresolved,
+            unresolved_floor: self.unresolved_floor,
         }
     }
 
@@ -1376,5 +1446,208 @@ mod tests {
 
         assert!(tm.is_finished());
         assert!(tm.incumbent().is_some());
+    }
+
+    // ---- #598 (B1-FIX): failed-relaxation results must stay soundly accounted ----
+    //
+    // A node whose relaxation FAILED is imported with a raw -inf bound and an
+    // untrusted placeholder solution (the box midpoint). `import_results` floors
+    // the bound at the parent-inherited value, which is finite below a solved
+    // ancestor — so `node_lb.is_finite()` can NOT detect the failure. Pre-fix,
+    // such a node whose midpoint happened to be integral (e.g. branching had
+    // fixed every integer variable) was fathomed as "integer feasible" in convex
+    // mode and PROMOTED TO THE INCUMBENT at the parent's lower bound — a false
+    // incumbent at an unverified point, and an unproven subtree removal.
+
+    fn two_int_vars() -> Vec<VarBranchInfo> {
+        vec![
+            VarBranchInfo {
+                offset: 0,
+                size: 1,
+                is_integer: true,
+            },
+            VarBranchInfo {
+                offset: 1,
+                size: 1,
+                is_integer: true,
+            },
+        ]
+    }
+
+    /// Box midpoint — exactly what `milp_driver::solve_node` hands back as the
+    /// untrusted placeholder solution on an IterLimit/Numerical LP exit.
+    fn mid(lb: &[f64], ub: &[f64]) -> Vec<f64> {
+        lb.iter().zip(ub).map(|(l, u)| 0.5 * (l + u)).collect()
+    }
+
+    /// Drive the tree so one child of the root solves fine and becomes the
+    /// incumbent (obj 5.0), the other branches; then FAIL one of its children
+    /// (raw -inf import, midpoint solution). Returns the tree post-processing.
+    fn tm_after_grandchild_lp_failure() -> TreeManager {
+        let mut tm = TreeManager::new(
+            2,
+            vec![0.0, 0.0],
+            vec![1.0, 1.0],
+            two_int_vars(),
+            SelectionStrategy::BestFirst,
+        );
+        tm.initialize();
+        // Root: lb=1.0, fractional at var 0 -> branch var 0.
+        let batch = tm.export_batch(1);
+        tm.import_results(&[NodeResult {
+            node_id: batch.node_ids[0],
+            lower_bound: 1.0,
+            solution: vec![0.5, 0.0],
+            is_feasible: false,
+        }]);
+        tm.process_evaluated();
+        // Children c1, c2 (x0 fixed to 0 / 1). c1: good LP, lb=2.0, fractional
+        // at var 1 -> branch var 1 (grandchildren have BOTH integers fixed).
+        // c2: good LP, integral solution, obj 5.0 -> fathom + incumbent.
+        let batch = tm.export_batch(2);
+        assert_eq!(batch.node_ids.len(), 2);
+        tm.import_results(&[
+            NodeResult {
+                node_id: batch.node_ids[0],
+                lower_bound: 2.0,
+                solution: {
+                    let mut s = mid(&batch.lb[0], &batch.ub[0]);
+                    s[1] = 0.5;
+                    s
+                },
+                is_feasible: false,
+            },
+            NodeResult {
+                node_id: batch.node_ids[1],
+                lower_bound: 5.0,
+                solution: batch.lb[1].clone(),
+                is_feasible: true,
+            },
+        ]);
+        tm.process_evaluated();
+        assert_eq!(tm.incumbent().map(|(_, v)| v), Some(5.0));
+        // Grandchildren g1, g2 (every integer variable fixed; inherited lb 2.0).
+        // g1's LP FAILS: raw -inf, box-midpoint solution — which is INTEGRAL
+        // here, the exact spurious-int-feasibility trap. g2 solves fine at 6.0
+        // (>= incumbent -> rigorously pruned).
+        let batch = tm.export_batch(2);
+        assert_eq!(batch.node_ids.len(), 2);
+        tm.import_results(&[
+            NodeResult {
+                node_id: batch.node_ids[0],
+                lower_bound: f64::NEG_INFINITY,
+                solution: mid(&batch.lb[0], &batch.ub[0]),
+                is_feasible: false,
+            },
+            NodeResult {
+                node_id: batch.node_ids[1],
+                lower_bound: 6.0,
+                solution: mid(&batch.lb[1], &batch.ub[1]),
+                is_feasible: false,
+            },
+        ]);
+        tm.process_evaluated();
+        tm
+    }
+
+    #[test]
+    fn failed_node_with_integral_midpoint_never_becomes_incumbent() {
+        // Pre-fix: the failed grandchild's floored bound (2.0, the PARENT's
+        // bound) is finite and its box midpoint is integral, so it was fathomed
+        // as "integer feasible" and PROMOTED to the incumbent (2.0 at an
+        // unverified point), silently replacing the true incumbent 5.0.
+        let tm = tm_after_grandchild_lp_failure();
+        assert_eq!(
+            tm.incumbent().map(|(_, v)| v),
+            Some(5.0),
+            "a failed relaxation's floored parent bound must never become the incumbent"
+        );
+        // The unproven removal is floored into the global bound permanently:
+        // the removed subtree (bounded below by the inherited 2.0) still
+        // constrains it, so the gap honestly stays open.
+        let stats = tm.stats();
+        assert_eq!(stats.unresolved_floor, 2.0);
+        assert_eq!(stats.global_lower_bound, 2.0);
+        assert!(
+            !stats.bound_unresolved,
+            "a finite floor must not -inf-pin the tree"
+        );
+        // The tree has drained (open_nodes == 0) but the gap honestly stays
+        // open: (5.0 - 2.0)/5.0. The driver's `decide_status` refuses both
+        // `Optimal` (gap not closed) and `Infeasible` (tree_unresolved) here.
+        assert!(
+            tm.gap() > 0.5,
+            "gap {} must stay open across an unproven subtree removal",
+            tm.gap()
+        );
+    }
+
+    #[test]
+    fn failed_node_with_fractional_midpoint_is_branched_not_fathomed() {
+        // A failed node whose box still has a branchable integer: it must be
+        // BRANCHED (children re-solve fresh relaxations; subtree stays in the
+        // frontier), never fathomed or promoted.
+        let mut tm = TreeManager::new(
+            2,
+            vec![0.0, 0.0],
+            vec![1.0, 1.0],
+            two_int_vars(),
+            SelectionStrategy::BestFirst,
+        );
+        tm.initialize();
+        let batch = tm.export_batch(1);
+        tm.import_results(&[NodeResult {
+            node_id: batch.node_ids[0],
+            lower_bound: 1.5,
+            solution: vec![0.5, 0.0],
+            is_feasible: false,
+        }]);
+        tm.process_evaluated();
+        // One child's LP fails; its box midpoint is fractional at var 1.
+        let batch = tm.export_batch(1);
+        assert_eq!(batch.node_ids.len(), 1);
+        tm.import_results(&[NodeResult {
+            node_id: batch.node_ids[0],
+            lower_bound: f64::NEG_INFINITY,
+            solution: mid(&batch.lb[0], &batch.ub[0]),
+            is_feasible: false,
+        }]);
+        let stats = tm.process_evaluated();
+        assert_eq!(
+            stats.branched, 1,
+            "failed node must be branched, not fathomed"
+        );
+        assert!(tm.incumbent().is_none());
+        let ts = tm.stats();
+        // No unproven removal happened: the floor stays disengaged and the
+        // frontier (failed node's children at the inherited 1.5 + the sibling)
+        // carries the bound.
+        assert_eq!(ts.unresolved_floor, f64::INFINITY);
+        assert!(ts.open_nodes >= 2, "failed node's children must be open");
+        assert_eq!(ts.global_lower_bound, 1.5);
+    }
+
+    #[test]
+    fn trusted_integral_result_still_fathoms_and_promotes() {
+        // Control: a node that produced its OWN finite bound with an integral
+        // solution still fathoms and becomes the incumbent (unchanged behavior).
+        let mut tm = TreeManager::new(
+            2,
+            vec![0.0, 0.0],
+            vec![1.0, 1.0],
+            simple_integer_vars(),
+            SelectionStrategy::BestFirst,
+        );
+        tm.initialize();
+        let batch = tm.export_batch(1);
+        tm.import_results(&[NodeResult {
+            node_id: batch.node_ids[0],
+            lower_bound: 2.0,
+            solution: vec![1.0, 0.0],
+            is_feasible: true,
+        }]);
+        tm.process_evaluated();
+        assert_eq!(tm.incumbent().map(|(_, v)| v), Some(2.0));
+        assert!(tm.is_finished());
     }
 }
