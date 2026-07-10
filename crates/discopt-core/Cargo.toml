@@ -19,13 +19,30 @@ description = "Core MINLP solver: B&B engine, expression IR, presolve"
 # invisible on few-row knapsacks but catastrophic on 800–1500-row covering LPs.
 # `test_setcover_lp_regression.py` guards against a re-downgrade.
 #
-# 0.12.0 is the first crates.io release carrying the discopt#364 LU-hardening APIs
+# 0.12.0 was the first crates.io release carrying the discopt#364 LU-hardening APIs
 # (feral #93/#94/#95) the numeric-focus simplex consumes: the element-growth
 # getters (growth()/u_max0()), the unsymmetric-LU condition estimate
 # (condition_estimate_1), and the richer update() instability signal
 # (RefactorCause + last_refactor() + growth-aware/dense-parity should_refactor).
-# It replaces the temporary git-rev pin used while those APIs were unreleased.
-feral = "0.12.0"
+#
+# Pinned to a git rev PAST the v0.13.0 release (2026-07-02) for feral #112 / PR #113
+# (merge commit 660224dc9299): the sparse Forrest–Tomlin bump update now accumulates
+# its working row with an always-on Neumaier (Kahan–Babuška) compensated sum, which
+# keeps the sparse LU factor accurate on the wide dense-McCormick node bases.
+#
+# WHY THIS IS BUNDLED WITH THE #557 density-aware LU route (linsolve.rs): the route
+# sends the m∈(16,256] sparse-but-wide McCormick bases to feral's SPARSE LU instead
+# of the dense O(m³) path. On plain feral 0.12 that eliminates the RefacFtTinyPivot
+# refactor storm (storm-elimination IS feral-independent, 42337→~3200 on st_e36) —
+# BUT the plain-0.12 sparse factor is not accurate enough for the dual bound to keep
+# closing: st_e36 with the route ON drops optimal→feasible, its bound stuck at the
+# root value −304.5 (vs −246.02 that certifies optimal). #112's compensated sparse
+# accumulation restores the bound-closing, so route ON stays `optimal`. Bound-closing
+# is NOT feral-independent, hence the route change and this bump ship together.
+# No discopt API change (LuParams gains `update_pivot_search: bool`, default false,
+# covered by `..LuParams::default()`). Unreleased on crates.io as of the pin date,
+# hence the git rev; bump to the next tagged release when it cuts.
+feral = { git = "https://github.com/jkitchin/feral", rev = "660224dc929953072582603a15c7cb4c7bf0592c" }
 # rayon: data-parallel iterators. Used (behind the `parallel` feature) to solve
 # the independent per-node LP relaxations of a B&B batch concurrently. Pinned to
 # 1.10 to keep the crate's MSRV (1.75); 1.12+ requires rustc 1.80.
