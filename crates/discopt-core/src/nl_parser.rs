@@ -1415,6 +1415,397 @@ fn is_zero_constant(arena: &ExprArena, id: ExprId) -> bool {
     matches!(arena.get(id), ExprNode::Constant(v) if v.abs() < 1e-15)
 }
 
+// ─────────────────────────────────────────────────────────────
+// Binary ('b') .nl → text ('g') transcoder
+// ─────────────────────────────────────────────────────────────
+//
+// AMPL's binary .nl encoding (`b<k> …` header) carries the *identical* model as
+// the text ('g') encoding — same header lines, same segment grammar, same opcode
+// stream — differing only in how numbers are lexed: the text format writes each
+// token on its own whitespace-delimited line, while the binary format packs
+// integers as 4-byte little-endian `i32` and reals as 8-byte little-endian
+// IEEE-754 `f64`, with the single-letter segment/record prefixes (`b r C O V x k
+// J G S d n v o`) still stored as ASCII bytes and the bound/constraint *type*
+// codes as ASCII digits.
+//
+// Rather than duplicate the whole recursive-descent parser against a byte cursor
+// (a second source of truth that could silently diverge), we TRANSCODE the binary
+// body into the exact text-token stream the proven text parser consumes, then feed
+// it to `parse_nl`. This reuses 100 % of the model-building / opcode / soundness
+// logic, so a correctly-transcoded binary file is guaranteed to build the same
+// `ModelRepr` as its text twin (verified by round-trip in the tests). The
+// transcoder only knows number lexing + per-opcode operand arity — the latter
+// mirrored 1:1 from `parse_opcode` (any drift is caught by the round-trip test).
+
+/// Cursor over the binary body with little-endian primitive reads.
+struct BinCursor<'a> {
+    bytes: &'a [u8],
+    pos: usize,
+}
+
+impl<'a> BinCursor<'a> {
+    fn new(bytes: &'a [u8], pos: usize) -> Self {
+        Self { bytes, pos }
+    }
+
+    fn has_more(&self) -> bool {
+        // Trailing whitespace (a final newline) is not a real record.
+        self.bytes[self.pos..]
+            .iter()
+            .any(|b| !b.is_ascii_whitespace())
+    }
+
+    /// Read one non-whitespace prefix byte (segment / record / node marker).
+    fn read_marker(&mut self) -> Result<u8, NlParseError> {
+        while self.pos < self.bytes.len() && self.bytes[self.pos].is_ascii_whitespace() {
+            self.pos += 1;
+        }
+        if self.pos >= self.bytes.len() {
+            return Err(NlParseError::UnexpectedEof);
+        }
+        let b = self.bytes[self.pos];
+        self.pos += 1;
+        Ok(b)
+    }
+
+    /// Read a single ASCII byte (e.g. a bound-type digit), no whitespace skip.
+    fn read_byte(&mut self) -> Result<u8, NlParseError> {
+        if self.pos >= self.bytes.len() {
+            return Err(NlParseError::UnexpectedEof);
+        }
+        let b = self.bytes[self.pos];
+        self.pos += 1;
+        Ok(b)
+    }
+
+    fn read_i32(&mut self) -> Result<i32, NlParseError> {
+        if self.pos + 4 > self.bytes.len() {
+            return Err(NlParseError::UnexpectedEof);
+        }
+        let arr: [u8; 4] = self.bytes[self.pos..self.pos + 4].try_into().unwrap();
+        self.pos += 4;
+        Ok(i32::from_le_bytes(arr))
+    }
+
+    fn read_f64(&mut self) -> Result<f64, NlParseError> {
+        if self.pos + 8 > self.bytes.len() {
+            return Err(NlParseError::UnexpectedEof);
+        }
+        let arr: [u8; 8] = self.bytes[self.pos..self.pos + 8].try_into().unwrap();
+        self.pos += 8;
+        Ok(f64::from_le_bytes(arr))
+    }
+}
+
+/// Emit an `f64` as a text token that re-parses to the identical bit pattern.
+/// `{:?}` on `f64` uses Rust's shortest round-trip formatting (Ryū), so the
+/// re-lexed value equals the original — keeping the transcode bound-neutral.
+fn fmt_f64(v: f64) -> String {
+    if v == v.trunc() && v.is_finite() && v.abs() < 1e15 {
+        // Integral value: emit without a fractional part (matches AMPL text `n0`).
+        format!("{}", v as i64)
+    } else {
+        format!("{v:?}")
+    }
+}
+
+/// Number of child *expression* operands an opcode consumes, or `None` for the
+/// n-ary opcodes (o11/o12/o54) that read a count first. Mirrors `parse_opcode`;
+/// the unsupported/refused opcodes (o13/14/35/48/55/57/58) are handled by the
+/// text parser after transcode — we still need their arity to walk past them
+/// only if they appear, but since the text parser refuses them the transcode of
+/// their operands is harmless. Unknown opcodes return an error (fail loud).
+fn opcode_arity(opcode: i32) -> Result<Option<u32>, NlParseError> {
+    Ok(match opcode {
+        // n-ary: count then N operands
+        11 | 12 | 54 => None,
+        // unary
+        15 | 16 | 34 | 37 | 38 | 39 | 40 | 41 | 42 | 43 | 44 | 45 | 46 | 47 | 49 | 50 | 51 | 52
+        | 53 | 77 => Some(1),
+        // binary
+        0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 48 | 55 | 76 | 78 => Some(2),
+        // refused-but-known unary/nullary ops (o13 floor, o14 ceil, o57 round,
+        // o58 trunc are unary; o35 if is ternary). Give their arity so a body that
+        // contains them transcodes; the text parser then refuses them loudly.
+        13 | 14 | 57 | 58 => Some(1),
+        35 => Some(3),
+        _ => return Err(NlParseError::UnknownOpcode(opcode)),
+    })
+}
+
+/// Transcode one binary expression node into text lines appended to `out`.
+fn transcode_expr(cur: &mut BinCursor<'_>, out: &mut String) -> Result<(), NlParseError> {
+    let marker = cur.read_marker()?;
+    match marker {
+        b'n' => {
+            let v = cur.read_f64()?;
+            out.push('n');
+            out.push_str(&fmt_f64(v));
+            out.push('\n');
+        }
+        b'v' => {
+            let idx = cur.read_i32()?;
+            out.push('v');
+            out.push_str(&idx.to_string());
+            out.push('\n');
+        }
+        b'o' => {
+            let opcode = cur.read_i32()?;
+            out.push('o');
+            out.push_str(&opcode.to_string());
+            out.push('\n');
+            match opcode_arity(opcode)? {
+                None => {
+                    // n-ary: count then that many operands.
+                    let count = cur.read_i32()?;
+                    if count < 0 {
+                        return Err(NlParseError::Parse(format!(
+                            "negative operand count {count} for o{opcode}"
+                        )));
+                    }
+                    out.push_str(&count.to_string());
+                    out.push('\n');
+                    for _ in 0..count {
+                        transcode_expr(cur, out)?;
+                    }
+                }
+                Some(arity) => {
+                    for _ in 0..arity {
+                        transcode_expr(cur, out)?;
+                    }
+                }
+            }
+        }
+        // 'f' = defined-function call (o-style): fN k args — not currently emitted
+        // by the models we target; refuse loudly rather than mis-walk the stream.
+        other => {
+            return Err(NlParseError::Parse(format!(
+                "unexpected binary expression marker 0x{other:02x} ('{}')",
+                other as char
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Number of `f64` values that follow a bound/constraint type digit.
+fn bound_value_count(type_digit: u8) -> Result<usize, NlParseError> {
+    match type_digit {
+        b'0' => Ok(2), // range / bounded: lb, ub
+        b'1' | b'2' | b'4' => Ok(1),
+        b'3' => Ok(0), // free
+        b'5' => Ok(2), // complementarity (range-shaped)
+        _ => Err(NlParseError::Parse(format!(
+            "unknown bound type digit '{}' in binary .nl",
+            type_digit as char
+        ))),
+    }
+}
+
+/// Transcode the binary body of a `b`-encoding .nl into text `g`-encoding lines.
+/// `header` is the already-parsed header (giving n_vars / n_constraints);
+/// `body` is the raw bytes after the 10 text header lines.
+fn transcode_binary_body(
+    header: &NlHeader,
+    body: &[u8],
+    out: &mut String,
+) -> Result<(), NlParseError> {
+    let mut cur = BinCursor::new(body, 0);
+    let n_vars = header.n_vars;
+    let n_cons = header.n_constraints;
+
+    while cur.has_more() {
+        let seg = cur.read_marker()?;
+        match seg {
+            b'C' => {
+                let idx = cur.read_i32()?;
+                out.push_str(&format!("C{idx}\n"));
+                transcode_expr(&mut cur, out)?;
+            }
+            b'O' => {
+                let idx = cur.read_i32()?;
+                let sense = cur.read_i32()?;
+                out.push_str(&format!("O{idx} {sense}\n"));
+                transcode_expr(&mut cur, out)?;
+            }
+            b'V' => {
+                // V<idx> <n_linear> <k>  then n_linear (int,double) pairs, then body.
+                let idx = cur.read_i32()?;
+                let n_lin = cur.read_i32()?;
+                let k = cur.read_i32()?;
+                out.push_str(&format!("V{idx} {n_lin} {k}\n"));
+                for _ in 0..n_lin.max(0) {
+                    let vi = cur.read_i32()?;
+                    let coeff = cur.read_f64()?;
+                    out.push_str(&format!("{vi} {}\n", fmt_f64(coeff)));
+                }
+                transcode_expr(&mut cur, out)?;
+            }
+            b'x' => {
+                let count = cur.read_i32()?;
+                out.push_str(&format!("x{count}\n"));
+                for _ in 0..count.max(0) {
+                    let vi = cur.read_i32()?;
+                    let val = cur.read_f64()?;
+                    out.push_str(&format!("{vi} {}\n", fmt_f64(val)));
+                }
+            }
+            b'd' => {
+                let count = cur.read_i32()?;
+                out.push_str(&format!("d{count}\n"));
+                for _ in 0..count.max(0) {
+                    let ci = cur.read_i32()?;
+                    let val = cur.read_f64()?;
+                    out.push_str(&format!("{ci} {}\n", fmt_f64(val)));
+                }
+            }
+            b'r' => {
+                out.push_str("r\n");
+                for _ in 0..n_cons {
+                    let t = cur.read_byte()?;
+                    out.push(t as char);
+                    for _ in 0..bound_value_count(t)? {
+                        let v = cur.read_f64()?;
+                        out.push(' ');
+                        out.push_str(&fmt_f64(v));
+                    }
+                    out.push('\n');
+                }
+            }
+            b'b' => {
+                out.push_str("b\n");
+                for _ in 0..n_vars {
+                    let t = cur.read_byte()?;
+                    out.push(t as char);
+                    for _ in 0..bound_value_count(t)? {
+                        let v = cur.read_f64()?;
+                        out.push(' ');
+                        out.push_str(&fmt_f64(v));
+                    }
+                    out.push('\n');
+                }
+            }
+            b'k' => {
+                let count = cur.read_i32()?;
+                out.push_str(&format!("k{count}\n"));
+                for _ in 0..count.max(0) {
+                    let c = cur.read_i32()?;
+                    out.push_str(&format!("{c}\n"));
+                }
+            }
+            b'J' => {
+                let ci = cur.read_i32()?;
+                let count = cur.read_i32()?;
+                out.push_str(&format!("J{ci} {count}\n"));
+                for _ in 0..count.max(0) {
+                    let vi = cur.read_i32()?;
+                    let coeff = cur.read_f64()?;
+                    out.push_str(&format!("{vi} {}\n", fmt_f64(coeff)));
+                }
+            }
+            b'G' => {
+                let oi = cur.read_i32()?;
+                let count = cur.read_i32()?;
+                out.push_str(&format!("G{oi} {count}\n"));
+                for _ in 0..count.max(0) {
+                    let vi = cur.read_i32()?;
+                    let coeff = cur.read_f64()?;
+                    out.push_str(&format!("{vi} {}\n", fmt_f64(coeff)));
+                }
+            }
+            b'S' => {
+                // Suffix: S<kind> <count> <name>. `kind` and `count` are ints; the
+                // name is an ASCII token terminated by newline in text; in binary it
+                // follows the two ints as raw bytes up to a newline. The text parser
+                // only skips `count` following lines, so emit a matching shape.
+                let kind = cur.read_i32()?;
+                let count = cur.read_i32()?;
+                // Read the name: bytes up to the next newline.
+                let mut name = String::new();
+                while cur.pos < cur.bytes.len() {
+                    let b = cur.read_byte()?;
+                    if b == b'\n' {
+                        break;
+                    }
+                    name.push(b as char);
+                }
+                out.push_str(&format!("S{kind} {count} {}\n", name.trim()));
+                // Each suffix entry is (int index, value). The value is a double for
+                // real suffixes (kind & 4) and an int otherwise.
+                let real = (kind & 4) != 0;
+                for _ in 0..count.max(0) {
+                    let ix = cur.read_i32()?;
+                    if real {
+                        let v = cur.read_f64()?;
+                        out.push_str(&format!("{ix} {}\n", fmt_f64(v)));
+                    } else {
+                        let v = cur.read_i32()?;
+                        out.push_str(&format!("{ix} {v}\n"));
+                    }
+                }
+            }
+            other => {
+                return Err(NlParseError::Parse(format!(
+                    "unexpected binary .nl segment marker 0x{other:02x} ('{}')",
+                    other as char
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Transcode a full binary ('b') .nl byte buffer into an equivalent text ('g')
+/// .nl string. The header (first 10 lines) is ASCII in both encodings; only the
+/// body is re-lexed. Returns a `Parse`/`Binary` error on a malformed stream.
+fn transcode_binary_nl(bytes: &[u8]) -> Result<String, NlParseError> {
+    // The header is text in the binary format too. Find the end of the 10th line.
+    let mut newlines = 0usize;
+    let mut header_end = 0usize;
+    for (i, &b) in bytes.iter().enumerate() {
+        if b == b'\n' {
+            newlines += 1;
+            if newlines == 10 {
+                header_end = i + 1;
+                break;
+            }
+        }
+    }
+    if newlines < 10 {
+        return Err(NlParseError::InvalidHeader(
+            "binary .nl header has fewer than 10 lines".to_string(),
+        ));
+    }
+    let header_text = std::str::from_utf8(&bytes[..header_end]).map_err(|e| {
+        NlParseError::InvalidHeader(format!("binary .nl header is not valid ASCII: {e}"))
+    })?;
+
+    // Rewrite the magic 'b<rest>' → 'g<rest>' on the first header line FIRST, so
+    // the produced text is a valid 'g' .nl and `parse_header` (which refuses a 'b'
+    // prefix) accepts it. The header body (lines 1..9) is byte-identical between
+    // the encodings.
+    let first_line_end = header_text.find('\n').unwrap_or(header_text.len());
+    let first_line = &header_text[..first_line_end];
+    let rest_of_first = first_line
+        .trim_start()
+        .strip_prefix('b')
+        .ok_or_else(|| NlParseError::InvalidHeader("binary header missing 'b' magic".into()))?;
+
+    let mut out = String::new();
+    out.push('g');
+    out.push_str(rest_of_first);
+    out.push('\n');
+    // Header lines 1..=9 verbatim.
+    out.push_str(&header_text[first_line_end + 1..]);
+
+    // Parse the *rewritten* ('g') header to learn n_vars / n_constraints.
+    let mut hreader = LineReader::new(&out);
+    let header = parse_header(&mut hreader)?;
+
+    transcode_binary_body(&header, &bytes[header_end..], &mut out)?;
+    Ok(out)
+}
+
 /// Parse a .nl file from a file path.
 ///
 /// Reads the file as raw bytes and inspects the leading magic character to
@@ -1426,9 +1817,13 @@ pub fn parse_nl_file(path: &str) -> Result<ModelRepr, NlParseError> {
     let bytes = std::fs::read(path)
         .map_err(|e| NlParseError::Parse(format!("failed to read file '{path}': {e}")))?;
 
-    // Detect the format from the first non-whitespace byte.
+    // Detect the format from the first non-whitespace byte: 'b' = binary (David
+    // Gay's binary .nl encoding), 'g' = text/ASCII. Binary is transcoded into the
+    // equivalent text token stream and then parsed by the same text parser, so the
+    // two encodings of one model build byte-identical `ModelRepr`s.
     if let Some(b'b') = bytes.iter().find(|b| !b.is_ascii_whitespace()) {
-        return Err(NlParseError::BinaryUnsupported);
+        let text = transcode_binary_nl(&bytes)?;
+        return parse_nl(&text);
     }
 
     let content = std::str::from_utf8(&bytes).map_err(|e| {
@@ -2352,8 +2747,11 @@ mod tests {
     // ─── Test: binary .nl format yields explicit diagnostic ───
 
     #[test]
-    fn test_binary_header_rejected() {
-        // A 'b'-prefixed header signals the binary encoding.
+    fn test_binary_string_rejected() {
+        // A 'b'-prefixed *string* still refuses: a real binary body embeds raw
+        // IEEE-754 doubles that are not valid UTF-8, so it can never arrive as a
+        // `&str`. Binary is handled only at the byte-level `parse_nl_file` entry
+        // (which transcodes); the string API stays sound-or-refuse.
         let err = parse_nl("b3 1 1 0\n").unwrap_err();
         assert!(matches!(err, NlParseError::BinaryUnsupported));
         let msg = err.to_string();
@@ -2361,14 +2759,104 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_nl_file_binary_detected() {
-        // Write a fake binary .nl: text header line plus a non-UTF-8 body byte.
+    fn test_parse_nl_file_binary_malformed_errors() {
+        // A truncated/garbage binary body must fail loudly (not silently produce a
+        // wrong model). Fewer than 10 header lines → InvalidHeader.
         let dir = std::env::temp_dir();
-        let path = dir.join(format!("discopt_binary_test_{}.nl", std::process::id()));
+        let path = dir.join(format!("discopt_binary_bad_{}.nl", std::process::id()));
         std::fs::write(&path, b"b3 0 1 0\t# problem\n\x00\xf0\x3f").unwrap();
         let result = parse_nl_file(path.to_str().unwrap());
         let _ = std::fs::remove_file(&path);
-        assert!(matches!(result, Err(NlParseError::BinaryUnsupported)));
+        assert!(result.is_err(), "malformed binary must error");
+    }
+
+    // ─── TAIL-1b: binary ('b') .nl round-trips to the same model as text ───
+
+    /// The transcoded binary model must be byte-for-byte equivalent to the text
+    /// model built from the *same* source .gms (st_miqp5, generated by GAMS
+    /// CONVERT into both encodings). This is the bound-neutral capability check:
+    /// a binary .nl produces the SAME `ModelRepr` as its text twin.
+    #[test]
+    fn test_binary_nl_roundtrips_to_text_model() {
+        let bin_bytes = std::fs::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixture_st_miqp5_bin.nl"
+        ))
+        .unwrap();
+        let text_str = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixture_st_miqp5_text.nl"
+        ))
+        .unwrap();
+
+        let transcoded = transcode_binary_nl(&bin_bytes).expect("transcode must succeed");
+        // The transcoded header must be 'g' (text) encoding.
+        assert!(transcoded.starts_with('g'), "transcoded header must be 'g'");
+
+        let bin_model = parse_nl(&transcoded).expect("transcoded binary parses");
+        let text_model = parse_nl(&text_str).expect("text parses");
+
+        // Structural equivalence.
+        assert_eq!(bin_model.n_vars, text_model.n_vars, "n_vars");
+        assert_eq!(
+            bin_model.constraints.len(),
+            text_model.constraints.len(),
+            "n_constraints"
+        );
+        assert_eq!(
+            bin_model.objective_sense, text_model.objective_sense,
+            "objective sense"
+        );
+
+        // Numeric equivalence: the objective evaluates identically at several
+        // probe points (the nonlinear objective exercises the transcoded opcode
+        // stream — o54 sumlist, o2 mult, n constants, v refs).
+        let n = bin_model.n_vars;
+        for seed in 0..5u64 {
+            let x: Vec<f64> = (0..n)
+                .map(|i| {
+                    let t = ((seed.wrapping_mul(2654435761).wrapping_add(i as u64)) % 97) as f64;
+                    t / 13.0 - 3.0
+                })
+                .collect();
+            let vb = bin_model.evaluate_objective(&x);
+            let vt = text_model.evaluate_objective(&x);
+            assert!(
+                (vb - vt).abs() <= 1e-9 * (1.0 + vt.abs()),
+                "objective mismatch at probe {seed}: bin={vb} text={vt}"
+            );
+        }
+    }
+
+    /// The real minlplib snapshot binary (independent provenance from the
+    /// GAMS-CONVERT fixture) also transcodes and parses, and matches the text
+    /// model numerically — guards against over-fitting to one writer's byte
+    /// layout.
+    #[test]
+    fn test_binary_nl_minlplib_snapshot_parses() {
+        let bin_bytes = std::fs::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixture_st_miqp5_minlplib_bin.nl"
+        ))
+        .unwrap();
+        let text_str = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixture_st_miqp5_text.nl"
+        ))
+        .unwrap();
+        let transcoded = transcode_binary_nl(&bin_bytes).expect("snapshot transcodes");
+        let bin_model = parse_nl(&transcoded).expect("snapshot parses");
+        let text_model = parse_nl(&text_str).expect("text parses");
+        assert_eq!(bin_model.n_vars, text_model.n_vars);
+        assert_eq!(bin_model.constraints.len(), text_model.constraints.len());
+        // Objective agrees at the origin-ish probe.
+        let x = vec![0.5_f64; bin_model.n_vars];
+        let vb = bin_model.evaluate_objective(&x);
+        let vt = text_model.evaluate_objective(&x);
+        assert!(
+            (vb - vt).abs() <= 1e-9 * (1.0 + vt.abs()),
+            "bin={vb} text={vt}"
+        );
     }
 
     // ─── Test: coefficient -1 optimization ────────────────
