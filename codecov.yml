@@ -22,7 +22,7 @@ coverage:
       default:
         informational: true
 
-# Keep the PR comment concise (it is not a failing check, just a summary).
-comment:
-  layout: "reach, diff, flags"
-  require_changes: true   # only comment when coverage actually changes
+# No PR comments: the bot's coverage-summary comment emailed the maintainer on
+# every code PR push. Coverage remains visible in the (informational) status
+# checks above and in the label-gated python-coverage CI job.
+comment: false
