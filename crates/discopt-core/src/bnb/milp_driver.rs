@@ -1981,10 +1981,8 @@ fn try_dive_repair(
                 break;
             }
         }
-        match next_x {
-            Some(xx) => x = xx,
-            None => return None, // both roundings infeasible -> abandon the dive
-        }
+        // `None` means both roundings were infeasible -> abandon the dive.
+        x = next_x?;
     }
     None
 }
