@@ -60,18 +60,15 @@ def _ensure_sympy() -> None:
     module-level import failure).
     """
     global _SYMPY_LOADED, sp
-    global ChainCoupling, TermUnderestimator
     global eliminate_chain_coupling, power_term_underestimator, verify_cut
     if _SYMPY_LOADED:
         return
     import sympy as _sp
 
-    from discopt._jax.symbolic.constraint_cuts import (
-        ChainCoupling as _ChainCoupling,
-    )
-    from discopt._jax.symbolic.constraint_cuts import (
-        TermUnderestimator as _TermUnderestimator,
-    )
+    # ChainCoupling / TermUnderestimator are used only as annotations (evaluated
+    # never, under `from __future__ import annotations`) — they stay TYPE_CHECKING
+    # imports and are deliberately NOT rebound here (rebinding a class name trips
+    # mypy's "cannot assign to a type"). Only the runtime-called functions bind.
     from discopt._jax.symbolic.constraint_cuts import (
         eliminate_chain_coupling as _eliminate_chain_coupling,
     )
@@ -83,8 +80,6 @@ def _ensure_sympy() -> None:
     )
 
     sp = _sp
-    ChainCoupling = _ChainCoupling
-    TermUnderestimator = _TermUnderestimator
     eliminate_chain_coupling = _eliminate_chain_coupling
     power_term_underestimator = _power_term_underestimator
     verify_cut = _verify_cut
