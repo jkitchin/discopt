@@ -168,14 +168,38 @@ def test_jit_and_vmap_over_boxes():
     assert bool(jnp.all(cv <= cc + 1e-9))
 
 
+# ---- variable division via sign-definite reciprocal (P1.2) ----
+def test_division_positive_denominator():
+    _check(lambda x, y: x / y, lambda v: v[0] / v[1], [0.5, 1.0], [3.0, 4.0])
+
+
+def test_division_negative_denominator():
+    _check(lambda x, y: x / y, lambda v: v[0] / v[1], [0.5, -4.0], [3.0, -1.0])
+
+
+def test_division_nonaffine_denominator():
+    # (x+1)/(y*y+1): non-affine MCBox denominator with a provably-positive interval
+    # (y non-spanning, so the y*y bilinear interval stays >= 0 and the reciprocal is
+    # well-defined; a spanning y would make the loose y*y interval cross 0 and the
+    # reciprocal correctly returns a no-information bracket instead of a wrong bound).
+    _check(
+        lambda x, y: (x + 1.0) / (y * y + 1.0),
+        lambda v: (v[0] + 1.0) / (v[1] * v[1] + 1.0),
+        [-1.0, 0.5],
+        [2.0, 2.0],
+    )
+
+
+def test_division_zero_crossing_denominator_noinfo():
+    # denominator interval spans 0 -> reciprocal is unbounded -> no-information
+    # bracket (non-finite cv/cc), jit-safe and never a wrong finite bound.
+    z = relax_through(
+        lambda x, y: x / y, jnp.array([1.0, 1.0]), jnp.array([1.0, -2.0]), jnp.array([2.0, 2.0])
+    )
+    assert not bool(jnp.isfinite(z.cv)) and not bool(jnp.isfinite(z.cc))
+
+
 # ---- sound-or-refuse ----
 def test_refuse_noninteger_power():
     with pytest.raises(UnsupportedMcboxOp):
         relax_through(lambda x: x**1.5, jnp.array([1.0]), jnp.array([0.5]), jnp.array([3.0]))
-
-
-def test_refuse_var_division():
-    with pytest.raises(UnsupportedMcboxOp):
-        relax_through(
-            lambda x, y: x / y, jnp.array([1.0, 1.0]), jnp.array([0.0, 1.0]), jnp.array([2.0, 3.0])
-        )
