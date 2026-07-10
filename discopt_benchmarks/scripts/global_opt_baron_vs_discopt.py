@@ -55,6 +55,21 @@ UA = "discopt-bench (jkitchin@andrew.cmu.edu)"
 ATOL, RTOL = 1e-6, 1e-4
 
 
+def root_gap_from(obj: float | None, root_bound: float | None) -> float | None:
+    """Incumbent-relative root gap ``|obj - root_bound| / max(1, |obj|)``.
+
+    The single definition used for BOTH solvers so ``root_gap_ratio_vs_baron``
+    compares like with like; it mirrors ``SolveResult.root_gap`` (each solver
+    normalizes by its own best incumbent). ``None`` when either input is missing
+    or non-finite (an honest "not measurable", never a fabricated 0).
+    """
+    if obj is None or root_bound is None:
+        return None
+    if not (math.isfinite(obj) and math.isfinite(root_bound)):
+        return None
+    return abs(obj - root_bound) / max(1.0, abs(obj))
+
+
 def matches(obj: float | None, known: float | None) -> bool:
     if obj is None or known is None or math.isnan(known):
         return False
@@ -183,12 +198,21 @@ try:
     # After A2, ``.bound`` is None on the no-relaxation class rather than a 1e30
     # sentinel, so a None here means "no dual bound", not "read failed".
     lb = getattr(res, "bound", None)
+    # TAIL-1c: the root-node dual bound / relative root gap / root wall time are
+    # produced by the solver (SolveResult.root_bound/root_gap/root_time) so the
+    # root_gap_ratio_vs_baron gate is evaluable against BARON's own root bound.
+    rb = getattr(res, "root_bound", None)
+    rg = getattr(res, "root_gap", None)
+    rt = getattr(res, "root_time", None)
     print(json.dumps({
         "ok": True,
         "status": str(getattr(res, "status", "")),
         "objective": (None if res.objective is None else float(res.objective)),
         "lower_bound": (None if lb is None else float(lb)),
         "gap": (None if res.gap is None else float(res.gap)),
+        "root_bound": (None if rb is None else float(rb)),
+        "root_gap": (None if rg is None else float(rg)),
+        "root_time": (None if rt is None else float(rt)),
         "node_count": int(getattr(res, "node_count", 0) or 0),
         "wall_time": dt,
     }))
@@ -207,6 +231,14 @@ class SolverRun:
     node_count: int = 0
     wall_time: float = 0.0
     error: str | None = None
+    # TAIL-1c root-node instrumentation. ``root_bound`` is the strongest dual
+    # bound available at the end of root processing (before the first branch);
+    # ``root_gap`` is ``|obj - root_bound| / max(1, |obj|)`` (incumbent-relative,
+    # matching SolveResult.root_gap so the discopt/BARON ratio is symmetric);
+    # ``root_time`` is wall-clock seconds to reach that bound.
+    root_bound: float | None = None
+    root_gap: float | None = None
+    root_time: float | None = None
 
 
 def run_discopt(name: str, tl: float) -> SolverRun:
@@ -242,6 +274,9 @@ def run_discopt(name: str, tl: float) -> SolverRun:
         gap=d["gap"],
         node_count=d["node_count"],
         wall_time=d["wall_time"],
+        root_bound=d.get("root_bound"),
+        root_gap=d.get("root_gap"),
+        root_time=d.get("root_time"),
     )
 
 
@@ -269,6 +304,19 @@ _MS = re.compile(r"\*\*\*\* MODEL STATUS\s+(\d+)\s+(.+)")
 _OV = re.compile(r"\*\*\*\* OBJECTIVE VALUE\s+([-\d.eE+]+)")
 _RU = re.compile(r"RESOURCE USAGE, LIMIT\s+([-\d.eE+]+)\s+([-\d.eE+]+)")
 
+# BARON's per-iteration progress log (GAMS ``lo=3`` routes it to stdout). The
+# header is ``Iteration  Time (s)  Mem  Lower bound  Upper bound  Progress`` and
+# each data row is ``<iter> <time> <mem>MB <lower> <upper> <progress>%``. The
+# FIRST data row (iteration 1) is BARON's root-node relaxation, so its lower
+# bound is BARON's root dual bound and its time is the root wall-clock. All
+# bounds are printed in *internal-minimization* sense (BARON minimizes ``objvar``
+# after GAMS's max→min reformulation), matching how ``parse_lst`` reads the
+# .lst; the caller un-negates for maximize models.
+_BAR_ITER = re.compile(
+    r"^\s*(\d+)\s+([-\d.eE+]+)\s+[-\d.eE+]+MB\s+([-\d.eE+]+)\s+([-\d.eE+]+)\s+",
+    re.MULTILINE,
+)
+
 
 def parse_lst(lst: str) -> SolverRun:
     run = SolverRun(status="ERROR")
@@ -283,7 +331,28 @@ def parse_lst(lst: str) -> SolverRun:
     return run
 
 
-def run_baron(name: str, tl: float) -> SolverRun:
+def parse_baron_root(log: str, maximize: bool) -> tuple[float | None, float | None]:
+    """Extract BARON's root-node dual bound and the time to reach it.
+
+    Returns ``(root_bound, root_time)`` in *original-objective* sense (un-negated
+    for maximize models, mirroring ``run_baron``'s objective handling), or
+    ``(None, None)`` when the iteration log is absent (e.g. BARON solved in
+    preprocessing and emitted no progress table). The root bound is the ``Lower
+    bound`` column of iteration 1 — the strongest bound BARON has before it
+    branches, the exact analogue of ``SolveResult.root_bound``.
+    """
+    m = _BAR_ITER.search(log)
+    if m is None:
+        return None, None
+    with contextlib.suppress(ValueError):
+        root_time = float(m.group(2))
+        lb_internal = float(m.group(3))
+        root_bound = -lb_internal if maximize else lb_internal
+        return root_bound, root_time
+    return None, None
+
+
+def run_baron(name: str, tl: float, maximize: bool = False) -> SolverRun:
     gms = fetch_gms(name)
     if gms is None:
         return SolverRun(status="NO_GMS", error="could not fetch .gms from minlplib.org")
@@ -293,7 +362,11 @@ def run_baron(name: str, tl: float) -> SolverRun:
         shutil.copy(gms, local_gms)
         t0 = time.perf_counter()
         try:
-            subprocess.run(
+            # lo=3 routes BARON's per-iteration progress log to stdout so the
+            # root-node (iteration 1) dual bound is recoverable (TAIL-1c); lo=2
+            # suppressed it. The .lst still carries model status / objective /
+            # resource usage, so parse_lst is unaffected.
+            proc = subprocess.run(
                 [
                     GAMS,
                     f"{name}.gms",
@@ -301,7 +374,7 @@ def run_baron(name: str, tl: float) -> SolverRun:
                     "optcr=0",
                     "optca=1e-9",
                     f"reslim={int(tl)}",
-                    "lo=2",
+                    "lo=3",
                     "-o",
                     f"{name}.lst",
                 ],
@@ -319,6 +392,10 @@ def run_baron(name: str, tl: float) -> SolverRun:
         run = parse_lst(lst_path.read_text(errors="replace"))
         if run.wall_time == 0.0:
             run.wall_time = wall
+        # TAIL-1c: recover BARON's root-node bound/time from the iteration log and
+        # form the incumbent-relative root gap (same definition as discopt's).
+        run.root_bound, run.root_time = parse_baron_root(proc.stdout or "", maximize)
+        run.root_gap = root_gap_from(run.objective, run.root_bound)
         return run
     finally:
         shutil.rmtree(work, ignore_errors=True)
@@ -416,6 +493,39 @@ def write_report(rows: list[Row], tl: float, out_dir: Path, ts: str) -> Path:
             if d[VIOLATION] == 0
             else f"> ❌ **{d[VIOLATION]} discopt VIOLATION(S) — investigate.**"
         ),
+        "",
+        "## Root-gap instrumentation (TAIL-1c)",
+        "",
+        "Root gap = `|obj − root_bound| / max(1, |obj|)` at the end of root "
+        "processing (before the first branch), for each solver against its own "
+        "incumbent. `ratio` = discopt / BARON (the `root_gap_ratio_vs_baron` "
+        "gate quantity; lower is tighter, gate target ≤ 1.3). Rows with no "
+        "root bound on either side are excluded from the ratio.",
+        "",
+        "| instance | d root_gap | d root_t | BARON root_gap | b root_t | ratio |",
+        "|---|---|---|---|---|---|",
+    ]
+    _ratios: list[float] = []
+    for r in sorted(rows, key=lambda x: x.instance):
+        drg, brg = r.discopt.root_gap, r.baron.root_gap
+        ratio = None
+        if drg is not None and brg is not None and brg > 1e-10 and math.isfinite(drg):
+            ratio = drg / brg
+            _ratios.append(ratio)
+        lines.append(
+            f"| {r.instance} | {fmt(drg, 10)} | {fmt(r.discopt.root_time, 8)} | "
+            f"{fmt(brg, 10)} | {fmt(r.baron.root_time, 8)} | {fmt(ratio, 8)} |"
+        )
+    d_pop = sum(r.discopt.root_gap is not None for r in rows)
+    b_pop = sum(r.baron.root_gap is not None for r in rows)
+    mean_ratio = (sum(_ratios) / len(_ratios)) if _ratios else None
+    lines += [
+        "",
+        f"- discopt root_gap populated: **{d_pop}/{len(rows)}**  ·  "
+        f"BARON root_gap populated: **{b_pop}/{len(rows)}**",
+        f"- Mean root_gap ratio (discopt/BARON) over **{len(_ratios)}** "
+        f"co-populated instances: **{fmt(mean_ratio).strip()}** "
+        f"(gate `root_gap_ratio_vs_baron` target ≤ 1.3)",
         "",
         "## Per-instance results",
         "",
@@ -551,9 +661,14 @@ def main() -> int:
     rows: list[Row] = []
     for i, name in enumerate(insts, 1):
         kn = known.get(name)
+        mx = nl_is_maximize(name)
         d = run_discopt(name, args.time_limit)
-        b = SolverRun(status="SKIPPED") if args.skip_baron else run_baron(name, args.time_limit)
-        row = finalize(Row(name, kn, d, b, maximize=nl_is_maximize(name)))
+        b = (
+            SolverRun(status="SKIPPED")
+            if args.skip_baron
+            else run_baron(name, args.time_limit, maximize=mx)
+        )
+        row = finalize(Row(name, kn, d, b, maximize=mx))
         rows.append(row)
         ds = f"{d.status[:14]:14} {fmt(d.objective, 9)} {row.d_verdict:>9} {d.wall_time:6.1f}s"
         bs = f"{b.status[:14]:14} {fmt(b.objective, 9)} {row.b_verdict:>9} {b.wall_time:6.1f}s"
