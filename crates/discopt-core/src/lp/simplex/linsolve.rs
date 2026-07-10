@@ -185,11 +185,57 @@ fn route_dense_decision(m: usize, nnz: usize, params: &LuParams, density_route: 
     should_use_dense_lu(m, nnz, params)
 }
 
-/// Whether the `DISCOPT_LU_DENSITY_ROUTE` density-aware LU route (#557) is on.
-/// Default off — the LU routing is byte-identical to the historical policy — so
-/// this is a real, opt-in performance knob, not a dead flag.
+/// Whether the `DISCOPT_LU_DENSITY_ROUTE` density-aware LU route (#557) is on
+/// for new factorizations: the env flag is set AND no dense-retry suppression is
+/// in effect (#85 — a failed solve is re-run once with the route suppressed; see
+/// [`with_density_route_suppressed`]). Default off — the LU routing is
+/// byte-identical to the historical policy — so this is a real, opt-in
+/// performance knob, not a dead flag.
 fn density_route_enabled() -> bool {
-    std::env::var_os("DISCOPT_LU_DENSITY_ROUTE").is_some()
+    !route_suppressed() && std::env::var_os("DISCOPT_LU_DENSITY_ROUTE").is_some()
+}
+
+std::thread_local! {
+    /// #85 failure-triggered dense retry: while `true`, [`want_dense_route`]
+    /// ignores the `DISCOPT_LU_DENSITY_ROUTE` flag and every factorization takes
+    /// the historical dense-preferring policy. Set only for the duration of a
+    /// retry re-solve (see `dense_retry_wanted` in `primal.rs`); thread-local
+    /// because the parallel B&B feature solves independent node LPs on rayon
+    /// workers.
+    static DENSITY_ROUTE_SUPPRESSED: std::cell::Cell<bool> =
+        const { std::cell::Cell::new(false) };
+}
+
+/// Whether the density-route suppression (a dense retry in progress) is active
+/// on this thread.
+fn route_suppressed() -> bool {
+    DENSITY_ROUTE_SUPPRESSED.with(|s| s.get())
+}
+
+/// #85: whether a *failed* LP solve may be retried on the dense route — true iff
+/// the density route is currently active (so the failure may be
+/// sparse-route-specific) and we are not already inside a retry (a retry that
+/// fails again must fall through to the existing fallback chain, never recurse;
+/// [`density_route_enabled`] is false under suppression, which provides exactly
+/// that guarantee).
+pub(crate) fn density_route_retry_available() -> bool {
+    density_route_enabled()
+}
+
+/// Run `f` with the density-aware LU route suppressed: every factorization under
+/// `f` takes the historical dense-preferring routing (the robust path the
+/// default configuration uses). Restores the previous suppression state on exit,
+/// including on unwind (guard-based), so a panicking solve cannot leave the
+/// thread stuck in suppressed mode.
+pub(crate) fn with_density_route_suppressed<T>(f: impl FnOnce() -> T) -> T {
+    struct Restore(bool);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            DENSITY_ROUTE_SUPPRESSED.with(|s| s.set(self.0));
+        }
+    }
+    let _guard = Restore(DENSITY_ROUTE_SUPPRESSED.with(|s| s.replace(true)));
+    f()
 }
 
 /// The retained basis matrix, in dense-column form, kept **in sync** with every
@@ -553,6 +599,29 @@ impl LinearSolver for DenseLU {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dense_retry_suppression_scopes_and_restores() {
+        // #85: the suppression guard must (a) suppress inside the closure —
+        // which also makes density_route_retry_available() false, preventing
+        // retry recursion; (b) restore on exit; (c) restore on unwind.
+        assert!(!route_suppressed());
+        with_density_route_suppressed(|| {
+            assert!(route_suppressed());
+            // No recursion: inside a retry, a further retry is unavailable even
+            // if the env flag were set (density_route_enabled() is false here).
+            assert!(!density_route_retry_available());
+            // Nesting is harmless and restores to the outer (suppressed) state.
+            with_density_route_suppressed(|| assert!(route_suppressed()));
+            assert!(route_suppressed());
+        });
+        assert!(!route_suppressed());
+        // Unwind safety: a panicking solve must not leave the thread suppressed.
+        let _ = std::panic::catch_unwind(|| {
+            with_density_route_suppressed(|| panic!("simulated solve panic"))
+        });
+        assert!(!route_suppressed());
+    }
 
     #[test]
     fn route_default_off_is_historical() {

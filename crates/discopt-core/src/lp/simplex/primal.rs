@@ -50,13 +50,61 @@ pub fn solve_lp(lp: &LpView<'_>, b: &[f64], opts: &SimplexOptions) -> LpSolve {
     }
 }
 
+/// #85 failure-triggered dense retry (with the #557 density-aware LU route): is
+/// this solve a *failure* that may be sparse-route-specific?
+///
+/// Entry experiment (docs/dev/performance-plan.md §6, 2026-07-10): with the
+/// route ON, a small class of node LPs exits `Numerical`/`IterLimit` on the
+/// sparse route where the historical dense-preferring route succeeds (nvs21: 39
+/// vs 12 failing solves; the failing node keeps its inherited loose relaxation
+/// bound, the final dual bound sticks at that value, and the `optimal`
+/// certificate is lost — `feasible`, bound −1.59e7 vs true −5.685). A
+/// factorization-time conditioning gate was falsified as the discriminator
+/// (inverted populations), so the fix is failure-triggered: detect the failure
+/// the solve already reports and re-solve once on the robust path.
+fn dense_retry_wanted(sol: &LpSolve) -> bool {
+    matches!(sol.status, LpStatus::Numerical | LpStatus::IterLimit)
+        && super::linsolve::density_route_retry_available()
+}
+
+/// Re-solve a failed LP once, cold, with the density-aware LU route suppressed
+/// (every factorization takes the historical dense-preferring policy — the exact
+/// robust path the default configuration uses).
+///
+/// **Soundness invariant:** this only ever *replaces a failure* — a
+/// `Numerical`/`IterLimit` exit carries no certificate to preserve — with the
+/// robust path's result; a suspect fast-path result is never accepted or
+/// blended. A retry that also fails is returned as that failure and falls
+/// through to the existing fallback chain exactly as before the retry existed.
+/// The retry is **cold**, not warm from the failed run's state: that state
+/// (basis, factor, iterate) is precisely what is in doubt after a numerical
+/// breakdown (sound-or-refuse). Recursion is impossible: under suppression,
+/// `density_route_retry_available()` is false.
+fn dense_retry(failed: LpSolve, re_solve: impl FnOnce() -> LpSolve) -> LpSolve {
+    debug_assert!(matches!(
+        failed.status,
+        LpStatus::Numerical | LpStatus::IterLimit
+    ));
+    drop(failed); // no certificate to keep — the retry result replaces it wholesale
+    crate::profile::incr(crate::profile::Ctr::LpDenseRetries);
+    let sol = super::linsolve::with_density_route_suppressed(re_solve);
+    if !matches!(sol.status, LpStatus::Numerical | LpStatus::IterLimit) {
+        crate::profile::incr(crate::profile::Ctr::LpDenseRetryRescues);
+    }
+    sol
+}
+
 /// Two-phase primal simplex on an already-equilibrated (or known well-scaled) LP.
 /// The warm dual path's cold fallback and the B&B driver (which equilibrates the
 /// working matrix once and shares it across all node solves) call this directly
 /// so the matrix is not scaled twice; the caller owns the [`scaling::Scaling`]
 /// and unscales the returned `x` itself.
 pub fn solve_lp_scaled(lp: &LpView<'_>, b: &[f64], opts: &SimplexOptions) -> LpSolve {
-    Simplex::new(lp, b, opts).run()
+    let sol = Simplex::new(lp, b, opts).run();
+    if dense_retry_wanted(&sol) {
+        return dense_retry(sol, || Simplex::new(lp, b, opts).run());
+    }
+    sol
 }
 
 /// Cold primal solve from an owned CSC matrix (already scaled by the caller, if at
@@ -73,7 +121,20 @@ pub fn solve_lp_cols(
     b: &[f64],
     opts: &SimplexOptions,
 ) -> LpSolve {
-    Simplex::new_from_cols(cols, m, n, c, l, u, b, opts).run()
+    // #85: `cols` is consumed by the solve, so a possible dense retry needs its
+    // own copy up front. O(nnz), paid only with the density route ON (the warm
+    // dual path already clones the CSC per solve — see dual.rs — so this is
+    // in-family), and nothing extra with the route OFF (default).
+    let retry_cols = super::linsolve::density_route_retry_available().then(|| cols.clone());
+    let sol = Simplex::new_from_cols(cols, m, n, c, l, u, b, opts).run();
+    if let Some(cols2) = retry_cols {
+        if dense_retry_wanted(&sol) {
+            return dense_retry(sol, || {
+                Simplex::new_from_cols(cols2, m, n, c, l, u, b, opts).run()
+            });
+        }
+    }
+    sol
 }
 
 /// Warm-started primal solve from an inherited `start` basis (cert:T1.4).
@@ -102,13 +163,25 @@ pub fn solve_lp_cols_warm(
     start: &Basis,
     opts: &SimplexOptions,
 ) -> LpSolve {
+    // #85: cloned up front for a possible dense retry (see solve_lp_cols).
+    let retry_cols = super::linsolve::density_route_retry_available().then(|| cols.clone());
     let s = Simplex::new_from_cols(cols, m, n, c, l, u, b, opts);
-    match s.run_warm(start) {
+    let sol = match s.run_warm(start) {
         Ok(sol) => sol,
         // Unusable warm basis → the genuine cold two-phase solve on the same
         // matrix (handed back so no clone / no stale state is reused).
         Err(cols_back) => Simplex::new_from_cols(cols_back, m, n, c, l, u, b, opts).run(),
+    };
+    if let Some(cols2) = retry_cols {
+        if dense_retry_wanted(&sol) {
+            // Cold, never warm from `start`-derived state: after a numerical
+            // failure the warm trajectory is exactly what is in doubt.
+            return dense_retry(sol, || {
+                Simplex::new_from_cols(cols2, m, n, c, l, u, b, opts).run()
+            });
+        }
     }
+    sol
 }
 
 /// Whether `x` satisfies the box `l ≤ x ≤ u` and the equalities `A x = b` to a
