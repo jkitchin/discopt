@@ -1,0 +1,113 @@
+#+TITLE: MAiNGO Solver
+#+FILETAGS: :concept:maingo:solver:global-optimization:minlp:mccormick:reduced-space:
+
+
+* MAiNGO Solver
+:PROPERTIES:
+:ARTICLE_TYPE: concept
+:SOURCE_KEYS: bongartz2018maingo bongartz2017reducedspace najman2021linearization tsoukalas2014 mitsos2009 schweidtmann2019ann bongartz2022maingo_overview bongartz2026
+:STATUS: active
+:CREATED: 2026-07-09
+:UPDATED: 2026-07-09
+:END:
+
+MAiNGO (McCormick-based Algorithm for mixed-integer Nonlinear Global
+Optimization) is an open-source deterministic global optimization solver for
+nonconvex mixed-integer nonlinear programs (MINLPs), written in C++ and developed
+by the Process Systems Engineering group (AVT.SVT) at RWTH Aachen University
+(Bongartz, Najman, Sass, Mitsos) citep:bongartz2018maingo. Like
+[[file:baron-solver.org][BARON]], [[file:couenne-solver.org][Couenne]], and
+[[file:scip-solver.org][SCIP]], it is a spatial branch-and-bound solver that
+produces a rigorous optimality certificate; its distinguishing feature is *where*
+and *how* it builds convex relaxations.
+
+** The defining idea: relaxations in the original variable space
+
+The state-of-the-art global solvers relax nonconvex models via the
+[[file:../methods/auxiliary-variable-reformulation.org][auxiliary-variable method]] (AVM): every factorable expression is decomposed into
+elementary operations, one auxiliary variable is introduced per intermediate node,
+and [[file:../methods/mccormick-relaxations.org][McCormick envelopes]] / RLT rows
+are written on those auxiliary variables in a *lifted* space. MAiNGO's central
+design choice is the opposite: it **propagates McCormick relaxations through the
+computational graph in the original (reduced) optimization variable space, adding
+no auxiliary variables to the problem** citep:bongartz2018maingo,bongartz2026.
+
+It does this with **multivariate McCormick relaxations** citep:tsoukalas2014 — a
+generalization of McCormick's 1976 composition rules citep:mccormick1976 — together
+with **subgradient propagation** citep:mitsos2009: as the code list is evaluated,
+convex/concave relaxation values *and* their subgradients are carried forward by
+the chain rule. The machinery is implemented in the open-source MC++ library,
+which uses FILIB++ interval arithmetic underneath.
+
+** Reduced-space formulation and hidden model parts
+
+Because relaxations propagate through the model rather than needing an auxiliary
+variable per intermediate, the branch-and-bound tree can branch over only the
+**degrees of freedom** — the true decision variables — while all intermediate
+quantities are computed inside externally-defined functions that return values and
+McCormick relaxations citep:bongartz2017reducedspace. For a process flowsheet the
+optimizer sees a handful of design variables and few equality constraints; stream
+states, unit calculations, and even implicit-equation solutions are "hidden." When
+the number of degrees of freedom is far smaller than the number of intermediate
+variables, MAiNGO branches on a dramatically smaller space than an AVM solver,
+which must branch over the full lifted set. This is the source of its computational
+advantage on reduced-space-amenable problems.
+
+The same mechanism makes MAiNGO a natural host for **surrogate-embedded**
+optimization: artificial neural networks citep:schweidtmann2019ann, Gaussian
+processes, and decision trees are written as functions returning McCormick
+relaxations, and MAiNGO branches only on their inputs — the same territory as the
+OMLT/Melon toolboxes and discopt's own [[file:neural-network-embedding.org][neural-network embedding]] module.
+
+The trade-off is bound tightness: relaxations built by composition are generally
+**weaker per node** than the tightest AVM/RLT relaxation of the same model, because
+composed McCormick envelopes are not the convex hull of the whole expression.
+MAiNGO trades per-node tightness for a much smaller branching space.
+
+** Lower bounding: linearize the McCormick relaxation into an LP
+
+At a node MAiNGO evaluates the McCormick relaxation of the objective and each
+constraint over the current box, obtaining convex underestimators and concave
+overestimators together with subgradients at a reference point. It then
+**linearizes** these relaxations using the subgradients — each subgradient yields a
+supporting hyperplane, i.e. one affine cut — to assemble a linear program that is
+solved once for a valid lower bound citep:najman2021linearization. MAiNGO does not,
+by default, hand the nonlinear convex relaxation to an NLP solver; it solves an LP
+built from subgradient linearizations, which is cheaper and globally solved in a
+single pass. The number and placement of linearization points is a tuning knob:
+one point gives a loose but cheap LP, several points per relaxation give a tighter
+LP with more rows. Najman, Bongartz and Mitsos citep:najman2021linearization show
+that the pure-McCormick (MC) and auxiliary-variable (AVM) approaches are endpoints
+of a spectrum and can be **hybridized** — selectively lifting some subexpressions
+to auxiliary variables to recover AVM tightness where it pays, while keeping the
+small MC variable space elsewhere. The LP is solved with CPLEX or COIN-OR CLP.
+
+** Bound tightening
+
+MAiNGO applies both flavors of [[file:../methods/bound-tightening.org][bound tightening]] at nodes:
+**OBBT** (optimization-based) solves auxiliary LPs that minimize/maximize each
+variable over the relaxation to contract the box, and **DBBT** (duality-based) uses
+the LP dual multipliers and reduced costs from the lower-bounding LP to tighten
+variable bounds cheaply, in the spirit of Ryoo–Sahinidis range reduction. Interval
+constraint propagation (FBBT) is also used.
+
+** Upper bounding, integers, and ecosystem
+
+Feasible incumbents come from multistart local NLP solves via Ipopt or NLopt/SLSQP.
+Integers are handled by relaxing integrality for the LP lower bound and branching
+on both discrete and continuous variables. MAiNGO exposes a C++ API, the ALE
+algebraic modeling language, a Python interface, and a GAMS interface; it
+parallelizes its branch-and-bound over MPI ranks, with recent work on GPU-parallel
+interval arithmetic for the bounding kernels citep:bongartz2022maingo_overview. Its
+strongest niches are process-systems flowsheet optimization and
+machine-learning-surrogate-embedded global optimization.
+
+** Relevance to discopt
+
+MAiNGO is the reference McCormick-based global solver, and discopt shares the same
+McCormick foundation — making it the most instructive architectural comparison in
+the field. The key difference is that discopt's default global path lifts nonlinear
+terms into auxiliary LP columns (the AVM family, like BARON/Couenne), whereas
+MAiNGO propagates McCormick in the reduced space. That single choice explains much
+of their differing performance behavior; see [[file:../comparisons/maingo-vs-discopt.org][MAiNGO vs discopt]] for the detailed
+comparison.
