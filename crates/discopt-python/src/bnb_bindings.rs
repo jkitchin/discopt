@@ -199,6 +199,36 @@ impl PyTreeManager {
         Ok(())
     }
 
+    /// Pop-time `local_lower_bound` for each of `node_ids` (task #89 / B2-FIX).
+    ///
+    /// Read-only. Called between `export_batch` and `import_results`, each
+    /// value is the bound the node carried when it was popped — inherited from
+    /// its parent's rigorous relaxation solve — which remains a valid lower
+    /// bound for that node's whole subtree even if the node is subsequently
+    /// fathomed non-rigorously (failure sentinel without an infeasibility
+    /// proof). Unknown / negative ids map to `-inf` (conservative: a `-inf`
+    /// floor makes the caller discard the tree bound, the pre-fix behavior).
+    fn node_lower_bounds<'py>(
+        &self,
+        py: Python<'py>,
+        node_ids: PyReadonlyArray1<i64>,
+    ) -> Bound<'py, PyArray1<f64>> {
+        let ids = node_ids.as_array();
+        let out: Vec<f64> = ids
+            .iter()
+            .map(|&i| {
+                if i < 0 {
+                    f64::NEG_INFINITY
+                } else {
+                    self.inner
+                        .node_lower_bound(NodeId(i as usize))
+                        .unwrap_or(f64::NEG_INFINITY)
+                }
+            })
+            .collect();
+        PyArray1::from_vec(py, out)
+    }
+
     /// Replace a node's structural variable bounds with reduction-tightened ones
     /// (cert:T2.4c), so its children inherit the contracted box.
     ///

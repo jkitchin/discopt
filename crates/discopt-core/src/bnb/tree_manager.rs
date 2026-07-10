@@ -711,6 +711,26 @@ impl TreeManager {
         }
     }
 
+    /// A node's stored `local_lower_bound`, or `None` when the id was never
+    /// allocated in the pool.
+    ///
+    /// Read-only accessor for certification accounting (task #89 / B2-FIX):
+    /// between `export_batch` and `import_results` this is the node's
+    /// *pop-time* bound — the value inherited from its parent's rigorous
+    /// relaxation solve (children are floored at the parent bound on import).
+    /// When a node is later fathomed non-rigorously (failure sentinel with no
+    /// infeasibility proof), this pop-time bound is still a valid lower bound
+    /// for the node's entire subtree, so the driver can keep it as a floor in
+    /// the reported global dual bound instead of discarding the whole tree
+    /// bound.
+    pub fn node_lower_bound(&self, id: NodeId) -> Option<f64> {
+        if id.0 < self.pool.total_count() {
+            Some(self.pool.get(id).local_lower_bound)
+        } else {
+            None
+        }
+    }
+
     /// The warm-start basis stored on a node (cloned), for the Rust-internal
     /// simplex MILP driver. `None` if the node has no inherited basis (root).
     pub fn node_basis(&self, id: NodeId) -> Option<crate::lp::basis::Basis> {
