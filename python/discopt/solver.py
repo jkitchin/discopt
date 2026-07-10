@@ -5665,6 +5665,129 @@ def solve_model(
             _node_reduce_enabled = False
             _node_reduce_fn = None
 
+    # --- Reduced-space McCormick per-node bounding (MAiNGO-parity §2 P2.3) ---
+    # ``DISCOPT_RELAX_SPACE=reduced`` swaps the lifted per-node LP for a Kelley
+    # cutting-plane bound over the ORIGINAL variables only (no auxiliary columns —
+    # the #557 dense-lifted FT storm is avoided by construction). The bound is
+    # certifying: an ``optimal`` status is a VALID node dual lower bound and an
+    # ``infeasible`` status is a rigorous fathom (the relaxed feasible set is
+    # empty). ``lifted``/``auto`` preserve today's path byte-for-byte.
+    #
+    # Sound-or-refuse (plan §0.3): the reduced evaluator is *probed* once here on
+    # the root box. If the model is outside the sound MCBox scope
+    # (``UnsupportedRelaxation``), the WHOLE solve silently falls back to the
+    # lifted path — never an error to the user. Per node, ``unsupported`` /
+    # ``unbounded`` yields no reduced bound (the lifted LP still runs as fallback,
+    # so no node is ever left without a bound source it would otherwise have had).
+    _relax_space = _tuning().relax_space
+    if _relax_space == "hybrid":
+        raise NotImplementedError(
+            "DISCOPT_RELAX_SPACE=hybrid is reserved for MAiNGO-parity plan P2.5 "
+            "(MC<->AVM per-term lift) and is not implemented yet. Use 'lifted' "
+            "(default), 'auto', or 'reduced'."
+        )
+    _reduced_space_active = _relax_space == "reduced" and model._objective is not None
+    # The reduced-space evaluator relaxes over the ORIGINAL degrees of freedom only
+    # (its whole premise — no auxiliary columns). Two adjustments are REQUIRED for a
+    # sound bound (task #69, P2.3 root cause #2):
+    #
+    #   1. Build the relaxation on the PRE-REFORMULATION model. When
+    #      ``factorable_reformulate`` ran (line ~3864), ``model`` is already the
+    #      LIFTED model: its ``_variables`` include the added dependent aux columns
+    #      (e.g. nvs22: 8 originals -> 15 lifted) and its constraints include their
+    #      defining equalities. Relaxing THAT through MCBox rebuilds the lifted
+    #      formulation — defeating the reduced-space purpose AND feeding the aux
+    #      columns' huge bounds (~1e8 on nvs22) into the Kelley LP, whose resulting
+    #      ~1e9-scaled basis the in-house simplex can mis-solve as spuriously
+    #      "infeasible" -> wrong node fathom -> FALSE OPTIMAL. Use ``_prereform_model``
+    #      (the true DOF) when it exists.
+    #   2. Slice every node box to the original columns ``[:_reduced_n_orig]``. Aux
+    #      columns are appended after the originals (comment at the reformulation
+    #      site), so the first ``_reduced_n_orig`` flat entries of every tree-exported
+    #      node box are exactly the original-variable sub-box.
+    _reduced_model = _prereform_model if _prereform_model is not None else model
+    if _prereform_model is not None:
+        _reduced_n_orig = int(_prereform_nvars)
+    else:
+        _reduced_n_orig = int(sum(v.size for v in model._variables))
+    _reduced_bound_fn: Any = None
+    if _reduced_space_active:
+        try:
+            from discopt._jax.mccormick_subgradient import (
+                UnsupportedRelaxation as _RSUnsupported,
+            )
+            from discopt._jax.mccormick_subgradient import (
+                reduced_mccormick_lp_bound as _reduced_bound_fn,
+            )
+
+            # Probe buildability once on the root box: a model out of MCBox scope
+            # surfaces here (status "unsupported") and we fall back for the whole
+            # solve rather than paying the probe cost at every node.
+            _rs_probe = _reduced_bound_fn(
+                _reduced_model,
+                np.asarray(lb, dtype=np.float64)[:_reduced_n_orig],
+                np.asarray(ub, dtype=np.float64)[:_reduced_n_orig],
+                max_rounds=1,
+            )
+            if _rs_probe.status == "unsupported":
+                logger.info(
+                    "DISCOPT_RELAX_SPACE=reduced: model outside sound reduced-space "
+                    "(MCBox) scope; falling back to the lifted McCormick path for "
+                    "this solve."
+                )
+                _reduced_space_active = False
+                _reduced_bound_fn = None
+        except _RSUnsupported as _rs_exc:
+            logger.info(
+                "DISCOPT_RELAX_SPACE=reduced: reduced-space build refused (%s); "
+                "falling back to the lifted McCormick path for this solve.",
+                _rs_exc,
+            )
+            _reduced_space_active = False
+            _reduced_bound_fn = None
+        except Exception as _rs_exc:  # pragma: no cover - defensive
+            logger.warning(
+                "DISCOPT_RELAX_SPACE=reduced: reduced-space setup failed (%s); "
+                "falling back to the lifted McCormick path for this solve.",
+                _rs_exc,
+            )
+            _reduced_space_active = False
+            _reduced_bound_fn = None
+        if _reduced_space_active:
+            logger.debug("reduced-space McCormick per-node bounding active (P2.3)")
+
+    def _reduced_node_bound(_node_lb, _node_ub, _i):
+        """Compute the reduced-space node dual bound over the given node box.
+
+        Returns ``(kind, value)`` where ``kind`` is:
+          * ``"infeasible"`` — rigorous fathom (relaxed feasible set empty);
+          * ``"bound"`` — ``value`` is a VALID node dual lower bound (min sense);
+          * ``None`` — no reduced bound available (unsupported/unbounded/error);
+            the caller must not fathom and should keep any other bound source.
+
+        Correctness (plan §0.3, CLAUDE.md §1): only ``optimal``/``infeasible`` are
+        acted on; a non-finite ``optimal`` bound is dropped (never trusted). This
+        can only raise a node bound toward — never above — the true box optimum.
+
+        The node box spans the lifted space; slice to the original variables
+        (``[:_reduced_n_orig]``) — the reduced evaluator is defined over the
+        original variables only (see the setup block's rationale).
+        """
+        try:
+            rb = _reduced_bound_fn(
+                _reduced_model,
+                np.asarray(_node_lb, dtype=np.float64)[:_reduced_n_orig],
+                np.asarray(_node_ub, dtype=np.float64)[:_reduced_n_orig],
+            )
+        except Exception as _rb_exc:  # pragma: no cover - defensive
+            logger.debug("reduced-space bound failed at node %d: %s", _i, _rb_exc)
+            return None, None
+        if rb.status == "infeasible":
+            return "infeasible", None
+        if rb.status == "optimal" and rb.bound is not None and np.isfinite(rb.bound):
+            return "bound", float(rb.bound)
+        return None, None
+
     from discopt import debug as _debug
 
     def _debug_validate_candidate(
@@ -6092,11 +6215,47 @@ def solve_model(
                                 result_lbs[i] = max(result_lbs[i], float(mc_lbs[i]))
                 except (ValueError, ArithmeticError, RuntimeError) as e:
                     logger.debug("Batch McCormick bound failed: %s", e)
+            # Reduced-space McCormick per-node bound (P2.3). Replaces the lifted
+            # LP for nodes where it applies; nodes it cannot bound (None) fall
+            # through to the lifted block below unchanged.
+            _reduced_done = np.zeros(n_batch, dtype=bool)
+            if _reduced_space_active:
+                for i in range(n_batch):
+                    if node_infeasible_mask[i]:
+                        continue
+                    if _deadline - time.perf_counter() <= 0.0:
+                        break
+                    _rk, _rv = _reduced_node_bound(batch_lb[i], batch_ub[i], i)
+                    if _rk == "infeasible":
+                        # Rigorous fathom: the reduced-space relaxation is a valid
+                        # outer relaxation, so an empty relaxed feasible set proves
+                        # the node's subtree infeasible (mirrors the lifted path).
+                        node_infeasible_mask[i] = True
+                        result_lbs[i] = _INFEASIBILITY_SENTINEL
+                        result_feas[i] = False
+                        _reduced_done[i] = True
+                    elif _rk == "bound":
+                        # Valid node dual lower bound. Combine soundly (max) with
+                        # any bound already present; reduced REPLACES the lifted
+                        # LP solve for this node (the storm-avoidance win).
+                        cur = result_lbs[i]
+                        if cur >= _SENTINEL_THRESHOLD or not np.isfinite(cur):
+                            result_lbs[i] = _rv
+                            result_feas[i] = False
+                        else:
+                            result_lbs[i] = max(cur, _rv)
+                        _reduced_done[i] = True
+                    # _rk is None: no reduced bound (unsupported/unbounded); leave
+                    # the node for the lifted LP fallback below.
+
             # LP-form McCormick: lift bilinears, solve as LP via HiGHS.
             # Per-node, ~20ms for problems with tens of bilinear terms.
             if _mc_lp_relaxer is not None:
                 for i in range(n_batch):
                     if node_infeasible_mask[i]:
+                        continue
+                    if _reduced_done[i]:
+                        # Reduced-space already produced this node's bound/fathom.
                         continue
                     # Deadline enforcement (time_limit overrun fix). A single
                     # McCormick LP solve has an irreducible ~1s floor on a large
@@ -6428,12 +6587,32 @@ def solve_model(
                     result_sols[i] = 0.5 * (lb_clipped + ub_clipped)
                     result_feas[i] = False
 
+                # Reduced-space McCormick per-node bound (P2.3, serial path).
+                # Replaces the lifted LP where it applies; a node it cannot bound
+                # (None) falls through to the lifted block unchanged.
+                _reduced_done_serial = False
+                if _reduced_space_active and not node_infeasible_mask[i]:
+                    _rk, _rv = _reduced_node_bound(node_lb, node_ub, i)
+                    if _rk == "infeasible":
+                        node_infeasible_mask[i] = True
+                        result_lbs[i] = _INFEASIBILITY_SENTINEL
+                        result_feas[i] = False
+                        _reduced_done_serial = True
+                    elif _rk == "bound":
+                        cur = result_lbs[i]
+                        if cur >= _SENTINEL_THRESHOLD or not np.isfinite(cur):
+                            result_lbs[i] = _rv
+                            result_feas[i] = False
+                        else:
+                            result_lbs[i] = max(cur, _rv)
+                        _reduced_done_serial = True
+
                 # LP-form McCormick bound (lifted bilinears, HiGHS LP).
                 # Runs independently of the NLP: provides a valid lower bound
                 # and a feasible LP point usable for spatial branching even
                 # when the NLP was skipped (root) or returned infeasible /
                 # iteration_limit (any node).
-                if _mc_lp_relaxer is not None:
+                if _mc_lp_relaxer is not None and not _reduced_done_serial:
                     try:
                         mc_lp_res = _mc_lp_relaxer.solve_at_node(
                             node_lb,

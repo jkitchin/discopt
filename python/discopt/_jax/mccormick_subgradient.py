@@ -60,6 +60,48 @@ def _scalar_const(expr) -> float:
     return float(v.reshape(()))
 
 
+def _is_affine_ast(expr, model) -> bool:
+    """True iff ``expr`` is affine in the original variables over the whole box.
+
+    Static, structural check on the AST (constants/params/scalar-vars are affine;
+    ``+``/``-``/unary-neg preserve affine-ness; ``*``//``/`` are affine only when one
+    side is a constant; ``**`` only for exponent 1 over an affine base). Used to gate
+    division: ``a / b`` is SOUND when the denominator ``b`` is affine (then ``1/b`` is a
+    univariate reciprocal of an affine expression — the classic McCormick case). For a
+    NON-affine denominator the general reciprocal-then-product composition
+    (``x/y = x·(1/y)``) is NOT validated — it produced an INVALID ``cc`` subgradient on
+    nvs22 con2 (``(A·x6)/((x2·x3)·(sum-of-squares))``), a cut that excluded the true
+    feasible optimum by ~1.7e5 -> false-infeasible -> false optimal (task #69). Refuse
+    rather than emit an invalid bound (sound-or-refuse, CLAUDE.md §3)."""
+    if isinstance(expr, (Constant, Parameter)):
+        return True
+    if _resolve_scalar_var_offset(expr, model) is not None:
+        return True
+    if isinstance(expr, Variable):
+        return False
+    if isinstance(expr, UnaryOp):
+        return expr.op == "neg" and _is_affine_ast(expr.operand, model)
+    if isinstance(expr, BinaryOp):
+        lo_const = isinstance(expr.left, (Constant, Parameter))
+        ro_const = isinstance(expr.right, (Constant, Parameter))
+        if expr.op in ("+", "-"):
+            return _is_affine_ast(expr.left, model) and _is_affine_ast(expr.right, model)
+        if expr.op == "*":
+            if lo_const:
+                return _is_affine_ast(expr.right, model)
+            if ro_const:
+                return _is_affine_ast(expr.left, model)
+            return False
+        if expr.op == "/":
+            return ro_const and _is_affine_ast(expr.left, model)
+        if expr.op == "**":
+            return (
+                ro_const and _scalar_const(expr.right) == 1.0 and _is_affine_ast(expr.left, model)
+            )
+        return False
+    return False
+
+
 def _to_mcbox(expr, leaves, model):
     """Interpret a scalar model expression into an MCBox over the current leaves."""
     if isinstance(expr, (Constant, Parameter)):
@@ -91,7 +133,16 @@ def _to_mcbox(expr, leaves, model):
                 if c == 0.0:
                     raise UnsupportedRelaxation("division by zero constant")
                 return _to_mcbox(expr.left, leaves, model) * (1.0 / c)
-            # variable division via the sign-definite reciprocal (P1.2)
+            # Variable division via the sign-definite reciprocal (P1.2). SOUND only
+            # for an AFFINE denominator (1/affine is a univariate reciprocal of an
+            # affine arg — validated). A NON-affine denominator routes through the
+            # general reciprocal-then-bilinear composition whose cc subgradient is
+            # NOT validated and was shown INVALID on nvs22 con2 (task #69) -> refuse.
+            if not _is_affine_ast(expr.right, model):
+                raise UnsupportedRelaxation(
+                    "division by a non-affine denominator (unvalidated reduced-space "
+                    "reciprocal composition; P1.2 follow-up)"
+                )
             return _to_mcbox(expr.left, leaves, model) / _to_mcbox(expr.right, leaves, model)
         if op == "**":
             if not isinstance(expr.right, (Constant, Parameter)):
@@ -323,6 +374,37 @@ def reduced_mccormick_lp_bound(
                     status = "error"
 
         if status == "infeasible":
+            # SOUND-OR-REFUSE (task #69, P2.3 root cause #2): a reduced-space
+            # ``infeasible`` fathoms the node, so it MUST be a rigorous proof — not
+            # a numerical artifact. The Kelley LP (box + epigraph + valid cuts) can
+            # only be genuinely infeasible if the accumulated valid constraint cuts
+            # contradict; but the in-house simplex can spuriously report infeasible
+            # on a badly-scaled basis. Cross-check with scipy/HiGHS before trusting
+            # the fathom: if HiGHS finds the same LP feasible (or is itself
+            # inconclusive), DO NOT fathom — return no bound and let the caller keep
+            # any other (lifted) bound source. Only a two-solver agreement fathoms.
+            if backend == "simplex":
+                try:
+                    _vres = sopt.linprog(
+                        c,
+                        A_ub=np.asarray(A_all),
+                        b_ub=np.asarray(rhs_all),
+                        bounds=bounds,
+                        method="highs",
+                    )
+                except Exception:
+                    _vres = None
+                _confirmed = _vres is not None and (
+                    "infeasible" in (getattr(_vres, "message", "") or "").lower()
+                    or (not _vres.success and getattr(_vres, "status", None) == 2)
+                )
+                if not _confirmed:
+                    # Unconfirmed infeasible => suspected simplex mis-solve. Refuse to
+                    # fathom; report no usable reduced bound for this node (the caller
+                    # falls back to any other bound source; the node is NOT pruned).
+                    return ReducedBound(
+                        bound=-np.inf, status="unsupported", rounds=r, history=history
+                    )
             return ReducedBound(bound=np.inf, status="infeasible", rounds=r, history=history)
         if status == "unbounded":
             return ReducedBound(bound=-np.inf, status="unbounded", rounds=r, history=history)

@@ -411,11 +411,11 @@ remainder enclosure; kill if the enclosure blows up on the motivating model).
 | P0.2 MCBox module | **DONE (2026-07-11)** | `feat/mcbox-p0` commit `5d7fdf4f`: `_jax/mcbox.py` (MCBox pytree, arithmetic + bilinear + sign-agnostic repeated-mult powers + exp/log/log2/log10/sqrt/softplus/abs), `test_mcbox.py` **22/22**. **Finding (binding for P1.1):** the kernel-chain subgradient is valid **exactly for provably-convex envelopes** — the S-shaped ops (tanh/atan/sigmoid/sinh) have a non-convex cv over a sign-spanning box, so they *refuse* in P0.2 and move to P1.1 (per-regime subgradient selection). Powers are sound via repeated bilinear multiplication for all n≥1 and all signs (looser than the tight monomial hull → P1.3). Not merged (library-only; PR pending). |
 | P0.3 v1 port | **DONE — PR #575 (2026-07-11)** | `mccormick_subgradient.py` reimplemented on MCBox (`_to_mcbox` AST interpreter); 14/14. **Strictly more capable:** 12 core v1 tests unchanged (regression floor); 2 v1 refusal tests flipped to soundness (x**3 spanning, exp(x)*x now relax soundly). P0.2 (`5d7fdf4f`) merged in **#574**; density-route #557 fix merged in **#573**. |
 | P1.1 S-shaped ops | **DONE — PR #576 (2026-07-11)** | tanh/atan/sigmoid/sinh in MCBox: kernel-chain (tight) on non-spanning boxes, sound constant-envelope fallback (`jnp.where`, loose) on spanning boxes — jit/vmap-able. Diagnostic confirmed the sigmoidal cv is convex non-spanning, non-convex spanning (issue #51). test_mcbox 27/27. **P1.1b** follow-up: tight tangent envelope for the spanning case. P0.3 merged in **#575**. |
-| P1.2 division | **DONE — PR #577 (2026-07-11)** | Non-affine products already sound in `_bilinear` (P0.2). Added variable division `x/y` via sign-definite reciprocal (mid-rule clamp; no-info bracket when denom interval crosses 0). test_mcbox 30/30, reduced-space `min x/y`=exact 1/3. |
+| P1.2 division | **PARTIAL — reciprocal-of-affine only (2026-07-10)** | PR #577 added `x/y` via sign-definite reciprocal (mid-rule clamp; no-info bracket when denom crosses 0); sound for `1/(affine)`. **Correction (P2.3, nvs22):** the general **non-affine-denominator** case (`(A·x6)/((x2·x3)·(Σ-sq))`) produces an INVALID `cc` subgradient (numeric witness in §7 P2.3). `_to_mcbox` now REFUSES division by a non-affine denominator (sound-or-refuse); reciprocal-of-affine and non-affine *products* remain sound. FOLLOW-UP: a validated non-affine reciprocal subgradient to lift the refusal. test_mcbox 30/30, `min x/y`=exact 1/3 still hold. |
 | P1.3–P1.4 coverage | not started | P1.3 tight monomial hull (`x**n` via relax_pow, tighter than repeated-mult); P1.4 fractional powers/signomials. P1.1b: tight sigmoidal spanning envelope. |
 | P2.1 jit Kelley | not started | eager baseline: 12–23 s / 15 rounds (nvs19/24) |
 | P2.2 in-house LP | not started | de-risk: check `RefacFtTinyPivot` ≈ 0 on Kelley bases |
-| P2.3 mode wiring | not started | |
+| P2.3 mode wiring | **SOUND, default-OFF (2026-07-10)** | Branch `feat/relax-space-p2.3`: `solver_tuning.relax_space` + env `DISCOPT_RELAX_SPACE` (default `lifted`), reduced bound fed into both the batched and serial node loops, sound-or-refuse fallback. **Default byte-identical: PASS** (11-instance panel unchanged). **Corpus soundness sweep: PASS, incorrect_count=0** across 21 MINLPLib instances (curated small + nvs19/24/st_e36/nvs22 + QPs) cross-checked vs `minlplib.solu` — no false-optimal, no invalid bound, no false-infeasible. **Feasible-point soundness: PASS** (74,015 samples, 0 cuts). **Adversarial suite with the flag ON: 10/10** (incl. nvs22). **nvs22 false-optimal FIXED** — three root causes: (1) unbounded leaves (#582 `_require_finite_box`); (2) the wiring fed the reduced evaluator the LIFTED node box (15 cols incl. ~1e8-bound factorable-reformulation aux vars) instead of the original DOF — fixed by building on `_prereform_model` and slicing node boxes to `_prereform_nvars`; (3) the deep defect — an **INVALID `cc` subgradient of the non-affine division** in nvs22 con2 (`(A·x6)/((x2·x3)·(Σ-of-squares))`), whose Kelley cut excluded the true optimum by ~1.7e5 (numeric witness: cut idx 20 at iterate `[1,1,1,1,42.2,1,1.12,0.064]`). Fixed sound-or-refuse: `_to_mcbox` now **refuses division by a non-affine denominator** (`UnsupportedRelaxation` → status `unsupported` → whole-solve lifted fallback); reciprocal-of-affine is still accepted. Defense-in-depth: an `infeasible` from the in-house simplex is cross-checked against scipy/HiGHS before it is trusted to fathom (never a single mis-solve). nvs22 now certifies 6.0582 (35 nodes, = lifted). nodes/s: reduced ~5× slower/node on st\_e36 where it applies — capability, not speed (§0.1); `auto` still never selects reduced (P2.4). NOT merged; wiring stays default-OFF pending the P2.4 graduation gate. |
 | P2.4 auto policy | blocked on P2.3 | |
 | P2.5 hybrid | deferred | |
 | P3.1 CustomCall relax | not started | prototype P3.3 first |
@@ -434,6 +434,19 @@ Prior falsifications binding on this plan (§4 of CLAUDE.md — measurements win
   root bounds on QPs.
 - The FT-storm motivation for reduced space is **gone** (#573 density route);
   §0.1's capability framing is the binding rationale.
+- **The reduced-space evaluator's non-affine-division subgradient was unsound**
+  (P2.3, found+fixed 2026-07-10): the general `x/y = x·(1/y)` composition produced
+  an INVALID `cc` subgradient on `nvs22` con2, cutting off the true optimum → false
+  `infeasible` → false optimal. RESOLUTION (sound-or-refuse, CLAUDE.md §3):
+  `_to_mcbox` refuses division by a **non-affine denominator** (reciprocal-of-affine
+  stays sound); the caller falls back to lifted. Two adjacent bugs fixed with it:
+  the solver must feed the reduced evaluator the **original-DOF box**
+  (`_prereform_model` / `_prereform_nvars` slice), NOT the factorable-lifted node box
+  (whose ~1e8 aux bounds also made the Kelley LP mis-solve); and the unbounded-leaf
+  refusal (#582). Corpus sweep now clean (incorrect_count=0, 21 instances) + adversarial
+  10/10 with the flag ON. FOLLOW-UP (P1.2): implement a *validated* non-affine
+  division/reciprocal subgradient to widen scope beyond reciprocal-of-affine; until
+  then the refusal is the correct, sound behavior.
 
 ## 8. What "parity" means at the end
 

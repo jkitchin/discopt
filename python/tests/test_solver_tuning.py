@@ -31,6 +31,8 @@ def test_defaults_match_legacy_env_defaults():
     assert t.rlt_quad_max == 256
     assert t.multilinear_rlt_max == 4
     assert t.node_bound_mode == "lp"
+    # P2.3: reduced-space relaxation defaults to the lifted path (byte-identical).
+    assert t.relax_space == "lifted"
     assert t.node_nlp_stride == 4
     # ILS-DEFAULT: the integer_local_search sub-NLP solve cap is ON by default (2).
     assert t.ils_solve_cap == 2
@@ -59,6 +61,8 @@ def test_defaults_match_legacy_env_defaults():
         ("DISCOPT_RLT", "1", "rlt", True),
         ("DISCOPT_LIFTED_FBBT", "1", "lifted_fbbt", True),
         ("DISCOPT_NODE_BOUND_MODE", "milp", "node_bound_mode", "milp"),
+        ("DISCOPT_RELAX_SPACE", "reduced", "relax_space", "reduced"),
+        ("DISCOPT_RELAX_SPACE", "auto", "relax_space", "auto"),
         ("DISCOPT_NODE_NLP_STRIDE", "2", "node_nlp_stride", 2),
         ("DISCOPT_ILS_SOLVE_CAP", "5", "ils_solve_cap", 5),
         ("DISCOPT_ILS_SOLVE_CAP", "0", "ils_solve_cap", 0),  # escape hatch = uncapped
@@ -107,6 +111,7 @@ def test_explicit_field_overrides_env(monkeypatch):
         (dict(node_nlp_stride=0), "node_nlp_stride must be >= 1"),
         (dict(ils_solve_cap=-1), "ils_solve_cap must be >= 0"),
         (dict(node_bound_mode="bogus"), "node_bound_mode must be 'lp' or 'milp'"),
+        (dict(relax_space="bogus"), "relax_space must be"),
         (dict(psd_cost_gate_budget=0), "psd_cost_gate_budget must be > 0"),
         (dict(psd_cost_gate_budget=-1.0), "psd_cost_gate_budget must be > 0"),
         (dict(psd_cost_gate_tau=-1e-6), "psd_cost_gate_tau must be >= 0"),

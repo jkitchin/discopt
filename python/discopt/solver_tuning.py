@@ -291,6 +291,34 @@ class SolverTuning:
     """Per-node dual bound: ``"lp"`` (default, lifted-McCormick LP) or ``"milp"``
     (legacy nested integer MILP node solve) — ``DISCOPT_NODE_BOUND_MODE``."""
 
+    relax_space: str = field(
+        default_factory=lambda: os.environ.get("DISCOPT_RELAX_SPACE", "lifted")
+    )
+    """Per-node relaxation *space* for the McCormick dual bound
+    (``DISCOPT_RELAX_SPACE``, MAiNGO-parity plan §2 P2.3). Values:
+
+    - ``"lifted"`` (**default**, byte-identical to pre-P2.3): today's lifted
+      McCormick LP with auxiliary columns (``MccormickLPRelaxer.solve_at_node``).
+    - ``"auto"``: currently an alias for ``"lifted"`` — no structural policy has
+      graduated yet (P2.4). Preserves today's behavior exactly.
+    - ``"reduced"``: MAiNGO-style **reduced-space** McCormick — a Kelley
+      cutting-plane bound over the *original* variables only (no lifted columns),
+      computed by ``reduced_mccormick_lp_bound``. The evaluator is built once per
+      solve; if the model is outside the sound MCBox scope
+      (``UnsupportedRelaxation`` at build time) the whole solve falls back to the
+      lifted path (logged once, never an error). Per-node, an ``"unsupported"`` /
+      ``"unbounded"`` status yields no reduced bound for that node (lifted-only);
+      ``"infeasible"`` fathoms the node; ``"optimal"`` is a **valid** node dual
+      lower bound and is combined soundly (max with any lifted bound).
+    - ``"hybrid"``: reserved for P2.5 (Najman-style MC↔AVM per-term lift); raises
+      ``NotImplementedError`` until then rather than silently degrading.
+
+    CORRECTNESS-CRITICAL: the reduced-space bound certifies the node dual bound.
+    A ``"reduced"`` bound is only ever used where its status is ``"optimal"``
+    (valid LB) or ``"infeasible"`` (empty relaxed set → fathom); it can only
+    *raise* a node bound up to (never above) the true box optimum, never cut a
+    feasible point."""
+
     node_nlp_stride: int = field(default_factory=lambda: _env_int("DISCOPT_NODE_NLP_STRIDE", 4))
     """Solve the node NLP every k-th node (``DISCOPT_NODE_NLP_STRIDE``, default 4)."""
 
@@ -357,6 +385,11 @@ class SolverTuning:
         if self.node_bound_mode not in ("lp", "milp"):
             raise ValueError(
                 f"node_bound_mode must be 'lp' or 'milp', got {self.node_bound_mode!r}"
+            )
+        if self.relax_space not in ("auto", "lifted", "reduced", "hybrid"):
+            raise ValueError(
+                "relax_space must be 'auto', 'lifted', 'reduced', or 'hybrid', "
+                f"got {self.relax_space!r}"
             )
         if self.psd_cost_gate_budget <= 0:
             raise ValueError(f"psd_cost_gate_budget must be > 0, got {self.psd_cost_gate_budget}")
