@@ -3621,11 +3621,20 @@ def _should_claim_composite(
         if p == int(p):
             if int(p) >= 3:
                 return True
-            # Integer square of a non-bare base: normally the dedicated square
-            # lift (a composed relaxation). Under H-UNI, claim it here so the
-            # exact 1-D hull can lift the whole single-variable square directly.
+            # Integer square of a non-bare base. Under H-UNI, claim it so the exact
+            # 1-D hull can lift the whole single-variable square directly — but NOT
+            # when the base is *affine*. A square of an affine (e.g. ``(x-3)**2``) is
+            # a convex quadratic the dedicated square lift already handles exactly;
+            # diverting it into the composite path changes the aux-column layout the
+            # incremental McCormick engine relies on and buys no tightness. Only a
+            # genuinely non-affine base (e.g. ``ln(x-2)``, whose square the standard
+            # path relaxes only via a looser composition) is claimed here.
             if allow_general and int(p) == 2:
-                return True
+                try:
+                    _linearize_affine_expr(expr.left, model, n_orig)
+                    return False  # affine base → dedicated square lift handles it
+                except ValueError:
+                    return True  # non-affine base → H-UNI hull is the right tool
             return False
         return True
     if allow_general and isinstance(expr, BinaryOp) and expr.op in ("+", "-"):
