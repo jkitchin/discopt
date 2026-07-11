@@ -4154,7 +4154,7 @@ def _collect_aliased_monomial_hull_relaxations(
                 pts = np.tile(base_x, (len(xarr), 1))
                 pts[:, _fi] = xarr
                 hv = np.asarray(_fb(jnp.asarray(pts))).ravel()
-                return hv**_pw  # G(x) = h(x)**p
+                return np.asarray(hv**_pw, dtype=np.float64)  # G(x) = h(x)**p
 
             hull = univariate_hull_envelope(lo, hi, value_batch)
             env_cache[ckey] = hull

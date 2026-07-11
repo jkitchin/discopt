@@ -139,7 +139,7 @@ def _thin_hull(
 def _pwl_eval(hull: list[tuple[float, float]], xf: np.ndarray) -> np.ndarray:
     hx = np.array([p[0] for p in hull], dtype=np.float64)
     hy = np.array([p[1] for p in hull], dtype=np.float64)
-    return np.interp(xf, hx, hy)
+    return np.asarray(np.interp(xf, hx, hy), dtype=np.float64)
 
 
 def _hull_lines(
