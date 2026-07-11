@@ -4197,9 +4197,9 @@ class LogMonomialRelaxation:
 
     t_col: int
     coef: float
-    z_cols: tuple[int, ...]           # one ln-column per distinct factor
-    factor_cols: tuple[int, ...]      # the original variable column of each factor
-    factor_exps: tuple[float, ...]    # exponent aᵢ (aligned with z_cols/factor_cols)
+    z_cols: tuple[int, ...]  # one ln-column per distinct factor
+    factor_cols: tuple[int, ...]  # the original variable column of each factor
+    factor_exps: tuple[float, ...]  # exponent aᵢ (aligned with z_cols/factor_cols)
     factor_boxes: tuple[tuple[float, float], ...]
     s_col: int
     s_lb: float
