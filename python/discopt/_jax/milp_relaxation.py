@@ -3542,14 +3542,29 @@ def _composite_referenced_var(expr: Expression, model: Model) -> Optional[tuple[
 
 
 def _univariate_envelope_enabled() -> bool:
-    """H-UNI feature flag (``DISCOPT_UNIVARIATE_ENVELOPE``, default **OFF**).
+    """H-UNI feature flag (``DISCOPT_UNIVARIATE_ENVELOPE``, default **OFF** — opt-in).
 
-    Task ``cert:LR-2`` (``docs/dev/lever-a-root-tightness-plan.md`` §4). When ON,
-    a maximal single-variable subtree whose certified curvature is *neither*
-    convex nor concave is lifted with the exact 1-D convex/concave hull envelope
-    (:mod:`discopt._jax.univariate_hull`) instead of falling to a looser composed
-    relaxation. Default-OFF makes the flag-OFF relaxation byte-identical to prior
-    main (bound-changing regime, parent-plan §0.4).
+    Task ``cert:LR-2`` / ``cert:LR-3``. When ON, a maximal single-variable subtree
+    whose certified curvature is *neither* convex nor concave is lifted with the
+    exact 1-D convex/concave hull envelope (:mod:`discopt._jax.univariate_hull`)
+    instead of falling to a looser composed relaxation. Set
+    ``DISCOPT_UNIVARIATE_ENVELOPE=1`` to opt in.
+
+    **Graduation deferred (kept default-OFF).** The gate result was sound (nvs09
+    certifies, tree 215→3, ``incorrect_count = 0``), but graduating H-UNI default-ON
+    surfaced a class of *claim-boundary collisions*: as an additional overlapping
+    "claimer" layered onto the federated lifted-relaxation path, H-UNI diverts terms
+    the dedicated exact machinery already handles (bare-monomial lifts, the square
+    lift, the issue-267 univariate-product path, the finite-domain trig table),
+    arbitrated by a hand-maintained defer-list in :func:`_should_claim_composite`.
+    Those collisions are order-masked under pytest-xdist, so a green parallel suite
+    is not proof of no silent divert. The principled home for graduating H-UNI is the
+    AVM/factorable-canonicalization work (``docs/dev/maingo-parity-plan.md``), where a
+    single canonical normal form gives one envelope per atom and the defer-list
+    disappears. Until then H-UNI ships as a sound opt-in flag; OFF is byte-identical
+    to prior main (the #630 fingerprint guard proves it), and the LR-3 soundness fixes
+    (no hull over effectively-unbounded boxes; the claim-boundary defers) still harden
+    the opt-in ON path.
     """
     return os.environ.get("DISCOPT_UNIVARIATE_ENVELOPE", "0") != "0"
 
@@ -3613,11 +3628,20 @@ def _should_claim_composite(
         if p == int(p):
             if int(p) >= 3:
                 return True
-            # Integer square of a non-bare base: normally the dedicated square
-            # lift (a composed relaxation). Under H-UNI, claim it here so the
-            # exact 1-D hull can lift the whole single-variable square directly.
+            # Integer square of a non-bare base. Under H-UNI, claim it so the exact
+            # 1-D hull can lift the whole single-variable square directly — but NOT
+            # when the base is *affine*. A square of an affine (e.g. ``(x-3)**2``) is
+            # a convex quadratic the dedicated square lift already handles exactly;
+            # diverting it into the composite path changes the aux-column layout the
+            # incremental McCormick engine relies on and buys no tightness. Only a
+            # genuinely non-affine base (e.g. ``ln(x-2)``, whose square the standard
+            # path relaxes only via a looser composition) is claimed here.
             if allow_general and int(p) == 2:
-                return True
+                try:
+                    _linearize_affine_expr(expr.left, model, n_orig)
+                    return False  # affine base → dedicated square lift handles it
+                except ValueError:
+                    return True  # non-affine base → H-UNI hull is the right tool
             return False
         return True
     if allow_general and isinstance(expr, BinaryOp) and expr.op in ("+", "-"):
@@ -3627,8 +3651,99 @@ def _should_claim_composite(
         # a purely affine sum is left to the exact linear path.
         if _composite_referenced_var(expr, model) is None:
             return False
-        return _expr_has_nonlinear_subterm(expr)
+        return _has_genuine_composite_subterm(expr, model, n_orig)
     return False
+
+
+def _has_genuine_composite_subterm(expr: Expression, model: Model, n_orig: int) -> bool:
+    """True if an additive single-variable ``expr`` contains a sub-term the standard
+    path relaxes only via a *looser composition* — the case H-UNI's exact 1-D hull
+    improves on.
+
+    A *bare monomial* ``x**p`` (base is a variable) is lifted exactly by the
+    dedicated monomial/fractional-power machinery, and the incremental McCormick
+    engine builds its rows directly; H-UNI adds no tightness there but would divert
+    the term into the composite path and break the engine's cold/patch agreement.
+    So ``_expr_has_nonlinear_subterm`` (which fires on *any* power) is too broad for
+    the additive claim. Here we walk ``+``/``-``/``neg``/const-scaling and claim only
+    when a leaf is a *genuine composite*: a univariate call of a non-affine argument
+    (``ln(x-2)``) or a power of a non-bare base (``(ln(x-2))**2``) — exactly the
+    non-additive cases :func:`_should_claim_composite` recognises with
+    ``allow_general=True``. nvs09's ``(ln(x-2))**2 + (ln(10-x))**2`` still qualifies;
+    ``x**p + x`` (bare monomial + linear) no longer does."""
+    if isinstance(expr, UnaryOp) and expr.op == "neg":
+        return _has_genuine_composite_subterm(expr.operand, model, n_orig)
+    if isinstance(expr, BinaryOp) and expr.op in ("+", "-"):
+        return _has_genuine_composite_subterm(expr.left, model, n_orig) or (
+            _has_genuine_composite_subterm(expr.right, model, n_orig)
+        )
+    if isinstance(expr, BinaryOp) and expr.op == "*":
+        # A constant-scaled term contributes its non-constant factor's status.
+        if isinstance(expr.right, Constant):
+            return _has_genuine_composite_subterm(expr.left, model, n_orig)
+        if isinstance(expr.left, Constant):
+            return _has_genuine_composite_subterm(expr.right, model, n_orig)
+        return False
+    return _should_claim_composite(expr, model, n_orig, allow_general=True)
+
+
+def _is_tabulatable_trig_square(
+    expr: Expression,
+    model: Model,
+    n_orig: int,
+    flat_types: list[VarType],
+    flat_lb: np.ndarray,
+    flat_ub: np.ndarray,
+) -> bool:
+    """True when ``expr`` is exactly ``sin/cos(affine(x))**2`` for a small integer
+    domain ``x`` the finite-domain trig-square table covers exactly."""
+    if not (isinstance(expr, BinaryOp) and expr.op == "**" and isinstance(expr.right, Constant)):
+        return False
+    if float(expr.right.value) != 2.0:
+        return False
+    op = _univariate_arg(expr.left)
+    if op is None or op[0] not in {"sin", "cos"}:
+        return False
+    try:
+        arg_coeff, _arg_const = _linearize_affine_expr(op[1], model, n_orig)
+    except ValueError:
+        return False
+    nz = np.flatnonzero(np.abs(arg_coeff) > 1e-12)
+    if nz.size != 1:
+        return False
+    dom = _integer_domain_values(int(nz[0]), flat_types, flat_lb, flat_ub)
+    return dom is not None and 0 < len(dom) <= _MAX_FINITE_DOMAIN_TRIG_TABLE_VALUES
+
+
+def _defers_to_finite_domain_trig_table(
+    expr: Expression,
+    model: Model,
+    n_orig: int,
+    flat_types: list[VarType],
+    flat_lb: np.ndarray,
+    flat_ub: np.ndarray,
+) -> bool:
+    """True when every nonlinear part of ``expr`` is a tabulatable trig-square (a
+    ``sin/cos(affine(x))**2`` over a small integer domain).
+
+    H-UNI's ``allow_general`` claim otherwise grabs the whole composite — either
+    the bare ``trig(x)**2`` or an additive ``trig(x)**2 + c`` (the constraint RHS
+    form) — and relaxes it with a *continuous* 1-D hull, looser than the exact
+    per-integer-point table. Deferring lets the exact table
+    (:func:`_finite_domain_trig_square_table_values`) handle it. The recursion into
+    ``+``/``-`` keeps this from firing on genuinely non-tabulatable additive
+    composites (e.g. nvs09's ``(ln(x-2))**2 + (ln(10-x))**2`` — ``ln`` is not a
+    trig table), so the nvs09 win is preserved.
+    """
+
+    def all_nonlinear_tabulatable(e: Expression) -> bool:
+        if isinstance(e, BinaryOp) and e.op in ("+", "-"):
+            return all_nonlinear_tabulatable(e.left) and all_nonlinear_tabulatable(e.right)
+        if not _expr_has_nonlinear_subterm(e):
+            return True  # affine leaf: no nonlinear content to defer
+        return _is_tabulatable_trig_square(e, model, n_orig, flat_types, flat_lb, flat_ub)
+
+    return _expr_has_nonlinear_subterm(expr) and all_nonlinear_tabulatable(expr)
 
 
 def _expr_has_nonlinear_subterm(expr: Expression) -> bool:
@@ -3907,6 +4022,7 @@ def _collect_composite_univariate_relaxations(
     box = _build_convexity_box(model, flat_lb, flat_ub)
     base_x = np.zeros(n_orig, dtype=np.float64)
     allow_general = _univariate_envelope_enabled()
+    flat_types = _flat_variable_types(model)
 
     def maybe_add(expr: Expression) -> bool:
         """Attempt to lift ``expr`` as a composite. Returns True when it was
@@ -3921,6 +4037,12 @@ def _collect_composite_univariate_relaxations(
             return False
         if not _should_claim_composite(expr, model, n_orig, allow_general=allow_general):
             return False
+        # Defer to the exact finite-domain trig-square table (tighter than H-UNI's
+        # continuous hull) for sin/cos of a small integer domain.
+        if allow_general and _defers_to_finite_domain_trig_table(
+            expr, model, n_orig, flat_types, flat_lb, flat_ub
+        ):
+            return False
         # Is this node claimable by the *pre-existing* (curvature-certified) path?
         # If so, treat it exactly as before (claim, but let visit descend).
         _pre_existing_claim = _should_claim_composite(expr, model, n_orig, allow_general=False)
@@ -3930,7 +4052,14 @@ def _collect_composite_univariate_relaxations(
         var, flat_idx = ref
         lo = float(flat_lb[flat_idx])
         hi = float(flat_ub[flat_idx])
-        if not (np.isfinite(lo) and np.isfinite(hi)) or hi < lo:
+        # Use the solver-sense finiteness check (|bound| < 1e19), NOT raw
+        # np.isfinite: an *unbounded* variable carries a finite-but-astronomical
+        # default box (~±1e20), which np.isfinite accepts. Sampling a 1-D hull over
+        # a ~1e20-wide box is numerically meaningless (aux magnitudes reach ~1e60)
+        # and drives the LP to a false `infeasible`. Abstain → fall back to the
+        # sound composed relaxation. (Root cause of the H-UNI AMP min/max
+        # false-infeasible, cert:LR-3.)
+        if not (_is_effectively_finite(lo) and _is_effectively_finite(hi)) or hi < lo:
             return False
         try:
             f = compile_expression(expr, model)
@@ -3997,9 +4126,15 @@ def _collect_composite_univariate_relaxations(
         )
         bounds.append(col_bounds)
         col_idx += 1
-        # Only a *new* general (non-pre-existing) claim blocks descent; a
-        # convex/concave claim behaves exactly as prior main (descent continues).
-        return not _pre_existing_claim
+        # A *new* general (non-pre-existing) claim always blocks descent. When
+        # H-UNI is on, a pre-existing convex/concave composite ALSO blocks descent:
+        # the whole single-variable node is already relaxed as a composite in x, so
+        # descending would let H-UNI redundantly re-claim an inner sub-expression
+        # (e.g. the ``x**2 + 1`` inside a claimed ``sqrt(x**2 + 1)``) — sound but a
+        # duplicate column. When the flag is OFF, descent is unchanged from prior
+        # main (byte-identity: the general ``+``/``**2`` claims never fire, so
+        # descending into a convex composite claims nothing anyway).
+        return (not _pre_existing_claim) or allow_general
 
     def visit(expr: Expression) -> None:
         if maybe_add(expr):
@@ -4126,7 +4261,14 @@ def _collect_aliased_monomial_hull_relaxations(
             continue
         lo = float(flat_lb[flat_idx])
         hi = float(flat_ub[flat_idx])
-        if not (np.isfinite(lo) and np.isfinite(hi)) or hi - lo <= _COMPOSITE_CURV_TOL:
+        # Solver-sense finiteness (see the companion guard in
+        # _collect_composite_univariate_relaxations): reject the ~±1e20 default
+        # box of an unbounded variable, over which the sampled hull is numerically
+        # meaningless and yields a false `infeasible`.
+        if (
+            not (_is_effectively_finite(lo) and _is_effectively_finite(hi))
+            or hi - lo <= _COMPOSITE_CURV_TOL
+        ):
             continue
         # Compiling + vmapping the alias body is the expensive step; cache the
         # traced batch evaluator across nodes (the box changes per node, but the
