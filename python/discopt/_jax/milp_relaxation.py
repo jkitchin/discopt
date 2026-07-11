@@ -3631,6 +3631,65 @@ def _should_claim_composite(
     return False
 
 
+def _is_tabulatable_trig_square(
+    expr: Expression,
+    model: Model,
+    n_orig: int,
+    flat_types: list[VarType],
+    flat_lb: np.ndarray,
+    flat_ub: np.ndarray,
+) -> bool:
+    """True when ``expr`` is exactly ``sin/cos(affine(x))**2`` for a small integer
+    domain ``x`` the finite-domain trig-square table covers exactly."""
+    if not (isinstance(expr, BinaryOp) and expr.op == "**" and isinstance(expr.right, Constant)):
+        return False
+    if float(expr.right.value) != 2.0:
+        return False
+    op = _univariate_arg(expr.left)
+    if op is None or op[0] not in {"sin", "cos"}:
+        return False
+    try:
+        arg_coeff, _arg_const = _linearize_affine_expr(op[1], model, n_orig)
+    except ValueError:
+        return False
+    nz = np.flatnonzero(np.abs(arg_coeff) > 1e-12)
+    if nz.size != 1:
+        return False
+    dom = _integer_domain_values(int(nz[0]), flat_types, flat_lb, flat_ub)
+    return dom is not None and 0 < len(dom) <= _MAX_FINITE_DOMAIN_TRIG_TABLE_VALUES
+
+
+def _defers_to_finite_domain_trig_table(
+    expr: Expression,
+    model: Model,
+    n_orig: int,
+    flat_types: list[VarType],
+    flat_lb: np.ndarray,
+    flat_ub: np.ndarray,
+) -> bool:
+    """True when every nonlinear part of ``expr`` is a tabulatable trig-square (a
+    ``sin/cos(affine(x))**2`` over a small integer domain).
+
+    H-UNI's ``allow_general`` claim otherwise grabs the whole composite — either
+    the bare ``trig(x)**2`` or an additive ``trig(x)**2 + c`` (the constraint RHS
+    form) — and relaxes it with a *continuous* 1-D hull, looser than the exact
+    per-integer-point table. Deferring lets the exact table
+    (:func:`_finite_domain_trig_square_table_values`) handle it. The recursion into
+    ``+``/``-`` keeps this from firing on genuinely non-tabulatable additive
+    composites (e.g. nvs09's ``(ln(x-2))**2 + (ln(10-x))**2`` — ``ln`` is not a
+    trig table), so the nvs09 win is preserved.
+    """
+
+    def all_nonlinear_tabulatable(e: Expression) -> bool:
+        if isinstance(e, BinaryOp) and e.op in ("+", "-"):
+            return all_nonlinear_tabulatable(e.left) and all_nonlinear_tabulatable(e.right)
+        if not _expr_has_nonlinear_subterm(e):
+            return True  # affine leaf: no nonlinear content to defer
+        return _is_tabulatable_trig_square(e, model, n_orig, flat_types, flat_lb, flat_ub)
+
+    return _expr_has_nonlinear_subterm(expr) and all_nonlinear_tabulatable(expr)
+
+
 def _expr_has_nonlinear_subterm(expr: Expression) -> bool:
     """True if ``expr`` contains a FunctionCall or a non-unit power — i.e. it is
     not a pure affine combination (which the exact linear path already handles)."""
@@ -3907,6 +3966,7 @@ def _collect_composite_univariate_relaxations(
     box = _build_convexity_box(model, flat_lb, flat_ub)
     base_x = np.zeros(n_orig, dtype=np.float64)
     allow_general = _univariate_envelope_enabled()
+    flat_types = _flat_variable_types(model)
 
     def maybe_add(expr: Expression) -> bool:
         """Attempt to lift ``expr`` as a composite. Returns True when it was
@@ -3921,6 +3981,12 @@ def _collect_composite_univariate_relaxations(
             return False
         if not _should_claim_composite(expr, model, n_orig, allow_general=allow_general):
             return False
+        # Defer to the exact finite-domain trig-square table (tighter than H-UNI's
+        # continuous hull) for sin/cos of a small integer domain.
+        if allow_general and _defers_to_finite_domain_trig_table(
+            expr, model, n_orig, flat_types, flat_lb, flat_ub
+        ):
+            return False
         # Is this node claimable by the *pre-existing* (curvature-certified) path?
         # If so, treat it exactly as before (claim, but let visit descend).
         _pre_existing_claim = _should_claim_composite(expr, model, n_orig, allow_general=False)
@@ -3930,7 +3996,14 @@ def _collect_composite_univariate_relaxations(
         var, flat_idx = ref
         lo = float(flat_lb[flat_idx])
         hi = float(flat_ub[flat_idx])
-        if not (np.isfinite(lo) and np.isfinite(hi)) or hi < lo:
+        # Use the solver-sense finiteness check (|bound| < 1e19), NOT raw
+        # np.isfinite: an *unbounded* variable carries a finite-but-astronomical
+        # default box (~±1e20), which np.isfinite accepts. Sampling a 1-D hull over
+        # a ~1e20-wide box is numerically meaningless (aux magnitudes reach ~1e60)
+        # and drives the LP to a false `infeasible`. Abstain → fall back to the
+        # sound composed relaxation. (Root cause of the H-UNI AMP min/max
+        # false-infeasible, cert:LR-3.)
+        if not (_is_effectively_finite(lo) and _is_effectively_finite(hi)) or hi < lo:
             return False
         try:
             f = compile_expression(expr, model)
@@ -3997,9 +4070,15 @@ def _collect_composite_univariate_relaxations(
         )
         bounds.append(col_bounds)
         col_idx += 1
-        # Only a *new* general (non-pre-existing) claim blocks descent; a
-        # convex/concave claim behaves exactly as prior main (descent continues).
-        return not _pre_existing_claim
+        # A *new* general (non-pre-existing) claim always blocks descent. When
+        # H-UNI is on, a pre-existing convex/concave composite ALSO blocks descent:
+        # the whole single-variable node is already relaxed as a composite in x, so
+        # descending would let H-UNI redundantly re-claim an inner sub-expression
+        # (e.g. the ``x**2 + 1`` inside a claimed ``sqrt(x**2 + 1)``) — sound but a
+        # duplicate column. When the flag is OFF, descent is unchanged from prior
+        # main (byte-identity: the general ``+``/``**2`` claims never fire, so
+        # descending into a convex composite claims nothing anyway).
+        return (not _pre_existing_claim) or allow_general
 
     def visit(expr: Expression) -> None:
         if maybe_add(expr):
@@ -4126,7 +4205,14 @@ def _collect_aliased_monomial_hull_relaxations(
             continue
         lo = float(flat_lb[flat_idx])
         hi = float(flat_ub[flat_idx])
-        if not (np.isfinite(lo) and np.isfinite(hi)) or hi - lo <= _COMPOSITE_CURV_TOL:
+        # Solver-sense finiteness (see the companion guard in
+        # _collect_composite_univariate_relaxations): reject the ~±1e20 default
+        # box of an unbounded variable, over which the sampled hull is numerically
+        # meaningless and yields a false `infeasible`.
+        if (
+            not (_is_effectively_finite(lo) and _is_effectively_finite(hi))
+            or hi - lo <= _COMPOSITE_CURV_TOL
+        ):
             continue
         # Compiling + vmapping the alias body is the expensive step; cache the
         # traced batch evaluator across nodes (the box changes per node, but the
