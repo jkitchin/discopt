@@ -313,6 +313,9 @@ pub fn solve_lp_py<'py>(
         // cold fallback on trip; bound-neutral). Cold-only entry points ignore it.
         warm_stall_guard: true,
         warm_stall_cap_override: None,
+        // SOTA Phase 3 / #99: exact DSE pricing honors the DISCOPT_DUAL_DSE env
+        // gate (default OFF → existing Devex path).
+        dual_exact_dse: discopt_core::lp::simplex::dual_dse_from_env(),
     };
     let sol = simplex_solve_lp(&lp, b.as_slice()?, &opts);
     let status = match sol.status {
@@ -443,6 +446,9 @@ pub fn solve_lp_warm_py<'py>(
         // cold fallback on trip; bound-neutral). Cold-only entry points ignore it.
         warm_stall_guard: true,
         warm_stall_cap_override: None,
+        // SOTA Phase 3 / #99: exact DSE pricing honors the DISCOPT_DUAL_DSE env
+        // gate (default OFF → existing Devex path).
+        dual_exact_dse: discopt_core::lp::simplex::dual_dse_from_env(),
     };
     let b_slice = b.as_slice()?;
 
@@ -527,6 +533,9 @@ pub fn solve_lp_warm_csc_py<'py>(
         // cold fallback on trip; bound-neutral). Cold-only entry points ignore it.
         warm_stall_guard: true,
         warm_stall_cap_override: None,
+        // SOTA Phase 3 / #99: exact DSE pricing honors the DISCOPT_DUAL_DSE env
+        // gate (default OFF → existing Devex path).
+        dual_exact_dse: discopt_core::lp::simplex::dual_dse_from_env(),
     };
     let start = match (start_col_status, start_basic_vars) {
         (Some(cs), Some(bv)) => build_extended_basis(cs.as_slice()?, bv.as_slice()?, n, m),
@@ -630,6 +639,9 @@ pub fn solve_lp_batch_py<'py>(
         // cold fallback on trip; bound-neutral). Cold-only entry points ignore it.
         warm_stall_guard: true,
         warm_stall_cap_override: None,
+        // SOTA Phase 3 / #99: exact DSE pricing honors the DISCOPT_DUAL_DSE env
+        // gate (default OFF → existing Devex path).
+        dual_exact_dse: discopt_core::lp::simplex::dual_dse_from_env(),
     };
     // The solve touches no Python objects, so release the GIL to let the core's
     // rayon workers run the batch concurrently without contending on it.
@@ -831,6 +843,8 @@ pub fn solve_milp_py<'py>(
             // F2: warm dual-simplex stall guard (size-derived cap → cold fallback).
             warm_stall_guard: true,
             warm_stall_cap_override: None,
+            // SOTA Phase 3 / #99: exact DSE honors DISCOPT_DUAL_DSE (default OFF).
+            dual_exact_dse: discopt_core::lp::simplex::dual_dse_from_env(),
         },
     };
     // Wrap an attached Python debugger (if any) as a core hook. It is created

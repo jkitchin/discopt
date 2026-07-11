@@ -91,6 +91,21 @@ pub struct SimplexOptions {
     /// Exists so a test can drive a deterministic, small cap without depending on
     /// LP size; production always leaves it `None`.
     pub warm_stall_cap_override: Option<usize>,
+    /// Warm dual-simplex **exact steepest-edge (DSE) pricing** for the leaving
+    /// variable (CHUZR), gated OFF by default (SOTA Phase 3 / #99). When `false`
+    /// (the default) the dual loop prices with the existing Goldfarb–Reid dual
+    /// **Devex** approximation (`γ` reference weights). When `true` it maintains
+    /// the *exact* dual steepest-edge weights `β_i = ‖B⁻ᵀ eᵢ‖²` via the
+    /// Forrest–Goldfarb 1992 recurrence and selects the leaving row by
+    /// `violationᵢ² / βᵢ` — the true steepest-edge criterion HiGHS's dual revised
+    /// simplex relies on {cite:p}`Huangfu2018`, {cite:p}`ForrestGoldfarb1992`.
+    /// Exact DSE is strictly a **pricing** choice: it changes only *which*
+    /// primal-infeasible row leaves, never the LP optimum (any infeasible basic
+    /// var is a valid leaving choice). Gated so bound-neutrality can be proved
+    /// (identical objective/vertex to full tolerance; only pivot counts move)
+    /// before any discussion of flipping the default. Set from the environment via
+    /// `DISCOPT_DUAL_DSE=1`.
+    pub dual_exact_dse: bool,
 }
 
 impl SimplexOptions {
@@ -129,8 +144,23 @@ impl Default for SimplexOptions {
             deadline: None,
             warm_stall_guard: true,
             warm_stall_cap_override: None,
+            dual_exact_dse: dual_dse_from_env(),
         }
     }
+}
+
+/// Read the `DISCOPT_DUAL_DSE` environment gate (SOTA Phase 3 / #99). Any of
+/// `1`/`true`/`on`/`yes` (case-insensitive) enables exact dual steepest-edge
+/// pricing; anything else (including unset) leaves it OFF — the default is the
+/// existing Devex approximation, so a stock build is bit-identical to before.
+pub fn dual_dse_from_env() -> bool {
+    std::env::var("DISCOPT_DUAL_DSE")
+        .ok()
+        .map(|v| {
+            let v = v.trim().to_ascii_lowercase();
+            matches!(v.as_str(), "1" | "true" | "on" | "yes")
+        })
+        .unwrap_or(false)
 }
 
 /// Result of an LP solve: status plus the primal point, objective, and the

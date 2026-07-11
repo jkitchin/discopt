@@ -354,6 +354,19 @@ impl<'a> PreparedDual<'a> {
         // pricing. Pricing only chooses *which* primal-infeasible row leaves, never
         // affects correctness (any infeasible basic var is a valid leaving choice).
         let mut gamma = vec![1.0f64; m];
+        // Exact dual steepest-edge (DSE) weights β_i = ‖B⁻ᵀ eᵢ‖² (SOTA Phase 3 /
+        // #99; Forrest–Goldfarb 1992), maintained instead of `gamma` when
+        // `opts.dual_exact_dse` is set. Seeded exactly here from the freshly
+        // factorized basis (one btran per row), updated by the FG recurrence after
+        // each pivot, and re-seeded after every refactorization. `None` when the
+        // seed btran fails → fall back to Devex for this solve (pricing only, so
+        // still correct). Like Devex, this only chooses which infeasible row
+        // leaves; the returned optimum is unchanged.
+        let mut beta: Option<Vec<f64>> = if opts.dual_exact_dse {
+            recompute_dse_weights(&mut lu, m)
+        } else {
+            None
+        };
         // Anti-cycling: consecutive degenerate dual pivots (entering reduced cost
         // ≈ 0 → no dual-objective progress) accumulate `stall`; once it crosses the
         // threshold the pivot rules switch to Bland's smallest-index selection
@@ -407,17 +420,24 @@ impl<'a> PreparedDual<'a> {
                 since_refresh = 0;
             }
 
+            // Active leaving-row pricing weights: exact DSE `β` when enabled and
+            // successfully seeded, else the Devex `γ`. `select_leaving` scores by
+            // `violation²/weight` for either — the only difference is *which*
+            // steepest-edge measure (exact vs approximate). Pricing choice only;
+            // never affects the returned optimum.
+            let weights: &[f64] = beta.as_deref().unwrap_or(&gamma);
+
             // Leaving variable from the *maintained* `xb`. If it shows primal
             // feasibility, confirm with an *exact* recompute before declaring
             // optimality, and verify dual feasibility on *exact* reduced costs —
             // so a drifted increment can never return a wrong optimum.
             let (r, to_lower, delta) =
-                match select_leaving(m, &basis, l, u, &gamma, &xb, tol, bland) {
+                match select_leaving(m, &basis, l, u, weights, &xb, tol, bland) {
                     Some(sel) => sel,
                     None => {
                         xb = recompute_basic_values(&mut lu, sp, b, n, l, u, &stat)?;
                         since_refresh = 0;
-                        match select_leaving(m, &basis, l, u, &gamma, &xb, tol, bland) {
+                        match select_leaving(m, &basis, l, u, weights, &xb, tol, bland) {
                             Some(sel) => sel,
                             None => {
                                 dvec = recompute_reduced_costs(&mut lu, sp, c, n, &basis)?;
@@ -442,7 +462,7 @@ impl<'a> PreparedDual<'a> {
                                             ) {
                                                 Some(xb_r) => {
                                                     if select_leaving(
-                                                        m, &basis, l, u, &gamma, &xb_r, tol, bland,
+                                                        m, &basis, l, u, weights, &xb_r, tol, bland,
                                                     )
                                                     .is_some()
                                                     {
@@ -628,6 +648,45 @@ impl<'a> PreparedDual<'a> {
                 }
             }
 
+            // Exact dual steepest-edge weight update (Forrest–Goldfarb 1992), when
+            // DSE pricing is active. With leaving slot `r`, entering column
+            // `α = B⁻¹A_q`, pivot `α_r`, and `τ = B⁻¹ρ_r` (ρ_r = eᵣᵀB⁻¹, the
+            // leaving row of the inverse — one extra ftran of the still-valid
+            // `rho`), the new weights are
+            //   β_r ← β_r / α_r²
+            //   β_i ← β_i − 2(α_i/α_r)τ_i + (α_i/α_r)²·β_r_old   (i ≠ r)
+            // floored at the exact lower bound (α_i/α_r)²·β_r_new so roundoff can
+            // never drive a weight negative. Pricing only — a failed ftran just
+            // drops DSE to Devex for the rest of the solve (still correct). This
+            // runs *before* the basis is mutated below, using the current B⁻¹.
+            if let Some(bw) = beta.as_mut() {
+                let mut tau = rho.clone();
+                if lu.ftran(&mut tau).is_err() {
+                    // Can't maintain exact weights this pivot; abandon DSE and let
+                    // the loop continue on Devex (γ was kept up to date in parallel).
+                    beta = None;
+                } else {
+                    let beta_r_old = bw[r];
+                    let beta_r_new = beta_r_old / (piv * piv);
+                    for i in 0..m {
+                        if i == r {
+                            continue;
+                        }
+                        let ratio = alpha[i] / piv;
+                        // Exact FG92 recurrence: β̄_i = ‖ρ_i − (α_i/α_r)ρ_r‖²
+                        //   = β_i − 2(α_i/α_r)(ρ_iᵀρ_r) + (α_i/α_r)²β_r, with
+                        // ρ_iᵀρ_r = (B⁻¹ρ_r)_i = τ_i. Exact in exact arithmetic;
+                        // roundoff is re-seeded away at every refactorization. A tiny
+                        // positive floor guards only against a roundoff-induced
+                        // non-positive weight (a valid steepest-edge weight is > 0),
+                        // never clamps the genuine value.
+                        let updated = bw[i] - 2.0 * ratio * tau[i] + ratio * ratio * beta_r_old;
+                        bw[i] = updated.max(1e-12);
+                    }
+                    bw[r] = beta_r_new;
+                }
+            }
+
             // Pivot: q enters at slot r; leaving var pinned at the violated bound.
             let leaving = basis[r];
 
@@ -701,6 +760,14 @@ impl<'a> PreparedDual<'a> {
                 // Fresh factorization → reseed exact values, reset the drift clock.
                 xb = recompute_basic_values(&mut lu, sp, b, n, l, u, &stat)?;
                 dvec = recompute_reduced_costs(&mut lu, sp, c, n, &basis)?;
+                // Re-seed the exact DSE weights from the fresh B⁻¹ too: the FT
+                // update accumulates edge-weight roundoff exactly as it does for
+                // x_B/d, so a refactorization is the natural point to restore them
+                // to the exact ‖row of B⁻¹‖². (If DSE was already inactive, this is
+                // skipped; a failed reseed just keeps DSE off — Devex continues.)
+                if opts.dual_exact_dse && beta.is_some() {
+                    beta = recompute_dse_weights(&mut lu, m);
+                }
                 since_refresh = 0;
             } else {
                 since_refresh += 1;
@@ -841,6 +908,32 @@ fn recompute_reduced_costs(
         *dj = c[j] - sp.dot(j, &y);
     }
     Some(d)
+}
+
+/// Exact dual steepest-edge weights `β_i = ‖B⁻ᵀ eᵢ‖²`, one per basic slot
+/// (SOTA Phase 3 / #99; Forrest–Goldfarb 1992). `β_i` is the squared 2-norm of
+/// row `i` of `B⁻¹` — the exact steepest-edge reference the dual pricing divides
+/// the squared bound-violation by, so the leaving row is chosen by the true
+/// steepest-edge criterion rather than the Devex approximation. Computed from
+/// scratch by solving `Bᵀ v = eᵢ` (one `btran` per slot) and taking `‖v‖²`; used
+/// to seed the maintained `beta` at loop entry / after each refactorization, and
+/// (in tests) to check the incremental FG recurrence against a fresh recompute.
+/// `None` if any `btran` fails (the caller keeps Devex / cold-falls-back).
+fn recompute_dse_weights(lu: &mut FeralLU, m: usize) -> Option<Vec<f64>> {
+    let mut beta = vec![0.0f64; m];
+    for (i, bi) in beta.iter_mut().enumerate() {
+        let mut e = vec![0.0f64; m];
+        e[i] = 1.0;
+        if lu.btran(&mut e).is_err() {
+            return None;
+        }
+        // Exact steepest-edge weight = ‖row i of B⁻¹‖². No Devex-style `≥ 1`
+        // floor: this is the true edge norm, and the recurrence must track it
+        // exactly (a floor would desync the incremental update from a fresh
+        // recompute). Anti-cycling is handled by the Bland switch, not the weight.
+        *bi = e.iter().map(|v| v * v).sum::<f64>();
+    }
+    Some(beta)
 }
 
 /// Most primal-infeasible basic variable by dual-Devex score `violation²/γ`, or
@@ -1009,7 +1102,21 @@ mod tests {
     use super::*;
 
     fn opts() -> SimplexOptions {
-        SimplexOptions::default()
+        // Force DSE OFF regardless of the ambient DISCOPT_DUAL_DSE env so the
+        // existing bound-neutrality tests price with the default Devex path and
+        // stay deterministic under any environment.
+        SimplexOptions {
+            dual_exact_dse: false,
+            ..SimplexOptions::default()
+        }
+    }
+
+    /// Options with exact dual steepest-edge pricing forced ON (SOTA Phase 3 / #99).
+    fn opts_dse() -> SimplexOptions {
+        SimplexOptions {
+            dual_exact_dse: true,
+            ..SimplexOptions::default()
+        }
     }
 
     #[test]
@@ -1633,5 +1740,238 @@ mod tests {
         );
 
         crate::profile::set_enabled(false);
+    }
+
+    // ----- SOTA Phase 3 / #99: exact dual steepest-edge (DSE) pricing ---------
+
+    /// The Forrest–Goldfarb 1992 DSE weight recurrence, applied to a single
+    /// product-form basis update, must reproduce the weights a *from-scratch*
+    /// recompute (`‖row of B⁻¹‖²`) gives on the updated basis — to full tolerance.
+    /// This is the core soundness check for the incremental update in the loop:
+    /// if the recurrence tracked the exact edge norms wrong, DSE would misprice
+    /// (still correct, but not steepest-edge) or, worse, diverge. We pivot one
+    /// column in and compare `β_new` (recurrence) against `β_recompute` (fresh).
+    #[test]
+    fn dse_weight_recurrence_matches_fresh_recompute() {
+        // A well-conditioned 3×3 basis B and a replacement column for slot r.
+        // Columns are dense m-vectors (FeralLU::factorize takes column-major).
+        let m = 3;
+        let b_cols = vec![
+            vec![2.0, 1.0, 0.0], // slot 0
+            vec![1.0, 3.0, 1.0], // slot 1
+            vec![0.0, 1.0, 2.0], // slot 2
+        ];
+        let entering = vec![1.0, -1.0, 2.0]; // replaces slot r
+
+        for r in 0..m {
+            let mut lu = FeralLU::new();
+            lu.factorize(m, &b_cols).unwrap();
+
+            // Exact starting weights β_i = ‖B⁻ᵀ eᵢ‖².
+            let beta0 = recompute_dse_weights(&mut lu, m).unwrap();
+
+            // α = B⁻¹ a_q and ρ_r = eᵣᵀ B⁻¹ (a row of the inverse), τ = B⁻¹ ρ_r.
+            let mut alpha = entering.clone();
+            lu.ftran(&mut alpha).unwrap();
+            let piv = alpha[r];
+            assert!(piv.abs() > 1e-9, "chosen pivot must be nonzero");
+            let mut rho = vec![0.0; m];
+            rho[r] = 1.0;
+            lu.btran(&mut rho).unwrap();
+            let mut tau = rho.clone();
+            lu.ftran(&mut tau).unwrap();
+
+            // FG recurrence (exactly as the loop applies it).
+            let beta_r_old = beta0[r];
+            let beta_r_new = beta_r_old / (piv * piv);
+            let mut beta_rec = beta0.clone();
+            for i in 0..m {
+                if i == r {
+                    continue;
+                }
+                let ratio = alpha[i] / piv;
+                let updated = beta0[i] - 2.0 * ratio * tau[i] + ratio * ratio * beta_r_old;
+                beta_rec[i] = updated.max(1e-12);
+            }
+            beta_rec[r] = beta_r_new;
+
+            // Fresh recompute on the *updated* basis (slot r ← entering column).
+            let mut updated_cols = b_cols.clone();
+            updated_cols[r] = entering.clone();
+            let mut lu2 = FeralLU::new();
+            lu2.factorize(m, &updated_cols).unwrap();
+            let beta_fresh = recompute_dse_weights(&mut lu2, m).unwrap();
+
+            for i in 0..m {
+                assert!(
+                    (beta_rec[i] - beta_fresh[i]).abs() <= 1e-9 * (1.0 + beta_fresh[i].abs()),
+                    "r={r} slot {i}: recurrence β {} vs fresh β {}",
+                    beta_rec[i],
+                    beta_fresh[i]
+                );
+            }
+        }
+    }
+
+    /// DSE and Devex are two *pricing* rules for the same dual simplex: on a
+    /// battery of random warm re-solves they must return the identical optimum
+    /// (to 1e-9) and the same status — only the pivot path (and count) may differ.
+    /// This is the bound-neutrality invariant at the LP level, on many LPs.
+    #[test]
+    fn dse_and_devex_agree_on_optimum_random_battery() {
+        let mut state: u64 = 0xA5A5_1234_DEAD_0F0F;
+        let mut next = || {
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            ((state >> 11) as f64) / ((1u64 << 53) as f64)
+        };
+        let mut both_ran = 0;
+        for _ in 0..80 {
+            let (m, n) = (6, 16);
+            let a: Vec<f64> = (0..m * n).map(|_| (next() * 6.0 - 3.0).round()).collect();
+            let x0: Vec<f64> = (0..n).map(|_| 0.3 + 3.4 * next()).collect();
+            let b: Vec<f64> = (0..m)
+                .map(|i| (0..n).map(|j| a[i * n + j] * x0[j]).sum())
+                .collect();
+            let c: Vec<f64> = (0..n).map(|_| (next() * 10.0 - 5.0).round()).collect();
+            let l = vec![0.0; n];
+            let u = vec![4.0; n];
+            let lp = LpView {
+                a: &a,
+                m,
+                n,
+                c: &c,
+                l: &l,
+                u: &u,
+            };
+            let cold = solve_lp(&lp, &b, &opts());
+            if cold.status != LpStatus::Optimal {
+                continue;
+            }
+            // Tighten several upper bounds at once → a multi-pivot warm re-solve.
+            let mut u2 = u.clone();
+            for j in 0..n {
+                if next() < 0.5 {
+                    u2[j] = (cold.x[j] - 1.5).max(0.0);
+                }
+            }
+            let lp2 = LpView {
+                a: &a,
+                m,
+                n,
+                c: &c,
+                l: &l,
+                u: &u2,
+            };
+            let devex = solve_lp_warm(&lp2, &b, &cold.basis, &opts());
+            let dse = solve_lp_warm(&lp2, &b, &cold.basis, &opts_dse());
+            assert_eq!(
+                devex.status, dse.status,
+                "status mismatch devex {:?} vs dse {:?}",
+                devex.status, dse.status
+            );
+            if devex.status == LpStatus::Optimal {
+                assert!(
+                    (devex.obj - dse.obj).abs() <= 1e-9 * (1.0 + devex.obj.abs()),
+                    "devex obj {} vs dse obj {} (must be bound-neutral)",
+                    devex.obj,
+                    dse.obj
+                );
+                if devex.iters > 0 && dse.iters > 0 {
+                    both_ran += 1;
+                }
+            }
+        }
+        assert!(
+            both_ran >= 10,
+            "warm dual path under both pricings ran too rarely ({both_ran}) — not exercised"
+        );
+    }
+
+    /// Entry-experiment probe (SOTA Phase 3 / #99): on degenerate warm re-solves —
+    /// the lifted-McCormick pathology class (many tightened bounds → long
+    /// degenerate dual sequences) — exact DSE must (a) still reach the cold
+    /// optimum and (b) not blow up the pivot count versus Devex. We report the
+    /// aggregate pivot counts so the payoff (or its absence) is measured, not
+    /// asserted-into-existence. The hard assertion is only bound-neutrality; the
+    /// pivot comparison is informational (printed) because degeneracy ties are
+    /// instance-specific.
+    #[test]
+    fn dse_vs_devex_degenerate_warm_pivot_counts() {
+        let mut state: u64 = 0x0FF1_CE00_1234_5678;
+        let mut next = || {
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            ((state >> 11) as f64) / ((1u64 << 53) as f64)
+        };
+        let (mut devex_pivots, mut dse_pivots) = (0usize, 0usize);
+        let mut cases = 0;
+        for _ in 0..200 {
+            // Small-integer coefficient matrix with many equal magnitudes → lots of
+            // ratio-test ties → degeneracy, the shape DSE is meant to help.
+            let (m, n) = (8, 20);
+            let a: Vec<f64> = (0..m * n).map(|_| (next() * 4.0 - 2.0).round()).collect();
+            let x0: Vec<f64> = (0..n).map(|_| 0.5 + 2.5 * next()).collect();
+            let b: Vec<f64> = (0..m)
+                .map(|i| (0..n).map(|j| a[i * n + j] * x0[j]).sum())
+                .collect();
+            let c: Vec<f64> = (0..n).map(|_| (next() * 8.0 - 4.0).round()).collect();
+            let l = vec![0.0; n];
+            let u = vec![3.0; n];
+            let lp = LpView {
+                a: &a,
+                m,
+                n,
+                c: &c,
+                l: &l,
+                u: &u,
+            };
+            let cold = solve_lp(&lp, &b, &opts());
+            if cold.status != LpStatus::Optimal {
+                continue;
+            }
+            // Gentle, feasibility-preserving tightening: nudge a subset of upper
+            // bounds down by 1 (still ≥ the cold value's floor), so the warm
+            // re-solve runs several dual pivots but the LP stays feasible often
+            // enough to accumulate a comparison population.
+            let mut u2 = u.clone();
+            for j in 0..n {
+                if next() < 0.5 {
+                    u2[j] = (cold.x[j] - 1.0).max(0.0);
+                }
+            }
+            let lp2 = LpView {
+                a: &a,
+                m,
+                n,
+                c: &c,
+                l: &l,
+                u: &u2,
+            };
+            let devex = solve_lp_warm(&lp2, &b, &cold.basis, &opts());
+            let dse = solve_lp_warm(&lp2, &b, &cold.basis, &opts_dse());
+            if devex.status == LpStatus::Optimal && dse.status == LpStatus::Optimal {
+                assert!(
+                    (devex.obj - dse.obj).abs() <= 1e-9 * (1.0 + devex.obj.abs()),
+                    "bound-neutrality violated: devex {} vs dse {}",
+                    devex.obj,
+                    dse.obj
+                );
+                devex_pivots += devex.iters;
+                dse_pivots += dse.iters;
+                cases += 1;
+            }
+        }
+        // Informational — the primary deterministic evidence for the PR. Printed
+        // with `--nocapture`. No inequality is asserted (would be an instance-level
+        // claim); the class-level payoff is judged from these aggregates + the
+        // MINLPLib panel counters.
+        println!(
+            "DSE entry-experiment: {cases} degenerate warm re-solves — \
+             Devex total pivots = {devex_pivots}, DSE total pivots = {dse_pivots}"
+        );
+        assert!(cases >= 20, "too few comparable cases ({cases})");
     }
 }

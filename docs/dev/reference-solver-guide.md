@@ -184,8 +184,8 @@ All discopt evidence is `file:symbol` in this repo; solver evidence in §1.
 | **Gomory (GMI)** | HiGHS/SCIP | **PARTIAL** (POUNCE-gated, off by default) | `crates/discopt-core/src/lp/gomory.rs`; `solver.py` GMI gate |
 | **Cover cuts** | HiGHS/SCIP | **PARTIAL** (root only) | `crates/discopt-core/src/lp/cover.rs`, `_jax/cover_cuts.py` |
 | **Cut separation *loop*** (rounds + re-solve + filtering) | SCIP separation loop {cite:p}`Bestuzheva2023` | **WEAK** (cuts added mostly at root as a pool, not an efficacy/orthogonality-filtered multi-round loop) | root cut assembly in `solver.py`; no per-node round loop |
-| **Dual simplex — DSE pricing** | HiGHS {cite:p}`Huangfu2018` | **MISSING** (not found in `dual.rs`) | `crates/discopt-core/src/lp/simplex/dual.rs` (no steepest-edge weights) |
-| **Dual simplex — bound-flipping ratio test** | HiGHS {cite:p}`Huangfu2018` | **MISSING** | `dual.rs` (no BFRT) |
+| **Dual simplex — steepest-edge pricing** | HiGHS {cite:p}`Huangfu2018` | **PARTIAL** (dual **Devex** — a steepest-edge *approximation* — present since #178; exact DSE tried under `DISCOPT_DUAL_DSE` and **KILLED** — F11/#99: regresses the #606 pathology 2.5× wall, RefacCap 3.4×) | `dual.rs` `gamma` Devex weights + Goldfarb–Reid update (`select_leaving`); exact DSE `recompute_dse_weights` flag-gated default-OFF |
+| **Dual simplex — bound-flipping ratio test** | HiGHS {cite:p}`Huangfu2018` | **HAS** (long-step BFRT since #178) | `dual.rs` `build_candidates` + the breakpoint-flipping loop in `run_dual` |
 | **Hypersparse FTRAN/BTRAN + FT update** | HiGHS {cite:p}`Huangfu2018` | **PARTIAL** (sparse LU + product-form update via `feral`; iterative refinement opt-in) | `simplex/linsolve.rs` (`SparseLu`, `update`, `ftran_refined`) |
 | **Dense-LU fallback route for wide bases** | (discopt-specific fix for the AVM dense-column pathology) | **PARTIAL** (flag `DISCOPT_LU_DENSITY_ROUTE`, default-OFF; blocked from graduating) | `simplex/linsolve.rs:188–195` `density_route_enabled`; A-2/#85 retry work in flight |
 | **Presolve reduction library** | HiGHS/SCIP {cite:p}`Achterberg2020` | **HAS** (aggregate, coeff-strengthen, implied-bounds, eliminate, cliques, symmetry, redundancy) | `crates/discopt-core/src/presolve/*.rs` via `orchestrator.rs` |
@@ -210,18 +210,24 @@ ICNN — see `maingo-vs-discopt.org`); the *engine and search control* are the g
 Levers ranked by **(reference-solver evidence it matters) × (discopt gap size) ×
 (tractability)**. Each is a *class* fix, not an instance probe.
 
-### Lever 1 — Dual-simplex DSE pricing + bound-flipping ratio test
+### Lever 1 — Dual-simplex steepest-edge pricing + bound-flipping ratio test — **RESOLVED / KILLED (F11, #99)**
 - **Reference grounding.** The two techniques HiGHS's dual revised simplex is
   built on {cite:p}`Huangfu2018`; DSE is *the* iteration-count lever and BFRT is
-  *the* degeneracy lever.
-- **discopt gap.** Both **MISSING** in `simplex/dual.rs` (§2). DECOMP-1 measured
-  the exact symptom they cure: 81% degenerate dual pivots and refactor-cap churn
-  on lifted bases (§1.3).
-- **Why #1.** Highest reference-evidence (canonical HiGHS paper), largest
-  measured discopt gap (the #557/#606/#598 per-node cost), and it is a
-  well-specified, self-contained numerics change behind the existing engine
-  interface. Bound-neutral verification regime applies (node_count/objective must
-  be *exactly* unchanged; only pivot counts and wall time move).
+  *the* degeneracy lever — **over Dantzig pricing**.
+- **What was actually there (this row was wrong above).** BFRT and dual **Devex**
+  (a steepest-edge *approximation*) both landed in #178 (`dual.rs`); they are
+  *not* missing. The only genuine delta was Devex → *exact* DSE.
+- **Verdict (F11/#99).** Exact DSE was implemented (Forrest–Goldfarb 1992
+  recurrence, unit-tested vs a from-scratch weight recompute to 1e-9) behind
+  `DISCOPT_DUAL_DSE`, default-OFF, and measured on the reproduced #606 pathology.
+  It **regresses**: 2.5× wall, RefacCap 3.4×, Phase1Pivots 3.5×, only −10%
+  degenerate dual pivots, and is not node-count-neutral (459→321 node LPs).
+  LP-objective bound-neutral to ~1e-13 (the sound part), but a net loss — Devex is
+  already a good DSE approximation and exact DSE's seeding/refactor cost dominates.
+  **Do not relitigate.** The #606/#598 per-node cost is *not* a pricing gap; it is
+  degeneracy geometry + FT-update/refactor churn on lifted bases (see DECOMP-1 §5.1a:
+  iterative refinement / anti-degeneracy on partitioned formulations, and the
+  primal-side `RefacCap`).
 
 ### Lever 2 — Graduate the dense-LU route + failure-triggered retry (A-2/#85)
 - **Reference grounding.** Not a reference *feature* but the discopt-specific
