@@ -126,7 +126,7 @@ experiment may run.
 | T2.2 OBBT persistent LP + warm probes | (a)+(b) done; (c) skipped | #406 | Per-sweep CSC built once + warm-primal probes (t14 patch applied). Differential **NEUTRAL** (warm==cold ≤4.3e-12, tightenings identical, cert-neutrality NEUTRAL). Root-OBBT umbrella: ex1252a 1.54×, ex1252 1.89×, st_e38 1.92×. ex1252a < 2× → residual is the JAX envelope rebuild (Phase 4/5), not the LP loop. See the T2.2-DONE block below |
 | T2.3 root fixpoint loop | **built — flagged default-OFF** (R2) | (this PR) | `_jax/root_reduce.py::run_root_fixpoint` {S2 cutoff-FBBT, S3 cutoff-OBBT}, integrated at end of iteration 0 (solver.py); tighten-only intersection, ≤2 rounds, ≈10% budget; `root_fixpoint`/`DISCOPT_ROOT_FIXPOINT` OFF. No-offtarget gate + cut-pool re-capture opt-in only. Flag-OFF cert-baseline **NEUTRAL** (41/41 node_count exact, Δobj 0). Node A/B: wastewater04m2 479→159 (root). See §14 "R2 build-results" |
 | T2.4 per-node `reduce_node()` | **built — flagged default-OFF** (R2) | (this PR) | T2.4a marginals on `MccormickLPResult` (bound-neutral, additive `dual`/`col_status`/`safe_bound`/`reduced_costs`); T2.4b `_jax/node_reduce.py::reduce_node` (cutoff-FBBT + free DBBT z=safe_bound + integer RC-fixing); T2.4c `PyTreeManager.set_node_bounds` feeds child boxes. `node_reduce`/`DISCOPT_NODE_REDUCE` OFF. 200-box property test green. See §14 "R2 build-results" |
-| T2.5 OBBT escalation policy | **UNLOCKED** (T2.1-revisit GO) → R2 | — | build per §14 spec (width×\|RC\| top-k scoring) |
+| T2.5 OBBT escalation policy | **BUILT → KILL** (2026-07-11; mechanism sound, flag-gated default-OFF) | `p2/obbt-topk-scoring` | width×\|RC\| top-k scoring + `DISCOPT_OBBT_TOPK` de-gate: OBBT now RUNS on casctanks (n=500)/ex8_3_13, but bound is flat/WORSE and net wall is negative (kill-crit b). Mechanism kept for a targeted-budget revisit; do NOT flip default. See "T2.5 — RESULTS / VERDICT (2026-07-11)" |
 | T2.6 cert2 gate wiring + default-on | **moot** (T2.3–T2.5 not built) | — | residual gap re-scoped to Phases 3–4 |
 | Phase 3 entry experiment (0b) | done — GO on c-MIR **(SUPERSEDED by CUT-1, 2026-07-06 → NO-GO)** | (prior) | SCIP root-bound *proxy* (`scripts/p3_0b_scip_rootbound.py`): median root gap closed discopt 0.0 vs SCIP 1.0 over 8 (graphpart/ex1263/fac). CUT-1 replaced the proxy with a direct injection of SCIP's actual c-MIR cut coefficients into discopt's LP + a real-relaxation measurement; on nvs17/19/24 discopt's *default* root already closes 99.9% (≥ SCIP's cut-root), and injected cuts close ≤1.8%. See §7 "0b RESULTS / VERDICT (2026-07-03)" and "CUT-1 …(2026-07-06)" |
 | Phase 3 1c reachability entry experiment | done — **NO-GO / re-scope** | #(prior) | Cuts made reachable+armed close ~0% (median gap-closed 0.000, best +0.55% on ex1263a) vs SCIP ~1.0. Residual is separator DEPTH, not plumbing. Do NOT build the Rust cut-callback seam yet. See §7 "Phase 3 1c" |
@@ -2532,6 +2532,60 @@ calibration table here; no per-class forks, no named-instance tuning.
   regression ≤ 1.05; the previously-gated class (`_dependent_var_names`
   instances) must not regress in node_count when the class gate is removed;
   `incorrect = 0`.
+
+**T2.5 — RESULTS / VERDICT (2026-07-11): KILL the de-gate as a bound lever
+(the scoring + de-gate MECHANISM is built, sound, and flag-gated default-OFF;
+it does NOT pay off).** Branch `p2/obbt-topk-scoring` (PR pending). Built the
+`width × |reduced cost|` top-k scoring (`run_obbt_on_relaxation(top_k=…)`,
+`obbt_tighten_root(top_k=…)`) and the `DISCOPT_OBBT_TOPK` de-gate that lets
+per-node OBBT run above the `_PER_NODE_OBBT_MAX_VARS=100` cap on the
+`_dependent_var_names` structural class. Reduced costs come from one extra
+objective LP (the DBBT LP); selection changes *which* vars are probed, never the
+NS-safe soundness of each tightening.
+
+- **Entry experiment** (casctanks n=500, tanksize n=47, nvs05 n=8, ex8_3_7 n=126,
+  ex8_3_13 n=115; TL=60 then 120; isolated release build):
+
+  | instance | OBBT-ran OFF→ON | cert bound OFF→ON | nodes OFF→ON | obbt wall ON | net |
+  |---|---|---|---|---|---|
+  | casctanks (TL60) | no→**YES** | 1.3523→1.3523 (=) | 103→25 | 36.9 s | bound flat |
+  | casctanks (TL120)| no→**YES** | **1.8023→1.3523 (WORSE)** | 211→75 | 73.8 s | **net-negative** |
+  | ex8_3_13 (TL120) | no→**YES** | −100.0→−100.0 (=) | 757→443 | 44.9 s | flat, wasted cost |
+  | tanksize | no→no | 0.8680 (=) | 551→555 | 0 | flag inert (no dep-vars) |
+  | nvs05 | no→no | 1.3521 (=) | 781→771 | 0 | flag inert (small+no dep) |
+  | ex8_3_7 | no→no | — (no LP bound; x0/x1 obj) | 1→1 | 0 | n/a |
+
+  Distinguishing the three outcomes the kill criterion demands:
+  **(1) OBBT now RUNS** on the de-gated large instances (casctanks/ex8_3_13
+  YES) — F12's size-gate disabler is genuinely cleared and top-k+budget bounds the
+  cost (casctanks 359 s/node uncapped → ≤37–74 s total). **(2) The bound does NOT
+  improve** — byte-identical on every de-gated instance, and on casctanks TL=120
+  it is *weaker* (1.352 vs 1.802) because ≥60 % of the budget goes to per-node
+  OBBT instead of the tree exploration that actually lifts the global frontier
+  bound. Node count drops (local fathoming) but the weakest open node — which sets
+  the dual bound — is not lifted faster. **(3) Net wall is negative.** Leaning the
+  config (k=8/frac=0.2 → still 1.352; k=5/frac=0.15 → matches 1.802 but wastes
+  19 s) does not flip it — best case is bound-neutral with pure overhead.
+
+- **KILL criterion (b) FIRES:** "the per-node cost even with top-k+budget is
+  net-negative on wall." Consistent with the T2.1-revisit record — casctanks is in
+  the OBBT-resistant/marginal class (8 % root-gap reduction; "does not crack the
+  hard uncertified tail"). Per-node OBBT's local box-tightening does not translate
+  into a better *global* dual bound on this class, and the budget it consumes would
+  raise the bound faster if spent on B&B.
+
+- **Soundness:** entry panel + 4 new correctness unit tests
+  (`test_obbt_topk_scoring.py`) + smoke (642 passed) + adversarial (10 passed) all
+  green; **0 bound-crossing violations**, no oracle cross. `top_k=None` /
+  flag-OFF is byte-identical to the legacy all-columns sweep (locked by
+  `test_topk_none_is_byte_identical_to_legacy`), so the machinery is inert at rest.
+
+- **Disposition:** the scoring + de-gate machinery ships flag-gated **default-OFF**
+  (mechanism is correct and cheap to keep for a future *targeted-budget* revisit —
+  e.g. a bound-conditioned trigger that only spends OBBT when it demonstrably lifts
+  the frontier). **T2.5 is NOT a bound win; do not flip the default.** The residual
+  large-model certification gap is re-scoped to Phases 3–4 (cuts/structure), which
+  the T2.1-revisit already flagged as the levers for the hard tail.
 
 **T2.6 — Gate wiring, nightlies, default-on (last).**
 1. `benchmarks.toml`: add `[suites.global50]`
