@@ -1626,9 +1626,21 @@ def _nonrigorous_sentinel_fathom(node_lower_bound: float, node_infeasible: bool)
     constraints, neither of which rules out a better point in the subtree. The
     Rust tree still mechanically cuts that subtree by bound (``1e30 >=``
     incumbent, ``tree_manager.rs``), so the *gap* it reports is not certified.
-    When this returns True the caller must set ``_gap_certified = False`` so the
-    terminal verdict downgrades from "optimal" to "feasible" — a non-rigorous
-    fathom can never certify global optimality.
+    When this returns True the caller must set ``_gap_certified = False`` — the
+    bare frontier gap can no longer certify: the fathom itself proves nothing
+    about the removed subtree.
+
+    Terminal accounting (SPATIAL-CERT, #604 parity): the removal is not
+    unaccounted — the C-1 sweep floors it at its pop-time bound (proved at an
+    ancestor; valid over the subtree forever, #603). The terminal decision
+    re-earns certification iff the floor-inclusive bound
+    ``min(frontier, taint floor)`` closes the certification gap — i.e. every
+    unproven removal is *provably* within tolerance of the incumbent. That is a
+    rigorous certificate (every term of the closed gap is a proved bound), so
+    "a non-rigorous fathom can never certify global optimality" is preserved:
+    the fathom never certifies anything; only the proved floors do. When the
+    floor-inclusive gap stays open, the verdict remains "feasible", exactly as
+    before.
 
     A rigorously-infeasible node (``node_infeasible`` True) does NOT decertify:
     an empty relaxation over the box is a valid emptiness proof, so pruning it is
@@ -2084,6 +2096,20 @@ def _gap_converged(tree, gap_tolerance: float, abs_gap_tol: float = _DEFAULT_ABS
     stats = tree.stats()
     ub = float(stats.get("incumbent_value", float("inf")))
     lb = float(stats.get("global_lower_bound", float("-inf")))
+    return _gap_values_converged(ub, lb, gap_tolerance, abs_gap_tol)
+
+
+def _gap_values_converged(
+    ub: float, lb: float, gap_tolerance: float, abs_gap_tol: float = _DEFAULT_ABS_GAP_TOL
+) -> bool:
+    """Value-form of :func:`_gap_converged` (same arithmetic, explicit bounds).
+
+    Extracted so the terminal certification accounting can run the *identical*
+    convergence test on the floor-inclusive rigorous bound
+    ``min(frontier, taint floor)`` (SPATIAL-CERT, mirroring the MILP driver's
+    #604 discipline) — a second, subtly different gap formula here would be a
+    soundness bug of its own.
+    """
     if not np.isfinite(ub) or not np.isfinite(lb):
         return False
     abs_gap = max(0.0, ub - lb)
@@ -4784,6 +4810,13 @@ def solve_model(
     #     and the tree bound is discarded wholesale, as before.
     _taint_floor_internal = np.inf
     _tree_bound_poisoned = False
+    #   _convex_bound_untrusted: True when a convex node's NLP objective was not
+    #     a trusted (KKT) lower bound (C-13 serial / P0.3 batch). The node's own
+    #     bound was abstained or poisoned, but — unlike a sentinel fathom — there
+    #     is no pop-time floor re-representing what the certification would rest
+    #     on, so the SPATIAL-CERT terminal accounting below must never re-earn
+    #     certification over this cause.
+    _convex_bound_untrusted = False
 
     # --- Soundness (C-1): distinguish a PROVEN-infeasible fathom from a merely
     # non-rigorous one, exactly as ``_solve_nlp_bb`` does with
@@ -6126,6 +6159,7 @@ def solve_model(
             if _model_is_convex and not bool(np.all(_batch_trusted)):
                 _gap_certified = False
                 _tree_bound_poisoned = True
+                _convex_bound_untrusted = True
             # Constraint feasibility post-check for batch IPM results.
             # When the IPM solution violates constraints (e.g. due to hitting
             # the iteration limit), mark the node as infeasible (SENTINEL).
@@ -6779,6 +6813,7 @@ def solve_model(
                 # (roadmap P0.3) and that _solve_nlp_bb applies on ITERATION_LIMIT.
                 if _model_is_convex and not node_infeasible_mask[i] and not _serial_nlp_trusted:
                     _gap_certified = False
+                    _convex_bound_untrusted = True
         jax_time += time.perf_counter() - t_jax_start
 
         # C-1 (path-agnostic, covers convex + nonconvex, batch + serial): any node
@@ -8124,6 +8159,11 @@ def solve_model(
     stats = tree.stats()
     incumbent = tree.incumbent()
 
+    # SPATIAL-CERT: the floor-inclusive rigorous bound adopted when the terminal
+    # accounting below re-earns certification over soundly-floored sentinel
+    # removals (None on every other exit — then the result build is unchanged).
+    _taint_rig_bound_internal: Optional[float] = None
+
     # R3a instrumentation: export the per-variable branch-frequency vector when
     # an experiment harness has armed the sink. Behavior-neutral; guarded so a
     # missing accessor (older extension build) degrades silently.
@@ -8298,6 +8338,69 @@ def solve_model(
         _bound_unresolved = bool(tree.stats().get("bound_unresolved", False))
         if _bound_unresolved:
             _gap_certified = False
+
+        # SPATIAL-CERT (gap-closing plan P0; MILP-driver parity with #604): a
+        # non-rigorous sentinel fathom decertifies the gap mid-loop (issue #27a,
+        # sites above), but the removed subtree is not unaccounted — its POP-TIME
+        # lower bound (proved at an ancestor's rigorous relaxation solve; a bound
+        # over a fixed box stays valid forever) is accumulated in
+        # ``_taint_floor_internal`` by the authoritative C-1 sweep (#603). The
+        # rigorous global dual bound of such a tree is therefore
+        #     min(surviving-frontier bound, taint floor)
+        # — every term of which is a *proved* bound. When that floor-inclusive
+        # bound closes the certification gap against the incumbent, every
+        # unproven removal is provably within tolerance of the incumbent — the
+        # exact criterion #604 certifies with in the MILP driver (its
+        # ``unresolved_floor`` permanently seeds the frontier minimum and
+        # ``Optimal`` requires the floor-inclusive ``gap_closed``). Withholding
+        # the label there is pure over-conservatism: certification must track
+        # genuine search truncation and UNACCOUNTED removals, not
+        # soundly-floored node failures (measured: nvs22 under
+        # DISCOPT_LU_DENSITY_ROUTE=1 — one node whose LP soundly declined an
+        # uncertifiable vertex bound was sentinel-fathomed carrying pop-time
+        # floor 7.4035, far above the incumbent 6.05822; frontier gap 4.9e-9,
+        # yet the exit was downgraded to "feasible").
+        #
+        # Certification is re-earned here ONLY when:
+        #   * the sole decertification cause was sentinel fathoms — an untrusted
+        #     bound VALUE in the tree (``_tree_bound_poisoned``), an untrusted
+        #     convex node bound (``_convex_bound_untrusted``), or an unresolved
+        #     -inf pin (``_bound_unresolved``) can never re-earn: those leave no
+        #     rigorous per-removal floor to account with;
+        #   * the floor-inclusive bound is finite and non-sentinel (a -inf floor
+        #     — an unbounded removal — keeps the conservative downgrade); and
+        #   * the floor-inclusive gap converges under the IDENTICAL arithmetic
+        #     the search itself certifies with (``_gap_values_converged``).
+        # The reported bound is then the floor-inclusive value (never the bare
+        # frontier, which may over-report the removed subtrees) — byte-identical
+        # to the bound #603's recovery already reports on these exits today;
+        # only the label changes. This does not touch #603's #27a gate at the
+        # late re-certification block: a taint-recovered bound on a solve whose
+        # floor-inclusive gap did NOT close still never upgrades to "optimal".
+        if (
+            not _gap_certified
+            and _nonrigorous_fathom
+            and not _tree_bound_poisoned
+            and not _convex_bound_untrusted
+            and not _bound_unresolved
+        ):
+            _glb_int = stats.get("global_lower_bound")
+            _inc_int = stats.get("incumbent_value")
+            if (
+                _glb_int is not None
+                and np.isfinite(_glb_int)
+                and _inc_int is not None
+                and np.isfinite(_inc_int)
+            ):
+                _rig_int = min(float(_glb_int), _taint_floor_internal)
+                if (
+                    np.isfinite(_rig_int)
+                    and abs(_rig_int) < _SENTINEL_THRESHOLD
+                    and _gap_values_converged(float(_inc_int), _rig_int, gap_tolerance)
+                ):
+                    _gap_certified = True
+                    _taint_rig_bound_internal = _rig_int
+
         search_closed = _gap_converged(tree, gap_tolerance) or (
             tree.is_finished() and not _bound_unresolved
         )
@@ -8362,10 +8465,28 @@ def solve_model(
 
     # Negate bound back for maximization
     bound_val = stats["global_lower_bound"]
+    # SPATIAL-CERT: on an exit certified over soundly-floored sentinel removals,
+    # the honest rigorous bound is the floor-inclusive value min(frontier, taint
+    # floor) — the bare frontier may over-report the removed subtrees. This is
+    # the same value #603's recovery reports on the uncertified version of these
+    # exits; adopting it here keeps "certified" and "reported" bounds identical.
+    if _taint_rig_bound_internal is not None:
+        bound_val = _taint_rig_bound_internal
     assert model._objective is not None
     if bound_val is not None and model._objective.sense == ObjectiveSense.MAXIMIZE:
         bound_val = -bound_val
     gap_val = stats["gap"]
+    if (
+        _taint_rig_bound_internal is not None
+        and obj_val is not None
+        and np.isfinite(obj_val)
+        and bound_val is not None
+        and np.isfinite(bound_val)
+    ):
+        # Recompute the reported gap from the adopted floor-inclusive bound so
+        # the surfaced gap matches the surfaced bound (the tree's ``gap`` was
+        # computed from the bare frontier).
+        gap_val = abs(obj_val - bound_val) / max(1.0, abs(obj_val))
 
     # A *feasible* exit never inherits the tree's validity flag as a certificate.
     # The flag means no node invalidated the tree bound — NOT that the gap is

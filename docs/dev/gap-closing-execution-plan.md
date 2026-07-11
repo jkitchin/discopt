@@ -368,4 +368,5 @@ adversarial suite. Post the table to the tracking issue; update this §7.
 | OVERHEAD-1 startup floor | **in flight** (agent) | profiling |
 | TAIL-1 a/b/c | queued | do (c) first |
 | RELAX-1 centropy tangent cuts | **entry green → GO, implemented** | ex6_2_5 root bound `None`→−27791 (finite, valid ≤ oracle −70.75); 6/8 `ex6_2_*` unlock feasibility-fallback → valid bound; neutral on 30 non-centropy instances; PR open |
+| P0 SPATIAL-CERT (#604 parity in the spatial driver) | **entry green → GO, implemented** | nvs22×route cert loss root-caused: one strided-NLP node's LP soundly declines an uncertifiable vertex bound → placeholder sentinel survives → unproven removal floored at 7.4035 ABOVE the incumbent 6.05822 — case (c), pure over-conservatism. Terminal accounting now certifies iff min(frontier, taint floor) closes the gap (#604's criterion); label-only (nodes/objectives/bounds byte-identical). Also covers the BR-3 st_e36×node_reduce loss (same class: floor −246.00000046, 4.6e-7 inside tolerance). See `docs/dev/p0-spatial-cert-2026-07-10.md`. |
 | V-2 final validation | blocked (all) | baseline §1 banked |
