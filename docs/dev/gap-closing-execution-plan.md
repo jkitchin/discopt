@@ -98,13 +98,24 @@ command). **Note the panel differs from the §1 baseline**: this is the full
 subset — so the apples-to-apples comparison is against the prior *62-panel* run
 (`…2026-07-07…`, discopt ok 50), **not** the §1 43/50.
 
-- **Correctness: discopt VIOLATIONS 0** (ok **52**, gap 1, n/a 9). BARON 0
+Two counts must be kept distinct (the §1 baseline already separates them):
+**certified-optimal** = solver returns status `optimal` with the dual bound
+closed; **`ok`** = the reported value is consistent with the oracle, which
+*includes* a `feasible` incumbent equal to the optimum but not dual-certified.
+
+- **Correctness: discopt VIOLATIONS 0** (ok 52, gap 1, n/a 9). BARON 0
   (ok 55, gap 3, n/a 4). Oracle known on 59/62.
-- **Certified coverage: discopt 52/62 → within 3 of full-license BARON (55/62).**
-  Movement over the week's merges (#593 binary parser, #597 RELAX-1, #603/#604/
-  #613 cert-plumbing, #616 flag graduations): **50 → 52 on the 62-panel (+2)**,
-  zero violations — consistent with the §1 diagnosis (most work was falsification
-  + cert hardening, not headline levers).
+- **Certified-optimal: discopt 43/62, BARON 45/62** (discopt −2). This is the
+  binding coverage metric and it is **flat vs the §1 baseline's 43** — the 62
+  panel adds 12 harder instances (4stufen, bchoco0{6,7,8}, beuster, contvar,
+  heatexch_gen{1,2,3}, hda, …) that discopt does not certify, so 43 holds while
+  the panel grew.
+- **What moved is primal, not certification:** discopt's `ok` (correct-value)
+  count went **50 → 52 on the 62-panel** (prior 62-run 2026-07-07) — discopt now
+  *finds* the correct incumbent on 2 more instances but still cannot *certify*
+  them. Consistent with the §1 diagnosis: the week's merges (#593 parser, #597
+  RELAX-1, #603/#604/#613 cert-plumbing, #616 flag graduations) were primal +
+  correctness hardening, not dual-bound levers; certified-optimal is unchanged.
 - **Residual is the relaxation-looseness class, confirmed with fresh data:**
   nvs05, nvs09, tanksize, casctanks, tls2 now all **find the correct incumbent**
   (their `feasible` values equal BARON's optimum) but do not close the dual bound
@@ -113,6 +124,12 @@ subset — so the apples-to-apples comparison is against the prior *62-panel* ru
   envelope, §6 F13), not an engine, coverage, or primal-heuristic gap. tls2 in
   particular now carries a matching incumbent where the P4/F14 entry run had none,
   so its miss is purely dual-bound certification, not primal.
+- **Speed decomposition** (40 co-certified): *easy class* (BARON < 1 s, n=38)
+  discopt median wall **0.80 s** (down from the §1 baseline's 1.02 s — OVERHEAD-1
+  #592 lazy-SymPy; still > the 0.35 s target), slower than BARON on **all 40**
+  co-certified (the fixed import/JAX/compile floor, not the engine); *hard class*
+  (BARON ≥ 1 s, n=2) geomean **5.2×** — clay0303hfsg 16.9× (25.4 s vs 1.5 s, the
+  outlier), cvxnonsep_nsig30 1.6×.
 
 ---
 
@@ -400,4 +417,4 @@ adversarial suite. Post the table to the tracking issue; update this §7.
 | OVERHEAD-1 startup floor | **in flight** (agent) | profiling |
 | TAIL-1 a/b/c | queued | do (c) first |
 | RELAX-1 centropy tangent cuts | **entry green → GO, implemented** | ex6_2_5 root bound `None`→−27791 (finite, valid ≤ oracle −70.75); 6/8 `ex6_2_*` unlock feasibility-fallback → valid bound; neutral on 30 non-centropy instances; PR open |
-| V-2 final validation | **milestone re-measure banked (§1a, 2026-07-11)** | 62-panel: discopt 52/62 certified (50→52 vs 07-07), 0 violations, BARON 55/62. Residual = relaxation-looseness class (root_gap ratio ~40835); nvs05/nvs09/tanksize/casctanks/tls2 find the correct incumbent but don't certify the dual bound in 60s. |
+| V-2 final validation | **milestone re-measure banked (§1a, 2026-07-11)** | 62-panel: discopt **certified-optimal 43/62** (flat vs baseline), BARON 45/62, 0 violations. `ok`/correct-value 50→52 (+2, primal only — finds the incumbent, doesn't certify). Residual = relaxation-looseness class (root_gap ratio ~40835); nvs05/nvs09/tanksize/casctanks/tls2 find the correct incumbent but don't certify the dual bound in 60s. Easy-class discopt median wall 1.02s→0.80s. |
