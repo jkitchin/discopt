@@ -1,0 +1,325 @@
+{
+  "arm": "lift_loose_products",
+  "env": {
+    "DISCOPT_LIFT_LOOSE_PRODUCTS": "1",
+    "DISCOPT_LU_DENSITY_ROUTE": "1"
+  },
+  "tl": 60.0,
+  "results": {
+    "nvs21": {
+      "instance": "nvs21",
+      "status": "optimal",
+      "objective": -5.684782607923295,
+      "bound": -5.685216256038941,
+      "node_count": 191,
+      "wall": 21.315,
+      "sense": "min"
+    },
+    "st_e36": {
+      "instance": "st_e36",
+      "status": "optimal",
+      "objective": -245.99999999999997,
+      "bound": -246.01879639837875,
+      "node_count": 153,
+      "wall": 15.605,
+      "sense": "min"
+    },
+    "nvs09": {
+      "instance": "nvs09",
+      "status": "feasible",
+      "objective": -43.13433691803531,
+      "bound": -50.27159635063695,
+      "node_count": 85,
+      "wall": 60.449,
+      "sense": "min"
+    },
+    "alkyl": {
+      "instance": "alkyl",
+      "status": "optimal",
+      "objective": -1.7649998792765358,
+      "bound": -1.7651560833301083,
+      "node_count": 29,
+      "wall": 2.319,
+      "sense": "min"
+    },
+    "tls2": {
+      "instance": "tls2",
+      "status": "time_limit",
+      "objective": null,
+      "bound": null,
+      "node_count": 1663,
+      "wall": 61.11,
+      "sense": "min"
+    },
+    "nvs14": {
+      "instance": "nvs14",
+      "status": "optimal",
+      "objective": -40358.15476929996,
+      "bound": -40358.15476929999,
+      "node_count": 223,
+      "wall": 0.349,
+      "sense": "min"
+    },
+    "nvs20": {
+      "instance": "nvs20",
+      "status": "feasible",
+      "objective": 230.9221630055551,
+      "bound": 45.99999999999982,
+      "node_count": 359,
+      "wall": 60.375,
+      "sense": "min"
+    },
+    "nvs22": {
+      "instance": "nvs22",
+      "status": "optimal",
+      "objective": 6.0582199356118025,
+      "bound": 6.0582199951512,
+      "node_count": 37,
+      "wall": 10.099,
+      "sense": "min"
+    },
+    "nvs01": {
+      "instance": "nvs01",
+      "status": "optimal",
+      "objective": 12.46966882156821,
+      "bound": 12.469668808098541,
+      "node_count": 17,
+      "wall": 2.609,
+      "sense": "min"
+    },
+    "nvs04": {
+      "instance": "nvs04",
+      "status": "optimal",
+      "objective": 0.720000000000006,
+      "bound": 0.7199999473599988,
+      "node_count": 5,
+      "wall": 0.715,
+      "sense": "min"
+    },
+    "nvs06": {
+      "instance": "nvs06",
+      "status": "optimal",
+      "objective": 1.7703125002341187,
+      "bound": 1.7703124984296874,
+      "node_count": 5,
+      "wall": 1.105,
+      "sense": "min"
+    },
+    "nvs13": {
+      "instance": "nvs13",
+      "status": "optimal",
+      "objective": -585.2,
+      "bound": -585.2000011714,
+      "node_count": 47,
+      "wall": 2.376,
+      "sense": "min"
+    },
+    "nvs15": {
+      "instance": "nvs15",
+      "status": "optimal",
+      "objective": 1.0,
+      "bound": 1.0,
+      "node_count": 7,
+      "wall": 0.056,
+      "sense": "min"
+    },
+    "nvs23": {
+      "instance": "nvs23",
+      "status": "feasible",
+      "objective": -1124.8,
+      "bound": -1130.495879486534,
+      "node_count": 37,
+      "wall": 65.008,
+      "sense": "min"
+    },
+    "st_miqp2": {
+      "instance": "st_miqp2",
+      "status": "optimal",
+      "objective": 2.0,
+      "bound": 2.0,
+      "node_count": 9,
+      "wall": 0.18,
+      "sense": "min"
+    },
+    "st_miqp3": {
+      "instance": "st_miqp3",
+      "status": "optimal",
+      "objective": -6.0,
+      "bound": -6.0,
+      "node_count": 1,
+      "wall": 0.139,
+      "sense": "min"
+    },
+    "st_miqp5": {
+      "instance": "st_miqp5",
+      "status": "optimal",
+      "objective": -333.8888902488547,
+      "bound": -333.8888902488547,
+      "node_count": 1,
+      "wall": 0.169,
+      "sense": "min"
+    },
+    "st_test2": {
+      "instance": "st_test2",
+      "status": "optimal",
+      "objective": -9.25,
+      "bound": -9.25,
+      "node_count": 5,
+      "wall": 0.15,
+      "sense": "min"
+    },
+    "meanvarx": {
+      "instance": "meanvarx",
+      "status": "optimal",
+      "objective": 14.36923135631427,
+      "bound": 14.36923135631427,
+      "node_count": 17,
+      "wall": 0.621,
+      "sense": "min"
+    },
+    "alan": {
+      "instance": "alan",
+      "status": "optimal",
+      "objective": 2.924999998301341,
+      "bound": 2.924999998301341,
+      "node_count": 21,
+      "wall": 0.219,
+      "sense": "min"
+    },
+    "ex5_2_2_case1": {
+      "instance": "ex5_2_2_case1",
+      "status": "optimal",
+      "objective": -400.0000020422272,
+      "bound": -400.0000041260587,
+      "node_count": 3,
+      "wall": 0.965,
+      "sense": "min"
+    },
+    "ex5_2_4": {
+      "instance": "ex5_2_4",
+      "status": "optimal",
+      "objective": -450.0000011369069,
+      "bound": -450.00000209765136,
+      "node_count": 3,
+      "wall": 0.642,
+      "sense": "min"
+    },
+    "ex7_2_2": {
+      "instance": "ex7_2_2",
+      "status": "feasible",
+      "objective": -0.38881143010195207,
+      "bound": -0.39749234462710814,
+      "node_count": 75,
+      "wall": 7.497,
+      "sense": "min"
+    },
+    "ex7_2_3": {
+      "instance": "ex7_2_3",
+      "status": "feasible",
+      "objective": 7049.247897736022,
+      "bound": 2203.827724298371,
+      "node_count": 637,
+      "wall": 60.148,
+      "sense": "min"
+    },
+    "ex4_1_3": {
+      "instance": "ex4_1_3",
+      "status": "optimal",
+      "objective": -443.6717047411247,
+      "bound": -443.69325421340716,
+      "node_count": 49,
+      "wall": 0.631,
+      "sense": "min"
+    },
+    "ex4_1_8": {
+      "instance": "ex4_1_8",
+      "status": "optimal",
+      "objective": -16.73889318443983,
+      "bound": -16.740521631557268,
+      "node_count": 7,
+      "wall": 0.669,
+      "sense": "min"
+    },
+    "ex4_1_9": {
+      "instance": "ex4_1_9",
+      "status": "optimal",
+      "objective": -5.508013263411899,
+      "bound": -5.508237191656272,
+      "node_count": 187,
+      "wall": 1.621,
+      "sense": "min"
+    },
+    "ex8_1_1": {
+      "instance": "ex8_1_1",
+      "status": "optimal",
+      "objective": -2.021806795967722,
+      "bound": -2.021968747474246,
+      "node_count": 5,
+      "wall": 0.659,
+      "sense": "min"
+    },
+    "ex8_1_6": {
+      "instance": "ex8_1_6",
+      "status": "optimal",
+      "objective": -10.086001496222387,
+      "bound": -10.086001496222387,
+      "node_count": 1,
+      "wall": 0.541,
+      "sense": "min"
+    },
+    "st_bpaf1a": {
+      "instance": "st_bpaf1a",
+      "status": "optimal",
+      "objective": -45.37971091253482,
+      "bound": -45.37971142671955,
+      "node_count": 5,
+      "wall": 0.699,
+      "sense": "min"
+    },
+    "st_bpaf1b": {
+      "instance": "st_bpaf1b",
+      "status": "optimal",
+      "objective": -42.96255572024222,
+      "bound": -42.96255849515288,
+      "node_count": 3,
+      "wall": 0.681,
+      "sense": "min"
+    },
+    "st_e29": {
+      "instance": "st_e29",
+      "status": "optimal",
+      "objective": -0.9434704910762214,
+      "bound": -0.9435072710855771,
+      "node_count": 53,
+      "wall": 5.052,
+      "sense": "min"
+    },
+    "st_e31": {
+      "instance": "st_e31",
+      "status": "feasible",
+      "objective": -2.000000023408541,
+      "bound": -3.0,
+      "node_count": 171,
+      "wall": 60.767,
+      "sense": "min"
+    },
+    "gbd": {
+      "instance": "gbd",
+      "status": "optimal",
+      "objective": 2.199999982504936,
+      "bound": 2.199999982504936,
+      "node_count": 3,
+      "wall": 0.165,
+      "sense": "min"
+    },
+    "gkocis": {
+      "instance": "gkocis",
+      "status": "optimal",
+      "objective": -1.9230987798770212,
+      "bound": -1.9230988280923489,
+      "node_count": 5,
+      "wall": 1.706,
+      "sense": "min"
+    }
+  }
+}
