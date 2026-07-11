@@ -345,10 +345,17 @@ class SolverTuning:
     dual bound or the certificate (heuristic-policy regime, CLAUDE.md §5)."""
 
     obj_branch_priority: bool = field(
-        default_factory=lambda: _env_flag("DISCOPT_OBJ_BRANCH_PRIORITY", default=False)
+        default_factory=lambda: _env_flag("DISCOPT_OBJ_BRANCH_PRIORITY", default=True)
     )
     """Prioritize branching on objective-defining variables
-    (``DISCOPT_OBJ_BRANCH_PRIORITY``, default off)."""
+    (``DISCOPT_OBJ_BRANCH_PRIORITY``, default ON).
+
+    Graduated per T2.6 with 3 consecutive green held-out verdicts (composed
+    with the density LU route): BR-3 #602 (verdict 1), FLAG-GRAD #612
+    (verdict 2), and the P0 SPATIAL-CERT re-run
+    (``docs/dev/p0-spatial-cert-2026-07-10.md``, verdict 3 — incorrect 0,
+    oracle-cross 0, cert-loss 0; both-certified nodes 1092 -> 1054). Set
+    ``DISCOPT_OBJ_BRANCH_PRIORITY=0`` to restore the old default."""
 
     lp_warmstart: bool = field(
         default_factory=lambda: _env_flag("DISCOPT_LP_WARMSTART", default=True)

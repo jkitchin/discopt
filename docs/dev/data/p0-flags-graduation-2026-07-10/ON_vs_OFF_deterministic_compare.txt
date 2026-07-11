@@ -1,0 +1,60 @@
+ON  violations=0  certified=43/50
+OFF violations=0  certified=43/50
+
+REGRESSIONS (OFF optimal -> ON not-optimal): NONE
+GAINS (OFF not-optimal -> ON optimal): NONE
+
+instance               ON_st      OFF_st        ON_n   OFF_n   dNode          ON_obj d_verdict_ON
+alan                   optimal    optimal         21      21      +0  2.924999998301           ok
+casctanks              feasible   feasible        15      13          9.163479239984           ok
+chance                 optimal    optimal          0       0      +0  29.89437815427           ok
+clay0303hfsg           feasible   feasible       293     305          26669.10955143           ok
+cvxnonsep_nsig30       optimal    optimal        165     165      +0  130.6287111692           ok
+cvxnonsep_psig30       optimal    optimal         89      89      +0  78.99885435294           ok
+cvxnonsep_psig40r      optimal    optimal         95      95      +0  86.54527995164           ok
+dispatch               optimal    optimal          3       3      +0  3155.287926698           ok
+ex1221                 optimal    optimal          5       5      +0  7.667180071144           ok
+ex1222                 optimal    optimal          1       1      +0  1.076543083332           ok
+ex1224                 optimal    optimal         53      53      +0  -0.94347049107           ok
+ex1225                 optimal    optimal          5       5      +0  30.99999991355           ok
+ex1226                 optimal    optimal          5       5      +0  -17.0000000039           ok
+fac2                   optimal    optimal         69      69      +0  331837498.1820           ok
+flay02m                optimal    optimal          7       7      +0  37.94733186383           ok
+flay03m                optimal    optimal        111     111      +0  48.98979479383           ok
+gbd                    optimal    optimal          3       3      +0  2.199999982504           ok
+gkocis                 optimal    optimal          5       5      +0  -1.92309877987           ok
+hda                    time_limit time_limit       3       3                    None          n/a
+m3                     optimal    optimal         61      61      +0  37.79999966997           ok
+nvs01                  optimal    optimal         17      17      +0  12.46966882156           ok
+nvs02                  optimal    optimal        337     337      +0   5.96418452307           ok
+nvs03                  optimal    optimal          5       5      +0            16.0           ok
+nvs04                  optimal    optimal          5       5      +0  0.720000000000           ok
+nvs05                  feasible   feasible       493     493          5.470934126405           ok
+nvs06                  optimal    optimal          5       5      +0  1.770312500234           ok
+nvs07                  optimal    optimal          5       5      +0             4.0           ok
+nvs08                  optimal    optimal         57      57      +0  23.44972735335           ok
+nvs09                  feasible   feasible        31      63          -43.1343369180           ok
+nvs10                  optimal    optimal          5       5      +0  -310.799999999           ok
+nvs11                  optimal    optimal         55      55      +0  -430.999999999           ok
+nvs12                  optimal    optimal        231     231      +0  -481.200000000           ok
+nvs13                  optimal    optimal         45      47      -2          -585.2           ok
+nvs14                  optimal    optimal        223     223      +0  -40358.1547692           ok
+nvs15                  optimal    optimal          7       7      +0             1.0           ok
+oaer                   optimal    optimal          3       3      +0  -1.92309830374           ok
+st_e13                 optimal    optimal          3       3      +0             2.0           ok
+st_e29                 optimal    optimal         53      53      +0  -0.94347049107           ok
+st_e36                 optimal    optimal        153     153      +0          -246.0           ok
+st_e38                 optimal    optimal          3       3      +0  7197.727116839           ok
+st_miqp1               optimal    optimal         15      15      +0  280.9999999906           ok
+st_miqp2               optimal    optimal          9       9      +0             2.0           ok
+st_miqp3               optimal    optimal          1       1      +0            -6.0           ok
+st_miqp4               optimal    optimal          3       3      +0  -4574.00000442           ok
+st_miqp5               optimal    optimal          1       1      +0  -333.888890248           ok
+st_test1               optimal    optimal         15      15      +0  -1.64959944906           ok
+st_testgr3             optimal    optimal        549     549      +0          -20.59           ok
+tanksize               feasible   feasible       173     173          1.268643752927           ok
+tls2                   time_limit time_limit    1567    1567                    None          n/a
+tspn05                 optimal    optimal         39      39      +0  191.2552076849           ok
+
+both-certified instances: 43
+total nodes ON=2542  OFF=2544  delta=-2

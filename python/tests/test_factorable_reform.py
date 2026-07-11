@@ -977,8 +977,11 @@ def _squared_log_model():
 
 
 def test_tda_flag_off_leaves_call_power_untouched(monkeypatch):
-    """Flag OFF: ``g(x)**n`` is NOT lifted (reform byte-identical to baseline)."""
-    monkeypatch.delenv("DISCOPT_LIFT_LOOSE_PRODUCTS", raising=False)
+    """Flag OFF: ``g(x)**n`` is NOT lifted (reform byte-identical to baseline).
+
+    DISCOPT_LIFT_LOOSE_PRODUCTS is now default-ON (graduated), so the OFF behavior
+    must be requested explicitly with ``=0`` rather than by unsetting the env."""
+    monkeypatch.setenv("DISCOPT_LIFT_LOOSE_PRODUCTS", "0")
     m, _xs, _ = _squared_log_model()
     # The squared-log alone is not factorable work with the flag off.
     assert not has_factorable_work(m)

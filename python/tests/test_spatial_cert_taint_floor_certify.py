@@ -73,6 +73,11 @@ def test_nvs22_density_route_certifies_closed_gap(monkeypatch):
     lift_loose_products.
     """
     monkeypatch.setenv("DISCOPT_LU_DENSITY_ROUTE", "1")
+    # Pin the other graduated flags OFF: this test freezes the exact measured
+    # configuration (route alone) so its deterministic 37-node signature holds
+    # regardless of the flags' defaults.
+    monkeypatch.setenv("DISCOPT_OBJ_BRANCH_PRIORITY", "0")
+    monkeypatch.setenv("DISCOPT_LIFT_LOOSE_PRODUCTS", "0")
     result = from_nl(_NVS22_NL).solve(time_limit=40, gap_tolerance=1e-4)
 
     assert result.status == "optimal", (
@@ -111,6 +116,12 @@ def test_st_e36_node_reduce_certifies_within_tolerance_floor(monkeypatch):
     reported bound (the BR-3 node_reduce blocker, same accounting class).
     """
     monkeypatch.setenv("DISCOPT_NODE_REDUCE", "1")
+    # Pin the graduated flags OFF ("0" disables each): this test freezes the
+    # exact measured configuration (node_reduce alone, historical LU routing)
+    # so its deterministic signature holds regardless of the flags' defaults.
+    monkeypatch.setenv("DISCOPT_LU_DENSITY_ROUTE", "0")
+    monkeypatch.setenv("DISCOPT_OBJ_BRANCH_PRIORITY", "0")
+    monkeypatch.setenv("DISCOPT_LIFT_LOOSE_PRODUCTS", "0")
     result = from_nl(_ST_E36_NL).solve(time_limit=40, gap_tolerance=1e-4)
 
     assert result.status == "optimal", (
