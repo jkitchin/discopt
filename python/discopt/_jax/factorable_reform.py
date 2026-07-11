@@ -105,7 +105,14 @@ def _lift_zero_spanning_factors_enabled() -> bool:
 
 
 def _lift_loose_products_enabled() -> bool:
-    """TD-A feature flag (``DISCOPT_LIFT_LOOSE_PRODUCTS``, default OFF).
+    """TD-A feature flag (``DISCOPT_LIFT_LOOSE_PRODUCTS``, default ON).
+
+    Graduated per T2.6 with 3 consecutive green held-out verdicts (composed
+    with the density LU route): BR-3 #602 (verdict 1), FLAG-GRAD #612
+    (verdict 2), and the P0 SPATIAL-CERT re-run
+    (``docs/dev/p0-spatial-cert-2026-07-10.md``, verdict 3 — incorrect 0,
+    oracle-cross 0, cert-loss 0; nvs09 dual bound −63.71 -> −50.27). Set
+    ``DISCOPT_LIFT_LOOSE_PRODUCTS=0`` to restore the old default.
 
     Extends the factorable lift to an integer power of a *non-atomic univariate
     function call* — ``g(x)**n`` with ``g`` a transcendental (``log``, ``sin``,
@@ -126,7 +133,8 @@ def _lift_loose_products_enabled() -> bool:
     existing monomial-secant / even-power envelope relaxes exactly (even ``n``) or
     3-regime (odd ``n``). This is an exact identity substitution (``t == g(x)``),
     so it cuts no feasible point; it only replaces a *dropped* term with a
-    relaxable one. Default OFF keeps the reform byte-identical.
+    relaxable one. ``DISCOPT_LIFT_LOOSE_PRODUCTS=0`` keeps the reform
+    byte-identical to the pre-lift behavior.
 
     Entry-experiment measurement (nvs09 hand-lift): root bound −72.90 → −54.83
     (root gap 69.0 % → 27.1 %, a 60.7 % relative reduction, ≥ 25 % bar). nvs05 was
@@ -137,7 +145,7 @@ def _lift_loose_products_enabled() -> bool:
     """
     import os
 
-    return os.environ.get("DISCOPT_LIFT_LOOSE_PRODUCTS", "0") == "1"
+    return os.environ.get("DISCOPT_LIFT_LOOSE_PRODUCTS", "1") != "0"
 
 
 # Transcendental univariate calls whose integer power TD-A lifts. Restricted to

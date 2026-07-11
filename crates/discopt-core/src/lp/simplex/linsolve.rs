@@ -186,13 +186,22 @@ fn route_dense_decision(m: usize, nnz: usize, params: &LuParams, density_route: 
 }
 
 /// Whether the `DISCOPT_LU_DENSITY_ROUTE` density-aware LU route (#557) is on
-/// for new factorizations: the env flag is set AND no dense-retry suppression is
-/// in effect (#85 — a failed solve is re-run once with the route suppressed; see
-/// [`with_density_route_suppressed`]). Default off — the LU routing is
-/// byte-identical to the historical policy — so this is a real, opt-in
-/// performance knob, not a dead flag.
+/// for new factorizations: the env flag is not explicitly disabled AND no
+/// dense-retry suppression is in effect (#85 — a failed solve is re-run once
+/// with the route suppressed; see [`with_density_route_suppressed`]).
+///
+/// Default ON. Graduated per T2.6 with 3 consecutive green held-out verdicts:
+/// BR-3 #602 (verdict 1), FLAG-GRAD #612 (verdict 2), and the P0 SPATIAL-CERT
+/// re-run (`docs/dev/p0-spatial-cert-2026-07-10.md`, verdict 3 — incorrect 0,
+/// oracle-cross 0, cert-loss 0; the nvs22 loss that broke the first verdict-3
+/// attempt was a spatial-driver certification-accounting bug, fixed there).
+/// Set `DISCOPT_LU_DENSITY_ROUTE=0` to restore the historical dense-preferring
+/// routing byte-identically.
 fn density_route_enabled() -> bool {
-    !route_suppressed() && std::env::var_os("DISCOPT_LU_DENSITY_ROUTE").is_some()
+    !route_suppressed()
+        && std::env::var("DISCOPT_LU_DENSITY_ROUTE")
+            .map(|v| v != "0")
+            .unwrap_or(true)
 }
 
 std::thread_local! {
