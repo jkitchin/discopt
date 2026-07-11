@@ -3542,24 +3542,31 @@ def _composite_referenced_var(expr: Expression, model: Model) -> Optional[tuple[
 
 
 def _univariate_envelope_enabled() -> bool:
-    """H-UNI feature flag (``DISCOPT_UNIVARIATE_ENVELOPE``, default **ON**).
+    """H-UNI feature flag (``DISCOPT_UNIVARIATE_ENVELOPE``, default **OFF** — opt-in).
 
     Task ``cert:LR-2`` / ``cert:LR-3``. When ON, a maximal single-variable subtree
     whose certified curvature is *neither* convex nor concave is lifted with the
     exact 1-D convex/concave hull envelope (:mod:`discopt._jax.univariate_hull`)
-    instead of falling to a looser composed relaxation.
+    instead of falling to a looser composed relaxation. Set
+    ``DISCOPT_UNIVARIATE_ENVELOPE=1`` to opt in.
 
-    **Graduated default-ON (cert:LR-3).** Graduation gate (62-corpus + a MINLPLib
-    signomial/product draw): ``incorrect_count = 0``, zero certificate losses, and
-    it *adds* a certification (clay0303hfsg) while collapsing nvs09's tree
-    (215→3 nodes). Verified inert where it does not fire (byte-identical
-    status/objective/node_count on non-matching instances) and, post the LR-3
-    soundness fix, sound on the AMP path (no false-infeasible on unbounded boxes;
-    defers to exact trig-table / curvature handlers). Set
-    ``DISCOPT_UNIVARIATE_ENVELOPE=0`` to opt out (restores the prior composed
-    relaxation, byte-identical to pre-LR-2 main via the #630 fingerprint guard).
+    **Graduation deferred (kept default-OFF).** The gate result was sound (nvs09
+    certifies, tree 215→3, ``incorrect_count = 0``), but graduating H-UNI default-ON
+    surfaced a class of *claim-boundary collisions*: as an additional overlapping
+    "claimer" layered onto the federated lifted-relaxation path, H-UNI diverts terms
+    the dedicated exact machinery already handles (bare-monomial lifts, the square
+    lift, the issue-267 univariate-product path, the finite-domain trig table),
+    arbitrated by a hand-maintained defer-list in :func:`_should_claim_composite`.
+    Those collisions are order-masked under pytest-xdist, so a green parallel suite
+    is not proof of no silent divert. The principled home for graduating H-UNI is the
+    AVM/factorable-canonicalization work (``docs/dev/maingo-parity-plan.md``), where a
+    single canonical normal form gives one envelope per atom and the defer-list
+    disappears. Until then H-UNI ships as a sound opt-in flag; OFF is byte-identical
+    to prior main (the #630 fingerprint guard proves it), and the LR-3 soundness fixes
+    (no hull over effectively-unbounded boxes; the claim-boundary defers) still harden
+    the opt-in ON path.
     """
-    return os.environ.get("DISCOPT_UNIVARIATE_ENVELOPE", "1") != "0"
+    return os.environ.get("DISCOPT_UNIVARIATE_ENVELOPE", "0") != "0"
 
 
 def _log_monomial_enabled() -> bool:

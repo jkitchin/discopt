@@ -85,11 +85,13 @@ def _clear_flags(monkeypatch):
     yield
 
 
-def test_flag_defaults_post_lr3_graduation():
-    # cert:LR-3 graduated H-UNI default-ON (sound + adds a certification + inert
-    # where it does not fire). H-LOG stays default-OFF (no binding target: nvs09
-    # closes without it, nvs05 was killed). ``=0`` opts out of H-UNI.
-    assert mr._univariate_envelope_enabled() is True
+def test_flags_default_off():
+    # cert:LR-3 graduation was DEFERRED: H-UNI stays default-OFF (opt-in) because
+    # graduating it default-ON surfaced order-masked claim-boundary collisions with
+    # the existing lifted-relaxation paths (see _univariate_envelope_enabled docstring
+    # and docs/dev/maingo-parity-plan.md). H-LOG is likewise default-OFF. Both remain
+    # sound opt-in flags; OFF is byte-identical to prior main (guarded below).
+    assert mr._univariate_envelope_enabled() is False
     assert mr._log_monomial_enabled() is False
 
 

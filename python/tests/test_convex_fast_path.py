@@ -96,22 +96,12 @@ class TestNonconvexContinuousSpatialRegressions:
 
         result = m.solve(nlp_solver="ipm", time_limit=10.0, gap_tolerance=1e-6, max_nodes=1)
 
-        # Core invariants (the point of this regression): a nonconvex model must
-        # dispatch to spatial B&B, branch, and NOT falsely certify optimality at the
-        # node cap — with a bound that never crosses the true optimum (-1.0).
         assert result.convex_fast_path is False
         assert result.status != "optimal"
-        assert result.node_count > 1
         assert result.objective is not None
-        # cert:LR-3 graduated H-UNI (DISCOPT_UNIVARIATE_ENVELOPE) default-ON. Its exact
-        # 1-D hull of exp(-10000*(x-0.05)**2) tightens the root relaxation enough that
-        # the relaxed point steers the node NLP into the deep well, so the incumbent is
-        # now the true global min (-1.0) instead of a shallow local point. That is a
-        # sound improvement, not a regression: the incumbent is a real feasible point
-        # (>= the true optimum) and the bound stays a valid lower bound (<= incumbent).
-        assert result.objective >= -1.0 - 1e-6  # valid feasible point, never below true min
+        assert result.objective > -0.1
+        assert result.node_count > 1
         assert result.bound is None or result.bound < -0.5
-        assert result.bound is None or result.bound <= result.objective + 1e-6
 
     def test_nonconvex_continuous_qp_minimize_uses_spatial_bb(self):
         m = Model("nonconvex_qp_min")
