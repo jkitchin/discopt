@@ -3644,8 +3644,40 @@ def _should_claim_composite(
         # a purely affine sum is left to the exact linear path.
         if _composite_referenced_var(expr, model) is None:
             return False
-        return _expr_has_nonlinear_subterm(expr)
+        return _has_genuine_composite_subterm(expr, model, n_orig)
     return False
+
+
+def _has_genuine_composite_subterm(expr: Expression, model: Model, n_orig: int) -> bool:
+    """True if an additive single-variable ``expr`` contains a sub-term the standard
+    path relaxes only via a *looser composition* — the case H-UNI's exact 1-D hull
+    improves on.
+
+    A *bare monomial* ``x**p`` (base is a variable) is lifted exactly by the
+    dedicated monomial/fractional-power machinery, and the incremental McCormick
+    engine builds its rows directly; H-UNI adds no tightness there but would divert
+    the term into the composite path and break the engine's cold/patch agreement.
+    So ``_expr_has_nonlinear_subterm`` (which fires on *any* power) is too broad for
+    the additive claim. Here we walk ``+``/``-``/``neg``/const-scaling and claim only
+    when a leaf is a *genuine composite*: a univariate call of a non-affine argument
+    (``ln(x-2)``) or a power of a non-bare base (``(ln(x-2))**2``) — exactly the
+    non-additive cases :func:`_should_claim_composite` recognises with
+    ``allow_general=True``. nvs09's ``(ln(x-2))**2 + (ln(10-x))**2`` still qualifies;
+    ``x**p + x`` (bare monomial + linear) no longer does."""
+    if isinstance(expr, UnaryOp) and expr.op == "neg":
+        return _has_genuine_composite_subterm(expr.operand, model, n_orig)
+    if isinstance(expr, BinaryOp) and expr.op in ("+", "-"):
+        return _has_genuine_composite_subterm(expr.left, model, n_orig) or (
+            _has_genuine_composite_subterm(expr.right, model, n_orig)
+        )
+    if isinstance(expr, BinaryOp) and expr.op == "*":
+        # A constant-scaled term contributes its non-constant factor's status.
+        if isinstance(expr.right, Constant):
+            return _has_genuine_composite_subterm(expr.left, model, n_orig)
+        if isinstance(expr.left, Constant):
+            return _has_genuine_composite_subterm(expr.right, model, n_orig)
+        return False
+    return _should_claim_composite(expr, model, n_orig, allow_general=True)
 
 
 def _is_tabulatable_trig_square(
