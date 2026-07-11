@@ -429,6 +429,22 @@ Stage 0 (gate) ─► Stage 1 (kill recompilation — the dominant measured cost
 > `docs/dev/a-unbounded-entry-2026-07-10.md`; ledgered as F9 in
 > `gap-closing-execution-plan.md` §6.
 
+> **Falsified (2026-07-11, task #98 — P1-A2, F13):** "The MINLPLib ex6_2 Gibbs/log-sum
+> objective is a sum of convex atoms (whole objective convex), so joint outer-approximation
+> cuts of the full objective collapse the ~300× root gap left by summing per-atom tangents."
+> The premise is false: the objective is **nonconvex** — its Wilson activity terms
+> `−x_i·log(a·x+b·y+…)` (the 24 `neg(...)` nodes in ex6_2_5) are nonconvex at 100% of box
+> points, and the whole objective has a negative Hessian eigenvalue at 78%/92%/99.5% of box
+> points (ex6_2_5/9/10). Joint-OA is therefore **unsound** (a gradient cut of a nonconvex
+> function is not a valid underestimator), and the sound joint alternative (αBB over the whole
+> objective) is ~1e40–1e52× **worse** — the `x·log(x)`/`log(x)` `~1/x` Hessian singularity at
+> the box edge drives rigorous α to ~1e40. Per-atom relaxation is used *because* it is the only
+> tractable sound handling of this singular structure. Residual looseness is 100% in the
+> objective (constraints are linear mass-balances), but the lever is a tighter **per-atom**
+> `x·log(affine)` envelope, not a joint cut — Lever A on that composite. No code shipped.
+> Record + reproduction: `docs/dev/p1a2-gibbs-log-sum-oa-entry-2026-07-11.md`; ledgered as
+> F13 in `gap-closing-execution-plan.md` §6.
+
 ## 9. Engine layer — density-aware LU route (#557): the nvs21 certificate loss
 
 > **Entry experiment (2026-07-10, task #77) — the conditioning-gate hypothesis is
