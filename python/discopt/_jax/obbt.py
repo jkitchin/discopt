@@ -951,6 +951,7 @@ def run_obbt_on_relaxation(
     deadline: Optional[float] = None,
     prefer_pounce: bool = False,
     full_result: bool = False,
+    top_k: Optional[int] = None,
 ) -> ObbtResult:
     """OBBT over the LP relaxation of a MILP relaxation envelope.
 
@@ -989,6 +990,19 @@ def run_obbt_on_relaxation(
         Used by the OBBT-on-aux diagnostic (#208) to *capture* the tightening of
         the lifted (product/ratio) aux columns that the default path discards.
         Does not change the default (``False``) behavior for solve-path callers.
+    top_k : int, optional
+        When set, run OBBT only on the ``top_k`` most promising candidate
+        columns instead of every candidate in index order (T2.5). Candidates are
+        ranked by the standard ``bound-width × |reduced cost|`` heuristic: a wide
+        variable with a large marginal is where a min/max probe pays. Reduced
+        costs come from a single extra objective LP over the same relaxation
+        polytope (the DBBT LP); if no dual-exposing oracle is available the score
+        degrades to width alone. Selecting *which* variables to tighten never
+        changes the soundness of each tightening (every probe is still NS-safe),
+        only the number of probes — so this is a pure affordability lever that
+        lets per-node OBBT engage on large (n > 100) spatial models that the
+        all-columns sweep made too expensive to run. ``None`` (default) keeps the
+        legacy all-candidates-in-index-order behavior byte-for-byte.
     """
     import time as _time
 
@@ -1086,6 +1100,54 @@ def run_obbt_on_relaxation(
     n_tightened = 0
     total_lp_time = 0.0
     warm_basis = None
+
+    # T2.5 candidate scoring: when ``top_k`` is set, rank candidates by the
+    # standard ``width × |reduced cost|`` heuristic and probe only the top-k. A
+    # single objective LP over the (equilibrated) polytope yields the reduced
+    # costs; the marginal |d_i| says how strongly the relaxation objective pushes
+    # x_i against a bound, and width says how much room there is to shrink — their
+    # product is where a min/max probe pays. This selects *which* variables to
+    # tighten, never *how* (each surviving probe is still NS-safe below), so the
+    # subset is a pure affordability lever with no soundness effect. Without a
+    # dual-exposing oracle the score degrades to width alone (still far better
+    # than index order for the same budget). The scoring LP time is folded into
+    # ``total_lp_time`` so the budget accounting stays honest.
+    if top_k is not None and 0 <= top_k < len(candidate_idxs):
+        width_arr = ub_arr - lb_arr
+        rc = None
+        if c_obj is not None:
+            try:
+                _score_res = _lp(
+                    c=np.asarray(c_obj, dtype=np.float64),
+                    A_ub=A_ub,
+                    b_ub=b_ub,
+                    bounds=[(float(lb_arr[i]), float(ub_arr[i])) for i in range(n_total)],
+                    time_limit=time_limit_per_lp,
+                )
+                total_lp_time += getattr(_score_res, "wall_time", 0.0) or 0.0
+                n_lp_solves += 1
+                if _score_res.status == SolveStatus.OPTIMAL:
+                    _rc = getattr(_score_res, "reduced_costs", None)
+                    if _rc is not None:
+                        rc = np.asarray(_rc, dtype=np.float64)
+            except Exception:
+                rc = None
+
+        def _score(i: int) -> float:
+            w = float(width_arr[i]) if np.isfinite(width_arr[i]) else 0.0
+            if w <= min_width:
+                return 0.0
+            if rc is not None and i < rc.shape[0] and np.isfinite(rc[i]):
+                return w * abs(float(rc[i]))
+            # No reduced cost for this column: fall back to width, but rank it
+            # below any RC-scored candidate of comparable width so scored ones win
+            # the budget. Width alone is still a sound, sensible ordering.
+            return w if rc is None else 0.0
+
+        # Stable top-k: sort by descending score, keep index order among ties so
+        # the selection is deterministic (byte-reproducible verdicts).
+        ranked = sorted(candidate_idxs, key=lambda i: (-_score(i), i))
+        candidate_idxs = ranked[:top_k]
 
     def _bounds_list() -> list[tuple[float, float]]:
         return [(float(lb_arr[i]), float(ub_arr[i])) for i in range(n_total)]
@@ -1779,6 +1841,7 @@ def obbt_tighten_root(
     superposition: bool = False,
     prefer_pounce: bool = False,
     cascade_aux: bool = False,
+    top_k: Optional[int] = None,
 ) -> RootObbtResult:
     """Structural root OBBT over the LP-form McCormick relaxation.
 
@@ -1828,6 +1891,12 @@ def obbt_tighten_root(
         reduction and slightly regressed one instance (nvs13 39→53 nodes), so it
         does not meet #208's "the extra OBBT cost must pay for itself" bar yet. It
         is kept available behind this flag for a future targeted-budget A/B.
+    top_k : int, optional
+        Forwarded to :func:`run_obbt_on_relaxation` — probe only the ``top_k``
+        highest ``width × |reduced cost|`` variables per sweep instead of all
+        original columns (T2.5). This bounds the per-sweep probe count so per-node
+        OBBT stays affordable on large spatial models; soundness of each surviving
+        tightening is unchanged. ``None`` keeps the all-columns behavior.
     """
     from discopt.modeling.core import VarType
 
@@ -2007,6 +2076,10 @@ def obbt_tighten_root(
                 deadline=deadline,
                 prefer_pounce=prefer_pounce,
                 full_result=cascade_aux,
+                # T2.5: probe only the top-k width×|RC| candidates when requested.
+                # Not combined with the aux-cascade candidate set (all columns) —
+                # cascade is a diagnostic path with its own full-column contract.
+                top_k=None if cascade_aux else top_k,
             )
             total_lp_time += res.total_lp_time
             n_rounds += 1

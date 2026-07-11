@@ -235,6 +235,25 @@ _PER_NODE_OBBT_BUDGET_FRAC = 0.6
 _PER_NODE_OBBT_PER_NODE_S = 3.0
 _PER_NODE_OBBT_PER_LP_S = 0.3
 _PER_NODE_OBBT_ROUNDS = 3
+# T2.5 (flag-gated, default OFF): scored top-k OBBT de-gate. BARON/SCIP reduce at
+# every node but affordably, by scoring variables and probing only the most
+# promising ones. discopt's per-node OBBT probes all columns in index order —
+# O(n) LPs/node — so it is size-gated off at n>_PER_NODE_OBBT_MAX_VARS, which
+# skips large stall-class spatial models entirely (casctanks n=560 never runs
+# per-node OBBT; F12). With ``DISCOPT_OBBT_TOPK=1`` the gate instead runs OBBT on
+# the top-k ``width × |reduced cost|`` variables for models above the size cap,
+# bounding the per-sweep probe count so the existing per-node/cumulative budgets
+# can hold. Selecting *which* variables to tighten is a pure affordability lever;
+# every surviving tightening is still NS-safe (soundness unchanged). Default OFF
+# until the differential + panel gates are green on consecutive nightlies.
+_PER_NODE_OBBT_TOPK = 20
+
+
+def _obbt_topk_enabled() -> bool:
+    """Whether the T2.5 scored top-k OBBT de-gate is on (env flag, default OFF)."""
+    return os.environ.get("DISCOPT_OBBT_TOPK", "").strip().lower() in ("1", "true", "yes", "on")
+
+
 # Root branch-and-reduce fixpoint (cert:T2.3) no-offtarget gate: skip the loop when
 # the relative gap between the root dual bound and the incumbent cutoff is at/below
 # this — an already-tight root has nothing to close, so running it would only add
@@ -5687,21 +5706,31 @@ def solve_model(
     # certifies the welded-beam (nvs05) class; together they do (~23 nodes).
     # A cumulative time budget caps total cost so a deep tree can never let
     # per-node OBBT dominate wall clock.
-    _per_node_obbt_enabled = (
-        _mc_lp_relaxer is not None
-        and bool(_dependent_var_names)
-        and n_vars <= _PER_NODE_OBBT_MAX_VARS
+    _pn_obbt_structural = _mc_lp_relaxer is not None and bool(_dependent_var_names)
+    _pn_obbt_small = _pn_obbt_structural and n_vars <= _PER_NODE_OBBT_MAX_VARS
+    # T2.5 de-gate: with the scored top-k flag on, the same structural class runs
+    # per-node OBBT above the size cap too — but only on the top-k
+    # ``width × |reduced cost|`` variables, so the per-sweep probe count is bounded
+    # (O(top_k) LPs/node instead of O(n_vars)) and the existing per-node /
+    # cumulative budgets can cap wall. Below the cap we keep the legacy
+    # all-columns behavior byte-for-byte (top_k stays None) so the flag is inert
+    # on the already-certifying small class.
+    _pn_obbt_degated = (
+        _pn_obbt_structural and n_vars > _PER_NODE_OBBT_MAX_VARS and _obbt_topk_enabled()
     )
+    _per_node_obbt_enabled = _pn_obbt_small or _pn_obbt_degated
+    _pn_obbt_topk = _PER_NODE_OBBT_TOPK if _pn_obbt_degated else None
     _pn_obbt_spent = 0.0
     _pn_obbt_budget_total = time_limit * _PER_NODE_OBBT_BUDGET_FRAC
     if _per_node_obbt_enabled:
         from discopt._jax.obbt import obbt_tighten_root
 
         logger.debug(
-            "per-node OBBT enabled (n_vars=%d, dependent=%d, budget=%.1fs)",
+            "per-node OBBT enabled (n_vars=%d, dependent=%d, budget=%.1fs, top_k=%s)",
             n_vars,
             len(_dependent_var_names),
             _pn_obbt_budget_total,
+            _pn_obbt_topk,
         )
 
     # --- Per-node cheap reduction (cert:T2.4b, flag default OFF) ---
@@ -6104,6 +6133,7 @@ def solve_model(
                         deadline=_t_pn + _PER_NODE_OBBT_PER_NODE_S,
                         time_limit_per_lp=_PER_NODE_OBBT_PER_LP_S,
                         prefer_pounce=nlp_solver == "pounce",
+                        top_k=_pn_obbt_topk,
                     )
                 except Exception as _pn_exc:  # pragma: no cover - defensive
                     logger.debug("per-node OBBT failed: %s", _pn_exc)
