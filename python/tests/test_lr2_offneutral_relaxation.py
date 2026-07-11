@@ -85,8 +85,11 @@ def _clear_flags(monkeypatch):
     yield
 
 
-def test_flags_off_by_default():
-    assert mr._univariate_envelope_enabled() is False
+def test_flag_defaults_post_lr3_graduation():
+    # cert:LR-3 graduated H-UNI default-ON (sound + adds a certification + inert
+    # where it does not fire). H-LOG stays default-OFF (no binding target: nvs09
+    # closes without it, nvs05 was killed). ``=0`` opts out of H-UNI.
+    assert mr._univariate_envelope_enabled() is True
     assert mr._log_monomial_enabled() is False
 
 
@@ -110,6 +113,10 @@ def test_relaxation_off_byte_identical_corpus(name, monkeypatch):
     collectors. Because the flags are OFF, the real path already takes these
     branches — so equality proves the OFF path is a genuine no-op (no row leaks),
     byte-identical to prior main, on every corpus instance."""
+    # H-UNI is default-ON post cert:LR-3, so force the opt-out (=0) to exercise the
+    # genuine flag-OFF path this guardrail is about.
+    monkeypatch.setenv("DISCOPT_UNIVARIATE_ENVELOPE", "0")
+    monkeypatch.setenv("DISCOPT_LOG_MONOMIAL", "0")
     fp_real_off = _relaxation_fingerprint(name)
 
     # Force the additive Path-B entry points to their code-absent behavior.
@@ -127,6 +134,7 @@ def test_relaxation_off_byte_identical_corpus(name, monkeypatch):
 def test_flag_on_changes_nvs09_relaxation(monkeypatch):
     """Flag ON must add rows to nvs09's relaxation — proves the envelope lever is
     real, not an inert flag (CLAUDE.md §3)."""
+    monkeypatch.setenv("DISCOPT_UNIVARIATE_ENVELOPE", "0")
     fp_off = _relaxation_fingerprint("nvs09")
     monkeypatch.setenv("DISCOPT_UNIVARIATE_ENVELOPE", "1")
     fp_on = _relaxation_fingerprint("nvs09")

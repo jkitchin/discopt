@@ -3542,16 +3542,24 @@ def _composite_referenced_var(expr: Expression, model: Model) -> Optional[tuple[
 
 
 def _univariate_envelope_enabled() -> bool:
-    """H-UNI feature flag (``DISCOPT_UNIVARIATE_ENVELOPE``, default **OFF**).
+    """H-UNI feature flag (``DISCOPT_UNIVARIATE_ENVELOPE``, default **ON**).
 
-    Task ``cert:LR-2`` (``docs/dev/lever-a-root-tightness-plan.md`` §4). When ON,
-    a maximal single-variable subtree whose certified curvature is *neither*
-    convex nor concave is lifted with the exact 1-D convex/concave hull envelope
-    (:mod:`discopt._jax.univariate_hull`) instead of falling to a looser composed
-    relaxation. Default-OFF makes the flag-OFF relaxation byte-identical to prior
-    main (bound-changing regime, parent-plan §0.4).
+    Task ``cert:LR-2`` / ``cert:LR-3``. When ON, a maximal single-variable subtree
+    whose certified curvature is *neither* convex nor concave is lifted with the
+    exact 1-D convex/concave hull envelope (:mod:`discopt._jax.univariate_hull`)
+    instead of falling to a looser composed relaxation.
+
+    **Graduated default-ON (cert:LR-3).** Graduation gate (62-corpus + a MINLPLib
+    signomial/product draw): ``incorrect_count = 0``, zero certificate losses, and
+    it *adds* a certification (clay0303hfsg) while collapsing nvs09's tree
+    (215→3 nodes). Verified inert where it does not fire (byte-identical
+    status/objective/node_count on non-matching instances) and, post the LR-3
+    soundness fix, sound on the AMP path (no false-infeasible on unbounded boxes;
+    defers to exact trig-table / curvature handlers). Set
+    ``DISCOPT_UNIVARIATE_ENVELOPE=0`` to opt out (restores the prior composed
+    relaxation, byte-identical to pre-LR-2 main via the #630 fingerprint guard).
     """
-    return os.environ.get("DISCOPT_UNIVARIATE_ENVELOPE", "0") != "0"
+    return os.environ.get("DISCOPT_UNIVARIATE_ENVELOPE", "1") != "0"
 
 
 def _log_monomial_enabled() -> bool:
