@@ -90,6 +90,30 @@ Full report: `global_opt_baron_vs_discopt_2026-07-10T11-32-04.md` (regenerable:
 | root_gap_ratio_vs_baron gate | unevaluable (nulls) | **evaluable and ≤ 1.3** |
 | branch-and-reduce | unmerged branch | **default-ON on the hot path** |
 
+### §1a Re-measure (2026-07-11, V-2 milestone, full 62-instance corpus, TL=60s)
+
+Full report: `global_opt_baron_vs_discopt_2026-07-11T09-42-41.md` (same regen
+command). **Note the panel differs from the §1 baseline**: this is the full
+`python/tests/data/minlplib_nl` 62-instance corpus, not the 50-instance global50
+subset — so the apples-to-apples comparison is against the prior *62-panel* run
+(`…2026-07-07…`, discopt ok 50), **not** the §1 43/50.
+
+- **Correctness: discopt VIOLATIONS 0** (ok **52**, gap 1, n/a 9). BARON 0
+  (ok 55, gap 3, n/a 4). Oracle known on 59/62.
+- **Certified coverage: discopt 52/62 → within 3 of full-license BARON (55/62).**
+  Movement over the week's merges (#593 binary parser, #597 RELAX-1, #603/#604/
+  #613 cert-plumbing, #616 flag graduations): **50 → 52 on the 62-panel (+2)**,
+  zero violations — consistent with the §1 diagnosis (most work was falsification
+  + cert hardening, not headline levers).
+- **Residual is the relaxation-looseness class, confirmed with fresh data:**
+  nvs05, nvs09, tanksize, casctanks, tls2 now all **find the correct incumbent**
+  (their `feasible` values equal BARON's optimum) but do not close the dual bound
+  in 60 s. Mean root_gap ratio (discopt/BARON) over 30 co-populated instances is
+  **~40 835** (gate target ≤ 1.3) — Lever A (per-atom `x·log(affine)` Wilson/Gibbs
+  envelope, §6 F13), not an engine, coverage, or primal-heuristic gap. tls2 in
+  particular now carries a matching incumbent where the P4/F14 entry run had none,
+  so its miss is purely dual-bound certification, not primal.
+
 ---
 
 ## §2 Campaign structure — fronts and dependency DAG
@@ -376,4 +400,4 @@ adversarial suite. Post the table to the tracking issue; update this §7.
 | OVERHEAD-1 startup floor | **in flight** (agent) | profiling |
 | TAIL-1 a/b/c | queued | do (c) first |
 | RELAX-1 centropy tangent cuts | **entry green → GO, implemented** | ex6_2_5 root bound `None`→−27791 (finite, valid ≤ oracle −70.75); 6/8 `ex6_2_*` unlock feasibility-fallback → valid bound; neutral on 30 non-centropy instances; PR open |
-| V-2 final validation | blocked (all) | baseline §1 banked |
+| V-2 final validation | **milestone re-measure banked (§1a, 2026-07-11)** | 62-panel: discopt 52/62 certified (50→52 vs 07-07), 0 violations, BARON 55/62. Residual = relaxation-looseness class (root_gap ratio ~40835); nvs05/nvs09/tanksize/casctanks/tls2 find the correct incumbent but don't certify the dual bound in 60s. |
