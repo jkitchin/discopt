@@ -1047,13 +1047,41 @@ def _check_constraints_with_evaluator(
         return False
 
 
+# Realistic horizon for how many AMP refinement rounds remain, used to size the
+# per-iteration MILP budget. AMP converges in a handful of rounds (single digits
+# to low tens on the MINLPTESTS/adversarial corpus), so the MILP budget should be
+# an even split of the remaining wall over *that* horizon — not over the rarely
+# reached ``max_iter`` cap. Splitting by a large cap (e.g. ``max_iter=1000``)
+# starves every early iteration to a fraction of a second, below the fixed cost of
+# building and XLA-compiling one refined relaxation on a cold interpreter, so the
+# loop makes no progress and the solve burns its whole wall without certifying.
+_AMP_EXPECTED_ITER_HORIZON = 32
+
+
 def _default_milp_time_limit(
     remaining: float,
     iteration: int,
     max_iter: int,
 ) -> float:
-    """Allocate a bounded MILP budget from the remaining AMP wall time."""
-    iter_budget = remaining / max(1, max_iter - iteration + 1)
+    """Allocate a bounded MILP budget from the remaining AMP wall time.
+
+    The budget is an even split of the wall still available over the number of
+    iterations we actually *expect* to run (``_AMP_EXPECTED_ITER_HORIZON``),
+    capped by the true iterations-left when that is smaller. Dividing by the full
+    ``max_iter`` cap instead under-budgets early iterations pathologically: with
+    ``max_iter=1000`` and 300 s remaining each MILP would get ~0.9 s, which on a
+    cold/slow interpreter is less than the one-time cost of building and compiling
+    the refined MILP envelope. Each iteration then accomplishes nothing and the
+    AMP solve returns ``feasible`` instead of ``optimal`` despite having ample
+    wall left (observed on the 2-core CI runner: nlp_004_010, time_limit=300,
+    max_iter=1000). This is a pure *time-allocation* ceiling — ``remaining`` is
+    recomputed every iteration and the outer AMP deadline still hard-caps total
+    spend, so raising it never changes a certificate, only lets a slow MILP solve
+    finish (yielding an equal-or-tighter valid lower bound) instead of being cut
+    off mid-compile.
+    """
+    horizon = min(max(1, max_iter - iteration + 1), _AMP_EXPECTED_ITER_HORIZON)
+    iter_budget = remaining / horizon
     return min(iter_budget * 3, remaining * 0.8, 60.0)
 
 
