@@ -801,6 +801,43 @@ def test_amp_small_helpers_cover_aliases_gaps_and_pruning():
     assert cuts == ["keep1", "keep2"]
 
 
+def test_default_milp_time_limit_not_starved_by_large_max_iter():
+    """Regression: a large ``max_iter`` must not starve early MILP budgets.
+
+    AMP converges in a handful of refinement rounds, but ``max_iter`` is a large
+    safety cap (callers routinely pass 1000). The per-iteration MILP budget must
+    be split over the *expected* iteration horizon, not the full cap — otherwise
+    each early MILP is handed a fraction of a second, below the fixed cost of
+    building and XLA-compiling one refined relaxation on a cold interpreter, and
+    the solve burns its whole wall without certifying (returns ``feasible``
+    instead of ``optimal`` on the 2-core CI runner: nlp_004_010, time_limit=300).
+
+    The old code (`remaining / (max_iter - iteration + 1)` then `* 3`) gave
+    ``min(0.9, ...) == 0.9`` s here; the fix must hand out a workable budget.
+    """
+    from discopt.solvers import amp as amp_mod
+
+    # Large max_iter, plenty of wall left → budget must reflect the ~tens of
+    # iterations we actually expect, not the 1000 cap. Old behaviour was 0.9 s.
+    budget = amp_mod._default_milp_time_limit(remaining=300.0, iteration=1, max_iter=1000)
+    assert budget >= 5.0, f"per-iter MILP budget starved to {budget}s by large max_iter"
+
+    # Horizon-bounded: never exceeds the remaining*0.8 and 60 s ceilings.
+    assert budget <= 60.0
+    assert budget <= 300.0 * 0.8
+
+    # Backward-compatible for small caps (unchanged pre-fix contract, line 783).
+    assert amp_mod._default_milp_time_limit(remaining=10.0, iteration=1, max_iter=5) == 6.0
+
+    # When the true iterations-left is smaller than the horizon, it governs:
+    # near the cap the remaining wall is split over the few rounds that remain.
+    near_end = amp_mod._default_milp_time_limit(remaining=100.0, iteration=999, max_iter=1000)
+    assert near_end == pytest.approx(min(100.0 / 2 * 3, 100.0 * 0.8, 60.0))
+
+    # Tiny remaining wall is still respected (never budgets more than 80% of it).
+    assert amp_mod._default_milp_time_limit(remaining=0.5, iteration=1, max_iter=1000) <= 0.5 * 0.8
+
+
 def test_amp_constraint_helpers_cover_success_and_failure(caplog):
     """Constraint helper failures should reject points instead of accepting them."""
     from discopt.solvers import amp as amp_mod
