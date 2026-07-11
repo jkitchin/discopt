@@ -3541,7 +3541,36 @@ def _composite_referenced_var(expr: Expression, model: Model) -> Optional[tuple[
     return var, _compute_var_offset(var, model)
 
 
-def _should_claim_composite(expr: Expression, model: Model, n_orig: int) -> bool:
+def _univariate_envelope_enabled() -> bool:
+    """H-UNI feature flag (``DISCOPT_UNIVARIATE_ENVELOPE``, default **OFF**).
+
+    Task ``cert:LR-2`` (``docs/dev/lever-a-root-tightness-plan.md`` §4). When ON,
+    a maximal single-variable subtree whose certified curvature is *neither*
+    convex nor concave is lifted with the exact 1-D convex/concave hull envelope
+    (:mod:`discopt._jax.univariate_hull`) instead of falling to a looser composed
+    relaxation. Default-OFF makes the flag-OFF relaxation byte-identical to prior
+    main (bound-changing regime, parent-plan §0.4).
+    """
+    return os.environ.get("DISCOPT_UNIVARIATE_ENVELOPE", "0") != "0"
+
+
+def _log_monomial_enabled() -> bool:
+    """H-LOG feature flag (``DISCOPT_LOG_MONOMIAL``, default **OFF**).
+
+    Task ``cert:LR-2`` — the narrow positive-product piece F16 left alive
+    (``docs/dev/lever-a-root-tightness-plan.md`` §7; ``docs/dev/lr0-logspace-entry``).
+    Scoped to a **positive product** ``∏ xᵢ^{aᵢ}`` (every factor lb > 0 on the
+    FBBT-tightened box): the log-space relaxation ``zᵢ = ln xᵢ`` (exact concave
+    envelope), ``s = Σ aᵢ zᵢ`` (linear), ``t = exp(s)`` (exact convex envelope) is
+    far tighter than recursive McCormick for wide boxes. Default-OFF; when OFF the
+    relaxation is byte-identical to prior main.
+    """
+    return os.environ.get("DISCOPT_LOG_MONOMIAL", "0") != "0"
+
+
+def _should_claim_composite(
+    expr: Expression, model: Model, n_orig: int, allow_general: bool = False
+) -> bool:
     """True when ``expr`` is a nonlinear node the *existing* machinery cannot lift.
 
     The bilinear/monomial/fractional-power/univariate-of-affine builders already
@@ -3556,6 +3585,15 @@ def _should_claim_composite(expr: Expression, model: Model, n_orig: int) -> bool
       stay on the dedicated square lift.  Non-affine integer-power bases are
       only claimed here; they still need certified curvature before any
       envelope is emitted.
+
+    When ``allow_general`` (H-UNI, ``DISCOPT_UNIVARIATE_ENVELOPE``), *additionally*
+    claim single-variable additive/square composites that the standard path lifts
+    only via a *composed* (looser) relaxation — a ``**2`` of a non-bare base, or a
+    ``+``/``-`` sum of single-variable nonlinear terms — so the exact 1-D hull
+    envelope can replace the composition. The curvature-free hull builder in
+    :func:`_collect_composite_univariate_relaxations` handles these even when they
+    are neither convex nor concave; claiming here only *offers* the node, the
+    collector still abstains (falls back unchanged) if a rigorous hull can't form.
     """
     if isinstance(expr, FunctionCall) and len(expr.args) == 1:
         op_info = _univariate_arg(expr)
@@ -3573,8 +3611,44 @@ def _should_claim_composite(expr: Expression, model: Model, n_orig: int) -> bool
         if _get_flat_index(expr.left, model) is not None:
             return False
         if p == int(p):
-            return int(p) >= 3
+            if int(p) >= 3:
+                return True
+            # Integer square of a non-bare base: normally the dedicated square
+            # lift (a composed relaxation). Under H-UNI, claim it here so the
+            # exact 1-D hull can lift the whole single-variable square directly.
+            if allow_general and int(p) == 2:
+                return True
+            return False
         return True
+    if allow_general and isinstance(expr, BinaryOp) and expr.op in ("+", "-"):
+        # A maximal single-variable additive composite (e.g. nvs09's
+        # ``(ln(x-2))**2 + (ln(10-x))**2``). Claim only if it genuinely contains a
+        # nonlinear single-variable sub-term the composition would relax loosely;
+        # a purely affine sum is left to the exact linear path.
+        if _composite_referenced_var(expr, model) is None:
+            return False
+        return _expr_has_nonlinear_subterm(expr)
+    return False
+
+
+def _expr_has_nonlinear_subterm(expr: Expression) -> bool:
+    """True if ``expr`` contains a FunctionCall or a non-unit power — i.e. it is
+    not a pure affine combination (which the exact linear path already handles)."""
+    if isinstance(expr, FunctionCall):
+        return True
+    if isinstance(expr, BinaryOp):
+        if expr.op == "**":
+            return True
+        if expr.op == "*":
+            # nonlinear unless one side is constant
+            if not (isinstance(expr.left, Constant) or isinstance(expr.right, Constant)):
+                return True
+            return _expr_has_nonlinear_subterm(expr.left) or _expr_has_nonlinear_subterm(expr.right)
+        if expr.op in ("+", "-"):
+            return _expr_has_nonlinear_subterm(expr.left) or _expr_has_nonlinear_subterm(expr.right)
+        return True  # "/" and other ops are nonlinear
+    if isinstance(expr, UnaryOp):
+        return _expr_has_nonlinear_subterm(expr.operand)
     return False
 
 
@@ -3832,30 +3906,37 @@ def _collect_composite_univariate_relaxations(
 
     box = _build_convexity_box(model, flat_lb, flat_ub)
     base_x = np.zeros(n_orig, dtype=np.float64)
+    allow_general = _univariate_envelope_enabled()
 
-    def maybe_add(expr: Expression) -> None:
+    def maybe_add(expr: Expression) -> bool:
+        """Attempt to lift ``expr`` as a composite. Returns True when it was
+        claimed *as a general single-variable hull composite* (a ``**2``/``+``
+        node the standard path would relax only via composition) — in that case
+        ``visit`` must not descend and re-lift the sub-terms. Convex/concave
+        claims return False so descent is unchanged from prior main (byte-identity
+        when the flag is OFF)."""
         nonlocal col_idx
         eid = id(expr)
         if eid in seen or eid in claimed_ids:
-            return
-        if not _should_claim_composite(expr, model, n_orig):
-            return
+            return False
+        if not _should_claim_composite(expr, model, n_orig, allow_general=allow_general):
+            return False
+        # Is this node claimable by the *pre-existing* (curvature-certified) path?
+        # If so, treat it exactly as before (claim, but let visit descend).
+        _pre_existing_claim = _should_claim_composite(expr, model, n_orig, allow_general=False)
         ref = _composite_referenced_var(expr, model)
         if ref is None:
-            return
+            return False
         var, flat_idx = ref
         lo = float(flat_lb[flat_idx])
         hi = float(flat_ub[flat_idx])
         if not (np.isfinite(lo) and np.isfinite(hi)) or hi < lo:
-            return
-        curvature = _composite_curvature(expr, model, var, flat_idx, lo, hi, box)
-        if curvature is None:
-            return
+            return False
         try:
             f = compile_expression(expr, model)
             grad_f = jax.grad(lambda xv: jnp.reshape(f(xv), ()))
         except Exception:
-            return
+            return False
 
         def value_fn(t: float) -> float:
             x = jnp.asarray(base_x).at[flat_idx].set(t)
@@ -3865,10 +3946,40 @@ def _collect_composite_univariate_relaxations(
             x = jnp.asarray(base_x).at[flat_idx].set(t)
             return float(np.asarray(grad_f(x)).ravel()[flat_idx])
 
-        env = _composite_envelope(curvature, lo, hi, value_fn, grad_fn)
-        if env is None:
-            return
-        lower_lines, upper_lines, pin_value, col_bounds = env
+        curvature = _composite_curvature(expr, model, var, flat_idx, lo, hi, box)
+        if curvature is not None:
+            env = _composite_envelope(curvature, lo, hi, value_fn, grad_fn)
+            if env is None:
+                return False
+            lower_lines, upper_lines, pin_value, col_bounds = env
+        elif allow_general:
+            # H-UNI: curvature is neither convex nor concave. Build the exact 1-D
+            # convex/concave hull envelope (curvature-free, rigorous). Abstain
+            # (fall back) if a proven-tight hull can't form.
+            from discopt._jax.univariate_hull import univariate_hull_envelope
+
+            if hi - lo <= _COMPOSITE_CURV_TOL:
+                return False  # pinned — the exact-pin path handles it
+
+            f_batched = jax.vmap(lambda xv: jnp.reshape(f(xv), ()))
+
+            def value_batch(xarr: np.ndarray) -> np.ndarray:
+                # Evaluate f at many x values in one vmapped JAX call (the sole
+                # variable is flat_idx; all other coordinates are irrelevant to a
+                # single-var composite, so the zero base row is fine).
+                pts = np.tile(base_x, (len(xarr), 1))
+                pts[:, flat_idx] = xarr
+                return np.asarray(f_batched(jnp.asarray(pts))).ravel()
+
+            hull = univariate_hull_envelope(lo, hi, value_batch)
+            if hull is None:
+                return False
+            lower_lines, upper_lines, col_bounds = hull
+            pin_value = None
+            curvature = "general"
+        else:
+            return False
+
         seen.add(eid)
         var_map[eid] = col_idx
         relaxations.append(
@@ -3886,9 +3997,15 @@ def _collect_composite_univariate_relaxations(
         )
         bounds.append(col_bounds)
         col_idx += 1
+        # Only a *new* general (non-pre-existing) claim blocks descent; a
+        # convex/concave claim behaves exactly as prior main (descent continues).
+        return not _pre_existing_claim
 
     def visit(expr: Expression) -> None:
-        maybe_add(expr)
+        if maybe_add(expr):
+            # Claimed as a whole general single-variable composite; do not descend
+            # and re-lift its sub-terms (that would double-count the objective).
+            return
         if isinstance(expr, BinaryOp):
             visit(expr.left)
             visit(expr.right)
@@ -3912,6 +4029,227 @@ def _collect_composite_univariate_relaxations(
         visit(constraint.body)
 
     return relaxations, var_map, bounds
+
+
+def _alias_equality_defs(model: Model) -> dict[int, Expression]:
+    """Map an aux column index to the expression it equals via an ``aux == h``
+    equality constraint (the form ``factorable_reform`` emits: ``w - h == 0``).
+
+    Only equalities of the exact shape ``Variable(aux) - h == 0`` (or ``h -
+    Variable(aux) == 0``) with ``rhs == 0`` are recognised, so the alias is
+    unambiguous. Used by the H-UNI/H-LOG lifts to relax the *aux's* nonlinear
+    uses against the underlying ``h`` when the reform has split the structure
+    (e.g. nvs09's ``(ln(x-2))**2`` becomes ``aux == ln(x-2)`` + objective
+    ``aux**2``). Structure-only — no instance names.
+    """
+    defs: dict[int, Expression] = {}
+    for con in model._constraints:
+        if con.sense != "==" or abs(float(con.rhs)) > 1e-12:
+            continue
+        body = con.body
+        if not (isinstance(body, BinaryOp) and body.op == "-"):
+            continue
+        left, right = body.left, body.right
+        # aux - h == 0  (aux is a bare variable/index)
+        aux_idx = _get_flat_index(left, model)
+        other = right
+        if aux_idx is None:
+            aux_idx = _get_flat_index(right, model)
+            other = left
+        if aux_idx is None:
+            continue
+        # ``other`` must be genuinely nonlinear (an affine alias is already exact).
+        if not _expr_has_nonlinear_subterm(other):
+            continue
+        # First definition wins; a variable defined by two equalities is ambiguous.
+        defs.setdefault(aux_idx, other)
+    return defs
+
+
+_CACHE_MISS = object()  # sentinel: distinguishes "absent" from a cached ``None`` (abstain)
+
+
+def _collect_aliased_monomial_hull_relaxations(
+    model: Model,
+    n_orig: int,
+    flat_lb: np.ndarray,
+    flat_ub: np.ndarray,
+    monomial_var_map: dict[tuple[int, int], int],
+) -> list[CompositeUnivariateRelaxation]:
+    """H-UNI on reform-split composites: tighten ``aux**p`` where ``aux == h(x)``.
+
+    Task ``cert:LR-2``. ``factorable_reform`` rewrites a single-variable composite
+    ``(ln(x-2))**2`` into an aux equality ``aux == ln(x-2)`` plus an objective
+    monomial ``aux**2`` — the *composed* relaxation the plan calls loose (each
+    ``aux`` floats freely, so ``aux**2`` can reach 0). Here we bind the **existing**
+    ``aux**p`` monomial column directly to the original variable ``x`` with the
+    exact 1-D hull of ``G(x) = h(x)**p`` (:mod:`discopt._jax.univariate_hull`),
+    which is a rigorous *additional* tightening — never removed rows, so soundness
+    of the base relaxation is untouched. Gated by ``DISCOPT_UNIVARIATE_ENVELOPE``.
+
+    Emits ``CompositeUnivariateRelaxation`` records whose ``aux_col`` is the
+    monomial column ``(aux_idx, p)`` and whose lines are in ``x``; the standard
+    composite-emission loop turns them into rows. No new columns are created.
+    """
+    out: list[CompositeUnivariateRelaxation] = []
+    if not monomial_var_map:
+        return out
+    defs = _alias_equality_defs(model)
+    if not defs:
+        return out
+
+    try:
+        import jax
+        import jax.numpy as jnp
+
+        from discopt._jax.dag_compiler import compile_expression
+        from discopt._jax.univariate_hull import univariate_hull_envelope
+    except Exception:
+        return out
+
+    base_x = np.zeros(n_orig, dtype=np.float64)
+    # Caches scoped to *this* model instance (attributes, not module globals), so a
+    # freed model's expression ids can never be reused to serve a stale envelope to
+    # a different model. Persist across the per-node relaxation rebuilds of one
+    # solve, where the alias expression objects and their ids are stable.
+    batch_cache: dict[int, Callable] = model.__dict__.setdefault("_lr2_alias_batch_cache", {})
+    env_cache: dict = model.__dict__.setdefault("_lr2_alias_env_cache", {})
+    for (aux_idx, p), aux_col in monomial_var_map.items():
+        h = defs.get(aux_idx)
+        if h is None:
+            continue
+        ref = _composite_referenced_var(h, model)
+        if ref is None:
+            continue  # h must be a single ORIGINAL variable's function
+        var, flat_idx = ref
+        if flat_idx >= n_orig:
+            continue
+        lo = float(flat_lb[flat_idx])
+        hi = float(flat_ub[flat_idx])
+        if not (np.isfinite(lo) and np.isfinite(hi)) or hi - lo <= _COMPOSITE_CURV_TOL:
+            continue
+        # Compiling + vmapping the alias body is the expensive step; cache the
+        # traced batch evaluator across nodes (the box changes per node, but the
+        # function of x does not). Keyed by the stable alias-expression identity.
+        f_batched = batch_cache.get(id(h))
+        if f_batched is None:
+            try:
+                f = compile_expression(h, model)
+                f_batched = jax.vmap(lambda xv, _f=f: jnp.reshape(_f(xv), ()))
+            except Exception:
+                continue
+            batch_cache[id(h)] = f_batched
+
+        pw = float(p)
+
+        # Envelope is a function of (alias, exponent, box); cache on the box so
+        # nodes that did not branch this variable reuse the root envelope instead
+        # of re-sampling. Box key rounded to a tight grid (well below any envelope
+        # sensitivity) so float jitter does not defeat the cache.
+        ckey = (id(h), int(p), round(lo, 12), round(hi, 12))
+        hull = env_cache.get(ckey, _CACHE_MISS)
+        if hull is _CACHE_MISS:
+
+            def value_batch(xarr: np.ndarray, _fb=f_batched, _fi=flat_idx, _pw=pw) -> np.ndarray:
+                pts = np.tile(base_x, (len(xarr), 1))
+                pts[:, _fi] = xarr
+                hv = np.asarray(_fb(jnp.asarray(pts))).ravel()
+                return hv**_pw  # G(x) = h(x)**p
+
+            hull = univariate_hull_envelope(lo, hi, value_batch)
+            env_cache[ckey] = hull
+        if hull is None:
+            continue
+        lower_lines, upper_lines, _col_bounds = hull
+        out.append(
+            CompositeUnivariateRelaxation(
+                expr_id=-aux_col,  # synthetic id; not consulted for these rows
+                aux_col=aux_col,
+                var_idx=flat_idx,
+                curvature="general",
+                arg_lb=lo,
+                arg_ub=hi,
+                lower_lines=lower_lines,
+                upper_lines=upper_lines,
+                pin_value=None,
+            )
+        )
+    return out
+
+
+@dataclass
+class LogMonomialRelaxation:
+    """Log-space envelope of a positive product ``t == coef·∏ xᵢ^{aᵢ}`` (H-LOG).
+
+    Task ``cert:LR-2``. Binds an existing product column ``t_col`` (the reform's
+    ``aux == ∏xᵢ`` alias) to the original factor columns through log space:
+
+    * ``zᵢ = ln xᵢ`` — concave, so tangents overestimate and the endpoint secant
+      underestimates (a rigorous outer band on each ``zᵢ`` column).
+    * ``s = Σ aᵢ zᵢ`` — exact linear equality.
+    * ``t = coef·exp(s)`` — convex, so tangents underestimate and the secant
+      overestimates (a rigorous band binding ``t_col``).
+
+    All envelopes are recomputed per node box from ``factor_boxes``/``s_lb,s_ub``;
+    strict positivity of every factor is a hard precondition checked on the
+    node box (no epsilon shift). Purely additive rows + fresh z/s columns.
+    """
+
+    t_col: int
+    coef: float
+    z_cols: tuple[int, ...]           # one ln-column per distinct factor
+    factor_cols: tuple[int, ...]      # the original variable column of each factor
+    factor_exps: tuple[float, ...]    # exponent aᵢ (aligned with z_cols/factor_cols)
+    factor_boxes: tuple[tuple[float, float], ...]
+    s_col: int
+    s_lb: float
+    s_ub: float
+
+
+def _extract_positive_product(
+    expr: Expression, model: Model, n_orig: int, flat_lb: np.ndarray, flat_ub: np.ndarray
+) -> Optional[tuple[float, dict[int, float]]]:
+    """Return ``(coef, {orig_var_idx: exponent})`` if ``expr`` is a product/power of
+    strictly-positive original variables, else ``None``.
+
+    Strict positivity (lb > 0 on the node box) is required for every factor — the
+    log lift is undefined otherwise — and is the H-LOG precondition (no epsilon
+    shift). Only *original* variables (index < ``n_orig``) are accepted as factors.
+    """
+    factors: dict[int, float] = {}
+    coef = [1.0]
+
+    def visit(e: Expression, power: float) -> bool:
+        if isinstance(e, Constant):
+            v = float(e.value)
+            if v <= 0.0:
+                return False  # a non-positive constant factor breaks the log lift
+            coef[0] *= v**power
+            return True
+        idx = _get_flat_index(e, model)
+        if idx is not None:
+            if idx >= n_orig:
+                return False
+            lo = float(flat_lb[idx])
+            if not (lo > 1e-9) or not np.isfinite(lo):
+                return False  # strict-positivity precondition (no epsilon shift)
+            factors[idx] = factors.get(idx, 0.0) + power
+            return True
+        if isinstance(e, BinaryOp):
+            if e.op == "*":
+                return visit(e.left, power) and visit(e.right, power)
+            if e.op == "/":
+                return visit(e.left, power) and visit(e.right, -power)
+            if e.op == "**" and isinstance(e.right, Constant):
+                return visit(e.left, power * float(e.right.value))
+            return False
+        return False
+
+    if not visit(expr, 1.0):
+        return None
+    if not factors:
+        return None
+    return coef[0], factors
 
 
 def _referenced_flat_indices(expr: Expression, model: Model) -> list[int]:
@@ -5545,6 +5883,82 @@ def build_milp_relaxation(
         all_bounds.append(val_bounds)
         integrality_flags.append(0)
         col_idx += 1
+
+    # H-UNI (LR-2): tighten reform-split composites ``aux**p`` (aux == h(x)) with
+    # the exact 1-D hull of ``h(x)**p`` bound directly to the existing monomial
+    # column. Additive rows only, no new columns; default-OFF flag.
+    aliased_hull_relaxations: list[CompositeUnivariateRelaxation] = []
+    if _univariate_envelope_enabled():
+        aliased_hull_relaxations = _collect_aliased_monomial_hull_relaxations(
+            model, n_orig, flat_lb, flat_ub, monomial_var_map
+        )
+
+    # H-LOG (LR-2): log-space envelope of positive-product aliases ``aux == ∏xᵢ``.
+    # Allocates a ln-column per distinct factor + one s-column per product, then
+    # binds the existing product column ``aux`` through ``t = exp(s)``. Fresh
+    # columns + additive rows; default-OFF flag.
+    log_monomial_relaxations: list[LogMonomialRelaxation] = []
+    if _log_monomial_enabled():
+        _log_defs = _alias_equality_defs(model)
+        _z_col_of: dict[int, int] = {}  # distinct factor var idx -> its ln column
+        for _aux_idx, _h in _log_defs.items():
+            _aux_col = _aux_idx  # aux is an original/primary column (index == flat idx)
+            if _aux_idx >= n_orig:
+                continue
+            _pp = _extract_positive_product(_h, model, n_orig, flat_lb, flat_ub)
+            if _pp is None:
+                continue
+            _coef, _facs = _pp
+            if len(_facs) < 2:
+                continue  # a single positive power is already a monomial column
+            _z_cols: list[int] = []
+            _f_cols: list[int] = []
+            _f_exps: list[float] = []
+            _f_boxes: list[tuple[float, float]] = []
+            _s_lb = 0.0
+            _s_ub = 0.0
+            _ok = True
+            for _fi, _exp in sorted(_facs.items()):
+                _flo = float(flat_lb[_fi])
+                _fhi = float(flat_ub[_fi])
+                if not (_flo > 1e-9 and np.isfinite(_flo) and np.isfinite(_fhi) and _fhi >= _flo):
+                    _ok = False
+                    break
+                _zc = _z_col_of.get(_fi)
+                if _zc is None:
+                    _zc = col_idx
+                    all_bounds.append((math.log(_flo), math.log(_fhi)))
+                    integrality_flags.append(0)
+                    col_idx += 1
+                    _z_col_of[_fi] = _zc
+                _z_cols.append(_zc)
+                _f_cols.append(_fi)
+                _f_exps.append(float(_exp))
+                _f_boxes.append((_flo, _fhi))
+                # s = Σ aᵢ ln xᵢ range over the box (aᵢ may be negative)
+                _lo_term = _exp * (math.log(_flo) if _exp > 0 else math.log(_fhi))
+                _hi_term = _exp * (math.log(_fhi) if _exp > 0 else math.log(_flo))
+                _s_lb += _lo_term
+                _s_ub += _hi_term
+            if not _ok:
+                continue
+            _s_col = col_idx
+            all_bounds.append((_s_lb, _s_ub))
+            integrality_flags.append(0)
+            col_idx += 1
+            log_monomial_relaxations.append(
+                LogMonomialRelaxation(
+                    t_col=_aux_col,
+                    coef=float(_coef),
+                    z_cols=tuple(_z_cols),
+                    factor_cols=tuple(_f_cols),
+                    factor_exps=tuple(_f_exps),
+                    factor_boxes=tuple(_f_boxes),
+                    s_col=_s_col,
+                    s_lb=float(_s_lb),
+                    s_ub=float(_s_ub),
+                )
+            )
 
     # Multivariate convex/concave composite nodes (Euclidean distance / norm,
     # other DCP-certified multivariate functions) lifted by supporting-hyperplane
@@ -7623,7 +8037,7 @@ def build_milp_relaxation(
     # z is the aux column for f(x_i); each (slope, intercept) line is in x_i.
     # lower_lines give ``z ≥ slope·x_i + intercept`` and upper_lines give
     # ``z ≤ slope·x_i + intercept``. A pinned variable yields an exact equality.
-    for crelax in composite_relaxations:
+    for crelax in list(composite_relaxations) + list(aliased_hull_relaxations):
         if crelax.pin_value is not None:
             row = np.zeros(n_total)
             row[crelax.aux_col] = 1.0
@@ -7640,6 +8054,83 @@ def build_milp_relaxation(
             row[crelax.var_idx] += -slope
             row[crelax.aux_col] = 1.0
             _add_row(row, intercept)
+
+    # ── H-LOG positive-product log-space envelopes (LR-2) ───────────────────
+    # For each ``t == coef·∏ xᵢ^{aᵢ}`` (all factors strictly positive):
+    #   zᵢ = ln xᵢ  (concave): tangents overestimate (zᵢ ≤ tangent), secant under.
+    #   s  = Σ aᵢ zᵢ (exact linear equality).
+    #   t  = coef·exp(s) (convex): tangents underestimate (t ≥ coef·tangent),
+    #        secant overestimates. Every line is a proven bound on its box, so the
+    #        product column ``t`` is bracketed tightly. Rows are additive.
+    for lm in log_monomial_relaxations:
+        # zᵢ = ln xᵢ concave envelope, per distinct factor column.
+        for zc, fc, (flo, fhi) in zip(lm.z_cols, lm.factor_cols, lm.factor_boxes):
+            if fhi - flo <= 1e-12:
+                val = math.log(max(flo, 1e-300))
+                row = np.zeros(n_total)
+                row[zc] = 1.0
+                _add_row(row, val)
+                _add_row(-row, -val)
+                continue
+            # tangents at l, mid, u are overestimators: z ≤ ln(a) + (x-a)/a
+            for a in _tangent_points("log", flo, fhi):
+                slope = _univariate_grad("log", a)
+                intercept = _univariate_value("log", a) - slope * a
+                # z - slope*x ≤ intercept
+                row = np.zeros(n_total)
+                row[zc] = 1.0
+                row[fc] += -slope
+                _add_row(row, intercept)
+            # secant underestimator: z ≥ ln(l) + m(x-l), m=(ln u - ln l)/(u-l)
+            m = (math.log(fhi) - math.log(flo)) / (fhi - flo)
+            b = math.log(flo) - m * flo
+            row = np.zeros(n_total)
+            row[zc] = -1.0
+            row[fc] += m
+            _add_row(row, -b)  # -z + m*x ≤ -b  ⇔  z ≥ m*x + b
+        # s = Σ aᵢ zᵢ  (exact): s - Σ aᵢ zᵢ == 0
+        row = np.zeros(n_total)
+        row[lm.s_col] = 1.0
+        for zc, exp in zip(lm.z_cols, lm.factor_exps):
+            row[zc] += -exp
+        _add_row(row, 0.0)
+        _add_row(-row, 0.0)
+        # t = coef·exp(s) convex envelope binding the product column t_col.
+        s_lo, s_hi = lm.s_lb, lm.s_ub
+        coef = lm.coef
+        if s_hi - s_lo <= 1e-12:
+            val = coef * math.exp(s_lo)
+            row = np.zeros(n_total)
+            row[lm.t_col] = 1.0
+            _add_row(row, val)
+            _add_row(-row, -val)
+            continue
+        # tangents underestimate exp: exp(s) ≥ exp(a) + exp(a)(s-a); with coef>0
+        # this gives t ≥ coef·(...). (coef<0 flips the sense — handled by scaling.)
+        for a in _tangent_points("exp", s_lo, s_hi):
+            e = _univariate_value("exp", a)
+            # exp(s) ≥ e + e*(s-a)  →  t = coef*exp(s)
+            # coef>0: t - coef*e*s ≥ coef*(e - e*a)
+            # coef<0: sense flips → t - coef*e*s ≤ coef*(e - e*a)
+            rhs = coef * (e - e * a)
+            row = np.zeros(n_total)
+            row[lm.t_col] = 1.0
+            row[lm.s_col] += -coef * e
+            if coef >= 0.0:
+                _add_row(-row, -rhs)  # t - coef*e*s ≥ rhs
+            else:
+                _add_row(row, rhs)  # t - coef*e*s ≤ rhs
+        # secant overestimates exp: exp(s) ≤ E_lo + M(s - s_lo), M=(e^hi-e^lo)/(hi-lo)
+        E_lo = math.exp(s_lo)
+        M = (math.exp(s_hi) - math.exp(s_lo)) / (s_hi - s_lo)
+        rhs = coef * (E_lo - M * s_lo)
+        row = np.zeros(n_total)
+        row[lm.t_col] = 1.0
+        row[lm.s_col] += -coef * M
+        if coef >= 0.0:
+            _add_row(row, rhs)  # t - coef*M*s ≤ coef*(E_lo - M*s_lo)
+        else:
+            _add_row(-row, -rhs)
 
     # ── Multivariate composite relaxations (gradient cuts) ──────────────────
     # d is the aux column for g(x); each line is sparse over the original cols.
