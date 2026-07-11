@@ -293,9 +293,9 @@ path.**
 
 | task | state | verdict/notes |
 |---|---|---|
-| LR-0 entry experiment | **not started** | — |
-| LR-1 log-monomial build | blocked (LR-0) | — |
-| LR-2 univariate envelopes | blocked (LR-0 variant b) | — |
+| LR-0 entry experiment | **MIXED — H-LOG KILL on nvs05/tanksize; H-UNI GO on nvs09** (2026-07-11) | Probe (`docs/dev/lr0-logspace-entry-2026-07-11.md`, `docs/dev/lr0_probe/`): H-LOG closes **0%** root gap on nvs05 (gap is division constraints C2/C6, not monomials — 0.674 = posynomial box-min) and **~0%** on tanksize (23/47 vars have lb=0 ⇒ strict-positivity precondition excludes the bilinears; H-LOG byte-identical to McCormick). nvs09: H-LOG-only −51.14 (8.01 loose); **H-LOG+H-UNI −43.1343 = root certificate** — the win is **H-UNI (LR-2)**, not H-LOG. Falsification **F16** recorded. Do NOT build LR-1 as written. |
+| LR-1 log-monomial build | **do-not-build as specified** (LR-0 F16) | Inert where the gap lives on the target set. Re-scope per LR-0 doc §Re-scope: nvs05 needs a wide-box division/ratio lever (+OBBT); tanksize needs a zero-lb-tolerant bilinear/sqrt lever. |
+| LR-2 univariate envelopes | **GO (scoped to nvs09 univariate composites)** — LR-0 variant (b) is the only banked win | nvs09's certificate is entirely H-UNI's (exact 1-D convex envelope of `(ln(x−2))²+(ln(10−x))²`). Build per §LR-2, default-OFF, regime-2. |
 | LR-3 graduation | blocked (LR-1) | — |
 | LR-V validation | blocked (LR-3) | — |
 | LR-T tls2 MIP front | blocked (LR-V) | — |
