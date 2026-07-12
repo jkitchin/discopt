@@ -3542,6 +3542,41 @@ def _composite_referenced_var(expr: Expression, model: Model) -> Optional[tuple[
     return var, _compute_var_offset(var, model)
 
 
+def _diag_hessian_enclosure(sym_expr: Expression, model: Model, var: Variable, flat_idx: int):
+    """Sound ``(f''_lo, f''_hi)`` enclosure of ``d²/dx²`` of ``sym_expr`` over ``x∈[a,b]``.
+
+    Bridges the symbolic single-variable composite to the rigorous second-order
+    remainder in :func:`univariate_hull.univariate_hull_envelope` (#632 review
+    finding 2). The returned callable yields, per cell ``[a, b]``, a sound interval
+    enclosure of the ``(flat_idx, flat_idx)`` Hessian diagonal via
+    :func:`convexity.interval_ad.interval_hessian`. Because the composite depends on
+    exactly one scalar variable (``_composite_referenced_var`` enforces
+    ``var.size == 1``), that diagonal entry is a function of ``x`` alone, so the
+    single-coordinate box override is exact and the other variables' boxes are
+    irrelevant to it. Any abstention (unbounded/failed enclosure) returns
+    ``(-inf, +inf)`` so the envelope refuses rather than ship an uncertified facet.
+    """
+    from discopt._jax.convexity.interval import Interval
+    from discopt._jax.convexity.interval_ad import interval_hessian
+
+    def enclosure(a: float, b: float) -> tuple[float, float]:
+        try:
+            iad = interval_hessian(
+                sym_expr, model, box={var: Interval(np.array([a]), np.array([b]))}
+            )
+            h_lo = np.asarray(iad.hess.lo, dtype=float)
+            h_hi = np.asarray(iad.hess.hi, dtype=float)
+            d_lo = float(h_lo[flat_idx, flat_idx])
+            d_hi = float(h_hi[flat_idx, flat_idx])
+        except Exception:
+            return (float("-inf"), float("inf"))
+        if not (np.isfinite(d_lo) and np.isfinite(d_hi)):
+            return (float("-inf"), float("inf"))
+        return (d_lo, d_hi)
+
+    return enclosure
+
+
 def _univariate_envelope_enabled() -> bool:
     """H-UNI feature flag (``DISCOPT_UNIVARIATE_ENVELOPE``, default **OFF** — opt-in).
 
@@ -4171,7 +4206,9 @@ def _collect_composite_univariate_relaxations(
                 pts[:, flat_idx] = xarr
                 return np.asarray(f_batched(jnp.asarray(pts))).ravel()
 
-            hull = univariate_hull_envelope(lo, hi, value_batch)
+            hull = univariate_hull_envelope(
+                lo, hi, value_batch, _diag_hessian_enclosure(expr, model, var, flat_idx)
+            )
             if hull is None:
                 return False
             lower_lines, upper_lines, col_bounds = hull
@@ -4369,7 +4406,14 @@ def _collect_aliased_monomial_hull_relaxations(
                 hv = np.asarray(_fb(jnp.asarray(pts))).ravel()
                 return np.asarray(hv**_pw, dtype=np.float64)  # G(x) = h(x)**p
 
-            hull = univariate_hull_envelope(lo, hi, value_batch)
+            # Certify the facets between grid nodes with a sound interval Hessian of
+            # the SAME lifted function G(x) = h(x)**p (#632 review finding 2). ``p`` is
+            # the integer monomial exponent (map key type), so ``h ** p`` is exactly
+            # the function ``value_batch`` samples as ``h(x)**pw`` (pw == float(p)).
+            g_expr = h**p
+            hull = univariate_hull_envelope(
+                lo, hi, value_batch, _diag_hessian_enclosure(g_expr, model, var, flat_idx)
+            )
             env_cache[ckey] = hull
         if hull is None:
             continue

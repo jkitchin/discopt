@@ -12,14 +12,25 @@ LR-0 probe (``docs/dev/lr0-logspace-entry-2026-07-11.md``) measured this exactly
 
 This module builds the **exact 1-D convex underestimator hull** and **concave
 overestimator hull** of an arbitrary continuous ``f`` on ``[lo, hi]``, as a small
-set of secant lines ``(slope, intercept)`` in the single variable. Each returned
-line is a *proven* under/over estimator: the piecewise-linear hull of a finite
-sample is corrected by the *measured* maximum deviation from ``f`` on a much finer
-grid, then shifted so every facet lies at or below (resp. above) ``f`` everywhere.
-As the sample density grows the shift → 0 for a continuous ``f``; we refuse
-loudly (return ``None``) if the correction cannot be driven under a tolerance
-within a subdivision budget, rather than ship an assumed-tight facet (§0.1
-"no sampled/assumed convexity").
+set of secant lines ``(slope, intercept)`` in the single variable.
+
+**Soundness by construction (#632 review finding 2).** An earlier version shifted
+each facet only by the deviation *measured on a finite grid* — proven at the grid
+nodes but not between them. A dense-sampling probe found real (tiny, ~1e-6)
+violations between nodes on sharply-curved ``f``; that is exactly the
+"sampled/assumed convexity" CLAUDE.md §3 forbids on the certificate path. The
+correction is now **rigorous**: on each fine cell ``[u,v]`` (nodes ``u,v`` of the
+fine grid), ``facet(x) − f(x)`` decomposes into an affine part (max at the nodes —
+covered by the measured grid slack) plus the interpolation remainder
+``chord_f(x) − f(x)``, which is bounded by ``⅛·max(0, f''_hi)·h²`` for a convex
+cell (and symmetrically ``⅛·max(0, −f''_lo)·h²`` for the concave/overestimator
+side), where ``[f''_lo, f''_hi]`` is a **sound interval enclosure** of ``f''`` over
+the cell and ``h`` the fine spacing. Adding that proven ``O(h²)`` term to the
+measured slack makes every facet a bound *everywhere*, not just at the nodes. The
+caller supplies the enclosure (``curvature_enclosure``) — in the build via a
+sound interval Hessian (``convexity.interval_ad``); the envelope refuses loudly
+(returns ``None``) if the enclosure is unbounded or the resulting shift cannot be
+driven under the usefulness tolerance, rather than ship an assumed-tight facet.
 
 The construction is porting the validated LR-0 probe builder
 (``docs/dev/lr0_probe/lr0_envelopes.py::exact_convex_underenvelope_rows``) into a
@@ -32,6 +43,17 @@ from __future__ import annotations
 from typing import Callable, Optional
 
 import numpy as np
+
+# A ``curvature_enclosure`` maps a cell ``[a, b]`` to a SOUND enclosure
+# ``(f''_lo, f''_hi)`` of the second derivative of ``f`` over that cell. Non-finite
+# entries signal an unbounded Hessian (the envelope then abstains).
+CurvatureEnclosure = Callable[[float, float], "tuple[float, float]"]
+
+# Number of cells over which the rigorous second-order remainder correction is
+# evaluated. More cells → a tighter (smaller) proven shift, since the interval
+# Hessian enclosure per cell is tighter; the correction is SOUND for any count
+# (enclosure monotonicity under subset), so this only trades cost for tightness.
+_CURV_CELLS = 512
 
 # Sampling / rigor budget. The coarse grid seeds the hull; the fine grid measures
 # the worst-case hull-vs-f deviation used to shift each facet into a proven bound.
@@ -150,15 +172,21 @@ def _hull_lines(
     f_range: float,
     *,
     upper: bool,
+    remainder: float,
 ) -> Optional[tuple[tuple[float, float], ...]]:
     """Proven under- (``upper=False``) or over- (``upper=True``) estimator lines.
 
     ``xs``/``ys`` are the coarse hull-seed samples; ``xf``/``ff`` the fine grid
-    used to measure and correct the hull's deviation from ``f``. Returns a tuple
-    of ``(slope, intercept)`` lines such that, on the box, ``slope*x + intercept
-    ≤ f(x)`` (under) resp. ``≥ f(x)`` (over). ``None`` if the sampled hull cannot
-    be made a *useful* rigorous bound (caller falls back to the existing path).
+    used to measure the hull's deviation from ``f`` at the fine nodes. ``remainder``
+    is the proven ``O(h²)`` second-order bound on ``f``'s deviation from its chord
+    *between* fine nodes for this side (under vs over) — added to the measured node
+    slack so the shift is a bound everywhere, not just at nodes. Returns a tuple of
+    ``(slope, intercept)`` lines such that, on the box, ``slope*x + intercept ≤
+    f(x)`` (under) resp. ``≥ f(x)`` (over). ``None`` if the hull cannot be made a
+    *useful* rigorous bound (caller falls back to the existing path).
     """
+    if not np.isfinite(remainder):
+        return None  # unbounded interval Hessian → no proven bound → abstain
     # For an OVER estimator (concave hull) we build the LOWER hull of -f and negate.
     sign = -1.0 if upper else 1.0
     hull = _lower_convex_hull(xs, sign * ys)
@@ -169,12 +197,15 @@ def _hull_lines(
 
     # Rigor: the piecewise-linear hull of the *samples* can sit slightly on the
     # wrong side of f between samples — and thinning vertices can raise it further.
-    # Measure the worst deviation on a 10x-finer grid and shift the whole (thinned)
-    # hull to the safe side by that (nonnegative) slack, so every facet becomes a
-    # proven bound. Deviation is measured against sign*f, matching the hull space.
+    # Measure the worst deviation at the fine nodes and shift the whole (thinned)
+    # hull to the safe side by that (nonnegative) slack. The affine (facet − chord)
+    # part is maximised at a fine node, so this covers it; the remaining
+    # chord-vs-f interpolation error between nodes is bounded by the proven
+    # ``remainder`` (⅛·max(0,±f'')·h²). Their sum shifts every facet to a bound
+    # everywhere. Deviation is measured against sign*f, matching the hull space.
     hull_vals = _pwl_eval(hull, xf)
     slack = float(np.max(hull_vals - sign * ff))  # how far hull rose above sign*f
-    slack = max(slack, 0.0)
+    slack = max(slack, 0.0) + remainder
 
     denom = max(abs(f_range), 1.0)
     if slack / denom > _MAX_REL_SLACK:
@@ -196,10 +227,50 @@ def _hull_lines(
     return tuple(lines)
 
 
+def _second_order_remainder(
+    lo: float,
+    hi: float,
+    curvature_enclosure: CurvatureEnclosure,
+    h: float,
+    n_cells: int,
+) -> tuple[float, float]:
+    """Proven ``O(h²)`` interpolation-remainder bound per side over ``[lo, hi]``.
+
+    Partitions the box into ``n_cells`` cells, takes a sound interval enclosure
+    ``[d_lo, d_hi]`` of ``f''`` on each, and returns
+    ``(under_remainder, over_remainder)``:
+
+    * ``under_remainder = ⅛·max_cell(max(0, d_hi))·h²`` — the most a chord of ``f``
+      can rise above ``f`` on a convex cell (bounds ``chord_f − f`` for the
+      underestimator side);
+    * ``over_remainder  = ⅛·max_cell(max(0, −d_lo))·h²`` — symmetric for the
+      concave/overestimator side.
+
+    A cell's ``f''`` enclosure encloses that of every sub-cell (monotone under
+    subset), so bounding over ``n_cells`` cells and applying the fine spacing ``h``
+    is a valid bound for every fine cell. Returns ``(inf, inf)`` if any enclosure is
+    unbounded — the caller then abstains rather than ship an uncertified facet.
+    """
+    edges = np.linspace(lo, hi, n_cells + 1)
+    d_hi_max = 0.0  # max(0, f''_hi) over cells → convex-side remainder
+    d_lo_neg_max = 0.0  # max(0, -f''_lo) over cells → concave-side remainder
+    for i in range(n_cells):
+        d_lo, d_hi = curvature_enclosure(float(edges[i]), float(edges[i + 1]))
+        if not (np.isfinite(d_lo) and np.isfinite(d_hi)):
+            return float("inf"), float("inf")
+        d_hi_max = max(d_hi_max, d_hi)
+        d_lo_neg_max = max(d_lo_neg_max, -d_lo)
+    c = 0.125 * h * h
+    return c * d_hi_max, c * d_lo_neg_max
+
+
 def univariate_hull_envelope(
     lo: float,
     hi: float,
     value_batch: Callable[[np.ndarray], np.ndarray],
+    curvature_enclosure: CurvatureEnclosure,
+    *,
+    n_curv_cells: int = _CURV_CELLS,
 ) -> Optional[
     tuple[tuple[tuple[float, float], ...], tuple[tuple[float, float], ...], tuple[float, float]]
 ]:
@@ -210,17 +281,24 @@ def univariate_hull_envelope(
     the fine correction grid — so per-node cost is two batched evaluations, not
     hundreds of thousands of scalar dispatches).
 
+    ``curvature_enclosure`` maps a cell ``[a, b]`` to a SOUND interval enclosure
+    ``(f''_lo, f''_hi)`` of ``f``'s second derivative on that cell (in the build,
+    a sound interval Hessian). It is what makes the returned facets rigorous
+    *between* the fine-grid nodes, not merely at them (#632 review finding 2); it
+    is called ``n_curv_cells`` times.
+
     Returns ``(lower_lines, upper_lines, col_bounds)`` where ``lower_lines`` are
-    proven underestimator secants (``≤ f``), ``upper_lines`` proven overestimator
-    secants (``≥ f``), and ``col_bounds`` a sound box on the lifted value derived
-    from the same sampled range (widened outward by the proven hull slacks so it
-    never excludes a true value). ``None`` to abstain (caller keeps the existing
+    proven underestimator secants (``≤ f`` everywhere on the box), ``upper_lines``
+    proven overestimator secants (``≥ f`` everywhere), and ``col_bounds`` a sound
+    box on the lifted value (widened outward by the proven hull slacks so it never
+    excludes a true value). ``None`` to abstain (caller keeps the existing
     relaxation for this node).
 
-    Soundness relies only on: (a) the monotone-chain lower hull is a valid PL
-    underestimator of its sample points, and (b) the finite-grid deviation shift,
-    which makes each facet a proven bound for continuous ``f``. No convexity of
-    ``f`` is assumed anywhere.
+    Soundness relies on: (a) the monotone-chain lower hull is a valid PL
+    underestimator of its sample points; (b) the fine-node deviation shift covers
+    the affine ``facet − chord`` part; and (c) the proven ``⅛·max(0,±f'')·h²``
+    second-order remainder covers the chord-vs-``f`` interpolation error between
+    nodes. No convexity of ``f`` is assumed anywhere.
     """
     if not (hi > lo):
         return None
@@ -238,8 +316,17 @@ def univariate_hull_envelope(
         return None
     f_range = float(np.max(ff) - np.min(ff))
 
-    lower = _hull_lines(xs, ys, xf, ff, f_range, upper=False)
-    upper = _hull_lines(xs, ys, xf, ff, f_range, upper=True)
+    # Proven second-order remainder that certifies the facets between fine nodes.
+    h_fine = (hi - lo) / (_FINE_MULT * _COARSE_N - 1)
+    try:
+        under_rem, over_rem = _second_order_remainder(
+            lo, hi, curvature_enclosure, h_fine, n_curv_cells
+        )
+    except Exception:
+        return None
+
+    lower = _hull_lines(xs, ys, xf, ff, f_range, upper=False, remainder=under_rem)
+    upper = _hull_lines(xs, ys, xf, ff, f_range, upper=True, remainder=over_rem)
     if lower is None or upper is None:
         return None
 
