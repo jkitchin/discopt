@@ -22,14 +22,12 @@ not inert (CLAUDE.md §3).
 from __future__ import annotations
 
 import glob
-import hashlib
 import os
 from pathlib import Path
 
-import numpy as np
 import pytest
-import scipy.sparse as sp
 from discopt._jax import milp_relaxation as mr
+from discopt._jax.claim_audit import relaxation_fingerprint
 from discopt._jax.discretization import DiscretizationState
 from discopt._jax.milp_relaxation import build_milp_relaxation
 from discopt._jax.term_classifier import classify_nonlinear_terms
@@ -44,38 +42,15 @@ _ALL = sorted(os.path.basename(p)[:-3] for p in glob.glob(str(_NL_DIR / "*.nl"))
 def _relaxation_fingerprint(name: str) -> str:
     """Deterministic hash of the built MILP relaxation matrix for ``name``.
 
-    Covers every array a Path-B additive row could touch: objective ``_c``, the
-    inequality matrix ``_A_ub`` (densified in a stable order), the RHS ``_b_ub``,
-    the variable ``_bounds``, and the ``_integrality`` mask. Two identical hashes
-    mean identical LP relaxations (same columns, same rows, same numbers)."""
+    Thin wrapper over the extracted library primitive
+    :func:`discopt._jax.claim_audit.relaxation_fingerprint` (issue #632, R0.3),
+    which hashes ``(_c, _A_ub, _b_ub, _bounds, _integrality)`` — every array a
+    claim (additive row/column) could touch. Two identical hashes mean identical
+    LP relaxations (same columns, same rows, same numbers)."""
     model = from_nl(str(_NL_DIR / f"{name}.nl"))
     terms = classify_nonlinear_terms(model)
     relax, _info = build_milp_relaxation(model, terms, DiscretizationState())
-
-    h = hashlib.sha256()
-
-    def _feed(label: str, arr) -> None:
-        h.update(label.encode())
-        if arr is None:
-            h.update(b"None")
-            return
-        if sp.issparse(arr):
-            arr = np.asarray(arr.todense())
-        a = np.ascontiguousarray(np.asarray(arr, dtype=np.float64))
-        h.update(str(a.shape).encode())
-        h.update(a.tobytes())
-
-    _feed("c", relax._c)
-    _feed("A_ub", relax._A_ub)
-    _feed("b_ub", relax._b_ub)
-    _feed("bounds", np.asarray(relax._bounds, dtype=np.float64) if relax._bounds else None)
-    _feed(
-        "integrality",
-        np.asarray(relax._integrality, dtype=np.float64)
-        if relax._integrality is not None
-        else None,
-    )
-    return h.hexdigest()
+    return relaxation_fingerprint(relax)
 
 
 @pytest.fixture(autouse=True)
