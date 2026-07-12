@@ -19,7 +19,10 @@ from discopt._jax.canonical_expr import canonicalize, is_affine
 from discopt._jax.claim_audit import audit_build
 from discopt.modeling.core import from_nl
 
-pytestmark = [pytest.mark.claim_boundary]
+# slow: builds every corpus relaxation (some — e.g. st_e36 — take 100s+), so this
+# runs in the serial claim-boundary CI job (generous timeout), not the parallel
+# python-fast job (120s/test).
+pytestmark = [pytest.mark.claim_boundary, pytest.mark.slow]
 
 _NL_DIR = Path(__file__).parent / "data" / "minlplib_nl"
 _CORPUS = sorted(p.stem for p in _NL_DIR.glob("*.nl"))

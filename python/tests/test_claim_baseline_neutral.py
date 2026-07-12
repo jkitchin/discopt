@@ -21,7 +21,9 @@ from __future__ import annotations
 import pytest
 from support.claim_differential import load_baseline, partition_corpus
 
-pytestmark = [pytest.mark.claim_boundary]
+# slow: rebuilds all 62 corpus relaxations in one test (~120s+), so it runs in the
+# serial claim-boundary CI job (generous timeout), not the parallel python-fast job.
+pytestmark = [pytest.mark.claim_boundary, pytest.mark.slow]
 
 
 def test_current_build_matches_committed_baseline_shape():
