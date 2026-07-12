@@ -3775,6 +3775,69 @@ def _expr_has_nonlinear_subterm(expr: Expression) -> bool:
     return False
 
 
+# Univariate-atom owners, in tightness-dominance order (issue #632, R1.2). Each is
+# at-least-as-tight as those below it wherever it applies, so the *order* is the
+# arbitration — no hand-maintained defer-list. This single decision function is the
+# successor to the scattered ``_should_claim_composite(allow_general=…)`` +
+# ``_defers_to_finite_domain_trig_table`` gates inside the composite collector.
+_UNI_OWNER_NONE = "none"  # not a single-variable composite this path owns
+_UNI_OWNER_TABLE = "table"  # rule 1: exact finite-domain table (small integer domain)
+_UNI_OWNER_EXACT = "exact"  # rule 2: certified convex/concave -> exact envelope + secant
+_UNI_OWNER_HULL = "hull"  # rule 3: neither convex nor concave, finite box -> exact 1-D hull
+_UNI_OWNER_COMPOSED = "composed"  # rule 4: unbounded/pinned box -> composed fallback
+
+
+def _univariate_dispatch_owner(
+    expr: Expression,
+    model: Model,
+    n_orig: int,
+    flat_lb: np.ndarray,
+    flat_ub: np.ndarray,
+    flat_types: list[VarType],
+    box: dict,
+) -> str:
+    """Dominance-order owner of a single-variable nonlinear composite ``expr``.
+
+    Returns one of ``_UNI_OWNER_{NONE,TABLE,EXACT,HULL,COMPOSED}`` (§2.4 rules
+    1..4). The order encodes the arbitration: an exact finite-domain table (rule
+    1) beats a certified convex/concave envelope (rule 2), which beats the exact
+    1-D hull (rule 3), which beats the composed fallback (rule 4). Only ``EXACT``
+    and ``HULL`` are claimed by the composite-univariate collector; ``TABLE``
+    defers to the finite-domain trig-square table, ``COMPOSED``/``NONE`` fall
+    through to the existing composed relaxation. This is a **decision only** — it
+    reuses the same curvature/finite-domain/box helpers the collector uses, so
+    wiring it changes no envelope math, only *who* owns each atom.
+    """
+    # Only nodes the composite path could own at all (the widened, H-UNI-inclusive
+    # candidate set); everything else is owned elsewhere (bare monomial, affine
+    # square/power, univariate-of-affine, product, …).
+    if not _should_claim_composite(expr, model, n_orig, allow_general=True):
+        return _UNI_OWNER_NONE
+    # Rule 1 — a tabulatable trig-square over a small integer domain: the exact
+    # per-point table is tighter than any continuous envelope.
+    if _defers_to_finite_domain_trig_table(expr, model, n_orig, flat_types, flat_lb, flat_ub):
+        return _UNI_OWNER_TABLE
+    ref = _composite_referenced_var(expr, model)
+    if ref is None:
+        return _UNI_OWNER_NONE
+    var, flat_idx = ref
+    lo = float(flat_lb[flat_idx])
+    hi = float(flat_ub[flat_idx])
+    # Effectively-unbounded (or degenerate) box: a 1-D hull over a ~1e20-wide box
+    # is numerically meaningless (cert:LR-3), so fall back to the composed path.
+    if not (_is_effectively_finite(lo) and _is_effectively_finite(hi)) or hi < lo:
+        return _UNI_OWNER_COMPOSED
+    # Rule 2 — certified convex/concave on the box: the exact envelope + secant is
+    # tight (and for a convex function equals the hull), so prefer it.
+    if _composite_curvature(expr, model, var, flat_idx, lo, hi, box) is not None:
+        return _UNI_OWNER_EXACT
+    # A pinned (near-degenerate) box is handled by the exact-pin path, not the hull.
+    if hi - lo <= _COMPOSITE_CURV_TOL:
+        return _UNI_OWNER_COMPOSED
+    # Rule 3 — neither convex nor concave, finite box: the exact 1-D hull.
+    return _UNI_OWNER_HULL
+
+
 def _affine_base_power_curvature(expr: Expression, model: Model, box: dict) -> Optional[str]:
     """Analytic curvature of ``(affine_base)**p`` from ``p`` and the base sign.
 
