@@ -9,11 +9,21 @@ Deliberately NOT gated here: the exact float **fingerprint**. The in-house
 FBBT/parse path produces last-digit-different matrix coefficients across Rust
 builds/platforms (``contvar``/``tanksize`` drift with identical shape — confirmed
 on a pristine tree), so a committed-hash equality check is not reproducible on a
-different CI runner. Environment-independent byte-identity is guarded instead by
-the in-process ``test_lr2_offneutral_relaxation.py`` (#630, OFF-vs-code-absent in
-one process) and, for the cutover, by the canonical-ON-vs-OFF in-process
-differential gate (R1.2). Fingerprint drift with identical shape is surfaced here
-as an informational count, not a failure.
+different CI runner. Fingerprint drift with identical shape is surfaced here as an
+informational count, not a failure.
+
+**What still guards coefficient-level neutrality, and what does not** (per the
+#636 review): ``test_lr2_offneutral_relaxation.py`` (#630) compares two builds
+*from current code* (OFF vs code-absent), so it rigorously proves the LR-2/H-UNI
+collectors are inert when off — but it is NOT a frozen-reference gate: a uniform
+coefficient change from a refactor would move both fingerprints identically and
+still pass. This PR needs no frozen-reference coefficient gate because its only
+build-path change is three ``note_defer()`` no-ops (everything else is unwired, so
+it provably cannot change a coefficient). The frozen-reference *coefficient* gate
+arrives with the first bound-changing cutover (R1.2), built as its own differential
+gate per CLAUDE.md §5 — a **tolerance-based** coefficient comparison (``_A_ub``/
+``_c`` within ~1e-9), robust to the FBBT last-digit non-determinism that makes an
+exact committed hash unachievable cross-build.
 """
 
 from __future__ import annotations
