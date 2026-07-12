@@ -8,7 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 The release procedure that produces these entries is documented in
 [`RELEASE.md`](RELEASE.md).
 
-## [Unreleased]
+## [0.6.0] - 2026-07-12
 
 ### Removed
 
@@ -52,11 +52,68 @@ The release procedure that produces these entries is documented in
   full help — and built-in names cannot be shadowed. The in-tree `discopt doe`
   subcommand now registers through this mechanism, ahead of its extraction to
   the standalone `discopt-doe` package (#389).
+- **Reduced-space McCormick relaxation (MAiNGO-parity, opt-in)** (`feat(mcbox)`,
+  #574, #575, #576, #577, #579, #580, #583). A propagating McCormick type with
+  rule-based subgradients that relaxes in the original variable space (no
+  auxiliary lifting), plus a jitted Kelley-cut LP on the in-house simplex,
+  S-shaped intrinsics with per-regime subgradients, and sign-definite reciprocal
+  division. Selected with `DISCOPT_RELAX_SPACE=reduced` (**default-OFF**); sound
+  where it engages, pursued for generality/robustness parity with MAiNGO rather
+  than as a speed lever. See `docs/dev/maingo-parity-plan.md`.
+- **Hybrid physics + ML: trainable surrogates and simultaneous neural-DAE
+  training** (`feat(nn)`, #595). Surrogate weights become decision variables so a
+  neural rate law can be trained jointly with a physics model (e.g. inside a
+  collocation DAE); see `discopt.nn.trainable` / `discopt.nn.surrogate` and the
+  multi-experiment fitting glue in `discopt.dae.fit`.
+- **Entropy-family relaxation: centropy tangent-plane underestimator**
+  (`feat(relax)`, #597). Linearizes the `x·log(x)` / entropy atom so entropy-style
+  objectives become certifiable rather than local-NLP-only.
+- **Exact 1-D univariate-composite and positive-product envelopes (opt-in)**
+  (`cert:LR-2`, #627). `DISCOPT_UNIVARIATE_ENVELOPE` (H-UNI) and
+  `DISCOPT_LOG_MONOMIAL` (H-LOG) add exact convex/concave hulls for
+  single-variable composites and log-space positive products (root-certifies
+  nvs09). Both **default-OFF**; graduation to default-ON is tracked in #632
+  (canonical factorable normal form). OFF is byte-identical to prior main.
+- **Binary (`b`) `.nl` parsing** (`cert:TAIL-1b`, #593). Binary-format AMPL `.nl`
+  files are transcoded to text and read (e.g. `st_miqp5`).
 
 ### Changed
 
-- Version bumped to 0.6.0.dev0; 0.6.0 will be the first release with the DOE
-  module extracted to the `discopt-doe` plugin package.
+- **`pounce-solver` minimum raised to `>=0.8`** (`chore(deps)`, #633). pounce 0.8
+  makes `Problem` a compiled object; discopt's usage is unaffected (method
+  dispatch behind `hasattr`).
+- **`feral` LP engine bumped to crates.io `0.14.0`** (`chore(deps)`, #628),
+  retiring the git-rev pin from #112.
+- **Default-ON graduation of three per-node levers** (`graduate`, #616): the
+  density-aware LU route (`lu_density_route`), objective-branch-priority
+  (`obj_branch_priority`), and loose-product lifting (`lift_loose_products`) are
+  now on by default, validated soundness-neutral (`incorrect_count = 0`).
+- **Density-aware dense/sparse LU route for wide-McCormick node bases**
+  (`perf(lp)`, #573, #591) with a failure-triggered dense retry that cures the
+  nvs21 certificate loss; plus zero-pivot / refactorization-breakdown fixes in
+  the LP engine (#570, #571).
+- **Documentation build is now zero-warning** (`docs`, #605; 132 → 0).
+
+### Fixed
+
+- **AMP false-feasible from per-iteration MILP-budget starvation** (`fix(amp)`,
+  #621). The per-iteration MILP time budget was sized off the `max_iter` cap, so
+  a large `max_iter` starved each MILP on cold runs; it is now sized by an
+  expected iteration horizon.
+- **Gap-closed solves are now certified soundly** (`fix(cert)`, #604, #603,
+  #613). A node-LP failure no longer poisons certification when the bound
+  accounting stays rigorous (per-node sound accounting, #604); tainted trees now
+  report the strongest rigorous dual bound instead of the taint-dropped one
+  (#603); spatial gap-closed solves certify over soundly-floored sentinel
+  removals (#613).
+- **`nvs22` false-optimal on the reduced-space and cut-inheritance paths**
+  (`fix`, #582, #568). The reduced-space evaluator now refuses non-finite boxes;
+  column-identity-safe cut inheritance fixes the cut-inherit false-optimal.
+- **H-UNI no longer builds a hull over effectively-unbounded boxes** (`cert:LR-3`,
+  #631) — was a false-infeasible on the opt-in envelope path; guarded by a
+  solver-sense finiteness check.
+- **AMP integration suite de-flaked** (`ci(amp)`, #607, #608) via pytest-xdist
+  process distribution and isolation of the slow trig/abs certification tests.
 
 ## [0.5.0] - 2026-07-01
 
@@ -450,7 +507,7 @@ git log v0.2.0..v0.2.1
 
 Going forward, every release will have a section above with curated entries.
 
-[Unreleased]: https://github.com/jkitchin/discopt/compare/v0.5.0...HEAD
+[0.6.0]: https://github.com/jkitchin/discopt/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/jkitchin/discopt/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/jkitchin/discopt/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/jkitchin/discopt/compare/v0.2.5...v0.3.0
