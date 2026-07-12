@@ -33,6 +33,7 @@ import scipy.sparse as sp
 
 from discopt._jax._numeric import EFFECTIVE_INF as _EFFECTIVE_INF
 from discopt._jax._numeric import is_effectively_finite as _is_effectively_finite
+from discopt._jax.claim_audit import note_defer as _note_defer
 from discopt._jax.discretization import DiscretizationState
 from discopt._jax.embedding import EmbeddingMap, build_embedding_map
 from discopt._jax.model_utils import flat_variable_bounds
@@ -3610,6 +3611,11 @@ def _should_claim_composite(
     are neither convex nor concave; claiming here only *offers* the node, the
     collector still abstains (falls back unchanged) if a rigorous hull can't form.
     """
+    # Audit hook (issue #632): counts consultations of the legacy defer-list under
+    # a claim_audit.defer_audit() context; a genuine no-op otherwise. The canonical
+    # dispatch (R1.2+) must drive this count to zero (the R2.5 exactly-one-owner /
+    # zero-defer CI assertion).
+    _note_defer("_should_claim_composite")
     if isinstance(expr, FunctionCall) and len(expr.args) == 1:
         op_info = _univariate_arg(expr)
         if op_info is None:
@@ -3735,6 +3741,8 @@ def _defers_to_finite_domain_trig_table(
     composites (e.g. nvs09's ``(ln(x-2))**2 + (ln(10-x))**2`` — ``ln`` is not a
     trig table), so the nvs09 win is preserved.
     """
+
+    _note_defer("_defers_to_finite_domain_trig_table")
 
     def all_nonlinear_tabulatable(e: Expression) -> bool:
         if isinstance(e, BinaryOp) and e.op in ("+", "-"):
@@ -4447,6 +4455,7 @@ def _should_claim_composite_multivar(expr: Expression, model: Model, n_orig: int
     * ``(base)**p`` with a non-integer constant ``p`` and a non-bare,
       multivariate base.
     """
+    _note_defer("_should_claim_composite_multivar")
     if isinstance(expr, FunctionCall) and len(expr.args) == 1:
         op_info = _univariate_arg(expr)
         if op_info is None:
