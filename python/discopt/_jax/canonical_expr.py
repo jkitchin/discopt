@@ -40,6 +40,7 @@ from __future__ import annotations
 
 import dataclasses
 import itertools
+import math
 from typing import Any, Optional
 
 import numpy as np
@@ -123,6 +124,46 @@ def _sort_key(node: "CNode"):
     return repr(node.key)
 
 
+# Numpy-backed evaluators for constant-argument intrinsic calls. Deliberately the
+# numpy analogues of discopt's own (jnp-based) evaluator, which agree to ~1e-15 on
+# these functions — well inside the semantic-equivalence tolerance. Intrinsics
+# whose evaluator is not a plain numpy ufunc (erf/sigmoid/softplus/sign) and the
+# n-ary ops beyond min/max are intentionally absent: those are left unfolded (a
+# call node), which the atomizer's zero-support guard still keeps out of the
+# univariate bucket.
+_UNARY_CONST_FN = {
+    "exp": np.exp, "log": np.log, "log2": np.log2, "log10": np.log10, "sqrt": np.sqrt,
+    "sin": np.sin, "cos": np.cos, "tan": np.tan, "atan": np.arctan, "asin": np.arcsin,
+    "acos": np.arccos, "sinh": np.sinh, "cosh": np.cosh, "tanh": np.tanh,
+    "asinh": np.arcsinh, "acosh": np.arccosh, "atanh": np.arctanh, "log1p": np.log1p,
+    "abs": np.abs,
+}  # fmt: skip
+_NARY_CONST_FN = {"min": min, "max": max}
+
+
+def _fold_const_call(name: str, values: tuple[float, ...]) -> Optional[float]:
+    """Evaluate an intrinsic on constant argument(s), or ``None`` to not fold.
+
+    A call whose arguments are all constant (e.g. ``sin(2.0)``) is a constant, not
+    a nonlinear atom; folding it keeps it out of the atomizer's univariate bucket
+    (the #636 Finding-2 trap of a zero-variable "univariate" atom). Returns
+    ``None`` (leave the call unfolded) for unsupported intrinsics or when the
+    result is not a finite real (out-of-domain arg, e.g. ``log(-1)`` → nan) — never
+    a nan/complex constant in the canonical form.
+    """
+    try:
+        with np.errstate(all="ignore"):  # out-of-domain (log(-1)) -> nan, handled below
+            if len(values) == 1 and name in _UNARY_CONST_FN:
+                out = float(_UNARY_CONST_FN[name](float(values[0])))
+            elif name in _NARY_CONST_FN:
+                out = float(_NARY_CONST_FN[name](*(float(v) for v in values)))
+            else:
+                return None
+    except (ArithmeticError, ValueError, TypeError):
+        return None
+    return out if math.isfinite(out) else None
+
+
 # --------------------------------------------------------------------------- #
 # Canonicalizer
 # --------------------------------------------------------------------------- #
@@ -133,7 +174,13 @@ class _Canonicalizer:
         self.model = model
         self.n_vars = sum(v.size for v in model._variables)
         self._intern: dict[tuple, CNode] = {}
-        self._memo: dict[int, CNode] = {}  # id(expr) -> CNode
+        # id(expr) -> CNode. NOTE: this is the id()-fragility class the module
+        # replaces, now confined to the memo layer: the dict holds int keys and
+        # never pins the source Expression, so it is valid ONLY while the source
+        # trees are live (a GC'd expr whose id is later reused by a different expr
+        # would return a stale CNode). Within one build the model pins every
+        # subtree, so it is safe; do not retain a memo/DAG past its model's life.
+        self._memo: dict[int, CNode] = {}
         self._opaque_counter = itertools.count()
 
     # -- interning ---------------------------------------------------------- #
@@ -167,9 +214,17 @@ class _Canonicalizer:
         return self._mk("pow", ("pow", base.key, float(p)), (base,), float(p))
 
     def _call(self, name: str, arg: CNode) -> CNode:
+        if arg.kind == "const":
+            folded = _fold_const_call(name, (arg.payload,))
+            if folded is not None:
+                return self._const(folded)
         return self._mk("call", ("call", name, arg.key), (arg,), name)
 
     def _callN(self, name: str, args: tuple[CNode, ...]) -> CNode:
+        if all(a.kind == "const" for a in args):
+            folded = _fold_const_call(name, tuple(a.payload for a in args))
+            if folded is not None:
+                return self._const(folded)
         key = ("callN", name, tuple(a.key for a in args))
         return self._mk("callN", key, args, name)
 
@@ -279,10 +334,18 @@ class _Canonicalizer:
             return self._const(0.0)
         if not factor_list:
             return self._const(coef_acc)
-        # A single factor with exponent 1 and unit coef is just that child.
         factor_list.sort(key=lambda t: _sort_key(t[0]))
-        if len(factor_list) == 1 and factor_list[0][1] == 1.0 and coef_acc == 1.0:
-            return factor_list[0][0]
+        # A single-factor product is never a ``prod`` node: b^1 is just ``b`` and
+        # b^e is ``pow(b, e)`` — with the scalar coef applied by a surrounding sum.
+        # (Collapsing this matters once constant-folding can turn a 2-factor
+        # product like ``sin(2.0)·z`` into a single ``z`` factor; leaving it as
+        # ``prod(z^1)`` would spuriously mark the affine result nonlinear — #636.)
+        if len(factor_list) == 1:
+            base_node, e = factor_list[0]
+            single = base_node if e == 1.0 else self._pow(base_node, e)
+            if coef_acc == 1.0:
+                return single
+            return self._sum([(coef_acc, single)], 0.0)
         exps = tuple(float(e) for _, e in factor_list)
         children = tuple(b for b, _ in factor_list)
         prod_key = ("prod", tuple((ch.key, e) for ch, e in zip(children, exps)))
@@ -672,6 +735,14 @@ def atomize(dag: CanonicalDAG) -> AtomPartition:
         if n.kind == "sum" and (len(s) > 1 or has_opaque(n)):
             for c in n.children:
                 visit(c)
+            return
+        # A non-opaque node with zero variable support is constant-valued (e.g.
+        # a ``sin(2.0)`` that did not constant-fold, or a call on parameters). It
+        # has no variable to build a 1-D envelope over, so it is NOT a univariate
+        # atom; the evaluator/linear path handles the constant. Opaque nodes also
+        # have empty support but must still surface as their own fallback atom —
+        # hence the ``not is_opaque`` (the #636 Finding-2 zero-variable trap).
+        if not s and not n.is_opaque:
             return
         # Otherwise this node is a maximal nonlinear atom.
         if id(n) in seen:

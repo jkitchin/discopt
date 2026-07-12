@@ -10,6 +10,7 @@ cannot represent.
 
 from __future__ import annotations
 
+import math
 from pathlib import Path
 
 import discopt.modeling as dm
@@ -415,3 +416,49 @@ def test_atomize_is_deterministic():
     k1 = [(a.node.key, a.kind) for a in _atoms(m).atoms]
     k2 = [(a.node.key, a.kind) for a in _atoms(m).atoms]
     assert k1 == k2
+
+
+# --------------------------------------------------------------------------- #
+# constant-folding of pure-constant calls (issue #636, Finding 2)
+# --------------------------------------------------------------------------- #
+def test_constant_call_folds_to_const():
+    m = dm.Model()
+    m.continuous("z", lb=1, ub=3)
+    node = canonicalize(dm.Model()).cnode_of(dm.sin(Constant(2.0)))
+    assert node.kind == "const"
+    assert abs(node.payload - float(np.sin(2.0))) < 1e-12
+
+
+def test_constant_call_times_var_is_affine_no_atom():
+    # sin(2.0)*z is constant*z = affine — NOT a spurious univariate atom.
+    m = dm.Model()
+    z = m.continuous("z", lb=1, ub=3)
+    m.minimize(dm.sin(Constant(2.0)) * z)
+    part = atomize(canonicalize(m))
+    assert part.kinds.get("univariate", 0) == 0
+    obj = canonicalize(m).cnode_of(m._objective.expression)
+    assert is_affine(obj)
+
+
+def test_constant_call_plus_var_is_affine():
+    m = dm.Model()
+    z = m.continuous("z", lb=1, ub=3)
+    m.minimize(dm.exp(Constant(0.5)) + z)
+    assert is_affine(canonicalize(m).cnode_of(m._objective.expression))
+
+
+def test_genuine_monomials_still_atoms_after_collapse():
+    # The single-factor collapse must not swallow real monomials/products.
+    m = dm.Model()
+    x = m.continuous("x", lb=1, ub=3)
+    y = m.continuous("y", lb=1, ub=3)
+    m.minimize(x * x * y + 3 * x * x)  # product atom + univariate (x^2) atom
+    kinds = atomize(canonicalize(m)).kinds
+    assert kinds.get("product", 0) == 1
+    assert kinds.get("univariate", 0) == 1
+
+
+def test_out_of_domain_constant_call_not_folded_to_nan():
+    # log(-1) is nan; folding must abstain (leave the call), never a nan const.
+    node = canonicalize(dm.Model()).cnode_of(dm.log(Constant(-1.0)))
+    assert node.kind != "const" or math.isfinite(node.payload)

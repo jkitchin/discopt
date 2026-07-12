@@ -83,6 +83,18 @@ class InstanceDiff:
 
 
 def diff_instance(name: str, baseline: dict[str, dict]) -> InstanceDiff:
+    """Classify one instance vs the committed baseline by relaxation **shape**.
+
+    Shape (row/column/integer-column counts) is the cross-environment-stable
+    signal a claim or structural change moves; the exact float **fingerprint** is
+    NOT reproducible across Rust builds/platforms (the in-house FBBT/parse path
+    produces last-digit-different matrix coefficients on ``contvar``/``tanksize``
+    — confirmed on a pristine tree), so this reference test does not gate on it.
+    Environment-independent byte-identity is guarded separately and in-process by
+    ``test_lr2_offneutral_relaxation.py`` (#630) and, for the cutover, by the
+    canonical-ON-vs-OFF in-process differential gate (R1.2). ``fingerprint_drift``
+    records where the hash differs despite identical shape (informational).
+    """
     base = baseline.get(name)
     if base is None:
         return InstanceDiff(name, "missing", "no baseline row")
@@ -93,14 +105,18 @@ def diff_instance(name: str, baseline: dict[str, dict]) -> InstanceDiff:
         cur = current_row(name)
     except Exception as exc:  # noqa: BLE001 - report, do not raise
         return InstanceDiff(name, "error", repr(exc))
-    if cur["fingerprint"] == base["fingerprint"]:
-        return InstanceDiff(name, "unchanged")
-    detail = (
-        f"fingerprint changed; rows {base['n_rows']}->{cur['n_rows']} "
-        f"cols {base['n_cols']}->{cur['n_cols']} "
-        f"int {base['n_integer_cols']}->{cur['n_integer_cols']}"
-    )
-    return InstanceDiff(name, "changed", detail)
+    shape_keys = ("n_rows", "n_cols", "n_integer_cols")
+    if any(cur[k] != base[k] for k in shape_keys):
+        detail = (
+            f"shape changed; rows {base['n_rows']}->{cur['n_rows']} "
+            f"cols {base['n_cols']}->{cur['n_cols']} "
+            f"int {base['n_integer_cols']}->{cur['n_integer_cols']}"
+        )
+        return InstanceDiff(name, "changed", detail)
+    if cur["fingerprint"] != base["fingerprint"]:
+        # Same shape, different bytes — cross-build float noise, not a claim change.
+        return InstanceDiff(name, "fingerprint_drift", "identical shape; matrix bytes differ")
+    return InstanceDiff(name, "unchanged")
 
 
 def partition_corpus(baseline: Optional[dict[str, dict]] = None) -> dict[str, list[InstanceDiff]]:
@@ -109,6 +125,7 @@ def partition_corpus(baseline: Optional[dict[str, dict]] = None) -> dict[str, li
     buckets: dict[str, list[InstanceDiff]] = {
         "unchanged": [],
         "changed": [],
+        "fingerprint_drift": [],
         "error": [],
         "missing": [],
     }
