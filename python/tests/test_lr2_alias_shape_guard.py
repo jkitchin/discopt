@@ -29,7 +29,7 @@ from discopt._jax import milp_relaxation as mr
 from discopt._jax.factorable_reform import factorable_reformulate
 from discopt.modeling.core import from_nl
 
-pytestmark = [pytest.mark.correctness]
+pytestmark = [pytest.mark.correctness, pytest.mark.claim_boundary]
 
 _NL = Path(__file__).parent / "data" / "minlplib_nl" / "nvs09.nl"
 

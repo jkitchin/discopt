@@ -32,6 +32,8 @@ from discopt._jax.milp_relaxation import build_milp_relaxation
 from discopt._jax.term_classifier import classify_nonlinear_terms
 from discopt.modeling.core import Model
 
+pytestmark = [pytest.mark.claim_boundary]
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------

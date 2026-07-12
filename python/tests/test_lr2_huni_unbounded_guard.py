@@ -22,7 +22,7 @@ import discopt.modeling as dm
 import pytest
 from discopt.modeling.core import Model
 
-pytestmark = [pytest.mark.correctness]
+pytestmark = [pytest.mark.correctness, pytest.mark.claim_boundary]
 
 
 def _build(model):

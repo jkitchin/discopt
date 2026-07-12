@@ -22,6 +22,8 @@ from pathlib import Path
 
 import pytest
 
+pytestmark = [pytest.mark.claim_boundary]
+
 _REPO = Path(__file__).resolve().parents[2]
 _NL = _REPO / "python" / "tests" / "data" / "minlplib_nl" / "nvs09.nl"
 _OPT = -43.134

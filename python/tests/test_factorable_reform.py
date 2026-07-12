@@ -27,6 +27,8 @@ from discopt._jax.factorable_reform import (
     factorable_reformulate,
     has_factorable_work,
 )
+
+pytestmark = [pytest.mark.claim_boundary]
 from discopt._jax.term_classifier import classify_nonlinear_terms
 from discopt.modeling.core import FunctionCall, Variable
 

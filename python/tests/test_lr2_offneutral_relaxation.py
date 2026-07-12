@@ -35,7 +35,7 @@ from discopt._jax.milp_relaxation import build_milp_relaxation
 from discopt._jax.term_classifier import classify_nonlinear_terms
 from discopt.modeling.core import from_nl
 
-pytestmark = [pytest.mark.correctness]
+pytestmark = [pytest.mark.correctness, pytest.mark.claim_boundary]
 
 _NL_DIR = Path(__file__).parent / "data" / "minlplib_nl"
 _ALL = sorted(os.path.basename(p)[:-3] for p in glob.glob(str(_NL_DIR / "*.nl")))
@@ -115,8 +115,9 @@ def test_relaxation_off_byte_identical_corpus(name, monkeypatch):
     collectors. Because the flags are OFF, the real path already takes these
     branches — so equality proves the OFF path is a genuine no-op (no row leaks),
     byte-identical to prior main, on every corpus instance."""
-    # H-UNI is default-ON post cert:LR-3, so force the opt-out (=0) to exercise the
-    # genuine flag-OFF path this guardrail is about.
+    # H-UNI is default-OFF (opt-in; cert:LR-3 graduation deferred, see #632). Force
+    # =0 explicitly so this guardrail exercises the genuine flag-OFF path regardless
+    # of any ambient env.
     monkeypatch.setenv("DISCOPT_UNIVARIATE_ENVELOPE", "0")
     monkeypatch.setenv("DISCOPT_LOG_MONOMIAL", "0")
     fp_real_off = _relaxation_fingerprint(name)

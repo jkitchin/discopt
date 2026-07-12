@@ -29,6 +29,8 @@ from pathlib import Path
 import discopt.modeling as dm
 import pytest
 
+pytestmark = [pytest.mark.claim_boundary]
+
 _DATA = Path(__file__).parent / "data" / "minlplib"
 
 

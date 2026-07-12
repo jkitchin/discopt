@@ -23,20 +23,19 @@ import numpy as np
 import pytest
 from discopt._jax.mccormick_lp import MccormickLPRelaxer
 
+pytestmark = [pytest.mark.claim_boundary]
 
-def _node_bound(model, lb, ub, claimer: bool) -> float:
-    prev = os.environ.get("DISCOPT_CONVEX_CLAIMER")
-    os.environ["DISCOPT_CONVEX_CLAIMER"] = "1" if claimer else "0"
-    try:
-        relaxer = MccormickLPRelaxer(model)
-        r = relaxer.solve_at_node(np.asarray(lb, float), np.asarray(ub, float), separate=True)
-        assert r.status == "optimal"
-        return float(r.lower_bound)
-    finally:
-        if prev is None:
-            os.environ.pop("DISCOPT_CONVEX_CLAIMER", None)
-        else:
-            os.environ["DISCOPT_CONVEX_CLAIMER"] = prev
+
+def _node_bound(monkeypatch, model, lb, ub, claimer: bool) -> float:
+    # Use monkeypatch (auto-reverting) rather than a raw os.environ write: the
+    # claim flag is read fresh per build, so a leaked value would silently flip
+    # later tests in the same xdist worker (issue #632; enforced by the autouse
+    # _guard_discopt_env_leaks fixture in conftest.py).
+    monkeypatch.setenv("DISCOPT_CONVEX_CLAIMER", "1" if claimer else "0")
+    relaxer = MccormickLPRelaxer(model)
+    r = relaxer.solve_at_node(np.asarray(lb, float), np.asarray(ub, float), separate=True)
+    assert r.status == "optimal"
+    return float(r.lower_bound)
 
 
 def _convex_qp():
@@ -52,12 +51,12 @@ def _convex_qp():
 _CVXQP_MIN = -204.35
 
 
-def test_convex_objective_lift_is_tight_and_sound():
+def test_convex_objective_lift_is_tight_and_sound(monkeypatch):
     """The convex claimer + LP-point separation reaches the exact convex minimum,
     and is far tighter than the term-by-term McCormick relaxation."""
     m = _convex_qp()
-    off = _node_bound(m, [0, 0], [20, 20], claimer=False)
-    on = _node_bound(m, [0, 0], [20, 20], claimer=True)
+    off = _node_bound(monkeypatch, m, [0, 0], [20, 20], claimer=False)
+    on = _node_bound(monkeypatch, m, [0, 0], [20, 20], claimer=True)
     # Sound: a valid lower bound never exceeds the true minimum.
     assert on <= _CVXQP_MIN + 1e-2
     assert off <= _CVXQP_MIN + 1e-2
@@ -67,17 +66,17 @@ def test_convex_objective_lift_is_tight_and_sound():
     assert on > off + 10.0
 
 
-def test_default_off_leaves_relaxation_unchanged():
+def test_default_off_leaves_relaxation_unchanged(monkeypatch):
     """With the flag unset the claimer must not fire (term-by-term bound)."""
     m = _convex_qp()
-    os.environ.pop("DISCOPT_CONVEX_CLAIMER", None)
+    monkeypatch.delenv("DISCOPT_CONVEX_CLAIMER", raising=False)
     relaxer = MccormickLPRelaxer(m)
     default = float(relaxer.solve_at_node(np.array([0.0, 0.0]), np.array([20.0, 20.0])).lower_bound)
-    off = _node_bound(m, [0, 0], [20, 20], claimer=False)
+    off = _node_bound(monkeypatch, m, [0, 0], [20, 20], claimer=False)
     assert default == pytest.approx(off, abs=1e-6)
 
 
-def test_nonconvex_sum_is_not_claimed():
+def test_nonconvex_sum_is_not_claimed(monkeypatch):
     """Soundness gate: a sum with an indefinite Hessian must NOT be lifted as
     convex — its gradient cut would be an unsound over-estimator. The claimer
     abstains (curvature UNKNOWN) and the bound stays the term-by-term value, so
@@ -87,8 +86,8 @@ def test_nonconvex_sum_is_not_claimed():
     y = m.continuous("y", lb=0, ub=10)
     # x*y - x**2 has Hessian [[-2,1],[1,0]] — indefinite (not convex/concave).
     m.minimize(x * y - x**2 - 5 * x)
-    on = _node_bound(m, [0, 0], [10, 10], claimer=True)
-    off = _node_bound(m, [0, 0], [10, 10], claimer=False)
+    on = _node_bound(monkeypatch, m, [0, 0], [10, 10], claimer=True)
+    off = _node_bound(monkeypatch, m, [0, 0], [10, 10], claimer=False)
     # The claimer abstained → identical relaxation, and still a sound lower bound.
     assert on == pytest.approx(off, abs=1e-6)
 

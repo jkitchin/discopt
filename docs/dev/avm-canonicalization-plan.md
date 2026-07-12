@@ -746,11 +746,11 @@ Recorded so the reasons survive; each was verified against code, not assumed:
 
 | Stage | Status | Evidence / notes |
 |---|---|---|
-| R0.1 marker + serial CI (+ docstring fix) | not started | record job duration |
-| R0.2 leak guard | not started | |
+| R0.1 marker + serial CI (+ docstring fix) | **DONE (2026-07-12)** | `claim_boundary` marker (pyproject + conftest); `python-claims-serial` CI job (`-m claim_boundary -p no:cacheprovider -n0`, timeout 30 min); marker added to the 9 target files; stale default-ON comment at `test_lr2_offneutral_relaxation.py:118` corrected. Serial set runs **9m40s** (182 passed / 3 pre-existing fails / 12 skipped) — under the 30-min budget but the 62-way `test_relaxation_off_byte_identical_corpus` (st_e36 alone 289 s) + 3×~42 s nvs09 subprocess certs dominate; if CI is slower, split `test_lr2_nvs09_cert.py` to a `claim_boundary and slow` nightly per R0.1. |
+| R0.2 leak guard | **DONE (2026-07-12)** | Autouse `_guard_discopt_env_leaks` in `conftest.py`: snapshots `DISCOPT_*`, fails any test that mutates them without monkeypatch, restores so no cascade. Verified it flags a deliberate raw-write leak at teardown AND restores the env. `test_convex_claimer.py` raw `os.environ` writes (:28–39, :73) converted to `monkeypatch`. No test in the claim set tripped the guard. |
+| R0.5 serial inventory | **DONE (2026-07-12)** | Serial (`-n0`) run of the claim set: **3 pre-existing failures, all reproduced on clean `e914a7d` with R0 changes stashed, all fail in isolation (NOT order-masked), all sound (valid bounds — `incorrect_count` unaffected):** (1) `test_power_certification::…[st_e11]` objective 189.3116 vs 189.3292 (Δ0.0176 > 1e-2 tol) — numerics/tolerance; (2,3) `test_lr2_nvs09_cert::{univariate_envelope,both}` — H-UNI ON yields status `feasible`, bound −43.501 (sound, below −43.134 optimum), uncertified in the 40 s budget (7 nodes); the #631 "215→3 certifies" win does not reproduce in this container. These are environment/numeric, not claim-collision, and are pre-existing — NOT fixed in R0 (plan §4 R0.5). **Watch item for R1.2:** its acceptance ("nvs09 certifies at defaults") may not reproduce here; re-measure on the CI runner before treating it as a gate. |
 | R0.3 fingerprint util + claim-baseline | not started | |
 | R0.4 auditor | not started | no-op-when-off proof required |
-| R0.5 serial inventory | not started | failures → issues, not scope |
 | R1.1 canonical module | blocked on R0 | |
 | R1.2 univariate cutover | blocked on R1.1 | nvs09 certifies at defaults here |
 | R2.1 affine-square/power | blocked on R1.2 | |

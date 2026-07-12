@@ -40,6 +40,8 @@ from discopt._jax import milp_relaxation as MR
 from discopt._jax.factorable_reform import canonicalize_entropy
 from discopt._jax.mccormick_lp import MccormickLPRelaxer
 
+pytestmark = [pytest.mark.claim_boundary]
+
 
 def _centropy_model():
     """``min x·log(x/y) + x + y`` on ``[0.5, 3]²``.

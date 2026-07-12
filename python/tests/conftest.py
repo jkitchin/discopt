@@ -70,6 +70,59 @@ def pytest_configure(config):
         "runs these in a separate single-process step (fresh interpreter, no "
         "accumulation) so they execute at true speed as real gating tests",
     )
+    config.addinivalue_line(
+        "markers",
+        "claim_boundary: relaxation claim-arbitration tests; run SERIALLY (-n0) "
+        "so claimer collisions cannot be order-masked under pytest-xdist (#632)",
+    )
+
+
+@pytest.fixture(autouse=True)
+def _guard_discopt_env_leaks():
+    """Fail any test that mutates a ``DISCOPT_*`` env var without ``monkeypatch``.
+
+    Claim-arbitration behaviour is read fresh from ``os.environ`` on every
+    relaxation build (``_univariate_envelope_enabled`` etc.), and there is no
+    module-level caching. A test that writes ``os.environ["DISCOPT_..."]``
+    directly therefore leaks that setting into *every later test in the same
+    xdist worker*, silently flipping claim behaviour and producing results that
+    pass under ``-n>=2`` (leaker and victim land in different workers) yet fail
+    serially or in CI. That is the order-masked-collision class issue #632 is
+    about.
+
+    This autouse fixture snapshots the ``DISCOPT_*`` environment before each
+    test and, afterwards, (a) restores it so one leak cannot cascade to the next
+    test, and (b) **fails the leaking test** with the diff, so the mutation is
+    fixed at the source (use ``monkeypatch.setenv``/``delenv``, which revert
+    automatically) rather than masked. Non-``DISCOPT_*`` vars are out of scope.
+    """
+    import os
+
+    before = {k: v for k, v in os.environ.items() if k.startswith("DISCOPT_")}
+    try:
+        yield
+    finally:
+        after = {k: v for k, v in os.environ.items() if k.startswith("DISCOPT_")}
+        if after != before:
+            added = {k: after[k] for k in after.keys() - before.keys()}
+            removed = {k: before[k] for k in before.keys() - after.keys()}
+            changed = {
+                k: (before[k], after[k])
+                for k in before.keys() & after.keys()
+                if before[k] != after[k]
+            }
+            # Restore first so the leak cannot cascade to unrelated later tests.
+            for k in after.keys() - before.keys():
+                del os.environ[k]
+            for k, v in before.items():
+                os.environ[k] = v
+            raise AssertionError(
+                "test leaked DISCOPT_* environment mutations (use "
+                "monkeypatch.setenv/delenv instead of writing os.environ "
+                "directly, so the change reverts automatically and cannot be "
+                f"order-masked under xdist): added={added} removed={removed} "
+                f"changed={changed}"
+            )
 
 
 def _cyipopt_available() -> bool:
