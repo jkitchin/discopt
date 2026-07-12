@@ -1,489 +1,769 @@
 # AVM canonical normal form — replacing the claim federation (issue #632)
 
-**Status:** committed direction (maintainer decision, 2026-07-12) · **Owner issue:**
+**Status:** committed direction (maintainer decision, 2026-07-12); implementation
+workbook (facts re-verified 2026-07-12 on `main` ≈ `9937ff7`) · **Owner issue:**
 #632 · **Prereq reading (every executor, every stage):** this file top-to-bottom,
 then issue #632, PR #631's description (the collision post-mortem),
 `docs/design/relaxation-catalog.md` §3–§4, and CLAUDE.md §Development Philosophy.
 
 This document is written to be executed **stage by stage by a fresh Opus session**
-with no other context. Each stage has: verified codebase facts, deliverables, a
-test spec, and a gate. Execute stages in order. After each stage, update the
-**State ledger** (§9) in the same PR.
+with no other context. Every stage has verified codebase facts (file:line),
+PR-level deliverables, a test spec, and a gate. Execute stages in order. After
+each stage, update the **State ledger** (§10) in the same PR. §9 records the
+corrections applied during plan review — read it so you do not re-introduce a
+rejected design.
 
 ---
 
-## 0. Mandate (binding — read this before anything else)
+## 0. Mandate (binding)
 
 1. **The architecture is decided; do not hedge it.** BARON, Couenne, and SCIP all
-   relax through one canonical factorable decomposition with one envelope per atom
-   — there is decades of evidence the architecture works. discopt's federated
+   relax through one canonical factorable decomposition with one envelope per
+   atom — decades of evidence say the architecture works. discopt's federated
    claim system (overlapping specialized lift paths arbitrated by a hand-grown
    defer-list) is slower to evolve and demonstrably fragile (PR #631). This plan
-   **replaces** the federation with the canonical architecture on the default
-   lifted path. There is no kill criterion for the architecture itself: an
-   obstacle in a stage is fixed in that stage (or the stage's *design* adapts),
-   never routed around by parking the work behind a flag.
+   **replaces** the federation on the default lifted path. There is no kill
+   criterion for the architecture: an obstacle in a stage is fixed in that stage
+   (or the stage's *design* adapts), never routed around by parking work behind
+   a flag.
 2. **No new run-time flags; the flag count goes DOWN.** Maintainer decision: the
    prior flag regime (per-capability default-OFF env flags, byte-identity OFF
-   proofs, graduation ledgers, multi-flag interaction matrices) was ineffective
-   and confusing, and produced parked capabilities and overlapping claim
-   configurations instead of shipped improvements. This plan introduces **zero**
-   new `DISCOPT_*` flags and deletes at least two
-   (`DISCOPT_UNIVARIATE_ENVELOPE`, `DISCOPT_LOG_MONOMIAL` — their machinery
-   becomes always-on *rules* selected by dominance, §2.4). The rollback unit for
-   every stage is **`git revert` of its PR**, not an environment variable. Do not
-   "helpfully" re-add a flag or a graduation-gate arm; that is a contract
-   violation under this plan even though CLAUDE.md §5 describes a flag regime —
-   this is a deliberate, maintainer-authorized process deviation for this work,
-   recorded here so an executor does not re-litigate it. The *verification
-   substance* of CLAUDE.md §5 (differential bound evidence, feasible-point
-   sampling, exact neutrality where neutrality is claimed) is kept in full — it
-   moves from flag gymnastics into the test suite and per-PR evidence (§3).
-3. **Correctness gates are absolute and unchanged.** `incorrect_count ≤ 0` with
-   zero slack; certified objectives never change; a dual bound never crosses the
-   oracle; never weaken a validation or fallback to pass a gate. A failed
-   correctness gate means fix-and-retry within the stage, not descope.
-4. **One boundary at all times.** At no point do two claim systems ship
-   side-by-side as user-selectable configurations. During the cutover series the
-   legacy predicates exist only until the PR that replaces their callers, and
-   each cutover PR deletes what it obsoletes. Coexistence lives in *tests*
-   (differential harness vs a committed baseline snapshot), not in the product.
-5. **General mechanisms only.** Dispatch order is derived from dominance
-   invariants (provably at-least-as-tight when applicable), never from instance
-   names or shapes discovered through test failures. Named instances (nvs09,
-   ex7_2_3, …) are probes.
-6. **Workflow.** One stage = one PR series from `main`, task ID in titles
-   (`refactor(claims): R2.1 — …`). Every PR: the stage's test spec green,
-   `pytest -m smoke`, the adversarial suite
-   (`pytest -m slow python/tests/test_adversarial_recent_fixes.py`), and the
-   claim-boundary set green **serially** (the R0 job). State what was run and the
-   result in the PR body.
-7. **Measurement beats plan.** A falsified assumption is recorded in §9 (dated,
-   `performance-plan.md` §6 style) and the *design* re-scoped before further code
-   — the destination does not change.
+   proofs, graduation ledgers, multi-flag matrices) was ineffective and
+   confusing. This plan introduces **zero** new `DISCOPT_*` flags and deletes at
+   least two, targeting three (`DISCOPT_UNIVARIATE_ENVELOPE`,
+   `DISCOPT_LOG_MONOMIAL`, and — with its own differential evidence —
+   `DISCOPT_CONVEX_CLAIMER`); their machinery becomes always-on *rules* selected
+   by dominance (§2.4). The rollback unit for every stage is **`git revert` of
+   its PR**, not an environment variable. Do not re-add a flag or a
+   graduation-gate arm; that is a contract violation under this plan even though
+   CLAUDE.md §5 describes a flag regime — a deliberate, maintainer-authorized
+   process deviation, recorded here so an executor does not re-litigate it. The
+   *verification substance* of CLAUDE.md §5 (differential bound evidence,
+   feasible-point sampling, exact neutrality where neutrality is claimed) is
+   kept in full — it moves into the test suite and per-PR evidence (§3).
+3. **Correctness gates are absolute.** `incorrect_count ≤ 0` with zero slack;
+   certified objectives never change; a dual bound never crosses the oracle;
+   never weaken a validation or fallback to pass a gate (`IncrementalMcCormickLP
+   ._validate`, the trusted-incumbent gate, `gap_certified` downgrade, and every
+   conditioning/finiteness cap in §1 are load-bearing). A failed correctness
+   gate means fix-and-retry within the stage.
+4. **One boundary at all times.** No two claim systems ever ship as selectable
+   configurations. Each cutover PR deletes the arbitration it replaces.
+   Old-behavior comparison lives in *tests* (the committed baseline snapshot +
+   differential harness, §3), not in the product.
+5. **General mechanisms only.** Dispatch order derives from dominance invariants
+   (provably at-least-as-tight when applicable), never from instance names or
+   shapes discovered through test failures.
+6. **Workflow.** One stage = one PR series from `main`, task IDs in titles
+   (`refactor(claims): R2.1 — …`). Every PR: the stage's test spec,
+   `pytest -m smoke`, `pytest -m slow python/tests/test_adversarial_recent_fixes.py`,
+   and the claim-boundary set **serially** (`pytest -m claim_boundary -n0`, the
+   R0 job) — state what was run and the result in the PR body.
+7. **Measurement beats plan.** A falsified assumption is recorded in §10 (dated,
+   `performance-plan.md` §6 style) and the *design* re-scoped before further
+   code — the destination does not change.
 
-## 1. Verified codebase facts (verified 2026-07-12 on `main` ≈ `9937ff7`)
+## 1. Verified codebase facts
 
-All line numbers are `python/discopt/_jax/milp_relaxation.py` unless another file
-is named.
+All anchors `python/discopt/_jax/milp_relaxation.py` (9129 lines) unless named.
 
-### 1.1 The federation and its arbitration
+### 1.1 Build pipeline and the two keying regimes
 
-- Entry point `build_milp_relaxation` (**:5360**). Composite-claim collectors run
-  in order: `_collect_univariate_relaxations` (:5999, def :4826) →
-  `_univariate_claimed_ids` seed (:6013) →
-  `_collect_composite_univariate_relaxations` (:6014, def :3992, H-UNI home) →
+- `build_milp_relaxation` (**:5360**) is re-invoked **per node** from
+  `MccormickLPRelaxer._solve_at_node_impl` (`mccormick_lp.py:1102–1112`) and
+  `_lifted_fbbt_rebuild` (`mccormick_lp.py:1561–1565`), always with the **same
+  `Model` object** (`self._model`, set once in `__init__` :419) and a per-node
+  `bound_override=(node_lb, node_ub)`. Raw-tree `id()`s are therefore stable
+  across nodes; `MccormickLPRelaxer.__init__` (:408) already caches per-model
+  structure (`_terms`, `_disc`) and is the home for the canonical-DAG cache.
+- Composite-claim collectors, in call order: `_collect_univariate_relaxations`
+  (:5999, def :4826) → `_univariate_claimed_ids` (:6013) →
+  `_collect_composite_univariate_relaxations` (:6014, def :3992) →
   `_collect_aliased_monomial_hull_relaxations` (:6033, def :4207) → H-LOG
   (:6042–6103) → `_multivar_claimed_ids` (:6110) →
   `_collect_composite_multivar_relaxations` (:6111, def :4643) → univariate
-  squares (:6133) → finite-domain trig-square table (:6147–6182) → piecewise
-  (:6184–6249) → fractional powers (:6256) → lifted products (:6310, :6326) →
-  affine-square lift (:6365–6449) → affine-power lift (:6453–6493) → the
-  issue-267 ratio/nested-division/univariate-product walk (`_walk_lift` :7095,
-  called :7142–7144).
-- **The defer-list:** `_should_claim_composite` (**:3586**) +
-  `_has_genuine_composite_subterm` (:3658), `_defers_to_finite_domain_trig_table`
-  (:3718), `_is_tabulatable_trig_square` (:3690), the multivar twin
-  `_should_claim_composite_multivar` (:4437), and the
-  `claimed_ids`/`seen`/`_pre_existing_claim` gates inside the collectors
-  (:4036–:4137). Every clause is a negative special case discovered through test
-  collisions (the comments at :3634–3638 and :3664–3667 say so).
-- **Two keying regimes coexist.** The *product* side is structurally keyed and
-  collision-free: `bilinear_var_map[(i,j)]`, `monomial_var_map[(i,p)]`,
-  trilinear/multilinear/fractional-power/univariate-square maps (:5576–5583).
-  The *composite* side is `id()`-keyed: `composite_var_map[id(node)] = col`
-  (consulted by `_linearize_expr` :5073 at :5122–5123 and `_decompose_product`
-  :1564/:1620). The fragility lives entirely on the id()-keyed side.
-- **id()-keying is load-bearing and fragile.** `distribute_products`
-  (`term_classifier.py:329`) rebuilds nodes; claims survive only via
-  `protected_squares = frozenset(affine_square_protected_ids | composite_var_map)`
-  (:7131–7132, applied :7134/:7139); a second distribution pass would orphan
-  every key (comment :7114–7130). `_nested_div_keepalive` (:6540) exists solely
-  to stop Python recycling claimed ids (the ex7_2_3 false-cache-hit bug class).
-  Expressions are id-hashed, not content-hashed (`modeling/core.py:210–227`,
-  `:318`); the closest structural key in the codebase is
-  `factorable_reform.py:356` `_Lifter._expr_cache` keyed on
-  `(repr(expr), lb_floor)` (comment :347–355 explains why `id()` was abandoned
-  there).
-- **`factorable_reform.py`** does targeted (not canonical) lifting at the solver
-  level (`solver.py:3860→3909`): division clearing, repeated-factor monomial
-  lifting (:737), blow-up-preventing product lifting (:531), TD-A call powers
-  (:596), transcendental-arg lifting (:658), entropy canonicalization. It keeps
-  running first; the canonical pass sees its output.
+  squares (:6133) → finite-domain trig-square table (:6146–6182) → piecewise
+  (:6184–6249) → fractional powers (:6256) → lifted products (:6310/:6326) →
+  affine-square lift (:6358–6442) → affine-power lift (:6444–6493) → the
+  issue-267 walk (`_walk_lift` :7095, run :7142–7144) → post-lift re-collection
+  (:7146–7200).
+- **Product side (structurally keyed, collision-free — untouched by this
+  plan):** `bilinear_var_map[(i,j)]`, `monomial_var_map[(i,p)]`, trilinear/
+  multilinear/fractional-power maps (:5576–5583), RLT specs (:5787–5960).
+- **Composite side (id-keyed — the replacement target):**
+  `composite_var_map[id(node)] = col`, written at :6014 (composite univariate),
+  :6441 (affine-square), :6492 (affine-power), :6806 (ratio, plus
+  `composite_coeff_map[eid]=coeff` :6807), :6919 (nested division), and merged
+  from the multivar map at :6121. `univariate_var_map` is **doubly keyed**: by
+  `id(expr)` AND by the structural `_univariate_signature(func_name, coeffs,
+  const)` (:2684; split into `"univariate"`/`"univariate_signatures"` varmap
+  keys at :9098–9101) — an existing content-key precedent.
+- **The defer-list:** `_should_claim_composite` (:3586),
+  `_has_genuine_composite_subterm` (:3658), `_is_tabulatable_trig_square`
+  (:3690), `_defers_to_finite_domain_trig_table` (:3718),
+  `_should_claim_composite_multivar` (:4437), plus the `claimed_ids`/`seen`/
+  `_pre_existing_claim` gates inside the collectors (:4036–:4137).
 
-### 1.2 The incremental engine constraint
+### 1.2 How claims are resolved (the linearizer contract)
 
-`IncrementalMcCormickLP` (`incremental_mccormick.py:103`, default-on via
-`DISCOPT_INCREMENTAL_MC`, `mccormick_lp.py:574–598`) patches bilinear/monomial
-rows per node and validates cold/patch agreement (`_validate` :305 — row-set +
-bounds equality vs a fresh full build; mismatch → `ok=False` → sound cold
-fallback). Column identities (`mccormick_lp.py:96`) tag structural columns
-(`("bilinear",(i,j))`, `("monomial",(i,p))`, …); composite-claimed aux columns
-are `("opaque", k)` — position-locked and excluded from root-pool cut
-inheritance (`_remap_pool_rows` `mccormick_lp.py:146`). Consequences: (a) any
-change to which columns exist flips the structural/opaque partition and can
-silently disable the fast path (perf, not soundness); (b) today's composite
-columns *already* never inherit pool cuts. `_validate` is a load-bearing safety
-mechanism — never weakened; the plan instead **teaches the engine the canonical
-layout** (R4) so agreement holds by construction.
+`_linearize_expr` (def :5073) runs on the **distributed** trees
+(`distributed_objective` :7133 → used :8987–8995; `distributed_bodies` :7138 →
+used :8879/:8889). At the top of every visit it consults, in order:
+1. `composite_var_map.get(id(e))` — **unconditional, first, short-circuits**
+   (:5122–5127), scaled by `composite_coeff_map.get(id(e), 1.0)`;
+2. type dispatch: `FunctionCall` → `univariate_var_map.get(id(e))` (:5149);
+   `/` → fractional-power then univariate maps (id and reciprocal-signature
+   keys, :5192–5194); `**` → `monomial_var_map[(flat,n)]` (:5216) /
+   fractional-power (:5225); `*` → `_decompose_product` (:5251).
+`_decompose_product` (def :1558) leaf order: flat index (:1611) →
+`univariate_var_map[id]` (:1615) → `composite_var_map[id]` (:1620, **abstains if
+`composite_coeff_map[id] != 1.0`**, :1627) → fractional/monomial maps
+(:1639–1658).
 
-### 1.3 The order-mask mechanism (why xdist green ≠ safe)
+Claims made on **raw** trees survive into the distributed trees only because
+`distribute_products` (`term_classifier.py:329`) is called with
+`protected_squares = frozenset(affine_square_protected_ids | composite_var_map)`
+(:7131–7132, applied :7134/:7139) — protected ids are returned intact
+(term_classifier :359–360, :367–368). The issue-267 walk instead claims on the
+already-distributed trees (:7142–7144). A second distribution pass would orphan
+every id-key (comment :7114–7130). `_nested_div_keepalive` (:6540) pins a
+synthetic `object()` sentinel (:6895–6896) whose `id` names the reciprocal aux
+(:6900) purely against id recycling. `build_milp_relaxation` is the **only**
+caller in the repo that passes `protected_squares`; ~30 other call sites use the
+default `None`.
 
-Claim flags are read fresh from `os.environ` on every call (:3544, :3572,
-:4505); some tests write `os.environ` raw (`test_convex_claimer.py:29–39`);
-`conftest.py` has no autouse `DISCOPT_*` reset. CI
-(`.github/workflows/ci.yml`) runs both Python jobs with `-n 2 --dist loadgroup`
-(:176–182, :243–250); there is **no serial Python job**, and
-`-m "... not correctness ..."` excludes correctness-marked tests from the
-standard path. A leaked flag flips claim behavior for every later test in the
-same worker — the #631 experience (test_issue_267 green under `-n4`, red
-serially).
+### 1.3 The incremental engine: what it actually covers today
 
-### 1.4 H-UNI / H-LOG status
+`IncrementalMcCormickLP` (`incremental_mccormick.py:103`; wired
+`mccormick_lp.py:574–602`) patches **only** bilinear (exactly 4 rows each,
+:181–185) and monomial (exactly 3 rows, sign-definite root, :186–194) rows;
+everything else is frozen into `base_A` at a probe box. `_validate` (:305)
+compares patch vs fresh cold build on 6 sign-diverse boxes; any box-varying row
+it cannot patch (univariate tangents/secants, composite lines, RLT) makes the
+row-set differ → raise → `ok=False` → cold path (the caller comment at
+`mccormick_lp.py:578–588` says exactly this). **Consequence: the fast engine
+already declines on every instance with any univariate/composite content.**
+The canonical cutover therefore cannot regress engine engagement on the
+composite class (it is zero today); the pure-product engaged class must stay
+byte-identical (automatic — the product side is untouched). Extending the patch
+table to canonical atom rows is the R4.2 payoff, not a cutover risk.
+Column identities: `column_identities` (`mccormick_lp.py:96`) tags orig/
+bilinear/monomial/trilinear/multilinear/fractional_power/univariate_square;
+**everything composite is `("opaque", k)`** (:139–142) and `_remap_pool_rows`
+(:146) drops any pooled cut row touching an opaque column (:189–195) — composite
+columns never inherit root cuts today.
 
-`DISCOPT_UNIVARIATE_ENVELOPE` default-OFF (:3544–3569 records the deferral).
-The ON path is sound (PR #631: nvs09 certifies, tree 215→3,
-`incorrect_count = 0`; measured gain global50 43→44). Hull builder:
-`_collect_composite_univariate_relaxations` + `discopt._jax.univariate_hull`,
-guarded against effectively-unbounded boxes (|bound| < 1e19). H-LOG
-(`DISCOPT_LOG_MONOMIAL`, :3572) is the positive-product log-space chain, also
-default-OFF. Flag-ON tests: `test_lr2_huni_unbounded_guard.py`,
-`test_lr2_nvs09_cert.py` (subprocess-isolated), `test_lr2_alias_shape_guard.py`,
-`test_lr2_offneutral_relaxation.py`.
+### 1.4 The order-mask mechanism and CI
 
-### 1.5 Binding prior falsifications (do not re-litigate)
+Claim flags are read fresh from `os.environ` per call
+(`_univariate_envelope_enabled` :3569, `_log_monomial_enabled` :3583,
+`_convex_claimer_enabled` :4513 — `DISCOPT_CONVEX_CLAIMER`, default OFF). Raw
+`os.environ` writes exist in tests (`test_convex_claimer.py:28–39`).
+`python/tests/conftest.py` sets JAX env at import (:5–8) and has **no autouse
+`DISCOPT_*` guard**. CI (`.github/workflows/ci.yml`): `python-fast` (:113) runs
+`-n 2 --dist loadgroup` with `-m "not slow and not correctness and …"`
+(:176–187); `python-coverage` same (:243–250). **No serial Python job exists**,
+and `correctness`-marked tests are excluded from the standard path entirely.
+`pyproject.toml` pytest config at :230–254 (markers :240–254 — no
+`claim_boundary` yet; `addopts` :239 carries the default `-m` filter, which an
+explicit `-m claim_boundary` on the command line **replaces**, so
+correctness/slow-marked claim tests do run in the serial job).
 
-- **Reduced-space is NOT the vehicle.** `maingo-parity-plan.md` §7 P2.4 KILLED:
-  reduced-space root bounds tie or lose vs lifted on every measured class. This
-  plan canonicalizes the **lifted AVM path itself** — BARON's move. The reduced
-  evaluator is reused only as an independent test oracle (§3.3).
-- **id()-keyed expression caching across rebuilds is unsound** (ex7_2_3). Any
-  new identity must be content-based.
+### 1.5 Existing instruments (reuse; gaps named)
+
+- **Fingerprint (#630):** `_relaxation_fingerprint(name)` is **inline test
+  code** (`test_lr2_offneutral_relaxation.py:44–78`): SHA-256 over the built
+  relaxation's `(_c, _A_ub densified, _b_ub, _bounds, _integrality)`; corpus =
+  all 62 `.nl` under `python/tests/data/minlplib_nl/`; comparison is in-process
+  OFF-vs-code-absent — **no committed baseline file exists**. (Also: that
+  file's :88–92 docstring claims H-UNI is default-ON — stale; the code truth is
+  default-OFF at :3569. Fix the docstring in R0.)
+- **cert-baseline** (`docs/dev/data/cert-baseline.jsonl`, 41 rows of
+  `SolveResult.to_dict()`): has `objective/status/node_count/bound/root_gap`
+  but **no root-LP-bound field** — the claim baseline must record it itself.
+  Checker: `check_cert_neutrality.py` / `utils/cert_neutrality.py`
+  (`check_neutrality`, OBJ_TOL 1e-8; end-to-end results, not matrices).
+- **Soundness harness:** `discopt_benchmarks/utils/soundness.py` —
+  `assert_bound_sound(relaxer_fn, boxes, oracle_fn, tol=1e-6, *, baseline_fn,
+  sense)` and `assert_cut_valid(cut, feasible_points)` (callable/array based, no
+  Model). **Not importable from `python/tests`** today (only
+  `discopt_benchmarks/tests` has it on sys.path) — the harness needs the same
+  sys.path bridge `check_cert_neutrality.py:19–20` uses, or local thin copies.
+- **Measurement of record:** `discopt_benchmarks/scripts/
+  global_opt_baron_vs_discopt.py` over the vendored corpus;
+  "global50" = `[suites.global50]` (`config/benchmarks.toml:82–95`,
+  `config/baron_global50.txt`, `--time-limit 60`); `incorrect_count` gates at
+  benchmarks.toml:237/254. H-UNI's measured prize: global50 43→44 (PR #631).
+- **Flag touch list (complete, verified by grep):**
+  `DISCOPT_UNIVARIATE_ENVELOPE` read only at :3569;
+  `DISCOPT_LOG_MONOMIAL` only at :3583; `DISCOPT_CONVEX_CLAIMER` only at :4513.
+  Docstring refs: :3545, :3551, :3604, :4223; `univariate_hull.py:27`.
+  Test setenv sites: `test_lr2_offneutral_relaxation.py:83–84,120–121,139–141`;
+  `test_lr2_huni_unbounded_guard.py:42,56,77–79,91`;
+  `test_lr2_alias_shape_guard.py:75`; `test_lr2_nvs09_cert.py:78,88,97`
+  (subprocess env). Docs: `lever-a-root-tightness-plan.md:181,228`,
+  `CHANGELOG.md:74–75`. **Not** in `discopt_benchmarks/` and **not** graduation
+  arms in `generality_sweep.py` (`ARMS` :126–154).
+
+### 1.6 AST inventory (canonicalizer input domain, `modeling/core.py`)
+
+Node types: `Constant` (:254, np array value — may be non-scalar), `Variable`
+(:269, arbitrary `shape`, flat `_index`), `IndexExpression` (:327 — index may be
+int/tuple/**slice/ndarray**, accepted unvalidated), `BinaryOp` (:385, ops
+`+ - * / **`), `UnaryOp` (:407, ops **`neg`, `abs` only**), `FunctionCall`
+(:421), `CustomCall` (:433 — relaxation/export raise; the canonical `opaque`),
+`MatMulExpression` (:466), `SumExpression` (:477, axis reduction),
+`SumOverExpression` (:490, n-ary additive), `Parameter` (:1276 — value fixed at
+build time; `dag_compiler._snapshot_params` treats it as a compile-time
+constant). Expressions are id-hashed (`__hash__ = object.__hash__` :227;
+`Variable.__hash__` :318) — no structural `__eq__/__hash__` exists anywhere.
+FunctionCall names: 23 unary intrinsics (core.py:555–789) + `prod`,
+`norm{1,2,inf,p}` (array arg), binary `min`/`max` (:823/:841), and — **from the
+`.nl` import path only** — `atan2`, `signpower`, `entropy`, `centropy`
+(dag_compiler.py:185–256). `compile_expression(expr, model) -> fn(x_flat)`
+(dag_compiler.py:403) evaluates any node type; memoizes by id (:80/:88) — the
+semantic-equivalence oracle for R1. A reusable random-expression generator
+template exists at `test_bilevel_symbolic_diff.py:76` (`_random_expr`; no
+hypothesis dependency in the repo).
+
+### 1.7 Binding prior falsifications (do not re-litigate)
+
+- **Reduced-space is NOT the vehicle** (`maingo-parity-plan.md` §7, P2.4
+  KILLED): ties-or-loses on every measured class. This plan canonicalizes the
+  **lifted AVM path**. The reduced evaluator (`mccormick_subgradient.py`, sound
+  post-#583) is reused only as an independent bound cross-check.
+- **id()-keyed caching across rebuilds is unsound** (ex7_2_3 false cache hit;
+  `factorable_reform.py:347–355`). All new identity is content-based.
 - **H-UNI's tightness is real; its claim boundary was reverse-engineered from
-  flaky tests** (PR #631). It graduates here by becoming a rule, not by more
-  defer clauses.
+  flaky tests** (PR #631). It graduates here by becoming a rule.
 
 ## 2. Target architecture
 
 ### 2.1 The canonical pass
 
-A **canonicalization pass** over the objective + constraint trees (run once per
-model build, cached; per-node work is dispatch only — see §2.5) producing a
-content-addressed, hash-consed canonical DAG, plus an **atomizer** that
-partitions every nonlinear canonical node into exactly one *atom* with exactly
-one *owner* (envelope family). Builders keep their envelope math; the *claim
-decision* is centralized in one total dispatch.
+Once per model (after `factorable_reformulate`, cached on `MccormickLPRelaxer`),
+build a content-addressed, hash-consed canonical DAG over the objective +
+constraint bodies. Per node of the B&B tree, run only box-dependent **dispatch**
+over the cached atoms. Builders keep their envelope math; the claim decision is
+centralized.
 
-Canonical node grammar (immutable, interned; a total ordering on keys makes
-every normalization deterministic):
+Canonical key grammar (immutable, interned; total order on keys):
 
 ```
 ckey := ("var", flat_index)
-      | ("const", c)
-      | ("sum", ((coef, ckey), …sorted), const)   # n-ary, flattened, folded
-      | ("prod", ((ckey, exponent), …sorted))      # repeated factors merged
+      | ("const", c)                                   # Parameter snapshots too
+      | ("sum", ((coef, ckey), …sorted), const)        # n-ary, flattened, folded
+      | ("prod", ((ckey, exponent), …sorted))          # repeated factors merged
       | ("pow", ckey, p)
-      | ("call", name, ckey)                       # univariate intrinsics
-      | ("callN", name, (ckey, …))                 # centropy, min/max, norm, prod
-      | ("opaque", token)                          # unsupported: relaxed by the
-                                                   #   composed fallback, never rewritten
+      | ("call", name, ckey)                           # unary intrinsics incl. abs
+      | ("callN", name, (ckey, …))                     # min/max/atan2/signpower/
+                                                       #   centropy/entropy/prod/norm*
+      | ("opaque", token)                              # CustomCall, MatMul, array-shaped
+                                                       #   nodes, non-scalar indexing,
+                                                       #   sign-spanning division —
+                                                       #   relaxed by the existing
+                                                       #   fallback path, never rewritten
 ```
 
-Normalization rules (each a pure rewrite with a property test): sum/product
-flattening; constant folding; `neg`/`sub` → coefficients; repeated-factor
-merging; `x**1 → x`, `x**0 → 1`; division → `("prod", …, (den, -1))` only when
-the denominator is sign-definite on the root box (else `opaque`);
-deterministic child ordering. Canonicalization is **box-independent**;
-box-dependent decisions (curvature, finite-domain, sign-definiteness) belong to
-the dispatcher, which takes the node box as input.
+Normalization rewrites (each with a property test): sum/product flattening;
+constant folding; `neg`/`sub` → coefficients; `abs` stays a `call`; repeated-
+factor merging; `x**1 → x`, `x**0 → 1`; division → `("prod", …, (den, -1))`
+only when the denominator is sign-definite on the **root** box (else opaque —
+matching `_clear_divisions`' guard); `SumOverExpression` → n-ary sum;
+scalar `IndexExpression` → `("var", flat)` via the existing
+`_resolve/_get_flat_index` logic; deterministic child ordering by key.
+Canonicalization is box-independent except the one root-box division check
+(recorded on the CNode; a node whose denominator is sign-definite at the root is
+sign-definite on every sub-box, so this is sound and stable). All curvature /
+finite-domain / effective-finiteness (`_is_effectively_finite`, |b| < 1e19)
+decisions are per-node dispatch inputs.
 
 ### 2.2 Atom taxonomy (exactly one owner per kind)
 
-| Atom kind (canonical shape) | Owner (existing machinery — reused, not rebuilt) |
+Atomization is **recursive**: inner atoms get aux columns; outer atoms are
+functions of original vars *and* inner-atom aux symbols (this is how BARON
+decomposes, and it is exactly what the issue-267 walk does by hand today —
+`cos(x − x·x)` → product atom `w = x²`, then a univariate atom over the affine
+form `x − w`).
+
+| Atom kind (canonical shape) | Owner (existing machinery, reused) |
 |---|---|
-| affine | linear rows, no aux (unchanged) |
-| `("prod")` of ≥2 distinct unit-exponent factors | bilinear/trilinear/multilinear + RLT hull (already structurally keyed; unchanged) |
+| affine over vars/aux | linear rows, no aux (unchanged) |
+| `("prod")`, ≥2 distinct unit-exponent factors | bilinear/trilinear/multilinear + RLT (untouched) |
 | `("pow", var, p)` | monomial-secant / fractional-power lift |
-| `("pow", affine, 2)` / `("pow", affine, p≥3)` | affine-square / affine-power lift |
-| **univariate atom** = maximal single-variable nonlinear canonical subtree | the univariate envelope dispatcher (§2.4) |
-| `("callN","centropy",…)` / certified-convex multivar subtree | composite-multivar gradient cuts |
-| positive product `∏ xᵢ^{aᵢ}` (all lb > 0) | H-LOG chain (a rule, no flag) |
-| `("opaque", …)` | composed fallback (sound, looser) on that node only |
+| `("pow", affine, 2)` / `("pow", affine, p≥3)` | affine-square (:6358) / affine-power (:6444) lift |
+| `("prod")` with negative exponents, sign-definite denominators | ratio owner (today's :6709/:6809 machinery: fold, reciprocal, McCormick product; keeps the `composite_coeff_map` scalar slot) |
+| **univariate atom** — maximal single-variable nonlinear canonical subtree (over an original var or an aux symbol) | the univariate dispatcher (§2.4) |
+| `("callN","centropy",…)` / certified-convex multivar subtree (incl. convex sums) | composite-multivar gradient cuts (:4643) |
+| positive product `∏ xᵢ^{aᵢ}` (all lb > 0), incl. reform alias defs (`_alias_equality_defs` :4169) | H-LOG chain (:6042; binds the existing alias aux `t_col`, adds z/s columns + rows) — a rule, no flag |
+| `("opaque", …)` | existing composed fallback on that node only |
 
-The **univariate atom** is the load-bearing novelty: today five overlapping
-claimers (univariate-of-affine, composite-univariate/H-UNI, univariate-square,
-trig table, aliased-monomial-hull) grab fragments and defer to each other; the
-atomizer identifies each maximal single-variable nonlinear subtree once, and one
-dispatcher chooses its envelope.
+Notes: (i) the H-LOG owner's claim unit is an **aux-defining equality**, so the
+canonical pass must cover constraint bodies including reform alias definitions;
+(ii) rule 1 of the univariate dispatcher emits an exact **MILP table** (binary
+selector columns, integrality flags — see :6162–6168), not just LP rows — the
+`ClaimPlan` column spec must carry integrality; (iii) piecewise/trig-piecewise
+(:5962–5997, :6184–6249) are additive, column-keyed, not claim-arbitrated —
+untouched until R4.3.
 
-### 2.3 Identity: canonical keys replace `id()`
+### 2.3 Identity and claim resolution
 
-`composite_var_map`, the protected set, and the claim seeds re-key from
-`id(node)` to `ckey`. Content-based identity means: claims survive
-`distribute_products` by construction (the `protected_squares` plumbing and
-keep-alive pinning become deletable); the ex7_2_3 hazard class dies;
-structurally identical subexpressions share one aux column (CSE — the
-"hash-consed, one aux per elementary op" half of the issue); and column
-identities extend to `("canon", ckey)`, converting today's `("opaque", k)`
-position-locked columns into remappable identities so root-pool cut inheritance
-covers composite columns (R4).
+`ClaimPlan` maps **CNodes** (not ids) to `(atom_kind, owner, column_spec,
+coeff)`. The bridge to the existing trees is a memoized
+`cnode_of(expr) -> CNode` (memo keyed by `id(expr)` **within one build**, safe
+because the trees are pinned for the build — the ex7_2_3 hazard applies to
+caches that outlive their trees). Both raw and distributed nodes resolve by
+content, so the linearizer's consultation becomes `plan.get(cnode_of(e))`
+wherever it reads `composite_var_map[id(e)]`/`univariate_var_map[id(e)]` today
+(:5122, :5149, :5192, :1615, :1620), preserving the `composite_coeff_map`
+scaling and the `_decompose_product` abstain-if-coeff≠1 rule (:1627). CSE is a
+consequence: equal content → same CNode → same aux column.
+
+**Distribution protection stays — its inputs change.** If `distribute_products`
+rewrote a claimed node (e.g. expanded `(x−3)**2`), the distributed form's ckeys
+would no longer match the claim and the aux would go dead (the "silently inert
+claim" bug class of `convex-claimer-relaxation.md`). So the
+`protected_squares` mechanism (`term_classifier.py:359–368`) is kept, but its
+input set is **derived from the ClaimPlan** (`{id(n) for raw nodes n with
+cnode_of(n) claimed}`) instead of hand-maintained
+`affine_square_protected_ids`-style bookkeeping. What dies: the hand-maintained
+sets, the keep-alive pinning (`_nested_div_keepalive` — synthetic sub-atoms get
+real CNode names), and every id-keyed claim registry.
+
+Column identities extend with `("canon", ckey)` for composite columns (R4.1),
+converting today's position-locked `("opaque", k)` tags into remappable
+identities for pool-cut inheritance.
 
 ### 2.4 The univariate dispatcher: dominance order, not defer-list
 
 For a univariate atom `u(x)` over the node box (post-FBBT), the first applicable
-rule wins; each rule is provably at-least-as-tight as every rule below it
-whenever it applies, so the order is an invariant, not an arbitration:
+rule wins; each rule is at-least-as-tight as every rule below it whenever it
+applies:
 
-1. **Exact finite-domain table** — `x` integer, `|dom(x)| ≤ cap`: the convex
-   hull of the finite graph is exact. Generalizes the trig-square table from
-   `sin/cos(affine)**2` to any univariate atom over a small integer domain — the
-   special case becomes a theorem instead of a defer clause.
-2. **Certified convex/concave on the box** — exact envelope + secant (the
-   univariate-of-affine machinery and the monomial/square/fractional kernels are
-   instances; a bare `x**p` atom dispatches to the same monomial-secant kernel
-   as today, so there is nothing to defer to).
-3. **Exact 1-D hull** (the machinery currently behind H-UNI) — neither convex
-   nor concave, box effectively finite.
-4. **Composed fallback** — hull abstains (unbounded box, hull failure):
-   decompose one level, relax the pieces with today's composed envelopes.
+1. **Exact finite-domain table** — `x` integer, `|dom(x)| ≤` the existing cap
+   (`_MAX_FINITE_DOMAIN_TRIG_TABLE_VALUES`): convex hull of the finite graph,
+   binary selectors (today's :6146–6182 machinery). At R1.2 its *scope* stays
+   exactly today's (`sin/cos(affine)**2` via the square/univariate pair);
+   generalization to any univariate atom is R3.2.
+2. **Certified convex/concave on the box** — exact envelope + secant: the
+   univariate-of-affine machinery (:4826), the monomial/square/fractional
+   kernels, and `_affine_base_power_curvature` (:3770) are instances of this
+   rule; a bare `x**p` atom dispatches to the same monomial-secant kernel as
+   today.
+3. **Exact 1-D hull** — neither convex nor concave, box effectively finite:
+   `univariate_hull_envelope(lo, hi, value_batch)` (`univariate_hull.py:199`;
+   abstains by returning `None`). The machinery currently gated by
+   `DISCOPT_UNIVARIATE_ENVELOPE`; under the dispatcher it is simply the rule
+   for the remaining atoms.
+4. **Composed fallback** — rule 3 abstained: decompose the atom one level and
+   relax the pieces with today's composed envelopes (sound, looser).
 
-Ordering proof obligations (R1 test spec): 1 ⊐ 2 and 1 ⊐ 3 (exactness); 2 = 3
-where both apply (a convex function's hull *is* its envelope — assert equality;
-2 first because cheaper); 3 ⊐ 4 (the nvs09 measurement). No rule names an
-operator except through a mathematical property (integrality, curvature
-certificate, boundedness).
+Ordering proof obligations (R1.1 tests): 1 ⊐ 2 and 1 ⊐ 3 (exactness); 2 = 3
+where both apply (a convex function's hull *is* its envelope — assert equality
+on samples; 2 first because cheaper); 3 ⊐ 4 (the nvs09 measurement). No rule
+names an operator except through a mathematical property.
 
-### 2.5 Cost model (design decision, not a kill criterion)
+## 3. Verification doctrine (replaces the flag regime)
 
-`build_milp_relaxation` runs per node. Canonicalization is box-independent, so:
-**canonicalize + hash-cons once per model** (after `factorable_reformulate`),
-cache the DAG + atom partition on the relaxer, and per node run only the
-box-dependent dispatch (rules 1–4 predicate checks) on the cached atoms. Per-node
-dispatch must be O(#atoms) with cheap predicates; the existing per-node curvature
-/ interval machinery it calls is already per-node cost today.
+Three instruments, built in R0, used by every behavior-changing PR:
 
-### 2.6 What this plan does not touch
+### 3.1 The committed baseline (`docs/dev/data/claim-baseline.jsonl`)
 
-Envelope kernels (`mccormick.py`, `envelopes.py`, `univariate_hull`), the
-product/RLT side's keying, FBBT/OBBT/DBBT, the simplex, branching,
-`factorable_reform.py`'s solver-level rewrites, the reduced-space/MCBox line.
-
-## 3. Verification doctrine (this replaces the flag regime)
-
-Safety comes from evidence, not configuration. Three instruments, built in R0
-and used by every later PR:
-
-### 3.1 The committed baseline snapshot
-
-Before any behavior change, capture on the in-repo corpus
-(`python/tests/data/minlplib_nl/`) + the 41-instance cert panel
-(`docs/dev/data/cert-baseline.jsonl`): relaxation fingerprint (the #630
-mechanism), root LP bound, certified objective, node count, and solve status →
-`docs/dev/data/claim-baseline.jsonl` (committed). This snapshot is what "old
-behavior" means once the legacy code is deleted.
+Producer script `discopt_benchmarks/scripts/gen_claim_baseline.py`; one row per
+instance of the 62-file `python/tests/data/minlplib_nl/` corpus:
+`{instance, fingerprint, n_rows, n_cols, n_integer_cols, root_lp_bound,
+solver_commit}`. `fingerprint` = the extracted #630 hash (§4 R0.3);
+`root_lp_bound` = the built relaxation's LP optimum (solve the
+`MilpRelaxationModel` with the in-house simplex backend; scipy fallback),
+recorded because `cert-baseline.jsonl` does not carry it. End-to-end fields
+(certified objective/status/node_count) stay in the existing
+`cert-baseline.jsonl` — the two baselines are complementary, not merged.
 
 ### 3.2 The differential gate (every behavior-changing PR)
 
-Against the baseline, partition instances:
-- **Unchanged dispatch** (no rule fired differently): fingerprint must be
-  **byte-identical**. Any drift is a bug — find it or revert.
-- **Changed dispatch**: root bound may move, but (i) certified objective
-  identical, (ii) bound sound vs `minlplib.solu` (never crosses the oracle),
-  (iii) feasible-point sampling clean (`utils/soundness.py::assert_bound_sound`
-  — no valid point cut), (iv) the change is *attributed*: the PR lists which
-  dispatcher rule changed the instance's relaxation. Unattributed changes block
-  the PR.
-- `incorrect_count = 0` over the whole set, both suites (parallel AND serial).
+Harness `python/tests/support/claim_differential.py` (plus
+`support/__init__.py`; not collected as tests). Against the baseline, partition
+the corpus:
+- **Unchanged dispatch** (the ClaimPlan matches what the legacy path claimed —
+  known from the R0.4 auditor log): fingerprint must be **byte-identical**.
+  Any drift is a bug.
+- **Changed dispatch**: root LP bound may move, but (i) certified objective
+  identical (re-solve; `cert_neutrality.check_neutrality` on the cert-panel
+  instances), (ii) root bound sound vs the `minlplib.solu` oracle (never
+  crosses), (iii) feasible-point sampling clean (`assert_bound_sound` /
+  `assert_cut_valid`, imported via the `check_cert_neutrality.py:19–20`
+  sys.path-bridge pattern or thin local equivalents), (iv) every changed
+  instance **attributed** in the PR body to the dispatcher rule that changed
+  it (from the auditor's ownership diff). Unattributed changes block the PR.
+- `incorrect_count = 0` over the affected suites, run **both** `-n 2` and
+  `-n0`.
 
 ### 3.3 Independent oracles
 
-`minlplib.solu` + the cert panel; the reduced-space evaluator
-(`mccormick_subgradient.py`, sound post-#583) as a three-way consistency probe
-where it applies (reduced bound ≤ lifted LP bound ≤ oracle optimum); the AVM
-claim auditor (R0) asserting **exactly one owner per nonlinear node and zero
-defer-clause firings** once the dispatcher owns a shape class.
+`minlplib.solu` + cert panel; the reduced-space evaluator as a three-way probe
+where it applies (reduced bound ≤ lifted LP bound ≤ oracle optimum); the R0.4
+auditor asserting exactly-one-owner and, from R2.5 on, zero legacy-predicate
+consultations.
 
-Rollback for any landed regression: `git revert` the PR. No flag.
+Rollback for any landed regression: `git revert` the PR.
 
-## 4. R0 — the correctness net (ships first; everything else depends on it)
+## 4. R0 — the correctness net (ships first)
 
-**Deliverables**
-1. `claim_boundary` pytest marker (registered in `pyproject.toml`) on the
-   claim-sensitive files: `test_power_certification.py`,
-   `test_centropy_relaxation.py`, `test_lr2_*.py`,
-   `test_issue_267_univariate_product_lift.py`, `test_convex_claimer.py`,
-   `test_factorable_reform.py`.
-2. `ci.yml` job "Python claim-boundary (serial)": `pytest -m claim_boundary -n0`
-   — collisions can no longer be order-masked. Keep it <10 min.
-3. Autouse fixture in `python/tests/conftest.py`: snapshot `DISCOPT_*` before
-   each test, **fail loudly** on unmonkeypatched leaks. Convert known offenders
-   (`test_convex_claimer.py:29–39`) to `monkeypatch.setenv`.
-4. **Full-suite serial status measurement** (time-boxed, one session): run the
-   PR-fast suite `-n0` at defaults, record pass/fail inventory in §9. Failures
-   found are *reported as issues*, not silently fixed in this PR (each is a
-   pre-existing latent collision — triage severity first).
-5. The claim auditor (`_jax/claim_audit.py`, test-only import): for one build,
-   record per nonlinear node which claimers would claim it and who won. Changes
-   no behavior; it is the exactly-one-owner assertion for the rest of the plan.
-6. The baseline snapshot (§3.1) + the differential-gate harness as a pytest
-   utility (`python/tests/support/claim_differential.py` or similar).
+### R0.1 `claim_boundary` marker + serial CI job
 
-**Gate:** serial job green on the marker set; leak fixture green on the marker
-set; baseline committed; auditor demonstrated on 3 corpus instances.
-**PR series:** `ci(claims): R0.1 serial job + leak guard`,
-`test(claims): R0.2 auditor + baseline + differential harness`.
+- Add `claim_boundary` to `pyproject.toml` markers (:240–254) and to
+  `python/tests/conftest.py::pytest_configure` (:55–72).
+- Module-level `pytestmark += [pytest.mark.claim_boundary]` on:
+  `test_power_certification.py`, `test_centropy_relaxation.py`,
+  `test_lr2_offneutral_relaxation.py`, `test_lr2_alias_shape_guard.py`,
+  `test_lr2_huni_unbounded_guard.py`, `test_lr2_nvs09_cert.py`,
+  `test_issue_267_univariate_product_lift.py`, `test_convex_claimer.py`,
+  `test_factorable_reform.py`.
+- New `ci.yml` job `python-claims-serial`, copying the `python-fast` recipe
+  (rust-toolchain + rust-cache + uv install + `maturin develop` + the JAX env
+  block :183–187) with the pytest line
+  `pytest python/tests/ -m claim_boundary -n0 -q --tb=short --timeout=120`.
+  **Deliberate decision:** the bare `-m claim_boundary` *overrides* the
+  `addopts` filter, so the `slow`/`correctness`-marked claim tests (incl. the
+  3×~40 s subprocess tests in `test_lr2_nvs09_cert.py` and the 62-way
+  parametrized fingerprint test) run — that is the point. Set
+  `timeout-minutes: 30`; record the measured duration in the PR; if it exceeds
+  ~15 min, move `test_lr2_nvs09_cert.py` alone to a
+  `claim_boundary and slow` nightly split and document it.
+- Fix the stale docstring at `test_lr2_offneutral_relaxation.py:88–92` (claims
+  default-ON; truth is default-OFF at :3569).
 
-## 5. R1 — canonical core + risk-first vertical slice
+### R0.2 `DISCOPT_*` leak guard
 
-Two half-stages; R1.2's measurements come before any broad cutover.
+Autouse fixture in `python/tests/conftest.py`: snapshot
+`{k: v for k in os.environ if k.startswith("DISCOPT_")}` before each test;
+after the test, if the live environment differs from the snapshot, **fail**
+with the diff (the fixture itself restores the snapshot so one leak doesn't
+cascade). Convert the raw writes in `test_convex_claimer.py:28–39` to
+`monkeypatch.setenv`. Run the full PR-fast suite `-n0` once with the guard on;
+fix any offender the guard itself flags (mechanical monkeypatch conversions
+belong in this PR; behavioral failures do not — see R0.5).
 
-### R1.1 The module (library + tests, nothing wired)
+### R0.3 Fingerprint util + baseline
 
-`python/discopt/_jax/canonical_expr.py`:
+- Extract `_relaxation_fingerprint` (test_lr2_offneutral_relaxation.py:44–78)
+  into `python/discopt/_jax/claim_audit.py::relaxation_fingerprint(relax) ->
+  str` (same `(_c, _A_ub, _b_ub, _bounds, _integrality)` SHA-256); re-point the
+  test at it.
+- `gen_claim_baseline.py` + commit `docs/dev/data/claim-baseline.jsonl`
+  (fields per §3.1).
+- `python/tests/support/claim_differential.py`: load baseline, rebuild, diff,
+  partition, oracle checks (§3.2), as reusable helpers a per-stage test can
+  call.
+
+### R0.4 Claim auditor
+
+In `claim_audit.py`: an opt-in instrumentation mode (a context manager or an
+`audit=` hook threaded into `build_milp_relaxation` — **no behavior change when
+off**, asserted by fingerprint equality with the hook absent) that records, per
+build: every write to `composite_var_map`/`univariate_var_map` with the writing
+site tag (collector name), and counters on each defer-predicate site
+(`_should_claim_composite`, `_defers_to_finite_domain_trig_table`,
+`_should_claim_composite_multivar`). Output: `{ckey-or-id: owner_tag}` +
+defer-fire counts. This log is (a) the "unchanged dispatch" classifier for
+§3.2, (b) the ownership diff for attribution, (c) from R2.5, the CI assertion
+`defer_fires == 0` and `exactly one owner per nonlinear node`.
+
+### R0.5 Serial inventory (measurement, time-boxed)
+
+Run the PR-fast suite `-n0` at defaults; record the pass/fail inventory in §10.
+Pre-existing serial failures are filed as issues with severity triage —
+**not** fixed inside R0 (each is a latent collision worth its own diagnosis).
+
+**Gate:** serial job green on the marker set; leak guard green; baseline
+committed; auditor no-op-when-off proven (fingerprint equality) and
+demonstrated on 3 corpus instances (one with H-UNI content: nvs09; one trig
+table: a `sin/cos` integer instance; one pure product).
+**PRs:** `ci(claims): R0.1 …`, `test(claims): R0.2 …`,
+`test(claims): R0.3+R0.4 …` (R0.5 result lands in whichever PR finishes it).
+
+## 5. R1 — canonical core + univariate vertical slice
+
+### R1.1 `python/discopt/_jax/canonical_expr.py` (library-only)
 
 ```python
 @dataclass(frozen=True)
-class CNode: ...                    # kind, children, payload; interned
+class CNode:          # kind: str, children: tuple[CNode,...], payload; interned
 class CanonicalDAG:
-    roots: list[CNode]
-    of: dict[int, CNode]            # id(orig node) -> CNode for this build's pinned trees
-def canonicalize(model) -> CanonicalDAG            # pure, box-independent, cached per model
-def atomize(dag, model) -> AtomPartition           # box-independent atom identification
-def dispatch(part, box, flat_types) -> ClaimPlan   # per-node: atom -> (owner, column spec)
-class UnsupportedCanonicalization(Exception): ...  # -> ("opaque",…), never escapes
+    def cnode_of(self, expr: Expression) -> CNode      # memoized by id(expr),
+                                                        # valid for pinned trees;
+                                                        # content-addressed result
+def canonicalize(model: Model) -> CanonicalDAG          # objective + constraint
+                                                        # bodies + alias defs;
+                                                        # box-independent except
+                                                        # the root-box division
+                                                        # sign check (§2.1)
+def atomize(dag: CanonicalDAG, model: Model) -> AtomPartition   # recursive; atoms
+                                                        # over vars AND aux symbols
+def dispatch(part: AtomPartition, flat_lb, flat_ub, flat_types) -> ClaimPlan
+    # per-node; ClaimPlan: CNode -> (atom_kind, owner, column_spec(bounds,
+    # integrality), coeff)
+class UnsupportedCanonicalization(Exception): ...       # internal; surfaces as
+                                                        # ("opaque",…), never raised
+                                                        # to the caller
 ```
 
-Generalize `_Lifter._expr_cache`'s structural key into the interning table. The
-univariate-atom extraction is a maximal-single-variable-subtree computation on
-the canonical DAG (canonicalizing the `_composite_referenced_var` :3507 logic).
+Implementation notes (binding): interning table generalizes
+`_univariate_signature` (:2684) and `_Lifter._expr_cache`
+(`factorable_reform.py:356`); float payloads keyed by exact bit pattern (no
+tolerance-keying); `Parameter` → `("const", snapshot)` matching
+`dag_compiler._snapshot_params`; the univariate-atom extractor canonicalizes
+`_composite_referenced_var` (:3507); array-shaped nodes (`MatMul`,
+axis-`SumExpression` over arrays, non-scalar `IndexExpression`, array
+`Constant` in non-reducible position), `CustomCall`, `sign`, and anything
+unhandled → `("opaque", token)` with the original node retained.
 
-**Test spec** (`python/tests/test_canonical_expr.py`):
-- *Semantic equivalence*: ≥200 generated expression trees (all supported ops) +
-  every in-repo corpus instance; evaluate original vs canonical at 1k random box
-  points via the DAG compiler; max error ≤ 1e-12; `opaque` nodes round-trip
-  untouched.
-- *Idempotence*, *interning/CSE* (`x*y + x*y` → one product node),
-  *determinism* (same expression built two ways → equal keys), *refusal*
-  (sign-spanning division, unsupported ops → `opaque`).
-- *Atomizer* unit tests per §2.2 row (nvs09's `(ln(x-2))**2 + (ln(10-x))**2` →
-  one univariate atom; `sin(x)**2` small-int-domain → rule 1; post-reform
-  `x**2·y` → product atom) + the §2.4 ordering obligations as sampled-tightness
-  property tests (≥20 random atoms per rule pair).
-- *Cost*: canonicalize+atomize once ≤ a small fraction of one
-  `build_milp_relaxation`; per-node `dispatch` on the largest in-repo instance
-  ≤ 5% of its per-node build time.
+**Test spec** (`python/tests/test_canonical_expr.py`, marked
+`claim_boundary`):
+- *Semantic equivalence*: extend `_random_expr`
+  (`test_bilevel_symbolic_diff.py:76`) to cover the full op set of §1.6 (incl.
+  min/max, abs, fractional powers with positive bases, division with bounded
+  denominators, Sum/SumOver); ≥200 generated trees + all 62 corpus instances;
+  compare `compile_expression(original)` vs `compile_expression
+  (reconstructed-from-CNode)` at 1k box points, ≤1e-12; opaque nodes assert
+  untouched round-trip.
+- *Idempotence*, *interning/CSE* (`x*y + x*y` → one CNode; two structurally
+  equal trees built separately → identical CNode object), *determinism*
+  (construction-order independence), *refusal* (sign-spanning division,
+  CustomCall, ndarray index → opaque).
+- *Atomizer*: one unit test per §2.2 row — nvs09's
+  `(ln(x-2))**2 + (ln(10-x))**2` → one univariate atom; `sin(3x+1)**2`,
+  integer `x∈[0,5]` → univariate atom, dispatch rule 1; post-reform `x**2·y` →
+  product atom over `(w, y)` with inner monomial atom; `cos(x − x·x)` →
+  recursive: product atom + univariate atom over an aux-referencing affine
+  form; a centropy call → multivar atom; an alias `aux == x^0.3·y^0.7` with
+  positive lbs → H-LOG atom.
+- *Dominance obligations* (§2.4): sampled-tightness property tests, ≥20 random
+  atoms per rule pair; rule 2 = rule 3 equality on convex samples.
+- *Cost*: `canonicalize`+`atomize` once ≤ 20% of one cold
+  `build_milp_relaxation` on the largest corpus instance; `dispatch` per node
+  ≤ 5% of the per-node build it will join.
 
-### R1.2 Vertical slice — measure the two real integration risks NOW
+### R1.2 Univariate-atom cutover (the risk slice — a real cutover)
 
-Wire **one atom kind end-to-end** — the univariate atom, since it subsumes the
-five colliding claimers — on a branch, and measure before the broad cutover:
+Replace the five univariate claimers' *claim decisions* with the dispatcher;
+their **emission machinery stays** (`UnivariateRelaxation` :662,
+`CompositeUnivariateRelaxation` :3417, `UnivariateSquareRelaxation`, the trig
+table :6146–6182, row emitters :8182–8198):
 
-1. **Re-keying:** `composite_var_map` keyed by `ckey` (id→CNode bridge for the
-   linearizer) for univariate atoms only. Differential gate (§3.2) over the
-   corpus: instances with unchanged dispatch must be byte-identical.
-2. **Engine engagement:** fraction of panel instances where
-   `IncrementalMcCormickLP` fast path stays engaged, before vs after. If
-   engagement drops, the fix is R4's identity extension pulled forward — do it,
-   don't record-and-proceed.
-3. **Panel drift:** cert-panel objectives identical; node-count changes
-   attributed per §3.2.
+1. `MccormickLPRelaxer.__init__` builds/caches `CanonicalDAG` +
+   `AtomPartition`; `build_milp_relaxation` gains an optional
+   `canonical=` argument (relaxer passes it; standalone/test callers get a
+   fresh one built internally — same content, so same behavior).
+2. In `build_milp_relaxation`, for univariate atoms the ClaimPlan drives which
+   node gets which envelope; `_collect_univariate_relaxations`'s affine-arg
+   scope, the composite collector's non-affine scope, the square path, and the
+   trig table become the *owners invoked by* rules 1–3;
+   `univariate_hull_envelope` is invoked for rule 3 with the existing
+   `value_batch` closure pattern (:4088–4108) and the existing
+   effectively-finite guard as its applicability predicate.
+3. Claim resolution: the linearizer/`_decompose_product` consultation sites
+   (:5122, :5149, :5192, :1615, :1620) go through `plan.get(cnode_of(e))` for
+   univariate/composite lookups (product/monomial/fractional maps unchanged);
+   `composite_coeff_map` semantics preserved.
+4. Protection derived from the ClaimPlan (§2.3) replaces the univariate
+   fragments of the hand-maintained sets.
+5. **Delete in this PR:** `_defers_to_finite_domain_trig_table`,
+   `_is_tabulatable_trig_square` as a *defer* (its shape test survives inside
+   the rule-1 owner), `_has_genuine_composite_subterm`, the `allow_general`
+   parameter and additive-claim clauses of `_should_claim_composite`
+   (:3639–3654), and `_collect_aliased_monomial_hull_relaxations`' flag gate
+   (its hull machinery folds into rule 3). The non-univariate clauses of
+   `_should_claim_composite` survive until R2.
+6. Rule 3 is now always-on: `_univariate_envelope_enabled()` becomes
+   unconditional at the dispatcher (the env read itself is removed in R3.1
+   with its tests).
 
-**Gate:** R1.1 spec green; R1.2 differential gate green with every change
-attributed; engine engagement not reduced (after the identity fix if needed);
-serial marker suite green. Findings recorded in §9.
-**PR series:** `feat(claims): R1.1 canonical DAG + atomizer`,
-`refactor(claims): R1.2 univariate atoms on canonical dispatch`.
-Note R1.2 is a **real cutover of that shape class** — its PR deletes the
-univariate fragments of the defer-list it obsoletes
-(`_defers_to_finite_domain_trig_table`, `_is_tabulatable_trig_square`,
-`_has_genuine_composite_subterm`, the `allow_general` additive clauses), per
-§0.4. The hull rule (rule 3) activates here — reaching it no longer reads
-`DISCOPT_UNIVARIATE_ENVELOPE` (see R3 for the flag's formal removal), which is
-expected to certify nvs09 on the default path in this stage.
+**Expected differential outcome (write into the PR):** pure-product instances
+byte-identical; instances with H-UNI-claimable or aliased-monomial atoms change
+with rule-3 attribution (nvs09 must certify on the default path — tree ~3
+nodes, objective per `minlplib.solu`); trig-table instances byte-identical
+(rule 1 scope unchanged); engine-engaged set unchanged (it is disjoint from
+univariate content, §1.3 — assert this from the auditor + engine `ok` flags on
+the panel).
+
+**Gate:** R1.1 spec green; differential gate green with every change
+attributed; nvs09 certified at defaults; adversarial suite; serial + parallel
+suites; `incorrect_count = 0`.
+**PRs:** `feat(claims): R1.1 — canonical DAG + atomizer + dispatcher`,
+`refactor(claims): R1.2 — univariate atoms on canonical dispatch (deletes the
+univariate defer clauses)`.
 
 ## 6. R2 — cutover of the remaining composite claims
 
-Move the remaining id()-keyed claimers onto the ClaimPlan, in dependency order,
-one PR each, each PR deleting the arbitration it replaces and passing the
-differential gate:
+One PR each, dependency order; each deletes what it replaces and passes the
+differential gate. Emission machinery and every conditioning/finiteness cap
+(`_MONOMIAL_AUX_BOUND_LIMIT`, `_LIFT_MAX_CROSS_TERM_ARG_MAGNITUDE`,
+`_RECIP_MIN_DENOM`, `_affine_square_row_ok`) stay exactly as-is.
 
-- **R2.1** affine-square + affine-power lifts (`("pow", affine, p)` atoms) —
-  removes their `composite_var_map[id]` writes and
-  `affine_square_protected_ids`.
-- **R2.2** composite-multivar (centropy / norm / convex-sum) —
-  `_should_claim_composite_multivar` becomes the multivar atom classification;
-  its predicate deletes.
-- **R2.3** the issue-267 ratio/nested-division/univariate-product walk — its
-  shapes become canonical atoms (`("prod")` with negative exponents where
-  sign-definite, univariate atoms otherwise); `_nested_div_keepalive` and the
-  `_walk_lift` re-collection passes delete.
-- **R2.4** `protected_squares` plumbing removal: with all claims ckey-based,
-  `distribute_products` no longer needs the protection set from this path;
-  remove the dead wiring (`term_classifier.py` keeps the parameter if other
-  callers use it).
-- **R2.5** `_should_claim_composite` itself deletes; the auditor's
-  zero-defer-firings assertion goes into the serial CI job permanently.
+- **R2.1 affine-square + affine-power atoms.** `("pow", affine, 2)` /
+  `("pow", affine, p≥3)` atoms drive the existing lift blocks (:6358–6442,
+  :6444–6493; row emitters :8495–8568). Deletes:
+  `_collect_affine_squares`/`_collect_affine_powers` as *claim* passes (their
+  shape-extraction survives as owner helpers), `affine_square_protected_ids`
+  (protection now plan-derived), and the corresponding
+  `composite_var_map[id]` writes (:6441/:6492).
+- **R2.2 multivar atoms.** `_should_claim_composite_multivar` (:4437) becomes
+  the multivar atom classification inside `atomize`; the collector (:4643)
+  becomes the owner (curvature certification via `classify_expr` →
+  `_multivar_box_curvature` :4516 unchanged — these are per-node dispatch
+  predicates). **Convex-sum atoms:** dispatching them unconditionally is what
+  deletes `DISCOPT_CONVEX_CLAIMER` (:4513); this is bound-changing on convex
+  sums — its own differential evidence, its own attribution list, and the
+  `convex-claimer-relaxation.md` Phase-3 test battery (routing / no-double-
+  relax / soundness gauntlet) run in this PR. If that battery is not green,
+  ship R2.2 with the convex-sum atom mapped to opaque and file the follow-up
+  — the flag still dies (the predicate does not consult it; the atom kind is
+  just not yet owned).
+- **R2.3 ratio/division atoms.** The issue-267 walk (:6709–7093, `_walk_lift`
+  :7095, re-collection :7146–7200) becomes recursive atomization: negative-
+  exponent product atoms (sign-definite denominators) → the ratio owner
+  (fold + reciprocal + McCormick product, keeping `composite_coeff_map`);
+  univariate-over-aux atoms → the §2.4 dispatcher (this is what
+  `_lift_general_univariate` :6921 does today). Deletes: the walk itself, the
+  outer-atom guards (`if eid in composite_var_map` :6734/:6842/:6995), the
+  `_nested_div_keepalive` sentinels (:6540/:6895–6900 — synthetic sub-atoms
+  now have CNode names), and the double-keyed id writes. The post-lift
+  product re-collection (:7146–7200) is replaced by the atomizer's recursion
+  (inner product atoms exist before outer atoms by construction).
+- **R2.4 protection + registry consolidation.** `composite_var_map`/
+  `univariate_var_map` id-registries are gone; the linearizer consults the
+  ClaimPlan only. `protected_squares` input = plan-derived raw-node id set
+  (§2.3 — the term_classifier mechanism at :359–368 **stays**; only its
+  hand-maintained feeders die). The varmap's `"univariate"`/
+  `"univariate_signatures"`/`"composite_relaxations"` output keys keep their
+  shapes (downstream consumers: `column_identities`, separation, tests) with
+  ckeys where ids were.
+- **R2.5 delete the defer-list.** `_should_claim_composite` (:3586) and every
+  §1.1 defer helper are removed; the auditor's `defer_fires == 0` +
+  exactly-one-owner assertions become part of the serial CI job. Stage-end
+  grep gate: `git grep -l "_should_claim_composite\|_defers_to_finite_domain\|
+  _has_genuine_composite_subterm\|_nested_div_keepalive"` returns only docs.
 
-**Gate (per PR and at stage end):** differential gate; auditor exactly-one-owner
-+ zero defer firings on the corpus; full PR-fast suite green **serially and in
-parallel**; adversarial suite; cert-panel objectives identical;
-`incorrect_count = 0`. Stage-end grep gate: no shape-named defer predicate
-remains (`git grep` for the deleted symbols is empty).
+**Gate (per PR and stage end):** differential gate; auditor assertions; full
+PR-fast suite serial + parallel; adversarial; cert-panel objectives identical
+(`check_neutrality`); `incorrect_count = 0`.
 
-## 7. R3 — flags become rules; the runway dividends
+## 7. R3 — flags become rules; acceptance; the sweep of record
 
-- **R3.1 Delete `DISCOPT_UNIVARIATE_ENVELOPE` and `DISCOPT_LOG_MONOMIAL`.**
-  Their machinery is now rules 3 and the H-LOG row of §2.2, always on where the
-  dominance order selects them. Update the flag-ON test files to default-path
-  tests; update `relaxation-catalog.md` §3–§4 and the :3544 docstring (rule, not
-  deferral). **Issue-#632 acceptance check, verified in this PR:** (a) no
-  instance-shape defer-list exists (CI-enforced by the auditor); (b) full suite
-  green serially; (c) ≥1 added certification vs the R0 baseline (nvs09 is the
-  known candidate; report the global50 count) with `incorrect_count = 0` on the
-  measurement of record (`global_opt_baron_vs_discopt.py`, 60 s, defaults).
-- **R3.2 Generalize rule 1** (finite-domain table beyond trig-squares) — now a
-  small dispatcher change; differential-gated like everything else.
-- **R3.3 Corpus sweep of record:** the full-corpus sample sweep
-  (`generality_sweep.py` machinery, defaults-only — no arms) proving
-  `incorrect_count = 0` and reporting cert/bound deltas vs baseline. This is the
-  evidence a release note cites.
+- **R3.1 Delete the flags.** Touch list (complete, §1.5):
+  `_univariate_envelope_enabled` (:3544–3569) and `_log_monomial_enabled`
+  (:3572–3583) removed with their call sites; docstrings :3604/:4223 and
+  `univariate_hull.py:27` updated; H-LOG block (:6042–6103) unconditional
+  (it is additive and guarded by `_extract_positive_product`'s strict-
+  positivity; its differential attribution = positive-product instances);
+  flag-ON test files (`test_lr2_offneutral_relaxation.py`,
+  `test_lr2_huni_unbounded_guard.py`, `test_lr2_alias_shape_guard.py`,
+  `test_lr2_nvs09_cert.py`) converted to default-path tests (the unbounded-box
+  guard and alias-shape guards remain as *rule* tests);
+  `relaxation-catalog.md` §3–§4 updated (one dispatch, atom taxonomy);
+  `CHANGELOG.md`. `DISCOPT_CONVEX_CLAIMER` already died in R2.2.
+  **Issue-#632 acceptance check, verified in this PR body:** (a) no
+  instance-shape defer-list (CI-enforced); (b) full suite green **serially**;
+  (c) `global_opt_baron_vs_discopt.py --time-limit 60` on the global50 suite:
+  certified count ≥ baseline+1 (nvs09 is the known candidate; report the
+  actual count) with `incorrect_count = 0`.
+- **R3.2 Generalize rule 1.** The finite-domain table extends from
+  `sin/cos(affine)**2` to any univariate atom over a small integer domain
+  (same cap, same binary-selector emission). Bound-changing; differential-
+  gated; attribution = small-integer-domain instances.
+- **R3.3 Corpus sweep of record.** `generality_sweep.py`'s held-out machinery
+  run **defaults-only** (no arms): a seeded stratified sample of the full
+  `~/Dropbox/projects/discopt-minlp-benchmark` snapshot vs `minlplib.solu`;
+  report `incorrect_count` (must be 0), cert-count and root-bound deltas vs
+  the R0 baseline. This is the release-note evidence.
 
-## 8. R4 — fragility dividends (the "long runway" payoff)
+## 8. R4 — fragility dividends (the long-runway payoff)
 
-With one canonical identity for every column:
+- **R4.1 Canonical column identities.** `column_identities`
+  (`mccormick_lp.py:96`) tags composite columns `("canon", ckey)` (construction
+  sites :1250/:1393 and `incremental_mccormick.py:171–176`);
+  `_remap_pool_rows` (:146) then inherits pool cuts across composite columns.
+  Measure inherited-row counts before/after on the cert panel; soundness
+  unchanged (remap drops on any miss, as today).
+- **R4.2 Extend the incremental patch table to canonical atom rows.** Today
+  the engine covers only bilinear(4-row)/monomial(3-row) patches and
+  `ok=False`s on **any** instance with univariate/composite content (§1.3) —
+  the whole transcendental class runs cold. With one canonical identity per
+  row family, teach `_build_structure`/`_patch` the univariate tangent/secant
+  and composite line row families (row counts vary → store per-atom row
+  slices, not fixed counts). `_validate` stays as the safety net, never
+  weakened. Measure: fast-path engagement fraction and nodes/s on the panel
+  before/after; this is the concrete "discopt is slower" attack in this plan.
+- **R4.3 Cleanup + follow-ups.** Delete remaining dead plumbing; file issues:
+  piecewise/trig-piecewise onto atom dispatch; canonical keys for the product
+  side's stage maps; `sign`/indicator atom (catalog §6.5, still low value).
 
-- **R4.1** `col_identities` gains `("canon", ckey)` for all composite columns
-  (if not already pulled into R1.2); root-pool cut inheritance
-  (`_remap_pool_rows`) covers composite columns — measure inherited-row counts
-  before/after on the panel.
-- **R4.2** Teach `IncrementalMcCormickLP._build_structure` the canonical layout
-  (structure map derived from the ClaimPlan) so cold/patch agreement holds by
-  construction instead of by probe-box validation; `_validate` stays as the
-  safety net (never weakened), but its decline rate on the panel should go to
-  ~0 — measure and report.
-- **R4.3** Delete the remaining dead plumbing the cutover obsoleted and file the
-  follow-up issue list (e.g. piecewise/trig-piecewise migration onto atom
-  dispatch, canonical keys for the product side's stage maps) — each a small,
-  differential-gated change on the now-single boundary.
+**Gate:** differential gate; engagement + inheritance numbers in the PR; full
+suites green both orders.
 
-**Gate:** differential gate; engine decline rate and pool-inheritance coverage
-reported with numbers; full suites green both orders.
+## 9. Plan-review corrections (2026-07-12 — binding on executors)
 
-## 9. State ledger (update in every stage PR)
+Recorded so the reasons survive; each was verified against code, not assumed:
+
+1. **`protected_squares` removal reversed.** An earlier draft deleted the
+   distribution-protection mechanism outright. Wrong: without protection,
+   `distribute_products` rewrites claimed nodes and ckey lookups miss → dead
+   aux columns (the documented "silently inert claim" class). The mechanism
+   stays; its *inputs* become plan-derived (§2.3, R2.4).
+2. **Engine risk re-classified.** The incremental engine already declines on
+   every instance with univariate/composite content
+   (`mccormick_lp.py:578–588`; `_validate` freezes composite rows at the probe
+   box). The cutover cannot regress engagement there; the engaged pure-product
+   class is untouched. R4.2 upgraded from "keep engagement" to "extend
+   engagement to the transcendental class."
+3. **No committed fingerprint baseline existed.** The #630 guard is an
+   in-process differential in inline test code; R0.3 extracts it and commits
+   `claim-baseline.jsonl`, which must also record `root_lp_bound`
+   (cert-baseline lacks it).
+4. **Dual keying + coefficient slot are contract, not detail.**
+   `univariate_var_map` is id+signature keyed (:9098–9101); ratio claims carry
+   `composite_coeff_map` scalars (:6807) with a `_decompose_product` abstain
+   rule (:1627). The ClaimPlan API carries `coeff` and the signature precedent
+   informs the interner.
+5. **Rule 1 emits an exact MILP table** (binary selector columns, :6162–6168)
+   — column specs carry integrality; the trig-table scope is unchanged at
+   R1.2 and generalizes only in R3.2.
+6. **`.nl`-path call names** (`atan2`, `signpower`, `entropy`, `centropy`) are
+   canonicalizer inputs even though the Python DSL never builds them.
+7. **`DISCOPT_CONVEX_CLAIMER` added to the deletion list** (third flag), via
+   R2.2 with the convex-claimer plan's own test battery; opaque fallback if
+   that battery isn't green — the flag dies either way.
+8. **`utils/soundness.py` is not importable from `python/tests`** — the
+   harness uses the existing sys.path-bridge pattern or thin local copies.
+9. **Serial-job runtime risk quantified** (62-way fingerprint parametrization
+   + 3×40 s subprocess certs): measured in R0.1 with an explicit split
+   decision if >15 min.
+10. **Stale test docstring** (`test_lr2_offneutral_relaxation.py:88–92` claims
+    default-ON) — fixed in R0.1 so no executor mistakes it for code truth.
+
+## 10. State ledger (update in every stage PR)
 
 | Stage | Status | Evidence / notes |
 |---|---|---|
-| R0.1 serial CI + leak guard | not started | |
-| R0.2 auditor + baseline + differential harness | not started | |
-| R1.1 canonical DAG module | blocked on R0 | |
-| R1.2 univariate-atom cutover (risk slice) | blocked on R1.1 | engine engagement + panel drift measured HERE |
-| R2.1–R2.5 remaining cutover | blocked on R1.2 | one PR each; each deletes what it replaces |
-| R3.1 flags→rules + #632 acceptance | blocked on R2 | flag count −2 |
+| R0.1 marker + serial CI (+ docstring fix) | not started | record job duration |
+| R0.2 leak guard | not started | |
+| R0.3 fingerprint util + claim-baseline | not started | |
+| R0.4 auditor | not started | no-op-when-off proof required |
+| R0.5 serial inventory | not started | failures → issues, not scope |
+| R1.1 canonical module | blocked on R0 | |
+| R1.2 univariate cutover | blocked on R1.1 | nvs09 certifies at defaults here |
+| R2.1 affine-square/power | blocked on R1.2 | |
+| R2.2 multivar (+CONVEX_CLAIMER deletion) | blocked on R2.1 | convex-claimer battery |
+| R2.3 ratio/division | blocked on R2.2 | keepalive sentinels die |
+| R2.4 registry/protection consolidation | blocked on R2.3 | |
+| R2.5 defer-list deletion + CI assertions | blocked on R2.4 | grep gate |
+| R3.1 flag deletion + #632 acceptance | blocked on R2 | global50 count reported |
 | R3.2 rule-1 generalization | blocked on R3.1 | |
 | R3.3 corpus sweep of record | blocked on R3.1 | |
-| R4.1–R4.3 identity dividends | blocked on R2 (R4.1 may pull into R1.2) | |
-| Full-suite serial inventory (R0 item 4) | not started | pre-existing failures → issues, not scope creep |
+| R4.1 canon column identities | blocked on R2 | inheritance numbers |
+| R4.2 engine patch-table extension | blocked on R4.1 | engagement + nodes/s |
+| R4.3 cleanup + follow-up issues | blocked on R4.2 | |
 
 Falsifications and design adaptations recorded here as they occur (dated,
-`performance-plan.md` §6 style). Reminder (§0.1): an adaptation changes *how*,
-never *whether*.
+`performance-plan.md` §6 style). An adaptation changes *how*, never *whether*.
