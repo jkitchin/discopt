@@ -15,6 +15,68 @@ rejected design.
 
 ---
 
+## 0′. Focus refresh — SOTA performance is the north star (maintainer, 2026-07-12)
+
+The goal is **not** a novel relaxation; it is **closing the BARON performance gap
+using the techniques SOTA global solvers actually use**, measured (SGM time, node
+count, root-gap closure, `incorrect_count=0`). Every design choice is judged
+against "is this what BARON/Couenne/SCIP do, and does the measurement improve?"
+— not against internal cleverness.
+
+**H-UNI is KILLED (not graduated).** The composite univariate 1-D hull
+(`univariate_hull.py`, `DISCOPT_UNIVARIATE_ENVELOPE`, the aliased-monomial-hull
+collector) is removed. The falsification chain that led here (record; do not
+re-attempt any link):
+
+1. **Grid-sampled hull → dead.** Sampling `f` on a 40 010-pt grid and shifting
+   facets by measured deviation is (a) **not how SOTA solvers build envelopes**,
+   (b) **unsound between grid nodes** (a 5M-sample probe found real ~1e-6
+   violations), and (c) contradicts this project's own lever-a §0.1 ("no sampled
+   envelopes"). Not a certificate-path construction.
+2. **Analytical composite hull → works, but the scaffolding isn't SOTA.** A
+   grid-free construction (interval-verified curvature pieces → tangent/secant
+   with a rigorous per-piece validity proof → adaptive outer-approximation
+   refinement) is sound and tight (nvs09 `(ln(x-2))²+(ln(10-x))²` loss 0.0). Its
+   *machinery* (secants, OA tangent refinement) is SOTA — but the **pre-seeding**
+   of a static candidate set (piece midpoints, stationary points, all-pairs
+   chords) is a bespoke substitute for lazy separation, and **building a 1-D hull
+   of an arbitrary composite at all is not the factorable/AVM approach.**
+3. **The SOTA way to recover this tightness is factorable, not a composite hull.**
+   BARON/Couenne/SCIP **decompose** `(ln(x-2))²` into atoms (`ln`, then `(·)²`)
+   and relax each atom with its closed-form envelope, composed via the
+   auxiliary-variable method, then **tighten with outer-approximation cutting
+   planes added lazily at the LP relaxation solution** and **branch-and-reduce**
+   (OBBT/FBBT/probing). That is where the performance comes from.
+
+**Refocused roadmap (SOTA-performance levers, in leverage order):**
+
+- **P1 — Tight factorable per-atom envelopes (the canonical AVM).** The existing
+  R1.1 canonical DAG + atomizer is the substrate. Make each atom's relaxation as
+  tight as SOTA: `ln`/`exp`/`sqrt` (secant + tangents), even/odd powers, bilinear
+  (McCormick), general monomial/product (recursive McCormick vs. tighter
+  simultaneous envelopes), division. The nvs09 root-gap that H-UNI chased is a
+  **measurement target for P1**, recovered through composition tightness — not a
+  special case.
+- **P2 — Outer-approximation cutting planes.** Add gradient/OA cuts for convex
+  atoms **lazily at the LP solution** (Kelley), not pre-seeded — the standard
+  separation loop. Touches the per-node LP/B&B path.
+- **P3 — Branch-and-reduce.** OBBT + FBBT + probing to shrink boxes (BARON's
+  actual engine); reduced boxes make the factorable envelopes tight without any
+  composite hull.
+- **P4 — Structure/convexity detection** to route atoms to the tightest
+  applicable envelope.
+
+**What this changes in the stages below:** the R1.2 "univariate cutover / hull
+graduation" line of work is **cancelled** — there is no hull to graduate. The
+R1.1 canonical core and R0 correctness net stand. R2+ is re-pointed at P1–P4
+above. The dominance dispatch (R1.2 decision) keeps only the **table > exact >
+composed** tiers; the **hull** tier is deleted with H-UNI. Concrete next actions:
+(a) delete the H-UNI code + flag + tests (byte-neutral: H-UNI was default-OFF);
+(b) open P1 with a measured per-atom envelope-tightness audit against BARON on
+the nvs09/global50 panel.
+
+---
+
 ## 0. Mandate (binding)
 
 1. **The architecture is decided; do not hedge it.** BARON, Couenne, and SCIP all
