@@ -228,6 +228,37 @@ def test_refusal_custom_call_is_opaque():
     assert reconstruct(node, m) is cc
 
 
+def test_cnode_of_fresh_opaque_subtree_no_token_collision():
+    """#636 Finding 3: ``cnode_of`` on a not-yet-walked opaque subtree must mint a
+    NEW ``("opaque", k)`` token, not collide with one already interned.
+
+    ``cnode_of`` re-canonicalizes an unseen subtree with a fresh ``_Canonicalizer``
+    that shares ``_intern`` but (pre-fix) reset its opaque counter to 0. A second,
+    structurally different opaque node would then request the already-taken
+    ``("opaque", 0)`` key and get back the FIRST opaque node — wrapping a different
+    original expression. This is exactly the primitive the R1.2 ``distribute_products``
+    rebuild will call, so the collision must not exist.
+    """
+    m = dm.Model()
+    x = m.continuous("x", lb=1, ub=3)
+    a = CustomCall(lambda t: t * t, x, name="opaqueA")  # in the model → interned first
+    m.minimize(a + x)
+    dag = canonicalize(m)
+    # Sanity: the walk interned exactly the opaque node for ``a`` at token 0.
+    node_a = dag.cnode_of(a)
+    assert node_a.is_opaque
+    assert reconstruct(node_a, m) is a
+
+    # A distinct opaque expression never seen during the walk.
+    b = CustomCall(lambda t: t + t, x, name="opaqueB")
+    node_b = dag.cnode_of(b)
+    assert node_b.is_opaque
+    # The fix: ``b`` must reconstruct to ``b`` — NOT to the stale ``a`` that shares
+    # token 0. It must also be a distinct interned node.
+    assert reconstruct(node_b, m) is b
+    assert node_b is not node_a
+
+
 def test_refusal_zero_parameter_divisor_is_opaque():
     """Dividing by a zero-valued parameter folds to const(0)**-1; canonicalize must
     route it to opaque, not raise ZeroDivisionError out to the caller."""

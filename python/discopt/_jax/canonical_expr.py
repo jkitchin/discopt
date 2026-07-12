@@ -490,6 +490,15 @@ class CanonicalDAG:
         canon = _Canonicalizer(self.model)
         canon._intern = self._intern
         canon._memo = self._memo
+        # Seed the opaque counter past every ("opaque", k) token already interned.
+        # A fresh _Canonicalizer resets its counter to 0, so an opaque node in the
+        # re-canonicalized subtree would otherwise request key ("opaque", 0) — which
+        # may already be interned wrapping a DIFFERENT original expression, and _mk
+        # would return that stale node (wrong reconstruct, broken CSE identity).
+        # Distinct opaque subtrees must get distinct tokens across cnode_of calls
+        # too (#636 Finding 3 — latent until distribute_products calls cnode_of).
+        opaque_tokens = [k[1] for k in self._intern if k[0] == "opaque"]
+        canon._opaque_counter = itertools.count(max(opaque_tokens) + 1 if opaque_tokens else 0)
         return canon.canon(expr)
 
     @property
