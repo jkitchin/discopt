@@ -64,6 +64,11 @@ __all__ = [
     "canonicalize",
     "reconstruct",
     "UnsupportedCanonicalization",
+    "Atom",
+    "AtomPartition",
+    "atomize",
+    "var_support",
+    "is_affine",
 ]
 
 
@@ -500,3 +505,172 @@ def reconstruct(node: CNode, model: Model, _flat: Optional[list[Expression]] = N
         raise ValueError(f"cannot reconstruct CNode kind {n.kind!r}")
 
     return rec(node)
+
+
+# --------------------------------------------------------------------------- #
+# Atomizer — partition the canonical DAG into maximal nonlinear atoms
+# --------------------------------------------------------------------------- #
+# Each maximal nonlinear canonical node is one *atom* with one coarse kind. The
+# kind fixes the owner family for the structurally-keyed side (product/ratio/
+# multivar) directly; single-variable atoms carry kind "univariate" and their
+# *envelope* owner is chosen per node box by the dominance dispatcher (rule 1..4
+# of the plan §2.4) — a bare ``x**p`` univariate atom routes to the same
+# monomial-secant kernel as today, ``sin(x)**2`` over a small integer domain to
+# the exact table, a non-convex single-variable composite to the 1-D hull. The
+# dominance dispatch (which needs the node box + curvature/finite-domain
+# predicates + the concrete envelope builders) is threaded in with the R1.2
+# wiring; atomization here is box-independent and pure.
+
+_ATOM_OPAQUE = "opaque"
+_ATOM_UNIVARIATE = "univariate"
+# multivariable product of positive powers (bilinear / multilinear / monomial):
+_ATOM_PRODUCT = "product"
+_ATOM_RATIO = "ratio"  # multivariable product with a negative exponent (division)
+_ATOM_MULTIVAR = "multivar"  # multivariable call/pow/centropy (curvature-certified owner)
+
+
+def _support_map(nodes) -> dict[int, frozenset[int]]:
+    """Memoized variable-support (set of flat var indices) per CNode, by id."""
+    memo: dict[int, frozenset[int]] = {}
+
+    def supp(n: CNode) -> frozenset[int]:
+        cached = memo.get(id(n))
+        if cached is not None:
+            return cached
+        if n.kind == "var":
+            s = frozenset({n.payload})
+        elif n.kind in ("const", "opaque"):
+            s = frozenset()
+        else:
+            acc: set[int] = set()
+            for c in n.children:
+                acc |= supp(c)
+            s = frozenset(acc)
+        memo[id(n)] = s
+        return s
+
+    for node in nodes:
+        supp(node)
+    return memo
+
+
+def var_support(node: CNode) -> frozenset[int]:
+    """Flat variable indices referenced by ``node`` (opaque contributes none)."""
+    return _support_map([node])[id(node)]
+
+
+def is_affine(node: CNode) -> bool:
+    """True if ``node`` is an affine combination of variables (no nonlinear atom).
+
+    ``var``/``const`` are affine; a ``sum`` is affine iff every child is affine;
+    everything else (prod/pow/call/callN/opaque) is a nonlinear atom.
+    """
+    if node.kind in ("var", "const"):
+        return True
+    if node.kind == "sum":
+        return all(is_affine(c) for c in node.children)
+    return False
+
+
+@dataclasses.dataclass(frozen=True)
+class Atom:
+    """One maximal nonlinear canonical node and its coarse owner kind."""
+
+    node: CNode
+    kind: str
+    support: frozenset[int]
+
+    @property
+    def is_univariate(self) -> bool:
+        return self.kind == _ATOM_UNIVARIATE
+
+
+@dataclasses.dataclass
+class AtomPartition:
+    """The set of maximal nonlinear atoms of a canonical DAG (one owner each)."""
+
+    atoms: tuple[Atom, ...]
+
+    def by_kind(self, kind: str) -> tuple[Atom, ...]:
+        return tuple(a for a in self.atoms if a.kind == kind)
+
+    @property
+    def kinds(self) -> dict[str, int]:
+        out: dict[str, int] = {}
+        for a in self.atoms:
+            out[a.kind] = out.get(a.kind, 0) + 1
+        return out
+
+
+def _classify_atom(node: CNode, support: frozenset[int]) -> str:
+    if node.is_opaque:
+        return _ATOM_OPAQUE
+    if len(support) <= 1:
+        # A single-variable nonlinear node (monomial, power, univariate call, or a
+        # single-variable additive/multiplicative composite). Owner chosen by the
+        # dominance dispatcher per node box.
+        return _ATOM_UNIVARIATE
+    if node.kind == "prod":
+        (exps,) = node.payload
+        if any(e < 0 for e in exps):
+            return _ATOM_RATIO
+        return _ATOM_PRODUCT
+    # multivariable pow / call / callN (centropy, norm, ...) -> curvature-certified
+    # multivar owner (or opaque fallback if uncertifiable, decided at dispatch).
+    return _ATOM_MULTIVAR
+
+
+def atomize(dag: CanonicalDAG) -> AtomPartition:
+    """Partition ``dag``'s objective + constraint bodies into maximal atoms.
+
+    Walks each root; affine combinations contribute no atom (they stay linear
+    rows). A ``sum`` that is itself nonlinear but single-variable is ONE
+    univariate atom (e.g. nvs09's ``(ln(x-2))**2 + (ln(10-x))**2``); a
+    multivariable ``sum`` is split into the atoms of its nonlinear children.
+    Every non-``sum`` nonlinear node is an atom of its classified kind. Atoms are
+    deduplicated by CNode identity (CSE: one atom per shared subexpression).
+    """
+    roots: list[CNode] = []
+    if dag.objective is not None:
+        roots.append(dag.objective)
+    roots.extend(dag.constraints)
+
+    supp = _support_map(roots)
+    seen: set[int] = set()
+    atoms: list[Atom] = []
+
+    _opaque_memo: dict[int, bool] = {}
+
+    def has_opaque(n: CNode) -> bool:
+        cached = _opaque_memo.get(id(n))
+        if cached is not None:
+            return cached
+        r = n.is_opaque or any(has_opaque(c) for c in n.children)
+        _opaque_memo[id(n)] = r
+        return r
+
+    def visit(n: CNode) -> None:
+        if is_affine(n):
+            return
+        s = supp[id(n)]
+        # A sum is one univariate atom ONLY when it is genuinely single-variable
+        # AND contains no opaque descendant (an opaque node has empty variable
+        # support, so it would otherwise hide inside a single-var sum). Otherwise
+        # descend so each nonlinear/opaque child becomes its own atom and the
+        # affine part stays linear.
+        if n.kind == "sum" and (len(s) > 1 or has_opaque(n)):
+            for c in n.children:
+                visit(c)
+            return
+        # Otherwise this node is a maximal nonlinear atom.
+        if id(n) in seen:
+            return
+        seen.add(id(n))
+        atoms.append(Atom(node=n, kind=_classify_atom(n, s), support=s))
+
+    for r in roots:
+        visit(r)
+
+    # Deterministic order for reproducible plans/tests.
+    atoms.sort(key=lambda a: _sort_key(a.node))
+    return AtomPartition(atoms=tuple(atoms))

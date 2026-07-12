@@ -16,7 +16,14 @@ import discopt.modeling as dm
 import jax.numpy as jnp
 import numpy as np
 import pytest
-from discopt._jax.canonical_expr import CNode, canonicalize, reconstruct
+from discopt._jax.canonical_expr import (
+    CNode,
+    atomize,
+    canonicalize,
+    is_affine,
+    reconstruct,
+    var_support,
+)
 from discopt._jax.dag_compiler import compile_expression
 from discopt._jax.discretization import DiscretizationState
 from discopt._jax.milp_relaxation import build_milp_relaxation
@@ -257,3 +264,127 @@ def test_build_still_works_after_canonicalize():
     assert isinstance(canonicalize(model).nodes[0], CNode)
     # shape stable across a canonicalize call
     assert np.asarray(relax1._c).shape == np.asarray(relax2._c).shape
+
+
+# --------------------------------------------------------------------------- #
+# atomizer (issue #632, R1.1 layer 2)
+# --------------------------------------------------------------------------- #
+def _atoms(model):
+    return atomize(canonicalize(model))
+
+
+def test_atom_nvs09_additive_composite_is_one_univariate_atom():
+    # (ln(x-2))**2 + (ln(10-x))**2 references only x -> ONE univariate atom.
+    m = dm.Model()
+    x = m.continuous("x", lb=2.1, ub=9.9)
+    m.minimize(dm.log(x - 2) ** 2 + dm.log(10 - x) ** 2)
+    part = _atoms(m)
+    uni = part.by_kind("univariate")
+    assert len(uni) == 1
+    assert uni[0].support == frozenset({0})
+
+
+def test_atom_trig_square_single_var_is_univariate():
+    m = dm.Model()
+    x = m.integer("x", lb=0, ub=5)
+    m.minimize(dm.sin(3 * x + 1) ** 2)
+    part = _atoms(m)
+    assert part.by_kind("univariate")
+    assert part.kinds.get("univariate", 0) == 1
+
+
+def test_atom_monomial_product_is_multivar_product():
+    # x*x*y -> prod(x^2, y): multivariable positive-power product atom.
+    m = dm.Model()
+    x = m.continuous("x", lb=1, ub=3)
+    y = m.continuous("y", lb=1, ub=3)
+    m.minimize(x * x * y)
+    part = _atoms(m)
+    prods = part.by_kind("product")
+    assert len(prods) == 1
+    assert prods[0].support == frozenset({0, 1})
+
+
+def test_atom_recursive_inner_single_var_composite():
+    # cos(x - x*x) references only x -> ONE univariate atom (recursive inner
+    # monomial folded inside; matches the issue-267 hand lift by structure).
+    m = dm.Model()
+    x = m.continuous("x", lb=-1, ub=1)
+    m.minimize(dm.cos(x - x * x))
+    part = _atoms(m)
+    uni = part.by_kind("univariate")
+    assert len(uni) == 1
+    assert uni[0].support == frozenset({0})
+
+
+def test_atom_centropy_is_multivar():
+    m = dm.Model()
+    x = m.continuous("x", lb=0.5, ub=3)
+    y = m.continuous("y", lb=0.5, ub=3)
+    # centropy(x, y) = x*log(x/y); build it directly as the named call.
+    from discopt.modeling.core import FunctionCall
+
+    m.minimize(FunctionCall("centropy", x, y))
+    part = _atoms(m)
+    assert part.by_kind("multivar")
+
+
+def test_atom_division_is_ratio():
+    m = dm.Model()
+    x = m.continuous("x", lb=1, ub=3)
+    y = m.continuous("y", lb=1, ub=3)
+    m.minimize(x / y)
+    part = _atoms(m)
+    assert part.by_kind("ratio")
+    assert part.kinds.get("ratio", 0) == 1
+
+
+def test_atom_custom_call_is_opaque_atom():
+    m = dm.Model()
+    x = m.continuous("x", lb=1, ub=3)
+    m.minimize(CustomCall(lambda a: a * a, x, name="sq") + x)
+    part = _atoms(m)
+    assert part.by_kind("opaque")
+
+
+def test_atom_multivar_sum_splits_into_child_atoms():
+    # exp(x) + y*z references {x,y,z}; the sum is NOT one atom — it splits into a
+    # univariate atom (exp(x)) and a product atom (y*z). The affine part (if any)
+    # contributes no atom.
+    m = dm.Model()
+    x = m.continuous("x", lb=0.5, ub=3)
+    y = m.continuous("y", lb=1, ub=3)
+    z = m.continuous("z", lb=1, ub=3)
+    m.minimize(dm.exp(x) + y * z + 2 * x - 5)
+    part = _atoms(m)
+    assert part.kinds.get("univariate", 0) == 1
+    assert part.kinds.get("product", 0) == 1
+
+
+def test_pure_affine_has_no_atoms():
+    m = dm.Model()
+    x = m.continuous("x", lb=0, ub=3)
+    y = m.continuous("y", lb=0, ub=3)
+    m.minimize(2 * x - 3 * y + 4)
+    part = _atoms(m)
+    assert part.atoms == ()
+
+
+def test_is_affine_and_support_helpers():
+    m = dm.Model()
+    x = m.continuous("x", lb=1, ub=3)
+    y = m.continuous("y", lb=1, ub=3)
+    dag = canonicalize(m if m.minimize(x + 2 * y) or True else m)
+    aff = dag.cnode_of(m._objective.expression)
+    assert is_affine(aff)
+    assert var_support(aff) == frozenset({0, 1})
+
+
+def test_atomize_is_deterministic():
+    m = dm.Model()
+    x = m.continuous("x", lb=0.5, ub=3)
+    y = m.continuous("y", lb=0.5, ub=3)
+    m.minimize(dm.exp(x) + x * y + dm.log(y))
+    k1 = [(a.node.key, a.kind) for a in _atoms(m).atoms]
+    k2 = [(a.node.key, a.kind) for a in _atoms(m).atoms]
+    assert k1 == k2
