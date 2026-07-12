@@ -3787,60 +3787,6 @@ _UNI_OWNER_HULL = "hull"  # rule 3: neither convex nor concave, finite box -> ex
 _UNI_OWNER_COMPOSED = "composed"  # rule 4: unbounded/pinned box -> composed fallback
 
 
-def _univariate_dispatch(
-    expr: Expression,
-    model: Model,
-    n_orig: int,
-    flat_lb: np.ndarray,
-    flat_ub: np.ndarray,
-    flat_types: list[VarType],
-    box: dict,
-) -> tuple[str, Optional[str]]:
-    """Dominance-order owner (and, for EXACT, the certified curvature) of a
-    single-variable nonlinear composite ``expr``.
-
-    Returns ``(owner, curvature)`` where ``owner`` is one of
-    ``_UNI_OWNER_{NONE,TABLE,EXACT,HULL,COMPOSED}`` (§2.4 rules 1..4) and
-    ``curvature`` is the proven ``"convex"``/``"concave"`` verdict when
-    ``owner == EXACT`` (else ``None``). The order encodes the arbitration: an exact
-    finite-domain table (rule 1) beats a certified convex/concave envelope (rule
-    2), which beats the exact 1-D hull (rule 3), which beats the composed fallback
-    (rule 4). Only ``EXACT`` and ``HULL`` are claimed by the composite-univariate
-    collector. Returning the curvature lets the caller build the envelope without a
-    second (expensive) ``_composite_curvature`` call. Decision only — it reuses the
-    same curvature/finite-domain/box helpers the collector uses.
-    """
-    # Only nodes the composite path could own at all (the widened, H-UNI-inclusive
-    # candidate set); everything else is owned elsewhere (bare monomial, affine
-    # square/power, univariate-of-affine, product, …).
-    if not _should_claim_composite(expr, model, n_orig, allow_general=True):
-        return _UNI_OWNER_NONE, None
-    # Rule 1 — a tabulatable trig-square over a small integer domain: the exact
-    # per-point table is tighter than any continuous envelope.
-    if _defers_to_finite_domain_trig_table(expr, model, n_orig, flat_types, flat_lb, flat_ub):
-        return _UNI_OWNER_TABLE, None
-    ref = _composite_referenced_var(expr, model)
-    if ref is None:
-        return _UNI_OWNER_NONE, None
-    var, flat_idx = ref
-    lo = float(flat_lb[flat_idx])
-    hi = float(flat_ub[flat_idx])
-    # Effectively-unbounded (or degenerate) box: a 1-D hull over a ~1e20-wide box
-    # is numerically meaningless (cert:LR-3), so fall back to the composed path.
-    if not (_is_effectively_finite(lo) and _is_effectively_finite(hi)) or hi < lo:
-        return _UNI_OWNER_COMPOSED, None
-    # Rule 2 — certified convex/concave on the box: the exact envelope + secant is
-    # tight (and for a convex function equals the hull), so prefer it.
-    curvature = _composite_curvature(expr, model, var, flat_idx, lo, hi, box)
-    if curvature is not None:
-        return _UNI_OWNER_EXACT, curvature
-    # A pinned (near-degenerate) box is handled by the exact-pin path, not the hull.
-    if hi - lo <= _COMPOSITE_CURV_TOL:
-        return _UNI_OWNER_COMPOSED, None
-    # Rule 3 — neither convex nor concave, finite box: the exact 1-D hull.
-    return _UNI_OWNER_HULL, None
-
-
 def _univariate_dispatch_owner(
     expr: Expression,
     model: Model,
@@ -3850,8 +3796,46 @@ def _univariate_dispatch_owner(
     flat_types: list[VarType],
     box: dict,
 ) -> str:
-    """The dominance-order owner alone (see :func:`_univariate_dispatch`)."""
-    return _univariate_dispatch(expr, model, n_orig, flat_lb, flat_ub, flat_types, box)[0]
+    """Dominance-order owner of a single-variable nonlinear composite ``expr``.
+
+    Returns one of ``_UNI_OWNER_{NONE,TABLE,EXACT,HULL,COMPOSED}`` (§2.4 rules
+    1..4). The order encodes the arbitration: an exact finite-domain table (rule
+    1) beats a certified convex/concave envelope (rule 2), which beats the exact
+    1-D hull (rule 3), which beats the composed fallback (rule 4). Only ``EXACT``
+    and ``HULL`` are claimed by the composite-univariate collector; ``TABLE``
+    defers to the finite-domain trig-square table, ``COMPOSED``/``NONE`` fall
+    through to the existing composed relaxation. This is a **decision only** — it
+    reuses the same curvature/finite-domain/box helpers the collector uses, so
+    wiring it changes no envelope math, only *who* owns each atom.
+    """
+    # Only nodes the composite path could own at all (the widened, H-UNI-inclusive
+    # candidate set); everything else is owned elsewhere (bare monomial, affine
+    # square/power, univariate-of-affine, product, …).
+    if not _should_claim_composite(expr, model, n_orig, allow_general=True):
+        return _UNI_OWNER_NONE
+    # Rule 1 — a tabulatable trig-square over a small integer domain: the exact
+    # per-point table is tighter than any continuous envelope.
+    if _defers_to_finite_domain_trig_table(expr, model, n_orig, flat_types, flat_lb, flat_ub):
+        return _UNI_OWNER_TABLE
+    ref = _composite_referenced_var(expr, model)
+    if ref is None:
+        return _UNI_OWNER_NONE
+    var, flat_idx = ref
+    lo = float(flat_lb[flat_idx])
+    hi = float(flat_ub[flat_idx])
+    # Effectively-unbounded (or degenerate) box: a 1-D hull over a ~1e20-wide box
+    # is numerically meaningless (cert:LR-3), so fall back to the composed path.
+    if not (_is_effectively_finite(lo) and _is_effectively_finite(hi)) or hi < lo:
+        return _UNI_OWNER_COMPOSED
+    # Rule 2 — certified convex/concave on the box: the exact envelope + secant is
+    # tight (and for a convex function equals the hull), so prefer it.
+    if _composite_curvature(expr, model, var, flat_idx, lo, hi, box) is not None:
+        return _UNI_OWNER_EXACT
+    # A pinned (near-degenerate) box is handled by the exact-pin path, not the hull.
+    if hi - lo <= _COMPOSITE_CURV_TOL:
+        return _UNI_OWNER_COMPOSED
+    # Rule 3 — neither convex nor concave, finite box: the exact 1-D hull.
+    return _UNI_OWNER_HULL
 
 
 def _affine_base_power_curvature(expr: Expression, model: Model, box: dict) -> Optional[str]:
@@ -4108,29 +4092,33 @@ def _collect_composite_univariate_relaxations(
 
     box = _build_convexity_box(model, flat_lb, flat_ub)
     base_x = np.zeros(n_orig, dtype=np.float64)
+    allow_general = _univariate_envelope_enabled()
     flat_types = _flat_variable_types(model)
 
     def maybe_add(expr: Expression) -> bool:
-        """Attempt to lift ``expr`` as a single-variable composite, owner chosen by
-        the canonical dominance dispatch (issue #632, R1.2). Returns True when the
-        node was claimed (as EXACT or HULL) — ``visit`` must then not descend and
-        re-lift its sub-terms. The dispatch is the single arbitration point that
-        replaced the hand-maintained ``_should_claim_composite(allow_general=…)`` +
-        finite-domain-table defer-list; the 1-D hull (rule 3) is now always on, no
-        longer gated by ``DISCOPT_UNIVARIATE_ENVELOPE``."""
+        """Attempt to lift ``expr`` as a composite. Returns True when it was
+        claimed *as a general single-variable hull composite* (a ``**2``/``+``
+        node the standard path would relax only via composition) — in that case
+        ``visit`` must not descend and re-lift the sub-terms. Convex/concave
+        claims return False so descent is unchanged from prior main (byte-identity
+        when the flag is OFF)."""
         nonlocal col_idx
         eid = id(expr)
         if eid in seen or eid in claimed_ids:
             return False
-        owner, dispatch_curvature = _univariate_dispatch(
-            expr, model, n_orig, flat_lb, flat_ub, flat_types, box
-        )
-        # Only EXACT (rule 2) and HULL (rule 3) are claimed here; TABLE (rule 1),
-        # COMPOSED (rule 4) and NONE are owned elsewhere / fall back.
-        if owner not in (_UNI_OWNER_EXACT, _UNI_OWNER_HULL):
+        if not _should_claim_composite(expr, model, n_orig, allow_general=allow_general):
             return False
+        # Defer to the exact finite-domain trig-square table (tighter than H-UNI's
+        # continuous hull) for sin/cos of a small integer domain.
+        if allow_general and _defers_to_finite_domain_trig_table(
+            expr, model, n_orig, flat_types, flat_lb, flat_ub
+        ):
+            return False
+        # Is this node claimable by the *pre-existing* (curvature-certified) path?
+        # If so, treat it exactly as before (claim, but let visit descend).
+        _pre_existing_claim = _should_claim_composite(expr, model, n_orig, allow_general=False)
         ref = _composite_referenced_var(expr, model)
-        if ref is None:  # defensive: the dispatch already required a single var
+        if ref is None:
             return False
         var, flat_idx = ref
         lo = float(flat_lb[flat_idx])
@@ -4158,19 +4146,14 @@ def _collect_composite_univariate_relaxations(
             x = jnp.asarray(base_x).at[flat_idx].set(t)
             return float(np.asarray(grad_f(x)).ravel()[flat_idx])
 
-        # Reuse the curvature the dispatch already computed (owner EXACT carries it),
-        # avoiding a second expensive _composite_curvature call per composite node.
-        if owner == _UNI_OWNER_EXACT:
-            # Rule 2: certified convex/concave -> exact envelope. EXACT always
-            # carries a proven curvature (the dispatch computed it).
-            assert dispatch_curvature is not None
-            curvature: str = dispatch_curvature
+        curvature = _composite_curvature(expr, model, var, flat_idx, lo, hi, box)
+        if curvature is not None:
             env = _composite_envelope(curvature, lo, hi, value_fn, grad_fn)
             if env is None:
                 return False
             lower_lines, upper_lines, pin_value, col_bounds = env
-        else:
-            # Rule 3 (owner HULL): neither convex nor concave. Build the exact 1-D
+        elif allow_general:
+            # H-UNI: curvature is neither convex nor concave. Build the exact 1-D
             # convex/concave hull envelope (curvature-free, rigorous). Abstain
             # (fall back) if a proven-tight hull can't form.
             from discopt._jax.univariate_hull import univariate_hull_envelope
@@ -4194,6 +4177,8 @@ def _collect_composite_univariate_relaxations(
             lower_lines, upper_lines, col_bounds = hull
             pin_value = None
             curvature = "general"
+        else:
+            return False
 
         seen.add(eid)
         var_map[eid] = col_idx
@@ -4212,12 +4197,15 @@ def _collect_composite_univariate_relaxations(
         )
         bounds.append(col_bounds)
         col_idx += 1
-        # A claimed single-variable composite (EXACT or HULL) blocks descent: the
-        # whole node is already relaxed as one composite column in x, so descending
-        # would let another collector redundantly re-claim an inner sub-expression
+        # A *new* general (non-pre-existing) claim always blocks descent. When
+        # H-UNI is on, a pre-existing convex/concave composite ALSO blocks descent:
+        # the whole single-variable node is already relaxed as a composite in x, so
+        # descending would let H-UNI redundantly re-claim an inner sub-expression
         # (e.g. the ``x**2 + 1`` inside a claimed ``sqrt(x**2 + 1)``) — sound but a
-        # duplicate column.
-        return True
+        # duplicate column. When the flag is OFF, descent is unchanged from prior
+        # main (byte-identity: the general ``+``/``**2`` claims never fire, so
+        # descending into a convex composite claims nothing anyway).
+        return (not _pre_existing_claim) or allow_general
 
     def visit(expr: Expression) -> None:
         if maybe_add(expr):

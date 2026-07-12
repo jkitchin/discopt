@@ -1,21 +1,22 @@
-"""cert:LR-2 — flag-OFF relaxation byte-identity guardrail (post-R1.2 scope).
+"""cert:LR-2 (Path B) — flag-OFF relaxation byte-identity guardrail.
 
-**Update (#632 R1.2):** the composite univariate 1-D **hull** graduated to
-default-ON — it is now chosen by the canonical dominance dispatch and is no longer
-gated by ``DISCOPT_UNIVARIATE_ENVELOPE``. What remains flag-gated is the
-**aliased-monomial-hull** collector (``DISCOPT_UNIVARIATE_ENVELOPE``) and the
-**log-monomial** collector (``DISCOPT_LOG_MONOMIAL``) — both still purely additive.
+Path B ships the H-UNI / H-LOG envelopes as **purely additive** rows/columns
+collected inside :func:`build_milp_relaxation`, each guarded by a default-OFF env
+flag (``DISCOPT_UNIVARIATE_ENVELOPE`` / ``DISCOPT_LOG_MONOMIAL``). The soundness
+argument for shipping them is that when the flags are OFF the relaxation matrix is
+byte-identical to prior main: the collectors are never called, so no row/column is
+added and the composite-claim path stays at ``allow_general=False``.
 
-This guardrail therefore now proves the neutrality of those two *still-flag-gated*
-collectors: for every corpus instance it fingerprints the built LP
-``(_c, _A_ub, _b_ub, _bounds, _integrality)`` with the flags OFF and asserts it is
-identical to the fingerprint built with those collectors forced to their
-"code-absent" behavior (empty / disabled). Because the graduated composite hull is
-unconditional, it appears identically on both sides and cancels out. If they
-differ, an OFF path is leaking a row — a guardrail failure.
+The team-lead's lock-condition #1 is explicit: *prove* that neutrality with a test,
+do not assume it. This module does so at the relaxation-matrix level (the layer the
+additive rows actually touch): for every corpus instance it fingerprints the built
+LP ``(_c, _A_ub, _b_ub, _bounds, _integrality)`` with the flags OFF and asserts it
+is identical to the fingerprint built with the additive collectors forced to their
+"code-absent" behavior (empty / disabled). If they differ, an OFF path is leaking a
+row — a guardrail failure.
 
-It also asserts the graduated hull is a live default (nvs09's default relaxation
-carries the hull columns), so the mechanism is not inert (CLAUDE.md §3).
+It also asserts the lever is *real* (ON changes nvs09's relaxation), so the flag is
+not inert (CLAUDE.md §3).
 """
 
 from __future__ import annotations
@@ -108,17 +109,11 @@ def test_relaxation_off_byte_identical_corpus(name, monkeypatch):
     )
 
 
-def test_composite_hull_graduated_default_on_for_nvs09():
-    """R1.2 graduated the composite univariate 1-D hull to default-ON: it is now
-    chosen by the canonical dominance dispatch, no longer gated by
-    ``DISCOPT_UNIVARIATE_ENVELOPE``. nvs09's DEFAULT relaxation therefore carries
-    the hull columns for its ``(ln(x-2))**2``/``(ln(10-x))**2`` composites —
-    proving the hull is a live default (CLAUDE.md §3: not an inert flag), the whole
-    point of the #632 graduation."""
-    model = from_nl(str(_NL_DIR / "nvs09.nl"))
-    terms = classify_nonlinear_terms(model)
-    _relax, info = build_milp_relaxation(model, terms, DiscretizationState())
-    assert info["composite_relaxations"], (
-        "nvs09's default relaxation must include composite-hull columns (the hull "
-        "graduated default-ON in R1.2)"
-    )
+def test_flag_on_changes_nvs09_relaxation(monkeypatch):
+    """Flag ON must add rows to nvs09's relaxation — proves the envelope lever is
+    real, not an inert flag (CLAUDE.md §3)."""
+    monkeypatch.setenv("DISCOPT_UNIVARIATE_ENVELOPE", "0")
+    fp_off = _relaxation_fingerprint("nvs09")
+    monkeypatch.setenv("DISCOPT_UNIVARIATE_ENVELOPE", "1")
+    fp_on = _relaxation_fingerprint("nvs09")
+    assert fp_on != fp_off, "H-UNI ON must change nvs09's relaxation matrix"

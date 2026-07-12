@@ -90,20 +90,6 @@ class TestNonconvexContinuousSpatialRegressions:
     """Regression tests for nonconvex pure-continuous spatial dispatch."""
 
     def test_nonconvex_nlp_root_local_point_is_not_certified_optimal(self):
-        # A narrow Gaussian well: min -exp(-10000·(x-0.05)²) over x∈[0,1], global
-        # optimum -1.0 at the needle x=0.05. This guards the soundness invariant that
-        # a nonconvex, node-limited solve must NOT falsely certify optimality and must
-        # carry a valid dual bound (bound ≤ incumbent for min sense).
-        #
-        # Behavior change (#632, R1.2): the composite univariate 1-D hull graduated
-        # default-ON, so exp(-10000·(x-0.05)²) is now RELAXED (previously it hit the
-        # "cannot linearize" feasibility fallback with no usable bound). The solver
-        # therefore now produces a valid bound and its local search reaches the global
-        # needle (obj=-1.0) — an improvement — while STILL not certifying optimality
-        # (the 0.015% gap stays open under gap_tolerance=1e-6). The prior
-        # ``objective > -0.1`` assertion encoded the old "unrelaxable → weak incumbent"
-        # assumption and no longer holds; the assertions below pin the actual soundness
-        # contract instead.
         m = Model("narrow_nonconvex_well")
         x = m.continuous("x", lb=0.0, ub=1.0)
         m.minimize(-dm.exp(-10000.0 * (x - 0.05) ** 2))
@@ -111,15 +97,11 @@ class TestNonconvexContinuousSpatialRegressions:
         result = m.solve(nlp_solver="ipm", time_limit=10.0, gap_tolerance=1e-6, max_nodes=1)
 
         assert result.convex_fast_path is False
-        # No false certification on a nonconvex, node-limited solve.
         assert result.status != "optimal"
         assert result.objective is not None
+        assert result.objective > -0.1
         assert result.node_count > 1
-        # Certificate soundness: the dual bound must be valid — a real lower bound that
-        # never crosses the incumbent (min sense: bound ≤ incumbent). This is the true
-        # invariant the test guards, independent of how tight the relaxation is.
-        assert result.bound is not None
-        assert result.bound <= result.objective + 1e-6
+        assert result.bound is None or result.bound < -0.5
 
     def test_nonconvex_continuous_qp_minimize_uses_spatial_bb(self):
         m = Model("nonconvex_qp_min")
