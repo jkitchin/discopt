@@ -3542,41 +3542,6 @@ def _composite_referenced_var(expr: Expression, model: Model) -> Optional[tuple[
     return var, _compute_var_offset(var, model)
 
 
-def _diag_hessian_enclosure(sym_expr: Expression, model: Model, var: Variable, flat_idx: int):
-    """Sound ``(f''_lo, f''_hi)`` enclosure of ``d²/dx²`` of ``sym_expr`` over ``x∈[a,b]``.
-
-    Bridges the symbolic single-variable composite to the rigorous second-order
-    remainder in :func:`univariate_hull.univariate_hull_envelope` (#632 review
-    finding 2). The returned callable yields, per cell ``[a, b]``, a sound interval
-    enclosure of the ``(flat_idx, flat_idx)`` Hessian diagonal via
-    :func:`convexity.interval_ad.interval_hessian`. Because the composite depends on
-    exactly one scalar variable (``_composite_referenced_var`` enforces
-    ``var.size == 1``), that diagonal entry is a function of ``x`` alone, so the
-    single-coordinate box override is exact and the other variables' boxes are
-    irrelevant to it. Any abstention (unbounded/failed enclosure) returns
-    ``(-inf, +inf)`` so the envelope refuses rather than ship an uncertified facet.
-    """
-    from discopt._jax.convexity.interval import Interval
-    from discopt._jax.convexity.interval_ad import interval_hessian
-
-    def enclosure(a: float, b: float) -> tuple[float, float]:
-        try:
-            iad = interval_hessian(
-                sym_expr, model, box={var: Interval(np.array([a]), np.array([b]))}
-            )
-            h_lo = np.asarray(iad.hess.lo, dtype=float)
-            h_hi = np.asarray(iad.hess.hi, dtype=float)
-            d_lo = float(h_lo[flat_idx, flat_idx])
-            d_hi = float(h_hi[flat_idx, flat_idx])
-        except Exception:
-            return (float("-inf"), float("inf"))
-        if not (np.isfinite(d_lo) and np.isfinite(d_hi)):
-            return (float("-inf"), float("inf"))
-        return (d_lo, d_hi)
-
-    return enclosure
-
-
 def _univariate_envelope_enabled() -> bool:
     """H-UNI feature flag (``DISCOPT_UNIVARIATE_ENVELOPE``, default **OFF** — opt-in).
 
@@ -4188,27 +4153,16 @@ def _collect_composite_univariate_relaxations(
                 return False
             lower_lines, upper_lines, pin_value, col_bounds = env
         elif allow_general:
-            # H-UNI: curvature is neither convex nor concave. Build the exact 1-D
-            # convex/concave hull envelope (curvature-free, rigorous). Abstain
-            # (fall back) if a proven-tight hull can't form.
+            # H-UNI: curvature is neither convex nor concave. Build the analytical
+            # 1-D convex/concave envelope (curvature-verified tangent/secant, no
+            # sampling — lever-a §0.1). Abstain (fall back) if a proven hull can't
+            # form (pathological curvature / unbounded interval Hessian).
             from discopt._jax.univariate_hull import univariate_hull_envelope
 
             if hi - lo <= _COMPOSITE_CURV_TOL:
                 return False  # pinned — the exact-pin path handles it
 
-            f_batched = jax.vmap(lambda xv: jnp.reshape(f(xv), ()))
-
-            def value_batch(xarr: np.ndarray) -> np.ndarray:
-                # Evaluate f at many x values in one vmapped JAX call (the sole
-                # variable is flat_idx; all other coordinates are irrelevant to a
-                # single-var composite, so the zero base row is fine).
-                pts = np.tile(base_x, (len(xarr), 1))
-                pts[:, flat_idx] = xarr
-                return np.asarray(f_batched(jnp.asarray(pts))).ravel()
-
-            hull = univariate_hull_envelope(
-                lo, hi, value_batch, _diag_hessian_enclosure(expr, model, var, flat_idx)
-            )
+            hull = univariate_hull_envelope(expr, model, var, flat_idx, lo, hi)
             if hull is None:
                 return False
             lower_lines, upper_lines, col_bounds = hull
@@ -4342,20 +4296,14 @@ def _collect_aliased_monomial_hull_relaxations(
         return out
 
     try:
-        import jax
-        import jax.numpy as jnp
-
-        from discopt._jax.dag_compiler import compile_expression
         from discopt._jax.univariate_hull import univariate_hull_envelope
     except Exception:
         return out
 
-    base_x = np.zeros(n_orig, dtype=np.float64)
-    # Caches scoped to *this* model instance (attributes, not module globals), so a
-    # freed model's expression ids can never be reused to serve a stale envelope to
-    # a different model. Persist across the per-node relaxation rebuilds of one
-    # solve, where the alias expression objects and their ids are stable.
-    batch_cache: dict[int, Callable] = model.__dict__.setdefault("_lr2_alias_batch_cache", {})
+    # Env cache scoped to *this* model instance (an attribute, not a module global),
+    # so a freed model's expression ids can never serve a stale envelope to a
+    # different model. Persists across the per-node relaxation rebuilds of one solve,
+    # where the alias expression objects and their ids are stable.
     env_cache: dict = model.__dict__.setdefault("_lr2_alias_env_cache", {})
     for (aux_idx, p), aux_col in monomial_var_map.items():
         h = defs.get(aux_idx)
@@ -4378,42 +4326,18 @@ def _collect_aliased_monomial_hull_relaxations(
             or hi - lo <= _COMPOSITE_CURV_TOL
         ):
             continue
-        # Compiling + vmapping the alias body is the expensive step; cache the
-        # traced batch evaluator across nodes (the box changes per node, but the
-        # function of x does not). Keyed by the stable alias-expression identity.
-        f_batched = batch_cache.get(id(h))
-        if f_batched is None:
-            try:
-                f = compile_expression(h, model)
-                f_batched = jax.vmap(lambda xv, _f=f: jnp.reshape(_f(xv), ()))
-            except Exception:
-                continue
-            batch_cache[id(h)] = f_batched
-
-        pw = float(p)
-
         # Envelope is a function of (alias, exponent, box); cache on the box so
-        # nodes that did not branch this variable reuse the root envelope instead
-        # of re-sampling. Box key rounded to a tight grid (well below any envelope
-        # sensitivity) so float jitter does not defeat the cache.
+        # nodes that did not branch this variable reuse the root envelope. Box key
+        # rounded to a tight grid (well below any envelope sensitivity) so float
+        # jitter does not defeat the cache.
         ckey = (id(h), int(p), round(lo, 12), round(hi, 12))
         hull = env_cache.get(ckey, _CACHE_MISS)
         if hull is _CACHE_MISS:
-
-            def value_batch(xarr: np.ndarray, _fb=f_batched, _fi=flat_idx, _pw=pw) -> np.ndarray:
-                pts = np.tile(base_x, (len(xarr), 1))
-                pts[:, _fi] = xarr
-                hv = np.asarray(_fb(jnp.asarray(pts))).ravel()
-                return np.asarray(hv**_pw, dtype=np.float64)  # G(x) = h(x)**p
-
-            # Certify the facets between grid nodes with a sound interval Hessian of
-            # the SAME lifted function G(x) = h(x)**p (#632 review finding 2). ``p`` is
-            # the integer monomial exponent (map key type), so ``h ** p`` is exactly
-            # the function ``value_batch`` samples as ``h(x)**pw`` (pw == float(p)).
+            # Analytical 1-D envelope of the lifted monomial G(x) = h(x)**p directly
+            # in the original variable x (no sampling — lever-a §0.1). ``p`` is the
+            # integer monomial exponent (map key type), so ``h ** p`` is exactly G.
             g_expr = h**p
-            hull = univariate_hull_envelope(
-                lo, hi, value_batch, _diag_hessian_enclosure(g_expr, model, var, flat_idx)
-            )
+            hull = univariate_hull_envelope(g_expr, model, var, flat_idx, lo, hi)
             env_cache[ckey] = hull
         if hull is None:
             continue
