@@ -249,18 +249,19 @@ discopt keeps its core lean and ships domain-specific application builders and
 teaching tools as separate **plugin packages**. Each is a PEP 420 namespace
 package: once installed, its modules import under `discopt.<name>` unchanged,
 and any CLI verbs it registers (through the `"discopt.cli"` entry-point group)
-become available as `discopt <subcommand>`. None are on PyPI yet — install
+become available as `discopt <subcommand>`. Some are on PyPI; the rest install
 directly from the repository.
 
 | Plugin | Install | Provides |
 |---|---|---|
-| **[discopt-doe](https://github.com/jkitchin/discopt-doe)** | `pip install "git+https://github.com/jkitchin/discopt-doe.git"` | Model-based **design of experiments** — D/A/E-optimality, identifiability, model discrimination — as a `discopt doe ...` CLI loop (templates/new/status/fit/extend/gui) around an `.xlsx` workbook, with an optional Streamlit GUI. |
+| **[discopt-doe](https://github.com/jkitchin/discopt-doe)** | `pip install discopt-doe` | Model-based **design of experiments** — D/A/E-optimality, identifiability, model discrimination — as a `discopt doe ...` CLI loop (templates/new/status/fit/extend/gui) around an `.xlsx` workbook, with an optional Streamlit GUI. |
+| **[discopt-aggregation](https://github.com/jkitchin/discopt-aggregation)** | `pip install discopt-aggregation` | **Variable aggregation** (reduced-space presolve): substitutes variables defined by equality constraints to yield a smaller reduced-space formulation, then recovers them from the solution ([Naik et al., arXiv:2502.13869](https://arxiv.org/abs/2502.13869)). Exposes `aggregate`/`solve` under `discopt.aggregation`. |
 | **[discopt-apps](https://github.com/jkitchin/discopt-apps)** | `pip install "git+https://github.com/jkitchin/discopt-apps.git"` | **Application builders** for the modeling language: AC optimal power flow (`discopt.opf`) and pooling (`discopt.pooling`). |
 | **[discopt-course](https://github.com/jkitchin/discopt-course)** | `pip install "git+https://github.com/jkitchin/discopt-course.git"` | An **optimization course** plus an interactive `discopt tutor ...` CLI (`discopt.course`) that walks through modeling and solving exercises. |
 
 ```bash
 # Example: add the design-of-experiments plugin
-pip install "git+https://github.com/jkitchin/discopt-doe.git"
+pip install discopt-doe
 discopt doe --help          # the plugin's verbs are now under the `discopt` CLI
 ```
 
@@ -278,7 +279,7 @@ discopt install-skills   # Install Claude Code slash commands and agents
 External packages can add subcommands through the `"discopt.cli"` entry-point
 group (see the protocol notes in `python/discopt/cli.py`). For example, the
 [discopt-doe](https://github.com/jkitchin/discopt-doe) plugin
-(`pip install "git+https://github.com/jkitchin/discopt-doe.git"`) adds
+(`pip install discopt-doe`) adds
 `discopt doe ...` — a model-based design-of-experiments loop
 (templates/new/status/fit/extend/gui) around an `.xlsx` workbook, with an
 optional Streamlit GUI. See [Plugins](#plugins) above for the full list.
