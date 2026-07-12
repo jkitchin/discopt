@@ -158,6 +158,10 @@ class AuditReport:
     defer_fires: dict[str, int]
     conflicts: dict[int, tuple[str, ...]]
     fingerprint: str
+    # Raw-expression ids the federation actually claimed, per owner family (from
+    # the ``expr_id`` field of the emitted relaxation records). These are the
+    # ids the R1.2 boundary census maps onto canonical atoms.
+    claimed_expr_ids: dict[str, frozenset[int]] = dataclasses.field(default_factory=dict)
 
     @property
     def n_claims(self) -> int:
@@ -165,6 +169,12 @@ class AuditReport:
 
     def owners(self) -> frozenset[str]:
         return frozenset(self.columns)
+
+    def all_claimed_expr_ids(self) -> frozenset[int]:
+        out: set[int] = set()
+        for ids in self.claimed_expr_ids.values():
+            out |= ids
+        return frozenset(out)
 
 
 def _column_claims(info: dict) -> list[tuple[int, str]]:
@@ -179,6 +189,27 @@ def _column_claims(info: dict) -> list[tuple[int, str]]:
         for col in (info.get(key, {}) or {}).values():
             claims.append((int(col), key))
     return claims
+
+
+def _expr_id_claims(info: dict) -> dict[str, frozenset[int]]:
+    """Per-family set of raw-expression ids the federation claimed.
+
+    Only the list-owner relaxation records carry an ``expr_id`` (the id of the
+    original ``Expression`` node claimed); the structurally-keyed product side is
+    keyed by (index) tuples, not expr ids, so it is omitted here.
+    """
+    out: dict[str, set[int]] = {}
+    for key, (id_field, _col_field) in _LIST_OWNERS.items():
+        # Only families whose id field is a genuine expression id carry a claim
+        # on a raw Expression node; univariate_square keys by base column, not
+        # expr id, so it is excluded from the expr-id census.
+        if id_field != "expr_id":
+            continue
+        for rel in info.get(key, []) or []:
+            eid = getattr(rel, id_field, None)
+            if isinstance(eid, int):
+                out.setdefault(key, set()).add(eid)
+    return {k: frozenset(v) for k, v in out.items()}
 
 
 def audit_build(model: Any, terms: Any = None, disc: Any = None) -> AuditReport:
@@ -206,6 +237,7 @@ def audit_build(model: Any, terms: Any = None, disc: Any = None) -> AuditReport:
         columns={k: frozenset(v) for k, v in columns.items()},
         defer_fires=dict(fires),
         conflicts={c: tuple(v) for c, v in conflicts.items()},
+        claimed_expr_ids=_expr_id_claims(info),
         fingerprint=relaxation_fingerprint(relax),
     )
 
