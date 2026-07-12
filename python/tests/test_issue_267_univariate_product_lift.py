@@ -194,8 +194,14 @@ def test_univariate_product_not_dropped(make_constraint, desc, caplog):
         if "omitting constraint" in rec.message or "cannot be linearized" in rec.message
     ]
     assert not omitted, f"{desc}: constraint was dropped: {omitted}"
-    # at least one univariate aux + one product aux must have been allocated.
-    assert info["univariate_relaxations"], f"{desc}: no univariate aux lifted"
+    # The single-variable factor is lifted, so the constraint is not dropped. Its
+    # owner may be the univariate-of-affine path OR the composite dominance
+    # dispatch (#632 R1.2: a single-variable composite like ``exp(x-x*x)`` is now
+    # owned as a composite column rather than the issue-267 univariate-product
+    # walk — sound, and at least as tight).
+    assert info["univariate_relaxations"] or info["composite_relaxations"], (
+        f"{desc}: no single-variable aux lifted"
+    )
     n_products = len(info["bilinear"]) + len(info["trilinear"]) + len(info["multilinear"])
     assert n_products >= 1, f"{desc}: no product envelope allocated"
 
