@@ -322,6 +322,39 @@ class TestMaximize:
 # ─────────────────────────────────────────────────────────────
 
 
+class _RecordingProblem:
+    """Delegating proxy around a ``pounce.Problem`` that records one method's arg.
+
+    pounce 0.8 makes ``Problem`` a compiled object (``pounce._pounce.Problem``)
+    whose attributes are **read-only**, so a call spy can no longer be installed via
+    ``monkeypatch.setattr(prob, "set_kkt_schur_block", ...)`` — it raises
+    ``AttributeError: ... is read-only``. discopt consumes the Problem purely by
+    method dispatch (``add_option`` / ``set_kkt_schur_block`` / ``set_ordering`` /
+    ``solve``), so wrapping the real object in a pure-Python proxy lets the test
+    observe the forwarded argument verbatim without mutating the compiled object.
+    Everything except the intercepted method delegates straight through."""
+
+    def __init__(self, real, record, method, key):
+        object.__setattr__(self, "_real", real)
+        object.__setattr__(self, "_record", record)
+        object.__setattr__(self, "_method", method)
+        object.__setattr__(self, "_key", key)
+
+    def __getattr__(self, name):
+        real = object.__getattribute__(self, "_real")
+        attr = getattr(real, name)  # raises AttributeError if absent (matches real)
+        if name == object.__getattribute__(self, "_method") and callable(attr):
+            record = object.__getattribute__(self, "_record")
+            key = object.__getattribute__(self, "_key")
+
+            def _spy(arg, *a, **k):
+                record[key] = list(arg)
+                return attr(arg, *a, **k)
+
+            return _spy
+        return attr
+
+
 class TestSchurPassthrough:
     def _eq_model(self):
         """min x^2 + y^2 s.t. x + y == 2 => optimal at (1, 1). n=2, m=1."""
@@ -340,15 +373,8 @@ class TestSchurPassthrough:
         def make_problem(*args, **kwargs):
             prob = original_problem(*args, **kwargs)
             if hasattr(prob, "set_kkt_schur_block"):
-                orig = prob.set_kkt_schur_block
-
-                def spy(block):
-                    captured["block"] = list(block)
-                    return orig(block)
-
-                monkeypatch.setattr(prob, "set_kkt_schur_block", spy, raising=False)
-            else:
-                captured["no_method"] = True
+                return _RecordingProblem(prob, captured, "set_kkt_schur_block", "block")
+            captured["no_method"] = True
             return prob
 
         monkeypatch.setattr(pounce, "Problem", make_problem)
@@ -398,15 +424,8 @@ class TestSchurPassthrough:
         def make_problem(*args, **kwargs):
             prob = original_problem(*args, **kwargs)
             if hasattr(prob, "set_ordering"):
-                orig = prob.set_ordering
-
-                def spy(order):
-                    captured["order"] = list(order)
-                    return orig(order)
-
-                monkeypatch.setattr(prob, "set_ordering", spy, raising=False)
-            else:
-                captured["no_method"] = True
+                return _RecordingProblem(prob, captured, "set_ordering", "order")
+            captured["no_method"] = True
             return prob
 
         monkeypatch.setattr(pounce, "Problem", make_problem)
