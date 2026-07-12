@@ -27,10 +27,10 @@ from discopt._jax.factorable_reform import (
     factorable_reformulate,
     has_factorable_work,
 )
-
-pytestmark = [pytest.mark.claim_boundary]
 from discopt._jax.term_classifier import classify_nonlinear_terms
 from discopt.modeling.core import FunctionCall, Variable
+
+pytestmark = [pytest.mark.claim_boundary]
 
 _DATA = Path(__file__).parent / "data" / "minlplib"
 _NL_DATA = Path(__file__).parent / "data" / "minlplib_nl"
