@@ -227,6 +227,33 @@ def test_refusal_custom_call_is_opaque():
     assert reconstruct(node, m) is cc
 
 
+def test_refusal_zero_parameter_divisor_is_opaque():
+    """Dividing by a zero-valued parameter folds to const(0)**-1; canonicalize must
+    route it to opaque, not raise ZeroDivisionError out to the caller."""
+    m = dm.Model()
+    x = m.continuous("x", lb=1, ub=3)
+    p = m.parameter("p", 0.0)
+    e = x / p
+    m.minimize(e)
+    dag = canonicalize(m)  # must not raise
+    node = dag.cnode_of(e)
+    assert node.is_opaque
+    assert reconstruct(node, m) is e
+
+
+def test_refusal_negative_constant_fractional_power_is_opaque():
+    """A negative constant base with a fractional exponent folds to a complex;
+    canonicalize must route it to opaque, not raise TypeError out to the caller."""
+    m = dm.Model()
+    y = m.continuous("y", lb=1, ub=3)
+    e = y * (Constant(-2.0) ** Constant(0.5))
+    m.minimize(e)
+    dag = canonicalize(m)  # must not raise
+    node = dag.cnode_of(e)
+    # the surrounding product surfaces the undefined constant power as opaque.
+    assert node.is_opaque or any(c.is_opaque for c in node.children)
+
+
 def test_division_is_negative_exponent_product():
     m = dm.Model()
     x = m.continuous("x", lb=1, ub=3)

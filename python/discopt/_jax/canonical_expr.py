@@ -236,8 +236,19 @@ class _Canonicalizer:
             if exp == 0.0:
                 continue
             if base.kind == "const":
-                # const**exp is a constant multiplier.
-                coef_acc *= float(base.payload) ** exp
+                # const**exp is a constant multiplier. It is not total over the
+                # reals: 0**(negative) raises (e.g. division by a zero-valued
+                # parameter) and (negative)**(fractional) yields a complex. Both
+                # mean this node has no sound real canonical form, so route it to
+                # opaque rather than letting the exception escape canonicalize()
+                # (the module's "never raises to the caller" contract).
+                try:
+                    factor = float(base.payload) ** exp
+                except ArithmeticError as exc:
+                    raise UnsupportedCanonicalization("undefined constant power") from exc
+                if isinstance(factor, complex):
+                    raise UnsupportedCanonicalization("non-real constant power")
+                coef_acc *= factor
                 continue
             if base.kind == "prod":
                 inner_exps = base.payload[0]
