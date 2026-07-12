@@ -14,7 +14,7 @@ informational count, not a failure.
 
 **What still guards coefficient-level neutrality, and what does not** (per the
 #636 review): ``test_lr2_offneutral_relaxation.py`` (#630) compares two builds
-*from current code* (OFF vs code-absent), so it rigorously proves the LR-2/H-UNI
+*from current code* (OFF vs code-absent), so it rigorously proves the LR-2/H-LOG
 collectors are inert when off — but it is NOT a frozen-reference gate: a uniform
 coefficient change from a refactor would move both fingerprints identically and
 still pass. This PR needs no frozen-reference coefficient gate because its only

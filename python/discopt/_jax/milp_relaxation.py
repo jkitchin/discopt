@@ -3542,34 +3542,6 @@ def _composite_referenced_var(expr: Expression, model: Model) -> Optional[tuple[
     return var, _compute_var_offset(var, model)
 
 
-def _univariate_envelope_enabled() -> bool:
-    """H-UNI feature flag (``DISCOPT_UNIVARIATE_ENVELOPE``, default **OFF** — opt-in).
-
-    Task ``cert:LR-2`` / ``cert:LR-3``. When ON, a maximal single-variable subtree
-    whose certified curvature is *neither* convex nor concave is lifted with the
-    exact 1-D convex/concave hull envelope (:mod:`discopt._jax.univariate_hull`)
-    instead of falling to a looser composed relaxation. Set
-    ``DISCOPT_UNIVARIATE_ENVELOPE=1`` to opt in.
-
-    **Graduation deferred (kept default-OFF).** The gate result was sound (nvs09
-    certifies, tree 215→3, ``incorrect_count = 0``), but graduating H-UNI default-ON
-    surfaced a class of *claim-boundary collisions*: as an additional overlapping
-    "claimer" layered onto the federated lifted-relaxation path, H-UNI diverts terms
-    the dedicated exact machinery already handles (bare-monomial lifts, the square
-    lift, the issue-267 univariate-product path, the finite-domain trig table),
-    arbitrated by a hand-maintained defer-list in :func:`_should_claim_composite`.
-    Those collisions are order-masked under pytest-xdist, so a green parallel suite
-    is not proof of no silent divert. The principled home for graduating H-UNI is the
-    AVM/factorable-canonicalization work (``docs/dev/maingo-parity-plan.md``), where a
-    single canonical normal form gives one envelope per atom and the defer-list
-    disappears. Until then H-UNI ships as a sound opt-in flag; OFF is byte-identical
-    to prior main (the #630 fingerprint guard proves it), and the LR-3 soundness fixes
-    (no hull over effectively-unbounded boxes; the claim-boundary defers) still harden
-    the opt-in ON path.
-    """
-    return os.environ.get("DISCOPT_UNIVARIATE_ENVELOPE", "0") != "0"
-
-
 def _log_monomial_enabled() -> bool:
     """H-LOG feature flag (``DISCOPT_LOG_MONOMIAL``, default **OFF**).
 
@@ -3602,14 +3574,13 @@ def _should_claim_composite(
       only claimed here; they still need certified curvature before any
       envelope is emitted.
 
-    When ``allow_general`` (H-UNI, ``DISCOPT_UNIVARIATE_ENVELOPE``), *additionally*
-    claim single-variable additive/square composites that the standard path lifts
-    only via a *composed* (looser) relaxation — a ``**2`` of a non-bare base, or a
-    ``+``/``-`` sum of single-variable nonlinear terms — so the exact 1-D hull
-    envelope can replace the composition. The curvature-free hull builder in
-    :func:`_collect_composite_univariate_relaxations` handles these even when they
-    are neither convex nor concave; claiming here only *offers* the node, the
-    collector still abstains (falls back unchanged) if a rigorous hull can't form.
+    ``allow_general`` widens the candidate set to *additionally* recognise
+    single-variable additive/square composites that the standard path lifts only
+    via a *composed* (looser) relaxation — a ``**2`` of a non-bare base, or a
+    ``+``/``-`` sum of single-variable nonlinear terms. It is used only by the
+    dominance dispatcher (:func:`_univariate_dispatch_owner`) to enumerate the
+    universe of single-variable composites for ownership arbitration; the
+    composite collector itself claims only curvature-certified (exact) nodes.
     """
     # Audit hook (issue #632): counts consultations of the legacy defer-list under
     # a claim_audit.defer_audit() context; a genuine no-op otherwise. The canonical
@@ -3783,8 +3754,7 @@ def _expr_has_nonlinear_subterm(expr: Expression) -> bool:
 _UNI_OWNER_NONE = "none"  # not a single-variable composite this path owns
 _UNI_OWNER_TABLE = "table"  # rule 1: exact finite-domain table (small integer domain)
 _UNI_OWNER_EXACT = "exact"  # rule 2: certified convex/concave -> exact envelope + secant
-_UNI_OWNER_HULL = "hull"  # rule 3: neither convex nor concave, finite box -> exact 1-D hull
-_UNI_OWNER_COMPOSED = "composed"  # rule 4: unbounded/pinned box -> composed fallback
+_UNI_OWNER_COMPOSED = "composed"  # rule 3: neither/unbounded/pinned box -> composed fallback
 
 
 def _univariate_dispatch_owner(
@@ -3798,13 +3768,14 @@ def _univariate_dispatch_owner(
 ) -> str:
     """Dominance-order owner of a single-variable nonlinear composite ``expr``.
 
-    Returns one of ``_UNI_OWNER_{NONE,TABLE,EXACT,HULL,COMPOSED}`` (§2.4 rules
-    1..4). The order encodes the arbitration: an exact finite-domain table (rule
-    1) beats a certified convex/concave envelope (rule 2), which beats the exact
-    1-D hull (rule 3), which beats the composed fallback (rule 4). Only ``EXACT``
-    and ``HULL`` are claimed by the composite-univariate collector; ``TABLE``
-    defers to the finite-domain trig-square table, ``COMPOSED``/``NONE`` fall
-    through to the existing composed relaxation. This is a **decision only** — it
+    Returns one of ``_UNI_OWNER_{NONE,TABLE,EXACT,COMPOSED}`` in tightness order
+    **table > exact > composed**: an exact finite-domain table (rule 1) beats a
+    certified convex/concave envelope (rule 2), which beats the composed fallback
+    (rule 3). Only ``EXACT`` is claimed by the composite-univariate collector;
+    ``TABLE`` defers to the finite-domain trig-square table, ``COMPOSED``/``NONE``
+    fall through to the existing composed relaxation. (The former ``HULL`` tier —
+    a non-convex 1-D hull — was deleted with H-UNI; non-convex composites are now
+    recovered through the factorable AVM, #632.) This is a **decision only** — it
     reuses the same curvature/finite-domain/box helpers the collector uses, so
     wiring it changes no envelope math, only *who* owns each atom.
     """
@@ -3823,19 +3794,17 @@ def _univariate_dispatch_owner(
     var, flat_idx = ref
     lo = float(flat_lb[flat_idx])
     hi = float(flat_ub[flat_idx])
-    # Effectively-unbounded (or degenerate) box: a 1-D hull over a ~1e20-wide box
-    # is numerically meaningless (cert:LR-3), so fall back to the composed path.
+    # Effectively-unbounded (or degenerate) box: fall back to the composed path.
     if not (_is_effectively_finite(lo) and _is_effectively_finite(hi)) or hi < lo:
         return _UNI_OWNER_COMPOSED
     # Rule 2 — certified convex/concave on the box: the exact envelope + secant is
     # tight (and for a convex function equals the hull), so prefer it.
     if _composite_curvature(expr, model, var, flat_idx, lo, hi, box) is not None:
         return _UNI_OWNER_EXACT
-    # A pinned (near-degenerate) box is handled by the exact-pin path, not the hull.
-    if hi - lo <= _COMPOSITE_CURV_TOL:
-        return _UNI_OWNER_COMPOSED
-    # Rule 3 — neither convex nor concave, finite box: the exact 1-D hull.
-    return _UNI_OWNER_HULL
+    # Rule 3 — neither convex nor concave (or a pinned/near-degenerate box): the
+    # composed fallback. The exact 1-D hull that used to own this case (H-UNI) is
+    # deleted; non-convex composites are recovered through the factorable AVM.
+    return _UNI_OWNER_COMPOSED
 
 
 def _affine_base_power_curvature(expr: Expression, model: Model, box: dict) -> Optional[str]:
@@ -4092,31 +4061,22 @@ def _collect_composite_univariate_relaxations(
 
     box = _build_convexity_box(model, flat_lb, flat_ub)
     base_x = np.zeros(n_orig, dtype=np.float64)
-    allow_general = _univariate_envelope_enabled()
-    flat_types = _flat_variable_types(model)
 
     def maybe_add(expr: Expression) -> bool:
-        """Attempt to lift ``expr`` as a composite. Returns True when it was
-        claimed *as a general single-variable hull composite* (a ``**2``/``+``
-        node the standard path would relax only via composition) — in that case
-        ``visit`` must not descend and re-lift the sub-terms. Convex/concave
-        claims return False so descent is unchanged from prior main (byte-identity
-        when the flag is OFF)."""
+        """Attempt to lift ``expr`` as a curvature-certified composite.
+
+        Always returns False (never blocks descent). This path only emits the
+        EXACT convex/concave envelope; the non-convex 1-D hull (H-UNI) that used
+        to block descent when it claimed a whole general composite is deleted —
+        non-convex composites are recovered through the factorable AVM (#632).
+        A convex/concave claim never blocked descent, so behaviour is unchanged.
+        """
         nonlocal col_idx
         eid = id(expr)
         if eid in seen or eid in claimed_ids:
             return False
-        if not _should_claim_composite(expr, model, n_orig, allow_general=allow_general):
+        if not _should_claim_composite(expr, model, n_orig):
             return False
-        # Defer to the exact finite-domain trig-square table (tighter than H-UNI's
-        # continuous hull) for sin/cos of a small integer domain.
-        if allow_general and _defers_to_finite_domain_trig_table(
-            expr, model, n_orig, flat_types, flat_lb, flat_ub
-        ):
-            return False
-        # Is this node claimable by the *pre-existing* (curvature-certified) path?
-        # If so, treat it exactly as before (claim, but let visit descend).
-        _pre_existing_claim = _should_claim_composite(expr, model, n_orig, allow_general=False)
         ref = _composite_referenced_var(expr, model)
         if ref is None:
             return False
@@ -4125,11 +4085,8 @@ def _collect_composite_univariate_relaxations(
         hi = float(flat_ub[flat_idx])
         # Use the solver-sense finiteness check (|bound| < 1e19), NOT raw
         # np.isfinite: an *unbounded* variable carries a finite-but-astronomical
-        # default box (~±1e20), which np.isfinite accepts. Sampling a 1-D hull over
-        # a ~1e20-wide box is numerically meaningless (aux magnitudes reach ~1e60)
-        # and drives the LP to a false `infeasible`. Abstain → fall back to the
-        # sound composed relaxation. (Root cause of the H-UNI AMP min/max
-        # false-infeasible, cert:LR-3.)
+        # default box (~±1e20), which np.isfinite accepts. Abstain → fall back to
+        # the sound composed relaxation.
         if not (_is_effectively_finite(lo) and _is_effectively_finite(hi)) or hi < lo:
             return False
         try:
@@ -4147,29 +4104,12 @@ def _collect_composite_univariate_relaxations(
             return float(np.asarray(grad_f(x)).ravel()[flat_idx])
 
         curvature = _composite_curvature(expr, model, var, flat_idx, lo, hi, box)
-        if curvature is not None:
-            env = _composite_envelope(curvature, lo, hi, value_fn, grad_fn)
-            if env is None:
-                return False
-            lower_lines, upper_lines, pin_value, col_bounds = env
-        elif allow_general:
-            # H-UNI: curvature is neither convex nor concave. Build the analytical
-            # 1-D convex/concave envelope (curvature-verified tangent/secant, no
-            # sampling — lever-a §0.1). Abstain (fall back) if a proven hull can't
-            # form (pathological curvature / unbounded interval Hessian).
-            from discopt._jax.univariate_hull import univariate_hull_envelope
-
-            if hi - lo <= _COMPOSITE_CURV_TOL:
-                return False  # pinned — the exact-pin path handles it
-
-            hull = univariate_hull_envelope(expr, model, var, flat_idx, lo, hi)
-            if hull is None:
-                return False
-            lower_lines, upper_lines, col_bounds = hull
-            pin_value = None
-            curvature = "general"
-        else:
+        if curvature is None:
             return False
+        env = _composite_envelope(curvature, lo, hi, value_fn, grad_fn)
+        if env is None:
+            return False
+        lower_lines, upper_lines, pin_value, col_bounds = env
 
         seen.add(eid)
         var_map[eid] = col_idx
@@ -4188,20 +4128,15 @@ def _collect_composite_univariate_relaxations(
         )
         bounds.append(col_bounds)
         col_idx += 1
-        # A *new* general (non-pre-existing) claim always blocks descent. When
-        # H-UNI is on, a pre-existing convex/concave composite ALSO blocks descent:
-        # the whole single-variable node is already relaxed as a composite in x, so
-        # descending would let H-UNI redundantly re-claim an inner sub-expression
-        # (e.g. the ``x**2 + 1`` inside a claimed ``sqrt(x**2 + 1)``) — sound but a
-        # duplicate column. When the flag is OFF, descent is unchanged from prior
-        # main (byte-identity: the general ``+``/``**2`` claims never fire, so
-        # descending into a convex composite claims nothing anyway).
-        return (not _pre_existing_claim) or allow_general
+        # A curvature-certified convex/concave composite never blocks descent: the
+        # inner sub-terms are still visited (as in prior main). Only H-UNI's deleted
+        # general hull ever returned True here.
+        return False
 
     def visit(expr: Expression) -> None:
         if maybe_add(expr):
-            # Claimed as a whole general single-variable composite; do not descend
-            # and re-lift its sub-terms (that would double-count the objective).
+            # (Unreachable with H-UNI deleted — maybe_add never claims a whole
+            # general composite now.) Kept for the descent-blocking contract.
             return
         if isinstance(expr, BinaryOp):
             visit(expr.left)
@@ -4261,101 +4196,6 @@ def _alias_equality_defs(model: Model) -> dict[int, Expression]:
         # First definition wins; a variable defined by two equalities is ambiguous.
         defs.setdefault(aux_idx, other)
     return defs
-
-
-_CACHE_MISS = object()  # sentinel: distinguishes "absent" from a cached ``None`` (abstain)
-
-
-def _collect_aliased_monomial_hull_relaxations(
-    model: Model,
-    n_orig: int,
-    flat_lb: np.ndarray,
-    flat_ub: np.ndarray,
-    monomial_var_map: dict[tuple[int, int], int],
-) -> list[CompositeUnivariateRelaxation]:
-    """H-UNI on reform-split composites: tighten ``aux**p`` where ``aux == h(x)``.
-
-    Task ``cert:LR-2``. ``factorable_reform`` rewrites a single-variable composite
-    ``(ln(x-2))**2`` into an aux equality ``aux == ln(x-2)`` plus an objective
-    monomial ``aux**2`` — the *composed* relaxation the plan calls loose (each
-    ``aux`` floats freely, so ``aux**2`` can reach 0). Here we bind the **existing**
-    ``aux**p`` monomial column directly to the original variable ``x`` with the
-    exact 1-D hull of ``G(x) = h(x)**p`` (:mod:`discopt._jax.univariate_hull`),
-    which is a rigorous *additional* tightening — never removed rows, so soundness
-    of the base relaxation is untouched. Gated by ``DISCOPT_UNIVARIATE_ENVELOPE``.
-
-    Emits ``CompositeUnivariateRelaxation`` records whose ``aux_col`` is the
-    monomial column ``(aux_idx, p)`` and whose lines are in ``x``; the standard
-    composite-emission loop turns them into rows. No new columns are created.
-    """
-    out: list[CompositeUnivariateRelaxation] = []
-    if not monomial_var_map:
-        return out
-    defs = _alias_equality_defs(model)
-    if not defs:
-        return out
-
-    try:
-        from discopt._jax.univariate_hull import univariate_hull_envelope
-    except Exception:
-        return out
-
-    # Env cache scoped to *this* model instance (an attribute, not a module global),
-    # so a freed model's expression ids can never serve a stale envelope to a
-    # different model. Persists across the per-node relaxation rebuilds of one solve,
-    # where the alias expression objects and their ids are stable.
-    env_cache: dict = model.__dict__.setdefault("_lr2_alias_env_cache", {})
-    for (aux_idx, p), aux_col in monomial_var_map.items():
-        h = defs.get(aux_idx)
-        if h is None:
-            continue
-        ref = _composite_referenced_var(h, model)
-        if ref is None:
-            continue  # h must be a single ORIGINAL variable's function
-        var, flat_idx = ref
-        if flat_idx >= n_orig:
-            continue
-        lo = float(flat_lb[flat_idx])
-        hi = float(flat_ub[flat_idx])
-        # Solver-sense finiteness (see the companion guard in
-        # _collect_composite_univariate_relaxations): reject the ~±1e20 default
-        # box of an unbounded variable, over which the sampled hull is numerically
-        # meaningless and yields a false `infeasible`.
-        if (
-            not (_is_effectively_finite(lo) and _is_effectively_finite(hi))
-            or hi - lo <= _COMPOSITE_CURV_TOL
-        ):
-            continue
-        # Envelope is a function of (alias, exponent, box); cache on the box so
-        # nodes that did not branch this variable reuse the root envelope. Box key
-        # rounded to a tight grid (well below any envelope sensitivity) so float
-        # jitter does not defeat the cache.
-        ckey = (id(h), int(p), round(lo, 12), round(hi, 12))
-        hull = env_cache.get(ckey, _CACHE_MISS)
-        if hull is _CACHE_MISS:
-            # Analytical 1-D envelope of the lifted monomial G(x) = h(x)**p directly
-            # in the original variable x (no sampling — lever-a §0.1). ``p`` is the
-            # integer monomial exponent (map key type), so ``h ** p`` is exactly G.
-            g_expr = h**p
-            hull = univariate_hull_envelope(g_expr, model, var, flat_idx, lo, hi)
-            env_cache[ckey] = hull
-        if hull is None:
-            continue
-        lower_lines, upper_lines, _col_bounds = hull
-        out.append(
-            CompositeUnivariateRelaxation(
-                expr_id=-aux_col,  # synthetic id; not consulted for these rows
-                aux_col=aux_col,
-                var_idx=flat_idx,
-                curvature="general",
-                arg_lb=lo,
-                arg_ub=hi,
-                lower_lines=lower_lines,
-                upper_lines=upper_lines,
-                pin_value=None,
-            )
-        )
-    return out
 
 
 @dataclass
@@ -6065,15 +5905,6 @@ def build_milp_relaxation(
         all_bounds.append(val_bounds)
         integrality_flags.append(0)
         col_idx += 1
-
-    # H-UNI (LR-2): tighten reform-split composites ``aux**p`` (aux == h(x)) with
-    # the exact 1-D hull of ``h(x)**p`` bound directly to the existing monomial
-    # column. Additive rows only, no new columns; default-OFF flag.
-    aliased_hull_relaxations: list[CompositeUnivariateRelaxation] = []
-    if _univariate_envelope_enabled():
-        aliased_hull_relaxations = _collect_aliased_monomial_hull_relaxations(
-            model, n_orig, flat_lb, flat_ub, monomial_var_map
-        )
 
     # H-LOG (LR-2): log-space envelope of positive-product aliases ``aux == ∏xᵢ``.
     # Allocates a ln-column per distinct factor + one s-column per product, then
@@ -8219,7 +8050,7 @@ def build_milp_relaxation(
     # z is the aux column for f(x_i); each (slope, intercept) line is in x_i.
     # lower_lines give ``z ≥ slope·x_i + intercept`` and upper_lines give
     # ``z ≤ slope·x_i + intercept``. A pinned variable yields an exact equality.
-    for crelax in list(composite_relaxations) + list(aliased_hull_relaxations):
+    for crelax in list(composite_relaxations):
         if crelax.pin_value is not None:
             row = np.zeros(n_total)
             row[crelax.aux_col] = 1.0

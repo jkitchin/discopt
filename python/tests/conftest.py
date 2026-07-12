@@ -82,7 +82,7 @@ def _guard_discopt_env_leaks():
     """Fail any test that mutates a ``DISCOPT_*`` env var without ``monkeypatch``.
 
     Claim-arbitration behaviour is read fresh from ``os.environ`` on every
-    relaxation build (``_univariate_envelope_enabled`` etc.), and there is no
+    relaxation build (``_log_monomial_enabled`` etc.), and there is no
     module-level caching. A test that writes ``os.environ["DISCOPT_..."]``
     directly therefore leaks that setting into *every later test in the same
     xdist worker*, silently flipping claim behaviour and producing results that

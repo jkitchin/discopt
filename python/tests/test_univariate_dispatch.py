@@ -3,7 +3,7 @@
 ``_univariate_dispatch_owner`` is the single decision point that replaces the
 scattered ``_should_claim_composite(allow_general=…)`` + finite-domain-table
 defers inside the composite-univariate collector. These tests pin the tightness
-dominance order (table > exact > hull > composed) on synthetic single-variable
+dominance order (table > exact > composed) on synthetic single-variable
 atoms, and check the function is well-defined (never raises) over the whole
 vendored corpus — the de-risking before it is wired into the build.
 """
@@ -17,7 +17,6 @@ import pytest
 from discopt._jax.milp_relaxation import (
     _UNI_OWNER_COMPOSED,
     _UNI_OWNER_EXACT,
-    _UNI_OWNER_HULL,
     _UNI_OWNER_NONE,
     _UNI_OWNER_TABLE,
     _build_convexity_box,
@@ -49,13 +48,15 @@ def test_rule2_convex_composite_is_exact():
     assert _owner(m, e) == _UNI_OWNER_EXACT
 
 
-def test_rule3_nonconvex_single_var_composite_is_hull():
-    # (ln(x-2))**2 over a finite box is neither convex nor concave -> 1-D hull.
+def test_rule3_nonconvex_single_var_composite_is_composed():
+    # (ln(x-2))**2 over a finite box is neither convex nor concave. The former
+    # 1-D hull owner (H-UNI) is deleted; it now falls back to the composed path
+    # (non-convex composites are recovered through the factorable AVM, #632).
     m = dm.Model()
     x = m.continuous("x", lb=2.1, ub=9.0)
     e = dm.log(x - 2) ** 2
     m.minimize(e)
-    assert _owner(m, e) == _UNI_OWNER_HULL
+    assert _owner(m, e) == _UNI_OWNER_COMPOSED
 
 
 def test_rule1_integer_trig_square_is_table():
@@ -67,7 +68,7 @@ def test_rule1_integer_trig_square_is_table():
     assert _owner(m, e) == _UNI_OWNER_TABLE
 
 
-def test_rule4_unbounded_box_is_composed():
+def test_unbounded_box_is_composed():
     # A genuine composite over an effectively-unbounded box falls back to composed.
     m = dm.Model()
     x = m.continuous("x", lb=0.0, ub=1e20)
@@ -99,7 +100,6 @@ _VALID_OWNERS = {
     _UNI_OWNER_NONE,
     _UNI_OWNER_TABLE,
     _UNI_OWNER_EXACT,
-    _UNI_OWNER_HULL,
     _UNI_OWNER_COMPOSED,
 }
 
