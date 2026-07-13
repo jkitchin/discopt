@@ -5236,6 +5236,81 @@ def _linearize_expr(
 # Main builder
 # ---------------------------------------------------------------------------
 
+# Column families a legacy caller may read off the returned ``varmap``. Under the
+# #632 cutover the uniform engine emits every envelope row inline (AVM), so the
+# per-column-family separators have nothing to arbitrate; we hand back an
+# all-empty skeleton carrying every key the separator chain / obbt / psd paths
+# iterate, so they iterate over nothing (no cuts) rather than KeyError.
+_EMPTY_VARMAP_KEYS: tuple[str, ...] = (
+    "bilinear",
+    "trilinear",
+    "trilinear_stages",
+    "multilinear",
+    "multilinear_stages",
+    "monomial",
+    "monomial_pw",
+    "univariate",
+    "univariate_signatures",
+    "univariate_relaxations",
+    "composite_relaxations",
+    "composite_multivar_relaxations",
+    "univariate_piecewise_relaxations",
+    "univariate_square",
+    "univariate_square_relaxations",
+    "univariate_square_piecewise_relaxations",
+    "finite_domain_trig_square_tables",
+    "fractional_power",
+    "bilinear_pw",
+    "bilinear_lambda",
+    "generation_guardrails",
+)
+
+
+def _empty_varmap(n_orig: int, convhull_mode: str) -> dict:
+    """A drop-in ``varmap`` for the engine path: originals mapped, families empty."""
+    vm: dict = {k: {} for k in _EMPTY_VARMAP_KEYS}
+    vm["original"] = {k: k for k in range(n_orig)}
+    vm["minmax_objective_lift"] = None
+    vm["convhull_formulation"] = convhull_mode
+    vm["convhull_ebd"] = False
+    vm["convhull_ebd_encoding"] = "gray"
+    vm["generation_guardrails"] = []
+    return vm
+
+
+def _uniform_relaxation_delegate(
+    model: Model,
+    flat_lb: np.ndarray,
+    flat_ub: np.ndarray,
+    n_orig: int,
+    convhull_mode: str,
+) -> tuple["MilpRelaxationModel", dict]:
+    """Build the default relaxation through the uniform factorable engine (#632).
+
+    ``build_uniform_relaxation`` (``uniform_relax.py``) relaxes every canonical
+    atom class soundly by the auxiliary-variable method and returns a
+    :class:`MilpRelaxationModel` with the SAME output contract as the historical
+    federated builder — original variables in columns ``0..n_orig-1``, aux columns
+    appended after. Soundness is by construction (every emitted row is a valid
+    outer inequality at the lifted point); tightness parity with the deleted
+    product-side separators (RLT/PSD/finite-domain trig) is the deferred polish
+    pass. Original-variable integrality is preserved (aux columns continuous), so
+    the integer-aware node solve and every legacy caller keep their contract.
+    """
+    from discopt._jax.uniform_relax import build_uniform_relaxation
+
+    rel = build_uniform_relaxation(model, box=(flat_lb, flat_ub))
+    milp = rel.model
+    n_total = int(np.size(milp._c))
+    flags = np.zeros(n_total, dtype=np.int32)
+    off = 0
+    for v in model._variables:
+        if v.var_type in (VarType.BINARY, VarType.INTEGER):
+            flags[off : off + v.size] = 1
+        off += int(v.size)
+    milp._integrality = flags if int(flags.sum()) else None
+    return milp, _empty_varmap(n_orig, convhull_mode)
+
 
 def build_milp_relaxation(
     model: Model,
@@ -5304,6 +5379,14 @@ def build_milp_relaxation(
         raise ValueError(
             "convhull_ebd is only supported with convhull_formulation='sos2' or its 'lambda' alias."
         )
+    # ── #632 cutover: the uniform factorable engine is the DEFAULT relaxation ──
+    # Route the build through build_uniform_relaxation (uniform_relax.py), which
+    # relaxes every canonical atom class soundly via the AVM and returns a
+    # MilpRelaxationModel with the same column contract. This supersedes the
+    # federated collectors/separators below (being deleted stage-by-stage). The
+    # engine is a valid outer relaxation by construction; product-side tightness
+    # parity is the deferred polish pass.
+    return _uniform_relaxation_delegate(model, flat_lb, flat_ub, n_orig, convhull_mode)
     generation_guardrails: list[str] = []
     generation_guardrail_keys: set[tuple[str, str, int, int]] = set()
     objective_lift = _build_minmax_objective_lift(model, flat_lb, flat_ub)

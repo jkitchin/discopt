@@ -847,6 +847,45 @@ def build_uniform_relaxation(
         b = None
 
     bounds = list(zip(ctx.col_lb, ctx.col_ub))
+
+    # Objective-bound validity (soundness guard). The LP optimum is a valid lower
+    # bound ONLY if the relaxed objective is actually bounded below over the box.
+    # When a nonlinear atom cannot be enveloped (unbounded box: McCormick rows
+    # dropped for infinite endpoints, transcendental over an infinite argument,
+    # …) its aux column is a free interval-floor column; if such a column carries
+    # objective cost and is otherwise unconstrained, the LP is unbounded below —
+    # yet the warm-started Rust simplex can mis-report a finite "optimal" (issue
+    # #15). Reporting that as a bound would be a FALSE certificate. We therefore
+    # compute a SOUND box-interval lower bound on the (minimize-equivalent)
+    # objective from the column bounds; a cost column that is unbounded on its
+    # cost-relevant side and appears in NO row makes that lower bound -inf, and we
+    # refuse the objective bound (the solver falls back to its rigorous
+    # alphaBB/interval bound) rather than trust a possibly-fabricated LP value.
+    # This mirrors the federation's ``objective_bound_valid=False`` behaviour on
+    # an un-relaxable / under-constrained objective.
+    _row_cols: set[int] = set()
+    for _coeffs, _ in ctx.rows:
+        _row_cols.update(_coeffs)
+    obj_bound_valid = True
+    obj_box_lb = obj_offset
+    for j, coef in obj_lin.coeffs.items():
+        edge = ctx.col_lb[j] if coef > 0 else ctx.col_ub[j]
+        contrib = coef * edge
+        if not math.isfinite(contrib):
+            # Unbounded on the cost-relevant side. If the column is tied down by a
+            # row it MAY still be LP-bounded (a correct simplex would report the
+            # true bound or unboundedness); but a free unconstrained cost column is
+            # provably unbounded -> refuse.
+            if j not in _row_cols:
+                obj_bound_valid = False
+            obj_box_lb = -math.inf
+        else:
+            obj_box_lb += contrib
+    if not math.isfinite(obj_box_lb):
+        # No finite sound floor on the objective at all -> the LP value cannot be
+        # certified as a global lower bound.
+        obj_bound_valid = False
+
     # Pure LP relaxation (integrality relaxed at the root) — a sound lower bound,
     # matching the federation's root-node LP convention.
     milp = MilpRelaxationModel(
@@ -856,6 +895,7 @@ def build_uniform_relaxation(
         bounds=bounds,
         obj_offset=obj_offset,
         integrality=None,
+        objective_bound_valid=obj_bound_valid,
     )
     return UniformRelaxation(
         model=milp,
