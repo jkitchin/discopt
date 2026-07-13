@@ -1740,29 +1740,6 @@ class MccormickLPRelaxer:
                 base, power = key
                 if int(power) == 2:
                     specs.append((int(base), int(aux)))
-            # Composite-univariate square atoms ``f(x)**2`` (issue #632, P1.1). The
-            # factorable AVM decomposes ``(g(x))**2`` into an inner atom ``w = g(x)``
-            # (relaxed by g's exact univariate envelope, ``base_col``) and an outer
-            # square ``s = w**2`` (``univariate_square`` column) — the same two-atom
-            # split ``factorable_reform`` performs by hand for ``g(x)**2``. But the
-            # outer square's STATIC envelope pins ``s`` with tangents only at the
-            # base endpoints (+0), so deep inside ``w``'s range ``s >= w**2`` is
-            # slack and the whole composite drops to a 0 bound (nvs09's per-variable
-            # ``(ln(x-2))**2 + (ln(10-x))**2`` on [3,9]: static bound 0 vs true
-            # 3.66667). ``factorable_reform`` recovered this only by rewriting the
-            # composite into a bare-variable MONOMIAL, which this separator already
-            # covered; the ``univariate_square`` column family — the identical atom,
-            # just keyed on a function-call base rather than a variable — was skipped
-            # here. Adding it lets the EXACT same convex tangent ``s >= 2 x0 w - x0**2``
-            # (a global underestimator of ``s = w**2`` for any base column, so it
-            # cuts no feasible point) tighten the composite atom at the LP point,
-            # recovering the AVM composition bound on the default path (+1.89328/var
-            # on the nvs09 composite) with no new envelope math.
-            univariate_square = varmap.get("univariate_square") or {}
-            for key, aux in univariate_square.items():
-                base, power = key
-                if int(power) == 2:
-                    specs.append((int(base), int(aux)))
             if not specs:
                 return res
             n_total = len(milp._c)
