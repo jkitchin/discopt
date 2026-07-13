@@ -84,7 +84,7 @@ A fresh context executing item EP*k*:
 
 | Item | Status | Before → after (probe) | Commit |
 |---|---|---|---|
-| EP0 probe harness | open | — | |
+| EP0 probe harness | done | baseline (in-container, `--children 10`): nvs09 ctor 0.762 s / root 0.291 s / **294 ms/node** / 22 builds / 19 nodes / obj −43.13434; ex1226 ctor 0.025 s / root 0.024 s / 24 ms/node / 9 builds / 5 nodes / obj −17.0; bchoco06 ctor 0.656 s / root 2.256 s / 2214 ms/node / 6 builds / 7 nodes / time_limit@120 s | `0105c8d` |
 | EP1 per-model analysis cache | open | | |
 | EP2 OBBT single-build-per-box | open | | |
 | EP3 patch-table node path | open | | |
@@ -118,6 +118,20 @@ instances in §3 (they are the "before" column for EP1).
 defaults. No fingerprint gate needed (no library change).
 
 **Done.** Probe committed; §3 baseline row filled.
+
+**Baseline measured (2026-07-13, in-container, `--children 10`).** The harness
+reproduces the §1 build-count evidence exactly (nvs09: **22 builds for 19
+nodes**), which validates the counter. One number diverges materially from §1
+and the measurement stands (contract §0.3): **nvs09 per-node cost measured
+~294 ms/node, not the ~38 ms/node cited in §1** — the root `solve_at_node`
+(0.291 s) is consistent with ~294 ms, so the whole per-node relaxation build is
+~8× more expensive here than the §1 profile recorded. The EP0 child boxes shrink
+one variable to its lower half from the *root* box (every child is a cold engine
+rebuild — the incremental fast path never engages, per §1), so this is the true
+cold per-node cost; the §1 38 ms figure likely reflects a different child
+schedule or host. EP1's before column is **294 ms/node (nvs09)**; wall-clock
+timings vary run-to-run, so treat them as order-of-magnitude, but the 22-build /
+19-node and 294-ms/root-0.291-s internal consistency is solid.
 
 ---
 
