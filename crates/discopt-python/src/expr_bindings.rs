@@ -522,6 +522,13 @@ impl PyModelRepr {
     /// or skips and echoes the input bounds back unchanged. Setting
     /// `depth_stride = 0` disables the pass entirely.
     ///
+    /// When `probing = True`, a P3 branch-and-reduce probing pass runs after
+    /// FBBT: it tentatively fixes each discrete variable at a bound, re-runs
+    /// cutoff-aware FBBT, and contracts the domain on any proven-infeasible
+    /// fixing (binaries forced, integer endpoints peeled). At most
+    /// `probe_max_vars` discrete variables are probed per node. Sound —
+    /// contracts only on proven infeasibility, never loosens.
+    ///
     /// Returns a dict with keys:
     /// - `lb`, `ub`: numpy arrays of post-tightening per-variable bounds.
     /// - `bounds_tightened`: int — number of half-bounds that tightened.
@@ -535,6 +542,8 @@ impl PyModelRepr {
         max_iter=8,
         tol=1e-6,
         incumbent=None,
+        probing=false,
+        probe_max_vars=32,
     ))]
     fn in_tree_presolve(
         &self,
@@ -546,6 +555,8 @@ impl PyModelRepr {
         max_iter: usize,
         tol: f64,
         incumbent: Option<f64>,
+        probing: bool,
+        probe_max_vars: usize,
     ) -> PyResult<PyObject> {
         use discopt_core::bnb::{run_in_tree_presolve, InTreePresolveOptions};
         if node_lb.len() != self.inner.variables.len()
@@ -559,6 +570,8 @@ impl PyModelRepr {
             depth_stride,
             max_iter,
             tol,
+            probing,
+            probe_max_vars,
         };
         let delta = run_in_tree_presolve(
             &self.inner,
