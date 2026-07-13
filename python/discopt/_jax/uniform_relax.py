@@ -852,7 +852,10 @@ def _build_product(ctx: _Builder, node: CNode, w: int) -> Envelope:
     if scalar != 1.0:
         lin0, (b0lo, b0hi), fe0 = factor_vals[0]
         nb = (scalar * b0lo, scalar * b0hi) if scalar >= 0 else (scalar * b0hi, scalar * b0lo)
-        factor_vals[0] = (lin0.scaled(scalar), nb, (scalar * fe0) if fe0 is not None else None)
+        # fe0 is the validation-only tracking Expression (typed ``object``); scaling
+        # it by the folded scalar is runtime-valid via Expression.__rmul__.
+        scaled_fe0 = (scalar * fe0) if fe0 is not None else None  # type: ignore[operator]
+        factor_vals[0] = (lin0.scaled(scalar), nb, scaled_fe0)
     tight = _fold_product(ctx, w, factor_vals)
     return Envelope(rows=[], tight=tight)
 
