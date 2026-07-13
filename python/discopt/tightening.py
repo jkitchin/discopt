@@ -216,9 +216,7 @@ def probe_box(
     )
 
     if delta["infeasible"]:
-        return BoundTightening(
-            lb=orig_lb_arr, ub=orig_ub_arr, infeasible=True, n_tightened=0
-        )
+        return BoundTightening(lb=orig_lb_arr, ub=orig_ub_arr, infeasible=True, n_tightened=0)
 
     block_lb = np.asarray(delta["lb"], dtype=np.float64)
     block_ub = np.asarray(delta["ub"], dtype=np.float64)
