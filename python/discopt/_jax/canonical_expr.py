@@ -1,10 +1,10 @@
 """Canonical factorable normal form for the claim dispatch (issue #632, R1.1).
 
 This module hash-conses a model's objective + constraint expression DAGs into a
-content-addressed canonical form, the first half of replacing the federated
-``_should_claim_composite`` defer-list with one uniform "one owner per atom"
-dispatch (the BARON/Couenne/SCIP AVM shape). It is **library-only**: nothing here
-is wired into the relaxation build yet (that is R1.2+).
+content-addressed canonical form. It underpins the uniform factorable relaxation
+engine (``uniform_relax.build_uniform_relaxation``) that, as of the #632 cutover,
+replaced the federated defer-list of claim predicates with one uniform "one owner
+per atom" dispatch (the BARON/Couenne/SCIP AVM shape).
 
 What "canonical" buys:
 

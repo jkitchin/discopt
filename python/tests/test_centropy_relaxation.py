@@ -83,15 +83,12 @@ def test_centropy_claim_produces_finite_valid_bound():
     """The lift turns a missing (feasibility-fallback) bound into a finite, valid
     lower bound. This is the entropy-family unlock."""
     m = _centropy_model()
-    off = _node_bound(m, [0.5, 0.5], [3.0, 3.0], claim=False)
     on = _node_bound(m, [0.5, 0.5], [3.0, 3.0], claim=True)
 
-    # Before the fix the objective cannot be linearized → no valid dual bound
-    # (the LP either has no objective row or the relaxer refuses the bound).
-    assert off.lower_bound is None or off.lower_bound < on.lower_bound - 1e-6
-
-    # After the fix: finite, and sound (a valid lower bound never exceeds the
-    # true minimum).
+    # Engine contract: the uniform engine covers the centropy atom by construction
+    # (the jointly-convex claim toggle is a federation lever the engine subsumes —
+    # the bound is produced regardless), so the node yields a finite, valid, SOUND
+    # dual bound (a valid lower bound never exceeds the true minimum).
     assert on.status == "optimal"
     assert on.lower_bound is not None
     assert np.isfinite(on.lower_bound)
@@ -149,18 +146,21 @@ def test_centropy_negative_domain_is_not_claimed():
 
 def test_centropy_nonaffine_argument_is_not_claimed():
     """A non-affine inner argument breaks the atom∘affine convexity licence; the
-    structural pre-filter must refuse to claim it (the classifier would abstain
-    anyway)."""
+    convexity classifier must abstain (not CONVEX) so no unsound jointly-convex
+    gradient cut is built. (The #632 cutover deleted the federation structural
+    pre-filter ``_should_claim_composite_multivar``; the soundness invariant is
+    the same and is asserted here through the kept ``classify_expr`` API, mirroring
+    test_centropy_negative_domain_is_not_claimed.)"""
+    from discopt._jax.convexity import Curvature, classify_expr
     from discopt.modeling.core import FunctionCall
 
     m = dm.Model("nonaffine")
     x = m.continuous("x", lb=0.5, ub=3.0)
     y = m.continuous("y", lb=0.5, ub=3.0)
     z = m.continuous("z", lb=0.5, ub=3.0)
-    n_orig = sum(v.size for v in m._variables)
     # centropy(x*y, z): first argument is a nonlinear product, not affine.
     ce = FunctionCall("centropy", x * y, z)
-    assert MR._should_claim_composite_multivar(ce, m, n_orig) is False
+    assert classify_expr(ce, m) != Curvature.CONVEX
 
 
 if __name__ == "__main__":

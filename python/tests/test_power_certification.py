@@ -48,16 +48,14 @@ def test_affine_base_fractional_power_certifies():
     assert r.bound <= 1.0 + 1e-3, "dual bound must not exceed the true optimum"
 
 
-def test_shifted_integer_power_lift_guards():
-    from discopt._jax.milp_relaxation import _should_claim_composite
-
-    m = dm.Model()
-    x = m.continuous("x", lb=-2.0, ub=3.0)
-    n_orig = 1
-
-    assert _should_claim_composite((x - 1.0) ** 4, m, n_orig)
-    assert not _should_claim_composite((x - 1.0) ** 2, m, n_orig)
-    assert not _should_claim_composite(x**4, m, n_orig)
+# NOTE (#632 cutover): test_shifted_integer_power_lift_guards was a unit test of the
+# deleted federation predicate `_should_claim_composite` (which decided whether a
+# shifted integer power was "claimed" as a composite). The uniform engine atomizes
+# and relaxes every power by construction (no claim predicate); the end-to-end
+# soundness that mattered — (x-1)**4 certifies with a sound bound — is asserted by
+# test_shifted_even_integer_power_certifies below, so the predicate unit test was
+# deleted rather than rewritten against a removed API. The `_affine_base_power_curvature`
+# curvature helper it sat next to is KEPT and still unit-tested here.
 
 
 def test_affine_power_curvature_guards_crossing_zero_base():
