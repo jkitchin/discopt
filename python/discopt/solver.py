@@ -254,6 +254,30 @@ def _obbt_topk_enabled() -> bool:
     return os.environ.get("DISCOPT_OBBT_TOPK", "").strip().lower() in ("1", "true", "yes", "on")
 
 
+# P3 branch-and-reduce: per-node probing (issue #632). When the in-tree FBBT
+# pass runs (``in_tree_presolve_stride > 0``), also probe discrete variables at
+# the node — tentatively fix each at a bound, re-run cutoff-FBBT, and contract
+# on a proven-infeasible fixing (binaries forced, integer endpoints peeled).
+# Sound by construction (contracts only on proven infeasibility); default OFF
+# because it costs O(discrete) extra FBBT solves per firing.
+def _node_probing_enabled() -> bool:
+    """Whether P3 per-node probing is on (``DISCOPT_NODE_PROBING``, default OFF)."""
+    return os.environ.get("DISCOPT_NODE_PROBING", "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+
+
+def _node_probe_max_vars() -> int:
+    """Per-node probing budget (discrete vars probed per firing); default 32."""
+    try:
+        return max(0, int(os.environ.get("DISCOPT_NODE_PROBE_MAX_VARS", "32")))
+    except ValueError:
+        return 32
+
+
 # Root branch-and-reduce fixpoint (cert:T2.3) no-offtarget gate: skip the loop when
 # the relative gap between the root dual bound and the incumbent cutoff is at/below
 # this — an already-tight root has nothing to close, so running it would only add
@@ -9276,6 +9300,21 @@ def _solve_nlp_bb(
         if in_tree_presolve_stride and in_tree_presolve_repr is not None:
             try:
                 n_blocks = in_tree_presolve_repr.n_var_blocks
+                # P3 branch-and-reduce: enable per-node probing (default OFF) and
+                # feed the current incumbent as a cutoff so both the in-tree FBBT
+                # and the probing pass are optimality-aware. The incumbent value
+                # is a valid upper bound on the optimum, so cutoff-driven
+                # contraction never removes an improving feasible point.
+                _itp_probing = _node_probing_enabled()
+                _itp_probe_max = _node_probe_max_vars()
+                _itp_inc = tree.incumbent()
+                _itp_cutoff = (
+                    float(_itp_inc[1])
+                    if _itp_inc is not None
+                    and np.isfinite(_itp_inc[1])
+                    and _itp_inc[1] < _SENTINEL_THRESHOLD
+                    else None
+                )
                 for i in range(n_batch):
                     if len(batch_lb[i]) != n_blocks:
                         continue
@@ -9284,8 +9323,15 @@ def _solve_nlp_bb(
                         np.asarray(batch_ub[i], dtype=np.float64),
                         node_depth=0,
                         depth_stride=in_tree_presolve_stride,
+                        incumbent=_itp_cutoff,
+                        probing=_itp_probing,
+                        probe_max_vars=_itp_probe_max,
                     )
-                    if delta["ran"] and not delta["infeasible"]:
+                    if delta["ran"] and delta["infeasible"]:
+                        # Rigorous fathom: the node box is empty (FBBT/probing
+                        # proof). Mark infeasible so the node is pruned soundly.
+                        node_infeasible_mask[i] = True
+                    elif delta["ran"]:
                         batch_lb[i] = list(delta["lb"])
                         batch_ub[i] = list(delta["ub"])
             except Exception as _e:
