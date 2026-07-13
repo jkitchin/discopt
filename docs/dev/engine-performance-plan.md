@@ -85,7 +85,7 @@ A fresh context executing item EP*k*:
 | Item | Status | Before → after (probe) | Commit |
 |---|---|---|---|
 | EP0 probe harness | done | baseline (in-container, `--children 10`): nvs09 ctor 0.762 s / root 0.291 s / **294 ms/node** / 22 builds / 19 nodes / obj −43.13434; ex1226 ctor 0.025 s / root 0.024 s / 24 ms/node / 9 builds / 5 nodes / obj −17.0; bchoco06 ctor 0.656 s / root 2.256 s / 2214 ms/node / 6 builds / 7 nodes / time_limit@120 s | `0105c8d` |
-| EP1 per-model analysis cache | open | | |
+| EP1 per-model analysis cache | done | in-container `--children 10` (wall-clock noisy, treat as order-of-magnitude): nvs09 ctor 0.53→0.17 s / **282→169 ms/node**; ex1226 ctor 0.025→0.025 s / **26.8→3.7 ms/node**; bchoco06 ctor 0.61→0.55 s / **2268→1813 ms/node**. Builds/nodes/objectives UNCHANGED (nvs09 22 builds/19 nodes/−43.13434; ex1226 9/5/−17.0; bchoco06 6/7/time_limit). Fingerprints byte-identical on all 62 vendored instances; node_count + objective byte-equal on a 19-instance corpus (persistent-cache vs fresh-per-build). | `7a6a5bd` |
 | EP2 OBBT single-build-per-box | open | | |
 | EP3 patch-table node path | open | | |
 | EP4a separation facet cache | open | | |

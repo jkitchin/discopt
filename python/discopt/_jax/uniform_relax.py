@@ -46,7 +46,7 @@ from __future__ import annotations
 
 import dataclasses
 import math
-from typing import Callable, Optional
+from typing import Callable, Optional, cast
 
 import numpy as np
 
@@ -302,6 +302,131 @@ _UNIVARIATE_FN: dict[str, tuple[Callable, Callable, Callable, Callable]] = {
 
 
 # --------------------------------------------------------------------------- #
+# Per-model analysis cache (issue #632 EP1) — box-INDEPENDENT work computed once
+# --------------------------------------------------------------------------- #
+# The uniform engine is the load-bearing per-node relaxation path: every B&B node
+# calls ``build_uniform_relaxation`` with the SAME model and a different box. The
+# analysis below is a pure function of the model (not the box): the canonical DAG,
+# the reconstructed expression trees, the global DCP curvature verdicts, and the
+# compiled ``value_fn``/``grad_fn`` of each node. Re-deriving them at every build
+# was the dominant per-node cost (EP0: ~294 ms/node on nvs09). We compute them once
+# and pin them on the model, so the second and later builds read through the cache.
+#
+# Two box-DEPENDENT results are also cached, but soundly keyed by the box so a cache
+# hit is byte-identical to a fresh computation:
+#   * interval enclosures, keyed by ``(id(cnode), support-restricted box bytes)`` —
+#     the enclosure of a node depends only on the box entries for the variables in
+#     its support, so branching on one variable invalidates only the nodes that
+#     depend on it;
+#   * interval-Hessian curvature certificates, with MONOTONE INHERITANCE: a
+#     ``convex``/``concave`` verdict proven on a box is valid — and, because the
+#     interval Hessian is inclusion-monotone (a sub-box's Hessian enclosure is a
+#     subset of the box's, so the same Gershgorin sign certificate holds at an
+#     equal-or-coarser refinement), *re-certified with the same verdict* — on every
+#     sub-box. So returning a proven super-box's verdict for a query sub-box is
+#     byte-identical to re-proving it. Abstained boxes are also recorded to skip
+#     re-proving a box that is not meaningfully smaller (see ``_curvature_cert``).
+#
+# Staleness is guarded by a token ``(len(_variables), len(_constraints),
+# id(_objective))``; a mismatch rebuilds the entry. Mid-solve model mutation is
+# unsupported, but a stale *objective* would be flat-out wrong, so the token is
+# mandatory. The pinned CNodes make every ``id(cnode)`` key stable for the model's
+# life (the cache keeps the DAG alive), which also stabilizes ``expr_id`` in every
+# ``CompositeMultivarRelaxation``.
+_ANALYSIS_ATTR = "_uniform_relax_analysis"
+_UNSET = object()
+# Stable empty-box bytes for the support-box key of a variable-free (constant) node.
+_EMPTY_BOX = np.empty(0, dtype=np.float64)
+# Cap on the per-model ``bounds_by_box`` dict before it is cleared (branching over a
+# deep tree can accumulate many distinct support-boxes; the per-build ``self._bounds``
+# memo still absorbs the within-build hits after a clear).
+_BOUNDS_CACHE_CAP = 500_000
+# Cap on the per-node proven/abstained curvature-box lists (drop-oldest).
+_CERT_LIST_CAP = 8
+
+
+def _analysis_token(model: Model) -> tuple:
+    return (len(model._variables), len(model._constraints), id(model._objective))
+
+
+class _ModelAnalysisCache:
+    """Box-independent analysis pinned on a model (see the module note above)."""
+
+    __slots__ = (
+        "token",
+        "dag",
+        "flat_expr",
+        "expr",
+        "dcp",
+        "compiled",
+        "support_cols",
+        "bounds_by_box",
+        "hessian_certs",
+        "hessian_abstain",
+    )
+
+    def __init__(self, model: Model, dag: CanonicalDAG):
+        from discopt._jax.canonical_expr import _flat_var_expr
+
+        self.token = _analysis_token(model)
+        self.dag = dag  # pins CNodes -> stable id(cnode) for the model's life
+        self.flat_expr = _flat_var_expr(model)
+        # id(cnode) -> reconstructed Expression (box-independent; pinned so a
+        # shared evaluate_interval id() memo can never go stale — see bounds()).
+        self.expr: dict[int, object] = {}
+        # id(cnode) -> classify_expr verdict (Curvature enum or None on failure).
+        self.dcp: dict[int, object] = {}
+        # id(cnode) -> (value_fn, grad_fn) or None if compilation failed.
+        self.compiled: dict[int, object] = {}
+        # id(cnode) -> sorted tuple of support columns, or None if the subtree
+        # hides variables inside an opaque node (then the full box is the key).
+        self.support_cols: dict[int, object] = {}
+        # (id(cnode), lb.tobytes(), ub.tobytes()) -> (lo, hi) interval enclosure.
+        self.bounds_by_box: dict[tuple, tuple[float, float]] = {}
+        # id(cnode) -> [(lo_support, hi_support, verdict)] proven boxes (capped).
+        self.hessian_certs: dict[int, list[tuple[np.ndarray, np.ndarray, str]]] = {}
+        # id(cnode) -> [(lo_support, hi_support)] abstained boxes (capped).
+        self.hessian_abstain: dict[int, list[tuple[np.ndarray, np.ndarray]]] = {}
+
+
+def _get_analysis_cache(model: Model) -> _ModelAnalysisCache:
+    """Fetch (or rebuild if stale) the model's box-independent analysis cache."""
+    token = _analysis_token(model)
+    cache = model.__dict__.get(_ANALYSIS_ATTR)
+    if cache is None or cache.token != token:
+        cache = _ModelAnalysisCache(model, canonicalize(model))
+        model.__dict__[_ANALYSIS_ATTR] = cache
+    return cache
+
+
+def _node_support_cols(node: CNode) -> Optional[tuple[int, ...]]:
+    """Original columns a node's interval enclosure can depend on.
+
+    Returns a sorted tuple of flat variable indices, or ``None`` if the subtree
+    contains an ``opaque`` node. ``opaque`` nodes wrap an original subexpression
+    whose variables ``var_support`` does NOT report, so keying such a node's
+    enclosure by ``var_support`` would collide across genuinely different boxes —
+    an unsound stale bound. In that case the caller keys on the full box instead.
+    """
+    acc: set[int] = set()
+    stack = [node]
+    while stack:
+        n = stack.pop()
+        if n.kind == "opaque":
+            return None
+        if n.kind == "var":
+            acc.add(int(n.payload))
+        else:
+            stack.extend(n.children)
+    return tuple(sorted(acc))
+
+
+def _box_subset(lo: np.ndarray, hi: np.ndarray, plo: np.ndarray, phi: np.ndarray) -> bool:
+    """True iff ``[lo, hi] ⊆ [plo, phi]`` elementwise (exact — no slack)."""
+    return bool(np.all(lo >= plo) and np.all(hi <= phi))
+
+
+# --------------------------------------------------------------------------- #
 # The builder context — the bottom-up AVM walk state
 # --------------------------------------------------------------------------- #
 class _Builder:
@@ -312,9 +437,17 @@ class _Builder:
         model: Model,
         flat_lb: np.ndarray,
         flat_ub: np.ndarray,
+        analysis: "Optional[_ModelAnalysisCache]" = None,
         track_aux_exprs: bool = False,
     ):
         self.model = model
+        # Box-independent per-model analysis (canonical DAG, reconstructed exprs,
+        # DCP verdicts, compiled fns, curvature certs) — computed once, read here.
+        # Falls back to the model's cache when constructed standalone (tests).
+        self._analysis = analysis if analysis is not None else _get_analysis_cache(model)
+        # Original (flat) box in np form, for keying the box-dependent caches.
+        self._flat_lb = np.asarray(flat_lb, dtype=np.float64)
+        self._flat_ub = np.asarray(flat_ub, dtype=np.float64)
         self.n_orig = int(len(flat_lb))
         self.col_lb: list[float] = list(map(float, flat_lb))
         self.col_ub: list[float] = list(map(float, flat_ub))
@@ -429,26 +562,162 @@ class _Builder:
             return
         self.rows.append(({j: float(c) for j, c in coeffs.items() if c != 0.0}, float(rhs)))
 
+    # -- box-independent analysis read-through helpers (issue #632 EP1) ------- #
+    def _expr(self, node: CNode):
+        """Reconstructed :class:`Expression` for ``node`` (box-independent, pinned).
+
+        Cached on the model so a node is reconstructed once for the model's life.
+        Pinning also kills the historical stale-``id()`` hazard: ``evaluate_interval``
+        memoizes by ``id(expr)``, and a transient reconstruct tree could be GC'd and
+        its ``id()`` reused for a DIFFERENT node — a shared memo would then return an
+        unsound bound. The pinned tree keeps ``id(expr)`` stable and live.
+        """
+        cache = self._analysis.expr
+        nid = id(node)
+        e = cache.get(nid)
+        if e is None:
+            e = reconstruct(node, self.model, self._analysis.flat_expr)
+            cache[nid] = e
+        return e
+
+    def _dcp(self, node: CNode):
+        """Global DCP curvature verdict of ``node`` (box-independent; ``None`` on
+        classifier failure — the same abstain the inline try/except produced)."""
+        cache = self._analysis.dcp
+        nid = id(node)
+        v = cache.get(nid, _UNSET)
+        if v is not _UNSET:
+            return v
+        from discopt._jax.convexity import classify_expr
+
+        try:
+            v = classify_expr(self._expr(node), self.model)
+        except Exception:
+            v = None
+        cache[nid] = v
+        return v
+
+    def _compiled(self, node: CNode):
+        """``(value_fn, grad_fn)`` for ``node`` (the *function of x*, box-independent),
+        or ``None`` if compilation failed (the same abstain as the inline path)."""
+        cache = self._analysis.compiled
+        nid = id(node)
+        v: object = cache.get(nid, _UNSET)
+        if v is not _UNSET:
+            return v
+        import jax
+        import jax.numpy as jnp
+
+        from discopt._jax.dag_compiler import compile_expression
+
+        try:
+            f = compile_expression(self._expr(node), self.model)
+            grad_f = jax.grad(lambda xv: jnp.reshape(f(xv), ()))
+            v = (f, grad_f)
+        except Exception:
+            v = None
+        cache[nid] = v
+        return v
+
+    def _support_box_key(self, node: CNode) -> tuple:
+        """Box-dependent cache key ``(id(node), lb.bytes, ub.bytes)`` restricted to
+        the node's support columns (full box for opaque-hiding subtrees)."""
+        sc = self._analysis.support_cols
+        nid = id(node)
+        cols = sc.get(nid, _UNSET)
+        if cols is _UNSET:
+            cols = _node_support_cols(node)
+            sc[nid] = cols
+        if cols is None:
+            lb, ub = self._flat_lb, self._flat_ub
+        elif cols:
+            idx = np.asarray(cols, dtype=np.intp)
+            lb, ub = self._flat_lb[idx], self._flat_ub[idx]
+        else:  # no variables (e.g. a constant node): box-independent enclosure
+            lb = ub = _EMPTY_BOX
+        return (nid, lb.tobytes(), ub.tobytes())
+
+    def _curvature_cert(
+        self,
+        node: CNode,
+        idxs: list[int],
+        flat_lb: np.ndarray,
+        flat_ub: np.ndarray,
+        cbox: dict,
+    ) -> Optional[str]:
+        """Interval-Hessian curvature verdict of ``node`` over the box, with monotone
+        inheritance (see the module note). Matches ``_multivar_box_curvature`` exactly
+        on a fresh cache; on a hit it returns a proven super-box's verdict (byte-
+        identical by inclusion-monotonicity) or skips re-proving an abstained box that
+        is not meaningfully smaller.
+        """
+        nid = id(node)
+        lo = self._flat_lb[np.asarray(idxs, dtype=np.intp)]
+        hi = self._flat_ub[np.asarray(idxs, dtype=np.intp)]
+        # 1) Proven-box inheritance: convex/concave on a super-box holds (and re-proves
+        #    with the same verdict) on every sub-box — byte-identical to a fresh call.
+        for plo, phi, proven in self._analysis.hessian_certs.get(nid, ()):
+            if _box_subset(lo, hi, plo, phi):
+                return proven
+        # 2) Abstained-box shortcut: skip re-proving when the query is a subset that is
+        #    not meaningfully smaller (every width >= 0.5x the abstained width). Curvature
+        #    can resolve on a >=2x-smaller box, so those are re-proven; abstaining longer
+        #    is sound (only looser).
+        for alo, ahi in self._analysis.hessian_abstain.get(nid, ()):
+            if _box_subset(lo, hi, alo, ahi) and bool(np.all((hi - lo) >= 0.5 * (ahi - alo))):
+                return None
+        # 3) Prove afresh and record the outcome (support-restricted, capped).
+        from discopt._jax.milp_relaxation import _multivar_box_curvature
+
+        verdict = cast(
+            Optional[str],
+            _multivar_box_curvature(self._expr(node), self.model, idxs, flat_lb, flat_ub, cbox),
+        )
+        if verdict == "convex" or verdict == "concave":
+            certs = self._analysis.hessian_certs.setdefault(nid, [])
+            certs.append((lo, hi, verdict))
+            if len(certs) > _CERT_LIST_CAP:
+                del certs[0]
+        else:
+            abstained = self._analysis.hessian_abstain.setdefault(nid, [])
+            abstained.append((lo, hi))
+            if len(abstained) > _CERT_LIST_CAP:
+                del abstained[0]
+        return verdict
+
     # -- interval enclosure of a node over the box (AVM bound propagation) --- #
     def bounds(self, node: CNode) -> tuple[float, float]:
         cached = self._bounds.get(id(node))
         if cached is not None:
             return cached
-        expr = reconstruct(node, self.model)
-        # A FRESH per-expr cache: ``evaluate_interval`` memoizes by ``id(expr)``,
-        # but each ``reconstruct`` builds a new transient tree and Python reuses
-        # ``id()`` of GC'd nodes, so a shared cache would return a STALE interval
-        # for a different node — an UNSOUND, nondeterministic bound. Per-node bound
-        # results are still memoized by the stable ``id(CNode)`` in ``self._bounds``.
-        enc = evaluate_interval(expr, self.model, self._ivbox)
+        # Cross-build cache (issue #632 EP1): keyed by (id(node), support-box bytes),
+        # so branching on one variable invalidates only the enclosures of nodes that
+        # depend on it. The reconstructed tree is pinned (``_expr``), which kills the
+        # historical stale-``id()`` hazard the WARNING here used to describe:
+        # ``evaluate_interval`` memoizes by ``id(expr)``, and a transient reconstruct
+        # tree could be GC'd with its ``id()`` reused for a different node, so a shared
+        # memo would return an UNSOUND, nondeterministic bound. With the pinned tree
+        # ``id(expr)`` stays stable/live, and the box-keyed cache below is a pure
+        # function of (node, box) — every hit is byte-identical to a fresh evaluation.
+        box_cache = self._analysis.bounds_by_box
+        key = self._support_box_key(node)
+        hit = box_cache.get(key)
+        if hit is not None:
+            self._bounds[id(node)] = hit
+            return hit
+        enc = evaluate_interval(self._expr(node), self.model, self._ivbox)
         lo = float(np.asarray(enc.lo))
         hi = float(np.asarray(enc.hi))
         if not (math.isfinite(lo)):
             lo = -math.inf
         if not (math.isfinite(hi)):
             hi = math.inf
-        self._bounds[id(node)] = (lo, hi)
-        return (lo, hi)
+        result = (lo, hi)
+        if len(box_cache) >= _BOUNDS_CACHE_CAP:
+            box_cache.clear()
+        box_cache[key] = result
+        self._bounds[id(node)] = result
+        return result
 
     # -- the recursive representation walk (bottom-up) ---------------------- #
     def rep(self, node: CNode) -> LinForm:
@@ -510,16 +779,11 @@ class _Builder:
         if not self._lift_eligible(node):
             return None
         try:
-            import jax
-            import jax.numpy as jnp
-
-            from discopt._jax.convexity import Curvature, classify_expr
-            from discopt._jax.dag_compiler import compile_expression
+            from discopt._jax.convexity import Curvature
             from discopt._jax.milp_relaxation import (
                 _LIFT_MAX_CROSS_TERM_ARG_MAGNITUDE,
                 CompositeMultivarRelaxation,
                 _build_convexity_box,
-                _multivar_box_curvature,
             )
         except Exception:
             return None
@@ -534,20 +798,17 @@ class _Builder:
         if not (np.all(np.isfinite(lo)) and np.all(np.isfinite(hi))) or np.any(hi < lo):
             return None
 
-        expr = reconstruct(node, self.model)
         cbox = _build_convexity_box(self.model, flat_lb, flat_ub)
-        # Certify curvature: global DCP first, else the sound box-restricted
-        # interval-Hessian PSD/NSD certificate (abstains -> None).
-        try:
-            curv = classify_expr(expr, self.model)
-        except Exception:
-            curv = None
+        # Certify curvature: global DCP first (box-independent, cached), else the
+        # sound box-restricted interval-Hessian PSD/NSD certificate (monotone-inherited
+        # across sub-boxes, cached; abstains -> None).
+        curv = self._dcp(node)
         if curv == Curvature.CONVEX:
             curvature = "convex"
         elif curv == Curvature.CONCAVE:
             curvature = "concave"
         else:
-            box_curv = _multivar_box_curvature(expr, self.model, idxs, flat_lb, flat_ub, cbox)
+            box_curv = self._curvature_cert(node, idxs, flat_lb, flat_ub, cbox)
             if box_curv is None:
                 return None
             curvature = box_curv
@@ -563,11 +824,11 @@ class _Builder:
         if max(abs(col_lo), abs(col_hi)) > _LIFT_MAX_CROSS_TERM_ARG_MAGNITUDE:
             return None
 
-        try:
-            f = compile_expression(expr, self.model)
-            grad_f = jax.grad(lambda xv: jnp.reshape(f(xv), ()))
-        except Exception:
+        # Compiled value/gradient (the function of x, box-independent, cached).
+        compiled = self._compiled(node)
+        if compiled is None:
             return None
+        f, grad_f = compiled
 
         # Committed to lifting. Build the node's ordinary atom decomposition FIRST
         # (all its envelope rows + product-side varmap registrations are kept), then
@@ -594,7 +855,7 @@ class _Builder:
             # zero slack (soundness preserved for the feasible-point sampler).
             w = self.new_aux(col_lo, col_hi)
             if self.track_aux_exprs:
-                self.aux_expr[w] = expr
+                self.aux_expr[w] = self._expr(node)
             le = {w: 1.0}
             ge = {w: -1.0}
             for j, c in dec.coeffs.items():
@@ -633,7 +894,7 @@ class _Builder:
         lo, hi = self.bounds(node)
         w = self.new_aux(lo, hi)
         if self.track_aux_exprs:
-            self.aux_expr[w] = reconstruct(node, self.model)
+            self.aux_expr[w] = self._expr(node)
         kind = _node_kind(node)
         env = ENVELOPE_LIBRARY[kind](self, node, w)
         for coeffs, rhs in env.rows:
@@ -978,7 +1239,7 @@ def _factor_value(
     """
     lb_base = ctx.rep(base)
     bb = ctx.bounds(base)
-    base_expr = reconstruct(base, ctx.model) if ctx.track_aux_exprs else None
+    base_expr = ctx._expr(base) if ctx.track_aux_exprs else None
     if e == 1.0:
         return lb_base, bb, base_expr
     # Relax base**e as its own 1-D power atom into a fresh aux (AVM).
@@ -1157,7 +1418,7 @@ def _emit_logspace_band(ctx: _Builder, w: int, node: CNode) -> bool:
     n_orig = ctx.n_orig
     flat_lb = np.asarray(ctx.col_lb[:n_orig], dtype=np.float64)
     flat_ub = np.asarray(ctx.col_ub[:n_orig], dtype=np.float64)
-    expr = reconstruct(node, ctx.model)
+    expr = ctx._expr(node)
     pp = _extract_positive_product(expr, ctx.model, n_orig, flat_lb, flat_ub)
     if pp is None:
         return False
@@ -1367,8 +1628,12 @@ def build_uniform_relaxation(
     # envelopes below (McCormick/secant/tangent are monotone in the box). This layer
     # does not tighten the box itself.
 
-    dag: CanonicalDAG = canonicalize(model)
-    ctx = _Builder(model, flat_lb, flat_ub)
+    # Box-independent analysis, computed once per model and pinned on it (issue #632
+    # EP1): the canonical DAG (which pins CNodes -> stable id() keys), reconstructed
+    # expressions, DCP verdicts, compiled value/grad fns, and curvature certificates.
+    analysis = _get_analysis_cache(model)
+    dag: CanonicalDAG = analysis.dag
+    ctx = _Builder(model, flat_lb, flat_ub, analysis)
 
     # Objective -> c, obj_offset (minimize convention; maximize is negated so the
     # reported LP bound is a valid lower bound on the minimize-equivalent, matching

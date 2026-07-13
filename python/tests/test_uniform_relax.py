@@ -258,3 +258,87 @@ def test_feasible_points_not_cut_multilinear_and_powers(seed):
     z = m.continuous("z", lb=0.5, ub=2.0)
     m.minimize(x * y * z + x**3 + dm.sqrt(x + y) + (x * y) ** 0.5)
     _sample_no_cut(m, seed=seed)
+
+
+# --------------------------------------------------------------------------- #
+# Per-model analysis cache (issue #632 EP1) — bound-neutral byte-identity gate
+# --------------------------------------------------------------------------- #
+def _fp(rel):
+    from discopt._jax.claim_audit import relaxation_fingerprint
+
+    return relaxation_fingerprint(rel.model)
+
+
+@pytest.mark.unit
+def test_ep1_cache_hot_rebuild_is_byte_identical():
+    """A second (cache-hot) build of the SAME (model, box) must be byte-identical
+    to the first. Guards that reading box-independent analysis through the pinned
+    per-model cache never perturbs the emitted relaxation."""
+    from discopt._jax.uniform_relax import _ANALYSIS_ATTR
+
+    m = Model()
+    x = m.continuous("x", lb=0.5, ub=2.5)
+    y = m.continuous("y", lb=0.5, ub=2.0)
+    m.minimize(dm.exp(x * y) + dm.log(x + y) ** 2 + x / y)
+    m.subject_to(x * y + dm.sqrt(x + y) <= 6.0)
+
+    from discopt._jax.model_utils import flat_variable_bounds
+
+    lb, ub = flat_variable_bounds(m)
+    assert _ANALYSIS_ATTR not in m.__dict__  # cold: no cache yet
+    r1 = build_uniform_relaxation(m, box=(lb.copy(), ub.copy()))
+    assert _ANALYSIS_ATTR in m.__dict__  # cache pinned after first build
+    r2 = build_uniform_relaxation(m, box=(lb.copy(), ub.copy()))
+    assert _fp(r1) == _fp(r2), "cache-hot rebuild drifted from the cold build"
+
+    # A shrunk child box (subset) rebuilt twice is also self-consistent (the
+    # box-dependent enclosure/curvature caches key on the box).
+    ub2 = ub.copy()
+    ub2[0] = 0.5 * (lb[0] + ub[0])
+    c1 = build_uniform_relaxation(m, box=(lb.copy(), ub2.copy()))
+    c2 = build_uniform_relaxation(m, box=(lb.copy(), ub2.copy()))
+    assert _fp(c1) == _fp(c2)
+
+
+@pytest.mark.unit
+def test_ep1_staleness_token_new_constraint_invalidates_cache():
+    """Adding a constraint must invalidate the cache (staleness token changes) so
+    the rebuilt relaxation reflects the new constraint's rows."""
+    from discopt._jax.uniform_relax import _ANALYSIS_ATTR
+
+    m = Model()
+    x = m.continuous("x", lb=0.5, ub=2.5)
+    y = m.continuous("y", lb=0.5, ub=2.0)
+    m.minimize(dm.exp(x * y) + x / y)
+    r1 = build_uniform_relaxation(m)
+    tok1 = m.__dict__[_ANALYSIS_ATTR].token
+
+    m.subject_to(x * y <= 3.0)  # mutate: one more constraint
+    r2 = build_uniform_relaxation(m)
+    tok2 = m.__dict__[_ANALYSIS_ATTR].token
+
+    assert tok1 != tok2, "staleness token did not change after adding a constraint"
+    assert _fp(r1) != _fp(r2), "cache was not invalidated: new constraint absent"
+    # Row count grew (the new constraint added at least one row).
+    assert r2.model._A_ub.shape[0] > r1.model._A_ub.shape[0]
+
+
+@pytest.mark.unit
+def test_ep1_staleness_token_new_objective_invalidates_cache():
+    """Replacing the objective must invalidate the cache (id(_objective) changes)
+    so a stale objective is never reused — a stale objective would be unsound."""
+    from discopt._jax.uniform_relax import _ANALYSIS_ATTR
+
+    m = Model()
+    x = m.continuous("x", lb=0.5, ub=2.5)
+    y = m.continuous("y", lb=0.5, ub=2.0)
+    m.minimize(dm.exp(x * y))
+    r1 = build_uniform_relaxation(m)
+    tok1 = m.__dict__[_ANALYSIS_ATTR].token
+
+    m.minimize(dm.log(x + y) ** 2 + x / y)  # new objective object
+    r2 = build_uniform_relaxation(m)
+    tok2 = m.__dict__[_ANALYSIS_ATTR].token
+
+    assert tok1 != tok2, "staleness token did not change after a new objective"
+    assert _fp(r1) != _fp(r2), "cache was not invalidated: stale objective reused"
