@@ -89,7 +89,7 @@ A fresh context executing item EP*k*:
 | EP2 OBBT single-build-per-box | **done (already landed by T2.2 #579; premise falsified)** | Measured (in-container): per-node/root OBBT already builds the relaxation **once per (node box, round)** and shares it across all probes — hda (722 cols, 15 s budget) `build_milp_relaxation` **calls=1 per sweep** (builds/sweep = 1.00), the single build 6.83 s = 36.5 % of OBBT wall, probes warm-started via `_PersistentProbeLP`. **No per-probe rebuild exists to remove** — EP2's "each probe pays a full engine build" premise is falsified (see EP2 section). Node-level neutrality pinned by new `test_obbt_ep2_node_reuse.py` (10 vendored instances: reuse+warm boxes == cold-seam boxes, Δ ≤ 1 ulp / ≤ 1e-9). No solver-math change → fingerprints/node-counts/objectives byte-unchanged by construction. | (docs+test) |
 | EP3 patch-table node path | **done (engagement 48/62 = 77%; cheap-closed-form half falsified — see EP3 §)** | Fast-path engagement restored for the ENGINE via `UniformPatchTable` (`incremental_mccormick.py`), wired ahead of the closed-form `IncrementalMcCormickLP` in `mccormick_lp.py`. **Before→after (probe, `--children 10`, fast path engaged):** nvs09 **169→51 ms/node** (3.3×, node-neutral: 19 nodes, obj −43.13433691803531 byte-identical fast-ON vs `DISCOPT_INCREMENTAL_MC=0` **to optimality**); ex1226 **3.6→2.4 ms/node** (5 nodes, obj byte-identical ON/OFF). bchoco06 (3rd certifying instance) does NOT engage (unbounded/large layout-unstable root) → cold path unchanged → trivially neutral. **Engagement 48/62 = 77%** (not engaged: alan, bchoco06/08, ex1224, fac2, m3, nvs01, nvs21, oaer, st_e29, tanksize, tspn08/10/12 — unbounded root / box-unstable lifted layout → cold fallback). `relaxation_fingerprint` byte-identical on all 62 (build path untouched; `test_claim_baseline_neutral` green). **Falsification (§0.3):** the envisioned ~0.1 ms closed-form coefficient refresh is NOT byte-reproducible for the engine — its box-dependent rows/aux-bounds are `evaluate_interval` results over the reconstructed DAG (measured: a closed-form affine interval differs from `evaluate_interval` bit-for-bit on fac2 3/3, alan 1/6), and single-atom replay cannot reproduce the interleaved aux-column layout; so `_patch` regenerates through the EP1-cached engine build (byte-identical) and the win is the per-node **separation skip** (inherited root pool) + **warm start**, not a numpy refresh (hence 51 ms, not ≤12 ms). | `cb31ea9` |
 | EP4a separation facet cache | **done (cache landed; measured wall win negligible — §0.3 honest report)** | Exact memoization of `separate_multilinear_envelope` in a capped (200k, clear-on-overflow) module dict, keyed by the **full** float64-bytes inputs `(lb, ub, x_star, w_star, tol, max_factors)` — NOT box-only: the supporting facet is *selected at* `x_star` (measured varies with `x_star` on 10/16 nvs09 boxes), so a box-only key would return a stale facet (a byte-neutrality bug). **BOUND-NEUTRAL gate GREEN:** node counts + certified objectives byte-identical before/after (nvs09 51 builds/19 nodes/−43.13433691803531; ex1226 24/5/−16.999999994161513; bchoco06 38/7/time_limit); `relaxation_fingerprint` byte-identical on all 62 (build path untouched; `test_claim_baseline_neutral` green, 113s); new `test_ep4a_multilinear_facet_cache.py` asserts cache-hit facets == fresh derivation byte-for-byte on 25 boxes/arity ×{2,3} × 3 w_star, key-includes-x_star, no-resolve-on-hit, cap-clears. **Measured (nvs09 end-to-end):** cache deterministically removes **144/360 = 40% of facet-LP solves** (180 sep calls, 108 unique inputs → 72 hits), but the recurring atoms are the *cheap* LPs — `_solve_envelope` cumulative time only 15.1→14.6 s (~3%), within noise at the 45 s solve; EP0 ms/node (distinct cold child boxes, no recurrence) unchanged (53.0→52.7). **Win is negligible on the certifying instances** — landed anyway as the guaranteed-neutral, harmless exact cache (bounded, self-verified) that removes the real redundant computation. **Closed-form arity≤3 NOT added** (correctly skipped): the LP facet is `x_star`-selected with a vertex-recomputed intercept, so no box-only closed form can reproduce it bit-for-bit — the self-check would fail by construction. | `f1a5e77` |
-| EP4b separation warm-start + OA pool | open | | |
+| EP4b separation warm-start + OA pool | **done (all three premises FALSIFIED by the entry experiment — no-op, §0.3 honest report)** | **Entry experiment (2026-07-13, in-container nvs09 full `m.solve()`, cProfile + instrumented Kelley loop):** all three EP4b sub-changes measured to have no available win. **(A) incremental append vs vstack:** the whole scipy-sparse rebuild stack costs **0.05 s of a 37 s solve** (`_compressed_sparse_stack` 438 calls / 0.052 s; `_separate_convex`'s own `_append` vstack **0.035 s** across 96 rounds) — negligible → dropped (§0.3: no speculative complexity). **(B) warm-start the round-to-round re-solve:** ALREADY implemented — `backend="simplex"` (relaxer default) routes every Kelley re-solve through `MilpRelaxationModel._solve_lp_warm`, which reuses the prior optimal basis when rows only grow; measured **warm_hits=96/96 (100%)** in `_separate_convex` → nothing to add. **(C) OA cut pooling for child inheritance:** ALREADY done root→child — the general root cut pool (`solver.py:5319`, fires when `_inc is not None`; nvs09 engages) captures the FULL separation chain including convex tangents (`solver.py:5326` lists "convex"; `mccormick_lp.py:1417` captures every appended row) and inherits it at every fast-path node; confirmed at runtime: *"Root cut pool (general spatial): 175 cuts... inherited at every fast-path node"*. The only unbuilt variant — per-node **parent→child** tangent pooling — is bound-CHANGING, needs invasive B&B-tree restructuring (the driver threads a single `_root_cut_pool`, not per-parent pools), targets the non-dominant convex-separation cost (8.4 s, itself ~90% JAX grad eval = EP5 territory, not LP/vstack), and has **no measured evidence** of a net win → deferred (not implemented speculatively). **No code change; byte-identity trivially holds** (nvs09 obj −43.13433691803531 unchanged, status optimal). Dominant nvs09 costs are multilinear separation (14.5 s, EP4a-negligible) + Rust LP (14.8 s), neither in EP4b scope. | (docs-only) |
 | EP5 lazy/shared compiles | **done (jit falsified non-neutral; byte-neutral `eval_jaxpr` + lazy trace landed)** | **Entry (§0.3):** `jax.jit` NOT bit-identical to eager (nvs09 5/286 value bits Δ≤7.1e-15; tspn05 5/25 value Δ≤1.1e-12 + 6/25 grad Δ≤2.4e-15) → bound-CHANGING, NOT landed. `eval_jaxpr` (pre-trace once, op-by-op eval) IS bit-identical (**0/311** value+grad on nvs09/tspn05) and **5.7×** on the grad path → landed. **Measured (nvs09 `m.solve()`):** wall **44.9→32.8 s**; AD cProfile tottime (`ad.py`+`linearize`) **3.23→0.085 s** (one-time `make_jaxpr`+`eval_jaxpr`≈0.73 s reused); 19 nodes / obj −43.13433691803531 **unchanged**. EP0 probe unchanged (nvs09 ctor 0.216→0.216 s / **53.1→52.0 ms/node** noise / 51 builds / 19 nodes / obj identical; ex1226 2.4→2.7; bchoco06 1801→1861 — `solve_at_node` child boxes don't run the separation grad loop, so the win is in full-solve wall, per the plan). **Bound-neutral gate GREEN:** fingerprints byte-identical on all 62; node/obj byte-identical before/after AND fast-ON vs `DISCOPT_INCREMENTAL_MC=0` (nvs09 19/−43.13433691803531, ex1226 5/−16.999999994161513, bchoco06 7/time_limit); 3 new `test_ep5_*`; smoke 620 passed; ruff/format/mypy clean. Ctor double-build left to EP3's guarded `_validate` (byte-identity guard, not free waste). | `perf(ep5)` |
 | EP6 probing/OBBT default-on tuning | open (local host) | | |
 
@@ -463,6 +463,79 @@ mirror the RLT/PSD pool mechanism).
 
 **Done.** Per-round separation cost measured before/after; §3 updated;
 differential + feasible-point results recorded.
+
+**OUTCOME (2026-07-13): all three sub-changes FALSIFIED by the entry experiment —
+EP4b is a NO-OP (docs-only). The plan's premise (a ~20 s Rust-LP Kelley loop that
+vstacks the matrix each round and never pools OA cuts) does not survive
+measurement.**
+
+*Entry experiment (§0.3, run before any implementation — mandatory).* One
+in-container `m.solve()` on nvs09 (32–37 s wall, obj −43.13433691803531, 19
+nodes), cProfile'd, with the `_separate_convex` Kelley loop separately
+instrumented (per-round vstack time vs LP-solve time vs warm-basis state). The
+three sub-changes classify as follows:
+
+  1. **(A) Incremental append instead of full `vstack` per round — WOULD be
+     bound-NEUTRAL, but the measured win is nil → dropped.** The whole
+     scipy-sparse construction stack over the entire solve costs **0.05 s**
+     (`scipy/sparse/_construct.py:_compressed_sparse_stack` 438 calls, 0.052 s
+     cumulative; `get_index_dtype`/`check_format`/`prune` a few ms each), and
+     `_separate_convex`'s own `_append` vstack is **0.035 s across all 96 rounds**
+     — < 0.2 % of a 37 s solve. Appending rows to a CSR in place cannot beat
+     0.05 s, and it would add a growable-matrix data structure (complexity/risk)
+     for nothing. §0.3: do not land speculative complexity. Dropped.
+  2. **(B) Warm-start the round-to-round re-solve — ALREADY implemented; nothing
+     to add.** The relaxer's default `backend="simplex"` routes every Kelley
+     re-solve through `MilpRelaxationModel.solve` →
+     `MilpRelaxationModel._solve_lp_warm` (`milp_relaxation.py:445`), which reuses
+     the cached optimal basis from the previous `.solve()` whenever the structural
+     columns are unchanged and rows have only grown (`_warm_rows <= m_now`) — the
+     exact cutting-plane case. Instrumented over nvs09: **warm_hits = 96/96
+     (100 %)**, warm_miss = 0. The plan's "warm-start each round" was landed years
+     ago (`DISCOPT_LP_WARMSTART`, default on). No divergence question arises — it
+     is already the code's behaviour, and it is already byte-neutral (the warm
+     dual simplex returns the same LP optimum).
+  3. **(C) OA cut pooling for child inheritance — ALREADY done root→child; the
+     residual parent→child variant is speculative and deferred.** The premise
+     "engine OA cuts are not pooled the way root RLT/PSD cuts are" is FALSE. The
+     GENERAL root cut pool (`solver.py:5319`, gated on `_mc_lp_relaxer._inc is not
+     None or _cut_inherit_enabled`; nvs09 engages the incremental engine per EP3)
+     forces one cold, fully-separating root solve (`out_cuts=_pool_chunks`) that
+     captures the ENTIRE separation chain — multilinear, edge-concave,
+     univariate-square, **convex tangents**, and RLT (`solver.py:5326` names
+     "convex"; `mccormick_lp.py:1417` captures every row appended beyond
+     `_n_base_rows`, convex included) — tags each row with its column identity
+     (C-44) and inherits it at every fast-path node via
+     `inherited_cuts=_root_cut_pool`. Confirmed at runtime on nvs09: *"Root cut
+     pool (general spatial): 175 cuts (of 175 separated), inherited at every
+     fast-path node."* So the convex OA tangents are already pooled and inherited
+     exactly the way RLT/PSD are. The only unbuilt variant is **per-node
+     parent→child** pooling (each node captures its own deep-box tangents; children
+     remap the parent's). That is bound-CHANGING and (i) requires threading
+     per-node pools through the B&B tree — the driver currently carries a single
+     global `_root_cut_pool`, not per-parent pools, so this is an invasive
+     node-expansion rewrite, not a `mccormick_lp.py` edit; (ii) targets the
+     non-dominant cost — `_separate_convex` is 8.4 s but ~90 % of that is
+     `value_fn`/`grad_fn` JAX evaluation (EP5's `eval_jaxpr` domain), not the LP
+     re-solve (0.9 s) or the vstack (0.035 s); (iii) has **no measured evidence**
+     it reduces the dominant costs, which are multilinear separation (14.5 s,
+     EP4a-negligible) and the Rust LP (`solve_lp_warm_py` 9.5 s + `_csc` 5.3 s).
+     Per §0.3 and CLAUDE.md §4 (run the entry experiment before building; no fix
+     on a hypothesis), it is NOT implemented speculatively. If a future local-host
+     global50 profile shows a class where inherited parent tangents demonstrably
+     cut node counts, it graduates then behind a default-off flag with the
+     differential-regime gate — deferred to the local host, like EP6.
+
+*Net.* No sub-change survives measurement as a landable win. EP4b lands the
+falsification only (this section + §3 + the ledger). No library change ⇒
+byte-identity on all 62 and node/objective equality on the certifying set hold
+trivially (nvs09 obj −43.13433691803531 / status optimal, unchanged from
+EP5-HEAD); the differential regime is moot (there is nothing bound-changing to
+gate). The maintainer-visible per-node separation cost that remains is the
+multilinear facet LPs (EP4a: exact cache landed, wall win negligible) and the
+JAX grad path (EP5: `eval_jaxpr`, landed) — both already addressed; the Rust LP
+itself (14.8 s) is the in-house simplex doing genuine work on distinct cold child
+boxes, not redundant re-computation EP4b could remove.
 
 ---
 
