@@ -3890,8 +3890,38 @@ def _extract_positive_product(
                 return visit(e.left, power) and visit(e.right, -power)
             if e.op == "**" and isinstance(e.right, Constant):
                 return visit(e.left, power * float(e.right.value))
+            if e.op in ("+", "-"):
+                # Additive-identity passthrough: canonical reconstruct wraps a
+                # monomial factor as ``0 + m`` / ``m + 0`` / ``m - 0``. Strip a zero
+                # constant operand and recurse into the real factor.
+                if isinstance(e.left, Constant) and abs(float(e.left.value)) <= 1e-12:
+                    if e.op == "+":
+                        return visit(e.right, power)
+                elif isinstance(e.right, Constant) and abs(float(e.right.value)) <= 1e-12:
+                    return visit(e.left, power)
+        # Fallback: a factor that is an affine multiple of a SINGLE positive
+        # variable, ``c·x`` with ``c>0`` and zero constant (e.g. ``(30000·x)^-0.48``
+        # in a signomial). Then ``(c·x)^power = c^power · x^power`` is still a
+        # positive monomial factor. A nonzero constant or >1 variable breaks the
+        # monomial form (reject); a non-positive coefficient breaks the log lift.
+        try:
+            aff_coeffs, aff_const = _linearize_affine_expr(e, model, n_orig)
+        except ValueError:
             return False
-        return False
+        if abs(float(aff_const)) > 1e-12:
+            return False
+        nz = [(j, float(c)) for j, c in enumerate(aff_coeffs) if abs(float(c)) > 0.0]
+        if len(nz) != 1:
+            return False
+        j, c = nz[0]
+        if j >= n_orig or c <= 0.0:
+            return False
+        lo = float(flat_lb[j])
+        if not (lo > 1e-9) or not np.isfinite(lo):
+            return False
+        coef[0] *= c**power
+        factors[j] = factors.get(j, 0.0) + power
+        return True
 
     if not visit(expr, 1.0):
         return None
