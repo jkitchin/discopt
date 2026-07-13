@@ -2,12 +2,14 @@
 
 One entry point — :func:`build_uniform_relaxation` — that relaxes *every* atom
 class of the R1.1 canonical DAG (``canonical_expr.atomize`` taxonomy) soundly and
-uniformly, composing via the auxiliary-variable method (AVM). This is the
-substrate the federation cutover (``docs/dev/factorable-capability-blueprint.md``)
-routes through; it is implemented as a **new module that runs ALONGSIDE** the
-default ``build_milp_relaxation`` path — nothing here is wired into the default
-build, and no new ``DISCOPT_*`` runtime flag is added. It is exercised only by
-tests and the validation harness.
+uniformly, composing via the auxiliary-variable method (AVM). The federation
+cutover (``docs/dev/factorable-capability-blueprint.md``) is complete: this engine
+**IS the default relaxation** — ``build_milp_relaxation`` (``milp_relaxation.py``)
+unconditionally delegates every default build to :func:`build_uniform_relaxation`,
+so this module is the load-bearing per-node certificate path (in-house Rust
+simplex), not an alongside experiment. No new ``DISCOPT_*`` runtime flag is added:
+the delegation is unconditional. The full-panel correctness gate (``global50``,
+``cert0``) is green on this path (``incorrect_count = 0``).
 
 The pipeline (blueprint §3.1)::
 

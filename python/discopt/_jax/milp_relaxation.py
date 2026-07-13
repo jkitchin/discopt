@@ -4220,6 +4220,24 @@ def build_milp_relaxation(
 ) -> tuple["MilpRelaxationModel", dict]:
     """Build a MILP relaxation with piecewise McCormick for bilinear/monomial terms.
 
+    .. note::
+        **#632 cutover — this function now delegates the entire default build to
+        the uniform factorable engine** (:func:`uniform_relax.build_uniform_relaxation`),
+        which relaxes every canonical atom class soundly via the AVM. As a result
+        the following parameters are currently **IGNORED** on the default path and
+        kept only for signature compatibility: ``terms``, ``disc_state`` (no
+        piecewise-McCormick refinement is fed in — the engine's per-atom envelopes
+        supersede it), ``incumbent``, ``oa_cuts`` (OA/Kelley tangents are added
+        lazily by the separators at ``solve_at_node``, not pre-seeded here),
+        ``convhull_ebd``/``convhull_ebd_encoding``, ``superposition``, and
+        ``rlt_level1``. Only ``model``, ``convhull_formulation`` (validated),
+        and ``bound_override`` still affect the result. A caller that relied on
+        ``disc_state`` piecewise refinement or on feeding back ``oa_cuts`` gets a
+        sound but unrefined-by-those-inputs relaxation — the engine is a valid
+        outer relaxation by construction, verified ``incorrect_count = 0`` on the
+        global50 panel. The docstring below describes the superseded federated
+        build and is retained for historical context.
+
     For each bilinear term x_i*x_j: adds standard McCormick envelope constraints
     (4 linear inequalities).  These give the convex hull of the bilinear set on the
     bounding box and are independent of the partition (piecewise refinement via binary
