@@ -88,7 +88,7 @@ A fresh context executing item EP*k*:
 | EP1 per-model analysis cache | done | in-container `--children 10` (wall-clock noisy, treat as order-of-magnitude): nvs09 ctor 0.53→0.17 s / **282→169 ms/node**; ex1226 ctor 0.025→0.025 s / **26.8→3.7 ms/node**; bchoco06 ctor 0.61→0.55 s / **2268→1813 ms/node**. Builds/nodes/objectives UNCHANGED (nvs09 22 builds/19 nodes/−43.13434; ex1226 9/5/−17.0; bchoco06 6/7/time_limit). Fingerprints byte-identical on all 62 vendored instances; node_count + objective byte-equal on a 19-instance corpus (persistent-cache vs fresh-per-build). | `7a6a5bd` |
 | EP2 OBBT single-build-per-box | **done (already landed by T2.2 #579; premise falsified)** | Measured (in-container): per-node/root OBBT already builds the relaxation **once per (node box, round)** and shares it across all probes — hda (722 cols, 15 s budget) `build_milp_relaxation` **calls=1 per sweep** (builds/sweep = 1.00), the single build 6.83 s = 36.5 % of OBBT wall, probes warm-started via `_PersistentProbeLP`. **No per-probe rebuild exists to remove** — EP2's "each probe pays a full engine build" premise is falsified (see EP2 section). Node-level neutrality pinned by new `test_obbt_ep2_node_reuse.py` (10 vendored instances: reuse+warm boxes == cold-seam boxes, Δ ≤ 1 ulp / ≤ 1e-9). No solver-math change → fingerprints/node-counts/objectives byte-unchanged by construction. | (docs+test) |
 | EP3 patch-table node path | **done (engagement 48/62 = 77%; cheap-closed-form half falsified — see EP3 §)** | Fast-path engagement restored for the ENGINE via `UniformPatchTable` (`incremental_mccormick.py`), wired ahead of the closed-form `IncrementalMcCormickLP` in `mccormick_lp.py`. **Before→after (probe, `--children 10`, fast path engaged):** nvs09 **169→51 ms/node** (3.3×, node-neutral: 19 nodes, obj −43.13433691803531 byte-identical fast-ON vs `DISCOPT_INCREMENTAL_MC=0` **to optimality**); ex1226 **3.6→2.4 ms/node** (5 nodes, obj byte-identical ON/OFF). bchoco06 (3rd certifying instance) does NOT engage (unbounded/large layout-unstable root) → cold path unchanged → trivially neutral. **Engagement 48/62 = 77%** (not engaged: alan, bchoco06/08, ex1224, fac2, m3, nvs01, nvs21, oaer, st_e29, tanksize, tspn08/10/12 — unbounded root / box-unstable lifted layout → cold fallback). `relaxation_fingerprint` byte-identical on all 62 (build path untouched; `test_claim_baseline_neutral` green). **Falsification (§0.3):** the envisioned ~0.1 ms closed-form coefficient refresh is NOT byte-reproducible for the engine — its box-dependent rows/aux-bounds are `evaluate_interval` results over the reconstructed DAG (measured: a closed-form affine interval differs from `evaluate_interval` bit-for-bit on fac2 3/3, alan 1/6), and single-atom replay cannot reproduce the interleaved aux-column layout; so `_patch` regenerates through the EP1-cached engine build (byte-identical) and the win is the per-node **separation skip** (inherited root pool) + **warm start**, not a numpy refresh (hence 51 ms, not ≤12 ms). | `cb31ea9` |
-| EP4a separation facet cache | open | | |
+| EP4a separation facet cache | **done (cache landed; measured wall win negligible — §0.3 honest report)** | Exact memoization of `separate_multilinear_envelope` in a capped (200k, clear-on-overflow) module dict, keyed by the **full** float64-bytes inputs `(lb, ub, x_star, w_star, tol, max_factors)` — NOT box-only: the supporting facet is *selected at* `x_star` (measured varies with `x_star` on 10/16 nvs09 boxes), so a box-only key would return a stale facet (a byte-neutrality bug). **BOUND-NEUTRAL gate GREEN:** node counts + certified objectives byte-identical before/after (nvs09 51 builds/19 nodes/−43.13433691803531; ex1226 24/5/−16.999999994161513; bchoco06 38/7/time_limit); `relaxation_fingerprint` byte-identical on all 62 (build path untouched; `test_claim_baseline_neutral` green, 113s); new `test_ep4a_multilinear_facet_cache.py` asserts cache-hit facets == fresh derivation byte-for-byte on 25 boxes/arity ×{2,3} × 3 w_star, key-includes-x_star, no-resolve-on-hit, cap-clears. **Measured (nvs09 end-to-end):** cache deterministically removes **144/360 = 40% of facet-LP solves** (180 sep calls, 108 unique inputs → 72 hits), but the recurring atoms are the *cheap* LPs — `_solve_envelope` cumulative time only 15.1→14.6 s (~3%), within noise at the 45 s solve; EP0 ms/node (distinct cold child boxes, no recurrence) unchanged (53.0→52.7). **Win is negligible on the certifying instances** — landed anyway as the guaranteed-neutral, harmless exact cache (bounded, self-verified) that removes the real redundant computation. **Closed-form arity≤3 NOT added** (correctly skipped): the LP facet is `x_star`-selected with a vertex-recomputed intercept, so no box-only closed form can reproduce it bit-for-bit — the self-check would fail by construction. | `f1a5e77` |
 | EP4b separation warm-start + OA pool | open | | |
 | EP5 lazy/shared compiles | open | | |
 | EP6 probing/OBBT default-on tuning | open (local host) | | |
@@ -403,6 +403,42 @@ facets on 20 random boxes. Suites per §2.
 
 **Done.** ms/node contribution of `_separate_multilinear` in the EP0 profile
 drops to ~0 on cache-hot nodes; §3 updated.
+
+**OUTCOME (2026-07-13): exact cache landed, byte-neutral; measured wall win
+NEGLIGIBLE on the certifying instances — honest §0.3 report, no manufactured
+win. Closed-form arity≤3 correctly NOT added.**
+
+*Key correction to the plan's premise.* EP4a assumed "the facet set is a pure
+function of the atom and its box." The *full hull* is; but
+`_solve_envelope` returns the **single supporting facet selected at the query
+point `x_star`**, which is NOT box-only — measured on nvs09, the returned
+`(a, b)` varies with `x_star` on **10 of 16** boxes queried at multiple points.
+A box-only cache key would therefore return a stale facet for a different
+`x_star` at the same box — a byte-neutrality (correctness) bug. So the cache is
+keyed by the **exact float64 bytes of all of `_separate_multilinear_envelope`'s
+inputs** (`lb, ub, x_star, w_star, tol, max_factors`) — a pure-function
+memoization, byte-identical by construction. This is the safe cache the plan's
+own fallback clause mandates ("if the closed form is at all uncertain, land only
+the exact cache").
+
+*Closed-form arity≤3 skipped (correctly).* For the same reason, no box-only
+closed-form facet can reproduce the `x_star`-selected LP facet (with its
+vertex-recomputed intercept) bit-for-bit, so the construction-time self-check
+would fail by definition. Adding it would be dead code; skipped per the
+directive.
+
+*Measured (nvs09, in-container).* The cache is exact and removes real
+redundancy — **144/360 = 40% of the facet-LP solves** are eliminated (180 sep
+calls, 108 distinct inputs → 72 hits). But the recurring atoms are the *cheap*
+LPs: cumulative `_solve_envelope` time drops only ~15.1 → 14.6 s (~3%), within
+run-to-run noise at the 45 s solve, and the EP0 ms/node metric (which solves
+distinct cold child boxes with no recurrence) is unchanged (53.0 → 52.7). The
+post-EP1/EP3 facet LPs are simply already cheap where they recur; the large
+per-node separation cost is `_separate_convex`'s JAX-grad Kelley loop (EP4b/EP5),
+not the multilinear hull LP. **Node counts, objectives, and fingerprints are
+byte-identical**, so the cache is landed as a guaranteed-neutral, harmless,
+bounded (200k, clear-on-overflow) removal of redundant work — not for a wall win
+that the measurement does not support.
 
 ---
 

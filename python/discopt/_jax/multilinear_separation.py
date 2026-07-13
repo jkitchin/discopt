@@ -49,6 +49,28 @@ _HULL_SIMPLEX_STALL_K = 100
 _HULL_SIMPLEX_STALL_C = 500
 _HULL_SIMPLEX_STALL_MAX = 3000
 
+# EP4a — exact multilinear facet cache (bound-neutral memoization).
+#
+# ``separate_multilinear_envelope`` is a pure, deterministic function of its
+# inputs; solving its two tiny facet LPs dominates per-node separation cost on
+# multilinear-heavy instances (measured nvs09: 180 calls / 360 LP solves /
+# ~15 s ≈ 34% of solve wall, engine-performance-plan.md EP4a). The same atom+box
+# recurs across nodes/probes, so memoizing the result is a guaranteed-neutral
+# win: identical inputs ⇒ identical cuts ⇒ identical node counts and objectives.
+#
+# CRITICAL — the key includes ``x_star`` (and ``w_star``), NOT just the box. The
+# supporting facet ``_solve_envelope`` returns is *selected at* ``x_star`` (it is
+# the active dual facet at that point), so it is NOT a pure function of the box:
+# measured on nvs09, the facet ``(a, b)`` varies with ``x_star`` on 10 of 16
+# boxes queried at multiple points. A box-only key would therefore return a
+# stale facet for a different query point — a byte-neutrality (correctness) bug.
+# The box is keyed by exact float64 bytes (``ascontiguousarray(...).tobytes()``),
+# never rounded floats, so no float-key collision can return a wrong facet.
+_FACET_CACHE: dict[tuple, list[EnvelopeCut]] = {}
+# Cap: clear wholesale at 200k distinct atom/box/point entries (no LRU — the
+# recurrence is temporal, and a full clear is O(1) and keeps the memo bounded).
+_FACET_CACHE_CAP = 200_000
+
 
 def _separation_lp_simplex_enabled() -> bool:
     """Whether F3 routes the hull LP to the Rust simplex (env, default ON).
@@ -174,6 +196,55 @@ def separate_multilinear_envelope(
     returned list is always sound to add. Returns ``[]`` when the point is
     already inside the hull, the bounds are not finite, the factor count exceeds
     ``max_factors`` (``2^n`` vertices), or the LP solve did not converge.
+
+    EP4a: results are memoized in the module-level :data:`_FACET_CACHE` keyed by
+    the exact float64 bytes of *all* inputs (box, query point, product value,
+    tolerance, factor cap). This is a pure-function memoization — a cache hit
+    returns the byte-identical cut list a fresh derivation would produce — so it
+    is provably bound-neutral while skipping the two facet LPs on the ~40% of
+    calls that recur (same atom+box+point) across nodes and probes.
+    """
+    lb = np.ascontiguousarray(lb, dtype=np.float64)
+    ub = np.ascontiguousarray(ub, dtype=np.float64)
+    x_star = np.ascontiguousarray(x_star, dtype=np.float64)
+    # Exact-bytes memo key over every argument the result depends on. A tuple of
+    # ``bytes`` slots (not a delimited concatenation) so variable-arity arrays
+    # cannot collide, and ``tobytes()`` (not rounded floats) so no near-equal box
+    # aliases to a wrong facet. ``x_star``/``w_star`` are load-bearing in the key
+    # (the facet is selected at the query point — see _FACET_CACHE note above).
+    key = (
+        lb.tobytes(),
+        ub.tobytes(),
+        x_star.tobytes(),
+        np.float64(w_star).tobytes(),
+        np.float64(tol).tobytes(),
+        int(max_factors),
+    )
+    cached = _FACET_CACHE.get(key)
+    if cached is not None:
+        return list(cached)
+    cuts = _separate_multilinear_envelope_uncached(
+        lb, ub, x_star, w_star, tol=tol, max_factors=max_factors
+    )
+    if len(_FACET_CACHE) >= _FACET_CACHE_CAP:
+        _FACET_CACHE.clear()
+    _FACET_CACHE[key] = cuts
+    return list(cuts)
+
+
+def _separate_multilinear_envelope_uncached(
+    lb: np.ndarray,
+    ub: np.ndarray,
+    x_star: np.ndarray,
+    w_star: float,
+    *,
+    tol: float = 1e-6,
+    max_factors: int = 12,
+) -> list[EnvelopeCut]:
+    """Uncached derivation of the multilinear hull cuts (see the public wrapper).
+
+    Kept as a distinct entry point so the EP4a bound-neutral gate can compare a
+    cache hit against a fresh derivation on the same inputs.
     """
     lb = np.asarray(lb, dtype=np.float64)
     ub = np.asarray(ub, dtype=np.float64)
