@@ -145,6 +145,19 @@ class UniformRelaxation:
     obj_offset: float
     # per-node coverage: id(CNode) -> (kind, tight)
     coverage: dict[int, tuple[str, bool]]
+    # Structural varmaps over ORIGINAL columns (0..n_orig-1) that the proven
+    # legacy separators (PSD / RLT / edge-concave / univariate-square / multilinear)
+    # consume — see ``_uniform_relaxation_delegate``. Each entry maps a product /
+    # power of original variables to the aux column that lifts it in this
+    # relaxation, so the separators fire on the engine's decomposition exactly as
+    # they did on the federation's. Every registration is EXACT (the aux equals the
+    # product/power of the named originals, tied to them by the McCormick /
+    # secant-tangent rows already emitted), so every separated cut stays sound.
+    bilinear_map: dict[tuple[int, int], int]
+    monomial_map: dict[tuple[int, int], int]
+    trilinear_map: dict[tuple[int, int, int], int]
+    multilinear_map: dict[tuple[int, ...], int]
+    univariate_square_map: dict[tuple[int, int], int]
 
 
 # --------------------------------------------------------------------------- #
@@ -302,6 +315,14 @@ class _Builder:
         # id(CNode) -> (lo, hi) sound interval enclosure
         self._bounds: dict[int, tuple[float, float]] = {}
         self.coverage: dict[int, tuple[str, bool]] = {}
+        # Structural varmaps over ORIGINAL columns for the legacy separators
+        # (populated by the builders as they lift each product/power of bare
+        # originals; see UniformRelaxation for the soundness contract).
+        self.bilinear_map: dict[tuple[int, int], int] = {}
+        self.monomial_map: dict[tuple[int, int], int] = {}
+        self.trilinear_map: dict[tuple[int, int, int], int] = {}
+        self.multilinear_map: dict[tuple[int, ...], int] = {}
+        self.univariate_square_map: dict[tuple[int, int], int] = {}
         self._ivbox = _interval_box(model, flat_lb, flat_ub)
         # Validation-only: aux column -> the modeling Expression whose exact value
         # that column represents (the node itself, a relaxed power, or a McCormick
@@ -318,6 +339,68 @@ class _Builder:
         self.col_ub.append(float(hi))
         self.integrality.append(1 if integ else 0)
         return j
+
+    # -- structural varmap registration (for the legacy separators) --------- #
+    def single_orig_col(self, lt: LinForm) -> Optional[int]:
+        """Return ``i`` iff ``lt`` is EXACTLY the bare original variable ``x_i``.
+
+        Only a coefficient-1, zero-constant, single-original-column LinForm is a
+        bare original; a scaled/shifted/aux LinForm (e.g. ``2 x_i``, ``x_i+1``, an
+        aux column) is rejected. This is the soundness gate for registering a lift:
+        the separators treat the registered aux as the product/power of exactly the
+        *named originals*, so registering ``(2 x_i)**2`` under key ``(i, 2)`` (which
+        would be ``4 x_i**2``, not ``x_i**2``) MUST be refused.
+        """
+        if lt.const != 0.0:
+            return None
+        items = [(j, c) for j, c in lt.coeffs.items() if c != 0.0]
+        if len(items) != 1:
+            return None
+        j, c = items[0]
+        if c == 1.0 and 0 <= j < self.n_orig:
+            return j
+        return None
+
+    def single_var_affine(self, lt: LinForm) -> Optional[tuple[int, float]]:
+        """Return ``(i, c)`` iff ``lt`` is ``c * x_i`` (one original, zero const).
+
+        Unlike :meth:`single_orig_col` this accepts any nonzero coefficient (not
+        just 1), so ``2 x_i`` is recognised as ``(i, 2.0)``. Used by the product
+        builder to aggregate factors that are affine multiples of a *single*
+        original into a univariate power (the ``(c x_i)·x_i == c x_i**2`` class).
+        """
+        if lt.const != 0.0:
+            return None
+        items = [(j, c) for j, c in lt.coeffs.items() if c != 0.0]
+        if len(items) != 1:
+            return None
+        j, c = items[0]
+        if 0 <= j < self.n_orig:
+            return (j, c)
+        return None
+
+    def register_power(self, i: int, p: int, col: int) -> None:
+        """Register an aux holding ``x_i**p`` (``p`` integer >= 2) as a monomial."""
+        self.monomial_map[(i, p)] = col
+        if p == 2:
+            self.univariate_square_map[(i, 2)] = col
+
+    def register_product(self, cols: list[int], col: int) -> None:
+        """Register an aux holding ``prod(x_c for c in cols)`` (distinct originals).
+
+        Bilinear (2), trilinear (3) and higher-arity (>=4) distinct-variable
+        products go to the map the matching separator reads; a non-distinct or
+        empty ``cols`` is ignored (never mis-registered).
+        """
+        if len(set(cols)) != len(cols) or len(cols) < 2:
+            return
+        key = tuple(sorted(cols))
+        if len(key) == 2:
+            self.bilinear_map[(key[0], key[1])] = col
+        elif len(key) == 3:
+            self.trilinear_map[(key[0], key[1], key[2])] = col
+        else:
+            self.multilinear_map[key] = col
 
     def add_row(self, coeffs: dict[int, float], rhs: float) -> None:
         # Drop rows whose payload is not finite/usable — the interval floor stands.
@@ -579,6 +662,11 @@ def _build_power(ctx: _Builder, node: CNode, w: int) -> Envelope:
     f = lambda t: float(t) ** p  # noqa: E731
     fp = lambda t: p * (float(t) ** (p - 1.0))  # noqa: E731
     tight = _emit_1d(ctx, w, lt, lo, hi, f, fp, curv)
+    # Register a bare-original integer power ``x_i**p`` (p>=2) so the moment/PSD,
+    # edge-concave and univariate-square separators see the lifted square/monomial.
+    i = ctx.single_orig_col(lt)
+    if i is not None and float(p).is_integer() and int(p) >= 2:
+        ctx.register_power(i, int(p), w)
     return Envelope(rows=[], tight=tight)
 
 
@@ -637,6 +725,10 @@ def _factor_value(
     f = lambda t: float(t) ** e  # noqa: E731
     fp = lambda t: e * (float(t) ** (e - 1.0))  # noqa: E731
     _emit_1d(ctx, aux, lb_base, bb[0], bb[1], f, fp, curv)
+    # A bare-original integer power factor ``x_i**e`` is itself a lifted monomial.
+    bi = ctx.single_orig_col(lb_base)
+    if bi is not None and float(e).is_integer() and int(e) >= 2:
+        ctx.register_power(bi, int(e), aux)
     return LinForm.col(aux), (lo, hi), factor_expr
 
 
@@ -654,20 +746,114 @@ def _pow_bounds(lo: float, hi: float, e: float) -> tuple[float, float]:
     return (rl if math.isfinite(rl) else -math.inf, rh if math.isfinite(rh) else math.inf)
 
 
+def _relax_var_power(ctx: _Builder, col: int, n: int) -> tuple[LinForm, tuple[float, float]]:
+    """Relax ``x_col**n`` (``n`` integer >= 2) into a fresh aux with the tight
+    secant/tangent power envelope, register it as monomial ``(col, n)`` and return
+    its ``(LinForm, bounds)``.
+    """
+    lo0, hi0 = ctx.col_lb[col], ctx.col_ub[col]
+    lo, hi = _pow_bounds(lo0, hi0, float(n))
+    aux = ctx.new_aux(lo, hi)
+    base_lin = LinForm.col(col)
+    curv = _pow_curv(float(n), lo0, hi0)
+    f = lambda t: float(t) ** n  # noqa: E731
+    fp = lambda t: n * (float(t) ** (n - 1.0))  # noqa: E731
+    _emit_1d(ctx, aux, base_lin, lo0, hi0, f, fp, curv)
+    if ctx.track_aux_exprs:
+        from discopt._jax.canonical_expr import _flat_var_expr
+
+        ctx.aux_expr[aux] = _flat_var_expr(ctx.model)[col] ** n
+    ctx.register_power(col, n, aux)
+    return LinForm.col(aux), (lo, hi)
+
+
+def _emit_scaled_equality(ctx: _Builder, w: int, lin: LinForm, scalar: float) -> None:
+    """Emit ``w == scalar * lin`` as two sound ``<=`` rows (exact link, no relaxation)."""
+    scaled = lin.scaled(scalar)
+    # w - scalar*lin <= 0
+    c1 = {w: 1.0}
+    for j, c in scaled.coeffs.items():
+        c1[j] = c1.get(j, 0.0) - c
+    ctx.add_row(c1, scaled.const)
+    # -(w - scalar*lin) <= 0
+    c2 = {w: -1.0}
+    for j, c in scaled.coeffs.items():
+        c2[j] = c2.get(j, 0.0) + c
+    ctx.add_row(c2, -scaled.const)
+
+
 def _build_product(ctx: _Builder, node: CNode, w: int) -> Envelope:
     """``w = prod_i base_i**e_i`` (all exponents positive => product/monomial).
 
-    Recursive pairwise McCormick (sound): each factor value (relaxing any e≠1
-    power first) is folded left-to-right, allocating an intermediate aux for every
-    partial product except the last, whose aux IS ``w``. Every step is a sound
-    bilinear McCormick relaxation, so the composition is a sound outer relaxation
-    of the product. Tight for a single bilinear pair on a box; loose-but-sound for
-    wide / high-arity multilinear boxes (blueprint TODO: simultaneous multilinear
-    envelope / log-space for ``(prod x)**a``).
+    A product is first *canonicalized into a monomial*: every factor that is an
+    affine multiple of a single original ``(c x_i)`` raised to an integer power is
+    aggregated by variable into ``scalar · prod_i x_i**n_i`` (so the disguised
+    univariate square ``(2 x_i)·x_i`` becomes ``2 x_i**2``, not a wide-box
+    bilinear). Each aggregated ``x_i**n_i`` (n_i>=2) is relaxed by its *tight*
+    secant/tangent power envelope (and registered as a monomial so the
+    univariate-square / edge-concave / PSD separators fire); the ``n_i==1``
+    variables and any remaining general factors are McCormick-folded pairwise —
+    sound at every step. The scalar links to ``w`` by an exact equality. Without
+    this aggregation, pairwise McCormick of ``(c x_i)·x_i`` over a wide box is
+    hopelessly loose (st_miqp2: -221 vs -13.06).
     """
     (exps,) = node.payload
-    factors = [_factor_value(ctx, ch, float(e)) for ch, e in zip(node.children, exps)]
-    tight = _fold_product(ctx, w, factors)
+    scalar = 1.0
+    var_exp: dict[int, int] = {}
+    general: list[tuple[CNode, float]] = []
+    for child, e in zip(node.children, exps):
+        ef = float(e)
+        lt = ctx.rep(child)
+        sv = ctx.single_var_affine(lt) if ef.is_integer() and int(ef) >= 1 else None
+        if sv is not None:
+            col, coef = sv
+            scalar *= coef ** int(ef)
+            var_exp[col] = var_exp.get(col, 0) + int(ef)
+        else:
+            general.append((child, ef))
+
+    # Nothing aggregated (no single-variable integer factor) => the original
+    # pairwise-McCormick path is exactly correct; keep it (also the sole path when
+    # every factor is a general multi-variable / nonlinear form).
+    if not var_exp:
+        factors = [_factor_value(ctx, ch, e) for ch, e in general]
+        tight = _fold_product(ctx, w, factors)
+        return Envelope(rows=[], tight=tight)
+
+    # Assemble the relaxed factor values (LinForm, bounds, tracking-expr): tight
+    # power envelopes for aggregated x_i**n_i, the bare variable for n_i==1, general
+    # factors as-is. The tracking-expr (validation only) is the EXACT value the
+    # factor represents, so the soundness harness can lift the true point.
+    flat_expr = None
+    if ctx.track_aux_exprs:
+        from discopt._jax.canonical_expr import _flat_var_expr
+
+        flat_expr = _flat_var_expr(ctx.model)
+    factor_vals: list[tuple[LinForm, tuple[float, float], object]] = []
+    for col, n in var_exp.items():
+        fe = (flat_expr[col] ** n if n >= 2 else flat_expr[col]) if flat_expr is not None else None
+        if n >= 2:
+            lin, bb = _relax_var_power(ctx, col, n)
+            factor_vals.append((lin, bb, fe))
+        else:  # n == 1
+            factor_vals.append((LinForm.col(col), (ctx.col_lb[col], ctx.col_ub[col]), fe))
+    for child, e in general:
+        factor_vals.append(_factor_value(ctx, child, e))
+
+    if len(factor_vals) == 1:
+        # w = scalar * (single relaxed factor). Exact link; the factor already
+        # carries its own (tight) envelope.
+        _emit_scaled_equality(ctx, w, factor_vals[0][0], scalar)
+        return Envelope(rows=[], tight=True)
+
+    # Fold the scalar into the first factor (associativity: scalar·f0·f1·… =
+    # (scalar·f0)·f1·…), scaling its LinForm and bounds, so no temp aux is needed
+    # and ``w`` remains exactly the product value.
+    if scalar != 1.0:
+        lin0, (b0lo, b0hi), fe0 = factor_vals[0]
+        nb = (scalar * b0lo, scalar * b0hi) if scalar >= 0 else (scalar * b0hi, scalar * b0lo)
+        factor_vals[0] = (lin0.scaled(scalar), nb, (scalar * fe0) if fe0 is not None else None)
+    tight = _fold_product(ctx, w, factor_vals)
     return Envelope(rows=[], tight=tight)
 
 
@@ -692,6 +878,13 @@ def _fold_product(ctx: _Builder, w: int, factors: list) -> bool:
         # A product node always has >= 2 factors; guard defensively.
         return False
     acc_lin, acc_b, acc_expr = factors[0]
+    # Track the ORIGINAL columns multiplied so far while every factor folded to
+    # this point is a bare original ``x_i`` (exponent 1); the moment ``acc_cols``
+    # goes ``None`` (a scaled/aux/power factor entered) we can no longer name the
+    # partial product as a pure multilinear of originals, so no further product is
+    # registered on this chain.
+    c0 = ctx.single_orig_col(acc_lin)
+    acc_cols: Optional[list[int]] = [c0] if c0 is not None else None
     for k in range(1, len(factors)):
         fl, fb, fe = factors[k]
         tb = _interval_mul(acc_b, fb)
@@ -702,6 +895,14 @@ def _fold_product(ctx: _Builder, w: int, factors: list) -> bool:
             if ctx.track_aux_exprs:
                 ctx.aux_expr[target] = acc_expr * fe
         _emit_mccormick(ctx, target, acc_lin, acc_b, fl, fb)
+        fcol = ctx.single_orig_col(fl)
+        if acc_cols is not None and fcol is not None and fcol not in acc_cols:
+            acc_cols = acc_cols + [fcol]
+            # ``target`` == prod(x_c for c in acc_cols) exactly, tied to those
+            # originals by the McCormick chain — sound to register.
+            ctx.register_product(acc_cols, target)
+        else:
+            acc_cols = None
         acc_lin, acc_b = LinForm.col(target), tb
         if ctx.track_aux_exprs:
             acc_expr = acc_expr * fe
@@ -904,6 +1105,11 @@ def build_uniform_relaxation(
         obj_sense_sign=sign,
         obj_offset=obj_offset,
         coverage=dict(ctx.coverage),
+        bilinear_map=dict(ctx.bilinear_map),
+        monomial_map=dict(ctx.monomial_map),
+        trilinear_map=dict(ctx.trilinear_map),
+        multilinear_map=dict(ctx.multilinear_map),
+        univariate_square_map=dict(ctx.univariate_square_map),
     )
 
 

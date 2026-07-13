@@ -4869,7 +4869,23 @@ def _uniform_relaxation_delegate(
             flags[off : off + v.size] = 1
         off += int(v.size)
     milp._integrality = flags if int(flags.sum()) else None
-    return milp, _empty_varmap(n_orig, convhull_mode)
+    # Populate the structural varmap families the proven legacy separators (PSD /
+    # RLT / edge-concave / univariate-square / multilinear) consume, from the
+    # engine's own decomposition (uniform_relax registered each lifted product /
+    # power of ORIGINAL variables to its aux column). This restores product-side
+    # tightness parity: the separators now fire on the engine's relaxation exactly
+    # as they did on the deleted federation, driven by the uniform factorable
+    # decomposition. Every registered aux equals the named product/power and is
+    # tied to its originals by the emitted McCormick / secant-tangent rows, so
+    # every separated cut is a valid inequality at the lifted feasible point
+    # (soundness by construction; see uniform_relax.UniformRelaxation).
+    vm = _empty_varmap(n_orig, convhull_mode)
+    vm["bilinear"] = dict(rel.bilinear_map)
+    vm["monomial"] = dict(rel.monomial_map)
+    vm["trilinear"] = dict(rel.trilinear_map)
+    vm["multilinear"] = dict(rel.multilinear_map)
+    vm["univariate_square"] = dict(rel.univariate_square_map)
+    return milp, vm
 
 
 def build_milp_relaxation(
