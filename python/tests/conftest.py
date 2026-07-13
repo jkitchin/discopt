@@ -278,14 +278,15 @@ _CUTOVER_DEFERRED_TESTS: dict[str, str] = {
     "test_cube_negative_is_concave_and_covered": (
         "engine bypasses the incremental McCormick node-patch validation path"
     ),
-    "test_incremental_active_for_integer_qcqp": (
-        "engine bypasses the incremental McCormick node-patch path (inactive)"
-    ),
+    # EP3 (#632): the engine fast path is RESTORED via ``UniformPatchTable`` (the
+    # engine-shaped models the closed-form table could not validate). These two now
+    # engage + give sound bounds, so they run again (removed from the deferred set).
     "test_incremental_infeasible_node_pruned_without_cold_rebuild": (
-        "engine bypasses the incremental McCormick node-patch path (inactive)"
-    ),
-    "test_incremental_node_bound_is_sound_and_matches_cold": (
-        "engine bypasses the incremental McCormick node-patch path (inactive)"
+        # UniformPatchTable's ``_patch`` regenerates through the engine build (a
+        # ``build_milp_relaxation`` call), so the closed-form path's "no cold rebuild
+        # on an infeasible node" property does not hold — this is the closed-form
+        # table's design, not the engine reuse-build path (EP3 #632).
+        "UniformPatchTable regenerates via the engine build (no closed-form no-rebuild)"
     ),
     # ── cut-pool / LP-spatial / incremental machinery the engine bypasses ──
     "test_serial_convex_iteration_limit_does_not_certify": (

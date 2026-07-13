@@ -26,7 +26,19 @@ os.environ.setdefault("JAX_ENABLE_X64", "1")
 import discopt.modeling as dm
 import numpy as np
 import pytest
+from discopt._jax.incremental_mccormick import IncrementalMcCormickLP
 from discopt._jax.mccormick_lp import MccormickLPRelaxer
+from discopt._jax.term_classifier import classify_nonlinear_terms
+
+
+def _closed_form_inc(model):
+    """The *closed-form* incremental table (bare-variable bilinear/monomial),
+    constructed directly. Since EP3 (#632) ``MccormickLPRelaxer`` prefers
+    ``UniformPatchTable`` for the engine, these closed-form-specific soundness gates
+    (sign-regime coverage, the C-21 mutation catch) are exercised on the closed-form
+    table itself — the machinery they guard is unchanged and still reachable (bare-
+    variable models, the ``lp_spatial`` engine)."""
+    return IncrementalMcCormickLP(model, classify_nonlinear_terms(model))
 
 
 def _int_qcqp():
@@ -58,7 +70,7 @@ def test_validate_exercises_at_least_four_sign_regimes():
     """C-21: the soundness gate must probe negative-lb / zero-spanning / mixed-sign
     / degenerate boxes, not just ``lb>=0``. On a model with zero-spanning root
     factors the validation set covers >= 4 distinct sign regimes."""
-    inc = MccormickLPRelaxer(_span_bilinear())._inc
+    inc = _closed_form_inc(_span_bilinear())
     assert inc is not None and inc.ok
     regimes = inc._validated_regimes
     # span (lb<0<ub), zero_lb (lb==0<ub), neg (ub<=0), degen (lb==ub), pos (lb>0)
@@ -80,8 +92,8 @@ def test_validate_catches_negative_box_sign_flip_mutation(monkeypatch):
     """
     import discopt._jax.incremental_mccormick as ic
 
-    # Sanity: the unmutated engine engages on this model.
-    assert MccormickLPRelaxer(_span_bilinear())._inc is not None
+    # Sanity: the unmutated closed-form table engages on this bare-variable model.
+    assert _closed_form_inc(_span_bilinear()).ok
 
     _orig_rows = ic._bilinear_rows
 
@@ -90,8 +102,8 @@ def test_validate_catches_negative_box_sign_flip_mutation(monkeypatch):
         return _orig_rows(i, j, a, max(li, 0.0), ui, max(lj, 0.0), uj)
 
     monkeypatch.setattr(ic, "_bilinear_rows", _clip_negative_lb)
-    inc = MccormickLPRelaxer(_span_bilinear())._inc
-    assert inc is None, "sign-flip mutation must be caught by the hardened validation gate"
+    inc = _closed_form_inc(_span_bilinear())
+    assert not inc.ok, "sign-flip mutation must be caught by the hardened validation gate"
 
 
 def test_incremental_sound_for_mixed_and_division():
@@ -118,14 +130,27 @@ def test_incremental_sound_for_mixed_and_division():
     assert r_fast.lower_bound <= 0.0 + 1e-6  # valid lower bound (<= true optimum)
     assert r_fast.lower_bound <= r_cold.lower_bound + 1e-6  # never over-tightens cold
 
-    # Division is an uncovered term -> _validate fails -> ok=False -> cold fallback,
-    # so the engine stays inactive (the sound degradation path is preserved).
+    # Division is uncovered by the CLOSED-FORM table (no bare-variable bilinear/
+    # monomial closed form) -> that table declines (ok=False). Since EP3 (#632) the
+    # engine's ``UniformPatchTable`` regenerates division through the byte-identical
+    # engine build, so the relaxer's fast path DOES engage — soundly: the reciprocal
+    # on a sign-definite (positive) denominator box is a valid relaxation, and the
+    # fast-path bound is a valid lower bound never tighter than the cold bound.
     md = dm.Model("div")
     a = md.continuous("a", lb=1, ub=5)
     b = md.continuous("b", lb=1, ub=5)
     md.minimize(a / b)
     md.subject_to(a + b >= 3)
-    assert MccormickLPRelaxer(md)._inc is None, "uncovered division must fall back to cold"
+    assert not _closed_form_inc(md).ok, "closed-form table has no division closed form"
+    fast_div = MccormickLPRelaxer(md)
+    if fast_div._inc is not None:
+        lbd, ubd = np.array([1.0, 1.0]), np.array([5.0, 5.0])
+        r_fd = fast_div.solve_at_node(lbd.copy(), ubd.copy())
+        cold_div = MccormickLPRelaxer(md)
+        cold_div._inc = None
+        r_cd = cold_div.solve_at_node(lbd.copy(), ubd.copy())
+        assert r_fd.status == "optimal" and r_cd.status == "optimal"
+        assert r_fd.lower_bound <= r_cd.lower_bound + 1e-6  # sound, never over-tightens
 
 
 def test_incremental_disabled_by_env(monkeypatch):

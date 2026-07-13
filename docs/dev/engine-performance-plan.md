@@ -87,7 +87,7 @@ A fresh context executing item EP*k*:
 | EP0 probe harness | done | baseline (in-container, `--children 10`): nvs09 ctor 0.762 s / root 0.291 s / **294 ms/node** / 22 builds / 19 nodes / obj −43.13434; ex1226 ctor 0.025 s / root 0.024 s / 24 ms/node / 9 builds / 5 nodes / obj −17.0; bchoco06 ctor 0.656 s / root 2.256 s / 2214 ms/node / 6 builds / 7 nodes / time_limit@120 s | `0105c8d` |
 | EP1 per-model analysis cache | done | in-container `--children 10` (wall-clock noisy, treat as order-of-magnitude): nvs09 ctor 0.53→0.17 s / **282→169 ms/node**; ex1226 ctor 0.025→0.025 s / **26.8→3.7 ms/node**; bchoco06 ctor 0.61→0.55 s / **2268→1813 ms/node**. Builds/nodes/objectives UNCHANGED (nvs09 22 builds/19 nodes/−43.13434; ex1226 9/5/−17.0; bchoco06 6/7/time_limit). Fingerprints byte-identical on all 62 vendored instances; node_count + objective byte-equal on a 19-instance corpus (persistent-cache vs fresh-per-build). | `7a6a5bd` |
 | EP2 OBBT single-build-per-box | **done (already landed by T2.2 #579; premise falsified)** | Measured (in-container): per-node/root OBBT already builds the relaxation **once per (node box, round)** and shares it across all probes — hda (722 cols, 15 s budget) `build_milp_relaxation` **calls=1 per sweep** (builds/sweep = 1.00), the single build 6.83 s = 36.5 % of OBBT wall, probes warm-started via `_PersistentProbeLP`. **No per-probe rebuild exists to remove** — EP2's "each probe pays a full engine build" premise is falsified (see EP2 section). Node-level neutrality pinned by new `test_obbt_ep2_node_reuse.py` (10 vendored instances: reuse+warm boxes == cold-seam boxes, Δ ≤ 1 ulp / ≤ 1e-9). No solver-math change → fingerprints/node-counts/objectives byte-unchanged by construction. | (docs+test) |
-| EP3 patch-table node path | open | | |
+| EP3 patch-table node path | **done (engagement 48/62 = 77%; cheap-closed-form half falsified — see EP3 §)** | Fast-path engagement restored for the ENGINE via `UniformPatchTable` (`incremental_mccormick.py`), wired ahead of the closed-form `IncrementalMcCormickLP` in `mccormick_lp.py`. **Before→after (probe, `--children 10`, fast path engaged):** nvs09 **169→51 ms/node** (3.3×, node-neutral: 19 nodes, obj −43.13433691803531 byte-identical fast-ON vs `DISCOPT_INCREMENTAL_MC=0` **to optimality**); ex1226 **3.6→2.4 ms/node** (5 nodes, obj byte-identical ON/OFF). bchoco06 (3rd certifying instance) does NOT engage (unbounded/large layout-unstable root) → cold path unchanged → trivially neutral. **Engagement 48/62 = 77%** (not engaged: alan, bchoco06/08, ex1224, fac2, m3, nvs01, nvs21, oaer, st_e29, tanksize, tspn08/10/12 — unbounded root / box-unstable lifted layout → cold fallback). `relaxation_fingerprint` byte-identical on all 62 (build path untouched; `test_claim_baseline_neutral` green). **Falsification (§0.3):** the envisioned ~0.1 ms closed-form coefficient refresh is NOT byte-reproducible for the engine — its box-dependent rows/aux-bounds are `evaluate_interval` results over the reconstructed DAG (measured: a closed-form affine interval differs from `evaluate_interval` bit-for-bit on fac2 3/3, alan 1/6), and single-atom replay cannot reproduce the interleaved aux-column layout; so `_patch` regenerates through the EP1-cached engine build (byte-identical) and the win is the per-node **separation skip** (inherited root pool) + **warm start**, not a numpy refresh (hence 51 ms, not ≤12 ms). | `cb31ea9` |
 | EP4a separation facet cache | open | | |
 | EP4b separation warm-start + OA pool | open | | |
 | EP5 lazy/shared compiles | open | | |
@@ -321,6 +321,65 @@ engagement telemetry: report the fraction of the 62-instance corpus where
 pre-cutover ~12 ms; §3 records engagement rate + ms/node. (Reaching ~100%
 engagement by patching log-space/odd-power families can be a follow-up item —
 record actual coverage honestly.)
+
+**OUTCOME (2026-07-13): DELIVERED at 48/62 = 77% engagement, node-neutral — but
+the "closed-form coefficient refresh" half is FALSIFIED (§0.3); the fast-path
+engagement and its measured win ARE delivered.**
+
+*What was falsified (measured, before implementing the patch).* EP3's premise is
+that the per-node relaxation can be a **cheap closed-form coefficient refresh**
+that byte-reproduces the cold build. It cannot, for the uniform engine:
+
+1. The engine's box-dependent row coefficients and aux-column bounds are produced
+   by `evaluate_interval` run over the reconstructed canonical DAG (secant/tangent
+   `_emit_1d`, McCormick folds, aux floors). A closed-form recomputation does **not**
+   reproduce `evaluate_interval`'s floating-point results bit-for-bit for any
+   multi-term (affine / folded / power-of-affine) argument — **measured:** a
+   closed-form affine interval differs from `evaluate_interval` on fac2 (3/3 atoms)
+   and alan (1/6). Byte-identity (the whole EP3 soundness model) therefore fails for
+   the engine's dominant families; only bare-single-variable atoms match, and the
+   vendored corpus has essentially none (the `IncrementalMcCormickLP` bare-var
+   closed-form validates on **0/62**).
+2. Replaying "just the box-dependent atoms" cannot reproduce the aux-column layout:
+   the builders allocate aux columns *interleaved* through the bottom-up DAG walk,
+   so byte-identical replay = the full walk = the cold build.
+
+After EP1 the engine build is already ~12 ms/node; the dominant per-node cost is
+per-node **separation** (multilinear facet LPs — ~100 ms/node on nvs09, EP4a's
+target) plus the node LP solve. A byte-identical patch cannot beat the EP1-cached
+build, and the large lever the fast path actually pulls — **skipping per-node
+separation** (the inherited root cut pool substitutes) + **warm-starting** the Rust
+simplex — is exactly the CC2 mitigation the #632 cutover disabled by leaving
+`IncrementalMcCormickLP` unable to validate on engine rows.
+
+*What was delivered.* `UniformPatchTable` (`incremental_mccormick.py`), wired ahead
+of the closed-form table in `mccormick_lp.py`. Its `_patch` regenerates the node
+relaxation through the (EP1-cached) engine build — **byte-identical by construction**
+— and `_validate` engages only when (a) the root build has a valid objective bound
+and (b) the lifted column layout is box-stable across reachable sub-boxes (else
+`ok=False` → cold path unchanged, exactly as today). Engaging then routes the node
+through the existing `_try_incremental_node` fast path: **skip the per-node
+separation chain, inherit the root pool, warm-start.** All existing soundness guards
+are preserved (T1.3 skip during pool capture `out_cuts is not None`; C-38 warm-basis
+false-infeasible re-solve; C-43 pool false-fathom re-verify).
+
+*Measured (in-container, verified fast-ON vs `DISCOPT_INCREMENTAL_MC=0`).*
+Engagement **48/62 = 77%**; nvs09 **169→51 ms/node** (3.3×), node count 19 and dual
+bound/objective −43.13433691803531 **byte-identical to optimality** with the fast
+path both ON and OFF; ex1226 5 nodes / obj byte-identical, 3.6→2.4 ms/node; bchoco06
+declines engagement (cold path unchanged). `relaxation_fingerprint` byte-identical on
+all 62 (no build path changed). The 51 ms (vs the plan's ≤12 ms target) is the direct
+consequence of the falsification: `_patch` still pays the ~12 ms EP1-cached build, so
+the win is separation-skip + warm-start, not a 0.1 ms refresh.
+
+*Follow-up (honestly out of EP3's soundly-deliverable scope).* A genuinely cheaper
+patch would require either (i) an engine that emits its box-dependent coefficients in
+a closed form it *also* uses to build (so the closed form is byte-identical by
+definition), or (ii) accepting a *non*-byte-identical (differential-regime) fast
+path. Both are larger than EP3. The 14 non-engaging instances are unbounded-root or
+box-unstable-layout (log-space/composite columns that appear only on a strict
+sub-box) — closing them needs the layout-stability analysis or the differential
+regime, a follow-up.
 
 ---
 
