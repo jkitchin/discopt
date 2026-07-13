@@ -90,7 +90,7 @@ A fresh context executing item EP*k*:
 | EP3 patch-table node path | **done (engagement 48/62 = 77%; cheap-closed-form half falsified — see EP3 §)** | Fast-path engagement restored for the ENGINE via `UniformPatchTable` (`incremental_mccormick.py`), wired ahead of the closed-form `IncrementalMcCormickLP` in `mccormick_lp.py`. **Before→after (probe, `--children 10`, fast path engaged):** nvs09 **169→51 ms/node** (3.3×, node-neutral: 19 nodes, obj −43.13433691803531 byte-identical fast-ON vs `DISCOPT_INCREMENTAL_MC=0` **to optimality**); ex1226 **3.6→2.4 ms/node** (5 nodes, obj byte-identical ON/OFF). bchoco06 (3rd certifying instance) does NOT engage (unbounded/large layout-unstable root) → cold path unchanged → trivially neutral. **Engagement 48/62 = 77%** (not engaged: alan, bchoco06/08, ex1224, fac2, m3, nvs01, nvs21, oaer, st_e29, tanksize, tspn08/10/12 — unbounded root / box-unstable lifted layout → cold fallback). `relaxation_fingerprint` byte-identical on all 62 (build path untouched; `test_claim_baseline_neutral` green). **Falsification (§0.3):** the envisioned ~0.1 ms closed-form coefficient refresh is NOT byte-reproducible for the engine — its box-dependent rows/aux-bounds are `evaluate_interval` results over the reconstructed DAG (measured: a closed-form affine interval differs from `evaluate_interval` bit-for-bit on fac2 3/3, alan 1/6), and single-atom replay cannot reproduce the interleaved aux-column layout; so `_patch` regenerates through the EP1-cached engine build (byte-identical) and the win is the per-node **separation skip** (inherited root pool) + **warm start**, not a numpy refresh (hence 51 ms, not ≤12 ms). | `cb31ea9` |
 | EP4a separation facet cache | **done (cache landed; measured wall win negligible — §0.3 honest report)** | Exact memoization of `separate_multilinear_envelope` in a capped (200k, clear-on-overflow) module dict, keyed by the **full** float64-bytes inputs `(lb, ub, x_star, w_star, tol, max_factors)` — NOT box-only: the supporting facet is *selected at* `x_star` (measured varies with `x_star` on 10/16 nvs09 boxes), so a box-only key would return a stale facet (a byte-neutrality bug). **BOUND-NEUTRAL gate GREEN:** node counts + certified objectives byte-identical before/after (nvs09 51 builds/19 nodes/−43.13433691803531; ex1226 24/5/−16.999999994161513; bchoco06 38/7/time_limit); `relaxation_fingerprint` byte-identical on all 62 (build path untouched; `test_claim_baseline_neutral` green, 113s); new `test_ep4a_multilinear_facet_cache.py` asserts cache-hit facets == fresh derivation byte-for-byte on 25 boxes/arity ×{2,3} × 3 w_star, key-includes-x_star, no-resolve-on-hit, cap-clears. **Measured (nvs09 end-to-end):** cache deterministically removes **144/360 = 40% of facet-LP solves** (180 sep calls, 108 unique inputs → 72 hits), but the recurring atoms are the *cheap* LPs — `_solve_envelope` cumulative time only 15.1→14.6 s (~3%), within noise at the 45 s solve; EP0 ms/node (distinct cold child boxes, no recurrence) unchanged (53.0→52.7). **Win is negligible on the certifying instances** — landed anyway as the guaranteed-neutral, harmless exact cache (bounded, self-verified) that removes the real redundant computation. **Closed-form arity≤3 NOT added** (correctly skipped): the LP facet is `x_star`-selected with a vertex-recomputed intercept, so no box-only closed form can reproduce it bit-for-bit — the self-check would fail by construction. | `f1a5e77` |
 | EP4b separation warm-start + OA pool | open | | |
-| EP5 lazy/shared compiles | open | | |
+| EP5 lazy/shared compiles | **done (jit falsified non-neutral; byte-neutral `eval_jaxpr` + lazy trace landed)** | **Entry (§0.3):** `jax.jit` NOT bit-identical to eager (nvs09 5/286 value bits Δ≤7.1e-15; tspn05 5/25 value Δ≤1.1e-12 + 6/25 grad Δ≤2.4e-15) → bound-CHANGING, NOT landed. `eval_jaxpr` (pre-trace once, op-by-op eval) IS bit-identical (**0/311** value+grad on nvs09/tspn05) and **5.7×** on the grad path → landed. **Measured (nvs09 `m.solve()`):** wall **44.9→32.8 s**; AD cProfile tottime (`ad.py`+`linearize`) **3.23→0.085 s** (one-time `make_jaxpr`+`eval_jaxpr`≈0.73 s reused); 19 nodes / obj −43.13433691803531 **unchanged**. EP0 probe unchanged (nvs09 ctor 0.216→0.216 s / **53.1→52.0 ms/node** noise / 51 builds / 19 nodes / obj identical; ex1226 2.4→2.7; bchoco06 1801→1861 — `solve_at_node` child boxes don't run the separation grad loop, so the win is in full-solve wall, per the plan). **Bound-neutral gate GREEN:** fingerprints byte-identical on all 62; node/obj byte-identical before/after AND fast-ON vs `DISCOPT_INCREMENTAL_MC=0` (nvs09 19/−43.13433691803531, ex1226 5/−16.999999994161513, bchoco06 7/time_limit); 3 new `test_ep5_*`; smoke 620 passed; ruff/format/mypy clean. Ctor double-build left to EP3's guarded `_validate` (byte-identity guard, not free waste). | `perf(ep5)` |
 | EP6 probing/OBBT default-on tuning | open (local host) | | |
 
 ---
@@ -489,6 +489,70 @@ the same sound no-op as today's construction-time failure). Report ctor +
 root-solve time before/after on the EP0 set.
 
 **Done.** In-container nvs09 ctor+root < 2 s (from ~16 s); §3 updated.
+
+**OUTCOME (2026-07-13): the profile-dominant re-linearization removed
+BYTE-NEUTRALLY via `eval_jaxpr` (NOT `jax.jit` — jit falsified as
+non-byte-neutral); lazy grad-trace deferral landed; ctor double-build left to
+EP3's guarded path.**
+
+*Entry experiment (§0.3, run before landing — mandatory).* The 2026-07-13 profile
+attributed the single largest avoidable cost to the BARE `jax.grad` `grad_fn` in
+`_separate_convex`: it RE-LINEARIZES (re-traces autodiff) on every call, up to 8
+rounds/spec/node, in interpreted JAX. Two candidate fixes were tested for
+**bit-for-bit** identity against the eager `grad_f(x)`/`f(x)` on the ACTUAL lift
+points `_separate_convex` encounters (captured across nvs09/tspn05 full solves,
+286+25 value/grad comparisons):
+
+  1. **`jax.jit(grad_f)` / `jax.jit(f)` — NOT bit-identical.** XLA fusion reorders
+     float ops: nvs09 **5/286** value bits differ (max |Δ| 7.1e-15), tspn05 **5/25**
+     value (max 1.1e-12) **and 6/25 grad** (max 2.4e-15). Jitting is therefore
+     **bound-CHANGING** (a different, still-valid cut sequence) — the differential
+     regime (EP4b/EP6), NOT this bound-neutral item. It was NOT landed.
+  2. **Pre-trace once → `jax.core.eval_jaxpr` each call — BIT-IDENTICAL.** Tracing
+     `fn` to a jaxpr once (`jax.make_jaxpr`) and evaluating that jaxpr op-by-op is
+     the SAME primitive-by-primitive dispatch the eager call performs (no XLA
+     fusion), so it reproduces eager numerics exactly: **0/311** value+grad bit
+     mismatches across nvs09/tspn05, while removing the per-call re-linearization
+     (**~5.7×** on the grad path). This is the target byte-neutral win.
+
+*What was landed (`uniform_relax.py` only).* `_compiled(node)` now wraps the
+value/grad callables in a lazy `_TracedEvalFn`: `compile_expression` (which only
+builds a Python DAG closure — no trace) stays eager so the **lift/no-lift decision
+is byte-identical** to before, but the expensive autodiff trace is deferred to the
+first `_separate_convex` use and then reused (`eval_jaxpr`) for the model's life
+instead of re-tracing every round. **Lazy** (plan goal): a lifted spec that never
+separates never traces — it pays nothing beyond the cheap closure (guarded by
+`test_ep5_lift_never_separated_leaves_grad_untraced`). **Exception-transparent**: a
+trace failure at first use raises exactly where the eager call did, so
+`_separate_convex`'s try/except skips that spec — the same sound no-op as before.
+**Hash-consing (point 3) verified**: the canonical DAG interns structurally
+identical CNodes to one object (`CanonicalDAG._mk` keys on the structural `key`),
+and `_compiled` is keyed by `id(cnode)`, so identical occurrences already share one
+lazily-traced wrapper (`test_ep5_hash_consing_shares_one_compiled_fn`).
+
+*Ctor double-build (point 4) — deliberately NOT touched.* `UniformPatchTable._validate`
+runs `_patch` (== `_full_build`) AND `_full_build` per reachable box to PROVE the
+patch reproduces the cold build row-for-row — that redundant second build IS EP3's
+byte-identity guard, not free-standing setup waste; removing it would weaken the
+self-verification EP3's engagement depends on. The build already reads the EP1
+per-model cache. Left to EP3's landed path per the "only if trivial and byte-neutral"
+directive.
+
+*Verification — BOUND-NEUTRAL gate GREEN.* `relaxation_fingerprint` byte-identical
+on all 62 vendored instances (`test_claim_baseline_neutral`, 71 s); node counts +
+certified objectives byte-identical before/after AND fast-path ON vs
+`DISCOPT_INCREMENTAL_MC=0` (nvs09 **19 / −43.13433691803531**, ex1226 **5 /
+−16.999999994161513**, bchoco06 **7 / time_limit**, all four cells equal); 3 new
+`test_uniform_relax.py::test_ep5_*` (byte-identity + laziness + hash-consing);
+`pytest -m smoke` 620 passed; `ruff`/`format`/`mypy python/discopt/` clean.
+**Measured (nvs09 end-to-end `m.solve()`, in-container):** wall **44.9 → 32.8 s**
+(−12 s), the AD-related cProfile tottime (`ad.py` + `linearize`) **3.23 → 0.085 s**
+(the one-time trace is now `make_jaxpr`+`eval_jaxpr` ≈ 0.73 s, reused; the
+per-round `_pjit_linearize`/`backward_pass`/`process_primitive` frames collapse to
+~0), node count 19 and obj −43.13433691803531 unchanged. As the plan anticipated,
+the EP0 ms/node metric is unchanged — `solve_at_node`'s cold child boxes do not run
+the `_separate_convex` grad loop, so the win shows in the full-solve wall +
+autodiff tottime, not the probe's per-node number.
 
 ---
 

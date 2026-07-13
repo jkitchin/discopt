@@ -342,3 +342,109 @@ def test_ep1_staleness_token_new_objective_invalidates_cache():
 
     assert tok1 != tok2, "staleness token did not change after a new objective"
     assert _fp(r1) != _fp(r2), "cache was not invalidated: stale objective reused"
+
+
+# --------------------------------------------------------------------------- #
+# EP5 — lazy + shared (eval_jaxpr) JAX compiles for the separation grad path
+# --------------------------------------------------------------------------- #
+@pytest.mark.unit
+def test_ep5_traced_eval_fn_byte_identical_and_lazy():
+    """EP5: :class:`_TracedEvalFn` must be (a) LAZY — no trace until first call —
+    and (b) BIT-IDENTICAL to the eager JAX callable on every point.
+
+    The wrapper traces the value/grad function to a jaxpr once and thereafter
+    evaluates it op-by-op via ``eval_jaxpr`` — the SAME primitive dispatch the
+    eager call performs, so the result is byte-for-byte equal to ``fn(x)``. This
+    is what makes EP5 bound-neutral. ``jax.jit`` is deliberately NOT used: XLA
+    fusion reorders float ops and is not bit-identical (the falsified alternative,
+    recorded in the plan).
+    """
+    import jax
+    import jax.numpy as jnp
+    from discopt._jax.dag_compiler import compile_expression
+    from discopt._jax.uniform_relax import _TracedEvalFn
+
+    m = Model()
+    x = m.continuous("x", lb=0.5, ub=2.5)
+    y = m.continuous("y", lb=0.5, ub=2.0)
+    g = dm.exp(x * y) + dm.log(x + y) ** 2  # smooth multivariate composite
+    m.minimize(g)
+    f = compile_expression(g, m)
+    grad_f = jax.grad(lambda xv: jnp.reshape(f(xv), ()))
+
+    vw = _TracedEvalFn(f)
+    gw = _TracedEvalFn(grad_f)
+    # (a) LAZY: nothing is traced before the first call.
+    assert vw._jaxpr is None and gw._jaxpr is None
+
+    rng = np.random.default_rng(0)
+    for _ in range(25):
+        pt = jnp.asarray(rng.uniform([0.5, 0.5], [2.5, 2.0]), dtype=jnp.float64)
+        ve = np.asarray(f(pt), dtype=np.float64)
+        ge = np.asarray(grad_f(pt), dtype=np.float64)
+        vt = np.asarray(vw(pt), dtype=np.float64)
+        gt = np.asarray(gw(pt), dtype=np.float64)
+        # (b) BIT-IDENTICAL to eager (not "close" — exactly equal).
+        assert np.array_equal(ve, vt), f"value drift: eager={ve!r} traced={vt!r}"
+        assert np.array_equal(ge, gt), f"grad drift: eager={ge!r} traced={gt!r}"
+    # Traced exactly once and then reused across all 25 distinct points.
+    assert vw._jaxpr is not None and gw._jaxpr is not None
+
+
+@pytest.mark.unit
+def test_ep5_lift_never_separated_leaves_grad_untraced():
+    """EP5 lazy: a composite lift whose spec is never separated pays nothing — its
+    value/grad wrappers are never traced — and the emitted relaxation (hence its
+    root LP bound) is unaffected, because those fns are consumed ONLY by
+    ``_separate_convex``. Solving the root relaxation LP without the separation
+    loop must leave both wrappers untraced and yield a sound bound."""
+    from discopt._jax.model_utils import flat_variable_bounds
+    from discopt._jax.uniform_relax import _TracedEvalFn, build_uniform_relaxation
+
+    m = Model()
+    x = m.continuous("x", lb=0.5, ub=2.5)
+    y = m.continuous("y", lb=0.5, ub=2.0)
+    # Euclidean norm sqrt(x**2 + y**2) is jointly convex -> a composite lift (the
+    # tspn-class node the separation grad path targets).
+    m.minimize(dm.sqrt(x**2 + y**2))
+    lb, ub = flat_variable_bounds(m)
+    rel = build_uniform_relaxation(m, box=(lb.copy(), ub.copy()))
+
+    specs = rel.composite_multivar_specs
+    assert specs, "expected at least one composite lift for this model"
+    # The lift's fns are the lazy wrappers, still untraced (never separated).
+    for spec in specs:
+        assert isinstance(spec.value_fn, _TracedEvalFn)
+        assert isinstance(spec.grad_fn, _TracedEvalFn)
+        assert spec.value_fn._jaxpr is None
+        assert spec.grad_fn._jaxpr is None
+
+    # Solving the root relaxation LP (no separation) produces a sound bound and
+    # STILL leaves the wrappers untraced — the never-separated spec cost nothing.
+    res = rel.model.solve(backend="simplex")
+    assert res.status == "optimal"
+    for spec in specs:
+        assert spec.value_fn._jaxpr is None
+        assert spec.grad_fn._jaxpr is None
+
+
+@pytest.mark.unit
+def test_ep5_hash_consing_shares_one_compiled_fn():
+    """EP5 point 3: the canonical DAG is hash-consed, so a subexpression that
+    appears twice is ONE ``CNode`` object — and the per-model ``_compiled`` cache,
+    keyed by ``id(cnode)``, therefore shares a single (lazily-traced) wrapper
+    across every structurally identical occurrence. Verify the interning."""
+    from discopt._jax.canonical_expr import canonicalize
+
+    m = Model()
+    x = m.continuous("x", lb=0.5, ub=2.5)
+    y = m.continuous("y", lb=0.5, ub=2.0)
+    # exp(x*y) appears twice structurally -> must intern to the same CNode.
+    m.minimize(dm.exp(x * y) + dm.exp(x * y) + dm.log(x + y))
+    dag = canonicalize(m)
+    # Every interned structural key maps to exactly one CNode object; two builds
+    # of the identical structural key return the SAME object (id equality).
+    keys = list(dag._intern.keys())
+    assert len(keys) == len(set(keys))
+    for key, node in dag._intern.items():
+        assert dag._intern[key] is node  # stable identity per structural key

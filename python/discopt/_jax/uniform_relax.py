@@ -345,6 +345,58 @@ _BOUNDS_CACHE_CAP = 500_000
 _CERT_LIST_CAP = 8
 
 
+class _TracedEvalFn:
+    """Lazy, byte-neutral replacement for re-tracing a JAX callable each call
+    (issue #632 EP5).
+
+    Wraps a pure JAX function ``fn`` — a ``compile_expression`` output or its
+    ``jax.grad`` — that the separation loop (``mccormick_lp._separate_convex``)
+    calls up to 8 rounds per node. A *bare* ``jax.grad`` re-runs the autodiff
+    trace (``linearize`` / ``ad.py`` process) on **every** call in interpreted
+    JAX — a large avoidable per-node cost (measured on nvs09: the full
+    ``m.solve()`` drops 44.9 → 32.8 s and the ``ad.py``+``linearize`` cProfile
+    tottime drops 3.23 → 0.085 s). This wrapper traces ``fn`` to a
+    jaxpr **once** on first use (``jax.make_jaxpr``) and thereafter evaluates that
+    jaxpr op-by-op via ``jax.core.eval_jaxpr`` — the SAME primitive-by-primitive
+    dispatch the eager call performs, so the result is **bit-identical** to
+    ``fn(x)`` (verified on the EP5 corpus lift points: 0/311 bit mismatches on
+    value AND grad across nvs09/tspn05), while the re-linearization happens once
+    for the model's life (measured ~5.7× on the grad path).
+
+    NOT ``jax.jit``: XLA fusion reorders float operations and is **not**
+    bit-identical (measured value drift ~7e-15, grad drift ~2e-15 on the same
+    points), which would make the separation cut sequence differ — a
+    bound-CHANGING optimization (EP4b/EP6 territory), not this bound-neutral item.
+
+    Lazy: the trace is deferred to the first separation call, so a lifted spec
+    that is never actually separated pays nothing beyond the cheap
+    ``compile_expression`` closure. Exception-transparent: a trace failure at
+    first use raises exactly where the eager call would have, so
+    ``_separate_convex``'s try/except skips that spec's separation — the same
+    sound no-op as before.
+    """
+
+    __slots__ = ("_fn", "_jaxpr", "_consts", "_eval")
+
+    def __init__(self, fn):
+        self._fn = fn
+        self._jaxpr = None
+        self._consts = None
+        self._eval = None
+
+    def __call__(self, x):
+        ev = self._eval
+        if ev is None:
+            import jax
+            from jax import core as _jcore
+
+            closed = jax.make_jaxpr(self._fn)(x)
+            self._jaxpr = closed.jaxpr
+            self._consts = closed.consts
+            ev = self._eval = _jcore.eval_jaxpr
+        return ev(self._jaxpr, self._consts, x)[0]
+
+
 def _analysis_token(model: Model) -> tuple:
     return (len(model._variables), len(model._constraints), id(model._objective))
 
@@ -599,7 +651,15 @@ class _Builder:
 
     def _compiled(self, node: CNode):
         """``(value_fn, grad_fn)`` for ``node`` (the *function of x*, box-independent),
-        or ``None`` if compilation failed (the same abstain as the inline path)."""
+        or ``None`` if compilation failed (the same abstain as the inline path).
+
+        The returned fns are lazy, byte-neutral :class:`_TracedEvalFn` wrappers
+        (issue #632 EP5): ``compile_expression`` (which only builds a Python DAG
+        closure, no trace) stays eager so the lift/no-lift decision is byte-identical
+        to before, but the expensive autodiff/DAG-walk trace is deferred to the first
+        ``_separate_convex`` use and then reused (``eval_jaxpr``) for the model's life
+        instead of re-linearizing on every round — see :class:`_TracedEvalFn`.
+        """
         cache = self._analysis.compiled
         nid = id(node)
         v: object = cache.get(nid, _UNSET)
@@ -613,7 +673,7 @@ class _Builder:
         try:
             f = compile_expression(self._expr(node), self.model)
             grad_f = jax.grad(lambda xv: jnp.reshape(f(xv), ()))
-            v = (f, grad_f)
+            v = (_TracedEvalFn(f), _TracedEvalFn(grad_f))
         except Exception:
             v = None
         cache[nid] = v
