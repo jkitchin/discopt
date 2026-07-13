@@ -125,6 +125,31 @@ def _guard_discopt_env_leaks():
             )
 
 
+@pytest.fixture(autouse=True)
+def _clear_multilinear_facet_cache():
+    """Reset the EP4a multilinear-facet memo (`multilinear_separation._FACET_CACHE`)
+    before each test.
+
+    The cache is module-level mutable state whose *result* is byte-identical to a
+    cold derivation, but whose *observable backend behaviour* is not: on a warm
+    hit neither the simplex nor the POUNCE fallback runs. Tests that assert on
+    which backend was invoked (``test_f3_multilinear_separation_lp_backend``'s
+    ``pounce_calls >= 1``) therefore pass or fail depending on whether an earlier
+    test in the same xdist worker warmed the same atom/box/point key — the exact
+    order-masked-collision class the ``_guard_discopt_env_leaks`` fixture above
+    guards against. Clearing before each test makes those tests deterministic;
+    the intra-solve caching benefit (recurring atoms within one solve) is
+    unaffected, since that recurrence is within a single test.
+    """
+    try:
+        from discopt._jax import multilinear_separation
+
+        multilinear_separation._FACET_CACHE.clear()
+    except Exception:
+        pass
+    yield
+
+
 def _cyipopt_available() -> bool:
     """True iff the optional cyipopt/Ipopt stack imports cleanly."""
     import importlib.util
