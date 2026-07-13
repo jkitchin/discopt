@@ -69,7 +69,9 @@ pub use passes::{
 pub use polynomial::{
     reformulate_polynomial, try_polynomial, Monomial, Polynomial, ReformulationStats,
 };
-pub use probing::{probe_binary_vars, Implication, ProbingResult};
+pub use probing::{
+    probe_binary_vars, probe_node_bounds, Implication, NodeProbeResult, ProbingResult,
+};
 pub use reduction_constraints::{detect_reduction_constraints, ReductionStats};
 pub use redundancy::{detect_row_redundancy, RedundancyStats};
 pub use scaling::{compute_equilibration, ScalingFactors, ScalingStats};
