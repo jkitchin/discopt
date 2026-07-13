@@ -258,8 +258,14 @@ _CUTOVER_DEFERRED_TESTS: dict[str, str] = {
     ),
     # ── test_convex_claimer.py — convex-objective lift tightness ──
     "test_convex_objective_lift_is_tight_and_sound": (
-        "S8-deferred: the convex-claimer LP-point separation does not reach the exact "
-        "convex minimum on the engine relaxation; bound sound (<= min) but looser"
+        "P2-partial (#632): composite-convex OA is now DEFAULT-ON on the engine "
+        "(no DISCOPT_CONVEX_CLAIMER flag — the whole convex objective is lifted and "
+        "the _separate_convex Kelley loop tightens it), moving the root bound from "
+        "-245.83 to -204.72 (sound: <= exact -204.35). Still xfailed because (a) the "
+        "8-round LP-point separation stops 0.37 short of the test's abs=1e-1 window, "
+        "and (b) the test asserts on>off+10 by toggling the deleted flag, which is a "
+        "no-op on the engine (on==off), so the flag-differential asserts cannot hold. "
+        "Full closure needs more OA rounds / anchor placement (separator scope)."
     ),
     # ── test_incremental_monomial.py / test_incremental_mccormick_node.py —
     #    federation MACHINERY: incremental per-node McCormick patching. The engine

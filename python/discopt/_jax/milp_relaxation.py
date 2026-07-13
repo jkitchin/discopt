@@ -4162,6 +4162,16 @@ def _uniform_relaxation_delegate(
     vm["trilinear"] = dict(rel.trilinear_map)
     vm["multilinear"] = dict(rel.multilinear_map)
     vm["univariate_square"] = dict(rel.univariate_square_map)
+    # Composite convex/concave lifts (issue #632 P2): each certified-convex/-concave
+    # multivariate node the engine lifted to a single aux is registered here so the
+    # existing ``MccormickLPRelaxer._separate_convex`` outer-approximation (Kelley)
+    # loop adds its exact supporting tangent at the LP point each round, recovering
+    # the composite-convex tightness class generally. Each spec carries a jax value
+    # / gradient over the ORIGINAL affine-free variables and its aux column; the
+    # tangent of a certified convex (resp. concave) function is a global under-
+    # (over-) estimator, so the cut never removes a feasible point (sound by
+    # construction; the loop is a sound no-op on any failure).
+    vm["composite_multivar_relaxations"] = list(rel.composite_multivar_specs)
     return milp, vm
 
 

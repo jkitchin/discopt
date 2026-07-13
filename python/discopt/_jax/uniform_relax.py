@@ -52,7 +52,9 @@ from discopt._jax.canonical_expr import (
     CanonicalDAG,
     CNode,
     canonicalize,
+    is_affine,
     reconstruct,
+    var_support,
 )
 from discopt._jax.convexity.interval import Interval
 from discopt._jax.convexity.interval_eval import evaluate_interval
@@ -158,6 +160,12 @@ class UniformRelaxation:
     trilinear_map: dict[tuple[int, int, int], int]
     multilinear_map: dict[tuple[int, ...], int]
     univariate_square_map: dict[tuple[int, int], int]
+    # Composite convex/concave lifts (issue #632 P2) — ``CompositeMultivarRelaxation``
+    # specs the ``_separate_convex`` Kelley loop consumes (value_fn/grad_fn/idxs/
+    # aux_col/curvature). Each is a certified-convex/-concave multivariate node
+    # lifted to a single aux; the OA tangents added lazily at the LP point are
+    # global under-/over-estimators (sound, never cut a feasible point).
+    composite_multivar_specs: list
 
 
 # --------------------------------------------------------------------------- #
@@ -323,6 +331,15 @@ class _Builder:
         self.trilinear_map: dict[tuple[int, int, int], int] = {}
         self.multilinear_map: dict[tuple[int, ...], int] = {}
         self.univariate_square_map: dict[tuple[int, int], int] = {}
+        # Composite convex/concave lifts (issue #632 P2): each certified-convex or
+        # -concave multivariate nonlinear node the engine would otherwise decompose
+        # loosely is lifted to a single aux and registered here so the existing
+        # ``MccormickLPRelaxer._separate_convex`` Kelley loop adds its EXACT
+        # supporting tangent at the LP point each round (outer-approximation cutting
+        # planes, added lazily — not pre-seeded). A tangent of a convex function is
+        # a global underestimator (concave: overestimator), so no feasible point is
+        # ever cut; sound by construction. Populated by ``_try_convex_lift``.
+        self.composite_multivar_specs: list = []
         self._ivbox = _interval_box(model, flat_lb, flat_ub)
         # Validation-only: aux column -> the modeling Expression whose exact value
         # that column represents (the node itself, a relaxed power, or a McCormick
@@ -436,9 +453,167 @@ class _Builder:
         cached = self._rep.get(id(node))
         if cached is not None:
             return cached
-        out = self._rep_impl(node)
+        out = self._try_convex_lift(node)
+        if out is None:
+            out = self._rep_impl(node)
         self._rep[id(node)] = out
         return out
+
+    # -- composite convex/concave lift (issue #632 P2) ---------------------- #
+    def _lift_eligible(self, node: CNode) -> bool:
+        """Structural pre-filter: is ``node`` a multivariate nonlinear node the
+        atom decomposition relaxes *loosely* (so a convex OA lift can only help)?
+
+        Mirrors the deleted federation gate ``_should_claim_composite_multivar``:
+        a composite univariate call (non-affine arg), a jointly-convex multivar
+        intrinsic (``callN`` — centropy/…), a non-integer power of a non-affine
+        base, or a convex/concave *sum* spanning >= 2 variables. NOT eligible: an
+        affine-argument call/power (already exact via the 1-D envelope), an integer
+        power (monomial/square path), a bare product (bilinear — McCormick), or an
+        opaque node. The sound curvature certificate (``_try_convex_lift``) is the
+        real gate; this only avoids lifting nodes the engine already handles tightly.
+        """
+        if node.kind in ("var", "const"):
+            return False
+        if len(var_support(node)) < 2:
+            return False  # univariate composites are a separate class/stage
+        kind = node.kind
+        if kind == "sum":
+            return not is_affine(node)
+        if kind == "callN":
+            return True
+        if kind == "call":
+            (child,) = node.children
+            return not is_affine(child)
+        if kind == "pow":
+            p = float(node.payload)
+            if p == int(p):
+                return False  # integer power -> monomial/square owner
+            (child,) = node.children
+            return not is_affine(child)
+        return False  # prod (bilinear) / opaque
+
+    def _try_convex_lift(self, node: CNode) -> Optional[LinForm]:
+        """Lift ``node`` to an aux and register a composite convex/concave spec if
+        its curvature is CERTIFIED over the box; else return ``None``.
+
+        Reuses the surviving, class-general detectors and the ``_separate_convex``
+        spec shape (``CompositeMultivarRelaxation``) verbatim — this only *connects*
+        them to the engine's decomposition. Registration is EXACT-only and sound by
+        construction: the aux equals ``g`` over genuinely-original affine-free vars,
+        curvature is proven (DCP or the interval-Hessian PSD certificate), and the
+        supporting tangent ``_separate_convex`` adds is a global under-/over-estimator
+        that never cuts a feasible point.
+        """
+        if not self._lift_eligible(node):
+            return None
+        try:
+            import jax
+            import jax.numpy as jnp
+
+            from discopt._jax.convexity import Curvature, classify_expr
+            from discopt._jax.dag_compiler import compile_expression
+            from discopt._jax.milp_relaxation import (
+                _LIFT_MAX_CROSS_TERM_ARG_MAGNITUDE,
+                CompositeMultivarRelaxation,
+                _build_convexity_box,
+                _multivar_box_curvature,
+            )
+        except Exception:
+            return None
+
+        idxs = sorted(int(j) for j in var_support(node))
+        if len(idxs) < 2 or any(j >= self.n_orig for j in idxs):
+            return None
+        flat_lb = np.asarray(self.col_lb[: self.n_orig], dtype=np.float64)
+        flat_ub = np.asarray(self.col_ub[: self.n_orig], dtype=np.float64)
+        lo = flat_lb[idxs]
+        hi = flat_ub[idxs]
+        if not (np.all(np.isfinite(lo)) and np.all(np.isfinite(hi))) or np.any(hi < lo):
+            return None
+
+        expr = reconstruct(node, self.model)
+        cbox = _build_convexity_box(self.model, flat_lb, flat_ub)
+        # Certify curvature: global DCP first, else the sound box-restricted
+        # interval-Hessian PSD/NSD certificate (abstains -> None).
+        try:
+            curv = classify_expr(expr, self.model)
+        except Exception:
+            curv = None
+        if curv == Curvature.CONVEX:
+            curvature = "convex"
+        elif curv == Curvature.CONCAVE:
+            curvature = "concave"
+        else:
+            box_curv = _multivar_box_curvature(expr, self.model, idxs, flat_lb, flat_ub, cbox)
+            if box_curv is None:
+                return None
+            curvature = box_curv
+
+        # Sound interval enclosure of g over the box -> finite aux column bounds.
+        col_lo, col_hi = self.bounds(node)
+        if not (math.isfinite(col_lo) and math.isfinite(col_hi)) or col_hi < col_lo:
+            return None
+        # Conditioning guard (#358): a wide/ill-conditioned node whose value range
+        # (hence gradient / cut coefficients) explodes fools the fast simplex into a
+        # garbage bound. Abstain above the magnitude the cut builders abstain at; the
+        # node then stays on the sound term-by-term decomposition path.
+        if max(abs(col_lo), abs(col_hi)) > _LIFT_MAX_CROSS_TERM_ARG_MAGNITUDE:
+            return None
+
+        try:
+            f = compile_expression(expr, self.model)
+            grad_f = jax.grad(lambda xv: jnp.reshape(f(xv), ()))
+        except Exception:
+            return None
+
+        # Committed to lifting. Build the node's ordinary atom decomposition FIRST
+        # (all its envelope rows + product-side varmap registrations are kept), then
+        # tie a single aux ``w = g`` to it so ``_separate_convex`` can add outer-
+        # approximation tangents. Because the decomposition rows stay and the OA
+        # cuts only ADD constraints, the lifted relaxation is at-least-as-tight as
+        # the decomposition on EVERY node — the OA can tighten, never loosen (this
+        # is what makes the composite-convex lift non-regressing, unlike a lift that
+        # *replaces* the decomposition with the crude interval floor).
+        dec = self._rep_impl(node)
+        single = None
+        if dec.const == 0.0:
+            items = [(j, c) for j, c in dec.coeffs.items() if c != 0.0]
+            if len(items) == 1 and items[0][1] == 1.0 and items[0][0] >= self.n_orig:
+                single = items[0][0]
+        if single is not None:
+            # The decomposition already collapsed to one bare aux (call/callN/pow) —
+            # register OA on it directly (its aux_expr == g is set by _rep_impl).
+            w = single
+        else:
+            # A sum (or scaled/affine) decomposition — bind a fresh aux ``w == dec``.
+            # At the lifted true point every atom aux equals its exact value, so
+            # ``dec`` evaluates to ``g(x)`` exactly and both equality rows hold with
+            # zero slack (soundness preserved for the feasible-point sampler).
+            w = self.new_aux(col_lo, col_hi)
+            if self.track_aux_exprs:
+                self.aux_expr[w] = expr
+            le = {w: 1.0}
+            ge = {w: -1.0}
+            for j, c in dec.coeffs.items():
+                le[j] = le.get(j, 0.0) - c
+                ge[j] = ge.get(j, 0.0) + c
+            self.add_row(le, dec.const)
+            self.add_row(ge, -dec.const)
+        self.composite_multivar_specs.append(
+            CompositeMultivarRelaxation(
+                expr_id=id(node),
+                aux_col=w,
+                curvature=curvature,
+                lower_lines=(),
+                upper_lines=(),
+                idxs=tuple(idxs),
+                value_fn=f,
+                grad_fn=grad_f,
+            )
+        )
+        self.coverage[id(node)] = ("composite_convex", True)
+        return LinForm.col(w)
 
     def _rep_impl(self, node: CNode) -> LinForm:
         if node.kind == "var":
@@ -1113,6 +1288,7 @@ def build_uniform_relaxation(
         trilinear_map=dict(ctx.trilinear_map),
         multilinear_map=dict(ctx.multilinear_map),
         univariate_square_map=dict(ctx.univariate_square_map),
+        composite_multivar_specs=list(ctx.composite_multivar_specs),
     )
 
 
