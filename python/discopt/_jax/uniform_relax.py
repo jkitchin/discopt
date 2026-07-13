@@ -837,6 +837,10 @@ def _build_power(ctx: _Builder, node: CNode, w: int) -> Envelope:
     f = lambda t: float(t) ** p  # noqa: E731
     fp = lambda t: p * (float(t) ** (p - 1.0))  # noqa: E731
     tight = _emit_1d(ctx, w, lt, lo, hi, f, fp, curv)
+    # A power of a positive product ``(∏ xⱼ)**p`` also admits the (tighter) log-space
+    # signomial band directly over the original factors (additive, sound).
+    if _emit_logspace_band(ctx, w, node):
+        tight = True
     # Register a bare-original integer power ``x_i**p`` (p>=2) so the moment/PSD,
     # edge-concave and univariate-square separators see the lifted square/monomial.
     i = ctx.single_orig_col(lt)
@@ -987,13 +991,17 @@ def _build_product(ctx: _Builder, node: CNode, w: int) -> Envelope:
         else:
             general.append((child, ef))
 
+    # Log-space signomial band (additive, sound): tighter than McCormick for a wide
+    # positive product / any fractional exponent. Intersects with the McCormick fold.
+    logspace = _emit_logspace_band(ctx, w, node)
+
     # Nothing aggregated (no single-variable integer factor) => the original
     # pairwise-McCormick path is exactly correct; keep it (also the sole path when
     # every factor is a general multi-variable / nonlinear form).
     if not var_exp:
         factors = [_factor_value(ctx, ch, e) for ch, e in general]
         tight = _fold_product(ctx, w, factors)
-        return Envelope(rows=[], tight=tight)
+        return Envelope(rows=[], tight=tight or logspace)
 
     # Assemble the relaxed factor values (LinForm, bounds, tracking-expr): tight
     # power envelopes for aggregated x_i**n_i, the bare variable for n_i==1, general
@@ -1035,6 +1043,99 @@ def _build_product(ctx: _Builder, node: CNode, w: int) -> Envelope:
     return Envelope(rows=[], tight=tight)
 
 
+def _emit_logspace_band(ctx: _Builder, w: int, node: CNode) -> bool:
+    """Additive log-space envelope for a positive signomial ``w = coef·∏ xᵢ^{aᵢ}``.
+
+    For a product/power/ratio of STRICTLY-POSITIVE original variables the tightest
+    factorable relaxation is not recursive McCormick (loose on wide boxes / undefined
+    for fractional exponents) but the log-space lift (Tawarmalani & Sahinidis; the
+    surviving H-LOG construction). Emitted here as ADDITIONAL rows on ``w`` alongside
+    the McCormick fold, so the relaxation is the intersection of the two — sound, and
+    at-least-as-tight as McCormick alone:
+
+    * ``zᵢ = ln xᵢ`` — concave, exact secant/tangent band binding each ``zᵢ`` to
+      ``xᵢ`` (``_emit_1d``);
+    * ``s = Σ aᵢ zᵢ`` — an exact linear equality (fresh column);
+    * ``w = coef·exp(s)`` — convex (``coef>0``) / concave (``coef<0``), exact
+      secant/tangent band binding ``w`` to ``s``.
+
+    Every row touches the graph, so no feasible ``(x, w=∏xᵢ^{aᵢ})`` point is cut.
+    Only fires for a genuinely-loose case (>=3 factors, or any non-integer / negative
+    exponent — a single bilinear/trilinear-integer product is already at its McCormick
+    hull, so log-space would only add redundant columns). Returns ``True`` if emitted.
+    """
+    from discopt._jax.milp_relaxation import _extract_positive_product
+
+    n_orig = ctx.n_orig
+    flat_lb = np.asarray(ctx.col_lb[:n_orig], dtype=np.float64)
+    flat_ub = np.asarray(ctx.col_ub[:n_orig], dtype=np.float64)
+    expr = reconstruct(node, ctx.model)
+    pp = _extract_positive_product(expr, ctx.model, n_orig, flat_lb, flat_ub)
+    if pp is None:
+        return False
+    coef, factors = pp
+    if len(factors) < 2 or coef == 0.0:
+        return False
+    items = sorted(factors.items())
+    non_trivial = len(items) >= 3 or any(not float(a).is_integer() or a < 0 for _i, a in items)
+    if not non_trivial:
+        return False  # pure low-arity positive integer product -> McCormick is exact
+
+    flat_expr = None
+    if ctx.track_aux_exprs:
+        from discopt._jax.canonical_expr import _flat_var_expr
+
+        flat_expr = _flat_var_expr(ctx.model)
+
+    z_cols: list[int] = []
+    a_list: list[float] = []
+    s_lo = 0.0
+    s_hi = 0.0
+    for i, a in items:
+        lo_i, hi_i = float(ctx.col_lb[i]), float(ctx.col_ub[i])
+        if not (lo_i > 1e-12 and math.isfinite(hi_i) and hi_i > lo_i * (1.0 + 1e-15)):
+            return False  # strict positivity + finite width required for the ln band
+        af = float(a)
+        zlo, zhi = math.log(lo_i), math.log(hi_i)
+        z = ctx.new_aux(zlo, zhi)
+        if flat_expr is not None:
+            from discopt import modeling as _dm
+
+            ctx.aux_expr[z] = _dm.log(flat_expr[i])
+        _emit_1d(ctx, z, LinForm.col(i), lo_i, hi_i, math.log, lambda t: 1.0 / t, "concave")
+        z_cols.append(z)
+        a_list.append(af)
+        s_lo += af * (zlo if af > 0 else zhi)
+        s_hi += af * (zhi if af > 0 else zlo)
+
+    # s == Σ aᵢ zᵢ (exact linear equality via two <= rows).
+    s = ctx.new_aux(s_lo, s_hi)
+    if flat_expr is not None:
+        from discopt import modeling as _dm
+
+        s_expr = None
+        for z_i, af in zip(z_cols, a_list):
+            # aux_expr entries are validation-only tracking Expressions (typed object);
+            # scaling/adding is runtime-valid via Expression.__rmul__/__add__.
+            term = af * ctx.aux_expr[z_i]  # type: ignore[operator]
+            s_expr = term if s_expr is None else s_expr + term
+        ctx.aux_expr[s] = s_expr
+    le = {s: 1.0}
+    ge = {s: -1.0}
+    for z_i, af in zip(z_cols, a_list):
+        le[z_i] = le.get(z_i, 0.0) - af
+        ge[z_i] = ge.get(z_i, 0.0) + af
+    ctx.add_row(le, 0.0)
+    ctx.add_row(ge, 0.0)
+
+    # w == coef·exp(s): convex band if coef>0, concave if coef<0.
+    def f(t: float) -> float:
+        return coef * math.exp(float(t))
+
+    _emit_1d(ctx, w, LinForm.col(s), s_lo, s_hi, f, f, "convex" if coef > 0 else "concave")
+    return True
+
+
 def _build_ratio(ctx: _Builder, node: CNode, w: int) -> Envelope:  # noqa: D401
     """``w = prod_i base_i**e_i`` with a negative exponent (division).
 
@@ -1045,10 +1146,11 @@ def _build_ratio(ctx: _Builder, node: CNode, w: int) -> Envelope:  # noqa: D401
     skipped and the aux interval floor stands (sound; no finite bound, which is an
     orthogonal bound-validity concern, not a soundness one).
     """
+    logspace = _emit_logspace_band(ctx, w, node)
     (exps,) = node.payload
     factors = [_factor_value(ctx, ch, float(e)) for ch, e in zip(node.children, exps)]
     tight = _fold_product(ctx, w, factors)
-    return Envelope(rows=[], tight=tight and len(factors) == 2)
+    return Envelope(rows=[], tight=(tight and len(factors) == 2) or logspace)
 
 
 def _fold_product(ctx: _Builder, w: int, factors: list) -> bool:
@@ -1170,6 +1272,12 @@ def build_uniform_relaxation(
     else:
         flat_lb = np.asarray(box[0], dtype=np.float64)
         flat_ub = np.asarray(box[1], dtype=np.float64)
+
+    # NOTE (roadmap P3): branch-and-reduce / box tightening (FBBT/OBBT) is owned by
+    # the separate branch-and-reduce workstream and arrives HERE via the ``box``
+    # (node-box) interface — a tighter box automatically yields uniformly tighter
+    # envelopes below (McCormick/secant/tangent are monotone in the box). This layer
+    # does not tighten the box itself.
 
     dag: CanonicalDAG = canonicalize(model)
     ctx = _Builder(model, flat_lb, flat_ub)
