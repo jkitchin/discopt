@@ -820,6 +820,88 @@ def _pow_curv(p: float, lo: float, hi: float) -> Optional[str]:
     return "convex"  # p in {0,1} degenerate (won't reach: pow collapses those)
 
 
+def _odd_power_tangent_point(p: int, endpoint: float, lo: float, hi: float) -> Optional[float]:
+    """Tangent point of the line through ``(endpoint, endpoint**p)`` touching ``t**p``.
+
+    Root of ``h(t) = (p-1) t^p - p·endpoint·t^(p-1) + endpoint**p`` on the OPEN side
+    opposite the endpoint's sign (for the convex-envelope lower facet the endpoint is
+    ``lo<0`` and the tangency is in ``(0, hi]``; the concave upper facet mirrors it in
+    ``[lo, 0)``). Returns the root by bisection, or ``None`` if the tangency lies
+    outside the box (=> the secant is the exact facet instead).
+    """
+
+    def h(t: float) -> float:
+        return (p - 1) * t**p - p * endpoint * t ** (p - 1) + endpoint**p
+
+    if endpoint < 0.0:  # lower facet: search (0, hi]
+        a, b = 1e-12 * max(hi, 1.0), hi
+    else:  # upper facet: search [lo, 0)
+        a, b = lo, -1e-12 * max(-lo, 1.0)
+    ha, hb = h(a), h(b)
+    if ha == 0.0:
+        return a
+    if hb == 0.0:
+        return b
+    if (ha > 0.0) == (hb > 0.0):
+        return None  # no sign change -> tangency outside box, secant is the facet
+    for _ in range(80):
+        m = 0.5 * (a + b)
+        hm = h(m)
+        if hm == 0.0:
+            return m
+        if (hm > 0.0) == (ha > 0.0):
+            a, ha = m, hm
+        else:
+            b = m
+    return 0.5 * (a + b)
+
+
+def _emit_odd_power_hull(ctx: _Builder, w: int, lt: LinForm, lo: float, hi: float, p: int) -> bool:
+    """Exact two-piece convex/concave hull of ``w = t**p`` (odd ``p>=3``) over a
+    SIGN-STRADDLING box ``lo<0<hi`` — the case ``_pow_curv`` abstains on (S-shaped,
+    neither convex nor concave), where the builder otherwise keeps only the interval
+    floor. Two facets (Liberti & Pantelides 2003):
+
+    * underestimator = the tangent line from ``(lo, lo^p)`` (or the secant ``lo->hi``
+      if the tangency exceeds ``hi``) — a valid convex-envelope lower facet;
+    * overestimator = the mirror tangent line from ``(hi, hi^p)`` (or the secant).
+
+    Each line touches the graph and lies on the correct side everywhere on the box
+    (the convex/concave-envelope construction), so no feasible ``(t, w=t^p)`` is cut.
+    """
+    if p < 3 or p % 2 == 0 or not (lo < 0.0 < hi) or not _finite(lo, hi):
+        return False
+
+    def _line(m: float, t0: float, ft0: float, under: bool) -> None:
+        # under: w >= ft0 + m(t - t0);  over: w <= ft0 + m(t - t0).  t = lt.
+        sign = -1.0 if under else 1.0  # sign*w on the LHS
+        coeffs = {w: sign}
+        for j, c in lt.scaled(-sign * m).coeffs.items():
+            coeffs[j] = coeffs.get(j, 0.0) + c
+        # sign*w - sign*m*(cols) <= sign*(m*t0 - ft0 + m*lt.const)*(-1)^...:
+        rhs = sign * (ft0 - m * t0 + m * lt.const)
+        ctx.add_row(coeffs, rhs)
+
+    flo, fhi = lo**p, hi**p
+    # Underestimator from lo.
+    t_u = _odd_power_tangent_point(p, lo, lo, hi)
+    if t_u is not None and 0.0 < t_u <= hi:
+        m_u = p * t_u ** (p - 1)
+        _line(m_u, lo, flo, under=True)
+    else:
+        m_u = (fhi - flo) / (hi - lo)
+        _line(m_u, lo, flo, under=True)
+    # Overestimator from hi (mirror).
+    t_o = _odd_power_tangent_point(p, hi, lo, hi)
+    if t_o is not None and lo <= t_o < 0.0:
+        m_o = p * t_o ** (p - 1)
+        _line(m_o, hi, fhi, under=False)
+    else:
+        m_o = (fhi - flo) / (hi - lo)
+        _line(m_o, hi, fhi, under=False)
+    return True
+
+
 def _build_power(ctx: _Builder, node: CNode, w: int) -> Envelope:
     """``w = t**p``; ``t`` = base LinForm, ``p`` = constant exponent.
 
@@ -837,6 +919,10 @@ def _build_power(ctx: _Builder, node: CNode, w: int) -> Envelope:
     f = lambda t: float(t) ** p  # noqa: E731
     fp = lambda t: p * (float(t) ** (p - 1.0))  # noqa: E731
     tight = _emit_1d(ctx, w, lt, lo, hi, f, fp, curv)
+    # Sign-straddling odd power: _pow_curv abstains (S-shaped) -> two-piece hull.
+    if curv is None and float(p).is_integer():
+        if _emit_odd_power_hull(ctx, w, lt, lo, hi, int(p)):
+            tight = True
     # A power of a positive product ``(∏ xⱼ)**p`` also admits the (tighter) log-space
     # signomial band directly over the original factors (additive, sound).
     if _emit_logspace_band(ctx, w, node):
