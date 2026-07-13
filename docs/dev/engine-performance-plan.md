@@ -86,7 +86,7 @@ A fresh context executing item EP*k*:
 |---|---|---|---|
 | EP0 probe harness | done | baseline (in-container, `--children 10`): nvs09 ctor 0.762 s / root 0.291 s / **294 ms/node** / 22 builds / 19 nodes / obj −43.13434; ex1226 ctor 0.025 s / root 0.024 s / 24 ms/node / 9 builds / 5 nodes / obj −17.0; bchoco06 ctor 0.656 s / root 2.256 s / 2214 ms/node / 6 builds / 7 nodes / time_limit@120 s | `0105c8d` |
 | EP1 per-model analysis cache | done | in-container `--children 10` (wall-clock noisy, treat as order-of-magnitude): nvs09 ctor 0.53→0.17 s / **282→169 ms/node**; ex1226 ctor 0.025→0.025 s / **26.8→3.7 ms/node**; bchoco06 ctor 0.61→0.55 s / **2268→1813 ms/node**. Builds/nodes/objectives UNCHANGED (nvs09 22 builds/19 nodes/−43.13434; ex1226 9/5/−17.0; bchoco06 6/7/time_limit). Fingerprints byte-identical on all 62 vendored instances; node_count + objective byte-equal on a 19-instance corpus (persistent-cache vs fresh-per-build). | `7a6a5bd` |
-| EP2 OBBT single-build-per-box | open | | |
+| EP2 OBBT single-build-per-box | **done (already landed by T2.2 #579; premise falsified)** | Measured (in-container): per-node/root OBBT already builds the relaxation **once per (node box, round)** and shares it across all probes — hda (722 cols, 15 s budget) `build_milp_relaxation` **calls=1 per sweep** (builds/sweep = 1.00), the single build 6.83 s = 36.5 % of OBBT wall, probes warm-started via `_PersistentProbeLP`. **No per-probe rebuild exists to remove** — EP2's "each probe pays a full engine build" premise is falsified (see EP2 section). Node-level neutrality pinned by new `test_obbt_ep2_node_reuse.py` (10 vendored instances: reuse+warm boxes == cold-seam boxes, Δ ≤ 1 ulp / ≤ 1e-9). No solver-math change → fingerprints/node-counts/objectives byte-unchanged by construction. | (docs+test) |
 | EP3 patch-table node path | open | | |
 | EP4a separation facet cache | open | | |
 | EP4b separation warm-start + OA pool | open | | |
@@ -240,6 +240,43 @@ stand-in in-container) via EP0 `--profile`.
 Expected: root_time on hda-class drops by ~the probe-count multiple (each
 probe was a full build); contvar may regain its finite root bound
 (`iteration_limit` was budget exhaustion — check and note, do not force).
+
+**OUTCOME (2026-07-13): premise falsified — already implemented; no code change.**
+Per §0.3 (measurement beats plan; do not land speculative complexity), the entry
+measurement was run *before* implementing, and it falsifies EP2's premise. The
+optimization EP2 describes — "build the relaxation once per (node box, OBBT
+round), swap only the objective per probe, warm-start consecutive probes from the
+previous basis" — was **already landed by cert:T2.2 (PR #579, merged 2026-07-10)**
+as `_PersistentProbeLP` in `obbt.py`, consumed by `run_obbt_on_relaxation` and
+reached from `obbt_tighten_root` (the per-node/root OBBT entry). Evidence:
+
+- **Code.** `run_obbt_on_relaxation` assembles the standard-form CSC **once per
+  sweep** (`_PersistentProbeLP`, `obbt.py`) and threads the optimal basis
+  probe→probe; each probe only writes `c[var]=±1`. No probe calls
+  `build_milp_relaxation`. `obbt_tighten_root` calls `build_milp_relaxation`
+  **once per round** (plus one DBBT rebuild at the *tightened* box when a cutoff
+  fires — a different box, not redundant).
+- **Measurement.** Instrumented `obbt_tighten_root` on **hda** (722 cols, 15 s
+  budget): `build_milp_relaxation` **calls = 1** for the sweep (builds/sweep =
+  1.00), that single build 6.83 s = 36.5 % of OBBT wall; the rest is the
+  large-scale (722-col equilibrated) probe LP solves. There is **no per-probe
+  build** to remove. The EP0 profile's "OBBT probes paying a full engine build
+  each" (§1) mischaracterised the per-**round** builds — the profile was taken
+  2026-07-13, *after* T2.2 (#579) landed 2026-07-10 (git ancestry confirmed).
+- **Neutrality.** The EP0 profile's premise is the only thing changed here; the
+  solver math is untouched, so the byte-identity gate (fingerprints on all 62,
+  node counts + objectives) holds by construction. `test_obbt_ep2_node_reuse.py`
+  pins the invariant at the *node* level (`obbt_tighten_root` reuse+warm boxes ==
+  forced-cold-seam boxes, Δ ≤ 1 ulp / ≤ 1e-9, on 10 vendored instances),
+  complementing the T2.2 `run_obbt_on_relaxation`-level tests in
+  `test_obbt_warm_probes.py`.
+
+**The residual hda-class OBBT root_time is EP3's target, not EP2's:** the single
+per-round `build_milp_relaxation` (6.83 s on hda) is the cold engine build that
+EP3's patch-table node path removes. EP2 landed **no code change** beyond the
+regression test that documents and guards the already-present reuse — inventing a
+rewrite of a working, byte-neutral-critical path to "land EP2" would be exactly
+the speculative complexity §0.3 forbids.
 
 ---
 
