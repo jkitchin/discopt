@@ -200,6 +200,43 @@ class BilevelProblem:
                 f"makes the lower feasible set nonconvex); got curvature '{status}'."
             )
 
+    # ── big-M feasibility gate for the KKT complementarity path ────────
+
+    # A KKT multiplier left at discopt's ±sentinel bound is "unbounded above" for
+    # the purpose of the big-M complementarity encoding: the GDP/SOS1 reformulation
+    # needs a finite bound on μ to build the disjunction link, and a sentinel-sized
+    # big-M is numerically vacuous (it would let the selector binary sit below the
+    # integrality tolerance while μ > 0, silently defeating complementarity — a
+    # false optimal). Match the GDP layer's threshold (gdp_reformulate._BIGM_SENTINEL).
+    _MU_UNBOUNDED = 1e15
+
+    def _require_bounded_multipliers(self, mpec_method: str) -> None:
+        """Refuse loudly when a complementarity multiplier is unbounded above.
+
+        KKT multipliers have no a-priori upper bound, so :func:`kkt.build_kkt`
+        creates them unbounded. The big-M complementarity encodings (``gdp``,
+        ``sos1``) cannot certify such a system — the linking big-M would be the
+        ±sentinel and the disjunction becomes vacuous. Rather than emit an unsound
+        (false-optimal) reformulation, refuse and point at the sound alternative.
+        """
+        unbounded = [
+            pair.f.name
+            for pair in self.kkt.comp_pairs
+            if isinstance(pair.f, Variable) and float(pair.f.ub) >= self._MU_UNBOUNDED
+        ]
+        if unbounded:
+            raise NotImplementedError(
+                f"the KKT complementarity multiplier(s) {unbounded} are unbounded "
+                f"above, so the '{mpec_method}' big-M reformulation cannot build a "
+                f"finite, non-vacuous complementarity encoding — it would certify a "
+                f"follower-infeasible point (a false optimum). KKT multipliers have "
+                f"no a-priori bound. Use method='strong_duality' (a single bilinear "
+                f"equality, no big-M; exact for a convex lower level, though its "
+                f"nonconvex equality means the solve is not gap-certified), or supply "
+                f"finite upper bounds on the follower's dual multipliers if the "
+                f"problem admits them."
+            )
+
     # ── follower variable bounds are follower constraints ──────────────
 
     _BIG = 1e19  # discopt's "unbounded" sentinel is 9.999e19; treat |b| >= 1e19 as ∞
@@ -232,6 +269,35 @@ class BilevelProblem:
 
     # ── build ─────────────────────────────────────────────────────────
 
+    def build_kkt_system(self) -> _kkt.KKTSystem:
+        """Emit the follower's KKT system onto the model and return it (sound math).
+
+        Runs the convexity gate, folds finite follower-variable bounds into the
+        lower constraint set, and builds the KKT stationarity + primal-feasibility
+        constraints and multipliers via :func:`discopt.bilevel.kkt.build_kkt`. It
+        does **not** encode the complementarity pairs (that is :meth:`formulate`'s
+        big-M / strong-duality step) and does not mark the problem formulated, so it
+        is the way to inspect or validate the KKT characterization independently of
+        the encoding. Idempotent: repeated calls return the already-built system;
+        :meth:`formulate` reuses it.
+        """
+        if self.kkt is None:
+            self._gate_convexity()
+            # Follower variable bounds are follower constraints: fold finite ones in
+            # so the KKT system is complete (user constraints first, so
+            # multipliers[0:k] stay aligned with the user's lower_constraints).
+            extra = self._follower_bound_constraints() if self.include_follower_bounds else []
+            self.lower_constraints_full = list(self.lower_constraints) + extra
+            self.kkt = _kkt.build_kkt(
+                self.model,
+                lower_vars=self.lower_vars,
+                lower_objective=self.lower_objective,
+                lower_constraints=self.lower_constraints_full,
+                lower_sense=self.lower_sense,
+                prefix=self.prefix,
+            )
+        return self.kkt
+
     def formulate(self, *, method: str = "kkt", mpec_method: str = "gdp") -> None:
         """Rewrite the model in place into a single-level MPEC.
 
@@ -261,14 +327,6 @@ class BilevelProblem:
         if method not in ("kkt", "strong_duality"):
             raise ValueError(f"unknown method {method!r}; use 'kkt' or 'strong_duality'")
 
-        self._gate_convexity()
-
-        # Follower variable bounds are follower constraints: fold finite ones in so
-        # the KKT system is complete (user constraints first, so multipliers[0:k]
-        # remain aligned with the user's lower_constraints).
-        extra = self._follower_bound_constraints() if self.include_follower_bounds else []
-        self.lower_constraints_full = list(self.lower_constraints) + extra
-
         if method == "kkt":
             if mpec_method not in ("gdp", "sos1"):
                 raise ValueError(
@@ -276,20 +334,20 @@ class BilevelProblem:
                     f"{mpec_method!r}. (For the local Scholtes homotopy, call "
                     f"discopt.mpec.solve_mpec on the formulated pairs.)"
                 )
-            self.kkt = _kkt.build_kkt(
-                self.model,
-                lower_vars=self.lower_vars,
-                lower_objective=self.lower_objective,
-                lower_constraints=self.lower_constraints_full,
-                lower_sense=self.lower_sense,
-                prefix=self.prefix,
-            )
+            # Gate + fold follower bounds + build the KKT stationarity/primal system.
+            self.build_kkt_system()
             if self.kkt.comp_pairs:
+                # The big-M complementarity encodings cannot certify an unbounded
+                # multiplier without a vacuous big-M — refuse before emitting it.
+                self._require_bounded_multipliers(mpec_method)
                 if mpec_method == "gdp":
                     reformulate_gdp(self.model, self.kkt.comp_pairs)
                 else:
                     reformulate_sos1(self.model, self.kkt.comp_pairs)
         else:  # strong_duality
+            self._gate_convexity()
+            extra = self._follower_bound_constraints() if self.include_follower_bounds else []
+            self.lower_constraints_full = list(self.lower_constraints) + extra
             self.strong_duality = _sd.build_strong_duality(
                 self.model,
                 lower_vars=self.lower_vars,

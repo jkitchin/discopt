@@ -18,6 +18,7 @@ import math
 import pytest
 
 jax = pytest.importorskip("jax")
+import discopt.modeling as dm  # noqa: E402
 import jax.numpy as jnp  # noqa: E402
 from discopt._jax.dag_compiler import compile_expression_params  # noqa: E402
 from discopt.bilevel.symbolic_diff import diff, grad  # noqa: E402
@@ -225,6 +226,47 @@ def test_grad_returns_component_list():
     dy = float(compile_expression_params(g[1], m)(xv, _NO_PARAMS))  # 3x
     assert abs(dx - (2 * 1.1 + 3 * 0.4)) <= 1e-9
     assert abs(dy - (3 * 1.1)) <= 1e-9
+
+
+# ---------------------------------------------------------------------------
+# 4b. Aggregation / structural nodes (the module documents these as supported;
+# the random fuzz above only builds arithmetic + univariate-function nodes, so
+# pin them explicitly against jax.grad).
+# ---------------------------------------------------------------------------
+
+
+def test_unary_neg_node():
+    m = Model("neg")
+    x = m.continuous("x", lb=-3, ub=3)
+    y = m.continuous("y", lb=-3, ub=3)
+    # -(x*y): UnaryOp('neg') around a product.
+    assert _assert_grad_matches(-(x * y), m, [x, y], jnp.asarray([1.1, -0.7]))
+
+
+def test_sum_over_expression_node():
+    m = Model("sumover")
+    xs = [m.continuous(f"x{i}", lb=-3, ub=3) for i in range(3)]
+    # dm.sum over a list of expressions -> SumOverExpression.
+    expr = dm.sum([xs[0] * xs[0], xs[1], xs[2] * Constant(3.0)])
+    assert _assert_grad_matches(expr, m, xs, jnp.asarray([1.1, -0.7, 0.5]))
+
+
+def test_sum_and_index_over_array_variable():
+    m = Model("sumidx")
+    s = m.continuous("s", lb=-3, ub=3)  # scalar we differentiate against
+    a = m.continuous("a", shape=(3,), lb=-3, ub=3)  # array var
+    # dm.sum(a) -> SumExpression (reduction); a[1] -> IndexExpression. Multiply by
+    # the scalar so ∂/∂s is nonzero and structural nodes are on the diff path.
+    for expr in (dm.sum(a) * s, a[1] * s):
+        assert _assert_grad_matches(expr, m, [s], jnp.asarray([1.1, 0.2, 0.3, 0.4]))
+
+
+def test_matmul_node():
+    m = Model("matmul")
+    s = m.continuous("s", lb=-3, ub=3)
+    a = m.continuous("a", shape=(3,), lb=-3, ub=3)
+    # (a @ a) is a scalar (dot product); times s exercises the matmul product rule.
+    assert _assert_grad_matches((a @ a) * s, m, [s], jnp.asarray([1.1, 0.2, 0.3, 0.4]))
 
 
 # ---------------------------------------------------------------------------

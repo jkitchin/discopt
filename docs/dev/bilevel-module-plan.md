@@ -1,7 +1,9 @@
 # Bilevel Optimization Module — Design & Implementation Plan
 
-**Date:** 2026-07-03
-**Status:** design plan for a new `python/discopt/bilevel/` module.
+**Date:** 2026-07-03 (audited & corrected 2026-07-13)
+**Status:** implemented (`python/discopt/bilevel/`), Phases 0–3 landed. A 2026-07-13
+audit found and fixed a P0 false-optimal in the certified KKT path — see the
+"Audit correction" block in §6. The sound end-to-end path is `strong_duality`.
 **Thesis:** a bilevel program is solved by replacing the *follower's* optimization
 with its optimality conditions, collapsing the two levels into one. discopt already
 has the two hardest ingredients — the **complementarity/MPEC machinery**
@@ -89,12 +91,20 @@ for cuts, teaching).
 ```
 python/discopt/bilevel/
   __init__.py            # BilevelProblem, exports
-  problem.py             # BilevelProblem: the user-facing front-end + .formulate()
+  problem.py             # BilevelProblem: front-end + .formulate()/.build_kkt_system()
+                         #   AND the convexity gate (folded in; no separate file)
   symbolic_diff.py       # ∂Expression/∂Variable -> Expression  (the new engine piece)
   kkt.py                 # KKT reformulation: stationarity + feas + complementarity
-  strong_duality.py      # LP strong-duality reformulation
-  convexity_gate.py      # lower-level-convex-in-y check (wraps the certifier)
+  strong_duality.py      # LP/QP strong-duality reformulation
 ```
+
+> **As-built note (audit 2026-07-13):** there is no separate `convexity_gate.py`;
+> the lower-level-convex-in-y check lives in `problem.py` (`_convexity_status` /
+> `_hessian_in_y` / `_gate_convexity`), a constant-Hessian PSD test covering LP and
+> convex-QP. The general convexity certifier is not yet wired in (non-quadratic
+> convex lower levels are refused loudly). `problem.py` also exposes
+> `build_kkt_system()` — the sound KKT-math construction, separate from the
+> encoding choice in `formulate()`.
 
 Optional dep: none beyond the core (mpec + _jax are already core). Mirrors the flat,
 builder-pattern shape of `ro/`.
@@ -202,6 +212,32 @@ already uses.
 | **1 ✅ DONE** | `BilevelProblem` (`problem.py`) + `kkt.py` — the **KKT reformulation** for an LP-in-`y` lower level; integer/nonconvex/pessimistic gates | the emitted stationarity + primal + dual + complementarity conditions exactly characterize follower optimality — validated against an independent **scipy follower-LP oracle** (min & max followers, several leader `x`), stationarity shown to bind, all gates enforced — **11 tests pass, ruff clean**. End-to-end *certified* solve of Bard's instances → CI (needs Rust+pounce). | module/API docstrings with a worked toll example (the seed for the notebook) |
 | **2 ✅ DONE** | `strong_duality.py` (aggregate-complementarity / strong-duality reformulation) + convexity gate **lifted to convex-QP** (PSD constant Hessian in y) | KKT ≡ strong-duality verified equivalent at the follower optimum (scipy LP oracle); convex-QP lower level accepted with KKT correct (QP oracle); nonconvex / non-quadratic / nonlinear-equality lower levels refused — **8 tests pass, ruff clean**. Convex-**NLP** (non-quadratic) via the full convexity certifier is deferred (gate refuses loudly, names it). End-to-end certified solve → CI. | module/API docstrings; worked LP + convex-QP examples seed the notebook |
 | **3 ✅ DONE** | `example_bilevel_toll` gallery model (convex-QP toll setting) + **follower-variable-bound correctness fix** (finite bounds folded into the KKT); `docs/notebooks/bilevel.ipynb`; `references.bib` + `_toc.yml` | the gallery example builds + `validate()`s in the whole-gallery smoke test; notebook code cells execute solver-free (formulate is pure-Python); bound-active regression test (a follower optimum on a bound is excluded without the fix) — **bilevel suite + gallery green (ruff clean)**. `jupyter-book build` zero-warning check → CI (not installed locally). Advisor hook deferred (bilevel does not map onto the decomposition advisor). | notebook with `{cite:p}` citations (Bard/Dempe/Colson–Marcotte–Savard/Kleinert et al.); gallery example; TOC + bib entries |
+
+**Audit correction (2026-07-13) — the certified KKT solve never actually worked.**
+The Phase-1/3 "End-to-end *certified* solve → CI" line was aspirational: **no test
+ever called `model.solve()` on a `BilevelProblem`** (the phase suites validate the
+`formulate()` output against a scipy oracle; the gallery example is only
+`validate()`d). An end-to-end solve exposed a **P0 false optimal**: the module
+default `method="kkt", mpec_method="gdp"` on a linear-follower bilevel certified a
+follower-*infeasible* point (`gap_certified=True`) because the KKT multipliers are
+unbounded and the GDP big-M treated discopt's ±1e20 unbounded sentinel as a valid
+(but numerically vacuous) `M`, so the complementarity disjunction was never
+enforced. Fixes:
+- **Shared GDP layer** (`_jax/gdp_reformulate.py`): `_compute_big_m` now refuses a
+  sentinel-magnitude bound (`|bound| ≥ _BIGM_SENTINEL = 1e15`) as it already did for
+  ±inf and as SOS1 / `_compute_big_m_lp` already did — a sentinel `M` is not a
+  usable big-M. (Real finite bounds below the sentinel still use the true bound,
+  preserving the #413 "don't shrink a valid `M`" fix.)
+- **Bilevel front-end**: `formulate(method="kkt", mpec_method="gdp"|"sos1")` now
+  **refuses loudly** when the follower multipliers are unbounded (the common case),
+  pointing at `method="strong_duality"`.
+- **The working certified-ish path is `strong_duality`** (a single bilinear
+  equality, no big-M): it solves the linear/convex-QP bilevel to the true
+  optimistic optimum (the new `test_bilevel_phase3.py` pins this end-to-end and
+  checks follower optimality against a scipy oracle). Its solve is *not*
+  gap-certified because the strong-duality equality is nonconvex — an honest state,
+  not the "certified" the table claimed. A genuinely gap-certified KKT path needs
+  valid finite multiplier bounds (future work), not a big-M over the sentinel.
 
 **Re-scope note (2026-07-03, after Phase 0 landed).** The original plan put LP
 strong-duality in Phase 1 and the KKT reformulation in Phase 2. With Phase 0's

@@ -127,20 +127,31 @@ class TestComputeBigM:
         # Lower bound of body = 0 - 3 = -3, so M = -(-3) * 1.01 = 3.03
         assert M == pytest.approx(3.0 * 1.01)
 
-    def test_large_finite_bounds_use_true_bound(self):
-        # GDP-1 (#413): a variable left at the large-but-FINITE default bounds
-        # (±~1e20) has a valid (large) big-M equal to that finite bound. The old
-        # behavior shrank it to _DEFAULT_BIG_M (1e4), which is NOT a valid
-        # over-estimate and cut feasible points of the active disjunct → a
-        # false-infeasible certificate. Correctness first: use the true finite
-        # bound, even though a huge M weakens the LP relaxation.
+    def test_large_but_real_finite_bounds_use_true_bound(self):
+        # GDP-1 (#413), preserved: a variable with a large-but-*real* finite bound
+        # (below the unbounded sentinel) has a valid big-M equal to that bound. We
+        # must NOT shrink it to _DEFAULT_BIG_M (1e4) — that would cut feasible
+        # points of the active disjunct (a false-infeasible certificate).
         m = dm.Model("t")
-        x = m.continuous("x")  # lb≈-1e20, ub≈1e20 (finite defaults)
-        ub = float(np.max(x.ub))
+        x = m.continuous("x", lb=-1e6, ub=1e6)  # real bounds, < _BIGM_SENTINEL
         con = Constraint(body=x, sense="<=", rhs=0.0)
         M = _compute_big_m(con, m)
-        assert M == pytest.approx(ub * 1.01)
-        assert M >= ub  # M must over-estimate the body's reachable max
+        assert M == pytest.approx(1e6 * 1.01)
+        assert M >= 1e6  # M must over-estimate the body's reachable max
+
+    def test_sentinel_bounds_refuse_loudly(self):
+        # Audit correction to GDP-1: a variable left at discopt's unbounded
+        # *sentinel* bounds (±~1e20) has NO usable big-M. #413 used that sentinel
+        # as M to avoid a false-infeasible, but a sentinel-sized M is numerically
+        # vacuous (M·integrality_tol ≫ operand scale), so the disjunction/
+        # complementarity is not enforced and the solver can certify a point that
+        # violates it (a false *optimal* — see the bilevel KKT complementarity
+        # case). A sentinel bound is not a real bound: refuse, exactly as for ±inf.
+        m = dm.Model("t")
+        x = m.continuous("x")  # lb≈-1e20, ub≈1e20 (unbounded sentinel)
+        con = Constraint(body=x, sense="<=", rhs=0.0)
+        with pytest.raises(ValueError, match="unbounded|finite"):
+            _compute_big_m(con, m)
 
     def test_truly_infinite_bounds_refuse_loudly(self):
         # GDP-1 (#413): a genuinely unbounded body has NO valid finite big-M.

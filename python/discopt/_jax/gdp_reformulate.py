@@ -42,6 +42,15 @@ from discopt.modeling.core import (
 
 _DEFAULT_BIG_M = 1e4
 
+# A bound at or above this magnitude is treated as the "unbounded" sentinel, not a
+# real finite bound: discopt's unbounded sentinel is 9.999e19 and the NLP path warns
+# above ~1e15, so any |bound| >= this is meaningless as a big-M. Using such a value
+# as M makes the disjunction link ``operand <= M * b`` satisfiable with the selector
+# ``b`` far below the integrality tolerance, silently defeating the disjunction (a
+# false optimal). Both big-M paths refuse rather than emit a vacuous M. This is
+# orthogonal to the GDP-1/#413 "M too small cuts feasible points" guard.
+_BIGM_SENTINEL = 1e15
+
 
 def reformulate_gdp(
     model: Model,
@@ -177,15 +186,20 @@ def _compute_big_m(
     constraint and can cut feasible points of the *active* disjunct, producing
     a false-infeasible / wrong-optimum certificate. Therefore:
 
-    - When the relevant body bound is **finite** (even if very large, e.g. a
-      variable left at the default ±1e20), that finite bound *is* a valid M and
-      is used as-is. A large M weakens the LP relaxation (a *performance* cost),
-      but correctness comes first — we never shrink a valid finite M to a
-      smaller ``default`` just because it exceeds a "looks infinite" threshold.
-    - When the relevant body bound is **truly non-finite** (``±inf``), no valid
-      finite M exists, so we **refuse loudly** rather than silently substitute
-      ``default`` (which is not a valid over-estimate and would cut feasible
-      points). The caller must supply a finite bound on the offending variable.
+    - When the relevant body bound is **finite and below the ``_BIGM_SENTINEL``
+      magnitude**, that bound *is* a valid M and is used as-is. A large M weakens
+      the LP relaxation (a *performance* cost), but correctness comes first — we
+      never shrink such a valid finite M to a smaller ``default``.
+    - When the relevant body bound is **non-finite (``±inf``) or at/above the
+      ``_BIGM_SENTINEL`` "unbounded" magnitude** (e.g. a variable left at the
+      default ±9.999e19 sentinel), no *usable* finite M exists, so we **refuse
+      loudly** rather than emit a vacuous M. A sentinel-sized M is not merely weak:
+      it makes the disjunction link ``operand <= M * selector`` hold with the
+      selector binary far below the integrality tolerance, so the disjunction is
+      never enforced and the solver can certify a point that violates it (a false
+      optimal — see GDP-2). The caller must supply a finite bound on the offending
+      variable, or use ``method='hull'`` (no big-M). This is *orthogonal* to the
+      GDP-1/#413 "M too small cuts feasible points" guard, which still holds.
 
     Parameters
     ----------
@@ -214,15 +228,16 @@ def _compute_big_m(
 
     def _require_finite_upper() -> float:
         # Valid M for a ``body <= 0`` disjunct: any value >= max body. The
-        # interval upper bound ``hi`` is exactly that. Finite (even if huge) ⇒
-        # valid; non-finite ⇒ no valid finite M exists.
-        if np.isfinite(hi):
+        # interval upper bound ``hi`` is exactly that. Finite AND below the
+        # unbounded sentinel ⇒ valid; non-finite or sentinel-sized ⇒ no *usable*
+        # finite M exists (a sentinel-sized M makes the disjunction vacuous).
+        if np.isfinite(hi) and abs(hi) < _BIGM_SENTINEL:
             return abs(hi)
         raise _unbounded_big_m_error(constraint, "above")
 
     def _require_finite_lower() -> float:
         # Valid M for a ``body >= 0`` disjunct: any value >= -min(body) = |lo|.
-        if np.isfinite(lo):
+        if np.isfinite(lo) and abs(lo) < _BIGM_SENTINEL:
             return abs(lo)
         raise _unbounded_big_m_error(constraint, "below")
 
@@ -340,7 +355,7 @@ def _compute_big_m_lp(
             ub_i = float(ub_flat[i]) if ub_flat.size == v.size else float(ub_flat.flat[0])
             bounds_list.append((lb_i, ub_i))
 
-    _INF_THRESH = 1e15
+    _INF_THRESH = _BIGM_SENTINEL  # shared "unbounded" magnitude; see _compute_big_m
 
     def _solve_bound(maximize: bool) -> float | None:
         """Solve LP to get bound. Returns None if LP fails."""
