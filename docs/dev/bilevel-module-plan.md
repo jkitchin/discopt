@@ -231,13 +231,31 @@ enforced. Fixes:
 - **Bilevel front-end**: `formulate(method="kkt", mpec_method="gdp"|"sos1")` now
   **refuses loudly** when the follower multipliers are unbounded (the common case),
   pointing at `method="strong_duality"`.
-- **The working certified-ish path is `strong_duality`** (a single bilinear
-  equality, no big-M): it solves the linear/convex-QP bilevel to the true
-  optimistic optimum (the new `test_bilevel_phase3.py` pins this end-to-end and
-  checks follower optimality against a scipy oracle). Its solve is *not*
-  gap-certified because the strong-duality equality is nonconvex — an honest state,
-  not the "certified" the table claimed. A genuinely gap-certified KKT path needs
-  valid finite multiplier bounds (future work), not a big-M over the sentinel.
+- **The default working path is `strong_duality`** (a single bilinear equality, no
+  big-M): it solves the linear/convex-QP/convex-NLP bilevel to the true optimistic
+  optimum (the new `test_bilevel_phase3.py` pins this end-to-end and checks follower
+  optimality against a scipy oracle). Its solve is *not* gap-certified because the
+  strong-duality equality is nonconvex — an honest state, not the "certified" the
+  table claimed.
+
+**Follow-on (2026-07-14) — certified path + convex-NLP followers.**
+- **Auto-derived multiplier bounds: FALSIFIED.** An entry experiment confirmed
+  `run_obbt` cannot bound the KKT multipliers (they are unbounded in the linear KKT
+  relaxation — boundedness comes from complementarity, and valid bilevel big-Ms are
+  NP-hard, Kleinert et al. 2021). Dropped.
+- **Certified via user-supplied bounds (delivered).** `BilevelProblem(...,
+  multiplier_ub=M)` applies a user-asserted valid finite bound to the follower duals
+  (like any user-supplied big-M), making `kkt`+`gdp` gap-certified (verified on Bard:
+  `optimal, obj=−7, gap_certified=True`, follower-optimal). Soundness is the user's
+  responsibility (a too-small `M` cuts the true optimum); `solve()` best-effort-warns
+  when a multiplier sits at its bound. `sos1` additionally needs the `−g` operand
+  bounded (an `mpec.reformulate_sos1` gap), so use `gdp`.
+- **Convex-NLP followers (delivered).** The convexity gate now proves convexity *in
+  `y`* for a nonlinear body via a symbolic follower Hessian + interval-Gershgorin PSD
+  test over the box (`problem.py::_y_convex_on_box`). Tight enough to accept the
+  natural linearly-coupled form (`exp(y) − x·y`, `y**4 − x·y`) while refusing
+  nonconvex/concave bodies; solves end-to-end via `strong_duality`. This supersedes
+  the Phase-2 "convex-NLP deferred / gate refuses" note.
 
 **Re-scope note (2026-07-03, after Phase 0 landed).** The original plan put LP
 strong-duality in Phase 1 and the KKT reformulation in Phase 2. With Phase 0's

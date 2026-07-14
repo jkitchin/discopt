@@ -1,0 +1,122 @@
+#+TITLE: Bilevel Programming
+#+FILETAGS: :concept:bilevel:stackelberg:kkt:mpec:complementarity:big-m:
+bibliography:../../references.bib
+
+* Bilevel Programming
+:PROPERTIES:
+:ARTICLE_TYPE: concept
+:SOURCE_KEYS: bard1998 dempe2002 colson-marcotte-savard-2007 kleinert-labbe-ljubic-schmidt-2021
+:STATUS: new
+:CREATED: 2026-07-14
+:UPDATED: 2026-07-14
+:END:
+
+A bilevel program is an optimization problem in which one problem is nested inside
+another: a /leader/ optimizes an objective subject to constraints, one of which
+requires a /follower/ to be optimal for its own problem, parameterized by the
+leader's decision. It is the mathematical form of a Stackelberg game, where the
+leader commits to a decision and the follower responds by best-replying
+citep:bard1998,dempe2002. Writing the leader's variables as $x$ and the follower's
+as $y$, the problem is
+
+\[
+\min_{x,y}\; F(x,y) \quad\text{s.t.}\quad G(x,y) \le 0,\quad
+y \in \arg\min_{y'}\{\, f(x,y') : g(x,y') \le 0 \,\}.
+\]
+
+The argmin constraint is the whole difficulty: it is an /optimization problem
+embedded inside a constraint/, so the feasible set of the leader is defined
+implicitly by the follower's optimality rather than by ordinary algebraic
+inequalities. Even when all data are linear, the resulting problem is nonconvex and
+NP-hard citep:colson-marcotte-savard-2007.
+
+** Optimistic versus pessimistic
+
+When the follower's optimal response is not unique, the bilevel problem is
+ill-posed until one specifies how ties are broken. The /optimistic/ formulation
+lets the leader choose, among all follower optima, the one most favorable to the
+leader; the /pessimistic/ formulation makes the leader hedge against the least
+favorable response. The optimistic case is the standard, well-posed, and tractable
+one and is what the KKT reduction below produces; the pessimistic case has a
+min--max structure that is genuinely harder and is treated separately in the
+literature citep:dempe2002,colson-marcotte-savard-2007.
+
+** The KKT reduction to a single level
+
+The canonical exact reduction applies when the follower's problem is /convex in
+$y$/ for each fixed $x$. Then the follower's Karush--Kuhn--Tucker (KKT) conditions
+are necessary /and sufficient/ for its optimality, so the argmin constraint can be
+replaced by the KKT system, collapsing the two levels into one:
+
+- stationarity $\nabla_y L = 0$ with the Lagrangian $L = f + \sum_i \mu_i g_i$,
+- primal feasibility $g_i(x,y) \le 0$,
+- dual feasibility $\mu_i \ge 0$,
+- complementarity $0 \le \mu_i \perp -g_i(x,y) \ge 0$.
+
+The result is a single-level Mathematical Program with Equilibrium Constraints
+(MPEC): an ordinary nonlinear program plus complementarity conditions. The
+convexity precondition is not advice but a soundness requirement — for a nonconvex
+follower the KKT conditions are only /necessary/, so the reduction would admit
+points that are stationary but not follower-optimal, silently changing the problem.
+
+The strong-duality reduction is an alternative for a linear (or convex) follower:
+replace the follower by primal feasibility, dual feasibility, and the single
+equality $c^\top y = b^\top \lambda$ equating primal and dual objectives. It trades
+the disjunctive complementarity for one bilinear equality, which the global
+spatial-branching solver handles directly; it is often convenient because it avoids
+discrete complementarity branching, at the cost of a nonconvex equality that is not
+gap-certifiable.
+
+** The big-M multiplier-bound pitfall
+
+Reducing complementarity to a solvable form is where bilevel programs are most
+easily mis-solved. Each condition $0 \le \mu_i \perp -g_i \ge 0$ is a disjunction
+(either $\mu_i = 0$ or $g_i = 0$), and the two standard encodings —
+[[file:generalized-disjunctive-programming.org][GDP]] big-M and SOS1 — both need a
+/finite bound/ on every participating variable to build a valid
+[[file:big-m-formulations.org][big-M]] linking constraint. The subtlety is that KKT
+multipliers $\mu_i$ have /no a priori upper bound/: the leader can, in general, drive
+the follower's dual arbitrarily large, and the multiplier is pinned only by
+complementarity itself, not by the linear KKT relaxation.
+
+This creates a trap that is easy to miss. If a multiplier is left at a solver's
+"unbounded" sentinel and that sentinel value is used as the big-M $M$, the
+disjunction link $\mu_i \le M\,b$ (with binary selector $b$) is satisfiable with $b$
+far below the integrality tolerance while $\mu_i$ is large — the disjunction becomes
+/numerically vacuous/, complementarity is never enforced, and the solver returns a
+follower-infeasible point with a spurious optimality certificate. The failure is a
+false /optimal/, not a false infeasible, and is invisible unless the returned $y$ is
+independently checked against the follower's own optimum. The lesson is that a big-M
+must be a genuinely usable finite bound, and a sentinel-magnitude value must be
+refused rather than used — treating it as "large but finite" is unsound.
+
+Deriving /valid/ finite multiplier bounds automatically is the crux of certified
+bilevel optimization, and it is NP-hard in general: there is no free lunch, and
+constant-factor or heuristic big-Ms can cut off the true optimum
+citep:kleinert-labbe-ljubic-schmidt-2021. Bound-tightening over the linear KKT
+relaxation does not help, because the multiplier's unboundedness there is exactly
+the recession direction that complementarity would remove. Practical certified
+solves therefore rely on problem-specific valid bounds — supplied by the modeler, or
+derived from structure the solver can exploit.
+
+** Realization in discopt
+
+discopt implements the optimistic KKT reduction in =discopt.bilevel=. A symbolic
+differentiator over the [[file:expression-dag-and-ad.org][expression DAG]] emits the
+stationarity condition $\nabla_y L = 0$ as ordinary algebraic constraints, keeping
+the reformulation inside the certified global path rather than behind an opaque
+numeric-gradient node. Complementarity is handed to the MPEC layer (GDP / SOS1 /
+Scholtes). A convexity gate certifies the follower is convex in $y$ — a
+constant-Hessian PSD test for LP/QP followers, and an interval-Hessian Gershgorin
+test over the variable box for convex-NLP followers, which accepts the natural
+linearly-coupled form such as $e^{y} - x\,y$ (convex in $y$ though not jointly convex
+in $(x,y)$). Nonconvex, integer-follower, and pessimistic problems are refused
+loudly.
+
+Consistent with the big-M pitfall above, discopt /refuses/ the certified GDP/SOS1
+path when the follower multipliers are unbounded, rather than emit a vacuous big-M.
+The modeler can supply a valid finite multiplier bound to obtain a gap-certified
+solve, or use the strong-duality reduction for an exact but uncertified solve. This
+is the honest position the survey literature recommends: expose the certificate
+faithfully, and never manufacture one from an unproven bound
+citep:kleinert-labbe-ljubic-schmidt-2021.

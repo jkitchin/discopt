@@ -56,12 +56,27 @@ false optimal." `_compute_big_m_lp` and SOS1 already rejected `≥1e15`; only th
 
 ## What is and isn't certified now
 
-`strong_duality` solves linear and convex-QP bilevel to the true optimistic
-optimum, but its solve is **not gap-certified** (its strong-duality equality is
-nonconvex/bilinear) — an honest state. A genuinely gap-certified KKT path needs
-valid finite multiplier bounds; that is future work, not a big-M over the sentinel.
-Deferred features (convex-NLP lower level, integer/pessimistic lower level) remain
-**refused loudly**, per CLAUDE.md §3.
+`strong_duality` solves linear, convex-QP, and convex-NLP bilevel to the true
+optimistic optimum, but its solve is **not gap-certified** (its strong-duality
+equality is nonconvex/bilinear) — an honest state. Integer/pessimistic lower levels
+remain **refused loudly**, per CLAUDE.md §3.
+
+## Follow-on capabilities (2026-07-14)
+
+- **Certified path via user-supplied multiplier bounds.** Auto-deriving valid
+  multiplier bounds was investigated and **falsified** (entry experiment: `run_obbt`
+  leaves every KKT multiplier at the sentinel — boundedness comes from
+  complementarity, not the linear KKT relaxation; valid bilevel big-Ms are NP-hard,
+  Kleinert et al. 2021). Instead `BilevelProblem(..., multiplier_ub=M)` lets the user
+  assert a valid finite bound on the follower duals (like any big-M), making
+  `kkt`+`gdp` gap-certified (verified on Bard: `optimal, obj=−7, gap_certified=True`).
+  `solve()` best-effort-warns if a multiplier sits at its bound. `strong_duality`
+  stays the default for users who cannot bound their duals.
+- **Convex-NLP followers.** The convexity gate now certifies convexity *in `y`* for a
+  nonlinear body via a symbolic follower Hessian + interval-Gershgorin PSD test over
+  the box (`problem.py::_y_convex_on_box`) — tight enough to accept the natural
+  linearly-coupled form (`exp(y) − x·y`), refusing nonconvex/concave bodies. This
+  removes the "convex-NLP deferred" limitation.
 
 ## Tests added / changed
 
