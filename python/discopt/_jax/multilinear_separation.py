@@ -260,10 +260,59 @@ def _separate_multilinear_envelope_uncached(
     # numerical artifact and clamping keeps the supporting hyperplane valid.
     x_star = np.clip(x_star, lb, ub)
 
+    # Pinned dims (branching / FBBT set ``lb == ub`` exactly): a pinned factor's
+    # coordinate is a constant on the box, so the ``2^n`` vertex enumeration emits
+    # duplicate vertex columns and a redundant equality row, and the hull LP is
+    # degenerate — the Rust simplex then cycles to its pivot cap and falls back to
+    # the POUNCE IPM (measured on nvs09: caps 3k/20k/200k all ITERATION_LIMIT,
+    # ~0.1-2.8 s/LP). Drop the pinned dims from the enumeration so the LP is
+    # non-degenerate. The emitted cut is unchanged in effect: a pinned dim's
+    # coordinate is fixed at that constant in the *relaxation LP* too (its column
+    # is bounded to a point), so any slope on it is absorbed into the intercept
+    # with no change to the LP feasible region or bound; the returned slope is 0
+    # on pinned dims and the intercept — recomputed as ``min/max_v(f(v) - a.v)``
+    # over the vertices inside :func:`_solve_envelope` — is unaffected because the
+    # pinned dims contribute 0 to ``a.v`` and the dropped duplicate vertices do
+    # not move the extremum. The product's constant pinned factor ``K = prod
+    # lb[pinned]`` scales ``f(v)`` on the reduced vertices.
+    pinned = lb == ub
+    if pinned.any():
+        fidx = np.nonzero(~pinned)[0]
+        if fidx.size == 0:
+            # Fully pinned: the term is a constant on the box — no multilinear
+            # structure to separate.
+            return []
+        const = float(np.prod(lb[pinned]))
+        rlb = lb[fidx]
+        rub = ub[fidx]
+        verts_free = np.array(
+            list(product(*[(float(rlb[i]), float(rub[i])) for i in range(fidx.size)]))
+        )
+        fv = const * np.prod(verts_free, axis=1)
+        x_free = x_star[fidx]
+
+        def _expand(a_free: np.ndarray) -> np.ndarray:
+            a = np.zeros(n, dtype=np.float64)
+            a[fidx] = a_free
+            return a
+
+        cuts: list[EnvelopeCut] = []
+        under = _solve_envelope(verts_free, fv, x_free, maximize=False)
+        if under is not None:
+            env, a_free, b = under
+            if w_star < env - tol:
+                cuts.append(EnvelopeCut(a=_expand(a_free), b=b, sense="under"))
+        over = _solve_envelope(verts_free, fv, x_free, maximize=True)
+        if over is not None:
+            env, a_free, b = over
+            if w_star > env + tol:
+                cuts.append(EnvelopeCut(a=_expand(a_free), b=b, sense="over"))
+        return cuts
+
     verts = np.array(list(product(*[(float(lb[d]), float(ub[d])) for d in range(n)])))
     fv = np.prod(verts, axis=1)
 
-    cuts: list[EnvelopeCut] = []
+    cuts = []
     under = _solve_envelope(verts, fv, x_star, maximize=False)
     if under is not None:
         env, a, b = under
