@@ -175,14 +175,26 @@ bound-changing ones face the full PF0 panel.
 | Finding | Root cause | Regime | Verdict | Commit |
 |---|---|---|---|---|
 | **F1 — pinned-dim vertex-hull LPs** (`multilinear_separation.py`, `edge_concave.py`) | The `2ⁿ` box-vertex enumeration includes dims that branching/FBBT have **pinned** (`lb == ub`). At the root every dim is full-width so the 2ⁿ vertices are distinct and the hull LP is non-degenerate; deep in the tree the pinned dims emit **duplicate vertex columns + a redundant equality row** → degenerate LP → the Rust simplex cycles to its pivot cap → POUNCE IPM fallback (measured nvs09: 0.1–2.8 s/LP). | **Byte-neutral** (drop pinned dims before enumerating; slope 0 on pinned dims, intercept recomputed over the free vertices → identical cut). | **LANDED** — fingerprint gate PASSED (all 62 root shapes byte-identical; env-value at x* identical to 4.45e-14; nvs09 wall **64 s → 28 s, −56 %**, obj/nodes identical). | `c94fc03` |
-| **F2 — jit the separation-grad eval** (`uniform_relax._TracedEvalFn`) | The cached jaxpr is re-evaluated interpreted (`jax.core.eval_jaxpr`, ~137k `core.bind` ≈ 2.7 s/solve) up to 8 rounds × thousands of nodes. `jax.jit` would make each call a µs XLA dispatch. | **Bound-changing** — XLA fusion reorders floats (~1–2 ulp), which shifts the `_separate_convex` cut sequence → node counts / dual bounds move. Sound (a tangent is a valid underestimator at any last-bit point) but not bound-neutral. | **REJECTED** — full PF0 panel: **3 bounds LOOSER (m3 19.36 vs 37.8 [proof lost], nvs05 3.76 vs 4.70, tls2 2.1 vs 2.45)**. Exactly the PF5 failure mode. Reverted to `eval_jaxpr`; the deliberate non-jit is now documented in the class. | reverted (not landed) |
+| **F2 — jit the separation-grad eval** (`uniform_relax._TracedEvalFn`) | The cached jaxpr is re-evaluated interpreted (`jax.core.eval_jaxpr`, ~137k `core.bind` ≈ 2.7 s/solve) up to 8 rounds × thousands of nodes. `jax.jit` would make each call a µs XLA dispatch. | **Bound-changing** — XLA fusion reorders floats (~1–2 ulp), which shifts the `_separate_convex` cut sequence → node counts / dual bounds can move. Sound (a tangent is a valid underestimator at any last-bit point) but not bound-neutral. | **NOT LANDED — nondeterminism** (verdict corrected after a controlled re-measure). The first gate ran the panel at **`jobs=4`**, whose CPU contention corrupts bound/node comparisons (the PF3 method rule): its "m3 19.36 vs 37.8 [proof lost], nvs05 3.76" were **contention artifacts, not jit**. A `jobs=1` serial re-run (2×/arm) shows jit is in fact **faster and net proof-positive**: m3 optimal 37.8/47n (identical to eval), nvs05 identical 4.833/237n, **tspn05 eval-times-out→jit-optimal 191.3 (proof GAINED, both runs)**. The **real** residual is `tls2`: eval reproducible (2.449, 2.449), **jit run-to-run nondeterministic (2.449, 2.1)** — the XLA float-reordering, demonstrated. A run-to-run-varying dual bound on the same machine is the disqualifier for a certifying solver, so jit stays out — but **superseded by F2′** (analytic IR gradient) which gets jit's speed *with* determinism. | reverted (not landed) |
+| **F2′ — analytic IR gradient (root fix)** (`_separate_convex` grad path) | Both F2 symptoms (`eval_jaxpr` interpreter tax AND jit nondeterminism) stem from using JAX autodiff to differentiate a **known factorable expression**. `∇g` is the gradient of the engine's own `Expression` IR (closed-form atoms), computable analytically via `convexity/interval_ad.py` (forward-mode AD over the same IR, point mode) with **no JAX on the hot path**. | **Bound-changing** (its last bits differ from JAX grad) but **deterministic**. | **SPIKE** (open) — target: jit-level speed + reproducible bound + drop the hot-path JAX dep. Gate: jobs=1 PF0 panel + feasible-point + same-bound-across-repeats. | (spike) |
 
 **Why the "single jit issue" smelled funny (maintainer's question) — resolved:**
-jit was *not already there* because it is bound-changing, and this project's
-correctness regime forbids a bound-changing perf fix that regresses any proof.
-EP5 chose the `eval_jaxpr` middle path precisely because it removes the
-re-tracing tax **bit-identically**; the jit upgrade genuinely fails the gate, so
-"not jitted" is the correct state, not an oversight.
+jit was *not already there* because it is bound-changing; EP5 chose the
+`eval_jaxpr` middle path precisely because it removes the re-tracing tax
+**bit-identically**. The deeper smell the maintainer named — *why is any of this
+differentiated through JAX at all?* — is the right one: the separation cut is a
+supporting hyperplane `d ≥ g(x₀) + ∇g(x₀)·(x−x₀)`, so it genuinely needs `∇g`,
+but `g` is a **known factorable expression** whose gradient we can compute
+analytically over our own IR. Using JAX autodiff for it is what *creates* both
+the interpreter tax (eval_jaxpr) and the nondeterminism (jit). **F2′ removes JAX
+from this path entirely** — the root fix, not a choice between two JAX symptoms.
+
+**Measurement note (binding):** the F2 rejection was first attributed to a
+`jobs=4` panel; a `jobs=1` serial re-measure (`scratchpad/serial_{eval,jit}_*.json`)
+showed 2 of the 3 "regressions" were **contention, not jit**. Bound/node
+comparisons MUST run `jobs=1` serial (PF3 rule) — a contended panel is not a
+valid gate. jit's true cost is run-to-run nondeterminism (tls2 2.449↔2.1), which
+still disqualifies it, but for the correct reason.
 
 **Completeness — every instance of the class, classified.** An exhaustive sweep
 of `python/discopt/_jax` for both signatures (`itertools.product` box-vertex
