@@ -160,3 +160,44 @@ with its own entry experiment, not a mop-up.
 62-instance vendored panel is the in-container proxy). `incorrect_count = 0` held
 at every step; the one landed change (PF1) is sound by construction and passed
 the differential + feasible-point + panel gates.
+
+## §5. Maintainer perf review — two verified findings (2026-07-14)
+
+The maintainer's PR review flagged two per-node hot-path costs. Both are the
+same *class* of defect: **a relaxation builder written and validated at the ROOT
+node — one full-width box, one call — that turns pathological only inside the
+B&B loop, where branching/FBBT drive it into a regime the root-node unit tests
+never create.** The math is correct in both cases; the cost is a runtime-context
+artifact the isolated tests could not see. Handled per the two verification
+regimes (§0 / CLAUDE.md §5): byte-neutral fixes land on a fingerprint gate,
+bound-changing ones face the full PF0 panel.
+
+| Finding | Root cause | Regime | Verdict | Commit |
+|---|---|---|---|---|
+| **F1 — pinned-dim vertex-hull LPs** (`multilinear_separation.py`, `edge_concave.py`) | The `2ⁿ` box-vertex enumeration includes dims that branching/FBBT have **pinned** (`lb == ub`). At the root every dim is full-width so the 2ⁿ vertices are distinct and the hull LP is non-degenerate; deep in the tree the pinned dims emit **duplicate vertex columns + a redundant equality row** → degenerate LP → the Rust simplex cycles to its pivot cap → POUNCE IPM fallback (measured nvs09: 0.1–2.8 s/LP). | **Byte-neutral** (drop pinned dims before enumerating; slope 0 on pinned dims, intercept recomputed over the free vertices → identical cut). | **LANDED** — fingerprint gate PASSED (all 62 root shapes byte-identical; env-value at x* identical to 4.45e-14; nvs09 wall **64 s → 28 s, −56 %**, obj/nodes identical). | `c94fc03` |
+| **F2 — jit the separation-grad eval** (`uniform_relax._TracedEvalFn`) | The cached jaxpr is re-evaluated interpreted (`jax.core.eval_jaxpr`, ~137k `core.bind` ≈ 2.7 s/solve) up to 8 rounds × thousands of nodes. `jax.jit` would make each call a µs XLA dispatch. | **Bound-changing** — XLA fusion reorders floats (~1–2 ulp), which shifts the `_separate_convex` cut sequence → node counts / dual bounds move. Sound (a tangent is a valid underestimator at any last-bit point) but not bound-neutral. | **REJECTED** — full PF0 panel: **3 bounds LOOSER (m3 19.36 vs 37.8 [proof lost], nvs05 3.76 vs 4.70, tls2 2.1 vs 2.45)**. Exactly the PF5 failure mode. Reverted to `eval_jaxpr`; the deliberate non-jit is now documented in the class. | reverted (not landed) |
+
+**Why the "single jit issue" smelled funny (maintainer's question) — resolved:**
+jit was *not already there* because it is bound-changing, and this project's
+correctness regime forbids a bound-changing perf fix that regresses any proof.
+EP5 chose the `eval_jaxpr` middle path precisely because it removes the
+re-tracing tax **bit-identically**; the jit upgrade genuinely fails the gate, so
+"not jitted" is the correct state, not an oversight.
+
+**Completeness — every instance of the class, classified.** An exhaustive sweep
+of `python/discopt/_jax` for both signatures (`itertools.product` box-vertex
+enumeration; `eval_jaxpr`/interpreted per-call eval):
+- **`2ⁿ`-vertex hull LP** (the F1 pathology — duplicate columns → degenerate
+  simplex): exactly two sites, `multilinear_separation` + `edge_concave`, **both
+  fixed** (`c94fc03`).
+- **`2ⁿ`-corner but NOT an LP:** `signed_signomial._corner_maxima` is a
+  `max`-reduction (pinned corners are idempotent, no simplex) **and** not on the
+  per-node path (catalog metadata + tests only) → benign, no fix.
+- **curvature-verdict grid** `milp_relaxation.py:4057` already collapses
+  pinned/zero-width dims to a single edge (`widths[i] > tol`) → already
+  pinned-aware.
+- **4-corner closed-form min/max** (`envelopes.py`, `incremental_mccormick.py`,
+  `eigenvalue_arith.py`, `relaxation_compiler.py`, …): `n` fixed at 2, a pinned
+  dim just duplicates a value inside `min`/`max` → pin-immune by construction.
+- **interpreted per-call eval** (`eval_jaxpr`): the single `uniform_relax` site,
+  and its jit upgrade is the (rejected) F2 above — no other interpreted hot path.
