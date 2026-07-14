@@ -1,0 +1,2053 @@
+{
+  "meta": {
+    "item": "TX0",
+    "generated": "2026-07-14",
+    "budget_s": 30.0,
+    "jobs": 1,
+    "wall_status_bound_nodes_source": "scratchpad/f2p_full_eval.json (full 62-inst jobs=1 30s panel at current HEAD)",
+    "floor_source": "performance-plan.md Appendix B (nonlinear 0.60 s, MILP/MIQP 0.30 s fixed per class)",
+    "profiled_subset": [
+      "bchoco06",
+      "casctanks",
+      "fac2",
+      "gkocis",
+      "heatexch_gen1",
+      "m3",
+      "nvs02",
+      "nvs03",
+      "nvs09",
+      "nvs11",
+      "nvs12",
+      "nvs13",
+      "oaer",
+      "st_e36",
+      "st_e38",
+      "tanksize"
+    ],
+    "method": "family = A/B/C/D per tenx-plan \u00a71 (structure + panel outcome; classify_nonlinear_terms shape for C). decomposition (seconds, sum to wall): floor fixed per class; the remaining (wall-floor) split by cProfile bucket shares. 16/62 instances (3-4 per family) were cProfile'd and use their OWN shares; the other 46 use their family-average shares (per-family extrapolation, ~10% precision target). Buckets extracted at precise cumtime anchors in priority order presolve>node_nlp>separation>node_lp>other so overlapping call trees are not double counted. node_nlp_heuristic = TOTAL per-node POUNCE NLP (relaxation-bound + heuristic); for the integer-product path POUNCE is native so it appears as native_builtin with jax~0. nlp_skippable_waste_measured_s (nvs09/st_e36/etc.) is the directly measured SKIPPABLE fraction of that bucket from the nlpoff/nlpdef stride experiment. node_lp is the Rust warm-simplex tottime (~0 everywhere \u2014 a key finding: the LP is not the cost). 'other' = jax relaxation build/eval + engine constant + orchestration.",
+    "family_share_profile": {
+      "A": {
+        "root_presolve_build": 0.2662427217289167,
+        "node_nlp_heuristic": 0.7144996885677805,
+        "separation": 0.01925758970330283,
+        "node_lp": 0.0,
+        "other": 0.0
+      },
+      "B": {
+        "root_presolve_build": 0.11595898927739604,
+        "node_nlp_heuristic": 0.7623010962537514,
+        "separation": 0.12149371931361162,
+        "node_lp": 0.0002461951552409471,
+        "other": 0.0
+      },
+      "C": {
+        "root_presolve_build": 0.12394046137019481,
+        "node_nlp_heuristic": 0.7864624590799811,
+        "separation": 0.022209557839477975,
+        "node_lp": 0.003107431758388682,
+        "other": 0.06428008995195739
+      },
+      "D": {
+        "root_presolve_build": 0.12102126667416768,
+        "node_nlp_heuristic": 0.7137174597688773,
+        "separation": 0.014005024100833678,
+        "node_lp": 0.000576472692644218,
+        "other": 0.15067977676347705
+      }
+    },
+    "nlp_skippable_waste_measured_s": {
+      "nvs09": 14.29,
+      "st_e36": 2.47,
+      "heatexch_gen1": 1.21,
+      "bchoco06": 0.0,
+      "fac2": 0.0
+    }
+  },
+  "family_counts": {
+    "D": 16,
+    "A": 22,
+    "B": 14,
+    "C": 10
+  },
+  "family_total_wall_s": {
+    "D": 556.9,
+    "A": 27.9,
+    "B": 226.7,
+    "C": 58.6
+  },
+  "rows": [
+    {
+      "instance": "4stufen",
+      "family": "D",
+      "binding_constraint": "bound_frozen",
+      "class": "nonlinear",
+      "wall": 35.99167843499981,
+      "status": "time_limit",
+      "bound": 19021.346794750414,
+      "nodes": 3,
+      "objective": null,
+      "sense": "min",
+      "profiled": false,
+      "shape": {
+        "vtypes": {
+          "continuous": 101,
+          "binary": 48
+        },
+        "bilinear": 21,
+        "trilinear": 0,
+        "multilinear": 0,
+        "monomial": 24,
+        "general_nl": 61
+      },
+      "decomposition": {
+        "floor": 0.6,
+        "root_presolve_build": 4.283,
+        "node_nlp_heuristic": 25.26,
+        "separation": 0.496,
+        "node_lp": 0.02,
+        "other": 5.333
+      }
+    },
+    {
+      "instance": "alan",
+      "family": "A",
+      "binding_constraint": "floor",
+      "class": "nonlinear",
+      "wall": 0.4213733179999508,
+      "status": "optimal",
+      "bound": 2.9249999983013426,
+      "nodes": 21,
+      "objective": 2.9249999983013426,
+      "sense": "min",
+      "profiled": false,
+      "shape": {
+        "vtypes": {
+          "continuous": 4,
+          "binary": 4
+        },
+        "bilinear": 3,
+        "trilinear": 0,
+        "multilinear": 0,
+        "monomial": 3,
+        "general_nl": 0
+      },
+      "decomposition": {
+        "floor": 0.6,
+        "root_presolve_build": 0.0,
+        "node_nlp_heuristic": 0.0,
+        "separation": 0.0,
+        "node_lp": 0.0,
+        "other": 0.0
+      }
+    },
+    {
+      "instance": "bchoco06",
+      "family": "D",
+      "binding_constraint": "no_bound",
+      "class": "nonlinear",
+      "wall": 33.828957631999856,
+      "status": "time_limit",
+      "bound": null,
+      "nodes": 3,
+      "objective": null,
+      "sense": "max",
+      "profiled": true,
+      "shape": {
+        "vtypes": {
+          "continuous": 111,
+          "integer": 1,
+          "binary": 6
+        },
+        "bilinear": 49,
+        "trilinear": 7,
+        "multilinear": 7,
+        "monomial": 10,
+        "general_nl": 75
+      },
+      "nlp_skippable_waste_measured_s": 0.0,
+      "decomposition": {
+        "floor": 0.6,
+        "root_presolve_build": 2.573,
+        "node_nlp_heuristic": 26.414,
+        "separation": 1.658,
+        "node_lp": 0.028,
+        "other": 2.555
+      }
+    },
+    {
+      "instance": "bchoco07",
+      "family": "D",
+      "binding_constraint": "no_bound",
+      "class": "nonlinear",
+      "wall": 37.35842075299979,
+      "status": "time_limit",
+      "bound": null,
+      "nodes": 3,
+      "objective": null,
+      "sense": "max",
+      "profiled": false,
+      "shape": {
+        "vtypes": {
+          "continuous": 126,
+          "integer": 2,
+          "binary": 6
+        },
+        "bilinear": 62,
+        "trilinear": 15,
+        "multilinear": 22,
+        "monomial": 16,
+        "general_nl": 200
+      },
+      "decomposition": {
+        "floor": 0.6,
+        "root_presolve_build": 4.449,
+        "node_nlp_heuristic": 26.235,
+        "separation": 0.515,
+        "node_lp": 0.021,
+        "other": 5.539
+      }
+    },
+    {
+      "instance": "bchoco08",
+      "family": "D",
+      "binding_constraint": "no_bound",
+      "class": "nonlinear",
+      "wall": 51.616152735000014,
+      "status": "time_limit",
+      "bound": null,
+      "nodes": 1,
+      "objective": null,
+      "sense": "max",
+      "profiled": false,
+      "shape": {
+        "vtypes": {
+          "continuous": 159,
+          "integer": 2,
+          "binary": 7
+        },
+        "bilinear": 88,
+        "trilinear": 23,
+        "multilinear": 42,
+        "monomial": 22,
+        "general_nl": 597
+      },
+      "decomposition": {
+        "floor": 0.6,
+        "root_presolve_build": 6.174,
+        "node_nlp_heuristic": 36.411,
+        "separation": 0.714,
+        "node_lp": 0.029,
+        "other": 7.687
+      }
+    },
+    {
+      "instance": "beuster",
+      "family": "D",
+      "binding_constraint": "bound_frozen",
+      "class": "nonlinear",
+      "wall": 32.19220605300006,
+      "status": "time_limit",
+      "bound": 6352.063220222274,
+      "nodes": 7,
+      "objective": null,
+      "sense": "min",
+      "profiled": false,
+      "shape": {
+        "vtypes": {
+          "continuous": 105,
+          "binary": 52
+        },
+        "bilinear": 85,
+        "trilinear": 0,
+        "multilinear": 0,
+        "monomial": 24,
+        "general_nl": 61
+      },
+      "decomposition": {
+        "floor": 0.6,
+        "root_presolve_build": 3.823,
+        "node_nlp_heuristic": 22.548,
+        "separation": 0.442,
+        "node_lp": 0.018,
+        "other": 4.76
+      }
+    },
+    {
+      "instance": "casctanks",
+      "family": "D",
+      "binding_constraint": "overrun",
+      "class": "nonlinear",
+      "wall": 48.75266742599979,
+      "status": "time_limit",
+      "bound": -99.09488945997721,
+      "nodes": 1,
+      "objective": null,
+      "sense": "min",
+      "profiled": true,
+      "shape": {
+        "vtypes": {
+          "continuous": 460,
+          "integer": 40
+        },
+        "bilinear": 160,
+        "trilinear": 0,
+        "multilinear": 0,
+        "monomial": 0,
+        "general_nl": 180
+      },
+      "decomposition": {
+        "floor": 0.6,
+        "root_presolve_build": 15.521,
+        "node_nlp_heuristic": 8.64,
+        "separation": 0.268,
+        "node_lp": 0.064,
+        "other": 23.66
+      }
+    },
+    {
+      "instance": "chance",
+      "family": "A",
+      "binding_constraint": "floor",
+      "class": "nonlinear",
+      "wall": 0.8474576940002407,
+      "status": "optimal",
+      "bound": 29.894378154271102,
+      "nodes": 0,
+      "objective": 29.894378154271102,
+      "sense": "min",
+      "profiled": false,
+      "shape": {
+        "vtypes": {
+          "continuous": 4
+        },
+        "bilinear": 0,
+        "trilinear": 0,
+        "multilinear": 0,
+        "monomial": 4,
+        "general_nl": 5
+      },
+      "decomposition": {
+        "floor": 0.6,
+        "root_presolve_build": 0.066,
+        "node_nlp_heuristic": 0.177,
+        "separation": 0.005,
+        "node_lp": 0.0,
+        "other": 0.0
+      }
+    },
+    {
+      "instance": "clay0303hfsg",
+      "family": "D",
+      "binding_constraint": "no_bound",
+      "class": "nonlinear",
+      "wall": 30.437274964000153,
+      "status": "time_limit",
+      "bound": null,
+      "nodes": 95,
+      "objective": null,
+      "sense": "min",
+      "profiled": false,
+      "shape": {
+        "vtypes": {
+          "continuous": 78,
+          "integer": 9,
+          "binary": 12
+        },
+        "bilinear": 0,
+        "trilinear": 0,
+        "multilinear": 0,
+        "monomial": 0,
+        "general_nl": 720
+      },
+      "decomposition": {
+        "floor": 0.6,
+        "root_presolve_build": 3.611,
+        "node_nlp_heuristic": 21.295,
+        "separation": 0.418,
+        "node_lp": 0.017,
+        "other": 4.496
+      }
+    },
+    {
+      "instance": "contvar",
+      "family": "D",
+      "binding_constraint": "overrun",
+      "class": "nonlinear",
+      "wall": 61.41054660099962,
+      "status": "time_limit",
+      "bound": 171244.8112723543,
+      "nodes": 1,
+      "objective": null,
+      "sense": "min",
+      "profiled": false,
+      "shape": {
+        "vtypes": {
+          "continuous": 208,
+          "binary": 88
+        },
+        "bilinear": 2,
+        "trilinear": 0,
+        "multilinear": 0,
+        "monomial": 0,
+        "general_nl": 302
+      },
+      "decomposition": {
+        "floor": 0.6,
+        "root_presolve_build": 7.359,
+        "node_nlp_heuristic": 43.402,
+        "separation": 0.852,
+        "node_lp": 0.035,
+        "other": 9.163
+      }
+    },
+    {
+      "instance": "cvxnonsep_nsig30",
+      "family": "B",
+      "binding_constraint": "node_count",
+      "class": "nonlinear",
+      "wall": 8.904430021999815,
+      "status": "optimal",
+      "bound": 130.61841392487688,
+      "nodes": 165,
+      "objective": 130.6287111692529,
+      "sense": "min",
+      "profiled": false,
+      "shape": {
+        "vtypes": {
+          "continuous": 15,
+          "integer": 15
+        },
+        "bilinear": 0,
+        "trilinear": 0,
+        "multilinear": 0,
+        "monomial": 0,
+        "general_nl": 59
+      },
+      "decomposition": {
+        "floor": 0.6,
+        "root_presolve_build": 0.963,
+        "node_nlp_heuristic": 6.33,
+        "separation": 1.009,
+        "node_lp": 0.002,
+        "other": 0.0
+      }
+    },
+    {
+      "instance": "cvxnonsep_psig30",
+      "family": "B",
+      "binding_constraint": "node_count",
+      "class": "nonlinear",
+      "wall": 3.6398471180000342,
+      "status": "optimal",
+      "bound": 78.99179874365787,
+      "nodes": 89,
+      "objective": 78.99885435294289,
+      "sense": "min",
+      "profiled": false,
+      "shape": {
+        "vtypes": {
+          "continuous": 15,
+          "integer": 15
+        },
+        "bilinear": 0,
+        "trilinear": 0,
+        "multilinear": 0,
+        "monomial": 0,
+        "general_nl": 59
+      },
+      "decomposition": {
+        "floor": 0.6,
+        "root_presolve_build": 0.352,
+        "node_nlp_heuristic": 2.317,
+        "separation": 0.369,
+        "node_lp": 0.001,
+        "other": 0.0
+      }
+    },
+    {
+      "instance": "cvxnonsep_psig40r",
+      "family": "B",
+      "binding_constraint": "node_count",
+      "class": "nonlinear",
+      "wall": 14.839773281999896,
+      "status": "optimal",
+      "bound": 86.53873600363832,
+      "nodes": 95,
+      "objective": 86.54527995164959,
+      "sense": "min",
+      "profiled": false,
+      "shape": {
+        "vtypes": {
+          "continuous": 62,
+          "integer": 20
+        },
+        "bilinear": 0,
+        "trilinear": 0,
+        "multilinear": 0,
+        "monomial": 0,
+        "general_nl": 41
+      },
+      "decomposition": {
+        "floor": 0.6,
+        "root_presolve_build": 1.651,
+        "node_nlp_heuristic": 10.855,
+        "separation": 1.73,
+        "node_lp": 0.004,
+        "other": 0.0
+      }
+    },
+    {
+      "instance": "dispatch",
+      "family": "A",
+      "binding_constraint": "floor",
+      "class": "nonlinear",
+      "wall": 1.5797445580001295,
+      "status": "optimal",
+      "bound": 3155.2872325371836,
+      "nodes": 3,
+      "objective": 3155.2879266989653,
+      "sense": "min",
+      "profiled": false,
+      "shape": {
+        "vtypes": {
+          "continuous": 4
+        },
+        "bilinear": 3,
+        "trilinear": 0,
+        "multilinear": 0,
+        "monomial": 3,
+        "general_nl": 3
+      },
+      "decomposition": {
+        "floor": 0.6,
+        "root_presolve_build": 0.261,
+        "node_nlp_heuristic": 0.7,
+        "separation": 0.019,
+        "node_lp": 0.0,
+        "other": 0.0
+      }
+    },
+    {
+      "instance": "ex1221",
+      "family": "A",
+      "binding_constraint": "floor",
+      "class": "nonlinear",
+      "wall": 1.7538093639996077,
+      "status": "optimal",
+      "bound": 7.667180060145954,
+      "nodes": 5,
+      "objective": 7.667180068813135,
+      "sense": "min",
+      "profiled": false,
+      "shape": {
+        "vtypes": {
+          "continuous": 2,
+          "binary": 3
+        },
+        "bilinear": 0,
+        "trilinear": 0,
+        "multilinear": 0,
+        "monomial": 1,
+        "general_nl": 1
+      },
+      "decomposition": {
+        "floor": 0.6,
+        "root_presolve_build": 0.307,
+        "node_nlp_heuristic": 0.824,
+        "separation": 0.022,
+        "node_lp": 0.0,
+        "other": 0.0
+      }
+    },
+    {
+      "instance": "ex1222",
+      "family": "A",
+      "binding_constraint": "floor",
+      "class": "nonlinear",
+      "wall": 1.1979357690001962,
+      "status": "optimal",
+      "bound": 1.0765430463031964,
+      "nodes": 1,
+      "objective": 1.0765430833322625,
+      "sense": "min",
+      "profiled": false,
+      "shape": {
+        "vtypes": {
+          "continuous": 2,
+          "binary": 1
+        },
+        "bilinear": 0,
+        "trilinear": 0,
+        "multilinear": 0,
+        "monomial": 1,
+        "general_nl": 1
+      },
+      "decomposition": {
+        "floor": 0.6,
+        "root_presolve_build": 0.159,
+        "node_nlp_heuristic": 0.427,
+        "separation": 0.012,
+        "node_lp": 0.0,
+        "other": 0.0
+      }
+    },
+    {
+      "instance": "ex1224",
+      "family": "B",
+      "binding_constraint": "node_count",
+      "class": "nonlinear",
+      "wall": 6.102654324000014,
+      "status": "optimal",
+      "bound": -0.9434705021069314,
+      "nodes": 5,
+      "objective": -0.943470491100134,
+      "sense": "min",
+      "profiled": false,
+      "shape": {
+        "vtypes": {
+          "continuous": 3,
+          "binary": 8
+        },
+        "bilinear": 0,
+        "trilinear": 1,
+        "multilinear": 0,
+        "monomial": 0,
+        "general_nl": 3
+      },
+      "decomposition": {
+        "floor": 0.6,
+        "root_presolve_build": 0.638,
+        "node_nlp_heuristic": 4.195,
+        "separation": 0.669,
+        "node_lp": 0.001,
+        "other": 0.0
+      }
+    },
+    {
+      "instance": "ex1225",
+      "family": "B",
+      "binding_constraint": "node_count",
+      "class": "nonlinear",
+      "wall": 4.1208373239996945,
+      "status": "optimal",
+      "bound": 30.999999968,
+      "nodes": 5,
+      "objective": 30.999999913550667,
+      "sense": "min",
+      "profiled": false,
+      "shape": {
+        "vtypes": {
+          "continuous": 2,
+          "binary": 6
+        },
+        "bilinear": 0,
+        "trilinear": 0,
+        "multilinear": 0,
+        "monomial": 0,
+        "general_nl": 3
+      },
+      "decomposition": {
+        "floor": 0.6,
+        "root_presolve_build": 0.408,
+        "node_nlp_heuristic": 2.684,
+        "separation": 0.428,
+        "node_lp": 0.001,
+        "other": 0.0
+      }
+    },
+    {
+      "instance": "ex1226",
+      "family": "A",
+      "binding_constraint": "floor",
+      "class": "nonlinear",
+      "wall": 2.0074119769997196,
+      "status": "optimal",
+      "bound": -17.000000014222035,
+      "nodes": 5,
+      "objective": -16.999999994161513,
+      "sense": "min",
+      "profiled": false,
+      "shape": {
+        "vtypes": {
+          "continuous": 2,
+          "binary": 3
+        },
+        "bilinear": 0,
+        "trilinear": 0,
+        "multilinear": 0,
+        "monomial": 1,
+        "general_nl": 4
+      },
+      "decomposition": {
+        "floor": 0.6,
+        "root_presolve_build": 0.375,
+        "node_nlp_heuristic": 1.006,
+        "separation": 0.027,
+        "node_lp": 0.0,
+        "other": 0.0
+      }
+    },
+    {
+      "instance": "fac2",
+      "family": "B",
+      "binding_constraint": "node_count",
+      "class": "nonlinear",
+      "wall": 14.47792560300013,
+      "status": "optimal",
+      "bound": 331837497.561812,
+      "nodes": 39,
+      "objective": 331837498.18201387,
+      "sense": "min",
+      "profiled": true,
+      "shape": {
+        "vtypes": {
+          "continuous": 54,
+          "binary": 12
+        },
+        "bilinear": 0,
+        "trilinear": 0,
+        "multilinear": 0,
+        "monomial": 0,
+        "general_nl": 3
+      },
+      "nlp_skippable_waste_measured_s": 0.0,
+      "decomposition": {
+        "floor": 0.6,
+        "root_presolve_build": 0.112,
+        "node_nlp_heuristic": 13.766,
+        "separation": 0.0,
+        "node_lp": 0.0,
+        "other": 0.0
+      }
+    },
+    {
+      "instance": "flay02m",
+      "family": "A",
+      "binding_constraint": "floor",
+      "class": "nonlinear",
+      "wall": 1.3914589370001522,
+      "status": "optimal",
+      "bound": 37.94733180456953,
+      "nodes": 7,
+      "objective": 37.947331863834606,
+      "sense": "min",
+      "profiled": false,
+      "shape": {
+        "vtypes": {
+          "continuous": 10,
+          "binary": 4
+        },
+        "bilinear": 0,
+        "trilinear": 0,
+        "multilinear": 0,
+        "monomial": 0,
+        "general_nl": 2
+      },
+      "decomposition": {
+        "floor": 0.6,
+        "root_presolve_build": 0.211,
+        "node_nlp_heuristic": 0.565,
+        "separation": 0.015,
+        "node_lp": 0.0,
+        "other": 0.0
+      }
+    },
+    {
+      "instance": "flay03m",
+      "family": "B",
+      "binding_constraint": "node_count",
+      "class": "nonlinear",
+      "wall": 16.704811913999947,
+      "status": "optimal",
+      "bound": 48.98979470823039,
+      "nodes": 107,
+      "objective": 48.98979479383543,
+      "sense": "min",
+      "profiled": false,
+      "shape": {
+        "vtypes": {
+          "continuous": 14,
+          "binary": 12
+        },
+        "bilinear": 0,
+        "trilinear": 0,
+        "multilinear": 0,
+        "monomial": 0,
+        "general_nl": 3
+      },
+      "decomposition": {
+        "floor": 0.6,
+        "root_presolve_build": 1.867,
+        "node_nlp_heuristic": 12.277,
+        "separation": 1.957,
+        "node_lp": 0.004,
+        "other": 0.0
+      }
+    },
+    {
+      "instance": "gbd",
+      "family": "A",
+      "binding_constraint": "floor",
+      "class": "milp_miqp",
+      "wall": 0.3448819029999868,
+      "status": "optimal",
+      "bound": 2.199999982504936,
+      "nodes": 3,
+      "objective": 2.199999982504936,
+      "sense": "min",
+      "profiled": false,
+      "shape": {
+        "vtypes": {
+          "continuous": 1,
+          "binary": 3
+        },
+        "bilinear": 0,
+        "trilinear": 0,
+        "multilinear": 0,
+        "monomial": 1,
+        "general_nl": 0
+      },
+      "decomposition": {
+        "floor": 0.3,
+        "root_presolve_build": 0.012,
+        "node_nlp_heuristic": 0.032,
+        "separation": 0.001,
+        "node_lp": 0.0,
+        "other": 0.0
+      }
+    },
+    {
+      "instance": "gkocis",
+      "family": "A",
+      "binding_constraint": "floor",
+      "class": "nonlinear",
+      "wall": 2.1675920249999763,
+      "status": "optimal",
+      "bound": -1.9230988280923489,
+      "nodes": 5,
+      "objective": -1.9230987798770212,
+      "sense": "min",
+      "profiled": true,
+      "shape": {
+        "vtypes": {
+          "continuous": 8,
+          "binary": 3
+        },
+        "bilinear": 0,
+        "trilinear": 0,
+        "multilinear": 0,
+        "monomial": 0,
+        "general_nl": 2
+      },
+      "decomposition": {
+        "floor": 0.6,
+        "root_presolve_build": 0.334,
+        "node_nlp_heuristic": 1.233,
+        "separation": 0.0,
+        "node_lp": 0.0,
+        "other": 0.0
+      }
+    },
+    {
+      "instance": "hda",
+      "family": "D",
+      "binding_constraint": "no_bound",
+      "class": "nonlinear",
+      "wall": null,
+      "status": "hang",
+      "bound": null,
+      "nodes": null,
+      "objective": null,
+      "sense": null,
+      "profiled": false,
+      "shape": {
+        "vtypes": {
+          "continuous": 709,
+          "binary": 13
+        },
+        "bilinear": 135,
+        "trilinear": 31,
+        "multilinear": 0,
+        "monomial": 0,
+        "general_nl": 154
+      },
+      "decomposition": null,
+      "note": "killed after 90s"
+    },
+    {
+      "instance": "heatexch_gen1",
+      "family": "D",
+      "binding_constraint": "overrun",
+      "class": "nonlinear",
+      "wall": 42.416009906,
+      "status": "time_limit",
+      "bound": 38183.53170784717,
+      "nodes": 3,
+      "objective": null,
+      "sense": "min",
+      "profiled": true,
+      "shape": {
+        "vtypes": {
+          "continuous": 100,
+          "binary": 12
+        },
+        "bilinear": 32,
+        "trilinear": 0,
+        "multilinear": 0,
+        "monomial": 0,
+        "general_nl": 24
+      },
+      "nlp_skippable_waste_measured_s": 1.21,
+      "decomposition": {
+        "floor": 0.6,
+        "root_presolve_build": 1.583,
+        "node_nlp_heuristic": 38.763,
+        "separation": 0.023,
+        "node_lp": 0.006,
+        "other": 1.442
+      }
+    },
+    {
+      "instance": "heatexch_gen2",
+      "family": "D",
+      "binding_constraint": "bound_frozen",
+      "class": "nonlinear",
+      "wall": 37.11911672500037,
+      "status": "time_limit",
+      "bound": 555767.7897300989,
+      "nodes": 3,
+      "objective": null,
+      "sense": "min",
+      "profiled": false,
+      "shape": {
+        "vtypes": {
+          "continuous": 132,
+          "binary": 16
+        },
+        "bilinear": 40,
+        "trilinear": 0,
+        "multilinear": 0,
+        "monomial": 0,
+        "general_nl": 53
+      },
+      "decomposition": {
+        "floor": 0.6,
+        "root_presolve_build": 4.42,
+        "node_nlp_heuristic": 26.064,
+        "separation": 0.511,
+        "node_lp": 0.021,
+        "other": 5.503
+      }
+    },
+    {
+      "instance": "heatexch_gen3",
+      "family": "D",
+      "binding_constraint": "overrun",
+      "class": "nonlinear",
+      "wall": 45.312658807999924,
+      "status": "time_limit",
+      "bound": 43887.579881797195,
+      "nodes": 1,
+      "objective": null,
+      "sense": "min",
+      "profiled": false,
+      "shape": {
+        "vtypes": {
+          "continuous": 520,
+          "binary": 60
+        },
+        "bilinear": 200,
+        "trilinear": 0,
+        "multilinear": 0,
+        "monomial": 0,
+        "general_nl": 205
+      },
+      "decomposition": {
+        "floor": 0.6,
+        "root_presolve_build": 5.411,
+        "node_nlp_heuristic": 31.912,
+        "separation": 0.626,
+        "node_lp": 0.026,
+        "other": 6.737
+      }
+    },
+    {
+      "instance": "m3",
+      "family": "B",
+      "binding_constraint": "node_count",
+      "class": "nonlinear",
+      "wall": 9.539571651999722,
+      "status": "optimal",
+      "bound": 37.79999951039202,
+      "nodes": 47,
+      "objective": 37.799999669978845,
+      "sense": "min",
+      "profiled": true,
+      "shape": {
+        "vtypes": {
+          "continuous": 20,
+          "binary": 6
+        },
+        "bilinear": 0,
+        "trilinear": 0,
+        "multilinear": 0,
+        "monomial": 0,
+        "general_nl": 6
+      },
+      "decomposition": {
+        "floor": 0.6,
+        "root_presolve_build": 0.0,
+        "node_nlp_heuristic": 8.94,
+        "separation": 0.0,
+        "node_lp": 0.0,
+        "other": 0.0
+      }
+    },
+    {
+      "instance": "nvs01",
+      "family": "A",
+      "binding_constraint": "floor",
+      "class": "nonlinear",
+      "wall": 2.4259722839997266,
+      "status": "optimal",
+      "bound": 12.469668821568202,
+      "nodes": 7,
+      "objective": 12.46966882156821,
+      "sense": "min",
+      "profiled": false,
+      "shape": {
+        "vtypes": {
+          "continuous": 1,
+          "integer": 2
+        },
+        "bilinear": 0,
+        "trilinear": 1,
+        "multilinear": 0,
+        "monomial": 1,
+        "general_nl": 4
+      },
+      "decomposition": {
+        "floor": 0.6,
+        "root_presolve_build": 0.486,
+        "node_nlp_heuristic": 1.305,
+        "separation": 0.035,
+        "node_lp": 0.0,
+        "other": 0.0
+      }
+    },
+    {
+      "instance": "nvs02",
+      "family": "C",
+      "binding_constraint": "node_count",
+      "class": "nonlinear",
+      "wall": 2.9234608220003793,
+      "status": "optimal",
+      "bound": 5.96418452307,
+      "nodes": 337,
+      "objective": 5.96418452307,
+      "sense": "min",
+      "profiled": true,
+      "shape": {
+        "vtypes": {
+          "continuous": 3,
+          "integer": 5
+        },
+        "bilinear": 7,
+        "trilinear": 0,
+        "multilinear": 0,
+        "monomial": 1,
+        "general_nl": 3
+      },
+      "decomposition": {
+        "floor": 0.6,
+        "root_presolve_build": 0.0,
+        "node_nlp_heuristic": 2.323,
+        "separation": 0.0,
+        "node_lp": 0.0,
+        "other": 0.0
+      }
+    },
+    {
+      "instance": "nvs03",
+      "family": "A",
+      "binding_constraint": "floor",
+      "class": "nonlinear",
+      "wall": 0.8622449700001198,
+      "status": "optimal",
+      "bound": 15.99999972676511,
+      "nodes": 5,
+      "objective": 16.0,
+      "sense": "min",
+      "profiled": true,
+      "shape": {
+        "vtypes": {
+          "integer": 2
+        },
+        "bilinear": 0,
+        "trilinear": 0,
+        "multilinear": 0,
+        "monomial": 2,
+        "general_nl": 1
+      },
+      "decomposition": {
+        "floor": 0.6,
+        "root_presolve_build": 0.0,
+        "node_nlp_heuristic": 0.262,
+        "separation": 0.0,
+        "node_lp": 0.0,
+        "other": 0.0
+      }
+    },
+    {
+      "instance": "nvs04",
+      "family": "A",
+      "binding_constraint": "floor",
+      "class": "nonlinear",
+      "wall": 1.397355661000347,
+      "status": "optimal",
+      "bound": 0.7199999982799788,
+      "nodes": 5,
+      "objective": 0.720000000000006,
+      "sense": "min",
+      "profiled": false,
+      "shape": {
+        "vtypes": {
+          "integer": 2
+        },
+        "bilinear": 0,
+        "trilinear": 0,
+        "multilinear": 0,
+        "monomial": 2,
+        "general_nl": 3
+      },
+      "decomposition": {
+        "floor": 0.6,
+        "root_presolve_build": 0.212,
+        "node_nlp_heuristic": 0.57,
+        "separation": 0.015,
+        "node_lp": 0.0,
+        "other": 0.0
+      }
+    },
+    {
+      "instance": "nvs05",
+      "family": "B",
+      "binding_constraint": "node_count",
+      "class": "nonlinear",
+      "wall": 30.100330355000096,
+      "status": "feasible",
+      "bound": 4.789510215679502,
+      "nodes": 237,
+      "objective": 5.47093412640568,
+      "sense": "min",
+      "profiled": false,
+      "shape": {
+        "vtypes": {
+          "continuous": 6,
+          "integer": 2
+        },
+        "bilinear": 1,
+        "trilinear": 2,
+        "multilinear": 0,
+        "monomial": 5,
+        "general_nl": 22
+      },
+      "decomposition": {
+        "floor": 0.6,
+        "root_presolve_build": 3.421,
+        "node_nlp_heuristic": 22.488,
+        "separation": 3.584,
+        "node_lp": 0.007,
+        "other": 0.0
+      }
+    },
+    {
+      "instance": "nvs06",
+      "family": "A",
+      "binding_constraint": "floor",
+      "class": "nonlinear",
+      "wall": 2.3502594319998025,
+      "status": "optimal",
+      "bound": 1.7703124970484372,
+      "nodes": 5,
+      "objective": 1.7703125002341187,
+      "sense": "min",
+      "profiled": false,
+      "shape": {
+        "vtypes": {
+          "integer": 2
+        },
+        "bilinear": 0,
+        "trilinear": 0,
+        "multilinear": 0,
+        "monomial": 1,
+        "general_nl": 3
+      },
+      "decomposition": {
+        "floor": 0.6,
+        "root_presolve_build": 0.466,
+        "node_nlp_heuristic": 1.251,
+        "separation": 0.034,
+        "node_lp": 0.0,
+        "other": 0.0
+      }
+    },
+    {
+      "instance": "nvs07",
+      "family": "C",
+      "binding_constraint": "floor",
+      "class": "nonlinear",
+      "wall": 0.24625649000017802,
+      "status": "optimal",
+      "bound": 4.0,
+      "nodes": 5,
+      "objective": 4.0,
+      "sense": "min",
+      "profiled": false,
+      "shape": {
+        "vtypes": {
+          "integer": 3
+        },
+        "bilinear": 0,
+        "trilinear": 0,
+        "multilinear": 0,
+        "monomial": 2,
+        "general_nl": 0
+      },
+      "decomposition": {
+        "floor": 0.6,
+        "root_presolve_build": 0.0,
+        "node_nlp_heuristic": 0.0,
+        "separation": 0.0,
+        "node_lp": 0.0,
+        "other": 0.0
+      }
+    },
+    {
+      "instance": "nvs08",
+      "family": "A",
+      "binding_constraint": "floor",
+      "class": "nonlinear",
+      "wall": 2.479608234999887,
+      "status": "optimal",
+      "bound": 23.4497273162716,
+      "nodes": 5,
+      "objective": 23.449727353351044,
+      "sense": "min",
+      "profiled": false,
+      "shape": {
+        "vtypes": {
+          "continuous": 1,
+          "integer": 2
+        },
+        "bilinear": 0,
+        "trilinear": 0,
+        "multilinear": 0,
+        "monomial": 3,
+        "general_nl": 3
+      },
+      "decomposition": {
+        "floor": 0.6,
+        "root_presolve_build": 0.5,
+        "node_nlp_heuristic": 1.343,
+        "separation": 0.036,
+        "node_lp": 0.0,
+        "other": 0.0
+      }
+    },
+    {
+      "instance": "nvs09",
+      "family": "B",
+      "binding_constraint": "heuristic_waste",
+      "class": "nonlinear",
+      "wall": 30.1520339599997,
+      "status": "feasible",
+      "bound": -43.24935881174626,
+      "nodes": 17,
+      "objective": -43.13433691803531,
+      "sense": "min",
+      "profiled": true,
+      "shape": {
+        "vtypes": {
+          "integer": 10
+        },
+        "bilinear": 0,
+        "trilinear": 0,
+        "multilinear": 1,
+        "monomial": 0,
+        "general_nl": 61
+      },
+      "nlp_skippable_waste_measured_s": 14.29,
+      "decomposition": {
+        "floor": 0.6,
+        "root_presolve_build": 1.397,
+        "node_nlp_heuristic": 14.53,
+        "separation": 13.626,
+        "node_lp": 0.0,
+        "other": 0.0
+      }
+    },
+    {
+      "instance": "nvs10",
+      "family": "C",
+      "binding_constraint": "floor",
+      "class": "nonlinear",
+      "wall": 0.6707430770002247,
+      "status": "optimal",
+      "bound": -310.7999999999999,
+      "nodes": 5,
+      "objective": -310.7999999999999,
+      "sense": "min",
+      "profiled": false,
+      "shape": {
+        "vtypes": {
+          "integer": 2
+        },
+        "bilinear": 1,
+        "trilinear": 0,
+        "multilinear": 0,
+        "monomial": 2,
+        "general_nl": 0
+      },
+      "decomposition": {
+        "floor": 0.6,
+        "root_presolve_build": 0.009,
+        "node_nlp_heuristic": 0.056,
+        "separation": 0.002,
+        "node_lp": 0.0,
+        "other": 0.005
+      }
+    },
+    {
+      "instance": "nvs11",
+      "family": "C",
+      "binding_constraint": "node_count",
+      "class": "nonlinear",
+      "wall": 9.325371697999799,
+      "status": "optimal",
+      "bound": -430.99999999999966,
+      "nodes": 55,
+      "objective": -430.99999999999966,
+      "sense": "min",
+      "profiled": true,
+      "shape": {
+        "vtypes": {
+          "integer": 3
+        },
+        "bilinear": 3,
+        "trilinear": 0,
+        "multilinear": 0,
+        "monomial": 3,
+        "general_nl": 0
+      },
+      "decomposition": {
+        "floor": 0.6,
+        "root_presolve_build": 0.0,
+        "node_nlp_heuristic": 8.442,
+        "separation": 0.0,
+        "node_lp": 0.0,
+        "other": 0.284
+      }
+    },
+    {
+      "instance": "nvs12",
+      "family": "C",
+      "binding_constraint": "throughput",
+      "class": "nonlinear",
+      "wall": 31.90075809400014,
+      "status": "time_limit",
+      "bound": -3554.456319731603,
+      "nodes": 1,
+      "objective": null,
+      "sense": "min",
+      "profiled": true,
+      "shape": {
+        "vtypes": {
+          "integer": 4
+        },
+        "bilinear": 6,
+        "trilinear": 0,
+        "multilinear": 0,
+        "monomial": 4,
+        "general_nl": 0
+      },
+      "decomposition": {
+        "floor": 0.6,
+        "root_presolve_build": 0.0,
+        "node_nlp_heuristic": 28.579,
+        "separation": 0.0,
+        "node_lp": 0.056,
+        "other": 2.666
+      }
+    },
+    {
+      "instance": "nvs13",
+      "family": "C",
+      "binding_constraint": "node_count",
+      "class": "nonlinear",
+      "wall": 6.4573463179999635,
+      "status": "optimal",
+      "bound": -585.2000011714,
+      "nodes": 33,
+      "objective": -585.2,
+      "sense": "min",
+      "profiled": true,
+      "shape": {
+        "vtypes": {
+          "integer": 5
+        },
+        "bilinear": 10,
+        "trilinear": 0,
+        "multilinear": 0,
+        "monomial": 5,
+        "general_nl": 0
+      },
+      "decomposition": {
+        "floor": 0.6,
+        "root_presolve_build": 2.904,
+        "node_nlp_heuristic": 1.554,
+        "separation": 0.52,
+        "node_lp": 0.062,
+        "other": 0.817
+      }
+    },
+    {
+      "instance": "nvs14",
+      "family": "C",
+      "binding_constraint": "node_count",
+      "class": "nonlinear",
+      "wall": 2.3958727679996628,
+      "status": "optimal",
+      "bound": -40358.15476929999,
+      "nodes": 223,
+      "objective": -40358.15476929996,
+      "sense": "min",
+      "profiled": false,
+      "shape": {
+        "vtypes": {
+          "continuous": 3,
+          "integer": 5
+        },
+        "bilinear": 7,
+        "trilinear": 0,
+        "multilinear": 0,
+        "monomial": 1,
+        "general_nl": 0
+      },
+      "decomposition": {
+        "floor": 0.6,
+        "root_presolve_build": 0.223,
+        "node_nlp_heuristic": 1.412,
+        "separation": 0.04,
+        "node_lp": 0.006,
+        "other": 0.115
+      }
+    },
+    {
+      "instance": "nvs15",
+      "family": "C",
+      "binding_constraint": "floor",
+      "class": "nonlinear",
+      "wall": 0.5230651530000614,
+      "status": "optimal",
+      "bound": 1.0,
+      "nodes": 7,
+      "objective": 1.0,
+      "sense": "min",
+      "profiled": false,
+      "shape": {
+        "vtypes": {
+          "integer": 3
+        },
+        "bilinear": 2,
+        "trilinear": 0,
+        "multilinear": 0,
+        "monomial": 3,
+        "general_nl": 0
+      },
+      "decomposition": {
+        "floor": 0.6,
+        "root_presolve_build": 0.0,
+        "node_nlp_heuristic": 0.0,
+        "separation": 0.0,
+        "node_lp": 0.0,
+        "other": 0.0
+      }
+    },
+    {
+      "instance": "nvs21",
+      "family": "C",
+      "binding_constraint": "node_count",
+      "class": "nonlinear",
+      "wall": 3.5226301259999673,
+      "status": "optimal",
+      "bound": -5.684782628025259,
+      "nodes": 11,
+      "objective": -5.684782607923296,
+      "sense": "min",
+      "profiled": false,
+      "shape": {
+        "vtypes": {
+          "continuous": 1,
+          "integer": 2
+        },
+        "bilinear": 0,
+        "trilinear": 0,
+        "multilinear": 0,
+        "monomial": 3,
+        "general_nl": 0
+      },
+      "decomposition": {
+        "floor": 0.6,
+        "root_presolve_build": 0.362,
+        "node_nlp_heuristic": 2.299,
+        "separation": 0.065,
+        "node_lp": 0.009,
+        "other": 0.188
+      }
+    },
+    {
+      "instance": "oaer",
+      "family": "A",
+      "binding_constraint": "floor",
+      "class": "nonlinear",
+      "wall": 2.04232453800023,
+      "status": "optimal",
+      "bound": -1.923098601139822,
+      "nodes": 3,
+      "objective": -1.923098499884843,
+      "sense": "min",
+      "profiled": true,
+      "shape": {
+        "vtypes": {
+          "continuous": 6,
+          "binary": 3
+        },
+        "bilinear": 0,
+        "trilinear": 0,
+        "multilinear": 0,
+        "monomial": 0,
+        "general_nl": 2
+      },
+      "decomposition": {
+        "floor": 0.6,
+        "root_presolve_build": 0.735,
+        "node_nlp_heuristic": 0.708,
+        "separation": 0.0,
+        "node_lp": 0.0,
+        "other": 0.0
+      }
+    },
+    {
+      "instance": "st_e13",
+      "family": "A",
+      "binding_constraint": "floor",
+      "class": "nonlinear",
+      "wall": 1.131052591000298,
+      "status": "optimal",
+      "bound": 1.9999999825187809,
+      "nodes": 3,
+      "objective": 2.0000003463351197,
+      "sense": "min",
+      "profiled": false,
+      "shape": {
+        "vtypes": {
+          "continuous": 1,
+          "binary": 1
+        },
+        "bilinear": 0,
+        "trilinear": 0,
+        "multilinear": 0,
+        "monomial": 1,
+        "general_nl": 0
+      },
+      "decomposition": {
+        "floor": 0.6,
+        "root_presolve_build": 0.141,
+        "node_nlp_heuristic": 0.379,
+        "separation": 0.01,
+        "node_lp": 0.0,
+        "other": 0.0
+      }
+    },
+    {
+      "instance": "st_e29",
+      "family": "B",
+      "binding_constraint": "node_count",
+      "class": "nonlinear",
+      "wall": 5.780024641000182,
+      "status": "optimal",
+      "bound": -0.9434705021069314,
+      "nodes": 5,
+      "objective": -0.943470491100134,
+      "sense": "min",
+      "profiled": false,
+      "shape": {
+        "vtypes": {
+          "continuous": 3,
+          "binary": 8
+        },
+        "bilinear": 0,
+        "trilinear": 1,
+        "multilinear": 0,
+        "monomial": 0,
+        "general_nl": 3
+      },
+      "decomposition": {
+        "floor": 0.6,
+        "root_presolve_build": 0.601,
+        "node_nlp_heuristic": 3.949,
+        "separation": 0.629,
+        "node_lp": 0.001,
+        "other": 0.0
+      }
+    },
+    {
+      "instance": "st_e36",
+      "family": "B",
+      "binding_constraint": "heuristic_waste",
+      "class": "nonlinear",
+      "wall": 20.277865635000126,
+      "status": "optimal",
+      "bound": -246.00000037500067,
+      "nodes": 89,
+      "objective": -245.99999999999997,
+      "sense": "min",
+      "profiled": true,
+      "shape": {
+        "vtypes": {
+          "continuous": 1,
+          "integer": 1
+        },
+        "bilinear": 1,
+        "trilinear": 0,
+        "multilinear": 0,
+        "monomial": 16,
+        "general_nl": 197351
+      },
+      "nlp_skippable_waste_measured_s": 2.47,
+      "decomposition": {
+        "floor": 0.6,
+        "root_presolve_build": 8.038,
+        "node_nlp_heuristic": 11.13,
+        "separation": 0.49,
+        "node_lp": 0.019,
+        "other": 0.0
+      }
+    },
+    {
+      "instance": "st_e38",
+      "family": "A",
+      "binding_constraint": "floor",
+      "class": "nonlinear",
+      "wall": 1.707533538000007,
+      "status": "optimal",
+      "bound": 7197.727116826533,
+      "nodes": 3,
+      "objective": 7197.727116839705,
+      "sense": "min",
+      "profiled": true,
+      "shape": {
+        "vtypes": {
+          "continuous": 2,
+          "integer": 2
+        },
+        "bilinear": 0,
+        "trilinear": 1,
+        "multilinear": 0,
+        "monomial": 3,
+        "general_nl": 10
+      },
+      "decomposition": {
+        "floor": 0.6,
+        "root_presolve_build": 0.379,
+        "node_nlp_heuristic": 0.643,
+        "separation": 0.085,
+        "node_lp": 0.0,
+        "other": 0.0
+      }
+    },
+    {
+      "instance": "st_miqp1",
+      "family": "A",
+      "binding_constraint": "floor",
+      "class": "milp_miqp",
+      "wall": 0.35137273899999855,
+      "status": "optimal",
+      "bound": 280.9999999906497,
+      "nodes": 15,
+      "objective": 280.9999999906497,
+      "sense": "min",
+      "profiled": false,
+      "shape": {
+        "vtypes": {
+          "integer": 5
+        },
+        "bilinear": 0,
+        "trilinear": 0,
+        "multilinear": 0,
+        "monomial": 5,
+        "general_nl": 0
+      },
+      "decomposition": {
+        "floor": 0.3,
+        "root_presolve_build": 0.014,
+        "node_nlp_heuristic": 0.037,
+        "separation": 0.001,
+        "node_lp": 0.0,
+        "other": 0.0
+      }
+    },
+    {
+      "instance": "st_miqp2",
+      "family": "A",
+      "binding_constraint": "floor",
+      "class": "milp_miqp",
+      "wall": 0.35219794499971613,
+      "status": "optimal",
+      "bound": 2.0,
+      "nodes": 9,
+      "objective": 2.0,
+      "sense": "min",
+      "profiled": false,
+      "shape": {
+        "vtypes": {
+          "integer": 2,
+          "binary": 2
+        },
+        "bilinear": 0,
+        "trilinear": 0,
+        "multilinear": 0,
+        "monomial": 2,
+        "general_nl": 0
+      },
+      "decomposition": {
+        "floor": 0.3,
+        "root_presolve_build": 0.014,
+        "node_nlp_heuristic": 0.037,
+        "separation": 0.001,
+        "node_lp": 0.0,
+        "other": 0.0
+      }
+    },
+    {
+      "instance": "st_miqp3",
+      "family": "A",
+      "binding_constraint": "floor",
+      "class": "milp_miqp",
+      "wall": 0.38131465900005423,
+      "status": "optimal",
+      "bound": -6.0,
+      "nodes": 1,
+      "objective": -6.0,
+      "sense": "min",
+      "profiled": false,
+      "shape": {
+        "vtypes": {
+          "integer": 2
+        },
+        "bilinear": 0,
+        "trilinear": 0,
+        "multilinear": 0,
+        "monomial": 1,
+        "general_nl": 0
+      },
+      "decomposition": {
+        "floor": 0.3,
+        "root_presolve_build": 0.022,
+        "node_nlp_heuristic": 0.058,
+        "separation": 0.002,
+        "node_lp": 0.0,
+        "other": 0.0
+      }
+    },
+    {
+      "instance": "st_miqp4",
+      "family": "A",
+      "binding_constraint": "floor",
+      "class": "milp_miqp",
+      "wall": 0.35851126499983366,
+      "status": "optimal",
+      "bound": -4574.000004423649,
+      "nodes": 3,
+      "objective": -4574.000004423649,
+      "sense": "min",
+      "profiled": false,
+      "shape": {
+        "vtypes": {
+          "continuous": 3,
+          "binary": 3
+        },
+        "bilinear": 0,
+        "trilinear": 0,
+        "multilinear": 0,
+        "monomial": 3,
+        "general_nl": 0
+      },
+      "decomposition": {
+        "floor": 0.3,
+        "root_presolve_build": 0.016,
+        "node_nlp_heuristic": 0.042,
+        "separation": 0.001,
+        "node_lp": 0.0,
+        "other": 0.0
+      }
+    },
+    {
+      "instance": "st_test1",
+      "family": "A",
+      "binding_constraint": "floor",
+      "class": "milp_miqp",
+      "wall": 0.34898100300006263,
+      "status": "optimal",
+      "bound": -1.6495994490692313e-08,
+      "nodes": 15,
+      "objective": -1.6495994490692313e-08,
+      "sense": "min",
+      "profiled": false,
+      "shape": {
+        "vtypes": {
+          "integer": 4,
+          "binary": 1
+        },
+        "bilinear": 0,
+        "trilinear": 0,
+        "multilinear": 0,
+        "monomial": 4,
+        "general_nl": 0
+      },
+      "decomposition": {
+        "floor": 0.3,
+        "root_presolve_build": 0.013,
+        "node_nlp_heuristic": 0.035,
+        "separation": 0.001,
+        "node_lp": 0.0,
+        "other": 0.0
+      }
+    },
+    {
+      "instance": "st_testgr3",
+      "family": "C",
+      "binding_constraint": "floor",
+      "class": "milp_miqp",
+      "wall": 0.679855511000369,
+      "status": "optimal",
+      "bound": -20.59070709795548,
+      "nodes": 549,
+      "objective": -20.59,
+      "sense": "min",
+      "profiled": false,
+      "shape": {
+        "vtypes": {
+          "integer": 20
+        },
+        "bilinear": 0,
+        "trilinear": 0,
+        "multilinear": 0,
+        "monomial": 20,
+        "general_nl": 0
+      },
+      "decomposition": {
+        "floor": 0.3,
+        "root_presolve_build": 0.047,
+        "node_nlp_heuristic": 0.299,
+        "separation": 0.008,
+        "node_lp": 0.001,
+        "other": 0.024
+      }
+    },
+    {
+      "instance": "tanksize",
+      "family": "D",
+      "binding_constraint": "node_count",
+      "class": "nonlinear",
+      "wall": 30.6983768529999,
+      "status": "feasible",
+      "bound": 0.8528765311589279,
+      "nodes": 53,
+      "objective": 1.2686437852365031,
+      "sense": "min",
+      "profiled": true,
+      "shape": {
+        "vtypes": {
+          "continuous": 38,
+          "integer": 9
+        },
+        "bilinear": 47,
+        "trilinear": 0,
+        "multilinear": 0,
+        "monomial": 0,
+        "general_nl": 3
+      },
+      "decomposition": {
+        "floor": 0.6,
+        "root_presolve_build": 1.398,
+        "node_nlp_heuristic": 28.7,
+        "separation": 0.0,
+        "node_lp": 0.0,
+        "other": 0.0
+      }
+    },
+    {
+      "instance": "tls2",
+      "family": "B",
+      "binding_constraint": "node_count",
+      "class": "nonlinear",
+      "wall": 30.948483528999986,
+      "status": "feasible",
+      "bound": 2.4487125876978726,
+      "nodes": 353,
+      "objective": 10.299999865440752,
+      "sense": "min",
+      "profiled": false,
+      "shape": {
+        "vtypes": {
+          "continuous": 4,
+          "integer": 2,
+          "binary": 31
+        },
+        "bilinear": 4,
+        "trilinear": 0,
+        "multilinear": 0,
+        "monomial": 0,
+        "general_nl": 4
+      },
+      "decomposition": {
+        "floor": 0.6,
+        "root_presolve_build": 3.519,
+        "node_nlp_heuristic": 23.135,
+        "separation": 3.687,
+        "node_lp": 0.007,
+        "other": 0.0
+      }
+    },
+    {
+      "instance": "tspn05",
+      "family": "B",
+      "binding_constraint": "node_count",
+      "class": "nonlinear",
+      "wall": 31.092138059000263,
+      "status": "feasible",
+      "bound": 179.4433806807624,
+      "nodes": 35,
+      "objective": 191.2552076849412,
+      "sense": "min",
+      "profiled": false,
+      "shape": {
+        "vtypes": {
+          "continuous": 10,
+          "integer": 10
+        },
+        "bilinear": 0,
+        "trilinear": 0,
+        "multilinear": 0,
+        "monomial": 10,
+        "general_nl": 50
+      },
+      "decomposition": {
+        "floor": 0.6,
+        "root_presolve_build": 3.536,
+        "node_nlp_heuristic": 23.244,
+        "separation": 3.705,
+        "node_lp": 0.008,
+        "other": 0.0
+      }
+    },
+    {
+      "instance": "tspn08",
+      "family": "D",
+      "binding_constraint": "no_bound",
+      "class": "nonlinear",
+      "wall": 21.92108009399999,
+      "status": "feasible",
+      "bound": null,
+      "nodes": 1,
+      "objective": 290.56685374735093,
+      "sense": "min",
+      "profiled": false,
+      "shape": {
+        "vtypes": {
+          "continuous": 16,
+          "integer": 28
+        },
+        "bilinear": 0,
+        "trilinear": 0,
+        "multilinear": 0,
+        "monomial": 16,
+        "general_nl": 128
+      },
+      "decomposition": {
+        "floor": 0.6,
+        "root_presolve_build": 2.58,
+        "node_nlp_heuristic": 15.217,
+        "separation": 0.299,
+        "node_lp": 0.012,
+        "other": 3.213
+      }
+    },
+    {
+      "instance": "tspn10",
+      "family": "D",
+      "binding_constraint": "no_bound",
+      "class": "nonlinear",
+      "wall": 28.426778199000182,
+      "status": "feasible",
+      "bound": null,
+      "nodes": 1,
+      "objective": 225.12607139732683,
+      "sense": "min",
+      "profiled": false,
+      "shape": {
+        "vtypes": {
+          "continuous": 20,
+          "integer": 45
+        },
+        "bilinear": 0,
+        "trilinear": 0,
+        "multilinear": 0,
+        "monomial": 20,
+        "general_nl": 200
+      },
+      "decomposition": {
+        "floor": 0.6,
+        "root_presolve_build": 3.368,
+        "node_nlp_heuristic": 19.86,
+        "separation": 0.39,
+        "node_lp": 0.016,
+        "other": 4.193
+      }
+    },
+    {
+      "instance": "tspn12",
+      "family": "D",
+      "binding_constraint": "no_bound",
+      "class": "nonlinear",
+      "wall": 19.465884608000124,
+      "status": "feasible",
+      "bound": null,
+      "nodes": 1,
+      "objective": 262.64739525060224,
+      "sense": "min",
+      "profiled": false,
+      "shape": {
+        "vtypes": {
+          "continuous": 24,
+          "integer": 66
+        },
+        "bilinear": 0,
+        "trilinear": 0,
+        "multilinear": 0,
+        "monomial": 24,
+        "general_nl": 288
+      },
+      "decomposition": {
+        "floor": 0.6,
+        "root_presolve_build": 2.283,
+        "node_nlp_heuristic": 13.465,
+        "separation": 0.264,
+        "node_lp": 0.011,
+        "other": 2.843
+      }
+    }
+  ]
+}
