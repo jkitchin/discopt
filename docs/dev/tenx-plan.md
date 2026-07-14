@@ -214,6 +214,49 @@ zero marginal in-stack is removed.
 3. TX4b (OBBT on pure-integer) widens OBBT's reach exactly where TX2 budgets
    it — sequence TX2 before TX4b so the sub-budget exists first.
 
+## §5.5. Running synthesis after TX0–TX3 (2026-07-14) — the wins are engine-layer
+
+Three items in (TX0 data; TX2 STOP; TX3 KILL), a pattern the pre-plan guessing
+missed: **every large cost bucket is gated by the native engine (Rust simplex,
+POUNCE, the JAX evaluator), not by Python orchestration — which is already
+correct or already optimized.**
+
+- **TX2:** the 4 overruns are single native bound-producing solves; the Python
+  scheduler already passes correct per-phase budgets. Fix needs a **native
+  deadline in the Rust simplex/POUNCE**, caller-tagged safe-vs-unsafe.
+- **TX3:** the easy-class floor is `import jax` (~0.4 s, ~40 % of the median),
+  imported unconditionally as the *first* solve op to build the NLP evaluator
+  (node bound source + all heuristics). Unremovable without a jax-free
+  **point-mode NLP evaluator** — and the F2′ microbench (this session,
+  `scratchpad/f2prime_speed.py`) shows the deciding constraint: **jitted JAX
+  ≈ 45 µs/call vs interval_ad/numpy ≈ 500 µs/call.** A jax-free evaluator is
+  ~10× slower *per call*; it only wins on import-dominated tiny models (few
+  calls) and loses badly on anything with node volume. So JAX is the *right*
+  per-call tool; its fixed import cost is the price, and that price only bites
+  the easy class. The floor is a genuine import-vs-per-call tradeoff, not an
+  inefficiency to fix cheaply.
+- **TX0:** node-NLP is 69 % of wall (the per-node bound source, jitted-fast per
+  call but high call *volume*); node-LP is 0.06 %.
+
+**Implication for the plan.** The codified metric (easy-class geomean) is
+**floor-blocked** — no cheap Python item moves it; the options are all heavy
+(dual numpy/JAX evaluator for tiny models; upstream `import jax` speedup, §2
+"out of repo"; or accept it). The reachable wins are:
+1. **TX1** — throttle the NLP-heuristic *call volume* where it is idle waste
+   (Python, bounded, the one un-blocked item; TX0 measured nvs09 = 14.3 s).
+2. **TX4** — route family C to the existing LP-node engine (native LP per node
+   instead of NLP) — the one place we already have a jax-light per-node path.
+3. **A native-deadline engine item** (enables TX2) — Rust work, high certainty.
+4. **The jax-free point-mode evaluator** — the biggest general lever *and* the
+   biggest cost; would touch floor + node-NLP dispatch + deadline honoring at
+   once, but it is an engine rewrite (TX3's "what would have to change"), and
+   the 10×-slower-per-call constraint means it must be a *dual* path (numpy for
+   tiny, JAX for the rest), not a replacement. Needs its own entry experiment
+   before any commitment.
+
+This is a strategic fork (items 3/4 are engine-scope, not Python) — flagged for
+a direction decision, not auto-dispatched.
+
 ## §6. Alignment with the reference solvers (evidence-tiered)
 
 Claims about SCIP/BARON in this plan carry one of three evidence tiers; no
