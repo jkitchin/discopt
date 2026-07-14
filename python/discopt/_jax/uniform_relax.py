@@ -1144,6 +1144,95 @@ def _emit_1d(
 
 
 # --------------------------------------------------------------------------- #
+# Log-sum-exp atom (issue #632 adjacent-atom family). ``log(sum_i exp(t_i))`` is
+# CONVEX in the exp arguments ``t_i``, but the factorable path relaxes the outer
+# ``log`` as a CONCAVE atom over the (separately-relaxed) exp-sum — the wrong
+# curvature for the convex composite, so the underestimator (the bound side for a
+# minimization) collapses to a loose floor (measured root gap ~2.7). Recognize the
+# atom and emit its exact convex outer approximation: supporting-hyperplane
+# (softmax-gradient) tangent cuts ``w >= LSE(t0) + sum_i softmax_i(t0)*(t_i - t0)``.
+# ANY reference ``t0`` gives a sound global underestimator (tangent of a convex
+# function), so a set at the box center + corners tightens toward the exact
+# envelope; the aux interval bound (kept via ``tight=False``) closes the over side.
+# Sound by construction. Gated ``DISCOPT_LOGSUMEXP_ATOM`` (default OFF -> the log
+# path is byte-identical). Prototype scope: unit-weight ``log(sum exp(affine))``.
+def _lse_terms(ctx: "_Builder", node: CNode):
+    """If ``node`` is ``log(sum_i exp(t_i))`` (unit weights, no constant), return
+    ``[(lt_i, lo_i, hi_i), ...]`` (each exp argument's LinForm + bounds); else None."""
+    if node.kind != "call" or node.payload != "log":
+        return None
+    arg = node.children[0]
+    if arg.kind != "sum":
+        return None
+    coeffs, const = arg.payload
+    if not coeffs or not all(abs(float(c) - 1.0) < 1e-12 for c in coeffs):
+        return None
+    terms = []
+    for ch in arg.children:
+        if ch.kind != "call" or ch.payload != "exp":
+            return None
+        (targ,) = ch.children
+        lo, hi = ctx.bounds(targ)
+        terms.append((ctx.rep(targ), lo, hi))
+    # A positive additive constant ``c`` folds in as a fixed term ``exp(log c)``,
+    # so ``log(sum exp(t_i) + c)`` = LSE over the args plus ``log c`` (this is what
+    # makes softplus ``log(1 + exp(x))`` = LSE(0, x) recognizable). A negative
+    # constant can make the inner sum non-positive -> not a clean LSE, so bail.
+    cst = float(const)
+    if cst > 0.0:
+        lc = math.log(cst)
+        terms.append((LinForm.constant(lc), lc, lc))
+    elif cst != 0.0:
+        return None
+    return terms if len(terms) >= 2 else None
+
+
+def _lse_refs(terms: list) -> list:
+    """Reference points in t-space for the softmax tangent set: box center + box
+    corners (capped for many terms). Any ``t0`` yields a sound tangent."""
+    n = len(terms)
+    los = [lo for _, lo, _ in terms]
+    his = [hi for _, _, hi in terms]
+    refs = [[0.5 * (lo + hi) for _, lo, hi in terms]]
+    if n <= 4:
+        import itertools
+
+        refs.extend(list(c) for c in itertools.product(*[(lo, hi) for _, lo, hi in terms]))
+    else:
+        for j in range(n):  # per-axis dominant corner: t_j at hi, rest at lo
+            r = list(los)
+            r[j] = his[j]
+            refs.append(r)
+    return refs
+
+
+def _emit_lse(ctx: "_Builder", w: int, terms: list) -> bool:
+    """Emit softmax-gradient tangent underestimators of ``w = log(sum_i exp(t_i))``.
+    Returns True iff at least one cut was emitted (over side = the aux floor)."""
+    if not all(_finite(lo, hi) for _, lo, hi in terms):
+        return False
+    lts = [lt for lt, _, _ in terms]
+    emitted = False
+    for t0 in _lse_refs(terms):
+        e = [math.exp(v) for v in t0]
+        z = math.fsum(e)
+        if not math.isfinite(z) or z <= 0.0:
+            continue
+        s = [ei / z for ei in e]
+        # w >= log(z) + sum_i s_i (t_i - t0_i); t_i = lt_i affine. Rearranged to
+        # -w + sum_i s_i lt_i(x) <= sum_i s_i t0_i - log(z) - sum_i s_i lt_i.const.
+        coeffs: dict[int, float] = {w: -1.0}
+        b = -math.log(z)
+        for si, lt, t0i in zip(s, lts, t0):
+            for j, c in lt.coeffs.items():
+                coeffs[j] = coeffs.get(j, 0.0) + si * c
+            b += si * t0i - si * lt.const
+        ctx.add_row(coeffs, b)
+        emitted = True
+    return emitted
+
+
+# --------------------------------------------------------------------------- #
 # ENVELOPE_LIBRARY builders — one per atom kind, ALL sound (blueprint §3.2)
 # --------------------------------------------------------------------------- #
 def _build_univariate_call(ctx: _Builder, node: CNode, w: int) -> Envelope:
@@ -1156,6 +1245,14 @@ def _build_univariate_call(ctx: _Builder, node: CNode, w: int) -> Envelope:
     on the argument box, else the sound interval floor.
     """
     fname: str = node.payload
+    # Log-sum-exp atom (gated): emit the convex softmax-tangent OA instead of the
+    # loose concave ``log(sum exp)`` relaxation. Off by default => byte-identical.
+    if fname == "log" and os.environ.get("DISCOPT_LOGSUMEXP_ATOM") == "1":
+        _lse = _lse_terms(ctx, node)
+        if _lse is not None and _emit_lse(ctx, w, _lse):
+            # tight=False keeps the aux interval floor (over side); the tangent
+            # cuts tighten the under side toward the exact convex envelope.
+            return Envelope(rows=[], tight=False)
     arg = node.children[0]
     lt = ctx.rep(arg)
     lo, hi = ctx.bounds(arg)
