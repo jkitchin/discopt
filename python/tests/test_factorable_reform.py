@@ -666,17 +666,24 @@ def test_r4_flag_on_unpins_pinned_product(monkeypatch):
         "flag OFF must tag nothing on st_e36"
     )
 
-    # Soundness + non-regression on the synthetic class probe (no wall-clock race):
-    # both arms' dual bounds underestimate the optimum, and ON never regresses vs
-    # OFF. A generous budget so the assertions are about the *bound*, not the wall.
+    # Soundness + non-regression on the synthetic class probe. The budget is a
+    # DETERMINISTIC node cap (``max_nodes``), NOT a wall clock: a shared wall-time
+    # limit gives the two arms *different* node counts (they explore different
+    # trees — ON tags an extra branchable aux), so their dual bounds are sampled at
+    # incomparable points and the non-regression races the clock (the prior
+    # time_limit=20 version flaked in CI when a per-node timing change gave OFF
+    # more nodes around a bound plateau). A fixed node budget makes both arms
+    # reproducible and their bounds comparable; ``time_limit`` is a generous
+    # backstop only, never the binding limit, so wall-fraction-budgeted root
+    # heuristics still complete deterministically.
     monkeypatch.setenv("DISCOPT_LIFT_ZERO_SPANNING_FACTORS", "1")
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        r_on = _st_e36_shaped().solve(time_limit=20, gap_tolerance=1e-4)
+        r_on = _st_e36_shaped().solve(max_nodes=150, time_limit=120, gap_tolerance=1e-4)
     monkeypatch.setenv("DISCOPT_LIFT_ZERO_SPANNING_FACTORS", "0")
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        r_off = _st_e36_shaped().solve(time_limit=20, gap_tolerance=1e-4)
+        r_off = _st_e36_shaped().solve(max_nodes=150, time_limit=120, gap_tolerance=1e-4)
 
     assert r_on.bound is not None and r_off.bound is not None
     assert r_on.objective is not None and r_off.objective is not None
