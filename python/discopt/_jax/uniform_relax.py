@@ -1144,6 +1144,28 @@ def _emit_1d(
 
 
 # --------------------------------------------------------------------------- #
+# ATOM-REDUNDANCY-REVIEW (#632) — grep this tag to find the whole cluster.
+#
+# The gated DCP atoms below (entropy, log-sum-exp, norm, relative-entropy, xexp)
+# each recognize a convex composite the *bare* factorable relaxation shatters. But
+# the full solver also runs ``_try_convex_lift`` (default ON) + the ``_separate_convex``
+# Kelley loop, which lifts any node whose interval-Hessian Gershgorin certificate
+# proves it convex/concave — and that ALREADY closes several of these on a real solve.
+# Measured node counts (full ``m.solve()``, atom ON vs OFF) on constructed interior-min
+# instances:
+#     log-sum-exp   103 -> 3   HELPS   (certifier abstains: wide interval Hessian)
+#     xexp           33 -> 9   HELPS   (univariate: not eligible for the >=2-var lift)
+#     norm            0 -> 0   REDUNDANT
+#     relative-entr   0 -> 0   REDUNDANT
+#     entropy         0 -> 0   REDUNDANT (as a >=2-var sum; the lift certifies it)
+# So log-sum-exp and xexp earn their keep; norm/relent/entropy are (on every case
+# reproducible here) redundant with the composite lift. They are kept gated-OFF and
+# harmless pending a check against the real centropy ``ex6_2_*`` regression (#19),
+# whose specific structure may hit a certifier-abstain case like log-sum-exp does.
+# If that check comes back clean, DELETE the three REDUNDANT atoms (their detectors,
+# emitters, ``_build_product``/``_build_univariate_call`` interceptions, flags, and
+# tests) — each redundant site is tagged ``ATOM-REDUNDANCY-REVIEW: redundant`` below.
+# --------------------------------------------------------------------------- #
 # Log-sum-exp atom (issue #632 adjacent-atom family). ``log(sum_i exp(t_i))`` is
 # CONVEX in the exp arguments ``t_i``, but the factorable path relaxes the outer
 # ``log`` as a CONCAVE atom over the (separately-relaxed) exp-sum — the wrong
@@ -1233,6 +1255,7 @@ def _emit_lse(ctx: "_Builder", w: int, terms: list) -> bool:
 
 
 # --------------------------------------------------------------------------- #
+# ATOM-REDUNDANCY-REVIEW: redundant (norm — measured 0->0 nodes; see the cluster note above).
 # Euclidean-norm atom (issue #632 adjacent-atom family). ``sqrt(sum_i t_i^2)`` is
 # CONVEX, but the factorable path relaxes the outer ``sqrt`` as a CONCAVE atom over
 # the square-sum — the wrong curvature, collapsing the underestimator to a loose
@@ -1641,6 +1664,10 @@ def _emit_scaled_equality(ctx: _Builder, w: int, lin: LinForm, scalar: float) ->
 
 
 # --------------------------------------------------------------------------- #
+# ATOM-REDUNDANCY-REVIEW: redundant on constructed cases (entropy — measured 0->0
+# nodes as a >=2-var sum), BUT this atom's original driver is the centropy ex6_2_*
+# regression (#19), whose structure may still need it; do NOT delete before that
+# corpus check. See the cluster note above.
 # Entropy atom (issue #632 centropy-tightness). ``x*log(x)`` is convex on x>0
 # (``f'' = 1/x > 0``), but the factorable path shatters it into a loose bilinear
 # ``x*(log x)`` over the DECOUPLED box (McCormick allows ``x=x_ub, log=log(x_lb)``
@@ -1734,6 +1761,7 @@ def _xexp_prod_var(ctx: "_Builder", node: CNode):
     return None
 
 
+# ATOM-REDUNDANCY-REVIEW: redundant (relent — measured 0->0 nodes; see the cluster note above).
 # Relative-entropy atom (issue #632 adjacent-atom family). ``x*log(x/y)`` is
 # JOINTLY convex on x,y>0 (the perspective of ``x log x``), but the factorable
 # path relaxes it as ``x * log(x/y)`` (a bilinear of x against the concave-relaxed
