@@ -31,28 +31,6 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 
-/// Translate an optional caller-supplied elapsed-seconds budget into an absolute
-/// [`std::time::Instant`] deadline for [`SimplexOptions::deadline`] (TX2b).
-///
-/// `None` → `None` (deadline disabled; the solve is bit-identical to the legacy
-/// path). `Some(s)` for a finite `s > 0` → `now + s`. A non-positive or
-/// non-finite `s` collapses to `now`, which the iteration loop's first poll
-/// treats as already expired → an immediate `IterLimit`. This is only ever
-/// wired from a call site that has proven its result is discarded/zero-stake, so
-/// an early exit is a valid non-improving verdict, never a truncated dual bound.
-#[inline]
-fn native_deadline(deadline_s: Option<f64>) -> Option<std::time::Instant> {
-    deadline_s.map(|s| {
-        let now = std::time::Instant::now();
-        if s.is_finite() && s > 0.0 {
-            now.checked_add(std::time::Duration::from_secs_f64(s))
-                .unwrap_or(now)
-        } else {
-            now
-        }
-    })
-}
-
 /// Push an interior LP optimum `x` to a vertex of the optimal face.
 ///
 /// `a` is the C-contiguous `m × n` equality-constraint matrix; `c`, `lb`, `ub`
@@ -421,7 +399,7 @@ fn build_extended_basis(cs: &[i8], bv: &[i64], n: usize, m: usize) -> Option<Bas
 /// with the `a`/`b`/`lb`/`ub` passed in. Each is empty when not applicable.
 #[pyfunction]
 #[pyo3(signature = (c, a, b, lb, ub, start_col_status=None, start_basic_vars=None,
-                    tol=1e-9, max_iter=100_000, deadline_s=None))]
+                    tol=1e-9, max_iter=100_000))]
 #[allow(clippy::too_many_arguments)]
 pub fn solve_lp_warm_py<'py>(
     py: Python<'py>,
@@ -434,7 +412,6 @@ pub fn solve_lp_warm_py<'py>(
     start_basic_vars: Option<PyReadonlyArray1<'py, i64>>,
     tol: f64,
     max_iter: usize,
-    deadline_s: Option<f64>,
 ) -> PyResult<(
     String,
     Bound<'py, PyArray1<f64>>,
@@ -461,13 +438,7 @@ pub fn solve_lp_warm_py<'py>(
     let opts = SimplexOptions {
         tol,
         max_iter,
-        // TX2b: optional per-call wall-clock deadline. `None` (the default) leaves
-        // the solve bit-identical to before. A `Some(s)` is an *elapsed-seconds*
-        // budget the caller has already verified is ZERO-STAKE — the result is
-        // discarded or a primal-only incumbent — so an early `IterLimit` exit is a
-        // valid non-improving verdict, never a truncated dual bound. A non-positive
-        // or non-finite `s` fires immediately (returns IterLimit at iter 0).
-        deadline: native_deadline(deadline_s),
+        deadline: None,
         // F2: warm dual-simplex stall guard on by default (size-derived cap →
         // cold fallback on trip; bound-neutral). Cold-only entry points ignore it.
         warm_stall_guard: true,
@@ -512,8 +483,7 @@ pub fn solve_lp_warm_py<'py>(
 /// [`solve_lp_warm_py`], with the certificates mapped back from any equilibration.
 #[pyfunction]
 #[pyo3(signature = (c, m, n, col_ptr, row_idx, vals, b, lb, ub,
-                    start_col_status=None, start_basic_vars=None, tol=1e-9, max_iter=100_000,
-                    deadline_s=None))]
+                    start_col_status=None, start_basic_vars=None, tol=1e-9, max_iter=100_000))]
 #[allow(clippy::too_many_arguments)]
 pub fn solve_lp_warm_csc_py<'py>(
     py: Python<'py>,
@@ -530,7 +500,6 @@ pub fn solve_lp_warm_csc_py<'py>(
     start_basic_vars: Option<PyReadonlyArray1<'py, i64>>,
     tol: f64,
     max_iter: usize,
-    deadline_s: Option<f64>,
 ) -> PyResult<(
     String,
     Bound<'py, PyArray1<f64>>,
@@ -553,11 +522,7 @@ pub fn solve_lp_warm_csc_py<'py>(
     let opts = SimplexOptions {
         tol,
         max_iter,
-        // TX2b: optional per-call wall-clock deadline (see solve_lp_warm_py). `None`
-        // is byte-identical to the old behavior; a `Some(s)` elapsed-seconds budget
-        // is honored only by a caller that has proven the result is zero-stake
-        // (discarded), so the early `IterLimit` exit never truncates a live bound.
-        deadline: native_deadline(deadline_s),
+        deadline: None,
         // F2: warm dual-simplex stall guard on by default (size-derived cap →
         // cold fallback on trip; bound-neutral). Cold-only entry points ignore it.
         warm_stall_guard: true,

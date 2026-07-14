@@ -408,7 +408,6 @@ def solve_lp_warm_std(
     in_basis: Optional[tuple[np.ndarray, np.ndarray]] = None,
     *,
     return_cert: bool = False,
-    deadline_s: Optional[float] = None,
 ):
     """Warm-startable **pure-LP** solve of ``min c^T x s.t. A_ub x <= b_ub, bounds``.
 
@@ -430,14 +429,6 @@ def solve_lp_warm_std(
     rigorous safe lower bound on an ``optimal`` solve, and an independently
     verified infeasibility proof on an ``infeasible`` one — both without a second
     external solve (issue #356).
-
-    ``deadline_s`` (TX2b) is an optional per-call wall-clock budget in seconds
-    handed to the native simplex; on expiry the solve returns early with an
-    ``iter_limit`` status (mapped to ``result is None`` here). It is honored ONLY
-    when the caller has proven this LP's result is zero-stake (discarded, e.g. the
-    root-probe relaxer-usefulness check), never on a bound-producing solve — a
-    truncated warm solve would otherwise loosen the dual bound (the PF5 trap).
-    ``None`` (the default) leaves the solve bit-identical to before.
     """
     from discopt._rust import solve_lp_warm_csc_py
 
@@ -494,9 +485,6 @@ def solve_lp_warm_std(
         np.ascontiguousarray(ub_std),
         cs0,
         bv0,
-        1e-9,
-        100_000,
-        deadline_s,
     )
 
     def _result_basis_cert():
