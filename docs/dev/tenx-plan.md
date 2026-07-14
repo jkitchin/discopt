@@ -115,7 +115,7 @@ Verdicts land in this table as they happen.
 | item | family | what | entry experiment (before building) | kill criterion | gate | verdict |
 |---|---|---|---|---|---|---|
 | **TX0 attribution table** | all | One table, one session: for every 62-panel instance + the 5 trivial floor probes, decompose wall into {floor, root build/presolve, node LP, node-NLP heuristic, other} using the existing EP0 probe harness + Appendix-B method, and stamp each instance with its §1 family. Publish `docs/dev/data/tenx-attribution.json`. No fixes in this item. | n/a (it *is* the measurement) | n/a | table committed; every later item must cite its rows | **DONE (2026-07-14)** — `data/tenx-attribution.json`, 62 rows (16 cProfile'd, rest family-extrapolated; wall/status/bound/nodes from the f2p jobs=1 30 s panel). **Families:** **A** 22 inst / 27.9 s (floor 41 %, node-NLP 42 %; all 22 proved) — floor-bound; **B** 14 / 226.7 s (node-NLP 70 %, sep 14 %, presolve 12 %; 10 proved / 4 feasible) — node-NLP-bound, separation concentrated in nvs09; **C** 10 / 58.6 s (node-NLP 77 %; **9 proved, only nvs12 times out**) — native per-node NLP where an LP suffices; **D** 16 / 556.9 s (node-NLP 69 %, other/engine 16 %, presolve 12 %; 11 timeout / 4 feasible / 1 hang). **Panel-wide split of ~870 s:** node-NLP **600.6 s (69 %)**, root presolve/build 103.6 s (12 %), other/engine 91.2 s (10 %), separation 40.3 s (5 %), floor 34.5 s (4 %), **node-LP 0.5 s (0.06 %)**. **Findings:** (1) the node LP is *not* the cost anywhere (0.06 %); per-node NLP dominates every family — confirms PF2. (2) that node-NLP is mostly the per-node relaxation *solve* (bound source), not skippable heuristic: measured skippable waste (`nlpoff/nlpdef` stride) is 14.3 s on nvs09 (integer ⇒ whole node-NLP removable → TX1) but only 1.2 s heatexch_gen1 / 0 s bchoco06 (the D-tail node-NLP is the relaxer → TX3/TX4, not TX1). (3) **§1 correction:** the integer-product class (C) is *not* stuck on the vendored panel — nvs17/19/24 are absent; 9/10 in-panel C members prove (0.25–9.3 s), only nvs12 shows the frozen-bound pathology, so TX4's family-C win is barely visible here. (4) **§1 correction:** nvs05/nvs09/tspn05 are *feasible, not proved* at HEAD (default-off F2′). (5) presolve/build is a top cost on casctanks (15.5 s) and st_e36 (8 s), larger than §1's 'relaxation-strength' framing for D. **Top single attributions (all node-NLP):** contvar 43 s, heatexch_gen1 39 s, bchoco08 36 s, heatexch_gen3 32 s, tanksize 29 s, nvs12 29 s. |
-| **TX1 adaptive node-NLP default** | B | The node-NLP is a primal heuristic (bound comes from the LP relaxer; code comment solver.py:6613) costing up to 60 % of wall on stuck trees. Measured: stride→∞ gives identical proofs/bounds, nvs09 30→15 s, st_e36 17→14 s. The `fast` profile already ships stride 8 — the *default* (4) is too eager. Make the default adaptive: always at root + when the last K attempts improved the incumbent; exponential back-off when they don't. | rerun the 07-14 stride experiment on the full 62 panel (stride 4 vs adaptive prototype), jobs=1 | any lost proof or looser bound (2 repeats on flagged instances) | full panel: proofs ≥ 42, no LOOSER/CROSSED, total wall strictly down | — |
+| **TX1 adaptive NLP-heuristic budget** | B | **RE-SCOPED by TX0.** TX0 falsified the original "node-NLP = 60 % of wall, zero bound stake" framing: the 600 s / 69 % node-NLP bucket is *mostly the non-skippable per-node relaxation solve*, and only **2 instances** carry `binding_constraint=heuristic_waste`. The `DISCOPT_NODE_NLP_STRIDE` knob touches only the strided *in-tree* node-NLP (nvs09 14.3 s skippable; heatexch_gen1 1.2 s; bchoco06 0 s) — a small, integer-family-concentrated slice. The real primal-heuristic budget is the *set* (`_solve_root_node_multistart`, feasibility_pump, integer_local_search, subnlp — the ~600 s minus the bound-source solve). Re-scoped item: adaptive back-off across **all** NLP primal heuristics keyed on incumbent improvement, not just the node-NLP stride. Entry experiment must first *measure the addressable set* per family (TX0 only stride-tested 3 instances). | on the full 62 panel, per-heuristic on/off attribution (which of {multistart, fpump, ils, subnlp, strided node-NLP} is idle waste, by family) — do NOT assume it's 60 % | addressable idle-heuristic wall < 40 s panel-wide (then TX1 is not worth the risk — demote), OR any lost proof / looser bound | full panel: proofs ≥ 42, no LOOSER/CROSSED, wall strictly down on the instances it names | — |
 | **TX2 honor the time limit** | B | Budget overruns are pure ratio loss: contvar 51–82 s, casctanks 68 s, heatexch_gen3 68 s on a 30 s limit — the benchmark charges us the overrun. PF5's blunt fix is falsified; the surgical form: per-phase deadline checks in the node loop + OBBT probe LPs get their **own sub-budget** so range reduction is never truncated by the outer deadline. | instrument where the overrun accrues on contvar/casctanks (which phase ignores the deadline) | the PF5 trap: any bound looser on the panel | panel: no instance exceeds budget+grace; bounds/proofs unchanged (differential on OBBT-affected instances) | — |
 | **TX3 easy-class floor: JAX-free small-model path** | A | The remaining floor (Appendix B, post-sympy-fix) is jax import 240–300 ms + first trace ~75 ms + pounce import ~140 ms on a ~0.6 s median — ~40–50 % of easy-class wall. Appendix B calls `import jax` "out of repo", which assumes JAX must be imported. F2′ proved the engine's own IR + `interval_ad` can produce values/gradients JAX-free. Hypothesis: for models under a size/atom threshold, the full root relaxation + B&B can run with **no JAX import at all** (interval_ad envelopes + Rust simplex + POUNCE-native NLP where needed). | count how many of the 30 easy-class instances use only interval_ad-covered atoms; hand-build a JAX-free root bound on 3 of them and compare bound + build time vs the JAX path | <15/30 instances qualify, or JAX-free root bound is looser, or build >2× slower | byte-level: bounds/nodes identical to the JAX path on qualifying instances (it computes the same envelopes); easy-class A/B geomean strictly down; panel no-regression | — |
 | **TX4 route family C to the LP-node engine** | C | All parts exist: `lp_spatial_bb.py` (incremental warm LP, node cuts, opt-in via #290), the scope test, OBBT (contracts [0,200]→[0,40] on nvs17 when un-gated). Work: (a) fix #287 (dive/primal incumbent surfaced early; soft limit honored between phases — overlaps TX2); (b) un-gate root OBBT for pure-integer models (scip-gap plan Phase 1; predicted nvs17 root −65,842→−6,790); (c) route in-scope integer-product models to the engine by default. | reproduce #287 (kall_congruentcircles_c72 first-incumbent 12.9 s vs 8 s limit); rerun the engine on nvs17/19/24 at current HEAD to refresh the Step-1 numbers | engine (with OBBT + latency fix) fails to beat the default path on its own family, or any out-of-family panel regression | family gate: nvs17/19/24 solved or bound within 2× of true (SCIP no-cut solves in 4.7 s — that is the parity bar, not 0.88 s); graphpart improves; full panel + differential green; #286-class false-unbounded regression tests pass | — |
@@ -124,24 +124,40 @@ Verdicts land in this table as they happen.
 
 ## §4. Sequencing, arithmetic, and the stop condition
 
-**Order: TX0 → TX1 → TX2 → TX3 → TX4 → TX6 (TX5 deferred).**
-TX1/TX2 are low-risk measured wins that also make every later measurement
-cleaner (no heuristic noise, no overruns). TX3 attacks the recorded geomean's
-largest component. TX4 is the biggest single family flip with mostly-built
-parts. TX6 is research and goes last deliberately.
+**Re-sequenced by TX0 (2026-07-14).** TX0's binding-constraint histogram over
+the 62 panel: **floor 26**, node_count 18, no_bound 8, overrun 4,
+bound_frozen 3, **heuristic_waste 2**, throughput 1. This re-orders the plan:
+the biggest addressable bucket is the **floor** (TX3, and it *is* the codified
+easy-class metric), not the node-NLP heuristic (TX1, now 2 instances). The
+29 instances in {node_count 18, no_bound 8, bound_frozen 3} are
+relaxation-strength-limited — the genuinely hard core (TX4/TX6), which no cheap
+item touches.
 
-**Honest arithmetic (predictions to be checked against TX0, not adjectives):**
-- TX1: mid-class wall −30…−50 % where the heuristic is idle waste (nvs09-class);
-  no new proofs by itself; frees budget inside fixed limits so some timeouts
-  may flip.
-- TX2: removes 20–50 s of charged overrun on ≥4 tail instances; ratio-table
-  effect immediate.
-- TX3: if the entry holds, easy-class nonlinear floor drops ~0.3–0.45 s of a
-  ~0.6 s median → geomean 10.3× → **plausibly 4–6×**. This is the single
-  largest predicted mover of the tracked number.
-- TX4: family C from timeout/frozen to solved-in-seconds (∞→finite terms in
-  the ratio table); parity bar is no-cut SCIP (4.7 s), not full SCIP.
-- TX6: no prediction — that is the point of entry experiments.
+**Order: TX0 ✓ → TX2 → TX3 → TX1(re-scoped) → TX4 → TX6 (TX5 deferred).**
+Lead with the two highest-certainty, metric-aligned items: TX2 (overrun, 4
+named instances, trivial + safe) and TX3 (floor, 26 instances, the codified
+geomean). TX1 drops behind them — TX0 shrank its premise from 60 % to 2
+instances; it runs only if its re-scoped entry experiment finds a ≥40 s
+addressable set. TX4 is the family flip (barely in-container observable per
+TX0 — its gate needs the out-of-panel nvs17/19/24 + graphpart). TX6 last.
+
+**Honest arithmetic (now anchored to TX0's numbers, not the pre-TX0 guesses):**
+- TX2: removes the charged overrun on the 4 `overrun` instances (contvar 43 s
+  over, casctanks/heatexch_gen3/bchoco08 similar) — immediate ratio-table win,
+  no proof change; the single most certain item.
+- TX3: family A is 41 % floor / 42 % node-NLP (TX0). If the JAX-free entry
+  holds, the floor share (~0.25 s of the ~0.6 s easy-class median) drops →
+  geomean 10.3× → **plausibly 5–7×**. Still the largest single mover of the
+  codified metric, but TX0 shows node-NLP is an equal chunk of family A, so
+  TX3 alone does not reach ≤2.5× — it stacks with TX1's easy-class share.
+- TX1 (re-scoped): addressable only where NLP heuristics are idle waste;
+  TX0 measured this as small + integer-concentrated. Predict < 50 s panel-wide;
+  kill-if-<40 s. No longer a headline item.
+- TX4: family C is *not stuck in-container* (TX0: 9/10 panel-C prove); the win
+  is on the absent nvs17/19/24 + graphpart — measured out-of-panel, ∞→finite.
+- TX6: no prediction. But TX0 re-weights it *up*: 29 instances are
+  relaxation-strength-limited, the largest hard bucket — the real spatial 10×
+  lives here, and it is research, not a lever.
 
 **Stop condition (anti-circling):** after the Stack-C checkpoint, re-measure
 the easy-class geomean and the panel on the maintainer's box. If geomean ≤
