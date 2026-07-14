@@ -665,6 +665,16 @@ class _Builder:
         v: object = cache.get(nid, _UNSET)
         if v is not _UNSET:
             return v
+        import os
+
+        if os.environ.get("DISCOPT_ANALYTIC_SEPGRAD") == "1":
+            v = self._compiled_analytic(node)
+            if v is not None:
+                cache[nid] = v
+                return v
+            # fall through to the JAX path on any construction failure (soundness:
+            # a missing analytic atom must not silently drop separation).
+
         import jax
         import jax.numpy as jnp
 
@@ -678,6 +688,87 @@ class _Builder:
             v = None
         cache[nid] = v
         return v
+
+    def _compiled_analytic(self, node: CNode):
+        """F2′ spike: ``(value_fn, grad_fn)`` computed analytically over the engine's
+        own factorable IR via forward-mode interval AD at a *point* box, with NO JAX.
+
+        The separation cut ``d ≥ g(x₀) + ∇g(x₀)·(x−x₀)`` needs ``g(x₀)`` and
+        ``∇g(x₀)``; ``g`` is a known factorable expression, so its gradient is the
+        exact derivative of the IR — computed here by pinning every variable to its
+        point value (``Interval.point``) so the AD's gradient interval collapses to
+        the exact point gradient. Deterministic (no XLA float reordering) and
+        JAX-free on the hot path. Returns ``None`` if the atom set isn't covered
+        (caller falls back to JAX). Gated by ``DISCOPT_ANALYTIC_SEPGRAD``.
+        """
+        try:
+            import numpy as _np
+
+            from discopt._jax.convexity.interval import Interval as _Ivl
+            from discopt._jax.convexity.interval_ad import _flat_size, interval_hessian
+
+            expr = self._expr(node)
+            model = self.model
+            variables = model._variables
+            # Prefix-sum flat offsets (mirrors interval_ad._offset_map).
+            offs: list[int] = []
+            acc = 0
+            for _v in variables:
+                offs.append(acc)
+                acc += _v.size
+            n_flat = _flat_size(model)
+
+            # Probe once at the box midpoint so an uncovered atom (unbounded/NaN
+            # gradient) is caught HERE and we fall back to JAX, rather than silently
+            # emitting no cut deep in the tree.
+            probe = _np.array(
+                [0.5 * (float(_np.ravel(v.lb)[0]) + float(_np.ravel(v.ub)[0])) for v in variables],
+                dtype=_np.float64,
+            )
+
+            def _box_at(xv):
+                xa = _np.asarray(xv, dtype=_np.float64).ravel()
+                box = {}
+                for _v, off in zip(variables, offs):
+                    sl = xa[off : off + _v.size]
+                    box[_v] = _Ivl(sl.astype(_np.float64), sl.astype(_np.float64))
+                return box
+
+            def _eval(xv):
+                ad = interval_hessian(expr, model, _box_at(xv))
+                val = float(_np.asarray(ad.value.lo).ravel()[0])
+                g = _np.asarray(ad.grad.lo, dtype=_np.float64).ravel()
+                return val, g
+
+            pv, pg = _eval(probe)
+            if not (_np.isfinite(pv) and pg.size == n_flat and _np.all(_np.isfinite(pg))):
+                return None  # atom not covered → JAX fallback
+
+            # One shared eval per (value_fn, grad_fn) pair: _separate_convex calls
+            # value_fn(xv) then grad_fn(xv) with the SAME xv each round. Key the
+            # 1-entry memo on the point's CONTENT (not id(xv) — object ids are
+            # recycled after GC, so a later round could collide with a freed xv and
+            # return a stale point's (value, grad)).
+            _memo: dict = {}
+
+            def _shared(xv):
+                k = _np.asarray(xv, dtype=_np.float64).tobytes()
+                hit = _memo.get(k)
+                if hit is None:
+                    hit = _eval(xv)
+                    _memo.clear()
+                    _memo[k] = hit
+                return hit
+
+            def value_fn(xv):
+                return _shared(xv)[0]
+
+            def grad_fn(xv):
+                return _shared(xv)[1]
+
+            return (value_fn, grad_fn)
+        except Exception:
+            return None
 
     def _support_box_key(self, node: CNode) -> tuple:
         """Box-dependent cache key ``(id(node), lb.bytes, ub.bytes)`` restricted to
