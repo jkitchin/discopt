@@ -163,6 +163,41 @@ class TestSolveLpWarmStdCert:
         )
         assert len(out) == 2  # (result, out_basis) — unchanged default contract
 
+    def test_native_deadline_none_is_byte_identical(self):
+        # TX2b: the optional ``deadline_s`` is a pure pass-through to the native
+        # simplex. ``None`` (the default) must be bit-identical to omitting it: the
+        # same optimum via the same path.
+        args = (
+            np.array([-1.0, -2.0]),
+            sp.csr_matrix(np.array([[1.0, 1.0]])),
+            np.array([4.0]),
+            [(0.0, 5.0), (0.0, 5.0)],
+        )
+        res0, b0, c0 = solve_lp_warm_std(*args, return_cert=True)
+        res1, b1, c1 = solve_lp_warm_std(*args, return_cert=True, deadline_s=None)
+        assert res0 is not None and res1 is not None
+        assert res0.status == res1.status == SolveStatus.OPTIMAL
+        assert res0.objective == res1.objective
+        assert res0.bound == res1.bound
+
+    def test_native_deadline_expired_truncates_to_none(self):
+        # TX2b: an already-expired budget (``deadline_s=0.0``) fires on the native
+        # simplex's first deadline poll and returns the IterLimit sentinel, which
+        # ``solve_lp_warm_std`` maps to ``result is None`` (a valid non-improving
+        # verdict a caller falls back from). This is the mechanism a *zero-stake*
+        # caller uses to bound a pathological warm spin; it is never wired to a
+        # bound-producing solve (that would loosen the dual bound — the PF5 trap).
+        res, out_basis, _cert = solve_lp_warm_std(
+            np.array([-1.0, -2.0]),
+            sp.csr_matrix(np.array([[1.0, 1.0]])),
+            np.array([4.0]),
+            [(0.0, 5.0), (0.0, 5.0)],
+            return_cert=True,
+            deadline_s=0.0,
+        )
+        assert res is None
+        assert out_basis is None
+
 
 class TestIncrementalFarkasPath:
     @staticmethod

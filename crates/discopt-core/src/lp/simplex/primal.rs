@@ -1776,6 +1776,45 @@ mod tests {
     }
 
     #[test]
+    fn deadline_fires_returns_iterlimit() {
+        // TX2b: an already-expired wall-clock deadline must abort the primal loop
+        // early with the IterLimit sentinel (a valid non-improving verdict) rather
+        // than solve to Optimal. Uses the knapsack relaxation (needs real pivots)
+        // so the deadline poll at the loop head is reached. A deadline captured
+        // *before* the solve is already in the past by the first poll (`now() >= d`).
+        let a = [5.0, 5.0, 5.0, 5.0, 1.0];
+        let c = [-16.0, -16.0, -16.0, -16.0, 0.0];
+        let l = [0.0; 5];
+        let u = [1.0, 1.0, 1.0, 1.0, INF];
+        let lp = LpView {
+            a: &a,
+            m: 1,
+            n: 5,
+            c: &c,
+            l: &l,
+            u: &u,
+        };
+        let opts = SimplexOptions {
+            deadline: Some(std::time::Instant::now()),
+            ..SimplexOptions::default()
+        };
+        let r = solve_lp(&lp, &[9.0], &opts);
+        assert_eq!(
+            r.status,
+            LpStatus::IterLimit,
+            "expired deadline must yield IterLimit, got {:?} (obj {})",
+            r.status,
+            r.obj
+        );
+
+        // Control: the same LP with no deadline solves to Optimal (deadline: None
+        // is byte-identical to the legacy path).
+        let r_ok = solve_lp(&lp, &[9.0], &SimplexOptions::default());
+        assert_eq!(r_ok.status, LpStatus::Optimal);
+        assert!((r_ok.obj - (-28.8)).abs() < 1e-6, "obj {}", r_ok.obj);
+    }
+
+    #[test]
     fn equality_constraint_feasible() {
         // min x0+x1 s.t. x0+x1=2 (equality, no slack), x∈[0,inf]. obj 2.
         let a = [1.0, 1.0];
