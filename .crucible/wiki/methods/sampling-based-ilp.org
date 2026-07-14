@@ -1,0 +1,139 @@
+#+TITLE: Sampling-Based ILP Heuristics (MCMC + Parallel Tempering)
+#+FILETAGS: :method:sampling:mcmc:parallel-tempering:simulated-annealing:lp-free:primal-heuristic:matheuristic:ilp:mip:gpu:jax:
+
+* Sampling-Based ILP Heuristics (MCMC + Parallel Tempering)
+:PROPERTIES:
+:ARTICLE_TYPE: method
+:SOURCE_KEYS: kyuilsim2026
+:DERIVED_FROM: ../summaries/kyuilsim2026-ilp-parallel-tempering.org ./feasibility-jump.org ./first-order-mip-heuristics.org ./matheuristics.org
+:STATUS: draft
+:CREATED: 2026-07-12
+:END:
+
+/Sampling-based ILP/ treats an integer program not as a tree to be searched
+but as a probability distribution to be sampled. The objective and constraints
+are folded into a single Gibbs energy, and Markov Chain Monte Carlo (MCMC),
+accelerated by [[file:feasibility-jump.org][Lagrangian-style]] penalty weighting and Parallel Tempering,
+draws high-quality feasible integer points from it. It is *LP-free* (like
+[[file:feasibility-jump.org][Feasibility Jump]]), *GPU-batchable* (like the [[file:first-order-mip-heuristics.org][first-order and GPU MIP
+heuristics]]), and *training-free* (unlike learning-based methods). The
+canonical reference is citet:kyuilsim2026; the full result is distilled in
+the summary [[file:../summaries/kyuilsim2026-ilp-parallel-tempering.org][Solving ILP with Parallel Tempering]].
+
+The defining property, and the one that fixes its role in a global solver, is
+that a sampler returns a *primal* point with *no dual bound and no certificate
+of optimality*. It is therefore a [[file:matheuristics.org][primal heuristic]], a producer of good
+incumbents, not a replacement for certifying Branch-and-Bound.
+
+** The method in brief
+
+For $\min c^\top x$ s.t. $Ax \le b,\ x\in\{0,1\}^n$, sample from
+$\pi(x) \propto \exp(-\mathcal{E}(x;\lambda)/\tau)$ with the penalty energy
+
+$$\mathcal{E}(x;\lambda) = c^\top x + \lambda \sum_{k} \max(0,\ A_{k\cdot}x - b_k).$$
+
+Three moving parts:
+
+1. *Proposal (MLBP).* The exact Locally-Balanced Proposal over the 1-Hamming
+   sphere is computable in closed form because the energy is linear: the
+   single-flip objective and constraint changes are $c\odot(1-2x)$ and
+   $A\cdot\mathrm{diag}(1-2x)$. Multi-step LBP flips $L$ coordinates per move.
+2. *Temperature annealing.* An exponential simulated-annealing schedule
+   $\tau(t)=\tau_0\gamma^t$ moves from broad exploration to refinement.
+3. *[[file:../concepts/parallel-tempering.org][Parallel Tempering]].* A ladder of chains with periodic swaps escapes
+   local optima: $\tau$-PT tempers temperature; $\lambda$-PT tempers the penalty,
+   selectively lowering constraint barriers while preserving the landscape over
+   feasible points.
+
+** Why it fits discopt unusually well
+
+discopt already couples a Rust Branch-and-Bound core with a JAX/GPU numerics
+layer, and the wiki already records the thesis that *GPU-batched primal
+heuristics are a structural advantage CPU-only solvers (SCIP, HiGHS) cannot
+easily match* (see [[file:feasibility-jump.org][Feasibility Jump]] and [[file:first-order-mip-heuristics.org][first-order MIP heuristics]]).
+Sampling-based ILP slots into exactly that gap:
+
+- *The hot loop is two matrix products, per chain, per step.* MLBP's neighbor
+  energies are $c\odot(1-2x)$ and $A\cdot\mathrm{diag}(1-2x)$ (equations 6 in
+  citet:kyuilsim2026). Batched over $B$ tempering chains and $L$ candidate
+  flips, this is pure =jax.vmap= over sparse mat-vec, the same kernel style
+  discopt uses for McCormick relaxations. No LP solve, no factorization.
+- *Parallel Tempering is embarrassingly parallel.* The $B$ chains are
+  independent between swaps, matching a GPU's throughput profile; the swap step
+  is a cheap reduction.
+- *It reuses data discopt already marshals.* The B&B node already carries the
+  local $A$, $b$, $c$ and integer bounds; a sampling heuristic on the node's
+  fixings needs no new problem representation.
+
+** How discopt should (and should not) use it
+
+*Correctness-safe framing first.* Per the project's governing philosophy
+("the certificate is the product"), a sampling heuristic may *only* affect the
+/primal/ side. Concretely:
+
+- *Primary use, incumbent seeding.* Run the sampler at the root (or
+  periodically at nodes) as a GPU-batched primal heuristic. Any feasible
+  integer point it returns is re-validated by discopt's own feasibility check
+  and, if it improves the incumbent, tightens the upper bound, so B&B prunes
+  more aggressively and closes the gap faster. This is the identical role
+  [[file:feasibility-jump.org][Feasibility Jump]] and the [[file:first-order-mip-heuristics.org][first-order heuristics]] already occupy; sampling
+  adds a global-exploration flavor (PT escapes basins that a single-descent
+  heuristic like FJ cannot).
+- *$\lambda$-PT as a feasibility engine.* The penalty energy discopt would use
+  is exactly the constraint-violation form that feasibility heuristics already
+  minimize. $\lambda$-PT's ability to cross feasibility boundaries offers a
+  principled alternative to ad-hoc penalty schedules when the incumbent search
+  is stuck in an infeasible basin, complementary to the
+  [[file:feasibility-pump.org][feasibility pump]] / [[file:feasibility-jump.org][feasibility jump]] family.
+- *A hard guardrail.* Nothing the sampler emits may enter the dual bound, the
+  node selection certificate, or any pruning decision except through a
+  fully-validated improved incumbent. No sampled "bound", no early termination
+  on a sampled objective. A sampler has no soundness argument, so its output is
+  a candidate to be checked, never a fact to be trusted.
+
+*What does not transfer for free.*
+
+- *It is linear.* The exact-LBP trick and the closed-form neighbor energies
+  depend on $\mathcal{E}$ being linear (piecewise-linear with the penalty).
+  discopt's target class is MINLP: a nonconvex/bilinear energy has no
+  closed-form 1-Hamming-sphere update, and gradient-based discrete proposals
+  are exactly what citet:kyuilsim2026 show to be uninformative. A JAX evaluator
+  could supply nonlinear violation values per neighbor, but the per-step cost
+  and the loss of LBP optimality must be measured, not assumed. The honest
+  first target is therefore the *MILP / integer-linear substructure* (or ILP
+  subproblems), not general MINLP.
+- *Hyperparameters need tuning.* $\tau_0$, $\gamma$, $\lambda$, the ladder, and
+  the swap interval are grid-searched per problem class in the paper. A robust
+  default schedule keyed to the scales of $c$ and $A$ (which discopt can read
+  off the node) is a prerequisite for using this without per-instance babysitting.
+- *No convergence guarantee.* Discrete-PT mixing lacks theory, so the sampler
+  must run under a wall-clock/iteration budget as an /anytime/ incumbent
+  producer, never as a termination oracle.
+
+** A concrete falsifiable entry experiment
+
+Consistent with the repo's evidence-first protocol, the smallest test worth
+running before any implementation: on the MILP / integer-linear instances in
+the benchmark corpus, add a GPU-batched MLBP+$\tau$-PT root primal heuristic
+that only ever *proposes validated incumbents*, and measure (a) time-to-first
+incumbent and (b) time-to-close-gap versus the current primal heuristics, on a
+fixed panel, with =incorrect_count = 0= as a hard gate and =node_count= /
+certified objective required unchanged except through legitimately improved
+incumbents. Kill criterion: if it does not improve time-to-good-incumbent over
+the existing FJ/first-order heuristics on a majority of the panel, it does not
+earn a place in the portfolio.
+
+** Relationship to neighboring methods
+
+- [[file:feasibility-jump.org][Feasibility Jump]]: also LP-free and GPU-batchable, but a single
+  greedy-descent local search; sampling+PT adds stochastic global exploration
+  at higher per-step cost.
+- [[file:first-order-mip-heuristics.org][First-Order and GPU MIP Heuristics]]: same "GPU heuristics CPU solvers can't
+  match" thesis, but built on first-order LP (PDLP/MPAX) projections rather
+  than MCMC; the two are portfolio siblings, not competitors.
+- [[file:matheuristics.org][Matheuristics]]: sampling-based ILP is /solver-free/, so unlike classical
+  matheuristics it uses no MIP solver as a subroutine, it is closer in spirit
+  to Simulated Annealing for VLSI/TSP than to relax-and-fix.
+- [[file:learning-based-mip-heuristics.org][Learning-Based MIP Heuristics]]: the paper's main empirical foil; sampling
+  matches or beats them and, being training-free, does not collapse under
+  distribution shift.

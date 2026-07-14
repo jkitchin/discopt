@@ -1,0 +1,71 @@
+#+TITLE: Parallel Tempering
+#+FILETAGS: :concept:parallel-tempering:mcmc:simulated-annealing:sampling:replica-exchange:
+
+* Parallel Tempering
+:PROPERTIES:
+:ARTICLE_TYPE: concept
+:SOURCE_KEYS: kyuilsim2026
+:DERIVED_FROM: ../methods/sampling-based-ilp.org ../summaries/kyuilsim2026-ilp-parallel-tempering.org
+:STATUS: draft
+:CREATED: 2026-07-12
+:END:
+
+/Parallel Tempering/ (PT), also called /replica exchange/, is a Markov Chain
+Monte Carlo (MCMC) technique for sampling from rugged, multimodal
+distributions whose modes are separated by high-energy barriers that trap a
+single chain. Instead of one chain, PT runs $B$ chains in parallel, each
+targeting a /tempered/ version of the same distribution
+$\pi(x) \propto \exp(-\mathcal{E}(x)/\tau)$, and periodically proposes swaps of
+state between adjacent chains. Hot (weakly-tempered) chains flatten the energy
+surface and cross barriers freely to explore globally; cold chains keep the
+sharp target and refine within a basin. Swaps let a configuration discovered by
+a hot chain migrate down to a cold chain, giving the cold chain access to modes
+it could never reach by local moves alone.
+
+** Swap acceptance
+
+The joint distribution over all chains is the product of the per-chain tempered
+targets, $\pi(\mathbf{x}) = \prod_{i=1}^{B} \pi(x^i; \tau^i)$. A proposed swap
+between adjacent chains $i$ and $j$ is accepted under the Metropolis rule for
+this joint target, which for temperature tempering reduces to
+$\min(1, \exp(\Delta\beta_{i,j}\,\Delta\mathcal{E}_{i,j}))$ with
+$\Delta\beta = 1/\tau^i - 1/\tau^j$ and $\Delta\mathcal{E} = \mathcal{E}(x^i) - \mathcal{E}(x^j)$.
+Because each chain individually preserves its stationary distribution and the
+swap preserves the joint, the whole scheme leaves $\pi$ invariant. Mixing
+quality is commonly measured by the /round-trip rate/, how often a replica
+travels the full temperature ladder; non-reversible PT schemes (Syed et al.)
+improve this over naive random swaps.
+
+** Tempering axes
+
+The temperature $\tau$ is the classical thing to temper, but any parameter that
+controls the /sharpness/ or /shape/ of the target can define a ladder. In
+constrained problems the barrier is often set by a penalty weight $\lambda$
+rather than temperature; citet:kyuilsim2026 introduce *penalty tempering*
+($\lambda$-PT) for ILP, where a ladder of penalty levels
+$\lambda^1 > \cdots > \lambda^B$ lets low-$\lambda$ chains cross feasibility
+boundaries while the landscape over feasible solutions is preserved,
+complementary to standard temperature tempering ($\tau$-PT). See
+[[file:../methods/sampling-based-ilp.org][sampling-based ILP heuristics]] for the ILP application and
+[[file:../summaries/kyuilsim2026-ilp-parallel-tempering.org][Solving ILP with Parallel Tempering]] for the full result.
+
+** Relation to simulated annealing
+
+Simulated annealing (SA) lowers a single chain's temperature on a schedule,
+$\tau(t) = \tau_0\gamma^t$, trading exploration for exploitation over time; it
+has one chain and no swaps. PT keeps the whole temperature ladder alive
+/simultaneously/ and exchanges between rungs, so it does not have to commit to a
+cooling schedule to retain barrier-crossing ability. The two compose: PT chains
+can each anneal, and citet:kyuilsim2026 find SA to be an indispensable
+component layered on top of PT for ILP.
+
+** Why it is relevant here
+
+PT is the global-exploration mechanism that makes MCMC competitive as a
+discrete-optimization heuristic: the $B$ chains are independent between swaps,
+so the scheme is embarrassingly parallel and maps naturally onto GPU
+throughput. That property is what makes sampling attractive as an LP-free,
+GPU-batchable primal heuristic for integer programs, a role developed for
+discopt in [[file:../methods/sampling-based-ilp.org][sampling-based ILP heuristics]] alongside [[file:../methods/feasibility-jump.org][Feasibility Jump]] and the
+[[file:../methods/first-order-mip-heuristics.org][first-order and GPU MIP heuristics]]. As a stochastic sampler it produces
+/primal/ points only, with no dual bound or optimality certificate.

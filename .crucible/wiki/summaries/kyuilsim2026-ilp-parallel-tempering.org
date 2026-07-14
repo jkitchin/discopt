@@ -1,0 +1,114 @@
+#+TITLE: Solving Integer Linear Programming with Parallel Tempering
+#+FILETAGS: :summary:ilp:sampling:mcmc:parallel-tempering:simulated-annealing:lp-free:primal-heuristic:gpu:
+
+* Solving Integer Linear Programming with Parallel Tempering
+:PROPERTIES:
+:ARTICLE_TYPE: summary
+:SOURCE_KEYS: kyuilsim2026
+:STATUS: draft
+:CREATED: 2026-07-12
+:END:
+
+citet:kyuilsim2026 (Sim, Choi, and Park; KAIST and University of Edinburgh)
+propose a *training-free, solver-free, sampling-based* framework for Integer
+Linear Programming (ILP). Where learning-based ILP methods depend on external
+solvers and generalize poorly off their training distribution, and classical
+exact solvers rely on sophisticated Branch-and-Bound heuristics, this work
+casts the ILP itself as a discrete sampling problem and solves it with
+Markov Chain Monte Carlo (MCMC) enhanced by Parallel Tempering. It is a
+[[file:../methods/sampling-based-ilp.org][sampling-based ILP heuristic]]: it finds high-quality feasible integer points
+but produces no dual bound and no optimality certificate.
+
+** Formulation: ILP as a Gibbs sampling problem
+
+The canonical binary ILP $\min_x c^\top x$ s.t. $Ax \le b,\ x \in \{0,1\}^n$
+is reformulated as sampling from a Gibbs distribution
+$\pi(x;\lambda,\tau) = \exp(-\mathcal{E}(x;\lambda)/\tau) / Z(\lambda,\tau)$
+whose energy folds objective and constraints into one penalty function
+
+$$\mathcal{E}(x;\lambda) := c^\top x + \lambda \sum_{k=1}^{m} \max(0,\ A_{k\cdot} x - b_k).$$
+
+The paper stresses that this /inequality-penalty/ form is deliberately
+distinct from the standard Lagrangian formulation used in prior sampling-for-CO
+work, which handles only equality constraints and would introduce a slack
+variable per inequality, undesirable in a sampling setting. The temperature
+$\tau$ is annealed on an exponential schedule $\tau(t) = \tau_0 \gamma^t$
+(a simulated-annealing schedule), and $\lambda$ must be chosen large enough
+that $\arg\min_x \mathcal{E}(x;\lambda)$ recovers the true ILP optimum.
+
+** Multi-step Locally-Balanced Proposal (MLBP)
+
+The transition kernel uses the /Locally-Balanced Proposal/ (LBP) of Zanella,
+which is asymptotically optimal in the Peskun ordering. The key insight is
+that for ILP the LBP can be computed *exactly and cheaply* thanks to the
+linear energy, so no gradient approximation is needed (gradient-based
+discrete samplers are uninformative here because the piecewise-linear energy
+has a piecewise-constant gradient). For the 1-Hamming sphere around $x$, both
+$c^\top x^{-j}$ and $A x^{-j}$ over all single-flip neighbors follow from two
+matrix expressions,
+
+$$[c^\top x^{-1} \cdots c^\top x^{-n}] = c^\top x \cdot \mathbf{1}_n^\top + c \odot (1 - 2x^\top), \qquad
+[A x^{-1} \cdots A x^{-n}] = A x \cdot \mathbf{1}_n^\top + A \cdot \mathrm{diag}(1 - 2x),$$
+
+which yield the exact LBP over all single flips in a couple of matrix
+products. To move faster, /Multi-step LBP/ (MLBP-$L$) samples $L$ flip indices
+without replacement per step; the paper uses MLBP-3 ($L=3$) throughout.
+Ablations show plain LBP and MLBP dramatically outperform gradient-based
+discrete samplers (Gibbs-with-Gradients, Path Auxiliary Fast Sampler), which
+are often /infeasible/ on these problems, confirming that the linear structure
+is what makes exact LBP both possible and superior.
+
+** Two Parallel Tempering strategies
+
+ILP energy landscapes are rugged, multimodal, and fragmented by constraint
+barriers, so vanilla MCMC gets trapped. [[file:../concepts/parallel-tempering.org][Parallel Tempering]] (PT, a.k.a.
+replica exchange) runs $B$ chains at once and periodically proposes swaps between
+adjacent chains. The paper studies two axes:
+
+- *$\tau$-PT (temperature tempering)*, the classical scheme: chains sit at a
+  ladder of temperatures $\tau^1 < \cdots < \tau^B$. High-temperature chains
+  flatten the /entire/ surface and traverse steep barriers; low-temperature
+  chains refine. Swap acceptance is $\min(1, \exp(\Delta\beta_{i,j}\Delta\mathcal{E}_{i,j}))$.
+- *$\lambda$-PT (penalty tempering)*, the paper's novel contribution: chains
+  sit at a ladder of penalty levels $\lambda^1 > \cdots > \lambda^B$ at fixed
+  temperature. Lower $\lambda$ /selectively lowers the constraint barrier/,
+  letting a chain cross feasibility boundaries and traverse infeasible regions,
+  while the energy landscape over feasible solutions is preserved. This is a
+  parallel alternative to adaptive/online penalty schedules.
+
+Both use MLBP within chains and a non-reversible PT scheme (Syed et al.) for
+better round-trip mixing.
+
+** Empirical results
+
+- *Vs. classical solvers.* On four NP-hard ILP benchmarks (Minimum Vertex
+  Cover, Maximum Independent Set, Combinatorial Auction, Set Covering) under a
+  strict 200-second budget, the sampling methods consistently outperform SCIP
+  and match or exceed Gurobi on two of four tasks. $\tau$-PT helps most on
+  Combinatorial Auction (few constraints); $\lambda$-PT excels on MIS and Set
+  Covering (dense constraints), highlighting its constraint-handling.
+- *Out-of-distribution.* Learning-based baselines (IL-LNS, CL-LNS) degrade
+  sharply on OOD instances; the sampling framework, needing no training,
+  stays competitive across all OOD tasks: robustness is the headline
+  advantage over learned methods.
+- *Real-world.* On MIPLIB 2017 instances (<10,000 constraints, 1000s budget)
+  with only lightly-tuned hyperparameters, the framework is competitive with
+  classical solvers and beats learned methods that fail outside their training
+  set, though it still underperforms SCIP on some instances.
+- *Ablations.* Removing the simulated-annealing schedule degrades all four
+  benchmarks (SA is indispensable: broad exploration first, then concentration
+  on feasible regions). MLBP path length $L$ trades local accuracy for global
+  coverage; feasibility is robust to the choice.
+
+** Limitations (and why they matter for a certifying solver)
+
+The authors note: (1) convergence and mixing of discrete PT in
+high-dimensional spaces lack theory, so there are *no formal guarantees*;
+(2) the key hyperparameters $\tau$ and $\lambda$ are grid-searched on a small
+validation set and may need re-tuning per problem class; (3) the method relies
+on GPU-accelerated parallel computation. For discopt the decisive point is
+implicit in the design: a sampler yields a /primal/ (feasible) point but *no
+dual bound and no certificate of optimality*. It can therefore only complement
+a certifying global solver, never replace its Branch-and-Bound. The concrete
+integration path is developed in the method article
+[[file:../methods/sampling-based-ilp.org][sampling-based ILP heuristic]].
