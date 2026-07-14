@@ -238,20 +238,73 @@ def test_nonconvex_qp_refused():
         bl.formulate(method="kkt")
 
 
-def test_nonquadratic_lower_refused_pending_certifier():
+def test_convex_nlp_lower_accepted():
+    """A genuinely convex non-quadratic follower is certified convex in y and accepted.
+
+    ``exp(y) - x*y`` is convex in y (∂²/∂y² = exp(y) > 0) for every leader x, even
+    though it is not jointly convex in (x, y). The interval-Hessian-in-y certifier
+    must accept it (the natural bilevel form couples the leader linearly).
+    """
     m = Model("nq")
+    x = m.continuous("x", lb=0.5, ub=8)
+    y = m.continuous("y", lb=-2, ub=2)
+    m.minimize((y - 1) * (y - 1))
+    bl = BilevelProblem(
+        m,
+        upper_vars=[x],
+        lower_vars=[y],
+        lower_objective=FunctionCall("exp", y) - x * y,
+        lower_constraints=[],
+    )
+    bl.build_kkt_system()  # must not raise
+    assert bl.kkt is not None and len(bl.kkt.stationarity) == 1
+
+
+def test_convex_nlp_with_power_accepted():
+    """y**4 - x*y: convex in y (∂²/∂y² = 12 y² >= 0), leader coupling linear."""
+    m = Model("pw")
+    x = m.continuous("x", lb=0, ub=5)
+    y = m.continuous("y", lb=-3, ub=3)
+    m.minimize(x - y)
+    bl = BilevelProblem(
+        m, upper_vars=[x], lower_vars=[y], lower_objective=y**4 - x * y, lower_constraints=[]
+    )
+    bl.build_kkt_system()
+    assert bl.kkt is not None
+
+
+def test_nonconvex_nlp_lower_refused():
+    """sin(y) has an indefinite second derivative over the box → refused."""
+    m = Model("ncx_nl")
     x = m.continuous("x", lb=0, ub=10)
-    y = m.continuous("y", lb=0.1, ub=10)
+    y = m.continuous("y", lb=-2, ub=2)
     m.minimize(x - y)
     bl = BilevelProblem(
         m,
         upper_vars=[x],
         lower_vars=[y],
-        lower_objective=FunctionCall("exp", y),  # exp(y): convex but non-quadratic
-        lower_constraints=[y <= 5],
+        lower_objective=FunctionCall("sin", y),  # ∂²/∂y² = -sin(y): sign-indefinite
+        lower_constraints=[],
     )
-    with pytest.raises(NotImplementedError, match="not-quadratic|certifier"):
-        bl.formulate(method="kkt")
+    with pytest.raises(NotImplementedError, match="convex"):
+        bl.build_kkt_system()
+
+
+def test_concave_nlp_min_follower_refused():
+    """-exp(y) for a *minimizing* follower is concave → nonconvex lower level, refused."""
+    m = Model("cc_nl")
+    x = m.continuous("x", lb=0, ub=10)
+    y = m.continuous("y", lb=-2, ub=2)
+    m.minimize(x - y)
+    bl = BilevelProblem(
+        m,
+        upper_vars=[x],
+        lower_vars=[y],
+        lower_objective=-FunctionCall("exp", y),
+        lower_constraints=[],
+    )
+    with pytest.raises(NotImplementedError, match="convex"):
+        bl.build_kkt_system()
 
 
 def test_nondiagonal_psd_qp_accepted():
