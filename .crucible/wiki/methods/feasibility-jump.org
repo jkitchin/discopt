@@ -27,7 +27,10 @@ citep:bolusani-scip9-2024 and =HighsFeasibilityJump.cpp= in [[file:../concepts/h
 For discopt, FJ is uniquely interesting: its inner loop maps cleanly onto
 JAX =vmap= or NVIDIA Warp kernels, giving discopt the opportunity to offer a
 GPU-batched feasibility engine that CPU-only implementations in SCIP and
-HiGHS structurally cannot match.
+HiGHS structurally cannot match. FJ's greedy single-variable descent has a
+stochastic, globally-exploring counterpart in [[file:sampling-based-ilp.org][sampling-based ILP heuristics]]
+(MCMC with parallel tempering), another LP-free, GPU-batchable primal engine
+in the same portfolio.
 
 ** The Algorithm
 
