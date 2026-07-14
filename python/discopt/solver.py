@@ -5646,6 +5646,19 @@ def solve_model(
     iteration = 0
     _deadline = t_start + time_limit
 
+    # --- TX1: adaptive back-off for the strided in-tree node NLP -------------
+    # DISCOPT_ADAPTIVE_NLP (default OFF, flag-graduation). The strided node-NLP is
+    # a pure primal heuristic (fires only in the nonconvex + LP-relaxer regime,
+    # where the LP gives the bound); TX0 measured it as idle waste on integer-heavy
+    # models (nvs09 14.3 s, identical proof). When ON we grow the *effective*
+    # stride whenever the node-NLP fired but found no incumbent improvement, and
+    # reset it to the base stride the instant it does. This state persists across
+    # B&B iterations; it never touches the convex / no-LP-relaxer bound-source path.
+    _adaptive_nlp = _tuning().adaptive_nlp
+    _ADAPTIVE_NLP_PATIENCE = 2  # non-improving fired batches before a doubling
+    _ADAPTIVE_NLP_STRIDE_CAP = 256  # ceiling on the effective stride
+    _adaptive_nlp_state = {"eff_stride": 0, "no_improve": 0}
+
     # --- F4: root-heuristic NLP/compile budget gate --------------------------
     # ``solve(time_limit=T)`` is a contract. On the no-relaxation flowsheet class
     # (contvar, heatexch_gen3, hda) the root PRIMAL-HEURISTIC phase blows past it
@@ -6577,6 +6590,24 @@ def solve_model(
             _nlp_stride = _tuning().node_nlp_stride
             _gate_node_nlp = _mc_lp_relaxer is not None and not _model_is_convex and _nlp_stride > 1
 
+            # TX1: effective stride. When adaptive back-off is ON and we are in the
+            # throttle-safe gated regime, use the (persisted, back-off-grown)
+            # effective stride instead of the fixed one; seed it from the base
+            # stride on first use. Adaptive-off, or outside the gated regime, this
+            # is byte-identical to today's fixed-stride behavior.
+            _eff_nlp_stride = _nlp_stride
+            if _adaptive_nlp and _gate_node_nlp:
+                if _adaptive_nlp_state["eff_stride"] <= 0:
+                    _adaptive_nlp_state["eff_stride"] = _nlp_stride
+                _eff_nlp_stride = _adaptive_nlp_state["eff_stride"]
+
+            # TX1: snapshot the incumbent so we can attribute any improvement over
+            # this batch's per-node loop to the strided node-NLP (the ONLY
+            # inject_incumbent site inside the loop below); track whether it fired.
+            _adapt_inc_pre = tree.incumbent()
+            _adapt_inc_pre_val = float(_adapt_inc_pre[1]) if _adapt_inc_pre is not None else None
+            _adapt_nlp_fired = False
+
             for i in range(n_batch):
                 node_lb = np.array(batch_lb[i])
                 node_ub = np.array(batch_ub[i])
@@ -6607,7 +6638,7 @@ def solve_model(
                 # Strided primal NLP (lever 2): run the per-node NLP only on a
                 # fraction of nodes in the gated regime; every node still gets the
                 # LP relaxer's bound + primal below.
-                _node_nlp_due = (not _gate_node_nlp) or (int(batch_ids[i]) % _nlp_stride == 0)
+                _node_nlp_due = (not _gate_node_nlp) or (int(batch_ids[i]) % _eff_nlp_stride == 0)
                 nlp_result = None
                 if iteration == 0 and _mc_lp_relaxer is None:
                     # The root multistart NLP is the only bound source we have.
@@ -6625,6 +6656,8 @@ def solve_model(
                         observe_cost=_observe_heur_nlp,
                     )
                 elif iteration > 0 and _node_nlp_due:
+                    if _gate_node_nlp:
+                        _adapt_nlp_fired = True
                     # Warm-start from parent solution if available
                     psol_i = np.array(batch_psols[i])
                     if not np.any(np.isnan(psol_i)):
@@ -6953,6 +6986,42 @@ def solve_model(
                 if _model_is_convex and not node_infeasible_mask[i] and not _serial_nlp_trusted:
                     _gap_certified = False
                     _convex_bound_untrusted = True
+
+            # TX1: adaptive back-off update. Only when the strided node-NLP fired
+            # this batch (gated regime): if it did NOT improve the incumbent for
+            # PATIENCE consecutive fired batches, double the effective stride (up to
+            # the cap); reset to the base stride the moment it improves. Purely a
+            # heuristic-schedule change — the dual bound / gap are untouched.
+            if _adaptive_nlp and _gate_node_nlp and _adapt_nlp_fired:
+                _adapt_inc_post = tree.incumbent()
+                _adapt_inc_post_val = (
+                    float(_adapt_inc_post[1]) if _adapt_inc_post is not None else None
+                )
+                _adapt_improved = _adapt_inc_post_val is not None and (
+                    _adapt_inc_pre_val is None
+                    or _adapt_inc_post_val < _adapt_inc_pre_val - _DEFAULT_ABS_GAP_TOL
+                )
+                if _adapt_improved:
+                    if _adaptive_nlp_state["eff_stride"] != _nlp_stride:
+                        logger.debug(
+                            "TX1 adaptive node-NLP: incumbent improved, reset stride %d -> %d",
+                            _adaptive_nlp_state["eff_stride"],
+                            _nlp_stride,
+                        )
+                    _adaptive_nlp_state["eff_stride"] = _nlp_stride
+                    _adaptive_nlp_state["no_improve"] = 0
+                else:
+                    _adaptive_nlp_state["no_improve"] += 1
+                    if _adaptive_nlp_state["no_improve"] >= _ADAPTIVE_NLP_PATIENCE:
+                        _new_stride = min(_eff_nlp_stride * 2, _ADAPTIVE_NLP_STRIDE_CAP)
+                        if _new_stride != _adaptive_nlp_state["eff_stride"]:
+                            logger.debug(
+                                "TX1 adaptive node-NLP: no improvement, back off stride %d -> %d",
+                                _adaptive_nlp_state["eff_stride"],
+                                _new_stride,
+                            )
+                        _adaptive_nlp_state["eff_stride"] = _new_stride
+                        _adaptive_nlp_state["no_improve"] = 0
         jax_time += time.perf_counter() - t_jax_start
 
         # C-1 (path-agnostic, covers convex + nonconvex, batch + serial): any node
