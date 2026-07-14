@@ -197,3 +197,44 @@ zero marginal in-stack is removed.
    dual-bound-at-budget and proofs as the signal, never node counts (§0.5).
 3. TX4b (OBBT on pure-integer) widens OBBT's reach exactly where TX2 budgets
    it — sequence TX2 before TX4b so the sub-budget exists first.
+
+## §6. Alignment with the reference solvers (evidence-tiered)
+
+Claims about SCIP/BARON in this plan carry one of three evidence tiers; no
+untiered claim about a reference solver is admissible in TX items.
+
+- **Tier 1 — measured in this repo.** SCIP was run directly on the family-C
+  instances with statistics captured (`scip-gap-nvs-diagnosis.md`): nvs17
+  70 nodes / 0.88 s default; **6,796 nodes / 4.72 s with cuts off** (≈1,440
+  nodes/s — the TX4 throughput bar); presolve-off unchanged; separator stats
+  aggregation(c-MIR) 15–22, Gomory 1–6, RLT 0. BARON is **closed source**: we
+  observe only outcomes (recorded walls, Appendix B / `baron_global50.txt`);
+  all claims about its internals are Tier-2 reconstructions.
+- **Tier 2 — published literature (keys in `docs/references.bib`, distilled
+  in `.crucible/wiki/methods/{bound-tightening,spatial-branch-and-bound}.org`).**
+  BARON = branch-and-reduce: LP/polyhedral relaxations of a factorable
+  reformulation + per-node range reduction [Ryoo1996; Tawarmalani2005;
+  Tawarmalani2002; Kilinc2018]. SCIP MINLP = LP-based branch-and-cut on an
+  extended formulation [Vigerske2018; Bestuzheva2023]. OBBT is explicitly
+  budgeted/filtered in reference practice [Gleixner2017]. Shared substrate:
+  [McCormick1976; Smith1999; Belotti2009]; branching [Achterberg2005];
+  heuristic budgeting [Berthold2006; Achterberg2007].
+- **Tier 3 — inference (must be labeled).** E.g. "BARON does not run an
+  expensive NLP at every node" is an inference from its published LP-polyhedral
+  architecture, not an observable; BARON does run local NLPs for incumbents.
+  The LMTD-convexity literature (Mistry & Misener) is not yet in the bib —
+  ingest before citing in TX6.
+
+Per-item alignment: **TX1** (NLP as budgeted heuristic) and **TX2** (budgeted
+OBBT) move *toward* reference practice [Berthold2006; Vigerske2018;
+Gleixner2017] — our stride-4-unconditional default is the deviation. **TX4**
+is the published core of both solvers [Ryoo1996; Tawarmalani2005; Vigerske2018;
+Kilinc2018] plus Tier-1 observation. **TX5** matches SCIP's observed working
+separator (aggregation/c-MIR) and is deferred for the Tier-1 reason (no-cut
+SCIP still solves the family). **TX3** has no reference analog — it removes a
+substrate artifact (Python/JAX floor) reference solvers never had. **TX6** is
+not alignment-driven: it is our own PF4 finding; no evidence either reference
+solver handles the ε-pole class better. Deliberate divergence: the certificate
+regime (outward rounding, zero-slack `incorrect_count`, differential gates) is
+stricter than default floating-point SCIP/BARON practice — a product choice,
+not a gap.
