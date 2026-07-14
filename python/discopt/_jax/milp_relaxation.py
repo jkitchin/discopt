@@ -70,13 +70,6 @@ _warned_messages: set[str] = set()
 _MAX_INTEGER_COS_ENUM = 10000
 _MAX_FINITE_EXP_ARG = float(np.log(np.finfo(np.float64).max))
 _MAX_TRIG_PIECEWISE_SPAN = 2.0 * math.pi
-# Lifted ``1/g`` (issue #154) is convex only on ``g > 0``; require the inner
-# interval's lower end to clear this strictly-positive floor so the reciprocal
-# and its tangent slopes (``-1/g**2``) stay finite and well-conditioned.
-_RECIP_MIN_DENOM = 1e-6
-# Lifted ``sqrt(g)`` needs ``g >= 0``; tolerate a tiny negative slack from loose
-# interval bounds on a provably-nonnegative argument (sum of squares) and clamp.
-_SQRT_NEG_TOL = 1e-9
 # Conditioning guard shared by the fractional-power envelopes (issue #158) and the
 # lifted reciprocal/sqrt envelopes (issue #154). A power ``x**p`` with ``p<0`` (or
 # ``0<p<1``) near a small lower bound, the convex ``1/g`` slope ``-1/g**2``, and the
@@ -128,7 +121,6 @@ def _envelope_slope_ok(slope: float) -> bool:
 _MAX_TRIG_PIECEWISE_INTERVALS = 32
 _MAX_TRIG_IMPORTED_BREAKPOINTS = _MAX_TRIG_PIECEWISE_INTERVALS + 1
 _MAX_TRIG_PIECEWISE_WIDTH = math.pi / 6.0
-_MAX_RELAXATION_PARTITION_INTERVALS = 128
 _MAX_OBJECTIVE_LIFT_POWER = 6
 _MAX_FINITE_DOMAIN_TRIG_TABLE_VALUES = 256
 
