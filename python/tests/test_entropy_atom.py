@@ -107,6 +107,44 @@ def test_non_entropy_product_unaffected_when_on(_flag_on):
     assert on == off, f"entropy flag changed a non-entropy product: {on} vs {off}"
 
 
+# (a, b, x_lb, x_ub) chosen so t = a*x+b spans 1/e (interior min, curvature bites).
+_AFFINE_ARG_CASES = [(2.0, 0.0, 0.1, 1.0), (1.0, 1.0, -0.8, 1.0), (3.0, 0.5, -0.1, 1.0)]
+
+
+@pytest.mark.parametrize("a,b,xl,xu", _AFFINE_ARG_CASES)
+def test_affine_arg_entropy_sound_and_tighter(_flag_on, a, b, xl, xu):
+    """``(a*x+b)*log(a*x+b)`` for an affine argument fires the same atom (shared
+    affine form). Sound (LB <= true) and strictly tighter than the shattered
+    bilinear where the interior curvature bites."""
+
+    def build():
+        m = Model("aff_ent")
+        x = m.continuous("x", lb=xl, ub=xu)
+        t = a * x + b
+        m.minimize(t * dm.log(t))
+        return m
+
+    on = _bound_of(build)
+    os.environ.pop("DISCOPT_ENTROPY_ATOM", None)
+    off = _bound_of(build)
+    os.environ["DISCOPT_ENTROPY_ATOM"] = "1"
+    # True min of t log t on t in [a*xl+b, a*xu+b]: interior 1/e (spanned) else corner.
+    tlo, thi = a * xl + b, a * xu + b
+    cands = [tlo, thi] + ([1.0 / math.e] if tlo <= 1.0 / math.e <= thi else [])
+    tm = min(t * math.log(t) for t in cands)
+    assert on <= tm + 1e-4, f"UNSOUND: ON {on} > true {tm} for a={a} b={b}"
+    assert on >= off - 1e-9, f"LOOSER for a={a} b={b}: ON={on} OFF={off}"
+    assert on > off + 1e-3, f"not tighter for a={a} b={b}: ON={on} OFF={off}"
+
+
+def _bound_of(build):
+    m = build()
+    terms = classify_nonlinear_terms(m)
+    milp, _ = build_milp_relaxation(m, terms, None, incumbent=None)
+    r = milp.solve()
+    return float(r.objective) if r.objective is not None else float(r.bound)
+
+
 def test_entropy_full_solve_still_proves(_flag_on):
     """End-to-end: the entropy model still solves to the true optimum (sound)."""
     m = Model("ent_solve")

@@ -1233,6 +1233,81 @@ def _emit_lse(ctx: "_Builder", w: int, terms: list) -> bool:
 
 
 # --------------------------------------------------------------------------- #
+# Euclidean-norm atom (issue #632 adjacent-atom family). ``sqrt(sum_i t_i^2)`` is
+# CONVEX, but the factorable path relaxes the outer ``sqrt`` as a CONCAVE atom over
+# the square-sum — the wrong curvature, collapsing the underestimator to a loose
+# floor. Recognize the atom and emit its convex OA: ``||t|| >= a . t`` for every
+# unit vector ``a`` (Cauchy-Schwarz — the tangent of the norm at ``t0`` is the
+# direction ``a = t0/||t0||``), plus the axis facets ``||t|| >= +/- t_i``. Sound for
+# ANY direction. Gated ``DISCOPT_NORM_ATOM`` (default OFF -> the sqrt path is
+# byte-identical). Prototype scope: ``sqrt(sum_i t_i^2 [+ c])``, ``c >= 0`` folding
+# in as a constant coordinate ``sqrt(c)``.
+def _norm_terms(ctx: "_Builder", node: CNode):
+    """If ``node`` is ``sqrt(sum_i t_i^2 [+ c])`` (unit weights, ``c >= 0``), return
+    ``[(lt_i, lo_i, hi_i), ...]`` for each squared base's LinForm + bounds; else
+    ``None``."""
+    if node.kind != "call" or node.payload != "sqrt":
+        return None
+    arg = node.children[0]
+    if arg.kind != "sum":
+        return None
+    coeffs, const = arg.payload
+    if not coeffs or not all(abs(float(c) - 1.0) < 1e-12 for c in coeffs):
+        return None
+    terms = []
+    for ch in arg.children:
+        if ch.kind != "pow" or float(ch.payload) != 2.0:
+            return None
+        (base,) = ch.children
+        lo, hi = ctx.bounds(base)
+        terms.append((ctx.rep(base), lo, hi))
+    cst = float(const)
+    if cst > 0.0:  # sqrt(sum t^2 + c) = ||(t, sqrt(c))||: a fixed coordinate.
+        sc = math.sqrt(cst)
+        terms.append((LinForm.constant(sc), sc, sc))
+    elif cst != 0.0:
+        return None
+    return terms if terms else None
+
+
+def _emit_norm(ctx: "_Builder", w: int, terms: list) -> bool:
+    """Emit convex OA of ``w = ||t||``: axis facets ``w >= +/- t_i`` and direction
+    cuts ``w >= a . t`` at box-corner directions. Returns True iff any cut emitted."""
+    if not all(_finite(lo, hi) for _, lo, hi in terms):
+        return False
+    # ||t|| is nonnegative and box-bounded above by the farthest corner; pin the
+    # aux interval so the objective floor is finite (the bound certifies) and sound.
+    ctx.col_lb[w] = max(ctx.col_lb[w], 0.0)
+    maxsq = math.fsum(max(abs(lo), abs(hi)) ** 2 for _, lo, hi in terms)
+    ctx.col_ub[w] = min(ctx.col_ub[w], math.sqrt(maxsq))
+    lts = [lt for lt, _, _ in terms]
+    emitted = False
+    # Axis facets: ||t|| >= |t_i|  ->  w >= t_i and w >= -t_i.
+    for lt in lts:
+        for sgn in (1.0, -1.0):
+            coeffs: dict[int, float] = {w: -1.0}
+            for j, c in lt.coeffs.items():
+                coeffs[j] = coeffs.get(j, 0.0) + sgn * c
+            ctx.add_row(coeffs, -sgn * lt.const)  # -w + sgn*t_i <= 0
+            emitted = True
+    # Direction cuts a . t <= ||t|| at the box-corner unit directions.
+    for p in _lse_refs(terms):
+        norm_p = math.sqrt(math.fsum(v * v for v in p))
+        if norm_p < 1e-12:
+            continue
+        a = [v / norm_p for v in p]
+        coeffs = {w: -1.0}
+        b = 0.0
+        for ai, lt in zip(a, lts):
+            for j, c in lt.coeffs.items():
+                coeffs[j] = coeffs.get(j, 0.0) + ai * c
+            b += -ai * lt.const
+        ctx.add_row(coeffs, b)
+        emitted = True
+    return emitted
+
+
+# --------------------------------------------------------------------------- #
 # ENVELOPE_LIBRARY builders — one per atom kind, ALL sound (blueprint §3.2)
 # --------------------------------------------------------------------------- #
 def _build_univariate_call(ctx: _Builder, node: CNode, w: int) -> Envelope:
@@ -1252,6 +1327,12 @@ def _build_univariate_call(ctx: _Builder, node: CNode, w: int) -> Envelope:
         if _lse is not None and _emit_lse(ctx, w, _lse):
             # tight=False keeps the aux interval floor (over side); the tangent
             # cuts tighten the under side toward the exact convex envelope.
+            return Envelope(rows=[], tight=False)
+    # Euclidean-norm atom (gated): convex OA of sqrt(sum t^2) instead of the loose
+    # concave sqrt(square-sum). Off by default => byte-identical.
+    if fname == "sqrt" and os.environ.get("DISCOPT_NORM_ATOM") == "1":
+        _nt = _norm_terms(ctx, node)
+        if _nt is not None and _emit_norm(ctx, w, _nt):
             return Envelope(rows=[], tight=False)
     arg = node.children[0]
     lt = ctx.rep(arg)
@@ -1571,9 +1652,9 @@ def _emit_scaled_equality(ctx: _Builder, w: int, lin: LinForm, scalar: float) ->
 # construction (a tangent of a convex function is a global underestimator; the
 # secant chord is a global overestimator). Gated by ``DISCOPT_ENTROPY_ATOM``
 # (default OFF, flag-graduation convention); when off, ``_build_product`` is
-# byte-identical. Prototype scope: the pure univariate ``x*log(x)`` (unit
-# coefficients, single variable); affine-arg / relative-entropy generalizations
-# are follow-ups (the multivariate jointly-convex case routes to _separate_convex).
+# byte-identical. Recognizes ``t*log(t)`` for any shared affine form ``t`` (so
+# ``x log x``, ``(a x) log(a x)`` and ``(a x + b) log(a x + b)`` all fire); the
+# relative-entropy generalization ``x log(x/y)`` has its own gated atom below.
 def _xlogx(t: float) -> float:
     return t * math.log(t)
 
@@ -1582,11 +1663,23 @@ def _xlogx_prime(t: float) -> float:
     return math.log(t) + 1.0
 
 
+def _linform_eq(a: LinForm, b: LinForm) -> bool:
+    """Do two LinForms represent the same affine expression (same nonzero coeffs
+    and constant)? Used to recognize ``t*log(t)`` for a shared affine ``t``."""
+    if abs(a.const - b.const) > 1e-12:
+        return False
+    ca = {j: c for j, c in a.coeffs.items() if c != 0.0}
+    cb = {j: c for j, c in b.coeffs.items() if c != 0.0}
+    return ca.keys() == cb.keys() and all(abs(ca[j] - cb[j]) <= 1e-12 for j in ca)
+
+
 def _entropy_prod_var(ctx: "_Builder", node: CNode):
-    """If ``node`` is the product ``x*log(x)`` (one original variable, unit
-    coefficients on both the base and the log argument), return ``(lt_x, lo, hi)``
-    for the shared 1-D entropy envelope; else ``None``. Only the exact
-    ``x*log(x)`` form is recognized, so the rewrite is never mis-applied."""
+    """If ``node`` is ``t*log(t)`` for a shared AFFINE form ``t`` (unit exponents),
+    return ``(lt_t, lo, hi)`` for the shared 1-D entropy envelope; else ``None``.
+    Covers ``x*log(x)``, ``(a x)*log(a x)``, ``(a x + b)*log(a x + b)`` — all convex
+    (``t log t`` composed with an affine ``t``). Only recognized when the base
+    factor and the log argument are the *same* affine form, so it is never
+    mis-applied to a genuine bilinear ``x*log(y)``."""
     if node.kind != "prod":
         return None
     (exps,) = node.payload
@@ -1596,18 +1689,75 @@ def _entropy_prod_var(ctx: "_Builder", node: CNode):
         if ch.kind == "call" and ch.payload == "log":
             other = node.children[1 - i]
             (larg,) = ch.children
-            sv_o = ctx.single_var_affine(ctx.rep(other))
-            sv_a = ctx.single_var_affine(ctx.rep(larg))
-            if (
-                sv_o is not None
-                and sv_a is not None
-                and sv_o[0] == sv_a[0]
-                and abs(sv_o[1] - 1.0) < 1e-12
-                and abs(sv_a[1] - 1.0) < 1e-12
-            ):
+            lt_o = ctx.rep(other)
+            if _linform_eq(lt_o, ctx.rep(larg)):
                 lo, hi = ctx.bounds(other)
-                return ctx.rep(other), lo, hi
+                return lt_o, lo, hi
     return None
+
+
+# Relative-entropy atom (issue #632 adjacent-atom family). ``x*log(x/y)`` is
+# JOINTLY convex on x,y>0 (the perspective of ``x log x``), but the factorable
+# path relaxes it as ``x * log(x/y)`` (a bilinear of x against the concave-relaxed
+# ``log(x/y)``) -> loose. Recognize the atom and emit its joint convex OA: tangent
+# planes ``w >= D0 + dD/dx (x-x0) + dD/dy (y-y0)`` with dD/dx = log(x0/y0)+1,
+# dD/dy = -x0/y0. Sound for ANY (x0,y0) with x0,y0>0 (tangent of a jointly-convex
+# function). Gated ``DISCOPT_RELENT_ATOM`` (default OFF; byte-identical off).
+def _relent_vars(ctx: "_Builder", node: CNode):
+    """If ``node`` is ``x*log(x/y)`` (unit-coeff single vars x != y), return
+    ``(col_x, col_y, (lox, hix, loy, hiy))``; else ``None``."""
+    if node.kind != "prod":
+        return None
+    (exps,) = node.payload
+    if len(node.children) != 2 or not all(float(e) == 1.0 for e in exps):
+        return None
+    for i, ch in enumerate(node.children):
+        if ch.kind == "call" and ch.payload == "log":
+            other = node.children[1 - i]
+            (ratio,) = ch.children
+            sv = ctx.single_var_affine(ctx.rep(other))
+            if sv is None or abs(sv[1] - 1.0) > 1e-12 or ratio.kind != "prod":
+                return None
+            colx = sv[0]
+            (rexps,) = ratio.payload
+            if len(ratio.children) != 2:
+                return None
+            num = den = None
+            for rc, re in zip(ratio.children, rexps):
+                svr = ctx.single_var_affine(ctx.rep(rc))
+                if svr is None or abs(svr[1] - 1.0) > 1e-12:
+                    return None
+                if abs(float(re) - 1.0) < 1e-12:
+                    num = svr[0]
+                elif abs(float(re) + 1.0) < 1e-12:
+                    den = svr[0]
+            if num != colx or den is None or den == colx:
+                return None
+            lox, hix = ctx.bounds(other)
+            return colx, den, (lox, hix, ctx.col_lb[den], ctx.col_ub[den])
+    return None
+
+
+def _emit_relent(ctx: "_Builder", w: int, colx: int, coly: int, box: tuple) -> bool:
+    """Emit joint tangent-plane underestimators of ``w = x*log(x/y)``."""
+    lox, hix, loy, hiy = box
+    if not (lox > 0.0 and loy > 0.0 and _finite(lox, hix) and _finite(loy, hiy)):
+        return False
+    # Sound aux floor (interval product of x>0 and log(x/y)) so the bound certifies.
+    lr, hr = math.log(lox / hiy), math.log(hix / loy)
+    ctx.col_lb[w] = max(ctx.col_lb[w], min(xv * lv for xv in (lox, hix) for lv in (lr, hr)))
+    ctx.col_ub[w] = min(ctx.col_ub[w], max(xv * lv for xv in (lox, hix) for lv in (lr, hr)))
+    refs = [(0.5 * (lox + hix), 0.5 * (loy + hiy))]
+    refs += [(a, b) for a in (lox, hix) for b in (loy, hiy)]
+    emitted = False
+    for x0, y0 in refs:
+        d0 = x0 * math.log(x0 / y0)
+        gx = math.log(x0 / y0) + 1.0
+        gy = -x0 / y0
+        # w >= d0 + gx(x-x0) + gy(y-y0) -> -w + gx*x + gy*y <= gx*x0 + gy*y0 - d0
+        ctx.add_row({w: -1.0, colx: gx, coly: gy}, gx * x0 + gy * y0 - d0)
+        emitted = True
+    return emitted
 
 
 def _build_product(ctx: _Builder, node: CNode, w: int) -> Envelope:
@@ -1637,6 +1787,11 @@ def _build_product(ctx: _Builder, node: CNode, w: int) -> Envelope:
             if _lo > 0.0:
                 _tight = _emit_1d(ctx, w, _lt, _lo, _hi, _xlogx, _xlogx_prime, "convex")
                 return Envelope(rows=[], tight=_tight)
+    # Relative-entropy atom (gated): joint convex OA of x*log(x/y). Off => identical.
+    if os.environ.get("DISCOPT_RELENT_ATOM") == "1":
+        _re = _relent_vars(ctx, node)
+        if _re is not None and _emit_relent(ctx, w, _re[0], _re[1], _re[2]):
+            return Envelope(rows=[], tight=False)
 
     (exps,) = node.payload
     scalar = 1.0
