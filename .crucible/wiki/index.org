@@ -1,18 +1,19 @@
 #+TITLE: Crucible Wiki Index
-#+DATE: [2026-04-24 Fri]
+#+DATE: [2026-07-12 Sun]
 #+STARTUP: overview
 
 Auto-generated index of the Crucible knowledge base.
-56 articles, 177 concepts, 271 sources, 262 links.
+63 articles, 186 concepts, 279 sources, 318 links.
 
 * Articles by Type
 
-** Concepts (24)
+** Concepts (27)
 
 - [[file:concepts/baron-solver.org][BARON Solver]] /draft/
 - [[file:concepts/big-m-formulations.org][Big-M Formulations]] /draft/
 - [[file:concepts/convex-minlp-solvers.org][Convex MINLP Solvers]] /draft/
 - [[file:concepts/convex-relaxations.org][Convex Relaxations for Global Optimization]] /draft/
+- [[file:concepts/convex-transformable-functions.org][Convex-Transformable (G-convex) Functions]] /draft/
 - [[file:concepts/convexity-detection.org][Convexity Detection]] /draft/
 - [[file:concepts/couenne-solver.org][Couenne Solver]] /draft/
 - [[file:index.org][Crucible Wiki Index]] /draft/
@@ -22,19 +23,30 @@ Auto-generated index of the Crucible knowledge base.
 - [[file:concepts/highs-solver.org][HiGHS Solver]] /draft/
 - [[file:concepts/ipopt-solver.org][Ipopt: Interior Point Optimizer]] /draft/
 - [[file:concepts/llm-optimization.org][Large Language Models for Mathematical Optimization]] /draft/
+- [[file:concepts/maingo-solver.org][MAiNGO Solver]] /draft/
 - [[file:concepts/minlp-survey.org][MINLP Problem Class and Surveys]] /draft/
 - [[file:concepts/mpax-solver.org][MPAX Solver]] /draft/
 - [[file:concepts/model-based-doe.org][Model-Based Design of Experiments (MBDoE)]] /draft/
 - [[file:concepts/multiobjective-optimization.org][Multiobjective Optimization: Pareto Optimality and Problem Structure]] /draft/
 - [[file:concepts/neural-network-embedding.org][Neural Network Embedding in Optimization]] /draft/
 - [[file:concepts/nonlinear-programming.org][Nonlinear Programming Fundamentals]] /draft/
+- [[file:concepts/parallel-tempering.org][Parallel Tempering]] /draft/
 - [[file:concepts/identifiability-analysis.org][Parameter Identifiability Analysis]] /draft/
 - [[file:concepts/performance-indicators-mo.org][Performance Indicators for Pareto Front Approximations]] /draft/
 - [[file:concepts/robust-optimization.org][Robust Optimization: Decision-Making Under Set-Based Uncertainty]] /draft/
 - [[file:concepts/scip-solver.org][SCIP Solver]] /draft/
 - [[file:concepts/sloppy-models.org][Sloppy Models]] /draft/
 
-** Methods (32)
+** Source Summaries (2)
+
+- [[file:summaries/kyuilsim2026-ilp-parallel-tempering.org][Solving Integer Linear Programming with Parallel Tempering]] /draft/
+- [[file:summaries/khajavirad-2012-convex-transformable.org][Summary — Relaxations of Factorable Functions with Convex-Transformable Intermediates (Khajavirad, Michalek, Sahinidis 2012)]] /draft/
+
+** Comparisons (1)
+
+- [[file:comparisons/maingo-vs-discopt.org][MAiNGO vs discopt]] /draft/
+
+** Methods (33)
 
 - [[file:methods/adaptive-multivariate-partitioning.org][Adaptive Multivariate Partitioning (AMP) for Global MINLP]] /draft/
 - [[file:methods/alphabb-underestimators.org][AlphaBB Underestimators]] /draft/
@@ -65,6 +77,7 @@ Auto-generated index of the Crucible knowledge base.
 - [[file:methods/outer-approximation.org][Outer Approximation for MINLP]] /draft/
 - [[file:methods/parameter-estimability.org][Parameter Estimability and Subset Selection]] /draft/
 - [[file:methods/profile-likelihood-identifiability.org][Profile Likelihood Identifiability Analysis]] /draft/
+- [[file:methods/sampling-based-ilp.org][Sampling-Based ILP Heuristics (MCMC + Parallel Tempering)]] /draft/
 - [[file:methods/scalarization-methods.org][Scalarization Methods for Multiobjective Optimization]] /draft/
 - [[file:methods/spatial-branch-and-bound.org][Spatial Branch and Bound]] /draft/
 - [[file:methods/structural-identifiability.org][Structural Identifiability Methods]] /draft/
@@ -99,10 +112,11 @@ Auto-generated index of the Crucible knowledge base.
 
 - [[file:methods/auxiliary-variable-reformulation.org][Auxiliary Variable Reformulation]] [method]
 
-** Baron (2)
+** Baron (3)
 
 - [[file:methods/auxiliary-variable-reformulation.org][Auxiliary Variable Reformulation]] [method]
 - [[file:concepts/baron-solver.org][BARON Solver]] [concept]
+- [[file:summaries/khajavirad-2012-convex-transformable.org][Summary — Relaxations of Factorable Functions with Convex-Transformable Intermediates (Khajavirad, Michalek, Sahinidis 2012)]] [summary]
 
 ** Barrier (1)
 
@@ -203,15 +217,19 @@ Auto-generated index of the Crucible knowledge base.
 - [[file:methods/nonlinear-branch-and-bound.org][Nonlinear Branch and Bound (NLP-BB)]] [method]
 - [[file:methods/outer-approximation.org][Outer Approximation for MINLP]] [method]
 
-** Convex-Relaxation (3)
+** Convex-Relaxation (5)
 
 - [[file:methods/alphabb-underestimators.org][AlphaBB Underestimators]] [method]
 - [[file:concepts/convex-relaxations.org][Convex Relaxations for Global Optimization]] [concept]
+- [[file:concepts/convex-transformable-functions.org][Convex-Transformable (G-convex) Functions]] [concept]
 - [[file:methods/mccormick-relaxations.org][McCormick Relaxations]] [method]
+- [[file:summaries/khajavirad-2012-convex-transformable.org][Summary — Relaxations of Factorable Functions with Convex-Transformable Intermediates (Khajavirad, Michalek, Sahinidis 2012)]] [summary]
 
-** Convexity (1)
+** Convexity (3)
 
+- [[file:concepts/convex-transformable-functions.org][Convex-Transformable (G-convex) Functions]] [concept]
 - [[file:concepts/convexity-detection.org][Convexity Detection]] [concept]
+- [[file:summaries/khajavirad-2012-convex-transformable.org][Summary — Relaxations of Factorable Functions with Convex-Transformable Intermediates (Khajavirad, Michalek, Sahinidis 2012)]] [summary]
 
 ** Couenne (3)
 
@@ -268,9 +286,10 @@ Auto-generated index of the Crucible knowledge base.
 
 - [[file:methods/large-neighborhood-search.org][Large Neighborhood Search for MIP]] [method]
 
-** Discopt (1)
+** Discopt (2)
 
 - [[file:methods/debugging-discopt.org][Debugging and Troubleshooting discopt]] [method]
+- [[file:comparisons/maingo-vs-discopt.org][MAiNGO vs discopt]] [comparison]
 
 ** Discrimination (1)
 
@@ -304,9 +323,10 @@ Auto-generated index of the Crucible knowledge base.
 
 - [[file:methods/bayesian-multiobjective.org][Bayesian Multiobjective Optimization]] [method]
 
-** Envelopes (2)
+** Envelopes (3)
 
 - [[file:concepts/convex-relaxations.org][Convex Relaxations for Global Optimization]] [concept]
+- [[file:concepts/convex-transformable-functions.org][Convex-Transformable (G-convex) Functions]] [concept]
 - [[file:methods/mccormick-relaxations.org][McCormick Relaxations]] [method]
 
 ** Epsilon-Constraint (1)
@@ -329,10 +349,12 @@ Auto-generated index of the Crucible knowledge base.
 
 - [[file:concepts/expression-dag-and-ad.org][Expression DAG and Automatic Differentiation]] [concept]
 
-** Factorable (2)
+** Factorable (4)
 
 - [[file:methods/auxiliary-variable-reformulation.org][Auxiliary Variable Reformulation]] [method]
+- [[file:concepts/convex-transformable-functions.org][Convex-Transformable (G-convex) Functions]] [concept]
 - [[file:methods/mccormick-relaxations.org][McCormick Relaxations]] [method]
+- [[file:summaries/khajavirad-2012-convex-transformable.org][Summary — Relaxations of Factorable Functions with Convex-Transformable Intermediates (Khajavirad, Michalek, Sahinidis 2012)]] [summary]
 
 ** Fbbt (2)
 
@@ -369,6 +391,12 @@ Auto-generated index of the Crucible knowledge base.
 
 - [[file:concepts/generalized-disjunctive-programming.org][Generalized Disjunctive Programming]] [concept]
 
+** Generalized-Convexity (3)
+
+- [[file:concepts/convex-transformable-functions.org][Convex-Transformable (G-convex) Functions]] [concept]
+- [[file:concepts/convexity-detection.org][Convexity Detection]] [concept]
+- [[file:summaries/khajavirad-2012-convex-transformable.org][Summary — Relaxations of Factorable Functions with Convex-Transformable Intermediates (Khajavirad, Michalek, Sahinidis 2012)]] [summary]
+
 ** Geometry (1)
 
 - [[file:concepts/sloppy-models.org][Sloppy Models]] [concept]
@@ -377,26 +405,32 @@ Auto-generated index of the Crucible knowledge base.
 
 - [[file:methods/spatial-branch-and-bound.org][Spatial Branch and Bound]] [method]
 
-** Global-Optimization (8)
+** Global-Optimization (12)
 
 - [[file:methods/adaptive-multivariate-partitioning.org][Adaptive Multivariate Partitioning (AMP) for Global MINLP]] [method]
 - [[file:methods/alphabb-underestimators.org][AlphaBB Underestimators]] [method]
 - [[file:concepts/baron-solver.org][BARON Solver]] [concept]
 - [[file:methods/bound-tightening.org][Bound Tightening (FBBT and OBBT)]] [method]
 - [[file:concepts/convex-relaxations.org][Convex Relaxations for Global Optimization]] [concept]
+- [[file:concepts/convex-transformable-functions.org][Convex-Transformable (G-convex) Functions]] [concept]
 - [[file:concepts/couenne-solver.org][Couenne Solver]] [concept]
+- [[file:concepts/maingo-solver.org][MAiNGO Solver]] [concept]
+- [[file:comparisons/maingo-vs-discopt.org][MAiNGO vs discopt]] [comparison]
 - [[file:methods/mccormick-relaxations.org][McCormick Relaxations]] [method]
 - [[file:methods/spatial-branch-and-bound.org][Spatial Branch and Bound]] [method]
+- [[file:summaries/khajavirad-2012-convex-transformable.org][Summary — Relaxations of Factorable Functions with Convex-Transformable Intermediates (Khajavirad, Michalek, Sahinidis 2012)]] [summary]
 
 ** Gnn (2)
 
 - [[file:methods/branch-variable-selection.org][Branch Variable Selection]] [method]
 - [[file:methods/learning-based-mip-heuristics.org][Learning-Based MIP Heuristics]] [method]
 
-** Gpu (2)
+** Gpu (4)
 
 - [[file:methods/first-order-mip-heuristics.org][First-Order and GPU MIP Heuristics]] [method]
 - [[file:concepts/mpax-solver.org][MPAX Solver]] [concept]
+- [[file:methods/sampling-based-ilp.org][Sampling-Based ILP Heuristics (MCMC + Parallel Tempering)]] [method]
+- [[file:summaries/kyuilsim2026-ilp-parallel-tempering.org][Solving Integer Linear Programming with Parallel Tempering]] [summary]
 
 ** Heuristic (1)
 
@@ -426,6 +460,11 @@ Auto-generated index of the Crucible knowledge base.
 ** Identification (1)
 
 - [[file:methods/model-discrimination.org][Model Discrimination: Rival-Model Experimental Design and Selection]] [method]
+
+** Ilp (2)
+
+- [[file:methods/sampling-based-ilp.org][Sampling-Based ILP Heuristics (MCMC + Parallel Tempering)]] [method]
+- [[file:summaries/kyuilsim2026-ilp-parallel-tempering.org][Solving Integer Linear Programming with Parallel Tempering]] [summary]
 
 ** Indicator (1)
 
@@ -461,11 +500,12 @@ Auto-generated index of the Crucible knowledge base.
 
 - [[file:methods/algebraic-model-identifiability.org][Identifiability for Algebraic and Regression Models]] [method]
 
-** Jax (3)
+** Jax (4)
 
 - [[file:concepts/expression-dag-and-ad.org][Expression DAG and Automatic Differentiation]] [concept]
 - [[file:methods/feasibility-jump.org][Feasibility Jump]] [method]
 - [[file:concepts/mpax-solver.org][MPAX Solver]] [concept]
+- [[file:methods/sampling-based-ilp.org][Sampling-Based ILP Heuristics (MCMC + Parallel Tempering)]] [method]
 
 ** Kernel-Search (1)
 
@@ -500,27 +540,43 @@ Auto-generated index of the Crucible knowledge base.
 - [[file:concepts/highs-solver.org][HiGHS Solver]] [concept]
 - [[file:concepts/mpax-solver.org][MPAX Solver]] [concept]
 
-** Lp-Free (1)
+** Lp-Free (3)
 
 - [[file:methods/feasibility-jump.org][Feasibility Jump]] [method]
+- [[file:methods/sampling-based-ilp.org][Sampling-Based ILP Heuristics (MCMC + Parallel Tempering)]] [method]
+- [[file:summaries/kyuilsim2026-ilp-parallel-tempering.org][Solving Integer Linear Programming with Parallel Tempering]] [summary]
 
 ** Machine-Learning (2)
 
 - [[file:methods/branch-variable-selection.org][Branch Variable Selection]] [method]
 - [[file:methods/learning-based-mip-heuristics.org][Learning-Based MIP Heuristics]] [method]
 
-** Matheuristic (2)
+** Maingo (2)
+
+- [[file:concepts/maingo-solver.org][MAiNGO Solver]] [concept]
+- [[file:comparisons/maingo-vs-discopt.org][MAiNGO vs discopt]] [comparison]
+
+** Matheuristic (3)
 
 - [[file:methods/first-order-mip-heuristics.org][First-Order and GPU MIP Heuristics]] [method]
 - [[file:methods/matheuristics.org][Matheuristics]] [method]
+- [[file:methods/sampling-based-ilp.org][Sampling-Based ILP Heuristics (MCMC + Parallel Tempering)]] [method]
 
 ** Mbdoe (1)
 
 - [[file:concepts/model-based-doe.org][Model-Based Design of Experiments (MBDoE)]] [concept]
 
-** Mccormick (1)
+** Mccormick (3)
 
+- [[file:concepts/maingo-solver.org][MAiNGO Solver]] [concept]
+- [[file:comparisons/maingo-vs-discopt.org][MAiNGO vs discopt]] [comparison]
 - [[file:methods/mccormick-relaxations.org][McCormick Relaxations]] [method]
+
+** Mcmc (3)
+
+- [[file:concepts/parallel-tempering.org][Parallel Tempering]] [concept]
+- [[file:methods/sampling-based-ilp.org][Sampling-Based ILP Heuristics (MCMC + Parallel Tempering)]] [method]
+- [[file:summaries/kyuilsim2026-ilp-parallel-tempering.org][Solving Integer Linear Programming with Parallel Tempering]] [summary]
 
 ** Metric (1)
 
@@ -536,7 +592,7 @@ Auto-generated index of the Crucible knowledge base.
 
 - [[file:methods/adaptive-multivariate-partitioning.org][Adaptive Multivariate Partitioning (AMP) for Global MINLP]] [method]
 
-** Minlp (14)
+** Minlp (16)
 
 - [[file:methods/adaptive-multivariate-partitioning.org][Adaptive Multivariate Partitioning (AMP) for Global MINLP]] [method]
 - [[file:methods/auxiliary-variable-reformulation.org][Auxiliary Variable Reformulation]] [method]
@@ -547,13 +603,15 @@ Auto-generated index of the Crucible knowledge base.
 - [[file:methods/exact-mo-integer-programming.org][Exact Multiobjective Integer and Mixed-Integer Programming]] [method]
 - [[file:methods/feasibility-pump.org][Feasibility Pump]] [method]
 - [[file:concepts/generalized-disjunctive-programming.org][Generalized Disjunctive Programming]] [concept]
+- [[file:concepts/maingo-solver.org][MAiNGO Solver]] [concept]
+- [[file:comparisons/maingo-vs-discopt.org][MAiNGO vs discopt]] [comparison]
 - [[file:concepts/minlp-survey.org][MINLP Problem Class and Surveys]] [concept]
 - [[file:methods/nonlinear-branch-and-bound.org][Nonlinear Branch and Bound (NLP-BB)]] [method]
 - [[file:methods/outer-approximation.org][Outer Approximation for MINLP]] [method]
 - [[file:concepts/scip-solver.org][SCIP Solver]] [concept]
 - [[file:methods/spatial-branch-and-bound.org][Spatial Branch and Bound]] [method]
 
-** Mip (6)
+** Mip (7)
 
 - [[file:methods/feasibility-jump.org][Feasibility Jump]] [method]
 - [[file:concepts/highs-solver.org][HiGHS Solver]] [concept]
@@ -561,6 +619,7 @@ Auto-generated index of the Crucible knowledge base.
 - [[file:methods/mip-presolve.org][MIP Presolve]] [method]
 - [[file:methods/mip-primal-heuristics.org][MIP Primal Heuristics]] [method]
 - [[file:methods/matheuristics.org][Matheuristics]] [method]
+- [[file:methods/sampling-based-ilp.org][Sampling-Based ILP Heuristics (MCMC + Parallel Tempering)]] [method]
 
 ** Model-Selection (1)
 
@@ -669,6 +728,12 @@ Auto-generated index of the Crucible knowledge base.
 - [[file:concepts/convex-minlp-solvers.org][Convex MINLP Solvers]] [concept]
 - [[file:methods/outer-approximation.org][Outer Approximation for MINLP]] [method]
 
+** Parallel-Tempering (3)
+
+- [[file:concepts/parallel-tempering.org][Parallel Tempering]] [concept]
+- [[file:methods/sampling-based-ilp.org][Sampling-Based ILP Heuristics (MCMC + Parallel Tempering)]] [method]
+- [[file:summaries/kyuilsim2026-ilp-parallel-tempering.org][Solving Integer Linear Programming with Parallel Tempering]] [summary]
+
 ** Parameter-Estimation (1)
 
 - [[file:concepts/identifiability-analysis.org][Parameter Identifiability Analysis]] [concept]
@@ -707,13 +772,15 @@ Auto-generated index of the Crucible knowledge base.
 
 - [[file:methods/interior-point-methods.org][Interior Point Methods for NLP]] [method]
 
-** Primal-Heuristic (5)
+** Primal-Heuristic (7)
 
 - [[file:methods/feasibility-jump.org][Feasibility Jump]] [method]
 - [[file:methods/feasibility-pump.org][Feasibility Pump]] [method]
 - [[file:methods/learning-based-mip-heuristics.org][Learning-Based MIP Heuristics]] [method]
 - [[file:methods/mip-primal-heuristics.org][MIP Primal Heuristics]] [method]
 - [[file:methods/matheuristics.org][Matheuristics]] [method]
+- [[file:methods/sampling-based-ilp.org][Sampling-Based ILP Heuristics (MCMC + Parallel Tempering)]] [method]
+- [[file:summaries/kyuilsim2026-ilp-parallel-tempering.org][Solving Integer Linear Programming with Parallel Tempering]] [summary]
 
 ** Probing (1)
 
@@ -726,6 +793,11 @@ Auto-generated index of the Crucible knowledge base.
 ** Proximity (1)
 
 - [[file:methods/large-neighborhood-search.org][Large Neighborhood Search for MIP]] [method]
+
+** Reduced-Space (2)
+
+- [[file:concepts/maingo-solver.org][MAiNGO Solver]] [concept]
+- [[file:comparisons/maingo-vs-discopt.org][MAiNGO vs discopt]] [comparison]
 
 ** Reference-Point (1)
 
@@ -755,6 +827,10 @@ Auto-generated index of the Crucible knowledge base.
 
 - [[file:methods/large-neighborhood-search.org][Large Neighborhood Search for MIP]] [method]
 
+** Replica-Exchange (1)
+
+- [[file:concepts/parallel-tempering.org][Parallel Tempering]] [concept]
+
 ** Rins (1)
 
 - [[file:methods/large-neighborhood-search.org][Large Neighborhood Search for MIP]] [method]
@@ -774,6 +850,12 @@ Auto-generated index of the Crucible knowledge base.
 ** Rounding (1)
 
 - [[file:methods/mip-primal-heuristics.org][MIP Primal Heuristics]] [method]
+
+** Sampling (3)
+
+- [[file:concepts/parallel-tempering.org][Parallel Tempering]] [concept]
+- [[file:methods/sampling-based-ilp.org][Sampling-Based ILP Heuristics (MCMC + Parallel Tempering)]] [method]
+- [[file:summaries/kyuilsim2026-ilp-parallel-tempering.org][Solving Integer Linear Programming with Parallel Tempering]] [summary]
 
 ** Scalarization (1)
 
@@ -800,6 +882,12 @@ Auto-generated index of the Crucible knowledge base.
 
 - [[file:concepts/highs-solver.org][HiGHS Solver]] [concept]
 
+** Simulated-Annealing (3)
+
+- [[file:concepts/parallel-tempering.org][Parallel Tempering]] [concept]
+- [[file:methods/sampling-based-ilp.org][Sampling-Based ILP Heuristics (MCMC + Parallel Tempering)]] [method]
+- [[file:summaries/kyuilsim2026-ilp-parallel-tempering.org][Solving Integer Linear Programming with Parallel Tempering]] [summary]
+
 ** Sloppy-Models (1)
 
 - [[file:concepts/sloppy-models.org][Sloppy Models]] [concept]
@@ -808,7 +896,7 @@ Auto-generated index of the Crucible knowledge base.
 
 - [[file:methods/identifiability-software.org][Identifiability Software Landscape]] [method]
 
-** Solver (7)
+** Solver (8)
 
 - [[file:concepts/baron-solver.org][BARON Solver]] [concept]
 - [[file:concepts/convex-minlp-solvers.org][Convex MINLP Solvers]] [concept]
@@ -816,6 +904,7 @@ Auto-generated index of the Crucible knowledge base.
 - [[file:methods/debugging-discopt.org][Debugging and Troubleshooting discopt]] [method]
 - [[file:concepts/highs-solver.org][HiGHS Solver]] [concept]
 - [[file:concepts/ipopt-solver.org][Ipopt: Interior Point Optimizer]] [concept]
+- [[file:concepts/maingo-solver.org][MAiNGO Solver]] [concept]
 - [[file:concepts/scip-solver.org][SCIP Solver]] [concept]
 
 ** Spatial-Branch-And-Bound (1)
@@ -885,6 +974,20 @@ Auto-generated index of the Crucible knowledge base.
 
 * Sources
 
+- [pdf] Solving Integer Linear Programming with Parallel Tempering (external)
+- [other] MAiNGO -- McCormick-based Algorithm for mixed-integer Nonlinear Global Optimization (shareable)
+  https://avt-svt.pages.rwth-aachen.de/public/maingo/
+- [pdf] Deterministic global optimization of process flowsheets in a reduced space using {McCormick} relaxations (shareable)
+  https://doi.org/10.1007/s10898-017-0547-4
+- [pdf] Linearization of {McCormick} relaxations and hybridization with the auxiliary variable method (shareable)
+  https://doi.org/10.1007/s10898-020-00977-x
+- [pdf] Deterministic Global Optimization with Artificial Neural Networks Embedded (shareable)
+  https://doi.org/10.1007/s10957-018-1396-0
+- [pdf] {MAiNGO} -- A Global Optimizer for Process Engineering: Algorithm and Applications in Process Design and Machine Learning (shareable)
+  https://doi.org/10.1002/cite.202255033
+- [web] MAiNGO — McCormick-based Algorithm for MINLP Global Optimization (research notes) (external)
+  https://avt-svt.pages.rwth-aachen.de/public/maingo/
+- [pdf] Relaxations of factorable functions with convex-transformable intermediates (external)
 - [pdf] Designs for discriminating between two rival models (shareable)
 - [pdf] A new sequential experimental design procedure for discriminating among rival models (shareable)
 - [pdf] Discrimination among mechanistic models (shareable)

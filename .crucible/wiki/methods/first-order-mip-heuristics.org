@@ -19,7 +19,9 @@ architecturally very well suited to hosting MIP primal heuristics on a GPU,
 and combining it with NVIDIA Warp kernels (see [[file:feasibility-jump.org][feasibility jump]] and
 [[file:mip-presolve.org][MIP presolve]]) opens an entire class of heuristics that CPU-only solvers
 cannot easily match. This article surveys the landscape and records
-discopt's plan to take advantage.
+discopt's plan to take advantage. A non-projection sibling in the same
+GPU-batched, LP-free portfolio is [[file:sampling-based-ilp.org][sampling-based ILP heuristics]], which
+replaces first-order LP projections with MCMC and parallel tempering.
 
 ** Background: First-Order LP Solvers
 

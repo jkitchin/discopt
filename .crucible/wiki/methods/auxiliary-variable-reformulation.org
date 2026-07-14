@@ -76,8 +76,20 @@ trilinear atoms when allocating auxiliaries for multilinear products.
   the polyhedron defined by the linear constraints plus the atomic
   envelopes.
 
+** The reduced-space alternative
+
+The auxiliary-variable method is not the only way to build a McCormick-based
+relaxation. [[file:../concepts/maingo-solver.org][MAiNGO]] instead *propagates* multivariate McCormick relaxations
+and their subgradients through the model in the original variable space, adding no
+auxiliary variables, and linearizes them into an LP only at the bounding step
+citep:bongartz2017reducedspace,najman2021linearization. This branches over far fewer
+variables (only the degrees of freedom) at the cost of looser per-node bounds, and
+the two approaches can be hybridized. [[file:../comparisons/maingo-vs-discopt.org][MAiNGO vs discopt]] contrasts the two along
+the lifting axis and its consequences for the per-node LP engine.
+
 ** See also
 
+- [[file:../concepts/maingo-solver.org][MAiNGO]] (reduced-space McCormick propagation)
 - [[file:../concepts/couenne-solver.org][Couenne]]
 - [[file:../concepts/baron-solver.org][BARON]]
 - [[file:../concepts/expression-dag-and-ad.org][expression DAG and AD]]
