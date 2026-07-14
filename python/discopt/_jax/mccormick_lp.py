@@ -573,10 +573,7 @@ class MccormickLPRelaxer:
         # ``solve_at_node`` (e.g. structural OBBT), avoiding wasted cold builds.
         if build_incremental and os.environ.get("DISCOPT_INCREMENTAL_MC", "1") != "0":
             try:
-                from discopt._jax.incremental_mccormick import (
-                    IncrementalMcCormickLP,
-                    UniformPatchTable,
-                )
+                from discopt._jax.incremental_mccormick import IncrementalMcCormickLP
 
                 # Scope gate (cert:T1.3): gate ONLY on the constructor's row-for-row
                 # self-validation (`ok`), for ANY model — any variable mix, any
@@ -598,24 +595,7 @@ class MccormickLPRelaxer:
                 # inherits; and by skipping the fast path during pool capture
                 # (``out_cuts``) so the pool actually separates. Bound-changing
                 # behaviour is verified by the differential-neutrality check.
-                #
-                # EP3 (#632): the uniform factorable engine is the default
-                # relaxation, and its box-dependent rows/aux-bounds come from
-                # ``evaluate_interval`` over the reconstructed DAG — not reproducible
-                # bit-for-bit by a closed-form numpy refresh (measured), so
-                # ``IncrementalMcCormickLP``'s bare-variable bilinear/monomial patch
-                # never validates on engine-shaped models (``ok=False`` on all 62
-                # vendored instances). ``UniformPatchTable`` restores fast-path
-                # engagement for the engine byte-identically: its ``_patch``
-                # regenerates the node relaxation through the (EP1-cached) engine
-                # build, so the per-node solve skips the separation chain (the
-                # inherited root pool substitutes) and warm-starts — the CC2
-                # mitigation the cutover disabled. Prefer it; fall back to the
-                # closed-form table (bare-variable models / the ``lp_spatial``
-                # engine) then to the cold path.
-                _inc: IncrementalMcCormickLP = UniformPatchTable(model)
-                if not _inc.ok:
-                    _inc = IncrementalMcCormickLP(model, self._terms)
+                _inc = IncrementalMcCormickLP(model, self._terms)
                 if _inc.ok:
                     self._inc = _inc
             except Exception:
