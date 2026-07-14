@@ -1,6 +1,13 @@
 # PF4 SPIKE — residual root-gap relaxation classes
 
-Status: **DONE → GO (scoped: LMTD / logarithmic-mean envelope class)** (2026-07-14).
+Status: **FULL ITEM → KILL on SOUNDNESS (2026-07-14).** The spike's GO verdict below
+is **superseded** — see §6. The proposed `GM ≤ LMTD ≤ AM` envelope is UNSOUND for the
+term the heatexch model actually contains, because the spike sampled the ε-FREE mean
+`(a−b)/log(a/b)` while the model term is `(a−b)/log(a/(ε+b))` with a **pole inside the
+box**. No relaxation change was landed; the finding + a guard test
+(`python/tests/test_pf4_lmtd_epsilon_pole.py`) were.
+
+Status (original): **DONE → GO (scoped: LMTD / logarithmic-mean envelope class)** (2026-07-14).
 Measurement + isolated prototype only; lives in an **isolated worktree**, NOT pushed.
 Companion: `docs/dev/sota-proof-plan.md` §2 PF4; `docs/dev/pf3-branching-spike.md`
 (redirect that pointed here); `docs/dev/nvs05-division-lever-entry-2026-07-11.md` (F17,
@@ -156,4 +163,64 @@ export JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 PYTHONPATH=$PWD/python
 python docs/dev/lr0_probe/pf4_rootgap.py          # root-gap table
 python /tmp/lmtd_iso.py                           # LMTD output unbounded in current relaxer
 python /tmp/lmtd_env.py                           # AM/GM envelope + feasible-point soundness
+```
+
+## 6. FULL-ITEM FALSIFICATION — the ε-pole makes AM/GM UNSOUND (2026-07-14, KILL)
+
+The full item ran the entry experiment against the term the model **actually
+contains** and the envelope collapsed on the hard soundness gate. Recorded here in
+`performance-plan.md` §6 house style.
+
+**Hypothesis (spike):** `GM(a,b) ≤ LMTD(a,b) ≤ AM(a,b)`, so `w ≤ (a+b)/2` (AM) and
+`w ≥ chord(√(ab))` (GM secant) are sound outer rows for the lifted LMTD aux `w`.
+
+**The measurement that killed it.** The spike sampled the ε-FREE logarithmic mean
+`LMTD₀(a,b) = (a−b)/log(a/b)` (see `lmtd_iso.py`/`lmtd_env.py`: `lmtd()` uses
+`log(a/max(b,1e-12))`, no ε). `LMTD₀` genuinely obeys `GM ≤ LMTD₀ ≤ AM`. But the
+heatexch atoms are, verbatim (canonical reconstruct of `heatexch_gen1`):
+`(a−b)/log(a/(ε+b))` with **ε = 1e-6** and `a,b ∈ [10, +∞)`. The `+ε` does **not
+remove** the LMTD singularity — it **moves** it from the diagonal `a=b` to the line
+`a = ε+b`, which lies strictly **inside** the box (e.g. `a=10.000001, b=10`). There
+the denominator `log(a/(ε+b))` crosses **zero** with a non-zero numerator, so the
+exact aux value `w = (a−b)/log(a/(ε+b))` is **genuinely unbounded (±∞)**. Sampling
+the exact term over `a,b ∈ [10,650]²` (2 M points):
+
+| row | violated feasible points | worst violation |
+|---|---|---|
+| AM `w ≤ (a+b)/2` | **3 211 / 2 000 000** | `w−AM = +5.10` (near `a=b=494.5`, `a−b≈1e-4`) |
+| GM `w ≥ √(ab)` | **3 971 / 2 000 000** | `GM−w = +3.78` (other side of the pole) |
+
+Both rows **cut feasible points** — the worst class of bug (false-infeasible / lost
+optimum). A "just require the denominator sign-definite" gate is **insufficient**:
+on a box with `a > ε+b` throughout (margin 0.0057) AM still had 201 violations, and
+on a box hugging the pole (margin ≥ 2e-6, still `log>0`) AM was violated at
+**417 707 / 3 000 000** points (worst `+12.4`). The margin AM needs is quantitative
+and box-dependent, and it fails exactly at the small-approach (pinch) region where
+good heat-exchanger-network solutions live.
+
+**Why the "hole" is not a hole.** Because `w` is truly unbounded on any
+pole-straddling box, the current relaxation's "maximise `w` → unbounded" is the
+**SOUND** answer, not a fixable weakness. The AM over-estimator (the only one that
+could tighten heatexch's dual bound, since area-cost minimisation drives `w` large)
+is precisely the unsound one; the sound half (GM under-estimator) does not bind the
+dual in the relevant direction, so even shipping only GM yields **zero** root
+improvement. Entry-experiment root bounds are unchanged from §1 (gen1 38 184 /
+75.3%, gen2 543 496 / 14.5%, gen3 43 888 / 32.3%).
+
+**Landed:** nothing in the relaxation. A guard test
+`python/tests/test_pf4_lmtd_epsilon_pole.py` pins the falsification (in-box pole;
+AM/GM unsound; sign-gate insufficient; current relaxation cuts no near-pole feasible
+point) so an ungated LMTD envelope cannot be re-introduced silently.
+
+**If PF4 is ever revisited:** the only sound route is to relax the term as written
+over pole-EXCLUDED sub-boxes with a *quantitative* AM-validity margin (not a sign
+gate), which is inert at the root and of unmeasured deep-node value — a new spike
+with its own entry experiment, not this envelope. Do **not** relax it as the ε-free
+mean: that relaxes a different function and reintroduces the cut.
+
+### Reproduce the falsification
+```bash
+cd /home/user/discopt; source .venv/bin/activate
+export JAX_PLATFORMS=cpu JAX_ENABLE_X64=1
+python -m pytest python/tests/test_pf4_lmtd_epsilon_pole.py -q
 ```
