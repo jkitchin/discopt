@@ -46,6 +46,7 @@ from __future__ import annotations
 
 import dataclasses
 import math
+import os
 from typing import Callable, Optional, cast
 
 import numpy as np
@@ -1461,6 +1462,57 @@ def _emit_scaled_equality(ctx: _Builder, w: int, lin: LinForm, scalar: float) ->
     ctx.add_row(c2, -scaled.const)
 
 
+# --------------------------------------------------------------------------- #
+# Entropy atom (issue #632 centropy-tightness). ``x*log(x)`` is convex on x>0
+# (``f'' = 1/x > 0``), but the factorable path shatters it into a loose bilinear
+# ``x*(log x)`` over the DECOUPLED box (McCormick allows ``x=x_ub, log=log(x_lb)``
+# simultaneously -> a floor far below the true convex minimum). The generic
+# interval-Hessian certifier cannot recover the convexity of the factored form
+# (dependency problem). So we RECOGNIZE the atom and emit its EXACT convex hull
+# (tangent under + secant over) via the shared 1-D emitter — the same tight
+# treatment ``exp``/``log`` already get from ``_UNIVARIATE_FN``. Sound by
+# construction (a tangent of a convex function is a global underestimator; the
+# secant chord is a global overestimator). Gated by ``DISCOPT_ENTROPY_ATOM``
+# (default OFF, flag-graduation convention); when off, ``_build_product`` is
+# byte-identical. Prototype scope: the pure univariate ``x*log(x)`` (unit
+# coefficients, single variable); affine-arg / relative-entropy generalizations
+# are follow-ups (the multivariate jointly-convex case routes to _separate_convex).
+def _xlogx(t: float) -> float:
+    return t * math.log(t)
+
+
+def _xlogx_prime(t: float) -> float:
+    return math.log(t) + 1.0
+
+
+def _entropy_prod_var(ctx: "_Builder", node: CNode):
+    """If ``node`` is the product ``x*log(x)`` (one original variable, unit
+    coefficients on both the base and the log argument), return ``(lt_x, lo, hi)``
+    for the shared 1-D entropy envelope; else ``None``. Only the exact
+    ``x*log(x)`` form is recognized, so the rewrite is never mis-applied."""
+    if node.kind != "prod":
+        return None
+    (exps,) = node.payload
+    if len(node.children) != 2 or not all(float(e) == 1.0 for e in exps):
+        return None
+    for i, ch in enumerate(node.children):
+        if ch.kind == "call" and ch.payload == "log":
+            other = node.children[1 - i]
+            (larg,) = ch.children
+            sv_o = ctx.single_var_affine(ctx.rep(other))
+            sv_a = ctx.single_var_affine(ctx.rep(larg))
+            if (
+                sv_o is not None
+                and sv_a is not None
+                and sv_o[0] == sv_a[0]
+                and abs(sv_o[1] - 1.0) < 1e-12
+                and abs(sv_a[1] - 1.0) < 1e-12
+            ):
+                lo, hi = ctx.bounds(other)
+                return ctx.rep(other), lo, hi
+    return None
+
+
 def _build_product(ctx: _Builder, node: CNode, w: int) -> Envelope:
     """``w = prod_i base_i**e_i`` (all exponents positive => product/monomial).
 
@@ -1476,6 +1528,19 @@ def _build_product(ctx: _Builder, node: CNode, w: int) -> Envelope:
     this aggregation, pairwise McCormick of ``(c x_i)·x_i`` over a wide box is
     hopelessly loose (st_miqp2: -221 vs -13.06).
     """
+    # Entropy atom (gated): recognize ``x*log(x)`` and emit its exact convex
+    # envelope instead of the loose decoupled-bilinear fold. Off by default =>
+    # byte-identical. ``lo>0`` guards the domain (``x*log(x)`` -> nan at x=0, and
+    # its lower tangent slope ``log x + 1`` -> -inf); on ``lo<=0`` fall through to
+    # the sound product path.
+    if os.environ.get("DISCOPT_ENTROPY_ATOM") == "1":
+        _ent = _entropy_prod_var(ctx, node)
+        if _ent is not None:
+            _lt, _lo, _hi = _ent
+            if _lo > 0.0:
+                _tight = _emit_1d(ctx, w, _lt, _lo, _hi, _xlogx, _xlogx_prime, "convex")
+                return Envelope(rows=[], tight=_tight)
+
     (exps,) = node.payload
     scalar = 1.0
     var_exp: dict[int, int] = {}
