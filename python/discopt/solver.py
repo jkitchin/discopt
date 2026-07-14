@@ -278,6 +278,21 @@ def _node_probe_max_vars() -> int:
         return 32
 
 
+# PF1 (issue #632): telemetry counting how many times the in-tree presolve
+# (FBBT / branch-and-reduce) kernel actually fired on the GLOBAL spatial B&B
+# node loop. The spike found the kernel was wired only into ``_solve_nlp_bb``
+# and this count was 0 on spatial instances. A regression test resets this and
+# asserts it is > 0 after a stride>=1 solve of such an instance, pinning the
+# wiring so it cannot silently disconnect again. Process-global, reset at the
+# top of ``solve_model``; read via ``_in_tree_presolve_global_calls()``.
+_IN_TREE_PRESOLVE_GLOBAL_CALLS = 0
+
+
+def _in_tree_presolve_global_calls() -> int:
+    """Firings of the in-tree presolve kernel on the global spatial B&B path."""
+    return _IN_TREE_PRESOLVE_GLOBAL_CALLS
+
+
 # Root branch-and-reduce fixpoint (cert:T2.3) no-offtarget gate: skip the loop when
 # the relative gap between the root dual bound and the incumbent cutoff is at/below
 # this — an already-tight root has nothing to close, so running it would only add
@@ -2863,7 +2878,11 @@ def solve_model(
     presolve: bool = True,
     presolve_polynomial: bool = False,
     presolve_reverse_ad: bool = False,
-    in_tree_presolve_stride: int = 0,
+    # PF1 (issue #632): default 1 = FBBT-only in-tree presolve at every node,
+    # on BOTH the NLP-BB and global spatial B&B paths. Probing stays OFF
+    # (DISCOPT_NODE_PROBING). Spike-supported (m3 proof, fac2 -43% nodes, no
+    # losses); sound-by-construction cutoff-aware FBBT (see the node loops).
+    in_tree_presolve_stride: int = 1,
     eigenvalue_root_bound: bool = False,
     relaxation_arithmetic: str = "mccormick",
     subnlp_enabled: bool = True,
@@ -3372,7 +3391,9 @@ def solve_model(
         _note_ignored_mip_nlp("presolve", presolve is not True)
         _note_ignored_mip_nlp("presolve_polynomial", presolve_polynomial is not False)
         _note_ignored_mip_nlp("presolve_reverse_ad", presolve_reverse_ad is not False)
-        _note_ignored_mip_nlp("in_tree_presolve_stride", in_tree_presolve_stride != 0)
+        # PF1 (#632): default is now 1; warn only when the user overrode it, so a
+        # default solve on the mip-nlp path stays quiet.
+        _note_ignored_mip_nlp("in_tree_presolve_stride", in_tree_presolve_stride != 1)
         _note_ignored_mip_nlp("eigenvalue_root_bound", eigenvalue_root_bound is not False)
         _note_ignored_mip_nlp("relaxation_arithmetic", relaxation_arithmetic != "mccormick")
         _note_ignored_mip_nlp("subnlp_enabled", subnlp_enabled is not True)
@@ -4027,6 +4048,8 @@ def solve_model(
         logger.debug("integer-bilinear reformulation skipped: %s", _ipx_exc)
 
     # --- Build Rust model representation for FBBT ---
+    global _IN_TREE_PRESOLVE_GLOBAL_CALLS
+    _IN_TREE_PRESOLVE_GLOBAL_CALLS = 0  # PF1 telemetry reset (issue #632)
     _model_repr = None
     try:
         from discopt._rust import model_to_repr
@@ -6109,6 +6132,68 @@ def solve_model(
                 batch_lb[i] = t_lb.tolist()
                 batch_ub[i] = t_ub.tolist()
             _reduce_timers["fbbt"] += time.perf_counter() - _t_fbbt
+
+        # --- In-tree presolve / branch-and-reduce (PF1, issue #632) ---
+        # Wire the persistent Rust FBBT(+reduce) kernel into the GLOBAL spatial
+        # B&B node loop, gated by ``in_tree_presolve_stride`` (same kwarg the
+        # NLP-BB path uses). Before this the kernel fired only on ``_solve_nlp_bb``
+        # (convex path); every unproved spatial instance lives here and never saw
+        # cutoff-aware in-tree FBBT / branch-and-reduce. The kernel:
+        #   * runs cutoff-aware FBBT with the incumbent as a valid upper bound, so
+        #     it discards only points that cannot improve the incumbent (sound
+        #     inside B&B), then
+        #   * optionally (probing, default OFF) contracts discrete domains on
+        #     proven-infeasible fixings.
+        # SOUNDNESS: every contraction is outward-rounded interval propagation
+        # applied as an INTERSECTION with the current box (``run_in_tree_presolve``
+        # never loosens); a proven-empty box fathoms the node. A reduced box thus
+        # always still contains the entire feasible region — no feasible point,
+        # and never the optimum, is ever excluded. Best-effort: silently skipped
+        # when the repr's block count doesn't match the node box (e.g. a
+        # polynomial-reformulated repr with extra aux vars) — the intersect-only
+        # floor keeps it sound even then.
+        if in_tree_presolve_stride and _model_repr is not None:
+            try:
+                _itp_n_blocks = _model_repr.n_var_blocks
+                _itp_probing = _node_probing_enabled()
+                _itp_probe_max = _node_probe_max_vars()
+                _itp_inc = tree.incumbent()
+                _itp_cutoff = (
+                    float(_itp_inc[1])
+                    if _itp_inc is not None
+                    and np.isfinite(_itp_inc[1])
+                    and _itp_inc[1] < _SENTINEL_THRESHOLD
+                    else None
+                )
+                _itp_depths = tree.node_depths(np.asarray(batch_ids, dtype=np.int64))
+                _t_itp = time.perf_counter()
+                for i in range(n_batch):
+                    if node_infeasible_mask[i]:
+                        continue
+                    if len(batch_lb[i]) != _itp_n_blocks:
+                        continue
+                    _itp_delta = _model_repr.in_tree_presolve(
+                        np.asarray(batch_lb[i], dtype=np.float64),
+                        np.asarray(batch_ub[i], dtype=np.float64),
+                        node_depth=int(_itp_depths[i]),
+                        depth_stride=in_tree_presolve_stride,
+                        incumbent=_itp_cutoff,
+                        probing=_itp_probing,
+                        probe_max_vars=_itp_probe_max,
+                    )
+                    if not _itp_delta["ran"]:
+                        continue
+                    _IN_TREE_PRESOLVE_GLOBAL_CALLS += 1
+                    if _itp_delta["infeasible"]:
+                        # Rigorous fathom: the node box is empty (FBBT/probing
+                        # proof), so its subtree holds no feasible point.
+                        node_infeasible_mask[i] = True
+                    else:
+                        batch_lb[i] = list(_itp_delta["lb"])
+                        batch_ub[i] = list(_itp_delta["ub"])
+                _reduce_timers["fbbt"] += time.perf_counter() - _t_itp
+            except Exception as _itp_exc:  # pragma: no cover - defensive
+                logger.debug("global in-tree presolve skipped: %s", _itp_exc)
 
         # --- Per-node OBBT (Lever A) ---
         # Tighten each surviving node's box against its own McCormick relaxation
@@ -9005,7 +9090,7 @@ def _solve_nlp_bb(
     lazy_constraints=None,
     incumbent_callback=None,
     node_callback=None,
-    in_tree_presolve_stride: int = 0,
+    in_tree_presolve_stride: int = 1,  # PF1 (#632): FBBT-only default; see solve_model
     in_tree_presolve_repr=None,
     rens_enabled: bool = True,
     _lns_enabled: bool = True,
@@ -9315,13 +9400,18 @@ def _solve_nlp_bb(
                     and _itp_inc[1] < _SENTINEL_THRESHOLD
                     else None
                 )
+                # Real per-node tree depth so the depth-stride gate is honest
+                # (issue #632 / PF1): the old hardcode of 0 made every stride
+                # fire at every node (0 % s == 0). At stride 1 this is a no-op
+                # (fires everywhere either way); it only matters for stride > 1.
+                _itp_depths = tree.node_depths(np.asarray(batch_ids, dtype=np.int64))
                 for i in range(n_batch):
                     if len(batch_lb[i]) != n_blocks:
                         continue
                     delta = in_tree_presolve_repr.in_tree_presolve(
                         np.asarray(batch_lb[i], dtype=np.float64),
                         np.asarray(batch_ub[i], dtype=np.float64),
-                        node_depth=0,
+                        node_depth=int(_itp_depths[i]),
                         depth_stride=in_tree_presolve_stride,
                         incumbent=_itp_cutoff,
                         probing=_itp_probing,

@@ -2,14 +2,14 @@
   "budget": 30.0,
   "rows": [
     {
-      "bound": 19020.49834019071,
+      "bound": 19021.346794750414,
       "gap": null,
       "instance": "4stufen",
       "nodes": 7,
       "objective": null,
       "sense": "min",
       "status": "time_limit",
-      "wall": 34.95716059100005
+      "wall": 31.693030362000172
     },
     {
       "bound": 2.9249999983013426,
@@ -19,7 +19,7 @@
       "objective": 2.9249999983013426,
       "sense": "min",
       "status": "optimal",
-      "wall": 1.5716415479996613
+      "wall": 0.8105864369999836
     },
     {
       "bound": null,
@@ -29,37 +29,47 @@
       "objective": null,
       "sense": "max",
       "status": "time_limit",
-      "wall": 39.88273769600028
+      "wall": 33.91760939800042
     },
     {
       "bound": null,
       "gap": null,
       "instance": "bchoco07",
+      "nodes": 3,
+      "objective": null,
+      "sense": "max",
+      "status": "time_limit",
+      "wall": 36.81990244700046
+    },
+    {
+      "bound": null,
+      "gap": null,
+      "instance": "bchoco08",
       "nodes": 1,
       "objective": null,
       "sense": "max",
       "status": "time_limit",
-      "wall": 72.99559900500026
+      "wall": 51.076034910999624
     },
     {
-      "error": "killed after 90s",
-      "instance": "bchoco08",
-      "status": "hang"
-    },
-    {
-      "bound": 6351.562833929256,
+      "bound": 6352.063220222274,
       "gap": null,
       "instance": "beuster",
-      "nodes": 3,
+      "nodes": 7,
       "objective": null,
       "sense": "min",
       "status": "time_limit",
-      "wall": 35.045977112999935
+      "wall": 33.19006128100045
     },
     {
-      "error": "killed after 90s",
+      "bound": 5.697893551291301,
+      "gap": null,
       "instance": "casctanks",
-      "status": "hang"
+      "nodes": 1,
+      "objective": null,
+      "sense": "min",
+      "status": "time_limit",
+      "wall": 60.57901153200055
     },
     {
       "bound": 29.894378154271102,
@@ -69,7 +79,7 @@
       "objective": 29.894378154271102,
       "sense": "min",
       "status": "optimal",
-      "wall": 4.187718422999751
+      "wall": 1.2898165900005552
     },
     {
       "bound": null,
@@ -79,22 +89,27 @@
       "objective": null,
       "sense": "min",
       "status": "time_limit",
-      "wall": 76.7633826389997
+      "wall": 30.08462392599995
     },
     {
-      "error": "killed after 90s",
+      "bound": 171244.8112803359,
+      "gap": null,
       "instance": "contvar",
-      "status": "hang"
+      "nodes": 1,
+      "objective": null,
+      "sense": "min",
+      "status": "time_limit",
+      "wall": 82.0931593310006
     },
     {
-      "bound": 130.6044163518445,
-      "gap": 0.00018598374883273388,
+      "bound": 130.61841392487688,
+      "gap": 7.882808727819201e-05,
       "instance": "cvxnonsep_nsig30",
-      "nodes": 121,
-      "objective": 130.62871116925294,
+      "nodes": 165,
+      "objective": 130.6287111692529,
       "sense": "min",
-      "status": "feasible",
-      "wall": 31.771252877999814
+      "status": "optimal",
+      "wall": 15.563145273000373
     },
     {
       "bound": 78.99179874365787,
@@ -104,17 +119,17 @@
       "objective": 78.99885435294289,
       "sense": "min",
       "status": "optimal",
-      "wall": 17.92012793799995
+      "wall": 8.159070537999469
     },
     {
-      "bound": 86.53872191349262,
-      "gap": 7.423014759263791e-05,
+      "bound": 86.53873600363832,
+      "gap": 7.406734070720922e-05,
       "instance": "cvxnonsep_psig40r",
       "nodes": 95,
       "objective": 86.54527995164959,
       "sense": "min",
       "status": "optimal",
-      "wall": 29.048218173999885
+      "wall": 15.100157823999325
     },
     {
       "bound": 3155.2872325371836,
@@ -124,7 +139,7 @@
       "objective": 3155.2879266989653,
       "sense": "min",
       "status": "optimal",
-      "wall": 5.139096843000061
+      "wall": 1.5945251720004308
     },
     {
       "bound": 7.667180060145954,
@@ -134,7 +149,7 @@
       "objective": 7.667180068813135,
       "sense": "min",
       "status": "optimal",
-      "wall": 4.663835578000089
+      "wall": 1.6689260140001352
     },
     {
       "bound": 1.0765430463031964,
@@ -144,17 +159,17 @@
       "objective": 1.0765430833322625,
       "sense": "min",
       "status": "optimal",
-      "wall": 3.178478756000004
+      "wall": 1.2387386949994834
     },
     {
-      "bound": -0.9434744129395758,
-      "gap": 3.91252550502319e-06,
+      "bound": -0.9434705021069314,
+      "gap": 2.106931296097514e-09,
       "instance": "ex1224",
-      "nodes": 11,
+      "nodes": 5,
       "objective": -0.943470491100134,
       "sense": "min",
       "status": "optimal",
-      "wall": 10.199050003999673
+      "wall": 5.973159815000145
     },
     {
       "bound": 30.999999968,
@@ -164,7 +179,7 @@
       "objective": 30.999999913550667,
       "sense": "min",
       "status": "optimal",
-      "wall": 8.25094534200025
+      "wall": 4.424880816000041
     },
     {
       "bound": -17.000000014222035,
@@ -174,37 +189,37 @@
       "objective": -16.999999994161513,
       "sense": "min",
       "status": "optimal",
-      "wall": 3.040081122000174
+      "wall": 1.6618163390003247
     },
     {
-      "bound": 331837497.83380234,
+      "bound": 331837497.561812,
       "gap": 0.0,
       "instance": "fac2",
-      "nodes": 69,
-      "objective": 331837498.18201375,
+      "nodes": 39,
+      "objective": 331837498.18201387,
       "sense": "min",
       "status": "optimal",
-      "wall": 28.744844063000073
+      "wall": 13.766709305999939
     },
     {
-      "bound": 37.94733180456952,
+      "bound": 37.94733180456953,
       "gap": 0.0,
       "instance": "flay02m",
       "nodes": 7,
       "objective": 37.947331863834606,
       "sense": "min",
       "status": "optimal",
-      "wall": 5.073335800999757
+      "wall": 1.4369065979999505
     },
     {
-      "bound": 48.98979470823052,
+      "bound": 48.98979470823039,
       "gap": 0.0,
       "instance": "flay03m",
-      "nodes": 111,
-      "objective": 48.98979479383566,
+      "nodes": 107,
+      "objective": 48.98979479383543,
       "sense": "min",
       "status": "optimal",
-      "wall": 28.348119442000097
+      "wall": 19.95665092099989
     },
     {
       "bound": 2.199999982504936,
@@ -214,7 +229,7 @@
       "objective": 2.199999982504936,
       "sense": "min",
       "status": "optimal",
-      "wall": 0.8207753990000128
+      "wall": 0.3116515330002585
     },
     {
       "bound": -1.9230988280923489,
@@ -224,7 +239,7 @@
       "objective": -1.9230987798770212,
       "sense": "min",
       "status": "optimal",
-      "wall": 6.116453737000029
+      "wall": 2.0797433280004043
     },
     {
       "error": "killed after 90s",
@@ -235,56 +250,61 @@
       "bound": 38183.53170784717,
       "gap": null,
       "instance": "heatexch_gen1",
+      "nodes": 3,
+      "objective": null,
+      "sense": "min",
+      "status": "time_limit",
+      "wall": 51.683239349999894
+    },
+    {
+      "bound": 555767.7897300989,
+      "gap": null,
+      "instance": "heatexch_gen2",
       "nodes": 7,
       "objective": null,
       "sense": "min",
       "status": "time_limit",
-      "wall": 34.241636179000125
+      "wall": 33.35672717399939
     },
     {
-      "bound": 555767.7897300986,
+      "bound": 43887.57988179716,
       "gap": null,
-      "instance": "heatexch_gen2",
+      "instance": "heatexch_gen3",
       "nodes": 1,
       "objective": null,
       "sense": "min",
       "status": "time_limit",
-      "wall": 41.716055804999996
+      "wall": 56.98498163300064
     },
     {
-      "error": "killed after 90s",
-      "instance": "heatexch_gen3",
-      "status": "hang"
-    },
-    {
-      "bound": -1.6655115531567335e-07,
-      "gap": 1.0000000044061153,
+      "bound": 37.79999951039202,
+      "gap": 0.0,
       "instance": "m3",
-      "nodes": 3,
-      "objective": 37.79999951039202,
+      "nodes": 47,
+      "objective": 37.799999669978845,
       "sense": "min",
-      "status": "feasible",
-      "wall": 30.477989308999895
+      "status": "optimal",
+      "wall": 23.411345455000628
     },
     {
-      "bound": 12.46966880809854,
-      "gap": 1.080194672104233e-09,
+      "bound": 12.469668821568202,
+      "gap": 5.698168459222487e-16,
       "instance": "nvs01",
-      "nodes": 17,
+      "nodes": 7,
       "objective": 12.46966882156821,
       "sense": "min",
       "status": "optimal",
-      "wall": 13.551772395999706
+      "wall": 6.267616387999624
     },
     {
-      "bound": 5.95507617008,
-      "gap": 0.01698113413215587,
+      "bound": 5.96418452307,
+      "gap": 0.0,
       "instance": "nvs02",
-      "nodes": 215,
-      "objective": 6.057946980320001,
+      "nodes": 337,
+      "objective": 5.96418452307,
       "sense": "min",
-      "status": "feasible",
-      "wall": 11.499738850000085
+      "status": "optimal",
+      "wall": 5.096101066000301
     },
     {
       "bound": 15.99999972676511,
@@ -294,7 +314,7 @@
       "objective": 16.0,
       "sense": "min",
       "status": "optimal",
-      "wall": 5.267893417999858
+      "wall": 0.9105406120006592
     },
     {
       "bound": 0.7199999982799788,
@@ -304,17 +324,17 @@
       "objective": 0.720000000000006,
       "sense": "min",
       "status": "optimal",
-      "wall": 4.718435256999783
+      "wall": 1.2688186349996613
     },
     {
-      "bound": 1.3520892806701879,
-      "gap": 0.7528595212992116,
+      "bound": 4.697044703985232,
+      "gap": 0.14145471404695598,
       "instance": "nvs05",
-      "nodes": 11,
-      "objective": 5.470934133404972,
+      "nodes": 215,
+      "objective": 5.47093412640568,
       "sense": "min",
       "status": "feasible",
-      "wall": 31.506902070999786
+      "wall": 30.10345069899995
     },
     {
       "bound": 1.7703124970484372,
@@ -324,7 +344,7 @@
       "objective": 1.7703125002341187,
       "sense": "min",
       "status": "optimal",
-      "wall": 6.586482194999917
+      "wall": 1.939458650999768
     },
     {
       "bound": 4.0,
@@ -334,27 +354,27 @@
       "objective": 4.0,
       "sense": "min",
       "status": "optimal",
-      "wall": 0.7532711040003051
+      "wall": 0.23269918900041375
     },
     {
-      "bound": 23.449677122436523,
-      "gap": 2.1417869871512393e-06,
+      "bound": 23.4497273162716,
+      "gap": 1.3000495573051173e-09,
       "instance": "nvs08",
-      "nodes": 65,
+      "nodes": 5,
       "objective": 23.449727353351044,
       "sense": "min",
       "status": "optimal",
-      "wall": 16.930865191000066
+      "wall": 2.161828999000136
     },
     {
-      "bound": -51.97202791087229,
-      "gap": 0.3124882550774879,
+      "bound": -43.696863253882604,
+      "gap": 0.013041265405707249,
       "instance": "nvs09",
-      "nodes": 15,
-      "objective": -39.59808989513885,
+      "nodes": 13,
+      "objective": -43.13433691803531,
       "sense": "min",
       "status": "feasible",
-      "wall": 30.642896027000006
+      "wall": 34.21137029199963
     },
     {
       "bound": -310.7999999999999,
@@ -364,17 +384,17 @@
       "objective": -310.7999999999999,
       "sense": "min",
       "status": "optimal",
-      "wall": 1.385674144999939
+      "wall": 0.7287330230001317
     },
     {
-      "bound": -2781.2353276866334,
-      "gap": null,
+      "bound": -430.99999999999966,
+      "gap": 0.0,
       "instance": "nvs11",
-      "nodes": 1,
-      "objective": null,
+      "nodes": 55,
+      "objective": -430.99999999999966,
       "sense": "min",
-      "status": "time_limit",
-      "wall": 31.773866923999776
+      "status": "optimal",
+      "wall": 9.951391540999794
     },
     {
       "bound": -3554.456319731603,
@@ -384,7 +404,7 @@
       "objective": null,
       "sense": "min",
       "status": "time_limit",
-      "wall": 57.33016433399962
+      "wall": 34.22098430400001
     },
     {
       "bound": -585.2000011714,
@@ -394,7 +414,7 @@
       "objective": -585.2,
       "sense": "min",
       "status": "optimal",
-      "wall": 20.115276788999836
+      "wall": 7.90461059900008
     },
     {
       "bound": -40358.15476929999,
@@ -404,7 +424,7 @@
       "objective": -40358.15476929996,
       "sense": "min",
       "status": "optimal",
-      "wall": 9.611432042999695
+      "wall": 3.612324886999886
     },
     {
       "bound": 1.0,
@@ -414,17 +434,17 @@
       "objective": 1.0,
       "sense": "min",
       "status": "optimal",
-      "wall": 1.8759857539998848
+      "wall": 0.7490356500002235
     },
     {
-      "bound": -5.685216256125444,
-      "gap": 1.478788002576214e-09,
+      "bound": -5.684782628025259,
+      "gap": 0.0,
       "instance": "nvs21",
-      "nodes": 183,
-      "objective": -5.684782607923295,
+      "nodes": 11,
+      "objective": -5.684782607923296,
       "sense": "min",
       "status": "optimal",
-      "wall": 28.922331156999917
+      "wall": 3.5605073409997203
     },
     {
       "bound": -1.923098601139822,
@@ -434,7 +454,7 @@
       "objective": -1.923098499884843,
       "sense": "min",
       "status": "optimal",
-      "wall": 5.195540846999847
+      "wall": 2.1633715159996427
     },
     {
       "bound": 1.9999999825187809,
@@ -444,27 +464,27 @@
       "objective": 2.0000003463351197,
       "sense": "min",
       "status": "optimal",
-      "wall": 1.2499920289997135
+      "wall": 1.2802300170005765
     },
     {
-      "bound": -0.9434744129395758,
-      "gap": 3.91252550502319e-06,
+      "bound": -0.9434705021069314,
+      "gap": 2.106931296097514e-09,
       "instance": "st_e29",
-      "nodes": 11,
+      "nodes": 5,
       "objective": -0.943470491100134,
       "sense": "min",
       "status": "optimal",
-      "wall": 8.77976758800014
+      "wall": 6.614313583000694
     },
     {
-      "bound": -299.30800030030736,
-      "gap": 0.21669918821263154,
+      "bound": -246.00000037500067,
+      "gap": 1.5243668441343357e-09,
       "instance": "st_e36",
-      "nodes": 61,
-      "objective": -246.0,
+      "nodes": 89,
+      "objective": -245.99999999999997,
       "sense": "min",
-      "status": "feasible",
-      "wall": 30.897572670000045
+      "status": "optimal",
+      "wall": 23.004111147000003
     },
     {
       "bound": 7197.727116826533,
@@ -474,7 +494,7 @@
       "objective": 7197.727116839705,
       "sense": "min",
       "status": "optimal",
-      "wall": 3.0965517469999213
+      "wall": 1.9292036619999635
     },
     {
       "bound": 280.9999999906497,
@@ -484,7 +504,7 @@
       "objective": 280.9999999906497,
       "sense": "min",
       "status": "optimal",
-      "wall": 0.47275263599976824
+      "wall": 0.3560992319999059
     },
     {
       "bound": 2.0,
@@ -494,7 +514,7 @@
       "objective": 2.0,
       "sense": "min",
       "status": "optimal",
-      "wall": 0.41730418899987853
+      "wall": 0.4142784440000469
     },
     {
       "bound": -6.0,
@@ -504,7 +524,7 @@
       "objective": -6.0,
       "sense": "min",
       "status": "optimal",
-      "wall": 0.39813208499981556
+      "wall": 0.3846799689999898
     },
     {
       "bound": -4574.000004423649,
@@ -514,7 +534,7 @@
       "objective": -4574.000004423649,
       "sense": "min",
       "status": "optimal",
-      "wall": 0.3233736399997724
+      "wall": 0.42075560400007816
     },
     {
       "bound": -1.6495994490692313e-08,
@@ -524,7 +544,7 @@
       "objective": -1.6495994490692313e-08,
       "sense": "min",
       "status": "optimal",
-      "wall": 0.6515486650000639
+      "wall": 0.4202173479998237
     },
     {
       "bound": -20.59070709795548,
@@ -534,37 +554,37 @@
       "objective": -20.59,
       "sense": "min",
       "status": "optimal",
-      "wall": 1.7137721879998935
+      "wall": 0.9408360990000801
     },
     {
-      "bound": 0.8382369708575652,
-      "gap": 0.33926530082607326,
+      "bound": 0.8528765311589279,
+      "gap": 0.32772576471468673,
       "instance": "tanksize",
-      "nodes": 23,
-      "objective": 1.2686437868414628,
+      "nodes": 49,
+      "objective": 1.2686437861135151,
       "sense": "min",
       "status": "feasible",
-      "wall": 33.84988136999982
+      "wall": 30.79642158599927
     },
     {
-      "bound": null,
-      "gap": null,
+      "bound": 2.4487125876978726,
+      "gap": 0.7622609107099159,
       "instance": "tls2",
-      "nodes": 319,
-      "objective": null,
+      "nodes": 353,
+      "objective": 10.299999865440752,
       "sense": "min",
-      "status": "time_limit",
-      "wall": 31.221907762000228
+      "status": "feasible",
+      "wall": 31.043129349000083
     },
     {
-      "bound": 178.27201906677078,
-      "gap": 0.06788410509353524,
+      "bound": 179.4433806807624,
+      "gap": 0.06175950525559916,
       "instance": "tspn05",
-      "nodes": 31,
+      "nodes": 37,
       "objective": 191.25520768494124,
       "sense": "min",
       "status": "feasible",
-      "wall": 30.164769492999767
+      "wall": 30.142610170999433
     },
     {
       "bound": null,
@@ -574,7 +594,7 @@
       "objective": 290.56685374735093,
       "sense": "min",
       "status": "feasible",
-      "wall": 40.8587219609999
+      "wall": 21.948357307999686
     },
     {
       "bound": null,
@@ -584,7 +604,7 @@
       "objective": 225.12607139732683,
       "sense": "min",
       "status": "feasible",
-      "wall": 28.715442277999955
+      "wall": 28.66480064300049
     },
     {
       "bound": null,
@@ -594,16 +614,16 @@
       "objective": 262.64739525060224,
       "sense": "min",
       "status": "feasible",
-      "wall": 22.6210043760002
+      "wall": 19.44749967699954
     }
   ],
   "summary": {
-    "error": 5,
-    "feasible": 11,
+    "error": 1,
+    "feasible": 8,
     "infeasible": 0,
     "n": 62,
-    "proved": 36,
-    "timeout": 10,
-    "total_wall": 1067.2555365639964
+    "proved": 41,
+    "timeout": 12,
+    "total_wall": 962.8165992300028
   }
 }

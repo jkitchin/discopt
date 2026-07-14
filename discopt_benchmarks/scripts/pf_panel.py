@@ -104,8 +104,18 @@ def _solve_one(name: str, budget: float) -> dict:
     if model._objective is not None and model._objective.sense is ObjectiveSense.MAXIMIZE:
         sense = "max"
 
+    # Harness-only knob (PF1 / #632): override the library default
+    # in_tree_presolve_stride so an OFF-vs-ON panel can be produced on the
+    # *identical* binary (controls for run-to-run variance when reading node
+    # ratios). This forwards the existing solve_model kwarg — no library flag is
+    # added. Unset => library default (currently 1, FBBT-only in-tree presolve).
+    solve_kwargs: dict = {"time_limit": budget}
+    _itp = os.environ.get("DISCOPT_ITP_STRIDE")
+    if _itp is not None and _itp != "":
+        solve_kwargs["in_tree_presolve_stride"] = int(_itp)
+
     t0 = time.perf_counter()
-    res = model.solve(time_limit=budget)
+    res = model.solve(**solve_kwargs)
     wall = time.perf_counter() - t0
 
     def _f(x: object) -> float | None:
