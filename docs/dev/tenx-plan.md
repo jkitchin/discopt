@@ -14,11 +14,29 @@ moves that number for the instances it names.
 
 ## §0. Operating rules (binding — these encode the retrospective's failures)
 
-1. **The metric is the ratio table, not a profile.** Every item must name, *in
-   advance*: the instances it targets, the seconds it predicts to recover, and
-   the family it generalizes to. The exit gate is that named prediction,
-   measured end-to-end. A landed item that does not move its named instances
-   is **reverted**, even if harmless — accretion without effect is cost.
+1. **The metric is the ratio table, not a profile — but it gates STACKS, not
+   items.** The repo's own data forbids per-item end-metric gating:
+   `scip-gap-nvs-diagnosis.md` measured that OBBT alone leaves nvs17 6× loose,
+   cuts alone are useless at 0.9 nodes/s, throughput alone can't close loose
+   McCormick — "*they are multiplicative and must be addressed together*." A
+   solo revert-if-no-effect rule would kill necessary-but-insufficient
+   components (and past try-and-revert cycles did exactly that; reverting also
+   destroys the component, making the next composition attempt archaeology).
+   So gating is two-level:
+   - **Mechanism gate (per item):** did the item do the mechanical thing it
+     claims (calls drop, phase respects deadline, engine routes, box
+     contracts) *and* pass its soundness regime. This admits the component —
+     behind a default-OFF flag when bound-changing (the
+     `flag-graduation-protocol.md` convention), directly when byte-neutral or
+     zero-bound-stake. No end-metric demand at this level.
+   - **Stack gate (per family checkpoint, §5):** the named family metric is
+     evaluated for the *composed stack*, with attribution by **ablation arms**
+     (stack minus one component, reusing `generality_sweep.py`'s arm
+     machinery) — a component's value is its marginal contribution *in
+     context*, not solo. A component with zero marginal contribution in the
+     full stack is then removable; that replaces revert-on-no-solo-effect.
+   - **Revert** is reserved for regressions: unsoundness, lost proofs, looser
+     bounds, or metric-worsening. Never for "no solo effect."
 2. **Do-not-relitigate list (§2).** No item may re-test a hypothesis already
    killed in `performance-plan.md` (incl. Appendix B's kill list),
    `sota-proof-plan.md` §3, `scip-gap-nvs-diagnosis.md`, or
@@ -125,8 +143,57 @@ parts. TX6 is research and goes last deliberately.
   the ratio table); parity bar is no-cut SCIP (4.7 s), not full SCIP.
 - TX6: no prediction — that is the point of entry experiments.
 
-**Stop condition (anti-circling):** after TX4, re-measure the easy-class
-geomean and the panel on the maintainer's box. If geomean ≤ 2.5× (the
-benchmarks.toml gate), the plan closes. If not, the residual must be
+**Stop condition (anti-circling):** after the Stack-C checkpoint, re-measure
+the easy-class geomean and the panel on the maintainer's box. If geomean ≤
+2.5× (the benchmarks.toml gate), the plan closes. If not, the residual must be
 *attributed* (TX0 refresh) to named instances/causes and becomes new named
 items — no unattributed grinding, no profile-of-the-day.
+
+## §5. Composition: declared stacks, checkpoints, ablation
+
+Items are NOT independent; the dependency structure is declared here so
+composition is designed, not discovered. Components land behind env flags (the
+`flag-graduation-protocol.md` convention: `DISCOPT_X=0` always restores old
+behavior), so stack checkpoints and ablations are a **flag matrix**, not
+reverts and re-lands.
+
+**Stack B (mid-class wall): TX1 + TX2.**
+Interaction: TX1 frees wall *inside* a budget that TX2 makes real — with
+overruns unhonored, TX1's savings don't change what the benchmark charges; with
+the heuristic uncapped, TX2's deadline fires mid-heuristic. Shared
+implementation surface: both touch the node loop's phase boundaries — build as
+one deadline-aware phase scheduler, not two patches.
+*Checkpoint B:* 62-panel jobs=1, arms {off, TX1, TX2, TX1+TX2}: proofs ≥
+baseline, no LOOSER, mid-class wall and overrun-seconds strictly down in the
+composed arm; per-component marginal from the ablation arms recorded in §3.
+
+**Stack C (integer-product family): TX1 + TX2 + TX4a(#287 latency) +
+TX4b(OBBT un-gate) + TX4c(engine routing).**
+This is the stack the scip-gap diagnosis calls multiplicative: OBBT tightens
+the box the engine's McCormick LP is built on (necessary, insufficient alone);
+LP-node throughput exploits the tightened box (insufficient on a loose box);
+TX4a's early incumbent enables pruning that throughput makes affordable; TX1
+matters here because the engine's scope test falling through to the default
+path must not re-enter an unthrottled NLP loop.
+*Checkpoint C:* family gate on nvs17/19/24 + graphpart_2g/3pm (bar: solved or
+bound within 2× of true at 60 s — parity with no-cut SCIP's 4.7 s, not 0.88 s)
++ full-panel no-regression + differential; ablation arms = stack minus each of
+{TX4a, TX4b, TX4c}, with TX1+TX2 held on (they graduate at Checkpoint B and
+become part of the control). Marginal contributions recorded; a component with
+zero marginal in-stack is removed.
+
+**Independent items (solo gates are correct for these):**
+- **TX3** (JAX-free floor): additive cost, no coupling to search behavior —
+  its gate is byte-level equivalence + easy-class A/B geomean. Interacts with
+  nothing above (it changes *how* the same envelopes are computed, not which).
+- **TX0 / TX6**: measurements; nothing to compose.
+
+**Interactions to watch (named now so they're tested, not discovered):**
+1. TX2's deadline machinery vs OBBT probes — the PF5 trap lives exactly at
+   this seam; the OBBT sub-budget is *part of* TX2's design, and Stack C's
+   ablation must include a TX2-off arm on OBBT-heavy instances.
+2. TX1's throttle changes incumbent arrival times → changes pruning →
+   changes node counts everywhere. All Stack B/C comparisons therefore use
+   dual-bound-at-budget and proofs as the signal, never node counts (§0.5).
+3. TX4b (OBBT on pure-integer) widens OBBT's reach exactly where TX2 budgets
+   it — sequence TX2 before TX4b so the sub-budget exists first.
