@@ -112,7 +112,7 @@ Spike each; only build what the spike shows.
 
 | Item | Stage | Result | Commit |
 |---|---|---|---|
-| PF0 harness + baseline | open | | |
+| PF0 harness + baseline | **DONE (2026-07-14)** | `scripts/pf_panel.py` — panel (subprocess-isolated, `--jobs N`, fresh env/worker) + diff (`--vs`, sense-aware LOOSER/CROSSED catcher, exits non-zero) + differential (`--env-a/--env-b` per-box bound compare + feasible-point soundness, 0 cuts). Baseline `docs/dev/data/pf-baseline.json` @ HEAD, 30 s/inst, jobs=4: **proved 36 / feasible 11 / timeout 10 / hung 5** (bchoco08, casctanks, contvar, hda, heatexch_gen3 — `solve()` overran budget+grace=90 s and were killed; isolation kept the panel alive), total_wall 1067 s. Notable: ex1226 optimal (obj −17.0, 5 nodes, 3 s); nvs09 feasible (bound −51.97, obj −39.60, 15 nodes); tspn05 feasible (bound 178.27, obj 191.26, 31 nodes). ruff/format clean; 5-inst smoke green; regression + differential gates verified firing on synthetic inputs. | branch `claude/issue-632-opus-plan-ffxld4` (#632) |
 | PF1 branch-and-reduce ON | open (spike) | | |
 | PF2 sound incremental node LP | open (spike) | | |
 | PF3 branching tune | open (spike) | | |
