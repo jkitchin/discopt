@@ -13,10 +13,9 @@ from __future__ import annotations
 import math
 import os
 
+import discopt.modeling as dm
 import numpy as np
 import pytest
-
-import discopt.modeling as dm
 from discopt import Model
 from discopt._jax.milp_relaxation import build_milp_relaxation
 from discopt._jax.term_classifier import classify_nonlinear_terms
