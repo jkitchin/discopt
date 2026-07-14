@@ -271,6 +271,7 @@ class BilevelProblem:
         ±sentinel and the disjunction becomes vacuous. Rather than emit an unsound
         (false-optimal) reformulation, refuse and point at the sound alternative.
         """
+        assert self.kkt is not None  # only called after build_kkt_system()
         unbounded = [
             pair.f.name
             for pair in self.kkt.comp_pairs
@@ -312,6 +313,7 @@ class BilevelProblem:
             raise ValueError(
                 f"multiplier_ub must be a finite positive number, got {self.multiplier_ub!r}"
             )
+        assert self.kkt is not None  # only called after build_kkt_system()
         for pair in self.kkt.comp_pairs:
             if isinstance(pair.f, Variable):
                 pair.f.ub = np.asarray(m, dtype=float)
@@ -414,8 +416,8 @@ class BilevelProblem:
                     f"discopt.mpec.solve_mpec on the formulated pairs.)"
                 )
             # Gate + fold follower bounds + build the KKT stationarity/primal system.
-            self.build_kkt_system()
-            if self.kkt.comp_pairs:
+            kkt = self.build_kkt_system()
+            if kkt.comp_pairs:
                 # A user-supplied multiplier bound (if any) makes the big-M encoding
                 # certifiable; apply it before the unbounded-multiplier gate.
                 self._apply_multiplier_ub()
@@ -423,9 +425,9 @@ class BilevelProblem:
                 # multiplier without a vacuous big-M — refuse before emitting it.
                 self._require_bounded_multipliers(mpec_method)
                 if mpec_method == "gdp":
-                    reformulate_gdp(self.model, self.kkt.comp_pairs)
+                    reformulate_gdp(self.model, kkt.comp_pairs)
                 else:
-                    reformulate_sos1(self.model, self.kkt.comp_pairs)
+                    reformulate_sos1(self.model, kkt.comp_pairs)
         else:  # strong_duality
             self._gate_convexity()
             extra = self._follower_bound_constraints() if self.include_follower_bounds else []
