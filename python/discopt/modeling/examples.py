@@ -832,7 +832,11 @@ def example_bilevel_toll():
         lower_objective=0.5 * f * f - 5 * f + t * f,
         lower_constraints=[],  # only the follower's flow bounds (folded in as KKT)
     )
-    bl.formulate(method="kkt", mpec_method="gdp")
+    # Strong-duality reduction (a single bilinear equality) rather than the KKT
+    # big-M path: the follower's KKT multipliers are unbounded, and a big-M
+    # (gdp/sos1) complementarity encoding cannot certify an unbounded multiplier
+    # without a vacuous big-M. Strong duality is exact for this convex lower level.
+    bl.formulate(method="strong_duality")
 
     print(m)
     return m

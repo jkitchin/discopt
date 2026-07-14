@@ -84,7 +84,7 @@ def _build_instance_min():
         lower_constraints=[x + y >= 3, y <= 2 * x],
         lower_sense="min",
     )
-    bl.formulate(method="kkt", mpec_method="gdp")
+    bl.build_kkt_system()  # sound KKT math; the big-M encoding is tested separately
     # signed objective gradient d, and (A, b(x)) for the follower LP in y.
     #   g0: 3 - x - y <= 0  ->  -y <= x - 3
     #   g1: y - 2x   <= 0  ->   y <= 2x
@@ -108,7 +108,7 @@ def _build_instance_max():
         lower_constraints=[y <= 2 * x, y <= 5],
         lower_sense="max",
     )
-    bl.formulate(method="kkt", mpec_method="gdp")
+    bl.build_kkt_system()  # sound KKT math; the big-M encoding is tested separately
     # signed objective = -y (max y == min -y) -> d = [-1]
     d = [-1.0]
     A = [[1.0], [1.0]]
@@ -181,7 +181,7 @@ def test_structure_and_leader_objective_preserved():
         lower_objective=y,
         lower_constraints=[x + y >= 3, y <= 2 * x],
     )
-    bl.formulate(method="kkt", mpec_method="gdp")
+    bl.build_kkt_system()
     # one multiplier per lower constraint (2 user + 2 finite follower bounds y in
     # [0,10]); one stationarity row per lower var; all four are inequalities.
     assert len(bl.lower_constraints_full) == 4
@@ -220,9 +220,11 @@ def test_double_formulate_refused():
     bl = BilevelProblem(
         m, upper_vars=[x], lower_vars=[y], lower_objective=y, lower_constraints=[x + y >= 3]
     )
-    bl.formulate()
+    # strong_duality has no big-M multiplier gate, so it formulates in place; the
+    # double-call guard must then refuse a second formulate.
+    bl.formulate(method="strong_duality")
     with pytest.raises(RuntimeError, match="already been called"):
-        bl.formulate()
+        bl.formulate(method="strong_duality")
 
 
 # ---------------------------------------------------------------------------
@@ -272,8 +274,8 @@ def test_bilinear_xy_is_allowed_affine_in_y():
         lower_objective=x * y,  # affine in y (x is the coefficient)
         lower_constraints=[x + y >= 3],
     )
-    bl.formulate(method="kkt")  # must not raise
-    assert bl._formulated
+    bl.build_kkt_system()  # convexity gate must accept affine-in-y and build the KKT
+    assert bl.kkt is not None and len(bl.kkt.stationarity) == 1
 
 
 def test_pessimistic_refused():

@@ -59,7 +59,12 @@ def _lp_instance(method):
         lower_objective=y,
         lower_constraints=[x + y >= 3, y <= 2 * x],
     )
-    bl.formulate(method=method)
+    # KKT multipliers here are unbounded, so the big-M encoding (formulate kkt) is
+    # correctly refused; build the sound KKT system directly to validate its math.
+    if method == "kkt":
+        bl.build_kkt_system()
+    else:
+        bl.formulate(method=method)
     d, A = [1.0], [[-1.0], [1.0]]
     b_of_x = lambda xv: [xv - 3.0, 2.0 * xv]  # noqa: E731
     return m, x, y, bl, d, A, b_of_x
@@ -128,7 +133,7 @@ def test_convex_qp_lower_level_accepted_and_kkt_correct():
         lower_objective=y * y - 2 * x * y,  # convex in y (Hessian = 2)
         lower_constraints=[y <= 1],
     )
-    bl.formulate(method="kkt")  # gate must accept convex-QP
+    bl.build_kkt_system()  # gate must accept convex-QP; validate the KKT math
     assert bl.kkt is not None and len(bl.kkt.stationarity) == 1
 
     for xv in [1.5, 2.0, 3.0]:
@@ -175,7 +180,7 @@ def test_active_follower_bound_gets_its_multiplier():
     bl = BilevelProblem(
         m, upper_vars=[x], lower_vars=[y], lower_objective=y, lower_constraints=[y <= 8]
     )
-    bl.formulate(method="kkt")
+    bl.build_kkt_system()
     # constraints: [y<=8 (user), 2-y<=0 (lb), y-10<=0 (ub)]
     assert len(bl.lower_constraints_full) == 3
     # at y*=2 the lower bound is active: μ_lb = 1, others 0 -> stationarity 1+μ0-μ_lb+μ_ub = 0
@@ -202,7 +207,7 @@ def test_without_bound_handling_active_bound_optimum_is_excluded():
         lower_constraints=[y <= 8],
         include_follower_bounds=False,
     )
-    bl.formulate(method="kkt")
+    bl.build_kkt_system()
     assert len(bl.lower_constraints_full) == 1
     # stationarity is 1 + μ0; with the only multiplier μ0 >= 0 it can never be 0.
     for mu0 in (0.0, 5.0):
@@ -233,20 +238,154 @@ def test_nonconvex_qp_refused():
         bl.formulate(method="kkt")
 
 
-def test_nonquadratic_lower_refused_pending_certifier():
+def test_convex_nlp_lower_accepted():
+    """A genuinely convex non-quadratic follower is certified convex in y and accepted.
+
+    ``exp(y) - x*y`` is convex in y (∂²/∂y² = exp(y) > 0) for every leader x, even
+    though it is not jointly convex in (x, y). The interval-Hessian-in-y certifier
+    must accept it (the natural bilevel form couples the leader linearly).
+    """
     m = Model("nq")
+    x = m.continuous("x", lb=0.5, ub=8)
+    y = m.continuous("y", lb=-2, ub=2)
+    m.minimize((y - 1) * (y - 1))
+    bl = BilevelProblem(
+        m,
+        upper_vars=[x],
+        lower_vars=[y],
+        lower_objective=FunctionCall("exp", y) - x * y,
+        lower_constraints=[],
+    )
+    bl.build_kkt_system()  # must not raise
+    assert bl.kkt is not None and len(bl.kkt.stationarity) == 1
+
+
+def test_convex_nlp_with_power_accepted():
+    """y**4 - x*y: convex in y (∂²/∂y² = 12 y² >= 0), leader coupling linear."""
+    m = Model("pw")
+    x = m.continuous("x", lb=0, ub=5)
+    y = m.continuous("y", lb=-3, ub=3)
+    m.minimize(x - y)
+    bl = BilevelProblem(
+        m, upper_vars=[x], lower_vars=[y], lower_objective=y**4 - x * y, lower_constraints=[]
+    )
+    bl.build_kkt_system()
+    assert bl.kkt is not None
+
+
+def test_nonconvex_nlp_lower_refused():
+    """sin(y) has an indefinite second derivative over the box → refused."""
+    m = Model("ncx_nl")
     x = m.continuous("x", lb=0, ub=10)
-    y = m.continuous("y", lb=0.1, ub=10)
+    y = m.continuous("y", lb=-2, ub=2)
     m.minimize(x - y)
     bl = BilevelProblem(
         m,
         upper_vars=[x],
         lower_vars=[y],
-        lower_objective=FunctionCall("exp", y),  # exp(y): convex but non-quadratic
-        lower_constraints=[y <= 5],
+        lower_objective=FunctionCall("sin", y),  # ∂²/∂y² = -sin(y): sign-indefinite
+        lower_constraints=[],
     )
-    with pytest.raises(NotImplementedError, match="not-quadratic|certifier"):
-        bl.formulate(method="kkt")
+    with pytest.raises(NotImplementedError, match="convex"):
+        bl.build_kkt_system()
+
+
+def test_concave_nlp_min_follower_refused():
+    """-exp(y) for a *minimizing* follower is concave → nonconvex lower level, refused."""
+    m = Model("cc_nl")
+    x = m.continuous("x", lb=0, ub=10)
+    y = m.continuous("y", lb=-2, ub=2)
+    m.minimize(x - y)
+    bl = BilevelProblem(
+        m,
+        upper_vars=[x],
+        lower_vars=[y],
+        lower_objective=-FunctionCall("exp", y),
+        lower_constraints=[],
+    )
+    with pytest.raises(NotImplementedError, match="convex"):
+        bl.build_kkt_system()
+
+
+def test_nondiagonal_psd_qp_accepted():
+    # min_{y1,y2} y1^2 + y1*y2 + y2^2 : Hessian [[2,1],[1,2]], eigenvalues 1,3 > 0
+    # -> convex (non-diagonal). The gate must accept it (not just diagonal QPs).
+    m = Model("psd")
+    x = m.continuous("x", lb=0, ub=10)
+    y1 = m.continuous("y1", lb=-5, ub=5)
+    y2 = m.continuous("y2", lb=-5, ub=5)
+    m.minimize(x - y1 - y2)
+    bl = BilevelProblem(
+        m,
+        upper_vars=[x],
+        lower_vars=[y1, y2],
+        lower_objective=y1 * y1 + y1 * y2 + y2 * y2,
+        lower_constraints=[y1 + y2 <= 4],
+    )
+    bl.build_kkt_system()  # gate accepts; would raise if it mis-classified
+    assert bl.kkt is not None and len(bl.kkt.stationarity) == 2
+
+
+def test_nondiagonal_indefinite_qp_refused():
+    # y1^2 + 3*y1*y2 + y2^2 : Hessian [[2,3],[3,2]], eigenvalues -1,5 -> indefinite.
+    m = Model("indef")
+    x = m.continuous("x", lb=0, ub=10)
+    y1 = m.continuous("y1", lb=-5, ub=5)
+    y2 = m.continuous("y2", lb=-5, ub=5)
+    m.minimize(x - y1 - y2)
+    bl = BilevelProblem(
+        m,
+        upper_vars=[x],
+        lower_vars=[y1, y2],
+        lower_objective=y1 * y1 + 3 * y1 * y2 + y2 * y2,
+        lower_constraints=[y1 + y2 <= 4],
+    )
+    with pytest.raises(NotImplementedError, match="nonconvex"):
+        bl.build_kkt_system()
+
+
+def test_max_follower_sign_flip_in_convexity_gate():
+    # The gate signs the objective by lower_sense: a *max* follower minimises -f, so
+    # a **convex** objective under max is a *concave* minimand -> must be refused,
+    # while a **concave** objective under max is convex -> accepted. A gate that
+    # forgot the sign flip would wrongly accept the convex-max case.
+    def _mk(obj_fn):
+        m = Model("maxg")
+        x = m.continuous("x", lb=0, ub=10)
+        y = m.continuous("y", lb=-5, ub=5)
+        m.minimize(x - y)
+        return BilevelProblem(
+            m,
+            upper_vars=[x],
+            lower_vars=[y],
+            lower_objective=obj_fn(y),
+            lower_constraints=[y <= 4],
+            lower_sense="max",
+        )
+
+    # max of a concave objective -> convex minimand -> accepted.
+    _mk(lambda y: -(y * y)).build_kkt_system()
+    # max of a convex objective -> concave minimand -> refused.
+    with pytest.raises(NotImplementedError, match="nonconvex"):
+        _mk(lambda y: y * y).build_kkt_system()
+
+
+def test_concave_inequality_body_refused():
+    # A '<=' body that is concave in y makes the gate refuse: KKT/strong-duality
+    # need each inequality body convex (convex feasible set). Conservative refusal.
+    m = Model("concave")
+    x = m.continuous("x", lb=0, ub=10)
+    y = m.continuous("y", lb=-5, ub=5)
+    m.minimize(x - y)
+    bl = BilevelProblem(
+        m,
+        upper_vars=[x],
+        lower_vars=[y],
+        lower_objective=y,
+        lower_constraints=[-(y * y) <= 0],  # concave body
+    )
+    with pytest.raises(NotImplementedError, match="nonconvex"):
+        bl.build_kkt_system()
 
 
 def test_nonlinear_equality_refused():
