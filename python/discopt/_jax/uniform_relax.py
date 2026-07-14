@@ -1696,6 +1696,44 @@ def _entropy_prod_var(ctx: "_Builder", node: CNode):
     return None
 
 
+# xexp atom (issue #632 adjacent-atom family). ``t*exp(t)`` is convex on ``t >= -2``
+# (``f''(t) = exp(t)(t+2) >= 0``), but the factorable path shatters it into a bilinear
+# ``t * exp(t)`` (``t`` against the convex-relaxed ``exp``) -> loose (root gap ~2.3 on
+# an interior-min box). Recognize the atom for a shared affine ``t`` and emit its exact
+# 1-D convex envelope (tangent under + secant over). Sound on any box with ``lo >= -2``
+# (fully convex there). Gated ``DISCOPT_XEXP_ATOM`` (default OFF; byte-identical off).
+# On ``lo < -2`` (box spans the inflection) or an overflow-prone ``hi`` fall through to
+# the sound product path.
+def _xexp(t: float) -> float:
+    return t * math.exp(t)
+
+
+def _xexp_prime(t: float) -> float:
+    return math.exp(t) * (1.0 + t)
+
+
+def _xexp_prod_var(ctx: "_Builder", node: CNode):
+    """If ``node`` is ``t*exp(t)`` for a shared AFFINE form ``t`` (unit exponents),
+    return ``(lt_t, lo, hi)`` for the shared 1-D xexp envelope; else ``None``.
+    Covers ``x*exp(x)``, ``(a x)*exp(a x)``, ``(a x + b)*exp(a x + b)``. Recognized
+    only when the base factor and the exp argument are the SAME affine form, so it is
+    never mis-applied to a genuine bilinear ``x*exp(y)``."""
+    if node.kind != "prod":
+        return None
+    (exps,) = node.payload
+    if len(node.children) != 2 or not all(float(e) == 1.0 for e in exps):
+        return None
+    for i, ch in enumerate(node.children):
+        if ch.kind == "call" and ch.payload == "exp":
+            other = node.children[1 - i]
+            (earg,) = ch.children
+            lt_o = ctx.rep(other)
+            if _linform_eq(lt_o, ctx.rep(earg)):
+                lo, hi = ctx.bounds(other)
+                return lt_o, lo, hi
+    return None
+
+
 # Relative-entropy atom (issue #632 adjacent-atom family). ``x*log(x/y)`` is
 # JOINTLY convex on x,y>0 (the perspective of ``x log x``), but the factorable
 # path relaxes it as ``x * log(x/y)`` (a bilinear of x against the concave-relaxed
@@ -1786,6 +1824,16 @@ def _build_product(ctx: _Builder, node: CNode, w: int) -> Envelope:
             _lt, _lo, _hi = _ent
             if _lo > 0.0:
                 _tight = _emit_1d(ctx, w, _lt, _lo, _hi, _xlogx, _xlogx_prime, "convex")
+                return Envelope(rows=[], tight=_tight)
+    # xexp atom (gated): recognize ``t*exp(t)`` on its convex region ``t>=-2`` and emit
+    # the exact 1-D convex envelope. ``lo<-2`` (spans the inflection) or an overflow-prone
+    # ``hi`` => fall through to the sound product path. Off by default => byte-identical.
+    if os.environ.get("DISCOPT_XEXP_ATOM") == "1":
+        _xe = _xexp_prod_var(ctx, node)
+        if _xe is not None:
+            _lt, _lo, _hi = _xe
+            if _lo >= -2.0 and _hi <= 700.0:
+                _tight = _emit_1d(ctx, w, _lt, _lo, _hi, _xexp, _xexp_prime, "convex")
                 return Envelope(rows=[], tight=_tight)
     # Relative-entropy atom (gated): joint convex OA of x*log(x/y). Off => identical.
     if os.environ.get("DISCOPT_RELENT_ATOM") == "1":
