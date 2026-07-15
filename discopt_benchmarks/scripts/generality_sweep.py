@@ -150,6 +150,42 @@ ARMS: dict[str, dict] = {
         "struct_attr": None,
         "regime": "bound_changing",
     },
+    # --- #581 flags wired in 2026-07-15 (previously untracked by the gate) ------ #
+    # LU density route (#557): a factorization *route*. A ``bound_neutral`` guess was
+    # FALSIFIED by the gate — the alternate route reorders pivots, so it is NOT
+    # byte-identical: node_count drifts (nvs02 101->337) and the objective drifts by
+    # ~1e-7 (oaer 1.96e-7, st_e13 3.46e-7), both from floating-point roundoff, well
+    # within the 1e-6 abs / 1e-4 rel tolerance. So it is ``bound_changing`` (certified
+    # objective enforced TO TOLERANCE + oracle bracket; node drift a perf note the
+    # graduation PR must weigh — the nvs02 +234% node case is a real trade-off). No
+    # cheap static structure proxy (density is a runtime property).
+    "lu_density_route": {
+        "env": {"DISCOPT_LU_DENSITY_ROUTE": "1"},
+        "struct_attr": None,
+        "regime": "bound_changing",
+    },
+    # Square-cost gate (THRU-3): when ON it *shortens* the per-node x**2 tangent
+    # loop, dropping cuts → a legitimately looser relaxation (more nodes, same valid
+    # bound) → ``bound_changing`` (objective + oracle-bracket enforced; node drift a
+    # perf note).
+    "square_cost_gate": {
+        "env": {"DISCOPT_SQUARE_COST_GATE": "1"},
+        "struct_attr": None,
+        "regime": "bound_changing",
+    },
+    # Lifted-FBBT: adds an FBBT sweep + conditional relaxation rebuild per node →
+    # tighter boxes / stronger bound (wins ex1252) → ``bound_changing``.
+    "lifted_fbbt": {
+        "env": {"DISCOPT_LIFTED_FBBT": "1"},
+        "struct_attr": None,
+        "regime": "bound_changing",
+    },
+    # alpha-BB alongside the LP: adds an extra (valid) dual bound → ``bound_changing``.
+    "alphabb_with_lp": {
+        "env": {"DISCOPT_ALPHABB_WITH_LP": "1"},
+        "struct_attr": None,
+        "regime": "bound_changing",
+    },
     "all": {"env": dict(FLAGS_ON), "struct_attr": None, "regime": "bound_changing"},
 }
 
@@ -162,6 +198,11 @@ GRADUATION_ARMS = (
     "psd_cost_gate",
     "lift_zero_spanning",
     "lift_loose_products",
+    # #581 flags wired in 2026-07-15
+    "lu_density_route",
+    "square_cost_gate",
+    "lifted_fbbt",
+    "alphabb_with_lp",
 )
 
 # correctness tolerance (matches conftest abs=1e-6, rel=1e-4)
