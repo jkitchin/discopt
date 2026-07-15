@@ -224,10 +224,6 @@ _CUTOVER_DEFERRED_TESTS: dict[str, str] = {
         "S8-deferred: square-difference partitioned root tightening (gas network) "
         "not reproduced by the static engine pass (sound, looser)"
     ),
-    "test_integer_affine_cos_objective_uses_discrete_separable_lower_bound": (
-        "S8-deferred: exact enumerated integer-affine-cos bound not reproduced; "
-        "engine uses the continuous cos in [-1,1] range (sound, looser)"
-    ),
     "test_mixed_curvature_affine_trig_uses_piecewise_relaxation": (
         "S8-deferred: mixed-curvature affine-trig piecewise tightening not "
         "reproduced; engine returns the loose range bound (sound)"
@@ -240,10 +236,13 @@ _CUTOVER_DEFERRED_TESTS: dict[str, str] = {
         "S8-deferred: spatial-partition square-secant tightening (circle superlevel) "
         "not reproduced; engine LP bound is sound (<= sqrt(2)) but looser"
     ),
-    "test_x_exp_minlptests_objective_uses_separable_lower_bound": (
-        "S8-deferred: separable lower bound for the unbounded-box x*exp(x)+cos+... "
-        "objective not derived; engine returns unbounded (sound: no false bound)"
-    ),
+    # NOTE (#640 Bucket 1, separable-objective slice — RECOVERED): the two separable
+    # objective lower-bound tests
+    # (test_integer_affine_cos_objective_uses_discrete_separable_lower_bound,
+    # test_x_exp_minlptests_objective_uses_separable_lower_bound) were un-deferred
+    # when the federation separable-objective analyzer was ported back into
+    # milp_relaxation.py and wired into build_uniform_relaxation as a sound
+    # ``obj_lin >= sep_lb`` cut (added only when it strictly improves the box floor).
     # ── test_bucket2_sound_bounds.py — whole-function product-side deferrals ──
     "test_ex1252_relaxation_equilibration_conditions_and_preserves_bound": (
         "S8-deferred: the RLT ill-conditioning/equilibration path is not exercised "

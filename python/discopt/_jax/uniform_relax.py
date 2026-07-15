@@ -61,9 +61,12 @@ from discopt._jax.canonical_expr import (
 )
 from discopt._jax.convexity.interval import Interval
 from discopt._jax.convexity.interval_eval import evaluate_interval
-from discopt._jax.milp_relaxation import MilpRelaxationModel
+from discopt._jax.milp_relaxation import (
+    MilpRelaxationModel,
+    _expression_lower_bound_for_lift,
+)
 from discopt._jax.model_utils import flat_variable_bounds
-from discopt.modeling.core import Model, ObjectiveSense
+from discopt.modeling.core import Model, ObjectiveSense, UnaryOp
 
 __all__ = [
     "LinForm",
@@ -2203,12 +2206,79 @@ def build_uniform_relaxation(
             ctx.add_row(lc.coeffs, rhs_shift - lc.const)
             ctx.add_row(lc.scaled(-1.0).coeffs, -(rhs_shift) + lc.const)
 
+    obj_offset = obj_lin.const
+
+    # ── Plain box-interval objective floor + validity (soundness guard) ──
+    # The LP optimum is a valid lower bound ONLY if the relaxed objective is
+    # actually bounded below over the box. When a nonlinear atom cannot be
+    # enveloped (unbounded box: McCormick rows dropped for infinite endpoints,
+    # transcendental over an infinite argument, …) its aux column is a free
+    # interval-floor column; if such a column carries objective cost and is
+    # otherwise unconstrained, the LP is unbounded below — yet the warm-started
+    # Rust simplex can mis-report a finite "optimal" (issue #15). Reporting that as
+    # a bound would be a FALSE certificate. We compute a SOUND box-interval lower
+    # bound on the (minimize-equivalent) objective from the column bounds; a cost
+    # column that is unbounded on its cost-relevant side and appears in NO row makes
+    # that lower bound -inf, and we refuse the objective bound (the solver falls
+    # back to its rigorous alphaBB/interval bound) rather than trust a
+    # possibly-fabricated LP value. Mirrors the federation's
+    # ``objective_bound_valid=False`` on an un-relaxable / under-constrained
+    # objective. NOTE: the LP feasible region ⊆ the column box, so the LP optimum is
+    # always ≥ ``obj_box_lb`` — this is why the separable floor below only helps
+    # (and is only added) when it STRICTLY exceeds ``obj_box_lb``.
+    _row_cols: set[int] = set()
+    for _coeffs, _ in ctx.rows:
+        _row_cols.update(_coeffs)
+    obj_bound_valid = True
+    obj_box_lb = obj_offset
+    for j, coef in obj_lin.coeffs.items():
+        edge = ctx.col_lb[j] if coef > 0 else ctx.col_ub[j]
+        contrib = coef * edge
+        if not math.isfinite(contrib):
+            if j not in _row_cols:
+                obj_bound_valid = False
+            obj_box_lb = -math.inf
+        else:
+            obj_box_lb += contrib
+    if not math.isfinite(obj_box_lb):
+        obj_bound_valid = False
+
+    # ── Separable objective lower bound (issue #640 Bucket 1 — federation-parity) ──
+    # ``sep_lb`` is a sound constant lower bound on the MINIMIZE-EQUIVALENT
+    # objective, derived by separable term analysis (integer-domain enumeration for
+    # cos(integer-affine), x*exp(x) >= -1/e, monotone-polynomial vertex min,
+    # reciprocal / even-power enclosures). It rescues shapes the static per-atom
+    # envelope leaves loose or unbounded on a wide box: an unbounded
+    # x*exp(x)+cos(y)+z^3-z^2 objective, or an integer-affine cos whose continuous
+    # envelope is the [-1,1] range. We add it as the single cut ``obj_lin >= sep_lb``
+    # ONLY when it strictly improves ``obj_box_lb`` (i.e. it would change the LP
+    # bound) — a redundant cut on a linear / already-tight objective is skipped so
+    # bound-neutral relaxation consumers (e.g. the incremental-McCormick row-exact
+    # validator) are untouched. SOUNDNESS: every feasible ORIGINAL point x maps to a
+    # lifted point with obj_lin = objective(x) >= sep_lb, so the cut removes NO image
+    # of a feasible point — only relaxation-only points where the loose envelope dips
+    # below the true objective floor. The LP optimum after the cut is therefore still
+    # a valid lower bound (>= before, <= true optimum), and — being a genuine LP row
+    # rather than a free-column simplex quirk — it makes the objective certifiably
+    # bounded, so ``obj_bound_valid`` becomes True.
+    if dag.objective is not None and model._objective is not None and obj_lin.coeffs:
+        obj_expr = model._objective.expression
+        min_equiv_expr = (
+            UnaryOp("neg", obj_expr)
+            if model._objective.sense == ObjectiveSense.MAXIMIZE
+            else obj_expr
+        )
+        sep_lb = _expression_lower_bound_for_lift(min_equiv_expr, model, flat_lb, flat_ub)
+        if sep_lb is not None and math.isfinite(sep_lb) and sep_lb > obj_box_lb + 1e-9:
+            # obj_lin >= sep_lb  <=>  -(obj_lin variable part) <= obj_lin.const - sep_lb
+            ctx.add_row(obj_lin.scaled(-1.0).coeffs, obj_lin.const - sep_lb)
+            obj_bound_valid = True
+
     # Assemble the LP.
     n_cols = len(ctx.col_lb)
     c = np.zeros(n_cols, dtype=np.float64)
     for j, coef in obj_lin.coeffs.items():
         c[j] += coef
-    obj_offset = obj_lin.const
 
     if ctx.rows:
         import scipy.sparse as sp
@@ -2231,44 +2301,6 @@ def build_uniform_relaxation(
         b = None
 
     bounds = list(zip(ctx.col_lb, ctx.col_ub))
-
-    # Objective-bound validity (soundness guard). The LP optimum is a valid lower
-    # bound ONLY if the relaxed objective is actually bounded below over the box.
-    # When a nonlinear atom cannot be enveloped (unbounded box: McCormick rows
-    # dropped for infinite endpoints, transcendental over an infinite argument,
-    # …) its aux column is a free interval-floor column; if such a column carries
-    # objective cost and is otherwise unconstrained, the LP is unbounded below —
-    # yet the warm-started Rust simplex can mis-report a finite "optimal" (issue
-    # #15). Reporting that as a bound would be a FALSE certificate. We therefore
-    # compute a SOUND box-interval lower bound on the (minimize-equivalent)
-    # objective from the column bounds; a cost column that is unbounded on its
-    # cost-relevant side and appears in NO row makes that lower bound -inf, and we
-    # refuse the objective bound (the solver falls back to its rigorous
-    # alphaBB/interval bound) rather than trust a possibly-fabricated LP value.
-    # This mirrors the federation's ``objective_bound_valid=False`` behaviour on
-    # an un-relaxable / under-constrained objective.
-    _row_cols: set[int] = set()
-    for _coeffs, _ in ctx.rows:
-        _row_cols.update(_coeffs)
-    obj_bound_valid = True
-    obj_box_lb = obj_offset
-    for j, coef in obj_lin.coeffs.items():
-        edge = ctx.col_lb[j] if coef > 0 else ctx.col_ub[j]
-        contrib = coef * edge
-        if not math.isfinite(contrib):
-            # Unbounded on the cost-relevant side. If the column is tied down by a
-            # row it MAY still be LP-bounded (a correct simplex would report the
-            # true bound or unboundedness); but a free unconstrained cost column is
-            # provably unbounded -> refuse.
-            if j not in _row_cols:
-                obj_bound_valid = False
-            obj_box_lb = -math.inf
-        else:
-            obj_box_lb += contrib
-    if not math.isfinite(obj_box_lb):
-        # No finite sound floor on the objective at all -> the LP value cannot be
-        # certified as a global lower bound.
-        obj_bound_valid = False
 
     # Pure LP relaxation (integrality relaxed at the root) — a sound lower bound,
     # matching the federation's root-node LP convention.
