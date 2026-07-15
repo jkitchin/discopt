@@ -601,27 +601,31 @@ class MccormickLPRelaxer:
             except Exception:
                 self._inc = None
 
-        # Does this model carry a composite convex/concave OA lift? Its tightening
-        # is the lazy Kelley tangents ``_separate_convex`` adds from
-        # ``composite_multivar_relaxations`` — which the incremental fast path skips
-        # (it builds the reference with ``skip_convex_lift=True``) and instead
-        # inherits via the root cut pool. A DIRECT ``solve_at_node(separate=True)``
-        # with no inherited pool (e.g. a unit test, or any caller not driving the
-        # pooled spatial loop) would therefore lose that tightening on the fast path
-        # (bound-neutrality violation: test_convex_claimer -204 -> -350). Detect the
-        # lift once so ``solve_at_node`` can fall back to the cold, separating build
-        # in exactly that case. Cheap best-effort; failure leaves the flag False.
-        self._has_composite_lift = False
-        if self._inc is not None:
+        # Composite convex/concave OA lift detection is LAZY (see
+        # ``_model_has_composite_lift``): computed at most once, and only the first
+        # time a ``solve_at_node(separate=True)`` on the fast path with no inherited
+        # pool actually needs it. Most relaxers (structural OBBT, pooled spatial
+        # nodes, non-separating solves) never trigger it, so the extra cold build it
+        # costs stays off their hot path.
+        self._has_composite_lift_cache: Optional[bool] = None
+
+    def _model_has_composite_lift(self) -> bool:
+        """Whether the model carries a composite convex/concave OA lift whose
+        Kelley tightening the incremental fast path would drop. Computed once and
+        cached; only ever called from the fast-path bound-neutrality guard, so its
+        one probe build stays off every other relaxer's hot path."""
+        if self._has_composite_lift_cache is None:
+            self._has_composite_lift_cache = False
             try:
                 from discopt._jax.model_utils import flat_variable_bounds
                 from discopt._jax.uniform_relax import build_uniform_relaxation
 
-                _flb, _fub = flat_variable_bounds(model)
-                _probe = build_uniform_relaxation(model, box=(_flb, _fub))
-                self._has_composite_lift = bool(_probe.composite_multivar_specs)
+                _flb, _fub = flat_variable_bounds(self._model)
+                _probe = build_uniform_relaxation(self._model, box=(_flb, _fub))
+                self._has_composite_lift_cache = bool(_probe.composite_multivar_specs)
             except Exception:
-                self._has_composite_lift = False
+                self._has_composite_lift_cache = False
+        return self._has_composite_lift_cache
 
     @property
     def nonlinear_columns(self) -> frozenset[int]:
@@ -1122,7 +1126,12 @@ class MccormickLPRelaxer:
         # is bound-independent (an empty McCormick polytope over a finite box is a
         # rigorous infeasibility proof), so it is always trusted; pooled spatial
         # nodes, which DO inherit cuts, keep the fast path for both verdicts.
-        _skip_fast_for_lift = separate and self._has_composite_lift and not inherited_cuts
+        _skip_fast_for_lift = (
+            separate
+            and self._inc is not None
+            and not inherited_cuts
+            and self._model_has_composite_lift()
+        )
         if out_cuts is None:
             _fast = self._try_incremental_node(
                 node_lb, node_ub, inherited_cuts, want_marginals=want_marginals
