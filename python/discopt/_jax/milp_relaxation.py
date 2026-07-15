@@ -1608,6 +1608,7 @@ def _uniform_relaxation_delegate(
     rlt_level1: bool = False,
     skip_separable_floor: bool = False,
     skip_convex_lift: bool = False,
+    disc_state: object = None,
 ) -> tuple["MilpRelaxationModel", dict]:
     """Build the default relaxation through the uniform factorable engine (#632).
 
@@ -1633,6 +1634,7 @@ def _uniform_relaxation_delegate(
         rlt_quad=rlt_quad,
         skip_separable_floor=skip_separable_floor,
         skip_convex_lift=skip_convex_lift,
+        disc_state=disc_state,
     )
     milp = rel.model
     n_total = int(np.size(milp._c))
@@ -1679,11 +1681,11 @@ def _uniform_relaxation_delegate(
     # (over-) estimator, so the cut never removes a feasible point (sound by
     # construction; the loop is a sound no-op on any failure).
     vm["composite_multivar_relaxations"] = list(rel.composite_multivar_specs)
-    # The engine does one static factorable build and emits no piecewise univariate
-    # (trig) relaxations — the historical federation contract types this family as a
-    # LIST (of per-function piecewise relaxations), so expose the honest empty list
-    # rather than the uniform ``{}`` default. Recovering the populated piecewise
-    # trig family is a separate S8 item (#640 Bucket 1, buckets A/B/C).
+    # Piecewise univariate/monomial/bilinear refinement (#640 S8) is now emitted
+    # DIRECTLY as relaxation rows by ``build_uniform_relaxation`` when a ``disc_state``
+    # partition is supplied (the AMP path), not surfaced through this legacy census
+    # list — so the family stays the honest empty list here (the tightening rows are
+    # already in the relaxation, keyed to the atoms' aux columns).
     vm["univariate_piecewise_relaxations"] = []
     # Finite-domain trig-square selector tables (#640 Bucket 1): exact one-hot
     # encodings of sin/cos(int-affine)^2 the engine emitted, surfaced for callers
@@ -1714,17 +1716,17 @@ def build_milp_relaxation(
         the uniform factorable engine** (:func:`uniform_relax.build_uniform_relaxation`),
         which relaxes every canonical atom class soundly via the AVM. As a result
         the following parameters are currently **IGNORED** on the default path and
-        kept only for signature compatibility: ``terms``, ``disc_state`` (no
-        piecewise-McCormick refinement is fed in — the engine's per-atom envelopes
-        supersede it), ``incumbent``, ``oa_cuts`` (OA/Kelley tangents are added
-        lazily by the separators at ``solve_at_node``, not pre-seeded here),
-        ``convhull_ebd``/``convhull_ebd_encoding``, ``superposition``, and
-        ``rlt_level1``. Only ``model``, ``convhull_formulation`` (validated),
-        and ``bound_override`` still affect the result. A caller that relied on
-        ``disc_state`` piecewise refinement or on feeding back ``oa_cuts`` gets a
-        sound but unrefined-by-those-inputs relaxation — the engine is a valid
-        outer relaxation by construction, verified ``incorrect_count = 0`` on the
-        global50 panel. The docstring below describes the superseded federated
+        kept only for signature compatibility: ``terms``, ``incumbent``, ``oa_cuts``
+        (OA/Kelley tangents are added lazily by the separators at ``solve_at_node``,
+        not pre-seeded here), ``convhull_ebd``/``convhull_ebd_encoding``,
+        ``superposition``. ``disc_state`` is now **consumed** again (#640 S8): its
+        partition breakpoints drive sound piecewise-McCormick refinement of every
+        bilinear/monomial/univariate atom depending on a partitioned variable, so
+        the AMP adaptive-partition loop tightens the node bound as it refines. Only
+        ``model``, ``convhull_formulation`` (validated), ``bound_override``,
+        ``disc_state`` and ``rlt_level1`` affect the result. The engine remains a
+        valid outer relaxation by construction, verified ``incorrect_count = 0`` on
+        the global50 panel. The docstring below describes the superseded federated
         build and is retained for historical context.
 
     For each bilinear term x_i*x_j: adds standard McCormick envelope constraints
@@ -1795,6 +1797,7 @@ def build_milp_relaxation(
         rlt_level1=rlt_level1,
         skip_separable_floor=skip_separable_floor,
         skip_convex_lift=skip_convex_lift,
+        disc_state=disc_state,
     )
 
 

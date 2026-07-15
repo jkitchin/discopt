@@ -594,6 +594,12 @@ class _Builder:
         # by ``_build_power`` when it hits a ``trig(int-affine)**2`` over a small
         # finite integer domain.
         self.finite_domain_trig_square_tables: list = []
+        # Univariate intrinsic atoms whose argument is affine in ONE original
+        # variable (``w = fname(coeff*x_i + const)``) — recorded by
+        # ``_build_univariate_call`` so the piecewise-partition refinement (#640 S8
+        # AMP ``disc_state`` recovery) can add per-interval secant/tangent envelopes
+        # when ``x_i`` is partitioned. Entries: ``(fname, w, var_idx, coeff, const)``.
+        self.univariate_atom_specs: list[tuple[str, int, int, float, float]] = []
         self._ivbox = _interval_box(model, flat_lb, flat_ub)
         # Validation-only: aux column -> the modeling Expression whose exact value
         # that column represents (the node itself, a relaxed power, or a McCormick
@@ -1427,6 +1433,17 @@ def _build_univariate_call(ctx: _Builder, node: CNode, w: int) -> Envelope:
     arg = node.children[0]
     lt = ctx.rep(arg)
     lo, hi = ctx.bounds(arg)
+    # Record ``w = fname(coeff*x_i + const)`` for the piecewise-partition refinement
+    # (#640 S8 AMP ``disc_state`` recovery) when the argument is affine in a single
+    # ORIGINAL variable. This includes intrinsics with no static single-curvature
+    # envelope over the box (e.g. ``tan`` on a box straddling its inflection, or any
+    # ``fname`` absent from ``_UNIVARIATE_FN``): partitioning splits the box into
+    # single-curvature pieces where a sound secant/tangent envelope DOES exist.
+    if fname in _PIECEWISE_UNIVARIATE_FN:
+        aff = _single_orig_affine(ctx, lt)
+        if aff is not None:
+            v_idx, v_coeff = aff
+            ctx.univariate_atom_specs.append((fname, w, v_idx, v_coeff, float(lt.const)))
     if fname == "abs":
         return _build_abs(ctx, w, lt, lo, hi)
     entry = _UNIVARIATE_FN.get(fname)
@@ -2524,6 +2541,362 @@ def _emit_quadratic_rlt(
                 ctx.add_row({int(j): float(coeffs[j]) for j in nz}, float(rhs))
 
 
+def _clamped_breakpoints(
+    raw: "np.ndarray", lo: float, hi: float, min_intervals: int = 2
+) -> Optional[list[float]]:
+    """Return sorted breakpoints of ``raw`` clipped to ``[lo, hi]`` with the box
+    endpoints included, or ``None`` if fewer than ``min_intervals`` usable
+    intervals remain.
+
+    The node box (``lo, hi``) may be tighter than when the AMP partition was
+    created, so breakpoints outside it are dropped and the true endpoints are
+    re-inserted — the partition must exactly tile ``[lo, hi]`` for the
+    disaggregation identity ``x == sum_k x_hat_k`` to be exact.
+    """
+    if not (math.isfinite(lo) and math.isfinite(hi)) or hi - lo <= 1e-12:
+        return None
+    pts = [float(p) for p in np.asarray(raw, dtype=np.float64) if lo < float(p) < hi]
+    merged = sorted({lo, hi, *pts})
+    # Drop near-duplicate breakpoints that would create a degenerate interval.
+    dedup: list[float] = [merged[0]]
+    for p in merged[1:]:
+        if p - dedup[-1] > 1e-9:
+            dedup.append(p)
+    if dedup[-1] < hi - 1e-12:
+        dedup[-1] = hi
+    if len(dedup) - 1 < min_intervals:
+        return None
+    return dedup
+
+
+_MAX_PIECEWISE_CELLS = 144  # cap on grid cells per bilinear (cost guard)
+
+
+def _add_piecewise_bilinear(
+    ctx: "_Builder",
+    a: int,
+    b: int,
+    w: int,
+    a_pts: list[float],
+    b_pts: Optional[list[float]],
+) -> None:
+    """Append a sound disaggregated piecewise-McCormick relaxation of ``w == x_a *
+    x_b``: 2-D grid over partitions ``a_pts`` (of ``a``) and ``b_pts`` (of ``b``)
+    when both are supplied, else 1-D over ``a_pts`` with ``b`` on its full box.
+
+    Piecewise McCormick (Nagarajan et al., CP 2016; Alpine.jl): a cell binary
+    ``lam`` per (interval-of-a x interval-of-b) cell, ``sum lam == 1``,
+    disaggregates ``a = sum a_hat``, ``b = sum b_hat``, ``w = sum w_hat`` with each
+    ``_hat`` copy confined to its cell when active (0 otherwise), and per-cell
+    McCormick on ``w_hat`` using the CELL bounds. SOUNDNESS: for the TRUE point
+    ``(a, b, w = a*b)`` in cell ``c*``, ``lam_{c*}=1`` (else 0), ``a_hat_{c*}=a``,
+    ``b_hat_{c*}=b``, ``w_hat_{c*}=a*b`` (else 0) satisfies every row — no feasible
+    point is cut; the full-box McCormick rows on ``w`` remain, so the result is
+    their intersection (never looser, strictly tighter once ``lam`` is integral).
+    Refining BOTH factors is required to certify a bilinear whose two factor ranges
+    are both wide (1-D refinement of one factor plateaus at ``~Δ_other/4``).
+    """
+    bl = float(ctx.col_lb[b])
+    bu = float(ctx.col_ub[b])
+    if not (math.isfinite(bl) and math.isfinite(bu)):
+        return
+    # Build the grid of (a-interval, b-interval) cells. 1-D degenerates to a single
+    # b-"interval" spanning the full box.
+    a_ivs = list(zip(a_pts[:-1], a_pts[1:]))
+    b_ivs = list(zip(b_pts[:-1], b_pts[1:])) if b_pts else [(bl, bu)]
+    if len(a_ivs) * len(b_ivs) > _MAX_PIECEWISE_CELLS:
+        b_ivs = [(bl, bu)]  # fall back to 1-D on ``a`` to bound the column count
+    cells = [(alo, ahi, blo, bhi) for (alo, ahi) in a_ivs for (blo, bhi) in b_ivs]
+
+    lam: list[int] = []
+    a_hat: list[int] = []
+    b_hat: list[int] = []
+    w_hat: list[int] = []
+    for alo, ahi, blo, bhi in cells:
+        lam.append(ctx.new_aux(0.0, 1.0, integ=True))
+        a_hat.append(ctx.new_aux(min(0.0, alo), max(0.0, ahi)))
+        b_hat.append(ctx.new_aux(min(0.0, blo), max(0.0, bhi)))
+        corners = [alo * blo, alo * bhi, ahi * blo, ahi * bhi, 0.0]
+        w_hat.append(ctx.new_aux(min(corners), max(corners)))
+
+    def _eq(coeffs: dict[int, float], rhs: float) -> None:
+        ctx.add_row(coeffs, rhs)
+        ctx.add_row({j: -c for j, c in coeffs.items()}, -rhs)
+
+    n = len(cells)
+    _eq({lam[k]: 1.0 for k in range(n)}, 1.0)
+    _eq({a: 1.0, **{a_hat[k]: -1.0 for k in range(n)}}, 0.0)
+    _eq({b: 1.0, **{b_hat[k]: -1.0 for k in range(n)}}, 0.0)
+    _eq({w: 1.0, **{w_hat[k]: -1.0 for k in range(n)}}, 0.0)
+    for k, (alo, ahi, blo, bhi) in enumerate(cells):
+        # alo*lam <= a_hat <= ahi*lam ;  blo*lam <= b_hat <= bhi*lam
+        ctx.add_row({a_hat[k]: 1.0, lam[k]: -ahi}, 0.0)
+        ctx.add_row({a_hat[k]: -1.0, lam[k]: alo}, 0.0)
+        ctx.add_row({b_hat[k]: 1.0, lam[k]: -bhi}, 0.0)
+        ctx.add_row({b_hat[k]: -1.0, lam[k]: blo}, 0.0)
+        # Per-cell McCormick (under):
+        ctx.add_row({w_hat[k]: -1.0, b_hat[k]: alo, a_hat[k]: blo, lam[k]: -alo * blo}, 0.0)
+        ctx.add_row({w_hat[k]: -1.0, b_hat[k]: ahi, a_hat[k]: bhi, lam[k]: -ahi * bhi}, 0.0)
+        # Per-cell McCormick (over):
+        ctx.add_row({w_hat[k]: 1.0, b_hat[k]: -alo, a_hat[k]: -bhi, lam[k]: alo * bhi}, 0.0)
+        ctx.add_row({w_hat[k]: 1.0, b_hat[k]: -ahi, a_hat[k]: -blo, lam[k]: ahi * blo}, 0.0)
+
+
+# Univariate intrinsics eligible for piecewise refinement: ``fname -> (f, f',
+# curvature(arg_lo, arg_hi))``. Reuses the static-envelope table and adds ``tan``
+# (absent there because it has no single-curvature envelope over a box straddling
+# its inflection — the exact case piecewise splitting fixes).
+_PIECEWISE_UNIVARIATE_FN: dict[str, tuple[Callable, Callable, Callable]] = {
+    "tan": (np.tan, lambda t: 1.0 / (np.cos(t) ** 2), _curv_by_sign(True)),
+    **{name: (f, fp, cv) for name, (f, fp, cv, _dom) in _UNIVARIATE_FN.items()},
+}
+
+
+def _single_orig_affine(ctx: "_Builder", lt: "LinForm") -> Optional[tuple[int, float]]:
+    """Return ``(var_idx, coeff)`` iff ``lt`` is ``coeff*x_i (+ const)`` for a single
+    ORIGINAL variable (any nonzero coeff, any const), else ``None``."""
+    items = [(j, c) for j, c in lt.coeffs.items() if c != 0.0]
+    if len(items) != 1:
+        return None
+    j, c = items[0]
+    if 0 <= j < ctx.n_orig and math.isfinite(c) and c != 0.0:
+        return (j, float(c))
+    return None
+
+
+def _univariate_inflection_args(fname: str, alo: float, ahi: float) -> list[float]:
+    """Curvature-change (inflection) points of ``fname`` inside ``(alo, ahi)`` in
+    ARGUMENT space, so each sub-interval is single-curvature."""
+    out: list[float] = []
+    # f'' has the sign of the argument -> inflection at 0.
+    if fname in ("tan", "tanh", "atan", "asin", "asinh", "atanh", "erf", "sinh"):
+        if alo < 0.0 < ahi:
+            out.append(0.0)
+        return out
+    if fname in ("sin", "cos"):
+        # sin'' = -sin (inflections at k*pi); cos'' = -cos (inflections at pi/2+k*pi).
+        start = 0.0 if fname == "sin" else 0.5 * math.pi
+        k_min = math.ceil((alo - start) / math.pi)
+        k_max = math.floor((ahi - start) / math.pi)
+        for k in range(k_min, k_max + 1):
+            p = start + k * math.pi
+            if alo < p < ahi:
+                out.append(float(p))
+    return out
+
+
+def _tan_branch_safe(alo: float, ahi: float) -> bool:
+    """True iff ``[alo, ahi]`` contains no ``tan`` asymptote (pi/2 + k*pi)."""
+    margin = 1e-6
+    k_min = math.floor((alo - 0.5 * math.pi) / math.pi) - 1
+    k_max = math.ceil((ahi - 0.5 * math.pi) / math.pi) + 1
+    for k in range(k_min, k_max + 1):
+        asymptote = 0.5 * math.pi + k * math.pi
+        if alo - margin <= asymptote <= ahi + margin:
+            return False
+    return True
+
+
+def _emit_piecewise_1d(
+    ctx: "_Builder",
+    w_hat: int,
+    x_hat: int,
+    lam: int,
+    coeff: float,
+    const: float,
+    alo: float,
+    ahi: float,
+    f: Callable[[float], float],
+    fp: Callable[[float], float],
+    curv: Optional[str],
+) -> None:
+    """Append the λ-homogenized secant/tangent envelope of ``w_hat == f(coeff*x_hat +
+    const)`` valid on the active interval (arg in ``[alo, ahi]``).
+
+    ``arg_k = coeff*x_hat + const*lam`` is the per-interval argument (== the true
+    arg when ``lam == 1``, 0 when ``lam == 0``). A line ``s*arg + b`` valid on the
+    interval becomes ``s*arg_k + b*lam`` so it is the true line when the interval is
+    active and the trivial ``0 (>=|<=) 0`` when inactive. SOUNDNESS: on a
+    curvature-certified piece each tangent is a supporting line (rigorous one-sided
+    bound) and the endpoint secant a chord (rigorous opposite bound); homogenizing
+    by ``lam`` keeps them exact at the true point and vacuous elsewhere.
+    """
+    if curv is None or ahi - alo < _MIN_WIDTH:
+        return
+    try:
+        flo, fhi = float(f(alo)), float(f(ahi))
+    except (ValueError, ArithmeticError):
+        return
+    if not _finite(flo, fhi):
+        return
+    ssl = (fhi - flo) / (ahi - alo)  # secant slope (arg space)
+    sint = flo - ssl * alo  # secant intercept
+
+    def _line(slope: float, intercept: float, sign: float) -> None:
+        # sign*w_hat (<=|>=) sign*(slope*arg_k + intercept*lam):
+        #   arg_k = coeff*x_hat + const*lam
+        #   -> row  sign*w_hat - sign*slope*coeff*x_hat - sign*(slope*const+intercept)*lam <= 0
+        if not (_finite(slope, intercept)):
+            return
+        ctx.add_row(
+            {
+                w_hat: sign,
+                x_hat: -sign * slope * coeff,
+                lam: -sign * (slope * const + intercept),
+            },
+            0.0,
+        )
+
+    mid = 0.5 * (alo + ahi)
+    sec_sign = +1.0 if curv == "convex" else -1.0  # convex: w<=secant; concave: w>=secant
+    _line(ssl, sint, sec_sign)
+    for t0 in (alo, mid, ahi):
+        try:
+            g, gp = float(f(t0)), float(fp(t0))
+        except (ValueError, ArithmeticError):
+            continue
+        if not _finite(g, gp):
+            continue
+        _line(gp, g - gp * t0, -sec_sign)  # tangent: opposite side of the secant
+
+
+def _add_piecewise_univariate(
+    ctx: "_Builder",
+    w: int,
+    v: int,
+    coeff: float,
+    const: float,
+    f: Callable[[float], float],
+    fp: Callable[[float], float],
+    curv_fn: Callable[[float, float], Optional[str]],
+    pts: list[float],
+    branch_safe: Optional[Callable[[float, float], bool]] = None,
+) -> None:
+    """Append a sound disaggregated piecewise envelope of ``w == f(coeff*x_v +
+    const)`` over the partition ``pts`` of ``x_v`` (used for both univariate
+    intrinsics and integer powers ``x_v**p``). Aborts (adds nothing) if any interval
+    is not soundly relaxable (e.g. a ``tan`` piece crossing an asymptote), leaving
+    the atom's existing interval floor intact.
+    """
+    m = len(pts) - 1
+    # Sound generous column box for the disaggregated ``w_hat`` copies: the atom's
+    # full-box aux range (rigorous, contains every sub-interval range) plus 0 (the
+    # inactive value).
+    w_lo = min(0.0, float(ctx.col_lb[w]))
+    w_hi = max(0.0, float(ctx.col_ub[w]))
+    if not (_finite(w_lo, w_hi)):
+        return
+    # Pre-check: every interval's argument box must be soundly relaxable.
+    specs: list[tuple[float, float, Optional[str]]] = []
+    for k in range(m):
+        a0 = coeff * pts[k] + const
+        a1 = coeff * pts[k + 1] + const
+        alo, ahi = (a0, a1) if a0 <= a1 else (a1, a0)
+        if branch_safe is not None and not branch_safe(alo, ahi):
+            return  # cannot relax this atom soundly over the partition
+        specs.append((alo, ahi, curv_fn(alo, ahi)))
+
+    lam: list[int] = []
+    x_hat: list[int] = []
+    w_hat: list[int] = []
+    for k in range(m):
+        p_lo, p_hi = pts[k], pts[k + 1]
+        lam.append(ctx.new_aux(0.0, 1.0, integ=True))
+        x_hat.append(ctx.new_aux(min(0.0, p_lo), max(0.0, p_hi)))
+        w_hat.append(ctx.new_aux(w_lo, w_hi))
+
+    def _eq(coeffs: dict[int, float], rhs: float) -> None:
+        ctx.add_row(coeffs, rhs)
+        ctx.add_row({j: -c for j, c in coeffs.items()}, -rhs)
+
+    _eq({lam[k]: 1.0 for k in range(m)}, 1.0)
+    _eq({v: 1.0, **{x_hat[k]: -1.0 for k in range(m)}}, 0.0)
+    _eq({w: 1.0, **{w_hat[k]: -1.0 for k in range(m)}}, 0.0)
+    for k in range(m):
+        p_lo, p_hi = pts[k], pts[k + 1]
+        ctx.add_row({x_hat[k]: 1.0, lam[k]: -p_hi}, 0.0)  # x_hat <= p_hi*lam
+        ctx.add_row({x_hat[k]: -1.0, lam[k]: p_lo}, 0.0)  # x_hat >= p_lo*lam
+        alo, ahi, curv = specs[k]
+        _emit_piecewise_1d(ctx, w_hat[k], x_hat[k], lam[k], coeff, const, alo, ahi, f, fp, curv)
+
+
+def _apply_partition_refinement(ctx: "_Builder", disc_state: object) -> None:
+    """Add sound piecewise structure for every atom depending on a partitioned
+    variable (#640 S8 AMP ``disc_state`` recovery). No-op when no partitions.
+    """
+    parts = getattr(disc_state, "partitions", None)
+    if not parts:
+        return
+
+    def _clamped(v: int, extra: Optional[list[float]] = None) -> Optional[list[float]]:
+        raw = parts.get(v)
+        if raw is None:
+            return None
+        merged = np.asarray(raw, dtype=np.float64)
+        if extra:
+            merged = np.concatenate([merged, np.asarray(extra, dtype=np.float64)])
+        return _clamped_breakpoints(merged, float(ctx.col_lb[v]), float(ctx.col_ub[v]))
+
+    for (a, b), w in list(ctx.bilinear_map.items()):
+        a_pts = _clamped(a)
+        b_pts = _clamped(b)
+        if a_pts is None and b_pts is None:
+            continue
+        # Refine both factors (2-D grid) when both are partitioned — required to
+        # certify a bilinear with two wide factor ranges. If only one is
+        # partitioned, refine that one (1-D) with the other on its full box.
+        if a_pts is not None:
+            _add_piecewise_bilinear(ctx, a, b, w, a_pts, b_pts)
+        elif b_pts is not None:
+            _add_piecewise_bilinear(ctx, b, a, w, b_pts, None)
+
+    for fname, w, v, coeff, const in list(ctx.univariate_atom_specs):
+        if v not in parts:
+            continue
+        entry = _PIECEWISE_UNIVARIATE_FN.get(fname)
+        if entry is None:
+            continue
+        f, fp, curv_fn = entry
+        # Inject the function's inflection points (mapped from arg space to x space)
+        # so no sub-interval straddles a curvature change; without this a partition
+        # refined only near the incumbent leaves the inflection interval loose.
+        infl_x: list[float] = []
+        _e0 = coeff * float(ctx.col_lb[v]) + const
+        _e1 = coeff * float(ctx.col_ub[v]) + const
+        for a_infl in _univariate_inflection_args(fname, min(_e0, _e1), max(_e0, _e1)):
+            infl_x.append((a_infl - const) / coeff)
+        pts = _clamped(v, infl_x)
+        if pts is None:
+            continue
+        branch_safe = _tan_branch_safe if fname == "tan" else None
+        _add_piecewise_univariate(ctx, w, v, coeff, const, f, fp, curv_fn, pts, branch_safe)
+
+    # Integer powers ``x_v**p`` (the sphere/square terms): piecewise-refine the aux
+    # so a convex square's under-estimating tangents tighten as ``x_v`` is
+    # partitioned — without this a wide symmetric box (e.g. ``y**2`` on ``[-s, s]``)
+    # keeps its aux pinned to the tangent at 0, decoupling the square from its base.
+    for (i, p), w in list(ctx.monomial_map.items()):
+        if i not in parts or not isinstance(p, int) or p < 2:
+            continue
+        pw = p
+
+        def _fpow(t: float, _pw: int = pw) -> float:
+            return float(t**_pw)
+
+        def _fppow(t: float, _pw: int = pw) -> float:
+            return float(_pw * t ** (_pw - 1))
+
+        # ``x**p`` is convex for even ``p`` (all x) and for odd ``p`` on ``x >= 0``;
+        # concave for odd ``p`` on ``x <= 0`` — curvature has the sign of ``x`` when
+        # ``p`` is odd (inflection at 0), constant convex when ``p`` is even.
+        curv_pow = _curv_const("convex") if pw % 2 == 0 else _curv_by_sign(True)
+        infl_x = [0.0] if (pw % 2 == 1 and ctx.col_lb[i] < 0.0 < ctx.col_ub[i]) else []
+        pts = _clamped(i, infl_x)
+        if pts is None:
+            continue
+        _add_piecewise_univariate(ctx, w, i, 1.0, 0.0, _fpow, _fppow, curv_pow, pts)
+
+
 def build_uniform_relaxation(
     model: Model,
     box: Optional[tuple[np.ndarray, np.ndarray]] = None,
@@ -2531,6 +2904,7 @@ def build_uniform_relaxation(
     rlt_quad: bool = False,
     skip_separable_floor: bool = False,
     skip_convex_lift: bool = False,
+    disc_state: object = None,
 ) -> UniformRelaxation:
     """Build the uniform factorable relaxation of ``model`` over ``box``.
 
@@ -2681,6 +3055,13 @@ def build_uniform_relaxation(
             # obj_lin >= sep_lb  <=>  -(obj_lin variable part) <= obj_lin.const - sep_lb
             ctx.add_row(obj_lin.scaled(-1.0).coeffs, obj_lin.const - sep_lb)
             obj_bound_valid = True
+
+    # Piecewise-McCormick partition refinement (#640 S8 — AMP `disc_state`
+    # recovery). When the caller (the AMP adaptive-multivariate-partitioning loop)
+    # supplies partition breakpoints, add sound piecewise structure that tightens
+    # every atom depending on a partitioned variable. No-op when ``disc_state`` is
+    # empty (every non-AMP caller and the root), so the base build is unchanged.
+    _apply_partition_refinement(ctx, disc_state)
 
     # Assemble the LP.
     n_cols = len(ctx.col_lb)

@@ -373,17 +373,16 @@ def test_self_product_difference_classifies_cross_term():
 
 
 def test_partitioned_square_secants_tighten_circle_superlevel_bound():
-    """Sound (looser) circle superlevel bound under the uniform engine (#640).
+    """Partition refinement of the square terms tightens the circle bound (#640 S8).
 
-    #640 Bucket 1 — sound-but-looser contract (federation-specific tightness
-    intentionally not reproduced). The deleted spatial-partition square-secant
-    tables closed the Alpine circle lower bound to sqrt(2); the uniform engine does
-    ONE static factorable build and ignores the ``disc_state`` partitions, so
-    refining the partition is a no-op (coarse == fine) and the McCormick relaxation
-    of the nonconvex superlevel constraint ``x0**2 + x1**2 >= 2`` yields a valid but
-    looser lower bound. The recovered contract: the bound is sound (a valid lower
-    bound, never above the true optimum sqrt(2)), strictly positive (the superlevel
-    constraint is active in the relaxation, not dropped), and partition-invariant.
+    #640 S8 — the piecewise-McCormick partition subsystem the #632 cutover parked
+    is recovered: ``build_uniform_relaxation`` now consumes ``disc_state`` and adds
+    sound piecewise square-secant/tangent structure for every partitioned variable.
+    On the nonconvex superlevel constraint ``x0**2 + x1**2 >= 2`` the coarse
+    (``n_init=2``) partition yields a loose lower bound; refining to ``n_init=64``
+    tightens it toward the true optimum ``sqrt(2)``. The contract: every bound is
+    SOUND (a valid lower bound, never above ``sqrt(2)``), and refinement STRICTLY
+    tightens (fine > coarse) and converges close to ``sqrt(2)``.
     """
     m = _make_circle()
     part_vars = [0, 1]
@@ -399,11 +398,12 @@ def test_partitioned_square_secants_tighten_circle_superlevel_bound():
 
     assert coarse.objective is not None
     assert fine.objective is not None
-    # Partition refinement is a no-op on the static engine build.
-    assert fine.objective == pytest.approx(coarse.objective, abs=1e-9)
-    # Sound: a valid lower bound, strictly positive but not yet at the true sqrt(2).
-    assert fine.objective > 1e-6
+    # Both bounds are sound (never above the true optimum sqrt(2)).
+    assert coarse.objective <= np.sqrt(2.0) + 1e-6
     assert fine.objective <= np.sqrt(2.0) + 1e-6
+    # Partition refinement strictly tightens the bound and converges near sqrt(2).
+    assert fine.objective > coarse.objective + 1e-3
+    assert fine.objective == pytest.approx(np.sqrt(2.0), abs=1e-3)
 
 
 def test_shifted_square_constraint_linearizes_and_proves_infeasible(caplog):
