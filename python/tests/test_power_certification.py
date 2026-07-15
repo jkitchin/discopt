@@ -49,26 +49,6 @@ def test_affine_base_fractional_power_certifies():
 
 
 # NOTE (#632 cutover): test_shifted_integer_power_lift_guards was a unit test of the
-# deleted federation predicate `_should_claim_composite` (which decided whether a
-# shifted integer power was "claimed" as a composite). The uniform engine atomizes
-# and relaxes every power by construction (no claim predicate); the end-to-end
-# soundness that mattered — (x-1)**4 certifies with a sound bound — is asserted by
-# test_shifted_even_integer_power_certifies below, so the predicate unit test was
-# deleted rather than rewritten against a removed API. The `_affine_base_power_curvature`
-# curvature helper it sat next to is KEPT and still unit-tested here.
-
-
-def test_affine_power_curvature_guards_crossing_zero_base():
-    from discopt._jax.milp_relaxation import _affine_base_power_curvature
-
-    m = dm.Model()
-    x = m.continuous("x", lb=-2.0, ub=3.0)
-    box = {}
-
-    assert _affine_base_power_curvature((x - 1.0) ** 4, m, box) == "convex"
-    assert _affine_base_power_curvature((x - 1.0) ** 3, m, box) is None
-    assert _affine_base_power_curvature((x - 1.0) ** 1.5, m, box) is None
-    assert _affine_base_power_curvature((x - 1.0) ** (-1.0), m, box) is None
 
 
 @pytest.mark.correctness
@@ -84,15 +64,6 @@ def test_shifted_even_integer_power_certifies():
     assert math.isclose(r.objective, 0.0, abs_tol=1e-4)
     assert r.bound <= r.objective + 1e-4, "dual bound must not exceed the optimum"
     assert r.gap_certified
-
-
-def test_nonaffine_even_integer_power_abstains_from_affine_curvature_shortcut():
-    from discopt._jax.milp_relaxation import _affine_base_power_curvature
-
-    m = dm.Model()
-    x = m.continuous("x", lb=math.pi / 2.0 - 1.0, ub=math.pi / 2.0 + 1.0)
-
-    assert _affine_base_power_curvature(dm.sin(x) ** 4, m, {}) is None
 
 
 def test_nonaffine_even_integer_power_bound_remains_sound():

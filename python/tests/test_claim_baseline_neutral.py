@@ -19,9 +19,10 @@ H-LOG flag deprecation — the log-space envelope now lives in the uniform engin
 not as an off-by-default collector, so there is nothing to prove inert. That test
 was in any case NOT a frozen-reference gate: a uniform
 coefficient change from a refactor would move both fingerprints identically and
-still pass. This PR needs no frozen-reference coefficient gate because its only
-build-path change is three ``note_defer()`` no-ops (everything else is unwired, so
-it provably cannot change a coefficient). The frozen-reference *coefficient* gate
+still pass. At the R0 stage this PR needed no frozen-reference coefficient gate
+because its only build-path change was inert instrumentation, since removed
+(everything else was unwired, so it provably could not change a coefficient). The
+frozen-reference *coefficient* gate
 arrives with the first bound-changing cutover (R1.2), built as its own differential
 gate per CLAUDE.md §5 — a **tolerance-based** coefficient comparison (``_A_ub``/
 ``_c`` within ~1e-9), robust to the FBBT last-digit non-determinism that makes an

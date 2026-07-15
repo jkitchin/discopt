@@ -9,8 +9,8 @@ absent from the monomial map (``univariate_square_var_map`` only registered
 ``(Πx)**0.2`` term ``factorable_reform`` *does* lift — fell back to a feasibility
 objective (``objective_bound_valid=False``).
 
-The generic tangent/secant square envelope emitted for every
-``UnivariateSquareRelaxation`` (``w = base**2`` over ``[base_lb, base_ub]``) is
+The generic tangent/secant square envelope emitted for every lifted univariate
+square (``w = base**2`` over ``[base_lb, base_ub]``) is
 function-agnostic and sound for any lifted base, so the fix is simply to register
 squares of *any* lifted univariate call, in both the authored ``f**2`` form and
 the ``f*f`` product ``distribute_products`` rewrites it into (the shape the

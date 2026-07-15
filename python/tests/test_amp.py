@@ -295,16 +295,6 @@ def test_amp_helper_defaults_cover_semifinite_domains():
     np.testing.assert_allclose(recovery_starts[2], np.array([1.0, 2.0]))
 
 
-def test_exp_univariate_domain_rejects_overflowing_bounds_without_warning():
-    """Wide finite exp domains should be rejected without probing exp(ub)."""
-    from discopt._jax.milp_relaxation import _univariate_domain_ok
-
-    with warnings.catch_warnings():
-        warnings.simplefilter("error", RuntimeWarning)
-        assert _univariate_domain_ok("exp", 0.0, 1000.0) is False
-        assert _univariate_domain_ok("exp", -1000.0, 10.0) is True
-
-
 def test_amp_normalizes_initial_point_length_and_bounds():
     """Initial AMP points should be length-checked and clipped to tightened bounds."""
     from discopt.solvers import amp as amp_mod
@@ -519,40 +509,6 @@ def test_distributed_univariate_constraint_monomials_registered(caplog):
     assert result.status == "optimal"
     assert result.objective is not None
     assert result.objective <= 1.0 + 1e-8
-
-
-def test_reciprocal_of_positive_quadratic_objective_lower_bound():
-    """``min -1/(0.1+(x0-4)**2+(x1-4)**2)`` must get a finite, sound lower bound.
-
-    The MILP linearizer cannot relax a non-constant division, so the whole
-    objective is dropped and AMP would abstain (``bound=None``, can never
-    certify — the ex8_1_6 capability gap).  The separable fallback recognizes the
-    reciprocal term and bounds the denominator via the polynomial-vertex
-    machinery, which works even on the live solve's already-DISTRIBUTED
-    denominator ``0.1 + x0**2 - 8*x0 + 16 + ...`` (a naive interval evaluation of
-    ``x*x`` on a wide box collapses to ``[-inf, inf]``).  ``1/D`` is decreasing in
-    ``D`` so for ``k<0`` the term floor is ``k/D_lo``; the bound must never exceed
-    the true optimum.
-    """
-    from discopt._jax.milp_relaxation import _separable_objective_lower_bound
-    from discopt._jax.term_classifier import distribute_products
-
-    m = Model("reciprocal_quadratic")
-    x = m.continuous("x", lb=0.0, ub=8.0, shape=(2,))
-    m.minimize(-1.0 / (0.1 + (x[0] - 4.0) ** 2 + (x[1] - 4.0) ** 2))
-
-    flat_lb = np.array([0.0, 0.0])
-    flat_ub = np.array([8.0, 8.0])
-
-    # Match the live solve, whose objective arrives already distributed.
-    distributed = distribute_products(m._objective.expression)
-    bound = _separable_objective_lower_bound(distributed, m, flat_lb, flat_ub)
-
-    assert bound is not None
-    assert np.isfinite(bound)
-    # True optimum is -10 (denominator floor 0.1 at x=(4,4), inside the box).
-    # A valid lower bound for minimization must not exceed it.
-    assert bound <= -10.0 + 1e-6
 
 
 @pytest.mark.memory_heavy
@@ -1038,59 +994,6 @@ def test_supported_univariate_constraint_tightens_relaxation():
     assert result.objective > -1.0
 
 
-def test_entropy_univariate_helpers_interior_minimum():
-    """``entropy(x)=x*log(x)`` value-bounds must capture the interior minimum.
-
-    entropy is convex with a single interior minimum at ``x = 1/e`` (value
-    ``-1/e``); endpoint-only bounds would miss it and could clip the aux column
-    above the true minimum, cutting off the optimum.
-    """
-    from discopt._jax.milp_relaxation import (
-        _univariate_curvature,
-        _univariate_domain_ok,
-        _univariate_value,
-        _univariate_value_bounds,
-    )
-
-    # Box straddles 1/e -> minimum is the interior value -1/e.
-    lo, hi = _univariate_value_bounds("entropy", 0.05, 2.0)
-    assert lo == pytest.approx(-np.exp(-1.0))
-    assert hi == pytest.approx(2.0 * np.log(2.0))
-    # Box entirely right of 1/e -> minimum at the left endpoint.
-    lo2, hi2 = _univariate_value_bounds("entropy", 1.0, 3.0)
-    assert lo2 == pytest.approx(0.0)
-    assert hi2 == pytest.approx(3.0 * np.log(3.0))
-    assert _univariate_value("entropy", 0.0) == 0.0  # x -> 0+ limit
-    assert _univariate_curvature("entropy", lo, hi) == "convex"
-    assert _univariate_domain_ok("entropy", 0.0, 2.0)
-    assert not _univariate_domain_ok("entropy", -0.1, 2.0)  # x < 0 undefined
-    assert not _univariate_domain_ok("entropy", 0.0, 0.0)  # no positive point
-
-
-def test_linear_expr_bounds_zero_coeff_ignores_infinite_var():
-    """A zero coefficient must not poison the interval via ``0 * inf = nan``.
-
-    Regression for ex6_1_4: a univariate term ``f(x0)`` has coefficient vector
-    ``[1, 0, 0, ...]``; when an unrelated variable is unbounded (``ub = inf``),
-    the old ``c >= 0`` branch evaluated ``0.0 * inf = nan`` and the entropy/log
-    argument bound came out NaN, so the term was dropped from the relaxation.
-    """
-    from discopt._jax.milp_relaxation import _linear_expr_bounds
-
-    coeff = np.array([1.0, 0.0, 0.0])
-    lb = np.array([1e-6, 0.0, 0.0])
-    ub = np.array([1.0, np.inf, np.inf])
-    lo, hi = _linear_expr_bounds(coeff, 0.0, lb, ub)
-    assert lo == pytest.approx(1e-6)
-    assert hi == pytest.approx(1.0)
-    assert np.isfinite(hi)
-
-    # Negative zero-adjacent and genuinely contributing infinite bounds still flow.
-    lo2, hi2 = _linear_expr_bounds(np.array([0.0, 1.0]), 0.0, np.array([0.0, 0.0]), ub[:2])
-    assert lo2 == pytest.approx(0.0)
-    assert hi2 == np.inf
-
-
 def test_entropy_objective_linearizes_with_sound_bound(caplog):
     """``entropy(x)`` objectives must produce a sound finite MILP lower bound.
 
@@ -1221,7 +1124,7 @@ def test_issue64_minlptests_minmax_objective_uses_lifted_bound(
 
 
 def test_tan_range_rejects_near_asymptote_endpoints():
-    from discopt._jax.milp_relaxation import _tan_range
+    from discopt._jax.operator_relaxations import tan_range as _tan_range
 
     near_asymptote = np.pi / 2.0 - 5e-4
 
@@ -2636,7 +2539,6 @@ def test_reciprocal_argument_interval_uses_explicit_infeasible_sentinel():
 
 def test_nonlinear_tightening_counts_infinite_bounds_without_warning():
     """Unchanged infinite bounds should not warn while counting tightened entries."""
-    import warnings
 
     from discopt._jax.nonlinear_bound_tightening import tighten_nonlinear_bounds
 

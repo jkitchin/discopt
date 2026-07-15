@@ -1,8 +1,7 @@
 """Claim-audit instrumentation tests (issue #632, R0.3 + R0.4).
 
-Proves the audit machinery is (a) deterministic, (b) read-only — an audited build
-is byte-identical to an un-audited one — and (c) that the defer-fire counter is a
-genuine no-op unless a ``defer_audit`` context is active.
+Proves the audit machinery is (a) deterministic and (b) read-only — an audited
+build is byte-identical to an un-audited one.
 """
 
 from __future__ import annotations
@@ -13,9 +12,7 @@ import pytest
 from discopt._jax.claim_audit import (
     AuditReport,
     audit_build,
-    defer_audit,
     fingerprint_model,
-    note_defer,
     relaxation_fingerprint,
 )
 from discopt._jax.discretization import DiscretizationState
@@ -88,27 +85,3 @@ def test_nvs09_ownership_has_a_nonlinear_owner_family():
     report = audit_build(from_nl(str(_NL_DIR / "nvs09.nl")))
     assert report.n_claims > 0
     assert report.owners(), "no nonlinear owner family populated for nvs09"
-
-
-def test_defer_counter_is_noop_outside_context():
-    """note_defer outside a defer_audit context must do nothing and not raise."""
-    note_defer("some_site")  # must be a silent no-op
-
-
-def test_defer_counter_counts_inside_context():
-    with defer_audit() as fires:
-        note_defer("a")
-        note_defer("a")
-        note_defer("b")
-    assert dict(fires) == {"a": 2, "b": 1}
-
-
-def test_defer_counter_resets_between_contexts():
-    with defer_audit() as first:
-        note_defer("x")
-    with defer_audit() as second:
-        note_defer("y")
-    assert dict(first) == {"x": 1}
-    assert dict(second) == {"y": 1}
-    # After both contexts, note_defer is inert again.
-    note_defer("z")

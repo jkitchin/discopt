@@ -22,25 +22,17 @@ The auditor derives everything from the build's *output* varmap, so it never
 changes what the solver builds — proven in ``test_claim_audit.py`` by fingerprint
 equality between an audited and an un-audited build.
 
-The defer-fire counter (:func:`defer_audit` / :func:`note_defer`) was the hook the
-federated defer predicates reported to. The #632 cutover removed the federation
-(``build_milp_relaxation`` now delegates unconditionally to the uniform engine, and
-no defer predicate remains), so this counter has **no production consumer** — it is
-retained only as standalone-tested instrumentation (a no-op unless a
-:func:`defer_audit` context is active) pending a decision to remove it or repurpose
-it for the uniform engine. The still-live audit here is :func:`audit_build` /
-:class:`AuditReport`, which run against the uniform build and are exercised by the
-tests.
+(The former defer-fire counter — ``defer_audit``/``note_defer`` — was federation-era
+instrumentation for the defer predicates the #632 cutover removed; with no
+production consumer left it has been deleted. The live audit is :func:`audit_build`
+/ :class:`AuditReport`, which run against the uniform build.)
 """
 
 from __future__ import annotations
 
-import contextlib
-import contextvars
 import dataclasses
 import hashlib
-from collections import Counter
-from typing import Any, Optional
+from typing import Any
 
 import numpy as np
 
@@ -61,8 +53,6 @@ __all__ = [
     "fingerprint_model",
     "AuditReport",
     "audit_build",
-    "defer_audit",
-    "note_defer",
 ]
 
 
@@ -149,16 +139,13 @@ class AuditReport:
     """Ownership summary of one ``build_milp_relaxation`` call.
 
     ``owner_by_col`` maps each aux column to the owner family that produced it;
-    ``columns`` is the per-family set of aux columns; ``defer_fires`` counts each
-    defer-predicate site that fired during the build (empty unless the build ran
-    inside a :func:`defer_audit` context with the predicates wired). ``conflicts``
-    lists any aux column claimed by more than one family (must be empty — the R2.5
+    ``columns`` is the per-family set of aux columns; ``conflicts`` lists any aux
+    column claimed by more than one family (must be empty — the R2.5
     exactly-one-owner invariant).
     """
 
     owner_by_col: dict[int, str]
     columns: dict[str, frozenset[int]]
-    defer_fires: dict[str, int]
     conflicts: dict[int, tuple[str, ...]]
     fingerprint: str
     # Raw-expression ids the federation actually claimed, per owner family (from
@@ -218,12 +205,9 @@ def _expr_id_claims(info: dict) -> dict[str, frozenset[int]]:
 def audit_build(model: Any, terms: Any = None, disc: Any = None) -> AuditReport:
     """Build ``model``'s relaxation and summarise which owner claimed each column.
 
-    Read-only: it inspects the returned varmap and never alters the build. Runs the
-    build inside a :func:`defer_audit` context so any wired defer-predicate sites
-    are counted.
+    Read-only: it inspects the returned varmap and never alters the build.
     """
-    with defer_audit() as fires:
-        relax, info = _build(model, terms, disc)
+    relax, info = _build(model, terms, disc)
 
     owner_by_col: dict[int, str] = {}
     columns: dict[str, set[int]] = {}
@@ -238,41 +222,7 @@ def audit_build(model: Any, terms: Any = None, disc: Any = None) -> AuditReport:
     return AuditReport(
         owner_by_col=dict(owner_by_col),
         columns={k: frozenset(v) for k, v in columns.items()},
-        defer_fires=dict(fires),
         conflicts={c: tuple(v) for c, v in conflicts.items()},
         claimed_expr_ids=_expr_id_claims(info),
         fingerprint=relaxation_fingerprint(relax),
     )
-
-
-# --------------------------------------------------------------------------- #
-# Defer-fire counter (mechanism only; wired into the predicates by R1.2/R2)
-# --------------------------------------------------------------------------- #
-_DEFER_SINK: contextvars.ContextVar[Optional[Counter]] = contextvars.ContextVar(
-    "discopt_defer_sink", default=None
-)
-
-
-@contextlib.contextmanager
-def defer_audit():
-    """Activate defer-fire counting for the duration of the context.
-
-    Yields a :class:`collections.Counter` that accumulates one increment per
-    :func:`note_defer` call made while the context is active. Nested contexts are
-    independent (the innermost sink wins). Outside any context, :func:`note_defer`
-    is a no-op — so a ``note_defer`` call wired into a defer predicate cannot
-    change that predicate's behaviour or the built relaxation.
-    """
-    sink: Counter = Counter()
-    token = _DEFER_SINK.set(sink)
-    try:
-        yield sink
-    finally:
-        _DEFER_SINK.reset(token)
-
-
-def note_defer(site: str) -> None:
-    """Record that defer-predicate ``site`` fired (no-op unless auditing)."""
-    sink = _DEFER_SINK.get()
-    if sink is not None:
-        sink[site] += 1
