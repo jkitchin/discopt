@@ -418,19 +418,17 @@ impl LinearSolver for FeralLU {
             .iter()
             .map(|c| c.iter().filter(|&&v| v != 0.0).count())
             .sum();
-        self.lu = Some(
-            if want_dense_route(m, nnz, &params) {
-                Factored::Dense(Box::new(
-                    DenseLu::factor(cols, m, params).map_err(feral_err)?,
-                ))
-            } else {
-                let a = SparseColMatrix::from_dense_columns(m, cols).map_err(feral_err)?;
-                let sym = SparseLuSymbolic::analyze(&a).map_err(feral_err)?;
-                Factored::Sparse(Box::new(
-                    SparseLu::factor(&a, &sym, params).map_err(feral_err)?,
-                ))
-            },
-        );
+        self.lu = Some(if want_dense_route(m, nnz, &params) {
+            Factored::Dense(Box::new(
+                DenseLu::factor(cols, m, params).map_err(feral_err)?,
+            ))
+        } else {
+            let a = SparseColMatrix::from_dense_columns(m, cols).map_err(feral_err)?;
+            let sym = SparseLuSymbolic::analyze(&a).map_err(feral_err)?;
+            Factored::Sparse(Box::new(
+                SparseLu::factor(&a, &sym, params).map_err(feral_err)?,
+            ))
+        });
         self.retained = self.refine_enabled().then(|| RetainedBasis {
             m,
             cols: cols.to_vec(),

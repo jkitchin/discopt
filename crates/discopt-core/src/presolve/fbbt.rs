@@ -2622,13 +2622,7 @@ mod tests {
         // Index on element 1 resolved to [5,5]; intersecting with (-inf,3] was
         // empty → false infeasible. The union seed [0,5] intersected with
         // (-inf,3] is [0,3] → feasible.
-        let model = array_var_model(
-            vec![5.0, 0.0],
-            vec![5.0, 3.0],
-            1,
-            ConstraintSense::Le,
-            3.0,
-        );
+        let model = array_var_model(vec![5.0, 0.0], vec![5.0, 3.0], 1, ConstraintSense::Le, 3.0);
         let bounds = fbbt(&model, 8, 1e-9);
         // C-31 FIXED: a feasible model must NOT be reported infeasible.
         // "FBBT never reports feasible as infeasible."
