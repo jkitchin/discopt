@@ -189,6 +189,14 @@ def _select_priority_branch_var(
         if j >= sol.shape[0] or node_ub[j] - node_lb[j] <= tol:
             continue
         val = float(sol[j])
+        if not math.isfinite(val):
+            # An ill-conditioned node LP can return a non-finite relaxation value
+            # for a column (issue #640: a >1e12-spread lifted relaxation on which
+            # the simplex ratio test overflows). Such a value carries no branching
+            # signal — skip it rather than crash ``math.floor(nan)``; the standard
+            # selector then branches on a finite column (sound: a hint is only ever
+            # an accelerator, never a correctness dependency).
+            continue
         frac = val - math.floor(val)
         f = min(frac, 1.0 - frac)
         if f > best_frac:

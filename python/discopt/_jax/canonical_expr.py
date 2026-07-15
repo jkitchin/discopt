@@ -285,6 +285,15 @@ class _Canonicalizer:
         unmerged: list[tuple[CNode, float]] = []  # non-mergeable factors kept as-is
         coef_acc = float(coef)
         stack = list(factors)
+        # Preserve coupled univariate atoms: when a factor is a transcendental
+        # ``call`` (log/exp/…), a sibling scaled factor ``c·g`` must stay INTACT so
+        # the atom recognizers see the shared affine form — e.g. ``(2x)·log(2x)`` is
+        # ``t·log(t)`` with ``t = 2x``, but extracting the ``2`` into ``coef_acc``
+        # would leave ``2·(x·log(2x))`` and break the ``_entropy_prod_var`` /
+        # ``_xexp_prod_var`` match (issue #640 Bucket 4 regression). The
+        # scalar-extraction CSE only targets pure variable products (``x0·x1``),
+        # which carry no ``call`` factor, so gate it off when one is present.
+        _has_call_factor = any(getattr(b, "kind", None) == "call" for b, _ in factors)
         while stack:
             base, exp = stack.pop()
             exp = float(exp)
@@ -316,6 +325,33 @@ class _Canonicalizer:
                 # (b^q)^exp -> b^(q*exp), keep folding.
                 stack.append((base.children[0], base.payload * exp))
                 continue
+            if base.kind == "sum":
+                # A monic scaled single term ``c·g`` (one child, zero const) inside a
+                # product: ``(c·g)^exp = c^exp · g^exp``. Extract the scalar into
+                # ``coef_acc`` and keep folding ``g`` so the product stays MONIC. This
+                # canonicalizes ``(-2·x0)·x1`` and ``(-2·x1)·x0`` to the same
+                # ``-2·prod(x0,x1)``, so commuted scaled products share one interned
+                # node / lifted column (CSE) instead of two (issue #640 Bucket 4).
+                # Guarded to a real ``c^exp`` (integer exp, or c>0 for a fractional
+                # one) so no complex/undefined power slips through.
+                scoeffs, sconst = base.payload
+                if (
+                    not _has_call_factor
+                    and float(sconst) == 0.0
+                    and len(base.children) == 1
+                    and len(scoeffs) == 1
+                    and float(scoeffs[0]) != 0.0
+                    and (float(exp).is_integer() or float(scoeffs[0]) > 0.0)
+                ):
+                    try:
+                        factor = float(scoeffs[0]) ** exp
+                    except ArithmeticError as exc:
+                        raise UnsupportedCanonicalization("undefined scaled-factor power") from exc
+                    if isinstance(factor, complex):
+                        raise UnsupportedCanonicalization("non-real scaled-factor power")
+                    coef_acc *= factor
+                    stack.append((base.children[0], exp))
+                    continue
             # Mergeable only when positive (see docstring).
             if exp > 0:
                 slot = merged.get(base.key)

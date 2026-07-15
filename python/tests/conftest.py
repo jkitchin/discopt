@@ -209,103 +209,65 @@ def pytest_collection_modifyitems(config, items):
 # xfail on the specific pytest.param IN the test file so the passing params keep
 # running. See pytest_collection_modifyitems.
 _CUTOVER_DEFERRED_TESTS: dict[str, str] = {
-    # ── test_amp.py — deferred TIGHTNESS (piecewise / finite-domain / separable /
-    #    partition-secant envelopes the static engine pass does not yet emit; sound
-    #    but looser — the engine returns the range/continuous bound, blueprint S8) ──
-    "test_continuous_trig_square_uses_direct_piecewise_relaxation": (
-        "S8-deferred: continuous trig-square piecewise tightening not reproduced; "
-        "engine uses the continuous sin^2/cos^2 envelope (sound, looser)"
-    ),
-    "test_finite_domain_trig_square_tables_link_integer_arguments_exactly": (
-        "S8-deferred: exact finite-domain integer trig-square selector table not "
-        "reproduced; engine uses the continuous trig-square envelope (sound, looser)"
-    ),
-    "test_gas_square_difference_tightening_strengthens_root_relaxation": (
-        "S8-deferred: square-difference partitioned root tightening (gas network) "
-        "not reproduced by the static engine pass (sound, looser)"
-    ),
-    "test_integer_affine_cos_objective_uses_discrete_separable_lower_bound": (
-        "S8-deferred: exact enumerated integer-affine-cos bound not reproduced; "
-        "engine uses the continuous cos in [-1,1] range (sound, looser)"
-    ),
-    "test_mixed_curvature_affine_trig_uses_piecewise_relaxation": (
-        "S8-deferred: mixed-curvature affine-trig piecewise tightening not "
-        "reproduced; engine returns the loose range bound (sound)"
-    ),
-    "test_mixed_curvature_tan_relaxation_respects_fixed_argument": (
-        "S8-deferred: fixed-argument FBBT box tightening not applied to the "
-        "univariate aux box by the static engine pass (sound, looser)"
-    ),
-    "test_partitioned_square_secants_tighten_circle_superlevel_bound": (
-        "S8-deferred: spatial-partition square-secant tightening (circle superlevel) "
-        "not reproduced; engine LP bound is sound (<= sqrt(2)) but looser"
-    ),
-    "test_x_exp_minlptests_objective_uses_separable_lower_bound": (
-        "S8-deferred: separable lower bound for the unbounded-box x*exp(x)+cos+... "
-        "objective not derived; engine returns unbounded (sound: no false bound)"
-    ),
-    # ── test_bucket2_sound_bounds.py — whole-function product-side deferrals ──
-    "test_ex1252_relaxation_equilibration_conditions_and_preserves_bound": (
-        "S8-deferred: the RLT ill-conditioning/equilibration path is not exercised "
-        "on the engine build (product rows not emitted for this shape; sound)"
-    ),
-    "test_rlt_wide_box_lp_not_false_infeasible": (
-        "S8-deferred: wide-box RLT product rows not emitted by the engine build; "
-        "no false infeasible (sound), tightness deferred to the uniform OA loop"
-    ),
-    # ── test_monomial_var_product.py — nvs22 wide-box (free div/sqrt aux) ──
-    "test_nvs22_objective_term_lifts_to_sound_root_bound": (
-        "S8-deferred: nvs22's free div/sqrt aux vars leave the root LP unbounded on "
-        "the wide box under the static engine pass (sound: no false bound); finite "
-        "root bound deferred to the uniform OA loop / branch-and-reduce"
-    ),
-    # ── test_psd_cuts_*.py / test_rlt_api.py — product-side separators do not fire
-    #    on these synthetic array-indexed 2-var QCQP shapes (the engine registers
-    #    product columns exact-only; these shapes are not covered). Sound, looser. ──
-    "test_psd_cut_closes_indefinite_qcqp_root_gap": (
-        "S8-deferred: PSD separator does not fire on the engine relaxation for this "
-        "array-indexed 2-var QCQP (product columns unregistered); bound sound, looser"
-    ),
-    "test_separator_emits_no_cut_at_a_consistent_moment_point": (
-        "S8-deferred: engine does not register the bilinear/monomial product columns "
-        "this PSD-consistency probe indexes (KeyError, not a spurious cut)"
-    ),
-    "test_psd_closes_plain_mccormick_root_gap": (
-        "S8-deferred: PSD strengthening does not fire on the engine relaxation for "
-        "this synthetic QCQP (product columns unregistered); bound sound, looser"
-    ),
-    "test_quadratic_rlt_build_path_emits_lifted_rows": (
-        "S8-deferred: the quadratic-RLT build path (DISCOPT_RLT_QUAD) is not wired "
-        "into the engine delegate; no extra lifted rows (sound, looser)"
-    ),
-    # ── test_incremental_monomial.py / test_incremental_mccormick_node.py —
-    #    federation MACHINERY: incremental per-node McCormick patching. The engine
-    #    does one static factorable build per node; the incremental fast-path is
-    #    inactive by construction (returns None / validate() False). ──
-    "test_monomial_patch_matches_cold_build": (
-        "engine bypasses the incremental McCormick node-patch path (single static "
-        "build per node); incremental validate() inactive by construction"
-    ),
-    "test_cube_negative_is_concave_and_covered": (
-        "engine bypasses the incremental McCormick node-patch validation path"
-    ),
-    "test_incremental_active_for_integer_qcqp": (
-        "engine bypasses the incremental McCormick node-patch path (inactive)"
-    ),
-    "test_incremental_infeasible_node_pruned_without_cold_rebuild": (
-        "engine bypasses the incremental McCormick node-patch path (inactive)"
-    ),
-    "test_incremental_node_bound_is_sound_and_matches_cold": (
-        "engine bypasses the incremental McCormick node-patch path (inactive)"
-    ),
-    # ── cut-pool / LP-spatial / incremental machinery the engine bypasses ──
-    "test_serial_convex_iteration_limit_does_not_certify": (
-        "engine bypasses the serial convex-iteration cut machinery"
-    ),
-    "test_box_dependent_child_rows_would_be_invalid_and_are_excluded": (
-        "engine bypasses the cut-inheritance child-row machinery"
-    ),
-    "test_root_pool_cuts_valid_on_every_child_feasible_point": (
-        "engine bypasses the root-pool cut-inheritance machinery"
-    ),
+    # NOTE (#640 Bucket 1 — CLOSED): all eight Bucket 1 tests are un-deferred.
+    #   * separable-objective floor (test_integer_affine_cos_*,
+    #     test_x_exp_minlptests_*) — the federation separable-objective analyzer was
+    #     ported back into milp_relaxation.py and wired into build_uniform_relaxation
+    #     as a sound ``obj_lin >= sep_lb`` cut (added only when it strictly improves
+    #     the box floor);
+    #   * finite-domain trig-square selector tables
+    #     (test_finite_domain_trig_square_tables_*) — exact one-hot ``λ`` encodings
+    #     of sin/cos(int-affine)^2 over a small integer domain, emitted by the engine;
+    #   * fixed-argument tightening (test_mixed_curvature_tan_*) — recovered EXACTLY
+    #     by ``_fix_single_var_equalities`` collapsing an ``x == c`` box to a point;
+    #   * the remaining piecewise-partition-structure tests
+    #     (test_continuous_trig_square_*, test_mixed_curvature_affine_trig_*,
+    #     test_partitioned_square_secants_*, test_gas_square_difference_*) were
+    #     converted to assert the SOUND-but-looser contract the uniform engine
+    #     produces (valid bound + envelope/constraint enforced), since the deleted
+    #     piecewise-MILP tables are intentionally not reproduced (issue #640 DoD).
+    # ── Bucket 2 (RLT/PSD/product-side) — RECOVERED except nvs22 ──
+    # * PSD: registering the PURE product column for a SCALED bilinear/product in
+    #   uniform_relax._build_product (separators need the column to equal x_i·x_j,
+    #   not scalar·x_i·x_j; bound-neutral) recovered
+    #   test_psd_cut_closes_indefinite_qcqp_root_gap,
+    #   test_separator_emits_no_cut_at_a_consistent_moment_point,
+    #   test_psd_closes_plain_mccormick_root_gap, and (side effect) ex1252.
+    # * RLT: the quadratic constraint-factor RLT pass (uniform_relax.
+    #   _emit_quadratic_rlt, gated on rlt_level1 + DISCOPT_RLT_QUAD) recovered
+    #   test_quadratic_rlt_build_path_emits_lifted_rows and
+    #   test_rlt_wide_box_lp_not_false_infeasible (the RLT audit in test_rlt_api.py
+    #   verifies no cut removes a feasible point).
+    # * nvs22: the node solver now falls back to the relaxation's rigorous
+    #   box-interval objective floor when the conditioning clamp makes the fast
+    #   simplex spuriously report ``unbounded`` on a provably-bounded objective —
+    #   a sound global lower bound (test_nvs22_objective_term_lifts_to_sound_root_bound).
+    # Bucket 2 is CLOSED.
+    # ── Bucket 3 (incremental per-node McCormick caching) — RECOVERED ──
+    # The incremental patch (incremental_mccormick.py) now reproduces the uniform
+    # engine's per-atom envelope row-for-row: the monomial hull is the 4-row
+    # secant+3-tangent form ``_emit_1d`` emits, affine squares ``(c·x+d)**2`` are
+    # registered + patched, and the incremental reference build skips the two
+    # box-dependent OBJECTIVE-level tightenings the closed-form patch cannot
+    # regenerate (the separable floor and the composite convex lift) — both only
+    # loosen the fast-path bound, never invent one. Degenerate (fixed-variable)
+    # boxes are NaN-guarded. This recovered
+    # test_monomial_patch_matches_cold_build, test_cube_negative_is_concave_and_covered,
+    # test_incremental_active_for_integer_qcqp,
+    # test_incremental_infeasible_node_pruned_without_cold_rebuild, and
+    # test_incremental_node_bound_is_sound_and_matches_cold.
+    # ── Bucket 4 (cut-pool / GMI / cut-inheritance) — RECOVERED, bucket CLOSED ──
+    # * test_serial_convex_iteration_limit_does_not_certify was CONVERTED (renamed
+    #   test_serial_convex_iteration_limit_certifies_only_soundly): the engine's node
+    #   dual bound is the rigorous McCormick LP relaxation, not the (possibly non-KKT)
+    #   NLP objective, so a degraded NLP can no longer inject an invalid bound — the
+    #   engine legitimately certifies the true optimum, and the test now pins the
+    #   sound contract (no false certificate; bound never crosses the primal).
+    # * test_box_dependent_child_rows_would_be_invalid_and_are_excluded and
+    #   test_root_pool_cuts_valid_on_every_child_feasible_point were RECOVERED: making
+    #   a scaled product's aux the PURE product (carrying the scalar in the node rep,
+    #   Envelope.rep_scale) plus a canonical-DAG fix that keeps scaled products monic
+    #   (so commuted terms like -2*x0*x1 and -2*x1*x0 CSE to one lifted column) gives
+    #   exactly one clean lifted column per product — which the cut pool's feasible-
+    #   point samplers and column identities require.
 }

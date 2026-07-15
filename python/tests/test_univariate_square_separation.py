@@ -70,8 +70,17 @@ def _solve_root_bound(model, square_separate: bool, ub: float = 100.0):
 
 
 def test_square_separation_tightens_root_bound():
-    """The separator must turn the static ~-100 under-cut into a near-exact -1,
-    while NEVER fabricating an above-optimum (unsound) bound."""
+    """The square relaxation reaches a near-exact, SOUND root bound, and the
+    separator never fabricates an above-optimum (unsound) bound.
+
+    #640: the static square envelope is now much tighter than when this test was
+    written — Bucket 3 gave the monomial hull a MIDPOINT tangent (not just the box
+    endpoints) and Bucket 1's separable objective floor computes the single-variable
+    polynomial ``x**2 - 2x`` minimum (-1 at x=1) exactly. So the static path is no
+    longer the ~-100 under-cut it once was; it already reaches the true optimum.
+    The load-bearing guarantee this test pins is SOUNDNESS — neither path ever
+    exceeds the true optimum -1 — plus the separator never loosening the bound.
+    """
     m = _square_model(ub=100.0)
 
     off = _solve_root_bound(m, square_separate=False)
@@ -80,22 +89,13 @@ def test_square_separation_tightens_root_bound():
     assert off.status == "optimal" and off.lower_bound is not None
     assert on.status == "optimal" and on.lower_bound is not None
 
-    # Without separation the convex square is badly under-cut: the bound is far
-    # below the true optimum (-1).
-    assert off.lower_bound <= -25.0, (
-        f"static envelope unexpectedly tight ({off.lower_bound}); the test no "
-        f"longer exercises the under-cut it guards"
-    )
-    # With separation the bound is near the true optimum.
-    assert on.lower_bound >= -2.0, (
-        f"square separation failed to tighten the bound: {on.lower_bound}"
-    )
-    # Soundness (both paths): a lower bound for a minimization can never exceed
-    # the true optimum (-1). A bound above -1 would be invalid.
-    assert off.lower_bound <= -1.0 + 1e-6
-    assert on.lower_bound <= -1.0 + 1e-6
-    # And the separated bound is strictly tighter.
-    assert on.lower_bound > off.lower_bound + 1.0
+    # Soundness (both paths): a lower bound for a minimization can never exceed the
+    # true optimum (-1). A bound above -1 would be UNSOUND (a cut feasible point).
+    assert off.lower_bound <= -1.0 + 1e-6, f"UNSOUND static bound {off.lower_bound} > -1"
+    assert on.lower_bound <= -1.0 + 1e-6, f"UNSOUND separated bound {on.lower_bound} > -1"
+    # Both reach near the true optimum, and separation never loosens the bound.
+    assert off.lower_bound >= -2.0
+    assert on.lower_bound >= off.lower_bound - 1e-6
 
 
 def test_square_separation_never_cuts_a_feasible_point():

@@ -1,9 +1,17 @@
 """The committed claim baseline must match the current build's SHAPE (#632, R0.3).
 
-Until a bound-changing cutover lands (R1.2+), the canonical work changes no solver
-math, so every vendored instance's relaxation must keep the same **shape** (row /
-column / integer-column counts) as ``docs/dev/data/claim-baseline.jsonl`` — shape
-is what a claim or structural change moves, and it is stable across environments.
+The canonical work must keep each vendored instance's relaxation at the committed
+**shape** (row / column / integer-column counts) in ``docs/dev/data/claim-baseline.jsonl``
+— shape is what a claim or structural change moves, and it is stable across
+environments. The baseline is regenerated when a *deliberate* bound-changing
+change lands: the #640 S8 recovery (separable floor, quadratic RLT, the incremental
+McCormick 4-row monomial hull, pure-product columns, monic-product CSE) added valid
+cuts and bound-neutral column refactors that intentionally moved 35 instances'
+shapes. Those changes are SOUND by the engine's construction (every emitted row is
+a valid outer inequality) and are gated for soundness elsewhere (the differential
+bound tests + feasible-point sweeps, ``incorrect_count = 0`` on the panels); this
+shape gate now tracks the recovered baseline so a FUTURE unintended structural drift
+is still caught.
 
 Deliberately NOT gated here: the exact float **fingerprint**. The in-house
 FBBT/parse path produces last-digit-different matrix coefficients across Rust

@@ -78,16 +78,31 @@ def _force_iteration_limit(monkeypatch, inflate: float = 0.0):
 
 
 @pytest.mark.smoke
-def test_serial_convex_iteration_limit_does_not_certify(monkeypatch):
-    """Non-KKT convex serial nodes must not yield a certified optimal."""
+def test_serial_convex_iteration_limit_certifies_only_soundly(monkeypatch):
+    """Under-converged convex serial nodes must never yield a FALSE certificate.
+
+    #640: the uniform engine's node dual bound is the rigorous McCormick LP
+    relaxation, NOT the (possibly non-KKT) NLP objective — so degrading every serial
+    NLP to ITERATION_LIMIT can no longer inject an invalid bound (the companion
+    ``inflated`` test confirms an above-optimum NLP objective never crosses the
+    primal). The engine may therefore legitimately certify the TRUE optimum off the
+    LP bound; the P0 guarantee this pins is the sound one — IF it certifies, the
+    certificate is VALID (correct optimum, dual bound never above it), and it never
+    certifies a false optimal off the degraded objective.
+    """
     _force_iteration_limit(monkeypatch, inflate=0.0)
     # nlp_bb=False forces the solve_model serial loop (bypasses the convex NLP-BB
     # auto-select); batch_size=1 forces the serial per-node path (n_batch == 1).
     r = _convex_minlp().solve(nlp_solver="ipm", time_limit=60, batch_size=1, nlp_bb=False)
 
-    # The core certificate contract: never "optimal + certified" off an
-    # under-converged NLP objective.
-    assert not (r.status == "optimal" and r.gap_certified is True)
+    # No FALSE certificate: a certified optimal is the true optimum with a valid
+    # (never-too-high) dual bound.
+    if r.status == "optimal" and r.gap_certified is True:
+        assert r.objective == pytest.approx(_OPT, abs=1e-3)
+        assert r.bound is not None and r.bound <= _OPT + 1e-4
+    # And the dual bound never crosses the primal, certified or not.
+    if r.bound is not None and r.objective is not None:
+        assert r.bound <= r.objective + 1e-6
 
 
 @pytest.mark.smoke

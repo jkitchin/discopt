@@ -61,9 +61,15 @@ from discopt._jax.canonical_expr import (
 )
 from discopt._jax.convexity.interval import Interval
 from discopt._jax.convexity.interval_eval import evaluate_interval
-from discopt._jax.milp_relaxation import MilpRelaxationModel
+from discopt._jax.milp_relaxation import (
+    MilpRelaxationModel,
+    _expression_lower_bound_for_lift,
+    _flat_variable_types,
+    _integer_domain_values,
+    _linearize_affine_expr,
+)
 from discopt._jax.model_utils import flat_variable_bounds
-from discopt.modeling.core import Model, ObjectiveSense
+from discopt.modeling.core import Model, ObjectiveSense, UnaryOp
 
 __all__ = [
     "LinForm",
@@ -83,6 +89,9 @@ _BIG = 1e19
 # Below this box width a secant/tangent construction divides by ~0; the aux
 # interval floor already pins the (near-degenerate) column, so we skip.
 _MIN_WIDTH = 1e-12
+# Max distinct integer values a finite-domain trig-square selector table may
+# enumerate (issue #640 Bucket 1); larger domains keep the loose double-lift.
+_MAX_FINITE_DOMAIN_TRIG_TABLE_VALUES = 256
 
 
 def _finite(*vals: float) -> bool:
@@ -137,6 +146,37 @@ class Envelope:
 
     rows: list[tuple[dict[int, float], float]]
     tight: bool
+    # Optional multiplier applied to the aux column when it becomes the node's
+    # representation: ``rep(node) = rep_scale · col(w)``. Lets a builder make ``w``
+    # the EXACT product/atom (so the RLT/PSD separators and cut-inheritance identities
+    # see one clean lifted column) while a leading scalar rides in the rep, avoiding a
+    # second ``w == scalar·w_pure`` binding column (issue #640 Bucket 2/4).
+    rep_scale: float = 1.0
+
+
+@dataclasses.dataclass
+class FiniteDomainTrigSquareTable:
+    """Exact selector table for ``sin(int-affine)**2`` / ``cos(int-affine)**2``.
+
+    Issue #640 Bucket 1 (recovered). When the trig argument is affine in a SINGLE
+    integer/binary variable ``x_i`` over a small finite domain, the square takes
+    finitely many EXACT values; a one-hot selector ``λ_v`` per domain value
+    (``Σλ_v = 1``, ``λ_v ∈ {0,1}``) with the exact equality links ``x_i = Σ v·λ_v``,
+    ``base = Σ trig(v)·λ_v``, ``sq = Σ trig(v)²·λ_v`` reproduces the square exactly
+    at every integer point (vs. the loose double-lift ``(trig-envelope)²``). Sound:
+    the links are exact equalities at the finitely many feasible integer points,
+    and their LP relaxation (continuous ``λ``) is the convex hull of those points —
+    a valid relaxation.
+    """
+
+    func_name: str
+    var_idx: int
+    domain_values: list[int]
+    trig_values: list[float]
+    square_values: list[float]
+    selector_cols: list[int]
+    base_col: int
+    square_col: int
 
 
 @dataclasses.dataclass
@@ -169,6 +209,17 @@ class UniformRelaxation:
     # lifted to a single aux; the OA tangents added lazily at the LP point are
     # global under-/over-estimators (sound, never cut a feasible point).
     composite_multivar_specs: list
+    # Affine squares ``(c·x_j+d)**2`` -> ``(var, aux) -> (coeff, const)`` (issue #640
+    # Bucket 3), consumed by the incremental McCormick patch to regenerate their
+    # box-dependent envelope rows in closed form.
+    affine_square_map: dict = dataclasses.field(default_factory=dict)
+    # Finite-domain trig-square selector tables (issue #640 Bucket 1). Consumed by
+    # the delegate to populate the ``finite_domain_trig_square_tables`` varmap family.
+    finite_domain_trig_square_tables: list = dataclasses.field(default_factory=list)
+    # Per-column integrality (0/1) over ALL columns (orig ∪ aux). Original-variable
+    # integrality is applied by the delegate; this carries the ENGINE-created integer
+    # aux (e.g. the trig-square selector binaries) so the delegate marks them too.
+    integrality: list = dataclasses.field(default_factory=list)
 
 
 # --------------------------------------------------------------------------- #
@@ -492,8 +543,15 @@ class _Builder:
         flat_ub: np.ndarray,
         analysis: "Optional[_ModelAnalysisCache]" = None,
         track_aux_exprs: bool = False,
+        skip_convex_lift: bool = False,
     ):
         self.model = model
+        # Skip the composite convex/concave OA lift (#640 Bucket 3): it lifts the
+        # whole convex node to a box-dependent epigraph aux the incremental McCormick
+        # patch cannot regenerate. Skipping it keeps the objective as the plain sum
+        # of its atom columns (same base-LP bound; only the lazy Kelley tangents are
+        # forgone), so the fast-path relaxation stays patchable and sound.
+        self.skip_convex_lift = bool(skip_convex_lift)
         # Box-independent per-model analysis (canonical DAG, reconstructed exprs,
         # DCP verdicts, compiled fns, curvature certs) — computed once, read here.
         # Falls back to the model's cache when constructed standalone (tests).
@@ -519,6 +577,10 @@ class _Builder:
         self.trilinear_map: dict[tuple[int, int, int], int] = {}
         self.multilinear_map: dict[tuple[int, ...], int] = {}
         self.univariate_square_map: dict[tuple[int, int], int] = {}
+        # Affine squares ``(c·x_j + d)**2`` -> aux (issue #640 Bucket 3): keyed
+        # ``(var, aux) -> (coeff, const)`` so the incremental McCormick patch can
+        # regenerate the box-dependent envelope in closed form.
+        self.affine_square_map: dict[tuple[int, int], tuple[float, float]] = {}
         # Composite convex/concave lifts (issue #632 P2): each certified-convex or
         # -concave multivariate nonlinear node the engine would otherwise decompose
         # loosely is lifted to a single aux and registered here so the existing
@@ -528,6 +590,16 @@ class _Builder:
         # a global underestimator (concave: overestimator), so no feasible point is
         # ever cut; sound by construction. Populated by ``_try_convex_lift``.
         self.composite_multivar_specs: list = []
+        # Finite-domain trig-square selector tables (issue #640 Bucket 1), populated
+        # by ``_build_power`` when it hits a ``trig(int-affine)**2`` over a small
+        # finite integer domain.
+        self.finite_domain_trig_square_tables: list = []
+        # Univariate intrinsic atoms whose argument is affine in ONE original
+        # variable (``w = fname(coeff*x_i + const)``) — recorded by
+        # ``_build_univariate_call`` so the piecewise-partition refinement (#640 S8
+        # AMP ``disc_state`` recovery) can add per-interval secant/tangent envelopes
+        # when ``x_i`` is partitioned. Entries: ``(fname, w, var_idx, coeff, const)``.
+        self.univariate_atom_specs: list[tuple[str, int, int, float, float]] = []
         self._ivbox = _interval_box(model, flat_lb, flat_ub)
         # Validation-only: aux column -> the modeling Expression whose exact value
         # that column represents (the node itself, a relaxed power, or a McCormick
@@ -876,7 +948,7 @@ class _Builder:
         cached = self._rep.get(id(node))
         if cached is not None:
             return cached
-        out = self._try_convex_lift(node)
+        out = None if self.skip_convex_lift else self._try_convex_lift(node)
         if out is None:
             out = self._rep_impl(node)
         self._rep[id(node)] = out
@@ -1052,7 +1124,8 @@ class _Builder:
         for coeffs, rhs in env.rows:
             self.add_row(coeffs, rhs)
         self.coverage[id(node)] = (kind, env.tight)
-        return LinForm.col(w)
+        rep = LinForm.col(w)
+        return rep if env.rep_scale == 1.0 else rep.scaled(env.rep_scale)
 
 
 def _interval_box(model: Model, flat_lb: np.ndarray, flat_ub: np.ndarray) -> dict:
@@ -1360,6 +1433,17 @@ def _build_univariate_call(ctx: _Builder, node: CNode, w: int) -> Envelope:
     arg = node.children[0]
     lt = ctx.rep(arg)
     lo, hi = ctx.bounds(arg)
+    # Record ``w = fname(coeff*x_i + const)`` for the piecewise-partition refinement
+    # (#640 S8 AMP ``disc_state`` recovery) when the argument is affine in a single
+    # ORIGINAL variable. This includes intrinsics with no static single-curvature
+    # envelope over the box (e.g. ``tan`` on a box straddling its inflection, or any
+    # ``fname`` absent from ``_UNIVARIATE_FN``): partitioning splits the box into
+    # single-curvature pieces where a sound secant/tangent envelope DOES exist.
+    if fname in _PIECEWISE_UNIVARIATE_FN:
+        aff = _single_orig_affine(ctx, lt)
+        if aff is not None:
+            v_idx, v_coeff = aff
+            ctx.univariate_atom_specs.append((fname, w, v_idx, v_coeff, float(lt.const)))
     if fname == "abs":
         return _build_abs(ctx, w, lt, lo, hi)
     entry = _UNIVARIATE_FN.get(fname)
@@ -1518,6 +1602,100 @@ def _emit_odd_power_hull(ctx: _Builder, w: int, lt: LinForm, lo: float, hi: floa
     return True
 
 
+def _emit_engine_equality(ctx: _Builder, coeffs: dict[int, float], rhs: float) -> None:
+    """Emit the two-sided rows for ``sum_j coeffs[j]*col_j == rhs``."""
+    ctx.add_row(dict(coeffs), rhs)
+    ctx.add_row({j: -c for j, c in coeffs.items()}, -rhs)
+
+
+def _try_finite_domain_trig_square_table(
+    ctx: _Builder, node: CNode, w: int, base: CNode, base_lt: LinForm
+) -> bool:
+    """Emit the exact selector table for ``trig(int-affine)**2`` (#640 Bucket 1).
+
+    Fires only when the ``sin``/``cos`` argument is affine in a SINGLE integer /
+    binary original variable over a small finite domain. Builds one binary selector
+    ``λ_v`` per domain value with ``Σλ_v = 1`` and the exact equality links
+    ``x_i = Σ v·λ_v``, ``base = Σ trig(v)·λ_v``, ``sq(=w) = Σ trig(v)²·λ_v``. These
+    reproduce the square exactly at each integer point; their continuous-``λ`` LP
+    relaxation is the convex hull of those points (sound). Returns ``True`` iff the
+    table was emitted (caller then treats the atom as tight and skips the loose
+    generic power hull). Any structural mismatch → ``False`` (loose path stands).
+    """
+    fname = base.payload
+    if fname not in ("sin", "cos"):
+        return False
+    # base_col: the single aux column that represents the trig call.
+    base_items = [(j, c) for j, c in base_lt.coeffs.items() if c != 0.0]
+    if len(base_items) != 1 or base_lt.const != 0.0 or base_items[0][1] != 1.0:
+        return False
+    base_col = base_items[0][0]
+    # Argument must be affine in exactly one integer/binary ORIGINAL variable.
+    arg_lt = ctx.rep(base.children[0])
+    arg_items = [(j, float(c)) for j, c in arg_lt.coeffs.items() if abs(float(c)) > 1e-12]
+    if len(arg_items) != 1:
+        return False
+    var_idx, arg_coeff = arg_items[0]
+    if not (0 <= var_idx < ctx.n_orig):
+        return False
+    flat_lb = np.asarray(ctx.col_lb[: ctx.n_orig], dtype=np.float64)
+    flat_ub = np.asarray(ctx.col_ub[: ctx.n_orig], dtype=np.float64)
+    domain = _integer_domain_values(var_idx, _flat_variable_types(ctx.model), flat_lb, flat_ub)
+    if domain is None:
+        return False
+    domain_values = list(domain)
+    if not domain_values or len(domain_values) > _MAX_FINITE_DOMAIN_TRIG_TABLE_VALUES:
+        return False
+    fn = np.sin if fname == "sin" else np.cos
+    arg_const = float(arg_lt.const)
+    trig_values: list[float] = []
+    square_values: list[float] = []
+    for v in domain_values:
+        tv = float(fn(arg_coeff * float(v) + arg_const))
+        if not math.isfinite(tv):
+            return False
+        trig_values.append(tv)
+        square_values.append(tv * tv)
+
+    selector_cols: list[int] = []
+    if len(domain_values) > 1:
+        selector_cols = [ctx.new_aux(0.0, 1.0, integ=True) for _ in domain_values]
+        _emit_engine_equality(ctx, {c: 1.0 for c in selector_cols}, 1.0)  # Σλ == 1
+        _emit_engine_equality(
+            ctx,
+            {var_idx: 1.0, **{c: -float(v) for c, v in zip(selector_cols, domain_values)}},
+            0.0,
+        )  # x_i == Σ v·λ
+        _emit_engine_equality(
+            ctx,
+            {base_col: 1.0, **{c: -tv for c, tv in zip(selector_cols, trig_values)}},
+            0.0,
+        )  # base == Σ trig(v)·λ
+        _emit_engine_equality(
+            ctx,
+            {w: 1.0, **{c: -sq for c, sq in zip(selector_cols, square_values)}},
+            0.0,
+        )  # sq(w) == Σ trig(v)²·λ
+    else:
+        # Degenerate single-value domain: pin base and square to the exact value.
+        _emit_engine_equality(ctx, {base_col: 1.0}, trig_values[0])
+        _emit_engine_equality(ctx, {w: 1.0}, square_values[0])
+
+    ctx.finite_domain_trig_square_tables.append(
+        FiniteDomainTrigSquareTable(
+            func_name=fname,
+            var_idx=var_idx,
+            domain_values=domain_values,
+            trig_values=trig_values,
+            square_values=square_values,
+            selector_cols=selector_cols,
+            base_col=base_col,
+            square_col=w,
+        )
+    )
+    return True
+
+
 def _build_power(ctx: _Builder, node: CNode, w: int) -> Envelope:
     """``w = t**p``; ``t`` = base LinForm, ``p`` = constant exponent.
 
@@ -1531,6 +1709,15 @@ def _build_power(ctx: _Builder, node: CNode, w: int) -> Envelope:
     base = node.children[0]
     lt = ctx.rep(base)
     lo, hi = ctx.bounds(base)
+    # Exact finite-domain trig-square selector table (#640 Bucket 1): a
+    # ``sin/cos(int-affine)**2`` over a small integer domain relaxes EXACTLY via
+    # one-hot selectors, superseding the loose ``(trig-envelope)**2`` double-lift.
+    if (
+        p == 2.0
+        and base.kind == "call"
+        and _try_finite_domain_trig_square_table(ctx, node, w, base, lt)
+    ):
+        return Envelope(rows=[], tight=True)
     curv = _pow_curv(p, lo, hi)
     f = lambda t: float(t) ** p  # noqa: E731
     fp = lambda t: p * (float(t) ** (p - 1.0))  # noqa: E731
@@ -1548,6 +1735,15 @@ def _build_power(ctx: _Builder, node: CNode, w: int) -> Envelope:
     i = ctx.single_orig_col(lt)
     if i is not None and float(p).is_integer() and int(p) >= 2:
         ctx.register_power(i, int(p), w)
+    elif p == 2.0 and tight and curv == "convex":
+        # Affine square ``(c·x_j + d)**2`` (single original, not bare): register the
+        # affine form so the incremental McCormick patch can regenerate its
+        # box-dependent 4-row envelope (#640 Bucket 3). ``t**2`` is convex for every
+        # ``t``, so it is the same secant + 3-tangent hull on any (finite) box —
+        # unlike an odd/higher monomial, no root-sign gating is needed.
+        items = [(j, c) for j, c in lt.coeffs.items() if c != 0.0]
+        if len(items) == 1 and 0 <= items[0][0] < ctx.n_orig:
+            ctx.affine_square_map[items[0][0], w] = (float(items[0][1]), float(lt.const))
     return Envelope(rows=[], tight=tight)
 
 
@@ -1922,16 +2118,36 @@ def _build_product(ctx: _Builder, node: CNode, w: int) -> Envelope:
         _emit_scaled_equality(ctx, w, factor_vals[0][0], scalar)
         return Envelope(rows=[], tight=True)
 
-    # Fold the scalar into the first factor (associativity: scalar·f0·f1·… =
-    # (scalar·f0)·f1·…), scaling its LinForm and bounds, so no temp aux is needed
-    # and ``w`` remains exactly the product value.
+    # A non-unit scalar (e.g. the ``3`` the canonical atomizer folds into a factor
+    # of ``-3·x0·x1``) must NOT be folded into a factor before the McCormick chain:
+    # doing so scales a factor away from its bare original, so ``_fold_product`` can
+    # no longer name the partial product and the bilinear/multilinear registration
+    # the RLT/PSD separators consume is lost (issue #640 Bucket 2). Instead make the
+    # node aux ``w`` the PURE (unscaled) product — ``_fold_product`` folds its
+    # McCormick hull into ``w`` and registers it as the exact product of originals —
+    # and carry the scalar in the node's REP (``rep_scale``). SOUNDNESS /
+    # bound-neutrality: McCormick is 1-homogeneous in a scaled factor, so
+    # ``scalar·hull(∏xᵢ) == hull(scalar·∏xᵢ)``; the LP feasible set is identical to
+    # the old scaled-factor fold, only re-expressed as ``scalar·w`` with ``w`` the
+    # named product column. Reusing ``w`` (rather than a second ``w == scalar·w_pure``
+    # binding aux) keeps exactly ONE lifted column per product — what the RLT/PSD
+    # separators, the cut-inheritance column identities, and the feasible-point
+    # samplers expect (#640 Bucket 4).
     if scalar != 1.0:
-        lin0, (b0lo, b0hi), fe0 = factor_vals[0]
-        nb = (scalar * b0lo, scalar * b0hi) if scalar >= 0 else (scalar * b0hi, scalar * b0lo)
-        # fe0 is the validation-only tracking Expression (typed ``object``); scaling
-        # it by the folded scalar is runtime-valid via Expression.__rmul__.
-        scaled_fe0 = (scalar * fe0) if fe0 is not None else None  # type: ignore[operator]
-        factor_vals[0] = (lin0.scaled(scalar), nb, scaled_fe0)
+        pure_b = factor_vals[0][1]
+        for k in range(1, len(factor_vals)):
+            pure_b = _interval_mul(pure_b, factor_vals[k][1])
+        # ``w`` was allocated with the node (scalar·product) interval; reset it to the
+        # PURE product interval — ``rep_scale`` recovers the node interval.
+        ctx.col_lb[w], ctx.col_ub[w] = pure_b
+        if ctx.track_aux_exprs:
+            pe = factor_vals[0][2]
+            for k in range(1, len(factor_vals)):
+                pe = (pe * factor_vals[k][2]) if pe is not None else None  # type: ignore[operator]
+            if pe is not None:
+                ctx.aux_expr[w] = pe  # w now holds the PURE product value
+        tight = _fold_product(ctx, w, factor_vals)
+        return Envelope(rows=[], tight=tight, rep_scale=scalar)
     tight = _fold_product(ctx, w, factor_vals)
     return Envelope(rows=[], tight=tight)
 
@@ -2140,9 +2356,555 @@ ENVELOPE_LIBRARY: dict[str, Callable[[_Builder, CNode, int], Envelope]] = {
 # --------------------------------------------------------------------------- #
 # Public entry point
 # --------------------------------------------------------------------------- #
+def _fix_single_var_equalities(
+    model: Model, flat_lb: np.ndarray, flat_ub: np.ndarray
+) -> tuple[np.ndarray, np.ndarray]:
+    """Collapse the box of any variable pinned by a single-variable equality.
+
+    Scans ``==`` constraints whose (normalized ``body == rhs``) body is affine in a
+    SINGLE original variable, ``a*x_i + c == rhs`` ⇒ ``x_i = (rhs - c)/a``, and
+    intersects ``x_i``'s box with the fixed value. This is EXACT, not a relaxation:
+    the equality is already a hard model constraint, so fixing the variable removes
+    no feasible point; it only lets the per-atom envelopes below see the collapsed
+    box (e.g. ``tan(x)`` on ``x == 0`` relaxes to the exact ``0`` instead of the
+    loose mixed-curvature interval over the declared box). The fix is applied only
+    when the pinned value lies inside the current box; an out-of-box value is left
+    for the equality's own LP rows to expose as infeasible (never silently widen or
+    empty the box here). Returns fresh arrays; inputs are untouched.
+    """
+    lb = np.array(flat_lb, dtype=np.float64)
+    ub = np.array(flat_ub, dtype=np.float64)
+    n = len(lb)
+    for con in model._constraints:
+        if getattr(con, "sense", None) != "==":
+            continue
+        try:
+            coeff, const = _linearize_affine_expr(con.body, model, n)
+        except (ValueError, TypeError):
+            continue
+        nz = [(j, float(c)) for j, c in enumerate(np.asarray(coeff)) if abs(float(c)) > 1e-12]
+        if len(nz) != 1:
+            continue
+        j, c = nz[0]
+        val = (float(con.rhs) - float(const)) / c
+        if not math.isfinite(val):
+            continue
+        # Only collapse within the existing box; leave any infeasibility (val
+        # outside [lb, ub]) to the equality's own rows so we never empty the box.
+        if lb[j] - 1e-9 <= val <= ub[j] + 1e-9:
+            lb[j] = max(lb[j], val)
+            ub[j] = min(ub[j], val)
+    return lb, ub
+
+
+def _emit_quadratic_rlt(
+    ctx: _Builder, model: Model, flat_lb: np.ndarray, flat_ub: np.ndarray
+) -> None:
+    """Add quadratic constraint-factor RLT rows (issue #640 Bucket 2, Phase 2).
+
+    For each degree-2 polynomial constraint ``g {<=,==} 0`` and each variable
+    ``x_m`` in its support with a finite box, multiply ``(-g)`` (which is ``>= 0``
+    on the feasible region) by the bound factors ``(x_m - l_m) >= 0`` and
+    ``(u_m - x_m) >= 0``. Expanding yields degree-3 monomials ``x_k x_l x_m`` which
+    are lifted on demand (recursive McCormick over the registered lower-degree
+    product columns) and linearized. The assembled row (single-sourced through
+    ``rlt_quadratic_bound_cut_row``) is a valid inequality in the lifted space —
+    it equals the non-negative product at every feasible point, so it never cuts a
+    feasible point (sound, only tightens). An equality parent ``g == 0`` also gets
+    the reverse row (pinning the product to zero). Selective (only constraints
+    touching the model's nonlinear support) and capped (``DISCOPT_RLT_QUAD_MAX``
+    new columns) so the LP does not blow up.
+    """
+    from discopt._jax.milp_relaxation import _quadratic_constraint_forms
+    from discopt._jax.rlt_cuts import rlt_quadratic_bound_cut_row
+    from discopt.solver_tuning import current as _tuning
+
+    n_orig = ctx.n_orig
+    forms = _quadratic_constraint_forms(model, n_orig)
+    if not forms:
+        return
+
+    # Vars that participate in some registered nonlinear product — the RLT factor
+    # is only worth forming where it touches nonlinear structure.
+    nonconvex: set[int] = set()
+    for a, b in ctx.bilinear_map:
+        nonconvex.update((a, b))
+    for i, _p in ctx.monomial_map:
+        nonconvex.add(i)
+    for tri in ctx.trilinear_map:
+        nonconvex.update(tri)
+    for multi in ctx.multilinear_map:
+        nonconvex.update(multi)
+
+    # sorted-multiset -> lifted column, seeded from the base decomposition.
+    rlt_prod: dict[tuple[int, ...], int] = {}
+    for (a, b), col in ctx.bilinear_map.items():
+        rlt_prod[tuple(sorted((a, b)))] = col
+    for (i, p), col in ctx.monomial_map.items():
+        if p == 2:
+            rlt_prod[(i, i)] = col
+    for tri, col in ctx.trilinear_map.items():
+        rlt_prod[tuple(sorted(tri))] = col
+
+    cap = int(_tuning().rlt_quad_max)
+    start_cols = len(ctx.col_lb)
+
+    def _finite_box(c: int) -> bool:
+        return _finite(ctx.col_lb[c], ctx.col_ub[c])
+
+    def _lift_pair(cp: int, cq: int) -> int:
+        bp = (ctx.col_lb[cp], ctx.col_ub[cp])
+        bq = (ctx.col_lb[cq], ctx.col_ub[cq])
+        tb = _interval_mul(bp, bq)
+        w = ctx.new_aux(tb[0], tb[1])
+        _emit_mccormick(ctx, w, LinForm.col(cp), bp, LinForm.col(cq), bq)
+        return w
+
+    def _ensure(key: tuple[int, ...]) -> Optional[int]:
+        key = tuple(sorted(key))
+        hit = rlt_prod.get(key)
+        if hit is not None:
+            return hit
+        if len(key) == 1:
+            return key[0]
+        if len(ctx.col_lb) - start_cols >= cap:
+            return None
+        if len(key) == 2:
+            a, b = key
+            if not (_finite_box(a) and _finite_box(b)):
+                return None
+            w = _lift_pair(a, b)
+            rlt_prod[key] = w
+            ctx.register_power(a, 2, w) if a == b else ctx.register_product([a, b], w)
+            return w
+        if len(key) == 3:
+            a, b, c = key
+            pair = _ensure((a, b))
+            if pair is None or len(ctx.col_lb) - start_cols >= cap or not _finite_box(c):
+                return None
+            w = _lift_pair(pair, c)
+            rlt_prod[key] = w
+            if len({a, b, c}) == 3:
+                ctx.register_product([a, b, c], w)
+            return w
+        return None
+
+    specs: list[tuple] = []
+    for quad, lin, const, sense in forms:
+        support = set(lin) | {k for k, _ in quad} | {ll for _, ll in quad}
+        if not (support & nonconvex):
+            continue
+        for mm in sorted(support):
+            if not _finite_box(mm):
+                continue
+            required: set[tuple[int, ...]] = set()
+            for i in lin:
+                required.add(tuple(sorted((i, mm))))
+            for ka, kb in quad:
+                required.add(tuple(sorted((ka, kb))))
+                required.add(tuple(sorted((ka, kb, mm))))
+            prod_map: dict[tuple[int, ...], int] = {}
+            ok = True
+            for req in required:
+                rc = _ensure(req)
+                if rc is None:
+                    ok = False
+                    break
+                prod_map[req] = rc
+            if not ok:
+                continue
+            specs.append((quad, lin, const, mm, ctx.col_lb[mm], ctx.col_ub[mm], sense, prod_map))
+
+    if not specs:
+        return
+    n_total = len(ctx.col_lb)
+
+    def _orig_col(i: int) -> Optional[int]:
+        return i if 0 <= i < n_orig else None
+
+    for quad, lin, const, mm, lm, um, sense, prod_map in specs:
+
+        def _prod_col(key: tuple[int, ...], _pm: dict = prod_map) -> Optional[int]:
+            return _pm.get(tuple(sorted(key)))
+
+        for lower, bnd in ((True, lm), (False, um)):
+            assembled = rlt_quadratic_bound_cut_row(
+                quad, lin, const, mm, float(bnd), lower, _orig_col, _prod_col, n_total
+            )
+            if assembled is None:
+                continue
+            coeffs, rhs = assembled
+            nz = np.flatnonzero(coeffs)
+            # coeffs·z >= rhs  ->  -coeffs·z <= -rhs.
+            ctx.add_row({int(j): -float(coeffs[j]) for j in nz}, -float(rhs))
+            if sense == "==":
+                ctx.add_row({int(j): float(coeffs[j]) for j in nz}, float(rhs))
+
+
+def _clamped_breakpoints(
+    raw: "np.ndarray", lo: float, hi: float, min_intervals: int = 2
+) -> Optional[list[float]]:
+    """Return sorted breakpoints of ``raw`` clipped to ``[lo, hi]`` with the box
+    endpoints included, or ``None`` if fewer than ``min_intervals`` usable
+    intervals remain.
+
+    The node box (``lo, hi``) may be tighter than when the AMP partition was
+    created, so breakpoints outside it are dropped and the true endpoints are
+    re-inserted — the partition must exactly tile ``[lo, hi]`` for the
+    disaggregation identity ``x == sum_k x_hat_k`` to be exact.
+    """
+    if not (math.isfinite(lo) and math.isfinite(hi)) or hi - lo <= 1e-12:
+        return None
+    pts = [float(p) for p in np.asarray(raw, dtype=np.float64) if lo < float(p) < hi]
+    merged = sorted({lo, hi, *pts})
+    # Drop near-duplicate breakpoints that would create a degenerate interval.
+    dedup: list[float] = [merged[0]]
+    for p in merged[1:]:
+        if p - dedup[-1] > 1e-9:
+            dedup.append(p)
+    if dedup[-1] < hi - 1e-12:
+        dedup[-1] = hi
+    if len(dedup) - 1 < min_intervals:
+        return None
+    return dedup
+
+
+_MAX_PIECEWISE_CELLS = 144  # cap on grid cells per bilinear (cost guard)
+
+
+def _add_piecewise_bilinear(
+    ctx: "_Builder",
+    a: int,
+    b: int,
+    w: int,
+    a_pts: list[float],
+    b_pts: Optional[list[float]],
+) -> None:
+    """Append a sound disaggregated piecewise-McCormick relaxation of ``w == x_a *
+    x_b``: 2-D grid over partitions ``a_pts`` (of ``a``) and ``b_pts`` (of ``b``)
+    when both are supplied, else 1-D over ``a_pts`` with ``b`` on its full box.
+
+    Piecewise McCormick (Nagarajan et al., CP 2016; Alpine.jl): a cell binary
+    ``lam`` per (interval-of-a x interval-of-b) cell, ``sum lam == 1``,
+    disaggregates ``a = sum a_hat``, ``b = sum b_hat``, ``w = sum w_hat`` with each
+    ``_hat`` copy confined to its cell when active (0 otherwise), and per-cell
+    McCormick on ``w_hat`` using the CELL bounds. SOUNDNESS: for the TRUE point
+    ``(a, b, w = a*b)`` in cell ``c*``, ``lam_{c*}=1`` (else 0), ``a_hat_{c*}=a``,
+    ``b_hat_{c*}=b``, ``w_hat_{c*}=a*b`` (else 0) satisfies every row — no feasible
+    point is cut; the full-box McCormick rows on ``w`` remain, so the result is
+    their intersection (never looser, strictly tighter once ``lam`` is integral).
+    Refining BOTH factors is required to certify a bilinear whose two factor ranges
+    are both wide (1-D refinement of one factor plateaus at ``~Δ_other/4``).
+    """
+    bl = float(ctx.col_lb[b])
+    bu = float(ctx.col_ub[b])
+    if not (math.isfinite(bl) and math.isfinite(bu)):
+        return
+    # Build the grid of (a-interval, b-interval) cells. 1-D degenerates to a single
+    # b-"interval" spanning the full box.
+    a_ivs = list(zip(a_pts[:-1], a_pts[1:]))
+    b_ivs = list(zip(b_pts[:-1], b_pts[1:])) if b_pts else [(bl, bu)]
+    if len(a_ivs) * len(b_ivs) > _MAX_PIECEWISE_CELLS:
+        b_ivs = [(bl, bu)]  # fall back to 1-D on ``a`` to bound the column count
+    cells = [(alo, ahi, blo, bhi) for (alo, ahi) in a_ivs for (blo, bhi) in b_ivs]
+
+    lam: list[int] = []
+    a_hat: list[int] = []
+    b_hat: list[int] = []
+    w_hat: list[int] = []
+    for alo, ahi, blo, bhi in cells:
+        lam.append(ctx.new_aux(0.0, 1.0, integ=True))
+        a_hat.append(ctx.new_aux(min(0.0, alo), max(0.0, ahi)))
+        b_hat.append(ctx.new_aux(min(0.0, blo), max(0.0, bhi)))
+        corners = [alo * blo, alo * bhi, ahi * blo, ahi * bhi, 0.0]
+        w_hat.append(ctx.new_aux(min(corners), max(corners)))
+
+    def _eq(coeffs: dict[int, float], rhs: float) -> None:
+        ctx.add_row(coeffs, rhs)
+        ctx.add_row({j: -c for j, c in coeffs.items()}, -rhs)
+
+    n = len(cells)
+    _eq({lam[k]: 1.0 for k in range(n)}, 1.0)
+    _eq({a: 1.0, **{a_hat[k]: -1.0 for k in range(n)}}, 0.0)
+    _eq({b: 1.0, **{b_hat[k]: -1.0 for k in range(n)}}, 0.0)
+    _eq({w: 1.0, **{w_hat[k]: -1.0 for k in range(n)}}, 0.0)
+    for k, (alo, ahi, blo, bhi) in enumerate(cells):
+        # alo*lam <= a_hat <= ahi*lam ;  blo*lam <= b_hat <= bhi*lam
+        ctx.add_row({a_hat[k]: 1.0, lam[k]: -ahi}, 0.0)
+        ctx.add_row({a_hat[k]: -1.0, lam[k]: alo}, 0.0)
+        ctx.add_row({b_hat[k]: 1.0, lam[k]: -bhi}, 0.0)
+        ctx.add_row({b_hat[k]: -1.0, lam[k]: blo}, 0.0)
+        # Per-cell McCormick (under):
+        ctx.add_row({w_hat[k]: -1.0, b_hat[k]: alo, a_hat[k]: blo, lam[k]: -alo * blo}, 0.0)
+        ctx.add_row({w_hat[k]: -1.0, b_hat[k]: ahi, a_hat[k]: bhi, lam[k]: -ahi * bhi}, 0.0)
+        # Per-cell McCormick (over):
+        ctx.add_row({w_hat[k]: 1.0, b_hat[k]: -alo, a_hat[k]: -bhi, lam[k]: alo * bhi}, 0.0)
+        ctx.add_row({w_hat[k]: 1.0, b_hat[k]: -ahi, a_hat[k]: -blo, lam[k]: ahi * blo}, 0.0)
+
+
+# Univariate intrinsics eligible for piecewise refinement: ``fname -> (f, f',
+# curvature(arg_lo, arg_hi))``. Reuses the static-envelope table and adds ``tan``
+# (absent there because it has no single-curvature envelope over a box straddling
+# its inflection — the exact case piecewise splitting fixes).
+_PIECEWISE_UNIVARIATE_FN: dict[str, tuple[Callable, Callable, Callable]] = {
+    "tan": (np.tan, lambda t: 1.0 / (np.cos(t) ** 2), _curv_by_sign(True)),
+    **{name: (f, fp, cv) for name, (f, fp, cv, _dom) in _UNIVARIATE_FN.items()},
+}
+
+
+def _single_orig_affine(ctx: "_Builder", lt: "LinForm") -> Optional[tuple[int, float]]:
+    """Return ``(var_idx, coeff)`` iff ``lt`` is ``coeff*x_i (+ const)`` for a single
+    ORIGINAL variable (any nonzero coeff, any const), else ``None``."""
+    items = [(j, c) for j, c in lt.coeffs.items() if c != 0.0]
+    if len(items) != 1:
+        return None
+    j, c = items[0]
+    if 0 <= j < ctx.n_orig and math.isfinite(c) and c != 0.0:
+        return (j, float(c))
+    return None
+
+
+def _univariate_inflection_args(fname: str, alo: float, ahi: float) -> list[float]:
+    """Curvature-change (inflection) points of ``fname`` inside ``(alo, ahi)`` in
+    ARGUMENT space, so each sub-interval is single-curvature."""
+    out: list[float] = []
+    # f'' has the sign of the argument -> inflection at 0.
+    if fname in ("tan", "tanh", "atan", "asin", "asinh", "atanh", "erf", "sinh"):
+        if alo < 0.0 < ahi:
+            out.append(0.0)
+        return out
+    if fname in ("sin", "cos"):
+        # sin'' = -sin (inflections at k*pi); cos'' = -cos (inflections at pi/2+k*pi).
+        start = 0.0 if fname == "sin" else 0.5 * math.pi
+        k_min = math.ceil((alo - start) / math.pi)
+        k_max = math.floor((ahi - start) / math.pi)
+        for k in range(k_min, k_max + 1):
+            p = start + k * math.pi
+            if alo < p < ahi:
+                out.append(float(p))
+    return out
+
+
+def _tan_branch_safe(alo: float, ahi: float) -> bool:
+    """True iff ``[alo, ahi]`` contains no ``tan`` asymptote (pi/2 + k*pi)."""
+    margin = 1e-6
+    k_min = math.floor((alo - 0.5 * math.pi) / math.pi) - 1
+    k_max = math.ceil((ahi - 0.5 * math.pi) / math.pi) + 1
+    for k in range(k_min, k_max + 1):
+        asymptote = 0.5 * math.pi + k * math.pi
+        if alo - margin <= asymptote <= ahi + margin:
+            return False
+    return True
+
+
+def _emit_piecewise_1d(
+    ctx: "_Builder",
+    w_hat: int,
+    x_hat: int,
+    lam: int,
+    coeff: float,
+    const: float,
+    alo: float,
+    ahi: float,
+    f: Callable[[float], float],
+    fp: Callable[[float], float],
+    curv: Optional[str],
+) -> None:
+    """Append the λ-homogenized secant/tangent envelope of ``w_hat == f(coeff*x_hat +
+    const)`` valid on the active interval (arg in ``[alo, ahi]``).
+
+    ``arg_k = coeff*x_hat + const*lam`` is the per-interval argument (== the true
+    arg when ``lam == 1``, 0 when ``lam == 0``). A line ``s*arg + b`` valid on the
+    interval becomes ``s*arg_k + b*lam`` so it is the true line when the interval is
+    active and the trivial ``0 (>=|<=) 0`` when inactive. SOUNDNESS: on a
+    curvature-certified piece each tangent is a supporting line (rigorous one-sided
+    bound) and the endpoint secant a chord (rigorous opposite bound); homogenizing
+    by ``lam`` keeps them exact at the true point and vacuous elsewhere.
+    """
+    if curv is None or ahi - alo < _MIN_WIDTH:
+        return
+    try:
+        flo, fhi = float(f(alo)), float(f(ahi))
+    except (ValueError, ArithmeticError):
+        return
+    if not _finite(flo, fhi):
+        return
+    ssl = (fhi - flo) / (ahi - alo)  # secant slope (arg space)
+    sint = flo - ssl * alo  # secant intercept
+
+    def _line(slope: float, intercept: float, sign: float) -> None:
+        # sign*w_hat (<=|>=) sign*(slope*arg_k + intercept*lam):
+        #   arg_k = coeff*x_hat + const*lam
+        #   -> row  sign*w_hat - sign*slope*coeff*x_hat - sign*(slope*const+intercept)*lam <= 0
+        if not (_finite(slope, intercept)):
+            return
+        ctx.add_row(
+            {
+                w_hat: sign,
+                x_hat: -sign * slope * coeff,
+                lam: -sign * (slope * const + intercept),
+            },
+            0.0,
+        )
+
+    mid = 0.5 * (alo + ahi)
+    sec_sign = +1.0 if curv == "convex" else -1.0  # convex: w<=secant; concave: w>=secant
+    _line(ssl, sint, sec_sign)
+    for t0 in (alo, mid, ahi):
+        try:
+            g, gp = float(f(t0)), float(fp(t0))
+        except (ValueError, ArithmeticError):
+            continue
+        if not _finite(g, gp):
+            continue
+        _line(gp, g - gp * t0, -sec_sign)  # tangent: opposite side of the secant
+
+
+def _add_piecewise_univariate(
+    ctx: "_Builder",
+    w: int,
+    v: int,
+    coeff: float,
+    const: float,
+    f: Callable[[float], float],
+    fp: Callable[[float], float],
+    curv_fn: Callable[[float, float], Optional[str]],
+    pts: list[float],
+    branch_safe: Optional[Callable[[float, float], bool]] = None,
+) -> None:
+    """Append a sound disaggregated piecewise envelope of ``w == f(coeff*x_v +
+    const)`` over the partition ``pts`` of ``x_v`` (used for both univariate
+    intrinsics and integer powers ``x_v**p``). Aborts (adds nothing) if any interval
+    is not soundly relaxable (e.g. a ``tan`` piece crossing an asymptote), leaving
+    the atom's existing interval floor intact.
+    """
+    m = len(pts) - 1
+    # Sound generous column box for the disaggregated ``w_hat`` copies: the atom's
+    # full-box aux range (rigorous, contains every sub-interval range) plus 0 (the
+    # inactive value).
+    w_lo = min(0.0, float(ctx.col_lb[w]))
+    w_hi = max(0.0, float(ctx.col_ub[w]))
+    if not (_finite(w_lo, w_hi)):
+        return
+    # Pre-check: every interval's argument box must be soundly relaxable.
+    specs: list[tuple[float, float, Optional[str]]] = []
+    for k in range(m):
+        a0 = coeff * pts[k] + const
+        a1 = coeff * pts[k + 1] + const
+        alo, ahi = (a0, a1) if a0 <= a1 else (a1, a0)
+        if branch_safe is not None and not branch_safe(alo, ahi):
+            return  # cannot relax this atom soundly over the partition
+        specs.append((alo, ahi, curv_fn(alo, ahi)))
+
+    lam: list[int] = []
+    x_hat: list[int] = []
+    w_hat: list[int] = []
+    for k in range(m):
+        p_lo, p_hi = pts[k], pts[k + 1]
+        lam.append(ctx.new_aux(0.0, 1.0, integ=True))
+        x_hat.append(ctx.new_aux(min(0.0, p_lo), max(0.0, p_hi)))
+        w_hat.append(ctx.new_aux(w_lo, w_hi))
+
+    def _eq(coeffs: dict[int, float], rhs: float) -> None:
+        ctx.add_row(coeffs, rhs)
+        ctx.add_row({j: -c for j, c in coeffs.items()}, -rhs)
+
+    _eq({lam[k]: 1.0 for k in range(m)}, 1.0)
+    _eq({v: 1.0, **{x_hat[k]: -1.0 for k in range(m)}}, 0.0)
+    _eq({w: 1.0, **{w_hat[k]: -1.0 for k in range(m)}}, 0.0)
+    for k in range(m):
+        p_lo, p_hi = pts[k], pts[k + 1]
+        ctx.add_row({x_hat[k]: 1.0, lam[k]: -p_hi}, 0.0)  # x_hat <= p_hi*lam
+        ctx.add_row({x_hat[k]: -1.0, lam[k]: p_lo}, 0.0)  # x_hat >= p_lo*lam
+        alo, ahi, curv = specs[k]
+        _emit_piecewise_1d(ctx, w_hat[k], x_hat[k], lam[k], coeff, const, alo, ahi, f, fp, curv)
+
+
+def _apply_partition_refinement(ctx: "_Builder", disc_state: object) -> None:
+    """Add sound piecewise structure for every atom depending on a partitioned
+    variable (#640 S8 AMP ``disc_state`` recovery). No-op when no partitions.
+    """
+    parts = getattr(disc_state, "partitions", None)
+    if not parts:
+        return
+
+    def _clamped(v: int, extra: Optional[list[float]] = None) -> Optional[list[float]]:
+        raw = parts.get(v)
+        if raw is None:
+            return None
+        merged = np.asarray(raw, dtype=np.float64)
+        if extra:
+            merged = np.concatenate([merged, np.asarray(extra, dtype=np.float64)])
+        return _clamped_breakpoints(merged, float(ctx.col_lb[v]), float(ctx.col_ub[v]))
+
+    for (a, b), w in list(ctx.bilinear_map.items()):
+        a_pts = _clamped(a)
+        b_pts = _clamped(b)
+        if a_pts is None and b_pts is None:
+            continue
+        # Refine both factors (2-D grid) when both are partitioned — required to
+        # certify a bilinear with two wide factor ranges. If only one is
+        # partitioned, refine that one (1-D) with the other on its full box.
+        if a_pts is not None:
+            _add_piecewise_bilinear(ctx, a, b, w, a_pts, b_pts)
+        elif b_pts is not None:
+            _add_piecewise_bilinear(ctx, b, a, w, b_pts, None)
+
+    for fname, w, v, coeff, const in list(ctx.univariate_atom_specs):
+        if v not in parts:
+            continue
+        entry = _PIECEWISE_UNIVARIATE_FN.get(fname)
+        if entry is None:
+            continue
+        f, fp, curv_fn = entry
+        # Inject the function's inflection points (mapped from arg space to x space)
+        # so no sub-interval straddles a curvature change; without this a partition
+        # refined only near the incumbent leaves the inflection interval loose.
+        infl_x: list[float] = []
+        _e0 = coeff * float(ctx.col_lb[v]) + const
+        _e1 = coeff * float(ctx.col_ub[v]) + const
+        for a_infl in _univariate_inflection_args(fname, min(_e0, _e1), max(_e0, _e1)):
+            infl_x.append((a_infl - const) / coeff)
+        pts = _clamped(v, infl_x)
+        if pts is None:
+            continue
+        branch_safe = _tan_branch_safe if fname == "tan" else None
+        _add_piecewise_univariate(ctx, w, v, coeff, const, f, fp, curv_fn, pts, branch_safe)
+
+    # Integer powers ``x_v**p`` (the sphere/square terms): piecewise-refine the aux
+    # so a convex square's under-estimating tangents tighten as ``x_v`` is
+    # partitioned — without this a wide symmetric box (e.g. ``y**2`` on ``[-s, s]``)
+    # keeps its aux pinned to the tangent at 0, decoupling the square from its base.
+    for (i, p), w in list(ctx.monomial_map.items()):
+        if i not in parts or not isinstance(p, int) or p < 2:
+            continue
+        pw = p
+
+        def _fpow(t: float, _pw: int = pw) -> float:
+            return float(t**_pw)
+
+        def _fppow(t: float, _pw: int = pw) -> float:
+            return float(_pw * t ** (_pw - 1))
+
+        # ``x**p`` is convex for even ``p`` (all x) and for odd ``p`` on ``x >= 0``;
+        # concave for odd ``p`` on ``x <= 0`` — curvature has the sign of ``x`` when
+        # ``p`` is odd (inflection at 0), constant convex when ``p`` is even.
+        curv_pow = _curv_const("convex") if pw % 2 == 0 else _curv_by_sign(True)
+        infl_x = [0.0] if (pw % 2 == 1 and ctx.col_lb[i] < 0.0 < ctx.col_ub[i]) else []
+        pts = _clamped(i, infl_x)
+        if pts is None:
+            continue
+        _add_piecewise_univariate(ctx, w, i, 1.0, 0.0, _fpow, _fppow, curv_pow, pts)
+
+
 def build_uniform_relaxation(
     model: Model,
     box: Optional[tuple[np.ndarray, np.ndarray]] = None,
+    *,
+    rlt_quad: bool = False,
+    skip_separable_floor: bool = False,
+    skip_convex_lift: bool = False,
+    disc_state: object = None,
 ) -> UniformRelaxation:
     """Build the uniform factorable relaxation of ``model`` over ``box``.
 
@@ -2152,6 +2914,12 @@ def build_uniform_relaxation(
     box : optional ``(flat_lb, flat_ub)`` — the B&B node box in flat variable
         order (like ``build_milp_relaxation``'s ``bound_override``). Defaults to
         the model's declared variable bounds.
+    rlt_quad : bool, default False
+        Enable the quadratic constraint-factor RLT pass (issue #640 Bucket 2):
+        multiply each degree-2 polynomial constraint by variable bound factors,
+        lifting the resulting degree-3 monomials on demand, and add the valid RLT
+        product rows. Sound (only tightens); the caller gates it on the
+        ``rlt_level1`` build option AND ``DISCOPT_RLT_QUAD``.
 
     Returns
     -------
@@ -2166,18 +2934,24 @@ def build_uniform_relaxation(
         flat_lb = np.asarray(box[0], dtype=np.float64)
         flat_ub = np.asarray(box[1], dtype=np.float64)
 
-    # NOTE (roadmap P3): branch-and-reduce / box tightening (FBBT/OBBT) is owned by
-    # the separate branch-and-reduce workstream and arrives HERE via the ``box``
-    # (node-box) interface — a tighter box automatically yields uniformly tighter
-    # envelopes below (McCormick/secant/tangent are monotone in the box). This layer
-    # does not tighten the box itself.
+    # NOTE (roadmap P3): general branch-and-reduce / box tightening (FBBT/OBBT) is
+    # owned by the separate branch-and-reduce workstream and arrives HERE via the
+    # ``box`` (node-box) interface — a tighter box automatically yields uniformly
+    # tighter envelopes below (McCormick/secant/tangent are monotone in the box).
+    # The one tightening this layer DOES perform is EXACT variable fixing from
+    # single-variable equality constraints (issue #640 Bucket 1): ``a*x_i == b``
+    # forces ``x_i = b/a``, so relaxing over the collapsed box [b/a, b/a] is exact
+    # for that variable — a sound win (the envelope of e.g. ``tan(x)`` on the fixed
+    # point is the exact value) that cannot remove a feasible point, since the
+    # equality is already a hard constraint of the model.
+    flat_lb, flat_ub = _fix_single_var_equalities(model, flat_lb, flat_ub)
 
     # Box-independent analysis, computed once per model and pinned on it (issue #632
     # EP1): the canonical DAG (which pins CNodes -> stable id() keys), reconstructed
     # expressions, DCP verdicts, compiled value/grad fns, and curvature certificates.
     analysis = _get_analysis_cache(model)
     dag: CanonicalDAG = analysis.dag
-    ctx = _Builder(model, flat_lb, flat_ub, analysis)
+    ctx = _Builder(model, flat_lb, flat_ub, analysis, skip_convex_lift=skip_convex_lift)
 
     # Objective -> c, obj_offset (minimize convention; maximize is negated so the
     # reported LP bound is a valid lower bound on the minimize-equivalent, matching
@@ -2203,12 +2977,97 @@ def build_uniform_relaxation(
             ctx.add_row(lc.coeffs, rhs_shift - lc.const)
             ctx.add_row(lc.scaled(-1.0).coeffs, -(rhs_shift) + lc.const)
 
+    # Quadratic constraint-factor RLT (issue #640 Bucket 2, gated). Runs AFTER the
+    # base build so every product column the base decomposition registered is
+    # available to seed the on-demand degree-3 lifting.
+    if rlt_quad:
+        _emit_quadratic_rlt(ctx, model, flat_lb, flat_ub)
+
+    obj_offset = obj_lin.const
+
+    # ── Plain box-interval objective floor + validity (soundness guard) ──
+    # The LP optimum is a valid lower bound ONLY if the relaxed objective is
+    # actually bounded below over the box. When a nonlinear atom cannot be
+    # enveloped (unbounded box: McCormick rows dropped for infinite endpoints,
+    # transcendental over an infinite argument, …) its aux column is a free
+    # interval-floor column; if such a column carries objective cost and is
+    # otherwise unconstrained, the LP is unbounded below — yet the warm-started
+    # Rust simplex can mis-report a finite "optimal" (issue #15). Reporting that as
+    # a bound would be a FALSE certificate. We compute a SOUND box-interval lower
+    # bound on the (minimize-equivalent) objective from the column bounds; a cost
+    # column that is unbounded on its cost-relevant side and appears in NO row makes
+    # that lower bound -inf, and we refuse the objective bound (the solver falls
+    # back to its rigorous alphaBB/interval bound) rather than trust a
+    # possibly-fabricated LP value. Mirrors the federation's
+    # ``objective_bound_valid=False`` on an un-relaxable / under-constrained
+    # objective. NOTE: the LP feasible region ⊆ the column box, so the LP optimum is
+    # always ≥ ``obj_box_lb`` — this is why the separable floor below only helps
+    # (and is only added) when it STRICTLY exceeds ``obj_box_lb``.
+    _row_cols: set[int] = set()
+    for _coeffs, _ in ctx.rows:
+        _row_cols.update(_coeffs)
+    obj_bound_valid = True
+    obj_box_lb = obj_offset
+    for j, coef in obj_lin.coeffs.items():
+        edge = ctx.col_lb[j] if coef > 0 else ctx.col_ub[j]
+        contrib = coef * edge
+        if not math.isfinite(contrib):
+            if j not in _row_cols:
+                obj_bound_valid = False
+            obj_box_lb = -math.inf
+        else:
+            obj_box_lb += contrib
+    if not math.isfinite(obj_box_lb):
+        obj_bound_valid = False
+
+    # ── Separable objective lower bound (issue #640 Bucket 1 — federation-parity) ──
+    # ``sep_lb`` is a sound constant lower bound on the MINIMIZE-EQUIVALENT
+    # objective, derived by separable term analysis (integer-domain enumeration for
+    # cos(integer-affine), x*exp(x) >= -1/e, monotone-polynomial vertex min,
+    # reciprocal / even-power enclosures). It rescues shapes the static per-atom
+    # envelope leaves loose or unbounded on a wide box: an unbounded
+    # x*exp(x)+cos(y)+z^3-z^2 objective, or an integer-affine cos whose continuous
+    # envelope is the [-1,1] range. We add it as the single cut ``obj_lin >= sep_lb``
+    # ONLY when it strictly improves ``obj_box_lb`` (i.e. it would change the LP
+    # bound) — a redundant cut on a linear / already-tight objective is skipped so
+    # bound-neutral relaxation consumers (e.g. the incremental-McCormick row-exact
+    # validator) are untouched. SOUNDNESS: every feasible ORIGINAL point x maps to a
+    # lifted point with obj_lin = objective(x) >= sep_lb, so the cut removes NO image
+    # of a feasible point — only relaxation-only points where the loose envelope dips
+    # below the true objective floor. The LP optimum after the cut is therefore still
+    # a valid lower bound (>= before, <= true optimum), and — being a genuine LP row
+    # rather than a free-column simplex quirk — it makes the objective certifiably
+    # bounded, so ``obj_bound_valid`` becomes True.
+    if (
+        not skip_separable_floor
+        and dag.objective is not None
+        and model._objective is not None
+        and obj_lin.coeffs
+    ):
+        obj_expr = model._objective.expression
+        min_equiv_expr = (
+            UnaryOp("neg", obj_expr)
+            if model._objective.sense == ObjectiveSense.MAXIMIZE
+            else obj_expr
+        )
+        sep_lb = _expression_lower_bound_for_lift(min_equiv_expr, model, flat_lb, flat_ub)
+        if sep_lb is not None and math.isfinite(sep_lb) and sep_lb > obj_box_lb + 1e-9:
+            # obj_lin >= sep_lb  <=>  -(obj_lin variable part) <= obj_lin.const - sep_lb
+            ctx.add_row(obj_lin.scaled(-1.0).coeffs, obj_lin.const - sep_lb)
+            obj_bound_valid = True
+
+    # Piecewise-McCormick partition refinement (#640 S8 — AMP `disc_state`
+    # recovery). When the caller (the AMP adaptive-multivariate-partitioning loop)
+    # supplies partition breakpoints, add sound piecewise structure that tightens
+    # every atom depending on a partitioned variable. No-op when ``disc_state`` is
+    # empty (every non-AMP caller and the root), so the base build is unchanged.
+    _apply_partition_refinement(ctx, disc_state)
+
     # Assemble the LP.
     n_cols = len(ctx.col_lb)
     c = np.zeros(n_cols, dtype=np.float64)
     for j, coef in obj_lin.coeffs.items():
         c[j] += coef
-    obj_offset = obj_lin.const
 
     if ctx.rows:
         import scipy.sparse as sp
@@ -2232,44 +3091,6 @@ def build_uniform_relaxation(
 
     bounds = list(zip(ctx.col_lb, ctx.col_ub))
 
-    # Objective-bound validity (soundness guard). The LP optimum is a valid lower
-    # bound ONLY if the relaxed objective is actually bounded below over the box.
-    # When a nonlinear atom cannot be enveloped (unbounded box: McCormick rows
-    # dropped for infinite endpoints, transcendental over an infinite argument,
-    # …) its aux column is a free interval-floor column; if such a column carries
-    # objective cost and is otherwise unconstrained, the LP is unbounded below —
-    # yet the warm-started Rust simplex can mis-report a finite "optimal" (issue
-    # #15). Reporting that as a bound would be a FALSE certificate. We therefore
-    # compute a SOUND box-interval lower bound on the (minimize-equivalent)
-    # objective from the column bounds; a cost column that is unbounded on its
-    # cost-relevant side and appears in NO row makes that lower bound -inf, and we
-    # refuse the objective bound (the solver falls back to its rigorous
-    # alphaBB/interval bound) rather than trust a possibly-fabricated LP value.
-    # This mirrors the federation's ``objective_bound_valid=False`` behaviour on
-    # an un-relaxable / under-constrained objective.
-    _row_cols: set[int] = set()
-    for _coeffs, _ in ctx.rows:
-        _row_cols.update(_coeffs)
-    obj_bound_valid = True
-    obj_box_lb = obj_offset
-    for j, coef in obj_lin.coeffs.items():
-        edge = ctx.col_lb[j] if coef > 0 else ctx.col_ub[j]
-        contrib = coef * edge
-        if not math.isfinite(contrib):
-            # Unbounded on the cost-relevant side. If the column is tied down by a
-            # row it MAY still be LP-bounded (a correct simplex would report the
-            # true bound or unboundedness); but a free unconstrained cost column is
-            # provably unbounded -> refuse.
-            if j not in _row_cols:
-                obj_bound_valid = False
-            obj_box_lb = -math.inf
-        else:
-            obj_box_lb += contrib
-    if not math.isfinite(obj_box_lb):
-        # No finite sound floor on the objective at all -> the LP value cannot be
-        # certified as a global lower bound.
-        obj_bound_valid = False
-
     # Pure LP relaxation (integrality relaxed at the root) — a sound lower bound,
     # matching the federation's root-node LP convention.
     milp = MilpRelaxationModel(
@@ -2281,6 +3102,14 @@ def build_uniform_relaxation(
         integrality=None,
         objective_bound_valid=obj_bound_valid,
     )
+    # Rigorous box-interval objective floor (issue #640 Bucket 2, nvs22). A valid
+    # global lower bound on the (minimize-equivalent) objective, computed from the
+    # cost-column bounds alone — independent of the constraint rows and of the
+    # node-solve conditioning clamp (the cost columns are never near-inf, so this
+    # stays finite even when a free non-cost column drives the clamped LP to a
+    # spurious "unbounded"). The node solver falls back to it to report a sound
+    # bound instead of declining. ``None`` when no finite floor exists.
+    milp._objective_floor = obj_box_lb if math.isfinite(obj_box_lb) else None
     return UniformRelaxation(
         model=milp,
         n_orig=ctx.n_orig,
@@ -2294,6 +3123,9 @@ def build_uniform_relaxation(
         multilinear_map=dict(ctx.multilinear_map),
         univariate_square_map=dict(ctx.univariate_square_map),
         composite_multivar_specs=list(ctx.composite_multivar_specs),
+        affine_square_map=dict(ctx.affine_square_map),
+        finite_domain_trig_square_tables=list(ctx.finite_domain_trig_square_tables),
+        integrality=list(ctx.integrality),
     )
 
 

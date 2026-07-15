@@ -601,6 +601,32 @@ class MccormickLPRelaxer:
             except Exception:
                 self._inc = None
 
+        # Composite convex/concave OA lift detection is LAZY (see
+        # ``_model_has_composite_lift``): computed at most once, and only the first
+        # time a ``solve_at_node(separate=True)`` on the fast path with no inherited
+        # pool actually needs it. Most relaxers (structural OBBT, pooled spatial
+        # nodes, non-separating solves) never trigger it, so the extra cold build it
+        # costs stays off their hot path.
+        self._has_composite_lift_cache: Optional[bool] = None
+
+    def _model_has_composite_lift(self) -> bool:
+        """Whether the model carries a composite convex/concave OA lift whose
+        Kelley tightening the incremental fast path would drop. Computed once and
+        cached; only ever called from the fast-path bound-neutrality guard, so its
+        one probe build stays off every other relaxer's hot path."""
+        if self._has_composite_lift_cache is None:
+            self._has_composite_lift_cache = False
+            try:
+                from discopt._jax.model_utils import flat_variable_bounds
+                from discopt._jax.uniform_relax import build_uniform_relaxation
+
+                _flb, _fub = flat_variable_bounds(self._model)
+                _probe = build_uniform_relaxation(self._model, box=(_flb, _fub))
+                self._has_composite_lift_cache = bool(_probe.composite_multivar_specs)
+            except Exception:
+                self._has_composite_lift_cache = False
+        return self._has_composite_lift_cache
+
     @property
     def nonlinear_columns(self) -> frozenset[int]:
         """Original-variable flat columns in any nonlinear term (product,
@@ -1091,11 +1117,26 @@ class MccormickLPRelaxer:
         # inherit the pool this captures. Without this, the root cut pool is never
         # populated once the incremental engine is active — exactly why the T1.3
         # gate flip collapsed the spatial bound (dispatch 3 → 9843).
+        # Bound-neutrality: with a composite convex lift present, a FEASIBLE fast-path
+        # bound omits the lift's Kelley tightening unless it can inherit those cuts
+        # from the pool (``inherited_cuts``). When separation is requested with no
+        # inherited pool, fall back to the cold, separating build for an OPTIMAL
+        # result so the lift actually tightens the node (fixes test_convex_claimer's
+        # -204 -> -350 on a direct solve_at_node call). An ``infeasible`` fast verdict
+        # is bound-independent (an empty McCormick polytope over a finite box is a
+        # rigorous infeasibility proof), so it is always trusted; pooled spatial
+        # nodes, which DO inherit cuts, keep the fast path for both verdicts.
+        _skip_fast_for_lift = (
+            separate
+            and self._inc is not None
+            and not inherited_cuts
+            and self._model_has_composite_lift()
+        )
         if out_cuts is None:
             _fast = self._try_incremental_node(
                 node_lb, node_ub, inherited_cuts, want_marginals=want_marginals
             )
-            if _fast is not None:
+            if _fast is not None and not (_skip_fast_for_lift and _fast.status == "optimal"):
                 return _fast
 
         try:
@@ -1470,6 +1511,18 @@ class MccormickLPRelaxer:
             )
             return MccormickLPResult(status="numerical")
         if res.status != "optimal" or res.x is None:
+            # Objective-floor fallback (issue #640 Bucket 2, nvs22). The conditioning
+            # clamp above widens a free non-cost column to true +/-inf, which can make
+            # the fast simplex spuriously report ``unbounded`` on a relaxation whose
+            # OBJECTIVE is provably bounded below (its cost columns are never
+            # near-inf, so they are never clamped). The relaxation's rigorous
+            # box-interval objective floor is a valid global lower bound in that case,
+            # so report it rather than declining — a sound (never-too-high) bound that
+            # keeps the node from being dropped for want of a certificate. Only fires
+            # for a finite floor (a genuinely unbounded-below objective has none).
+            floor = getattr(milp, "_objective_floor", None)
+            if res.status == "unbounded" and floor is not None and np.isfinite(floor):
+                return MccormickLPResult(status="optimal", lower_bound=float(floor))
             return MccormickLPResult(status=res.status)
 
         def _certify(r) -> Optional[float]:

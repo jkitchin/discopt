@@ -29,6 +29,7 @@ from typing import Callable, Optional, Union
 import numpy as np
 import scipy.sparse as sp
 
+from discopt._jax._numeric import is_effectively_finite as _is_effectively_finite
 from discopt._jax.discretization import DiscretizationState
 from discopt._jax.model_utils import flat_variable_bounds
 from discopt._jax.term_classifier import (
@@ -261,6 +262,9 @@ class MilpRelaxationModel:
         self._obj_offset = obj_offset
         self._integrality = integrality
         self._objective_bound_valid = objective_bound_valid
+        # Rigorous box-interval objective floor (#640 Bucket 2, nvs22); set by
+        # ``build_uniform_relaxation``. ``None`` unless a finite floor was computed.
+        self._objective_floor: Optional[float] = None
         # Warm-start state for the pure-LP simplex fast path (cutting-plane loop):
         # the previous solve's optimal basis and the (structural-cols, rows) it was
         # produced at, so the next ``.solve()`` on the SAME columns with rows only
@@ -1601,6 +1605,10 @@ def _uniform_relaxation_delegate(
     flat_ub: np.ndarray,
     n_orig: int,
     convhull_mode: str,
+    rlt_level1: bool = False,
+    skip_separable_floor: bool = False,
+    skip_convex_lift: bool = False,
+    disc_state: object = None,
 ) -> tuple["MilpRelaxationModel", dict]:
     """Build the default relaxation through the uniform factorable engine (#632).
 
@@ -1616,7 +1624,18 @@ def _uniform_relaxation_delegate(
     """
     from discopt._jax.uniform_relax import build_uniform_relaxation
 
-    rel = build_uniform_relaxation(model, box=(flat_lb, flat_ub))
+    # Quadratic constraint-factor RLT (#640 Bucket 2) fires only when the caller
+    # engaged level-1 RLT AND ``DISCOPT_RLT_QUAD`` is on (default on). Off => the
+    # base build is byte-identical to before.
+    rlt_quad = bool(rlt_level1 and _tuning().rlt_quad)
+    rel = build_uniform_relaxation(
+        model,
+        box=(flat_lb, flat_ub),
+        rlt_quad=rlt_quad,
+        skip_separable_floor=skip_separable_floor,
+        skip_convex_lift=skip_convex_lift,
+        disc_state=disc_state,
+    )
     milp = rel.model
     n_total = int(np.size(milp._c))
     flags = np.zeros(n_total, dtype=np.int32)
@@ -1625,6 +1644,13 @@ def _uniform_relaxation_delegate(
         if v.var_type in (VarType.BINARY, VarType.INTEGER):
             flags[off : off + v.size] = 1
         off += int(v.size)
+    # OR in ENGINE-created integer aux columns (e.g. the finite-domain trig-square
+    # selector binaries, #640 Bucket 1). The exact selector table is only exact when
+    # its ``λ`` are integer, so the node MILP must see them as such; the pure-LP root
+    # (continuous ``λ``) keeps the sound convex-hull relaxation.
+    aux_int = np.asarray(rel.integrality, dtype=np.int32)
+    if aux_int.size == n_total:
+        flags = np.maximum(flags, aux_int)
     milp._integrality = flags if int(flags.sum()) else None
     # Populate the structural varmap families the proven legacy separators (PSD /
     # RLT / edge-concave / univariate-square / multilinear) consume, from the
@@ -1642,6 +1668,9 @@ def _uniform_relaxation_delegate(
     vm["trilinear"] = dict(rel.trilinear_map)
     vm["multilinear"] = dict(rel.multilinear_map)
     vm["univariate_square"] = dict(rel.univariate_square_map)
+    # Affine squares ``(c·x_j+d)**2`` (#640 Bucket 3): ``(var, aux) -> (coeff, const)``
+    # for the incremental McCormick patch's closed-form envelope regeneration.
+    vm["affine_square"] = dict(rel.affine_square_map)
     # Composite convex/concave lifts (issue #632 P2): each certified-convex/-concave
     # multivariate node the engine lifted to a single aux is registered here so the
     # existing ``MccormickLPRelaxer._separate_convex`` outer-approximation (Kelley)
@@ -1652,6 +1681,16 @@ def _uniform_relaxation_delegate(
     # (over-) estimator, so the cut never removes a feasible point (sound by
     # construction; the loop is a sound no-op on any failure).
     vm["composite_multivar_relaxations"] = list(rel.composite_multivar_specs)
+    # Piecewise univariate/monomial/bilinear refinement (#640 S8) is now emitted
+    # DIRECTLY as relaxation rows by ``build_uniform_relaxation`` when a ``disc_state``
+    # partition is supplied (the AMP path), not surfaced through this legacy census
+    # list — so the family stays the honest empty list here (the tightening rows are
+    # already in the relaxation, keyed to the atoms' aux columns).
+    vm["univariate_piecewise_relaxations"] = []
+    # Finite-domain trig-square selector tables (#640 Bucket 1): exact one-hot
+    # encodings of sin/cos(int-affine)^2 the engine emitted, surfaced for callers
+    # that census them (the rows are already in the relaxation).
+    vm["finite_domain_trig_square_tables"] = list(rel.finite_domain_trig_square_tables)
     return milp, vm
 
 
@@ -1667,6 +1706,8 @@ def build_milp_relaxation(
     bound_override: Optional[tuple[np.ndarray, np.ndarray]] = None,
     superposition: bool = False,
     rlt_level1: bool = False,
+    skip_separable_floor: bool = False,
+    skip_convex_lift: bool = False,
 ) -> tuple["MilpRelaxationModel", dict]:
     """Build a MILP relaxation with piecewise McCormick for bilinear/monomial terms.
 
@@ -1675,17 +1716,17 @@ def build_milp_relaxation(
         the uniform factorable engine** (:func:`uniform_relax.build_uniform_relaxation`),
         which relaxes every canonical atom class soundly via the AVM. As a result
         the following parameters are currently **IGNORED** on the default path and
-        kept only for signature compatibility: ``terms``, ``disc_state`` (no
-        piecewise-McCormick refinement is fed in — the engine's per-atom envelopes
-        supersede it), ``incumbent``, ``oa_cuts`` (OA/Kelley tangents are added
-        lazily by the separators at ``solve_at_node``, not pre-seeded here),
-        ``convhull_ebd``/``convhull_ebd_encoding``, ``superposition``, and
-        ``rlt_level1``. Only ``model``, ``convhull_formulation`` (validated),
-        and ``bound_override`` still affect the result. A caller that relied on
-        ``disc_state`` piecewise refinement or on feeding back ``oa_cuts`` gets a
-        sound but unrefined-by-those-inputs relaxation — the engine is a valid
-        outer relaxation by construction, verified ``incorrect_count = 0`` on the
-        global50 panel. The docstring below describes the superseded federated
+        kept only for signature compatibility: ``terms``, ``incumbent``, ``oa_cuts``
+        (OA/Kelley tangents are added lazily by the separators at ``solve_at_node``,
+        not pre-seeded here), ``convhull_ebd``/``convhull_ebd_encoding``,
+        ``superposition``. ``disc_state`` is now **consumed** again (#640 S8): its
+        partition breakpoints drive sound piecewise-McCormick refinement of every
+        bilinear/monomial/univariate atom depending on a partitioned variable, so
+        the AMP adaptive-partition loop tightens the node bound as it refines. Only
+        ``model``, ``convhull_formulation`` (validated), ``bound_override``,
+        ``disc_state`` and ``rlt_level1`` affect the result. The engine remains a
+        valid outer relaxation by construction, verified ``incorrect_count = 0`` on
+        the global50 panel. The docstring below describes the superseded federated
         build and is retained for historical context.
 
     For each bilinear term x_i*x_j: adds standard McCormick envelope constraints
@@ -1747,4 +1788,680 @@ def build_milp_relaxation(
     # federated collectors/separators below (being deleted stage-by-stage). The
     # engine is a valid outer relaxation by construction; product-side tightness
     # parity is the deferred polish pass.
-    return _uniform_relaxation_delegate(model, flat_lb, flat_ub, n_orig, convhull_mode)
+    return _uniform_relaxation_delegate(
+        model,
+        flat_lb,
+        flat_ub,
+        n_orig,
+        convhull_mode,
+        rlt_level1=rlt_level1,
+        skip_separable_floor=skip_separable_floor,
+        skip_convex_lift=skip_convex_lift,
+        disc_state=disc_state,
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Separable objective lower bound (issue #640 Bucket 1 — federation-parity)
+#
+# Recovered from the #632 federation cutover: a sound constant lower bound on a
+# *separable* (minimize-equivalent) objective, derived term by term. Every term
+# yields a valid lower bound over the box, and for ANY additive decomposition
+# ``f = sum_k g_k`` we have ``min f >= sum_k min g_k`` (each ``g_k`` is >= its own
+# box-minimum pointwise), so the sum is a valid global lower bound — soundness
+# does NOT require the supports to be disjoint. Recognized shapes:
+#   * constant terms;
+#   * ``x*exp(x)`` (global inf ``-1/e``; the loss-sign case needs a finite box);
+#   * ``cos(integer-affine)`` — exact enumeration over the small integer domain;
+#   * single-variable polynomials — vertex/critical-point minimization;
+#   * reciprocals ``k/D(x)`` with a provably strictly-positive denominator;
+#   * even powers ``c*(E(x))**n`` of a multivariate base (``>= 0`` for ``c>=0``);
+#   * affine terms (box-vertex minimization).
+# Any unrecognized/unbounded-below term makes the whole bound abstain (``None``),
+# so a fabricated bound is never returned (see the guard regressions in
+# test_amp.py — e.g. ``-x*exp(x)`` on a free box stays unbounded). The engine
+# (uniform_relax.build_uniform_relaxation) consumes this via a sound
+# ``obj_lin >= sep_lb`` cut; see its call site for the validity argument.
+# --------------------------------------------------------------------------- #
+def _finite_bound_or_none(value: Optional[float]) -> Optional[float]:
+    if value is None:
+        return None
+    value = float(value)
+    if not _is_effectively_finite(value):
+        return None
+    return value
+
+
+def _expand_integer_powers_for_relaxation(expr: Expression, model: Model) -> Expression:
+    """Expand small integer powers of affine expressions for existing monomial lifts."""
+
+    def visit(node: Expression) -> Expression:
+        if isinstance(node, BinaryOp):
+            left = visit(node.left)
+            right = visit(node.right)
+            if node.op == "**":
+                exp = _constant_value(right)
+                if exp is not None:
+                    n = int(exp)
+                    if exp == n and 2 <= n <= _MAX_OBJECTIVE_LIFT_POWER:
+                        base = left
+                        product = base
+                        for _ in range(n - 1):
+                            product = BinaryOp("*", product, base)
+                        return distribute_products(product)
+            return distribute_products(BinaryOp(node.op, left, right))
+        if isinstance(node, UnaryOp):
+            return UnaryOp(node.op, visit(node.operand))
+        if isinstance(node, SumExpression):
+            return SumExpression(visit(node.operand), axis=node.axis)
+        if isinstance(node, SumOverExpression):
+            return SumOverExpression([visit(term) for term in node.terms])
+        # Preserve FunctionCall object identity so existing univariate lift maps
+        # keyed by id(expr) remain usable during branch linearization.
+        return node
+
+    return distribute_products(visit(expr))
+
+
+def _expression_lower_bound_for_lift(
+    expr: Expression,
+    model: Model,
+    flat_lb: np.ndarray,
+    flat_ub: np.ndarray,
+) -> Optional[float]:
+    expanded = _expand_integer_powers_for_relaxation(expr, model)
+    lower = _separable_objective_lower_bound(expanded, model, flat_lb, flat_ub)
+    return _finite_bound_or_none(lower)
+
+
+def _expression_upper_bound_for_lift(
+    expr: Expression,
+    model: Model,
+    flat_lb: np.ndarray,
+    flat_ub: np.ndarray,
+) -> Optional[float]:
+    lower_of_negated = _expression_lower_bound_for_lift(
+        UnaryOp("neg", expr),
+        model,
+        flat_lb,
+        flat_ub,
+    )
+    if lower_of_negated is None:
+        return None
+    return -lower_of_negated
+
+
+def _sorted_unique_points(points: list[float]) -> list[float]:
+    """Return sorted points with near-duplicates removed."""
+    unique: list[float] = []
+    for point in sorted(float(p) for p in points):
+        if not unique or abs(point - unique[-1]) > 1e-12:
+            unique.append(point)
+    return unique
+
+
+def _flatten_additive_terms(
+    expr: Expression, scale: float, out: list[tuple[float, Expression]]
+) -> None:
+    if isinstance(expr, BinaryOp) and expr.op == "+":
+        _flatten_additive_terms(expr.left, scale, out)
+        _flatten_additive_terms(expr.right, scale, out)
+        return
+    if isinstance(expr, BinaryOp) and expr.op == "-":
+        _flatten_additive_terms(expr.left, scale, out)
+        _flatten_additive_terms(expr.right, -scale, out)
+        return
+    if isinstance(expr, UnaryOp) and expr.op == "neg":
+        _flatten_additive_terms(expr.operand, -scale, out)
+        return
+    if isinstance(expr, SumOverExpression):
+        for term in expr.terms:
+            _flatten_additive_terms(term, scale, out)
+        return
+    out.append((scale, expr))
+
+
+def _flatten_product_factors(expr: Expression, out: list[Expression]) -> None:
+    if isinstance(expr, BinaryOp) and expr.op == "*":
+        _flatten_product_factors(expr.left, out)
+        _flatten_product_factors(expr.right, out)
+        return
+    out.append(expr)
+
+
+def _monomial_power_term(expr: Expression, model: Model) -> Optional[tuple[int, int]]:
+    flat = _get_flat_index(expr, model)
+    if flat is not None:
+        return flat, 1
+    if isinstance(expr, BinaryOp) and expr.op == "**" and isinstance(expr.right, Constant):
+        base = _get_flat_index(expr.left, model)
+        if base is None:
+            return None
+        exp_val = float(expr.right.value)
+        n_int = int(exp_val)
+        if exp_val == n_int and n_int >= 1:
+            return base, n_int
+    return None
+
+
+def _match_scaled_monomial(expr: Expression, model: Model) -> Optional[tuple[float, int, int]]:
+    factors: list[Expression] = []
+    _flatten_product_factors(expr, factors)
+    scalar = 1.0
+    var_idx: Optional[int] = None
+    power_total = 0
+    for factor in factors:
+        const = _constant_value(factor)
+        if const is not None:
+            scalar *= const
+            continue
+        power_term = _monomial_power_term(factor, model)
+        if power_term is None:
+            return None
+        factor_var, factor_power = power_term
+        if var_idx is None:
+            var_idx = factor_var
+        elif var_idx != factor_var:
+            return None
+        power_total += factor_power
+    if var_idx is None or power_total < 1:
+        return None
+    return scalar, var_idx, power_total
+
+
+def _match_x_exp_product(expr: Expression, model: Model) -> Optional[tuple[float, int]]:
+    factors: list[Expression] = []
+    _flatten_product_factors(expr, factors)
+    scalar = 1.0
+    var_idx: Optional[int] = None
+    exp_arg_idx: Optional[int] = None
+    for factor in factors:
+        const = _constant_value(factor)
+        if const is not None:
+            scalar *= const
+            continue
+        flat = _get_flat_index(factor, model)
+        if flat is not None:
+            if var_idx is not None:
+                return None
+            var_idx = flat
+            continue
+        if isinstance(factor, FunctionCall) and factor.func_name == "exp" and len(factor.args) == 1:
+            arg_idx = _get_flat_index(factor.args[0], model)
+            if arg_idx is None or exp_arg_idx is not None:
+                return None
+            exp_arg_idx = arg_idx
+            continue
+        return None
+    if var_idx is None or exp_arg_idx is None or var_idx != exp_arg_idx:
+        return None
+    return scalar, var_idx
+
+
+def _safe_x_exp_value(x: float) -> Optional[float]:
+    if not np.isfinite(x) or x > _MAX_FINITE_EXP_ARG:
+        return None
+    if x < -745.0:
+        return 0.0
+    return float(x * np.exp(x))
+
+
+def _x_exp_upper_bound(var_idx: int, flat_lb: np.ndarray, flat_ub: np.ndarray) -> Optional[float]:
+    lb = float(flat_lb[var_idx])
+    ub = float(flat_ub[var_idx])
+    if not (_is_effectively_finite(lb) and _is_effectively_finite(ub)):
+        return None
+    values = [_safe_x_exp_value(lb), _safe_x_exp_value(ub)]
+    finite_values = [value for value in values if value is not None and np.isfinite(value)]
+    if len(finite_values) != len(values):
+        return None
+    return max(finite_values)
+
+
+def _is_cos_call(expr: Expression) -> bool:
+    return isinstance(expr, FunctionCall) and expr.func_name == "cos" and len(expr.args) == 1
+
+
+def _flat_variable_types(model: Model) -> list[VarType]:
+    types: list[VarType] = []
+    for var in model._variables:
+        types.extend([var.var_type] * var.size)
+    return types
+
+
+def _integer_domain_values(
+    var_idx: int,
+    flat_types: list[VarType],
+    flat_lb: np.ndarray,
+    flat_ub: np.ndarray,
+) -> Optional[range]:
+    var_type = flat_types[var_idx]
+    if var_type not in (VarType.BINARY, VarType.INTEGER):
+        return None
+    lb_i = float(flat_lb[var_idx])
+    ub_i = float(flat_ub[var_idx])
+    if not (_is_effectively_finite(lb_i) and _is_effectively_finite(ub_i)):
+        return None
+    lo = int(np.ceil(lb_i - 1e-9))
+    hi = int(np.floor(ub_i + 1e-9))
+    if var_type == VarType.BINARY:
+        lo = max(lo, 0)
+        hi = min(hi, 1)
+    if lo > hi:
+        return None
+    return range(lo, hi + 1)
+
+
+def _integer_affine_cos_lower_bound(
+    expr: Expression,
+    scale: float,
+    model: Model,
+    flat_lb: np.ndarray,
+    flat_ub: np.ndarray,
+) -> Optional[float]:
+    """Return exact lower bound for scale*cos(integer-affine expr) on a small box."""
+    if not isinstance(expr, FunctionCall) or expr.func_name != "cos" or len(expr.args) != 1:
+        return None
+    try:
+        coeff, const = _linearize_affine_expr(expr.args[0], model, len(flat_lb))
+    except ValueError:
+        return None
+
+    flat_types = _flat_variable_types(model)
+    entries: list[tuple[float, range]] = []
+    n_values = 1
+    for var_idx, c_i in enumerate(coeff):
+        c = float(c_i)
+        if abs(c) <= 1e-12:
+            continue
+        values = _integer_domain_values(var_idx, flat_types, flat_lb, flat_ub)
+        if values is None:
+            return None
+        n_values *= len(values)
+        if n_values > _MAX_INTEGER_COS_ENUM:
+            return None
+        entries.append((c, values))
+
+    if not entries:
+        value = scale * float(np.cos(const))
+        return value if np.isfinite(value) else None
+
+    best = np.inf
+    for assignment in itertools.product(*(values for _c, values in entries)):
+        arg = float(const)
+        for (c, _values), value in zip(entries, assignment):
+            arg += c * float(value)
+        best = min(best, scale * float(np.cos(arg)))
+    return float(best) if np.isfinite(best) else None
+
+
+def _scaled_affine_lower_bound(
+    expr: Expression,
+    scale: float,
+    model: Model,
+    flat_lb: np.ndarray,
+    flat_ub: np.ndarray,
+) -> Optional[float]:
+    try:
+        coeff, const = _linearize_affine_expr(expr, model, len(flat_lb))
+    except ValueError:
+        return None
+    want_lower = scale >= 0.0
+    bound = float(const)
+    for c_i, lb_i, ub_i in zip(coeff, flat_lb, flat_ub):
+        c = float(c_i)
+        if abs(c) <= 1e-12:
+            continue
+        chosen = float(lb_i) if (c >= 0.0) == want_lower else float(ub_i)
+        if not _is_effectively_finite(chosen):
+            return None
+        bound += c * chosen
+    return scale * bound
+
+
+def _evaluate_polynomial(coeffs: dict[int, float], x: float) -> Optional[float]:
+    max_power = max(coeffs)
+    value = 0.0
+    for power in range(max_power, -1, -1):
+        value = value * x + float(coeffs.get(power, 0.0))
+        if not np.isfinite(value):
+            return None
+    return float(value)
+
+
+def _polynomial_lower_bound(
+    coeffs: dict[int, float],
+    lb: float,
+    ub: float,
+) -> Optional[float]:
+    clean = {power: coeff for power, coeff in coeffs.items() if abs(coeff) > 1e-12}
+    if not clean:
+        return 0.0
+    max_power = max(clean)
+    if max_power == 0:
+        return float(clean[0])
+
+    leading = float(clean[max_power])
+    lo_unbounded = not _is_effectively_finite(lb)
+    hi_unbounded = not _is_effectively_finite(ub)
+    if hi_unbounded and leading < 0.0:
+        return None
+    if lo_unbounded:
+        if max_power % 2 == 0 and leading < 0.0:
+            return None
+        if max_power % 2 == 1 and leading > 0.0:
+            return None
+
+    candidates: list[float] = []
+    if not lo_unbounded:
+        candidates.append(float(lb))
+    if not hi_unbounded:
+        candidates.append(float(ub))
+
+    deriv_coeffs = [power * clean.get(power, 0.0) for power in range(max_power, 0, -1)]
+    roots = np.roots(deriv_coeffs) if deriv_coeffs else np.array([])
+    for root in roots:
+        if abs(float(np.imag(root))) > 1e-9:
+            continue
+        x = float(np.real(root))
+        if (lo_unbounded or x >= lb - 1e-9) and (hi_unbounded or x <= ub + 1e-9):
+            candidates.append(x)
+
+    values: list[float] = []
+    for x in _sorted_unique_points(candidates):
+        value = _evaluate_polynomial(clean, x)
+        if value is not None and np.isfinite(value):
+            values.append(value)
+    if not values:
+        return None
+    return min(values)
+
+
+def _reciprocal_term_lower_bound(
+    scaled_numerator: float,
+    denominator: Expression,
+    model: Model,
+    flat_lb: np.ndarray,
+    flat_ub: np.ndarray,
+) -> Optional[float]:
+    """Rigorous constant lower bound for ``scaled_numerator / denominator(x)``.
+
+    Encloses ``denominator`` over the box via the same separable-polynomial
+    machinery used for objective lifts (``_expression_lower_bound_for_lift`` /
+    ``_expression_upper_bound_for_lift``), which recovers ``D_lo``/``D_hi`` from a
+    distributed quadratic by per-variable vertex minimization — crucially, this
+    works on the live solve's already-distributed denominator (e.g. ``0.1 +
+    x0**2 - 8*x0 + 16 + ...``) where a naive interval evaluation of ``x*x`` on an
+    unbounded box would collapse to ``[-inf, inf]``. When the enclosure is
+    strictly positive (``D_lo > 0``), ``1/D`` is decreasing in ``D`` so the term
+    ``k/D`` is minimized at ``D_hi`` when ``k > 0`` and at ``D_lo`` when
+    ``k < 0``. Returns ``None`` (caller abstains) if the denominator cannot be
+    proven strictly positive or the bound is not finite.
+    """
+    if abs(scaled_numerator) <= 1e-12:
+        return 0.0
+    denom_lo = _expression_lower_bound_for_lift(denominator, model, flat_lb, flat_ub)
+    denom_hi = _expression_upper_bound_for_lift(denominator, model, flat_lb, flat_ub)
+    # A strictly-positive, finite lower end is required for a sound reciprocal;
+    # _expression_lower_bound_for_lift returns None when it cannot prove one.
+    if denom_lo is None or not np.isfinite(denom_lo) or denom_lo <= 1e-12:
+        return None
+    if scaled_numerator > 0.0:
+        # k/D minimized at the largest D; an unbounded/unknown D_hi drives the
+        # positive term toward 0 from above, which is still a valid lower bound.
+        bound = (
+            0.0
+            if (denom_hi is None or not np.isfinite(denom_hi))
+            else (scaled_numerator / denom_hi)
+        )
+    else:
+        bound = scaled_numerator / denom_lo
+    if not np.isfinite(bound):
+        return None
+    return float(bound)
+
+
+def _match_scaled_even_power(
+    term: Expression, scale: float
+) -> Optional[tuple[float, Expression, int]]:
+    """Match ``scale * c * (base)**n`` with ``n`` a positive even integer.
+
+    Returns ``(coeff, base, n)`` where ``coeff`` folds ``scale`` and every
+    constant factor of the product. Exactly one even-power factor is allowed;
+    any other non-constant factor (or a second power) disqualifies the match.
+    """
+    factors: list[Expression] = []
+    _flatten_product_factors(term, factors)
+    coeff = scale
+    base: Optional[Expression] = None
+    power = 0
+    for factor in factors:
+        const = _constant_value(factor)
+        if const is not None:
+            coeff *= const
+            continue
+        if (
+            isinstance(factor, BinaryOp)
+            and factor.op == "**"
+            and isinstance(factor.right, Constant)
+        ):
+            exp_val = float(factor.right.value)
+            n_int = int(round(exp_val))
+            if abs(exp_val - n_int) < 1e-12 and n_int >= 2 and n_int % 2 == 0:
+                if base is not None:
+                    return None
+                base = factor.left
+                power = n_int
+                continue
+        return None
+    if base is None:
+        return None
+    return coeff, base, power
+
+
+def _count_distinct_scalar_refs(expr: Expression, model: Model) -> int:
+    """Count distinct scalar variable columns referenced by ``expr``.
+
+    Used to gate the even-power lower bound to genuinely multivariate bases:
+    a single-variable square is handled more tightly by the distribute /
+    polynomial path (which combines it with any linear term in the same
+    variable), so only multivariate bases — which that path cannot bound at
+    all — are routed through the sum-of-squares relaxation.
+    """
+    seen: set = set()
+
+    def visit(e: Expression) -> None:
+        idx = _get_flat_index(e, model)
+        if idx is not None:
+            seen.add(idx)
+            return
+        if isinstance(e, Variable):
+            seen.add(("var", id(e)))
+            return
+        if isinstance(e, IndexExpression):
+            visit(e.base)
+            return
+        if isinstance(e, BinaryOp):
+            visit(e.left)
+            visit(e.right)
+        elif isinstance(e, UnaryOp):
+            visit(e.operand)
+        elif isinstance(e, FunctionCall):
+            for a in e.args:
+                visit(a)
+        elif isinstance(e, SumExpression):
+            visit(e.operand)
+        elif isinstance(e, SumOverExpression):
+            for t in e.terms:
+                visit(t)
+
+    visit(expr)
+    return len(seen)
+
+
+def _even_power_term_lower_bound(
+    coeff: float,
+    base: Expression,
+    n: int,
+    model: Model,
+    flat_lb: np.ndarray,
+    flat_ub: np.ndarray,
+) -> Optional[float]:
+    """Rigorous constant lower bound for ``coeff * base(x)**n`` with ``n`` even.
+
+    ``base**n >= 0`` always, so for ``coeff >= 0`` the term is nonnegative — a
+    valid lower bound of ``0`` even when ``base`` cannot be enclosed. When the
+    box yields a finite enclosure ``base in [bl, bh]`` the bound tightens to the
+    vertex minimum of ``base**n`` (``0`` if the interval straddles zero, else
+    ``min(|bl|, |bh|)**n``). For ``coeff < 0`` the term is maximized in
+    magnitude at the larger ``|base|`` endpoint, so a finite enclosure is
+    required; ``None`` (caller abstains) when it is unavailable.
+    """
+    bl = _expression_lower_bound_for_lift(base, model, flat_lb, flat_ub)
+    bh = _expression_upper_bound_for_lift(base, model, flat_lb, flat_ub)
+    if coeff >= 0.0:
+        if bl is None or bh is None or not (np.isfinite(bl) and np.isfinite(bh)):
+            return 0.0
+        if bl <= 0.0 <= bh:
+            pow_min = 0.0
+        else:
+            pow_min = min(abs(bl), abs(bh)) ** n
+        return float(coeff * pow_min)
+    if bl is None or bh is None or not (np.isfinite(bl) and np.isfinite(bh)):
+        return None
+    pow_max = max(abs(bl), abs(bh)) ** n
+    bound = coeff * pow_max
+    if not np.isfinite(bound):
+        return None
+    return float(bound)
+
+
+def _separable_objective_lower_bound(
+    expr: Expression,
+    model: Model,
+    flat_lb: np.ndarray,
+    flat_ub: np.ndarray,
+) -> Optional[float]:
+    """Compute a conservative constant lower bound for simple separable objectives.
+
+    ``expr`` is flattened additively and matched term-by-term.  Reciprocal terms
+    ``k / D(x)`` are matched on the term's ORIGINAL (un-distributed) structure so
+    the denominator's square/power shape survives for a sound interval enclosure;
+    every other term is distributed individually before the polynomial / affine
+    matchers run (the union over terms equals distributing the whole expression,
+    so non-reciprocal behavior is unchanged).
+    """
+    terms: list[tuple[float, Expression]] = []
+    _flatten_additive_terms(expr, 1.0, terms)
+
+    total = 0.0
+    polynomial_terms: dict[int, dict[int, float]] = {}
+
+    def _accumulate_simple_term(scale: float, term: Expression) -> bool:
+        """Fold one already-distributed, non-reciprocal term into the running bound.
+
+        Returns ``False`` (caller abstains entirely) when the term is not one of
+        the recognized separable shapes.
+        """
+        nonlocal total
+        if abs(scale) <= 1e-12:
+            return True
+        const = _constant_value(term)
+        if const is not None:
+            total += scale * const
+            return True
+
+        x_exp = _match_x_exp_product(term, model)
+        if x_exp is not None:
+            scalar, var_idx = x_exp
+            term_scale = scale * scalar
+            if abs(term_scale) <= 1e-12:
+                return True
+            if term_scale > 0.0:
+                total += term_scale * (-1.0 / np.e)
+                return True
+            upper = _x_exp_upper_bound(var_idx, flat_lb, flat_ub)
+            if upper is None:
+                return False
+            total += term_scale * upper
+            return True
+
+        if _is_cos_call(term):
+            integer_lb = _integer_affine_cos_lower_bound(term, scale, model, flat_lb, flat_ub)
+            total += integer_lb if integer_lb is not None else -abs(scale)
+            return True
+
+        monomial = _match_scaled_monomial(term, model)
+        if monomial is not None:
+            scalar, var_idx, power = monomial
+            polynomial_terms.setdefault(var_idx, {})
+            polynomial_terms[var_idx][power] = (
+                polynomial_terms[var_idx].get(power, 0.0) + scale * scalar
+            )
+            return True
+
+        affine_bound = _scaled_affine_lower_bound(term, scale, model, flat_lb, flat_ub)
+        if affine_bound is None:
+            return False
+        total += affine_bound
+        return True
+
+    for scale, term in terms:
+        if abs(scale) <= 1e-12:
+            continue
+
+        # Reciprocal term ``k / D(x)`` with a strictly-positive denominator (e.g.
+        # ex8_1_6's ``-1/(0.1 + (x0-4)**2 + (x1-4)**2)``). The MILP linearizer
+        # cannot relax a non-constant division, so without this the whole
+        # objective is dropped and AMP can never certify. A rigorous interval
+        # enclosure ``D in [D_lo, D_hi]`` with ``D_lo > 0`` yields a valid
+        # constant lower bound for the term: ``k/D_hi`` when ``k > 0`` else
+        # ``k/D_lo`` (``1/D`` is decreasing in ``D``). The bound tightens as B&B
+        # branching shrinks the box, eventually enabling certification. Matched
+        # on the un-distributed term so ``D``'s ``(x-a)**2`` shape survives for a
+        # tight interval enclosure (distribution would expand it to a polynomial
+        # whose naive interval enclosure is uselessly loose on a wide box).
+        recip = _match_scaled_constant_division(term, scale)
+        if recip is not None:
+            recip_bound = _reciprocal_term_lower_bound(recip[0], recip[1], model, flat_lb, flat_ub)
+            if recip_bound is None:
+                return None
+            total += recip_bound
+            continue
+
+        # Even-power term ``c * (E(x))**n`` (n even) with a *multivariate* base,
+        # e.g. Rosenbrock's ``100 * (x1 - x0**2)**2``. Distributing it yields a
+        # bilinear/multivariate polynomial whose cross terms no single-variable
+        # matcher accepts, so the whole objective would be dropped. But a square
+        # is nonnegative regardless of its argument's structure: for ``c >= 0``
+        # the term is ``>= 0`` (tightened to the vertex minimum of ``E**n`` when
+        # the box encloses ``E``). Recognizing it on the un-distributed term lets
+        # AMP certify sum-of-squares objectives at the root. Single-variable
+        # bases are left to the polynomial path, which combines them with any
+        # linear term in the same variable for a strictly tighter bound.
+        even_pow = _match_scaled_even_power(term, scale)
+        if even_pow is not None and _count_distinct_scalar_refs(even_pow[1], model) >= 2:
+            coeff, base, power = even_pow
+            ep_bound = _even_power_term_lower_bound(coeff, base, power, model, flat_lb, flat_ub)
+            if ep_bound is None:
+                return None
+            total += ep_bound
+            continue
+
+        # Distribute this single term and fold each resulting sub-term through the
+        # simple-shape matchers (polynomial path needs the expanded form).
+        sub_terms: list[tuple[float, Expression]] = []
+        _flatten_additive_terms(distribute_products(term), scale, sub_terms)
+        for sub_scale, sub_term in sub_terms:
+            if not _accumulate_simple_term(sub_scale, sub_term):
+                return None
+
+    for var_idx, coeffs in polynomial_terms.items():
+        lower = _polynomial_lower_bound(coeffs, float(flat_lb[var_idx]), float(flat_ub[var_idx]))
+        if lower is None:
+            return None
+        total += lower
+
+    if not np.isfinite(total):
+        return None
+    return float(total)
