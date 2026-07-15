@@ -243,26 +243,19 @@ _CUTOVER_DEFERRED_TESTS: dict[str, str] = {
     #   simplex spuriously report ``unbounded`` on a provably-bounded objective —
     #   a sound global lower bound (test_nvs22_objective_term_lifts_to_sound_root_bound).
     # Bucket 2 is CLOSED.
-    # ── test_incremental_monomial.py / test_incremental_mccormick_node.py —
-    #    federation MACHINERY: incremental per-node McCormick patching. The engine
-    #    does one static factorable build per node; the incremental fast-path is
-    #    inactive by construction (returns None / validate() False). ──
-    "test_monomial_patch_matches_cold_build": (
-        "engine bypasses the incremental McCormick node-patch path (single static "
-        "build per node); incremental validate() inactive by construction"
-    ),
-    "test_cube_negative_is_concave_and_covered": (
-        "engine bypasses the incremental McCormick node-patch validation path"
-    ),
-    "test_incremental_active_for_integer_qcqp": (
-        "engine bypasses the incremental McCormick node-patch path (inactive)"
-    ),
-    "test_incremental_infeasible_node_pruned_without_cold_rebuild": (
-        "engine bypasses the incremental McCormick node-patch path (inactive)"
-    ),
-    "test_incremental_node_bound_is_sound_and_matches_cold": (
-        "engine bypasses the incremental McCormick node-patch path (inactive)"
-    ),
+    # ── Bucket 3 (incremental per-node McCormick caching) — RECOVERED ──
+    # The incremental patch (incremental_mccormick.py) now reproduces the uniform
+    # engine's per-atom envelope row-for-row: the monomial hull is the 4-row
+    # secant+3-tangent form ``_emit_1d`` emits, affine squares ``(c·x+d)**2`` are
+    # registered + patched, and the incremental reference build skips the two
+    # box-dependent OBJECTIVE-level tightenings the closed-form patch cannot
+    # regenerate (the separable floor and the composite convex lift) — both only
+    # loosen the fast-path bound, never invent one. Degenerate (fixed-variable)
+    # boxes are NaN-guarded. This recovered
+    # test_monomial_patch_matches_cold_build, test_cube_negative_is_concave_and_covered,
+    # test_incremental_active_for_integer_qcqp,
+    # test_incremental_infeasible_node_pruned_without_cold_rebuild, and
+    # test_incremental_node_bound_is_sound_and_matches_cold.
     # ── cut-pool / LP-spatial / incremental machinery the engine bypasses ──
     "test_serial_convex_iteration_limit_does_not_certify": (
         "engine bypasses the serial convex-iteration cut machinery"

@@ -203,6 +203,10 @@ class UniformRelaxation:
     # lifted to a single aux; the OA tangents added lazily at the LP point are
     # global under-/over-estimators (sound, never cut a feasible point).
     composite_multivar_specs: list
+    # Affine squares ``(c·x_j+d)**2`` -> ``(var, aux) -> (coeff, const)`` (issue #640
+    # Bucket 3), consumed by the incremental McCormick patch to regenerate their
+    # box-dependent envelope rows in closed form.
+    affine_square_map: dict = dataclasses.field(default_factory=dict)
     # Finite-domain trig-square selector tables (issue #640 Bucket 1). Consumed by
     # the delegate to populate the ``finite_domain_trig_square_tables`` varmap family.
     finite_domain_trig_square_tables: list = dataclasses.field(default_factory=list)
@@ -533,8 +537,15 @@ class _Builder:
         flat_ub: np.ndarray,
         analysis: "Optional[_ModelAnalysisCache]" = None,
         track_aux_exprs: bool = False,
+        skip_convex_lift: bool = False,
     ):
         self.model = model
+        # Skip the composite convex/concave OA lift (#640 Bucket 3): it lifts the
+        # whole convex node to a box-dependent epigraph aux the incremental McCormick
+        # patch cannot regenerate. Skipping it keeps the objective as the plain sum
+        # of its atom columns (same base-LP bound; only the lazy Kelley tangents are
+        # forgone), so the fast-path relaxation stays patchable and sound.
+        self.skip_convex_lift = bool(skip_convex_lift)
         # Box-independent per-model analysis (canonical DAG, reconstructed exprs,
         # DCP verdicts, compiled fns, curvature certs) — computed once, read here.
         # Falls back to the model's cache when constructed standalone (tests).
@@ -560,6 +571,10 @@ class _Builder:
         self.trilinear_map: dict[tuple[int, int, int], int] = {}
         self.multilinear_map: dict[tuple[int, ...], int] = {}
         self.univariate_square_map: dict[tuple[int, int], int] = {}
+        # Affine squares ``(c·x_j + d)**2`` -> aux (issue #640 Bucket 3): keyed
+        # ``(var, aux) -> (coeff, const)`` so the incremental McCormick patch can
+        # regenerate the box-dependent envelope in closed form.
+        self.affine_square_map: dict[tuple[int, int], tuple[float, float]] = {}
         # Composite convex/concave lifts (issue #632 P2): each certified-convex or
         # -concave multivariate nonlinear node the engine would otherwise decompose
         # loosely is lifted to a single aux and registered here so the existing
@@ -921,7 +936,7 @@ class _Builder:
         cached = self._rep.get(id(node))
         if cached is not None:
             return cached
-        out = self._try_convex_lift(node)
+        out = None if self.skip_convex_lift else self._try_convex_lift(node)
         if out is None:
             out = self._rep_impl(node)
         self._rep[id(node)] = out
@@ -1696,6 +1711,15 @@ def _build_power(ctx: _Builder, node: CNode, w: int) -> Envelope:
     i = ctx.single_orig_col(lt)
     if i is not None and float(p).is_integer() and int(p) >= 2:
         ctx.register_power(i, int(p), w)
+    elif p == 2.0 and tight and curv == "convex":
+        # Affine square ``(c·x_j + d)**2`` (single original, not bare): register the
+        # affine form so the incremental McCormick patch can regenerate its
+        # box-dependent 4-row envelope (#640 Bucket 3). ``t**2`` is convex for every
+        # ``t``, so it is the same secant + 3-tangent hull on any (finite) box —
+        # unlike an odd/higher monomial, no root-sign gating is needed.
+        items = [(j, c) for j, c in lt.coeffs.items() if c != 0.0]
+        if len(items) == 1 and 0 <= items[0][0] < ctx.n_orig:
+            ctx.affine_square_map[items[0][0], w] = (float(items[0][1]), float(lt.const))
     return Envelope(rows=[], tight=tight)
 
 
@@ -2453,11 +2477,11 @@ def _emit_quadratic_rlt(
             prod_map: dict[tuple[int, ...], int] = {}
             ok = True
             for req in required:
-                col: Optional[int] = _ensure(req)
-                if col is None:
+                rc = _ensure(req)
+                if rc is None:
                     ok = False
                     break
-                prod_map[req] = col
+                prod_map[req] = rc
             if not ok:
                 continue
             specs.append((quad, lin, const, mm, ctx.col_lb[mm], ctx.col_ub[mm], sense, prod_map))
@@ -2493,6 +2517,8 @@ def build_uniform_relaxation(
     box: Optional[tuple[np.ndarray, np.ndarray]] = None,
     *,
     rlt_quad: bool = False,
+    skip_separable_floor: bool = False,
+    skip_convex_lift: bool = False,
 ) -> UniformRelaxation:
     """Build the uniform factorable relaxation of ``model`` over ``box``.
 
@@ -2539,7 +2565,7 @@ def build_uniform_relaxation(
     # expressions, DCP verdicts, compiled value/grad fns, and curvature certificates.
     analysis = _get_analysis_cache(model)
     dag: CanonicalDAG = analysis.dag
-    ctx = _Builder(model, flat_lb, flat_ub, analysis)
+    ctx = _Builder(model, flat_lb, flat_ub, analysis, skip_convex_lift=skip_convex_lift)
 
     # Objective -> c, obj_offset (minimize convention; maximize is negated so the
     # reported LP bound is a valid lower bound on the minimize-equivalent, matching
@@ -2626,7 +2652,12 @@ def build_uniform_relaxation(
     # a valid lower bound (>= before, <= true optimum), and — being a genuine LP row
     # rather than a free-column simplex quirk — it makes the objective certifiably
     # bounded, so ``obj_bound_valid`` becomes True.
-    if dag.objective is not None and model._objective is not None and obj_lin.coeffs:
+    if (
+        not skip_separable_floor
+        and dag.objective is not None
+        and model._objective is not None
+        and obj_lin.coeffs
+    ):
         obj_expr = model._objective.expression
         min_equiv_expr = (
             UnaryOp("neg", obj_expr)
@@ -2699,6 +2730,7 @@ def build_uniform_relaxation(
         multilinear_map=dict(ctx.multilinear_map),
         univariate_square_map=dict(ctx.univariate_square_map),
         composite_multivar_specs=list(ctx.composite_multivar_specs),
+        affine_square_map=dict(ctx.affine_square_map),
         finite_domain_trig_square_tables=list(ctx.finite_domain_trig_square_tables),
         integrality=list(ctx.integrality),
     )

@@ -262,6 +262,9 @@ class MilpRelaxationModel:
         self._obj_offset = obj_offset
         self._integrality = integrality
         self._objective_bound_valid = objective_bound_valid
+        # Rigorous box-interval objective floor (#640 Bucket 2, nvs22); set by
+        # ``build_uniform_relaxation``. ``None`` unless a finite floor was computed.
+        self._objective_floor: Optional[float] = None
         # Warm-start state for the pure-LP simplex fast path (cutting-plane loop):
         # the previous solve's optimal basis and the (structural-cols, rows) it was
         # produced at, so the next ``.solve()`` on the SAME columns with rows only
@@ -1603,6 +1606,8 @@ def _uniform_relaxation_delegate(
     n_orig: int,
     convhull_mode: str,
     rlt_level1: bool = False,
+    skip_separable_floor: bool = False,
+    skip_convex_lift: bool = False,
 ) -> tuple["MilpRelaxationModel", dict]:
     """Build the default relaxation through the uniform factorable engine (#632).
 
@@ -1622,7 +1627,13 @@ def _uniform_relaxation_delegate(
     # engaged level-1 RLT AND ``DISCOPT_RLT_QUAD`` is on (default on). Off => the
     # base build is byte-identical to before.
     rlt_quad = bool(rlt_level1 and _tuning().rlt_quad)
-    rel = build_uniform_relaxation(model, box=(flat_lb, flat_ub), rlt_quad=rlt_quad)
+    rel = build_uniform_relaxation(
+        model,
+        box=(flat_lb, flat_ub),
+        rlt_quad=rlt_quad,
+        skip_separable_floor=skip_separable_floor,
+        skip_convex_lift=skip_convex_lift,
+    )
     milp = rel.model
     n_total = int(np.size(milp._c))
     flags = np.zeros(n_total, dtype=np.int32)
@@ -1655,6 +1666,9 @@ def _uniform_relaxation_delegate(
     vm["trilinear"] = dict(rel.trilinear_map)
     vm["multilinear"] = dict(rel.multilinear_map)
     vm["univariate_square"] = dict(rel.univariate_square_map)
+    # Affine squares ``(c·x_j+d)**2`` (#640 Bucket 3): ``(var, aux) -> (coeff, const)``
+    # for the incremental McCormick patch's closed-form envelope regeneration.
+    vm["affine_square"] = dict(rel.affine_square_map)
     # Composite convex/concave lifts (issue #632 P2): each certified-convex/-concave
     # multivariate node the engine lifted to a single aux is registered here so the
     # existing ``MccormickLPRelaxer._separate_convex`` outer-approximation (Kelley)
@@ -1690,6 +1704,8 @@ def build_milp_relaxation(
     bound_override: Optional[tuple[np.ndarray, np.ndarray]] = None,
     superposition: bool = False,
     rlt_level1: bool = False,
+    skip_separable_floor: bool = False,
+    skip_convex_lift: bool = False,
 ) -> tuple["MilpRelaxationModel", dict]:
     """Build a MILP relaxation with piecewise McCormick for bilinear/monomial terms.
 
@@ -1771,7 +1787,14 @@ def build_milp_relaxation(
     # engine is a valid outer relaxation by construction; product-side tightness
     # parity is the deferred polish pass.
     return _uniform_relaxation_delegate(
-        model, flat_lb, flat_ub, n_orig, convhull_mode, rlt_level1=rlt_level1
+        model,
+        flat_lb,
+        flat_ub,
+        n_orig,
+        convhull_mode,
+        rlt_level1=rlt_level1,
+        skip_separable_floor=skip_separable_floor,
+        skip_convex_lift=skip_convex_lift,
     )
 
 

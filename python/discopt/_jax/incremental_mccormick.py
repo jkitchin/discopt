@@ -66,31 +66,44 @@ def _square_aux_bounds(li, ui):
 
 
 def _monomial_rows(li, ui, p):
-    """The 3 envelope rows for ``s = x**p`` over a *sign-definite* box ``[li,ui]``
-    (2 endpoint tangents + 1 secant), each ``(coeff_on_x, coeff_on_s, rhs)`` of an
-    ``... <= rhs`` row. Generalizes :func:`_square_rows` (p=2) to any integer
-    power ``p >= 2``.
+    """The 4 envelope rows for ``s = x**p`` over a *sign-definite* box ``[li,ui]``
+    (secant + tangents at ``li``, the midpoint, and ``ui``), each
+    ``(coeff_on_x, coeff_on_s, rhs)`` of an ``... <= rhs`` row. Generalizes
+    :func:`_square_rows` (p=2) to any integer power ``p >= 2``.
 
     On a sign-definite box ``x**p`` is monotone and single-convexity: convex when
     ``p`` is even or ``li >= 0``; concave when ``p`` is odd and ``ui <= 0``. In the
-    convex case the two endpoint tangents underestimate and the secant
-    overestimates (exactly the ``x**2`` pattern); in the concave case the roles
-    flip. Reproduces ``build_milp_relaxation`` row-for-row (validated).
+    convex case the three tangents underestimate and the secant overestimates; in
+    the concave case the roles flip. Matches the uniform engine's ``_emit_1d``
+    envelope exactly — which underestimates a convex atom with tangents at both
+    endpoints AND the box midpoint (a tighter, 3-tangent hull), so the closed-form
+    patch must emit the same midpoint tangent to reproduce the cold build
+    row-for-row (validated).
     """
-    fl, fu = li**p, ui**p
-    dfl, dfu = p * li ** (p - 1), p * ui ** (p - 1)
-    slope = (fu - fl) / (ui - li)
+    mid = 0.5 * (li + ui)
+    fl, fm, fu = li**p, mid**p, ui**p
+    dfl, dfm, dfu = p * li ** (p - 1), p * mid ** (p - 1), p * ui ** (p - 1)
+    # Degenerate box (variable fixed by integer branching, li==ui): the exact value
+    # is fl and the secant slope is 0/0. Use the endpoint derivative so the "secant"
+    # collapses to the tangent at the pinned point (s <= fl at x=li, matching the
+    # tangent's s >= fl) — sound and NaN-free. Guarded on EXACT zero width only: for
+    # ANY positive width the true secant is the sound convex overestimator, whereas
+    # ``dfl`` would under-cut it. Mirrors the cold build, which emits no envelope
+    # rows at a fixed variable and pins the aux via its [fl,fl] bound.
+    slope = dfl if ui <= li else (fu - fl) / (ui - li)
     convex = (p % 2 == 0) or (li >= 0.0)
     if convex:
         return [
-            (dfl, -1.0, dfl * li - fl),  # s >= f'(li)*x - (f'(li)*li - f(li))  tangent at li
+            (dfl, -1.0, dfl * li - fl),  # tangent at li:  s >= f'(li)*(x-li)+f(li)
+            (dfm, -1.0, dfm * mid - fm),  # tangent at midpoint
             (dfu, -1.0, dfu * ui - fu),  # tangent at ui
-            (-slope, 1.0, fl - slope * li),  # s <= secant  (overestimator)
+            (-slope, 1.0, fl - slope * li),  # secant (overestimator): s <= ...
         ]
     return [
-        (-dfl, 1.0, fl - dfl * li),  # s <= tangent at li  (overestimator)
+        (-dfl, 1.0, fl - dfl * li),  # tangent at li (overestimator): s <= ...
+        (-dfm, 1.0, fm - dfm * mid),  # tangent at midpoint
         (-dfu, 1.0, fu - dfu * ui),  # tangent at ui
-        (slope, -1.0, slope * li - fl),  # s >= secant  (underestimator)
+        (slope, -1.0, slope * li - fl),  # secant (underestimator): s >= ...
     ]
 
 
@@ -98,6 +111,38 @@ def _monomial_aux_bounds(li, ui, p):
     """min/max of ``x**p`` over a sign-definite ``[li,ui]`` (monotone there)."""
     a, b = li**p, ui**p
     return (a, b) if a <= b else (b, a)
+
+
+def _affine_square_rows(coeff, const, li, ui):
+    """The 4 envelope rows for ``w = (coeff*x + const)**2`` over ``x in [li,ui]``,
+    each ``(coeff_on_x, coeff_on_w, rhs)`` of an ``... <= rhs`` row.
+
+    Let ``t = coeff*x + const`` range over ``[t_lo, t_hi]``. ``t**2`` is convex for
+    every ``t`` (no sign gating), so the hull is the secant overestimator plus
+    tangents at ``t_lo``, the midpoint, and ``t_hi`` — matching the uniform engine's
+    ``_emit_1d`` on the affine base LinForm exactly (validated)."""
+    tl, tu = coeff * li + const, coeff * ui + const
+    t_lo, t_hi = (tl, tu) if tl <= tu else (tu, tl)
+    mid = 0.5 * (t_lo + t_hi)
+    # t_hi + t_lo == (t_hi**2 - t_lo**2)/(t_hi - t_lo); at a degenerate base box
+    # (t_lo == t_hi) it already equals 2*t_lo == f'(t_lo), so no divide-by-zero
+    # guard is needed here (unlike the general power secant).
+    slope = t_hi + t_lo
+    a = t_lo * t_lo - slope * t_lo
+    return [
+        (-slope * coeff, 1.0, a + slope * const),  # secant (overestimator): w <= ...
+        (2.0 * t_lo * coeff, -1.0, t_lo * t_lo - 2.0 * t_lo * const),  # tangent at t_lo
+        (2.0 * mid * coeff, -1.0, mid * mid - 2.0 * mid * const),  # tangent at midpoint
+        (2.0 * t_hi * coeff, -1.0, t_hi * t_hi - 2.0 * t_hi * const),  # tangent at t_hi
+    ]
+
+
+def _affine_square_aux_bounds(coeff, const, li, ui):
+    """min/max of ``(coeff*x+const)**2`` over ``x in [li,ui]`` (0 if the base
+    straddles zero)."""
+    tl, tu = coeff * li + const, coeff * ui + const
+    t_lo, t_hi = (tl, tu) if tl <= tu else (tu, tl)
+    return _square_aux_bounds(t_lo, t_hi)
 
 
 class IncrementalMcCormickLP:
@@ -120,8 +165,19 @@ class IncrementalMcCormickLP:
         from discopt._jax.discretization import DiscretizationState
         from discopt._jax.milp_relaxation import build_milp_relaxation
 
+        # Skip the separable objective-floor cut (#640 Bucket 1): it is a
+        # box-dependent OBJECTIVE row (support = the objective columns) that the
+        # closed-form patch does not regenerate, so including it would break the
+        # row-for-row match. Omitting it only *loosens* the incremental relaxation
+        # (a valid lower bound is dropped, never invented), so the fast-path bound
+        # stays sound — and never tighter than the cold path, which keeps it.
         relax, info = build_milp_relaxation(
-            self.model, self.terms, DiscretizationState(), bound_override=(lb, ub)
+            self.model,
+            self.terms,
+            DiscretizationState(),
+            bound_override=(lb, ub),
+            skip_separable_floor=True,
+            skip_convex_lift=True,
         )
         if not relax._objective_bound_valid or relax._A_ub is None:
             raise ValueError("relaxation has no valid bound / no rows")
@@ -161,6 +217,7 @@ class IncrementalMcCormickLP:
         self.base_bounds = bnds.copy()
         self.bilinear = dict(info.get("bilinear", {}))
         self.monomial = dict(info.get("monomial", {}))  # any integer power p >= 2
+        self.affine_square = dict(info.get("affine_square", {}))  # (var,aux)->(coeff,const)
 
         # C-44: per-column identity vector for this fixed lifted layout. The
         # incremental structure never rebuilds columns (``_patch`` only rewrites
@@ -189,14 +246,23 @@ class IncrementalMcCormickLP:
             if self._root_sign[i] == 0:
                 raise ValueError(f"monomial x_{i}^{p}: root box spans zero (unmappable)")
             rows = [k for k in range(A.shape[0]) if a in supp[k] and supp[k] <= {i, a}]
-            if len(rows) != 3:
-                raise ValueError(f"monomial x_{i}^{p} -> {len(rows)} rows, expected 3")
+            if len(rows) != 4:
+                raise ValueError(f"monomial x_{i}^{p} -> {len(rows)} rows, expected 4")
             self.mono_rows[(i, a, p)] = rows
+        # affine square (c*x_j + d)**2 -> aux: 4 secant/tangent rows over {j, aux}.
+        self.affsq_rows = {}
+        for (j, a), (coeff, const) in self.affine_square.items():
+            rows = [k for k in range(A.shape[0]) if a in supp[k] and supp[k] <= {j, a}]
+            if len(rows) != 4:
+                raise ValueError(f"affine square ({j},{a}) -> {len(rows)} rows, expected 4")
+            self.affsq_rows[(j, a, coeff, const)] = rows
         # the union of all product rows must be exactly the box-dependent rows
         self._prod_rows = set()
         for rs in self.bilin_rows.values():
             self._prod_rows |= set(rs)
         for rs in self.mono_rows.values():
+            self._prod_rows |= set(rs)
+        for rs in self.affsq_rows.values():
             self._prod_rows |= set(rs)
 
     # -- per-node patch ---------------------------------------------------- #
@@ -225,6 +291,14 @@ class IncrementalMcCormickLP:
                 A[k, a] = cs
                 b[k] = rhs
             bounds[a, 0], bounds[a, 1] = _monomial_aux_bounds(li, ui, p)
+        for (j, a, coeff, const), rows in self.affsq_rows.items():
+            li, ui = lb[j], ub[j]
+            for k, (cx, cw, rhs) in zip(rows, _affine_square_rows(coeff, const, li, ui)):
+                A[k] = 0.0
+                A[k, j] = cx
+                A[k, a] = cw
+                b[k] = rhs
+            bounds[a, 0], bounds[a, 1] = _affine_square_aux_bounds(coeff, const, li, ui)
         return A, b, bounds
 
     # -- soundness gate ---------------------------------------------------- #
