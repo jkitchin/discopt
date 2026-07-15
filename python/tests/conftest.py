@@ -226,11 +226,14 @@ _CUTOVER_DEFERRED_TESTS: dict[str, str] = {
     #     converted to assert the SOUND-but-looser contract the uniform engine
     #     produces (valid bound + envelope/constraint enforced), since the deleted
     #     piecewise-MILP tables are intentionally not reproduced (issue #640 DoD).
-    # ── test_bucket2_sound_bounds.py — whole-function product-side deferrals ──
-    "test_ex1252_relaxation_equilibration_conditions_and_preserves_bound": (
-        "S8-deferred: the RLT ill-conditioning/equilibration path is not exercised "
-        "on the engine build (product rows not emitted for this shape; sound)"
-    ),
+    # ── Bucket 2 (RLT/PSD/product-side) — PARTIALLY RECOVERED ──
+    # Recovered by registering the PURE product column for a SCALED bilinear/product
+    # in uniform_relax._build_product (the RLT/PSD separators require the column to
+    # equal x_i·x_j, not scalar·x_i·x_j; bound-neutral — McCormick is 1-homogeneous
+    # in a scaled factor): test_psd_cut_closes_indefinite_qcqp_root_gap,
+    # test_separator_emits_no_cut_at_a_consistent_moment_point,
+    # test_psd_closes_plain_mccormick_root_gap, and (side effect: the product rows
+    # now create the >1e12 spread it probes) ex1252. Still deferred below:
     "test_rlt_wide_box_lp_not_false_infeasible": (
         "S8-deferred: wide-box RLT product rows not emitted by the engine build; "
         "no false infeasible (sound), tightness deferred to the uniform OA loop"
@@ -240,21 +243,6 @@ _CUTOVER_DEFERRED_TESTS: dict[str, str] = {
         "S8-deferred: nvs22's free div/sqrt aux vars leave the root LP unbounded on "
         "the wide box under the static engine pass (sound: no false bound); finite "
         "root bound deferred to the uniform OA loop / branch-and-reduce"
-    ),
-    # ── test_psd_cuts_*.py / test_rlt_api.py — product-side separators do not fire
-    #    on these synthetic array-indexed 2-var QCQP shapes (the engine registers
-    #    product columns exact-only; these shapes are not covered). Sound, looser. ──
-    "test_psd_cut_closes_indefinite_qcqp_root_gap": (
-        "S8-deferred: PSD separator does not fire on the engine relaxation for this "
-        "array-indexed 2-var QCQP (product columns unregistered); bound sound, looser"
-    ),
-    "test_separator_emits_no_cut_at_a_consistent_moment_point": (
-        "S8-deferred: engine does not register the bilinear/monomial product columns "
-        "this PSD-consistency probe indexes (KeyError, not a spurious cut)"
-    ),
-    "test_psd_closes_plain_mccormick_root_gap": (
-        "S8-deferred: PSD strengthening does not fire on the engine relaxation for "
-        "this synthetic QCQP (product columns unregistered); bound sound, looser"
     ),
     "test_quadratic_rlt_build_path_emits_lifted_rows": (
         "S8-deferred: the quadratic-RLT build path (DISCOPT_RLT_QUAD) is not wired "

@@ -2070,16 +2070,31 @@ def _build_product(ctx: _Builder, node: CNode, w: int) -> Envelope:
         _emit_scaled_equality(ctx, w, factor_vals[0][0], scalar)
         return Envelope(rows=[], tight=True)
 
-    # Fold the scalar into the first factor (associativity: scalar·f0·f1·… =
-    # (scalar·f0)·f1·…), scaling its LinForm and bounds, so no temp aux is needed
-    # and ``w`` remains exactly the product value.
+    # A non-unit scalar (e.g. the ``3`` the canonical atomizer folds into a factor
+    # of ``-3·x0·x1``) must NOT be folded into a factor before the McCormick chain:
+    # doing so scales a factor away from its bare original, so ``_fold_product`` can
+    # no longer name the partial product and the bilinear/multilinear registration
+    # the RLT/PSD separators consume is lost (issue #640 Bucket 2). Instead lift the
+    # PURE (unscaled) product into its own aux ``wp`` — ``_fold_product`` registers
+    # it as the exact product of originals — and bind ``w == scalar·wp`` by an exact
+    # equality. Soundness/bound-neutrality: McCormick is 1-homogeneous in a scaled
+    # factor, so ``scalar·hull(∏xᵢ) == hull(scalar·∏xᵢ)``; the LP feasible set for
+    # ``w`` is identical to the old scaled-factor fold, only re-expressed through the
+    # named column ``wp`` (verified: root bounds byte-identical on the smoke panel).
     if scalar != 1.0:
-        lin0, (b0lo, b0hi), fe0 = factor_vals[0]
-        nb = (scalar * b0lo, scalar * b0hi) if scalar >= 0 else (scalar * b0hi, scalar * b0lo)
-        # fe0 is the validation-only tracking Expression (typed ``object``); scaling
-        # it by the folded scalar is runtime-valid via Expression.__rmul__.
-        scaled_fe0 = (scalar * fe0) if fe0 is not None else None  # type: ignore[operator]
-        factor_vals[0] = (lin0.scaled(scalar), nb, scaled_fe0)
+        pure_b = factor_vals[0][1]
+        for k in range(1, len(factor_vals)):
+            pure_b = _interval_mul(pure_b, factor_vals[k][1])
+        wp = ctx.new_aux(pure_b[0], pure_b[1])
+        if ctx.track_aux_exprs:
+            pe = factor_vals[0][2]
+            for k in range(1, len(factor_vals)):
+                pe = (pe * factor_vals[k][2]) if pe is not None else None  # type: ignore[operator]
+            if pe is not None:
+                ctx.aux_expr[wp] = pe
+        tight = _fold_product(ctx, wp, factor_vals)
+        _emit_scaled_equality(ctx, w, LinForm.col(wp), scalar)
+        return Envelope(rows=[], tight=tight)
     tight = _fold_product(ctx, w, factor_vals)
     return Envelope(rows=[], tight=tight)
 
