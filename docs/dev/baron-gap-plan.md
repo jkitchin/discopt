@@ -1,9 +1,12 @@
 # BARON-gap plan — five independent, stacking tasks (G1–G5)
 
-**Status:** planned (2026-07-15). Successor to `tenx-plan.md`, incorporating the
-2026-07-15 layer-correct profiling session (post-#636 uniform engine on `main`
+**Status:** G1–G5 **executed and merged** (2026-07-15) — see the verdict column
+in §9 and the follow-on items in §10. Successor to `tenx-plan.md`, incorporating
+the 2026-07-15 layer-correct profiling session (post-#636 uniform engine on `main`
 @`0f3ebd7d`). Every number below was measured in that session or is cited to a
-committed record; nothing is assumed.
+committed record; nothing is assumed. Net outcome: G1/G2/G4 landed net-positive;
+G3 routing was falsified (kill criterion) but surfaced+fixed a P0 false-optimal;
+G5 diagnosed family D and re-scoped bchoco06 to an LP-conditioning problem (G6).
 
 **Audience:** each task section (§3–§7) is written to be implemented by an
 independent agent session with no other context than this document plus the
@@ -162,6 +165,13 @@ G3 → G5. But the point of this document is that order is not required.
 ---
 
 ## §3. G1 — kill the Python↔JAX marshaling in the point-mode evaluator
+
+> **Landed #645 (2026-07-15).** The literal "fuse `(f,g,c,J)` tuple +
+> `jax.device_get`" implementation sketch below was **falsified** in the entry
+> experiment (0.76–0.90×, slower; 87.8% of iterates want obj+cons only) and
+> replaced by **co-occurrence fusion** (concat `FC=[f,c]` / `GJ=[g,J]`, single
+> `np.asarray`, iterate-memo). Read the §9 verdict for the shipped design and
+> numbers; the sketch below is retained as the original hypothesis.
 
 **Objective.** Reduce per-NLP-solve callback overhead by ≥5× on the
 nvs05-class measurement (§1.3) with **byte-identical bounds and node counts**
@@ -432,8 +442,48 @@ elsewhere.
 
 | task | scope | entry experiment | gate | verdict |
 |---|---|---|---|---|
-| G1 marshaling | `nlp_evaluator.py` fused/memoized point-mode | callback census + fused prototype on nvs05 | byte-identical bounds/nodes; nodes/s up ≥2× on nvs05 probe | — |
-| G2 adaptive NLP default-ON | `solver_tuning.py:325` | re-run TX1 `--vs` panel at `main` | proofs ≥ baseline (+2 expected), 0 LOOSER/CROSSED, wall down | — |
-| G3 LP-node routing (TX4) | #287 fix + OBBT un-gate + routing | #287 repro; nvs17/19/24 refresh; OBBT root-bound probe | family: ≤2× of true on nvs17/19/24; zero off-family regression | — |
-| G4 harness truth | benchmarks script only | June-baseline node-count spot check | ratios reproduce §1.1; no solver diff | — |
-| G5 family-D diagnoses (TX6) | bchoco06 hole; heatexch pole children | they *are* the experiments | written record; builds get full gate | — |
+| G1 marshaling | `nlp_evaluator.py` fused/memoized point-mode | callback census + fused prototype on nvs05 | byte-identical bounds/nodes; nodes/s up ≥2× on nvs05 probe | **LANDED #645** (2026-07-15). Literal `(f,g,c,J)`-tuple + `device_get` design **falsified** (0.76–0.90×, slower — census: 87.8% of iterates want obj+cons only). Landed **co-occurrence fusion** instead (concat `FC=[f,c]`, `GJ=[g,J]`, one `np.asarray`, iterate-memo): **2.45×** callback-overhead reduction on the access-pattern replay, byte-identical across the 13-instance panel (nodes/obj/bound/status exact). End-to-end nvs05 nodes/s **1.26×** (26.6→33.5) with a not-looser bound — marshaling is one component of node cost, so end-to-end < the callback-layer 2.45×. |
+| G2 adaptive NLP default-ON | `solver_tuning.py:325` | re-run TX1 `--vs` panel at `main` | proofs ≥ baseline (+2 expected), 0 LOOSER/CROSSED, wall down | **LANDED #643** (2026-07-15). `adaptive_nlp` default `False→True`; env `DISCOPT_ADAPTIVE_NLP=0` restores fixed stride. Gate green. |
+| G3 LP-node routing (TX4) | #287 fix + OBBT un-gate + routing | #287 repro; nvs17/19/24 refresh; OBBT root-bound probe | family: ≤2× of true on nvs17/19/24; zero off-family regression | **ROUTING KILLED #646** (2026-07-15) — kill criterion met: engine cannot beat the default path on its own family (default already solves nvs17/19/24: −1100.4/−1098.4 optimal, nvs24 0.27% gap; #636 + already-un-gated root OBBT superseded the freeze). Entry experiment instead surfaced a **P0 false-optimal** in the opt-in engine (nvs17 reported optimal −1836.2 at an infeasible point; #636's univariate-square bilinear lifting emptied `info["bilinear"]` so `_worst_product_var` declared "all products tight"). Landed the **soundness fix** (ground-truth incumbent verification + `unresolved_lb` floor; opt-in path only, default byte-identical). Engine restoration → G7 below. |
+| G4 harness truth | benchmarks script only | June-baseline node-count spot check | ratios reproduce §1.1; no solver diff | **LANDED #642** (2026-07-15). BARON node parse (`Total no. of BaR iterations`; alan=3 validated exact vs June), floor-split timing (`import/parse/solve`), `--via-daemon` lane, 3 ratio columns. No solver diff. |
+| G5 family-D diagnoses (TX6) | bchoco06 hole; heatexch pole children | they *are* the experiments | written record; builds get full gate | **LANDED #644** (2026-07-15, `g5-family-d-diagnoses.md`). bchoco06 unbounded-**hole FALSIFIED** — re-attributed to **in-house LP conditioning** (HiGHS gives root bound ~1.0; discopt simplex `iteration_limit`s on a 1e10‥5e-324 coefficient spread) → G6 below. heatexch pole-children **KILLED** (0.00% root-bound improvement). No build shipped. |
+
+---
+
+## §10. Follow-on items surfaced during G1–G5 execution
+
+These were *discovered* by the G1–G5 sessions (measured, recorded), not part of
+the original plan. Each is diagnosis-first and independent; scope before building
+per §0.
+
+### G6 — in-house LP simplex conditioning (from G5's bchoco06 re-attribution)
+
+**Hypothesis (evidence-backed, from `g5-family-d-diagnoses.md`).** bchoco06's
+"missing dual bound" is **not** an unbounded-relaxation hole — the same root
+relaxation solved by HiGHS returns a finite bound ~1.0, while the in-house
+simplex hits an `iteration_limit` on a coefficient spread spanning ~1e10 down to
+subnormal (5e-324). The defect is **LP conditioning / numerics in
+`crates/discopt-core/src/lp/simplex/`**, not the relaxation layer.
+
+**Entry experiment (before any code).** On the bchoco06 root LP: (a) confirm the
+HiGHS-vs-simplex bound gap reproduces at `main`; (b) characterize the failing
+basis (which columns carry the 1e10‥5e-324 spread; is it a scaling problem the
+simplex should equilibrate, or a genuine ill-conditioning that needs a numerics
+fix); (c) does column/row equilibration (geometric scaling) inside the simplex
+close the gap without perturbing well-conditioned instances? **Kill criterion:**
+scaling does not recover a finite bound, or it perturbs any byte-neutral panel
+instance → escalate to a linear-algebra (refactorization/tolerance) fix with its
+own plan. **Layer note:** this is a Rust-layer change — profile and gate in Rust
+(`cargo test -p discopt-core`), do not conflate with the JAX evaluator work.
+
+### G7 — restore the LP-node engine's product map (prerequisite for any future routing)
+
+**Context (from G3/#646).** #636's univariate-square bilinear lifting left the
+LP-node engine's `info` product map empty for integer-product models, which (a)
+was the root of the P0 false-optimal #646 fixed by falling back to ground-truth
+verification, and (b) disables the engine's product branching + cuts
+(`IncrementalMcCormickLP.ok=False`), so it has no throughput on family C. Routing
+(G3) can only be reconsidered once the engine's product map is repopulated to the
+#636 relaxation so spatial branching and cuts work again. This is a larger engine
+change, not a routing tweak; it needs its own plan and the full bound-changing
+gate. Until then the sound default path owns family C.
