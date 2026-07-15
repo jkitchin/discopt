@@ -1,0 +1,11 @@
+# Ad-hoc local MINLPLib .nl corpus copies (drawn from
+# ~/Dropbox/projects/discopt-minlp-benchmark for local benchmark/soundness sweeps
+# via discopt_benchmarks/scripts/global_opt_baron_vs_discopt.py, which reads this
+# directory) are ignored so they stay conveniently available locally without
+# cluttering git or being accidentally committed.
+#
+# The curated regression-test .nl fixtures already committed here remain TRACKED
+# (git does not apply this rule to already-tracked files). To vendor a NEW test
+# fixture, add it explicitly:
+#     git add -f <name>.nl
+*.nl
