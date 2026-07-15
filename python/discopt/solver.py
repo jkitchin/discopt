@@ -3197,6 +3197,22 @@ def solve_model(
     def _remaining_budget() -> float:
         return max(0.0, float(time_limit) - (time.perf_counter() - _solve_t0))
 
+    def _deadline_exhausted(floor: float = _DEADLINE_NODE_FLOOR_S) -> bool:
+        """True once the whole-solve budget is spent past a small floor.
+
+        Optional root-setup phases (presolve, reverse-AD, eigenvalue diagnostic,
+        root OBBT, root cut pool) check this to avoid *launching* further
+        bound-strengthening work once ``time_limit`` is already blown — the fix
+        for issue #654's "budget effectively ignored" symptom. This never
+        truncates an in-flight bound-producing op (that would drop a valid bound;
+        docs/dev/baron-gap-plan.md §8): each phase runs to completion once started
+        and only new phases are skipped, so the overrun is bounded to at most one
+        in-flight uninterruptible op and the wall scales with ``time_limit``.
+        Skipping a phase only ever *weakens* the (still-valid) bound — a larger
+        box or fewer cuts — never makes it unsound.
+        """
+        return _remaining_budget() <= floor
+
     # Reset the per-solve convexity-classification memo (a previous solve, or an
     # IIS feasibility probe, may have cached a verdict for a different constraint
     # set), and budget classification to a fraction of the time limit so it
@@ -4072,7 +4088,11 @@ def solve_model(
     # Tightened bounds are pushed back into the Python `model` so that
     # the relaxation compiler / B&B initialisation see them. See
     # discopt._jax.presolve_pipeline for the sequencing rationale.
-    if _model_repr is not None and presolve:
+    # Skipped if the budget is already blown (e.g. a large-model reformulation
+    # above overran ``time_limit``): presolve only tightens bounds, so declining
+    # it leaves a looser-but-valid box and lets the wall track ``time_limit``
+    # (#654). ``propagate_bounds_to_model`` is a no-op when skipped.
+    if _model_repr is not None and presolve and not _deadline_exhausted():
         try:
             from discopt._jax.presolve_pipeline import (
                 propagate_bounds_to_model,
@@ -4115,8 +4135,9 @@ def solve_model(
     # Iterates Gauss-Seidel reverse-mode interval AD over every
     # constraint to a fixed point and writes back tighter scalar bounds.
     # Disabled by default because it walks the Python expression DAG and
-    # can be slow on very large models.
-    if presolve and presolve_reverse_ad:
+    # can be slow on very large models. Skipped once the budget is blown (#654):
+    # it only tightens bounds, so declining it leaves a valid looser box.
+    if presolve and presolve_reverse_ad and not _deadline_exhausted():
         try:
             from discopt._jax.presolve_pipeline import run_reverse_ad_tightening
 
@@ -4129,8 +4150,9 @@ def solve_model(
     # --- Eigenvalue root bound on quadratic objectives (M6 of #51, opt-in) ---
     # For models with a quadratic objective, compute a sound root-node
     # bound via spectral decomposition. Used only as an informational
-    # diagnostic at the root; does not affect the B&B tree directly.
-    if eigenvalue_root_bound:
+    # diagnostic at the root; does not affect the B&B tree directly. Skipped
+    # once the budget is blown (#654): purely diagnostic, safe to omit.
+    if eigenvalue_root_bound and not _deadline_exhausted():
         try:
             from discopt._jax.convexity.eigenvalue_arith import (
                 QuadraticForm,
@@ -4710,6 +4732,11 @@ def solve_model(
         bool(kwargs.get("obbt_at_root", True))
         and model._objective is not None
         and not _obbt_known_convex
+        # Skip once the budget is blown (#654): OBBT only shrinks the box, so
+        # declining it leaves a valid looser envelope and lets the wall track
+        # ``time_limit`` instead of paying a full clamped OBBT sweep past the
+        # deadline. (When time remains, the budget below still clamps it.)
+        and not _deadline_exhausted()
         # Continuous (or mixed) models keep the original ≤500-var reach. The
         # pure-integer-nonlinear path is newer and capped tighter (≤50 vars, the
         # ``_AUTO_RLT_LEVEL1_MAX_VARS`` scale): there OBBT reaches a fixpoint in a
@@ -5282,6 +5309,16 @@ def solve_model(
                     if not _probe_useful:
                         _mc_lp_relaxer = None
                         _mc_mode = "none"
+                    elif _deadline_exhausted():
+                        # Budget already blown (#654): skip the one-time root cut
+                        # pool separation. Its only value is a stronger per-node
+                        # bound during the search, but a past-deadline node loop
+                        # finalizes almost immediately, so separating the pool
+                        # here would just overrun the wall for no realized bound.
+                        # Nodes still separate their own cuts if any run. Sound:
+                        # the relaxer/bound are unchanged — only the inherited-pool
+                        # speedup is forgone.
+                        pass
                     elif _root_cut_rounds > 0 and getattr(_mc_lp_relaxer, "_psd_cuts", False):
                         # Root cut pool (P3, opt-in): the relaxer carries PSD cuts, so
                         # separate a strong pool ONCE at the root box (many
