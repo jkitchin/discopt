@@ -245,11 +245,6 @@ _CUTOVER_DEFERRED_TESTS: dict[str, str] = {
         "objective not derived; engine returns unbounded (sound: no false bound)"
     ),
     # ── test_bucket2_sound_bounds.py — whole-function product-side deferrals ──
-    "test_nvs16_full_solve_does_not_anchor_on_garbage_bound": (
-        "S8-deferred: the #248 freed-wide-box-variable objective-invalidation guard "
-        "is federation machinery not reproduced; nvs16 bound is loose garbage but "
-        "SOUND (status=feasible, never certifies — no false optimal; verified)"
-    ),
     "test_ex1252_relaxation_equilibration_conditions_and_preserves_bound": (
         "S8-deferred: the RLT ill-conditioning/equilibration path is not exercised "
         "on the engine build (product rows not emitted for this shape; sound)"
@@ -283,17 +278,6 @@ _CUTOVER_DEFERRED_TESTS: dict[str, str] = {
         "S8-deferred: the quadratic-RLT build path (DISCOPT_RLT_QUAD) is not wired "
         "into the engine delegate; no extra lifted rows (sound, looser)"
     ),
-    # ── test_convex_claimer.py — convex-objective lift tightness ──
-    "test_convex_objective_lift_is_tight_and_sound": (
-        "P2-partial (#632): composite-convex OA is now DEFAULT-ON on the engine "
-        "(no DISCOPT_CONVEX_CLAIMER flag — the whole convex objective is lifted and "
-        "the _separate_convex Kelley loop tightens it), moving the root bound from "
-        "-245.83 to -204.72 (sound: <= exact -204.35). Still xfailed because (a) the "
-        "8-round LP-point separation stops 0.37 short of the test's abs=1e-1 window, "
-        "and (b) the test asserts on>off+10 by toggling the deleted flag, which is a "
-        "no-op on the engine (on==off), so the flag-differential asserts cannot hold. "
-        "Full closure needs more OA rounds / anchor placement (separator scope)."
-    ),
     # ── test_incremental_monomial.py / test_incremental_mccormick_node.py —
     #    federation MACHINERY: incremental per-node McCormick patching. The engine
     #    does one static factorable build per node; the incremental fast-path is
@@ -318,29 +302,10 @@ _CUTOVER_DEFERRED_TESTS: dict[str, str] = {
     "test_serial_convex_iteration_limit_does_not_certify": (
         "engine bypasses the serial convex-iteration cut machinery"
     ),
-    "test_lazy_reseparation_stride_net_fires": (
-        "engine bypasses the cut-pool lazy-reseparation machinery"
-    ),
-    "test_pool_drop_retry_recovers_the_node_bound": (
-        "engine bypasses the cut-pool drop/retry machinery"
-    ),
-    "test_pool_infeasible_reverify_recovers_false_fathom": (
-        "engine bypasses the cut-pool infeasible-reverify machinery"
-    ),
     "test_box_dependent_child_rows_would_be_invalid_and_are_excluded": (
         "engine bypasses the cut-inheritance child-row machinery"
     ),
-    "test_cut_inherit_structure_gated_fires_on_dense_qp": (
-        "engine bypasses the structured cut-inheritance machinery"
-    ),
     "test_root_pool_cuts_valid_on_every_child_feasible_point": (
         "engine bypasses the root-pool cut-inheritance machinery"
-    ),
-    "test_c10_lp_spatial_gmi_cut_carries_safety_margin": (
-        "engine bypasses the LP-spatial GMI cut machinery"
-    ),
-    "test_c10_no_feasible_integer_point_is_cut": (
-        "engine bypasses the LP-spatial GMI cut machinery (soundness of that path "
-        "is moot; engine soundness is covered by test_uniform_relax.py)"
     ),
 }
