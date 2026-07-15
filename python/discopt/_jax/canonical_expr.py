@@ -285,6 +285,15 @@ class _Canonicalizer:
         unmerged: list[tuple[CNode, float]] = []  # non-mergeable factors kept as-is
         coef_acc = float(coef)
         stack = list(factors)
+        # Preserve coupled univariate atoms: when a factor is a transcendental
+        # ``call`` (log/exp/…), a sibling scaled factor ``c·g`` must stay INTACT so
+        # the atom recognizers see the shared affine form — e.g. ``(2x)·log(2x)`` is
+        # ``t·log(t)`` with ``t = 2x``, but extracting the ``2`` into ``coef_acc``
+        # would leave ``2·(x·log(2x))`` and break the ``_entropy_prod_var`` /
+        # ``_xexp_prod_var`` match (issue #640 Bucket 4 regression). The
+        # scalar-extraction CSE only targets pure variable products (``x0·x1``),
+        # which carry no ``call`` factor, so gate it off when one is present.
+        _has_call_factor = any(getattr(b, "kind", None) == "call" for b, _ in factors)
         while stack:
             base, exp = stack.pop()
             exp = float(exp)
@@ -327,7 +336,8 @@ class _Canonicalizer:
                 # one) so no complex/undefined power slips through.
                 scoeffs, sconst = base.payload
                 if (
-                    float(sconst) == 0.0
+                    not _has_call_factor
+                    and float(sconst) == 0.0
                     and len(base.children) == 1
                     and len(scoeffs) == 1
                     and float(scoeffs[0]) != 0.0

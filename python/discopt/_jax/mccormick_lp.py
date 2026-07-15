@@ -601,6 +601,28 @@ class MccormickLPRelaxer:
             except Exception:
                 self._inc = None
 
+        # Does this model carry a composite convex/concave OA lift? Its tightening
+        # is the lazy Kelley tangents ``_separate_convex`` adds from
+        # ``composite_multivar_relaxations`` — which the incremental fast path skips
+        # (it builds the reference with ``skip_convex_lift=True``) and instead
+        # inherits via the root cut pool. A DIRECT ``solve_at_node(separate=True)``
+        # with no inherited pool (e.g. a unit test, or any caller not driving the
+        # pooled spatial loop) would therefore lose that tightening on the fast path
+        # (bound-neutrality violation: test_convex_claimer -204 -> -350). Detect the
+        # lift once so ``solve_at_node`` can fall back to the cold, separating build
+        # in exactly that case. Cheap best-effort; failure leaves the flag False.
+        self._has_composite_lift = False
+        if self._inc is not None:
+            try:
+                from discopt._jax.model_utils import flat_variable_bounds
+                from discopt._jax.uniform_relax import build_uniform_relaxation
+
+                _flb, _fub = flat_variable_bounds(model)
+                _probe = build_uniform_relaxation(model, box=(_flb, _fub))
+                self._has_composite_lift = bool(_probe.composite_multivar_specs)
+            except Exception:
+                self._has_composite_lift = False
+
     @property
     def nonlinear_columns(self) -> frozenset[int]:
         """Original-variable flat columns in any nonlinear term (product,
@@ -1091,11 +1113,21 @@ class MccormickLPRelaxer:
         # inherit the pool this captures. Without this, the root cut pool is never
         # populated once the incremental engine is active — exactly why the T1.3
         # gate flip collapsed the spatial bound (dispatch 3 → 9843).
+        # Bound-neutrality: with a composite convex lift present, a FEASIBLE fast-path
+        # bound omits the lift's Kelley tightening unless it can inherit those cuts
+        # from the pool (``inherited_cuts``). When separation is requested with no
+        # inherited pool, fall back to the cold, separating build for an OPTIMAL
+        # result so the lift actually tightens the node (fixes test_convex_claimer's
+        # -204 -> -350 on a direct solve_at_node call). An ``infeasible`` fast verdict
+        # is bound-independent (an empty McCormick polytope over a finite box is a
+        # rigorous infeasibility proof), so it is always trusted; pooled spatial
+        # nodes, which DO inherit cuts, keep the fast path for both verdicts.
+        _skip_fast_for_lift = separate and self._has_composite_lift and not inherited_cuts
         if out_cuts is None:
             _fast = self._try_incremental_node(
                 node_lb, node_ub, inherited_cuts, want_marginals=want_marginals
             )
-            if _fast is not None:
+            if _fast is not None and not (_skip_fast_for_lift and _fast.status == "optimal"):
                 return _fast
 
         try:

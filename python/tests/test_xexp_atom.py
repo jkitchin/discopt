@@ -21,8 +21,11 @@ from discopt import Model
 from discopt._jax.milp_relaxation import build_milp_relaxation
 from discopt._jax.term_classifier import classify_nonlinear_terms
 
-# Frozen pre-atom (flag-off) bound for x*exp(x) on [-1,1] — the shattered bilinear.
-_OFF_REF = -1.1752011936438014
+# Flag-off bound for x*exp(x) on [-1,1]. #640 Bucket 1: the recovered separable
+# objective floor now recognizes ``x*exp(x) >= -1/e`` and closes this single-term
+# bound to the exact global minimum (-1/e), independent of the xexp atom flag — so
+# the flag-off baseline is the tight -1/e, not the old shattered-bilinear -1.1752.
+_OFF_REF = -math.exp(-1.0)
 
 
 @pytest.fixture
@@ -78,13 +81,27 @@ def test_xexp_sound_and_never_looser(_flag_on, lo, hi):
 
 
 @pytest.mark.parametrize("lo,hi", _CURVATURE_BOXES)
-def test_xexp_strictly_tighter_where_curvature_bites(_flag_on, lo, hi):
-    """Where the min is interior, the convex envelope beats the shattered bilinear."""
+def test_xexp_reaches_true_min_via_separable_floor(monkeypatch, lo, hi):
+    """The single-term ``min t*exp(t)`` reaches its exact minimum with or without
+    the xexp atom.
+
+    #640 Bucket 1: the recovered separable objective floor is a GENERAL mechanism
+    that recognizes ``t*exp(t) >= -1/e`` and closes the single-term bound exactly —
+    subsuming the xexp atom's convex envelope for a separable objective. So where
+    this test previously showed the atom strictly tighter than the shattered
+    bilinear, ON and OFF now BOTH hit the true interior minimum. (The atom still
+    tightens a NON-separable objective that couples ``t*exp(t)`` with other terms;
+    that is out of scope for these single-term fixtures.) Assert the sound,
+    tight contract the engine now delivers.
+    """
+    monkeypatch.setenv("DISCOPT_XEXP_ATOM", "1")
     on = _bound(_xexp1(lo, hi))
-    os.environ.pop("DISCOPT_XEXP_ATOM", None)
+    monkeypatch.delenv("DISCOPT_XEXP_ATOM", raising=False)
     off = _bound(_xexp1(lo, hi))
-    os.environ["DISCOPT_XEXP_ATOM"] = "1"
-    assert on > off + 0.1, f"not tighter on [{lo},{hi}]: ON={on} OFF={off}"
+    tm = _true_min(lo, hi)
+    assert on == pytest.approx(tm, abs=1e-4), f"ON not tight on [{lo},{hi}]: {on} vs {tm}"
+    assert off == pytest.approx(tm, abs=1e-4), f"OFF not tight on [{lo},{hi}]: {off} vs {tm}"
+    assert on <= tm + 1e-5 and off <= tm + 1e-5  # both sound lower bounds
 
 
 def test_xexp_inflection_guard_abstains(_flag_on):
