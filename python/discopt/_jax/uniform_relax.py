@@ -146,6 +146,12 @@ class Envelope:
 
     rows: list[tuple[dict[int, float], float]]
     tight: bool
+    # Optional multiplier applied to the aux column when it becomes the node's
+    # representation: ``rep(node) = rep_scale · col(w)``. Lets a builder make ``w``
+    # the EXACT product/atom (so the RLT/PSD separators and cut-inheritance identities
+    # see one clean lifted column) while a leading scalar rides in the rep, avoiding a
+    # second ``w == scalar·w_pure`` binding column (issue #640 Bucket 2/4).
+    rep_scale: float = 1.0
 
 
 @dataclasses.dataclass
@@ -1112,7 +1118,8 @@ class _Builder:
         for coeffs, rhs in env.rows:
             self.add_row(coeffs, rhs)
         self.coverage[id(node)] = (kind, env.tight)
-        return LinForm.col(w)
+        rep = LinForm.col(w)
+        return rep if env.rep_scale == 1.0 else rep.scaled(env.rep_scale)
 
 
 def _interval_box(model: Model, flat_lb: np.ndarray, flat_ub: np.ndarray) -> dict:
@@ -2098,27 +2105,32 @@ def _build_product(ctx: _Builder, node: CNode, w: int) -> Envelope:
     # of ``-3·x0·x1``) must NOT be folded into a factor before the McCormick chain:
     # doing so scales a factor away from its bare original, so ``_fold_product`` can
     # no longer name the partial product and the bilinear/multilinear registration
-    # the RLT/PSD separators consume is lost (issue #640 Bucket 2). Instead lift the
-    # PURE (unscaled) product into its own aux ``wp`` — ``_fold_product`` registers
-    # it as the exact product of originals — and bind ``w == scalar·wp`` by an exact
-    # equality. Soundness/bound-neutrality: McCormick is 1-homogeneous in a scaled
-    # factor, so ``scalar·hull(∏xᵢ) == hull(scalar·∏xᵢ)``; the LP feasible set for
-    # ``w`` is identical to the old scaled-factor fold, only re-expressed through the
-    # named column ``wp`` (verified: root bounds byte-identical on the smoke panel).
+    # the RLT/PSD separators consume is lost (issue #640 Bucket 2). Instead make the
+    # node aux ``w`` the PURE (unscaled) product — ``_fold_product`` folds its
+    # McCormick hull into ``w`` and registers it as the exact product of originals —
+    # and carry the scalar in the node's REP (``rep_scale``). SOUNDNESS /
+    # bound-neutrality: McCormick is 1-homogeneous in a scaled factor, so
+    # ``scalar·hull(∏xᵢ) == hull(scalar·∏xᵢ)``; the LP feasible set is identical to
+    # the old scaled-factor fold, only re-expressed as ``scalar·w`` with ``w`` the
+    # named product column. Reusing ``w`` (rather than a second ``w == scalar·w_pure``
+    # binding aux) keeps exactly ONE lifted column per product — what the RLT/PSD
+    # separators, the cut-inheritance column identities, and the feasible-point
+    # samplers expect (#640 Bucket 4).
     if scalar != 1.0:
         pure_b = factor_vals[0][1]
         for k in range(1, len(factor_vals)):
             pure_b = _interval_mul(pure_b, factor_vals[k][1])
-        wp = ctx.new_aux(pure_b[0], pure_b[1])
+        # ``w`` was allocated with the node (scalar·product) interval; reset it to the
+        # PURE product interval — ``rep_scale`` recovers the node interval.
+        ctx.col_lb[w], ctx.col_ub[w] = pure_b
         if ctx.track_aux_exprs:
             pe = factor_vals[0][2]
             for k in range(1, len(factor_vals)):
                 pe = (pe * factor_vals[k][2]) if pe is not None else None  # type: ignore[operator]
             if pe is not None:
-                ctx.aux_expr[wp] = pe
-        tight = _fold_product(ctx, wp, factor_vals)
-        _emit_scaled_equality(ctx, w, LinForm.col(wp), scalar)
-        return Envelope(rows=[], tight=tight)
+                ctx.aux_expr[w] = pe  # w now holds the PURE product value
+        tight = _fold_product(ctx, w, factor_vals)
+        return Envelope(rows=[], tight=tight, rep_scale=scalar)
     tight = _fold_product(ctx, w, factor_vals)
     return Envelope(rows=[], tight=tight)
 

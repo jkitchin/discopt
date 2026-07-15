@@ -1508,9 +1508,14 @@ def test_negative_unbounded_x_exp_objective_keeps_no_bound(caplog):
 
     # Engine contract (soundness/refusal): -x*exp(x) is unbounded below on the free
     # box, so no fake separable lower bound is invented — the engine refuses the
-    # objective bound (objective_bound_valid False, no reported objective).
+    # objective bound (objective_bound_valid False, no reported objective). The
+    # relaxation LP is itself genuinely unbounded here (its free product column has
+    # negative objective cost with the McCormick rows dropped on the infinite box),
+    # so the solve reports either "unbounded" or a spurious-vertex "optimal" — both
+    # are sound because the bound is refused either way (#640 Bucket 4: the
+    # monic-product canonicalization made the free-column ray explicit).
     assert milp_model._objective_bound_valid is False
-    assert result.status == "optimal"
+    assert result.status in ("optimal", "unbounded")
     assert result.objective is None
 
 

@@ -256,14 +256,18 @@ _CUTOVER_DEFERRED_TESTS: dict[str, str] = {
     # test_incremental_active_for_integer_qcqp,
     # test_incremental_infeasible_node_pruned_without_cold_rebuild, and
     # test_incremental_node_bound_is_sound_and_matches_cold.
-    # ── cut-pool / LP-spatial / incremental machinery the engine bypasses ──
-    "test_serial_convex_iteration_limit_does_not_certify": (
-        "engine bypasses the serial convex-iteration cut machinery"
-    ),
-    "test_box_dependent_child_rows_would_be_invalid_and_are_excluded": (
-        "engine bypasses the cut-inheritance child-row machinery"
-    ),
-    "test_root_pool_cuts_valid_on_every_child_feasible_point": (
-        "engine bypasses the root-pool cut-inheritance machinery"
-    ),
+    # ── Bucket 4 (cut-pool / GMI / cut-inheritance) — RECOVERED, bucket CLOSED ──
+    # * test_serial_convex_iteration_limit_does_not_certify was CONVERTED (renamed
+    #   test_serial_convex_iteration_limit_certifies_only_soundly): the engine's node
+    #   dual bound is the rigorous McCormick LP relaxation, not the (possibly non-KKT)
+    #   NLP objective, so a degraded NLP can no longer inject an invalid bound — the
+    #   engine legitimately certifies the true optimum, and the test now pins the
+    #   sound contract (no false certificate; bound never crosses the primal).
+    # * test_box_dependent_child_rows_would_be_invalid_and_are_excluded and
+    #   test_root_pool_cuts_valid_on_every_child_feasible_point were RECOVERED: making
+    #   a scaled product's aux the PURE product (carrying the scalar in the node rep,
+    #   Envelope.rep_scale) plus a canonical-DAG fix that keeps scaled products monic
+    #   (so commuted terms like -2*x0*x1 and -2*x1*x0 CSE to one lifted column) gives
+    #   exactly one clean lifted column per product — which the cut pool's feasible-
+    #   point samplers and column identities require.
 }
