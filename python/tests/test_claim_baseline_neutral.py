@@ -13,9 +13,11 @@ different CI runner. Fingerprint drift with identical shape is surfaced here as 
 informational count, not a failure.
 
 **What still guards coefficient-level neutrality, and what does not** (per the
-#636 review): ``test_lr2_offneutral_relaxation.py`` (#630) compares two builds
-*from current code* (OFF vs code-absent), so it rigorously proves the LR-2/H-LOG
-collectors are inert when off — but it is NOT a frozen-reference gate: a uniform
+#636 review): the H-LOG flag-OFF byte-identity guardrail
+(``test_lr2_offneutral_relaxation.py``, #630) has been removed together with the
+H-LOG flag deprecation — the log-space envelope now lives in the uniform engine,
+not as an off-by-default collector, so there is nothing to prove inert. That test
+was in any case NOT a frozen-reference gate: a uniform
 coefficient change from a refactor would move both fingerprints identically and
 still pass. This PR needs no frozen-reference coefficient gate because its only
 build-path change is three ``note_defer()`` no-ops (everything else is unwired, so

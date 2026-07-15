@@ -23,24 +23,17 @@ from __future__ import annotations
 import itertools
 import logging
 import math
-import os
 from dataclasses import dataclass
 from typing import Callable, Optional, Union
 
 import numpy as np
 import scipy.sparse as sp
 
-from discopt._jax._numeric import EFFECTIVE_INF as _EFFECTIVE_INF
 from discopt._jax._numeric import is_effectively_finite as _is_effectively_finite
 from discopt._jax.discretization import DiscretizationState
 from discopt._jax.model_utils import flat_variable_bounds
-from discopt._jax.operator_relaxations import (
-    critical_points_in_interval as _critical_points_in_interval,
-)
 from discopt._jax.operator_relaxations import tan_range as _tan_range
 from discopt._jax.operator_relaxations import trig_range as _trig_range
-from discopt._jax.operator_relaxations import trig_square_curvature as _trig_square_curvature
-from discopt._jax.operator_relaxations import trig_square_range as _trig_square_range
 from discopt._jax.term_classifier import (
     NonlinearTerms,
     _compute_var_offset,
@@ -54,7 +47,6 @@ from discopt.modeling.core import (
     FunctionCall,
     IndexExpression,
     Model,
-    ObjectiveSense,
     SumExpression,
     SumOverExpression,
     UnaryOp,
@@ -104,18 +96,6 @@ _LIFT_MAX_CROSS_TERM_ARG_MAGNITUDE = 1e7
 # just the GAMS relative-entropy intrinsic ``centropy(x, y) = x·log(x/y)`` (Boyd
 # & Vandenberghe §3.2.6), which powers the MINLPLib ``ex6_2_*`` entropy family.
 _JOINTLY_CONVEX_MULTIVAR_ATOMS: dict[str, int] = {"centropy": 2}
-
-
-def _envelope_slope_ok(slope: float) -> bool:
-    """True when an envelope cut's slope is well-conditioned enough to emit.
-
-    A finite slope at or below :data:`_LIFT_MAX_ENVELOPE_SLOPE` keeps the LP row
-    numerically reliable; anything steeper (e.g. ``p*t**(p-1)`` for ``x**p`` with
-    ``p<0`` near a small lower bound) makes HiGHS return an unsound polytope, so
-    the caller abstains. Dropping a cut only enlarges the relaxation, so an
-    abstention is always sound — at worst the aux column keeps its value bounds.
-    """
-    return bool(np.isfinite(slope)) and abs(slope) <= _LIFT_MAX_ENVELOPE_SLOPE
 
 
 _MAX_TRIG_PIECEWISE_INTERVALS = 32
@@ -228,14 +208,6 @@ def equilibrate_relaxation_lp(
         for (lo, hi), d in zip(bounds, col_scale)
     ]
     return c2, sp.csr_matrix(A), b2, bounds2, col_scale
-
-
-def _warn_once(msg: str, *args) -> None:
-    formatted = msg % args if args else msg
-    if formatted in _warned_messages:
-        return
-    _warned_messages.add(formatted)
-    logger.warning("%s", formatted)
 
 
 # ---------------------------------------------------------------------------
@@ -644,37 +616,6 @@ def sanitize_relaxation_for_conditioning(
 
 
 @dataclass
-class UnivariateRelaxation:
-    """Lifted outer relaxation for a supported univariate operator."""
-
-    expr_id: int
-    func_name: str
-    aux_col: int
-    arg_coeff: np.ndarray
-    arg_const: float
-    arg_lb: float
-    arg_ub: float
-
-
-@dataclass
-class PiecewiseUnivariateInterval:
-    """Binary-selected interval for a mixed-curvature univariate relaxation."""
-
-    delta_col: int
-    lb: float
-    ub: float
-    curvature: Optional[str]
-
-
-@dataclass
-class PiecewiseUnivariateRelaxation:
-    """Partition-aware relaxation for a lifted univariate operator."""
-
-    relax: UnivariateRelaxation
-    intervals: list[PiecewiseUnivariateInterval]
-
-
-@dataclass
 class UnivariateSquareRelaxation:
     """Lifted square of a supported univariate auxiliary."""
 
@@ -684,130 +625,9 @@ class UnivariateSquareRelaxation:
     base_ub: float
 
 
-@dataclass
-class AffineSquareRelaxation:
-    """Univariate square envelope on an affine residual over lifted columns.
-
-    ``r = const + Σ resid[col] * z[col]`` is an affine form whose factors (a
-    bilinear/monomial product) are already lifted to auxiliary columns. ``s`` is
-    the lifted ``r**2`` and ``[r_lb, r_ub]`` is an interval-arithmetic outer
-    bound on ``r`` used to build the tangent/secant square envelope (issue #155).
-    """
-
-    aux_col: int
-    resid: dict[int, float]
-    const: float
-    r_lb: float
-    r_ub: float
-
-
-@dataclass
-class AffinePowerRelaxation:
-    """Univariate power envelope on a scaled single-variable residual.
-
-    ``r = scale * x_var`` (``x_var`` is the original flat column ``var_idx``) and
-    ``w`` is the lifted ``r**power`` for an integer ``power >= 3``.  The envelope
-    is built in well-conditioned ``r`` space, so a base variable ranging over a
-    wide box (e.g. ``x in [0, 2950]`` in ex1252, deliberately scaled by
-    ``1/2950`` so ``r in [0, 1]``) does not produce the ``~1e10`` aux column the
-    raw ``x**power`` monomial would and the magnitude cap would drop.
-    """
-
-    aux_col: int
-    var_idx: int
-    scale: float
-    power: int
-    r_lb: float
-    r_ub: float
-
-
-@dataclass
-class RatioRelaxation:
-    """Linear-fractional envelope for a ratio of products ``coeff·m/q`` (#185).
-
-    ``m`` is the lifted numerator product column and ``q`` the lifted denominator
-    product column (each a standard McCormick-enveloped bilinear/multilinear aux,
-    or an original variable). ``r`` is a fresh column standing for the *pure*
-    ratio ``m/q``; the division node is mapped to ``r`` with the scalar ``coeff``
-    applied by the linearizer (keeping a large numerator constant out of the
-    envelope coefficients). The McCormick envelope of the bilinear identity
-    ``r·q = m`` — emitted over ``[r_lb, r_ub] × [q bounds]`` — outer-approximates
-    the quotient: at any true point ``r = m/q`` so ``r·q = m`` holds exactly and
-    all four inequalities are satisfied, hence the relaxed feasible set is a
-    superset of the true one (sound lower bound). Requires ``q`` strictly
-    sign-definite and bounded away from zero on the node box.
-    """
-
-    r_col: int
-    q_col: int
-    m_col: int
-    r_lb: float
-    r_ub: float
-
-
-@dataclass
-class PiecewiseTrigSquareInterval:
-    """Binary-selected interval for a direct trig-square relaxation."""
-
-    delta_col: int
-    lb: float
-    ub: float
-    curvature: Optional[str]
-
-
-@dataclass
-class PiecewiseTrigSquareRelaxation:
-    """Partition-aware direct relaxation for sin(arg)^2 or cos(arg)^2."""
-
-    square: UnivariateSquareRelaxation
-    func_name: str
-    arg_coeff: np.ndarray
-    arg_const: float
-    arg_lb: float
-    arg_ub: float
-    intervals: list[PiecewiseTrigSquareInterval]
-
-
-@dataclass
-class FiniteDomainTrigSquareTable:
-    """Exact selector table for sin(integer_affine)^2 or cos(integer_affine)^2."""
-
-    square: UnivariateSquareRelaxation
-    func_name: str
-    var_idx: int
-    arg_coeff: float
-    arg_const: float
-    domain_values: list[int]
-    trig_values: list[float]
-    square_values: list[float]
-    selector_cols: list[int]
-
-
-@dataclass
-class MinMaxObjectiveLift:
-    """Epigraph/hypograph lift for a supported objective-level min/max call."""
-
-    func_name: str
-    aux_col: int
-    branch_exprs: tuple[Expression, ...]
-    branch_bounds: tuple[tuple[Optional[float], Optional[float]], ...]
-    aux_bounds: tuple[float, float]
-
-
 # ---------------------------------------------------------------------------
 # Helpers: variable bounds
 # ---------------------------------------------------------------------------
-
-
-def _piecewise_product_bounds(
-    a_k: float,
-    b_k: float,
-    y_lb: float,
-    y_ub: float,
-) -> tuple[list[float], float, float]:
-    """Return interval corner products and their min/max values."""
-    corners = [a_k * y_lb, a_k * y_ub, b_k * y_lb, b_k * y_ub]
-    return corners, min(corners), max(corners)
 
 
 def _compute_piecewise_big_m(corners: list[float]) -> float:
@@ -1012,129 +832,6 @@ def _expression_upper_bound_for_lift(
     return -lower_of_negated
 
 
-def _collect_monomial_terms_for_lift(expr: Expression, model: Model) -> set[tuple[int, int]]:
-    terms: set[tuple[int, int]] = set()
-
-    def visit(node: Expression) -> None:
-        if isinstance(node, BinaryOp):
-            if node.op == "*":
-                decomp = _decompose_product(node, model)
-                if decomp is not None:
-                    _scalar, indices = decomp
-                    # Register EVERY repeated original-variable factor as a monomial,
-                    # not only a pure single-variable product. A multi-repeated mixed
-                    # product such as ``x*x*y*y`` decomposes to ``[x, x, y, y]``; the
-                    # constraint-linearization collapse needs both ``(x,2)`` and
-                    # ``(y,2)`` to rebuild it as the bilinear ``aux(x**2)*aux(y**2)``.
-                    # Catching only the ``len(unique)==1`` (pure ``x*x``) case missed
-                    # ``(y,2)`` because tree associativity (``((x*x)*y)*y``) never
-                    # presents ``y*y`` as a standalone subproduct — so the collapse
-                    # failed and the whole constraint dropped from the relaxation.
-                    counts: dict[int, int] = {}
-                    for i in indices:
-                        counts[i] = counts.get(i, 0) + 1
-                    for i, c in counts.items():
-                        if c >= 2:
-                            terms.add((i, c))
-            elif node.op == "**":
-                flat = _get_flat_index(node.left, model)
-                exp = _constant_value(node.right)
-                if flat is not None and exp is not None:
-                    n = int(exp)
-                    if exp == n and n >= 2:
-                        terms.add((flat, n))
-            visit(node.left)
-            visit(node.right)
-            return
-        if isinstance(node, UnaryOp):
-            visit(node.operand)
-            return
-        if isinstance(node, FunctionCall):
-            for arg in node.args:
-                visit(arg)
-            return
-        if isinstance(node, IndexExpression) and not isinstance(node.base, Variable):
-            visit(node.base)
-            return
-        if isinstance(node, SumExpression):
-            visit(node.operand)
-            return
-        if isinstance(node, SumOverExpression):
-            for term in node.terms:
-                visit(term)
-
-    visit(expr)
-    return terms
-
-
-def _collect_repeated_var_monomials_in_products(
-    expr: Expression, model: Model
-) -> set[tuple[int, int]]:
-    """Register monomials for original variables that repeat as factors of a
-    product *even when a sibling factor is an opaque transcendental* (issue #267).
-
-    ``sqrt(x) * y * y`` decomposes (after the univariate lift) to
-    ``[col(sqrt), y, y]``; the constraint-linearization collapse then needs the
-    ``(y, 2)`` monomial aux to rebuild it as ``aux(sqrt) * aux(y**2)``. The plain
-    :func:`_collect_monomial_terms_for_lift` misses it because the whole product
-    does not decompose without ``univariate_var_map`` (the ``sqrt`` factor is
-    unresolved there). This structural pass walks each maximal ``*`` tree and
-    counts the original-variable factors directly, ignoring (but tolerating) the
-    opaque factors, so the repeated-variable monomial is registered regardless of
-    what the other factors are. Registering an unused monomial only costs one aux
-    column and a rigorous power envelope, so it is always sound."""
-    terms: set[tuple[int, int]] = set()
-
-    def factor_counts(node: Expression, counts: dict[int, int]) -> None:
-        if isinstance(node, BinaryOp) and node.op == "*":
-            factor_counts(node.left, counts)
-            factor_counts(node.right, counts)
-            return
-        if isinstance(node, UnaryOp) and node.op == "neg":
-            factor_counts(node.operand, counts)
-            return
-        if isinstance(node, BinaryOp) and node.op == "**" and isinstance(node.right, Constant):
-            base = _get_flat_index(node.left, model)
-            p = _constant_value(node.right)
-            if base is not None and p is not None and p == int(p) and int(p) >= 1:
-                counts[base] = counts.get(base, 0) + int(p)
-            return
-        flat = _get_flat_index(node, model)
-        if flat is not None:
-            counts[flat] = counts.get(flat, 0) + 1
-
-    def visit(node: Expression) -> None:
-        if isinstance(node, BinaryOp):
-            if node.op == "*":
-                counts: dict[int, int] = {}
-                factor_counts(node, counts)
-                for v, c in counts.items():
-                    if c >= 2:
-                        terms.add((v, c))
-            visit(node.left)
-            visit(node.right)
-            return
-        if isinstance(node, UnaryOp):
-            visit(node.operand)
-            return
-        if isinstance(node, FunctionCall):
-            for arg in node.args:
-                visit(arg)
-            return
-        if isinstance(node, IndexExpression) and not isinstance(node.base, Variable):
-            visit(node.base)
-            return
-        if isinstance(node, SumExpression):
-            visit(node.operand)
-            return
-        if isinstance(node, SumOverExpression):
-            for term in node.terms:
-                visit(term)
-
-    visit(expr)
-    return terms
-
-
 # Flat-variable monomial: a sorted tuple of original variable indices, repeated
 # by power (e.g. ``x1**2 * x0`` → ``(0, 1, 1)``).  An affine-square residual is
 # represented as ``(const, [(coeff, monomial), ...])``.
@@ -1268,42 +965,6 @@ def _extract_affine_square(expr: Expression, model: Model) -> _AffineSquare | No
     return const, terms
 
 
-def _collect_affine_squares(model: Model) -> list[tuple[Expression, _AffineSquare]]:
-    """Find every ``E**2`` affine-square node in the objective and constraints."""
-    found: list[tuple[Expression, _AffineSquare]] = []
-    seen: set[int] = set()
-
-    def visit(e: Expression) -> None:
-        info = _extract_affine_square(e, model)
-        if info is not None and id(e) not in seen:
-            seen.add(id(e))
-            found.append((e, info))
-            # The residual is lifted wholesale; do not descend into it.
-            return
-        if isinstance(e, BinaryOp):
-            visit(e.left)
-            visit(e.right)
-        elif isinstance(e, UnaryOp):
-            visit(e.operand)
-        elif isinstance(e, FunctionCall):
-            for arg in e.args:
-                visit(arg)
-        elif isinstance(e, IndexExpression):
-            if not isinstance(e.base, Variable):
-                visit(e.base)
-        elif isinstance(e, SumExpression):
-            visit(e.operand)
-        elif isinstance(e, SumOverExpression):
-            for term in e.terms:
-                visit(term)
-
-    if model._objective is not None:
-        visit(model._objective.expression)
-    for constraint in model._constraints:
-        visit(constraint.body)
-    return found
-
-
 def _collect_affine_powers(
     model: Model, already_lifted: set[int]
 ) -> list[tuple[Expression, float, int, int]]:
@@ -1357,74 +1018,6 @@ def _collect_affine_powers(
     return found
 
 
-def _build_minmax_objective_lift(
-    model: Model,
-    flat_lb: np.ndarray,
-    flat_ub: np.ndarray,
-) -> Optional[MinMaxObjectiveLift]:
-    if model._objective is None:
-        return None
-    expr = model._objective.expression
-    if not isinstance(expr, FunctionCall) or len(expr.args) < 2:
-        return None
-    if model._objective.sense == ObjectiveSense.MINIMIZE and expr.func_name != "max":
-        return None
-    if model._objective.sense == ObjectiveSense.MAXIMIZE and expr.func_name != "min":
-        return None
-    if expr.func_name not in {"min", "max"}:
-        return None
-
-    branch_exprs = tuple(_expand_integer_powers_for_relaxation(arg, model) for arg in expr.args)
-    branch_bounds = tuple(
-        (
-            _expression_lower_bound_for_lift(branch, model, flat_lb, flat_ub),
-            _expression_upper_bound_for_lift(branch, model, flat_lb, flat_ub),
-        )
-        for branch in branch_exprs
-    )
-
-    lower_bounds = [lb for lb, _ub in branch_bounds if lb is not None]
-    upper_bounds = [ub for _lb, ub in branch_bounds if ub is not None]
-    aux_lb: Optional[float]
-    aux_ub: Optional[float]
-    if expr.func_name == "max":
-        # max(f_i) is at least any available lower bound on a branch.
-        aux_lb = max(lower_bounds) if lower_bounds else None
-        # max(f_i) is at most max(ub_i) only when every branch has an upper bound.
-        aux_ub = max(upper_bounds) if len(upper_bounds) == len(branch_bounds) else None
-        directional_bound = aux_lb
-    else:
-        # min(f_i) is at least min(lb_i) only when every branch has a lower bound.
-        aux_lb = min(lower_bounds) if len(lower_bounds) == len(branch_bounds) else None
-        # min(f_i) is at most any available upper bound on a branch.
-        aux_ub = min(upper_bounds) if upper_bounds else None
-        directional_bound = aux_ub
-
-    directional_bound = _finite_bound_or_none(directional_bound)
-    if directional_bound is None:
-        return None
-
-    lb = _finite_bound_or_none(aux_lb)
-    ub = _finite_bound_or_none(aux_ub)
-    aux_bounds = (
-        lb if lb is not None else -_EFFECTIVE_INF,
-        ub if ub is not None else _EFFECTIVE_INF,
-    )
-    if aux_bounds[0] > aux_bounds[1] + 1e-9:
-        return None
-    if aux_bounds[0] > aux_bounds[1]:
-        mid = 0.5 * (aux_bounds[0] + aux_bounds[1])
-        aux_bounds = (mid, mid)
-
-    return MinMaxObjectiveLift(
-        func_name=expr.func_name,
-        aux_col=-1,
-        branch_exprs=branch_exprs,
-        branch_bounds=branch_bounds,
-        aux_bounds=aux_bounds,
-    )
-
-
 def _normalize_convhull_formulation(formulation: str) -> str:
     """Normalize accepted bilinear convex-hull mode names."""
     aliases = {
@@ -1459,36 +1052,6 @@ def _power_tangent_line(t: float, n: int) -> tuple[float, float]:
     return slope, intercept
 
 
-def _power_secant_line(lb: float, ub: float, n: int) -> tuple[float, float]:
-    """Return slope/intercept for the secant through (lb, lb**n) and (ub, ub**n)."""
-    if abs(ub - lb) <= 1e-12:
-        return 0.0, float(lb**n)
-    slope = float((ub**n - lb**n) / (ub - lb))
-    intercept = float(lb**n - slope * lb)
-    return slope, intercept
-
-
-def _power_is_convex_on_box(n: int, lb: float) -> bool:
-    """Return True when x**n is convex on the current box."""
-    return n % 2 == 0 or lb >= 0.0
-
-
-def _monomial_breakpoints(
-    var_idx: int,
-    lb_i: float,
-    ub_i: float,
-    disc_state: DiscretizationState,
-) -> list[float]:
-    """Return refinement-aware monomial cut points, including zero when needed."""
-    if var_idx in disc_state.partitions and len(disc_state.partitions[var_idx]) >= 2:
-        points = [float(p) for p in disc_state.partitions[var_idx]]
-    else:
-        points = [lb_i, ub_i]
-    if lb_i < 0.0 < ub_i:
-        points.append(0.0)
-    return _sorted_unique_points(points)
-
-
 def _odd_mixed_tangent_is_valid(
     t: float,
     lb: float,
@@ -1510,28 +1073,6 @@ def _odd_mixed_tangent_is_valid(
     if kind == "over":
         return all(diff <= tol for diff in diffs)
     raise ValueError(f"Unknown tangent validity kind: {kind}")
-
-
-def _choose_trilinear_pair(
-    term: tuple[int, int, int],
-    partitioned_vars: set[int],
-) -> tuple[tuple[int, int], int]:
-    """Choose a deterministic trilinear decomposition pair.
-
-    Prefer a pair that includes as many currently partitioned original variables as
-    possible so the first or second lifted bilinear term can reuse the stronger
-    piecewise relaxation machinery already present for bilinear terms.
-    """
-    i, j, k = tuple(sorted(term))
-    candidates = [((i, j), k), ((i, k), j), ((j, k), i)]
-    candidates.sort()
-    return max(
-        candidates,
-        key=lambda item: (
-            sum(v in partitioned_vars for v in item[0]),
-            item[0][0] in partitioned_vars or item[0][1] in partitioned_vars,
-        ),
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -1634,7 +1175,7 @@ def _decompose_product(
                 # constraint drops from the relaxation, freezing the dual bound.
                 # The monomial aux carries a rigorous power envelope and the
                 # bilinear envelope between the two lifted columns is registered by
-                # ``_collect_lifted_bilinear_products``, so resolving it here only
+                # the uniform engine's product relaxation, so resolving it here only
                 # ever shrinks the relaxed set toward the true one (sound).
                 if monomial_var_map and exp_val == int(exp_val) and int(exp_val) >= 2:
                     mono_key = (base_flat, int(exp_val))
@@ -1698,210 +1239,6 @@ def _decompose_product(
     return scalar[0], var_indices
 
 
-def _decompose_signed_monomial(expr: Expression, model: Model) -> tuple[float, list[int]] | None:
-    """Decompose a signed product / quotient-by-constant into ``(coeff, indices)``.
-
-    Folds every variable-free subexpression (including composite constants such as
-    gear4's ``neg(1e6)``) into ``coeff`` and collects the flat indices of the
-    original-variable factors (with repeats for integer powers ``x**n``,
-    ``2 ≤ n ≤ 4``). Returns ``None`` the moment a non-constant, non-variable,
-    non-product/​power leaf — a transcendental call, an additive operand, or a
-    division by a variable — is encountered, so the caller only ever sees a
-    genuine signed monomial in original variables.
-    """
-    const = _eval_constant_expr(expr)
-    if const is not None:
-        return const, []
-    flat = _get_flat_index(expr, model)
-    if flat is not None:
-        return 1.0, [flat]
-    if isinstance(expr, UnaryOp) and expr.op == "neg":
-        sub = _decompose_signed_monomial(expr.operand, model)
-        if sub is None:
-            return None
-        c, idx = sub
-        return -c, idx
-    if isinstance(expr, BinaryOp) and expr.op == "*":
-        left = _decompose_signed_monomial(expr.left, model)
-        if left is None:
-            return None
-        right = _decompose_signed_monomial(expr.right, model)
-        if right is None:
-            return None
-        return left[0] * right[0], left[1] + right[1]
-    if isinstance(expr, BinaryOp) and expr.op == "/":
-        denom = _eval_constant_expr(expr.right)
-        if denom is None or denom == 0.0:
-            return None
-        sub = _decompose_signed_monomial(expr.left, model)
-        if sub is None:
-            return None
-        return sub[0] / denom, sub[1]
-    if isinstance(expr, BinaryOp) and expr.op == "**" and isinstance(expr.right, Constant):
-        p = _eval_constant_expr(expr.right)
-        if p is not None and p.is_integer() and 2 <= int(p) <= 4:
-            base = _decompose_signed_monomial(expr.left, model)
-            if base is None:
-                return None
-            bc, bidx = base
-            return bc ** int(p), bidx * int(p)
-    return None
-
-
-def _collect_lifted_bilinear_products(
-    model: Model,
-    fractional_power_var_map: dict[tuple[int, float], int],
-    univariate_var_map: dict[object, int],
-    n_orig: int,
-    monomial_var_map: Optional[dict[tuple[int, int], int]] = None,
-    composite_var_map: Optional[dict[int, int]] = None,
-) -> list[tuple[int, int]]:
-    """Return products between original variables and lifted auxiliary columns."""
-    keys: set[tuple[int, int]] = set()
-
-    def visit(expr: Expression) -> None:
-        if isinstance(expr, BinaryOp):
-            if expr.op == "*":
-                decomp = _decompose_product(
-                    expr,
-                    model,
-                    fractional_power_var_map=fractional_power_var_map,
-                    univariate_var_map=univariate_var_map,
-                    monomial_var_map=monomial_var_map,
-                    composite_var_map=composite_var_map,
-                )
-                if decomp is not None:
-                    _scalar, indices = decomp
-                    unique = list(dict.fromkeys(indices))
-                    if (
-                        len(unique) == 2
-                        and len(indices) == 2
-                        and any(idx >= n_orig for idx in unique)
-                    ):
-                        i, j = sorted(unique)
-                        keys.add((i, j))
-            visit(expr.left)
-            visit(expr.right)
-            return
-
-        if isinstance(expr, UnaryOp):
-            visit(expr.operand)
-            return
-
-        if isinstance(expr, FunctionCall):
-            for arg in expr.args:
-                visit(arg)
-            return
-
-        if isinstance(expr, IndexExpression):
-            if not isinstance(expr.base, Variable):
-                visit(expr.base)
-            return
-
-        if isinstance(expr, SumExpression):
-            visit(expr.operand)
-            return
-
-        if isinstance(expr, SumOverExpression):
-            for term in expr.terms:
-                visit(term)
-
-    if model._objective is not None:
-        visit(distribute_products(model._objective.expression))
-    for constraint in model._constraints:
-        visit(distribute_products(constraint.body))
-
-    return sorted(keys)
-
-
-def _collect_lifted_higher_products(
-    model: Model,
-    fractional_power_var_map: dict[tuple[int, float], int],
-    univariate_var_map: dict[object, int],
-    n_orig: int,
-    monomial_var_map: Optional[dict[tuple[int, int], int]] = None,
-    composite_var_map: Optional[dict[int, int]] = None,
-) -> tuple[list[tuple[int, int, int]], list[tuple[int, ...]]]:
-    """Return trilinear/multilinear products that involve a lifted aux column.
-
-    The trilinear/multilinear allocation loops in :func:`build_milp_relaxation`
-    are populated only from ``terms.trilinear`` / ``terms.multilinear``, which
-    the term classifier records over *original* variables. A product such as
-    ``x**2 * y * z`` is dumped into ``general_nl``; after :func:`_decompose_product`
-    collapses ``x*x`` into its monomial aux column it becomes a three-distinct-column
-    product ``[col(x**2), y, z]`` whose key never appears in those classifier
-    sets, so the linearizer raised ``"Trilinear (i,j,k) not in map"`` and the
-    whole objective/constraint dropped (issue #139, bucket 2).
-
-    This collector walks the objective and constraints exactly like
-    :func:`_collect_lifted_bilinear_products` and returns the distinct-column
-    products with no repeated factor (``len(indices) == len(unique)``) where at
-    least one factor is a lifted aux column (``idx >= n_orig``). They are split
-    by arity into trilinear (three columns) and multilinear (four or more).
-    The recursive bilinear chain that relaxes them is already proven sound:
-    each stage is a standard McCormick envelope on interval-arithmetic bounds.
-    """
-    trilinear: set[tuple[int, int, int]] = set()
-    multilinear: set[tuple[int, ...]] = set()
-
-    def visit(expr: Expression) -> None:
-        if isinstance(expr, BinaryOp):
-            if expr.op == "*":
-                decomp = _decompose_product(
-                    expr,
-                    model,
-                    fractional_power_var_map=fractional_power_var_map,
-                    univariate_var_map=univariate_var_map,
-                    monomial_var_map=monomial_var_map,
-                    composite_var_map=composite_var_map,
-                )
-                if decomp is not None:
-                    _scalar, indices = decomp
-                    unique = list(dict.fromkeys(indices))
-                    if (
-                        len(unique) == len(indices)
-                        and len(unique) >= 3
-                        and any(idx >= n_orig for idx in unique)
-                    ):
-                        ordered = tuple(sorted(unique))
-                        if len(ordered) == 3:
-                            trilinear.add(ordered)  # type: ignore[arg-type]
-                        else:
-                            multilinear.add(ordered)
-            visit(expr.left)
-            visit(expr.right)
-            return
-
-        if isinstance(expr, UnaryOp):
-            visit(expr.operand)
-            return
-
-        if isinstance(expr, FunctionCall):
-            for arg in expr.args:
-                visit(arg)
-            return
-
-        if isinstance(expr, IndexExpression):
-            if not isinstance(expr.base, Variable):
-                visit(expr.base)
-            return
-
-        if isinstance(expr, SumExpression):
-            visit(expr.operand)
-            return
-
-        if isinstance(expr, SumOverExpression):
-            for term in expr.terms:
-                visit(term)
-
-    if model._objective is not None:
-        visit(distribute_products(model._objective.expression))
-    for constraint in model._constraints:
-        visit(distribute_products(constraint.body))
-
-    return sorted(trilinear), sorted(multilinear, key=lambda t: (len(t), t))
-
-
 # Univariate functions whose superposition cuts are supported: smooth on any
 # box the lifted aux already validated, so the Chebyshev kernel encloses them
 # rigorously. ``abs`` (non-smooth) and ``tan`` (poles) are deliberately omitted.
@@ -1915,148 +1252,6 @@ _SUPERPOSITION_FUNCS = {
     "sin",
     "cos",
 }
-
-
-def _superposition_jax_func(func_name: str):
-    """Return a jax-traceable callable for ``func_name``, or ``None`` if unsupported."""
-    import jax.numpy as jnp
-
-    table = {
-        "exp": jnp.exp,
-        "log": jnp.log,
-        "log2": lambda t: jnp.log(t) / jnp.log(2.0),
-        "log10": lambda t: jnp.log(t) / jnp.log(10.0),
-        "sqrt": jnp.sqrt,
-        "reciprocal": lambda t: 1.0 / t,
-        "sin": jnp.sin,
-        "cos": jnp.cos,
-    }
-    return table.get(func_name)
-
-
-def _add_superposition_cuts(
-    add_row,
-    univariate_by_aux_col: dict[int, "UnivariateRelaxation"],
-    bilinear_var_map: dict[tuple[int, int], int],
-    flat_lb: np.ndarray,
-    flat_ub: np.ndarray,
-    n_orig: int,
-    n_total: int,
-) -> None:
-    """Inject rigorous interior-reference cuts for lifted ``w = f(arg)*y`` products.
-
-    For each bilinear aux ``w`` whose factors are a lifted univariate aux
-    ``u = f(arg)`` (``arg`` affine in the original variables) and an original
-    variable ``y``, emit the superposition cut family from
-    :mod:`discopt._jax.superposition`. Each cut is an individually valid global
-    bound on the true product surface, so the LP stays a sound lower-bounding
-    relaxation. Any term that cannot be handled safely is skipped (never relaxed
-    incorrectly): unsupported function, shared variable between ``arg`` and
-    ``y``, degenerate box, or a non-finite cut coefficient.
-    """
-    from discopt._jax.superposition import (
-        BilinearNonlinearTerm,
-        bilinear_nonlinear_cuts,
-        superposition_references,
-    )
-
-    for (i, j), w_col in bilinear_var_map.items():
-        # Identify the univariate-aux factor and the original-variable factor.
-        if i in univariate_by_aux_col and j < n_orig:
-            relax = univariate_by_aux_col[i]
-            y_col = j
-        elif j in univariate_by_aux_col and i < n_orig:
-            relax = univariate_by_aux_col[j]
-            y_col = i
-        else:
-            continue
-
-        func = _superposition_jax_func(relax.func_name)
-        if func is None:
-            continue
-
-        arg_coeff = np.asarray(relax.arg_coeff, dtype=np.float64)
-        # ``y`` must be independent of the argument of ``f`` for the bilinear
-        # split to be valid; skip if it appears in the affine argument.
-        if y_col < len(arg_coeff) and arg_coeff[y_col] != 0.0:
-            continue
-
-        x_lb, x_ub = float(relax.arg_lb), float(relax.arg_ub)
-        y_lb, y_ub = float(flat_lb[y_col]), float(flat_ub[y_col])
-        if not (x_lb < x_ub and y_lb < y_ub):
-            continue
-        if not (
-            np.isfinite(x_lb) and np.isfinite(x_ub) and np.isfinite(y_lb) and np.isfinite(y_ub)
-        ):
-            continue
-
-        try:
-            term = BilinearNonlinearTerm(func, (x_lb, x_ub), (y_lb, y_ub))
-            refs = superposition_references((x_lb, x_ub), (y_lb, y_ub))
-            cuts = bilinear_nonlinear_cuts(term, refs)
-        except (ValueError, ArithmeticError, FloatingPointError):
-            continue
-
-        arg_const = float(relax.arg_const)
-        for cut in cuts:
-            # Local cut over (t, y, w): coeffs = [-ax, -ay, 1] with t the
-            # argument of f. Substitute t = arg_coeff·x + arg_const.
-            neg_ax, neg_ay, aw = (float(c) for c in cut.coeffs)
-            row = np.zeros(n_total, dtype=np.float64)
-            row[:n_orig] += neg_ax * arg_coeff[:n_orig]
-            row[y_col] += neg_ay
-            row[w_col] += aw
-            rhs = float(cut.rhs) - neg_ax * arg_const
-            if not np.all(np.isfinite(row)) or not np.isfinite(rhs):
-                continue
-            # ``add_row(coeff, rhs)`` encodes ``coeff·z <= rhs``.
-            if cut.sense == "<=":
-                add_row(row, rhs)
-            elif cut.sense == ">=":
-                add_row(-row, -rhs)
-
-
-def _collect_distinct_multilinear_products(model: Model) -> list[tuple[int, ...]]:
-    """Return distinct-variable product terms with four or more factors."""
-    terms: set[tuple[int, ...]] = set()
-
-    def visit(expr: Expression) -> None:
-        if isinstance(expr, BinaryOp):
-            if expr.op == "*":
-                decomp = _decompose_product(expr, model)
-                if decomp is not None:
-                    _, indices = decomp
-                    unique = list(dict.fromkeys(indices))
-                    if len(unique) >= 4 and len(unique) == len(indices):
-                        terms.add(tuple(sorted(unique)))
-                        return
-            visit(expr.left)
-            visit(expr.right)
-            return
-
-        if isinstance(expr, UnaryOp):
-            visit(expr.operand)
-            return
-
-        if isinstance(expr, SumExpression):
-            visit(expr.operand)
-            return
-
-        if isinstance(expr, SumOverExpression):
-            for term in expr.terms:
-                visit(term)
-            return
-
-        if isinstance(expr, FunctionCall):
-            for arg in expr.args:
-                visit(arg)
-
-    if model._objective is not None:
-        visit(model._objective.expression)
-    for constraint in model._constraints:
-        visit(constraint.body)
-
-    return sorted(terms)
 
 
 def _linear_constraint_forms(model: Model, n_vars: int) -> list[tuple[np.ndarray, float]]:
@@ -2236,33 +1431,6 @@ def _linearize_affine_expr(expr: Expression, model: Model, n_vars: int) -> tuple
     return coeff, const_acc[0]
 
 
-def _univariate_arg(expr: Expression) -> tuple[str, Expression] | None:
-    """Return (operator_name, argument) for supported univariate nodes."""
-    if isinstance(expr, FunctionCall) and len(expr.args) == 1:
-        name = expr.func_name
-        if name in {
-            "sqrt",
-            "log",
-            "log2",
-            "log10",
-            "exp",
-            "abs",
-            "sin",
-            "cos",
-            "tan",
-            "asin",
-            "acos",
-            "acosh",
-            "entropy",
-        }:
-            return name, expr.args[0]
-    if isinstance(expr, UnaryOp) and expr.op == "abs":
-        return "abs", expr.operand
-    if isinstance(expr, BinaryOp) and expr.op == "/" and _constant_value(expr.left) is not None:
-        return "reciprocal", expr.right
-    return None
-
-
 def _univariate_value(func_name: str, x: float) -> float:
     """Evaluate a supported scalar univariate function."""
     if func_name == "sqrt":
@@ -2330,18 +1498,6 @@ def _univariate_grad(func_name: str, x: float) -> float:
         # d/dx [x*log(x)] = log(x) + 1 (finite only for x > 0).
         return float(np.log(x) + 1.0)
     raise ValueError(f"No smooth derivative for univariate function: {func_name}")
-
-
-def _tan_domain_ok(arg_lb: float, arg_ub: float) -> bool:
-    """Return True when ``tan`` is finite and continuous on the interval."""
-    if not np.isfinite(arg_lb) or not np.isfinite(arg_ub) or arg_lb > arg_ub:
-        return False
-    half_pi = 0.5 * np.pi
-    k = np.ceil((arg_lb - half_pi) / np.pi)
-    asymptote = half_pi + k * np.pi
-    if arg_lb <= asymptote <= arg_ub:
-        return False
-    return all(_is_effectively_finite(np.tan(x)) for x in (arg_lb, arg_ub))
 
 
 def _univariate_domain_ok(func_name: str, arg_lb: float, arg_ub: float) -> bool:
@@ -2470,209 +1626,6 @@ def _univariate_curvature(func_name: str, val_lb: float, val_ub: float) -> Optio
     return None
 
 
-def _trig_partition_breakpoints(
-    relax: UnivariateRelaxation,
-    disc_state: DiscretizationState,
-    n_orig: int,
-) -> list[float]:
-    """Return safe breakpoints for a mixed-curvature trig argument interval."""
-    lb = float(relax.arg_lb)
-    ub = float(relax.arg_ub)
-    if relax.func_name not in {"sin", "cos", "tan"} or not (np.isfinite(lb) and np.isfinite(ub)):
-        return [lb, ub]
-
-    points = [lb, ub]
-    if relax.func_name == "sin":
-        curvature_start, critical_start = 0.0, math.pi / 2.0
-        points.extend(_critical_points_in_interval(critical_start, math.pi, lb, ub))
-    elif relax.func_name == "cos":
-        curvature_start, critical_start = math.pi / 2.0, 0.0
-        points.extend(_critical_points_in_interval(critical_start, math.pi, lb, ub))
-    else:
-        curvature_start = 0.0
-
-    points.extend(_critical_points_in_interval(curvature_start, math.pi, lb, ub))
-
-    nz = np.flatnonzero(np.abs(relax.arg_coeff) > 1e-12)
-    if nz.size == 1:
-        var_idx = int(nz[0])
-        if var_idx < n_orig and var_idx in disc_state.partitions:
-            coeff = float(relax.arg_coeff[var_idx])
-            partition = np.asarray(disc_state.partitions[var_idx], dtype=np.float64)
-            if partition.size <= _MAX_TRIG_IMPORTED_BREAKPOINTS:
-                transformed = coeff * partition + relax.arg_const
-                points.extend(float(p) for p in transformed)
-
-    # A modest fixed split keeps the dedicated trig relaxation useful even when
-    # no AMP variable partition exists for the affine argument.
-    base = _sorted_unique_points([p for p in points if lb - 1e-12 <= p <= ub + 1e-12])
-    refined: list[float] = []
-    for a, b in zip(base[:-1], base[1:]):
-        if not refined:
-            refined.append(float(a))
-        width = float(b - a)
-        if width > _MAX_TRIG_PIECEWISE_WIDTH:
-            n_chunks = int(math.ceil(width / _MAX_TRIG_PIECEWISE_WIDTH))
-            for k in range(1, n_chunks):
-                refined.append(float(a + width * k / n_chunks))
-        refined.append(float(b))
-    return _sorted_unique_points(refined or base)
-
-
-def _trig_piecewise_interval_specs(
-    relax: UnivariateRelaxation,
-    disc_state: DiscretizationState,
-    n_orig: int,
-) -> list[tuple[float, float, Optional[str]]]:
-    """Build certified curvature subintervals for mixed-curvature trig functions."""
-    if relax.func_name not in {"sin", "cos", "tan"}:
-        return []
-    if not (np.isfinite(relax.arg_lb) and np.isfinite(relax.arg_ub)):
-        return []
-    if relax.arg_ub - relax.arg_lb >= _MAX_TRIG_PIECEWISE_SPAN:
-        return []
-    bounds = _trig_range(relax.func_name, relax.arg_lb, relax.arg_ub)
-    if bounds is None:
-        return []
-    if _univariate_curvature(relax.func_name, bounds[0], bounds[1]) is not None:
-        return []
-
-    points = _trig_partition_breakpoints(relax, disc_state, n_orig)
-    if len(points) - 1 > _MAX_TRIG_PIECEWISE_INTERVALS:
-        return []
-    intervals: list[tuple[float, float, Optional[str]]] = []
-    for a, b in zip(points[:-1], points[1:]):
-        if b <= a + 1e-12:
-            continue
-        local_bounds = _trig_range(relax.func_name, a, b)
-        curvature = None
-        if local_bounds is not None:
-            curvature = _univariate_curvature(relax.func_name, local_bounds[0], local_bounds[1])
-        intervals.append((float(a), float(b), curvature))
-    if sum(1 for _a, _b, curvature in intervals if curvature is not None) < 2:
-        return []
-    return intervals
-
-
-def _inverse_trig_piecewise_interval_specs(
-    relax: UnivariateRelaxation,
-) -> list[tuple[float, float, Optional[str]]]:
-    """Build certified curvature subintervals for asin/acos across the inflection.
-
-    ``asin``/``acos`` change curvature at the argument value 0 (the inflection
-    point).  When the argument interval straddles 0 we split it there into two
-    sign-definite, single-curvature pieces; otherwise the single-curvature path
-    in the main builder already applies.
-    """
-    if relax.func_name not in {"asin", "acos"}:
-        return []
-    lb = float(relax.arg_lb)
-    ub = float(relax.arg_ub)
-    if not (np.isfinite(lb) and np.isfinite(ub)):
-        return []
-    if not (lb < -1e-12 and ub > 1e-12):
-        return []
-
-    intervals: list[tuple[float, float, Optional[str]]] = []
-    for a, b in ((lb, 0.0), (0.0, ub)):
-        if b <= a + 1e-12:
-            continue
-        val_lb, val_ub = _univariate_value_bounds(relax.func_name, a, b)
-        curvature = _univariate_curvature(relax.func_name, val_lb, val_ub)
-        intervals.append((float(a), float(b), curvature))
-    if sum(1 for _a, _b, curvature in intervals if curvature is not None) < 2:
-        return []
-    return intervals
-
-
-def _affine_argument_has_continuous_var(arg_coeff: np.ndarray, model: Model) -> bool:
-    """Return true if an affine argument depends on at least one continuous variable."""
-    offset = 0
-    for var in model._variables:
-        is_continuous = var.var_type not in (VarType.BINARY, VarType.INTEGER)
-        for k in range(var.size):
-            if abs(float(arg_coeff[offset + k])) > 1e-12 and is_continuous:
-                return True
-        offset += var.size
-    return False
-
-
-def _trig_square_partition_breakpoints(
-    relax: UnivariateRelaxation,
-    disc_state: DiscretizationState,
-    n_orig: int,
-) -> list[float]:
-    """Return safe breakpoints for a mixed-curvature trig-square argument interval."""
-    lb = float(relax.arg_lb)
-    ub = float(relax.arg_ub)
-    points = [lb, ub]
-    points.extend(_critical_points_in_interval(0.0, math.pi / 2.0, lb, ub))
-    points.extend(_critical_points_in_interval(math.pi / 4.0, math.pi / 2.0, lb, ub))
-
-    nz = np.flatnonzero(np.abs(relax.arg_coeff) > 1e-12)
-    if nz.size == 1:
-        var_idx = int(nz[0])
-        if var_idx < n_orig and var_idx in disc_state.partitions:
-            coeff = float(relax.arg_coeff[var_idx])
-            partition = np.asarray(disc_state.partitions[var_idx], dtype=np.float64)
-            if partition.size <= _MAX_TRIG_IMPORTED_BREAKPOINTS:
-                transformed = coeff * partition + relax.arg_const
-                points.extend(float(p) for p in transformed)
-
-    base = _sorted_unique_points([p for p in points if lb - 1e-12 <= p <= ub + 1e-12])
-    refined: list[float] = []
-    for a, b in zip(base[:-1], base[1:]):
-        if not refined:
-            refined.append(float(a))
-        width = float(b - a)
-        if width > _MAX_TRIG_PIECEWISE_WIDTH:
-            n_chunks = int(math.ceil(width / _MAX_TRIG_PIECEWISE_WIDTH))
-            for k in range(1, n_chunks):
-                refined.append(float(a + width * k / n_chunks))
-        refined.append(float(b))
-    return _sorted_unique_points(refined or base)
-
-
-def _trig_square_piecewise_interval_specs(
-    relax: UnivariateRelaxation,
-    disc_state: DiscretizationState,
-    n_orig: int,
-) -> list[tuple[float, float, Optional[str]]]:
-    """Build certified curvature subintervals for mixed-curvature trig-square terms."""
-    if relax.func_name not in {"sin", "cos"}:
-        return []
-    if not (np.isfinite(relax.arg_lb) and np.isfinite(relax.arg_ub)):
-        return []
-    if relax.arg_ub - relax.arg_lb >= _MAX_TRIG_PIECEWISE_SPAN:
-        return []
-    if _trig_square_range(relax.func_name, relax.arg_lb, relax.arg_ub) is None:
-        return []
-    if _trig_square_curvature(relax.func_name, relax.arg_lb, relax.arg_ub) is not None:
-        return []
-
-    points = _trig_square_partition_breakpoints(relax, disc_state, n_orig)
-    if len(points) - 1 > _MAX_TRIG_PIECEWISE_INTERVALS:
-        return []
-
-    intervals: list[tuple[float, float, Optional[str]]] = []
-    for a, b in zip(points[:-1], points[1:]):
-        if b <= a + 1e-12:
-            continue
-        curvature = _trig_square_curvature(relax.func_name, a, b)
-        intervals.append((float(a), float(b), curvature))
-    if sum(1 for _a, _b, curvature in intervals if curvature is not None) < 2:
-        return []
-    return intervals
-
-
-def _univariate_signature(
-    func_name: str,
-    arg_coeff: np.ndarray,
-    arg_const: float,
-) -> tuple[str, tuple[float, ...], float]:
-    return func_name, tuple(float(c) for c in arg_coeff.tolist()), float(arg_const)
-
-
 def _flatten_additive_terms(
     expr: Expression, scale: float, out: list[tuple[float, Expression]]
 ) -> None:
@@ -2717,51 +1670,6 @@ def _match_scaled_constant_division(
     if numerator is None or abs(numerator) <= 1e-12:
         return None
     return scale * numerator, expr.right
-
-
-def _exact_positive_reciprocal_row(
-    expr: Expression,
-    model: Model,
-    flat_lb: np.ndarray,
-    flat_ub: np.ndarray,
-) -> Optional[tuple[np.ndarray, float]]:
-    """Match ``constant - numerator / positive_affine <= 0`` as an exact affine row."""
-    terms: list[tuple[float, Expression]] = []
-    _flatten_additive_terms(expr, 1.0, terms)
-
-    constant_term = 0.0
-    reciprocal_match: Optional[tuple[float, Expression]] = None
-
-    for scale, term in terms:
-        const_val = _constant_value(term)
-        if const_val is not None:
-            constant_term += scale * const_val
-            continue
-
-        match = _match_scaled_constant_division(term, scale)
-        if match is None or reciprocal_match is not None:
-            return None
-        reciprocal_match = match
-
-    if reciprocal_match is None or constant_term <= 0.0:
-        return None
-
-    scaled_numerator, denominator = reciprocal_match
-    if scaled_numerator >= 0.0:
-        return None
-
-    try:
-        denom_coeff, denom_const = _linearize_affine_expr(denominator, model, len(flat_lb))
-        denom_lb, _denom_ub = _linear_expr_bounds(denom_coeff, denom_const, flat_lb, flat_ub)
-    except ValueError:
-        return None
-
-    if denom_lb <= 0.0:
-        return None
-    rhs = -scaled_numerator / constant_term
-    if not np.isfinite(rhs):
-        return None
-    return denom_coeff, float(rhs - denom_const)
 
 
 def _flatten_product_factors(expr: Expression, out: list[Expression]) -> None:
@@ -2936,94 +1844,6 @@ def _integer_affine_cos_lower_bound(
             arg += c * float(value)
         best = min(best, scale * float(np.cos(arg)))
     return float(best) if np.isfinite(best) else None
-
-
-def _integer_affine_trig_range(
-    func_name: str,
-    coeff: np.ndarray,
-    const: float,
-    model: Model,
-    flat_lb: np.ndarray,
-    flat_ub: np.ndarray,
-) -> Optional[tuple[float, float]]:
-    """Return exact range for trig(affine integer vars) on small finite domains."""
-    if func_name not in {"sin", "cos", "tan"}:
-        return None
-
-    flat_types = _flat_variable_types(model)
-    entries: list[tuple[float, range]] = []
-    n_values = 1
-    for var_idx, c_i in enumerate(coeff):
-        c = float(c_i)
-        if abs(c) <= 1e-12:
-            continue
-        values = _integer_domain_values(var_idx, flat_types, flat_lb, flat_ub)
-        if values is None:
-            return None
-        n_values *= len(values)
-        if n_values > _MAX_INTEGER_COS_ENUM:
-            return None
-        entries.append((c, values))
-
-    if not entries:
-        value = _univariate_value(func_name, float(const))
-        return (value, value) if np.isfinite(value) else None
-
-    values_out: list[float] = []
-    for assignment in itertools.product(*(values for _c, values in entries)):
-        arg = float(const)
-        for (c, _values), value in zip(entries, assignment):
-            arg += c * float(value)
-        value_out = _univariate_value(func_name, arg)
-        if not np.isfinite(value_out):
-            return None
-        values_out.append(value_out)
-    if not values_out:
-        return None
-    return min(values_out), max(values_out)
-
-
-def _finite_domain_trig_square_table_values(
-    relax: UnivariateRelaxation,
-    model: Model,
-    flat_lb: np.ndarray,
-    flat_ub: np.ndarray,
-) -> Optional[tuple[int, float, float, list[int], list[float], list[float]]]:
-    """Return exact finite-domain values for a single integer trig-square argument."""
-    if relax.func_name not in {"sin", "cos"}:
-        return None
-
-    nz = np.flatnonzero(np.abs(relax.arg_coeff) > 1e-12)
-    if nz.size != 1:
-        return None
-
-    var_idx = int(nz[0])
-    flat_types = _flat_variable_types(model)
-    domain = _integer_domain_values(var_idx, flat_types, flat_lb, flat_ub)
-    if domain is None:
-        return None
-
-    domain_values = list(domain)
-    if not domain_values or len(domain_values) > _MAX_FINITE_DOMAIN_TRIG_TABLE_VALUES:
-        return None
-
-    arg_coeff = float(relax.arg_coeff[var_idx])
-    arg_const = float(relax.arg_const)
-    if not (_is_effectively_finite(arg_coeff) and _is_effectively_finite(arg_const)):
-        return None
-
-    trig_values: list[float] = []
-    square_values: list[float] = []
-    for value in domain_values:
-        arg = arg_coeff * float(value) + arg_const
-        trig_value = _univariate_value(relax.func_name, arg)
-        square_value = trig_value * trig_value
-        if not (np.isfinite(trig_value) and np.isfinite(square_value)):
-            return None
-        trig_values.append(float(trig_value))
-        square_values.append(float(square_value))
-
-    return var_idx, arg_coeff, arg_const, domain_values, trig_values, square_values
 
 
 def _scaled_affine_lower_bound(
@@ -3399,36 +2219,11 @@ def _separable_objective_lower_bound(
 
 
 @dataclass
-class CompositeUnivariateRelaxation:
-    """Outer relaxation for a single-variable nonlinear node of certified curvature.
-
-    Unlike :class:`UnivariateRelaxation` (a named operator of an *affine*
-    argument), this handles a composite node ``f(x_i)`` that depends on a single
-    original variable but whose internal structure is non-affine — e.g.
-    ``sqrt(x**2 + c)``, ``(a*x + b)**p``, or ``exp(c - k/(d + x))``. Curvature is
-    proven sound on the node box (analytic power rule, or a subdivided
-    interval-Hessian certificate), so the tangent/secant envelope below is a
-    rigorous outer approximation. The aux column ``z`` satisfies
-    ``lower_lines ≤ z ≤ upper_lines`` (convex: tangents below, secant above;
-    concave: secant below, tangents above).
-    """
-
-    expr_id: int
-    aux_col: int
-    var_idx: int
-    curvature: str
-    arg_lb: float
-    arg_ub: float
-    lower_lines: tuple[tuple[float, float], ...]
-    upper_lines: tuple[tuple[float, float], ...]
-    pin_value: Optional[float]
-
-
-@dataclass
 class CompositeMultivarRelaxation:
     """Outer relaxation for a *multivariate* convex/concave nonlinear node.
 
-    Generalizes :class:`CompositeUnivariateRelaxation` to a node ``g(x)`` that
+    The multivariate counterpart of the composite univariate convex/concave
+    relaxation: a node ``g(x)`` that
     depends on **more than one** original variable but whose global curvature is
     certified by the DCP classifier — e.g. the Euclidean distance
     ``sqrt((x0-x2)**2 + (x1-x3)**2) = ||A x + b||`` of a TSP-with-neighbourhoods
@@ -3488,78 +2283,6 @@ def _build_convexity_box(model: Model, flat_lb: np.ndarray, flat_ub: np.ndarray)
     return box
 
 
-def _composite_referenced_var(expr: Expression, model: Model) -> Optional[tuple[Variable, int]]:
-    """Return ``(var, flat_idx)`` if ``expr`` depends on exactly one scalar variable."""
-    found: dict[int, Variable] = {}
-
-    def visit(e: Expression) -> None:
-        if isinstance(e, Variable):
-            found[id(e)] = e
-            return
-        if isinstance(e, IndexExpression):
-            if isinstance(e.base, Variable):
-                found[id(e.base)] = e.base
-            else:
-                visit(e.base)
-            return
-        if isinstance(e, BinaryOp):
-            visit(e.left)
-            visit(e.right)
-        elif isinstance(e, UnaryOp):
-            visit(e.operand)
-        elif isinstance(e, FunctionCall):
-            for a in e.args:
-                visit(a)
-        elif isinstance(e, SumExpression):
-            visit(e.operand)
-        elif isinstance(e, SumOverExpression):
-            for t in e.terms:
-                visit(t)
-
-    visit(expr)
-    if len(found) != 1:
-        return None
-    var = next(iter(found.values()))
-    if var.size != 1:
-        return None
-    return var, _compute_var_offset(var, model)
-
-
-def _log_monomial_enabled() -> bool:
-    """H-LOG feature flag (``DISCOPT_LOG_MONOMIAL``, default **OFF**).
-
-    Task ``cert:LR-2`` — the narrow positive-product piece F16 left alive
-    (``docs/dev/lever-a-root-tightness-plan.md`` §7; ``docs/dev/lr0-logspace-entry``).
-    Scoped to a **positive product** ``∏ xᵢ^{aᵢ}`` (every factor lb > 0 on the
-    FBBT-tightened box): the log-space relaxation ``zᵢ = ln xᵢ`` (exact concave
-    envelope), ``s = Σ aᵢ zᵢ`` (linear), ``t = exp(s)`` (exact convex envelope) is
-    far tighter than recursive McCormick for wide boxes. Default-OFF; when OFF the
-    relaxation is byte-identical to prior main.
-    """
-    return os.environ.get("DISCOPT_LOG_MONOMIAL", "0") != "0"
-
-
-def _expr_has_nonlinear_subterm(expr: Expression) -> bool:
-    """True if ``expr`` contains a FunctionCall or a non-unit power — i.e. it is
-    not a pure affine combination (which the exact linear path already handles)."""
-    if isinstance(expr, FunctionCall):
-        return True
-    if isinstance(expr, BinaryOp):
-        if expr.op == "**":
-            return True
-        if expr.op == "*":
-            # nonlinear unless one side is constant
-            if not (isinstance(expr.left, Constant) or isinstance(expr.right, Constant)):
-                return True
-            return _expr_has_nonlinear_subterm(expr.left) or _expr_has_nonlinear_subterm(expr.right)
-        if expr.op in ("+", "-"):
-            return _expr_has_nonlinear_subterm(expr.left) or _expr_has_nonlinear_subterm(expr.right)
-        return True  # "/" and other ops are nonlinear
-    if isinstance(expr, UnaryOp):
-        return _expr_has_nonlinear_subterm(expr.operand)
-    return False
-
-
 def _affine_base_power_curvature(expr: Expression, model: Model, box: dict) -> Optional[str]:
     """Analytic curvature of ``(affine_base)**p`` from ``p`` and the base sign.
 
@@ -3599,251 +2322,6 @@ def _affine_base_power_curvature(expr: Expression, model: Model, box: dict) -> O
     if p > 1.0:
         return "convex"
     return "concave"  # 0 < p < 1
-
-
-def _subdivision_curvature(
-    expr: Expression,
-    model: Model,
-    var: Variable,
-    flat_idx: int,
-    lo: float,
-    hi: float,
-    box: dict,
-) -> Optional[str]:
-    """Sound curvature via an *adaptively refined* interval Hessian.
-
-    ``f`` is C² and depends on one variable, so its Hessian is the scalar
-    ``f''`` in entry ``(flat_idx, flat_idx)``. Covering ``[lo, hi]`` with
-    sub-intervals and enclosing ``f''`` on each tightens the dependency-induced
-    looseness of a single whole-box enclosure: if every piece has ``f'' ≥ 0``
-    the function is convex on the union ``[lo, hi]`` (symmetrically for concave).
-
-    Rather than re-evaluating a *uniform* grid at escalating densities
-    (4, 16, 64, … sub-intervals, each level recomputed from scratch — so a term
-    resolving only at the finest level paid for every coarser one), this refines
-    adaptively: check the whole box first (a convex/concave term with a tight
-    enclosure resolves in a single evaluation), and otherwise bisect *only* the
-    sub-intervals whose enclosure is still sign-ambiguous, down to the same
-    finest width ``(hi - lo) / _COMPOSITE_MAX_SUBDIV``. A depth-first descent fails
-    fast — the first finest-width piece that violates the target curvature refutes
-    it immediately. The finest resolution is unchanged, so any term the old
-    uniform sweep certified is still certified (no soundness or detection
-    regression); localized looseness just costs far fewer Hessian evaluations.
-    """
-    from discopt._jax.convexity.interval import Interval
-    from discopt._jax.convexity.interval_ad import interval_hessian
-
-    if hi - lo <= _COMPOSITE_CURV_TOL:
-        return None  # pinned — handled by the exact pin value, not an envelope
-    shape = var.shape if var.shape else (1,)
-    tol = _COMPOSITE_CURV_TOL
-    min_width = (hi - lo) / _COMPOSITE_MAX_SUBDIV
-    _ABSTAIN = object()  # sentinel: a non-finite enclosure → give up entirely
-
-    def _hess(a: float, b: float):
-        box[var] = Interval(
-            np.full(shape, a, dtype=np.float64), np.full(shape, b, dtype=np.float64)
-        )
-        try:
-            ad = interval_hessian(expr, model, box=box)
-        except Exception:
-            return None
-        h = ad.hess
-        h_lo = float(h.lo[flat_idx, flat_idx])
-        h_hi = float(h.hi[flat_idx, flat_idx])
-        if not (np.isfinite(h_lo) and np.isfinite(h_hi)):
-            return None
-        return h_lo, h_hi
-
-    def _prove(want_convex: bool):
-        """True if ``f`` is convex (resp. concave) over ``[lo, hi]``, False if
-        refuted at the finest width, ``_ABSTAIN`` on a non-finite enclosure."""
-        stack = [(lo, hi)]
-        while stack:
-            a, b = stack.pop()
-            r = _hess(a, b)
-            if r is None:
-                return _ABSTAIN
-            h_lo, h_hi = r
-            ok = (h_lo >= -tol) if want_convex else (h_hi <= tol)
-            if ok:
-                continue  # this piece does not threaten the target curvature
-            if (b - a) <= min_width * (1.0 + 1e-9):
-                return False  # genuine sign change at the finest resolution
-            m = 0.5 * (a + b)
-            stack.append((a, m))
-            stack.append((m, b))
-        return True
-
-    try:
-        whole = _hess(lo, hi)
-        if whole is None:
-            return None
-        h_lo, h_hi = whole
-        if h_lo >= -tol:
-            return "convex"
-        if h_hi <= tol:
-            return "concave"
-        # Genuine straddle on the whole box: refine, trying the leaning direction
-        # first (positive-leaning enclosure → convex) then the other.
-        lean_convex = (h_lo + h_hi) >= 0.0
-        for want_convex in (lean_convex, not lean_convex):
-            res = _prove(want_convex)
-            if res is _ABSTAIN:
-                return None
-            if res is True:
-                return "convex" if want_convex else "concave"
-        return None
-    finally:
-        box[var] = Interval(
-            np.full(shape, lo, dtype=np.float64), np.full(shape, hi, dtype=np.float64)
-        )
-
-
-def _composite_curvature(
-    expr: Expression,
-    model: Model,
-    var: Variable,
-    flat_idx: int,
-    lo: float,
-    hi: float,
-    box: dict,
-) -> Optional[str]:
-    """Certified curvature of a single-variable composite, or ``None`` to abstain."""
-    analytic = _affine_base_power_curvature(expr, model, box)
-    if analytic is not None:
-        return analytic
-    return _subdivision_curvature(expr, model, var, flat_idx, lo, hi, box)
-
-
-def _composite_envelope(
-    curvature: str,
-    lo: float,
-    hi: float,
-    value_fn,
-    grad_fn,
-) -> Optional[tuple[tuple, tuple, Optional[float], tuple[float, float]]]:
-    """Build (lower_lines, upper_lines, pin_value, col_bounds) for a composite.
-
-    Lines are ``(slope, intercept)`` in the single variable. For a convex
-    function tangents underestimate and the endpoint secant overestimates; the
-    roles swap for concave. Slopes/values come from exact autodiff, so for a
-    truly-convex (resp. concave) ``f`` each tangent is a supporting line and the
-    secant a chord — a rigorous outer band.
-
-    ``col_bounds`` is a rigorous box on the aux column derived from the same
-    certified curvature: a convex ``f`` attains its maximum at an endpoint, and
-    its underestimating tangents bound it from below (symmetrically for concave).
-    This avoids the interval evaluator, which abstains (``±inf``) on a
-    non-integer power whose base interval grazes zero.
-    """
-    if hi - lo <= _COMPOSITE_CURV_TOL:
-        v = value_fn(0.5 * (lo + hi))
-        if not np.isfinite(v):
-            return None
-        return (), (), float(v), (float(v), float(v))
-
-    pts: list[float] = []
-    for t in (lo, 0.5 * (lo + hi), hi):
-        if all(abs(t - s) > 1e-12 for s in pts):
-            pts.append(float(t))
-
-    f_lo = value_fn(lo)
-    f_hi = value_fn(hi)
-    if not (np.isfinite(f_lo) and np.isfinite(f_hi)):
-        return None
-    secant_slope = (f_hi - f_lo) / (hi - lo)
-    secant_intercept = f_lo - secant_slope * lo
-    if not (np.isfinite(secant_slope) and np.isfinite(secant_intercept)):
-        return None
-
-    tangents: list[tuple[float, float]] = []
-    for t in pts:
-        slope = grad_fn(t)
-        val = value_fn(t)
-        if not (np.isfinite(slope) and np.isfinite(val)):
-            return None
-        tangents.append((float(slope), float(val - slope * t)))
-
-    def _line_span(slope: float, intercept: float) -> tuple[float, float]:
-        a = slope * lo + intercept
-        b = slope * hi + intercept
-        return min(a, b), max(a, b)
-
-    secant = (float(secant_slope), float(secant_intercept))
-    if curvature == "convex":
-        # Max at an endpoint; tangents (underestimators) bound below.
-        col_hi = max(f_lo, f_hi)
-        col_lo = min(_line_span(s, b)[0] for s, b in tangents)
-        return tuple(tangents), (secant,), None, (float(col_lo), float(col_hi))
-    # Concave: min at an endpoint; tangents (overestimators) bound above.
-    col_lo = min(f_lo, f_hi)
-    col_hi = max(_line_span(s, b)[1] for s, b in tangents)
-    return (secant,), tuple(tangents), None, (float(col_lo), float(col_hi))
-
-
-def _alias_equality_defs(model: Model) -> dict[int, Expression]:
-    """Map an aux column index to the expression it equals via an ``aux == h``
-    equality constraint (the form ``factorable_reform`` emits: ``w - h == 0``).
-
-    Only equalities of the exact shape ``Variable(aux) - h == 0`` (or ``h -
-    Variable(aux) == 0``) with ``rhs == 0`` are recognised, so the alias is
-    unambiguous. Used by the H-UNI/H-LOG lifts to relax the *aux's* nonlinear
-    uses against the underlying ``h`` when the reform has split the structure
-    (e.g. nvs09's ``(ln(x-2))**2`` becomes ``aux == ln(x-2)`` + objective
-    ``aux**2``). Structure-only — no instance names.
-    """
-    defs: dict[int, Expression] = {}
-    for con in model._constraints:
-        if con.sense != "==" or abs(float(con.rhs)) > 1e-12:
-            continue
-        body = con.body
-        if not (isinstance(body, BinaryOp) and body.op == "-"):
-            continue
-        left, right = body.left, body.right
-        # aux - h == 0  (aux is a bare variable/index)
-        aux_idx = _get_flat_index(left, model)
-        other = right
-        if aux_idx is None:
-            aux_idx = _get_flat_index(right, model)
-            other = left
-        if aux_idx is None:
-            continue
-        # ``other`` must be genuinely nonlinear (an affine alias is already exact).
-        if not _expr_has_nonlinear_subterm(other):
-            continue
-        # First definition wins; a variable defined by two equalities is ambiguous.
-        defs.setdefault(aux_idx, other)
-    return defs
-
-
-@dataclass
-class LogMonomialRelaxation:
-    """Log-space envelope of a positive product ``t == coef·∏ xᵢ^{aᵢ}`` (H-LOG).
-
-    Task ``cert:LR-2``. Binds an existing product column ``t_col`` (the reform's
-    ``aux == ∏xᵢ`` alias) to the original factor columns through log space:
-
-    * ``zᵢ = ln xᵢ`` — concave, so tangents overestimate and the endpoint secant
-      underestimates (a rigorous outer band on each ``zᵢ`` column).
-    * ``s = Σ aᵢ zᵢ`` — exact linear equality.
-    * ``t = coef·exp(s)`` — convex, so tangents underestimate and the secant
-      overestimates (a rigorous band binding ``t_col``).
-
-    All envelopes are recomputed per node box from ``factor_boxes``/``s_lb,s_ub``;
-    strict positivity of every factor is a hard precondition checked on the
-    node box (no epsilon shift). Purely additive rows + fresh z/s columns.
-    """
-
-    t_col: int
-    coef: float
-    z_cols: tuple[int, ...]  # one ln-column per distinct factor
-    factor_cols: tuple[int, ...]  # the original variable column of each factor
-    factor_exps: tuple[float, ...]  # exponent aᵢ (aligned with z_cols/factor_cols)
-    factor_boxes: tuple[tuple[float, float], ...]
-    s_col: int
-    s_lb: float
-    s_ub: float
 
 
 def _extract_positive_product(
@@ -3922,57 +2400,6 @@ def _extract_positive_product(
     return coef[0], factors
 
 
-def _referenced_flat_indices(expr: Expression, model: Model) -> list[int]:
-    """Sorted distinct flat column indices of the scalar variables in ``expr``."""
-    found: set[int] = set()
-
-    def visit(e: Expression) -> None:
-        if isinstance(e, Variable):
-            offset = _compute_var_offset(e, model)
-            for j in range(e.size):
-                found.add(offset + j)
-            return
-        if isinstance(e, IndexExpression):
-            if isinstance(e.base, Variable):
-                idx = _get_flat_index(e, model)
-                if idx is not None:
-                    found.add(idx)
-                else:
-                    offset = _compute_var_offset(e.base, model)
-                    for j in range(e.base.size):
-                        found.add(offset + j)
-            else:
-                visit(e.base)
-            return
-        if isinstance(e, BinaryOp):
-            visit(e.left)
-            visit(e.right)
-        elif isinstance(e, UnaryOp):
-            visit(e.operand)
-        elif isinstance(e, FunctionCall):
-            for a in e.args:
-                visit(a)
-        elif isinstance(e, SumExpression):
-            visit(e.operand)
-        elif isinstance(e, SumOverExpression):
-            for t in e.terms:
-                visit(t)
-
-    visit(expr)
-    return sorted(found)
-
-
-def _convex_claimer_enabled() -> bool:
-    """Whether the convex polynomial subexpression claimer (#358) is on.
-
-    Default OFF while the vertical slice is validated; set ``DISCOPT_CONVEX_CLAIMER``
-    to a non-``0`` value to enable. The claim is sound regardless (the collector
-    only lifts a node it certifies CONVEX/CONCAVE), so the flag gates *tightness*
-    behaviour, not correctness.
-    """
-    return os.environ.get("DISCOPT_CONVEX_CLAIMER", "0") != "0"
-
-
 def _multivar_box_curvature(
     expr: Expression,
     model: Model,
@@ -3983,7 +2410,7 @@ def _multivar_box_curvature(
 ) -> Optional[str]:
     """Sound box-restricted ``"convex"``/``"concave"`` certificate for a node.
 
-    The multivariate analogue of :func:`_subdivision_curvature`. ``expr`` is C²,
+    The multivariate curvature certificate. ``expr`` is C²,
     so it is convex on the (convex) box iff ``∇²expr ⪰ 0`` at *every* point of the
     box, and concave iff ``∇²expr ⪯ 0`` everywhere. We enclose the Hessian with
     interval AD on each sub-box of an axis-aligned partition and apply a per-row
