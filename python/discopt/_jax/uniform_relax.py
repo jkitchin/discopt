@@ -2678,6 +2678,14 @@ def build_uniform_relaxation(
         integrality=None,
         objective_bound_valid=obj_bound_valid,
     )
+    # Rigorous box-interval objective floor (issue #640 Bucket 2, nvs22). A valid
+    # global lower bound on the (minimize-equivalent) objective, computed from the
+    # cost-column bounds alone — independent of the constraint rows and of the
+    # node-solve conditioning clamp (the cost columns are never near-inf, so this
+    # stays finite even when a free non-cost column drives the clamped LP to a
+    # spurious "unbounded"). The node solver falls back to it to report a sound
+    # bound instead of declining. ``None`` when no finite floor exists.
+    milp._objective_floor = obj_box_lb if math.isfinite(obj_box_lb) else None
     return UniformRelaxation(
         model=milp,
         n_orig=ctx.n_orig,

@@ -1470,6 +1470,18 @@ class MccormickLPRelaxer:
             )
             return MccormickLPResult(status="numerical")
         if res.status != "optimal" or res.x is None:
+            # Objective-floor fallback (issue #640 Bucket 2, nvs22). The conditioning
+            # clamp above widens a free non-cost column to true +/-inf, which can make
+            # the fast simplex spuriously report ``unbounded`` on a relaxation whose
+            # OBJECTIVE is provably bounded below (its cost columns are never
+            # near-inf, so they are never clamped). The relaxation's rigorous
+            # box-interval objective floor is a valid global lower bound in that case,
+            # so report it rather than declining — a sound (never-too-high) bound that
+            # keeps the node from being dropped for want of a certificate. Only fires
+            # for a finite floor (a genuinely unbounded-below objective has none).
+            floor = getattr(milp, "_objective_floor", None)
+            if res.status == "unbounded" and floor is not None and np.isfinite(floor):
+                return MccormickLPResult(status="optimal", lower_bound=float(floor))
             return MccormickLPResult(status=res.status)
 
         def _certify(r) -> Optional[float]:

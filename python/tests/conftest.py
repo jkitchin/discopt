@@ -237,13 +237,12 @@ _CUTOVER_DEFERRED_TESTS: dict[str, str] = {
     #   _emit_quadratic_rlt, gated on rlt_level1 + DISCOPT_RLT_QUAD) recovered
     #   test_quadratic_rlt_build_path_emits_lifted_rows and
     #   test_rlt_wide_box_lp_not_false_infeasible (the RLT audit in test_rlt_api.py
-    #   verifies no cut removes a feasible point). Still deferred:
-    # ── test_monomial_var_product.py — nvs22 wide-box (free div/sqrt aux) ──
-    "test_nvs22_objective_term_lifts_to_sound_root_bound": (
-        "S8-deferred: nvs22's free div/sqrt aux vars leave the root LP unbounded on "
-        "the wide box under the static engine pass (sound: no false bound); finite "
-        "root bound deferred to the uniform OA loop / branch-and-reduce"
-    ),
+    #   verifies no cut removes a feasible point).
+    # * nvs22: the node solver now falls back to the relaxation's rigorous
+    #   box-interval objective floor when the conditioning clamp makes the fast
+    #   simplex spuriously report ``unbounded`` on a provably-bounded objective —
+    #   a sound global lower bound (test_nvs22_objective_term_lifts_to_sound_root_bound).
+    # Bucket 2 is CLOSED.
     # ── test_incremental_monomial.py / test_incremental_mccormick_node.py —
     #    federation MACHINERY: incremental per-node McCormick patching. The engine
     #    does one static factorable build per node; the incremental fast-path is
