@@ -11,6 +11,7 @@ resulting bound is valid (never beyond the true optimum).
 
 from __future__ import annotations
 
+import math
 import os
 
 os.environ.setdefault("JAX_PLATFORMS", "cpu")
@@ -94,8 +95,12 @@ def test_fbbt_rescues_dropped_log_envelope_and_bound_is_sound():
     # The relaxer builds a *finite* root bound (constraint not dropped).
     assert bound is not None
     # Sound: for the maximize lifted to minimize(-y), the bound never over-states
-    # the true optimum max y = log(6) = 1.7918, i.e. lower_bound <= -1.7918.
-    assert float(bound) <= -1.7918 + 1e-6
+    # the true optimum max y = log(1 + 5) = log(6), i.e. lower_bound <= -log(6).
+    # Compare against the exact optimum (the earlier coarse -1.7918 round-up sat
+    # *below* -log(6), so it only held while the envelope was looser than optimal;
+    # the tightened log envelope now attains -log(6) to ~1e-9, which is the sound
+    # boundary this guard actually protects).
+    assert float(bound) <= -math.log(6.0) + 1e-6
 
 
 def test_genuinely_unbounded_arg_is_not_falsely_bounded():

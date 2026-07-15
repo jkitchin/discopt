@@ -248,39 +248,12 @@ def test_c31_heterogeneous_array_block_no_false_infeasible():
     assert np.all(feasible_pt <= res.ub + 1e-9)
 
 
-@pytest.mark.smoke
-def test_c31_fbbt_argument_box_envelope_contains_feasible_arg():
-    """The univariate-rescue envelope (certified LP path) must not exclude a
-    feasible argument of a heterogeneous array block.
-
-    `_collect_univariate_relaxations` builds a McCormick envelope over the FBBT
-    argument box for out-of-domain univariate ops (issue #219 rescue). Pre-fix,
-    a `log` on a heterogeneous array element got element-0's collapsed box, which
-    excluded the element's true feasible arguments → an invalid envelope in the
-    certified LP relaxation. Post-fix the union seed keeps the element's box, so
-    the op either (a) has an envelope whose arg box CONTAINS every feasible
-    argument, or (b) is soundly abstained (dropped) — never an envelope over a
-    box that excludes a feasible argument.
-    """
-    import discopt._jax.milp_relaxation as mr
-    from discopt.modeling import log as dlog
-
-    m = dm.Model("c31_env")
-    # x[0] fixed at [3,3] (in log domain); x[1] raw box [-1,5] straddles 0 → log
-    # out of domain raw → FBBT-rescue path fires. Element-0 collapse would give
-    # the log arg box [3,3], excluding x[1]'s feasible arguments in (0,5].
-    x = m.continuous("x", shape=(2,), lb=np.array([3.0, -1.0]), ub=np.array([3.0, 5.0]))
-    m.minimize(dlog(x[1]) + x[0])
-
-    flat_lb = np.array([3.0, -1.0])
-    flat_ub = np.array([3.0, 5.0])
-    relax, _var_map, _bounds = mr._collect_univariate_relaxations(
-        m, 2, flat_lb, flat_ub, start_col=2
-    )
-    # A feasible argument for x[1] under the model is any value in (0, 5], e.g. 4.0.
-    for r in relax:
-        assert r.arg_lb - 1e-9 <= 4.0 <= r.arg_ub + 1e-9, (
-            f"C-31: univariate-rescue envelope arg box [{r.arg_lb}, {r.arg_ub}] "
-            "excludes the feasible argument 4.0 → invalid envelope in the "
-            "certified LP relaxation"
-        )
+# NOTE (#632 cutover): test_c31_fbbt_argument_box_envelope_contains_feasible_arg
+# was a unit test of the deleted federation collector `_collect_univariate_relaxations`
+# (it asserted the rescue envelope's arg box contains a feasible argument on a
+# heterogeneous array block). The uniform engine allocates the aux box from a sound
+# interval enclosure of the atom's argument over the element's real box, and its
+# "never cut a feasible point" soundness is asserted directly, per-kind and over the
+# corpus, by test_uniform_relax.py (feasible-point sampling) and by the enclosure
+# checks in test_issue_267_univariate_product_lift.py — so this collector-internal
+# unit test was deleted rather than rewritten against a removed API.

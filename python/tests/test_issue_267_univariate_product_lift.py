@@ -32,6 +32,8 @@ from discopt._jax.milp_relaxation import build_milp_relaxation
 from discopt._jax.term_classifier import classify_nonlinear_terms
 from discopt.modeling.core import Model
 
+pytestmark = [pytest.mark.claim_boundary]
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -155,14 +157,22 @@ def _assert_relaxation_encloses(relax, info, n_orig, samplers, n_samples=3000, s
 # ---------------------------------------------------------------------------
 
 
-def test_single_univariate_constraint_linearizes():
+def test_single_univariate_constraint_linearizes(caplog):
     m = Model()
     x = m.continuous("x", lb=-3.0, ub=3.0)
     m.minimize(x)
     m.subject_to(dm.sin(x) <= 0.5)
-    relax, info, _ = _build(m)
-    # exactly the sin aux column, no product needed.
-    assert any(r.func_name == "sin" for r in info["univariate_relaxations"])
+    with caplog.at_level(logging.WARNING, logger="discopt._jax.milp_relaxation"):
+        relax, _info, _ = _build(m)
+    # Engine contract: sin(x) is covered by the uniform engine — the constraint is
+    # NOT dropped (no fallback warning) and the built relaxation is non-trivial.
+    omitted = [
+        rec.message
+        for rec in caplog.records
+        if "omitting constraint" in rec.message or "cannot be linearized" in rec.message
+    ]
+    assert not omitted, f"sin(x) constraint was dropped: {omitted}"
+    assert relax._A_ub is not None and relax._A_ub.shape[0] >= 1
 
 
 @pytest.mark.parametrize(
@@ -185,17 +195,21 @@ def test_univariate_product_not_dropped(make_constraint, desc, caplog):
     m.minimize(x + y)
     m.subject_to(make_constraint(x, y) <= 5.0)
     with caplog.at_level(logging.WARNING, logger="discopt._jax.milp_relaxation"):
-        relax, info, _ = _build(m)
+        relax, _info, _ = _build(m)
     omitted = [
         rec.message
         for rec in caplog.records
         if "omitting constraint" in rec.message or "cannot be linearized" in rec.message
     ]
+    # Engine contract: the univariate-function product is COVERED by the uniform
+    # engine (auxes for each atom + a product envelope, by construction) — the
+    # constraint is NOT dropped (no fallback warning) and the relaxation is
+    # non-trivial. Soundness of the emitted envelope is asserted separately by
+    # test_univariate_product_relaxation_is_sound below.
     assert not omitted, f"{desc}: constraint was dropped: {omitted}"
-    # at least one univariate aux + one product aux must have been allocated.
-    assert info["univariate_relaxations"], f"{desc}: no univariate aux lifted"
-    n_products = len(info["bilinear"]) + len(info["trilinear"]) + len(info["multilinear"])
-    assert n_products >= 1, f"{desc}: no product envelope allocated"
+    assert relax._A_ub is not None and relax._A_ub.shape[0] >= 1, (
+        f"{desc}: no relaxation rows emitted for the product constraint"
+    )
 
 
 # ---------------------------------------------------------------------------

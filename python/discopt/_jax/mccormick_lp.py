@@ -1326,6 +1326,15 @@ class MccormickLPRelaxer:
                 skip_pool_separators = False
                 self._pool_stats["lazy_reseparations"] += 1
 
+        # Snapshot the pre-separation solve. Every separated cut is a valid
+        # inequality, so the pre-separation LP optimum is a valid lower bound on the
+        # separated (tighter) system too. On a wide/ill-conditioned box a valid cut
+        # can nonetheless flip the warm simplex to an uncertifiable re-solve (safe
+        # bound lost AND the integer-aware dual bound not recomputed → no finite
+        # bound), which would make separation *degrade* the node to no-bound. Keep
+        # this snapshot as a floor so separation can never make a node less
+        # certifiable than it was before (sound: the floor is a valid lower bound).
+        _presep_res = res
         if separate:
             _st = self._sep_timers  # cert:T0.3 per-family separation timers
             # On-demand separation of the exact multilinear hull for products with
@@ -1463,43 +1472,58 @@ class MccormickLPRelaxer:
         if res.status != "optimal" or res.x is None:
             return MccormickLPResult(status=res.status)
 
-        if self._backend == "auto":
-            # HiGHS/POUNCE already returns a trustworthy optimum; keep the legacy
-            # behaviour (no certificate is produced on that path).
-            bound: Optional[float] = res.objective
-        elif res.safe_bound is not None:
-            # The common pure-LP warm-simplex path: rigorous safe bound.
-            bound = res.safe_bound
-        elif milp._integrality is not None:
-            # Integer-aware node bound (non-default ``node_bound_mode="milp"``):
-            # the engine's own B&B dual bound is the valid lower bound here.
-            bound = res.bound
-        elif self._nonlinear_cols and self._has_unbounded_nonlinear_col(milp):
-            # A nonlinear-participating variable is still unbounded at this node, so
-            # the McCormick/RLT envelope may be genuinely UNBOUNDED — and the fast
-            # simplex can fabricate a finite "optimal" there (himmel16 with RLT
-            # cuts). With no computable safe bound (free variable) we cannot certify
-            # the vertex is not too high, so decline: report no bound and let the
-            # driver branch, rather than trust a fabricated value that would fathom
-            # the optimal region. (Pure-Rust replacement of the old HiGHS
-            # unbounded-relaxation cross-check.)
-            bound = None
-        elif self._max_finite_magnitude(milp) <= _LIFT_MAX_CROSS_TERM_ARG_MAGNITUDE:
-            # Pure-LP with a free variable but a bounded relaxation: trust the
-            # internally-equilibrated, dual-feasibility-verified vertex objective
-            # only when well-conditioned (mirrors the old guard's conditioning gate
-            # — below it the vertex carries no meaningful drift).
-            bound = res.objective
-        else:
-            # Free variable AND ill-conditioned beyond where the fast simplex is
-            # reliable, with no computable safe bound: decline (branch) rather than
-            # risk a too-high vertex value (pure-Rust replacement of the old
-            # too-high-optimal HiGHS cross-check).
-            bound = None
+        def _certify(r) -> Optional[float]:
+            """The valid lower bound this optimal solve certifies (or None)."""
+            if r is None or r.status != "optimal" or r.x is None:
+                return None
+            if self._backend == "auto":
+                # HiGHS/POUNCE already returns a trustworthy optimum; keep the
+                # legacy behaviour (no certificate is produced on that path).
+                b: Optional[float] = r.objective
+            elif r.safe_bound is not None:
+                # The common pure-LP warm-simplex path: rigorous safe bound.
+                b = r.safe_bound
+            elif milp._integrality is not None:
+                # Integer-aware node bound (non-default ``node_bound_mode="milp"``):
+                # the engine's own B&B dual bound is the valid lower bound here.
+                b = r.bound
+            elif self._nonlinear_cols and self._has_unbounded_nonlinear_col(milp):
+                # A nonlinear-participating variable is still unbounded at this node,
+                # so the McCormick/RLT envelope may be genuinely UNBOUNDED — and the
+                # fast simplex can fabricate a finite "optimal" there (himmel16 with
+                # RLT cuts). With no computable safe bound (free variable) we cannot
+                # certify the vertex is not too high, so decline: report no bound and
+                # let the driver branch, rather than trust a fabricated value that
+                # would fathom the optimal region. (Pure-Rust replacement of the old
+                # HiGHS unbounded-relaxation cross-check.)
+                b = None
+            elif self._max_finite_magnitude(milp) <= _LIFT_MAX_CROSS_TERM_ARG_MAGNITUDE:
+                # Pure-LP with a free variable but a bounded relaxation: trust the
+                # internally-equilibrated, dual-feasibility-verified vertex objective
+                # only when well-conditioned (mirrors the old guard's conditioning
+                # gate — below it the vertex carries no meaningful drift).
+                b = r.objective
+            else:
+                # Free variable AND ill-conditioned beyond where the fast simplex is
+                # reliable, with no computable safe bound: decline (branch) rather
+                # than risk a too-high vertex value (pure-Rust replacement of the old
+                # too-high-optimal HiGHS cross-check).
+                b = None
+            return b if (b is not None and np.isfinite(b)) else None
+
+        bound = _certify(res)
+        x_source = res
+        if bound is None and _presep_res is not res:
+            # Separation left the node uncertifiable (a valid cut flipped the warm
+            # simplex on a wide box); fall back to the pre-separation certified bound
+            # — still a valid lower bound on the separated system, so sound.
+            presep_bound = _certify(_presep_res)
+            if presep_bound is not None:
+                bound, x_source = presep_bound, _presep_res
 
         if bound is None or not np.isfinite(bound):
             return MccormickLPResult(status=res.status)
-        x_orig = np.asarray(res.x)[: self._n_orig].copy()
+        x_orig = np.asarray(x_source.x)[: self._n_orig].copy()
         return MccormickLPResult(status="optimal", lower_bound=float(bound), x=x_orig)
 
     def _lifted_fbbt_rebuild(self, milp, node_lb, node_ub):
@@ -1795,6 +1819,16 @@ class MccormickLPRelaxer:
                     x0 = float(x[base])
                     s = float(x[aux])
                     if not (np.isfinite(x0) and np.isfinite(s)):
+                        continue
+                    # Conditioning guard (mirrors ``_separate_convex``): on a very
+                    # wide box the tangent ``s >= 2 x0 x - x0**2`` has coefficient
+                    # ``2 x0`` and intercept ``x0**2`` that blow up (``x0`` ~ 1e15
+                    # on st_miqp4's ``[0,1e15]`` square), and a cut with ~1e30
+                    # entries fools the fast simplex into an uncertifiable basis —
+                    # the node then reports no finite bound at all. Skip it; the
+                    # static envelope still bounds ``s`` and the relaxation stays
+                    # sound, just looser at this point (dropping a cut only loosens).
+                    if abs(x0) > _LIFT_MAX_CROSS_TERM_ARG_MAGNITUDE:
                         continue
                     # Separate only where the convex underestimator is slack:
                     # the LP put ``s`` below the true parabola at ``x0``.

@@ -229,6 +229,30 @@ impl PyTreeManager {
         PyArray1::from_vec(py, out)
     }
 
+    /// Tree depth for each of `node_ids` (root = 0), for the in-tree presolve
+    /// depth-stride gate (issue #632 / PF1). Called between `export_batch` and
+    /// `import_results`. Depth is immutable per node, so this is valid for any
+    /// exported node. Unknown / negative ids map to `0` (conservative: the pass
+    /// then fires at that node under any stride, never wrongly skipped).
+    fn node_depths<'py>(
+        &self,
+        py: Python<'py>,
+        node_ids: PyReadonlyArray1<i64>,
+    ) -> Bound<'py, PyArray1<i64>> {
+        let ids = node_ids.as_array();
+        let out: Vec<i64> = ids
+            .iter()
+            .map(|&i| {
+                if i < 0 {
+                    0
+                } else {
+                    self.inner.node_depth(NodeId(i as usize)).unwrap_or(0) as i64
+                }
+            })
+            .collect();
+        PyArray1::from_vec(py, out)
+    }
+
     /// Replace a node's structural variable bounds with reduction-tightened ones
     /// (cert:T2.4c), so its children inherit the contracted box.
     ///

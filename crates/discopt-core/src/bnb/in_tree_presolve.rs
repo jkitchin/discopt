@@ -26,6 +26,7 @@
 
 use crate::expr::ModelRepr;
 use crate::presolve::fbbt::{fbbt_with_cutoff, Interval};
+use crate::presolve::probing::probe_node_bounds;
 
 /// Options controlling persistent in-tree bound tightening.
 #[derive(Debug, Clone)]
@@ -37,6 +38,13 @@ pub struct InTreePresolveOptions {
     pub max_iter: usize,
     /// FBBT inner-loop convergence tolerance.
     pub tol: f64,
+    /// Run per-node probing (P3 branch-and-reduce) after FBBT. Probing
+    /// tentatively fixes each discrete variable at a bound and re-runs FBBT,
+    /// contracting the domain on any proven-infeasible fixing. Off by default
+    /// (it costs O(discrete) extra FBBT solves per node); sound when on.
+    pub probing: bool,
+    /// Cap on the number of discrete variables probed per node (budget).
+    pub probe_max_vars: usize,
 }
 
 impl Default for InTreePresolveOptions {
@@ -45,6 +53,8 @@ impl Default for InTreePresolveOptions {
             depth_stride: 4,
             max_iter: 8,
             tol: 1e-6,
+            probing: false,
+            probe_max_vars: 32,
         }
     }
 }
@@ -106,7 +116,7 @@ pub fn run_in_tree_presolve(
     }
 
     let bounds: Vec<Interval> = fbbt_with_cutoff(&patched, opts.max_iter, opts.tol, incumbent);
-    let infeasible = bounds.iter().any(|iv| iv.is_empty());
+    let mut infeasible = bounds.iter().any(|iv| iv.is_empty());
 
     let mut new_lb = node_lb.to_vec();
     let mut new_ub = node_ub.to_vec();
@@ -122,6 +132,44 @@ pub fn run_in_tree_presolve(
             if iv.hi < new_ub[i] - opts.tol {
                 new_ub[i] = iv.hi;
                 tightened += 1;
+            }
+        }
+    }
+
+    // P3 probing pass: contract discrete-variable domains by tentatively fixing
+    // each at a bound and re-running FBBT (proven-infeasible fixings only).
+    // Runs on the FBBT-tightened box; folds its (subset) result back, never
+    // loosening. `patched` carries the node bounds; probing re-seeds fully from
+    // the explicit interval box, so the two boxes agree.
+    if opts.probing && !infeasible {
+        let node_box: Vec<Interval> = (0..new_lb.len())
+            .map(|i| Interval::new(new_lb[i], new_ub[i]))
+            .collect();
+        let pr = probe_node_bounds(
+            &patched,
+            &node_box,
+            opts.probe_max_vars,
+            opts.max_iter,
+            opts.tol,
+            incumbent,
+            None,
+        );
+        if pr.infeasible {
+            infeasible = true;
+        } else {
+            for i in 0..pr.tightened_bounds.len().min(new_lb.len()) {
+                let iv = pr.tightened_bounds[i];
+                if iv.lo > new_lb[i] + opts.tol {
+                    new_lb[i] = iv.lo;
+                    tightened += 1;
+                }
+                if iv.hi < new_ub[i] - opts.tol {
+                    new_ub[i] = iv.hi;
+                    tightened += 1;
+                }
+                if new_lb[i] > new_ub[i] + opts.tol {
+                    infeasible = true;
+                }
             }
         }
     }
@@ -198,6 +246,7 @@ mod tests {
             depth_stride: 1,
             max_iter: 16,
             tol: 1e-9,
+            ..Default::default()
         };
         let delta = run_in_tree_presolve(&model, &[3.0, 0.0], &[10.0, 10.0], 1, None, &opts);
         assert!(delta.ran);
@@ -247,6 +296,7 @@ mod tests {
             depth_stride: 1,
             max_iter: 16,
             tol: 1e-9,
+            ..Default::default()
         };
         let delta = run_in_tree_presolve(&model, &[3.0, 0.0], &[10.0, 1.0], 1, None, &opts);
         assert!(delta.ran);
@@ -315,5 +365,75 @@ mod tests {
         assert!(delta.ran);
         // The ub on x must remain at 1.0 (or tighter), never relax to 5.
         assert!(delta.ub[0] <= 1.0 + 1e-9);
+    }
+
+    #[test]
+    fn probing_fixes_binary_at_node() {
+        // x ≤ 10·b, x ∈ [0,10], b binary; node branch x ∈ [3,10] ⇒ b = 1.
+        // The probing pass (opts.probing = true) must fix b to 1 at the node.
+        let model = {
+            let mut arena = ExprArena::new();
+            let x = scalar_var(&mut arena, "x", 0);
+            let b = scalar_var(&mut arena, "b", 1);
+            let m = arena.add(ExprNode::Constant(10.0));
+            let mb = arena.add(ExprNode::BinaryOp {
+                op: BinOp::Mul,
+                left: m,
+                right: b,
+            });
+            let body = arena.add(ExprNode::BinaryOp {
+                op: BinOp::Sub,
+                left: x,
+                right: mb,
+            });
+            let mut bvar = vinfo("b", 0.0, 1.0);
+            bvar.var_type = VarType::Binary;
+            ModelRepr {
+                arena,
+                objective: x,
+                objective_sense: ObjectiveSense::Minimize,
+                constraints: vec![ConstraintRepr {
+                    body,
+                    sense: ConstraintSense::Le,
+                    rhs: 0.0,
+                    name: None,
+                }],
+                variables: vec![vinfo("x", 0.0, 10.0), bvar],
+                n_vars: 2,
+            }
+        };
+        let opts = InTreePresolveOptions {
+            depth_stride: 1,
+            max_iter: 16,
+            tol: 1e-9,
+            probing: true,
+            probe_max_vars: 32,
+        };
+        let delta = run_in_tree_presolve(&model, &[3.0, 0.0], &[10.0, 1.0], 1, None, &opts);
+        assert!(delta.ran);
+        assert!(!delta.infeasible);
+        assert!(
+            (delta.lb[1] - 1.0).abs() <= 1e-6,
+            "b should be fixed to 1 at the node, got [{}, {}]",
+            delta.lb[1],
+            delta.ub[1]
+        );
+    }
+
+    #[test]
+    fn probing_off_by_default_is_byte_neutral() {
+        // With probing disabled (default), the delta matches the FBBT-only path.
+        let model = x_plus_y_le_5();
+        let opts = InTreePresolveOptions {
+            depth_stride: 1,
+            max_iter: 16,
+            tol: 1e-9,
+            ..Default::default()
+        };
+        assert!(!opts.probing);
+        let delta = run_in_tree_presolve(&model, &[3.0, 0.0], &[10.0, 10.0], 1, None, &opts);
+        assert!(delta.ran);
+        assert!(!delta.infeasible);
+        assert!((delta.ub[1] - 2.0).abs() <= 1e-6);
     }
 }

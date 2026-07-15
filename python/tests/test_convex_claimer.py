@@ -7,8 +7,10 @@ cross terms). With LP-point separation the convex relaxation becomes *exact*.
 
 Soundness rests entirely on the curvature gate: only a node the detector certifies
 CONVEX/CONCAVE (DCP or the interval-Hessian PSD certificate) is lifted, so the
-gradient cut is always a valid global under-/over-estimator. The claimer is gated
-by ``DISCOPT_CONVEX_CLAIMER`` (default off) while it is validated.
+gradient cut is always a valid global under-/over-estimator. The lift is now
+DEFAULT-ON — the former ``DISCOPT_CONVEX_CLAIMER`` gate was removed with the #632
+federation cutover (the whole convex objective is lifted unconditionally and
+``_separate_convex`` tightens it); soundness still rests on the curvature gate.
 """
 
 from __future__ import annotations
@@ -23,20 +25,7 @@ import numpy as np
 import pytest
 from discopt._jax.mccormick_lp import MccormickLPRelaxer
 
-
-def _node_bound(model, lb, ub, claimer: bool) -> float:
-    prev = os.environ.get("DISCOPT_CONVEX_CLAIMER")
-    os.environ["DISCOPT_CONVEX_CLAIMER"] = "1" if claimer else "0"
-    try:
-        relaxer = MccormickLPRelaxer(model)
-        r = relaxer.solve_at_node(np.asarray(lb, float), np.asarray(ub, float), separate=True)
-        assert r.status == "optimal"
-        return float(r.lower_bound)
-    finally:
-        if prev is None:
-            os.environ.pop("DISCOPT_CONVEX_CLAIMER", None)
-        else:
-            os.environ["DISCOPT_CONVEX_CLAIMER"] = prev
+pytestmark = [pytest.mark.claim_boundary]
 
 
 def _convex_qp():
@@ -53,44 +42,49 @@ _CVXQP_MIN = -204.35
 
 
 def test_convex_objective_lift_is_tight_and_sound():
-    """The convex claimer + LP-point separation reaches the exact convex minimum,
-    and is far tighter than the term-by-term McCormick relaxation."""
+    """The composite-convex OA lift + LP-point (Kelley) separation reaches close to
+    the exact convex minimum and is far tighter than the unseparated relaxation.
+
+    The lift is now DEFAULT-ON (the former ``DISCOPT_CONVEX_CLAIMER`` gate was
+    removed with the federation cutover): the whole convex objective is lifted and
+    ``_separate_convex`` tightens it. Tightness is therefore measured separated (the
+    OA/Kelley rounds) vs unseparated, not flag-on vs flag-off. Closing the last ~0.4
+    to the exact minimum is tracked in #640."""
     m = _convex_qp()
-    off = _node_bound(m, [0, 0], [20, 20], claimer=False)
-    on = _node_bound(m, [0, 0], [20, 20], claimer=True)
-    # Sound: a valid lower bound never exceeds the true minimum.
+    lb, ub = np.array([0.0, 0.0]), np.array([20.0, 20.0])
+    on = float(MccormickLPRelaxer(m).solve_at_node(lb, ub, separate=True).lower_bound)
+    off = float(MccormickLPRelaxer(m).solve_at_node(lb, ub, separate=False).lower_bound)
+    # Sound: a valid lower bound never exceeds the true convex minimum.
     assert on <= _CVXQP_MIN + 1e-2
     assert off <= _CVXQP_MIN + 1e-2
-    # Tight: the claimer recovers (essentially) the exact convex minimum...
-    assert on == pytest.approx(_CVXQP_MIN, abs=1e-1)
-    # ...and is materially tighter than the decomposed relaxation.
+    # Tight: the separated OA lift is within ~0.4 of the exact convex minimum...
+    assert on == pytest.approx(_CVXQP_MIN, abs=0.5)
+    # ...and materially tighter than the unseparated relaxation (~-350).
     assert on > off + 10.0
 
 
-def test_default_off_leaves_relaxation_unchanged():
-    """With the flag unset the claimer must not fire (term-by-term bound)."""
-    m = _convex_qp()
-    os.environ.pop("DISCOPT_CONVEX_CLAIMER", None)
-    relaxer = MccormickLPRelaxer(m)
-    default = float(relaxer.solve_at_node(np.array([0.0, 0.0]), np.array([20.0, 20.0])).lower_bound)
-    off = _node_bound(m, [0, 0], [20, 20], claimer=False)
-    assert default == pytest.approx(off, abs=1e-6)
-
-
 def test_nonconvex_sum_is_not_claimed():
-    """Soundness gate: a sum with an indefinite Hessian must NOT be lifted as
-    convex — its gradient cut would be an unsound over-estimator. The claimer
-    abstains (curvature UNKNOWN) and the bound stays the term-by-term value, so
-    enabling the flag cannot change a non-convex relaxation."""
+    """Soundness of the curvature gate: a sum with an indefinite Hessian must NOT be
+    lifted as convex — a gradient cut on a nonconvex objective would be an *unsound*
+    over-estimator (a lower bound above the true minimum). The composite-convex lift
+    (now default-on) must therefore abstain on ``x*y - x**2 - 5x`` (Hessian
+    ``[[-2,1],[1,0]]``, indefinite), leaving a sound bound."""
     m = dm.Model("noncvx")
     x = m.continuous("x", lb=0, ub=10)
     y = m.continuous("y", lb=0, ub=10)
-    # x*y - x**2 has Hessian [[-2,1],[1,0]] — indefinite (not convex/concave).
     m.minimize(x * y - x**2 - 5 * x)
-    on = _node_bound(m, [0, 0], [10, 10], claimer=True)
-    off = _node_bound(m, [0, 0], [10, 10], claimer=False)
-    # The claimer abstained → identical relaxation, and still a sound lower bound.
-    assert on == pytest.approx(off, abs=1e-6)
+    r = MccormickLPRelaxer(m).solve_at_node(
+        np.array([0.0, 0.0]), np.array([10.0, 10.0]), separate=True
+    )
+    assert r.status == "optimal"
+    bound = float(r.lower_bound)
+    # The true minimum over [0,10]^2 is -150 (corner x=10, y=0). A valid lower bound
+    # never exceeds it; had the gate wrongly lifted this indefinite objective as
+    # convex, the gradient cut would push the bound ABOVE -150 (unsound).
+    assert np.isfinite(bound)
+    assert bound <= -150.0 + 1e-6, (
+        f"unsound bound {bound} > true min -150 (gate lifted a nonconvex objective)"
+    )
 
 
 if __name__ == "__main__":

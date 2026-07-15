@@ -317,6 +317,39 @@ def test_467sub3_infeasible_bilinear_never_optimal():
     )
 
 
+@pytest.mark.smoke
+def test_ex14_1_9_reported_bound_never_exceeds_incumbent():
+    """A reported dual bound must never cross a known feasible objective (the
+    ``bound <= incumbent`` invariant the Rust tree enforces via
+    ``update_global_lower_bound``).
+
+    ``ex14_1_9`` minimizes a *free* variable ``x1`` pinned only by two constraints
+    that are differences of huge, nearly-cancelling transcendental terms
+    (``4.51e6*exp(-7548/x0)*x0 - 2.02e9*exp(-7548/x0)``); its true optimum is 0.
+    The uniform engine cannot bound this free objective (``objective_bound_valid``
+    is False), so the search takes a tainted exit and runs the
+    ``_root_relaxation_lower_bound`` fallback over an FBBT-tightened *snapshot* box
+    that no longer contains the optimum, which returns ~1.0. Before the fix the
+    Python result assembly adopted that as a "tighter" lower bound and reported
+    ``bound=1.0 > incumbent=0`` — an unsound dual bound (found by the expanded
+    50-instance BARON soundness sweep). The reported bound is now capped at the
+    incumbent. Status stays ``feasible`` (the taint correctly blocks certifying
+    ``optimal``); only the reported bound must be sound.
+    """
+    from discopt.modeling.core import from_nl
+
+    nl = os.path.join(os.path.dirname(__file__), "data", "minlplib_nl", "ex14_1_9.nl")
+    r = from_nl(nl).solve(time_limit=30.0)
+    assert r.objective is not None
+    if r.bound is not None and np.isfinite(r.bound):
+        # oracle optimum ~0; the invariant is bound <= incumbent (== objective).
+        assert r.bound <= r.objective + 1e-6, (
+            f"unsound dual bound {r.bound} exceeds the incumbent {r.objective} "
+            "(bound must never cross a feasible objective)"
+        )
+        assert r.bound <= 0.0 + 1e-4, f"dual bound {r.bound} crosses the oracle optimum 0"
+
+
 @pytest.mark.slow
 def test_467sub3_ex7_3_6_not_false_optimal():
     """(a) the real repro (MINLPLib ex7_3_6, oracle =inf=): FBBT proves the root

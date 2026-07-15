@@ -801,6 +801,21 @@ impl TreeManager {
         }
     }
 
+    /// Depth of a node in the B&B tree (root = 0, incremented per branch).
+    ///
+    /// Read-only; the depth is set at node creation and immutable, so it is
+    /// valid for any id in the pool (including popped/branched nodes). Used by
+    /// the in-tree presolve depth-stride gate (issue #632 / PF1) to make the
+    /// stride schedule real instead of hardcoding depth 0. Unknown ids map to
+    /// `None`.
+    pub fn node_depth(&self, id: NodeId) -> Option<usize> {
+        if id.0 < self.pool.total_count() {
+            Some(self.pool.get(id).depth)
+        } else {
+            None
+        }
+    }
+
     /// The warm-start basis stored on a node (cloned), for the Rust-internal
     /// simplex MILP driver. `None` if the node has no inherited basis (root).
     pub fn node_basis(&self, id: NodeId) -> Option<crate::lp::basis::Basis> {

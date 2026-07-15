@@ -322,6 +322,32 @@ class SolverTuning:
     node_nlp_stride: int = field(default_factory=lambda: _env_int("DISCOPT_NODE_NLP_STRIDE", 4))
     """Solve the node NLP every k-th node (``DISCOPT_NODE_NLP_STRIDE``, default 4)."""
 
+    adaptive_nlp: bool = field(
+        default_factory=lambda: _env_flag("DISCOPT_ADAPTIVE_NLP", default=False)
+    )
+    """Adaptive back-off for the *strided in-tree node NLP*
+    (``DISCOPT_ADAPTIVE_NLP``, **default OFF** — flag-graduation convention: ``=0``
+    restores today's fixed ``node_nlp_stride``).
+
+    TX1 (``docs/dev/tenx-plan.md`` §3). The strided node-NLP is a **pure primal
+    heuristic** — it fires ONLY where the McCormick LP relaxer supplies the node
+    dual bound and the model is nonconvex (``_gate_node_nlp`` in ``solve_model``);
+    there its objective is never a bound (the LP is), so throttling it can only
+    change *incumbent arrival*, never the certificate. TX0 measured this bucket as
+    idle waste on integer-heavy nonconvex models (nvs09: 14.3 s skippable, identical
+    proof/bound). Fixed stride 4 keeps re-solving it long after the incumbent has
+    stopped improving.
+
+    When ON, the *effective* stride starts at ``node_nlp_stride`` and doubles
+    (capped) after each batch whose strided node-NLP fired but did **not** improve
+    the incumbent, resetting to the base stride the moment it does. Convex nodes and
+    the no-LP-relaxer path (where the NLP objective IS the bound) are never touched
+    — the gate that admits this back-off is exactly the existing heuristic-only
+    envelope. Sound (heuristic-policy regime, CLAUDE.md §5): every injected point is
+    still sub-NLP/constraint-verified and ``inject_incumbent`` enforces strict
+    improvement, so the dual bound and gap certification are byte-identical to the
+    fixed-stride run; only *which* nodes get a primal probe changes."""
+
     ils_solve_cap: int = field(default_factory=lambda: _env_int("DISCOPT_ILS_SOLVE_CAP", 2))
     """Sub-NLP solve cap for the ``integer_local_search`` objective-descent
     (``DISCOPT_ILS_SOLVE_CAP``, **default 2 = ON** since ILS-DEFAULT, #530-followup).

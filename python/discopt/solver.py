@@ -254,6 +254,45 @@ def _obbt_topk_enabled() -> bool:
     return os.environ.get("DISCOPT_OBBT_TOPK", "").strip().lower() in ("1", "true", "yes", "on")
 
 
+# P3 branch-and-reduce: per-node probing (issue #632). When the in-tree FBBT
+# pass runs (``in_tree_presolve_stride > 0``), also probe discrete variables at
+# the node — tentatively fix each at a bound, re-run cutoff-FBBT, and contract
+# on a proven-infeasible fixing (binaries forced, integer endpoints peeled).
+# Sound by construction (contracts only on proven infeasibility); default OFF
+# because it costs O(discrete) extra FBBT solves per firing.
+def _node_probing_enabled() -> bool:
+    """Whether P3 per-node probing is on (``DISCOPT_NODE_PROBING``, default OFF)."""
+    return os.environ.get("DISCOPT_NODE_PROBING", "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+
+
+def _node_probe_max_vars() -> int:
+    """Per-node probing budget (discrete vars probed per firing); default 32."""
+    try:
+        return max(0, int(os.environ.get("DISCOPT_NODE_PROBE_MAX_VARS", "32")))
+    except ValueError:
+        return 32
+
+
+# PF1 (issue #632): telemetry counting how many times the in-tree presolve
+# (FBBT / branch-and-reduce) kernel actually fired on the GLOBAL spatial B&B
+# node loop. The spike found the kernel was wired only into ``_solve_nlp_bb``
+# and this count was 0 on spatial instances. A regression test resets this and
+# asserts it is > 0 after a stride>=1 solve of such an instance, pinning the
+# wiring so it cannot silently disconnect again. Process-global, reset at the
+# top of ``solve_model``; read via ``_in_tree_presolve_global_calls()``.
+_IN_TREE_PRESOLVE_GLOBAL_CALLS = 0
+
+
+def _in_tree_presolve_global_calls() -> int:
+    """Firings of the in-tree presolve kernel on the global spatial B&B path."""
+    return _IN_TREE_PRESOLVE_GLOBAL_CALLS
+
+
 # Root branch-and-reduce fixpoint (cert:T2.3) no-offtarget gate: skip the loop when
 # the relative gap between the root dual bound and the incumbent cutoff is at/below
 # this — an already-tight root has nothing to close, so running it would only add
@@ -2839,7 +2878,11 @@ def solve_model(
     presolve: bool = True,
     presolve_polynomial: bool = False,
     presolve_reverse_ad: bool = False,
-    in_tree_presolve_stride: int = 0,
+    # PF1 (issue #632): default 1 = FBBT-only in-tree presolve at every node,
+    # on BOTH the NLP-BB and global spatial B&B paths. Probing stays OFF
+    # (DISCOPT_NODE_PROBING). Spike-supported (m3 proof, fac2 -43% nodes, no
+    # losses); sound-by-construction cutoff-aware FBBT (see the node loops).
+    in_tree_presolve_stride: int = 1,
     eigenvalue_root_bound: bool = False,
     relaxation_arithmetic: str = "mccormick",
     subnlp_enabled: bool = True,
@@ -3348,7 +3391,9 @@ def solve_model(
         _note_ignored_mip_nlp("presolve", presolve is not True)
         _note_ignored_mip_nlp("presolve_polynomial", presolve_polynomial is not False)
         _note_ignored_mip_nlp("presolve_reverse_ad", presolve_reverse_ad is not False)
-        _note_ignored_mip_nlp("in_tree_presolve_stride", in_tree_presolve_stride != 0)
+        # PF1 (#632): default is now 1; warn only when the user overrode it, so a
+        # default solve on the mip-nlp path stays quiet.
+        _note_ignored_mip_nlp("in_tree_presolve_stride", in_tree_presolve_stride != 1)
         _note_ignored_mip_nlp("eigenvalue_root_bound", eigenvalue_root_bound is not False)
         _note_ignored_mip_nlp("relaxation_arithmetic", relaxation_arithmetic != "mccormick")
         _note_ignored_mip_nlp("subnlp_enabled", subnlp_enabled is not True)
@@ -4003,6 +4048,8 @@ def solve_model(
         logger.debug("integer-bilinear reformulation skipped: %s", _ipx_exc)
 
     # --- Build Rust model representation for FBBT ---
+    global _IN_TREE_PRESOLVE_GLOBAL_CALLS
+    _IN_TREE_PRESOLVE_GLOBAL_CALLS = 0  # PF1 telemetry reset (issue #632)
     _model_repr = None
     try:
         from discopt._rust import model_to_repr
@@ -5599,6 +5646,19 @@ def solve_model(
     iteration = 0
     _deadline = t_start + time_limit
 
+    # --- TX1: adaptive back-off for the strided in-tree node NLP -------------
+    # DISCOPT_ADAPTIVE_NLP (default OFF, flag-graduation). The strided node-NLP is
+    # a pure primal heuristic (fires only in the nonconvex + LP-relaxer regime,
+    # where the LP gives the bound); TX0 measured it as idle waste on integer-heavy
+    # models (nvs09 14.3 s, identical proof). When ON we grow the *effective*
+    # stride whenever the node-NLP fired but found no incumbent improvement, and
+    # reset it to the base stride the instant it does. This state persists across
+    # B&B iterations; it never touches the convex / no-LP-relaxer bound-source path.
+    _adaptive_nlp = _tuning().adaptive_nlp
+    _ADAPTIVE_NLP_PATIENCE = 2  # non-improving fired batches before a doubling
+    _ADAPTIVE_NLP_STRIDE_CAP = 256  # ceiling on the effective stride
+    _adaptive_nlp_state = {"eff_stride": 0, "no_improve": 0}
+
     # --- F4: root-heuristic NLP/compile budget gate --------------------------
     # ``solve(time_limit=T)`` is a contract. On the no-relaxation flowsheet class
     # (contvar, heatexch_gen3, hda) the root PRIMAL-HEURISTIC phase blows past it
@@ -6086,6 +6146,68 @@ def solve_model(
                 batch_ub[i] = t_ub.tolist()
             _reduce_timers["fbbt"] += time.perf_counter() - _t_fbbt
 
+        # --- In-tree presolve / branch-and-reduce (PF1, issue #632) ---
+        # Wire the persistent Rust FBBT(+reduce) kernel into the GLOBAL spatial
+        # B&B node loop, gated by ``in_tree_presolve_stride`` (same kwarg the
+        # NLP-BB path uses). Before this the kernel fired only on ``_solve_nlp_bb``
+        # (convex path); every unproved spatial instance lives here and never saw
+        # cutoff-aware in-tree FBBT / branch-and-reduce. The kernel:
+        #   * runs cutoff-aware FBBT with the incumbent as a valid upper bound, so
+        #     it discards only points that cannot improve the incumbent (sound
+        #     inside B&B), then
+        #   * optionally (probing, default OFF) contracts discrete domains on
+        #     proven-infeasible fixings.
+        # SOUNDNESS: every contraction is outward-rounded interval propagation
+        # applied as an INTERSECTION with the current box (``run_in_tree_presolve``
+        # never loosens); a proven-empty box fathoms the node. A reduced box thus
+        # always still contains the entire feasible region — no feasible point,
+        # and never the optimum, is ever excluded. Best-effort: silently skipped
+        # when the repr's block count doesn't match the node box (e.g. a
+        # polynomial-reformulated repr with extra aux vars) — the intersect-only
+        # floor keeps it sound even then.
+        if in_tree_presolve_stride and _model_repr is not None:
+            try:
+                _itp_n_blocks = _model_repr.n_var_blocks
+                _itp_probing = _node_probing_enabled()
+                _itp_probe_max = _node_probe_max_vars()
+                _itp_inc = tree.incumbent()
+                _itp_cutoff = (
+                    float(_itp_inc[1])
+                    if _itp_inc is not None
+                    and np.isfinite(_itp_inc[1])
+                    and _itp_inc[1] < _SENTINEL_THRESHOLD
+                    else None
+                )
+                _itp_depths = tree.node_depths(np.asarray(batch_ids, dtype=np.int64))
+                _t_itp = time.perf_counter()
+                for i in range(n_batch):
+                    if node_infeasible_mask[i]:
+                        continue
+                    if len(batch_lb[i]) != _itp_n_blocks:
+                        continue
+                    _itp_delta = _model_repr.in_tree_presolve(
+                        np.asarray(batch_lb[i], dtype=np.float64),
+                        np.asarray(batch_ub[i], dtype=np.float64),
+                        node_depth=int(_itp_depths[i]),
+                        depth_stride=in_tree_presolve_stride,
+                        incumbent=_itp_cutoff,
+                        probing=_itp_probing,
+                        probe_max_vars=_itp_probe_max,
+                    )
+                    if not _itp_delta["ran"]:
+                        continue
+                    _IN_TREE_PRESOLVE_GLOBAL_CALLS += 1
+                    if _itp_delta["infeasible"]:
+                        # Rigorous fathom: the node box is empty (FBBT/probing
+                        # proof), so its subtree holds no feasible point.
+                        node_infeasible_mask[i] = True
+                    else:
+                        batch_lb[i] = list(_itp_delta["lb"])
+                        batch_ub[i] = list(_itp_delta["ub"])
+                _reduce_timers["fbbt"] += time.perf_counter() - _t_itp
+            except Exception as _itp_exc:  # pragma: no cover - defensive
+                logger.debug("global in-tree presolve skipped: %s", _itp_exc)
+
         # --- Per-node OBBT (Lever A) ---
         # Tighten each surviving node's box against its own McCormick relaxation
         # (optionally with the incumbent objective as a cutoff). The relaxation
@@ -6468,6 +6590,24 @@ def solve_model(
             _nlp_stride = _tuning().node_nlp_stride
             _gate_node_nlp = _mc_lp_relaxer is not None and not _model_is_convex and _nlp_stride > 1
 
+            # TX1: effective stride. When adaptive back-off is ON and we are in the
+            # throttle-safe gated regime, use the (persisted, back-off-grown)
+            # effective stride instead of the fixed one; seed it from the base
+            # stride on first use. Adaptive-off, or outside the gated regime, this
+            # is byte-identical to today's fixed-stride behavior.
+            _eff_nlp_stride = _nlp_stride
+            if _adaptive_nlp and _gate_node_nlp:
+                if _adaptive_nlp_state["eff_stride"] <= 0:
+                    _adaptive_nlp_state["eff_stride"] = _nlp_stride
+                _eff_nlp_stride = _adaptive_nlp_state["eff_stride"]
+
+            # TX1: snapshot the incumbent so we can attribute any improvement over
+            # this batch's per-node loop to the strided node-NLP (the ONLY
+            # inject_incumbent site inside the loop below); track whether it fired.
+            _adapt_inc_pre = tree.incumbent()
+            _adapt_inc_pre_val = float(_adapt_inc_pre[1]) if _adapt_inc_pre is not None else None
+            _adapt_nlp_fired = False
+
             for i in range(n_batch):
                 node_lb = np.array(batch_lb[i])
                 node_ub = np.array(batch_ub[i])
@@ -6498,7 +6638,7 @@ def solve_model(
                 # Strided primal NLP (lever 2): run the per-node NLP only on a
                 # fraction of nodes in the gated regime; every node still gets the
                 # LP relaxer's bound + primal below.
-                _node_nlp_due = (not _gate_node_nlp) or (int(batch_ids[i]) % _nlp_stride == 0)
+                _node_nlp_due = (not _gate_node_nlp) or (int(batch_ids[i]) % _eff_nlp_stride == 0)
                 nlp_result = None
                 if iteration == 0 and _mc_lp_relaxer is None:
                     # The root multistart NLP is the only bound source we have.
@@ -6516,6 +6656,8 @@ def solve_model(
                         observe_cost=_observe_heur_nlp,
                     )
                 elif iteration > 0 and _node_nlp_due:
+                    if _gate_node_nlp:
+                        _adapt_nlp_fired = True
                     # Warm-start from parent solution if available
                     psol_i = np.array(batch_psols[i])
                     if not np.any(np.isnan(psol_i)):
@@ -6844,6 +6986,42 @@ def solve_model(
                 if _model_is_convex and not node_infeasible_mask[i] and not _serial_nlp_trusted:
                     _gap_certified = False
                     _convex_bound_untrusted = True
+
+            # TX1: adaptive back-off update. Only when the strided node-NLP fired
+            # this batch (gated regime): if it did NOT improve the incumbent for
+            # PATIENCE consecutive fired batches, double the effective stride (up to
+            # the cap); reset to the base stride the moment it improves. Purely a
+            # heuristic-schedule change — the dual bound / gap are untouched.
+            if _adaptive_nlp and _gate_node_nlp and _adapt_nlp_fired:
+                _adapt_inc_post = tree.incumbent()
+                _adapt_inc_post_val = (
+                    float(_adapt_inc_post[1]) if _adapt_inc_post is not None else None
+                )
+                _adapt_improved = _adapt_inc_post_val is not None and (
+                    _adapt_inc_pre_val is None
+                    or _adapt_inc_post_val < _adapt_inc_pre_val - _DEFAULT_ABS_GAP_TOL
+                )
+                if _adapt_improved:
+                    if _adaptive_nlp_state["eff_stride"] != _nlp_stride:
+                        logger.debug(
+                            "TX1 adaptive node-NLP: incumbent improved, reset stride %d -> %d",
+                            _adaptive_nlp_state["eff_stride"],
+                            _nlp_stride,
+                        )
+                    _adaptive_nlp_state["eff_stride"] = _nlp_stride
+                    _adaptive_nlp_state["no_improve"] = 0
+                else:
+                    _adaptive_nlp_state["no_improve"] += 1
+                    if _adaptive_nlp_state["no_improve"] >= _ADAPTIVE_NLP_PATIENCE:
+                        _new_stride = min(_eff_nlp_stride * 2, _ADAPTIVE_NLP_STRIDE_CAP)
+                        if _new_stride != _adaptive_nlp_state["eff_stride"]:
+                            logger.debug(
+                                "TX1 adaptive node-NLP: no improvement, back off stride %d -> %d",
+                                _adaptive_nlp_state["eff_stride"],
+                                _new_stride,
+                            )
+                        _adaptive_nlp_state["eff_stride"] = _new_stride
+                        _adaptive_nlp_state["no_improve"] = 0
         jax_time += time.perf_counter() - t_jax_start
 
         # C-1 (path-agnostic, covers convex + nonconvex, batch + serial): any node
@@ -8693,6 +8871,35 @@ def solve_model(
         _gap_certified = True
         status = "optimal"
 
+    # SOUNDNESS INVARIANT (bound <= incumbent). A valid dual bound never crosses a
+    # known feasible objective: a MINIMIZE lower bound is <= the incumbent, a
+    # MAXIMIZE upper bound is >= it. The Rust tree already enforces this
+    # (``update_global_lower_bound`` caps ``global_lower_bound`` at
+    # ``incumbent_value``), but the Python bound-adoption fallbacks above — the
+    # root-relaxation recompute over a possibly FBBT-tightened *snapshot* box, the
+    # taint floor, the root-cut-pool bound — can surface a value that is valid over
+    # its own box yet exceeds the GLOBAL incumbent when that box no longer contains
+    # the optimum. That is an unsound reported bound (ex14_1_7 / ex14_1_9: the
+    # objective is a free variable the uniform engine cannot bound, so the tainted
+    # exit ran the root-relaxation fallback over a tightened snapshot and adopted
+    # 28.5 / 1.0 as a "tighter" lower bound though the true optimum is 0). Cap the
+    # reported bound at the incumbent. This runs AFTER the certification decision —
+    # which correctly used the raw, possibly wrong-side bound via
+    # ``_bound_on_correct_side`` to REFUSE certification — so it can never
+    # manufacture a false "optimal", and it is a no-op for any genuinely valid
+    # bound (already on the correct side). The reported gap is recomputed from the
+    # capped bound so ``bound`` and ``gap`` stay mutually consistent.
+    if (
+        bound_val is not None
+        and np.isfinite(bound_val)
+        and obj_val is not None
+        and np.isfinite(obj_val)
+    ):
+        _capped = max(bound_val, obj_val) if _is_max else min(bound_val, obj_val)
+        if _capped != bound_val:
+            bound_val = _capped
+            gap_val = abs(bound_val - obj_val) / max(1.0, abs(obj_val))
+
     # Root-node certification metrics (cert:T0.1). Convert the root snapshot to
     # the reported objective sense (mirroring ``bound_val``'s negation for
     # MAXIMIZE) and adopt the strengthened root cut-pool bound when it is the
@@ -8981,7 +9188,7 @@ def _solve_nlp_bb(
     lazy_constraints=None,
     incumbent_callback=None,
     node_callback=None,
-    in_tree_presolve_stride: int = 0,
+    in_tree_presolve_stride: int = 1,  # PF1 (#632): FBBT-only default; see solve_model
     in_tree_presolve_repr=None,
     rens_enabled: bool = True,
     _lns_enabled: bool = True,
@@ -9276,16 +9483,43 @@ def _solve_nlp_bb(
         if in_tree_presolve_stride and in_tree_presolve_repr is not None:
             try:
                 n_blocks = in_tree_presolve_repr.n_var_blocks
+                # P3 branch-and-reduce: enable per-node probing (default OFF) and
+                # feed the current incumbent as a cutoff so both the in-tree FBBT
+                # and the probing pass are optimality-aware. The incumbent value
+                # is a valid upper bound on the optimum, so cutoff-driven
+                # contraction never removes an improving feasible point.
+                _itp_probing = _node_probing_enabled()
+                _itp_probe_max = _node_probe_max_vars()
+                _itp_inc = tree.incumbent()
+                _itp_cutoff = (
+                    float(_itp_inc[1])
+                    if _itp_inc is not None
+                    and np.isfinite(_itp_inc[1])
+                    and _itp_inc[1] < _SENTINEL_THRESHOLD
+                    else None
+                )
+                # Real per-node tree depth so the depth-stride gate is honest
+                # (issue #632 / PF1): the old hardcode of 0 made every stride
+                # fire at every node (0 % s == 0). At stride 1 this is a no-op
+                # (fires everywhere either way); it only matters for stride > 1.
+                _itp_depths = tree.node_depths(np.asarray(batch_ids, dtype=np.int64))
                 for i in range(n_batch):
                     if len(batch_lb[i]) != n_blocks:
                         continue
                     delta = in_tree_presolve_repr.in_tree_presolve(
                         np.asarray(batch_lb[i], dtype=np.float64),
                         np.asarray(batch_ub[i], dtype=np.float64),
-                        node_depth=0,
+                        node_depth=int(_itp_depths[i]),
                         depth_stride=in_tree_presolve_stride,
+                        incumbent=_itp_cutoff,
+                        probing=_itp_probing,
+                        probe_max_vars=_itp_probe_max,
                     )
-                    if delta["ran"] and not delta["infeasible"]:
+                    if delta["ran"] and delta["infeasible"]:
+                        # Rigorous fathom: the node box is empty (FBBT/probing
+                        # proof). Mark infeasible so the node is pruned soundly.
+                        node_infeasible_mask[i] = True
+                    elif delta["ran"]:
                         batch_lb[i] = list(delta["lb"])
                         batch_ub[i] = list(delta["ub"])
             except Exception as _e:

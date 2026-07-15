@@ -170,10 +170,8 @@ def collect_edge_concave_quadratics(model, *, max_factors: int = 12) -> list[Edg
     return blocks
 
 
-def _quad_vertex_values(block: EdgeConcaveQuadratic, lb: np.ndarray, ub: np.ndarray, idx: dict):
-    """Evaluate ``q`` at every box vertex of ``block.var_idxs``."""
-    n = len(block.var_idxs)
-    verts = np.array(list(product(*[(float(lb[d]), float(ub[d])) for d in range(n)])))
+def _quad_values(block: EdgeConcaveQuadratic, verts: np.ndarray, idx: dict) -> np.ndarray:
+    """Evaluate ``q`` at each (full-width) vertex row of ``verts``."""
     vals = np.full(verts.shape[0], block.const, dtype=np.float64)
     for i, coeff in block.sq.items():
         vals += coeff * verts[:, idx[i]] ** 2
@@ -181,7 +179,14 @@ def _quad_vertex_values(block: EdgeConcaveQuadratic, lb: np.ndarray, ub: np.ndar
         vals += coeff * verts[:, idx[i]] * verts[:, idx[j]]
     for i, coeff in block.lin.items():
         vals += coeff * verts[:, idx[i]]
-    return verts, vals
+    return vals
+
+
+def _quad_vertex_values(block: EdgeConcaveQuadratic, lb: np.ndarray, ub: np.ndarray, idx: dict):
+    """Evaluate ``q`` at every box vertex of ``block.var_idxs``."""
+    n = len(block.var_idxs)
+    verts = np.array(list(product(*[(float(lb[d]), float(ub[d])) for d in range(n)])))
+    return verts, _quad_values(block, verts, idx)
 
 
 def separate_edge_concave_quadratic(
@@ -218,12 +223,66 @@ def separate_edge_concave_quadratic(
     if n < 2 or not (np.all(np.isfinite(lb[:n])) and np.all(np.isfinite(ub[:n]))):
         return None
     idx = {v: k for k, v in enumerate(block.var_idxs)}
+    xs = np.clip(np.asarray(x_star, dtype=np.float64), lb[:n], ub[:n])
+    maximize = block.sense == "over"
+
+    # Pinned dims (branching / FBBT set ``lb == ub`` exactly): the ``2^n`` vertex
+    # enumeration emits duplicate vertex columns and a redundant equality row, so
+    # the vertex-hull LP is degenerate and the Rust simplex cycles to its pivot
+    # cap and falls back to the POUNCE IPM. Drop the pinned positions from the
+    # enumeration so the LP is non-degenerate. The cut is unchanged in effect: a
+    # pinned var is fixed at that constant in the relaxation LP too, so any slope
+    # on it is absorbed into the intercept with no change to the feasible region
+    # or bound; the returned slope ``A`` is 0 on pinned dims and the intercept —
+    # recomputed as ``min/max_v(q(v) − A·v)`` over the vertices — is unaffected
+    # because the pinned dims contribute a constant to ``q(v)`` and 0 to ``A·v``.
+    pinned = lb[:n] == ub[:n]
+    if pinned.any():
+        fidx = np.nonzero(~pinned)[0]  # free positions (0..n-1)
+        if fidx.size == 0:
+            # Fully pinned: q is constant on the box — nothing to separate.
+            return None
+        pin_pos = np.nonzero(pinned)[0]
+        free_verts = np.array(list(product(*[(float(lb[d]), float(ub[d])) for d in fidx])))
+        m = free_verts.shape[0]
+        # Full-width vertices (pinned columns held at their constant) so ``q(v)``
+        # evaluates correctly; only the free rows enter the LP.
+        verts_full = np.empty((m, n), dtype=np.float64)
+        verts_full[:, fidx] = free_verts
+        verts_full[:, pin_pos] = lb[pin_pos]
+        vals = _quad_values(block, verts_full, idx)
+        a_eq = np.vstack([free_verts.T, np.ones(m)])
+        b_eq = np.append(xs[fidx], 1.0)
+        c = -vals if maximize else vals
+        try:
+            res = solve_lp(c, A_eq=a_eq, b_eq=b_eq, bounds=[(0.0, np.inf)] * m)
+        except ImportError:  # pragma: no cover - POUNCE is a core dependency
+            return None
+        if res.status != SolveStatus.OPTIMAL or res.dual_values is None:
+            return None
+        duals = np.asarray(res.dual_values, dtype=np.float64)
+        if duals.shape[0] != fidx.size + 1 or not np.all(np.isfinite(duals)):
+            return None
+        A_free = -duals[: fidx.size] if maximize else duals[: fidx.size]
+        A = np.zeros(n, dtype=np.float64)
+        A[fidx] = A_free
+        if not np.all(np.isfinite(A)):
+            return None
+        resid = vals - verts_full @ A  # q(v) − A·v
+        if maximize:
+            B = float(np.max(resid))
+            if q_star <= float(A @ xs + B) + tol:
+                return None
+        else:
+            B = float(np.min(resid))
+            if q_star >= float(A @ xs + B) - tol:
+                return None
+        return A, B
+
     verts, vals = _quad_vertex_values(block, lb, ub, idx)
     m = verts.shape[0]
-    xs = np.clip(np.asarray(x_star, dtype=np.float64), lb[:n], ub[:n])
     a_eq = np.vstack([verts.T, np.ones(m)])
     b_eq = np.append(xs, 1.0)
-    maximize = block.sense == "over"
     c = -vals if maximize else vals
     try:
         res = solve_lp(c, A_eq=a_eq, b_eq=b_eq, bounds=[(0.0, np.inf)] * m)

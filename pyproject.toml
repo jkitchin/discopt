@@ -251,6 +251,7 @@ markers = [
     "correctness: known-optima validation tests; usually also `slow`",
     "pr_correctness: small known-optima subset run on every PR; <30 s total",
     "cutest: requires pycutest and CUTEst installation",
+    "claim_boundary: relaxation claim-arbitration tests; run SERIALLY (-n0) so claimer collisions cannot be order-masked under pytest-xdist (issue #632)",
 ]
 
 [tool.coverage.run]

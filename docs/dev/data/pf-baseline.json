@@ -1,0 +1,629 @@
+{
+  "budget": 30.0,
+  "rows": [
+    {
+      "bound": 19021.346794750414,
+      "gap": null,
+      "instance": "4stufen",
+      "nodes": 7,
+      "objective": null,
+      "sense": "min",
+      "status": "time_limit",
+      "wall": 31.693030362000172
+    },
+    {
+      "bound": 2.9249999983013426,
+      "gap": 0.0,
+      "instance": "alan",
+      "nodes": 21,
+      "objective": 2.9249999983013426,
+      "sense": "min",
+      "status": "optimal",
+      "wall": 0.8105864369999836
+    },
+    {
+      "bound": null,
+      "gap": null,
+      "instance": "bchoco06",
+      "nodes": 3,
+      "objective": null,
+      "sense": "max",
+      "status": "time_limit",
+      "wall": 33.91760939800042
+    },
+    {
+      "bound": null,
+      "gap": null,
+      "instance": "bchoco07",
+      "nodes": 3,
+      "objective": null,
+      "sense": "max",
+      "status": "time_limit",
+      "wall": 36.81990244700046
+    },
+    {
+      "bound": null,
+      "gap": null,
+      "instance": "bchoco08",
+      "nodes": 1,
+      "objective": null,
+      "sense": "max",
+      "status": "time_limit",
+      "wall": 51.076034910999624
+    },
+    {
+      "bound": 6352.063220222274,
+      "gap": null,
+      "instance": "beuster",
+      "nodes": 7,
+      "objective": null,
+      "sense": "min",
+      "status": "time_limit",
+      "wall": 33.19006128100045
+    },
+    {
+      "bound": 5.697893551291301,
+      "gap": null,
+      "instance": "casctanks",
+      "nodes": 1,
+      "objective": null,
+      "sense": "min",
+      "status": "time_limit",
+      "wall": 60.57901153200055
+    },
+    {
+      "bound": 29.894378154271102,
+      "gap": 0.0,
+      "instance": "chance",
+      "nodes": 0,
+      "objective": 29.894378154271102,
+      "sense": "min",
+      "status": "optimal",
+      "wall": 1.2898165900005552
+    },
+    {
+      "bound": null,
+      "gap": null,
+      "instance": "clay0303hfsg",
+      "nodes": 3,
+      "objective": null,
+      "sense": "min",
+      "status": "time_limit",
+      "wall": 30.08462392599995
+    },
+    {
+      "bound": 171244.8112803359,
+      "gap": null,
+      "instance": "contvar",
+      "nodes": 1,
+      "objective": null,
+      "sense": "min",
+      "status": "time_limit",
+      "wall": 82.0931593310006
+    },
+    {
+      "bound": 130.61841392487688,
+      "gap": 7.882808727819201e-05,
+      "instance": "cvxnonsep_nsig30",
+      "nodes": 165,
+      "objective": 130.6287111692529,
+      "sense": "min",
+      "status": "optimal",
+      "wall": 15.563145273000373
+    },
+    {
+      "bound": 78.99179874365787,
+      "gap": 8.9312555104815e-05,
+      "instance": "cvxnonsep_psig30",
+      "nodes": 89,
+      "objective": 78.99885435294289,
+      "sense": "min",
+      "status": "optimal",
+      "wall": 8.159070537999469
+    },
+    {
+      "bound": 86.53873600363832,
+      "gap": 7.406734070720922e-05,
+      "instance": "cvxnonsep_psig40r",
+      "nodes": 95,
+      "objective": 86.54527995164959,
+      "sense": "min",
+      "status": "optimal",
+      "wall": 15.100157823999325
+    },
+    {
+      "bound": 3155.2872325371836,
+      "gap": 2.1999950200987244e-07,
+      "instance": "dispatch",
+      "nodes": 3,
+      "objective": 3155.2879266989653,
+      "sense": "min",
+      "status": "optimal",
+      "wall": 1.5945251720004308
+    },
+    {
+      "bound": 7.667180060145954,
+      "gap": 1.1304261375223097e-09,
+      "instance": "ex1221",
+      "nodes": 5,
+      "objective": 7.667180068813135,
+      "sense": "min",
+      "status": "optimal",
+      "wall": 1.6689260140001352
+    },
+    {
+      "bound": 1.0765430463031964,
+      "gap": 0.0,
+      "instance": "ex1222",
+      "nodes": 1,
+      "objective": 1.0765430833322625,
+      "sense": "min",
+      "status": "optimal",
+      "wall": 1.2387386949994834
+    },
+    {
+      "bound": -0.9434705021069314,
+      "gap": 2.106931296097514e-09,
+      "instance": "ex1224",
+      "nodes": 5,
+      "objective": -0.943470491100134,
+      "sense": "min",
+      "status": "optimal",
+      "wall": 5.973159815000145
+    },
+    {
+      "bound": 30.999999968,
+      "gap": 1.0322580353218772e-09,
+      "instance": "ex1225",
+      "nodes": 5,
+      "objective": 30.999999913550667,
+      "sense": "min",
+      "status": "optimal",
+      "wall": 4.424880816000041
+    },
+    {
+      "bound": -17.000000014222035,
+      "gap": 6.079171674468364e-10,
+      "instance": "ex1226",
+      "nodes": 5,
+      "objective": -16.999999994161513,
+      "sense": "min",
+      "status": "optimal",
+      "wall": 1.6618163390003247
+    },
+    {
+      "bound": 331837497.561812,
+      "gap": 0.0,
+      "instance": "fac2",
+      "nodes": 39,
+      "objective": 331837498.18201387,
+      "sense": "min",
+      "status": "optimal",
+      "wall": 13.766709305999939
+    },
+    {
+      "bound": 37.94733180456953,
+      "gap": 0.0,
+      "instance": "flay02m",
+      "nodes": 7,
+      "objective": 37.947331863834606,
+      "sense": "min",
+      "status": "optimal",
+      "wall": 1.4369065979999505
+    },
+    {
+      "bound": 48.98979470823039,
+      "gap": 0.0,
+      "instance": "flay03m",
+      "nodes": 107,
+      "objective": 48.98979479383543,
+      "sense": "min",
+      "status": "optimal",
+      "wall": 19.95665092099989
+    },
+    {
+      "bound": 2.199999982504936,
+      "gap": 0.0,
+      "instance": "gbd",
+      "nodes": 3,
+      "objective": 2.199999982504936,
+      "sense": "min",
+      "status": "optimal",
+      "wall": 0.3116515330002585
+    },
+    {
+      "bound": -1.9230988280923489,
+      "gap": 0.0,
+      "instance": "gkocis",
+      "nodes": 5,
+      "objective": -1.9230987798770212,
+      "sense": "min",
+      "status": "optimal",
+      "wall": 2.0797433280004043
+    },
+    {
+      "error": "killed after 90s",
+      "instance": "hda",
+      "status": "hang"
+    },
+    {
+      "bound": 38183.53170784717,
+      "gap": null,
+      "instance": "heatexch_gen1",
+      "nodes": 3,
+      "objective": null,
+      "sense": "min",
+      "status": "time_limit",
+      "wall": 51.683239349999894
+    },
+    {
+      "bound": 555767.7897300989,
+      "gap": null,
+      "instance": "heatexch_gen2",
+      "nodes": 7,
+      "objective": null,
+      "sense": "min",
+      "status": "time_limit",
+      "wall": 33.35672717399939
+    },
+    {
+      "bound": 43887.57988179716,
+      "gap": null,
+      "instance": "heatexch_gen3",
+      "nodes": 1,
+      "objective": null,
+      "sense": "min",
+      "status": "time_limit",
+      "wall": 56.98498163300064
+    },
+    {
+      "bound": 37.79999951039202,
+      "gap": 0.0,
+      "instance": "m3",
+      "nodes": 47,
+      "objective": 37.799999669978845,
+      "sense": "min",
+      "status": "optimal",
+      "wall": 23.411345455000628
+    },
+    {
+      "bound": 12.469668821568202,
+      "gap": 5.698168459222487e-16,
+      "instance": "nvs01",
+      "nodes": 7,
+      "objective": 12.46966882156821,
+      "sense": "min",
+      "status": "optimal",
+      "wall": 6.267616387999624
+    },
+    {
+      "bound": 5.96418452307,
+      "gap": 0.0,
+      "instance": "nvs02",
+      "nodes": 337,
+      "objective": 5.96418452307,
+      "sense": "min",
+      "status": "optimal",
+      "wall": 5.096101066000301
+    },
+    {
+      "bound": 15.99999972676511,
+      "gap": 1.707718066956687e-08,
+      "instance": "nvs03",
+      "nodes": 5,
+      "objective": 16.0,
+      "sense": "min",
+      "status": "optimal",
+      "wall": 0.9105406120006592
+    },
+    {
+      "bound": 0.7199999982799788,
+      "gap": 1.7200271207329365e-09,
+      "instance": "nvs04",
+      "nodes": 5,
+      "objective": 0.720000000000006,
+      "sense": "min",
+      "status": "optimal",
+      "wall": 1.2688186349996613
+    },
+    {
+      "bound": 4.697044703985232,
+      "gap": 0.14145471404695598,
+      "instance": "nvs05",
+      "nodes": 215,
+      "objective": 5.47093412640568,
+      "sense": "min",
+      "status": "feasible",
+      "wall": 30.10345069899995
+    },
+    {
+      "bound": 1.7703124970484372,
+      "gap": 1.667255228649717e-09,
+      "instance": "nvs06",
+      "nodes": 5,
+      "objective": 1.7703125002341187,
+      "sense": "min",
+      "status": "optimal",
+      "wall": 1.939458650999768
+    },
+    {
+      "bound": 4.0,
+      "gap": 0.0,
+      "instance": "nvs07",
+      "nodes": 5,
+      "objective": 4.0,
+      "sense": "min",
+      "status": "optimal",
+      "wall": 0.23269918900041375
+    },
+    {
+      "bound": 23.4497273162716,
+      "gap": 1.3000495573051173e-09,
+      "instance": "nvs08",
+      "nodes": 5,
+      "objective": 23.449727353351044,
+      "sense": "min",
+      "status": "optimal",
+      "wall": 2.161828999000136
+    },
+    {
+      "bound": -43.696863253882604,
+      "gap": 0.013041265405707249,
+      "instance": "nvs09",
+      "nodes": 13,
+      "objective": -43.13433691803531,
+      "sense": "min",
+      "status": "feasible",
+      "wall": 34.21137029199963
+    },
+    {
+      "bound": -310.7999999999999,
+      "gap": 0.0,
+      "instance": "nvs10",
+      "nodes": 5,
+      "objective": -310.7999999999999,
+      "sense": "min",
+      "status": "optimal",
+      "wall": 0.7287330230001317
+    },
+    {
+      "bound": -430.99999999999966,
+      "gap": 0.0,
+      "instance": "nvs11",
+      "nodes": 55,
+      "objective": -430.99999999999966,
+      "sense": "min",
+      "status": "optimal",
+      "wall": 9.951391540999794
+    },
+    {
+      "bound": -3554.456319731603,
+      "gap": null,
+      "instance": "nvs12",
+      "nodes": 1,
+      "objective": null,
+      "sense": "min",
+      "status": "time_limit",
+      "wall": 34.22098430400001
+    },
+    {
+      "bound": -585.2000011714,
+      "gap": 2.0017087463537884e-09,
+      "instance": "nvs13",
+      "nodes": 33,
+      "objective": -585.2,
+      "sense": "min",
+      "status": "optimal",
+      "wall": 7.90461059900008
+    },
+    {
+      "bound": -40358.15476929999,
+      "gap": 7.211387790918682e-16,
+      "instance": "nvs14",
+      "nodes": 223,
+      "objective": -40358.15476929996,
+      "sense": "min",
+      "status": "optimal",
+      "wall": 3.612324886999886
+    },
+    {
+      "bound": 1.0,
+      "gap": 0.0,
+      "instance": "nvs15",
+      "nodes": 7,
+      "objective": 1.0,
+      "sense": "min",
+      "status": "optimal",
+      "wall": 0.7490356500002235
+    },
+    {
+      "bound": -5.684782628025259,
+      "gap": 0.0,
+      "instance": "nvs21",
+      "nodes": 11,
+      "objective": -5.684782607923296,
+      "sense": "min",
+      "status": "optimal",
+      "wall": 3.5605073409997203
+    },
+    {
+      "bound": -1.923098601139822,
+      "gap": 0.0,
+      "instance": "oaer",
+      "nodes": 3,
+      "objective": -1.923098499884843,
+      "sense": "min",
+      "status": "optimal",
+      "wall": 2.1633715159996427
+    },
+    {
+      "bound": 1.9999999825187809,
+      "gap": 0.0,
+      "instance": "st_e13",
+      "nodes": 3,
+      "objective": 2.0000003463351197,
+      "sense": "min",
+      "status": "optimal",
+      "wall": 1.2802300170005765
+    },
+    {
+      "bound": -0.9434705021069314,
+      "gap": 2.106931296097514e-09,
+      "instance": "st_e29",
+      "nodes": 5,
+      "objective": -0.943470491100134,
+      "sense": "min",
+      "status": "optimal",
+      "wall": 6.614313583000694
+    },
+    {
+      "bound": -246.00000037500067,
+      "gap": 1.5243668441343357e-09,
+      "instance": "st_e36",
+      "nodes": 89,
+      "objective": -245.99999999999997,
+      "sense": "min",
+      "status": "optimal",
+      "wall": 23.004111147000003
+    },
+    {
+      "bound": 7197.727116826533,
+      "gap": 0.0,
+      "instance": "st_e38",
+      "nodes": 3,
+      "objective": 7197.727116839705,
+      "sense": "min",
+      "status": "optimal",
+      "wall": 1.9292036619999635
+    },
+    {
+      "bound": 280.9999999906497,
+      "gap": 0.0,
+      "instance": "st_miqp1",
+      "nodes": 15,
+      "objective": 280.9999999906497,
+      "sense": "min",
+      "status": "optimal",
+      "wall": 0.3560992319999059
+    },
+    {
+      "bound": 2.0,
+      "gap": 0.0,
+      "instance": "st_miqp2",
+      "nodes": 9,
+      "objective": 2.0,
+      "sense": "min",
+      "status": "optimal",
+      "wall": 0.4142784440000469
+    },
+    {
+      "bound": -6.0,
+      "gap": 0.0,
+      "instance": "st_miqp3",
+      "nodes": 1,
+      "objective": -6.0,
+      "sense": "min",
+      "status": "optimal",
+      "wall": 0.3846799689999898
+    },
+    {
+      "bound": -4574.000004423649,
+      "gap": 0.0,
+      "instance": "st_miqp4",
+      "nodes": 3,
+      "objective": -4574.000004423649,
+      "sense": "min",
+      "status": "optimal",
+      "wall": 0.42075560400007816
+    },
+    {
+      "bound": -1.6495994490692313e-08,
+      "gap": 0.0,
+      "instance": "st_test1",
+      "nodes": 15,
+      "objective": -1.6495994490692313e-08,
+      "sense": "min",
+      "status": "optimal",
+      "wall": 0.4202173479998237
+    },
+    {
+      "bound": -20.59070709795548,
+      "gap": 3.434181425354089e-05,
+      "instance": "st_testgr3",
+      "nodes": 549,
+      "objective": -20.59,
+      "sense": "min",
+      "status": "optimal",
+      "wall": 0.9408360990000801
+    },
+    {
+      "bound": 0.8528765311589279,
+      "gap": 0.32772576471468673,
+      "instance": "tanksize",
+      "nodes": 49,
+      "objective": 1.2686437861135151,
+      "sense": "min",
+      "status": "feasible",
+      "wall": 30.79642158599927
+    },
+    {
+      "bound": 2.4487125876978726,
+      "gap": 0.7622609107099159,
+      "instance": "tls2",
+      "nodes": 353,
+      "objective": 10.299999865440752,
+      "sense": "min",
+      "status": "feasible",
+      "wall": 31.043129349000083
+    },
+    {
+      "bound": 179.4433806807624,
+      "gap": 0.06175950525559916,
+      "instance": "tspn05",
+      "nodes": 37,
+      "objective": 191.25520768494124,
+      "sense": "min",
+      "status": "feasible",
+      "wall": 30.142610170999433
+    },
+    {
+      "bound": null,
+      "gap": null,
+      "instance": "tspn08",
+      "nodes": 1,
+      "objective": 290.56685374735093,
+      "sense": "min",
+      "status": "feasible",
+      "wall": 21.948357307999686
+    },
+    {
+      "bound": null,
+      "gap": null,
+      "instance": "tspn10",
+      "nodes": 1,
+      "objective": 225.12607139732683,
+      "sense": "min",
+      "status": "feasible",
+      "wall": 28.66480064300049
+    },
+    {
+      "bound": null,
+      "gap": null,
+      "instance": "tspn12",
+      "nodes": 1,
+      "objective": 262.64739525060224,
+      "sense": "min",
+      "status": "feasible",
+      "wall": 19.44749967699954
+    }
+  ],
+  "summary": {
+    "error": 1,
+    "feasible": 8,
+    "infeasible": 0,
+    "n": 62,
+    "proved": 41,
+    "timeout": 12,
+    "total_wall": 962.8165992300028
+  }
+}

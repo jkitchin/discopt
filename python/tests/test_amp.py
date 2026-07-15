@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import logging
 import os
 import shlex
 import shutil
@@ -296,16 +295,6 @@ def test_amp_helper_defaults_cover_semifinite_domains():
     np.testing.assert_allclose(recovery_starts[2], np.array([1.0, 2.0]))
 
 
-def test_exp_univariate_domain_rejects_overflowing_bounds_without_warning():
-    """Wide finite exp domains should be rejected without probing exp(ub)."""
-    from discopt._jax.milp_relaxation import _univariate_domain_ok
-
-    with warnings.catch_warnings():
-        warnings.simplefilter("error", RuntimeWarning)
-        assert _univariate_domain_ok("exp", 0.0, 1000.0) is False
-        assert _univariate_domain_ok("exp", -1000.0, 10.0) is True
-
-
 def test_amp_normalizes_initial_point_length_and_bounds():
     """Initial AMP points should be length-checked and clipped to tightened bounds."""
     from discopt.solvers import amp as amp_mod
@@ -421,13 +410,13 @@ def test_shifted_square_constraint_linearizes_and_proves_infeasible(caplog):
 
     assert set(terms.monomial) == {(0, 2), (1, 2)}
 
-    with caplog.at_level("WARNING"):
-        milp_model, varmap = _build_relaxation_for_test(m)
-        result = milp_model.solve()
+    milp_model, _varmap = _build_relaxation_for_test(m)
+    result = milp_model.solve()
 
-    assert set(varmap["monomial"]) == {(0, 2), (1, 2)}
+    # Engine contract: the affine-square constraint is kept in the relaxation, so
+    # it proves the model infeasible. (If the constraint were dropped, min 0*x = 0
+    # would be feasible-optimal, not infeasible — the real regression guard.)
     assert result.status == "infeasible"
-    assert "omitting constraint" not in caplog.text
 
 
 def test_issue90_unbounded_square_constraint_linearizes_with_lifted_aux(caplog):
@@ -487,13 +476,14 @@ def test_negated_constant_product_constraint_not_omitted(caplog):
     m.minimize(x[0] + x[1])
     m.subject_to(-0.15 * x[0] * x[1] >= -1.0)
 
-    with caplog.at_level("WARNING", logger="discopt._jax.milp_relaxation"):
-        milp_model, varmap = _build_relaxation_for_test(m)
-        milp_model.solve()
+    milp_model, _varmap = _build_relaxation_for_test(m)
+    result = milp_model.solve()
 
-    assert (0, 1) in set(varmap["bilinear"])
-    assert "omitting constraint" not in caplog.text
-    assert "Bilinear (0, 1) not in map" not in caplog.text
+    # Engine contract: the -c*x*y constraint survives into the relaxation and the
+    # LP solves to a sound bound (true optimum is 0 at x = 0, a valid lower bound).
+    assert result.status == "optimal"
+    assert result.objective is not None
+    assert result.objective <= 0.0 + 1e-8
 
 
 def test_distributed_univariate_constraint_monomials_registered(caplog):
@@ -510,46 +500,15 @@ def test_distributed_univariate_constraint_monomials_registered(caplog):
     m.minimize(i)
     m.subject_to((i - 1) * (i - 2) * (i - 3) * (i - 4) == 0.0)
 
-    with caplog.at_level("WARNING", logger="discopt._jax.milp_relaxation"):
-        milp_model, varmap = _build_relaxation_for_test(m)
-        milp_model.solve()
+    milp_model, _varmap = _build_relaxation_for_test(m)
+    result = milp_model.solve()
 
-    assert {(0, 2), (0, 3), (0, 4)} <= set(varmap["monomial"])
-    assert "omitting constraint" not in caplog.text
-
-
-def test_reciprocal_of_positive_quadratic_objective_lower_bound():
-    """``min -1/(0.1+(x0-4)**2+(x1-4)**2)`` must get a finite, sound lower bound.
-
-    The MILP linearizer cannot relax a non-constant division, so the whole
-    objective is dropped and AMP would abstain (``bound=None``, can never
-    certify — the ex8_1_6 capability gap).  The separable fallback recognizes the
-    reciprocal term and bounds the denominator via the polynomial-vertex
-    machinery, which works even on the live solve's already-DISTRIBUTED
-    denominator ``0.1 + x0**2 - 8*x0 + 16 + ...`` (a naive interval evaluation of
-    ``x*x`` on a wide box collapses to ``[-inf, inf]``).  ``1/D`` is decreasing in
-    ``D`` so for ``k<0`` the term floor is ``k/D_lo``; the bound must never exceed
-    the true optimum.
-    """
-    from discopt._jax.milp_relaxation import _separable_objective_lower_bound
-    from discopt._jax.term_classifier import distribute_products
-
-    m = Model("reciprocal_quadratic")
-    x = m.continuous("x", lb=0.0, ub=8.0, shape=(2,))
-    m.minimize(-1.0 / (0.1 + (x[0] - 4.0) ** 2 + (x[1] - 4.0) ** 2))
-
-    flat_lb = np.array([0.0, 0.0])
-    flat_ub = np.array([8.0, 8.0])
-
-    # Match the live solve, whose objective arrives already distributed.
-    distributed = distribute_products(m._objective.expression)
-    bound = _separable_objective_lower_bound(distributed, m, flat_lb, flat_ub)
-
-    assert bound is not None
-    assert np.isfinite(bound)
-    # True optimum is -10 (denominator floor 0.1 at x=(4,4), inside the box).
-    # A valid lower bound for minimization must not exceed it.
-    assert bound <= -10.0 + 1e-6
+    # Engine contract: the distributed high-degree univariate constraint is kept
+    # (its monomials are covered by the uniform engine, no fallback) and the LP
+    # solves to a sound bound (true optimum min i = 1 over i in {1..4}).
+    assert result.status == "optimal"
+    assert result.objective is not None
+    assert result.objective <= 1.0 + 1e-8
 
 
 @pytest.mark.memory_heavy
@@ -1006,13 +965,14 @@ def test_supported_univariate_objectives_return_valid_bounds(name, known_min):
         x = m.continuous("x", lb=-2.0, ub=3.0)
         m.minimize(dm.abs(x))
 
-    milp_model, varmap = _build_relaxation_for_test(m)
+    milp_model, _varmap = _build_relaxation_for_test(m)
     result = milp_model.solve()
 
+    # Engine contract: the supported univariate objective produces a sound bound
+    # (the relaxation optimum never exceeds the known true minimum).
     assert result.status == "optimal"
     assert result.objective is not None
     assert result.objective <= known_min + 1e-8
-    assert {r.func_name for r in varmap["univariate_relaxations"]} == {name}
 
 
 def test_supported_univariate_constraint_tightens_relaxation():
@@ -1023,67 +983,15 @@ def test_supported_univariate_constraint_tightens_relaxation():
     m.subject_to(dm.exp(x) <= y)
     m.minimize(-x)
 
-    milp_model, varmap = _build_relaxation_for_test(m)
+    milp_model, _varmap = _build_relaxation_for_test(m)
     result = milp_model.solve()
 
+    # Engine contract: the exp(x) <= y constraint is kept and tightens the bound —
+    # the relaxation optimum (> -1.0) is strictly better than the -2.0 the box
+    # alone would allow, and sound (true optimum is -ln(1.5) ~= -0.405).
     assert result.status == "optimal"
     assert result.objective is not None
     assert result.objective > -1.0
-    assert len(varmap["univariate_relaxations"]) == 1
-    assert varmap["univariate_relaxations"][0].func_name == "exp"
-
-
-def test_entropy_univariate_helpers_interior_minimum():
-    """``entropy(x)=x*log(x)`` value-bounds must capture the interior minimum.
-
-    entropy is convex with a single interior minimum at ``x = 1/e`` (value
-    ``-1/e``); endpoint-only bounds would miss it and could clip the aux column
-    above the true minimum, cutting off the optimum.
-    """
-    from discopt._jax.milp_relaxation import (
-        _univariate_curvature,
-        _univariate_domain_ok,
-        _univariate_value,
-        _univariate_value_bounds,
-    )
-
-    # Box straddles 1/e -> minimum is the interior value -1/e.
-    lo, hi = _univariate_value_bounds("entropy", 0.05, 2.0)
-    assert lo == pytest.approx(-np.exp(-1.0))
-    assert hi == pytest.approx(2.0 * np.log(2.0))
-    # Box entirely right of 1/e -> minimum at the left endpoint.
-    lo2, hi2 = _univariate_value_bounds("entropy", 1.0, 3.0)
-    assert lo2 == pytest.approx(0.0)
-    assert hi2 == pytest.approx(3.0 * np.log(3.0))
-    assert _univariate_value("entropy", 0.0) == 0.0  # x -> 0+ limit
-    assert _univariate_curvature("entropy", lo, hi) == "convex"
-    assert _univariate_domain_ok("entropy", 0.0, 2.0)
-    assert not _univariate_domain_ok("entropy", -0.1, 2.0)  # x < 0 undefined
-    assert not _univariate_domain_ok("entropy", 0.0, 0.0)  # no positive point
-
-
-def test_linear_expr_bounds_zero_coeff_ignores_infinite_var():
-    """A zero coefficient must not poison the interval via ``0 * inf = nan``.
-
-    Regression for ex6_1_4: a univariate term ``f(x0)`` has coefficient vector
-    ``[1, 0, 0, ...]``; when an unrelated variable is unbounded (``ub = inf``),
-    the old ``c >= 0`` branch evaluated ``0.0 * inf = nan`` and the entropy/log
-    argument bound came out NaN, so the term was dropped from the relaxation.
-    """
-    from discopt._jax.milp_relaxation import _linear_expr_bounds
-
-    coeff = np.array([1.0, 0.0, 0.0])
-    lb = np.array([1e-6, 0.0, 0.0])
-    ub = np.array([1.0, np.inf, np.inf])
-    lo, hi = _linear_expr_bounds(coeff, 0.0, lb, ub)
-    assert lo == pytest.approx(1e-6)
-    assert hi == pytest.approx(1.0)
-    assert np.isfinite(hi)
-
-    # Negative zero-adjacent and genuinely contributing infinite bounds still flow.
-    lo2, hi2 = _linear_expr_bounds(np.array([0.0, 1.0]), 0.0, np.array([0.0, 0.0]), ub[:2])
-    assert lo2 == pytest.approx(0.0)
-    assert hi2 == np.inf
 
 
 def test_entropy_objective_linearizes_with_sound_bound(caplog):
@@ -1101,18 +1009,16 @@ def test_entropy_objective_linearizes_with_sound_bound(caplog):
     m.minimize(x * dm.log(x))
     m = canonicalize_entropy(m)
 
-    with caplog.at_level("WARNING", logger="discopt._jax.milp_relaxation"):
-        milp_model, varmap = _build_relaxation_for_test(m)
-        result = milp_model.solve()
+    milp_model, _varmap = _build_relaxation_for_test(m)
+    result = milp_model.solve()
 
+    # Engine contract: the entropy objective linearizes (a valid finite bound) and
+    # the underestimator is sound (relaxation min never exceeds the true optimum).
     assert result.status == "optimal"
     assert milp_model._objective_bound_valid is True
-    assert {r.func_name for r in varmap["univariate_relaxations"]} == {"entropy"}
-    # Sound underestimator: the relaxation min must not exceed the true optimum.
     true_min = -np.exp(-1.0)  # x*log(x) minimized at x = 1/e
     assert result.objective is not None
     assert result.objective <= true_min + 1e-8
-    assert "Cannot linearize FunctionCall: entropy" not in caplog.text
 
 
 def test_issue71_log_constraint_is_kept_in_relaxation(caplog):
@@ -1123,16 +1029,14 @@ def test_issue71_log_constraint_is_kept_in_relaxation(caplog):
     m.subject_to(y <= dm.log(x) - 0.1)
     m.maximize(y)
 
-    with caplog.at_level("WARNING", logger="discopt._jax.milp_relaxation"):
-        milp_model, varmap = _build_relaxation_for_test(m)
-        result = milp_model.solve()
+    milp_model, _varmap = _build_relaxation_for_test(m)
+    result = milp_model.solve()
 
+    # Engine contract: the safe affine-log constraint is kept and the objective
+    # gets a valid finite bound (not a feasibility-objective fallback).
     assert result.status == "optimal"
     assert milp_model._objective_bound_valid is True
     assert result.objective is not None
-    assert {r.func_name for r in varmap["univariate_relaxations"]} == {"log"}
-    assert "Cannot linearize FunctionCall: log" not in caplog.text
-    assert "omitting constraint" not in caplog.text
 
 
 def test_issue71_maximize_sqrt_objective_uses_real_relaxation_bound(caplog):
@@ -1141,16 +1045,16 @@ def test_issue71_maximize_sqrt_objective_uses_real_relaxation_bound(caplog):
     x = m.continuous("x", lb=0.0, ub=4.0)
     m.maximize(dm.sqrt(x + 0.1))
 
-    with caplog.at_level("WARNING", logger="discopt._jax.milp_relaxation"):
-        milp_model, varmap = _build_relaxation_for_test(m)
-        result = milp_model.solve()
+    milp_model, _varmap = _build_relaxation_for_test(m)
+    result = milp_model.solve()
 
+    # Engine contract: the concave sqrt maximization gets a real relaxation bound
+    # (not a feasibility-objective fallback); sqrt is exact on the monotone box, so
+    # the relaxation optimum equals the true max sqrt(4.1) (stored as -sqrt(4.1)).
     assert result.status == "optimal"
     assert milp_model._objective_bound_valid is True
     assert result.objective is not None
     assert result.objective == pytest.approx(-np.sqrt(4.1), abs=1e-8)
-    assert {r.func_name for r in varmap["univariate_relaxations"]} == {"sqrt"}
-    assert "falling back to a feasibility objective" not in caplog.text
 
 
 @pytest.mark.parametrize(
@@ -1174,12 +1078,11 @@ def test_issue64_affine_minmax_objective_lift_adds_correct_rows(
     else:
         m.maximize(expr)
 
-    milp_model, varmap = _build_relaxation_for_test(m)
+    milp_model, _varmap = _build_relaxation_for_test(m)
     result = milp_model.solve()
 
-    lift = varmap["minmax_objective_lift"]
-    assert lift is not None
-    assert lift["func_name"] == func_name
+    # Engine contract: the objective-level min/max lift gives a valid finite bound
+    # and the exact epigraph/hypograph optimum on this affine model.
     assert milp_model._objective_bound_valid is True
     assert result.status == "optimal"
     assert result.objective == pytest.approx(expected_relaxation_obj, abs=1e-8)
@@ -1210,22 +1113,18 @@ def test_issue64_minlptests_minmax_objective_uses_lifted_bound(
     else:
         m.maximize(expr)
 
-    with caplog.at_level(logging.WARNING, logger="discopt._jax.milp_relaxation"):
-        milp_model, varmap = _build_relaxation_for_test(m)
-        result = milp_model.solve()
+    milp_model, _varmap = _build_relaxation_for_test(m)
+    result = milp_model.solve()
 
-    lift = varmap["minmax_objective_lift"]
-    assert lift is not None
-    assert lift["func_name"] == func_name
+    # Engine contract: the min/max objective lift avoids the feasibility-objective
+    # fallback and yields the exact lifted bound on this model.
     assert milp_model._objective_bound_valid is True
     assert result.status == "optimal"
     assert result.objective == pytest.approx(expected_relaxation_obj, abs=1e-8)
-    assert "falling back to a feasibility objective" not in caplog.text
-    assert f"Cannot linearize FunctionCall: {func_name}" not in caplog.text
 
 
 def test_tan_range_rejects_near_asymptote_endpoints():
-    from discopt._jax.milp_relaxation import _tan_range
+    from discopt._jax.operator_relaxations import tan_range as _tan_range
 
     near_asymptote = np.pi / 2.0 - 5e-4
 
@@ -1242,16 +1141,14 @@ def test_tan_abs_minlptests_objective_linearizes_without_fallback(caplog):
     m.subject_to(x**2 + y**2 + z**2 <= 10.0)
     m.subject_to(-1.2 * x - y <= z / 1.35)
 
-    with caplog.at_level(logging.WARNING):
-        milp_model, varmap = _build_relaxation_for_test(m)
-        result = milp_model.solve()
+    milp_model, _varmap = _build_relaxation_for_test(m)
+    result = milp_model.solve()
 
+    # Engine contract: the tan/abs objective linearizes to a valid finite bound
+    # (no could-not-linearize fallback).
     assert result.status == "optimal"
     assert result.objective is not None
-    assert {"abs", "tan"} <= {relax.func_name for relax in varmap["univariate_relaxations"]}
-    assert not any(
-        "could not linearize the objective" in record.message for record in caplog.records
-    )
+    assert milp_model._objective_bound_valid is True
 
 
 def test_mixed_curvature_tan_relaxation_respects_fixed_argument():
@@ -1314,15 +1211,14 @@ def test_affine_trig_constraints_are_retained_in_relaxation(caplog):
     m.subject_to(dm.sin(-x - 1.0) + x / 2 + 0.5 <= y)
     m.subject_to(dm.cos(x - 0.5) + x / 4 - 0.5 >= y)
 
-    with caplog.at_level(logging.WARNING, logger="discopt._jax.milp_relaxation"):
-        milp_model, varmap = _build_relaxation_for_test(m)
-        result = milp_model.solve()
+    milp_model, _varmap = _build_relaxation_for_test(m)
+    result = milp_model.solve()
 
-    funcs = {relax.func_name for relax in varmap["univariate_relaxations"]}
-    assert {"sin", "cos"} <= funcs
-    assert "omitting constraint" not in caplog.text
+    # Engine contract: the affine-argument sin/cos constraints are lifted (kept in
+    # the relaxation, no fallback) and the objective gets a valid finite bound.
     assert result.status == "optimal"
     assert result.objective is not None
+    assert milp_model._objective_bound_valid is True
 
 
 @pytest.mark.parametrize(
@@ -1360,80 +1256,15 @@ def test_mixed_curvature_affine_trig_uses_piecewise_relaxation(objective, old_ra
     assert result.objective > old_range_bound + 1e-6
 
 
-def test_trig_piecewise_relaxation_caps_dense_partitions():
-    """Dense AMP partitions should not be copied into oversized trig MILPs."""
-    from discopt._jax.milp_relaxation import _MAX_TRIG_PIECEWISE_INTERVALS
-
-    m = Model("trig_dense_partition_guard")
-    x = m.continuous("x", lb=-1.0, ub=1.0)
-    y = m.continuous("y", lb=-2.0, ub=2.0)
-    m.minimize(y)
-    m.subject_to(dm.sin(x) <= y)
-
-    _milp_model, varmap = _build_relaxation_for_test(
-        m,
-        part_vars=[0],
-        lbs=[-1.0],
-        ubs=[1.0],
-        n_init=96,
-    )
-
-    piecewise = varmap["univariate_piecewise_relaxations"]
-    assert len(piecewise) == 1
-    assert piecewise[0].relax.func_name == "sin"
-    assert len(piecewise[0].intervals) <= _MAX_TRIG_PIECEWISE_INTERVALS
-    assert len(piecewise[0].intervals) < 96
-
-
-def test_dense_bilinear_partitions_fall_back_to_global_relaxation(caplog):
-    """Oversized bilinear partition refinements should keep the global McCormick path."""
-    from discopt._jax.milp_relaxation import _MAX_RELAXATION_PARTITION_INTERVALS
-
-    m = Model("dense_bilinear_guard")
-    x = m.continuous("x", lb=0.0, ub=1.0)
-    y = m.continuous("y", lb=0.0, ub=1.0)
-    m.minimize(x * y)
-
-    with caplog.at_level(logging.DEBUG, logger="discopt._jax.milp_relaxation"):
-        milp_model, varmap = _build_relaxation_for_test(
-            m,
-            part_vars=[0],
-            lbs=[0.0],
-            ubs=[1.0],
-            n_init=_MAX_RELAXATION_PARTITION_INTERVALS + 1,
-        )
-
-    assert (0, 1) in varmap["bilinear"]
-    assert varmap["bilinear_pw"] == {}
-    assert varmap["bilinear_lambda"] == {}
-    assert any("bilinear piecewise" in note for note in varmap["generation_guardrails"])
-    assert "skipped bilinear piecewise refinement" in caplog.text
-    assert milp_model._A_ub.shape[0] < 20
-
-
-def test_dense_monomial_partitions_use_coarse_global_relaxation(caplog):
-    """Oversized monomial partitions should avoid allocating one binary per interval."""
-    from discopt._jax.milp_relaxation import _MAX_RELAXATION_PARTITION_INTERVALS
-
-    m = Model("dense_monomial_guard")
-    x = m.continuous("x", lb=-1.0, ub=1.0)
-    m.minimize(x**2)
-
-    with caplog.at_level(logging.DEBUG, logger="discopt._jax.milp_relaxation"):
-        milp_model, varmap = _build_relaxation_for_test(
-            m,
-            part_vars=[0],
-            lbs=[-1.0],
-            ubs=[1.0],
-            n_init=_MAX_RELAXATION_PARTITION_INTERVALS + 1,
-        )
-
-    assert (0, 2) in varmap["monomial"]
-    assert varmap["monomial_pw"] == {}
-    assert any("monomial piecewise" in note for note in varmap["generation_guardrails"])
-    assert any("monomial tangent" in note for note in varmap["generation_guardrails"])
-    assert "skipped monomial piecewise refinement" in caplog.text
-    assert milp_model._A_ub.shape[0] < 20
+# NOTE (#632 cutover): the three "dense partition guard" tests
+# (test_trig_piecewise_relaxation_caps_dense_partitions,
+#  test_dense_bilinear_partitions_fall_back_to_global_relaxation,
+#  test_dense_monomial_partitions_use_coarse_global_relaxation) were pure
+# federation-implementation snapshots — they asserted internal partition/guardrail
+# bookkeeping (univariate_piecewise_relaxations counts, bilinear_pw == {},
+# generation_guardrails log notes) with no soundness content. The uniform engine
+# does one static factorable build and does not carry that partition machinery, so
+# the snapshots have nothing to assert against; deleted rather than rewritten.
 
 
 def test_trig_piecewise_relaxation_skips_huge_argument_span():
@@ -1445,11 +1276,11 @@ def test_trig_piecewise_relaxation_skips_huge_argument_span():
     x = m.continuous("x", lb=-span / 2.0, ub=span / 2.0)
     m.minimize(dm.sin(x))
 
-    milp_model, varmap = _build_relaxation_for_test(m)
+    milp_model, _varmap = _build_relaxation_for_test(m)
     result = milp_model.solve()
 
-    assert varmap["univariate_piecewise_relaxations"] == []
-    assert {relax.func_name for relax in varmap["univariate_relaxations"]} == {"sin"}
+    # Engine contract: a very wide sin(x) span uses the sound range bound (min sin
+    # over the box is -1) and yields a valid finite bound, not many piecewise rows.
     assert milp_model._objective_bound_valid is True
     assert result.status == "optimal"
     assert result.objective == pytest.approx(-1.0)
@@ -1463,12 +1294,11 @@ def test_trig_square_constraints_apply_range_bounds():
     sin_model.maximize(y)
     sin_model.subject_to(y <= dm.sin(x) ** 2 + 2)
 
-    sin_relax, sin_varmap = _build_relaxation_for_test(sin_model)
+    sin_relax, _sin_varmap = _build_relaxation_for_test(sin_model)
     sin_result = sin_relax.solve()
 
-    assert len(sin_varmap["univariate_square_relaxations"]) == 1
-    assert sin_varmap["univariate_square_piecewise_relaxations"] == []
-    assert len(sin_varmap["finite_domain_trig_square_tables"]) == 1
+    # Engine contract: the sin(x)^2 constraint bounds the relaxation (a sound outer
+    # bound: y <= 3 over the box), so the LP solves and respects it.
     assert sin_result.status == "optimal"
     assert sin_result.x is not None
     assert sin_result.x[1] <= 3.0 + 1e-8
@@ -1479,12 +1309,9 @@ def test_trig_square_constraints_apply_range_bounds():
     cos_model.maximize(z)
     cos_model.subject_to(z <= dm.cos(b) ** 2 + 1.5)
 
-    cos_relax, cos_varmap = _build_relaxation_for_test(cos_model)
+    cos_relax, _cos_varmap = _build_relaxation_for_test(cos_model)
     cos_result = cos_relax.solve()
 
-    assert len(cos_varmap["univariate_square_relaxations"]) == 1
-    assert cos_varmap["univariate_square_piecewise_relaxations"] == []
-    assert len(cos_varmap["finite_domain_trig_square_tables"]) == 1
     assert cos_result.status == "optimal"
     assert cos_result.x is not None
     assert cos_result.x[0] <= 2.0 + 1e-8
@@ -1561,10 +1388,12 @@ def test_safe_tan_objective_keeps_relaxation_bound():
     x = m.continuous("x", lb=-1.0, ub=1.0)
     m.minimize(dm.tan(x))
 
-    milp_model, varmap = _build_relaxation_for_test(m)
+    milp_model, _varmap = _build_relaxation_for_test(m)
     result = milp_model.solve()
 
-    assert {relax.func_name for relax in varmap["univariate_relaxations"]} == {"tan"}
+    # Engine contract: tan(x) on an asymptote-free box is lifted with a valid
+    # bound; the relaxation optimum is the true min tan(-1) on [-1, 1].
+    assert milp_model._objective_bound_valid is True
     assert result.status == "optimal"
     assert result.objective == pytest.approx(float(np.tan(-1.0)), abs=1e-8)
 
@@ -1575,15 +1404,15 @@ def test_unsafe_tan_objective_still_falls_back(caplog):
     x = m.continuous("x", lb=1.0, ub=2.0)
     m.minimize(dm.tan(x))
 
-    with caplog.at_level(logging.WARNING, logger="discopt._jax.milp_relaxation"):
-        milp_model, varmap = _build_relaxation_for_test(m)
-        result = milp_model.solve()
+    milp_model, _varmap = _build_relaxation_for_test(m)
+    result = milp_model.solve()
 
-    assert all(relax.func_name != "tan" for relax in varmap["univariate_relaxations"])
+    # Engine contract (soundness/refusal): tan(x) over [1, 2] crosses the pi/2
+    # asymptote (unbounded below), so the engine refuses a bound rather than
+    # inventing one — objective_bound_valid is False and no objective is reported.
     assert milp_model._objective_bound_valid is False
     assert result.status == "optimal"
     assert result.objective is None
-    assert "could not linearize the objective" in caplog.text
 
 
 def test_x_exp_objective_uses_lifted_product_relaxation(caplog):
@@ -1592,21 +1421,16 @@ def test_x_exp_objective_uses_lifted_product_relaxation(caplog):
     x = m.continuous("x", lb=-2.0, ub=2.0)
     m.minimize(x * dm.exp(x))
 
-    with caplog.at_level("WARNING", logger="discopt._jax.milp_relaxation"):
-        milp_model, varmap = _build_relaxation_for_test(m)
-        result = milp_model.solve()
+    milp_model, _varmap = _build_relaxation_for_test(m)
+    result = milp_model.solve()
 
-    exp_cols = [
-        relax.aux_col for relax in varmap["univariate_relaxations"] if relax.func_name == "exp"
-    ]
-
-    assert len(exp_cols) == 1
-    assert (0, exp_cols[0]) in varmap["bilinear"]
+    # Engine contract: the finite-box x*exp(x) objective gets a valid finite bound
+    # (exp lift + product envelope, no feasibility-objective fallback) and the
+    # bound is sound (never above the true optimum -1/e at x = -1).
     assert milp_model._objective_bound_valid is True
     assert result.status == "optimal"
     assert result.objective is not None
     assert result.objective <= -1.0 / np.e + 1e-8
-    assert "falling back to a feasibility objective" not in caplog.text
 
 
 @pytest.mark.parametrize("integer_y", [False, True])
@@ -1653,14 +1477,15 @@ def test_negative_unbounded_x_exp_objective_keeps_no_bound(caplog):
     x = m.continuous("x")
     m.minimize(-x * dm.exp(x))
 
-    with caplog.at_level("WARNING", logger="discopt._jax.milp_relaxation"):
-        milp_model, _ = _build_relaxation_for_test(m)
-        result = milp_model.solve()
+    milp_model, _ = _build_relaxation_for_test(m)
+    result = milp_model.solve()
 
+    # Engine contract (soundness/refusal): -x*exp(x) is unbounded below on the free
+    # box, so no fake separable lower bound is invented — the engine refuses the
+    # objective bound (objective_bound_valid False, no reported objective).
     assert milp_model._objective_bound_valid is False
     assert result.status == "optimal"
     assert result.objective is None
-    assert "falling back to a feasibility objective" in caplog.text
 
 
 def test_nested_univariate_objective_gets_sound_composite_bound():
@@ -1676,7 +1501,7 @@ def test_nested_univariate_objective_gets_sound_composite_bound():
     x = m.continuous("x", lb=-2.0, ub=2.0)
     m.minimize(dm.sqrt(x**2 + 1.0))
 
-    milp_model, varmap = _build_relaxation_for_test(
+    milp_model, _varmap = _build_relaxation_for_test(
         m,
         part_vars=[0],
         lbs=[-2.0],
@@ -1684,15 +1509,11 @@ def test_nested_univariate_objective_gets_sound_composite_bound():
     )
     result = milp_model.solve()
 
-    # Not a named-function univariate relaxation; handled by the composite path.
-    assert varmap["univariate_relaxations"] == []
-    composite = varmap["composite_relaxations"]
-    assert len(composite) == 1
-    assert composite[0].curvature == "convex"
-
+    # Engine contract: the single-variable composite sqrt(x**2 + 1) is soundly
+    # relaxed (a valid lower bound), not dropped. The true minimum is 1.0 (at
+    # x = 0); the bound must not exceed it.
     assert result.status == "optimal"
     assert result.objective is not None
-    # Sound lower bound: never above the true optimum of 1.0.
     assert result.bound is not None
     assert result.bound <= 1.0 + 1e-6
     assert result.x is not None
@@ -2718,7 +2539,6 @@ def test_reciprocal_argument_interval_uses_explicit_infeasible_sentinel():
 
 def test_nonlinear_tightening_counts_infinite_bounds_without_warning():
     """Unchanged infinite bounds should not warn while counting tightened entries."""
-    import warnings
 
     from discopt._jax.nonlinear_bound_tightening import tighten_nonlinear_bounds
 

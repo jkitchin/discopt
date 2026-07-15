@@ -9,8 +9,8 @@ absent from the monomial map (``univariate_square_var_map`` only registered
 ``(Πx)**0.2`` term ``factorable_reform`` *does* lift — fell back to a feasibility
 objective (``objective_bound_valid=False``).
 
-The generic tangent/secant square envelope emitted for every
-``UnivariateSquareRelaxation`` (``w = base**2`` over ``[base_lb, base_ub]``) is
+The generic tangent/secant square envelope emitted for every lifted univariate
+square (``w = base**2`` over ``[base_lb, base_ub]``) is
 function-agnostic and sound for any lifted base, so the fix is simply to register
 squares of *any* lifted univariate call, in both the authored ``f**2`` form and
 the ``f*f`` product ``distribute_products`` rewrites it into (the shape the
@@ -111,12 +111,12 @@ def test_log_square_objective_linearizes_with_square_aux():
     x = m.integer("x", shape=n, lb=3, ub=9)
     m.minimize(sum(dm.log(x[i] - 2) ** 2 + dm.log(10 - x[i]) ** 2 for i in range(n)))
 
-    milp, varmap = _build(m)
+    milp, _varmap = _build(m)
 
+    # Engine contract: the log**2 objective linearizes to a valid finite bound (no
+    # feasibility fallback). Soundness of that bound is asserted by
+    # test_log_square_root_bound_is_sound below.
     assert milp._objective_bound_valid, "log**2 objective must produce a lower bound"
-    # One square aux per log term (2 per variable).
-    assert len(varmap["univariate_square_relaxations"]) == 2 * n
-    assert set(_square_base_func_names(varmap)) == {"log"}
 
 
 @pytest.mark.correctness
@@ -127,58 +127,51 @@ def test_exp_square_objective_linearizes_with_square_aux():
     x = m.integer("x", shape=n, lb=3, ub=9)
     m.minimize(sum(dm.exp(0.1 * x[i]) ** 2 for i in range(n)))
 
-    milp, varmap = _build(m)
+    milp, _varmap = _build(m)
 
+    # Engine contract: the exp**2 objective linearizes to a valid finite bound.
     assert milp._objective_bound_valid
-    assert len(varmap["univariate_square_relaxations"]) == n
-    assert set(_square_base_func_names(varmap)) == {"exp"}
 
 
 @pytest.mark.correctness
 def test_distributed_log_square_product_form_is_collected():
-    """``distribute_products`` rewrites ``log(.)**2`` into ``log(.)*log(.)`` once a
-    sibling term triggers factorable_reform; the collector must recognize that
-    product form too (else nvs09's log squares stay uncollected -> no bound)."""
+    """When a sibling term (here ``(Πx)**0.2``) triggers factorable_reform, the
+    ``log(.)**2`` terms must still be collected into a sound, finite objective bound
+    (else nvs09's log squares stay uncollected -> no bound).
+
+    The uniform engine lifts each ``log(.)`` into an aux variable and bounds the
+    resulting polynomial in aux space, so the reformed objective no longer contains
+    the ``log()`` calls syntactically (it did under the old distribute-into-``f*f``
+    collector). The contract this test guards is therefore the *bound the engine
+    produces*, not the objective's syntactic shape."""
     n = 3
     m = dm.Model("log_sq_reform")
     x = m.integer("x", shape=n, lb=3, ub=9)
-    # The ``(Πx)**0.2`` term makes has_factorable_work True, distributing the
-    # objective so the log squares arrive as products.
+    # The ``(Πx)**0.2`` term makes has_factorable_work True, so the objective is
+    # routed through factorable_reform.
     m.minimize(
         sum(dm.log(x[i] - 2) ** 2 + dm.log(10 - x[i]) ** 2 for i in range(n))
         - (_prod([x[i] for i in range(n)])) ** 0.2
     )
+    assert fr.has_factorable_work(m)
 
-    reformed = fr.factorable_reformulate(m)
-    # Sanity: the objective really is in the distributed product form now.
-    from discopt.modeling.core import BinaryOp, FunctionCall
-
-    def count_forms(e, acc):
-        if isinstance(e, BinaryOp):
-            if e.op == "**" and isinstance(e.left, FunctionCall):
-                acc["pow"] += 1
-            if (
-                e.op == "*"
-                and isinstance(e.left, FunctionCall)
-                and isinstance(e.right, FunctionCall)
-            ):
-                acc["mul"] += 1
-            count_forms(e.left, acc)
-            count_forms(e.right, acc)
-        elif hasattr(e, "operand"):
-            count_forms(e.operand, acc)
-        elif isinstance(e, FunctionCall):
-            for a in e.args:
-                count_forms(a, acc)
-
-    acc = {"pow": 0, "mul": 0}
-    count_forms(reformed._objective.expression, acc)
-    assert acc["pow"] == 0 and acc["mul"] == 2 * n, "expected the distributed f*f form"
-
-    milp, varmap = _build(m, reform=True)
+    milp, _varmap = _build(m, reform=True)
+    # Engine contract: the log**2 terms are collected (lifted), so the objective
+    # linearizes to a valid finite bound rather than a feasibility fallback.
     assert milp._objective_bound_valid
-    assert len(varmap["univariate_square_relaxations"]) == 2 * n
-    assert set(_square_base_func_names(varmap)) == {"log"}
+
+    # And that bound is finite and sound (<= the true integer optimum) — proving the
+    # log squares were actually bounded, not silently dropped.
+    bound = _root_lp_bound(milp)
+    true_min = _brute_min(
+        lambda pt: sum(math.log(v - 2) ** 2 + math.log(10 - v) ** 2 for v in pt)
+        - (math.prod(pt)) ** 0.2,
+        3,
+        9,
+        n,
+    )
+    assert math.isfinite(bound)
+    assert bound <= true_min + 1e-6, f"unsound bound {bound} > true min {true_min}"
 
 
 # --------------------------------------------------------------------------- #
@@ -221,13 +214,11 @@ def test_nvs09_shape_objective_linearizes_and_bound_is_sound(n):
         - (_prod([x[i] for i in range(n)])) ** 0.2
     )
 
-    milp, varmap = _build(m, reform=True)
+    milp, _varmap = _build(m, reform=True)
 
     # The whole mixed objective bounds: log**2 squares AND the fractional power of
     # the multilinear product are both present, not a feasibility fallback.
     assert milp._objective_bound_valid, "combined log**2 + (Πx)**0.2 objective must bound"
-    assert len(varmap["univariate_square_relaxations"]) == 2 * n
-    assert len(varmap["fractional_power"]) == 1
 
     bound = _root_lp_bound(milp)
 
@@ -254,7 +245,7 @@ def test_full_nvs09_size_objective_linearizes():
         - (_prod([x[i] for i in range(n)])) ** 0.2
     )
 
-    milp, varmap = _build(m, reform=True)
+    milp, _varmap = _build(m, reform=True)
+    # Engine contract: at nvs09's full size the mixed objective still linearizes to
+    # a valid finite bound (no feasibility fallback).
     assert milp._objective_bound_valid
-    assert len(varmap["univariate_square_relaxations"]) == 2 * n
-    assert len(varmap["fractional_power"]) == 1

@@ -1434,16 +1434,12 @@ class TestAmpPhase4Coverage:
     @pytest.fixture(autouse=True)
     def _import(self):
         from discopt._jax.discretization import initialize_partitions
-        from discopt._jax.milp_relaxation import (
-            _odd_mixed_tangent_is_valid,
-            build_milp_relaxation,
-        )
+        from discopt._jax.milp_relaxation import build_milp_relaxation
         from discopt._jax.term_classifier import classify_nonlinear_terms
 
         self.build_milp = build_milp_relaxation
         self.classify = classify_nonlinear_terms
         self.init_partitions = initialize_partitions
-        self.is_valid_odd_tangent = _odd_mixed_tangent_is_valid
 
     def test_trilinear_milp_builds_nested_auxiliaries(self):
         """Trilinear terms should be modeled through explicit lifted auxiliaries."""
@@ -1642,50 +1638,8 @@ class TestAmpPhase4Coverage:
         )
         assert not any("Monomial (1, -2)" in rec.message for rec in caplog.records)
 
-    def test_mixed_sign_odd_tangent_filter_keeps_only_global_supporting_lines(self):
-        """Only tangents that stay valid on the full mixed-sign box should be used."""
-        assert self.is_valid_odd_tangent(0.5, -0.5, 0.5, 5, "under") is True
-        assert self.is_valid_odd_tangent(-0.5, -0.5, 0.5, 5, "over") is True
-        assert self.is_valid_odd_tangent(0.1, -1.0, 0.1, 5, "under") is False
-        assert self.is_valid_odd_tangent(-0.1, -0.1, 1.0, 5, "over") is False
 
-
-class TestAmpPhase1Helpers:
-    """Fast regression tests for Phase 1 helper behavior."""
-
-    def test_piecewise_big_m_scales_with_large_coefficients(self):
-        """Big-M must scale with coefficient magnitude instead of adding a flat 1.0."""
-        from discopt._jax.milp_relaxation import _compute_piecewise_big_m
-
-        corners = [-25000.0, 10000.0, 5000.0, 30000.0]
-        big_m = _compute_piecewise_big_m(corners)
-        expected = 30000.0 * (1.0 + 1e-4) + 3.0
-
-        assert big_m == pytest.approx(expected)
-        assert big_m > 30000.0
-
-    def test_piecewise_big_m_keeps_small_intervals_tight(self):
-        """The Big-M floor should not dominate near-zero product intervals."""
-        from discopt._jax.milp_relaxation import _compute_piecewise_big_m
-
-        corners = [0.0, 0.0, 0.01, 0.01]
-        big_m = _compute_piecewise_big_m(corners)
-
-        assert big_m == pytest.approx(0.010002)
-        assert big_m < 0.011
-
-
-# ===========================================================================
-# Section 6: End-to-End AMP Solver (Alpine canonical problems)
-#
-# Requires:
-#   - python/discopt/solvers/amp.py (solve_amp function)
-#   - python/discopt/solver.py routing for solver="amp"
-#
-# Known optima from Alpine.jl test suite.
-# ===========================================================================
-
-# Known global optima (from Alpine.jl test suite + standard references)
+# Alpine canonical-problem reference optima (used across the end-to-end tests below).
 NLP1_OPTIMUM = 58.38368  # Alpine nlp1
 CIRCLE_OPTIMUM = 1.41421356  # √2
 NLP3_OPTIMUM = 7049.247898  # Alpine nlp3
