@@ -91,3 +91,6 @@ docs/notebooks/*.xlsx
 # <stub>.sol next to the input .nl when run over the vendored instance tree).
 # These are run artifacts, never fixtures (0 are tracked) — keep them out.
 *.sol
+
+# stray solver listing files (GAMS/BARON .lst) — not part of the repo
+*.lst
