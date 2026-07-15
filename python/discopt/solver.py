@@ -5647,7 +5647,8 @@ def solve_model(
     _deadline = t_start + time_limit
 
     # --- TX1: adaptive back-off for the strided in-tree node NLP -------------
-    # DISCOPT_ADAPTIVE_NLP (default OFF, flag-graduation). The strided node-NLP is
+    # DISCOPT_ADAPTIVE_NLP (default ON since G2, flag-graduation; =0 restores the
+    # fixed stride). The strided node-NLP is
     # a pure primal heuristic (fires only in the nonconvex + LP-relaxer regime,
     # where the LP gives the bound); TX0 measured it as idle waste on integer-heavy
     # models (nvs09 14.3 s, identical proof). When ON we grow the *effective*

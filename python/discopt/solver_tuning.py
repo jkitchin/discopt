@@ -323,11 +323,11 @@ class SolverTuning:
     """Solve the node NLP every k-th node (``DISCOPT_NODE_NLP_STRIDE``, default 4)."""
 
     adaptive_nlp: bool = field(
-        default_factory=lambda: _env_flag("DISCOPT_ADAPTIVE_NLP", default=False)
+        default_factory=lambda: _env_flag("DISCOPT_ADAPTIVE_NLP", default=True)
     )
     """Adaptive back-off for the *strided in-tree node NLP*
-    (``DISCOPT_ADAPTIVE_NLP``, **default OFF** — flag-graduation convention: ``=0``
-    restores today's fixed ``node_nlp_stride``).
+    (``DISCOPT_ADAPTIVE_NLP``, **default ON** since G2 — flag-graduation
+    convention: ``=0`` restores today's fixed ``node_nlp_stride``).
 
     TX1 (``docs/dev/tenx-plan.md`` §3). The strided node-NLP is a **pure primal
     heuristic** — it fires ONLY where the McCormick LP relaxer supplies the node
