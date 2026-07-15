@@ -110,11 +110,15 @@ class NonlinearTerms:
 
 
 def _compute_var_offset(var: Variable, model: Model) -> int:
-    """Compute the starting flat index of a variable in the stacked x vector."""
-    offset = 0
-    for v in model._variables[: var._index]:
-        offset += v.size
-    return offset
+    """Compute the starting flat index of a variable in the stacked x vector.
+
+    Delegates to the model's memoized prefix-sum offset table
+    (``Model._flat_var_offset``), turning the classifier's per-term flat-index
+    resolution from O(n·terms) into O(n + terms) — the quadratic summation here
+    was the dominant uninterruptible root-setup overrun on large factorable
+    models (issues #507, #654).
+    """
+    return model._flat_var_offset(var)
 
 
 def _as_scalar_index(value: Any) -> int | None:

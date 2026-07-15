@@ -1674,6 +1674,9 @@ class Model:
     def __init__(self, name: str = "model"):
         self.name = name
         self._variables: list[Variable] = []
+        # Cached exclusive prefix-sum of variable sizes (flat start offsets); see
+        # ``_flat_var_offset``. ``None`` until first requested / after growth.
+        self._flat_var_offsets_cache: Optional[list[int]] = None
         self._parameters: list[Parameter] = []
         # Persistent set of declared variable/parameter names for O(1)
         # uniqueness checks (M7). Rebuilding ``{v.name ...} | {p.name ...}`` on
@@ -1812,6 +1815,38 @@ class Model:
         so a later ``_check_name`` on that model stays correct.
         """
         self._names = {v.name for v in self._variables} | {p.name for p in self._parameters}
+
+    def _flat_var_offset(self, var: "Variable") -> int:
+        """Return the flat start index of ``var`` in the stacked x vector.
+
+        The offset is the sum of the sizes of every variable preceding ``var``
+        in ``self._variables``. Summing that slice from scratch is O(n) per call,
+        and the relaxation / AD / term-classifier builds resolve a flat index
+        once per variable leaf per term — O(n·terms) overall. That quadratic was
+        the dominant *uninterruptible* pre-B&B root-setup cost that made
+        ``solve(time_limit=T)`` overrun its budget on large factorable models
+        (issue #654; sub-sites #507 term-classifier build, #187 DAG compile).
+
+        An exclusive prefix-sum table is memoized and rebuilt only when the
+        (append-only) variable list grows, so each lookup is O(1). This is a pure
+        speedup: ``_variables`` only ever grows and a Variable's ``_index`` /
+        ``size`` are immutable after construction, so a cached offset can never
+        go stale without the length changing. Indices at/past the end collapse to
+        the full total, exactly as the ``[: var._index]`` slice did.
+        """
+        n = len(self._variables)
+        # ``getattr`` fallback guards the rare path that builds a Model without
+        # ``__init__`` (e.g. a shallow ``copy.copy`` of a pre-attribute object).
+        offsets = getattr(self, "_flat_var_offsets_cache", None)
+        if offsets is None or len(offsets) != n + 1:
+            offsets = [0] * (n + 1)
+            acc = 0
+            for k, v in enumerate(self._variables):
+                acc += v.size
+                offsets[k + 1] = acc
+            self._flat_var_offsets_cache = offsets
+        idx = var._index
+        return offsets[idx] if idx < n else offsets[n]
 
     def _register_variable(self, var: "Variable") -> "Variable":
         """Append a variable and register it with the Rust builder if active."""
