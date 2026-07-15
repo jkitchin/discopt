@@ -2610,14 +2610,18 @@ def test_square_difference_tightens_weymouth_like_upstream_pressure():
     assert tightened_lb[2] == pytest.approx(np.sqrt(5.0**2 + 6.0**2 / 4.0))
 
 
-@pytest.mark.timeout(360)
+@pytest.mark.slow
 def test_gas_square_difference_tightening_strengthens_root_relaxation():
     """The gas benchmark should start AMP from a tighter Weymouth pressure box.
 
-    Heavy gas-benchmark integration solve (~60s uninstrumented). Under the AMP
-    coverage job's coverage.py instrumentation it runs ~3x slower and exceeds the
-    120s CLI default, so pin a per-test 360s budget — the test completes correctly
-    well within it; this only prevents a false coverage-only timeout.
+    Heavy gas-benchmark integration solve (~60s uninstrumented; >360s under the AMP
+    coverage job's coverage.py instrumentation, which the recovered tighter
+    relaxation only made heavier). Marked ``slow`` so it is excluded from the
+    per-test-timeout coverage/fast jobs and runs in the slow-inclusive suites. The
+    ``square_difference_lower_bound`` tightening rule it exercises is also unit
+    tested by ``test_square_difference_tightens_weymouth_like_upstream_pressure``
+    above (rule fired + exact tightened bound), so the coverage jobs keep that
+    guarantee directly.
     """
     from discopt._jax.discretization import initialize_partitions
     from discopt._jax.milp_relaxation import build_milp_relaxation
