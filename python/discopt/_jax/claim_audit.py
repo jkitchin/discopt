@@ -22,12 +22,15 @@ The auditor derives everything from the build's *output* varmap, so it never
 changes what the solver builds — proven in ``test_claim_audit.py`` by fingerprint
 equality between an audited and an un-audited build.
 
-The defer-fire counter (:func:`defer_audit` / :func:`note_defer`) is the hook the
-federated defer predicates report to. It is a no-op unless a :func:`defer_audit`
-context is active, so wiring a ``note_defer`` call into a predicate cannot change
-that predicate's return value or the built relaxation. The wiring into
-``milp_relaxation.py`` lands with the stage that consumes the counts (R1.2/R2);
-the mechanism is committed here so it is testable standalone.
+The defer-fire counter (:func:`defer_audit` / :func:`note_defer`) was the hook the
+federated defer predicates reported to. The #632 cutover removed the federation
+(``build_milp_relaxation`` now delegates unconditionally to the uniform engine, and
+no defer predicate remains), so this counter has **no production consumer** — it is
+retained only as standalone-tested instrumentation (a no-op unless a
+:func:`defer_audit` context is active) pending a decision to remove it or repurpose
+it for the uniform engine. The still-live audit here is :func:`audit_build` /
+:class:`AuditReport`, which run against the uniform build and are exercised by the
+tests.
 """
 
 from __future__ import annotations

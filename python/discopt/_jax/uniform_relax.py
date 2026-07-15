@@ -1524,8 +1524,8 @@ def _build_power(ctx: _Builder, node: CNode, w: int) -> Envelope:
     AVM: the base is relaxed first, so ``(affine)**2``, ``f(x)**2`` and ``x**p``
     are all uniformly a 1-D power atom over the base's enclosure. Exact
     secant/tangent envelope on a definite-curvature (sign-definite or even-power)
-    box; interval floor on a sign-straddling odd/fractional power (loose-but-sound,
-    the blueprint's two-piece-hull tightening TODO).
+    box; interval floor on a sign-straddling odd/fractional power (loose-but-sound;
+    the two-piece-hull tightening is a deferred tightness item tracked in #640).
     """
     p = float(node.payload)
     base = node.children[0]
@@ -2307,7 +2307,7 @@ def relaxation_report(
     "loose"}}, "tight": int, "loose": int}``. ``fallbacks`` is the number of atoms
     left with NO sound envelope — **0 by construction** (every atom carries at
     least the sound interval floor). ``loose`` atoms are sound but not yet at their
-    exact envelope (deferred tightening).
+    exact envelope (deferred tightening; tracked in #640).
     """
     rel = build_uniform_relaxation(model, box)
     by_kind: dict[str, dict[str, int]] = {}
