@@ -464,15 +464,24 @@ equilibration); a subnormal-flush fix is being implemented + gated. G7
 
 ### G6 — in-house LP simplex conditioning (from G5's bchoco06 re-attribution)
 
-> **Entry experiment run 2026-07-15 — subnormal-flush sub-hypothesis FALSIFIED,
-> kill criterion MET → escalated to issue #649.** Flushing subnormal structural
-> noise (`|v|<1e-300 → 0`) does NOT make the in-house simplex converge; the genuine
-> `1e10` spread survives geometric-mean equilibration as a residual `~1.25e12`
-> condition the Rust simplex stalls on while HiGHS solves the identical matrix. No
-> band-aid shipped. Full record: `g5-family-d-diagnoses.md` §"G6 update"; probe
-> `discopt_benchmarks/scripts/g6_bchoco06_conditioning_probe.py`. The Rust
-> linear-algebra/refactorization fix is now **issue #649** (its own plan, full
-> bound-changing gate + `cargo test -p discopt-core`).
+> **RESOLVED (2026-07-15, issue #649).** Root cause was **not** the hypothesized
+> simplex-core numerics (refactorization cadence / Harris ratio test / Markowitz
+> tolerances) — the measurement overruled that. The in-house simplex *core* solves
+> bchoco06's root LP fine (`solve_lp_cols` → Optimal, obj −1.0, 0 iters). The
+> defect was in the **warm/binding path** (`solve_lp_warm_csc`): it applies its own
+> pow2 `Scaling::from_sparse` on top of the (already Python-Ruiz-equilibrated)
+> matrix, and that *re-scaling* is counterproductive here — the scaled optimum
+> unscales just past the feasibility audit and returns `Numerical` (no bound),
+> where the unscaled solve is clean. Fix: **scaling-first, then fall back to the
+> trusted unscaled cold solve when scaling yields `Numerical`/`IterLimit`** (exact
+> pow2 `unscale_cols`, no allocation on the success path) + a Python `isfinite`
+> guard so a non-finite objective/bound is never reported as a valid dual bound.
+> Result: bchoco06 `Model.solve()` now reports **bound ≈ 0.99999** (was none),
+> agreeing with HiGHS. Gate: `cargo test -p discopt-core` 446 pass (byte-neutral +
+> new regression `bchoco06_illcond_scaled_path_recovers_bound_649`), smoke 638,
+> adversarial 10, clean-instance optima unchanged. Full record:
+> `g5-family-d-diagnoses.md` §"G6 update"; probe
+> `discopt_benchmarks/scripts/g6_bchoco06_conditioning_probe.py`.
 
 **Hypothesis (evidence-backed, from `g5-family-d-diagnoses.md`).** bchoco06's
 "missing dual bound" is **not** an unbounded-relaxation hole — the same root

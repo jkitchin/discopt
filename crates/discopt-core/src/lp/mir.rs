@@ -529,7 +529,11 @@ mod tests {
             let b = next() * 14.0 - 6.0;
             let x: Vec<f64> = (0..n)
                 .map(|k| {
-                    let t = if next() > 0.25 { 0.6 + 0.4 * next() } else { next() };
+                    let t = if next() > 0.25 {
+                        0.6 + 0.4 * next()
+                    } else {
+                        next()
+                    };
                     l[k] + t * (u[k] - l[k]).max(0.0)
                 })
                 .collect();

@@ -1840,6 +1840,64 @@ mod tests {
     /// `test_continuous_trig_square_uses_direct_piecewise_relaxation`. The `−1`
     /// surplus-slack recovery (`s_i ≤ max_x (A x)_i − b_i`) makes the ray certify.
     /// FAILS pre-fix (returns `Numerical`); passes after (`Infeasible`).
+    /// #649 regression: the bchoco06 root uniform relaxation (equilibrated +
+    /// flushed, standard form 833×1182). The shipped `solve_lp_warm_csc` path
+    /// applies its own pow2 `Scaling::from_sparse` on top; on this already-
+    /// equilibrated LP that scaled solve unscales just past the feasibility audit
+    /// and returned `Numerical` (no bound) — the bchoco06 "no finite dual bound"
+    /// defect (issue #649). The unscaled cold solve of the identical LP is clean
+    /// (`solve_lp_cols` → Optimal, obj ≈ −1.0, matching HiGHS's −0.99999). The
+    /// unscaled fallback in `solve_lp_warm_csc` must recover that bound.
+    ///
+    /// Fails pre-fix (`solve_lp_warm_csc` → Numerical); passes after.
+    #[test]
+    fn bchoco06_illcond_scaled_path_recovers_bound_649() {
+        let json = include_str!("testdata/bchoco06_illcond_lp.json");
+        let (m, n, col_ptr, row_idx, vals, c, l, u, b) = parse_lp_fixture(json);
+
+        // Ground truth: the UNSCALED cold solve (no Rust scaling) is clean.
+        let sp_cold = SparseCols::from_csc(col_ptr.clone(), row_idx.clone(), vals.clone());
+        let cold = solve_lp_cols(sp_cold, m, n, &c, &l, &u, &b, &SimplexOptions::default());
+        assert_eq!(
+            cold.status,
+            LpStatus::Optimal,
+            "unscaled cold solve of the bchoco06 root LP must be Optimal"
+        );
+        assert!(
+            (cold.obj - (-0.9999893)).abs() < 1e-4,
+            "unscaled obj {} must match the HiGHS bound ≈ -0.99999",
+            cold.obj
+        );
+
+        // The shipped scaled path (Scaling::from_sparse ON) must ALSO reach the
+        // bound now, via the #649 unscaled fallback — not Numerical/IterLimit.
+        let sp = SparseCols::from_csc(col_ptr, row_idx, vals);
+        let scaled = crate::lp::simplex::dual::solve_lp_warm_csc(
+            sp,
+            m,
+            n,
+            &c,
+            &l,
+            &u,
+            &b,
+            None,
+            &SimplexOptions::default(),
+        );
+        assert_eq!(
+            scaled.status,
+            LpStatus::Optimal,
+            "scaled solve_lp_warm_csc must recover Optimal via the #649 unscaled \
+             fallback (was Numerical), got {:?}",
+            scaled.status
+        );
+        assert!(
+            (scaled.obj - cold.obj).abs() <= 1e-6 * (1.0 + cold.obj.abs()),
+            "scaled-path obj {} must equal the unscaled cold obj {}",
+            scaled.obj,
+            cold.obj
+        );
+    }
+
     #[test]
     fn c39_surplus_slack_infeasible_certifies() {
         let json = include_str!("testdata/c39_surplus_slack_infeasible_lp.json");

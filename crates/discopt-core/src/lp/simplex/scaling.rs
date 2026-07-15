@@ -118,6 +118,19 @@ impl Scaling {
         sp.scale_in_place(&self.row, &self.col);
     }
 
+    /// Undo an in-place [`scale_cols`] on `sp`, recovering the original matrix
+    /// **exactly**: multiply by the reciprocal `R⁻¹ · Â · C⁻¹` factors. Every
+    /// factor is a power of two (see [`nearest_pow2`]), so its reciprocal and the
+    /// product are exact floating-point operations — `unscale_cols(scale_cols(A))`
+    /// is bit-identical to `A`. Used by the #649 unscaled-fallback to reconstruct
+    /// the original matrix for a trusted cold retry with no clone on the success
+    /// path (a scaled solve that succeeds never calls this).
+    pub fn unscale_cols(&self, sp: &mut SparseCols) {
+        let rinv: Vec<f64> = self.row.iter().map(|&r| 1.0 / r).collect();
+        let cinv: Vec<f64> = self.col.iter().map(|&c| 1.0 / c).collect();
+        sp.scale_in_place(&rinv, &cinv);
+    }
+
     /// Scaled matrix `Â = R A C` (owned, row-major `m × n`).
     pub fn scale_matrix(&self, a: &[f64]) -> Vec<f64> {
         let (m, n) = (self.m, self.n);

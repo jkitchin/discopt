@@ -260,3 +260,43 @@ threshold with no measured beneficiary — rejected per CLAUDE.md §3. Tracked i
 pivoting tolerances / Harris ratio test), which will carry the full bound-changing
 gate + `cargo test -p discopt-core`. Reproduce with
 `discopt_benchmarks/scripts/g6_bchoco06_conditioning_probe.py`.
+
+## G6 resolution — the defect was counterproductive re-scaling, not the simplex core (2026-07-15, #649)
+
+The issue-#649 fix work overturned its own hypothesis (the measurement wins). The
+Rust simplex **core** is not the problem: fed bchoco06's equilibrated root LP
+directly, `solve_lp_cols` (the cold primal, **no** Rust scaling) returns
+**Optimal, obj −1.0, 0 iters** — clean, matching HiGHS. The `iteration_limit`/`None`
+comes from the **warm/binding path** the shipped `backend="simplex"` uses:
+`dual::solve_lp_warm_csc` applies its **own** pow2 `Scaling::from_sparse` on top of
+the already-Ruiz-equilibrated matrix, and on this class that re-scaling is
+counterproductive — the scaled optimum, unscaled, lands just past the feasibility
+audit and the solve returns **`Numerical`** (0 iters, obj already ≈ −1.0 but
+refused). Isolation (Rust diagnostic on the captured std-form fixture):
+
+| path on the identical bchoco06 std-form LP | result |
+|---|---|
+| `solve_lp_cols` (no Rust scaling) | **Optimal**, obj −0.99999 |
+| `Scaling::from_sparse` | re-scales range 1.25e12 → 3.33e8 (looks *better*) … |
+| `solve_lp_warm_csc` (scaling ON), pre-fix | **`Numerical`**, no bound |
+| `solve_lp_warm_csc` (scaling ON), post-fix | **Optimal**, obj −0.99999 |
+
+**Fix (shipped, #649).** Neither scaling nor no-scaling dominates (scaling is
+*needed* on the issue-#170 degenerate LPs), so keep scaling-first and, **only when
+the scaled solve yields `Numerical`/`IterLimit`, retry on the exactly-reconstructed
+unscaled matrix** (`Scaling::unscale_cols`, exact powers of two, zero allocation on
+the success path) and prefer that resolved verdict. Sound: the unscaled cold solve
+carries its own feasibility audit, so a returned `Optimal`/`Infeasible`/`Unbounded`
+is genuine — a scaled point the audit rejected is never accepted, only a bound the
+scaling lost is recovered. Plus a Python `isfinite` guard in `milp_relaxation.py`
+so a non-finite objective/bound (seen on the raw un-presolved probe path once the
+solve started returning `optimal`) is reported as no-bound, never a NaN that would
+silently pass `bound ≤ incumbent`.
+
+**Result.** bchoco06 `Model.solve()` now reports a finite dual **bound ≈ 0.99999**
+(was none at 7 nodes — the original EP0 symptom), agreeing with HiGHS. Gate: 446
+`discopt-core` tests (byte-neutral on all existing solves + the new regression
+`bchoco06_illcond_scaled_path_recovers_bound_649`), smoke 638, adversarial 10,
+clean-instance optima (alan/ex1221/ex1225/nvs09/st_miqp2) unchanged. **Cause B**
+(vacuous high-degree-monomial relaxation — the bound ≈ 1.0 is `x0`'s box top) is now
+*measurable* and remains open/lowest-priority (still `known=null`).

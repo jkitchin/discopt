@@ -312,10 +312,8 @@ pub fn probe_node_bounds(
                         if j == i {
                             continue;
                         }
-                        let hull = Interval::new(
-                            res0[j].lo.min(res1[j].lo),
-                            res0[j].hi.max(res1[j].hi),
-                        );
+                        let hull =
+                            Interval::new(res0[j].lo.min(res1[j].lo), res0[j].hi.max(res1[j].hi));
                         let before = bounds[j];
                         bounds[j] = bounds[j].intersect(&hull);
                         if bounds[j].lo > before.lo + tol || bounds[j].hi < before.hi - tol {
@@ -1029,7 +1027,10 @@ mod tests {
         );
         // Soundness: the feasible optimum x = 2 is retained.
         assert!(res.tightened_bounds[0].contains(2.0));
-        assert!(res.tightened_bounds[0].lo <= 1.0 + 1e-9, "lb must not over-tighten");
+        assert!(
+            res.tightened_bounds[0].lo <= 1.0 + 1e-9,
+            "lb must not over-tighten"
+        );
     }
 
     /// Both binary branches infeasible ⇒ node infeasible. x = 8 (node-pinned),
