@@ -456,6 +456,12 @@ These were *discovered* by the G1–G5 sessions (measured, recorded), not part o
 the original plan. Each is diagnosis-first and independent; scope before building
 per §0.
 
+**Status (2026-07-15):** G6 **in progress** — entry experiment reproduced (the
+subnormal `-4.941e-324` lower bounds on `x²`/product aux columns are underflow
+artifacts of a true 0 and, with the 1e10 coefficient side, break the simplex's
+equilibration); a subnormal-flush fix is being implemented + gated. G7
+**deferred** (rationale below — no default-path value while G3 routing is killed).
+
 ### G6 — in-house LP simplex conditioning (from G5's bchoco06 re-attribution)
 
 **Hypothesis (evidence-backed, from `g5-family-d-diagnoses.md`).** bchoco06's
@@ -476,14 +482,26 @@ instance → escalate to a linear-algebra (refactorization/tolerance) fix with i
 own plan. **Layer note:** this is a Rust-layer change — profile and gate in Rust
 (`cargo test -p discopt-core`), do not conflate with the JAX evaluator work.
 
-### G7 — restore the LP-node engine's product map (prerequisite for any future routing)
+### G7 — restore the LP-node engine's product map — **DEFERRED (2026-07-15)**
 
 **Context (from G3/#646).** #636's univariate-square bilinear lifting left the
 LP-node engine's `info` product map empty for integer-product models, which (a)
 was the root of the P0 false-optimal #646 fixed by falling back to ground-truth
 verification, and (b) disables the engine's product branching + cuts
-(`IncrementalMcCormickLP.ok=False`), so it has no throughput on family C. Routing
-(G3) can only be reconsidered once the engine's product map is repopulated to the
-#636 relaxation so spatial branching and cuts work again. This is a larger engine
-change, not a routing tweak; it needs its own plan and the full bound-changing
-gate. Until then the sound default path owns family C.
+(`IncrementalMcCormickLP.ok=False`), so it has no throughput on family C.
+Repopulating the product map to the #636 relaxation would restore spatial
+branching + cuts.
+
+**Disposition — deferred, not built.** The LP-node engine is **opt-in only**
+(`solver.py:3209`, `if kwargs.get("lp_spatial", False)`); nothing routes to it on
+the default path. Its only consumer would be G3 routing, which is **KILLED** (§9:
+the engine cannot beat the default path on its own family even once made sound).
+So G7 restores *throughput on an engine nothing uses by default and that loses to
+the default path* — a benefit confined to an unrouted opt-in engine, which
+CLAUDE.md §2 rejects. The #646 soundness fix already made that engine **safe**
+(no false optima), which is the only property that mattered while it stays opt-in.
+G7 is therefore parked: it becomes worth doing only if new evidence reopens G3
+routing (a measured case where the LP-node engine, with a restored product map,
+*beats* the default path on some family) — that evidence is the entry experiment
+that would un-defer it. Until then the sound default path owns family C and this
+item ships nothing.
