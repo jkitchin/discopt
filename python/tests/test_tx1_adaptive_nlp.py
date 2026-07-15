@@ -8,8 +8,10 @@ change *incumbent arrival* (node counts, wall), never the certificate. TX0
 measured this bucket as idle waste on integer-heavy nonconvex models (nvs09:
 14.3 s skippable, identical proof/bound).
 
-``DISCOPT_ADAPTIVE_NLP`` graduates behind the flag convention: ``=0`` (default)
-restores today's fixed ``node_nlp_stride``.
+``DISCOPT_ADAPTIVE_NLP`` graduated to **default-ON** in G2
+(``docs/dev/baron-gap-plan.md`` §4). Flag-graduation convention: the adaptive
+back-off is now the default; ``DISCOPT_ADAPTIVE_NLP=0`` restores today's fixed
+``node_nlp_stride``.
 
 Soundness contract asserted here:
   * On a **convex** model the flag is inert — the gated regime requires
@@ -47,6 +49,29 @@ def _solve(name: str, *, adaptive: bool, tl: float, monkeypatch):
     monkeypatch.setenv("DISCOPT_ADAPTIVE_NLP", "1" if adaptive else "0")
     model = from_nl(os.path.join(_DATA, f"{name}.nl"))
     return model.solve(time_limit=tl)
+
+
+def test_adaptive_nlp_default_direction(monkeypatch):
+    """G2 flip: the adaptive back-off is now default-ON; ``=0`` restores fixed.
+
+    Fast, load-immune unit test on the tuning default itself (no solve).
+    ``docs/dev/baron-gap-plan.md`` §4 graduated ``DISCOPT_ADAPTIVE_NLP`` from
+    default-OFF to default-ON; the flag-graduation convention keeps ``=0`` as the
+    explicit escape hatch back to today's fixed ``node_nlp_stride``.
+    """
+    from discopt.solver_tuning import SolverTuning
+
+    # Unset env -> the new default is ON (adaptive back-off engaged).
+    monkeypatch.delenv("DISCOPT_ADAPTIVE_NLP", raising=False)
+    assert SolverTuning().adaptive_nlp is True
+
+    # =0 restores the fixed stride (explicit opt-out still honored).
+    monkeypatch.setenv("DISCOPT_ADAPTIVE_NLP", "0")
+    assert SolverTuning().adaptive_nlp is False
+
+    # =1 is still ON (idempotent with the default).
+    monkeypatch.setenv("DISCOPT_ADAPTIVE_NLP", "1")
+    assert SolverTuning().adaptive_nlp is True
 
 
 @pytest.mark.slow
