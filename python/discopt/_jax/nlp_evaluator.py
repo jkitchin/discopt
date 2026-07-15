@@ -16,6 +16,8 @@ NMPC-style closed-loop workloads.
 
 from __future__ import annotations
 
+from typing import Optional
+
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -405,6 +407,120 @@ class NLPEvaluator:
             self._jac_fn = None
         self._lagrangian_hess_fn = self._bind_x_obj_lam(self._lagrangian_hess_fn_jit)
 
+        # --- G1: iterate-memoized fused evaluation (kill Python<->JAX marshaling)
+        # POUNCE calls one Python round-trip *per quantity per iterate*. The census
+        # (docs/dev/data/g1) shows ~88% of iterates evaluate objective+constraints
+        # ONLY (line-search trial points), and the removable cost is the per-call
+        # JAX *dispatch* plus per-scalar host conversion — not the XLA compute.
+        # We fuse co-occurring quantities into ONE jitted function returning ONE
+        # concatenated array (never a pytree / jax.device_get, which is ~10x
+        # slower than a single np.asarray), convert once, and slice numpy for each
+        # per-quantity method. A tiny per-iterate memo keyed on x.tobytes() (plus a
+        # parameter token when the model has parameters, so a Parameter.value
+        # change can never serve stale values) lets the second+ quantity of a group
+        # hit the cache. Values are pure functions of (x, params) — independent of
+        # any per-node box override — so sharing across _BoundOverrideEvaluator
+        # proxies is correct. The memo lives on the evaluator instance with NO
+        # module-level state; entries bind (key -> [fc_array, gj_array]) so a
+        # Rayon-concurrent reader only ever consumes a value whose key matches its
+        # own x (worst case under contention is a recompute, never a wrong value).
+        # The Lagrangian Hessian stays on its own path (called ~10x less).
+        self._memo_cap = 32
+        self._iter_memo: dict[bytes, list] = {}
+        self._fused_gj_jit = None  # lazily built concat([grad, jac.ravel()])
+        self._gj_fusable_cache: Optional[bool] = None
+        # FC (objective+constraints) needs no sparsity decision -> build eagerly
+        # when the model has constraints; otherwise there is nothing to fuse.
+        if self._cons_fn_jit is not None and self._n_constraints > 0:
+            _obj_jit = self._obj_fn_jit
+            _cons_jit = self._cons_fn_jit
+
+            def _fused_fc(x_flat, params):
+                f = jnp.reshape(_obj_jit(x_flat, params), (1,))
+                c = jnp.reshape(_cons_jit(x_flat, params), (-1,))
+                return jnp.concatenate([f, c])
+
+            self._fused_fc_jit = jax.jit(_fused_fc)
+        else:
+            self._fused_fc_jit = None
+
+    def _memo_key(self, x: np.ndarray) -> bytes:
+        """Per-iterate memo key: the raw x bytes, plus a parameter-value token
+        when the model has parameters (fused values depend on both)."""
+        xb = np.asarray(x, dtype=np.float64).tobytes()
+        if not self._parameters:
+            return xb
+        ptok = b"".join(np.asarray(p.value, dtype=np.float64).tobytes() for p in self._parameters)
+        return xb + b"|" + ptok
+
+    def _memo_store(self, key: bytes, idx: int, arr: np.ndarray) -> None:
+        """Store ``arr`` in slot ``idx`` (0=FC, 1=GJ) under ``key`` with bounded
+        FIFO eviction. Race-tolerant: dict/list element assignment is atomic under
+        the GIL; a concurrent eviction only costs a later recompute."""
+        e = self._iter_memo.get(key)
+        if e is None:
+            if len(self._iter_memo) >= self._memo_cap:
+                try:
+                    self._iter_memo.pop(next(iter(self._iter_memo)))
+                except (StopIteration, KeyError):
+                    pass
+            e = self._iter_memo.get(key)
+            if e is None:
+                e = [None, None]
+                self._iter_memo[key] = e
+        e[idx] = arr
+
+    def _fused_fc_array(self, x: np.ndarray) -> np.ndarray:
+        """Return the fused concat([objective, constraints]) numpy array at x,
+        computing + caching it once per iterate."""
+        key = self._memo_key(x)
+        e = self._iter_memo.get(key)
+        if e is not None and e[0] is not None:
+            return e[0]
+        arr = np.asarray(self._fused_fc_jit(x, self._current_params()))
+        self._memo_store(key, 0, arr)
+        return arr
+
+    def _gj_fusable(self) -> bool:
+        """True when fusing gradient+Jacobian into a single dense concat produces
+        byte-identical values to the per-quantity path. Requires the dense
+        Jacobian to be the path the current code takes: a compiled dense
+        ``jacfwd`` (m*n within the compile limit) that is NOT superseded by the
+        compressed sparse-JVP evaluator (whose float op order differs, so it must
+        not be swapped)."""
+        if self._gj_fusable_cache is None:
+            ok = False
+            n = self._n_variables
+            m = self._n_constraints
+            if self._jac_fn_jit is not None and m > 0 and n > 0:
+                if m * n <= _DENSE_JACOBIAN_COMPILE_LIMIT and not (
+                    self.has_sparse_structure() and self._use_compressed_eval()
+                ):
+                    ok = True
+            self._gj_fusable_cache = ok
+        return self._gj_fusable_cache
+
+    def _fused_gj_array(self, x: np.ndarray) -> np.ndarray:
+        """Return the fused concat([gradient, dense_jacobian.ravel()]) numpy array
+        at x, computing + caching it once per iterate."""
+        key = self._memo_key(x)
+        e = self._iter_memo.get(key)
+        if e is not None and e[1] is not None:
+            return e[1]
+        if self._fused_gj_jit is None:
+            _grad_jit = self._grad_fn_jit
+            _jac_jit = self._jac_fn_jit
+
+            def _fused_gj(x_flat, params):
+                g = jnp.reshape(_grad_jit(x_flat, params), (-1,))
+                jj = jnp.reshape(_jac_jit(x_flat, params), (-1,))
+                return jnp.concatenate([g, jj])
+
+            self._fused_gj_jit = jax.jit(_fused_gj)
+        arr = np.asarray(self._fused_gj_jit(x, self._current_params()))
+        self._memo_store(key, 1, arr)
+        return arr
+
     def _build_gauss_newton_obj_hessian(self, model: Model):
         """Build ``fn(x, params) -> 2 Jᵀ J`` if the objective is a sum of squares.
 
@@ -498,10 +614,17 @@ class NLPEvaluator:
 
     def evaluate_objective(self, x: np.ndarray) -> float:
         """Evaluate objective at x. Returns scalar."""
+        # G1: when the model has constraints, objective and constraints co-occur
+        # at ~88% of iterates; the fused concat computes both in one dispatch.
+        if self._fused_fc_jit is not None:
+            return float(self._fused_fc_array(x)[0])
         return float(self._obj_fn_jit(x, self._current_params()))
 
     def evaluate_gradient(self, x: np.ndarray) -> np.ndarray:
         """Evaluate gradient of objective at x. Returns (n,) array."""
+        # G1: fuse with the dense Jacobian when that path is byte-identical.
+        if self._gj_fusable():
+            return np.array(self._fused_gj_array(x)[: self._n_variables], dtype=np.float64)
         return np.asarray(self._grad_fn_jit(x, self._current_params()))
 
     def evaluate_hessian(self, x: np.ndarray) -> np.ndarray:
@@ -512,6 +635,10 @@ class NLPEvaluator:
         """Evaluate all constraint bodies at x. Returns (m,) array."""
         if self._cons_fn_jit is None:
             return np.array([], dtype=np.float64)
+        # G1: slice the constraints out of the fused objective+constraints array
+        # (the objective call for this iterate typically already computed it).
+        if self._fused_fc_jit is not None:
+            return np.array(self._fused_fc_array(x)[1:], dtype=np.float64)
         return np.asarray(self._cons_fn_jit(x, self._current_params()))
 
     def _evaluate_dense_jacobian(self, x: np.ndarray) -> np.ndarray:
@@ -564,6 +691,16 @@ class NLPEvaluator:
         """
         if self._jac_fn_jit is None:
             return np.empty((0, self._n_variables), dtype=np.float64)
+        # G1: when the dense-Jacobian fusion is active it produces the identical
+        # dense matrix as ``_evaluate_dense_jacobian`` (same compiled jacfwd),
+        # sharing the per-iterate compute with the gradient.
+        if self._gj_fusable():
+            n = self._n_variables
+            return (
+                self._fused_gj_array(x)[n:]
+                .reshape(self._n_constraints, n)
+                .astype(np.float64, copy=True)
+            )
         if (
             self._n_constraints * self._n_variables > _DENSE_JACOBIAN_COMPILE_LIMIT
             and self._ensure_sparse_jac_fn()
@@ -774,6 +911,14 @@ class NLPEvaluator:
             values_fn = self._ensure_sparse_jac_values_fn()
             if values_fn is not None:
                 return values_fn(x, self._current_params())
+        # G1: fused dense path — slice the dense Jacobian out of the fused
+        # gradient+Jacobian array and project onto the COO pattern. ``_gj_fusable``
+        # is False whenever the compressed branch above would fire, so this stays
+        # byte-identical to the ``evaluate_jacobian`` densify+project below.
+        if self._gj_fusable():
+            n = self._n_variables
+            J = self._fused_gj_array(x)[n:].reshape(self._n_constraints, n)
+            return J[self._jac_rows, self._jac_cols].astype(np.float64)
         # Dense evaluation, projected onto the COO pattern (which may still
         # be the true sparse pattern — that's the common moderately-dense path)
         jac = self.evaluate_jacobian(x)
