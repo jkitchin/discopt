@@ -149,3 +149,56 @@ SCIP), **not** cuts. Cuts (a future c-MIR/aggregation separator) are a node-coun
 optimization (6,796 → 70), valuable later but neither necessary nor currently
 attainable. **Step 2 is therefore the real next step; Step 3 is deferred** until a
 proper aggregation-MIR separator exists.
+
+## G3 / TX4 update (2026-07-15) — routing FALSIFIED; false-optimal fixed instead
+
+Entry experiments for baron-gap-plan G3 (route family C to the LP-node engine by
+default) measured on `main` @`0f3ebd7d` (post-#636 uniform engine). Two findings
+overrode the plan.
+
+**1. The default NLP path already solves the family (#636 superseded the freeze).**
+The frozen-bound pathology this diagnosis documented (nvs17 stuck at −65,842) is
+gone on the default path — the uniform engine + already-un-gated root OBBT
+(`solver.py:4711`, `_obbt_has_nonlinear and n_vars <= 50`) close it:
+
+| instance | default path (60 s budget) | true opt |
+|---|---|---|
+| nvs17 | **optimal −1100.4**, 131 nodes, 10.5 s | −1100.4 |
+| nvs19 | **optimal −1098.4**, 277 nodes, 30.2 s | −1098.4 |
+| nvs24 | feasible −1031.8, bound −1034.55, gap 0.27 %, 517 nodes, 60 s | −1033.2 |
+
+Root OBBT probe (EE3): post-#636 the root McCormick bound is −395,450 over [0,200]
+→ −34,715 after OBBT (box → ~[0,49..65]). The Phase-1 prediction (−65,842 →
+−6,790) was against the *pre-#636* relaxation and does not reproduce; the number
+changed but the default path solves regardless, so OBBT un-gating (plan part b) is
+already effective on `main`.
+
+**2. The opt-in LP-node engine returns CERTIFIED FALSE OPTIMA at `main`** — a P0
+regression, not just a throughput gap:
+
+| instance | `solve(lp_spatial=True)` at `main` | true opt |
+|---|---|---|
+| nvs17 | status=**optimal** obj=**−1836.2**, gap_certified=True (infeasible point) | −1100.4 |
+| nvs19 | status=**optimal** obj=**−2520.4** | −1098.4 |
+
+Cause: #636 lifts bilinear `x_i*x_j` via **univariate squares**, so
+`build_milp_relaxation`'s `info["bilinear"]` is empty for nvs17-class models. The
+engine's `_worst_product_var` then never sees the (loose) products, declares "all
+products tight", and accepted the loose McCormick node bound as the incumbent's
+true objective. `IncrementalMcCormickLP.ok` is also False (cuts + pump disabled),
+and the collapsed-box `verify()` returned None (`_objective_bound_valid` False).
+The existing `test_nvs17_dual_bound_is_valid_and_tight` catches this but is
+`slow`+`requires_pounce`, so CI smoke never ran it.
+
+**Action taken (this PR).** Routing (part c) is NOT landed — it would inject false
+optima into the default path, and the engine cannot beat the default even once made
+sound (inc.ok broken → no throughput; McCormick bound too loose). Instead the
+engine's **soundness** was fixed generally (exact ground-truth incumbent
+verification; a valid dual-bound floor for nodes it cannot branch; "optimal" only
+on a genuine gap closure). Post-fix the engine is sound on the family (nvs17
+feasible −1092.4 / valid bound −1836.2 / honest `time_limit`, no false optimum).
+
+**Kill criterion (met):** the engine, even with OBBT + soundness fixes, does not
+beat the default path on its own family. Full engine restoration to the #636
+relaxation (repopulate the product map so `inc.ok`/product-branching/cuts work
+again) is a separate, larger effort and the prerequisite for any future routing.

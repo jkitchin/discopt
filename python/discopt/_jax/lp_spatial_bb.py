@@ -12,12 +12,17 @@ LP relaxation** (``build_milp_relaxation`` — one LP, no NLP, globally valid lo
 bound for a minimize), and branches either on a fractional integer variable or, when
 the integer assignment is integral but a lifted product ``w_ij`` disagrees with
 ``x_i*x_j``, spatially on the worst-violated product's variable. A rounding
-heuristic produces incumbents, verified *exactly* by collapsing the integer box to
-the rounded point (where McCormick is exact).
+heuristic produces incumbents, verified *exactly* against a ground-truth point
+evaluator (true objective + constraint feasibility) — never the relaxation bound.
 
-**Scope (this step).** Pure-integer models with a MINIMIZE objective. With every
-variable integer, fixing the integers at a leaf determines every nonlinear term, so
-the collapsed-box LP value is the true objective and fathoming is exact. Cuts
+**Scope (this step).** Pure-integer models with a MINIMIZE objective. The frontier
+McCormick bound is always a valid lower bound; every incumbent is a genuinely
+feasible point whose reported objective is its true objective, so ``bound <=
+incumbent`` holds unconditionally. Optimality is declared only when the valid dual
+bound (frontier + a floor for nodes the engine cannot branch — see
+``unresolved_lb``) closes the gap: a node whose products are lifted outside this
+engine's ``info`` map (e.g. univariate-square bilinear post-#636) is *not* treated
+as an exact leaf, so a loose relaxation can never masquerade as a proof. Cuts
 (Gomory/MIR) and warm-started incremental LPs are added in later steps;
 ``build_milp_relaxation`` is currently rebuilt per node. Returns ``None`` (caller
 falls back to the default path) whenever the model is out of scope or anything
@@ -210,6 +215,30 @@ def solve_lp_spatial_bb(
 
     t0 = time.perf_counter()
 
+    # Ground-truth point evaluator for exact incumbent verification. An incumbent's
+    # objective MUST be the true objective at a verified-feasible integer point,
+    # never a McCormick relaxation value: post-uniform-relaxation (#636) a bilinear
+    # product ``x_i*x_j`` is lifted via univariate squares, so it no longer appears
+    # in this engine's ``info`` product map -- the "collapsed box is exact" argument
+    # (and ``_worst_product_var``'s "all products tight" check) silently fail, and
+    # trusting the relaxation bound as a primal produced *certified false optima*
+    # (nvs17: reported optimal -1836.2 vs true -1100.4, at an infeasible point).
+    # Verifying against the evaluator restores ``bound <= incumbent`` unconditionally.
+    # If we cannot build a verifier we cannot safely accept any incumbent, so bail to
+    # the sound default path (return None) rather than risk an unverified certificate.
+    try:
+        from discopt._jax.nlp_evaluator import NLPEvaluator
+        from discopt.solver import _check_constraint_feasibility, _infer_constraint_bounds
+
+        _ev = NLPEvaluator(model)
+        _cl, _cu = _infer_constraint_bounds(model, _ev)
+    except Exception:
+        return None
+    _FEAS_TOL = 1e-6
+
+    def _pt_feasible(xr: np.ndarray) -> bool:
+        return bool(_check_constraint_feasibility(_ev, xr, _cl, _cu, tol=_FEAS_TOL))
+
     if use_obbt:
         try:
             from discopt._jax.obbt import obbt_tighten_root
@@ -335,11 +364,21 @@ def solve_lp_spatial_bb(
             cnt_u[i] += 1
 
     def verify(xhat):
-        """True objective at integer point xhat (products fixed -> McCormick exact),
-        or None if xhat is infeasible."""
+        """Exact objective at the rounded integer point, or None if infeasible.
+
+        Ground truth only: evaluates the true objective and checks constraint
+        feasibility with the point evaluator (never the McCormick relaxation bound,
+        which is not exact once a product is lifted outside ``info`` -- see the
+        verifier note above). Guarantees any accepted incumbent is a genuinely
+        feasible point whose reported objective is its true objective, so the
+        frontier's valid lower bound can never exceed it."""
         xr = np.minimum(np.maximum(np.round(xhat), lb0), ub0)
-        b_, _x, _bas = relax(xr, xr, None)
-        return (b_, xr) if b_ is not None else None
+        if not _pt_feasible(xr):
+            return None
+        try:
+            return float(_ev.evaluate_objective(xr)), xr
+        except Exception:
+            return None
 
     def dive(lb_d, ub_d):
         """Fix-and-dive: repeatedly fix the most-fractional free integer to its
@@ -411,6 +450,12 @@ def solve_lp_spatial_bb(
     consider(dive(lb0, ub0))
     consider(feasibility_pump(lb0, ub0, root_x))
 
+    # Valid global lower bound floor from nodes the engine popped but could NOT
+    # branch or fathom exactly (see the unbranchable-node handling below). The true
+    # global lower bound is min(best frontier bound, this floor); optimality may be
+    # declared only when that closes the gap to the verified incumbent.
+    unresolved_lb = float("inf")
+
     status = "infeasible"
     while heap:
         if (time.perf_counter() - t0) >= time_limit or nodes >= max_nodes:
@@ -418,9 +463,14 @@ def solve_lp_spatial_bb(
             break
         bound, _, lb, ub, x, basis, ncuts = heapq.heappop(heap)
         nodes += 1
+        # Global lower bound = smallest frontier bound (this popped node, best-first)
+        # capped by any unresolved-node floor. Fathoming/gap tests use this, never the
+        # popped node's bound alone, so an unresolved node below the incumbent keeps
+        # the gap open instead of yielding a false optimality proof.
+        glb = min(bound, unresolved_lb)
         if bound >= inc_val - 1e-9 * (1 + abs(inc_val)):
             continue
-        if inc_x is not None and abs(inc_val - bound) <= gap_tolerance * (1 + abs(inc_val)):
+        if inc_x is not None and abs(inc_val - glb) <= gap_tolerance * (1 + abs(inc_val)):
             status = "optimal"
             break
         # primal: cheap one-shot rounding every node; dive / pump rate-limited so
@@ -445,19 +495,49 @@ def solve_lp_spatial_bb(
             _update_pc(bi, "d", bound, bd, fd)
             _update_pc(bi, "u", bound, bu, fu)
             continue
-        # integral assignment: spatial-bisect the worst-violated product variable
+        # Integral assignment: spatial-bisect the worst-violated product variable.
+        # ``_worst_product_var`` can only see products present in ``info``; once a
+        # product is lifted elsewhere (univariate-square bilinear post-#636) it
+        # returns None even though the relaxation is NOT tight, so "no branchable
+        # product" is NOT a proof that ``bound`` is exact here. Record a verified
+        # incumbent (exact objective, never the loose ``bound``); the node is a true,
+        # fathomable leaf only when the integer box is fully fixed (a single point,
+        # where every nonlinear term is determined). Otherwise it is unresolved: keep
+        # its valid lower bound as a global-bound floor so optimality is never claimed
+        # over branching the engine could not perform.
         bv = _worst_product_var(x, info, ub - lb)
         if bv is None:
-            consider((bound, x[:n].copy()))  # all products tight -> true solution
+            consider(verify(x[:n]))
+            if not bool(np.all(ub[:n] - lb[:n] <= 1e-9)):
+                unresolved_lb = min(unresolved_lb, bound)
             continue
         mid = np.floor((lb[bv] + ub[bv]) / 2)
         child(lb, _set(ub, bv, mid), basis, ncuts, _rounds)
         child(_set(lb, bv, mid + 1.0), ub, basis, ncuts, _rounds)
     else:
-        status = "optimal" if inc_x is not None else "infeasible"
+        # Heap exhausted. Optimal only if the unresolved-node floor does not sit below
+        # the incumbent (else there is space the engine could not rule out -> feasible
+        # with an honest gap, never a false optimality certificate).
+        if inc_x is not None and (
+            not np.isfinite(unresolved_lb)
+            or abs(inc_val - unresolved_lb) <= gap_tolerance * (1 + abs(inc_val))
+        ):
+            status = "optimal"
+        elif inc_x is not None:
+            status = "feasible"
+        elif np.isfinite(unresolved_lb):
+            # Nodes the engine could neither branch nor find a feasible point in were
+            # left unresolved: cannot certify infeasibility.
+            status = "time_limit"
+        else:
+            status = "infeasible"
 
-    gbound = min([h[0] for h in heap], default=inc_val)
-    gbound = min(gbound, inc_val) if inc_x is not None else gbound
+    gbound = min([h[0] for h in heap], default=float("inf"))
+    gbound = min(gbound, unresolved_lb)
+    if inc_x is not None:
+        gbound = min(gbound, inc_val)
+    if not np.isfinite(gbound):
+        gbound = inc_val if inc_x is not None else None
     obj = inc_val if inc_x is not None else None
     gap = None
     if obj is not None and gbound is not None and np.isfinite(gbound):
@@ -467,7 +547,7 @@ def solve_lp_spatial_bb(
     return LpSpatialResult(
         status=status,
         objective=obj,
-        bound=(gbound if np.isfinite(gbound) else None),
+        bound=(gbound if (gbound is not None and np.isfinite(gbound)) else None),
         gap=gap,
         x=inc_x,
         node_count=nodes,

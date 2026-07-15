@@ -127,6 +127,48 @@ def _brute(ux, uy, rhs, coef):
     )
 
 
+@pytest.mark.smoke
+def test_no_false_optimum_on_dense_integer_quadratic():
+    """Soundness invariant (fail-before/pass-after for the #636 univariate-square
+    regression): on a dense all-integer quadratic the engine must never report an
+    objective *below* the true optimum, never a dual bound *above* it, and never
+    declare ``optimal`` at a suboptimal point.
+
+    The engine's incumbent objective used to be the McCormick relaxation value at a
+    collapsed box; once a bilinear product is lifted outside ``info`` (univariate-
+    square post-#636) that value is loose, and ``_worst_product_var`` cannot see the
+    product to branch it, so the loose bound was accepted as a certified optimum
+    (nvs17: -1836.2 vs true -1100.4). This small dense model drives the same
+    fallback path (``inc.ok`` is False), so the exact-verify + unresolved-bound
+    invariant is exercised without the slow nvs17 solve."""
+    n, ub = 3, 5
+    m = dm.Model("dq")
+    xs = [m.integer(f"x{i}", lb=0, ub=ub) for i in range(n)]
+    obj = 0
+    for i in range(n):
+        obj = obj - xs[i] * xs[i]
+        for j in range(i + 1, n):
+            obj = obj - xs[i] * xs[j]
+    m.minimize(obj)
+    m.subject_to(sum(xs) <= 2 * n)
+
+    brute = min(
+        -(a * a + b * b + c * c + a * b + a * c + b * c)
+        for a in range(ub + 1)
+        for b in range(ub + 1)
+        for c in range(ub + 1)
+        if a + b + c <= 2 * n
+    )
+    r = solve_lp_spatial_bb(m, time_limit=20, gap_tolerance=1e-6)
+    assert r is not None
+    if r.objective is not None:
+        assert r.objective >= brute - 1e-6  # incumbent can never beat the true optimum
+    if r.bound is not None:
+        assert r.bound <= brute + 1e-6  # dual bound is a valid lower bound
+    if r.status == "optimal":  # a claimed proof must be a real one
+        assert r.objective == pytest.approx(brute, abs=1e-6)
+
+
 # --------------------------------------------------------------------------- #
 # scope gate (pure logic, fast)
 # --------------------------------------------------------------------------- #
