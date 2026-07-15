@@ -135,49 +135,43 @@ def test_exp_square_objective_linearizes_with_square_aux():
 
 @pytest.mark.correctness
 def test_distributed_log_square_product_form_is_collected():
-    """``distribute_products`` rewrites ``log(.)**2`` into ``log(.)*log(.)`` once a
-    sibling term triggers factorable_reform; the collector must recognize that
-    product form too (else nvs09's log squares stay uncollected -> no bound)."""
+    """When a sibling term (here ``(Πx)**0.2``) triggers factorable_reform, the
+    ``log(.)**2`` terms must still be collected into a sound, finite objective bound
+    (else nvs09's log squares stay uncollected -> no bound).
+
+    The uniform engine lifts each ``log(.)`` into an aux variable and bounds the
+    resulting polynomial in aux space, so the reformed objective no longer contains
+    the ``log()`` calls syntactically (it did under the old distribute-into-``f*f``
+    collector). The contract this test guards is therefore the *bound the engine
+    produces*, not the objective's syntactic shape."""
     n = 3
     m = dm.Model("log_sq_reform")
     x = m.integer("x", shape=n, lb=3, ub=9)
-    # The ``(Πx)**0.2`` term makes has_factorable_work True, distributing the
-    # objective so the log squares arrive as products.
+    # The ``(Πx)**0.2`` term makes has_factorable_work True, so the objective is
+    # routed through factorable_reform.
     m.minimize(
         sum(dm.log(x[i] - 2) ** 2 + dm.log(10 - x[i]) ** 2 for i in range(n))
         - (_prod([x[i] for i in range(n)])) ** 0.2
     )
-
-    reformed = fr.factorable_reformulate(m)
-    # Sanity: the objective really is in the distributed product form now.
-    from discopt.modeling.core import BinaryOp, FunctionCall
-
-    def count_forms(e, acc):
-        if isinstance(e, BinaryOp):
-            if e.op == "**" and isinstance(e.left, FunctionCall):
-                acc["pow"] += 1
-            if (
-                e.op == "*"
-                and isinstance(e.left, FunctionCall)
-                and isinstance(e.right, FunctionCall)
-            ):
-                acc["mul"] += 1
-            count_forms(e.left, acc)
-            count_forms(e.right, acc)
-        elif hasattr(e, "operand"):
-            count_forms(e.operand, acc)
-        elif isinstance(e, FunctionCall):
-            for a in e.args:
-                count_forms(a, acc)
-
-    acc = {"pow": 0, "mul": 0}
-    count_forms(reformed._objective.expression, acc)
-    assert acc["pow"] == 0 and acc["mul"] == 2 * n, "expected the distributed f*f form"
+    assert fr.has_factorable_work(m)
 
     milp, _varmap = _build(m, reform=True)
-    # Engine contract: the distributed log*log product form still linearizes to a
-    # valid finite bound (the collector recognizes the product form).
+    # Engine contract: the log**2 terms are collected (lifted), so the objective
+    # linearizes to a valid finite bound rather than a feasibility fallback.
     assert milp._objective_bound_valid
+
+    # And that bound is finite and sound (<= the true integer optimum) — proving the
+    # log squares were actually bounded, not silently dropped.
+    bound = _root_lp_bound(milp)
+    true_min = _brute_min(
+        lambda pt: sum(math.log(v - 2) ** 2 + math.log(10 - v) ** 2 for v in pt)
+        - (math.prod(pt)) ** 0.2,
+        3,
+        9,
+        n,
+    )
+    assert math.isfinite(bound)
+    assert bound <= true_min + 1e-6, f"unsound bound {bound} > true min {true_min}"
 
 
 # --------------------------------------------------------------------------- #
