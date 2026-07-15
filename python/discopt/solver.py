@@ -8871,6 +8871,35 @@ def solve_model(
         _gap_certified = True
         status = "optimal"
 
+    # SOUNDNESS INVARIANT (bound <= incumbent). A valid dual bound never crosses a
+    # known feasible objective: a MINIMIZE lower bound is <= the incumbent, a
+    # MAXIMIZE upper bound is >= it. The Rust tree already enforces this
+    # (``update_global_lower_bound`` caps ``global_lower_bound`` at
+    # ``incumbent_value``), but the Python bound-adoption fallbacks above — the
+    # root-relaxation recompute over a possibly FBBT-tightened *snapshot* box, the
+    # taint floor, the root-cut-pool bound — can surface a value that is valid over
+    # its own box yet exceeds the GLOBAL incumbent when that box no longer contains
+    # the optimum. That is an unsound reported bound (ex14_1_7 / ex14_1_9: the
+    # objective is a free variable the uniform engine cannot bound, so the tainted
+    # exit ran the root-relaxation fallback over a tightened snapshot and adopted
+    # 28.5 / 1.0 as a "tighter" lower bound though the true optimum is 0). Cap the
+    # reported bound at the incumbent. This runs AFTER the certification decision —
+    # which correctly used the raw, possibly wrong-side bound via
+    # ``_bound_on_correct_side`` to REFUSE certification — so it can never
+    # manufacture a false "optimal", and it is a no-op for any genuinely valid
+    # bound (already on the correct side). The reported gap is recomputed from the
+    # capped bound so ``bound`` and ``gap`` stay mutually consistent.
+    if (
+        bound_val is not None
+        and np.isfinite(bound_val)
+        and obj_val is not None
+        and np.isfinite(obj_val)
+    ):
+        _capped = max(bound_val, obj_val) if _is_max else min(bound_val, obj_val)
+        if _capped != bound_val:
+            bound_val = _capped
+            gap_val = abs(bound_val - obj_val) / max(1.0, abs(obj_val))
+
     # Root-node certification metrics (cert:T0.1). Convert the root snapshot to
     # the reported objective sense (mirroring ``bound_val``'s negation for
     # MAXIMIZE) and adopt the strengthened root cut-pool bound when it is the
