@@ -197,7 +197,9 @@ def pytest_collection_modifyitems(config, items):
 
 
 # Tests deferred by the #632 uniform-engine cutover, each with a PRECISE reason
-# (matched by function name, parametrisation-agnostic). Two classes only:
+# (matched by function name, parametrisation-agnostic). Recovery/un-deferral is
+# tracked in issue #640 (grouped by capability bucket, tied to blueprint S8).
+# Two classes only:
 #   (T) deferred TIGHTNESS — sound (feasible-point clean, bound never crosses the
 #       oracle) but looser than the old separators; recovered by the uniform OA
 #       loop / branch-and-reduce (blueprint S8), NOT by faking the bound; and
