@@ -186,13 +186,26 @@ def all_instances() -> list[str]:
 # --------------------------------------------------------------------------- #
 DISCOPT_WORKER = r"""
 import json, sys, time
+# G4 (baron-gap-plan.md): floor-separated timing. The fresh-process floor is the
+# import tax (jax ~300 ms + pounce ~150 ms + discopt ~70 ms, Appendix B /
+# baron-gap-plan §1.1); ``solve`` used to silently include jax's LAZY import on
+# the first solve, so the phases were not separable. Pre-import the heavy deps
+# explicitly and time them, so ``solve_time`` is pure engine time and
+# ``import_time + parse_time + solve_time ~= wall_time`` (the G4 identity gate).
+t_begin = time.perf_counter()
+import jax  # noqa: F401  (heavy: ~300 ms; otherwise lazily imported inside solve)
+import pounce  # noqa: F401  (heavy: ~150 ms; the NLP engine)
 from discopt.modeling.core import from_nl
+t_import = time.perf_counter() - t_begin
 nl, tl = sys.argv[1], float(sys.argv[2])
-t0 = time.perf_counter()
 try:
+    t0 = time.perf_counter()
     model = from_nl(nl)
+    t_parse = time.perf_counter() - t0
+    t0 = time.perf_counter()
     res = model.solve(time_limit=tl, gap_tolerance=1e-4)
-    dt = time.perf_counter() - t0
+    t_solve = time.perf_counter() - t0
+    dt = time.perf_counter() - t_begin
     # A3: SolveResult exposes the certified dual bound as ``.bound`` (there is no
     # ``.lower_bound`` attribute — the old name silently read None on every run).
     # After A2, ``.bound`` is None on the no-relaxation class rather than a 1e30
@@ -215,10 +228,14 @@ try:
         "root_time": (None if rt is None else float(rt)),
         "node_count": int(getattr(res, "node_count", 0) or 0),
         "wall_time": dt,
+        "import_time": t_import,
+        "parse_time": t_parse,
+        "solve_time": t_solve,
     }))
 except Exception as e:
-    dt = time.perf_counter() - t0
-    print(json.dumps({"ok": False, "error": f"{type(e).__name__}: {e}", "wall_time": dt}))
+    dt = time.perf_counter() - t_begin
+    print(json.dumps({"ok": False, "error": f"{type(e).__name__}: {e}", "wall_time": dt,
+                      "import_time": t_import}))
 """
 
 
@@ -239,6 +256,13 @@ class SolverRun:
     root_bound: float | None = None
     root_gap: float | None = None
     root_time: float | None = None
+    # G4 floor-separated timing (discopt side only; None for BARON rows and for
+    # daemon-lane rows where the phases happen once in the warm process).
+    # ``solve_time`` is pure engine time (imports pre-paid and measured in
+    # ``import_time``); ``wall_time`` keeps its meaning as the row's total wall.
+    import_time: float | None = None
+    parse_time: float | None = None
+    solve_time: float | None = None
 
 
 def run_discopt(name: str, tl: float) -> SolverRun:
@@ -277,6 +301,44 @@ def run_discopt(name: str, tl: float) -> SolverRun:
         root_bound=d.get("root_bound"),
         root_gap=d.get("root_gap"),
         root_time=d.get("root_time"),
+        import_time=d.get("import_time"),
+        parse_time=d.get("parse_time"),
+        solve_time=d.get("solve_time"),
+    )
+
+
+def run_discopt_daemon(name: str, tl: float) -> SolverRun:
+    """G4 daemon lane: solve through the warm ``discopt`` daemon.
+
+    Measures the deployment-realistic wall (a socket round-trip to a warm
+    Python+JAX process, baron-gap-plan §1.1: easy-class geomean vs BARON drops
+    7.5x -> 3.7x) instead of charging the ~0.5 s fresh-process import floor to
+    every row. Falls back to the isolated-subprocess worker when the daemon is
+    unreachable (mirroring the CLI contract), so a broken daemon can never
+    invalidate a sweep — the fallback row still carries its floor-split fields.
+    """
+    from discopt.daemon import solve_via_daemon
+
+    nl = str(NL_DIR / f"{name}.nl")
+    t0 = time.perf_counter()
+    reply = solve_via_daemon(nl, {"time_limit": tl, "gap_tolerance": 1e-4}, hard_deadline=tl + 60)
+    dt = time.perf_counter() - t0
+    if reply is None:
+        return run_discopt(name, tl)  # daemon unreachable -> honest fallback
+    if not reply.get("ok"):
+        return SolverRun(status="ERROR", wall_time=dt, error=str(reply.get("error"))[:200])
+    r = reply.get("result") or {}
+    return SolverRun(
+        status=str(r.get("status", "")),
+        objective=r.get("objective"),
+        lower_bound=r.get("bound"),
+        gap=r.get("gap"),
+        node_count=int(r.get("node_count") or 0),
+        wall_time=dt,
+        root_bound=r.get("root_bound"),
+        root_gap=r.get("root_gap"),
+        root_time=r.get("root_time"),
+        solve_time=r.get("wall_time"),  # the daemon's in-process solve wall
     )
 
 
@@ -329,6 +391,27 @@ def parse_lst(lst: str) -> SolverRun:
         with contextlib.suppress(ValueError):
             run.wall_time = float(m.group(1))
     return run
+
+
+_BAR_TOTAL = re.compile(r"Total no\. of BaR iterations:\s+(\d+)")
+
+
+def parse_baron_nodes(log: str) -> int:
+    """BARON node count from the ``lo=3`` stdout (G4, baron-gap-plan §6).
+
+    Primary: the ``Total no. of BaR iterations: N`` summary line (BaR
+    iterations == nodes processed — the count BARON reports for itself and the
+    semantics of the 2026-06-18 baseline's node_count column). Fallback: the
+    iteration number of the LAST progress-table row. 0 when neither exists.
+    """
+    if m := _BAR_TOTAL.search(log):
+        with contextlib.suppress(ValueError):
+            return int(m.group(1))
+    matches = list(_BAR_ITER.finditer(log))
+    if matches:
+        with contextlib.suppress(ValueError):
+            return int(matches[-1].group(1))
+    return 0
 
 
 def parse_baron_root(log: str, maximize: bool) -> tuple[float | None, float | None]:
@@ -396,6 +479,15 @@ def run_baron(name: str, tl: float, maximize: bool = False) -> SolverRun:
         # form the incumbent-relative root gap (same definition as discopt's).
         run.root_bound, run.root_time = parse_baron_root(proc.stdout or "", maximize)
         run.root_gap = root_gap_from(run.objective, run.root_bound)
+        # G4: BARON's node count. Every prior sweep recorded node_count=0 (never
+        # parsed), which manufactured the "BARON prunes to 1 node" misreading
+        # (baron-gap-plan §1.2 — the '1' in the table is its MODEL STATUS code).
+        # BARON's ``lo=3`` stdout ends with ``Total no. of BaR iterations: N``
+        # (BaR iterations == nodes processed, the metric BARON itself reports;
+        # validated: alan=3 matching the 2026-06-18 baseline). Fallback: the last
+        # progress-table row's iteration number. Never fabricate — leave 0 when
+        # neither is present (e.g. solved in preprocessing with no table).
+        run.node_count = parse_baron_nodes(proc.stdout or "")
         return run
     finally:
         shutil.rmtree(work, ignore_errors=True)
@@ -456,6 +548,34 @@ def write_report(rows: list[Row], tl: float, out_dir: Path, ts: str) -> Path:
     b = tally(lambda r: r.b_verdict)
     n_oracle = sum(r.known is not None for r in rows)
 
+    # G4 (baron-gap-plan §6): the three wall ratios. ``wall/baron`` is the
+    # historical number (charges discopt the fresh-process import floor);
+    # ``solve/baron`` excludes the floor (pure engine time); a --via-daemon run's
+    # wall IS deployment-realistic, so its wall/baron plays the third role.
+    def _geomean(xs: list[float]) -> float | None:
+        xs = [x for x in xs if x and x > 0]
+        if not xs:
+            return None
+        return math.exp(sum(math.log(x) for x in xs) / len(xs))
+
+    _wall_r = [
+        r.discopt.wall_time / r.baron.wall_time
+        for r in rows
+        if r.baron.wall_time and r.baron.wall_time > 0.03 and r.discopt.wall_time
+    ]
+    _solve_r = [
+        r.discopt.solve_time / r.baron.wall_time
+        for r in rows
+        if r.baron.wall_time and r.baron.wall_time > 0.03 and r.discopt.solve_time
+    ]
+    ratio_lines = []
+    if (g := _geomean(_wall_r)) is not None:
+        ratio_lines.append(f"- geomean wall/BARON: **{g:.1f}x** (n={len(_wall_r)})")
+    if (g := _geomean(_solve_r)) is not None:
+        ratio_lines.append(
+            f"- geomean solve/BARON (import floor excluded): **{g:.1f}x** (n={len(_solve_r)})"
+        )
+
     lines = [
         "# Global Optimization Benchmark — discopt vs BARON (GAMS, full license)",
         "",
@@ -466,6 +586,7 @@ def write_report(rows: list[Row], tl: float, out_dir: Path, ts: str) -> Path:
         "- BARON: `gams <name>.gms minlp=baron optcr=0 optca=1e-9 "
         f"reslim={int(tl)}` (CMU full license)",
         f"- Generated: {ts}",
+        *ratio_lines,
         "",
         "## Verdict vocabulary",
         "",
@@ -625,6 +746,12 @@ def main() -> int:
     ap.add_argument("--out-dir", type=str, default=str(REPO / "reports"))
     ap.add_argument("--skip-baron", action="store_true")
     ap.add_argument(
+        "--via-daemon",
+        action="store_true",
+        help="G4: solve through the warm discopt daemon (deployment-realistic "
+        "wall, no per-row import floor; one excluded warm-up solve first)",
+    )
+    ap.add_argument(
         "--from-json",
         type=str,
         default="",
@@ -658,11 +785,18 @@ def main() -> int:
         flush=True,
     )
 
+    solve_one = run_discopt_daemon if args.via_daemon else run_discopt
+    if args.via_daemon:
+        # One excluded warm-up solve: the first daemon request pays the spawn +
+        # import cost that the lane exists to amortize (baron-gap-plan §6).
+        print("# warming daemon (excluded solve) ...", flush=True)
+        run_discopt_daemon(insts[0], min(args.time_limit, 30.0))
+
     rows: list[Row] = []
     for i, name in enumerate(insts, 1):
         kn = known.get(name)
         mx = nl_is_maximize(name)
-        d = run_discopt(name, args.time_limit)
+        d = solve_one(name, args.time_limit)
         b = (
             SolverRun(status="SKIPPED")
             if args.skip_baron
