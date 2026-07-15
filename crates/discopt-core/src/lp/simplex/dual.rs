@@ -87,6 +87,31 @@ pub fn solve_lp_warm_csc(
             scaling.unscale_x(&mut sol.x);
             scaling.unscale_dual(&mut sol.dual);
             scaling.unscale_ray(&mut sol.ray);
+            // #649: geometric-mean (pow2) equilibration is a heuristic — on some
+            // LPs it is counterproductive. On an already-equilibrated lifted
+            // relaxation with a wide *residual* range (bchoco06's root: scaled
+            // range 3.3e8, still coupled) the scaled optimum unscales just past the
+            // feasibility audit and returns `Numerical` (or the scaled search
+            // stalls to `IterLimit`), while the UNSCALED cold solve of the identical
+            // LP is clean (bchoco06: unscaled → Optimal obj −1.0, matching HiGHS;
+            // scaled → Numerical). Since neither scaling nor no-scaling dominates
+            // (scaling is *needed* on the issue-#170 degenerate LPs), keep
+            // scaling-first and, only when it yields a bound-losing verdict, retry
+            // on the exactly-reconstructed unscaled matrix and prefer that resolved
+            // answer. Sound: the unscaled solve carries its own feasibility audit,
+            // so a returned Optimal/Infeasible/Unbounded is genuine — we never
+            // accept a scaled point the audit rejected, only recover a bound the
+            // scaling lost. No allocation on the success path (the common case).
+            if matches!(sol.status, LpStatus::Numerical | LpStatus::IterLimit) {
+                scaling.unscale_cols(&mut sp); // exact pow2 → original matrix
+                let alt = solve_csc_core(&sp, m, n, c, l, u, b, start, opts);
+                if matches!(
+                    alt.status,
+                    LpStatus::Optimal | LpStatus::Infeasible | LpStatus::Unbounded
+                ) {
+                    return alt;
+                }
+            }
             sol
         }
         None => solve_csc_core(&sp, m, n, c, l, u, b, start, opts),

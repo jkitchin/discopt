@@ -390,15 +390,31 @@ class MilpRelaxationModel:
         }
         status_str = status_map.get(result.status, str(result.status))
 
+        # A non-finite objective/bound is never a valid dual bound: report no
+        # bound (None) rather than propagate a NaN/inf that would silently pass
+        # every ``bound <= incumbent`` comparison (NaN compares false) and corrupt
+        # fathoming. Seen on a raw, un-presolved lifted relaxation whose subnormal
+        # aux bounds / +inf originals let the LP optimum's objective evaluate to
+        # NaN while the solver still reports ``optimal`` (#649). Refuse loudly-by-
+        # omission here; the caller then treats the node as unbounded-below (no
+        # prune), which is sound.
         obj = None
-        if result.objective is not None and self._objective_bound_valid:
+        if (
+            result.objective is not None
+            and self._objective_bound_valid
+            and math.isfinite(float(result.objective))
+        ):
             obj = float(result.objective) + self._obj_offset
 
         # The sound lower bound on the original problem is the MILP's dual bound
         # (not its incumbent), and only when this relaxation's objective is a
         # valid bound on the original (``_objective_bound_valid``).
         bound = None
-        if result.bound is not None and self._objective_bound_valid:
+        if (
+            result.bound is not None
+            and self._objective_bound_valid
+            and math.isfinite(float(result.bound))
+        ):
             bound = float(result.bound) + self._obj_offset
 
         return MilpRelaxationResult(status=status_str, objective=obj, bound=bound, x=result.x)
