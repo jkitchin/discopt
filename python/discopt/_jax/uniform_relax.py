@@ -2344,9 +2344,155 @@ def _fix_single_var_equalities(
     return lb, ub
 
 
+def _emit_quadratic_rlt(
+    ctx: _Builder, model: Model, flat_lb: np.ndarray, flat_ub: np.ndarray
+) -> None:
+    """Add quadratic constraint-factor RLT rows (issue #640 Bucket 2, Phase 2).
+
+    For each degree-2 polynomial constraint ``g {<=,==} 0`` and each variable
+    ``x_m`` in its support with a finite box, multiply ``(-g)`` (which is ``>= 0``
+    on the feasible region) by the bound factors ``(x_m - l_m) >= 0`` and
+    ``(u_m - x_m) >= 0``. Expanding yields degree-3 monomials ``x_k x_l x_m`` which
+    are lifted on demand (recursive McCormick over the registered lower-degree
+    product columns) and linearized. The assembled row (single-sourced through
+    ``rlt_quadratic_bound_cut_row``) is a valid inequality in the lifted space —
+    it equals the non-negative product at every feasible point, so it never cuts a
+    feasible point (sound, only tightens). An equality parent ``g == 0`` also gets
+    the reverse row (pinning the product to zero). Selective (only constraints
+    touching the model's nonlinear support) and capped (``DISCOPT_RLT_QUAD_MAX``
+    new columns) so the LP does not blow up.
+    """
+    from discopt._jax.milp_relaxation import _quadratic_constraint_forms
+    from discopt._jax.rlt_cuts import rlt_quadratic_bound_cut_row
+    from discopt.solver_tuning import current as _tuning
+
+    n_orig = ctx.n_orig
+    forms = _quadratic_constraint_forms(model, n_orig)
+    if not forms:
+        return
+
+    # Vars that participate in some registered nonlinear product — the RLT factor
+    # is only worth forming where it touches nonlinear structure.
+    nonconvex: set[int] = set()
+    for a, b in ctx.bilinear_map:
+        nonconvex.update((a, b))
+    for i, _p in ctx.monomial_map:
+        nonconvex.add(i)
+    for tri in ctx.trilinear_map:
+        nonconvex.update(tri)
+    for multi in ctx.multilinear_map:
+        nonconvex.update(multi)
+
+    # sorted-multiset -> lifted column, seeded from the base decomposition.
+    rlt_prod: dict[tuple[int, ...], int] = {}
+    for (a, b), col in ctx.bilinear_map.items():
+        rlt_prod[tuple(sorted((a, b)))] = col
+    for (i, p), col in ctx.monomial_map.items():
+        if p == 2:
+            rlt_prod[(i, i)] = col
+    for tri, col in ctx.trilinear_map.items():
+        rlt_prod[tuple(sorted(tri))] = col
+
+    cap = int(_tuning().rlt_quad_max)
+    start_cols = len(ctx.col_lb)
+
+    def _finite_box(c: int) -> bool:
+        return _finite(ctx.col_lb[c], ctx.col_ub[c])
+
+    def _lift_pair(cp: int, cq: int) -> int:
+        bp = (ctx.col_lb[cp], ctx.col_ub[cp])
+        bq = (ctx.col_lb[cq], ctx.col_ub[cq])
+        tb = _interval_mul(bp, bq)
+        w = ctx.new_aux(tb[0], tb[1])
+        _emit_mccormick(ctx, w, LinForm.col(cp), bp, LinForm.col(cq), bq)
+        return w
+
+    def _ensure(key: tuple[int, ...]) -> Optional[int]:
+        key = tuple(sorted(key))
+        hit = rlt_prod.get(key)
+        if hit is not None:
+            return hit
+        if len(key) == 1:
+            return key[0]
+        if len(ctx.col_lb) - start_cols >= cap:
+            return None
+        if len(key) == 2:
+            a, b = key
+            if not (_finite_box(a) and _finite_box(b)):
+                return None
+            w = _lift_pair(a, b)
+            rlt_prod[key] = w
+            ctx.register_power(a, 2, w) if a == b else ctx.register_product([a, b], w)
+            return w
+        if len(key) == 3:
+            a, b, c = key
+            pair = _ensure((a, b))
+            if pair is None or len(ctx.col_lb) - start_cols >= cap or not _finite_box(c):
+                return None
+            w = _lift_pair(pair, c)
+            rlt_prod[key] = w
+            if len({a, b, c}) == 3:
+                ctx.register_product([a, b, c], w)
+            return w
+        return None
+
+    specs: list[tuple] = []
+    for quad, lin, const, sense in forms:
+        support = set(lin) | {k for k, _ in quad} | {ll for _, ll in quad}
+        if not (support & nonconvex):
+            continue
+        for mm in sorted(support):
+            if not _finite_box(mm):
+                continue
+            required: set[tuple[int, ...]] = set()
+            for i in lin:
+                required.add(tuple(sorted((i, mm))))
+            for ka, kb in quad:
+                required.add(tuple(sorted((ka, kb))))
+                required.add(tuple(sorted((ka, kb, mm))))
+            prod_map: dict[tuple[int, ...], int] = {}
+            ok = True
+            for req in required:
+                col: Optional[int] = _ensure(req)
+                if col is None:
+                    ok = False
+                    break
+                prod_map[req] = col
+            if not ok:
+                continue
+            specs.append((quad, lin, const, mm, ctx.col_lb[mm], ctx.col_ub[mm], sense, prod_map))
+
+    if not specs:
+        return
+    n_total = len(ctx.col_lb)
+
+    def _orig_col(i: int) -> Optional[int]:
+        return i if 0 <= i < n_orig else None
+
+    for quad, lin, const, mm, lm, um, sense, prod_map in specs:
+
+        def _prod_col(key: tuple[int, ...], _pm: dict = prod_map) -> Optional[int]:
+            return _pm.get(tuple(sorted(key)))
+
+        for lower, bnd in ((True, lm), (False, um)):
+            assembled = rlt_quadratic_bound_cut_row(
+                quad, lin, const, mm, float(bnd), lower, _orig_col, _prod_col, n_total
+            )
+            if assembled is None:
+                continue
+            coeffs, rhs = assembled
+            nz = np.flatnonzero(coeffs)
+            # coeffs·z >= rhs  ->  -coeffs·z <= -rhs.
+            ctx.add_row({int(j): -float(coeffs[j]) for j in nz}, -float(rhs))
+            if sense == "==":
+                ctx.add_row({int(j): float(coeffs[j]) for j in nz}, float(rhs))
+
+
 def build_uniform_relaxation(
     model: Model,
     box: Optional[tuple[np.ndarray, np.ndarray]] = None,
+    *,
+    rlt_quad: bool = False,
 ) -> UniformRelaxation:
     """Build the uniform factorable relaxation of ``model`` over ``box``.
 
@@ -2356,6 +2502,12 @@ def build_uniform_relaxation(
     box : optional ``(flat_lb, flat_ub)`` — the B&B node box in flat variable
         order (like ``build_milp_relaxation``'s ``bound_override``). Defaults to
         the model's declared variable bounds.
+    rlt_quad : bool, default False
+        Enable the quadratic constraint-factor RLT pass (issue #640 Bucket 2):
+        multiply each degree-2 polynomial constraint by variable bound factors,
+        lifting the resulting degree-3 monomials on demand, and add the valid RLT
+        product rows. Sound (only tightens); the caller gates it on the
+        ``rlt_level1`` build option AND ``DISCOPT_RLT_QUAD``.
 
     Returns
     -------
@@ -2412,6 +2564,12 @@ def build_uniform_relaxation(
         elif sense == "==":  # body == rhs (both directions)
             ctx.add_row(lc.coeffs, rhs_shift - lc.const)
             ctx.add_row(lc.scaled(-1.0).coeffs, -(rhs_shift) + lc.const)
+
+    # Quadratic constraint-factor RLT (issue #640 Bucket 2, gated). Runs AFTER the
+    # base build so every product column the base decomposition registered is
+    # available to seed the on-demand degree-3 lifting.
+    if rlt_quad:
+        _emit_quadratic_rlt(ctx, model, flat_lb, flat_ub)
 
     obj_offset = obj_lin.const
 

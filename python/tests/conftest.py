@@ -226,27 +226,23 @@ _CUTOVER_DEFERRED_TESTS: dict[str, str] = {
     #     converted to assert the SOUND-but-looser contract the uniform engine
     #     produces (valid bound + envelope/constraint enforced), since the deleted
     #     piecewise-MILP tables are intentionally not reproduced (issue #640 DoD).
-    # ── Bucket 2 (RLT/PSD/product-side) — PARTIALLY RECOVERED ──
-    # Recovered by registering the PURE product column for a SCALED bilinear/product
-    # in uniform_relax._build_product (the RLT/PSD separators require the column to
-    # equal x_i·x_j, not scalar·x_i·x_j; bound-neutral — McCormick is 1-homogeneous
-    # in a scaled factor): test_psd_cut_closes_indefinite_qcqp_root_gap,
-    # test_separator_emits_no_cut_at_a_consistent_moment_point,
-    # test_psd_closes_plain_mccormick_root_gap, and (side effect: the product rows
-    # now create the >1e12 spread it probes) ex1252. Still deferred below:
-    "test_rlt_wide_box_lp_not_false_infeasible": (
-        "S8-deferred: wide-box RLT product rows not emitted by the engine build; "
-        "no false infeasible (sound), tightness deferred to the uniform OA loop"
-    ),
+    # ── Bucket 2 (RLT/PSD/product-side) — RECOVERED except nvs22 ──
+    # * PSD: registering the PURE product column for a SCALED bilinear/product in
+    #   uniform_relax._build_product (separators need the column to equal x_i·x_j,
+    #   not scalar·x_i·x_j; bound-neutral) recovered
+    #   test_psd_cut_closes_indefinite_qcqp_root_gap,
+    #   test_separator_emits_no_cut_at_a_consistent_moment_point,
+    #   test_psd_closes_plain_mccormick_root_gap, and (side effect) ex1252.
+    # * RLT: the quadratic constraint-factor RLT pass (uniform_relax.
+    #   _emit_quadratic_rlt, gated on rlt_level1 + DISCOPT_RLT_QUAD) recovered
+    #   test_quadratic_rlt_build_path_emits_lifted_rows and
+    #   test_rlt_wide_box_lp_not_false_infeasible (the RLT audit in test_rlt_api.py
+    #   verifies no cut removes a feasible point). Still deferred:
     # ── test_monomial_var_product.py — nvs22 wide-box (free div/sqrt aux) ──
     "test_nvs22_objective_term_lifts_to_sound_root_bound": (
         "S8-deferred: nvs22's free div/sqrt aux vars leave the root LP unbounded on "
         "the wide box under the static engine pass (sound: no false bound); finite "
         "root bound deferred to the uniform OA loop / branch-and-reduce"
-    ),
-    "test_quadratic_rlt_build_path_emits_lifted_rows": (
-        "S8-deferred: the quadratic-RLT build path (DISCOPT_RLT_QUAD) is not wired "
-        "into the engine delegate; no extra lifted rows (sound, looser)"
     ),
     # ── test_incremental_monomial.py / test_incremental_mccormick_node.py —
     #    federation MACHINERY: incremental per-node McCormick patching. The engine

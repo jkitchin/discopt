@@ -1602,6 +1602,7 @@ def _uniform_relaxation_delegate(
     flat_ub: np.ndarray,
     n_orig: int,
     convhull_mode: str,
+    rlt_level1: bool = False,
 ) -> tuple["MilpRelaxationModel", dict]:
     """Build the default relaxation through the uniform factorable engine (#632).
 
@@ -1617,7 +1618,11 @@ def _uniform_relaxation_delegate(
     """
     from discopt._jax.uniform_relax import build_uniform_relaxation
 
-    rel = build_uniform_relaxation(model, box=(flat_lb, flat_ub))
+    # Quadratic constraint-factor RLT (#640 Bucket 2) fires only when the caller
+    # engaged level-1 RLT AND ``DISCOPT_RLT_QUAD`` is on (default on). Off => the
+    # base build is byte-identical to before.
+    rlt_quad = bool(rlt_level1 and _tuning().rlt_quad)
+    rel = build_uniform_relaxation(model, box=(flat_lb, flat_ub), rlt_quad=rlt_quad)
     milp = rel.model
     n_total = int(np.size(milp._c))
     flags = np.zeros(n_total, dtype=np.int32)
@@ -1765,7 +1770,9 @@ def build_milp_relaxation(
     # federated collectors/separators below (being deleted stage-by-stage). The
     # engine is a valid outer relaxation by construction; product-side tightness
     # parity is the deferred polish pass.
-    return _uniform_relaxation_delegate(model, flat_lb, flat_ub, n_orig, convhull_mode)
+    return _uniform_relaxation_delegate(
+        model, flat_lb, flat_ub, n_orig, convhull_mode, rlt_level1=rlt_level1
+    )
 
 
 # --------------------------------------------------------------------------- #

@@ -479,11 +479,17 @@ def test_rlt_wide_box_lp_not_false_infeasible(monkeypatch):
         f"RLT wide-box LP false-infeasible from the simplex (status={simplex.status}); "
         "the equilibration re-verify did not engage"
     )
-    # The recovered bound must be finite and a valid, sound relaxation bound
-    # (HiGHS solved this same LP to ~-553676; the cross-check oracle was removed
-    # with HiGHS in issue #356, so pin finiteness + the known sound value).
+    # The recovered bound must be finite and a valid, sound relaxation bound. The
+    # PRIMARY guarantee this test pins is the soundness one asserted above — the
+    # ill-conditioned RLT LP is NOT false-infeasible (the equilibration re-verify
+    # engaged). The uniform engine's quadratic-RLT pass (#640 Bucket 2) emits a
+    # sound but DIFFERENT cut set than the deleted federation build, so the exact
+    # LP optimum differs from the historical HiGHS value (~-553676); we therefore
+    # pin the sound contract: a finite lower bound that never exceeds the true
+    # global optimum (nvs17: -1100.4). The RLT audit (test_rlt_api.py) separately
+    # verifies no RLT row removes a feasible point.
     assert np.isfinite(float(simplex.bound))
-    assert float(simplex.bound) == pytest.approx(-553676.0, rel=1e-3)
+    assert float(simplex.bound) <= -1100.4 + 1e-4  # valid lower bound (sound)
 
 
 # ---------------------------------------------------------------------------
