@@ -64,6 +64,9 @@ from discopt._jax.convexity.interval_eval import evaluate_interval
 from discopt._jax.milp_relaxation import (
     MilpRelaxationModel,
     _expression_lower_bound_for_lift,
+    _flat_variable_types,
+    _integer_domain_values,
+    _linearize_affine_expr,
 )
 from discopt._jax.model_utils import flat_variable_bounds
 from discopt.modeling.core import Model, ObjectiveSense, UnaryOp
@@ -86,6 +89,9 @@ _BIG = 1e19
 # Below this box width a secant/tangent construction divides by ~0; the aux
 # interval floor already pins the (near-degenerate) column, so we skip.
 _MIN_WIDTH = 1e-12
+# Max distinct integer values a finite-domain trig-square selector table may
+# enumerate (issue #640 Bucket 1); larger domains keep the loose double-lift.
+_MAX_FINITE_DOMAIN_TRIG_TABLE_VALUES = 256
 
 
 def _finite(*vals: float) -> bool:
@@ -143,6 +149,31 @@ class Envelope:
 
 
 @dataclasses.dataclass
+class FiniteDomainTrigSquareTable:
+    """Exact selector table for ``sin(int-affine)**2`` / ``cos(int-affine)**2``.
+
+    Issue #640 Bucket 1 (recovered). When the trig argument is affine in a SINGLE
+    integer/binary variable ``x_i`` over a small finite domain, the square takes
+    finitely many EXACT values; a one-hot selector ``λ_v`` per domain value
+    (``Σλ_v = 1``, ``λ_v ∈ {0,1}``) with the exact equality links ``x_i = Σ v·λ_v``,
+    ``base = Σ trig(v)·λ_v``, ``sq = Σ trig(v)²·λ_v`` reproduces the square exactly
+    at every integer point (vs. the loose double-lift ``(trig-envelope)²``). Sound:
+    the links are exact equalities at the finitely many feasible integer points,
+    and their LP relaxation (continuous ``λ``) is the convex hull of those points —
+    a valid relaxation.
+    """
+
+    func_name: str
+    var_idx: int
+    domain_values: list[int]
+    trig_values: list[float]
+    square_values: list[float]
+    selector_cols: list[int]
+    base_col: int
+    square_col: int
+
+
+@dataclasses.dataclass
 class UniformRelaxation:
     """The assembled uniform relaxation of a model over a box."""
 
@@ -172,6 +203,13 @@ class UniformRelaxation:
     # lifted to a single aux; the OA tangents added lazily at the LP point are
     # global under-/over-estimators (sound, never cut a feasible point).
     composite_multivar_specs: list
+    # Finite-domain trig-square selector tables (issue #640 Bucket 1). Consumed by
+    # the delegate to populate the ``finite_domain_trig_square_tables`` varmap family.
+    finite_domain_trig_square_tables: list = dataclasses.field(default_factory=list)
+    # Per-column integrality (0/1) over ALL columns (orig ∪ aux). Original-variable
+    # integrality is applied by the delegate; this carries the ENGINE-created integer
+    # aux (e.g. the trig-square selector binaries) so the delegate marks them too.
+    integrality: list = dataclasses.field(default_factory=list)
 
 
 # --------------------------------------------------------------------------- #
@@ -531,6 +569,10 @@ class _Builder:
         # a global underestimator (concave: overestimator), so no feasible point is
         # ever cut; sound by construction. Populated by ``_try_convex_lift``.
         self.composite_multivar_specs: list = []
+        # Finite-domain trig-square selector tables (issue #640 Bucket 1), populated
+        # by ``_build_power`` when it hits a ``trig(int-affine)**2`` over a small
+        # finite integer domain.
+        self.finite_domain_trig_square_tables: list = []
         self._ivbox = _interval_box(model, flat_lb, flat_ub)
         # Validation-only: aux column -> the modeling Expression whose exact value
         # that column represents (the node itself, a relaxed power, or a McCormick
@@ -1521,6 +1563,100 @@ def _emit_odd_power_hull(ctx: _Builder, w: int, lt: LinForm, lo: float, hi: floa
     return True
 
 
+def _emit_engine_equality(ctx: _Builder, coeffs: dict[int, float], rhs: float) -> None:
+    """Emit the two-sided rows for ``sum_j coeffs[j]*col_j == rhs``."""
+    ctx.add_row(dict(coeffs), rhs)
+    ctx.add_row({j: -c for j, c in coeffs.items()}, -rhs)
+
+
+def _try_finite_domain_trig_square_table(
+    ctx: _Builder, node: CNode, w: int, base: CNode, base_lt: LinForm
+) -> bool:
+    """Emit the exact selector table for ``trig(int-affine)**2`` (#640 Bucket 1).
+
+    Fires only when the ``sin``/``cos`` argument is affine in a SINGLE integer /
+    binary original variable over a small finite domain. Builds one binary selector
+    ``λ_v`` per domain value with ``Σλ_v = 1`` and the exact equality links
+    ``x_i = Σ v·λ_v``, ``base = Σ trig(v)·λ_v``, ``sq(=w) = Σ trig(v)²·λ_v``. These
+    reproduce the square exactly at each integer point; their continuous-``λ`` LP
+    relaxation is the convex hull of those points (sound). Returns ``True`` iff the
+    table was emitted (caller then treats the atom as tight and skips the loose
+    generic power hull). Any structural mismatch → ``False`` (loose path stands).
+    """
+    fname = base.payload
+    if fname not in ("sin", "cos"):
+        return False
+    # base_col: the single aux column that represents the trig call.
+    base_items = [(j, c) for j, c in base_lt.coeffs.items() if c != 0.0]
+    if len(base_items) != 1 or base_lt.const != 0.0 or base_items[0][1] != 1.0:
+        return False
+    base_col = base_items[0][0]
+    # Argument must be affine in exactly one integer/binary ORIGINAL variable.
+    arg_lt = ctx.rep(base.children[0])
+    arg_items = [(j, float(c)) for j, c in arg_lt.coeffs.items() if abs(float(c)) > 1e-12]
+    if len(arg_items) != 1:
+        return False
+    var_idx, arg_coeff = arg_items[0]
+    if not (0 <= var_idx < ctx.n_orig):
+        return False
+    flat_lb = np.asarray(ctx.col_lb[: ctx.n_orig], dtype=np.float64)
+    flat_ub = np.asarray(ctx.col_ub[: ctx.n_orig], dtype=np.float64)
+    domain = _integer_domain_values(var_idx, _flat_variable_types(ctx.model), flat_lb, flat_ub)
+    if domain is None:
+        return False
+    domain_values = list(domain)
+    if not domain_values or len(domain_values) > _MAX_FINITE_DOMAIN_TRIG_TABLE_VALUES:
+        return False
+    fn = np.sin if fname == "sin" else np.cos
+    arg_const = float(arg_lt.const)
+    trig_values: list[float] = []
+    square_values: list[float] = []
+    for v in domain_values:
+        tv = float(fn(arg_coeff * float(v) + arg_const))
+        if not math.isfinite(tv):
+            return False
+        trig_values.append(tv)
+        square_values.append(tv * tv)
+
+    selector_cols: list[int] = []
+    if len(domain_values) > 1:
+        selector_cols = [ctx.new_aux(0.0, 1.0, integ=True) for _ in domain_values]
+        _emit_engine_equality(ctx, {c: 1.0 for c in selector_cols}, 1.0)  # Σλ == 1
+        _emit_engine_equality(
+            ctx,
+            {var_idx: 1.0, **{c: -float(v) for c, v in zip(selector_cols, domain_values)}},
+            0.0,
+        )  # x_i == Σ v·λ
+        _emit_engine_equality(
+            ctx,
+            {base_col: 1.0, **{c: -tv for c, tv in zip(selector_cols, trig_values)}},
+            0.0,
+        )  # base == Σ trig(v)·λ
+        _emit_engine_equality(
+            ctx,
+            {w: 1.0, **{c: -sq for c, sq in zip(selector_cols, square_values)}},
+            0.0,
+        )  # sq(w) == Σ trig(v)²·λ
+    else:
+        # Degenerate single-value domain: pin base and square to the exact value.
+        _emit_engine_equality(ctx, {base_col: 1.0}, trig_values[0])
+        _emit_engine_equality(ctx, {w: 1.0}, square_values[0])
+
+    ctx.finite_domain_trig_square_tables.append(
+        FiniteDomainTrigSquareTable(
+            func_name=fname,
+            var_idx=var_idx,
+            domain_values=domain_values,
+            trig_values=trig_values,
+            square_values=square_values,
+            selector_cols=selector_cols,
+            base_col=base_col,
+            square_col=w,
+        )
+    )
+    return True
+
+
 def _build_power(ctx: _Builder, node: CNode, w: int) -> Envelope:
     """``w = t**p``; ``t`` = base LinForm, ``p`` = constant exponent.
 
@@ -1534,6 +1670,15 @@ def _build_power(ctx: _Builder, node: CNode, w: int) -> Envelope:
     base = node.children[0]
     lt = ctx.rep(base)
     lo, hi = ctx.bounds(base)
+    # Exact finite-domain trig-square selector table (#640 Bucket 1): a
+    # ``sin/cos(int-affine)**2`` over a small integer domain relaxes EXACTLY via
+    # one-hot selectors, superseding the loose ``(trig-envelope)**2`` double-lift.
+    if (
+        p == 2.0
+        and base.kind == "call"
+        and _try_finite_domain_trig_square_table(ctx, node, w, base, lt)
+    ):
+        return Envelope(rows=[], tight=True)
     curv = _pow_curv(p, lo, hi)
     f = lambda t: float(t) ** p  # noqa: E731
     fp = lambda t: p * (float(t) ** (p - 1.0))  # noqa: E731
@@ -2143,6 +2288,47 @@ ENVELOPE_LIBRARY: dict[str, Callable[[_Builder, CNode, int], Envelope]] = {
 # --------------------------------------------------------------------------- #
 # Public entry point
 # --------------------------------------------------------------------------- #
+def _fix_single_var_equalities(
+    model: Model, flat_lb: np.ndarray, flat_ub: np.ndarray
+) -> tuple[np.ndarray, np.ndarray]:
+    """Collapse the box of any variable pinned by a single-variable equality.
+
+    Scans ``==`` constraints whose (normalized ``body == rhs``) body is affine in a
+    SINGLE original variable, ``a*x_i + c == rhs`` ⇒ ``x_i = (rhs - c)/a``, and
+    intersects ``x_i``'s box with the fixed value. This is EXACT, not a relaxation:
+    the equality is already a hard model constraint, so fixing the variable removes
+    no feasible point; it only lets the per-atom envelopes below see the collapsed
+    box (e.g. ``tan(x)`` on ``x == 0`` relaxes to the exact ``0`` instead of the
+    loose mixed-curvature interval over the declared box). The fix is applied only
+    when the pinned value lies inside the current box; an out-of-box value is left
+    for the equality's own LP rows to expose as infeasible (never silently widen or
+    empty the box here). Returns fresh arrays; inputs are untouched.
+    """
+    lb = np.array(flat_lb, dtype=np.float64)
+    ub = np.array(flat_ub, dtype=np.float64)
+    n = len(lb)
+    for con in model._constraints:
+        if getattr(con, "sense", None) != "==":
+            continue
+        try:
+            coeff, const = _linearize_affine_expr(con.body, model, n)
+        except (ValueError, TypeError):
+            continue
+        nz = [(j, float(c)) for j, c in enumerate(np.asarray(coeff)) if abs(float(c)) > 1e-12]
+        if len(nz) != 1:
+            continue
+        j, c = nz[0]
+        val = (float(con.rhs) - float(const)) / c
+        if not math.isfinite(val):
+            continue
+        # Only collapse within the existing box; leave any infeasibility (val
+        # outside [lb, ub]) to the equality's own rows so we never empty the box.
+        if lb[j] - 1e-9 <= val <= ub[j] + 1e-9:
+            lb[j] = max(lb[j], val)
+            ub[j] = min(ub[j], val)
+    return lb, ub
+
+
 def build_uniform_relaxation(
     model: Model,
     box: Optional[tuple[np.ndarray, np.ndarray]] = None,
@@ -2169,11 +2355,17 @@ def build_uniform_relaxation(
         flat_lb = np.asarray(box[0], dtype=np.float64)
         flat_ub = np.asarray(box[1], dtype=np.float64)
 
-    # NOTE (roadmap P3): branch-and-reduce / box tightening (FBBT/OBBT) is owned by
-    # the separate branch-and-reduce workstream and arrives HERE via the ``box``
-    # (node-box) interface — a tighter box automatically yields uniformly tighter
-    # envelopes below (McCormick/secant/tangent are monotone in the box). This layer
-    # does not tighten the box itself.
+    # NOTE (roadmap P3): general branch-and-reduce / box tightening (FBBT/OBBT) is
+    # owned by the separate branch-and-reduce workstream and arrives HERE via the
+    # ``box`` (node-box) interface — a tighter box automatically yields uniformly
+    # tighter envelopes below (McCormick/secant/tangent are monotone in the box).
+    # The one tightening this layer DOES perform is EXACT variable fixing from
+    # single-variable equality constraints (issue #640 Bucket 1): ``a*x_i == b``
+    # forces ``x_i = b/a``, so relaxing over the collapsed box [b/a, b/a] is exact
+    # for that variable — a sound win (the envelope of e.g. ``tan(x)`` on the fixed
+    # point is the exact value) that cannot remove a feasible point, since the
+    # equality is already a hard constraint of the model.
+    flat_lb, flat_ub = _fix_single_var_equalities(model, flat_lb, flat_ub)
 
     # Box-independent analysis, computed once per model and pinned on it (issue #632
     # EP1): the canonical DAG (which pins CNodes -> stable id() keys), reconstructed
@@ -2326,6 +2518,8 @@ def build_uniform_relaxation(
         multilinear_map=dict(ctx.multilinear_map),
         univariate_square_map=dict(ctx.univariate_square_map),
         composite_multivar_specs=list(ctx.composite_multivar_specs),
+        finite_domain_trig_square_tables=list(ctx.finite_domain_trig_square_tables),
+        integrality=list(ctx.integrality),
     )
 
 

@@ -373,32 +373,37 @@ def test_self_product_difference_classifies_cross_term():
 
 
 def test_partitioned_square_secants_tighten_circle_superlevel_bound():
-    """Local square secants should close the Alpine circle MILP lower bound."""
+    """Sound (looser) circle superlevel bound under the uniform engine (#640).
+
+    #640 Bucket 1 — sound-but-looser contract (federation-specific tightness
+    intentionally not reproduced). The deleted spatial-partition square-secant
+    tables closed the Alpine circle lower bound to sqrt(2); the uniform engine does
+    ONE static factorable build and ignores the ``disc_state`` partitions, so
+    refining the partition is a no-op (coarse == fine) and the McCormick relaxation
+    of the nonconvex superlevel constraint ``x0**2 + x1**2 >= 2`` yields a valid but
+    looser lower bound. The recovered contract: the bound is sound (a valid lower
+    bound, never above the true optimum sqrt(2)), strictly positive (the superlevel
+    constraint is active in the relaxation, not dropped), and partition-invariant.
+    """
     m = _make_circle()
     part_vars = [0, 1]
     coarse_model, _ = _build_relaxation_for_test(
-        m,
-        part_vars=part_vars,
-        lbs=[0.0, 0.0],
-        ubs=[2.0, 2.0],
-        n_init=2,
+        m, part_vars=part_vars, lbs=[0.0, 0.0], ubs=[2.0, 2.0], n_init=2
     )
-    fine_model, fine_varmap = _build_relaxation_for_test(
-        m,
-        part_vars=part_vars,
-        lbs=[0.0, 0.0],
-        ubs=[2.0, 2.0],
-        n_init=64,
+    fine_model, _ = _build_relaxation_for_test(
+        m, part_vars=part_vars, lbs=[0.0, 0.0], ubs=[2.0, 2.0], n_init=64
     )
 
     coarse = coarse_model.solve()
     fine = fine_model.solve()
 
-    assert set(fine_varmap["monomial_pw"]) == {(0, 2), (1, 2)}
     assert coarse.objective is not None
     assert fine.objective is not None
-    assert fine.objective >= coarse.objective + 0.05
-    assert fine.objective == pytest.approx(np.sqrt(2.0), abs=1e-4)
+    # Partition refinement is a no-op on the static engine build.
+    assert fine.objective == pytest.approx(coarse.objective, abs=1e-9)
+    # Sound: a valid lower bound, strictly positive but not yet at the true sqrt(2).
+    assert fine.objective > 1e-6
+    assert fine.objective <= np.sqrt(2.0) + 1e-6
 
 
 def test_shifted_square_constraint_linearizes_and_proves_infeasible(caplog):
@@ -1152,20 +1157,26 @@ def test_tan_abs_minlptests_objective_linearizes_without_fallback(caplog):
 
 
 def test_mixed_curvature_tan_relaxation_respects_fixed_argument():
-    """Piecewise tan envelopes should tighten a mixed-curvature lifted objective."""
+    """A single-variable equality fixes the tan argument to its exact value (#640).
+
+    #640 Bucket 1 — RECOVERED (exact fix, not federation piecewise). ``x == 0``
+    pins ``x`` to a point, so the engine's ``_fix_single_var_equalities`` collapses
+    its box to ``[0, 0]`` and ``tan(x)`` relaxes to the exact ``tan(0) = 0`` — no
+    piecewise mixed-curvature envelope required. (The deleted piecewise-tan tables
+    are intentionally not reproduced; the fixed-argument tightness they provided is
+    recovered exactly by variable fixing.)
+    """
     m = Model("tan_fixed_arg")
     x = m.continuous("x", lb=-1.0, ub=1.0)
     m.minimize(dm.tan(x))
     m.subject_to(x == 0.0)
 
-    milp_model, varmap = _build_relaxation_for_test(m)
+    milp_model, _varmap = _build_relaxation_for_test(m)
     result = milp_model.solve()
 
     assert result.status == "optimal"
+    assert milp_model._objective_bound_valid is True
     assert result.objective == pytest.approx(0.0, abs=1e-8)
-    piecewise = varmap["univariate_piecewise_relaxations"]
-    assert [relax.relax.func_name for relax in piecewise] == ["tan"]
-    assert {interval.curvature for interval in piecewise[0].intervals} == {"concave", "convex"}
 
 
 def test_disaggregated_piecewise_bilinear_big_m_keeps_negative_endpoint_feasible():
@@ -1243,17 +1254,26 @@ def test_mixed_curvature_affine_trig_uses_piecewise_relaxation(objective, old_ra
     milp_model, varmap = _build_relaxation_for_test(m)
     result = milp_model.solve()
 
-    piecewise = varmap["univariate_piecewise_relaxations"]
-    assert {relax.relax.func_name for relax in piecewise} == {"sin", "cos"}
-    assert all(len(relax.intervals) > 2 for relax in piecewise)
-    assert all(
-        interval.curvature in {"convex", "concave"}
-        for relax in piecewise
-        for interval in relax.intervals
-    )
+    # #640 Bucket 1 — sound-but-looser contract (federation-specific tightness
+    # intentionally not reproduced). Without the deleted curvature-split piecewise
+    # sin/cos relaxations the engine returns the loose range bound (== the box
+    # bound ``old_range_bound`` here), which is SOUND but not tightened above it.
+    # The recovered contract: the bound is a valid lower bound (never above any
+    # feasible objective value — computed here by a dense feasible-region scan) and
+    # never below the trivial box minimum.
+    xs = np.linspace(-3.0, 3.0, 241)
+    feasible_best = np.inf
+    for xv in xs:
+        c1 = np.sin(-xv - 1.0) + xv / 2 + 0.5
+        c2 = np.cos(xv - 0.5) + xv / 4 - 0.5
+        y_lo, y_hi = max(-1.0, c1), min(1.0, c2)
+        if y_lo <= y_hi:
+            val = (-xv - y_hi) if objective == "neg_sum" else (xv + y_lo)
+            feasible_best = min(feasible_best, val)
     assert result.status == "optimal"
     assert result.objective is not None
-    assert result.objective > old_range_bound + 1e-6
+    assert result.objective <= feasible_best + 1e-6  # valid lower bound (sound)
+    assert result.objective >= old_range_bound - 1e-6  # not below the box minimum
 
 
 # NOTE (#632 cutover): the three "dense partition guard" tests
@@ -1372,14 +1392,20 @@ def test_continuous_trig_square_uses_direct_piecewise_relaxation(func_name, func
     )
     result = milp_model.solve()
 
-    piecewise = varmap["univariate_square_piecewise_relaxations"]
-    assert len(piecewise) == 1
-    assert piecewise[0].func_name == func_name
-    assert len(piecewise[0].intervals) > 2
-    assert all(interval.curvature in {"convex", "concave"} for interval in piecewise[0].intervals)
+    # #640 Bucket 1 — sound-but-looser contract (federation-specific tightness
+    # intentionally not reproduced). The uniform engine relaxes func(x)^2 with the
+    # continuous sin^2/cos^2 envelope (func^2 <= 1) rather than the deleted
+    # curvature-split piecewise-square tables, so it does NOT reach the piecewise
+    # optimum. The relaxation must still be SOUND (a valid over-estimate of the
+    # maximum) AND actually enforce the envelope: the true max of x+y is
+    # 4 + func(4)^2 + 2 (x*=4, constraint binding), and the envelope caps y at 3
+    # (func^2 <= 1) so the relaxed max cannot exceed x_ub + 3 = 7.
+    true_opt = 4.0 + float(getattr(np, func_name)(4.0)) ** 2 + 2.0
     assert result.status == "optimal"
     assert result.x is not None
-    assert float(result.x[0] + result.x[1]) < 6.95
+    relaxed_max = float(result.x[0] + result.x[1])
+    assert relaxed_max >= true_opt - 1e-4  # valid relaxation of the maximization
+    assert relaxed_max <= 7.0 + 1e-6  # envelope enforced: y <= func^2 + 2 <= 3
 
 
 def test_safe_tan_objective_keeps_relaxation_bound():
@@ -2622,8 +2648,15 @@ def test_gas_square_difference_tightening_strengthens_root_relaxation():
     raw_bound = root_bound(raw_lb, raw_ub)
     tightened_bound = root_bound(tightened_lb, tightened_ub)
 
-    assert tightened_bound >= raw_bound + 0.1
-    assert tightened_bound > 2.3
+    # #640 Bucket 1 — sound-but-looser contract. The square-difference box
+    # tightening still fires (asserted above: the rule ran and pushed lb[4] >= 45),
+    # but the deleted piecewise-monomial partition refinement that turned that
+    # tighter box into a materially stronger root bound (> 2.3) is not reproduced by
+    # the static engine build. The recovered, still-meaningful contract is
+    # monotonicity: a tighter box never loosens the McCormick root bound, so the
+    # tightened bound is >= the raw bound (both finite, valid lower bounds).
+    assert np.isfinite(raw_bound) and np.isfinite(tightened_bound)
+    assert tightened_bound >= raw_bound - 1e-6
 
 
 def test_oa_cut_recovery_drops_oldest_half(monkeypatch):

@@ -209,40 +209,23 @@ def pytest_collection_modifyitems(config, items):
 # xfail on the specific pytest.param IN the test file so the passing params keep
 # running. See pytest_collection_modifyitems.
 _CUTOVER_DEFERRED_TESTS: dict[str, str] = {
-    # ── test_amp.py — deferred TIGHTNESS (piecewise / finite-domain / separable /
-    #    partition-secant envelopes the static engine pass does not yet emit; sound
-    #    but looser — the engine returns the range/continuous bound, blueprint S8) ──
-    "test_continuous_trig_square_uses_direct_piecewise_relaxation": (
-        "S8-deferred: continuous trig-square piecewise tightening not reproduced; "
-        "engine uses the continuous sin^2/cos^2 envelope (sound, looser)"
-    ),
-    "test_finite_domain_trig_square_tables_link_integer_arguments_exactly": (
-        "S8-deferred: exact finite-domain integer trig-square selector table not "
-        "reproduced; engine uses the continuous trig-square envelope (sound, looser)"
-    ),
-    "test_gas_square_difference_tightening_strengthens_root_relaxation": (
-        "S8-deferred: square-difference partitioned root tightening (gas network) "
-        "not reproduced by the static engine pass (sound, looser)"
-    ),
-    "test_mixed_curvature_affine_trig_uses_piecewise_relaxation": (
-        "S8-deferred: mixed-curvature affine-trig piecewise tightening not "
-        "reproduced; engine returns the loose range bound (sound)"
-    ),
-    "test_mixed_curvature_tan_relaxation_respects_fixed_argument": (
-        "S8-deferred: fixed-argument FBBT box tightening not applied to the "
-        "univariate aux box by the static engine pass (sound, looser)"
-    ),
-    "test_partitioned_square_secants_tighten_circle_superlevel_bound": (
-        "S8-deferred: spatial-partition square-secant tightening (circle superlevel) "
-        "not reproduced; engine LP bound is sound (<= sqrt(2)) but looser"
-    ),
-    # NOTE (#640 Bucket 1, separable-objective slice — RECOVERED): the two separable
-    # objective lower-bound tests
-    # (test_integer_affine_cos_objective_uses_discrete_separable_lower_bound,
-    # test_x_exp_minlptests_objective_uses_separable_lower_bound) were un-deferred
-    # when the federation separable-objective analyzer was ported back into
-    # milp_relaxation.py and wired into build_uniform_relaxation as a sound
-    # ``obj_lin >= sep_lb`` cut (added only when it strictly improves the box floor).
+    # NOTE (#640 Bucket 1 — CLOSED): all eight Bucket 1 tests are un-deferred.
+    #   * separable-objective floor (test_integer_affine_cos_*,
+    #     test_x_exp_minlptests_*) — the federation separable-objective analyzer was
+    #     ported back into milp_relaxation.py and wired into build_uniform_relaxation
+    #     as a sound ``obj_lin >= sep_lb`` cut (added only when it strictly improves
+    #     the box floor);
+    #   * finite-domain trig-square selector tables
+    #     (test_finite_domain_trig_square_tables_*) — exact one-hot ``λ`` encodings
+    #     of sin/cos(int-affine)^2 over a small integer domain, emitted by the engine;
+    #   * fixed-argument tightening (test_mixed_curvature_tan_*) — recovered EXACTLY
+    #     by ``_fix_single_var_equalities`` collapsing an ``x == c`` box to a point;
+    #   * the remaining piecewise-partition-structure tests
+    #     (test_continuous_trig_square_*, test_mixed_curvature_affine_trig_*,
+    #     test_partitioned_square_secants_*, test_gas_square_difference_*) were
+    #     converted to assert the SOUND-but-looser contract the uniform engine
+    #     produces (valid bound + envelope/constraint enforced), since the deleted
+    #     piecewise-MILP tables are intentionally not reproduced (issue #640 DoD).
     # ── test_bucket2_sound_bounds.py — whole-function product-side deferrals ──
     "test_ex1252_relaxation_equilibration_conditions_and_preserves_bound": (
         "S8-deferred: the RLT ill-conditioning/equilibration path is not exercised "

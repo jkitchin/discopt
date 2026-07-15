@@ -1626,6 +1626,13 @@ def _uniform_relaxation_delegate(
         if v.var_type in (VarType.BINARY, VarType.INTEGER):
             flags[off : off + v.size] = 1
         off += int(v.size)
+    # OR in ENGINE-created integer aux columns (e.g. the finite-domain trig-square
+    # selector binaries, #640 Bucket 1). The exact selector table is only exact when
+    # its ``λ`` are integer, so the node MILP must see them as such; the pure-LP root
+    # (continuous ``λ``) keeps the sound convex-hull relaxation.
+    aux_int = np.asarray(rel.integrality, dtype=np.int32)
+    if aux_int.size == n_total:
+        flags = np.maximum(flags, aux_int)
     milp._integrality = flags if int(flags.sum()) else None
     # Populate the structural varmap families the proven legacy separators (PSD /
     # RLT / edge-concave / univariate-square / multilinear) consume, from the
@@ -1659,6 +1666,10 @@ def _uniform_relaxation_delegate(
     # rather than the uniform ``{}`` default. Recovering the populated piecewise
     # trig family is a separate S8 item (#640 Bucket 1, buckets A/B/C).
     vm["univariate_piecewise_relaxations"] = []
+    # Finite-domain trig-square selector tables (#640 Bucket 1): exact one-hot
+    # encodings of sin/cos(int-affine)^2 the engine emitted, surfaced for callers
+    # that census them (the rows are already in the relaxation).
+    vm["finite_domain_trig_square_tables"] = list(rel.finite_domain_trig_square_tables)
     return milp, vm
 
 
