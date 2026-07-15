@@ -1,0 +1,75 @@
+{
+  "census": {
+    "wall_s": 20.148601667002367,
+    "objective": 5.47093412640568,
+    "bound": 5.351553883096131,
+    "node_count": 411.0,
+    "status": "feasible",
+    "census": {
+      "jacobian_dense": {
+        "calls": 47258,
+        "total_us": 1527566.266,
+        "us_per_call": 32.32397194125863
+      },
+      "constraints": {
+        "calls": 382898,
+        "total_us": 2205602.541,
+        "us_per_call": 5.760287442086405
+      },
+      "gradient": {
+        "calls": 42958,
+        "total_us": 239434.149,
+        "us_per_call": 5.573680082871642
+      },
+      "jacobian_values": {
+        "calls": 45967,
+        "total_us": 1665887.807,
+        "us_per_call": 36.24095126938891
+      },
+      "lagrangian_hessian": {
+        "calls": 44445,
+        "total_us": 1775814.126,
+        "us_per_call": 39.95531839352008
+      },
+      "hessian_values": {
+        "calls": 44445,
+        "total_us": 1976963.756,
+        "us_per_call": 44.481128495893806
+      },
+      "objective": {
+        "calls": 380558,
+        "total_us": 3253690.497,
+        "us_per_call": 8.549788723400901
+      }
+    },
+    "n_distinct_iterates": 375131,
+    "n_total_callbacks": 988529,
+    "iterate_quantity_combos": {
+      "constraints+objective": 329280,
+      "constraints+gradient+hessian_values+jacobian_dense+jacobian_values+lagrangian_hessian+objective": 39390,
+      "constraints+hessian_values+jacobian_dense+jacobian_values+lagrangian_hessian+objective": 3826,
+      "constraints+gradient+jacobian_dense+jacobian_values+objective": 860,
+      "jacobian_dense": 548,
+      "gradient+jacobian_dense+jacobian_values": 431,
+      "constraints": 403,
+      "constraints+jacobian_dense": 271,
+      "constraints+jacobian_dense+jacobian_values+objective": 116,
+      "constraints+gradient+jacobian_dense+jacobian_values": 6
+    }
+  },
+  "fused_probe": {
+    "n_iterates": 2000,
+    "use_sparse_structure": true,
+    "per_quantity_us": 65289.708,
+    "fused_memoized_us": 72890.0,
+    "per_quantity_us_per_iter": 32.644854,
+    "fused_us_per_iter": 36.445,
+    "speedup_x": 0.8957292907120318,
+    "max_abs_diff": {
+      "f": 0.0,
+      "g": 0.0,
+      "c": 0.0,
+      "J": 0.0
+    }
+  }
+}

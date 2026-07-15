@@ -67,20 +67,31 @@ def test_small_model_uses_dense_path(monkeypatch):
     ev = NE.NLPEvaluator(_small_model())
     x = np.zeros(ev._n_variables)
 
-    # Real cap (1e6) >> this model's m * n, so the dense path must be used.
+    # Real cap (1e6) >> this model's m * n, so a dense (cap-bounded) path must be
+    # used -- NOT the sparse coloring path. Below the cap this is either the fused
+    # gradient+Jacobian array (G1 co-occurrence fusion: same compiled jacfwd, shared
+    # with the gradient) or, when fusion is inapplicable, the standalone dense
+    # jacfwd. Both respect _DENSE_JACOBIAN_COMPILE_LIMIT; the safety-relevant
+    # property this test pins is that the sparse path is not taken below the cap.
     called = {"dense": False}
     real_dense = ev._evaluate_dense_jacobian
+    real_fused = ev._fused_gj_array
 
-    def _spy(xx):
+    def _dense_spy(xx):
         called["dense"] = True
         return real_dense(xx)
 
-    monkeypatch.setattr(ev, "_evaluate_dense_jacobian", _spy)
-    # If sparse were (wrongly) chosen it would short-circuit before _spy.
+    def _fused_spy(xx):
+        called["dense"] = True
+        return real_fused(xx)
+
+    monkeypatch.setattr(ev, "_evaluate_dense_jacobian", _dense_spy)
+    monkeypatch.setattr(ev, "_fused_gj_array", _fused_spy)
+    # If sparse were (wrongly) chosen it would short-circuit before either spy.
     ev._sparse_jac_fn = lambda _x: (_ for _ in ()).throw(
         AssertionError("sparse path used below the cap")
     )
 
     J = ev.evaluate_jacobian(x)
-    assert called["dense"], "small model must use the dense Jacobian path"
+    assert called["dense"], "small model must use a dense (cap-bounded) Jacobian path, not sparse"
     assert J.shape == (ev._n_constraints, ev._n_variables)
