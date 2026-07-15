@@ -70,6 +70,8 @@ select = ["E", "F", "W", "I", "N", "UP", "B", "A", "C4", "SIM", "TCH"]
 "bench_engine.py" = ["N806"]
 # A/A_new/A_ub are LP constraint matrices in the CUT-1 cut-injection harness.
 "scripts/cut1_cmir_oracle_injection.py" = ["N803", "N806"]
+# A/A_f/A_s are LP constraint matrices in the G6 conditioning diagnosis probe.
+"scripts/g6_bchoco06_conditioning_probe.py" = ["N803", "N806", "B905"]
 
 [tool.coverage.run]
 source = ["benchmarks", "utils"]

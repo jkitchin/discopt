@@ -194,3 +194,69 @@ LP-conditioning/solver-robustness fix (Cause A), not a relaxation envelope;
 heatexch's LMTD AM/GM envelope is closed as a non-lever even on pole-excluded
 children. Both follow-ups, if taken, ship only through the CLAUDE.md §5
 bound-changing gate.
+
+---
+
+## G6 update — subnormal-flush hypothesis FALSIFIED (2026-07-15)
+
+Follow-up on Diagnosis 1 / Cause A (baron-gap-plan.md §10 "G6"). The G6 entry
+experiment tested a specific, cheap hypothesis for the bchoco06 LP
+non-convergence before committing to a Rust-layer numerics fix. It is falsified;
+recording per the performance-plan.md §6 house style (hypothesis → the
+measurement that settled it → verdict vs kill criterion → scoped follow-up).
+
+**Environment.** Worktree of `discopt` @ `b7ed54c` (post-#647, on `main`'s line);
+`JAX_PLATFORMS=cpu JAX_ENABLE_X64=1`; `bchoco06.nl` from the in-repo corpus. Root
+uniform relaxation assembled exactly as `g5_bchoco06_hole_probe.py`, byte-identical
+matrix solved by the shipped in-house Rust simplex (`backend="simplex"`, which
+already retries via `_solve_lp_warm_equilibrated` / geometric-mean Ruiz
+equilibration) and cross-checked with HiGHS (scipy `linprog`).
+
+**Hypothesis (G6).** The `-4.941e-324` subnormal lower bounds on `x^2`/`x*y` aux
+columns (interval-arithmetic underflow of a true `0`) plus any subnormal matrix
+coefficients are the conditioning poison. Flushing structural noise `|v| < 1e-300`
+to `0` in `(A_ub, b_ub, bounds)` before the solve lets the existing equilibration
+compress the *real* 1e10 range, and the in-house simplex then converges to the
+HiGHS bound (≈ 1.0). **Kill criterion:** if the flush does NOT make the simplex
+converge (the 1e10 side alone still stalls it), STOP — it is a deeper Rust
+linear-algebra/refactorization problem, not a cleanup pass.
+
+**The measurement that settled it.** bchoco06 root LP, one stage at a time:
+
+| stage of the matrix | A nonzero spread (max / min) | in-house simplex | HiGHS |
+|---|---|---|---|
+| raw (as shipped) | 1.0e10 / 4.9e-324 = **inf** | `iteration_limit`, None | optimal, **0.99998** |
+| subnormals flushed (`|v|<1e-300 → 0`) | 1.0e10 / 1.0e-10 = **1e20** | **`iteration_limit`, None** | optimal, 0.99998 |
+| flushed + Ruiz equilibrated (20/50/100 sweeps) | 1.95 / 1.56e-12 = **1.25e12** | **`iteration_limit`, None** | optimal, ~1.0 |
+
+- Subnormal count: **20** nonzeros in `A.data`, **29** in `col_lb`, 0 in `b`/`col_ub`.
+  Flushing *all* of them to 0 leaves the simplex at `iteration_limit`, bound None.
+- The subnormals are **not** the poison. After the flush the smallest nonzero is a
+  *genuine* McCormick coefficient `1e-10` (not a subnormal), and the real spread is
+  `1e20`. Geometric-mean (Ruiz, power-of-two) equilibration compresses this only to
+  a **residual `1.25e12`** and cannot go lower — 50 and 100 sweeps give the identical
+  `1.25e12`. That residual is the intrinsic ill-conditioning of the recursive-
+  McCormick envelope over degree-5 multilinear products on the wide/unbounded box,
+  which a diagonal rescaling cannot remove.
+- The raw Rust warm simplex returns `None` (iter-limit at its 100k-pivot cap / stall
+  guard, `crates/discopt-core/src/lp/simplex/`) on the equilibrated matrix, flushed
+  or not; the Neumaier–Shcherbina `safe_bound` side channel is also `None` — no
+  salvageable bound. HiGHS solves the identical raw / flushed / equilibrated matrix
+  to optimal ≈ 1.0.
+
+**Verdict — kill criterion MET; hypothesis FALSIFIED.** Flushing subnormals does
+not make the in-house simplex converge. The `-4.941e-324` bounds are a real
+interval-underflow artifact, but they are **not** the conditioning poison — the
+poison is the genuine `≥1e12` ill-conditioning that *survives* full geometric-mean
+equilibration, a matrix HiGHS's dual simplex handles (LU refactorization + Harris
+ratio test + pivoting tolerances) and the in-house Rust simplex does not. This is a
+**Rust linear-algebra / refactorization robustness defect** in
+`crates/discopt-core/src/lp/simplex/`, exactly the escalation branch baron-gap §10
+G6 named ("scaling does not recover a finite bound → escalate to a linear-algebra
+(refactorization/tolerance) fix with its own plan"). No band-aid shipped: a subnormal
+flush is (a) a proven no-op for convergence on the target class and (b) would add a
+threshold with no measured beneficiary — rejected per CLAUDE.md §3. Tracked in
+**issue #649** for a Rust-layer numerics fix (refactorization cadence / Markowitz
+pivoting tolerances / Harris ratio test), which will carry the full bound-changing
+gate + `cargo test -p discopt-core`. Reproduce with
+`discopt_benchmarks/scripts/g6_bchoco06_conditioning_probe.py`.

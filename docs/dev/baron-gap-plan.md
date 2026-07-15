@@ -464,6 +464,16 @@ equilibration); a subnormal-flush fix is being implemented + gated. G7
 
 ### G6 — in-house LP simplex conditioning (from G5's bchoco06 re-attribution)
 
+> **Entry experiment run 2026-07-15 — subnormal-flush sub-hypothesis FALSIFIED,
+> kill criterion MET → escalated to issue #649.** Flushing subnormal structural
+> noise (`|v|<1e-300 → 0`) does NOT make the in-house simplex converge; the genuine
+> `1e10` spread survives geometric-mean equilibration as a residual `~1.25e12`
+> condition the Rust simplex stalls on while HiGHS solves the identical matrix. No
+> band-aid shipped. Full record: `g5-family-d-diagnoses.md` §"G6 update"; probe
+> `discopt_benchmarks/scripts/g6_bchoco06_conditioning_probe.py`. The Rust
+> linear-algebra/refactorization fix is now **issue #649** (its own plan, full
+> bound-changing gate + `cargo test -p discopt-core`).
+
 **Hypothesis (evidence-backed, from `g5-family-d-diagnoses.md`).** bchoco06's
 "missing dual bound" is **not** an unbounded-relaxation hole — the same root
 relaxation solved by HiGHS returns a finite bound ~1.0, while the in-house
