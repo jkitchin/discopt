@@ -96,6 +96,15 @@ bound-only node. Measured: hda flag-ON → `bound = -1.80e10` (finite, `≤` opt
 certifying instances (alan, ex1221, nvs05) byte-identical. Tests:
 `python/tests/test_issue_517_numerical_dual_bound.py`.
 
+*Extension (#362, 2026-07-16):* the same stashed NS bound is also surfaced as
+`safe_bound` on an `optimal` generic-path solve (which computes no certificate
+of its own), closing the nvs05 taint-at-the-certification-edge class — see
+`docs/dev/nvs05-decline-taint-2026-07-16.md`. With the extension nvs05
+flag-ON is no longer byte-identical (it *certifies*: `optimal`, bound 5.47057).
+**Graduated default-ON with #362** (same doc, §Graduation: 65-instance panel
+0 lost / no loosening, differential GREEN + feasible-point 0 cuts,
+graduation_gate eligible=YES); `=0` restores the legacy no-rescue behavior.
+
 The mechanism: a valid *lower* bound needs only a dual point + directed rounding
 (Neumaier–Shcherbina), **not** a clean primal. When phase-2 drifts (audit
 `Bounds`/`Rows`) or breaks down, the engine still holds a basis whose dual

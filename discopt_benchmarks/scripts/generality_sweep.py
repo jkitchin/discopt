@@ -186,6 +186,15 @@ ARMS: dict[str, dict] = {
         "struct_attr": None,
         "regime": "bound_changing",
     },
+    # NS safe bound from the in-house simplex's own dual on numerically-failed
+    # node LPs (#517), also surfaced as ``safe_bound`` on the certificate-free
+    # generic path (#362): gives no-bound nodes a rigorous dual floor and lets
+    # decline-class nodes branch instead of tainting → ``bound_changing``.
+    "node_numerical_dual_bound": {
+        "env": {"DISCOPT_NODE_NUMERICAL_DUAL_BOUND": "1"},
+        "struct_attr": None,
+        "regime": "bound_changing",
+    },
     "all": {"env": dict(FLAGS_ON), "struct_attr": None, "regime": "bound_changing"},
 }
 
@@ -203,6 +212,8 @@ GRADUATION_ARMS = (
     "square_cost_gate",
     "lifted_fbbt",
     "alphabb_with_lp",
+    # #517/#362 NS dual safe bound, wired 2026-07-16
+    "node_numerical_dual_bound",
 )
 
 # correctness tolerance (matches conftest abs=1e-6, rel=1e-4)
