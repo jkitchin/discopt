@@ -46,10 +46,28 @@ assembly, never a new relaxation. Stop and root-cause.
   deferred to T2/T3 rather than forced here. **Done ✓** — new gate
   `csc_entry_matches_dense_on_panel` (status/nodes/obj/bound/incumbent all identical)
   green; full `cargo test -p discopt-core` 450 pass; `discopt-python` builds.
+### Gate strengthening (done during T2 setup — §0 kill/re-scope)
+
+The T1 dense-vs-CSC test (`csc_entry_matches_dense_on_panel`) is insufficient as the
+driver-wide gate: T2/T3 change the driver internals for BOTH entry points, so after
+conversion "dense" and "CSC" move together and that test can't catch a regression
+vs the *original* behavior. Added **`driver_matches_golden`** — golden status / obj /
+bound / **node count** / **lp_iters** captured from the pre-conversion driver.
+`lp_iters` is the sensitive discriminator (a different root-solve pivot path drifts
+it even at a single B&B node). Panel note: the current cases all solve at the ROOT
+(nodes=1), so `lp_iters` is the real bit-identity signal for T2; consider adding a
+genuinely-branching instance before/with T3.
+
 - [ ] **T2 — sparse root cold solve.** Replace `solve_lp_root`'s
-  `dual_slack_basis(lp.a,..)`+`solve_lp` with a CSC cold two-phase (adapt the
-  `solve_lp_cols_*` warm-fallback family to a cold entry). **Done:** root bound
-  unchanged on the T0 panel; no dense `a_w` touched on the root path.
+  `dual_slack_basis(lp.a,..)`+`solve_lp` with a CSC path. **RE-SCOPED (risk):** it is
+  NOT a clean swap — `solve_lp` (dense) does internal `ScaledLp` equilibration + a
+  dual-slack warm start; `solve_lp_cols` (CSC) may take a different pivot path →
+  different basis → `lp_iters`/tree drift. To stay bit-identical, mirror the dense
+  logic in CSC (CSC dual-slack warm start where it qualifies, then a CSC cold
+  two-phase) OR confirm `solve_lp_cols` reproduces `solve_lp`'s basis exactly. If
+  neither holds, this is a falsification: stop and re-scope the invariant (bound-only
+  vs bit-identical) before proceeding. **Done:** `driver_matches_golden` still green
+  with no dense `a_w` on the root path.
 - [ ] **T3 — sparse scaling + cut-row append.** `Scaling::from_matrix` CSC variant;
   GMI cut rows appended to the CSC (grow col_ptr/row_idx/vals) instead of `a_w`.
   **Done:** cuts-firing panel instance bit-identical; `a_w` no longer constructed.

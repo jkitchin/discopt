@@ -2932,6 +2932,61 @@ mod sparse_milp_diff {
         }
     }
 
+    /// Golden lock on the CURRENT driver's per-instance solve — status, objective,
+    /// bound, node count, and simplex pivot count. This is the **driver-wide**
+    /// bit-identity gate for the sparse conversion: T2/T3 change the driver internals
+    /// for BOTH the dense and CSC entry points, so `csc_entry_matches_dense_on_panel`
+    /// (dense-vs-CSC) alone can no longer catch a regression against the *original*
+    /// behavior — after conversion both sides move together. `lp_iters` is the
+    /// sensitive discriminator: a different root-solve pivot path drifts it even when
+    /// the B&B tree is a single node. A change to any value here is a red flag — the
+    /// sparse path is a pure representation change and must reproduce these exactly.
+    #[test]
+    fn driver_matches_golden() {
+        for case in panel() {
+            let r = case.solve_dense();
+            let (status, obj, bound, nodes, iters): (MilpStatus, f64, f64, usize, usize) =
+                match case.name {
+                    "pure_lp" => (MilpStatus::Optimal, -1.0, -1.0, 1, 0),
+                    "binary_knapsack" => (MilpStatus::Optimal, -10.0, -10.0, 1, 1),
+                    "general_integer" => (MilpStatus::Optimal, -3.0, -3.0, 1, 1),
+                    "infeasible" => (MilpStatus::Infeasible, f64::INFINITY, f64::INFINITY, 0, 0),
+                    "unbounded" => (
+                        MilpStatus::Unbounded,
+                        f64::INFINITY,
+                        f64::NEG_INFINITY,
+                        1,
+                        0,
+                    ),
+                    "cuts_firing_knapsack" => (MilpStatus::Optimal, -16.0, -16.0, 1, 1),
+                    other => panic!("unhandled case {other}"),
+                };
+            assert_eq!(r.status, status, "{}: status", case.name);
+            assert_eq!(r.nodes, nodes, "{}: nodes", case.name);
+            assert_eq!(r.lp_iters, iters, "{}: lp_iters", case.name);
+            if obj.is_finite() {
+                assert!(
+                    (r.obj - obj).abs() < 1e-9,
+                    "{}: obj {} != {obj}",
+                    case.name,
+                    r.obj
+                );
+            } else {
+                assert_eq!(r.obj, obj, "{}: obj", case.name);
+            }
+            if bound.is_finite() {
+                assert!(
+                    (r.bound - bound).abs() < 1e-9,
+                    "{}: bound {} != {bound}",
+                    case.name,
+                    r.bound
+                );
+            } else {
+                assert_eq!(r.bound, bound, "{}: bound", case.name);
+            }
+        }
+    }
+
     /// Determinism: re-solving is bit-identical. This is exactly the property the
     /// CSC path must satisfy against the dense path at T1, so the harness proves the
     /// gate is meaningful (the dense driver itself is reproducible).
