@@ -40,6 +40,125 @@ under-estimate (and the Farkas test a rigorous proof). Mirrors the constant in
 
 _INF = 1e20  # discopt's effective-infinity sentinel for free variable bounds.
 
+_U64 = 2.0**-53  # float64 unit roundoff
+
+
+def _gamma(p):
+    """Higham's ``γ_p = p·u/(1−p·u)``: rigorous relative bound on the forward
+    error of a length-``p`` float64 dot product / recursive sum (Higham 2002,
+    Lemma 3.1 — valid for ANY summation order, so numpy's pairwise reduction is
+    covered). ``p`` may be an ndarray."""
+    pu = np.asarray(p, dtype=np.float64) * _U64
+    return pu / (1.0 - pu)
+
+
+def _safe_lp_lower_bound_sharp(
+    y: np.ndarray,
+    c: np.ndarray,
+    a_std,
+    b: np.ndarray,
+    lb: np.ndarray,
+    ub: np.ndarray,
+) -> Optional[float]:
+    """Sharp-margin Neumaier–Shcherbina safe bound (#309, flag-gated).
+
+    Same weak-duality bound as :func:`_safe_lp_lower_bound_std` — ``g(y) = bᵀy +
+    Σ_k min_{z_k∈box} rc_k z_k`` is valid for ANY ``y`` — but instead of the flat
+    ``1e-9``-relative margin it subtracts a *provably sufficient* forward-error
+    bound assembled from the data:
+
+    * per-column reduced-cost error ``E_k ≤ γ_{nnz_k+1}·(|c_k| + (|A|ᵀ|y|)_k)``
+      (dot product + one subtraction, Higham 2002 §3.1);
+    * a column whose computed ``rc_k`` is within ``E_k`` of zero has an
+      *uncertain sign*: its box term is enclosed by the four interval corners
+      ``{rc_k∓E_k}×{lb_k, ub_k}`` (rigorous, no side selection needed). If such
+      a column still has an infinite side after FBBT the enclosure is ``−∞`` and
+      the function abstains — the legacy path silently contributes 0 there,
+      which a flat margin cannot cover (latent soundness gap, recorded in
+      ``docs/dev/ns-sharp-margin-2026-07-16.md``);
+    * summation errors ``γ_n·Σ|term|`` and ``γ_{m+1}·Σ|b_j y_j|``.
+
+    The assembled margin is inflated by 1.0625 (exact power-of-two headroom) to
+    dominate the O(u²) terms Higham's first-order gammas drop and the float64
+    evaluation of the margin expression itself. On the gear4 piece LPs this
+    replaces a 2.9e-4 loss with ~1e-6 (measured; see the dev doc §2).
+    """
+    y = np.asarray(y, dtype=np.float64)
+    if y.size == 0 or not np.all(np.isfinite(y)):
+        return None
+    lb = np.where(np.asarray(lb, dtype=np.float64) <= -_INF, -np.inf, lb)
+    ub = np.where(np.asarray(ub, dtype=np.float64) >= _INF, np.inf, ub)
+    c = np.asarray(c, dtype=np.float64)
+    a_csc = a_std if sp.issparse(a_std) else sp.csc_matrix(np.asarray(a_std, dtype=np.float64))
+    a_csc = a_csc.tocsc()
+    n = a_csc.shape[1]
+    rc = c - np.asarray(a_csc.T @ y).ravel()
+    if not np.all(np.isfinite(rc)):
+        return None
+
+    abs_a = a_csc.copy()
+    abs_a.data = np.abs(abs_a.data)
+    aty_abs = np.asarray(abs_a.T @ np.abs(y)).ravel()
+    col_nnz = np.diff(a_csc.indptr)
+    err_rc = _gamma(col_nnz + 1) * (np.abs(c) + aty_abs)
+
+    cert_pos = rc > err_rc
+    cert_neg = rc < -err_rc
+    uncertain = ~(cert_pos | cert_neg)
+    # FBBT-recover a finite valid box wherever the selected/enclosed side is
+    # infinite (superset of the legacy trigger: uncertain columns need BOTH
+    # sides). FBBT bounds still contain the feasible set, so g stays ≤ p*.
+    need = (
+        (cert_pos & ~np.isfinite(lb))
+        | (cert_neg & ~np.isfinite(ub))
+        | (uncertain & ~(np.isfinite(lb) & np.isfinite(ub)))
+    )
+    if need.any():
+        lb, ub = _fbbt_eq_bounds(a_csc, np.asarray(b, dtype=np.float64), lb, ub)
+
+    term = np.zeros_like(rc)
+    err_term = np.zeros_like(rc)
+    term[cert_pos] = rc[cert_pos] * lb[cert_pos]
+    term[cert_neg] = rc[cert_neg] * ub[cert_neg]
+    # Certain-sign columns: |true term − computed| ≤ E_k·|side| + u·|computed|.
+    side = np.zeros_like(rc)
+    side[cert_pos] = lb[cert_pos]
+    side[cert_neg] = ub[cert_neg]
+    cert = cert_pos | cert_neg
+    err_term[cert] = err_rc[cert] * np.abs(side[cert]) + _U64 * np.abs(term[cert])
+    if uncertain.any():
+        # Interval-corner enclosure of min_{z∈box} rc_true·z over rc_true ∈
+        # [rc−E, rc+E]. np.minimum propagates the −inf of an unbounded side.
+        rl, rh = rc[uncertain] - err_rc[uncertain], rc[uncertain] + err_rc[uncertain]
+        lo_u, hi_u = lb[uncertain], ub[uncertain]
+        with np.errstate(invalid="ignore"):  # 0·±inf → nan, handled below
+            corners = np.minimum(np.minimum(rl * lo_u, rl * hi_u), np.minimum(rh * lo_u, rh * hi_u))
+        # 0·±inf = nan in IEEE: an exact-zero interval edge on an infinite side
+        # bounds a term that is exactly 0 from that corner; treat nan as that
+        # corner not binding only when the WHOLE interval is the point 0.
+        point_zero = (rl == 0.0) & (rh == 0.0)
+        corners = np.where(point_zero, 0.0, corners)
+        if not np.all(np.isfinite(corners)):
+            return None
+        term[uncertain] = corners
+        err_term[uncertain] = 2.0 * _U64 * np.abs(corners)
+    if not np.all(np.isfinite(term)):
+        return None
+
+    b64 = np.asarray(b, dtype=np.float64)
+    by = float(b64 @ y)
+    s = float(term.sum())
+    g = by + s
+    if not np.isfinite(g):
+        return None
+    margin = (
+        float(err_term.sum())
+        + float(_gamma(max(n, 1)) * np.abs(term).sum())
+        + float(_gamma(y.size + 1) * (np.abs(b64) * np.abs(y)).sum())
+        + 4.0 * _U64 * (abs(by) + abs(s) + abs(g))
+    ) * 1.0625
+    return g - margin
+
 
 class LpWarmCert(NamedTuple):
     """Verified-certificate side-channel from :func:`solve_lp_warm_std`.
@@ -218,6 +337,25 @@ def _safe_lp_lower_bound_std(
     return g - margin
 
 
+def _safe_lp_lower_bound(
+    y: np.ndarray,
+    c: np.ndarray,
+    a_std,
+    b: np.ndarray,
+    lb: np.ndarray,
+    ub: np.ndarray,
+) -> Optional[float]:
+    """Dispatch to the sharp-margin NS evaluation when ``ns_sharp_margin`` is on
+    (#309), else the legacy flat-margin one. Both are rigorous lower bounds; the
+    sharp one is tighter and additionally abstains on sign-uncertain columns
+    with an unbounded side (see :func:`_safe_lp_lower_bound_sharp`)."""
+    from discopt.solver_tuning import current as _tuning_current
+
+    if _tuning_current().ns_sharp_margin:
+        return _safe_lp_lower_bound_sharp(y, c, a_std, b, lb, ub)
+    return _safe_lp_lower_bound_std(y, c, a_std, b, lb, ub)
+
+
 def _farkas_certified_std(
     ray: np.ndarray,
     a_std: np.ndarray,
@@ -238,7 +376,7 @@ def _farkas_certified_std(
         return False
     zeros_c = np.zeros(a_std.shape[1], dtype=np.float64)
     for sign in (1.0, -1.0):
-        g0 = _safe_lp_lower_bound_std(sign * ray, zeros_c, a_std, b, lb, ub)
+        g0 = _safe_lp_lower_bound(sign * ray, zeros_c, a_std, b, lb, ub)
         if g0 is not None and g0 > 0.0:
             return True
     return False
@@ -496,7 +634,7 @@ def solve_lp_warm_std(
             # ``objective`` stays the raw vertex value; ``bound`` is the certified
             # one (the safe bound, clamped to never exceed the raw value, since a
             # well-conditioned raw value <= safe bound is itself sound and tighter).
-            safe = _safe_lp_lower_bound_std(dual, c_std, a_std, b_vec, lb_std, ub_std)
+            safe = _safe_lp_lower_bound(dual, c_std, a_std, b_vec, lb_std, ub_std)
             bound = float(obj) if safe is None else min(float(obj), float(safe))
             return (
                 MILPResult(
@@ -539,7 +677,7 @@ def solve_lp_warm_std(
         # only as a last-resort floor when nothing else produced a bound.
         safe = None
         if dual is not None and np.size(dual):
-            safe = _safe_lp_lower_bound_std(dual, c_std, a_std, b_vec, lb_std, ub_std)
+            safe = _safe_lp_lower_bound(dual, c_std, a_std, b_vec, lb_std, ub_std)
         return (
             None,
             None,

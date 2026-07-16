@@ -96,6 +96,20 @@ class SolverTuning:
     loosens it, never lifts it above the optimum; never fathoms on its own. No
     external solver (the removed #517 HiGHS rescue is NOT resurrected)."""
 
+    # --- #309 sharp NS safe-bound margin ---------------------------------------
+    ns_sharp_margin: bool = field(
+        default_factory=lambda: _env_flag("DISCOPT_NS_SHARP_MARGIN", default=False)
+    )
+    """Replace the flat ``1e-9``-relative Neumaier–Shcherbina evaluation margin
+    with a rigorous forward-error bound computed from the actual data (Higham
+    dot-product gammas + interval corners on sign-uncertain reduced costs)
+    (``DISCOPT_NS_SHARP_MARGIN``, default OFF — bound-changing regime, #309).
+    On magnitude ~1e5 decompositions (gear4 piece LPs) the flat margin costs
+    2.9e-4 of every certified LP bound; the sharp margin costs ~1e-6. The sharp
+    path also *abstains* when a sign-uncertain reduced cost sits next to an
+    unbounded box side (the legacy path silently contributes 0 there), so it can
+    return ``None`` where the legacy path returned a value — never the reverse."""
+
     # --- RLT (reformulation-linearization) families ---------------------------
     rlt: bool = field(default_factory=lambda: _env_flag("DISCOPT_RLT", default=False))
     """Legacy whole-relaxation RLT toggle (``DISCOPT_RLT``). The ``rlt=`` argument

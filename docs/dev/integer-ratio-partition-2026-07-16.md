@@ -83,7 +83,12 @@ deviation (1.6434284739…), but the **rigorous Neumaier–Shcherbina safe bound
 from the Rust simplex duals loses a *bit-identical* 2.8856e-4 on this
 1e6-scaled row — measured invariant to piece width, box depth, `s,t` widths,
 and geometric-mean equilibration, so it is the dual vector's residual, not
-conditioning of the piece. Consequence: the dive bound (1.64314) sits 1.25e-4
+conditioning of the piece. **[FALSIFIED 2026-07-16, same day: the loss is the
+flat `1e-9`-relative evaluation margin on a ~2.9e5-magnitude dual
+decomposition — the dual residual is only 1.0e-6. The invariance observations
+were the signature of a magnitude-scaled constant, not a residual. Root cause,
+fix (`DISCOPT_NS_SHARP_MARGIN`), and measurements in
+`ns-sharp-margin-2026-07-16.md`; no dual refinement was needed.]** Consequence: the dive bound (1.64314) sits 1.25e-4
 below the 1e-4-relative certification threshold at the optimum (1.64326), so
 nodes containing the optimal ratio never fathom by gap — certification happens
 by exhaustion. Measured ceiling: with the optimal incumbent injected at node 1
