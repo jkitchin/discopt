@@ -84,16 +84,24 @@ ship under the bound-neutral regime (Dev-Philosophy #5): `node_count` and
 certified `objective` **exactly unchanged** on the certifying panel + `cargo test
 -p discopt-core`. Each is its own PR, not a rider on this investigation.
 
-**(A) Safe dual bound from the in-house basis (most tractable, additive).**
-A valid *lower* bound needs only a dual point + directed rounding
-(Neumaier–Shcherbina), **not** a clean primal. When phase-2 drifts (audit
-`Bounds`/`Rows`) or breaks down, the engine still holds a basis and can export its
-dual `y = B⁻ᵀc_B`; feeding that through the in-repo NS certificate
-(`milp_simplex._safe_lp_lower_bound_std`, already used elsewhere) would attach a
-sound (if loose) bound where today there is none — architecture-respecting (own
-dual, no HiGHS). *Risk to test first:* from a fully broken phase-2 basis the dual
-may yield only `-inf`; viability needs one instrumented probe (export the dual on
-the `Numerical`/audit-fail path and check the NS bound is finite on hda).
+**(A) Safe dual bound from the in-house basis (most tractable, additive) —
+VIABILITY CONFIRMED.** A valid *lower* bound needs only a dual point + directed
+rounding (Neumaier–Shcherbina), **not** a clean primal. When phase-2 drifts
+(audit `Bounds`/`Rows`) or breaks down, the engine still holds a basis and can
+export its dual `y = B⁻ᵀc_B`; feeding that through the in-repo NS certificate
+(`milp_simplex._safe_lp_lower_bound_std`, already used elsewhere) attaches a sound
+bound where today there is none — architecture-respecting (own dual, no HiGHS).
+
+*Probe result (env-gated `DISCOPT_LP_NUMERICAL_DUAL`, since reverted):* on hda's
+`Numerical` root-LP solves the exported dual yields a **finite** NS safe bound —
+measured `-1.447e6` and `-2.650e8`, both valid (`≤` optimum `-5964.53`). So the
+in-house dual survives the phase-2 breakdown well enough to certify hda's **first
+finite dual bound**, with no HiGHS. *Caveat:* the bound is **loose** (the basis is
+drifted), so it lifts `best_bound` off the `1e30` sentinel and satisfies #517's
+literal acceptance but gives little fathoming power on its own — a tight, useful
+bound still needs (B). To ship, wire the numerical-path dual → NS bound behind a
+flag (bound-changing regime, default OFF) with the differential-bound +
+feasible-point + no-fathom gates.
 
 **(B) Phase-2 / factorization robustness (the deeper fix).** Keep phase-2 from
 drifting/breaking down on the ill-conditioned basis — more frequent
