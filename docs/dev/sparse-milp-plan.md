@@ -35,11 +35,17 @@ assembly, never a new relaxation. Stop and root-cause.
   reference-values, determinism (dense re-solve bit-identical incl. lp_iters), and
   CSC-nnz-round-trips-dense. **Done ✓** — 3 tests green; full `cargo test
   -p discopt-core` 449+ pass.
-- [ ] **T1 — CSC-carrying driver core.** `solve_milp_csc(csc: SparseCols, m, n, c,
-  l, u, b, obj_const, opts)` that threads `csc` where `SparseCols::from_dense(&a_w)`
-  is today and passes zero-length `.a` to node `LpView`s. Root solve / cuts /
-  scaling may still build a dense `a_w` from the CSC *internally* for now (correct,
-  not yet memory-fixed). **Done:** T0 panel bit-identical dense vs CSC path.
+- [x] **T1 — CSC-carrying driver core.** Added `pub fn solve_milp_csc(csc, m, n, c,
+  l, u, b, obj_const, opts) -> MilpResult` (the entry the Python binding calls at T4)
+  + a `csc_to_dense` bridge. **T1 keeps a dense `a_w` internally** by reconstructing
+  the matrix at entry and calling the reference `solve_milp` — so it is provably
+  bit-identical but does NOT yet fix the memory blow-up (that is T2/T3, which remove
+  the densification). Note: threading the CSC *through* the batched-cuts loop is
+  entangled with per-batch scaling (`Scaling::from_matrix(&a_w)` →
+  `SparseCols::from_dense(scaled a_w)`) and cut-row appends, so it is correctly
+  deferred to T2/T3 rather than forced here. **Done ✓** — new gate
+  `csc_entry_matches_dense_on_panel` (status/nodes/obj/bound/incumbent all identical)
+  green; full `cargo test -p discopt-core` 450 pass; `discopt-python` builds.
 - [ ] **T2 — sparse root cold solve.** Replace `solve_lp_root`'s
   `dual_slack_basis(lp.a,..)`+`solve_lp` with a CSC cold two-phase (adapt the
   `solve_lp_cols_*` warm-fallback family to a cold entry). **Done:** root bound

@@ -2163,6 +2163,55 @@ fn warm_root_opts(opts: &SimplexOptions, m: usize, n: usize) -> SimplexOptions {
     o
 }
 
+/// Reconstruct the dense row-major `m×n` matrix from a column-major
+/// [`SparseCols`]. **Temporary T1 bridge** (docs/dev/sparse-milp-plan.md): the CSC
+/// entry densifies here and calls the reference dense driver so the CSC path is
+/// provably bit-identical to the dense path, while T2/T3 sparsify the driver
+/// internals (root solve, scaling, cut appends) and remove this densification. It
+/// therefore does NOT yet fix the memory blow-up on a large sparse relaxation —
+/// that is T3's job — it only establishes the entry point and its differential gate.
+fn csc_to_dense(csc: &SparseCols, m: usize, n: usize) -> Vec<f64> {
+    let mut a = vec![0.0; m * n];
+    for j in 0..n {
+        let (rows, vals) = csc.col(j);
+        for (&i, &v) in rows.iter().zip(vals) {
+            a[i * n + j] = v;
+        }
+    }
+    a
+}
+
+/// CSC-input entry to the MILP branch-and-bound driver
+/// (docs/dev/sparse-milp-plan.md, T1). Identical contract and result to
+/// [`solve_milp`], but the equality-constraint matrix arrives column-major as a
+/// [`SparseCols`] (`m` rows, `n` columns) so a large *sparse* relaxation need not be
+/// densified by the caller / Python boundary. T1 bridges to the dense driver via
+/// [`csc_to_dense`]; the differential harness gates it bit-identical to
+/// [`solve_milp`] on the panel, and T2/T3 remove the internal densification so the
+/// sparse matrix flows through untouched.
+pub fn solve_milp_csc(
+    csc: &SparseCols,
+    m: usize,
+    n: usize,
+    c: &[f64],
+    l: &[f64],
+    u: &[f64],
+    b: &[f64],
+    obj_const: f64,
+    opts: &MilpOptions,
+) -> MilpResult {
+    let a = csc_to_dense(csc, m, n);
+    let lp = LpView {
+        a: &a,
+        m,
+        n,
+        c,
+        l,
+        u,
+    };
+    solve_milp(&lp, b, obj_const, opts)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2720,12 +2769,25 @@ mod sparse_milp_diff {
             solve_milp(&self.dense_view(), &self.b, 0.0, &self.opts())
         }
 
-        /// CSC view of this instance's matrix. T1 will feed this to the CSC driver
-        /// entry; kept here so the harness already exercises `from_dense`/`from_csc`
-        /// round-tripping the same nonzeros the dense path sees.
-        #[allow(dead_code)]
+        /// CSC view of this instance's matrix, fed to the CSC driver entry.
         fn csc(&self) -> SparseCols {
             SparseCols::from_dense(&self.a, self.m, self.n)
+        }
+
+        /// Solve through the T1 CSC entry point [`solve_milp_csc`].
+        fn solve_csc(&self) -> MilpResult {
+            let sp = self.csc();
+            solve_milp_csc(
+                &sp,
+                self.m,
+                self.n,
+                &self.c,
+                &self.l,
+                &self.u,
+                &self.b,
+                0.0,
+                &self.opts(),
+            )
         }
     }
 
@@ -2880,6 +2942,34 @@ mod sparse_milp_diff {
             let r2 = case.solve_dense();
             assert_same(case.name, &r1, &r2);
             assert_eq!(r1.lp_iters, r2.lp_iters, "{}: lp_iters drift", case.name);
+        }
+    }
+
+    /// T1 gate: the CSC entry point [`solve_milp_csc`] is bit-identical to the
+    /// dense [`solve_milp`] on every panel case — same status, node count, objective,
+    /// bound, and incumbent length. Any drift means the CSC path perturbed the
+    /// solve, which would corrupt a dual bound (the whole point of the gate).
+    #[test]
+    fn csc_entry_matches_dense_on_panel() {
+        for case in panel() {
+            let dense = case.solve_dense();
+            let csc = case.solve_csc();
+            assert_same(case.name, &dense, &csc);
+            assert_eq!(
+                dense.x.len(),
+                csc.x.len(),
+                "{}: incumbent length",
+                case.name
+            );
+            if dense.status == MilpStatus::Optimal {
+                for (k, (xd, xc)) in dense.x.iter().zip(csc.x.iter()).enumerate() {
+                    assert!(
+                        (xd - xc).abs() < 1e-9,
+                        "{}: incumbent[{k}] drift {xd} {xc}",
+                        case.name
+                    );
+                }
+            }
         }
     }
 
