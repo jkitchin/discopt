@@ -2292,6 +2292,12 @@ def _register_ratio_of_originals(ctx: _Builder, node: CNode, w: int) -> None:
         ef = float(e)
         if not ef.is_integer() or ef == 0.0:
             return
+        # Gate on the child KIND before touching its rep: ``ctx.rep`` builds the
+        # child's envelope on first call, so probing a composite child here would
+        # reorder aux/row creation relative to the pre-change build (a byte-level
+        # layout change on the default path). A bare original is always safe.
+        if getattr(child, "kind", None) != "var":
+            return
         col = ctx.single_orig_col(ctx.rep(child))
         if col is None:
             return
