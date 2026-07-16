@@ -765,7 +765,9 @@ def _compute_alphabb_bound(evaluator, model, alphabb_expr, node_lb, node_ub):
     return float(tangent_min - 1e-9 * (1.0 + abs(L_hat) + abs(tangent_min)))
 
 
-def _objective_is_convex_quadratic(model: Model, evaluator, n_vars: int) -> bool:
+def _objective_is_convex_quadratic(
+    model: Model, evaluator, n_vars: int, remaining_budget: float | None = None
+) -> bool:
     """Whether the internally-minimized objective is a convex quadratic.
 
     True iff (a) no term in the model is higher than bilinear/square — so the
@@ -784,6 +786,14 @@ def _objective_is_convex_quadratic(model: Model, evaluator, n_vars: int) -> bool
     The eigenvalue test runs on the *evaluator's* objective Hessian, which is the
     internally-minimized objective (negated for a maximize), so PSD here means the
     minimized objective is convex regardless of the user's sense.
+
+    ``remaining_budget`` (seconds): when given, the PSD test is *skipped* (returns
+    False, abstaining to the McCormick bound) if the estimated first-time dense
+    objective-Hessian XLA compile would not fit the remaining time budget. That
+    compile is uninterruptible and super-linear in the objective's quadratic term
+    count, so on a large quadratic form (e.g. qap: 21 424 terms, ~48 s objective
+    compile) it would otherwise blow the ``time_limit`` (#654). The convex bound is
+    a *tightening only*, so abstaining is always sound — the dual bound stands.
     """
     if model._objective is None or n_vars == 0:
         return False
@@ -798,7 +808,7 @@ def _objective_is_convex_quadratic(model: Model, evaluator, n_vars: int) -> bool
         # the (non-constant) curvature, an unsound over-claim.
         # ``monomial`` is an iterable of ``(var, power)`` (a list of pairs or a
         # dict); pull the powers robustly across either shape.
-        _monos = t.monomial.items() if hasattr(t.monomial, "items") else t.monomial
+        _monos = list(t.monomial.items() if hasattr(t.monomial, "items") else t.monomial)
         if (
             t.trilinear
             or t.multilinear
@@ -809,6 +819,28 @@ def _objective_is_convex_quadratic(model: Model, evaluator, n_vars: int) -> bool
             or any(int(deg) > 2 for _, deg in _monos)
         ):
             return False
+
+        # #654 budget gate: the PSD test below forces the dense objective-Hessian
+        # compile (``jacfwd∘jacfwd``), whose XLA codegen is super-linear in the
+        # objective's quadratic term count and uninterruptible once entered. On a
+        # large quadratic form that single compile dwarfs the whole time budget, so
+        # skip the (tightening-only) convex bound when it will not fit. The term
+        # count is a model-wide upper bound on the objective's quadratic nnz —
+        # conservative, so over-estimating only abstains (sound).
+        if remaining_budget is not None:
+            from discopt._jax.nlp_evaluator import estimate_dense_obj_hessian_compile_s
+
+            _obj_quad_nnz = len(t.bilinear) + sum(1 for _, deg in _monos if int(deg) == 2)
+            _compile_est = estimate_dense_obj_hessian_compile_s(_obj_quad_nnz)
+            if _compile_est > remaining_budget:
+                logger.info(
+                    "convex-objective node bound skipped: dense obj-Hessian compile "
+                    "~%.1fs (%d quad terms) exceeds remaining budget %.1fs (#654)",
+                    _compile_est,
+                    _obj_quad_nnz,
+                    remaining_budget,
+                )
+                return False
         lb = np.array([v.lb for v in model._variables for _ in range(v.size)], dtype=np.float64)
         ub = np.array([v.ub for v in model._variables for _ in range(v.size)], dtype=np.float64)
         lb_f = np.where(np.isfinite(lb), lb, -1.0)
@@ -4995,7 +5027,7 @@ def solve_model(
     # hyperplane recovers an almost-tight, rigorous bound at each node. Engaged
     # even when a McCormick LP relaxer is present (the LP is the loose source).
     _use_convex_obj_bound = (not _model_is_convex) and _objective_is_convex_quadratic(
-        model, evaluator, n_vars
+        model, evaluator, n_vars, remaining_budget=_remaining_budget()
     )
     if _use_convex_obj_bound:
         logger.debug("convex-objective node bound enabled (n_vars=%d)", n_vars)

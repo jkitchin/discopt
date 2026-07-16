@@ -99,9 +99,57 @@ def estimate_hessian_compile_s(n_vars: int, hessian_nnz: int, use_sparse: bool) 
     heuristic (always sound) and never touches the dual bound.
     """
     if not use_sparse:
-        return _HESSIAN_COMPILE_DENSE_S
+        # Dense ``jacfwd∘jacfwd`` path. The flat constant held only because the F4
+        # measurements covered dense on TINY objectives (n<=66). A large dense
+        # Hessian (a big quadratic form like qap, hessian_nnz~43k) compiles for
+        # tens of seconds — super-linear in the term count — so size the dense
+        # estimate too (#654). ``hessian_nnz`` counts matrix nonzeros (off-diagonal
+        # entries appear twice); halve it to the distinct-quadratic-term count the
+        # dense-objective model is calibrated on.
+        return estimate_dense_obj_hessian_compile_s(hessian_nnz // 2)
     # Sparse compressed-HVP path: unpredictable and potentially budget-dwarfing.
     return _HESSIAN_COMPILE_SPARSE_FLOOR_S
+
+
+# --- Dense OBJECTIVE-Hessian compile-cost model (#654 qap overrun) ---------------
+# ``estimate_hessian_compile_s`` above models the LAGRANGIAN Hessian, whose dense
+# branch is a flat small constant because it was fit only on tiny-objective
+# instances (tls2 n=37, fac2 n=66 obj). It is BLIND to the dense OBJECTIVE Hessian
+# ``jax.jacfwd(jax.jacfwd(obj_fn))`` that ``_objective_is_convex_quadratic`` forces:
+# that kernel's XLA codegen is super-linear in the number of quadratic cross-terms
+# of the objective, and on a large quadratic form it dwarfs the whole time budget
+# uninterruptibly.
+#
+# Measured (M-series arm64, JAX 0.10.2), first dense-objective-Hessian compile vs
+# the objective's quadratic nnz (distinct x_i·x_j / x_i^2 terms):
+#     instance   obj_quad_nnz   compile_s
+#     fac2              972        0.15
+#     qap            21 424       48+     (gradient compile alone > 150s)
+# 22x more nnz -> ~320x compile (empirical exponent ~1.87): unmistakably
+# super-linear. As with the sparse floor this is deliberately CONSERVATIVE, not a
+# point predictor — it only gates entry into the convex-objective node bound (a
+# bound *tightening*, never a validity source), so over-estimating merely falls
+# back to the McCormick relaxation (sound) and never touches the dual bound.
+_DENSE_OBJ_HESS_CHEAP_NNZ = 1500  # below this the dense obj-Hessian compile is trivially cheap
+_DENSE_OBJ_HESS_REF_NNZ = 1500  # ratio anchor for the super-linear growth term
+
+
+def estimate_dense_obj_hessian_compile_s(obj_quad_nnz: int) -> float:
+    """Conservative estimate of the first dense OBJECTIVE-Hessian XLA compile (s).
+
+    ``obj_quad_nnz`` is the count of distinct quadratic terms in the objective
+    (bilinear cross terms + squares); the dense ``jacfwd∘jacfwd`` second-derivative
+    graph — and hence its XLA codegen time — grows super-linearly in that count.
+    Below :data:`_DENSE_OBJ_HESS_CHEAP_NNZ` the compile is trivially cheap
+    (constant). Above it, a quadratic-in-nnz growth term is used; the exponent 2.0
+    slightly over-estimates the measured ~1.87 on purpose, so the value is an upper
+    bound the budget gate can trust. Over-estimating only skips the convex-objective
+    *tightening* (sound); it never affects the dual bound or the returned optimum.
+    """
+    if obj_quad_nnz <= _DENSE_OBJ_HESS_CHEAP_NNZ:
+        return _HESSIAN_COMPILE_DENSE_S
+    ratio = float(obj_quad_nnz) / float(_DENSE_OBJ_HESS_REF_NNZ)
+    return _HESSIAN_COMPILE_DENSE_S * ratio * ratio
 
 
 def evaluator_fingerprint(model: Model) -> tuple:

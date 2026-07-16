@@ -65,9 +65,11 @@ import numpy as np
 from discopt.modeling.core import (
     BinaryOp,
     Constant,
+    CustomCall,
     Expression,
     FunctionCall,
     IndexExpression,
+    MatMulExpression,
     Model,
     Parameter,
     SumExpression,
@@ -83,6 +85,68 @@ from .interval import Interval
 # once avoids re-allocating tiny 0-d arrays in every chain-rule step.
 _ONE = Interval.point(1.0)
 _TWO = Interval.point(2.0)
+
+
+class IntervalHessianTooLarge(ValueError):
+    """Raised when an expression's DAG exceeds the interval-Hessian node budget.
+
+    The interval-Hessian walk is a pure-numpy, per-node chain-rule pass; its wall
+    cost is ~linear in the DAG node count but with a large numpy-scalar constant
+    (~0.5 ms/node), so a body with >100k nodes (e.g. qap's 21 424-term quadratic
+    objective, ~124k nodes) runs for over a minute and is uninterruptible — blowing
+    the solver's ``time_limit`` (#654). A ``ValueError`` subclass so the existing
+    ``except ValueError`` abstention paths (``certify_convex``, the McCormick
+    Hessian refinement) catch it and fall back soundly.
+    """
+
+
+# Node-count ceiling for :func:`interval_hessian`. Above this the walk abstains
+# (raises :class:`IntervalHessianTooLarge`) rather than run a minute-plus
+# uninterruptible pass. The interval Hessian is only ever a *bound tightening*
+# (convexity proof / alphaBB / McCormick refinement); refusing it routes callers
+# to their sound looser fallback (spatial B&B, term-wise McCormick), so the
+# ceiling never affects a dual bound's validity. Set well above any normal
+# convex-body DAG (hundreds–low-thousands of nodes) and far below the pathological
+# regime. A purely quadratic body of any size still certifies through the exact
+# PSD-on-Q fast path in ``certify_convex``, which runs before this walk.
+_INTERVAL_HESSIAN_MAX_NODES = 8000
+
+
+def _expr_node_budget_exceeded(expr: Expression, limit: int) -> bool:
+    """True if ``expr``'s DAG has more than ``limit`` distinct nodes.
+
+    Iterative, memoized (shared subexpressions counted once — the same accounting
+    :func:`_walk` uses), and early-exits the moment the count crosses ``limit``, so
+    the check itself is O(limit) and never becomes the pathology it guards against.
+    """
+    seen: set[int] = set()
+    stack: list[Expression] = [expr]
+    count = 0
+    while stack:
+        e = stack.pop()
+        eid = id(e)
+        if eid in seen:
+            continue
+        seen.add(eid)
+        count += 1
+        if count > limit:
+            return True
+        if isinstance(e, (BinaryOp, MatMulExpression)):
+            stack.append(e.left)
+            stack.append(e.right)
+        elif isinstance(e, UnaryOp):
+            stack.append(e.operand)
+        elif isinstance(e, (FunctionCall, CustomCall)):
+            stack.extend(e.args)
+        elif isinstance(e, SumExpression):
+            stack.append(e.operand)
+        elif isinstance(e, SumOverExpression):
+            stack.extend(e.terms)
+        elif isinstance(e, IndexExpression):
+            stack.append(e.base)
+        # Variable / Constant (and any other leaf) contribute no children.
+    return False
+
 
 # Type aliases for the sparse carriers (documentation only).
 GradMap = "dict[int, Interval]"
@@ -443,10 +507,21 @@ def interval_hessian(
     Raises:
         ValueError: if ``expr`` references array-shaped values that
             the scalar-output AD cannot handle.
+        IntervalHessianTooLarge: if ``expr``'s DAG exceeds
+            :data:`_INTERVAL_HESSIAN_MAX_NODES` — the walk would blow the solver's
+            time budget (#654); callers catch it and fall back soundly.
     """
     n = _flat_size(model)
     if n == 0:
         raise ValueError("Model has no variables; cannot produce Hessian.")
+    # #654: refuse the minute-plus uninterruptible walk on a pathologically large
+    # body. Cheap O(budget) pre-check with early-exit; abstaining is sound (the
+    # interval Hessian is only ever a bound tightening).
+    if _expr_node_budget_exceeded(expr, _INTERVAL_HESSIAN_MAX_NODES):
+        raise IntervalHessianTooLarge(
+            f"expression DAG exceeds {_INTERVAL_HESSIAN_MAX_NODES} nodes; "
+            "interval-Hessian walk declined to protect the time budget (#654)"
+        )
     box = box or {}
     cache: dict = {}
     # Wide boxes intentionally overflow to ``±inf`` / ``0 * inf`` (the
