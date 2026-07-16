@@ -132,10 +132,26 @@ known oracle. *Perf caveat:* heatexch_gen3 flag-ON took 240 s vs 32 s OFF (the
 extra bounded nodes drive more per-node NS work) — default-OFF, so no CI impact;
 a reason the flag stays opt-in until (B) tightens the underlying solve.
 
+## 2b. Full verification (flag ON) — PR #662
+
+| suite | result |
+|---|---|
+| differential panel (16 inst, ON vs OFF) | `PASS` — all bounds ≤ oracle; 12 byte-identical |
+| adversarial recent-fixes (`-m slow`, ON) | 10 passed, 0 failed (hda oracle-checked to −5964.53) |
+| `test_issue_517_numerical_dual_bound.py` | 5 passed (hda first-bound, flag-off baseline, alan/ex1221 inert, default-off) |
+| smoke (`-m smoke`, ON) | 651 passed, 13 skipped, 0 failed |
+| `cargo test -p discopt-core` | 446 + 4 + 1 passed, 0 failed |
+
+Graduation: flag stays **default OFF** (bound-changing regime) until it accrues
+green runs and the perf caveat above is understood; a default-ON flip is a
+separate change.
+
 ## 3. Disposition
 
-* #517 stays **open**, re-scoped to the phase-2/factorization robustness blocker
-  in §1, with candidate fix (A) (safe in-house dual bound) as the next step.
+* Candidate (A) is **implemented and shipped default-OFF** on this branch (PR
+  #662). #517's literal acceptance (a finite first dual bound for hda) is met.
+* #517 stays **open** for the *tight*-bound goal — the phase-2/factorization
+  robustness blocker in §1 (candidate B) — since (A)'s bound is loose.
 * The external-HiGHS rescue and the subtol-fold are **not shipped** (branch reset;
   no source change to the relaxation or solver was retained).
 * The root cause was measured with temporary `DISCOPT_LP_DEBUG` instrumentation in
