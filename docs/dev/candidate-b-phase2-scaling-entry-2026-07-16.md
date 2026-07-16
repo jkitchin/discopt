@@ -46,18 +46,51 @@ toward 1 makes those excluded tiny entries relatively even smaller, so the
 residual dynamic range balloons to ~1e20 — which feral's LU cannot factorize
 without runaway growth.
 
-## Fix hypothesis (to test next)
+## Tested fix hypotheses (both refined/falsified) — the conditioning is harder than a scaling tweak
 
-**Drop / fold the sub-tolerance coefficients before scaling.** They are provably
-near-zero (cancellation residue) or fold soundly into the RHS via their interval
-worst case (the candidate-A "fold", here repurposed as a *conditioning* fix). With
-them gone, the equilibration can bring the residual to ~O(1), feral factorizes
-cleanly, phase-2 converges, and hda gets a **tight** bound.
+**H1 — drop/fold sub-tolerance coefficients: WRONG.** Capturing the real node LP
+and tracing its entries showed the residual-driving small coefficients are **not**
+droppable cancellation residue. They are **crushed real coefficients**: hda's
+Arrhenius rows pair a huge pre-exponential (~6.3e10) with normal (~1) entries.
+Geometric-mean row scaling crushes the ~1 entries to ~1e-11 (they are below the
+`MAX_LINE_RANGE=1e-10` noise floor relative to 6.3e10, so the floor *excludes* them
+from the scale computation). Dropping them would corrupt real constraints — not a
+sound fix.
 
-Kill criterion: if removing sub-tolerance coefficients does **not** collapse the
-scaled residual range (or if a clean residual still leaves phase-1 grinding on
-degeneracy), scaling is not the whole story and the degeneracy (redundant envelope
-rows, rank ~1136 of 2974) is the next target.
+**H2 — stronger scaling (lower noise floor + more passes): FALSIFIED.** Env-gated
+`DISCOPT_SCALE_PASSES=12 DISCOPT_SCALE_LINE_RANGE=1e-14` made the in-engine residual
+**worse** (1.8e20 → 2.25e21), and hda still `bound=None`. Root cause of the limit:
+the Rust scaler runs on the **standard-form matrix `[A | I]` with slack columns**
+(n=4112 = 1138 structural + 2974 slacks). The identity slacks **pin** the row
+scales, so no diagonal scaling of the full standard form can balance the Arrhenius
+rows.
+
+**The two irreducible facts:**
+
+1. Scaling `A_ub` *alone* (no slacks; 8-pass geo-mean, no floor) reaches ~**2.5e9**
+   — vs ~2e20 for the slack-included standard form. So scaling *before* the
+   standard-form conversion is worth ~1e11.
+2. Even 2.5e9 exceeds feral's reliable range (~1e7, per this module's own header):
+   the 6.3e10 Arrhenius/normal coupling is an **irreducible ~1e9 conditioning** that
+   diagonal scaling cannot remove.
+
+## Real levers (harder; not yet built)
+
+- **L1 — scale `A_ub` pre-slack:** equilibrate the structural matrix before slacks
+  are appended (append slacks with coefficient = row scale, not 1), so feral sees
+  ~2.5e9 instead of ~2e20. Necessary but likely not sufficient alone.
+- **L2 — robust factorization for ~2.5e9:** pair L1 with the dense LU route
+  (`#557`) and/or a higher feral pivot threshold, since ~2.5e9 is past the sparse
+  route's reliable range.
+- **L3 — model/relaxation-level rescale of the Arrhenius term:** normalize the
+  `6.3e10 · exp(-E/RT)` product (the aux value is ~1e-13, so the product is ~6e-3)
+  at relaxation build, removing the 6.3e10 from the matrix entirely. The most
+  fundamental fix; largest surface.
+
+Kill note: candidate B is **not** a scaling-parameter tweak. It needs L1+L2
+(and possibly L3) together, each a real core-engine/relaxation change under the
+bound-neutral regime. Candidate A's loose floor remains the shipped fallback until
+one lands.
 
 Acceptance / regime unchanged from #664: bound-neutral verification
 (`node_count` + certified `objective` exactly unchanged on the certifying panel,
