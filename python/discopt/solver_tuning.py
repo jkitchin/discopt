@@ -330,6 +330,36 @@ class SolverTuning:
     Default off pending a benchmark instance that measurably benefits (qap's
     indefinite-QP McCormick bound is ~0; see docs/dev/sparse-milp-plan.md T7/T12)."""
 
+    rlt1_root_bound: bool = field(
+        default_factory=lambda: _env_flag("DISCOPT_RLT1_ROOT_BOUND", default=False)
+    )
+    """Add an RLT level-1 lower bound at the root for constrained **binary** QPs
+    (``DISCOPT_RLT1_ROOT_BOUND``, default off; §5 bound-changing).
+
+    Term-wise McCormick envelopes on an indefinite ``x'Qx`` are trivially loose —
+    every ``X_ij`` drops to its independent lower face, so the root LP bound is ~0
+    and fathoms nothing (the qap phenomenon, issue #661). RLT-1 multiplies each
+    linear **equality** ``a·x = beta`` of the model by each variable ``x_p`` to add
+    the valid identities ``sum_k a_k X_{p,k} = beta x_p`` (binary diagonal
+    ``X_pp = x_p``). These constraint-factor products couple the lifted variables
+    across a whole constraint and tighten a constrained binary QP toward its
+    Shor/SDP bound. Purely LP (no SDP solver); solved with the exact vertex simplex,
+    so the bound is **rigorous** and joins ``_root_relaxation_lower_bound``'s
+    candidates via ``max`` — it can only *raise* the bound, never loosen it.
+
+    Sound by construction: each added row is a product of valid model constraints,
+    so the RLT LP minimum is a valid lower bound (``<=`` the true optimum) and never
+    cuts a feasible point. Measured: qap root 0 -> ~352891 (vs true optimum 388214;
+    HiGHS-ipm gauge) and small synthetic Koopmans-Beckmann QAPs 0 -> optimum via the
+    exact oracle. **Default off** because the exact vertex simplex is slow on qap's
+    highly degenerate all-pairs RLT-1 LP (114k rows); it graduates once the exact
+    solve is fast enough at that scale (see docs/dev/sparse-milp-plan.md §RLT1)."""
+
+    rlt1_max_pairs: int = field(default_factory=lambda: _env_int("DISCOPT_RLT1_MAX_PAIRS", 60_000))
+    """Size guard for :attr:`rlt1_root_bound`: skip (sound no-op) when the all-pairs
+    lift ``n(n-1)/2`` exceeds this (``DISCOPT_RLT1_MAX_PAIRS``, default 60000 —
+    admits qap's 25200 pairs, blocks a runaway build on a much larger model)."""
+
     node_bound_mode: str = field(
         default_factory=lambda: os.environ.get("DISCOPT_NODE_BOUND_MODE", "lp")
     )
