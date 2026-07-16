@@ -55,11 +55,12 @@ from discopt.modeling.core import (
 
 
 def _compute_var_offset(var: Variable, model: Model) -> int:
-    """Compute the starting offset of a variable in the flat x vector."""
-    offset = 0
-    for v in model._variables[: var._index]:
-        offset += v.size
-    return offset
+    """Compute the starting offset of a variable in the flat x vector.
+
+    Delegates to the model's memoized prefix-sum table so per-leaf offset
+    resolution is O(1) rather than O(n) (issue #654).
+    """
+    return model._flat_var_offset(var)
 
 
 def _compute_param_offset(param: Parameter, model: Model) -> int:

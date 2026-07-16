@@ -765,7 +765,9 @@ def _compute_alphabb_bound(evaluator, model, alphabb_expr, node_lb, node_ub):
     return float(tangent_min - 1e-9 * (1.0 + abs(L_hat) + abs(tangent_min)))
 
 
-def _objective_is_convex_quadratic(model: Model, evaluator, n_vars: int) -> bool:
+def _objective_is_convex_quadratic(
+    model: Model, evaluator, n_vars: int, remaining_budget: float | None = None
+) -> bool:
     """Whether the internally-minimized objective is a convex quadratic.
 
     True iff (a) no term in the model is higher than bilinear/square — so the
@@ -784,6 +786,14 @@ def _objective_is_convex_quadratic(model: Model, evaluator, n_vars: int) -> bool
     The eigenvalue test runs on the *evaluator's* objective Hessian, which is the
     internally-minimized objective (negated for a maximize), so PSD here means the
     minimized objective is convex regardless of the user's sense.
+
+    ``remaining_budget`` (seconds): when given, the PSD test is *skipped* (returns
+    False, abstaining to the McCormick bound) if the estimated first-time dense
+    objective-Hessian XLA compile would not fit the remaining time budget. That
+    compile is uninterruptible and super-linear in the objective's quadratic term
+    count, so on a large quadratic form (e.g. qap: 21 424 terms, ~48 s objective
+    compile) it would otherwise blow the ``time_limit`` (#654). The convex bound is
+    a *tightening only*, so abstaining is always sound — the dual bound stands.
     """
     if model._objective is None or n_vars == 0:
         return False
@@ -798,7 +808,7 @@ def _objective_is_convex_quadratic(model: Model, evaluator, n_vars: int) -> bool
         # the (non-constant) curvature, an unsound over-claim.
         # ``monomial`` is an iterable of ``(var, power)`` (a list of pairs or a
         # dict); pull the powers robustly across either shape.
-        _monos = t.monomial.items() if hasattr(t.monomial, "items") else t.monomial
+        _monos = list(t.monomial.items() if hasattr(t.monomial, "items") else t.monomial)
         if (
             t.trilinear
             or t.multilinear
@@ -809,6 +819,28 @@ def _objective_is_convex_quadratic(model: Model, evaluator, n_vars: int) -> bool
             or any(int(deg) > 2 for _, deg in _monos)
         ):
             return False
+
+        # #654 budget gate: the PSD test below forces the dense objective-Hessian
+        # compile (``jacfwd∘jacfwd``), whose XLA codegen is super-linear in the
+        # objective's quadratic term count and uninterruptible once entered. On a
+        # large quadratic form that single compile dwarfs the whole time budget, so
+        # skip the (tightening-only) convex bound when it will not fit. The term
+        # count is a model-wide upper bound on the objective's quadratic nnz —
+        # conservative, so over-estimating only abstains (sound).
+        if remaining_budget is not None:
+            from discopt._jax.nlp_evaluator import estimate_dense_obj_hessian_compile_s
+
+            _obj_quad_nnz = len(t.bilinear) + sum(1 for _, deg in _monos if int(deg) == 2)
+            _compile_est = estimate_dense_obj_hessian_compile_s(_obj_quad_nnz)
+            if _compile_est > remaining_budget:
+                logger.info(
+                    "convex-objective node bound skipped: dense obj-Hessian compile "
+                    "~%.1fs (%d quad terms) exceeds remaining budget %.1fs (#654)",
+                    _compile_est,
+                    _obj_quad_nnz,
+                    remaining_budget,
+                )
+                return False
         lb = np.array([v.lb for v in model._variables for _ in range(v.size)], dtype=np.float64)
         ub = np.array([v.ub for v in model._variables for _ in range(v.size)], dtype=np.float64)
         lb_f = np.where(np.isfinite(lb), lb, -1.0)
@@ -3197,6 +3229,22 @@ def solve_model(
     def _remaining_budget() -> float:
         return max(0.0, float(time_limit) - (time.perf_counter() - _solve_t0))
 
+    def _deadline_exhausted(floor: float = _DEADLINE_NODE_FLOOR_S) -> bool:
+        """True once the whole-solve budget is spent past a small floor.
+
+        Optional root-setup phases (presolve, reverse-AD, eigenvalue diagnostic,
+        root OBBT, root cut pool) check this to avoid *launching* further
+        bound-strengthening work once ``time_limit`` is already blown — the fix
+        for issue #654's "budget effectively ignored" symptom. This never
+        truncates an in-flight bound-producing op (that would drop a valid bound;
+        docs/dev/baron-gap-plan.md §8): each phase runs to completion once started
+        and only new phases are skipped, so the overrun is bounded to at most one
+        in-flight uninterruptible op and the wall scales with ``time_limit``.
+        Skipping a phase only ever *weakens* the (still-valid) bound — a larger
+        box or fewer cuts — never makes it unsound.
+        """
+        return _remaining_budget() <= floor
+
     # Reset the per-solve convexity-classification memo (a previous solve, or an
     # IIS feasibility probe, may have cached a verdict for a different constraint
     # set), and budget classification to a fraction of the time limit so it
@@ -3205,6 +3253,14 @@ def solve_model(
     model._convexity_classification_cache = None
     _convexity_time_budget = min(max(0.2 * float(time_limit), 0.5), 20.0)
     model._convexity_time_budget = _convexity_time_budget
+    # #654: absolute solve deadline, anchored at ``_solve_t0`` (before all
+    # preprocessing), so an uninterruptible pre-B&B phase can decline to *start*
+    # new work once the budget is spent rather than blow past ``time_limit``. Read
+    # by ``IncrementalMcCormickLP._validate`` to bound its row-for-row
+    # cold-vs-patched self-check — tens of seconds on large factorable models
+    # (sonet*, qap): the dominant #654 overrun — leaving ``ok=False`` so the engine
+    # falls back to the sound per-node cold build. Never truncates an in-flight op.
+    model._solve_deadline = _solve_t0 + float(time_limit)
 
     # Opt-in LP-node spatial branch-and-cut engine (discopt#280) for pure-integer
     # product MINLPs. The default NLP-per-node spatial path freezes its dual bound
@@ -3968,6 +4024,7 @@ def solve_model(
             # 15 s solve budget. Re-assert the budget (and clear any stale cache).
             model._convexity_classification_cache = None
             model._convexity_time_budget = _convexity_time_budget
+            model._solve_deadline = _solve_t0 + float(time_limit)  # #654 (see above)
         # A *convex* model with a clearable denominator is deliberately left
         # untouched here: many such divisions (e.g. the rotated-SOC ``x**2/z``)
         # are solved exactly by the convex NLP fast path, and clearing would
@@ -4033,6 +4090,7 @@ def solve_model(
                 model = _ipx
                 model._convexity_classification_cache = None
                 model._convexity_time_budget = _convexity_time_budget
+                model._solve_deadline = _solve_t0 + float(time_limit)  # #654 (see above)
                 # The reformulated big-M MILP is best handled by a real MILP
                 # engine. discopt's FBBT root presolve is both redundant (the MILP
                 # engines presolve internally) and pathologically slow on the
@@ -4072,7 +4130,11 @@ def solve_model(
     # Tightened bounds are pushed back into the Python `model` so that
     # the relaxation compiler / B&B initialisation see them. See
     # discopt._jax.presolve_pipeline for the sequencing rationale.
-    if _model_repr is not None and presolve:
+    # Skipped if the budget is already blown (e.g. a large-model reformulation
+    # above overran ``time_limit``): presolve only tightens bounds, so declining
+    # it leaves a looser-but-valid box and lets the wall track ``time_limit``
+    # (#654). ``propagate_bounds_to_model`` is a no-op when skipped.
+    if _model_repr is not None and presolve and not _deadline_exhausted():
         try:
             from discopt._jax.presolve_pipeline import (
                 propagate_bounds_to_model,
@@ -4115,8 +4177,9 @@ def solve_model(
     # Iterates Gauss-Seidel reverse-mode interval AD over every
     # constraint to a fixed point and writes back tighter scalar bounds.
     # Disabled by default because it walks the Python expression DAG and
-    # can be slow on very large models.
-    if presolve and presolve_reverse_ad:
+    # can be slow on very large models. Skipped once the budget is blown (#654):
+    # it only tightens bounds, so declining it leaves a valid looser box.
+    if presolve and presolve_reverse_ad and not _deadline_exhausted():
         try:
             from discopt._jax.presolve_pipeline import run_reverse_ad_tightening
 
@@ -4129,8 +4192,9 @@ def solve_model(
     # --- Eigenvalue root bound on quadratic objectives (M6 of #51, opt-in) ---
     # For models with a quadratic objective, compute a sound root-node
     # bound via spectral decomposition. Used only as an informational
-    # diagnostic at the root; does not affect the B&B tree directly.
-    if eigenvalue_root_bound:
+    # diagnostic at the root; does not affect the B&B tree directly. Skipped
+    # once the budget is blown (#654): purely diagnostic, safe to omit.
+    if eigenvalue_root_bound and not _deadline_exhausted():
         try:
             from discopt._jax.convexity.eigenvalue_arith import (
                 QuadraticForm,
@@ -4710,6 +4774,11 @@ def solve_model(
         bool(kwargs.get("obbt_at_root", True))
         and model._objective is not None
         and not _obbt_known_convex
+        # Skip once the budget is blown (#654): OBBT only shrinks the box, so
+        # declining it leaves a valid looser envelope and lets the wall track
+        # ``time_limit`` instead of paying a full clamped OBBT sweep past the
+        # deadline. (When time remains, the budget below still clamps it.)
+        and not _deadline_exhausted()
         # Continuous (or mixed) models keep the original ≤500-var reach. The
         # pure-integer-nonlinear path is newer and capped tighter (≤50 vars, the
         # ``_AUTO_RLT_LEVEL1_MAX_VARS`` scale): there OBBT reaches a fixpoint in a
@@ -4958,7 +5027,7 @@ def solve_model(
     # hyperplane recovers an almost-tight, rigorous bound at each node. Engaged
     # even when a McCormick LP relaxer is present (the LP is the loose source).
     _use_convex_obj_bound = (not _model_is_convex) and _objective_is_convex_quadratic(
-        model, evaluator, n_vars
+        model, evaluator, n_vars, remaining_budget=_remaining_budget()
     )
     if _use_convex_obj_bound:
         logger.debug("convex-objective node bound enabled (n_vars=%d)", n_vars)
@@ -5282,6 +5351,16 @@ def solve_model(
                     if not _probe_useful:
                         _mc_lp_relaxer = None
                         _mc_mode = "none"
+                    elif _deadline_exhausted():
+                        # Budget already blown (#654): skip the one-time root cut
+                        # pool separation. Its only value is a stronger per-node
+                        # bound during the search, but a past-deadline node loop
+                        # finalizes almost immediately, so separating the pool
+                        # here would just overrun the wall for no realized bound.
+                        # Nodes still separate their own cuts if any run. Sound:
+                        # the relaxer/bound are unchanged — only the inherited-pool
+                        # speedup is forgone.
+                        pass
                     elif _root_cut_rounds > 0 and getattr(_mc_lp_relaxer, "_psd_cuts", False):
                         # Root cut pool (P3, opt-in): the relaxer carries PSD cuts, so
                         # separate a strong pool ONCE at the root box (many

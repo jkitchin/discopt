@@ -74,11 +74,12 @@ from discopt.solver_tuning import current as _tuning
 
 
 def _compute_var_offset(var: Variable, model: Model) -> int:
-    """Compute the starting offset of a variable in the flat x vector."""
-    offset = 0
-    for v in model._variables[: var._index]:
-        offset += v.size
-    return offset
+    """Compute the starting offset of a variable in the flat x vector.
+
+    Delegates to the model's memoized prefix-sum table so per-leaf offset
+    resolution during relaxation compilation is O(1) rather than O(n) (#654).
+    """
+    return model._flat_var_offset(var)
 
 
 def _is_constant_expr(expr: Expression) -> bool:

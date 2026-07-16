@@ -361,11 +361,12 @@ def _constant_scalar(expr: Expression) -> Optional[float]:
 
 
 def _var_offset(var: Variable, model: Model) -> int:
-    """Return a variable's start index in the flattened model vector."""
-    offset = 0
-    for existing in model._variables[: var._index]:
-        offset += existing.size
-    return offset
+    """Return a variable's start index in the flattened model vector.
+
+    Delegates to the model's memoized prefix-sum table so offset resolution is
+    O(1) rather than O(n) (issue #654).
+    """
+    return model._flat_var_offset(var)
 
 
 def _scalar_var_index(expr: Expression, model: Model) -> Optional[int]:
@@ -759,20 +760,16 @@ def detect_bilinear_terms(model) -> list[BilinearTerm]:
     )
     from discopt.modeling.core import Constraint as ConstraintType
 
-    def _var_index(expr: Expression, model_) -> int | None:
+    def _var_index(expr: Expression, model_: Model) -> int | None:
         """Get the flat variable index for a simple variable reference."""
         if isinstance(expr, Variable):
-            offset = 0
-            for v in model_._variables[: expr._index]:
-                offset += v.size
+            offset = model_._flat_var_offset(expr)
             if expr.shape == () or expr.shape == (1,):
                 return offset
             return None
         if isinstance(expr, IndexExpression) and isinstance(expr.base, Variable):
             var = expr.base
-            offset = 0
-            for v in model_._variables[: var._index]:
-                offset += v.size
+            offset = model_._flat_var_offset(var)
             idx = expr.index
             if isinstance(idx, int):
                 return offset + idx

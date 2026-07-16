@@ -1085,7 +1085,6 @@ pub fn model_to_repr(
             name,
         });
     }
-
     // Construction complete: drop the intern table so downstream mutating passes
     // (presolve/reformulation) see plain, unshared append semantics.
     arena.disable_interning();
@@ -1165,28 +1164,50 @@ fn convert_expr(
             }
         }
         "BinaryOp" => {
-            let op_str: String = obj.getattr("op")?.extract()?;
-            let op = match op_str.as_str() {
-                "+" => BinOp::Add,
-                "-" => BinOp::Sub,
-                "*" => BinOp::Mul,
-                "/" => BinOp::Div,
-                "**" => BinOp::Pow,
-                _ => {
-                    return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
-                        "Unknown BinOp: {op_str}"
-                    )));
+            // #654: convert the LEFT-nested associative spine ITERATIVELY. Factorable
+            // objectives are left-deep chains — qap's is 42849 levels,
+            // ``(((...) + t) + t) + t`` — and recursing down ``left`` overflows the
+            // thread stack (which manifests as a hang, not a clean crash). Walk down
+            // ``left`` in a loop, stacking each ``(op, right)`` pair; the right
+            // operands and the deepest-left leaf are shallow, so converting them
+            // recurses only a little. Then fold bottom-up with the same ``intern`` —
+            // identical to the recursive build, so the arena is byte-for-byte the same.
+            fn parse_binop(s: &str) -> PyResult<BinOp> {
+                Ok(match s {
+                    "+" => BinOp::Add,
+                    "-" => BinOp::Sub,
+                    "*" => BinOp::Mul,
+                    "/" => BinOp::Div,
+                    "**" => BinOp::Pow,
+                    _ => {
+                        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                            "Unknown BinOp: {s}"
+                        )))
+                    }
+                })
+            }
+            let mut spine: Vec<(BinOp, Bound<'_, PyAny>)> = Vec::new();
+            let mut cur = obj.clone();
+            let deepest_left = loop {
+                if get_class_name(&cur)? != "BinaryOp" {
+                    break cur;
                 }
+                let op = parse_binop(&cur.getattr("op")?.extract::<String>()?)?;
+                let right = cur.getattr("right")?;
+                let left = cur.getattr("left")?;
+                spine.push((op, right));
+                cur = left;
             };
-            let left = obj.getattr("left")?;
-            let right = obj.getattr("right")?;
-            let left_id = convert_expr(_py, &left, arena, var_ids, param_ids)?;
-            let right_id = convert_expr(_py, &right, arena, var_ids, param_ids)?;
-            Ok(arena.intern(ExprNode::BinaryOp {
-                op,
-                left: left_id,
-                right: right_id,
-            }))
+            let mut acc = convert_expr(_py, &deepest_left, arena, var_ids, param_ids)?;
+            for (op, right) in spine.into_iter().rev() {
+                let right_id = convert_expr(_py, &right, arena, var_ids, param_ids)?;
+                acc = arena.intern(ExprNode::BinaryOp {
+                    op,
+                    left: acc,
+                    right: right_id,
+                });
+            }
+            Ok(acc)
         }
         "UnaryOp" => {
             let op_str: String = obj.getattr("op")?.extract()?;

@@ -25,6 +25,8 @@ univariate, fractional power, piecewise) makes validation fail -> fallback.
 
 from __future__ import annotations
 
+import time
+
 import numpy as np
 import scipy.sparse as sp
 
@@ -153,6 +155,14 @@ class IncrementalMcCormickLP:
         self.model = model
         self.terms = terms
         self._validated_regimes = frozenset()  # sign regimes _validate exercised
+        # #654: if the solve budget is already spent when we get here, don't build
+        # the incremental structure at all (its own cold builds cost seconds on
+        # large factorable models) — leave ``ok=False`` and let ``solve_at_node``
+        # use the trusted per-node cold build. No-op when budget remains (the common
+        # case) or when no deadline was stashed (construction outside a solve).
+        _deadline = getattr(model, "_solve_deadline", None)
+        if _deadline is not None and time.perf_counter() > _deadline:
+            return
         try:
             self._build_structure()
             self._validate()
@@ -383,9 +393,23 @@ class IncrementalMcCormickLP:
         # through negative-lb, zero-spanning, mixed-sign and degenerate boxes — the
         # sign regimes real nodes reach. The patched row-set + aux bounds must
         # reproduce the cold ``build_milp_relaxation`` exactly on every one.
+        # #654: this row-for-row self-check cold-builds ``build_milp_relaxation``
+        # once per validation box — tens of seconds on large factorable models
+        # (sonet*, qap), the dominant uninterruptible pre-B&B overrun. Bound it by
+        # the solve deadline (stashed on the model in solver.py, anchored before all
+        # preprocessing): once the budget is spent, stop *before starting* a new box
+        # and leave ``ok=False`` — the engine then falls back to the trusted per-node
+        # cold build (a valid, if unaccelerated, relaxation). Skipping validation only
+        # forgoes the incremental speedup, never soundness; and checking before each
+        # box bounds the overrun to at most one in-flight build (baron-gap-plan §8:
+        # never truncate an in-flight bound-producing op).
+        _deadline = getattr(self.model, "_solve_deadline", None)
         rng_boxes = self._validation_boxes()
         regimes = set()
         for lb, ub in rng_boxes:
+            if _deadline is not None and time.perf_counter() > _deadline:
+                self.ok = False
+                return
             for i in range(self.n):
                 regimes.add(self._box_sign_regime(float(lb[i]), float(ub[i])))
             Ap, bp, bdp = self._patch(lb, ub)

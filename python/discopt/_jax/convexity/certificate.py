@@ -153,7 +153,10 @@ def certify_convex(
         ad = interval_hessian(expr, model, box=box)
     except ValueError:
         # Expressions referencing array variables directly are not
-        # supported by v1; abstain rather than guess.
+        # supported by v1; abstain rather than guess. Also catches
+        # ``IntervalHessianTooLarge`` (a ValueError subclass) raised when the
+        # body's DAG exceeds the interval-Hessian node budget (#654): abstaining
+        # to the caller's spatial/looser path is sound.
         return None
 
     hess = ad.hess

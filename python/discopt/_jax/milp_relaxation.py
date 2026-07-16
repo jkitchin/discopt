@@ -1890,7 +1890,21 @@ def _expand_integer_powers_for_relaxation(expr: Expression, model: Model) -> Exp
                         for _ in range(n - 1):
                             product = BinaryOp("*", product, base)
                         return distribute_products(product)
-            return distribute_products(BinaryOp(node.op, left, right))
+            # ``left``/``right`` are already fully distributed by the recursive
+            # ``visit``. Only a ``*`` combines them in a way that can create a new
+            # product-of-sums needing (re-)distribution; ``+``/``-``/``/`` of
+            # distributed children are already in distributed form. Re-running
+            # ``distribute_products`` on those merely re-walks the whole subtree —
+            # an O(N^2) blow-up on a large sum objective (qap's 21 424-term
+            # objective spent ~30 s here, #654). Reconstruct them directly, and
+            # preserve node identity when nothing changed so id()-keyed lift maps
+            # still match. This is bound-neutral: the emitted expression is
+            # identical, only the redundant re-walk is removed.
+            if node.op == "*":
+                return distribute_products(BinaryOp("*", left, right))
+            if left is node.left and right is node.right:
+                return node
+            return BinaryOp(node.op, left, right)
         if isinstance(node, UnaryOp):
             return UnaryOp(node.op, visit(node.operand))
         if isinstance(node, SumExpression):
