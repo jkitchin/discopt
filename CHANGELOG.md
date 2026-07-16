@@ -10,6 +10,25 @@ The release procedure that produces these entries is documented in
 
 ## [Unreleased]
 
+### Added
+
+- **Continuous stratified multistart at the root** (`feat`, #188). Pure-continuous
+  nonconvex models had zero basin diversification on the spatial McCormick-LP
+  path: the integer-centric primal heuristics (pump/ILS/diving/RINS/RENS) all
+  no-op without integers, the root multistart NLP is skipped there, and the
+  strided node NLP warm-starts from the parent point — so the incumbent stayed
+  locked in the first LP-vertex basin (kall_congruentcircles_c51: parked at the
+  1.5371 two-row packing vs the 1.0730 global). `solve_model` now runs a
+  budgeted, deadline-gated stratified multistart
+  (`primal_heuristics.continuous_multistart`) once at the root for nonconvex
+  models with no integer variables; the c51-class reconstruction reaches the
+  1.07301 global on the default path (siblings and the C-38 `kall_circles_c8a`
+  soundness lock unregressed). Primal-only (heuristic-policy regime): every
+  point is constraint-re-verified and `inject_incumbent` enforces strict
+  improvement, so dual bounds and certificates are untouched.
+  `DISCOPT_CONTINUOUS_MULTISTART=0` / `SolverTuning.continuous_multistart=False`
+  restores the prior behavior.
+
 ## [0.6.0] - 2026-07-12
 
 ### Removed

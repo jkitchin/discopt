@@ -199,6 +199,22 @@ early incumbent + more budget for the bound).
 do — these are sound suboptimal points); nothing is certified optimal without the
 bound (`gap_certified` discipline). Low correctness risk.
 
+> **Incumbent *quality* sub-gap closed (2026-07-16, #188).** CC4's latency framing
+> did not cover the basin-quality gap on pure-continuous nonconvex models: that
+> class had zero diversification end to end (pump/ILS/diving/RINS/RENS no-op with
+> no integers; root multistart skipped on the MC-LP path; node NLPs warm-start
+> from the parent point), so kall_congruentcircles_c51 parked at the 1.5371
+> two-row local packing forever. Fix: root stratified continuous multistart
+> (`primal_heuristics.continuous_multistart`, `DISCOPT_CONTINUOUS_MULTISTART`,
+> default ON) — c51 reconstruction now reaches the 1.07301 global (c41 sibling
+> and kall_circles_c8a C-38 lock unregressed).
+> **Falsified in passing:** #188's "random multistart is a confirmed dead end
+> (40/40 infeasible)" does not hold on the current POUNCE backend — 54/64
+> *stratified* starts converge to constraint-verified feasible KKT points
+> (~90 ms/solve), 3/32 in the global basin on every seed tried; the 4
+> deterministic anchors and LP-vertex seeds never leave 1.54–3.23. The dead end
+> was the sampling scheme + old backend, not multistart per se.
+
 ## 6. Stage 4 — Node-count reduction (CC3; highest leverage, strictest gate)
 
 > **Entry experiment (2026-06-24) — falsified the framing below; read this first.**

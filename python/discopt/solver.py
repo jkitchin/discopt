@@ -7636,6 +7636,61 @@ def solve_model(
                     except Exception as e:
                         logger.debug("Fractional diving failed: %s", e)
 
+            # --- Continuous stratified multistart (issue #188) ---
+            # Pure-continuous nonconvex models are the one class the heuristic
+            # suite above leaves bare: with no integers to round/flip/dive on,
+            # pump, ILS and diving all no-op, the root multistart NLP is skipped
+            # on this (McCormick-LP) path, and the strided node NLP warm-starts
+            # from the parent point — so the incumbent stays locked in whatever
+            # basin the first LP-vertex-seeded local solve lands in
+            # (kall_congruentcircles_c51: 1.5371 two-row packing vs the 1.0730
+            # global row basin, reached by 3/32 stratified starts on every seed
+            # tried). Run one budgeted stratified multistart at the root.
+            # Sound (heuristic-policy regime, CLAUDE.md §5): a primal finder
+            # only — the point is constraint-re-verified here and
+            # ``inject_incumbent`` enforces strict improvement, so the dual
+            # bound and certificate math are untouched.
+            if (
+                _tuning().continuous_multistart
+                and _mc_lp_relaxer is not None
+                and not _model_is_convex
+                and not _lns_has_integers
+                and not _root_optimum_proven()
+                and _root_heur_nlp_entry_ok(evaluator)
+            ):
+                try:
+                    from discopt._jax.primal_heuristics import continuous_multistart
+
+                    _cms_inc = tree.incumbent()
+                    _cms_inc_obj = (
+                        float(_cms_inc[1])
+                        if _cms_inc is not None and _cms_inc[1] < _SENTINEL_THRESHOLD
+                        else None
+                    )
+                    _t_cms = time.perf_counter()
+                    _cms = continuous_multistart(
+                        model,
+                        n_starts=int(min(64, max(32, 2 * int(np.size(lb))))),
+                        backend=_resolve_heuristic_backend(nlp_solver),
+                        evaluator=evaluator,
+                        deadline=min(
+                            _deadline,
+                            time.perf_counter() + max(2.0, min(15.0, 0.2 * float(time_limit))),
+                        ),
+                        incumbent_obj=_cms_inc_obj,
+                    )
+                    _observe_heur_nlp(time.perf_counter() - _t_cms)
+                    if _cms is not None:
+                        _x_cms, _obj_cms = _cms
+                        _cms_feas = not cl_list or _check_constraint_feasibility(
+                            evaluator, _x_cms, cl_list, cu_list
+                        )
+                        if np.isfinite(_obj_cms) and _obj_cms < _SENTINEL_THRESHOLD and _cms_feas:
+                            tree.inject_incumbent(np.asarray(_x_cms).copy(), float(_obj_cms))
+                            logger.info("Continuous multistart found incumbent: obj=%.6g", _obj_cms)
+                except Exception as e:
+                    logger.debug("Continuous multistart failed: %s", e)
+
         # --- SubNLP primal heuristic ---
         # Fix integers in the best relaxation solution, then solve the
         # resulting continuous NLP. Useful for nonconvex problems whose

@@ -379,6 +379,31 @@ class SolverTuning:
     improvement, so the dual bound and gap certification are byte-identical to the
     fixed-stride run; only *which* nodes get a primal probe changes."""
 
+    continuous_multistart: bool = field(
+        default_factory=lambda: _env_flag("DISCOPT_CONTINUOUS_MULTISTART", default=True)
+    )
+    """Stratified continuous multistart at the root for pure-continuous
+    nonconvex models (``DISCOPT_CONTINUOUS_MULTISTART``, default ON; issue #188).
+
+    The primal-heuristic suite is integer-centric: on a model with no integer
+    variables, pump/ILS/diving/RINS/RENS all no-op, the root multistart NLP is
+    skipped on the McCormick-LP spatial path, and the strided node NLP
+    warm-starts from the parent point — zero basin diversification end to end.
+    Measured on the kall_congruentcircles_c51 class (#188): the default path
+    parks at the 1.5371 two-row local packing forever, while 32 stratified
+    starts (~2.8 s, ~90 ms/solve) reach the 1.0730 global basin on every seed
+    tried; the 4 deterministic anchors and the LP-vertex-seeded solves never do.
+
+    When ON, ``solve_model`` runs ``primal_heuristics.continuous_multistart``
+    once at the end of the root iteration on the spatial McCormick-LP path for
+    nonconvex models with no integer variables: ``min(64, max(32, 2·n))``
+    stratified starts, deadline-gated between starts and per-solve capped, seed
+    fixed for determinism. Sound (heuristic-policy regime, CLAUDE.md §5): a
+    primal finder only — every point is constraint-re-verified and
+    ``inject_incumbent`` enforces strict improvement; the dual bound and
+    certificate math are untouched. Set ``DISCOPT_CONTINUOUS_MULTISTART=0`` to
+    restore the prior behavior."""
+
     ils_solve_cap: int = field(default_factory=lambda: _env_int("DISCOPT_ILS_SOLVE_CAP", 2))
     """Sub-NLP solve cap for the ``integer_local_search`` objective-descent
     (``DISCOPT_ILS_SOLVE_CAP``, **default 2 = ON** since ILS-DEFAULT, #530-followup).
