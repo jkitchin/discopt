@@ -120,3 +120,85 @@ def test_unknown_method_raises():
     m, x, y = _distance_model()
     with pytest.raises(ValueError):
         solve_mpec(m, [complementarity(x, y)], method="bogus")
+
+
+# ─────────────────── vector / elementwise complementarity ───────────────────
+#
+# 0 <= f ⊥ g >= 0 over arrays is complementarity *elementwise*: each index is an
+# independent (f_i == 0) ∨ (g_i == 0) disjunction. A single all-zero-vector
+# disjunction is strictly wrong. The mixed-selection instance below is the
+# regression probe: pair 0 must pick x0 == 0 (y0 free) while pair 1 must pick
+# y1 == 0 (x1 free). The old "all x zero OR all y zero" encoding could not
+# select differently per index and returned obj ≈ 25 instead of 0.
+
+
+def _mixed_selection_model(name: str) -> tuple[dm.Model, dm.Variable, dm.Variable]:
+    m = dm.Model(name)
+    x = m.continuous("x", shape=2, lb=0, ub=10)
+    y = m.continuous("y", shape=2, lb=0, ub=10)
+    # Optimum needs y0 = 5 (=> x0 = 0) and x1 = 5 (=> y1 = 0): a mixed selection.
+    m.minimize((y[0] - 5) ** 2 + (x[1] - 5) ** 2)
+    return m, x, y
+
+
+def test_vector_gdp_elementwise_mixed_selection():
+    m, x, y = _mixed_selection_model("vec_gdp")
+    m.complementarity(x, y)  # default gdp
+    res = m.solve()
+    assert res.objective is not None
+    assert abs(float(res.objective)) < 1e-3  # was ≈ 25 with the all-or-nothing bug
+    xv = np.asarray(res.x["x"], dtype=float)
+    yv = np.asarray(res.x["y"], dtype=float)
+    assert np.allclose(xv * yv, 0.0, atol=1e-4)  # elementwise complementarity holds
+
+
+def test_vector_sos1_elementwise_mixed_selection():
+    m, x, y = _mixed_selection_model("vec_sos1")
+    res = solve_mpec(m, [complementarity(x, y)], method="sos1")
+    assert abs(float(res.objective)) < 1e-3
+    xv = np.asarray(res.x["x"], dtype=float)
+    yv = np.asarray(res.x["y"], dtype=float)
+    assert np.allclose(xv * yv, 0.0, atol=1e-4)
+
+
+def test_vector_scholtes_elementwise_mixed_selection():
+    m, x, y = _mixed_selection_model("vec_scholtes")
+    res = solve_mpec(m, [complementarity(x, y)], method="scholtes")
+    assert res is not None and res.objective is not None
+    assert abs(float(res.objective)) < 1e-3
+
+
+def test_matrix_complementarity_elementwise():
+    m = dm.Model("mat")
+    a = m.continuous("a", shape=(2, 2), lb=0, ub=10)
+    b = m.continuous("b", shape=(2, 2), lb=0, ub=10)
+    # Each pair: min (a-2)^2 + (b-3)^2 s.t. a·b = 0 -> (a=0,b=3)=4 beats (a=2,b=0)=9.
+    obj = sum((a[i, j] - 2) ** 2 for i in range(2) for j in range(2))
+    obj += sum((b[i, j] - 3) ** 2 for i in range(2) for j in range(2))
+    m.minimize(obj)
+    m.complementarity(a, b)
+    res = m.solve()
+    assert abs(float(res.objective) - 16.0) < 1e-2  # 4 per element × 4 elements
+    av = np.asarray(res.x["a"], dtype=float)
+    bv = np.asarray(res.x["b"], dtype=float)
+    assert np.allclose(av * bv, 0.0, atol=1e-4)
+
+
+def test_scalar_broadcasts_against_vector():
+    m = dm.Model("bcast")
+    xs = m.continuous("xs", lb=0, ub=10)
+    ys = m.continuous("ys", shape=2, lb=0, ub=10)
+    # Both y components want to be > 0, so the shared xs must be driven to 0.
+    m.minimize((xs - 1) ** 2 + (ys[0] - 2) ** 2 + (ys[1] - 3) ** 2)
+    m.complementarity(xs, ys)
+    res = m.solve()
+    assert abs(float(res.objective) - 1.0) < 1e-3
+    assert abs(float(np.asarray(res.x["xs"]))) < 1e-3
+
+
+def test_incompatible_vector_shapes_raise():
+    m = dm.Model("bad")
+    p = m.continuous("p", shape=2, lb=0)
+    q = m.continuous("q", shape=3, lb=0)
+    with pytest.raises(ValueError, match="incompatible operand shapes"):
+        m.complementarity(p, q)

@@ -2786,10 +2786,17 @@ class Model:
         ``Model._complementarities``) and immediately reformulated into ordinary
         constraints solved by :meth:`solve`.
 
+        Vector/array operands are complementarity **elementwise**: for every
+        index ``i`` independently, ``x_i · y_i == 0`` with ``x_i, y_i >= 0`` (a
+        separate disjunction per index — *not* a single "all ``x`` zero or all
+        ``y`` zero" choice). A scalar side broadcasts against a vector side;
+        incompatible shapes are rejected.
+
         Parameters
         ----------
         x, y : Expression
-            The complementary pair. Both are constrained non-negative.
+            The complementary pair. Both are constrained non-negative. May be
+            scalars or equally-shaped (or scalar-broadcastable) arrays.
         method : {"gdp", "sos1"}, default "gdp"
             Reformulation. ``"gdp"`` lowers to the exact disjunction
             ``(x == 0) ∨ (y == 0)`` (big-M with a selector binary), so

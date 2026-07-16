@@ -36,7 +36,7 @@ Example
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional
+from typing import Optional, cast
 
 import numpy as np
 
@@ -71,6 +71,76 @@ def complementarity(f: Expression, g: Expression, name: Optional[str] = None) ->
     return Complementarity(f, g, name)
 
 
+# ─────────────────────────── scalarization ────────────────────────────
+
+
+def _elem_shape(model: Model, expr: Expression) -> tuple[int, ...]:
+    """Static element shape of ``expr`` (``()`` for a scalar) via interval eval."""
+    from discopt._jax.convexity.interval_eval import evaluate_interval
+
+    iv = evaluate_interval(expr, model)
+    return tuple(int(d) for d in np.asarray(iv.lo).shape)
+
+
+def _aux_upper_bound(model: Model, expr: Expression) -> float:
+    """Finite upper bound for an SOS1 aux mirroring a nonnegative operand.
+
+    Uses the static interval enclosure of ``expr``; returns ``+inf`` when the
+    enclosure is non-finite so the SOS1→big-M lowering can raise its clear
+    "add a finite upper bound" error instead of silently fabricating a huge M.
+    """
+    from discopt._jax.convexity.interval_eval import evaluate_interval
+
+    try:
+        hi = float(np.max(np.asarray(evaluate_interval(expr, model).hi)))
+    except Exception:
+        return float("inf")
+    return hi if np.isfinite(hi) else float("inf")
+
+
+def _index(expr: Expression, shape: tuple[int, ...], k: int) -> Expression:
+    """Return element ``k`` (row-major) of a vector/array expression."""
+    idx = tuple(int(v) for v in np.unravel_index(k, shape))
+    elem = expr[idx[0]] if len(idx) == 1 else expr[idx]
+    return cast(Expression, elem)
+
+
+def _scalarize_pairs(model: Model, pairs: list[Complementarity]) -> list[Complementarity]:
+    """Expand vector/array complementarity pairs into elementwise scalar pairs.
+
+    ``0 <= f ⊥ g >= 0`` over arrays is complementarity *elementwise*: for every
+    index ``i`` independently, ``f_i·g_i = 0`` with ``f_i, g_i >= 0``. A single
+    disjunction over the whole vector (``all f == 0`` ∨ ``all g == 0``) is a
+    strictly stronger, wrong condition, so every reformulation scalarizes first.
+
+    A scalar side is broadcast against a vector side (e.g. one ``f`` complementary
+    to each ``g_i``). Shapes that are neither equal nor scalar-broadcastable are
+    rejected loudly rather than silently mis-encoded.
+    """
+    out: list[Complementarity] = []
+    for i, p in enumerate(pairs):
+        tag = p.name or f"compl{i}"
+        fs = _elem_shape(model, p.f)
+        gs = _elem_shape(model, p.g)
+        nf = int(np.prod(fs, dtype=np.int64)) if fs else 1
+        ng = int(np.prod(gs, dtype=np.int64)) if gs else 1
+        n = max(nf, ng)
+        if n == 1:
+            out.append(Complementarity(p.f, p.g, tag))
+            continue
+        if nf not in (1, n) or ng not in (1, n):
+            raise ValueError(
+                f"complementarity {tag!r} has incompatible operand shapes "
+                f"{fs} ⊥ {gs}: sides must have equal element counts, or one side "
+                "must be scalar to broadcast."
+            )
+        for k in range(n):
+            fk = p.f if nf == 1 else _index(p.f, fs, k)
+            gk = p.g if ng == 1 else _index(p.g, gs, k)
+            out.append(Complementarity(fk, gk, f"{tag}_{k}"))
+    return out
+
+
 # ─────────────────────────── reformulations ───────────────────────────
 
 
@@ -79,10 +149,10 @@ def reformulate_scholtes(model: Model, pairs: list[Complementarity], t) -> None:
 
     ``t`` may be a float or a :class:`~discopt.modeling.core.Parameter`; using a
     parameter lets :func:`solve_mpec` drive the homotopy without rebuilding the
-    model.
+    model. Vector/array pairs are complementarity elementwise (each ``f_i·g_i <= t``).
     """
-    for i, p in enumerate(pairs):
-        tag = p.name or f"compl{i}"
+    for p in _scalarize_pairs(model, pairs):
+        tag = p.name
         model.subject_to(p.f >= 0, name=f"{tag}_f_nonneg")
         model.subject_to(p.g >= 0, name=f"{tag}_g_nonneg")
         model.subject_to(p.f * p.g <= t, name=f"{tag}_reg")
@@ -93,17 +163,23 @@ def reformulate_sos1(model: Model, pairs: list[Complementarity]) -> None:
 
     Requires ``f >= 0`` and ``g >= 0`` and that at most one is nonzero. When
     ``f``/``g`` are plain variables they enter the SOS1 set directly; otherwise
-    nonnegative auxiliary variables ``af == f``, ``ag == g`` are introduced.
+    nonnegative auxiliary variables ``af == f``, ``ag == g`` are introduced. Vector/
+    array pairs are complementarity elementwise (one SOS1 set per index).
     """
-    for i, p in enumerate(pairs):
-        tag = p.name or f"compl{i}"
+    for p in _scalarize_pairs(model, pairs):
+        tag = p.name
         members: list[Variable] = []
         for side, expr in (("f", p.f), ("g", p.g)):
             if isinstance(expr, Variable) and expr.size == 1:
                 model.subject_to(expr >= 0, name=f"{tag}_{side}_nonneg")
                 members.append(expr)
             else:
-                aux = model.continuous(f"{tag}_{side}_aux", lb=0.0, ub=np.inf)
+                # Finite ub (from interval enclosure) keeps the SOS1→big-M
+                # linking exact; left at inf only when genuinely unbounded, so
+                # the downstream check surfaces a clear "add a finite ub" error.
+                aux = model.continuous(
+                    f"{tag}_{side}_aux", lb=0.0, ub=_aux_upper_bound(model, expr)
+                )
                 model.subject_to(aux == expr, name=f"{tag}_{side}_link")
                 members.append(aux)
         model.sos1(members, name=f"{tag}_sos1")
@@ -119,16 +195,20 @@ def reformulate_gdp(model: Model, pairs: list[Complementarity]) -> None:
     side is zero when the other is bounded away from zero (the backward
     complementarity rule).
 
-    Nonlinear or vector operands are lifted into a scalar auxiliary variable
+    Nonlinear operands are lifted into a scalar auxiliary variable
     ``u == expr`` (with finite interval bounds) so the disjunct ``u == 0`` stays
     linear and big-M is exact; plain scalar variables enter the disjunction
     directly. Lifting also keeps the nonlinear part as an ordinary smooth
     equality handled natively by the NLP relaxation — avoiding the perspective
     of a nonlinear equality, whose big-M relaxation is bounded unreliably and
     whose hull form often cannot be linearized.
+
+    Vector/array pairs are complementarity elementwise: each index becomes its own
+    ``(f_i==0) ∨ (g_i==0)`` disjunction, not a single all-zero-vector disjunction.
     """
-    for i, p in enumerate(pairs):
-        tag = p.name or f"compl{i}"
+    for p in _scalarize_pairs(model, pairs):
+        # _scalarize_pairs always assigns a name; narrow Optional[str] -> str.
+        tag = p.name or "compl"
         fv = _gdp_operand(model, p.f, tag, "f")
         gv = _gdp_operand(model, p.g, tag, "g")
         model.subject_to(fv >= 0, name=f"{tag}_f_nonneg")
