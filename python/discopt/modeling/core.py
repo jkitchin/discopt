@@ -371,6 +371,18 @@ def _broadcast_shapes(
     NLPEvaluator with an opaque traceback, or (worse) be silently mis-extracted —
     so raise here with both operand shapes named.
     """
+    # Hot path: building a large McCormick relaxation constructs millions of
+    # element-wise ``BinaryOp`` nodes (~1.5M for a single qap node), the vast
+    # majority on identical shapes — scalars ``() op ()`` or matched arrays. Equal
+    # shapes broadcast to themselves, and a scalar broadcasts to the other operand;
+    # both are exact and skip the ~10x-slower ``numpy.broadcast_shapes`` machinery
+    # (profiled ~2.5s of a 12.6s 4-node build). Result is identical to the numpy
+    # path, so this is bound-neutral. Differing non-scalar shapes still defer to
+    # numpy, which additionally validates broadcast-compatibility.
+    if s_left == s_right or s_right == ():
+        return s_left
+    if s_left == ():
+        return s_right
     try:
         return tuple(int(d) for d in np.broadcast_shapes(s_left, s_right))
     except ValueError:

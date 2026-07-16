@@ -257,6 +257,26 @@ structural `0.0` adds exactly, and CSC preserves ascending row order, so `Aᵀy`
     point (`test_binary_products_get_moment_cuts_via_diagonal_shortcut`). 158 PSD, 653 smoke, 10
     adversarial green; continuous QCQP PSD path unchanged (reaches −1.0 exactly).
 
+- [x] **T10 — per-node LP-time profiling: the LP is NOT the bottleneck; the cold rebuild is.**
+  cProfile of `MccormickLPRelaxer.solve_at_node` on qap (guard lifted, 4 node solves, warm):
+  **3.66 s/node**, split — **cold `build_milp_relaxation` 3.16 s (86%)** vs the sparse LP solve
+  `solve_lp_warm_csc_py` **0.49 s (13%)**. The "per-node LP time" is small; the cost is
+  **rebuilding the 85 756-row McCormick relaxation from scratch every node** (qap can't use the
+  incremental fast path — its dense `base_A` is declined in T6). Inside the build, the top Python
+  cost was **1.54 M `BinaryOp` constructions per 4 nodes**, each calling
+  `numpy.broadcast_shapes` on (almost always) scalar `()` shapes — ~2.5 s of the 12.6 s 4-node
+  build spent on shape bookkeeping alone.
+  - **Fix (bound-neutral, committed):** scalar/equal-shape fast path in `core._broadcast_shapes`
+    (equal shapes → themselves; scalar → the other operand; differing shapes still defer to numpy,
+    which also validates). Verified identical output to numpy on a broadcast panel (incl. the
+    mismatch-raises case). **Per-node 3.66 s → 3.05 s (−17%)**, build 3.16 → 2.55 s/node; 653
+    smoke + 96 shape/broadcast tests green.
+  - **The remaining bottleneck (biggest lever, not yet taken):** the 2.55 s/node cold rebuild
+    itself. `distribute_products` (0.64 s/node) + `_build_product`/`_emit_mccormick` dominate. The
+    real win is to **make `IncrementalMcCormickLP` sparse** (the T6 follow-up) so qap can patch
+    coefficients per node instead of rebuilding — that would collapse the ~2.5 s build to a patch,
+    leaving mostly the 0.49 s LP solve. Larger change (bit-identity contract vs the cold build).
+
 ## Problem (measured on qap — a 225-binary Quadratic Assignment Problem)
 
 `solve_milp_py` (the Rust MILP entry) takes a **dense** `a: PyReadonlyArray2`, and
