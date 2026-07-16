@@ -1491,6 +1491,74 @@ fn farkas_safe_bound(
     g > margin
 }
 
+/// CSC port of [`farkas_safe_bound`] (docs/dev/sparse-milp-plan.md T3b1). Bit-identical:
+/// the only matrix use is `(Aᵀy)ⱼ`, which `csc.dot(j, y)` computes as the same sum of
+/// the same nonzero products (multiplication commutes; structural zeros add `0.0`
+/// exactly; CSC preserves ascending row order). Never materializes the dense matrix.
+#[allow(dead_code)] // wired into the driver at T3b5
+fn farkas_safe_bound_csc(
+    y: &[f64],
+    csc: &SparseCols,
+    b: &[f64],
+    l: &[f64],
+    u: &[f64],
+    m: usize,
+    n: usize,
+) -> bool {
+    let ynorm = y.iter().fold(0.0f64, |acc, &v| acc.max(v.abs()));
+    let rc_tol = 1e-7 * ynorm.max(1.0);
+    let mut g = 0.0f64;
+    let mut scale = 0.0f64;
+    for i in 0..m {
+        g += b[i] * y[i];
+        scale = scale.max((b[i] * y[i]).abs());
+    }
+    for j in 0..n {
+        let aty = csc.dot(j, y);
+        let mut rc = -aty;
+        if rc.abs() <= rc_tol {
+            rc = 0.0;
+        }
+        let term = if rc > 0.0 {
+            if l[j] <= -INF {
+                return false;
+            }
+            rc * l[j]
+        } else if rc < 0.0 {
+            if u[j] >= INF {
+                return false;
+            }
+            rc * u[j]
+        } else {
+            0.0
+        };
+        g += term;
+        scale = scale.max(term.abs());
+    }
+    let margin = 1e-9 * scale.max(1.0);
+    g > margin
+}
+
+/// CSC port of [`verify_farkas_infeasible`].
+#[allow(dead_code)] // wired into the driver at T3b5
+fn verify_farkas_infeasible_csc(
+    y: &[f64],
+    csc: &SparseCols,
+    b: &[f64],
+    l: &[f64],
+    u: &[f64],
+    m: usize,
+    n: usize,
+) -> bool {
+    if y.len() != m || m == 0 {
+        return false;
+    }
+    farkas_safe_bound_csc(y, csc, b, l, u, m, n) || {
+        let neg: Vec<f64> = y.iter().map(|v| -v).collect();
+        farkas_safe_bound_csc(&neg, csc, b, l, u, m, n)
+    }
+}
+
 /// Limited strong branching. For the *unreliable* fractional candidates (those
 /// whose pseudocosts aren't trusted yet), probe both child bounds with a warm
 /// dual re-solve from the node's basis and pick the variable with the best
@@ -1932,6 +2000,88 @@ fn try_rounding(
             .collect()
     };
 
+    let mut best: Option<(Vec<f64>, f64)> = None;
+    let mut consider = |xc: Vec<f64>| {
+        if feasible(&xc) {
+            let o = obj(&xc);
+            if best.as_ref().map(|(_, bo)| o < *bo).unwrap_or(true) {
+                best = Some((xc, o));
+            }
+        }
+    };
+    consider(make(&|v: f64| v.round()));
+    consider(make(&|v: f64| v.floor()));
+    best
+}
+
+/// CSC port of [`try_rounding`] (docs/dev/sparse-milp-plan.md T3b1). Bit-identical:
+/// the slack range (`slack_lo/hi`, xc-independent) and the per-row activity `act` are
+/// accumulated by CSC column iteration in the SAME ascending order as the dense
+/// per-row loops, and a structural `0.0` adds exactly, so every row sum matches
+/// term-for-term. Never materializes the dense matrix.
+#[allow(clippy::too_many_arguments)]
+#[allow(dead_code)] // wired into the driver at T3b5
+fn try_rounding_csc(
+    x: &[f64],
+    ns: usize,
+    is_int: &[bool],
+    csc: &SparseCols,
+    b_w: &[f64],
+    c_w: &[f64],
+    l_w: &[f64],
+    u_w: &[f64],
+    n_orig_rows: usize,
+    n_w: usize,
+    obj_const: f64,
+) -> Option<(Vec<f64>, f64)> {
+    let (col_ptr, row_idx, vals) = csc.raw();
+    let mut slack_lo = vec![0.0f64; n_orig_rows];
+    let mut slack_hi = vec![0.0f64; n_orig_rows];
+    for k in ns..n_w {
+        for idx in col_ptr[k]..col_ptr[k + 1] {
+            let i = row_idx[idx];
+            if i >= n_orig_rows {
+                continue;
+            }
+            let aik = vals[idx];
+            let (c1, c2) = (aik * l_w[k], aik * u_w[k]);
+            slack_lo[i] += c1.min(c2);
+            slack_hi[i] += c1.max(c2);
+        }
+    }
+    let feasible = |xc: &[f64]| -> bool {
+        let mut act = vec![0.0f64; n_orig_rows];
+        for j in 0..ns {
+            for idx in col_ptr[j]..col_ptr[j + 1] {
+                let i = row_idx[idx];
+                if i >= n_orig_rows {
+                    continue;
+                }
+                act[i] += vals[idx] * xc[j];
+            }
+        }
+        for i in 0..n_orig_rows {
+            let resid = b_w[i] - act[i];
+            if resid < slack_lo[i] - 1e-6 || resid > slack_hi[i] + 1e-6 {
+                return false;
+            }
+        }
+        true
+    };
+    let obj = |xc: &[f64]| -> f64 { (0..ns).map(|j| c_w[j] * xc[j]).sum::<f64>() + obj_const };
+    let make = |round: &dyn Fn(f64) -> f64| -> Vec<f64> {
+        (0..ns)
+            .map(|j| {
+                let v = if is_int[j] { round(x[j]) } else { x[j] };
+                let (lo, hi) = if l_w[j] <= u_w[j] {
+                    (l_w[j], u_w[j])
+                } else {
+                    (u_w[j], l_w[j])
+                };
+                v.clamp(lo, hi)
+            })
+            .collect()
+    };
     let mut best: Option<(Vec<f64>, f64)> = None;
     let mut consider = |xc: Vec<f64>| {
         if feasible(&xc) {
@@ -3243,6 +3393,54 @@ mod sparse_milp_diff {
         // b/c/l/u/is_int side-effects (independent of the matrix layout) match the k
         // appended surplus rows/cols.
         assert_eq!((mn, nn), (m + cuts.len(), n + cuts.len()));
+    }
+
+    /// T3b1 gate: `farkas_safe_bound_csc`/`verify_farkas_infeasible_csc` give the
+    /// identical verdict to their dense oracles across several rays.
+    #[test]
+    fn farkas_csc_matches_dense() {
+        let a = vec![2.0, 0.0, -1.0, 0.0, 3.0, 1.0, 1.0, -2.0, 0.0]; // 3×3
+        let (m, n) = (3usize, 3usize);
+        let b = vec![1.0, -2.0, 0.5];
+        let l = vec![0.0, 0.0, 0.0];
+        let u = vec![INF, INF, INF];
+        let csc = SparseCols::from_dense(&a, m, n);
+        for y in [
+            vec![1.0, -1.0, 2.0],
+            vec![0.5, 0.5, 0.5],
+            vec![-3.0, 1.0, 0.0],
+            vec![0.0, 0.0, 0.0],
+        ] {
+            assert_eq!(
+                farkas_safe_bound(&y, &a, &b, &l, &u, m, n),
+                farkas_safe_bound_csc(&y, &csc, &b, &l, &u, m, n),
+                "farkas verdict drift for y={y:?}"
+            );
+            assert_eq!(
+                verify_farkas_infeasible(&y, &a, &b, &l, &u, m, n),
+                verify_farkas_infeasible_csc(&y, &csc, &b, &l, &u, m, n),
+            );
+        }
+    }
+
+    /// T3b1 gate: `try_rounding_csc` returns the identical incumbent (or `None`) as
+    /// the dense oracle across fractional/integral start points.
+    #[test]
+    fn try_rounding_csc_matches_dense() {
+        let a = vec![1.0, 1.0, 1.0]; // 1×3: x0 + x1 + s = b
+        let (ns, n_orig_rows, n_w) = (2usize, 1usize, 3usize);
+        let b = vec![1.0];
+        let c = vec![-1.0, -1.0, 0.0];
+        let l = vec![0.0, 0.0, 0.0];
+        let u = vec![1.0, 1.0, INF];
+        let is_int = vec![true, true, false];
+        let csc = SparseCols::from_dense(&a, n_orig_rows, n_w);
+        for x in [vec![0.6, 0.3], vec![1.0, 1.0], vec![0.0, 0.0]] {
+            let dense = try_rounding(&x, ns, &is_int, &a, &b, &c, &l, &u, n_orig_rows, n_w, 0.0);
+            let cscr =
+                try_rounding_csc(&x, ns, &is_int, &csc, &b, &c, &l, &u, n_orig_rows, n_w, 0.0);
+            assert_eq!(dense, cscr, "try_rounding drift for x={x:?}");
+        }
     }
 
     /// The CSC of each instance round-trips the dense matrix's exact nonzeros

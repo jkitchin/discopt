@@ -100,7 +100,7 @@ matrices + fractional points). All ports are bit-identical by the same argument:
 structural `0.0` adds exactly, and CSC preserves ascending row order, so `Aᵀy`
 (`csc.dot`) and row activities match the dense sums term-for-term.
 
-- [ ] **T3b1 — trivial ports.** `struct_nnz` → `col_ptr[ns]`; `try_rounding` and
+- [x] **T3b1 — trivial ports.** `struct_nnz` → `col_ptr[ns]`; `try_rounding` and
   `farkas_safe_bound` → `&SparseCols` (column-iteration into `act/lo/hi`;
   `csc.dot(j,y)`). Keep dense versions as oracles. **Done:** differential unit tests
   (dense == csc) green.
