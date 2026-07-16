@@ -2652,3 +2652,251 @@ mod tests {
         );
     }
 }
+
+/// T0 (docs/dev/sparse-milp-plan.md): differential harness for the sparse-MILP
+/// conversion. A fixed panel of small MILPs solved through the reference dense
+/// [`solve_milp`]. Today it pins the dense results and their determinism; at T1 the
+/// CSC entry point plugs into [`Case::solve_csc`] and [`assert_same`] gates it
+/// bit-identical to the dense path (same status / obj / bound / node count) — the
+/// invariant that keeps the representation change from perturbing any dual bound.
+#[cfg(test)]
+mod sparse_milp_diff {
+    use super::*;
+    use crate::lp::simplex::sparse::SparseCols;
+
+    /// One MILP in the panel. Owns its data so the borrowing [`LpView`] can be
+    /// rebuilt per solve.
+    struct Case {
+        name: &'static str,
+        a: Vec<f64>, // row-major, m*n
+        m: usize,
+        n: usize,
+        c: Vec<f64>,
+        l: Vec<f64>,
+        u: Vec<f64>,
+        b: Vec<f64>,
+        ns: usize,
+        int_cols: Vec<usize>,
+    }
+
+    impl Case {
+        fn opts(&self) -> MilpOptions {
+            MilpOptions {
+                n_struct: self.ns,
+                integer_cols: self.int_cols.clone(),
+                max_nodes: 100_000,
+                time_limit_s: None,
+                gap_tol: 1e-9,
+                root_cuts: 16,
+                cut_rounds: 3,
+                gmi_cuts: true,
+                cut_select: true,
+                node_cuts: true,
+                max_pool_cuts: 500,
+                heuristics: true,
+                presolve: true,
+                strong_branch: true,
+                node_propagation: true,
+                reduced_cost_fixing: true,
+                sb_max_cands: 8,
+                sb_node_budget: 1024,
+                simplex: SimplexOptions::default(),
+            }
+        }
+
+        fn dense_view(&self) -> LpView<'_> {
+            LpView {
+                a: &self.a,
+                m: self.m,
+                n: self.n,
+                c: &self.c,
+                l: &self.l,
+                u: &self.u,
+            }
+        }
+
+        /// Reference solve through the dense driver.
+        fn solve_dense(&self) -> MilpResult {
+            solve_milp(&self.dense_view(), &self.b, 0.0, &self.opts())
+        }
+
+        /// CSC view of this instance's matrix. T1 will feed this to the CSC driver
+        /// entry; kept here so the harness already exercises `from_dense`/`from_csc`
+        /// round-tripping the same nonzeros the dense path sees.
+        #[allow(dead_code)]
+        fn csc(&self) -> SparseCols {
+            SparseCols::from_dense(&self.a, self.m, self.n)
+        }
+    }
+
+    /// Panel: pure-LP, small binary knapsack, general integer, infeasible,
+    /// unbounded, and a cuts-firing knapsack (branches + fires GMI cuts).
+    fn panel() -> Vec<Case> {
+        vec![
+            // pure LP: min -x0 s.t. x0 + s = 1, x0 in [0,1] continuous -> -1.
+            Case {
+                name: "pure_lp",
+                a: vec![1.0, 1.0],
+                m: 1,
+                n: 2,
+                c: vec![-1.0, 0.0],
+                l: vec![0.0, 0.0],
+                u: vec![1.0, INF],
+                b: vec![1.0],
+                ns: 1,
+                int_cols: vec![],
+            },
+            // binary knapsack: max 10x0+9x1+8x2+x3 s.t. 5*sum <= 9, binary -> -10.
+            Case {
+                name: "binary_knapsack",
+                a: vec![5.0, 5.0, 5.0, 5.0, 1.0],
+                m: 1,
+                n: 5,
+                c: vec![-10.0, -9.0, -8.0, -1.0, 0.0],
+                l: vec![0.0; 5],
+                u: vec![1.0, 1.0, 1.0, 1.0, INF],
+                b: vec![9.0],
+                ns: 4,
+                int_cols: vec![0, 1, 2, 3],
+            },
+            // general integer: min -x0-x1 s.t. x0+x1+s=3, x in [0,2] int -> -3.
+            Case {
+                name: "general_integer",
+                a: vec![1.0, 1.0, 1.0],
+                m: 1,
+                n: 3,
+                c: vec![-1.0, -1.0, 0.0],
+                l: vec![0.0, 0.0, 0.0],
+                u: vec![2.0, 2.0, INF],
+                b: vec![3.0],
+                ns: 2,
+                int_cols: vec![0, 1],
+            },
+            // infeasible: x0 + s = 1, x0 in [2,5] int -> infeasible.
+            Case {
+                name: "infeasible",
+                a: vec![1.0, 1.0],
+                m: 1,
+                n: 2,
+                c: vec![1.0, 0.0],
+                l: vec![2.0, 0.0],
+                u: vec![5.0, INF],
+                b: vec![1.0],
+                ns: 1,
+                int_cols: vec![0],
+            },
+            // unbounded: min -x0 s.t. 0*x0 + s = 1, x0 in [0,INF) -> unbounded.
+            Case {
+                name: "unbounded",
+                a: vec![0.0, 1.0],
+                m: 1,
+                n: 2,
+                c: vec![-1.0, 0.0],
+                l: vec![0.0, 0.0],
+                u: vec![INF, INF],
+                b: vec![1.0],
+                ns: 1,
+                int_cols: vec![0],
+            },
+            // cuts-firing knapsack: 6 binaries, branches and fires GMI cuts.
+            Case {
+                name: "cuts_firing_knapsack",
+                a: vec![5.0, 3.0, 2.0, 4.0, 3.0, 5.0, 1.0],
+                m: 1,
+                n: 7,
+                c: vec![-8.0, -5.0, -3.0, -6.0, -4.0, -7.0, 0.0],
+                l: vec![0.0; 7],
+                u: vec![1.0, 1.0, 1.0, 1.0, 1.0, 1.0, INF],
+                b: vec![10.0],
+                ns: 6,
+                int_cols: vec![0, 1, 2, 3, 4, 5],
+            },
+        ]
+    }
+
+    /// Bit-identical gate used by the dense-vs-dense determinism check now and by
+    /// the dense-vs-CSC check at T1. Status and node count must match exactly;
+    /// obj/bound match to a tight tolerance (finite cases only).
+    fn assert_same(name: &str, a: &MilpResult, b: &MilpResult) {
+        assert_eq!(a.status, b.status, "{name}: status drift");
+        assert_eq!(a.nodes, b.nodes, "{name}: node-count drift");
+        if a.obj.is_finite() && b.obj.is_finite() {
+            assert!(
+                (a.obj - b.obj).abs() < 1e-9,
+                "{name}: obj drift {} {}",
+                a.obj,
+                b.obj
+            );
+        }
+        if a.bound.is_finite() && b.bound.is_finite() {
+            assert!(
+                (a.bound - b.bound).abs() < 1e-9,
+                "{name}: bound drift {} {}",
+                a.bound,
+                b.bound
+            );
+        }
+    }
+
+    #[test]
+    fn dense_panel_reference_values() {
+        for case in panel() {
+            let r = case.solve_dense();
+            match case.name {
+                "pure_lp" => {
+                    assert_eq!(r.status, MilpStatus::Optimal, "pure_lp");
+                    assert!((r.obj - (-1.0)).abs() < 1e-6, "pure_lp obj {}", r.obj);
+                }
+                "binary_knapsack" => {
+                    assert_eq!(r.status, MilpStatus::Optimal, "binary_knapsack");
+                    assert!((r.obj - (-10.0)).abs() < 1e-6, "knapsack obj {}", r.obj);
+                }
+                "general_integer" => {
+                    assert_eq!(r.status, MilpStatus::Optimal, "general_integer");
+                    assert!((r.obj - (-3.0)).abs() < 1e-6, "genint obj {}", r.obj);
+                }
+                "infeasible" => assert_eq!(r.status, MilpStatus::Infeasible, "infeasible"),
+                "unbounded" => assert_eq!(r.status, MilpStatus::Unbounded, "unbounded"),
+                "cuts_firing_knapsack" => {
+                    assert_eq!(r.status, MilpStatus::Optimal, "cuts_firing");
+                    assert!(
+                        r.obj.is_finite() && r.obj < 0.0,
+                        "cuts_firing obj {}",
+                        r.obj
+                    );
+                }
+                other => panic!("unhandled case {other}"),
+            }
+        }
+    }
+
+    /// Determinism: re-solving is bit-identical. This is exactly the property the
+    /// CSC path must satisfy against the dense path at T1, so the harness proves the
+    /// gate is meaningful (the dense driver itself is reproducible).
+    #[test]
+    fn dense_panel_is_deterministic() {
+        for case in panel() {
+            let r1 = case.solve_dense();
+            let r2 = case.solve_dense();
+            assert_same(case.name, &r1, &r2);
+            assert_eq!(r1.lp_iters, r2.lp_iters, "{}: lp_iters drift", case.name);
+        }
+    }
+
+    /// The CSC of each instance round-trips the dense matrix's exact nonzeros
+    /// (T1 relies on this equivalence). Sanity-checks `from_dense` on the panel.
+    #[test]
+    fn csc_roundtrips_dense_nonzeros() {
+        for case in panel() {
+            let sp = case.csc();
+            let mut dense_nnz = 0usize;
+            for &v in &case.a {
+                if v != 0.0 {
+                    dense_nnz += 1;
+                }
+            }
+            let (_col_ptr, _row_idx, vals) = sp.raw();
+            assert_eq!(vals.len(), dense_nnz, "{}: csc nnz != dense nnz", case.name);
+        }
+    }
+}

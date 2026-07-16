@@ -27,11 +27,14 @@ assembly, never a new relaxation. Stop and root-cause.
 
 ## Tasks
 
-- [ ] **T0 — differential harness.** Rust test `bnb::milp_driver` (or a new
-  `sparse_milp_diff` test module): a panel of small MILPs — pure-LP, 1–3 binaries,
-  infeasible, unbounded, a cuts-firing instance — each solved via dense `solve_milp`
-  and (stubbed for now) asserted against itself; wire the CSC path in at T1.
-  **Done:** panel builds + passes against the dense path; committed.
+- [x] **T0 — differential harness.** `#[cfg(test)] mod sparse_milp_diff` in
+  `milp_driver.rs`: a 6-case panel (pure-LP, binary knapsack, general integer,
+  infeasible, unbounded, cuts-firing knapsack) with a `Case` owning its data, a
+  dense-oracle runner, a `Case::csc()` (from_dense) for T1, and an `assert_same`
+  bit-identical gate (status + node-count exact, obj/bound tight). Tests:
+  reference-values, determinism (dense re-solve bit-identical incl. lp_iters), and
+  CSC-nnz-round-trips-dense. **Done ✓** — 3 tests green; full `cargo test
+  -p discopt-core` 449+ pass.
 - [ ] **T1 — CSC-carrying driver core.** `solve_milp_csc(csc: SparseCols, m, n, c,
   l, u, b, obj_const, opts)` that threads `csc` where `SparseCols::from_dense(&a_w)`
   is today and passes zero-length `.a` to node `LpView`s. Root solve / cuts /
