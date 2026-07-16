@@ -32,62 +32,85 @@ problem, not a coverage or reformulation gap.
   bound-changing lever with no independently-demonstrated benefit (Dev-Philosophy
   #4).
 
-## 1. Root cause (measured, reproducible)
+## 1. Root cause (measured by in-engine instrumentation on the *real* solve)
 
-hda's root relaxation LP is **3054 rows × 1145 cols** — grossly redundant (2.7×
-more inequality rows than columns; the lifted McCormick / interval-floor
-envelopes emit many dependent rows). Its coefficient spread is **4.13e17**
-(Arrhenius pre-exponentials `~6.3e10` against `exp(-261.67/x)` envelope atoms in
-`[2e-13, 2.4e-12]`).
+hda's root relaxation LP is **2974 rows × ~1145 cols**, coefficient spread
+~1e26 (Arrhenius pre-exponentials `~6.3e10` against `exp(-261.67/x)` envelope
+atoms in `[2e-13, 2.4e-12]`, plus LinForm cancellation residue near machine
+epsilon). The blocker was pinned by temporary `DISCOPT_LP_DEBUG` `eprintln`
+tracing in `primal.rs` (scaling entry, phase-1 residual, phase-2 exit, and the
+`assemble()` feasibility audit), driving a real `Model.solve()` — **not** a
+captured/replayed LP (an earlier capture-and-replay pass was invalidated: the
+captured arrays were a malformed/infeasible subset — HiGHS agreed they were
+infeasible — so every replay conclusion from it, including "phase-1
+false-certifies infeasible" and "presolve/redundancy is the lever", is
+**withdrawn**).
 
-On this LP the in-house simplex fails at **0 pivots** — it never gets past
-phase-1 / initial factorization:
+On the *real* per-node LP the trace is unambiguous:
 
-| path | verdict on hda's folded root LP |
-|---|---|
-| bare cold simplex, un-equilibrated (`solve_lp_py`) | **false `infeasible`**, 0 pivots, 0.2 s |
-| bare cold simplex, geometric-mean equilibrated (spread → 1.9e4) | **`numerical`**, 0 pivots, ~14 s |
-| per-node path `milp.solve(backend="simplex")` | **false `infeasible`**, ~0.5 s |
-| `MilpRelaxationModel._solve_lp_warm_equilibrated()` (the repo's ill-conditioned handler, built for nvs21) | **None** (numerical/iter-limit) after ~55 s |
-| SciPy-HiGHS (has presolve) | `optimal` (collapses the redundancy first) |
+```
+phase1 done: m=2974 artificial_infeas_sum=3.5e-15      <- phase 1 CONVERGES (feasible)
+phase2 loop -> Numerical                                <- phase 2 breaks down
+assemble: audit=Bounds -> final=Numerical obj=1.6e10    <- drifted point rejected
+assemble: audit=Rows   -> final=Numerical obj=-2.1e4    <- Ax=b residual rejected
+```
 
-Equilibration *fixes the conditioning* (4.13e17 → 1.9e4) but the engine still
-returns `numerical` at 0 pivots — so conditioning is **not** the whole story.
-The distinguishing factor is HiGHS's **presolve**, which removes the redundant /
-dependent rows before factorizing; the in-house engine has no such LP presolve
-and its (already hardened) phase-1 cannot factor the raw redundant basis.
+So:
 
-The in-house phase-1 is already sophisticated for this exact class — Farkas-ray
-certification to distinguish genuine from numerical false-infeasible, plus the
-C-39 `drive_out_basic_artificials` degenerate-cleanup pass
-(`crates/discopt-core/src/lp/simplex/primal.rs:769–851`). hda defeats even that
-and hits the honest, non-fathoming `LpStatus::Numerical` return
-(`primal.rs:846`). No unsound fathom ever occurs — the failure mode is *no
-bound*, never a wrong one (the C-38 no-Farkas-no-prune guard holds). TD-B's
-"stock reform yields an infeasible root LP" observation is this same numerical
-false-infeasible, not an invalid relaxation.
+1. **Phase 1 succeeds** — the LP is feasible and the engine finds a feasible
+   basis (artificial infeasibility ≈ 3.5e-15). Coverage, the equilibration noise
+   floor, and row redundancy are all **not** the blocker (all three earlier
+   hypotheses falsified).
+2. **Phase 2 fails** — the objective-optimizing simplex loop returns
+   `LpStatus::Numerical` (a mid-solve `refactorize`/`basic_values` breakdown on
+   the ill-conditioned basis), or returns a point that the `assemble()`
+   feasibility audit rejects as `Bounds` (a Harris ratio-test excursion past a
+   variable bound) or `Rows` (accumulated `Ax=b` drift). The assembled objectives
+   are garbage-scale (1.6e10, 5.8e6, −3.6e7), confirming numerical drift.
+3. The audit **soundly** downgrades every such solve to `Numerical` — it refuses
+   to certify a drifted point (no unsound bound is ever produced; the failure
+   mode is strictly *no bound*). Because *every* root-LP solve fails this way,
+   the node contributes no dual bound and the tree never fathoms.
 
-## 2. The real fix (scoped, not yet implemented — core-engine work)
+The blocker is therefore **phase-2 simplex + factorization robustness on hda's
+ill-conditioned basis**, not relaxation coverage, conditioning-of-the-matrix, or
+row redundancy.
 
-Give the in-house LP layer a **presolve that removes redundant / linearly
-dependent inequality rows** (and empty/singleton rows) before the simplex
-factorizes — the step HiGHS uses to make this LP tractable. Candidate home:
-`crates/discopt-core/src/lp/` (a new `presolve` alongside `basis.rs`), applied on
-the relaxation-LP solve path.
+## 2. Candidate fixes (scoped, not yet implemented — core-engine work)
 
-This is a **certificate-critical core-engine change** and must ship under the
-bound-neutral verification regime (Dev-Philosophy #5): assert `node_count` and
-certified `objective` **exactly unchanged** on the certifying panel for every
-instance that already solves, plus `cargo test -p discopt-core`, before it can be
-trusted. It is therefore its own PR, not a rider on this investigation.
+Since phase-1 already reaches a feasible basis, two sound directions target the
+phase-2/audit failure. Both are certificate-critical core-engine changes and must
+ship under the bound-neutral regime (Dev-Philosophy #5): `node_count` and
+certified `objective` **exactly unchanged** on the certifying panel + `cargo test
+-p discopt-core`. Each is its own PR, not a rider on this investigation.
+
+**(A) Safe dual bound from the in-house basis (most tractable, additive).**
+A valid *lower* bound needs only a dual point + directed rounding
+(Neumaier–Shcherbina), **not** a clean primal. When phase-2 drifts (audit
+`Bounds`/`Rows`) or breaks down, the engine still holds a basis and can export its
+dual `y = B⁻ᵀc_B`; feeding that through the in-repo NS certificate
+(`milp_simplex._safe_lp_lower_bound_std`, already used elsewhere) would attach a
+sound (if loose) bound where today there is none — architecture-respecting (own
+dual, no HiGHS). *Risk to test first:* from a fully broken phase-2 basis the dual
+may yield only `-inf`; viability needs one instrumented probe (export the dual on
+the `Numerical`/audit-fail path and check the NS bound is finite on hda).
+
+**(B) Phase-2 / factorization robustness (the deeper fix).** Keep phase-2 from
+drifting/breaking down on the ill-conditioned basis — more frequent
+refactorization, tighter Harris ratio-test tolerances, or a better-conditioned
+basis factorization (the `#557` density-aware LU route, or basis scaling). Higher
+blast radius; only if (A) proves insufficient.
 
 Acceptance for #517 (unchanged): hda reports a **finite** dual bound (its first),
 `bound ≤ −5964.534084` (the published optimum), with no panel regression.
 
 ## 3. Disposition
 
-* #517 stays **open**, re-scoped to the in-house-simplex robustness blocker above.
+* #517 stays **open**, re-scoped to the phase-2/factorization robustness blocker
+  in §1, with candidate fix (A) (safe in-house dual bound) as the next step.
 * The external-HiGHS rescue and the subtol-fold are **not shipped** (branch reset;
   no source change to the relaxation or solver was retained).
-* Evidence for the rejection and the root cause is this document; the probes are
-  reproducible from the corpus instance `python/tests/data/minlplib_nl/hda.nl`.
+* The root cause was measured with temporary `DISCOPT_LP_DEBUG` instrumentation in
+  `primal.rs`, since reverted (no debug code retained). Reproducible from the
+  corpus instance `python/tests/data/minlplib_nl/hda.nl` via a real
+  `Model.solve()` — do **not** capture-and-replay the node LP (§1).
