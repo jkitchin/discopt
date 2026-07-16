@@ -54,18 +54,68 @@ def test_incremental_active_for_integer_qcqp():
     assert MccormickLPRelaxer(_int_qcqp())._inc is not None
 
 
-def test_incremental_declined_when_lift_too_large_for_dense(monkeypatch):
-    """A lift whose dense ``base_A`` would exceed the cell budget declines the
-    incremental structure and falls back to the sparse per-node cold build with an
-    UNCHANGED (never looser) bound.
+def test_incremental_structure_is_sparse_and_patch_matches_dense():
+    """The incremental structure holds ``base_A`` SPARSE and ``_patch`` returns a
+    sparse CSR whose dense form equals a from-scratch dense patch — the fixed-pattern
+    ``.data`` rewrite is bit-identical to the old dense ``A[k]=0; A[k,col]=coef``.
 
-    Regression for the qap ~30 GB blowup: ``IncrementalMcCormickLP`` stores
-    ``base_A`` DENSE (``rows x cols``) and ``_patch`` copies that whole array on
-    EVERY node — ~14.85 GB each for qap's 85756x21649 lift, ~30 GB peak just
-    constructing the relaxer. The size guard declines the dense structure above
-    ``_MAX_INCREMENTAL_DENSE_CELLS`` so large-lift models use the sparse cold path.
-    Before the guard, ``_inc`` was built regardless of lift size (this test's
-    ``_inc is None`` assertion fails); after, it is declined.
+    Regression for the sparse-incremental rewrite: before it ``base_A`` was a dense
+    ``rows x cols`` array (``.todense()``, ~14.85 GB per copy on qap). Here we assert
+    the representation is sparse AND the patched values are unchanged.
+    """
+    import numpy as np
+    import scipy.sparse as sp
+    from discopt._jax.incremental_mccormick import (
+        IncrementalMcCormickLP,
+        _affine_square_rows,
+        _bilinear_rows,
+        _monomial_rows,
+    )
+    from discopt._jax.term_classifier import classify_nonlinear_terms
+
+    m = _int_qcqp()  # (x-3)^2 + (y-2)^2 + x*y : bilinear + affine squares
+    inc = IncrementalMcCormickLP(m, classify_nonlinear_terms(m))
+    assert inc.ok
+    # base_A is sparse, not a dense ndarray.
+    assert sp.issparse(inc.base_A)
+
+    lb = np.array([1.0, 0.0])
+    ub = np.array([5.0, 4.0])
+    A_sp, b_sp, bd_sp = inc._patch(lb, ub)
+    assert sp.issparse(A_sp)  # patched matrix is sparse
+
+    # Independent dense reference of the same patch (zero the product rows, set the
+    # McCormick/monomial/affine-square coefficients) — must match the sparse patch.
+    A_ref = inc.base_A.toarray().copy()
+    for (i, j, a), rows in inc.bilin_rows.items():
+        for k, (ci, cj, cw, rhs) in zip(rows, _bilinear_rows(i, j, a, lb[i], ub[i], lb[j], ub[j])):
+            A_ref[k] = 0.0
+            A_ref[k, i] += ci
+            A_ref[k, j] += cj
+            A_ref[k, a] = cw
+    for (i, a, p), rows in inc.mono_rows.items():
+        for k, (ci, cs, rhs) in zip(rows, _monomial_rows(lb[i], ub[i], p)):
+            A_ref[k] = 0.0
+            A_ref[k, i] = ci
+            A_ref[k, a] = cs
+    for (j, a, coeff, const), rows in inc.affsq_rows.items():
+        for k, (cx, cw, rhs) in zip(rows, _affine_square_rows(coeff, const, lb[j], ub[j])):
+            A_ref[k] = 0.0
+            A_ref[k, j] = cx
+            A_ref[k, a] = cw
+    assert np.allclose(A_sp.toarray(), A_ref, atol=1e-12)
+
+
+def test_incremental_declined_when_lift_exceeds_nnz_budget(monkeypatch):
+    """A lift whose nonzero count exceeds the budget declines the incremental
+    structure and falls back to the sparse per-node cold build with an UNCHANGED
+    (never looser) bound.
+
+    The structure now holds ``base_A`` SPARSE and ``_patch`` copies only its
+    ``.data`` (~nnz floats) per node, so the guard is by NONZEROS
+    (``_MAX_INCREMENTAL_NNZ``), not the old dense ``rows*cols`` cells. Above it the
+    fast path is declined (``_inc is None``) and ``solve_at_node`` uses the cold
+    build; declining only forgoes the speedup, never soundness.
     """
     import discopt._jax.incremental_mccormick as inc
 
@@ -73,16 +123,16 @@ def test_incremental_declined_when_lift_too_large_for_dense(monkeypatch):
     lb = np.array([float(v.lb) for v in m._variables], dtype=np.float64)
     ub = np.array([float(v.ub) for v in m._variables], dtype=np.float64)
 
-    # Reference bound WITH the fast path (normal cap): structure engages.
+    # Reference bound WITH the fast path (normal budget): structure engages.
     relaxer_fast = MccormickLPRelaxer(m)
     assert relaxer_fast._inc is not None
     ref = relaxer_fast.solve_at_node(lb, ub)
     assert ref.status == "optimal"
 
-    # Tiny cap forces the oversize decline even on this small QCQP lift.
-    monkeypatch.setattr(inc, "_MAX_INCREMENTAL_DENSE_CELLS", 1.0)
+    # Tiny nnz budget forces the decline even on this small QCQP lift.
+    monkeypatch.setattr(inc, "_MAX_INCREMENTAL_NNZ", 1)
     relaxer_cold = MccormickLPRelaxer(m)
-    assert relaxer_cold._inc is None  # dense structure declined -> cold fallback
+    assert relaxer_cold._inc is None  # structure declined -> cold fallback
     got = relaxer_cold.solve_at_node(lb, ub)
     assert got.status == "optimal"
     # Sound + never looser: the cold path keeps every cut the fast path may drop,

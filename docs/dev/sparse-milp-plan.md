@@ -277,6 +277,34 @@ structural `0.0` adds exactly, and CSC preserves ascending row order, so `Aᵀy`
     coefficients per node instead of rebuilding — that would collapse the ~2.5 s build to a patch,
     leaving mostly the 0.49 s LP solve. Larger change (bit-identity contract vs the cold build).
 
+- [x] **T11 — sparse `IncrementalMcCormickLP`: 14.7× per-node on qap, 30 GB → 0.76 GB.** Made the
+  incremental fast path fully sparse so large-lift models patch coefficients per node instead of
+  rebuilding:
+  - `base_A` is now **CSR** (was `.todense()`d, ~14.85 GB/copy on qap). The McCormick product
+    rows have a **stable sparsity pattern** (columns fixed at `{factors, aux}`, only the box-
+    dependent *values* change), so `_build_structure` precomputes each product row's data-index
+    span + target-column positions, and `_patch` copies the base `.data` (~nnz floats) and
+    overwrites only those entries — O(nnz)/node, not O(rows·cols). `_full_build` keeps the matrix
+    sparse; the row-mapping loop is now O(nnz) via a CSC aux-column lookup (was O(rows·products)
+    ~1.8e9 on qap); `_rowset` compares sparse row-sets order-free without densifying; `assemble`
+    uses sparse vstack. Guard is now **nnz-based** (`_MAX_INCREMENTAL_NNZ = 5e7`), replacing the
+    T6 dense-cell decline.
+  - **Bit-identical:** the built-in `_validate` gate (patched vs cold-built row-set on 6 sign-
+    diverse boxes) still passes — 231 mccormick/incremental + 653 smoke + 10 adversarial green.
+    New `test_incremental_structure_is_sparse_and_patch_matches_dense` asserts `base_A` is sparse
+    and the sparse patch equals an independent dense patch.
+  - **Measured (qap, guard lifted so the LP solves):** per-node **1.566 s (cold rebuild) → 0.107 s
+    (sparse patch)**, **14.7×**, same bound (−1e-9), RSS **0.76 GB** (was ~30 GB). Construction
+    (incl. `_validate`'s 6 cold builds) ~13 s, one-time.
+  - **Fixup:** `lp_spatial_bb._separate_node_cuts` (a dense-only GMI/crossover cut separator that
+    always received a dense `A`) now densifies its `A` at entry — this bounded per-node cut path
+    was never viable for a large lift; the node LP solve stays sparse.
+  - **Production note:** the 14.7× is *realized* only where the node LP actually solves. For qap
+    the `_MAX_RELAX_DENSE_CELLS` fast-path guard (`mccormick_lp.py:766`) still declines the solve
+    (T7: qap's McCormick bound is ~0, so lifting it is a separate flagged, bound-changing
+    decision). This change removes the memory blowup and makes the fast path *available* for
+    large lifts — the enabler that lifting that guard would need.
+
 ## Problem (measured on qap — a 225-binary Quadratic Assignment Problem)
 
 `solve_milp_py` (the Rust MILP entry) takes a **dense** `a: PyReadonlyArray2`, and
