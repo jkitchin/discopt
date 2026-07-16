@@ -5589,6 +5589,15 @@ def solve_model(
         if _mc_lp_relaxer is not None
         else None
     )
+    # Measured interaction (this container, gear4): the injected incumbent only
+    # pays when the sharp NS margin lets nodes fathom against it — partition +
+    # injection with the FLAT margin is a regression (2229 nodes / 122 s vs
+    # 695 / 46 s without injection: no node clears the 1e-4 threshold, and the
+    # early incumbent activates cutoff-OBBT/improver machinery that burns wall).
+    # With the sharp margin the same injection collapses the tree to 3 nodes.
+    # So the witness injection additionally requires ns_sharp_margin.
+    if _ir_partitioner is not None and not _tuning().ns_sharp_margin:
+        _ir_partitioner = None
     if _ir_partitioner is not None:
         try:
             from discopt._jax.primal_heuristics import subnlp as _ir_subnlp

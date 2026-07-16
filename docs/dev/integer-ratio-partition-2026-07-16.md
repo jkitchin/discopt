@@ -112,7 +112,13 @@ unpartitioned LP's ratio point `q*`; `solver.py` completes each with a
 fixed-integer `subnlp` (finite-clipped midpoint seed + witness factors) and
 injects the best verified-feasible point via `tree.inject_incumbent`, right
 after the warm-start block. Gated on the partitioner being attached (same
-flag). Entry experiment: the top-ranked candidate at the gear4 root IS the
+flag) **AND `ns_sharp_margin`** — measured interaction: with the flat margin
+the injected incumbent cannot fathom the optimal-ratio nodes (no node clears
+the 1e-4 threshold) and the early incumbent activates cutoff-OBBT/improver
+machinery that burns wall: partition+injection+flat-margin measured **2229
+nodes / 122 s**, i.e. worse than partition alone (695 / 46 s). With the sharp
+margin the same injection collapses the tree.
+Entry experiment: the top-ranked candidate at the gear4 root IS the
 optimal assignment (16·19)/(43·49) = 304/2107, and `subnlp` completes it to
 objective 1.6434284565. End-to-end (both flags, cold start): **gear4
 certifies in 3 nodes / 1.6 s** — vs 2487 nodes / 42 s baseline, and ~8.7× the
