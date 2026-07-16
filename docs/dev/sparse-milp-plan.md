@@ -162,15 +162,34 @@ structural `0.0` adds exactly, and CSC preserves ascending row order, so `Aᵀy`
     driver**: it is the **Python McCormick relaxation build** for the 85,756-row lift
     (21,424 bilinear envelopes), a transient the sparse driver does not touch.
   - **Consequences / re-scope:** (1) The sparse-driver work is correct and necessary but does
-    **not** by itself make qap tractable. (2) The `_MAX_RELAX_DENSE_CELLS` guard is left
-    **intact** — its dense-driver rationale is now obsolete, but even on the sparse path
-    solving qap's node LP still incurs the ~28 GB build blowup **and** an unquantified
-    85756×85756 basis-LU fill-in risk, so relaxing it would make qap *worse*, not better. Do
-    not open it without first solving the build-memory problem. (3) **Next task (new plan
-    doc):** profile and cap the Python McCormick relaxation *build* memory for large lifts
-    (the ~30 GB transient), independent of this driver work. The certificate gate
-    (`incorrect_count == 0` on global50) is unaffected by this iteration — the routing is
-    bound-neutral. Retire the dense oracles only after that follow-up + nightly greens.
+    **not** by itself make qap tractable. (2) **Next task:** root-cause and fix the Python
+    McCormick relaxation build memory for large lifts (the ~30 GB transient).
+
+- [x] **T6 — ROOT-CAUSED + FIXED the ~30 GB (commit `fad92ab6`).** Stack-sampling the relaxer
+  build (`faulthandler.dump_traceback` triggered by an RSS watchdog) placed the entire blowup
+  in `IncrementalMcCormickLP._build_structure`, **not** the cold build and **not** `_A_ub`:
+  - The incremental per-node fast path stores **`base_A` DENSE** (`rows×cols`): qap's
+    85756×21649 lift is `.todense()` → **14.85 GB**, then `self.base_A = A.copy()` holds a
+    **second 14.85 GB**, and `_patch()` does `A = self.base_A.copy()` — a **fresh 14.85 GB
+    dense array on every node**. The fast path is `O(rows·cols)` memory, per node.
+  - **Fix:** guard the incremental structure by dense-cell budget
+    (`_MAX_INCREMENTAL_DENSE_CELLS = 1e8`, ~0.8 GB) **before** the `.todense()`; above it,
+    raise → caught by the existing `__init__` fallback (`ok=False`) → `solve_at_node` uses the
+    sparse per-node cold build. Sound: the fast path is only an accelerator whose rows are
+    `_validate`d bit-identical to the cold build, so declining it changes speed, never the
+    bound. General (mirrors `_MAX_RELAX_DENSE_CELLS`), not instance-keyed. Regression test
+    `test_incremental_declined_when_lift_too_large_for_dense`; 230 mccormick/incremental +
+    653 smoke green.
+  - **Measured (peak RSS):** relaxer construction 30 GB → **0.38 GB**; full solve with
+    production guards 30 GB → **0.86 GB**; full solve with `_MAX_RELAX_DENSE_CELLS` lifted so
+    the sparse simplex actually solves qap's 85756-row node LP → **0.88 GB, bound sound**
+    (−1e-9 ≤ oracle 388214). **The basis-LU does NOT blow memory** — falsifying the T5
+    "unquantified fill-in risk" worry. The remaining issue is per-node LP **time** (8 s budget
+    → ~20 s wall on the 85k-row McCormick LP), now a **profiling target**, not a memory
+    blocker. The `_MAX_RELAX_DENSE_CELLS` guard is still left intact by default (relaxing it —
+    to let qap earn a real McCormick LP bound instead of alphaBB — is a **bound-changing**
+    change per §5: needs the differential-bound test + feature flag + nightly greens, a
+    separate task). Certificate gate unaffected. Retire dense oracles only after nightly-green.
 
 ## Problem (measured on qap — a 225-binary Quadratic Assignment Problem)
 
