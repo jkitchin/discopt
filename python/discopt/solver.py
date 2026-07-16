@@ -2915,6 +2915,7 @@ def solve_model(
     record_decomposition: bool = False,
     lagrangian_bound: bool = False,
     lagrangian_frequency: int = 1,
+    lagrangian_method: str = "subgradient",
     initial_point: Optional[np.ndarray] = None,
     skip_convex_check: bool = False,
     nlp_bb: Optional[bool] = None,
@@ -3708,6 +3709,7 @@ def solve_model(
                 gap_tolerance=gap_tolerance,
                 max_iterations=max_nodes,
                 nlp_solver=nlp_solver,
+                method=lagrangian_method,
             )
         if decomposition == "auto":
             # Consult the advisor, log its reasoning, and dispatch its
