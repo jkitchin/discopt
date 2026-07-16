@@ -5137,6 +5137,39 @@ def solve_model(
                 _mc_lp_relaxer = None
                 _mc_mode = "none" if _pure_discrete else "nlp"
             else:
+                # Integer-ratio partition bound (issue #309; flag-gated,
+                # default OFF). When the PRE-reform model carries an eligible
+                # ratio-of-integer-products quotient, attach the partitioner so
+                # every node LP bound is max-combined with the sound
+                # achievable-ratio partition bound (gear4-class: the quotient's
+                # convex relaxation admits the target ratio at a fractional
+                # point, freezing the dual bound at 0; the partition over the
+                # exactly-enumerable achievable rational set is the measured
+                # unlock — see docs/dev/integer-ratio-partition-2026-07-16.md).
+                try:
+                    from discopt._jax.integer_ratio import (
+                        IntegerRatioPartitioner,
+                        detect_integer_ratio_specs,
+                    )
+                    from discopt._jax.integer_ratio import (
+                        enabled as _integer_ratio_enabled,
+                    )
+
+                    if _integer_ratio_enabled():
+                        _ir_model = (
+                            _prereform_model if _prereform_model is not None else model
+                        )
+                        _ir_specs = detect_integer_ratio_specs(_ir_model)
+                        if _ir_specs:
+                            _mc_lp_relaxer.set_integer_ratio_partitioner(
+                                IntegerRatioPartitioner(_ir_model, _ir_specs)
+                            )
+                            logger.info(
+                                "integer-ratio partition bound active: %d spec(s)",
+                                len(_ir_specs),
+                            )
+                except Exception as _ir_exc:  # pragma: no cover - defensive
+                    logger.debug("integer-ratio partition wiring skipped: %s", _ir_exc)
                 # Structure-gated cut policy (cuts="auto", the default): the A/B
                 # sweep showed RLT dominates on QCQP *with* linear constraints, PSD
                 # on box-QP (no constraints), and stacking the two is

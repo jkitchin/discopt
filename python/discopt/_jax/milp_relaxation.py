@@ -1625,6 +1625,7 @@ _EMPTY_VARMAP_KEYS: tuple[str, ...] = (
     "bilinear_pw",
     "bilinear_lambda",
     "generation_guardrails",
+    "ratio",
 )
 
 
@@ -1712,6 +1713,10 @@ def _uniform_relaxation_delegate(
     # Affine squares ``(c·x_j+d)**2`` (#640 Bucket 3): ``(var, aux) -> (coeff, const)``
     # for the incremental McCormick patch's closed-form envelope regeneration.
     vm["affine_square"] = dict(rel.affine_square_map)
+    # Ratio-of-products lifts (issue #309): the quotient aux column each exact
+    # ``(Π x_i)/(Π y_j)`` of bare originals was lifted to, for the integer-ratio
+    # partition bound.
+    vm["ratio"] = dict(rel.ratio_map)
     # Composite convex/concave lifts (issue #632 P2): each certified-convex/-concave
     # multivariate node the engine lifted to a single aux is registered here so the
     # existing ``MccormickLPRelaxer._separate_convex`` outer-approximation (Kelley)
