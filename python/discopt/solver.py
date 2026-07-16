@@ -2645,6 +2645,34 @@ def _root_relaxation_lower_bound(
                     psd_bound = float(_za)
             except Exception as psd_exc:  # pragma: no cover - defensive
                 logger.debug("root PSD-strengthened bound skipped: %s", psd_exc)
+
+        # RLT level-1 (constraint-factor products) strengthens the root bound on a
+        # constrained *binary* QP where McCormick alone is trivially loose (qap:
+        # root ~0 vs optimum 388214, issue #661). Each added row is a product of
+        # valid model constraints, solved with the exact vertex simplex, so the RLT
+        # LP minimum is a rigorous lower bound that joins the `max` below — it can
+        # only raise the bound. Opt-in (`DISCOPT_RLT1_ROOT_BOUND`, default off);
+        # any ineligibility/failure is a sound no-op.
+        rlt_bound: Optional[float] = None
+        _tun = _tuning()
+        if getattr(_tun, "rlt1_root_bound", False):
+            try:
+                from discopt._jax.model_utils import binary_flat_cols as _bfc
+                from discopt._jax.rlt import rlt1_lower_bound
+
+                _rb, _nrows = rlt1_lower_bound(
+                    model,
+                    relax,
+                    _relax_info,
+                    binary_vars=_bfc(model),
+                    time_limit=min(30.0, max(5.0, time_limit * 0.5)),
+                    max_pairs=int(getattr(_tun, "rlt1_max_pairs", 60_000)),
+                )
+                if _nrows and _rb is not None and np.isfinite(_rb):
+                    rlt_bound = float(_rb)
+            except Exception as rlt_exc:  # pragma: no cover - defensive
+                logger.debug("root RLT-1 bound skipped: %s", rlt_exc)
+
         budget = min(10.0, max(1.0, time_limit * 0.1))
         result = relax.solve(time_limit=budget, gap_tolerance=1e-6)
         # Only an OPTIMAL relaxation solve yields a valid lower bound. An
@@ -2683,7 +2711,7 @@ def _root_relaxation_lower_bound(
 
         # Both values are valid lower bounds for a minimization, so the larger
         # (tighter) one is the better rigorous bound.
-        candidates = [b for b in (plain_bound, sep_bound, psd_bound) if b is not None]
+        candidates = [b for b in (plain_bound, sep_bound, psd_bound, rlt_bound) if b is not None]
         if candidates:
             return max(candidates)
     except Exception as exc:  # pragma: no cover - defensive

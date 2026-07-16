@@ -328,6 +328,44 @@ structural `0.0` adds exactly, and CSC preserves ascending row order, so `Aᵀy`
     sparse thread enables); it stays off until such an instance measurably benefits on consecutive
     nightlies, per §5.
 
+- [x] **RLT1 — the relaxation-strength fix T7/T9/T12 pointed to: exhaustive root RLT level-1
+  bound closes qap's gap (issue #661, §4 entry-experiment confirmed, §5 flagged default-off).**
+  T7/T9/T12 established that qap's McCormick LP root bound is ~0 and that the *local* PSD/moment
+  cuts cannot rescue it (even a 14-var clique moment minor is PSD at the McCormick vertex —
+  measured λ_min ≈ −1.7e-17; the bilinear graph is 85 %-dense so no larger all-pairs clique
+  forms). The gap is **relaxation strength**, and the lever that binds is **RLT-1
+  constraint×variable products**, not the moment/SDP path.
+  - **Direction chosen (of the four in #661):** exhaustive root RLT-1 (Adams–Johnson
+    linearization). For each linear **equality** `a·x = β` of the model and each variable
+    `x_p`, add the valid identity `Σ_k a_k X_{p,k} = β x_p` (binary diagonal `X_pp = x_p`).
+    Purely LP — no SDP solver — so the bound is rigorous via the exact vertex simplex.
+  - **Entry experiment (before implementing, §4):** on qap's root box the exhaustive RLT-1 LP
+    (25 425 vars, 114 360 rows, 418 k nnz, built in 0.1 s) solves to **352 890.9** — vs
+    McCormick's **~0**, the oracle **dual bound 149 106**, and the true optimum **388 214**.
+    **Sound: 352 891 ≤ 388 214** (91 % of the optimum, and well above the published dual). On
+    small synthetic Koopmans–Beckmann QAPs (n=3..7, multiple seeds) the continuous McCormick LP
+    bound is **exactly 0** while RLT-1 reaches the **brute-force optimum** (or a tight
+    underestimate, e.g. n=7 → 3332 vs opt 3352), sound in every case — the fix is **general to
+    constrained binary QPs**, not a qap special-case. The exact in-house simplex matches HiGHS
+    on the tractable synthetic instances (rigorous path validated).
+  - **Cost caveat (measured):** the *exact vertex simplex* is very slow on qap's massively
+    degenerate all-pairs RLT-1 LP — HiGHS-ipm solves it in **12.8 s**, but `get_exact_lp_solver`
+    (simplex, the only rigorous oracle — IPM is rejected for rigor per #145) ran **>25 min**
+    without converging. So the qap **rigorous** bound is not yet realized in a practical budget;
+    the 352 891 figure is the HiGHS-ipm *gauge* of relaxation strength.
+  - **Shipped (§5 bound-changing):** `SolverTuning.rlt1_root_bound` (`DISCOPT_RLT1_ROOT_BOUND`,
+    **default off**) + size guard `rlt1_max_pairs` (`DISCOPT_RLT1_MAX_PAIRS`, default 60 000).
+    New module `python/discopt/_jax/rlt.py` (`build_rlt1_lp` / `rlt1_lower_bound`); wired into
+    `solver.py::_root_relaxation_lower_bound` as a candidate joined by `max` (only ever raises the
+    bound). Distinct from `rlt_cuts.py` (which *separates* targeted constraint×bound-factor cuts
+    over already-lifted columns per node — the non-exhaustive half that leaves qap at ~0); this
+    builds the exhaustive all-pairs RLT-1 LP. Tests: `python/tests/test_rlt_root_bound.py`
+    (differential-bound: RLT-1 ≥ McCormick ~0 and ≤ brute optimum; feasible-point sampling: no
+    assignment `(x, xxᵀ)` violates any RLT row; eligibility no-ops for no-equality / continuous /
+    oversize; flag default-off). **Default-off** until the rigorous solve is fast enough at
+    qap scale (an exact IPM / safe Neumaier–Shcherbina bound on the ipm solution is the named
+    follow-up), per §5's nightly-green gate.
+
 ## Problem (measured on qap — a 225-binary Quadratic Assignment Problem)
 
 `solve_milp_py` (the Rust MILP entry) takes a **dense** `a: PyReadonlyArray2`, and
