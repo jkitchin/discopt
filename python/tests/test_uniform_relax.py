@@ -448,3 +448,48 @@ def test_ep5_hash_consing_shares_one_compiled_fn():
     assert len(keys) == len(set(keys))
     for key, node in dag._intern.items():
         assert dag._intern[key] is node  # stable identity per structural key
+
+
+@pytest.mark.unit
+def test_sum_accumulation_bound_neutral_multiterm_quadratic():
+    """The ``sum`` rep folds children into one dict in O(N) (not the old
+    O(N^2) chained ``LinForm.__add__``). This must be BYTE-IDENTICAL to the
+    per-child accumulation: each product/linear column keeps its exact summed
+    coefficient. A multi-term quadratic whose McCormick envelope is exact at the
+    box corner pins the bound, so a dropped/mis-scaled objective coefficient would
+    move it.
+
+    ``min x*y + x*z`` over ``x,y,z in [1,2]`` — McCormick is exact at the corner
+    ``(1,1,1)`` where the true minimum ``1*1 + 1*1 = 2`` is attained, so the root
+    LP bound is exactly 2. If the sum accumulation mis-summed either bilinear aux's
+    objective coefficient the bound would not be 2.
+    """
+    m = Model()
+    x = m.continuous("x", lb=1.0, ub=2.0)
+    y = m.continuous("y", lb=1.0, ub=2.0)
+    z = m.continuous("z", lb=1.0, ub=2.0)
+    m.minimize(x * y + x * z)
+    bound, status, _ = _root_bound(m)
+    assert status == "optimal"
+    assert bound is not None
+    assert bound == pytest.approx(2.0, abs=1e-6)  # exact at the corner (1,1,1)
+    assert bound <= 2.0 + 1e-9  # sound: never above the true box minimum
+
+
+@pytest.mark.unit
+def test_sum_accumulation_repeated_column_coefficients_sum():
+    """A column appearing in several summed children must accumulate its
+    coefficients (not overwrite). ``min 3*x + x*y + x*y`` over ``x in [1,2],
+    y in [1,2]``: the linear ``x`` carries coeff 3 and the bilinear ``x*y``
+    carries coeff 2. McCormick is exact at ``(1,1)`` giving ``3*1 + 2*(1*1) = 5``.
+    A broken accumulation (overwrite instead of add) would drop to ``3 + 1 = 4``
+    or ``3`` and change the bound."""
+    m = Model()
+    x = m.continuous("x", lb=1.0, ub=2.0)
+    y = m.continuous("y", lb=1.0, ub=2.0)
+    m.minimize(3.0 * x + x * y + x * y)
+    bound, status, _ = _root_bound(m)
+    assert status == "optimal"
+    assert bound is not None
+    assert bound == pytest.approx(5.0, abs=1e-6)
+    assert bound <= 5.0 + 1e-9
