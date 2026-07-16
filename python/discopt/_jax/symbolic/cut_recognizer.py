@@ -197,11 +197,7 @@ def model_to_sympy(model) -> SympyModel:
                 # (.nl loading types MINLPLib's 0/1 columns as INTEGER, so
                 # keying on VarType.BINARY alone misses them — issue #187.)
                 if is_bin or (
-                    is_int
-                    and elb is not None
-                    and eub is not None
-                    and elb > -1.0
-                    and eub < 2.0
+                    is_int and elb is not None and eub is not None and elb > -1.0 and eub < 2.0
                 ):
                     binaries.add(syms[key])
     return SympyModel(
