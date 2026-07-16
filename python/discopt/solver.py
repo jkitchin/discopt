@@ -3221,6 +3221,14 @@ def solve_model(
     model._convexity_classification_cache = None
     _convexity_time_budget = min(max(0.2 * float(time_limit), 0.5), 20.0)
     model._convexity_time_budget = _convexity_time_budget
+    # #654: absolute solve deadline, anchored at ``_solve_t0`` (before all
+    # preprocessing), so an uninterruptible pre-B&B phase can decline to *start*
+    # new work once the budget is spent rather than blow past ``time_limit``. Read
+    # by ``IncrementalMcCormickLP._validate`` to bound its row-for-row
+    # cold-vs-patched self-check — tens of seconds on large factorable models
+    # (sonet*, qap): the dominant #654 overrun — leaving ``ok=False`` so the engine
+    # falls back to the sound per-node cold build. Never truncates an in-flight op.
+    model._solve_deadline = _solve_t0 + float(time_limit)
 
     # Opt-in LP-node spatial branch-and-cut engine (discopt#280) for pure-integer
     # product MINLPs. The default NLP-per-node spatial path freezes its dual bound
@@ -3984,6 +3992,7 @@ def solve_model(
             # 15 s solve budget. Re-assert the budget (and clear any stale cache).
             model._convexity_classification_cache = None
             model._convexity_time_budget = _convexity_time_budget
+            model._solve_deadline = _solve_t0 + float(time_limit)  # #654 (see above)
         # A *convex* model with a clearable denominator is deliberately left
         # untouched here: many such divisions (e.g. the rotated-SOC ``x**2/z``)
         # are solved exactly by the convex NLP fast path, and clearing would
@@ -4049,6 +4058,7 @@ def solve_model(
                 model = _ipx
                 model._convexity_classification_cache = None
                 model._convexity_time_budget = _convexity_time_budget
+                model._solve_deadline = _solve_t0 + float(time_limit)  # #654 (see above)
                 # The reformulated big-M MILP is best handled by a real MILP
                 # engine. discopt's FBBT root presolve is both redundant (the MILP
                 # engines presolve internally) and pathologically slow on the
