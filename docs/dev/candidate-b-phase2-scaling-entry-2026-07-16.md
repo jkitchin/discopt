@@ -209,6 +209,36 @@ it is the best a float64 engine can certify on this relaxation. My earlier
 float64 limit); the *verified* obstacle is genuine near-singularity, confirmed by
 HiGHS failing identically.
 
+## SCIP cross-check + feasibility settled (the LP is FEASIBLE, false-infeasible on conditioning)
+
+**SCIP/SoPlex (pyscipopt 6.2.1 / SCIP 10):** default solve (SoPlex + iterative
+refinement) → **infeasible** on hda's captured root LP; exact-rational mode
+**unavailable** (this SCIP was compiled without exact-solve support). So SCIP joins
+feral + HiGHS(simplex) + HiGHS(IPM) — **four float64 engines all false-infeasible**.
+
+**Feasibility settled by elastic phase-1** (min total constraint violation, a
+well-posed LP HiGHS solves cleanly):
+
+```
+RAW root LP (original units):  min violation = 1.8e-10   -> FEASIBLE
+```
+
+The root relaxation **is feasible** (a feasible point exists to ~1e-10; node_count=1,
+so it is the root). *(Correction: an intermediate elastic run on the optimally-
+scaled system reported "887" and I briefly mis-read it as genuine infeasibility —
+that was a units error: violations in scaled space are inflated by the row factors,
+up to ~1e12, so 887-scaled ≈ ~1e-10 raw. The RAW-units test above is authoritative.)*
+
+**Settled verdict.** hda's root McCormick relaxation is **feasible but float64-
+intractable**: every available float64 LP engine (feral, HiGHS simplex + IPM,
+SCIP/SoPlex) **false-infeasibles** on it because of the rank-deficiency + ~1e14
+conditioning. This is not a feral bug, not genuine infeasibility, and not fixable by
+scaling/presolve (all tested). The genuine lever is **higher-precision / exact-
+rational LP arithmetic** (an exact solver would return the feasible optimum) — could
+not be demonstrated here only because no exact-capable solver is installed. A
+reformulated well-conditioned relaxation is the alternative. Candidate (A)'s sound
+floor remains the best a float64 engine certifies on this relaxation.
+
 Acceptance / regime unchanged from #664: bound-neutral verification
 (`node_count` + certified `objective` exactly unchanged on the certifying panel,
 `cargo test -p discopt-core`), and a **tight** hda bound materially closer to opt
