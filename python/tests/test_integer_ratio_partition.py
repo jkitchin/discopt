@@ -171,3 +171,66 @@ def test_gear4_flag_on_certifies_with_fewer_nodes(monkeypatch):
     assert res.node_count < 1500
     # the root bound must be unfrozen (baseline: ~0)
     assert res.root_bound > 1.0
+
+
+# ---------------------------------------------------------------------------
+# Root witness generation (#309 primal side)
+# ---------------------------------------------------------------------------
+
+
+def test_factor_assignments_two_columns():
+    from discopt._jax.integer_ratio import _factor_assignments
+
+    ilo = np.array([12.0, 12.0])
+    ihi = np.array([60.0, 60.0])
+    outs = _factor_assignments((0, 1), 304, ilo, ihi)
+    assert outs
+    for a in outs:
+        assert a[0] * a[1] == 304
+        assert 12 <= a[0] <= 60 and 12 <= a[1] <= 60
+
+
+def test_factor_assignments_repeated_column_exact_power():
+    from discopt._jax.integer_ratio import _factor_assignments
+
+    ilo = np.array([2.0])
+    ihi = np.array([9.0])
+    assert _factor_assignments((0, 0), 49, ilo, ihi) == [{0: 7}]
+    assert _factor_assignments((0, 0), 50, ilo, ihi) == []  # not a square
+
+
+def test_gear4_root_witnesses_contain_the_optimum():
+    """The optimal assignment (16*19)/(43*49) = 304/2107 must be among the
+    generated witnesses at the root box — the primal analogue of the bound
+    test above."""
+    m = _gear4()
+    p = IntegerRatioPartitioner(m, detect_integer_ratio_specs(m))
+    lb = np.array([12, 12, 12, 12, 0, 0], dtype=float)
+    ub = np.array([60, 60, 60, 60, 100000, 100000], dtype=float)
+    cands = p.root_witnesses(lb, ub)
+    assert cands
+    products = {(c[0] * c[1], c[2] * c[3]) for c in cands if set(c) == {0, 1, 2, 3}}
+    assert (304, 2107) in products
+
+
+def test_root_witnesses_empty_on_integer_infeasible_box():
+    m = _gear4()
+    p = IntegerRatioPartitioner(m, detect_integer_ratio_specs(m))
+    lb = np.array([12.4, 12, 12, 12, 0, 0], dtype=float)
+    ub = np.array([12.6, 60, 60, 60, 100000, 100000], dtype=float)
+    assert p.root_witnesses(lb, ub) == []
+
+
+@pytest.mark.slow
+def test_gear4_both_flags_with_witness_injection_near_root_solve(monkeypatch):
+    """Partition bound + sharp NS margin + root witness injection: gear4 must
+    certify in a HANDFUL of nodes (measured: 3) — the #309 acceptance target.
+    Generous ceiling of 50 guards the mechanism, not the exact count."""
+    monkeypatch.setenv("DISCOPT_INTEGER_RATIO_PARTITION", "1")
+    monkeypatch.setenv("DISCOPT_NS_SHARP_MARGIN", "1")
+    m = _gear4()
+    res = m.solve(time_limit=150, gap_tolerance=1e-4)
+    assert res.objective == pytest.approx(GEAR4_OPT, abs=1e-4)
+    assert res.bound <= res.objective + 1e-6
+    assert res.gap_certified
+    assert res.node_count <= 50

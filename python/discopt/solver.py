@@ -5572,6 +5572,51 @@ def solve_model(
                 "Warm-start point is not integer-feasible, using as NLP starting point only"
             )
 
+    # --- #309 primal witness injection (integer-ratio partition, flag-gated) ---
+    # The same enumeration that proves the ratio holes *empty* also knows which
+    # ratios ARE achievable. Complete the few nearest-achievable factor
+    # assignments with a fixed-integer sub-NLP and inject the best feasible
+    # point as the root incumbent — removing the incumbent-latency half of the
+    # gear4-class tree (the partition bound already fathoms every node once an
+    # incumbent exists; see docs/dev/ns-sharp-margin-2026-07-16.md §4). Runs
+    # only when the partitioner is attached (DISCOPT_INTEGER_RATIO_PARTITION=1
+    # AND an eligible spec detected), so the default path is untouched.
+    # Soundness: ``subnlp`` verifies integer- and constraint-feasibility of the
+    # completed point and ``inject_incumbent`` enforces strict improvement — a
+    # bad witness costs a few bounded NLP solves, never validity.
+    _ir_partitioner = (
+        getattr(_mc_lp_relaxer, "_integer_ratio_partitioner", None)
+        if _mc_lp_relaxer is not None
+        else None
+    )
+    if _ir_partitioner is not None:
+        try:
+            from discopt._jax.primal_heuristics import subnlp as _ir_subnlp
+
+            _ir_budget = max(1.0, min(5.0, 0.05 * time_limit))
+            _ir_lb_c = np.maximum(lb, -1e3)
+            _ir_ub_c = np.minimum(ub, 1e3)
+            _ir_best: Optional[tuple[np.ndarray, float]] = None
+            for _ir_cand in _ir_partitioner.root_witnesses(lb, ub)[:8]:
+                _ir_seed = 0.5 * (_ir_lb_c + _ir_ub_c)
+                for _ir_col, _ir_val in _ir_cand.items():
+                    _ir_seed[_ir_col] = float(_ir_val)
+                _ir_sn = _ir_subnlp(
+                    model,
+                    np.clip(_ir_seed, lb, ub),
+                    evaluator=evaluator,
+                    time_budget=_ir_budget,
+                )
+                if _ir_sn is not None and (_ir_best is None or _ir_sn[1] < _ir_best[1]):
+                    _ir_best = _ir_sn
+            if _ir_best is not None:
+                tree.inject_incumbent(_ir_best[0], float(_ir_best[1]))
+                logger.info(
+                    "integer-ratio witness incumbent injected: obj=%.6g", _ir_best[1]
+                )
+        except Exception:  # pragma: no cover - defensive (never blocks the solve)
+            logger.debug("integer-ratio witness injection skipped", exc_info=True)
+
     # --- Feasibility pump at root ---
     # Try to find an integer-feasible incumbent before B&B starts.
     _fp_ran = False

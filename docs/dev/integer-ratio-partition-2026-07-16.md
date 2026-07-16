@@ -106,6 +106,21 @@ injecting a feasibility-checked witness as an incumbent at the root would
 remove the incumbent-latency half of the tree (primal work, same class as
 #287/#281).
 
+**[DONE 2026-07-16, same session]** `IntegerRatioPartitioner.root_witnesses`
+generates the K nearest-achievable factor assignments around the
+unpartitioned LP's ratio point `q*`; `solver.py` completes each with a
+fixed-integer `subnlp` (finite-clipped midpoint seed + witness factors) and
+injects the best verified-feasible point via `tree.inject_incumbent`, right
+after the warm-start block. Gated on the partitioner being attached (same
+flag). Entry experiment: the top-ranked candidate at the gear4 root IS the
+optimal assignment (16·19)/(43·49) = 304/2107, and `subnlp` completes it to
+objective 1.6434284565. End-to-end (both flags, cold start): **gear4
+certifies in 3 nodes / 1.6 s** — vs 2487 nodes / 42 s baseline, and ~8.7× the
+issue's BARON reference (0.18 s), inside the "~10× of BARON" acceptance
+target. Requires the sharp NS margin (`ns-sharp-margin-2026-07-16.md`):
+without it the injected incumbent cannot fathom the optimal-ratio nodes and
+the tree stays >500 nodes.
+
 ## 6. Soundness
 
 - Achievable set from **outward-rounded** integer node bounds (superset of

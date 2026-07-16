@@ -71,6 +71,10 @@ _MAX_SPECS = 4
 # Piece-LP budget per node dive.
 _MAX_LPS = 8
 _PIECE_LP_TIME_LIMIT = 10.0
+# Root witness generation: candidate achievable ratios per spec, and factor
+# assignments per candidate (each costs one fixed-integer sub-NLP downstream).
+_WITNESS_CANDIDATES = 4
+_WITNESS_ASSIGNMENTS = 2
 
 
 def enabled() -> bool:
@@ -248,6 +252,60 @@ def _hole_around(num_vals: np.ndarray, den_vals: np.ndarray, q_star: float):
     return v_below, v_above
 
 
+def _factor_assignments(
+    cols: tuple[int, ...],
+    value: int,
+    ilo: np.ndarray,
+    ihi: np.ndarray,
+    cap: int = _WITNESS_ASSIGNMENTS,
+) -> list[dict[int, int]]:
+    """Integer assignments of ``cols`` (multiplicity-aware, ≤2 distinct) whose
+    product equals ``value`` within the integer box. First ``cap`` found."""
+    distinct = sorted(set(cols))
+    if len(distinct) == 1:
+        c = distinct[0]
+        k = len(cols)
+        root = round(abs(float(value)) ** (1.0 / k)) if value else 0
+        for cand in (root - 1, root, root + 1, -root, -root - 1, -root + 1):
+            if cand**k == value and ilo[c] <= cand <= ihi[c]:
+                return [{c: int(cand)}]
+        return []
+    a, b = distinct
+    out: list[dict[int, int]] = []
+    for va in range(int(ilo[a]), int(ihi[a]) + 1):
+        if va == 0 or value % va:
+            continue
+        vb = value // va
+        if ilo[b] <= vb <= ihi[b]:
+            out.append({a: int(va), b: int(vb)})
+            if len(out) >= cap:
+                break
+    return out
+
+
+def _nearest_achievable(
+    num_vals: np.ndarray, den_vals: np.ndarray, q_star: float, k: int
+) -> list[tuple[float, int, int]]:
+    """The ``k`` achievable ratios nearest ``q_star`` as ``(v, n, d)`` triples.
+
+    Same bracketing scan as :func:`_hole_around` (per denominator, the
+    numerators around ``q_star·d``), so the cost is O(len(den_vals)·log) — never
+    the full cross product.
+    """
+    t = q_star * den_vals.astype(np.float64)
+    idx = np.searchsorted(num_vals, t)
+    best: dict[float, tuple[float, int, int]] = {}
+    for off in (-1, 0, 1):
+        jj = idx + off
+        ok = (jj >= 0) & (jj < len(num_vals))
+        if not ok.any():
+            continue
+        for n, d in zip(num_vals[jj[ok]], den_vals[ok]):
+            v = float(n) / float(d)
+            best.setdefault(round(v, 15), (v, int(n), int(d)))
+    return sorted(best.values(), key=lambda c: abs(c[0] - q_star))[:k]
+
+
 class IntegerRatioPartitioner:
     """Per-node integer-ratio partition bound over a fixed pre-reform model.
 
@@ -302,6 +360,59 @@ class IntegerRatioPartitioner:
         if best is not None:
             self._stats["lifted"] += 1
         return best
+
+    def root_witnesses(
+        self,
+        node_lb: np.ndarray,
+        node_ub: np.ndarray,
+        *,
+        k: int = _WITNESS_CANDIDATES,
+    ) -> list[dict[int, int]]:
+        """Candidate integer factor assignments near the LP's preferred ratio.
+
+        Primal counterpart of :meth:`node_bound` (#309): the same enumeration
+        that proves the holes *empty* also knows which ratios ARE achievable.
+        Solves the unpartitioned piece LP once to find the ratio point ``q*``
+        the relaxation wants, ranks the ``k`` nearest achievable ratios, and
+        recovers integer factor assignments for each. The caller completes each
+        assignment with a fixed-integer sub-NLP and feasibility-checks before
+        any incumbent use — nothing returned here is trusted as feasible.
+
+        Returns ``[]`` on any failure; never raises.
+        """
+        out: list[dict[int, int]] = []
+        try:
+            lb = np.asarray(node_lb, dtype=np.float64).ravel()[: self._n_pre]
+            ub = np.asarray(node_ub, dtype=np.float64).ravel()[: self._n_pre]
+            if lb.size < self._n_pre or ub.size < self._n_pre:
+                return []
+            ilo = np.ceil(lb - _INT_TOL)
+            ihi = np.floor(ub + _INT_TOL)
+            for spec in self._specs:
+                num_vals = _product_values(spec.num, ilo, ihi)
+                den_vals = _product_values(spec.den, ilo, ihi)
+                if num_vals is None or den_vals is None or not den_vals.size:
+                    continue
+                if den_vals[0] <= 0:
+                    continue
+                piece = self._solve_piece(spec, lb, ub, -np.inf, np.inf, [0])
+                if piece is None or piece[0] != "open" or piece[2] is None:
+                    continue
+                q_star = float(piece[2])
+                for _v, n, d in _nearest_achievable(num_vals, den_vals, q_star, k):
+                    for na in _factor_assignments(spec.num, n, ilo, ihi):
+                        for da in _factor_assignments(spec.den, d, ilo, ihi):
+                            if set(na) & set(da):
+                                # a shared column cannot honor both products;
+                                # detection never emits this, guard anyway
+                                continue
+                            cand = {**na, **da}
+                            if cand not in out:
+                                out.append(cand)
+        except Exception:
+            logger.debug("integer-ratio witness generation abstained", exc_info=True)
+            return []
+        return out
 
     # -- internals --------------------------------------------------------- #
 
