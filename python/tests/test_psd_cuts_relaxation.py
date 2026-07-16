@@ -83,7 +83,12 @@ def test_separator_emits_no_cut_at_a_consistent_moment_point():
 
 
 def test_no_op_on_model_without_lifted_squares():
-    """A purely bilinear model with no lifted squares yields no PSD cuts (sound no-op)."""
+    """A purely bilinear model with no lifted squares yields no PSD cuts (sound no-op).
+
+    The variables here are CONTINUOUS, so ``X_ii = x_i**2 != x_i`` and the moment
+    diagonal genuinely needs a lifted square (absent) — the separator correctly finds
+    nothing. This is the soundness boundary of the binary-diagonal shortcut below.
+    """
     m = dm.Model("bilin")
     x = m.continuous("x", shape=(2,), lb=0, ub=1)
     m.minimize(x[0] * x[1])  # only the cross term; no x_i^2 lifted
@@ -92,3 +97,57 @@ def test_no_op_on_model_without_lifted_squares():
     assert n_cuts == 0
     if z_before is not None:
         assert z_after == pytest.approx(z_before)
+
+
+def test_binary_products_get_moment_cuts_via_diagonal_shortcut():
+    """Pure products of DISTINCT binaries (QAP-class) carry no lifted square column,
+    yet ``X_ii = x_i`` holds for a binary — so the moment separator must still fire.
+
+    Before the binary-diagonal fix ``_diag_col`` returned ``None`` for every variable
+    (no ``monomial``/``univariate_square`` lift), so ``_lifted_cliques`` was empty and
+    PSD strengthening was a silent no-op on all such models (the qap ``-1e-9`` bound).
+
+    Model: min x0x1 + x0x2 + x1x2 s.t. x0+x1+x2 >= 1.5, xi in {0,1}. Binary-feasible
+    sums are {2,3} so the true minimum is 1; the McCormick relaxation reaches 0 at
+    x=(.5,.5,.5), X_ij=0, whose 4x4 moment matrix has eigenvalue -1/4. The k=3 moment
+    cut is violated there and tightens the bound, staying valid (<= 1).
+    """
+    from discopt._jax.model_utils import binary_flat_cols
+
+    m = dm.Model("tri")
+    x = [m.integer(f"x{i}", lb=0, ub=1) for i in range(3)]
+    m.minimize(x[0] * x[1] + x[0] * x[2] + x[1] * x[2])
+    m.subject_to(x[0] + x[1] + x[2] >= 1.5)
+    bvars = binary_flat_cols(m)
+    assert bvars == frozenset({0, 1, 2})
+
+    # Old behavior (no binary_vars): still a no-op — gates the fix (fails after if the
+    # shortcut leaked into the default path).
+    milp0, info0 = _relax(m)
+    zb0, za0, nc0 = psd_strengthen_relaxation_bound(milp0, info0, max_rounds=10, binary_vars=None)
+    assert nc0 == 0
+
+    # With binary diagonals: cuts fire and tighten the bound toward the true min 1.
+    milp1, info1 = _relax(m)
+    zb1, za1, nc1 = psd_strengthen_relaxation_bound(milp1, info1, max_rounds=10, binary_vars=bvars)
+    assert nc1 >= 1
+    assert za1 > zb1 + 1e-3  # genuine tightening (McCormick 0 -> ~0.36)
+    assert za1 <= 1.0 + 1e-6  # SOUND: never above the true minimum
+
+    # Soundness / feasible-point sampling (CLAUDE.md §5): every separated cut must
+    # hold at every feasible integer point (X_ij = x_i x_j, X_ii = x_i there).
+    x_at_pt = np.asarray(milp1._c, dtype=np.float64)  # length = #relaxation columns
+    n_total = x_at_pt.shape[0]
+    cuts = separate_psd_cuts_on_relaxation(info1, np.zeros(n_total), n_total, binary_vars=bvars)
+    orig = info1["original"]
+    bil = info1["bilinear"]
+    feas = [p for p in [(1, 1, 0), (1, 0, 1), (0, 1, 1), (1, 1, 1)] if sum(p) >= 1.5]
+    for pt in feas:
+        z = np.zeros(n_total)
+        for i in range(3):
+            z[orig[i]] = pt[i]
+        for (i, j), col in bil.items():
+            z[col] = pt[i] * pt[j]  # X_ij = x_i x_j exactly at an integer point
+        for c in cuts:
+            # coeffs . z >= rhs must hold at every feasible integer point.
+            assert float(c.coeffs @ z) >= c.rhs - 1e-7, (pt, "cut removes a feasible point")

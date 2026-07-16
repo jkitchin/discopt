@@ -229,7 +229,33 @@ structural `0.0` adds exactly, and CSC preserves ascending row order, so `Aᵀy`
   0.69 GB** (64 s → 15 s). Regression tests: `test_solve_lp_routes_through_sparse_csc_binding`
   (spies that the dense binding is never called) + `test_solve_lp_does_not_densify_large_sparse_lp`
   (tracemalloc peak ≪ the dense `m×(n+m)`). NB: PSD still buys qap no bound (−1e-9) — that is a
-  separate *effectiveness* question, untouched here; only the memory blowup is fixed.
+  separate *effectiveness* question, resolved in T9 below.
+
+- [x] **T9 — PSD effectiveness: root-caused the "no bound" AND fixed a real inertness bug.**
+  Diagnosed why `psd_strengthen_relaxation_bound` never tightens qap (two layers):
+  - **Primary bug (FIXED):** the moment separator's `_diag_col`/`_lifted_cliques` required a
+    lifted **square** column `X_ii = x_i²` (`monomial`/`univariate_square`), which pure products
+    of *distinct* binaries (the whole QAP objective) never create → **0 cliques → 0 cuts → PSD
+    completely inert** on every binary-product model, not just qap. But for a **binary** `x_i`,
+    `x_i² = x_i` at every feasible point, so the moment diagonal `X_ii` *is* the original `x_i`
+    column. Fix: `discopt/_jax/model_utils.py::binary_flat_cols` (integer-typed vars on `[0,1]`)
+    threaded as `binary_vars` through `_diag_col`→`_moment_blocks_for_set`→`_lifted_cliques`→
+    `separate_psd_cuts_on_relaxation`→`psd_strengthen_relaxation_bound`, and wired at both
+    callers (`solver.py` root bound, `mccormick_lp.py` per-node). Sound only for binaries
+    (continuous `X_ii = x_i² ≠ x_i` still requires the real square lift — preserved, see
+    `test_no_op_on_model_without_lifted_squares`). On qap: cliques go 0 → 223 (k=2) / 219 (k=4)
+    / 215 (k=6).
+  - **Deeper limitation (measured, not a bug):** even with cliques, **0 of qap's 223 pairwise
+    moment minors are violated** at the McCormick vertex (λ_min = 0) — pairwise binary moment
+    cuts are redundant with McCormick, and qap's vertex also satisfies the k≤6 minors, so the
+    bound stays ~0. Closing qap needs the **global** (full 226×226) moment/Shor SDP, which local
+    clique separation cannot supply — a separate, larger effort.
+  - **The fix is verified effective + sound on the class it targets** via a constructed binary
+    QP (`min x0x1+x0x2+x1x2 s.t. Σx ≥ 1.5`, true min 1): the k=3 moment matrix at `x=(½,½,½),
+    X=0` has eigenvalue −¼, so **PSD strengthening lifts the bound 0 → 0.356** (was 0 cuts before
+    the fix), staying valid (≤ 1); feasible-point sampling confirms no cut removes an integer
+    point (`test_binary_products_get_moment_cuts_via_diagonal_shortcut`). 158 PSD, 653 smoke, 10
+    adversarial green; continuous QCQP PSD path unchanged (reaches −1.0 exactly).
 
 ## Problem (measured on qap — a 225-binary Quadratic Assignment Problem)
 

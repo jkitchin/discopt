@@ -2631,9 +2631,16 @@ def _root_relaxation_lower_bound(
         psd_bound: Optional[float] = None
         if psd_cuts:
             try:
+                from discopt._jax.model_utils import binary_flat_cols
                 from discopt._jax.psd_cuts import psd_strengthen_relaxation_bound
 
-                _zb, _za, _nc = psd_strengthen_relaxation_bound(relax, _relax_info)
+                # Binary variables have moment diagonal X_ii = x_i, so the moment
+                # separator can form cliques over pure products of distinct binaries
+                # (QAP-class) that carry no lifted square column — otherwise it finds
+                # no clique and emits no cut (a no-op strengthening).
+                _zb, _za, _nc = psd_strengthen_relaxation_bound(
+                    relax, _relax_info, binary_vars=binary_flat_cols(model)
+                )
                 if _nc and _za is not None and np.isfinite(_za):
                     psd_bound = float(_za)
             except Exception as psd_exc:  # pragma: no cover - defensive

@@ -608,6 +608,9 @@ class MccormickLPRelaxer:
         # nodes, non-separating solves) never trigger it, so the extra cold build it
         # costs stays off their hot path.
         self._has_composite_lift_cache: Optional[bool] = None
+        # Binary-variable columns (moment diagonal X_ii = x_i) for the PSD moment
+        # separator; computed once, only when the opt-in PSD path first fires.
+        self._binary_cols_cache: Optional[frozenset] = None
 
     def _model_has_composite_lift(self) -> bool:
         """Whether the model carries a composite convex/concave OA lift whose
@@ -2193,8 +2196,15 @@ class MccormickLPRelaxer:
                 ):
                     # Per-node PSD wall budget spent — stop feeding the search.
                     break
+                if self._binary_cols_cache is None:
+                    from discopt._jax.model_utils import binary_flat_cols
+
+                    self._binary_cols_cache = binary_flat_cols(self._model)
                 cuts = separate_psd_cuts_on_relaxation(
-                    varmap, np.asarray(res.x, dtype=np.float64), n_total
+                    varmap,
+                    np.asarray(res.x, dtype=np.float64),
+                    n_total,
+                    binary_vars=self._binary_cols_cache,
                 )
                 if not cuts:
                     break
