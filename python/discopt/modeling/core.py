@@ -1837,7 +1837,7 @@ class Model:
         n = len(self._variables)
         # ``getattr`` fallback guards the rare path that builds a Model without
         # ``__init__`` (e.g. a shallow ``copy.copy`` of a pre-attribute object).
-        offsets = getattr(self, "_flat_var_offsets_cache", None)
+        offsets: Optional[list[int]] = getattr(self, "_flat_var_offsets_cache", None)
         if offsets is None or len(offsets) != n + 1:
             offsets = [0] * (n + 1)
             acc = 0

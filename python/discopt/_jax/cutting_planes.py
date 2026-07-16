@@ -760,7 +760,7 @@ def detect_bilinear_terms(model) -> list[BilinearTerm]:
     )
     from discopt.modeling.core import Constraint as ConstraintType
 
-    def _var_index(expr: Expression, model_) -> int | None:
+    def _var_index(expr: Expression, model_: Model) -> int | None:
         """Get the flat variable index for a simple variable reference."""
         if isinstance(expr, Variable):
             offset = model_._flat_var_offset(expr)
