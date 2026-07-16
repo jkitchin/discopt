@@ -89,7 +89,7 @@ def test_benders_matches_known_optimum_and_monolithic(case):
 @pytest.mark.parametrize("method", ["subgradient", "bundle"])
 def test_lagrangian_matches_known_optimum(case, method):
     model, opt = case()
-    r = model.solve(decomposition="lagrangian", method=method, time_limit=60)
+    r = model.solve(decomposition="lagrangian", lagrangian_method=method, time_limit=60)
     assert r.status == "optimal"
     assert r.objective == pytest.approx(opt, abs=ABS_TOL)
     assert r.bound is not None and r.bound <= r.objective + 1e-4

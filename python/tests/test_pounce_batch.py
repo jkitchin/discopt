@@ -220,7 +220,7 @@ def test_pounce_size_gate_keeps_small_serial():
     finally:
         S._solve_batch_pounce = orig
 
-    assert res.objective == pytest.approx(1390.0, abs=1.0, rel=1e-3)  # still correct
+    assert res.objective == pytest.approx(400.0, abs=1.0, rel=1e-3)  # Haverly-I optimum (E1)
     assert not fired, "small problem should stay serial under the size gate"
 
 
