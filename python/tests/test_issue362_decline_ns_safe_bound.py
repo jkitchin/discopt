@@ -18,8 +18,10 @@ Neumaier–Shcherbina safe bounds from their own dual candidates (5.288 bare,
 5.4658 equilibrated) — valid for ANY multiplier vector by weak duality — and
 threw them away.
 
-Fix (same flag as #517, ``DISCOPT_NODE_NUMERICAL_DUAL_BOUND``, default OFF —
-bound-changing regime): surface the stashed NS bound as ``safe_bound`` on an
+Fix (same flag as #517, ``DISCOPT_NODE_NUMERICAL_DUAL_BOUND``; shipped
+default OFF under the bound-changing regime, graduated to default ON after the
+gates below — ``=0`` restores the legacy behavior): surface the stashed NS
+bound as ``safe_bound`` on an
 ``optimal`` generic-path solve, so ``_certify`` certifies the node (which then
 *branches* on its rigorous bound instead of tainting the tree). A finite NS
 bound is itself a proof the LP is bounded, so this can never fabricate a bound
@@ -92,14 +94,14 @@ def test_decline_lp_flag_on_surfaces_ns_safe_bound(monkeypatch):
     assert res.safe_bound >= 5.0, f"NS bound unexpectedly loose: {res.safe_bound!r}"
 
 
-def test_decline_lp_flag_off_baseline_unchanged(monkeypatch):
-    """Default (flag OFF): the generic path still reports no certificate — the
-    fix is opt-in and the default search is byte-identical."""
-    monkeypatch.delenv(_FLAG, raising=False)
+def test_decline_lp_flag_disabled_restores_legacy_baseline(monkeypatch):
+    """Flag disabled (=0, the graduation escape hatch): the generic path reports
+    no certificate — the pre-#362 legacy search is reachable and unchanged."""
+    monkeypatch.setenv(_FLAG, "0")
     res = _solve_decline_lp()
     assert res.status == "optimal"
     assert res.safe_bound is None, (
-        f"flag OFF must leave the generic path certificate-free, got {res.safe_bound!r}"
+        f"flag disabled must leave the generic path certificate-free, got {res.safe_bound!r}"
     )
 
 

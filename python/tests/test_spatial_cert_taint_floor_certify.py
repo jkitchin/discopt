@@ -75,9 +75,12 @@ def test_nvs22_density_route_certifies_closed_gap(monkeypatch):
     monkeypatch.setenv("DISCOPT_LU_DENSITY_ROUTE", "1")
     # Pin the other graduated flags OFF: this test freezes the exact measured
     # configuration (route alone) so its deterministic 37-node signature holds
-    # regardless of the flags' defaults.
+    # regardless of the flags' defaults. (node_numerical_dual_bound, graduated
+    # with #362, rescues the single declined node and legitimately certifies in
+    # 35 nodes — pinned OFF here to keep this frozen-signature probe intact.)
     monkeypatch.setenv("DISCOPT_OBJ_BRANCH_PRIORITY", "0")
     monkeypatch.setenv("DISCOPT_LIFT_LOOSE_PRODUCTS", "0")
+    monkeypatch.setenv("DISCOPT_NODE_NUMERICAL_DUAL_BOUND", "0")
     result = from_nl(_NVS22_NL).solve(time_limit=40, gap_tolerance=1e-4)
 
     assert result.status == "optimal", (
@@ -101,11 +104,16 @@ def test_nvs22_density_route_certifies_closed_gap(monkeypatch):
     assert abs(bound - _NVS22_OPT) <= 1e-3, f"dual bound {bound!r} did not close to {_NVS22_OPT}"
 
     # The search itself must be untouched (certification accounting only).
-    # Deterministic: 37 nodes, byte-identical across reps (2026-07-10 root-cause
-    # data + this fix's entry experiment). A drift here means the change was
-    # not label-only.
-    assert result.node_count == 37, (
-        f"node count {result.node_count} != 37: the fix must not change the search"
+    # Deterministic frozen signature, byte-identical across reps. Originally 37
+    # nodes (2026-07-10 root-cause data + the SPATIAL-CERT entry experiment);
+    # re-frozen at 35 on 2026-07-16 after unrelated landed changes shifted the
+    # trajectory — verified pre-existing at merge-base fd5db1c (35 nodes, same
+    # optimal/objective) before the #362 branch touched anything, and invariant
+    # to the #362 flag (identical at =0 and =1). A drift here means some change
+    # altered this frozen configuration's search — re-verify it was label-only
+    # before re-freezing.
+    assert result.node_count == 35, (
+        f"node count {result.node_count} != 35: the frozen-config search drifted"
     )
 
 
@@ -122,6 +130,7 @@ def test_st_e36_node_reduce_certifies_within_tolerance_floor(monkeypatch):
     monkeypatch.setenv("DISCOPT_LU_DENSITY_ROUTE", "0")
     monkeypatch.setenv("DISCOPT_OBJ_BRANCH_PRIORITY", "0")
     monkeypatch.setenv("DISCOPT_LIFT_LOOSE_PRODUCTS", "0")
+    monkeypatch.setenv("DISCOPT_NODE_NUMERICAL_DUAL_BOUND", "0")
     result = from_nl(_ST_E36_NL).solve(time_limit=40, gap_tolerance=1e-4)
 
     assert result.status == "optimal", (

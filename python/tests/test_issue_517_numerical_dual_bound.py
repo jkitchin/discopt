@@ -7,7 +7,9 @@ node certifies no dual bound and the tree never fathoms — hda has *no* dual bo
 at all.
 
 Fix (flag ``DISCOPT_NODE_NUMERICAL_DUAL_BOUND`` /
-``SolverTuning.node_numerical_dual_bound``, default OFF — bound-changing regime):
+``SolverTuning.node_numerical_dual_bound``; shipped default OFF under the
+bound-changing regime, graduated to default ON with #362 —
+``DISCOPT_NODE_NUMERICAL_DUAL_BOUND=0`` restores the legacy no-rescue behavior):
 export the Optimal-style dual candidate ``y = B⁻ᵀc_B`` from the broken basis and
 attach the in-repo Neumaier–Shcherbina safe lower bound it yields. The NS bound is
 valid for ANY multiplier vector, so a drifted-basis dual only *loosens* it — never
@@ -49,12 +51,12 @@ def test_hda_gets_first_finite_dual_bound(monkeypatch):
 
 
 @pytest.mark.slow
-def test_hda_flag_off_is_the_unchanged_baseline(monkeypatch):
-    """Default (flag OFF): hda still has no dual bound — the fix is opt-in and the
-    baseline is untouched."""
-    monkeypatch.delenv(_FLAG, raising=False)
+def test_hda_flag_disabled_restores_the_legacy_baseline(monkeypatch):
+    """Flag disabled (=0, the graduation escape hatch): hda has no dual bound —
+    the legacy no-rescue baseline is reachable and untouched."""
+    monkeypatch.setenv(_FLAG, "0")
     r = dm.from_nl(_hda_path()).solve(time_limit=25)
-    assert r.bound is None, f"flag OFF must be the no-bound baseline, got {r.bound}"
+    assert r.bound is None, f"flag disabled must be the no-bound baseline, got {r.bound}"
 
 
 @pytest.mark.slow
@@ -67,7 +69,7 @@ def test_inert_on_cleanly_certifying_instances(name, monkeypatch):
     if not os.path.exists(path):
         pytest.skip(f"{name}.nl not vendored")
 
-    monkeypatch.delenv(_FLAG, raising=False)
+    monkeypatch.setenv(_FLAG, "0")
     off = dm.from_nl(path).solve(time_limit=20)
     monkeypatch.setenv(_FLAG, "1")
     on = dm.from_nl(path).solve(time_limit=20)
@@ -77,12 +79,15 @@ def test_inert_on_cleanly_certifying_instances(name, monkeypatch):
     assert off.bound == on.bound, f"{name}: bound drifted with the flag ({off.bound} -> {on.bound})"
 
 
-def test_flag_defaults_off(monkeypatch):
-    """The tuning flag is default-OFF (opt-in, bound-changing regime).
+def test_flag_defaults_on(monkeypatch):
+    """The tuning flag is default-ON (graduated with #362; ``=0`` restores the
+    legacy no-rescue behavior).
 
     Check the *code* default in the absence of the env override (a CI shell that
-    exports the flag must not make the default look ON)."""
+    exports the flag must not distort the default), and the escape hatch."""
     monkeypatch.delenv(_FLAG, raising=False)
     from discopt.solver_tuning import SolverTuning
 
+    assert SolverTuning().node_numerical_dual_bound is True
+    monkeypatch.setenv(_FLAG, "0")
     assert SolverTuning().node_numerical_dual_bound is False

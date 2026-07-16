@@ -102,6 +102,33 @@ Verified end-to-end (real implementation, in-container):
   flag OFF vs ON): see `panel gate` record in the PR description — bounds
   never cross an in-repo-attested oracle on either arm; no proof lost flag-ON.
 
+## Graduation (default-ON flip, same PR — 2026-07-16)
+
+All three house gates run in-container, flag OFF vs ON:
+
+1. **65-instance `pf_panel --vs` (30 s, jobs 4):** proofs gained=0 / lost=0;
+   every bound `ok` except one flagged beuster row (6353 → 6352.06) that is a
+   **wall-clock truncation artifact of jobs=4 contention**: in isolation
+   (jobs=1, 2 reps per arm) beuster is byte-identical OFF vs ON
+   (6395.108322741576, all four runs) and both panel values sit *below* the
+   isolated 30 s bound.
+2. **`pf_panel --differential`** (nvs05, nvs09, st_e36, tanksize, beuster,
+   hda, ex1252; root + 5 child boxes each): **GREEN** — env-b at-least-as-tight
+   per box (hda root gains a bound: none → −2.81e7, sound), feasible-point
+   sampler **0 cuts**, worst violation 1.82e-11. (ex1252 errors identically in
+   both arms — instance-level, arm-symmetric.)
+3. **`graduation_gate --ci-subset --flags node_numerical_dual_bound`:**
+   `eligible=YES  soundness=ok  cert=neutral` (arm registered in
+   `generality_sweep.GRADUATION_ARMS` as part of this PR, so reference-host
+   nightlies can keep gating it).
+
+Flip: `solver_tuning.node_numerical_dual_bound` default `False→True`;
+`DISCOPT_NODE_NUMERICAL_DUAL_BOUND=0` restores the legacy no-rescue behavior.
+Tests reconciled to the new default (`test_issue_517_numerical_dual_bound.py`,
+`test_issue362_decline_ns_safe_bound.py`). The held-out ~4,800-instance corpus
+arm (absent in-container) remains available to the reference-host nightly via
+the registered graduation arm.
+
 ## Stale-test reconciliation
 
 `test_b2fix_taint_floor_bound.py::test_nvs05_tainted_tree_reports_rigorous_floored_bound`

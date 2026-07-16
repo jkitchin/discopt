@@ -82,27 +82,33 @@ class SolverTuning:
     it. All fields are validated on construction.
     """
 
-    # --- #517 hda-class last-resort dual bound --------------------------------
+    # --- #517/#362 NS dual safe bound on numerically-failed node LPs ----------
     node_numerical_dual_bound: bool = field(
-        default_factory=lambda: _env_flag("DISCOPT_NODE_NUMERICAL_DUAL_BOUND", default=False)
+        default_factory=lambda: _env_flag("DISCOPT_NODE_NUMERICAL_DUAL_BOUND", default=True)
     )
     """Attach a Neumaier–Shcherbina safe lower bound from the in-house simplex's
     *own* dual candidate when the node LP solve breaks down numerically
-    (``DISCOPT_NODE_NUMERICAL_DUAL_BOUND``, default OFF — bound-changing regime,
-    #517). Fires only where the whole in-house chain (warm → equilibrated → cold)
-    produces NO bound today: the hda-class flowsheets whose ill-conditioned root
-    LP defeats phase-2 (see ``docs/dev/hda-no-bound-simplex-robustness-2026-07-16.md``).
-    The NS bound is valid for ANY dual vector, so a drifted-basis dual only
-    loosens it, never lifts it above the optimum; never fathoms on its own. No
-    external solver (the removed #517 HiGHS rescue is NOT resurrected).
-
-    #362 extends the same mechanism to the certification edge: when the
-    warm/equilibrated attempts break down but the generic cold path solves the
-    node LP ``optimal`` (which carries no certificate of its own), the stashed
-    NS bound is surfaced as the result's ``safe_bound`` so ``_certify`` can
-    certify the node instead of declining it into a non-rigorous sentinel
-    fathom (the nvs05 taint-at-the-certification-edge class; see
-    ``docs/dev/nvs05-decline-taint-2026-07-16.md``)."""
+    (``DISCOPT_NODE_NUMERICAL_DUAL_BOUND``, default ON since the #362 graduation
+    — ``DISCOPT_NODE_NUMERICAL_DUAL_BOUND=0`` restores the legacy no-rescue
+    behavior). Fires only where the certified in-house chain (warm →
+    equilibrated) produced no bound: the hda-class flowsheets whose
+    ill-conditioned LPs defeat phase-2 (#517, see
+    ``docs/dev/hda-no-bound-simplex-robustness-2026-07-16.md``) and the nvs05
+    certification-edge decline class, where the stashed NS bound is also
+    surfaced as ``safe_bound`` on an ``optimal`` generic-path solve so
+    ``_certify`` can certify the node instead of declining it into a
+    non-rigorous sentinel fathom (#362, see
+    ``docs/dev/nvs05-decline-taint-2026-07-16.md``). The NS bound is valid for
+    ANY dual vector, so a drifted-basis dual only loosens it, never lifts it
+    above the optimum; never fathoms on its own; a finite NS value proves the
+    LP is bounded, so it can never fabricate a bound on a genuinely unbounded
+    relaxation. No external solver (the removed #517 HiGHS rescue is NOT
+    resurrected). Graduation evidence (2026-07-16, in-container): 65-instance
+    panel ON-vs-OFF — 0 proofs lost, no bound loosened (one beuster wall-jitter
+    artifact, byte-identical in isolation); differential gate GREEN
+    (at-least-as-tight per box, feasible-point 0 cuts, worst 1.8e-11);
+    graduation_gate cert-neutrality eligible=YES; nvs05 gains its first full
+    rigorous certificate (``optimal``, bound 5.47057)."""
 
     # --- RLT (reformulation-linearization) families ---------------------------
     rlt: bool = field(default_factory=lambda: _env_flag("DISCOPT_RLT", default=False))
