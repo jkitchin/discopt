@@ -123,6 +123,7 @@ fn opts(inst: &Instance) -> MilpOptions {
         reduced_cost_fixing: true,
         sb_max_cands: 8,
         sb_node_budget: 4096,
+        initial_incumbent: None,
         simplex: SimplexOptions {
             tol: 1e-9,
             max_iter: 100_000,

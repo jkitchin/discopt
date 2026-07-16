@@ -376,6 +376,33 @@ panel green for 3 consecutive nightlies before default-on.
 
 **Risk**: high (correctness-sensitive). Flag-gated, A/B'd, default-off until green.
 
+> **Binary-multilinear MILP route follow-up (2026-07-16) — "sparse-MILP LP
+> throughput ⇒ autocorr 25-25 certifies" FALSIFIED.** After #187's exact
+> linearization (PR #667) routed the autocorr class to the MILP engine and #663's
+> sparse CSC engine landed, the hypothesis was that node-LP throughput was the
+> remaining blocker to *certifying* autocorr_bern25-25 in budget. Measured on the
+> reformed 1,224-row MILP (synthetic Bernasconi n=25 dense):
+>
+> | lever | result |
+> |---|---|
+> | sparse engine, 600 s | 8,415 nodes, **dual bound frozen at 12.0** (= the parity floor: one per odd-length lag) — no visible progress toward the optimum 36 |
+> | generic root cuts (cover/clique/GMI/MIR via `DISCOPT_P3_FORCE_CUT_PATH`) | bound unchanged at 12.0; root ~10× slower |
+> | perfect incumbent (36) | frontier bound stays ~12 → pruning threshold barely matters for tree size |
+>
+> The LP relaxation sits at the parity floor because the LP can hold every
+> ``y_k`` at its parity-nearest-zero value with fractional ``b = 1/2`` and
+> loose Fortet ``z``; branching individual bits barely moves it until deep in
+> the tree. This is the **same bound-pinned phenomenon as gear4 above**, now on
+> the lifted binary-product (Boolean-quadric) polytope: certification needs
+> BQP/PSD-class strengthening of the ``z``-polytope (triangle inequalities,
+> PSD moment cuts à la #663's `X_ii = x_i` recognition — currently only on the
+> spatial path), a scoped research effort, not an engine or throughput fix.
+> **What DID pay** (shipped in the follow-up PR): incumbent seeding — the
+> class-gated 1-flip local search finds the true optimum 36 in ~0.5 s, and with
+> it the 30 s answer improves from `feasible 84 / bound 12` to `incumbent 36 /
+> bound 12`; n=13 dense *certification* drops 3.7 s → 0.4 s (the seed collapses
+> the proving phase where the bound does move).
+
 ## 7. Sequencing & rationale (revised by the measurement)
 
 ```

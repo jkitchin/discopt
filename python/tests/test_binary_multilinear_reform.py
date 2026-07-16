@@ -335,6 +335,136 @@ def test_from_nl_round_trip_fires_and_certifies(tmp_path):
     assert res.objective == pytest.approx(ref, abs=1e-5)
 
 
+# ---------------------------------------------------------------------------
+# Incumbent seeding: warm-start mapping + local-search heuristic
+# ---------------------------------------------------------------------------
+
+
+def _flat_point_satisfies_model(m2, x):
+    """Every constraint row of the reformed model holds at the extended point."""
+    from discopt._jax.binary_multilinear_reform import _ExpandCtx
+
+    offs = {}
+    off = 0
+    for v in m2._variables:
+        offs[v._index] = off
+        off += v.size
+    for c in m2._constraints:
+        ctx = _ExpandCtx()
+        poly = B._expand_to_multilinear(c.body, ctx)
+        val = 0.0
+        for mono, coef in poly.items():
+            term = coef
+            for vi, el in mono:
+                term *= x[offs[vi] + el]
+            val += term
+        if c.sense == "==":
+            assert abs(val - c.rhs) < 1e-9, f"{c.name}: {val} != {c.rhs}"
+        elif c.sense == "<=":
+            assert val <= c.rhs + 1e-9
+        else:
+            assert val >= c.rhs - 1e-9
+
+
+@pytest.mark.parametrize("objvar_sense", [None, "=="])
+def test_extend_initial_point_satisfies_all_reform_rows(objvar_sense):
+    """The aux extension of any binary point (z = prod b, y = E(b), t = y**2,
+    tau = E) satisfies every Fortet, link, and secant row exactly — so the
+    Rust driver's validation accepts it and the seed's objective equals the
+    original objective at that point."""
+    n, K = 6, 5
+    m, _ = build_autocorr(n, K, objvar_sense=objvar_sense)
+    m2 = B.reformulate_binary_multilinear(m)
+    n0 = m2._bml_n_orig_flat
+    rng = np.random.RandomState(7)
+    for _ in range(10):
+        bits = rng.randint(0, 2, size=n).astype(float)
+        x0 = np.zeros(n0)
+        x0[:n] = bits
+        if objvar_sense is not None:
+            x0[n] = autocorr_energy([int(v) for v in bits], K)  # tau = E(b)
+        x = B.extend_initial_point(m2, x0)
+        assert x is not None and x.size == sum(v.size for v in m2._variables)
+        _flat_point_satisfies_model(m2, x)
+
+
+def test_extend_initial_point_rejects_fractional_binary():
+    m, _ = build_autocorr(5, 4)
+    m2 = B.reformulate_binary_multilinear(m)
+    x0 = np.full(m2._bml_n_orig_flat, 0.5)
+    assert B.extend_initial_point(m2, x0) is None
+
+
+def test_heuristic_incumbent_finds_good_point_deterministically():
+    n, K = 10, 9
+    ref = brute_force_autocorr(n, K)
+    m, _ = build_autocorr(n, K)
+    m2 = B.reformulate_binary_multilinear(m)
+    x1 = B.heuristic_incumbent(m2)
+    x2 = B.heuristic_incumbent(m2)
+    assert x1 is not None
+    np.testing.assert_array_equal(x1, x2)  # deterministic
+    _flat_point_satisfies_model(m2, x1)
+    meta = m2._bml_heuristic
+    xb = {j: x1[j] for j in meta["bits"]}
+    for jf, vf in meta["fixed"]:
+        xb[jf] = vf
+    val = B._heuristic_value(meta, xb)
+    assert val == pytest.approx(ref, abs=1e-9), "local search should nail n=10"
+
+
+def test_heuristic_gated_off_with_extra_constraints():
+    """An extra constraint on the bits breaks the every-assignment-feasible
+    argument — the heuristic must not run on such a model."""
+    m = Model()
+    b = [m.integer(f"b{i}", lb=0, ub=1) for i in range(4)]
+    s = [2 * bi - 1 for bi in b]
+    C = s[0] * s[1] + s[1] * s[2] + s[2] * s[3]
+    m.subject_to(b[0] + b[1] <= 1)
+    m.minimize(C * C)
+    m2 = B.reformulate_binary_multilinear(m)
+    assert m2 is not m
+    assert m2._bml_heuristic is None
+    assert B.heuristic_incumbent(m2) is None
+
+
+def test_warm_start_reaches_milp_engine_end_to_end():
+    """A user initial_solution must survive the reformulation: the reported
+    objective can never be worse than the (feasible) warm start's value, even
+    under a truncated search."""
+    n, K = 10, 9
+    ref = brute_force_autocorr(n, K)
+    m, b = build_autocorr(n, K)
+    # brute-force the optimal bits for the warm start
+    best_bits = None
+    best = None
+    for mask in range(1 << n):
+        bits = [(mask >> i) & 1 for i in range(n)]
+        e = autocorr_energy(bits, K)
+        if best is None or e < best:
+            best, best_bits = e, bits
+    x0 = {bv: float(v) for bv, v in zip(b, best_bits)}
+    res = m.solve(time_limit=60, initial_solution=x0)
+    assert res.objective is not None
+    assert res.objective <= ref + 1e-6
+    assert res.status in ("optimal", "feasible")
+
+
+def test_seeded_solve_certifies_faster_regression():
+    """n=13 dense: heuristic seeding collapses the proving phase (measured
+    3.7 s -> 0.4 s). Keep a loose ceiling so a silent loss of seeding (the
+    regression this guards) is caught without making the test timing-flaky."""
+    n, K = 13, 12
+    ref = brute_force_autocorr(n, K)
+    m, _ = build_autocorr(n, K)
+    t0 = time.time()
+    res = m.solve(time_limit=120)
+    wall = time.time() - t0
+    assert res.status == "optimal"
+    assert res.objective == pytest.approx(ref, abs=1e-5)
+    assert wall < 30, f"n=13 took {wall:.1f}s — incumbent seeding regressed"
+
+
 def test_binary_valued_integer_recognized_in_model_to_sympy():
     """{0,1}-bounded INTEGER columns count as binary in the symbolic
     recognizer layer too (issue #187 correction 1)."""

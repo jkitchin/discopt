@@ -880,6 +880,11 @@ def _detect_objvar_row(model: Model, mu: float) -> Optional[tuple[int, float]]:
 # ---------------------------------------------------------------------------
 
 
+def _mono_order(poly: dict) -> list[frozenset]:
+    """Non-constant monomials of *poly* in the deterministic canonical order."""
+    return sorted((m for m in poly if m), key=lambda m: tuple(sorted(m)))
+
+
 def _balanced_sum(terms: list[Expression]) -> Expression:
     """Combine *terms* into a balanced ``+`` tree (depth O(log n)) so that
     downstream recursive DAG walkers never see a linear-depth chain."""
@@ -1004,6 +1009,23 @@ def _reformulate(model: Model) -> Model:
     new_model._parameters = list(model._parameters)
     new_model._rebuild_name_index()
 
+    # Flat positions of the original variables (the aux columns are appended
+    # after them, so the original flat layout is a prefix of the reformed one).
+    # Recorded per aux variable — in exact append order — so a warm start /
+    # heuristic point over the ORIGINAL variables can be extended to a feasible
+    # point of the reformed MILP (see ``extend_initial_point``).
+    _flat_off: dict[int, int] = {}
+    _off = 0
+    for v in model._variables:
+        _flat_off[v._index] = _off
+        _off += v.size
+    n_orig_flat = _off
+
+    def _flat(key: tuple[int, int]) -> int:
+        return _flat_off[key[0]] + key[1]
+
+    aux_spec: list[tuple] = []
+
     # One aux + Fortet rows per distinct monomial, in deterministic order.
     aux: dict[frozenset, Variable] = {}
     aux_rows: list[Constraint] = []
@@ -1011,6 +1033,7 @@ def _reformulate(model: Model) -> Model:
         z = Variable(f"_bml_z{i}", VarType.CONTINUOUS, (), 0.0, 1.0, new_model)
         new_model._variables.append(z)
         aux[mono] = z
+        aux_spec.append(("z", tuple(_flat(k) for k in sorted(mono))))
         refs = [ctx.refs[k] for k in sorted(mono)]
         # z <= b_i for every factor (z >= 0 is the variable's lower bound).
         for r in refs:
@@ -1046,6 +1069,11 @@ def _reformulate(model: Model) -> Model:
         t = Variable(f"_bml_t{sq_counter}", VarType.CONTINUOUS, (), t_lo, t_hi, new_model)
         new_model._variables.append(t)
         sq_counter += 1
+        y_terms = tuple(
+            (sq.poly[m], tuple(_flat(k) for k in sorted(m))) for m in _mono_order(sq.poly)
+        )
+        aux_spec.append(("y", y_terms, float(sq.poly.get(_EMPTY, 0.0))))
+        aux_spec.append(("t",))
         link = _balanced_sum([y, *(_negate(term) for term in _poly_terms(sq.poly, ctx, aux))])
         aux_rows.append(Constraint(link, "==", 0.0))
         for u in range(sq.lo, sq.hi, sq.step):
@@ -1078,10 +1106,311 @@ def _reformulate(model: Model) -> Model:
 
     new_model._constraints = rebuilt + aux_rows
     new_model._objective = Objective(expression=new_obj_expr, sense=obj.sense)
+
+    # --- Warm-start / heuristic metadata (incumbent seeding) ---
+    # Dynamic attributes (Model does not declare them): consumed only through
+    # getattr by extend_initial_point / heuristic_incumbent.
+    setattr(new_model, "_bml_aux_spec", aux_spec)  # noqa: B010
+    setattr(new_model, "_bml_n_orig_flat", n_orig_flat)  # noqa: B010
+    setattr(  # noqa: B010
+        new_model,
+        "_bml_binary_flat",
+        frozenset(_flat(k) for k, is_b in ctx.is_bin.items() if is_b),
+    )
+    setattr(  # noqa: B010
+        new_model,
+        "_bml_heuristic",
+        _heuristic_meta(model, ctx, mu, objvar_row, obj_body, con_bodies, _flat_off, n_orig_flat),
+    )
     return new_model
+
+
+def _heuristic_meta(
+    model: Model,
+    ctx: _ExpandCtx,
+    mu: float,
+    objvar_row: Optional[tuple[int, float]],
+    obj_body: _ProcessedBody,
+    con_bodies: list[_ProcessedBody],
+    flat_off: dict[int, int],
+    n_orig_flat: int,
+) -> Optional[dict]:
+    """Build the primal local-search description of the model, or ``None`` when
+    the class-level feasibility argument does not apply. The heuristic needs
+    "every 0/1 assignment of the binary variables is feasible", which holds
+    exactly when the only constraint is the objective variable's defining row
+    (or there are none) and every variable is binary-valued — except the free
+    objective variable itself, whose value is *determined* by the bits."""
+    n_extra_rows = 1 if objvar_row is not None else 0
+    if len(model._constraints) != n_extra_rows:
+        return None
+
+    def _flat(key: tuple[int, int]) -> int:
+        return flat_off[key[0]] + key[1]
+
+    tau_key: Optional[tuple[int, int]] = None
+    if objvar_row is not None:
+        assert model._objective is not None
+        tau = model._objective.expression
+        assert isinstance(tau, Variable)
+        tau_key = (tau._index, 0)
+
+    bits: list[int] = []
+    fixed: list[tuple[int, float]] = []
+    for v in model._variables:
+        for elem in range(v.size):
+            key = (v._index, elem)
+            if tau_key is not None and key == tau_key:
+                continue
+            if not _binary_like(v, elem):
+                return None
+            lo = float(np.asarray(v.lb).flat[elem])
+            hi = float(np.asarray(v.ub).flat[elem])
+            flo, fhi = max(0.0, np.ceil(lo)), min(1.0, np.floor(hi))
+            if flo > fhi:
+                return None
+            if flo == fhi:
+                fixed.append((_flat(key), flo))
+            else:
+                bits.append(_flat(key))
+
+    def _poly_terms_flat(poly: dict, scale: float, skip: Optional[tuple[int, int]] = None):
+        terms = []
+        for m in _mono_order(poly):
+            if skip is not None and m == frozenset((skip,)):
+                continue
+            terms.append((scale * poly[m], tuple(_flat(k) for k in sorted(m))))
+        return terms, scale * poly.get(_EMPTY, 0.0)
+
+    squares: list[tuple[float, list, float]] = []
+    if objvar_row is None:
+        body = obj_body
+        flat_terms, const = _poly_terms_flat(body.flat, 1.0)
+        for sq in body.squares:
+            iterms, iconst = _poly_terms_flat(sq.poly, 1.0)
+            squares.append((sq.coef, iterms, iconst))
+        tau_spec = None
+    else:
+        # Row a*tau + R(b) + sum c_q*E_q**2 <sense> rhs pins the objective to
+        # tau*(b) = (rhs - R(b) - sum c_q E_q(b)**2) / a on its binding side.
+        row_idx, a = objvar_row
+        c = model._constraints[row_idx]
+        body = con_bodies[row_idx]
+        assert tau_key is not None
+        flat_terms, const = _poly_terms_flat(body.flat, -1.0 / a, skip=tau_key)
+        const += float(c.rhs) / a
+        for sq in body.squares:
+            iterms, iconst = _poly_terms_flat(sq.poly, 1.0)
+            squares.append((-sq.coef / a, iterms, iconst))
+        tau_spec = _flat(tau_key)
+
+    return {
+        "bits": bits,
+        "fixed": fixed,
+        "tau": tau_spec,
+        "flat_terms": flat_terms,
+        "flat_const": const,
+        "squares": squares,
+        "sense_mul": mu,
+        "n_orig_flat": n_orig_flat,
+    }
 
 
 def _negate(term: Expression) -> Expression:
     if isinstance(term, Constant):
         return Constant(-float(term.value.reshape(())))
     return UnaryOp("neg", term)
+
+
+# ---------------------------------------------------------------------------
+# Incumbent seeding: warm-start mapping + primal local search
+# ---------------------------------------------------------------------------
+
+
+def extend_initial_point(reformed: Model, x0) -> Optional[np.ndarray]:
+    """Extend a point over the ORIGINAL variables (flat, length
+    ``_bml_n_orig_flat``) to a point over the reformed model's full variable
+    vector by evaluating each auxiliary from its recorded definition
+    (``z = prod b``, ``y = E(b)``, ``t = y**2``). Binary-valued entries are
+    snapped to their nearest integer first so the aux values satisfy the
+    Fortet/secant rows exactly. Returns ``None`` when the model carries no
+    reformulation metadata or the point has the wrong length — the caller then
+    simply does not seed (the MILP driver re-validates whatever is passed, so
+    this mapping is an optimization, never a soundness lever)."""
+    spec = getattr(reformed, "_bml_aux_spec", None)
+    n0 = getattr(reformed, "_bml_n_orig_flat", None)
+    if spec is None or n0 is None:
+        return None
+    x = np.asarray(x0, dtype=np.float64).ravel()
+    if x.size != n0 or not np.all(np.isfinite(x)):
+        return None
+    x = x.copy()
+    for j in getattr(reformed, "_bml_binary_flat", frozenset()):
+        r = round(float(x[j]))
+        if abs(x[j] - r) > 1e-6:
+            return None
+        x[j] = float(r)
+    out = list(x)
+    last_y = 0.0
+    for entry in spec:
+        kind = entry[0]
+        if kind == "z":
+            v = 1.0
+            for j in entry[1]:
+                v *= x[j]
+        elif kind == "y":
+            v = entry[2]
+            for coef, idxs in entry[1]:
+                term = coef
+                for j in idxs:
+                    term *= x[j]
+                v += term
+            last_y = v
+        else:  # "t"
+            v = last_y * last_y
+        out.append(float(v))
+    return np.asarray(out, dtype=np.float64)
+
+
+def _heuristic_value(meta: dict, xb: dict[int, float]) -> float:
+    """Objective value (model sense's raw value, not min-normalized) of the
+    bit assignment *xb* (flat index -> 0/1) under the recorded description."""
+    val = meta["flat_const"]
+    for coef, idxs in meta["flat_terms"]:
+        term = coef
+        for j in idxs:
+            term *= xb[j]
+        val += term
+    for coef, iterms, iconst in meta["squares"]:
+        e = iconst
+        for c2, idxs in iterms:
+            term = c2
+            for j in idxs:
+                term *= xb[j]
+            e += term
+        val += coef * e * e
+    return float(val)
+
+
+class _FlipSearch:
+    """1-flip steepest-descent machinery over the recorded objective
+    description, with incremental deltas: flipping bit ``j`` changes each
+    multilinear part by ``(1 - 2*b_j) * (sum of its j-monomials evaluated on
+    the other factors)``, and each square by ``coef*(2*E*dE + dE**2)`` — so a
+    flip probe costs O(terms containing j), not O(all terms)."""
+
+    def __init__(self, meta: dict):
+        self.meta = meta
+        self.bits: list[int] = meta["bits"]
+        # Per bit: flat-part monomials containing it, and per-square monomials
+        # containing it (square index, coefficient, remaining factors).
+        self.flat_by_bit: dict[int, list] = {j: [] for j in self.bits}
+        self.sq_by_bit: dict[int, list] = {j: [] for j in self.bits}
+        bitset = set(self.bits)
+        for coef, idxs in meta["flat_terms"]:
+            for j in set(idxs) & bitset:
+                others = tuple(k for k in idxs if k != j)
+                self.flat_by_bit[j].append((coef, others))
+        for q, (_, iterms, _) in enumerate(meta["squares"]):
+            for c2, idxs in iterms:
+                for j in set(idxs) & bitset:
+                    others = tuple(k for k in idxs if k != j)
+                    self.sq_by_bit[j].append((q, c2, others))
+
+    def descend(self, xb: dict[int, float], budget: list) -> float:
+        """Steepest-descend *xb* in place; returns the raw objective value.
+        ``budget`` is a single-element mutable flip-probe countdown shared
+        across restarts (deterministic work cap)."""
+        meta = self.meta
+        e_vals = []
+        for _, iterms, iconst in meta["squares"]:
+            e = iconst
+            for c2, idxs in iterms:
+                term = c2
+                for j in idxs:
+                    term *= xb[j]
+                e += term
+            e_vals.append(e)
+        mu = meta["sense_mul"]
+        while budget[0] > 0:
+            best_j, best_d, best_des = None, -1e-9, None
+            for j in self.bits:
+                budget[0] -= 1
+                f = 1.0 - 2.0 * xb[j]
+                d_flat = 0.0
+                for coef, others in self.flat_by_bit[j]:
+                    term = coef
+                    for k in others:
+                        term *= xb[k]
+                    d_flat += f * term
+                des: dict[int, float] = {}
+                d_val = d_flat
+                for q, c2, others in self.sq_by_bit[j]:
+                    term = c2
+                    for k in others:
+                        term *= xb[k]
+                    des[q] = des.get(q, 0.0) + f * term
+                for q, de in des.items():
+                    d_val += meta["squares"][q][0] * (2.0 * e_vals[q] * de + de * de)
+                if mu * d_val < best_d:
+                    best_j, best_d, best_des = j, mu * d_val, des
+            if best_j is None:
+                break
+            xb[best_j] = 1.0 - xb[best_j]
+            for q, de in (best_des or {}).items():
+                e_vals[q] += de
+        # Exact value of the terminal point (the incremental E_q caches only
+        # steer the descent; the reported value is recomputed from scratch).
+        return _heuristic_value(meta, xb)
+
+    def run(self, restarts: int, max_flip_probes: int, seed: int):
+        import random
+
+        rng = random.Random(seed)
+        mu = self.meta["sense_mul"]
+        starts: list[dict[int, float]] = [
+            {j: 0.0 for j in self.bits},
+            {j: 1.0 for j in self.bits},
+        ]
+        while len(starts) < restarts:
+            starts.append({j: float(rng.getrandbits(1)) for j in self.bits})
+        budget = [max_flip_probes]
+        best_val, best_bits = None, None
+        for xb in starts:
+            if budget[0] <= 0:
+                break
+            for jf, vf in self.meta["fixed"]:
+                xb[jf] = vf
+            v = self.descend(xb, budget)
+            if best_val is None or mu * v < mu * best_val:
+                best_val, best_bits = v, dict(xb)
+        return best_val, best_bits
+
+
+def heuristic_incumbent(
+    reformed: Model, *, restarts: int = 512, max_flip_probes: int = 2_000_000, seed: int = 0
+) -> Optional[np.ndarray]:
+    """Deterministic 1-flip steepest-descent local search over the binary
+    variables of a reformed model whose recorded structure proves EVERY bit
+    assignment feasible (no constraints beyond the objvar defining row; all
+    non-objvar variables binary-valued). Returns the best point found,
+    extended over the reformed variable vector, or ``None`` when the class
+    argument does not apply. Purely a primal seed: the MILP driver re-validates
+    it, and a better incumbent only prunes — it never changes the certified
+    optimum. Fixed ``seed``/``restarts``/``max_flip_probes`` keep the search
+    deterministic (``deterministic=True`` default)."""
+    meta = getattr(reformed, "_bml_heuristic", None)
+    if not meta:
+        return None
+    bits: list[int] = meta["bits"]
+    if not bits or len(bits) > 1024:
+        return None
+    best_val, best_bits = _FlipSearch(meta).run(restarts, max_flip_probes, seed)
+    if best_bits is None:
+        return None
+    x0 = np.zeros(meta["n_orig_flat"], dtype=np.float64)
+    for j, v in best_bits.items():
+        x0[j] = v
+    if meta["tau"] is not None:
+        x0[meta["tau"]] = _heuristic_value(meta, best_bits)
+    return extend_initial_point(reformed, x0)

@@ -748,7 +748,7 @@ impl MilpDebugHook for PyMilpHook {
                     max_pool_cuts=128, heuristics=true, presolve=true, strong_branch=true,
                     node_propagation=false, reduced_cost_fixing=true,
                     sb_max_cands=6, sb_node_budget=48,
-                    time_limit_s=0.0, debug_hook=None))]
+                    initial_incumbent=None, time_limit_s=0.0, debug_hook=None))]
 pub fn solve_milp_py<'py>(
     py: Python<'py>,
     c: PyReadonlyArray1<'py, f64>,
@@ -775,6 +775,7 @@ pub fn solve_milp_py<'py>(
     reduced_cost_fixing: bool,
     sb_max_cands: usize,
     sb_node_budget: usize,
+    initial_incumbent: Option<PyReadonlyArray1<'py, f64>>,
     time_limit_s: f64,
     debug_hook: Option<Py<PyAny>>,
 ) -> PyResult<(String, Bound<'py, PyArray1<f64>>, f64, f64, usize, usize)> {
@@ -830,6 +831,7 @@ pub fn solve_milp_py<'py>(
         reduced_cost_fixing,
         sb_max_cands,
         sb_node_budget,
+        initial_incumbent,
         time_limit_s,
         debug_hook,
     )
@@ -847,7 +849,7 @@ pub fn solve_milp_py<'py>(
                     max_pool_cuts=128, heuristics=true, presolve=true, strong_branch=true,
                     node_propagation=false, reduced_cost_fixing=true,
                     sb_max_cands=6, sb_node_budget=48,
-                    time_limit_s=0.0, debug_hook=None))]
+                    initial_incumbent=None, time_limit_s=0.0, debug_hook=None))]
 #[allow(clippy::too_many_arguments)]
 pub fn solve_milp_csc_py<'py>(
     py: Python<'py>,
@@ -879,6 +881,7 @@ pub fn solve_milp_csc_py<'py>(
     reduced_cost_fixing: bool,
     sb_max_cands: usize,
     sb_node_budget: usize,
+    initial_incumbent: Option<PyReadonlyArray1<'py, f64>>,
     time_limit_s: f64,
     debug_hook: Option<Py<PyAny>>,
 ) -> PyResult<(String, Bound<'py, PyArray1<f64>>, f64, f64, usize, usize)> {
@@ -923,6 +926,7 @@ pub fn solve_milp_csc_py<'py>(
         reduced_cost_fixing,
         sb_max_cands,
         sb_node_budget,
+        initial_incumbent,
         time_limit_s,
         debug_hook,
     )
@@ -961,6 +965,7 @@ fn run_milp_hooked<'py>(
     reduced_cost_fixing: bool,
     sb_max_cands: usize,
     sb_node_budget: usize,
+    initial_incumbent: Option<PyReadonlyArray1<'py, f64>>,
     time_limit_s: f64,
     debug_hook: Option<Py<PyAny>>,
 ) -> PyResult<(String, Bound<'py, PyArray1<f64>>, f64, f64, usize, usize)> {
@@ -987,6 +992,9 @@ fn run_milp_hooked<'py>(
         reduced_cost_fixing,
         sb_max_cands,
         sb_node_budget,
+        initial_incumbent: initial_incumbent
+            .map(|arr| arr.as_slice().map(|s| s.to_vec()))
+            .transpose()?,
         simplex: SimplexOptions {
             tol,
             max_iter: 100_000,
