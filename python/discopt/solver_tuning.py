@@ -94,7 +94,15 @@ class SolverTuning:
     LP defeats phase-2 (see ``docs/dev/hda-no-bound-simplex-robustness-2026-07-16.md``).
     The NS bound is valid for ANY dual vector, so a drifted-basis dual only
     loosens it, never lifts it above the optimum; never fathoms on its own. No
-    external solver (the removed #517 HiGHS rescue is NOT resurrected)."""
+    external solver (the removed #517 HiGHS rescue is NOT resurrected).
+
+    #362 extends the same mechanism to the certification edge: when the
+    warm/equilibrated attempts break down but the generic cold path solves the
+    node LP ``optimal`` (which carries no certificate of its own), the stashed
+    NS bound is surfaced as the result's ``safe_bound`` so ``_certify`` can
+    certify the node instead of declining it into a non-rigorous sentinel
+    fathom (the nvs05 taint-at-the-certification-edge class; see
+    ``docs/dev/nvs05-decline-taint-2026-07-16.md``)."""
 
     # --- RLT (reformulation-linearization) families ---------------------------
     rlt: bool = field(default_factory=lambda: _env_flag("DISCOPT_RLT", default=False))

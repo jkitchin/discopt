@@ -439,7 +439,33 @@ class MilpRelaxationModel:
         ):
             bound = self._pending_numerical_bound
 
-        return MilpRelaxationResult(status=status_str, objective=obj, bound=bound, x=result.x)
+        # #362 (same flag): surface the stashed NS bound as ``safe_bound`` on an
+        # ``optimal`` generic-path solve. The generic MILP path computes no
+        # certificate of its own, so before this a node whose warm/equilibrated
+        # simplex attempts broke down numerically — but whose duals already yielded
+        # a rigorous Neumaier–Shcherbina bound on this very LP — reached
+        # ``_certify`` with ``safe_bound=None`` and was DECLINED by the
+        # conditioning guard, leaving the node's failure sentinel to non-rigorously
+        # fathom it (the nvs05 taint at the certification edge: LP optimum 5.47073,
+        # discarded NS bound 5.46581, taint floor 2.4e-4 below the incumbent). The
+        # NS bound is valid for ANY multiplier vector by weak duality, so a
+        # drifted-basis dual only loosens it — it can never exceed the true LP
+        # optimum — and a finite value is itself a proof the LP is bounded, so this
+        # can never fabricate a bound on a genuinely unbounded relaxation
+        # (himmel16 class). Attached only on ``optimal`` (elsewhere the ``bound``
+        # fill above already carries it; ``_certify`` only reads ``safe_bound``
+        # from optimal results).
+        safe_bound = None
+        if (
+            status_str == "optimal"
+            and _tuning().node_numerical_dual_bound
+            and self._pending_numerical_bound is not None
+        ):
+            safe_bound = self._pending_numerical_bound
+
+        return MilpRelaxationResult(
+            status=status_str, objective=obj, bound=bound, x=result.x, safe_bound=safe_bound
+        )
 
     def _solve_lp_warm(self) -> Optional["MilpRelaxationResult"]:
         """Pure-LP warm-started re-solve via the Rust dual simplex.
