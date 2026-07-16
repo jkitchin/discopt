@@ -2439,6 +2439,7 @@ fn solve_lp_root(lp: &LpView<'_>, b: &[f64], opts: &SimplexOptions) -> crate::lp
 /// the root relaxation of a large sparse binary QP solves from CSC without the dense
 /// blow-up. `cols` is the (unscaled) CSC of the working matrix; `c/l/u/b` and the
 /// slack layout match the dense root LP.
+#[allow(clippy::too_many_arguments)] // inherent LP signature: cols + m,n,c,l,u,b,opts
 fn solve_lp_root_csc(
     cols: &SparseCols,
     m: usize,
@@ -2516,6 +2517,7 @@ fn csc_to_dense(csc: &SparseCols, m: usize, n: usize) -> Vec<f64> {
 /// [`csc_to_dense`]; the differential harness gates it bit-identical to
 /// [`solve_milp`] on the panel, and T2/T3 remove the internal densification so the
 /// sparse matrix flows through untouched.
+#[allow(clippy::too_many_arguments)] // inherent LP signature: csc + m,n,c,l,u,b,obj_const,opts
 pub fn solve_milp_csc(
     csc: &SparseCols,
     m: usize,

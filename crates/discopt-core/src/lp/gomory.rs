@@ -265,7 +265,7 @@ pub fn separate_gomory_cols(
             }
         }
     }
-    let xb = match ftran_refined(&mut lu, &sp, &basis.basic_vars, &rhs_b, tol) {
+    let xb = match ftran_refined(&mut lu, sp, &basis.basic_vars, &rhs_b, tol) {
         Some(xb) => xb,
         None => return cuts,
     };
@@ -282,7 +282,7 @@ pub fn separate_gomory_cols(
         // Row i of B⁻¹: refined solve of Bᵀ w = e_i (one btran + refinement).
         let mut e_i = vec![0.0_f64; m];
         e_i[i] = 1.0;
-        let w = match btran_refined(&mut lu, &sp, &basis.basic_vars, &e_i, tol) {
+        let w = match btran_refined(&mut lu, sp, &basis.basic_vars, &e_i, tol) {
             Some(w) => w,
             None => continue,
         };

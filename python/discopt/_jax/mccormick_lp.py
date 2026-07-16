@@ -825,10 +825,15 @@ class MccormickLPRelaxer:
                 try:
                     y = np.asarray(cert.dual, dtype=np.float64)
                     n0 = self._n_orig
-                    A_arr = np.asarray(A, dtype=np.float64)
-                    if A_arr.ndim == 2 and A_arr.shape[0] == y.shape[0] and A_arr.shape[1] >= n0:
+                    # ``A`` is the assembled node matrix — SPARSE CSR since the
+                    # incremental structure went sparse (T11). Compute the structural
+                    # reduced costs ``d_j = c_j - (Aᵀy)_j`` with a sparse matvec on the
+                    # first ``n0`` columns; never densify ``A`` (would reintroduce the
+                    # O(rows*cols) blow-up on a large lift).
+                    A_sp = A if sp.issparse(A) else sp.csr_matrix(np.asarray(A, dtype=np.float64))
+                    if A_sp.shape[0] == y.shape[0] and A_sp.shape[1] >= n0:
                         c_full = np.asarray(inc.c, dtype=np.float64)
-                        rc = c_full[:n0] - (A_arr[:, :n0].T @ y)
+                        rc = c_full[:n0] - np.asarray(A_sp[:, :n0].T @ y, dtype=np.float64).ravel()
                         res.reduced_costs = rc
                         res.dual = y
                         res.col_status = cert.col_status
