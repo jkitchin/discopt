@@ -184,12 +184,25 @@ def model_to_sympy(model) -> SympyModel:
         size = int(getattr(v, "size", 1) or 1)
         lb = getattr(v, "lb", None)
         ub = getattr(v, "ub", None)
-        is_bin = getattr(v, "var_type", None) == core.VarType.BINARY
+        vt = getattr(v, "var_type", None)
+        is_bin = vt == core.VarType.BINARY
+        is_int = vt == core.VarType.INTEGER
         for i in range(size):
             key = v.name if size == 1 else f"{v.name}[{i}]"
             if key in syms:
-                bounds[syms[key]] = (_elem(lb, i, size), _elem(ub, i, size))
-                if is_bin:
+                elb, eub = _elem(lb, i, size), _elem(ub, i, size)
+                bounds[syms[key]] = (elb, eub)
+                # A {0,1}-bounded INTEGER element is binary-VALUED — all the
+                # binary-keyed recognitions here only need values in {0,1}.
+                # (.nl loading types MINLPLib's 0/1 columns as INTEGER, so
+                # keying on VarType.BINARY alone misses them — issue #187.)
+                if is_bin or (
+                    is_int
+                    and elb is not None
+                    and eub is not None
+                    and elb > -1.0
+                    and eub < 2.0
+                ):
                     binaries.add(syms[key])
     return SympyModel(
         objective=obj,
