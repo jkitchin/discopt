@@ -155,6 +155,37 @@ Candidate (B)'s tight bound requires L3-structural or higher-precision arithmeti
 tracked here as the honest scope; not attempted speculatively, since the entry
 experiment shows no scaling/factorization path exists.
 
+## CORRECTION (the "~1e7 ceiling" reasoning above was wrong)
+
+The "feral reliable to ~1e7" figure is `scaling.rs`'s empirical **coefficient
+dynamic-range** heuristic (`SCALE_TRIGGER`-adjacent), **not** a float64 limit —
+float64 LU with partial pivoting is accurate to condition numbers ~1e12–1e14. And
+the "1.77e9" repeatedly cited above is a **coefficient range**, not the basis
+**condition number** that governs factorization. Comparing them was an error.
+
+The real measurement (SVD of the captured hda node matrix, raw and optimally
+scaled):
+
+| | σ_max | σ_min (nz) | numerical rank (σ<σmax·1e-14) | #σ < σmax·1e-7 |
+|---|---|---|---|---|
+| raw A (2974×1138) | 8.91e10 | 4.47e-18 | 1123 / 1138 | — |
+| optimally-scaled A | 3.55 | 9.4e-26 | **1095 / 1138** | **409** |
+
+hda's relaxation matrix is **rank-deficient by ~15–43** (genuine near-linear
+dependence among columns) with a true SVD condition number **~1e14+** — and this is
+**scale-invariant**, which is why L1 cut the coefficient spread to 4e9 yet hda still
+failed. feral's FT `Growth` is it choking on **near-singular bases** (tiny pivots),
+exactly what a rank-deficient matrix produces.
+
+**Re-scoped fix (more tractable than "higher precision"):** the blocker is
+structural **redundancy / near-linear-dependence** in the lifted relaxation, not
+conditioning-by-scaling. The lever is a **presolve that detects and removes (or
+regularizes) the ~43 numerically dependent columns/rows** before factorization, so
+bases are non-singular. Higher precision is *not* required. (An earlier presolve
+probe was run on a malformed captured LP and its negative result is withdrawn —
+this SVD evidence supersedes it.) Still a real core-engine change under the
+bound-neutral regime; but structural-rank-reduction, not scaling and not f128.
+
 Acceptance / regime unchanged from #664: bound-neutral verification
 (`node_count` + certified `objective` exactly unchanged on the certifying panel,
 `cargo test -p discopt-core`), and a **tight** hda bound materially closer to opt
