@@ -85,7 +85,16 @@ certified `objective` **exactly unchanged** on the certifying panel + `cargo tes
 -p discopt-core`. Each is its own PR, not a rider on this investigation.
 
 **(A) Safe dual bound from the in-house basis (most tractable, additive) —
-VIABILITY CONFIRMED.** A valid *lower* bound needs only a dual point + directed
+IMPLEMENTED (flag `DISCOPT_NODE_NUMERICAL_DUAL_BOUND` /
+`SolverTuning.node_numerical_dual_bound`, default OFF).** `primal.rs` `assemble()`
+exports the Optimal-style dual candidate on a `Numerical` breakdown;
+`solve_lp_warm_std` computes the NS safe bound from it; `MilpRelaxationModel.solve`
+stashes it and attaches it as a last-resort floor when the whole in-house chain
+produced no bound; `MccormickLPRelaxer._solve_at_node_impl` reports it as a
+bound-only node. Measured: hda flag-ON → `bound = -1.80e10` (finite, `≤` optimum
+`-5964.53` — its first), flag-OFF → `bound=None` (baseline unchanged); clean
+certifying instances (alan, ex1221, nvs05) byte-identical. Tests:
+`python/tests/test_issue_517_numerical_dual_bound.py`. A valid *lower* bound needs only a dual point + directed
 rounding (Neumaier–Shcherbina), **not** a clean primal. When phase-2 drifts
 (audit `Bounds`/`Rows`) or breaks down, the engine still holds a basis and can
 export its dual `y = B⁻ᵀc_B`; feeding that through the in-repo NS certificate
