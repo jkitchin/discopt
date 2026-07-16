@@ -115,6 +115,46 @@ solves hda** — the conditioning floor is above feral's ceiling.
 
 Candidate A's loose floor remains hda's shipped fallback until L3 lands.
 
+## L3 entry experiment — the conditioning is irreducible and structural (measured)
+
+Before building any reformulation, solved the **true optimal diagonal scaling** of
+hda's captured node matrix (the classic log-space min-max LP:
+`min (M−m)` s.t. `m ≤ log|a_ij| + r_i + c_j ≤ M`, via HiGHS):
+
+```
+OPTIMAL diagonal-scaling residual spread = 1.771e9
+```
+
+So the heuristic ~2–4e9 was near-optimal; **~1.8e9 is the rigorous floor** no
+scaling algorithm can beat. And it is **not** caused by residue: recomputing the
+optimum after dropping every entry below 1e-14 … 1e-8 leaves it **exactly 1.771e9**
+at all thresholds. Tracing the binding entries: they are **normal-magnitude
+coefficients** (|a|≈1) — e.g. column 722 (6 rows) is forced to *both* extremes
+(scaled `e^0` in some rows, `e^-21.3` in others) because its rows demand scales
+differing by 1.77e9. It is a genuine **non-diagonal structural coupling** among real
+coefficients (the Arrhenius `6.3e10` / `3.27e6` rate rows vs the ~1 mass-balance
+rows sharing variables), which diagonal scaling provably cannot resolve.
+
+**Conclusion — candidate B is blocked at the relaxation-conditioning level, not the
+engine level.** hda's LP relaxation is inherently ~1.8e9-conditioned; float64
+simplex (feral ~1e7; HiGHS also false-infeasibles on the unscaled form) cannot
+solve it cleanly regardless of scaling/factorization. The only genuine fixes are
+both major and uncertain:
+
+- **L3-structural** — a *general* relaxation-build reformulation that changes the
+  coefficient structure (variable substitution/elimination to break the coupling,
+  or a rate-term reformulation). A constant-scale variable split is **not** enough
+  (it is diagonal, already in the 1.77e9). Must be general (Dev-Philosophy #2 — no
+  hda-keyed special case) and sound, which is a substantial relaxation-layer
+  research effort with no guarantee it drops below ~1e7.
+- **Higher-precision LP arithmetic** (f128 / rational residuals in the factorization)
+  — a different engine capability.
+
+**Disposition:** candidate (A)'s sound loose floor is the practical answer for hda.
+Candidate (B)'s tight bound requires L3-structural or higher-precision arithmetic —
+tracked here as the honest scope; not attempted speculatively, since the entry
+experiment shows no scaling/factorization path exists.
+
 Acceptance / regime unchanged from #664: bound-neutral verification
 (`node_count` + certified `objective` exactly unchanged on the certifying panel,
 `cargo test -p discopt-core`), and a **tight** hda bound materially closer to opt
