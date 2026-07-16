@@ -127,6 +127,28 @@ target. Requires the sharp NS margin (`ns-sharp-margin-2026-07-16.md`):
 without it the injected incumbent cannot fathom the optimal-ratio nodes and
 the tree stays >500 nodes.
 
+## 5b. Graduation differential panel (2026-07-16, this container)
+
+66-instance in-repo corpus (65 × `minlplib_nl` + gear4), flags OFF vs both
+flags ON, `tl=25 s`, `gap=1e-4`, 132 runs
+(`discopt_benchmarks/results/issue309_flags_graduation_panel_20260716.jsonl`;
+driver in the session scratchpad, gates in `panel_analyze.py` style):
+
+- **incorrect_count = 0.** Oracle gates on the 23 instances with committed
+  reference optima (`_KNOWN_OPTIMA` + gear4): no bound above its optimum, every
+  certified objective matches. Per-run certificate invariant (`bound ≤ obj`)
+  holds on all 132 runs. Every returned incumbent that could be independently
+  re-checked (106/132) verified feasible via `warm_start.check_feasibility`.
+- **0 certification regressions.** Certified count 45 (OFF) → 46 (ON); the one
+  change is gear4 itself (OFF: 855 nodes / bound ~0 / not certified at tl=25 s;
+  ON: 3 nodes / 1.6 s / certified optimum).
+- Off-class deltas (sharp NS margin only — no eligible ratio spec): ex1226
+  5 → 3 nodes, st_e36 89 → 85 nodes, same certified objectives,
+  oracle-checked. Everything else byte-identical or within-noise.
+
+Formal graduation per regime 2 still requires the corpus-wide panel green on
+consecutive **nightly** runs; this panel is the branch-side evidence.
+
 ## 6. Soundness
 
 - Achievable set from **outward-rounded** integer node bounds (superset of
