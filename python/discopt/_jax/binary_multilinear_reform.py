@@ -1068,8 +1068,13 @@ def _reformulate(model: Model) -> Model:
     new_obj_expr = _rebuild(obj_body)
     rebuilt: list[Constraint] = []
     for c, pbody in zip(model._constraints, con_bodies):
-        has_work = pbody.squares or any(len(m) >= 2 for m in pbody.flat)
-        rebuilt.append(Constraint(_rebuild(pbody), c.sense, c.rhs, c.name) if has_work else c)
+        # Rebuild EVERY body from its expansion, not only those that gained
+        # aux terms: a body like ``b*b + x`` expands to the *linear* ``b + x``
+        # (no aux, so no "work"), but keeping the original nonlinear
+        # expression would make the pure-MILP adoption guard reject the whole
+        # reformulation. The rebuilt form is algebraically identical on the
+        # feasible set.
+        rebuilt.append(Constraint(_rebuild(pbody), c.sense, c.rhs, c.name))
 
     new_model._constraints = rebuilt + aux_rows
     new_model._objective = Objective(expression=new_obj_expr, sense=obj.sense)

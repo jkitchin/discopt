@@ -248,6 +248,34 @@ def test_mixed_model_with_binary_witness_still_abstains():
     assert B.reformulate_binary_multilinear(m) is m
 
 
+def test_binary_square_in_constraint_collapses_to_linear():
+    """``b*b`` in a constraint collapses to ``b`` (b**2 == b), so the rebuilt
+    model is genuinely pure-MILP and the optimum is preserved."""
+    m = Model()
+    b = [m.integer(f"b{i}", lb=0, ub=1) for i in range(3)]
+    x = m.continuous("x", lb=0, ub=2)
+    m.subject_to(b[0] * b[0] + x <= 1.5)
+    m.minimize(b[0] * b[1] * b[2] - 2 * b[0] - x)
+    m2 = B.reformulate_binary_multilinear(m)
+    assert m2 is not m
+    from discopt._jax.problem_classifier import ProblemClass, classify_problem
+    from discopt._jax.term_classifier import classify_nonlinear_terms
+
+    nl = classify_nonlinear_terms(m2)
+    assert not (nl.bilinear or nl.trilinear or nl.multilinear or nl.monomial or nl.general_nl)
+    assert classify_problem(m2) == ProblemClass.MILP
+    # b0=1 forces x <= 0.5; with b1*b2 = 0 the objective is -2 - 0.5 = -2.5
+    # (b0=0 allows x=1.5 but only reaches -1.5). Verified by enumeration.
+    ref = min(
+        v0 * v1 * v2 - 2 * v0 - min(2.0, 1.5 - v0 * v0)
+        for v0, v1, v2 in itertools.product([0, 1], repeat=3)
+    )
+    res = m2.solve(time_limit=60, nlp_solver="simplex", presolve=False)
+    assert res.status == "optimal"
+    assert res.objective == pytest.approx(ref, abs=1e-5)
+    assert res.objective == pytest.approx(-2.5, abs=1e-5)
+
+
 def test_deterministic_rebuild():
     m1, _ = build_autocorr(8, 7)
     m2, _ = build_autocorr(8, 7)
