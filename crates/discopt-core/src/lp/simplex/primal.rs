@@ -1658,6 +1658,25 @@ impl<'a> Simplex<'a> {
                     Vec::new()
                 }
             }
+            // #517: on a phase-2 `Numerical` breakdown also export the Optimal-style
+            // row-dual candidate `y = B⁻ᵀc_B` from the final basis. It is a *candidate*
+            // the caller verifies (a Neumaier–Shcherbina safe bound is valid for ANY
+            // `y`, so a drifted-basis dual only loosens it, never lifts it above the
+            // optimum) — it lets the hda-class no-bound nodes still contribute a sound
+            // lower bound. `IterLimit` and the `failed()` path keep the empty dual
+            // (no usable factorization to btran against).
+            LpStatus::Numerical => {
+                let mut y: Vec<f64> = self
+                    .basis
+                    .iter()
+                    .map(|&j| if j < self.n { self.c[j] } else { 0.0 })
+                    .collect();
+                if self.lu.btran(&mut y).is_ok() {
+                    y
+                } else {
+                    Vec::new()
+                }
+            }
             _ => Vec::new(),
         };
         let ray = std::mem::take(&mut self.unbounded_ray);

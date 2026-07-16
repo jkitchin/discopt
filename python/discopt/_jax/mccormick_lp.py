@@ -1523,6 +1523,18 @@ class MccormickLPRelaxer:
             floor = getattr(milp, "_objective_floor", None)
             if res.status == "unbounded" and floor is not None and np.isfinite(floor):
                 return MccormickLPResult(status="optimal", lower_bound=float(floor))
+            # #517 (flag-gated): the node LP broke down numerically but the in-house
+            # simplex's own dual yielded a rigorous Neumaier–Shcherbina safe lower
+            # bound (``milp.solve`` attached it to ``res.bound``). It is valid for ANY
+            # dual — so ``<=`` the true LP optimum ``<=`` this node's true optimum,
+            # sound even with unbounded nonlinear columns and no vertex ``x`` — which
+            # gives the hda-class no-bound nodes a dual bound instead of nothing.
+            if (
+                _tuning().node_numerical_dual_bound
+                and res.bound is not None
+                and np.isfinite(res.bound)
+            ):
+                return MccormickLPResult(status="optimal", lower_bound=float(res.bound))
             return MccormickLPResult(status=res.status)
 
         def _certify(r) -> Optional[float]:

@@ -531,8 +531,23 @@ def solve_lp_warm_std(
                 None,
                 LpWarmCert(safe_bound=None, farkas_certified=False),
             )
-        # iter_limit / numerical: signal the caller to fall back to the generic path.
-        return None, None, LpWarmCert(safe_bound=None, farkas_certified=False)
+        # iter_limit / numerical: no clean optimum — signal fallback (result None).
+        # But if the engine exported a dual candidate from the broken basis (#517),
+        # carry a Neumaier–Shcherbina safe lower bound in the cert. It is valid for
+        # ANY multiplier vector, so a drifted-basis dual only loosens it — never
+        # lifts it above the optimum. The caller (behind a default-OFF flag) uses it
+        # only as a last-resort floor when nothing else produced a bound.
+        safe = None
+        if dual is not None and np.size(dual):
+            safe = _safe_lp_lower_bound_std(dual, c_std, a_std, b_vec, lb_std, ub_std)
+        return (
+            None,
+            None,
+            LpWarmCert(
+                safe_bound=(None if safe is None else float(safe)),
+                farkas_certified=False,
+            ),
+        )
 
     result, out_basis, cert = _result_basis_cert()
     if return_cert:

@@ -282,6 +282,13 @@ class MilpRelaxationModel:
         from discopt.solvers import SolveStatus
         from discopt.solvers.lp_backend import get_milp_solver
 
+        # #517 last-resort dual floor (flag-gated, default OFF): reset per solve.
+        # A numerically-failed node LP may still yield a sound Neumaier–Shcherbina
+        # safe bound from the in-house simplex's own dual; the warm/equilibrated
+        # paths stash it here and it is attached below only if nothing else produced
+        # a bound (the hda-class no-bound nodes).
+        self._pending_numerical_bound: Optional[float] = None
+
         # Warm-startable pure-LP fast path: the spatial cut-separation loop
         # re-solves the SAME structural columns with only rows (cuts) appended, so
         # the previous optimal basis is an ideal dual-simplex warm start. Engage
@@ -421,6 +428,17 @@ class MilpRelaxationModel:
         ):
             bound = float(result.bound) + self._obj_offset
 
+        # #517 last-resort dual floor: if the whole in-house chain produced no
+        # bound but a numerically-failed node LP yielded a sound NS safe bound
+        # (from the engine's own dual), use it (flag-gated). Never overrides a real
+        # bound — it only fills a ``None`` — and never fathoms on its own.
+        if (
+            bound is None
+            and _tuning().node_numerical_dual_bound
+            and self._pending_numerical_bound is not None
+        ):
+            bound = self._pending_numerical_bound
+
         return MilpRelaxationResult(status=status_str, objective=obj, bound=bound, x=result.x)
 
     def _solve_lp_warm(self) -> Optional["MilpRelaxationResult"]:
@@ -461,6 +479,7 @@ class MilpRelaxationModel:
         if result is None:
             # iter_limit / numerical: let the generic path (with its HiGHS option)
             # handle it; drop the stale basis so the next round cold-starts.
+            self._stash_numerical_bound(cert)  # #517 last-resort floor (flag-gated)
             self._warm_basis = None
             return None
         if out_basis is not None:
@@ -530,6 +549,7 @@ class MilpRelaxationModel:
         except Exception:  # pragma: no cover - defensive
             return None
         if result is None:
+            self._stash_numerical_bound(cert)  # #517 last-resort floor (flag-gated)
             return None
         status_map = {
             SolveStatus.OPTIMAL: "optimal",
@@ -565,6 +585,27 @@ class MilpRelaxationModel:
             safe_bound=safe_bound,
             farkas_certified=bool(cert.farkas_certified),
         )
+
+    def _stash_numerical_bound(self, cert) -> None:
+        """Record a Neumaier–Shcherbina safe bound recovered from a numerically-
+        failed node LP as this solve's last-resort dual floor (#517, flag-gated).
+
+        The NS bound comes from the in-house simplex's *own* dual candidate on a
+        phase-2 breakdown and is valid for **any** multiplier vector, so it can
+        never exceed the true optimum — a drifted basis only loosens it. Attached
+        in :meth:`solve` only when nothing else produced a bound, so it never
+        overrides (or tightens away from) a real bound. Tracks the tightest (max)
+        floor seen across the warm/equilibrated attempts of one solve.
+        """
+        if not _tuning().node_numerical_dual_bound:
+            return
+        if cert is None or cert.safe_bound is None or not self._objective_bound_valid:
+            return
+        sb = float(cert.safe_bound) + self._obj_offset
+        if not math.isfinite(sb):
+            return
+        prev = getattr(self, "_pending_numerical_bound", None)
+        self._pending_numerical_bound = sb if prev is None else max(prev, sb)
 
 
 def sanitize_relaxation_for_conditioning(

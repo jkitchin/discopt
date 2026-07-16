@@ -82,6 +82,20 @@ class SolverTuning:
     it. All fields are validated on construction.
     """
 
+    # --- #517 hda-class last-resort dual bound --------------------------------
+    node_numerical_dual_bound: bool = field(
+        default_factory=lambda: _env_flag("DISCOPT_NODE_NUMERICAL_DUAL_BOUND", default=False)
+    )
+    """Attach a Neumaier–Shcherbina safe lower bound from the in-house simplex's
+    *own* dual candidate when the node LP solve breaks down numerically
+    (``DISCOPT_NODE_NUMERICAL_DUAL_BOUND``, default OFF — bound-changing regime,
+    #517). Fires only where the whole in-house chain (warm → equilibrated → cold)
+    produces NO bound today: the hda-class flowsheets whose ill-conditioned root
+    LP defeats phase-2 (see ``docs/dev/hda-no-bound-simplex-robustness-2026-07-16.md``).
+    The NS bound is valid for ANY dual vector, so a drifted-basis dual only
+    loosens it, never lifts it above the optimum; never fathoms on its own. No
+    external solver (the removed #517 HiGHS rescue is NOT resurrected)."""
+
     # --- RLT (reformulation-linearization) families ---------------------------
     rlt: bool = field(default_factory=lambda: _env_flag("DISCOPT_RLT", default=False))
     """Legacy whole-relaxation RLT toggle (``DISCOPT_RLT``). The ``rlt=`` argument
