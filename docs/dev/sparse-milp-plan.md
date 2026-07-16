@@ -106,7 +106,7 @@ structural `0.0` adds exactly, and CSC preserves ascending row order, so `Aᵀy`
   (dense == csc) green.
 - [x] **T3b2 — `separate_cover` → CSC** (+ its dense oracle + differential test on a
   crafted fractional node).
-- [ ] **T3b3 — `strong_branch` → CSC** (+ oracle + differential test).
+- [x] **T3b3 — `strong_branch` → CSC.** Finding (mini-falsification): `strong_branch` is ALREADY CSC-based — it solves only via `PreparedDual::prepare`/`solve_lp_warm_scaled_csc`, which take `ctx.csc` and never read `LpView.a`, and it has no other matrix access. So no port is needed; its two `a: ctx.sa` fields were vestigial → set to `&[]` (removing its dense dependency). **Done ✓** — full `cargo test -p discopt-core` (456) green with the empty `.a` (runtime proof it's unread); the integration gate where `strong_branch` actually fires is T3b6.
 - [ ] **T3b4 — node propagation / FBBT (`prop_lp`) → CSC** (+ oracle + differential
   test).
 - [ ] **T3b5 — driver rewire + remove `a_w`.** Carry the working matrix as

@@ -1616,7 +1616,10 @@ fn strong_branch(
     // Reference scaled bounds (the node's own) at which the basis is dual-feasible.
     let (ref_l, ref_u) = scale_bounds(orig_l, orig_u);
     let prep_view = LpView {
-        a: ctx.sa,
+        // T3b3: strong branching solves only through `PreparedDual`/`solve_lp_warm_scaled_csc`,
+        // which read the matrix from `ctx.csc`, never `LpView.a`. The `.a` is vestigial —
+        // pass an empty slice so this path carries no dense-matrix dependency.
+        a: &[],
         m: ctx.m_w,
         n: ctx.n_w,
         c: ctx.sc,
@@ -1630,7 +1633,7 @@ fn strong_branch(
             Some(p) => p.reoptimize(&sl, &su, ctx.sb, simplex),
             None => {
                 let view = LpView {
-                    a: ctx.sa,
+                    a: &[], // T3b3: matrix comes from `ctx.csc`; `.a` unused here.
                     m: ctx.m_w,
                     n: ctx.n_w,
                     c: ctx.sc,
