@@ -194,7 +194,24 @@ def _contains_expandable_square(model: Model) -> bool:
         """A ``+``/``-`` node whose distribution can expose product cross-terms."""
         return isinstance(e, BinaryOp) and e.op in ("+", "-")
 
+    # Memoize on ``id(expr)``: this is a *pure structural* predicate — it inspects
+    # only op / constant structure, never variable bounds — so an id-keyed cache is
+    # bound-neutral and cannot go stale during the walk. Dense-quadratic models share
+    # subexpressions heavily (qap: a 225-variable assignment objective is a sum of
+    # ~n^2 products over a small variable set), so the naive ``visit(left) or
+    # visit(right)`` re-walks shared nodes combinatorially — minutes of wall /
+    # RecursionError on qap. With the memo each unique node is visited once -> O(nodes).
+    _seen: dict[int, bool] = {}
+
     def visit(expr: Expression) -> bool:
+        eid = id(expr)
+        hit = _seen.get(eid)
+        if hit is not None:
+            return hit
+        _seen[eid] = result = _visit_uncached(expr)
+        return result
+
+    def _visit_uncached(expr: Expression) -> bool:
         if isinstance(expr, BinaryOp):
             if (
                 expr.op == "**"
