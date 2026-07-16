@@ -191,6 +191,28 @@ structural `0.0` adds exactly, and CSC preserves ascending row order, so `Aᵀy`
     change per §5: needs the differential-bound test + feature flag + nightly greens, a
     separate task). Certificate gate unaffected. Retire dense oracles only after nightly-green.
 
+- [ ] **T7 — relax `_MAX_RELAX_DENSE_CELLS` for the sparse backend: ENTRY EXPERIMENT KILLED
+  IT (§4).** Before implementing the flag, measured the payoff on qap's root box (guard lifted,
+  `backend="simplex"`):
+  - **McCormick LP is now cheap and memory-safe:** `solve_at_node(root)` → **optimal in ~2 s,
+    0.6 GB** (all three of budget=10/30/60 s converge to the same vertex). The sparse work
+    (T0–T4) + the T6 incremental fix delivered a working large-lift LP path.
+  - **…but the bound is useless.** McCormick-LP root bound = **−1e-9 ≈ 0** vs the oracle DUAL
+    bound **149106**. Expected: McCormick envelopes on an indefinite binary `x'Qx`
+    (eig ∈ [−330k, +953k], x ∈ [0,1]) are trivially loose — each lifted product drops to its
+    independent lower envelope, so the LP minimum is ~0 and fathoms nothing.
+  - **PSD strengthening does not rescue it AND re-densifies.** `_root_relaxation_lower_bound(
+    …, psd_cuts=True)` → bound still **−1e-9**, **wall 64 s, RSS 46 GB** (vs 17 s / 0.6 GB
+    without PSD). So the moment/clique path (`psd_strengthen_relaxation_bound`) has its own
+    dense blowup, same class as T6 — and even so it buys no bound here.
+  - **Verdict:** relaxing the guard **by default is a regression** for qap (≥2 s/node LP for a
+    ~0 bound, no fathoming) and **helps no measured instance**, so shipping a default-off flag
+    would be a near-dead flag (§3). NOT implemented. The guard stays as-is. qap's real dual
+    bound (→149106) needs a fundamentally stronger relaxation (RLT-2 / tailored QAP / SDP),
+    not a McCormick-LP guard flip. **Two concrete follow-ups surfaced, neither a guard flip:**
+    (a) the PSD path's 46 GB densification (a real memory bug, T6-style fix); (b) per-node LP
+    time on large lifts (profiling target from T6). Awaiting direction on which to pursue.
+
 ## Problem (measured on qap — a 225-binary Quadratic Assignment Problem)
 
 `solve_milp_py` (the Rust MILP entry) takes a **dense** `a: PyReadonlyArray2`, and
