@@ -90,16 +90,37 @@ mechanisms — de-risked below, they're all bit-identical ports, not rewrites:
   exists (`Scaling::from_sparse`, used in T2). **Done ✓** — `csc_augment_matches_dense_augment`
   proves it's nonzero-for-nonzero identical to `from_dense(augment_with_cuts(..))`;
   453 core tests green.
-- [ ] **T3b — remove dense `a_w` (driver rewire).** Carry the working matrix as a
-  `SparseCols` through `solve_milp_hooked`: build the base CSC (from the entry;
-  `from_dense(lp.a)` for the dense entry until T4), append cuts via
-  `augment_cols_with_cuts`, drive scaling with `Scaling::from_sparse` + `scale_cols`,
-  and build the node `ctx` (`csc`/`csc_rc`) directly. Remove `a_w = lp.a.to_vec()`,
-  the per-round `from_dense(a_w)`, the `Scaling::from_matrix(&a_w)` /
-  `from_dense(sa)` / `from_dense(&a_w)` sites, and the `NodeCtx.a_w`/`sa` dense
-  fields (rewire their few consumers — cuts, reduced-cost fixing — to the CSC).
-  **Done:** `driver_matches_golden` green (incl. `lp_iters`); `a_w` no longer
-  constructed anywhere; the dense-entry path still bit-identical.
+**T3b scope correction (user: full per-node CSC port).** `a_w` (dense) is read by
+the WHOLE per-node engine via `node_lp.a`/`prop_lp.a`/`ctx.sa`, not "a few
+consumers": `struct_nnz`, `try_rounding`, `farkas_safe_bound`, `separate_cover`,
+`strong_branch`, and node propagation (FBBT). The panel solves at the root (nodes=1)
+so it can't gate these — instead **keep each dense function as the oracle and add a
+DIRECT differential unit test** (`fn_dense(dense,..) == fn_csc(csc,..)` on crafted
+matrices + fractional points). All ports are bit-identical by the same argument: a
+structural `0.0` adds exactly, and CSC preserves ascending row order, so `Aᵀy`
+(`csc.dot`) and row activities match the dense sums term-for-term.
+
+- [ ] **T3b1 — trivial ports.** `struct_nnz` → `col_ptr[ns]`; `try_rounding` and
+  `farkas_safe_bound` → `&SparseCols` (column-iteration into `act/lo/hi`;
+  `csc.dot(j,y)`). Keep dense versions as oracles. **Done:** differential unit tests
+  (dense == csc) green.
+- [ ] **T3b2 — `separate_cover` → CSC** (+ its dense oracle + differential test on a
+  crafted fractional node).
+- [ ] **T3b3 — `strong_branch` → CSC** (+ oracle + differential test).
+- [ ] **T3b4 — node propagation / FBBT (`prop_lp`) → CSC** (+ oracle + differential
+  test).
+- [ ] **T3b5 — driver rewire + remove `a_w`.** Carry the working matrix as
+  `SparseCols` through `solve_milp_hooked`: build base CSC, append cuts via
+  `augment_cols_with_cuts` (+ the `b/c/l/u/is_int` appends), scaling via
+  `Scaling::from_sparse`+`scale_cols`, `NodeCtx` carries `csc`/`csc_rc` (drop `a_w`,
+  `sa`; ignored `LpView.a` fields → `&[]`), switch all consumers to the CSC ports.
+  Delete `a_w = lp.a.to_vec()` and every dense-matrix site. **Done:**
+  `driver_matches_golden` green (incl. `lp_iters`); all T3b differential tests green;
+  `a_w` no longer constructed; dense-entry path bit-identical.
+- [ ] **T3b6 (gate strengthening) — branching integration golden.** Add ≥1 small MILP
+  that genuinely branches (source from the `.nl` corpus or craft with cuts/heuristics
+  off) so `driver_matches_golden` exercises `separate_cover`/`strong_branch`/
+  propagation end-to-end, not just nodes=1. Capture status/obj/nodes/`lp_iters`.
 - [ ] **T4 — Python binding + routing.** `solve_milp_csc_py(col_ptr, row_idx, vals,
   m, n, c, l, u, int_cols, ...)`; route `solvers/milp_simplex.py` and the
   `MilpRelaxationModel` MILP path to pass the relaxation's existing scipy CSC
