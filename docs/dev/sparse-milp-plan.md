@@ -205,13 +205,13 @@ structural `0.0` adds exactly, and CSC preserves ascending row order, so `Aᵀy`
     …, psd_cuts=True)` → bound still **−1e-9**, **wall 64 s, RSS 46 GB** (vs 17 s / 0.6 GB
     without PSD). So the moment/clique path (`psd_strengthen_relaxation_bound`) has its own
     dense blowup, same class as T6 — and even so it buys no bound here.
-  - **Verdict:** relaxing the guard **by default is a regression** for qap (≥2 s/node LP for a
-    ~0 bound, no fathoming) and **helps no measured instance**, so shipping a default-off flag
-    would be a near-dead flag (§3). NOT implemented. The guard stays as-is. qap's real dual
-    bound (→149106) needs a fundamentally stronger relaxation (RLT-2 / tailored QAP / SDP),
-    not a McCormick-LP guard flip. **Two concrete follow-ups surfaced, neither a guard flip:**
-    (a) the PSD path's 46 GB densification (a real memory bug, T6-style fix) — **FIXED in T8
-    below**; (b) per-node LP time on large lifts (profiling target from T6).
+  - **Verdict (revised in T12):** relaxing the guard **by default is a regression** for qap
+    (≥2 s/node LP for a ~0 bound, no fathoming) and **helps no measured instance**, so it is
+    **NOT default-on**. qap's real dual bound (→149106) needs a fundamentally stronger relaxation
+    (RLT-2 / tailored QAP / SDP), not a McCormick-LP guard flip. **Two follow-ups surfaced:**
+    (a) the PSD path's 46 GB densification — **FIXED in T8**; (b) per-node LP time — **profiled
+    in T10, fixed in T11**. The guard relaxation itself is shipped as a **default-off flag in
+    T12** (the now-safe capability), not defaulted on.
 
 - [x] **T8 — FIXED the PSD/OBBT exact-LP oracle 46 GB densification.** Root cause: the exact-LP
   oracle `solvers/lp_simplex.py::solve_lp` (returned by `get_exact_lp_solver`, called by
@@ -304,6 +304,29 @@ structural `0.0` adds exactly, and CSC preserves ascending row order, so `Aᵀy`
     (T7: qap's McCormick bound is ~0, so lifting it is a separate flagged, bound-changing
     decision). This change removes the memory blowup and makes the fast path *available* for
     large lifts — the enabler that lifting that guard would need.
+
+- [x] **T12 — the guard relaxation, shipped as a default-off flag (§5 bound-changing).** With the
+  whole per-node path now sparse (T0–T11), the `_MAX_RELAX_DENSE_CELLS` dense-cell guard blocks
+  large-lift LPs for a "would force a multi-GB dense allocation" reason that no longer exists.
+  Added `SolverTuning.sparse_large_lp` (`DISCOPT_SPARSE_LARGE_LP`, **default off**): when set, both
+  guard sites (`mccormick_lp.py` fast + cold paths, via `_lp_lift_too_large`) switch from the
+  dense-cell test to a **nonzero** ceiling (`_MAX_SPARSE_LP_NNZ = 5e7`), so a large *sparse* lift
+  earns its rigorous McCormick LP bound instead of being declined — relevant because for
+  `n_vars > 50` alpha-BB is ineligible, so a declined node has **no** per-node relaxation at all.
+  - **Sound (§5):** the McCormick LP bound is a valid lower bound and the B&B keeps the parent
+    bound as a floor, so enabling it never loosens a node — only adds a bound. Regression test
+    `test_sparse_large_lp_flag_solves_declined_node_soundly`: guard tripped + flag on solves the
+    node with the **same** bound as the below-cap solve (the flag gates only *declining*, not the
+    math) and ≤ every sampled feasible objective; flag off is unchanged (declined). qap (guard
+    tripped): off → `skipped_oversize`; on → optimal, bound −3e-9 ≤ oracle, 0.64 GB. 653 smoke +
+    10 adversarial green (default-off ⇒ no behavior change).
+  - **Why default-off (not a dead flag, §3):** the survey found **no benchmark instance that
+    benefits** — the guard only trips at qap-scale lifts (>1e8 dense cells), and qap's indefinite-
+    QP McCormick bound is ~0; every other tested lift is compact (< 1e8 cells) and already solves
+    (autocorr_bern20-03's root McCormick LP is *exact*, −72.0 = oracle). The flag is the opt-in
+    escape hatch for a large-*sparse*-lift-with-tight-McCormick problem (the culmination the whole
+    sparse thread enables); it stays off until such an instance measurably benefits on consecutive
+    nightlies, per §5.
 
 ## Problem (measured on qap — a 225-binary Quadratic Assignment Problem)
 

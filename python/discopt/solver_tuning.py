@@ -299,6 +299,23 @@ class SolverTuning:
     """Feasibility-based bound tightening on lifted columns
     (``DISCOPT_LIFTED_FBBT``, default off)."""
 
+    sparse_large_lp: bool = field(
+        default_factory=lambda: _env_flag("DISCOPT_SPARSE_LARGE_LP", default=False)
+    )
+    """Solve the per-node McCormick LP even when its lift exceeds the
+    ``_MAX_RELAX_DENSE_CELLS`` dense-cell guard (``DISCOPT_SPARSE_LARGE_LP``, default
+    off). The whole per-node path is now sparse — relaxation build (CSR), incremental
+    patch (T11), simplex (CSC), exact-LP oracle (T8) — so the guard's "would force a
+    multi-GB dense allocation" premise is obsolete: a huge lift (e.g. qap's 85756-row
+    McCormick relaxation) solves in ~0.1 s at <1 GB. On this flag the guard becomes
+    nonzero-based (``_MAX_INCREMENTAL_NNZ``) instead of dense-cell-based, so a large
+    *sparse* lift earns its rigorous McCormick LP bound instead of being declined
+    (no per-node relaxation at all when ``n_vars > 50``, where alpha-BB is
+    ineligible). Sound: the LP bound is a valid lower bound and the B&B keeps the
+    parent bound as a floor, so enabling it never loosens a node — only adds a bound.
+    Default off pending a benchmark instance that measurably benefits (qap's
+    indefinite-QP McCormick bound is ~0; see docs/dev/sparse-milp-plan.md T7/T12)."""
+
     node_bound_mode: str = field(
         default_factory=lambda: os.environ.get("DISCOPT_NODE_BOUND_MODE", "lp")
     )
