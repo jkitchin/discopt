@@ -25,12 +25,37 @@ univariate, fractional power, piecewise) makes validation fail -> fallback.
 
 from __future__ import annotations
 
+import logging
 import time
 
 import numpy as np
 import scipy.sparse as sp
 
+logger = logging.getLogger(__name__)
+
 _TOL = 1e-7
+
+# Nonzero-footprint budget for the incremental structure. The fast path now holds
+# ``base_A`` SPARSE (CSR) and ``_patch`` copies only its ``.data`` array (~nnz
+# floats) per node, so the footprint is ``O(nnz)``, not ``O(rows*cols)`` — the
+# earlier dense ``base_A`` (~14.85 GB on qap, ~30 GB peak) is gone. This cap only
+# guards a pathologically dense lift whose per-node ``.data`` copy would itself be
+# large; above it the incremental path is declined (``ok=False``) and
+# ``solve_at_node`` uses the per-node SPARSE cold build. Sound either way: the
+# structure is only an accelerator whose rows are validated bit-identical to the
+# cold build (``_validate``), so declining changes speed, never the bound. 5e7
+# nonzeros ~ 0.4 GB of f64 data — far above qap's ~172k nnz and any well-posed
+# lift, far below a memory-thrashing structure.
+_MAX_INCREMENTAL_NNZ = 50_000_000
+
+# Warn-once keys for oversize declines, so a large model logs a single line
+# rather than one per relaxer construction.
+_incremental_oversize_warned: set = set()
+
+
+class _IncrementalStructureTooLarge(Exception):
+    """The lifted relaxation is too large to hold densely in the incremental
+    fast path; the caller falls back to the sparse per-node cold build."""
 
 
 def _bilinear_rows(i, j, a, li, ui, lj, uj):
@@ -191,7 +216,14 @@ class IncrementalMcCormickLP:
         )
         if not relax._objective_bound_valid or relax._A_ub is None:
             raise ValueError("relaxation has no valid bound / no rows")
-        A = np.asarray(sp.csr_matrix(relax._A_ub).todense(), dtype=np.float64)
+        # SPARSE: keep the lifted constraint matrix as CSR — never densify. The
+        # structure holds it sparse (``_build_structure``) and ``_patch`` rewrites
+        # only the box-dependent product-row *values* in place (fixed sparsity
+        # pattern), so the footprint is O(nnz), not O(rows*cols). (Before this the
+        # matrix was ``.todense()``'d, ~14.85 GB per copy on qap's 85756x21649 lift,
+        # which forced the whole structure to be declined for large lifts — T6/T10.)
+        A = sp.csr_matrix(relax._A_ub, dtype=np.float64)
+        A.sort_indices()
         b = np.asarray(relax._b_ub, dtype=np.float64).ravel()
         bnds = np.asarray(relax._bounds, dtype=np.float64)
         c = np.asarray(relax._c, dtype=np.float64).ravel()
@@ -218,11 +250,25 @@ class IncrementalMcCormickLP:
                 lb_p[k], ub_p[k] = -(7.0 + k), -1.0
             else:
                 lb_p[k], ub_p[k] = 1.0, 7.0 + k
-        A, b, bnds, c, info, _ = self._full_build(lb_p, ub_p)
+        A, b, bnds, c, info, _ = self._full_build(lb_p, ub_p)  # A is CSR (sparse)
+        # Decline only genuinely huge structures — now measured by NONZEROS (the
+        # sparse footprint), not dense cells. qap's lift is ~172k nnz (trivial);
+        # this guards a pathological lift whose sparse `.data` copy per node would
+        # itself be large. Above it, fall back to the per-node cold build.
+        if A.nnz > _MAX_INCREMENTAL_NNZ:
+            if A.nnz not in _incremental_oversize_warned:
+                _incremental_oversize_warned.add(A.nnz)
+                logger.info(
+                    "Incremental McCormick structure declined: lift has %d nonzeros "
+                    "> cap %d; using the per-node sparse cold build instead.",
+                    A.nnz,
+                    _MAX_INCREMENTAL_NNZ,
+                )
+            raise _IncrementalStructureTooLarge(f"lift nnz {A.nnz} exceeds budget")
         self.n = n
         self.ncol = A.shape[1]
         self.c = c
-        self.base_A = A.copy()
+        self.base_A = A  # CSR, sorted indices; product-row VALUES rewritten per node
         self.base_b = b.copy()
         self.base_bounds = bnds.copy()
         self.bilinear = dict(info.get("bilinear", {}))
@@ -242,11 +288,24 @@ class IncrementalMcCormickLP:
         except Exception:
             self.col_identities = None
 
-        # map each product to its row indices (support subset of {factors, aux})
-        supp = [set(np.nonzero(np.abs(A[k]) > _TOL)[0]) for k in range(A.shape[0])]
+        # Map each product to its row indices. SPARSE + efficient: each product row
+        # contains its aux column, so a product's rows are found among the rows that
+        # touch that aux (a CSC lookup) — not by scanning all rows for every product
+        # (the old dense ``supp <= {...}`` loop was O(rows*products) ~1.8e9 on qap).
+        indptr, indices, data = A.indptr, A.indices, A.data
+        csc = A.tocsc()
+        col_ptr, col_rows = csc.indptr, csc.indices
+
+        def _rows_with_col(c):
+            return col_rows[col_ptr[c] : col_ptr[c + 1]]
+
+        def _support(k):
+            lo, hi = indptr[k], indptr[k + 1]
+            return {int(indices[t]) for t in range(lo, hi) if abs(data[t]) > _TOL}
+
         self.bilin_rows = {}
         for (i, j), a in self.bilinear.items():
-            rows = [k for k in range(A.shape[0]) if a in supp[k] and supp[k] <= {i, j, a}]
+            rows = [int(k) for k in _rows_with_col(a) if _support(k) <= {i, j, a}]
             if len(rows) != 4:
                 raise ValueError(f"bilinear ({i},{j}) -> {len(rows)} rows, expected 4")
             self.bilin_rows[(i, j, a)] = rows
@@ -255,14 +314,14 @@ class IncrementalMcCormickLP:
         for (i, p), a in self.monomial.items():
             if self._root_sign[i] == 0:
                 raise ValueError(f"monomial x_{i}^{p}: root box spans zero (unmappable)")
-            rows = [k for k in range(A.shape[0]) if a in supp[k] and supp[k] <= {i, a}]
+            rows = [int(k) for k in _rows_with_col(a) if _support(k) <= {i, a}]
             if len(rows) != 4:
                 raise ValueError(f"monomial x_{i}^{p} -> {len(rows)} rows, expected 4")
             self.mono_rows[(i, a, p)] = rows
         # affine square (c*x_j + d)**2 -> aux: 4 secant/tangent rows over {j, aux}.
         self.affsq_rows = {}
         for (j, a), (coeff, const) in self.affine_square.items():
-            rows = [k for k in range(A.shape[0]) if a in supp[k] and supp[k] <= {j, a}]
+            rows = [int(k) for k in _rows_with_col(a) if _support(k) <= {j, a}]
             if len(rows) != 4:
                 raise ValueError(f"affine square ({j},{a}) -> {len(rows)} rows, expected 4")
             self.affsq_rows[(j, a, coeff, const)] = rows
@@ -275,49 +334,120 @@ class IncrementalMcCormickLP:
         for rs in self.affsq_rows.values():
             self._prod_rows |= set(rs)
 
+        # Fixed-pattern rewrite maps for the sparse ``_patch`` hot path: the base
+        # CSR ``.data`` template, each product row's data-index span (to zero it,
+        # matching the dense ``A[k]=0.0``), and the data index of each target column
+        # ``(row, col)``. The sparsity pattern never changes across nodes — only the
+        # product-row coefficient *values* do — so a node solve copies ``.data`` and
+        # overwrites a few hundred entries instead of rebuilding the whole matrix.
+        self._base_data = np.asarray(data, dtype=np.float64).copy()
+        self._base_indices = np.asarray(indices)
+        self._base_indptr = np.asarray(indptr)
+        self._base_shape = A.shape
+        self._row_span = {k: (int(indptr[k]), int(indptr[k + 1])) for k in self._prod_rows}
+        self._pos: dict[tuple[int, int], int] = {}
+
+        def _index_of(k, col):
+            lo, hi = indptr[k], indptr[k + 1]
+            for t in range(lo, hi):
+                if int(indices[t]) == col:
+                    return int(t)
+            # Probe box is built so every McCormick coefficient is nonzero, so each
+            # target column is present. A miss means the pattern can't represent a
+            # box where this coefficient is nonzero -> refuse (ok=False -> cold path).
+            raise ValueError(f"incremental pattern missing entry ({k},{col})")
+
+        for (i, j, a), rows in self.bilin_rows.items():
+            for k in rows:
+                for col in (i, j, a):
+                    self._pos[(k, col)] = _index_of(k, col)
+        for (i, a, p), rows in self.mono_rows.items():
+            for k in rows:
+                for col in (i, a):
+                    self._pos[(k, col)] = _index_of(k, col)
+        for (j, a, coeff, const), rows in self.affsq_rows.items():
+            for k in rows:
+                for col in (j, a):
+                    self._pos[(k, col)] = _index_of(k, col)
+
     # -- per-node patch ---------------------------------------------------- #
 
     def _patch(self, lb, ub):
-        """Return (A, b, bounds) for the McCormick LP over [lb,ub]."""
-        A = self.base_A.copy()
+        """Return (A, b, bounds) for the McCormick LP over [lb,ub].
+
+        SPARSE hot path: copy the base CSR ``.data`` template and overwrite only the
+        box-dependent product-row entries at their precomputed positions (fixed
+        pattern), then wrap it back into a CSR sharing the immutable indptr/indices.
+        Equivalent, row for row, to the dense ``A[k]=0; A[k,col]=coef`` it replaces
+        (each product row's stored support is exactly its target columns, so zeroing
+        the row's data span then setting the targets reproduces it) — bit-identity is
+        gated by :meth:`_validate`.
+        """
+        data = self._base_data.copy()
         b = self.base_b.copy()
         bounds = self.base_bounds.copy()
         bounds[: self.n, 0] = lb
         bounds[: self.n, 1] = ub
+        pos = self._pos
+        span = self._row_span
         for (i, j, a), rows in self.bilin_rows.items():
             li, ui, lj, uj = lb[i], ub[i], lb[j], ub[j]
             for k, (ci, cj, cw, rhs) in zip(rows, _bilinear_rows(i, j, a, li, ui, lj, uj)):
-                A[k] = 0.0
-                A[k, i] += ci
-                A[k, j] += cj
-                A[k, a] = cw
+                lo, hi = span[k]
+                data[lo:hi] = 0.0  # zero the whole row (matches dense A[k]=0.0)
+                data[pos[(k, i)]] = ci
+                data[pos[(k, j)]] = cj
+                data[pos[(k, a)]] = cw
                 b[k] = rhs
             bounds[a, 0], bounds[a, 1] = _bilinear_aux_bounds(li, ui, lj, uj)
         for (i, a, p), rows in self.mono_rows.items():
             li, ui = lb[i], ub[i]
             for k, (ci, cs, rhs) in zip(rows, _monomial_rows(li, ui, p)):
-                A[k] = 0.0
-                A[k, i] = ci
-                A[k, a] = cs
+                lo, hi = span[k]
+                data[lo:hi] = 0.0
+                data[pos[(k, i)]] = ci
+                data[pos[(k, a)]] = cs
                 b[k] = rhs
             bounds[a, 0], bounds[a, 1] = _monomial_aux_bounds(li, ui, p)
         for (j, a, coeff, const), rows in self.affsq_rows.items():
             li, ui = lb[j], ub[j]
             for k, (cx, cw, rhs) in zip(rows, _affine_square_rows(coeff, const, li, ui)):
-                A[k] = 0.0
-                A[k, j] = cx
-                A[k, a] = cw
+                lo, hi = span[k]
+                data[lo:hi] = 0.0
+                data[pos[(k, j)]] = cx
+                data[pos[(k, a)]] = cw
                 b[k] = rhs
             bounds[a, 0], bounds[a, 1] = _affine_square_aux_bounds(coeff, const, li, ui)
+        A = sp.csr_matrix(
+            (data, self._base_indices, self._base_indptr), shape=self._base_shape, copy=False
+        )
         return A, b, bounds
 
     # -- soundness gate ---------------------------------------------------- #
 
     @staticmethod
     def _rowset(A, b):
-        """Canonical hashable representation of the polytope's rows (order-free)."""
-        rows = np.hstack([np.round(A, 6), np.round(b, 6).reshape(-1, 1)])
-        return sorted(map(tuple, rows.tolist()))
+        """Canonical hashable representation of the polytope's rows (order-free).
+
+        Sparse-native (O(nnz), never densified): each row is the sorted tuple of its
+        nonzero ``(col, round(val,6))`` pairs plus ``round(rhs,6)``. Entries rounding
+        to 0 are dropped, so an explicit structural zero (the fixed-pattern ``_patch``
+        can leave a zeroed target entry) compares equal to its absence in the cold
+        build — the two matrices match iff they encode the same polytope.
+        """
+        M = sp.csr_matrix(A)
+        M.sort_indices()
+        indptr, indices, data = M.indptr, M.indices, M.data
+        b = np.asarray(b, dtype=np.float64).ravel()
+        out = []
+        for k in range(M.shape[0]):
+            entries = tuple(
+                (int(indices[t]), rv)
+                for t in range(indptr[k], indptr[k + 1])
+                if (rv := round(float(data[t]), 6)) != 0.0
+            )
+            out.append((entries, round(float(b[k]), 6)))
+        return sorted(out)
 
     @staticmethod
     def _box_sign_regime(lo, hi):
@@ -431,13 +561,13 @@ class IncrementalMcCormickLP:
         ``cut_rows`` is a list of ``(coeffs, rhs)`` inequalities ``coeffs·x <= rhs``
         over the structural+aux columns (length ``ncol``). Returns ``(A, b, bounds)``.
         """
-        A, b, bounds = self._patch(lb, ub)
+        A, b, bounds = self._patch(lb, ub)  # A is CSR (sparse)
         if cut_rows:
-            extra_A = np.array(
-                [np.asarray(co, dtype=np.float64)[: self.ncol] for co, _ in cut_rows]
+            extra_A = sp.csr_matrix(
+                np.array([np.asarray(co, dtype=np.float64)[: self.ncol] for co, _ in cut_rows])
             )
             extra_b = np.array([float(r) for _, r in cut_rows])
-            A = np.vstack([A, extra_A])
+            A = sp.vstack([A, extra_A], format="csr")
             b = np.concatenate([b, extra_b])
         return A, b, bounds
 

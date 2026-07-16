@@ -241,6 +241,29 @@ _SOLVE_DEADLINE_FLOOR_S = 0.05
 # (typical MINLP lifts are < 1e6 cells) and far below the multi-GB blowup.
 _MAX_RELAX_DENSE_CELLS = 1.0e8
 
+# Nonzero ceiling for the per-node McCormick LP under the opt-in
+# ``SolverTuning.sparse_large_lp`` flag. The whole per-node path is sparse now, so
+# the dense-cell guard above is the wrong cost model — memory is O(nnz), not
+# O(rows*cols). With the flag set the guard becomes nnz-based against this cap
+# (~0.4 GB of f64 data), so a large *sparse* lift earns its rigorous McCormick LP
+# bound instead of being declined. Matches ``incremental_mccormick._MAX_INCREMENTAL_NNZ``.
+_MAX_SPARSE_LP_NNZ = 50_000_000
+
+
+def _lp_lift_too_large(n_cols: int, n_rows: int, nnz: int) -> bool:
+    """Whether a per-node lift should be declined (``skipped_oversize``).
+
+    Default: the legacy dense-cell guard ``(n_cols+n_rows)*n_rows > cap`` — a proxy
+    for the matrix-form backend's dense allocation. Under the opt-in
+    ``sparse_large_lp`` flag the path is fully sparse, so switch to a nonzero-based
+    ceiling: a large sparse lift is memory-safe and its LP is a valid (rigorous)
+    bound, so decline only a pathologically dense structure. Sound either way — a
+    decline only forgoes a node's LP bound, never fathoms."""
+    if _tuning().sparse_large_lp:
+        return nnz > _MAX_SPARSE_LP_NNZ
+    return (n_cols + n_rows) * n_rows > _MAX_RELAX_DENSE_CELLS
+
+
 # Lifted-LP FBBT (issue #184): number of feasibility-propagation sweeps over the
 # relaxation rows, and the width left around a factor that propagation pins to a
 # point so the build path keeps the multilinear term at full arity (see
@@ -608,6 +631,9 @@ class MccormickLPRelaxer:
         # nodes, non-separating solves) never trigger it, so the extra cold build it
         # costs stays off their hot path.
         self._has_composite_lift_cache: Optional[bool] = None
+        # Binary-variable columns (moment diagonal X_ii = x_i) for the PSD moment
+        # separator; computed once, only when the opt-in PSD path first fires.
+        self._binary_cols_cache: Optional[frozenset] = None
 
     def _model_has_composite_lift(self) -> bool:
         """Whether the model carries a composite convex/concave OA lift whose
@@ -759,8 +785,13 @@ class MccormickLPRelaxer:
             # a multi-GB dense solve. Sound: no bound is returned, so the caller
             # keeps the rigorous alphaBB/interval underestimator (identical to the
             # cold-path decline). Falling back to the cold build would only hit the
-            # same guard, so return the oversize verdict directly.
-            if (inc.ncol + nrows) * nrows > _MAX_RELAX_DENSE_CELLS:
+            # same guard, so return the oversize verdict directly. Under the opt-in
+            # ``sparse_large_lp`` flag the check is nnz-based (the path is sparse; see
+            # ``_lp_lift_too_large``), so a large sparse lift is solved, not declined.
+            import scipy.sparse as sp
+
+            _nnz = int(A.nnz) if sp.issparse(A) else int(np.count_nonzero(A))
+            if _lp_lift_too_large(inc.ncol, nrows, _nnz):
                 return MccormickLPResult(status="skipped_oversize")
             in_basis = (
                 self._inc_warm_basis
@@ -794,10 +825,15 @@ class MccormickLPRelaxer:
                 try:
                     y = np.asarray(cert.dual, dtype=np.float64)
                     n0 = self._n_orig
-                    A_arr = np.asarray(A, dtype=np.float64)
-                    if A_arr.ndim == 2 and A_arr.shape[0] == y.shape[0] and A_arr.shape[1] >= n0:
+                    # ``A`` is the assembled node matrix — SPARSE CSR since the
+                    # incremental structure went sparse (T11). Compute the structural
+                    # reduced costs ``d_j = c_j - (Aᵀy)_j`` with a sparse matvec on the
+                    # first ``n0`` columns; never densify ``A`` (would reintroduce the
+                    # O(rows*cols) blow-up on a large lift).
+                    A_sp = A if sp.issparse(A) else sp.csr_matrix(np.asarray(A, dtype=np.float64))
+                    if A_sp.shape[0] == y.shape[0] and A_sp.shape[1] >= n0:
                         c_full = np.asarray(inc.c, dtype=np.float64)
-                        rc = c_full[:n0] - (A_arr[:, :n0].T @ y)
+                        rc = c_full[:n0] - np.asarray(A_sp[:, :n0].T @ y, dtype=np.float64).ravel()
                         res.reduced_costs = rc
                         res.dual = y
                         res.col_status = cert.col_status
@@ -1166,10 +1202,15 @@ class MccormickLPRelaxer:
         # forgoes this node's LP underestimator; the caller keeps the rigorous
         # alphaBB/interval bound and the incumbent search, so the solve respects
         # its time limit instead of hanging on the dense solve.
+        import scipy.sparse as sp
+
         n_cols = int(np.size(milp._c))
         _a_ub = milp._A_ub
         n_rows = 0 if _a_ub is None else int(_a_ub.shape[0])
-        if (n_cols + n_rows) * n_rows > _MAX_RELAX_DENSE_CELLS:
+        _nnz = 0 if _a_ub is None else int(sp.csr_matrix(_a_ub).nnz)
+        # Under the opt-in ``sparse_large_lp`` flag this is nnz-based (the path is
+        # sparse — no dense allocation); by default the legacy dense-cell guard.
+        if _lp_lift_too_large(n_cols, n_rows, _nnz):
             key = (n_cols, n_rows).__hash__()
             if key not in _oversize_warned:
                 _oversize_warned.add(key)
@@ -2193,8 +2234,15 @@ class MccormickLPRelaxer:
                 ):
                     # Per-node PSD wall budget spent — stop feeding the search.
                     break
+                if self._binary_cols_cache is None:
+                    from discopt._jax.model_utils import binary_flat_cols
+
+                    self._binary_cols_cache = binary_flat_cols(self._model)
                 cuts = separate_psd_cuts_on_relaxation(
-                    varmap, np.asarray(res.x, dtype=np.float64), n_total
+                    varmap,
+                    np.asarray(res.x, dtype=np.float64),
+                    n_total,
+                    binary_vars=self._binary_cols_cache,
                 )
                 if not cuts:
                     break

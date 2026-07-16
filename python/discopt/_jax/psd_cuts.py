@@ -120,18 +120,29 @@ def psd_cut_from_submatrix(
     return LinearCut(coeffs=coeffs, rhs=float(rhs), sense=">=")
 
 
-def _diag_col(info: dict, i: int) -> Optional[int]:
-    """Relaxation column holding the lifted square ``X_ii = x_i**2`` (or None)."""
+def _diag_col(info: dict, i: int, binary_vars: Optional[frozenset] = None) -> Optional[int]:
+    """Relaxation column standing for the moment-matrix diagonal ``X_ii`` (or None).
+
+    Normally this is a lifted square column ``X_ii = x_i**2``. For a **binary**
+    variable (``binary_vars``) ``x_i**2 = x_i`` at every feasible point, so the
+    original ``x_i`` column *is* ``X_ii`` — this is what lets the moment/PSD cut fire
+    on pure products of distinct binaries (QAP) where no square column is lifted.
+    Sound only for binaries; a continuous ``x_i`` has ``X_ii = x_i**2 != x_i``.
+    """
     mono = info.get("monomial", {})
     usq = info.get("univariate_square", {})
     if (i, 2) in mono:
         return int(mono[(i, 2)])
     if (i, 2) in usq:
         return int(usq[(i, 2)])
+    if binary_vars is not None and i in binary_vars:
+        orig = info.get("original", {})
+        if i in orig:
+            return int(orig[i])
     return None
 
 
-def _moment_blocks_for_set(info: dict, S: Sequence[int]):
+def _moment_blocks_for_set(info: dict, S: Sequence[int], binary_vars: Optional[frozenset] = None):
     """Column indices needed for the moment submatrix over variables ``S``.
 
     Returns ``(orig_cols, diag_cols, off_cols)`` or ``None`` if any required
@@ -144,7 +155,7 @@ def _moment_blocks_for_set(info: dict, S: Sequence[int]):
         return None
     diag_cols = []
     for i in S:
-        di = _diag_col(info, i)
+        di = _diag_col(info, i, binary_vars)
         if di is None:
             return None
         diag_cols.append(di)
@@ -160,10 +171,16 @@ def _moment_blocks_for_set(info: dict, S: Sequence[int]):
 
 
 def _moment_clique_cut(
-    info: dict, x_full: np.ndarray, S: Sequence[int], n_total: int, *, tol: float
+    info: dict,
+    x_full: np.ndarray,
+    S: Sequence[int],
+    n_total: int,
+    *,
+    tol: float,
+    binary_vars: Optional[frozenset] = None,
 ) -> Optional[LinearCut]:
     """Separate a single moment cut over the variable clique ``S`` (size >= 2)."""
-    blocks = _moment_blocks_for_set(info, S)
+    blocks = _moment_blocks_for_set(info, S, binary_vars)
     if blocks is None:
         return None
     orig_cols, diag_cols, off = blocks
@@ -180,15 +197,20 @@ def _moment_clique_cut(
     return psd_cut_from_submatrix(x_vals, X_vals, orig_cols, prod_cols, n_total, tol=tol)
 
 
-def _lifted_cliques(info: dict, max_dim: int) -> list[tuple[int, ...]]:
+def _lifted_cliques(
+    info: dict, max_dim: int, binary_vars: Optional[frozenset] = None
+) -> list[tuple[int, ...]]:
     """Greedy cliques of variables whose pairwise products + squares are all lifted.
 
-    A clique ``S`` (all pairs in ``bilinear``, all squares lifted) is exactly the
-    set over which a dense moment submatrix can be formed. Dense ``k>=3`` cliques
-    capture multi-variable moment coupling that pairwise 2x2 minors miss.
+    A clique ``S`` (all pairs in ``bilinear``, all diagonals available) is exactly
+    the set over which a dense moment submatrix can be formed. Dense ``k>=3`` cliques
+    capture multi-variable moment coupling that pairwise 2x2 minors miss. A binary
+    variable's diagonal ``X_ii = x_i`` needs no lifted square (see ``_diag_col``), so
+    passing ``binary_vars`` lets cliques form over pure products of distinct binaries
+    (QAP) that would otherwise yield no moment cut at all.
     """
     bil = info.get("bilinear", {})
-    verts = [i for i in info.get("original", {}) if _diag_col(info, i) is not None]
+    verts = [i for i in info.get("original", {}) if _diag_col(info, i, binary_vars) is not None]
     adj: dict[int, set] = {i: set() for i in verts}
     for i, j in bil:
         if i in adj and j in adj:
@@ -217,6 +239,7 @@ def separate_psd_cuts_on_relaxation(
     tol: float = 1e-7,
     max_cuts: int = 64,
     max_dim: int = 6,
+    binary_vars: Optional[frozenset] = None,
 ) -> list[LinearCut]:
     """Separate moment (PSD) cuts from a McCormick relaxation point.
 
@@ -236,10 +259,10 @@ def separate_psd_cuts_on_relaxation(
     cuts: list[LinearCut] = []
     seen_pairs: set[tuple[int, int]] = set()
     # Dense cliques first (strongest), then any remaining pairwise products.
-    for S in _lifted_cliques(info, max_dim):
+    for S in _lifted_cliques(info, max_dim, binary_vars):
         if len(cuts) >= max_cuts:
             break
-        cut = _moment_clique_cut(info, x_full, S, n_total, tol=tol)
+        cut = _moment_clique_cut(info, x_full, S, n_total, tol=tol, binary_vars=binary_vars)
         if cut is not None:
             cuts.append(cut)
         for a in range(len(S)):
@@ -253,11 +276,11 @@ def separate_psd_cuts_on_relaxation(
             break
         if (min(i, j), max(i, j)) in seen_pairs:
             continue
-        di = _diag_col(info, i)
-        dj = _diag_col(info, j)
+        di = _diag_col(info, i, binary_vars)
+        dj = _diag_col(info, j, binary_vars)
         if di is None or dj is None or i not in orig or j not in orig:
             continue
-        cut = _moment_clique_cut(info, x_full, (i, j), n_total, tol=tol)
+        cut = _moment_clique_cut(info, x_full, (i, j), n_total, tol=tol, binary_vars=binary_vars)
         if cut is not None:
             cuts.append(cut)
     return cuts
@@ -270,6 +293,7 @@ def psd_strengthen_relaxation_bound(
     max_rounds: int = 5,
     tol: float = 1e-7,
     time_limit_per_lp: Optional[float] = 1.0,
+    binary_vars: Optional[frozenset] = None,
 ):
     """Iteratively add PSD cuts to a McCormick relaxation LP and re-solve.
 
@@ -312,7 +336,9 @@ def psd_strengthen_relaxation_bound(
     A_cur = sp.csr_matrix(A_ub)
     b_cur = np.asarray(b_ub, dtype=np.float64)
     for _ in range(max(1, max_rounds)):
-        cuts = separate_psd_cuts_on_relaxation(info, np.asarray(res.x), n_total, tol=tol)
+        cuts = separate_psd_cuts_on_relaxation(
+            info, np.asarray(res.x), n_total, tol=tol, binary_vars=binary_vars
+        )
         if not cuts:
             break
         # Cut is coeffs.z >= rhs  ==>  (-coeffs).z <= -rhs for the A_ub<=b_ub form.

@@ -19,6 +19,7 @@
 
 use crate::lp::crossover::LpView;
 use crate::lp::gomory::GomoryCut;
+use crate::lp::simplex::sparse::SparseCols;
 
 /// Capacity ceiling for the integer lifting DP; above it we emit the basic cover.
 const MAX_CAP_DP: f64 = 100_000.0;
@@ -42,157 +43,203 @@ pub fn separate_cover(
 ) -> Vec<GomoryCut> {
     let (a, n) = (lp.a, lp.n);
     let mut cuts = Vec::new();
-
+    let mut row_nz: Vec<(usize, f64)> = Vec::new();
     for i in 0..n_orig_rows.min(lp.m) {
         let row = &a[i * n..(i + 1) * n];
-
-        // Require exactly one slack column (≥ ns) with coefficient +1 and
-        // bounds [0, ∞): i.e. a genuine `≤` row.
-        let mut slack: Option<usize> = None;
-        let mut ok = true;
-        for j in ns..n {
-            if row[j].abs() > tol {
-                if slack.is_some() || (row[j] - 1.0).abs() > tol {
-                    ok = false;
-                    break;
-                }
-                slack = Some(j);
+        row_nz.clear();
+        for (j, &v) in row.iter().enumerate() {
+            if v != 0.0 {
+                row_nz.push((j, v));
             }
         }
-        let s = match (ok, slack) {
-            (true, Some(s)) => s,
-            _ => continue,
-        };
-        // The slack must be a `≤` surplus (lower bound 0); its upper bound is
-        // irrelevant to cover validity (presolve may have tightened it to ≤ cap).
-        if lp.l[s].abs() > tol {
+        if let Some(cut) = cover_cut_for_row(&row_nz, ns, n, lp.l, lp.u, is_int, x, b[i], tol) {
+            cuts.push(cut);
+        }
+    }
+    cuts
+}
+
+/// CSC port of [`separate_cover`] (docs/dev/sparse-milp-plan.md T3b2). Bit-identical:
+/// per-row nonzeros are gathered from the CSC by a single `O(nnz)` column sweep,
+/// landing column-ascending per row exactly as the dense row scan produces them, and
+/// the shared [`cover_cut_for_row`] runs the same code. Never materializes the dense
+/// matrix.
+#[allow(clippy::too_many_arguments)]
+pub fn separate_cover_csc(
+    csc: &SparseCols,
+    n: usize,
+    m: usize,
+    l: &[f64],
+    u: &[f64],
+    b: &[f64],
+    x: &[f64],
+    ns: usize,
+    is_int: &[bool],
+    n_orig_rows: usize,
+    tol: f64,
+) -> Vec<GomoryCut> {
+    let rows = n_orig_rows.min(m);
+    let mut row_nz: Vec<Vec<(usize, f64)>> = vec![Vec::new(); rows];
+    let (col_ptr, row_idx, vals) = csc.raw();
+    for j in 0..n {
+        for idx in col_ptr[j]..col_ptr[j + 1] {
+            let i = row_idx[idx];
+            if i < rows {
+                row_nz[i].push((j, vals[idx]));
+            }
+        }
+    }
+    let mut cuts = Vec::new();
+    for (i, nz) in row_nz.iter().enumerate() {
+        if let Some(cut) = cover_cut_for_row(nz, ns, n, l, u, is_int, x, b[i], tol) {
+            cuts.push(cut);
+        }
+    }
+    cuts
+}
+
+/// Shared cover-cut construction for a single `≤` row, given its nonzeros
+/// `(col, coeff)` in ascending-column order. Returns a violated lifted-minimal-cover
+/// cut or `None`. Representation-independent: the dense and CSC entries differ ONLY
+/// in how they gather `row_nz`, so both emit byte-identical cuts.
+#[allow(clippy::too_many_arguments)]
+fn cover_cut_for_row(
+    row_nz: &[(usize, f64)],
+    ns: usize,
+    n: usize,
+    l: &[f64],
+    u: &[f64],
+    is_int: &[bool],
+    x: &[f64],
+    cap: f64,
+    tol: f64,
+) -> Option<GomoryCut> {
+    // Require exactly one slack column (≥ ns) with coefficient +1 and l=0: a `≤` row.
+    let mut slack: Option<usize> = None;
+    for &(j, v) in row_nz {
+        if j >= ns && v.abs() > tol {
+            if slack.is_some() || (v - 1.0).abs() > tol {
+                return None;
+            }
+            slack = Some(j);
+        }
+    }
+    let s = slack?;
+    if l[s].abs() > tol {
+        return None;
+    }
+    // Structural items must be binary with nonnegative weights.
+    let mut items: Vec<(usize, f64, f64)> = Vec::new();
+    for &(j, w) in row_nz {
+        if j >= ns || w.abs() <= tol {
             continue;
         }
+        if w < -tol || !is_int[j] || l[j] < -tol || u[j] > 1.0 + tol {
+            return None;
+        }
+        items.push((j, w, x[j]));
+    }
+    if items.is_empty() {
+        return None;
+    }
 
-        // Structural items must be binary with nonnegative weights.
-        let cap = b[i];
-        let mut items: Vec<(usize, f64, f64)> = Vec::new(); // (col, weight, x*)
-        let mut knap = true;
-        for j in 0..ns {
-            let w = row[j];
-            if w.abs() <= tol {
+    // Greedy cover: add items by x* descending until the weight exceeds cap.
+    items.sort_by(|p, q| q.2.partial_cmp(&p.2).unwrap_or(std::cmp::Ordering::Equal));
+    let mut cover: Vec<(usize, f64, f64)> = Vec::new();
+    let mut wsum = 0.0;
+    let mut xsum = 0.0;
+    for &it in &items {
+        cover.push(it);
+        wsum += it.1;
+        xsum += it.2;
+        if wsum > cap + tol {
+            break;
+        }
+    }
+    if wsum <= cap + tol {
+        return None; // never exceeded cap → not a cover
+    }
+
+    // Reduce to a minimal cover: drop the largest-weight element that keeps it a
+    // cover, repeatedly. Each removal raises the violation (by 1 − x*).
+    loop {
+        cover.sort_by(|p, q| q.1.partial_cmp(&p.1).unwrap_or(std::cmp::Ordering::Equal));
+        let mut removed = false;
+        for idx in 0..cover.len() {
+            if wsum - cover[idx].1 > cap + tol {
+                wsum -= cover[idx].1;
+                xsum -= cover[idx].2;
+                cover.remove(idx);
+                removed = true;
+                break;
+            }
+        }
+        if !removed {
+            break;
+        }
+    }
+
+    // Violated when Σ_C x* > |C| − 1.
+    let rhs_le = cover.len() as f64 - 1.0;
+    if !(xsum > rhs_le + 1e-4 && cover.len() >= 2) {
+        return None;
+    }
+    let rhs_i = cover.len() as i64 - 1; // |C| − 1
+
+    // Cover variables keep coefficient 1; non-cover variables are lifted.
+    let mut coeffs = vec![0.0; n];
+    for &(j, _, _) in &cover {
+        coeffs[j] = -1.0;
+    }
+
+    // Sequential up-lifting via an integer-capacity knapsack DP.
+    let cap_int = cap.round();
+    let integral =
+        (cap - cap_int).abs() < 1e-6 && items.iter().all(|&(_, w, _)| (w - w.round()).abs() < 1e-6);
+    if integral && (0.0..=MAX_CAP_DP).contains(&cap_int) {
+        let capn = cap_int as usize;
+        let mut f = vec![0i64; capn + 1];
+        for &(_, w, _) in &cover {
+            let wi = w.round() as usize;
+            if wi == 0 || wi > capn {
                 continue;
             }
-            if w < -tol || !is_int[j] || lp.l[j] < -tol || lp.u[j] > 1.0 + tol {
-                knap = false;
-                break;
-            }
-            items.push((j, w, x[j]));
-        }
-        if !knap || items.is_empty() {
-            continue;
-        }
-
-        // Greedy cover: add items by x* descending until the weight exceeds cap.
-        items.sort_by(|p, q| q.2.partial_cmp(&p.2).unwrap_or(std::cmp::Ordering::Equal));
-        let mut cover: Vec<(usize, f64, f64)> = Vec::new();
-        let mut wsum = 0.0;
-        let mut xsum = 0.0;
-        for &it in &items {
-            cover.push(it);
-            wsum += it.1;
-            xsum += it.2;
-            if wsum > cap + tol {
-                break;
-            }
-        }
-        if wsum <= cap + tol {
-            continue; // never exceeded cap → not a cover
-        }
-
-        // Reduce to a minimal cover: drop the largest-weight element that keeps
-        // it a cover, repeatedly. Each removal raises the violation (by 1 − x*).
-        loop {
-            cover.sort_by(|p, q| q.1.partial_cmp(&p.1).unwrap_or(std::cmp::Ordering::Equal));
-            let mut removed = false;
-            for idx in 0..cover.len() {
-                if wsum - cover[idx].1 > cap + tol {
-                    wsum -= cover[idx].1;
-                    xsum -= cover[idx].2;
-                    cover.remove(idx);
-                    removed = true;
-                    break;
+            for b in (wi..=capn).rev() {
+                let cand = f[b - wi] + 1;
+                if cand > f[b] {
+                    f[b] = cand;
                 }
             }
-            if !removed {
-                break;
-            }
         }
-
-        // Violated when Σ_C x* > |C| − 1.
-        let rhs_le = cover.len() as f64 - 1.0;
-        if !(xsum > rhs_le + 1e-4 && cover.len() >= 2) {
-            continue;
-        }
-        let rhs_i = cover.len() as i64 - 1; // |C| − 1
-
-        // Cover variables keep coefficient 1; non-cover variables are lifted.
-        let mut coeffs = vec![0.0; n];
-        for &(j, _, _) in &cover {
-            coeffs[j] = -1.0;
-        }
-
-        // Sequential up-lifting via an integer-capacity knapsack DP. Needs
-        // integral weights and a modest capacity; otherwise the basic minimal
-        // cover above is emitted unchanged.
-        let cap_int = cap.round();
-        let integral = (cap - cap_int).abs() < 1e-6
-            && items.iter().all(|&(_, w, _)| (w - w.round()).abs() < 1e-6);
-        if integral && (0.0..=MAX_CAP_DP).contains(&cap_int) {
-            let capn = cap_int as usize;
-            // f[b] = max LHS achievable within capacity b. Seed with the cover
-            // variables (each coefficient 1).
-            let mut f = vec![0i64; capn + 1];
-            for &(_, w, _) in &cover {
-                let wi = w.round() as usize;
-                if wi == 0 || wi > capn {
-                    continue;
-                }
-                for b in (wi..=capn).rev() {
-                    let cand = f[b - wi] + 1;
-                    if cand > f[b] {
-                        f[b] = cand;
-                    }
-                }
-            }
-            // Lift non-cover variables, heaviest first, folding each into f so
-            // later coefficients account for it (true sequential lifting).
-            let mut noncover: Vec<(usize, usize)> = items
-                .iter()
-                .filter(|&&(j, _, _)| !cover.iter().any(|&(cj, _, _)| cj == j))
-                .map(|&(j, w, _)| (j, w.round() as usize))
-                .collect();
-            noncover.sort_by_key(|b| std::cmp::Reverse(b.1));
-            for (j, wi) in noncover {
-                let alpha = if wi > capn {
-                    rhs_i // never fits alongside anything → maximal coefficient
-                } else {
-                    rhs_i - f[capn - wi]
-                };
-                if alpha > 0 {
-                    coeffs[j] = -(alpha as f64);
-                    if (1..=capn).contains(&wi) {
-                        for b in (wi..=capn).rev() {
-                            let cand = f[b - wi] + alpha;
-                            if cand > f[b] {
-                                f[b] = cand;
-                            }
+        let mut noncover: Vec<(usize, usize)> = items
+            .iter()
+            .filter(|&&(j, _, _)| !cover.iter().any(|&(cj, _, _)| cj == j))
+            .map(|&(j, w, _)| (j, w.round() as usize))
+            .collect();
+        noncover.sort_by_key(|b| std::cmp::Reverse(b.1));
+        for (j, wi) in noncover {
+            let alpha = if wi > capn {
+                rhs_i
+            } else {
+                rhs_i - f[capn - wi]
+            };
+            if alpha > 0 {
+                coeffs[j] = -(alpha as f64);
+                if (1..=capn).contains(&wi) {
+                    for b in (wi..=capn).rev() {
+                        let cand = f[b - wi] + alpha;
+                        if cand > f[b] {
+                            f[b] = cand;
                         }
                     }
                 }
             }
         }
-        cuts.push(GomoryCut {
-            coeffs,
-            rhs: -(rhs_i as f64),
-        });
     }
-    cuts
+    Some(GomoryCut {
+        coeffs,
+        rhs: -(rhs_i as f64),
+    })
 }
 
 #[cfg(test)]
@@ -257,5 +304,47 @@ mod tests {
         let is_int = [true, true, false];
         let cuts = separate_cover(&lp, &[9.0], &x, 2, &is_int, 1, 1e-9);
         assert!(cuts.is_empty());
+    }
+
+    /// T3b2 gate: `separate_cover_csc` emits byte-identical cuts to the dense
+    /// `separate_cover` on the violated-cover instance (a multi-item knapsack row
+    /// that fires the greedy cover, minimal-cover reduction, and lifting DP).
+    #[test]
+    fn csc_matches_dense_on_cover() {
+        let a = [5.0, 5.0, 5.0, 1.0];
+        let c = [0.0; 4];
+        let l = [0.0; 4];
+        let u = [1.0, 1.0, 1.0, 1e20];
+        let x = [0.6, 0.6, 0.6, 0.0];
+        let is_int = [true, true, true, false];
+        let (m, n) = (1usize, 4usize);
+        let lp = LpView {
+            a: &a,
+            m,
+            n,
+            c: &c,
+            l: &l,
+            u: &u,
+        };
+        let dense = separate_cover(&lp, &[9.0], &x, 3, &is_int, 1, 1e-9);
+        let csc = separate_cover_csc(
+            &SparseCols::from_dense(&a, m, n),
+            n,
+            m,
+            &l,
+            &u,
+            &[9.0],
+            &x,
+            3,
+            &is_int,
+            1,
+            1e-9,
+        );
+        assert_eq!(dense.len(), csc.len(), "cut count drift");
+        assert!(!dense.is_empty(), "expected a cover cut (sanity)");
+        for (d, s) in dense.iter().zip(csc.iter()) {
+            assert_eq!(d.coeffs, s.coeffs, "cover cut coeffs drift");
+            assert_eq!(d.rhs, s.rhs, "cover cut rhs drift");
+        }
     }
 }

@@ -18,15 +18,15 @@ use crate::bnb::node::NodeId;
 use crate::bnb::pool::SelectionStrategy;
 use crate::bnb::tree_manager::{NodeResult, TreeManager};
 use crate::lp::basis::{Basis, AT_LOWER, AT_UPPER, BASIC};
-use crate::lp::cover::separate_cover;
+use crate::lp::cover::separate_cover_csc;
 use crate::lp::crossover::LpView;
 use crate::lp::cut_select::select_cuts;
-use crate::lp::gomory::{separate_gomory, GomoryCut};
+use crate::lp::gomory::{separate_gomory_cols, GomoryCut};
 use crate::lp::simplex::linsolve::{FeralLU, LinearSolver};
 use crate::lp::simplex::sparse::SparseCols;
 use crate::lp::simplex::{
-    solve_lp, solve_lp_scaled, solve_lp_warm, solve_lp_warm_scaled_csc, tighten_bounds, LpStatus,
-    PreparedDual, Scaling, SimplexOptions,
+    solve_lp, solve_lp_cols, solve_lp_cols_scaled, solve_lp_warm, solve_lp_warm_scaled_csc,
+    tighten_bounds_csc, LpStatus, PreparedDual, Scaling, SimplexOptions,
 };
 
 const INF: f64 = 1e20;
@@ -277,14 +277,35 @@ fn decide_status(
 /// Solve `min cᵀx + obj_const s.t. A x = b, l ≤ x ≤ u` with `integer_cols`
 /// integer-constrained, by Rust-internal warm-started-simplex branch and bound.
 pub fn solve_milp(lp: &LpView<'_>, b: &[f64], obj_const: f64, opts: &MilpOptions) -> MilpResult {
-    solve_milp_hooked(lp, b, obj_const, opts, None)
+    // Dense entry: build the working CSC from `lp.a` once and hand it to the fully
+    // sparse driver core. The CSC entry (`solve_milp_csc`) skips this densify.
+    solve_milp_hooked(
+        SparseCols::from_dense(lp.a, lp.m, lp.n),
+        lp.m,
+        lp.n,
+        lp.c,
+        lp.l,
+        lp.u,
+        b,
+        obj_const,
+        opts,
+        None,
+    )
 }
 
-/// [`solve_milp`] with an optional interactive-debugger hook. When `hook` is
-/// `None` this is bit-for-bit identical to a plain solve (all fire-sites
-/// short-circuit); the `solve_milp` wrapper above passes `None`.
+/// The MILP branch-and-bound driver core, taking the constraint matrix as a
+/// column-major [`SparseCols`] (`m` rows, `n` cols) — **no dense `m×n` matrix is ever
+/// materialized** (docs/dev/sparse-milp-plan.md T3b5/T4). `hook` is an optional
+/// interactive-debugger hook; when `None` this is bit-for-bit identical to a plain
+/// solve (all fire-sites short-circuit).
+#[allow(clippy::too_many_arguments)]
 pub fn solve_milp_hooked(
-    lp: &LpView<'_>,
+    mut csc_w: SparseCols,
+    m: usize,
+    n: usize,
+    c: &[f64],
+    l: &[f64],
+    u: &[f64],
     b: &[f64],
     obj_const: f64,
     opts: &MilpOptions,
@@ -292,7 +313,6 @@ pub fn solve_milp_hooked(
 ) -> MilpResult {
     crate::profile::init_from_env();
     crate::profile::reset();
-    let n = lp.n;
     let ns = opts.n_struct;
     let is_int = {
         let mut v = vec![false; ns];
@@ -323,7 +343,7 @@ pub fn solve_milp_hooked(
         // cert:T0.3 — time root presolve bound reduction.
         let pr = {
             let _t = crate::profile::Timer::new(crate::profile::Phase::NodeReduce);
-            tighten_bounds(lp, b, &is_int_full, opts.simplex.tol)
+            tighten_bounds_csc(&csc_w, m, n, l, u, b, &is_int_full, opts.simplex.tol)
         };
         if pr.infeasible {
             return MilpResult {
@@ -337,7 +357,7 @@ pub fn solve_milp_hooked(
         }
         (pr.l, pr.u)
     } else {
-        (lp.l.to_vec(), lp.u.to_vec())
+        (l.to_vec(), u.to_vec())
     };
 
     let glb = base_l[..ns].to_vec();
@@ -348,12 +368,11 @@ pub fn solve_milp_hooked(
     // Working LP, possibly augmented with root cuts. Cuts add rows + slack
     // columns; structural columns [0, ns) are untouched, so the tree's
     // structural bounds still apply unchanged.
-    let mut a_w = lp.a.to_vec();
     let mut b_w = b.to_vec();
-    let mut c_w = lp.c.to_vec();
+    let mut c_w = c.to_vec();
     let mut l_w = base_l;
     let mut u_w = base_u;
-    let mut m_w = lp.m;
+    let mut m_w = m;
     let mut n_w = n;
 
     let mut lp_iters = 0usize;
@@ -395,9 +414,9 @@ pub fn solve_milp_hooked(
     //     set; loose caps (≈8×) drive the per-node LP cost up and erase it. Cuts
     //     are kept globally valid and never removed, so a tight cap is the cheap
     //     stand-in for SCIP-style aging.
-    let struct_nnz: usize = (0..m_w)
-        .map(|i| (0..ns).filter(|&j| a_w[i * n_w + j] != 0.0).count())
-        .sum();
+    // Nonzeros in the structural columns [0, ns): the CSC's column pointer at `ns`
+    // (columns are stored contiguously) — identical to the dense per-row count.
+    let struct_nnz: usize = csc_w.raw().0[ns];
     let row_density = struct_nnz as f64 / (m_w.max(1) * ns.max(1)) as f64;
     const NODE_CUT_MAX_DENSITY: f64 = 0.5;
     let node_cuts_on = opts.node_cuts && row_density < NODE_CUT_MAX_DENSITY;
@@ -437,17 +456,12 @@ pub fn solve_milp_hooked(
             if total_cuts >= opts.root_cuts {
                 break;
             }
-            let root_lp = LpView {
-                a: &a_w,
-                m: m_w,
-                n: n_w,
-                c: &c_w,
-                l: &l_w,
-                u: &u_w,
-            };
             let root = {
                 let _t = crate::profile::Timer::new(crate::profile::Phase::RootSolve);
-                solve_lp_root(&root_lp, &b_w, &node_simplex)
+                // Solve the root relaxation directly from the working CSC (T3b5: no
+                // dense matrix). Bit-identical to `solve_lp_root` (gated by
+                // `driver_matches_golden`).
+                solve_lp_root_csc(&csc_w, m_w, n_w, &c_w, &l_w, &u_w, &b_w, &node_simplex)
             };
             lp_iters += root.iters;
             if root.status != LpStatus::Optimal {
@@ -469,8 +483,12 @@ pub fn solve_milp_hooked(
             // Gomory mixed-integer cuts off the native basis.
             let mut cuts = {
                 let _t = crate::profile::Timer::new(crate::profile::Phase::SepCover);
-                separate_cover(
-                    &root_lp,
+                separate_cover_csc(
+                    &csc_w,
+                    n_w,
+                    m_w,
+                    &l_w,
+                    &u_w,
                     &b_w,
                     &root.x,
                     ns,
@@ -481,8 +499,12 @@ pub fn solve_milp_hooked(
             };
             if opts.gmi_cuts {
                 let _t = crate::profile::Timer::new(crate::profile::Phase::SepGomory);
-                cuts.extend(separate_gomory(
-                    &root_lp,
+                cuts.extend(separate_gomory_cols(
+                    &csc_w,
+                    m_w,
+                    n_w,
+                    &l_w,
+                    &u_w,
                     &b_w,
                     &root.basis,
                     &is_int_full,
@@ -504,8 +526,8 @@ pub fn solve_milp_hooked(
                 break;
             }
             total_cuts += new_cuts.len();
-            let (nm, nn) = augment_with_cuts(
-                &mut a_w,
+            let (nw_csc, nm, nn) = augment_csc_with_cuts(
+                &csc_w,
                 &mut b_w,
                 &mut c_w,
                 &mut l_w,
@@ -515,6 +537,7 @@ pub fn solve_milp_hooked(
                 n_w,
                 &new_cuts,
             );
+            csc_w = nw_csc;
             m_w = nm;
             n_w = nn;
         }
@@ -633,28 +656,32 @@ pub fn solve_milp_hooked(
         // ill-scaled lifted LP this is the dominant per-node cost; sharing it lets
         // the 64 nodes pay one equilibration. When the matrix is well-conditioned
         // (`None`) the nodes solve the original LP unchanged.
-        let scaling = Scaling::from_matrix(&a_w, m_w, n_w);
-        let (a_s, c_s, b_s) = match &scaling {
-            Some(s) => (s.scale_matrix(&a_w), s.scale_c(&c_w), s.scale_b(&b_w)),
-            None => (Vec::new(), Vec::new(), Vec::new()),
+        let scaling = Scaling::from_sparse(&csc_w, m_w, n_w);
+        let (c_s, b_s) = match &scaling {
+            Some(s) => (s.scale_c(&c_w), s.scale_b(&b_w)),
+            None => (Vec::new(), Vec::new()),
         };
-        // Solve-space matrix/objective/rhs: the scaled copies when scaling, else
-        // the originals (borrowed). Node bounds are scaled per node (cheap).
-        let (sa, sc, sb): (&[f64], &[f64], &[f64]) = match &scaling {
-            Some(_) => (&a_s, &c_s, &b_s),
-            None => (&a_w, &c_w, &b_w),
+        // Solve-space objective/rhs: the scaled copies when scaling, else the
+        // originals (borrowed). Node bounds are scaled per node (cheap).
+        let (sc, sb): (&[f64], &[f64]) = match &scaling {
+            Some(_) => (&c_s, &b_s),
+            None => (&c_w, &b_w),
         };
-        // CSC of the solve-space matrix, built once and shared by every node solve
-        // in this batch (the matrix is constant within a batch). This lifts the
-        // per-node `SparseCols::from_dense` O(m·n) rebuild out of the warm solve.
-        let csc_batch = SparseCols::from_dense(sa, m_w, n_w);
-        // Reduced-cost fixing needs the *unscaled* duals/reduced costs (the integer
-        // bound fixing reasons in true objective units), so it gets the CSC of the
-        // unscaled working matrix. When the matrix isn't scaled this is exactly
-        // `csc_batch` (no second build); otherwise build it once for the batch.
-        let csc_unscaled_owned = scaling
-            .as_ref()
-            .map(|_| SparseCols::from_dense(&a_w, m_w, n_w));
+        // Solve-space CSC of the working matrix, built once and shared by every node
+        // solve in this batch (the matrix is constant within a batch): scale the
+        // working CSC by the batch factors, or reuse it unscaled. Never densified.
+        let csc_batch = match &scaling {
+            Some(s) => {
+                let mut c = csc_w.clone();
+                s.scale_cols(&mut c);
+                c
+            }
+            None => csc_w.clone(),
+        };
+        // Reduced-cost fixing (and the unscaled per-node consumers) reason in true
+        // objective units, so they use the CSC of the *unscaled* working matrix. When
+        // the matrix isn't scaled this is exactly `csc_batch` (no second build).
+        let csc_unscaled_owned = scaling.as_ref().map(|_| csc_w.clone());
         let csc_rc: &SparseCols = csc_unscaled_owned.as_ref().unwrap_or(&csc_batch);
         let sb_active = opts.strong_branch && tm.stats().total_nodes < opts.sb_node_budget;
         let mut results = Vec::with_capacity(batch.node_ids.len());
@@ -673,13 +700,11 @@ pub fn solve_milp_hooked(
         // the mutable reduce below.
         let outputs: Vec<NodeOutput> = {
             let ctx = NodeCtx {
-                a_w: &a_w,
                 b_w: &b_w,
                 c_w: &c_w,
                 l_w: &l_w,
                 u_w: &u_w,
                 scaling: scaling.as_ref(),
-                sa,
                 sc,
                 sb,
                 csc: &csc_batch,
@@ -824,8 +849,8 @@ pub fn solve_milp_hooked(
         // Stored node bases are extended lazily on their next solve, so children
         // warm-start through the dual simplex from the cut-augmented basis.
         if !pending_cuts.is_empty() {
-            let (nm, nn) = augment_with_cuts(
-                &mut a_w,
+            let (nw_csc, nm, nn) = augment_csc_with_cuts(
+                &csc_w,
                 &mut b_w,
                 &mut c_w,
                 &mut l_w,
@@ -835,6 +860,7 @@ pub fn solve_milp_hooked(
                 n_w,
                 &pending_cuts,
             );
+            csc_w = nw_csc;
             m_w = nm;
             n_w = nn;
             slack_l = l_w[ns..].to_vec();
@@ -884,26 +910,23 @@ pub fn solve_milp_hooked(
 /// tree's read-only state. All fields are `Sync`, so `solve_node` runs under
 /// `rayon`'s `into_par_iter` over the batch.
 struct NodeCtx<'a> {
-    a_w: &'a [f64],
     b_w: &'a [f64],
     c_w: &'a [f64],
     l_w: &'a [f64],
     u_w: &'a [f64],
     /// Equilibration for the working matrix (shared across the batch), or `None`
     /// when it is well-conditioned. When `Some`, the node LP is solved on the
-    /// pre-scaled `sa`/`sc`/`sb` and the solution is unscaled before use.
+    /// pre-scaled `csc`/`sc`/`sb` and the solution is unscaled before use.
     scaling: Option<&'a Scaling>,
-    /// Solve-space matrix / objective / rhs: scaled copies when `scaling` is
-    /// `Some`, else the originals (`a_w`/`c_w`/`b_w`).
-    sa: &'a [f64],
+    /// Solve-space objective / rhs: scaled copies when `scaling` is `Some`, else the
+    /// originals (`c_w`/`b_w`).
     sc: &'a [f64],
     sb: &'a [f64],
-    /// CSC view of the solve-space matrix `sa`, built **once per batch** and
-    /// shared by every node/strong-branch/dive LP solve in the batch. The working
-    /// matrix is constant within a batch (cuts fold in only between batches), so
-    /// this removes the per-node `SparseCols::from_dense` rebuild from the warm
-    /// solve. Built from `sa`, so it matches whichever (scaled or raw) matrix the
-    /// node solves see.
+    /// CSC view of the solve-space (scaled when `scaling` is `Some`) working matrix,
+    /// built **once per batch** and shared by every node/strong-branch/dive LP solve
+    /// in the batch. The working matrix is constant within a batch (cuts fold in only
+    /// between batches). The MILP driver is fully sparse: no dense `m×n` working
+    /// matrix is ever materialized, so a large sparse relaxation never blows up.
     csc: &'a SparseCols,
     /// CSC view of the **unscaled** working matrix `a_w`, for reduced-cost fixing
     /// (which reasons in true objective units, so it needs unscaled duals/reduced
@@ -1038,18 +1061,21 @@ fn solve_node(id: NodeId, lb_k: &[f64], ub_k: &[f64], ctx: &NodeCtx<'_>) -> Node
     // (including cut rows) with the node's local bounds.
     let mut tightened: Option<(Vec<f64>, Vec<f64>)> = None;
     if ctx.opts.node_propagation {
-        let prop_lp = LpView {
-            a: ctx.a_w,
-            m: ctx.m_w,
-            n: ctx.n_w,
-            c: ctx.c_w,
-            l: &full_l,
-            u: &full_u,
-        };
         let pr = {
-            // cert:T0.3 — time per-node FBBT/constraint propagation.
+            // cert:T0.3 — time per-node FBBT/constraint propagation. T3b5: FBBT on
+            // the UNSCALED working CSC (`ctx.csc_rc`; the dense `prop_lp.a` was
+            // `ctx.a_w`, unscaled), bit-identical to the dense `tighten_bounds`.
             let _t = crate::profile::Timer::new(crate::profile::Phase::Fbbt);
-            tighten_bounds(&prop_lp, ctx.b_w, ctx.is_int_full, ctx.opts.simplex.tol)
+            tighten_bounds_csc(
+                ctx.csc_rc,
+                ctx.m_w,
+                ctx.n_w,
+                &full_l,
+                &full_u,
+                ctx.b_w,
+                ctx.is_int_full,
+                ctx.opts.simplex.tol,
+            )
         };
         if pr.infeasible {
             // Proven-empty box ⇒ prune this node (a valid fathom, like an
@@ -1080,17 +1106,6 @@ fn solve_node(id: NodeId, lb_k: &[f64], ub_k: &[f64], ctx: &NodeCtx<'_>) -> Node
         full_l = pr.l;
         full_u = pr.u;
     }
-    // Original-space LP, used by the cut separators, rounding, and strong
-    // branching (which all reason about the model's true coefficients/values).
-    let node_lp = LpView {
-        a: ctx.a_w,
-        m: ctx.m_w,
-        n: ctx.n_w,
-        c: ctx.c_w,
-        l: &full_l,
-        u: &full_u,
-    };
-
     // Solve on the batch's shared (pre-scaled, when ill-conditioned) matrix. Only
     // the per-node bounds are scaled here; the matrix/objective/rhs were scaled
     // once for the whole batch. The basis is scaling-invariant, so a warm start
@@ -1104,7 +1119,7 @@ fn solve_node(id: NodeId, lb_k: &[f64], ub_k: &[f64], ctx: &NodeCtx<'_>) -> Node
         None => (full_l.clone(), full_u.clone()),
     };
     let solve_lp_view = LpView {
-        a: ctx.sa,
+        a: &[], // T3b5: matrix comes from `ctx.csc`; `.a` unused by the CSC solvers.
         m: ctx.m_w,
         n: ctx.n_w,
         c: ctx.sc,
@@ -1139,7 +1154,10 @@ fn solve_node(id: NodeId, lb_k: &[f64], ub_k: &[f64], ctx: &NodeCtx<'_>) -> Node
                 solve_lp_warm_scaled_csc(&solve_lp_view, ctx.sb, &basis, ctx.simplex, ctx.csc)
             } else {
                 match dual_slack_basis(
-                    ctx.a_w,
+                    // The unscaled CSC of the working matrix (== `from_dense(a_w)`);
+                    // dual_slack_basis reads only singleton structure + `c`, both
+                    // scale-invariant, so this is bit-identical to the old dense arg.
+                    ctx.csc_rc,
                     ctx.m_w,
                     ctx.n_w,
                     ctx.c_w,
@@ -1160,13 +1178,29 @@ fn solve_node(id: NodeId, lb_k: &[f64], ub_k: &[f64], ctx: &NodeCtx<'_>) -> Node
                             ctx.csc,
                         );
                         match warm.status {
-                            LpStatus::IterLimit | LpStatus::Numerical => {
-                                solve_lp_scaled(&solve_lp_view, ctx.sb, ctx.simplex)
-                            }
+                            LpStatus::IterLimit | LpStatus::Numerical => solve_lp_cols(
+                                ctx.csc.clone(),
+                                ctx.m_w,
+                                ctx.n_w,
+                                ctx.sc,
+                                &sl,
+                                &su,
+                                ctx.sb,
+                                ctx.simplex,
+                            ),
                             _ => warm,
                         }
                     }
-                    None => solve_lp_scaled(&solve_lp_view, ctx.sb, ctx.simplex),
+                    None => solve_lp_cols(
+                        ctx.csc.clone(),
+                        ctx.m_w,
+                        ctx.n_w,
+                        ctx.sc,
+                        &sl,
+                        &su,
+                        ctx.sb,
+                        ctx.simplex,
+                    ),
                 }
             }
         }
@@ -1245,11 +1279,11 @@ fn solve_node(id: NodeId, lb_k: &[f64], ub_k: &[f64], ctx: &NodeCtx<'_>) -> Node
             // Primal heuristic: round this fractional point so the reduce can
             // inject a feasible incumbent early and prune more of the tree.
             if ctx.opts.heuristics && !feasible && !time_up {
-                out.incumbent = try_rounding(
+                out.incumbent = try_rounding_csc(
                     &sol.x,
                     ctx.ns,
                     ctx.is_int,
-                    ctx.a_w,
+                    ctx.csc_rc, // T3b5: unscaled working CSC (was ctx.a_w)
                     ctx.b_w,
                     ctx.c_w,
                     ctx.l_w,
@@ -1277,8 +1311,12 @@ fn solve_node(id: NodeId, lb_k: &[f64], ub_k: &[f64], ctx: &NodeCtx<'_>) -> Node
             // dedups them into the shared pool to tighten the whole tree.
             if !feasible && ctx.pool_room && !time_up {
                 let _t = crate::profile::Timer::new(crate::profile::Phase::SepCover);
-                out.found_cuts = separate_cover(
-                    &node_lp,
+                out.found_cuts = separate_cover_csc(
+                    ctx.csc_rc, // T3b5: unscaled working CSC (was node_lp.a = ctx.a_w)
+                    ctx.n_w,
+                    ctx.m_w,
+                    ctx.l_w,
+                    ctx.u_w,
                     ctx.b_w,
                     &sol.x,
                     ctx.ns,
@@ -1332,7 +1370,10 @@ fn solve_node(id: NodeId, lb_k: &[f64], ub_k: &[f64], ctx: &NodeCtx<'_>) -> Node
             // Numerical arm below). A sound infeasible LP always exports a
             // verifiable ray, so this costs one mat-vec and never changes a
             // correct fathom.
-            if verify_farkas_infeasible(&sol.dual, ctx.sa, ctx.sb, &sl, &su, ctx.m_w, ctx.n_w) {
+            // T3b5: farkas check on the SCALED working CSC (`ctx.csc`; the dual/ray
+            // and `sl`/`su`/`ctx.sb` are all in scaled space, as `ctx.sa` was).
+            if verify_farkas_infeasible_csc(&sol.dual, ctx.csc, ctx.sb, &sl, &su, ctx.m_w, ctx.n_w)
+            {
                 out.result = NodeResult {
                     node_id: id,
                     lower_bound: INFEAS_SENTINEL, // pruned
@@ -1403,6 +1444,7 @@ fn solve_node(id: NodeId, lb_k: &[f64], ub_k: &[f64], ctx: &NodeCtx<'_>) -> Node
 /// certify. Runs on the scaled solve-space data (`sa`, `sb`, scaled `l`/`u`), where
 /// the returned ray lives; the safe-bound identity is invariant under
 /// equilibration, so the verdict matches the original space.
+#[allow(dead_code)] // retained as the differential oracle for the CSC port (tests)
 fn verify_farkas_infeasible(
     y: &[f64],
     a: &[f64],
@@ -1432,6 +1474,7 @@ fn verify_farkas_infeasible(
 /// `1e-18` dribble would send `g0` to `−∞` and reject a valid certificate). A reduced
 /// cost genuinely past that tolerance toward an infinite bound does push `g0` to
 /// `−∞`: this ray cannot certify emptiness and the caller keeps the node.
+#[allow(dead_code)] // retained as the differential oracle for the CSC port (tests)
 fn farkas_safe_bound(
     y: &[f64],
     a: &[f64],
@@ -1480,6 +1523,74 @@ fn farkas_safe_bound(
     // spare, while a ray grazing zero on a numerically-tight feasible box does not.
     let margin = 1e-9 * scale.max(1.0);
     g > margin
+}
+
+/// CSC port of [`farkas_safe_bound`] (docs/dev/sparse-milp-plan.md T3b1). Bit-identical:
+/// the only matrix use is `(Aᵀy)ⱼ`, which `csc.dot(j, y)` computes as the same sum of
+/// the same nonzero products (multiplication commutes; structural zeros add `0.0`
+/// exactly; CSC preserves ascending row order). Never materializes the dense matrix.
+#[allow(dead_code)] // wired into the driver at T3b5
+fn farkas_safe_bound_csc(
+    y: &[f64],
+    csc: &SparseCols,
+    b: &[f64],
+    l: &[f64],
+    u: &[f64],
+    m: usize,
+    n: usize,
+) -> bool {
+    let ynorm = y.iter().fold(0.0f64, |acc, &v| acc.max(v.abs()));
+    let rc_tol = 1e-7 * ynorm.max(1.0);
+    let mut g = 0.0f64;
+    let mut scale = 0.0f64;
+    for i in 0..m {
+        g += b[i] * y[i];
+        scale = scale.max((b[i] * y[i]).abs());
+    }
+    for j in 0..n {
+        let aty = csc.dot(j, y);
+        let mut rc = -aty;
+        if rc.abs() <= rc_tol {
+            rc = 0.0;
+        }
+        let term = if rc > 0.0 {
+            if l[j] <= -INF {
+                return false;
+            }
+            rc * l[j]
+        } else if rc < 0.0 {
+            if u[j] >= INF {
+                return false;
+            }
+            rc * u[j]
+        } else {
+            0.0
+        };
+        g += term;
+        scale = scale.max(term.abs());
+    }
+    let margin = 1e-9 * scale.max(1.0);
+    g > margin
+}
+
+/// CSC port of [`verify_farkas_infeasible`].
+#[allow(dead_code)] // wired into the driver at T3b5
+fn verify_farkas_infeasible_csc(
+    y: &[f64],
+    csc: &SparseCols,
+    b: &[f64],
+    l: &[f64],
+    u: &[f64],
+    m: usize,
+    n: usize,
+) -> bool {
+    if y.len() != m || m == 0 {
+        return false;
+    }
+    farkas_safe_bound_csc(y, csc, b, l, u, m, n) || {
+        let neg: Vec<f64> = y.iter().map(|v| -v).collect();
+        farkas_safe_bound_csc(&neg, csc, b, l, u, m, n)
+    }
 }
 
 /// Limited strong branching. For the *unreliable* fractional candidates (those
@@ -1539,7 +1650,10 @@ fn strong_branch(
     // Reference scaled bounds (the node's own) at which the basis is dual-feasible.
     let (ref_l, ref_u) = scale_bounds(orig_l, orig_u);
     let prep_view = LpView {
-        a: ctx.sa,
+        // T3b3: strong branching solves only through `PreparedDual`/`solve_lp_warm_scaled_csc`,
+        // which read the matrix from `ctx.csc`, never `LpView.a`. The `.a` is vestigial —
+        // pass an empty slice so this path carries no dense-matrix dependency.
+        a: &[],
         m: ctx.m_w,
         n: ctx.n_w,
         c: ctx.sc,
@@ -1553,7 +1667,7 @@ fn strong_branch(
             Some(p) => p.reoptimize(&sl, &su, ctx.sb, simplex),
             None => {
                 let view = LpView {
-                    a: ctx.sa,
+                    a: &[], // T3b3: matrix comes from `ctx.csc`; `.a` unused here.
                     m: ctx.m_w,
                     n: ctx.n_w,
                     c: ctx.sc,
@@ -1721,6 +1835,7 @@ fn reduced_cost_fix(
 /// as `coeffs·x − s = rhs` surplus rows (`s ≥ 0`), growing the dense matrix and
 /// the bound/cost/integrality vectors. Returns the new `(m, n)`.
 #[allow(clippy::too_many_arguments)]
+#[allow(dead_code)] // retained as the differential oracle for the CSC port (tests)
 fn augment_with_cuts(
     a_w: &mut Vec<f64>,
     b_w: &mut Vec<f64>,
@@ -1756,6 +1871,82 @@ fn augment_with_cuts(
     }
     *a_w = a_new;
     (m_new, n_new)
+}
+
+/// CSC analogue of [`augment_with_cuts`]'s MATRIX augmentation (docs/dev/sparse-milp-plan.md,
+/// T3): append `k` cut rows and `k` surplus-slack columns to a column-major matrix,
+/// producing EXACTLY the nonzeros `from_dense(augment_with_cuts(dense,..))` would.
+/// Bit-identical by construction and `O(nnz + cut_nnz)` — never materializes the dense
+/// `m×n` matrix, which is what lets the driver drop the dense `a_w` at T3b. The caller
+/// appends to `b/c/l/u/is_int` itself (those are independent of the matrix layout).
+#[allow(dead_code)] // wired into the driver at T3b (replaces the dense a_w path)
+fn augment_cols_with_cuts(sp: &SparseCols, m: usize, n: usize, cuts: &[GomoryCut]) -> SparseCols {
+    let k = cuts.len();
+    if k == 0 {
+        return sp.clone();
+    }
+    let (col_ptr, row_idx, vals) = sp.raw();
+    let mut new_col_ptr: Vec<usize> = Vec::with_capacity(n + k + 1);
+    let mut new_row_idx: Vec<usize> = Vec::with_capacity(row_idx.len() + n * k + k);
+    let mut new_vals: Vec<f64> = Vec::with_capacity(vals.len() + n * k + k);
+    new_col_ptr.push(0);
+    for j in 0..n {
+        // Existing entries (rows 0..m, already sorted ascending) …
+        for idx in col_ptr[j]..col_ptr[j + 1] {
+            new_row_idx.push(row_idx[idx]);
+            new_vals.push(vals[idx]);
+        }
+        // … then this column's coefficient in each cut row (rows m..m+k, strictly
+        // greater, so the column stays row-sorted). Matches the dense path's
+        // `coeffs[..min(len, n)]`: columns j >= cut.coeffs.len() contribute nothing.
+        for (ci, cut) in cuts.iter().enumerate() {
+            if let Some(&v) = cut.coeffs.get(j) {
+                if v != 0.0 {
+                    new_row_idx.push(m + ci);
+                    new_vals.push(v);
+                }
+            }
+        }
+        new_col_ptr.push(new_row_idx.len());
+    }
+    // Surplus slack columns n..n+k: a singleton `-1.0` at the cut's row.
+    for ci in 0..k {
+        new_row_idx.push(m + ci);
+        new_vals.push(-1.0);
+        new_col_ptr.push(new_row_idx.len());
+    }
+    SparseCols::from_csc(new_col_ptr, new_row_idx, new_vals)
+}
+
+/// Full CSC analogue of [`augment_with_cuts`] (T3b5): augment the matrix via
+/// [`augment_cols_with_cuts`] AND append the `k` surplus rows/cols to
+/// `b/c/l/u/is_int` exactly as the dense version does. Returns the grown CSC and new
+/// `(m, n)`.
+#[allow(clippy::too_many_arguments)]
+fn augment_csc_with_cuts(
+    csc: &SparseCols,
+    b_w: &mut Vec<f64>,
+    c_w: &mut Vec<f64>,
+    l_w: &mut Vec<f64>,
+    u_w: &mut Vec<f64>,
+    is_int_full: &mut Vec<bool>,
+    m_w: usize,
+    n_w: usize,
+    cuts: &[GomoryCut],
+) -> (SparseCols, usize, usize) {
+    let k = cuts.len();
+    if k == 0 {
+        return (csc.clone(), m_w, n_w);
+    }
+    let new_csc = augment_cols_with_cuts(csc, m_w, n_w, cuts);
+    for cut in cuts {
+        b_w.push(cut.rhs);
+        c_w.push(0.0);
+        l_w.push(0.0);
+        u_w.push(INF);
+        is_int_full.push(false);
+    }
+    (new_csc, m_w + k, n_w + k)
 }
 
 /// Sparse signature of a cut for pool deduplication: its nonzero `(col, coeff)`
@@ -1811,6 +2002,7 @@ fn extend_basis(mut basis: Basis, n_w: usize) -> Basis {
 /// it is feasible for knapsack-like rows). Returns the better feasible candidate.
 /// Cheap (`O(ns · n_orig_rows)`); an early incumbent prunes the whole tree.
 #[allow(clippy::too_many_arguments)]
+#[allow(dead_code)] // retained as the differential oracle for the CSC port (tests)
 fn try_rounding(
     x: &[f64],
     ns: usize,
@@ -1878,6 +2070,88 @@ fn try_rounding(
             .collect()
     };
 
+    let mut best: Option<(Vec<f64>, f64)> = None;
+    let mut consider = |xc: Vec<f64>| {
+        if feasible(&xc) {
+            let o = obj(&xc);
+            if best.as_ref().map(|(_, bo)| o < *bo).unwrap_or(true) {
+                best = Some((xc, o));
+            }
+        }
+    };
+    consider(make(&|v: f64| v.round()));
+    consider(make(&|v: f64| v.floor()));
+    best
+}
+
+/// CSC port of [`try_rounding`] (docs/dev/sparse-milp-plan.md T3b1). Bit-identical:
+/// the slack range (`slack_lo/hi`, xc-independent) and the per-row activity `act` are
+/// accumulated by CSC column iteration in the SAME ascending order as the dense
+/// per-row loops, and a structural `0.0` adds exactly, so every row sum matches
+/// term-for-term. Never materializes the dense matrix.
+#[allow(clippy::too_many_arguments)]
+#[allow(dead_code)] // wired into the driver at T3b5
+fn try_rounding_csc(
+    x: &[f64],
+    ns: usize,
+    is_int: &[bool],
+    csc: &SparseCols,
+    b_w: &[f64],
+    c_w: &[f64],
+    l_w: &[f64],
+    u_w: &[f64],
+    n_orig_rows: usize,
+    n_w: usize,
+    obj_const: f64,
+) -> Option<(Vec<f64>, f64)> {
+    let (col_ptr, row_idx, vals) = csc.raw();
+    let mut slack_lo = vec![0.0f64; n_orig_rows];
+    let mut slack_hi = vec![0.0f64; n_orig_rows];
+    for k in ns..n_w {
+        for idx in col_ptr[k]..col_ptr[k + 1] {
+            let i = row_idx[idx];
+            if i >= n_orig_rows {
+                continue;
+            }
+            let aik = vals[idx];
+            let (c1, c2) = (aik * l_w[k], aik * u_w[k]);
+            slack_lo[i] += c1.min(c2);
+            slack_hi[i] += c1.max(c2);
+        }
+    }
+    let feasible = |xc: &[f64]| -> bool {
+        let mut act = vec![0.0f64; n_orig_rows];
+        for j in 0..ns {
+            for idx in col_ptr[j]..col_ptr[j + 1] {
+                let i = row_idx[idx];
+                if i >= n_orig_rows {
+                    continue;
+                }
+                act[i] += vals[idx] * xc[j];
+            }
+        }
+        for i in 0..n_orig_rows {
+            let resid = b_w[i] - act[i];
+            if resid < slack_lo[i] - 1e-6 || resid > slack_hi[i] + 1e-6 {
+                return false;
+            }
+        }
+        true
+    };
+    let obj = |xc: &[f64]| -> f64 { (0..ns).map(|j| c_w[j] * xc[j]).sum::<f64>() + obj_const };
+    let make = |round: &dyn Fn(f64) -> f64| -> Vec<f64> {
+        (0..ns)
+            .map(|j| {
+                let v = if is_int[j] { round(x[j]) } else { x[j] };
+                let (lo, hi) = if l_w[j] <= u_w[j] {
+                    (l_w[j], u_w[j])
+                } else {
+                    (u_w[j], l_w[j])
+                };
+                v.clamp(lo, hi)
+            })
+            .collect()
+    };
     let mut best: Option<(Vec<f64>, f64)> = None;
     let mut consider = |xc: Vec<f64>| {
         if feasible(&xc) {
@@ -2003,7 +2277,7 @@ fn try_dive_repair(
                 None => (full_l.clone(), full_u.clone()),
             };
             let view = LpView {
-                a: ctx.sa,
+                a: &[], // T3b5: matrix comes from `ctx.csc`; `.a` unused by CSC solve.
                 m: ctx.m_w,
                 n: ctx.n_w,
                 c: ctx.sc,
@@ -2058,7 +2332,7 @@ fn midpoint(lb: &[f64], ub: &[f64]) -> Vec<f64> {
 // loop reads clearer than zipping four slices (matches the simplex modules).
 #[allow(clippy::needless_range_loop)]
 fn dual_slack_basis(
-    a: &[f64],
+    sp: &SparseCols,
     m: usize,
     n: usize,
     c: &[f64],
@@ -2066,7 +2340,6 @@ fn dual_slack_basis(
     u: &[f64],
     tol: f64,
 ) -> Option<Basis> {
-    let sp = SparseCols::from_dense(a, m, n);
     // Assign each row a distinct zero-cost singleton column (a slack).
     let mut row_basic: Vec<i64> = vec![-1; m];
     for j in 0..n {
@@ -2120,8 +2393,21 @@ fn dual_slack_basis(
 /// degenerate phase-2 pivots). `solve_lp_warm` falls back to the cold primal when
 /// the slack basis is unavailable or not actually dual-feasible, so the result is
 /// always the same optimum — only the path differs.
+///
+/// Superseded in the driver by [`solve_lp_root_csc`] (T2); retained as the
+/// differential ORACLE the `sparse_milp_diff` tests check the CSC root solve against
+/// bit-for-bit. Removed with the dense driver at T5.
+#[allow(dead_code)]
 fn solve_lp_root(lp: &LpView<'_>, b: &[f64], opts: &SimplexOptions) -> crate::lp::simplex::LpSolve {
-    match dual_slack_basis(lp.a, lp.m, lp.n, lp.c, lp.l, lp.u, opts.tol) {
+    match dual_slack_basis(
+        &SparseCols::from_dense(lp.a, lp.m, lp.n),
+        lp.m,
+        lp.n,
+        lp.c,
+        lp.l,
+        lp.u,
+        opts.tol,
+    ) {
         Some(basis) => {
             // The dual-slack warm start is an *optimization*, not a requirement: on
             // covering/packing relaxations the dual simplex reaches the optimum in a
@@ -2144,6 +2430,48 @@ fn solve_lp_root(lp: &LpView<'_>, b: &[f64], opts: &SimplexOptions) -> crate::lp
     }
 }
 
+/// Sparse-native equivalent of [`solve_lp_root`] (docs/dev/sparse-milp-plan.md, T2).
+/// Bit-identical to `solve_lp_root` on the same LP — the dual-slack warm start reads
+/// only singleton structure + `c` (scale-invariant), the warm re-solve uses the same
+/// `solve_lp_warm_scaled_csc` the node solves already trust with the same pivot cap,
+/// and the cold fallback uses [`solve_lp_cols_scaled`] which reproduces `solve_lp`'s
+/// `ScaledLp` equilibration exactly. It NEVER materializes the dense `m×n` matrix, so
+/// the root relaxation of a large sparse binary QP solves from CSC without the dense
+/// blow-up. `cols` is the (unscaled) CSC of the working matrix; `c/l/u/b` and the
+/// slack layout match the dense root LP.
+#[allow(clippy::too_many_arguments)] // inherent LP signature: cols + m,n,c,l,u,b,opts
+fn solve_lp_root_csc(
+    cols: &SparseCols,
+    m: usize,
+    n: usize,
+    c: &[f64],
+    l: &[f64],
+    u: &[f64],
+    b: &[f64],
+    opts: &SimplexOptions,
+) -> crate::lp::simplex::LpSolve {
+    match dual_slack_basis(cols, m, n, c, l, u, opts.tol) {
+        Some(basis) => {
+            let lp = LpView {
+                a: &[],
+                m,
+                n,
+                c,
+                l,
+                u,
+            };
+            let warm = solve_lp_warm_scaled_csc(&lp, b, &basis, &warm_root_opts(opts, m, n), cols);
+            match warm.status {
+                LpStatus::IterLimit | LpStatus::Numerical => {
+                    solve_lp_cols_scaled(cols.clone(), m, n, c, l, u, b, opts)
+                }
+                _ => warm,
+            }
+        }
+        None => solve_lp_cols_scaled(cols.clone(), m, n, c, l, u, b, opts),
+    }
+}
+
 /// Pivot-bounded options for a dual-slack *warm* root attempt. The dual-slack
 /// start only ever pays off when it converges quickly (the covering-LP win is a
 /// few hundred to a low-thousands pivots); past a generous multiple of the problem
@@ -2161,6 +2489,56 @@ fn warm_root_opts(opts: &SimplexOptions, m: usize, n: usize) -> SimplexOptions {
     let mut o = opts.clone();
     o.max_iter = o.max_iter.min(cap);
     o
+}
+
+/// Reconstruct the dense row-major `m×n` matrix from a column-major
+/// [`SparseCols`]. **Temporary T1 bridge** (docs/dev/sparse-milp-plan.md): the CSC
+/// entry densifies here and calls the reference dense driver so the CSC path is
+/// provably bit-identical to the dense path, while T2/T3 sparsify the driver
+/// internals (root solve, scaling, cut appends) and remove this densification. It
+/// therefore does NOT yet fix the memory blow-up on a large sparse relaxation —
+/// that is T3's job — it only establishes the entry point and its differential gate.
+fn csc_to_dense(csc: &SparseCols, m: usize, n: usize) -> Vec<f64> {
+    let mut a = vec![0.0; m * n];
+    for j in 0..n {
+        let (rows, vals) = csc.col(j);
+        for (&i, &v) in rows.iter().zip(vals) {
+            a[i * n + j] = v;
+        }
+    }
+    a
+}
+
+/// CSC-input entry to the MILP branch-and-bound driver
+/// (docs/dev/sparse-milp-plan.md, T1). Identical contract and result to
+/// [`solve_milp`], but the equality-constraint matrix arrives column-major as a
+/// [`SparseCols`] (`m` rows, `n` columns) so a large *sparse* relaxation need not be
+/// densified by the caller / Python boundary. T1 bridges to the dense driver via
+/// [`csc_to_dense`]; the differential harness gates it bit-identical to
+/// [`solve_milp`] on the panel, and T2/T3 remove the internal densification so the
+/// sparse matrix flows through untouched.
+#[allow(clippy::too_many_arguments)] // inherent LP signature: csc + m,n,c,l,u,b,obj_const,opts
+pub fn solve_milp_csc(
+    csc: &SparseCols,
+    m: usize,
+    n: usize,
+    c: &[f64],
+    l: &[f64],
+    u: &[f64],
+    b: &[f64],
+    obj_const: f64,
+    opts: &MilpOptions,
+) -> MilpResult {
+    let a = csc_to_dense(csc, m, n);
+    let lp = LpView {
+        a: &a,
+        m,
+        n,
+        c,
+        l,
+        u,
+    };
+    solve_milp(&lp, b, obj_const, opts)
 }
 
 #[cfg(test)]
@@ -2243,7 +2621,12 @@ mod tests {
 
         let hook = Counter(AtomicUsize::new(0));
         let hooked = solve_milp_hooked(
-            &lp,
+            SparseCols::from_dense(&a, 1, 7),
+            1,
+            7,
+            &c,
+            &l,
+            &u,
             &[10.0],
             0.0,
             &opts(6, vec![0, 1, 2, 3, 4, 5]),
@@ -2650,5 +3033,559 @@ mod tests {
             verify_farkas_infeasible(&y, &a_noisy, &b, &l, &u, 1, 2),
             "noise-level reduced cost on an ∞-bounded column must not reject the ray"
         );
+    }
+}
+
+/// T0 (docs/dev/sparse-milp-plan.md): differential harness for the sparse-MILP
+/// conversion. A fixed panel of small MILPs solved through the reference dense
+/// [`solve_milp`]. Today it pins the dense results and their determinism; at T1 the
+/// CSC entry point plugs into [`Case::solve_csc`] and [`assert_same`] gates it
+/// bit-identical to the dense path (same status / obj / bound / node count) — the
+/// invariant that keeps the representation change from perturbing any dual bound.
+#[cfg(test)]
+mod sparse_milp_diff {
+    use super::*;
+    use crate::lp::simplex::sparse::SparseCols;
+
+    /// One MILP in the panel. Owns its data so the borrowing [`LpView`] can be
+    /// rebuilt per solve.
+    struct Case {
+        name: &'static str,
+        a: Vec<f64>, // row-major, m*n
+        m: usize,
+        n: usize,
+        c: Vec<f64>,
+        l: Vec<f64>,
+        u: Vec<f64>,
+        b: Vec<f64>,
+        ns: usize,
+        int_cols: Vec<usize>,
+    }
+
+    impl Case {
+        fn opts(&self) -> MilpOptions {
+            MilpOptions {
+                n_struct: self.ns,
+                integer_cols: self.int_cols.clone(),
+                max_nodes: 100_000,
+                time_limit_s: None,
+                gap_tol: 1e-9,
+                root_cuts: 16,
+                cut_rounds: 3,
+                gmi_cuts: true,
+                cut_select: true,
+                node_cuts: true,
+                max_pool_cuts: 500,
+                heuristics: true,
+                presolve: true,
+                strong_branch: true,
+                node_propagation: true,
+                reduced_cost_fixing: true,
+                sb_max_cands: 8,
+                sb_node_budget: 1024,
+                simplex: SimplexOptions::default(),
+            }
+        }
+
+        fn dense_view(&self) -> LpView<'_> {
+            LpView {
+                a: &self.a,
+                m: self.m,
+                n: self.n,
+                c: &self.c,
+                l: &self.l,
+                u: &self.u,
+            }
+        }
+
+        /// Reference solve through the dense driver.
+        fn solve_dense(&self) -> MilpResult {
+            solve_milp(&self.dense_view(), &self.b, 0.0, &self.opts())
+        }
+
+        /// CSC view of this instance's matrix, fed to the CSC driver entry.
+        fn csc(&self) -> SparseCols {
+            SparseCols::from_dense(&self.a, self.m, self.n)
+        }
+
+        /// Solve through the T1 CSC entry point [`solve_milp_csc`].
+        fn solve_csc(&self) -> MilpResult {
+            let sp = self.csc();
+            solve_milp_csc(
+                &sp,
+                self.m,
+                self.n,
+                &self.c,
+                &self.l,
+                &self.u,
+                &self.b,
+                0.0,
+                &self.opts(),
+            )
+        }
+    }
+
+    /// Panel: pure-LP, small binary knapsack, general integer, infeasible,
+    /// unbounded, and a cuts-firing knapsack (branches + fires GMI cuts).
+    fn panel() -> Vec<Case> {
+        vec![
+            // pure LP: min -x0 s.t. x0 + s = 1, x0 in [0,1] continuous -> -1.
+            Case {
+                name: "pure_lp",
+                a: vec![1.0, 1.0],
+                m: 1,
+                n: 2,
+                c: vec![-1.0, 0.0],
+                l: vec![0.0, 0.0],
+                u: vec![1.0, INF],
+                b: vec![1.0],
+                ns: 1,
+                int_cols: vec![],
+            },
+            // binary knapsack: max 10x0+9x1+8x2+x3 s.t. 5*sum <= 9, binary -> -10.
+            Case {
+                name: "binary_knapsack",
+                a: vec![5.0, 5.0, 5.0, 5.0, 1.0],
+                m: 1,
+                n: 5,
+                c: vec![-10.0, -9.0, -8.0, -1.0, 0.0],
+                l: vec![0.0; 5],
+                u: vec![1.0, 1.0, 1.0, 1.0, INF],
+                b: vec![9.0],
+                ns: 4,
+                int_cols: vec![0, 1, 2, 3],
+            },
+            // general integer: min -x0-x1 s.t. x0+x1+s=3, x in [0,2] int -> -3.
+            Case {
+                name: "general_integer",
+                a: vec![1.0, 1.0, 1.0],
+                m: 1,
+                n: 3,
+                c: vec![-1.0, -1.0, 0.0],
+                l: vec![0.0, 0.0, 0.0],
+                u: vec![2.0, 2.0, INF],
+                b: vec![3.0],
+                ns: 2,
+                int_cols: vec![0, 1],
+            },
+            // infeasible: x0 + s = 1, x0 in [2,5] int -> infeasible.
+            Case {
+                name: "infeasible",
+                a: vec![1.0, 1.0],
+                m: 1,
+                n: 2,
+                c: vec![1.0, 0.0],
+                l: vec![2.0, 0.0],
+                u: vec![5.0, INF],
+                b: vec![1.0],
+                ns: 1,
+                int_cols: vec![0],
+            },
+            // unbounded: min -x0 s.t. 0*x0 + s = 1, x0 in [0,INF) -> unbounded.
+            Case {
+                name: "unbounded",
+                a: vec![0.0, 1.0],
+                m: 1,
+                n: 2,
+                c: vec![-1.0, 0.0],
+                l: vec![0.0, 0.0],
+                u: vec![INF, INF],
+                b: vec![1.0],
+                ns: 1,
+                int_cols: vec![0],
+            },
+            // cuts-firing knapsack: 6 binaries, branches and fires GMI cuts.
+            Case {
+                name: "cuts_firing_knapsack",
+                a: vec![5.0, 3.0, 2.0, 4.0, 3.0, 5.0, 1.0],
+                m: 1,
+                n: 7,
+                c: vec![-8.0, -5.0, -3.0, -6.0, -4.0, -7.0, 0.0],
+                l: vec![0.0; 7],
+                u: vec![1.0, 1.0, 1.0, 1.0, 1.0, 1.0, INF],
+                b: vec![10.0],
+                ns: 6,
+                int_cols: vec![0, 1, 2, 3, 4, 5],
+            },
+        ]
+    }
+
+    /// Bit-identical gate used by the dense-vs-dense determinism check now and by
+    /// the dense-vs-CSC check at T1. Status and node count must match exactly;
+    /// obj/bound match to a tight tolerance (finite cases only).
+    fn assert_same(name: &str, a: &MilpResult, b: &MilpResult) {
+        assert_eq!(a.status, b.status, "{name}: status drift");
+        assert_eq!(a.nodes, b.nodes, "{name}: node-count drift");
+        if a.obj.is_finite() && b.obj.is_finite() {
+            assert!(
+                (a.obj - b.obj).abs() < 1e-9,
+                "{name}: obj drift {} {}",
+                a.obj,
+                b.obj
+            );
+        }
+        if a.bound.is_finite() && b.bound.is_finite() {
+            assert!(
+                (a.bound - b.bound).abs() < 1e-9,
+                "{name}: bound drift {} {}",
+                a.bound,
+                b.bound
+            );
+        }
+    }
+
+    #[test]
+    fn dense_panel_reference_values() {
+        for case in panel() {
+            let r = case.solve_dense();
+            match case.name {
+                "pure_lp" => {
+                    assert_eq!(r.status, MilpStatus::Optimal, "pure_lp");
+                    assert!((r.obj - (-1.0)).abs() < 1e-6, "pure_lp obj {}", r.obj);
+                }
+                "binary_knapsack" => {
+                    assert_eq!(r.status, MilpStatus::Optimal, "binary_knapsack");
+                    assert!((r.obj - (-10.0)).abs() < 1e-6, "knapsack obj {}", r.obj);
+                }
+                "general_integer" => {
+                    assert_eq!(r.status, MilpStatus::Optimal, "general_integer");
+                    assert!((r.obj - (-3.0)).abs() < 1e-6, "genint obj {}", r.obj);
+                }
+                "infeasible" => assert_eq!(r.status, MilpStatus::Infeasible, "infeasible"),
+                "unbounded" => assert_eq!(r.status, MilpStatus::Unbounded, "unbounded"),
+                "cuts_firing_knapsack" => {
+                    assert_eq!(r.status, MilpStatus::Optimal, "cuts_firing");
+                    assert!(
+                        r.obj.is_finite() && r.obj < 0.0,
+                        "cuts_firing obj {}",
+                        r.obj
+                    );
+                }
+                other => panic!("unhandled case {other}"),
+            }
+        }
+    }
+
+    /// Golden lock on the CURRENT driver's per-instance solve — status, objective,
+    /// bound, node count, and simplex pivot count. This is the **driver-wide**
+    /// bit-identity gate for the sparse conversion: T2/T3 change the driver internals
+    /// for BOTH the dense and CSC entry points, so `csc_entry_matches_dense_on_panel`
+    /// (dense-vs-CSC) alone can no longer catch a regression against the *original*
+    /// behavior — after conversion both sides move together. `lp_iters` is the
+    /// sensitive discriminator: a different root-solve pivot path drifts it even when
+    /// the B&B tree is a single node. A change to any value here is a red flag — the
+    /// sparse path is a pure representation change and must reproduce these exactly.
+    #[test]
+    fn driver_matches_golden() {
+        for case in panel() {
+            let r = case.solve_dense();
+            let (status, obj, bound, nodes, iters): (MilpStatus, f64, f64, usize, usize) =
+                match case.name {
+                    "pure_lp" => (MilpStatus::Optimal, -1.0, -1.0, 1, 0),
+                    "binary_knapsack" => (MilpStatus::Optimal, -10.0, -10.0, 1, 1),
+                    "general_integer" => (MilpStatus::Optimal, -3.0, -3.0, 1, 1),
+                    "infeasible" => (MilpStatus::Infeasible, f64::INFINITY, f64::INFINITY, 0, 0),
+                    "unbounded" => (
+                        MilpStatus::Unbounded,
+                        f64::INFINITY,
+                        f64::NEG_INFINITY,
+                        1,
+                        0,
+                    ),
+                    "cuts_firing_knapsack" => (MilpStatus::Optimal, -16.0, -16.0, 1, 1),
+                    other => panic!("unhandled case {other}"),
+                };
+            assert_eq!(r.status, status, "{}: status", case.name);
+            assert_eq!(r.nodes, nodes, "{}: nodes", case.name);
+            assert_eq!(r.lp_iters, iters, "{}: lp_iters", case.name);
+            if obj.is_finite() {
+                assert!(
+                    (r.obj - obj).abs() < 1e-9,
+                    "{}: obj {} != {obj}",
+                    case.name,
+                    r.obj
+                );
+            } else {
+                assert_eq!(r.obj, obj, "{}: obj", case.name);
+            }
+            if bound.is_finite() {
+                assert!(
+                    (r.bound - bound).abs() < 1e-9,
+                    "{}: bound {} != {bound}",
+                    case.name,
+                    r.bound
+                );
+            } else {
+                assert_eq!(r.bound, bound, "{}: bound", case.name);
+            }
+        }
+    }
+
+    /// T3b6 branching integration golden. The panel solves at the root (nodes=1) so
+    /// it never runs the per-node engine. This instance FORCES a 13-node tree
+    /// (heuristics off, no root GMI) while keeping node cover separation, strong
+    /// branching, and FBBT propagation ON — so `separate_cover`, `strong_branch`,
+    /// and `tighten_bounds` (and their CSC ports wired in at T3b5) are exercised
+    /// end-to-end. The rewire must leave status/obj/node-count/`lp_iters` EXACTLY
+    /// unchanged; any drift is a per-node-engine regression the panel would miss.
+    #[test]
+    fn branching_golden() {
+        let a = [
+            3.0, 4.0, 5.0, 2.0, 6.0, 1.0, 1.0, 0.0, //
+            2.0, 3.0, 1.0, 5.0, 2.0, 4.0, 0.0, 1.0,
+        ];
+        let c = [-5.0, -6.0, -7.0, -4.0, -8.0, -3.0, 0.0, 0.0];
+        let l = [0.0; 8];
+        let u = [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, INF, INF];
+        let lp = LpView {
+            a: &a,
+            m: 2,
+            n: 8,
+            c: &c,
+            l: &l,
+            u: &u,
+        };
+        let o = MilpOptions {
+            n_struct: 6,
+            integer_cols: vec![0, 1, 2, 3, 4, 5],
+            max_nodes: 100_000,
+            time_limit_s: None,
+            gap_tol: 1e-9,
+            root_cuts: 0,
+            cut_rounds: 3,
+            gmi_cuts: false,
+            cut_select: true,
+            node_cuts: true,
+            max_pool_cuts: 500,
+            heuristics: false,
+            presolve: true,
+            strong_branch: true,
+            node_propagation: true,
+            reduced_cost_fixing: true,
+            sb_max_cands: 8,
+            sb_node_budget: 1024,
+            simplex: SimplexOptions::default(),
+        };
+        let r = solve_milp(&lp, &[10.0, 9.0], 0.0, &o);
+        assert_eq!(r.status, MilpStatus::Optimal, "status");
+        assert!((r.obj - (-16.0)).abs() < 1e-9, "obj {}", r.obj);
+        assert_eq!(r.nodes, 13, "node-count drift (per-node engine)");
+        assert_eq!(r.lp_iters, 39, "lp_iters drift (per-node engine)");
+    }
+
+    /// Determinism: re-solving is bit-identical. This is exactly the property the
+    /// CSC path must satisfy against the dense path at T1, so the harness proves the
+    /// gate is meaningful (the dense driver itself is reproducible).
+    #[test]
+    fn dense_panel_is_deterministic() {
+        for case in panel() {
+            let r1 = case.solve_dense();
+            let r2 = case.solve_dense();
+            assert_same(case.name, &r1, &r2);
+            assert_eq!(r1.lp_iters, r2.lp_iters, "{}: lp_iters drift", case.name);
+        }
+    }
+
+    /// T1 gate: the CSC entry point [`solve_milp_csc`] is bit-identical to the
+    /// dense [`solve_milp`] on every panel case — same status, node count, objective,
+    /// bound, and incumbent length. Any drift means the CSC path perturbed the
+    /// solve, which would corrupt a dual bound (the whole point of the gate).
+    #[test]
+    fn csc_entry_matches_dense_on_panel() {
+        for case in panel() {
+            let dense = case.solve_dense();
+            let csc = case.solve_csc();
+            assert_same(case.name, &dense, &csc);
+            assert_eq!(
+                dense.x.len(),
+                csc.x.len(),
+                "{}: incumbent length",
+                case.name
+            );
+            if dense.status == MilpStatus::Optimal {
+                for (k, (xd, xc)) in dense.x.iter().zip(csc.x.iter()).enumerate() {
+                    assert!(
+                        (xd - xc).abs() < 1e-9,
+                        "{}: incumbent[{k}] drift {xd} {xc}",
+                        case.name
+                    );
+                }
+            }
+        }
+    }
+
+    /// T2 direct gate: [`solve_lp_root_csc`] reproduces the dense [`solve_lp_root`]
+    /// pivot-for-pivot (status, objective, and **iteration count**) on both a
+    /// well-conditioned LP and an ILL-conditioned one whose 1e8 dynamic range trips
+    /// the `ScaledLp`/`Scaling::from_sparse` equilibration — the exact path whose
+    /// dense-vs-CSC equivalence option A rests on. `iters` drift here would mean the
+    /// CSC root solve takes a different pivot path and is NOT bit-identical.
+    #[test]
+    fn solve_lp_root_csc_matches_dense() {
+        // (name, a row-major m*n, m, n, c, l, u, b)
+        let cases: Vec<(
+            &str,
+            Vec<f64>,
+            usize,
+            usize,
+            Vec<f64>,
+            Vec<f64>,
+            Vec<f64>,
+            Vec<f64>,
+        )> = vec![
+            (
+                "well_conditioned",
+                vec![1.0, 1.0],
+                1,
+                2,
+                vec![-1.0, 0.0],
+                vec![0.0, 0.0],
+                vec![1.0, INF],
+                vec![1.0],
+            ),
+            (
+                // 1e8*x0 + 1.0*s = 1e8, x0 in [0,1] -> x0=1, obj -1. Range 1e8 > 1e6
+                // SCALE_TRIGGER, so both paths equilibrate.
+                "ill_conditioned",
+                vec![1e8, 1.0],
+                1,
+                2,
+                vec![-1.0, 0.0],
+                vec![0.0, 0.0],
+                vec![1.0, INF],
+                vec![1e8],
+            ),
+        ];
+        let opts = SimplexOptions::default();
+        for (name, a, m, n, c, l, u, b) in cases {
+            let lp = LpView {
+                a: &a,
+                m,
+                n,
+                c: &c,
+                l: &l,
+                u: &u,
+            };
+            let dense = solve_lp_root(&lp, &b, &opts);
+            let sp = SparseCols::from_dense(&a, m, n);
+            let csc = solve_lp_root_csc(&sp, m, n, &c, &l, &u, &b, &opts);
+            assert_eq!(dense.status, csc.status, "{name}: status");
+            assert_eq!(dense.iters, csc.iters, "{name}: iters (pivot-path) drift");
+            assert!(
+                (dense.obj - csc.obj).abs() < 1e-6 * (1.0 + dense.obj.abs()),
+                "{name}: obj {} vs {}",
+                dense.obj,
+                csc.obj
+            );
+        }
+    }
+
+    /// T3 gate: the CSC cut augmentation reproduces the dense `augment_with_cuts`
+    /// matrix exactly — `augment_cols_with_cuts(from_dense(A))` equals `from_dense`
+    /// of the dense-augmented A, nonzero-for-nonzero (same col_ptr/row_idx/vals).
+    /// This is what lets T3b append cuts to the CSC and drop `a_w` without perturbing
+    /// a single coefficient.
+    #[test]
+    fn csc_augment_matches_dense_augment() {
+        use crate::lp::gomory::GomoryCut;
+        // 2×3 base with a structural zero; two cuts, one carrying a zero coeff.
+        let a = vec![1.0, 0.0, 2.0, 0.0, 3.0, 4.0];
+        let (m, n) = (2usize, 3usize);
+        let cuts = vec![
+            GomoryCut {
+                coeffs: vec![1.0, 0.0, -2.0],
+                rhs: 1.0,
+            },
+            GomoryCut {
+                coeffs: vec![0.0, 5.0, 0.0],
+                rhs: 2.0,
+            },
+        ];
+        // Reference: dense augment, then to CSC.
+        let mut a_w = a.clone();
+        let mut b = vec![0.0; m];
+        let mut c = vec![0.0; n];
+        let mut l = vec![0.0; n];
+        let mut u = vec![INF; n];
+        let mut ii = vec![false; n];
+        let (mn, nn) = augment_with_cuts(
+            &mut a_w, &mut b, &mut c, &mut l, &mut u, &mut ii, m, n, &cuts,
+        );
+        let csc_ref = SparseCols::from_dense(&a_w, mn, nn);
+        // CSC augment of the CSC of A.
+        let csc_test = augment_cols_with_cuts(&SparseCols::from_dense(&a, m, n), m, n, &cuts);
+        assert_eq!(
+            csc_ref.raw(),
+            csc_test.raw(),
+            "csc augment != from_dense(dense augment)"
+        );
+        // b/c/l/u/is_int side-effects (independent of the matrix layout) match the k
+        // appended surplus rows/cols.
+        assert_eq!((mn, nn), (m + cuts.len(), n + cuts.len()));
+    }
+
+    /// T3b1 gate: `farkas_safe_bound_csc`/`verify_farkas_infeasible_csc` give the
+    /// identical verdict to their dense oracles across several rays.
+    #[test]
+    fn farkas_csc_matches_dense() {
+        let a = vec![2.0, 0.0, -1.0, 0.0, 3.0, 1.0, 1.0, -2.0, 0.0]; // 3×3
+        let (m, n) = (3usize, 3usize);
+        let b = vec![1.0, -2.0, 0.5];
+        let l = vec![0.0, 0.0, 0.0];
+        let u = vec![INF, INF, INF];
+        let csc = SparseCols::from_dense(&a, m, n);
+        for y in [
+            vec![1.0, -1.0, 2.0],
+            vec![0.5, 0.5, 0.5],
+            vec![-3.0, 1.0, 0.0],
+            vec![0.0, 0.0, 0.0],
+        ] {
+            assert_eq!(
+                farkas_safe_bound(&y, &a, &b, &l, &u, m, n),
+                farkas_safe_bound_csc(&y, &csc, &b, &l, &u, m, n),
+                "farkas verdict drift for y={y:?}"
+            );
+            assert_eq!(
+                verify_farkas_infeasible(&y, &a, &b, &l, &u, m, n),
+                verify_farkas_infeasible_csc(&y, &csc, &b, &l, &u, m, n),
+            );
+        }
+    }
+
+    /// T3b1 gate: `try_rounding_csc` returns the identical incumbent (or `None`) as
+    /// the dense oracle across fractional/integral start points.
+    #[test]
+    fn try_rounding_csc_matches_dense() {
+        let a = vec![1.0, 1.0, 1.0]; // 1×3: x0 + x1 + s = b
+        let (ns, n_orig_rows, n_w) = (2usize, 1usize, 3usize);
+        let b = vec![1.0];
+        let c = vec![-1.0, -1.0, 0.0];
+        let l = vec![0.0, 0.0, 0.0];
+        let u = vec![1.0, 1.0, INF];
+        let is_int = vec![true, true, false];
+        let csc = SparseCols::from_dense(&a, n_orig_rows, n_w);
+        for x in [vec![0.6, 0.3], vec![1.0, 1.0], vec![0.0, 0.0]] {
+            let dense = try_rounding(&x, ns, &is_int, &a, &b, &c, &l, &u, n_orig_rows, n_w, 0.0);
+            let cscr =
+                try_rounding_csc(&x, ns, &is_int, &csc, &b, &c, &l, &u, n_orig_rows, n_w, 0.0);
+            assert_eq!(dense, cscr, "try_rounding drift for x={x:?}");
+        }
+    }
+
+    /// The CSC of each instance round-trips the dense matrix's exact nonzeros
+    /// (T1 relies on this equivalence). Sanity-checks `from_dense` on the panel.
+    #[test]
+    fn csc_roundtrips_dense_nonzeros() {
+        for case in panel() {
+            let sp = case.csc();
+            let mut dense_nnz = 0usize;
+            for &v in &case.a {
+                if v != 0.0 {
+                    dense_nnz += 1;
+                }
+            }
+            let (_col_ptr, _row_idx, vals) = sp.raw();
+            assert_eq!(vals.len(), dense_nnz, "{}: csc nnz != dense nnz", case.name);
+        }
     }
 }

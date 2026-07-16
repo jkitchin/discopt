@@ -189,7 +189,40 @@ pub fn separate_gomory(
     tol: f64,
     max_dynamism: f64,
 ) -> Vec<GomoryCut> {
-    let (a, m, n, l, u) = (lp.a, lp.m, lp.n, lp.l, lp.u);
+    // Dense-entry wrapper (used by tests): build the CSC once and delegate. The
+    // driver calls `separate_gomory_cols` directly with its working CSC (no dense
+    // matrix) — see docs/dev/sparse-milp-plan.md T3b5.
+    let sp = SparseCols::from_dense(lp.a, lp.m, lp.n);
+    separate_gomory_cols(
+        &sp,
+        lp.m,
+        lp.n,
+        lp.l,
+        lp.u,
+        b,
+        basis,
+        integrality,
+        tol,
+        max_dynamism,
+    )
+}
+
+/// CSC-input GMI separation (the body of [`separate_gomory`]). Bit-identical: the
+/// function already worked entirely through a `SparseCols` (`sp.col(j)` + a sparse
+/// LU factorization); it just took the dense matrix and rebuilt the CSC internally.
+#[allow(clippy::too_many_arguments)]
+pub fn separate_gomory_cols(
+    sp: &SparseCols,
+    m: usize,
+    n: usize,
+    l: &[f64],
+    u: &[f64],
+    b: &[f64],
+    basis: &Basis,
+    integrality: &[bool],
+    tol: f64,
+    max_dynamism: f64,
+) -> Vec<GomoryCut> {
     let mut cuts = Vec::new();
     if m == 0 {
         return cuts;
@@ -201,15 +234,6 @@ pub fn separate_gomory(
         return cuts;
     }
 
-    // CSC view of the constraint matrix: column access `A[:,j]` in O(nnz_j),
-    // replacing the dense O(m·n) scans the bmat/bt build and the ā_j dot used to
-    // pay per cut. The basis factorization comes from feral's sparse LU
-    // (`B = A[:, basic_vars]`), so `x_B = B⁻¹(b − A_N x_N)` and each tableau row
-    // `B⁻ᵀ e_i` are a single ftran/btran instead of an O(m³) dense Gaussian
-    // solve — the dense `solve_dense`/`solve_refined` path was the dominant root
-    // cost on sparse models. Iterative refinement (the GMI soundness measure) is
-    // preserved exactly, now driven by sparse matvecs against the same factor.
-    let sp = SparseCols::from_dense(a, m, n);
     let mut lu = FeralLU::new();
     let bcols: Vec<Vec<(usize, f64)>> = basis
         .basic_vars
@@ -241,7 +265,7 @@ pub fn separate_gomory(
             }
         }
     }
-    let xb = match ftran_refined(&mut lu, &sp, &basis.basic_vars, &rhs_b, tol) {
+    let xb = match ftran_refined(&mut lu, sp, &basis.basic_vars, &rhs_b, tol) {
         Some(xb) => xb,
         None => return cuts,
     };
@@ -258,7 +282,7 @@ pub fn separate_gomory(
         // Row i of B⁻¹: refined solve of Bᵀ w = e_i (one btran + refinement).
         let mut e_i = vec![0.0_f64; m];
         e_i[i] = 1.0;
-        let w = match btran_refined(&mut lu, &sp, &basis.basic_vars, &e_i, tol) {
+        let w = match btran_refined(&mut lu, sp, &basis.basic_vars, &e_i, tol) {
             Some(w) => w,
             None => continue,
         };

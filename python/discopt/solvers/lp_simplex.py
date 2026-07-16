@@ -54,6 +54,21 @@ def _dense_rows(A: Optional[Union[np.ndarray, sp.spmatrix]], n: int) -> np.ndarr
     return dense.reshape(-1, n)
 
 
+def _sparse_rows(A: Optional[Union[np.ndarray, sp.spmatrix]], n: int) -> "sp.csr_matrix":
+    """Sparse CSR ``(m, n)`` view of a constraint block, or an empty ``(0, n)``.
+
+    Never densifies a sparse input — the whole point of the sparse marshaling in
+    :func:`solve_lp`. A dense ndarray input is reshaped to ``(-1, n)`` (matching
+    :func:`_dense_rows`) then converted to CSR.
+    """
+    if A is None:
+        return sp.csr_matrix((0, n), dtype=np.float64)
+    if sp.issparse(A):
+        M = sp.csr_matrix(A)
+        return M if M.shape[1] == n else M.reshape((-1, n))
+    return sp.csr_matrix(np.asarray(A, dtype=np.float64).reshape(-1, n))
+
+
 def solve_lp(
     c: np.ndarray,
     A_ub: Optional[Union[np.ndarray, sp.spmatrix]] = None,
@@ -93,13 +108,20 @@ def solve_lp(
     ill-conditioned LP (the F3 multilinear vertex-hull LP: ``2^n`` λ columns)
     without waiting for the 100 000-pivot default.
     """
-    from discopt._rust import solve_lp_warm_py
+    from discopt._rust import solve_lp_warm_csc_py
 
     c_arr = np.asarray(c, dtype=np.float64).ravel()
     n = c_arr.shape[0]
 
-    a_ub = _dense_rows(A_ub if (b_ub is not None and np.size(b_ub)) else None, n)
-    a_eq = _dense_rows(A_eq if (b_eq is not None and np.size(b_eq)) else None, n)
+    # Constraint blocks kept SPARSE. A dense standard form ``a_std`` here is
+    # ``O(m*(n+m))`` — for a large lifted relaxation (qap's 85756-row McCormick LP:
+    # ``a_std`` = 85756 x 107405 ~ 9.2e9 cells ~ 73 GB) it blows memory before the
+    # solve. This oracle is the exact-LP seam the PSD/OBBT/DBBT paths call, so the
+    # blowup surfaced there (~46 GB, issue: sparse-milp-plan T7). The CSC-native
+    # ``solve_lp_warm_csc_py`` consumes the standard form directly with the slack
+    # identity left implicit-sparse.
+    a_ub = _sparse_rows(A_ub if (b_ub is not None and np.size(b_ub)) else None, n)
+    a_eq = _sparse_rows(A_eq if (b_eq is not None and np.size(b_eq)) else None, n)
     m_ub, m_eq = a_ub.shape[0], a_eq.shape[0]
     m = m_ub + m_eq
     b_vec = np.concatenate(
@@ -109,15 +131,18 @@ def solve_lp(
         ]
     )
 
-    # Standard form [A_ub | I_ub | 0 ; A_eq | 0 | I_eq] z = b, with slacks in
-    # [0, +inf) for the inequality rows and pinned to [0, 0] for the equality rows.
-    a_std = np.zeros((m, n + m), dtype=np.float64)
-    if m_ub:
-        a_std[:m_ub, :n] = a_ub
-        a_std[:m_ub, n : n + m_ub] = np.eye(m_ub)
-    if m_eq:
-        a_std[m_ub:, :n] = a_eq
-        a_std[m_ub:, n + m_ub :] = np.eye(m_eq)
+    # Standard form [A_ub | I_ub | 0 ; A_eq | 0 | I_eq] z = b, built directly as
+    # CSC. Structural columns first, then one slack per row: [0, +inf) for the
+    # inequality rows and pinned to [0, 0] for the equality rows. ``sort_indices``
+    # gives ascending row order per column, which the CSC-native simplex requires.
+    a_struct = sp.vstack([a_ub, a_eq], format="csr") if m else sp.csr_matrix((0, n))
+    if m > 0:
+        a_std = sp.hstack(
+            [a_struct, sp.identity(m, format="csc", dtype=np.float64)], format="csc"
+        ).tocsc()
+        a_std.sort_indices()
+    else:
+        a_std = sp.csc_matrix((0, n), dtype=np.float64)
     c_std = np.concatenate([c_arr, np.zeros(m)])
     if bounds is not None:
         lb = np.array([lo for lo, _ in bounds], dtype=np.float64)
@@ -131,12 +156,18 @@ def solve_lp(
     _warm_kw: dict[str, Any] = {}
     if max_iter is not None:
         _warm_kw["max_iter"] = int(max_iter)
-    status, x_full, obj, _iters, _cs, _bv, dual, _ray = solve_lp_warm_py(
+    status, x_full, obj, _iters, _cs, _bv, dual, _ray = solve_lp_warm_csc_py(
         np.ascontiguousarray(c_std),
-        np.ascontiguousarray(a_std),
+        m,
+        n + m,
+        np.ascontiguousarray(a_std.indptr, dtype=np.int64),
+        np.ascontiguousarray(a_std.indices, dtype=np.int64),
+        np.ascontiguousarray(a_std.data, dtype=np.float64),
         np.ascontiguousarray(b_vec),
         np.ascontiguousarray(lb_std),
         np.ascontiguousarray(ub_std),
+        None,  # no warm basis (cold solve)
+        None,
         **_warm_kw,
     )
 
@@ -181,9 +212,9 @@ def solve_lp(
     if dual_values is not None:
         rc = c_arr.copy()
         if m_ub:
-            rc = rc - a_ub.T @ y[:m_ub]
+            rc = rc - np.asarray(a_ub.T @ y[:m_ub]).ravel()
         if m_eq:
-            rc = rc - a_eq.T @ y[m_ub:]
+            rc = rc - np.asarray(a_eq.T @ y[m_ub:]).ravel()
         if np.all(np.isfinite(rc)):
             reduced_costs = rc
 

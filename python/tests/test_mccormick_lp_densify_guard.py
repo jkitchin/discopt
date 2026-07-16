@@ -75,3 +75,50 @@ def test_solve_at_node_declines_oversize(monkeypatch):
     assert gated.status == "skipped_oversize"
     assert gated.lower_bound is None
     assert gated.status != "infeasible"  # a declined node must never be fathomed
+
+
+def test_sparse_large_lp_flag_solves_declined_node_soundly(monkeypatch):
+    """Opt-in ``DISCOPT_SPARSE_LARGE_LP``: a node the dense-cell guard would decline
+    is instead solved (the whole path is sparse now), yielding the SAME rigorous LP
+    bound as the normal below-cap solve — the flag only gates *declining*, not the
+    math. Sound: the bound is a valid lower bound (<= every feasible objective).
+
+    §5 bound-changing regime: default off (no behavior change), and when on the new
+    bound equals the old below-cap bound and never exceeds the true optimum.
+    """
+    from discopt.solver_tuning import current
+
+    m = _small_bilinear()
+    lb = np.array([-2.0, -2.0], dtype=np.float64)
+    ub = np.array([2.0, 2.0], dtype=np.float64)
+
+    # Real McCormick bound below the cap (guard inactive).
+    relaxer = mc.MccormickLPRelaxer(m)
+    normal = relaxer.solve_at_node(lb, ub, time_limit=5.0)
+    assert normal.status == "optimal" and normal.lower_bound is not None
+    b_normal = float(normal.lower_bound)
+
+    # Force the guard to trip on this small lift.
+    monkeypatch.setattr(mc, "_MAX_RELAX_DENSE_CELLS", 1.0)
+
+    # Flag OFF (default): declined.
+    monkeypatch.delenv("DISCOPT_SPARSE_LARGE_LP", raising=False)
+    assert current().sparse_large_lp is False
+    off = mc.MccormickLPRelaxer(m).solve_at_node(lb, ub, time_limit=5.0)
+    assert off.status == "skipped_oversize"
+
+    # Flag ON: the same node now solves, with the SAME bound as the below-cap solve.
+    monkeypatch.setenv("DISCOPT_SPARSE_LARGE_LP", "1")
+    assert current().sparse_large_lp is True
+    on = mc.MccormickLPRelaxer(m).solve_at_node(lb, ub, time_limit=5.0)
+    assert on.status == "optimal"
+    assert on.lower_bound is not None
+    assert on.lower_bound == pytest.approx(b_normal, rel=1e-9, abs=1e-9)
+
+    # Feasible-point sampling: the bound never exceeds any feasible objective
+    # (min x*y - x - y over x+y>=0.5, x,y in [-2,2]).
+    feas = [(2.0, 2.0), (0.5, 0.0), (0.25, 0.25), (2.0, -1.5), (-2.0, 2.5), (1.0, 1.0)]
+    for x, y in feas:
+        if x + y >= 0.5 - 1e-9 and -2.0 <= x <= 2.0 and -2.0 <= y <= 2.0:
+            obj = x * y - x - y
+            assert on.lower_bound <= obj + 1e-6, (x, y, obj, on.lower_bound)

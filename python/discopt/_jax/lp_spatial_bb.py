@@ -119,6 +119,17 @@ def _separate_node_cuts(A, b, bounds, x, ncol, c, max_cuts=12):
     except Exception:
         return cuts
 
+    # This GMI/crossover cut separator is dense by construction (``np.hstack([A,
+    # np.eye])``, ``LPData``, the crossover vertex solve), and its dense ``A_eq`` is
+    # ``m x (ncol+m)`` regardless — it was never viable for a large lift. ``inc.assemble``
+    # now returns a SPARSE ``A``, so densify once here to preserve the exact prior
+    # contract (only this bounded per-node cut path densifies; the node LP solve stays
+    # sparse).
+    import scipy.sparse as sp
+
+    if sp.issparse(A):
+        A = A.toarray()
+
     lb = bounds[:, 0]
     ub = bounds[:, 1]
     is_int = np.ones(ncol, dtype=bool)  # original + product aux are integer-valued

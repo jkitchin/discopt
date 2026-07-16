@@ -215,22 +215,22 @@ class TestPureLpShortCircuit:
     verdict is unchanged; only the wasted integer-side work is skipped."""
 
     def test_pure_lp_runs_with_machinery_off(self, monkeypatch):
-        """A no-integer solve routes ``solve_milp_py`` with the MILP machinery
+        """A no-integer solve routes the sparse CSC driver with the MILP machinery
         off; a solve WITH integers keeps it on. Fails before THRU-2b (the old
         code always passed the machinery-on defaults)."""
         import discopt._rust as _rust
         from discopt.solvers import milp_simplex
 
         captured: list[dict] = []
-        _orig = _rust.solve_milp_py
+        _orig = _rust.solve_milp_csc_py
 
         def _spy(*args, **kwargs):
             captured.append(dict(kwargs))
             return _orig(*args, **kwargs)
 
-        # ``solve_milp`` does ``from discopt._rust import solve_milp_py`` at call
-        # time, so patch the source module attribute (not ``milp_simplex``).
-        monkeypatch.setattr(_rust, "solve_milp_py", _spy)
+        # ``solve_milp`` does ``from discopt._rust import solve_milp_csc_py`` at
+        # call time, so patch the source module attribute (not ``milp_simplex``).
+        monkeypatch.setattr(_rust, "solve_milp_csc_py", _spy)
 
         c = np.array([-1.0, -1.0])
         A = np.array([[2.0, 1.0], [1.0, 2.0]])

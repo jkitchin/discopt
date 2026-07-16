@@ -36,6 +36,13 @@ def _assemble_node_lp(ux=6, uy=5, uz=4):
     lb = np.array([0.0, 0.0, 0.0])
     ub = np.array([float(ux), float(uy), float(uz)])
     A, b_, bounds = inc.assemble(lb, ub, [])
+    # ``inc.assemble`` now returns a sparse CSR ``A``; this test's dense GMI reference
+    # (``_raw_gmi_cuts``: ``np.hstack([A, np.eye])`` etc.) needs a dense array, so
+    # densify here (small node LP) to reproduce the pre-sparse-incremental contract.
+    import scipy.sparse as sp
+
+    if sp.issparse(A):
+        A = A.toarray()
     bd, x, _ = inc.solve_assembled(A, b_, bounds)
     assert x is not None
     return inc, A, b_, bounds, x, inc.ncol

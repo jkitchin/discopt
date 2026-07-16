@@ -799,6 +799,171 @@ pub fn solve_milp_py<'py>(
         .iter()
         .map(|&v| v as usize)
         .collect();
+    // Fully sparse driver (T3b5): build the working CSC from the dense numpy matrix
+    // once and delegate. The CSC entry `solve_milp_csc_py` skips this densify.
+    let csc = SparseCols::from_dense(&a_owned, m, n);
+    run_milp_hooked(
+        py,
+        csc,
+        m,
+        n,
+        c_owned,
+        l_owned,
+        u_owned,
+        b_owned,
+        int_cols,
+        n_struct,
+        obj_const,
+        max_nodes,
+        gap_tol,
+        tol,
+        root_cuts,
+        cut_rounds,
+        gmi_cuts,
+        cut_select,
+        node_cuts,
+        max_pool_cuts,
+        heuristics,
+        presolve,
+        strong_branch,
+        node_propagation,
+        reduced_cost_fixing,
+        sb_max_cands,
+        sb_node_budget,
+        time_limit_s,
+        debug_hook,
+    )
+}
+
+/// CSC-input MILP entry (docs/dev/sparse-milp-plan.md T4): the constraint matrix is
+/// passed column-major (`col_ptr`/`row_idx`/`vals`, `m` rows × `n` cols) so a large
+/// sparse relaxation is NEVER densified — not on the Python side (no `A.toarray()`)
+/// and not in Rust (the driver is fully sparse). Same options and return tuple as
+/// [`solve_milp_py`].
+#[pyfunction]
+#[pyo3(signature = (c, m, n, col_ptr, row_idx, vals, b, lb, ub, integer_cols, n_struct,
+                    obj_const=0.0, max_nodes=1_000_000, gap_tol=1e-6, tol=1e-9, root_cuts=16,
+                    cut_rounds=1, gmi_cuts=true, cut_select=false, node_cuts=false,
+                    max_pool_cuts=128, heuristics=true, presolve=true, strong_branch=true,
+                    node_propagation=false, reduced_cost_fixing=true,
+                    sb_max_cands=6, sb_node_budget=48,
+                    time_limit_s=0.0, debug_hook=None))]
+#[allow(clippy::too_many_arguments)]
+pub fn solve_milp_csc_py<'py>(
+    py: Python<'py>,
+    c: PyReadonlyArray1<'py, f64>,
+    m: usize,
+    n: usize,
+    col_ptr: PyReadonlyArray1<'py, i64>,
+    row_idx: PyReadonlyArray1<'py, i64>,
+    vals: PyReadonlyArray1<'py, f64>,
+    b: PyReadonlyArray1<'py, f64>,
+    lb: PyReadonlyArray1<'py, f64>,
+    ub: PyReadonlyArray1<'py, f64>,
+    integer_cols: PyReadonlyArray1<'py, i64>,
+    n_struct: usize,
+    obj_const: f64,
+    max_nodes: usize,
+    gap_tol: f64,
+    tol: f64,
+    root_cuts: usize,
+    cut_rounds: usize,
+    gmi_cuts: bool,
+    cut_select: bool,
+    node_cuts: bool,
+    max_pool_cuts: usize,
+    heuristics: bool,
+    presolve: bool,
+    strong_branch: bool,
+    node_propagation: bool,
+    reduced_cost_fixing: bool,
+    sb_max_cands: usize,
+    sb_node_budget: usize,
+    time_limit_s: f64,
+    debug_hook: Option<Py<PyAny>>,
+) -> PyResult<(String, Bound<'py, PyArray1<f64>>, f64, f64, usize, usize)> {
+    let col_ptr_v: Vec<usize> = col_ptr.as_slice()?.iter().map(|&x| x as usize).collect();
+    let row_idx_v: Vec<usize> = row_idx.as_slice()?.iter().map(|&x| x as usize).collect();
+    let vals_v: Vec<f64> = vals.as_slice()?.to_vec();
+    let c_owned: Vec<f64> = c.as_slice()?.to_vec();
+    let b_owned: Vec<f64> = b.as_slice()?.to_vec();
+    let l_owned: Vec<f64> = lb.as_slice()?.to_vec();
+    let u_owned: Vec<f64> = ub.as_slice()?.to_vec();
+    let int_cols: Vec<usize> = integer_cols
+        .as_slice()?
+        .iter()
+        .map(|&v| v as usize)
+        .collect();
+    let csc = SparseCols::from_csc(col_ptr_v, row_idx_v, vals_v);
+    run_milp_hooked(
+        py,
+        csc,
+        m,
+        n,
+        c_owned,
+        l_owned,
+        u_owned,
+        b_owned,
+        int_cols,
+        n_struct,
+        obj_const,
+        max_nodes,
+        gap_tol,
+        tol,
+        root_cuts,
+        cut_rounds,
+        gmi_cuts,
+        cut_select,
+        node_cuts,
+        max_pool_cuts,
+        heuristics,
+        presolve,
+        strong_branch,
+        node_propagation,
+        reduced_cost_fixing,
+        sb_max_cands,
+        sb_node_budget,
+        time_limit_s,
+        debug_hook,
+    )
+}
+
+/// Shared MILP solve: builds `MilpOptions`, wraps an optional debug hook, runs the
+/// fully sparse driver under `allow_threads`, and marshals the result back. Both the
+/// dense entry (`solve_milp_py`) and the CSC entry (`solve_milp_csc_py`) funnel here
+/// after producing the working `SparseCols`.
+#[allow(clippy::too_many_arguments)]
+fn run_milp_hooked<'py>(
+    py: Python<'py>,
+    csc: SparseCols,
+    m: usize,
+    n: usize,
+    c_owned: Vec<f64>,
+    l_owned: Vec<f64>,
+    u_owned: Vec<f64>,
+    b_owned: Vec<f64>,
+    int_cols: Vec<usize>,
+    n_struct: usize,
+    obj_const: f64,
+    max_nodes: usize,
+    gap_tol: f64,
+    tol: f64,
+    root_cuts: usize,
+    cut_rounds: usize,
+    gmi_cuts: bool,
+    cut_select: bool,
+    node_cuts: bool,
+    max_pool_cuts: usize,
+    heuristics: bool,
+    presolve: bool,
+    strong_branch: bool,
+    node_propagation: bool,
+    reduced_cost_fixing: bool,
+    sb_max_cands: usize,
+    sb_node_budget: usize,
+    time_limit_s: f64,
+    debug_hook: Option<Py<PyAny>>,
+) -> PyResult<(String, Bound<'py, PyArray1<f64>>, f64, f64, usize, usize)> {
     let opts = MilpOptions {
         n_struct,
         integer_cols: int_cols,
@@ -842,15 +1007,9 @@ pub fn solve_milp_py<'py>(
     });
     let hook_ref: Option<&dyn MilpDebugHook> = hook.as_ref().map(|h| h as &dyn MilpDebugHook);
     let res = py.allow_threads(|| {
-        let lp = LpView {
-            a: &a_owned,
-            m,
-            n,
-            c: &c_owned,
-            l: &l_owned,
-            u: &u_owned,
-        };
-        let r = core_solve_milp_hooked(&lp, &b_owned, obj_const, &opts, hook_ref);
+        let r = core_solve_milp_hooked(
+            csc, m, n, &c_owned, &l_owned, &u_owned, &b_owned, obj_const, &opts, hook_ref,
+        );
         // Emit the per-phase / pivot profile to stderr when DISCOPT_PROFILE is set
         // (no-op otherwise). solve_milp has returned, so its function-scoped phase
         // timers have recorded. Engine perf work (issue #332) reads this.
