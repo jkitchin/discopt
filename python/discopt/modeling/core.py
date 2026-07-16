@@ -4206,6 +4206,54 @@ def from_pyomo(pyomo_model) -> Model:
         return from_nl(nl_path)
 
 
+# Depth at/above which a left-nested ``+`` chain is rebalanced into a shallow
+# tree (#654). A flat N-term sum parsed from a ``.nl`` file is built as a depth-N
+# left chain ``(((...(t1+t2)+t3)...)+tN)``; on a dense-quadratic model (qap: ~50k
+# products) that is ~43000 deep, and every recursive tree-walk in the pipeline
+# (expr->arena conversion, term classification, relaxation build, AD compile)
+# recurses N deep and overflows the C stack — which manifests as a *hang*, not a
+# clean error. The threshold is set well above any sum a working model carries but
+# far below the ~15k-frame stack limit, so only pathologically deep chains (which
+# otherwise hang) are touched; shallower sums are returned unchanged and every
+# existing model stays byte-identical.
+_SUM_REBALANCE_DEPTH = 2048
+
+
+def _rebalance_deep_sum(expr: "Expression") -> "Expression":
+    """Rebalance a deeply left-nested ``+`` chain into a shallow balanced tree.
+
+    Only ``+`` chains are touched: addition is associative *and* commutative, so
+    the rebalanced tree is exactly value-equal to the original (a balanced fold of
+    the same terms). Chains shorter than :data:`_SUM_REBALANCE_DEPTH` are returned
+    unchanged (identity), so the transform is a no-op — and byte-neutral — on every
+    model that is not pathologically deep. The left-spine is walked *iteratively*
+    (the chain is exactly the structure that would overflow a recursive walk)."""
+    if not (isinstance(expr, BinaryOp) and expr.op == "+"):
+        return expr
+    # Measure the left-spine depth without recursing.
+    depth = 0
+    cur: Expression = expr
+    while isinstance(cur, BinaryOp) and cur.op == "+":
+        cur = cur.left
+        depth += 1
+    if depth < _SUM_REBALANCE_DEPTH:
+        return expr
+    # Deep chain: collect its terms (left-to-right) iteratively, then balanced-fold.
+    terms: list[Expression] = []
+    cur = expr
+    while isinstance(cur, BinaryOp) and cur.op == "+":
+        terms.append(cur.right)
+        cur = cur.left
+    terms.append(cur)  # deepest-left operand
+    terms.reverse()
+    while len(terms) > 1:
+        terms = [
+            terms[i] + terms[i + 1] if i + 1 < len(terms) else terms[i]
+            for i in range(0, len(terms), 2)
+        ]
+    return terms[0]
+
+
 def from_nl(path: str) -> Model:
     """
     Import a model from AMPL .nl format.
@@ -4271,20 +4319,26 @@ def from_nl(path: str) -> Model:
     # Reconstruct the expression DAG from the Rust arena
     objective_expr, constraint_tuples = reconstruct_dag(nl_repr, m._variables)
 
+    # #654: rebalance pathologically deep ``+`` chains (flat sums parsed as depth-N
+    # left chains) so downstream recursive tree-walks don't overflow the stack.
+    # A no-op below _SUM_REBALANCE_DEPTH, so ordinary models are byte-identical.
+    obj_expr: Expression = _rebalance_deep_sum(objective_expr)
+
     # Set the objective with the reconstructed expression
     if nl_repr.objective_sense == "minimize":
-        m.minimize(objective_expr)
+        m.minimize(obj_expr)
     else:
-        m.maximize(objective_expr)
+        m.maximize(obj_expr)
 
     # Add constraints from the reconstructed DAG
     for body, sense, rhs in constraint_tuples:
+        body_expr: Expression = _rebalance_deep_sum(body)
         if sense == "<=":
-            m.subject_to(body <= rhs)
+            m.subject_to(body_expr <= rhs)
         elif sense == ">=":
-            m.subject_to(body >= rhs)
+            m.subject_to(body_expr >= rhs)
         elif sense == "==":
-            m.subject_to(body == rhs)
+            m.subject_to(body_expr == rhs)
 
     # Keep nl_repr for backward compatibility (Rust evaluator for validation)
     m._nl_repr = nl_repr

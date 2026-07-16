@@ -140,6 +140,40 @@ impl<'a> TermClassifier<'a> {
         }
     }
 
+    /// Classify a left-nested `+`/`-` chain ITERATIVELY.
+    ///
+    /// #654: factorable objectives are left-deep add chains — qap's is 42849 levels
+    /// (`(((...) + t) + t) + t`) — so recursing `classify_node(left)` overflows the
+    /// stack (which manifests as a hang). Descend `left` in a loop, classifying each
+    /// right operand (shallow — a product/leaf), then classify the deepest-left leaf.
+    /// Visits exactly the same nodes as the recursive form, without the O(depth) stack.
+    fn classify_add_chain(&mut self, start: ExprId) {
+        // Collect the right operands top-down while descending `left`, WITHOUT
+        // classifying yet, so we can then replay the *recursive* order exactly:
+        // deepest-left leaf first, then the right operands bottom-up. Preserving
+        // that order keeps term-discovery indices (``term_incidence``) identical to
+        // the recursive form — the walk is byte-neutral, only the stack is gone.
+        let mut rights = Vec::new();
+        let mut cur = start;
+        let deepest_left = loop {
+            match self.model.arena.get(cur) {
+                ExprNode::BinaryOp {
+                    op: BinOp::Add | BinOp::Sub,
+                    left,
+                    right,
+                } => {
+                    rights.push(*right);
+                    cur = *left;
+                }
+                _ => break cur,
+            }
+        };
+        self.classify_node(deepest_left);
+        for r in rights.into_iter().rev() {
+            self.classify_node(r);
+        }
+    }
+
     fn classify_node(&mut self, id: ExprId) {
         match self.model.arena.get(id) {
             ExprNode::Constant(_) | ExprNode::ConstantArray(_, _) | ExprNode::Parameter { .. } => {}
@@ -153,10 +187,7 @@ impl<'a> TermClassifier<'a> {
             ExprNode::BinaryOp { op, left, right } => match op {
                 BinOp::Pow => self.classify_power(*left, *right),
                 BinOp::Mul => self.classify_product(id, *left, *right),
-                BinOp::Add | BinOp::Sub => {
-                    self.classify_node(*left);
-                    self.classify_node(*right);
-                }
+                BinOp::Add | BinOp::Sub => self.classify_add_chain(id),
                 BinOp::Div => {
                     if self.constant_value(*right).is_some() {
                         self.classify_node(*left);
