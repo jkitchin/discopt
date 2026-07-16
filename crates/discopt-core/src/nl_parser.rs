@@ -28,8 +28,8 @@
 //! ```
 
 use crate::expr::{
-    BinOp, ConstraintRepr, ConstraintSense, ExprArena, ExprId, ExprNode, MathFunc, ModelRepr,
-    ObjectiveSense, UnOp, VarInfo, VarType,
+    BinOp, ComplementarityRepr, ConstraintRepr, ConstraintSense, ExprArena, ExprId, ExprNode,
+    MathFunc, ModelRepr, ObjectiveSense, UnOp, VarInfo, VarType,
 };
 use std::fmt;
 
@@ -734,7 +734,22 @@ fn parse_opcode(
 /// Parse a text-mode .nl file and produce a [`ModelRepr`].
 ///
 /// The input should be the full text content of an .nl file (not binary).
+/// Complementarity (type-5) rows are recovered but discarded here; use
+/// [`parse_nl_with_complementarity`] to also receive the recovered pairs.
 pub fn parse_nl(content: &str) -> Result<ModelRepr, NlParseError> {
+    parse_nl_with_complementarity(content).map(|(model, _compl)| model)
+}
+
+/// Parse a text-mode .nl file, returning the model together with any
+/// complementarity (type-5) relations recovered from the `r` (constraint
+/// bounds) segment.
+///
+/// The returned [`ComplementarityRepr`] entries reference arena nodes owned by
+/// the accompanying [`ModelRepr`]; the complementarity rows themselves are *not*
+/// present in `ModelRepr::constraints` (they are consumed by the relation).
+pub fn parse_nl_with_complementarity(
+    content: &str,
+) -> Result<(ModelRepr, Vec<ComplementarityRepr>), NlParseError> {
     let mut reader = LineReader::new(content);
     let header = parse_header(&mut reader)?;
 
@@ -791,6 +806,12 @@ pub fn parse_nl(content: &str) -> Result<ModelRepr, NlParseError> {
         ub: f64,
         is_range: bool,
         is_eq: bool,
+        /// For a complementarity (type-5) row: `Some((flag, comp_var_1based))`.
+        /// `flag` is the AMPL MP `ComplInfo` bound flag; `comp_var_1based` is the
+        /// 1-based index of the variable the body is complementary to. When set,
+        /// the row is *not* emitted as an ordinary constraint (see the build
+        /// loop) — it is surfaced as a `ComplementarityRepr` instead.
+        compl: Option<(usize, usize)>,
     }
     let mut con_bounds: Vec<ConBound> = vec![
         ConBound {
@@ -798,6 +819,7 @@ pub fn parse_nl(content: &str) -> Result<ModelRepr, NlParseError> {
             ub: f64::INFINITY,
             is_range: false,
             is_eq: false,
+            compl: None,
         };
         n_constraints
     ];
@@ -996,10 +1018,21 @@ pub fn parse_nl(content: &str) -> Result<ModelRepr, NlParseError> {
                             }
                         }
                         5 => {
-                            // Complementarity — treat as range for now
+                            // Complementarity: `5 k i`. `k` is the AMPL MP
+                            // `ComplInfo` bound flag and `i` is the *1-based index
+                            // of the complementary variable* — NEITHER is a numeric
+                            // bound. Record the pair and leave lb/ub free so the
+                            // build loop emits a `ComplementarityRepr` rather than a
+                            // fabricated `k <= body <= i` range constraint (#658).
                             if parts.len() >= 3 {
-                                cb.lb = parse_f64(parts[1])?;
-                                cb.ub = parse_f64(parts[2])?;
+                                let flag = parse_usize(parts[1])?;
+                                let comp_var_1based = parse_usize(parts[2])?;
+                                cb.compl = Some((flag, comp_var_1based));
+                            } else {
+                                return Err(NlParseError::Parse(format!(
+                                    "complementarity bound (type 5) needs 2 operands, got {}",
+                                    parts.len().saturating_sub(1)
+                                )));
                             }
                         }
                         _ => {
@@ -1298,6 +1331,7 @@ pub fn parse_nl(content: &str) -> Result<ModelRepr, NlParseError> {
 
     // Build constraint expressions and ConstraintRepr.
     let mut constraints = Vec::with_capacity(n_constraints);
+    let mut complementarities: Vec<ComplementarityRepr> = Vec::new();
     for ci in 0..n_constraints {
         let nl_part = nl_con_exprs[ci];
         let lin_part = build_linear(&j_terms[ci], &mut arena, &var_nodes);
@@ -1320,6 +1354,23 @@ pub fn parse_nl(content: &str) -> Result<ModelRepr, NlParseError> {
         };
 
         let cb = &con_bounds[ci];
+        if let Some((flag, comp_var_1based)) = cb.compl {
+            // Complementarity (type-5) row: surface the `body ⊥ x` relation and do
+            // NOT emit an ordinary constraint. The row is consumed by the relation;
+            // fabricating a bound from `(flag, index)` here would be the #658 bug.
+            if comp_var_1based == 0 || comp_var_1based > n_vars {
+                return Err(NlParseError::Parse(format!(
+                    "complementarity constraint {ci} references variable index \
+                     {comp_var_1based} (1-based), out of range 1..={n_vars}"
+                )));
+            }
+            complementarities.push(ComplementarityRepr {
+                body: body_expr,
+                var_index: comp_var_1based - 1,
+                flag,
+            });
+            continue;
+        }
         if cb.is_eq {
             constraints.push(ConstraintRepr {
                 body: body_expr,
@@ -1400,14 +1451,15 @@ pub fn parse_nl(content: &str) -> Result<ModelRepr, NlParseError> {
     // append semantics — no lingering hash-consing behavior.
     arena.disable_interning();
 
-    Ok(ModelRepr {
+    let model = ModelRepr {
         arena,
         objective: obj_expr,
         objective_sense: obj_sense,
         constraints,
         variables,
         n_vars,
-    })
+    };
+    Ok((model, complementarities))
 }
 
 /// Check if an ExprId is a zero constant.
@@ -1594,7 +1646,10 @@ fn bound_value_count(type_digit: u8) -> Result<usize, NlParseError> {
         b'0' => Ok(2), // range / bounded: lb, ub
         b'1' | b'2' | b'4' => Ok(1),
         b'3' => Ok(0), // free
-        b'5' => Ok(2), // complementarity (range-shaped)
+        // Complementarity (type 5) carries two *integer* operands, not doubles;
+        // the `r` transcode loop reads them directly (see #658). This arity is
+        // retained only for completeness — the f64 read path must not be used.
+        b'5' => Ok(2),
         _ => Err(NlParseError::Parse(format!(
             "unknown bound type digit '{}' in binary .nl",
             type_digit as char
@@ -1664,10 +1719,22 @@ fn transcode_binary_body(
                 for _ in 0..n_cons {
                     let t = cur.read_byte()?;
                     out.push(t as char);
-                    for _ in 0..bound_value_count(t)? {
-                        let v = cur.read_f64()?;
-                        out.push(' ');
-                        out.push_str(&fmt_f64(v));
+                    if t == b'5' {
+                        // Complementarity: `5 k i`. In binary these two operands are
+                        // 4-byte ints (a bound flag and a 1-based variable index),
+                        // NOT 8-byte doubles — reading them as f64 would desync the
+                        // whole stream (#658). Emit them as plain integers.
+                        for _ in 0..2 {
+                            let v = cur.read_i32()?;
+                            out.push(' ');
+                            out.push_str(&v.to_string());
+                        }
+                    } else {
+                        for _ in 0..bound_value_count(t)? {
+                            let v = cur.read_f64()?;
+                            out.push(' ');
+                            out.push_str(&fmt_f64(v));
+                        }
                     }
                     out.push('\n');
                 }
@@ -1814,6 +1881,15 @@ fn transcode_binary_nl(bytes: &[u8]) -> Result<String, NlParseError> {
 /// than a confusing UTF-8 decode error, since binary bodies embed raw IEEE-754
 /// doubles that are not valid UTF-8).
 pub fn parse_nl_file(path: &str) -> Result<ModelRepr, NlParseError> {
+    parse_nl_file_with_complementarity(path).map(|(model, _compl)| model)
+}
+
+/// Parse a .nl file, returning the model together with any complementarity
+/// (type-5) relations recovered from the `r` segment. See
+/// [`parse_nl_with_complementarity`] for the shape of the returned pairs.
+pub fn parse_nl_file_with_complementarity(
+    path: &str,
+) -> Result<(ModelRepr, Vec<ComplementarityRepr>), NlParseError> {
     let bytes = std::fs::read(path)
         .map_err(|e| NlParseError::Parse(format!("failed to read file '{path}': {e}")))?;
 
@@ -1823,7 +1899,7 @@ pub fn parse_nl_file(path: &str) -> Result<ModelRepr, NlParseError> {
     // two encodings of one model build byte-identical `ModelRepr`s.
     if let Some(b'b') = bytes.iter().find(|b| !b.is_ascii_whitespace()) {
         let text = transcode_binary_nl(&bytes)?;
-        return parse_nl(&text);
+        return parse_nl_with_complementarity(&text);
     }
 
     let content = std::str::from_utf8(&bytes).map_err(|e| {
@@ -1831,7 +1907,7 @@ pub fn parse_nl_file(path: &str) -> Result<ModelRepr, NlParseError> {
             "failed to read file '{path}': not valid UTF-8 text .nl ({e})"
         ))
     })?;
-    parse_nl(content)
+    parse_nl_with_complementarity(content)
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -2112,6 +2188,56 @@ mod tests {
         s
     }
 
+    /// Small MPCC with a complementarity (type-5) constraint bound:
+    ///   min (x-1)^2 + (y-1)^2   s.t.   0 <= x  ⊥  y >= 0,   x,y in [0,10]
+    /// The `r` row `5 2 2` is: type 5, flag=2 (body >= 0), complementary
+    /// variable index 2 (1-based) = y. The body is the linear expression `x`.
+    fn complementarity_nl() -> String {
+        let mut s = String::new();
+        s.push_str("g3 1 1 0\n");
+        s.push_str(" 2 1 1 0 0\n"); // 2 vars, 1 con, 1 obj, 0 ranges, 0 eqns
+        s.push_str(" 0 1\n"); // 0 nl cons, 1 nl obj
+        s.push_str(" 0 0\n"); // network
+        s.push_str(" 0 2 0\n"); // nlvc, nlvo, nlvb
+        s.push_str(" 0 0 0 1\n"); // flags
+        s.push_str(" 0 0\n"); // discrete
+        s.push_str(" 1 0\n"); // nnz jacobian=1, gradient=0
+        s.push_str(" 0 0\n"); // max name lengths
+        s.push_str(" 0 0 0 0 0\n"); // common exprs
+                                    // O0: minimize (x-1)^2 + (y-1)^2
+        s.push_str("O0 0\n");
+        s.push_str("o0\n"); // add
+        s.push_str("o5\n"); // pow
+        s.push_str("o1\n"); // sub
+        s.push_str("v0\n"); // x
+        s.push_str("n1\n"); // 1
+        s.push_str("n2\n"); // 2
+        s.push_str("o5\n"); // pow
+        s.push_str("o1\n"); // sub
+        s.push_str("v1\n"); // y
+        s.push_str("n1\n"); // 1
+        s.push_str("n2\n"); // 2
+                            // C0: linear body (nl part = 0)
+        s.push_str("C0\n");
+        s.push_str("n0\n");
+        s.push_str("x2\n");
+        s.push_str("0 0.5\n");
+        s.push_str("1 0.5\n");
+        // r: complementarity — body(=x) >= 0 (flag 2), complements var #2 (y).
+        s.push_str("r\n");
+        s.push_str("5 2 2\n");
+        // b: 0 <= x <= 10,  0 <= y <= 10
+        s.push_str("b\n");
+        s.push_str("0 0 10\n");
+        s.push_str("0 0 10\n");
+        s.push_str("k1\n");
+        s.push_str("1\n");
+        // J0: constraint body = 1*x0
+        s.push_str("J0 1\n");
+        s.push_str("0 1\n");
+        s
+    }
+
     /// Maximization problem:
     /// max 3*x + 5*y  s.t. x + y <= 10
     fn maximize_nl() -> String {
@@ -2339,6 +2465,49 @@ mod tests {
         // body <= 8
         assert_eq!(model.constraints[1].sense, ConstraintSense::Le);
         assert!((model.constraints[1].rhs - 8.0).abs() < 1e-12);
+    }
+
+    // ─── Test: complementarity (type-5) ───────────────────
+
+    #[test]
+    fn test_complementarity_recovered_not_fabricated() {
+        // #658: a type-5 (complementarity) `r` row must be surfaced as a
+        // ComplementarityRepr, NOT misread into a fabricated `k <= body <= i`
+        // range constraint.
+        let nl = complementarity_nl();
+        let (model, compl) = parse_nl_with_complementarity(&nl).unwrap();
+
+        // The complementarity row is consumed by the relation — it is NOT an
+        // ordinary constraint. Regression for the fabricated-range bug: the old
+        // parser produced two bogus range constraints here.
+        assert_eq!(
+            model.constraints.len(),
+            0,
+            "complementarity row must not become an ordinary constraint"
+        );
+
+        // Exactly one complementarity, complementing variable index 1 (y, the
+        // 0-based form of the 1-based `2`), with the AMPL MP flag 2 (body >= 0).
+        assert_eq!(compl.len(), 1);
+        assert_eq!(compl[0].var_index, 1);
+        assert_eq!(compl[0].flag, 2);
+
+        // The recovered body is the linear expression `x` (variable index 0),
+        // and its arena id is valid.
+        assert!(compl[0].body.0 < model.arena.len());
+        assert!(matches!(
+            model.arena.get(compl[0].body),
+            ExprNode::Variable { index: 0, .. }
+        ));
+    }
+
+    #[test]
+    fn test_complementarity_not_range_via_parse_nl() {
+        // `parse_nl` (the complementarity-discarding wrapper) must still drop the
+        // fabricated range — the bug was in the model, not just the side channel.
+        let model = parse_nl(&complementarity_nl()).unwrap();
+        assert_eq!(model.constraints.len(), 0);
+        assert_eq!(model.n_vars, 2);
     }
 
     // ─── Test: maximize ───────────────────────────────────
