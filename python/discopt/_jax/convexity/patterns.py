@@ -71,7 +71,38 @@ from .lattice import Curvature
 # ──────────────────────────────────────────────────────────────────────
 
 
+# Per-model cache of the declared-box arrays + scalar count (issue: qap-class
+# convexity classification). ``_box_bounds`` / ``_total_scalar_variables`` are pure
+# functions of the model's DECLARED variable bounds, yet the syntactic convexity
+# recognizers call them once per product term (``_affine_strictly_positive`` ->
+# ``_affine_lower_bound``) — 66k times on qap's 21,424-term objective, each an
+# O(n_vars) rebuild (10s of pure recomputation). Declared bounds are static within a
+# single classification pass, so we memoize the result on the model and invalidate it
+# exactly where the solver resets ``_convexity_classification_cache`` (see
+# :func:`clear_declared_box_cache`, called from ``solver.solve_model``), so a
+# post-presolve re-classification with tightened bounds recomputes. Bound-neutral: the
+# returned arrays/count are identical, only recomputation is removed.
+_DECLARED_BOX_CACHE_ATTR = "_patterns_declared_box_cache"
+
+
+def clear_declared_box_cache(model: Model) -> None:
+    """Invalidate the per-model declared-box cache (call when declared bounds change).
+
+    Idempotent and safe on a model that was never cached. The solver calls this at
+    every point it resets its convexity-classification cache, so a re-classification
+    after presolve/reformulation tightens the declared bounds sees fresh values.
+    """
+    try:
+        if hasattr(model, _DECLARED_BOX_CACHE_ATTR):
+            delattr(model, _DECLARED_BOX_CACHE_ATTR)
+    except Exception:
+        pass
+
+
 def _total_scalar_variables(model: Model) -> int:
+    cached = getattr(model, _DECLARED_BOX_CACHE_ATTR, None)
+    if cached is not None:
+        return int(cached[0])
     return sum(v.size for v in model._variables)
 
 
@@ -219,7 +250,16 @@ def _affine_range_1d(alpha: float, beta: float, lb: float, ub: float) -> tuple[f
 
 
 def _box_bounds(model: Model) -> tuple[np.ndarray, np.ndarray]:
-    """Per-scalar-slot lower/upper bound vectors over all model variables."""
+    """Per-scalar-slot lower/upper bound vectors over all model variables.
+
+    Memoized per model (see :data:`_DECLARED_BOX_CACHE_ATTR`): pure function of the
+    DECLARED bounds, called once per objective term by the syntactic convexity
+    recognizers. The cache stores ``(n_scalar, lo, hi)`` so ``_total_scalar_variables``
+    shares it, and is invalidated by :func:`clear_declared_box_cache`.
+    """
+    cached = getattr(model, _DECLARED_BOX_CACHE_ATTR, None)
+    if cached is not None:
+        return cached[1], cached[2]
     los: list[np.ndarray] = []
     his: list[np.ndarray] = []
     for v in model._variables:
@@ -232,8 +272,14 @@ def _box_bounds(model: Model) -> tuple[np.ndarray, np.ndarray]:
         los.append(lb)
         his.append(ub)
     if not los:
-        return np.zeros(0), np.zeros(0)
-    return np.concatenate(los), np.concatenate(his)
+        lo_arr, hi_arr = np.zeros(0), np.zeros(0)
+    else:
+        lo_arr, hi_arr = np.concatenate(los), np.concatenate(his)
+    try:
+        setattr(model, _DECLARED_BOX_CACHE_ATTR, (int(lo_arr.size), lo_arr, hi_arr))
+    except Exception:
+        pass
+    return lo_arr, hi_arr
 
 
 def _affine_lower_bound(expr: Expression, model: Model) -> Optional[float]:

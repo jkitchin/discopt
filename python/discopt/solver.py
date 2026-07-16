@@ -3251,6 +3251,12 @@ def solve_model(
     # cannot, on its own, overrun ``time_limit`` (issue: tens of seconds of
     # eigenvalue work on large quadratic models before search even starts).
     model._convexity_classification_cache = None
+    # The syntactic convexity recognizers memoize the declared-box arrays on the
+    # model; invalidate that cache in lockstep with the classification cache so a
+    # post-presolve re-classification with tightened bounds recomputes them.
+    from discopt._jax.convexity.patterns import clear_declared_box_cache
+
+    clear_declared_box_cache(model)
     _convexity_time_budget = min(max(0.2 * float(time_limit), 0.5), 20.0)
     model._convexity_time_budget = _convexity_time_budget
     # #654: absolute solve deadline, anchored at ``_solve_t0`` (before all
@@ -4023,6 +4029,7 @@ def solve_model(
             # on the (larger) lifted model — heatexch_gen3: 12 s classify under a
             # 15 s solve budget. Re-assert the budget (and clear any stale cache).
             model._convexity_classification_cache = None
+            clear_declared_box_cache(model)
             model._convexity_time_budget = _convexity_time_budget
             model._solve_deadline = _solve_t0 + float(time_limit)  # #654 (see above)
         # A *convex* model with a clearable denominator is deliberately left
@@ -4089,6 +4096,7 @@ def solve_model(
             if _ipx_pure_milp and classify_problem(_ipx) == ProblemClass.MILP:
                 model = _ipx
                 model._convexity_classification_cache = None
+                clear_declared_box_cache(model)
                 model._convexity_time_budget = _convexity_time_budget
                 model._solve_deadline = _solve_t0 + float(time_limit)  # #654 (see above)
                 # The reformulated big-M MILP is best handled by a real MILP
