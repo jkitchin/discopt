@@ -58,16 +58,29 @@ it even at a single B&B node). Panel note: the current cases all solve at the RO
 (nodes=1), so `lp_iters` is the real bit-identity signal for T2; consider adding a
 genuinely-branching instance before/with T3.
 
-- [ ] **T2 — sparse root cold solve.** Replace `solve_lp_root`'s
-  `dual_slack_basis(lp.a,..)`+`solve_lp` with a CSC path. **RE-SCOPED (risk):** it is
-  NOT a clean swap — `solve_lp` (dense) does internal `ScaledLp` equilibration + a
-  dual-slack warm start; `solve_lp_cols` (CSC) may take a different pivot path →
-  different basis → `lp_iters`/tree drift. To stay bit-identical, mirror the dense
-  logic in CSC (CSC dual-slack warm start where it qualifies, then a CSC cold
-  two-phase) OR confirm `solve_lp_cols` reproduces `solve_lp`'s basis exactly. If
-  neither holds, this is a falsification: stop and re-scope the invariant (bound-only
-  vs bit-identical) before proceeding. **Done:** `driver_matches_golden` still green
-  with no dense `a_w` on the root path.
+**Invariant decision (user, option A): STRICT bit-identical.** Reproduce
+`solve_lp_root` pivot-for-pivot in CSC (keep the `lp_iters`/node-count golden). The
+falsification (`solve_lp_cols` skips `ScaledLp`) is resolved by *porting* the dense
+mechanisms — de-risked below, they're all bit-identical ports, not rewrites:
+- `dual_slack_basis` ALREADY does `SparseCols::from_dense(a)` at its top then uses
+  only `sp.col(j)`; switch its signature to `&SparseCols` and drop the densify —
+  identical result.
+- `Scaling::from_matrix` ALREADY delegates to `equilibrate(&SparseCols,..)`; add
+  `Scaling::from_cols(&SparseCols,m,n)` (same min/max trigger over `vals`, same
+  `equilibrate`) — identical factors. `Scaling::scale_cols(&mut SparseCols)` exists.
+- A CSC `ScaledLp` mirror: `Scaling::from_cols` → `scale_cols` + scale c/l/u/b →
+  `solve_lp_cols` → unscale x/dual/ray (exactly what dense `solve_lp` does).
+
+- [ ] **T2 — bit-identical CSC root solve.** (a) `dual_slack_basis` → `&SparseCols`;
+  (b) add `Scaling::from_cols` (+ unit test: identical factors to `from_matrix` on
+  the panel); (c) a CSC-scaled cold solve mirroring `solve_lp`'s `ScaledLp` path;
+  (d) `solve_lp_root_csc` mirroring `solve_lp_root` (dual-slack warm via
+  `solve_lp_warm_scaled_csc`, CSC cold fallback), wired into the root-cuts loop from
+  a CSC derived once per round. **Coupling note:** cut rows still append to dense
+  `a_w` until T3, so a_w isn't gone yet — T2 proves the *root solve* is CSC and
+  bit-identical; T3 removes a_w. **Done:** `driver_matches_golden` green (incl.
+  `lp_iters`); a unit test confirms `solve_lp_root_csc` == `solve_lp_root` on the
+  panel.
 - [ ] **T3 — sparse scaling + cut-row append.** `Scaling::from_matrix` CSC variant;
   GMI cut rows appended to the CSC (grow col_ptr/row_idx/vals) instead of `a_w`.
   **Done:** cuts-firing panel instance bit-identical; `a_w` no longer constructed.
