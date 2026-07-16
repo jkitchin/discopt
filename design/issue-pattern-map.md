@@ -90,12 +90,21 @@ elsewhere), **new-pattern** (needs a pattern not yet implemented), **search/infr
   `w = 0` gives a valid relaxation, and the disjunction drives branching.
 - Recommendation: add an IR node (per the issue) + the `w=xy, w=0` cut; provable.
 
-### #187 — autocorr_bern: products of binaries — **new-pattern (exact)**
+### #187 — autocorr_bern: products of binaries — **new-pattern (exact)** — **done**
 - Structure: products of **binary** variables `∏ b_i` (Fortet/Glover).
 - Pattern: new **Fortet/Glover linearization** — *exact* (not a relaxation):
   `z = ∏_i b_i ⟺ z <= b_i ∀i, z >= Σ b_i − (n−1), z >= 0`.
 - Recommendation: highest-value clean win — exact, provable, and avoids the
   full-DAG Jacobian XLA blowup the issue flags. Implement first.
+- **Shipped** as the auto-firing presolve pass
+  `discopt._jax.binary_multilinear_reform` (`solve_model` adopts it under the
+  pure-MILP guard and routes to the MILP engine): per-monomial Fortet rows for
+  the general binary-multilinear case, plus an exact **integer-point secant
+  envelope** for objective-pressure squares of integer-valued forms
+  (`y == E`, `t >= (u+v)·y − u·v` over the attainable value grid — the
+  autocorr `Σ_k C_k²` structure), which keeps the MILP ~10x smaller than flat
+  expansion. `{0,1}`-bounded INTEGER columns count as binary (from_nl typing).
+  Certified in `python/tests/test_binary_multilinear_reform.py`.
 
 ### #219 — transcendental over unbounded/implied-bound domains — **search/infra (bounds)**
 - Structure: `exp/log/...` whose argument has no finite bound → dropped from LP.

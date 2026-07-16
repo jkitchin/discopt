@@ -3974,6 +3974,69 @@ def solve_model(
     except Exception as _dep_exc:  # pragma: no cover - defensive
         logger.debug("functional-dependency detection skipped: %s", _dep_exc)
 
+    # --- Pure-binary multilinear exact linearization (issue #187) ---
+    # A polynomial objective/constraint over binary-valued variables ({0,1}
+    # INTEGER counts — from_nl types MINLPLib's 0/1 columns as INTEGER) is
+    # multilinear on its feasible points, so every degree>=2 monomial can be
+    # replaced exactly by a Fortet/Glover-linearized auxiliary, and squares of
+    # integer-valued forms by their integer-point secant envelope. The result
+    # is an *equivalent pure MILP* that routes to the MILP branch-and-bound —
+    # bypassing the spatial/JAX path whose full-DAG Jacobian XLA compile and
+    # sparsity walk are the autocorr_bern* wall (issue #187). Runs BEFORE the
+    # factorable reform: that pass would lift the squared sums into continuous
+    # aux variables and destroy the pure-binary structure this one needs. The
+    # pass abstains (returns the model unchanged) on anything it cannot
+    # linearize exactly, so it is a no-op everywhere else.
+    try:
+        from discopt._jax.binary_multilinear_reform import (
+            has_binary_multilinear_work,
+            reformulate_binary_multilinear,
+        )
+
+        if has_binary_multilinear_work(model):
+            _bml = reformulate_binary_multilinear(model)
+            if _bml is not model:
+                from discopt._jax.problem_classifier import ProblemClass, classify_problem
+                from discopt._jax.term_classifier import classify_nonlinear_terms
+
+                # Same adoption guard as the integer-bilinear reform below:
+                # adopt ONLY a genuinely pure MILP, confirmed by BOTH the
+                # extract_lp_data-based classifier and the DAG-walking term
+                # classifier (see that block's rationale / issue #286).
+                _bml_nl = classify_nonlinear_terms(_bml)
+                _bml_pure_milp = not (
+                    _bml_nl.bilinear
+                    or _bml_nl.trilinear
+                    or _bml_nl.multilinear
+                    or _bml_nl.monomial
+                    or _bml_nl.fractional_power
+                    or _bml_nl.bilinear_with_fp
+                    or _bml_nl.ratio_of_products
+                    or _bml_nl.general_nl
+                )
+                if _bml_pure_milp and classify_problem(_bml) == ProblemClass.MILP:
+                    logger.info(
+                        "binary-multilinear linearization: exact pure-MILP "
+                        "reformulation adopted (%d -> %d vars, %d -> %d rows)",
+                        len(model._variables),
+                        len(_bml._variables),
+                        len(model._constraints),
+                        len(_bml._constraints),
+                    )
+                    model = _bml
+                    model._convexity_classification_cache = None
+                    model._convexity_time_budget = _convexity_time_budget
+                    # Route like the integer-bilinear reform: skip the (slow,
+                    # redundant) FBBT root presolve on the lifted rows and use
+                    # the monolithic Rust simplex MILP engine, unless the
+                    # cert:P3.1c cut-reachability experiment keeps the solve
+                    # on the cut-carrying _solve_milp_bb path.
+                    presolve = False
+                    if nlp_solver == "pounce" and not _p3_force_cut_path_enabled():
+                        nlp_solver = "simplex"
+    except Exception as _bml_exc:  # pragma: no cover - defensive
+        logger.debug("binary-multilinear reformulation skipped: %s", _bml_exc)
+
     # Pre-reform model + original variable count, set only when the factorable
     # lift actually fires (see below). Used by the per-node interval bound to
     # recover the un-distributed objective's tight enclosure over the original

@@ -218,6 +218,13 @@ the envelope engine), **roadmap** (proof given here, implementation pending).
   For `n = 2` these are the bilinear hull on `[0,1]^2`. *Fortet (1960); Glover &
   Woolsey (1974).* Issue #187.
 - `patterns.binary_product_linearization`; certified in `test_patterns.py`.
+- **Auto-firing presolve pass** (issue #187): `discopt._jax.binary_multilinear_reform`
+  applies this per-monomial to any pure-binary multilinear model (`{0,1}` INTEGER
+  counts as binary), plus an exact integer-point **secant envelope**
+  `t >= (u+v)·y − u·v` over the attainable value grid for objective-pressure
+  squares of integer-valued forms (`Σ_k C_k²`, the autocorr structure) — the
+  whole model becomes an equivalent pure MILP and bypasses the spatial/JAX
+  path. Certified in `test_binary_multilinear_reform.py`.
 
 ### P12. Complementarity `x·y = 0`, `x,y >= 0` — **done**
 - **Fields:** MPEC/equilibrium, contact mechanics, KKT systems, disjunctive.
