@@ -1767,6 +1767,51 @@ fn augment_with_cuts(
     (m_new, n_new)
 }
 
+/// CSC analogue of [`augment_with_cuts`]'s MATRIX augmentation (docs/dev/sparse-milp-plan.md,
+/// T3): append `k` cut rows and `k` surplus-slack columns to a column-major matrix,
+/// producing EXACTLY the nonzeros `from_dense(augment_with_cuts(dense,..))` would.
+/// Bit-identical by construction and `O(nnz + cut_nnz)` — never materializes the dense
+/// `m×n` matrix, which is what lets the driver drop the dense `a_w` at T3b. The caller
+/// appends to `b/c/l/u/is_int` itself (those are independent of the matrix layout).
+#[allow(dead_code)] // wired into the driver at T3b (replaces the dense a_w path)
+fn augment_cols_with_cuts(sp: &SparseCols, m: usize, n: usize, cuts: &[GomoryCut]) -> SparseCols {
+    let k = cuts.len();
+    if k == 0 {
+        return sp.clone();
+    }
+    let (col_ptr, row_idx, vals) = sp.raw();
+    let mut new_col_ptr: Vec<usize> = Vec::with_capacity(n + k + 1);
+    let mut new_row_idx: Vec<usize> = Vec::with_capacity(row_idx.len() + n * k + k);
+    let mut new_vals: Vec<f64> = Vec::with_capacity(vals.len() + n * k + k);
+    new_col_ptr.push(0);
+    for j in 0..n {
+        // Existing entries (rows 0..m, already sorted ascending) …
+        for idx in col_ptr[j]..col_ptr[j + 1] {
+            new_row_idx.push(row_idx[idx]);
+            new_vals.push(vals[idx]);
+        }
+        // … then this column's coefficient in each cut row (rows m..m+k, strictly
+        // greater, so the column stays row-sorted). Matches the dense path's
+        // `coeffs[..min(len, n)]`: columns j >= cut.coeffs.len() contribute nothing.
+        for (ci, cut) in cuts.iter().enumerate() {
+            if let Some(&v) = cut.coeffs.get(j) {
+                if v != 0.0 {
+                    new_row_idx.push(m + ci);
+                    new_vals.push(v);
+                }
+            }
+        }
+        new_col_ptr.push(new_row_idx.len());
+    }
+    // Surplus slack columns n..n+k: a singleton `-1.0` at the cut's row.
+    for ci in 0..k {
+        new_row_idx.push(m + ci);
+        new_vals.push(-1.0);
+        new_col_ptr.push(new_row_idx.len());
+    }
+    SparseCols::from_csc(new_col_ptr, new_row_idx, new_vals)
+}
+
 /// Sparse signature of a cut for pool deduplication: its nonzero `(col, coeff)`
 /// pairs (quantized) plus the rhs, so an identical cut found at many nodes is
 /// added to the pool only once.
@@ -3154,6 +3199,50 @@ mod sparse_milp_diff {
                 csc.obj
             );
         }
+    }
+
+    /// T3 gate: the CSC cut augmentation reproduces the dense `augment_with_cuts`
+    /// matrix exactly — `augment_cols_with_cuts(from_dense(A))` equals `from_dense`
+    /// of the dense-augmented A, nonzero-for-nonzero (same col_ptr/row_idx/vals).
+    /// This is what lets T3b append cuts to the CSC and drop `a_w` without perturbing
+    /// a single coefficient.
+    #[test]
+    fn csc_augment_matches_dense_augment() {
+        use crate::lp::gomory::GomoryCut;
+        // 2×3 base with a structural zero; two cuts, one carrying a zero coeff.
+        let a = vec![1.0, 0.0, 2.0, 0.0, 3.0, 4.0];
+        let (m, n) = (2usize, 3usize);
+        let cuts = vec![
+            GomoryCut {
+                coeffs: vec![1.0, 0.0, -2.0],
+                rhs: 1.0,
+            },
+            GomoryCut {
+                coeffs: vec![0.0, 5.0, 0.0],
+                rhs: 2.0,
+            },
+        ];
+        // Reference: dense augment, then to CSC.
+        let mut a_w = a.clone();
+        let mut b = vec![0.0; m];
+        let mut c = vec![0.0; n];
+        let mut l = vec![0.0; n];
+        let mut u = vec![INF; n];
+        let mut ii = vec![false; n];
+        let (mn, nn) = augment_with_cuts(
+            &mut a_w, &mut b, &mut c, &mut l, &mut u, &mut ii, m, n, &cuts,
+        );
+        let csc_ref = SparseCols::from_dense(&a_w, mn, nn);
+        // CSC augment of the CSC of A.
+        let csc_test = augment_cols_with_cuts(&SparseCols::from_dense(&a, m, n), m, n, &cuts);
+        assert_eq!(
+            csc_ref.raw(),
+            csc_test.raw(),
+            "csc augment != from_dense(dense augment)"
+        );
+        // b/c/l/u/is_int side-effects (independent of the matrix layout) match the k
+        // appended surplus rows/cols.
+        assert_eq!((mn, nn), (m + cuts.len(), n + cuts.len()));
     }
 
     /// The CSC of each instance round-trips the dense matrix's exact nonzeros

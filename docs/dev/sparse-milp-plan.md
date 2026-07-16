@@ -84,9 +84,22 @@ mechanisms — de-risked below, they're all bit-identical ports, not rewrites:
   incl. `lp_iters`; `solve_lp_root_csc_matches_dense` confirms bit-identity on a
   well-conditioned AND an ill-conditioned (1e8-range, equilibration-firing) LP; full
   `cargo test -p discopt-core` 452 pass; `discopt-python` builds.
-- [ ] **T3 — sparse scaling + cut-row append.** `Scaling::from_matrix` CSC variant;
-  GMI cut rows appended to the CSC (grow col_ptr/row_idx/vals) instead of `a_w`.
-  **Done:** cuts-firing panel instance bit-identical; `a_w` no longer constructed.
+- [x] **T3a — CSC cut-augmentation primitive.** Added `augment_cols_with_cuts`
+  (CSC analogue of `augment_with_cuts`: append `k` cut rows + `k` surplus-slack
+  columns, O(nnz+cut_nnz), no dense). `Scaling::from_matrix`'s CSC form already
+  exists (`Scaling::from_sparse`, used in T2). **Done ✓** — `csc_augment_matches_dense_augment`
+  proves it's nonzero-for-nonzero identical to `from_dense(augment_with_cuts(..))`;
+  453 core tests green.
+- [ ] **T3b — remove dense `a_w` (driver rewire).** Carry the working matrix as a
+  `SparseCols` through `solve_milp_hooked`: build the base CSC (from the entry;
+  `from_dense(lp.a)` for the dense entry until T4), append cuts via
+  `augment_cols_with_cuts`, drive scaling with `Scaling::from_sparse` + `scale_cols`,
+  and build the node `ctx` (`csc`/`csc_rc`) directly. Remove `a_w = lp.a.to_vec()`,
+  the per-round `from_dense(a_w)`, the `Scaling::from_matrix(&a_w)` /
+  `from_dense(sa)` / `from_dense(&a_w)` sites, and the `NodeCtx.a_w`/`sa` dense
+  fields (rewire their few consumers — cuts, reduced-cost fixing — to the CSC).
+  **Done:** `driver_matches_golden` green (incl. `lp_iters`); `a_w` no longer
+  constructed anywhere; the dense-entry path still bit-identical.
 - [ ] **T4 — Python binding + routing.** `solve_milp_csc_py(col_ptr, row_idx, vals,
   m, n, c, l, u, int_cols, ...)`; route `solvers/milp_simplex.py` and the
   `MilpRelaxationModel` MILP path to pass the relaxation's existing scipy CSC
