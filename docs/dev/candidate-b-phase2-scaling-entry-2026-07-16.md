@@ -74,23 +74,46 @@ rows.
    the 6.3e10 Arrhenius/normal coupling is an **irreducible ~1e9 conditioning** that
    diagonal scaling cannot remove.
 
-## Real levers (harder; not yet built)
+## L1 — slack-aware scaling: BUILT + MEASURED (necessary, effective, insufficient alone)
 
-- **L1 — scale `A_ub` pre-slack:** equilibrate the structural matrix before slacks
-  are appended (append slacks with coefficient = row scale, not 1), so feral sees
-  ~2.5e9 instead of ~2e20. Necessary but likely not sufficient alone.
-- **L2 — robust factorization for ~2.5e9:** pair L1 with the dense LU route
-  (`#557`) and/or a higher feral pivot threshold, since ~2.5e9 is past the sparse
-  route's reliable range.
-- **L3 — model/relaxation-level rescale of the Arrhenius term:** normalize the
-  `6.3e10 · exp(-E/RT)` product (the aux value is ~1e-13, so the product is ~6e-3)
-  at relaxation build, removing the 6.3e10 from the matrix entirely. The most
-  fundamental fix; largest surface.
+Implemented (env-gated `DISCOPT_LP_SLACK_AWARE_SCALE`, since reverted): a
+single-entry column is a slack (standard-form `I`) or bound row; exclude such
+columns from the row equilibration and normalize each to 1 via its own column
+scale, so slacks no longer pin the row factors.
 
-Kill note: candidate B is **not** a scaling-parameter tweak. It needs L1+L2
-(and possibly L3) together, each a real core-engine/relaxation change under the
-bound-neutral regime. Candidate A's loose floor remains the shipped fallback until
-one lands.
+L1 alone barely moved the residual (1.8e20 → ~1e20) because the *structural*
+scaling is itself capped by the 4-pass / `MAX_LINE_RANGE=1e-10` config. **L1 +
+stronger structural scaling** (`DISCOPT_SCALE_PASSES=12 DISCOPT_SCALE_LINE_RANGE=1e-16`)
+collapses it as theory predicts:
+
+```
+raw=2.837e26  →  scaled_residual = 4.096e9    (vs 1.845e20 default — a ~1e10 win)
+```
+
+But **hda end-to-end still `bound=None`**: **4e9 exceeds feral's ~1e7 reliable
+range** at m=2974. The dense LU route can't rescue it (m=2974 ≫ `FORCE_DENSE_M=256`;
+a dense O(m³) factorization is infeasible at this size), so the basis stays on the
+sparse route. Diagonal scaling provably cannot go below ~4e9 (the 6.3e10 Arrhenius
+coupling), so **no combination of L1 + scaling params + L2 factorization route
+solves hda** — the conditioning floor is above feral's ceiling.
+
+## Verdict — hda needs L3 (model-level rescale); L1 is a separable general win
+
+- **hda specifically:** blocked. Even the theoretical-best diagonal scaling (4e9)
+  is past feral's factorization limit at this size. The only lever that helps is
+  **L3** — normalize the `6.3e10·exp(−E/RT)` product (aux value ~1e-13, product
+  ~6e-3) at *relaxation build*, removing the 6.3e10 from the matrix so conditioning
+  drops below ~1e7. Most fundamental fix, largest surface; not yet built.
+- **L1 as a general improvement:** the slack-aware scaling (+ tuned stronger
+  structural params) is a real, separable conditioning win that likely helps
+  *other* ill-conditioned instances whose residual currently sits between feral's
+  ~1e7 ceiling and the ~1e20 the slacks impose. Worth productionizing on its own —
+  but it changes scaling factors globally, so it must ship bound-neutral-verified
+  (panel node_count/objective unchanged + `cargo test`) with carefully tuned
+  params (the `MAX_LINE_RANGE` floor exists to guard spurious residue). That is its
+  own task, separate from the hda goal.
+
+Candidate A's loose floor remains hda's shipped fallback until L3 lands.
 
 Acceptance / regime unchanged from #664: bound-neutral verification
 (`node_count` + certified `objective` exactly unchanged on the certifying panel,
