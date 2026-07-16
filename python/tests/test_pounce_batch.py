@@ -155,17 +155,47 @@ def test_batch_pounce_marks_infeasible_nodes():
     assert np.all(np.abs(rlb) >= _SENTINEL)
 
 
+def _wide_bilinear_pool() -> dm.Model:
+    """A pooling-style bilinear (nonconvex) NLP with a genuinely wide B&B tree.
+
+    Two bilinear "blend" terms in the objective plus two bilinear capacity
+    constraints force the spatial branch-and-bound to open many nodes before it
+    closes the gap (the McCormick root relaxation does not converge at the
+    root), so the batch path fires repeatedly with ``n_batch > 1``. Contrast
+    with pooling-Haverly, whose root relaxation + NLP multistart nails the
+    global optimum in ~3 nodes, so the frontier never grows past a single node
+    and the batch path is never reached through ``solve()`` dispatch (issue
+    #665 — this is by-design solver behavior, not a batch-formation regression).
+
+    Certified global optimum obj = -12.8, established by discopt's own global
+    solver on both the ``ipm`` and ``pounce`` node engines (agreeing objective
+    and sound dual bound). It is used only as a known-correct fixed point here.
+    """
+    m = dm.Model("wide_bilinear_pool")
+    x = [m.continuous(f"x{i}", lb=0, ub=5) for i in range(4)]
+    m.minimize(-(x[0] * x[1]) - (x[2] * x[3]) + sum(xi * xi for xi in x) * 0.1)
+    m.subject_to(x[0] + x[1] + x[2] + x[3] <= 8)
+    m.subject_to(x[0] * x[2] <= 6)
+    m.subject_to(x[1] * x[3] <= 6)
+    return m
+
+
 @pytest.mark.correctness
 @pytest.mark.slow
-def test_pounce_batch_end_to_end_pooling(monkeypatch):
-    """A wide-tree nonconvex MINLP exercises the batch path and is correct.
+def test_pounce_batch_end_to_end_wide_bilinear(monkeypatch):
+    """A wide-tree nonconvex bilinear NLP exercises the batch path and is correct.
 
-    Pooling-Haverly is below the default ``_POUNCE_BATCH_MIN_VARS`` size gate
-    (n_vars=6), so the threshold is lowered here to drive the integration; the
-    gate's own behavior is covered by ``test_pounce_size_gate_keeps_small_serial``.
+    The batch path fires only when the tree holds >1 open node at export time
+    (``n_batch > 1``). Small problems whose root relaxation already nails the
+    global optimum (pooling-Haverly, the old model here) converge at the root
+    and never form a multi-node frontier, so the batch path is never reached
+    through ``solve()`` — by design (issue #665). This model keeps the spatial
+    tree genuinely wide, so ``export_batch`` returns multi-node batches.
+
+    The model has 4 variables, below the default ``_POUNCE_BATCH_MIN_VARS`` size
+    gate, so the threshold is lowered here to drive the integration; the gate's
+    own behavior is covered by ``test_pounce_size_gate_keeps_small_serial``.
     """
-    from discopt.modeling.examples import example_pooling_haverly
-
     monkeypatch.setattr(S, "_POUNCE_BATCH_MIN_VARS", 0)
 
     sizes: list[int] = []
@@ -177,19 +207,12 @@ def test_pounce_batch_end_to_end_pooling(monkeypatch):
         return r
 
     monkeypatch.setattr(S, "_solve_batch_pounce", spy)
-    model = example_pooling_haverly()
+    model = _wide_bilinear_pool()
     res = model.solve(nlp_solver="pounce", batch_size=16, time_limit=120)
 
-    # Pooling-Haverly is nonconvex: the McCormick relaxation bounds do not
-    # rigorously close the gap, and spatial-branch nodes whose NLP relaxation
-    # fails carry no rigorous lower bound. Per the #27a soundness guard
-    # (applied on the serial path and, since the batch-sentinel fix, on the
-    # batch path too), such a search reports the correct incumbent as
-    # "feasible" rather than claiming a certificate it does not hold. Every
-    # solve path (pounce/ipm × batch/serial) agrees on "feasible" here.
     assert res.status in ("optimal", "feasible")
-    # Haverly pooling global optimum (this formulation): -400 profit => 1390 obj.
-    assert res.objective == pytest.approx(1390.0, abs=1.0, rel=1e-3)
+    # Certified global optimum (ipm and pounce agree; sound dual bound).
+    assert res.objective == pytest.approx(-12.8, abs=1e-2, rel=1e-3)
     # The batch path must have actually fired with more than one node.
     assert sizes, "pounce batch path never triggered"
     assert max(sizes) > 1, f"batch never exceeded one node: {sizes}"

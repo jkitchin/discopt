@@ -30,30 +30,34 @@ import pytest
 def _build_nonconvex_minlp() -> tuple[dm.Model, dict]:
     """Nonconvex MINLP that branches into a multi-node frontier.
 
-    The integer ``x`` makes the root relaxation fractional, so the tree opens
-    several nodes at once: ``export_batch`` returns >1 node and the POUNCE
-    batch path (``n_batch > 1``) runs. The ``sin`` term keeps the model
-    nonconvex and out of the MIQP class and — crucially — leaves it free of
-    bilinear products, so the spatial-BB McCormick LP relaxer is inactive.
-    That matters because the relaxer would otherwise rescue a failed node-NLP
-    solve with a valid LP bound; without it, the failure sentinel survives to
-    the decertification guard. The optimum is x=0, y≈3.665 (1.3*0 + sin≈-1.0 =
-    -1.0); the warm start (x=8, y=5) is feasible but far worse, so pruning the
-    whole tree off failure sentinels and certifying the gap would report a
-    badly wrong "optimal".
+    The integer ``x`` has a *fractional* root relaxation here: minimizing
+    ``-1.3 x`` drives ``x`` up against the linear cap ``2x + y <= 5``, and at the
+    relaxed optimum (``y = 0``) that pins ``x = 2.5``. The tree therefore
+    branches on ``x`` (children ``x <= 2`` and ``x >= 3``) and opens several
+    nodes at once: ``export_batch`` returns >1 node and the POUNCE batch path
+    (``n_batch > 1``) runs. (A root relaxation that is already integer-feasible
+    would converge at the root and never form a batch — that is exactly why the
+    earlier model here stopped exercising the batch path; see issue #665.) The
+    ``sin`` term keeps the model nonconvex and out of the MIQP class and —
+    crucially — leaves it free of bilinear products, so the spatial-BB McCormick
+    LP relaxer is inactive. That matters because the relaxer would otherwise
+    rescue a failed node-NLP solve with a valid LP bound; without it, the
+    failure sentinel survives to the decertification guard. The optimum is
+    x=2, y=0 (-1.3*2 + sin(0) = -2.6); the warm start (x=0, y=0 -> obj 0) is
+    feasible but far worse, so pruning the whole tree off failure sentinels and
+    certifying the gap would report a badly wrong "optimal".
     """
     m = dm.Model("sentinel_soundness")
     x = m.integer("x", lb=0, ub=8)
     y = m.continuous("y", lb=0, ub=5)
-    m.minimize(2 * x + dm.sin(3 * y) - 0.7 * x)
-    m.subject_to(3 * x + 2 * y >= 7)
-    m.subject_to(x - y <= 3)
-    warm = {x: 8, y: 5.0}
+    m.minimize(-1.3 * x + dm.sin(3 * y))
+    m.subject_to(2 * x + y <= 5)
+    warm = {x: 0, y: 0.0}
     return m, warm
 
 
-# Optimum of the model above: x=0, y≈3.665 -> 1.3*0 + sin(3y)≈-1.0.
-_OPT = -1.0
+# Optimum of the model above: x=2, y=0 -> -1.3*2 + sin(0) = -2.6.
+_OPT = -2.6
 
 
 def _all_sentinel_batch(evaluator, batch_lb, batch_ub, batch_ids, n_vars, *args, **kwargs):
