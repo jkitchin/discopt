@@ -210,8 +210,26 @@ structural `0.0` adds exactly, and CSC preserves ascending row order, so `Aᵀy`
     would be a near-dead flag (§3). NOT implemented. The guard stays as-is. qap's real dual
     bound (→149106) needs a fundamentally stronger relaxation (RLT-2 / tailored QAP / SDP),
     not a McCormick-LP guard flip. **Two concrete follow-ups surfaced, neither a guard flip:**
-    (a) the PSD path's 46 GB densification (a real memory bug, T6-style fix); (b) per-node LP
-    time on large lifts (profiling target from T6). Awaiting direction on which to pursue.
+    (a) the PSD path's 46 GB densification (a real memory bug, T6-style fix) — **FIXED in T8
+    below**; (b) per-node LP time on large lifts (profiling target from T6).
+
+- [x] **T8 — FIXED the PSD/OBBT exact-LP oracle 46 GB densification.** Root cause: the exact-LP
+  oracle `solvers/lp_simplex.py::solve_lp` (returned by `get_exact_lp_solver`, called by
+  `psd_strengthen_relaxation_bound`, OBBT, DBBT, Benders) is a **separate** dense entry from the
+  T4b `solve_milp` — it did `A_ub.toarray()` **and** built `a_std = np.zeros((m, n+m))`; for
+  qap's 85756-row PSD-strengthened relaxation that standard form is `85756 x 107405 ~ 9.2e9
+  cells ~ 73 GB` (observed ~46 GB peak before the OS killed/partial-committed it). **Fix:**
+  rewrote `solve_lp` to assemble the standard form `[A_ub | I_ub | 0 ; A_eq | 0 | I_eq]`
+  **sparsely** (`sp.vstack`/`sp.hstack` + `sort_indices`) and call the CSC-native
+  `solve_lp_warm_csc_py` (which already returns the row duals), reconstructing reduced costs
+  with sparse `Aᵀy`. Bound-neutral marshaling (§5): objective matches HiGHS to 3e-16 and
+  dense-input == sparse-input on a 40-LP panel; row-dual/reduced-cost KKT identities preserved
+  (`test_simplex_lp.py` +2 tests, 344 LP/OBBT/DBBT/PSD tests, 653 smoke, 10 adversarial green).
+  **Measured (qap root, peak RSS):** `_root_relaxation_lower_bound(psd_cuts=True)` **46 GB →
+  0.69 GB** (64 s → 15 s). Regression tests: `test_solve_lp_routes_through_sparse_csc_binding`
+  (spies that the dense binding is never called) + `test_solve_lp_does_not_densify_large_sparse_lp`
+  (tracemalloc peak ≪ the dense `m×(n+m)`). NB: PSD still buys qap no bound (−1e-9) — that is a
+  separate *effectiveness* question, untouched here; only the memory blowup is fixed.
 
 ## Problem (measured on qap — a 225-binary Quadratic Assignment Problem)
 

@@ -249,3 +249,79 @@ class TestSimplexLpDuals:
             assert len(rc) == n
             checked += 1
         assert checked >= 20
+
+
+def test_solve_lp_routes_through_sparse_csc_binding(monkeypatch):
+    """The exact-LP oracle (``solvers.lp_simplex.solve_lp``) must marshal through
+    the CSC-native ``solve_lp_warm_csc_py``, NEVER the dense ``solve_lp_warm_py``
+    whose ``a_std = np.zeros((m, n+m))`` standard form blew memory on a large
+    lifted LP — qap's 85756-row McCormick relaxation densifies to
+    ``85756 x 107405 ~ 73 GB`` (surfaced as the PSD/OBBT ~46 GB blowup; see
+    docs/dev/sparse-milp-plan.md T7). Fails before the sparse rewrite (which
+    called the dense binding).
+    """
+    import discopt._rust as _rust
+    from discopt.solvers import SolveStatus as _SS
+    from discopt.solvers.lp_simplex import solve_lp as _solve_lp
+
+    calls = {"csc": 0, "dense": 0}
+    _orig_csc = _rust.solve_lp_warm_csc_py
+
+    def _csc_spy(*a, **k):
+        calls["csc"] += 1
+        return _orig_csc(*a, **k)
+
+    monkeypatch.setattr(_rust, "solve_lp_warm_csc_py", _csc_spy)
+    if hasattr(_rust, "solve_lp_warm_py"):
+        _orig_dense = _rust.solve_lp_warm_py
+
+        def _dense_spy(*a, **k):
+            calls["dense"] += 1
+            return _orig_dense(*a, **k)
+
+        monkeypatch.setattr(_rust, "solve_lp_warm_py", _dense_spy)
+
+    A = np.array([[2.0, 1.0], [1.0, 3.0]])
+    b = np.array([4.0, 6.0])
+    c = np.array([-1.0, -1.0])
+    r = _solve_lp(c=c, A_ub=A, b_ub=b, bounds=[(0.0, 10.0), (0.0, 10.0)])
+    assert r.status == _SS.OPTIMAL
+    assert calls["csc"] >= 1  # routed through the sparse CSC binding
+    assert calls["dense"] == 0  # never the dense standard-form binding
+
+
+def test_solve_lp_does_not_densify_large_sparse_lp():
+    """A large, very sparse LP must not allocate anything near the dense standard
+    form ``[A | I]`` of shape ``m x (n+m)``. Regression for the exact-LP oracle
+    densification (docs/dev/sparse-milp-plan.md T7)."""
+    import gc
+    import tracemalloc
+
+    import scipy.sparse as sp
+    from discopt.solvers import SolveStatus as _SS
+    from discopt.solvers.lp_simplex import solve_lp as _solve_lp
+
+    n = 1500
+    rng = np.random.default_rng(0)
+    rows, cols, data, b = [], [], [], []
+    for i in range(n):
+        j = int(rng.integers(0, n))
+        rows += [i, i]
+        cols += [j, (j + 1) % n]
+        data += [1.0, 1.0]
+        b.append(2.0)
+    A = sp.csr_matrix((data, (rows, cols)), shape=(n, n), dtype=np.float64)
+    c = np.ones(n)
+    bounds = [(0.0, 1.0)] * n
+    dense_std_bytes = n * (2 * n) * 8  # m x (n+m) f64 the old path allocated
+
+    gc.collect()
+    tracemalloc.start()
+    r = _solve_lp(c=c, A_ub=A, b_ub=np.array(b, dtype=np.float64), bounds=bounds)
+    _cur, peak = tracemalloc.get_traced_memory()
+    tracemalloc.stop()
+
+    assert r.status == _SS.OPTIMAL
+    # The sparse marshaling peaks far below the dense standard form (which would be
+    # ~36 MB here, ~73 GB on qap). Half of it is a generous, deterministic ceiling.
+    assert peak < dense_std_bytes * 0.5, f"peak={peak} vs dense={dense_std_bytes}"
