@@ -135,7 +135,13 @@ structural `0.0` adds exactly, and CSC preserves ascending row order, so `Aᵀy`
   that genuinely branches (source from the `.nl` corpus or craft with cuts/heuristics
   off) so `driver_matches_golden` exercises `separate_cover`/`strong_branch`/
   propagation end-to-end, not just nodes=1. Capture status/obj/nodes/`lp_iters`.
-- [ ] **T4 — Python binding + routing.** `solve_milp_csc_py(col_ptr, row_idx, vals,
+- [~] **T4 — Python binding + routing.** RUST HALF DONE: `solve_milp_hooked` now takes a
+  `SparseCols` (dense `solve_milp`/`solve_milp_py` build it from `lp.a`; no internal dense
+  copy). Added `solve_milp_csc_py` (col_ptr/row_idx/vals input → `from_csc` → the sparse
+  driver, NEVER densified) + a shared `run_milp_hooked`, registered in lib.rs. core 458
+  tests green; discopt-python builds. REMAINING (with T5, needs a rebuilt extension):
+  route `solvers/milp_simplex.py` + the `MilpRelaxationModel` MILP path to the CSC binding,
+  deleting `A.toarray()`/the dense `a_std`. `solve_milp_csc_py(col_ptr, row_idx, vals,
   m, n, c, l, u, int_cols, ...)`; route `solvers/milp_simplex.py` and the
   `MilpRelaxationModel` MILP path to pass the relaxation's existing scipy CSC
   through — delete the `A.toarray()`/dense `a_std` assembly. **Done:** a small

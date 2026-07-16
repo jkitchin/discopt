@@ -277,14 +277,35 @@ fn decide_status(
 /// Solve `min cᵀx + obj_const s.t. A x = b, l ≤ x ≤ u` with `integer_cols`
 /// integer-constrained, by Rust-internal warm-started-simplex branch and bound.
 pub fn solve_milp(lp: &LpView<'_>, b: &[f64], obj_const: f64, opts: &MilpOptions) -> MilpResult {
-    solve_milp_hooked(lp, b, obj_const, opts, None)
+    // Dense entry: build the working CSC from `lp.a` once and hand it to the fully
+    // sparse driver core. The CSC entry (`solve_milp_csc`) skips this densify.
+    solve_milp_hooked(
+        SparseCols::from_dense(lp.a, lp.m, lp.n),
+        lp.m,
+        lp.n,
+        lp.c,
+        lp.l,
+        lp.u,
+        b,
+        obj_const,
+        opts,
+        None,
+    )
 }
 
-/// [`solve_milp`] with an optional interactive-debugger hook. When `hook` is
-/// `None` this is bit-for-bit identical to a plain solve (all fire-sites
-/// short-circuit); the `solve_milp` wrapper above passes `None`.
+/// The MILP branch-and-bound driver core, taking the constraint matrix as a
+/// column-major [`SparseCols`] (`m` rows, `n` cols) — **no dense `m×n` matrix is ever
+/// materialized** (docs/dev/sparse-milp-plan.md T3b5/T4). `hook` is an optional
+/// interactive-debugger hook; when `None` this is bit-for-bit identical to a plain
+/// solve (all fire-sites short-circuit).
+#[allow(clippy::too_many_arguments)]
 pub fn solve_milp_hooked(
-    lp: &LpView<'_>,
+    mut csc_w: SparseCols,
+    m: usize,
+    n: usize,
+    c: &[f64],
+    l: &[f64],
+    u: &[f64],
     b: &[f64],
     obj_const: f64,
     opts: &MilpOptions,
@@ -292,7 +313,6 @@ pub fn solve_milp_hooked(
 ) -> MilpResult {
     crate::profile::init_from_env();
     crate::profile::reset();
-    let n = lp.n;
     let ns = opts.n_struct;
     let is_int = {
         let mut v = vec![false; ns];
@@ -315,11 +335,6 @@ pub fn solve_milp_hooked(
     let mut is_int_full = vec![false; n];
     is_int_full[..ns].copy_from_slice(&is_int);
 
-    // Working matrix as CSC — the MILP driver is fully sparse (no dense `m×n` working
-    // matrix is ever materialized). For the dense entry `lp.a` is read once here to
-    // build the CSC; the CSC entry (`solve_milp_csc`) feeds a `SparseCols` directly.
-    let mut csc_w = SparseCols::from_dense(lp.a, lp.m, n);
-
     // --- presolve: sound, dimension-preserving root bound tightening ---
     // Only narrows bounds (interval/FBBT contraction), so it never cuts a
     // feasible solution and needs no postsolve; the tightened bounds seed both
@@ -328,16 +343,7 @@ pub fn solve_milp_hooked(
         // cert:T0.3 — time root presolve bound reduction.
         let pr = {
             let _t = crate::profile::Timer::new(crate::profile::Phase::NodeReduce);
-            tighten_bounds_csc(
-                &csc_w,
-                lp.m,
-                n,
-                lp.l,
-                lp.u,
-                b,
-                &is_int_full,
-                opts.simplex.tol,
-            )
+            tighten_bounds_csc(&csc_w, m, n, l, u, b, &is_int_full, opts.simplex.tol)
         };
         if pr.infeasible {
             return MilpResult {
@@ -351,7 +357,7 @@ pub fn solve_milp_hooked(
         }
         (pr.l, pr.u)
     } else {
-        (lp.l.to_vec(), lp.u.to_vec())
+        (l.to_vec(), u.to_vec())
     };
 
     let glb = base_l[..ns].to_vec();
@@ -363,10 +369,10 @@ pub fn solve_milp_hooked(
     // columns; structural columns [0, ns) are untouched, so the tree's
     // structural bounds still apply unchanged.
     let mut b_w = b.to_vec();
-    let mut c_w = lp.c.to_vec();
+    let mut c_w = c.to_vec();
     let mut l_w = base_l;
     let mut u_w = base_u;
-    let mut m_w = lp.m;
+    let mut m_w = m;
     let mut n_w = n;
 
     let mut lp_iters = 0usize;
@@ -2613,7 +2619,12 @@ mod tests {
 
         let hook = Counter(AtomicUsize::new(0));
         let hooked = solve_milp_hooked(
-            &lp,
+            SparseCols::from_dense(&a, 1, 7),
+            1,
+            7,
+            &c,
+            &l,
+            &u,
             &[10.0],
             0.0,
             &opts(6, vec![0, 1, 2, 3, 4, 5]),
