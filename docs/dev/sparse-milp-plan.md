@@ -104,7 +104,7 @@ structural `0.0` adds exactly, and CSC preserves ascending row order, so `Aᵀy`
   `farkas_safe_bound` → `&SparseCols` (column-iteration into `act/lo/hi`;
   `csc.dot(j,y)`). Keep dense versions as oracles. **Done:** differential unit tests
   (dense == csc) green.
-- [ ] **T3b2 — `separate_cover` → CSC** (+ its dense oracle + differential test on a
+- [x] **T3b2 — `separate_cover` → CSC** (+ its dense oracle + differential test on a
   crafted fractional node).
 - [ ] **T3b3 — `strong_branch` → CSC** (+ oracle + differential test).
 - [ ] **T3b4 — node propagation / FBBT (`prop_lp`) → CSC** (+ oracle + differential
