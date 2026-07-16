@@ -510,6 +510,124 @@ def subnlp(
     return x_out, obj
 
 
+def continuous_multistart(
+    model: Model,
+    n_starts: int = 32,
+    seed: int = 42,
+    backend: Optional[Callable] = None,
+    nlp_options: Optional[dict] = None,
+    evaluator: Optional[NLPEvaluator] = None,
+    deadline: Optional[float] = None,
+    feas_tol: float = 1e-6,
+    incumbent_obj: Optional[float] = None,
+) -> Optional[tuple[np.ndarray, float]]:
+    """Stratified continuous multistart for pure-continuous nonconvex models.
+
+    Basin diversification for the one model class the primal-heuristic suite
+    otherwise leaves bare (issue #188): with no integers to round, flip or dive
+    on, ``feasibility_pump``/``integer_local_search``/``fractional_diving``/
+    RINS/RENS all no-op, and on the McCormick-LP spatial path the node NLPs
+    warm-start from the parent point — so every local solve stays locked in the
+    first basin the relaxation vertex happens to fall into
+    (kall_congruentcircles_c51: parks at the two-row packing 1.5371 while the
+    single-row global basin at 1.0730 is reachable by 3/32 stratified starts,
+    every seed tried).
+
+    Draws ``n_starts`` stratified samples over the variable box (the
+    :func:`_generate_starts` Latin-hypercube-style sampler MultiStartNLP uses)
+    and runs one local NLP from each, keeping the best *constraint-verified*
+    point. Deadline-gated between starts; each solve is individually capped so
+    one pathological start cannot eat the remaining budget.
+
+    Scope guard: returns ``None`` untried when the model has any integer
+    variable — integer models have a full heuristic arsenal already, and a
+    relaxed-integer local optimum is useless as an incumbent there.
+
+    Sound (heuristic-policy regime, CLAUDE.md §5): a primal-side finder only.
+    Every returned point is re-verified with ``_check_constraint_feasibility``
+    and the caller's ``inject_incumbent`` enforces strict improvement, so the
+    dual bound and the certificate math are untouched by construction.
+
+    Args:
+        model: The optimization model (must be pure-continuous to act).
+        n_starts: Number of stratified starting points.
+        seed: RNG seed for the stratified sampler (fixed for determinism).
+        backend: ``solve_nlp(evaluator, x0, options=...)`` callable. If None,
+            uses :func:`discopt.solvers.nlp_backend.get_nlp_solver('auto')`.
+        nlp_options: Options dict forwarded to the NLP backend.
+        evaluator: Pre-built NLPEvaluator; one is constructed if omitted.
+        deadline: Absolute ``time.perf_counter()`` deadline. Starts are skipped
+            once it has passed; the loop never begins a solve it cannot fit.
+        feas_tol: Constraint-feasibility tolerance for accepting a point.
+        incumbent_obj: Current incumbent objective, if any. Purely
+            informational for early exit bookkeeping — points are kept only if
+            they beat it, but the caller's injection still re-checks.
+
+    Returns:
+        ``(x, obj)`` for the best constraint-feasible local optimum found that
+        beats ``incumbent_obj`` (when given), else ``None``.
+    """
+    int_mask = _get_integer_mask(model)
+    if np.any(int_mask):
+        return None
+    if n_starts <= 0:
+        return None
+
+    if backend is None:
+        from discopt.solvers.nlp_backend import get_nlp_solver
+
+        backend = get_nlp_solver("auto")
+    if evaluator is None:
+        evaluator = cached_evaluator(model)
+
+    lb, ub = _get_variable_bounds(model)
+    rng = np.random.default_rng(seed)
+    starts = _generate_starts(lb, ub, n_starts, rng)
+
+    opts = dict(nlp_options) if nlp_options else {}
+    opts.setdefault("print_level", 0)
+    opts.setdefault("max_iter", _HEURISTIC_NLP_MAX_ITER)
+
+    best_obj = float("inf") if incumbent_obj is None else float(incumbent_obj)
+    best_x: Optional[np.ndarray] = None
+
+    for i in range(n_starts):
+        remaining = np.inf if deadline is None else deadline - time.perf_counter()
+        if remaining <= 0.05:
+            break
+        solve_opts = dict(opts)
+        if np.isfinite(remaining):
+            # Cap the single solve so a stiff start cannot eat the whole budget,
+            # while still letting a typical (sub-second) local solve converge.
+            solve_opts.setdefault("max_wall_time", float(min(3.0, remaining)))
+        try:
+            res = backend(evaluator, starts[i], options=solve_opts)
+        except BaseException:
+            # PyO3 backends can raise PanicException (not an Exception subclass).
+            continue
+        # Accept OPTIMAL or ITERATION_LIMIT — the point is independently
+        # re-verified below, mirroring subnlp's acceptance set.
+        if res.status not in (SolveStatus.OPTIMAL, SolveStatus.ITERATION_LIMIT):
+            continue
+        if res.x is None or res.objective is None:
+            continue
+        obj = float(res.objective)
+        if not np.isfinite(obj) or obj >= best_obj:
+            continue
+        x_out = np.asarray(res.x, dtype=np.float64)
+        if not _check_constraint_feasibility(evaluator, x_out, tol=feas_tol):
+            continue
+        # Keep the verified objective consistent with the evaluator.
+        obj = float(evaluator.evaluate_objective(x_out))
+        if obj < best_obj:
+            best_obj = obj
+            best_x = x_out.copy()
+
+    if best_x is None:
+        return None
+    return best_x, best_obj
+
+
 def integer_local_search(
     model: Model,
     x_relax: np.ndarray,
