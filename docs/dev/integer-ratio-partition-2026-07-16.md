@@ -126,5 +126,17 @@ remove the incumbent-latency half of the tree (primal work, same class as
 - `pytest python/tests/test_integer_ratio_partition.py -m "not slow"` — 9 passed.
 - `pytest python/tests/test_ratio_of_products_relaxation.py
   python/tests/test_nested_division_soundness.py` — 28 passed (default path).
-- `pytest python/tests -m smoke` — see PR description.
-- gear4 flag-ON / flag-OFF end-to-end (this doc §4).
+- `pytest python/tests -m smoke` — 651 passed, 14 skipped.
+- Touched-layer guards (`-k "uniform or mccormick or milp_relax or varmap or
+  incremental"`) — 261 passed, 13 skipped.
+- Adversarial suite (`pytest -m slow python/tests/test_adversarial_recent_fixes.py`):
+  9/10 passed on this branch; the 1 failure (`hda`, the `wall < tl + 60` deadline
+  assert) reproduces **identically on the untouched branch parent** under the same
+  conditions and passes solo on this branch (53 s / 68 s) — a pre-existing timing
+  sensitivity under CPU load, unrelated to this change.
+- gear4 flag-ON / flag-OFF end-to-end (this doc §4); flag-OFF is bit-identical to
+  the pre-change baseline (objective, bound, and 2487-node count).
+- Cohort with flag ON (clay0303hfsg, nvs05, ex1226, tls2): `detect_integer_ratio_specs`
+  finds no eligible quotient, so the partitioner never attaches — code-path-identical
+  to OFF on non-class instances.
+- Rust untouched — no `cargo test` needed.
