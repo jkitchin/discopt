@@ -17,9 +17,11 @@ use crate::expr_bindings::PyModelRepr;
 ///     PyModelRepr wrapping the parsed model.
 #[pyfunction]
 pub fn parse_nl_file(path: &str) -> PyResult<PyModelRepr> {
-    let model = nl_parser::parse_nl_file(path)
+    let (model, compl) = nl_parser::parse_nl_file_with_complementarity(path)
         .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("{e}")))?;
-    Ok(PyModelRepr::from_model_repr(model))
+    Ok(PyModelRepr::from_model_repr_with_complementarity(
+        model, compl,
+    ))
 }
 
 /// Parse .nl content from a string and return a PyModelRepr.
@@ -31,7 +33,9 @@ pub fn parse_nl_file(path: &str) -> PyResult<PyModelRepr> {
 ///     PyModelRepr wrapping the parsed model.
 #[pyfunction]
 pub fn parse_nl_string(content: &str) -> PyResult<PyModelRepr> {
-    let model = nl_parser::parse_nl(content)
+    let (model, compl) = nl_parser::parse_nl_with_complementarity(content)
         .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("{e}")))?;
-    Ok(PyModelRepr::from_model_repr(model))
+    Ok(PyModelRepr::from_model_repr_with_complementarity(
+        model, compl,
+    ))
 }

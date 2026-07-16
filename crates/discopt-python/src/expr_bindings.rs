@@ -7,8 +7,9 @@ use pyo3::prelude::*;
 use pyo3::types::{PyDict, PySlice, PyTuple};
 
 use discopt_core::expr::{
-    BinOp, ConstraintRepr, ConstraintSense, ExprArena, ExprId, ExprNode, IndexElem, IndexSpec,
-    MathFunc, ModelBuilder, ModelRepr, ObjectiveSense, UnOp, VarInfo, VarType,
+    BinOp, ComplementarityRepr, ConstraintRepr, ConstraintSense, ExprArena, ExprId, ExprNode,
+    IndexElem, IndexSpec, MathFunc, ModelBuilder, ModelRepr, ObjectiveSense, UnOp, VarInfo,
+    VarType,
 };
 
 // ─────────────────────────────────────────────────────────────
@@ -18,12 +19,22 @@ use discopt_core::expr::{
 #[pyclass]
 pub struct PyModelRepr {
     inner: ModelRepr,
+    /// Complementarity relations recovered from a `.nl` file (empty for models
+    /// built any other way). Their `body` ids reference `inner.arena` (#658).
+    complementarities: Vec<ComplementarityRepr>,
 }
 
 impl PyModelRepr {
-    /// Create a PyModelRepr from a Rust ModelRepr (crate-internal).
-    pub(crate) fn from_model_repr(model: ModelRepr) -> Self {
-        Self { inner: model }
+    /// Create a PyModelRepr carrying complementarity relations recovered from a
+    /// `.nl` parse (crate-internal). Pass an empty vector for models with none.
+    pub(crate) fn from_model_repr_with_complementarity(
+        model: ModelRepr,
+        complementarities: Vec<ComplementarityRepr>,
+    ) -> Self {
+        Self {
+            inner: model,
+            complementarities,
+        }
     }
 }
 
@@ -366,6 +377,29 @@ impl PyModelRepr {
         (c.body.0, sense, c.rhs)
     }
 
+    /// Number of complementarity relations recovered from a `.nl` file (#658).
+    /// Zero for models built any other way.
+    #[getter]
+    fn n_complementarities(&self) -> usize {
+        self.complementarities.len()
+    }
+
+    /// (body_expr_id, complementary_var_index, flag) for complementarity `i`.
+    ///
+    /// `body_expr_id` indexes the expression arena (walk it with `get_node`);
+    /// `complementary_var_index` is the 0-based variable the body is
+    /// complementary to; `flag` is the raw AMPL MP `ComplInfo` bound flag
+    /// (bit 0 ⇒ body lower bound `-inf`, bit 1 ⇒ body upper bound `+inf`).
+    fn complementarity_info(&self, i: usize) -> PyResult<(usize, usize, usize)> {
+        let c = self.complementarities.get(i).ok_or_else(|| {
+            pyo3::exceptions::PyIndexError::new_err(format!(
+                "complementarity index {i} out of range (have {})",
+                self.complementarities.len()
+            ))
+        })?;
+        Ok((c.body.0, c.var_index, c.flag))
+    }
+
     /// Evaluate the objective at a given point x.
     ///
     /// Accepts non-contiguous input (e.g. a strided/sliced or transposed numpy
@@ -414,7 +448,13 @@ impl PyModelRepr {
         dict.set_item("variables_fixed", stats.variables_fixed)?;
         dict.set_item("constraints_removed", stats.constraints_removed)?;
         dict.set_item("candidates_examined", stats.candidates_examined)?;
-        Ok((PyModelRepr { inner: new_model }, dict.into()))
+        Ok((
+            PyModelRepr {
+                inner: new_model,
+                complementarities: Vec::new(),
+            },
+            dict.into(),
+        ))
     }
 
     /// Reformulate polynomial monomials of degree > 2 into bilinear
@@ -437,7 +477,13 @@ impl PyModelRepr {
             stats.aux_constraints_introduced,
         )?;
         dict.set_item("aux_bounds_derived", stats.aux_bounds_derived)?;
-        Ok((PyModelRepr { inner: new_model }, dict.into()))
+        Ok((
+            PyModelRepr {
+                inner: new_model,
+                complementarities: Vec::new(),
+            },
+            dict.into(),
+        ))
     }
 
     /// Run FBBT with an optional incumbent cutoff bound.
@@ -801,6 +847,7 @@ impl PyModelRepr {
         Ok((
             PyModelRepr {
                 inner: result.model,
+                complementarities: Vec::new(),
             },
             stats.into(),
         ))
@@ -1052,7 +1099,10 @@ pub fn model_to_repr(
         n_vars,
     };
 
-    Ok(PyModelRepr { inner })
+    Ok(PyModelRepr {
+        inner,
+        complementarities: Vec::new(),
+    })
 }
 
 // ─────────────────────────────────────────────────────────────

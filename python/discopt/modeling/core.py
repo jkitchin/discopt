@@ -4194,7 +4194,10 @@ def from_nl(path: str) -> Model:
     >>> model = dm.from_nl("problem.nl")
     >>> result = model.solve()
     """
-    from discopt._jax.nl_reconstruction import reconstruct_dag
+    from discopt._jax.nl_reconstruction import (
+        reconstruct_complementarities,
+        reconstruct_dag,
+    )
     from discopt._rust import parse_nl_file
 
     nl_repr = parse_nl_file(path)
@@ -4251,15 +4254,82 @@ def from_nl(path: str) -> Model:
         elif sense == "==":
             m.subject_to(body == rhs)
 
+    # Complementarity (type-5) rows: lower each ``body ⊥ x`` relation through the
+    # exact GDP disjunction machinery instead of adding it as an ordinary
+    # constraint (#658). The complementarity rows are absent from
+    # ``constraint_tuples`` above (consumed by the relation), so there is no
+    # double-add.
+    compl_pairs = reconstruct_complementarities(nl_repr, m._variables)
+    for body, var_index, flag in compl_pairs:
+        _add_nl_complementarity(m, body, var_index, flag)
+
     # Keep nl_repr for backward compatibility (Rust evaluator for validation)
     m._nl_repr = nl_repr
     # Record the source path so the solver can hand POUNCE the original .nl for
     # native-AD node NLP solves (discopt.solvers.nlp_native), bypassing the JAX
     # callback bridge. The .nl column order is the model's variable order here,
     # so the native problem aligns with the evaluator's flat x (identity map).
-    m._source_nl_path = os.path.abspath(path)
+    #
+    # Suppressed when the model carried complementarities: the GDP lowering above
+    # added selector binaries / auxiliaries and disjunction constraints that the
+    # in-memory model has but the original .nl does not, so POUNCE reading the raw
+    # .nl would solve a structurally different (under-constrained) problem. The
+    # ``to_nl`` fallback emits the reformulated model instead, staying consistent
+    # with the JAX evaluator.
+    if not compl_pairs:
+        m._source_nl_path = os.path.abspath(path)
 
     return m
+
+
+def _add_nl_complementarity(m: "Model", body: "Expression", var_index: int, flag: int) -> None:
+    r"""Lower one ``.nl`` complementarity row into ``Model.complementarity``.
+
+    The row asserts ``body ⊥ x`` where ``x = m._variables[var_index]`` and
+    ``body`` carries the bounds encoded by ``flag`` (AMPL MP ``ComplInfo``:
+    bit 0 ⇒ lower ``-inf``, bit 1 ⇒ upper ``+inf``; unset ⇒ 0). discopt's
+    primitive is the symmetric nonnegative complementarity
+    :math:`0 \le a \perp b \ge 0`, so we orient ``body`` and ``x`` into two
+    nonnegative quantities before handing them over.
+
+    Only the single-bounded MPEC forms map soundly onto that primitive: the body
+    bounded on exactly one side (``body >= 0`` or ``body <= 0``) against a
+    single-signed variable (``x >= 0`` or ``x <= 0``). Doubly-bounded / free /
+    equality-pinned complementarity rows require a richer disjunction than the
+    primitive expresses; rather than silently mis-model them we refuse loudly
+    (correctness-first — the native complementarity node is the #231 follow-up).
+    """
+    inf_lb = bool(flag & 1)  # ComplInfo INF_LB: body lower bound is -inf
+    inf_ub = bool(flag & 2)  # ComplInfo INF_UB: body upper bound is +inf
+    body_ge0 = (not inf_lb) and inf_ub  # body in [0, +inf)
+    body_le0 = inf_lb and (not inf_ub)  # body in (-inf, 0]
+
+    x = m._variables[var_index]
+    xlb = float(np.min(np.asarray(x.lb)))
+    xub = float(np.max(np.asarray(x.ub)))
+    x_ge0 = xlb >= 0.0  # x >= 0
+    x_le0 = xub <= 0.0  # x <= 0
+
+    def _unsupported(reason: str) -> ValueError:
+        return ValueError(
+            f"from_nl: complementarity on variable {x.name!r} has an unsupported "
+            f"bound configuration ({reason}; flag={flag}, x in [{xlb:g}, {xub:g}]). "
+            "The .nl → GDP slice (#658) handles single-bounded MPEC forms "
+            "(body >= 0 or body <= 0, complementary to a single-signed variable); "
+            "richer complementarity requires the native node tracked in #231."
+        )
+
+    if not (body_ge0 or body_le0):
+        _kind = "body fixed to 0" if (not inf_lb and not inf_ub) else "body free / double-bounded"
+        raise _unsupported(_kind)
+    if not (x_ge0 or x_le0):
+        raise _unsupported("complementary variable is free / straddles 0")
+
+    # Orient both sides nonnegative. Negating a side flips the sign of the zero
+    # product but not whether it is zero, so ``a * b == 0`` is preserved exactly.
+    a = body if body_ge0 else -body
+    b = x if x_ge0 else -x
+    m.complementarity(a, b, method="gdp")
 
 
 def from_gams(path: str) -> Model:

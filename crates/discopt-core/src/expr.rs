@@ -479,6 +479,29 @@ pub struct ConstraintRepr {
     pub name: Option<String>,
 }
 
+/// A complementarity relation recovered from an AMPL `.nl` file.
+///
+/// Represents `body ⊥ x[var_index]`: the constraint body expression is
+/// complementary to the variable at `var_index` (0-based). This is *not* a field
+/// of [`ModelRepr`] — the parser threads it out separately (see
+/// [`crate::nl_parser::parse_nl_with_complementarity`]) so the ubiquitous
+/// `ModelRepr` struct literal stays untouched — and it references arena nodes
+/// owned by the accompanying `ModelRepr`.
+///
+/// `flag` is the raw type-5 bound flag from the `.nl` `r` segment, with AMPL MP
+/// `ComplInfo` semantics: bit 0 set ⇒ the body's lower bound is `-inf` (else 0),
+/// bit 1 set ⇒ the body's upper bound is `+inf` (else 0). The standard MPEC form
+/// `0 <= body ⊥ x >= 0` is `flag == 2`.
+#[derive(Debug, Clone)]
+pub struct ComplementarityRepr {
+    /// Arena id of the constraint body `f` complementary to the variable.
+    pub body: ExprId,
+    /// 0-based index of the complementary variable.
+    pub var_index: usize,
+    /// Raw type-5 bound flag (AMPL MP `ComplInfo` bit semantics; see struct docs).
+    pub flag: usize,
+}
+
 /// Complete model representation in Rust.
 #[derive(Debug, Clone)]
 pub struct ModelRepr {
