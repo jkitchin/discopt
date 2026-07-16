@@ -71,16 +71,19 @@ mechanisms — de-risked below, they're all bit-identical ports, not rewrites:
 - A CSC `ScaledLp` mirror: `Scaling::from_cols` → `scale_cols` + scale c/l/u/b →
   `solve_lp_cols` → unscale x/dual/ray (exactly what dense `solve_lp` does).
 
-- [ ] **T2 — bit-identical CSC root solve.** (a) `dual_slack_basis` → `&SparseCols`;
-  (b) add `Scaling::from_cols` (+ unit test: identical factors to `from_matrix` on
-  the panel); (c) a CSC-scaled cold solve mirroring `solve_lp`'s `ScaledLp` path;
-  (d) `solve_lp_root_csc` mirroring `solve_lp_root` (dual-slack warm via
-  `solve_lp_warm_scaled_csc`, CSC cold fallback), wired into the root-cuts loop from
-  a CSC derived once per round. **Coupling note:** cut rows still append to dense
-  `a_w` until T3, so a_w isn't gone yet — T2 proves the *root solve* is CSC and
-  bit-identical; T3 removes a_w. **Done:** `driver_matches_golden` green (incl.
-  `lp_iters`); a unit test confirms `solve_lp_root_csc` == `solve_lp_root` on the
-  panel.
+- [x] **T2 — bit-identical CSC root solve.** (a) `dual_slack_basis` → `&SparseCols`
+  (it already built one internally); (b) reused the existing `Scaling::from_sparse`
+  (identical factors to `from_matrix`); (c) added `solve_lp_cols_scaled` — a
+  sparse-native cold solve that mirrors `solve_lp`'s `ScaledLp` (from_sparse →
+  scale_cols + scale c/l/u/b → `solve_lp_cols` → unscale x/dual/ray); (d) added
+  `solve_lp_root_csc` (dual-slack warm via `solve_lp_warm_scaled_csc`, `solve_lp_cols_scaled`
+  cold fallback) and **wired it into the root-cuts loop** (CSC from `from_dense(a_w)`
+  per round for now). `solve_lp_root` retained as `#[allow(dead_code)]` differential
+  oracle. **Coupling:** dense `a_w` still built (cuts append to it; the loop derives
+  the CSC from it) — a_w removal is T3. **Done ✓** — `driver_matches_golden` green
+  incl. `lp_iters`; `solve_lp_root_csc_matches_dense` confirms bit-identity on a
+  well-conditioned AND an ill-conditioned (1e8-range, equilibration-firing) LP; full
+  `cargo test -p discopt-core` 452 pass; `discopt-python` builds.
 - [ ] **T3 — sparse scaling + cut-row append.** `Scaling::from_matrix` CSC variant;
   GMI cut rows appended to the CSC (grow col_ptr/row_idx/vals) instead of `a_w`.
   **Done:** cuts-firing panel instance bit-identical; `a_w` no longer constructed.

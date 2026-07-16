@@ -16,7 +16,7 @@
 #![allow(clippy::needless_range_loop)]
 
 use super::linsolve::{FeralLU, LinearSolver};
-use super::scaling::ScaledLp;
+use super::scaling::{ScaledLp, Scaling};
 use super::sparse::SparseCols;
 use super::{LpSolve, LpStatus, SimplexOptions};
 use crate::lp::basis::{Basis, AT_LOWER, AT_UPPER, BASIC};
@@ -135,6 +135,50 @@ pub fn solve_lp_cols(
         }
     }
     sol
+}
+
+/// Sparse-native equivalent of [`solve_lp`]: a cold CSC solve with the SAME
+/// geometric-mean equilibration [`solve_lp`] applies via [`ScaledLp`]. It is
+/// bit-identical to `solve_lp` on the same matrix — [`Scaling::from_sparse`] yields
+/// the identical factors as `Scaling::from_matrix` (equilibration is sparse-native;
+/// zeros never affect a line's min/max), [`Scaling::scale_cols`] produces the same
+/// `R A C` entries as `scale_matrix`, [`solve_lp_cols`] runs the same `Simplex` the
+/// node solves already trust, and the certificate vectors are unscaled back to the
+/// original space exactly as `solve_lp` does. The point: it NEVER materializes the
+/// dense `m×n` matrix, so a large sparse relaxation (docs/dev/sparse-milp-plan.md,
+/// T2) is solved from CSC without the dense blow-up while staying pivot-for-pivot
+/// identical to the dense root solve.
+#[allow(clippy::too_many_arguments)]
+pub fn solve_lp_cols_scaled(
+    mut cols: SparseCols,
+    m: usize,
+    n: usize,
+    c: &[f64],
+    l: &[f64],
+    u: &[f64],
+    b: &[f64],
+    opts: &SimplexOptions,
+) -> LpSolve {
+    match Scaling::from_sparse(&cols, m, n) {
+        Some(scaling) => {
+            scaling.scale_cols(&mut cols);
+            let cs = scaling.scale_c(c);
+            let ls = scaling.scale_lower(l);
+            let us = scaling.scale_upper(u);
+            let bs = scaling.scale_b(b);
+            let mut sol = solve_lp_cols(cols, m, n, &cs, &ls, &us, &bs, opts);
+            // Map the certificate vectors back to the original space (mirrors
+            // `solve_lp`), so a caller's safe-bound / Farkas check sees them against
+            // the ORIGINAL A/b/bounds rather than the scaled system.
+            scaling.unscale_x(&mut sol.x);
+            scaling.unscale_dual(&mut sol.dual);
+            scaling.unscale_ray(&mut sol.ray);
+            sol
+        }
+        // Well-conditioned: solve unscaled — bit-identical to `solve_lp`'s `None`
+        // branch (`solve_lp_scaled` on the raw view).
+        None => solve_lp_cols(cols, m, n, c, l, u, b, opts),
+    }
 }
 
 /// Warm-started primal solve from an inherited `start` basis (cert:T1.4).

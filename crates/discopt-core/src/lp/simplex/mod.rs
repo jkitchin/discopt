@@ -29,7 +29,7 @@ pub use dual::{
     solve_lp_warm, solve_lp_warm_csc, solve_lp_warm_scaled, solve_lp_warm_scaled_csc, PreparedDual,
 };
 pub use presolve::tighten_bounds;
-pub use primal::{solve_lp, solve_lp_cols, solve_lp_scaled};
+pub use primal::{solve_lp, solve_lp_cols, solve_lp_cols_scaled, solve_lp_scaled};
 pub use scaling::Scaling;
 pub use sparse::SparseCols;
 

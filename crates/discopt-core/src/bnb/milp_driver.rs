@@ -25,8 +25,8 @@ use crate::lp::gomory::{separate_gomory, GomoryCut};
 use crate::lp::simplex::linsolve::{FeralLU, LinearSolver};
 use crate::lp::simplex::sparse::SparseCols;
 use crate::lp::simplex::{
-    solve_lp, solve_lp_scaled, solve_lp_warm, solve_lp_warm_scaled_csc, tighten_bounds, LpStatus,
-    PreparedDual, Scaling, SimplexOptions,
+    solve_lp, solve_lp_cols_scaled, solve_lp_scaled, solve_lp_warm, solve_lp_warm_scaled_csc,
+    tighten_bounds, LpStatus, PreparedDual, Scaling, SimplexOptions,
 };
 
 const INF: f64 = 1e20;
@@ -447,7 +447,13 @@ pub fn solve_milp_hooked(
             };
             let root = {
                 let _t = crate::profile::Timer::new(crate::profile::Phase::RootSolve);
-                solve_lp_root(&root_lp, &b_w, &node_simplex)
+                // T2 (docs/dev/sparse-milp-plan.md): solve the root relaxation from
+                // CSC via the bit-identical `solve_lp_root_csc`. The CSC is derived
+                // from `a_w` here only until T3 removes the dense working matrix; the
+                // node solves already run on CSC, so this makes the WHOLE per-round
+                // solve path sparse, gated bit-identical by `driver_matches_golden`.
+                let root_csc = SparseCols::from_dense(&a_w, m_w, n_w);
+                solve_lp_root_csc(&root_csc, m_w, n_w, &c_w, &l_w, &u_w, &b_w, &node_simplex)
             };
             lp_iters += root.iters;
             if root.status != LpStatus::Optimal {
@@ -1139,7 +1145,10 @@ fn solve_node(id: NodeId, lb_k: &[f64], ub_k: &[f64], ctx: &NodeCtx<'_>) -> Node
                 solve_lp_warm_scaled_csc(&solve_lp_view, ctx.sb, &basis, ctx.simplex, ctx.csc)
             } else {
                 match dual_slack_basis(
-                    ctx.a_w,
+                    // The unscaled CSC of the working matrix (== `from_dense(a_w)`);
+                    // dual_slack_basis reads only singleton structure + `c`, both
+                    // scale-invariant, so this is bit-identical to the old dense arg.
+                    ctx.csc_rc,
                     ctx.m_w,
                     ctx.n_w,
                     ctx.c_w,
@@ -2058,7 +2067,7 @@ fn midpoint(lb: &[f64], ub: &[f64]) -> Vec<f64> {
 // loop reads clearer than zipping four slices (matches the simplex modules).
 #[allow(clippy::needless_range_loop)]
 fn dual_slack_basis(
-    a: &[f64],
+    sp: &SparseCols,
     m: usize,
     n: usize,
     c: &[f64],
@@ -2066,7 +2075,6 @@ fn dual_slack_basis(
     u: &[f64],
     tol: f64,
 ) -> Option<Basis> {
-    let sp = SparseCols::from_dense(a, m, n);
     // Assign each row a distinct zero-cost singleton column (a slack).
     let mut row_basic: Vec<i64> = vec![-1; m];
     for j in 0..n {
@@ -2120,8 +2128,21 @@ fn dual_slack_basis(
 /// degenerate phase-2 pivots). `solve_lp_warm` falls back to the cold primal when
 /// the slack basis is unavailable or not actually dual-feasible, so the result is
 /// always the same optimum — only the path differs.
+///
+/// Superseded in the driver by [`solve_lp_root_csc`] (T2); retained as the
+/// differential ORACLE the `sparse_milp_diff` tests check the CSC root solve against
+/// bit-for-bit. Removed with the dense driver at T5.
+#[allow(dead_code)]
 fn solve_lp_root(lp: &LpView<'_>, b: &[f64], opts: &SimplexOptions) -> crate::lp::simplex::LpSolve {
-    match dual_slack_basis(lp.a, lp.m, lp.n, lp.c, lp.l, lp.u, opts.tol) {
+    match dual_slack_basis(
+        &SparseCols::from_dense(lp.a, lp.m, lp.n),
+        lp.m,
+        lp.n,
+        lp.c,
+        lp.l,
+        lp.u,
+        opts.tol,
+    ) {
         Some(basis) => {
             // The dual-slack warm start is an *optimization*, not a requirement: on
             // covering/packing relaxations the dual simplex reaches the optimum in a
@@ -2141,6 +2162,47 @@ fn solve_lp_root(lp: &LpView<'_>, b: &[f64], opts: &SimplexOptions) -> crate::lp
             }
         }
         None => solve_lp(lp, b, opts),
+    }
+}
+
+/// Sparse-native equivalent of [`solve_lp_root`] (docs/dev/sparse-milp-plan.md, T2).
+/// Bit-identical to `solve_lp_root` on the same LP — the dual-slack warm start reads
+/// only singleton structure + `c` (scale-invariant), the warm re-solve uses the same
+/// `solve_lp_warm_scaled_csc` the node solves already trust with the same pivot cap,
+/// and the cold fallback uses [`solve_lp_cols_scaled`] which reproduces `solve_lp`'s
+/// `ScaledLp` equilibration exactly. It NEVER materializes the dense `m×n` matrix, so
+/// the root relaxation of a large sparse binary QP solves from CSC without the dense
+/// blow-up. `cols` is the (unscaled) CSC of the working matrix; `c/l/u/b` and the
+/// slack layout match the dense root LP.
+fn solve_lp_root_csc(
+    cols: &SparseCols,
+    m: usize,
+    n: usize,
+    c: &[f64],
+    l: &[f64],
+    u: &[f64],
+    b: &[f64],
+    opts: &SimplexOptions,
+) -> crate::lp::simplex::LpSolve {
+    match dual_slack_basis(cols, m, n, c, l, u, opts.tol) {
+        Some(basis) => {
+            let lp = LpView {
+                a: &[],
+                m,
+                n,
+                c,
+                l,
+                u,
+            };
+            let warm = solve_lp_warm_scaled_csc(&lp, b, &basis, &warm_root_opts(opts, m, n), cols);
+            match warm.status {
+                LpStatus::IterLimit | LpStatus::Numerical => {
+                    solve_lp_cols_scaled(cols.clone(), m, n, c, l, u, b, opts)
+                }
+                _ => warm,
+            }
+        }
+        None => solve_lp_cols_scaled(cols.clone(), m, n, c, l, u, b, opts),
     }
 }
 
@@ -3025,6 +3087,72 @@ mod sparse_milp_diff {
                     );
                 }
             }
+        }
+    }
+
+    /// T2 direct gate: [`solve_lp_root_csc`] reproduces the dense [`solve_lp_root`]
+    /// pivot-for-pivot (status, objective, and **iteration count**) on both a
+    /// well-conditioned LP and an ILL-conditioned one whose 1e8 dynamic range trips
+    /// the `ScaledLp`/`Scaling::from_sparse` equilibration — the exact path whose
+    /// dense-vs-CSC equivalence option A rests on. `iters` drift here would mean the
+    /// CSC root solve takes a different pivot path and is NOT bit-identical.
+    #[test]
+    fn solve_lp_root_csc_matches_dense() {
+        // (name, a row-major m*n, m, n, c, l, u, b)
+        let cases: Vec<(
+            &str,
+            Vec<f64>,
+            usize,
+            usize,
+            Vec<f64>,
+            Vec<f64>,
+            Vec<f64>,
+            Vec<f64>,
+        )> = vec![
+            (
+                "well_conditioned",
+                vec![1.0, 1.0],
+                1,
+                2,
+                vec![-1.0, 0.0],
+                vec![0.0, 0.0],
+                vec![1.0, INF],
+                vec![1.0],
+            ),
+            (
+                // 1e8*x0 + 1.0*s = 1e8, x0 in [0,1] -> x0=1, obj -1. Range 1e8 > 1e6
+                // SCALE_TRIGGER, so both paths equilibrate.
+                "ill_conditioned",
+                vec![1e8, 1.0],
+                1,
+                2,
+                vec![-1.0, 0.0],
+                vec![0.0, 0.0],
+                vec![1.0, INF],
+                vec![1e8],
+            ),
+        ];
+        let opts = SimplexOptions::default();
+        for (name, a, m, n, c, l, u, b) in cases {
+            let lp = LpView {
+                a: &a,
+                m,
+                n,
+                c: &c,
+                l: &l,
+                u: &u,
+            };
+            let dense = solve_lp_root(&lp, &b, &opts);
+            let sp = SparseCols::from_dense(&a, m, n);
+            let csc = solve_lp_root_csc(&sp, m, n, &c, &l, &u, &b, &opts);
+            assert_eq!(dense.status, csc.status, "{name}: status");
+            assert_eq!(dense.iters, csc.iters, "{name}: iters (pivot-path) drift");
+            assert!(
+                (dense.obj - csc.obj).abs() < 1e-6 * (1.0 + dense.obj.abs()),
+                "{name}: obj {} vs {}",
+                dense.obj,
+                csc.obj
+            );
         }
     }
 
