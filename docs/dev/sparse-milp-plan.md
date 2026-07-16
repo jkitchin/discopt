@@ -135,22 +135,42 @@ structural `0.0` adds exactly, and CSC preserves ascending row order, so `Aᵀy`
   that genuinely branches (source from the `.nl` corpus or craft with cuts/heuristics
   off) so `driver_matches_golden` exercises `separate_cover`/`strong_branch`/
   propagation end-to-end, not just nodes=1. Capture status/obj/nodes/`lp_iters`.
-- [~] **T4 — Python binding + routing.** RUST HALF DONE: `solve_milp_hooked` now takes a
+- [x] **T4 — Python binding + routing.** RUST HALF: `solve_milp_hooked` takes a
   `SparseCols` (dense `solve_milp`/`solve_milp_py` build it from `lp.a`; no internal dense
   copy). Added `solve_milp_csc_py` (col_ptr/row_idx/vals input → `from_csc` → the sparse
   driver, NEVER densified) + a shared `run_milp_hooked`, registered in lib.rs. core 458
-  tests green; discopt-python builds. REMAINING (with T5, needs a rebuilt extension):
-  route `solvers/milp_simplex.py` + the `MilpRelaxationModel` MILP path to the CSC binding,
-  deleting `A.toarray()`/the dense `a_std`. `solve_milp_csc_py(col_ptr, row_idx, vals,
-  m, n, c, l, u, int_cols, ...)`; route `solvers/milp_simplex.py` and the
-  `MilpRelaxationModel` MILP path to pass the relaxation's existing scipy CSC
-  through — delete the `A.toarray()`/dense `a_std` assembly. **Done:** a small
-  binary-QP solves end-to-end via the CSC binding, bit-identical bound to dense.
-- [ ] **T5 — end-to-end + certificate gate.** `_root_relaxation_lower_bound(qap)`
-  and a full `solve_model(qap)` honor `time_limit` (no 73 GB, no overrun);
-  `incorrect_count == 0` on the global50 panel; node counts bit-identical to dense
-  on the T0 panel. **Done:** qap honors a real budget; certifying panels green;
-  retire the dense path only after consecutive nightly greens (separate task).
+  tests green. PYTHON HALF (this iter): `solvers/milp_simplex.py::solve_milp` now builds
+  the standard-form `[A_ub | I]` as a **scipy CSC** (`sp.hstack`, `sort_indices`) and calls
+  `solve_milp_csc_py` — the dense `a_std = np.zeros((m, n+m))` + `np.eye(m)` + `A.toarray()`
+  assembly is deleted. `MilpRelaxationModel.solve(backend="simplex")` already passes its
+  sparse `_A_ub` straight through (it is a CSR, ~2 MB for qap — verified). **Done:** all 39
+  `test_milp_simplex.py` tests green (incl. the pure-LP-machinery-off gate, respied on the
+  CSC binding); `pytest -m smoke` 653 green; adversarial suite 10 green — the routing is
+  bound-neutral (no node-count / objective drift on the certifying panels).
+- [x] **T5 — end-to-end measurement + FALSIFICATION (re-scope).** The MILP driver is now
+  fully sparse and materializes no dense `m×(n+m)` matrix (T0–T4 done, MILP path
+  bit-identical). **But the plan's premise — "making the Rust MILP driver sparse stops
+  qap's ~73 GB densification" — is FALSIFIED by measurement.** Entry experiment (qap.nl,
+  RSS watchdog, `/usr/bin/time -l`):
+  - qap's `MilpRelaxationModel._A_ub` is **already a sparse CSR** (85756×21649, ~2 MB) — not
+    dense. The 73 GB figure was the *hypothetical* dense driver footprint, never actually
+    allocated (the `_MAX_RELAX_DENSE_CELLS = 1e8` guard in `mccormick_lp.py` declines qap's
+    node LP at `(n_cols+n_rows)·n_rows = 9.2e9 > 1e8` **before** any solve).
+  - Measured peak RSS on a full `solve(time_limit=25s)` is **~28–30 GB** — and it is the
+    **same ~30 GB whether the guard is ON (every node LP declined, no simplex solve) or
+    OFF**. So qap's real memory ceiling is **independent of the LP solve and of the Rust
+    driver**: it is the **Python McCormick relaxation build** for the 85,756-row lift
+    (21,424 bilinear envelopes), a transient the sparse driver does not touch.
+  - **Consequences / re-scope:** (1) The sparse-driver work is correct and necessary but does
+    **not** by itself make qap tractable. (2) The `_MAX_RELAX_DENSE_CELLS` guard is left
+    **intact** — its dense-driver rationale is now obsolete, but even on the sparse path
+    solving qap's node LP still incurs the ~28 GB build blowup **and** an unquantified
+    85756×85756 basis-LU fill-in risk, so relaxing it would make qap *worse*, not better. Do
+    not open it without first solving the build-memory problem. (3) **Next task (new plan
+    doc):** profile and cap the Python McCormick relaxation *build* memory for large lifts
+    (the ~30 GB transient), independent of this driver work. The certificate gate
+    (`incorrect_count == 0` on global50) is unaffected by this iteration — the routing is
+    bound-neutral. Retire the dense oracles only after that follow-up + nightly greens.
 
 ## Problem (measured on qap — a 225-binary Quadratic Assignment Problem)
 

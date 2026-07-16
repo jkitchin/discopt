@@ -263,51 +263,58 @@ def solve_milp(
     ``objective`` is the engine's dual lower bound (see module docstring).
     """
     try:
-        from discopt._rust import solve_milp_py
+        from discopt._rust import solve_milp_csc_py
     except ImportError as err:  # pragma: no cover - exercised via the selector
         raise SimplexBackendUnavailable(
-            "discopt._rust.solve_milp_py is unavailable; build the Rust extension"
+            "discopt._rust.solve_milp_csc_py is unavailable; build the Rust extension"
         ) from err
 
     c_arr = np.asarray(c, dtype=np.float64).ravel()
     n = c_arr.shape[0]
 
     # Assemble all rows as `<=` (A_eq becomes a pair of `<=` rows) then slack.
-    rows: list[np.ndarray] = []
+    # SPARSE throughout: a dense `[A_ub | I]` would materialize an m×(n+m) matrix
+    # (~73 GB for qap's 85k×21k McCormick relaxation) that the Rust driver never
+    # needs — it consumes CSC. We keep every block sparse and hand the driver the
+    # CSC triplets of the standard-form matrix; nothing is ever densified here.
+    blocks: list[sp.spmatrix] = []
     rhs: list[float] = []
     if A_ub is not None and b_ub is not None and np.size(b_ub) > 0:
-        a = (
-            cast("sp.spmatrix", A_ub).toarray()
+        au = (
+            sp.csr_matrix(cast("sp.spmatrix", A_ub))
             if sp.issparse(A_ub)
-            else np.asarray(A_ub, dtype=np.float64)
+            else sp.csr_matrix(np.asarray(A_ub, dtype=np.float64).reshape(-1, n))
         )
-        rows.append(a.reshape(-1, n))
+        blocks.append(au)
         rhs.extend(np.asarray(b_ub, dtype=np.float64).ravel().tolist())
     if A_eq is not None and b_eq is not None and np.size(b_eq) > 0:
-        a = (
-            cast("sp.spmatrix", A_eq).toarray()
+        ae = (
+            sp.csr_matrix(cast("sp.spmatrix", A_eq))
             if sp.issparse(A_eq)
-            else np.asarray(A_eq, dtype=np.float64)
+            else sp.csr_matrix(np.asarray(A_eq, dtype=np.float64).reshape(-1, n))
         )
-        a = a.reshape(-1, n)
         be = np.asarray(b_eq, dtype=np.float64).ravel()
-        rows.append(a)
+        blocks.append(ae)
         rhs.extend(be.tolist())
-        rows.append(-a)
+        blocks.append(-ae)
         rhs.extend((-be).tolist())
 
-    if rows:
-        a_ub = np.vstack(rows)
+    if blocks:
+        a_ub_sp = sp.vstack(blocks, format="csr")
     else:
-        a_ub = np.zeros((0, n), dtype=np.float64)
+        a_ub_sp = sp.csr_matrix((0, n), dtype=np.float64)
     b_vec = np.asarray(rhs, dtype=np.float64)
-    m = a_ub.shape[0]
+    m = a_ub_sp.shape[0]
 
-    # Standard form A_eq z = b with one slack per row: [A_ub | I] z = b_ub.
-    a_std = np.zeros((m, n + m), dtype=np.float64)
-    if m > 0:
-        a_std[:, :n] = a_ub
-        a_std[:, n:] = np.eye(m)
+    # Standard form A_eq z = b with one slack per row: [A_ub | I] z = b_ub, built
+    # directly as CSC (never densified). ``sort_indices`` gives ascending row
+    # order within each column, which ``SparseCols::from_csc`` requires.
+    a_std_sp = sp.hstack([a_ub_sp, sp.identity(m, dtype=np.float64, format="csr")], format="csc")
+    a_std_sp.sum_duplicates()
+    a_std_sp.sort_indices()
+    csc_col_ptr = np.ascontiguousarray(a_std_sp.indptr, dtype=np.int64)
+    csc_row_idx = np.ascontiguousarray(a_std_sp.indices, dtype=np.int64)
+    csc_vals = np.ascontiguousarray(a_std_sp.data, dtype=np.float64)
 
     if bounds is not None:
         lb = np.array([lo for lo, _ in bounds], dtype=np.float64)
@@ -356,9 +363,13 @@ def solve_milp(
         else {}
     )
 
-    status, x_full, obj, bound, nodes, _iters = solve_milp_py(
+    status, x_full, obj, bound, nodes, _iters = solve_milp_csc_py(
         np.ascontiguousarray(c_std),
-        np.ascontiguousarray(a_std),
+        m,
+        n + m,  # total columns: structural + one slack per row
+        csc_col_ptr,
+        csc_row_idx,
+        csc_vals,
         np.ascontiguousarray(b_vec),
         np.ascontiguousarray(lb_std),
         np.ascontiguousarray(ub_std),
