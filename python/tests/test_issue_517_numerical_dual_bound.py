@@ -77,8 +77,12 @@ def test_inert_on_cleanly_certifying_instances(name, monkeypatch):
     assert off.bound == on.bound, f"{name}: bound drifted with the flag ({off.bound} -> {on.bound})"
 
 
-def test_flag_defaults_off():
-    """The tuning flag is default-OFF (opt-in, bound-changing regime)."""
+def test_flag_defaults_off(monkeypatch):
+    """The tuning flag is default-OFF (opt-in, bound-changing regime).
+
+    Check the *code* default in the absence of the env override (a CI shell that
+    exports the flag must not make the default look ON)."""
+    monkeypatch.delenv(_FLAG, raising=False)
     from discopt.solver_tuning import SolverTuning
 
     assert SolverTuning().node_numerical_dual_bound is False
