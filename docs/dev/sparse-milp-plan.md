@@ -115,7 +115,15 @@ structural `0.0` adds exactly, and CSC preserves ascending row order, so `Aᵀy`
   the sums are fixed from loop 1). **Done ✓** — 191 existing presolve tests gate the
   dense refactor; new `csc_matches_dense_fbbt` (tightening + infeasible box) gates the
   port; 457 core tests green.
-- [ ] **T3b5 — driver rewire + remove `a_w`.** Carry the working matrix as
+- [x] **T3b5 — driver rewire + remove `a_w`.** DONE — the MILP driver is fully sparse.
+  Built csc_w before presolve; presolve→tighten_bounds_csc; root-cuts loop→solve_lp_root_csc
+  + separate_cover_csc + separate_gomory_cols + augment_csc_with_cuts; per-batch scaling via
+  Scaling::from_sparse + scale_cols (csc_batch scaled, csc_rc unscaled); NodeCtx drops a_w/sa;
+  per-node consumers → CSC ports (FBBT/rounding/cover→csc_rc, farkas→csc); dense cold
+  fallbacks solve_lp_scaled→solve_lp_cols(ctx.csc). refactored separate_gomory→separate_gomory_cols.
+  **Done ✓** — driver_matches_golden AND branching_golden (nodes=13) green; 458 core tests +
+  discopt-python build. Dense oracles retained (allow(dead_code)) for the differential tests.
+  ORIGINAL: Carry the working matrix as
   `SparseCols` through `solve_milp_hooked`: build base CSC, append cuts via
   `augment_cols_with_cuts` (+ the `b/c/l/u/is_int` appends), scaling via
   `Scaling::from_sparse`+`scale_cols`, `NodeCtx` carries `csc`/`csc_rc` (drop `a_w`,
