@@ -54,6 +54,43 @@ def test_incremental_active_for_integer_qcqp():
     assert MccormickLPRelaxer(_int_qcqp())._inc is not None
 
 
+def test_incremental_declined_when_lift_too_large_for_dense(monkeypatch):
+    """A lift whose dense ``base_A`` would exceed the cell budget declines the
+    incremental structure and falls back to the sparse per-node cold build with an
+    UNCHANGED (never looser) bound.
+
+    Regression for the qap ~30 GB blowup: ``IncrementalMcCormickLP`` stores
+    ``base_A`` DENSE (``rows x cols``) and ``_patch`` copies that whole array on
+    EVERY node — ~14.85 GB each for qap's 85756x21649 lift, ~30 GB peak just
+    constructing the relaxer. The size guard declines the dense structure above
+    ``_MAX_INCREMENTAL_DENSE_CELLS`` so large-lift models use the sparse cold path.
+    Before the guard, ``_inc`` was built regardless of lift size (this test's
+    ``_inc is None`` assertion fails); after, it is declined.
+    """
+    import discopt._jax.incremental_mccormick as inc
+
+    m = _int_qcqp()
+    lb = np.array([float(v.lb) for v in m._variables], dtype=np.float64)
+    ub = np.array([float(v.ub) for v in m._variables], dtype=np.float64)
+
+    # Reference bound WITH the fast path (normal cap): structure engages.
+    relaxer_fast = MccormickLPRelaxer(m)
+    assert relaxer_fast._inc is not None
+    ref = relaxer_fast.solve_at_node(lb, ub)
+    assert ref.status == "optimal"
+
+    # Tiny cap forces the oversize decline even on this small QCQP lift.
+    monkeypatch.setattr(inc, "_MAX_INCREMENTAL_DENSE_CELLS", 1.0)
+    relaxer_cold = MccormickLPRelaxer(m)
+    assert relaxer_cold._inc is None  # dense structure declined -> cold fallback
+    got = relaxer_cold.solve_at_node(lb, ub)
+    assert got.status == "optimal"
+    # Sound + never looser: the cold path keeps every cut the fast path may drop,
+    # so its lower bound is >= the fast-path bound (bound-neutral to slightly
+    # tighter), never a regression.
+    assert got.lower_bound >= ref.lower_bound - 1e-6
+
+
 def test_validate_exercises_at_least_four_sign_regimes():
     """C-21: the soundness gate must probe negative-lb / zero-spanning / mixed-sign
     / degenerate boxes, not just ``lb>=0``. On a model with zero-spanning root

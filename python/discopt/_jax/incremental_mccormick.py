@@ -25,12 +25,39 @@ univariate, fractional power, piecewise) makes validation fail -> fallback.
 
 from __future__ import annotations
 
+import logging
 import time
 
 import numpy as np
 import scipy.sparse as sp
 
+logger = logging.getLogger(__name__)
+
 _TOL = 1e-7
+
+# Dense-footprint budget for the incremental structure. Unlike the cold build
+# (which keeps ``_A_ub`` SPARSE, ~nnz cells), the incremental fast path stores
+# ``base_A`` as a DENSE ``rows x cols`` array and, worse, ``_patch`` copies that
+# whole dense array on EVERY node solve — so its footprint is ``O(rows*cols)``
+# per node, not per solve. A large lift makes this ruinous: qap's 85756 x 21649
+# lift is ~1.86e9 cells ~ 14.85 GB for base_A alone, plus another 14.85 GB per
+# node copy (measured ~30 GB peak just constructing the relaxer). Above this cell
+# budget the incremental path is declined (``ok=False``) and ``solve_at_node``
+# falls back to the trusted per-node SPARSE cold build. Sound: the incremental
+# structure is only an accelerator whose result is validated bit-identical to the
+# cold build (see the class docstring / ``_validate``), so skipping it changes
+# speed, never the bound. ~1e8 cells ~ 0.8 GB dense: comfortably covers every
+# small/medium lift the fast path targets, far below the multi-GB blowup.
+_MAX_INCREMENTAL_DENSE_CELLS = 1.0e8
+
+# Warn-once keys for oversize declines, so a large model logs a single line
+# rather than one per relaxer construction.
+_incremental_oversize_warned: set = set()
+
+
+class _IncrementalStructureTooLarge(Exception):
+    """The lifted relaxation is too large to hold densely in the incremental
+    fast path; the caller falls back to the sparse per-node cold build."""
 
 
 def _bilinear_rows(i, j, a, li, ui, lj, uj):
@@ -191,6 +218,27 @@ class IncrementalMcCormickLP:
         )
         if not relax._objective_bound_valid or relax._A_ub is None:
             raise ValueError("relaxation has no valid bound / no rows")
+        # Decline the dense incremental structure for a large lift BEFORE
+        # densifying (``.todense()`` below would allocate the full ``rows*cols``
+        # array). This keeps the ~30 GB dense ``base_A`` (and its per-node copy in
+        # ``_patch``) off large-lift problems like qap; ``solve_at_node`` then uses
+        # the sparse cold build per node. See ``_MAX_INCREMENTAL_DENSE_CELLS``.
+        _rows, _cols = relax._A_ub.shape
+        if _rows * _cols > _MAX_INCREMENTAL_DENSE_CELLS:
+            key = (_rows, _cols)
+            if key not in _incremental_oversize_warned:
+                _incremental_oversize_warned.add(key)
+                logger.info(
+                    "Incremental McCormick structure declined: lift %dx%d ~ %.1e dense "
+                    "cells > cap %.0e; using the per-node sparse cold build instead.",
+                    _rows,
+                    _cols,
+                    float(_rows * _cols),
+                    _MAX_INCREMENTAL_DENSE_CELLS,
+                )
+            raise _IncrementalStructureTooLarge(
+                f"lift {_rows}x{_cols} exceeds the dense incremental budget"
+            )
         A = np.asarray(sp.csr_matrix(relax._A_ub).todense(), dtype=np.float64)
         b = np.asarray(relax._b_ub, dtype=np.float64).ravel()
         bnds = np.asarray(relax._bounds, dtype=np.float64)
