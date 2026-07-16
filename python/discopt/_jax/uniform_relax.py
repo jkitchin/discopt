@@ -1109,10 +1109,20 @@ class _Builder:
             return LinForm.constant(node.payload)
         if node.kind == "sum":
             coeffs, const = node.payload
-            acc = LinForm.constant(const)
+            # Accumulate into ONE dict rather than chaining ``acc = acc + rep(child)``:
+            # ``LinForm.__add__`` copies the growing accumulator each time, so a sum of
+            # N children (e.g. a 21k-term quadratic objective, qap) was O(N^2). Folding
+            # in place is O(N + total nnz) and produces the byte-identical LinForm (same
+            # per-column coefficient sum, zeros dropped), so the relaxation is unchanged.
+            acc_coeffs: dict[int, float] = {}
+            acc_const = float(const)
             for coef, child in zip(coeffs, node.children):
-                acc = acc + self.rep(child).scaled(float(coef))
-            return acc
+                s = float(coef)
+                lf = self.rep(child)
+                acc_const += lf.const * s
+                for j, c in lf.coeffs.items():
+                    acc_coeffs[j] = acc_coeffs.get(j, 0.0) + c * s
+            return LinForm({j: c for j, c in acc_coeffs.items() if c != 0.0}, acc_const)
         # Every remaining kind is a nonlinear atom: allocate an aux with the sound
         # interval floor, then let its builder add tighter sound rows.
         lo, hi = self.bounds(node)
