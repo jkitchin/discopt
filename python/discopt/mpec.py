@@ -36,7 +36,7 @@ Example
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional
+from typing import Optional, cast
 
 import numpy as np
 
@@ -94,14 +94,15 @@ def _aux_upper_bound(model: Model, expr: Expression) -> float:
     try:
         hi = float(np.max(np.asarray(evaluate_interval(expr, model).hi)))
     except Exception:
-        return np.inf
-    return hi if np.isfinite(hi) else np.inf
+        return float("inf")
+    return hi if np.isfinite(hi) else float("inf")
 
 
 def _index(expr: Expression, shape: tuple[int, ...], k: int) -> Expression:
     """Return element ``k`` (row-major) of a vector/array expression."""
     idx = tuple(int(v) for v in np.unravel_index(k, shape))
-    return expr[idx[0]] if len(idx) == 1 else expr[idx]
+    elem = expr[idx[0]] if len(idx) == 1 else expr[idx]
+    return cast(Expression, elem)
 
 
 def _scalarize_pairs(model: Model, pairs: list[Complementarity]) -> list[Complementarity]:
@@ -206,7 +207,8 @@ def reformulate_gdp(model: Model, pairs: list[Complementarity]) -> None:
     ``(f_i==0) ∨ (g_i==0)`` disjunction, not a single all-zero-vector disjunction.
     """
     for p in _scalarize_pairs(model, pairs):
-        tag = p.name
+        # _scalarize_pairs always assigns a name; narrow Optional[str] -> str.
+        tag = p.name or "compl"
         fv = _gdp_operand(model, p.f, tag, "f")
         gv = _gdp_operand(model, p.g, tag, "g")
         model.subject_to(fv >= 0, name=f"{tag}_f_nonneg")
