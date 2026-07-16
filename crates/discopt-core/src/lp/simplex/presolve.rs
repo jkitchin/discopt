@@ -14,6 +14,7 @@
 //! harmless (a no-op) on problems with no propagation, e.g. a lone knapsack row.
 
 use crate::lp::crossover::LpView;
+use crate::lp::simplex::sparse::SparseCols;
 
 const INF: f64 = 1e20;
 
@@ -41,106 +42,26 @@ pub fn tighten_bounds(lp: &LpView<'_>, b: &[f64], is_int: &[bool], tol: f64) -> 
     let max_rounds = 8;
     let round_tol = 1e-6;
 
+    let mut row_nz: Vec<(usize, f64)> = Vec::new();
     for _round in 0..max_rounds {
         let mut changed = false;
         for i in 0..m {
             let row = &a[i * n..(i + 1) * n];
-            // Row activity range with infinity bookkeeping. For column j the
-            // contribution interval is [cmin_j, cmax_j]; track the finite sums
-            // and how many terms are ±infinite so a single-column residual can
-            // tell whether *its* residual bound is finite.
-            let mut sum_min_finite = 0.0;
-            let mut sum_max_finite = 0.0;
-            let mut n_min_inf = 0usize; // terms contributing −∞ to the lower activity
-            let mut n_max_inf = 0usize; // terms contributing +∞ to the upper activity
-            for j in 0..n {
-                let aij = row[j];
-                if aij == 0.0 {
-                    continue;
-                }
-                let (cmin, cmax) = if aij > 0.0 {
-                    (aij * lo[j], aij * hi[j])
-                } else {
-                    (aij * hi[j], aij * lo[j])
-                };
-                if cmin <= -INF {
-                    n_min_inf += 1;
-                } else {
-                    sum_min_finite += cmin;
-                }
-                if cmax >= INF {
-                    n_max_inf += 1;
-                } else {
-                    sum_max_finite += cmax;
+            row_nz.clear();
+            for (j, &v) in row.iter().enumerate() {
+                if v != 0.0 {
+                    row_nz.push((j, v));
                 }
             }
-
-            for k in 0..n {
-                let aik = row[k];
-                if aik == 0.0 {
-                    continue;
-                }
-                let (ck_min, ck_max) = if aik > 0.0 {
-                    (aik * lo[k], aik * hi[k])
-                } else {
-                    (aik * hi[k], aik * lo[k])
-                };
-                let k_min_inf = ck_min <= -INF;
-                let k_max_inf = ck_max >= INF;
-
-                // Residual (over j≠k) bounds, finite only when no *other* term is
-                // infinite on that side.
-                let res_min_finite = n_min_inf - (k_min_inf as usize) == 0;
-                let res_max_finite = n_max_inf - (k_max_inf as usize) == 0;
-
-                // a_ik x_k ≤ b_i − res_min  (upper on the term)
-                let mut term_ub = INF;
-                if res_min_finite {
-                    let res_min = sum_min_finite - if k_min_inf { 0.0 } else { ck_min };
-                    term_ub = b[i] - res_min;
-                }
-                // a_ik x_k ≥ b_i − res_max  (lower on the term)
-                let mut term_lb = -INF;
-                if res_max_finite {
-                    let res_max = sum_max_finite - if k_max_inf { 0.0 } else { ck_max };
-                    term_lb = b[i] - res_max;
-                }
-
-                // Translate term bounds to x_k bounds (flip if a_ik < 0).
-                let (mut new_lo, mut new_hi) = if aik > 0.0 {
-                    (
-                        if term_lb <= -INF { -INF } else { term_lb / aik },
-                        if term_ub >= INF { INF } else { term_ub / aik },
-                    )
-                } else {
-                    (
-                        if term_ub >= INF { -INF } else { term_ub / aik },
-                        if term_lb <= -INF { INF } else { term_lb / aik },
-                    )
-                };
-                if is_int[k] {
-                    if new_lo > -INF {
-                        new_lo = (new_lo - round_tol).ceil();
-                    }
-                    if new_hi < INF {
-                        new_hi = (new_hi + round_tol).floor();
-                    }
-                }
-                if new_lo > lo[k] + tol {
-                    lo[k] = new_lo;
-                    changed = true;
-                }
-                if new_hi < hi[k] - tol {
-                    hi[k] = new_hi;
-                    changed = true;
-                }
-                if lo[k] > hi[k] + tol {
+            match fbbt_row(&row_nz, b[i], &mut lo, &mut hi, is_int, tol, round_tol) {
+                None => {
                     return PresolveResult {
                         l: lo,
                         u: hi,
                         infeasible: true,
-                    };
+                    }
                 }
+                Some(c) => changed |= c,
             }
         }
         if !changed {
@@ -153,6 +74,165 @@ pub fn tighten_bounds(lp: &LpView<'_>, b: &[f64], is_int: &[bool], tol: f64) -> 
         u: hi,
         infeasible: false,
     }
+}
+
+/// CSC port of [`tighten_bounds`] (docs/dev/sparse-milp-plan.md T3b4). Bit-identical:
+/// per-row nonzeros are gathered from the CSC once (a single `O(nnz)` column sweep,
+/// column-ascending per row exactly as the dense row scan produces them, reused
+/// across rounds), and the shared [`fbbt_row`] runs the same code. FBBT's row loops
+/// already skip structural zeros and the per-column tightening is independent of
+/// column order within a row (the activity sums are fixed from the first loop), so
+/// the CSC order yields the identical result. Never materializes the dense matrix.
+#[allow(clippy::too_many_arguments)]
+pub fn tighten_bounds_csc(
+    csc: &SparseCols,
+    m: usize,
+    n: usize,
+    l: &[f64],
+    u: &[f64],
+    b: &[f64],
+    is_int: &[bool],
+    tol: f64,
+) -> PresolveResult {
+    let mut lo = l.to_vec();
+    let mut hi = u.to_vec();
+    let max_rounds = 8;
+    let round_tol = 1e-6;
+
+    // Per-row nonzeros (CSR), built once and reused each round (the matrix is
+    // constant; only lo/hi change).
+    let mut row_nz: Vec<Vec<(usize, f64)>> = vec![Vec::new(); m];
+    let (col_ptr, row_idx, vals) = csc.raw();
+    for j in 0..n {
+        for idx in col_ptr[j]..col_ptr[j + 1] {
+            row_nz[row_idx[idx]].push((j, vals[idx]));
+        }
+    }
+
+    for _round in 0..max_rounds {
+        let mut changed = false;
+        for i in 0..m {
+            match fbbt_row(&row_nz[i], b[i], &mut lo, &mut hi, is_int, tol, round_tol) {
+                None => {
+                    return PresolveResult {
+                        l: lo,
+                        u: hi,
+                        infeasible: true,
+                    }
+                }
+                Some(c) => changed |= c,
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+
+    PresolveResult {
+        l: lo,
+        u: hi,
+        infeasible: false,
+    }
+}
+
+/// One FBBT round over a single row, given its nonzeros `(col, coeff)`. Mutates
+/// `lo`/`hi` in place; returns `Some(changed)` or `None` if the box was proven empty.
+/// Matrix-representation-independent — the dense and CSC entries differ ONLY in how
+/// they gather `row_nz`, so both produce byte-identical tightenings.
+fn fbbt_row(
+    row_nz: &[(usize, f64)],
+    b_i: f64,
+    lo: &mut [f64],
+    hi: &mut [f64],
+    is_int: &[bool],
+    tol: f64,
+    round_tol: f64,
+) -> Option<bool> {
+    let mut changed = false;
+    // Row activity range with infinity bookkeeping.
+    let mut sum_min_finite = 0.0;
+    let mut sum_max_finite = 0.0;
+    let mut n_min_inf = 0usize;
+    let mut n_max_inf = 0usize;
+    for &(j, aij) in row_nz {
+        if aij == 0.0 {
+            continue;
+        }
+        let (cmin, cmax) = if aij > 0.0 {
+            (aij * lo[j], aij * hi[j])
+        } else {
+            (aij * hi[j], aij * lo[j])
+        };
+        if cmin <= -INF {
+            n_min_inf += 1;
+        } else {
+            sum_min_finite += cmin;
+        }
+        if cmax >= INF {
+            n_max_inf += 1;
+        } else {
+            sum_max_finite += cmax;
+        }
+    }
+
+    for &(k, aik) in row_nz {
+        if aik == 0.0 {
+            continue;
+        }
+        let (ck_min, ck_max) = if aik > 0.0 {
+            (aik * lo[k], aik * hi[k])
+        } else {
+            (aik * hi[k], aik * lo[k])
+        };
+        let k_min_inf = ck_min <= -INF;
+        let k_max_inf = ck_max >= INF;
+
+        let res_min_finite = n_min_inf - (k_min_inf as usize) == 0;
+        let res_max_finite = n_max_inf - (k_max_inf as usize) == 0;
+
+        let mut term_ub = INF;
+        if res_min_finite {
+            let res_min = sum_min_finite - if k_min_inf { 0.0 } else { ck_min };
+            term_ub = b_i - res_min;
+        }
+        let mut term_lb = -INF;
+        if res_max_finite {
+            let res_max = sum_max_finite - if k_max_inf { 0.0 } else { ck_max };
+            term_lb = b_i - res_max;
+        }
+
+        let (mut new_lo, mut new_hi) = if aik > 0.0 {
+            (
+                if term_lb <= -INF { -INF } else { term_lb / aik },
+                if term_ub >= INF { INF } else { term_ub / aik },
+            )
+        } else {
+            (
+                if term_ub >= INF { -INF } else { term_ub / aik },
+                if term_lb <= -INF { INF } else { term_lb / aik },
+            )
+        };
+        if is_int[k] {
+            if new_lo > -INF {
+                new_lo = (new_lo - round_tol).ceil();
+            }
+            if new_hi < INF {
+                new_hi = (new_hi + round_tol).floor();
+            }
+        }
+        if new_lo > lo[k] + tol {
+            lo[k] = new_lo;
+            changed = true;
+        }
+        if new_hi < hi[k] - tol {
+            hi[k] = new_hi;
+            changed = true;
+        }
+        if lo[k] > hi[k] + tol {
+            return None;
+        }
+    }
+    Some(changed)
 }
 
 #[cfg(test)]
@@ -232,5 +312,58 @@ mod tests {
         assert!(!r.infeasible);
         assert!((r.u[0] - 2.0).abs() < 1e-9, "x0 upper {}", r.u[0]);
         assert!((r.l[0] - 1.0).abs() < 1e-9, "x0 lower {}", r.l[0]);
+    }
+
+    /// T3b4 gate: `tighten_bounds_csc` produces byte-identical tightened bounds to
+    /// the dense `tighten_bounds` on a multi-row system that fires activity-range
+    /// propagation and integer rounding (u[0]→3, u[1]→2), and on an infeasible box.
+    #[test]
+    fn csc_matches_dense_fbbt() {
+        // 2x0 + 3x1 + s0 = 6 ; x0 − x1 + s1 = 1 ; x0,x1 binary→general int ≥ 0.
+        let a = [2.0, 3.0, 1.0, 0.0, 1.0, -1.0, 0.0, 1.0]; // 2×4
+        let (m, n) = (2usize, 4usize);
+        let c = [0.0; 4];
+        let l = [0.0, 0.0, 0.0, 0.0];
+        let u = [1e20, 1e20, 1e20, 1e20];
+        let b = [6.0, 1.0];
+        let is_int = [true, true, false, false];
+        let dense = tighten_bounds(&view(&a, m, n, &c, &l, &u), &b, &is_int, 1e-9);
+        let csc = tighten_bounds_csc(
+            &SparseCols::from_dense(&a, m, n),
+            m,
+            n,
+            &l,
+            &u,
+            &b,
+            &is_int,
+            1e-9,
+        );
+        assert_eq!(dense.infeasible, csc.infeasible, "infeasible verdict drift");
+        assert_eq!(dense.l, csc.l, "lower bounds drift");
+        assert_eq!(dense.u, csc.u, "upper bounds drift");
+        assert!(
+            dense.u[0] < 1e20 && dense.u[1] < 1e20,
+            "sanity: expected tightening"
+        );
+
+        // Infeasible box: x0 ≥ 5 but the same 2x0 ≤ 6 forces x0 ≤ 3.
+        let l2 = [5.0, 0.0, 0.0, 0.0];
+        let d2 = tighten_bounds(&view(&a, m, n, &c, &l2, &u), &b, &is_int, 1e-9);
+        let c2 = tighten_bounds_csc(
+            &SparseCols::from_dense(&a, m, n),
+            m,
+            n,
+            &l2,
+            &u,
+            &b,
+            &is_int,
+            1e-9,
+        );
+        assert!(
+            d2.infeasible && c2.infeasible,
+            "expected infeasible both paths"
+        );
+        assert_eq!(d2.l, c2.l);
+        assert_eq!(d2.u, c2.u);
     }
 }

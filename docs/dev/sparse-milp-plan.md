@@ -107,8 +107,14 @@ structural `0.0` adds exactly, and CSC preserves ascending row order, so `Aᵀy`
 - [x] **T3b2 — `separate_cover` → CSC** (+ its dense oracle + differential test on a
   crafted fractional node).
 - [x] **T3b3 — `strong_branch` → CSC.** Finding (mini-falsification): `strong_branch` is ALREADY CSC-based — it solves only via `PreparedDual::prepare`/`solve_lp_warm_scaled_csc`, which take `ctx.csc` and never read `LpView.a`, and it has no other matrix access. So no port is needed; its two `a: ctx.sa` fields were vestigial → set to `&[]` (removing its dense dependency). **Done ✓** — full `cargo test -p discopt-core` (456) green with the empty `.a` (runtime proof it's unread); the integration gate where `strong_branch` actually fires is T3b6.
-- [ ] **T3b4 — node propagation / FBBT (`prop_lp`) → CSC** (+ oracle + differential
-  test).
+- [x] **T3b4 — FBBT `tighten_bounds` → CSC.** Refactored FBBT so the matrix touch
+  (gather a row's nonzeros) is split from the shared per-row propagation `fbbt_row`
+  (activity ranges + infinity bookkeeping + integer rounding). Dense scans the row;
+  new `tighten_bounds_csc` builds per-row nonzeros once from the CSC (reused across
+  rounds). Bit-identical (zeros skipped; per-column tightening order-independent as
+  the sums are fixed from loop 1). **Done ✓** — 191 existing presolve tests gate the
+  dense refactor; new `csc_matches_dense_fbbt` (tightening + infeasible box) gates the
+  port; 457 core tests green.
 - [ ] **T3b5 — driver rewire + remove `a_w`.** Carry the working matrix as
   `SparseCols` through `solve_milp_hooked`: build base CSC, append cuts via
   `augment_cols_with_cuts` (+ the `b/c/l/u/is_int` appends), scaling via
