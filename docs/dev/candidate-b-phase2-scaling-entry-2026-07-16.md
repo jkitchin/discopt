@@ -177,14 +177,37 @@ dependence among columns) with a true SVD condition number **~1e14+** — and th
 failed. feral's FT `Growth` is it choking on **near-singular bases** (tiny pivots),
 exactly what a rank-deficient matrix produces.
 
-**Re-scoped fix (more tractable than "higher precision"):** the blocker is
-structural **redundancy / near-linear-dependence** in the lifted relaxation, not
-conditioning-by-scaling. The lever is a **presolve that detects and removes (or
-regularizes) the ~43 numerically dependent columns/rows** before factorization, so
-bases are non-singular. Higher precision is *not* required. (An earlier presolve
-probe was run on a malformed captured LP and its negative result is withdrawn —
-this SVD evidence supersedes it.) Still a real core-engine change under the
-bound-neutral regime; but structural-rank-reduction, not scaling and not f128.
+**Cross-check — every float64 route fails, presolve included (measured):**
+
+| approach on hda's captured node LP | result |
+|---|---|
+| HiGHS simplex, unscaled | INFEASIBLE (false) |
+| HiGHS simplex, optimally scaled (coef range 1.77e9) | `numerical` |
+| HiGHS simplex, **rank-reduced** to 1063 full-rank rows + scaled | `numerical` |
+| HiGHS **interior-point**, scaled | `numerical` |
+
+So the presolve / rank-reduction hypothesis is **falsified**: dropping the
+redundant rows does not make HiGHS solve it. And it is **not** a feral-specific
+weakness — HiGHS's simplex *and* IPM both fail, with scaling and presolve. hda's
+McCormick relaxation LP is **genuinely intractable at float64 precision**: the
+rank-deficiency (~43) plus the cluster of ~400 tiny singular values makes the
+KKT/basis systems near-singular for *any* float64 factorization.
+
+**Final disposition (verified).** The tight dual bound for hda is **not obtainable
+at float64 precision** with this relaxation, by any engine/scaling/presolve. The
+only genuine fixes are:
+
+1. **Higher-precision LP arithmetic** (f128 / rational residual refinement in the
+   factorization) — now the *primary* lever, not optional.
+2. **A reformulated, well-conditioned relaxation** of the hda-class flowsheet
+   (change the constraint structure so the McCormick LP is not near-singular) — a
+   relaxation-layer research problem.
+
+Candidate (A)'s sound loose floor (merged, #662) stands as the practical answer:
+it is the best a float64 engine can certify on this relaxation. My earlier
+"~1e7 ceiling" framing was wrong (it is feral's coefficient-range heuristic, not a
+float64 limit); the *verified* obstacle is genuine near-singularity, confirmed by
+HiGHS failing identically.
 
 Acceptance / regime unchanged from #664: bound-neutral verification
 (`node_count` + certified `objective` exactly unchanged on the certifying panel,
