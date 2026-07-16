@@ -123,7 +123,7 @@ structural `0.0` adds exactly, and CSC preserves ascending row order, so `Aᵀy`
   Delete `a_w = lp.a.to_vec()` and every dense-matrix site. **Done:**
   `driver_matches_golden` green (incl. `lp_iters`); all T3b differential tests green;
   `a_w` no longer constructed; dense-entry path bit-identical.
-- [ ] **T3b6 (gate strengthening) — branching integration golden.** Add ≥1 small MILP
+- [x] **T3b6 (gate strengthening) — branching integration golden.** DONE FIRST (gate-first, before T3b5). Small 6-binary knapsack solved with heuristics off + no root GMI (forces a 13-node tree) but node cover separation + strong branching + FBBT propagation ON — so `separate_cover`/`strong_branch`/`tighten_bounds` (and their CSC ports) run end-to-end. Golden: Optimal, obj −16, **nodes=13, lp_iters=39**. This gates the T3b5 rewire (the nodes=1 panel can't). **Original T3b6 note:** Add ≥1 small MILP
   that genuinely branches (source from the `.nl` corpus or craft with cuts/heuristics
   off) so `driver_matches_golden` exercises `separate_cover`/`strong_branch`/
   propagation end-to-end, not just nodes=1. Capture status/obj/nodes/`lp_iters`.

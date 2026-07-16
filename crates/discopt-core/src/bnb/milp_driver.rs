@@ -3247,6 +3247,58 @@ mod sparse_milp_diff {
         }
     }
 
+    /// T3b6 branching integration golden. The panel solves at the root (nodes=1) so
+    /// it never runs the per-node engine. This instance FORCES a 13-node tree
+    /// (heuristics off, no root GMI) while keeping node cover separation, strong
+    /// branching, and FBBT propagation ON — so `separate_cover`, `strong_branch`,
+    /// and `tighten_bounds` (and their CSC ports wired in at T3b5) are exercised
+    /// end-to-end. The rewire must leave status/obj/node-count/`lp_iters` EXACTLY
+    /// unchanged; any drift is a per-node-engine regression the panel would miss.
+    #[test]
+    fn branching_golden() {
+        let a = [
+            3.0, 4.0, 5.0, 2.0, 6.0, 1.0, 1.0, 0.0, //
+            2.0, 3.0, 1.0, 5.0, 2.0, 4.0, 0.0, 1.0,
+        ];
+        let c = [-5.0, -6.0, -7.0, -4.0, -8.0, -3.0, 0.0, 0.0];
+        let l = [0.0; 8];
+        let u = [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, INF, INF];
+        let lp = LpView {
+            a: &a,
+            m: 2,
+            n: 8,
+            c: &c,
+            l: &l,
+            u: &u,
+        };
+        let o = MilpOptions {
+            n_struct: 6,
+            integer_cols: vec![0, 1, 2, 3, 4, 5],
+            max_nodes: 100_000,
+            time_limit_s: None,
+            gap_tol: 1e-9,
+            root_cuts: 0,
+            cut_rounds: 3,
+            gmi_cuts: false,
+            cut_select: true,
+            node_cuts: true,
+            max_pool_cuts: 500,
+            heuristics: false,
+            presolve: true,
+            strong_branch: true,
+            node_propagation: true,
+            reduced_cost_fixing: true,
+            sb_max_cands: 8,
+            sb_node_budget: 1024,
+            simplex: SimplexOptions::default(),
+        };
+        let r = solve_milp(&lp, &[10.0, 9.0], 0.0, &o);
+        assert_eq!(r.status, MilpStatus::Optimal, "status");
+        assert!((r.obj - (-16.0)).abs() < 1e-9, "obj {}", r.obj);
+        assert_eq!(r.nodes, 13, "node-count drift (per-node engine)");
+        assert_eq!(r.lp_iters, 39, "lp_iters drift (per-node engine)");
+    }
+
     /// Determinism: re-solving is bit-identical. This is exactly the property the
     /// CSC path must satisfy against the dense path at T1, so the harness proves the
     /// gate is meaningful (the dense driver itself is reproducible).
