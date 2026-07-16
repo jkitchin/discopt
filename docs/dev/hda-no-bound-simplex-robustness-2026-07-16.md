@@ -94,23 +94,19 @@ produced no bound; `MccormickLPRelaxer._solve_at_node_impl` reports it as a
 bound-only node. Measured: hda flag-ON → `bound = -1.80e10` (finite, `≤` optimum
 `-5964.53` — its first), flag-OFF → `bound=None` (baseline unchanged); clean
 certifying instances (alan, ex1221, nvs05) byte-identical. Tests:
-`python/tests/test_issue_517_numerical_dual_bound.py`. A valid *lower* bound needs only a dual point + directed
-rounding (Neumaier–Shcherbina), **not** a clean primal. When phase-2 drifts
-(audit `Bounds`/`Rows`) or breaks down, the engine still holds a basis and can
-export its dual `y = B⁻ᵀc_B`; feeding that through the in-repo NS certificate
-(`milp_simplex._safe_lp_lower_bound_std`, already used elsewhere) attaches a sound
-bound where today there is none — architecture-respecting (own dual, no HiGHS).
+`python/tests/test_issue_517_numerical_dual_bound.py`.
 
-*Probe result (env-gated `DISCOPT_LP_NUMERICAL_DUAL`, since reverted):* on hda's
-`Numerical` root-LP solves the exported dual yields a **finite** NS safe bound —
-measured `-1.447e6` and `-2.650e8`, both valid (`≤` optimum `-5964.53`). So the
-in-house dual survives the phase-2 breakdown well enough to certify hda's **first
-finite dual bound**, with no HiGHS. *Caveat:* the bound is **loose** (the basis is
-drifted), so it lifts `best_bound` off the `1e30` sentinel and satisfies #517's
-literal acceptance but gives little fathoming power on its own — a tight, useful
-bound still needs (B). To ship, wire the numerical-path dual → NS bound behind a
-flag (bound-changing regime, default OFF) with the differential-bound +
-feasible-point + no-fathom gates.
+The mechanism: a valid *lower* bound needs only a dual point + directed rounding
+(Neumaier–Shcherbina), **not** a clean primal. When phase-2 drifts (audit
+`Bounds`/`Rows`) or breaks down, the engine still holds a basis whose dual
+`y = B⁻ᵀc_B` through the in-repo NS certificate
+(`milp_simplex._safe_lp_lower_bound_std`) gives a sound bound where today there is
+none — architecture-respecting (own dual, no HiGHS). *Caveat:* the bound is
+**loose** (the basis is drifted): it lifts `best_bound` off the `1e30` sentinel
+and satisfies #517's literal acceptance but gives little fathoming power on its own
+— a tight, useful bound still needs (B). Env-gated probe measurements before wiring
+were `-1.447e6` / `-2.650e8` on the raw node LP; the end-to-end driver bound is
+looser (`-1.80e10`) as the frontier aggregates post-FBBT/OBBT node boxes.
 
 **(B) Phase-2 / factorization robustness (the deeper fix).** Keep phase-2 from
 drifting/breaking down on the ill-conditioned basis — more frequent
@@ -120,6 +116,21 @@ blast radius; only if (A) proves insufficient.
 
 Acceptance for #517 (unchanged): hda reports a **finite** dual bound (its first),
 `bound ≤ −5964.534084` (the published optimum), with no panel regression.
+
+## 2a. Verification of (A) — differential panel (flag ON vs OFF)
+
+16-instance in-repo panel, tl=25 s, oracle-checked against published optima:
+
+| class | instances | result |
+|---|---|---|
+| target | **hda** | `None → −1.80e10` (finite, ≤ opt −5964.53) — **first bound** |
+| tighter (still sound) | **4stufen** `19713 → 20282` (≤ opt 96908), **casctanks** `−90.182 → −90.179` (≤ opt 9.163) | flag explores a tighter frontier; every bound ≤ its true optimum |
+| byte-identical | nvs05, contvar, heatexch_gen1, beuster, tanksize, st_e36, nvs09, st_e11, gkocis, ex1221, alan, nvs21 | inert — the floor fires only on a numerically-failed node LP |
+
+`panel gate: PASS`; **no bound exceeds its true optimum** on any instance with a
+known oracle. *Perf caveat:* heatexch_gen3 flag-ON took 240 s vs 32 s OFF (the
+extra bounded nodes drive more per-node NS work) — default-OFF, so no CI impact;
+a reason the flag stays opt-in until (B) tightens the underlying solve.
 
 ## 3. Disposition
 
