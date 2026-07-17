@@ -1,7 +1,8 @@
 # Sharp Neumaier–Shcherbina margin (#309 follow-up, `DISCOPT_NS_SHARP_MARGIN`)
 
-Status: implemented, flag-gated default-OFF (bound-changing regime,
-CLAUDE.md verification regime 2). Companion to
+Status: implemented; **default ON since 2026-07-16** (`DISCOPT_NS_SHARP_MARGIN=0`
+opts out) — graduated on the owner's direction after the 66-instance
+differential panel passed (companion doc §5b). Companion to
 `integer-ratio-partition-2026-07-16.md` — this is the "residual blocker"
 its §5 identified, root-caused and fixed.
 
@@ -42,7 +43,7 @@ assembled from the actual data (Higham 2002, §3.1):
 
 Measured on the gear4 optimal piece: loss 2.8856e-4 → **1.0e-6** (the genuine
 dual residual). Dispatch: `_safe_lp_lower_bound` routes to sharp/legacy on
-`SolverTuning.ns_sharp_margin` (`DISCOPT_NS_SHARP_MARGIN`, default OFF); the
+`SolverTuning.ns_sharp_margin` (`DISCOPT_NS_SHARP_MARGIN`, default ON); the
 legacy path is byte-identical when the flag is off. All three NS consumers go
 through the dispatcher: the optimal-solve certificate, the #517 broken-basis
 floor, and the Farkas `g₀(y) > 0` verification.
@@ -97,6 +98,6 @@ the follow-up, same class as #287/#281).
   and keeps it — OBBT bounds are per-variable-box, not objective certificates,
   and the 1e-9-relative slack there costs box width, not certification. Sharing
   the sharp evaluator is a possible later cleanup with its own neutrality test.
-- Flag graduation (both `DISCOPT_INTEGER_RATIO_PARTITION` and
-  `DISCOPT_NS_SHARP_MARGIN`) per regime 2: corpus-wide differential panel on
-  consecutive nightly runs.
+- ~~Flag graduation~~ **done 2026-07-16**: both flags graduated default-ON on
+  the owner's direction after the 66-instance differential panel passed
+  (companion doc §5b); the nightly panel remains the ongoing regression watch.

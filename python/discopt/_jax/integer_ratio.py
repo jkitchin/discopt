@@ -37,9 +37,11 @@ Soundness invariants:
   every piece is infeasible it abstains too (conservative — the engine's own
   relaxation is the fathoming authority).
 
-Feature flag: ``DISCOPT_INTEGER_RATIO_PARTITION=1`` (default OFF; wired in
-``MccormickLPRelaxer.solve_at_node`` and ``solver.py``). Bound-changing per
-CLAUDE.md regime 2, so it ships default-off pending nightly graduation.
+Feature flag: ``DISCOPT_INTEGER_RATIO_PARTITION`` (default ON, ``=0`` opts out;
+wired in ``MccormickLPRelaxer.solve_at_node`` and ``solver.py``). Bound-changing
+per CLAUDE.md regime 2; graduated default-ON 2026-07-16 on the owner's direction
+after the 66-instance differential panel passed (incorrect_count=0, zero
+certification regressions — see the dev doc §5b).
 """
 
 from __future__ import annotations
@@ -78,8 +80,12 @@ _WITNESS_ASSIGNMENTS = 2
 
 
 def enabled() -> bool:
-    """Feature flag (default OFF)."""
-    return os.environ.get("DISCOPT_INTEGER_RATIO_PARTITION") == "1"
+    """Feature flag (default ON; ``DISCOPT_INTEGER_RATIO_PARTITION=0`` restores
+    the legacy path). Graduated default-ON 2026-07-16 on the owner's direction
+    after the 66-instance differential panel passed with ``incorrect_count=0``
+    and zero certification regressions (see
+    ``docs/dev/integer-ratio-partition-2026-07-16.md`` §5b)."""
+    return os.environ.get("DISCOPT_INTEGER_RATIO_PARTITION", "1") != "0"
 
 
 @dataclass(frozen=True)

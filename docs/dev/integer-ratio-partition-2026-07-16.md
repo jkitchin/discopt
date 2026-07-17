@@ -2,8 +2,8 @@
 
 **Date:** 2026-07-16
 **Issue:** #309 (gear4-class ratio-of-integer-products: certifies but node-heavy)
-**Feature flag:** `DISCOPT_INTEGER_RATIO_PARTITION=1` (default OFF — bound-changing
-per CLAUDE.md verification regime 2; graduation pending nightly runs)
+**Feature flag:** `DISCOPT_INTEGER_RATIO_PARTITION` (**default ON since 2026-07-16**, `=0` opts out; was default-OFF — bound-changing
+per CLAUDE.md verification regime 2; graduated on the passing differential panel, §5b)
 **Code:** `python/discopt/_jax/integer_ratio.py` (partitioner),
 `uniform_relax.py` (`ratio_map` registration), `mccormick_lp.py`
 (`solve_at_node` max-combine hook), `solver.py` (flag-gated wiring).
@@ -146,8 +146,10 @@ driver in the session scratchpad, gates in `panel_analyze.py` style):
   5 → 3 nodes, st_e36 89 → 85 nodes, same certified objectives,
   oracle-checked. Everything else byte-identical or within-noise.
 
-Formal graduation per regime 2 still requires the corpus-wide panel green on
-consecutive **nightly** runs; this panel is the branch-side evidence.
+**Graduated default-ON on this panel** (owner's direction 2026-07-16: a passing
+corpus-wide differential panel graduates the flags; the consecutive-nightly
+requirement was explicitly waived). `=0` on either env var restores the legacy
+path; the nightly panel remains the ongoing regression watch.
 
 ## 6. Soundness
 

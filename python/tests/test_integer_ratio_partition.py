@@ -145,17 +145,29 @@ def test_integer_infeasible_box_abstains():
 
 
 # ---------------------------------------------------------------------------
-# Default-off neutrality and flag-on solve wiring
+# Flag defaults (graduated ON 2026-07-16, panel §5b) and solve wiring
 # ---------------------------------------------------------------------------
 
 
-def test_default_off_no_partitioner(monkeypatch):
-    """Without the flag the relaxer never gets a partitioner (default path
-    byte-identical)."""
-    monkeypatch.delenv("DISCOPT_INTEGER_RATIO_PARTITION", raising=False)
+def test_default_on_and_opt_out(monkeypatch):
+    """Graduated default-ON; ``=0`` restores the legacy path."""
     from discopt._jax.integer_ratio import enabled
 
+    monkeypatch.delenv("DISCOPT_INTEGER_RATIO_PARTITION", raising=False)
+    assert enabled()
+    monkeypatch.setenv("DISCOPT_INTEGER_RATIO_PARTITION", "0")
     assert not enabled()
+    monkeypatch.setenv("DISCOPT_INTEGER_RATIO_PARTITION", "1")
+    assert enabled()
+
+
+def test_ns_sharp_margin_default_on_and_opt_out(monkeypatch):
+    from discopt.solver_tuning import SolverTuning
+
+    monkeypatch.delenv("DISCOPT_NS_SHARP_MARGIN", raising=False)
+    assert SolverTuning().ns_sharp_margin
+    monkeypatch.setenv("DISCOPT_NS_SHARP_MARGIN", "0")
+    assert not SolverTuning().ns_sharp_margin
 
 
 @pytest.mark.slow

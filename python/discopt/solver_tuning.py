@@ -98,17 +98,21 @@ class SolverTuning:
 
     # --- #309 sharp NS safe-bound margin ---------------------------------------
     ns_sharp_margin: bool = field(
-        default_factory=lambda: _env_flag("DISCOPT_NS_SHARP_MARGIN", default=False)
+        default_factory=lambda: _env_flag("DISCOPT_NS_SHARP_MARGIN", default=True)
     )
     """Replace the flat ``1e-9``-relative Neumaier–Shcherbina evaluation margin
     with a rigorous forward-error bound computed from the actual data (Higham
     dot-product gammas + interval corners on sign-uncertain reduced costs)
-    (``DISCOPT_NS_SHARP_MARGIN``, default OFF — bound-changing regime, #309).
-    On magnitude ~1e5 decompositions (gear4 piece LPs) the flat margin costs
+    (``DISCOPT_NS_SHARP_MARGIN``, default ON; ``=0`` restores the flat margin).
+    Graduated default-ON 2026-07-16 on the owner's direction after the
+    66-instance differential panel passed (incorrect_count=0, no certification
+    regression; docs/dev/integer-ratio-partition-2026-07-16.md §5b). On
+    magnitude ~1e5 decompositions (gear4 piece LPs) the flat margin costs
     2.9e-4 of every certified LP bound; the sharp margin costs ~1e-6. The sharp
     path also *abstains* when a sign-uncertain reduced cost sits next to an
-    unbounded box side (the legacy path silently contributes 0 there), so it can
-    return ``None`` where the legacy path returned a value — never the reverse."""
+    unbounded box side (the legacy path silently contributes 0 there — a latent
+    soundness gap the sharp path closes), so it can return ``None`` where the
+    legacy path returned a value — never the reverse."""
 
     # --- RLT (reformulation-linearization) families ---------------------------
     rlt: bool = field(default_factory=lambda: _env_flag("DISCOPT_RLT", default=False))
