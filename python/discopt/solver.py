@@ -4532,12 +4532,12 @@ def solve_model(
             )
 
             if has_integer_multilinear_reformulation_work(model):
+                _iml_n0 = sum(v.size for v in model._variables)
                 _iml = reformulate_integer_multilinear(model)
                 if _iml is not model:
                     from discopt._jax.problem_classifier import ProblemClass, classify_problem
                     from discopt._jax.term_classifier import classify_nonlinear_terms
 
-                    _did_multilinear_reform = True
                     # Does the reform eliminate *all* nonlinearity (pure MILP)? Then
                     # route to the MILP engine as the bilinear pass does; otherwise
                     # keep the reformed model on the spatial B&B path (still tighter).
@@ -4552,22 +4552,37 @@ def solve_model(
                         or _iml_nl.ratio_of_products
                         or _iml_nl.general_nl
                     )
-                    model = _iml
-                    model._convexity_classification_cache = None
-                    clear_declared_box_cache(model)
-                    model._convexity_time_budget = _convexity_time_budget
-                    model._solve_deadline = _solve_t0 + float(time_limit)
-                    if _iml_pure_milp and classify_problem(_iml) == ProblemClass.MILP:
-                        presolve = False
-                        if nlp_solver == "pounce" and not _p3_force_cut_path_enabled():
-                            nlp_solver = "simplex"
-                    # Extend a user warm start over the appended aux columns so the
-                    # (longer) reformed vector is not silently dropped. Purely primal:
-                    # the driver re-validates it, so it never affects the dual bound.
-                    if initial_point is not None:
-                        _iml_x0 = _iml_extend(model, initial_point)
-                        if _iml_x0 is not None:
-                            initial_point = _iml_x0
+                    # Blowup guard for the *spatial-path* case. The big-M/AND auxes
+                    # only pay off when they tighten a *binding* dual bound (ex1252:
+                    # the objective barrier); on an already-tractable instance they
+                    # merely balloon the per-node LP and slow convergence (nvs01: a
+                    # 3-var instance the spatial solve certifies fast blows up to
+                    # ~200 columns and *regresses*). So keep a non-pure-MILP reform
+                    # only when the column count stays within a modest factor of the
+                    # original; a pure-MILP reform is always worth the MILP-engine
+                    # route. When rejected, leave the model untouched so the normal
+                    # path (incl. the bilinear reform below) runs exactly as it would
+                    # with the flag off — never a regression.
+                    _iml_n1 = sum(v.size for v in _iml._variables)
+                    _iml_adopt = _iml_pure_milp or _iml_n1 <= 4 * max(_iml_n0, 16)
+                    if _iml_adopt:
+                        _did_multilinear_reform = True
+                        model = _iml
+                        model._convexity_classification_cache = None
+                        clear_declared_box_cache(model)
+                        model._convexity_time_budget = _convexity_time_budget
+                        model._solve_deadline = _solve_t0 + float(time_limit)
+                        if _iml_pure_milp and classify_problem(_iml) == ProblemClass.MILP:
+                            presolve = False
+                            if nlp_solver == "pounce" and not _p3_force_cut_path_enabled():
+                                nlp_solver = "simplex"
+                        # Extend a user warm start over the appended aux columns so the
+                        # (longer) reformed vector is not silently dropped. Purely primal:
+                        # the driver re-validates it, so it never affects the dual bound.
+                        if initial_point is not None:
+                            _iml_x0 = _iml_extend(model, initial_point)
+                            if _iml_x0 is not None:
+                                initial_point = _iml_x0
     except Exception as _iml_exc:  # pragma: no cover - defensive
         logger.debug("integer-multilinear reformulation skipped: %s", _iml_exc)
 

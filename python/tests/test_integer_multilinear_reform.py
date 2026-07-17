@@ -203,3 +203,27 @@ def test_ex1252_multilinear_reform_sound_and_lifts_bound():
     assert res.bound > 5134.5, (
         f"ex1252 multilinear-reform bound {res.bound} did not lift past the 5134 floor"
     )
+
+
+@pytest.mark.slow
+@pytest.mark.correctness
+def test_flag_does_not_regress_easy_instance():
+    """The spatial-path blowup guard must keep the flag from *regressing* an
+    already-tractable instance. ``nvs01`` (3 variables) certifies to 12.4697 on the
+    plain spatial path; its integer-multilinear reform balloons it to ~200 columns,
+    so the guard rejects the non-pure-MILP reform and leaves the original model —
+    the flag-on solve must reach the same optimum, not stall below it."""
+    nvs01_opt = 12.46966882
+    os.environ["DISCOPT_INTEGER_MULTILINEAR_REFORM"] = "1"
+    try:
+        m = dm.from_nl(str(_DATA / "nvs01.nl"))
+        res = m.solve(time_limit=30)
+    finally:
+        os.environ.pop("DISCOPT_INTEGER_MULTILINEAR_REFORM", None)
+    # Sound in any case.
+    if res.bound is not None and math.isfinite(res.bound):
+        assert res.bound <= nvs01_opt + 1e-2, f"nvs01 UNSOUND bound {res.bound}"
+    # No regression: the guard preserves the fast certification (bound reaches opt).
+    assert res.bound is not None and res.bound >= nvs01_opt - 1e-2, (
+        f"nvs01 regressed under the flag: bound {res.bound} < optimum {nvs01_opt}"
+    )

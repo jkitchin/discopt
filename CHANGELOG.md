@@ -31,13 +31,20 @@ The release procedure that produces these entries is documented in
   On ex1252 this lifts the global dual bound off its structural **5134** floor
   (the plateau the term-wise envelope and SOS1-selector branching both stall at)
   to ~32k in 45 s and climbing; the structure is general (present in 8 of the 81
-  in-repo MINLPLib instances: ex1252/ex1252a, nvs01/05/16/22, st_e36/e40). The
-  flag is default-off pending the CLAUDE.md §5 differential-panel graduation; the
-  default (flag-off) path is byte-identical (the bilinear reform and its blowup
-  guard are untouched). Full end-to-end certification of ex1252 additionally
-  requires closing a *separate* residual barrier — the continuous cubic cost rows
-  `x15 = f(x6, x12)` — which spatial branching, not this envelope, must tighten;
-  recorded in the issue.
+  in-repo MINLPLib instances: ex1252/ex1252a, nvs01/05/16/22, st_e36/e40). A
+  spatial-path **blowup guard** keeps a non-pure-MILP reform only when the column
+  count stays within a modest factor of the original, so an already-tractable
+  instance the spatial solve certifies fast (nvs01: 3 → ~200 columns) is left on
+  its original path rather than regressed. Differential panel over the eight
+  in-repo integer-multilinear instances (flag off vs on): **cert-clean** (every
+  bound ≤ its reference optimum, every incumbent feasible, both regimes) and
+  **net non-negative** (large gain on ex1252/ex1252a, neutral elsewhere). The flag
+  is default-off pending a corpus-wide §5 graduation; the default (flag-off) path
+  is byte-identical (the bilinear reform and its blowup guard are untouched — the
+  new aux-sharing cache is scoped to the multilinear path). Full end-to-end
+  certification of ex1252 additionally requires closing a *separate* residual
+  barrier — the continuous cubic cost rows `x15 = f(x6, x12)` — which spatial
+  branching, not this envelope, must tighten; recorded in the issue.
 
 - **GP-structured MINLP: y-space node relaxations + integer branch-and-bound**
   (`feat`, #116). A MINLP whose *continuous relaxation* is a geometric program
