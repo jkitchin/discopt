@@ -506,15 +506,21 @@ class SolverTuning:
     )
     """Warm-start the node LP from the parent basis (``DISCOPT_LP_WARMSTART``)."""
 
-    # --- branch-and-reduce (cert:T2.3 / T2.4, default OFF until T2.6) ----------
+    # --- branch-and-reduce (cert:T2.3 / T2.4) ---------------------------------
     root_fixpoint: bool = field(
-        default_factory=lambda: _env_flag("DISCOPT_ROOT_FIXPOINT", default=False)
+        default_factory=lambda: _env_flag("DISCOPT_ROOT_FIXPOINT", default=True)
     )
     """Run the cutoff-aware root branch-and-reduce fixpoint (cert:T2.3) at the end
     of iteration 0: iterate {FBBT-with-cutoff, OBBT/DBBT-with-cutoff} to a fixpoint
     on the root box, refreshing the root cut pool + incremental engine base from the
-    tightened box. ``DISCOPT_ROOT_FIXPOINT``, default OFF (bound-changing; unlocked
-    by the R1 GO, flipped default-on only after nightly-green per T2.6)."""
+    tightened box. ``DISCOPT_ROOT_FIXPOINT``, default **ON** (GRADUATED per #581
+    under the one-successful-graduation-gate-run policy — CLAUDE.md §5). The
+    graduation gate (`graduation_gate.py --flags root_fixpoint`, held-out N=20
+    seed 0 + 41-instance cert panel) returned cert-clean (incorrect_count 0, 0
+    cert violations, objective/optimal-status enforced) and net-positive
+    (benefit 29% — crudeoil_pooling_ct1, ex5_3_3, powerflow0014r, qap, eg_all_s —
+    with 0% regression). Set ``DISCOPT_ROOT_FIXPOINT=0`` to restore the old
+    default OFF."""
 
     node_reduce: bool = field(
         default_factory=lambda: _env_flag("DISCOPT_NODE_REDUCE", default=False)
