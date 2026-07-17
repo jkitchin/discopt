@@ -78,6 +78,8 @@ select = ["E", "F", "W", "I", "N", "UP", "B", "A", "C4", "SIM", "TCH"]
 # B/M/K are the monomial basis / moment matrix / lag count in the issue-677
 # joint-correlation moment probe (standard linear-algebra notation).
 "scripts/joint_correlation_moment_probe.py" = ["N803", "N806"]
+# A/Acsr/Ap are LP constraint matrices in the issue-694 anytime-build probe.
+"scripts/issue694_anytime_build_probe.py" = ["N806"]
 
 [tool.coverage.run]
 source = ["benchmarks", "utils"]

@@ -462,6 +462,33 @@ elsewhere.
    to START another only when a valid bound is already in hand and the fallback's
    own grant is spent — corpus-measured bound-neutral (0/65 bounds changed).
 
+   **UPDATE (2026-07-17, #694 entry experiment — the "floor is irreducible" claim
+   above is now qualified, not overturned).** #694 asks whether the floor is
+   *fundamental* or an *artifact of a monolithic build*: SOTA solvers don't face the
+   fork because their bound accrues continuously (a truncated build still hands back
+   a valid weaker bound). The entry experiment
+   (`issue694-anytime-build-entry-2026-07-17.md`; probes
+   `discopt_benchmarks/scripts/issue694_anytime_build_probe.py` +
+   `issue694_synthetic_proxy.py`) instruments `_Builder.add_row` and solves every
+   10 %-of-rows build **prefix**. **Verdict: the kill criterion is NOT met** — on all
+   6 named controls a finite bound exists by 8 %–21 % of build time (casctanks
+   69 %), and on synthetic proxies matching the class's structure (sonet\*:
+   linear-obj + bilinear-constraint `netdesign`, finite at **11.7 %** then monotone;
+   qap/graphpart: dense-quadratic `clique`, finite at ~40 % then monotone to 28 k
+   rows) the bound **accrues continuously** across deciles. So a build interrupted at
+   a checkpoint *does* yield a valid weaker bound: the §8.1 fork is **dissolvable in
+   principle** for this class, and the "irreducible floor" holds only for the
+   *current* end-of-build materialization, not fundamentally. Two subtleties recorded
+   there: (a) build **order** decides how early the bound turns finite (objective
+   product-envelopes must precede other rows, else −∞ until ~40 %); (b) a truncated
+   (smaller) relaxation is often *more* solvable within budget — hda's full LP
+   `iteration_limit`s while every prefix solves `optimal`, the exact "`plain` is
+   None" mode. **Not implemented this session** (bound-changing → default-off flag +
+   §5 corpus panel to graduate; super3t/sonet23v4 are big-corpus-only and absent
+   here, so the gate is a run-on-owner's-machine step). §8.1/§8.2 remain
+   un-circumvented: this changes the build's *precondition*, it does not truncate a
+   native solve or add a Rust LP deadline.
+
 ---
 
 ## §9. Task table (verdicts land here)
