@@ -16,6 +16,7 @@ that fits the per-node call shape in :mod:`discopt.solver`.
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 import os
 import time
@@ -226,6 +227,11 @@ def _append_relax_rows(milp, A_rows, b_rows) -> None:
 # internal re-solve is handed less than this floor (keeps a node that straddles
 # the deadline from receiving a zero/negative budget the backend would reject).
 _SOLVE_DEADLINE_FLOOR_S = 0.05
+
+# Per-node wall budget for the integer-ratio partition dive (issue #309). The
+# dive runs a handful of piece LPs; this cap keeps a pathological node from
+# stalling the loop (the partitioner also caps its LP count).
+_INTEGER_RATIO_DIVE_BUDGET_S = 5.0
 
 # Densification cap for the lifted relaxation. The matrix-form MILP backends
 # (warm-started Rust simplex, POUNCE) materialize a DENSE ``(m, n+m)`` constraint
@@ -502,6 +508,11 @@ class MccormickLPRelaxer:
         # Spatial-BB uses standard McCormick globally — no partitioning here.
         self._disc = DiscretizationState(partitions={})
         self._n_orig = sum(v.size for v in model._variables)
+        # Integer-ratio partition bound (issue #309, flag-gated default-OFF):
+        # attached by the solver when the pre-reform model carries a
+        # ratio-of-integer-products structure; ``solve_at_node`` then max-combines
+        # the partitioner's sound node bound with the LP bound.
+        self._integer_ratio_partitioner = None
         # Pre-compute which original columns are integer/binary so that
         # integrality is preserved (only aux columns get relaxed).
         flags: list[int] = []
@@ -1088,7 +1099,48 @@ class MccormickLPRelaxer:
                 # of the identical box (optimal → recovered node with a sound bound;
                 # infeasible → the *default-path* separators tightened the loose base
                 # to empty, a rigorous fathom, since every separated cut is valid).
-                return pool_free
+                res = pool_free
+        return self._apply_integer_ratio_partition(res, node_lb, node_ub, out_cuts)
+
+    def set_integer_ratio_partitioner(self, partitioner) -> None:
+        """Attach an :class:`~discopt._jax.integer_ratio.IntegerRatioPartitioner`.
+
+        Wired by the solver (issue #309) when ``DISCOPT_INTEGER_RATIO_PARTITION=1``
+        and the pre-reform model carries an eligible ratio-of-integer-products.
+        """
+        self._integer_ratio_partitioner = partitioner
+
+    def _apply_integer_ratio_partition(
+        self, res: "MccormickLPResult", node_lb, node_ub, out_cuts
+    ) -> "MccormickLPResult":
+        """Max-combine the node LP bound with the integer-ratio partition bound.
+
+        Sound: the partitioner's bound is the min over a valid disjunction of the
+        quotient's achievable rational values, each piece a valid outer relaxation
+        of this node (see ``integer_ratio.py``). Only ever *raises* an ``optimal``
+        node's bound; every other verdict (infeasible / no bound / capture calls
+        via ``out_cuts``) passes through untouched, and any partitioner failure
+        abstains. Attached partitioner is flag-gated at wiring time, so the
+        default path never reaches this branch.
+        """
+        p = self._integer_ratio_partitioner
+        if (
+            p is None
+            or out_cuts is not None
+            or res.status != "optimal"
+            or res.lower_bound is None
+            or not np.isfinite(res.lower_bound)
+        ):
+            return res
+        try:
+            deadline = time.perf_counter() + _INTEGER_RATIO_DIVE_BUDGET_S
+            lifted = p.node_bound(node_lb, node_ub, deadline=deadline)
+        except Exception:
+            logger.debug("integer-ratio partition bound abstained", exc_info=True)
+            return res
+        if lifted is not None and np.isfinite(lifted) and lifted > res.lower_bound:
+            lifted_res: MccormickLPResult = dataclasses.replace(res, lower_bound=float(lifted))
+            return lifted_res
         return res
 
     def _solve_at_node_impl(

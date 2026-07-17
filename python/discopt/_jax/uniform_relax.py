@@ -213,6 +213,10 @@ class UniformRelaxation:
     # Bucket 3), consumed by the incremental McCormick patch to regenerate their
     # box-dependent envelope rows in closed form.
     affine_square_map: dict = dataclasses.field(default_factory=dict)
+    # Ratio-of-products lifts ``((num_cols...), (den_cols...)) -> aux`` over bare
+    # originals with integer exponents (issue #309); consumed by the integer-ratio
+    # partition bound to address the quotient column of its piece LPs.
+    ratio_map: dict = dataclasses.field(default_factory=dict)
     # Finite-domain trig-square selector tables (issue #640 Bucket 1). Consumed by
     # the delegate to populate the ``finite_domain_trig_square_tables`` varmap family.
     finite_domain_trig_square_tables: list = dataclasses.field(default_factory=list)
@@ -581,6 +585,14 @@ class _Builder:
         # ``(var, aux) -> (coeff, const)`` so the incremental McCormick patch can
         # regenerate the box-dependent envelope in closed form.
         self.affine_square_map: dict[tuple[int, int], tuple[float, float]] = {}
+        # Ratio-of-products lifts ``w = (Π x_i) / (Π y_j)`` over BARE original
+        # variables with integer exponents (issue #309): keyed
+        # ``((num_cols_sorted...), (den_cols_sorted...)) -> aux`` with multiplicity
+        # (``x**2`` contributes its column twice). Registration is EXACT — the aux
+        # equals the named quotient, tied to the originals by the recursive
+        # McCormick fold — so the integer-ratio partition bound can address the
+        # quotient column directly. Metadata only; no rows are added here.
+        self.ratio_map: dict[tuple[tuple[int, ...], tuple[int, ...]], int] = {}
         # Composite convex/concave lifts (issue #632 P2): each certified-convex or
         # -concave multivariate nonlinear node the engine would otherwise decompose
         # loosely is lifted to a single aux and registered here so the existing
@@ -2267,9 +2279,42 @@ def _build_ratio(ctx: _Builder, node: CNode, w: int) -> Envelope:  # noqa: D401
     """
     logspace = _emit_logspace_band(ctx, w, node)
     (exps,) = node.payload
+    _register_ratio_of_originals(ctx, node, w)
     factors = [_factor_value(ctx, ch, float(e)) for ch, e in zip(node.children, exps)]
     tight = _fold_product(ctx, w, factors)
     return Envelope(rows=[], tight=(tight and len(factors) == 2) or logspace)
+
+
+def _register_ratio_of_originals(ctx: _Builder, node: CNode, w: int) -> None:
+    """Register ``w = (Π x_i) / (Π y_j)`` in ``ctx.ratio_map`` when exact.
+
+    Only a quotient of BARE original variables (coefficient exactly 1, integer
+    exponents) is registered — the consumer (the integer-ratio partition bound,
+    issue #309) treats the registered aux as the exact quotient of the *named*
+    originals, so a scaled/affine/aux factor must be refused (same soundness gate
+    as :meth:`_Builder.single_orig_col` for the product maps). Metadata only:
+    no rows are emitted and no behavior changes for non-consumers.
+    """
+    (exps,) = node.payload
+    num: list[int] = []
+    den: list[int] = []
+    for child, e in zip(node.children, exps):
+        ef = float(e)
+        if not ef.is_integer() or ef == 0.0:
+            return
+        # Gate on the child KIND before touching its rep: ``ctx.rep`` builds the
+        # child's envelope on first call, so probing a composite child here would
+        # reorder aux/row creation relative to the pre-change build (a byte-level
+        # layout change on the default path). A bare original is always safe.
+        if getattr(child, "kind", None) != "var":
+            return
+        col = ctx.single_orig_col(ctx.rep(child))
+        if col is None:
+            return
+        (num if ef > 0 else den).extend([col] * abs(int(ef)))
+    if not num or not den:
+        return
+    ctx.ratio_map[(tuple(sorted(num)), tuple(sorted(den)))] = w
 
 
 def _fold_product(ctx: _Builder, w: int, factors: list) -> bool:
@@ -3134,6 +3179,7 @@ def build_uniform_relaxation(
         univariate_square_map=dict(ctx.univariate_square_map),
         composite_multivar_specs=list(ctx.composite_multivar_specs),
         affine_square_map=dict(ctx.affine_square_map),
+        ratio_map=dict(ctx.ratio_map),
         finite_domain_trig_square_tables=list(ctx.finite_domain_trig_square_tables),
         integrality=list(ctx.integrality),
     )
