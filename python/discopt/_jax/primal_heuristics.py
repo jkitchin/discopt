@@ -1914,8 +1914,7 @@ def one_hot_swap_search(
 
     x_inc = np.asarray(x_incumbent, dtype=np.float64).copy()
     n_groups = len(groups)
-    size = len(groups[0])
-    group_arr = np.asarray(groups, dtype=np.int64)  # (n_groups, size)
+    group_arr = np.asarray(groups, dtype=np.int64)  # (n_groups, group_size)
 
     # Decode the incumbent's active slot per group (the ~1 member).
     assign0 = np.empty(n_groups, dtype=np.int64)
