@@ -39,8 +39,13 @@ So the §1–§5 priorities **do not map onto 280–287**:
    §1–§5 genuinely applies — but re-aimed at **graphpart** (96 vars / 240 products),
    not nvs17, and the §1.5 gate (do the cuts reduce nodes?) must be validated **on
    graphpart**. Higher-risk/effort; after the cheap primal wins above.
-4. **#282 — general-NL MINLP (syn/rsyn) search gap.** c-MIR irrelevant (0 bilinear);
-   needs general-NL relaxation strengthening + LNS heuristics — a separate track.
+4. **#282 — general-NL MINLP (syn/rsyn) search gap.** c-MIR irrelevant (0 bilinear).
+   *Measurement update 2026-07-17 (`issue-282-syn-rsyn-diagnosis-2026-07-17.md`):* the
+   family is **convex** and already convex-detected + NLP-BB-routed on the default path, so
+   "general-NL relaxation strengthening" (McCormick) is not the lever; and auto-routing to
+   OA is falsified (F-1) as a general win. The live levers are **NLP-BB throughput (#268) and
+   primal/LNS incumbent quality (#276)**, measured against the real corpus. Gap not
+   reproducible in the in-repo corpus (only `syn05m` is vendored, and it already closes).
 
 **Sequencing:** the LP-node engine has been shedding regressions (#286, #291, #287);
 the primal-side wins (#287, #281) should land before any multi-week native cut

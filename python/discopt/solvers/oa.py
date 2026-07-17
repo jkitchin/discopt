@@ -7234,8 +7234,37 @@ def solve_oa(
             gap_certified=False,
         )
 
+    # No incumbent was found. A no-incumbent terminal state is only a *proof* of
+    # infeasibility when the master MILP — a valid relaxation of the integer
+    # feasible set carrying globally-valid OA and (rigorous) no-good cuts — was
+    # itself proven infeasible: an infeasible relaxation implies the original is
+    # infeasible. Those are the ``master_infeasible`` reasons below (including the
+    # repair-attempted-and-failed variant). Every OTHER no-incumbent exit is
+    # INCONCLUSIVE: a resource limit (``time_limit`` / ``iteration_limit``), user
+    # termination, a master solver error, an unbounded master, cycling/stalling,
+    # or a repair loop that gave up all leave part of the integer feasible set
+    # unexplored, so a feasible (possibly optimal) assignment may still exist.
+    # Reporting "infeasible" in those states is a false infeasibility certificate
+    # (CLAUDE.md §1) — a solver that merely ran out of budget must never claim the
+    # model is infeasible. Report "unknown" there, exactly as the C-35
+    # unresolved-config path above does.
+    _PROVEN_INFEASIBLE_REASONS = {"master_infeasible", "master_infeasible_unrepaired"}
+    if final_reason in _PROVEN_INFEASIBLE_REASONS:
+        return SolveResult(
+            status="infeasible",
+            objective=None,
+            bound=(_obj_sign * bound if bound is not None else None),
+            gap=None,
+            x={},
+            wall_time=wall_time,
+            mip_count=mip_count,
+            subnlp_calls=nlp_subproblem_count,
+            mip_nlp_trace=_build_mip_nlp_trace(final_reason),
+            gap_certified=False,
+        )
+
     return SolveResult(
-        status="infeasible",
+        status="unknown",
         objective=None,
         bound=(_obj_sign * bound if bound is not None else None),
         gap=None,
