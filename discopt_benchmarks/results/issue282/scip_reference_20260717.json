@@ -1,0 +1,65 @@
+[
+  {
+    "instance": "rsyn0805m",
+    "opt": 1296.120603,
+    "scip_root": 1504.3909756867781,
+    "scip_obj": 1296.1206059929627,
+    "scip_bound": 1296.1206059929627,
+    "scip_time": 0.496892,
+    "scip_status": "optimal"
+  },
+  {
+    "instance": "rsyn0810m",
+    "opt": 1721.447711,
+    "scip_root": 1885.7379579758076,
+    "scip_obj": 1721.447711214436,
+    "scip_bound": 1721.447711214436,
+    "scip_time": 0.513717,
+    "scip_status": "optimal"
+  },
+  {
+    "instance": "rsyn0815m",
+    "opt": 1269.925649,
+    "scip_root": 1497.801344884537,
+    "scip_obj": 1269.9258308913745,
+    "scip_bound": 1269.9258308913745,
+    "scip_time": 0.5969169999999999,
+    "scip_status": "optimal"
+  },
+  {
+    "instance": "syn15m02hfsg",
+    "opt": 2832.748895,
+    "scip_root": 3027.8319122045177,
+    "scip_obj": 2832.749080507244,
+    "scip_bound": 2832.749080507244,
+    "scip_time": 0.688574,
+    "scip_status": "optimal"
+  },
+  {
+    "instance": "syn30hfsg",
+    "opt": 138.1596024,
+    "scip_root": 197.98533082206595,
+    "scip_obj": 138.1599209327462,
+    "scip_bound": 138.1599209327462,
+    "scip_time": 1.115881,
+    "scip_status": "optimal"
+  },
+  {
+    "instance": "syn40hfsg",
+    "opt": 67.71325586,
+    "scip_root": 258.3621293369445,
+    "scip_obj": 67.71370348739154,
+    "scip_bound": 67.71370348739154,
+    "scip_time": 1.549681,
+    "scip_status": "optimal"
+  },
+  {
+    "instance": "syn40m",
+    "opt": 67.71325586,
+    "scip_root": 71.2496163782043,
+    "scip_obj": 67.71350654913522,
+    "scip_bound": 67.71350654913522,
+    "scip_time": 0.874587,
+    "scip_status": "optimal"
+  }
+]

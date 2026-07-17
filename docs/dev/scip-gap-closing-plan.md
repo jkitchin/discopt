@@ -17,7 +17,7 @@ anchor: nvs is issue **#283, which is CLOSED**. The structure of the *live* issu
 |---|---|---|---|---|
 | **#280** | graphpart_* binary-QP (240 int-bilinear, 96 int) | **yes** | yes | global-search gap (≫ nvs17 size) |
 | **#281** | smallinvDAX_* MIQP (+1 continuous) | present | **no** | **incumbent polish / gap-tol**, not search |
-| **#282** | syn_*/rsyn_* MINLP (0 bilinear, general-NL, max) | **no** | **no** | search gap, different relaxation |
+| **#282** | syn_*/rsyn_* MINLP (0 bilinear, general-NL, max) — **mixed convex (rsyn*/syn40m → NLP-BB) + nonconvex (`*hfsg` → spatial McCormick)** | **no** | **no** | **root dual bound** (4×–500× looser than SCIP; dual-dominated 7/7) — *not* a primal/search gap; see §R2 |
 | **#287** | kall_*/graphpart_* (kall: 0 integers, continuous) | **no** | **no** | **incumbent latency** regression |
 
 So the §1–§5 priorities **do not map onto 280–287**:
@@ -40,12 +40,20 @@ So the §1–§5 priorities **do not map onto 280–287**:
    not nvs17, and the §1.5 gate (do the cuts reduce nodes?) must be validated **on
    graphpart**. Higher-risk/effort; after the cheap primal wins above.
 4. **#282 — general-NL MINLP (syn/rsyn) search gap.** c-MIR irrelevant (0 bilinear).
-   *Measurement update 2026-07-17 (`issue-282-syn-rsyn-diagnosis-2026-07-17.md`):* the
-   family is **convex** and already convex-detected + NLP-BB-routed on the default path, so
-   "general-NL relaxation strengthening" (McCormick) is not the lever; and auto-routing to
-   OA is falsified (F-1) as a general win. The live levers are **NLP-BB throughput (#268) and
-   primal/LNS incumbent quality (#276)**, measured against the real corpus. Gap not
-   reproducible in the in-repo corpus (only `syn05m` is vendored, and it already closes).
+   *Measurement update 2026-07-17 **round 2**, on the real corpus
+   (`issue-282-syn-rsyn-diagnosis-2026-07-17.md` §R2):* **#282 is a root-relaxation problem,
+   not a search or primal problem.** Attribution over all seven named instances against the
+   `=opt=` oracle: **dual-dominated 7/7** at 60 s, and on `syn15m02hfsg`/`syn30hfsg` the
+   incumbent is *already the proven optimum* — only the bound is missing. discopt's **root
+   bound is 4×–500× looser than SCIP's on all seven** (e.g. `syn40m` +2609 % vs SCIP +5.2 %),
+   while SCIP proves the whole panel optimal in 0.5–1.6 s.
+   Two round-1 claims are **falsified**: (a) "the family is convex" — it is not, `syn15m02hfsg`
+   /`syn30hfsg`/`syn40hfsg` are **nonconvex** and run **spatial McCormick** (round 1
+   generalized from `syn05m`, the only vendored sibling); (b) consequently "McCormick
+   strengthening is not the lever" — it *is* back on the table for the nonconvex `hfsg`
+   subfamily, exactly where the root bound is worst. Primal/LNS (#276) is **not** the lever
+   (the incumbent is the healthy half); #268 throughput is a secondary multiplier.
+   Re-pointed plan in §R2-6 of the diagnosis doc. F-1 (no OA auto-routing) still stands.
 
 **Sequencing:** the LP-node engine has been shedding regressions (#286, #291, #287);
 the primal-side wins (#287, #281) should land before any multi-week native cut
