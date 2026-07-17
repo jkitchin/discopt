@@ -435,6 +435,32 @@ elsewhere.
 5. **Do not trust single-layer profiler labels** (June's "jax=97.7%"): always
    aggregate cProfile across binding boundaries (pounce/_rust/jax/python) as
    in §1.3, or use the fresh-subprocess phase decomposition of §1.1.
+6. **Do not drop or reorder the root-relaxation fallback's bound candidates to
+   cut its wall** (#654 residual, measured 2026-07-17). `_root_relaxation_lower_bound`
+   computes independent candidates (static-envelope `plain`, separated `sep`,
+   opt-in PSD/RLT) and returns the `max`. Two tempting cuts are both **falsified**
+   over the 65-instance in-repo corpus at the real 3.0s grant:
+   - *"`sep` dominates `plain`, so drop the 5–8s `build_milp_relaxation`"* —
+     **false**. Neither dominates: `plain` is the SOLE producer on 2 (st_miqp2
+     −13.0625, st_miqp4 −6254.0) and strictly tighter on 14; `sep` is sole on 6
+     (hda, heatexch_gen1–3, nvs05, clay0303hfsg) and strictly tighter on 15. The
+     `max` is load-bearing.
+   - *"`plain` is cheap and enough, so skip `sep` once the budget is spent"* —
+     **false, and it drops exactly the §8.1 bounds**. On the whole #654 class
+     `plain` is `None` (its budgeted solve hits the iteration limit) and `sep` is
+     the sole producer: sonet23v4 −53974.375, super3t −1.0.
+
+   Also corrects PR #682's stated residual: the fallback's dominant cost is **not**
+   `build_milp_relaxation` in general — on sonet23v4 it is `sep`'s own LP build
+   (16.8s against a 1.0s solve budget; the build is not bounded by the solve's
+   `time_limit`), and that op *is* the bound producer. Hence the **documented
+   floor** for the class (T=2s walls: sonet22v4 6.7s / graphpart_clique-70 5.5s /
+   qap 11.4s / eg_all_s 18.0s / sonet23v4 24.5s) is irreducible under §8.1, and
+   #654's bar is "wall SCALES with `T`" (pinned by
+   `python/tests/test_issue654_deadline_root_setup.py`), not "wall ≤ T + 2s".
+   Admissible (landed): a checkpoint poll *between* whole candidates that declines
+   to START another only when a valid bound is already in hand and the fallback's
+   own grant is spent — corpus-measured bound-neutral (0/65 bounds changed).
 
 ---
 

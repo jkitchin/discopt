@@ -2610,6 +2610,46 @@ def _root_relaxation_lower_bound(
     )
     from discopt._jax.term_classifier import classify_nonlinear_terms
 
+    # Issue #654 checkpoint poll. This routine computes several INDEPENDENT bound
+    # candidates (plain / separated / PSD / RLT) and returns the tightest; each is
+    # an unbudgeted *build* plus a budgeted solve, so pre-fix they all ran to
+    # completion unconditionally and the fallback could overrun its own granted
+    # ``time_limit`` several-fold (measured: sonet23v4 22.3s against a 3.0s grant,
+    # eg_all_s 11.0s — the residual #654 overrun after PR #682 gated *entry* into
+    # the search apparatus). ``_fb_stop`` lets each phase poll at a safe checkpoint
+    # — between whole candidates, never inside one — so the overrun is bounded to
+    # at most one in-flight op and we return the best valid bound accumulated so
+    # far (the issue's fix direction 1).
+    #
+    # Two rules make this sound under docs/dev/baron-gap-plan.md §8 ("do not
+    # truncate bound-producing native solves"):
+    #
+    #   1. **Never skip while no valid bound is in hand.** A phase is only
+    #      "optional tightening" once some candidate has already landed; until
+    #      then it is the last remaining chance at a dual bound and MUST run to
+    #      completion. This is load-bearing, not defensive: measured on the #654
+    #      class, ``plain`` is ``None`` on *every* instance (its budgeted solve
+    #      hits the iteration limit), and the bound comes solely from the later
+    #      separated candidate — sonet23v4 (-53974.375), super3t (-1.0). A poll
+    #      without this rule would drop exactly the bounds §8 protects.
+    #   2. **Anchor on the fallback's OWN grant, not the global deadline.** The
+    #      caller only reaches here once the global budget is spent, so polling
+    #      the global deadline would fire on the first checkpoint every time and
+    #      trade large amounts of bound quality for nothing (nvs11: reports the
+    #      static -9600 instead of the separated -439 to save a 0.06s phase).
+    #
+    # Skipping a started-nothing phase only ever *weakens* a still-valid bound
+    # (fewer cuts), never falsifies one, so ``incorrect_count`` is unaffected.
+    # Corpus-measured bound-neutral: no in-repo instance both spends the whole
+    # grant before a checkpoint and has a candidate in hand, so no bound changes.
+    _fb_t0 = time.perf_counter()
+
+    def _fb_stop(have: "list[float]") -> bool:
+        """True when this phase should decline to *start* another optional
+        tightening: the fallback's own grant is spent AND a valid bound is
+        already in hand (rules 1 and 2 above)."""
+        return bool(have) and (time.perf_counter() - _fb_t0) >= max(0.0, float(time_limit))
+
     try:
         terms = classify_nonlinear_terms(model)
         relax, _relax_info = build_milp_relaxation(
@@ -2622,6 +2662,11 @@ def _root_relaxation_lower_bound(
             return None
         relax = sanitize_relaxation_for_conditioning(relax)
 
+        # Candidates accumulate here in completion order; every entry is an
+        # independently valid lower bound on the internally minimized objective,
+        # so ``max`` at the bottom keeps the tightest and any prefix is sound.
+        _have: list[float] = []
+
         # PSD (moment) cuts strengthen the McCormick relaxation toward the SDP
         # bound on nonconvex QCQP. `sanitize_*` only drops rows, so the column
         # map `_relax_info` still matches `relax`. Each cut is valid for the whole
@@ -2629,7 +2674,7 @@ def _root_relaxation_lower_bound(
         # (>= the plain bound); it joins the candidates below and `max` keeps the
         # tightest. Opt-in via `psd_cuts=True`; any failure is a sound no-op.
         psd_bound: Optional[float] = None
-        if psd_cuts:
+        if psd_cuts and not _fb_stop(_have):
             try:
                 from discopt._jax.model_utils import binary_flat_cols
                 from discopt._jax.psd_cuts import psd_strengthen_relaxation_bound
@@ -2643,6 +2688,7 @@ def _root_relaxation_lower_bound(
                 )
                 if _nc and _za is not None and np.isfinite(_za):
                     psd_bound = float(_za)
+                    _have.append(psd_bound)
             except Exception as psd_exc:  # pragma: no cover - defensive
                 logger.debug("root PSD-strengthened bound skipped: %s", psd_exc)
 
@@ -2657,7 +2703,7 @@ def _root_relaxation_lower_bound(
         # sound no-op.
         rlt_bound: Optional[float] = None
         _tun = _tuning()
-        if getattr(_tun, "rlt1_root_bound", False):
+        if getattr(_tun, "rlt1_root_bound", False) and not _fb_stop(_have):
             try:
                 from discopt._jax.model_utils import binary_flat_cols as _bfc
                 from discopt._jax.rlt import rlt1_lower_bound
@@ -2672,6 +2718,7 @@ def _root_relaxation_lower_bound(
                 )
                 if _nrows and _rb is not None and np.isfinite(_rb):
                     rlt_bound = float(_rb)
+                    _have.append(rlt_bound)
             except Exception as rlt_exc:  # pragma: no cover - defensive
                 logger.debug("root RLT-1 bound skipped: %s", rlt_exc)
 
@@ -2682,7 +2729,7 @@ def _root_relaxation_lower_bound(
         # route that beats the exact simplex's scaling wall at qap scale. Opt-in
         # (`DISCOPT_RLT1_LAGRANGIAN`, default off); any failure is a sound no-op.
         rlt_lag_bound: Optional[float] = None
-        if getattr(_tun, "rlt1_lagrangian", False):
+        if getattr(_tun, "rlt1_lagrangian", False) and not _fb_stop(_have):
             try:
                 from discopt._jax.model_utils import binary_flat_cols as _bfc
                 from discopt._jax.rlt import rlt1_lagrangian_lower_bound
@@ -2698,11 +2745,16 @@ def _root_relaxation_lower_bound(
                 )
                 if _nc and _lb is not None and np.isfinite(_lb):
                     rlt_lag_bound = float(_lb)
+                    _have.append(rlt_lag_bound)
             except Exception as lag_exc:  # pragma: no cover - defensive
                 logger.debug("root RLT-1 Lagrangian bound skipped: %s", lag_exc)
 
         budget = min(10.0, max(1.0, time_limit * 0.1))
-        result = relax.solve(time_limit=budget, gap_tolerance=1e-6)
+        # Checkpoint: the static-envelope solve is optional tightening only once a
+        # strengthened candidate (PSD/RLT) already landed; with those default-off
+        # ``_have`` is empty here, so this gate is inert on the default path and
+        # the plain solve always runs (rule 1 — it is then the first candidate).
+        result = None if _fb_stop(_have) else relax.solve(time_limit=budget, gap_tolerance=1e-6)
         # Only an OPTIMAL relaxation solve yields a valid lower bound. An
         # "unbounded" verdict means the relaxation (e.g. a McCormick envelope over
         # a box where a nonlinear-term variable is still unbounded) has no finite
@@ -2712,8 +2764,14 @@ def _root_relaxation_lower_bound(
         # fallback bound would publish an invalid (above-incumbent) dual bound.
         # Gate on optimality so an unbounded/limit solve returns no bound instead.
         plain_bound: Optional[float] = None
-        if result.status == "optimal" and result.bound is not None and np.isfinite(result.bound):
+        if (
+            result is not None
+            and result.status == "optimal"
+            and result.bound is not None
+            and np.isfinite(result.bound)
+        ):
             plain_bound = float(result.bound)
+            _have.append(plain_bound)
 
         # The raw ``relax.solve`` above carries only the static envelope cuts; the
         # per-node spatial relaxation additionally separates the multilinear hull,
@@ -2727,15 +2785,24 @@ def _root_relaxation_lower_bound(
         # unbounded cross-check, infeasible/limit re-verify) return no bound on
         # any unsound solve. ``_objective_bound_valid`` above already certified
         # the objective is fully linearized, the precondition both paths share.
+        # Checkpoint (#654): this candidate's LP build is NOT bounded by its solve
+        # ``time_limit`` — measured 16.8s on sonet23v4 against a 1.0s solve budget —
+        # so it is the fallback's dominant overrun. It is nonetheless the sole
+        # bound producer on the whole #654 class (``plain`` is None there), hence
+        # rule 1: it is declined only when a valid bound is ALREADY in hand, in
+        # which case it could merely tighten one we can still soundly report.
         sep_bound: Optional[float] = None
-        try:
-            from discopt._jax.mccormick_lp import MccormickLPRelaxer
+        if not _fb_stop(_have):
+            try:
+                from discopt._jax.mccormick_lp import MccormickLPRelaxer
 
-            node_res = MccormickLPRelaxer(model).solve_at_node(root_lb, root_ub, time_limit=budget)
-            if node_res.lower_bound is not None and np.isfinite(node_res.lower_bound):
-                sep_bound = float(node_res.lower_bound)
-        except Exception as sep_exc:  # pragma: no cover - defensive
-            logger.debug("root separated-relaxation bound skipped: %s", sep_exc)
+                node_res = MccormickLPRelaxer(model).solve_at_node(
+                    root_lb, root_ub, time_limit=budget
+                )
+                if node_res.lower_bound is not None and np.isfinite(node_res.lower_bound):
+                    sep_bound = float(node_res.lower_bound)
+            except Exception as sep_exc:  # pragma: no cover - defensive
+                logger.debug("root separated-relaxation bound skipped: %s", sep_exc)
 
         # Both values are valid lower bounds for a minimization, so the larger
         # (tighter) one is the better rigorous bound.
