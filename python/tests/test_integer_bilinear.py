@@ -26,13 +26,22 @@ os.environ.setdefault("JAX_PLATFORMS", "cpu")
 os.environ.setdefault("JAX_ENABLE_X64", "1")
 
 import discopt.modeling as dm  # noqa: E402
+import numpy as np  # noqa: E402
 import pytest  # noqa: E402
 from discopt._jax.implied_integer import detect_implied_integers  # noqa: E402
 from discopt._jax.integer_product_reform import (  # noqa: E402
+    extend_initial_point,
     has_reformulation_work,
     reformulate_integer_bilinear,
 )
 from discopt._jax.term_classifier import classify_nonlinear_terms  # noqa: E402
+from discopt.modeling.core import (  # noqa: E402
+    BinaryOp,
+    Constant,
+    IndexExpression,
+    UnaryOp,
+    Variable,
+)
 
 pytestmark = pytest.mark.unit
 
@@ -197,6 +206,162 @@ def test_blowup_guard_falls_back():
     m = dm.from_nl(path)
     assert has_reformulation_work(m)  # it does contain integer bilinear/squares
     assert reformulate_integer_bilinear(m) is m  # ...but the reform is too large -> fall back
+
+
+# --------------------------------------------------------------------------- #
+# warm-start extension across the big-M lift (issue #689)
+# --------------------------------------------------------------------------- #
+
+
+def _flat_offsets(model):
+    offs, off = {}, 0
+    for v in model._variables:
+        offs[v._index] = off
+        off += v.size
+    return offs
+
+
+def _eval_linear(expr, val):
+    """Evaluate a reformed (pure-linear) constraint body against a value map
+    ``(var._index, elem) -> float``."""
+    if isinstance(expr, Constant):
+        return float(np.asarray(expr.value).reshape(()))
+    if isinstance(expr, Variable):
+        return val[(expr._index, 0)]
+    if isinstance(expr, IndexExpression):
+        idx = expr.index
+        elem = idx if isinstance(idx, int) else int(np.ravel_multi_index(idx, expr.base.shape))
+        return val[(expr.base._index, elem)]
+    if isinstance(expr, UnaryOp):
+        assert expr.op == "neg"
+        return -_eval_linear(expr.operand, val)
+    if isinstance(expr, BinaryOp):
+        lhs = _eval_linear(expr.left, val)
+        rhs = _eval_linear(expr.right, val)
+        if expr.op == "+":
+            return lhs + rhs
+        if expr.op == "-":
+            return lhs - rhs
+        if expr.op == "*":
+            return lhs * rhs
+        if expr.op == "/":
+            return lhs / rhs
+        raise AssertionError(f"unexpected op {expr.op!r}")
+    raise AssertionError(f"unexpected node {type(expr).__name__}")
+
+
+def _extended_point_satisfies_model(rm, x):
+    """Every constraint row of the reformed model holds at the extended point."""
+    offs = _flat_offsets(rm)
+    val = {
+        (v._index, e): float(x[offs[v._index] + e]) for v in rm._variables for e in range(v.size)
+    }
+    for c in rm._constraints:
+        body = _eval_linear(c.body, val)
+        if c.sense == "==":
+            assert abs(body - c.rhs) < 1e-6, f"{c.name}: {body} != {c.rhs}"
+        elif c.sense == "<=":
+            assert body <= c.rhs + 1e-6, f"{c.name}: {body} > {c.rhs}"
+        else:
+            assert body >= c.rhs - 1e-6, f"{c.name}: {body} < {c.rhs}"
+
+
+@pytest.mark.parametrize(
+    "ua,ub,a0,b0,rhs",
+    [(6, 5, 3, 4, 12), (7, 3, 5, 2, 9), (15, 3, 11, 3, 33), (4, 4, 4, 4, 15)],
+)
+def test_extend_initial_point_satisfies_all_reform_rows(ua, ub, a0, b0, rhs):
+    """A warm start over the ORIGINAL integer factors extends to a point that
+    satisfies every big-M and bit-linking row of the lifted model exactly — so
+    the MILP driver's validation accepts it instead of silently dropping it for
+    a length mismatch (issue #689)."""
+    m = dm.Model("seed")
+    a = m.integer("a", lb=0, ub=ua)
+    b = m.integer("b", lb=0, ub=ub)
+    m.minimize(a + b)
+    m.subject_to(a * b >= rhs)
+    rm = reformulate_integer_bilinear(m)
+    assert rm is not m  # the lift fired
+    n0 = rm._ipx_n_orig_flat
+    assert n0 == 2  # two scalar originals
+    x0 = np.array([a0, b0], dtype=float)
+    x = extend_initial_point(rm, x0)
+    assert x is not None
+    assert x.size == sum(v.size for v in rm._variables)  # full reformed vector
+    assert x.size > n0  # aux columns were actually appended and filled
+    # The originals are preserved and every reform row holds at the extension.
+    assert np.allclose(x[:n0], x0)
+    _extended_point_satisfies_model(rm, x)
+
+
+def test_extend_initial_point_square_path():
+    """The integer-square expansion (bits + bit-AND products) is reconstructed
+    exactly, so a seed survives the ``x**2`` lift too."""
+    m = dm.Model("sq")
+    x = m.integer("x", lb=0, ub=6)
+    m.minimize(x * x - 4 * x)
+    rm = reformulate_integer_bilinear(m)
+    assert rm is not m
+    for xv in range(7):
+        ext = extend_initial_point(rm, np.array([xv], dtype=float))
+        assert ext is not None
+        assert ext.size == sum(v.size for v in rm._variables)
+        _extended_point_satisfies_model(rm, ext)
+
+
+def test_extend_initial_point_rejects_fractional_integer_factor():
+    """A non-integer value for the *binary-expanded* factor cannot be
+    reconstructed to bits exactly, so the extension refuses (returns ``None``)
+    rather than guessing. ``a`` (range 3) is the smaller factor, so it is the one
+    expanded into bits; a fractional ``a`` therefore cannot be mapped."""
+    m = dm.Model("frac")
+    a = m.integer("a", lb=0, ub=3)
+    b = m.integer("b", lb=0, ub=30)
+    m.minimize(a + b)
+    m.subject_to(a * b >= 10)
+    rm = reformulate_integer_bilinear(m)
+    # Sanity: the seed's a=1.5 sits on the expanded factor.
+    assert any(e[0] == "bit" for e in rm._ipx_aux_spec)
+    assert extend_initial_point(rm, np.array([1.5, 4.0])) is None
+
+
+def test_extend_initial_point_rejects_wrong_length_and_nonfinite():
+    """Wrong-length or non-finite seeds are refused (the driver's length guard is
+    the last line of defense; this one keeps a malformed seed from being lifted)."""
+    m = dm.Model("len")
+    a = m.integer("a", lb=0, ub=6)
+    b = m.integer("b", lb=0, ub=5)
+    m.minimize(a + b)
+    m.subject_to(a * b >= 12)
+    rm = reformulate_integer_bilinear(m)
+    assert extend_initial_point(rm, np.array([3.0])) is None  # too short
+    assert extend_initial_point(rm, np.array([3.0, 4.0, 0.0])) is None  # too long
+    assert extend_initial_point(rm, np.array([3.0, np.inf])) is None  # non-finite
+
+
+def test_extend_initial_point_none_without_metadata():
+    """A model that never went through the lift carries no spec, so extension is a
+    no-op returning ``None`` (the caller then does not seed)."""
+    m = dm.Model("plain")
+    x = m.continuous("x", lb=0, ub=5)
+    m.minimize(x)
+    assert extend_initial_point(m, np.array([1.0])) is None
+
+
+@pytest.mark.slow  # end-to-end solve
+def test_seed_survives_lift_end_to_end():
+    """Solving with an ``initial_solution`` over the original variables now seeds
+    the lifted MILP fast path instead of dropping it, and the solve still reaches
+    the proven optimum (soundness: the seed only helps pruning)."""
+    m = dm.Model("e2e")
+    a = m.integer("a", lb=0, ub=8)
+    b = m.integer("b", lb=0, ub=8)
+    m.minimize(a + b)
+    m.subject_to(a * b >= 20)
+    base = m.solve(time_limit=15).objective
+    seeded = m.solve(time_limit=15, initial_solution={a: 5, b: 4}).objective
+    assert base is not None and seeded is not None
+    assert seeded == pytest.approx(base, rel=1e-4, abs=1e-4)
 
 
 # --------------------------------------------------------------------------- #

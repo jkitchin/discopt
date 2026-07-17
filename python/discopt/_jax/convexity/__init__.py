@@ -47,6 +47,14 @@ from .g_transform import (
     least_convexifying_transform,
 )
 from .lattice import Curvature
+from .log_lattice import (
+    LogCurvature,
+    classify_log_curvature,
+    log_combine_product,
+    log_combine_sum,
+    log_negate,
+    log_scale_pow,
+)
 from .rules import (
     OACutConvexity,
     classify_constraint,
@@ -62,21 +70,27 @@ __all__ = [
     "GConvexCertificate",
     "GConvexCut",
     "GTransform",
+    "LogCurvature",
     "OACutConvexity",
     "ProductRatioGClass",
     "certify_convex",
     "certify_g_convex",
     "classify_constraint",
-    "classify_product_ratio",
     "classify_expr",
+    "classify_log_curvature",
     "classify_model",
     "classify_oa_cut_convexity",
+    "classify_product_ratio",
     "g_concave_overestimator_cut",
     "g_convex_supporting_cut",
     "is_g_convex_pointwise",
     "is_product_or_ratio",
     "least_convexifying_rho",
     "least_convexifying_transform",
+    "log_combine_product",
+    "log_combine_sum",
+    "log_negate",
+    "log_scale_pow",
     "refresh_convex_mask",
     "transformation_adds_value",
 ]

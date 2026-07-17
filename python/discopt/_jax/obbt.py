@@ -2152,6 +2152,16 @@ def _interval_div(nl: float, nu: float, dl: float, du: float) -> Optional[tuple[
     return _interval_mul(nl, nu, 1.0 / du, 1.0 / dl)
 
 
+def _interval_prod(intervals: list[tuple[float, float]]) -> Optional[tuple[float, float]]:
+    """Interval product ``∏ [lo_k, hi_k]``; ``None`` if any bound is non-finite."""
+    lo, hi = 1.0, 1.0
+    for a, b in intervals:
+        if not (np.isfinite(a) and np.isfinite(b)):
+            return None
+        lo, hi = _interval_mul(lo, hi, a, b)
+    return lo, hi
+
+
 def reverse_fbbt_from_aux(
     lb: np.ndarray,
     ub: np.ndarray,
@@ -2175,11 +2185,19 @@ def reverse_fbbt_from_aux(
       gives ``a in [wl, wu] / [bl, bu]`` (interval division), and symmetrically
       for ``b``;
     * monomial ``w = a**p`` with ``w in [wl, wu]`` gives the ``p``-th-root box
-      (sign-aware for even ``p``).
+      (sign-aware for even ``p``);
+    * trilinear / multilinear ``w = ∏ x_c`` gives, for each factor,
+      ``x_c in [wl, wu] / ∏_{s≠c} x_s`` when that product-of-the-others does not
+      straddle zero — the same hyperbolic deduction as bilinear, generalized to
+      any arity (#208 follow-up);
+    * ratio-of-products ``w = (∏ x_a) / (∏ x_b)`` (the #185 / #309 quotient aux)
+      gives, for each numerator factor ``x_a = w·(∏ x_b) / ∏_{s≠a} x_num[s]`` and
+      each denominator factor ``x_b = (∏ x_num) / (w·∏_{s≠b} x_den[s])``, again
+      only when the relevant divisor does not straddle zero.
 
-    Every such deduction is a sound FBBT step (it only removes ``a`` values that
-    cannot satisfy the term equation for any admissible partner), so the box stays
-    a valid enclosure. Mutates ``lb`` / ``ub`` in place over the original columns
+    Every such deduction is a sound FBBT step (it only removes values that cannot
+    satisfy the term equation for any admissible partner), so the box stays a
+    valid enclosure. Mutates ``lb`` / ``ub`` in place over the original columns
     and returns the number of bounds tightened.
     """
     n_orig = len(lb)
@@ -2237,6 +2255,75 @@ def reverse_fbbt_from_aux(
             lo = -((-wl) ** (1.0 / p)) if wl < 0 else wl ** (1.0 / p)
             hi = -((-wu) ** (1.0 / p)) if wu < 0 else wu ** (1.0 / p)
             n_tight += _tighten(i, lo, hi)
+
+    def _aux_box(cw: int) -> Optional[tuple[float, float]]:
+        if not (0 <= cw < len(aux_lb)):
+            return None
+        wl, wu = float(aux_lb[cw]), float(aux_ub[cw])
+        if not (np.isfinite(wl) and np.isfinite(wu)):
+            return None
+        return wl, wu
+
+    # Higher-arity products ``w = ∏ x_c``: divide the aux box by the interval
+    # product of the *other* factors, exactly as bilinear does with its single
+    # partner. Distinct-original keys, so every factor is an original column.
+    for mapname in ("trilinear", "multilinear"):
+        for cols, cw in varmap.get(mapname, {}).items():
+            wb = _aux_box(cw)
+            if wb is None or len(cols) < 2:
+                continue
+            cols = tuple(int(c) for c in cols)
+            for t, ct in enumerate(cols):
+                if not (0 <= ct < n_orig):
+                    continue
+                others = _interval_prod(
+                    [(float(lb[cols[s]]), float(ub[cols[s]])) for s in range(len(cols)) if s != t]
+                )
+                if others is None:
+                    continue
+                d = _interval_div(wb[0], wb[1], others[0], others[1])
+                if d is not None:
+                    n_tight += _tighten(ct, d[0], d[1])
+
+    # Ratio-of-products ``w = (∏ x_num) / (∏ x_den)`` (#185 / #309 quotient aux).
+    # ``num`` / ``den`` are tuples of original columns (repeated per exponent), so
+    # "the other factors" is taken over occurrences to handle powers correctly.
+    for (num, den), cw in varmap.get("ratio", {}).items():
+        wb = _aux_box(cw)
+        if wb is None or not num or not den:
+            continue
+        num = tuple(int(c) for c in num)
+        den = tuple(int(c) for c in den)
+        num_box = _interval_prod([(float(lb[c]), float(ub[c])) for c in num])
+        den_box = _interval_prod([(float(lb[c]), float(ub[c])) for c in den])
+        if num_box is None or den_box is None:
+            continue
+        # Numerator factor:  x_a = w · (∏ x_den) / ∏_{s≠a} x_num[s]
+        for t, ca in enumerate(num):
+            if not (0 <= ca < n_orig):
+                continue
+            rhs = _interval_mul(wb[0], wb[1], den_box[0], den_box[1])
+            others = _interval_prod(
+                [(float(lb[num[s]]), float(ub[num[s]])) for s in range(len(num)) if s != t]
+            )
+            if others is None:
+                continue
+            d = _interval_div(rhs[0], rhs[1], others[0], others[1])
+            if d is not None:
+                n_tight += _tighten(ca, d[0], d[1])
+        # Denominator factor:  x_b = (∏ x_num) / (w · ∏_{s≠b} x_den[s])
+        for t, cb in enumerate(den):
+            if not (0 <= cb < n_orig):
+                continue
+            others = _interval_prod(
+                [(float(lb[den[s]]), float(ub[den[s]])) for s in range(len(den)) if s != t]
+            )
+            if others is None:
+                continue
+            divisor = _interval_mul(wb[0], wb[1], others[0], others[1])
+            d = _interval_div(num_box[0], num_box[1], divisor[0], divisor[1])
+            if d is not None:
+                n_tight += _tighten(cb, d[0], d[1])
     return n_tight
 
 

@@ -39,6 +39,7 @@ flag-agnostic.
 from __future__ import annotations
 
 import logging
+import os
 import time
 from dataclasses import dataclass, field
 from typing import Optional
@@ -371,12 +372,16 @@ def _stage_obbt(
     reduce↔rebuild fixpoint, DBBT-first (one objective LP → reduced costs tighten all
     vars) then OBBT (2n min/max probes), all through the NS-safe vertex clamp. It is
     tighten-only and returns the input box on any failure. ``cascade_aux`` stays off
-    (measured-dead, §4/§14)."""
+    by default (measured-dead on the integer-heavy corpus, §4/§14); it is exposed
+    behind ``DISCOPT_OBBT_CASCADE_AUX`` (default ``0``) purely so the #208 A/B panel
+    can drive the reverse-FBBT cascade through the real solve path without changing
+    the default behavior."""
     try:
         from discopt._jax.obbt import obbt_tighten_root
     except Exception:
         return lb, ub, False, 0
 
+    cascade_aux = os.environ.get("DISCOPT_OBBT_CASCADE_AUX", "0") != "0"
     try:
         res = obbt_tighten_root(
             model,
@@ -387,7 +392,7 @@ def _stage_obbt(
             incumbent_cutoff=cutoff,
             superposition=superposition,
             prefer_pounce=prefer_pounce,
-            cascade_aux=False,
+            cascade_aux=cascade_aux,
         )
     except Exception:
         return lb, ub, False, 0
