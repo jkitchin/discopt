@@ -758,6 +758,86 @@ class TestReverseFbbtFromAux:
         assert lb[0] >= 1.0 - 1e-12 and ub[0] <= 3.0 + 1e-12
         assert lb[1] >= 2.0 - 1e-12 and ub[1] <= 4.0 + 1e-12
 
+    def test_trilinear_product_of_others_bound(self):
+        # w = x*y*z, y in [2,4], z in [1,2] -> y*z in [2,8]; a tightened w <= 12
+        # implies x <= 12/2 = 6 (a hyperbolic bound the linear rows can't express).
+        from discopt._jax.obbt import reverse_fbbt_from_aux
+
+        lb = np.array([0.0, 2.0, 1.0])
+        ub = np.array([10.0, 4.0, 2.0])
+        varmap = {"trilinear": {(0, 1, 2): 3}}
+        aux_lb = np.array([0.0, 0.0, 0.0, 0.0])
+        aux_ub = np.array([0.0, 0.0, 0.0, 12.0])
+        n = reverse_fbbt_from_aux(lb, ub, aux_lb, aux_ub, varmap)
+        assert n >= 1
+        assert ub[0] <= 6.0 + 1e-9  # x <= w_ub / (y*z)_lb = 12/2
+
+    def test_multilinear_product_of_others_bound(self):
+        # w = x0*x1*x2*x3, partners in [1,2] -> product-of-others in [1,8];
+        # w <= 4 implies x0 <= 4/1 = 4.
+        from discopt._jax.obbt import reverse_fbbt_from_aux
+
+        lb = np.array([0.0, 1.0, 1.0, 1.0])
+        ub = np.array([10.0, 2.0, 2.0, 2.0])
+        varmap = {"multilinear": {(0, 1, 2, 3): 4}}
+        aux_lb = np.array([0.0, 0.0, 0.0, 0.0, 0.0])
+        aux_ub = np.array([0.0, 0.0, 0.0, 0.0, 4.0])
+        n = reverse_fbbt_from_aux(lb, ub, aux_lb, aux_ub, varmap)
+        assert n >= 1
+        assert ub[0] <= 4.0 + 1e-9
+
+    def test_ratio_numerator_and_denominator_bounds(self):
+        # w = x / y. y in [2,4], tightened w <= 1 implies x = w*y <= 4.
+        from discopt._jax.obbt import reverse_fbbt_from_aux
+
+        lb = np.array([0.0, 2.0])
+        ub = np.array([10.0, 4.0])
+        varmap = {"ratio": {((0,), (1,)): 2}}
+        aux_lb = np.array([0.0, 0.0, 0.0])
+        aux_ub = np.array([0.0, 0.0, 1.0])
+        n = reverse_fbbt_from_aux(lb, ub, aux_lb, aux_ub, varmap)
+        assert n >= 1
+        assert ub[0] <= 4.0 + 1e-9  # x <= w_ub * y_ub = 1*4
+
+    def test_ratio_denominator_tightens(self):
+        # w = x / y, x fixed at 4, w in [2,10] implies y = x/w in [0.4, 2].
+        from discopt._jax.obbt import reverse_fbbt_from_aux
+
+        lb = np.array([4.0, 0.1])
+        ub = np.array([4.0, 5.0])
+        varmap = {"ratio": {((0,), (1,)): 2}}
+        aux_lb = np.array([0.0, 0.0, 2.0])
+        aux_ub = np.array([0.0, 0.0, 10.0])
+        n = reverse_fbbt_from_aux(lb, ub, aux_lb, aux_ub, varmap)
+        assert n >= 1
+        assert lb[1] >= 0.4 - 1e-9  # y >= x_lb / w_ub = 4/10
+        assert ub[1] <= 2.0 + 1e-9  # y <= x_ub / w_lb = 4/2
+
+    def test_higher_arity_never_loosens_and_is_sound(self):
+        # Randomized soundness: every (x,y,z) whose product lands in the aux box
+        # must remain inside the tightened box (reverse FBBT only removes points
+        # that cannot satisfy w = x*y*z for the given aux bounds).
+        from discopt._jax.obbt import reverse_fbbt_from_aux
+
+        rng = np.random.default_rng(0)
+        for _ in range(200):
+            lb = np.array([rng.uniform(-3, 0), rng.uniform(0.5, 2), rng.uniform(1, 2)])
+            ub = np.array([rng.uniform(1, 4), rng.uniform(2, 4), rng.uniform(2, 3)])
+            wl, wu = sorted(rng.uniform(-20, 20, size=2))
+            varmap = {"trilinear": {(0, 1, 2): 3}}
+            aux_lb = np.array([0.0, 0.0, 0.0, wl])
+            aux_ub = np.array([0.0, 0.0, 0.0, wu])
+            tl, tu = lb.copy(), ub.copy()
+            reverse_fbbt_from_aux(tl, tu, aux_lb, aux_ub, varmap)
+            # Tightened box is a subset of the original.
+            assert np.all(tl >= lb - 1e-9) and np.all(tu <= ub + 1e-9)
+            # No feasible (in-box, in-aux) point is cut.
+            for _ in range(40):
+                p = np.array([rng.uniform(lb[k], ub[k]) for k in range(3)])
+                w = p[0] * p[1] * p[2]
+                if wl - 1e-12 <= w <= wu + 1e-12:
+                    assert np.all(p >= tl - 1e-9) and np.all(p <= tu + 1e-9)
+
     def test_cascade_preserves_box_subset_and_optimum(self):
         # End to end: cascade_aux must keep the box a subset and never remove the
         # bilinear optimum. min x+y s.t. x*y >= 4, x,y in [0.5,4].
