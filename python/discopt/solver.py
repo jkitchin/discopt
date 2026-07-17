@@ -4650,6 +4650,30 @@ def solve_model(
             )
             # Fall through to the spatial/McCormick path below.
 
+    # --- Materialize builder-resident linear constraint rows (issue #681) ---
+    # The fast-construction API (``add_linear_constraints`` / the
+    # ``Model.constraint`` linear fast path) records constraint rows only in the
+    # Rust builder / ``model._builder_linear_blocks`` — NOT in
+    # ``model._constraints``. The JAX consumers below (the ``NLPEvaluator``
+    # feasibility gate and the McCormick relaxer) read only ``model._constraints``,
+    # so on this nonlinear/spatial path those rows would be silently dropped and
+    # the solver could certify a FALSE OPTIMUM on an infeasible incumbent. The
+    # pounce LP/QP/MILP/MIQP paths (which consume the builder directly via
+    # ``model_to_repr`` / ``extract_lp_data``) have all returned above, so from
+    # here the nonlinear/spatial path is the sole consumer: normalize the rows
+    # into equivalent expression constraints so every consumer sees the whole
+    # model. No-op unless builder constraint rows exist; model-preserving
+    # (relocates the rows, resets the builder to avoid a double-count in
+    # ``model_to_repr``, and preserves any builder-resident objective).
+    if model._num_builder_constraint_rows() > 0:
+        _n_materialized = model._materialize_builder_linear_rows()
+        if _n_materialized:
+            logger.info(
+                "Materialized %d builder-resident linear constraint row(s) for the "
+                "nonlinear solve path (issue #681)",
+                _n_materialized,
+            )
+
     # The pure-JAX interior-point method ("ipm") and its sparse variant
     # ("sparse_ipm") are retired as NLP solvers. From here on (the NLP/MINLP
     # path only) route them to POUNCE, the pure-Rust Ipopt port. MILP/MIQP/LP/QP

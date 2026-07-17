@@ -3730,6 +3730,84 @@ class Model:
             return 0
         return int(builtins_sum(int(A.shape[0]) for A, *_ in blocks))
 
+    def _materialize_builder_linear_rows(self) -> int:
+        """Rewrite builder-resident linear constraint rows as expression constraints.
+
+        The fast-construction API (``add_linear_constraints`` / the
+        ``Model.constraint`` linear fast path) records constraint rows only in
+        ``self._builder_linear_blocks`` / the Rust builder — they are **not**
+        mirrored into ``self._constraints``. The JAX spatial-B&B consumers (the
+        ``NLPEvaluator`` feasibility gate and the McCormick relaxer) read only
+        ``self._constraints``, so on the nonlinear solve path those rows are
+        silently dropped, and the solver can certify a **false optimum** on an
+        infeasible incumbent (issue #681).
+
+        This materialises each builder linear row into an equivalent expression
+        :class:`Constraint` in ``self._constraints`` and resets the Rust builder so
+        the rows are not *also* carried there (which would double-count them in
+        ``model_to_repr``). The variable registration and any builder-resident
+        objective (``add_linear_objective`` / ``add_quadratic_objective``) are
+        preserved by rebuilding the builder and re-applying the objective from its
+        retained Python-side block. The result is a single, consistent
+        representation every consumer sees — the fast path's documented "the
+        resulting model is identical" invariant, now honoured on the nonlinear
+        path too.
+
+        Idempotent (a no-op once the blocks are cleared). Returns the number of
+        rows materialised. Mathematically model-preserving: it relocates rows
+        between two internal representations without changing the feasible set,
+        the objective, or ``num_constraints``.
+        """
+        from discopt.export._common import iter_builder_linear_rows
+
+        blocks = getattr(self, "_builder_linear_blocks", None)
+        if not blocks:
+            return 0
+
+        rows = iter_builder_linear_rows(self)
+        new_constraints: list[Constraint] = []
+        for row in rows:
+            body: Optional[Expression] = None
+            for v, local, coeff in row.terms:
+                if v.shape == ():
+                    comp: Expression = v
+                elif len(v.shape) <= 1:
+                    comp = v[local]
+                else:
+                    comp = v[tuple(int(i) for i in np.unravel_index(local, v.shape))]
+                term = coeff * comp
+                body = term if body is None else body + term
+            if body is None:
+                body = Constant(np.float64(0.0))
+            if row.sense == "<=":
+                c = body <= row.rhs
+            elif row.sense == ">=":
+                c = body >= row.rhs
+            else:
+                c = body == row.rhs
+            c.name = row.name
+            new_constraints.append(c)
+
+        # Reset the Rust builder so it no longer carries the constraint rows
+        # (avoids a double-count in ``model_to_repr``), preserving the variable
+        # registration and re-applying any builder-resident objective from its
+        # retained Python block.
+        lin_obj = getattr(self, "_builder_linear_objective", None)
+        quad_obj = getattr(self, "_builder_quadratic_objective", None)
+        self._builder = None
+        self._builder_linear_blocks = []
+        # Re-register variables in a fresh builder so ``_builder_idx`` stays valid.
+        self._get_builder()
+        if lin_obj is not None:
+            c_vec, x, constant, sense = lin_obj
+            self.add_linear_objective(c_vec, x, constant=constant, sense=sense)
+        elif quad_obj is not None:
+            Q, c_vec, x, constant, sense = quad_obj
+            self.add_quadratic_objective(Q, c_vec, x, constant=constant, sense=sense)
+
+        self._constraints.extend(new_constraints)
+        return len(new_constraints)
+
     @property
     def num_constraints(self) -> int:
         """Total scalar constraint rows, including fast-API / builder-resident rows.
