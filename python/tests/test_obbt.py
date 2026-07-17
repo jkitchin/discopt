@@ -861,6 +861,122 @@ class TestReverseFbbtFromAux:
 
 
 # ─────────────────────────────────────────────────────────────
+# #208 aux-cascade budget: only probe reverse-FBBT-reachable aux columns
+# ─────────────────────────────────────────────────────────────
+
+
+class TestCascadeReachableAux:
+    """`cascade_reachable_aux` selects exactly the aux columns whose reverse-FBBT
+    could tighten an original — a *superset* of the reverse-FBBT deduction guards,
+    so restricting the OBBT aux candidate set to it is bound-neutral (#208)."""
+
+    def test_bilinear_reachable_when_partner_sign_definite(self):
+        from discopt._jax.obbt import cascade_reachable_aux
+
+        # w = x*y, x in [0,10] straddles 0, y in [2,4] excludes 0. b=w/a needs
+        # 0 ∉ [x] (fails) but a=w/b needs 0 ∉ [y] (holds) -> aux reachable.
+        lb = np.array([0.0, 2.0])
+        ub = np.array([10.0, 4.0])
+        varmap = {"bilinear": {(0, 1): 2}}
+        assert cascade_reachable_aux(varmap, lb, ub, n_orig=2, n_total=3) == [2]
+
+    def test_bilinear_unreachable_when_both_straddle_zero(self):
+        from discopt._jax.obbt import cascade_reachable_aux
+
+        # Both partners straddle 0 -> neither division is defined -> not reachable.
+        lb = np.array([-5.0, -3.0])
+        ub = np.array([5.0, 3.0])
+        varmap = {"bilinear": {(0, 1): 2}}
+        assert cascade_reachable_aux(varmap, lb, ub, n_orig=2, n_total=3) == []
+
+    def test_monomial_always_reachable(self):
+        from discopt._jax.obbt import cascade_reachable_aux
+
+        # A p>=2 monomial deduces a root box with no divisor -> always reachable,
+        # even when the base straddles zero.
+        lb = np.array([-5.0])
+        ub = np.array([5.0])
+        varmap = {"monomial": {(0, 2): 1}}
+        assert cascade_reachable_aux(varmap, lb, ub, n_orig=1, n_total=2) == [1]
+
+    def test_ratio_reachable_only_when_a_factor_is_sign_definite(self):
+        from discopt._jax.obbt import cascade_reachable_aux
+
+        # w = x/y. Denominator y in [2,4] excludes 0 -> numerator factor x is
+        # reachable (x = w*y). Both original.
+        lb = np.array([0.0, 2.0])
+        ub = np.array([10.0, 4.0])
+        varmap = {"ratio": {((0,), (1,)): 2}}
+        assert cascade_reachable_aux(varmap, lb, ub, n_orig=2, n_total=3) == [2]
+
+    def test_reachable_set_is_bound_neutral_on_the_corpus_shape(self):
+        # The predicate must never *under*-include: any aux from which
+        # reverse_fbbt_from_aux actually tightens an original MUST be reachable.
+        # Cross-check on a randomized varmap of every term family.
+        from discopt._jax.obbt import cascade_reachable_aux, reverse_fbbt_from_aux
+
+        rng = np.random.default_rng(7)
+        for _ in range(300):
+            n_orig = 3
+            lb = np.array([rng.uniform(-3, 1) for _ in range(n_orig)])
+            ub = np.array([lb[k] + rng.uniform(0.5, 4) for k in range(n_orig)])
+            cw = n_orig  # single aux column
+            n_total = n_orig + 1
+            kind = rng.integers(0, 4)
+            if kind == 0:
+                varmap = {"bilinear": {(0, 1): cw}}
+            elif kind == 1:
+                varmap = {"monomial": {(0, int(rng.integers(2, 4))): cw}}
+            elif kind == 2:
+                varmap = {"trilinear": {(0, 1, 2): cw}}
+            else:
+                varmap = {"ratio": {((0,), (1,)): cw}}
+            wl, wu = sorted(rng.uniform(-10, 10, size=2))
+            aux_lb = np.append(np.zeros(n_orig), wl)
+            aux_ub = np.append(np.zeros(n_orig), wu)
+            reach = set(cascade_reachable_aux(varmap, lb, ub, n_orig, n_total))
+            tl, tu = lb.copy(), ub.copy()
+            n = reverse_fbbt_from_aux(tl, tu, aux_lb, aux_ub, varmap)
+            if n > 0:  # reverse-FBBT tightened -> the aux MUST have been reachable
+                assert cw in reach, (varmap, lb.tolist(), ub.tolist(), wl, wu)
+
+    def test_targeted_candidate_set_matches_full_on_original_box(self):
+        # End-to-end bound-neutrality: obbt_tighten_root(cascade_aux=True) with the
+        # budgeted candidate set must return the SAME original box as it would with
+        # every aux column probed. We assert the shipped (budgeted) path equals a
+        # patched full-probe path on a mixed bilinear+monomial model.
+        import discopt._jax.obbt as obbt_mod
+
+        m = Model("mix")
+        m.continuous("x", lb=0.5, ub=4.0)
+        m.continuous("y", lb=1.0, ub=3.0)
+        x, y = m._variables[0], m._variables[1]
+        m.minimize(x + y)
+        m.subject_to(x * y >= 3.0)
+        m.subject_to(x * x <= 9.0)
+        lb = np.array([0.5, 1.0])
+        ub = np.array([4.0, 3.0])
+
+        budgeted = obbt_tighten_root(m, lb.copy(), ub.copy(), cascade_aux=True)
+
+        # Force the full-probe behavior by making the reachability predicate return
+        # every aux column, then confirm the propagated original box is identical.
+        orig = obbt_mod.cascade_reachable_aux
+
+        def _all_aux(varmap, lo, hi, n_orig, n_total, eps=1e-7):
+            return list(range(n_orig, n_total))
+
+        obbt_mod.cascade_reachable_aux = _all_aux
+        try:
+            full = obbt_tighten_root(m, lb.copy(), ub.copy(), cascade_aux=True)
+        finally:
+            obbt_mod.cascade_reachable_aux = orig
+
+        assert np.allclose(budgeted.lb, full.lb, atol=1e-9)
+        assert np.allclose(budgeted.ub, full.ub, atol=1e-9)
+
+
+# ─────────────────────────────────────────────────────────────
 # C-15: run_obbt must clamp the raw LP vertex to the NS-safe bound
 # ─────────────────────────────────────────────────────────────
 
