@@ -167,6 +167,150 @@ def _branch_priority_integer_vars(model: Model) -> frozenset[int]:
     return frozenset(priority)
 
 
+def _sos1_selector_vars(model: Model) -> frozenset[int]:
+    """Continuous SOS1-selector flat indices (issue #196).
+
+    A "selector" is a *continuous* variable ``s`` that simultaneously
+    (a) sits in a one-of-N **selection row** ``Σ_i s_i = k`` (``k ≠ 0``, an affine
+    equality with ≥ 2 continuous members — a convex-combination/selection row, not
+    a defining equality ``s = f(·)`` which is nonlinear and so never reduces to an
+    affine row), (b) is upper-bounded by a 0/1 **indicator** via ``s ≤ y`` (``y``
+    binary, or a ``[0, 1]``-bounded continuous indicator such as ex1252's
+    ``x18 = x36``), and (c) appears in a nonlinear product term.
+
+    On a box where several lines are simultaneously "on", such selectors stay
+    spread (``s_i`` fractional) and the McCormick relaxation of the gated products
+    relaxes to 0, so the node bound is pinned near 0 until the selection is
+    concentrated. Branching one selector spatially forces a single product
+    positive (measured on ex1252: an ambiguous box's bound 12658 → ~67–83k once a
+    selector is pinned).
+
+    Like :func:`_branch_priority_integer_vars`, this is **branching-order metadata
+    only** — it never enters a bound or feasibility test, so it cannot affect
+    soundness. Returns an empty set when the structure is absent.
+    """
+    from discopt._jax.term_classifier import _get_flat_index, classify_nonlinear_terms
+    from discopt.modeling.core import (
+        BinaryOp,
+        Constant,
+        IndexExpression,
+        UnaryOp,
+        Variable,
+    )
+
+    n = sum(v.size for v in model._variables)
+    is_int = [False] * n
+    lb = np.full(n, -np.inf)
+    ub = np.full(n, np.inf)
+    fi = 0
+    for v in model._variables:
+        flag = v.var_type in (VarType.BINARY, VarType.INTEGER)
+        vlb = np.asarray(v.lb).reshape(-1)
+        vub = np.asarray(v.ub).reshape(-1)
+        for k in range(v.size):
+            if fi < n:
+                is_int[fi] = flag
+                lb[fi] = float(vlb[k]) if vlb.size == v.size else float(vlb.reshape(-1)[0])
+                ub[fi] = float(vub[k]) if vub.size == v.size else float(vub.reshape(-1)[0])
+            fi += 1
+
+    # Variables in a nonlinear term (objective or constraint).
+    terms = classify_nonlinear_terms(model)
+    nl: set[int] = set()
+    for group in (terms.bilinear, terms.trilinear, terms.multilinear):
+        for term in group or []:
+            nl.update(int(x) for x in term)
+    for term in terms.monomial or []:
+        nl.add(int(term[0]))
+
+    def _is_indicator(j: int) -> bool:
+        # A 0/1 gate: an integer/binary column, or a continuous column pinned to
+        # ``[0, 1]`` (ex1252's ``x18`` is continuous but ``= x36`` binary).
+        return is_int[j] or (0.0 <= lb[j] and ub[j] <= 1.0 + 1e-9)
+
+    def _affine(expr: Any, s: float = 1.0):
+        if isinstance(expr, Constant):
+            return ({}, s * float(expr.value))
+        if isinstance(expr, (Variable, IndexExpression)):
+            flat = _get_flat_index(expr, model)
+            if flat is None:
+                return None
+            return ({int(flat): s}, 0.0)
+        if isinstance(expr, UnaryOp) and expr.op == "neg":
+            return _affine(expr.operand, -s)
+        if isinstance(expr, BinaryOp):
+            if expr.op in ("+", "-"):
+                left = _affine(expr.left, s)
+                right = _affine(expr.right, s if expr.op == "+" else -s)
+                if left is None or right is None:
+                    return None
+                d = dict(left[0])
+                for k, val in right[0].items():
+                    d[k] = d.get(k, 0.0) + val
+                return (d, left[1] + right[1])
+            if expr.op == "*":
+                if isinstance(expr.left, Constant):
+                    return _affine(expr.right, s * float(expr.left.value))
+                if isinstance(expr.right, Constant):
+                    return _affine(expr.left, s * float(expr.right.value))
+        return None
+
+    # Pass 1: collect candidate selectors from every affine selection row
+    # ``Σ s_i = k`` (k != 0, >= 2 continuous members).
+    candidates: set[int] = set()
+    for c in model._constraints:
+        if getattr(c, "sense", None) != "==":
+            continue
+        reduced = _affine(c.body)
+        if reduced is None:
+            continue
+        coeffs, const = reduced
+        members = [(k, v) for k, v in coeffs.items() if abs(v) > 1e-12]
+        if len(members) < 2 or abs(const) < 1e-12:
+            continue
+        if any(is_int[k] for k, _ in members):
+            continue  # a genuine convex-combination row is all-continuous
+        for k, _ in members:
+            candidates.add(k)
+
+    if not candidates:
+        return frozenset()
+
+    # Pass 2: keep a candidate ``s`` only if it is upper-coupled to a 0/1
+    # indicator ``y`` by an inequality ``s - y (<=) 0`` where the pair is tied to
+    # the nonlinear core — either the indicator ``y`` gates a product (``y`` is a
+    # nonlinear-term factor, as ex1252's ``x18`` in ``x0*x3*x18``) or the selector
+    # ``s`` is itself a factor. Concentrating ``s`` then tightens that product's
+    # McCormick envelope, which is the whole point.
+    selectors: set[int] = set()
+    for c in model._constraints:
+        if getattr(c, "sense", None) not in ("<=", ">="):
+            continue
+        reduced = _affine(c.body)
+        if reduced is None:
+            continue
+        coeffs, const = reduced
+        nz = [(k, v) for k, v in coeffs.items() if abs(v) > 1e-12]
+        if len(nz) != 2 or abs(const) > 1e-9:
+            continue
+        (i, ci), (j, cj) = nz
+        # Orient to ``s - y (<=) 0``: for '<=', selector has the + coeff; for '>=',
+        # the - coeff. Only the sign pattern (opposite signs) matters here.
+        if ci * cj >= 0:
+            continue
+        sense = c.sense
+        s_col, y_col = (i, j) if (ci > 0) == (sense == "<=") else (j, i)
+        if (
+            s_col in candidates
+            and not is_int[s_col]
+            and _is_indicator(y_col)
+            and (y_col in nl or s_col in nl)
+        ):
+            selectors.add(s_col)
+
+    return frozenset(selectors)
+
+
 def _select_priority_branch_var(
     solution: np.ndarray,
     node_lb: np.ndarray,
@@ -5635,6 +5779,25 @@ def solve_model(
                             )
                     except Exception as _dep_exc:  # pragma: no cover - defensive
                         logger.debug("branch-deprioritization wiring skipped: %s", _dep_exc)
+                    # SOS1 selector spatial branch (issue #196,
+                    # ``DISCOPT_SOS1_SELECTOR_BRANCH``, default off). Register the
+                    # continuous one-of-N selectors so the Rust tree branches one
+                    # spatially before drilling the aux-binary MILP, un-pinning a
+                    # multi-line box's bound off 0. Order-only metadata (soundness
+                    # unaffected); empty list when the flag is off or the structure
+                    # is absent, leaving the branch path byte-identical.
+                    if _tuning().sos1_selector_branch:
+                        try:
+                            _sos1_cols = sorted(_sos1_selector_vars(model))
+                            if _sos1_cols:
+                                tree.set_sos1_selector_cols(np.asarray(_sos1_cols, dtype=np.int64))
+                                logger.info(
+                                    "SOS1 selector spatial branching: %d selector(s) %s",
+                                    len(_sos1_cols),
+                                    _sos1_cols,
+                                )
+                        except Exception as _sos1_exc:  # pragma: no cover - defensive
+                            logger.debug("SOS1 selector wiring skipped: %s", _sos1_exc)
                     # Root probe: keep the LP relaxer only if it actually yields
                     # a valid objective bound (or a rigorous infeasibility proof)
                     # at the root box. When the objective is not LP-linearizable
