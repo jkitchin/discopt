@@ -1,10 +1,13 @@
 """#208 A/B panel: OBBT aux-cascade OFF vs ON over the vendored corpus.
 
 The reverse-FBBT aux cascade (``obbt_tighten_root(cascade_aux=True)``) is sound by
-construction but ships default-OFF because it was measured *not* net-positive on
-the integer-heavy corpus. This harness drives it through the *real* solve path via
-the ``DISCOPT_OBBT_CASCADE_AUX`` env gate (default ``0``) and reports the flag ON
-vs OFF differential the issue's acceptance criteria ask for:
+construction and, with the reverse-FBBT-reachable candidate budget, **graduated
+default-ON** (``DISCOPT_OBBT_CASCADE_AUX``, default ``1``, ``=0`` to opt out): this
+harness at a fair 30 s budget returned cert-clean and net-positive with 0
+regression (see #208). Run it at the too-tight 8 s budget (``AB_TL=8``) to
+reproduce the earlier time-limited-noise verdict. It drives the flag through the
+*real* solve path via the ``DISCOPT_OBBT_CASCADE_AUX`` env gate and reports the
+flag ON vs OFF differential the issue's acceptance criteria ask for:
 
   * **net-positive?** total node_count / wall, and per-instance node deltas;
   * **cert-clean?** ON vs the trusted OFF path (CLAUDE.md §5 bound-changing

@@ -1884,13 +1884,19 @@ def obbt_tighten_root(
         hyperbolic/root bounds the linear McCormick rows cannot express, and is
         sound by construction (an OBBT aux bound is valid over the relaxation
         polytope, which outer-approximates the MINLP feasible set, and reverse
-        FBBT only removes term-infeasible points). **Opt-in (default off):** on
-        the vendored corpus it is sound (every optimum preserved) and measurably
-        shrinks the root box on several instances (e.g. nvs11/12/13: box
-        log-volume −4 nats), but it did **not** yield a net node-count / wall
-        reduction and slightly regressed one instance (nvs13 39→53 nodes), so it
-        does not meet #208's "the extra OBBT cost must pay for itself" bar yet. It
-        is kept available behind this flag for a future targeted-budget A/B.
+        FBBT only removes term-infeasible points). The extra aux min/max LPs are
+        **budgeted** (:func:`cascade_reachable_aux`): only aux columns whose
+        reverse-FBBT can reach an original variable at the current box are probed,
+        which is bound-neutral vs probing every aux column but drops ~87% of the
+        aux LPs on the vendored corpus. **Graduated default-ON** on the real solve
+        path (``DISCOPT_OBBT_CASCADE_AUX``, default ``1``, ``=0`` to opt out) per
+        #208: the graduation gate (``design/ab_cascade_aux.py``, 65-instance corpus
+        at a fair 30 s budget) returned cert-clean (0 differential soundness
+        violations, 0 optimum mismatches, 0 cert regressions, +1 gain: tls2 F→T) and
+        net-positive with 0 regression — node-neutral on the convergent integer-heavy
+        majority and helpful on the continuous spatial-branch class (tspn08/10/12 →
+        1 node, heatexch_gen3 208→31 s wall). ``cascade_aux=False`` here is only the
+        *function* default; the solve path passes the env-resolved value.
     top_k : int, optional
         Forwarded to :func:`run_obbt_on_relaxation` — probe only the ``top_k``
         highest ``width × |reduced cost|`` variables per sweep instead of all
@@ -2062,9 +2068,18 @@ def obbt_tighten_root(
 
             # Include the aux columns as OBBT candidates (and request the full
             # column vector) when cascading, so their tightening is captured and
-            # carried instead of discarded.
+            # carried instead of discarded. Budget the extra probes (#208): only the
+            # aux columns whose reverse-FBBT can actually reach an original variable
+            # at the current box are candidates — probing the rest spends min/max LPs
+            # whose tightening can never cascade (bound-neutral to skip, ~87% of aux
+            # probes on the vendored corpus), which is what made the blanket cascade
+            # net-negative on integer-heavy instances.
             n_total = len(milp._bounds)
-            obbt_candidates = list(range(n_total)) if cascade_aux else None
+            if cascade_aux:
+                reach = cascade_reachable_aux(varmap, lb, ub, n_orig, n_total, eps=eps)
+                obbt_candidates = list(range(n_orig)) + reach
+            else:
+                obbt_candidates = None
             res = run_obbt_on_relaxation(
                 milp,
                 relaxer._n_orig,
@@ -2077,8 +2092,8 @@ def obbt_tighten_root(
                 prefer_pounce=prefer_pounce,
                 full_result=cascade_aux,
                 # T2.5: probe only the top-k width×|RC| candidates when requested.
-                # Not combined with the aux-cascade candidate set (all columns) —
-                # cascade is a diagnostic path with its own full-column contract.
+                # Not combined with the aux-cascade candidate set (originals + the
+                # reachable aux subset) — cascade has its own full-column contract.
                 top_k=None if cascade_aux else top_k,
             )
             total_lp_time += res.total_lp_time
@@ -2160,6 +2175,96 @@ def _interval_prod(intervals: list[tuple[float, float]]) -> Optional[tuple[float
             return None
         lo, hi = _interval_mul(lo, hi, a, b)
     return lo, hi
+
+
+def cascade_reachable_aux(
+    varmap: dict,
+    lb: np.ndarray,
+    ub: np.ndarray,
+    n_orig: int,
+    n_total: int,
+    *,
+    eps: float = 1e-7,
+) -> list[int]:
+    """Aux columns whose :func:`reverse_fbbt_from_aux` *could* tighten an original.
+
+    The #208 aux cascade only ever shrinks the original box through
+    :func:`reverse_fbbt_from_aux` — carrying an aux bound back through the *linear*
+    McCormick rows is self-implied (the Part-1 no-op finding). So OBBT-probing an
+    aux column whose reverse-FBBT step is structurally incapable of reaching an
+    original variable (a bilinear/product partner interval that straddles zero, a
+    ratio divisor that straddles zero, …) spends min/max LPs whose result can never
+    cascade — pure wasted cost. On the vendored corpus that waste is ~87% of the aux
+    probes and is exactly what made the blanket cascade net-negative on
+    integer-heavy instances (extra LPs cost more than they save when nothing
+    cascades). Restricting the aux candidate set to this reachable subset is
+    **bound-neutral** vs probing all aux columns: every column that reverse-FBBT
+    could tighten from is retained (the predicate below is a *superset* of the
+    reverse-FBBT deduction guards — it only ever over-includes, never under-includes),
+    so the propagated original box is identical while the LP count drops sharply.
+
+    The predicate is evaluated at the *current* box, so an aux that only becomes
+    reachable after a partner's interval turns sign-definite in a later round
+    re-enters the candidate set on that round (obbt_tighten_root recomputes it per
+    sweep). Returns the sorted aux column indices (all ``>= n_orig``).
+    """
+
+    def _excl0(a: float, b: float) -> bool:
+        # Interval [a, b] excludes zero (strictly, to a tolerance).
+        return a > eps or b < -eps
+
+    def _prod_excl0(cols) -> bool:
+        # Interval product ``∏ [lb[c], ub[c]]`` excludes zero iff every factor does.
+        return all(_excl0(float(lb[c]), float(ub[c])) for c in cols)
+
+    reachable: set[int] = set()
+
+    def _is_aux(cw) -> bool:
+        return isinstance(cw, (int, np.integer)) and n_orig <= int(cw) < n_total
+
+    for (i, j), cw in varmap.get("bilinear", {}).items():
+        if not _is_aux(cw):
+            continue
+        # a = w / b needs 0 ∉ [b]; b = w / a needs 0 ∉ [a].
+        if (0 <= i < n_orig and _excl0(float(lb[j]), float(ub[j]))) or (
+            0 <= j < n_orig and _excl0(float(lb[i]), float(ub[i]))
+        ):
+            reachable.add(int(cw))
+
+    for (i, p), cw in varmap.get("monomial", {}).items():
+        # a**p (p>=2) always yields a p-th-root box on the original — no divisor.
+        if _is_aux(cw) and 0 <= i < n_orig and p >= 2:
+            reachable.add(int(cw))
+
+    for mapname in ("trilinear", "multilinear"):
+        for cols, cw in varmap.get(mapname, {}).items():
+            if not _is_aux(cw):
+                continue
+            cols = tuple(int(c) for c in cols)
+            for t, ct in enumerate(cols):
+                if 0 <= ct < n_orig and _prod_excl0([cols[s] for s in range(len(cols)) if s != t]):
+                    reachable.add(int(cw))
+                    break
+
+    for (num, den), cw in varmap.get("ratio", {}).items():
+        if not _is_aux(cw) or not num or not den:
+            continue
+        num = tuple(int(c) for c in num)
+        den = tuple(int(c) for c in den)
+        hit = False
+        for t, ca in enumerate(num):
+            if 0 <= ca < n_orig and _prod_excl0([num[s] for s in range(len(num)) if s != t]):
+                hit = True
+                break
+        if not hit:
+            for t, cb in enumerate(den):
+                if 0 <= cb < n_orig and _prod_excl0([den[s] for s in range(len(den)) if s != t]):
+                    hit = True
+                    break
+        if hit:
+            reachable.add(int(cw))
+
+    return sorted(reachable)
 
 
 def reverse_fbbt_from_aux(

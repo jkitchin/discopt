@@ -371,17 +371,26 @@ def _stage_obbt(
     Delegates to :func:`obbt_tighten_root`, which already runs a ≤``rounds`` internal
     reduce↔rebuild fixpoint, DBBT-first (one objective LP → reduced costs tighten all
     vars) then OBBT (2n min/max probes), all through the NS-safe vertex clamp. It is
-    tighten-only and returns the input box on any failure. ``cascade_aux`` stays off
-    by default (measured-dead on the integer-heavy corpus, §4/§14); it is exposed
-    behind ``DISCOPT_OBBT_CASCADE_AUX`` (default ``0``) purely so the #208 A/B panel
-    can drive the reverse-FBBT cascade through the real solve path without changing
-    the default behavior."""
+    tighten-only and returns the input box on any failure. ``cascade_aux`` (the #208
+    reverse-FBBT aux cascade) is ``DISCOPT_OBBT_CASCADE_AUX``, default **ON**
+    (GRADUATED per #208 under the one-successful-graduation-gate-run policy —
+    CLAUDE.md §5). The graduation gate (``design/ab_cascade_aux.py``, 65-instance
+    corpus at a fair 30 s budget) returned cert-clean (0 differential soundness
+    violations, 0 optimum mismatches, 0 cert regressions, +1 cert gain: tls2 F→T)
+    and net-positive with 0 regression: node-neutral on the convergent integer-heavy
+    majority (converged-only 2228 vs 2228) and helpful on the continuous
+    spatial-branch class (tspn08/10/12 prune to 1 node, heatexch_gen3 208→31 s wall),
+    all-instances node_count −2.5 %. The candidate set is budgeted to the
+    reverse-FBBT-reachable aux columns (:func:`obbt.cascade_reachable_aux`), so the
+    extra probes are ~87 % fewer than a blanket cascade and it runs root-only (no
+    per-node cost). Set ``DISCOPT_OBBT_CASCADE_AUX=0`` to restore the old default
+    OFF."""
     try:
         from discopt._jax.obbt import obbt_tighten_root
     except Exception:
         return lb, ub, False, 0
 
-    cascade_aux = os.environ.get("DISCOPT_OBBT_CASCADE_AUX", "0") != "0"
+    cascade_aux = os.environ.get("DISCOPT_OBBT_CASCADE_AUX", "1") != "0"
     try:
         res = obbt_tighten_root(
             model,
