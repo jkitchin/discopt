@@ -119,6 +119,18 @@ class _Expander:
         # (var._index, elem) -> (lo, [(coef, e_k Variable), ...])
         self._cache: dict[tuple[int, int], tuple[int, list[tuple[int, Variable]]]] = {}
         self._counter = 0
+        # Warm-start reconstruction spec: one entry per auxiliary column, in the
+        # exact order the columns are appended to ``model._variables`` (so the aux
+        # block is a suffix of the reformed flat layout and each entry's index ==
+        # its append position). Every aux is *exactly determined* by the original
+        # variables, so a warm start over the originals extends to the reformed
+        # vector by evaluating this spec in order (see ``extend_initial_point``).
+        #   ("bit", (var._index, elem), k, lo, nbits): bit k of round(x - lo).
+        #   ("prod", (e._index, 0), (other._index, other_elem)): v = e * other.
+        self.aux_spec: list[tuple] = []
+        # Cleared if an aux column cannot be described (defensive): then the whole
+        # spec is discarded and no warm start is mapped rather than one misaligned.
+        self.spec_ok = True
 
     def expansion(self, var: Variable, elem: int, lo: int, hi: int):
         key = (var._index, elem)
@@ -134,6 +146,10 @@ class _Expander:
             e = Variable(f"_ipx_e{self._counter}", VarType.BINARY, (), 0.0, 1.0, self.model)
             self._counter += 1
             self.model._variables.append(e)
+            # e_k is bit k of round(x_i - lo): the link row pins sum 2^k e_k to
+            # x_i - lo exactly, and the binary digits of a value in [0, 2^nbits-1]
+            # are unique.
+            self.aux_spec.append(("bit", (var._index, elem), k, lo, nbits))
             bits.append((1 << k, e))
             term = e if k == 0 else BinaryOp("*", Constant(float(1 << k)), e)
             link = BinaryOp("-", link, term)
@@ -172,6 +188,15 @@ class _Expander:
         )
         self._counter += 1
         self.model._variables.append(v)
+        # v == e * other, both scalar variable references (``other`` is either an
+        # original factor or, in the square expansion, another expansion bit — in
+        # every case already appended before this product), so v reconstructs as
+        # value(e) * value(other) at any point. Record it for warm-start mapping.
+        oref = _scalar_var_ref(other)
+        if oref is None:  # pragma: no cover - defensive; other is always a scalar ref
+            self.spec_ok = False
+        else:
+            self.aux_spec.append(("prod", (e._index, 0), (oref[0]._index, oref[1])))
         ac = self.aux_constraints
         # discopt's LP extractor folds the RHS into the body (``body sense 0``);
         # every row below is therefore normalized to rhs == 0 with the constant
@@ -506,9 +531,81 @@ def expand_integer_products(model: Model, implied=frozenset()) -> Model:
         if len(new_model._variables) > cap:
             return model
         new_model._constraints = rebuilt + exp.aux_constraints
+        _attach_warm_start_spec(model, new_model, exp)
         return new_model
     except Exception:
         return model
+
+
+def _attach_warm_start_spec(model: Model, new_model: Model, exp: "_Expander") -> None:
+    """Record on *new_model* how to reconstruct every auxiliary column from a
+    point over the ORIGINAL variables, mirroring the binary-multilinear reform's
+    ``_bml_aux_spec`` / ``_bml_n_orig_flat``. The aux columns are appended after
+    the originals, so the reformed flat layout is ``[originals | aux]`` and each
+    aux's flat index equals ``n_orig_flat + its append position``. Purely primal
+    metadata: the MILP driver re-validates any seed built from it, so this can
+    never affect the dual bound or the certificate."""
+    if not exp.spec_ok:
+        return
+    full_off: dict[int, int] = {}
+    off = 0
+    for v in new_model._variables:
+        full_off[v._index] = off
+        off += v.size
+    n_orig_flat = sum(v.size for v in model._variables)
+
+    def _flat(key: tuple[int, int]) -> int:
+        return full_off[key[0]] + key[1]
+
+    translated: list[tuple] = []
+    try:
+        for entry in exp.aux_spec:
+            if entry[0] == "bit":
+                _, src, k, lo, nbits = entry
+                translated.append(("bit", _flat(src), k, lo, nbits))
+            else:  # "prod"
+                _, e_key, o_key = entry
+                translated.append(("prod", _flat(e_key), _flat(o_key)))
+    except KeyError:  # pragma: no cover - defensive; every key is a live variable
+        return
+    setattr(new_model, "_ipx_aux_spec", translated)  # noqa: B010
+    setattr(new_model, "_ipx_n_orig_flat", n_orig_flat)  # noqa: B010
+
+
+def extend_initial_point(reformed: Model, x0) -> Optional[np.ndarray]:
+    """Extend a point over the ORIGINAL variables (flat, length
+    ``_ipx_n_orig_flat``) to a point over the reformed model's full variable
+    vector by evaluating each auxiliary from its recorded definition
+    (``e_k`` = bit k of ``round(x - lo)``; ``v = e * other``). Returns ``None``
+    when the model carries no reformulation metadata, the point has the wrong
+    length or is non-finite, or any entry cannot be reconstructed exactly (a
+    non-integer integer-factor value, or one outside its expansion range) — the
+    caller then simply does not seed. The MILP driver re-validates whatever is
+    passed (bounds, integrality, row feasibility) and recomputes its objective,
+    so this mapping is an optimization, never a soundness lever."""
+    spec = getattr(reformed, "_ipx_aux_spec", None)
+    n0 = getattr(reformed, "_ipx_n_orig_flat", None)
+    if spec is None or n0 is None:
+        return None
+    x = np.asarray(x0, dtype=np.float64).ravel()
+    if x.size != n0 or not np.all(np.isfinite(x)):
+        return None
+    out: list[float] = list(x)
+    for entry in spec:
+        if entry[0] == "bit":
+            _, src, k, lo, nbits = entry
+            n = float(x[src]) - lo
+            nr = int(round(n))
+            # The bit is exactly determined only when x - lo is a non-negative
+            # integer representable in this factor's bit width; anything else
+            # (fractional or out-of-range seed) cannot be reconstructed — refuse.
+            if abs(n - nr) > 1e-6 or nr < 0 or nr > (1 << nbits) - 1:
+                return None
+            out.append(float((nr >> k) & 1))
+        else:  # "prod": v = e * other, both already reconstructed above
+            _, ei, oi = entry
+            out.append(float(out[ei] * out[oi]))
+    return np.asarray(out, dtype=np.float64)
 
 
 def has_reformulation_work(model: Model) -> bool:

@@ -4298,6 +4298,29 @@ def solve_model(
                     # _p3_force_cut_path_enabled / certification-gap-plan.md §7.
                     if not _p3_force_cut_path_enabled():
                         nlp_solver = "simplex"
+                # Incumbent seeding. A user warm start (initial_solution) is over
+                # the ORIGINAL variables; the big-M lift appends aux columns
+                # (bits e_k = binary digits of x-lo, products v = e*other) that
+                # are exactly determined by it, so extend it across the lift —
+                # otherwise the reformed vector is longer than the seed and the
+                # MILP fast path's size guard silently drops it (issue #689).
+                # Purely primal: the Rust MILP driver re-validates the seed and
+                # recomputes its objective, so a bad point is dropped, never
+                # trusted (the dual bound and certified optimum are unaffected).
+                if initial_point is not None:
+                    from discopt._jax.integer_product_reform import (
+                        extend_initial_point as _ipx_extend,
+                    )
+
+                    _ipx_x0 = _ipx_extend(model, initial_point)
+                    if _ipx_x0 is not None:
+                        initial_point = _ipx_x0
+                    else:
+                        logger.info(
+                            "integer-bilinear reformulation: warm-start point "
+                            "could not be extended across the lift; solving "
+                            "without a seed"
+                        )
     except Exception as _ipx_exc:  # pragma: no cover - defensive
         logger.debug("integer-bilinear reformulation skipped: %s", _ipx_exc)
 
