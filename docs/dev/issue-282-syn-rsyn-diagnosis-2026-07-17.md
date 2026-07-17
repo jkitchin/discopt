@@ -214,7 +214,7 @@ improvers starving the tree, and #321 ported them in without the contingent. Tur
 globally would re-break the families they were built for. The measurement instead indicts the
 **calibration**, and that is H2:
 
-> **H2 (untested, general):** `_improver_allowed` (`solver.py:9844-9855`) charges *fixed
+> **H2 (untested, general — now [#704](https://github.com/jkitchin/discopt/issues/704)):** `_improver_allowed` (`solver.py:9844-9855`) charges *fixed
 > abstract cost units* (`_HEUR_COST = {"rins": 5.0, "lbranch": 10.0}`) against a
 > node-proportional contingent — it never measures wall time. On syn/rsyn one local-branching
 > call costs ≈ 6 s (profile: 3 calls / 18.3 s), so ~10 improver calls burn ~35 s before a
@@ -356,18 +356,20 @@ whole solve), so this is a partial fire — but the dominant term is unambiguous
    answer before building: does NLP-BB have a root cut/OBBT stage at all, and is `syn40m`'s
    +2609 % a different failure from `rsyn*`'s ~+70 % (its `root_time` is 4.2 s — the fastest
    root, and the worst bound)?
-3. **Certification (own thread).** `gap_certified=False` on **14/14 runs, including the
-   convex NLP-BB ones**, where the gap *should* certify. Cause is `solver.py:10027` — any
-   untrusted (non-KKT) node in a batch decertifies. This is sound-conservative and correct
-   per roadmap P0.3, but it means #282's convex half never emits a certificate even when the
-   bound is valid. Worth a separate issue: *why* are these nodes untrusted?
+3. **Certification — split out to [#703](https://github.com/jkitchin/discopt/issues/703).**
+   `gap_certified=False` on **14/14 runs, including the convex NLP-BB ones**, where the gap
+   *should* certify. Cause is `solver.py:10027` — any untrusted (non-KKT) node in a batch
+   decertifies. This is sound-conservative and correct per roadmap P0.3, but it means #282's
+   convex half never emits a certificate even when the bound is valid. The open question is
+   *why* those nodes are untrusted.
 4. **Root latency (feeds #268).** `presolve` at 2.6 s/call × 4 = 10.5 s dominates the
    8–21 s root. At the issue's 5 s budget this is the *entire* story (§R2-4).
-5. **Improver contingent calibration (H2, §R2-7).** Measured: improvers cost ~half the wall
-   clock on this family and the budget is better spent on the tree (gap smaller on 6/7 with
-   them off; A wins 0/7). The general fix is a **wall-time-denominated** contingent, not a
-   family switch — the current one charges fixed abstract units and cannot see that one
-   `lbranch` call costs 6 s here. Entry experiment first, then the Regime-2 panel.
+5. **Improver contingent calibration — split out to
+   [#704](https://github.com/jkitchin/discopt/issues/704)** (H2, §R2-7). Measured: improvers
+   cost ~half the wall clock on this family and the budget is better spent on the tree (gap
+   smaller on 6/7 with them off; A wins 0/7). The general fix is a **wall-time-denominated**
+   contingent, not a family switch — the current one charges fixed abstract units and cannot
+   see that one `lbranch` call costs 6 s here. Entry experiment first, then the Regime-2 panel.
 
 **Not the lever (do not re-walk):** OA auto-routing (F-1), McCormick strengthening for the
 *convex* half (it doesn't run there), primal/LNS incumbent quality as the headline (§R2-1).
