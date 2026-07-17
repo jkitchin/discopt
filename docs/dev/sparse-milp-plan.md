@@ -413,8 +413,11 @@ structural `0.0` adds exactly, and CSC preserves ascending row order, so `Aᵀy`
     constant-factor win (ships; widens the tractable-`n` envelope) but is **falsified as the
     qap graduation lever** — the exponential wall, not the constant, is the barrier.
   - **Consequence — the only route that structurally beats the wall is decomposition, not a
-    faster monolithic solve.** Next: scope the **Lagrangian / Adams–Sherali dual** of the RLT
-    coupling rows (see the new task below), which never forms the 114k-row LP.
+    faster monolithic solve.** Scoped in **`docs/dev/rlt-lagrangian-plan.md`**: dualize the RLT
+    coupling rows and minimize over the cheap sparse McCormick inner LP, so `g(μ) ≤ RLT-1 opt`
+    for any `μ` (rigorous by weak duality + NS-safe inner bound) and the 114k-row coupled LP is
+    never formed. Entry experiment (synthetic QAPs) reaches **~100 % of the RLT-1 bound** in
+    ~10² cheap inner solves; qap-scale + target-free convergence are the named open risks.
 
 ## Problem (measured on qap — a 225-binary Quadratic Assignment Problem)
 
