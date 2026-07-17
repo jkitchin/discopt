@@ -1,0 +1,373 @@
+{
+  "time_limit_s": 60.0,
+  "summary": {
+    "on_better": 3,
+    "tie": 12,
+    "on_worse": 0,
+    "instances_with_soundness_problem": 0,
+    "cert_clean": true,
+    "net_positive": true
+  },
+  "rows": [
+    {
+      "instance": "graphpart_2pm-0044-0044",
+      "oracle": -13.0,
+      "off": {
+        "obj": -13.0,
+        "bound": -13.0,
+        "status": "optimal",
+        "gap_certified": true,
+        "nodes": 51,
+        "wall": 0.43,
+        "incumbent_feasible": true
+      },
+      "on": {
+        "obj": -13.0,
+        "bound": -13.0,
+        "status": "optimal",
+        "gap_certified": true,
+        "nodes": 51,
+        "wall": 0.41,
+        "incumbent_feasible": true
+      },
+      "problems": [],
+      "primal": "tie"
+    },
+    {
+      "instance": "graphpart_2pm-0055-0055",
+      "oracle": -20.0,
+      "off": {
+        "obj": -20.0,
+        "bound": -20.0,
+        "status": "optimal",
+        "gap_certified": true,
+        "nodes": 239,
+        "wall": 1.29,
+        "incumbent_feasible": true
+      },
+      "on": {
+        "obj": -20.0,
+        "bound": -20.0,
+        "status": "optimal",
+        "gap_certified": true,
+        "nodes": 239,
+        "wall": 1.27,
+        "incumbent_feasible": true
+      },
+      "problems": [],
+      "primal": "tie"
+    },
+    {
+      "instance": "graphpart_2pm-0066-0066",
+      "oracle": -29.0,
+      "off": {
+        "obj": -29.0,
+        "bound": -29.0,
+        "status": "optimal",
+        "gap_certified": true,
+        "nodes": 1345,
+        "wall": 4.9,
+        "incumbent_feasible": true
+      },
+      "on": {
+        "obj": -29.0,
+        "bound": -29.0,
+        "status": "optimal",
+        "gap_certified": true,
+        "nodes": 1345,
+        "wall": 5.0,
+        "incumbent_feasible": true
+      },
+      "problems": [],
+      "primal": "tie"
+    },
+    {
+      "instance": "graphpart_2pm-0077-0777",
+      "oracle": -40.0,
+      "off": {
+        "obj": -40.0,
+        "bound": -40.25,
+        "status": "feasible",
+        "gap_certified": false,
+        "nodes": 18072,
+        "wall": 60.12,
+        "incumbent_feasible": true
+      },
+      "on": {
+        "obj": -40.0,
+        "bound": -40.166666666666686,
+        "status": "feasible",
+        "gap_certified": false,
+        "nodes": 17954,
+        "wall": 61.19,
+        "incumbent_feasible": true
+      },
+      "problems": [],
+      "primal": "tie"
+    },
+    {
+      "instance": "graphpart_2pm-0088-0888",
+      "oracle": -55.0,
+      "off": {
+        "obj": -55.0,
+        "bound": -55.00000000000004,
+        "status": "optimal",
+        "gap_certified": true,
+        "nodes": 5098,
+        "wall": 42.87,
+        "incumbent_feasible": true
+      },
+      "on": {
+        "obj": -55.0,
+        "bound": -55.00000000000001,
+        "status": "optimal",
+        "gap_certified": true,
+        "nodes": 4798,
+        "wall": 44.01,
+        "incumbent_feasible": true
+      },
+      "problems": [],
+      "primal": "tie"
+    },
+    {
+      "instance": "graphpart_2pm-0099-0999",
+      "oracle": -64.0,
+      "off": {
+        "obj": -49.0,
+        "bound": -72.0,
+        "status": "feasible",
+        "gap_certified": false,
+        "nodes": 6714,
+        "wall": 60.27,
+        "incumbent_feasible": true
+      },
+      "on": {
+        "obj": -56.0,
+        "bound": -72.0,
+        "status": "feasible",
+        "gap_certified": false,
+        "nodes": 6756,
+        "wall": 61.42,
+        "incumbent_feasible": true
+      },
+      "problems": [],
+      "primal": "ON better"
+    },
+    {
+      "instance": "graphpart_3pm-0333-0333",
+      "oracle": -26.0,
+      "off": {
+        "obj": -26.0,
+        "bound": -26.0,
+        "status": "optimal",
+        "gap_certified": true,
+        "nodes": 3945,
+        "wall": 6.77,
+        "incumbent_feasible": true
+      },
+      "on": {
+        "obj": -26.0,
+        "bound": -26.0,
+        "status": "optimal",
+        "gap_certified": true,
+        "nodes": 3945,
+        "wall": 6.61,
+        "incumbent_feasible": true
+      },
+      "problems": [],
+      "primal": "tie"
+    },
+    {
+      "instance": "graphpart_3pm-0334-0334",
+      "oracle": -36.0,
+      "off": {
+        "obj": -36.0,
+        "bound": -36.0,
+        "status": "optimal",
+        "gap_certified": true,
+        "nodes": 12988,
+        "wall": 45.51,
+        "incumbent_feasible": true
+      },
+      "on": {
+        "obj": -36.0,
+        "bound": -36.0,
+        "status": "optimal",
+        "gap_certified": true,
+        "nodes": 12992,
+        "wall": 45.54,
+        "incumbent_feasible": true
+      },
+      "problems": [],
+      "primal": "tie"
+    },
+    {
+      "instance": "graphpart_3pm-0344-0344",
+      "oracle": -48.0,
+      "off": {
+        "obj": -35.0,
+        "bound": -54.5,
+        "status": "feasible",
+        "gap_certified": false,
+        "nodes": 12370,
+        "wall": 60.19,
+        "incumbent_feasible": true
+      },
+      "on": {
+        "obj": -40.0,
+        "bound": -54.5,
+        "status": "feasible",
+        "gap_certified": false,
+        "nodes": 12512,
+        "wall": 61.31,
+        "incumbent_feasible": true
+      },
+      "problems": [],
+      "primal": "ON better"
+    },
+    {
+      "instance": "graphpart_3pm-0444-0444",
+      "oracle": -65.0,
+      "off": {
+        "obj": -43.0,
+        "bound": -80.0,
+        "status": "feasible",
+        "gap_certified": false,
+        "nodes": 4230,
+        "wall": 60.36,
+        "incumbent_feasible": true
+      },
+      "on": {
+        "obj": -61.0,
+        "bound": -80.0,
+        "status": "feasible",
+        "gap_certified": false,
+        "nodes": 4216,
+        "wall": 61.71,
+        "incumbent_feasible": true
+      },
+      "problems": [],
+      "primal": "ON better"
+    },
+    {
+      "instance": "graphpart_2g-0044-1601",
+      "oracle": -954077.0,
+      "off": {
+        "obj": -954077.0,
+        "bound": -954077.0,
+        "status": "optimal",
+        "gap_certified": true,
+        "nodes": 11,
+        "wall": 0.33,
+        "incumbent_feasible": true
+      },
+      "on": {
+        "obj": -954077.0,
+        "bound": -954077.0,
+        "status": "optimal",
+        "gap_certified": true,
+        "nodes": 11,
+        "wall": 0.33,
+        "incumbent_feasible": true
+      },
+      "problems": [],
+      "primal": "tie"
+    },
+    {
+      "instance": "graphpart_2g-0066-0066",
+      "oracle": -2865560.0,
+      "off": {
+        "obj": -2865560.0,
+        "bound": -2865560.0,
+        "status": "optimal",
+        "gap_certified": true,
+        "nodes": 115,
+        "wall": 2.37,
+        "incumbent_feasible": true
+      },
+      "on": {
+        "obj": -2865560.0,
+        "bound": -2865560.0,
+        "status": "optimal",
+        "gap_certified": true,
+        "nodes": 115,
+        "wall": 2.36,
+        "incumbent_feasible": true
+      },
+      "problems": [],
+      "primal": "tie"
+    },
+    {
+      "instance": "graphpart_3g-0234-0234",
+      "oracle": -1952753.0,
+      "off": {
+        "obj": -1952753.0,
+        "bound": -1952753.0,
+        "status": "optimal",
+        "gap_certified": true,
+        "nodes": 219,
+        "wall": 1.67,
+        "incumbent_feasible": true
+      },
+      "on": {
+        "obj": -1952753.0,
+        "bound": -1952753.0,
+        "status": "optimal",
+        "gap_certified": true,
+        "nodes": 219,
+        "wall": 1.61,
+        "incumbent_feasible": true
+      },
+      "problems": [],
+      "primal": "tie"
+    },
+    {
+      "instance": "graphpart_3g-0334-0334",
+      "oracle": -3410696.0,
+      "off": {
+        "obj": -3410696.0,
+        "bound": -3410924.4999999995,
+        "status": "optimal",
+        "gap_certified": true,
+        "nodes": 1313,
+        "wall": 8.49,
+        "incumbent_feasible": true
+      },
+      "on": {
+        "obj": -3410696.0,
+        "bound": -3410924.4999999995,
+        "status": "optimal",
+        "gap_certified": true,
+        "nodes": 1313,
+        "wall": 8.49,
+        "incumbent_feasible": true
+      },
+      "problems": [],
+      "primal": "tie"
+    },
+    {
+      "instance": "graphpart_clique-20",
+      "oracle": 147.0,
+      "off": {
+        "obj": 146.99999999999997,
+        "bound": 146.99999999999997,
+        "status": "optimal",
+        "gap_certified": true,
+        "nodes": 2267,
+        "wall": 1.15,
+        "incumbent_feasible": true
+      },
+      "on": {
+        "obj": 146.99999999999997,
+        "bound": 146.99999999999997,
+        "status": "optimal",
+        "gap_certified": true,
+        "nodes": 2267,
+        "wall": 1.16,
+        "incumbent_feasible": true
+      },
+      "problems": [],
+      "primal": "tie"
+    }
+  ]
+}

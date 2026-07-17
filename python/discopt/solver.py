@@ -14239,12 +14239,13 @@ def _solve_milp_simplex(
             # driver re-validates and re-scores the seed, and the adoption gate
             # below re-verifies the returned point via ``_point_feasible``, so a
             # worse or invalid seed can only cost search, never the certificate.
-            # Default-OFF pending a graduation panel: sound, and the mechanism is
-            # verified (escapes a stalled assignment incumbent to the optimum in
-            # the reseed), but not yet shown net-positive vs the plain engine —
-            # the swap search costs a wall slice and can leave a marginally looser
-            # bound. Flag ON/OFF is the §5 differential-panel gate (issue #280).
-            if os.environ.get("DISCOPT_MILP_SWAP_RESEED", "0") == "1":
+            # Graduated default-ON (§5, issue #280): the flag ON-vs-OFF panel
+            # cleared both bars — cert-clean (global50 flag-ON incorrect_count=0;
+            # no bound past oracle on the graphpart family; improved incumbents
+            # independently re-verified feasible + integral) and net-positive
+            # (3/15 graphpart instances strictly better primal, 12 tie, 0 worse).
+            # ``DISCOPT_MILP_SWAP_RESEED=0`` remains the opt-out.
+            if os.environ.get("DISCOPT_MILP_SWAP_RESEED", "1") != "0":
                 _swap_seed = _one_hot_swap_reseed(
                     model, np.asarray(x_struct, dtype=np.float64), _reentry_remaining
                 )
