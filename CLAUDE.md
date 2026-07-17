@@ -40,13 +40,21 @@ discopt is a hybrid Mixed-Integer Nonlinear Programming (MINLP) solver combining
      (new bound ≥ old bound AND ≤ true box optimum on fixed boxes) plus
      feasible-point sampling (no valid point cut), behind a feature flag,
      default-off until a corpus-wide differential panel passes — flag ON vs OFF
-     over the in-repo corpus with `incorrect_count = 0`, no bound above its
-     reference optimum, no certification regression, and incumbents
-     independently feasibility-verified. A passing panel graduates the flag
-     default-ON (keep the `=0` opt-out and the legacy path intact); the nightly
-     panel remains the ongoing regression watch, not a graduation gate.
+     over the in-repo corpus, requiring BOTH (1) *cert-clean*: `incorrect_count
+     = 0`, no bound above its reference optimum, no certification regression (no
+     `gap_certified=True` instance regresses to uncertified), objective drift
+     within tolerance, and incumbents independently feasibility-verified
+     (soundness is non-negotiable; never flip a flag whose run shows any false
+     or looser bound), AND (2) *net-positive*: measurably helpful broadly (node
+     count / wall / bound), not merely sound — the `DISCOPT_CUT_INHERIT` lesson
+     (sound ≠ helpful; a cert-clean but neutral-or-harmful flag stays OFF, with
+     the measurement recorded). A passing panel graduates the flag default-ON
+     (keep the `=0` opt-out and the legacy path intact); the nightly panel
+     remains the ongoing regression watch, not a graduation gate.
      (Policy updated 2026-07-17 by the owner — consecutive-nightly graduation
-     was dropped in favor of the panel gate; first applied to the #309 flags.)
+     was dropped in favor of the panel gate; first applied to the #309 flags.
+     One passing graduation-gate run meeting both bars suffices — consecutive
+     nightly runs are no longer required.)
 
 ## Workflow
 
