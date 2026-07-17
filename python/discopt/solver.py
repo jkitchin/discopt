@@ -13858,6 +13858,103 @@ def _solve_milp_simplex(
         time_limit_s=float(_milp_budget),
         debug_hook=_debug.rust_hook(),
     )
+
+    # Feasibility gate (shared by the return path below and the #698 re-entry
+    # adoption test). The row/bound/integrality decomposition is independent of
+    # the point, so build it once and close over it.
+    n_slack = int(lp_data.A_eq.shape[1]) - n_orig
+    _A_ub_m, _b_ub_m, _A_eq_m, _b_eq_m = _decompose_eq_slack_form(
+        np.asarray(lp_data.A_eq), np.asarray(lp_data.b_eq), n_orig, n_slack
+    )
+    _xl_gate = np.asarray(lp_data.x_l[:n_orig], dtype=np.float64)
+    _xu_gate = np.asarray(lp_data.x_u[:n_orig], dtype=np.float64)
+    _gate_tol = 1e-5
+
+    def _point_feasible(xo: np.ndarray) -> bool:
+        """Never take the engine's ``optimal``/``feasible`` on faith: verify the
+        returned point against the model's own rows, bounds, and integrality."""
+        if _A_ub_m is not None and _b_ub_m is not None and _A_ub_m.shape[0]:
+            if not bool(np.all(_A_ub_m @ xo <= _b_ub_m + _gate_tol * (1.0 + np.abs(_b_ub_m)))):
+                return False
+        if _A_eq_m is not None and _b_eq_m is not None and _A_eq_m.shape[0]:
+            if not bool(
+                np.all(np.abs(_A_eq_m @ xo - _b_eq_m) <= _gate_tol * (1.0 + np.abs(_b_eq_m)))
+            ):
+                return False
+        if not bool(np.all(xo >= _xl_gate - _gate_tol)):
+            return False
+        if not bool(np.all(xo <= _xu_gate + _gate_tol)):
+            return False
+        for _off, _sz in zip(int_offsets, int_sizes):
+            seg = xo[_off : _off + int(_sz)]
+            if np.any(np.abs(seg - np.round(seg)) > 1e-4):
+                return False
+        return True
+
+    # Re-entry on an uncertified ``feasible`` (issue #698). The first slice
+    # (``_milp_budget``) is a bounded STALL guard (#291), NOT the user's whole
+    # budget — on an uncertified feasible the function returns rather than
+    # falling back, so absent this the remainder of ``time_limit`` is simply
+    # discarded (measured: up to 75% of the granted budget). But an engine that
+    # returned an incumbent is demonstrably *not* wedged, which is the only thing
+    # the cap exists to protect against, and the engine is monotone in its budget
+    # (#698 measurements) — more time strictly tightens the bound / incumbent. So
+    # hand the REMAINING budget back to the same engine, seeded with the best
+    # point so far. The bounded first slice is deliberately kept intact (handing
+    # run 1 the whole budget starves the #280 one-hot swap and measures worse);
+    # this only spends what run 1 left. Skip when there is no more time than run 1
+    # already had — a restart with less budget cannot beat it and would only burn
+    # wall. Also skip on a debugger stop (the user asked the solve to stop, not to
+    # restart). Adopt run 2 only when it certifies or is STRICTLY better and its
+    # point passes the feasibility gate: both runs' bounds are valid lower bounds
+    # on the same problem, so keeping the tighter one is sound.
+    _sess_reentry = _debug.current()
+    _debug_stop_pending = _sess_reentry is not None and _sess_reentry.stop_requested
+    if status == "feasible" and not _debug_stop_pending:
+        _reentry_remaining = float(time_limit) - (time.perf_counter() - t_start)
+        if _reentry_remaining > _milp_budget + 1e-9:
+            _xo1 = np.asarray(x_struct, dtype=np.float64)[:n_orig]
+            _seed2 = None
+            if _xo1.size == n_orig:
+                _seed2 = np.ascontiguousarray(_xo1.astype(np.float64).ravel())
+            (
+                _status2,
+                _x2,
+                _obj2,
+                _bound2,
+                _nodes2,
+                _iters2,
+            ) = solve_milp_py(
+                np.ascontiguousarray(lp_data.c, dtype=np.float64),
+                A,
+                np.ascontiguousarray(lp_data.b_eq, dtype=np.float64),
+                np.ascontiguousarray(lp_data.x_l, dtype=np.float64),
+                np.ascontiguousarray(lp_data.x_u, dtype=np.float64),
+                np.ascontiguousarray(np.asarray(int_idx, dtype=np.int64)),
+                n_orig,
+                float(lp_data.obj_const),
+                int(max_nodes),
+                float(gap_tolerance),
+                initial_incumbent=_seed2,
+                time_limit_s=float(_reentry_remaining),
+                debug_hook=_debug.rust_hook(),
+            )
+            if _status2 in ("optimal", "feasible"):
+                _xo2 = np.asarray(_x2, dtype=np.float64)[:n_orig]
+                # Comparisons in the engine-internal (minimize) sense: lower
+                # ``obj`` is a better incumbent, higher ``bound`` a tighter dual.
+                _better_primal = bool(np.isfinite(_obj2)) and _obj2 < obj - 1e-9 * (1.0 + abs(obj))
+                _better_dual = bool(np.isfinite(_bound2)) and (
+                    not np.isfinite(bound) or _bound2 > bound + 1e-9 * (1.0 + abs(bound))
+                )
+                _certifies = _status2 == "optimal"
+                if (_certifies or _better_primal or _better_dual) and _point_feasible(_xo2):
+                    status = _status2
+                    x_struct = _x2
+                    obj = _obj2
+                    bound = _bound2
+                    nodes = nodes + _nodes2
+
     wall_time = time.perf_counter() - t_start
     maximize = model._objective is not None and model._objective.sense == ObjectiveSense.MAXIMIZE
 
@@ -13891,28 +13988,8 @@ def _solve_milp_simplex(
         # feasibility. Verify the returned point against the model's own rows,
         # bounds, and integrality; on violation defer (return None) so the
         # caller falls back to a sound engine rather than returning a wrong
-        # "optimal".
-        n_slack = int(lp_data.A_eq.shape[1]) - n_orig
-        _A_ub_m, _b_ub_m, _A_eq_m, _b_eq_m = _decompose_eq_slack_form(
-            np.asarray(lp_data.A_eq), np.asarray(lp_data.b_eq), n_orig, n_slack
-        )
-        _tol = 1e-5
-        _feas = True
-        if _A_ub_m is not None and _b_ub_m is not None and _A_ub_m.shape[0]:
-            _feas = bool(np.all(_A_ub_m @ xo <= _b_ub_m + _tol * (1.0 + np.abs(_b_ub_m))))
-        if _feas and _A_eq_m is not None and _b_eq_m is not None and _A_eq_m.shape[0]:
-            _feas = bool(np.all(np.abs(_A_eq_m @ xo - _b_eq_m) <= _tol * (1.0 + np.abs(_b_eq_m))))
-        if _feas:
-            _xl = np.asarray(lp_data.x_l[:n_orig], dtype=np.float64)
-            _xu = np.asarray(lp_data.x_u[:n_orig], dtype=np.float64)
-            _feas = bool(np.all(xo >= _xl - _tol) and np.all(xo <= _xu + _tol))
-        if _feas:
-            for _off, _sz in zip(int_offsets, int_sizes):
-                seg = xo[_off : _off + int(_sz)]
-                if np.any(np.abs(seg - np.round(seg)) > 1e-4):
-                    _feas = False
-                    break
-        if not _feas:
+        # "optimal". (Shared ``_point_feasible`` helper, defined above.)
+        if not _point_feasible(xo):
             logger.warning(
                 "Rust simplex MILP returned an infeasible point labeled %s; "
                 "deferring to a sound engine",

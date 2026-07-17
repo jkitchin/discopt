@@ -131,3 +131,102 @@ class TestEqualityRowSoundness:
         assert r.status in ("optimal", "feasible")
         xv = np.round(np.asarray(r.x["x"]).ravel())
         assert int(xv.sum()) == 4  # feasible — not the bogus all-zeros
+
+
+class TestReentryOnUncertifiedFeasible:
+    """Issue #698: on an *uncertified* ``feasible`` the engine used to return
+    with the bounded first slice (a #291 stall guard) and DISCARD the rest of
+    the caller's ``time_limit``. It now re-enters the same engine with the
+    remaining budget, seeded with the best point so far, and keeps run 2 only
+    when it certifies or is strictly better.
+
+    Both runs are driven through a monkeypatched ``solve_milp_py`` so the
+    behavior is pinned without depending on any particular instance's runtime.
+    Call routing: the first non-empty-``int_idx`` call is run 1; the second is
+    the re-entry; a call with an *empty* ``int_idx`` is the root-relaxation
+    instrumentation LP (integers relaxed) and is answered separately.
+    """
+
+    @staticmethod
+    def _knap() -> dm.Model:
+        m = dm.Model("knap_reentry")
+        x = m.binary("x", shape=(4,))
+        m.minimize(-2 * sum(x[i] for i in range(4)))  # min -2 Σx  (opt = -4)
+        m.subject_to(sum(x[i] for i in range(4)) <= 2)
+        return m
+
+    def test_reentry_adopts_certifying_run(self, monkeypatch):
+        """Run 1 returns an uncertified ``feasible`` (one item, obj -2, loose
+        bound); the re-entry certifies the true optimum (-4). The certified,
+        strictly-better result is adopted and node counts are summed."""
+        import time
+
+        import discopt._rust as _rust
+
+        state = {"n": 0}
+
+        def mock(*a, **k):
+            if np.asarray(a[5]).size == 0:  # root-relaxation LP (integers relaxed)
+                return ("optimal", np.zeros(4), -8.0, -8.0, 1, 1)
+            state["n"] += 1
+            if state["n"] == 1:
+                return ("feasible", np.array([1.0, 0, 0, 0]), -2.0, -8.0, 3, 5)
+            return ("optimal", np.array([1.0, 1.0, 0, 0]), -4.0, -4.0, 100, 50)
+
+        monkeypatch.setattr(_rust, "solve_milp_py", mock)
+        res = S._solve_milp_simplex(self._knap(), 30.0, 1e-9, 1000, time.perf_counter())
+        assert state["n"] == 2  # the re-entry actually ran
+        assert res is not None
+        assert res.status == "optimal"
+        assert res.gap_certified is True
+        assert abs(res.objective - (-4.0)) < 1e-6
+        assert res.node_count == 103  # 3 (run 1) + 100 (re-entry)
+
+    def test_reentry_skipped_without_more_budget(self, monkeypatch):
+        """With no more time than run 1's own slice, a restart cannot beat it,
+        so the re-entry is skipped and run 1's result is returned verbatim."""
+        import time
+
+        import discopt._rust as _rust
+
+        state = {"n": 0}
+
+        def mock(*a, **k):
+            if np.asarray(a[5]).size == 0:
+                return ("optimal", np.zeros(4), -8.0, -8.0, 1, 1)
+            state["n"] += 1
+            return ("feasible", np.array([1.0, 0, 0, 0]), -2.0, -8.0, 7, 5)
+
+        monkeypatch.setattr(_rust, "solve_milp_py", mock)
+        # time_limit == first-slice floor: _milp_budget == remaining, so re-entry
+        # is skipped by the "no more time than run 1 had" guard.
+        res = S._solve_milp_simplex(self._knap(), 0.5, 1e-9, 1000, time.perf_counter())
+        assert state["n"] == 1  # no re-entry
+        assert res is not None
+        assert res.status == "feasible"
+        assert res.node_count == 7
+
+    def test_reentry_not_adopted_when_not_better(self, monkeypatch):
+        """A re-entry that neither certifies nor strictly improves (same obj,
+        same bound, still ``feasible``) is discarded — run 1's result stands,
+        and the bound is never regressed."""
+        import time
+
+        import discopt._rust as _rust
+
+        state = {"n": 0}
+
+        def mock(*a, **k):
+            if np.asarray(a[5]).size == 0:
+                return ("optimal", np.zeros(4), -8.0, -8.0, 1, 1)
+            state["n"] += 1
+            # Both runs report the same feasible point / bound.
+            return ("feasible", np.array([1.0, 1.0, 0, 0]), -4.0, -8.0, 4, 5)
+
+        monkeypatch.setattr(_rust, "solve_milp_py", mock)
+        res = S._solve_milp_simplex(self._knap(), 30.0, 1e-9, 1000, time.perf_counter())
+        assert state["n"] == 2  # re-entry ran...
+        assert res is not None
+        assert res.status == "feasible"  # ...but was not adopted
+        assert abs(res.objective - (-4.0)) < 1e-6
+        assert res.node_count == 4  # run 1's nodes only; re-entry nodes not merged
