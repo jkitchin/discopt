@@ -310,7 +310,11 @@ impl TreeManager {
                 continue;
             }
             let gwidth = self.global_ub[idx] - self.global_lb[idx];
-            if !(gwidth > 1e-15) {
+            // A non-positive (or NaN) global width is not branchable; a NaN falls
+            // through here and is filtered by the ``rel_width.is_finite()`` check
+            // below. (Written as ``<=`` rather than ``!(.. > ..)`` for clippy's
+            // ``neg_cmp_op_on_partial_ord``.)
+            if gwidth <= 1e-15 {
                 continue;
             }
             let rel_width = (ub[idx] - lb[idx]) / gwidth;
