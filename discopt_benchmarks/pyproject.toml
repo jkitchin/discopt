@@ -72,6 +72,9 @@ select = ["E", "F", "W", "I", "N", "UP", "B", "A", "C4", "SIM", "TCH"]
 "scripts/cut1_cmir_oracle_injection.py" = ["N803", "N806"]
 # A/A_f/A_s are LP constraint matrices in the G6 conditioning diagnosis probe.
 "scripts/g6_bchoco06_conditioning_probe.py" = ["N803", "N806", "B905"]
+# A/N/M/V are LP constraint matrices / moment matrices in the issue-673
+# z-polytope falsification (standard linear-algebra notation).
+"scripts/bqp673_zpolytope_falsification.py" = ["N803", "N806"]
 
 [tool.coverage.run]
 source = ["benchmarks", "utils"]
