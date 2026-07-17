@@ -13998,6 +13998,56 @@ def _root_dive(
 _SIMPLEX_MILP_BUDGET_CAP_S = 10.0
 
 
+def _one_hot_swap_reseed(model: Model, x_lifted: np.ndarray, budget: float) -> Optional[np.ndarray]:
+    """A lifted-space seed built by improving *x_lifted* with an assignment-aware
+    swap over the ORIGINAL variables, or ``None`` when unavailable.
+
+    On set-partition / assignment-structured models (``sum_k x[i,k] == 1``) a
+    single bit flip always breaks a one-hot row, so the engine's generic
+    flip/dive heuristics make little headway and its incumbent stalls well above
+    the optimum while the dual bound is already tight (#280). The
+    feasibility-preserving move is a *swap*, which is only well defined on the
+    pre-lift model: permuting bits in the lifted space leaves the expansion /
+    big-M auxiliaries stale, i.e. genuinely infeasible. So swap over the
+    originals, then reconstruct the aux exactly (#689 / #696).
+
+    Purely primal and never a soundness lever — the result is only ever handed
+    back as an ``initial_incumbent``, which the Rust driver re-validates (bounds,
+    integrality, row feasibility) and re-scores from ``c``. A bad or worse point
+    is dropped by the engine, never trusted; the dual bound and the certificate
+    are untouched either way. Self-gates to a no-op (returns ``None``) when the
+    model was not lifted or carries no one-hot structure."""
+    src = getattr(model, "_ipx_source_model", None)
+    n0 = getattr(model, "_ipx_n_orig_flat", None)
+    if src is None or n0 is None or budget <= 0.2:
+        return None
+    # ``one_hot_swap_search`` scores with the model's own objective and accepts
+    # strict *decreases*, so it only searches in the improving direction on a
+    # minimize model. On a maximize model it would drive the wrong way and the
+    # engine would just discard the seed — skip rather than burn the budget.
+    from discopt.modeling.core import ObjectiveSense as _Sense
+
+    obj = getattr(src, "_objective", None)
+    if obj is None or obj.sense != _Sense.MINIMIZE:
+        return None
+    try:
+        from discopt._jax.integer_product_reform import extend_initial_point
+        from discopt._jax.primal_heuristics import one_hot_swap_search
+
+        sw = one_hot_swap_search(
+            src,
+            np.asarray(x_lifted[: int(n0)], dtype=np.float64),
+            time_budget=min(1.0, budget * 0.5),
+            deadline=time.perf_counter() + budget,
+        )
+        if sw is None:
+            return None
+        return extend_initial_point(model, sw[0])
+    except Exception as _exc:  # pragma: no cover - defensive
+        logger.debug("one-hot swap reseed skipped: %s", _exc)
+        return None
+
+
 def _solve_milp_simplex(
     model: Model,
     time_limit: float,
@@ -14180,6 +14230,26 @@ def _solve_milp_simplex(
             _seed2 = None
             if _xo1.size == n_orig:
                 _seed2 = np.ascontiguousarray(_xo1.astype(np.float64).ravel())
+            # #280: on assignment-structured models the stalled incumbent escapes
+            # only via a feasibility-preserving one-hot *swap* (a single bit flip
+            # breaks a one-hot row, so generic flip/dive heuristics stall). Improve
+            # the point with an assignment-aware swap over the ORIGINAL variables
+            # and reseed run 2 with it; fall back to the plain incumbent when the
+            # model was not lifted / has no one-hot structure. Purely primal — the
+            # driver re-validates and re-scores the seed, and the adoption gate
+            # below re-verifies the returned point via ``_point_feasible``, so a
+            # worse or invalid seed can only cost search, never the certificate.
+            # Default-OFF pending a graduation panel: sound, and the mechanism is
+            # verified (escapes a stalled assignment incumbent to the optimum in
+            # the reseed), but not yet shown net-positive vs the plain engine —
+            # the swap search costs a wall slice and can leave a marginally looser
+            # bound. Flag ON/OFF is the §5 differential-panel gate (issue #280).
+            if os.environ.get("DISCOPT_MILP_SWAP_RESEED", "0") == "1":
+                _swap_seed = _one_hot_swap_reseed(
+                    model, np.asarray(x_struct, dtype=np.float64), _reentry_remaining
+                )
+                if _swap_seed is not None and _swap_seed.size == n_orig:
+                    _seed2 = np.ascontiguousarray(_swap_seed.astype(np.float64).ravel())
             (
                 _status2,
                 _x2,

@@ -1,0 +1,15 @@
+{
+  "issue": 280,
+  "flag": "DISCOPT_MILP_SWAP_RESEED",
+  "default": "off",
+  "date": "2026-07-17",
+  "note": "Starter differential panel (flag OFF vs ON) for the MILP-fast-path one-hot swap reseed. Single run/arm, TL=30s, contended box - directional evidence toward graduation, not the full corpus-wide gate. Full graduation to default-ON needs the corpus-wide graphpart panel + global50 cert-clean per CLAUDE.md §5.",
+  "time_limit_s": 30,
+  "rows": [
+    {"instance": "graphpart_2pm-0055-0055", "oracle": -20.0, "off_obj": -20.0, "off_bound": -20.0, "on_obj": -20.0, "on_bound": -20.0, "verdict": "tie (both optimal, certified)"},
+    {"instance": "graphpart_2pm-0077-0777", "oracle": -40.0, "off_obj": -34.0, "off_bound": -41.0, "on_obj": -36.0, "on_bound": -41.5, "verdict": "ON better primal"},
+    {"instance": "graphpart_2pm-0088-0888", "oracle": -55.0, "off_obj": -55.0, "off_bound": -56.0, "on_obj": -55.0, "on_bound": -56.0, "verdict": "tie (both optimal)"},
+    {"instance": "graphpart_2pm-0099-0999", "oracle": -64.0, "off_obj": -49.0, "off_bound": -74.5, "on_obj": -55.0, "on_bound": -74.0, "verdict": "ON better primal (+6)"}
+  ],
+  "summary": {"on_better_primal": 2, "tie": 2, "on_worse": 0, "unsound": 0, "soundness": "all bounds <= oracle, all incumbents >= oracle (min sense)"}
+}

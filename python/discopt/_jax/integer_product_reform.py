@@ -570,6 +570,10 @@ def _attach_warm_start_spec(model: Model, new_model: Model, exp: "_Expander") ->
         return
     setattr(new_model, "_ipx_aux_spec", translated)  # noqa: B010
     setattr(new_model, "_ipx_n_orig_flat", n_orig_flat)  # noqa: B010
+    # Stash the pre-lift model so a primal reseed (the #280 one-hot swap) can run
+    # assignment-aware moves over the ORIGINAL variables and map the result back
+    # through the spec above. Purely primal metadata; never a soundness lever.
+    setattr(new_model, "_ipx_source_model", model)  # noqa: B010
 
 
 def extend_initial_point(reformed: Model, x0) -> Optional[np.ndarray]:
