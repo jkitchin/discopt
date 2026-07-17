@@ -1,5 +1,13 @@
 # #282 — syn_*/rsyn_* process-synthesis global-search gap: diagnosis + a correctness fix found en route
 
+> **STATUS 2026-07-17 (round 2): the round-1 conclusions below are PARTLY FALSIFIED.**
+> The MINLPLib snapshot is now mounted, so the entry experiment round 1 could not run has
+> been run on all seven real instances. Measured: the gap is **dual-dominated on 7/7**, the
+> family is **not uniformly convex** (3/7 are nonconvex), and the round-1 dismissal of
+> relaxation strengthening does not survive contact with the corpus. **Read §R2 first** —
+> it supersedes Headline items 1–2 and F-1's forward-looking claim. The OA correctness fix
+> (Headline 3) is unaffected and stands.
+
 **Task:** [#282](https://github.com/jkitchin/discopt/issues/282) — the process-synthesis
 (`syn*` / `rsyn*`) MINLP global-search gap: discopt returns sound feasible incumbents
 (~19 % median gap on the issue's panel) but does not close to the optimum within budget,
@@ -45,7 +53,134 @@ experiment / diagnosis, plus one localized correctness fix in the opt-in OA path
 
 ---
 
-## Measurements
+## §R2 — round 2 (2026-07-17, real corpus): the gap is dual-dominated
+
+**What changed:** the Dropbox MINLPLib snapshot is mounted, so all seven named instances are
+available. Round 1's blocker is gone and its entry experiment ("attribute the gap") has been
+run. **Env:** discopt `0.6.1.dev0`, `JAX_ENABLE_X64=1`, `JAX_PLATFORMS=cpu`, 14-core darwin.
+**Harness:** `discopt_benchmarks/scripts/issue282_gap_attribution.py`. **Raw:**
+`discopt_benchmarks/results/issue282/`.
+
+All seven carry an `=opt=` tag (a *proven* optimum, both fences at once), so for these
+maximization instances the decomposition is exact, not heuristic:
+
+    reported_gap = bound − objective = (bound − opt) + (opt − objective)
+                                        └dual excess┘   └primal deficit┘
+
+Both terms are ≥ 0 for a sound solver. (Note `generality_sweep.load_solu` reads only
+`=best=`/`=bestdual=` and returns *nothing* for these instances — key on `=opt=`.)
+
+### R2-1 Attribution at 60 s — dual-dominated on 7/7
+
+| instance | convex | path | opt | obj | bound | dual excess | primal deficit | nodes | root_t |
+|---|---|---|---|---|---|---|---|---|---|
+| `rsyn0805m` | yes | NLP-BB | 1296.1 | 1116.5 | 1685.9 | **+30.1 %** | +13.9 % | 319 | 8.1 s |
+| `rsyn0810m` | yes | NLP-BB | 1721.4 | 1548.6 | 2486.4 | **+44.4 %** | +10.0 % | 191 | 10.2 s |
+| `rsyn0815m` | yes | NLP-BB | 1269.9 | 1047.3 | 1886.8 | **+48.6 %** | +17.5 % | 319 | 13.4 s |
+| `syn15m02hfsg` | **no** | spatial | 2832.7 | **2832.7** | 3343.5 | **+18.0 %** | **0.0 %** | 411 | 21.2 s |
+| `syn30hfsg` | **no** | spatial | 138.2 | **138.2** | 1375.0 | **+895 %** | **0.0 %** | 469 | 11.6 s |
+| `syn40hfsg` | **no** | spatial | 67.7 | 64.4 | 1853.7 | **+2638 %** | +4.8 % | 375 | 16.6 s |
+| `syn40m` | yes | NLP-BB | 67.7 | 33.2 | 1231.2 | **+1718 %** | +51.0 % | 479 | 4.2 s |
+
+**Every instance is dual-dominated at 60 s** (dual excess > 2 × primal deficit). On
+`syn15m02hfsg` and `syn30hfsg` the incumbent **is the proven optimum** — discopt has already
+found the answer and simply cannot prove it. **Soundness: clean** — no bound on the wrong
+side of `=opt=`, no incumbent beating it, on any of the 14 runs. The issue's "sound
+suboptimal incumbents" framing is confirmed as sound, but its *implied lever* (better
+incumbents) is wrong: the incumbent is the healthy half.
+
+**Honest caveat — the 60 s dual-dominance is budget-dependent on the convex half.** A 120 s
+`rsyn0805m` run narrows it to parity:
+
+| budget | obj | bound | nodes | dual | primal | verdict |
+|---|---|---|---|---|---|---|
+| 60 s | 1116.458 | 1685.90 | 319 | +30.07 % | +13.86 % | dual_dominated (2.17×) |
+| 120 s | 1116.458 | 1467.99 | 1245 | +13.26 % | +13.86 % | mixed (0.96×) |
+
+So for `rsyn*` both halves matter in absolute terms. But note *what moved*: over that extra
+60 s the incumbent improved by **exactly zero** (1116.4583 → 1116.4583; the node trace shows
+it frozen from t ≈ 49.9 s to t ≈ 119.6 s) while the bound gained 218 units. **The marginal
+return on budget is entirely dual**, and the improver heuristics ran for those 70 s and
+produced nothing. The `hfsg` trio is unambiguous at any budget (primal deficit ≡ 0).
+
+**Environment caveat:** this box is shared and was under concurrent load (a recurring ~10-core
+`expt_budget.py`; load avg 7–15 throughout). **Wall-clock-derived numbers here — `root_time`,
+`node_count`, the 5 s no-incumbent result — are soft and should be re-measured on a quiet box
+before being cited as throughput targets.** The R2-2 root-bound comparison below is
+timing-independent (it compares relaxation *values* at the root, not speed), so the headline
+conclusion does not rest on the contended timings.
+
+### R2-2 The root relaxation is the gap (SCIP reference)
+
+SCIP 6.2.1 on the same `.nl` files, same box. `scip_root` = dual bound at a 1-node limit:
+
+| instance | opt | SCIP root | **discopt root** | SCIP full solve |
+|---|---|---|---|---|
+| `rsyn0805m` | 1296.1 | +16.1 % | **+62.9 %** | optimal, 0.50 s |
+| `rsyn0810m` | 1721.4 | +9.5 % | **+72.1 %** | optimal, 0.51 s |
+| `rsyn0815m` | 1269.9 | +17.9 % | **+103.6 %** | optimal, 0.60 s |
+| `syn15m02hfsg` | 2832.7 | +6.9 % | **+124.7 %** | optimal, 0.69 s |
+| `syn30hfsg` | 138.2 | +43.3 % | **+955 %** | optimal, 1.12 s |
+| `syn40hfsg` | 67.7 | +281.6 % | **+3041 %** | optimal, 1.55 s |
+| `syn40m` | 67.7 | **+5.2 %** | **+2609 %** | optimal, 0.87 s |
+
+discopt's root bound is looser than SCIP's on **all seven**, by 4×–500× in relative excess.
+SCIP proves optimality on the whole panel in 0.5–1.6 s. This is a **root-relaxation quality**
+problem first; the tree cannot recover what the root gives away.
+
+### R2-3 Corrections to round 1 (measurement wins)
+
+1. **"The family is convex" — FALSE as stated.** Round 1 generalized from `syn05m`, the one
+   vendored sibling. Measured on the real seven (both `_classify_model_convexity` and
+   `_jax.convexity.classify_model(use_certificate=True)` agree): `rsyn0805m`, `rsyn0810m`,
+   `rsyn0815m`, `syn40m` are **convex** → NLP-BB; `syn15m02hfsg`, `syn30hfsg`, `syn40hfsg`
+   (the `hfsg` variants) are **nonconvex** → **spatial McCormick B&B**. The family spans both
+   paths.
+2. **"McCormick strengthening is not the lever" — FALSE.** It followed only from (1). The
+   three nonconvex instances run the McCormick relaxation, and that is exactly where the root
+   bound is worst (+124 %/+955 %/+3041 %) while the incumbent is already at/near optimal.
+   Relaxation strengthening is back on the table for the `hfsg` subfamily — as
+   `scip-gap-closing-plan.md` originally had it, before round 1 removed it.
+3. **"The live levers are NLP-BB throughput (#268) + primal/LNS incumbent quality (#276)"
+   — the primal half is FALSE.** The primal side is the healthy one (0 % deficit on 2/7).
+   Throughput is genuinely poor but is a *secondary* multiplier, not the lever.
+4. **F-1 stands as a falsification** (auto-routing convex MINLPs to OA remains killed), but
+   its closing sentence — naming throughput + primal/LNS as "the productive levers" — is
+   superseded by R2-1/R2-2.
+
+### R2-4 The issue's 5 s panel measures root latency, not search
+
+At the issue's 5 s budget, **6 of 7 return no incumbent at all** (`root_time` 5.0–21.2 s ≥ the
+whole budget; 3 nodes). The issue's 5 s table (e.g. `rsyn0805m` obj 1025.85) does **not**
+reproduce here on `0.6.1.dev0`. A 120 s trace shows discopt's first incumbent on `rsyn0805m`
+is 1025.845 — the issue's exact value — but it does not arrive until **t ≈ 8.5 s**. So the
+issue's panel and this one differ in *when* the root finishes, not in what it finds. This is
+either slower hardware or a root-latency regression since `0.4.1.dev0`; **not established
+here**, and worth its own bisect before anyone reads the 5 s column as a search result.
+
+### R2-5 Where the wall clock actually goes (`rsyn0805m`, 60 s, cProfile)
+
+`python_time` is **not** overhead. It is computed as `wall − rust − jax` (`solver.py:10557`)
+while `jax_time` wraps only the *batch node NLP* (`solver.py:10008`–`10154`) — so every
+primal-heuristic NLP solve lands in the residual and reads as "Python time". Profiled:
+
+| frame | calls | cum |
+|---|---|---|
+| `_solve_nlp_bb` | — | 57.7 s |
+| `nlp_pounce.solve_nlp` | 353 | 30.6 s |
+| `primal_heuristics.local_branching` | 3 | 18.3 s |
+| `primal_heuristics.diving` | 8 | 18.2 s |
+| `primal_heuristics.rins` | 7 | 17.0 s |
+| `PyModelRepr.presolve` (tottime) | 4 | 10.5 s |
+| `_tighten_node_bounds_with_status` | 79 | 16.4 s |
+
+The improver heuristics dominate `_solve_nlp_bb`, and `presolve` at 2.6 s/call explains the
+8.5 s root latency. Given R2-1 — the incumbent is the *healthy* half — this budget is being
+spent on the wrong side of the gap.
+
+---
+
+## Measurements (round 1)
 
 ### M-1 `syn05m` (only vendored real instance) — default path
 
@@ -131,21 +266,53 @@ on this slower container — default spatial-B&B path, never touches `solve_oa`)
 
 ---
 
-## Next experiments (need the real corpus; run before any perf build)
+## Next experiments (round 1's list — superseded by §R2-6 below; kept for the record)
 
 Draw `rsyn0805m/0810m/0815m`, `syn15m02hfsg`, `syn30hfsg`, `syn40hfsg`, `syn40m` from the
 MINLPLib snapshot (`minlplib.solu` as oracle). For each:
 
-1. **Attribute the gap.** Log NLP-BB node count, per-node NLP wall, first-incumbent time,
-   and root dual bound vs oracle. Decide whether the gap is dual (bound too loose → cuts /
-   OBBT) or primal (incumbent too weak → LNS/RENS/#276) or throughput (node/s → #268).
+1. **Attribute the gap.** *(DONE in §R2-1 — verdict: dual-dominated 7/7.)*
 2. **OA as a bounded primal heuristic**, not a router: run OA for a small iteration cap to
    harvest incumbents, inject into the default tree, keep the NLP-BB dual bound. Kill if it
    does not improve the incumbent within a fixed fraction of budget.
+   *(§R2-1 makes this low-value: the incumbent is the healthy half of the gap. Deprioritized,
+   not killed — it would still help `syn40m` (+51 % deficit).)*
 3. **Graduation** for any bound/primal-changing change follows the CLAUDE.md Regime-2 panel
    gate (flag default-OFF; `incorrect_count = 0`; no bound above oracle; incumbents
-   independently feasibility-verified) before default-ON.
+   independently feasibility-verified) before default-ON. *(Unchanged; still binding.)*
 
-Kill criterion for this whole track: if measured NLP-BB node throughput and first-incumbent
-latency on the real instances are already competitive and only the *bound* lags, the work
-collapses to cut/OBBT strengthening and #282 should be re-pointed at that.
+Round 1's kill criterion for this track was: *"if measured NLP-BB node throughput and
+first-incumbent latency on the real instances are already competitive and only the bound lags,
+the work collapses to cut/OBBT strengthening and #282 should be re-pointed at that."*
+**It has fired, on the bound half.** The bound lags badly (§R2-2: root 4×–500× looser than
+SCIP). Throughput/first-incumbent latency are *not* competitive (root 8–21 s vs SCIP's 0.5–1.6 s
+whole solve), so this is a partial fire — but the dominant term is unambiguous.
+
+---
+
+## §R2-6 — re-pointed plan for #282
+
+**#282 is a root-relaxation problem.** Re-point it from "search gap / primal incumbents"
+(#276) to **root dual-bound strengthening**, split by subfamily:
+
+1. **Nonconvex `hfsg` (spatial McCormick).** Root bound +124 %/+955 %/+3041 % vs SCIP's
+   +6.9 %/+43 %/+282 %, with the incumbent already optimal on 2/3. Highest-value, clearest
+   target. Entry experiment: root-bound-only A/B of the existing reduction/cut machinery
+   (OBBT, `nonlinear_bound_tightening`, cut families) on these three, scored purely on
+   `root_bound` vs `=opt=` — no wall-clock claims. Kill if no family moves the root bound
+   ≥ 10 % of the SCIP−discopt spread.
+2. **Convex `rsyn*`/`syn40m` (NLP-BB).** Root bound +63 %/+72 %/+104 %/+2609 %. The NLP-BB
+   node bound is the NLP objective; there is no cut loop tightening the *root*. Question to
+   answer before building: does NLP-BB have a root cut/OBBT stage at all, and is `syn40m`'s
+   +2609 % a different failure from `rsyn*`'s ~+70 % (its `root_time` is 4.2 s — the fastest
+   root, and the worst bound)?
+3. **Certification (own thread).** `gap_certified=False` on **14/14 runs, including the
+   convex NLP-BB ones**, where the gap *should* certify. Cause is `solver.py:10027` — any
+   untrusted (non-KKT) node in a batch decertifies. This is sound-conservative and correct
+   per roadmap P0.3, but it means #282's convex half never emits a certificate even when the
+   bound is valid. Worth a separate issue: *why* are these nodes untrusted?
+4. **Root latency (feeds #268).** `presolve` at 2.6 s/call × 4 = 10.5 s dominates the
+   8–21 s root. At the issue's 5 s budget this is the *entire* story (§R2-4).
+
+**Not the lever (do not re-walk):** OA auto-routing (F-1), McCormick strengthening for the
+*convex* half (it doesn't run there), primal/LNS incumbent quality as the headline (§R2-1).

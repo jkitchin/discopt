@@ -195,6 +195,15 @@ latency-specific safety net.
 tln4, flay04h) at a 10 s budget; syn*/rsyn* (#282) median gap improves (better
 early incumbent + more budget for the bound).
 
+> *Measured 2026-07-17 (`issue-282-syn-rsyn-diagnosis-2026-07-17.md` §R2) — the #282
+> clause above is half-right and should be scored accordingly.* CC4 genuinely owns
+> #282's **short-budget** regime: at the issue's 5 s budget **6/7 syn/rsyn return no
+> incumbent at all** because the root alone costs 5–21 s (`presolve` ≈ 2.6 s/call). But
+> "better early incumbent" does **not** close #282 at 60 s+: the gap there is
+> **dual-dominated 7/7**, and on `syn15m02hfsg`/`syn30hfsg` the incumbent is already the
+> proven optimum. For #282, score CC4 on *no-incumbent-at-short-budget*, not on median gap
+> — the median gap is the bound's to close (§R2-6).
+
 **Correctness gate**: incumbents pass the existing feasibility gate (they already
 do — these are sound suboptimal points); nothing is certified optimal without the
 bound (`gap_certified` discipline). Low correctness risk.

@@ -1,0 +1,951 @@
+{
+  "rows": [
+    {
+      "instance": "rsyn0805m",
+      "budget": 5.0,
+      "parse_time": 0.002847666008165106,
+      "is_max": true,
+      "n_vars": 170,
+      "n_cons": 286,
+      "model_is_convex": true,
+      "harness_wall": 5.0181365000025835,
+      "status": "time_limit",
+      "objective": null,
+      "bound": null,
+      "gap": null,
+      "node_count": 3,
+      "root_bound": 2111.0247441342085,
+      "root_gap": null,
+      "root_time": 5.014089541975409,
+      "wall_time": 5.014095999998972,
+      "nlp_bb": true,
+      "gap_certified": false,
+      "convex_fast_path": false,
+      "rust_time": 0.011310041008982807,
+      "jax_time": 1.789446417009458,
+      "python_time": 3.213339541980531,
+      "time_to_first_incumbent": null,
+      "trace_points": 1,
+      "opt": 1296.120603,
+      "dual_excess": null,
+      "primal_deficit": null,
+      "root_dual_excess": 814.9041411342084,
+      "dual_excess_rel": null,
+      "primal_deficit_rel": null,
+      "root_dual_excess_rel": 0.6287255516562515,
+      "bound_unsound": false,
+      "incumbent_unsound": false,
+      "verdict": "no_incumbent",
+      "trace_head": [
+        [
+          5.014083124988247,
+          3,
+          2111.0247441342085,
+          null
+        ]
+      ]
+    },
+    {
+      "instance": "rsyn0810m",
+      "budget": 5.0,
+      "parse_time": 0.0022889579995535314,
+      "is_max": true,
+      "n_vars": 185,
+      "n_cons": 312,
+      "model_is_convex": true,
+      "harness_wall": 5.017271582997637,
+      "status": "time_limit",
+      "objective": null,
+      "bound": null,
+      "gap": null,
+      "node_count": 3,
+      "root_bound": 2963.2095961276164,
+      "root_gap": null,
+      "root_time": 5.0132292920025066,
+      "wall_time": 5.013235499995062,
+      "nlp_bb": true,
+      "gap_certified": false,
+      "convex_fast_path": false,
+      "rust_time": 0.012915333034470677,
+      "jax_time": 1.6183472510019783,
+      "python_time": 3.381972915958613,
+      "time_to_first_incumbent": null,
+      "trace_points": 1,
+      "opt": 1721.447711,
+      "dual_excess": null,
+      "primal_deficit": null,
+      "root_dual_excess": 1241.7618851276163,
+      "dual_excess_rel": null,
+      "primal_deficit_rel": null,
+      "root_dual_excess_rel": 0.7213474316953077,
+      "bound_unsound": false,
+      "incumbent_unsound": false,
+      "verdict": "no_incumbent",
+      "trace_head": [
+        [
+          5.01322141700075,
+          3,
+          2963.2095961276164,
+          null
+        ]
+      ]
+    },
+    {
+      "instance": "rsyn0815m",
+      "budget": 5.0,
+      "parse_time": 0.002501874987501651,
+      "is_max": true,
+      "n_vars": 205,
+      "n_cons": 347,
+      "model_is_convex": true,
+      "harness_wall": 5.045352207991527,
+      "status": "time_limit",
+      "objective": null,
+      "bound": null,
+      "gap": null,
+      "node_count": 3,
+      "root_bound": 2585.1357176148313,
+      "root_gap": null,
+      "root_time": 5.044241084018722,
+      "wall_time": 5.04424604200176,
+      "nlp_bb": true,
+      "gap_certified": false,
+      "convex_fast_path": false,
+      "rust_time": 0.019270958990091458,
+      "jax_time": 1.8717503749940079,
+      "python_time": 3.1532247080176603,
+      "time_to_first_incumbent": null,
+      "trace_points": 1,
+      "opt": 1269.925649,
+      "dual_excess": null,
+      "primal_deficit": null,
+      "root_dual_excess": 1315.2100686148312,
+      "dual_excess_rel": null,
+      "primal_deficit_rel": null,
+      "root_dual_excess_rel": 1.0356591109491255,
+      "bound_unsound": false,
+      "incumbent_unsound": false,
+      "verdict": "no_incumbent",
+      "trace_head": [
+        [
+          5.044237000023713,
+          3,
+          2585.1357176148313,
+          null
+        ]
+      ]
+    },
+    {
+      "instance": "syn15m02hfsg",
+      "budget": 5.0,
+      "parse_time": 0.0033972079982049763,
+      "is_max": true,
+      "n_vars": 302,
+      "n_cons": 467,
+      "model_is_convex": false,
+      "harness_wall": 6.418239624996204,
+      "status": "time_limit",
+      "objective": null,
+      "bound": 3343.461352986659,
+      "gap": null,
+      "node_count": 3,
+      "root_bound": null,
+      "root_gap": null,
+      "root_time": 5.939940334006678,
+      "wall_time": 5.939946667000186,
+      "nlp_bb": false,
+      "gap_certified": false,
+      "convex_fast_path": false,
+      "rust_time": 0.014231749984901398,
+      "jax_time": 0.2838150830066297,
+      "python_time": 5.641899834008655,
+      "time_to_first_incumbent": null,
+      "trace_points": 1,
+      "opt": 2832.748895,
+      "dual_excess": 510.71245798665905,
+      "primal_deficit": null,
+      "root_dual_excess": null,
+      "dual_excess_rel": 0.18028864432287034,
+      "primal_deficit_rel": null,
+      "root_dual_excess_rel": null,
+      "bound_unsound": false,
+      "incumbent_unsound": false,
+      "verdict": "no_incumbent",
+      "trace_head": [
+        [
+          5.939935667003738,
+          3,
+          null,
+          null
+        ]
+      ]
+    },
+    {
+      "instance": "syn30hfsg",
+      "budget": 5.0,
+      "parse_time": 0.0021917499834671617,
+      "is_max": true,
+      "n_vars": 228,
+      "n_cons": 345,
+      "model_is_convex": false,
+      "harness_wall": 5.286766542005353,
+      "status": "time_limit",
+      "objective": null,
+      "bound": 414.9198193168567,
+      "gap": null,
+      "node_count": 3,
+      "root_bound": null,
+      "root_gap": null,
+      "root_time": 5.046895208011847,
+      "wall_time": 5.046901666006306,
+      "nlp_bb": false,
+      "gap_certified": false,
+      "convex_fast_path": false,
+      "rust_time": 0.010917666979366913,
+      "jax_time": 0.17592166698887013,
+      "python_time": 4.860062332038069,
+      "time_to_first_incumbent": null,
+      "trace_points": 1,
+      "opt": 138.1596024,
+      "dual_excess": 276.76021691685673,
+      "primal_deficit": null,
+      "root_dual_excess": null,
+      "dual_excess_rel": 2.003192048248517,
+      "primal_deficit_rel": null,
+      "root_dual_excess_rel": null,
+      "bound_unsound": false,
+      "incumbent_unsound": false,
+      "verdict": "no_incumbent",
+      "trace_head": [
+        [
+          5.046889958000975,
+          3,
+          null,
+          null
+        ]
+      ]
+    },
+    {
+      "instance": "syn40hfsg",
+      "budget": 5.0,
+      "parse_time": 0.002941083977930248,
+      "is_max": true,
+      "n_vars": 302,
+      "n_cons": 466,
+      "model_is_convex": false,
+      "harness_wall": 7.081067249993794,
+      "status": "time_limit",
+      "objective": null,
+      "bound": 1659.2292260798372,
+      "gap": null,
+      "node_count": 3,
+      "root_bound": null,
+      "root_gap": null,
+      "root_time": 5.880708790995413,
+      "wall_time": 5.880718458007323,
+      "nlp_bb": false,
+      "gap_certified": false,
+      "convex_fast_path": false,
+      "rust_time": 0.020049708982696757,
+      "jax_time": 0.19526729299104773,
+      "python_time": 5.665401456033578,
+      "time_to_first_incumbent": null,
+      "trace_points": 1,
+      "opt": 67.71325586,
+      "dual_excess": 1591.515970219837,
+      "primal_deficit": null,
+      "root_dual_excess": null,
+      "dual_excess_rel": 23.503757868479447,
+      "primal_deficit_rel": null,
+      "root_dual_excess_rel": null,
+      "bound_unsound": false,
+      "incumbent_unsound": false,
+      "verdict": "no_incumbent",
+      "trace_head": [
+        [
+          5.880704290990252,
+          3,
+          null,
+          null
+        ]
+      ]
+    },
+    {
+      "instance": "syn40m",
+      "budget": 5.0,
+      "parse_time": 0.001895207999041304,
+      "is_max": true,
+      "n_vars": 130,
+      "n_cons": 226,
+      "model_is_convex": true,
+      "harness_wall": 5.056997749983566,
+      "status": "feasible",
+      "objective": 23.160121054106398,
+      "bound": 1819.2301447052364,
+      "gap": 77.55011381223667,
+      "node_count": 7,
+      "root_bound": 1833.9137517794436,
+      "root_gap": 78.18411771229849,
+      "root_time": 4.050863707991084,
+      "wall_time": 5.028429250000045,
+      "nlp_bb": true,
+      "gap_certified": false,
+      "convex_fast_path": false,
+      "rust_time": 0.004641334991902113,
+      "jax_time": 1.3068445000099018,
+      "python_time": 3.7169434149982408,
+      "time_to_first_incumbent": 4.0508599169843365,
+      "trace_points": 2,
+      "opt": 67.71325586,
+      "dual_excess": 1751.5168888452363,
+      "primal_deficit": 44.553134805893606,
+      "root_dual_excess": 1766.2004959194437,
+      "dual_excess_rel": 25.86667657019138,
+      "primal_deficit_rel": 0.6579676939181462,
+      "root_dual_excess_rel": 26.083526386194414,
+      "bound_unsound": false,
+      "incumbent_unsound": false,
+      "dual_share": 0.975194099217065,
+      "verdict": "dual_dominated",
+      "trace_head": [
+        [
+          4.0508599169843365,
+          3,
+          1833.9137517794436,
+          -23.160121683858463
+        ],
+        [
+          4.1391086249786895,
+          7,
+          1819.2301447052364,
+          -23.160121683858463
+        ]
+      ]
+    },
+    {
+      "instance": "rsyn0805m",
+      "budget": 60.0,
+      "parse_time": 0.0022218750091269612,
+      "is_max": true,
+      "n_vars": 170,
+      "n_cons": 286,
+      "model_is_convex": true,
+      "harness_wall": 60.62020908400882,
+      "status": "feasible",
+      "objective": 1116.458325165389,
+      "bound": 1685.9015906031323,
+      "gap": 0.5100443541888476,
+      "node_count": 319,
+      "root_bound": 2111.0247441342085,
+      "root_gap": 0.8908226993797438,
+      "root_time": 8.115903583006002,
+      "wall_time": 60.59946554101771,
+      "nlp_bb": true,
+      "gap_certified": false,
+      "convex_fast_path": false,
+      "rust_time": 0.012002163944998756,
+      "jax_time": 2.703392624971457,
+      "python_time": 57.88407075210125,
+      "time_to_first_incumbent": 8.11589879100211,
+      "trace_points": 13,
+      "opt": 1296.120603,
+      "dual_excess": 389.7809876031322,
+      "primal_deficit": 179.66227783461113,
+      "root_dual_excess": 814.9041411342084,
+      "dual_excess_rel": 0.30072894968334374,
+      "primal_deficit_rel": 0.13861540154424282,
+      "root_dual_excess_rel": 0.6287255516562515,
+      "bound_unsound": false,
+      "incumbent_unsound": false,
+      "dual_share": 0.6844948588574477,
+      "verdict": "dual_dominated",
+      "trace_head": [
+        [
+          8.11589879100211,
+          3,
+          2111.0247441342085,
+          -1025.8450264708492
+        ],
+        [
+          8.194985291018384,
+          7,
+          2008.4634488557938,
+          -1025.8450264708492
+        ],
+        [
+          9.315818333008792,
+          15,
+          2005.922203436122,
+          -1043.0991930999264
+        ],
+        [
+          10.721817166020628,
+          31,
+          1996.3984796781,
+          -1043.0991930999264
+        ],
+        [
+          17.113708083023084,
+          63,
+          1921.1305734946948,
+          -1055.8450264809176
+        ],
+        [
+          25.4274212080054,
+          95,
+          1909.4880865275986,
+          -1055.8450264809176
+        ],
+        [
+          29.817564333003247,
+          127,
+          1896.0235528246578,
+          -1055.8450264809176
+        ],
+        [
+          36.78088375000516,
+          159,
+          1864.8382362707575,
+          -1055.8450264809176
+        ]
+      ]
+    },
+    {
+      "instance": "rsyn0810m",
+      "budget": 60.0,
+      "parse_time": 0.00267558399355039,
+      "is_max": true,
+      "n_vars": 185,
+      "n_cons": 312,
+      "model_is_convex": true,
+      "harness_wall": 60.261650125001324,
+      "status": "feasible",
+      "objective": 1548.6431867057615,
+      "bound": 2486.3685843313865,
+      "gap": 0.6055141724546201,
+      "node_count": 191,
+      "root_bound": 2963.2095961276164,
+      "root_gap": 0.91342306708551,
+      "root_time": 10.161304583016317,
+      "wall_time": 60.245733750023646,
+      "nlp_bb": true,
+      "gap_certified": false,
+      "convex_fast_path": false,
+      "rust_time": 0.013592624018201604,
+      "jax_time": 2.7097917499486357,
+      "python_time": 57.52234937605681,
+      "time_to_first_incumbent": 10.16129987500608,
+      "trace_points": 9,
+      "opt": 1721.447711,
+      "dual_excess": 764.9208733313865,
+      "primal_deficit": 172.8045242942385,
+      "root_dual_excess": 1241.7618851276163,
+      "dual_excess_rel": 0.44434743410651667,
+      "primal_deficit_rel": 0.10038325485579531,
+      "root_dual_excess_rel": 0.7213474316953077,
+      "bound_unsound": false,
+      "incumbent_unsound": false,
+      "dual_share": 0.8157194795706829,
+      "verdict": "dual_dominated",
+      "trace_head": [
+        [
+          10.16129987500608,
+          3,
+          2963.2095961276164,
+          -1387.3003750648554
+        ],
+        [
+          10.292016666004201,
+          7,
+          2863.456518125898,
+          -1387.3003750648554
+        ],
+        [
+          11.778781708009774,
+          15,
+          2860.9152727237247,
+          -1404.5545416966665
+        ],
+        [
+          13.494940708013019,
+          31,
+          2851.3915489851056,
+          -1404.5545416966665
+        ],
+        [
+          21.015998875023797,
+          63,
+          2770.8536941990114,
+          -1417.3003750844541
+        ],
+        [
+          30.43268816600903,
+          95,
+          2636.2910767505628,
+          -1417.3003750844541
+        ],
+        [
+          34.76723275001859,
+          127,
+          2596.3712318238,
+          -1417.3003750844541
+        ],
+        [
+          43.107073625025805,
+          159,
+          2533.7453636044916,
+          -1417.3003750844541
+        ]
+      ]
+    },
+    {
+      "instance": "rsyn0815m",
+      "budget": 60.0,
+      "parse_time": 0.002651374990819022,
+      "is_max": true,
+      "n_vars": 205,
+      "n_cons": 347,
+      "model_is_convex": true,
+      "harness_wall": 62.81427070900099,
+      "status": "feasible",
+      "objective": 1047.2769341769983,
+      "bound": 1886.7579375539767,
+      "gap": 0.8015845436686561,
+      "node_count": 319,
+      "root_bound": 2585.1357176148313,
+      "root_gap": 1.468435647965796,
+      "root_time": 13.383093000011286,
+      "wall_time": 62.79780324999592,
+      "nlp_bb": true,
+      "gap_certified": false,
+      "convex_fast_path": false,
+      "rust_time": 0.017445416830014437,
+      "jax_time": 3.0109354139422067,
+      "python_time": 59.7694224192237,
+      "time_to_first_incumbent": 13.383089250011835,
+      "trace_points": 13,
+      "opt": 1269.925649,
+      "dual_excess": 616.8322885539767,
+      "primal_deficit": 222.64871482300168,
+      "root_dual_excess": 1315.2100686148312,
+      "dual_excess_rel": 0.4857231516189155,
+      "primal_deficit_rel": 0.1753242128768136,
+      "root_dual_excess_rel": 1.0356591109491255,
+      "bound_unsound": false,
+      "incumbent_unsound": false,
+      "dual_share": 0.7347781380074675,
+      "verdict": "dual_dominated",
+      "trace_head": [
+        [
+          13.383089250011835,
+          3,
+          2585.1357176148313,
+          -1041.5275333539403
+        ],
+        [
+          13.543982333998429,
+          7,
+          2445.787132079769,
+          -1041.5275333539403
+        ],
+        [
+          15.043723209004384,
+          15,
+          2279.810941229247,
+          -1041.5275333539403
+        ],
+        [
+          16.764976417005528,
+          31,
+          2166.840873638101,
+          -1041.5275352703568
+        ],
+        [
+          20.436010250006802,
+          63,
+          2061.7346626355743,
+          -1041.5275352703568
+        ],
+        [
+          28.050056750013027,
+          95,
+          2057.788526776456,
+          -1041.5275352703568
+        ],
+        [
+          33.96595008400618,
+          127,
+          1987.4794272946203,
+          -1041.5275352703568
+        ],
+        [
+          37.64873187500052,
+          159,
+          1961.7062136710904,
+          -1041.5275352703568
+        ]
+      ]
+    },
+    {
+      "instance": "syn15m02hfsg",
+      "budget": 60.0,
+      "parse_time": 0.002949999994598329,
+      "is_max": true,
+      "n_vars": 302,
+      "n_cons": 467,
+      "model_is_convex": false,
+      "harness_wall": 63.61569825001061,
+      "status": "feasible",
+      "objective": 2832.7489285649167,
+      "bound": 3343.461352986659,
+      "gap": 0.18028863033776585,
+      "node_count": 411,
+      "root_bound": 6364.4847793622575,
+      "root_gap": 1.2467521618961601,
+      "root_time": 21.235747833008645,
+      "wall_time": 62.85899112498737,
+      "nlp_bb": false,
+      "gap_certified": false,
+      "convex_fast_path": false,
+      "rust_time": 0.016565872938372195,
+      "jax_time": 5.249256166105624,
+      "python_time": 57.59316908594337,
+      "time_to_first_incumbent": 21.235740125004668,
+      "trace_points": 18,
+      "opt": 2832.748895,
+      "dual_excess": 510.71245798665905,
+      "primal_deficit": -3.3564916520845145e-05,
+      "root_dual_excess": 3531.7358843622574,
+      "dual_excess_rel": 0.18028864432287034,
+      "primal_deficit_rel": -1.184888522243873e-08,
+      "root_dual_excess_rel": 1.2467521885176684,
+      "bound_unsound": false,
+      "incumbent_unsound": false,
+      "dual_share": 1.0000000657217545,
+      "verdict": "dual_dominated",
+      "trace_head": [
+        [
+          21.235740125004668,
+          3,
+          6364.4847793622575,
+          -1276.09625897871
+        ],
+        [
+          21.51864912500605,
+          7,
+          6364.4847793622575,
+          -2832.7489293131216
+        ],
+        [
+          22.113703332986915,
+          15,
+          6364.4847793622575,
+          -2832.748929313175
+        ],
+        [
+          23.341699250013335,
+          29,
+          6364.4847793622575,
+          -2832.748929313175
+        ],
+        [
+          25.15219320799224,
+          49,
+          6364.4847793622575,
+          -2832.7489301934365
+        ],
+        [
+          27.33489279198693,
+          73,
+          6316.4847793622575,
+          -2832.7489301934365
+        ],
+        [
+          29.91780287498841,
+          99,
+          6316.4847793622575,
+          -2832.7489301934365
+        ],
+        [
+          32.4800648750097,
+          123,
+          6316.4847793622575,
+          -2832.7489301934365
+        ]
+      ]
+    },
+    {
+      "instance": "syn30hfsg",
+      "budget": 60.0,
+      "parse_time": 0.0024131250102072954,
+      "is_max": true,
+      "n_vars": 228,
+      "n_cons": 345,
+      "model_is_convex": false,
+      "harness_wall": 60.4290313340025,
+      "status": "feasible",
+      "objective": 138.1596289302158,
+      "bound": 1375.049838217518,
+      "gap": 8.952616758344462,
+      "node_count": 469,
+      "root_bound": 1458.0884906903552,
+      "root_gap": 9.553650889051195,
+      "root_time": 11.626879832998384,
+      "wall_time": 60.40978658298263,
+      "nlp_bb": false,
+      "gap_certified": false,
+      "convex_fast_path": false,
+      "rust_time": 0.01148254203144461,
+      "jax_time": 14.718251498939935,
+      "python_time": 45.68005254201125,
+      "time_to_first_incumbent": 11.626873499975773,
+      "trace_points": 19,
+      "opt": 138.1596024,
+      "dual_excess": 1236.890235817518,
+      "primal_deficit": -2.653021579135384e-05,
+      "root_dual_excess": 1319.9288882903552,
+      "dual_excess_rel": 8.952618669504204,
+      "primal_deficit_rel": -1.9202585510157662e-07,
+      "root_dual_excess_rel": 9.553652915625031,
+      "bound_unsound": false,
+      "incumbent_unsound": false,
+      "dual_share": 1.0000000214491276,
+      "verdict": "dual_dominated",
+      "trace_head": [
+        [
+          11.626873499975773,
+          3,
+          1458.0884906903552,
+          -122.02648477973716
+        ],
+        [
+          11.776974999986123,
+          7,
+          1448.0884906903552,
+          -122.02648477973716
+        ],
+        [
+          12.165472666994901,
+          15,
+          1446.0884906903552,
+          -138.15962885722618
+        ],
+        [
+          15.220666332985274,
+          31,
+          1436.0884906903552,
+          -138.15962915003487
+        ],
+        [
+          19.032150249986444,
+          63,
+          1428.0884906903552,
+          -138.15962922457246
+        ],
+        [
+          25.51776862499537,
+          91,
+          1428.0884906903552,
+          -138.15962922457246
+        ],
+        [
+          29.645485124987317,
+          113,
+          1408.0884906903552,
+          -138.15962922457246
+        ],
+        [
+          33.81442199999583,
+          137,
+          1408.0884906903552,
+          -138.15962922457246
+        ]
+      ]
+    },
+    {
+      "instance": "syn40hfsg",
+      "budget": 60.0,
+      "parse_time": 0.0029946669819764793,
+      "is_max": true,
+      "n_vars": 302,
+      "n_cons": 466,
+      "model_is_convex": false,
+      "harness_wall": 60.27275033300975,
+      "status": "feasible",
+      "objective": 64.44554961700268,
+      "bound": 1853.6954788859482,
+      "gap": 27.7637469135167,
+      "node_count": 375,
+      "root_bound": 2127.145900396807,
+      "root_gap": 32.00687034307799,
+      "root_time": 16.59284287499031,
+      "wall_time": 60.24989641699358,
+      "nlp_bb": false,
+      "gap_certified": false,
+      "convex_fast_path": false,
+      "rust_time": 0.020286918937927112,
+      "jax_time": 5.300228999956744,
+      "python_time": 54.92938049809891,
+      "time_to_first_incumbent": 16.592835624993313,
+      "trace_points": 16,
+      "opt": 67.71325586,
+      "dual_excess": 1785.9822230259483,
+      "primal_deficit": 3.2677062429973205,
+      "root_dual_excess": 2059.432644536807,
+      "dual_excess_rel": 26.375666039727015,
+      "primal_deficit_rel": 0.048257999139096786,
+      "root_dual_excess_rel": 30.41402482247745,
+      "bound_unsound": false,
+      "incumbent_unsound": false,
+      "dual_share": 0.9981737005045839,
+      "verdict": "dual_dominated",
+      "trace_head": [
+        [
+          16.592835624993313,
+          3,
+          2127.145900396807,
+          -61.19706863066675
+        ],
+        [
+          16.846515124983853,
+          7,
+          2117.145900396807,
+          -61.19706863066675
+        ],
+        [
+          17.56464829199831,
+          15,
+          2109.145900396807,
+          -61.19706950797834
+        ],
+        [
+          18.7721349169733,
+          31,
+          2103.145900396807,
+          -61.19706950799434
+        ],
+        [
+          21.042333124991274,
+          63,
+          1891.6954788859482,
+          -61.19706950799434
+        ],
+        [
+          26.881850249978015,
+          95,
+          1881.6954788859482,
+          -61.19706950799437
+        ],
+        [
+          32.42202437497326,
+          127,
+          1873.6954788859482,
+          -64.44554729492641
+        ],
+        [
+          37.89621295899269,
+          153,
+          1873.6954788859482,
+          -64.44554729492641
+        ]
+      ]
+    },
+    {
+      "instance": "syn40m",
+      "budget": 60.0,
+      "parse_time": 0.0016898330068215728,
+      "is_max": true,
+      "n_vars": 130,
+      "n_cons": 226,
+      "model_is_convex": true,
+      "harness_wall": 61.450245416985126,
+      "status": "feasible",
+      "objective": 33.19705166362131,
+      "bound": 1231.2312337084757,
+      "gap": 36.08857178596102,
+      "node_count": 479,
+      "root_bound": 1833.9137517794436,
+      "root_gap": 54.24327191348506,
+      "root_time": 4.155795750004472,
+      "wall_time": 61.438282417017035,
+      "nlp_bb": true,
+      "gap_certified": false,
+      "convex_fast_path": false,
+      "rust_time": 0.0053413749556057155,
+      "jax_time": 3.038417582953116,
+      "python_time": 58.39452345910831,
+      "time_to_first_incumbent": 4.155791791999945,
+      "trace_points": 18,
+      "opt": 67.71325586,
+      "dual_excess": 1163.5179778484758,
+      "primal_deficit": 34.516204196378695,
+      "root_dual_excess": 1766.2004959194437,
+      "dual_excess_rel": 17.183016280506404,
+      "primal_deficit_rel": 0.5097407259184582,
+      "root_dual_excess_rel": 26.083526386194414,
+      "bound_unsound": false,
+      "incumbent_unsound": false,
+      "dual_share": 0.9711892993424736,
+      "verdict": "dual_dominated",
+      "trace_head": [
+        [
+          4.155791791999945,
+          3,
+          1833.9137517794436,
+          -23.160121683858463
+        ],
+        [
+          4.248799875000259,
+          7,
+          1819.2301447052364,
+          -23.160121683858463
+        ],
+        [
+          5.632767667004373,
+          15,
+          1795.6536388873199,
+          -23.160121683858463
+        ],
+        [
+          7.2221405419986695,
+          31,
+          1653.4352937184735,
+          -23.160121683858463
+        ],
+        [
+          9.282845792011358,
+          63,
+          1646.4581601554323,
+          -23.160121683858463
+        ],
+        [
+          11.334617834014352,
+          95,
+          1623.247685385467,
+          -23.160121683858463
+        ],
+        [
+          13.09315445899847,
+          127,
+          1572.865433839393,
+          -23.160121683858463
+        ],
+        [
+          14.953680500009796,
+          159,
+          1554.5247244170073,
+          -23.160121683858463
+        ]
+      ]
+    }
+  ],
+  "opts": {
+    "rsyn0805m": 1296.120603,
+    "rsyn0810m": 1721.447711,
+    "rsyn0815m": 1269.925649,
+    "syn15m02hfsg": 2832.748895,
+    "syn30hfsg": 138.1596024,
+    "syn40hfsg": 67.71325586,
+    "syn40m": 67.71325586
+  }
+}
