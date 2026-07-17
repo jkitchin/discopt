@@ -4248,6 +4248,34 @@ def solve_model(
                 or _ipx_nl.general_nl
             )
             if _ipx_pure_milp and classify_problem(_ipx) == ProblemClass.MILP:
+                # Carry any caller seed across the lift. The reform appends aux
+                # columns, so an original-space point no longer matches the lifted
+                # width and the MILP driver's length check would drop it SILENTLY
+                # — discarding even a known-optimal incumbent (#689). Reconstruct
+                # the aux from their exact definitions; ``None`` means the point
+                # was not exactly reconstructible, and we simply do not seed
+                # (unchanged behavior) rather than guess. Purely primal: the
+                # driver re-validates the seed and recomputes its objective, so
+                # the dual bound and the certificate are unaffected either way.
+                if initial_point is not None:
+                    from discopt._jax.integer_product_reform import (
+                        extend_initial_point as _ipx_extend,
+                    )
+
+                    _ipx_x0 = _ipx_extend(_ipx, initial_point)
+                    if _ipx_x0 is None:
+                        logger.debug(
+                            "integer-bilinear reform: initial_point not reconstructible "
+                            "across the lift; solving without a seed"
+                        )
+                    initial_point = _ipx_x0
+                # Keep the pre-lift model reachable from the MILP path. A primal
+                # move over the ORIGINAL variables (e.g. a one-hot swap) is only
+                # well defined there: permuting bits in the lifted space leaves
+                # the expansion/big-M auxiliaries stale, i.e. genuinely
+                # infeasible. The MILP engine improves an incumbent by swapping
+                # here, then lifts the result back (#280).
+                _ipx._ipx_source_model = model
                 model = _ipx
                 model._convexity_classification_cache = None
                 clear_declared_box_cache(model)
@@ -13743,6 +13771,56 @@ def _root_dive(
 _SIMPLEX_MILP_BUDGET_CAP_S = 10.0
 
 
+def _one_hot_swap_reseed(model: Model, x_lifted: np.ndarray, budget: float) -> Optional[np.ndarray]:
+    """A lifted-space seed built by improving *x_lifted* with an assignment-aware
+    swap over the ORIGINAL variables, or ``None`` when unavailable.
+
+    On set-partition / assignment-structured models (``sum_k x[i,k] == 1``) a
+    single bit flip always breaks a one-hot row, so the engine's generic
+    flip/dive heuristics make little headway and its incumbent stalls well above
+    the optimum while the dual bound is already tight (#280). The
+    feasibility-preserving move is a *swap*, which is only well defined on the
+    pre-lift model: permuting bits in the lifted space leaves the expansion /
+    big-M auxiliaries stale, i.e. genuinely infeasible. So swap over the
+    originals, then reconstruct the aux exactly (#689).
+
+    Purely primal and never a soundness lever — the result is only ever handed
+    back as an ``initial_incumbent``, which the Rust driver re-validates (bounds,
+    integrality, row feasibility) and re-scores from ``c``. A bad or worse point
+    is dropped by the engine, never trusted; the dual bound and the certificate
+    are untouched either way. Self-gates to a no-op (returns ``None``) when the
+    model was not lifted or carries no one-hot structure."""
+    src = getattr(model, "_ipx_source_model", None)
+    n0 = getattr(model, "_ipx_n_orig_flat", None)
+    if src is None or n0 is None or budget <= 0.2:
+        return None
+    # ``one_hot_swap_search`` scores with the model's own objective and accepts
+    # strict *decreases*, so it only searches in the improving direction on a
+    # minimize model. On a maximize model it would drive the wrong way and the
+    # engine would just discard the seed — skip rather than burn the budget.
+    from discopt.modeling.core import ObjectiveSense as _Sense
+
+    obj = getattr(src, "_objective", None)
+    if obj is None or obj.sense != _Sense.MINIMIZE:
+        return None
+    try:
+        from discopt._jax.integer_product_reform import extend_initial_point
+        from discopt._jax.primal_heuristics import one_hot_swap_search
+
+        sw = one_hot_swap_search(
+            src,
+            np.asarray(x_lifted[: int(n0)], dtype=np.float64),
+            time_budget=min(1.0, budget * 0.5),
+            deadline=time.perf_counter() + budget,
+        )
+        if sw is None:
+            return None
+        return extend_initial_point(model, sw[0])
+    except Exception as _exc:  # pragma: no cover - defensive
+        logger.debug("one-hot swap reseed skipped: %s", _exc)
+        return None
+
+
 def _solve_milp_simplex(
     model: Model,
     time_limit: float,
@@ -13866,6 +13944,49 @@ def _solve_milp_simplex(
         time_limit_s=float(_milp_budget),
         debug_hook=_debug.rust_hook(),
     )
+    # (#280) The engine stopped with an uncertified incumbent and the user's
+    # budget is not spent (``_milp_budget`` is a *stall* bound, deliberately a
+    # slice of the limit — see above). On assignment-structured models that
+    # incumbent is typically stuck: the swap below is the move that escapes it.
+    # Re-enter the engine seeded with the improved point and keep the result only
+    # when it is strictly better in the engine's own (min-normalized) objective,
+    # so this can never worsen the answer. The seed is re-validated and re-scored
+    # by the driver, so soundness does not rest on the heuristic.
+    if status == "feasible":
+        _rem = float(time_limit) - (time.perf_counter() - t_start)
+        _seed2 = _one_hot_swap_reseed(model, np.asarray(x_struct, dtype=np.float64), _rem)
+        if _seed2 is not None:
+            _rem = float(time_limit) - (time.perf_counter() - t_start)
+            _budget2 = min(max(0.5, _rem - 0.2), _SIMPLEX_MILP_BUDGET_CAP_S)
+            _s2, _x2, _o2, _b2, _n2, _ = solve_milp_py(
+                np.ascontiguousarray(lp_data.c, dtype=np.float64),
+                A,
+                np.ascontiguousarray(lp_data.b_eq, dtype=np.float64),
+                np.ascontiguousarray(lp_data.x_l, dtype=np.float64),
+                np.ascontiguousarray(lp_data.x_u, dtype=np.float64),
+                np.ascontiguousarray(np.asarray(int_idx, dtype=np.int64)),
+                n_orig,
+                float(lp_data.obj_const),
+                int(max_nodes),
+                float(gap_tolerance),
+                initial_incumbent=np.ascontiguousarray(_seed2, dtype=np.float64),
+                time_limit_s=float(_budget2),
+                debug_hook=_debug.rust_hook(),
+            )
+            if _s2 in ("optimal", "feasible") and np.isfinite(_o2) and _o2 < obj - 1e-9:
+                # Both runs' bounds are valid lower bounds in min-normalized
+                # space, so keeping the tighter one is sound.
+                _bound_new = _b2
+                if np.isfinite(bound) and np.isfinite(_b2):
+                    _bound_new = max(bound, _b2)
+                elif not np.isfinite(_b2):
+                    _bound_new = bound
+                logger.info(
+                    "MILP one-hot swap reseed improved the incumbent: %.6g -> %.6g", obj, _o2
+                )
+                status, x_struct, obj, bound = _s2, _x2, _o2, _bound_new
+                nodes += _n2
+
     wall_time = time.perf_counter() - t_start
     maximize = model._objective is not None and model._objective.sense == ObjectiveSense.MAXIMIZE
 

@@ -105,6 +105,105 @@ def _int_factor_range(
     return lo_i, hi_i
 
 
+def _flat_offsets(model: Model) -> tuple[dict[int, int], int]:
+    """Map ``id(Variable)`` -> its offset in the model's flat vector, plus the
+    total flat width. Variables are laid out in ``model._variables`` order."""
+    off: dict[int, int] = {}
+    cur = 0
+    for v in model._variables:
+        off[id(v)] = cur
+        cur += int(v.size)
+    return off, cur
+
+
+def _resolve_aux_spec(model: Model, spec: list[tuple]) -> Optional[list[tuple]]:
+    """Resolve an ``_Expander.aux_spec`` (Variable refs) to flat-index arithmetic
+    against *model*'s final variable list. ``None`` if any ref is unresolvable."""
+    off, _ = _flat_offsets(model)
+
+    def idx(ref) -> Optional[int]:
+        if ref is None:
+            return None
+        var, elem = ref
+        base = off.get(id(var))
+        return None if base is None else base + int(elem)
+
+    out: list[tuple] = []
+    for entry in spec:
+        if entry[0] == "bits":
+            j_x = idx(entry[1])
+            bits = [idx((e, 0)) for e in entry[3]]
+            if j_x is None or any(b is None for b in bits):
+                return None
+            out.append(("bits", j_x, int(entry[2]), bits))
+        elif entry[0] == "prod":
+            j_v, j_e, j_o = idx((entry[1], 0)), idx((entry[2], 0)), idx(entry[3])
+            if j_v is None or j_e is None:
+                return None
+            out.append(("prod", j_v, j_e, j_o))
+        else:  # unknown kind: decline rather than guess
+            return None
+    return out
+
+
+def extend_initial_point(reformed: Model, x0) -> Optional[np.ndarray]:
+    """Extend a point over the ORIGINAL variables (flat, length
+    ``_ipx_n_orig_flat``) to a point over *reformed*'s full variable vector by
+    evaluating each auxiliary from its recorded definition — the expansion bits
+    ``e_k`` of ``x = lo + sum 2^k e_k``, and each big-M product ``v = e * other``.
+    Both are *exactly* determined by the originals at integral ``e``, so this is
+    reconstruction, not approximation.
+
+    Returns ``None`` — the caller then simply does not seed, today's behavior —
+    when the model carries no reformulation metadata, the point has the wrong
+    length or is non-integral where a bit expansion needs an integer, or any aux
+    is not reconstructible. Never guesses: a partial or invented seed would be
+    worse than no seed.
+
+    Purely primal, never a soundness lever: the MILP driver re-validates whatever
+    it is handed (bounds, integrality, row feasibility) and recomputes the
+    objective, so a bad point is dropped rather than trusted (#689)."""
+    spec = getattr(reformed, "_ipx_aux_spec", None)
+    n0 = getattr(reformed, "_ipx_n_orig_flat", None)
+    if spec is None or n0 is None:
+        return None
+    x = np.asarray(x0, dtype=np.float64).ravel()
+    if x.size != int(n0) or not np.all(np.isfinite(x)):
+        return None
+
+    _, total = _flat_offsets(reformed)
+    out = np.full(int(total), np.nan, dtype=np.float64)
+    out[: int(n0)] = x
+    known: set[int] = set(range(int(n0)))
+
+    for entry in spec:
+        if entry[0] == "bits":
+            _, j_x, lo, bit_idx = entry
+            if j_x not in known:
+                return None
+            shifted = float(out[j_x]) - float(lo)
+            r = round(shifted)
+            # A fractional value has no bit expansion; a value outside the
+            # expanded range would silently wrap. Decline both.
+            if abs(shifted - r) > 1e-6 or r < 0 or r >= (1 << len(bit_idx)):
+                return None
+            for k, j in enumerate(bit_idx):
+                out[j] = float((int(r) >> k) & 1)
+                known.add(j)
+        elif entry[0] == "prod":
+            _, j_v, j_e, j_o = entry
+            if j_o is None or j_e not in known or j_o not in known:
+                return None
+            out[j_v] = float(out[j_e]) * float(out[j_o])
+            known.add(j_v)
+        else:
+            return None
+
+    if np.any(np.isnan(out)):
+        return None
+    return out
+
+
 class _Expander:
     """Creates and caches the binary expansion of integer factor variables and
     accumulates the linking ``x_i == lo + sum 2^k e_k`` constraints."""
@@ -119,6 +218,11 @@ class _Expander:
         # (var._index, elem) -> (lo, [(coef, e_k Variable), ...])
         self._cache: dict[tuple[int, int], tuple[int, list[tuple[int, Variable]]]] = {}
         self._counter = 0
+        # Aux definitions in creation order, for reconstructing every lifted
+        # column from a point over the ORIGINAL variables (see
+        # :func:`extend_initial_point`). Entries hold Variable refs here and are
+        # resolved to flat indices once the variable list is final (#689).
+        self.aux_spec: list[tuple] = []
 
     def expansion(self, var: Variable, elem: int, lo: int, hi: int):
         key = (var._index, elem)
@@ -139,6 +243,7 @@ class _Expander:
             link = BinaryOp("-", link, term)
         self.aux_constraints.append(Constraint(link, "==", 0.0))
         self._cache[key] = (lo, bits)
+        self.aux_spec.append(("bits", (var, elem), lo, [e for _, e in bits]))
         return lo, bits
 
     def bigm_product(self, e: Variable, other: Expression, lo_o: float, hi_o: float) -> Variable:
@@ -187,6 +292,11 @@ class _Expander:
         # v - other - hi_o*e + hi_o >= 0   (i.e. v >= other - hi_o*(1-e))
         body_l = BinaryOp("-", BinaryOp("-", v, other), BinaryOp("*", Constant(hi_o), e))
         ac.append(Constraint(BinaryOp("+", body_l, Constant(hi_o)), ">=", 0.0))
+        # ``v == e * other`` exactly at ``e in {0,1}``, so v is reconstructible
+        # from a point whenever ``other`` is a plain variable reference. A more
+        # structured ``other`` records ``None`` and makes the whole extension
+        # decline (never guess) — see :func:`extend_initial_point`.
+        self.aux_spec.append(("prod", v, e, _scalar_var_ref(other)))
         return v
 
 
@@ -506,6 +616,16 @@ def expand_integer_products(model: Model, implied=frozenset()) -> Model:
         if len(new_model._variables) > cap:
             return model
         new_model._constraints = rebuilt + exp.aux_constraints
+        # Record how to rebuild the lifted columns from a point over the original
+        # variables, so a caller's initial_solution survives the lift instead of
+        # being silently dropped on the length check downstream (#689). Resolved
+        # here, where the variable list is final (aux are appended after the
+        # originals, so the originals keep their flat indices).
+        n_orig_flat = sum(int(v.size) for v in model._variables)
+        setattr(new_model, "_ipx_n_orig_flat", n_orig_flat)  # noqa: B010
+        setattr(  # noqa: B010
+            new_model, "_ipx_aux_spec", _resolve_aux_spec(new_model, exp.aux_spec)
+        )
         return new_model
     except Exception:
         return model
