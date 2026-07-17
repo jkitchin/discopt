@@ -362,21 +362,56 @@ class SolverTuning:
     ``X_pp = x_p``). These constraint-factor products couple the lifted variables
     across a whole constraint and tighten a constrained binary QP toward its
     Shor/SDP bound. Purely LP (no SDP solver); solved with the exact vertex simplex,
-    so the bound is **rigorous** and joins ``_root_relaxation_lower_bound``'s
-    candidates via ``max`` — it can only *raise* the bound, never loosen it.
+    and the surfaced value is the **Neumaier-Shcherbina safe dual bound** from that
+    solve — rigorous at *any* conditioning (``<=`` the true LP min for any ``y>=0``
+    by weak duality), not the raw vertex objective, which on the wide-coefficient
+    RLT LP can drift above the true minimum (issue #145). It joins
+    ``_root_relaxation_lower_bound``'s candidates via ``max`` — it can only *raise*
+    the bound, never loosen it.
 
     Sound by construction: each added row is a product of valid model constraints,
     so the RLT LP minimum is a valid lower bound (``<=`` the true optimum) and never
     cuts a feasible point. Measured: qap root 0 -> ~352891 (vs true optimum 388214;
     HiGHS-ipm gauge) and small synthetic Koopmans-Beckmann QAPs 0 -> optimum via the
-    exact oracle. **Default off** because the exact vertex simplex is slow on qap's
-    highly degenerate all-pairs RLT-1 LP (114k rows); it graduates once the exact
-    solve is fast enough at that scale (see docs/dev/sparse-milp-plan.md §RLT1)."""
+    exact oracle. **Default off** because the *rigorous* solve is affordable only up
+    to small/medium ``n``: the exact vertex simplex is fast there (n<=6 QAP in <3 s)
+    but explodes on qap's highly degenerate all-pairs RLT-1 LP (114k rows), and the
+    POUNCE IPM — the only in-house alternative now that HiGHS is removed — does not
+    converge on these LPs (measured: ~25 iters in 90 s on a 2778x666 RLT LP). It
+    graduates once a fast *sparse* rigorous LP oracle exists at that scale (see
+    docs/dev/sparse-milp-plan.md §RLT1)."""
 
     rlt1_max_pairs: int = field(default_factory=lambda: _env_int("DISCOPT_RLT1_MAX_PAIRS", 60_000))
     """Size guard for :attr:`rlt1_root_bound`: skip (sound no-op) when the all-pairs
     lift ``n(n-1)/2`` exceeds this (``DISCOPT_RLT1_MAX_PAIRS``, default 60000 —
     admits qap's 25200 pairs, blocks a runaway build on a much larger model)."""
+
+    rlt1_lagrangian: bool = field(
+        default_factory=lambda: _env_flag("DISCOPT_RLT1_LAGRANGIAN", default=False)
+    )
+    """Compute the RLT-1 root bound by the **Lagrangian dual** of the coupling rows
+    instead of the monolithic LP (``DISCOPT_RLT1_LAGRANGIAN``, default off; §5).
+
+    Same rigorous RLT-1 bound as :attr:`rlt1_root_bound`, but reached without ever
+    forming the degenerate all-pairs RLT-1 LP: the RLT product identities ``C z = 0``
+    are dualized and ``g(mu) = min_{z in P_McC}(c + C^T mu)^T z`` is maximized by
+    adaptive-target-level subgradient ascent, each step a cheap sparse McCormick
+    solve made rigorous by the Neumaier-Shcherbina safe bound. ``g(mu) <= RLT-1 opt
+    <= true opt`` for *every* ``mu`` (weak duality), so each iterate is a valid lower
+    bound; it joins ``_root_relaxation_lower_bound`` via ``max``. This is the route
+    that beats the exact simplex's ~10-20x-per-n wall at qap scale (the inner
+    McCormick LP stays ~0.1 s while the monolithic solve is >25 min). Measured on
+    synthetic QAPs: reaches 100 % of the monolithic RLT-1 bound, target-free, sound.
+    **Default off** pending the qap-scale entry experiment on the real instance with
+    the sparse inner oracle (see docs/dev/rlt-lagrangian-plan.md §3)."""
+
+    rlt1_lagrangian_max_iter: int = field(
+        default_factory=lambda: _env_int("DISCOPT_RLT1_LAGRANGIAN_MAX_ITER", 300)
+    )
+    """Subgradient iteration budget for :attr:`rlt1_lagrangian`
+    (``DISCOPT_RLT1_LAGRANGIAN_MAX_ITER``, default 300). More iterations tighten the
+    bound toward the RLT-1 optimum; each iterate is already a valid lower bound, so
+    an early stop is sound (just looser)."""
 
     node_bound_mode: str = field(
         default_factory=lambda: os.environ.get("DISCOPT_NODE_BOUND_MODE", "lp")

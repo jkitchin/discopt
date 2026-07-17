@@ -26,9 +26,19 @@ optimum). Every added row is a product of valid model constraints, so the LP
 minimum is a **rigorous lower bound** on the original objective — the certificate
 is preserved (issue #661).
 
-Purely LP-based: no SDP solver. Solved with the exact (vertex) simplex oracle so
-the bound is rigorous. Gated by :class:`~discopt.solver_tuning.SolverTuning`
-(``DISCOPT_RLT1_ROOT_BOUND``, default off) and a size guard.
+Purely LP-based: no SDP solver. Solved with the exact (vertex) simplex oracle;
+the returned bound is the **Neumaier–Shcherbina safe dual bound** built from the
+simplex's own exposed row duals, *not* the raw vertex objective. On an indefinite
+``x'Qx`` the RLT-1 objective has a wide coefficient spread (qap: eig ∈
+[−330k, +953k]), and the reported vertex objective from such an ill-conditioned
+basis can drift a few ``ulp·cond`` *above* the true LP minimum — an over-estimate
+that, surfaced as a lower bound, could prune the global optimum (the nvs22
+false-certificate class, issue #145). The NS bound ``g(y) = −bᵀy + Σⱼ minₓ (c+Aᵀy)ⱼxⱼ``
+satisfies ``g(y) ≤ true LP min`` for *any* ``y ≥ 0`` by weak duality, so it is a
+rigorous under-estimate at **any** conditioning while reproducing the vertex
+objective to within its float margin on well-conditioned solves. Gated by
+:class:`~discopt.solver_tuning.SolverTuning` (``DISCOPT_RLT1_ROOT_BOUND``, default
+off) and a size guard.
 
 Distinct from ``rlt_cuts.py``: that module *separates* individual violated
 constraint×bound-factor RLT cuts per node over the **already-lifted** columns (the
@@ -46,7 +56,14 @@ from typing import Optional
 import numpy as np
 import scipy.sparse as sp
 
-__all__ = ["rlt1_lower_bound", "build_rlt1_lp", "RLT1Problem"]
+__all__ = [
+    "rlt1_lower_bound",
+    "build_rlt1_lp",
+    "RLT1Problem",
+    "rlt1_lagrangian_lower_bound",
+    "build_rlt1_split",
+    "RLT1Split",
+]
 
 
 @dataclass
@@ -120,6 +137,53 @@ def _reconstruct_quadratic_objective(
     return Q, c_lin, offset
 
 
+def _mutually_exclusive_pairs(A_eq, b_eq, binary_vars: frozenset, n: int) -> set:
+    """Pairs ``(i, j)`` (``i < j``) whose product ``x_i x_j`` is identically 0.
+
+    A **bound-neutral** structural presolve for the RLT-1 LP. For a linear equality
+    ``sum_k a_k x_k = beta`` with two binaries ``x_i, x_j`` in its support, setting
+    both to 1 forces ``LHS >= a_i + a_j + sum_{k != i,j} min(0, a_k)`` (each other
+    binary term is ``>= min(0, a_k)``); if that lower bound already exceeds
+    ``beta`` the assignment is infeasible, so ``x_i x_j = 0`` at *every* feasible
+    point. This is exactly the set-partitioning / packing exclusivity (assignment
+    ``sum_k x_k = 1`` is the unit-coefficient special case: ``1 + 1 > 1``), stated
+    generally so it is not keyed to a problem name (§2).
+
+    The lifted column ``X_ij`` of such a pair is already pinned to 0 by the RLT
+    product of that same equality (``sum_k X_{i,k} = x_i`` with ``X_{i,k} >= 0`` and
+    ``X_ii = x_i`` forces every off-diagonal ``X_{i,k} = 0``), so dropping the
+    column, its three McCormick rows, and its now-trivial RLT rows leaves the LP
+    optimum **exactly unchanged** while shrinking the system the exact simplex must
+    factor. Measured: ~1.3–1.5x fewer rows and ~2.4x faster on synthetic QAPs at an
+    identical bound (docs/dev/sparse-milp-plan.md §RLT1).
+    """
+    if A_eq is None or getattr(A_eq, "shape", (0,))[0] == 0:
+        return set()
+    A = sp.csr_matrix(A_eq)
+    b = np.asarray(b_eq, dtype=np.float64)
+    excl: set[tuple[int, int]] = set()
+    tol = 1e-9
+    for r in range(A.shape[0]):
+        s, e = A.indptr[r], A.indptr[r + 1]
+        idx = [int(c) for c in A.indices[s:e]]
+        val = [float(v) for v in A.data[s:e]]
+        beta = float(b[r])
+        # Lower bound on the sum of all *other* binary terms when two members are 1.
+        neg_rest = sum(min(0.0, v) for v in val)
+        for a in range(len(idx)):
+            ia, va = idx[a], val[a]
+            if ia not in binary_vars or ia >= n:
+                continue
+            for c in range(a + 1, len(idx)):
+                jb, vb = idx[c], val[c]
+                if jb not in binary_vars or jb >= n:
+                    continue
+                rest = neg_rest - min(0.0, va) - min(0.0, vb)
+                if va + vb + rest > beta + tol:
+                    excl.add((min(ia, jb), max(ia, jb)))
+    return excl
+
+
 def build_rlt1_lp(
     model,
     relax,
@@ -187,11 +251,19 @@ def build_rlt1_lp(
     Q, c_lin, offset = recon
 
     # -- build the RLT-1 LP ---------------------------------------------------
-    # Variables: x (n) then X_ij for every i<j pair.
+    # Bound-neutral presolve: pairs whose product is identically 0 (set-partitioning
+    # exclusivity) are already pinned to 0 by the RLT rows, so we do not lift them —
+    # dropping the column, its McCormick rows, and its trivial RLT rows shrinks the
+    # LP without changing its optimum (see ``_mutually_exclusive_pairs``).
+    excluded = _mutually_exclusive_pairs(A_eq_m, b_eq_m, binary_vars, n)
+
+    # Variables: x (n) then X_ij for every non-excluded i<j pair.
     pair_index: dict[tuple[int, int], int] = {}
     nv = n
     for i in range(n):
         for j in range(i + 1, n):
+            if (i, j) in excluded:
+                continue
             pair_index[(i, j)] = nv
             nv += 1
 
@@ -251,6 +323,10 @@ def build_rlt1_lp(
                 add_ub(ub_terms, float(b_ubm[r]))
 
     # RLT-1: (a·x = beta) * x_p  ->  sum_k a_k X_{p,k} = beta x_p, using X_pp = x_p.
+    # Terms whose pair (p, k) is exclusion-pinned to 0 are dropped (sound: the
+    # product is identically 0). A row that reduces to only ``coef·x_p = 0`` with
+    # ``coef ~ 0`` is a trivial identity — dropped — but ``coef·x_p = 0`` with a
+    # nonzero ``coef`` is the genuine constraint ``x_p = 0`` and is kept.
     n_rlt = 0
     for r in range(A_eq.shape[0]):
         s, e = A_eq.indptr[r], A_eq.indptr[r + 1]
@@ -264,8 +340,11 @@ def build_rlt1_lp(
             for k, a_k in supp:
                 if k == p:
                     coef_xp += a_k  # X_pp = x_p
-                else:
+                elif (min(p, k), max(p, k)) in pair_index:
                     rlt_terms.append((pcol(p, k), a_k))
+                # else: pair (p, k) exclusion-pinned to 0 -> term drops out.
+            if not rlt_terms and abs(coef_xp) <= 1e-12:
+                continue  # trivial 0 = 0 identity after presolve
             rlt_terms.append((p, coef_xp))
             add_eq(rlt_terms, 0.0)
             n_rlt += 1
@@ -287,6 +366,285 @@ def build_rlt1_lp(
     )
 
 
+@dataclass
+class RLT1Split:
+    """The RLT-1 LP split into a cheap inner McCormick polytope and the coupling.
+
+    ``min c^T z  s.t.  z in P_McC := {A_in z <= b_in, z in [0,1]},  C z = 0``.
+
+    ``P_McC`` (McCormick bound-factor rows + the model's linear rows) is the sparse,
+    non-degenerate McCormick LP the solver already handles fast; ``C z = 0`` are the
+    RLT product identities whose coupling is what makes the *monolithic* LP
+    degenerate. Dualizing ``C`` (Lagrangian) keeps every inner solve cheap — see
+    :func:`rlt1_lagrangian_lower_bound` and ``docs/dev/rlt-lagrangian-plan.md``.
+    """
+
+    c: np.ndarray
+    A_in: "sp.csr_matrix"
+    b_in: np.ndarray
+    C: "sp.csr_matrix"
+    offset: float
+    n: int
+    nv: int
+    pair_index: dict
+    n_coupling: int
+
+    def pack_point(self, x: np.ndarray) -> np.ndarray:
+        """Lift an original-variable point ``x`` to ``z`` with ``X_ij = x_i x_j``."""
+        z = np.zeros(self.nv, dtype=np.float64)
+        z[: self.n] = x
+        for (i, j), p in self.pair_index.items():
+            z[p] = x[i] * x[j]
+        return z
+
+
+def build_rlt1_split(
+    model,
+    relax,
+    info: dict,
+    *,
+    binary_vars: frozenset,
+    max_pairs: int = 60_000,
+) -> Optional[RLT1Split]:
+    """Assemble the RLT-1 LP in split form ``(P_McC, C)`` for the Lagrangian dual.
+
+    Shares the eligibility gate, exclusion presolve, pair lift, and objective with
+    :func:`build_rlt1_lp`; the only difference is that the RLT product identities go
+    into a separate coupling matrix ``C`` (``C z = 0``) instead of being stacked as
+    inequality rows. ``None`` on any ineligibility (same conditions as
+    :func:`build_rlt1_lp`).
+    """
+    from discopt._jax.obbt import _extract_linear_constraints
+
+    if not binary_vars:
+        return None
+    if not info.get("bilinear"):
+        return None
+    if not getattr(relax, "_objective_bound_valid", False):
+        return None
+    A_ub_m, b_ub_m, A_eq_m, b_eq_m, n = _extract_linear_constraints(model)
+    if A_eq_m is None or A_eq_m.shape[0] == 0:
+        return None
+    involved: set[int] = set()
+    for i, j in info.get("bilinear", {}):
+        involved.add(int(i))
+        involved.add(int(j))
+    if any(v not in binary_vars for v in involved):
+        return None
+    if n * (n - 1) // 2 > max_pairs:
+        return None
+    recon = _reconstruct_quadratic_objective(relax, info, n)
+    if recon is None:
+        return None
+    Q, c_lin, offset = recon
+
+    excluded = _mutually_exclusive_pairs(A_eq_m, b_eq_m, binary_vars, n)
+    pair_index: dict[tuple[int, int], int] = {}
+    nv = n
+    for i in range(n):
+        for j in range(i + 1, n):
+            if (i, j) in excluded:
+                continue
+            pair_index[(i, j)] = nv
+            nv += 1
+
+    def pcol(i: int, j: int) -> int:
+        return pair_index[(i, j)] if i < j else pair_index[(j, i)]
+
+    c = np.zeros(nv, dtype=np.float64)
+    for i in range(n):
+        c[i] = Q[i, i] + c_lin[i]
+    for (i, j), p in pair_index.items():
+        c[p] = 2.0 * Q[i, j]
+
+    # -- inner polytope P_McC: McCormick bound-factor rows + model linear rows -----
+    irows: list[int] = []
+    icols: list[int] = []
+    idata: list[float] = []
+    b_in: list[float] = []
+    iu = 0
+
+    def add_in(terms: list[tuple[int, float]], rhs: float) -> None:
+        nonlocal iu
+        for col, val in terms:
+            irows.append(iu)
+            icols.append(col)
+            idata.append(val)
+        b_in.append(rhs)
+        iu += 1
+
+    def add_in_eq(terms: list[tuple[int, float]], rhs: float) -> None:
+        add_in(terms, rhs)
+        add_in([(col, -val) for col, val in terms], -rhs)
+
+    for (i, j), p in pair_index.items():
+        add_in([(p, 1.0), (i, -1.0)], 0.0)
+        add_in([(p, 1.0), (j, -1.0)], 0.0)
+        add_in([(p, -1.0), (i, 1.0), (j, 1.0)], 1.0)
+    A_eq = sp.csr_matrix(A_eq_m)
+    b_eq = np.asarray(b_eq_m, dtype=np.float64)
+    for r in range(A_eq.shape[0]):
+        s, e = A_eq.indptr[r], A_eq.indptr[r + 1]
+        eq_terms = [(int(A_eq.indices[t]), float(A_eq.data[t])) for t in range(s, e)]
+        if eq_terms:
+            add_in_eq(eq_terms, float(b_eq[r]))
+    if A_ub_m is not None and b_ub_m is not None and A_ub_m.shape[0] > 0:
+        A_ubm = sp.csr_matrix(A_ub_m)
+        b_ubm = np.asarray(b_ub_m, dtype=np.float64)
+        for r in range(A_ubm.shape[0]):
+            s, e = A_ubm.indptr[r], A_ubm.indptr[r + 1]
+            ub_terms = [(int(A_ubm.indices[t]), float(A_ubm.data[t])) for t in range(s, e)]
+            if ub_terms:
+                add_in(ub_terms, float(b_ubm[r]))
+    A_in = sp.csr_matrix((idata, (irows, icols)), shape=(iu, nv))
+    A_in.sort_indices()
+
+    # -- coupling C z = 0: the (non-trivial, post-presolve) RLT product identities --
+    crows: list[int] = []
+    ccols: list[int] = []
+    cdata: list[float] = []
+    cu = 0
+    for r in range(A_eq.shape[0]):
+        s, e = A_eq.indptr[r], A_eq.indptr[r + 1]
+        supp = [(int(A_eq.indices[t]), float(A_eq.data[t])) for t in range(s, e)]
+        beta = float(b_eq[r])
+        if not supp:
+            continue
+        for p in range(n):
+            terms: list[tuple[int, float]] = []
+            coef_xp = -beta
+            for k, a_k in supp:
+                if k == p:
+                    coef_xp += a_k
+                elif (min(p, k), max(p, k)) in pair_index:
+                    terms.append((pcol(p, k), a_k))
+            if not terms and abs(coef_xp) <= 1e-12:
+                continue
+            terms.append((p, coef_xp))
+            for col, val in terms:
+                crows.append(cu)
+                ccols.append(col)
+                cdata.append(val)
+            cu += 1
+    C = sp.csr_matrix((cdata, (crows, ccols)), shape=(cu, nv))
+    C.sort_indices()
+
+    return RLT1Split(
+        c=c,
+        A_in=A_in,
+        b_in=np.asarray(b_in, dtype=np.float64),
+        C=C,
+        offset=offset,
+        n=n,
+        nv=nv,
+        pair_index=pair_index,
+        n_coupling=cu,
+    )
+
+
+def rlt1_lagrangian_lower_bound(
+    model,
+    relax,
+    info: dict,
+    *,
+    binary_vars: frozenset,
+    max_iter: int = 300,
+    time_limit: Optional[float] = 30.0,
+    max_pairs: int = 60_000,
+    inner_time_limit: float = 10.0,
+) -> tuple[Optional[float], int]:
+    """Rigorous RLT-1 lower bound via the Lagrangian dual of the coupling rows.
+
+    Dualizes ``C z = 0`` (:func:`build_rlt1_split`) with free multipliers ``mu`` and
+    maximizes ``g(mu) = min_{z in P_McC} (c + C^T mu)^T z`` by adaptive-target-level
+    subgradient ascent. For **every** ``mu``, weak duality gives
+    ``g(mu) <= RLT-1 optimum <= true optimum`` — so each iterate is a valid global
+    lower bound and no convergence is needed for *soundness*, only tightness. Each
+    ``g(mu)`` is made rigorous at any conditioning by the Neumaier-Shcherbina safe
+    bound on the (cheap, sparse) inner McCormick solve. Never forms the degenerate
+    monolithic RLT-1 LP — the route that beats the exact simplex's scaling wall at
+    qap scale (``docs/dev/rlt-lagrangian-plan.md``).
+
+    Returns ``(best_bound, n_coupling)``; ``best_bound`` is ``None`` on any
+    ineligibility/failure (a sound no-op). Step scaling (the ``delta`` target gap)
+    only affects convergence speed, never soundness.
+    """
+    import time as _time
+
+    from discopt._jax.obbt import _max_abs, _ns_safe_lp_lower_bound, get_exact_dual_lp_solver
+    from discopt.solvers import SolveStatus
+
+    split = build_rlt1_split(model, relax, info, binary_vars=binary_vars, max_pairs=max_pairs)
+    if split is None or split.n_coupling == 0:
+        return (None, 0)
+    _lp = get_exact_dual_lp_solver()
+    if _lp is None:
+        return (None, split.n_coupling if split else 0)
+
+    C = split.C
+    Ct = C.T.tocsr()
+    lo = np.zeros(split.nv, dtype=np.float64)
+    hi = np.ones(split.nv, dtype=np.float64)
+    mu = np.zeros(split.n_coupling, dtype=np.float64)
+    best_raw: Optional[float] = None
+
+    # Adaptive target level (Polyak with estimated optimum): level = best + delta,
+    # step t = (level - g)/||s||^2. delta halves after a stall and grows on a run of
+    # improvements, so it self-tunes from a scale-only initial guess — no external
+    # upper bound required for correctness or convergence.
+    delta = max(1.0, 0.1 * _max_abs(split.c) * max(1.0, split.n**0.5))
+    stall = 0
+    run_up = 0
+    t0 = _time.time()
+    it = 0
+    while it < max_iter:
+        if time_limit is not None and _time.time() - t0 > time_limit:
+            break
+        cmod = split.c + Ct @ mu
+        res = _lp(
+            c=cmod,
+            A_ub=split.A_in,
+            b_ub=split.b_in,
+            bounds=[(0.0, 1.0)] * split.nv,
+            time_limit=inner_time_limit,
+        )
+        if res.status != SolveStatus.OPTIMAL or res.objective is None or res.x is None:
+            break
+        g = _ns_safe_lp_lower_bound(
+            cmod, getattr(res, "dual_values", None), split.A_in, split.b_in, lo, hi, n_eq=0
+        )
+        z = np.asarray(res.x, dtype=np.float64)
+        s = C @ z  # subgradient of g at mu (coupling residual, target 0)
+        nrm2 = float(s @ s)
+        improved = g is not None and np.isfinite(g) and (best_raw is None or g > best_raw + 1e-9)
+        if improved:
+            best_raw = g
+            run_up += 1
+            stall = 0
+            if run_up >= 5:
+                delta *= 1.5
+                run_up = 0
+        else:
+            run_up = 0
+            stall += 1
+            if stall >= 15:
+                delta *= 0.5
+                stall = 0
+        it += 1
+        if nrm2 <= 1e-14:
+            break  # coupling satisfied -> g(mu) = RLT-1 optimum, done
+        level = (best_raw if best_raw is not None else float(g or 0.0)) + delta
+        g_here = g if (g is not None and np.isfinite(g)) else float(res.objective)
+        t = (level - g_here) / nrm2
+        if not np.isfinite(t) or t <= 0.0:
+            t = delta / (nrm2 + 1e-12)
+        mu = mu + t * s
+
+    if best_raw is None or not np.isfinite(best_raw):
+        return (None, split.n_coupling)
+    return (float(best_raw) + split.offset, split.n_coupling)
+
+
 def rlt1_lower_bound(
     model,
     relax,
@@ -299,18 +657,25 @@ def rlt1_lower_bound(
     """Rigorous RLT-1 lower bound for a constrained binary QP, or a sound no-op.
 
     Builds the exhaustive RLT-1 LP (:func:`build_rlt1_lp`) and solves it once with
-    the **exact vertex simplex** oracle, so the returned value is a rigorous global
-    lower bound on the minimize objective (``<=`` the true optimum). Returns
-    ``(bound, n_rlt_rows)``; ``bound`` is ``None`` on any ineligibility/failure (a
-    sound no-op) and ``n_rlt_rows`` is the number of RLT product rows added.
+    the **exact vertex simplex** oracle, then returns the **Neumaier–Shcherbina
+    safe dual bound** computed from that solve's exposed row duals — a rigorous
+    global lower bound on the minimize objective (``<=`` the true optimum) at *any*
+    conditioning, rather than the raw vertex objective which can drift above the
+    true LP minimum on the wide-coefficient RLT LP (issue #145 / #661). Returns
+    ``(bound, n_rlt_rows)``; ``bound`` is ``None`` on any ineligibility/failure —
+    including a solve that exposes no usable duals, in which case we decline rather
+    than surface the un-certified vertex objective (a sound no-op) — and
+    ``n_rlt_rows`` is the number of RLT product rows added.
     """
-    from discopt._jax.obbt import get_exact_lp_solver
+    from discopt._jax.obbt import _ns_safe_lp_lower_bound, get_exact_dual_lp_solver
     from discopt.solvers import SolveStatus
 
     prob = build_rlt1_lp(model, relax, info, binary_vars=binary_vars, max_pairs=max_pairs)
     if prob is None:
         return (None, 0)
-    _lp = get_exact_lp_solver()
+    # Prefer the dual-exposing exact oracle: the RLT-1 bound we surface is the
+    # rigorous NS-safe value built from its row duals, not the raw vertex value.
+    _lp = get_exact_dual_lp_solver()
     if _lp is None:
         return (None, 0)
     res = _lp(
@@ -318,4 +683,17 @@ def rlt1_lower_bound(
     )
     if res.status != SolveStatus.OPTIMAL or res.objective is None:
         return (None, prob.n_rlt_rows)
-    return (float(res.objective) + prob.offset, prob.n_rlt_rows)
+    # The RLT-1 LP is assembled entirely as ``A_ub z <= b_ub`` (equalities are split
+    # into two ``<=`` rows by ``build_rlt1_lp``), so ``n_eq = 0`` — every row's dual
+    # clamps to ``>= 0`` in the NS bound. All columns carry finite ``[0, 1]`` bounds,
+    # so no free-column reduced-cost snap is needed (``rc_snap_tol = 0``).
+    lo = np.array([b[0] for b in prob.bounds], dtype=np.float64)
+    hi = np.array([b[1] for b in prob.bounds], dtype=np.float64)
+    g = _ns_safe_lp_lower_bound(
+        prob.cobj, getattr(res, "dual_values", None), prob.A_ub, prob.b_ub, lo, hi, n_eq=0
+    )
+    if g is None or not np.isfinite(g):
+        # No usable duals -> the vertex objective is not certified rigorous on an
+        # ill-conditioned RLT LP; decline rather than risk an over-estimate.
+        return (None, prob.n_rlt_rows)
+    return (float(g) + prob.offset, prob.n_rlt_rows)

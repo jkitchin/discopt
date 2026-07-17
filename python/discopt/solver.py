@@ -2649,10 +2649,12 @@ def _root_relaxation_lower_bound(
         # RLT level-1 (constraint-factor products) strengthens the root bound on a
         # constrained *binary* QP where McCormick alone is trivially loose (qap:
         # root ~0 vs optimum 388214, issue #661). Each added row is a product of
-        # valid model constraints, solved with the exact vertex simplex, so the RLT
-        # LP minimum is a rigorous lower bound that joins the `max` below — it can
-        # only raise the bound. Opt-in (`DISCOPT_RLT1_ROOT_BOUND`, default off);
-        # any ineligibility/failure is a sound no-op.
+        # valid model constraints; the RLT LP is solved with the exact vertex
+        # simplex and the surfaced value is the Neumaier-Shcherbina *safe* dual
+        # bound from that solve (rigorous at any conditioning, `<=` the true LP
+        # min), so it joins the `max` below — it can only raise the bound. Opt-in
+        # (`DISCOPT_RLT1_ROOT_BOUND`, default off); any ineligibility/failure is a
+        # sound no-op.
         rlt_bound: Optional[float] = None
         _tun = _tuning()
         if getattr(_tun, "rlt1_root_bound", False):
@@ -2672,6 +2674,32 @@ def _root_relaxation_lower_bound(
                     rlt_bound = float(_rb)
             except Exception as rlt_exc:  # pragma: no cover - defensive
                 logger.debug("root RLT-1 bound skipped: %s", rlt_exc)
+
+        # RLT-1 via the Lagrangian dual of the coupling rows: the same rigorous
+        # bound reached without forming the degenerate monolithic RLT-1 LP — each
+        # subgradient step is a cheap sparse McCormick solve, made rigorous by the
+        # NS-safe bound, and `g(mu) <= RLT-1 opt` for every `mu` (weak duality). The
+        # route that beats the exact simplex's scaling wall at qap scale. Opt-in
+        # (`DISCOPT_RLT1_LAGRANGIAN`, default off); any failure is a sound no-op.
+        rlt_lag_bound: Optional[float] = None
+        if getattr(_tun, "rlt1_lagrangian", False):
+            try:
+                from discopt._jax.model_utils import binary_flat_cols as _bfc
+                from discopt._jax.rlt import rlt1_lagrangian_lower_bound
+
+                _lb, _nc = rlt1_lagrangian_lower_bound(
+                    model,
+                    relax,
+                    _relax_info,
+                    binary_vars=_bfc(model),
+                    max_iter=int(getattr(_tun, "rlt1_lagrangian_max_iter", 300)),
+                    time_limit=min(30.0, max(5.0, time_limit * 0.5)),
+                    max_pairs=int(getattr(_tun, "rlt1_max_pairs", 60_000)),
+                )
+                if _nc and _lb is not None and np.isfinite(_lb):
+                    rlt_lag_bound = float(_lb)
+            except Exception as lag_exc:  # pragma: no cover - defensive
+                logger.debug("root RLT-1 Lagrangian bound skipped: %s", lag_exc)
 
         budget = min(10.0, max(1.0, time_limit * 0.1))
         result = relax.solve(time_limit=budget, gap_tolerance=1e-6)
@@ -2711,7 +2739,11 @@ def _root_relaxation_lower_bound(
 
         # Both values are valid lower bounds for a minimization, so the larger
         # (tighter) one is the better rigorous bound.
-        candidates = [b for b in (plain_bound, sep_bound, psd_bound, rlt_bound) if b is not None]
+        candidates = [
+            b
+            for b in (plain_bound, sep_bound, psd_bound, rlt_bound, rlt_lag_bound)
+            if b is not None
+        ]
         if candidates:
             return max(candidates)
     except Exception as exc:  # pragma: no cover - defensive
