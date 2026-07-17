@@ -373,3 +373,63 @@ whole solve), so this is a partial fire — but the dominant term is unambiguous
 
 **Not the lever (do not re-walk):** OA auto-routing (F-1), McCormick strengthening for the
 *convex* half (it doesn't run there), primal/LNS incumbent quality as the headline (§R2-1).
+
+---
+
+## §R3 — entry experiment (2026-07-17): the nonconvex root bound is a discarded relaxer, not a weak relaxation
+
+**Regime:** bound-changing, flag-gated (`DISCOPT_ROOT_LP_PROBE_TIGHT`, default OFF). **Env:** worktree
+build, `JAX_ENABLE_X64=1`, `JAX_PLATFORMS=cpu`. **Reproduced first** (CLAUDE.md §4): rsyn0805m
+root excess **+62.9%**, syn30hfsg **+955.4%** — matches §R2-2 exactly.
+
+### R3-1 The `*hfsg` root bound is a *plumbing* gap, not a relaxation-strength gap (measurement wins over §R2-6)
+
+§R2-6 planned to strengthen the `*hfsg` McCormick relaxation (OBBT / cut families). **Measured,
+that is the wrong target.** The falsification chain:
+
+1. **Root OBBT does not move the reported `*hfsg` bound.** `obbt_tighten_root` tightens 12–62
+   bounds on syn30hfsg/syn40hfsg, but re-measuring the reported `root_bound` moves it **~0 pts**
+   (955.4% → 955.4%). Cutoff-OBBT is identical to no-cutoff. So range reduction is not the lever.
+2. **The McCormick LP relaxer already computes a *far tighter* bound than the solver reports.**
+   A standalone `MccormickLPRelaxer(model).solve_at_node(lb, ub)` over the FBBT box returns
+   **+571%** on syn30hfsg (vs the reported **+955%**), in 0.05 s, at every time limit.
+3. **Root cause — the relaxer is *discarded* before the search.** The spatial path keeps the LP
+   relaxer only if a one-shot root *probe* (`solver.py`, the `_probe = _mc_lp_relaxer.solve_at_node`
+   block) yields a bound. That probe uses `flat_variable_bounds(model)` — the **raw declared**
+   bounds. The `*hfsg` family declares its continuous flows `[0, inf]`, so the McCormick LP is
+   unbounded/None over the raw box → `_mc_mode = "none"`, relaxer dropped → the whole search
+   falls back to a loose alphaBB/interval/NLP bound (`+955%`), never using the LP it could build
+   over the tightened box (`+571%`). Confirmed by instrumentation: `iter0 … mc_mode=none
+   relaxer=no tree_glb=-1458` (OFF) vs `mc_mode=lp relaxer=yes tree_glb=-927` (probe on the
+   tightened box).
+
+### R3-2 The lever: probe the relaxer over the tightened root box (`DISCOPT_ROOT_LP_PROBE_TIGHT`, default OFF)
+
+One-line effect: the keep/discard probe uses the FBBT/OBBT-tightened `lb/ub` instead of the raw
+declared bounds. Sound by construction — the probe only decides *whether* to keep the (rigorous
+outer-approximation) relaxer; every node still solves its own sub-box. Flag ON-vs-OFF, 30 s panel:
+
+| instance | path | root % OFF→ON | dual % OFF→ON | sound |
+|---|---|---|---|---|
+| `syn30hfsg` | spatial | **+955.4 → +571.1** | +919.2 → **+542.4** | ✓ |
+| `syn40hfsg` | spatial | **+3041.4 → +2350.4** | +2667.1 → **+2260.0** | ✓ |
+| `syn15m02hfsg` | spatial | +124.7 → +118.1 | +123.0 → **+115.2** | ✓ |
+| `rsyn0805m/0810m/0815m`, `syn40m` | nlp_bb | unchanged | unchanged | ✓ (bound-neutral) |
+
+Broader soundness: the vendored 65-instance corpus (`python/tests/data/minlplib_nl/`) — **0/65
+soundness violations**; only 1 non-syn instance (`casctanks`, a cascading-tanks model — different
+class, confirms generality per CLAUDE.md §2) changes, and it tightens. Regression test:
+`python/tests/test_issue282_root_lp_probe.py` (vendored `syn05hfsg`, differential-bound +
+feasible-point, fails before the fix).
+
+### R3-3 The convex half (`rsyn*`/`syn40m`) is a separate, larger campaign — NOT closed here
+
+The convex family routes to `_solve_nlp_bb`, which has **no root cut/OBBT stage at all** — its
+root bound is the convex continuous relaxation with weak big-M, and OBBT moves it **0.0 pts**
+(measured on rsyn0805m/0810m/syn40m: box tightening doesn't cut the fractional-`y` relaxation
+point). Closing the +63%/+72%/+104%/+2609% convex root gap requires **root cutting planes**
+(MIR / flow-cover / knapsack-cover / OA cuts on the big-M linearization) on the NLP-BB path —
+the mechanism SCIP uses to reach +16%. That is a bounded-increment-free campaign, left open.
+
+**Corrected not-the-lever list:** OBBT/range-reduction for `*hfsg` (§R2-6 target — falsified in
+R3-1; the relaxer was discarded, not weak).
