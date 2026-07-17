@@ -23,11 +23,9 @@ survives, and the node is sentinel-fathomed carrying pop-time floor
 7.40348 — far above the incumbent 6.05822. Every removed subtree was
 rigorously accounted; only the label was withheld.
 
-Same class, second probe: st_e36 with ``DISCOPT_NODE_REDUCE=1`` (BR-3 blocker,
-docs/dev/br3-regate-2026-07-10.md) — one sentinel fathom whose floor
--246.00000046 sits 4.6e-7 below the incumbent -246.0000000026, well inside the
-certification tolerance; the floor-inclusive gap is closed and the exit must
-certify with the floor as the reported bound.
+(A second probe, st_e36 under the ``DISCOPT_NODE_REDUCE`` flag, was removed with
+that flag in #581; the floor-inclusive certification arithmetic it exercised is
+still covered by ``test_gap_values_converged_matches_certification_arithmetic``.)
 
 Negative control: a tree whose taint floor does NOT close the gap (nvs05,
 floor 1.3521 vs incumbent 5.4709) must keep the ``feasible`` downgrade — that
@@ -117,42 +115,10 @@ def test_nvs22_density_route_certifies_closed_gap(monkeypatch):
     )
 
 
-@pytest.mark.slow
-def test_st_e36_node_reduce_certifies_within_tolerance_floor(monkeypatch):
-    """node_reduce ON: st_e36's floor sits 4.6e-7 under the incumbent — inside
-    the certification tolerance — so the exit certifies with the floor as the
-    reported bound (the BR-3 node_reduce blocker, same accounting class).
-    """
-    monkeypatch.setenv("DISCOPT_NODE_REDUCE", "1")
-    # Pin the graduated flags OFF ("0" disables each): this test freezes the
-    # exact measured configuration (node_reduce alone, historical LU routing)
-    # so its deterministic signature holds regardless of the flags' defaults.
-    monkeypatch.setenv("DISCOPT_LU_DENSITY_ROUTE", "0")
-    monkeypatch.setenv("DISCOPT_OBJ_BRANCH_PRIORITY", "0")
-    monkeypatch.setenv("DISCOPT_LIFT_LOOSE_PRODUCTS", "0")
-    monkeypatch.setenv("DISCOPT_NODE_NUMERICAL_DUAL_BOUND", "0")
-    result = from_nl(_ST_E36_NL).solve(time_limit=40, gap_tolerance=1e-4)
-
-    assert result.status == "optimal", (
-        f"certificate withheld: status={result.status!r}, "
-        f"bound={getattr(result, 'bound', None)!r} "
-        f"(pre-fix signature: feasible / -246.00000046256457 / 75 nodes)"
-    )
-
-    assert result.objective is not None
-    err = abs(result.objective - _ST_E36_OPT)
-    assert err <= _ABS or err <= _REL * abs(_ST_E36_OPT), (
-        f"objective {result.objective!r} vs oracle {_ST_E36_OPT}"
-    )
-
-    # The certified bound must be the FLOOR-INCLUSIVE value (the honest
-    # rigorous bound: the removed subtree floors at -246.00000046, below the
-    # frontier), on the sound side of the oracle and of the incumbent.
-    bound = getattr(result, "bound", None)
-    assert bound is not None
-    assert bound <= _ST_E36_OPT + 1e-9, f"dual bound {bound!r} crosses the oracle {_ST_E36_OPT}"
-    assert bound <= result.objective + 1e-9, "certificate invariant: bound <= incumbent (min)"
-    assert abs(bound - _ST_E36_OPT) <= 1e-3, f"dual bound {bound!r} did not close to the optimum"
+# (The ``test_st_e36_node_reduce_certifies_within_tolerance_floor`` case was
+# removed with the ``DISCOPT_NODE_REDUCE`` flag in #581 — the floor-inclusive
+# certification arithmetic it exercised is still covered by the nvs22-based
+# ``test_gap_values_converged_matches_certification_arithmetic`` below.)
 
 
 @pytest.mark.smoke

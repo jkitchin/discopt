@@ -263,85 +263,10 @@ def test_ex1252_rlt_stays_sound(monkeypatch):
     )
 
 
-# Per-node lifted-LP FBBT (issue #184). ``ex1252``'s root bound is structurally 0
-# and no envelope/RLT cut can move it (the objective products are nonnegative and
-# zeroable on the box boundary). The bound only lifts once branching fixes the
-# line-selection binaries ``x36/x37/x38`` (≡ ``x18/x19/x20``): then propagating
-# the relaxation's *own* McCormick rows recovers the bilinear-implied factor
-# bounds (``x18=1`` ⟹ ``x9·x3=400`` ⟹ ``x3>=1``; ``x21=1`` ⟹ ``x0>=1``) that
-# purely linear FBBT misses, and rebuilding on the tightened box gives an
-# envelope that no longer underestimates the product to 0.
-_EX1252_LINE_BINARIES = (36, 37, 38)  # x18=x36, x19=x37, x20=x38 (constraints 40-42)
-
-
-@pytest.mark.correctness
-def test_ex1252_lifted_fbbt_tightens_branched_node(monkeypatch):
-    """At the branched node ``x36=1, x37=0, x38=0`` (line 1 selected), per-node
-    lifted-LP FBBT (``DISCOPT_LIFTED_FBBT=1``) drives the node bound off the
-    structural 0 — to ~18987 — while staying sound (``<= optimum 128893.8``). The
-    root bound is unchanged (binaries still relaxed there, so FBBT derives
-    nothing): the tightening is genuinely per-node, which is what lets the global
-    B&B certify optimality. This is the regression lock for #184.
-    """
-    monkeypatch.setenv("DISCOPT_LIFTED_FBBT", "1")
-    nl = _DATA / "ex1252.nl"
-    assert nl.exists(), f"missing {nl}"
-    m = dm.from_nl(str(nl))
-
-    relaxer = MccormickLPRelaxer(m)
-    lb, ub = flat_variable_bounds(m)
-
-    # Root: binaries relaxed, so lifted FBBT cannot tighten — bound stays ~0.
-    root = relaxer.solve_at_node(lb, ub)
-    assert root.status == "optimal", f"ex1252 root LP status {root.status}"
-    assert root.lower_bound is not None and root.lower_bound <= 1.0, (
-        f"ex1252 root bound unexpectedly {root.lower_bound} (expected ~0)"
-    )
-
-    # Branched node: fix line-selection binaries (x36=1, x37=x38=0).
-    nlb, nub = lb.copy(), ub.copy()
-    for k in _EX1252_LINE_BINARIES:
-        val = 1.0 if k == 36 else 0.0
-        nlb[k] = nub[k] = val
-    node = relaxer.solve_at_node(nlb, nub)
-
-    assert node.status == "optimal", f"ex1252 branched LP status {node.status}"
-    assert node.lower_bound is not None and math.isfinite(node.lower_bound), (
-        "ex1252 branched node dropped its objective bound"
-    )
-    # Tightness lock: the bound must climb well off 0 (validated ~18987).
-    assert node.lower_bound > 1000.0, (
-        f"ex1252 lifted-FBBT bound {node.lower_bound} did not lift off the "
-        "structural 0 — per-node tightening regressed"
-    )
-    # Soundness: a valid lower bound never exceeds the true optimum.
-    assert node.lower_bound <= 128893.8 + 1e-3, (
-        f"ex1252 lifted-FBBT UNSOUND bound {node.lower_bound} > optimum 128893.8"
-    )
-
-
-@pytest.mark.correctness
-@pytest.mark.parametrize("instance, optimum", _SOUND_BOUND_CASES)
-def test_bucket2_lifted_fbbt_stays_sound(monkeypatch, instance, optimum):
-    """Enabling per-node lifted-LP FBBT keeps every bucket-2 root bound sound
-    (finite and ``<= optimum``). Lifted FBBT only ever tightens with valid
-    relaxation rows, so no instance may gain an unsound (over-tight) bound."""
-    monkeypatch.setenv("DISCOPT_LIFTED_FBBT", "1")
-    nl = _DATA / f"{instance}.nl"
-    assert nl.exists(), f"missing {nl}"
-    m = dm.from_nl(str(nl))
-
-    relaxer = MccormickLPRelaxer(m)
-    lb, ub = flat_variable_bounds(m)
-    res = relaxer.solve_at_node(lb, ub)
-
-    assert res.status == "optimal", f"[{instance}] lifted-FBBT root LP status {res.status}"
-    assert res.lower_bound is not None and math.isfinite(res.lower_bound), (
-        f"[{instance}] lifted-FBBT dropped the root bound"
-    )
-    assert res.lower_bound <= optimum + 1e-3, (
-        f"[{instance}] lifted-FBBT UNSOUND root bound {res.lower_bound} > optimum {optimum}"
-    )
+# (The per-node lifted-LP FBBT tests, issue #184, were removed with the
+# ``DISCOPT_LIFTED_FBBT`` flag in #581 — deprecated as graduated-gate net-negative.
+# The objective-gating branch-priority detector below, also from #184, is
+# independent of that flag and retained.)
 
 
 @pytest.mark.correctness
