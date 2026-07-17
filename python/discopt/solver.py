@@ -5156,9 +5156,7 @@ def solve_model(
                     )
 
                     if _integer_ratio_enabled():
-                        _ir_model = (
-                            _prereform_model if _prereform_model is not None else model
-                        )
+                        _ir_model = _prereform_model if _prereform_model is not None else model
                         _ir_specs = detect_integer_ratio_specs(_ir_model)
                         if _ir_specs:
                             _mc_lp_relaxer.set_integer_ratio_partitioner(
@@ -5620,9 +5618,7 @@ def solve_model(
                     _ir_best = _ir_sn
             if _ir_best is not None:
                 tree.inject_incumbent(_ir_best[0], float(_ir_best[1]))
-                logger.info(
-                    "integer-ratio witness incumbent injected: obj=%.6g", _ir_best[1]
-                )
+                logger.info("integer-ratio witness incumbent injected: obj=%.6g", _ir_best[1])
         except Exception:  # pragma: no cover - defensive (never blocks the solve)
             logger.debug("integer-ratio witness injection skipped", exc_info=True)
 
