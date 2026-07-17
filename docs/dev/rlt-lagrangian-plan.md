@@ -1,6 +1,9 @@
 # RLT-1 Lagrangian dual — scoping plan (issue #661)
 
-**Status:** scoping / entry-experiment GO. Not yet implemented behind a flag.
+**Status:** implemented behind a default-off flag (`DISCOPT_RLT1_LAGRANGIAN`);
+target-free convergence de-risked on synthetic QAPs. Remaining gate: the qap-scale
+entry experiment on the real instance with the sparse inner oracle (§3), needed
+before default-on.
 **Owner tracking issue:** #661 (qap global dual bound).
 **Prereqs already shipped:** exhaustive RLT-1 root bound (#675), NS-safe rigorous
 return (PR #679), set-partitioning exclusion presolve (PR #679). See
@@ -68,19 +71,33 @@ presolve applied) on synthetic Koopmans–Beckmann QAPs:
 | 7 | 2678.7 (15.8 s)        | 2675.9          | ~100 %    | 200   | 14.6 s   |
 
 The dual **reaches the RLT-1 bound** through ~10²  cheap rigorous inner solves.
-**Two caveats that bound this evidence — the real entry experiment must remove
-both:**
 
-- **Optimistic step rule.** The prototype used a Polyak step
-  `t = (g* − g(μ)) / ‖Cz*‖²` seeded with the *known* target `g*` (the monolithic
-  RLT-1 optimum). In production the target is unknown; a target-free rule (bundle
-  method, or Polyak with an estimated/adaptive target, or diminishing step) will
-  need **more** iterations. Iteration count is the primary risk to quantify.
-- **qap-scale is extrapolated, not measured.** n=7's ~15 s matched monolithic here
-  only because n=7's monolithic is already fast; the advantage is at qap scale
-  where monolithic is >25 min but each inner McCormick solve is ~0.1 s (⇒ ~10²
-  iters ≈ 10–20 s, *if* iteration count holds). qap's real `.nl` is not in the
-  in-repo corpus, so this is unverified.
+**Target-free step rule — de-risked (was the primary open risk).** The prototype
+used a Polyak step seeded with the *known* target `g*`. The shipped implementation
+uses an **adaptive target level** (`level = g_best + δ`, `t = (level − g)/‖s‖²`,
+with `δ` halving on a stall and growing on a run of improvements) — no external
+upper bound, self-tuning from a scale-only initial `δ`. Measured against the
+monolithic RLT-1 optimum on synthetic QAPs (`rlt1_lagrangian_lower_bound`,
+`max_iter=400`): **100 % of the monolithic bound**, sound (≤ true optimum) in every
+case:
+
+| n | monolithic RLT-1 | Lagrangian (target-free) | % | sound |
+|---|------------------|--------------------------|---|-------|
+| 4 | 980.0  | 980.0  | 100 % | ✅ |
+| 5 | 1406.0 | 1406.0 | 100 % | ✅ |
+| 6 | 2518.0 | 2518.0 | 100 % | ✅ |
+| 7 | 2678.7 | 2678.7 | 100 % | ✅ |
+
+A comparison of rules (300-iter budget) confirmed the choice: adaptive-level 100 %
+across the board, Held-Karp-with-UB 97–100 %, plain diminishing only 77–88 %.
+
+**Still open — qap-scale is extrapolated, not measured.** At these small `n` the
+Lagrangian wall-clock (~26 s at n=7) is no better than the monolithic solve,
+because the *inner* solve here uses the exact simplex on a not-yet-huge McCormick
+LP; the advantage is only at qap scale, where the monolithic solve is >25 min but
+each inner McCormick solve is ~0.1 s with the sparse driver (⇒ ~10² iters ≈ 10–40 s
+*if* iteration count holds). qap's real `.nl` is not in the in-repo corpus, so this
+is the remaining gate before default-on (§3).
 
 ## 3. Kill criterion for the implementation stage (§4)
 
@@ -108,14 +125,24 @@ McCormick inner oracle (`DISCOPT_SPARSE_LARGE_LP`) and a **target-free** step ru
 - Default-off flag (`DISCOPT_RLT1_LAGRANGIAN` or fold into the RLT-1 lever);
   graduates only after consecutive nightly-green per §5.
 
-## 5. Implementation sketch (once GO confirmed)
+## 5. Implementation — done (behind `DISCOPT_RLT1_LAGRANGIAN`, default off)
 
-1. Factor `build_rlt1_lp` into `(P_McC, C, c, offset)` (split builder; the
-   prototype already does this) so the coupling matrix is first-class.
-2. `rlt1_lagrangian_lower_bound(...)`: subgradient/bundle loop over the split,
-   each step a sparse McCormick solve + NS-safe bound; return `max_μ g(μ)`.
-3. Target-free step rule + stopping (small residual, stalled improvement, or
-   iteration/time budget). Warm-start `μ` across the loop.
-4. Wire as a candidate in `_root_relaxation_lower_bound` (max), flag-gated.
-5. Tests: differential bound (≥ McCormick, ≤ true opt), no feasible point cut,
-   rigor of each `g(μ)`, eligibility no-ops — mirroring `test_rlt_root_bound.py`.
+1. `build_rlt1_split` (`python/discopt/_jax/rlt.py`) returns `RLT1Split`
+   `(c, A_in, b_in, C, offset, …)` — the inner McCormick polytope `P_McC` and the
+   coupling `C z = 0` as first-class matrices, sharing the eligibility gate,
+   exclusion presolve, pair lift, and objective with `build_rlt1_lp`.
+2. `rlt1_lagrangian_lower_bound(...)`: adaptive-target-level subgradient ascent over
+   the split, each step a sparse McCormick solve made rigorous by
+   `obbt._ns_safe_lp_lower_bound`; returns `max_μ g(μ)`.
+3. Target-free `δ` rule with two-sided adaptation + stopping (residual `‖Cz‖→0`,
+   iteration budget `rlt1_lagrangian_max_iter`, time budget). `μ` carried across
+   the loop.
+4. Wired in `solver.py::_root_relaxation_lower_bound` as a `max` candidate,
+   gated by `SolverTuning.rlt1_lagrangian`.
+5. Tests (`python/tests/test_rlt_root_bound.py`): reaches the monolithic bound and
+   `≤` true optimum; no feasible point cut (`A_in z ≤ b_in ∧ C z = 0` at every
+   assignment); split matches the monolithic feasible region; eligibility no-op
+   without equalities; flag default-off; root-wiring soundness.
+
+**Remaining before default-on:** the §3 qap-scale entry experiment on the real
+instance with the sparse inner oracle, then consecutive nightly-green (§4).

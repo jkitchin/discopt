@@ -23,7 +23,12 @@ from discopt._jax.milp_relaxation import (
     sanitize_relaxation_for_conditioning,
 )
 from discopt._jax.model_utils import binary_flat_cols, flat_variable_bounds
-from discopt._jax.rlt import build_rlt1_lp, rlt1_lower_bound
+from discopt._jax.rlt import (
+    build_rlt1_lp,
+    build_rlt1_split,
+    rlt1_lagrangian_lower_bound,
+    rlt1_lower_bound,
+)
 from discopt._jax.term_classifier import classify_nonlinear_terms
 
 
@@ -290,6 +295,117 @@ def test_rlt1_root_wiring_is_sound_when_enabled():
     model, opt, _ = _synthetic_qap(4, 1)
     lb, ub = flat_variable_bounds(model)
     tok = set_current(SolverTuning(rlt1_root_bound=True))
+    try:
+        bound = _root_relaxation_lower_bound(model, lb, ub, time_limit=30.0)
+    finally:
+        reset_current(tok)
+    assert bound is not None
+    assert bound <= opt + 1e-4
+
+
+# --------------------------------------------------------------------------------
+# RLT-1 Lagrangian dual (issue #661): the same rigorous bound via the dual of the
+# coupling rows, reached without forming the monolithic degenerate LP.
+# --------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("n,seed", [(4, 0), (5, 1)])
+def test_rlt1_lagrangian_reaches_the_monolithic_bound(n, seed):
+    """The Lagrangian dual reaches (essentially) the monolithic RLT-1 optimum and is
+    a rigorous under-estimate of the true optimum (weak duality, any mu)."""
+    model, opt, _ = _synthetic_qap(n, seed)
+    relax, info = _built(model)
+    bvars = binary_flat_cols(model)
+    mono, nrlt = rlt1_lower_bound(model, relax, info, binary_vars=bvars, time_limit=60.0)
+    lag, ncoup = rlt1_lagrangian_lower_bound(
+        model, relax, info, binary_vars=bvars, max_iter=400, time_limit=60.0
+    )
+    assert nrlt > 0 and ncoup > 0
+    assert mono is not None and lag is not None
+    # Rigorous: never crosses the true optimum ...
+    assert lag <= opt + 1e-4
+    # ... and it climbs to the monolithic RLT-1 bound (>= 99 % of it here).
+    assert lag >= 0.99 * mono - 1e-6
+    # Both are the same relaxation, so the Lagrangian cannot exceed the monolithic
+    # optimum by more than solver tolerance.
+    assert lag <= mono + 1e-3
+
+
+@pytest.mark.parametrize("n,seed", [(4, 0), (4, 2)])
+def test_rlt1_lagrangian_bound_le_every_feasible_objective(n, seed):
+    """Feasible-point check: the Lagrangian bound underestimates the objective at
+    every genuine assignment — no valid point is cut."""
+    model, opt, _ = _synthetic_qap(n, seed)
+    relax, info = _built(model)
+    bvars = binary_flat_cols(model)
+    split = build_rlt1_split(model, relax, info, binary_vars=bvars)
+    assert split is not None and split.n_coupling > 0
+    lag, _ = rlt1_lagrangian_lower_bound(
+        model, relax, info, binary_vars=bvars, max_iter=300, time_limit=60.0
+    )
+    assert lag is not None
+    for perm in itertools.permutations(range(n)):
+        x = np.zeros(n * n)
+        for i, k in enumerate(perm):
+            x[i * n + k] = 1.0
+        z = split.pack_point(x)
+        # A genuine assignment satisfies the inner McCormick rows and C z = 0 ...
+        assert np.max(split.A_in @ z - split.b_in) <= 1e-7
+        assert np.max(np.abs(split.C @ z)) <= 1e-7
+        obj = float(split.c @ z + split.offset)
+        assert lag <= obj + 1e-4
+
+
+def test_rlt1_split_matches_monolithic_feasible_region():
+    """The split's inner rows + coupling describe the same lifted feasible set as the
+    monolithic build (same columns, same packed feasible points)."""
+    model, _, _ = _synthetic_qap(4, 3)
+    relax, info = _built(model)
+    bvars = binary_flat_cols(model)
+    prob = build_rlt1_lp(model, relax, info, binary_vars=bvars)
+    split = build_rlt1_split(model, relax, info, binary_vars=bvars)
+    assert prob is not None and split is not None
+    assert prob.cobj.shape[0] == split.nv
+    assert prob.pair_index == split.pair_index
+    np.testing.assert_allclose(prob.cobj, split.c)
+    # Every feasible assignment satisfies both encodings.
+    for perm in itertools.permutations(range(4)):
+        x = np.zeros(16)
+        for i, k in enumerate(perm):
+            x[i * 4 + k] = 1.0
+        z = split.pack_point(x)
+        assert np.max(prob.A_ub @ z - prob.b_ub) <= 1e-7
+        assert np.max(split.A_in @ z - split.b_in) <= 1e-7
+        assert np.max(np.abs(split.C @ z)) <= 1e-7
+
+
+def test_rlt1_lagrangian_no_op_without_equalities():
+    """No equalities -> no coupling rows -> a sound no-op (like the monolithic path)."""
+    m = dm.Model()
+    x = m.binary("x", shape=(3,))
+    m.subject_to(dm.sum([x[i] for i in range(3)]) <= 2)
+    m.minimize(x[0] * x[1] + x[1] * x[2] - x[0] * x[2])
+    relax, info = _built(m)
+    assert build_rlt1_split(m, relax, info, binary_vars=binary_flat_cols(m)) is None
+    lag, ncoup = rlt1_lagrangian_lower_bound(m, relax, info, binary_vars=binary_flat_cols(m))
+    assert lag is None and ncoup == 0
+
+
+def test_rlt1_lagrangian_flag_default_off():
+    """The Lagrangian lever is opt-in: default-off."""
+    from discopt.solver_tuning import SolverTuning
+
+    assert SolverTuning().rlt1_lagrangian is False
+
+
+def test_rlt1_lagrangian_root_wiring_is_sound_when_enabled():
+    """With the Lagrangian flag on, the root bound never crosses the true optimum."""
+    from discopt.solver import _root_relaxation_lower_bound
+    from discopt.solver_tuning import SolverTuning, reset_current, set_current
+
+    model, opt, _ = _synthetic_qap(4, 1)
+    lb, ub = flat_variable_bounds(model)
+    tok = set_current(SolverTuning(rlt1_lagrangian=True))
     try:
         bound = _root_relaxation_lower_bound(model, lb, ub, time_limit=30.0)
     finally:
