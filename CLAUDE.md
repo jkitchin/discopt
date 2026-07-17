@@ -39,7 +39,14 @@ discopt is a hybrid Mixed-Integer Nonlinear Programming (MINLP) solver combining
    - *Bound-changing* (relaxations, cuts, reductions): differential bound test
      (new bound ≥ old bound AND ≤ true box optimum on fixed boxes) plus
      feasible-point sampling (no valid point cut), behind a feature flag,
-     default-off until green on consecutive nightly runs.
+     default-off until a corpus-wide differential panel passes — flag ON vs OFF
+     over the in-repo corpus with `incorrect_count = 0`, no bound above its
+     reference optimum, no certification regression, and incumbents
+     independently feasibility-verified. A passing panel graduates the flag
+     default-ON (keep the `=0` opt-out and the legacy path intact); the nightly
+     panel remains the ongoing regression watch, not a graduation gate.
+     (Policy updated 2026-07-17 by the owner — consecutive-nightly graduation
+     was dropped in favor of the panel gate; first applied to the #309 flags.)
 
 ## Workflow
 
