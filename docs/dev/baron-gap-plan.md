@@ -462,6 +462,44 @@ elsewhere.
    to START another only when a valid bound is already in hand and the fallback's
    own grant is spent — corpus-measured bound-neutral (0/65 bounds changed).
 
+   **UPDATE (2026-07-17, #694 entry experiment — the "floor is irreducible" claim
+   above is now qualified, not overturned).** #694 asks whether the floor is
+   *fundamental* or an *artifact of a monolithic build*: SOTA solvers don't face the
+   fork because their bound accrues continuously (a truncated build still hands back
+   a valid weaker bound). The entry experiment
+   (`issue694-anytime-build-entry-2026-07-17.md`; probes
+   `discopt_benchmarks/scripts/issue694_anytime_build_probe.py` +
+   `issue694_synthetic_proxy.py`) instruments `_Builder.add_row` and solves every
+   10 %-of-rows build **prefix**. **Verdict: the kill criterion is NOT met** — on all
+   6 named controls a finite bound exists by 8 %–21 % of build time (casctanks
+   69 %), and on synthetic proxies matching the class's structure (sonet\*:
+   linear-obj + bilinear-constraint `netdesign`, finite at **11.7 %** then monotone;
+   qap/graphpart: dense-quadratic `clique`, finite at ~40 % then monotone to 28 k
+   rows) the bound **accrues continuously** across deciles. So a build interrupted at
+   a checkpoint *does* yield a valid weaker bound: the §8.1 fork is **dissolvable in
+   principle** for this class, and the "irreducible floor" holds only for the
+   *current* end-of-build materialization, not fundamentally. Two subtleties recorded
+   there: (a) build **order** decides how early the bound turns finite (objective
+   product-envelopes must precede other rows, else −∞ until ~40 %); (b) a truncated
+   (smaller) relaxation is often *more* solvable within budget — hda's full LP
+   `iteration_limit`s while every prefix solves `optimal`, the exact "`plain` is
+   None" mode. **Implementation landed default-OFF** (`DISCOPT_ANYTIME_ROOT_BUILD`):
+   `build_uniform_relaxation` gained a `build_deadline` that stops the constraint-row
+   loop when spent (a valid weaker relaxation), threaded through
+   `build_milp_relaxation` and `solve_at_node`; `_root_relaxation_lower_bound`
+   applies it to the `sep` build only (the base build stays whole — truncating it can
+   trip `objective_bound_valid=False → return None` and LOSE the bound, the rule-1
+   case). OFF is byte-identical (smoke 661 + #654 suite green); tests in
+   `test_issue694_anytime_root_build.py`. **§5 graduation is a run-on-owner's-machine
+   step** (super3t/sonet23v4 are big-corpus-only): flag ON-vs-OFF panel, must-not-
+   regress casctanks 5.698 / super3t −1.0 / sonet23v4 −53974.375, cert-clean +
+   net-positive. Measured caveat: on hda (wide/unbounded cost columns) flag ON returns
+   `None` (sound, honors grant) rather than a weaker bound — the benefit is
+   structure-dependent (retained on clean finite-box #654 structure per the proxies;
+   the constraint row-ordering refinement is the follow-up if the class needs it).
+   §8.1/§8.2 remain un-circumvented: this changes the build's *precondition*, it does
+   not truncate a native solve or add a Rust LP deadline.
+
 ---
 
 ## §9. Task table (verdicts land here)
