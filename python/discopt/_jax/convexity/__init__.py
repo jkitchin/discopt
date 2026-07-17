@@ -23,6 +23,29 @@ Ceccon, Siirola, Misener (2020), "SUSPECT: MINLP special structure
 from __future__ import annotations
 
 from .certificate import certify_convex, refresh_convex_mask
+from .g_convex_cut import (
+    GConvexCut,
+    g_concave_overestimator_cut,
+    g_convex_supporting_cut,
+)
+from .g_convexity import (
+    GConvexCertificate,
+    certify_g_convex,
+    is_g_convex_pointwise,
+    least_convexifying_rho,
+)
+from .g_products_ratios import (
+    ProductRatioGClass,
+    classify_product_ratio,
+    is_product_or_ratio,
+)
+from .g_prop9 import transformation_adds_value
+from .g_transform import (
+    AffineOverestimator,
+    ExpTransform,
+    GTransform,
+    least_convexifying_transform,
+)
 from .lattice import Curvature
 from .log_lattice import (
     LogCurvature,
@@ -41,18 +64,33 @@ from .rules import (
 )
 
 __all__ = [
+    "AffineOverestimator",
     "Curvature",
+    "ExpTransform",
+    "GConvexCertificate",
+    "GConvexCut",
+    "GTransform",
     "LogCurvature",
     "OACutConvexity",
+    "ProductRatioGClass",
     "certify_convex",
+    "certify_g_convex",
     "classify_constraint",
     "classify_expr",
     "classify_log_curvature",
     "classify_model",
     "classify_oa_cut_convexity",
+    "classify_product_ratio",
+    "g_concave_overestimator_cut",
+    "g_convex_supporting_cut",
+    "is_g_convex_pointwise",
+    "is_product_or_ratio",
+    "least_convexifying_rho",
+    "least_convexifying_transform",
     "log_combine_product",
     "log_combine_sum",
     "log_negate",
     "log_scale_pow",
     "refresh_convex_mask",
+    "transformation_adds_value",
 ]

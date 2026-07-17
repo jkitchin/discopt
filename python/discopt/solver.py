@@ -3428,6 +3428,31 @@ def solve_model(
             except Exception as _sc_exc:  # pragma: no cover - defensive
                 logger.debug("structure-cut presolve skipped: %s", _sc_exc)
 
+    # G-convexity transformation-cut presolve (#181, DISCOPT_G_CONVEX_CUTS,
+    # default-OFF). A *bound-changing* capability (CLAUDE.md §5): recognizes
+    # constraint bodies that are G-convex (a strictly larger class than
+    # DCP-convex) and injects rigorously valid linear cuts exposing the
+    # transformed convex shape to the LP relaxation. Gated behind the env flag
+    # and only run when set, so the default solve path is byte-identical. Any
+    # failure is swallowed — the injector can never break a solve.
+    if model._objective is not None:
+        try:
+            from discopt._jax.convexity.g_convex_inject import (
+                g_convex_cuts_enabled,
+                inject_g_convex_cuts,
+            )
+
+            if g_convex_cuts_enabled():
+                _n_gconv = inject_g_convex_cuts(model)
+                if _n_gconv:
+                    logger.info(
+                        "G-convexity cut presolve: injected %d transformation cut(s) "
+                        "(DISCOPT_G_CONVEX_CUTS)",
+                        _n_gconv,
+                    )
+        except Exception as _gc_exc:  # pragma: no cover - defensive
+            logger.debug("g-convex cut presolve skipped: %s", _gc_exc)
+
     # --- Solver-family dispatch ---
     _solver = solver if solver is not None else kwargs.pop("solver", None)
     # Recognised global-solver selectors: ``None`` (default branch-and-bound,

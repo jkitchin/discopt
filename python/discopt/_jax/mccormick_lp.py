@@ -228,6 +228,10 @@ def _append_relax_rows(milp, A_rows, b_rows) -> None:
 # the deadline from receiving a zero/negative budget the backend would reject).
 _SOLVE_DEADLINE_FLOOR_S = 0.05
 
+# Cap on constraints probed per node by the (opt-in, default-OFF) G-convexity
+# separator (#181) — bounds the per-node interval-Hessian certification cost.
+_GCONV_MAX_CONSTRAINTS = 16
+
 # Per-node wall budget for the integer-ratio partition dive (issue #309). The
 # dive runs a handful of piece LPs; this cap keeps a pathological node from
 # stalling the loop (the partitioner also caps its LP count).
@@ -1387,6 +1391,17 @@ class MccormickLPRelaxer:
             _t = time.perf_counter()
             res = self._separate_convex(milp, varmap, res, _deadline)
             _st["convex"] += time.perf_counter() - _t
+            # G-convexity transformation cuts (#181, DISCOPT_G_CONVEX_CUTS,
+            # default-OFF). These are BOX-LOCAL — valid only on this node box, not
+            # globally — so they run ONLY on a regular node solve (``out_cuts is
+            # None``), never a pool-capture solve, guaranteeing they can never be
+            # captured into the inheritable root pool and replayed on a sub-box
+            # (the C-43 / nvs22 false-optimum hazard). They only tighten this
+            # node's LP and are discarded with the per-node ``milp``.
+            if out_cuts is None and self._g_convex_enabled():
+                _t = time.perf_counter()
+                res = self._separate_g_convex(milp, res, node_lb, node_ub, _deadline)
+                _st["gconvex"] = _st.get("gconvex", 0.0) + (time.perf_counter() - _t)
             # PSD (moment) cuts: enforce M = [[1,x^T],[x,X]] >= 0 over fully-lifted
             # cliques. Each cut v^T M v >= 0 is valid for every feasible point
             # (X = x x^T), so adding them only tightens the bound. Skipped under
@@ -1916,6 +1931,135 @@ class MccormickLPRelaxer:
             return res
         except Exception:
             return res
+
+    def _g_convex_enabled(self) -> bool:
+        """Cached read of the ``DISCOPT_G_CONVEX_CUTS`` flag (default OFF)."""
+        v = getattr(self, "_gconv_flag", None)
+        if v is None:
+            try:
+                from discopt._jax.convexity.g_convex_inject import g_convex_cuts_enabled
+
+                v = bool(g_convex_cuts_enabled())
+            except Exception:
+                v = False
+            self._gconv_flag = v
+        return v
+
+    def _gconv_candidate_constraints(self):
+        """Cache of inequality constraints eligible for G-convex separation.
+
+        Scalar-variable models only (so the flat gradient maps 1:1 onto the
+        first ``n_orig`` LP columns); ``<=`` / ``>=`` inequalities with a
+        nonlinear body. Computed once and memoised on ``self``. Returns
+        ``None`` when the model is out of scope (any array variable), which
+        disables the separator entirely.
+        """
+        cached = getattr(self, "_gconv_cands", False)
+        if cached is not False:
+            return cached
+        from discopt.modeling.core import Constraint
+
+        variables = list(self._model._variables)
+        if any(v.size != 1 for v in variables) or len(variables) != self._n_orig:
+            self._gconv_cands = None
+            return None
+        cands = []
+        for c in self._model._constraints:
+            if isinstance(c, Constraint) and c.sense in ("<=", ">="):
+                cands.append(c)
+        self._gconv_cands = cands
+        return cands
+
+    def _separate_g_convex(self, milp, res, node_lb, node_ub, deadline):
+        """Per-node **box-local** G-convexity transformation cuts (#181).
+
+        For each candidate inequality whose body is certified G-convex on THIS
+        node box, add the rigorous transformation cut ``g·x ≤ rhs`` (see
+        :func:`rigorous_g_convex_cut_coeffs`) as a local row of the node LP, then
+        re-solve. The cut is valid only on the node box, so — unlike the
+        globally-valid square/convex/PSD/RLT tangents — it must NEVER enter the
+        inheritable root pool. The caller guarantees this by invoking this method
+        only when ``out_cuts is None`` (a regular node solve, never a
+        pool-capture solve); the box-local rows are used for this one solve and
+        discarded with the per-node ``milp``.
+
+        Sound no-op on any failure or abstention.
+        """
+        try:
+            import scipy.sparse as sp
+
+            from discopt._jax.convexity.g_convex_inject import rigorous_g_convex_cut_coeffs
+            from discopt._jax.convexity.g_convexity import certify_g_convex
+            from discopt._jax.convexity.interval import Interval
+        except Exception:
+            return res
+        cands = self._gconv_candidate_constraints()
+        if not cands:
+            return res
+        if res is None or res.status != "optimal" or res.x is None:
+            return res
+
+        variables = list(self._model._variables)
+        lb = np.asarray(node_lb, dtype=np.float64).ravel()
+        ub = np.asarray(node_ub, dtype=np.float64).ravel()
+        n_orig = self._n_orig
+        if lb.size < n_orig or ub.size < n_orig:
+            return res
+        box = {v: Interval(np.array([lb[i]]), np.array([ub[i]])) for i, v in enumerate(variables)}
+        x = np.asarray(res.x, dtype=np.float64).ravel()
+        x0 = np.clip(x[:n_orig], lb[:n_orig], ub[:n_orig])
+        n_total = len(milp._c)
+
+        def _append(rows, rhs):
+            R = np.asarray(rows, dtype=np.float64)
+            b = np.asarray(rhs, dtype=np.float64)
+            if milp._A_ub is None:
+                milp._A_ub, milp._b_ub = R, b
+            elif sp.issparse(milp._A_ub):
+                milp._A_ub = sp.vstack([milp._A_ub, sp.csr_matrix(R)], format="csr")
+                milp._b_ub = np.concatenate([milp._b_ub, b])
+            else:
+                milp._A_ub = np.vstack([np.asarray(milp._A_ub), R])
+                milp._b_ub = np.concatenate([milp._b_ub, b])
+
+        rows, rhs = [], []
+        for c in cands[:_GCONV_MAX_CONSTRAINTS]:
+            phi = c.body if c.sense == "<=" else -c.body
+            try:
+                cert = certify_g_convex(phi, self._model, box=box)
+            except Exception:
+                cert = None
+            if cert is None or cert.kind != "g_convex" or not (cert.rho > 0.0):
+                continue
+            coeffs = rigorous_g_convex_cut_coeffs(self._model, phi, float(cert.rho), x0, box)
+            if coeffs is None:
+                continue
+            g, b_rhs = coeffs
+            g = np.asarray(g, dtype=np.float64).ravel()
+            if g.size < n_orig or not np.all(np.isfinite(g)):
+                continue
+            # Skip a cut already satisfied with slack at the LP point (adds no
+            # separation) and any ill-conditioned blow-up.
+            if float(np.dot(g[:n_orig], x0)) <= b_rhs - 1e-9:
+                continue
+            if np.any(np.abs(g[:n_orig]) > _LIFT_MAX_CROSS_TERM_ARG_MAGNITUDE):
+                continue
+            row = np.zeros(n_total)
+            row[:n_orig] = g[:n_orig]
+            rows.append(row)
+            rhs.append(float(b_rhs))
+        if not rows:
+            return res
+        _append(rows, rhs)
+        _tl = (
+            None
+            if deadline is None
+            else max(deadline - time.perf_counter(), _SOLVE_DEADLINE_FLOOR_S)
+        )
+        new_res = milp.solve(time_limit=_tl, backend=self._backend)
+        if new_res.status != "optimal" or new_res.objective is None:
+            return res
+        return new_res
 
     def _separate_rlt(self, milp, varmap, res, deadline):
         """Separate targeted RLT (constraint-factor x bound-factor) cuts.
