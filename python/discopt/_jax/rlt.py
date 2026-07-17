@@ -26,9 +26,19 @@ optimum). Every added row is a product of valid model constraints, so the LP
 minimum is a **rigorous lower bound** on the original objective — the certificate
 is preserved (issue #661).
 
-Purely LP-based: no SDP solver. Solved with the exact (vertex) simplex oracle so
-the bound is rigorous. Gated by :class:`~discopt.solver_tuning.SolverTuning`
-(``DISCOPT_RLT1_ROOT_BOUND``, default off) and a size guard.
+Purely LP-based: no SDP solver. Solved with the exact (vertex) simplex oracle;
+the returned bound is the **Neumaier–Shcherbina safe dual bound** built from the
+simplex's own exposed row duals, *not* the raw vertex objective. On an indefinite
+``x'Qx`` the RLT-1 objective has a wide coefficient spread (qap: eig ∈
+[−330k, +953k]), and the reported vertex objective from such an ill-conditioned
+basis can drift a few ``ulp·cond`` *above* the true LP minimum — an over-estimate
+that, surfaced as a lower bound, could prune the global optimum (the nvs22
+false-certificate class, issue #145). The NS bound ``g(y) = −bᵀy + Σⱼ minₓ (c+Aᵀy)ⱼxⱼ``
+satisfies ``g(y) ≤ true LP min`` for *any* ``y ≥ 0`` by weak duality, so it is a
+rigorous under-estimate at **any** conditioning while reproducing the vertex
+objective to within its float margin on well-conditioned solves. Gated by
+:class:`~discopt.solver_tuning.SolverTuning` (``DISCOPT_RLT1_ROOT_BOUND``, default
+off) and a size guard.
 
 Distinct from ``rlt_cuts.py``: that module *separates* individual violated
 constraint×bound-factor RLT cuts per node over the **already-lifted** columns (the
@@ -299,18 +309,25 @@ def rlt1_lower_bound(
     """Rigorous RLT-1 lower bound for a constrained binary QP, or a sound no-op.
 
     Builds the exhaustive RLT-1 LP (:func:`build_rlt1_lp`) and solves it once with
-    the **exact vertex simplex** oracle, so the returned value is a rigorous global
-    lower bound on the minimize objective (``<=`` the true optimum). Returns
-    ``(bound, n_rlt_rows)``; ``bound`` is ``None`` on any ineligibility/failure (a
-    sound no-op) and ``n_rlt_rows`` is the number of RLT product rows added.
+    the **exact vertex simplex** oracle, then returns the **Neumaier–Shcherbina
+    safe dual bound** computed from that solve's exposed row duals — a rigorous
+    global lower bound on the minimize objective (``<=`` the true optimum) at *any*
+    conditioning, rather than the raw vertex objective which can drift above the
+    true LP minimum on the wide-coefficient RLT LP (issue #145 / #661). Returns
+    ``(bound, n_rlt_rows)``; ``bound`` is ``None`` on any ineligibility/failure —
+    including a solve that exposes no usable duals, in which case we decline rather
+    than surface the un-certified vertex objective (a sound no-op) — and
+    ``n_rlt_rows`` is the number of RLT product rows added.
     """
-    from discopt._jax.obbt import get_exact_lp_solver
+    from discopt._jax.obbt import _ns_safe_lp_lower_bound, get_exact_dual_lp_solver
     from discopt.solvers import SolveStatus
 
     prob = build_rlt1_lp(model, relax, info, binary_vars=binary_vars, max_pairs=max_pairs)
     if prob is None:
         return (None, 0)
-    _lp = get_exact_lp_solver()
+    # Prefer the dual-exposing exact oracle: the RLT-1 bound we surface is the
+    # rigorous NS-safe value built from its row duals, not the raw vertex value.
+    _lp = get_exact_dual_lp_solver()
     if _lp is None:
         return (None, 0)
     res = _lp(
@@ -318,4 +335,17 @@ def rlt1_lower_bound(
     )
     if res.status != SolveStatus.OPTIMAL or res.objective is None:
         return (None, prob.n_rlt_rows)
-    return (float(res.objective) + prob.offset, prob.n_rlt_rows)
+    # The RLT-1 LP is assembled entirely as ``A_ub z <= b_ub`` (equalities are split
+    # into two ``<=`` rows by ``build_rlt1_lp``), so ``n_eq = 0`` — every row's dual
+    # clamps to ``>= 0`` in the NS bound. All columns carry finite ``[0, 1]`` bounds,
+    # so no free-column reduced-cost snap is needed (``rc_snap_tol = 0``).
+    lo = np.array([b[0] for b in prob.bounds], dtype=np.float64)
+    hi = np.array([b[1] for b in prob.bounds], dtype=np.float64)
+    g = _ns_safe_lp_lower_bound(
+        prob.cobj, getattr(res, "dual_values", None), prob.A_ub, prob.b_ub, lo, hi, n_eq=0
+    )
+    if g is None or not np.isfinite(g):
+        # No usable duals -> the vertex objective is not certified rigorous on an
+        # ill-conditioned RLT LP; decline rather than risk an over-estimate.
+        return (None, prob.n_rlt_rows)
+    return (float(g) + prob.offset, prob.n_rlt_rows)

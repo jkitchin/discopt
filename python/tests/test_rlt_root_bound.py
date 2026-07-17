@@ -170,6 +170,44 @@ def test_rlt1_bound_le_every_feasible_objective():
         assert bound <= obj + 1e-4
 
 
+def test_rlt1_bound_is_the_ns_safe_value_not_the_raw_vertex():
+    """Soundness (issue #145 / #661): the surfaced RLT-1 bound is the
+    Neumaier-Shcherbina *safe* dual value built from the exact simplex's exposed
+    row duals — a rigorous under-estimate of the LP minimum at any conditioning —
+    not the raw vertex objective, which on a wide-coefficient RLT LP can drift a
+    few ulp *above* the true minimum and, surfaced as a lower bound, prune the
+    optimum. Locks the mechanism: reverting to ``res.objective`` would break this.
+    """
+    from discopt._jax.obbt import _ns_safe_lp_lower_bound, get_exact_dual_lp_solver
+
+    model, opt, _ = _synthetic_qap(4, 0)
+    relax, info = _built(model)
+    prob = build_rlt1_lp(model, relax, info, binary_vars=binary_flat_cols(model))
+    assert prob is not None
+
+    _lp = get_exact_dual_lp_solver()
+    res = _lp(c=prob.cobj, A_ub=prob.A_ub, b_ub=prob.b_ub, bounds=prob.bounds, time_limit=30.0)
+    assert res.status.name == "OPTIMAL" and res.objective is not None
+    vertex = float(res.objective) + prob.offset
+
+    lo = np.array([b[0] for b in prob.bounds])
+    hi = np.array([b[1] for b in prob.bounds])
+    g = _ns_safe_lp_lower_bound(prob.cobj, res.dual_values, prob.A_ub, prob.b_ub, lo, hi, n_eq=0)
+    assert g is not None
+    ns = float(g) + prob.offset
+
+    bound, nrlt = rlt1_lower_bound(
+        model, relax, info, binary_vars=binary_flat_cols(model), time_limit=30.0
+    )
+    assert nrlt > 0 and bound is not None
+    # The surfaced bound IS the NS safe value (mechanism lock) ...
+    assert bound == pytest.approx(ns, abs=1e-9, rel=0.0)
+    # ... which is at or below the raw vertex objective (never above it) ...
+    assert bound <= vertex + 1e-12
+    # ... and a rigorous under-estimate of the true optimum (no false certificate).
+    assert bound <= opt
+
+
 def test_rlt1_no_op_without_equality_constraints():
     """RLT-1 constraint factors need equalities; a purely inequality-constrained
     binary QP yields no RLT-1 LP (a sound no-op)."""

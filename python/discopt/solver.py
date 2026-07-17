@@ -2649,10 +2649,12 @@ def _root_relaxation_lower_bound(
         # RLT level-1 (constraint-factor products) strengthens the root bound on a
         # constrained *binary* QP where McCormick alone is trivially loose (qap:
         # root ~0 vs optimum 388214, issue #661). Each added row is a product of
-        # valid model constraints, solved with the exact vertex simplex, so the RLT
-        # LP minimum is a rigorous lower bound that joins the `max` below — it can
-        # only raise the bound. Opt-in (`DISCOPT_RLT1_ROOT_BOUND`, default off);
-        # any ineligibility/failure is a sound no-op.
+        # valid model constraints; the RLT LP is solved with the exact vertex
+        # simplex and the surfaced value is the Neumaier-Shcherbina *safe* dual
+        # bound from that solve (rigorous at any conditioning, `<=` the true LP
+        # min), so it joins the `max` below — it can only raise the bound. Opt-in
+        # (`DISCOPT_RLT1_ROOT_BOUND`, default off); any ineligibility/failure is a
+        # sound no-op.
         rlt_bound: Optional[float] = None
         _tun = _tuning()
         if getattr(_tun, "rlt1_root_bound", False):

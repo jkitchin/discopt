@@ -344,16 +344,24 @@ class SolverTuning:
     ``X_pp = x_p``). These constraint-factor products couple the lifted variables
     across a whole constraint and tighten a constrained binary QP toward its
     Shor/SDP bound. Purely LP (no SDP solver); solved with the exact vertex simplex,
-    so the bound is **rigorous** and joins ``_root_relaxation_lower_bound``'s
-    candidates via ``max`` — it can only *raise* the bound, never loosen it.
+    and the surfaced value is the **Neumaier-Shcherbina safe dual bound** from that
+    solve — rigorous at *any* conditioning (``<=`` the true LP min for any ``y>=0``
+    by weak duality), not the raw vertex objective, which on the wide-coefficient
+    RLT LP can drift above the true minimum (issue #145). It joins
+    ``_root_relaxation_lower_bound``'s candidates via ``max`` — it can only *raise*
+    the bound, never loosen it.
 
     Sound by construction: each added row is a product of valid model constraints,
     so the RLT LP minimum is a valid lower bound (``<=`` the true optimum) and never
     cuts a feasible point. Measured: qap root 0 -> ~352891 (vs true optimum 388214;
     HiGHS-ipm gauge) and small synthetic Koopmans-Beckmann QAPs 0 -> optimum via the
-    exact oracle. **Default off** because the exact vertex simplex is slow on qap's
-    highly degenerate all-pairs RLT-1 LP (114k rows); it graduates once the exact
-    solve is fast enough at that scale (see docs/dev/sparse-milp-plan.md §RLT1)."""
+    exact oracle. **Default off** because the *rigorous* solve is affordable only up
+    to small/medium ``n``: the exact vertex simplex is fast there (n<=6 QAP in <3 s)
+    but explodes on qap's highly degenerate all-pairs RLT-1 LP (114k rows), and the
+    POUNCE IPM — the only in-house alternative now that HiGHS is removed — does not
+    converge on these LPs (measured: ~25 iters in 90 s on a 2778x666 RLT LP). It
+    graduates once a fast *sparse* rigorous LP oracle exists at that scale (see
+    docs/dev/sparse-milp-plan.md §RLT1)."""
 
     rlt1_max_pairs: int = field(default_factory=lambda: _env_int("DISCOPT_RLT1_MAX_PAIRS", 60_000))
     """Size guard for :attr:`rlt1_root_bound`: skip (sound no-op) when the all-pairs

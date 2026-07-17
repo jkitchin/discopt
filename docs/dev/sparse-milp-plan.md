@@ -366,6 +366,33 @@ structural `0.0` adds exactly, and CSC preserves ascending row order, so `Aᵀy`
     qap scale (an exact IPM / safe Neumaier–Shcherbina bound on the ipm solution is the named
     follow-up), per §5's nightly-green gate.
 
+- [x] **RLT1 follow-up — the surfaced bound is now the rigorous NS-safe dual value, and the
+  "safe NS bound on the IPM solution" graduation path is FALSIFIED for the in-house IPM
+  (issue #661, §4).** Two findings from the entry re-measurement:
+  - **Soundness hardening (shipped):** `rlt1_lower_bound` previously returned the *raw vertex
+    objective* `res.objective + offset`. On the wide-coefficient RLT LP (qap objective eig ∈
+    [−330k, +953k]) that vertex value can sit a few `ulp·cond` *above* the true LP minimum —
+    measured on the synthetic QAPs (n=4: vertex 980.000000000001 vs optimum 980; n=5:
+    +1.8e-12) — an over-estimate that, surfaced as a lower bound, is a latent nvs22-class false
+    certificate (issue #145). Fix: return the **Neumaier–Shcherbina safe dual bound**
+    (`obbt._ns_safe_lp_lower_bound`) built from the exact simplex's *own exposed row duals*
+    (the RLT LP is all `A_ub ≤ b_ub`, so `n_eq=0`; all columns are `[0,1]`, so no
+    reduced-cost snap). It satisfies `g(y) ≤ true LP min` for any `y ≥ 0`, so it is rigorous at
+    **any** conditioning while matching the vertex objective to ~1e-7 on well-conditioned
+    solves (n=4 → 979.99999990, ≤ optimum). New regression
+    `test_rlt1_bound_is_the_ns_safe_value_not_the_raw_vertex` locks the mechanism (fails on the
+    old vertex-objective return, which yields 980.0000000000007 > 980).
+  - **Falsified (record, §4):** the named "safe NS bound on the **IPM** solution" graduation
+    lever assumed a *fast* IPM — HiGHS-ipm's 12.8 s gauge on qap. HiGHS is removed from the
+    LP/MILP path (#356); the only in-house IPM is POUNCE, which (a) densifies `A_ub` and (b)
+    does **not** converge on these massively degenerate RLT LPs — measured **~25 iterations in
+    90 s** on the tiny n=6 RLT LP (2778×666), returning no objective/duals, while the exact
+    vertex simplex solved the same LP in **2.2 s**. So NS-on-POUNCE-IPM is not a graduation
+    path; the exact simplex remains the only rigorous oracle, and it is affordable only up to
+    small/medium `n` (n=7 already ~40 s). **Re-scoped follow-up:** graduation needs a *fast
+    sparse rigorous* LP oracle for degenerate systems (a sparse dual-simplex or a sparse IPM
+    whose duals feed the now-wired NS path), not a post-process on the existing IPM.
+
 ## Problem (measured on qap — a 225-binary Quadratic Assignment Problem)
 
 `solve_milp_py` (the Rust MILP entry) takes a **dense** `a: PyReadonlyArray2`, and
