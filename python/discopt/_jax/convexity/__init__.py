@@ -23,11 +23,23 @@ Ceccon, Siirola, Misener (2020), "SUSPECT: MINLP special structure
 from __future__ import annotations
 
 from .certificate import certify_convex, refresh_convex_mask
+from .g_convex_cut import (
+    GConvexCut,
+    g_concave_overestimator_cut,
+    g_convex_supporting_cut,
+)
 from .g_convexity import (
     GConvexCertificate,
     certify_g_convex,
     is_g_convex_pointwise,
     least_convexifying_rho,
+)
+from .g_prop9 import transformation_adds_value
+from .g_transform import (
+    AffineOverestimator,
+    ExpTransform,
+    GTransform,
+    least_convexifying_transform,
 )
 from .lattice import Curvature
 from .rules import (
@@ -39,8 +51,12 @@ from .rules import (
 )
 
 __all__ = [
+    "AffineOverestimator",
     "Curvature",
+    "ExpTransform",
     "GConvexCertificate",
+    "GConvexCut",
+    "GTransform",
     "OACutConvexity",
     "certify_convex",
     "certify_g_convex",
@@ -48,7 +64,11 @@ __all__ = [
     "classify_expr",
     "classify_model",
     "classify_oa_cut_convexity",
+    "g_concave_overestimator_cut",
+    "g_convex_supporting_cut",
     "is_g_convex_pointwise",
     "least_convexifying_rho",
+    "least_convexifying_transform",
     "refresh_convex_mask",
+    "transformation_adds_value",
 ]

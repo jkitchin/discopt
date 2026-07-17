@@ -45,9 +45,11 @@ import numpy as np
 from discopt.modeling.core import Expression, Model
 
 from .g_convexity import GConvexCertificate, certify_g_convex
+from .g_prop9 import transformation_adds_value
 from .g_transform import ExpTransform
 from .interval import Interval
 from .interval_ad import interval_hessian
+from .lattice import Curvature
 
 
 @dataclass(frozen=True)
@@ -112,6 +114,7 @@ def g_convex_supporting_cut(
     *,
     x0: Optional[np.ndarray] = None,
     cert: Optional[GConvexCertificate] = None,
+    outer_curvature: Optional[Curvature] = None,
     safety: float = 1e-9,
 ) -> Optional[GConvexCut]:
     """Build a valid transformation cut for the intermediate ``φ(x) ≤ t``.
@@ -126,13 +129,23 @@ def g_convex_supporting_cut(
             detector is run on the box. The cut is emitted only for a
             ``g_convex`` verdict (a ``g_concave`` intermediate would need the
             negated construction / an overestimator, not built here).
+        outer_curvature: Curvature of the outer function wrapping ``φ`` in the
+            factorable DAG, if known. When supplied, the Proposition-9 gate
+            (:mod:`g_prop9`) suppresses the cut where the recursive factorable
+            relaxation already captures the G-convexity (convex/affine outer,
+            or concave outer with the convex ``exp`` transform) — avoiding
+            redundant cuts. ``None`` (a bare intermediate) always proceeds.
         safety: Nonnegative RHS relaxation absorbing tangent round-off, as an
             absolute + relative (to the RHS magnitude) margin.
 
     Returns:
         A :class:`GConvexCut`, or ``None`` when ``φ`` is not certified
-        ``g_convex`` on the box or the enclosure is unusable.
+        ``g_convex`` on the box, the Prop-9 gate suppresses it, or the
+        enclosure is unusable.
     """
+    if outer_curvature is not None and not transformation_adds_value(outer_curvature):
+        # Proposition 9: recursive factorable relaxation already captures it.
+        return None
     if cert is None:
         cert = certify_g_convex(expr, model, box=box)
     if cert is None or cert.kind != "g_convex":
@@ -200,4 +213,69 @@ def g_convex_supporting_cut(
     )
 
 
-__all__ = ["GConvexCut", "g_convex_supporting_cut"]
+def g_concave_overestimator_cut(
+    expr: Expression,
+    model: Model,
+    box: Optional[dict] = None,
+    *,
+    x0: Optional[np.ndarray] = None,
+    cert: Optional[GConvexCertificate] = None,
+    outer_curvature: Optional[Curvature] = None,
+    safety: float = 1e-9,
+) -> Optional[GConvexCut]:
+    """Valid transformation cut for a **G-concave** intermediate ``t ≤ φ(x)``.
+
+    This is the mirror of :func:`g_convex_supporting_cut` and the concrete
+    relaxation for **log-concave** intermediates (issue #181, item 6): every
+    positive log-concave ``φ`` is G-concave (``exp(-ρφ)`` is convex for a
+    constant ``ρ = 1/min φ``), so the detector's ``g_concave`` branch
+    recognizes it and this routine relaxes it.
+
+    Construction (negation reduction). ``φ`` G-concave ⟺ ``ψ = -φ`` G-convex
+    with the same ``ρ``. Introduce ``s = -t``; then ``t ≤ φ(x)`` ⟺
+    ``ψ(x) ≤ s``. Applying :func:`g_convex_supporting_cut` to ``ψ`` yields a
+    valid linear cut ``A·x + c_s·s ≤ r``; substituting ``s = -t`` gives the
+    valid overestimator cut ``A·x − c_s·t ≤ r`` for ``{(x,t): t ≤ φ(x)}``.
+
+    Returns a :class:`GConvexCut` whose ``violation(x, t) ≤ 0`` holds for
+    every feasible ``(x, t)`` with ``t ≤ φ(x)`` and ``x`` in the box, or
+    ``None`` when ``φ`` is not certified ``g_concave`` / the enclosure is
+    unusable.
+    """
+    if outer_curvature is not None and not transformation_adds_value(outer_curvature):
+        return None
+    if cert is None:
+        cert = certify_g_convex(expr, model, box=box)
+    if cert is None or cert.kind != "g_concave":
+        return None
+
+    # ψ = -φ is g_convex with the same ρ; reuse the convex-side machinery on
+    # the negated body and pass the equivalent certificate (avoids re-running
+    # the detector and guarantees the same ρ witness).
+    neg_cert = GConvexCertificate("g_convex", float(cert.rho))
+    inner = g_convex_supporting_cut(
+        -expr,
+        model,
+        box=box,
+        x0=x0,
+        cert=neg_cert,
+        safety=safety,
+    )
+    if inner is None:
+        return None
+
+    # Remap s = -t: A·x + c_s·s ≤ r  ⟶  A·x − c_s·t ≤ r.
+    return GConvexCut(
+        x_coeffs=inner.x_coeffs,
+        t_coeff=-inner.t_coeff,
+        rhs=inner.rhs,
+        rho=inner.rho,
+        x0=inner.x0,
+    )
+
+
+__all__ = [
+    "GConvexCut",
+    "g_concave_overestimator_cut",
+    "g_convex_supporting_cut",
+]
