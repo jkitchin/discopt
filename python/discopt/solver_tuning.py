@@ -498,6 +498,26 @@ class SolverTuning:
     oracle-cross 0, cert-loss 0; both-certified nodes 1092 -> 1054). Set
     ``DISCOPT_OBJ_BRANCH_PRIORITY=0`` to restore the old default."""
 
+    sos1_selector_branch: bool = field(
+        default_factory=lambda: _env_flag("DISCOPT_SOS1_SELECTOR_BRANCH", default=False)
+    )
+    """Spatially branch continuous SOS1 selectors before drilling aux-binaries
+    (``DISCOPT_SOS1_SELECTOR_BRANCH``, default OFF; issue #196).
+
+    A continuous one-of-N selector ``s`` (member of a selection row ``Σ s_i = 1``,
+    upper-coupled to a 0/1 indicator by ``s ≤ y``, and in a nonlinear product term)
+    that stays spread across a multi-line box keeps the McCormick bound of the
+    gated products pinned near 0. When on, :func:`_sos1_selector_vars` detects such
+    selectors and the Rust tree branches one spatially (box-midpoint) with
+    precedence, concentrating the selection so a single product is forced positive
+    (ex1252: an ambiguous box's bound 12658 → ~67–83k once a selector is pinned).
+
+    Branch-ORDER metadata only (never a bound/feasibility input), so it cannot
+    change a bound's validity — the midpoint split is a sound cover and its
+    width-halving keeps the search complete. Default OFF pending a corpus
+    differential panel (CLAUDE.md §5, ``incorrect_count = 0`` + net-positive)
+    before any graduation."""
+
     lp_warmstart: bool = field(
         default_factory=lambda: _env_flag("DISCOPT_LP_WARMSTART", default=True)
     )

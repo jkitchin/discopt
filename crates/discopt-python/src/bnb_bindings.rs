@@ -393,6 +393,20 @@ impl PyTreeManager {
         Ok(())
     }
 
+    /// Register continuous SOS1-selector columns for spatial branch precedence
+    /// (issue #196, `DISCOPT_SOS1_SELECTOR_BRANCH`). Empty (the default) keeps the
+    /// legacy branch path byte-identical. Out-of-range indices are ignored.
+    fn set_sos1_selector_cols(&mut self, cols: PyReadonlyArray1<i64>) -> PyResult<()> {
+        let idx: Vec<usize> = cols
+            .as_slice()
+            .unwrap()
+            .iter()
+            .map(|&c| c as usize)
+            .collect();
+        self.inner.set_sos1_selector_cols(&idx);
+        Ok(())
+    }
+
     /// Score branching candidates for a solution vector.
     ///
     /// Returns (var_indices, frac_parts, obs_counts, scores) as four arrays.

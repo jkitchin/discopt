@@ -179,6 +179,15 @@ pub struct TreeManager {
     /// variables against the box-shrink responsiveness ranking. Does not affect
     /// any branching or bounding decision.
     branch_var_counts: Vec<usize>,
+    /// Flat columns of *continuous SOS1 selectors* (issue #196): variables in a
+    /// one-of-N selection row `Σ s_i = 1` with each `s_i ≤` a binary indicator and
+    /// each `s_i` in a nonlinear product term. On a multi-line box the selectors
+    /// stay spread and pin the McCormick bound near 0; branching one spatially (at
+    /// the box midpoint) before the aux-binary MILP is drilled concentrates the
+    /// selection and lifts the node bound. Empty unless registered via
+    /// [`Self::set_sos1_selector_cols`] (gated by `DISCOPT_SOS1_SELECTOR_BRANCH`),
+    /// so this is inert by default and the legacy branch path is byte-identical.
+    sos1_selector_cols: Vec<usize>,
 }
 
 impl TreeManager {
@@ -221,6 +230,7 @@ impl TreeManager {
             bound_unresolved: false,
             unresolved_floor: f64::INFINITY,
             branch_var_counts: vec![0; n_vars],
+            sos1_selector_cols: Vec::new(),
         }
     }
 
@@ -263,6 +273,60 @@ impl TreeManager {
                 self.branch_deprioritized[c] = true;
             }
         }
+    }
+
+    /// Register continuous SOS1-selector columns (issue #196). Out-of-range
+    /// indices are ignored. Empty (the default) disables the selector spatial
+    /// branch entirely, keeping the legacy branch path byte-identical.
+    pub fn set_sos1_selector_cols(&mut self, cols: &[usize]) {
+        self.sos1_selector_cols = cols
+            .iter()
+            .copied()
+            .filter(|&c| c < self.global_lb.len())
+            .collect();
+    }
+
+    /// Pick a continuous SOS1 selector to branch spatially at this node, or
+    /// `None` when none is registered or none is still wide enough to split
+    /// (issue #196). Selects the registered selector with the largest relative
+    /// remaining width (current / root), skipping any below `SOS1_MIN_REL_WIDTH`
+    /// — the same completeness floor the general spatial brancher uses, so the
+    /// midpoint split (which halves the selector width each level) disables this
+    /// hint after finitely many splits and the standard selector then resumes.
+    /// The returned decision branches at the box midpoint, so
+    /// [`create_children_spatial`] partitions `[lb, ub]` into `[lb, mid]` and
+    /// `[mid, ub]` — a sound cover of the parent regardless of the LP point.
+    fn select_sos1_spatial(&self, node_id: NodeId) -> Option<BranchDecision> {
+        const SOS1_MIN_REL_WIDTH: f64 = 1e-6;
+        if self.sos1_selector_cols.is_empty() {
+            return None;
+        }
+        let node = self.pool.get(node_id);
+        let (lb, ub) = (&node.lb, &node.ub);
+        let mut best_idx: Option<usize> = None;
+        let mut best_width = SOS1_MIN_REL_WIDTH;
+        for &idx in &self.sos1_selector_cols {
+            if idx >= lb.len() {
+                continue;
+            }
+            let gwidth = self.global_ub[idx] - self.global_lb[idx];
+            // A non-positive (or NaN) global width is not branchable; a NaN falls
+            // through here and is filtered by the ``rel_width.is_finite()`` check
+            // below. (Written as ``<=`` rather than ``!(.. > ..)`` for clippy's
+            // ``neg_cmp_op_on_partial_ord``.)
+            if gwidth <= 1e-15 {
+                continue;
+            }
+            let rel_width = (ub[idx] - lb[idx]) / gwidth;
+            if rel_width.is_finite() && rel_width > best_width {
+                best_width = rel_width;
+                best_idx = Some(idx);
+            }
+        }
+        best_idx.map(|idx| BranchDecision {
+            var_index: idx,
+            branch_point: 0.5 * (lb[idx] + ub[idx]),
+        })
     }
 
     /// Allocate a fresh NodeId.
@@ -446,6 +510,32 @@ impl TreeManager {
                     // branch direction remains, the no-decision arm below
                     // fathoms it into `unresolved_floor` (#598).
                 }
+            }
+
+            // 2b. Continuous SOS1 selector spatial branch (issue #196,
+            // `DISCOPT_SOS1_SELECTOR_BRANCH`). A one-of-N selector row
+            // `Σ s_i = 1` (each `s_i ≤` a binary indicator, each in a product
+            // term) that is still spread across a multi-line box keeps that box's
+            // McCormick bound pinned near 0. Branching a selector spatially at the
+            // box midpoint concentrates the selection *before* the aux-binary MILP
+            // is drilled — measured on ex1252: an ambiguous box's bound
+            // 12658 → ~67–83k once one selector is pinned. Taking precedence over
+            // integer/pseudocost branching is order-only, so it can never affect a
+            // bound's validity; `create_children_spatial` partitions `[lb, ub]`
+            // into `[lb, mid]`/`[mid, ub]` (sound cover) and the midpoint halving
+            // + `SOS1_MIN_REL_WIDTH` floor bound the extra depth (complete). When
+            // no selector is registered (flag off / structure absent) this is a
+            // no-op and the legacy branch path below runs unchanged.
+            if let Some(sos1_decision) = self.select_sos1_spatial(result.node_id) {
+                let parent = self.pool.get(result.node_id).clone();
+                self.pool.get_mut(result.node_id).status = NodeStatus::Branched;
+                let (left, right) =
+                    create_children_spatial(&parent, &sos1_decision, || self.next_id());
+                self.pool.add(left);
+                self.pool.add(right);
+                stats.branched += 1;
+                self.record_branch_var(sos1_decision.var_index);
+                continue;
             }
 
             // 3. Branch: use hint if available, else pseudocost/most-fractional.
