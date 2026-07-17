@@ -13929,6 +13929,7 @@ def _solve_milp_simplex(
     if initial_point is not None and np.asarray(initial_point).size == n_orig:
         _seed = np.ascontiguousarray(np.asarray(initial_point, dtype=np.float64).ravel())
 
+    _t_run1 = time.perf_counter()
     status, x_struct, obj, bound, nodes, _lp_iters = solve_milp_py(
         np.ascontiguousarray(lp_data.c, dtype=np.float64),
         A,
@@ -13944,20 +13945,41 @@ def _solve_milp_simplex(
         time_limit_s=float(_milp_budget),
         debug_hook=_debug.rust_hook(),
     )
-    # (#280) The engine stopped with an uncertified incumbent and the user's
-    # budget is not spent (``_milp_budget`` is a *stall* bound, deliberately a
-    # slice of the limit — see above). On assignment-structured models that
-    # incumbent is typically stuck: the swap below is the move that escapes it.
-    # Re-enter the engine seeded with the improved point and keep the result only
-    # when it is strictly better in the engine's own (min-normalized) objective,
-    # so this can never worsen the answer. The seed is re-validated and re-scored
-    # by the driver, so soundness does not rest on the heuristic.
+    # The engine came back with a real incumbent but no certificate, and the
+    # user's budget is not spent. ``_milp_budget`` is a *stall* bound (#291) — it
+    # exists to defer quickly to the robust fallback when the engine wedges — but
+    # an engine that produced an incumbent is demonstrably not wedged, and this
+    # branch RETURNS rather than falling back, so the rest of the budget is
+    # otherwise just discarded (at time_limit=40 the engine used ~10 s and
+    # returned uncertified; #698). Spend it instead, on two levers:
+    #
+    #   (a) primal — an assignment-aware swap over the pre-lift model, which is
+    #       what escapes a stuck one-hot incumbent (#280);
+    #   (b) dual — simply more search. The engine is monotone in its budget
+    #       (measured on graphpart_3pm-0334-0334: bound -54.0 / -50.0 / -40.5 /
+    #       -38.25 at 2.5 / 5 / 10 / 20 s), so a longer re-entry tightens the
+    #       bound and can certify.
+    #
+    # The first slice stays bounded either way: it keeps #291's stall deferral
+    # intact AND leaves room for (a) — handing run 1 the whole budget instead
+    # starves the swap and is strictly worse (measured).
     if status == "feasible":
+        _run1_spent_slice = (time.perf_counter() - _t_run1) >= _milp_budget - 0.05
         _rem = float(time_limit) - (time.perf_counter() - t_start)
         _seed2 = _one_hot_swap_reseed(model, np.asarray(x_struct, dtype=np.float64), _rem)
-        if _seed2 is not None:
-            _rem = float(time_limit) - (time.perf_counter() - t_start)
-            _budget2 = min(max(0.5, _rem - 0.2), _SIMPLEX_MILP_BUDGET_CAP_S)
+        _rem = float(time_limit) - (time.perf_counter() - t_start)
+        # Re-enter when the swap improved the point (even a short re-entry pays:
+        # the seed is better), or when there is genuinely more time than run 1
+        # had — otherwise a re-entry restarts the tree with less budget than run 1
+        # and cannot beat it, so it would only burn wall for nothing.
+        _more_time = _run1_spent_slice and _rem > _milp_budget + 0.5
+        if (_seed2 is not None or _more_time) and _rem > 0.7:
+            _seed_run2 = _seed2
+            if _seed_run2 is None:
+                _seed_run2 = np.asarray(x_struct, dtype=np.float64)[:n_orig]
+            # Uncapped: this is the user's own remaining budget, and no fallback
+            # is being starved — this branch returns its result directly.
+            _budget2 = max(0.5, _rem - 0.2)
             _s2, _x2, _o2, _b2, _n2, _ = solve_milp_py(
                 np.ascontiguousarray(lp_data.c, dtype=np.float64),
                 A,
@@ -13969,23 +13991,37 @@ def _solve_milp_simplex(
                 float(lp_data.obj_const),
                 int(max_nodes),
                 float(gap_tolerance),
-                initial_incumbent=np.ascontiguousarray(_seed2, dtype=np.float64),
+                initial_incumbent=np.ascontiguousarray(_seed_run2, dtype=np.float64),
                 time_limit_s=float(_budget2),
                 debug_hook=_debug.rust_hook(),
             )
-            if _s2 in ("optimal", "feasible") and np.isfinite(_o2) and _o2 < obj - 1e-9:
-                # Both runs' bounds are valid lower bounds in min-normalized
-                # space, so keeping the tighter one is sound.
-                _bound_new = _b2
-                if np.isfinite(bound) and np.isfinite(_b2):
-                    _bound_new = max(bound, _b2)
-                elif not np.isfinite(_b2):
-                    _bound_new = bound
-                logger.info(
-                    "MILP one-hot swap reseed improved the incumbent: %.6g -> %.6g", obj, _o2
-                )
-                status, x_struct, obj, bound = _s2, _x2, _o2, _bound_new
-                nodes += _n2
+
+            # Both runs' bounds are valid lower bounds on the same problem in
+            # min-normalized space, so keeping the tighter is sound (and can only
+            # sit below any feasible incumbent's objective).
+            def _tighter(_b_old, _b_new):
+                if not np.isfinite(_b_new):
+                    return _b_old
+                return _b_new if not np.isfinite(_b_old) else max(_b_old, _b_new)
+
+            if _s2 in ("optimal", "feasible") and np.isfinite(_o2):
+                if _o2 < obj - 1e-9:
+                    # Strictly better incumbent: take run 2's point wholesale.
+                    logger.info("MILP re-entry improved the incumbent: %.6g -> %.6g", obj, _o2)
+                    status, x_struct, obj = _s2, _x2, float(_o2)
+                    bound = _tighter(bound, _b2)
+                    nodes += _n2
+                elif _s2 == "optimal" and abs(float(_o2) - obj) <= 1e-9:
+                    # Same incumbent, now proved optimal — the certificate the
+                    # discarded budget was costing us.
+                    logger.info("MILP re-entry certified the incumbent: %.6g", obj)
+                    status = "optimal"
+                    bound = _tighter(bound, _b2)
+                    nodes += _n2
+                else:
+                    # No primal gain; still bank any dual progress.
+                    bound = _tighter(bound, _b2)
+                    nodes += _n2
 
     wall_time = time.perf_counter() - t_start
     maximize = model._objective is not None and model._objective.sense == ObjectiveSense.MAXIMIZE
