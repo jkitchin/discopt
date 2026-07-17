@@ -173,6 +173,31 @@ class SolverTuning:
     )
     """Trilinear RLT rows (``DISCOPT_TRILINEAR_RLT``, default on)."""
 
+    integer_multilinear_reform: bool = field(
+        default_factory=lambda: _env_flag("DISCOPT_INTEGER_MULTILINEAR_REFORM", default=False)
+    )
+    """Flow-aware exact linearization of *integer-multilinear* products — products
+    of >=3 variable factors where every factor but at most one is integer- or
+    binary-valued (declared or implied), e.g. ``(c + k*x_cont)*x_i*x_j*x_ind`` with
+    ``x_i,x_j`` integer flow factors and ``x_ind`` a 0/1 indicator
+    (``DISCOPT_INTEGER_MULTILINEAR_REFORM``, default **off**; issue #707).
+
+    Each integer factor is binary-expanded (``x = lo + sum 2^k e_k``) and the
+    resulting product of binaries is lifted to its **exact** hull — an n-ary AND
+    (``z <= e_i``, ``z >= sum e_i - (n-1)``, ``z`` binary) for the pure-integer
+    monomials, plus one big-M product (``v = e*x_cont``) for the single continuous
+    factor. The rewrite is a value-preserving algebraic identity; only the
+    *relaxation* changes (the loose term-wise trilinear McCormick envelope over the
+    continuous box is replaced by the per-integer-level exact envelope), so it is
+    sound and can only tighten the dual bound. Unlike the pure-bilinear integer
+    reform (which is adopted only when it yields a pure MILP), this pass is retained
+    on the spatial branch-and-bound path when residual *continuous* nonlinearity
+    remains — the tightening of the integer-multilinear terms is a strict gain there
+    (ex1252: lifts the SOS1-selector-branch dual bound off its 5134 floor).
+
+    Bound-changing (CLAUDE.md §5): default-off behind this flag until a corpus-wide
+    differential panel graduates it."""
+
     # --- McCormick separation toggles -----------------------------------------
     square_separate: bool = field(
         default_factory=lambda: _env_flag("DISCOPT_SQUARE_SEPARATE", default=True)

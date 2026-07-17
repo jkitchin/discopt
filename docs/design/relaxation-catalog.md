@@ -214,6 +214,18 @@ functions that already had relaxations + IR support are writable from native Pyt
   factors fall back to recursive McCormick; `edge-concave` underestimators (Tardella; an
   alternative tighter family for some structures) are not generated; and the cuts are added
   densely rather than separated on demand (a cut-on-violation loop would scale to higher n).
+- **Integer-multilinear exact envelope (issue #707, `DISCOPT_INTEGER_MULTILINEAR_REFORM`,
+  default off).** The continuous multilinear hull above is still loose when the factors are
+  *integer/binary-valued* (declared or implied): the exact continuous hull over the box
+  `[0,3]²×[0,1]` need not be tight at the integer lattice. For a product of ≥3 factors where
+  every factor but at most one is integer/binary, `integer_product_reform.py` binary-expands
+  each integer factor and lifts the resulting binary monomials to their exact hull (n-ary
+  AND + one big-M product for the lone continuous factor) — the per-integer-level envelope,
+  a value-preserving algebraic identity. This generalizes the integer-*bilinear* pass to the
+  trilinear/multilinear case (ex1252's `(c+1800·x15)·x0·x3·x18` objective, lifting its dual
+  bound off the 5134 floor). Unlike the bilinear pass it is retained on the spatial path when
+  residual *continuous* nonlinearity remains. Bound-changing → default-off pending the §5
+  differential panel.
 - **α-BB now wired in (resolved sub-item):** auto-dispatched as a fallback and selectable
   via `arithmetic="alphabb"`, with a rigorous interval-Hessian α.
 - **No automatic relaxation tightening loop:** `obbt.py` and nonlinear bound tightening

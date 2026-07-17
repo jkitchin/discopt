@@ -4510,6 +4510,67 @@ def solve_model(
         # to certify do we clear and fall back to spatial B&B (see the convex
         # fast-path block below).
 
+    # --- Integer-multilinear exact reformulation (issue #707, DISCOPT_INTEGER_MULTILINEAR_REFORM) ---
+    # A generalization of the integer-bilinear pass below to products of >=3
+    # variable factors where every factor but at most one is integer/binary-valued
+    # (declared or implied), e.g. ex1252's objective ``(c + 1800*x15)*x0*x3*x18``
+    # with integer flow factors ``x0,x3 in {0..3}`` and a 0/1 indicator ``x18``.
+    # Binary-expanding the integer factors and lifting the resulting binary product
+    # to its exact hull (n-ary AND + one big-M product for the lone continuous
+    # factor) replaces the loose term-wise trilinear McCormick envelope over the
+    # continuous box with the per-integer-level exact envelope. Unlike the
+    # bilinear pass, the result is retained even when residual *continuous*
+    # nonlinearity remains (ex1252's continuous cubic cost rows) — the tightening
+    # of the integer-multilinear terms is a strict, sound gain on the spatial path.
+    _did_multilinear_reform = False
+    try:
+        if _tuning().integer_multilinear_reform:
+            from discopt._jax.integer_product_reform import (
+                extend_initial_point as _iml_extend,
+                has_integer_multilinear_reformulation_work,
+                reformulate_integer_multilinear,
+            )
+
+            if has_integer_multilinear_reformulation_work(model):
+                _iml = reformulate_integer_multilinear(model)
+                if _iml is not model:
+                    from discopt._jax.problem_classifier import ProblemClass, classify_problem
+                    from discopt._jax.term_classifier import classify_nonlinear_terms
+
+                    _did_multilinear_reform = True
+                    # Does the reform eliminate *all* nonlinearity (pure MILP)? Then
+                    # route to the MILP engine as the bilinear pass does; otherwise
+                    # keep the reformed model on the spatial B&B path (still tighter).
+                    _iml_nl = classify_nonlinear_terms(_iml)
+                    _iml_pure_milp = not (
+                        _iml_nl.bilinear
+                        or _iml_nl.trilinear
+                        or _iml_nl.multilinear
+                        or _iml_nl.monomial
+                        or _iml_nl.fractional_power
+                        or _iml_nl.bilinear_with_fp
+                        or _iml_nl.ratio_of_products
+                        or _iml_nl.general_nl
+                    )
+                    model = _iml
+                    model._convexity_classification_cache = None
+                    clear_declared_box_cache(model)
+                    model._convexity_time_budget = _convexity_time_budget
+                    model._solve_deadline = _solve_t0 + float(time_limit)
+                    if _iml_pure_milp and classify_problem(_iml) == ProblemClass.MILP:
+                        presolve = False
+                        if nlp_solver == "pounce" and not _p3_force_cut_path_enabled():
+                            nlp_solver = "simplex"
+                    # Extend a user warm start over the appended aux columns so the
+                    # (longer) reformed vector is not silently dropped. Purely primal:
+                    # the driver re-validates it, so it never affects the dual bound.
+                    if initial_point is not None:
+                        _iml_x0 = _iml_extend(model, initial_point)
+                        if _iml_x0 is not None:
+                            initial_point = _iml_x0
+    except Exception as _iml_exc:  # pragma: no cover - defensive
+        logger.debug("integer-multilinear reformulation skipped: %s", _iml_exc)
+
     # --- Integer-bilinear exact reformulation ---
     # When a bilinear term ``x_i*x_j`` has an integer (declared or implied)
     # factor, binary-expand it and big-M-linearize the resulting binary*var
@@ -4535,7 +4596,7 @@ def solve_model(
         # the MIQP-batch certification path). This witness is far cheaper than a
         # full convexity classification (~6s on ex1263), so the common path and
         # the reformulated path both stay fast.
-        if has_nonconvex_integer_bilinear(model):
+        if not _did_multilinear_reform and has_nonconvex_integer_bilinear(model):
             _ipx = reformulate_integer_bilinear(model)
             # Adopt the reformulation ONLY when it eliminates *all* nonlinearity,
             # i.e. yields an equivalent pure MILP. If other nonlinear terms remain

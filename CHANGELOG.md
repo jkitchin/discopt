@@ -12,6 +12,33 @@ The release procedure that produces these entries is documented in
 
 ### Added
 
+- **Flow-aware integer-multilinear envelope** (`feat`, #707, default-off behind
+  `DISCOPT_INTEGER_MULTILINEAR_REFORM`). Generalizes the integer-*bilinear* exact
+  reformulation to products of ≥3 variable factors where every factor but at most
+  one is integer- or binary-valued (declared or *implied*) — e.g. ex1252's
+  objective `(6329.03 + 1800·x15)·x0·x3·x18` with integer flow factors
+  `x0,x3 ∈ {0..3}` and a 0/1 indicator `x18`. Each integer factor is
+  binary-expanded (`x = lo + Σ 2ᵏ eₖ`), the product distributed into binary
+  monomials (`e² = e`), and each monomial lifted to its **exact** hull: an n-ary
+  AND (`z ≤ eᵢ`, `z ≥ Σ eᵢ − (n−1)`, `z` binary) for the pure-integer part plus one
+  big-M product for the lone continuous factor. The rewrite is a value-preserving
+  algebraic identity (verified to ~1e-9 over sampled points), so it can only
+  tighten — never invalidate — the dual bound; it replaces the loose term-wise
+  trilinear McCormick envelope over the continuous box with the per-integer-level
+  exact envelope. Unlike the bilinear pass (adopted only when it yields a pure
+  MILP), this pass is **kept on the spatial B&B path** when residual *continuous*
+  nonlinearity remains, since the integer-term tightening is a strict gain there.
+  On ex1252 this lifts the global dual bound off its structural **5134** floor
+  (the plateau the term-wise envelope and SOS1-selector branching both stall at)
+  to ~32k in 45 s and climbing; the structure is general (present in 8 of the 81
+  in-repo MINLPLib instances: ex1252/ex1252a, nvs01/05/16/22, st_e36/e40). The
+  flag is default-off pending the CLAUDE.md §5 differential-panel graduation; the
+  default (flag-off) path is byte-identical (the bilinear reform and its blowup
+  guard are untouched). Full end-to-end certification of ex1252 additionally
+  requires closing a *separate* residual barrier — the continuous cubic cost rows
+  `x15 = f(x6, x12)` — which spatial branching, not this envelope, must tighten;
+  recorded in the issue.
+
 - **GP-structured MINLP: y-space node relaxations + integer branch-and-bound**
   (`feat`, #116). A MINLP whose *continuous relaxation* is a geometric program
   (posynomial objective, `posynomial ≤ monomial` / `monomial == monomial`
