@@ -246,3 +246,26 @@ def test_gear4_both_flags_with_witness_injection_near_root_solve(monkeypatch):
     assert res.bound <= res.objective + 1e-6
     assert res.gap_certified
     assert res.node_count <= 50
+
+
+@pytest.mark.slow
+def test_gear4_default_path_certifies_in_a_handful_of_nodes(monkeypatch):
+    """#309 acceptance guard on the GRADUATED DEFAULT path (both flags default-ON
+    since 2026-07-16, PR #676). The other slow gear4 solves force the flags on via
+    ``setenv(..., "1")``; this one asserts nothing about the environment and relies
+    solely on the shipped defaults, so a silent default flip (or a break in the
+    default wiring) that left the forced-on tests green would still fail here.
+
+    Measured on the default path: 3 nodes / <1 s certified (legacy path with both
+    flags OFF: 4281 nodes / ~35 s). The ceiling of 50 guards the graduated behavior
+    with generous headroom, not an exact count; a soundness-preserving change may
+    move the exact node count."""
+    # Make the default explicit: no override in the environment for either flag.
+    monkeypatch.delenv("DISCOPT_INTEGER_RATIO_PARTITION", raising=False)
+    monkeypatch.delenv("DISCOPT_NS_SHARP_MARGIN", raising=False)
+    m = _gear4()
+    res = m.solve(time_limit=150, gap_tolerance=1e-4)
+    assert res.objective == pytest.approx(GEAR4_OPT, abs=1e-4)
+    assert res.bound <= res.objective + 1e-6  # certificate invariant (min sense)
+    assert res.gap_certified
+    assert res.node_count <= 50
