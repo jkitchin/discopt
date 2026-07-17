@@ -132,14 +132,69 @@ def _corner_maxima(terms, u_lb, u_ub):
     return sec_plus, sec_minus
 
 
-def signed_signomial_dc_envelope(u, terms, u_lb, u_ub):
+def _secant_overestimators(u, terms, u_lb, u_ub):
+    """Tighter *sloped-affine* overestimators ``SEC[Pplus]``, ``SEC[Pminus]``.
+
+    This is the KMS 2012 §4 term-wise transforming-function overestimator
+    (issue #181, item 4), strictly tighter than the constant corner-maximum.
+    Each monomial in the log domain is ``m_k(u) = exp(xi_k)`` with the affine
+    argument ``xi_k(u) = log_c_k + a_k . u`` ranging over
+    ``[xi_lo_k, xi_hi_k]`` on the box. The chord (secant) of the convex
+    ``exp`` over that interval,
+
+        chord_k(u) = exp(xi_lo_k)
+                     + (exp(xi_hi_k) - exp(xi_lo_k)) / (xi_hi_k - xi_lo_k)
+                       * (xi_k(u) - xi_lo_k),
+
+    dominates ``exp(xi_k)`` on ``[xi_lo_k, xi_hi_k]`` (chord above a convex
+    function) and is **affine in ``u``**. Summing the chords of a posynomial
+    part gives a valid affine overestimator of it. Because the chord touches
+    ``exp`` at both endpoints and lies strictly below the constant endpoint
+    maximum in the interior, this is a genuinely tighter (never looser)
+    overestimator than :func:`_corner_maxima`.
+
+    Returns ``(sec_plus, sec_minus)`` evaluated at ``u`` (sloped-affine values).
+    """
+    u = jnp.asarray(u)
+    u_lb = jnp.asarray(u_lb)
+    u_ub = jnp.asarray(u_ub)
+    sec_plus = jnp.asarray(0.0)
+    sec_minus = jnp.asarray(0.0)
+    for sigma, log_c, exps in terms:
+        exps = jnp.asarray(exps)
+        log_c = jnp.asarray(log_c)
+        # Range of the affine argument xi_k = log_c + a_k . u over the box:
+        # min/max of a linear form are attained at the sign-matched corners.
+        lin_lo = jnp.dot(jnp.where(exps >= 0.0, exps, 0.0), u_lb) + jnp.dot(
+            jnp.where(exps < 0.0, exps, 0.0), u_ub
+        )
+        lin_hi = jnp.dot(jnp.where(exps >= 0.0, exps, 0.0), u_ub) + jnp.dot(
+            jnp.where(exps < 0.0, exps, 0.0), u_lb
+        )
+        xi_lo = log_c + lin_lo
+        xi_hi = log_c + lin_hi
+        xi = log_c + jnp.dot(exps, u)
+        e_lo = jnp.exp(xi_lo)
+        e_hi = jnp.exp(xi_hi)
+        width = xi_hi - xi_lo
+        # Degenerate width (monomial constant over the box): chord is the
+        # point value with zero slope. Guard the division so it stays finite.
+        safe_width = jnp.where(width > 0.0, width, 1.0)
+        slope = jnp.where(width > 0.0, (e_hi - e_lo) / safe_width, 0.0)
+        chord_k = e_lo + slope * (xi - xi_lo)
+        sec_plus = jnp.where(jnp.asarray(sigma) > 0.0, sec_plus + chord_k, sec_plus)
+        sec_minus = jnp.where(jnp.asarray(sigma) > 0.0, sec_minus, sec_minus + chord_k)
+    return sec_plus, sec_minus
+
+
+def signed_signomial_dc_envelope(u, terms, u_lb, u_ub, *, overestimator="corner"):
     """Certified DC convex/concave envelope of a signed signomial in log domain.
 
     Computes the difference-of-convex relaxation described in the module
     docstring at the lifted point ``u`` over the box ``[u_lb, u_ub]``:
 
-        cv(u) = Pplus(u)  - max_corner Pminus     # convex,  cv <= s
-        cc(u) = max_corner Pplus - Pminus(u)      # concave, cc >= s
+        cv(u) = Pplus(u)  - SEC[Pminus]     # convex,  cv <= s
+        cc(u) = SEC[Pplus] - Pminus(u)      # concave, cc >= s
 
     Parameters
     ----------
@@ -150,6 +205,15 @@ def signed_signomial_dc_envelope(u, terms, u_lb, u_ub):
         ``exps`` an array ``a_k`` of shape ``(n,)``.
     u_lb, u_ub : arrays of shape (n,)
         Lower/upper bounds of the ``u``-box.
+    overestimator : {"corner", "secant"}, optional
+        Which affine overestimator ``SEC[P]`` to use. ``"corner"`` (default)
+        is the constant corner-maximum :func:`_corner_maxima` — unchanged
+        legacy behavior, bound-neutral for existing callers. ``"secant"`` is
+        the tighter KMS 2012 §4 per-monomial sloped-affine chord
+        :func:`_secant_overestimators` (issue #181, item 4). The secant
+        option only ever *tightens* (``cv`` up, ``cc`` down); it is a
+        bound-changing option and therefore opt-in, default-off, pending the
+        CLAUDE.md §5 graduation panel before any default flip.
 
     Returns
     -------
@@ -159,7 +223,12 @@ def signed_signomial_dc_envelope(u, terms, u_lb, u_ub):
         ``cv(u) <= s(u) <= cc(u)`` on the box.
     """
     p_plus, p_minus = _posynomial_parts(u, terms)
-    sec_plus, sec_minus = _corner_maxima(terms, u_lb, u_ub)
+    if overestimator == "secant":
+        sec_plus, sec_minus = _secant_overestimators(u, terms, u_lb, u_ub)
+    elif overestimator == "corner":
+        sec_plus, sec_minus = _corner_maxima(terms, u_lb, u_ub)
+    else:
+        raise ValueError(f"overestimator must be 'corner' or 'secant', got {overestimator!r}")
     cv = p_plus - sec_minus
     cc = sec_plus - p_minus
     return cv, cc

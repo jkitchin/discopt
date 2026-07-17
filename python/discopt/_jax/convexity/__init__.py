@@ -34,6 +34,11 @@ from .g_convexity import (
     is_g_convex_pointwise,
     least_convexifying_rho,
 )
+from .g_products_ratios import (
+    ProductRatioGClass,
+    classify_product_ratio,
+    is_product_or_ratio,
+)
 from .g_prop9 import transformation_adds_value
 from .g_transform import (
     AffineOverestimator,
@@ -58,15 +63,18 @@ __all__ = [
     "GConvexCut",
     "GTransform",
     "OACutConvexity",
+    "ProductRatioGClass",
     "certify_convex",
     "certify_g_convex",
     "classify_constraint",
+    "classify_product_ratio",
     "classify_expr",
     "classify_model",
     "classify_oa_cut_convexity",
     "g_concave_overestimator_cut",
     "g_convex_supporting_cut",
     "is_g_convex_pointwise",
+    "is_product_or_ratio",
     "least_convexifying_rho",
     "least_convexifying_transform",
     "refresh_convex_mask",

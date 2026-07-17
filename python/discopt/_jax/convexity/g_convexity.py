@@ -78,9 +78,11 @@ import numpy as np
 
 from discopt.modeling.core import Expression, Model
 
+from .certificate import certify_convex
 from .eigenvalue import gershgorin_lambda_max, gershgorin_lambda_min
 from .interval import Interval
 from .interval_ad import interval_hessian
+from .lattice import Curvature
 
 # Tolerance for accepting "λ ≥ 0" / "λ ≤ 0" despite floating-point slop,
 # matching the ordinary convexity certificate (:mod:`certificate`). The
@@ -375,9 +377,17 @@ def certify_g_convex(
     # also G-convex via some increasing convex ``G`` (``G=exp`` gives a
     # linear composite) — reporting ``g_concave, ρ=0`` for them is far more
     # informative than an escalated ``g_convex, ρ>0``.
-    if gershgorin_lambda_min(H) >= -tol:
+    #
+    # Delegate the ρ=0 test to the full-strength ordinary certificate rather
+    # than a bare Gershgorin call, so G-convexity is a *proper superset* of
+    # convexity: ``certify_convex`` also carries the exact 2×2-Sylvester and
+    # rank-1 PSD fast paths, which certify convex bodies (e.g. ``x²/y``) whose
+    # entry-wise Gershgorin enclosure alone is too loose. It is sound (returns
+    # proofs) and box-aware.
+    ordinary = certify_convex(expr, model, box=box)
+    if ordinary == Curvature.CONVEX:
         return GConvexCertificate("g_convex", 0.0)
-    if gershgorin_lambda_max(H) <= tol:
+    if ordinary == Curvature.CONCAVE:
         return GConvexCertificate("g_concave", 0.0)
 
     outer = _interval_outer(g)
