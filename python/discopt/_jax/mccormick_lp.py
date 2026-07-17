@@ -1074,7 +1074,9 @@ class MccormickLPRelaxer:
         """
         self._integer_ratio_partitioner = partitioner
 
-    def _apply_integer_ratio_partition(self, res, node_lb, node_ub, out_cuts):
+    def _apply_integer_ratio_partition(
+        self, res: "MccormickLPResult", node_lb, node_ub, out_cuts
+    ) -> "MccormickLPResult":
         """Max-combine the node LP bound with the integer-ratio partition bound.
 
         Sound: the partitioner's bound is the min over a valid disjunction of the
@@ -1101,7 +1103,8 @@ class MccormickLPRelaxer:
             logger.debug("integer-ratio partition bound abstained", exc_info=True)
             return res
         if lifted is not None and np.isfinite(lifted) and lifted > res.lower_bound:
-            return dataclasses.replace(res, lower_bound=float(lifted))
+            lifted_res: MccormickLPResult = dataclasses.replace(res, lower_bound=float(lifted))
+            return lifted_res
         return res
 
     def _solve_at_node_impl(
