@@ -4,8 +4,8 @@
 discopt ships three bound-changing capabilities behind default-OFF env flags:
 
 - **branch-and-reduce** — the root branch-and-reduce fixpoint
-  (``DISCOPT_ROOT_FIXPOINT``) + the per-node cheap reduction
-  (``DISCOPT_NODE_REDUCE``); and
+  (``DISCOPT_ROOT_FIXPOINT``, GRADUATED default-ON); the per-node cheap reduction
+  (``DISCOPT_NODE_REDUCE``) was DEPRECATED/removed in #581; and
 - **PSD cost gate** — the cost-aware gate on the per-node PSD (moment) cut
   separation loop (``DISCOPT_PSD_COST_GATE``).
 
@@ -97,7 +97,6 @@ TUNING_PROBES = frozenset(
 # is present.
 FLAGS_ON = {
     "DISCOPT_ROOT_FIXPOINT": "1",
-    "DISCOPT_NODE_REDUCE": "1",
     "DISCOPT_PSD_COST_GATE": "1",
 }
 CAPABILITIES = ("branch_reduce", "psd_gate")
@@ -130,11 +129,8 @@ ARMS: dict[str, dict] = {
         "struct_attr": "reduce_struct",
         "regime": "bound_changing",
     },
-    "node_reduce": {
-        "env": {"DISCOPT_NODE_REDUCE": "1"},
-        "struct_attr": "reduce_struct",
-        "regime": "bound_changing",
-    },
+    # node_reduce / square_cost_gate / lifted_fbbt / alphabb_with_lp arms were
+    # removed with their flags in #581 (deprecated as graduated-gate net-negative).
     "psd_cost_gate": {
         "env": {"DISCOPT_PSD_COST_GATE": "1"},
         "struct_attr": "psd_struct",
@@ -164,28 +160,8 @@ ARMS: dict[str, dict] = {
         "struct_attr": None,
         "regime": "bound_changing",
     },
-    # Square-cost gate (THRU-3): when ON it *shortens* the per-node x**2 tangent
-    # loop, dropping cuts → a legitimately looser relaxation (more nodes, same valid
-    # bound) → ``bound_changing`` (objective + oracle-bracket enforced; node drift a
-    # perf note).
-    "square_cost_gate": {
-        "env": {"DISCOPT_SQUARE_COST_GATE": "1"},
-        "struct_attr": None,
-        "regime": "bound_changing",
-    },
-    # Lifted-FBBT: adds an FBBT sweep + conditional relaxation rebuild per node →
-    # tighter boxes / stronger bound (wins ex1252) → ``bound_changing``.
-    "lifted_fbbt": {
-        "env": {"DISCOPT_LIFTED_FBBT": "1"},
-        "struct_attr": None,
-        "regime": "bound_changing",
-    },
-    # alpha-BB alongside the LP: adds an extra (valid) dual bound → ``bound_changing``.
-    "alphabb_with_lp": {
-        "env": {"DISCOPT_ALPHABB_WITH_LP": "1"},
-        "struct_attr": None,
-        "regime": "bound_changing",
-    },
+    # (square_cost_gate / lifted_fbbt / alphabb_with_lp arms removed with their
+    # flags in #581 — see the note at the top of ARMS.)
     # NS safe bound from the in-house simplex's own dual on numerically-failed
     # node LPs (#517), also surfaced as ``safe_bound`` on the certificate-free
     # generic path (#362): gives no-bound nodes a rigorous dual floor and lets
@@ -203,15 +179,12 @@ ARMS: dict[str, dict] = {
 # for.
 GRADUATION_ARMS = (
     "root_fixpoint",
-    "node_reduce",
     "psd_cost_gate",
     "lift_zero_spanning",
     "lift_loose_products",
-    # #581 flags wired in 2026-07-15
+    # #581: lu_density_route GRADUATED (Rust default-ON); node_reduce /
+    # square_cost_gate / lifted_fbbt / alphabb_with_lp DEPRECATED (removed).
     "lu_density_route",
-    "square_cost_gate",
-    "lifted_fbbt",
-    "alphabb_with_lp",
     # #517/#362 NS dual safe bound, wired 2026-07-16
     "node_numerical_dual_bound",
 )

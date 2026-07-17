@@ -1206,47 +1206,6 @@ def _cached_structural_linear_mask(evaluator, m):
     return mask
 
 
-def _reduce_node_and_stage(
-    reduce_node_fn,
-    model,
-    i,
-    batch_lb,
-    batch_ub,
-    lp_result,
-    tree,
-    cutoff,
-    pending,
-):
-    """Run per-node reduce (cert:T2.4b) and stage the tightened child box.
-
-    Calls ``reduce_node`` on node ``i``'s box using the just-solved node LP's
-    marginals (``lp_result`` carries ``reduced_costs``/``safe_bound`` when the LP
-    requested them) plus cutoff-FBBT. On a strictly smaller box it updates
-    ``batch_lb[i]``/``batch_ub[i]`` (so downstream branching/hints see the tighter
-    box) and records it in ``pending[i]`` for the ``set_node_bounds`` child export.
-    Returns True iff the reduction proved the node infeasible under the cutoff (a
-    rigorous fathom). Tighten-only: any failure leaves the box unchanged."""
-    try:
-        cur_lb = np.asarray(batch_lb[i], dtype=np.float64)
-        cur_ub = np.asarray(batch_ub[i], dtype=np.float64)
-        res = reduce_node_fn(model, cur_lb, cur_ub, lp_result, cutoff)
-    except Exception as exc:  # pragma: no cover - defensive
-        logger.debug("reduce_node failed at node %d: %s", i, exc)
-        return False
-    if res.infeasible:
-        return True
-    if res.n_tightened > 0:
-        new_lb = np.maximum(cur_lb, res.lb)
-        new_ub = np.minimum(cur_ub, res.ub)
-        # Guard against an empty box from float noise (fathom).
-        if np.any(new_lb > new_ub + 1e-9):
-            return True
-        batch_lb[i] = new_lb.tolist()
-        batch_ub[i] = new_ub.tolist()
-        pending[i] = (new_lb, new_ub)
-    return False
-
-
 def _tighten_node_bounds_with_status(evaluator, node_lb, node_ub, cl_list, cu_list, max_rounds=3):
     """Constraint-based bound tightening (FBBT) for a single B&B node.
 
@@ -5897,14 +5856,10 @@ def solve_model(
     # AlphaBB alpha estimate (lever 3, issue #194), deferred from above: compute
     # it only when the LP relaxer is NOT the bound source. When the LP relaxer is
     # active it supplies every node's valid dual bound, so the ~2s alpha estimate
-    # (and the per-node alphaBB it enables) is skipped. ``DISCOPT_ALPHABB_WITH_LP=1``
-    # forces the estimate even under the LP relaxer (A/B / fallback safety).
-    _alphabb_force = _tuning().alphabb_with_lp
-    if (
-        _alphabb_eligible
-        and (_mc_lp_relaxer is None or _alphabb_force)
-        and model._objective is not None
-    ):
+    # (and the per-node alphaBB it enables) is skipped. (The former
+    # ``DISCOPT_ALPHABB_WITH_LP`` force-on flag was deprecated/removed in #581 —
+    # net-negative and redundant while the LP relaxer supplies every node bound.)
+    if _alphabb_eligible and _mc_lp_relaxer is None and model._objective is not None:
         # C-17: the node bound is derived from ``rigorous_alpha`` (sound interval
         # Hessian) per node box, NOT a sampled root alpha. We only need the
         # internally-minimized objective EXPRESSION here; the per-node alpha is
@@ -6323,23 +6278,12 @@ def solve_model(
             _pn_obbt_topk,
         )
 
-    # --- Per-node cheap reduction (cert:T2.4b, flag default OFF) ---
-    # After each node LP solve, run reduce_node (cutoff-FBBT + free DBBT from the
-    # node LP reduced costs + integer RC-fixing) and feed the tightened box to the
-    # child nodes via ``tree.set_node_bounds`` before the tree branches. Gated to
-    # the LP-relaxer spatial path (the only path exposing node-LP marginals) and
-    # behind the flag, default OFF until T2.6.
-    _node_reduce_enabled = _tuning().node_reduce and _mc_lp_relaxer is not None
-    _node_reduce_fn: Any = None
-    if _node_reduce_enabled:
-        try:
-            from discopt._jax.node_reduce import reduce_node as _node_reduce_fn
-
-            logger.debug("per-node reduce_node enabled (cert:T2.4b)")
-        except Exception as _nr_exc:  # pragma: no cover - defensive
-            logger.debug("reduce_node import failed; disabling node reduce: %s", _nr_exc)
-            _node_reduce_enabled = False
-            _node_reduce_fn = None
+    # --- Per-node cheap reduction (cert:T2.4b) — DEPRECATED/REMOVED (#581) ---
+    # The ``DISCOPT_NODE_REDUCE`` flag (reduce_node: cutoff-FBBT + free DBBT from
+    # the node-LP reduced costs + integer RC-fixing, feeding the tightened box to
+    # the children) was default-OFF and graduated-gated net-negative (#685), so it
+    # was removed rather than left in default-OFF limbo. The default path never
+    # entered it; removing the gated branch is byte-identical.
 
     # --- Reduced-space McCormick per-node bounding (MAiNGO-parity §2 P2.3) ---
     # ``DISCOPT_RELAX_SPACE=reduced`` swaps the lifted per-node LP for a Kelley
@@ -6619,21 +6563,6 @@ def solve_model(
             break
 
         node_infeasible_mask = np.zeros(n_batch, dtype=bool)
-
-        # Per-node reduce (cert:T2.4b) staging for THIS batch: the incumbent cutoff
-        # and a {batch_index: (lb, ub)} map of reduced child boxes, applied via
-        # set_node_bounds just before the tree branches (below).
-        _nr_pending: dict = {}
-        _nr_cutoff = None
-        if _node_reduce_enabled:
-            _nr_inc = tree.incumbent()
-            _nr_cutoff = (
-                float(_nr_inc[1])
-                if _nr_inc is not None
-                and np.isfinite(_nr_inc[1])
-                and _nr_inc[1] < _SENTINEL_THRESHOLD
-                else None
-            )
 
         # Apply the current global box to each exported node (issue: cutoff
         # tightening was dead). Phase C (incumbent-cutoff OBBT) and Phase C3
@@ -7028,7 +6957,7 @@ def solve_model(
                             time_limit=max(_node_remaining, _DEADLINE_NODE_FLOOR_S),
                             inherited_cuts=_root_cut_pool,
                             separate=True,
-                            want_marginals=_node_reduce_enabled,
+                            want_marginals=False,
                             # THRU-4: with the root pool inherited, skip the per-node
                             # square/PSD point-separation loops (sound: their cut
                             # families are box-independent and already in the pool)
@@ -7063,27 +6992,6 @@ def solve_model(
                             result_feas[i] = False
                         else:
                             result_lbs[i] = max(result_lbs[i], float(mc_res.lower_bound))
-                    # --- Per-node reduce (cert:T2.4b) ---
-                    # Reduce the node box from THIS solve's marginals (no extra LP)
-                    # plus cutoff-FBBT, and stage the tightened box for the child
-                    # export (applied via set_node_bounds before process_evaluated).
-                    if _node_reduce_enabled and _node_reduce_fn is not None:
-                        _nr_res = _reduce_node_and_stage(
-                            _node_reduce_fn,
-                            model,
-                            i,
-                            batch_lb,
-                            batch_ub,
-                            mc_res,
-                            tree,
-                            _nr_cutoff,
-                            _nr_pending,
-                        )
-                        if _nr_res:
-                            node_infeasible_mask[i] = True
-                            result_lbs[i] = _INFEASIBILITY_SENTINEL
-                            result_feas[i] = False
-                            continue
             if not _model_is_convex:
                 for i in range(n_batch):
                     if result_lbs[i] == -np.inf:
@@ -7385,7 +7293,7 @@ def solve_model(
                             time_limit=max(_deadline - time.perf_counter(), _DEADLINE_NODE_FLOOR_S),
                             inherited_cuts=_root_cut_pool,
                             separate=True,
-                            want_marginals=_node_reduce_enabled,
+                            want_marginals=False,
                             # THRU-4: with the root pool inherited, skip the per-node
                             # square/PSD point-separation loops (sound: their cut
                             # families are box-independent and already in the pool)
@@ -7399,34 +7307,6 @@ def solve_model(
                     except Exception as e:
                         logger.debug("McCormick LP failed at node %d: %s", int(batch_ids[i]), e)
                         mc_lp_res = None
-                    if (
-                        _node_reduce_enabled
-                        and _node_reduce_fn is not None
-                        and mc_lp_res is not None
-                        and mc_lp_res.status != "infeasible"
-                    ):
-                        # Per-node reduce (cert:T2.4b): tighten this node's box from
-                        # the marginals + cutoff-FBBT and stage the child box.
-                        if _reduce_node_and_stage(
-                            _node_reduce_fn,
-                            model,
-                            i,
-                            batch_lb,
-                            batch_ub,
-                            mc_lp_res,
-                            tree,
-                            _nr_cutoff,
-                            _nr_pending,
-                        ):
-                            node_infeasible_mask[i] = True
-                            result_lbs[i] = _INFEASIBILITY_SENTINEL
-                            result_feas[i] = False
-                            continue
-                        # The serial path uses ``node_lb``/``node_ub`` locals for
-                        # the subsequent branching/feasibility logic; refresh them
-                        # from the (possibly) reduced batch box.
-                        node_lb = np.asarray(batch_lb[i], dtype=np.float64)
-                        node_ub = np.asarray(batch_ub[i], dtype=np.float64)
                     if mc_lp_res is not None and mc_lp_res.status == "infeasible":
                         # The McCormick LP is a valid OUTER relaxation of this
                         # node's subtree: if the (larger) relaxed feasible set is
@@ -8641,26 +8521,6 @@ def solve_model(
             _debug_quit = True
             break
 
-        # Feed per-node reduced boxes forward to the children (cert:T2.4c). Applied
-        # BEFORE process_evaluated so the tree branches from the contracted box and
-        # every child inherits the reduction. Only nodes still open (not fathomed
-        # this round) are updated; each staged box is a subset of the node's box, so
-        # the contraction removes no feasible integer point (tree_manager.rs:792).
-        if _node_reduce_enabled and _nr_pending:
-            t_rust_start = time.perf_counter()
-            for _bi, (_nlb, _nub) in _nr_pending.items():
-                if node_infeasible_mask[_bi] or result_lbs[_bi] >= _SENTINEL_THRESHOLD:
-                    continue
-                try:
-                    tree.set_node_bounds(
-                        int(batch_ids[_bi]),
-                        np.asarray(_nlb, dtype=np.float64),
-                        np.asarray(_nub, dtype=np.float64),
-                    )
-                except Exception as _sb_exc:  # pragma: no cover - defensive
-                    logger.debug("set_node_bounds failed at node %d: %s", _bi, _sb_exc)
-            rust_time += time.perf_counter() - t_rust_start
-
         # Import results back to Rust tree
         t_rust_start = time.perf_counter()
         tree.import_results(result_ids, result_lbs, result_sols, result_feas)
@@ -9557,11 +9417,6 @@ def solve_model(
         for _sfam, _stime in _mc_lp_relaxer._sep_timers.items():
             if _stime > 0.0:
                 _solver_stats[f"separate/{_sfam}"] = float(_stime)
-        # THRU-3: surface the square-gate fire count so the default-OFF gate is
-        # proven to engage when enabled (0 on the default path).
-        _sqf = int(getattr(_mc_lp_relaxer, "_square_gate_fires", 0))
-        if _sqf > 0:
-            _solver_stats["gate/square_fires"] = float(_sqf)
     # Root-cut-pool inheritance counters (THRU-4). Surfaced whenever a pool was
     # built or inherited so both the fire-proof (pool populates + inherits) and
     # the skip lever are observable on the final result.

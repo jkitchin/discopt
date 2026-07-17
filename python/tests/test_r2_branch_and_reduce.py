@@ -1,17 +1,17 @@
-"""cert:T2.3 / T2.4 — root branch-and-reduce fixpoint + per-node reduce.
+"""cert:T2.3 — root branch-and-reduce fixpoint (GRADUATED ``root_fixpoint``).
 
-These tests pin the R2 soundness invariants (cert-gap-plan §14 T2.3/T2.4):
+These tests pin the R2 soundness invariants (cert-gap-plan §14 T2.3):
 
   * **T2.4a marginal neutrality** — requesting node-LP marginals never changes the
     LP ``lower_bound``/``x`` (additive side-channel only).
-  * **reduce_node feasible-point retention** — the per-node reduction never removes a
-    sampled feasible point better than the cutoff (200 random boxes/cutoffs). This is
-    the false-certificate guard (the nvs22 #277 / st_ph10 #306 class).
   * **run_root_fixpoint tighten-only + oracle-sound** — every reduced box is a subset
     of the input box and its dual bound never crosses the known optimum.
   * **round-2 improvement** — on a synthetic bilinear model a second fixpoint round
     (re-deriving the envelope on the round-1-tightened box) tightens strictly more
     than a single round, so the loop (not a one-shot pass) is load-bearing.
+
+(The T2.4 per-node ``reduce_node`` tests were removed with the
+``DISCOPT_NODE_REDUCE`` flag in #581 — deprecated as graduated-gate net-negative.)
 """
 
 from __future__ import annotations
@@ -27,7 +27,6 @@ import discopt.modeling as dm
 import numpy as np
 import pytest
 from discopt._jax.mccormick_lp import MccormickLPRelaxer
-from discopt._jax.node_reduce import _dbbt_from_reduced_costs, reduce_node
 from discopt._jax.root_reduce import run_root_fixpoint
 
 
@@ -65,82 +64,10 @@ def test_marginals_do_not_change_bound():
         assert r1.safe_bound == r1.lower_bound
 
 
-# --------------------------------------------------------------------------- #
-# reduce_node — feasible-point retention (property test, 200 boxes/cutoffs)    #
-# --------------------------------------------------------------------------- #
-@pytest.mark.unit
-def test_reduce_node_retains_better_than_cutoff_points():
-    """DBBT/RC-fixing from reduced costs must never cut a feasible point whose
-    objective is better than the cutoff. Property test over 200 random
-    boxes/cutoffs on a 3-var problem: for a linear surrogate with known reduced
-    costs and safe bound, every sampled point with c.x <= cutoff survives."""
-    rng = np.random.default_rng(20260706)
-    n = 3
-    n_retained_checks = 0
-    for _ in range(200):
-        lb = rng.uniform(-5, 0, size=n)
-        ub = lb + rng.uniform(0.5, 6.0, size=n)
-        rc = rng.uniform(-3, 3, size=n)  # reduced costs
-        z_lp = float(rng.uniform(-10, 0))  # NS-safe LP bound
-        cutoff = z_lp + float(rng.uniform(0.0, 8.0))  # >= z_lp (a valid incumbent)
-        is_int = rng.integers(0, 2, size=n).astype(bool)
-        new_lb, new_ub, _nt, infeas = _dbbt_from_reduced_costs(lb, ub, rc, z_lp, cutoff, is_int)
-        if infeas:
-            continue
-        # The reduction is only sound as a claim about points whose objective
-        # (c.x, with c == rc here since the LP is at a vertex where d==c on the
-        # nonbasic cols) is <= cutoff. Sample points in the ORIGINAL box, keep the
-        # ones the DBBT inequality's premise covers (rc·x <= cutoff - (rc·lb-ish));
-        # to keep the test model-agnostic, we check the exact inequality DBBT uses:
-        # for d_j>0, x_j <= lb_j + gap/d_j must hold for any x with rc·(x-anchor)<=gap.
-        # Simplest faithful check: sample uniformly in the ORIGINAL box; a point
-        # is "better than cutoff" iff it satisfies BOTH per-coordinate DBBT bounds
-        # derived from the SAME gap — which is exactly the retained box. So assert
-        # the retained box is a subset of the original (never loosens).
-        assert np.all(new_lb >= lb - 1e-9)
-        assert np.all(new_ub <= ub + 1e-9)
-        n_retained_checks += 1
-    assert n_retained_checks > 0
-
-
-@pytest.mark.unit
-def test_reduce_node_dbbt_matches_hand_computation():
-    """The free-DBBT move reproduces the closed-form reduced-cost inequality with
-    z = safe_bound (the C-15 rule) and inward integer rounding."""
-    lb = np.array([0.0, 0.0])
-    ub = np.array([10.0, 10.0])
-    rc = np.array([2.0, -1.0])
-    z_lp = 0.0
-    cutoff = 4.0  # gap = 4 (+ tiny margin)
-    is_int = np.array([False, True])
-    new_lb, new_ub, nt, infeas = _dbbt_from_reduced_costs(lb, ub, rc, z_lp, cutoff, is_int)
-    assert not infeas
-    # x0: d>0 -> ub0 <= lb0 + gap/d = 0 + 4/2 = 2 (+margin)
-    assert new_ub[0] <= 2.0 + 1e-3
-    assert new_ub[0] >= 2.0 - 1e-3
-    # x1 integer: d<0 -> lb1 >= ub1 - gap/|d| = 10 - 4/1 = 6, ceil -> 6
-    assert new_lb[1] == 6.0
-    assert nt == 2
-
-
-@pytest.mark.smoke
-def test_reduce_node_on_model_retains_optimum():
-    """reduce_node on a bilinear model with a valid cutoff keeps the optimum in
-    the reduced box (differential retention, end-to-end)."""
-    m = _bilinear_model()
-    r = MccormickLPRelaxer(m)
-    lb = np.array([0.0, 0.0])
-    ub = np.array([4.0, 4.0])
-    lpr = r.solve_at_node(lb, ub, want_marginals=True)
-    # A generous cutoff (the box optimum of x*y-2x on [0,4]^2 is at x=4,y=0 -> -8;
-    # use -7 so DBBT has a gap).
-    res = reduce_node(m, lb, ub, lpr, cutoff=-7.0)
-    assert not res.infeasible
-    assert np.all(res.lb >= lb - 1e-9)
-    assert np.all(res.ub <= ub + 1e-9)
-    # The optimum (x=4, y=0) with obj -8 <= -7 must be retained.
-    assert res.lb[0] <= 4.0 + 1e-6 and res.ub[0] >= 4.0 - 1e-6
-    assert res.lb[1] <= 0.0 + 1e-6 and res.ub[1] >= 0.0 - 1e-6
+# (The reduce_node feasible-point-retention + DBBT tests were removed with the
+# ``DISCOPT_NODE_REDUCE`` flag / ``discopt._jax.node_reduce`` module in #581. The
+# root branch-and-reduce fixpoint below — the GRADUATED ``root_fixpoint`` path —
+# retains its own tighten-only + oracle-soundness coverage.)
 
 
 # --------------------------------------------------------------------------- #
@@ -265,44 +192,6 @@ class _MisalignedRepr:
         lbs = _np.full(self._n, 1e9, dtype=float)
         ubs = _np.full(self._n, -1e9, dtype=float)
         return lbs, ubs
-
-
-@pytest.mark.smoke
-def test_node_reduce_misaligned_repr_forgoes_tightening():
-    """C-41: node cutoff-FBBT with a misaligned (short) repr must forgo the
-    tightening, not write a crossed box or falsely fathom the node."""
-    import discopt._jax.node_reduce as nr
-    import discopt._rust as _rust
-
-    m = _bilinear_model()  # 2 scalar blocks
-    lb = np.array([0.0, 0.0])
-    ub = np.array([4.0, 4.0])
-    r = MccormickLPRelaxer(m)
-    lpr = r.solve_at_node(lb, ub, want_marginals=True)
-
-    n_blocks = len(m._variables)
-    # ``_fbbt_on_node`` imports ``model_to_repr`` from ``discopt._rust`` locally,
-    # so patch it at the source module.
-    orig = _rust.model_to_repr
-
-    def _fake(model, builder):  # noqa: ARG001 - signature parity
-        return _MisalignedRepr(n_blocks)
-
-    _rust.model_to_repr = _fake
-    try:
-        res = nr.reduce_node(m, lb, ub, lpr, cutoff=-7.0, do_fbbt=True)
-    finally:
-        _rust.model_to_repr = orig
-
-    # The misaligned FBBT result is FORGONE: the box is unchanged by FBBT (DBBT
-    # may still tighten soundly), never crossed, never a false fathom.
-    assert not res.infeasible
-    assert np.all(res.lb >= lb - 1e-9)
-    assert np.all(res.ub <= ub + 1e-9)
-    assert np.all(res.lb <= res.ub + 1e-9)  # no crossed bound survived
-    # The optimum (x=4, y=0, obj -8 <= -7) is retained.
-    assert res.ub[0] >= 4.0 - 1e-6
-    assert res.lb[1] <= 0.0 + 1e-6
 
 
 @pytest.mark.smoke
