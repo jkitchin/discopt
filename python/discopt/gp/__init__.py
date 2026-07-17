@@ -41,6 +41,9 @@ import discopt.modeling as dm
 from discopt._jax.convexity.log_lattice import (
     LogCurvature,
     classify_log_curvature,
+    log_combine_product,
+    log_combine_sum,
+    log_negate,
 )
 from discopt._jax.convexity.posynomial import (
     Monomial,
@@ -48,12 +51,14 @@ from discopt._jax.convexity.posynomial import (
     is_posynomial,
 )
 from discopt.modeling.core import (
+    BinaryOp,
     Constant,
     Constraint,
     Expression,
     Model,
     ObjectiveSense,
     SolveResult,
+    UnaryOp,
     VarType,
 )
 
@@ -252,6 +257,204 @@ def classify_gp(model: Model) -> Optional[GPStructure]:
         gp_constraints.append(gp_c)
 
     return GPStructure(objective=obj_form, minimize=minimize, constraints=gp_constraints)
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Per-row log-curvature report (consumer of the per-expression lattice)
+# ──────────────────────────────────────────────────────────────────────
+
+
+@dataclass
+class ObjectiveLogCurvature:
+    """Log-curvature of the objective and whether it is convex in ``y``.
+
+    ``curvature`` is the :class:`LogCurvature` of the objective expression.
+    ``log_convex`` is ``True`` iff *optimising* it is a convex problem in
+    ``y = log x``: minimising a log-convex (or log-affine) objective, or
+    maximising a log-concave (or log-affine) one.
+    """
+
+    curvature: LogCurvature
+    minimize: bool
+    log_convex: bool
+
+
+@dataclass
+class ConstraintLogCurvature:
+    """Log-curvature of one constraint's two sides and its feasible set.
+
+    A constraint is normalised to ``body sense 0`` with ``body = lhs -
+    rhs``; ``lhs`` / ``rhs`` here are the :class:`LogCurvature` of the
+    positive / negative additive parts of ``body`` (each strictly positive
+    when not ``UNKNOWN``). ``log_convex`` is ``True`` iff the constraint's
+    feasible region is convex in ``y = log x`` under the sound rule in
+    :func:`model_log_curvature`.
+    """
+
+    source: Constraint
+    lhs: LogCurvature
+    rhs: LogCurvature
+    log_convex: bool
+
+
+@dataclass
+class ModelLogCurvature:
+    """Per-row log-curvature report for a model.
+
+    The whole-model :func:`is_log_convex` returns a single yes/no; this
+    report instead tags **each row** (objective + every constraint) via the
+    per-expression lattice, so a model that is convex-in-``y`` on some rows
+    and not others is legible — the *partially* log-convex case that
+    motivated issue #115.
+    """
+
+    objective: Optional[ObjectiveLogCurvature]
+    constraints: list[ConstraintLogCurvature]
+
+    @property
+    def is_log_convex_program(self) -> bool:
+        """True iff every row is convex in ``y`` (a full GP).
+
+        This is a per-row derivation of the same verdict as
+        :func:`is_log_convex`, and is *more* general: it certifies rows
+        built from nested posynomials / reciprocals (e.g.
+        ``sqrt(x + y) <= t``) that the monomial-splitting
+        :func:`classify_gp` rejects.
+        """
+        obj_ok = self.objective is None or self.objective.log_convex
+        return obj_ok and all(c.log_convex for c in self.constraints)
+
+    @property
+    def log_convex_rows(self) -> int:
+        """Number of constraint rows proven convex in ``y``."""
+        return sum(1 for c in self.constraints if c.log_convex)
+
+
+def _split_additive(
+    expr: Expression, sign: float, plus: list[Expression], minus: list[Expression]
+) -> None:
+    """Group ``expr`` into positive / negative parts at its *top-level* sum.
+
+    Walks only ``+`` / ``-`` / unary ``neg`` so sub-terms such as
+    ``sqrt(x + y)`` or ``1 / (x + y)`` stay intact for the log-curvature
+    walker to classify. ``sign`` tracks the running coefficient sign.
+    """
+    if isinstance(expr, BinaryOp) and expr.op == "+":
+        _split_additive(expr.left, sign, plus, minus)
+        _split_additive(expr.right, sign, plus, minus)
+        return
+    if isinstance(expr, BinaryOp) and expr.op == "-":
+        _split_additive(expr.left, sign, plus, minus)
+        _split_additive(expr.right, -sign, plus, minus)
+        return
+    if isinstance(expr, UnaryOp) and expr.op == "neg":
+        _split_additive(expr.operand, -sign, plus, minus)
+        return
+    (plus if sign > 0 else minus).append(expr)
+
+
+def _side_log_curvature(terms: list[Expression], cache: dict) -> LogCurvature:
+    """Fold the log-curvature of a sum of terms via :func:`log_combine_sum`.
+
+    Returns ``UNKNOWN`` for an empty side (no positive quantity to reason
+    about). A positive-coefficient scalar factor inside a term is handled
+    by the walker itself (``c * f`` is ``log_combine_product`` of an affine
+    coefficient), so no coefficient bookkeeping is needed here.
+    """
+    result: Optional[LogCurvature] = None
+    for term in terms:
+        label = classify_log_curvature(term, None, cache)
+        result = label if result is None else log_combine_sum(result, label)
+        if result == LogCurvature.UNKNOWN:
+            return LogCurvature.UNKNOWN
+    return result if result is not None else LogCurvature.UNKNOWN
+
+
+def _constraint_log_curvature(constraint: Constraint, cache: dict) -> ConstraintLogCurvature:
+    """Classify a single constraint's feasible-set log-curvature.
+
+    With ``body = P - N`` (positive part ``P``, negative part ``N``) the
+    constraint means ``P <= N`` (``<=``), ``P >= N`` (``>=``), or ``P == N``
+    (``==``). Writing the ratio ``r = P / N`` (``log_combine_product`` of
+    ``P`` against the reciprocal log-curvature of ``N``):
+
+    * ``P <= N`` ⇔ ``log(P/N) <= 0`` is convex iff ``r`` is
+      log-convex/affine (a convex sublevel set);
+    * ``P >= N`` ⇔ ``log(N/P) <= 0`` is convex iff ``r`` is
+      log-concave/affine;
+    * ``P == N`` is an affine equality in ``y`` (convex) iff ``r`` is
+      log-affine — i.e. monomial == monomial.
+
+    A missing side or an ``UNKNOWN`` side yields ``log_convex=False`` (no
+    proof), never a false positive.
+    """
+    plus: list[Expression] = []
+    minus: list[Expression] = []
+    _split_additive(constraint.body, 1.0, plus, minus)
+
+    p = _side_log_curvature(plus, cache)
+    n = _side_log_curvature(minus, cache)
+
+    log_convex = False
+    if p != LogCurvature.UNKNOWN and n != LogCurvature.UNKNOWN:
+        ratio = log_combine_product(p, log_negate(n))
+        if constraint.sense == "==":
+            log_convex = ratio == LogCurvature.LOG_AFFINE
+        elif constraint.sense == "<=":
+            log_convex = ratio in (LogCurvature.LOG_AFFINE, LogCurvature.LOG_CONVEX)
+        elif constraint.sense == ">=":
+            log_convex = ratio in (LogCurvature.LOG_AFFINE, LogCurvature.LOG_CONCAVE)
+
+    return ConstraintLogCurvature(source=constraint, lhs=p, rhs=n, log_convex=log_convex)
+
+
+def model_log_curvature(model: Model) -> ModelLogCurvature:
+    """Report the per-row log-curvature of ``model`` (issue #115 consumer).
+
+    Runs the per-expression :func:`classify_log_curvature` lattice over the
+    objective and every constraint and derives, for each row, whether it is
+    convex in ``y = log x``. Unlike the whole-model :func:`is_log_convex`
+    (a single verdict) this exposes *which* rows are log-convex, making a
+    **partially** log-convex model legible.
+
+    Soundness: every ``log_convex=True`` is a proof (each side's label
+    certifies strict positivity and its log-curvature, and the per-sense
+    rule is a sound convex-representability test); a failed precondition
+    reports ``log_convex=False`` / ``UNKNOWN``, never a false verdict. This
+    is a pure structural analysis — it does not solve, reformulate, or
+    touch the x-space convex fast path.
+
+    Only plain algebraic :class:`Constraint` rows are classifiable;
+    non-algebraic rows (indicator, disjunctive, SOS, logical) are reported
+    ``UNKNOWN`` / not-log-convex rather than skipped.
+    """
+    cache: dict = {}
+
+    objective: Optional[ObjectiveLogCurvature] = None
+    if model._objective is not None:
+        minimize = model._objective.sense == ObjectiveSense.MINIMIZE
+        curv = classify_log_curvature(model._objective.expression, None, cache)
+        if minimize:
+            obj_ok = curv in (LogCurvature.LOG_AFFINE, LogCurvature.LOG_CONVEX)
+        else:
+            obj_ok = curv in (LogCurvature.LOG_AFFINE, LogCurvature.LOG_CONCAVE)
+        objective = ObjectiveLogCurvature(curvature=curv, minimize=minimize, log_convex=obj_ok)
+
+    constraints: list[ConstraintLogCurvature] = []
+    for constraint in model._constraints:
+        if not isinstance(constraint, Constraint):
+            constraints.append(
+                ConstraintLogCurvature(
+                    source=constraint,
+                    lhs=LogCurvature.UNKNOWN,
+                    rhs=LogCurvature.UNKNOWN,
+                    log_convex=False,
+                )
+            )
+            continue
+        constraints.append(_constraint_log_curvature(constraint, cache))
+
+    return ModelLogCurvature(objective=objective, constraints=constraints)
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -489,13 +692,17 @@ def solve_gp(model: Model, **solve_kwargs) -> Optional[SolveResult]:
 
 
 __all__ = [
+    "ConstraintLogCurvature",
     "GPConstraint",
     "GPStructure",
     "GeometricProgram",
     "LogCurvature",
+    "ModelLogCurvature",
+    "ObjectiveLogCurvature",
     "as_geometric_program",
     "classify_gp",
     "classify_log_curvature",
     "is_log_convex",
+    "model_log_curvature",
     "solve_gp",
 ]

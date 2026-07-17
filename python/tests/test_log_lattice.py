@@ -20,6 +20,7 @@ from discopt._jax.convexity.log_lattice import (
     log_negate,
     log_scale_pow,
 )
+from discopt.gp import is_log_convex, model_log_curvature
 from discopt.modeling.core import Constant
 
 pytestmark = pytest.mark.relaxation
@@ -258,3 +259,92 @@ def test_shared_subexpression_is_cached(pos_model):
     _, x, y = pos_model
     p = x + y
     assert lc(p * p) == CVX
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Whole-model consumer: model_log_curvature (the #115 payoff)
+# ──────────────────────────────────────────────────────────────────────
+
+
+def _gp_model():
+    m = Model("gp")
+    x = m.continuous("x", lb=0.1, ub=10.0)
+    y = m.continuous("y", lb=0.1, ub=10.0)
+    return m, x, y
+
+
+def test_model_log_curvature_full_gp():
+    m, x, y = _gp_model()
+    m.minimize(x * y + 0.5 / x)  # posynomial objective
+    m.subject_to(x + y <= 5)
+    m.subject_to(x * y == 2)
+    report = model_log_curvature(m)
+    assert report.objective is not None
+    assert report.objective.log_convex is True
+    assert all(c.log_convex for c in report.constraints)
+    assert report.is_log_convex_program is True
+    assert report.log_convex_rows == 2
+
+
+def test_model_log_curvature_certifies_row_that_classify_gp_rejects():
+    """`sqrt(x + y) <= t` is convex in y but not a monomial-splitter GP row.
+
+    The lattice consumer certifies it; the whole-model monomial recogniser
+    (`classify_gp` / `is_log_convex`) does not — the concrete payoff of a
+    composing per-expression lattice.
+    """
+    m, x, y = _gp_model()
+    t = m.continuous("t", lb=0.1, ub=10.0)
+    m.minimize(t)
+    m.subject_to(dm.sqrt(x + y) <= t)
+    report = model_log_curvature(m)
+    (row,) = report.constraints
+    assert row.lhs == CVX  # sqrt(posynomial) is log-convex
+    assert row.rhs == AFF  # t is a monomial
+    assert row.log_convex is True
+    assert report.is_log_convex_program is True
+    # The whole-model monomial recogniser cannot see this structure.
+    assert is_log_convex(m) is False
+
+
+def test_model_log_curvature_reports_partial_log_convexity():
+    m, x, y = _gp_model()
+    m.minimize(x * y)
+    m.subject_to(x + y <= 4)  # log-convex row
+    m.subject_to(x - y <= 1)  # difference on the positive side → not certifiable
+    report = model_log_curvature(m)
+    assert [c.log_convex for c in report.constraints] == [True, False]
+    assert report.log_convex_rows == 1
+    assert report.is_log_convex_program is False
+
+
+def test_model_log_curvature_equality_needs_both_sides_monomial():
+    # monomial == monomial → affine equality in y (convex); posynomial == monomial → not.
+    m, x, y = _gp_model()
+    m.minimize(x)
+    m.subject_to(x * y == 3)
+    assert model_log_curvature(m).constraints[0].log_convex is True
+
+    m2, a, b = _gp_model()
+    m2.minimize(a)
+    m2.subject_to(a + b == 3)
+    assert model_log_curvature(m2).constraints[0].log_convex is False
+
+
+def test_model_log_curvature_objective_sense_matters():
+    # Maximising a monomial is convex-in-y; maximising a posynomial is not.
+    m, x, y = _gp_model()
+    m.maximize(x * y)
+    assert model_log_curvature(m).objective.log_convex is True
+
+    m2, a, b = _gp_model()
+    m2.maximize(a + b)
+    assert model_log_curvature(m2).objective.log_convex is False
+
+
+def test_model_log_curvature_no_objective():
+    m, x, y = _gp_model()
+    m.subject_to(x + y <= 5)
+    report = model_log_curvature(m)
+    assert report.objective is None
+    assert report.is_log_convex_program is True  # objective-free: all rows decide it
