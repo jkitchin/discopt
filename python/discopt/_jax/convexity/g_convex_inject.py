@@ -181,11 +181,78 @@ def inject_g_convex_cuts(
     return applied
 
 
+def rigorous_g_convex_cut_coeffs(model, phi, rho, x0, box, *, offsets=None):
+    """Rigorously valid transformation cut ``g·x ≤ rhs`` for ``phi(x) ≤ 0``.
+
+    Given a body ``phi`` certified G-convex on ``box`` with witness ``rho > 0``
+    and a linearization point ``x0`` (flat, over the model's scalar variables),
+    returns ``(g, rhs)`` — a length-``n`` gradient over the flat variable vector
+    and a scalar RHS — such that **every** ``x`` in ``box`` with ``phi(x) ≤ 0``
+    satisfies ``g·x ≤ rhs``. Returns ``None`` when the enclosure is unusable
+    (unsupported atom, non-finite, degenerate gradient).
+
+    The construction is the module's rigorous tangent: ``h = exp(rho·phi)`` is
+    convex on ``box`` (the g_convex witness), so with ``g`` the interval-midpoint
+    of ``∇h(x0)`` the intercept ``c = ψ_lo(x0) − Σ_i hw_i·r_i`` (``ψ = h − g·x``,
+    ``hw`` the gradient-interval half-widths, ``r`` the box half-widths) is a
+    sound lower bound of ``min_box ψ``; hence ``g·x ≤ h(x) − c ≤ 1 − c = rhs``
+    for feasible ``x``. Shared by the model-constraint injector and the per-node
+    relaxer separator.
+    """
+    import discopt.modeling as dm
+
+    variables = list(model._variables)
+    x0 = np.asarray(x0, dtype=float).ravel()
+    lb = np.array([float(np.asarray(box[v].lo).ravel()[0]) for v in variables], dtype=float)
+    ub = np.array([float(np.asarray(box[v].hi).ravel()[0]) for v in variables], dtype=float)
+    r = 0.5 * (ub - lb)
+
+    pbox = {v: Interval(np.array([x0[i]]), np.array([x0[i]])) for i, v in enumerate(variables)}
+    try:
+        ad0 = interval_hessian(phi, model, box=pbox)
+    except ValueError:
+        return None
+    phi_iv = ad0.value
+    grad_iv = ad0.grad
+    if not (
+        np.all(np.isfinite(phi_iv.lo))
+        and np.all(np.isfinite(phi_iv.hi))
+        and np.all(np.isfinite(grad_iv.lo))
+        and np.all(np.isfinite(grad_iv.hi))
+    ):
+        return None
+
+    # ∇h(x0) enclosure and its midpoint direction g; h certified convex on box.
+    h_iv = iv.exp(Interval.point(rho) * phi_iv)
+    dh_iv = Interval.point(rho) * h_iv * grad_iv
+    g = np.asarray(dh_iv.mid, dtype=float).ravel()
+    hw = 0.5 * (
+        np.asarray(dh_iv.hi, dtype=float).ravel() - np.asarray(dh_iv.lo, dtype=float).ravel()
+    )
+    if not np.all(np.isfinite(g)) or np.allclose(g, 0.0):
+        return None
+
+    if offsets is None:
+        offsets = {i: v for i, v in enumerate(variables)}
+    lin = _linear_expr(g, offsets)
+    residual = dm.exp(rho * phi) if lin is None else (dm.exp(rho * phi) - lin)
+    try:
+        psi0_iv = evaluate_interval(residual, model, box=pbox)
+    except Exception:
+        return None
+    psi0_lo = float(np.asarray(psi0_iv.lo).ravel()[0])
+    if not np.isfinite(psi0_lo):
+        return None
+    correction = float(_round_up(np.float64(np.sum(hw * r))))
+    c = float(_round_down(np.float64(psi0_lo - correction)))
+    rhs = float(_round_up(np.float64(1.0 - c)))
+    if not np.isfinite(rhs):
+        return None
+    return g, rhs
+
+
 def _inject_for_body(model, phi, rho, box, offsets, lb, ub, n, points, tag, dm) -> int:
     """Emit the valid linear cuts for one G-convex body ``phi`` (``phi ≤ 0``)."""
-    # Transformed convex composite h(x) = exp(rho * phi(x)); constraint ⟺ h ≤ 1.
-    h_expr = dm.exp(rho * phi)
-
     # Linearization points: midpoint + per-variable high corners (like the GP
     # injector), each yields an independent valid cut.
     mid = 0.5 * (lb + ub)
@@ -197,60 +264,12 @@ def _inject_for_body(model, phi, rho, box, offsets, lb, ub, n, points, tag, dm) 
         p[j] = ub[j]
         pts.append(p)
 
-    r = 0.5 * (ub - lb)  # box half-widths (x0 midpoint-centred where possible)
     emitted = 0
     for p_idx, x0 in enumerate(pts[:points]):
-        # Interval value + gradient of phi at the point x0 (degenerate box →
-        # near-exact enclosure; widths capture only rounding).
-        pbox = {
-            v: Interval(np.array([x0[i]]), np.array([x0[i]]))
-            for i, v in enumerate(model._variables)
-        }
-        try:
-            ad0 = interval_hessian(phi, model, box=pbox)
-        except ValueError:
+        coeffs = rigorous_g_convex_cut_coeffs(model, phi, rho, x0, box, offsets=offsets)
+        if coeffs is None:
             continue
-        phi_iv = ad0.value
-        grad_iv = ad0.grad
-        if not (
-            np.all(np.isfinite(phi_iv.lo))
-            and np.all(np.isfinite(phi_iv.hi))
-            and np.all(np.isfinite(grad_iv.lo))
-            and np.all(np.isfinite(grad_iv.hi))
-        ):
-            continue
-
-        # Interval enclosure of ∇h(x0) = ρ·exp(ρ·phi(x0))·∇phi(x0), and the
-        # float direction g = its midpoint. h is *certified convex* on the box
-        # (the g_convex witness ρ makes exp(ρ·phi) convex), which is what makes
-        # the tight tangent intercept below rigorous.
-        h_iv = iv.exp(Interval.point(rho) * phi_iv)
-        dh_iv = Interval.point(rho) * h_iv * grad_iv
-        g = np.asarray(dh_iv.mid, dtype=float).ravel()
-        hw = 0.5 * (
-            np.asarray(dh_iv.hi, dtype=float).ravel() - np.asarray(dh_iv.lo, dtype=float).ravel()
-        )
-        if not np.all(np.isfinite(g)) or np.allclose(g, 0.0):
-            continue
-
-        # Rigorous *tight* intercept. ψ(x)=h(x)−g·x is convex on the box, so
-        #     min_box ψ ≥ ψ(x₀) + ∇ψ(x₀)·(x−x₀) ≥ ψ(x₀) − Σ_i |∇ψ(x₀)_i|·r_i,
-        # and |∇ψ(x₀)_i| = |∇h(x₀)_i − g_i| ≤ hw_i (g is the interval midpoint).
-        # ψ(x₀) is enclosed by evaluating (h − g·x) at the point x0.
-        lin = _linear_expr(g, offsets)
-        residual = h_expr if lin is None else (h_expr - lin)
-        try:
-            psi0_iv = evaluate_interval(residual, model, box=pbox)
-        except Exception:
-            continue
-        psi0_lo = float(np.asarray(psi0_iv.lo).ravel()[0])
-        if not np.isfinite(psi0_lo):
-            continue  # unsupported atom → unbounded enclosure; skip (sound)
-        correction = float(_round_up(np.float64(np.sum(hw * r))))
-        c = float(_round_down(np.float64(psi0_lo - correction)))
-
-        # Cut: g·x ≤ 1 − c, RHS rounded outward (up) for float safety.
-        rhs = float(_round_up(np.float64(1.0 - c)))
+        g, rhs = coeffs
         cut_lin = _linear_expr(g, offsets)
         if cut_lin is None:
             continue
@@ -259,4 +278,8 @@ def _inject_for_body(model, phi, rho, box, offsets, lb, ub, n, points, tag, dm) 
     return emitted
 
 
-__all__ = ["g_convex_cuts_enabled", "inject_g_convex_cuts"]
+__all__ = [
+    "g_convex_cuts_enabled",
+    "inject_g_convex_cuts",
+    "rigorous_g_convex_cut_coeffs",
+]

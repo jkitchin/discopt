@@ -68,3 +68,37 @@ run in this container — no `~/Dropbox/projects/discopt-minlp-benchmark` corpus
    G-convexity certifies on wider boxes, including some roots.
 
 Until one of these lands, the flag is sound but inert and correctly stays OFF.
+
+## Update — per-node injection lands the benefit (2026-07-17)
+
+Follow-up #1 above is implemented: `MccormickLPRelaxer._separate_g_convex` now
+runs the transformation cut **per B&B node**, on the tightened node box, where
+the constant-ρ detector can certify G-convexity. The cut is **box-local** —
+valid only on the node box — so it is generated fresh per node and appended to
+that node's LP only, and it runs **only when `out_cuts is None`** (a regular
+node solve, never a pool-capture solve). That gate guarantees it can never enter
+the inheritable root pool and be replayed on a sub-box — the exact C-43 / nvs22
+false-optimum hazard.
+
+**Soundness (oracle).** Re-ran the neutrality sub-panel with the per-node path
+active over **18 instances** (OFF vs ON, tl=25s): **0 soundness/neutrality
+violations** — every certified objective identical to the committed baseline,
+every `optimal` preserved. The cut construction is rigorously valid on the node
+box (interval-safe intercept), and the never-pooled gate keeps it from leaking
+onto sub-boxes.
+
+**Benefit.** On a branching G-convex model (`maximize x+y+z` s.t.
+`log(x²+y²) ≤ 1.6`, integer `z`), flag OFF solves in **53 nodes**, flag ON in
+**39 nodes** — a 26% node reduction, same certified optimum (4.14739). The cut
+fires at the deeper nodes whose boxes have tightened enough to certify, exactly
+as predicted.
+
+Regression tests: `python/tests/test_g_convex_per_node.py` (flag preserves the
+certified optimum; node count never regresses; the node LP bound only tightens).
+The default path is unchanged — with the flag OFF `_separate_g_convex` is never
+called.
+
+The flag remains default-OFF pending the full corpus differential panel (the
+~4,800-instance benefit arm, which needs the MINLPLib corpus absent from this
+container). But the keystone result now holds: the capability is **sound and
+net-positive where it fires**, no longer inert.
