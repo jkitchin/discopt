@@ -1888,10 +1888,15 @@ def obbt_tighten_root(
         **budgeted** (:func:`cascade_reachable_aux`): only aux columns whose
         reverse-FBBT can reach an original variable at the current box are probed,
         which is bound-neutral vs probing every aux column but drops ~87% of the
-        aux LPs on the vendored corpus. **Opt-in (default off):** it is sound on the
-        corpus (every optimum preserved) and shrinks the root box on the continuous
-        spatial-branch instances that spatial branching bottlenecks; graduation to
-        default-on is gated on a net-positive A/B (see ``design/ab_cascade_aux.py``).
+        aux LPs on the vendored corpus. **Graduated default-ON** on the real solve
+        path (``DISCOPT_OBBT_CASCADE_AUX``, default ``1``, ``=0`` to opt out) per
+        #208: the graduation gate (``design/ab_cascade_aux.py``, 65-instance corpus
+        at a fair 30 s budget) returned cert-clean (0 differential soundness
+        violations, 0 optimum mismatches, 0 cert regressions, +1 gain: tls2 F→T) and
+        net-positive with 0 regression — node-neutral on the convergent integer-heavy
+        majority and helpful on the continuous spatial-branch class (tspn08/10/12 →
+        1 node, heatexch_gen3 208→31 s wall). ``cascade_aux=False`` here is only the
+        *function* default; the solve path passes the env-resolved value.
     top_k : int, optional
         Forwarded to :func:`run_obbt_on_relaxation` — probe only the ``top_k``
         highest ``width × |reduced cost|`` variables per sweep instead of all

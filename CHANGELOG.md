@@ -29,6 +29,27 @@ The release procedure that produces these entries is documented in
   `DISCOPT_CONTINUOUS_MULTISTART=0` / `SolverTuning.continuous_multistart=False`
   restores the prior behavior.
 
+### Changed
+
+- **OBBT-on-auxiliaries reverse-FBBT cascade graduated default-ON** (`perf`, #208).
+  The root branch-and-reduce fixpoint now propagates OBBT-tightened auxiliary
+  (product/ratio) column bounds back onto the original variables through the
+  nonlinear term definitions — the hyperbolic/root bounds the linear McCormick rows
+  cannot express (`w=a·b ⟹ a∈[w]/[b]`, `w=aᵖ ⟹` p-th-root box, plus the
+  trilinear/multilinear and ratio-of-products generalizations). The extra aux
+  min/max LPs are budgeted to the reverse-FBBT-*reachable* columns
+  (`obbt.cascade_reachable_aux`), which is bound-neutral vs a blanket cascade but
+  drops ~87% of the aux probes, and the cascade runs root-only (no per-node cost).
+  Graduation gate (`design/ab_cascade_aux.py`, 65-instance corpus, fair 30 s
+  budget): cert-clean — 0 differential soundness violations, 0 optimum mismatches,
+  0 cert regressions, +1 cert gain (`tls2` F→T) — and net-positive with 0
+  regression: node-neutral on the convergent integer-heavy majority (converged-only
+  2228 vs 2228) and helpful on the continuous spatial-branch class (`tspn08/10/12`
+  prune to 1 node, `heatexch_gen3` 208→31 s wall; all-instances node_count −2.5%).
+  An earlier too-tight 8 s A/B had read as net-negative; that was time-limited noise
+  (`fac2`/`cvxnonsep_nsig30` converge bit-identically at a fair budget).
+  `DISCOPT_OBBT_CASCADE_AUX=0` restores the prior default-OFF behavior.
+
 ## [0.6.0] - 2026-07-12
 
 ### Removed

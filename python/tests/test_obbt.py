@@ -976,6 +976,47 @@ class TestCascadeReachableAux:
         assert np.allclose(budgeted.ub, full.ub, atol=1e-9)
 
 
+class TestCascadeAuxGraduatedDefault:
+    """#208 graduation: the reverse-FBBT aux cascade is default-ON on the real
+    solve path (`DISCOPT_OBBT_CASCADE_AUX`, default `1`), with `=0` as the opt-out.
+    Guards the flipped default so a future edit can't silently un-graduate it."""
+
+    def _stub_model(self):
+        m = Model("bil")
+        m.continuous("x", lb=0.5, ub=4.0)
+        m.continuous("y", lb=0.5, ub=4.0)
+        x, y = m._variables[0], m._variables[1]
+        m.minimize(x + y)
+        m.subject_to(x * y >= 4.0)
+        return m
+
+    def test_default_on_and_optout_off(self, monkeypatch):
+        import discopt._jax.obbt as obbt_mod
+        from discopt._jax.obbt import RootObbtResult
+        from discopt._jax.root_reduce import _stage_obbt
+
+        captured = {}
+
+        def _spy(model, lb, ub, **kw):
+            captured["cascade_aux"] = kw.get("cascade_aux")
+            return RootObbtResult(lb, ub, 0, 0, 0.0)
+
+        monkeypatch.setattr(obbt_mod, "obbt_tighten_root", _spy)
+        m = self._stub_model()
+        lb, ub = np.array([0.5, 0.5]), np.array([4.0, 4.0])
+        kw = dict(rounds=1, deadline=None, prefer_pounce=False, superposition=False)
+
+        # Default (env unset) -> cascade ON (the graduated default).
+        monkeypatch.delenv("DISCOPT_OBBT_CASCADE_AUX", raising=False)
+        _stage_obbt(m, lb.copy(), ub.copy(), None, **kw)
+        assert captured["cascade_aux"] is True
+
+        # Explicit opt-out -> OFF (legacy path preserved).
+        monkeypatch.setenv("DISCOPT_OBBT_CASCADE_AUX", "0")
+        _stage_obbt(m, lb.copy(), ub.copy(), None, **kw)
+        assert captured["cascade_aux"] is False
+
+
 # ─────────────────────────────────────────────────────────────
 # C-15: run_obbt must clamp the raw LP vertex to the NS-safe bound
 # ─────────────────────────────────────────────────────────────
