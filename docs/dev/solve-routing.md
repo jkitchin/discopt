@@ -30,10 +30,11 @@ solve_model(...)                                          [solver.py:2017]
   ├─ stream=True ───────────────────────────► _solve_streaming  (yields SolveUpdate)
   │
   ├─ EXPLICIT SOLVER SELECTOR
-  │     solver="amp" ──► solve_amp           (Adaptive Multivariate Partitioning)
-  │     solver="gp"  ──► GP detect → log-space convex reformulation → solve
-  │     solver="bb"  ──► force B&B (skip GP auto fast-path)
-  │     solver=None  ──► fall through
+  │     solver="amp"      ──► solve_amp      (Adaptive Multivariate Partitioning)
+  │     solver="gp"       ──► GP detect → log-space convex reformulation → solve
+  │     solver="gp-minlp" ──► GP-MINLP detect → y-space node relaxations + integer B&B
+  │     solver="bb"       ──► force B&B (skip GP auto fast-paths)
+  │     solver=None       ──► fall through
   │
   ├─ GDP INTERCEPT (model has disjunctions / logic)
   │     gdp_method="oa"    ──► Outer Approximation (solve_oa)
@@ -79,7 +80,7 @@ classify_problem(model)                                   [problem_classifier.py
 
 | Decision | Criterion | Options |
 |---|---|---|
-| solver selector | explicit `solver=` | amp / gp / bb / auto |
+| solver selector | explicit `solver=` | amp / gp / gp-minlp / bb / auto |
 | GDP intercept | disjunctions + `gdp_method` | oa / loa / big-m / hull |
 | reformulations | structural detectors | factorable clear/lift; integer-bilinear→MILP (only if *pure*) |
 | classify_problem | obj degree × all-cons-linear × has-int | LP / QP / MILP / MIQP / NLP / MINLP |

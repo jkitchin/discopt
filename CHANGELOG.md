@@ -12,6 +12,23 @@ The release procedure that produces these entries is documented in
 
 ### Added
 
+- **GP-structured MINLP: y-space node relaxations + integer branch-and-bound**
+  (`feat`, #116). A MINLP whose *continuous relaxation* is a geometric program
+  (posynomial objective, `posynomial ≤ monomial` / `monomial == monomial`
+  constraints) but which also carries integer variables is now solved by integer
+  branch-and-bound in which every node relaxation is the **exact convex
+  log-space NLP**: per node the box `xᵢ ∈ [lᵢ, uᵢ]` maps to
+  `yᵢ ∈ [log lᵢ, log uᵢ]` (`lᵢ > 0` required), branching is on the discrete
+  variables in `x`-space, and incumbents recover via `x = exp(y)`. Because each
+  node bound is a rigorous convex-GP bound and integer branching is exhaustive, a
+  closed tree returns a **certified** global optimum (`gap_certified=True`,
+  `gap == 0`); a certifiably-infeasible model is reported as such. New surface:
+  `discopt.gp.classify_gp_minlp` / `is_gp_minlp` / `solve_gp_minlp`, and the
+  `solver="gp-minlp"` selector. The continuation of #113 (which shipped the pure
+  continuous GP auto-route); it does **not** auto-fire from a plain `solve()`
+  unless `DISCOPT_GP_MINLP` is set (default off, pending a corpus-wide
+  differential-panel graduation), so default behaviour is unchanged. Verified
+  against the independent classic spatial B&B over a differential panel.
 - **Continuous stratified multistart at the root** (`feat`, #188). Pure-continuous
   nonconvex models had zero basin diversification on the spatial McCormick-LP
   path: the integer-centric primal heuristics (pump/ILS/diving/RINS/RENS) all

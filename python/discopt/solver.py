@@ -3168,6 +3168,16 @@ def solve_model(
         skipped when branch-and-bound streaming callbacks (``incumbent_callback``,
         ``node_callback``, ``iteration_callback``) are attached, or when
         ``skip_convex_check=True``.
+        Use ``"gp-minlp"`` to dispatch to the GP-structured-MINLP path: a model
+        whose *continuous relaxation* is a GP but which also carries integer
+        variables (each with a strictly-positive lower bound and a finite upper
+        bound) is solved by integer branch-and-bound in which every node
+        relaxation is the exact convex log-space NLP (``yᵢ = log xᵢ`` per node),
+        yielding a rigorous, certifiable global optimum (issue #116). Raises
+        ``ValueError`` if the model is not a GP-structured MINLP. This path is
+        *not* auto-routed by a plain ``solve()`` unless the ``DISCOPT_GP_MINLP``
+        environment flag is set (default off); ``solver="gp-minlp"`` is the
+        explicit opt-in. See :mod:`discopt.gp`.
     solver="amp" options
         The AMP backend also accepts ``rel_gap``, ``abs_tol``, ``max_iter``,
         ``n_init_partitions``, ``partition_method``, ``milp_time_limit``,
@@ -3433,13 +3443,14 @@ def solve_model(
     # Recognised global-solver selectors: ``None`` (default branch-and-bound,
     # with the automatic GP fast path below), ``"amp"``, ``"gurobi"``,
     # ``"mip-nlp"``,
-    # ``"gp"`` (force the GP log-space path), and ``"bb"`` (force classic
+    # ``"gp"`` (force the GP log-space path), ``"gp-minlp"`` (force the
+    # GP-structured MINLP y-space branch-and-bound), and ``"bb"`` (force classic
     # branch-and-bound, opting out of the automatic GP fast path). Reject
     # anything else rather than silently falling through to B&B.
-    if _solver not in (None, "amp", "gurobi", "mip-nlp", "gp", "bb"):
+    if _solver not in (None, "amp", "gurobi", "mip-nlp", "gp", "gp-minlp", "bb"):
         raise ValueError(
             f"Unknown solver={_solver!r}. Choose one of None, 'amp', 'gurobi', "
-            "'mip-nlp', 'gp', 'bb'."
+            "'mip-nlp', 'gp', 'gp-minlp', 'bb'."
         )
     gurobi_options = kwargs.pop("gurobi_options", None) if _solver == "gurobi" else None
 
@@ -3744,6 +3755,65 @@ def solve_model(
             raise RuntimeError("GP reformulation failed unexpectedly.")
         return result
 
+    # --- GP-MINLP (y-space node relaxations + integer B&B) fast path ---
+    if _solver == "gp-minlp":
+        import warnings
+
+        from discopt.gp import classify_gp_minlp, solve_gp_minlp
+
+        if classify_gp_minlp(model) is None:
+            raise ValueError(
+                "solver='gp-minlp' was requested but the model is not a "
+                "GP-structured MINLP. It needs at least one integer variable, "
+                "every variable (continuous and integer) with a strictly "
+                "positive lower bound, finite integer upper bounds, and a "
+                "continuous relaxation that is a geometric program (posynomial "
+                "objective, posynomial <= monomial / monomial == monomial "
+                "constraints). See discopt.gp.classify_gp_minlp for the exact "
+                "preconditions."
+            )
+
+        ignored_gp_minlp_options = []
+
+        def _note_ignored_gp_minlp(name: str, should_warn: bool) -> None:
+            if should_warn:
+                ignored_gp_minlp_options.append(name)
+
+        _note_ignored_gp_minlp("threads", threads != 1)
+        _note_ignored_gp_minlp("deterministic", deterministic is not True)
+        _note_ignored_gp_minlp("batch_size", batch_size != 16)
+        _note_ignored_gp_minlp("strategy", strategy != "best_first")
+        _note_ignored_gp_minlp("partitions", partitions != 0)
+        _note_ignored_gp_minlp("branching_policy", branching_policy != "fractional")
+        _note_ignored_gp_minlp("use_learned_relaxations", use_learned_relaxations is not False)
+        _note_ignored_gp_minlp("mccormick_bounds", mccormick_bounds != "auto")
+        _note_ignored_gp_minlp("gdp_method", gdp_method != "big-m")
+        _note_ignored_gp_minlp("cutting_planes", cutting_planes is not False)
+        _note_ignored_gp_minlp("nlp_bb", nlp_bb is not None)
+        _note_ignored_gp_minlp("lazy_constraints", lazy_constraints is not None)
+        _note_ignored_gp_minlp("incumbent_callback", incumbent_callback is not None)
+        _note_ignored_gp_minlp("node_callback", node_callback is not None)
+        if kwargs:
+            ignored_gp_minlp_options.extend(sorted(kwargs))
+        if ignored_gp_minlp_options:
+            warnings.warn(
+                "GP-MINLP fast path ignores solve_model options: "
+                + ", ".join(sorted(dict.fromkeys(ignored_gp_minlp_options))),
+                stacklevel=2,
+            )
+
+        result = solve_gp_minlp(
+            model,
+            time_limit=time_limit,
+            gap_tolerance=gap_tolerance,
+            max_nodes=max_nodes,
+            nlp_solver=nlp_solver,
+            ipopt_options=ipopt_options,
+        )
+        if result is None:  # pragma: no cover - guarded by classify_gp_minlp above
+            raise RuntimeError("GP-MINLP reformulation failed unexpectedly.")
+        return result
+
     # --- Auto GP fast path: a recognised geometric program solves exactly via
     # its log-space convex reformulation (y = log x), which is strictly better
     # than branch-and-bound (a single convex NLP gives the global optimum). This
@@ -3771,6 +3841,36 @@ def solve_model(
             )
             if gp_result is not None:
                 return gp_result
+
+    # --- Auto GP-MINLP fast path (opt-in, DISCOPT_GP_MINLP; default OFF) ---
+    # A MINLP whose continuous relaxation is a geometric program solves exactly
+    # via y-space node relaxations + integer branch-and-bound (issue #116) — each
+    # node bound is a rigorous convex-GP bound, so a closed tree certifies. This
+    # changes default-solve behaviour for a class of models, so per the repo's
+    # bound-changing-flag discipline it stays behind a default-OFF env flag until
+    # a corpus-wide differential panel graduates it; ``solver="gp-minlp"`` is the
+    # always-available explicit opt-in. ``classify_gp_minlp`` bails cheaply on
+    # non-GP / no-integer models, and the same callback/opt-out guards as the
+    # pure-GP path apply.
+    if (
+        _solver is None
+        and not _has_bb_callbacks
+        and not skip_convex_check
+        and os.environ.get("DISCOPT_GP_MINLP", "0").strip().lower() in ("1", "true", "yes", "on")
+    ):
+        from discopt.gp import classify_gp_minlp, solve_gp_minlp
+
+        if classify_gp_minlp(model) is not None:
+            gp_minlp_result = solve_gp_minlp(
+                model,
+                time_limit=time_limit,
+                gap_tolerance=gap_tolerance,
+                max_nodes=max_nodes,
+                nlp_solver=nlp_solver,
+                ipopt_options=ipopt_options,
+            )
+            if gp_minlp_result is not None:
+                return gp_minlp_result
 
     # --- Benders / Lagrangian decomposition: opt-in, structure-exploiting ---
     if decomposition is not None:
