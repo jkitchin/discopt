@@ -12,6 +12,7 @@ thing off by default.
 from __future__ import annotations
 
 import discopt.modeling as dm
+import jax
 import jax.numpy as jnp
 import numpy as np
 from discopt._jax.convexity.g_convex_inject import (
@@ -31,17 +32,25 @@ def _cut_bodies(m):
 
 
 def _feasible_never_removed(m, body_expr, cut_fns, *, box_lb, box_ub, seed=0, n=60000):
-    """No point feasible for ``body_expr ≤ 0`` violates any injected cut."""
+    """No point feasible for ``body_expr ≤ 0`` violates any injected cut.
+
+    The fuzz is fully vectorized: the ``n`` sample points are drawn as one
+    ``(n, d)`` block and every compiled body/cut is evaluated with ``jax.vmap``
+    in a single dispatch. ``rng.uniform`` fills the block row-major from the
+    same bit stream, so these are the *identical* points the old per-point loop
+    drew — same samples, same tolerance, same soundness assertion, ~1000× fewer
+    JAX dispatches.
+    """
     fbody = compile_expression(body_expr, m)
     rng = np.random.default_rng(seed)
-    checked = 0
+    x = rng.uniform(box_lb, box_ub, size=(n, len(box_lb)))
+    feasible = np.asarray(jax.vmap(fbody)(jnp.asarray(x))) <= 0.0  # feasible for the original
+    checked = int(feasible.sum())
     worst = -np.inf
-    for _ in range(n):
-        x = rng.uniform(box_lb, box_ub)
-        if float(fbody(jnp.asarray(x))) <= 0.0:  # feasible for the original
-            checked += 1
-            for fc in cut_fns:
-                worst = max(worst, float(fc(jnp.asarray(x))))  # cut body ≤ 0 form
+    if checked:
+        xf = jnp.asarray(x[feasible])
+        for fc in cut_fns:
+            worst = max(worst, float(jnp.max(jax.vmap(fc)(xf))))  # cut body ≤ 0 form
     assert worst <= 1e-7, f"injected cut removed a feasible point (residual={worst})"
     return checked
 
@@ -81,12 +90,12 @@ class TestInjectorSoundness:
         fbody = compile_expression(body, m)
         cut_fns = _cut_bodies(m)
         rng = np.random.default_rng(3)
-        separated = 0
-        for _ in range(40000):
-            x = rng.uniform([1.4, 1.6], [1.5, 1.7])
-            if float(fbody(jnp.asarray(x))) > 0.0:  # infeasible for original
-                if max(float(fc(jnp.asarray(x))) for fc in cut_fns) > 1e-7:
-                    separated += 1
+        x = rng.uniform([1.4, 1.6], [1.5, 1.7], size=(40000, 2))
+        infeasible = np.asarray(jax.vmap(fbody)(jnp.asarray(x))) > 0.0  # infeasible for original
+        cut_max = np.full(x.shape[0], -np.inf)  # max cut residual per point
+        for fc in cut_fns:
+            cut_max = np.maximum(cut_max, np.asarray(jax.vmap(fc)(jnp.asarray(x))))
+        separated = int(np.count_nonzero(infeasible & (cut_max > 1e-7)))
         assert separated > 0, "cuts are valid but vacuous — they separate nothing"
 
     def test_ge_constraint_g_concave_body(self):

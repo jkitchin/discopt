@@ -13,6 +13,8 @@ products/ratios that are neither convex nor concave.
 
 from __future__ import annotations
 
+import jax
+import jax.numpy as jnp
 import numpy as np
 import pytest
 from discopt._jax.convexity.g_products_ratios import (
@@ -45,37 +47,46 @@ class TestSignomialSecantOverestimator:
     ub = np.array([1.0, 1.0])
 
     def test_secant_envelope_is_valid(self):
+        # Vectorized over the 2000-point fuzz: the signomial value and the DC
+        # envelope are ``jax.vmap``'d across the whole sample block in one
+        # dispatch each. ``rng.uniform`` fills the block row-major, so these are
+        # the identical points the per-point loop drew — same validity assertion.
         rng = np.random.default_rng(1)
-        for _ in range(2000):
-            u = rng.uniform(self.lb, self.ub)
-            sv = _s(u, self.terms)
-            cv, cc = (
-                float(v)
-                for v in signed_signomial_dc_envelope(
-                    u, self.terms, self.lb, self.ub, overestimator="secant"
+        u = jnp.asarray(rng.uniform(self.lb, self.ub, size=(2000, self.lb.shape[0])))
+        pp, pm = jax.vmap(lambda uu: _posynomial_parts(uu, self.terms))(u)
+        sv = np.asarray(pp - pm)
+        cv, cc = (
+            np.asarray(v)
+            for v in jax.vmap(
+                lambda uu: signed_signomial_dc_envelope(
+                    uu, self.terms, self.lb, self.ub, overestimator="secant"
                 )
-            )
-            assert cv - 1e-9 <= sv <= cc + 1e-9
+            )(u)
+        )
+        assert np.all(cv - 1e-9 <= sv) and np.all(sv <= cc + 1e-9)
 
     def test_secant_never_looser_than_corner(self):
         rng = np.random.default_rng(2)
-        for _ in range(2000):
-            u = rng.uniform(self.lb, self.ub)
-            cvc, ccc = (
-                float(v)
-                for v in signed_signomial_dc_envelope(
-                    u, self.terms, self.lb, self.ub, overestimator="corner"
+        u = jnp.asarray(rng.uniform(self.lb, self.ub, size=(2000, self.lb.shape[0])))
+        cvc, ccc = (
+            np.asarray(v)
+            for v in jax.vmap(
+                lambda uu: signed_signomial_dc_envelope(
+                    uu, self.terms, self.lb, self.ub, overestimator="corner"
                 )
-            )
-            cvs, ccs = (
-                float(v)
-                for v in signed_signomial_dc_envelope(
-                    u, self.terms, self.lb, self.ub, overestimator="secant"
+            )(u)
+        )
+        cvs, ccs = (
+            np.asarray(v)
+            for v in jax.vmap(
+                lambda uu: signed_signomial_dc_envelope(
+                    uu, self.terms, self.lb, self.ub, overestimator="secant"
                 )
-            )
-            # secant tightens: cc no larger, cv no smaller
-            assert ccs <= ccc + 1e-9
-            assert cvs >= cvc - 1e-9
+            )(u)
+        )
+        # secant tightens: cc no larger, cv no smaller
+        assert np.all(ccs <= ccc + 1e-9)
+        assert np.all(cvs >= cvc - 1e-9)
 
     def test_single_monomial_strictly_tighter_interior(self):
         terms = [(1.0, 0.0, np.array([1.0]))]  # exp(u)
