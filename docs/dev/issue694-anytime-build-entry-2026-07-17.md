@@ -122,35 +122,55 @@ The kill criterion (#694: partial bound −∞/None until ≳90 % build) is **no
 any tested instance**. §8.1 is therefore *challengeable* on these structures: a
 build interrupted at a checkpoint does yield a valid weaker bound, so the
 "lose-the-bound vs overrun" fork is dissolvable in principle — the entry experiment
-**survives**, and implementation is permitted to proceed.
+**survives**, and the implementation proceeds.
 
-It was **not** implemented in this session, by design:
+**Implementation landed (default-OFF, `DISCOPT_ANYTIME_ROOT_BUILD`).** The change is
+**bound-changing** (CLAUDE.md §5), so it ships behind a default-off flag and
+graduates only after the corpus-wide differential panel passes — flag ON vs OFF over
+the in-repo corpus, `incorrect_count = 0`, no bound above its reference optimum, no
+certification regression, incumbents independently feasibility-verified, AND
+net-positive (wall/nodes/bound). The specific must-not-regress bounds are
+**casctanks 5.698, super3t −1.0, sonet23v4 −53974.375**
+(`python/tests/test_issue654_deadline_root_setup.py` pins them). Two of those three
+(super3t, sonet23v4) and the headline slow-build case are **big-corpus-only**, so
+**graduating this flag is a run-on-the-owner's-machine step** — the panel cannot be
+certified in this environment.
 
-- The change is **bound-changing** (CLAUDE.md §5): it must land behind a
-  **default-off** flag and graduate only after the corpus-wide differential panel
-  passes — flag ON vs OFF over the in-repo corpus, `incorrect_count = 0`, no bound
-  above its reference optimum, no certification regression, incumbents
-  independently feasibility-verified, AND net-positive (wall/nodes/bound). The
-  specific must-not-regress bounds are **casctanks 5.698, super3t −1.0, sonet23v4
-  −53974.375** (`python/tests/test_issue654_deadline_root_setup.py` pins them).
-- Two of those three (super3t, sonet23v4) and the headline slow-build case are
-  **only in the big corpus**, which is not present here. Graduating this flag is
-  therefore a **run-on-the-user's-machine** step, not something that can be
-  certified in this environment.
+What landed:
 
-**Recommended implementation direction** (for when the corpus is available), read
-off the curves above:
+- `build_uniform_relaxation(..., build_deadline=...)` (default `None`): the
+  constraint-row loop stops adding rows once the `perf_counter` deadline passes,
+  polling BETWEEN whole constraints (never mid-`rep`, so no partial row). Threaded
+  through `build_milp_relaxation` → `_uniform_relaxation_delegate`, and through
+  `MccormickLPRelaxer.solve_at_node` / `_solve_at_node_impl` (the cold build only —
+  the incremental fast path is already cheap). Provenance on the model:
+  `_build_truncated` / `_build_constraints_done` / `_build_constraints_total`.
+- The objective is fully linearized BEFORE the loop, so truncation never touches
+  `objective_bound_valid` for the objective itself; a truncated build is a valid
+  weaker outer relaxation (drops constraint rows only).
+- `_root_relaxation_lower_bound` sets `build_deadline = _fb_t0 + time_limit` when the
+  flag is on and applies it to the **separated (`sep`) build only** — the base build
+  is left WHOLE. Rationale (rule-1, §8): truncating the base build can un-bound an
+  objective cost column and trip its `objective_bound_valid=False → return None`
+  gate, which would LOSE the bound rather than weaken it; the documented sonet23v4
+  cost is the `sep` build (§8.6), and `sep` constructs its own relaxation, so
+  truncating it is the targeted, rule-1-safe cut.
+- Tests: `python/tests/test_issue694_anytime_root_build.py` — OFF byte-identical
+  (row count + bound), truncated build is valid & weaker (LP min ≤ full), grant
+  honored + sound under the flag. Regime-neutral: smoke (661) + the #654 suite pass
+  unchanged (flag default off ⇒ `build_deadline` is `None` everywhere).
 
-- Build the LP incrementally with a checkpoint hook that, when the fallback's own
-  grant is spent AND a finite bound is already in hand, **stops adding rows and
-  solves the prefix** — reusing the exact `_fb_stop` discipline
-  (`solver.py:2606`) already proven bound-neutral for the between-candidate poll,
-  now applied *within* the build.
-- **Order the rows** variable-bound + objective-linearizing envelopes first, then
-  remaining term envelopes by objective contribution, so the first-finite point is
-  as early as possible (§4.1).
-- Keep the legacy monolithic build as the default (`=0` opt-out) until the panel
-  graduates the flag, per §5.
+**Measured caveat (in-repo, informs the gate).** On **hda** (a control with wide/
+unbounded cost columns) the OFF fallback overruns (−28100067 in ~11–27 s against a
+3 s grant — the #654 symptom), and with the flag ON the `sep` build truncates to a
+relaxation whose cost columns are no longer bounded by any surviving row, so it
+returns **`None`** (honoring the grant in ~2 s, sound — a weaker/absent bound, never
+false). So the flag's *soundness* is universal but its *benefit* is
+structure-dependent: it retains a weaker bound on the clean finite-box #654
+structures (proxies confirmed) and can degrade to `None` on messier ones. Whether
+the real #654 instances retain their bounds is the empirical question the graduation
+panel answers; if bound-retention on that class needs improving, the **row-ordering**
+refinement (objective-critical constraints first, §4.1) is the follow-up lever.
 
 ## 6. Do-not-circumvent (unchanged, reaffirmed)
 

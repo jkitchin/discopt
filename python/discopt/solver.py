@@ -2609,6 +2609,28 @@ def _root_relaxation_lower_bound(
         already in hand (rules 1 and 2 above)."""
         return bool(have) and (time.perf_counter() - _fb_t0) >= max(0.0, float(time_limit))
 
+    # Issue #694 anytime build (opt-in, ``DISCOPT_ANYTIME_ROOT_BUILD``, default off).
+    # When on, the SEPARATED relaxation build (``sep`` below) stops adding constraint
+    # rows once the fallback's own grant is spent and returns the valid weaker partial
+    # relaxation, so its dual bound accrues and the build honors ``time_limit``
+    # instead of overrunning it by the whole (uninterruptible, pre-#694) build cost —
+    # the documented sonet23v4 cost is that ``sep`` build (16.8s; baron-gap-plan.md
+    # §8.6). A truncated build only drops constraint rows -> weaker but still-valid
+    # lower bound (§8; never the §8.1 "truncate a bound-producing solve" nor the §8.2
+    # Rust LP native deadline — this bounds the Python build only).
+    #
+    # The BASE build (``build_milp_relaxation`` just below) is deliberately left
+    # WHOLE: it feeds the ``objective_bound_valid`` soundness gate and the
+    # plain/PSD/RLT candidates, and truncating it can trip that gate (a dropped
+    # constraint can un-bound an objective cost column -> a spuriously invalid base
+    # LP -> the whole fallback would abandon every candidate, LOSING the bound rather
+    # than weakening it — the rule-1 case §8 forbids). Only the independent ``sep``
+    # build, which constructs its own relaxation and is the class's sole producer, is
+    # truncated. ``None`` off the flag => the legacy monolithic build, byte-identical.
+    _build_deadline: Optional[float] = None
+    if getattr(_tuning(), "anytime_root_build", False):
+        _build_deadline = _fb_t0 + max(0.0, float(time_limit))
+
     try:
         terms = classify_nonlinear_terms(model)
         relax, _relax_info = build_milp_relaxation(
@@ -2756,7 +2778,7 @@ def _root_relaxation_lower_bound(
                 from discopt._jax.mccormick_lp import MccormickLPRelaxer
 
                 node_res = MccormickLPRelaxer(model).solve_at_node(
-                    root_lb, root_ub, time_limit=budget
+                    root_lb, root_ub, time_limit=budget, build_deadline=_build_deadline
                 )
                 if node_res.lower_bound is not None and np.isfinite(node_res.lower_bound):
                     sep_bound = float(node_res.lower_bound)

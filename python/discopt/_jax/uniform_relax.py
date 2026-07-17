@@ -47,6 +47,7 @@ from __future__ import annotations
 import dataclasses
 import math
 import os
+import time
 from typing import Callable, Optional, cast
 
 import numpy as np
@@ -2960,6 +2961,7 @@ def build_uniform_relaxation(
     skip_separable_floor: bool = False,
     skip_convex_lift: bool = False,
     disc_state: object = None,
+    build_deadline: Optional[float] = None,
 ) -> UniformRelaxation:
     """Build the uniform factorable relaxation of ``model`` over ``box``.
 
@@ -2969,6 +2971,22 @@ def build_uniform_relaxation(
     box : optional ``(flat_lb, flat_ub)`` — the B&B node box in flat variable
         order (like ``build_milp_relaxation``'s ``bound_override``). Defaults to
         the model's declared variable bounds.
+    build_deadline : float, optional
+        Issue #694 anytime/incremental build. When set (a ``time.perf_counter``
+        absolute time), the constraint-row loop stops adding rows once the deadline
+        passes and returns the relaxation built *so far*. Default ``None`` (the
+        legacy monolithic build; **byte-identical** to before). A truncated build
+        is still a **valid outer relaxation**: dropping constraint rows only enlarges
+        the feasible region, so its LP minimum is a valid (weaker) lower bound —
+        never falsified (baron-gap-plan.md §8 "weaken but never falsify"). The
+        objective is fully linearized BEFORE the loop, so ``objective_bound_valid``
+        (and the box/separable objective floor) are unaffected by truncation — a
+        truncated finite-box relaxation therefore still carries a finite bound (the
+        #694 entry experiment: finite by 8–45 % of build on every tested structure).
+        The result records ``milp._build_truncated`` / ``_build_constraints_done`` /
+        ``_build_constraints_total``. Gated default-off via
+        ``SolverTuning.anytime_root_build``; only ``_root_relaxation_lower_bound``
+        passes a non-``None`` value today.
     rlt_quad : bool, default False
         Enable the quadratic constraint-factor RLT pass (issue #640 Bucket 2):
         multiply each degree-2 polynomial constraint by variable bound factors,
@@ -3020,7 +3038,21 @@ def build_uniform_relaxation(
             obj_lin = obj_lin.scaled(-1.0)
 
     # Constraints (normalized ``body sense 0``) -> rows.
+    #
+    # Issue #694 anytime build: when ``build_deadline`` is set, stop repping
+    # constraints once the deadline passes and keep the rows built so far. The
+    # objective (above) is already fully linearized, so a prefix of the constraint
+    # rows is a valid weaker outer relaxation (dropping rows only enlarges the
+    # feasible set -> the LP min stays a valid lower bound). The deadline is polled
+    # BETWEEN whole constraints (never mid-``rep``), so no partial/invalid row is
+    # ever emitted. Default ``None`` -> the whole loop runs, byte-identical.
+    n_constraints = len(model._constraints)
+    constraints_done = 0
+    build_truncated = False
     for con, cnode in zip(model._constraints, dag.constraints):
+        if build_deadline is not None and time.perf_counter() >= build_deadline:
+            build_truncated = True
+            break
         lc = ctx.rep(cnode)
         sense = con.sense
         rhs_shift = float(con.rhs)
@@ -3031,11 +3063,15 @@ def build_uniform_relaxation(
         elif sense == "==":  # body == rhs (both directions)
             ctx.add_row(lc.coeffs, rhs_shift - lc.const)
             ctx.add_row(lc.scaled(-1.0).coeffs, -(rhs_shift) + lc.const)
+        constraints_done += 1
 
     # Quadratic constraint-factor RLT (issue #640 Bucket 2, gated). Runs AFTER the
     # base build so every product column the base decomposition registered is
-    # available to seed the on-demand degree-3 lifting.
-    if rlt_quad:
+    # available to seed the on-demand degree-3 lifting. Skipped on a truncated
+    # anytime build (#694): it only *adds* rows (tightening), so skipping it when
+    # the build deadline is already spent is sound (weaker, never falsified) and
+    # keeps the truncation honoring the deadline.
+    if rlt_quad and not build_truncated:
         _emit_quadratic_rlt(ctx, model, flat_lb, flat_ub)
 
     obj_offset = obj_lin.const
@@ -3165,6 +3201,12 @@ def build_uniform_relaxation(
     # spurious "unbounded"). The node solver falls back to it to report a sound
     # bound instead of declining. ``None`` when no finite floor exists.
     milp._objective_floor = obj_box_lb if math.isfinite(obj_box_lb) else None
+    # Issue #694 anytime-build provenance (informational; the LP is sound either
+    # way). ``_build_truncated`` is True when the constraint loop stopped early on
+    # the ``build_deadline``; the two counters record coverage for diagnostics/tests.
+    milp._build_truncated = build_truncated
+    milp._build_constraints_done = constraints_done
+    milp._build_constraints_total = n_constraints
     return UniformRelaxation(
         model=milp,
         n_orig=ctx.n_orig,

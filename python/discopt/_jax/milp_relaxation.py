@@ -265,6 +265,13 @@ class MilpRelaxationModel:
         # Rigorous box-interval objective floor (#640 Bucket 2, nvs22); set by
         # ``build_uniform_relaxation``. ``None`` unless a finite floor was computed.
         self._objective_floor: Optional[float] = None
+        # Issue #694 anytime-build provenance, set by ``build_uniform_relaxation``.
+        # ``_build_truncated`` is True when the constraint-row loop stopped early on
+        # a ``build_deadline`` (the relaxation is still a valid, weaker outer
+        # approximation). Default: a full, un-truncated build.
+        self._build_truncated: bool = False
+        self._build_constraints_done: Optional[int] = None
+        self._build_constraints_total: Optional[int] = None
         # Warm-start state for the pure-LP simplex fast path (cutting-plane loop):
         # the previous solve's optimal basis and the (structural-cols, rows) it was
         # produced at, so the next ``.solve()`` on the SAME columns with rows only
@@ -1677,6 +1684,7 @@ def _uniform_relaxation_delegate(
     skip_separable_floor: bool = False,
     skip_convex_lift: bool = False,
     disc_state: object = None,
+    build_deadline: Optional[float] = None,
 ) -> tuple["MilpRelaxationModel", dict]:
     """Build the default relaxation through the uniform factorable engine (#632).
 
@@ -1703,6 +1711,7 @@ def _uniform_relaxation_delegate(
         skip_separable_floor=skip_separable_floor,
         skip_convex_lift=skip_convex_lift,
         disc_state=disc_state,
+        build_deadline=build_deadline,
     )
     milp = rel.model
     n_total = int(np.size(milp._c))
@@ -1780,6 +1789,7 @@ def build_milp_relaxation(
     rlt_level1: bool = False,
     skip_separable_floor: bool = False,
     skip_convex_lift: bool = False,
+    build_deadline: Optional[float] = None,
 ) -> tuple["MilpRelaxationModel", dict]:
     """Build a MILP relaxation with piecewise McCormick for bilinear/monomial terms.
 
@@ -1870,6 +1880,7 @@ def build_milp_relaxation(
         skip_separable_floor=skip_separable_floor,
         skip_convex_lift=skip_convex_lift,
         disc_state=disc_state,
+        build_deadline=build_deadline,
     )
 
 

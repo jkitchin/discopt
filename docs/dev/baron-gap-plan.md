@@ -483,11 +483,22 @@ elsewhere.
    product-envelopes must precede other rows, else −∞ until ~40 %); (b) a truncated
    (smaller) relaxation is often *more* solvable within budget — hda's full LP
    `iteration_limit`s while every prefix solves `optimal`, the exact "`plain` is
-   None" mode. **Not implemented this session** (bound-changing → default-off flag +
-   §5 corpus panel to graduate; super3t/sonet23v4 are big-corpus-only and absent
-   here, so the gate is a run-on-owner's-machine step). §8.1/§8.2 remain
-   un-circumvented: this changes the build's *precondition*, it does not truncate a
-   native solve or add a Rust LP deadline.
+   None" mode. **Implementation landed default-OFF** (`DISCOPT_ANYTIME_ROOT_BUILD`):
+   `build_uniform_relaxation` gained a `build_deadline` that stops the constraint-row
+   loop when spent (a valid weaker relaxation), threaded through
+   `build_milp_relaxation` and `solve_at_node`; `_root_relaxation_lower_bound`
+   applies it to the `sep` build only (the base build stays whole — truncating it can
+   trip `objective_bound_valid=False → return None` and LOSE the bound, the rule-1
+   case). OFF is byte-identical (smoke 661 + #654 suite green); tests in
+   `test_issue694_anytime_root_build.py`. **§5 graduation is a run-on-owner's-machine
+   step** (super3t/sonet23v4 are big-corpus-only): flag ON-vs-OFF panel, must-not-
+   regress casctanks 5.698 / super3t −1.0 / sonet23v4 −53974.375, cert-clean +
+   net-positive. Measured caveat: on hda (wide/unbounded cost columns) flag ON returns
+   `None` (sound, honors grant) rather than a weaker bound — the benefit is
+   structure-dependent (retained on clean finite-box #654 structure per the proxies;
+   the constraint row-ordering refinement is the follow-up if the class needs it).
+   §8.1/§8.2 remain un-circumvented: this changes the build's *precondition*, it does
+   not truncate a native solve or add a Rust LP deadline.
 
 ---
 

@@ -519,6 +519,41 @@ class SolverTuning:
     with 0% regression). Set ``DISCOPT_ROOT_FIXPOINT=0`` to restore the old
     default OFF."""
 
+    anytime_root_build: bool = field(
+        default_factory=lambda: _env_flag("DISCOPT_ANYTIME_ROOT_BUILD", default=False)
+    )
+    """Make the root-relaxation *fallback* build anytime/incremental so its dual
+    bound accrues and the build can honor the grant (``DISCOPT_ANYTIME_ROOT_BUILD``,
+    default **off**; §5 bound-changing; issue #694).
+
+    #654 left a measured floor: on a class of large sparse network-design/QAP/graph
+    -partition MINLPs (sonet\\*, qap, eg_all_s, super3t) the fallback's dual bound is
+    produced by a single **uninterruptible** McCormick-LP *build* (sonet23v4: 16.8 s,
+    not bounded by the solve's ``time_limit``), so ``solve(time_limit=2)`` still took
+    24.5 s — truncate the build and you lose the bound (baron-gap-plan.md §8.1),
+    don't and you blow the budget. This flag dissolves that fork: when on,
+    ``_root_relaxation_lower_bound`` passes a ``build_deadline`` (its own grant) to
+    the base ``build_milp_relaxation`` and the separated ``solve_at_node`` build, so
+    the constraint-row loop **stops adding rows once the grant is spent** and the
+    partial relaxation is solved for a valid (weaker) bound.
+
+    Sound by construction: a relaxation with FEWER constraint rows is still a valid
+    outer approximation, so its LP minimum is a valid lower bound — dropping rows can
+    only *weaken*, never falsify (the "weaken but never falsify" property of
+    baron-gap-plan.md §8, and the #694 entry experiment: a finite bound exists by
+    8–45 % of build on every tested structure, because the objective is fully
+    linearized before the constraint loop). It does NOT re-add the Rust LP native
+    deadline (§8.2, TX2b): this truncates the Python relaxation *build*, never the LP
+    *solve*. **Default off** pending the §5 corpus-wide differential panel (flag ON
+    vs OFF; ``incorrect_count = 0``, no bound above its reference optimum, no
+    certification regression, incumbents feasibility-verified) AND net-positive on
+    the #654 class — with the must-not-regress bounds casctanks 5.698, super3t −1.0,
+    sonet23v4 −53974.375 kept sound. Entry evidence:
+    ``docs/dev/issue694-anytime-build-entry-2026-07-17.md``. NOTE: with the flag on
+    the fallback bound becomes timing-dependent (an anytime algorithm), so it is not
+    bit-reproducible run-to-run; the default (off) path is unaffected and stays
+    deterministic."""
+
     # NOTE (#581): ``DISCOPT_NODE_REDUCE`` (per-node cheap reduction: cutoff-FBBT +
     # free DBBT from node-LP reduced costs + integer RC-fixing, feeding the
     # tightened box to the children) was DEPRECATED and removed. It was a

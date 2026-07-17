@@ -888,6 +888,7 @@ class MccormickLPRelaxer:
         psd_max_rounds: int = 8,
         want_marginals: bool = False,
         skip_pool_separators: bool = False,
+        build_deadline: Optional[float] = None,
     ) -> MccormickLPResult:
         """Solve the McCormick LP relaxation restricted to the given bound box.
 
@@ -931,6 +932,7 @@ class MccormickLPRelaxer:
             psd_max_rounds=psd_max_rounds,
             want_marginals=want_marginals,
             skip_pool_separators=skip_pool_separators,
+            build_deadline=build_deadline,
         )
         # C-43 pool-infeasible re-verification. Only relevant when (a) this was a
         # regular node solve (not a root pool-capture call, which passes no pool),
@@ -1057,6 +1059,7 @@ class MccormickLPRelaxer:
         psd_max_rounds: int = 8,
         want_marginals: bool = False,
         skip_pool_separators: bool = False,
+        build_deadline: Optional[float] = None,
     ) -> MccormickLPResult:
         """Solve the McCormick LP relaxation restricted to the given bound box.
 
@@ -1130,6 +1133,11 @@ class MccormickLPRelaxer:
                 return _fast
 
         try:
+            # Issue #694 anytime build: ``build_deadline`` (a ``perf_counter`` time,
+            # default None) truncates the cold relaxation build's constraint loop
+            # once spent, yielding a valid weaker relaxation. The incremental fast
+            # path above is already cheap, so it ignores the deadline; only this
+            # cold, row-generating build (the ~16.8s sonet23v4 cost, #694) honors it.
             milp, varmap = build_milp_relaxation(
                 self._model,
                 self._terms,
@@ -1140,6 +1148,7 @@ class MccormickLPRelaxer:
                 ),
                 superposition=self._superposition,
                 rlt_level1=self._rlt_applicable,
+                build_deadline=build_deadline,
             )
         except Exception:
             # Build failures here are otherwise invisible: the result silently
