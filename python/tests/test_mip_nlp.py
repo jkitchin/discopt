@@ -4714,7 +4714,11 @@ def test_oa_rnlp_initialization_adds_cuts_at_relaxation_point(monkeypatch):
         max_iterations=0,
     )
 
-    assert result.status == "infeasible"
+    # max_iterations=0 exits before any master solve or incumbent: the search is
+    # INCONCLUSIVE (iteration limit), not a proof of infeasibility -> "unknown",
+    # not the (false) "infeasible" this used to report. The rNLP cut-injection
+    # under test is unaffected.
+    assert result.status == "unknown"
     assert cut_points[0].tolist() == pytest.approx(relaxation_point.tolist())
 
 

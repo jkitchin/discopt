@@ -288,6 +288,42 @@ class TestOAEdgeCases:
         assert result.gap is None
         assert result.x == {}
 
+    def test_no_incumbent_on_limit_is_not_reported_infeasible(self):
+        """A resource-limited OA run with no incumbent must NOT claim "infeasible".
+
+        Regression (#282 investigation): the multitree OA terminal path fell
+        through to ``status="infeasible"`` whenever it finished with no incumbent
+        and no unresolved NLP failure — INCLUDING when it merely hit the time
+        limit, iteration limit, or was stopped by a user termination hook. That
+        is a false infeasibility certificate on a demonstrably FEASIBLE model: a
+        solver that ran out of budget has proved nothing about feasibility
+        (CLAUDE.md §1). Only a genuine ``master_infeasible`` proof may report
+        "infeasible" (covered by ``test_infeasible_model`` above).
+        """
+        from discopt.solvers.oa import solve_oa
+
+        # Clearly feasible convex MINLP (optimum x=y=2, obj=4).
+        m = dm.Model("feasible_but_limited")
+        x = m.integer("x", lb=0, ub=5)
+        y = m.integer("y", lb=0, ub=5)
+        m.maximize(x + y)
+        m.subject_to(x**2 + y**2 <= 10)
+
+        # Force termination at iteration 0, before any incumbent is found, via a
+        # user termination hook. This deterministically drives the no-incumbent
+        # terminal path with final_reason="user_termination".
+        result = solve_oa(m, time_limit=60, termination_hook=lambda ctx: True)
+        assert result.status != "infeasible", (
+            "OA reported a feasible model as infeasible after early termination "
+            f"(status={result.status!r})"
+        )
+        assert result.status == "unknown"
+        assert result.objective is None
+        assert result.gap_certified is False
+        trace = result.mip_nlp_trace
+        assert trace is not None
+        assert trace.get("termination_reason") == "user_termination"
+
     @pytest.mark.slow
     def test_single_iteration_optimal(self):
         """NLP relaxation is already integer-feasible → immediate convergence."""
@@ -810,7 +846,12 @@ class TestOARobustnessOptions:
             cycling_check=False,
         )
 
-        assert result.status == "infeasible"
+        # max_iterations=1 exhausts the iteration budget with no incumbent (the
+        # monkeypatched master never turns infeasible), so the search is
+        # INCONCLUSIVE, not a proof of infeasibility -> "unknown", not the
+        # (false) "infeasible" this used to report. The no-good-cut mechanism
+        # under test is unaffected.
+        assert result.status == "unknown"
         assert len(no_good_calls) == expected_calls
 
     def test_multitree_no_good_cut_skips_mixed_integer_model(
@@ -863,7 +904,9 @@ class TestOARobustnessOptions:
             cycling_check=False,
         )
 
-        assert result.status == "infeasible"
+        # Iteration budget exhausted with no incumbent -> inconclusive "unknown"
+        # (not a false "infeasible"); the mechanism under test is unaffected.
+        assert result.status == "unknown"
         assert no_good_calls == []
 
     def test_multitree_no_good_cut_uses_integer_binary_expansion_when_enabled(
@@ -919,7 +962,9 @@ class TestOARobustnessOptions:
             cycling_check=False,
         )
 
-        assert result.status == "infeasible"
+        # Iteration budget exhausted with no incumbent -> inconclusive "unknown"
+        # (not a false "infeasible"); the mechanism under test is unaffected.
+        assert result.status == "unknown"
         assert len(no_good_expansions) == 1
         assert no_good_expansions[0] is not None
         assert no_good_expansions[0].bit_count == 2
