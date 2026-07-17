@@ -466,6 +466,46 @@ panel green for 3 consecutive nightlies before default-on.
 > lever for this class is cross-square/joint-correlation coupling, a distinct
 > higher-risk research direction — not `z`-polytope cuts.
 
+> **Falsified (2026-07-17, issue #677 — "joint-correlation / degree-4 moment
+> coupling certifies the autocorr class").** #673's re-scope pointed at the only
+> remaining lever: coupling the *joint* realization of `(C_1,…,C_K)` via the
+> degree-4 moment (Lasserre **level-2**) relaxation over `s ∈ {±1}`. Entry
+> experiment (before any engine integration, per #677's kill criterion): solve
+> the **combined** relaxation — the strongest form — the level-2 moment matrix
+> `M(y) ⪰ 0` (which *does* see the cross-square degree-4 couplings the pairwise
+> matrix misses) **plus** the per-square parity secant cuts `t_k ≥ (u+v)y_k−uv`
+> (pseudo-moments need not put `(E[C_k],E[C_k²])` in the integer hull, so the
+> secant cuts genuinely add to the SDP). Solved with CLARABEL/SCS:
+>
+> | n | parity floor | level-2+secant | movement | opt |
+> |---|---|---|---|---|
+> | 6 | 3 | 5.00 | **+2.0** | 7 |
+> | 8 | 4 | 4.76 | +0.76 | 8 |
+> | 10 | 5 | 5.77 | +0.77 | 13 |
+> | 13 | 6 | 6.00 | +0.0 (=opt) | 6 |
+> | 20 | 10 | 10.001 | ~0 | — |
+> | **25** (target) | **12** | **11.9999** | **~0** | 36 |
+>
+> The lever is **real but decays to zero by the target scale**: it moves the
+> bound above the floor only for small n (n=6 +2.0, n=8/10 ≈+0.76), the absolute
+> movement shrinks with n, and at n=25 the combined bound sits exactly at the
+> parity floor (11.9999, optimum 36). Worse, the mechanism is **intractable
+> in-solver**: the level-2 moment matrix is dense `326×326` at n=25 (15,275
+> moment vars), ~2 min for a *single* root relaxation at loose accuracy — hopeless
+> against the 60 s budget, before even considering per-node use. #677 direction 2
+> (the LABS Fourier sum-rule) is a single `vᵀM v ≥ 0` inequality **subsumed by
+> the level-1 PSD closure** #673 already found inert (12.0), so it is dead by
+> domination. Pure level-2 *without* the secant cuts is actually **weaker** than
+> the floor on most n (n=8 3.67<4, n=13 3.47<6) — it drops the per-square
+> integrality the reformed model exploits. **No code shipped.** This settles the
+> autocorr **dual-side** wall: no proposed relaxation lever (BQP/PSD `z`-polytope,
+> degree-4 moment, sum-rule) moves the n=25 bound off the parity floor tractably;
+> the LABS/merit-factor lower bound is genuinely hard (consistent with the weak
+> LP/SDP relaxations in that literature). The shipped practical state stands —
+> incumbent seeding returns the true optimum 36 in ~0.5 s; only certification is
+> open, and it is open on a hard-bound, not an engine, gap. Reproduction:
+> `discopt_benchmarks/scripts/joint_correlation_moment_probe.py`.
+
 ## 7. Sequencing & rationale (revised by the measurement)
 
 ```

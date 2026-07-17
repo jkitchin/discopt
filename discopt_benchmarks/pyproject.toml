@@ -75,6 +75,9 @@ select = ["E", "F", "W", "I", "N", "UP", "B", "A", "C4", "SIM", "TCH"]
 # A/N/M/V are LP constraint matrices / moment matrices in the issue-673
 # z-polytope falsification (standard linear-algebra notation).
 "scripts/bqp673_zpolytope_falsification.py" = ["N803", "N806"]
+# B/M/K are the monomial basis / moment matrix / lag count in the issue-677
+# joint-correlation moment probe (standard linear-algebra notation).
+"scripts/joint_correlation_moment_probe.py" = ["N803", "N806"]
 
 [tool.coverage.run]
 source = ["benchmarks", "utils"]
