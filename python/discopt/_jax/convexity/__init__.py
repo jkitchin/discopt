@@ -23,6 +23,12 @@ Ceccon, Siirola, Misener (2020), "SUSPECT: MINLP special structure
 from __future__ import annotations
 
 from .certificate import certify_convex, refresh_convex_mask
+from .g_convexity import (
+    GConvexCertificate,
+    certify_g_convex,
+    is_g_convex_pointwise,
+    least_convexifying_rho,
+)
 from .lattice import Curvature
 from .rules import (
     OACutConvexity,
@@ -34,11 +40,15 @@ from .rules import (
 
 __all__ = [
     "Curvature",
+    "GConvexCertificate",
     "OACutConvexity",
     "certify_convex",
+    "certify_g_convex",
     "classify_constraint",
     "classify_expr",
     "classify_model",
     "classify_oa_cut_convexity",
+    "is_g_convex_pointwise",
+    "least_convexifying_rho",
     "refresh_convex_mask",
 ]
