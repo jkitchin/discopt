@@ -1,0 +1,81 @@
+{
+  "issue": 671,
+  "experiment": "hda exact / high-precision LP entry experiment",
+  "date": "2026-07-17",
+  "exported_lp": {
+    "file": "hda_root_lp.npz",
+    "shape_rows": 3008,
+    "shape_cols": 1140,
+    "nnz": 7715,
+    "objective_nnz": 42,
+    "structure": "pure inequalities A_ub x <= b_ub plus finite variable bounds; no equalities",
+    "raw_coef_spread": 2.837e26,
+    "matches_diagnosis_raw_spread": true
+  },
+  "reference_values": {
+    "true_optimum": -5964.534084,
+    "candidate_A_loose_floor": -1.80e10,
+    "note": "candidate A (#662) Neumaier-Shcherbina safe bound; sound but loose"
+  },
+  "float64_objective_lp": {
+    "highs_simplex": "infeasible (false)",
+    "highs_ds": "infeasible (false)",
+    "highs_ipm": "infeasible (false)"
+  },
+  "float64_feasibility_elastic_phase1": {
+    "status": "optimal",
+    "min_total_constraint_violation": 1.821e-10,
+    "verdict": "FEASIBLE (confirms diagnosis 1.8e-10)"
+  },
+  "svd_structure_raw": {
+    "sigma_max": 8.910e10,
+    "sigma_min_nz": 8.955e-17,
+    "numerical_rank_1e-14": 1127,
+    "cols": 1140,
+    "rank_deficiency": 13
+  },
+  "sound_presolve_core": {
+    "rows": 2883,
+    "cols": 1096,
+    "note": "presolve barely reduces the system; exact solve faces near-full scale (rank-reduction lever confirmed dead)"
+  },
+  "E1_tau_relaxation_homotopy": {
+    "description": "min c^T x s.t. A x <= b + tau, bounds; tau -> 0+ approaches the true LP optimum",
+    "measurements": {
+      "1e-2": -75611.718128,
+      "1e-4": -64798.826324,
+      "1e-6": "unbounded (float64 numerical noise)",
+      "1e-7": -64675.372895,
+      "1e-8": -64675.261466,
+      "1e-9": -64675.250130,
+      "1e-10": -64675.248945,
+      "1e-11": "unbounded (float64 numerical noise)",
+      "1e-12": "infeasible (float64)",
+      "0": "infeasible (float64)"
+    },
+    "converged_tight_bound": -64675.25,
+    "gap_to_opt_abs": 58710.7,
+    "orders_of_magnitude_tighter_than_candidate_A": 5.4
+  },
+  "E2_infeasibility_core": {
+    "float64_core_rows": [1393, 1395],
+    "float64_core_cols": [42, 1026, 1027],
+    "core_block": [
+      "row 1393: -x[1026] - 6.211261e-10*x[1027] <= -6.590951e-11",
+      "row 1395: -x[42] + 6.300000e+10*x[1026] <= 0"
+    ],
+    "column_bounds": {
+      "x42": [0.01234706, 0.1495431],
+      "x1026": [1.959851e-13, 2.373700e-12],
+      "x1027": [0.1022913, 0.1118231]
+    },
+    "float64_highs_verdict": "infeasible",
+    "exact_rational_verdict": "FEASIBLE",
+    "exact_witness_max_violation": 0.0,
+    "interpretation": "Arrhenius 6.3e10 pre-exponential coupled to a ~1e-13 aux and a 6.2e-10 envelope slope; feasibility hinges on a 6.8e-11-scale term vs a 6.59e-11 RHS, below HiGHS's ~1e-7 feasibility tolerance. Exact arithmetic keeps the term and finds a feasible point; float64 drops it and false-infeasibles."
+  },
+  "verdict": "CONFIRMED",
+  "verdict_detail": "Higher-precision/exact arithmetic (a) resolves the false-infeasible (2-row core: float64 infeasible, exact feasible with zero-violation witness), and (b) the recoverable root McCormick LP bound is ~-6.468e4 -- about 5.4 orders of magnitude tighter than candidate A's -1.80e10. The residual gap to opt -5964.53 is the genuine McCormick relaxation gap (a relaxation property, not a precision artifact) and is not closable by LP precision alone.",
+  "tractability": "Full exact-rational solve is intractable with a naive pure-Python dense tableau (2883x1096 irreducible core; presolve does not shrink it), but is routine for a real exact-LP library (QSopt_ex / SoPlex-exact) at this size. A float64 solve with a tiny feasibility relaxation (tau~1e-8) already recovers the tight bound in milliseconds, indicating LP iterative refinement (Gleixner-Steffy-Wolter) is a cheaper sufficient lever than full exact rational.",
+  "recommendation": "GO (research-scale), root-only / numerical-failure-triggered. Integrate an LP iterative-refinement layer (f128/rational residuals over feral, GSW-style) or an exact-rational LP invoked only when a node LP false-fails -- NOT on the hot per-node path. Exact LP fixes certificate soundness+tightness of the root bound but does not by itself solve hda (the McCormick gap to opt remains a branch-and-reduce / relaxation problem)."
+}
