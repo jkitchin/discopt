@@ -1,0 +1,56 @@
+{
+  "issue": 661,
+  "experiment": "qap Shor-SDP entry experiment (feasibility spike, local scratch, no production code changed)",
+  "date": "2026-07-17",
+  "instance": "qap.nl (Koopmans-Beckmann QAP, n=15, 225 binaries, 30 assignment equalities)",
+  "solver_env": "cvxpy 1.8.1; SCS 3.2.11; CLARABEL",
+  "reference": {
+    "optimum": 388214.0,
+    "published_best_dual": 149106.0,
+    "mccormick_lp_root_bound": 0.0,
+    "rlt1_lp_root_bound_gauge": 352890.9
+  },
+  "qap_meta": {
+    "n": 225,
+    "n_eq": 30,
+    "offset": 0.0,
+    "Q_sym_eig_min": -164905.0,
+    "Q_sym_eig_max": 476724.0,
+    "note": "eig of the symmetrized Q used here; issue quotes the raw-Q spectrum [-330k,+953k]"
+  },
+  "real_qap_runs": {
+    "shor_plain_SCS": {
+      "bound": null,
+      "status": "unbounded",
+      "note": "M>=0 + diag(X)=x + assignment-on-x ONLY (no upper bound on X): the indefinite objective is unbounded below over the PSD cone X>=xx'. Plain Shor as literally posed is useless on qap."
+    },
+    "shor_plain_CLARABEL": {
+      "bound": null,
+      "status": "did-not-finish-in-budget",
+      "time_s": ">300",
+      "note": "same unbounded model"
+    },
+    "shor_rlt1_gangster_SCS": {
+      "bound": 377098.38,
+      "status": "optimal",
+      "time_s": 86.3,
+      "eps": 1e-05,
+      "note": "Shor PSD + diag(X)=x + assignment-on-x + lifted-assignment RLT (A_eq . X = b . x) + McCormick box on X + gangster (X_ij=0 for same-row/col pairs). Sound: 377098 <= 388214 optimum. Approximate (first-order; not yet a rigorous certificate)."
+    },
+    "shor_rlt1_gangster_CLARABEL": {
+      "bound": 357858.09,
+      "status": "user_limit",
+      "time_s": 327.3,
+      "note": "interior-point cross-check; did NOT converge in budget (dense KKT over ~25k SDP-cone vars + ~150k linear rows). Iterate still climbing; confirms the same >350k ballpark. Interior-point is the wrong tool at this scale."
+    }
+  },
+  "synthetic_validation": [
+    {"n": 4, "opt": 490.0, "mccormick": 0.0, "shor_plain": -270.0, "shor_rlt1_gangster": 490.0,
+     "note": "Shor+RLT1+gangster hits the exact brute-force optimum; plain Shor is negative (worse than McCormick 0)."},
+    {"n": 5, "opt": 771.0, "mccormick": 0.0, "shor_plain": -668.24, "shor_rlt1_gangster": 771.0,
+     "note": "exact optimum recovered by Shor+RLT1+gangster"}
+  ],
+  "verdict": "CONFIRMED (with a formulation caveat): plain Shor is FALSIFIED (unbounded/negative), but Shor + lifted-assignment RLT + gangster (ZKRW-style) gives 377098 on qap in 86s with SCS -- above RLT-1's LP gauge (352891), far above the published dual (149106), 97.1% of the optimum, and sound. Kill threshold (>50000) cleared by ~7x.",
+  "tractability": "Tractable at qap scale with a FIRST-ORDER SDP solver (SCS, 86s for the root relaxation). Interior-point (Clarabel) does not finish in budget. Bound is approximate (first-order); a rigorous certificate needs safe dual post-processing (SDP analogue of the Neumaier-Shcherbina bound already used on the RLT-1 LP).",
+  "recommendation": "Conditional GO on relaxation strength; not plain Shor. (1) The useful bound needs lifted-assignment RLT rows + gangster (structure the RLT-1 LP path already builds), NOT plain Shor. (2) The SCS value is not yet a rigorous lower bound -- production integration must derive a safe dual bound from the SDP dual. (3) 86s/root is fine as a root cut but not per-node. (4) A first-order SDP solver is required; interior-point does not scale here. Suggested follow-up: optional root-only strong-Shor SDP bound behind a default-off flag, first-order solver + safe-dual post-process, joined by max with the existing McCormick/PSD/RLT-1 candidates."
+}
