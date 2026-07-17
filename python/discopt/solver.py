@@ -406,6 +406,33 @@ def _obbt_topk_enabled() -> bool:
     return os.environ.get("DISCOPT_OBBT_TOPK", "").strip().lower() in ("1", "true", "yes", "on")
 
 
+def _root_lp_probe_tight_enabled() -> bool:
+    """Whether the #282 tightened-box root LP probe is on (env flag, default OFF).
+
+    The spatial path keeps the McCormick LP relaxer for the whole search only if a
+    one-shot "probe" solve yields a valid bound at the root. That probe was run over
+    the *raw declared* model bounds (``flat_variable_bounds(model)``), not the
+    FBBT/OBBT-tightened root box. On a model with unbounded declared bounds (the
+    process-synthesis ``*hfsg`` family, issue #282, has continuous variables
+    declared ``[0, inf]``) the LP is unbounded/None over that raw box, so the
+    relaxer is discarded (``_mc_mode = "none"``) and the whole spatial search falls
+    back to a far looser alphaBB/interval/NLP root bound — even though the SAME
+    relaxer produces a valid, much tighter bound on the tightened box the solver has
+    already computed (measured: syn30hfsg root excess +955% -> +571%, syn40hfsg
+    +3041% -> +2350%). With the flag on, the probe uses the tightened root box, so
+    the relaxer is kept and every node gets the LP bound. Sound: the probe only
+    decides whether to keep the relaxer; each node still solves its own (subset) box
+    and the LP is a rigorous outer approximation. Flag-gated (bound-changing) until
+    the CLAUDE.md Regime-2 panel graduates it. Default OFF.
+    """
+    return os.environ.get("DISCOPT_ROOT_LP_PROBE_TIGHT", "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+
+
 # P3 branch-and-reduce: per-node probing (issue #632). When the in-tree FBBT
 # pass runs (``in_tree_presolve_stride > 0``), also probe discrete variables at
 # the node — tentatively fix each at a bound, re-run cutoff-FBBT, and contract
@@ -5980,6 +6007,25 @@ def solve_model(
                     # can actually relax.
                     try:
                         _probe_lb, _probe_ub = flat_variable_bounds(model)
+                        # #282 (flag-gated): probe the relaxer over the FBBT/OBBT-
+                        # TIGHTENED root box rather than the raw declared model
+                        # bounds. The keep/discard decision above solves the
+                        # McCormick LP once at ``(_probe_lb, _probe_ub)``; on a
+                        # model with unbounded declared bounds (e.g. syn30hfsg's
+                        # x0..x4 = [0, inf]) that LP is unbounded/None over the raw
+                        # box, so the relaxer is wrongly discarded (``_mc_mode =
+                        # "none"``) and the whole spatial search falls back to a far
+                        # looser alphaBB/interval/NLP root bound — even though the
+                        # SAME relaxer yields a valid, much tighter bound on the
+                        # already-computed tightened box (syn30hfsg root +955% ->
+                        # +571%, syn40hfsg +3041% -> +2350%). Every node the tree
+                        # then solves uses its own box (subset of this one), so
+                        # keeping the relaxer here is sound; the probe only decides
+                        # whether to keep it, never a bound. Default OFF; graduates
+                        # through the CLAUDE.md Regime-2 panel gate.
+                        if _root_lp_probe_tight_enabled():
+                            _probe_lb = np.asarray(lb, dtype=np.float64)
+                            _probe_ub = np.asarray(ub, dtype=np.float64)
                         # Bound the probe's MILP relaxation solve to a SMALL slice
                         # of the budget. Without any limit it inherited
                         # solve_at_node's default time_limit=None -> the Rust MILP
