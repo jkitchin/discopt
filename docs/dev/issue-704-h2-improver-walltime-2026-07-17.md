@@ -168,3 +168,37 @@ until that gate passes.
 
 - Raw JSON: `discopt_benchmarks/results/issue704/h2_walltime_2026-07-17.json`
 - Harness (not committed): `scratchpad/h2_probe.py`, `scratchpad/h2_cprofile.py`
+
+---
+
+## Build result (2026-07-17): the fix is FALSIFIED — net-negative. #704 closed.
+
+The wall-time contingent was implemented exactly as proposed above (`_improver_gate_allows`
+pure helper shared by both LNS loops; `DISCOPT_HEUR_WALLTIME` charges the call's measured wall
+duration against `HEUR_TIME_FRAC` of the remaining budget; default-OFF). It is sound (adversarial
+suite 10/10; the improvers only propose feasibility-verified incumbents and B&B stays exhaustive)
+and the flag-OFF path is byte-identical.
+
+But the differential panel **falsifies H2's implied lever**. Flag OFF vs ON, syn/rsyn, TL=60 s,
+quiet single-threaded box (all four runs sound — incumbent ≤ oracle ≤ bound):
+
+| instance | opt | OFF obj / bound | ON obj / bound | reported gap OFF→ON |
+|---|---|---|---|---|
+| rsyn0805m | 1296.1 | 1116.5 / 1631.9 | 1055.9 / 1568.8 | 46.2 % → **48.6 %** (looser) |
+| rsyn0810m | 1721.4 | 1548.6 / 2464.7 | 1417.3 / 2358.0 | 59.2 % → **66.4 %** (looser) |
+| rsyn0815m | 1269.9 | 1047.3 / 1877.5 | 1041.5 / 1836.3 | 79.3 % → 76.3 % (tighter) |
+| syn40m | 67.7 | 33.2 / 1228.7 | 23.2 / 1158.7 | 3601 % → **4903 %** (looser) |
+
+Wall-mode does exactly what H2 predicted — it throttles the seconds-long improvers, and the freed
+budget **tightens the dual bound** (rsyn0805m 1631.9 → 1568.8). But it **worsens the incumbent by a
+near-equal amount** (1116.5 → 1055.9): the improvers were *buying primal quality worth more than the
+dual gain*. The trade is ~1:1-to-unfavorable, so the reported gap does not shrink — it **loosens on
+3/4**. The premise that the improvers waste budget is wrong; they are productive, and reallocating
+their budget to the search just moves the gap from the primal side to the dual side (net worse).
+
+**Resolution.** H2 (the calibration *is* decoupled from wall time) was confirmed (§ above, PR #709),
+but its implied *fix* — throttle improvers to free budget — is **not a lever**: net-negative on the
+target family. Per CLAUDE.md §4 the measurement wins, and per "sound ≠ helpful" a net-negative change
+does not ship even default-OFF. The code is reverted; this record stands. The real #282 lever is
+**dual-bound quality** (the root relaxation), pursued in #715 — not primal-budget reallocation.
+Closing #704.
