@@ -6015,6 +6015,13 @@ def solve_model(
     _lns_lb_calls = 0
     _lns_dive_calls = 0
     _lns_k_schedule = (2, 5, 10)
+    # One-hot swap search throttle (issue #280): the assignment-structured swap
+    # improver self-gates to no-op on models without one-hot rows, but where it DOES
+    # apply we still cap wasted effort — disable it after a few consecutive misses
+    # (the incumbent is then either optimal or beyond the swap neighbourhood), and
+    # skip it entirely once a run reports the model carries no one-hot structure.
+    _lns_swap_misses = 0
+    _lns_swap_applicable = True
     _lns_has_integers = bool(int_sizes) and int(np.sum(int_sizes)) > 0
     # Best incumbent value the cutoff-tightening phases (C/C3) have already acted
     # on. They fire whenever the incumbent strictly improves below this — from
@@ -8386,6 +8393,45 @@ def solve_model(
                         logger.debug("LNS RINS failed: %s", _e)
                     _record_improver(_HEUR_COST["rins"], _rins_improved)
                     _heuristic_governor.record("rins", _rins_improved)
+
+                # (2b) One-hot swap search (improve). For set-partition /
+                # assignment-structured MIQPs (``sum_k x[i,k] == 1``), a single bit
+                # flip always breaks a one-hot row, so RINS / local branching make
+                # little headway while the dual bound is already tight (issue #280).
+                # The swap move (exchange two items' slots) stays feasible by
+                # construction; the search self-gates to no-op when the model has no
+                # one-hot structure. Sound: proposes only re-verified, strictly
+                # improving incumbents; the dual bound is untouched.
+                if (
+                    _lns_have_inc
+                    and _lns_gap_open
+                    and _lns_swap_misses < 3
+                    and (_deadline - time.perf_counter()) > _DEADLINE_NODE_FLOOR_S
+                ):
+                    _swap_improved = False
+                    try:
+                        from discopt._jax.primal_heuristics import one_hot_swap_search
+
+                        _sw = one_hot_swap_search(
+                            model,
+                            np.asarray(_lns_inc[0], dtype=np.float64),
+                            evaluator=evaluator,
+                            time_budget=min(1.0, _deadline - time.perf_counter() - 0.1),
+                            deadline=_deadline,
+                        )
+                        if _sw is not None:
+                            _x_sw, _obj_sw = _sw
+                            _obj_sw = float(_obj_sw)
+                            _sw_feas = not cl_list or _check_constraint_feasibility(
+                                evaluator, _x_sw, cl_list, cu_list
+                            )
+                            if np.isfinite(_obj_sw) and _obj_sw < _SENTINEL_THRESHOLD and _sw_feas:
+                                tree.inject_incumbent(np.asarray(_x_sw).copy(), _obj_sw)
+                                _swap_improved = _obj_sw < float(_lns_inc[1]) - 1e-9
+                                logger.info("LNS one-hot swap incumbent: obj=%.6g", _obj_sw)
+                    except Exception as _e:
+                        logger.debug("LNS one-hot swap failed: %s", _e)
+                    _lns_swap_misses = 0 if _swap_improved else _lns_swap_misses + 1
 
                 # (3) Local branching (improve). Scalable Hamming-ball sub-MIP
                 # around the incumbent, escalating k across calls. Bounded by a

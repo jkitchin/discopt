@@ -1806,3 +1806,188 @@ def local_branching(
             if submip is not None and (best is None or submip[1] < best[1]):
                 best = submip
     return best
+
+
+def _detect_one_hot_groups(model: Model, binary_mask: np.ndarray, n_vars: int) -> list[list[int]]:
+    """Detect disjoint, equal-size one-hot groups (``sum of binaries == 1``).
+
+    Scans the model's ``==`` constraints for the assignment / set-partition
+    pattern ``sum_k x[i,k] == 1`` (each *item* i assigned to exactly one *slot*
+    k). A row qualifies only when its affine form is ``sum(x_g) - 1`` with unit
+    coefficients over an all-binary support; per-slot cardinality/balance rows
+    (``sum == c`` with ``c != 1``) are naturally excluded (their constant is
+    ``-c``). Overlapping or unequal-size groups are rejected — the swap move pairs
+    members by sorted position, which is only well defined for a clean partition
+    into equal-size groups.
+
+    Returns the list of groups (each a sorted list of flat binary indices, one
+    entry per slot), or ``[]`` when no such structure is present.
+    """
+    from discopt._jax.milp_relaxation import _linearize_affine_expr
+
+    groups: list[list[int]] = []
+    seen: set[int] = set()
+    for c in model._constraints:
+        if getattr(c, "sense", None) != "==":
+            continue
+        try:
+            coeff, const = _linearize_affine_expr(c.body, model, n_vars)
+        except Exception:
+            continue  # nonlinear body — not an affine one-hot row
+        if not np.isfinite(const) or abs(float(const) + 1.0) > 1e-9:
+            continue  # not ``... == 1``
+        nz = np.nonzero(np.abs(coeff) > 1e-9)[0]
+        if nz.size < 2:
+            continue
+        if not np.all(np.abs(coeff[nz] - 1.0) <= 1e-9):
+            continue  # non-unit coefficients — not a plain one-hot sum
+        if nz.max() >= binary_mask.size or not np.all(binary_mask[nz]):
+            continue  # support is not entirely binary
+        g = [int(i) for i in nz]
+        if seen.intersection(g):
+            continue  # overlapping groups: not a clean partition
+        seen.update(g)
+        groups.append(sorted(g))
+
+    if len(groups) < 2:
+        return []
+    size = len(groups[0])
+    if size < 2 or any(len(g) != size for g in groups):
+        return []
+    return groups
+
+
+def one_hot_swap_search(
+    model: Model,
+    x_incumbent: np.ndarray,
+    *,
+    evaluator: Optional[NLPEvaluator] = None,
+    integer_tol: float = 1e-5,
+    feas_tol: float = 1e-6,
+    max_restarts: int = 30,
+    max_passes: int = 40,
+    time_budget: float = 1.0,
+    deadline: Optional[float] = None,
+    seed: int = 0,
+) -> Optional[tuple[np.ndarray, float]]:
+    """Assignment-aware *swap* local search for one-hot (set-partition) MIQPs.
+
+    Many combinatorial MIQPs — graph partitioning, QAP, clustering, assignment —
+    constrain disjoint binary groups to be one-hot (``sum_k x[i,k] == 1``): each
+    item ``i`` occupies exactly one slot ``k``. On such models a single bit flip
+    always breaks a one-hot row, so the generic constraint-violation search,
+    RINS, and local-branching neighbourhoods make little progress and the solver
+    settles for a *sound but poor* incumbent while the dual bound is already tight
+    (issue #280). The feasibility-preserving move here is a **swap**: exchange the
+    slots of two items. A swap leaves every one-hot row satisfied AND leaves every
+    per-slot cardinality/balance row unchanged (each slot's count is preserved),
+    so the search stays on the feasible manifold with no sub-solve at all.
+
+    Greedy first-improving swap descent with perturbation restarts (a light
+    Kernighan–Lin). Each candidate assignment is scored by the model
+    :class:`NLPEvaluator` — the objective is never special-cased, so the move
+    works for any objective over the one-hot structure. The best assignment found
+    is re-verified integer- and constraint-feasible via :func:`_finalize_candidate`
+    (this also catches any *other* constraint a swap might violate) and returned
+    only on strict improvement.
+
+    General (gated purely on detected one-hot structure, never on a problem name
+    or shape — CLAUDE.md §2) and sound (heuristic-policy regime, CLAUDE.md §5:
+    only a re-verified, strictly-improving incumbent is proposed; the dual bound
+    and certificate are never touched). Returns ``(x, obj)`` or ``None``.
+    """
+    int_mask = _get_integer_mask(model)
+    if not np.any(int_mask):
+        return None
+    lb0, ub0 = _get_variable_bounds(model)
+    n_vars = int(int_mask.size)
+    binary_mask = int_mask & (lb0 >= -1e-9) & (ub0 <= 1.0 + 1e-9)
+    if not np.any(binary_mask):
+        return None
+
+    groups = _detect_one_hot_groups(model, binary_mask, n_vars)
+    if not groups:
+        return None
+
+    if evaluator is None:
+        evaluator = cached_evaluator(model)
+
+    x_inc = np.asarray(x_incumbent, dtype=np.float64).copy()
+    n_groups = len(groups)
+    group_arr = np.asarray(groups, dtype=np.int64)  # (n_groups, group_size)
+
+    # Decode the incumbent's active slot per group (the ~1 member).
+    assign0 = np.empty(n_groups, dtype=np.int64)
+    for gi in range(n_groups):
+        assign0[gi] = int(np.argmax(x_inc[group_arr[gi]]))
+
+    def _reconstruct(assign: np.ndarray) -> np.ndarray:
+        x = x_inc.copy()
+        x[group_arr.ravel()] = 0.0
+        for gi in range(n_groups):
+            x[int(group_arr[gi, int(assign[gi])])] = 1.0
+        return x
+
+    def _obj(assign: np.ndarray) -> float:
+        return float(evaluator.evaluate_objective(_reconstruct(assign)))
+
+    inc_obj = _obj(assign0)  # incumbent's own objective on the reconstructed point
+
+    t_end = time.perf_counter() + max(0.0, float(time_budget))
+    if deadline is not None and np.isfinite(deadline):
+        t_end = min(t_end, float(deadline))
+
+    def _expired() -> bool:
+        return time.perf_counter() >= t_end
+
+    def _descend(assign: np.ndarray) -> tuple[np.ndarray, float]:
+        """First-improving swap descent to a local minimum (budget-bounded)."""
+        a = assign.copy()
+        cur = _obj(a)
+        for _ in range(max_passes):
+            if _expired():
+                break
+            improved = False
+            for gi in range(n_groups):
+                if _expired():
+                    break
+                for gj in range(gi + 1, n_groups):
+                    if a[gi] == a[gj]:
+                        continue
+                    a[gi], a[gj] = a[gj], a[gi]
+                    o = _obj(a)
+                    if o < cur - 1e-9:
+                        cur = o
+                        improved = True  # accept (first improvement)
+                    else:
+                        a[gi], a[gj] = a[gj], a[gi]  # revert
+            if not improved:
+                break
+        return a, cur
+
+    best_a, best_obj = _descend(assign0)
+
+    rng = np.random.default_rng(seed)
+    restarts = 0
+    while restarts < max_restarts and not _expired():
+        restarts += 1
+        a = best_a.copy()
+        # Perturb: a few random slot swaps between differing groups.
+        for _ in range(int(rng.integers(1, 4))):
+            gi, gj = (int(v) for v in rng.integers(0, n_groups, size=2))
+            if a[gi] != a[gj]:
+                a[gi], a[gj] = a[gj], a[gi]
+        a, o = _descend(a)
+        if o < best_obj - 1e-9:
+            best_obj, best_a = o, a.copy()
+
+    if not np.isfinite(best_obj) or best_obj >= inc_obj - 1e-9:
+        return None
+
+    cand = _finalize_candidate(evaluator, _reconstruct(best_a), int_mask, integer_tol, feas_tol)
+    if cand is None:
+        return None
+    _, obj_cand = cand
+    if not np.isfinite(obj_cand) or obj_cand >= inc_obj - 1e-9:
+        return None
+    return cand
