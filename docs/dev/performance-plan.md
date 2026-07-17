@@ -419,6 +419,53 @@ panel green for 3 consecutive nightlies before default-on.
 > bound 12`; n=13 dense *certification* drops 3.7 s → 0.4 s (the seed collapses
 > the proving phase where the bound does move).
 
+> **Falsified (2026-07-17, issue #673 — "z-polytope (BQP/PSD) cuts certify the
+> autocorr class").** The 2026-07-16 entry above conjectured that
+> BQP/PSD-class strengthening of the lifted binary-product (Boolean-quadric)
+> `z`-polytope would move the reformed-autocorr root dual bound off the parity
+> floor. Issue #673 scoped three strengthenings "in increasing order of
+> ambition": (1) Padberg triangle inequalities, (2) PSD moment cuts on
+> `[1 b; bᵀ Z]` with `Z_ii = b_i` (the #663 recognition), (3) square-linkage RLT
+> coupling the `y_k` epigraphs with the `z` vars. The entry experiment measured
+> the reformed-autocorr root LP bound at the **full closure** of each family
+> (whole family added, LP re-solved to the polytope optimum — the strongest the
+> family can give), before writing any cut code:
+>
+> | instance | parity floor | base | +triangle (closure) | +PSD moment (Shor closure) | +square-RLT | opt |
+> |---|---|---|---|---|---|---|
+> | n=6 dense | 3 | 3.0 | 3.0 | 3.0 | 3.0 | 7 |
+> | n=8 dense | 4 | 4.0 | 4.0 | 4.0 | 4.0 | 8 |
+> | n=10 dense | 5 | 5.0 | 5.0 | 5.0 | 5.0 | 13 |
+> | n=13 dense | 6 | 6.0 | 6.0 | 6.0 | 6.0 | 6 |
+> | **n=25 dense** (the issue's 1,224-row instance) | **12** | **12.0** | **12.0** (all 2,300 triangles) | **12.0** | — | 36 |
+>
+> **All three directions leave the bound exactly at the parity floor**, including
+> the concrete thing the issue pointed to (#663's `Z_ii=b_i` PSD recognition
+> ported to this route — tested here as the full pairwise Shor closure). The
+> triangle cuts *do* separate the LP vertex (8 violated at the n=8 optimum, max
+> 0.18), but an alternate optimal face at the same objective satisfies them, so
+> the closure bound does not move. **Root cause:** the sum-of-squares objective
+> is relaxed square-by-square through the *exact* 2D convex hull of
+> `{(y_k, y_k²)}` (the secant envelope — already the tightest possible 2D
+> relaxation of each `C_k²`), and `y_k` is *affine* in `(b, z)`. Σ`t_k` reaches
+> the parity floor by driving each `y_k` independently to its parity-nearest
+> attainable value; every proposed strengthening constrains only the pairwise
+> `(b, z)` polytope and its affine link to `y_k`, none of them the **joint**
+> realization of `(C_1,…,C_K)`. That joint coupling — "the correlations cannot
+> all be near-zero at once" — is a degree-≥4 property absent from the pairwise
+> moment matrix (the flat degree-4 Fortet lift is *worse*, −529 vs 3.0 on n=6,
+> so the secant hull is the right relaxation, not the lever). It is the
+> LABS/merit-factor combinatorial lower bound, which is (a) not a Boolean-quadric
+> property, so the issue's entire proposed avenue cannot deliver it, and (b)
+> autocorr-class-specific (a Fourier sum-rule), which Dev-Philosophy #2 forbids
+> as a single-problem solution. **No cut code shipped** — shipping a family that
+> provably does not move the metric would fail the issue's own exit gate
+> ("root bound moves materially above the parity floor") and Dev-Philosophy #3/#4.
+> Reproduction: `discopt_benchmarks/scripts/bqp673_zpolytope_falsification.py`;
+> pinned by `python/tests/test_bqp_zpolytope_falsification.py`. Re-scope: the
+> lever for this class is cross-square/joint-correlation coupling, a distinct
+> higher-risk research direction — not `z`-polytope cuts.
+
 ## 7. Sequencing & rationale (revised by the measurement)
 
 ```
