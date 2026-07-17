@@ -217,6 +217,15 @@ pub struct MilpOptions {
     /// early region where branching choices shape the whole search. Beyond it,
     /// matured pseudocosts decide (avoids probing overhead deep in large trees).
     pub sb_node_budget: usize,
+    /// Optional caller-supplied point over the structural columns (length
+    /// `n_struct`) to seed the incumbent before the search starts — e.g. a
+    /// warm start mapped through an exact reformulation, or a primal
+    /// heuristic's solution. The driver VALIDATES it (integrality, bounds,
+    /// original-row feasibility) and recomputes the objective from `c`; an
+    /// invalid seed is silently ignored. The caller's point is never trusted:
+    /// an infeasible incumbent would prune the true optimum — a false
+    /// certificate.
+    pub initial_incumbent: Option<Vec<f64>>,
     /// LP solver options.
     pub simplex: SimplexOptions,
 }
@@ -374,6 +383,20 @@ pub fn solve_milp_hooked(
     let mut u_w = base_u;
     let mut m_w = m;
     let mut n_w = n;
+
+    // --- Caller-seeded incumbent: validate, then inject before the search ---
+    // Runs on the pre-cut matrix (all rows are original rows here) with the
+    // presolve-tightened bounds (FBBT never cuts a feasible point, so a
+    // genuinely feasible seed survives the tightening). A seed that cannot be
+    // proven feasible is dropped silently — seeding is an optimization and
+    // must never be able to produce a false certificate.
+    if let Some(seed) = opts.initial_incumbent.as_ref() {
+        if let Some((sx, sobj)) =
+            validate_seed_incumbent(seed, ns, &is_int, &csc_w, &b_w, &c_w, &l_w, &u_w, m_w, n_w)
+        {
+            tm.inject_incumbent(sx, sobj + obj_const);
+        }
+    }
 
     let mut lp_iters = 0usize;
     let mut unbounded = false;
@@ -2166,6 +2189,100 @@ fn try_rounding_csc(
     best
 }
 
+/// Validate a caller-supplied structural seed point (see
+/// [`MilpOptions::initial_incumbent`]) and return `(x, cᵀx)` ready for
+/// `inject_incumbent`, or `None` when it cannot be *proven* feasible here.
+/// Mirrors [`try_rounding_csc`]'s feasibility test: integer columns must sit
+/// on integer values (within `1e-6`, then snapped exactly), every column must
+/// lie within its (presolve-tightened) bounds (within `1e-6`, then clamped),
+/// and each original row's residual must be coverable by its slack columns'
+/// bound range. The objective is recomputed from `c_w` — a caller-claimed
+/// value is never trusted. Rejection is silent: an unverifiable seed simply
+/// does not seed, so a bad caller point can never prune the true optimum.
+// The arguments ARE the standard-form LP slices, same shape as the sibling
+// heuristics (`try_rounding_csc`); a parameter struct would only obscure that.
+#[allow(clippy::too_many_arguments)]
+fn validate_seed_incumbent(
+    seed: &[f64],
+    ns: usize,
+    is_int: &[bool],
+    csc: &SparseCols,
+    b_w: &[f64],
+    c_w: &[f64],
+    l_w: &[f64],
+    u_w: &[f64],
+    n_orig_rows: usize,
+    n_w: usize,
+) -> Option<(Vec<f64>, f64)> {
+    const TOL: f64 = 1e-6;
+    if seed.len() != ns {
+        return None;
+    }
+    let mut x = Vec::with_capacity(ns);
+    for j in 0..ns {
+        let mut v = seed[j];
+        if !v.is_finite() {
+            return None;
+        }
+        if is_int[j] {
+            let r = v.round();
+            if (v - r).abs() > TOL {
+                return None;
+            }
+            v = r;
+        }
+        let (lo, hi) = if l_w[j] <= u_w[j] {
+            (l_w[j], u_w[j])
+        } else {
+            (u_w[j], l_w[j])
+        };
+        if v < lo - TOL || v > hi + TOL {
+            return None;
+        }
+        x.push(v.clamp(lo, hi));
+    }
+    let (col_ptr, row_idx, vals) = csc.raw();
+    let mut slack_lo = vec![0.0f64; n_orig_rows];
+    let mut slack_hi = vec![0.0f64; n_orig_rows];
+    for k in ns..n_w {
+        for idx in col_ptr[k]..col_ptr[k + 1] {
+            let i = row_idx[idx];
+            if i >= n_orig_rows {
+                continue;
+            }
+            let aik = vals[idx];
+            let (c1, c2) = (aik * l_w[k], aik * u_w[k]);
+            slack_lo[i] += c1.min(c2);
+            slack_hi[i] += c1.max(c2);
+        }
+    }
+    let mut act = vec![0.0f64; n_orig_rows];
+    for (j, &xj) in x.iter().enumerate() {
+        if xj == 0.0 {
+            continue;
+        }
+        for idx in col_ptr[j]..col_ptr[j + 1] {
+            let i = row_idx[idx];
+            if i >= n_orig_rows {
+                continue;
+            }
+            act[i] += vals[idx] * xj;
+        }
+    }
+    for i in 0..n_orig_rows {
+        let resid = b_w[i] - act[i];
+        if resid < slack_lo[i] - TOL || resid > slack_hi[i] + TOL {
+            return None;
+        }
+    }
+    let obj = x
+        .iter()
+        .zip(c_w.iter())
+        .map(|(xj, cj)| cj * xj)
+        .sum::<f64>();
+    Some((x, obj))
+}
+
 /// Fractional-diving primal heuristic with continuous repair: repeatedly fix the
 /// most-fractional unfixed integer to its nearest integer and **re-solve the LP**
 /// (warm-started — the bound-change case the dual simplex re-optimizes cheaply),
@@ -2565,6 +2682,7 @@ mod tests {
             reduced_cost_fixing: true,
             sb_max_cands: 8,
             sb_node_budget: 1024,
+            initial_incumbent: None,
             simplex: SimplexOptions::default(),
         }
     }
@@ -2586,6 +2704,65 @@ mod tests {
             u: &u,
         };
         let r = solve_milp(&lp, &[9.0], 0.0, &opts(4, vec![0, 1, 2, 3]));
+        assert_eq!(r.status, MilpStatus::Optimal);
+        assert!((r.obj - (-10.0)).abs() < 1e-6, "obj {}", r.obj);
+    }
+
+    /// Same knapsack, driven to a hard truncation (`max_nodes = 0`) so the only
+    /// possible incumbent is the seeded one: a valid seed must be adopted (and
+    /// reported), an infeasible / fractional / wrong-length one silently
+    /// rejected (never trusted — an infeasible incumbent would be a false
+    /// certificate). Root machinery (cuts/heuristics/presolve) is disabled so
+    /// no other incumbent source can mask the seeding behavior.
+    #[test]
+    fn seeded_incumbent_validated_then_adopted() {
+        let a = [5.0, 5.0, 5.0, 5.0, 1.0];
+        let c = [-10.0, -9.0, -8.0, -1.0, 0.0];
+        let l = [0.0; 5];
+        let u = [1.0, 1.0, 1.0, 1.0, INF];
+        let lp = LpView {
+            a: &a,
+            m: 1,
+            n: 5,
+            c: &c,
+            l: &l,
+            u: &u,
+        };
+        let bare = |seed: Option<Vec<f64>>| {
+            let mut o = opts(4, vec![0, 1, 2, 3]);
+            o.max_nodes = 0;
+            o.root_cuts = 0;
+            o.cut_rounds = 0;
+            o.gmi_cuts = false;
+            o.node_cuts = false;
+            o.heuristics = false;
+            o.presolve = false;
+            o.strong_branch = false;
+            o.initial_incumbent = seed;
+            solve_milp(&lp, &[9.0], 0.0, &o)
+        };
+        // Feasible seed (x1 = 1, others 0, obj -9): adopted and reported.
+        let r = bare(Some(vec![0.0, 1.0, 0.0, 0.0]));
+        assert_ne!(r.status, MilpStatus::Optimal, "truncated search");
+        assert!((r.obj - (-9.0)).abs() < 1e-9, "seed not adopted: {}", r.obj);
+        assert!((r.x[1] - 1.0).abs() < 1e-9);
+        // Row-infeasible seed (two items, 10 > 9): rejected, no incumbent.
+        let r = bare(Some(vec![1.0, 1.0, 0.0, 0.0]));
+        assert!(!r.obj.is_finite(), "infeasible seed adopted: {}", r.obj);
+        // Fractional integer column: rejected.
+        let r = bare(Some(vec![0.5, 0.0, 0.0, 0.0]));
+        assert!(!r.obj.is_finite(), "fractional seed adopted: {}", r.obj);
+        // Wrong length: rejected.
+        let r = bare(Some(vec![1.0, 0.0]));
+        assert!(!r.obj.is_finite(), "wrong-length seed adopted: {}", r.obj);
+        // Out-of-bounds value: rejected.
+        let r = bare(Some(vec![2.0, 0.0, 0.0, 0.0]));
+        assert!(!r.obj.is_finite(), "out-of-bounds seed adopted: {}", r.obj);
+        // A seeded search left to run must still certify the true optimum
+        // (seeding is monotone: it can only help pruning, never change math).
+        let mut o = opts(4, vec![0, 1, 2, 3]);
+        o.initial_incumbent = Some(vec![0.0, 1.0, 0.0, 0.0]);
+        let r = solve_milp(&lp, &[9.0], 0.0, &o);
         assert_eq!(r.status, MilpStatus::Optimal);
         assert!((r.obj - (-10.0)).abs() < 1e-6, "obj {}", r.obj);
     }
@@ -3083,6 +3260,7 @@ mod sparse_milp_diff {
                 reduced_cost_fixing: true,
                 sb_max_cands: 8,
                 sb_node_budget: 1024,
+                initial_incumbent: None,
                 simplex: SimplexOptions::default(),
             }
         }
@@ -3364,6 +3542,7 @@ mod sparse_milp_diff {
             reduced_cost_fixing: true,
             sb_max_cands: 8,
             sb_node_budget: 1024,
+            initial_incumbent: None,
             simplex: SimplexOptions::default(),
         };
         let r = solve_milp(&lp, &[10.0, 9.0], 0.0, &o);

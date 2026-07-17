@@ -4062,6 +4062,28 @@ def solve_model(
                     presolve = False
                     if nlp_solver == "pounce" and not _p3_force_cut_path_enabled():
                         nlp_solver = "simplex"
+                    # Incumbent seeding. A user warm start is over the ORIGINAL
+                    # variables; the aux columns (z = prod b, y = E(b),
+                    # t = y**2) are determined by it, so extend it to the
+                    # reformed vector. Without one, run the class-gated
+                    # deterministic local search (any bit assignment is
+                    # feasible on this class, so its best point is a valid
+                    # incumbent). Purely primal: the Rust MILP driver
+                    # re-validates the seed and recomputes its objective, so a
+                    # bad point is dropped, never trusted (the dual bound and
+                    # the certified optimum are unaffected either way).
+                    from discopt._jax.binary_multilinear_reform import (
+                        extend_initial_point,
+                        heuristic_incumbent,
+                    )
+
+                    _bml_x0 = None
+                    if initial_point is not None:
+                        _bml_x0 = extend_initial_point(model, initial_point)
+                    if _bml_x0 is None:
+                        _bml_x0 = heuristic_incumbent(model)
+                    if _bml_x0 is not None:
+                        initial_point = _bml_x0
     except Exception as _bml_exc:  # pragma: no cover - defensive
         logger.debug("binary-multilinear reformulation skipped: %s", _bml_exc)
 
@@ -4552,7 +4574,12 @@ def solve_model(
                         "default nlp_solver='pounce' MILP path to enable it."
                     )
                 _simplex_res = _solve_milp_simplex(
-                    model, time_limit, gap_tolerance, max_nodes, t_start
+                    model,
+                    time_limit,
+                    gap_tolerance,
+                    max_nodes,
+                    t_start,
+                    initial_point=initial_point,
                 )
                 if _simplex_res is not None:
                     return _simplex_res
@@ -13443,6 +13470,7 @@ def _solve_milp_simplex(
     gap_tolerance: float,
     max_nodes: int,
     t_start: float,
+    initial_point: Optional[np.ndarray] = None,
 ) -> Optional[SolveResult]:
     """Solve a pure MILP with the Rust-internal warm-started-simplex B&B
     (``nlp_solver="simplex"`` and the POUNCE-only default MILP path).
@@ -13537,6 +13565,13 @@ def _solve_milp_simplex(
     # Python-driven loops, across the PyO3 boundary.
     from discopt import debug as _debug
 
+    # Optional incumbent seed over the structural columns. The Rust driver
+    # validates it (bounds, integrality, row feasibility) and recomputes its
+    # objective from c, so a bad point is silently ignored — never trusted.
+    _seed = None
+    if initial_point is not None and np.asarray(initial_point).size == n_orig:
+        _seed = np.ascontiguousarray(np.asarray(initial_point, dtype=np.float64).ravel())
+
     status, x_struct, obj, bound, nodes, _lp_iters = solve_milp_py(
         np.ascontiguousarray(lp_data.c, dtype=np.float64),
         A,
@@ -13548,6 +13583,7 @@ def _solve_milp_simplex(
         float(lp_data.obj_const),
         int(max_nodes),
         float(gap_tolerance),
+        initial_incumbent=_seed,
         time_limit_s=float(_milp_budget),
         debug_hook=_debug.rust_hook(),
     )
