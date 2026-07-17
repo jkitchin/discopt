@@ -28,6 +28,20 @@ The release procedure that produces these entries is documented in
   improvement, so dual bounds and certificates are untouched.
   `DISCOPT_CONTINUOUS_MULTISTART=0` / `SolverTuning.continuous_multistart=False`
   restores the prior behavior.
+- **#267 coverage: the #188 multistart lever generalizes to two more nonconvex
+  families** (`test`, #267). Regression locks
+  (`test_issue_267_global_search_gap.py`) confirm the merged continuous
+  multistart closes the two sound global-search gaps recorded in issue #267,
+  with no solver code change: (1) a **heterogeneous-radii** circle packing (a
+  `kall_diffcircles` sibling the #188 *congruent* lock did not cover) — the
+  default path parks in a two-row local (~1.841) with the lever off and reaches
+  the single-row global basin (1.525520, stable across 10 seeds) with it on; and
+  (2) **inscribedsquare02**, a *different family* (largest square inscribed in a
+  parametric curve, a maximization) reconstructed faithfully from its actual
+  curve — the default path reaches the published global 0.968017, where the
+  issue reported parking at 0.50885 (the reconstruction reproduces both digits).
+  Locks include the certificate invariant (`bound <= incumbent` for min, `>=`
+  for max) and that the incumbent never crosses the global.
 
 ## [0.6.0] - 2026-07-12
 

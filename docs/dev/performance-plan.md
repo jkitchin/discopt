@@ -215,6 +215,20 @@ bound (`gap_certified` discipline). Low correctness risk.
 > deterministic anchors and LP-vertex seeds never leave 1.54–3.23. The dead end
 > was the sampling scheme + old backend, not multistart per se.
 
+> **Generalizes to two more families (2026-07-17, #267).** The #188 lever was
+> validated only on *congruent*-circle packing. #267 recorded two sibling gaps;
+> both are now closed by the same merged lever with **no code change**, verified
+> on reconstructions (`test_issue_267_global_search_gap.py`): a
+> **heterogeneous-radii** packing (default parks in a two-row local ~1.841 with
+> the flag off, reaches the single-row global 1.525520 with it on — stable to 5
+> digits across 10 seeds) and **inscribedsquare02**, a structurally *different*
+> family (largest square inscribed in a parametric curve, a maximization,
+> `sin`/`cos`/poly constraints). The inscribedsquare02 reconstruction is
+> digit-faithful — it reproduces both the published global 0.968017 (reached on
+> the default path) and the 0.50885 local basin #267 reported parking in
+> (n_starts=32/seed=123). Evidence that the diversification gap, not a
+> geometry-specific trick, was the real lever: the fix is class-level.
+
 ## 6. Stage 4 — Node-count reduction (CC3; highest leverage, strictest gate)
 
 > **Entry experiment (2026-06-24) — falsified the framing below; read this first.**
