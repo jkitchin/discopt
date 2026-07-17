@@ -1,0 +1,16 @@
+{
+  "qap_meta": {
+    "n": 225,
+    "n_eq": 30,
+    "offset": 0.0,
+    "eig_min": -164905.19275524415,
+    "eig_max": 476723.64157340664
+  },
+  "runs": {
+    "shor_plain_SCS": {
+      "bound": -Infinity,
+      "status": "unbounded",
+      "time_s": 0.034559011459350586
+    }
+  }
+}
