@@ -288,6 +288,56 @@ the work collapses to cut/OBBT strengthening and #282 should be re-pointed at th
 SCIP). Throughput/first-incumbent latency are *not* competitive (root 8–21 s vs SCIP's 0.5–1.6 s
 whole solve), so this is a partial fire — but the dominant term is unambiguous.
 
+### R2-7 (H1, tested) — the improver contingent is mis-calibrated on this family
+
+**H1:** the improver-role LNS heuristics (RINS + local branching) consume the bulk of the
+NLP-BB budget and still leave the incumbent far from the optimum; capping them converts
+budget into nodes and a tighter dual bound. **Test:** A = default (`DISCOPT_HEUR_QUOT=0.5`)
+vs B = `DISCOPT_HEUR_QUOT=0` (improvers blocked once an incumbent exists — an existing knob,
+no code change), 60 s, all seven. **Kill if** B does not raise nodes AND tighten the bound,
+or if B's incumbent regresses enough to lose the gap.
+
+| instance | nodes A→B | dual excess A→B | primal deficit A→B | **reported gap A→B** |
+|---|---|---|---|---|
+| `rsyn0805m` | 319 → **1247** | +30.1 % → **+13.3 %** | +13.9 % → +20.9 % | 43.9 % → **34.1 %** |
+| `rsyn0810m` | 223 → **1119** | +43.9 % → **+33.4 %** | +10.0 % → +19.4 % | 53.9 % → **52.8 %** |
+| `rsyn0815m` | 351 → **607** | +47.8 % → **+44.9 %** | +17.5 % → +18.0 % | 65.4 % → **62.9 %** |
+| `syn40m` | 415 → **1535** | +1732 % → **+1619 %** | +54.3 % → +65.8 % | 1786 % → **1684 %** |
+| `syn30hfsg` | 281 → **623** | +919 % → **+895 %** | 0.0 % → **0.0 %** | 919 % → **895 %** |
+| `syn40hfsg` | 251 → **501** | +2638 % → **+2589 %** | +4.8 % → **+4.8 %** | 2642 % → **2594 %** |
+| `syn15m02hfsg` | 459 → 427 | +123 % → +123 % | 0.0 % → 0.0 % | 123 % → 123 % (tie) |
+
+**Verdict: H1 CONFIRMED, but it is a trade-off, not a free win.** B gives more nodes on 6/7,
+a tighter bound on 6/7, and a **smaller reported gap on 6/7 (A wins 0/7)** — the bound gain
+outweighs the incumbent loss every time it trades. On the `hfsg` trio B is *strictly* better
+(incumbent already optimal, so there is nothing to lose). But B's incumbent genuinely
+regresses on the convex half (`rsyn0805m` 1116.5 → 1025.8).
+
+Sharpest datum: **`rsyn0805m` with improvers off reaches at 60 s the exact bound (1467.995)
+and node count (1247 vs 1245) the default reaches at 120 s.** The default is spending ~half
+its wall clock on improvers. (B's incumbent, 1025.845, is precisely the value this issue
+reports — it is the root diving incumbent, i.e. what you get with no improver on top.)
+
+**This is NOT a "turn the improvers off" recommendation, and must not be read as one.**
+The governor exists *because* of the mirror-image failure: #347 (`clay0303hfsg`) had the
+improvers starving the tree, and #321 ported them in without the contingent. Turning them off
+globally would re-break the families they were built for. The measurement instead indicts the
+**calibration**, and that is H2:
+
+> **H2 (untested, general):** `_improver_allowed` (`solver.py:9844-9855`) charges *fixed
+> abstract cost units* (`_HEUR_COST = {"rins": 5.0, "lbranch": 10.0}`) against a
+> node-proportional contingent — it never measures wall time. On syn/rsyn one local-branching
+> call costs ≈ 6 s (profile: 3 calls / 18.3 s), so ~10 improver calls burn ~35 s before a
+> node-count-based contingent can throttle them; and the gate is bypassed entirely before the
+> first incumbent (`tree.incumbent() is None → return True`), which on `rsyn0805m` is the
+> first 8.5 s. A **wall-time-denominated** contingent (charge measured seconds, cap as a
+> fraction of remaining budget) would self-calibrate across families instead of assuming every
+> sub-MIP costs the same. Entry experiment before any build; then the Regime-2 panel gate.
+
+**Caveat:** 7 instances, contended box, single run per arm, no variance estimate. Enough to
+re-point the diagnosis; **not** enough to move a default. `DISCOPT_HEUR_QUOT` is an existing
+knob, so nothing here required a code change.
+
 ---
 
 ## §R2-6 — re-pointed plan for #282
@@ -313,6 +363,11 @@ whole solve), so this is a partial fire — but the dominant term is unambiguous
    bound is valid. Worth a separate issue: *why* are these nodes untrusted?
 4. **Root latency (feeds #268).** `presolve` at 2.6 s/call × 4 = 10.5 s dominates the
    8–21 s root. At the issue's 5 s budget this is the *entire* story (§R2-4).
+5. **Improver contingent calibration (H2, §R2-7).** Measured: improvers cost ~half the wall
+   clock on this family and the budget is better spent on the tree (gap smaller on 6/7 with
+   them off; A wins 0/7). The general fix is a **wall-time-denominated** contingent, not a
+   family switch — the current one charges fixed abstract units and cannot see that one
+   `lbranch` call costs 6 s here. Entry experiment first, then the Regime-2 panel.
 
 **Not the lever (do not re-walk):** OA auto-routing (F-1), McCormick strengthening for the
 *convex* half (it doesn't run there), primal/LNS incumbent quality as the headline (§R2-1).
