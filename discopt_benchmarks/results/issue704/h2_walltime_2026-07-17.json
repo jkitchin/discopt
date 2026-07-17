@@ -1,0 +1,524 @@
+[
+  {
+    "instance": "rsyn0805m",
+    "oracle": 1296.120603,
+    "status": "feasible",
+    "objective": 1116.458325165389,
+    "bound": 1640.3418265241712,
+    "nodes": 351,
+    "wall_s": 61.39784108300228,
+    "time_limit": 60.0,
+    "first_incumbent": {
+      "t": 7.582744209008524,
+      "node": 3,
+      "obj": -1025.8450264708492
+    },
+    "improver_total_wall_s": 39.12943328998517,
+    "improver_frac_of_budget": 0.6521572214997529,
+    "by_role": {
+      "rins": {
+        "n_calls": 12,
+        "total_wall_s": 18.865852707007434,
+        "mean_s": 1.5721543922506196,
+        "max_s": 3.182799292000709,
+        "min_s": 0.6759761669964064,
+        "charged_each": 5.0,
+        "charged_total": 60.0
+      },
+      "lbranch": {
+        "n_calls": 5,
+        "total_wall_s": 20.26358058297774,
+        "mean_s": 4.052716116595548,
+        "max_s": 4.436451207991922,
+        "min_s": 3.6306983339891303,
+        "charged_each": 10.0,
+        "charged_total": 50.0
+      }
+    },
+    "calls": [
+      {
+        "role": "rins",
+        "t_rel": 7.712660582998069,
+        "dur": 0.7650461250159424,
+        "improved": true
+      },
+      {
+        "role": "rins",
+        "t_rel": 8.712663042009808,
+        "dur": 0.723464790993603,
+        "improved": true
+      },
+      {
+        "role": "rins",
+        "t_rel": 9.993715457996586,
+        "dur": 0.6759761669964064,
+        "improved": true
+      },
+      {
+        "role": "lbranch",
+        "t_rel": 10.669739708013367,
+        "dur": 3.6306983339891303,
+        "improved": false
+      },
+      {
+        "role": "rins",
+        "t_rel": 15.500389791995985,
+        "dur": 2.2544103330001235,
+        "improved": true
+      },
+      {
+        "role": "lbranch",
+        "t_rel": 17.75490762499976,
+        "dur": 3.8000034170108847,
+        "improved": false
+      },
+      {
+        "role": "rins",
+        "t_rel": 22.7634287920082,
+        "dur": 2.325945332995616,
+        "improved": true
+      },
+      {
+        "role": "rins",
+        "t_rel": 26.333569208014524,
+        "dur": 0.7656170419941191,
+        "improved": true
+      },
+      {
+        "role": "lbranch",
+        "t_rel": 27.099307666998357,
+        "dur": 3.9659769159916323,
+        "improved": false
+      },
+      {
+        "role": "rins",
+        "t_rel": 32.41068495801301,
+        "dur": 2.5238144589820877,
+        "improved": true
+      },
+      {
+        "role": "rins",
+        "t_rel": 36.16507504199399,
+        "dur": 0.7730755410157144,
+        "improved": true
+      },
+      {
+        "role": "rins",
+        "t_rel": 38.301471874990966,
+        "dur": 0.9627734580135439,
+        "improved": true
+      },
+      {
+        "role": "rins",
+        "t_rel": 40.75119595800061,
+        "dur": 1.1818611249909736,
+        "improved": true
+      },
+      {
+        "role": "lbranch",
+        "t_rel": 41.93317737500183,
+        "dur": 4.430450707994169,
+        "improved": false
+      },
+      {
+        "role": "rins",
+        "t_rel": 47.974636958009796,
+        "dur": 3.182799292000709,
+        "improved": true
+      },
+      {
+        "role": "lbranch",
+        "t_rel": 51.15765791700687,
+        "dur": 4.436451207991922,
+        "improved": false
+      },
+      {
+        "role": "rins",
+        "t_rel": 57.299490542005515,
+        "dur": 2.7310690410085954,
+        "improved": true
+      }
+    ]
+  },
+  {
+    "instance": "rsyn0810m",
+    "oracle": 1721.447711,
+    "status": "feasible",
+    "objective": 1548.6431867057615,
+    "bound": 2486.3685843313865,
+    "nodes": 191,
+    "wall_s": 62.05811012498452,
+    "time_limit": 60.0,
+    "first_incumbent": {
+      "t": 11.136768708005548,
+      "node": 3,
+      "obj": -1387.3003750648554
+    },
+    "improver_total_wall_s": 41.608730209001806,
+    "improver_frac_of_budget": 0.6934788368166968,
+    "by_role": {
+      "rins": {
+        "n_calls": 8,
+        "total_wall_s": 20.710297001030995,
+        "mean_s": 2.5887871251288743,
+        "max_s": 5.055744666984538,
+        "min_s": 0.971526833018288,
+        "charged_each": 5.0,
+        "charged_total": 40.0
+      },
+      "lbranch": {
+        "n_calls": 5,
+        "total_wall_s": 20.89843320797081,
+        "mean_s": 4.179686641594162,
+        "max_s": 4.713356374995783,
+        "min_s": 3.0604420420131646,
+        "charged_each": 10.0,
+        "charged_total": 50.0
+      }
+    },
+    "calls": [
+      {
+        "role": "rins",
+        "t_rel": 11.34691875000135,
+        "dur": 1.4390987500082701,
+        "improved": true
+      },
+      {
+        "role": "rins",
+        "t_rel": 13.183599165990017,
+        "dur": 1.3602347090200055,
+        "improved": true
+      },
+      {
+        "role": "rins",
+        "t_rel": 15.495066957984818,
+        "dur": 1.3471542920160573,
+        "improved": true
+      },
+      {
+        "role": "lbranch",
+        "t_rel": 16.842282583005726,
+        "dur": 4.713356374995783,
+        "improved": false
+      },
+      {
+        "role": "rins",
+        "t_rel": 23.322346583008766,
+        "dur": 3.7149648329941556,
+        "improved": true
+      },
+      {
+        "role": "lbranch",
+        "t_rel": 27.03742737500579,
+        "dur": 4.022730540978955,
+        "improved": false
+      },
+      {
+        "role": "rins",
+        "t_rel": 32.38206254100078,
+        "dur": 3.0047033749870025,
+        "improved": true
+      },
+      {
+        "role": "rins",
+        "t_rel": 36.632944249984575,
+        "dur": 0.971526833018288,
+        "improved": true
+      },
+      {
+        "role": "lbranch",
+        "t_rel": 37.60457683299319,
+        "dur": 4.47497279199888,
+        "improved": false
+      },
+      {
+        "role": "rins",
+        "t_rel": 43.91825108299963,
+        "dur": 5.055744666984538,
+        "improved": true
+      },
+      {
+        "role": "lbranch",
+        "t_rel": 48.97423575000721,
+        "dur": 4.626931457984028,
+        "improved": false
+      },
+      {
+        "role": "rins",
+        "t_rel": 55.16803308299859,
+        "dur": 3.816869542002678,
+        "improved": true
+      },
+      {
+        "role": "lbranch",
+        "t_rel": 58.985079165984644,
+        "dur": 3.0604420420131646,
+        "improved": false
+      }
+    ]
+  },
+  {
+    "instance": "syn30hfsg",
+    "oracle": 138.1596024,
+    "status": "feasible",
+    "objective": 138.1596289302158,
+    "bound": 1375.049838217518,
+    "nodes": 373,
+    "wall_s": 62.27830891602207,
+    "time_limit": 60.0,
+    "first_incumbent": {
+      "t": 11.380660333990818,
+      "node": 3,
+      "obj": -122.02648477973716
+    },
+    "improver_total_wall_s": 12.544156998977996,
+    "improver_frac_of_budget": 0.20906928331629995,
+    "by_role": {
+      "rins": {
+        "n_calls": 13,
+        "total_wall_s": 2.3429785829794127,
+        "mean_s": 0.18022912176764713,
+        "max_s": 0.2897118330001831,
+        "min_s": 0.06825504198786803,
+        "charged_each": 5.0,
+        "charged_total": 65.0
+      },
+      "lbranch": {
+        "n_calls": 4,
+        "total_wall_s": 10.201178415998584,
+        "mean_s": 2.550294603999646,
+        "max_s": 2.7243797080009244,
+        "min_s": 2.3926558750099503,
+        "charged_each": 10.0,
+        "charged_total": 40.0
+      }
+    },
+    "calls": [
+      {
+        "role": "rins",
+        "t_rel": 11.853265125013422,
+        "dur": 0.07065929099917412,
+        "improved": true
+      },
+      {
+        "role": "rins",
+        "t_rel": 12.631291583005805,
+        "dur": 0.06825504198786803,
+        "improved": true
+      },
+      {
+        "role": "lbranch",
+        "t_rel": 12.700528750021476,
+        "dur": 2.7243797080009244,
+        "improved": false
+      },
+      {
+        "role": "rins",
+        "t_rel": 17.28474520801683,
+        "dur": 0.27428225000039674,
+        "improved": true
+      },
+      {
+        "role": "lbranch",
+        "t_rel": 17.55910004102043,
+        "dur": 2.5187126669916324,
+        "improved": false
+      },
+      {
+        "role": "rins",
+        "t_rel": 27.186993375013117,
+        "dur": 0.2598059579904657,
+        "improved": true
+      },
+      {
+        "role": "lbranch",
+        "t_rel": 27.446921875001863,
+        "dur": 2.5654301659960765,
+        "improved": false
+      },
+      {
+        "role": "rins",
+        "t_rel": 34.84562737500528,
+        "dur": 0.12747658300213516,
+        "improved": true
+      },
+      {
+        "role": "rins",
+        "t_rel": 38.484864958008984,
+        "dur": 0.14179516700096428,
+        "improved": true
+      },
+      {
+        "role": "rins",
+        "t_rel": 41.71927066601347,
+        "dur": 0.12864108398207463,
+        "improved": true
+      },
+      {
+        "role": "rins",
+        "t_rel": 43.8638372910209,
+        "dur": 0.12946358398767188,
+        "improved": true
+      },
+      {
+        "role": "rins",
+        "t_rel": 46.04913845800911,
+        "dur": 0.13849741700687446,
+        "improved": true
+      },
+      {
+        "role": "lbranch",
+        "t_rel": 46.187686958000995,
+        "dur": 2.3926558750099503,
+        "improved": false
+      },
+      {
+        "role": "rins",
+        "t_rel": 51.08304670799407,
+        "dur": 0.2897118330001831,
+        "improved": true
+      },
+      {
+        "role": "rins",
+        "t_rel": 53.87788470799569,
+        "dur": 0.1991475830145646,
+        "improved": true
+      },
+      {
+        "role": "rins",
+        "t_rel": 56.757225625013234,
+        "dur": 0.2671156660071574,
+        "improved": true
+      },
+      {
+        "role": "rins",
+        "t_rel": 59.5154525830003,
+        "dur": 0.24812712499988265,
+        "improved": true
+      }
+    ]
+  },
+  {
+    "instance": "syn40hfsg",
+    "oracle": 67.71325586,
+    "status": "feasible",
+    "objective": 64.44554961700268,
+    "bound": 1659.2292023560494,
+    "nodes": 347,
+    "wall_s": 64.77365287501016,
+    "time_limit": 60.0,
+    "first_incumbent": {
+      "t": 17.627572500001406,
+      "node": 3,
+      "obj": -61.19706863066675
+    },
+    "improver_total_wall_s": 11.861149624019163,
+    "improver_frac_of_budget": 0.19768582706698604,
+    "by_role": {
+      "rins": {
+        "n_calls": 11,
+        "total_wall_s": 1.3272279990487732,
+        "mean_s": 0.12065709082261575,
+        "max_s": 0.19694295802037232,
+        "min_s": 0.08237895800266415,
+        "charged_each": 5.0,
+        "charged_total": 55.0
+      },
+      "lbranch": {
+        "n_calls": 3,
+        "total_wall_s": 10.53392162497039,
+        "mean_s": 3.5113072083234633,
+        "max_s": 3.7957514580048155,
+        "min_s": 3.347137666976778,
+        "charged_each": 10.0,
+        "charged_total": 30.0
+      }
+    },
+    "calls": [
+      {
+        "role": "rins",
+        "t_rel": 18.36080954200588,
+        "dur": 0.14998308301437646,
+        "improved": true
+      },
+      {
+        "role": "rins",
+        "t_rel": 19.61974208301399,
+        "dur": 0.12464445899240673,
+        "improved": true
+      },
+      {
+        "role": "rins",
+        "t_rel": 21.916603917023167,
+        "dur": 0.12338929099496454,
+        "improved": true
+      },
+      {
+        "role": "rins",
+        "t_rel": 24.247333417006303,
+        "dur": 0.19694295802037232,
+        "improved": true
+      },
+      {
+        "role": "lbranch",
+        "t_rel": 24.444344667019323,
+        "dur": 3.7957514580048155,
+        "improved": false
+      },
+      {
+        "role": "rins",
+        "t_rel": 30.9275099170045,
+        "dur": 0.1509421250084415,
+        "improved": true
+      },
+      {
+        "role": "lbranch",
+        "t_rel": 31.078524458018364,
+        "dur": 3.391032499988796,
+        "improved": false
+      },
+      {
+        "role": "rins",
+        "t_rel": 37.14276200000313,
+        "dur": 0.12258312501944602,
+        "improved": true
+      },
+      {
+        "role": "lbranch",
+        "t_rel": 37.26540595802362,
+        "dur": 3.347137666976778,
+        "improved": false
+      },
+      {
+        "role": "rins",
+        "t_rel": 42.84840266700485,
+        "dur": 0.11704325000755489,
+        "improved": true
+      },
+      {
+        "role": "rins",
+        "t_rel": 45.10053075000178,
+        "dur": 0.08884241699706763,
+        "improved": true
+      },
+      {
+        "role": "rins",
+        "t_rel": 50.60622900002636,
+        "dur": 0.0866903749993071,
+        "improved": true
+      },
+      {
+        "role": "rins",
+        "t_rel": 53.823067125020316,
+        "dur": 0.08378795799217187,
+        "improved": true
+      },
+      {
+        "role": "rins",
+        "t_rel": 56.9266499170044,
+        "dur": 0.08237895800266415,
+        "improved": true
+      }
+    ]
+  }
+]
