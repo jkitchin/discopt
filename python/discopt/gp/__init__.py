@@ -38,6 +38,10 @@ from typing import Optional
 import numpy as np
 
 import discopt.modeling as dm
+from discopt._jax.convexity.log_lattice import (
+    LogCurvature,
+    classify_log_curvature,
+)
 from discopt._jax.convexity.posynomial import (
     Monomial,
     PosynomialForm,
@@ -193,11 +197,14 @@ def is_log_convex(model: Model) -> bool:
     mis-gate the ``x``-space convex fast path — a soundness break — so the
     two are exposed as independent predicates.
 
-    This is whole-model recognition (the model is a GP in standard form);
-    per-expression log-curvature lattice propagation is a future
-    extension. A ``True`` result is a proof: it is exactly the precondition
-    under which :func:`as_geometric_program` builds an equivalent convex
-    NLP in ``y``.
+    This is whole-model recognition (the model is a GP in standard form).
+    For the finer-grained, *per-expression* verdict — a log-curvature
+    lattice (``LOG_AFFINE``/``LOG_CONVEX``/``LOG_CONCAVE``) propagated
+    through the DAG so a sub-expression deep inside a constraint can be
+    tagged and composed upward — see :func:`classify_log_curvature`. A
+    ``True`` result here is a proof: it is exactly the precondition under
+    which :func:`as_geometric_program` builds an equivalent convex NLP in
+    ``y``.
     """
     return classify_gp(model) is not None
 
@@ -485,8 +492,10 @@ __all__ = [
     "GPConstraint",
     "GPStructure",
     "GeometricProgram",
+    "LogCurvature",
     "as_geometric_program",
     "classify_gp",
+    "classify_log_curvature",
     "is_log_convex",
     "solve_gp",
 ]

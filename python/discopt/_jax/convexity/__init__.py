@@ -24,6 +24,14 @@ from __future__ import annotations
 
 from .certificate import certify_convex, refresh_convex_mask
 from .lattice import Curvature
+from .log_lattice import (
+    LogCurvature,
+    classify_log_curvature,
+    log_combine_product,
+    log_combine_sum,
+    log_negate,
+    log_scale_pow,
+)
 from .rules import (
     OACutConvexity,
     classify_constraint,
@@ -34,11 +42,17 @@ from .rules import (
 
 __all__ = [
     "Curvature",
+    "LogCurvature",
     "OACutConvexity",
     "certify_convex",
     "classify_constraint",
     "classify_expr",
+    "classify_log_curvature",
     "classify_model",
     "classify_oa_cut_convexity",
+    "log_combine_product",
+    "log_combine_sum",
+    "log_negate",
+    "log_scale_pow",
     "refresh_convex_mask",
 ]
