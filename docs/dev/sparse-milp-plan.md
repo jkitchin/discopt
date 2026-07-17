@@ -393,6 +393,29 @@ structural `0.0` adds exactly, and CSC preserves ascending row order, so `Aᵀy`
     sparse rigorous* LP oracle for degenerate systems (a sparse dual-simplex or a sparse IPM
     whose duals feed the now-wired NS path), not a post-process on the existing IPM.
 
+- [x] **RLT1 exclusion presolve — bound-neutral shrink, but the LP-shrink route is FALSIFIED as
+  a qap graduation lever (issue #661, §4/§5).**
+  - **Shipped (§5 bound-neutral):** `build_rlt1_lp` now drops pair columns whose product is
+    identically 0 by set-partitioning/packing exclusivity — two binaries `x_i, x_j` in an
+    equality `Σ a_k x_k = β` with `a_i + a_j + Σ_{k≠i,j} min(0,a_k) > β` (assignment
+    `Σ x_k = 1` is the unit-coeff special case). Such `X_ij` is already pinned to 0 by that
+    equality's RLT row, so removing the column, its 3 McCormick rows, and the now-trivial RLT
+    rows (a partitioning constraint × a member of its own set) leaves the LP optimum **exactly
+    unchanged**. Stated generally (`_mutually_exclusive_pairs`), not keyed to a name (§2). Test
+    `test_rlt1_exclusion_presolve_is_bound_neutral` compares presolve-on vs presolve-off:
+    identical bound, strictly fewer cols/rows.
+  - **Entry experiment (before shipping the *graduation* claim, §4):** on synthetic QAPs the
+    presolve cut rows ~1.3–1.5× and sped the exact simplex **~2.4×** at an **identical** bound
+    (n=6: 2.30 s → 0.77 s; n=7: 38.7 s → 16.2 s). **But the scaling wall is unchanged** — both
+    full and reduced grow ~10–20× per unit `n`. A constant 2.4× shifts the wall one notch; qap
+    (n=15) is *eight* notches past n=7, so the all-pairs RLT-1 LP stays intractable for the
+    exact simplex with or without the presolve. **Verdict:** the presolve is a real, low-risk
+    constant-factor win (ships; widens the tractable-`n` envelope) but is **falsified as the
+    qap graduation lever** — the exponential wall, not the constant, is the barrier.
+  - **Consequence — the only route that structurally beats the wall is decomposition, not a
+    faster monolithic solve.** Next: scope the **Lagrangian / Adams–Sherali dual** of the RLT
+    coupling rows (see the new task below), which never forms the 114k-row LP.
+
 ## Problem (measured on qap — a 225-binary Quadratic Assignment Problem)
 
 `solve_milp_py` (the Rust MILP entry) takes a **dense** `a: PyReadonlyArray2`, and

@@ -170,6 +170,36 @@ def test_rlt1_bound_le_every_feasible_objective():
         assert bound <= obj + 1e-4
 
 
+@pytest.mark.parametrize("n,seed", [(4, 0), (5, 1), (6, 2)])
+def test_rlt1_exclusion_presolve_is_bound_neutral(n, seed, monkeypatch):
+    """§5 bound-neutral regime: the set-partitioning exclusion presolve drops
+    identically-zero pair columns / trivial RLT rows, so it must leave the LP
+    optimum **exactly** unchanged while shrinking the system. Compares the presolved
+    build against a full build (presolve monkeypatched off)."""
+    import discopt._jax.rlt as rlt_mod
+
+    model, opt, _ = _synthetic_qap(n, seed)
+    relax, info = _built(model)
+    bvars = binary_flat_cols(model)
+
+    # Presolved (real) build + bound.
+    prob_red = build_rlt1_lp(model, relax, info, binary_vars=bvars)
+    bound_red, _ = rlt1_lower_bound(model, relax, info, binary_vars=bvars, time_limit=60.0)
+
+    # Full build: disable the exclusion presolve.
+    monkeypatch.setattr(rlt_mod, "_mutually_exclusive_pairs", lambda *a, **k: set())
+    prob_full = build_rlt1_lp(model, relax, info, binary_vars=bvars)
+    bound_full, _ = rlt1_lower_bound(model, relax, info, binary_vars=bvars, time_limit=60.0)
+
+    assert prob_red is not None and prob_full is not None
+    # The presolve actually removes columns and rows (assignment pairs are excluded).
+    assert prob_red.cobj.shape[0] < prob_full.cobj.shape[0]
+    assert prob_red.A_ub.shape[0] < prob_full.A_ub.shape[0]
+    # ... and the certified bound is exactly unchanged (bound-neutral).
+    assert bound_red is not None and bound_full is not None
+    assert bound_red == pytest.approx(bound_full, abs=1e-6, rel=0.0)
+
+
 def test_rlt1_bound_is_the_ns_safe_value_not_the_raw_vertex():
     """Soundness (issue #145 / #661): the surfaced RLT-1 bound is the
     Neumaier-Shcherbina *safe* dual value built from the exact simplex's exposed
