@@ -4972,6 +4972,84 @@ def solve_model(
     _root_lb_snapshot = np.asarray(lb, dtype=np.float64).copy()
     _root_ub_snapshot = np.asarray(ub, dtype=np.float64).copy()
 
+    # --- #654: deadline-exhausted short-circuit before the spatial search build ---
+    # Everything below (the per-node NLP evaluator's one-time XLA compile, the
+    # McCormick LP relaxer build, and the node loop) is *optional* search apparatus:
+    # it only tightens the dual bound or finds an incumbent. On the large sparse
+    # network-design / QAP / graph-partition class (sonet*, qap, super3t) that
+    # build+compile is a fixed multi-second uninterruptible cost that runs to
+    # completion *regardless of* ``time_limit`` — the residual #654 overrun: wall is
+    # ~constant no matter how small ``T`` is. When the whole budget is already spent
+    # before we reach it, decline to *start* the search and instead spend the same
+    # bounded slice the post-search path uses on the rigorous root-relaxation
+    # fallback (``_root_relaxation_lower_bound`` builds its OWN McCormick relaxation
+    # — it does not need ``evaluator`` — and is the designated last-ditch bound
+    # recovery, docs/dev/baron-gap-plan.md §8). This is sound: the fallback runs to
+    # completion (never truncated mid-flight, so casctanks-class keeps its dual
+    # bound), the reported status is ``time_limit`` (never a certified/optimal
+    # claim), and skipping the search only ever *weakens* a still-valid bound —
+    # never falsifies it. When budget remains, ``_deadline_exhausted()`` is False and
+    # this is byte-identical to the pre-fix path (the search runs as before).
+    if _deadline_exhausted():
+        from discopt.modeling.core import ObjectiveSense as _ObjSenseSC
+
+        _rr_bound: Optional[float] = None
+        if model._objective is not None:
+            _is_maximize = model._objective.sense == _ObjSenseSC.MAXIMIZE
+            # Same bounded budget the post-search fallback grants once the limit is
+            # spent: the ``_ROOT_FALLBACK_FLOOR_S`` floor recovers a bound instead of
+            # None while keeping the overrun to a single bounded op.
+            _rr_budget = max(_remaining_budget(), _ROOT_FALLBACK_FLOOR_S)
+            try:
+                _rr_val = _root_relaxation_lower_bound(
+                    model,
+                    _root_lb_snapshot,
+                    _root_ub_snapshot,
+                    _rr_budget,
+                    psd_cuts=psd_cuts,
+                )
+            except Exception as _rr_exc:  # pragma: no cover - defensive
+                logger.debug(
+                    "root-relaxation fallback (deadline short-circuit) failed: %s", _rr_exc
+                )
+                _rr_val = None
+            if _rr_val is not None and np.isfinite(_rr_val):
+                # A lower bound on the internally minimized objective: for a MINIMIZE
+                # it is the dual lower bound directly; for a MAXIMIZE the builder
+                # minimizes ``-obj`` so a lower bound ``L`` on ``-obj`` gives the
+                # valid upper bound ``-L`` (mirrors the post-search negation).
+                _rr_bound = -_rr_val if _is_maximize else _rr_val
+        logger.info(
+            "time_limit spent before spatial search build (#654) — declining the "
+            "search apparatus; reporting the rigorous root-relaxation bound"
+        )
+        wall_time = time.perf_counter() - t_start
+        # Interactive debugger: fire the terminal checkpoint on this early exit too,
+        # so ``debug="on-error"`` sessions observe the (non-"optimal") termination
+        # exactly as they would on the normal loop exit (line ~9020). The status is
+        # always the non-certified ``"time_limit"`` here, so ``error`` is set.
+        from discopt import debug as _debug_sc
+
+        _debug_sc.fire(
+            _debug_sc.Checkpoint.TERMINATED,
+            model=model,
+            iteration=0,
+            elapsed=wall_time,
+            error="time_limit",
+        )
+        return SolveResult(
+            status="time_limit",
+            objective=None,
+            bound=_rr_bound,
+            gap=None,
+            x=None,
+            wall_time=wall_time,
+            node_count=0,
+            rust_time=rust_time,
+            jax_time=jax_time,
+            python_time=wall_time - rust_time - jax_time,
+        )
+
     # --- Create PyTreeManager (Rust) ---
     t_rust_start = time.perf_counter()
     tree = PyTreeManager(
@@ -5469,14 +5547,30 @@ def solve_model(
                         # timeout — so a brief cap suffices and leaves the bulk of
                         # the budget for the actual B&B. Mirror the OBBT root-budget
                         # heuristic above, never exceeding the live remaining time.
-                        _probe_remaining = time_limit - (time.perf_counter() - t_start)
-                        _probe_budget = min(
-                            max(time_limit * 0.1, 2.0),
-                            max(_probe_remaining, _DEADLINE_NODE_FLOOR_S),
-                        )
-                        _probe = _mc_lp_relaxer.solve_at_node(
-                            _probe_lb, _probe_ub, time_limit=_probe_budget
-                        )
+                        if _deadline_exhausted():
+                            # #654: the probe's FIRST ``solve_at_node`` builds the
+                            # full McCormick LP (seconds on the large sparse
+                            # sonet/qap/eg_all_s class) — that build is NOT bounded by
+                            # the solve ``time_limit`` below, only the Rust MILP solve
+                            # is — solely to decide whether to keep the relaxer for a
+                            # search that, past the deadline, finalizes after <=1 node.
+                            # Once the budget is already spent, skip the probe: leaving
+                            # ``_probe=None`` drops the relaxer to the sound ``"none"``
+                            # bound source, the node loop exits immediately, and the
+                            # rigorous post-search root-relaxation fallback still
+                            # supplies the dual bound. Sound: the relaxer only ever
+                            # *tightens* a per-node bound the fallback also computes —
+                            # skipping it never changes the reported bound's validity.
+                            _probe = None
+                        else:
+                            _probe_remaining = time_limit - (time.perf_counter() - t_start)
+                            _probe_budget = min(
+                                max(time_limit * 0.1, 2.0),
+                                max(_probe_remaining, _DEADLINE_NODE_FLOOR_S),
+                            )
+                            _probe = _mc_lp_relaxer.solve_at_node(
+                                _probe_lb, _probe_ub, time_limit=_probe_budget
+                            )
                     except Exception as e:  # pragma: no cover - defensive
                         logger.debug("McCormick LP root probe failed: %s", e)
                         _probe = None
