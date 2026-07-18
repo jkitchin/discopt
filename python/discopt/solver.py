@@ -4479,16 +4479,19 @@ def solve_model(
                 return gp_minlp_result
 
     # --- Signomial (mixed-sign) global fast path (opt-in, DISCOPT_SGO; OFF) ---
-    # A mixed-sign signomial minimised over a strictly-positive box is
-    # non-convex with no exact convex reformulation, so the GP path abstains
-    # (issue #114). This scheme certifies that class via spatial branch-and-bound
-    # on the certified log-domain DC envelope: every node bound is a rigorous
-    # dual bound and a closed tree certifies the global optimum. It changes
-    # default-solve behaviour for a class of models, so per the bound-changing
-    # flag discipline it stays behind a default-OFF env flag until a differential
-    # panel graduates it. ``classify_signomial_global`` bails cheaply on anything
-    # outside the class (integer vars, extra constraints, single-sign / non-
-    # signomial objective), preserving the sound GP abstention.
+    # A mixed-sign signomial minimised over a strictly-positive box (optionally
+    # with signomial inequality constraints and/or positive-bounded INTEGER
+    # variables — issue #741 Task 2) is non-convex with no exact convex
+    # reformulation, so the GP path abstains (issue #114). This scheme certifies
+    # that class via spatial branch-and-bound on the certified log-domain DC
+    # envelope (integers driven by integer branching wrapping the same node
+    # relaxation): every node bound is a rigorous dual bound and a closed tree
+    # certifies the global optimum. It changes default-solve behaviour for a
+    # class of models, so per the bound-changing flag discipline it stays behind
+    # a default-OFF env flag until a differential panel graduates it.
+    # ``classify_signomial_global`` bails cheaply on anything outside the class
+    # (binary / 0-lb vars, non-signomial or equality constraints, single-sign /
+    # non-signomial objective), preserving the sound GP abstention.
     if (
         _solver is None
         and not _has_bb_callbacks
