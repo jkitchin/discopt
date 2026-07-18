@@ -139,6 +139,44 @@ class TestWideBoxStructuralRecognizers:
         m.subject_to((x + 1.0) * (-y) + x * x - 10.0 <= 0)
         assert classify_constraint(m._constraints[0], m) is False
 
+    def test_fractional_epigraph_positive_denominator_hypograph_is_nonconvex(self):
+        """Regression for #757: the ``coeff_lo > 0`` (positive-denominator)
+        branch inverted the discriminant test.
+
+        ``(x+2)*y - x**2 <= 0`` with ``x in [0,1]`` rearranges to
+        ``y <= x**2/(x+2)``. The ratio ``x**2/(x+2)`` is strictly *convex*
+        on the box (positive denominator, discriminant
+        ``a*e^2 - b*d*e + c*d^2 = (-1)*4 = -4 < 0`` for the epigraph
+        orientation), so its *hypograph* — this feasible set — is NONconvex:
+        ``(0,0)`` and ``(1, 1/3)`` are feasible but their midpoint is not.
+        The classifier must return False. Before the fix it returned True
+        because the branch compared ``<= 1e-10`` instead of ``>= -1e-10``.
+
+        Both pre-existing fractional-epigraph tests use the ``(...)*(-y)``
+        form, which routes through the ``coeff_hi < 0`` branch; this is the
+        first coverage of the positive-denominator branch.
+        """
+        m = Model("frac_epi_pos_denom_nonconvex")
+        x = m.continuous("x", lb=0.0, ub=1.0)
+        y = m.continuous("y", lb=-10.0, ub=10.0)
+        m.subject_to((x + 2.0) * y - x * x <= 0)
+        assert classify_constraint(m._constraints[0], m) is False
+
+    def test_fractional_epigraph_positive_denominator_convex_hypograph(self):
+        """Sound direction of the ``coeff_lo > 0`` branch (#757).
+
+        ``(x+2)*y + x**2 + 1 <= 0`` rearranges to ``y <= -(x**2+1)/(x+2)``.
+        The ratio ``(x**2+1)/(x+2)`` is convex on the box (discriminant
+        ``a*e^2 - b*d*e + c*d^2 = 1*4 + 1*1 = 5 >= 0``), so its negation is
+        concave and the hypograph is genuinely convex. The classifier must
+        return True; the inverted comparison lost this valid tightening.
+        """
+        m = Model("frac_epi_pos_denom_convex")
+        x = m.continuous("x", lb=0.0, ub=1.0)
+        y = m.continuous("y", lb=-10.0, ub=10.0)
+        m.subject_to((x + 2.0) * y + x * x + 1.0 <= 0)
+        assert classify_constraint(m._constraints[0], m) is True
+
     def test_exp_perspective_with_mismatched_denominator_is_unknown(self):
         """Negative case for the perspective-of-exp recogniser.
 
