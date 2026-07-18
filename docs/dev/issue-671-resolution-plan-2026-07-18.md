@@ -333,7 +333,15 @@ re-checked: production diff vs `main` reverts no #732 hunk.
 - **Cherry-pick too conflict-ridden:** hand-port the four hunks of §2 directly;
   the branch's test file usually applies clean.
 
-## 8. Step 6 — PR and close-out
+## 8. Step 6 — PR and close-out ✅ DONE
+
+**Status: complete.** PR #768 opened (`Closes #671`), mirroring the repo PR
+template (Summary / Correctness / Tests / Regression / Bound-changing / Scope
+honesty). Issue #671 close-out comment posted
+(issuecomment-5012890310): summary, verification, explicit "can be closed:
+yes", sibling-flag disposition, scope honesty. Merging #768 closes #671.
+
+### (original Step 6)
 
 1. PR from `claude/issue-671-resolution-lm4bdh` titled
    `fix(cert): #671 failure-triggered row filter — graduate the tight hda dual bound`.
