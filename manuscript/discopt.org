@@ -5,6 +5,7 @@
 #+LATEX_CLASS: article
 #+LATEX_CLASS_OPTIONS: [12pt]
 #+LATEX_HEADER: \usepackage{amsmath,amssymb,algorithm,algpseudocode}
+#+LATEX_HEADER: \usepackage{mathtools}  % psmallmatrix and friends
 #+LATEX_HEADER: \usepackage{booktabs,multirow,graphicx}
 #+LATEX_HEADER: \PassOptionsToPackage{version=4}{mhchem}
 
