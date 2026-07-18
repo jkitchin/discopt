@@ -170,6 +170,21 @@ def evaluator_fingerprint(model: Model) -> tuple:
     )
 
 
+# Number of distinct-fingerprint evaluators kept per model. A single slot was
+# enough for the plain B&B loop (one structural fingerprint for the whole solve),
+# but the primal heuristics *temporarily* add a structural row (the RENS /
+# local-branching sub-solves append a Hamming-distance / restriction constraint,
+# solve, then remove it) and then re-solve the *base* model. That oscillation —
+# base → base+cut → base → base+cut' → … — thrashes a one-slot cache: every return
+# to the base model evicts and rebuilds the base evaluator (measured on
+# clay0303hfsg: the base evaluator rebuilt 3× per solve, #723). A small LRU keyed
+# on :func:`evaluator_fingerprint` keeps the base entry resident across the
+# interleaved sub-solve fingerprints so it is built once, while each genuinely
+# different sub-solve model still gets its own (correct) evaluator. Bounded so a
+# long run of ever-distinct sub-solve cuts cannot grow the cache without limit.
+_EVALUATOR_CACHE_MAXSIZE = 8
+
+
 def cached_evaluator(model: Model) -> "NLPEvaluator":
     """Return a per-model cached ``NLPEvaluator``, reusing its compiled JAX
     callables across repeated constructions as long as the model's *structure* is
@@ -184,15 +199,31 @@ def cached_evaluator(model: Model) -> "NLPEvaluator":
     fresh ``NLPEvaluator(model)`` per call (e.g. the diving heuristic, ~110×/solve
     on gear4) re-paid that construction cost on every call. Keyed on
     :func:`evaluator_fingerprint`, so a structurally different model rebuilds.
+
+    The cache holds up to :data:`_EVALUATOR_CACHE_MAXSIZE` distinct-fingerprint
+    evaluators (LRU) rather than a single slot, so a heuristic that temporarily
+    mutates the model's structure (RENS / local-branching adding then removing a
+    cut) does not evict — and force a rebuild of — the base-model evaluator each
+    time the search returns to it (#723). Each fingerprint maps to the identical
+    evaluator the one-slot cache would have built, so this is bound-neutral: it
+    only avoids rebuilding evaluators that were previously discarded.
     """
+    from collections import OrderedDict
+
     fp = evaluator_fingerprint(model)
-    cached = getattr(model, "_nlp_evaluator_cache", None)
-    if cached is not None:
-        ev, cached_fp = cached
-        if cached_fp == fp:
-            return ev
+    cache: "OrderedDict[tuple, NLPEvaluator] | None" = getattr(model, "_nlp_evaluator_cache", None)
+    if cache is None:
+        cache = OrderedDict()
+        model._nlp_evaluator_cache = cache  # type: ignore[attr-defined]
+    ev = cache.get(fp)
+    if ev is not None:
+        cache.move_to_end(fp)  # mark most-recently-used
+        return ev
     ev = NLPEvaluator(model, gauss_newton=bool(getattr(model, "_gauss_newton_hessian", False)))
-    model._nlp_evaluator_cache = (ev, fp)  # type: ignore[attr-defined]
+    cache[fp] = ev
+    cache.move_to_end(fp)
+    while len(cache) > _EVALUATOR_CACHE_MAXSIZE:
+        cache.popitem(last=False)  # evict least-recently-used
     return ev
 
 

@@ -68,3 +68,44 @@ def test_make_evaluator_shares_the_cache():
     ev_main = S._make_evaluator(m)
     ev_heur = cached_evaluator(m)
     assert ev_main is ev_heur, "_make_evaluator and cached_evaluator must share one cache"
+
+
+def test_lru_keeps_base_evaluator_across_transient_row():
+    """#723: a heuristic that *temporarily* appends a structural row (the RENS /
+    local-branching sub-solve adds a Hamming/restriction cut, solves, then removes
+    it) must not evict the base-model evaluator.
+
+    With the previous one-slot cache the return to the base structure rebuilt the
+    base evaluator every time — measured on clay0303hfsg as 3 wasted base rebuilds
+    / ~8 redundant XLA compiles per solve. The LRU must return the *same* base
+    object after the interleaved variant.
+    """
+    m = _model()
+    ev_base = cached_evaluator(m)
+    fp_base = evaluator_fingerprint(m)
+
+    # Sub-solve appends a transient structural row -> new fingerprint, new evaluator.
+    m._constraints.append(m._variables[0] >= 0.5)
+    assert evaluator_fingerprint(m) != fp_base
+    ev_variant = cached_evaluator(m)
+    assert ev_variant is not ev_base
+
+    # Sub-solve finishes and restores the base structure.
+    m._constraints.pop()
+    assert evaluator_fingerprint(m) == fp_base
+    ev_base_again = cached_evaluator(m)
+    assert ev_base_again is ev_base, "base evaluator must survive interleaved variant (no rebuild)"
+
+
+def test_cache_is_bounded_by_maxsize():
+    """The LRU must not grow without bound when a solve emits an unbounded stream
+    of ever-distinct transient sub-solve cuts."""
+    from discopt._jax.nlp_evaluator import _EVALUATOR_CACHE_MAXSIZE
+
+    m = _model()
+    cached_evaluator(m)  # base entry
+    for k in range(_EVALUATOR_CACHE_MAXSIZE + 5):
+        m._constraints.append(m._variables[0] >= 0.1 * (k + 1))
+        cached_evaluator(m)  # distinct fingerprint each iteration
+        m._constraints.pop()
+    assert len(m._nlp_evaluator_cache) <= _EVALUATOR_CACHE_MAXSIZE
