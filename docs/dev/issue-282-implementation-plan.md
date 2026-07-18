@@ -123,6 +123,31 @@ Existing harness (reuse, do not rebuild):
 
 ## Workstream A — graduate `DISCOPT_ROOT_LP_PROBE_TIGHT` (nonconvex `*hfsg`)
 
+> **VERDICT: GRADUATED default-ON (2026-07-18).** Routed through the `SolverTuning`
+> tri-state field `root_lp_probe_tight` (default_factory `_env_flag(..., default=True)`);
+> `_root_lp_probe_tight_enabled()` delegates to it; `DISCOPT_ROOT_LP_PROBE_TIGHT=0` remains
+> the opt-out. Evidence:
+> (1) **A/B re-confirmed** — all 7 root values reproduce #715 exactly (load-independent):
+> `results/issue282/root_lp_probe_ab_reconfirm_*.json`.
+> (2) **Regime-2 panel** (`issue282_root_lp_probe_graduation_panel.py`), ON vs OFF over the
+> vendored 66 + the 7-panel: **cert-clean** (0 flag-induced soundness regressions across 73
+> instances — no dual bound past `=opt=`, no `gap_certified True→False`, certified optima
+> identical, incumbents differentially feasibility-verified) AND **net-positive** (the affected
+> spatial set `syn15m02hfsg`/`syn30hfsg`/`syn40hfsg` + `casctanks` tighten the root dual bound;
+> everything else bound-neutral).
+> **Panel-methodology note (transparency):** the first panel run
+> (`root_lp_probe_graduation_panel_20260718T151309.json`) surfaced two *false-positive* flags —
+> `nvs13` (identical certified optimum -585.2 and identical root; only node count 23→19, a sound
+> trajectory change — node-count byte-identity is a *bound-neutral*-regime check, wrong for a
+> bound-changing flag) and `tanksize` (a pre-existing ~4e-6 default-path variable-bound tolerance
+> artifact present *identically in OFF*, 4.14e-6, which the flag actually *reduces* to 3.78e-6;
+> attributed by the deterministic isolated probe `issue282_probe_panel_violations.py`). The
+> panel's cert-clean checks were corrected to the principled **flag-induced** criteria
+> (certified-optimum identity + **differential** feasibility) — keeping every genuine soundness
+> guard — and re-run clean. **Separate finding to surface:** the `tanksize` default-path incumbent
+> sits ~4e-6 outside a variable bound (deterministic, present with the flag OFF); minor,
+> pre-existing, NOT caused by this graduation — worth its own tolerance-audit issue.
+
 **Mechanism is already merged (#715); this workstream is the graduation, not a build.** The
 keep/discard probe for the McCormick LP relaxer now runs over the FBBT/OBBT-tightened root box
 instead of the raw declared bounds (the `*hfsg` family declares flows `[0, inf]`, so the raw-box
@@ -180,6 +205,17 @@ Measured effect (30 s, root dual excess vs `=opt=`):
 ---
 
 ## Workstream B — graduate `DISCOPT_OBBT_ITERATE` (wide-box QCQP root box)
+
+> **VERDICT: HOLD (recorded 2026-07-18) — Workstream B is CLOSED, do not re-run the panel.**
+> The §5 graduation panel for `DISCOPT_OBBT_ITERATE` was already run as **#727 Track 1.2**.
+> Outcome: **sound (0 violations) but net-negative-to-neutral — 0/82 certifications gained.**
+> `nvs24`'s root tightens +70 % but that tighter root converts to **no new certification**
+> (it is a primal-gap + envelope-density problem, not a sweep-count one). Cert-clean but not
+> net-positive = the `DISCOPT_CUT_INHERIT` "sound ≠ helpful" law, so the flag **stays
+> default-OFF (opt-in)**. Evidence:
+> https://github.com/jkitchin/discopt/issues/727#issuecomment-5011711905 . Verdict artifact:
+> `discopt_benchmarks/results/issue282/obbt_iterate_workstream_b_HOLD_verdict.json`. No code
+> change, no PR. The steps below are retained for the record but are **not to be executed**.
 
 **Mechanism merged (#720), default-OFF.** Raises the root OBBT sweep cap 3→50 with a
 min-improvement early-stop when the model is quadratically structured AND the box is wide. The
@@ -299,9 +335,59 @@ likely a *different* failure from `rsyn*`'s ~+70 % (the diagnosis flagged this o
 one cut family fixes `rsyn*` but not `syn40m`, that is a real result — do not force one mechanism
 onto both; report the split.
 
+### C.0 RESULT (measured 2026-07-18) — every measurable family FALSIFIED; STOP-and-report
+
+**Verdict: all measurable cut families die (0.0 pt root gain). Recorded honest frontier; C.1
+NOT started.** Corpus: the four convex NLP-BB instances, root-bound values (load-independent),
+`--time-limit 20`. Probe: `discopt_benchmarks/scripts/issue282_c0_cut_family_root_gain.py`;
+data: `discopt_benchmarks/results/issue282/c0_cut_family_root_gain_20260718T144625.json`.
+
+| instance | NLP-BB root `B0` (excess %) | spatial-LP + **all** discopt cuts¹ | discopt→SCIP spread | kill ≥ | measured max gain |
+|---|---|---|---|---|---|
+| `rsyn0805m` | +62.873 | +62.873 (Δ ≈ 6e-10) | 46.8 pts | 4.68 pts | **0.0 pts** |
+| `rsyn0810m` | +72.135 | +72.135 (Δ ≈ 5e-9) | 62.6 pts | 6.26 pts | **0.0 pts** |
+| `rsyn0815m` | +103.566 | +103.566 (Δ ≈ 1e-9) | 85.7 pts | 8.57 pts | **0.0 pts** |
+| `syn40m` | +2608.35 | +2608.35 (Δ ≈ 1e-6) | 2603 pts | 260 pts | **0.0 pts** |
+
+¹ Gomory + single-row MIR + c-MIR aggregation (`DISCOPT_CMIR_AGGREGATION=1`) + knapsack-cover +
+clique, via `nlp_bb=False, root_cut_rounds=20`. The residuals (Δ) are LP feasibility-tolerance
+noise, not tightening.
+
+- **OA cuts (path a) — FALSIFIED by construction (0 pts).** For a convex MINLP the NLP-BB root
+  `B0` *is* the exact continuous convex relaxation optimum. An OA tangent of any convex row at
+  the root point is a valid but **redundant** supporting hyperplane (a tangent to a constraint
+  the relaxation already satisfies with equality at its optimum); an OA/LP outer approximation
+  converges *up to* `B0` from the loose side and can never pass it. The plan's "lowest-risk
+  first cut" cannot move the bound. (No numeric probe needed — it is a relaxation-theory
+  identity; a hand-rolled OA-augmented re-solve would only reproduce `B0`.)
+- **MIR / c-MIR / knapsack-cover / Gomory / clique (path b, discopt's real separators) —
+  FALSIFIED (0.0 pts measured).** discopt's entire existing root cut arsenal, run on the real
+  big-M LP relaxation of these models, moves the root bound by **0.000 pts** on all four
+  instances — 3–4 orders of magnitude below the kill threshold. Consistent with
+  `scip-gap-closing-plan.md` §0 ("#282: c-MIR irrelevant, 0 bilinear") and §1.5 (discopt's
+  current cuts do not deliver node reduction). The `syn40m` +2609 % vs `rsyn*` ~+70 % split is
+  real (different magnitudes) but the cut response is identical: **0.0 on both.**
+- **flow-cover — UNMEASURED (does not exist in the tree, plan §C entry).** The one genuinely
+  new family. It targets exactly the single-node flow set the big-M unit logic forms
+  (`Σ x_j ≤ b`, `x_j ≤ U y_j`, `y_j ∈ {0,1}`) — the fractional-`y` structure SCIP cuts to reach
+  +5–18 %. It is the sole remaining hypothesis, but **cannot be measured without a prototype
+  separator**, and building one *is* C.1-scoped work. Per correction #3 ("do not build cuts
+  blind; STOP and report if all families die") this is **not** a "clear survivor" → C.1 is NOT
+  started.
+
+**Recommendation.** Do not implement Stage C.1. The convex-half root gap resists every cut
+family discopt can currently produce (the honest frontier, house style cf. §C.3). The *only*
+gated next step, if the campaign continues, is a **throwaway flow-cover root-gain probe** on
+these four instances — measure flow-cover's *standalone* `(bound_with − B0)/(opt − B0)` against
+the same ≥10 %-of-spread bar **before any integration** — because it is the last unfalsified
+hypothesis and the #727 lesson forbids building on an unmeasured mechanism. If that probe also
+returns ~0, the convex-half #282 root gap is a recorded structural frontier and `gap_certified`
+stays legitimately `False` there (the #703 resolution holds).
+
 ### Stage C.1 — root cut loop on `_solve_nlp_bb`, behind `DISCOPT_NLPBB_ROOT_CUTS` (default-OFF)
 
-Only for the families that survived C.0. Add a root-only cutting stage to `_solve_nlp_bb`,
+Only for the families that survived C.0. **(As of the C.0 result above: NONE survived; C.1 is
+on hold pending a flow-cover probe. Do not start it.)** Add a root-only cutting stage to `_solve_nlp_bb`,
 inserted **after the root FBBT presolve and tree creation** (`solver.py:10870–10907`) and around
 the `iteration==0` root NLP solve (`:11218–11228`). `root_bound` is already wired onto
 `SolveResult` by cert-plan T0.1, so you have the measurement surface. The stage:
