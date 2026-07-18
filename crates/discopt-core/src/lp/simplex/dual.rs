@@ -91,8 +91,21 @@ pub fn solve_lp_warm_csc(
             // grind bails with `IterLimit` and falls through to the original verdict
             // (candidate A) instead of hanging — the flag can only *rescue*, never
             // stall the solve. A clean hardened solve finishes far inside the cap.
+            // Bound BOTH pivots and wall time: the root's OBBT/FBBT fixpoint issues
+            // many LP solves, so an unbounded (or only iteration-bounded) hardened
+            // re-solve on the m~3000 refactor-heavy basis compounds. A short wall
+            // deadline guarantees each retry terminates regardless of per-pivot cost.
+            let deadline = {
+                let cap = std::time::Instant::now()
+                    + std::time::Duration::from_millis(HARDENING_RETRY_DEADLINE_MS);
+                Some(match opts.deadline {
+                    Some(d) => d.min(cap),
+                    None => cap,
+                })
+            };
             let opts_h = SimplexOptions {
                 max_iter: hardening_retry_iter_cap(m, n).min(opts.max_iter),
+                deadline,
                 ..opts.clone()
             };
             let hardened = super::linsolve::with_hardening_active(|| {
@@ -117,6 +130,11 @@ fn hardening_retry_iter_cap(m: usize, n: usize) -> usize {
         .saturating_mul(m.saturating_add(n))
         .saturating_add(2000)
 }
+
+/// Wall-clock budget (ms) per #671 hardened re-solve. A clean hardened solve of an
+/// unblocked basis returns well inside it; a degenerate grind is cut here so the
+/// flag can never stall the enclosing solve even when many node LPs fail.
+const HARDENING_RETRY_DEADLINE_MS: u64 = 3000;
 
 /// The body of [`solve_lp_warm_csc`] (scaling + warm/cold solve + the #649 unscaled
 /// retry). Split out so the #671 hardened retry can re-run it under
