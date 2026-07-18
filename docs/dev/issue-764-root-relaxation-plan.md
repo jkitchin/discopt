@@ -63,21 +63,41 @@ and OBBT self-limits (loose relaxation → weak OBBT → loose relaxation).
 
 ## Candidate mechanisms, ranked — each needs a `tanksize`-real entry experiment first
 
-1. **Pooling PQ-relaxation (most promising).** Recognize the pool/split structure and add the
-   pq-reformulation constraints (multiply the proportion/balance rows by the shared variables and
-   lift into the existing `w_ij`). This is the standard strong relaxation for exactly this class
-   (Tawarmalani–Sahinidis; Misener–Floudas). Entry experiment: build the pq rows for `tanksize` by
-   hand, add to the root LP, measure root-gain. Kill if < +0.02.
-2. **Level-2 RLT / selective higher-degree products.** Multiply constraint pairs (not just
-   constraint × bound) to capture products of products. Larger LP; entry experiment on a curated
-   subset of pairs, measure root-gain before any general implementation.
-3. **Spectral/α-BB enrichment on the shared-variable blocks.** Diagonal α-BB was effectively Shor
-   (inert); a block/structured SDP on each shared-variable star may not be. Entry experiment: solve
-   the block-SDP relaxation offline (scs) and measure.
+1. **Pooling PQ-relaxation — FALSIFIED (entry experiment, 2026-07-18).** PQ is a special case of
+   level-1 RLT (multiply linear rows by variable/bound factors, lift the products). Tested the
+   **full level-1 RLT closure**, not just PQ: added `(-g)·(x_j-l_j) ≥ 0` and `(-g)·(u_j-x_j) ≥ 0`
+   for every linear form `g ≤ 0` × every continuous variable (2190 valid product constraints, 2170
+   lifted product columns, solved sparse via `DISCOPT_SPARSE_LARGE_LP=1`). Result: root LP
+   **0.8382 → 0.8382, delta = 0.0000** (bit-identical). Also tested the RLT-over-existing-products
+   subset (110 constraints): delta 0.0000. Construction validated — injecting an over-tightening
+   `x17 ≥ 1.0` correctly moves the root to 1.0, so the RLT rows genuinely reach the LP; they are
+   simply all non-binding at the McCormick optimum. **tanksize's McCormick bound already equals its
+   level-1 RLT bound.** Additional decisive sub-finding: with all 9 integers *fixed to their optimal
+   leaf* the root is still 0.8382, so the entire 0.838→1.2686 gap is **continuous×continuous
+   bilinear** (x0·x6/x9/x12, x1·x7/x10/x13, x2·x8/x11/x14, x15·x16, x16·x17), not integrality.
+   Repro: `scratchpad` `pq_exp.py` / `pq_exp2.py`. Kill criterion met — do not pursue PQ or any
+   level-1 RLT variant here.
+2. **Level-2 RLT / selective higher-degree products (now the leading candidate, but odds lowered).**
+   Since level-1 RLT is fully inert (candidate 1), the root can only move via products-of-products
+   (multiply *constraint pairs*, or bound-factor pairs → degree-2 monomials like `x0·x6·x9`). This is
+   O(n²) lifted columns — large — and level-1's complete inertness is a discouraging prior. Entry
+   experiment: a curated subset of degree-2 products among the loose group, solved sparse; kill if
+   < +0.02 before any implementation.
+3. **Structured/higher-order SDP on the shared-variable blocks.** Diagonal Shor was inert (0.840);
+   a moment/SDP relaxation on each shared-variable star (e.g. {x0, x6, x9, x12} and their products)
+   might capture the joint constraint level-1 RLT misses. Entry experiment: solve the block-moment
+   SDP offline (scs) over one leaf and measure.
 
-Branching-quality is a *secondary* finding: naive widest-variable bisection is inert while real B&B
-climbs, so the effective spatial-branching variable selection here is worth a separate look, but the
-dominant lever is the root relaxation.
+**Reality check from candidate 1.** McCormick = level-1 RLT = 0.838 here, and integer/naive-spatial
+branching are locally inert too, yet the continuous optimum is ≥ 0.955 — so the achievable gain
+lives in degree-≥2 / SDP territory (expensive, uncertain) or in *smart* spatial branching that the
+full B&B already exploits slowly (0.906→1.079 over 199 nodes). Both routes are research-grade with no
+guarantee; scope accordingly and always measure on `tanksize` itself first (the #727 lesson, now
+reinforced by level-1 RLT's exact no-op).
+
+Branching-quality is a *secondary* finding: naive widest-variable bisection is inert (0.838 to 8
+leaves) while real B&B climbs, so the effective spatial-branching variable selection here is worth a
+separate look.
 
 ## Soundness / graduation contract (non-negotiable)
 
