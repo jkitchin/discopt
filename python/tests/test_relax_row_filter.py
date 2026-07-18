@@ -7,10 +7,13 @@ contributing zero root tightness (measured:
 ``docs/dev/hda-certification-rowfilter-entry-2026-07-18.md``).
 
 Fix (flag ``DISCOPT_RELAX_ROW_FILTER`` / ``SolverTuning.relax_row_filter``,
-default OFF): drop such rows at the tail of ``build_milp_relaxation`` (root and
-every per-node cold rebuild). Sound by construction — removing relaxation rows
-yields a superset feasible region (a valid, weaker outer approximation), so the
-bound can only loosen, never falsify.
+default OFF): **failure-triggered** — only when a node LP breaks down without a
+certified verdict (``numerical``, or a spurious ``infeasible`` with no Farkas
+proof) does ``mccormick_lp._solve_at_node_impl`` drop such rows and re-solve
+once. Sound by construction — removing relaxation rows yields a superset
+feasible region (a valid, weaker outer approximation), so the bound can only
+loosen, never falsify. Firing only on failure keeps every already-solving node
+byte-identical (its LP is optimal/Farkas-infeasible, so the filter never runs).
 """
 
 import math
@@ -100,10 +103,18 @@ def test_hda_certifies_a_tight_bound_with_the_filter(monkeypatch):
 
 
 @pytest.mark.slow
-@pytest.mark.parametrize("name", ["alan", "ex1221"])
-def test_inert_on_well_conditioned_instances(name, monkeypatch):
-    """Instances whose relaxations have no wide rows are byte-identical ON vs OFF
-    (the filter drops nothing, so results cannot drift)."""
+@pytest.mark.parametrize(
+    "name",
+    # alan/ex1221: no wide rows. nvs09/bchoco07/beuster/casctanks: the always-on
+    # build-time filter LOOSENED these (nvs09 lost its `optimal` certificate) —
+    # the failure-triggered filter must be byte-identical on all of them, since
+    # their node LPs solve cleanly and the filter never fires.
+    ["alan", "ex1221", "nvs09", "bchoco07", "beuster", "casctanks"],
+)
+def test_failure_triggered_is_byte_identical_on_solving_instances(name, monkeypatch):
+    """The failure-triggered filter is byte-identical ON vs OFF on every
+    already-solving instance: the un-filtered node LP is optimal/Farkas-infeasible,
+    so the filter never fires (it only re-solves a numerically-failed node)."""
     path = os.path.join(_NL_DATA, f"{name}.nl")
     if not os.path.exists(path):
         pytest.skip(f"{name}.nl not vendored")
