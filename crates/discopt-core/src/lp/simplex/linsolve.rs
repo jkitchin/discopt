@@ -14,7 +14,7 @@
 //!   it refactorizes on every solve, so it is for bring-up, tiny bases, and
 //!   cross-checking `FeralLU` in tests — not performance.
 
-use super::refine::residual_dd;
+use super::refine::residual_matvec_dd;
 use feral::{
     should_use_dense_lu, DenseLu, GeneralMatrix, LuParams, LuSingularAction, RefactorCause,
     SparseColMatrix, SparseLu, SparseLuSymbolic,
@@ -220,6 +220,65 @@ std::thread_local! {
 /// on this thread.
 fn route_suppressed() -> bool {
     DENSITY_ROUTE_SUPPRESSED.with(|s| s.get())
+}
+
+std::thread_local! {
+    /// #671 factorization hardening: while `true`, a solve on this thread builds its
+    /// basis factor with [`FeralLU::with_singular_perturb`] so a near-singular basis
+    /// completes (`PerturbToEps`) instead of aborting, and the refined solves recover
+    /// accuracy in double-double. Set only for the duration of a *failure-triggered*
+    /// hardened retry (see `hardening_retry` in `primal.rs`/`dual.rs`); thread-local
+    /// for the rayon-parallel B&B. Default off — no solve is affected unless a prior
+    /// solve numerically failed AND the flag is enabled.
+    static FACTORIZATION_HARDENING_ACTIVE: std::cell::Cell<bool> =
+        const { std::cell::Cell::new(false) };
+}
+
+/// The `PerturbToEps` floor used by the hardened retry: below `zero_pivot_tol`
+/// (1e-13) so genuine small pivots are preserved, above 0 so exactly-singular /
+/// sub-tolerance pivots are floored and the factorization completes (the balance
+/// mapped by the `regularized_lu.rs` boundary experiment).
+pub(crate) const HARDENING_ABS_FLOOR: f64 = 1e-14;
+
+/// Whether the `DISCOPT_LP_FACTORIZATION_HARDENING` flag (default OFF) is enabled
+/// *and* no hardened retry is already in progress on this thread (a retry that
+/// fails again must fall through to the existing fallback chain, never recurse).
+pub(crate) fn hardening_retry_available() -> bool {
+    !FACTORIZATION_HARDENING_ACTIVE.with(|s| s.get())
+        && std::env::var("DISCOPT_LP_FACTORIZATION_HARDENING")
+            .map(|v| v != "0")
+            .unwrap_or(false)
+}
+
+/// Whether the hardened factorization mode is active on this thread (a hardened
+/// retry is in progress). Read at [`FeralLU`] construction in the simplex.
+pub(crate) fn hardening_active() -> bool {
+    FACTORIZATION_HARDENING_ACTIVE.with(|s| s.get())
+}
+
+/// A basis solver for a node solve, hardened iff a hardened retry is in progress:
+/// [`FeralLU::with_singular_perturb`] under [`hardening_active`], else the plain
+/// `FeralLU::new()` (byte-identical to today). The single construction helper the
+/// simplex uses so the mode is honored uniformly.
+pub(crate) fn node_feral_lu() -> FeralLU {
+    if hardening_active() {
+        FeralLU::new().with_singular_perturb(HARDENING_ABS_FLOOR)
+    } else {
+        FeralLU::new()
+    }
+}
+
+/// Run `f` with factorization hardening active on this thread (a hardened retry).
+/// Restores the previous state on exit, including on unwind.
+pub(crate) fn with_hardening_active<T>(f: impl FnOnce() -> T) -> T {
+    struct Restore(bool);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            FACTORIZATION_HARDENING_ACTIVE.with(|s| s.set(self.0));
+        }
+    }
+    let _guard = Restore(FACTORIZATION_HARDENING_ACTIVE.with(|s| s.replace(true)));
+    f()
 }
 
 /// #85: whether a *failed* LP solve may be retried on the dense route — true iff
@@ -451,54 +510,59 @@ impl FeralLU {
     /// refinement could not, #671). Used only when a retained basis is present;
     /// falls back to the plain solve otherwise.
     fn dd_refined(&mut self, rhs: &mut [f64], transpose: bool) -> Result<(), LinError> {
-        // A `PerturbToEps` factor of a near-singular basis has κ ≈ 1e14, so the
-        // Wilkinson refinement gains ~2 digits/step (κ·u ≈ 1e-2); 12 steps with an
-        // early exit is ample. Failure-triggered path — cost is off the hot loop.
+        // A `PerturbToEps` factor of a near-singular basis has κ ≈ 1/abs_floor, so
+        // the Wilkinson refinement gains ~`-log10(κ·u)` digits/step; a dozen steps
+        // with an early exit is ample and inert on well-conditioned solves (one
+        // correction, residual ≤ TOL, break). Failure-triggered path.
         const MAX_STEPS: usize = 12;
         const TOL: f64 = 1e-13;
-        let (m, cols) = match self.retained.as_ref() {
+        let (_m, cols) = match self.retained.as_ref() {
             Some(rb) => (rb.m, rb.cols.clone()),
             None => {
                 return if transpose {
-                    self.btran(rhs)
+                    self.btran_raw(rhs)
                 } else {
-                    self.ftran(rhs)
+                    self.ftran_raw(rhs)
                 }
             }
         };
         let target = rhs.to_vec();
-        let mut x = vec![0.0f64; m];
+        let mut x = vec![0.0f64; cols.len()];
         for _ in 0..MAX_STEPS {
-            let mut r = vec![0.0f64; m];
-            let mut resnorm = 0.0f64;
-            for i in 0..m {
-                // Residual against the TRUE basis, high precision. For `Bᵀ` the
-                // i-th row is column i of B (`cols[i]`); for `B` it is gathered
-                // across columns.
-                let ri = if transpose {
-                    residual_dd(&cols[i], &x, target[i])
-                } else {
-                    let row: Vec<f64> = cols.iter().map(|c| c[i]).collect();
-                    residual_dd(&row, &x, target[i])
-                };
-                r[i] = ri;
-                resnorm = resnorm.max(ri.abs());
-            }
+            // High-precision residual `target − (B or Bᵀ)·x`, sparse-aware O(nnz).
+            let mut r = residual_matvec_dd(&cols, &x, &target, transpose);
+            let resnorm = r.iter().fold(0.0f64, |a, &v| a.max(v.abs()));
             if resnorm <= TOL {
                 break;
             }
             // Correction through the (perturbed) factor: solve `B' dr = r`.
             if transpose {
-                self.btran(&mut r)?;
+                self.btran_raw(&mut r)?;
             } else {
-                self.ftran(&mut r)?;
+                self.ftran_raw(&mut r)?;
             }
-            for i in 0..m {
-                x[i] += r[i];
+            for (xi, ri) in x.iter_mut().zip(&r) {
+                *xi += ri;
             }
         }
         rhs.copy_from_slice(&x);
         Ok(())
+    }
+
+    /// Raw `B' x = rhs` solve through the current factor (no refinement).
+    fn ftran_raw(&mut self, rhs: &mut [f64]) -> Result<(), LinError> {
+        match self.lu.as_mut().ok_or(LinError::NotFactorized)? {
+            Factored::Sparse(lu) => lu.ftran(rhs).map_err(feral_err),
+            Factored::Dense(lu) => lu.ftran(rhs).map_err(feral_err),
+        }
+    }
+
+    /// Raw `B'ᵀ x = rhs` solve through the current factor (no refinement).
+    fn btran_raw(&mut self, rhs: &mut [f64]) -> Result<(), LinError> {
+        match self.lu.as_mut().ok_or(LinError::NotFactorized)? {
+            Factored::Sparse(lu) => lu.btran(rhs).map_err(feral_err),
+            Factored::Dense(lu) => lu.btran(rhs).map_err(feral_err),
+        }
     }
 }
 
@@ -572,17 +636,20 @@ impl LinearSolver for FeralLU {
     }
 
     fn ftran(&mut self, rhs: &mut [f64]) -> Result<(), LinError> {
-        match self.lu.as_mut().ok_or(LinError::NotFactorized)? {
-            Factored::Sparse(lu) => lu.ftran(rhs).map_err(feral_err),
-            Factored::Dense(lu) => lu.ftran(rhs).map_err(feral_err),
+        // #671 hardening: in singular-perturb mode the factor is of a nearby `B'`,
+        // so every solve is refined against the true `B` in double-double precision.
+        // The early-exit keeps well-conditioned solves cheap. Off mode → raw.
+        if self.singular_perturb.is_some() {
+            return self.dd_refined(rhs, false);
         }
+        self.ftran_raw(rhs)
     }
 
     fn btran(&mut self, rhs: &mut [f64]) -> Result<(), LinError> {
-        match self.lu.as_mut().ok_or(LinError::NotFactorized)? {
-            Factored::Sparse(lu) => lu.btran(rhs).map_err(feral_err),
-            Factored::Dense(lu) => lu.btran(rhs).map_err(feral_err),
+        if self.singular_perturb.is_some() {
+            return self.dd_refined(rhs, true);
         }
+        self.btran_raw(rhs)
     }
 
     fn update(&mut self, leaving_slot: usize, entering_col: &[f64]) -> Result<(), LinError> {

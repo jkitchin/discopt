@@ -34,9 +34,13 @@
 //! The production capability lives on [`super::linsolve::FeralLU`]:
 //! [`FeralLU::with_singular_perturb`](super::linsolve::FeralLU::with_singular_perturb)
 //! turns on the hardened factorization and double-double refined ftran/btran. It is
-//! **not yet wired** into the simplex's failure-triggered retry (that wiring, behind
-//! a default-OFF flag, plus the bound-neutral panel, is the gated follow-up); the
-//! tests here validate the primitive in isolation.
+//! wired into the simplex's **failure-triggered** retry behind a default-OFF flag
+//! (`DISCOPT_LP_FACTORIZATION_HARDENING`): [`super::linsolve::node_feral_lu`] builds
+//! a hardened factor while [`super::linsolve::with_hardening_active`] is set, and
+//! `dual::solve_lp_warm_csc` re-runs the solve under it once a strict solve exits
+//! `Numerical`/`IterLimit`. Flag OFF ⇒ every solve is byte-identical to today (the
+//! `node_lu_is_plain_when_hardening_inactive` test). The corpus-wide bound-neutral
+//! + differential panel remains the graduation gate before any default-ON.
 
 #![cfg(test)]
 
@@ -259,6 +263,39 @@ fn hardened_feral_lu_solves_where_default_aborts() {
     assert!(
         res_b < 1e-9,
         "hardened btran residual {res_b:.3e} too large"
+    );
+}
+
+#[test]
+fn node_lu_is_plain_when_hardening_inactive() {
+    // Outside a hardened retry, `node_feral_lu()` is the strict (Fail) factor: it
+    // aborts on a singular basis exactly like `FeralLU::new()`, so the flag-OFF
+    // path is byte-identical to today.
+    let cols = near_singular(4, 0.0);
+    let mut lu = super::linsolve::node_feral_lu();
+    assert!(
+        lu.factorize(4, &cols).is_err(),
+        "inactive node LU must be plain"
+    );
+}
+
+#[test]
+fn node_lu_is_hardened_inside_active_scope() {
+    // Inside a hardened retry scope, `node_feral_lu()` completes a singular factor
+    // (PerturbToEps) — the failure-triggered escalation.
+    let cols = near_singular(4, 0.0);
+    super::linsolve::with_hardening_active(|| {
+        let mut lu = super::linsolve::node_feral_lu();
+        assert!(
+            lu.factorize(4, &cols).is_ok(),
+            "hardened node LU must complete the singular factorization"
+        );
+    });
+    // Scope restored: back to plain afterward.
+    let mut lu = super::linsolve::node_feral_lu();
+    assert!(
+        lu.factorize(4, &cols).is_err(),
+        "hardening must not leak past the scope"
     );
 }
 

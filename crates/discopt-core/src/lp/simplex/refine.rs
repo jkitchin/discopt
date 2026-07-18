@@ -153,6 +153,45 @@ pub fn residual_dd(row: &[f64], x: &[f64], rhs: f64) -> f64 {
     acc.to_f64()
 }
 
+/// The residual vector `rhs − B x` (`transpose = false`) or `rhs − Bᵀ x`
+/// (`transpose = true`), each component accumulated in double-double, where `B` is
+/// given by its **dense columns** `cols` (`cols[j][i] = B[i][j]`). Zero entries are
+/// skipped, so on the sparse simplex bases (a handful of nonzeros per column) this
+/// is ~`O(nnz)`, not `O(m²)` — the form the hardened refined solves
+/// ([`super::linsolve::FeralLU`]) use so the residual is cheap on the hot path.
+pub fn residual_matvec_dd(cols: &[Vec<f64>], x: &[f64], rhs: &[f64], transpose: bool) -> Vec<f64> {
+    let m = cols.len();
+    if transpose {
+        // (Bᵀ x)_i = Σ_j B[j][i]·x[j] = dot(cols[i], x); rows are independent.
+        (0..m)
+            .map(|i| {
+                let mut acc = Dd::zero().add_f64(rhs[i]);
+                for (j, &a) in cols[i].iter().enumerate() {
+                    if a != 0.0 {
+                        acc = acc.add_prod(-a, x[j]);
+                    }
+                }
+                acc.to_f64()
+            })
+            .collect()
+    } else {
+        // (B x)_i = Σ_j cols[j][i]·x[j]; scatter each column's contribution.
+        let mut acc: Vec<Dd> = rhs.iter().map(|&b| Dd::zero().add_f64(b)).collect();
+        for (j, col) in cols.iter().enumerate() {
+            let xj = x[j];
+            if xj == 0.0 {
+                continue;
+            }
+            for (i, &a) in col.iter().enumerate() {
+                if a != 0.0 {
+                    acc[i] = acc[i].add_prod(-a, xj);
+                }
+            }
+        }
+        acc.iter().map(|d| d.to_f64()).collect()
+    }
+}
+
 /// The sentinel treated as `±∞` when reading variable bounds. Matches the crate's
 /// `CERT_INF` / MILP-boundary convention: a bound at or beyond this magnitude is
 /// an open side.

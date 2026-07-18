@@ -19,7 +19,7 @@
 
 #![allow(clippy::needless_range_loop)]
 
-use super::linsolve::{FeralLU, LinearSolver};
+use super::linsolve::{node_feral_lu, FeralLU, LinearSolver};
 use super::primal::{solve_lp_cols, solve_lp_cols_warm};
 use super::scaling::{ScaledLp, Scaling};
 use super::sparse::SparseCols;
@@ -64,6 +64,45 @@ pub fn solve_lp_warm(lp: &LpView<'_>, b: &[f64], start: &Basis, opts: &SimplexOp
 /// entries and touching ~19k per solve. `start` is `(col_status, basic_vars)`.
 #[allow(clippy::too_many_arguments)]
 pub fn solve_lp_warm_csc(
+    sp: SparseCols,
+    m: usize,
+    n: usize,
+    c: &[f64],
+    l: &[f64],
+    u: &[f64],
+    b: &[f64],
+    start: Option<&Basis>,
+    opts: &SimplexOptions,
+) -> LpSolve {
+    // #671 factorization hardening (default OFF): if the solve breaks down
+    // numerically — a near-singular basis feral's strict LU cannot factorize (the
+    // hda-class ill-conditioned relaxations) — retry once with `PerturbToEps` +
+    // double-double refined solves so the basis completes and the node yields a
+    // usable dual. Failure-triggered; the cloned CSC is paid only when the flag is
+    // on. A retry that also fails falls through to the original verdict.
+    let retry_sp = super::linsolve::hardening_retry_available().then(|| sp.clone());
+    let sol = solve_lp_warm_csc_inner(sp, m, n, c, l, u, b, start, opts);
+    if let Some(sp2) = retry_sp {
+        if matches!(sol.status, LpStatus::Numerical | LpStatus::IterLimit) {
+            let hardened = super::linsolve::with_hardening_active(|| {
+                solve_lp_warm_csc_inner(sp2, m, n, c, l, u, b, start, opts)
+            });
+            if matches!(
+                hardened.status,
+                LpStatus::Optimal | LpStatus::Infeasible | LpStatus::Unbounded
+            ) {
+                return hardened;
+            }
+        }
+    }
+    sol
+}
+
+/// The body of [`solve_lp_warm_csc`] (scaling + warm/cold solve + the #649 unscaled
+/// retry). Split out so the #671 hardened retry can re-run it under
+/// [`super::linsolve::with_hardening_active`] without recursing.
+#[allow(clippy::too_many_arguments)]
+fn solve_lp_warm_csc_inner(
     mut sp: SparseCols,
     m: usize,
     n: usize,
@@ -239,7 +278,7 @@ impl<'a> PreparedDual<'a> {
             return None;
         }
 
-        let mut lu = FeralLU::new();
+        let mut lu = node_feral_lu();
         // Sparse basis columns straight from the CSC view — O(nnz) factorize, no
         // dense m×m basis (discopt#268 / feral#87). Bit-identical to `col()`.
         let cols: Vec<Vec<(usize, f64)>> = basis
@@ -840,7 +879,7 @@ fn refined_basic_values(
             col
         })
         .collect();
-    let mut lu = FeralLU::new().with_numeric_focus();
+    let mut lu = node_feral_lu().with_numeric_focus();
     lu.factorize(m, &cols).ok()?;
     let mut xb = reduced_rhs(sp, b, n, l, u, stat);
     lu.ftran_refined(&mut xb).ok()?;

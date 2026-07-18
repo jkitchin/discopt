@@ -15,7 +15,7 @@
 // range loop is clearer than zipping multiple slices.
 #![allow(clippy::needless_range_loop)]
 
-use super::linsolve::{FeralLU, LinearSolver};
+use super::linsolve::{node_feral_lu, FeralLU, LinearSolver};
 use super::scaling::{ScaledLp, Scaling};
 use super::sparse::SparseCols;
 use super::{LpSolve, LpStatus, SimplexOptions};
@@ -594,7 +594,7 @@ impl<'a> Simplex<'a> {
             tol: opts.tol,
             max_iter: opts.max_iter,
             deadline: opts.deadline,
-            lu: FeralLU::new(),
+            lu: node_feral_lu(),
             basis: Vec::new(),
             slot_of: vec![-1; na],
             stat: vec![AT_LOWER; na],
@@ -688,7 +688,7 @@ impl<'a> Simplex<'a> {
             .iter()
             .map(|&j| self.column(j, art_sign))
             .collect();
-        let mut lu = FeralLU::new().with_numeric_focus();
+        let mut lu = node_feral_lu().with_numeric_focus();
         lu.factorize(self.m, &cols).ok()?;
         let mut rhs = self.reduced_rhs(art_sign);
         lu.ftran_refined(&mut rhs).ok()?;
