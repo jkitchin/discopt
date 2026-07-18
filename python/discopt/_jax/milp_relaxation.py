@@ -378,7 +378,13 @@ class MilpRelaxationModel:
             if (
                 _nz.size
                 and np.isfinite(_nz).all()
-                and _nz.max() / _nz.min() > _RELAX_FALSE_INFEAS_TRIGGER
+                # Cross-multiplied form of ``max/min > TRIGGER``: identical boolean
+                # (``min > 0`` after the zero-filter), but on the ill-conditioned
+                # narrow/RLT boxes this guard exists for — coefficient spreads of
+                # ~1e26 over ~1e-300 denormals — the division overflows to ``inf``
+                # (a spurious RuntimeWarning), whereas ``TRIGGER * min`` cannot
+                # overflow (#732 Stage 1-B).
+                and _nz.max() > _RELAX_FALSE_INFEAS_TRIGGER * _nz.min()
             ):
                 c_s, A_s, b_s, bounds_s, col_scale = equilibrate_relaxation_lp(
                     self._c, self._A_ub, self._b_ub, self._bounds, self._integrality
