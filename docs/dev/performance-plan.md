@@ -588,16 +588,42 @@ panel green for 3 consecutive nightlies before default-on.
 > `x15·(x0·x3·x18)` aux relaxes to its lower bound, so the `1800·x15` cost
 > contributes 0 to the bound regardless of `x15`. The cubic cost rows #721 targets
 > only *define* `x15`; tightening them cannot lift the bound while `x15`'s coupling
-> into the objective is itself loose in-relaxation. **No auto-trigger code shipped**
-> — a wide-range-monomial partition trigger would be inert on the real path (and,
-> keyed on range width, would select `x6`, the *most* inert flow), failing #721's
-> own exit gate and the `DISCOPT_CUT_INHERIT` lesson (sound ≠ helpful). Re-scope: the
-> only remaining lever is a **tighter joint relaxation of the `x15·(indicator)`
-> objective coupling and the cubic block together** (not a term-wise cubic-row
-> relaxation) — the catalog §7 joint edge-concave/αBB open item, a distinct,
-> higher-risk research direction. Reproduction:
-> `discopt_benchmarks/scripts/ex1252_piecewise_lever_probe.py`; pinned by
-> `python/tests/test_ex1252_piecewise_lever.py`.
+> into the objective is itself loose in-relaxation. No wide-range-monomial partition
+> trigger shipped — it would be inert on the real path (and, keyed on range width,
+> would select `x6`, the *most* inert flow), per the `DISCOPT_CUT_INHERIT` lesson
+> (sound ≠ helpful). The real lever is the **objective coupling**, addressed next.
+> Reproduction: `discopt_benchmarks/scripts/ex1252_piecewise_lever_probe.py`; pinned
+> by `python/tests/test_ex1252_piecewise_lever.py`.
+
+> **Implemented, default-OFF (2026-07-18, issue #721 — objective-coupling RLT,
+> `DISCOPT_MULTILINEAR_COUPLING_RLT`).** Following the record above (the wall is the
+> `x15·(x0·x3·x18)` coupling, not the cubic rows), the entry experiment measured
+> `min x15` over the reformed loosest-node relaxation = **12.44** — the cubic/flow
+> rows *do* force `x15` up; the bound sits at the objective constant `12658.06` only
+> because the reformed `v_k = z_k·x15` big-M products decouple (with the reform's own
+> expansion bits fractional in the LP, every `v_k` relaxes to 0). Since the objective
+> is `12658.06 + 3600·x15` at the node, a valid coupling link makes `12658.06 +
+> 3600·12.44 = 57435` a **sound** bound the current relaxation simply leaves on the
+> table. The fix is RLT (issue direction #3): multiply each integer factor's exact
+> bit-linking equality (`x_i = lo + Σ2^k e_k`) and each AND hull (`z ≤ b`,
+> `z ≥ Σb−(n−1)`) by the non-negative continuous factor, tying `Σ2^k(e_k·c)` to
+> `x_i·c` and `v = z·c` to the per-bit products. Both levels are needed — the AND-hull
+> RLT alone does nothing (the leak is one level down, in the fractional expansion
+> bits); adding the bit-linking RLT (where `x_i·c` is McCormick-exact once `x_i` is
+> fixed) lifts the loosest-node bound to **57434.96**, matching the entry-experiment
+> prediction to the penny. Sound throughout (RLT rows are products of valid
+> identities/inequalities — never cut a feasible point; verified `bound ≤ opt` on
+> every run). **Kept default-OFF, not graduated:** the flag-OFF path is
+> byte-identical to #707 (same 90-column model, same 12658.06), but a full
+> time-limited solve is not yet a clean net-positive — the extra per-node `x_i·c`
+> bilinears cost throughput, and the time-limited *global* dual is high-variance
+> (ex1252: OFF 12658–31856, ON 0–22468 across 60–240 s budgets; ON ≥ OFF at 240 s but
+> the OFF number is not even monotonic run-to-run, so no clean net claim). The
+> node-level gain is deterministic and large; net-positivity is the open graduation
+> question and needs a corpus panel + deep-node gating (the RLT only bites once the
+> integer factors are fixed, so applying it everywhere over-pays at shallow nodes).
+> `python/tests/test_ex1252_coupling_rlt.py` pins soundness + the node-level lift +
+> the byte-identical OFF path.
 
 ## 7. Sequencing & rationale (revised by the measurement)
 
