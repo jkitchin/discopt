@@ -294,6 +294,93 @@ root-phase stall, (b) the short-budget dual cost of reform+RLT on the
 ex1252 class (candidate fix: budget-aware reform adoption). Re-run this panel
 after those land.
 
+### Stage 5 — blockers resolved *(2026-07-18, second pass)*
+
+Both graduation blockers were root-caused and fixed; the panel was re-run.
+
+**Blocker (a) — nvs09 "root-phase stall" was a reform-build monomial blowup.**
+The stall is not in the LP/search but in the reformulation *build*: nvs09's
+objective carries a **10-factor** integer-multilinear product (`[3,9]` each →
+`4^10 ≈ 1.05M` distributed binary monomials), each ≥2-bit one minting an AND aux,
+so `_try_expand_multilinear` explodes for minutes before the post-build column
+guard can reject it (faulthandler lands in `and_product`). **Fix:** an early
+estimate of the distributed monomial count (`∏_i(1+nbits_i)`, from the factor
+ranges alone, no columns minted) aborts the whole pass once the cumulative
+estimate exceeds `max(5000, 12·n_orig)` — caught by `expand_integer_products`'
+existing `except → return model`, so a blown-up reform degrades to exactly the
+flag-off model (bound-neutral: any reform that trips this would be rejected by
+the post-build/adoption guards anyway; the cap sits ~46× above the largest
+observed legitimate reform, ex1252 cum-est 108, and ~280× below the nvs09
+blowup). **Measured:** nvs09 flag-ON now certifies optimal in ~11 s / 5 nodes
+(`gap_certified=True`), was hanging > 150 s. ex1252/ex1252a/nvs05 reform to
+byte-identical column counts. Pinned by
+`test_integer_multilinear_reform.py::{test_wide_multilinear_reform_guard_degrades_instead_of_hanging,
+test_nvs09_reform_on_certifies_and_terminates}`.
+
+**Blocker (b) — the short-budget dual cost is now avoided by budget-aware
+adoption.** On the gated-configuration class the reform's payoff is the
+disjunctive config-bound floor / deep spatial recursion, which only engages at a
+generous budget (the disjunctive pass engages at `min(0.25·time_limit,150) ≥ 45`
+s, i.e. `time_limit ≥ 180` s). Below that the exact-linearization is pure
+per-node-LP cost: measured on this container, ex1252@60 s flag-ON collapsed the
+tree dual **9273 → 0** and lost the incumbent, vs the flag-off spatial path's
+9273. **Fix:** a non-pure-MILP reform that carries configuration indicators is
+adopted only when the budget affords the payoff pass; below that it keeps the
+flag-off path. A non-config reform (nvs05: payoff is the direct node-LP
+tightening, +0.19 dual at equal nodes @60 s) and pure-MILP reforms are
+unaffected. **Measured after:** ex1252@60 s flag-ON is byte-identical to flag-off
+(dual 9273, 31 nodes); ex1252@200 s still adopts and lifts (dual 31459, incumbent
+134471). Pinned by
+`test_integer_multilinear_reform.py::test_ex1252_short_budget_declines_reform_no_regression`
+(deterministic node-limited byte-identity). A hygiene rider silences the spurious
+`milp_simplex` divide overflow on the ill-conditioned reform boxes (bound-neutral
+`errstate`, finishing Stage 1's robust-node-LP mandate).
+
+**Re-run differential (ON vs OFF, 60 s, this container —
+`discopt_benchmarks/scripts/ex1252_stage5_differential.py`):**
+
+| instance | OFF dual / incumbent | ON dual / incumbent | note |
+|---|---|---|---|
+| nvs01, nvs16, nvs22, st_e36, st_e40 | (optimal, certified) | identical | byte-identical, guards reject the reform |
+| **nvs09** | optimal −43.13 / 5 nodes / **cert** | identical, **cert** | **blocker (a) fixed** — ON now certifies (was hanging, uncertified) |
+| **ex1252** | 9273 / 204321 | **identical (9273 / 204321)** | **blocker (b) fixed** — the 9273 → 0 collapse is gone; reform declined below its payoff budget |
+| nvs05 | 3.81 / 8.732 | identical | the Stage-5 "3.62 → 3.81 win" was **wall-clock-limit noise**; both arms reach 3.81 here |
+| ex1252a | 14086 / 177861 | 14086 / **183660** | dual identical; ON incumbent slightly worse — a *sound* primal wobble from the **narrow-box-branch rider** (the reform is declined at 60 s, so this is the only ON/OFF delta) |
+
+**Soundness: clean** — no dual above its optimum, no `bound > incumbent`, no
+certificate regression, on any arm. The two Stage-5 regressions (nvs09 cert loss,
+ex1252 dual collapse) are **both eliminated**.
+
+**Generous-budget check (200 s, config instances):** the reform stack is
+**net-negative on this container** — ex1252 OFF **46875** vs ON **31458**; ex1252a
+OFF **46368** vs ON **38746** (ON incumbent also worse, 147745 vs 131564). Root
+cause (logged): the disjunctive pass engages correctly (reported dual *equals* its
+floor, no wiring bug) but is **leaf-throughput-limited on this slow container** —
+only **29 leaf solves in its 50 s budget** → floor 31458, versus the baseline's
+48–120 leaves → 37945–63080. Meanwhile the **flag-off spatial path has become
+strong** (46875 @ 200 s, climbing — vs the plan's earlier "OFF ≈ 0 @ 600 s", a
+different/older tree), so the pass's 50 s tax + the reform's heavier per-node LPs
+are not repaid here. **This falsifies "the reform pays off at generous budgets"
+_on this container_** (Dev-Philosophy #4 — measurement recorded); whether it still
+holds on the faster baseline machine (where the pass reaches 120 leaves) is
+untested here.
+
+**Verdict (`DISCOPT_CUT_INHERIT` discipline): flags stay default-OFF, measurement
+recorded.** The two graduation *blockers are resolved* — the stack is now **safe**
+(no reform-build hang, no certificate loss, no short-budget dual collapse) and
+sound throughout — but it is **not net-positive on this container**: neutral at
+the 60 s fair budget (the reform is correctly inert on the config class below its
+180 s adoption budget) and net-negative at 200 s (container-limited pass
+throughput + a strong OFF path). This is a strict improvement over the prior
+verdict (which had *active* regressions), and the flag is now safe to opt into,
+but it does not clear the net-positive bar. Re-running on a baseline-speed panel
+(where the disjunctive pass reaches its 48–120-leaf regime) is the remaining
+graduation question; the blocker fixes ship regardless as a default-OFF increment.
+**All three fixes are sound and kept: the monomial-blowup guard (a real hang +
+certificate fix, valuable independent of graduation), the budget-aware adoption
+gate (prevents the measured 60 s collapse; unchanged at ≥ 180 s), and the
+`milp_simplex` errstate hygiene (bound-neutral).**
+
 ### Stage 5-original — graduation (CLAUDE.md §5)
 Class detector: `has_integer_multilinear_reformulation_work(model)` (the #707
 trigger) — i.e. the gated-configuration class, *not* an ex1252 special case.
