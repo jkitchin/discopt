@@ -1682,7 +1682,9 @@ def _tseitin_var(expr: LogicalExpression, model: Model, add_aux_binary) -> list[
     return [(aux, True)]
 
 
-def _cardinality_implication_constraints(aux, expr: LogicalExpression) -> list[Constraint]:
+def _cardinality_implication_constraints(
+    aux, expr: "LogicalAtLeast | LogicalAtMost | LogicalExactly"
+) -> list[Constraint]:
     """Build linear constraints encoding ``aux -> <cardinality atom>``.
 
     Used when a ``LogicalAtLeast`` / ``LogicalAtMost`` / ``LogicalExactly``
