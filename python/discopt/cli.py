@@ -3,7 +3,8 @@
 Usage:
     discopt about
     discopt test
-    discopt solve model.nl [--profile NAME] [--time-limit S] [--json] [--sol] ...
+    discopt solve model.nl [--profile NAME] [--json] [--sol] [--emit-certificate] ...
+    discopt cert-check model.cert.json    # verify a feasibility certificate
     discopt daemon {serve|stop|status}    # warm solve daemon (auto-spawned by solve)
     discopt convert input.gms output.nl
     discopt install-skills [--project-scope] [--dev] [--force]
@@ -450,6 +451,23 @@ def _cmd_solve(args):
         p = base_dir / f"{stub}.sol"
         write_sol(result, var_names, p)
         wrote.append(str(p))
+    if args.emit_certificate:
+        from discopt.certificate import (
+            CertificateError,
+            build_feasibility_certificate,
+            write_certificate,
+        )
+        from discopt.modeling.core import from_nl
+
+        try:
+            cert = build_feasibility_certificate(from_nl(nl), result)
+            p = base_dir / f"{stub}.cert.json"
+            write_certificate(cert, p)
+            wrote.append(str(p))
+        except CertificateError as exc:
+            # Not fatal to the solve: some models/statuses have no Tier-1
+            # certificate (no incumbent, or an unsupported node). Report and go on.
+            print(f"warning: no feasibility certificate emitted: {exc}", file=sys.stderr)
 
     if args.format == "json":
         print(json.dumps(serialize_result(result), indent=2))
@@ -461,6 +479,31 @@ def _cmd_solve(args):
     sys.exit(0 if result.status in ("optimal", "feasible") else 1)
 
 
+def _cmd_cert_check(args):
+    """Check a feasibility certificate with the Python reference checker.
+
+    This is the executable twin of the Lean ``checkFeasible`` decision procedure
+    (``lean/Discopt/Model.lean``); it verifies, over exact rationals, that the
+    certificate's incumbent is feasible with the reported objective value. Exit 0
+    on ACCEPT, 1 on REJECT (or a malformed file)."""
+    import json
+
+    from discopt.certificate import check_certificate
+
+    path = os.path.abspath(args.file)
+    if not os.path.exists(path):
+        print(f"Error: no such file: {args.file}", file=sys.stderr)
+        sys.exit(2)
+    try:
+        cert = json.loads(Path(path).read_text())
+    except (OSError, json.JSONDecodeError) as exc:
+        print(f"REJECT: could not read certificate: {exc}", file=sys.stderr)
+        sys.exit(1)
+    ok, reason = check_certificate(cert)
+    print(f"{'ACCEPT' if ok else 'REJECT'}: {reason}")
+    sys.exit(0 if ok else 1)
+
+
 _BUILTIN_COMMANDS = frozenset(
     {
         "about",
@@ -468,6 +511,7 @@ _BUILTIN_COMMANDS = frozenset(
         "convert",
         "gams-register",
         "solve",
+        "cert-check",
         "daemon",
         "gams-daemon",
         "gams-verify",
@@ -557,9 +601,26 @@ def main():
     )
     p_solve.add_argument("--json", action="store_true", help="Write <stub>.result.json.")
     p_solve.add_argument("--sol", action="store_true", help="Write an AMPL-style <stub>.sol.")
-    p_solve.add_argument("--out-dir", default=None, help="Directory for --json/--sol output.")
+    p_solve.add_argument(
+        "--emit-certificate",
+        action="store_true",
+        help="Write a Tier-1 feasibility certificate <stub>.cert.json (checkable "
+        "with the Lean checker under lean/ or `discopt cert-check`).",
+    )
+    p_solve.add_argument(
+        "--out-dir", default=None, help="Directory for --json/--sol/certificate output."
+    )
     p_solve.add_argument("--quiet", action="store_true", help="Suppress the stdout summary.")
     p_solve.set_defaults(func=_cmd_solve)
+
+    p_cert = subparsers.add_parser(
+        "cert-check",
+        help="Check a feasibility certificate (reference checker; twin of the Lean checker)",
+    )
+    p_cert.add_argument(
+        "file", help="Certificate JSON produced by `discopt solve --emit-certificate`."
+    )
+    p_cert.set_defaults(func=_cmd_cert_check)
 
     p_daemon = subparsers.add_parser(
         "daemon",
