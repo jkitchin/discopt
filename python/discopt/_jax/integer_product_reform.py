@@ -50,6 +50,7 @@ from discopt.modeling.core import (
     Variable,
     VarType,
 )
+from discopt.solver_tuning import _env_flag
 
 from .factorable_reform import _collect_mul_factors
 from .term_classifier import distribute_products
@@ -140,6 +141,18 @@ class _Expander:
         #   _bigm_cache: (e._index, other._index, other_elem) -> big-M product aux
         self._and_cache: dict[tuple, Variable] = {}
         self._bigm_cache: dict[tuple, Variable] = {}
+        # Coupling-RLT (issue #721, default-OFF ``DISCOPT_MULTILINEAR_COUPLING_RLT``).
+        # For a continuous-times-AND product ``v = z*c`` with ``z = AND(bits)`` and a
+        # non-negative continuous factor ``c``, the plain big-M envelope of ``v``
+        # decouples in the LP: with the bits/``z`` fractional the objective's ``c*z``
+        # cost can relax to 0 regardless of ``c`` (ex1252 loosest node: the reformed
+        # ``x15*(x0*x3*x18)`` term relaxes to 0 though the cubic rows force
+        # ``x15 >= 12.44``, pinning the bound at the objective constant 12658). The
+        # RLT rows ``v <= b*c`` and ``v >= sum_b (b*c) - (n-1)*c`` (products of the
+        # exact AND hull ``z <= b`` / ``z >= sum b - (n-1)`` with ``c >= 0``) tie ``v``
+        # back to ``c``, lifting the bound sound-ly (entry experiment: 12658 ->
+        # ~57435 at that node). See docs/dev/performance-plan.md §6.
+        self.coupling_rlt = _env_flag("DISCOPT_MULTILINEAR_COUPLING_RLT", default=False)
 
     def expansion(self, var: Variable, elem: int, lo: int, hi: int):
         key = (var._index, elem)
@@ -267,6 +280,75 @@ class _Expander:
         ac.append(Constraint(body, ">=", 0.0))
         self._and_cache[key] = z
         return z
+
+    def add_coupling_rlt(
+        self, v: Variable, bits: "list[Variable]", other: Expression, lo_o: float, hi_o: float
+    ) -> None:
+        """Add RLT rows tying ``v = AND(bits) * other`` to the per-bit products.
+
+        Let ``z = AND(bits)`` (so ``v == z*other``). The exact AND hull gives
+        ``z <= b`` for each bit ``b`` and ``z >= sum_b b - (n-1)``. Multiplying each
+        by a **non-negative** ``other`` (``lo_o >= 0``) yields the valid RLT rows
+
+            v <= b*other            (each bit b)
+            v >= sum_b (b*other) - (n-1)*other
+
+        where each ``b*other`` is the exact big-M product (reused from the cache when
+        already lifted). These hold at every integral point, so they never cut a
+        feasible solution, and they tighten the LP envelope of ``v`` toward ``z*other``
+        — closing the objective-coupling leak (issue #721). No-op unless the flag is
+        on, ``other`` is sign-definite non-negative, and the AND is genuinely
+        multi-bit (a single-bit ``z`` already *is* its big-M product, exactly)."""
+        if not self.coupling_rlt or lo_o < 0.0 or len(bits) < 2:
+            return
+        ws = [self.bigm_product(b, other, lo_o, hi_o) for b in bits]
+        ac = self.aux_constraints
+        # v - b*other <= 0   (v <= b*other), for each bit
+        for w in ws:
+            ac.append(Constraint(BinaryOp("-", v, w), "<=", 0.0))
+        # v - sum_b (b*other) + (n-1)*other >= 0   (v >= sum_b (b*other) - (n-1)*other)
+        s: Expression = ws[0]
+        for w in ws[1:]:
+            s = BinaryOp("+", s, w)
+        body = BinaryOp(
+            "+", BinaryOp("-", v, s), BinaryOp("*", Constant(float(len(bits) - 1)), other)
+        )
+        ac.append(Constraint(body, ">=", 0.0))
+
+    def add_bitlink_rlt(
+        self,
+        ref: Expression,
+        lo: int,
+        bits: "list[tuple[int, Variable]]",
+        other: Expression,
+        lo_o: float,
+        hi_o: float,
+    ) -> None:
+        """RLT of the bit-linking equality ``x_i = lo + sum_k 2^k e_k`` times ``other``.
+
+        Multiplying that exact identity by the continuous factor ``other`` gives the
+        valid (exact) linear relation
+
+            x_i*other == lo*other + sum_k 2^k (e_k*other)
+
+        where each ``e_k*other`` is the exact big-M product and ``x_i*other`` is left
+        as a bilinear term the McCormick relaxer envelopes. This is what actually
+        closes the coupling leak: at any node where ``x_i`` is fixed, ``x_i*other``
+        is McCormick-exact, so the per-bit products ``e_k*other`` are pinned (the
+        bit-linking row alone leaves the ``e_k`` fractional in the LP, which is why
+        the AND-hull RLT above is not enough on its own). Requires ``other >= 0``
+        (``lo_o >= 0``) so the objective coupling — the only current caller — is
+        sign-definite; a sign-mixed factor is skipped (left to plain McCormick)."""
+        if not self.coupling_rlt or lo_o < 0.0:
+            return
+        acc: Expression = BinaryOp("*", ref, other)
+        if lo != 0:
+            acc = BinaryOp("-", acc, BinaryOp("*", Constant(float(lo)), other))
+        for ck, ek in bits:
+            w = self.bigm_product(ek, other, lo_o, hi_o)
+            term = w if ck == 1 else BinaryOp("*", Constant(float(ck)), w)
+            acc = BinaryOp("-", acc, term)
+        self.aux_constraints.append(Constraint(acc, "==", 0.0))
 
 
 def _expand_product(
@@ -431,6 +513,17 @@ def _try_expand_multilinear(node: BinaryOp, exp: _Expander) -> Optional[Expressi
         return None
     int_factors = [exp.expansion(v, el, lo, hi) for (v, el, lo, hi) in int_refs]
 
+    # Issue #721 (default-OFF coupling RLT): tie each integer factor's bit-linking
+    # equality to the continuous factor, so the per-bit products ``e_k*c`` are pinned
+    # once ``x_i`` is fixed (the level that actually closes the objective-coupling
+    # leak). Done once per (integer factor, continuous factor) pair, before the
+    # per-monomial AND-hull RLT below.
+    if exp.coupling_rlt and cont_factors:
+        _cexpr, _clo, _chi = cont_factors[0]
+        for (v, el, _lo0, _hi0), (lo_i, bits_i) in zip(int_refs, int_factors):
+            ref_i = v if v.size == 1 else IndexExpression(v, el)
+            exp.add_bitlink_rlt(ref_i, lo_i, bits_i, _cexpr, _clo, _chi)
+
     # Distribute the product of the integer factors into monomials over the binary
     # bits. ``poly`` maps a tuple of distinct bit Variables (sorted by index) to its
     # integer coefficient; ``e^2 = e`` collapses repeated bits (repeated integer
@@ -470,6 +563,10 @@ def _try_expand_multilinear(node: BinaryOp, exp: _Expander) -> Optional[Expressi
                 term_expr: Expression = cexpr  # 1 * continuous
             else:
                 term_expr = exp.bigm_product(mono, cexpr, clo, chi)  # continuous * 0/1
+                # Issue #721: tie a multi-bit AND coupling back to the continuous
+                # factor via RLT (default-OFF), closing the objective-coupling leak.
+                if len(key) >= 2:
+                    exp.add_coupling_rlt(term_expr, list(key), cexpr, clo, chi)
         else:
             if mono is None:
                 out = Constant(c) if out is None else BinaryOp("+", out, Constant(c))

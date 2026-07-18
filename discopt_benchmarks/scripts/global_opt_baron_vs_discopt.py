@@ -548,6 +548,17 @@ def write_report(rows: list[Row], tl: float, out_dir: Path, ts: str) -> Path:
     b = tally(lambda r: r.b_verdict)
     n_oracle = sum(r.known is not None for r in rows)
 
+    # "Certified-global CLAIM" = the solver asserted a proven global (discopt
+    # ``optimal``; BARON/GAMS ``1 Optimal``). This is DISTINCT from "solved
+    # correctly" (``ok`` = objective matches the oracle). The two diverge sharply
+    # for BARON: GAMS returns ``2 Locally Optimal`` / ``8 Integer Solution`` on
+    # many instances BARON has in fact solved to the global optimum, so the
+    # status-based claim count SYSTEMATICALLY UNDERCOUNTS BARON (measured ~2x on a
+    # 200-instance panel: 97 claims vs 179 objective-correct). Rank capability by
+    # ``ok`` (+``gap`` for "found something"), NEVER by the certified-claim count.
+    d_cert = sum(_claims_global(r.discopt.status) for r in rows)
+    b_cert = sum(_claims_global(r.baron.status) for r in rows)
+
     # G4 (baron-gap-plan §6): the three wall ratios. ``wall/baron`` is the
     # historical number (charges discopt the fresh-process import floor);
     # ``solve/baron`` excludes the floor (pure engine time); a --via-daemon run's
@@ -608,6 +619,16 @@ def write_report(rows: list[Row], tl: float, out_dir: Path, ts: str) -> Path:
         f"gap {d[GAP]}  ·  n/a {d[NA]}",
         f"- **BARON   — VIOLATIONS: {b[VIOLATION]}**  ·  ok {b[OK]}  ·  "
         f"gap {b[GAP]}  ·  n/a {b[NA]}",
+        "",
+        "### Solved vs certified-claim (score capability by *solved*)",
+        "",
+        f"- **Solved correctly** (objective matches oracle — the fair capability "
+        f"metric): discopt **{d[OK]}**  ·  BARON **{b[OK]}**",
+        f"- Certified-global *claim* (status only): discopt {d_cert}  ·  "
+        f"BARON {b_cert}",
+        "> BARON-via-GAMS reports `2 Locally Optimal` / `8 Integer Solution` on "
+        "many instances it has solved to the global optimum, so its *claim* count "
+        "undercounts it (~2x). **Rank by *solved* (`ok`), not by the claim count.**",
         "",
         (
             "> ✅ **Zero discopt correctness violations.**"

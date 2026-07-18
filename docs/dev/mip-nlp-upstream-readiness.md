@@ -24,7 +24,7 @@ before opening the final upstream PR from `bernalde:feature/mip-nlp-solver` to
 
 | Issue | Scope | Integration PR | Status |
 | --- | --- | --- | --- |
-| #111 | Route `solver="mip-nlp"` to OA/ECP and establish the two-axis API | #122 | Merged into `feature/mip-nlp-solver` |
+| #111 | Route `solver="mip-nlp"` to OA/ECP and establish the two-axis API (contract locked by #323; see `solve-routing.md` §4) | #122 | Merged into `feature/mip-nlp-solver` |
 | #112 | OA/ECP parity baselines against MindtPy-style fixtures | #123 | Merged into `feature/mip-nlp-solver` |
 | #113 | Initialization strategies: `rNLP`, `initial_binary`, `max_binary` | #124 | Merged into `feature/mip-nlp-solver` |
 | #114 | OA robustness: slack, no-good cuts, feasibility norms, cycling | #125 | Merged into `feature/mip-nlp-solver` |
