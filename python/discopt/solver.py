@@ -6721,6 +6721,7 @@ def solve_model(
             rens_enabled=rens,
             _lns_enabled=_lns_enabled,
             incumbent_time_extension=incumbent_time_extension,
+            emit_certificate=emit_certificate,
         )
 
     # --- Problem classification: dispatch LP/QP to specialized solvers ---
@@ -7156,6 +7157,7 @@ def solve_model(
                 _lns_enabled=_lns_enabled,
                 precomputed_is_convex=_root_is_convex,
                 incumbent_time_extension=incumbent_time_extension,
+                emit_certificate=emit_certificate,
             )
 
     # --- Extract variable info ---
@@ -12577,6 +12579,7 @@ def _solve_nlp_bb(
     # #917: extra wall-clock seconds this search may take once it holds an
     # incumbent; see ``_extend_budget_for_incumbent``. 0.0 = pre-#917 behaviour.
     incumbent_time_extension: float = 0.0,
+    emit_certificate: bool = False,
 ) -> SolveResult:
     """Solve a MINLP via nonlinear Branch & Bound (NLP-BB).
 
@@ -13838,6 +13841,11 @@ def _solve_nlp_bb(
         bound_duals_lower=bound_duals_lower,
         bound_duals_upper=bound_duals_upper,
         solver_stats=_ext_stats,
+        # Tier-3 tree (NLP-BB path). Its per-node bound is the NLP objective -- a
+        # valid lower bound only for convex MINLPs; nonconvex nodes carry -inf,
+        # which the certificate checker rejects. No McCormick LP here, so no leaf
+        # duals. Only emitted when recording is on (bound-neutral otherwise).
+        bnb_tree=(tree.tree_records() if emit_certificate else None),
     )
 
 

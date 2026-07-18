@@ -391,6 +391,12 @@ def build_bnb_certificate(
         )
     if result.x is None or result.objective is None:
         raise CertificateError("no incumbent to certify")
+    if not getattr(result, "gap_certified", False):
+        raise CertificateError(
+            "solve is not gap-certified; a Tier-3 global-optimality certificate "
+            "requires a certified solve (e.g. NLP-BB on a nonconvex model reports "
+            "gap_certified=False and its node bounds are not valid lower bounds)"
+        )
 
     base = build_feasibility_certificate(model, result, feas_tol=feas_tol, int_tol=int_tol)
     cert = base["certificate"]
