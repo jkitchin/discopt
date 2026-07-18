@@ -1,0 +1,57 @@
+# Registry of repositories that depend on discopt (issue #414).
+#
+# This is the machine-readable source of truth for "what depends on discopt".
+# The `notify-dependents` workflow (.github/workflows/notify-dependents.yml)
+# reads this file on every discopt release and, for each entry:
+#
+#   * dispatch: true  -> sends a `repository_dispatch` event so the dependent's
+#                        CI re-runs against the freshly released discopt and we
+#                        find out immediately if the release breaks a plugin.
+#   * notify:   true  -> opens a "review / update against discopt vX.Y.Z" issue
+#                        in the dependent repo so the update is tracked.
+#
+# The public entries below are also surfaced to humans in the README "Plugins"
+# table; private repos live here only (they are intentionally not listed in the
+# public README).
+#
+# Schema (per entry):
+#   repo        (required)  "owner/name" on GitHub.
+#   private     (optional, default false)  Informational; private repos need the
+#                                          dispatch token to be scoped to them.
+#   dispatch    (optional, default true)   Send repository_dispatch on release.
+#   notify      (optional, default true)   Open a review/update issue on release.
+#   event_type  (optional, default "discopt-updated")
+#                                          The repository_dispatch event type the
+#                                          dependent's workflow listens for.
+#   note        (optional)  Free-text description (unused by automation).
+
+dependents:
+  - repo: jkitchin/discopt-doe
+    private: false
+    dispatch: true
+    notify: true
+    note: Model-based design of experiments plugin.
+
+  - repo: jkitchin/discopt-aggregation
+    private: true
+    dispatch: true
+    notify: true
+    note: Variable aggregation (reduced-space presolve) plugin.
+
+  - repo: jkitchin/discopt-mkm
+    private: true
+    dispatch: true
+    notify: true
+    note: Microkinetic modeling plugin.
+
+  - repo: jkitchin/discopt-apps
+    private: false
+    dispatch: true
+    notify: true
+    note: Application builders (OPF, pooling).
+
+  - repo: jkitchin/discopt-course
+    private: false
+    dispatch: true
+    notify: true
+    note: Optimization course + interactive tutor CLI.
