@@ -22,6 +22,20 @@ shipped and lifted `tanksize`'s frontier 0.853→0.92 and certified `syn05hfsg`.
 > ex5_3_3/spring/qapw) but it was **never evaluated on the loose-root / big-tree class** where the
 > cheap-node-more-nodes tradeoff should win. This is the real next entry experiment; see "The closure
 > plan". The relaxation findings below stand as recorded, but they are **not** the blocker.
+>
+> **REFINEMENT (2026-07-18) — "cheap nodes" ≠ "no reduction".** Turning per-node OBBT fully OFF
+> (`_PER_NODE_OBBT_MAX_VARS=0`, ~1 LP/node) does NOT help: the frontier bound **stalls at ~0.93**
+> (851 nodes @150 s, never climbs) vs full OBBT's 1.138 @363. The per-node **box tightening is
+> load-bearing** — without it the McCormick relaxation is too loose for branching alone to progress.
+> So the lever is not *less* reduction, it is *cheaper-per-unit* reduction: SCIP/BARON get the same
+> box tightening from **reduced-cost propagation (free from the one node LP's duals) + selective OBBT
+> on a few variables at select nodes, warm-started in native code**, where discopt does **exhaustive
+> OBBT (all ~47 vars × 2 bounds = ~95 cold-ish LPs) at every branched node in Python/JAX**. Same
+> technique (OBBT/DBBT), done ~50× more often than needed and ~100× slower per LP. The
+> `certification-gap-plan.md` names both halves: **Phase 2 branch-and-reduce orchestration** (make
+> reduction selective/cheap — reduced-cost DBBT as the default, OBBT only where it pays) and
+> **Phase B native node kernel** (warm dual-simplex LPs, no marshaling). Neither is a research
+> unknown; both are engineering the substrate SCIP/BARON already have.
 
 > **CORRECTION (2026-07-18, same day).** An earlier revision of this doc claimed the T2.4
 > `reduce_node` flag (`DISCOPT_NODE_REDUCE`) as "a measured first lever (+bound, +52 % throughput
