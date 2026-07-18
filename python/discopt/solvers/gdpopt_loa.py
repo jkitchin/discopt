@@ -648,9 +648,7 @@ def _discrete_vars_all_binary(int_indices, lb, ub, tol: float = 1e-9) -> bool:
     The binary-only no-good cut (:func:`_add_no_good_cut`) is valid only in this
     case; otherwise the exact single-point exclusion is required (#756).
     """
-    return all(
-        abs(float(lb[i])) <= tol and abs(float(ub[i]) - 1.0) <= tol for i in int_indices
-    )
+    return all(abs(float(lb[i])) <= tol and abs(float(ub[i]) - 1.0) <= tol for i in int_indices)
 
 
 def _build_no_good_augmentation(no_good_configs, int_indices, lb, ub, n_base):
