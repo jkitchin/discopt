@@ -1,12 +1,16 @@
 # #764 — Closing `tanksize`: from root-relaxation research to the closure plan
 
-Status: **direction resolved 2026-07-18 — see "The closure plan" at the end.** The #764
-relaxer-discard fix (`DISCOPT_ROOT_LP_PROBE_TIGHT`, graduated default-ON) shipped and lifted
-`tanksize`'s frontier 0.853→0.92 and certified `syn05hfsg`. The root-relaxation research direction
-this doc originally scoped was then **run to ground and falsified** (level-1 RLT, level-2 RLT,
-Shor SDP, OBBT-to-fixpoint, naive partitioning — all exact no-ops at the root; §candidates below).
-The evidence identifies the closure path as **branch-and-reduce throughput** — the same diagnosis
-as `certification-gap-plan.md` C1/C2.
+Status: **RESOLVED 2026-07-18 — closure needs the Phase B Rust node kernel; everything cheaper is
+measured non-viable.** The #764 relaxer-discard fix (`DISCOPT_ROOT_LP_PROBE_TIGHT`, graduated
+default-ON) shipped and lifted `tanksize`'s frontier 0.853→0.92 and certified `syn05hfsg`. Two whole
+families of cheaper levers were then **run to ground and falsified** by entry experiments:
+(1) *root relaxation* — level-1 RLT, level-2 RLT, Shor SDP, OBBT-to-fixpoint, naive partitioning are
+all exact no-ops at the root (§candidates); (2) *Phase-A throughput* — OBBT probe scheduling is a
+wash (probes load-bearing), NLP starvation is at its floor, and the Python orchestration is diffuse
+(§"Phase A verdict"). The remaining path — the only one consistent with the evidence — is the
+**Rust per-node kernel** (`certification-gap-plan.md` C1 "architecture"): BARON closes `tanksize`
+with a 25 %-gap root and ~1300 nodes/s, so the deficit is node throughput, and in Python it is
+irreducible. This is a weeks-scale `certification-gap-plan` phase, not a #764 quick fix.
 
 > **CORRECTION (2026-07-18, same day).** An earlier revision of this doc claimed the T2.4
 > `reduce_node` flag (`DISCOPT_NODE_REDUCE`) as "a measured first lever (+bound, +52 % throughput
@@ -185,42 +189,57 @@ CORRECTION note in the header — it is NOT a Phase A item.
 
 ### Phase A — scheduling + orchestration diet (days; target ≥ 20–50 n/s, certify in minutes)
 
-1. **Per-node LP diet — schedule the 2n OBBT probes.** ~95 LPs/node (~32 % of wall) is the single
-   biggest line item. Full OBBT probing can be scheduled (depth-gated / strided /
-   marginal-filtered: probe only variables whose `width × |reduced cost|` suggests payoff —
-   T2.5's scorer exists, parked with a KILL verdict for *de-gating onto big models*; reusing it to
-   *thin* probes on already-enabled models is a different question and needs its own gate).
-   For the every-node cheap substitute, note the constraint: a reduce_node-style free-DBBT pass was
-   already killed net-negative (#685) — any revival must present new class-level evidence, not a
-   wiring flip. Entry experiment: the LPs/node vs frontier-bound-at-equal-wall tradeoff curve on
-   tanksize + nvs05 (nvs05 is the class where probes are load-bearing — #738; the diet must not
-   regress it). Kill: no schedule beats always-probe.
-2. **NLP starvation on stalled incumbents.** ~10 % of wall is pounce NLPs that cannot improve an
-   already-optimal incumbent. `DISCOPT_ADAPTIVE_NLP` (default-ON) should starve them; verify it
-   engages on tanksize and fix the gap if not (bound-neutral).
-3. **Python orchestration diet** (~35 % of wall): cache the static expression-DAG walk in
-   `nonlinear_bound_tightening` (~58 k calls/node re-deriving a static structure), batch the
-   `asarray` marshaling (~11 k/node). Bound-neutral Regime-1 changes (exact node-count/objective
-   equality gates).
+1. **Per-node LP diet — schedule the 2n OBBT probes — FALSIFIED (entry experiment, 2026-07-18).**
+   ~95 LPs/node (~32 % of wall) is the biggest line item, so the hypothesis was that thinning the
+   probes (stride / top-k columns / fewer rounds) buys net throughput. Measured the bound trajectory
+   (`node_callback`) for default vs `stride=2` vs `top_k=20`. **Bound-per-node (deterministic,
+   relaxation quality): full OBBT wins** — @160 nodes default 0.8957 vs stride2 0.8793 vs topk20
+   0.8858; thinning strictly loosens the box. Throughput rises (~72 s→~50 s to reach 160 nodes) but
+   the **net bound-at-equal-wall is a wash** — all three converge to ~1.00 by 90 s and no config
+   robustly leads (an apparent stride2 lead at 60 s was a single fathoming-jump landing just before
+   the sample; it did not reproduce). This reproduces #738 (probes load-bearing) and #723 lever-3
+   (probes productive, no free thinning) *on tanksize specifically*. Kill criterion met — do not
+   schedule/thin per-node OBBT for this class. Repro: `scratchpad/a1_traj.py`.
+   *(Corollary: even the best config reaches only ~1.00 @90 s vs the 1.2686 optimum — probe
+   scheduling cannot close tanksize regardless; the bound climb past ~1.0 is the long tail.)*
+2. **NLP starvation on stalled incumbents — SMALL / already near floor (measured).** pounce NLPs
+   are only **~10 % of wall, 2/node**, and `DISCOPT_ADAPTIVE_NLP` on-vs-off is a **no-op on
+   tanksize** (identical 55 NLPs, 27 nodes) — it is already at its floor and part of the 2/node is
+   the node-bound path, not pure waste. Ceiling ~10 %; not a closure lever. Repro:
+   `scratchpad/a2.py`.
+3. **Python orchestration diet — DIFFUSE, no cacheable hotspot (measured).** The ~14–35 % Python/JAX
+   cost is spread across thousands of tiny calls: `tighten_nonlinear_bounds` is ~34 ms/node
+   fragmented over `_constant_value` (220 k calls), `match` (87 k), `walk` (63 k) — already partially
+   cached (`_get_struct_cache`/`_cached_flat_terms`) — plus `asarray` marshaling (13.6 k/node) at the
+   Python↔Rust↔JAX boundary. There is no single hotspot to cache; this is death-by-a-thousand-cuts,
+   exactly the residual #723 closed as needing the native kernel, not micro-opts.
 
-Arithmetic: ~10 ms/node ⇒ ~100 n/s ⇒ a BARON-shaped 3.5–14 k-node tree closes in **35–140 s**.
-Phase A alone plausibly certifies tanksize at TL = 300 s and repairs the whole slow-spatial class;
-it does NOT reach "seconds".
+**Phase A verdict — NOT a viable path to the needed throughput (2026-07-18).** All three levers are
+now measured and none delivers the ~10× the plan's arithmetic assumed: A1 (the 32 % OBBT line item)
+is falsified — probes are load-bearing, thinning is a wash; A2 (10 %) is at its floor; A3 (~14–35 %)
+is diffuse and un-cacheable in Python. The tanksize per-node cost is genuinely ~⅓ productive-required
+OBBT LPs + ~⅓ diffuse Python orchestration + ~⅓ Rust LP/NLP — irreducible without moving the node
+loop out of Python. **Skip Phase A micro-optimization; the necessary investment is Phase B.** (This
+independently reconfirms the `certification-gap-plan.md` C1 "per-node language cost — architecture"
+diagnosis and the #723 closed verdict.)
 
 4. **(Parallel, cheap) Branching-quality A/B**: the full B&B climbs while naive widest-var
    bisection is inert — so selection matters. A/B current spatial selection vs pseudocost/
    reliability on bilinear-violation (BARON's violation transfer). Node-count multiplier if it
    lands; entry experiment offline on captured trees.
 
-### Phase B — the Rust node kernel (weeks; target ~1 ms/node, certify in seconds)
+### Phase B — the Rust node kernel (the sole viable path; weeks; target ~1 ms/node, certify in seconds)
 
-The `certification-gap-plan.md` §2 "per-node language cost — **architecture**" gap: move the
-spatial node inner loop (bound patch → warm dual simplex → cutoff-FBBT/DBBT reduce → branch
-select) entirely into `discopt-core`, calling back to Python only for NLP heuristics and
-separation events. This is the only route to BARON-order µs–ms nodes and the issue's literal
-"certifies in seconds" DoD. Scope it as its own certification-gap-plan phase with the usual
-entry experiment (a Rust prototype loop on the already-Rust LP/FBBT components, measured on the
-global50 spatial subset) before committing.
+With Phase A measured non-viable, this is **the** lever. The `certification-gap-plan.md` §2 "per-node
+language cost — **architecture**" gap: move the spatial node inner loop (bound patch → warm dual
+simplex → cutoff-FBBT/DBBT reduce → branch select) entirely into `discopt-core`, calling back to
+Python only for NLP heuristics and separation events. This is the only route to BARON-order µs–ms
+nodes and the issue's literal "certifies in seconds" DoD. It is a `certification-gap-plan.md`-scale
+phase (its C1 is the same diagnosis), owned there, not a #764 quick fix. Entry experiment before
+committing: a Rust prototype of the node loop over the already-Rust LP/FBBT/tree components on the
+global50 spatial subset, measured against the current Python loop (kill if < ~5× per-node speedup).
+Note the productive OBBT stays — Phase B makes its ~2n LPs cheap (warm dual simplex in-kernel), it
+does not remove them (A1 showed they are load-bearing).
 
 ### Gates (unchanged, binding)
 
