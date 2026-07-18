@@ -33,12 +33,9 @@ def _bilinear_binary_model():
     return m, x, y, b
 
 
-@pytest.mark.xfail(
-    reason="#739: sampled linearity check misroutes abs() models to the LP path "
-    "(false optimal). Probe asserts the TRUE optimum; remove marker when fixed.",
-    strict=False,
-)
 def test_nonsmooth_abs_objective_routes_and_certifies():
+    # Regression probe for #739 (fixed on main): the sampled linearity check
+    # must not misroute abs() models to the LP fast path.
     # min |x| over a box straddling 0: a smooth NLP oscillates at the kink;
     # the non-smooth router must send this to the spatial B&B and certify 0.
     m = Model("absmin")
@@ -49,12 +46,9 @@ def test_nonsmooth_abs_objective_routes_and_certifies():
     assert res.objective == pytest.approx(0.0, abs=1e-6)
 
 
-@pytest.mark.xfail(
-    reason="#739: sampled linearity check silently linearizes the abs() constraint "
-    "(constraint drop). Probe asserts the TRUE optimum; remove marker when fixed.",
-    strict=False,
-)
 def test_nonsmooth_abs_constraint_certifies():
+    # Regression probe for #739 (fixed on main): the abs() constraint must
+    # not be silently linearized/dropped.
     # min x s.t. |x| <= 0.5 -> optimum -0.5.
     m = Model("abscon")
     x = m.continuous("x", lb=-2.0, ub=2.0)
