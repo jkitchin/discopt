@@ -433,6 +433,15 @@ class MccormickLPRelaxer:
         # ratio-of-integer-products structure; ``solve_at_node`` then max-combines
         # the partitioner's sound node bound with the LP bound.
         self._integer_ratio_partitioner = None
+        # Disjunctive configuration floor (#732 Stage 2, flag-gated default-OFF):
+        # stashed on the model by the solver's root disjunctive-config pass. A
+        # valid lower bound over the ROOT box is valid over every node's sub-box,
+        # so ``solve_at_node`` max-combines it into every optimal node bound —
+        # the same plumbing precedent as the integer-ratio partitioner.
+        _dcf = getattr(model, "_disjunctive_config_floor", None)
+        self._disjunctive_floor: Optional[float] = (
+            float(_dcf) if _dcf is not None and np.isfinite(_dcf) else None
+        )
         # Pre-compute which original columns are integer/binary so that
         # integrality is preserved (only aux columns get relaxed).
         flags: list[int] = []
@@ -1036,7 +1045,23 @@ class MccormickLPRelaxer:
                 # infeasible → the *default-path* separators tightened the loose base
                 # to empty, a rigorous fathom, since every separated cut is valid).
                 res = pool_free
-        return self._apply_integer_ratio_partition(res, node_lb, node_ub, out_cuts)
+        res = self._apply_integer_ratio_partition(res, node_lb, node_ub, out_cuts)
+        # #732 Stage 2 (flag-gated default-OFF at wiring time): floor every
+        # optimal node bound at the root disjunctive-configuration bound. The
+        # floor is a valid lower bound over the ROOT box, hence over every
+        # node's sub-box; raising an optimal node bound to it is sound and
+        # flows through the tree's existing bound plumbing. Every other verdict
+        # passes through untouched.
+        if (
+            self._disjunctive_floor is not None
+            and out_cuts is None
+            and res.status == "optimal"
+            and res.lower_bound is not None
+            and np.isfinite(res.lower_bound)
+            and res.lower_bound < self._disjunctive_floor
+        ):
+            res = dataclasses.replace(res, lower_bound=float(self._disjunctive_floor))
+        return res
 
     def set_integer_ratio_partitioner(self, partitioner) -> None:
         """Attach an :class:`~discopt._jax.integer_ratio.IntegerRatioPartitioner`.

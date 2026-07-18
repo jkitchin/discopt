@@ -172,11 +172,30 @@ counts *before* continuous/spatial dimensions collapses the shallow-node floor.
    test pins moved to the feasible line-1-only config; (b) the raw-node simplex
    cannot Farkas-certify that emptiness (ill-conditioning) — an engine-hardening
    item to fold into Stage 1's scope if it recurs on feasible boxes.
-2. A root **disjunctive-bound pass** over the indicator patterns (class-gated,
-   default-OFF): global dual = max(root bound, min over configs of the per-config
-   OBBT+LP bound), recursing one level (pump counts) on configs that stay weak.
-   With deliverable 1's amplification, the surviving weak set is exactly the
-   multi-line configs — the recursion targets their pump-count integers.
+2. *(DONE 2026-07-18)* The root **disjunctive-bound pass**
+   (`discopt/_jax/disjunctive_config_bound.py`, flag
+   `DISCOPT_DISJUNCTIVE_CONFIG_BOUND`, default-OFF): enumerate the reform's
+   indicator patterns, bound each configuration box by **FBBT → OBBT → LP**
+   (the per-box FBBT closes the `numerical` leaves in ~4 ms), best-first
+   **unit-peel** the weakest leaf on the configuration count variables, under a
+   leaf/wall budget. Anytime-valid: children inherit the parent bound until
+   certified, so min-over-leaves is valid at any cutoff. Wired via the
+   integer-ratio-partitioner precedent: the floor is stashed on the model and
+   `MccormickLPRelaxer.solve_at_node` max-combines it into every optimal node
+   bound (a root-box bound is valid on every sub-box), flowing through the
+   tree's existing plumbing with no new threading. **Measured:** standalone
+   root pass (48 leaves, no incumbent, no tree) certifies **37945** — the
+   re-scoped Stage-2 gate (≥ 33k) passes; end-to-end at equal solve settings
+   (85 nodes, 240 s) the reported global dual goes **0.0 → 42725** with the
+   same incumbent (134471). Two operational findings: (a) *incumbent-cutoff
+   OBBT inside the pass is net-negative* — it degrades LP conditioning enough
+   that leaves stay uncertified and the min collapses to the inherited floor
+   (160-leaf run returned exactly the floor) — so the wiring runs the pass
+   cutoff-free; (b) the surviving weak leaves are the deep all-pumps-on chains,
+   whose climb is bounded by the per-leaf LP tightness (Stage 4's cubic
+   levers pick up from here). Tests:
+   `python/tests/test_disjunctive_config_bound.py` (decline, anytime validity,
+   the ≥ 33k gate, and the relaxer floor plumbing).
    *Recursion entry experiment (2026-07-18,
    `ex1252_pump_recursion_probe.py`, config (1,1,0), zero-dichotomies `{0}` vs
    `[1,3]` on the 4 active pump vars):* **12/16 children prune** (LP-infeasible)

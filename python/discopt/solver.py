@@ -4827,6 +4827,51 @@ def solve_model(
                             presolve = False
                             if nlp_solver == "pounce" and not _p3_force_cut_path_enabled():
                                 nlp_solver = "simplex"
+                        elif _tuning().disjunctive_config_bound:
+                            # #732 Stage 2 (default-OFF): root disjunctive
+                            # configuration bound for the spatial-path case.
+                            # Enumerate the reform's configuration-indicator
+                            # patterns, bound each config box (FBBT->OBBT->LP,
+                            # unit-peeling), and stash min-over-leaves as a
+                            # global-dual floor. The floor is a valid lower
+                            # bound over the ROOT box, hence over every node's
+                            # sub-box — ``MccormickLPRelaxer.solve_at_node``
+                            # max-combines it into every node bound (the
+                            # integer-ratio-partitioner precedent), so it flows
+                            # through the tree's existing bound plumbing with
+                            # no new threading. Budgeted to a fraction of the
+                            # solve's wall budget; a declined/failed pass
+                            # stashes nothing and the solve is unchanged.
+                            try:
+                                from discopt._jax.disjunctive_config_bound import (
+                                    compute_disjunctive_config_bound,
+                                )
+                                from discopt._jax.model_utils import (
+                                    flat_variable_bounds as _dcb_flat,
+                                )
+
+                                _dcb_budget = min(0.25 * float(time_limit), 60.0)
+                                _dcb_lb, _dcb_ub = _dcb_flat(model)
+                                _dcb = compute_disjunctive_config_bound(
+                                    model,
+                                    np.asarray(_dcb_lb, dtype=np.float64),
+                                    np.asarray(_dcb_ub, dtype=np.float64),
+                                    deadline=time.perf_counter() + _dcb_budget,
+                                )
+                                if _dcb.bound is not None and np.isfinite(_dcb.bound):
+                                    model._disjunctive_config_floor = float(_dcb.bound)
+                                    logger.info(
+                                        "disjunctive config bound: floor %.6g "
+                                        "(%d leaf solves, %d infeasible, %.1fs)",
+                                        _dcb.bound,
+                                        _dcb.n_processed,
+                                        _dcb.n_pruned_infeasible,
+                                        _dcb.wall,
+                                    )
+                            except Exception as _dcb_exc:  # pragma: no cover
+                                logger.debug(
+                                    "disjunctive config bound skipped: %s", _dcb_exc
+                                )
                         # Extend a user warm start over the appended aux columns so the
                         # (longer) reformed vector is not silently dropped. Purely primal:
                         # the driver re-validates it, so it never affects the dual bound.
