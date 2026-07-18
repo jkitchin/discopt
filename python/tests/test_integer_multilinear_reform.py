@@ -56,8 +56,13 @@ def _eval(expr, x, off):
         return float(x[off[v._index] + (idx if isinstance(idx, int) else 0)])
     if isinstance(expr, UnaryOp):
         a = _eval(expr.operand, x, off)
-        return {"neg": lambda z: -z, "exp": math.exp, "log": math.log,
-                "sqrt": math.sqrt, "abs": abs}[expr.op](a)
+        return {
+            "neg": lambda z: -z,
+            "exp": math.exp,
+            "log": math.log,
+            "sqrt": math.sqrt,
+            "abs": abs,
+        }[expr.op](a)
     if isinstance(expr, BinaryOp):
         a, b = _eval(expr.left, x, off), _eval(expr.right, x, off)
         if expr.op == "+":
@@ -69,7 +74,7 @@ def _eval(expr, x, off):
         if expr.op == "/":
             return a / b if b else math.inf
         if expr.op == "**":
-            return a ** b
+            return a**b
         raise ValueError(f"unhandled op {expr.op}")
     raise TypeError(type(expr))
 
@@ -163,8 +168,13 @@ def test_reform_generic_integer_trilinear_is_exact_and_sound():
                 x = np.array([av, bv, cv], dtype=float)
                 xf = extend_initial_point(r, x)
                 assert xf is not None
-                assert abs(_eval(m._objective.expression, x, o_off)
-                           - _eval(r._objective.expression, xf, r_off)) < 1e-9
+                assert (
+                    abs(
+                        _eval(m._objective.expression, x, o_off)
+                        - _eval(r._objective.expression, xf, r_off)
+                    )
+                    < 1e-9
+                )
 
     os.environ["DISCOPT_INTEGER_MULTILINEAR_REFORM"] = "1"
     try:

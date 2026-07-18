@@ -4510,7 +4510,7 @@ def solve_model(
         # to certify do we clear and fall back to spatial B&B (see the convex
         # fast-path block below).
 
-    # --- Integer-multilinear exact reformulation (issue #707, DISCOPT_INTEGER_MULTILINEAR_REFORM) ---
+    # --- Integer-multilinear exact reformulation (#707, DISCOPT_INTEGER_MULTILINEAR_REFORM) ---
     # A generalization of the integer-bilinear pass below to products of >=3
     # variable factors where every factor but at most one is integer/binary-valued
     # (declared or implied), e.g. ex1252's objective ``(c + 1800*x15)*x0*x3*x18``
@@ -4527,6 +4527,8 @@ def solve_model(
         if _tuning().integer_multilinear_reform:
             from discopt._jax.integer_product_reform import (
                 extend_initial_point as _iml_extend,
+            )
+            from discopt._jax.integer_product_reform import (
                 has_integer_multilinear_reformulation_work,
                 reformulate_integer_multilinear,
             )

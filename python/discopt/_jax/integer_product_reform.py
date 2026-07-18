@@ -259,10 +259,10 @@ class _Expander:
         # z - e_i <= 0  (each factor upper-bounds the product)
         for b in bits:
             ac.append(Constraint(BinaryOp("-", z, b), "<=", 0.0))
-        # z - sum_i e_i + (n-1) >= 0
-        s: Optional[Expression] = None
-        for b in bits:
-            s = b if s is None else BinaryOp("+", s, b)
+        # z - sum_i e_i + (n-1) >= 0  (bits is non-empty: n >= 2 at every call site)
+        s: Expression = bits[0]
+        for b in bits[1:]:
+            s = BinaryOp("+", s, b)
         body = BinaryOp("+", BinaryOp("-", z, s), Constant(float(n - 1)))
         ac.append(Constraint(body, ">=", 0.0))
         self._and_cache[key] = z
@@ -442,8 +442,10 @@ def _try_expand_multilinear(node: BinaryOp, exp: _Expander) -> Optional[Expressi
             if lo != 0.0:
                 newpoly[key] = newpoly.get(key, 0.0) + coef * float(lo)
             for ck, ek in bits:
-                nk = key if any(b is ek for b in key) else tuple(
-                    sorted((*key, ek), key=lambda b: b._index)
+                nk = (
+                    key
+                    if any(b is ek for b in key)
+                    else tuple(sorted((*key, ek), key=lambda b: b._index))
                 )
                 newpoly[nk] = newpoly.get(nk, 0.0) + coef * float(ck)
         poly = newpoly
@@ -454,9 +456,10 @@ def _try_expand_multilinear(node: BinaryOp, exp: _Expander) -> Optional[Expressi
         c = const * coef
         if c == 0.0:
             continue
-        # Lift the pure-binary monomial ``prod(key)`` to a single 0/1 quantity.
+        # Lift the pure-binary monomial ``prod(key)`` to a single 0/1 quantity — the
+        # bit itself, or a binary AND aux; both are ``Variable`` (needed by big-M).
         if len(key) == 0:
-            mono: Optional[Expression] = None  # empty product == 1
+            mono: Optional[Variable] = None  # empty product == 1
         elif len(key) == 1:
             mono = key[0]
         else:
@@ -613,9 +616,7 @@ def _has_int_multilinear(expr: Expression, implied) -> bool:
                 n_cont = len(refs) - n_int
                 if n_int >= 1 and n_cont <= 1:
                     return True
-        return _has_int_multilinear(expr.left, implied) or _has_int_multilinear(
-            expr.right, implied
-        )
+        return _has_int_multilinear(expr.left, implied) or _has_int_multilinear(expr.right, implied)
     c = getattr(expr, "operand", None)
     if isinstance(c, Expression) and _has_int_multilinear(c, implied):
         return True
@@ -692,9 +693,7 @@ def _participation(model: Model, implied) -> dict:
     return counts
 
 
-def expand_integer_products(
-    model: Model, implied=frozenset(), multilinear: bool = False
-) -> Model:
+def expand_integer_products(model: Model, implied=frozenset(), multilinear: bool = False) -> Model:
     """Return a model equivalent to *model* with integer-factor bilinear products
     binary-expanded + big-M-linearized to their exact (pure-MILP) form. ``implied``
     is an optional set of ``(var._index, elem)`` treated as integer-valued in

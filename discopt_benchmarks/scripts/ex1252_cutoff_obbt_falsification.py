@@ -14,6 +14,7 @@ strength, not range reduction. Run:
 
     python -m discopt_benchmarks.scripts.ex1252_cutoff_obbt_falsification
 """
+
 from __future__ import annotations
 
 import os
@@ -21,7 +22,9 @@ from pathlib import Path
 
 os.environ.setdefault("JAX_PLATFORMS", "cpu")
 os.environ.setdefault("JAX_ENABLE_X64", "1")
-os.environ.setdefault("DISCOPT_INCREMENTAL_MC", "0")  # cold build per call (no patch-state artifact)
+os.environ.setdefault(
+    "DISCOPT_INCREMENTAL_MC", "0"
+)  # cold build per call (no patch-state artifact)
 
 import discopt.modeling as dm
 from discopt._jax.integer_product_reform import reformulate_integer_multilinear
@@ -61,8 +64,9 @@ def main() -> None:
     for i, v in LINE1.items():
         lb1[i] = ub1[i] = float(v)
     nc = obbt_tighten_root(r, lb1.copy(), ub1.copy(), rounds=5, time_limit_per_lp=0.3)
-    cc = obbt_tighten_root(r, lb1.copy(), ub1.copy(), rounds=5, time_limit_per_lp=0.3,
-                           incumbent_cutoff=OPT)
+    cc = obbt_tighten_root(
+        r, lb1.copy(), ub1.copy(), rounds=5, time_limit_per_lp=0.3, incumbent_cutoff=OPT
+    )
     print(f"\nline-1 box: x6 [{nc.lb[6]:.0f},{nc.ub[6]:.0f}] x12 [{nc.lb[12]:.1f},{nc.ub[12]:.1f}]")
     print(f"line-1, OBBT no-cutoff : {_bound(r, nc.lb, nc.ub):.1f}")
     print(f"line-1, OBBT cutoff=opt: {_bound(r, cc.lb, cc.ub):.1f}  (identical -> cutoff inert)")
@@ -70,9 +74,11 @@ def main() -> None:
     # (3) subdivide continuous x12 (fresh cold relaxers) — bound does not move
     lb2, ub2 = nc.lb.copy(), nc.ub.copy()
     mid = 0.5 * (lb2[12] + ub2[12])
-    lo, hi = lb2.copy(), ub2.copy(); hi[12] = mid
+    lo, hi = lb2.copy(), ub2.copy()
+    hi[12] = mid
     print(f"\nx12 lower half: {_bound(r, lo, hi):.1f}")
-    lo, hi = lb2.copy(), ub2.copy(); lo[12] = mid
+    lo, hi = lb2.copy(), ub2.copy()
+    lo[12] = mid
     print(f"x12 upper half: {_bound(r, lo, hi):.1f}  (subdividing flows does not tighten)")
 
     # (4) fix the integer flow factors: the loosest node is the binding one
@@ -81,20 +87,26 @@ def main() -> None:
     for x0 in (1, 2, 3):
         for x3 in (1, 2, 3):
             lo, hi = nc.lb.copy(), nc.ub.copy()
-            lo[0] = hi[0] = x0; lo[3] = hi[3] = x3
-            lo[24] = hi[24] = x0 & 1; lo[25] = hi[25] = (x0 >> 1) & 1
-            lo[30] = hi[30] = x3 & 1; lo[31] = hi[31] = (x3 >> 1) & 1
+            lo[0] = hi[0] = x0
+            lo[3] = hi[3] = x3
+            lo[24] = hi[24] = x0 & 1
+            lo[25] = hi[25] = (x0 >> 1) & 1
+            lo[30] = hi[30] = x3 & 1
+            lo[31] = hi[31] = (x3 >> 1) & 1
             b = _bound(r, lo, hi)
             tag = f"{b:.0f}" if b is not None else "infeas"
             print(f"    x0={x0} x3={x3}: {tag}")
             if b is not None:
                 best = min(best, b)
-    print(f"min over integer (x0,x3) = {best:.0f}  vs opt {OPT}  (~10x loose -> relaxation is the wall)")
+    print(
+        f"min over integer (x0,x3) = {best:.0f}  vs opt {OPT}  (~10x loose: relaxation is the wall)"
+    )
 
 
 def _root_obbt_bound(r, lb, ub, cutoff):
-    res = obbt_tighten_root(r, lb.copy(), ub.copy(), rounds=5, time_limit_per_lp=0.3,
-                            incumbent_cutoff=cutoff)
+    res = obbt_tighten_root(
+        r, lb.copy(), ub.copy(), rounds=5, time_limit_per_lp=0.3, incumbent_cutoff=cutoff
+    )
     return _bound(r, res.lb, res.ub)
 
 
