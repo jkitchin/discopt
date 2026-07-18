@@ -567,7 +567,9 @@ def _rlt_root_gain(model: "Model") -> Optional[float]:
 # verdict is identical and the two root LP solves run only once. A WeakKeyDictionary
 # auto-evicts when the model is collected — no unbounded growth and no id-reuse stale
 # hit across solves.
-_RLT_ROOT_GAIN_CACHE: "weakref.WeakKeyDictionary" = weakref.WeakKeyDictionary()
+_RLT_ROOT_GAIN_CACHE: "weakref.WeakKeyDictionary[Any, Optional[float]]" = (
+    weakref.WeakKeyDictionary()
+)
 # Time budget (s) for each of the two root LP solves in the productivity probe. Small:
 # the sparse size ceiling keeps the admitted relaxations tiny (measured <=1.6 s each).
 _RLT_ROOT_PROBE_TIME_S = 5.0
