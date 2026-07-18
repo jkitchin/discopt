@@ -1,24 +1,27 @@
 # #764 — Closing `tanksize`: from root-relaxation research to the closure plan
 
-Status: **RESOLVED 2026-07-18 — `tanksize`-in-seconds is not reachable by any lever discopt can
-implement; both axes are exhausted by measurement.** The #764 relaxer-discard fix
-(`DISCOPT_ROOT_LP_PROBE_TIGHT`, graduated default-ON) shipped and lifted `tanksize`'s frontier
-0.853→0.92 and certified `syn05hfsg`. Every cheaper-than-rewrite lever was then **run to ground and
-falsified** by entry experiments:
-- *root relaxation* — level-1 RLT, level-2 RLT, Shor SDP, OBBT-to-fixpoint, naive partitioning are
-  all exact no-ops at the root (§candidates);
-- *Phase-A throughput* — OBBT probe scheduling is a wash (probes load-bearing), NLP starvation is at
-  its floor, Python orchestration is diffuse (§"Phase A verdict");
-- *Phase-B Rust node kernel* — entry experiment run: ceiling is **regime-dependent** — ~10–14× on
-  the cold-rebuild-bound spatial class (casctanks; GO, but owned by `certification-gap-plan`), yet
-  only **~2.3× on `tanksize`** because ~half its wall is *native* OBBT LP solves that #723 showed
-  are irreducible (§"Phase B — entry experiment").
+Status: **RESOLVED 2026-07-18 — `tanksize` is a per-node-*throughput* problem, full stop; the
+relaxation is a red herring and the "infeasible" framing below was overstated (see the STRATEGY
+CORRECTION).** The #764 relaxer-discard fix (`DISCOPT_ROOT_LP_PROBE_TIGHT`, graduated default-ON)
+shipped and lifted `tanksize`'s frontier 0.853→0.92 and certified `syn05hfsg`.
 
-**Net:** `tanksize` is in the KILL regime on both axes. The literal issue DoD is infeasible for this
-architecture; the only route left is a *different* per-node bounding scheme (far fewer than 2n LP
-probes) — the open, unowned research lever #723 named, not a faster implementation of the current
-one. **Reachable instead:** Phase B certifies `tanksize` in ~minutes and wins big on the
-cold-rebuild-bound majority of the slow-spatial class. Recommendation to the maintainer at the end.
+> **STRATEGY CORRECTION (2026-07-18) — the decisive measurement.** discopt reaches bound 1.138 at
+> **363 nodes / 150 s** and is climbing ~0.11 per 60 nodes, so it closes `tanksize` in **~450 nodes**
+> — *fewer* than **BARON's 3477**. discopt's search is MORE node-efficient. The entire deficit is
+> per-node speed: ~450 × ~420 ms ≈ 190 s vs BARON's 3477 × ~0.8 ms ≈ 2.7 s (~**500× per node**). At
+> BARON's node speed, discopt's ~450 nodes would close in **under a second**. So `tanksize` is not
+> special in its math — it is simply the rare instance that needs a **several-hundred-node tree**;
+> the problems discopt solves well close in **< ~50 nodes**, where the 500× per-node penalty is
+> invisible. This **invalidates two claims made earlier in this doc**: (1) the Phase-B "~2.3× ceiling
+> / KILL on tanksize" — that ceiling assumed discopt keeps doing **95 OBBT LPs/node**, which is a
+> *strategy choice*, not a floor; BARON closes with **~1 LP/node + free reduced-cost reduction** and
+> more nodes (discopt does ~450×95 ≈ 43 k LP solves total vs BARON's few thousand). (2) "both axes
+> exhausted / infeasible." The untested lever is exactly the **BARON per-node strategy** — cheap
+> reduced-cost DBBT (≈1 LP/node) in place of brute-force OBBT (95 LPs/node), taking more but far
+> cheaper nodes. discopt *had* this (T2.4 `reduce_node`, removed #581 as net-negative on
+> ex5_3_3/spring/qapw) but it was **never evaluated on the loose-root / big-tree class** where the
+> cheap-node-more-nodes tradeoff should win. This is the real next entry experiment; see "The closure
+> plan". The relaxation findings below stand as recorded, but they are **not** the blocker.
 
 > **CORRECTION (2026-07-18, same day).** An earlier revision of this doc claimed the T2.4
 > `reduce_node` flag (`DISCOPT_NODE_REDUCE`) as "a measured first lever (+bound, +52 % throughput
@@ -279,23 +282,34 @@ anywhere; `tanksize`/`nvs05` are gate probes only.
 
 ## Recommendation to the maintainer (2026-07-18)
 
-The full #764 campaign is complete. Every lever that could close `tanksize` has been measured:
+The corrected diagnosis: **`tanksize` is a pure per-node-throughput problem.** It needs ~450 nodes
+(fewer than BARON's 3477); each node is ~500× slower than BARON's. Not a relaxation problem.
 
 1. **Ship** (done): the relaxer-discard fix, `DISCOPT_ROOT_LP_PROBE_TIGHT` default-ON — a sound,
    panel-graduated win (tanksize frontier 0.853→0.92, `syn05hfsg` newly certified, byte-stable
    elsewhere). This is the only code change #764 warranted and it is landed.
-2. **Falsified, recorded as binding negatives** (do not re-tread): root-relaxation hierarchy
-   (level-1/2 RLT, Shor SDP, OBBT, partitioning — root immovable at 0.838); Phase-A throughput
-   (OBBT scheduling wash, NLP at floor, orchestration diffuse); Phase-B ceiling only ~2.3× on
-   `tanksize` (native OBBT LPs).
-3. **`tanksize`-in-seconds is infeasible** for the current architecture. Recommend **retitling /
-   closing #764** as: *fix shipped; full closure requires a different per-node bounding scheme for
-   the functionally-dependent bilinear class (≪ 2n LP probes/node) — an open research lever inherited
-   from #723, unowned*. It is NOT a bound-quality problem (relaxation exhausted) and NOT a
-   port-to-Rust problem (Phase B is 2.3× here).
-4. **Separately worth doing** (own issue, `certification-gap-plan` scope, NOT #764): the **Phase B
-   Rust node kernel** for the cold-McCormick-rebuild-bound spatial class (casctanks-like, ceiling
-   ~10–14×) — the C1 "architecture" gap, the highest-leverage general throughput win surfaced here.
+2. **Falsified, recorded as binding negatives** (do not re-tread): the whole root-relaxation
+   hierarchy (level-1/2 RLT, Shor SDP, OBBT, partitioning — root immovable at 0.838, and it does not
+   matter because the tree size is already fine). NLP starvation at floor. Python orchestration
+   diffuse. These are real and recorded, but none is the blocker.
+3. **The untested lever — the real next step (do NOT close #764 as infeasible):** the **BARON
+   per-node strategy**. discopt spends ~95 OBBT LPs/node to buy a small (~450-node) tree; BARON
+   spends ~1 LP/node + free reduced-cost reduction and takes ~3477 cheaper nodes, closing in 2.7 s.
+   discopt's total LP work is ~5–10× BARON's *and* each LP is slower. Entry experiment: on the
+   loose-root/big-tree class (tanksize + siblings), run cheap reduced-cost DBBT (≈1 LP/node) in place
+   of full per-node OBBT and measure **total wall to close** (not bound-per-node — the point is the
+   tradeoff favors many cheap nodes here). discopt *had* this (T2.4 `reduce_node`, removed #581 for
+   net-negative on ex5_3_3/spring/qapw — a *different* class); the #685 gate never covered this class.
+   Kill: total-wall-to-close not improved vs full-OBBT default. This is the honest correction to the
+   earlier "Phase-B ceiling 2.3× / infeasible" — that ceiling assumed the 95-LP strategy is fixed,
+   which it is not.
+4. **Also worth doing** (own issue, `certification-gap-plan` scope): the **Phase B Rust node kernel**
+   — but note the two levers compose: the strategy switch (item 3) cuts LPs/node ~50×, and the Rust
+   kernel makes each remaining node native. On the cold-rebuild-bound class (casctanks) the kernel
+   alone is ~10–14×; on tanksize the *combination* (fewer LPs × native loop) is the plausible route
+   to BARON-order wall, not the kernel alone.
 
-The through-line: measurement killed four plausible directions before any unsound or ineffective code
-shipped — the CLAUDE.md §4 discipline working as intended.
+The through-line: measurement killed four plausible directions before any unsound code shipped — but
+it also over-reached into an "infeasible" verdict that a single node-count measurement overturned.
+The §4 discipline cuts both ways: the correcting experiment (nodes-to-close) should have run before
+the "infeasible" framing, not after.
