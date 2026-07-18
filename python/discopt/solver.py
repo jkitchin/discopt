@@ -4869,9 +4869,7 @@ def solve_model(
                                         _dcb.wall,
                                     )
                             except Exception as _dcb_exc:  # pragma: no cover
-                                logger.debug(
-                                    "disjunctive config bound skipped: %s", _dcb_exc
-                                )
+                                logger.debug("disjunctive config bound skipped: %s", _dcb_exc)
                         # Extend a user warm start over the appended aux columns so the
                         # (longer) reformed vector is not silently dropped. Purely primal:
                         # the driver re-validates it, so it never affects the dual bound.

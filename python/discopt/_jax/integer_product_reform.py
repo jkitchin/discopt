@@ -875,9 +875,10 @@ def expand_integer_products(model: Model, implied=frozenset(), multilinear: bool
         # #732 Stage 2: configuration metadata for the disjunctive config bound
         # (flat indices over the ORIGINAL columns — the aux block is a suffix, so
         # original offsets are unchanged by the reform). Empty sets when the
-        # model has no multilinear configuration structure.
-        new_model._ipx_config_indicators = frozenset(exp.config_indicator_flats)
-        new_model._ipx_config_counts = frozenset(exp.config_count_flats)
+        # model has no multilinear configuration structure. Dynamic attributes
+        # (like the warm-start spec) — read back via ``getattr``.
+        setattr(new_model, "_ipx_config_indicators", frozenset(exp.config_indicator_flats))
+        setattr(new_model, "_ipx_config_counts", frozenset(exp.config_count_flats))
         return new_model
     except Exception:
         return model
