@@ -69,7 +69,16 @@ rather than silently skipping dependents.
        notify: true        # open a review issue on discopt release
    ```
 2. If the token is a fine-grained PAT scoped to *selected* repos, add the new
-   repo to that token's repository access list.
+   repo to that token's repository access list (edit the existing token in
+   place at GitHub → Settings → Developer settings → Fine-grained tokens — no
+   need to regenerate it or update the `DEPENDENTS_DISPATCH_TOKEN` secret; the
+   same token value keeps working). If you forget, only the new repo is skipped
+   (with a warning) on the next release; the others still notify.
+
+   > **Tip:** to skip this step forever, scope the token to *All repositories*
+   > instead of selected ones. Then any repo added to `dependents.yml` just
+   > works, at the cost of granting the token Contents + Issues write across all
+   > your repos rather than only the listed plugins.
 3. In the dependent repo, copy `.github/dependent-ci-template.yml` to
    `.github/workflows/discopt-integration.yml` and adjust its install/test
    steps to that package's layout.
