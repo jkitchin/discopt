@@ -518,6 +518,47 @@ _ROOT_FIXPOINT_MIN_GAP = 1e-4
 # per-node LP catastrophically slow on large models (casctanks, 500 vars: 359 s
 # for one node), so it is auto-engaged only at or below this lifted-variable count.
 _AUTO_RLT_LEVEL1_MAX_VARS = 50
+
+
+def _rlt_sparse_admit(model: "Model", n_vars: int) -> bool:
+    """Structure-aware widening of the RLT auto-engage gate (issue #727, flag-gated).
+
+    The raw ``_AUTO_RLT_LEVEL1_MAX_VARS`` / ``_AUTO_CUTS_MAX_VARS`` variable-count
+    caps are a poor proxy for RLT cost: what makes build-time level-1 RLT expensive
+    is the number of lifted product columns/rows, which grows ~linearly with the
+    variable count for a **sparse-bilinear** model (pooling / bilinear-flow network)
+    but quadratically for a **dense** QCQP. Medium pooling instances therefore have a
+    cheap, root-closing RLT relaxation yet are excluded by the raw cap — the measured
+    #727 gap ("weak McCormick root bound" on the pooling / bilinear-network family):
+    with RLT the root certifies in seconds; without it the McCormick bound is ~2-3x
+    loose and the solve times out.
+
+    When ``rlt_sparse_auto`` is on, admit RLT for a model whose product-term count is
+    within ``rlt_sparse_max_terms`` (the lifted-column budget — sparse bilinear vs
+    dense QCQP) AND whose variable count is within ``rlt_sparse_max_vars`` (a ceiling
+    on the enlarged per-node re-solve cost). Returns ``False`` (no widening) when the
+    flag is off, so default dispatch is byte-identical. RLT is sound regardless of
+    engagement, so this only trades relaxation size for bound tightness.
+    """
+    tun = _tuning()
+    if not getattr(tun, "rlt_sparse_auto", False):
+        return False
+    if n_vars > int(tun.rlt_sparse_max_vars):
+        return False
+    try:
+        from discopt._jax.term_classifier import classify_nonlinear_terms
+
+        terms = classify_nonlinear_terms(model)
+        n_terms = (
+            len(terms.bilinear)
+            + len(getattr(terms, "trilinear", []))
+            + len(getattr(terms, "multilinear", []))
+        )
+    except Exception:  # pragma: no cover - defensive; abstain (no widening) on failure
+        return False
+    return n_terms <= int(tun.rlt_sparse_max_terms)
+
+
 # Convex-objective node bound (the supporting-hyperplane lower bound for a model
 # whose minimized objective is a convex quadratic). No size cap: the bound is a
 # deterministic projected-gradient solve on the constant Hessian and is valid at
@@ -2772,7 +2813,10 @@ def _apply_auto_cut_policy(model: "Model", relaxer) -> None:
 
     try:
         n = sum(v.size for v in model._variables)
-        if n > _AUTO_CUTS_MAX_VARS:
+        # Sparse-bilinear widening (issue #727, flag-gated default-off): admit the
+        # per-node RLT cut family for a medium pooling / bilinear-network model whose
+        # product structure is sparse, past the raw variable-count gate.
+        if n > _AUTO_CUTS_MAX_VARS and not _rlt_sparse_admit(model, n):
             return  # size gate: leave cuts off
         has_linear_constraints = bool(_linear_constraint_forms(model, n))
         if has_linear_constraints:
@@ -6029,7 +6073,13 @@ def solve_model(
         # The per-node cut family is untouched (this only adds the root tightening),
         # and RLT is sound, so this trades bound tightness for size, never
         # correctness. An explicit rlt=True/False still wins.
-        _auto_rlt_level1 = _rlt_on is None and n_vars <= _AUTO_RLT_LEVEL1_MAX_VARS
+        # The raw variable-count cap excludes medium sparse-bilinear models
+        # (pooling / bilinear-flow networks) whose RLT relaxation is small and
+        # root-closing; ``_rlt_sparse_admit`` widens the gate for exactly that
+        # structural class when ``rlt_sparse_auto`` is on (issue #727, default off).
+        _auto_rlt_level1 = _rlt_on is None and (
+            n_vars <= _AUTO_RLT_LEVEL1_MAX_VARS or _rlt_sparse_admit(model, n_vars)
+        )
         _eff_rlt_level1 = bool(_rlt_on) or _auto_rlt_level1
 
         # The spatial path needs at least one variable it can branch on: a

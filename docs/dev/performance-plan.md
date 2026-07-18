@@ -678,6 +678,81 @@ Stage 0 (gate) ─► Stage 1 (kill recompilation — the dominant measured cost
 > Implemented in `lp/simplex/primal.rs` (`dense_retry`), counters
 > `LpDenseRetries`/`LpDenseRetryRescues`, still behind
 > `DISCOPT_LU_DENSITY_ROUTE` (default OFF).
+## 10. Relaxation layer — sparse-bilinear RLT auto-gate (#727): the medium-pooling root-bound gap
+
+> **Entry experiment (2026-07-18) — confirmed the framing; the fix is a
+> structure-aware auto-gate, behind a flag (`DISCOPT_RLT_SPARSE_AUTO`, default
+> OFF), pending the corpus graduation panel.**
+>
+> Context: issue #727 (SOTA wall-time gap on 70 medium MINLPs) attributes the
+> pooling / bilinear-flow-network cluster (haverly, pooling_bental5stp,
+> genpooling_lee2, gasprod_sarawak01, wastewater0*m*) to a **weak McCormick root
+> bound**. The full MINLPLib snapshot is not in-repo, so the entry experiment uses
+> a controlled proxy: `k` independent Haverly-I pooling blocks in one model (the
+> canonical pooling nonconvexity and weak McCormick bound, with a *known* optimum
+> `400·k` and `6·k` continuous vars / `4·k` bilinear terms — sparse: products grow
+> linearly with variables).
+>
+> **Hypothesis:** RLT (build-time level-1 + per-node cut separation) closes the
+> pooling root bound in seconds, but the default RLT auto policy gates on a raw
+> *variable count* (`_AUTO_RLT_LEVEL1_MAX_VARS = 50`, `_AUTO_CUTS_MAX_VARS = 40`),
+> which excludes medium pooling instances even though their RLT relaxation is small
+> and root-closing. The variable count is a poor cost proxy.
+>
+> **Measurement (TL=30 s, warm; `rlt` control vs the k-block proxy):**
+>
+> | k | vars | default (`auto`) | `rlt=on` |
+> |---|---|---|---|
+> | 8 | 48 | **feasible**, bound 7022 (opt 3200), 533 nodes, TL | **optimal**, root, 1 node, 1.5 s |
+> | 12 | 72 | **feasible**, bound 13650 (opt 4800), 591 nodes, TL | **optimal**, root, 1 node, 2.8 s |
+> | 16 | 96 | feasible, bound 18787 | feasible, bound 8950 (RLT helps; TL-bound) |
+>
+> Isolating the levers: at k=8 (48 vars) the decisive combination is **build-time
+> level-1 RLT** (which includes the Phase-2 quadratic-constraint RLT that multiplies
+> the bilinear pool-quality equality by bound factors, and lifts the product
+> columns) *plus* per-node RLT-cut separation; per-node separation alone (multiplying
+> only *linear* constraints) does not close k=12. Both levers are gated by the raw
+> caps, so medium pooling falls back to the loose McCormick bound and times out —
+> exactly the #727 symptom.
+>
+> **Why the raw cap is the wrong proxy (the discriminator):** RLT cost is driven by
+> the number of lifted product columns/rows, not the variable count. Measured
+> `nbil/nv`:
+>
+> | model | nbil/nv | density `nbil/(n·(n−1)/2)` | RLT relaxation (cols / ub rows) |
+> |---|---|---|---|
+> | k-block pooling (sparse) | ≈ 0.67 (constant) | → 0 as n grows | k=24, n=144: 472 / 1786 (trivially solvable) |
+> | dense box-QP | ≈ n/2 (grows) | 1.00 | grows ~n² |
+>
+> A sparse-bilinear pooling network keeps a small RLT relaxation past the raw cap;
+> a dense QCQP grows its products quadratically and is correctly excluded. The
+> variable-count cap (motivated by the dense casctanks blow-up, 500 vars → 359 s/node)
+> conflates the two.
+>
+> **Fix:** `SolverTuning.rlt_sparse_auto` (`DISCOPT_RLT_SPARSE_AUTO`, default OFF)
+> widens the build-time-level-1 and per-node-cut auto-gates to additionally admit a
+> model whose *product-term count* ≤ `rlt_sparse_max_terms` (300; the lifted-column
+> budget — sparse bilinear vs dense QCQP) **and** whose variable count ≤
+> `rlt_sparse_max_vars` (200; a ceiling on the enlarged per-node re-solve cost).
+> `solver._rlt_sparse_admit` implements the gate; flag OFF ⇒ byte-identical dispatch.
+>
+> **Soundness:** RLT is valid regardless of engagement (a constraint×bound-factor
+> product is non-negative at every feasible point), so this only ever trades
+> relaxation size for bound tightness — `incorrect_count` cannot change, and the
+> downstream soundness guards (C-43 pool retry, the per-node unboundedness cross-check,
+> the `gap_certified` guard) are untouched. Verified: flag ON, k=8/12 certify at the
+> root at the true optimum with a valid dual bound; flag OFF, the smoke suite (664)
+> and the k-block proxy are unchanged.
+>
+> **Kill criterion / graduation:** bound-changing (CLAUDE.md §5), so it stays
+> default-OFF until the owner's corpus-wide differential panel passes **both** bars
+> (cert-clean: `incorrect_count = 0`, no bound above its reference optimum, no
+> certification regression; and net-positive on the pooling/bilinear cluster without
+> a regression on the dense-QCQP class the raw cap was protecting). The flag is
+> *killed* if the panel shows the widened gate is net-negative on any covered class
+> (the `DISCOPT_CUT_INHERIT` lesson: sound ≠ helpful).
+> Regression-pinned by `python/tests/test_rlt_sparse_auto.py`.
+
 ## Appendix B — per-solve fixed startup floor (OVERHEAD-1, task #83; 2026-07-10, `JAX_PLATFORMS=cpu`, x64)
 
 Decomposition of a fresh-process trivial solve (5× stable, ex1222/st_test1/gbd/alan/nvs01;
