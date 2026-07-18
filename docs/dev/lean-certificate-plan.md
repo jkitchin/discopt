@@ -177,7 +177,7 @@ A `lean/` Lake project. Modules:
 |------|-------------|-------------|
 | **0 (this effort)** | Design doc + Tier-1 emitter + Python reference checker + Lean checker sources + end-to-end demo | Tier 1 feasibility (rational ops) |
 | 1 | `IntervalArith` over all `MathFunc`; feasibility over the transcendental set | Tier 1, full factorable |
-| 2 | `Convex.lean` + convex-fast-path emitter | Tier 2 |
+| 2 | convex/KKT emitter + Python checker **(done, exact QP/QCQP — §11)**; `Convex.lean` soundness proof pending Mathlib | Tier 2 (convex QP/QCQP) |
 | 3 | `LPDuality` + `Covering` + linear/MILP leaves | Tier 3 (MILP) |
 | 4 | `Envelopes` McCormick/bilinear | Tier 3 (QP/QCQP) |
 | 5 | Remaining `MathFunc` envelopes | Tier 3, full factorable |
@@ -217,3 +217,61 @@ verification in the meantime and is byte-for-byte the same decision procedure.
   schema validity, reference checker accepts valid / rejects tampered (bad incumbent,
   inflated objective, integrality violation). Emitter is import-light and touches no
   solver internals, so `node_count` / certified `objective` are unchanged (bound-neutral).
+
+## 11. Tier 2 (convex / KKT) — detailed design & as-built
+
+**Theorem.** For a convex model (convex objective; feasible set defined by convex
+`≤` bodies, concave `≥` bodies, affine `=` bodies, and box bounds), a point `x*`
+that satisfies the **KKT conditions** with multipliers is a *global* minimizer.
+So a certificate that exhibits (a) a convexity witness and (b) KKT multipliers
+proves `dualBound = objectiveValue` — the gap is closed and `x*` is globally
+optimal. No branch-and-bound tree is needed.
+
+**What is checkable in exact rationals (shipped).** The **convex QP/QCQP
+subclass** — objective and constraint bodies are quadratic — has a *constant*
+Hessian and *affine* gradients, both rational. So the entire Tier-2 check is exact
+(no floats, no Mathlib beyond the eventual soundness proof):
+
+1. **Convexity** — re-derive each body's Hessian by exact symbolic differentiation
+   (`certificate/diff.py`), require it *constant* (2nd derivative has no variable ⇒
+   the body is quadratic; higher-degree ⇒ refuse), then: objective & `le` bodies
+   PSD, `ge` bodies NSD, `=` bodies zero. PSD is an exact rational LDLᵀ pivot test
+   (`certificate/linalg.py`, diagonal pivoting so semidefinite is handled).
+2. **Stationarity** — `∇f(x*) + Σ_i λ_i s_i ∇g_i(x*) − ρ^L + ρ^U = 0` component-wise
+   (`s_i = +1` for `le`/`eq`, `−1` for `ge`; `ρ^L`,`ρ^U` the bound multipliers),
+   within `kkt_tol`.
+3. **Dual feasibility** — inequality `λ_i ≥ 0`, bound `ρ ≥ 0`.
+4. **Complementary slackness** — `λ_i g_i(x*) = 0` (g in `≤0` form); bound analogues.
+5. **Gap closed** — `dualBound == objectiveValue`.
+
+The sign convention is discopt's internal-min one, **validated against real solves**
+(`test_convex_*`): a constraint-active QP, a bound-active QP (pins the `ρ^U` sign),
+and an interior optimum all certify; inflating a multiplier breaks stationarity;
+lowering `dualBound` breaks the gap check.
+
+**Schema additions** (`tier: "convex"`): a `kkt` block
+(`constraint_multipliers` aligned to the constraint list, `bound_lower`/`bound_upper`
+in column order), a top-level `dualBound`, and `tolerances.kkt`. Multipliers come
+from `SolveResult.constraint_duals` / `bound_duals_lower` / `bound_duals_upper`;
+the emitter (`build_convex_certificate`) requires `gap_certified` **and**
+`convex_fast_path` (the solver's own convexity certification) and a minimize
+objective, else it refuses (falling back to a Tier-1 certificate in the CLI).
+
+**What still needs Mathlib (next Lean milestone).** The exact-rational *checker*
+ships and is tested, but its **soundness theorem** — "PSD Hessian ⇒ convex" and
+"convex + KKT ⇒ global min" — is real convex analysis and belongs in
+`lean/Discopt/Convex.lean` over Mathlib, which could not be built in the authoring
+sandbox (GitHub egress blocked). Until then, `refcheck._check_convex` is the
+**executable specification** the future Lean `checkConvex_sound` must match, exactly
+as `refcheck` Tier-1 mirrors the proven `checkFeasible`. The general
+*transcendental-convex* case (e.g. `exp` convex, `log` concave, gradients of
+`MathFunc`) is a further extension of both the checker (interval/derivative
+enclosures) and the Mathlib proof.
+
+**As-built (this change).** `certificate/diff.py` (exact symbolic differentiation),
+`certificate/linalg.py` (exact rational PSD), `emit.build_convex_certificate`,
+`refcheck` Tier-2 dispatch + `_check_convex`, `discopt solve --emit-certificate`
+auto-selecting the strongest tier, the convex block in
+`scripts/lean_certificate_demo.py`, and `test_convex_*` in
+`python/tests/test_certificate.py` (accept genuine; reject tampered multiplier,
+open gap, non-convex objective, negative dual; emitter refuses maximize).

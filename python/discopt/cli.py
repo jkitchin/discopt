@@ -454,20 +454,30 @@ def _cmd_solve(args):
     if args.emit_certificate:
         from discopt.certificate import (
             CertificateError,
+            build_convex_certificate,
             build_feasibility_certificate,
             write_certificate,
         )
         from discopt.modeling.core import from_nl
 
+        cmodel = from_nl(nl)
+        # Emit the strongest certificate the solve supports: a Tier-2 convex
+        # global-optimality certificate when the solver certified convexity,
+        # otherwise a Tier-1 feasibility certificate.
         try:
-            cert = build_feasibility_certificate(from_nl(nl), result)
+            try:
+                cert = build_convex_certificate(cmodel, result)
+                tier = "convex global-optimality"
+            except CertificateError:
+                cert = build_feasibility_certificate(cmodel, result)
+                tier = "feasibility"
             p = base_dir / f"{stub}.cert.json"
             write_certificate(cert, p)
-            wrote.append(str(p))
+            wrote.append(f"{p} ({tier})")
         except CertificateError as exc:
-            # Not fatal to the solve: some models/statuses have no Tier-1
-            # certificate (no incumbent, or an unsupported node). Report and go on.
-            print(f"warning: no feasibility certificate emitted: {exc}", file=sys.stderr)
+            # Not fatal to the solve: some models/statuses have no certificate
+            # (no incumbent, or an unsupported node). Report and go on.
+            print(f"warning: no certificate emitted: {exc}", file=sys.stderr)
 
     if args.format == "json":
         print(json.dumps(serialize_result(result), indent=2))

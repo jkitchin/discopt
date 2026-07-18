@@ -19,6 +19,7 @@ from pathlib import Path
 
 import discopt.modeling as dm
 from discopt.certificate import (
+    build_convex_certificate,
     build_feasibility_certificate,
     check_certificate,
     write_certificate,
@@ -46,6 +47,42 @@ def _milp() -> tuple[dm.Model, object]:
     m.subject_to(2 * a + b <= 10, name="res")
     m.maximize(3 * a + 2 * b)
     return m, m.solve()
+
+
+def _convex_qp() -> tuple[dm.Model, object]:
+    m = dm.Model()
+    x = m.continuous("x", lb=0, ub=10)
+    y = m.continuous("y", lb=0, ub=10)
+    m.subject_to(x + y <= 2, name="c1")
+    m.minimize((x - 2) ** 2 + (y - 1) ** 2)
+    return m, m.solve()
+
+
+def _report_convex(label: str, model: dm.Model, result: object) -> dict:
+    print(f"\n=== {label} ===")
+    print(
+        f"  solve: status={result.status}  objective={result.objective:.6g}  "
+        f"convex_fast_path={getattr(result, 'convex_fast_path', None)}"
+    )
+    cert = build_convex_certificate(model, result)
+    ok, reason = check_certificate(cert)
+    print(f"  check (Tier-2 global): {'ACCEPT' if ok else 'REJECT'}  -- {reason}")
+    assert ok, "genuine convex certificate must be accepted"
+
+    # Tamper: break KKT stationarity by inflating a constraint multiplier.
+    t = copy.deepcopy(cert)
+    t["certificate"]["kkt"]["constraint_multipliers"][0] = [5, 1]
+    ok1, r1 = check_certificate(t)
+    print(f"  check (bad KKT dual) : {'ACCEPT' if ok1 else 'REJECT'}  -- {r1}")
+    assert not ok1
+
+    # Tamper: claim a dual bound below the optimum (open gap).
+    t = copy.deepcopy(cert)
+    t["certificate"]["dualBound"] = [0, 1]
+    ok2, r2 = check_certificate(t)
+    print(f"  check (open gap)     : {'ACCEPT' if ok2 else 'REJECT'}  -- {r2}")
+    assert not ok2
+    return cert
 
 
 def _report(label: str, model: dm.Model, result: object) -> dict:
@@ -91,11 +128,18 @@ def main() -> None:
     milp_model, milp_result = _milp()
     _report("MILP (a,b) integer, linear", milp_model, milp_result)
 
+    cvx_model, cvx_result = _convex_qp()
+    cvx_cert = _report_convex("Convex QP (Tier-2 KKT global optimality)", cvx_model, cvx_result)
+
     EXAMPLES.mkdir(parents=True, exist_ok=True)
     out = EXAMPLES / "qp_feasibility.json"
     write_certificate(nlp_cert, out)
-    print(f"\nWrote example certificate -> {out.relative_to(REPO)}")
-    print("Check it with Lean:  cd lean && lake exe check examples/qp_feasibility.json")
+    cvx_out = EXAMPLES / "convex_qp_global.json"
+    write_certificate(cvx_cert, cvx_out)
+    print(f"\nWrote example certificates -> {out.relative_to(REPO)}, {cvx_out.relative_to(REPO)}")
+    print("Check the feasibility one with Lean:")
+    print("  cd lean && lake exe check examples/qp_feasibility.json")
+    print("(The Tier-2 convex checker in Lean needs Mathlib; see the plan doc.)")
 
 
 if __name__ == "__main__":
