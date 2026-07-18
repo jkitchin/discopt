@@ -1,0 +1,1801 @@
+{
+  "time_limit_s": 60.0,
+  "summary": {
+    "flag": "DISCOPT_OBBT_ITERATE",
+    "n_instances": 66,
+    "cert_gained_on": 0,
+    "cert_lost_on": 0,
+    "bound_tighter_on": 2,
+    "bound_looser_on": 0,
+    "instances_with_soundness_problem": 1,
+    "cert_clean": false,
+    "net_positive": true
+  },
+  "rows": [
+    {
+      "instance": "4stufen",
+      "oracle": 116329.6706,
+      "path": "python/tests/data/minlplib_nl/4stufen.nl",
+      "off": {
+        "obj": null,
+        "bound": 21601.18397827762,
+        "status": "time_limit",
+        "gap_certified": false,
+        "nodes": 63,
+        "wall": 64.27,
+        "incumbent_feasible": true
+      },
+      "on": {
+        "obj": null,
+        "bound": 21651.03024017585,
+        "status": "time_limit",
+        "gap_certified": false,
+        "nodes": 63,
+        "wall": 64.78,
+        "incumbent_feasible": true
+      },
+      "problems": [],
+      "cert_delta": "same",
+      "bound_delta": "ON tighter (+0.23%)",
+      "primal_delta": "n/a"
+    },
+    {
+      "instance": "alan",
+      "oracle": 2.925,
+      "path": "python/tests/data/minlplib_nl/alan.nl",
+      "off": {
+        "obj": 2.924999998301341,
+        "bound": 2.924999998301341,
+        "status": "optimal",
+        "gap_certified": true,
+        "nodes": 21,
+        "wall": 0.03,
+        "incumbent_feasible": true
+      },
+      "on": {
+        "obj": 2.924999998301341,
+        "bound": 2.924999998301341,
+        "status": "optimal",
+        "gap_certified": true,
+        "nodes": 21,
+        "wall": 0.02,
+        "incumbent_feasible": true
+      },
+      "problems": [],
+      "cert_delta": "same",
+      "bound_delta": "tie",
+      "primal_delta": "tie"
+    },
+    {
+      "instance": "bchoco06",
+      "oracle": null,
+      "path": "python/tests/data/minlplib_nl/bchoco06.nl",
+      "off": {
+        "obj": null,
+        "bound": 0.9999887833654022,
+        "status": "time_limit",
+        "gap_certified": false,
+        "nodes": 31,
+        "wall": 60.51,
+        "incumbent_feasible": true
+      },
+      "on": {
+        "obj": null,
+        "bound": 0.9999887833654022,
+        "status": "time_limit",
+        "gap_certified": false,
+        "nodes": 31,
+        "wall": 60.54,
+        "incumbent_feasible": true
+      },
+      "problems": [],
+      "cert_delta": "same",
+      "bound_delta": "tie",
+      "primal_delta": "n/a"
+    },
+    {
+      "instance": "bchoco07",
+      "oracle": null,
+      "path": "python/tests/data/minlplib_nl/bchoco07.nl",
+      "off": {
+        "obj": null,
+        "bound": 1.0000000000002374,
+        "status": "time_limit",
+        "gap_certified": false,
+        "nodes": 15,
+        "wall": 61.43,
+        "incumbent_feasible": true
+      },
+      "on": {
+        "obj": null,
+        "bound": 1.0000000000002374,
+        "status": "time_limit",
+        "gap_certified": false,
+        "nodes": 15,
+        "wall": 61.47,
+        "incumbent_feasible": true
+      },
+      "problems": [],
+      "cert_delta": "same",
+      "bound_delta": "tie",
+      "primal_delta": "n/a"
+    },
+    {
+      "instance": "bchoco08",
+      "oracle": null,
+      "path": "python/tests/data/minlplib_nl/bchoco08.nl",
+      "off": {
+        "obj": null,
+        "bound": 1.0000000000006195,
+        "status": "time_limit",
+        "gap_certified": false,
+        "nodes": 3,
+        "wall": 68.82,
+        "incumbent_feasible": true
+      },
+      "on": {
+        "obj": null,
+        "bound": 1.0000000000006195,
+        "status": "time_limit",
+        "gap_certified": false,
+        "nodes": 3,
+        "wall": 69.37,
+        "incumbent_feasible": true
+      },
+      "problems": [],
+      "cert_delta": "same",
+      "bound_delta": "tie",
+      "primal_delta": "n/a"
+    },
+    {
+      "instance": "beuster",
+      "oracle": 116329.6706,
+      "path": "python/tests/data/minlplib_nl/beuster.nl",
+      "off": {
+        "obj": null,
+        "bound": 19903.462069658257,
+        "status": "time_limit",
+        "gap_certified": false,
+        "nodes": 63,
+        "wall": 61.57,
+        "incumbent_feasible": true
+      },
+      "on": {
+        "obj": null,
+        "bound": 19903.462069658257,
+        "status": "time_limit",
+        "gap_certified": false,
+        "nodes": 63,
+        "wall": 60.84,
+        "incumbent_feasible": true
+      },
+      "problems": [],
+      "cert_delta": "same",
+      "bound_delta": "tie",
+      "primal_delta": "n/a"
+    },
+    {
+      "instance": "casctanks",
+      "oracle": 9.163479388,
+      "path": "python/tests/data/minlplib_nl/casctanks.nl",
+      "off": {
+        "obj": null,
+        "bound": 2.9571233120015106,
+        "status": "time_limit",
+        "gap_certified": false,
+        "nodes": 127,
+        "wall": 62.37,
+        "incumbent_feasible": true
+      },
+      "on": {
+        "obj": null,
+        "bound": 2.969353026776894,
+        "status": "time_limit",
+        "gap_certified": false,
+        "nodes": 127,
+        "wall": 62.42,
+        "incumbent_feasible": true
+      },
+      "problems": [],
+      "cert_delta": "same",
+      "bound_delta": "ON tighter (+0.31%)",
+      "primal_delta": "n/a"
+    },
+    {
+      "instance": "chance",
+      "oracle": 29.89437816,
+      "path": "python/tests/data/minlplib_nl/chance.nl",
+      "off": {
+        "obj": 29.894378154271102,
+        "bound": 29.894378154271102,
+        "status": "optimal",
+        "gap_certified": true,
+        "nodes": 0,
+        "wall": 0.07,
+        "incumbent_feasible": true
+      },
+      "on": {
+        "obj": 29.894378154271102,
+        "bound": 29.894378154271102,
+        "status": "optimal",
+        "gap_certified": true,
+        "nodes": 0,
+        "wall": 0.07,
+        "incumbent_feasible": true
+      },
+      "problems": [],
+      "cert_delta": "same",
+      "bound_delta": "tie",
+      "primal_delta": "tie"
+    },
+    {
+      "instance": "clay0303hfsg",
+      "oracle": 26669.10957,
+      "path": "python/tests/data/minlplib_nl/clay0303hfsg.nl",
+      "off": {
+        "obj": 26669.10955143198,
+        "bound": 26669.109513572792,
+        "status": "optimal",
+        "gap_certified": true,
+        "nodes": 443,
+        "wall": 34.12,
+        "incumbent_feasible": true
+      },
+      "on": {
+        "obj": 26669.10955143198,
+        "bound": 26669.109513572792,
+        "status": "optimal",
+        "gap_certified": true,
+        "nodes": 443,
+        "wall": 32.85,
+        "incumbent_feasible": true
+      },
+      "problems": [],
+      "cert_delta": "same",
+      "bound_delta": "tie",
+      "primal_delta": "tie"
+    },
+    {
+      "instance": "contvar",
+      "oracle": 809149.8272,
+      "path": "python/tests/data/minlplib_nl/contvar.nl",
+      "off": {
+        "obj": 809149.8138135842,
+        "bound": 184120.61349013608,
+        "status": "feasible",
+        "gap_certified": false,
+        "nodes": 15,
+        "wall": 61.23,
+        "incumbent_feasible": true
+      },
+      "on": {
+        "obj": 809149.8138135842,
+        "bound": 184120.61349013608,
+        "status": "feasible",
+        "gap_certified": false,
+        "nodes": 15,
+        "wall": 60.63,
+        "incumbent_feasible": true
+      },
+      "problems": [],
+      "cert_delta": "same",
+      "bound_delta": "tie",
+      "primal_delta": "tie"
+    },
+    {
+      "instance": "cvxnonsep_nsig30",
+      "oracle": 130.6287126,
+      "path": "python/tests/data/minlplib_nl/cvxnonsep_nsig30.nl",
+      "off": {
+        "obj": 130.62871116925294,
+        "bound": 130.61841392487688,
+        "status": "optimal",
+        "gap_certified": true,
+        "nodes": 171,
+        "wall": 1.16,
+        "incumbent_feasible": true
+      },
+      "on": {
+        "obj": 130.62871116925294,
+        "bound": 130.61841392487688,
+        "status": "optimal",
+        "gap_certified": true,
+        "nodes": 171,
+        "wall": 1.52,
+        "incumbent_feasible": true
+      },
+      "problems": [],
+      "cert_delta": "same",
+      "bound_delta": "tie",
+      "primal_delta": "tie"
+    },
+    {
+      "instance": "cvxnonsep_psig30",
+      "oracle": 78.99885434,
+      "path": "python/tests/data/minlplib_nl/cvxnonsep_psig30.nl",
+      "off": {
+        "obj": 78.99885435294289,
+        "bound": 78.99701703820377,
+        "status": "optimal",
+        "gap_certified": true,
+        "nodes": 89,
+        "wall": 0.51,
+        "incumbent_feasible": true
+      },
+      "on": {
+        "obj": 78.99885435294289,
+        "bound": 78.99701703820377,
+        "status": "optimal",
+        "gap_certified": true,
+        "nodes": 89,
+        "wall": 0.49,
+        "incumbent_feasible": true
+      },
+      "problems": [],
+      "cert_delta": "same",
+      "bound_delta": "tie",
+      "primal_delta": "tie"
+    },
+    {
+      "instance": "cvxnonsep_psig40r",
+      "oracle": 86.5451047,
+      "path": "python/tests/data/minlplib_nl/cvxnonsep_psig40r.nl",
+      "off": {
+        "obj": 86.54527995164958,
+        "bound": 86.53873600363832,
+        "status": "optimal",
+        "gap_certified": true,
+        "nodes": 95,
+        "wall": 1.83,
+        "incumbent_feasible": true
+      },
+      "on": {
+        "obj": 86.54527995164958,
+        "bound": 86.53873600363832,
+        "status": "optimal",
+        "gap_certified": true,
+        "nodes": 95,
+        "wall": 1.82,
+        "incumbent_feasible": true
+      },
+      "problems": [],
+      "cert_delta": "same",
+      "bound_delta": "tie",
+      "primal_delta": "tie"
+    },
+    {
+      "instance": "dispatch",
+      "oracle": 3155.287927,
+      "path": "python/tests/data/minlplib_nl/dispatch.nl",
+      "off": {
+        "obj": 3155.28792669897,
+        "bound": 3155.28790421789,
+        "status": "optimal",
+        "gap_certified": true,
+        "nodes": 3,
+        "wall": 0.39,
+        "incumbent_feasible": true
+      },
+      "on": {
+        "obj": 3155.28792669897,
+        "bound": 3155.28790421789,
+        "status": "optimal",
+        "gap_certified": true,
+        "nodes": 3,
+        "wall": 0.14,
+        "incumbent_feasible": true
+      },
+      "problems": [],
+      "cert_delta": "same",
+      "bound_delta": "tie",
+      "primal_delta": "tie"
+    },
+    {
+      "instance": "ex1221",
+      "oracle": 7.667180069,
+      "path": "python/tests/data/minlplib_nl/ex1221.nl",
+      "off": {
+        "obj": 7.667180068813135,
+        "bound": 7.667180068813077,
+        "status": "optimal",
+        "gap_certified": true,
+        "nodes": 5,
+        "wall": 0.22,
+        "incumbent_feasible": true
+      },
+      "on": {
+        "obj": 7.667180068813135,
+        "bound": 7.667180068813077,
+        "status": "optimal",
+        "gap_certified": true,
+        "nodes": 5,
+        "wall": 0.19,
+        "incumbent_feasible": true
+      },
+      "problems": [],
+      "cert_delta": "same",
+      "bound_delta": "tie",
+      "primal_delta": "tie"
+    },
+    {
+      "instance": "ex1222",
+      "oracle": 1.076543083,
+      "path": "python/tests/data/minlplib_nl/ex1222.nl",
+      "off": {
+        "obj": 1.0765430833322625,
+        "bound": 1.0765430463031964,
+        "status": "optimal",
+        "gap_certified": true,
+        "nodes": 1,
+        "wall": 0.16,
+        "incumbent_feasible": true
+      },
+      "on": {
+        "obj": 1.0765430833322625,
+        "bound": 1.0765430463031964,
+        "status": "optimal",
+        "gap_certified": true,
+        "nodes": 1,
+        "wall": 0.08,
+        "incumbent_feasible": true
+      },
+      "problems": [],
+      "cert_delta": "same",
+      "bound_delta": "tie",
+      "primal_delta": "tie"
+    },
+    {
+      "instance": "ex1224",
+      "oracle": -0.9434705,
+      "path": "python/tests/data/minlplib_nl/ex1224.nl",
+      "off": {
+        "obj": -0.9434704942820806,
+        "bound": -0.9434705000000164,
+        "status": "optimal",
+        "gap_certified": true,
+        "nodes": 5,
+        "wall": 1.18,
+        "incumbent_feasible": true
+      },
+      "on": {
+        "obj": -0.9434704942820806,
+        "bound": -0.9434705000000164,
+        "status": "optimal",
+        "gap_certified": true,
+        "nodes": 5,
+        "wall": 1.05,
+        "incumbent_feasible": true
+      },
+      "problems": [],
+      "cert_delta": "same",
+      "bound_delta": "tie",
+      "primal_delta": "tie"
+    },
+    {
+      "instance": "ex1225",
+      "oracle": 31.0,
+      "path": "python/tests/data/minlplib_nl/ex1225.nl",
+      "off": {
+        "obj": 30.999999913557566,
+        "bound": 30.999999913557566,
+        "status": "optimal",
+        "gap_certified": true,
+        "nodes": 5,
+        "wall": 0.77,
+        "incumbent_feasible": true
+      },
+      "on": {
+        "obj": 30.999999913557566,
+        "bound": 30.999999913557566,
+        "status": "optimal",
+        "gap_certified": true,
+        "nodes": 5,
+        "wall": 0.69,
+        "incumbent_feasible": true
+      },
+      "problems": [],
+      "cert_delta": "same",
+      "bound_delta": "tie",
+      "primal_delta": "tie"
+    },
+    {
+      "instance": "ex1226",
+      "oracle": -17.0,
+      "path": "python/tests/data/minlplib_nl/ex1226.nl",
+      "off": {
+        "obj": -17.000000003887443,
+        "bound": -17.000000003887443,
+        "status": "optimal",
+        "gap_certified": true,
+        "nodes": 3,
+        "wall": 0.22,
+        "incumbent_feasible": true
+      },
+      "on": {
+        "obj": -17.000000003887443,
+        "bound": -17.000000003887443,
+        "status": "optimal",
+        "gap_certified": true,
+        "nodes": 3,
+        "wall": 0.24,
+        "incumbent_feasible": true
+      },
+      "problems": [],
+      "cert_delta": "same",
+      "bound_delta": "tie",
+      "primal_delta": "tie"
+    },
+    {
+      "instance": "ex14_1_9",
+      "oracle": -0.0,
+      "path": "python/tests/data/minlplib_nl/ex14_1_9.nl",
+      "off": {
+        "obj": -1.9775220540513224e-16,
+        "bound": -1.9775220540513224e-16,
+        "status": "feasible",
+        "gap_certified": false,
+        "nodes": 3,
+        "wall": 0.11,
+        "incumbent_feasible": true
+      },
+      "on": {
+        "obj": -1.9775220540513224e-16,
+        "bound": -1.9775220540513224e-16,
+        "status": "feasible",
+        "gap_certified": false,
+        "nodes": 3,
+        "wall": 0.17,
+        "incumbent_feasible": true
+      },
+      "problems": [],
+      "cert_delta": "same",
+      "bound_delta": "tie",
+      "primal_delta": "tie"
+    },
+    {
+      "instance": "fac2",
+      "oracle": 331837498.2,
+      "path": "python/tests/data/minlplib_nl/fac2.nl",
+      "off": {
+        "obj": 331837498.18201387,
+        "bound": 331837497.561812,
+        "status": "optimal",
+        "gap_certified": true,
+        "nodes": 41,
+        "wall": 2.53,
+        "incumbent_feasible": true
+      },
+      "on": {
+        "obj": 331837498.18201387,
+        "bound": 331837497.561812,
+        "status": "optimal",
+        "gap_certified": true,
+        "nodes": 41,
+        "wall": 2.35,
+        "incumbent_feasible": true
+      },
+      "problems": [],
+      "cert_delta": "same",
+      "bound_delta": "tie",
+      "primal_delta": "tie"
+    },
+    {
+      "instance": "flay02m",
+      "oracle": 37.94733192,
+      "path": "python/tests/data/minlplib_nl/flay02m.nl",
+      "off": {
+        "obj": 37.94733186383461,
+        "bound": 37.947331804569515,
+        "status": "optimal",
+        "gap_certified": true,
+        "nodes": 7,
+        "wall": 0.24,
+        "incumbent_feasible": true
+      },
+      "on": {
+        "obj": 37.94733186383461,
+        "bound": 37.947331804569515,
+        "status": "optimal",
+        "gap_certified": true,
+        "nodes": 7,
+        "wall": 0.13,
+        "incumbent_feasible": true
+      },
+      "problems": [],
+      "cert_delta": "same",
+      "bound_delta": "tie",
+      "primal_delta": "tie"
+    },
+    {
+      "instance": "flay03m",
+      "oracle": 48.98979486,
+      "path": "python/tests/data/minlplib_nl/flay03m.nl",
+      "off": {
+        "obj": 48.989794793835436,
+        "bound": 48.98979470823028,
+        "status": "optimal",
+        "gap_certified": true,
+        "nodes": 111,
+        "wall": 3.13,
+        "incumbent_feasible": true
+      },
+      "on": {
+        "obj": 48.989794793835436,
+        "bound": 48.98979470823028,
+        "status": "optimal",
+        "gap_certified": true,
+        "nodes": 111,
+        "wall": 3.05,
+        "incumbent_feasible": true
+      },
+      "problems": [],
+      "cert_delta": "same",
+      "bound_delta": "tie",
+      "primal_delta": "tie"
+    },
+    {
+      "instance": "gbd",
+      "oracle": 2.2,
+      "path": "python/tests/data/minlplib_nl/gbd.nl",
+      "off": {
+        "obj": 2.199999982504936,
+        "bound": 2.199999982504936,
+        "status": "optimal",
+        "gap_certified": true,
+        "nodes": 3,
+        "wall": 0.01,
+        "incumbent_feasible": true
+      },
+      "on": {
+        "obj": 2.199999982504936,
+        "bound": 2.199999982504936,
+        "status": "optimal",
+        "gap_certified": true,
+        "nodes": 3,
+        "wall": 0.01,
+        "incumbent_feasible": true
+      },
+      "problems": [],
+      "cert_delta": "same",
+      "bound_delta": "tie",
+      "primal_delta": "tie"
+    },
+    {
+      "instance": "gkocis",
+      "oracle": -1.923098738,
+      "path": "python/tests/data/minlplib_nl/gkocis.nl",
+      "off": {
+        "obj": -1.9230987798770212,
+        "bound": -1.9230988280923489,
+        "status": "optimal",
+        "gap_certified": true,
+        "nodes": 5,
+        "wall": 0.43,
+        "incumbent_feasible": true
+      },
+      "on": {
+        "obj": -1.9230987798770212,
+        "bound": -1.9230988280923489,
+        "status": "optimal",
+        "gap_certified": true,
+        "nodes": 5,
+        "wall": 0.35,
+        "incumbent_feasible": true
+      },
+      "problems": [],
+      "cert_delta": "same",
+      "bound_delta": "tie",
+      "primal_delta": "tie"
+    },
+    {
+      "instance": "hda",
+      "oracle": -5964.534084,
+      "path": "python/tests/data/minlplib_nl/hda.nl",
+      "off": {
+        "obj": null,
+        "bound": -18016528426.50232,
+        "status": "time_limit",
+        "gap_certified": false,
+        "nodes": 3,
+        "wall": 92.95,
+        "incumbent_feasible": true
+      },
+      "on": {
+        "obj": null,
+        "bound": -18016528426.50232,
+        "status": "time_limit",
+        "gap_certified": false,
+        "nodes": 3,
+        "wall": 89.93,
+        "incumbent_feasible": true
+      },
+      "problems": [],
+      "cert_delta": "same",
+      "bound_delta": "tie",
+      "primal_delta": "n/a"
+    },
+    {
+      "instance": "heatexch_gen1",
+      "oracle": 154895.933,
+      "path": "python/tests/data/minlplib_nl/heatexch_gen1.nl",
+      "off": {
+        "obj": 167545.24112846807,
+        "bound": 95491.07142842615,
+        "status": "feasible",
+        "gap_certified": false,
+        "nodes": 111,
+        "wall": 60.52,
+        "incumbent_feasible": true
+      },
+      "on": {
+        "obj": 167545.24112846807,
+        "bound": 95491.07142842615,
+        "status": "feasible",
+        "gap_certified": false,
+        "nodes": 113,
+        "wall": 60.12,
+        "incumbent_feasible": true
+      },
+      "problems": [],
+      "cert_delta": "same",
+      "bound_delta": "tie",
+      "primal_delta": "tie"
+    },
+    {
+      "instance": "heatexch_gen2",
+      "oracle": 635838.8464,
+      "path": "python/tests/data/minlplib_nl/heatexch_gen2.nl",
+      "off": {
+        "obj": 824551.3266797881,
+        "bound": 558512.8882203752,
+        "status": "feasible",
+        "gap_certified": false,
+        "nodes": 35,
+        "wall": 63.02,
+        "incumbent_feasible": true
+      },
+      "on": {
+        "obj": 824551.3266797881,
+        "bound": 558512.8882203752,
+        "status": "feasible",
+        "gap_certified": false,
+        "nodes": 35,
+        "wall": 61.3,
+        "incumbent_feasible": true
+      },
+      "problems": [],
+      "cert_delta": "same",
+      "bound_delta": "tie",
+      "primal_delta": "tie"
+    },
+    {
+      "instance": "heatexch_gen3",
+      "oracle": 64843.69761,
+      "path": "python/tests/data/minlplib_nl/heatexch_gen3.nl",
+      "off": {
+        "obj": null,
+        "bound": null,
+        "status": "time_limit",
+        "gap_certified": false,
+        "nodes": 15,
+        "wall": 66.81,
+        "incumbent_feasible": true
+      },
+      "on": {
+        "obj": null,
+        "bound": null,
+        "status": "time_limit",
+        "gap_certified": false,
+        "nodes": 15,
+        "wall": 66.69,
+        "incumbent_feasible": true
+      },
+      "problems": [],
+      "cert_delta": "same",
+      "bound_delta": "n/a",
+      "primal_delta": "n/a"
+    },
+    {
+      "instance": "m3",
+      "oracle": 37.8,
+      "path": "python/tests/data/minlplib_nl/m3.nl",
+      "off": {
+        "obj": 37.79999966997884,
+        "bound": 37.79999951039201,
+        "status": "optimal",
+        "gap_certified": true,
+        "nodes": 47,
+        "wall": 1.08,
+        "incumbent_feasible": true
+      },
+      "on": {
+        "obj": 37.79999966997884,
+        "bound": 37.79999951039201,
+        "status": "optimal",
+        "gap_certified": true,
+        "nodes": 47,
+        "wall": 1.53,
+        "incumbent_feasible": true
+      },
+      "problems": [],
+      "cert_delta": "same",
+      "bound_delta": "tie",
+      "primal_delta": "tie"
+    },
+    {
+      "instance": "nvs01",
+      "oracle": 12.46966882,
+      "path": "python/tests/data/minlplib_nl/nvs01.nl",
+      "off": {
+        "obj": 12.46966882156821,
+        "bound": 12.46966882156821,
+        "status": "optimal",
+        "gap_certified": true,
+        "nodes": 3,
+        "wall": 0.4,
+        "incumbent_feasible": true
+      },
+      "on": {
+        "obj": 12.46966882156821,
+        "bound": 12.46966882156821,
+        "status": "optimal",
+        "gap_certified": true,
+        "nodes": 3,
+        "wall": 0.37,
+        "incumbent_feasible": true
+      },
+      "problems": [],
+      "cert_delta": "same",
+      "bound_delta": "tie",
+      "primal_delta": "tie"
+    },
+    {
+      "instance": "nvs02",
+      "oracle": 5.964184523,
+      "path": "python/tests/data/minlplib_nl/nvs02.nl",
+      "off": {
+        "obj": 5.96418452307,
+        "bound": 5.96418452307,
+        "status": "optimal",
+        "gap_certified": true,
+        "nodes": 337,
+        "wall": 0.19,
+        "incumbent_feasible": true
+      },
+      "on": {
+        "obj": 5.96418452307,
+        "bound": 5.96418452307,
+        "status": "optimal",
+        "gap_certified": true,
+        "nodes": 337,
+        "wall": 0.12,
+        "incumbent_feasible": true
+      },
+      "problems": [],
+      "cert_delta": "same",
+      "bound_delta": "tie",
+      "primal_delta": "tie"
+    },
+    {
+      "instance": "nvs03",
+      "oracle": 16.0,
+      "path": "python/tests/data/minlplib_nl/nvs03.nl",
+      "off": {
+        "obj": 16.0,
+        "bound": 15.99999972676511,
+        "status": "optimal",
+        "gap_certified": true,
+        "nodes": 5,
+        "wall": 0.06,
+        "incumbent_feasible": true
+      },
+      "on": {
+        "obj": 16.0,
+        "bound": 15.99999972676511,
+        "status": "optimal",
+        "gap_certified": true,
+        "nodes": 5,
+        "wall": 0.06,
+        "incumbent_feasible": true
+      },
+      "problems": [],
+      "cert_delta": "same",
+      "bound_delta": "tie",
+      "primal_delta": "tie"
+    },
+    {
+      "instance": "nvs04",
+      "oracle": 0.72,
+      "path": "python/tests/data/minlplib_nl/nvs04.nl",
+      "off": {
+        "obj": 0.720000000000006,
+        "bound": 0.7199999999999773,
+        "status": "optimal",
+        "gap_certified": true,
+        "nodes": 5,
+        "wall": 0.14,
+        "incumbent_feasible": true
+      },
+      "on": {
+        "obj": 0.720000000000006,
+        "bound": 0.7199999999999773,
+        "status": "optimal",
+        "gap_certified": true,
+        "nodes": 5,
+        "wall": 0.14,
+        "incumbent_feasible": true
+      },
+      "problems": [],
+      "cert_delta": "same",
+      "bound_delta": "tie",
+      "primal_delta": "tie"
+    },
+    {
+      "instance": "nvs05",
+      "oracle": 5.470934108,
+      "path": "python/tests/data/minlplib_nl/nvs05.nl",
+      "off": {
+        "obj": 5.470934126405679,
+        "bound": 5.470647318008123,
+        "status": "optimal",
+        "gap_certified": true,
+        "nodes": 283,
+        "wall": 37.01,
+        "incumbent_feasible": true
+      },
+      "on": {
+        "obj": 5.47093412640568,
+        "bound": 5.470721657332745,
+        "status": "optimal",
+        "gap_certified": true,
+        "nodes": 287,
+        "wall": 38.9,
+        "incumbent_feasible": true
+      },
+      "problems": [],
+      "cert_delta": "same",
+      "bound_delta": "tie",
+      "primal_delta": "tie"
+    },
+    {
+      "instance": "nvs06",
+      "oracle": 1.7703125,
+      "path": "python/tests/data/minlplib_nl/nvs06.nl",
+      "off": {
+        "obj": 1.7703125,
+        "bound": 1.7703124999999627,
+        "status": "optimal",
+        "gap_certified": true,
+        "nodes": 5,
+        "wall": 0.47,
+        "incumbent_feasible": true
+      },
+      "on": {
+        "obj": 1.7703125,
+        "bound": 1.7703124999999627,
+        "status": "optimal",
+        "gap_certified": true,
+        "nodes": 5,
+        "wall": 0.3,
+        "incumbent_feasible": true
+      },
+      "problems": [],
+      "cert_delta": "same",
+      "bound_delta": "tie",
+      "primal_delta": "tie"
+    },
+    {
+      "instance": "nvs07",
+      "oracle": 4.0,
+      "path": "python/tests/data/minlplib_nl/nvs07.nl",
+      "off": {
+        "obj": 4.0,
+        "bound": 4.0,
+        "status": "optimal",
+        "gap_certified": true,
+        "nodes": 5,
+        "wall": 0.02,
+        "incumbent_feasible": true
+      },
+      "on": {
+        "obj": 4.0,
+        "bound": 4.0,
+        "status": "optimal",
+        "gap_certified": true,
+        "nodes": 5,
+        "wall": 0.02,
+        "incumbent_feasible": true
+      },
+      "problems": [],
+      "cert_delta": "same",
+      "bound_delta": "tie",
+      "primal_delta": "tie"
+    },
+    {
+      "instance": "nvs08",
+      "oracle": 23.44972735,
+      "path": "python/tests/data/minlplib_nl/nvs08.nl",
+      "off": {
+        "obj": 23.449727347139827,
+        "bound": 23.44972734516655,
+        "status": "optimal",
+        "gap_certified": true,
+        "nodes": 3,
+        "wall": 0.34,
+        "incumbent_feasible": true
+      },
+      "on": {
+        "obj": 23.449727347032645,
+        "bound": 23.4497273467636,
+        "status": "optimal",
+        "gap_certified": true,
+        "nodes": 3,
+        "wall": 0.33,
+        "incumbent_feasible": true
+      },
+      "problems": [],
+      "cert_delta": "same",
+      "bound_delta": "tie",
+      "primal_delta": "tie"
+    },
+    {
+      "instance": "nvs09",
+      "oracle": -43.13433692,
+      "path": "python/tests/data/minlplib_nl/nvs09.nl",
+      "off": {
+        "obj": -43.134336918035295,
+        "bound": -43.13433691803662,
+        "status": "optimal",
+        "gap_certified": true,
+        "nodes": 5,
+        "wall": 2.37,
+        "incumbent_feasible": true
+      },
+      "on": {
+        "obj": -43.134336918035295,
+        "bound": -43.13433691803662,
+        "status": "optimal",
+        "gap_certified": true,
+        "nodes": 5,
+        "wall": 2.15,
+        "incumbent_feasible": true
+      },
+      "problems": [],
+      "cert_delta": "same",
+      "bound_delta": "tie",
+      "primal_delta": "tie"
+    },
+    {
+      "instance": "nvs10",
+      "oracle": -310.8,
+      "path": "python/tests/data/minlplib_nl/nvs10.nl",
+      "off": {
+        "obj": -310.7999999999999,
+        "bound": -310.7999999999999,
+        "status": "optimal",
+        "gap_certified": true,
+        "nodes": 5,
+        "wall": 0.05,
+        "incumbent_feasible": true
+      },
+      "on": {
+        "obj": -310.7999999999999,
+        "bound": -310.7999999999999,
+        "status": "optimal",
+        "gap_certified": true,
+        "nodes": 5,
+        "wall": 0.14,
+        "incumbent_feasible": true
+      },
+      "problems": [],
+      "cert_delta": "same",
+      "bound_delta": "tie",
+      "primal_delta": "tie"
+    },
+    {
+      "instance": "nvs11",
+      "oracle": -431.0,
+      "path": "python/tests/data/minlplib_nl/nvs11.nl",
+      "off": {
+        "obj": -430.99999999999966,
+        "bound": -430.99999999999966,
+        "status": "optimal",
+        "gap_certified": true,
+        "nodes": 55,
+        "wall": 0.25,
+        "incumbent_feasible": true
+      },
+      "on": {
+        "obj": -430.99999999999966,
+        "bound": -430.99999999999966,
+        "status": "optimal",
+        "gap_certified": true,
+        "nodes": 55,
+        "wall": 0.24,
+        "incumbent_feasible": true
+      },
+      "problems": [],
+      "cert_delta": "same",
+      "bound_delta": "tie",
+      "primal_delta": "tie"
+    },
+    {
+      "instance": "nvs12",
+      "oracle": -481.2,
+      "path": "python/tests/data/minlplib_nl/nvs12.nl",
+      "off": {
+        "obj": -481.20000000000005,
+        "bound": -481.20000000000005,
+        "status": "optimal",
+        "gap_certified": true,
+        "nodes": 231,
+        "wall": 0.76,
+        "incumbent_feasible": true
+      },
+      "on": {
+        "obj": -481.20000000000005,
+        "bound": -481.20000000000005,
+        "status": "optimal",
+        "gap_certified": true,
+        "nodes": 231,
+        "wall": 0.83,
+        "incumbent_feasible": true
+      },
+      "problems": [],
+      "cert_delta": "same",
+      "bound_delta": "tie",
+      "primal_delta": "tie"
+    },
+    {
+      "instance": "nvs13",
+      "oracle": -585.2,
+      "path": "python/tests/data/minlplib_nl/nvs13.nl",
+      "off": {
+        "obj": -585.2,
+        "bound": -585.2000002176499,
+        "status": "optimal",
+        "gap_certified": true,
+        "nodes": 23,
+        "wall": 2.78,
+        "incumbent_feasible": true
+      },
+      "on": {
+        "obj": -585.2,
+        "bound": -585.2000002176499,
+        "status": "optimal",
+        "gap_certified": true,
+        "nodes": 23,
+        "wall": 2.89,
+        "incumbent_feasible": true
+      },
+      "problems": [],
+      "cert_delta": "same",
+      "bound_delta": "tie",
+      "primal_delta": "tie"
+    },
+    {
+      "instance": "nvs14",
+      "oracle": -40358.15477,
+      "path": "python/tests/data/minlplib_nl/nvs14.nl",
+      "off": {
+        "obj": -40358.15476929996,
+        "bound": -40358.15476929999,
+        "status": "optimal",
+        "gap_certified": true,
+        "nodes": 223,
+        "wall": 0.11,
+        "incumbent_feasible": true
+      },
+      "on": {
+        "obj": -40358.15476929996,
+        "bound": -40358.15476929999,
+        "status": "optimal",
+        "gap_certified": true,
+        "nodes": 223,
+        "wall": 0.11,
+        "incumbent_feasible": true
+      },
+      "problems": [],
+      "cert_delta": "same",
+      "bound_delta": "tie",
+      "primal_delta": "tie"
+    },
+    {
+      "instance": "nvs15",
+      "oracle": 1.0,
+      "path": "python/tests/data/minlplib_nl/nvs15.nl",
+      "off": {
+        "obj": 1.0,
+        "bound": 1.0,
+        "status": "optimal",
+        "gap_certified": true,
+        "nodes": 7,
+        "wall": 0.04,
+        "incumbent_feasible": true
+      },
+      "on": {
+        "obj": 1.0,
+        "bound": 1.0,
+        "status": "optimal",
+        "gap_certified": true,
+        "nodes": 7,
+        "wall": 0.04,
+        "incumbent_feasible": true
+      },
+      "problems": [],
+      "cert_delta": "same",
+      "bound_delta": "tie",
+      "primal_delta": "tie"
+    },
+    {
+      "instance": "nvs21",
+      "oracle": -5.6847825,
+      "path": "python/tests/data/minlplib_nl/nvs21.nl",
+      "off": {
+        "obj": -5.684782628025259,
+        "bound": -5.684782628025259,
+        "status": "optimal",
+        "gap_certified": true,
+        "nodes": 3,
+        "wall": 1.63,
+        "incumbent_feasible": true
+      },
+      "on": {
+        "obj": -5.684782628025259,
+        "bound": -5.684782628025259,
+        "status": "optimal",
+        "gap_certified": true,
+        "nodes": 3,
+        "wall": 1.51,
+        "incumbent_feasible": true
+      },
+      "problems": [],
+      "cert_delta": "same",
+      "bound_delta": "tie",
+      "primal_delta": "tie"
+    },
+    {
+      "instance": "oaer",
+      "oracle": -1.923098514,
+      "path": "python/tests/data/minlplib_nl/oaer.nl",
+      "off": {
+        "obj": -1.9230984998848466,
+        "bound": -1.923098601139822,
+        "status": "optimal",
+        "gap_certified": true,
+        "nodes": 3,
+        "wall": 0.28,
+        "incumbent_feasible": true
+      },
+      "on": {
+        "obj": -1.9230984998848466,
+        "bound": -1.923098601139822,
+        "status": "optimal",
+        "gap_certified": true,
+        "nodes": 3,
+        "wall": 0.27,
+        "incumbent_feasible": true
+      },
+      "problems": [],
+      "cert_delta": "same",
+      "bound_delta": "tie",
+      "primal_delta": "tie"
+    },
+    {
+      "instance": "st_e11",
+      "oracle": 189.3116297,
+      "path": "python/tests/data/minlplib_nl/st_e11.nl",
+      "off": {
+        "obj": 189.31162970681882,
+        "bound": 189.31162966433996,
+        "status": "optimal",
+        "gap_certified": true,
+        "nodes": 5,
+        "wall": 0.72,
+        "incumbent_feasible": true
+      },
+      "on": {
+        "obj": 189.31162970681882,
+        "bound": 189.31162966433996,
+        "status": "optimal",
+        "gap_certified": true,
+        "nodes": 5,
+        "wall": 0.62,
+        "incumbent_feasible": true
+      },
+      "problems": [],
+      "cert_delta": "same",
+      "bound_delta": "tie",
+      "primal_delta": "tie"
+    },
+    {
+      "instance": "st_e13",
+      "oracle": 2.0,
+      "path": "python/tests/data/minlplib_nl/st_e13.nl",
+      "off": {
+        "obj": 2.0000003463351197,
+        "bound": 1.9999999825187809,
+        "status": "optimal",
+        "gap_certified": true,
+        "nodes": 3,
+        "wall": 0.08,
+        "incumbent_feasible": true
+      },
+      "on": {
+        "obj": 2.0000003463351197,
+        "bound": 1.9999999825187809,
+        "status": "optimal",
+        "gap_certified": true,
+        "nodes": 3,
+        "wall": 0.08,
+        "incumbent_feasible": true
+      },
+      "problems": [],
+      "cert_delta": "same",
+      "bound_delta": "tie",
+      "primal_delta": "tie"
+    },
+    {
+      "instance": "st_e29",
+      "oracle": -0.9434705,
+      "path": "python/tests/data/minlplib_nl/st_e29.nl",
+      "off": {
+        "obj": -0.9434704942820806,
+        "bound": -0.9434705000000164,
+        "status": "optimal",
+        "gap_certified": true,
+        "nodes": 5,
+        "wall": 1.07,
+        "incumbent_feasible": true
+      },
+      "on": {
+        "obj": -0.9434704942820806,
+        "bound": -0.9434705000000164,
+        "status": "optimal",
+        "gap_certified": true,
+        "nodes": 5,
+        "wall": 1.11,
+        "incumbent_feasible": true
+      },
+      "problems": [],
+      "cert_delta": "same",
+      "bound_delta": "tie",
+      "primal_delta": "tie"
+    },
+    {
+      "instance": "st_e36",
+      "oracle": -246.0,
+      "path": "python/tests/data/minlplib_nl/st_e36.nl",
+      "off": {
+        "obj": -245.99999999999997,
+        "bound": -246.00000000170442,
+        "status": "optimal",
+        "gap_certified": true,
+        "nodes": 85,
+        "wall": 3.3,
+        "incumbent_feasible": true
+      },
+      "on": {
+        "obj": -246.0,
+        "bound": -246.00000000170442,
+        "status": "optimal",
+        "gap_certified": true,
+        "nodes": 87,
+        "wall": 3.44,
+        "incumbent_feasible": true
+      },
+      "problems": [],
+      "cert_delta": "same",
+      "bound_delta": "tie",
+      "primal_delta": "tie"
+    },
+    {
+      "instance": "st_e38",
+      "oracle": 7197.727149,
+      "path": "python/tests/data/minlplib_nl/st_e38.nl",
+      "off": {
+        "obj": 7197.727116826533,
+        "bound": 7197.727116826533,
+        "status": "optimal",
+        "gap_certified": true,
+        "nodes": 3,
+        "wall": 0.21,
+        "incumbent_feasible": true
+      },
+      "on": {
+        "obj": 7197.727116826533,
+        "bound": 7197.727116826533,
+        "status": "optimal",
+        "gap_certified": true,
+        "nodes": 3,
+        "wall": 0.21,
+        "incumbent_feasible": true
+      },
+      "problems": [],
+      "cert_delta": "same",
+      "bound_delta": "tie",
+      "primal_delta": "tie"
+    },
+    {
+      "instance": "st_miqp1",
+      "oracle": 281.0,
+      "path": "python/tests/data/minlplib_nl/st_miqp1.nl",
+      "off": {
+        "obj": 280.9999999906497,
+        "bound": 280.9999999906497,
+        "status": "optimal",
+        "gap_certified": true,
+        "nodes": 15,
+        "wall": 0.01,
+        "incumbent_feasible": true
+      },
+      "on": {
+        "obj": 280.9999999906497,
+        "bound": 280.9999999906497,
+        "status": "optimal",
+        "gap_certified": true,
+        "nodes": 15,
+        "wall": 0.01,
+        "incumbent_feasible": true
+      },
+      "problems": [],
+      "cert_delta": "same",
+      "bound_delta": "tie",
+      "primal_delta": "tie"
+    },
+    {
+      "instance": "st_miqp2",
+      "oracle": 2.0,
+      "path": "python/tests/data/minlplib_nl/st_miqp2.nl",
+      "off": {
+        "obj": 2.0,
+        "bound": 2.0,
+        "status": "optimal",
+        "gap_certified": true,
+        "nodes": 9,
+        "wall": 0.01,
+        "incumbent_feasible": true
+      },
+      "on": {
+        "obj": 2.0,
+        "bound": 2.0,
+        "status": "optimal",
+        "gap_certified": true,
+        "nodes": 9,
+        "wall": 0.01,
+        "incumbent_feasible": true
+      },
+      "problems": [],
+      "cert_delta": "same",
+      "bound_delta": "tie",
+      "primal_delta": "tie"
+    },
+    {
+      "instance": "st_miqp3",
+      "oracle": -6.0,
+      "path": "python/tests/data/minlplib_nl/st_miqp3.nl",
+      "off": {
+        "obj": -6.0,
+        "bound": -6.0,
+        "status": "optimal",
+        "gap_certified": true,
+        "nodes": 1,
+        "wall": 0.0,
+        "incumbent_feasible": true
+      },
+      "on": {
+        "obj": -6.0,
+        "bound": -6.0,
+        "status": "optimal",
+        "gap_certified": true,
+        "nodes": 1,
+        "wall": 0.0,
+        "incumbent_feasible": true
+      },
+      "problems": [],
+      "cert_delta": "same",
+      "bound_delta": "tie",
+      "primal_delta": "tie"
+    },
+    {
+      "instance": "st_miqp4",
+      "oracle": -4574.0,
+      "path": "python/tests/data/minlplib_nl/st_miqp4.nl",
+      "off": {
+        "obj": -4574.000004423649,
+        "bound": -4574.000004423649,
+        "status": "optimal",
+        "gap_certified": true,
+        "nodes": 3,
+        "wall": 0.01,
+        "incumbent_feasible": true
+      },
+      "on": {
+        "obj": -4574.000004423649,
+        "bound": -4574.000004423649,
+        "status": "optimal",
+        "gap_certified": true,
+        "nodes": 3,
+        "wall": 0.01,
+        "incumbent_feasible": true
+      },
+      "problems": [],
+      "cert_delta": "same",
+      "bound_delta": "tie",
+      "primal_delta": "tie"
+    },
+    {
+      "instance": "st_miqp5",
+      "oracle": -333.8888889,
+      "path": "python/tests/data/minlplib_nl/st_miqp5.nl",
+      "off": {
+        "obj": -333.8888902488093,
+        "bound": -333.8888902488093,
+        "status": "optimal",
+        "gap_certified": true,
+        "nodes": 1,
+        "wall": 0.01,
+        "incumbent_feasible": true
+      },
+      "on": {
+        "obj": -333.8888902488093,
+        "bound": -333.8888902488093,
+        "status": "optimal",
+        "gap_certified": true,
+        "nodes": 1,
+        "wall": 0.01,
+        "incumbent_feasible": true
+      },
+      "problems": [],
+      "cert_delta": "same",
+      "bound_delta": "tie",
+      "primal_delta": "tie"
+    },
+    {
+      "instance": "st_test1",
+      "oracle": 0.0,
+      "path": "python/tests/data/minlplib_nl/st_test1.nl",
+      "off": {
+        "obj": -1.6495994490692313e-08,
+        "bound": -1.6495994490692313e-08,
+        "status": "optimal",
+        "gap_certified": true,
+        "nodes": 15,
+        "wall": 0.01,
+        "incumbent_feasible": true
+      },
+      "on": {
+        "obj": -1.6495994490692313e-08,
+        "bound": -1.6495994490692313e-08,
+        "status": "optimal",
+        "gap_certified": true,
+        "nodes": 15,
+        "wall": 0.01,
+        "incumbent_feasible": true
+      },
+      "problems": [],
+      "cert_delta": "same",
+      "bound_delta": "tie",
+      "primal_delta": "tie"
+    },
+    {
+      "instance": "st_testgr3",
+      "oracle": -20.59,
+      "path": "python/tests/data/minlplib_nl/st_testgr3.nl",
+      "off": {
+        "obj": -20.59,
+        "bound": -20.59070709795548,
+        "status": "optimal",
+        "gap_certified": true,
+        "nodes": 549,
+        "wall": 0.07,
+        "incumbent_feasible": true
+      },
+      "on": {
+        "obj": -20.59,
+        "bound": -20.59070709795548,
+        "status": "optimal",
+        "gap_certified": true,
+        "nodes": 549,
+        "wall": 0.07,
+        "incumbent_feasible": true
+      },
+      "problems": [],
+      "cert_delta": "same",
+      "bound_delta": "tie",
+      "primal_delta": "tie"
+    },
+    {
+      "instance": "syn05hfsg",
+      "oracle": 837.7324009,
+      "path": "python/tests/data/minlplib_nl/syn05hfsg.nl",
+      "off": {
+        "obj": 837.732412391107,
+        "bound": 916.1527654426542,
+        "status": "feasible",
+        "gap_certified": false,
+        "nodes": 4123,
+        "wall": 60.01,
+        "incumbent_feasible": true
+      },
+      "on": {
+        "obj": 837.732412391107,
+        "bound": 916.1527654426542,
+        "status": "feasible",
+        "gap_certified": false,
+        "nodes": 4145,
+        "wall": 60.03,
+        "incumbent_feasible": true
+      },
+      "problems": [
+        "off bound 916.153 > oracle 837.732 (FALSE BOUND)",
+        "on bound 916.153 > oracle 837.732 (FALSE BOUND)"
+      ],
+      "cert_delta": "same",
+      "bound_delta": "tie",
+      "primal_delta": "tie"
+    },
+    {
+      "instance": "tanksize",
+      "oracle": 1.268643754,
+      "path": "python/tests/data/minlplib_nl/tanksize.nl",
+      "off": {
+        "obj": 1.2686437555126844,
+        "bound": 0.8528765311589279,
+        "status": "feasible",
+        "gap_certified": false,
+        "nodes": 559,
+        "wall": 60.09,
+        "incumbent_feasible": true
+      },
+      "on": {
+        "obj": 1.2686437588757016,
+        "bound": 0.8528765311589279,
+        "status": "feasible",
+        "gap_certified": false,
+        "nodes": 571,
+        "wall": 60.13,
+        "incumbent_feasible": true
+      },
+      "problems": [],
+      "cert_delta": "same",
+      "bound_delta": "tie",
+      "primal_delta": "tie"
+    },
+    {
+      "instance": "tls2",
+      "oracle": 5.3,
+      "path": "python/tests/data/minlplib_nl/tls2.nl",
+      "off": {
+        "obj": 5.299999922109238,
+        "bound": 5.3,
+        "status": "optimal",
+        "gap_certified": true,
+        "nodes": 353,
+        "wall": 13.9,
+        "incumbent_feasible": true
+      },
+      "on": {
+        "obj": 5.299999922109238,
+        "bound": 5.3,
+        "status": "optimal",
+        "gap_certified": true,
+        "nodes": 353,
+        "wall": 13.59,
+        "incumbent_feasible": true
+      },
+      "problems": [],
+      "cert_delta": "same",
+      "bound_delta": "tie",
+      "primal_delta": "tie"
+    },
+    {
+      "instance": "tspn05",
+      "oracle": 191.2552078,
+      "path": "python/tests/data/minlplib_nl/tspn05.nl",
+      "off": {
+        "obj": 191.25520768494238,
+        "bound": 191.25510622528546,
+        "status": "optimal",
+        "gap_certified": true,
+        "nodes": 51,
+        "wall": 10.08,
+        "incumbent_feasible": true
+      },
+      "on": {
+        "obj": 191.25520768494238,
+        "bound": 191.25510622528546,
+        "status": "optimal",
+        "gap_certified": true,
+        "nodes": 51,
+        "wall": 9.66,
+        "incumbent_feasible": true
+      },
+      "problems": [],
+      "cert_delta": "same",
+      "bound_delta": "tie",
+      "primal_delta": "tie"
+    },
+    {
+      "instance": "tspn08",
+      "oracle": 290.5668539,
+      "path": "python/tests/data/minlplib_nl/tspn08.nl",
+      "off": {
+        "obj": 290.56685374735457,
+        "bound": null,
+        "status": "feasible",
+        "gap_certified": false,
+        "nodes": 1,
+        "wall": 9.69,
+        "incumbent_feasible": true
+      },
+      "on": {
+        "obj": 290.56685374735457,
+        "bound": null,
+        "status": "feasible",
+        "gap_certified": false,
+        "nodes": 1,
+        "wall": 9.54,
+        "incumbent_feasible": true
+      },
+      "problems": [],
+      "cert_delta": "same",
+      "bound_delta": "n/a",
+      "primal_delta": "tie"
+    },
+    {
+      "instance": "tspn10",
+      "oracle": 225.1260716,
+      "path": "python/tests/data/minlplib_nl/tspn10.nl",
+      "off": {
+        "obj": 225.1260713973292,
+        "bound": null,
+        "status": "feasible",
+        "gap_certified": false,
+        "nodes": 1,
+        "wall": 10.53,
+        "incumbent_feasible": true
+      },
+      "on": {
+        "obj": 225.1260713973292,
+        "bound": null,
+        "status": "feasible",
+        "gap_certified": false,
+        "nodes": 1,
+        "wall": 10.43,
+        "incumbent_feasible": true
+      },
+      "problems": [],
+      "cert_delta": "same",
+      "bound_delta": "n/a",
+      "primal_delta": "tie"
+    },
+    {
+      "instance": "tspn12",
+      "oracle": 262.6473957,
+      "path": "python/tests/data/minlplib_nl/tspn12.nl",
+      "off": {
+        "obj": 262.64739525060224,
+        "bound": null,
+        "status": "feasible",
+        "gap_certified": false,
+        "nodes": 1,
+        "wall": 7.95,
+        "incumbent_feasible": true
+      },
+      "on": {
+        "obj": 262.64739525060224,
+        "bound": null,
+        "status": "feasible",
+        "gap_certified": false,
+        "nodes": 1,
+        "wall": 7.9,
+        "incumbent_feasible": true
+      },
+      "problems": [],
+      "cert_delta": "same",
+      "bound_delta": "n/a",
+      "primal_delta": "tie"
+    }
+  ]
+}

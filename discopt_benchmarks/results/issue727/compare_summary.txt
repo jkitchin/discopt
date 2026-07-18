@@ -1,0 +1,119 @@
+#727 Track 1.2 — DISCOPT_OBBT_ITERATE (#720) §5 graduation panel
+Two bars: (1) cert-clean [flag introduces no false/looser bound, no cert loss]
+          (2) net-positive [ON gains cert or tightens bound broadly, regresses nothing]
+
+====================================================================================================
+CLUSTER (#727 QCQP wide-box targets)  (n=16, TL=60.0s)
+====================================================================================================
+instance                    oracle |     OFF bnd      ON bnd |   OFFn    ONn |  OFFw   ONw | OFFcert ONcert | delta
+nvs16                       0.7031 |      0.7031      0.7031 |     43     43 |   1.9   1.5 |    True   True | tie
+nvs17                        -1100 |       -1100       -1100 |     73     77 |  42.7  40.9 |    True   True | tie
+nvs18                       -778.4 |      -778.4      -778.4 |     45     45 |   9.3  10.0 |    True   True | tie
+nvs19                        -1098 |       -1104       -1104 |     17     21 |  61.1  61.3 |   False  False | ON tighter (+0.03%)
+nvs20                        230.9 |       230.9       230.9 |    447    447 |  31.7  31.9 |    True   True | tie
+nvs22                        6.058 |       6.058       6.058 |     35     35 |   4.9   4.8 |    True   True | tie
+nvs23                        -1125 |       -1131       -1131 |      9      7 |  60.2  60.7 |   False  False | tie
+nvs24                        -1033 |       -5045       -1497 |      3      3 |  62.2  64.7 |   False  False | ON tighter (+70.31%)
+clay0203m                4.157e+04 |        None        None |    127    127 |  22.1  21.2 |   False  False | n/a
+clay0204m                     6545 |        6545        6545 |   1573   1573 |  37.2  37.2 |    True   True | tie
+clay0205m                     8092 |        None        None |   5247   5471 |  60.1  60.3 |   False  False | n/a
+clay0303m                2.667e+04 |   2.667e+04   2.667e+04 |    181    181 |   8.1   8.2 |    True   True | tie
+clay0304m                4.026e+04 |   4.026e+04   4.026e+04 |    923    923 |  23.3  23.2 |    True   True | tie
+clay0305m                     8092 |        5872        5872 |   4463   4463 |  61.6  60.2 |   False  False | tie
+spectra2                     13.98 |       8.307       8.307 |   4089   4251 |  60.6  60.6 |   False  False | tie
+wager                    2.034e+04 |        3535        3535 |     95     95 |  63.0  63.0 |   False  False | tie
+
+  cert gained ON: 0 | cert lost ON: 0 | bound tighter ON: 2 | bound looser ON: 0
+  FLAG-ATTRIBUTABLE soundness problems: NONE
+  (pre-existing both-arm notes — identical OFF/ON, NOT flag-caused:)
+     nvs22: off incumbent INFEASIBLE; on incumbent INFEASIBLE
+
+====================================================================================================
+EASY / BROAD in-repo certifying corpus (regression guard)  (n=66, TL=60.0s)
+====================================================================================================
+instance                    oracle |     OFF bnd      ON bnd |   OFFn    ONn |  OFFw   ONw | OFFcert ONcert | delta
+4stufen                  1.163e+05 |    2.16e+04   2.165e+04 |     63     63 |  64.3  64.8 |   False  False | ON tighter (+0.23%)
+alan                         2.925 |       2.925       2.925 |     21     21 |   0.0   0.0 |    True   True | tie
+bchoco06                      None |           1           1 |     31     31 |  60.5  60.5 |   False  False | tie
+bchoco07                      None |           1           1 |     15     15 |  61.4  61.5 |   False  False | tie
+bchoco08                      None |           1           1 |      3      3 |  68.8  69.4 |   False  False | tie
+beuster                  1.163e+05 |    1.99e+04    1.99e+04 |     63     63 |  61.6  60.8 |   False  False | tie
+casctanks                    9.163 |       2.957       2.969 |    127    127 |  62.4  62.4 |   False  False | ON tighter (+0.31%)
+chance                       29.89 |       29.89       29.89 |      0      0 |   0.1   0.1 |    True   True | tie
+clay0303hfsg             2.667e+04 |   2.667e+04   2.667e+04 |    443    443 |  34.1  32.9 |    True   True | tie
+contvar                  8.091e+05 |   1.841e+05   1.841e+05 |     15     15 |  61.2  60.6 |   False  False | tie
+cvxnonsep_nsig30             130.6 |       130.6       130.6 |    171    171 |   1.2   1.5 |    True   True | tie
+cvxnonsep_psig30                79 |          79          79 |     89     89 |   0.5   0.5 |    True   True | tie
+cvxnonsep_psig40r            86.55 |       86.54       86.54 |     95     95 |   1.8   1.8 |    True   True | tie
+dispatch                      3155 |        3155        3155 |      3      3 |   0.4   0.1 |    True   True | tie
+ex1221                       7.667 |       7.667       7.667 |      5      5 |   0.2   0.2 |    True   True | tie
+ex1222                       1.077 |       1.077       1.077 |      1      1 |   0.2   0.1 |    True   True | tie
+ex1224                     -0.9435 |     -0.9435     -0.9435 |      5      5 |   1.2   1.1 |    True   True | tie
+ex1225                          31 |          31          31 |      5      5 |   0.8   0.7 |    True   True | tie
+ex1226                         -17 |         -17         -17 |      3      3 |   0.2   0.2 |    True   True | tie
+ex14_1_9                        -0 |  -1.978e-16  -1.978e-16 |      3      3 |   0.1   0.2 |   False  False | tie
+fac2                     3.318e+08 |   3.318e+08   3.318e+08 |     41     41 |   2.5   2.4 |    True   True | tie
+flay02m                      37.95 |       37.95       37.95 |      7      7 |   0.2   0.1 |    True   True | tie
+flay03m                      48.99 |       48.99       48.99 |    111    111 |   3.1   3.0 |    True   True | tie
+gbd                            2.2 |         2.2         2.2 |      3      3 |   0.0   0.0 |    True   True | tie
+gkocis                      -1.923 |      -1.923      -1.923 |      5      5 |   0.4   0.3 |    True   True | tie
+hda                          -5965 |  -1.802e+10  -1.802e+10 |      3      3 |  93.0  89.9 |   False  False | tie
+heatexch_gen1            1.549e+05 |   9.549e+04   9.549e+04 |    111    113 |  60.5  60.1 |   False  False | tie
+heatexch_gen2            6.358e+05 |   5.585e+05   5.585e+05 |     35     35 |  63.0  61.3 |   False  False | tie
+heatexch_gen3            6.484e+04 |        None        None |     15     15 |  66.8  66.7 |   False  False | n/a
+m3                            37.8 |        37.8        37.8 |     47     47 |   1.1   1.5 |    True   True | tie
+nvs01                        12.47 |       12.47       12.47 |      3      3 |   0.4   0.4 |    True   True | tie
+nvs02                        5.964 |       5.964       5.964 |    337    337 |   0.2   0.1 |    True   True | tie
+nvs03                           16 |          16          16 |      5      5 |   0.1   0.1 |    True   True | tie
+nvs04                         0.72 |        0.72        0.72 |      5      5 |   0.1   0.1 |    True   True | tie
+nvs05                        5.471 |       5.471       5.471 |    283    287 |  37.0  38.9 |    True   True | tie
+nvs06                         1.77 |        1.77        1.77 |      5      5 |   0.5   0.3 |    True   True | tie
+nvs07                            4 |           4           4 |      5      5 |   0.0   0.0 |    True   True | tie
+nvs08                        23.45 |       23.45       23.45 |      3      3 |   0.3   0.3 |    True   True | tie
+nvs09                       -43.13 |      -43.13      -43.13 |      5      5 |   2.4   2.1 |    True   True | tie
+nvs10                       -310.8 |      -310.8      -310.8 |      5      5 |   0.1   0.1 |    True   True | tie
+nvs11                         -431 |        -431        -431 |     55     55 |   0.2   0.2 |    True   True | tie
+nvs12                       -481.2 |      -481.2      -481.2 |    231    231 |   0.8   0.8 |    True   True | tie
+nvs13                       -585.2 |      -585.2      -585.2 |     23     23 |   2.8   2.9 |    True   True | tie
+nvs14                   -4.036e+04 |  -4.036e+04  -4.036e+04 |    223    223 |   0.1   0.1 |    True   True | tie
+nvs15                            1 |           1           1 |      7      7 |   0.0   0.0 |    True   True | tie
+nvs21                       -5.685 |      -5.685      -5.685 |      3      3 |   1.6   1.5 |    True   True | tie
+oaer                        -1.923 |      -1.923      -1.923 |      3      3 |   0.3   0.3 |    True   True | tie
+st_e11                       189.3 |       189.3       189.3 |      5      5 |   0.7   0.6 |    True   True | tie
+st_e13                           2 |           2           2 |      3      3 |   0.1   0.1 |    True   True | tie
+st_e29                     -0.9435 |     -0.9435     -0.9435 |      5      5 |   1.1   1.1 |    True   True | tie
+st_e36                        -246 |        -246        -246 |     85     87 |   3.3   3.4 |    True   True | tie
+st_e38                        7198 |        7198        7198 |      3      3 |   0.2   0.2 |    True   True | tie
+st_miqp1                       281 |         281         281 |     15     15 |   0.0   0.0 |    True   True | tie
+st_miqp2                         2 |           2           2 |      9      9 |   0.0   0.0 |    True   True | tie
+st_miqp3                        -6 |          -6          -6 |      1      1 |   0.0   0.0 |    True   True | tie
+st_miqp4                     -4574 |       -4574       -4574 |      3      3 |   0.0   0.0 |    True   True | tie
+st_miqp5                    -333.9 |      -333.9      -333.9 |      1      1 |   0.0   0.0 |    True   True | tie
+st_test1                         0 |   -1.65e-08   -1.65e-08 |     15     15 |   0.0   0.0 |    True   True | tie
+st_testgr3                  -20.59 |      -20.59      -20.59 |    549    549 |   0.1   0.1 |    True   True | tie
+syn05hfsg                    837.7 |       916.2       916.2 |   4123   4145 |  60.0  60.0 |   False  False | tie
+tanksize                     1.269 |      0.8529      0.8529 |    559    571 |  60.1  60.1 |   False  False | tie
+tls2                           5.3 |         5.3         5.3 |    353    353 |  13.9  13.6 |    True   True | tie
+tspn05                       191.3 |       191.3       191.3 |     51     51 |  10.1   9.7 |    True   True | tie
+tspn08                       290.6 |        None        None |      1      1 |   9.7   9.5 |   False  False | n/a
+tspn10                       225.1 |        None        None |      1      1 |  10.5  10.4 |   False  False | n/a
+tspn12                       262.6 |        None        None |      1      1 |   8.0   7.9 |   False  False | n/a
+
+  cert gained ON: 0 | cert lost ON: 0 | bound tighter ON: 2 | bound looser ON: 0
+  FLAG-ATTRIBUTABLE soundness problems: NONE
+  (pre-existing both-arm notes — identical OFF/ON, NOT flag-caused:)
+     syn05hfsg: off bound 916.153 > oracle 837.732 (FALSE BOUND); on bound 916.153 > oracle 837.732 (FALSE BOUND)
+
+====================================================================================================
+VERDICT
+====================================================================================================
+  cluster cert gained ON: 0   easy cert gained ON: 0
+  cluster cert lost ON:   0   easy cert lost ON:   0
+  bound tighter ON (total): 4   bound looser ON (total): 0
+  FLAG-ATTRIBUTABLE soundness problems (total): 0
+
+  BAR 1 cert-clean:   PASS
+  BAR 2 net-positive: PASS
+  (cluster certifications gained by ON: 0 — material closure of a #727 target?)
+
+  VERDICT: HOLD
