@@ -774,6 +774,49 @@ panel green for 3 consecutive nightlies before default-on.
 > (0.0/`numerical` fallback bounds on narrow boxes). Full anatomy + staged
 > certification plan: `docs/dev/ex1252-certification-plan.md`.
 
+> **Shipped + one falsification (2026-07-18, issue #741 — SGO constrained node
+> tightening; certifies the ≥4-var signomial class).** The #736 blocker (bound
+> −3e5-class vs opt on ex7_2_3 / ex3_1_2 while the incumbent is found) was
+> reproduced on faithful reconstructions of the two probes (the container had no
+> corpus access; ex3_1_2 ≡ Himmelblau/g04, ex7_2_3 ≡ HS106/g10 — coefficients
+> from the literature, oracle values matching the issue table). Root-caused into
+> THREE stacked losses, each measured at the root before its fix: (1) the
+> single-supporting-hyperplane certification of the Lagrangian is arbitrarily
+> loose when SLSQP stalls (ex3_1_2 root: relaxed opt −31499, corner certificate
+> **−122428**, plain interval floor −32217 — the certificate, not the
+> relaxation, was the binding loss); (2) child bounds were not monotone (a
+> failed child solve reported −1.1e10 *below* its parent); (3) the DC secants
+> over wide boxes need range reduction the tree wasn't doing (ex7_2_3 root
+> relaxed opt 2100 vs opt 7049). Shipped, all certified-sound and inside the
+> already-flagged `DISCOPT_SGO` path (issue #741, lever 1): iterated log-domain
+> OBBT with the incumbent objective cut, every coordinate bound proven by the
+> same Lagrangian-corner mechanism (never the subsolver's word) and backed off
+> by a margin; a rigorous interval floor on the objective AND on the fitted
+> Lagrangian; monotone parent-bound inheritance; certified infeasibility/cut
+> pruning (empty-box ⇒ `status="infeasible"` + `gap_certified=True`);
+> secant-gap-guided branching at the relaxation point; frozen-pack evaluation
+> (the secant part is affine on a fixed box — precompute per node; ~13×
+> node-rate). Measured: 4-var wide-box class instance **certifies** (1e-2 in
+> 562 nodes / ~31 s, 1e-4 in ~1.9k nodes) where the pre-#741 path sits at
+> **−327 vs opt 10.90** at the same node budget; ex3_1_2 tree bound
+> −1.1e10 → **−30701** (opt −30665.5, rel gap 1.2e-3 @ 900 s); ex7_2_3 finds
+> the optimal incumbent (was: none) and bound −3e5 → **+3233** (opt 7049) —
+> converging but not certified at 1e-4 in-budget; certification of the 8-var
+> 100×-range class needs LP-strength relaxation throughput (future work).
+> **Falsified in passing (lever 3, "tighter Pminus"):** certifying tighter
+> secant *argument* ranges (per-negative-monomial ξ-OBBT via the same
+> `_cert_min_linear` machinery, incumbent cut included) returns ranges WIDER
+> than box-implied on essentially every row of both probes (e.g. ex7_2_3 box
+> ξ∈[9.21,16.12] → "cert" [7.91,17.35]; the single exception tightens one
+> ex3_1_2 row by 0.06 log-units — noise) — the Lagrangian corner certificate
+> is too weak in non-coordinate directions, so ξ-OBBT through this machinery
+> is a dead end;
+> a tighter Pminus needs either a certified LP dual or piecewise secants with
+> branching on the argument, each its own entry experiment. Differential-bound
+> + feasible-point-sampling + infeasibility-certificate regression tests:
+> `python/tests/test_signomial_global.py` (§6 block). `DISCOPT_SGO` remains
+> default-OFF — graduation (issue Task 3) needs the corpus panel.
+
 ## 7. Sequencing & rationale (revised by the measurement)
 
 ```

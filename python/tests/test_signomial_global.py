@@ -15,6 +15,7 @@ import pytest
 from discopt import Model
 from discopt._jax.convexity.signomial import is_signomial, signomial_dc_terms
 from discopt._jax.convexity.signomial_global import (
+    SignomialGlobalStructure,
     _cv_and_grad,
     _node_lower_bound,
     _pack,
@@ -350,3 +351,194 @@ def test_constrained_node_bound_underestimates_feasible_samples():
         feas &= cvals <= 1e-9
     if feas.any():
         assert lb <= float(ovals[feas].min()) + 1e-6
+
+
+# ── 6. tightened constrained relaxation (issue #741) ───────────────────
+
+
+def _medium_4var():
+    """4-var wide-box mixed-sign signomial program (the ≥4-var class of #741).
+
+    min  x1 + x2 + x3 x4
+    s.t. x1 x4 >= 8,  x2 x3 >= 6,  x3 + x4 <= 10,  x in [0.5, 20]^4.
+
+    The optimum is interior and analytic: eliminating x1 = 8/x4, x2 = 6/x3
+    gives f = 8/x4 + 6/x3 + x3 x4 whose stationary point is x4 = (32/3)^(1/3),
+    x3 = 8/x4^2 (the x3 + x4 <= 10 row is slack there). The pre-#741 secant
+    relaxation's tree bound on this class stalls hundreds of units below the
+    optimum; the tightened relaxation certifies it.
+    """
+    m = Model()
+    x1 = m.continuous("x1", lb=0.5, ub=20.0)
+    x2 = m.continuous("x2", lb=0.5, ub=20.0)
+    x3 = m.continuous("x3", lb=0.5, ub=20.0)
+    x4 = m.continuous("x4", lb=0.5, ub=20.0)
+    m.minimize(x1 + x2 + x3 * x4)
+    m.subject_to(x1 * x4 >= 8.0)
+    m.subject_to(x2 * x3 >= 6.0)
+    m.subject_to(x3 + x4 <= 10.0)
+    return m
+
+
+def _medium_4var_optimum():
+    x4 = (32.0 / 3.0) ** (1.0 / 3.0)
+    x3 = 8.0 / x4**2
+    return 8.0 / x4 + 6.0 / x3 + x3 * x4
+
+
+def _sample_feasible(struct, n=60000, seed=0):
+    """Uniform log-box samples split into (U, objective values, feasible mask)."""
+    obj_pack = _pack(struct.terms)
+    con_packs = [_pack(t) for t in struct.constraint_terms]
+    u_lb, u_ub = struct.u_lb, struct.u_ub
+    rng = np.random.default_rng(seed)
+    U = u_lb + rng.random((n, len(u_lb))) * (u_ub - u_lb)
+    o_sig, o_lc, o_ex = obj_pack
+    ovals = (o_sig[None, :] * np.exp(o_lc[None, :] + U @ o_ex.T)).sum(axis=1)
+    feas = np.ones(U.shape[0], dtype=bool)
+    for sig, lc, ex in con_packs:
+        cvals = (sig[None, :] * np.exp(lc[None, :] + U @ ex.T)).sum(axis=1)
+        feas &= cvals <= 1e-9
+    return U, ovals, feas
+
+
+def test_medium_4var_certifies_and_legacy_does_not():
+    """The #741 acceptance probe for the class: a ≥4-variable wide-box
+    constrained signomial certifies under the tightened relaxation, while the
+    pre-#741 relaxation (``obbt=False``) is left with a bound hundreds of units
+    below the optimum at the same node budget (the measured blocker)."""
+    m = _medium_4var()
+    res = solve_signomial_global(m, gap_tolerance=1e-2, max_nodes=5000, time_limit=240)
+    f_star = _medium_4var_optimum()
+    assert res is not None
+    assert res.status == "optimal"
+    assert res.gap_certified is True
+    assert res.objective == pytest.approx(f_star, rel=1e-4)
+    # Certificate invariant: bound <= optimum <= incumbent.
+    assert res.bound <= res.objective + 1e-9
+    assert res.bound <= f_star + 1e-6
+    # Differential reference: the legacy relaxation at the SAME node budget
+    # stays sound but hopelessly loose (this is the class being fixed).
+    legacy = solve_signomial_global(
+        m, gap_tolerance=1e-2, max_nodes=res.node_count, time_limit=240, obbt=False
+    )
+    assert legacy.gap_certified is False
+    assert legacy.bound <= f_star + 1e-6  # still sound
+    assert res.bound > legacy.bound + 100.0  # and dramatically tighter
+
+
+def test_differential_node_bound_dominates_legacy_on_fixed_boxes():
+    """Bound-changing policy: on fixed boxes the tightened node bound is >= the
+    legacy bound AND <= the true (sampled) constrained optimum of the box."""
+    from discopt._jax.convexity.signomial_global import _constrained_node_bound
+
+    m = _medium_4var()
+    struct = classify_signomial_global(m)
+    obj_pack = _pack(struct.terms)
+    con_packs = [_pack(t) for t in struct.constraint_terms]
+    u_lb0, u_ub0 = struct.u_lb, struct.u_ub
+    rng = np.random.default_rng(3)
+    for _ in range(6):
+        # Random sub-box of the root box (fixed via the seeded rng).
+        a = u_lb0 + rng.random(4) * (u_ub0 - u_lb0)
+        b = u_lb0 + rng.random(4) * (u_ub0 - u_lb0)
+        alb, aub = np.minimum(a, b), np.maximum(a, b)
+        legacy, _ = _constrained_node_bound(obj_pack, con_packs, alb, aub)
+        tight, _ = _constrained_node_bound(obj_pack, con_packs, alb, aub, tighten=True)
+        assert tight >= legacy - 1e-9  # never looser than the reference
+        sub = SignomialGlobalStructure(
+            terms=struct.terms,
+            offsets=struct.offsets,
+            u_lb=alb,
+            u_ub=aub,
+            offset_to_var=struct.offset_to_var,
+            constraint_terms=struct.constraint_terms,
+        )
+        _U, ovals, feas = _sample_feasible(sub, n=40000, seed=11)
+        if feas.any():
+            true_box_min = float(ovals[feas].min())
+            assert tight <= true_box_min + 1e-6  # never above the box optimum
+
+
+def test_obbt_never_cuts_retained_feasible_points():
+    """Feasible-point sampling for the OBBT device: every sampled TRUE-feasible
+    point with objective <= incumbent stays inside the tightened box."""
+    from discopt._jax.convexity.signomial_global import _obbt_tighten
+
+    m = _medium_4var()
+    struct = classify_signomial_global(m)
+    obj_pack = _pack(struct.terms)
+    con_packs = [_pack(t) for t in struct.constraint_terms]
+    u_lb, u_ub = struct.u_lb, struct.u_ub
+    U, ovals, feas = _sample_feasible(struct, n=80000, seed=1)
+    assert feas.any()
+    incumbent = float(np.percentile(ovals[feas], 25.0))  # a genuine feasible UB
+    tt = _obbt_tighten(obj_pack, con_packs, u_lb, u_ub, incumbent, rounds=8)
+    assert tt is not None  # retained points exist -> never certified empty
+    tlb, tub = tt
+    retained = feas & (ovals <= incumbent)
+    assert retained.any()
+    inside = np.all((U[retained] >= tlb[None, :]) & (U[retained] <= tub[None, :]), axis=1)
+    assert bool(inside.all())  # no retained feasible point is ever cut
+    # And the box genuinely tightened somewhere (the device does something).
+    assert float(np.sum(tub - tlb)) < float(np.sum(u_ub - u_lb)) - 1e-6
+
+
+def test_interval_min_devices_are_rigorous():
+    """The interval floor and the weighted-Lagrangian interval floor
+    under-estimate their targets at every sampled point (for any lam >= 0)."""
+    from discopt._jax.convexity.signomial_global import (
+        _cv_and_grad,
+        _interval_min,
+        _interval_min_weighted,
+    )
+
+    m = _medium_4var()
+    struct = classify_signomial_global(m)
+    obj_pack = _pack(struct.terms)
+    con_packs = [_pack(t) for t in struct.constraint_terms]
+    u_lb, u_ub = struct.u_lb, struct.u_ub
+    U, ovals, _feas = _sample_feasible(struct, n=30000, seed=2)
+    # _interval_min bounds the TRUE signomial everywhere on the box.
+    ivl = _interval_min(*obj_pack, u_lb, u_ub)
+    assert ivl <= float(ovals.min()) + 1e-9
+    # _interval_min_weighted bounds L(u) = cv_obj + sum lam_i cv_i pointwise.
+    rng = np.random.default_rng(4)
+    lam = rng.random(len(con_packs)) * 3.0
+    weighted = [(obj_pack, 1.0)] + [(p, float(w)) for p, w in zip(con_packs, lam)]
+    wmin = _interval_min_weighted(weighted, u_lb, u_ub)
+    for k in range(0, 3000, 97):
+        u = U[k]
+        L = _cv_and_grad(*obj_pack, u, u_lb, u_ub)[0]
+        for pack, w in zip(con_packs, lam):
+            L += w * _cv_and_grad(*pack, u, u_lb, u_ub)[0]
+        assert wmin <= L + 1e-9
+
+
+def test_certified_infeasible_signomial_program():
+    """A constrained signomial program with a provably empty feasible region is
+    reported ``infeasible`` with ``gap_certified=True`` (interval certificate),
+    never a fabricated incumbent."""
+    m = Model()
+    x = m.continuous("x", lb=0.5, ub=1.0)
+    y = m.continuous("y", lb=0.5, ub=1.0)
+    m.minimize(x * y - 2.0 * x)  # mixed-sign objective (in class)
+    m.subject_to(x * y >= 10.0)  # impossible: xy <= 1 on the box
+    assert classify_signomial_global(m) is not None
+    res = solve_signomial_global(m, gap_tolerance=1e-6, max_nodes=1000, time_limit=60)
+    assert res is not None
+    assert res.status == "infeasible"
+    assert res.gap_certified is True
+    assert res.objective is None
+
+
+def test_legacy_obbt_off_path_still_certifies_small_case():
+    """The frozen pre-#741 reference path (``obbt=False``) still certifies the
+    small 2-var constrained probe — the differential baseline stays alive."""
+    m = _constrained_2d()
+    res = solve_signomial_global(m, gap_tolerance=1e-4, max_nodes=20000, time_limit=60, obbt=False)
+    true_min = _constrained_grid_min(m)
+    assert res is not None
+    assert res.gap_certified is True
+    assert res.objective == pytest.approx(true_min, abs=5e-3)
+    assert res.bound <= true_min + 1e-3

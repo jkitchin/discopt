@@ -12,6 +12,30 @@ The release procedure that produces these entries is documented in
 
 ### Added
 
+- **SGO constrained node tightening** (`feat`, #741, inside the default-off
+  `DISCOPT_SGO` path). The signomial global optimizer's constrained node
+  relaxation — previously sound but too loose to certify anything beyond 2-var
+  probes (#736's measured blocker) — gains a stack of certified devices:
+  iterated log-domain OBBT with the incumbent objective cut (every coordinate
+  bound proven by the Lagrangian corner mechanism, never by trusting the convex
+  subsolver), rigorous interval floors on the objective and the fitted
+  Lagrangian, monotone parent-bound inheritance, certified
+  infeasibility/objective-cut pruning (a fully pruned tree now returns a
+  rigorous `status="infeasible"` certificate), DC-secant-gap-guided branching,
+  phase-1 feasibility restoration for incumbent recovery, and per-node
+  frozen-pack evaluation (~13× node rate). Measured: a 4-var wide-box class
+  instance certifies (562 nodes at 1e-2) where the old relaxation's bound sits
+  at −327 vs opt 10.90 at the same node budget; ex3_1_2's tree bound moves
+  −1.1e10 → −30701 (opt −30665.5) and ex7_2_3's −3e5 → +3233 with the optimal
+  incumbent found (was: none). The pre-#741 node relaxation is preserved behind
+  `solve_signomial_global(..., obbt=False)` as the differential-test reference;
+  box-only solves are untouched. `DISCOPT_SGO` itself stays default-OFF
+  (graduation is #741 Task 3, pending the corpus panel). Falsified in passing
+  (recorded in `docs/dev/performance-plan.md` §6): certified ξ-argument-range
+  tightening via the same corner machinery returns ranges wider than
+  box-implied — not the lever. Reproduction:
+  `discopt_benchmarks/scripts/sgo_741_tightening_probe.py`.
+
 - **Flow-aware integer-multilinear envelope** (`feat`, #707, default-off behind
   `DISCOPT_INTEGER_MULTILINEAR_REFORM`). Generalizes the integer-*bilinear* exact
   reformulation to products of ≥3 variable factors where every factor but at most
