@@ -1842,6 +1842,7 @@ def obbt_tighten_root(
     prefer_pounce: bool = False,
     cascade_aux: bool = False,
     top_k: Optional[int] = None,
+    min_improvement: Optional[float] = None,
 ) -> RootObbtResult:
     """Structural root OBBT over the LP-form McCormick relaxation.
 
@@ -1903,6 +1904,21 @@ def obbt_tighten_root(
         original columns (T2.5). This bounds the per-sweep probe count so per-node
         OBBT stays affordable on large spatial models; soundness of each surviving
         tightening is unchanged. ``None`` keeps the all-columns behavior.
+    min_improvement : float, optional
+        Convergence early-stop for the iterate-to-fixpoint OBBT loop (#282). On a
+        wide-box dense QCQP, tightening ``x_i`` shrinks the McCormick envelopes,
+        which enables tightening ``x_j`` — so the root bound only converges after
+        *many* sweeps (nvs24: ~30 sweeps drive the box ``[0,200]^10 -> ~[0,24]^10``
+        and the McCormick LP bound ``-782k -> -14k``; the ``rounds=3`` default
+        stops at ``-394k``). Raising ``rounds`` alone lets the existing
+        ``sweep_tight == 0`` fixpoint break run to convergence, but on other
+        instances the tail sweeps can shave only a sliver each; ``min_improvement``
+        caps that cost by stopping once a sweep's *relative box-width reduction*
+        (summed over finite-width original columns) falls below this threshold.
+        Purely an additional early termination — ``None`` (default) preserves the
+        legacy behavior byte-for-byte (only the ``sweep_tight == 0`` break and the
+        ``rounds`` cap terminate the loop). Never affects the soundness of any
+        individual tightening (each is still NS-safe); only *when* the loop stops.
     """
     from discopt.modeling.core import VarType
 
@@ -1923,6 +1939,12 @@ def obbt_tighten_root(
     total_tight = 0
     total_lp_time = 0.0
     n_rounds = 0
+
+    def _finite_box_width() -> float:
+        """Total width over finite-width original columns (min-improvement metric)."""
+        w = ub[:n_orig] - lb[:n_orig]
+        w = w[np.isfinite(w)]
+        return float(w.sum()) if w.size else 0.0
 
     # Bootstrap: if the box is not fully finite, derive finite bounds for the
     # open variables before the round loop, which otherwise bails immediately on
@@ -2010,6 +2032,9 @@ def obbt_tighten_root(
             # whatever tightening prior rounds achieved) if any bound is open.
             if not (np.all(np.isfinite(lb)) and np.all(np.isfinite(ub))):
                 break
+            # Box width at the start of this sweep, for the #282 min-improvement
+            # convergence early-stop (measured only when the caller opts in).
+            _width_before = _finite_box_width() if min_improvement is not None else 0.0
             try:
                 milp, varmap = build_milp_relaxation(
                     relaxer._model,
@@ -2143,6 +2168,14 @@ def obbt_tighten_root(
             total_tight += sweep_tight
             if sweep_tight == 0:
                 break
+            # #282 convergence early-stop: once a sweep shrinks the box by less
+            # than ``min_improvement`` (relative, over finite-width columns) the
+            # remaining tail is not worth its 2n projection LPs. Purely bounds
+            # cost — every tightening already applied stays; only the loop stops.
+            if min_improvement is not None and _width_before > 0.0:
+                _rel = (_width_before - _finite_box_width()) / _width_before
+                if _rel < min_improvement:
+                    break
     except Exception:
         # Never let bound tightening crash or corrupt the solve.
         return RootObbtResult(lb, ub, total_tight, n_rounds, total_lp_time)

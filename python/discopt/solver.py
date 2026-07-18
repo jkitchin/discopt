@@ -406,6 +406,40 @@ def _obbt_topk_enabled() -> bool:
     return os.environ.get("DISCOPT_OBBT_TOPK", "").strip().lower() in ("1", "true", "yes", "on")
 
 
+# #282 iterate-root-OBBT-to-convergence (flag-gated, default OFF). The root OBBT
+# over the McCormick LP already iterates and rebuilds the envelope on the
+# tightened box each sweep (``obbt_tighten_root``), but at the default
+# ``rounds=3`` cap it stops FAR short of the fixpoint on a wide-box dense QCQP:
+# on nvs24 (dense 10-var integer QCQP, opt -1033.2) three sweeps leave the root
+# McCormick LP bound at ~-3.9e5 (the "stuck -4e5"), whereas iterating to the
+# natural ``sweep_tight == 0`` fixpoint (~33 sweeps) drives the box
+# ``[0,200]^10 -> ~[0,24]^10`` and the bound to ~-1.4e4 — a ~54x root-bound
+# tightening with discopt's own machinery, closing most of the root-relaxation
+# gap to SCIP. (The residual to a term-wise dense-tangent McCormick prototype's
+# -6.7e3 is envelope tangent density, orthogonal to OBBT — not addressed here.)
+# The lever is bounded LP work that scales with sweeps, so it is default-OFF and
+# only engaged, when the flag is on, for the structural class that pays: quadratic
+# (QCQP / bilinear-or-square) models with a wide box. Each individual tightening
+# is still the NS-safe clamp used by the ``rounds=3`` path — soundness unchanged;
+# only the number of sweeps grows. ``min_improvement`` caps the tail cost.
+_OBBT_ITERATE_ROUNDS = 50
+_OBBT_ITERATE_MIN_IMPROVEMENT = 1e-3
+# Only widen the sweep budget when the box is actually wide enough that the
+# envelope is loose and iterating pays; a narrow box reaches its fixpoint in a
+# sweep or two and the ``rounds=3`` cap already suffices.
+_OBBT_ITERATE_MIN_BOX_WIDTH = 10.0
+
+
+def _obbt_iterate_root_enabled() -> bool:
+    """Whether the #282 iterate-root-OBBT-to-convergence lever is on (default OFF)."""
+    return os.environ.get("DISCOPT_OBBT_ITERATE", "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+
+
 def _root_lp_probe_tight_enabled() -> bool:
     """Whether the #282 tightened-box root LP probe is on (env flag, default OFF).
 
@@ -5353,14 +5387,46 @@ def solve_model(
             from discopt._jax.obbt import obbt_tighten_root
 
             _obbt_budget = min(min(max(time_limit * 0.1, 2.0), 15.0), _remaining_budget())
+
+            # #282 iterate-to-convergence lever (default OFF). The ``rounds=3`` cap
+            # stops the root OBBT far short of the fixpoint on a wide-box dense
+            # QCQP, where the McCormick envelope is loose and each sweep's box
+            # shrink unlocks the next. When the flag is on AND the model is
+            # quadratically structured (bilinear or square terms) with a wide box,
+            # raise the sweep cap and let the existing fixpoint / min-improvement
+            # break run to convergence. General structural gate — no problem-name
+            # keying; each tightening is still the NS-safe clamp (soundness
+            # unchanged). OFF path is byte-identical (``rounds=3``, no early-stop).
+            _obbt_rounds = 3
+            _obbt_min_impr: Optional[float] = None
+            if _obbt_iterate_root_enabled():
+                try:
+                    from discopt._jax.term_classifier import (
+                        classify_nonlinear_terms as _cnt_it,
+                    )
+
+                    _ot_it = _cnt_it(model)
+                    _is_quadratic = bool(_ot_it.bilinear) or any(
+                        int(p) == 2 for _, p in _ot_it.monomial
+                    )
+                except Exception:
+                    _is_quadratic = False
+                _fin_w = ub - lb
+                _fin_w = _fin_w[np.isfinite(_fin_w)]
+                _wide_box = bool(_fin_w.size) and float(_fin_w.max()) > _OBBT_ITERATE_MIN_BOX_WIDTH
+                if _is_quadratic and _wide_box:
+                    _obbt_rounds = _OBBT_ITERATE_ROUNDS
+                    _obbt_min_impr = _OBBT_ITERATE_MIN_IMPROVEMENT
+
             _obbt_res = obbt_tighten_root(
                 model,
                 lb,
                 ub,
-                rounds=3,
+                rounds=_obbt_rounds,
                 deadline=time.perf_counter() + _obbt_budget,
                 superposition=(relaxation_arithmetic == "superposition"),
                 prefer_pounce=nlp_solver == "pounce",
+                min_improvement=_obbt_min_impr,
             )
             if _obbt_res.infeasible:
                 wall_time = time.perf_counter() - t_start
