@@ -18,6 +18,7 @@ timeout-as-infeasible LOA result.
 
 from __future__ import annotations
 
+import importlib.util
 import time
 import types
 
@@ -1548,6 +1549,14 @@ class TestSolveOptionPaths:
 
 @pytest.mark.unit
 class TestFromDescription:
+    # from_description guards on litellm's presence before the mocked
+    # completion layer is reached; skip cleanly where litellm isn't
+    # installed (e.g. the python-fast CI job) and run in the coverage job.
+    pytestmark = pytest.mark.skipif(
+        importlib.util.find_spec("litellm") is None,
+        reason="requires litellm (installed in the coverage CI job)",
+    )
+
     class _Msg:
         def __init__(self, content, tool_calls=None):
             self._content = content
