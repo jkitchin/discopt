@@ -78,8 +78,10 @@ select = ["E", "F", "W", "I", "N", "UP", "B", "A", "C4", "SIM", "TCH"]
 # B/M/K are the monomial basis / moment matrix / lag count in the issue-677
 # joint-correlation moment probe (standard linear-algebra notation).
 "scripts/joint_correlation_moment_probe.py" = ["N803", "N806"]
-# A/Acsr/Ap are LP constraint matrices in the issue-694 anytime-build probe.
-"scripts/issue694_anytime_build_probe.py" = ["N806"]
+# A/A_le/A_eq/B0 are LP constraint matrices / bounds in the issue-282 Stage 2
+# VUB+aggregation probe (standard linear-algebra notation); E702/C408/B905/B007
+# are throwaway-probe stylistic slack matching the Stage 0 ensemble probe.
+"scripts/issue282_stage2_probe.py" = ["N803", "N806", "E702", "C408", "B905", "B007"]
 
 [tool.coverage.run]
 source = ["benchmarks", "utils"]
