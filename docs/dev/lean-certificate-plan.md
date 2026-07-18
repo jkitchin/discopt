@@ -340,15 +340,32 @@ stores no branch metadata) and running `check_tree_covers`. Cargo tests
 (`tree_records_*`) and `test_certificate_bnb_record.py` verify it end-to-end
 (root-only, an integer branch, a 2-level spatial tree, and gap rejection).
 
-**Remaining engineering.** Two pieces close the loop: (1) stash `tree_records()` on
-`SolveResult` from `solver.py`'s B&B loop behind the `emit_certificate` flag (the
-recorder is reachable; only the local `tree` handle needs surfacing); (2) capture
-the per-leaf **McCormick LP dual / Farkas ray** — already computed on
-`MccormickLPResult` (`_jax/mccormick_lp.py`: `dual`, `reduced_costs`, the
-Neumaier–Shcherbina `safe_bound`) but discarded — keyed by node id. Then
-`build_bnb_certificate` serializes tree + duals and `check_bnb_certificate` composes
-the shipped kernel (covering → per-leaf `certified_leaf_bound`/Farkas → `L` vs
-incumbent).
+**Solver wiring (built).** `solve_model` takes an opt-in `emit_certificate=False`
+(bound-neutral default). When set, the spatial-B&B loop (a) stashes
+`tree.tree_records()` on `SolveResult.bnb_tree` after the loop, and (b) requests
+McCormick LP marginals (`want_marginals=emit_certificate`) and captures each node's
+`dual` / `safe_bound` / `reduced_costs` into `SolveResult.bnb_leaf_duals` keyed by
+node id (`_cert_record_node_dual`, best-effort — populated on the incremental fast
+path). `build_bnb_certificate(model, result)` then emits the `bnb` tier (Tier-1
+model + incumbent, the recorded tree with rational boxes + per-leaf bounds, the
+`dualBound`, and any captured leaf duals), and `check_bnb_certificate` verifies:
+incumbent feasibility (Tier-1) → **covering** (`check_tree_covers` on the
+reconstructed tree) → the reported `dualBound` does not exceed the minimum recorded
+leaf bound (so it is a valid global lower bound) → gap-closed ⇒ global optimum.
+Verified end-to-end (`test_certificate_bnb_e2e.py`): a real nonconvex bilinear
+solve certifies (tree covers root, valid dual bound), recording is bound-neutral
+(identical node count / objective on vs off), and tampering (inflated `dualBound`,
+broken covering) is rejected.
+
+**What is still trusted (the remaining untrusted-ness upgrade).** The current
+Tier-3 checker **trusts the solver's recorded per-leaf `local_lower_bound`** as a
+valid lower bound; it does not yet re-derive each leaf bound from scratch. The
+fully-untrusted version reconstructs each leaf's McCormick relaxation LP from the
+model + box and verifies the captured leaf **dual** by weak duality via the shipped
+`certificate.bnb` kernel (`certified_leaf_bound`) — turning "trust discopt's node
+bound" into "check the dual." The leaf duals are already captured for this; the
+remaining work is the per-leaf LP reconstruction (the same relaxation-compiler
+lifting the emitter would share).
 
 **Lean obligations.** Encouragingly, most of Tier 3 is **Lean-core (no Mathlib)**:
 `LPDuality.lean` (weak duality is exact linear algebra over `Rat`) and
@@ -361,9 +378,12 @@ executable specification those Lean checkers must match.
 **As-built.** (1) The checker kernel — `certificate/bnb.py` (covering, McCormick
 bilinear/square, LP weak duality, Farkas, `certified_leaf_bound`) +
 `test_certificate_bnb.py` (7 tests). (2) The **Rust tree recorder** —
-`TreeManager::tree_records()` + `NodeRecord` (`crates/discopt-core/src/bnb/`), the
-`PyTreeManager.tree_records()` PyO3 binding, `certificate/bnb_record.py`
-(reconstruct + derive splits + covering), with cargo tests (`tree_records_*`, 97
-bnb tests green) and `test_certificate_bnb_record.py` (5 tests). The `solver.py`
-stash + per-leaf LP-dual capture + `build_bnb_certificate`/`check_bnb_certificate`
-composition are the next step (scoped above).
+`TreeManager::tree_records()` + `NodeRecord`, the `PyTreeManager.tree_records()`
+PyO3 binding, `certificate/bnb_record.py` (reconstruct + derive splits + covering),
+cargo tests (`tree_records_*`) + `test_certificate_bnb_record.py` (5 tests). (3) The
+**solver wiring + emitter/checker** — `emit_certificate` on `solve_model`
+(`_cert_record_node_dual`, tree/dual stash on `SolveResult.bnb_tree`/`bnb_leaf_duals`),
+`emit.build_bnb_certificate`, `refcheck._check_bnb` (`bnb` dispatch), and
+`test_certificate_bnb_e2e.py` (5 slow tests: accept a real solve, bound-neutral,
+reject inflated dualBound / broken covering, refuse without recording). The
+fully-untrusted per-leaf LP-dual re-derivation is the remaining step (above).

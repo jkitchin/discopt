@@ -92,6 +92,11 @@ def check_certificate(cert: dict) -> tuple[bool, str]:
         if not ok:
             return False, f"primal infeasible: {reason}"
         return _check_convex(cert)
+    if tier == "bnb":
+        ok, reason = _check_feasibility(cert)
+        if not ok:
+            return False, f"primal infeasible: {reason}"
+        return _check_bnb(cert)
     return False, f"unsupported tier {tier!r}"
 
 
@@ -306,3 +311,69 @@ def _check_convex(cert: dict) -> tuple[bool, str]:
         )
 
     return True, "convex KKT global optimum verified: dualBound == objectiveValue"
+
+
+# ── Tier 3: spatial branch-and-bound global optimality ───────────────────────
+def _check_bnb(cert: dict) -> tuple[bool, str]:
+    """Verify covering + that the reported dual bound holds over the recorded tree.
+
+    This certifies (a) the incumbent is feasible (checked by the caller), (b) the
+    leaf boxes cover the root box, and (c) ``dualBound`` does not exceed the minimum
+    recorded leaf lower bound -- so it is a valid global lower bound. The recorded
+    per-leaf bounds are trusted (the solver's own node bounds); the fully-untrusted
+    upgrade re-derives each via the `certificate.bnb` LP-dual kernel from the
+    captured leaf duals (future work). Reports whether the gap is closed.
+    """
+    from .bnb import check_tree_covers
+    from .bnb_record import records_to_tree
+
+    body = cert["certificate"]
+    tree = body.get("tree")
+    if tree is None:
+        return False, "bnb certificate missing tree"
+    nodes = tree["nodes"]
+    int_cols = set(tree.get("integer_cols", []))
+    feas_tol = as_fraction(body["tolerances"]["feas"]) or Fraction(0)
+    gap_tol = as_fraction(body["tolerances"].get("gap")) or feas_tol
+
+    # (b) Covering: reconstruct the nested tree and verify leaf boxes cover root.
+    try:
+        nested, root = records_to_tree(nodes)
+    except ValueError as exc:
+        return False, f"malformed tree: {exc}"
+    ok, why = check_tree_covers(nested, root, int_cols)
+    if not ok:
+        return False, f"tree does not cover the root box: {why}"
+
+    # (c) Global lower bound = min over leaves of the recorded leaf bound.
+    child_ids = {n["parent"] for n in nodes if n["parent"] is not None}
+    leaf_bound = None
+    for n in nodes:
+        if n["id"] in child_ids:
+            continue  # internal (branched) node
+        if n.get("infeasible"):
+            continue  # empty leaf -> contributes +inf
+        lb = as_fraction(n.get("local_lower_bound"))
+        if lb is None:
+            return False, f"leaf node {n['id']} has no finite lower bound (cannot certify)"
+        leaf_bound = lb if leaf_bound is None else min(leaf_bound, lb)
+    if leaf_bound is None:
+        return False, "every leaf is infeasible but an incumbent was certified feasible"
+
+    claimed = as_fraction(body.get("dualBound"))
+    if claimed is None:
+        return False, "bnb certificate missing dualBound"
+    if claimed > leaf_bound + feas_tol:
+        return False, (
+            f"dualBound {float(claimed):.8g} exceeds min leaf bound "
+            f"{float(leaf_bound):.8g} (not a valid global lower bound)"
+        )
+
+    objval = as_fraction(body["incumbent"]["objectiveValue"])
+    gap_closed = (objval - leaf_bound) <= gap_tol
+    n_leaves = sum(1 for n in nodes if n["id"] not in child_ids)
+    detail = "global optimum within gap" if gap_closed else "valid dual bound (gap open)"
+    return True, (
+        f"bnb: {len(nodes)} nodes / {n_leaves} leaves cover the root box; "
+        f"dualBound {float(claimed):.8g} <= min leaf bound; {detail}"
+    )

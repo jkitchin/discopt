@@ -22,8 +22,19 @@ from .bnb import check_tree_covers
 from .schema import to_rational
 
 
+def _as_frac(v) -> Fraction:
+    """A box entry as an exact Fraction, accepting a float or a ``[num, den]`` pair."""
+    if isinstance(v, (list, tuple)):
+        return Fraction(int(v[0]), int(v[1]))
+    return Fraction(float(v))
+
+
 def _rat_box(arr) -> list:
-    return [to_rational(float(v)) for v in arr]
+    """A box side as ``[num, den]`` rationals, from floats or existing rationals."""
+    out = []
+    for v in arr:
+        out.append(list(v) if isinstance(v, (list, tuple)) else to_rational(float(v)))
+    return out
 
 
 def records_to_tree(records: list[dict]) -> tuple[dict, object]:
@@ -68,13 +79,13 @@ def records_to_tree(records: list[dict]) -> tuple[dict, object]:
 
 def _derive_split(parent: dict, c1: dict, c2: dict) -> tuple[int, list, list]:
     """Find the branch column, the split point, and order children [left, right]."""
-    plb = [Fraction(float(v)) for v in parent["lb"]]
-    pub = [Fraction(float(v)) for v in parent["ub"]]
+    plb = [_as_frac(v) for v in parent["lb"]]
+    pub = [_as_frac(v) for v in parent["ub"]]
     # The branch column is where a child's box differs from the parent's.
     diff_cols = set()
     for child in (c1, c2):
-        clb = [Fraction(float(v)) for v in child["lb"]]
-        cub = [Fraction(float(v)) for v in child["ub"]]
+        clb = [_as_frac(v) for v in child["lb"]]
+        cub = [_as_frac(v) for v in child["ub"]]
         for j in range(len(plb)):
             if clb[j] != plb[j] or cub[j] != pub[j]:
                 diff_cols.add(j)
@@ -84,11 +95,11 @@ def _derive_split(parent: dict, c1: dict, c2: dict) -> tuple[int, list, list]:
 
     # Left child tightens the upper bound (ub[j] < parent ub[j]); right tightens lb.
     def is_left(child):
-        return Fraction(float(child["ub"][j])) < pub[j]
+        return _as_frac(child["ub"][j]) < pub[j]
 
     left, right = (c1, c2) if is_left(c1) else (c2, c1)
-    left_ub = Fraction(float(left["ub"][j]))
-    right_lb = Fraction(float(right["lb"][j]))
+    left_ub = _as_frac(left["ub"][j])
+    right_lb = _as_frac(right["lb"][j])
     # Spatial split: left.ub == right.lb == point. Integer split: left.ub=floor,
     # right.lb=floor+1 -> any non-integer point in between works; use the midpoint
     # so floor(point) == left.ub (what check_tree_covers recomputes).

@@ -354,6 +354,75 @@ def build_convex_certificate(
     return base
 
 
+# B&B recorder sentinel: a node whose relaxation proved infeasible carries this
+# (or larger) as its "lower bound" (mirrors solver's _INFEASIBILITY_SENTINEL 1e30).
+_BNB_INFEAS_SENTINEL = 1e29
+
+
+def build_bnb_certificate(
+    model: Model,
+    result: SolveResult,
+    *,
+    feas_tol: float = DEFAULT_FEAS_TOL,
+    int_tol: float = DEFAULT_INT_TOL,
+    gap_tol: float = 1e-4,
+) -> dict:
+    """Build a Tier-3 (spatial branch-and-bound) global-optimality certificate.
+
+    On top of the Tier-1 model + incumbent, this carries the recorded B&B **tree**
+    (every node's box, relaxation lower bound, and status) and the reported
+    **dualBound**. The checker verifies the incumbent is feasible, the leaf boxes
+    **cover** the root box, and the reported dual bound does not exceed the minimum
+    recorded leaf bound — so ``dualBound`` is a valid global lower bound and, when
+    the gap is closed, the incumbent is globally optimal.
+
+    Requires a solve run with ``emit_certificate=True`` on the spatial-B&B path
+    (so ``result.bnb_tree`` is populated); raises :class:`CertificateError`
+    otherwise. Per-leaf McCormick LP duals, when captured
+    (``result.bnb_leaf_duals``), are attached for the future fully-untrusted
+    upgrade (re-deriving each leaf bound via the exact-rational kernel in
+    ``certificate.bnb``); the current checker trusts the recorded leaf bounds.
+    """
+    tree_records = getattr(result, "bnb_tree", None)
+    if tree_records is None:
+        raise CertificateError(
+            "no recorded B&B tree on the result; a Tier-3 certificate requires a "
+            "spatial-B&B solve run with emit_certificate=True"
+        )
+    if result.x is None or result.objective is None:
+        raise CertificateError("no incumbent to certify")
+
+    base = build_feasibility_certificate(model, result, feas_tol=feas_tol, int_tol=int_tol)
+    cert = base["certificate"]
+    cert["tier"] = "bnb"
+
+    int_cols = [
+        j for j, c in enumerate(cert["model"]["columns"]) if c["type"] in ("integer", "binary")
+    ]
+    nodes = []
+    for rec in tree_records:
+        val = float(rec["local_lower_bound"])
+        nodes.append(
+            {
+                "id": int(rec["id"]),
+                "parent": (None if rec["parent"] is None else int(rec["parent"])),
+                "lb": [to_rational(float(v)) for v in rec["lb"]],
+                "ub": [to_rational(float(v)) for v in rec["ub"]],
+                # None for -inf (unbounded); the checker rejects a leaf with no bound.
+                "local_lower_bound": to_rational(val),
+                "infeasible": bool(val >= _BNB_INFEAS_SENTINEL),
+                "status": rec["status"],
+            }
+        )
+    cert["tree"] = {"integer_cols": int_cols, "nodes": nodes}
+    if getattr(result, "bnb_leaf_duals", None):
+        cert["tree"]["leaf_duals"] = {str(k): v for k, v in result.bnb_leaf_duals.items()}
+
+    cert["dualBound"] = to_rational(float(result.bound)) if result.bound is not None else None
+    cert["tolerances"]["gap"] = to_rational(gap_tol)
+    return base
+
+
 def write_certificate(cert: dict, path: Union[str, Path]) -> None:
     """Write *cert* to *path* as indented JSON."""
     import json
