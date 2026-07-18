@@ -271,6 +271,65 @@ def compose_even_pow(cv_g, cc_g, g_lb, g_ub, n: int):
     return cv, cc
 
 
+def odd_pow_tangent_coeff(n: int) -> float:
+    """``t*/|lb|`` for the convex-envelope tangent of ``x**n`` (odd ``n``) over a box
+    ``[lb, ub]`` that spans 0 — the point ``t* in (0, |lb|)`` where the line from
+    ``(lb, lb**n)`` is tangent to ``x**n``. By homogeneity ``t* = c_n · |lb|`` with
+    ``c_n`` depending only on ``n``; ``c_n`` solves ``n t^{n-1}(t+1) - (t^n + 1) = 0``
+    on ``(0, 1)`` (n=3 -> 1/2). Static ``n`` -> a plain Newton solve at build time
+    (Liberti & Pantelides-style monomial convex hull)."""
+    if n % 2 == 0 or n < 3:
+        raise ValueError(f"odd_pow_tangent_coeff requires odd n >= 3, got {n}")
+    t = 0.5
+    for _ in range(80):
+        h = n * t ** (n - 1) * (t + 1.0) - (t**n + 1.0)
+        hp = n * (n - 1) * t ** (n - 2) * (t + 1.0)  # d/dt: the t^{n-1} terms cancel
+        step = h / hp
+        t -= step
+        if abs(step) < 1e-15:
+            break
+    return float(t)
+
+
+def _odd_cv_env(z, g_lb, g_ub, n, cn):
+    """Convex envelope of ``x**n`` (odd ``n``) on ``[g_lb, g_ub]``, evaluated at ``z``.
+
+    * ``g_lb >= 0`` (convex regime): ``x**n``;
+    * ``g_ub <= 0`` (concave regime): the secant chord;
+    * spanning ``g_lb < 0 < g_ub``: the line from ``(g_lb, g_lb**n)`` tangent at
+      ``t* = -g_lb·cn`` for ``z <= t*`` then ``x**n`` for ``z >= t*`` — unless ``t*``
+      falls beyond ``g_ub`` (box too far negative), where the envelope is the chord.
+    """
+    fz = z**n
+    f_lb, f_ub = g_lb**n, g_ub**n
+    slope_sec = _safe_slope(f_lb, f_ub, g_lb, g_ub)
+    sec = f_lb + slope_sec * (z - g_lb)
+    tstar = -g_lb * cn  # tangent point (>0 when g_lb<0)
+    m = n * tstar ** (n - 1)  # tangent slope; n-1 even -> real for any tstar sign
+    tang = f_lb + m * (z - g_lb)
+    spanning = jnp.where(z <= tstar, tang, fz)
+    spanning = jnp.where(tstar <= g_ub, spanning, sec)  # tangent beyond box -> chord
+    return jnp.where(g_lb >= 0.0, fz, jnp.where(g_ub <= 0.0, sec, spanning))
+
+
+def compose_odd_pow(cv_g, cc_g, g_lb, g_ub, n: int, cn: float):
+    """TM2014 composition rule for ``g(x)**n`` with odd integer ``n >= 3`` — the TIGHT
+    monomial hull (convex/concave envelope), valid over sign-spanning boxes where the
+    naive ``relax_pow`` cv is non-convex. ``x**n`` (odd) is monotone increasing, so the
+    convex envelope's argmin is ``g_lb`` (-> use ``cv_g``) and the concave envelope's
+    argmax is ``g_ub`` (-> use ``cc_g``). The concave envelope follows by antisymmetry
+    (``x**n`` is odd): ``cc_env(z) = -cv_env(-z)`` on the reflected box. Boundary
+    subgradients via ``clip_inner``; the tangent point ``t*`` is a per-box constant so
+    the kernel-chain derivative sees the active piece's slope."""
+    if n % 2 == 0 or n < 3:
+        raise ValueError(f"compose_odd_pow requires odd n >= 3, got {n}")
+    z_cv = clip_inner(cv_g, g_lb, g_ub)
+    z_cc = clip_inner(cc_g, g_lb, g_ub)
+    cv = _odd_cv_env(z_cv, g_lb, g_ub, n, cn)
+    cc = -_odd_cv_env(-z_cc, -g_ub, -g_lb, n, cn)  # antisymmetry of the odd monomial
+    return cv, cc
+
+
 # ---------------------------------------------------------------------------
 # Sigmoidal functions: f has a single inflection point at the origin and is
 # globally monotone-increasing. On intervals that don't span the inflection,

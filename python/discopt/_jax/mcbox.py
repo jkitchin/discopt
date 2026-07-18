@@ -51,7 +51,9 @@ from discopt._jax.multivariate_mccormick import (
     _COMPOSITION_RULES,
     clip_inner,
     compose_even_pow,
+    compose_odd_pow,
     compose_pow_frac,
+    odd_pow_tangent_coeff,
 )
 
 
@@ -158,21 +160,19 @@ class MCBox:
             n = int(p)
             if n < 1:
                 raise UnsupportedMcboxOp(f"non-positive integer power {n}")
+            if n == 1:
+                return self
             if n % 2 == 0:
                 # P1.3: even powers use the TIGHT monomial hull (exact convex
                 # envelope cv=x^n, secant cc) — materially tighter than repeated
                 # bilinear multiplication (e.g. x^2 on [-2,3]: exact cv=0 at x=0 vs
                 # repeated-mult's -4). Valid boundary subgradients via clip_into.
                 return _pow_even(self, n)
-            # Odd powers: repeated multiplication through the (sign-agnostic,
-            # validated) bilinear rule — SOUND for every odd n and every sign regime.
-            # Looser than the tight odd-power hull (the sign-spanning convex hull needs
-            # a transcendental tangent point for n>=5; deferred, tightness-only), but
-            # always valid.
-            out = self
-            for _ in range(n - 1):
-                out = out * self
-            return out
+            # P1.3: odd powers (n>=3) use the tight monomial hull — the convex/concave
+            # envelope with the tangent-line construction over sign-spanning boxes,
+            # tighter than repeated bilinear multiplication and (unlike relax_pow's
+            # piecewise cv) genuinely convex, so the kernel-chain subgradient is valid.
+            return _pow_odd(self, n)
         # Non-integer exponent: signomial x**a over a POSITIVE base (P1.4).
         return _pow_frac(self, float(p))
 
@@ -349,6 +349,23 @@ def _pow_even(base, n):
     e = (lo**n, hi**n)
     spans = (lo < 0.0) & (hi > 0.0)
     interval = (jnp.where(spans, 0.0, jnp.minimum(*e)), jnp.maximum(*e))
+    return _univariate_kernel(base, kernel, interval)
+
+
+def _pow_odd(base, n):
+    """``base ** n`` for an odd integer ``n >= 3`` (P1.3, tight monomial hull).
+
+    ``x**n`` (odd) is monotone increasing, so the interval is ``[lo**n, hi**n]``. The
+    convex/concave envelope (:func:`compose_odd_pow`) is tight and, over a sign-spanning
+    box, genuinely convex/concave via the tangent-line construction — so the kernel-chain
+    subgradient is valid (unlike the naive piecewise ``relax_pow`` cv). The tangent
+    coefficient is computed once at trace time (static ``n``)."""
+    cn = odd_pow_tangent_coeff(n)
+
+    def kernel(cv_g, cc_g, g_lb, g_ub):
+        return compose_odd_pow(cv_g, cc_g, g_lb, g_ub, n, cn)
+
+    interval = (base.lo**n, base.hi**n)
     return _univariate_kernel(base, kernel, interval)
 
 

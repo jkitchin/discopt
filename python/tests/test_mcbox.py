@@ -280,10 +280,41 @@ def test_even_power_hull_is_exact_convex_envelope():
         assert float(z.cv) == pytest.approx(xv**2, abs=1e-9), f"cv not exact at x={xv}"
 
 
-def test_odd_power_still_sound():
-    # Odd powers keep the sound (looser) repeated-mult path, incl. sign-spanning.
-    _check(lambda x: x**3, lambda v: v[0] ** 3, [-2.0], [3.0])
-    _check(lambda x: x**5, lambda v: v[0] ** 5, [-1.5], [1.2])
+@pytest.mark.parametrize(
+    "n,lb,ub",
+    [
+        (3, -2.0, 3.0),  # spanning
+        (3, -3.0, 1.0),  # box far negative -> tangent beyond ub -> chord
+        (3, 0.5, 3.0),  # convex (positive)
+        (3, -3.0, -0.5),  # concave (negative)
+        (5, -1.5, 2.0),
+        (7, -1.2, 1.4),
+    ],
+)
+def test_odd_power_tight_hull_sound(n, lb, ub):
+    # P1.3: odd powers use the tight convex/concave monomial hull (valid, and genuinely
+    # convex over sign-spanning boxes via the tangent-line construction).
+    _check(lambda x: x**n, lambda v: v[0] ** n, [lb], [ub])
+
+
+def test_odd_power_face_subgradients_valid():
+    for n, lb, ub in [(3, -2.0, 3.0), (5, -1.5, 2.0), (3, -3.0, 1.0)]:
+
+        @jax.jit
+        def one(p, _n=n, _lb=lb, _ub=ub):
+            z = relax_through(lambda x: x**_n, p, jnp.array([_lb]), jnp.array([_ub]))
+            return z.cv, z.cc, z.sub_cv, z.sub_cc
+
+        batch = jax.jit(jax.vmap(one))
+        probes = np.linspace(lb, ub, 500).reshape(-1, 1)
+        bases = np.array([[lb], [ub], [0.0], [0.5 * (lb + ub)]])
+        cvB, ccB, _, _ = (np.asarray(v) for v in batch(jnp.asarray(probes)))
+        cvA, ccA, scvA, sccA = (np.asarray(v) for v in batch(jnp.asarray(bases)))
+        for k in range(len(bases)):
+            lin_cv = cvA[k] + (probes - bases[k]) @ scvA[k]
+            lin_cc = ccA[k] + (probes - bases[k]) @ sccA[k]
+            assert np.all(cvB >= lin_cv - 1e-7 * (abs(cvA[k]) + 1)), f"n={n} cv face"
+            assert np.all(ccB <= lin_cc + 1e-7 * (abs(ccA[k]) + 1)), f"n={n} cc face"
 
 
 # ---- P1.4: fractional powers (signomials) over a positive base ----
