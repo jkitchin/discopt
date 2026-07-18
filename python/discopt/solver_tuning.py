@@ -110,6 +110,55 @@ class SolverTuning:
     graduation_gate cert-neutrality eligible=YES; nvs05 gains its first full
     rigorous certificate (``optimal``, bound 5.47057)."""
 
+    # --- #671 LP iterative refinement (RHS-regularized dual + rigorous NS) ------
+    lp_iterative_refinement: bool = field(
+        default_factory=lambda: _env_flag("DISCOPT_LP_ITERATIVE_REFINEMENT", default=False)
+    )
+    """When a node LP breaks down numerically (the hda-class ill-conditioned
+    McCormick relaxations whose near-singular bases the float64 simplex cannot
+    certify), recover a *tight* dual bound by re-solving a few RHS-regularized
+    neighbours ``[A|I] z = b + tau`` in the **in-house** simplex and keeping the
+    tightest Neumaier–Shcherbina safe bound the recovered duals imply
+    (``DISCOPT_LP_ITERATIVE_REFINEMENT``, default OFF — issue #671). A small
+    ``tau`` perturbs the RHS just enough for the simplex to certify the
+    well-conditioned neighbour and hand back a good multiplier; the NS bound is
+    then evaluated against the **original** ``b`` (never ``b+tau``), so it is a
+    valid lower bound for *any* recovered dual — clamping/regularization can only
+    tighten it, never lift it above the optimum. The reported bound is the **max**
+    over the sweep and candidate A's drifted-dual bound (#662), so it is never
+    looser than the candidate-A floor it supersedes and never unsound. Fires only
+    on the numerical-failure path (root / failure-triggered), never the hot
+    per-node engine, and uses **no external solver** (the #517 HiGHS rescue is not
+    resurrected). On hda this moves the root dual bound from candidate A's
+    −1.80e10 to ≈ −6.47e4 (the true root McCormick value). See
+    ``docs/dev/issue-671-gsw-iterative-refinement-2026-07-18.md`` and the
+    `crates/discopt-core/src/lp/simplex/refine.rs` kernel."""
+
+    # --- #671 float64-intractable-row filter (hda certification path) ----------
+    relax_row_filter: bool = field(
+        default_factory=lambda: _env_flag("DISCOPT_RELAX_ROW_FILTER", default=False)
+    )
+    """Drop relaxation rows whose coefficients cannot be resolved in float64 at
+    the LP feasibility tolerance (``DISCOPT_RELAX_ROW_FILTER``, default OFF —
+    issue #671, hda certification path). Applied at the tail of
+    ``build_milp_relaxation`` (one site: the root build AND every per-node cold
+    rebuild), dropping rows whose nonzero |coefficients| span > 1e6 orders or
+    fall outside ``[1e-8, 1e8]``. **Sound by construction**: removing relaxation
+    rows yields a superset feasible region — a valid (weaker) outer
+    approximation; the bound can only loosen, never falsify. Tightness impact is
+    instance-dependent, hence §5 bound-changing / default OFF pending the corpus
+    differential panel. Measured on hda's exported root LP
+    (``docs/dev/hda-certification-rowfilter-entry-2026-07-18.md``): the 130
+    filtered rows (4.3 %) carry ZERO root tightness but made every float64 LP
+    engine false-fail (raw spread 2.837e26, κ≈1e14); with them dropped the
+    in-house simplex solves cleanly at τ=0 (`optimal` −64675.249, exactly the
+    τ-homotopy limit) and its own dual NS-certifies −64675.2494 — no τ-sweep,
+    no factorization hardening, no external solver. Under this flag the
+    incremental McCormick engine's row-for-row self-validation fails on models
+    that actually filter rows, so those solves take the trusted cold (filtered)
+    build path — a speed cost only, never a soundness one; models with no
+    filtered rows are byte-identical either way."""
+
     # --- #309 sharp NS safe-bound margin ---------------------------------------
     ns_sharp_margin: bool = field(
         default_factory=lambda: _env_flag("DISCOPT_NS_SHARP_MARGIN", default=True)

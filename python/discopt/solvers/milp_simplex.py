@@ -356,6 +356,63 @@ def _safe_lp_lower_bound(
     return _safe_lp_lower_bound_std(y, c, a_std, b, lb, ub)
 
 
+# #671: geometric RHS-regularization schedule for the numerical-failure refinement.
+# A small ``tau`` moves the ill-conditioned relaxation off its near-singular
+# optimal configuration so the in-house simplex can certify the neighbour and
+# return a good dual; too-small ``tau`` stays singular (drifted dual), too-large
+# loosens the relaxation. Sweeping several orders and taking the *max* NS bound is
+# rigorously safe (max of valid lower bounds) and robust to where the usable window
+# sits for a given instance. Absolute perturbation, matching the measured hda sweet
+# spot (~3e-3; docs/dev/issue-671-gsw-iterative-refinement-2026-07-18.md).
+_REFINE_TAUS = (1e-4, 3e-4, 1e-3, 3e-3, 1e-2, 3e-2, 1e-1)
+
+
+def _refined_safe_bound_regularized(
+    solve_lp_warm_csc_py,
+    c_std: np.ndarray,
+    a_std,
+    b_vec: np.ndarray,
+    lb_std: np.ndarray,
+    ub_std: np.ndarray,
+    m: int,
+    n: int,
+) -> Optional[float]:
+    """#671 tight dual bound for a numerically-failed node LP, in-house only.
+
+    Re-solve ``[A|I] z = b + tau`` for each ``tau`` in :data:`_REFINE_TAUS` with the
+    in-house simplex, and for every recovered dual evaluate the Neumaier–Shcherbina
+    safe bound against the **original** ``b_vec`` (never ``b+tau``). ``g(y)`` is a
+    valid lower bound for *any* ``y`` (weak duality), so the regularization affects
+    only the *tightness* of the recovered dual, never the *soundness* of the bound.
+    Returns the **max** over the sweep (the tightest sound bound), or ``None`` if no
+    tau yielded a usable dual — in which case the caller keeps candidate A's
+    drifted-dual bound. Never returns a value above the true optimum.
+    """
+    indptr = np.ascontiguousarray(a_std.indptr, dtype=np.int64)
+    indices = np.ascontiguousarray(a_std.indices, dtype=np.int64)
+    data = np.ascontiguousarray(a_std.data, dtype=np.float64)
+    c_c = np.ascontiguousarray(c_std)
+    lb_c = np.ascontiguousarray(lb_std)
+    ub_c = np.ascontiguousarray(ub_std)
+    best: Optional[float] = None
+    for tau in _REFINE_TAUS:
+        b_reg = np.ascontiguousarray(b_vec + tau)
+        try:
+            _status, _x, _obj, _iters, _cs, _bv, dual, _ray = solve_lp_warm_csc_py(
+                c_c, m, n + m, indptr, indices, data, b_reg, lb_c, ub_c, None, None
+            )
+        except Exception:
+            continue
+        if dual is None or not np.size(dual):
+            continue
+        g = _safe_lp_lower_bound(
+            np.asarray(dual, dtype=np.float64), c_std, a_std, b_vec, lb_std, ub_std
+        )
+        if g is not None and np.isfinite(g) and (best is None or g > best):
+            best = float(g)
+    return best
+
+
 def _farkas_certified_std(
     ray: np.ndarray,
     a_std: np.ndarray,
@@ -689,6 +746,20 @@ def solve_lp_warm_std(
         safe = None
         if dual is not None and np.size(dual):
             safe = _safe_lp_lower_bound(dual, c_std, a_std, b_vec, lb_std, ub_std)
+        # #671: on a numerical break-down, optionally recover a *tight* bound by
+        # re-solving a few RHS-regularized neighbours and keeping the tightest NS
+        # bound their duals imply (max over the sweep — always a valid lower bound,
+        # so never looser than candidate A above, never unsound). Flag default-OFF;
+        # in-house simplex only; the NS bound is evaluated against the ORIGINAL
+        # ``b_vec`` for every tau.
+        from discopt.solver_tuning import current as _tuning_current
+
+        if _tuning_current().lp_iterative_refinement:
+            refined = _refined_safe_bound_regularized(
+                solve_lp_warm_csc_py, c_std, a_std, b_vec, lb_std, ub_std, m, n
+            )
+            if refined is not None and (safe is None or refined > safe):
+                safe = refined
         return (
             None,
             None,
