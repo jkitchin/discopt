@@ -14,9 +14,10 @@
 //!   it refactorizes on every solve, so it is for bring-up, tiny bases, and
 //!   cross-checking `FeralLU` in tests — not performance.
 
+use super::refine::residual_dd;
 use feral::{
-    should_use_dense_lu, DenseLu, GeneralMatrix, LuParams, RefactorCause, SparseColMatrix,
-    SparseLu, SparseLuSymbolic,
+    should_use_dense_lu, DenseLu, GeneralMatrix, LuParams, LuSingularAction, RefactorCause,
+    SparseColMatrix, SparseLu, SparseLuSymbolic,
 };
 
 /// Error from a basis factorization/solve.
@@ -284,8 +285,18 @@ pub struct FeralLU {
     /// factorize time. `0` (default) → refinement is a no-op and no basis is
     /// retained, i.e. byte-for-byte the pre-numeric-focus behavior.
     refine_steps: usize,
-    /// The in-sync basis, populated iff `refine_steps > 0` (see [`RetainedBasis`]).
+    /// The in-sync basis, populated iff refinement or singular-perturb mode is on
+    /// (see [`RetainedBasis`]).
     retained: Option<RetainedBasis>,
+    /// Singular-pivot perturbation floor (issue #671 factorization hardening). When
+    /// `Some(abs_floor)`, the factorization uses `LuSingularAction::PerturbToEps`
+    /// so a near-singular basis (the hda-class ill-conditioned relaxations) yields
+    /// a *completed* factor of a nearby matrix `B'` instead of aborting
+    /// (`SingularBasis` → `Numerical`), and the refined solves recover accuracy
+    /// against the true `B` in **double-double** precision (feral's own
+    /// double-precision refinement was falsified on this class, #671). `None`
+    /// (default) → strict `Fail`, byte-identical to today.
+    singular_perturb: Option<f64>,
 }
 
 impl FeralLU {
@@ -312,17 +323,43 @@ impl FeralLU {
         self
     }
 
-    /// Whether refinement / signal queries are active (a positive refine depth).
+    /// Enable **factorization hardening** for near-singular bases (issue #671): the
+    /// factorization uses `LuSingularAction::PerturbToEps { abs_floor }` so a
+    /// singular / near-singular pivot is floored to `abs_floor` and the factor
+    /// *completes* (a nearby matrix `B'`) instead of aborting, and
+    /// [`ftran_refined`](LinearSolver::ftran_refined) /
+    /// [`btran_refined`](LinearSolver::btran_refined) run **double-double**
+    /// iterative refinement against the true retained `B` to recover accuracy.
+    ///
+    /// `abs_floor` must sit **below** the genuine small pivots of the class (else
+    /// the perturbed factor discards a direction the solution needs — see the entry
+    /// experiment in `regularized_lu.rs`); a small value like `1e-12` floors the
+    /// exactly-zero / sub-`zero_pivot_tol` pivots while preserving genuine ones.
+    /// Turns on basis retention (needed for the true-`B` residual). Failure-
+    /// triggered by design: callers escalate to this only when the strict factor
+    /// aborted, so with it unused every solve is byte-identical to today.
+    pub fn with_singular_perturb(mut self, abs_floor: f64) -> Self {
+        self.singular_perturb = Some(abs_floor);
+        self
+    }
+
+    /// Whether basis retention (and hence a refined solve) is active: a positive
+    /// refine depth **or** singular-perturb hardening.
     fn refine_enabled(&self) -> bool {
-        self.refine_steps > 0
+        self.refine_steps > 0 || self.singular_perturb.is_some()
     }
 
     /// The [`LuParams`] for this solver's factorizations, carrying the configured
-    /// refinement depth. All other fields are feral's defaults (strict partial
-    /// pivoting, `zero_pivot_tol = 1e-13`, etc.).
+    /// refinement depth and, when hardening is on, the `PerturbToEps` singular
+    /// action. All other fields are feral's defaults (strict partial pivoting,
+    /// `zero_pivot_tol = 1e-13`, etc.).
     fn params(&self) -> LuParams {
         LuParams {
             refine_steps: self.refine_steps,
+            on_singular: match self.singular_perturb {
+                Some(abs_floor) => LuSingularAction::PerturbToEps { abs_floor },
+                None => LuSingularAction::Fail,
+            },
             ..LuParams::default()
         }
     }
@@ -403,6 +440,65 @@ impl FeralLU {
             Some(Factored::Sparse(lu)) => lu.factor_nnz(),
             _ => 0,
         }
+    }
+
+    /// Double-double iterative refinement of `B x = rhs` (`transpose=false`) or
+    /// `Bᵀ x = rhs` (`transpose=true`) using the retained *true* basis `B` and the
+    /// current factor as the correction solver (issue #671 hardening). The residual
+    /// `rhs − B x` is accumulated in ≈106-bit double-double
+    /// ([`super::refine::residual_dd`]) — that high precision is what recovers
+    /// accuracy past a `PerturbToEps` factor's error (feral's own double-precision
+    /// refinement could not, #671). Used only when a retained basis is present;
+    /// falls back to the plain solve otherwise.
+    fn dd_refined(&mut self, rhs: &mut [f64], transpose: bool) -> Result<(), LinError> {
+        // A `PerturbToEps` factor of a near-singular basis has κ ≈ 1e14, so the
+        // Wilkinson refinement gains ~2 digits/step (κ·u ≈ 1e-2); 12 steps with an
+        // early exit is ample. Failure-triggered path — cost is off the hot loop.
+        const MAX_STEPS: usize = 12;
+        const TOL: f64 = 1e-13;
+        let (m, cols) = match self.retained.as_ref() {
+            Some(rb) => (rb.m, rb.cols.clone()),
+            None => {
+                return if transpose {
+                    self.btran(rhs)
+                } else {
+                    self.ftran(rhs)
+                }
+            }
+        };
+        let target = rhs.to_vec();
+        let mut x = vec![0.0f64; m];
+        for _ in 0..MAX_STEPS {
+            let mut r = vec![0.0f64; m];
+            let mut resnorm = 0.0f64;
+            for i in 0..m {
+                // Residual against the TRUE basis, high precision. For `Bᵀ` the
+                // i-th row is column i of B (`cols[i]`); for `B` it is gathered
+                // across columns.
+                let ri = if transpose {
+                    residual_dd(&cols[i], &x, target[i])
+                } else {
+                    let row: Vec<f64> = cols.iter().map(|c| c[i]).collect();
+                    residual_dd(&row, &x, target[i])
+                };
+                r[i] = ri;
+                resnorm = resnorm.max(ri.abs());
+            }
+            if resnorm <= TOL {
+                break;
+            }
+            // Correction through the (perturbed) factor: solve `B' dr = r`.
+            if transpose {
+                self.btran(&mut r)?;
+            } else {
+                self.ftran(&mut r)?;
+            }
+            for i in 0..m {
+                x[i] += r[i];
+            }
+        }
+        rhs.copy_from_slice(&x);
+        Ok(())
     }
 }
 
@@ -509,6 +605,11 @@ impl LinearSolver for FeralLU {
     }
 
     fn ftran_refined(&mut self, rhs: &mut [f64]) -> Result<(), LinError> {
+        // #671 hardening: in singular-perturb mode the factor is of a nearby `B'`,
+        // so recover accuracy against the true `B` in double-double precision.
+        if self.singular_perturb.is_some() {
+            return self.dd_refined(rhs, false);
+        }
         // Build the basis matrix first (immutable borrow, produces an owned
         // matrix), then solve (mutable borrow) — the two borrows don't overlap.
         let mat = match self.build_basis_matrix() {
@@ -527,6 +628,9 @@ impl LinearSolver for FeralLU {
     }
 
     fn btran_refined(&mut self, rhs: &mut [f64]) -> Result<(), LinError> {
+        if self.singular_perturb.is_some() {
+            return self.dd_refined(rhs, true);
+        }
         let mat = match self.build_basis_matrix() {
             Some(m) => m?,
             None => return self.btran(rhs),

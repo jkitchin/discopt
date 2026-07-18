@@ -22,6 +22,7 @@ pub mod linsolve;
 pub mod presolve;
 pub mod primal;
 pub mod refine;
+pub mod regularized_lu;
 pub mod scaling;
 pub mod sparse;
 
