@@ -3411,8 +3411,29 @@ def solve_model(
         a valid lower bound on the box minimum, so it could certify a wrong
         optimum. Selecting it now raises ``ValueError``.)
     gdp_method : str, default "big-m"
-        Reformulation method for disjunctive constraints:
-        ``"big-m"`` (default) or ``"hull"`` (convex hull).
+        How a disjunctive (GDP) model is handled — the first of the two
+        orthogonal solver axes (see the second, ``solver``/``mip_nlp_method``,
+        below). Either *reformulate* the disjunctions into an algebraic
+        MIP/MINLP or solve the disjunctive form *natively* via a logic-based
+        method:
+
+        - ``"big-m"`` (default), ``"hull"`` (convex hull), ``"mbigm"``,
+          ``"auto"`` — reformulate disjunctions into a standard algebraic
+          MIP/MINLP, then dispatch normally.
+        - ``"loa"`` — *native* logic-based Outer Approximation on the
+          disjunctive form (dispatches to :func:`solve_gdpopt_loa`), not a
+          reformulation.
+        - ``"oa"`` — *deprecated*; historically "OA solver + big-M reform".
+          Now emits a ``DeprecationWarning`` and reformulates as ``"big-m"``.
+          Use ``solver="mip-nlp", mip_nlp_method="oa"`` for algebraic OA.
+
+        The two axes are orthogonal and are not aliased: a *native*
+        ``gdp_method`` (``"loa"``) combined with ``solver="mip-nlp"`` is
+        contradictory (one asks to solve the disjunctions natively, the other
+        to reformulate and decompose) and raises ``ValueError``. Likewise
+        ``"gloa"`` (global logic-based OA) is reserved for this native axis and
+        is distinct from the algebraic ``mip_nlp_method="goa"``. See
+        ``docs/dev/solve-routing.md`` §4 for the locked contract (#323).
     solver : str or None, default None
         Optional global-solver selector. Use ``"amp"`` to dispatch to
         Adaptive Multivariate Partitioning instead of branch-and-bound.
