@@ -52,7 +52,6 @@ parts:
       - file: notebooks/infeasibility_iis
       - file: notebooks/conflict_analysis
       - file: notebooks/primal_heuristics
-      - file: notebooks/gnn_branching
       - file: notebooks/sensitivity_analysis
       - file: notebooks/llm_integration
       - file: llm_features

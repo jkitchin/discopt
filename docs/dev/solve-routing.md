@@ -142,11 +142,10 @@ while open nodes and not finished:
      iteration>0 & gap-open & not-convex ─► LNS layer:
         node-diving (diversify) · RINS (improve) · local-branching (improve, escalating k)
         (sound: re-verify feasible, inject only on strict improvement; dual bound untouched)
-  BRANCHING (branching_policy):
-     "gnn"  ─► select_branch_variable_gnn
-     else   ─► objective-gating priority (_select_priority_branch_var)
-               + pseudocost; strong branching (_strong_branch_lp) for unreliable
-                 pseudocosts below tree.reliability_threshold()
+  BRANCHING:
+     objective-gating priority (_select_priority_branch_var)
+     + pseudocost; strong branching (_strong_branch_lp) for unreliable
+       pseudocosts below tree.reliability_threshold()
   import results to tree · node_callback · check termination
 TERMINATION: tree finished | gap converged | deadline | node cap
   ─► dual recovery at incumbent ─► gap certification (gap_certified only if bound valid)
@@ -158,7 +157,7 @@ TERMINATION: tree finished | gap converged | deadline | node cap
 | LP backend | relaxer `backend` | Rust warm simplex (default) / auto→HiGHS cross-check |
 | cuts | `cuts`, `psd_cuts`, `rlt_cuts`, `rlt` | RLT level-1 + per-node / PSD / multilinear / edge-concave / auto-policy |
 | per-node OBBT | iteration>0, budget, incumbent cutoff | on / skipped |
-| branching | `branching_policy` | fractional / pseudocost+priority+strong / gnn |
+| branching | (built-in) | pseudocost + priority + strong branching |
 | primal | iteration, gap-open, convexity | feasibility_pump+diving (root) · node-diving/RINS/local-branching (LNS) |
 
 ---

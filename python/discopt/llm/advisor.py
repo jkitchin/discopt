@@ -42,7 +42,7 @@ def suggest_solver_params(
     dict
         Recommended solver parameters with keys:
         ``nlp_solver``, ``partitions``, ``cutting_planes``,
-        ``branching_policy``, ``batch_size``, ``gap_tolerance``,
+        ``batch_size``, ``gap_tolerance``,
         ``time_limit``, and ``reasoning`` (explanation string).
     """
     analysis = _analyze_structure(model)
@@ -229,9 +229,6 @@ def _rule_based_params(analysis: dict) -> dict:
     else:
         params["cutting_planes"] = False
 
-    # Branching policy
-    params["branching_policy"] = "fractional"
-
     # Batch size based on problem size
     if analysis["n_variables"] > 500:
         params["batch_size"] = 64
@@ -276,7 +273,7 @@ def _llm_augment(
         f"## Current Suggestions\n{base_params}\n\n"
         "Respond with ONLY a JSON object of parameter overrides "
         "(empty {} if no changes needed). Valid keys: "
-        "nlp_solver, partitions, cutting_planes, branching_policy, "
+        "nlp_solver, partitions, cutting_planes, "
         "batch_size, gap_tolerance, time_limit. "
         "Include a 'reasoning' key explaining changes."
     )

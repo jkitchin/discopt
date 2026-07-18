@@ -30,7 +30,6 @@ result = m.solve(
     threads=1,
     initial_solution=None,          # {Variable: value} warm start
     partitions=0,                   # piecewise McCormick partitions (0 = off)
-    branching_policy="fractional",  # or "gnn"
     nlp_bb=None,                    # None=auto, True/False overrides
     skip_convex_check=False,        # True to force B&B even on convex NLPs
     solver=None,                    # backend NLP solver override
@@ -56,7 +55,6 @@ result = m.solve(
 - `python/discopt/_jax/ipm.py`, `ipm_iterative.py`, `lp_ipm.py` — pure-JAX IPM, vmap-batched.
 - `crates/discopt-core/src/bnb/` — Rust B&B tree (`branching.rs`, `tree_manager.rs`, `pool.rs`, `node.rs`).
 - `crates/discopt-core/src/presolve/` — Rust FBBT/OBBT/probing/simplify.
-- `python/discopt/_jax/gnn_branching.py` — GNN-based branching policy hook.
 
 ### Path-selection logic (simplified)
 ```

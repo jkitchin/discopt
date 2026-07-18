@@ -91,7 +91,6 @@ inspect the returned `SolveResult`. When the result points to a deeper problem
        partitions=0,           # piecewise McCormick (0=standard, 4-8=tighter)
        rlt="auto",             # "auto" | True | False
        psd_cuts=False,         # PSD/eigenvalue cuts for QCQP
-       branching_policy="fractional",  # or "gnn"
        gdp_method="big-m",     # or "hull" for tighter disjunctive relaxations
        nlp_bb=None,            # None=auto, True=NLP-BB, False=spatial B&B
        deterministic=True,     # reproducible results

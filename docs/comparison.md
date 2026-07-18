@@ -223,7 +223,7 @@ Key differences from discopt:
 
 - **You want to batch-evaluate B&B nodes on GPU.** JAX's `vmap` lets discopt evaluate NLP relaxations at many B&B nodes simultaneously. This matters when the NLP subproblem is the bottleneck (large nonlinear models) and you have GPU/TPU hardware available.
 
-- **You want a self-contained, extensible solver.** Every component (relaxations, branching, cutting planes, IPM) is accessible from Python. You can swap McCormick for alphaBB, plug in a GNN branching policy, or add custom cutting planes without writing C code. This makes discopt well-suited for optimization research.
+- **You want a self-contained, extensible solver.** Every component (relaxations, branching, cutting planes, IPM) is accessible from Python. You can swap McCormick for alphaBB, add custom cutting planes, or experiment with branching rules without writing C code. This makes discopt well-suited for optimization research.
 
 - **You want zero C/Fortran dependencies.** The solver stack is pure Rust + JAX + Python. No BLAS/LAPACK linking issues, no Fortran compiler needed. This simplifies deployment in containers, CI, and teaching environments.
 
