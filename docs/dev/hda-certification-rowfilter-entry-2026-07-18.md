@@ -82,6 +82,42 @@ wide row MAY carry tightness elsewhere in the corpus — so the flag ships
 the corpus differential panel (`incorrect_count = 0`, no bound above reference,
 net-positive).
 
+## Implementation (landed same day, default-OFF)
+
+Flag `DISCOPT_RELAX_ROW_FILTER` / `SolverTuning.relax_row_filter` (default OFF).
+`_filter_unresolvable_rows` at the tail of `build_milp_relaxation` — one site
+covering the root build **and** every per-node cold rebuild — drops rows whose
+nonzero |coefficients| exceed 1e8, fall below 1e-8, or span a ratio > 1e6 (the
+entry-experiment-validated criterion; absolute checks first so the ratio test is
+a multiply, no overflow). Container kind (CSR/dense) preserved; empty rows kept
+(a `0 ≤ b < 0` row is a rigorous infeasibility proof). Under the flag the
+incremental McCormick engine's row-for-row self-validation fails on models that
+actually filter rows → those solves take the trusted cold (filtered) build — a
+speed cost only; no-filter models are byte-identical either way.
+
+**End-to-end measurement** (`dm.from_nl("hda.nl").solve(time_limit=60)`,
+all other #671 flags OFF):
+
+| | bound | mechanism |
+|---|---|---|
+| filter OFF | −1.80e10 | candidate A (drifted dual of a failed LP) |
+| **filter ON** | **−64473.44** | **clean LP solves through the standard path** |
+
+The tight bound now arrives with *no* rescue stack — no τ-sweep, no NS-from-
+failure, no hardening. (−64473 is slightly tighter than the bare root LP's
+−64675: with clean LP solves, root OBBT/cut machinery does real work.)
+
+**Still open after this lever** (the measured next blockers, unchanged from the
+"revised path" below): the root consumes the whole 60 s budget (presolve ~10 s +
+FBBT + builds + now-working OBBT solves; `root_time ≈ wall`, 3 nodes) and no
+incumbent is found within it. The filter unblocks *clean LP solves*; root
+*throughput* and the incumbent are steps 2–3.
+
+Regression tests: `python/tests/test_relax_row_filter.py` (flag default-off;
+dense+sparse helper behavior incl. kind preservation and empty-row keep; no-op
+on well-conditioned matrices; slow: hda tight+sound end-to-end, alan/ex1221
+byte-identical ON vs OFF).
+
 ## Revised path to hda certification
 
 1. **Row filter** (this lever; small, well-scoped): default-OFF flag at row
