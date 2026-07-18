@@ -1408,6 +1408,26 @@ class MccormickLPRelaxer:
             self._pool_stats["dropped_nodes"] += 1
             res = milp.solve(time_limit=_remaining(), backend=self._backend)
 
+        # #671 float64-intractable-row filter — FAILURE-TRIGGERED. When the node LP
+        # breaks down without a certified verdict (the hda-class ill-conditioned
+        # relaxation: a near-singular system feral cannot certify — `numerical`, or
+        # a spurious `infeasible` with no Farkas proof), drop the rows whose
+        # coefficients float64 cannot resolve at the feasibility tolerance and
+        # re-solve once. Sound by superset (dropping relaxation rows only loosens,
+        # never falsifies). Failure-triggered by design: on an already-solving node
+        # the un-filtered solve is `optimal`/Farkas-`infeasible`, so this never
+        # fires and the node is byte-identical — unlike an always-on build-time
+        # filter, which loosened 10/66 in-repo instances (nvs09 lost its `optimal`
+        # certificate; #671 differential panel). Default OFF.
+        if _tuning().relax_row_filter and not (
+            res.status == "optimal"
+            or (res.status == "infeasible" and getattr(res, "farkas_certified", False))
+        ):
+            from discopt._jax.milp_relaxation import _filter_unresolvable_rows
+
+            if _filter_unresolvable_rows(milp) > 0:
+                res = milp.solve(time_limit=_remaining(), backend=self._backend)
+
         # Lazy re-separation, stride safety net (C-42): every
         # ``_LAZY_RESEP_STRIDE``-th skip-eligible node solve runs the full
         # square/PSD separation pass regardless of the driver's global-stall
