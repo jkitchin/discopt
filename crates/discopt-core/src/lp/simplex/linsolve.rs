@@ -403,9 +403,13 @@ impl FeralLU {
     }
 
     /// Whether basis retention (and hence a refined solve) is active: a positive
-    /// refine depth **or** singular-perturb hardening.
+    /// refine depth. **Not** implied by singular-perturb alone — retention is an
+    /// O(m²) dense copy per factorization, and the hot hardened solve does not need
+    /// it (its plain ftran/btran are raw; only the audit-path recovery, which builds
+    /// its own numeric-focus LU, refines). A caller that wants a refined solve on a
+    /// hardened factor combines `with_singular_perturb` with `with_numeric_focus`.
     fn refine_enabled(&self) -> bool {
-        self.refine_steps > 0 || self.singular_perturb.is_some()
+        self.refine_steps > 0
     }
 
     /// The [`LuParams`] for this solver's factorizations, carrying the configured

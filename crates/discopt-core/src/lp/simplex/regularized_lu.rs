@@ -233,7 +233,11 @@ fn hardened_feral_lu_solves_where_default_aborts() {
     let x_true = [1.0, 2.0, 3.0, 4.0, 5.0, 0.0];
     let rhs = matvec(&cols, &x_true);
 
-    let mut hardened = FeralLU::new().with_singular_perturb(1e-12);
+    // Production usage: hardened factor + numeric focus (numeric focus turns on the
+    // basis retention the double-double refined solve needs).
+    let mut hardened = FeralLU::new()
+        .with_singular_perturb(1e-12)
+        .with_numeric_focus();
     hardened
         .factorize(m, &cols)
         .expect("hardened factorization must complete");
