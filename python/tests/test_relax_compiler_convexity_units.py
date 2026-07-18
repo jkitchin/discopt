@@ -656,12 +656,6 @@ class TestPatternHelpers:
         lo, hi = pat._box_bounds(Model("empty"))
         assert lo.size == 0 and hi.size == 0
 
-    @pytest.mark.xfail(
-        reason="#757: _box_bounds scalar-bound broadcast branch calls float() on a "
-        "1-element array, which raises TypeError under NumPy 2 instead of "
-        "broadcasting (patterns.py lines 268-271)",
-        strict=False,
-    )
     def test_box_bounds_broadcasts_scalar_bounds(self):
         m = Model("bb")
         w = m.continuous("w", shape=(2,), lb=0.0, ub=1.0)
@@ -702,12 +696,6 @@ class TestFractionalEpigraph:
         assert 0.5 * (g(0.0) + g(1.0)) < g(0.5) - 1e-3
         assert pat.classify_fractional_epigraph_constraint(c, m) is False
 
-    @pytest.mark.xfail(
-        reason="#757: coeff_lo>0 branch of classify_fractional_epigraph_constraint "
-        "has an inverted discriminant test (patterns.py line 1091): the "
-        "genuinely convex hypograph y <= -(x^2+1)/(x+2) is reported False",
-        strict=False,
-    )
     def test_positive_denominator_convex_true(self):
         # (x+2)*y + x^2 + 1 <= 0  <=>  y <= -(x^2+1)/(x+2), the hypograph of a
         # concave function: a convex set that should be recognized.
@@ -717,13 +705,6 @@ class TestFractionalEpigraph:
         _assert_sampled_curvature(h, [0.0], [1.0], Curvature.CONCAVE)
         assert pat.classify_fractional_epigraph_constraint(c, m) is True
 
-    @pytest.mark.xfail(
-        reason="#757: SOUNDNESS: coeff_lo>0 branch of "
-        "classify_fractional_epigraph_constraint (patterns.py line 1091) "
-        "returns True for the NONCONVEX set y <= x^2/(x+2); the discriminant "
-        "inequality is inverted relative to the coeff_hi<0 branch",
-        strict=False,
-    )
     def test_positive_denominator_nonconvex_must_not_be_true(self):
         # (x+2)*y - x^2 <= 0  <=>  y <= x^2/(x+2): upper-bounding by a strictly
         # convex function is a NONCONVEX set — classifying it convex is unsound.
