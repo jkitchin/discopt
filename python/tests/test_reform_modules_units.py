@@ -1127,13 +1127,18 @@ def test_to_nnf_preserves_truth_tables():
             assert _truth(nnf, env) == _truth(f, env), (f, bits)
 
 
-def test_to_nnf_leaves_cardinality_untouched():
+def test_to_nnf_cardinality_and_de_morgan():
+    # Since the #750 fix, NNF lowers a negated cardinality atom by De
+    # Morgan for counts: not atleast(1, A, B) == atmost(0, A, B). A bare
+    # atom passes through untouched.
     m = Model("card")
     a, b = m.boolean("A"), m.boolean("B")
     at = dm.atleast(1, a, b)
     assert G._to_nnf(at) is at
-    negated = LogicalNot(at)
-    assert G._to_nnf(negated) is negated
+    lowered = G._to_nnf(LogicalNot(at))
+    assert type(lowered).__name__ == "LogicalAtMost"
+    assert lowered.k == 0
+    assert list(lowered.operands) == [a, b]
 
 
 def test_logical_tseitin_encoding_is_semantically_exact():
@@ -1174,13 +1179,6 @@ def test_logical_cardinality_semantics():
             assert _feasible(rm._constraints, env) == cond(sum(bits)), bits
 
 
-@pytest.mark.xfail(
-    reason="#750: cardinality atoms nested inside &/| are silently dropped by "
-    "_nnf_to_cnf_clauses (returns [] for LogicalAtLeast/AtMost/Exactly), so "
-    "the reformulated model under-constrains: A & atleast(1, B, C) admits "
-    "A=1, B=C=0. Correct behavior is to enforce the atom or refuse loudly.",
-    strict=False,
-)
 def test_logical_cardinality_nested_in_and_is_not_dropped():
     m = Model("nested_card")
     a, b, c = m.boolean("A"), m.boolean("B"), m.boolean("C")
