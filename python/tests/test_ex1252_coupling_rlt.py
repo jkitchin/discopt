@@ -28,7 +28,6 @@ from pathlib import Path
 
 os.environ.setdefault("JAX_PLATFORMS", "cpu")
 os.environ.setdefault("JAX_ENABLE_X64", "1")
-os.environ.setdefault("DISCOPT_INCREMENTAL_MC", "0")
 
 import discopt.modeling as dm
 import numpy as np
@@ -56,58 +55,53 @@ def _nl_path() -> Path:
     raise FileNotFoundError("ex1252.nl not found")
 
 
-def _loosest_node_bound(coupling_rlt: bool):
-    prev = os.environ.get("DISCOPT_MULTILINEAR_COUPLING_RLT")
-    os.environ["DISCOPT_MULTILINEAR_COUPLING_RLT"] = "1" if coupling_rlt else "0"
-    try:
-        r = reformulate_integer_multilinear(dm.from_nl(str(_nl_path())))
-        n_vars = sum(v.size for v in r._variables)
-        lb, ub = flat_variable_bounds(r)
-        lb = np.asarray(lb, float).copy()
-        ub = np.asarray(ub, float).copy()
-        for i, v in LINE1.items():
-            lb[i] = ub[i] = float(v)
-        nc = obbt_tighten_root(r, lb.copy(), ub.copy(), rounds=5, time_limit_per_lp=0.3)
-        lb, ub = nc.lb.copy(), nc.ub.copy()
-        lb[0] = ub[0] = 2.0
-        lb[24] = ub[24] = 0.0
-        lb[25] = ub[25] = 1.0  # x0 = 2
-        lb[3] = ub[3] = 1.0
-        lb[30] = ub[30] = 1.0
-        lb[31] = ub[31] = 0.0  # x3 = 1
-        res = MccormickLPRelaxer(r).solve_at_node(lb.copy(), ub.copy())
-        assert res.status == "optimal", f"status {res.status}"
-        return float(res.lower_bound), n_vars
-    finally:
-        if prev is None:
-            os.environ.pop("DISCOPT_MULTILINEAR_COUPLING_RLT", None)
-        else:
-            os.environ["DISCOPT_MULTILINEAR_COUPLING_RLT"] = prev
+def _loosest_node_bound(monkeypatch, coupling_rlt: bool):
+    # monkeypatch reverts the env change automatically (conftest guards against
+    # leaked DISCOPT_* mutations under xdist).
+    monkeypatch.setenv("DISCOPT_MULTILINEAR_COUPLING_RLT", "1" if coupling_rlt else "0")
+    r = reformulate_integer_multilinear(dm.from_nl(str(_nl_path())))
+    n_vars = sum(v.size for v in r._variables)
+    lb, ub = flat_variable_bounds(r)
+    lb = np.asarray(lb, float).copy()
+    ub = np.asarray(ub, float).copy()
+    for i, v in LINE1.items():
+        lb[i] = ub[i] = float(v)
+    nc = obbt_tighten_root(r, lb.copy(), ub.copy(), rounds=5, time_limit_per_lp=0.3)
+    lb, ub = nc.lb.copy(), nc.ub.copy()
+    lb[0] = ub[0] = 2.0
+    lb[24] = ub[24] = 0.0
+    lb[25] = ub[25] = 1.0  # x0 = 2
+    lb[3] = ub[3] = 1.0
+    lb[30] = ub[30] = 1.0
+    lb[31] = ub[31] = 0.0  # x3 = 1
+    res = MccormickLPRelaxer(r).solve_at_node(lb.copy(), ub.copy())
+    assert res.status == "optimal", f"status {res.status}"
+    return float(res.lower_bound), n_vars
 
 
-def test_off_path_is_707_baseline():
+def test_off_path_is_707_baseline(monkeypatch):
     """Flag OFF: byte-identical to #707 — bound at the objective-constant floor, no
     extra columns (the coupling RLT adds nothing when disabled)."""
-    bound, n_vars = _loosest_node_bound(coupling_rlt=False)
+    bound, n_vars = _loosest_node_bound(monkeypatch, coupling_rlt=False)
     assert bound == pytest.approx(OFF_BOUND, abs=1e-2)
     assert n_vars == 90, f"OFF path must not add columns; got {n_vars}"
 
 
-def test_on_path_lifts_bound_soundly():
+def test_on_path_lifts_bound_soundly(monkeypatch):
     """Flag ON: the coupling RLT lifts the loosest-node bound ~4.5x, and it stays
     sound — a valid dual bound never exceeds the true optimum."""
-    bound, n_vars = _loosest_node_bound(coupling_rlt=True)
+    bound, n_vars = _loosest_node_bound(monkeypatch, coupling_rlt=True)
     assert bound == pytest.approx(ON_BOUND, rel=1e-3), f"expected ~{ON_BOUND}, got {bound}"
     assert bound > OFF_BOUND + 1000.0, "coupling RLT must materially lift the bound"
     assert bound <= EX1252_OPT + 1e-2, f"UNSOUND: bound {bound} > optimum {EX1252_OPT}"
     assert n_vars > 90, "the RLT products add columns when enabled"
 
 
-def test_coupling_rlt_does_not_cut_the_optimum():
+def test_coupling_rlt_does_not_cut_the_optimum(monkeypatch):
     """Soundness: the true optimal point (bound ≤ opt) is never cut — the ON bound is
     a valid lower bound, strictly below the instance optimum (no over-tightening)."""
-    on_bound, _ = _loosest_node_bound(coupling_rlt=True)
+    on_bound, _ = _loosest_node_bound(monkeypatch, coupling_rlt=True)
     assert on_bound <= EX1252_OPT + 1e-2
-    off_bound, _ = _loosest_node_bound(coupling_rlt=False)
+    off_bound, _ = _loosest_node_bound(monkeypatch, coupling_rlt=False)
     # Monotone: adding valid RLT rows can only tighten (raise) the bound.
     assert on_bound >= off_bound - 1e-6, "valid RLT rows must never loosen the bound"

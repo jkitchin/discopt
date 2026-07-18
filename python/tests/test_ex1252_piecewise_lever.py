@@ -23,7 +23,6 @@ from pathlib import Path
 
 os.environ.setdefault("JAX_PLATFORMS", "cpu")
 os.environ.setdefault("JAX_ENABLE_X64", "1")
-os.environ.setdefault("DISCOPT_INCREMENTAL_MC", "0")
 
 import discopt.modeling as dm
 import numpy as np
