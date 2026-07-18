@@ -30,30 +30,34 @@ RNG = np.random.default_rng(0)
 
 
 def _sound(model, lb, ub, f_true, n_samples=300):
+    # Vectorized fuzz: the underestimator ``u`` (and its gradient) are the only
+    # JAX-dispatched work, so they are evaluated over the whole sample block with
+    # ``jax.vmap`` in one shot instead of one dispatch per point. Draw order is
+    # preserved bit-for-bit (P first, then the 120 (a, b) chord pairs interleaved
+    # via a (120, 2, n) block), so the shared module RNG stays in sync for the
+    # rest of the file and these are the identical samples the old loop tested.
     R = build_reduced_relaxation(model, lb, ub)
     u = R.obj_under
     n = R.n
     P = lb + RNG.random((n_samples, n)) * (ub - lb)
+    uP = np.asarray(jax.vmap(u)(jnp.asarray(P)))
+    fP = np.array([float(f_true(x)) for x in P])  # f_true is cheap numpy, kept per-row
     # validity: u(x) <= f(x)
-    for x in P:
-        assert float(u(jnp.asarray(x))) <= float(f_true(x)) + 1e-6 * (abs(float(f_true(x))) + 1)
-    # convexity + subgradient validity
-    gu = jax.grad(lambda z: u(z))
-    for _ in range(120):
-        a = lb + RNG.random(n) * (ub - lb)
-        b = lb + RNG.random(n) * (ub - lb)
-        mid = 0.5 * (a + b)
-        assert (
-            float(u(jnp.asarray(mid)))
-            <= 0.5 * (float(u(jnp.asarray(a))) + float(u(jnp.asarray(b)))) + 1e-6
-        )
-        u_a = float(u(jnp.asarray(a)))
-        g = np.asarray(gu(jnp.asarray(a)))
-        assert float(u(jnp.asarray(b))) >= u_a + g @ (b - a) - 1e-6 * (abs(u_a) + 1)
+    assert np.all(uP <= fP + 1e-6 * (np.abs(fP) + 1))
+    # convexity + subgradient validity over 120 random chords
+    ab = RNG.random((120, 2, n))
+    a = lb + ab[:, 0, :] * (ub - lb)
+    b = lb + ab[:, 1, :] * (ub - lb)
+    mid = 0.5 * (a + b)
+    u_a = np.asarray(jax.vmap(u)(jnp.asarray(a)))
+    u_b = np.asarray(jax.vmap(u)(jnp.asarray(b)))
+    u_mid = np.asarray(jax.vmap(u)(jnp.asarray(mid)))
+    g = np.asarray(jax.vmap(jax.grad(lambda z: u(z)))(jnp.asarray(a)))
+    assert np.all(u_mid <= 0.5 * (u_a + u_b) + 1e-6)  # midpoint convexity
+    # first-order (subgradient) inequality: u(b) >= u(a) + g(a) . (b - a)
+    assert np.all(u_b >= u_a + np.einsum("ij,ij->i", g, b - a) - 1e-6 * (np.abs(u_a) + 1))
     # bound validity: min cv <= min f (sampled)
-    min_u = min(float(u(jnp.asarray(x))) for x in P)
-    min_f = min(float(f_true(x)) for x in P)
-    assert min_u <= min_f + 1e-6 * (abs(min_f) + 1)
+    assert uP.min() <= fP.min() + 1e-6 * (abs(fP.min()) + 1)
 
 
 def test_bilinear_envelope_not_collapse():
