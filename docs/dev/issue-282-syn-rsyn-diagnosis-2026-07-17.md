@@ -494,20 +494,29 @@ needs the §R3-5 lever.
 Attempting to close `tanksize` after #764, every **sound, in-tree lever was tried and falsified as a
 close** (entry-experiment discipline, §4 — measurements recorded so the negatives are binding):
 
-| lever tried | root bound | verdict |
+Measured directly on the root McCormick LP over the FBBT box (`MccormickLPRelaxer.solve_at_node`),
+integers relaxed:
+
+| root relaxation lever | root LP bound | verdict |
 |---|---|---|
-| baseline (relaxer discarded) | 0.840 (frontier 0.853) | — |
-| #764 relaxer kept + per-node OBBT | 0.840 (frontier **0.92**) | frontier helps, root unchanged |
-| `DISCOPT_OBBT_ITERATE=1` (root OBBT → fixpoint) | **0.840** | box tightening does NOT move the root |
-| `DISCOPT_RLT=1` / `RLT1_ROOT_BOUND=1` | 0.840 | RLT-inert (gain ≈ 0, like heatexch) |
-| `DISCOPT_SHOR_SDP_ROOT_BOUND=1` | 0.840 | SDP-inert |
+| McCormick (baseline) | **0.838** | — |
+| + level-1 RLT (`rlt_level1=True` / `DISCOPT_RLT=1`) | 0.838 | **exactly no-op** — RLT-inert on this structure (#727 lesson, confirmed on a real instance) |
+| + `obbt_tighten_root`, 30 rounds (121 bounds tightened) | 0.838 | **exactly no-op** — box tightening does not move the root |
+| + Shor SDP (`DISCOPT_SHOR_SDP_ROOT_BOUND=1`) | 0.840 | SDP-inert |
+| full-solve frontier with #764 relaxer + per-node OBBT | 0.92 @ dozens of nodes | frontier climbs, root stuck |
+
+The bilinear structure is dense and pooling-like: 47 products with heavily shared variables (x0
+multiplies x18/x21/x24/x6/x9/x12; x18 multiplies x0/x6/x9/x12). BARON's root reaches **0.955**, so a
+stronger relaxation demonstrably exists (the continuous-relaxation global optimum is ≥ 0.955), but
+none of discopt's current machinery captures it.
 
 **Why box tightening can't fix it.** FBBT already derives finite boxes for the "unbounded" flows
 (`x0∈[1,40]`, `x6∈[0,992]`, `x7∈[0,1680]`); they are not unbounded, just *wide*. The McCormick
 envelope gap on a bilinear `xᵢ·xⱼ` scales with the box-width product, and OBBT derives its bounds
 *from that same loose McCormick* — a chicken-and-egg (loose relaxation → weak OBBT → loose
-relaxation) that pins the root at 0.840 vs BARON's 0.955. BARON/SCIP break it with stronger
-relaxations + reliability branching, not more OBBT.
+relaxation). Directly measured: 30 OBBT rounds tighten 121 bounds yet leave x0/x6/x7 wide (they are
+the free vars in the objective-defining bilinears) and the root LP at 0.838, unchanged. BARON/SCIP
+break it with stronger relaxations + reliability branching, not more OBBT.
 
 **Extrapolated node budget.** With every bound lever on, the frontier climbs 0.906→1.079 (199
 nodes)→1.145 (677 nodes); reaching the 1.2686 optimum needs *thousands* of nodes. So even a 10×
