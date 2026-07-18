@@ -60,7 +60,7 @@ def main():
     unsound = []       # bound above known optimum (either config) — HARD fail
     hard = []          # already-solving (optimal OFF) instance changed by ON — HARD fail
     soft = []          # partial-bound change on a non-optimal (timing-out) instance
-    NOISE = 1e-6       # relative tolerance below which a change is FP noise
+    noise_tol = 1e-6   # relative tolerance below which a change is FP noise
     print(f"{'instance':<22}{'off status':<12}{'on status':<12}"
           f"{'off bound':>16}{'on bound':>16}{'opt':>14}  flags")
     for name in names:
@@ -86,7 +86,7 @@ def main():
         rel = None
         if b_off is not None and b_on is not None:
             rel = abs(b_off - b_on) / max(1.0, abs(b_off))
-        changed = (s_off != s_on) or (rel is not None and rel > NOISE) or (
+        changed = (s_off != s_on) or (rel is not None and rel > noise_tol) or (
             (b_off is None) != (b_on is None)
         )
         if changed:
@@ -97,8 +97,8 @@ def main():
                 hard.append((name, f"{s_off}/{b_off:.6g} -> {s_on}/{b_on:.6g}"))
             else:
                 # SOFT: partial bound / status on a non-solving instance.
-                direction = "looser" if (b_off is not None and b_on is not None and b_on < b_off) else "changed"
-                flags.append(f"SOFT-{direction}")
+                looser = b_off is not None and b_on is not None and b_on < b_off
+                flags.append("SOFT-looser" if looser else "SOFT-changed")
                 soft.append((name, f"{s_off}/{b_off} -> {s_on}/{b_on}"))
 
         obs = f"{b_off if b_off is not None else float('nan'):>16.6g}"

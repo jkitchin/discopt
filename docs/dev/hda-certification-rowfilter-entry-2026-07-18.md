@@ -114,8 +114,24 @@ tightness* on non-hda instances. Firing only on a failed solve makes the flag
 `optimal`/Farkas-`infeasible`, so the filter never runs) — which is exactly what
 #671's acceptance ("`node_count`/`objective` exactly unchanged on already-solving
 instances") requires — while still recovering hda (its root LP false-fails → the
-filter fires → clean solve, tight bound). Re-running the panel with the
-failure-triggered filter is cert-clean with zero regressions.
+filter fires → clean solve, tight bound).
+
+**Re-run panel with the failure-triggered filter (in-repo, 66 instances):**
+
+| bucket | count | meaning |
+|---|---|---|
+| UNSOUND (bound > optimum) | **0** | sound by construction (superset) |
+| HARD (an *already-solving* instance changed) | **0** | **acceptance PASS** — every `optimal`-OFF instance is byte-identical (nvs09 keeps its certificate) |
+| SOFT (partial bound on a `time_limit`/`feasible` instance) | 7 | mixed, all sound: hda −1.8e10→**−64473** (huge gain), 4stufen/contvar/tspn05 tighter; bchoco07/08/casctanks looser |
+
+**ACCEPTANCE: PASS** (cert-clean + already-solving instances unchanged). The 7
+SOFT changes are the *graduation net-positive* question (does the hda-class gain
+outweigh the bchoco/casctanks partial-bound losses on timing-out instances?),
+decided by the full-corpus panel — hence the flag stays default-OFF. bchoco07/08
+and casctanks have numerically-failing nodes whose intractable rows *do* carry
+tightness, so the filter loosens their partial bound there; this is why the lever
+is not universally net-positive and must not graduate default-ON without the
+corpus panel.
 
 **End-to-end** (`dm.from_nl("hda.nl").solve(time_limit=60)`, other flags OFF):
 filter OFF → −1.80e10 (candidate A); **filter ON → −64473**, via clean LP solves
