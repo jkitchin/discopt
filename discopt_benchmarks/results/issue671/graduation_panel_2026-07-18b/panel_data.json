@@ -1,0 +1,2096 @@
+{
+  "hda_tl": 120.0,
+  "corpus_tl": 60.0,
+  "summary": {
+    "n_instances": 66,
+    "n_cert_fail": 1,
+    "n_filter_fired": 8,
+    "cert_clean": false,
+    "hda_tight_and_sound": true,
+    "hda_detail": "hda ON bound -64473.442401601744 (OFF -18016528426.50232, opt -5964.534084) tight&sound=True",
+    "soft_looser_partial_bounds": [
+      "bchoco07",
+      "bchoco08"
+    ],
+    "net_positive": false,
+    "verdict": "HOLD"
+  },
+  "rows": [
+    {
+      "instance": "4stufen",
+      "oracle": null,
+      "sense": "minimize",
+      "off": {
+        "obj": null,
+        "bound": 20712.174649243756,
+        "status": "time_limit",
+        "gap_certified": false,
+        "nodes": 7,
+        "wall": 60.52,
+        "rows_dropped": 0,
+        "builds_with_drop": 0,
+        "incumbent_feasible": true
+      },
+      "on": {
+        "obj": null,
+        "bound": 20712.174649243756,
+        "status": "time_limit",
+        "gap_certified": false,
+        "nodes": 7,
+        "wall": 60.52,
+        "rows_dropped": 0,
+        "builds_with_drop": 0,
+        "incumbent_feasible": true
+      },
+      "problems": [],
+      "notes": [],
+      "signal": "bound tie",
+      "inert": true
+    },
+    {
+      "instance": "alan",
+      "oracle": 2.925,
+      "sense": "minimize",
+      "off": {
+        "obj": 2.9249999983013426,
+        "bound": 2.9249999983013426,
+        "status": "optimal",
+        "gap_certified": true,
+        "nodes": 21,
+        "wall": 0.07,
+        "rows_dropped": 0,
+        "builds_with_drop": 0,
+        "incumbent_feasible": true
+      },
+      "on": {
+        "obj": 2.9249999983013426,
+        "bound": 2.9249999983013426,
+        "status": "optimal",
+        "gap_certified": true,
+        "nodes": 21,
+        "wall": 0.06,
+        "rows_dropped": 0,
+        "builds_with_drop": 0,
+        "incumbent_feasible": true
+      },
+      "problems": [],
+      "notes": [],
+      "signal": "bound tie",
+      "inert": true
+    },
+    {
+      "instance": "bchoco06",
+      "oracle": null,
+      "sense": "maximize",
+      "off": {
+        "obj": null,
+        "bound": 0.9999775725261241,
+        "status": "time_limit",
+        "gap_certified": false,
+        "nodes": 3,
+        "wall": 69.39,
+        "rows_dropped": 0,
+        "builds_with_drop": 0,
+        "incumbent_feasible": true
+      },
+      "on": {
+        "obj": null,
+        "bound": 0.9999775725261241,
+        "status": "time_limit",
+        "gap_certified": false,
+        "nodes": 3,
+        "wall": 70.24,
+        "rows_dropped": 131,
+        "builds_with_drop": 3,
+        "incumbent_feasible": true
+      },
+      "problems": [],
+      "notes": [
+        "filter FIRED: dropped 131 rows in 3 builds"
+      ],
+      "signal": "bound tie",
+      "inert": false
+    },
+    {
+      "instance": "bchoco07",
+      "oracle": null,
+      "sense": "maximize",
+      "off": {
+        "obj": null,
+        "bound": 2.9500190039537375,
+        "status": "time_limit",
+        "gap_certified": false,
+        "nodes": 3,
+        "wall": 95.87,
+        "rows_dropped": 0,
+        "builds_with_drop": 0,
+        "incumbent_feasible": true
+      },
+      "on": {
+        "obj": null,
+        "bound": 1.000000000000286,
+        "status": "time_limit",
+        "gap_certified": false,
+        "nodes": 3,
+        "wall": 87.75,
+        "rows_dropped": 237,
+        "builds_with_drop": 3,
+        "incumbent_feasible": true
+      },
+      "problems": [],
+      "notes": [
+        "filter FIRED: dropped 237 rows in 3 builds"
+      ],
+      "signal": "ON LOOSER bound",
+      "inert": false
+    },
+    {
+      "instance": "bchoco08",
+      "oracle": null,
+      "sense": "maximize",
+      "off": {
+        "obj": null,
+        "bound": 2.97299786579779,
+        "status": "time_limit",
+        "gap_certified": false,
+        "nodes": 3,
+        "wall": 75.64,
+        "rows_dropped": 0,
+        "builds_with_drop": 0,
+        "incumbent_feasible": true
+      },
+      "on": {
+        "obj": null,
+        "bound": 1.000000000002788,
+        "status": "time_limit",
+        "gap_certified": false,
+        "nodes": 3,
+        "wall": 69.97,
+        "rows_dropped": 216,
+        "builds_with_drop": 3,
+        "incumbent_feasible": true
+      },
+      "problems": [],
+      "notes": [
+        "filter FIRED: dropped 216 rows in 3 builds"
+      ],
+      "signal": "ON LOOSER bound",
+      "inert": false
+    },
+    {
+      "instance": "beuster",
+      "oracle": null,
+      "sense": "minimize",
+      "off": {
+        "obj": null,
+        "bound": 6395.108328058908,
+        "status": "time_limit",
+        "gap_certified": false,
+        "nodes": 3,
+        "wall": 63.29,
+        "rows_dropped": 0,
+        "builds_with_drop": 0,
+        "incumbent_feasible": true
+      },
+      "on": {
+        "obj": null,
+        "bound": 6395.108328058908,
+        "status": "time_limit",
+        "gap_certified": false,
+        "nodes": 7,
+        "wall": 61.47,
+        "rows_dropped": 0,
+        "builds_with_drop": 0,
+        "incumbent_feasible": true
+      },
+      "problems": [],
+      "notes": [
+        "timeout jitter nodes 3->7 obj None->None (both wall-limited)"
+      ],
+      "signal": "bound tie",
+      "inert": true
+    },
+    {
+      "instance": "casctanks",
+      "oracle": null,
+      "sense": "minimize",
+      "off": {
+        "obj": null,
+        "bound": -90.17862329759835,
+        "status": "time_limit",
+        "gap_certified": false,
+        "nodes": 3,
+        "wall": 73.83,
+        "rows_dropped": 0,
+        "builds_with_drop": 0,
+        "incumbent_feasible": true
+      },
+      "on": {
+        "obj": null,
+        "bound": -90.17862329759835,
+        "status": "time_limit",
+        "gap_certified": false,
+        "nodes": 3,
+        "wall": 64.27,
+        "rows_dropped": 0,
+        "builds_with_drop": 0,
+        "incumbent_feasible": true
+      },
+      "problems": [],
+      "notes": [],
+      "signal": "bound tie",
+      "inert": true
+    },
+    {
+      "instance": "chance",
+      "oracle": null,
+      "sense": "minimize",
+      "off": {
+        "obj": 29.894378154271102,
+        "bound": 29.894378154271102,
+        "status": "optimal",
+        "gap_certified": true,
+        "nodes": 0,
+        "wall": 0.35,
+        "rows_dropped": 0,
+        "builds_with_drop": 0,
+        "incumbent_feasible": true
+      },
+      "on": {
+        "obj": 29.894378154271102,
+        "bound": 29.894378154271102,
+        "status": "optimal",
+        "gap_certified": true,
+        "nodes": 0,
+        "wall": 0.16,
+        "rows_dropped": 0,
+        "builds_with_drop": 0,
+        "incumbent_feasible": true
+      },
+      "problems": [],
+      "notes": [],
+      "signal": "bound tie",
+      "inert": true
+    },
+    {
+      "instance": "clay0303hfsg",
+      "oracle": null,
+      "sense": "minimize",
+      "off": {
+        "obj": 26669.10955143314,
+        "bound": 25922.91765917036,
+        "status": "feasible",
+        "gap_certified": false,
+        "nodes": 439,
+        "wall": 73.5,
+        "rows_dropped": 0,
+        "builds_with_drop": 0,
+        "incumbent_feasible": true
+      },
+      "on": {
+        "obj": 26669.10955143314,
+        "bound": 25922.917659305862,
+        "status": "feasible",
+        "gap_certified": false,
+        "nodes": 441,
+        "wall": 75.61,
+        "rows_dropped": 0,
+        "builds_with_drop": 0,
+        "incumbent_feasible": true
+      },
+      "problems": [],
+      "notes": [
+        "timeout jitter nodes 439->441 obj 26669.10955143314->26669.10955143314 (both wall-limited)"
+      ],
+      "signal": "bound tie",
+      "inert": true
+    },
+    {
+      "instance": "contvar",
+      "oracle": null,
+      "sense": "minimize",
+      "off": {
+        "obj": null,
+        "bound": 183632.7659824254,
+        "status": "time_limit",
+        "gap_certified": false,
+        "nodes": 7,
+        "wall": 374.74,
+        "rows_dropped": 0,
+        "builds_with_drop": 0,
+        "incumbent_feasible": true
+      },
+      "on": {
+        "obj": null,
+        "bound": 183632.7659824254,
+        "status": "time_limit",
+        "gap_certified": false,
+        "nodes": 7,
+        "wall": 67.99,
+        "rows_dropped": 0,
+        "builds_with_drop": 0,
+        "incumbent_feasible": true
+      },
+      "problems": [],
+      "notes": [],
+      "signal": "bound tie",
+      "inert": true
+    },
+    {
+      "instance": "cvxnonsep_nsig30",
+      "oracle": null,
+      "sense": "minimize",
+      "off": {
+        "obj": 130.62871116925294,
+        "bound": 130.61841392487688,
+        "status": "optimal",
+        "gap_certified": true,
+        "nodes": 171,
+        "wall": 6.36,
+        "rows_dropped": 0,
+        "builds_with_drop": 0,
+        "incumbent_feasible": true
+      },
+      "on": {
+        "obj": 130.62871116925294,
+        "bound": 130.61841392487688,
+        "status": "optimal",
+        "gap_certified": true,
+        "nodes": 171,
+        "wall": 4.68,
+        "rows_dropped": 0,
+        "builds_with_drop": 0,
+        "incumbent_feasible": true
+      },
+      "problems": [],
+      "notes": [],
+      "signal": "bound tie",
+      "inert": true
+    },
+    {
+      "instance": "cvxnonsep_psig30",
+      "oracle": null,
+      "sense": "minimize",
+      "off": {
+        "obj": 78.99885435294289,
+        "bound": 78.99701703820377,
+        "status": "optimal",
+        "gap_certified": true,
+        "nodes": 89,
+        "wall": 3.61,
+        "rows_dropped": 0,
+        "builds_with_drop": 0,
+        "incumbent_feasible": true
+      },
+      "on": {
+        "obj": 78.99885435294289,
+        "bound": 78.99701703820377,
+        "status": "optimal",
+        "gap_certified": true,
+        "nodes": 89,
+        "wall": 1.8,
+        "rows_dropped": 0,
+        "builds_with_drop": 0,
+        "incumbent_feasible": true
+      },
+      "problems": [],
+      "notes": [],
+      "signal": "bound tie",
+      "inert": true
+    },
+    {
+      "instance": "cvxnonsep_psig40r",
+      "oracle": null,
+      "sense": "minimize",
+      "off": {
+        "obj": 86.54527995164959,
+        "bound": 86.53873600363832,
+        "status": "optimal",
+        "gap_certified": true,
+        "nodes": 103,
+        "wall": 8.46,
+        "rows_dropped": 0,
+        "builds_with_drop": 0,
+        "incumbent_feasible": true
+      },
+      "on": {
+        "obj": 86.54527995164959,
+        "bound": 86.53873600363832,
+        "status": "optimal",
+        "gap_certified": true,
+        "nodes": 103,
+        "wall": 8.76,
+        "rows_dropped": 0,
+        "builds_with_drop": 0,
+        "incumbent_feasible": true
+      },
+      "problems": [],
+      "notes": [],
+      "signal": "bound tie",
+      "inert": true
+    },
+    {
+      "instance": "dispatch",
+      "oracle": null,
+      "sense": "minimize",
+      "off": {
+        "obj": 3155.2879266989694,
+        "bound": 3155.2879042186782,
+        "status": "optimal",
+        "gap_certified": true,
+        "nodes": 3,
+        "wall": 0.72,
+        "rows_dropped": 0,
+        "builds_with_drop": 0,
+        "incumbent_feasible": true
+      },
+      "on": {
+        "obj": 3155.2879266989694,
+        "bound": 3155.2879042186782,
+        "status": "optimal",
+        "gap_certified": true,
+        "nodes": 3,
+        "wall": 0.43,
+        "rows_dropped": 0,
+        "builds_with_drop": 0,
+        "incumbent_feasible": true
+      },
+      "problems": [],
+      "notes": [],
+      "signal": "bound tie",
+      "inert": true
+    },
+    {
+      "instance": "ex1221",
+      "oracle": 7.66718,
+      "sense": "minimize",
+      "off": {
+        "obj": 7.667180068813135,
+        "bound": 7.667180068813077,
+        "status": "optimal",
+        "gap_certified": true,
+        "nodes": 5,
+        "wall": 1.06,
+        "rows_dropped": 0,
+        "builds_with_drop": 0,
+        "incumbent_feasible": true
+      },
+      "on": {
+        "obj": 7.667180068813135,
+        "bound": 7.667180068813077,
+        "status": "optimal",
+        "gap_certified": true,
+        "nodes": 5,
+        "wall": 0.74,
+        "rows_dropped": 0,
+        "builds_with_drop": 0,
+        "incumbent_feasible": true
+      },
+      "problems": [],
+      "notes": [],
+      "signal": "bound tie",
+      "inert": true
+    },
+    {
+      "instance": "ex1222",
+      "oracle": null,
+      "sense": "minimize",
+      "off": {
+        "obj": 1.0765430833322625,
+        "bound": 1.0765430463031964,
+        "status": "optimal",
+        "gap_certified": true,
+        "nodes": 1,
+        "wall": 0.5,
+        "rows_dropped": 0,
+        "builds_with_drop": 0,
+        "incumbent_feasible": true
+      },
+      "on": {
+        "obj": 1.0765430833322625,
+        "bound": 1.0765430463031964,
+        "status": "optimal",
+        "gap_certified": true,
+        "nodes": 1,
+        "wall": 0.29,
+        "rows_dropped": 0,
+        "builds_with_drop": 0,
+        "incumbent_feasible": true
+      },
+      "problems": [],
+      "notes": [],
+      "signal": "bound tie",
+      "inert": true
+    },
+    {
+      "instance": "ex1224",
+      "oracle": null,
+      "sense": "minimize",
+      "off": {
+        "obj": -0.9434704942820806,
+        "bound": -0.9434705000000166,
+        "status": "optimal",
+        "gap_certified": true,
+        "nodes": 5,
+        "wall": 5.33,
+        "rows_dropped": 0,
+        "builds_with_drop": 0,
+        "incumbent_feasible": true
+      },
+      "on": {
+        "obj": -0.9434704942820806,
+        "bound": -0.9434705000000166,
+        "status": "optimal",
+        "gap_certified": true,
+        "nodes": 5,
+        "wall": 4.88,
+        "rows_dropped": 0,
+        "builds_with_drop": 0,
+        "incumbent_feasible": true
+      },
+      "problems": [],
+      "notes": [],
+      "signal": "bound tie",
+      "inert": true
+    },
+    {
+      "instance": "ex1225",
+      "oracle": null,
+      "sense": "minimize",
+      "off": {
+        "obj": 30.999999913557566,
+        "bound": 30.999999913557566,
+        "status": "optimal",
+        "gap_certified": true,
+        "nodes": 5,
+        "wall": 3.41,
+        "rows_dropped": 0,
+        "builds_with_drop": 0,
+        "incumbent_feasible": true
+      },
+      "on": {
+        "obj": 30.999999913557566,
+        "bound": 30.999999913557566,
+        "status": "optimal",
+        "gap_certified": true,
+        "nodes": 5,
+        "wall": 2.91,
+        "rows_dropped": 0,
+        "builds_with_drop": 0,
+        "incumbent_feasible": true
+      },
+      "problems": [],
+      "notes": [],
+      "signal": "bound tie",
+      "inert": true
+    },
+    {
+      "instance": "ex1226",
+      "oracle": null,
+      "sense": "minimize",
+      "off": {
+        "obj": -17.000000003887443,
+        "bound": -17.000000003887443,
+        "status": "optimal",
+        "gap_certified": true,
+        "nodes": 3,
+        "wall": 1.04,
+        "rows_dropped": 0,
+        "builds_with_drop": 0,
+        "incumbent_feasible": true
+      },
+      "on": {
+        "obj": -17.000000003887443,
+        "bound": -17.000000003887443,
+        "status": "optimal",
+        "gap_certified": true,
+        "nodes": 3,
+        "wall": 0.83,
+        "rows_dropped": 0,
+        "builds_with_drop": 0,
+        "incumbent_feasible": true
+      },
+      "problems": [],
+      "notes": [],
+      "signal": "bound tie",
+      "inert": true
+    },
+    {
+      "instance": "ex14_1_9",
+      "oracle": null,
+      "sense": "minimize",
+      "off": {
+        "obj": -1.9775220540513224e-16,
+        "bound": -1.9775220540513224e-16,
+        "status": "feasible",
+        "gap_certified": false,
+        "nodes": 3,
+        "wall": 0.3,
+        "rows_dropped": 0,
+        "builds_with_drop": 0,
+        "incumbent_feasible": true
+      },
+      "on": {
+        "obj": -1.9775220540513224e-16,
+        "bound": -1.9775220540513224e-16,
+        "status": "feasible",
+        "gap_certified": false,
+        "nodes": 3,
+        "wall": 0.31,
+        "rows_dropped": 0,
+        "builds_with_drop": 0,
+        "incumbent_feasible": true
+      },
+      "problems": [],
+      "notes": [],
+      "signal": "bound tie",
+      "inert": true
+    },
+    {
+      "instance": "fac2",
+      "oracle": null,
+      "sense": "minimize",
+      "off": {
+        "obj": 331837498.18201387,
+        "bound": 331837497.561812,
+        "status": "optimal",
+        "gap_certified": true,
+        "nodes": 41,
+        "wall": 7.16,
+        "rows_dropped": 0,
+        "builds_with_drop": 0,
+        "incumbent_feasible": true
+      },
+      "on": {
+        "obj": 331837498.18201387,
+        "bound": 331837497.561812,
+        "status": "optimal",
+        "gap_certified": true,
+        "nodes": 41,
+        "wall": 7.09,
+        "rows_dropped": 0,
+        "builds_with_drop": 0,
+        "incumbent_feasible": true
+      },
+      "problems": [],
+      "notes": [],
+      "signal": "bound tie",
+      "inert": true
+    },
+    {
+      "instance": "flay02m",
+      "oracle": null,
+      "sense": "minimize",
+      "off": {
+        "obj": 37.94733186383461,
+        "bound": 37.947331804569515,
+        "status": "optimal",
+        "gap_certified": true,
+        "nodes": 7,
+        "wall": 0.75,
+        "rows_dropped": 0,
+        "builds_with_drop": 0,
+        "incumbent_feasible": true
+      },
+      "on": {
+        "obj": 37.94733186383461,
+        "bound": 37.947331804569515,
+        "status": "optimal",
+        "gap_certified": true,
+        "nodes": 7,
+        "wall": 0.49,
+        "rows_dropped": 0,
+        "builds_with_drop": 0,
+        "incumbent_feasible": true
+      },
+      "problems": [],
+      "notes": [],
+      "signal": "bound tie",
+      "inert": true
+    },
+    {
+      "instance": "flay03m",
+      "oracle": null,
+      "sense": "minimize",
+      "off": {
+        "obj": 48.98979479383567,
+        "bound": 48.98979470823052,
+        "status": "optimal",
+        "gap_certified": true,
+        "nodes": 111,
+        "wall": 9.49,
+        "rows_dropped": 0,
+        "builds_with_drop": 0,
+        "incumbent_feasible": true
+      },
+      "on": {
+        "obj": 48.98979479383567,
+        "bound": 48.98979470823052,
+        "status": "optimal",
+        "gap_certified": true,
+        "nodes": 111,
+        "wall": 7.55,
+        "rows_dropped": 0,
+        "builds_with_drop": 0,
+        "incumbent_feasible": true
+      },
+      "problems": [],
+      "notes": [],
+      "signal": "bound tie",
+      "inert": true
+    },
+    {
+      "instance": "gbd",
+      "oracle": null,
+      "sense": "minimize",
+      "off": {
+        "obj": 2.199999982504936,
+        "bound": 2.199999982504936,
+        "status": "optimal",
+        "gap_certified": true,
+        "nodes": 3,
+        "wall": 0.02,
+        "rows_dropped": 0,
+        "builds_with_drop": 0,
+        "incumbent_feasible": true
+      },
+      "on": {
+        "obj": 2.199999982504936,
+        "bound": 2.199999982504936,
+        "status": "optimal",
+        "gap_certified": true,
+        "nodes": 3,
+        "wall": 0.02,
+        "rows_dropped": 0,
+        "builds_with_drop": 0,
+        "incumbent_feasible": true
+      },
+      "problems": [],
+      "notes": [],
+      "signal": "bound tie",
+      "inert": true
+    },
+    {
+      "instance": "gkocis",
+      "oracle": null,
+      "sense": "minimize",
+      "off": {
+        "obj": -1.9230987798770212,
+        "bound": -1.9230988280923489,
+        "status": "optimal",
+        "gap_certified": true,
+        "nodes": 5,
+        "wall": 1.57,
+        "rows_dropped": 0,
+        "builds_with_drop": 0,
+        "incumbent_feasible": true
+      },
+      "on": {
+        "obj": -1.9230987798770212,
+        "bound": -1.9230988280923489,
+        "status": "optimal",
+        "gap_certified": true,
+        "nodes": 5,
+        "wall": 1.41,
+        "rows_dropped": 0,
+        "builds_with_drop": 0,
+        "incumbent_feasible": true
+      },
+      "problems": [],
+      "notes": [],
+      "signal": "bound tie",
+      "inert": true
+    },
+    {
+      "instance": "hda",
+      "oracle": -5964.534084,
+      "sense": "minimize",
+      "off": {
+        "obj": null,
+        "bound": -18016528426.50232,
+        "status": "time_limit",
+        "gap_certified": false,
+        "nodes": 3,
+        "wall": 214.31,
+        "rows_dropped": 0,
+        "builds_with_drop": 0,
+        "incumbent_feasible": true
+      },
+      "on": {
+        "obj": null,
+        "bound": -64473.442401601744,
+        "status": "time_limit",
+        "gap_certified": false,
+        "nodes": 3,
+        "wall": 194.12,
+        "rows_dropped": 405,
+        "builds_with_drop": 3,
+        "incumbent_feasible": true
+      },
+      "problems": [],
+      "notes": [
+        "filter FIRED: dropped 405 rows in 3 builds"
+      ],
+      "signal": "ON tighter bound",
+      "inert": false
+    },
+    {
+      "instance": "heatexch_gen1",
+      "oracle": null,
+      "sense": "minimize",
+      "off": {
+        "obj": null,
+        "bound": 38183.5317460179,
+        "status": "time_limit",
+        "gap_certified": false,
+        "nodes": 7,
+        "wall": 60.49,
+        "rows_dropped": 0,
+        "builds_with_drop": 0,
+        "incumbent_feasible": true
+      },
+      "on": {
+        "obj": null,
+        "bound": 41621.0317460187,
+        "status": "time_limit",
+        "gap_certified": false,
+        "nodes": 31,
+        "wall": 69.12,
+        "rows_dropped": 0,
+        "builds_with_drop": 0,
+        "incumbent_feasible": true
+      },
+      "problems": [],
+      "notes": [
+        "timeout jitter nodes 7->31 obj None->None (both wall-limited)"
+      ],
+      "signal": "ON tighter bound",
+      "inert": true
+    },
+    {
+      "instance": "heatexch_gen2",
+      "oracle": null,
+      "sense": "minimize",
+      "off": {
+        "obj": 824551.3265726111,
+        "bound": 555767.7902857271,
+        "status": "feasible",
+        "gap_certified": false,
+        "nodes": 3,
+        "wall": 60.69,
+        "rows_dropped": 0,
+        "builds_with_drop": 0,
+        "incumbent_feasible": true
+      },
+      "on": {
+        "obj": 824551.3265726122,
+        "bound": 555767.7902857271,
+        "status": "feasible",
+        "gap_certified": false,
+        "nodes": 3,
+        "wall": 61.43,
+        "rows_dropped": 0,
+        "builds_with_drop": 0,
+        "incumbent_feasible": true
+      },
+      "problems": [],
+      "notes": [
+        "timeout jitter nodes 3->3 obj 824551.3265726111->824551.3265726122 (both wall-limited)"
+      ],
+      "signal": "bound tie",
+      "inert": true
+    },
+    {
+      "instance": "heatexch_gen3",
+      "oracle": null,
+      "sense": "minimize",
+      "off": {
+        "obj": null,
+        "bound": null,
+        "status": "time_limit",
+        "gap_certified": false,
+        "nodes": 3,
+        "wall": 166.12,
+        "rows_dropped": 0,
+        "builds_with_drop": 0,
+        "incumbent_feasible": true
+      },
+      "on": {
+        "obj": null,
+        "bound": null,
+        "status": "time_limit",
+        "gap_certified": false,
+        "nodes": 3,
+        "wall": 75.35,
+        "rows_dropped": 0,
+        "builds_with_drop": 0,
+        "incumbent_feasible": true
+      },
+      "problems": [],
+      "notes": [],
+      "signal": "n/a",
+      "inert": true
+    },
+    {
+      "instance": "m3",
+      "oracle": null,
+      "sense": "minimize",
+      "off": {
+        "obj": 37.79999966997884,
+        "bound": 37.79999951039201,
+        "status": "optimal",
+        "gap_certified": true,
+        "nodes": 47,
+        "wall": 5.41,
+        "rows_dropped": 0,
+        "builds_with_drop": 0,
+        "incumbent_feasible": true
+      },
+      "on": {
+        "obj": 37.79999966997884,
+        "bound": 37.79999951039201,
+        "status": "optimal",
+        "gap_certified": true,
+        "nodes": 47,
+        "wall": 4.56,
+        "rows_dropped": 0,
+        "builds_with_drop": 0,
+        "incumbent_feasible": true
+      },
+      "problems": [],
+      "notes": [],
+      "signal": "bound tie",
+      "inert": true
+    },
+    {
+      "instance": "nvs01",
+      "oracle": null,
+      "sense": "minimize",
+      "off": {
+        "obj": 12.46966882156821,
+        "bound": 12.46966882156821,
+        "status": "optimal",
+        "gap_certified": true,
+        "nodes": 3,
+        "wall": 1.62,
+        "rows_dropped": 0,
+        "builds_with_drop": 0,
+        "incumbent_feasible": true
+      },
+      "on": {
+        "obj": 12.46966882156821,
+        "bound": 12.46966882156821,
+        "status": "optimal",
+        "gap_certified": true,
+        "nodes": 3,
+        "wall": 1.35,
+        "rows_dropped": 0,
+        "builds_with_drop": 0,
+        "incumbent_feasible": true
+      },
+      "problems": [],
+      "notes": [],
+      "signal": "bound tie",
+      "inert": true
+    },
+    {
+      "instance": "nvs02",
+      "oracle": null,
+      "sense": "minimize",
+      "off": {
+        "obj": 5.96418452307,
+        "bound": 5.96418452307,
+        "status": "optimal",
+        "gap_certified": true,
+        "nodes": 337,
+        "wall": 0.32,
+        "rows_dropped": 0,
+        "builds_with_drop": 0,
+        "incumbent_feasible": true
+      },
+      "on": {
+        "obj": 5.96418452307,
+        "bound": 5.96418452307,
+        "status": "optimal",
+        "gap_certified": true,
+        "nodes": 337,
+        "wall": 0.31,
+        "rows_dropped": 0,
+        "builds_with_drop": 0,
+        "incumbent_feasible": true
+      },
+      "problems": [],
+      "notes": [],
+      "signal": "bound tie",
+      "inert": true
+    },
+    {
+      "instance": "nvs03",
+      "oracle": null,
+      "sense": "minimize",
+      "off": {
+        "obj": 16.0,
+        "bound": 15.99999972676511,
+        "status": "optimal",
+        "gap_certified": true,
+        "nodes": 5,
+        "wall": 0.31,
+        "rows_dropped": 0,
+        "builds_with_drop": 0,
+        "incumbent_feasible": true
+      },
+      "on": {
+        "obj": 16.0,
+        "bound": 15.99999972676511,
+        "status": "optimal",
+        "gap_certified": true,
+        "nodes": 5,
+        "wall": 0.21,
+        "rows_dropped": 0,
+        "builds_with_drop": 0,
+        "incumbent_feasible": true
+      },
+      "problems": [],
+      "notes": [],
+      "signal": "bound tie",
+      "inert": true
+    },
+    {
+      "instance": "nvs04",
+      "oracle": null,
+      "sense": "minimize",
+      "off": {
+        "obj": 0.720000000000006,
+        "bound": 0.7199999999999773,
+        "status": "optimal",
+        "gap_certified": true,
+        "nodes": 5,
+        "wall": 0.72,
+        "rows_dropped": 0,
+        "builds_with_drop": 0,
+        "incumbent_feasible": true
+      },
+      "on": {
+        "obj": 0.720000000000006,
+        "bound": 0.7199999999999773,
+        "status": "optimal",
+        "gap_certified": true,
+        "nodes": 5,
+        "wall": 0.54,
+        "rows_dropped": 0,
+        "builds_with_drop": 0,
+        "incumbent_feasible": true
+      },
+      "problems": [],
+      "notes": [],
+      "signal": "bound tie",
+      "inert": true
+    },
+    {
+      "instance": "nvs05",
+      "oracle": 5.470765,
+      "sense": "minimize",
+      "off": {
+        "obj": 8.731956986640078,
+        "bound": 3.8053689243357476,
+        "status": "feasible",
+        "gap_certified": false,
+        "nodes": 131,
+        "wall": 60.08,
+        "rows_dropped": 0,
+        "builds_with_drop": 0,
+        "incumbent_feasible": true
+      },
+      "on": {
+        "obj": 8.731956986640078,
+        "bound": 4.099237739937647,
+        "status": "feasible",
+        "gap_certified": false,
+        "nodes": 155,
+        "wall": 60.11,
+        "rows_dropped": 494,
+        "builds_with_drop": 8,
+        "incumbent_feasible": true
+      },
+      "problems": [],
+      "notes": [
+        "filter FIRED: dropped 494 rows in 8 builds",
+        "timeout jitter nodes 131->155 obj 8.731956986640078->8.731956986640078 (both wall-limited)"
+      ],
+      "signal": "ON tighter bound",
+      "inert": false
+    },
+    {
+      "instance": "nvs06",
+      "oracle": null,
+      "sense": "minimize",
+      "off": {
+        "obj": 1.7703125,
+        "bound": 1.7703124999999627,
+        "status": "optimal",
+        "gap_certified": true,
+        "nodes": 5,
+        "wall": 1.66,
+        "rows_dropped": 0,
+        "builds_with_drop": 0,
+        "incumbent_feasible": true
+      },
+      "on": {
+        "obj": 1.7703125,
+        "bound": 1.7703124999999627,
+        "status": "optimal",
+        "gap_certified": true,
+        "nodes": 5,
+        "wall": 1.32,
+        "rows_dropped": 0,
+        "builds_with_drop": 0,
+        "incumbent_feasible": true
+      },
+      "problems": [],
+      "notes": [],
+      "signal": "bound tie",
+      "inert": true
+    },
+    {
+      "instance": "nvs07",
+      "oracle": null,
+      "sense": "minimize",
+      "off": {
+        "obj": 4.0,
+        "bound": 4.0,
+        "status": "optimal",
+        "gap_certified": true,
+        "nodes": 5,
+        "wall": 0.04,
+        "rows_dropped": 0,
+        "builds_with_drop": 0,
+        "incumbent_feasible": true
+      },
+      "on": {
+        "obj": 4.0,
+        "bound": 4.0,
+        "status": "optimal",
+        "gap_certified": true,
+        "nodes": 5,
+        "wall": 0.05,
+        "rows_dropped": 0,
+        "builds_with_drop": 0,
+        "incumbent_feasible": true
+      },
+      "problems": [],
+      "notes": [],
+      "signal": "bound tie",
+      "inert": true
+    },
+    {
+      "instance": "nvs08",
+      "oracle": null,
+      "sense": "minimize",
+      "off": {
+        "obj": 23.449727347139827,
+        "bound": 23.44972734516655,
+        "status": "optimal",
+        "gap_certified": true,
+        "nodes": 3,
+        "wall": 1.55,
+        "rows_dropped": 0,
+        "builds_with_drop": 0,
+        "incumbent_feasible": true
+      },
+      "on": {
+        "obj": 23.449727347139827,
+        "bound": 23.44972734516655,
+        "status": "optimal",
+        "gap_certified": true,
+        "nodes": 3,
+        "wall": 1.26,
+        "rows_dropped": 0,
+        "builds_with_drop": 0,
+        "incumbent_feasible": true
+      },
+      "problems": [],
+      "notes": [],
+      "signal": "bound tie",
+      "inert": true
+    },
+    {
+      "instance": "nvs09",
+      "oracle": -43.134336,
+      "sense": "minimize",
+      "off": {
+        "obj": -43.134336918035295,
+        "bound": -43.13433691803662,
+        "status": "optimal",
+        "gap_certified": true,
+        "nodes": 5,
+        "wall": 8.27,
+        "rows_dropped": 0,
+        "builds_with_drop": 0,
+        "incumbent_feasible": true
+      },
+      "on": {
+        "obj": -43.134336918035295,
+        "bound": -43.13433691803662,
+        "status": "optimal",
+        "gap_certified": true,
+        "nodes": 5,
+        "wall": 8.01,
+        "rows_dropped": 0,
+        "builds_with_drop": 0,
+        "incumbent_feasible": true
+      },
+      "problems": [],
+      "notes": [],
+      "signal": "bound tie",
+      "inert": true
+    },
+    {
+      "instance": "nvs10",
+      "oracle": null,
+      "sense": "minimize",
+      "off": {
+        "obj": -310.7999999999999,
+        "bound": -310.7999999999999,
+        "status": "optimal",
+        "gap_certified": true,
+        "nodes": 5,
+        "wall": 0.21,
+        "rows_dropped": 0,
+        "builds_with_drop": 0,
+        "incumbent_feasible": true
+      },
+      "on": {
+        "obj": -310.7999999999999,
+        "bound": -310.7999999999999,
+        "status": "optimal",
+        "gap_certified": true,
+        "nodes": 5,
+        "wall": 0.16,
+        "rows_dropped": 0,
+        "builds_with_drop": 0,
+        "incumbent_feasible": true
+      },
+      "problems": [],
+      "notes": [],
+      "signal": "bound tie",
+      "inert": true
+    },
+    {
+      "instance": "nvs11",
+      "oracle": null,
+      "sense": "minimize",
+      "off": {
+        "obj": -430.99999999999966,
+        "bound": -430.99999999999966,
+        "status": "optimal",
+        "gap_certified": true,
+        "nodes": 55,
+        "wall": 0.94,
+        "rows_dropped": 0,
+        "builds_with_drop": 0,
+        "incumbent_feasible": true
+      },
+      "on": {
+        "obj": -430.99999999999966,
+        "bound": -430.99999999999966,
+        "status": "optimal",
+        "gap_certified": true,
+        "nodes": 55,
+        "wall": 0.74,
+        "rows_dropped": 0,
+        "builds_with_drop": 0,
+        "incumbent_feasible": true
+      },
+      "problems": [],
+      "notes": [],
+      "signal": "bound tie",
+      "inert": true
+    },
+    {
+      "instance": "nvs12",
+      "oracle": null,
+      "sense": "minimize",
+      "off": {
+        "obj": -481.20000000000005,
+        "bound": -481.20000000000005,
+        "status": "optimal",
+        "gap_certified": true,
+        "nodes": 231,
+        "wall": 3.25,
+        "rows_dropped": 0,
+        "builds_with_drop": 0,
+        "incumbent_feasible": true
+      },
+      "on": {
+        "obj": -481.20000000000005,
+        "bound": -481.20000000000005,
+        "status": "optimal",
+        "gap_certified": true,
+        "nodes": 231,
+        "wall": 3.39,
+        "rows_dropped": 0,
+        "builds_with_drop": 0,
+        "incumbent_feasible": true
+      },
+      "problems": [],
+      "notes": [],
+      "signal": "bound tie",
+      "inert": true
+    },
+    {
+      "instance": "nvs13",
+      "oracle": -585.2,
+      "sense": "minimize",
+      "off": {
+        "obj": -585.2,
+        "bound": -585.200000000114,
+        "status": "optimal",
+        "gap_certified": true,
+        "nodes": 19,
+        "wall": 7.97,
+        "rows_dropped": 0,
+        "builds_with_drop": 0,
+        "incumbent_feasible": true
+      },
+      "on": {
+        "obj": -585.2,
+        "bound": -585.200000000114,
+        "status": "optimal",
+        "gap_certified": true,
+        "nodes": 19,
+        "wall": 6.88,
+        "rows_dropped": 0,
+        "builds_with_drop": 0,
+        "incumbent_feasible": true
+      },
+      "problems": [],
+      "notes": [],
+      "signal": "bound tie",
+      "inert": true
+    },
+    {
+      "instance": "nvs14",
+      "oracle": null,
+      "sense": "minimize",
+      "off": {
+        "obj": -40358.15476929996,
+        "bound": -40358.15476929999,
+        "status": "optimal",
+        "gap_certified": true,
+        "nodes": 223,
+        "wall": 0.29,
+        "rows_dropped": 0,
+        "builds_with_drop": 0,
+        "incumbent_feasible": true
+      },
+      "on": {
+        "obj": -40358.15476929996,
+        "bound": -40358.15476929999,
+        "status": "optimal",
+        "gap_certified": true,
+        "nodes": 223,
+        "wall": 0.29,
+        "rows_dropped": 0,
+        "builds_with_drop": 0,
+        "incumbent_feasible": true
+      },
+      "problems": [],
+      "notes": [],
+      "signal": "bound tie",
+      "inert": true
+    },
+    {
+      "instance": "nvs15",
+      "oracle": null,
+      "sense": "minimize",
+      "off": {
+        "obj": 1.0,
+        "bound": 1.0,
+        "status": "optimal",
+        "gap_certified": true,
+        "nodes": 7,
+        "wall": 0.08,
+        "rows_dropped": 0,
+        "builds_with_drop": 0,
+        "incumbent_feasible": true
+      },
+      "on": {
+        "obj": 1.0,
+        "bound": 1.0,
+        "status": "optimal",
+        "gap_certified": true,
+        "nodes": 7,
+        "wall": 0.1,
+        "rows_dropped": 0,
+        "builds_with_drop": 0,
+        "incumbent_feasible": true
+      },
+      "problems": [],
+      "notes": [],
+      "signal": "bound tie",
+      "inert": true
+    },
+    {
+      "instance": "nvs21",
+      "oracle": -5.684783,
+      "sense": "minimize",
+      "off": {
+        "obj": -5.684782628025259,
+        "bound": -5.684782628025259,
+        "status": "optimal",
+        "gap_certified": true,
+        "nodes": 3,
+        "wall": 7.54,
+        "rows_dropped": 0,
+        "builds_with_drop": 0,
+        "incumbent_feasible": true
+      },
+      "on": {
+        "obj": -5.684782628025259,
+        "bound": -5.684782628025259,
+        "status": "optimal",
+        "gap_certified": true,
+        "nodes": 3,
+        "wall": 8.12,
+        "rows_dropped": 0,
+        "builds_with_drop": 0,
+        "incumbent_feasible": true
+      },
+      "problems": [],
+      "notes": [],
+      "signal": "bound tie",
+      "inert": true
+    },
+    {
+      "instance": "oaer",
+      "oracle": null,
+      "sense": "minimize",
+      "off": {
+        "obj": -1.923098499884843,
+        "bound": -1.923098601139822,
+        "status": "optimal",
+        "gap_certified": true,
+        "nodes": 3,
+        "wall": 1.67,
+        "rows_dropped": 0,
+        "builds_with_drop": 0,
+        "incumbent_feasible": true
+      },
+      "on": {
+        "obj": -1.923098499884843,
+        "bound": -1.923098601139822,
+        "status": "optimal",
+        "gap_certified": true,
+        "nodes": 3,
+        "wall": 1.37,
+        "rows_dropped": 0,
+        "builds_with_drop": 0,
+        "incumbent_feasible": true
+      },
+      "problems": [],
+      "notes": [],
+      "signal": "bound tie",
+      "inert": true
+    },
+    {
+      "instance": "st_e11",
+      "oracle": null,
+      "sense": "minimize",
+      "off": {
+        "obj": 189.31162970681882,
+        "bound": 189.31162966433996,
+        "status": "optimal",
+        "gap_certified": true,
+        "nodes": 5,
+        "wall": 3.31,
+        "rows_dropped": 0,
+        "builds_with_drop": 0,
+        "incumbent_feasible": true
+      },
+      "on": {
+        "obj": 189.31162970681882,
+        "bound": 189.31162966433996,
+        "status": "optimal",
+        "gap_certified": true,
+        "nodes": 5,
+        "wall": 2.99,
+        "rows_dropped": 0,
+        "builds_with_drop": 0,
+        "incumbent_feasible": true
+      },
+      "problems": [],
+      "notes": [],
+      "signal": "bound tie",
+      "inert": true
+    },
+    {
+      "instance": "st_e13",
+      "oracle": null,
+      "sense": "minimize",
+      "off": {
+        "obj": 2.0000003463351197,
+        "bound": 1.9999999825187809,
+        "status": "optimal",
+        "gap_certified": true,
+        "nodes": 3,
+        "wall": 0.45,
+        "rows_dropped": 0,
+        "builds_with_drop": 0,
+        "incumbent_feasible": true
+      },
+      "on": {
+        "obj": 2.0000003463351197,
+        "bound": 1.9999999825187809,
+        "status": "optimal",
+        "gap_certified": true,
+        "nodes": 3,
+        "wall": 0.34,
+        "rows_dropped": 0,
+        "builds_with_drop": 0,
+        "incumbent_feasible": true
+      },
+      "problems": [],
+      "notes": [],
+      "signal": "bound tie",
+      "inert": true
+    },
+    {
+      "instance": "st_e29",
+      "oracle": null,
+      "sense": "minimize",
+      "off": {
+        "obj": -0.9434704942820806,
+        "bound": -0.9434705000000166,
+        "status": "optimal",
+        "gap_certified": true,
+        "nodes": 5,
+        "wall": 5.01,
+        "rows_dropped": 0,
+        "builds_with_drop": 0,
+        "incumbent_feasible": true
+      },
+      "on": {
+        "obj": -0.9434704942820806,
+        "bound": -0.9434705000000166,
+        "status": "optimal",
+        "gap_certified": true,
+        "nodes": 5,
+        "wall": 5.92,
+        "rows_dropped": 0,
+        "builds_with_drop": 0,
+        "incumbent_feasible": true
+      },
+      "problems": [],
+      "notes": [],
+      "signal": "bound tie",
+      "inert": true
+    },
+    {
+      "instance": "st_e36",
+      "oracle": null,
+      "sense": "minimize",
+      "off": {
+        "obj": -245.99999999999997,
+        "bound": -246.00000000170422,
+        "status": "optimal",
+        "gap_certified": true,
+        "nodes": 85,
+        "wall": 11.54,
+        "rows_dropped": 0,
+        "builds_with_drop": 0,
+        "incumbent_feasible": true
+      },
+      "on": {
+        "obj": -245.99999999999997,
+        "bound": -246.00000000170422,
+        "status": "optimal",
+        "gap_certified": true,
+        "nodes": 85,
+        "wall": 11.46,
+        "rows_dropped": 0,
+        "builds_with_drop": 0,
+        "incumbent_feasible": true
+      },
+      "problems": [],
+      "notes": [],
+      "signal": "bound tie",
+      "inert": true
+    },
+    {
+      "instance": "st_e38",
+      "oracle": null,
+      "sense": "minimize",
+      "off": {
+        "obj": 7197.727116826533,
+        "bound": 7197.727116826533,
+        "status": "optimal",
+        "gap_certified": true,
+        "nodes": 3,
+        "wall": 1.23,
+        "rows_dropped": 0,
+        "builds_with_drop": 0,
+        "incumbent_feasible": true
+      },
+      "on": {
+        "obj": 7197.727116826533,
+        "bound": 7197.727116826533,
+        "status": "optimal",
+        "gap_certified": true,
+        "nodes": 3,
+        "wall": 0.83,
+        "rows_dropped": 0,
+        "builds_with_drop": 0,
+        "incumbent_feasible": true
+      },
+      "problems": [],
+      "notes": [],
+      "signal": "bound tie",
+      "inert": true
+    },
+    {
+      "instance": "st_miqp1",
+      "oracle": null,
+      "sense": "minimize",
+      "off": {
+        "obj": 280.9999999906497,
+        "bound": 280.9999999906497,
+        "status": "optimal",
+        "gap_certified": true,
+        "nodes": 15,
+        "wall": 0.02,
+        "rows_dropped": 0,
+        "builds_with_drop": 0,
+        "incumbent_feasible": true
+      },
+      "on": {
+        "obj": 280.9999999906497,
+        "bound": 280.9999999906497,
+        "status": "optimal",
+        "gap_certified": true,
+        "nodes": 15,
+        "wall": 0.02,
+        "rows_dropped": 0,
+        "builds_with_drop": 0,
+        "incumbent_feasible": true
+      },
+      "problems": [],
+      "notes": [],
+      "signal": "bound tie",
+      "inert": true
+    },
+    {
+      "instance": "st_miqp2",
+      "oracle": null,
+      "sense": "minimize",
+      "off": {
+        "obj": 2.0,
+        "bound": 2.0,
+        "status": "optimal",
+        "gap_certified": true,
+        "nodes": 9,
+        "wall": 0.02,
+        "rows_dropped": 0,
+        "builds_with_drop": 0,
+        "incumbent_feasible": true
+      },
+      "on": {
+        "obj": 2.0,
+        "bound": 2.0,
+        "status": "optimal",
+        "gap_certified": true,
+        "nodes": 9,
+        "wall": 0.03,
+        "rows_dropped": 0,
+        "builds_with_drop": 0,
+        "incumbent_feasible": true
+      },
+      "problems": [],
+      "notes": [],
+      "signal": "bound tie",
+      "inert": true
+    },
+    {
+      "instance": "st_miqp3",
+      "oracle": null,
+      "sense": "minimize",
+      "off": {
+        "obj": -6.0,
+        "bound": -6.0,
+        "status": "optimal",
+        "gap_certified": true,
+        "nodes": 1,
+        "wall": 0.01,
+        "rows_dropped": 0,
+        "builds_with_drop": 0,
+        "incumbent_feasible": true
+      },
+      "on": {
+        "obj": -6.0,
+        "bound": -6.0,
+        "status": "optimal",
+        "gap_certified": true,
+        "nodes": 1,
+        "wall": 0.02,
+        "rows_dropped": 0,
+        "builds_with_drop": 0,
+        "incumbent_feasible": true
+      },
+      "problems": [],
+      "notes": [],
+      "signal": "bound tie",
+      "inert": true
+    },
+    {
+      "instance": "st_miqp4",
+      "oracle": null,
+      "sense": "minimize",
+      "off": {
+        "obj": -4574.000004423649,
+        "bound": -4574.000004423649,
+        "status": "optimal",
+        "gap_certified": true,
+        "nodes": 3,
+        "wall": 0.03,
+        "rows_dropped": 0,
+        "builds_with_drop": 0,
+        "incumbent_feasible": true
+      },
+      "on": {
+        "obj": -4574.000004423649,
+        "bound": -4574.000004423649,
+        "status": "optimal",
+        "gap_certified": true,
+        "nodes": 3,
+        "wall": 0.03,
+        "rows_dropped": 0,
+        "builds_with_drop": 0,
+        "incumbent_feasible": true
+      },
+      "problems": [],
+      "notes": [],
+      "signal": "bound tie",
+      "inert": true
+    },
+    {
+      "instance": "st_miqp5",
+      "oracle": null,
+      "sense": "minimize",
+      "off": {
+        "obj": -333.8888902720728,
+        "bound": -333.8888902720728,
+        "status": "optimal",
+        "gap_certified": true,
+        "nodes": 1,
+        "wall": 0.05,
+        "rows_dropped": 0,
+        "builds_with_drop": 0,
+        "incumbent_feasible": true
+      },
+      "on": {
+        "obj": -333.8888902720728,
+        "bound": -333.8888902720728,
+        "status": "optimal",
+        "gap_certified": true,
+        "nodes": 1,
+        "wall": 0.06,
+        "rows_dropped": 0,
+        "builds_with_drop": 0,
+        "incumbent_feasible": true
+      },
+      "problems": [],
+      "notes": [],
+      "signal": "bound tie",
+      "inert": true
+    },
+    {
+      "instance": "st_test1",
+      "oracle": null,
+      "sense": "minimize",
+      "off": {
+        "obj": -1.6495994490692313e-08,
+        "bound": -1.6495994490692313e-08,
+        "status": "optimal",
+        "gap_certified": true,
+        "nodes": 15,
+        "wall": 0.07,
+        "rows_dropped": 0,
+        "builds_with_drop": 0,
+        "incumbent_feasible": true
+      },
+      "on": {
+        "obj": -1.6495994490692313e-08,
+        "bound": -1.6495994490692313e-08,
+        "status": "optimal",
+        "gap_certified": true,
+        "nodes": 15,
+        "wall": 0.05,
+        "rows_dropped": 0,
+        "builds_with_drop": 0,
+        "incumbent_feasible": true
+      },
+      "problems": [],
+      "notes": [],
+      "signal": "bound tie",
+      "inert": true
+    },
+    {
+      "instance": "st_testgr3",
+      "oracle": null,
+      "sense": "minimize",
+      "off": {
+        "obj": -20.59,
+        "bound": -20.59070709795548,
+        "status": "optimal",
+        "gap_certified": true,
+        "nodes": 549,
+        "wall": 0.3,
+        "rows_dropped": 0,
+        "builds_with_drop": 0,
+        "incumbent_feasible": true
+      },
+      "on": {
+        "obj": -20.59,
+        "bound": -20.59070709795548,
+        "status": "optimal",
+        "gap_certified": true,
+        "nodes": 549,
+        "wall": 0.28,
+        "rows_dropped": 0,
+        "builds_with_drop": 0,
+        "incumbent_feasible": true
+      },
+      "problems": [],
+      "notes": [],
+      "signal": "bound tie",
+      "inert": true
+    },
+    {
+      "instance": "syn05hfsg",
+      "oracle": null,
+      "sense": "maximize",
+      "off": {
+        "obj": 837.7324123911069,
+        "bound": 1069.160504952989,
+        "status": "feasible",
+        "gap_certified": false,
+        "nodes": 1043,
+        "wall": 60.09,
+        "rows_dropped": 0,
+        "builds_with_drop": 0,
+        "incumbent_feasible": true
+      },
+      "on": {
+        "obj": 837.7324123911069,
+        "bound": 1069.160504952989,
+        "status": "feasible",
+        "gap_certified": false,
+        "nodes": 1043,
+        "wall": 60.44,
+        "rows_dropped": 0,
+        "builds_with_drop": 0,
+        "incumbent_feasible": true
+      },
+      "problems": [],
+      "notes": [],
+      "signal": "bound tie",
+      "inert": true
+    },
+    {
+      "instance": "tanksize",
+      "oracle": null,
+      "sense": "minimize",
+      "off": {
+        "obj": 1.268643761465286,
+        "bound": 0.8528765311589279,
+        "status": "feasible",
+        "gap_certified": false,
+        "nodes": 103,
+        "wall": 60.53,
+        "rows_dropped": 0,
+        "builds_with_drop": 0,
+        "incumbent_feasible": true
+      },
+      "on": {
+        "obj": 1.268643761465286,
+        "bound": 0.8528765311589279,
+        "status": "feasible",
+        "gap_certified": false,
+        "nodes": 107,
+        "wall": 60.26,
+        "rows_dropped": 0,
+        "builds_with_drop": 0,
+        "incumbent_feasible": true
+      },
+      "problems": [],
+      "notes": [
+        "timeout jitter nodes 103->107 obj 1.268643761465286->1.268643761465286 (both wall-limited)"
+      ],
+      "signal": "bound tie",
+      "inert": true
+    },
+    {
+      "instance": "tls2",
+      "oracle": null,
+      "sense": "minimize",
+      "off": {
+        "obj": 5.299999922109238,
+        "bound": 5.3,
+        "status": "optimal",
+        "gap_certified": true,
+        "nodes": 421,
+        "wall": 31.51,
+        "rows_dropped": 0,
+        "builds_with_drop": 0,
+        "incumbent_feasible": true
+      },
+      "on": {
+        "obj": 5.299999922109238,
+        "bound": 5.3,
+        "status": "optimal",
+        "gap_certified": true,
+        "nodes": 353,
+        "wall": 27.98,
+        "rows_dropped": 0,
+        "builds_with_drop": 0,
+        "incumbent_feasible": true
+      },
+      "problems": [
+        "BOUND-NEUTRAL VIOLATION: node_count 421->353"
+      ],
+      "notes": [],
+      "signal": "bound tie",
+      "inert": true
+    },
+    {
+      "instance": "tspn05",
+      "oracle": null,
+      "sense": "minimize",
+      "off": {
+        "obj": 191.2552076849416,
+        "bound": 191.25510622527844,
+        "status": "optimal",
+        "gap_certified": true,
+        "nodes": 51,
+        "wall": 34.58,
+        "rows_dropped": 0,
+        "builds_with_drop": 0,
+        "incumbent_feasible": true
+      },
+      "on": {
+        "obj": 191.2552076849416,
+        "bound": 191.25510622527844,
+        "status": "optimal",
+        "gap_certified": true,
+        "nodes": 51,
+        "wall": 35.31,
+        "rows_dropped": 0,
+        "builds_with_drop": 0,
+        "incumbent_feasible": true
+      },
+      "problems": [],
+      "notes": [],
+      "signal": "bound tie",
+      "inert": true
+    },
+    {
+      "instance": "tspn08",
+      "oracle": null,
+      "sense": "minimize",
+      "off": {
+        "obj": 290.56685374735093,
+        "bound": null,
+        "status": "feasible",
+        "gap_certified": false,
+        "nodes": 1,
+        "wall": 37.33,
+        "rows_dropped": 0,
+        "builds_with_drop": 0,
+        "incumbent_feasible": true
+      },
+      "on": {
+        "obj": 290.56685374735093,
+        "bound": null,
+        "status": "feasible",
+        "gap_certified": false,
+        "nodes": 1,
+        "wall": 33.79,
+        "rows_dropped": 7,
+        "builds_with_drop": 1,
+        "incumbent_feasible": true
+      },
+      "problems": [],
+      "notes": [
+        "filter FIRED: dropped 7 rows in 1 builds"
+      ],
+      "signal": "n/a",
+      "inert": false
+    },
+    {
+      "instance": "tspn10",
+      "oracle": null,
+      "sense": "minimize",
+      "off": {
+        "obj": 225.12607139732683,
+        "bound": null,
+        "status": "feasible",
+        "gap_certified": false,
+        "nodes": 1,
+        "wall": 27.83,
+        "rows_dropped": 0,
+        "builds_with_drop": 0,
+        "incumbent_feasible": true
+      },
+      "on": {
+        "obj": 225.12607139732683,
+        "bound": null,
+        "status": "feasible",
+        "gap_certified": false,
+        "nodes": 1,
+        "wall": 22.72,
+        "rows_dropped": 2,
+        "builds_with_drop": 1,
+        "incumbent_feasible": true
+      },
+      "problems": [],
+      "notes": [
+        "filter FIRED: dropped 2 rows in 1 builds"
+      ],
+      "signal": "n/a",
+      "inert": false
+    },
+    {
+      "instance": "tspn12",
+      "oracle": null,
+      "sense": "minimize",
+      "off": {
+        "obj": 262.6473952506017,
+        "bound": null,
+        "status": "feasible",
+        "gap_certified": false,
+        "nodes": 1,
+        "wall": 38.98,
+        "rows_dropped": 0,
+        "builds_with_drop": 0,
+        "incumbent_feasible": true
+      },
+      "on": {
+        "obj": 262.64739525060224,
+        "bound": null,
+        "status": "feasible",
+        "gap_certified": false,
+        "nodes": 1,
+        "wall": 14.31,
+        "rows_dropped": 1,
+        "builds_with_drop": 1,
+        "incumbent_feasible": true
+      },
+      "problems": [],
+      "notes": [
+        "filter FIRED: dropped 1 rows in 1 builds",
+        "timeout jitter nodes 1->1 obj 262.6473952506017->262.64739525060224 (both wall-limited)"
+      ],
+      "signal": "n/a",
+      "inert": false
+    }
+  ]
+}

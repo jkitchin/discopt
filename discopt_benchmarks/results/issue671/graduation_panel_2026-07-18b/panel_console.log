@@ -1,0 +1,96 @@
+instance                     oracle |     OFFbound      ONbound |  drop  ONnodes | signal | cert
+4stufen                        None |    2.071e+04    2.071e+04 |     0        7 | bound tie        | CLEAN
+alan                          2.925 |        2.925        2.925 |     0       21 | bound tie        | CLEAN
+bchoco06                       None |            1            1 |   131        3 | bound tie        | CLEAN  [filter FIRED: dropped 131 rows in 3 builds]
+bchoco07                       None |         2.95            1 |   237        3 | ON LOOSER bound  | CLEAN  [filter FIRED: dropped 237 rows in 3 builds]
+bchoco08                       None |        2.973            1 |   216        3 | ON LOOSER bound  | CLEAN  [filter FIRED: dropped 216 rows in 3 builds]
+beuster                        None |         6395         6395 |     0        7 | bound tie        | CLEAN  [timeout jitter nodes 3->7 obj None->None (both wall-limited)]
+casctanks                      None |       -90.18       -90.18 |     0        3 | bound tie        | CLEAN
+chance                         None |        29.89        29.89 |     0        0 | bound tie        | CLEAN
+clay0303hfsg                   None |    2.592e+04    2.592e+04 |     0      441 | bound tie        | CLEAN  [timeout jitter nodes 439->441 obj 26669.10955143314->26669.10955143314 (both wall-limited)]
+E0718 18:56:54.461321   24510 slow_operation_alarm.cc:73] 
+********************************
+[Compiling module jit_batch_hvp for CPU] Very slow compile? If you want to file a bug, run with envvar XLA_FLAGS=--xla_dump_to=/tmp/foo and attach the results.
+********************************
+E0718 18:59:55.374785   24507 slow_operation_alarm.cc:140] The operation took 5m0.913636442s
+
+********************************
+[Compiling module jit_batch_hvp for CPU] Very slow compile? If you want to file a bug, run with envvar XLA_FLAGS=--xla_dump_to=/tmp/foo and attach the results.
+********************************
+contvar                        None |    1.836e+05    1.836e+05 |     0        7 | bound tie        | CLEAN
+cvxnonsep_nsig30               None |        130.6        130.6 |     0      171 | bound tie        | CLEAN
+cvxnonsep_psig30               None |           79           79 |     0       89 | bound tie        | CLEAN
+cvxnonsep_psig40r              None |        86.54        86.54 |     0      103 | bound tie        | CLEAN
+dispatch                       None |         3155         3155 |     0        3 | bound tie        | CLEAN
+ex1221                        7.667 |        7.667        7.667 |     0        5 | bound tie        | CLEAN
+ex1222                         None |        1.077        1.077 |     0        1 | bound tie        | CLEAN
+ex1224                         None |      -0.9435      -0.9435 |     0        5 | bound tie        | CLEAN
+ex1225                         None |           31           31 |     0        5 | bound tie        | CLEAN
+ex1226                         None |          -17          -17 |     0        3 | bound tie        | CLEAN
+ex14_1_9                       None |   -1.978e-16   -1.978e-16 |     0        3 | bound tie        | CLEAN
+fac2                           None |    3.318e+08    3.318e+08 |     0       41 | bound tie        | CLEAN
+flay02m                        None |        37.95        37.95 |     0        7 | bound tie        | CLEAN
+flay03m                        None |        48.99        48.99 |     0      111 | bound tie        | CLEAN
+gbd                            None |          2.2          2.2 |     0        3 | bound tie        | CLEAN
+gkocis                         None |       -1.923       -1.923 |     0        5 | bound tie        | CLEAN
+hda                           -5965 |   -1.802e+10   -6.447e+04 |   405        3 | ON tighter bound | CLEAN  [filter FIRED: dropped 405 rows in 3 builds]
+heatexch_gen1                  None |    3.818e+04    4.162e+04 |     0       31 | ON tighter bound | CLEAN  [timeout jitter nodes 7->31 obj None->None (both wall-limited)]
+heatexch_gen2                  None |    5.558e+05    5.558e+05 |     0        3 | bound tie        | CLEAN  [timeout jitter nodes 3->3 obj 824551.3265726111->824551.3265726122 (both wall-limited)]
+heatexch_gen3                  None |         None         None |     0        3 | n/a              | CLEAN
+m3                             None |         37.8         37.8 |     0       47 | bound tie        | CLEAN
+nvs01                          None |        12.47        12.47 |     0        3 | bound tie        | CLEAN
+nvs02                          None |        5.964        5.964 |     0      337 | bound tie        | CLEAN
+nvs03                          None |           16           16 |     0        5 | bound tie        | CLEAN
+nvs04                          None |         0.72         0.72 |     0        5 | bound tie        | CLEAN
+nvs05                         5.471 |        3.805        4.099 |   494      155 | ON tighter bound | CLEAN  [filter FIRED: dropped 494 rows in 8 builds; timeout jitter nodes 131->155 obj 8.731956986640078->8.731956986640078 (both wall-limited)]
+nvs06                          None |         1.77         1.77 |     0        5 | bound tie        | CLEAN
+nvs07                          None |            4            4 |     0        5 | bound tie        | CLEAN
+nvs08                          None |        23.45        23.45 |     0        3 | bound tie        | CLEAN
+nvs09                        -43.13 |       -43.13       -43.13 |     0        5 | bound tie        | CLEAN
+nvs10                          None |       -310.8       -310.8 |     0        5 | bound tie        | CLEAN
+nvs11                          None |         -431         -431 |     0       55 | bound tie        | CLEAN
+nvs12                          None |       -481.2       -481.2 |     0      231 | bound tie        | CLEAN
+nvs13                        -585.2 |       -585.2       -585.2 |     0       19 | bound tie        | CLEAN
+nvs14                          None |   -4.036e+04   -4.036e+04 |     0      223 | bound tie        | CLEAN
+nvs15                          None |            1            1 |     0        7 | bound tie        | CLEAN
+nvs21                        -5.685 |       -5.685       -5.685 |     0        3 | bound tie        | CLEAN
+McCormick 'nlp' objective bound is not a valid dual bound for nonconvex models (issue #120); falling back to the alphaBB underestimator. Use mccormick_bounds='lp' for a valid spatial relaxation on models with continuous variables.
+McCormick 'nlp' objective bound is not a valid dual bound for nonconvex models (issue #120); falling back to the alphaBB underestimator. Use mccormick_bounds='lp' for a valid spatial relaxation on models with continuous variables.
+oaer                           None |       -1.923       -1.923 |     0        3 | bound tie        | CLEAN
+st_e11                         None |        189.3        189.3 |     0        5 | bound tie        | CLEAN
+st_e13                         None |            2            2 |     0        3 | bound tie        | CLEAN
+st_e29                         None |      -0.9435      -0.9435 |     0        5 | bound tie        | CLEAN
+st_e36                         None |         -246         -246 |     0       85 | bound tie        | CLEAN
+st_e38                         None |         7198         7198 |     0        3 | bound tie        | CLEAN
+st_miqp1                       None |          281          281 |     0       15 | bound tie        | CLEAN
+st_miqp2                       None |            2            2 |     0        9 | bound tie        | CLEAN
+st_miqp3                       None |           -6           -6 |     0        1 | bound tie        | CLEAN
+st_miqp4                       None |        -4574        -4574 |     0        3 | bound tie        | CLEAN
+st_miqp5                       None |       -333.9       -333.9 |     0        1 | bound tie        | CLEAN
+st_test1                       None |    -1.65e-08    -1.65e-08 |     0       15 | bound tie        | CLEAN
+st_testgr3                     None |       -20.59       -20.59 |     0      549 | bound tie        | CLEAN
+syn05hfsg                      None |         1069         1069 |     0     1043 | bound tie        | CLEAN
+tanksize                       None |       0.8529       0.8529 |     0      107 | bound tie        | CLEAN  [timeout jitter nodes 103->107 obj 1.268643761465286->1.268643761465286 (both wall-limited)]
+tls2                           None |          5.3          5.3 |     0      353 | bound tie        | !! BOUND-NEUTRAL VIOLATION: node_count 421->353
+tspn05                         None |        191.3        191.3 |     0       51 | bound tie        | CLEAN
+tspn08                         None |         None         None |     7        1 | n/a              | CLEAN  [filter FIRED: dropped 7 rows in 1 builds]
+tspn10                         None |         None         None |     2        1 | n/a              | CLEAN  [filter FIRED: dropped 2 rows in 1 builds]
+tspn12                         None |         None         None |     1        1 | n/a              | CLEAN  [filter FIRED: dropped 1 rows in 1 builds; timeout jitter nodes 1->1 obj 262.6473952506017->262.64739525060224 (both wall-limited)]
+
+SUMMARY: {
+  "n_instances": 66,
+  "n_cert_fail": 1,
+  "n_filter_fired": 8,
+  "cert_clean": false,
+  "hda_tight_and_sound": true,
+  "hda_detail": "hda ON bound -64473.442401601744 (OFF -18016528426.50232, opt -5964.534084) tight&sound=True",
+  "soft_looser_partial_bounds": [
+    "bchoco07",
+    "bchoco08"
+  ],
+  "net_positive": false,
+  "verdict": "HOLD"
+}
+
+VERDICT: HOLD
+wrote discopt_benchmarks/results/issue671/graduation_panel_2026-07-18b/panel_data.json
