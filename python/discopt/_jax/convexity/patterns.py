@@ -266,9 +266,9 @@ def _box_bounds(model: Model) -> tuple[np.ndarray, np.ndarray]:
         lb = np.asarray(v.lb, dtype=np.float64).ravel()
         ub = np.asarray(v.ub, dtype=np.float64).ravel()
         if lb.size == 1 and v.size != 1:
-            lb = np.full(v.size, float(lb), dtype=np.float64)
+            lb = np.full(v.size, float(lb.item()), dtype=np.float64)
         if ub.size == 1 and v.size != 1:
-            ub = np.full(v.size, float(ub), dtype=np.float64)
+            ub = np.full(v.size, float(ub.item()), dtype=np.float64)
         los.append(lb)
         his.append(ub)
     if not los:
@@ -1087,8 +1087,13 @@ def classify_fractional_epigraph_constraint(
             # coeff(x) * y + r(x) <= 0 with coeff < 0 ⇒ y >= r(x) / (-coeff).
             return curvature_numerator >= -1e-10
         if coeff_lo > 1e-10:
-            # coeff(x) * y + r(x) <= 0 with coeff > 0 ⇒ y <= -r(x) / coeff.
-            return curvature_numerator <= 1e-10
+            # coeff(x) * y + r(x) <= 0 with coeff > 0 ⇒ y <= -r(x) / coeff, a
+            # hypograph { y <= -q(x)/L(x) }; it is convex iff -q/L is concave,
+            # i.e. q/L is convex over the positive denominator L>0. That is the
+            # SAME discriminant as the coeff_hi<0 branch: a e^2 - b d e + c d^2
+            # >= 0. (The earlier `<= 1e-10` inverted this, classifying the
+            # nonconvex hypograph of a convex ratio as convex — see #757.)
+            return curvature_numerator >= -1e-10
 
     return None
 
