@@ -31,9 +31,11 @@ provably-convex-
 envelope intrinsics exp/log/log2/log10/sqrt/softplus/abs (kernel-chain subgradient),
 and (P1.1) the S-shaped intrinsics tanh/atan/sigmoid/sinh — tight kernel-chain on a
 box that doesn't span the inflection, a sound constant-envelope fallback (jnp.where)
-on a spanning box (valid but loose; P1.1b can add the tight tangent envelope). Anything
-else refuses (sound-or-refuse). P1 continues coverage (trig, fractional powers, the
-tight monomial hull incl. odd-power-over-sign-spanning).
+on a spanning box (valid but loose; P1.1b can add the tight tangent envelope), and
+(P1.4) fractional/signomial powers x**a (non-integer a) over a strictly-positive base
+(no-information bracket when the base can reach x<=0, where x**a is undefined). Anything
+else refuses (sound-or-refuse). P1 continues coverage (trig, the tight monomial hull
+incl. odd-power-over-sign-spanning).
 """
 
 from __future__ import annotations
@@ -45,7 +47,7 @@ from typing import cast
 import jax
 import jax.numpy as jnp
 
-from discopt._jax.multivariate_mccormick import _COMPOSITION_RULES, clip_inner
+from discopt._jax.multivariate_mccormick import _COMPOSITION_RULES, clip_inner, compose_pow_frac
 
 
 class UnsupportedMcboxOp(Exception):
@@ -147,18 +149,19 @@ class MCBox:
         return _scalar_mul(self, 1.0 / c)
 
     def __pow__(self, p):
-        if not (isinstance(p, int) or (isinstance(p, float) and float(p).is_integer())):
-            raise UnsupportedMcboxOp(f"non-integer power {p} (P1.4: signomial)")
-        n = int(p)
-        if n < 1:
-            raise UnsupportedMcboxOp(f"non-positive power {n}")
-        # Repeated multiplication through the (sign-agnostic, validated) bilinear rule:
-        # SOUND for every n>=1 and every sign regime. Looser than the tight monomial
-        # envelope (P1.3 replaces this with relax_pow's exact hull), but always valid.
-        out = self
-        for _ in range(n - 1):
-            out = out * self
-        return out
+        if isinstance(p, int) or (isinstance(p, float) and float(p).is_integer()):
+            n = int(p)
+            if n < 1:
+                raise UnsupportedMcboxOp(f"non-positive integer power {n}")
+            # Repeated multiplication through the (sign-agnostic, validated) bilinear
+            # rule: SOUND for every n>=1 and every sign regime. Looser than the tight
+            # monomial envelope (P1.3), but always valid.
+            out = self
+            for _ in range(n - 1):
+                out = out * self
+            return out
+        # Non-integer exponent: signomial x**a over a POSITIVE base (P1.4).
+        return _pow_frac(self, float(p))
 
     # -- univariate intrinsics with provably-convex envelopes: the kernel-chain
     #    subgradient is valid directly (see _univariate). --
@@ -312,6 +315,43 @@ def _reciprocal(b):
         jnp.where(crosses, jnp.inf, r.hi),
         jnp.where(crosses, zero, r.sub_cv),
         jnp.where(crosses, zero, r.sub_cc),
+    )
+
+
+def _pow_frac(base, a):
+    """``base ** a`` for a non-integer exponent ``a`` (P1.4, signomial).
+
+    ``x ** a`` is real only for ``x > 0`` when ``a`` is non-integer, so this is
+    sound-or-refuse on the sign of the base interval: over a strictly-positive box
+    (``lo > 0``) it uses the :func:`compose_pow_frac` envelope with the kernel-chain
+    subgradient (valid — the envelope is convex/concave per regime and ``clip_inner``
+    gives the valid boundary slope); a box that can reach ``x <= 0`` returns a
+    no-information bracket ``(-inf, +inf)`` (jit-safe via ``jnp.where``) that any
+    downstream consumer refuses. NaN discipline: the envelope is always evaluated on a
+    base clamped to ``>= eps > 0`` so the discarded ``jnp.where`` branch never produces
+    a NaN that would poison the subgradient."""
+    eps = 1e-12
+
+    def kernel(cv_g, cc_g, g_lb, g_ub):
+        g_lb_s = jnp.maximum(g_lb, eps)
+        g_ub_s = jnp.maximum(g_ub, eps)
+        return compose_pow_frac(cv_g, cc_g, g_lb_s, g_ub_s, a)
+
+    lo_s = jnp.maximum(base.lo, eps)
+    hi_s = jnp.maximum(base.hi, eps)
+    f_lo, f_hi = lo_s**a, hi_s**a
+    inc = a >= 0.0  # x**a increasing for a>0, decreasing for a<0
+    interval = (jnp.where(inc, f_lo, f_hi), jnp.where(inc, f_hi, f_lo))
+    r = _univariate_kernel(base, kernel, interval)
+    positive = base.lo > 0.0
+    zero = jnp.zeros_like(base.sub_cv)
+    return MCBox(
+        jnp.where(positive, r.cv, -jnp.inf),
+        jnp.where(positive, r.cc, jnp.inf),
+        jnp.where(positive, r.lo, -jnp.inf),
+        jnp.where(positive, r.hi, jnp.inf),
+        jnp.where(positive, r.sub_cv, zero),
+        jnp.where(positive, r.sub_cc, zero),
     )
 
 

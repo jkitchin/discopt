@@ -170,6 +170,37 @@ def compose_softplus(cv_g, cc_g, g_lb, g_ub):
     return _compose_monotone_convex_inc(f, cv_g, cc_g, g_lb, g_ub)
 
 
+def compose_pow_frac(cv_g, cc_g, g_lb, g_ub, a):
+    """TM2014 composition rule for the **signomial** term ``g(x) ** a`` with a
+    non-integer exponent ``a`` over a **positive** base (``g_lb > 0``), P1.4.
+
+    ``x ** a`` on ``(0, inf)`` is monotone with a single, fixed curvature per regime:
+
+    * ``a > 1``   -> convex, increasing  (``f^cv = f`` at ``g_lb``, ``f^cc`` = secant);
+    * ``0 < a < 1`` -> concave, increasing (``f^cv`` = secant, ``f^cc = f`` at ``g_ub``);
+    * ``a < 0``   -> convex, **decreasing** (``f^cv = f`` at ``g_ub``, ``f^cc`` = secant).
+
+    The mid-rule selects, for each envelope, the operand relaxation value at the
+    argmin/argmax of that envelope over ``[g_lb, g_ub]`` (``g_lb`` for an increasing
+    role, ``g_ub`` for a decreasing one), clamped by :func:`clip_inner` so the boundary
+    subgradient is the valid inner slope (not the ``jnp.clip`` tie). Caller guarantees
+    ``g_lb > 0`` (a base that can reach ``<= 0`` yields a no-information bracket upstream
+    — ``x ** a`` is undefined there for non-integer ``a``)."""
+    f = lambda t: t**a  # noqa: E731
+    f_lb, f_ub = f(g_lb), f(g_ub)
+    slope = _safe_slope(f_lb, f_ub, g_lb, g_ub)
+    z_lo = clip_inner(cv_g, g_lb, g_ub)
+    z_hi = clip_inner(cc_g, g_lb, g_ub)
+    sec = lambda z: f_lb + slope * (z - g_lb)  # noqa: E731
+    conc_inc = (a > 0.0) & (a < 1.0)
+    conv_dec = a < 0.0
+    # cv:  a>1 -> f(z_lo);  0<a<1 -> sec(z_lo);  a<0 -> f(z_hi)
+    cv = jnp.where(conv_dec, f(z_hi), jnp.where(conc_inc, sec(z_lo), f(z_lo)))
+    # cc:  a>1 -> sec(z_hi); 0<a<1 -> f(z_hi);  a<0 -> sec(z_lo)
+    cc = jnp.where(conv_dec, sec(z_lo), jnp.where(conc_inc, f(z_hi), sec(z_hi)))
+    return cv, cc
+
+
 def compose_square(cv_g, cc_g, g_lb, g_ub):
     """TM2014 composition rule for ``g(x)^2``.
 

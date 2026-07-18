@@ -258,7 +258,64 @@ def test_subgradient_valid_at_box_faces(name, fn, lb, ub):
         )
 
 
+# ---- P1.4: fractional powers (signomials) over a positive base ----
+@pytest.mark.parametrize(
+    "a,lb,ub",
+    [
+        (0.5, 0.1, 4.0),  # concave increasing
+        (1.5, 0.2, 3.0),  # convex increasing
+        (2.5, 0.5, 2.0),  # convex increasing
+        (-0.5, 0.3, 3.0),  # convex decreasing
+        (-1.5, 0.5, 2.0),  # convex decreasing
+        (0.25, 1.0, 5.0),
+    ],
+)
+def test_fractional_power_relaxes_soundly(a, lb, ub):
+    _check(lambda x: x**a, lambda v: v[0] ** a, [lb], [ub])
+
+
+def test_fractional_power_of_affine_combo():
+    # composition: (2x + y + 1)**0.5 over a box keeping the base positive.
+    _check(
+        lambda x, y: (2.0 * x + y + 1.0) ** 0.5,
+        lambda v: (2.0 * v[0] + v[1] + 1.0) ** 0.5,
+        [0.0, 0.0],
+        [2.0, 3.0],
+    )
+
+
+def test_fractional_power_face_subgradients_valid():
+    # box faces (where a Kelley/LP iterate sits) must have valid subgradients.
+    for a, lb, ub in [(0.5, 0.1, 4.0), (1.5, 0.2, 3.0), (-0.5, 0.3, 3.0)]:
+
+        @jax.jit
+        def one(p, _a=a):
+            z = relax_through(lambda x: x**_a, p, jnp.array([lb]), jnp.array([ub]))
+            return z.cv, z.cc, z.sub_cv, z.sub_cc
+
+        batch = jax.jit(jax.vmap(one))
+        probes = np.linspace(lb, ub, 400).reshape(-1, 1)
+        bases = np.array([[lb], [ub], [0.5 * (lb + ub)]])
+        cvB, ccB, _, _ = (np.asarray(v) for v in batch(jnp.asarray(probes)))
+        cvA, ccA, scvA, sccA = (np.asarray(v) for v in batch(jnp.asarray(bases)))
+        for k in range(len(bases)):
+            lin_cv = cvA[k] + (probes - bases[k]) @ scvA[k]
+            lin_cc = ccA[k] + (probes - bases[k]) @ sccA[k]
+            assert np.all(cvB >= lin_cv - 1e-7 * (abs(cvA[k]) + 1)), f"a={a} cv face"
+            assert np.all(ccB <= lin_cc + 1e-7 * (abs(ccA[k]) + 1)), f"a={a} cc face"
+
+
+def test_fractional_power_nonpositive_base_no_info():
+    # x**a (non-integer a) is undefined for x <= 0 -> no-information bracket, not a
+    # wrong finite bound (jit-safe). Any consumer of a non-finite bracket refuses.
+    z = relax_through(lambda x: x**0.5, jnp.array([0.5]), jnp.array([-1.0]), jnp.array([2.0]))
+    assert not bool(jnp.isfinite(z.cv)) and not bool(jnp.isfinite(z.cc))
+
+
 # ---- sound-or-refuse ----
-def test_refuse_noninteger_power():
+def test_refuse_nonpositive_integer_power():
+    # x**0 / x**-2 (non-positive INTEGER exponent) still refuse (reciprocals go via /).
     with pytest.raises(UnsupportedMcboxOp):
-        relax_through(lambda x: x**1.5, jnp.array([1.0]), jnp.array([0.5]), jnp.array([3.0]))
+        relax_through(lambda x: x**0, jnp.array([1.0]), jnp.array([0.5]), jnp.array([3.0]))
+    with pytest.raises(UnsupportedMcboxOp):
+        relax_through(lambda x: x**-2, jnp.array([1.0]), jnp.array([0.5]), jnp.array([3.0]))
