@@ -1119,3 +1119,55 @@ Stage-1 validation patch (route `diving` through a per-model evaluator cache):
 | jax_time | 22.8 s | 22.2 s | ≈0 (compilation was *not* the cost) |
 | node_count | 5921 | 5921 | unchanged (bound-neutral) |
 | objective | 1.6434285 | 1.643428 | identical (sound) |
+
+## 10. hda root throughput (#671 follow-up): where the root time actually goes
+
+> **Diagnosis + one falsification (2026-07-18).** After #671 gave hda a sound,
+> tight *root dual bound* (≈ −6.47e4), the natural next question was closing its
+> optimality gap to opt −5964.53. Measurement shows the blocker is **not**
+> relaxation strength — it is **root throughput**: hda explores **3 B&B nodes**
+> and the root node consumes the *entire* budget (`root_time` ≈ wall at every
+> `time_limit`), so the tree never branches and no primal incumbent is found
+> (`objective=None`, gap undefined). A tighter relaxation is moot while the tree
+> cannot move.
+>
+> Clean attribution (no cProfile overhead), `time_limit=40`, flag OFF:
+> **wall 42.2 s, jax 6.9 s, python 35.3 s, rust 0.0 s**, nodes 3. The `python`
+> bucket is dominated by *synchronous Rust-extension calls* (counted as Python):
+>
+> | cost centre | ~seconds | nature |
+> |---|---|---|
+> | Rust presolve (`run_root_presolve` → `PyModelRepr.presolve`) | ~10 | one-time |
+> | McCormick LP/MILP solves (`solve_lp_warm_csc_py` ~2.8 s each ×4, `solve_milp_csc_py`) | ~13 | ill-conditioned relaxation (the #671 hard LP) |
+> | FBBT (`reduce/fbbt`) | 5.1 | per fixpoint round |
+> | JAX XLA compile of the relaxation/Jacobian evaluator | ~7 | one-time per solve |
+> | relaxation build + convexity boxes (`build_uniform_relaxation`, `_build_convexity_box`/`eigvalsh`) | ~7 | — |
+>
+> `separate/*` cut timers are all **0.000** — the root never reaches cut
+> separation. There is **no single wasteful Python hotspot**; the time is genuine
+> presolve + slow LP solves on the near-singular McCormick relaxation + FBBT.
+>
+> **Falsified — dense→sparse Jacobian routing (the one clean candidate).**
+> `evaluate_jacobian` routes to the sparse coloring path only above
+> `_DENSE_JACOBIAN_COMPILE_LIMIT = 1e6` (m·n); hda is 718×722 = 5.18e5 < 1e6, so it
+> takes the **dense** `jax.jacfwd` (722 JVPs) despite a **0.4 %-dense** Jacobian —
+> `should_use_sparse` (density < 15 %, ≥50 vars) is plainly true. Hypothesis: a
+> density-aware route to the sparse path (identical values ⇒ bound-neutral) cuts
+> the ~12 s the profile attributed to `_evaluate_dense_jacobian`. **Entry
+> experiment (force hda through sparse via a lowered limit): FALSIFIED.** Bound and
+> node_count are **identical** (bound-neutral, as predicted) but wall time did
+> **not** improve — **44.1 s (sparse) vs 42.3 s (dense)**, `jax_time` 6.6 s both.
+> The profile's ~12 s was one-time XLA *compile* of the Jacobian program, which the
+> sparse coloring evaluator also pays; the per-iterate dense eval itself is cheap
+> at this size, and hda re-evaluates the Jacobian only a handful of times (FBBT's
+> two-point linearity test). Do not re-try density-aware Jacobian routing as an
+> hda root-speedup lever. Reproduction: `/tmp` experiment mirrored in the #671
+> session; the routing gate lives at `python/discopt/_jax/nlp_evaluator.py:783`.
+>
+> **Re-scope.** Meaningful hda root speedup requires the *hard* levers, not a Python
+> micro-fix: (a) faster/robust simplex on the ill-conditioned McCormick relaxation
+> (the #671 factorization-hardening research — also the thing that makes the LP
+> solves ~2.8 s each and forces the numerical-failure path), and/or (b) profiling
+> and reducing the ~10 s Rust presolve. Both are Rust-engine efforts with their own
+> bound-neutral gates; neither is a quick win. Recorded here so the next attempt
+> starts from the measurement, not the guess.
