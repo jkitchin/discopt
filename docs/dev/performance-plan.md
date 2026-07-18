@@ -553,6 +553,52 @@ panel green for 3 consecutive nightlies before default-on.
 > the cutoff bind. Reproduction:
 > `discopt_benchmarks/scripts/ex1252_cutoff_obbt_falsification.py`.
 
+> **Falsified (2026-07-18, issue #721 — "piecewise-McCormick auto-trigger on
+> wide-range cubic/monomial blocks certifies ex1252").** #707's re-scope (record
+> above) pointed at a stronger cubic-block relaxation, with #721's most localized
+> direction being auto-triggered piecewise McCormick on the wide flow factors
+> (`x6,x7,x8 ∈ [0,2950]`), asserting the `x6²` secant is "the weakest single link".
+> The entry experiment measured the reformed-ex1252 dual bound (with #707's reform
+> applied) on the *actual* per-node engine (`MccormickLPRelaxer`) at the canonical
+> loosest node (LINE1 fixed, OBBT-tightened, `x0=2, x3=1`). **The bound is pinned at
+> `12658.06` across every available lever:**
+>
+> | lever at the loosest node | dual bound |
+> |---|---|
+> | baseline (standard McCormick) | 12658.06 |
+> | subdivide `x6` / subdivide `x12` (halves) | 12658.06 (from the #707 probe: 12658.1 both) |
+> | RLT cuts / level-1 RLT | 12658.06 |
+> | PSD (moment) cuts | 12658.06 |
+> | superposition cuts | 12658.06 |
+> | OBBT + optimum cutoff | 12658 (the #707 record) |
+>
+> Two corrections to the issue's framing fall out. **(1) `x6` is not the lever, and
+> neither is any flow.** At the *root* the flows are wide but the objective relaxes
+> to 0 (indicators free); at any *binding* node OBBT has already narrowed
+> `x6 → [1823,2950]` and `x12 → [116.7,175]`, so partitioning those narrow ranges is
+> inert. "Wide-range" and "binding" never coincide, so direction #1 (piecewise on
+> wide monomial factors) cannot bite on the real path. (A transient +27% signal from
+> partitioning `x12` on the *AMP MILP* engine — `build_milp_relaxation`, SOS2
+> partition binaries — proved to be a node-definition artifact: it appears only at a
+> *looser* box where the MILP is free to re-choose the active line, and vanishes on
+> the canonical box, where the AMP build is infeasible. It is not a cubic-block
+> tightening.) **(2) The wall is the objective coupling, not the cubic rows.** The
+> bound equals the objective's constant term `6329.03·x0·x3·x18 = 6329.03·2 =
+> 12658.06` *exactly*, yet the relaxed `x15 = 12.44 ≠ 0`: the reformed
+> `x15·(x0·x3·x18)` aux relaxes to its lower bound, so the `1800·x15` cost
+> contributes 0 to the bound regardless of `x15`. The cubic cost rows #721 targets
+> only *define* `x15`; tightening them cannot lift the bound while `x15`'s coupling
+> into the objective is itself loose in-relaxation. **No auto-trigger code shipped**
+> — a wide-range-monomial partition trigger would be inert on the real path (and,
+> keyed on range width, would select `x6`, the *most* inert flow), failing #721's
+> own exit gate and the `DISCOPT_CUT_INHERIT` lesson (sound ≠ helpful). Re-scope: the
+> only remaining lever is a **tighter joint relaxation of the `x15·(indicator)`
+> objective coupling and the cubic block together** (not a term-wise cubic-row
+> relaxation) — the catalog §7 joint edge-concave/αBB open item, a distinct,
+> higher-risk research direction. Reproduction:
+> `discopt_benchmarks/scripts/ex1252_piecewise_lever_probe.py`; pinned by
+> `python/tests/test_ex1252_piecewise_lever.py`.
+
 ## 7. Sequencing & rationale (revised by the measurement)
 
 ```
