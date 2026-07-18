@@ -5,10 +5,21 @@ relaxer-discard fix (`DISCOPT_ROOT_LP_PROBE_TIGHT`, graduated default-ON) shippe
 `tanksize`'s frontier 0.853→0.92 and certified `syn05hfsg`. The root-relaxation research direction
 this doc originally scoped was then **run to ground and falsified** (level-1 RLT, level-2 RLT,
 Shor SDP, OBBT-to-fixpoint, naive partitioning — all exact no-ops at the root; §candidates below).
-The evidence now identifies the closure path as **branch-and-reduce throughput** — the same
-diagnosis as `certification-gap-plan.md` C1/C2 — with a measured first lever: the already-built
-T2.4 `reduce_node` (`DISCOPT_NODE_REDUCE`, default-OFF) moves BOTH axes on `tanksize`
-(bound 0.8898→0.9221 @60 s AND +52 % node throughput).
+The evidence identifies the closure path as **branch-and-reduce throughput** — the same diagnosis
+as `certification-gap-plan.md` C1/C2.
+
+> **CORRECTION (2026-07-18, same day).** An earlier revision of this doc claimed the T2.4
+> `reduce_node` flag (`DISCOPT_NODE_REDUCE`) as "a measured first lever (+bound, +52 % throughput
+> on tanksize)". That claim is **retracted as a measurement artifact**: the flag was
+> **removed in #581** (its held-out N=20 graduation gate in PR #685 came back net-negative —
+> benefit 24 % / regression 18 %, regressing ex5_3_3/spring/qapw — and the module was deleted;
+> nothing reads the env var). The apparent A/B difference (0.8898/95 nodes vs 0.9221/143 nodes
+> @60 s) was **machine load**: the "OFF" arms ran under the resource pressure that shortly killed
+> the session worker. Re-measured under clean conditions, default and `DISCOPT_NODE_REDUCE=1` are
+> indistinguishable (0.9221 @ 139–147 nodes across 4 runs). There is no T2.4 flag to graduate; a
+> reduce_node-style mechanism would be a *rebuild* that must first overturn the #685 net-negative
+> verdict with new class-level evidence. `DISCOPT_ROOT_FIXPOINT=1` (T2.3, which *does* still
+> exist) was re-verified clean: 0.9221 @143 — inert on tanksize, unchanged conclusion.
 
 ## Goal / definition of done
 
@@ -143,7 +154,7 @@ in `docs/dev/issue-282-syn-rsyn-diagnosis-2026-07-17.md` §R3-5.
 | BARON | root 0.955 (also a 25 % root gap!) → closes at **3477 nodes / 2.66 s ≈ 1300 n/s** |
 | SCIP | closes in 0.75 s |
 | discopt search | **does climb**: 0.92 @71 → 1.079 @199 → 1.145 @677 nodes — search quality is plausibly within small factors of BARON's; the deficit is **throughput: 2–10 n/s (100–600×)** |
-| best current config | probe-tight (default) + `DISCOPT_NODE_REDUCE=1`: 0.9221 @143 nodes/60 s, 2.38 n/s |
+| current default (clean re-measure ×4) | 0.9221 @ 139–147 nodes/60 s, ~2.4 n/s (probe-tight graduated in) |
 | per-node cost (~860 ms) | ~32 % Rust LP solves (**~95 LPs/node** ≈ 2n OBBT probes @~3 ms each), ~10 % pounce NLP, ~35 % Python/JAX orchestration (asarray ~11 k, Python DAG-walk ~58 k, interval ~7 k calls/node) |
 
 ### What BARON/SCIP actually do (maps to `certification-gap-plan.md` §2 gap table)
@@ -157,35 +168,37 @@ Neither closes `tanksize` at the root — BARON's root gap is 25 %. They win by 
 - **SCIP**: LP warm start + domain propagation at every node in C, reliability branching, cuts
   (measured **inert** for discopt's relaxation of this family — CUT-1/CUTS-1 NO-GO).
 
-discopt has the *components* (warm incremental LP engine T1.3, Rust `fbbt_with_cutoff`, free DBBT
-marginals T2.4a, OBBT probes) but spends ~95 LPs and ~40 ms+ of Python per node where BARON spends
-1–3 LPs and zero interpreter time.
+discopt has the *components* (warm incremental LP engine T1.3, Rust `fbbt_with_cutoff`,
+`MccormickLPResult` marginals from T2.4a — the result-surface half of T2.4, which survived #581,
+OBBT probes) but spends ~95 LPs and ~40 ms+ of Python per node where BARON spends 1–3 LPs and zero
+interpreter time.
 
 ### Verdict on this doc's original direction
 
 Root-relaxation research is **closed as falsified** here: candidates 1 (PQ/level-1 RLT) and
 2 (level-2 RLT) killed by entry experiments; candidate 3 (structured SDP) not run — low odds
 (Shor inert), high cost, and now unnecessary: the search closes the gap when given nodes.
-T2.3 root fixpoint (`DISCOPT_ROOT_FIXPOINT=1`): **bit-identical on tanksize** (bound 0.8898,
-95 nodes, unchanged) — binding negative for this class.
+T2.3 root fixpoint (`DISCOPT_ROOT_FIXPOINT=1`): **inert on tanksize** (0.9221 @143 = default,
+re-verified under clean conditions) — binding negative for this class. T2.4 `reduce_node`: **no
+longer exists** (removed #581 after the #685 held-out gate measured it net-negative); see the
+CORRECTION note in the header — it is NOT a Phase A item.
 
-### Phase A — wiring + scheduling (days; target ≥ 20–50 n/s, certify in minutes)
+### Phase A — scheduling + orchestration diet (days; target ≥ 20–50 n/s, certify in minutes)
 
-1. **Graduate T2.4 `reduce_node`** (`DISCOPT_NODE_REDUCE`) through the CLAUDE.md Regime-2 panel.
-   Measured on tanksize: bound 0.8898→0.9221 @60 s AND 1.57→2.38 n/s — the only lever this
-   campaign that moved both axes. It is the BARON free-reduction step, already built and
-   property-tested (200-box); it needs the ON-vs-OFF corpus panel (cert-clean + net-positive).
-2. **Per-node LP diet — replace the 2n OBBT probes with scheduled OBBT + free DBBT.** ~95 LPs/node
-   is the single biggest line item. With T2.4's free DBBT as the every-node reduction, full OBBT
-   probing can be scheduled (depth-gated / strided / marginal-filtered: probe only variables whose
-   `width × |reduced cost|` suggests payoff — T2.5's scorer exists, parked). Entry experiment: the
-   LPs/node vs bound-trajectory tradeoff curve on tanksize + nvs05 (nvs05 is the class where probes
-   are load-bearing — #738; the diet must not regress it). Kill: no schedule beats always-probe on
-   frontier-bound-at-equal-wall.
-3. **NLP starvation on stalled incumbents.** ~10 % of wall is pounce NLPs that cannot improve an
+1. **Per-node LP diet — schedule the 2n OBBT probes.** ~95 LPs/node (~32 % of wall) is the single
+   biggest line item. Full OBBT probing can be scheduled (depth-gated / strided /
+   marginal-filtered: probe only variables whose `width × |reduced cost|` suggests payoff —
+   T2.5's scorer exists, parked with a KILL verdict for *de-gating onto big models*; reusing it to
+   *thin* probes on already-enabled models is a different question and needs its own gate).
+   For the every-node cheap substitute, note the constraint: a reduce_node-style free-DBBT pass was
+   already killed net-negative (#685) — any revival must present new class-level evidence, not a
+   wiring flip. Entry experiment: the LPs/node vs frontier-bound-at-equal-wall tradeoff curve on
+   tanksize + nvs05 (nvs05 is the class where probes are load-bearing — #738; the diet must not
+   regress it). Kill: no schedule beats always-probe.
+2. **NLP starvation on stalled incumbents.** ~10 % of wall is pounce NLPs that cannot improve an
    already-optimal incumbent. `DISCOPT_ADAPTIVE_NLP` (default-ON) should starve them; verify it
    engages on tanksize and fix the gap if not (bound-neutral).
-4. **Python orchestration diet** (~35 % of wall): cache the static expression-DAG walk in
+3. **Python orchestration diet** (~35 % of wall): cache the static expression-DAG walk in
    `nonlinear_bound_tightening` (~58 k calls/node re-deriving a static structure), batch the
    `asarray` marshaling (~11 k/node). Bound-neutral Regime-1 changes (exact node-count/objective
    equality gates).
@@ -194,7 +207,7 @@ Arithmetic: ~10 ms/node ⇒ ~100 n/s ⇒ a BARON-shaped 3.5–14 k-node tree clo
 Phase A alone plausibly certifies tanksize at TL = 300 s and repairs the whole slow-spatial class;
 it does NOT reach "seconds".
 
-5. **(Parallel, cheap) Branching-quality A/B**: the full B&B climbs while naive widest-var
+4. **(Parallel, cheap) Branching-quality A/B**: the full B&B climbs while naive widest-var
    bisection is inert — so selection matters. A/B current spatial selection vs pseudocost/
    reliability on bilinear-violation (BARON's violation transfer). Node-count multiplier if it
    lands; entry experiment offline on captured trees.
