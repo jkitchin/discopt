@@ -58,8 +58,9 @@ def main():
     optima = _load_optima()
 
     unsound = []       # bound above known optimum (either config) — HARD fail
-    regressions = []   # status weakened or bound materially loosened by ON
-    changed = []       # any bound/status change (informational)
+    hard = []          # already-solving (optimal OFF) instance changed by ON — HARD fail
+    soft = []          # partial-bound change on a non-optimal (timing-out) instance
+    NOISE = 1e-6       # relative tolerance below which a change is FP noise
     print(f"{'instance':<22}{'off status':<12}{'on status':<12}"
           f"{'off bound':>16}{'on bound':>16}{'opt':>14}  flags")
     for name in names:
@@ -81,30 +82,40 @@ def main():
             if b_on is not None and b_on > opt + tol:
                 flags.append("UNSOUND-ON")
                 unsound.append((name, "on", b_on, opt))
-        # cert regression: optimal -> weaker
-        if s_off == "optimal" and s_on != "optimal":
-            flags.append("STATUS-REGRESS")
-            regressions.append((name, f"{s_off}->{s_on}"))
-        # bound loosened materially by ON (only meaningful when both finite)
+
+        rel = None
         if b_off is not None and b_on is not None:
-            loosen = b_off - b_on  # >0 means ON is looser (lower)
-            denom = max(1.0, abs(b_off))
-            if loosen / denom > 1e-6 and b_off <= (opt + tol if opt is not None else float("inf")):
-                flags.append(f"LOOSER({loosen/denom:.1e})")
-                regressions.append((name, f"bound {b_off:.6g}->{b_on:.6g}"))
-        if s_off != s_on or (b_off != b_on):
-            changed.append(name)
+            rel = abs(b_off - b_on) / max(1.0, abs(b_off))
+        changed = (s_off != s_on) or (rel is not None and rel > NOISE) or (
+            (b_off is None) != (b_on is None)
+        )
+        if changed:
+            # HARD (acceptance violation): the instance was ALREADY-SOLVING off
+            # (status optimal) and the filter changed its status or certified bound.
+            if s_off == "optimal":
+                flags.append("HARD-REGRESS")
+                hard.append((name, f"{s_off}/{b_off:.6g} -> {s_on}/{b_on:.6g}"))
+            else:
+                # SOFT: partial bound / status on a non-solving instance.
+                direction = "looser" if (b_off is not None and b_on is not None and b_on < b_off) else "changed"
+                flags.append(f"SOFT-{direction}")
+                soft.append((name, f"{s_off}/{b_off} -> {s_on}/{b_on}"))
+
         obs = f"{b_off if b_off is not None else float('nan'):>16.6g}"
         ons = f"{b_on if b_on is not None else float('nan'):>16.6g}"
         opts = f"{opt if opt is not None else float('nan'):>14.6g}"
         print(f"{name:<22}{str(s_off):<12}{str(s_on):<12}{obs}{ons}{opts}  {' '.join(flags)}")
 
     print("\n==== VERDICT ====")
-    print(f"instances: {len(names)}  changed by filter: {len(changed)}")
+    print(f"instances: {len(names)}")
     print(f"UNSOUND (bound > optimum): {len(unsound)}  -> {unsound}")
-    print(f"REGRESSIONS (status/bound): {len(regressions)}  -> {regressions[:12]}")
-    ok = not unsound and not regressions
-    print(f"PANEL: {'PASS (cert-clean, no regression)' if ok else 'FAIL'}")
+    print(f"HARD regressions (already-solving instance changed): {len(hard)}  -> {hard}")
+    print(f"SOFT changes (partial bound on timing-out instance): {len(soft)}  -> {soft}")
+    accept_ok = not unsound and not hard
+    print(f"\nACCEPTANCE (cert-clean + already-solving unchanged): "
+          f"{'PASS' if accept_ok else 'FAIL'}")
+    print(f"GRADUATION net-positive question: {len(soft)} soft change(s) "
+          f"(hda gain vs any partial-bound losses) — full-corpus panel decides")
 
 
 if __name__ == "__main__":
