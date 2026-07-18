@@ -553,6 +553,136 @@ panel green for 3 consecutive nightlies before default-on.
 > the cutoff bind. Reproduction:
 > `discopt_benchmarks/scripts/ex1252_cutoff_obbt_falsification.py`.
 
+> **Falsified + root-caused (2026-07-18, issue #723 lever 3 — "cap per-node LP
+> solves; nvs05 does ~59 LP/node").** #723's first three levers are handled:
+> convexity re-classification is de-duped (commit `ecff43e`), the RENS primal
+> heuristic is throttled by the default-ON G2 governor (`heuristic_governor.py`,
+> `EXPENSIVE_SOURCES = {"rens"}`), and the interval-`__mul__` / JIT-recompile
+> overheads are cut (`ecff43e`, `bfc9d55`). Lever 3 — "nvs05 does ~59 per-node LP
+> solves; find why and *bound it*" — was the open one, and the entry experiment
+> (measurement before code, Dev-Philosophy #4) **falsified the "cap it" framing**
+> and relocated the cost.
+>
+> The per-node LP solves are **per-node OBBT** (`obbt_tighten_root` on each
+> branched node's box against its McCormick relaxation): the load-bearing lever
+> that lets the nvs05/welded-beam class certify at modest node counts (it pins the
+> functionally-dependent continuous outputs once the integer drivers are fixed).
+> Two findings (`nvs05_obbt_probe_cost_measurement.py`):
+>
+> 1. **The probes are productive, not wasteful — capping rounds trades bound for
+>    wall.** Per-node OBBT runs up to `_PER_NODE_OBBT_ROUNDS` (3) sweeps, stopping
+>    at a `sweep_tight == 0` fixpoint. On nvs05 the sweeps do **not** diminish —
+>    over a representative solve (≥15 s, reaching branched nodes; the first few
+>    root-adjacent nodes fixpoint faster) rounds 1/2/3 each tighten ~18 bounds/call
+>    and almost every such call runs the full 3 sweeps without hitting the fixpoint
+>    (the McCormick envelope keeps tightening as the box shrinks). So "the LPs are
+>    far too many" is the wrong diagnosis:
+>    capping rounds/probes would loosen the per-node bound → **more** B&B nodes, a
+>    bound-for-wall trade, not a free cut. The bound-neutral affordability levers on
+>    the probe loop are already taken (fixed-column skip at `width <= min_width`,
+>    warm-start basis threaded probe→probe via `_PersistentProbeLP`, equilibrate-
+>    once-per-sweep, `build_incremental=False`).
+>
+> 2. **The per-probe cost is degenerate simplex *pivoting*, not factorization —
+>    and factorization reuse was implemented and measured NET-NEUTRAL (a second
+>    falsification).** The per-probe wall is *bimodal* (nvs05, ~635 probes/12 s):
+>    p50 ≈ 3.5 ms, p90 ≈ 12.7 ms, p99 ≈ 20 ms — ~66 % are cheap warm re-solves and
+>    the **~29 % expensive tail (≥5 ms) is 62 % of all probe wall**. The expensive
+>    probes are warm-start *rejections*: OBBT applies its tightenings mid-sweep and
+>    the objective flips each probe (`min x_i` → `min x_{i+1}`), so the threaded
+>    previous basis is both primal-infeasible (box shrank) and dual-infeasible
+>    (objective changed) → the warm dual and warm primal are both rejected and the
+>    probe does a near-cold two-phase re-solve of **~220 primal pivots** (per-call
+>    `DISCOPT_PROFILE`: `FtUpdate`/`AlphaFtran`/`PriceBtran` ≈ 220 each). Note the
+>    `iters` field returned by `solve_lp_warm_csc_py` reports **0** for these
+>    (the cold/primal-fallback path does not surface its pivot count) — which is why
+>    an earlier reading mislabeled the probes "0-pivot"; the phase counters are the
+>    ground truth. The LP is tiny (m ≈ 325, n ≈ 90, **nnz ≈ 1116, 0.8 % dense**), so
+>    its sparse basis factorization is only ~0.4 ms/call, equilibration ~0.003 ms,
+>    and Python↔Rust marshaling negligible — none is the bottleneck; the ~220
+>    degenerate pivots are.
+>
+>    A bit-identical **factorization-reuse** engine change was built to test the
+>    "re-factorization dominates" hypothesis: a persistent `discopt._rust.ProbeLp`
+>    handle + `ProbeFactorCache` that reuses a *fresh* `factorize_sparse` across
+>    probes sharing the sweep matrix (mirroring `PreparedDual::reoptimize`'s
+>    factorization-clone), behind `DISCOPT_OBBT_FACTOR_REUSE` (default-OFF), with
+>    cargo cached-vs-stateless differential tests. It was **cert-clean** (byte-
+>    identical status + `node_count` + objective bits on the certifying panel
+>    ex1224/st_e29/st_e36/fac2, each in a fresh process; 0 mismatches over a 609-probe
+>    in-situ A/B) but **net-neutral (~1.0×)**: reusing a ~0.4 ms factorization can
+>    not move a ~220-pivot cost. Per the `DISCOPT_CUT_INHERIT` lesson (sound ≠
+>    helpful — a cert-clean but neutral change stays out, measurement recorded), the
+>    change was **reverted**, not shipped.
+>
+> **Re-scope (the real lever):** cut the warm-start *rejection* tail — reduce the
+> ~29 % of probes that fall to a ~220-pivot near-cold re-solve because box-tightening
+> **and** objective-flip together invalidate the threaded basis. Directions (each a
+> distinct, higher-risk LP/OBBT-algorithm change needing its own entry experiment +
+> byte-identical panel, and a bounded per-probe pivot budget so the tail can never
+> blow up): a probe/basis strategy that keeps a warm start feasible across the two
+> simultaneous changes (e.g. re-optimize box changes with the dual from a *shared*
+> per-sweep basis before swapping the objective, rather than threading probe→probe);
+> or a bounded phase-1 from the node's LP-optimal basis. Factorization/scaling/
+> marshaling are all measured-small and are **not** the lever. `clay0303hfsg` is a
+> *different* bottleneck (0 per-node OBBT probes on the same panel — FBBT/JAX-bound
+> per the issue's own split), so this lever is scoped to the OBBT-probe class only.
+> Reproduction: `discopt_benchmarks/scripts/nvs05_obbt_probe_cost_measurement.py`;
+> pinned by `python/tests/test_perf_723_obbt_probe_cost.py`.
+
+> **Falsified (2026-07-18, #723 lever 3 re-scope — "cut the OBBT warm-start
+> rejection tail with a better warm-start strategy").** Entry experiment run
+> before any implementation (kill criterion set in advance: tail probe wall must
+> drop ≥ 50 %): capture every real OBBT probe from an nvs05 solve (per-sweep
+> matrix, per-probe objective/box/threaded basis), replay the captured stream
+> offline under each candidate strategy, and compare wall + results against the
+> baseline threading. Five measurements, one shared capture
+> (`nvs05_obbt_warmstart_replay.py`):
+>
+> 1. **Two-stage** (dual re-opt of the box change under the *previous* objective,
+>    then swap objectives from that primal-feasible basis — the direction the
+>    block above proposed): **1.10× slower on the tail**, oracle-gated ≤ 5 %.
+>    Diagnosis via the stage split: stage 1 (box change, same objective) costs
+>    ~0.85 ms — the box change was never the expensive part. The **objective flip
+>    itself** is: walking from `min x_i`'s optimal vertex to `min x_j`'s costs the
+>    ~220 pivots regardless of how fresh the starting basis is.
+> 2. **Self-warm floor** (re-solve each probe from its *own* optimal basis):
+>    p50 ~0.86 ms even on the tail, 100 % optimal — the LP is EASY from the right
+>    basis, ruling out degeneracy-stall; but the right basis isn't known ahead.
+> 3. **Per-objective basis memory** (warm `min/max x_j` from the basis that solved
+>    the *same objective* previously): the predicted per-probe win appears
+>    (tail-hit p50 7.0 → 1.3 ms) but ~1/3 of hits fail to transfer — the envelope
+>    matrix is rebuilt each round at the tightened box, and the coefficient drift
+>    rejects the basis → cold fallback — and those failures carry the wall.
+>    Aggregate: **1.02–1.07×**.
+> 4. **Hybrid upper bound** (memory + threaded fallback on rejection, i.e. the
+>    best an in-engine "try basis A, else basis B" could do, +0.3 ms detection):
+>    **1.34–1.36× probe wall ≈ ~8 % of nvs05 solve wall. This is the ceiling of
+>    the whole warm-start-strategy family** — below the ≥ 50 % kill criterion and
+>    below the bar for a correctness-critical engine change.
+> 5. **Solution-based probe filtering** (Gleixner/Berthold/Müller 2017 — skip a
+>    probe when a previously returned optimal point sits at the probe's bound):
+>    **unsound as naively implemented** — the returned vertex is feasible only to
+>    ~1e-6·scale, and on nvs05's ~1e4-scale boxes that slack fakes witnesses; the
+>    replay audit found **~45 % of "filterable" probes would actually have
+>    tightened** (a silent bound loosening, i.e. a correctness bug had it
+>    shipped). Even optimistically it caps at ~11 % of probe wall. A rigorous
+>    variant would need exactly-verified witnesses (directed-rounding feasibility
+>    check) and would keep only the sound remainder of that 11 %.
+>
+> **Standing conclusion for #723 lever 3 (three falsifications deep):** nvs05's
+> per-node OBBT LP wall (~1/3 of solve wall) is genuine simplex pivot work whose
+> per-probe floor (self-warm, ~1.3 ms mean incl. marshal) is ~3× below today's
+> ~4.4 ms mean, but no implementable warm-start/filter strategy tested reaches
+> that floor — the family caps at ~8 % of solve wall. Closing the remaining
+> BARON/SCIP gap on this class is NOT a warm-start orchestration problem; it
+> would need engine-level pivot-throughput work (pricing, degenerate-walk cost)
+> or a fundamentally different bounding scheme for the dependent-variable class
+> — both large, separate efforts with their own entry experiments. Lever 3 is
+> closed as measured-and-bounded; the issue's remaining wall-time gap on nvs05
+> is attributed, not mysterious. Reproduction:
+> `discopt_benchmarks/scripts/nvs05_obbt_warmstart_replay.py`.
+
 > **Falsified (2026-07-18, issue #721 — "piecewise-McCormick auto-trigger on
 > wide-range cubic/monomial blocks certifies ex1252").** #707's re-scope (record
 > above) pointed at a stronger cubic-block relaxation, with #721's most localized

@@ -64,8 +64,10 @@ def _get_heuristic_governor():
 
     Lazy-imported so the module has no import-time coupling to the governor and
     so ``heuristic_governor`` (a small leaf module) stays independently testable.
-    The governor is inert unless ``DISCOPT_HEURISTIC_GOVERNOR`` is set (default
-    behaviour byte-identical).
+    The governor is **default-ON** since G2-graduate: it throttles the RENS root
+    primal heuristic (the single largest per-node NLP-solve source, 0 % hit-rate
+    on the easy panel). ``DISCOPT_HEURISTIC_GOVERNOR=0`` is the escape hatch that
+    restores the pre-governor behaviour byte-for-byte.
     """
     from discopt.heuristic_governor import governor
 
