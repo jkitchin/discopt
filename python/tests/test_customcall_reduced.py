@@ -22,6 +22,7 @@ import discopt.modeling as dm  # noqa: E402
 import jax  # noqa: E402
 import jax.numpy as jnp  # noqa: E402
 import numpy as np  # noqa: E402
+import pytest  # noqa: E402
 from discopt._jax.mcbox import (  # noqa: E402
     MCBox,
     UnsupportedMcboxOp,
@@ -260,3 +261,32 @@ def test_admission_dispatched_transcendental_admits():
         return m, 2
 
     assert _admissible(b) is True
+
+
+# ---------------------------------------------------------------------------
+# P3.2: integer DOF for MCBox-relaxable CustomCall models.
+# ---------------------------------------------------------------------------
+
+
+def test_admission_integer_model_admits():
+    # The reduced-space probe relaxes integer leaves as continuous, so an MCBox-relaxable
+    # body admits even with integer DOF (P3.2 unblocks global B&B over them).
+    def b():
+        m = dm.Model()
+        x = m.continuous("x", lb=-10, ub=10)
+        k = m.integer("k", shape=(1,), lb=0, ub=4)
+        m.minimize(dm.custom(lambda x: (x - 3.0) ** 2)(x) + 1.5 * k[0])
+        return m, 2
+
+    assert _admissible(b) is True
+
+
+def test_nonrelaxable_custom_plus_integer_raises_at_gate():
+    # A non-MCBox-relaxable body (raw jnp) + integers has no valid node relaxation, so
+    # the solver refuses at the gate. This fires BEFORE any NLP solve (no backend needed).
+    m = dm.Model()
+    y = m.continuous("y", lb=-5, ub=5)
+    m.integer("j", shape=(1,), lb=0, ub=3)
+    m.minimize(dm.custom(lambda y: jnp.sin(y))(y))
+    with pytest.raises(ValueError, match="custom"):
+        m.solve(time_limit=5)

@@ -465,8 +465,11 @@ class CustomCall(Expression):
       non-affine hidden division, a non-scalar leaf, or an unbounded box is **not**
       reduced-relaxable and falls back to the **local NLP path only** (no global
       certificate, ``gap_certified`` is ``False``) -- sound-or-refuse.
-    - The solver **raises** if integer/binary variables are present (global B&B over
-      integer DOF for a hidden-function model is plan P3.2, not yet implemented).
+    - Integer/binary variables are supported **when the body is MCBox-relaxable**
+      (plan P3.2): the model is branched over the integer + continuous DOF with
+      reduced-space node bounds and certified globally. A **non**-MCBox-relaxable
+      body together with integers has no valid node relaxation, so the solver
+      **raises** (sound-or-refuse).
     - Rust presolve/FBBT does not run on a hidden model (the Rust IR has no opaque
       node); interval bounds on the ``CustomCall`` output come from the ``MCBox``
       ``lo/hi`` propagated during the reduced-space trace (Python interval only).

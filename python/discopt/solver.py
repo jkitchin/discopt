@@ -4807,29 +4807,23 @@ def solve_model(
     # lifted McCormick build / .nl export cannot reason about it. Historically that
     # forced the local-NLP-only path for every CustomCall model.
     #
-    # P3.1 (MAiNGO-parity, #713): a CustomCall whose opaque body traces soundly through
-    # MCBox is now GLOBALLY RELAXABLE via the reduced-space engine — the relaxation and
-    # its subgradients propagate by rule over the ORIGINAL degrees of freedom, the model
-    # is branched DOF-only, and the internal intermediates stay hidden. So for a
-    # continuous, MCBox-relaxable CustomCall model we fall through to the global path
-    # with the reduced-space relaxation forced on (the lifted/Rust machinery it can't
-    # see through is skipped/soft-fails, and the Rust tree is bound-source-agnostic). A
-    # model that is NOT reduced-relaxable (raw jnp intrinsics in the body, a non-affine
-    # hidden division, a non-scalar leaf, a non-finite box) keeps the local-NLP-only
-    # path exactly as before (sound-or-refuse). Integers with a CustomCall still refuse
-    # (P3.2, not yet implemented). The check is placed before the DAG-walking
-    # presolve/infeasibility passes; those abstain on CustomCall (verified), so it is
-    # safe to fall through past them. See #27b, #713.
+    # P3.1/P3.2 (MAiNGO-parity, #713): a CustomCall whose opaque body traces soundly
+    # through MCBox is GLOBALLY RELAXABLE via the reduced-space engine — the relaxation
+    # and its subgradients propagate by rule over the ORIGINAL degrees of freedom, the
+    # model is branched DOF-only, and the internal intermediates stay hidden. So for an
+    # MCBox-relaxable CustomCall model we fall through to the global path with the
+    # reduced-space relaxation forced on (the lifted/Rust machinery it can't see through
+    # is skipped/soft-fails, and the Rust tree is bound-source-agnostic). Because there
+    # is now a valid node relaxation, this holds for INTEGER degrees of freedom too
+    # (P3.2): the tree branches the integer + continuous DOF and the reduced Kelley bound
+    # fathoms nodes. A model that is NOT reduced-relaxable (raw jnp intrinsics in the
+    # body, a non-affine hidden division, a non-scalar leaf, a non-finite box) keeps the
+    # local-NLP-only path when continuous, and RAISES when integers are present (global
+    # B&B then has no valid node relaxation) — sound-or-refuse. The check is placed
+    # before the DAG-walking presolve/infeasibility passes; those abstain on CustomCall
+    # (verified), so it is safe to fall through past them. See #27b, #713.
     _force_reduced_space = False
     if _model_contains_custom_call(model):
-        if not _is_pure_continuous(model):
-            raise ValueError(
-                "Model contains a dm.custom(...) AD-only user function together "
-                "with integer/binary variables. Global branch-and-bound over integer "
-                "degrees of freedom for a hidden-function model is MAiNGO-parity plan "
-                "P3.2 (not yet implemented). Rebuild the function from dm.* primitives "
-                "(see dm.udf), or remove the integer/binary variables."
-            )
         _cc_reduced_model = _prereform_model if _prereform_model is not None else model
         _cc_n_orig = (
             int(_prereform_nvars)
@@ -4839,7 +4833,18 @@ def solve_model(
         _cc_admissible = model._objective is not None and _custom_call_reduced_admissible(
             _cc_reduced_model, _cc_n_orig
         )
+        _cc_has_integers = not _is_pure_continuous(model)
         if not _cc_admissible:
+            if _cc_has_integers:
+                raise ValueError(
+                    "Model contains a dm.custom(...) AD-only user function that is "
+                    "OUTSIDE the sound reduced-space (MCBox) scope, together with "
+                    "integer/binary variables. Global branch-and-bound needs a valid "
+                    "node relaxation, which a non-MCBox-relaxable opaque callable cannot "
+                    "provide. Express the body with MCBox-compatible ops (arithmetic + "
+                    "the discopt._jax.mcbox intrinsic namespace), rebuild it from dm.* "
+                    "primitives (see dm.udf), or remove the integer/binary variables."
+                )
             logger.info(
                 "Model contains a dm.custom(...) AD-only user function outside the "
                 "sound reduced-space (MCBox) scope — solving on the local NLP path "
@@ -4858,7 +4863,8 @@ def solve_model(
         logger.info(
             "Model contains a dm.custom(...) function that traces soundly through "
             "MCBox — solving GLOBALLY via the reduced-space engine (branching on the "
-            "original degrees of freedom; hidden intermediates stay hidden)."
+            "original degrees of freedom%s; hidden intermediates stay hidden).",
+            ", integers included" if _cc_has_integers else "",
         )
         _force_reduced_space = True
 
