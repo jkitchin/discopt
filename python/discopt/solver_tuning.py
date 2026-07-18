@@ -110,6 +110,30 @@ class SolverTuning:
     graduation_gate cert-neutrality eligible=YES; nvs05 gains its first full
     rigorous certificate (``optimal``, bound 5.47057)."""
 
+    # --- #671 LP iterative refinement (RHS-regularized dual + rigorous NS) ------
+    lp_iterative_refinement: bool = field(
+        default_factory=lambda: _env_flag("DISCOPT_LP_ITERATIVE_REFINEMENT", default=False)
+    )
+    """When a node LP breaks down numerically (the hda-class ill-conditioned
+    McCormick relaxations whose near-singular bases the float64 simplex cannot
+    certify), recover a *tight* dual bound by re-solving a few RHS-regularized
+    neighbours ``[A|I] z = b + tau`` in the **in-house** simplex and keeping the
+    tightest Neumaier–Shcherbina safe bound the recovered duals imply
+    (``DISCOPT_LP_ITERATIVE_REFINEMENT``, default OFF — issue #671). A small
+    ``tau`` perturbs the RHS just enough for the simplex to certify the
+    well-conditioned neighbour and hand back a good multiplier; the NS bound is
+    then evaluated against the **original** ``b`` (never ``b+tau``), so it is a
+    valid lower bound for *any* recovered dual — clamping/regularization can only
+    tighten it, never lift it above the optimum. The reported bound is the **max**
+    over the sweep and candidate A's drifted-dual bound (#662), so it is never
+    looser than the candidate-A floor it supersedes and never unsound. Fires only
+    on the numerical-failure path (root / failure-triggered), never the hot
+    per-node engine, and uses **no external solver** (the #517 HiGHS rescue is not
+    resurrected). On hda this moves the root dual bound from candidate A's
+    −1.80e10 to ≈ −6.47e4 (the true root McCormick value). See
+    ``docs/dev/issue-671-gsw-iterative-refinement-2026-07-18.md`` and the
+    `crates/discopt-core/src/lp/simplex/refine.rs` kernel."""
+
     # --- #309 sharp NS safe-bound margin ---------------------------------------
     ns_sharp_margin: bool = field(
         default_factory=lambda: _env_flag("DISCOPT_NS_SHARP_MARGIN", default=True)

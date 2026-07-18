@@ -40,11 +40,17 @@
 //!
 //! This layer is **root-only / numerical-failure-triggered** by design — the cost
 //! is justified only on the pathological ill-conditioned relaxations float64
-//! cannot certify, never the hot per-node engine. It is **not** wired into any
-//! default solve path in this commit (see the integration seam in
-//! `docs/dev/issue-671-gsw-iterative-refinement-2026-07-18.md`); every existing
-//! solve is byte-identical, so the certifying panel is bound-neutral by
-//! construction. The [`ns_safe_bound`] it produces is a weak-duality lower bound
+//! cannot certify, never the hot per-node engine. These functions are the
+//! reusable *kernel*; the shipped hda bound (issue #671, flag
+//! `DISCOPT_LP_ITERATIVE_REFINEMENT`, default OFF) uses the same soundness
+//! principle via a τ-regularized-resolve schedule at the numerical-failure branch
+//! (`solvers/milp_simplex.py::_refined_safe_bound_regularized`), because that is
+//! what makes feral's *current* factorization return usable duals on hda;
+//! `refine()` here becomes the engine once a rank-revealing LU lets feral return
+//! consistent approximate solutions to refine. See
+//! `docs/dev/issue-671-gsw-iterative-refinement-2026-07-18.md`. With the flag OFF
+//! every existing solve is byte-identical, so the certifying panel is bound-neutral
+//! by construction. The [`ns_safe_bound`] it produces is a weak-duality lower bound
 //! valid for *any* multiplier, so a refined dual can only *tighten* the
 //! certificate — it can never lift a bound above the true optimum, exactly like
 //! candidate A. Refinement improves the multiplier; it never relaxes a guard.

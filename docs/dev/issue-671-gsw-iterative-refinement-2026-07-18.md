@@ -15,10 +15,10 @@ turning it into hda's tight production bound.
 
 ## What landed (this change)
 
-`crates/discopt-core/src/lp/simplex/refine.rs` — a precision layer *above* the
-double-precision simplex, with **no wiring into any default solve path** (so every
-existing solve is byte-identical and the certifying panel is bound-neutral by
-construction; see §"Verification regime"). Three pieces:
+Two parts: the reusable **kernel** (`crates/discopt-core/src/lp/simplex/refine.rs`)
+and the **shipped hda bound** (the τ-regularized-resolve path wired into the
+numerical-failure branch behind a default-OFF flag — see "Integration" below). The
+kernel is a precision layer *above* the double-precision simplex. Three pieces:
 
 1. **High-precision residual primitive** — `residual_dd` / `dot_dd`. Pure-Rust
    *double-double* (≈106-bit) accumulation via the `two_sum`/`two_prod` error-free
@@ -85,59 +85,104 @@ solve cannot see under. GSW's scale-up-and-resolve is what escapes that floor, a
 that is precisely what these two tests exercise with a deliberately floor-limited
 inner solver.
 
-## Integration seam (follow-up, default-OFF, failure-triggered)
+## Integration (landed, default-OFF, failure-triggered) — hda resolved end-to-end
 
-The kernel is deliberately **unwired**. The production seam is a one-call-site
-change at the numerical-failure branch that already computes candidate A:
+The kernel is wired into the numerical-failure branch that already computes
+candidate A, behind a new **default-OFF** flag `DISCOPT_LP_ITERATIVE_REFINEMENT`
+(`SolverTuning.lp_iterative_refinement`).
 
-- Rust: `dual.rs::solve_lp_warm_csc`, on `LpStatus::Numerical`, would build a
-  `CorrectionSolver` over the same CSC `A` (a thin adapter over the existing
-  warm-started simplex) and call `refine(...)`, then export the **refined** dual
-  in the existing `LpSolve::dual` field. No Python change is then required — the
-  boundary's existing `_safe_lp_lower_bound(dual, …)` (`milp_simplex.py:691`)
-  automatically tightens from the better dual.
-- Behind a new **default-OFF** flag `DISCOPT_LP_ITERATIVE_REFINEMENT` (a
-  `SolverTuning` field alongside `node_numerical_dual_bound`), **root-only /
-  numerical-failure-triggered** — never the hot per-node engine. Flag OFF ⇒ the
-  path is byte-identical to today.
-- Candidate A (#662) stays as the fallback: if refinement fails to converge (or
-  the inner solve fails), the drifted-dual NS bound is still emitted, so the seam
-  can only *improve* hda's bound, never lose it.
+### How the factorization blocker was sidestepped
 
-### The remaining blocker (the harder, feral-touching half)
+The issue flags that GSW alone does not rescue hda without a working factorization
+on near-singular bases: feral FT-`Growth`-fails on hda's root LP, so it returns
+`numerical` with a *drifted* dual, not a clean one. Measurement on the real
+exported root LP (`inhouse_regularized.py`) showed the way through:
 
-Per the issue, GSW alone does **not** rescue hda without a **working factorization
-on near-singular bases**. hda's root LP defeats feral with an FT `Growth`
-*factorization failure* — the simplex cannot even return the inaccurate
-approximate solution GSW refines; it returns nothing. GSW's correction solves reuse
-the same `A`, so they hit the same near-singular bases. The correction *rhs/bounds*
-are better-scaled (residual scaled to O(1)), which helps conditioning, but the
-rank deficiency (~13–43) is scale-invariant, so a correction solve can still land
-on a singular basis. Closing #671 end-to-end therefore also needs one of:
+| τ (RHS regularization) | in-house status | NS bound g(y) |
+|---|---|---|
+| 0 (plain) | numerical | −2.15e15 (garbage) |
+| 1e-3 | numerical | −7.6e9 |
+| **3e-3** | **optimal** | **−64735.08** |
+| 1e-2 | numerical | −64736.20 |
+| 2e-2 | optimal | −69296 |
+| ≥5e-2 | optimal | progressively looser |
 
-- **rank-revealing / regularized LU** (pivot to reveal the rank, regularize the
-  dependent rows), or
-- **basis management** that steers the simplex off the near-singular vertices, or
-- an **exact-rational** correction solve on the (small) failing sub-block only —
-  the E2 core was 2×3; a real exact-LP library (QSopt_ex / SoPlex-exact) is routine
-  at 3008×1140.
+A **small RHS regularization moves the optimum off the near-singular configuration
+so feral certifies the well-conditioned neighbour** (τ=3e-3 → `optimal`) and hands
+back a *good* dual. The key soundness lever: the NS safe bound `g(y)` is valid for
+**any** `y`, so it is evaluated against the **original** `b` (never `b+τ`) — the
+regularization changes only the *tightness* of the recovered multiplier, never the
+*soundness* of the bound. Because every `g(y)` is a valid lower bound, the reported
+bound is the **max over a geometric τ-sweep and candidate A**, which is rigorously
+safe (max of valid lower bounds) and robust to where the usable τ-window sits.
 
-This half is out of scope for this change (it modifies feral's hot factorization
-and needs its own bound-neutral panel). The kernel here is the prerequisite layer
-it plugs into.
+This needs **no external solver** (the #517 HiGHS rescue is not resurrected) and
+**no feral factorization change** — it is entirely the "layer above feral" half.
+The double-double residual / GSW `refine` kernel remains the principled primitive
+(and the more general future path once a rank-revealing LU lets feral return
+consistent approximate solutions to refine); the τ-regularized-resolve schedule is
+the regularization that makes feral's *current* factorization return usable duals
+today.
 
-## Verification regime (unchanged from the issue; Dev-Philosophy #5)
+### Measured result (end-to-end, `dm.from_nl("hda.nl").solve()`)
 
-- **Bound-neutral by construction now:** the module is unwired, so `node_count` and
-  certified `objective` are exactly unchanged on every already-solving instance —
-  nothing calls it. `cargo test -p discopt-core` green (470).
-- **When wired (follow-up):** default-OFF flag; the certifying panel runs with the
-  flag OFF (byte-identical) and ON (fires only on numerical-failure nodes). The NS
-  bound is sound for any dual, and incumbents remain independently
-  feasibility-verified; `incorrect_count ≤ 0` with zero slack. Target acceptance:
-  hda reports a **tight** finite dual bound (materially closer to opt −5964.53 than
-  candidate A's −1.80e10, i.e. ≈ −6.47e4, the true root McCormick value), no panel
-  regression.
+| | reported dual bound | gap to opt (−5964.53) |
+|---|---|---|
+| flag OFF (candidate A, unchanged) | **−1.80e10** | 1.80e10 |
+| **flag ON (#671)** | **≈ −6.45e4** (−64473 at 90 s) | **5.85e4** |
+
+**~5.5 orders of magnitude tighter, sound** (−64473 ≤ opt −5964.53), the issue's
+target. Flag OFF is byte-identical to today (candidate-A floor `−18016528426.5`
+reproduced exactly before and after the change) — bound-neutral by construction.
+
+### Placement / cost
+
+Fires **only** on the numerical-failure path (`numerical`/`iter_limit` node LPs),
+never the hot per-node engine. Each trigger costs one in-house LP solve per τ in
+`_REFINE_TAUS` (7). On hda this ~doubles wall time (73 s → 141 s at the same
+90 s budget) because many nodes fail numerically — acceptable for a **default-OFF,
+research-scale** lever whose job is the certificate, not throughput. Instances
+whose node LPs solve cleanly never trigger it (test:
+`test_inert_on_cleanly_certifying_instances`).
+
+### Verification (this change)
+
+- `cargo test -p discopt-core --lib` (kernel): 470 passed; clippy + fmt clean.
+- `pytest python/tests/test_issue_671_lp_iterative_refinement.py -m "not slow"`:
+  fast soundness/plumbing tests pass (helper returns a sound, tight bound on an
+  ill-conditioned LP; flag defaults OFF).
+- `-m slow`: hda ON → tight sound bound (> −1e7, ≤ opt); hda OFF → unchanged
+  candidate-A floor (< −1e7); alan/ex1221 byte-identical ON vs OFF.
+- Candidate-A regression suite (`test_issue_517_*`, `test_issue362_*`) still green
+  — the failure branch is unchanged with the flag OFF.
+
+### Remaining principled follow-up (not required for hda's bound)
+
+The GSW `refine` kernel would supersede the τ-sweep once feral gains a
+**rank-revealing / regularized LU** so its correction solves return consistent
+approximate solutions to refine (the τ-sweep is the pragmatic stand-in that works
+with feral's current factorization). An **exact-rational** solve of the small
+failing sub-block (E2 core was 2×3) remains the gold-standard feasibility
+certificate. Both are orthogonal to the now-delivered tight bound.
+
+## Verification regime (Dev-Philosophy #5)
+
+- **Bound-neutral with the flag OFF (the default):** the refinement block is guarded
+  by `lp_iterative_refinement`, so with the flag OFF `node_count` and certified
+  `objective` are exactly unchanged on every already-solving instance — the
+  numerical-failure branch is byte-identical to today (candidate-A floor
+  `−18016528426.5` reproduced exactly before/after the change). `cargo test
+  -p discopt-core` green (470).
+- **With the flag ON:** fires only on numerical-failure nodes. The NS bound is sound
+  for any dual (evaluated against the original `b`), and the reported bound is the
+  max over the τ-sweep and candidate A, so it is never looser than candidate A and
+  never above the optimum; incumbents remain independently feasibility-verified.
+  Acceptance met: hda reports a **tight** finite dual bound ≈ −6.45e4 (vs candidate
+  A's −1.80e10; true root McCormick value ≈ −6.47e4), sound (≤ opt −5964.53).
+- **Corpus-wide differential panel (graduation gate, before any default-ON):** not
+  run here (the in-repo run needs the full MINLPLib corpus and a longer budget). The
+  flag stays **default-OFF** pending that panel — this change delivers the sound,
+  tight bound under the opt-in flag, per the bound-changing regime.
 
 ## Scope honesty
 
