@@ -326,15 +326,29 @@ already computes a Neumaier–Shcherbina directed-rounding safe bound
 (`_jax/mccormick_lp.py`, `safe_bound`) — the sound float→rational rounding the
 emitter uses so `Aᵀy=c` holds exactly (or is relaxed to the safe side).
 
-**Remaining engineering (the emitter/recorder).** Unlike Tiers 1–2, whose data is
-already on `SolveResult`, Tier-3 needs per-leaf data the solver currently discards.
-An opt-in **recorder** (default OFF, bound-neutral) must retain, per fathomed leaf:
-the box, fathom reason, the McCormick LP dual / Farkas ray, and the branch
-decisions — hooking `TreeManager::process_evaluated`
-(`crates/discopt-core/src/bnb/tree_manager.rs`) and the `MccormickLPResult`
-marginals (`dual`, `reduced_costs`, `safe_bound`). Then `build_bnb_certificate`
-serializes the tree + duals, and `check_bnb_certificate` composes the shipped
-kernel (covering → per-leaf `certified_leaf_bound`/Farkas → `L` vs incumbent).
+**The tree recorder (built).** Unlike Tiers 1–2, whose data is already on
+`SolveResult`, Tier-3 needs the tree the solver discards. Rather than hook every
+branch path, the recorder exploits the fact that the `NodePool` *retains every node
+ever created* (parent, box, `local_lower_bound`, terminal status): `TreeManager::
+tree_records()` (`crates/discopt-core/src/bnb/tree_manager.rs`) snapshots the whole
+pool **read-only after the solve** — zero hot-path bookkeeping, byte-identical
+search whether or not a certificate is requested (bound-neutral by construction).
+The `PyTreeManager.tree_records()` binding surfaces it to Python, and
+`certificate/bnb_record.py` reconstructs the nested tree, **deriving each branch's
+split variable and point from the parent-vs-child box difference** (the recorder
+stores no branch metadata) and running `check_tree_covers`. Cargo tests
+(`tree_records_*`) and `test_certificate_bnb_record.py` verify it end-to-end
+(root-only, an integer branch, a 2-level spatial tree, and gap rejection).
+
+**Remaining engineering.** Two pieces close the loop: (1) stash `tree_records()` on
+`SolveResult` from `solver.py`'s B&B loop behind the `emit_certificate` flag (the
+recorder is reachable; only the local `tree` handle needs surfacing); (2) capture
+the per-leaf **McCormick LP dual / Farkas ray** — already computed on
+`MccormickLPResult` (`_jax/mccormick_lp.py`: `dual`, `reduced_costs`, the
+Neumaier–Shcherbina `safe_bound`) but discarded — keyed by node id. Then
+`build_bnb_certificate` serializes tree + duals and `check_bnb_certificate` composes
+the shipped kernel (covering → per-leaf `certified_leaf_bound`/Farkas → `L` vs
+incumbent).
 
 **Lean obligations.** Encouragingly, most of Tier 3 is **Lean-core (no Mathlib)**:
 `LPDuality.lean` (weak duality is exact linear algebra over `Rat`) and
@@ -344,9 +358,12 @@ McCormick bilinear/square validity is provable over an ordered field (`Rat`). So
 only the transcendental envelopes (`exp`/`log`/…) pull in Mathlib. `bnb.py` is the
 executable specification those Lean checkers must match.
 
-**As-built (this change).** `certificate/bnb.py` (covering, McCormick
-bilinear/square, LP weak duality, Farkas, `certified_leaf_bound`) and
-`python/tests/test_certificate_bnb.py` (7 tests: covering accept/reject, envelope
-validity, weak-duality bound, unsound-cut rejection, Farkas). The full
-recorder/emitter and `check_bnb_certificate` composition are scoped above as the
-next step.
+**As-built.** (1) The checker kernel — `certificate/bnb.py` (covering, McCormick
+bilinear/square, LP weak duality, Farkas, `certified_leaf_bound`) +
+`test_certificate_bnb.py` (7 tests). (2) The **Rust tree recorder** —
+`TreeManager::tree_records()` + `NodeRecord` (`crates/discopt-core/src/bnb/`), the
+`PyTreeManager.tree_records()` PyO3 binding, `certificate/bnb_record.py`
+(reconstruct + derive splits + covering), with cargo tests (`tree_records_*`, 97
+bnb tests green) and `test_certificate_bnb_record.py` (5 tests). The `solver.py`
+stash + per-leaf LP-dual capture + `build_bnb_certificate`/`check_bnb_certificate`
+composition are the next step (scoped above).

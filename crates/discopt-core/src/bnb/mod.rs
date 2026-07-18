@@ -18,4 +18,6 @@ pub use branching::{BranchDecision, Pseudocosts, VarBranchInfo};
 pub use in_tree_presolve::{run_in_tree_presolve, InTreeDelta, InTreePresolveOptions};
 pub use node::{Node, NodeId, NodeStatus};
 pub use pool::{NodePool, SelectionStrategy};
-pub use tree_manager::{ExportBatch, NodeResult, ProcessingStats, TreeManager, TreeStats};
+pub use tree_manager::{
+    ExportBatch, NodeRecord, NodeResult, ProcessingStats, TreeManager, TreeStats,
+};

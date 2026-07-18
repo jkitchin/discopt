@@ -78,6 +78,32 @@ pub struct TreeStats {
     pub unresolved_floor: f64,
 }
 
+/// A read-only snapshot of one B&B tree node, for Tier-3 certificate export.
+///
+/// The pool retains every node it ever created (with its parent, box, relaxation
+/// lower bound, and terminal status), so the full search tree can be exported
+/// after a solve with no per-node bookkeeping during the search — the recorder is
+/// bound-neutral by construction. Python reconstructs the branch decisions from
+/// the parent-vs-child box differences and checks the covering (see
+/// `python/discopt/certificate/bnb_record.py`).
+#[derive(Debug, Clone)]
+pub struct NodeRecord {
+    /// Node id (index into the pool, root = 0).
+    pub id: usize,
+    /// Parent node id (`None` for the root).
+    pub parent: Option<usize>,
+    /// Depth in the tree (root = 0).
+    pub depth: usize,
+    /// Variable lower bounds defining this node's box.
+    pub lb: Vec<f64>,
+    /// Variable upper bounds defining this node's box.
+    pub ub: Vec<f64>,
+    /// Relaxation lower bound established at this node (`-inf` if never solved).
+    pub local_lower_bound: f64,
+    /// Terminal status: whether the node was branched, pruned, fathomed, ….
+    pub status: NodeStatus,
+}
+
 /// Internal buffer for results waiting to be processed.
 #[derive(Debug, Clone)]
 struct PendingResult {
@@ -910,6 +936,28 @@ impl TreeManager {
     /// simplex MILP driver. `None` if the node has no inherited basis (root).
     pub fn node_basis(&self, id: NodeId) -> Option<crate::lp::basis::Basis> {
         self.pool.get(id).basis.clone()
+    }
+
+    /// Export the entire B&B tree as a list of [`NodeRecord`]s (Tier-3 certificate
+    /// support). Read-only: it snapshots the retained node pool and touches no
+    /// search state, so it is safe to call after a solve and costs nothing unless
+    /// called — the search path is byte-identical whether or not a certificate is
+    /// requested (bound-neutral). Records are in `NodeId` order (parents precede
+    /// children, since ids are assigned at creation).
+    pub fn tree_records(&self) -> Vec<NodeRecord> {
+        self.pool
+            .nodes()
+            .iter()
+            .map(|n| NodeRecord {
+                id: n.id.0,
+                parent: n.parent.map(|p| p.0),
+                depth: n.depth,
+                lb: n.lb.clone(),
+                ub: n.ub.clone(),
+                local_lower_bound: n.local_lower_bound,
+                status: n.status,
+            })
+            .collect()
     }
 
     /// Store a node's optimal basis before it is branched, so its children
@@ -1754,5 +1802,62 @@ mod tests {
         tm.process_evaluated();
         assert_eq!(tm.incumbent().map(|(_, v)| v), Some(2.0));
         assert!(tm.is_finished());
+    }
+
+    #[test]
+    fn tree_records_root_only_after_init() {
+        let mut tm = TreeManager::new(
+            2,
+            vec![0.0, 0.0],
+            vec![1.0, 1.0],
+            simple_integer_vars(),
+            SelectionStrategy::BestFirst,
+        );
+        tm.initialize();
+        let recs = tm.tree_records();
+        assert_eq!(recs.len(), 1);
+        assert_eq!(recs[0].id, 0);
+        assert_eq!(recs[0].parent, None);
+        assert_eq!(recs[0].depth, 0);
+        assert_eq!(recs[0].lb, vec![0.0, 0.0]);
+        assert_eq!(recs[0].ub, vec![1.0, 1.0]);
+    }
+
+    #[test]
+    fn tree_records_capture_branch_children_boxes() {
+        // A fractional integer variable at the root (is_feasible=false, so the
+        // node is NOT fathomed as integer-feasible) forces a branch on var 0; the
+        // two children must split the root box at floor/ceil of 0.5.
+        let mut tm = TreeManager::new(
+            2,
+            vec![0.0, 0.0],
+            vec![1.0, 1.0],
+            simple_integer_vars(),
+            SelectionStrategy::BestFirst,
+        );
+        tm.initialize();
+        let batch = tm.export_batch(1);
+        tm.import_results(&[NodeResult {
+            node_id: batch.node_ids[0],
+            lower_bound: 1.0,
+            solution: vec![0.5, 0.0], // var 0 fractional
+            is_feasible: false,       // not integer-feasible -> branch, don't fathom
+        }]);
+        tm.process_evaluated();
+
+        let recs = tm.tree_records();
+        assert_eq!(recs.len(), 3, "root + two children");
+        assert_eq!(recs[0].status, NodeStatus::Branched);
+        assert_eq!(recs[1].parent, Some(0));
+        assert_eq!(recs[2].parent, Some(0));
+        // Children differ from the root box in exactly column 0 (the branch var):
+        // one gets ub[0]=0 (x0<=floor 0.5), the other lb[0]=1 (x0>=ceil 0.5).
+        let ubs = [recs[1].ub[0], recs[2].ub[0]];
+        let lbs = [recs[1].lb[0], recs[2].lb[0]];
+        assert!(ubs.contains(&0.0), "a child should have ub[0]=0, got {ubs:?}");
+        assert!(lbs.contains(&1.0), "a child should have lb[0]=1, got {lbs:?}");
+        // Column 1 is untouched by the branch.
+        assert_eq!(recs[1].lb[1], 0.0);
+        assert_eq!(recs[1].ub[1], 1.0);
     }
 }

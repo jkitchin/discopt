@@ -195,6 +195,16 @@ impl NodePool {
     pub fn total_count(&self) -> usize {
         self.nodes.len()
     }
+
+    /// Read-only view of every node ever created, in `NodeId` order.
+    ///
+    /// The pool retains all nodes for the life of the search, so this is the
+    /// authoritative record of the B&B tree topology (parents, boxes, bounds,
+    /// status). Used by [`super::tree_manager::TreeManager::tree_records`] to
+    /// export a Tier-3 certificate tree without any hot-path bookkeeping.
+    pub fn nodes(&self) -> &[Node] {
+        &self.nodes
+    }
 }
 
 #[cfg(test)]
