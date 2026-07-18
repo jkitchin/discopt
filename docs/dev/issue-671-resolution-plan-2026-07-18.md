@@ -123,7 +123,28 @@ row-filter-related changes. Specifically it must NOT revert any of `main`'s
 
 If any of those appear in the diff, the port is wrong — redo it.
 
-## 3. Step 2 — verify the design assumptions on today's tree
+## 3. Step 2 — verify the design assumptions on today's tree ✅ DONE
+
+**Status: complete.** All four checks pass on the ported tree:
+1. **Node-locality** ✓ — the cold path builds a fresh `milp` per node
+   (`mccormick_lp.py:1198`); `_filter_unresolvable_rows` mutates that local
+   object; the "pool" is per-node appended cut rows on the same fresh milp, not
+   shared state.
+2. **Fast-path bypass** ✓ — `_try_incremental_node` returns `None` for every
+   uncertified failure (`time_limit`/`unbounded`/`numerical` → `None` at the
+   tail; uncertified `infeasible` → `_reverify_incremental_infeasible` → `None`).
+   It only ever surfaces `optimal`, Farkas-certified `infeasible`, or
+   `skipped_oversize` (a deliberate size decline, not a numerical failure). So a
+   numerically-failed node always falls through to the cold build where the
+   filter lives — no bypass.
+3. **Re-solve budget** ✓ — the ported block re-solves with `_remaining()`.
+4. **Smoke** ✓ — nvs05/nvs09 byte-identical ON vs OFF (nvs09 keeps the
+   `optimal` certificate the always-on filter had destroyed); hda ON →
+   **−64473.44**, sound (≤ opt −5964.534084) and tight (≫ candidate A's
+   −1.80e10). Flag OFF is byte-identical to `main` by construction (the block
+   is skipped when `relax_row_filter` is False).
+
+## 3b. (superseded) original Step 2 checklist — verify the design assumptions
 
 Cheap checks before running anything heavy:
 
