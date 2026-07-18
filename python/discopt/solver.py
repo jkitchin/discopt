@@ -4172,6 +4172,35 @@ def solve_model_accepted_kwargs() -> frozenset[str]:
 @_scoped_deep_recursion
 @_scoped_tuning
 @_debug_outermost_solve
+def _cert_record_node_dual(store, node_id, mc_res) -> None:
+    """Best-effort capture of a McCormick LP node's dual / safe-bound witness for a
+    Tier-3 certificate (``solve(emit_certificate=True)``).
+
+    A no-op unless recording is on and the relaxer actually populated marginals
+    (``want_marginals=True`` on the incremental fast path). Stores plain JSON-safe
+    lists keyed by node id, so it never holds numpy/relaxer state. Never affects
+    any bound or search decision.
+    """
+    if store is None or mc_res is None:
+        return
+    dual = getattr(mc_res, "dual", None)
+    safe = getattr(mc_res, "safe_bound", None)
+    lb = getattr(mc_res, "lower_bound", None)
+    if dual is None and safe is None and lb is None:
+        return
+    entry: dict = {"status": getattr(mc_res, "status", None)}
+    if dual is not None:
+        entry["dual"] = np.asarray(dual, dtype=np.float64).tolist()
+    rc = getattr(mc_res, "reduced_costs", None)
+    if rc is not None:
+        entry["reduced_costs"] = np.asarray(rc, dtype=np.float64).tolist()
+    if safe is not None:
+        entry["safe_bound"] = float(safe)
+    if lb is not None:
+        entry["lower_bound"] = float(lb)
+    store[int(node_id)] = entry
+
+
 def solve_model(
     model: Model,
     time_limit: float = 3600.0,
@@ -4226,6 +4255,7 @@ def solve_model(
     root_cut_max: Optional[int] = None,
     _lns_enabled: bool = True,
     rens: bool = True,
+    emit_certificate: bool = False,
     **kwargs,
 ) -> SolveResult:
     """
@@ -6911,6 +6941,9 @@ def solve_model(
     )
     tree.initialize()
     rust_time += time.perf_counter() - t_rust_start
+    # Tier-3 certificate: per-node McCormick LP dual/safe-bound witnesses, keyed by
+    # node id. Populated only when emit_certificate is set (bound-neutral otherwise).
+    _cert_node_duals: Optional[dict] = {} if emit_certificate else None
 
     # --- Compile NLP evaluator ---
     t_jax_start = time.perf_counter()
@@ -8880,7 +8913,7 @@ def solve_model(
                             time_limit=max(_node_remaining, _DEADLINE_NODE_FLOOR_S),
                             inherited_cuts=_root_cut_pool,
                             separate=True,
-                            want_marginals=_phase2_dbbt_enabled,
+                            want_marginals=(_phase2_dbbt_enabled or emit_certificate),
                             # THRU-4: with the root pool inherited, skip the per-node
                             # square/PSD point-separation loops (sound: their cut
                             # families are box-independent and already in the pool)
@@ -8894,6 +8927,8 @@ def solve_model(
                     except Exception as e:
                         logger.debug("McCormick LP failed at node %d: %s", i, e)
                         continue
+                    if emit_certificate:
+                        _cert_record_node_dual(_cert_node_duals, batch_ids[i], mc_res)
                     if mc_res.status == "infeasible":
                         # Rigorous fathom: the McCormick LP is a valid outer
                         # relaxation, so an empty relaxed feasible set proves the
@@ -9236,7 +9271,7 @@ def solve_model(
                             time_limit=max(_deadline - time.perf_counter(), _DEADLINE_NODE_FLOOR_S),
                             inherited_cuts=_root_cut_pool,
                             separate=True,
-                            want_marginals=_phase2_dbbt_enabled,
+                            want_marginals=(_phase2_dbbt_enabled or emit_certificate),
                             # THRU-4: with the root pool inherited, skip the per-node
                             # square/PSD point-separation loops (sound: their cut
                             # families are box-independent and already in the pool)
@@ -9250,6 +9285,8 @@ def solve_model(
                     except Exception as e:
                         logger.debug("McCormick LP failed at node %d: %s", int(batch_ids[i]), e)
                         mc_lp_res = None
+                    if emit_certificate and mc_lp_res is not None:
+                        _cert_record_node_dual(_cert_node_duals, batch_ids[i], mc_lp_res)
                     if mc_lp_res is not None and mc_lp_res.status == "infeasible":
                         # The McCormick LP is a valid OUTER relaxation of this
                         # node's subtree: if the (larger) relaxed feasible set is
@@ -11456,6 +11493,8 @@ def solve_model(
         subnlp_calls=_subnlp_calls,
         subnlp_feasible=_subnlp_feasible,
         subnlp_incumbent_updates=_subnlp_incumbent_updates,
+        bnb_tree=(tree.tree_records() if emit_certificate else None),
+        bnb_leaf_duals=(_cert_node_duals if emit_certificate else None),
     )
 
 
