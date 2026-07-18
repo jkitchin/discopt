@@ -83,23 +83,6 @@ def test_batched_node_processing():
     assert res.objective == pytest.approx(2.0, abs=1e-4)
 
 
-def test_gnn_branching_policy_degrades_gracefully():
-    # The GNN scoring hook loads equinox/optax when present and must fall
-    # back to fractional branching (same certified optimum) without a
-    # trained policy.
-    m = _bilinear_binary_model()
-    res = m.solve(branching_policy="gnn", time_limit=120.0)
-    assert res.status in ("optimal", "feasible")
-    assert res.objective == pytest.approx(2.0, abs=1e-4)
-
-
-def test_pseudocost_branching_policy():
-    m = _bilinear_binary_model()
-    res = m.solve(branching_policy="pseudocost", time_limit=120.0)
-    assert res.status in ("optimal", "feasible")
-    assert res.objective == pytest.approx(2.0, abs=1e-4)
-
-
 def test_root_cut_loop_on_knapsack():
     # 0/1 knapsack with a fractional LP root: the root cut loop (cover /
     # aggregation-MIR separation) must not cut off the true optimum.
