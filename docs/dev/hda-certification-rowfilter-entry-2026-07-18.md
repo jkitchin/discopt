@@ -82,41 +82,55 @@ wide row MAY carry tightness elsewhere in the corpus — so the flag ships
 the corpus differential panel (`incorrect_count = 0`, no bound above reference,
 net-positive).
 
-## Implementation (landed same day, default-OFF)
+## Implementation — failure-triggered (default-OFF)
 
 Flag `DISCOPT_RELAX_ROW_FILTER` / `SolverTuning.relax_row_filter` (default OFF).
-`_filter_unresolvable_rows` at the tail of `build_milp_relaxation` — one site
-covering the root build **and** every per-node cold rebuild — drops rows whose
-nonzero |coefficients| exceed 1e8, fall below 1e-8, or span a ratio > 1e6 (the
-entry-experiment-validated criterion; absolute checks first so the ratio test is
-a multiply, no overflow). Container kind (CSR/dense) preserved; empty rows kept
-(a `0 ≤ b < 0` row is a rigorous infeasibility proof). Under the flag the
-incremental McCormick engine's row-for-row self-validation fails on models that
-actually filter rows → those solves take the trusted cold (filtered) build — a
-speed cost only; no-filter models are byte-identical either way.
+`_filter_unresolvable_rows` drops rows whose nonzero |coefficients| exceed 1e8,
+fall below 1e-8, or span a ratio > 1e6 (entry-experiment-validated; absolute
+checks first so the ratio test is an overflow-free multiply). Container kind
+(CSR/dense) preserved; empty rows kept (a `0 ≤ b < 0` row is a rigorous
+infeasibility proof).
 
-**End-to-end measurement** (`dm.from_nl("hda.nl").solve(time_limit=60)`,
-all other #671 flags OFF):
+**The filter fires only when a node LP fails** (`mccormick_lp._solve_at_node_impl`,
+after the primary solve): when the solve returns no certified verdict —
+`numerical`, or a spurious `infeasible` with no Farkas proof — the rows are
+dropped and the node re-solves once. **Not** at build time.
 
-| | bound | mechanism |
-|---|---|---|
-| filter OFF | −1.80e10 | candidate A (drifted dual of a failed LP) |
-| **filter ON** | **−64473.44** | **clean LP solves through the standard path** |
+### Why failure-triggered (the always-on version was measured net-negative)
 
-The tight bound now arrives with *no* rescue stack — no τ-sweep, no NS-from-
-failure, no hardening. (−64473 is slightly tighter than the bare root LP's
-−64675: with clean LP solves, root OBBT/cut machinery does real work.)
+First cut applied the filter always, at the tail of `build_milp_relaxation`. The
+in-repo differential panel (`rowfilter_diff_panel.py`, 66 instances, filter OFF
+vs ON vs known optima) killed it:
 
-**Still open after this lever** (the measured next blockers, unchanged from the
-"revised path" below): the root consumes the whole 60 s budget (presolve ~10 s +
-FBBT + builds + now-working OBBT solves; `root_time ≈ wall`, 3 nodes) and no
-incumbent is found within it. The filter unblocks *clean LP solves*; root
-*throughput* and the incumbent are steps 2–3.
+| panel result | count |
+|---|---|
+| UNSOUND (bound > optimum) | **0** — soundness holds by construction (superset) |
+| bound **loosened** on an already-solving instance | 9 (bchoco07 2.95→1, beuster 11821→6352, ex14_1_9 ≈0→−1.06e6, casctanks 5.70→3.58, …) |
+| **`optimal` certificate LOST** | 1 — **nvs09** dropped `optimal`→`feasible` |
 
-Regression tests: `python/tests/test_relax_row_filter.py` (flag default-off;
-dense+sparse helper behavior incl. kind preservation and empty-row keep; no-op
-on well-conditioned matrices; slow: hda tight+sound end-to-end, alan/ex1221
-byte-identical ON vs OFF).
+Sound but net-negative: those rows are float64-intractable *yet carry genuine
+tightness* on non-hda instances. Firing only on a failed solve makes the flag
+**byte-identical on every already-solving node** (its LP is
+`optimal`/Farkas-`infeasible`, so the filter never runs) — which is exactly what
+#671's acceptance ("`node_count`/`objective` exactly unchanged on already-solving
+instances") requires — while still recovering hda (its root LP false-fails → the
+filter fires → clean solve, tight bound). Re-running the panel with the
+failure-triggered filter is cert-clean with zero regressions.
+
+**End-to-end** (`dm.from_nl("hda.nl").solve(time_limit=60)`, other flags OFF):
+filter OFF → −1.80e10 (candidate A); **filter ON → −64473**, via clean LP solves
+on the failed root node, no other rescue stack.
+
+**Still open after this lever** (the certification remainder, below): the root
+consumes the whole budget (presolve + FBBT + builds; `root_time ≈ wall`, ~3
+nodes) and no incumbent is found within it. The filter unblocks *clean LP
+solves*; root *throughput* and the incumbent are steps 2–3.
+
+Regression tests: `python/tests/test_relax_row_filter.py` — flag default-off;
+dense+sparse helper behavior (kind preservation, empty-row keep, no-op on
+well-conditioned matrices); slow: hda tight+sound end-to-end, and byte-identical
+ON vs OFF on alan/ex1221 **plus the previously-regressing nvs09/bchoco07/beuster/
+casctanks**.
 
 ## Revised path to hda certification
 
