@@ -136,14 +136,16 @@ class SolverTuning:
 
     # --- #671 float64-intractable-row filter (hda certification path) ----------
     relax_row_filter: bool = field(
-        default_factory=lambda: _env_flag("DISCOPT_RELAX_ROW_FILTER", default=False)
+        default_factory=lambda: _env_flag("DISCOPT_RELAX_ROW_FILTER", default=True)
     )
-    """**Failure-triggered**: when a node LP breaks down without a certified
+    """**Failure-triggered**, **default ON** (#671 graduated 2026-07-18; opt out
+    with ``DISCOPT_RELAX_ROW_FILTER=0``). When a node LP breaks down without a
+    certified
     verdict (`numerical`, or a spurious `infeasible` with no Farkas proof — the
     hda-class ill-conditioned relaxations), drop the rows whose coefficients
     float64 cannot resolve at the feasibility tolerance (nonzero |coefficients|
     spanning > 1e6 orders, or outside ``[1e-8, 1e8]``) and re-solve once
-    (``DISCOPT_RELAX_ROW_FILTER``, default OFF — issue #671). Fires in
+    (``DISCOPT_RELAX_ROW_FILTER``, default ON — issue #671). Fires in
     ``mccormick_lp._solve_at_node_impl`` after the primary solve; **not** at build
     time. **Sound by construction**: removing relaxation rows yields a superset
     feasible region — a valid (weaker) outer approximation; the bound can only
@@ -160,8 +162,20 @@ class SolverTuning:
     float64-intractable rows (raw spread 2.837e26, κ≈1e14; measured to carry ZERO
     root tightness), and the in-house simplex then solves cleanly with the tight
     NS-certified bound — no τ-sweep, no factorization hardening, no external
-    solver. Still §5 bound-changing / default OFF pending the full-corpus panel.
-    See ``docs/dev/hda-certification-rowfilter-entry-2026-07-18.md``."""
+    solver.
+
+    **Graduated default-ON** (§5, 2026-07-18): the graduation panel over the
+    66-instance in-repo corpus + hda is cert-clean — every already-solving
+    instance is byte-identical (the filter is inert there: ``rows_dropped == 0``,
+    proven directly rather than via the noisy, non-deterministic ``node_count``
+    proxy) — and net-positive (hda ``−1.80e10 → −64473.44``, sound ≤ opt). Sound
+    SOFT losses (looser *partial* bounds when the filter fires on both-arms-
+    timeout ill-conditioned instances, e.g. bchoco07/08) are acceptable per the
+    §5 net-positive rule; a scoped interval-fallback max-combine on filtered nodes
+    is the recorded follow-up tightening. Opt out with
+    ``DISCOPT_RELAX_ROW_FILTER=0`` (the legacy no-filter path is intact). See
+    ``docs/dev/hda-certification-rowfilter-entry-2026-07-18.md`` and
+    ``docs/dev/issue-671-resolution-plan-2026-07-18.md``."""
 
     # --- #309 sharp NS safe-bound margin ---------------------------------------
     ns_sharp_margin: bool = field(

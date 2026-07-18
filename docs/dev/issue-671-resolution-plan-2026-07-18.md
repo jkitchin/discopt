@@ -199,7 +199,12 @@ Cheap checks before running anything heavy:
 - `cargo test -p discopt-core` (no Rust change expected in the port; run it
   anyway — the refine/regularized_lu modules live there)
 
-## 5. Step 4 — re-run the owner's graduation panel ⏳ IN PROGRESS
+## 5. Step 4 — re-run the owner's graduation panel ✅ DONE → GRADUATE
+
+**Final verdict: GRADUATE** (corrected assessment over the 18c measured data:
+n_cert_fail=0, cert_clean=True, hda_ok=True, net_positive=True). Owner ratified
+default-ON graduation (2026-07-18) after being shown the assessment correction
+and the SOFT-loss disposition.
 
 **Run 2026-07-18b (first re-run, HOLD — one artifact):** 66-instance corpus +
 hda, OFF vs ON, corpus TL 60 s / hda TL 120 s. Result: hda CLEAN and delivering
@@ -258,15 +263,32 @@ failure-triggered design makes inert *by construction*: their node LPs solve
 in the verdict doc with their bound deltas — the prior failure-triggered
 panel saw 7 (hda huge gain; bchoco/casctanks losses).
 
-**On SOFT losses:** they arise where a failed node's filtered re-solve yields
-a bound looser than the fallback bound the node would otherwise have reported.
-If bchoco/casctanks-style losses persist and look material, the surgical fix
-is to make the lever **monotone**: accept the filtered re-solve's bound only
-via max-combine with whatever bound the failure path already produces (both
-are valid lower bounds, so `max` is rigorously sound — the same "max of valid
-bounds" argument the τ-sweep uses). That turns net-positive from a judgment
-call into a structural property. Implement it only if the panel shows the
-need; re-run the panel after.
+**On SOFT losses — MECHANISM DIAGNOSED (2026-07-18):** the bchoco07/08 SOFT
+losses (partial dual bound 2.95→1.0 at timeout) come from a **sentinel-gate
+interaction in the driver's node-bound aggregation**, not from an unsound
+filter. `solver.py:7949-7984` max-combines the McCormick node bound with the
+alphaBB and interval-arithmetic fallbacks, **but only `if result_lbs[i] <
+_SENTINEL_THRESHOLD`** — i.e. only when the LP produced no finite bound. On
+bchoco07 OFF the node LP fails numerically → sentinel → the interval fallback
+fires → 2.95. ON, the filtered LP returns a finite (weaker) 1.0 ≥ threshold →
+the gate **skips** the interval fallback → 1.0. The filter, by turning a
+numerical failure into a finite-but-looser LP bound, suppresses the tighter
+interval fallback that the failure path would have used.
+
+- **Soundness:** unaffected — 1.0 is a valid lower bound (superset relaxation);
+  no false/looser-than-optimum bound anywhere in the panel.
+- **Graduation decision:** the owner's own harness defines
+  `net_positive = hda_ok and cert_clean` and **explicitly deems SOFT-looser-on-
+  timeout acceptable** ("Looser *partial* bounds on instances that time out in
+  BOTH arms are sound SOFT changes … acceptable per the task"). By that encoded
+  criterion the corrected panel GRADUATES (cert_clean after the non-determinism
+  fix, hda_ok). So the SOFT losses do **not** block default-ON.
+- **The monotone tightening (follow-up, not a blocker):** the principled removal
+  of the SOFT losses is to let the interval/alphaBB fallback still max-combine on
+  **filtered nodes only** (scoped so already-solving nodes stay byte-identical) —
+  `max` of valid lower bounds, rigorously sound. It touches the hot driver
+  bound-loop and needs its own bound-neutral panel, so it is recorded as a
+  follow-up tightening rather than gating this graduation.
 
 ## 6. Step 5 — graduate and protect
 

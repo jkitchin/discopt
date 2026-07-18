@@ -29,11 +29,13 @@ _FLAG = "DISCOPT_RELAX_ROW_FILTER"
 _HDA_OPT = -5964.534084  # published MINLPLib global optimum
 
 
-def test_flag_defaults_off(monkeypatch):
-    """Bound-changing lever ships default OFF (Dev-Philosophy #5); ``=1`` enables."""
+def test_flag_defaults_on(monkeypatch):
+    """Graduated default ON (#671, 2026-07-18); ``=0`` opts out."""
     monkeypatch.delenv(_FLAG, raising=False)
     from discopt.solver_tuning import SolverTuning
 
+    assert SolverTuning().relax_row_filter is True
+    monkeypatch.setenv(_FLAG, "0")
     assert SolverTuning().relax_row_filter is False
     monkeypatch.setenv(_FLAG, "1")
     assert SolverTuning().relax_row_filter is True
@@ -88,11 +90,12 @@ def test_filter_noop_on_well_conditioned_matrix():
 
 
 @pytest.mark.slow
-def test_hda_certifies_a_tight_bound_with_the_filter(monkeypatch):
-    """End-to-end: with the filter ON, hda's node LPs solve cleanly and the
-    reported dual bound is the tight root-relaxation value (≈ −6.47e4 or better
-    via branching) instead of candidate A's −1.80e10 — while staying sound."""
-    monkeypatch.setenv(_FLAG, "1")
+def test_hda_certifies_a_tight_bound_at_default(monkeypatch):
+    """End-to-end at DEFAULT settings (#671 graduated the filter ON): hda's node
+    LPs solve cleanly and the reported dual bound is the tight root-relaxation
+    value (≈ −6.47e4 or better via branching) instead of candidate A's −1.80e10,
+    while staying sound."""
+    monkeypatch.delenv(_FLAG, raising=False)  # rely on the graduated default (ON)
     r = dm.from_nl(os.path.join(_NL_DATA, "hda.nl")).solve(time_limit=60)
     assert r.bound is not None and math.isfinite(r.bound), f"no finite bound: {r.bound}"
     # Sound: never above the published optimum.
@@ -100,6 +103,23 @@ def test_hda_certifies_a_tight_bound_with_the_filter(monkeypatch):
     # Tight: at or above the true root McCormick value (−64675.25 − slack); far
     # above candidate A's −1.80e10 floor.
     assert r.bound >= -7e4, f"bound {r.bound:.6g} not the tight root value"
+
+
+@pytest.mark.slow
+def test_hda_optout_restores_loose_candidate_a_floor(monkeypatch):
+    """The ``=0`` opt-out restores the legacy no-filter path: hda's ill-conditioned
+    root LP false-fails and the reported bound falls back to candidate A's loose
+    floor (≪ −1e7), never the tight value. Proves the legacy path is intact and
+    the graduated behavior is genuinely gated (not hardcoded)."""
+    monkeypatch.setenv(_FLAG, "0")
+    r = dm.from_nl(os.path.join(_NL_DATA, "hda.nl")).solve(time_limit=60)
+    # Sound either way; the point is the bound is the LOOSE floor without the filter.
+    if r.bound is not None and math.isfinite(r.bound):
+        assert r.bound <= _HDA_OPT + 1e-2, f"UNSOUND: bound {r.bound:.6g} > opt {_HDA_OPT}"
+        assert r.bound < -1e7, (
+            f"opt-out bound {r.bound:.6g} is unexpectedly tight — the legacy "
+            "no-filter path should give the loose candidate-A floor"
+        )
 
 
 @pytest.mark.slow
