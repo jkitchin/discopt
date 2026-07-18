@@ -136,6 +136,77 @@ class SolverTuning:
     rlt_quad: bool = field(default_factory=lambda: _env_flag("DISCOPT_RLT_QUAD", default=True))
     """Quadratic RLT row generation (``DISCOPT_RLT_QUAD``, default on)."""
 
+    rlt_sparse_auto: bool = field(
+        default_factory=lambda: _env_flag("DISCOPT_RLT_SPARSE_AUTO", default=False)
+    )
+    """Structure-aware widening of the RLT auto-engage gate for **sparse-bilinear**
+    models (``DISCOPT_RLT_SPARSE_AUTO``, default **off**; issue #727).
+
+    The default RLT auto policy gates build-time level-1 RLT and the per-node RLT
+    cut family on a raw *variable count* (``_AUTO_RLT_LEVEL1_MAX_VARS`` /
+    ``_AUTO_CUTS_MAX_VARS`` in ``solver.py``). That is a poor cost proxy: RLT's cost
+    is driven by the number of lifted product columns / rows, not the variable count.
+    A pooling / bilinear-flow network has a *sparse* bilinear structure — the number
+    of product terms grows ~linearly with the variable count — so its RLT relaxation
+    stays small and solvable well past the raw-count cap, while a *dense* QCQP grows
+    its products quadratically and is correctly excluded.
+
+    When on, the auto gate additionally admits a model whose product-term count is
+    within ``rlt_sparse_max_terms`` AND whose variable count is within
+    ``rlt_sparse_max_vars`` — the sparse-bilinear envelope. RLT is always sound (a
+    constraint×bound-factor product is non-negative at every feasible point), so this
+    only ever trades relaxation size for bound tightness, never correctness.
+    Bound-changing → default-off pending the corpus-wide differential graduation panel
+    (see ``docs/dev/performance-plan.md``)."""
+
+    rlt_sparse_max_vars: int = field(
+        default_factory=lambda: _env_int("DISCOPT_RLT_SPARSE_MAX_VARS", 200)
+    )
+    """Variable-count ceiling for the sparse-bilinear RLT widening
+    (``DISCOPT_RLT_SPARSE_MAX_VARS``, default 200). Bounds the per-node re-solve cost
+    of the enlarged relaxation when a model does not close at the root. Only consulted
+    when ``rlt_sparse_auto`` is on."""
+
+    rlt_sparse_max_terms: int = field(
+        default_factory=lambda: _env_int("DISCOPT_RLT_SPARSE_MAX_TERMS", 300)
+    )
+    """Product-term (lifted-column) budget for the sparse-bilinear RLT widening
+    (``DISCOPT_RLT_SPARSE_MAX_TERMS``, default 300). Counts bilinear + trilinear +
+    multilinear product terms; caps the RLT relaxation size directly, so a dense QCQP
+    (products ~ n^2) is excluded while a sparse pooling network (products ~ n) is
+    admitted. Only consulted when ``rlt_sparse_auto`` is on."""
+
+    rlt_sparse_root_probe: bool = field(
+        default_factory=lambda: _env_flag("DISCOPT_RLT_SPARSE_ROOT_PROBE", default=True)
+    )
+    """Root-**productivity** gate on the sparse-bilinear RLT widening
+    (``DISCOPT_RLT_SPARSE_ROOT_PROBE``, default **on** when ``rlt_sparse_auto`` is on;
+    issue #727).
+
+    Structure alone is *necessary but not sufficient*: a sparse-bilinear model is
+    only worth the enlarged per-node relaxation if RLT actually **tightens the root
+    bound**. RLT helps precisely when it closes / near-closes the root (a pooling
+    network — RLT is paid once and the tree collapses); it is net-*negative* when the
+    root stays open (a heat-exchanger network — the heavier node LP just starves
+    branching and the incumbent search, with no bound gain). Measured root gain
+    ``|b_rlt − b_noRLT| / (|b_noRLT| + 1)``: pooling ≈ 0.68, heatexch ≈ 1e-11 — ten
+    orders of magnitude apart.
+
+    When on, the widening additionally requires a bounded root probe to show a
+    relative root-bound improvement ≥ ``rlt_sparse_min_root_gain``. The probe solves
+    the root McCormick LP with and without RLT once at setup (cheap: the size ceiling
+    keeps it small); on any probe failure the widening is *declined* (never regress the
+    default). Set to off to recover the structure-only gate (for A/B)."""
+
+    rlt_sparse_min_root_gain: float = field(
+        default_factory=lambda: _env_float("DISCOPT_RLT_SPARSE_MIN_ROOT_GAIN", 1e-2)
+    )
+    """Minimum relative root-bound improvement for the productivity gate to engage the
+    sparse RLT widening (``DISCOPT_RLT_SPARSE_MIN_ROOT_GAIN``, default 1e-2 = 1%). The
+    RLT-inert vs RLT-productive populations are ~10 orders of magnitude apart
+    (heatexch 1e-11 vs pooling 0.68), so the exact value is not sensitive; 1% requires
+    a real, non-noise tightening. Only consulted when ``rlt_sparse_root_probe`` is on."""
+
     rlt_quad_max: int = field(default_factory=lambda: _env_int("DISCOPT_RLT_QUAD_MAX", 256))
     """Column cap for quadratic RLT (``DISCOPT_RLT_QUAD_MAX``, default 256)."""
 
@@ -612,6 +683,14 @@ class SolverTuning:
     def __post_init__(self) -> None:
         if self.rlt_quad_max < 1:
             raise ValueError(f"rlt_quad_max must be >= 1, got {self.rlt_quad_max}")
+        if self.rlt_sparse_max_vars < 1:
+            raise ValueError(f"rlt_sparse_max_vars must be >= 1, got {self.rlt_sparse_max_vars}")
+        if self.rlt_sparse_max_terms < 1:
+            raise ValueError(f"rlt_sparse_max_terms must be >= 1, got {self.rlt_sparse_max_terms}")
+        if self.rlt_sparse_min_root_gain < 0:
+            raise ValueError(
+                f"rlt_sparse_min_root_gain must be >= 0, got {self.rlt_sparse_min_root_gain}"
+            )
         if self.multilinear_rlt_max < 1:
             raise ValueError(f"multilinear_rlt_max must be >= 1, got {self.multilinear_rlt_max}")
         if self.node_nlp_stride < 1:
