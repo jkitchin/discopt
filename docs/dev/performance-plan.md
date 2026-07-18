@@ -736,6 +736,40 @@ Stage 0 (gate) ─► Stage 1 (kill recompilation — the dominant measured cost
 > `rlt_sparse_max_vars` (200; a ceiling on the enlarged per-node re-solve cost).
 > `solver._rlt_sparse_admit` implements the gate; flag OFF ⇒ byte-identical dispatch.
 >
+> **Follow-up measurement (2026-07-18) — structure alone is NOT sufficient; the
+> productivity gate.** Surveyed the in-repo instances for an independent
+> sparse-bilinear family to validate the class-level fix. Found the heat-exchanger
+> network-synthesis family (`heatexch_gen{1,2,3}`: nonconvex, sparse bilinear —
+> gen1 32 bilin / 112 vars, gen2 40 / 148) — *and RLT is net-**negative** there*:
+>
+> | instance | default | structure-only gate ON |
+> |---|---|---|
+> | heatexch_gen1 | bound 41621 (31 nodes) | **looser** 38183 (3 nodes) |
+> | heatexch_gen2 | incumbent 824551 (feasible) | **incumbent lost** (`obj=None`) |
+>
+> Root-bound probe (single-node LP, RLT off vs on) explains it — the relative root
+> gain `|b_rlt − b_noRLT| / (|b_noRLT| + 1)` splits the two families by **ten orders
+> of magnitude**:
+>
+> | model | root LB no-RLT | root LB +RLT | relative root gain |
+> |---|---|---|---|
+> | pooling (kpool12) | −15000 | **−4800** (= optimum) | **0.68** |
+> | heatexch_gen1 | 38183.53174599 | 38183.53174550 | 1.3e-11 |
+> | heatexch_gen2 | 543496.0185139 | 543496.0185124 | 2.6e-12 |
+>
+> RLT helps *iff it closes / near-closes the root* (pooling: paid once, tree
+> collapses); when the root stays open (heatexch) the heavier node LP only starves
+> branching. This is the `DISCOPT_CUT_INHERIT` lesson again (sound ≠ helpful).
+>
+> **Refinement:** `rlt_sparse_root_probe` (`DISCOPT_RLT_SPARSE_ROOT_PROBE`, default ON
+> when the widening is on) adds a **productivity** condition on top of structure — a
+> bounded root probe (`solver._rlt_root_gain`, memoized once per solve) must show a
+> relative root gain ≥ `rlt_sparse_min_root_gain` (`DISCOPT_RLT_SPARSE_MIN_ROOT_GAIN`,
+> default 1e-2). Pooling (0.68) engages; heatexch (~1e-11) declines and falls back to
+> the exact default path — no regression. On any probe failure the widening is
+> declined (never regress). Verified: kpool8/12 still certify at the root; heatexch
+> gen1/gen2 match their default runs bit-for-bit in behavior.
+>
 > **Soundness:** RLT is valid regardless of engagement (a constraint×bound-factor
 > product is non-negative at every feasible point), so this only ever trades
 > relaxation size for bound tightness — `incorrect_count` cannot change, and the

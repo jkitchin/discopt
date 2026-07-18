@@ -28,6 +28,8 @@ These tests exercise:
 
 from __future__ import annotations
 
+import os
+
 import discopt.modeling as dm
 import numpy as np
 import pytest
@@ -84,6 +86,9 @@ def test_flag_defaults_off():
     assert tun.rlt_sparse_auto is False
     assert tun.rlt_sparse_max_vars == 200
     assert tun.rlt_sparse_max_terms == 300
+    # Productivity gate defaults: on, with a 1% relative-root-gain threshold.
+    assert tun.rlt_sparse_root_probe is True
+    assert tun.rlt_sparse_min_root_gain == 1e-2
 
 
 def test_admit_gate_noop_when_flag_off():
@@ -99,14 +104,15 @@ def test_admit_gate_noop_when_flag_off():
         reset_current(tok)
 
 
-def test_admit_gate_accepts_sparse_pooling_when_on():
-    """A medium sparse-bilinear pooling model (above the raw caps) is admitted."""
+def test_admit_gate_accepts_sparse_pooling_structure_only():
+    """A medium sparse-bilinear pooling model (above the raw caps) passes the
+    *structure* gate (probe disabled to isolate structure)."""
     from discopt.solver import _AUTO_RLT_LEVEL1_MAX_VARS, _rlt_sparse_admit
 
     m = _kblock_haverly(12)
     n_vars = sum(v.size for v in m._variables)
     assert n_vars > _AUTO_RLT_LEVEL1_MAX_VARS  # excluded by the raw cap
-    tok = set_current(SolverTuning(rlt_sparse_auto=True))
+    tok = set_current(SolverTuning(rlt_sparse_auto=True, rlt_sparse_root_probe=False))
     try:
         assert _rlt_sparse_admit(m, n_vars) is True
     finally:
@@ -135,6 +141,97 @@ def test_admit_gate_rejects_oversize_vars_when_on():
     tok = set_current(SolverTuning(rlt_sparse_auto=True, rlt_sparse_max_vars=50))
     try:
         assert _rlt_sparse_admit(m, n_vars) is False
+    finally:
+        reset_current(tok)
+
+
+# ---------------------------------------------------------------------------
+# Productivity gate (issue #727 follow-up): structure alone is not sufficient —
+# RLT must actually tighten the root, else it is sound-but-net-negative (heatexch).
+# ---------------------------------------------------------------------------
+
+_HEATEXCH = os.path.join(os.path.dirname(__file__), "data", "minlplib_nl", "heatexch_gen1.nl")
+
+
+def test_productivity_probe_large_gain_on_pooling():
+    """The root probe reports a large relative root gain for pooling (RLT closes the
+    root), so the productivity gate admits it."""
+    from discopt.solver import _rlt_root_gain, _rlt_sparse_admit
+
+    m = _kblock_haverly(12)
+    n_vars = sum(v.size for v in m._variables)
+    gain = _rlt_root_gain(m)
+    assert gain is not None and gain > 0.1  # measured ~0.68 (RLT closes the root)
+    tok = set_current(SolverTuning(rlt_sparse_auto=True))  # probe ON (default)
+    try:
+        assert _rlt_sparse_admit(m, n_vars) is True
+    finally:
+        reset_current(tok)
+
+
+def test_probe_failure_declines(monkeypatch):
+    """A probe that cannot compute a gain (returns None) declines the widening —
+    never regress the default path."""
+    import discopt.solver as solver_mod
+
+    monkeypatch.setattr(solver_mod, "_rlt_root_gain", lambda _m: None)
+    solver_mod._RLT_ROOT_GAIN_CACHE.clear()
+    m = _kblock_haverly(12)
+    n_vars = sum(v.size for v in m._variables)
+    tok = set_current(SolverTuning(rlt_sparse_auto=True))
+    try:
+        assert solver_mod._rlt_sparse_admit(m, n_vars) is False
+    finally:
+        reset_current(tok)
+        solver_mod._RLT_ROOT_GAIN_CACHE.clear()
+
+
+def test_probe_disabled_recovers_structure_only(monkeypatch):
+    """With the probe disabled, structure alone governs — even a would-be-inert
+    model (gain forced to ~0) is admitted on structure."""
+    import discopt.solver as solver_mod
+
+    monkeypatch.setattr(solver_mod, "_rlt_root_gain", lambda _m: 0.0)
+    solver_mod._RLT_ROOT_GAIN_CACHE.clear()
+    m = _kblock_haverly(12)
+    n_vars = sum(v.size for v in m._variables)
+    # Probe ON with the forced-zero gain → declines.
+    tok = set_current(SolverTuning(rlt_sparse_auto=True))
+    try:
+        assert solver_mod._rlt_sparse_admit(m, n_vars) is False
+    finally:
+        reset_current(tok)
+        solver_mod._RLT_ROOT_GAIN_CACHE.clear()
+    # Probe OFF → structure-only, admitted despite the (unused) zero gain.
+    tok = set_current(SolverTuning(rlt_sparse_auto=True, rlt_sparse_root_probe=False))
+    try:
+        assert solver_mod._rlt_sparse_admit(m, n_vars) is True
+    finally:
+        reset_current(tok)
+
+
+@pytest.mark.slow
+@pytest.mark.skipif(not os.path.exists(_HEATEXCH), reason="heatexch_gen1.nl not present")
+def test_productivity_gate_declines_rlt_inert_family():
+    """heatexch_gen1 is nonconvex sparse bilinear (passes structure) but RLT leaves
+    the root bound unchanged (gain ~1e-11), so the productivity gate DECLINES it —
+    preventing the sound-but-net-negative regression the structure-only gate caused."""
+    from discopt.modeling import from_nl
+    from discopt.solver import _rlt_root_gain, _rlt_sparse_admit
+
+    m = from_nl(_HEATEXCH)
+    n_vars = sum(v.size for v in m._variables)
+    gain = _rlt_root_gain(m)
+    assert gain is not None and gain < 1e-2  # measured ~1e-11 (RLT inert at the root)
+    # Structure alone would admit (sparse bilinear, within caps); the probe overrides.
+    tok = set_current(SolverTuning(rlt_sparse_auto=True, rlt_sparse_root_probe=False))
+    try:
+        assert _rlt_sparse_admit(m, n_vars) is True  # structure-only: admitted
+    finally:
+        reset_current(tok)
+    tok = set_current(SolverTuning(rlt_sparse_auto=True))  # probe ON
+    try:
+        assert _rlt_sparse_admit(m, n_vars) is False  # productivity: declined
     finally:
         reset_current(tok)
 

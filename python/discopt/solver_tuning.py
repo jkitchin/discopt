@@ -176,6 +176,37 @@ class SolverTuning:
     (products ~ n^2) is excluded while a sparse pooling network (products ~ n) is
     admitted. Only consulted when ``rlt_sparse_auto`` is on."""
 
+    rlt_sparse_root_probe: bool = field(
+        default_factory=lambda: _env_flag("DISCOPT_RLT_SPARSE_ROOT_PROBE", default=True)
+    )
+    """Root-**productivity** gate on the sparse-bilinear RLT widening
+    (``DISCOPT_RLT_SPARSE_ROOT_PROBE``, default **on** when ``rlt_sparse_auto`` is on;
+    issue #727).
+
+    Structure alone is *necessary but not sufficient*: a sparse-bilinear model is
+    only worth the enlarged per-node relaxation if RLT actually **tightens the root
+    bound**. RLT helps precisely when it closes / near-closes the root (a pooling
+    network — RLT is paid once and the tree collapses); it is net-*negative* when the
+    root stays open (a heat-exchanger network — the heavier node LP just starves
+    branching and the incumbent search, with no bound gain). Measured root gain
+    ``|b_rlt − b_noRLT| / (|b_noRLT| + 1)``: pooling ≈ 0.68, heatexch ≈ 1e-11 — ten
+    orders of magnitude apart.
+
+    When on, the widening additionally requires a bounded root probe to show a
+    relative root-bound improvement ≥ ``rlt_sparse_min_root_gain``. The probe solves
+    the root McCormick LP with and without RLT once at setup (cheap: the size ceiling
+    keeps it small); on any probe failure the widening is *declined* (never regress the
+    default). Set to off to recover the structure-only gate (for A/B)."""
+
+    rlt_sparse_min_root_gain: float = field(
+        default_factory=lambda: _env_float("DISCOPT_RLT_SPARSE_MIN_ROOT_GAIN", 1e-2)
+    )
+    """Minimum relative root-bound improvement for the productivity gate to engage the
+    sparse RLT widening (``DISCOPT_RLT_SPARSE_MIN_ROOT_GAIN``, default 1e-2 = 1%). The
+    RLT-inert vs RLT-productive populations are ~10 orders of magnitude apart
+    (heatexch 1e-11 vs pooling 0.68), so the exact value is not sensitive; 1% requires
+    a real, non-noise tightening. Only consulted when ``rlt_sparse_root_probe`` is on."""
+
     rlt_quad_max: int = field(default_factory=lambda: _env_int("DISCOPT_RLT_QUAD_MAX", 256))
     """Column cap for quadratic RLT (``DISCOPT_RLT_QUAD_MAX``, default 256)."""
 
@@ -656,6 +687,10 @@ class SolverTuning:
             raise ValueError(f"rlt_sparse_max_vars must be >= 1, got {self.rlt_sparse_max_vars}")
         if self.rlt_sparse_max_terms < 1:
             raise ValueError(f"rlt_sparse_max_terms must be >= 1, got {self.rlt_sparse_max_terms}")
+        if self.rlt_sparse_min_root_gain < 0:
+            raise ValueError(
+                f"rlt_sparse_min_root_gain must be >= 0, got {self.rlt_sparse_min_root_gain}"
+            )
         if self.multilinear_rlt_max < 1:
             raise ValueError(f"multilinear_rlt_max must be >= 1, got {self.multilinear_rlt_max}")
         if self.node_nlp_stride < 1:
