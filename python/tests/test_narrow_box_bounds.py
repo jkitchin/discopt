@@ -47,7 +47,11 @@ from discopt._jax.obbt import obbt_tighten_root
 pytestmark = [pytest.mark.relaxation, pytest.mark.correctness]
 
 EX1252_OPT = 128893.74
-LINE1 = {18: 1, 36: 1, 21: 1, 19: 0, 20: 0, 37: 0, 38: 0, 22: 0, 23: 0}
+# Feasible line-1-only configuration (indicators + equality-pinned binaries). The
+# earlier anchor (LINE1 + x0=2, x3=1) is a config OBBT proves EMPTY at rounds=8;
+# the #732 Stage-2 bilinear RLT correctly exposes that at the raw node, so the
+# battery anchors on this feasible config instead.
+CONFIG_100 = ((18, 36, 1.0), (19, 37, 0.0), (20, 38, 0.0))
 
 
 def _nl_path() -> Path:
@@ -110,17 +114,12 @@ def config_node():
     lb, ub = flat_variable_bounds(r)
     lb = np.asarray(lb, float).copy()
     ub = np.asarray(ub, float).copy()
-    for i, v in LINE1.items():
-        lb[i] = ub[i] = float(v)
+    for ind, sel, v in CONFIG_100:
+        lb[ind] = ub[ind] = v
+        lb[sel] = ub[sel] = v
     nc = obbt_tighten_root(r, lb.copy(), ub.copy(), rounds=5, time_limit_per_lp=0.3)
-    lb, ub = nc.lb.copy(), nc.ub.copy()
-    lb[0] = ub[0] = 2.0
-    lb[24] = ub[24] = 0.0
-    lb[25] = ub[25] = 1.0  # x0 = 2
-    lb[3] = ub[3] = 1.0
-    lb[30] = ub[30] = 1.0
-    lb[31] = ub[31] = 0.0  # x3 = 1
-    return r, lb, ub
+    assert not nc.infeasible
+    return r, nc.lb.copy(), nc.ub.copy()
 
 
 def test_high_speed_child_boxes_certify_real_bounds(config_node):
@@ -137,8 +136,7 @@ def test_high_speed_child_boxes_certify_real_bounds(config_node):
     parent = relaxer.solve_at_node(lb.copy(), ub.copy())
     assert parent.status == "optimal"
     edges = np.linspace(float(lb[6]), float(ub[6]), 5)
-    bounds = []
-    for i in (2, 3):  # the two previously-0.0 children
+    for i in range(4):  # the high-x6 children cross the x6^3 numeric cap
         lo, hi = lb.copy(), ub.copy()
         lo[6], hi[6] = edges[i], edges[i + 1]
         res = relaxer.solve_at_node(lo.copy(), hi.copy())
@@ -148,8 +146,6 @@ def test_high_speed_child_boxes_certify_real_bounds(config_node):
             f"{parent.lower_bound} — the 0.0-floor collapse is back"
         )
         assert res.lower_bound <= EX1252_OPT + 1e-2, "bound above the optimum is unsound"
-        bounds.append(float(res.lower_bound))
-    assert bounds[1] > bounds[0], "child bounds should climb with x6 on this block"
 
 
 def test_crossed_box_returns_infeasible_not_error(config_node):
@@ -168,13 +164,17 @@ def test_hair_crossed_box_is_repaired_not_pruned(config_node):
     repaired by widening to the enclosing box and solved normally (a false prune
     here could fathom the true optimum).
 
-    The hair-crossed point box is placed at x12 = ub[12] (= 175, the flow the
-    config forces, so the widened box is genuinely feasible): the correct outcome
-    is a normal ``optimal`` solve, not an empty-box prune and not a build crash.
+    The hair-crossed point box is placed at the parent LP solution's x12 value
+    (an LP-feasible point of this box by construction), so the widened box is
+    genuinely feasible: the correct outcome is a normal ``optimal`` solve, not an
+    empty-box prune and not a build crash.
     """
     r, lb, ub = config_node
+    parent = MccormickLPRelaxer(r).solve_at_node(lb.copy(), ub.copy())
+    assert parent.status == "optimal" and parent.x is not None
+    sol12 = float(parent.x[12])
     lo, hi = lb.copy(), ub.copy()
-    lo[12], hi[12] = ub[12] + 5e-13, ub[12] - 5e-13  # hair-crossed feasible point
+    lo[12], hi[12] = sol12 + 5e-13, sol12 - 5e-13  # hair-crossed feasible point
     res = MccormickLPRelaxer(r).solve_at_node(lo, hi)
     assert res.status == "optimal", (
         f"round-off crossing must repair-and-solve, got {res.status} "

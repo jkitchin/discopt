@@ -120,19 +120,66 @@ Both LP relaxations only widen or prune-on-empty, so the change is sound by
 construction; `python/tests/test_narrow_box_bounds.py` pins fails-before/
 passes-after (4 tests, incl. the false-prune guard for hair-crossings).
 
-### Stage 2 — configuration-first branching (L3, the dominant lever)
+### Stage 2 — configuration-first branching *(entry experiments run 2026-07-18 —
+kill criterion FIRED for the hint route; re-scoped to the disjunctive route)*
 **Hypothesis:** branching indicators → reform expansion bits (`_ipx_e*`) → pump
-counts *before* continuous/spatial dimensions collapses the shallow-node floor,
-because the config space is tiny (≤ 8 indicator patterns × small pump grids) and
-§2 shows config nodes now bound/prune hard.
-**Entry experiment:** instrument the existing 400-node run — what fraction of
-open nodes are integer-complete, and what does the node-depth-vs-bound profile
-look like? Then force integer-first priority (check `DISCOPT_OBJ_BRANCH_PRIORITY`
-semantics first — partial machinery may exist) and re-measure the global dual at
-the same 400-node budget, RLT ON.
-**Kill criterion:** if config-first branching does not at least double the
-400-node global dual (16304 → ≥ 33k), the search hypothesis is wrong for this
-tree and the plan re-scopes to the disjunctive-bound alternative (§5).
+counts *before* continuous/spatial dimensions collapses the shallow-node floor.
+**Measured** (`ex1252_stage2_branching_probe.py`, reform + RLT ON):
+- *Experiment A (instrumented 400-node tree):* the tree spends its branching on
+  the reform's **continuous** big-M product auxes (`_ipx_v*`, top column 29
+  branchings) whose subdivision provably cannot pin the coupling; the existing
+  `DISCOPT_OBJ_BRANCH_PRIORITY` set contains only 6 vars post-reform (its
+  detector keys on nonlinear-term participation, and the `_ipx_e` bits — the L2
+  leak drivers — appear only in *linear* big-M rows, invisible to it).
+- *Experiment B (all-binaries priority, monkeypatch):* **kill criterion fired**
+  — 400-node global dual 12658 (below the 16304 baseline, far below the 33k
+  gate), incumbent worse. Root cause: the priority hint is *fractionality-gated*
+  and the node LP vertex often has **integral binaries while the coupling stays
+  loose through the v-auxes** — no fractional signal, no hint, and the standard
+  selector keeps branching the useless v columns. Hint-based config-first
+  branching is falsified for this tree (the mechanism cannot express "branch a
+  config dichotomy regardless of fractionality").
+- *Experiment C (disjunctive route — the recorded alternative, now primary):*
+  enumerate the 2³ line patterns, OBBT each, min over configs = valid root bound:
+
+  | config | bound |
+  |---|---|
+  | (0,0,1) | 90592 — **pruned outright** under the incumbent cutoff |
+  | (0,1,1) | 59806 |
+  | (1,0,0) | 38524 |
+  | (1,0,1), (1,1,0), (1,1,1) | ~0 — the residual wall |
+  | (0,0,0) | infeasible; (0,1,0): numerical |
+
+  Single-line configs certify far above the tree's 16.3k; the multi-line configs
+  re-create the L2 decoupling **one level down**: their coupling runs through the
+  pump-count integer-**bilinear** products (`x9·x3 = 400·x18` …), which the
+  reform expands on its *bilinear* path — **not covered by the #721 coupling RLT**
+  (it keys on ≥3-factor multilinear products with a continuous factor).
+
+**Re-scoped Stage 2 deliverables (in order):**
+1. *(DONE 2026-07-18)* Extend the bit-linking coupling RLT to the
+   **integer-bilinear** expansion path (`_try_expand_mul`) — same identity, same
+   default-OFF flag. Measured per-config amplification (OBBT'd config boxes,
+   with the incumbent cutoff): (0,0,1) 90592 → **115466** (and pruned outright
+   under the cutoff), (0,1,1) 59806 → **90429**, (1,0,0) 38524 → **71644**; the
+   line-1-only config node lifts 12658 → **65654** (5.2×). Multi-line configs
+   stay ~0 — correctly: their pump-count integers are free, so the coupling
+   grounds out at a genuinely loose McCormick; they need one recursion level
+   (deliverable 2). Two side-findings: (a) the extension tightened the *old*
+   test anchor (LINE1 + `x0=2, x3=1`) enough to expose that the config is
+   **genuinely infeasible** (OBBT rounds=8 proves the box empty; the raw node LP
+   now goes `numerical`-inconclusive rather than bounding a vacuous 57435) — the
+   test pins moved to the feasible line-1-only config; (b) the raw-node simplex
+   cannot Farkas-certify that emptiness (ill-conditioning) — an engine-hardening
+   item to fold into Stage 1's scope if it recurs on feasible boxes.
+2. A root **disjunctive-bound pass** over the indicator patterns (class-gated,
+   default-OFF): global dual = max(root bound, min over configs of the per-config
+   OBBT+LP bound), recursing one level (pump counts) on configs that stay weak.
+   With deliverable 1's amplification, the surviving weak set is exactly the
+   multi-line configs — the recursion targets their pump-count integers.
+3. Only then revisit in-tree branching (the correct mechanism is dichotomy
+   branching on config variables regardless of fractionality — a tree-side
+   change, larger scope).
 
 ### Stage 3 — per-config compounding loop (OBBT + cutoff at integer-complete nodes)
 **Hypothesis:** at integer-complete nodes, a short OBBT loop (now potent, §2)

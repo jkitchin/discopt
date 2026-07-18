@@ -453,6 +453,18 @@ def _try_expand_mul(node: BinaryOp, model: Model, exp: _Expander) -> Optional[Ex
     lo_o = float(np.asarray(vo.lb).flat[elo])
     hi_o = float(np.asarray(vo.ub).flat[elo])
     expanded = _expand_product(base_lo, bits, other_e, lo_o, hi_o, exp)
+    # #732 Stage 2: the integer-BILINEAR expansion has the same L2 decoupling as
+    # the multilinear one — with the bits fractional in the LP, every
+    # ``v_k = e_k·other`` big-M product can relax to 0 (ex1252 multi-line
+    # configs: the pump-count couplings ``x9·x3 = 400·x18`` all collapse,
+    # pinning those config bounds at ~0). Tie the bit-linking equality to the
+    # other factor exactly as ``_try_expand_multilinear`` does. Multilinear-path
+    # only (its ``_bigm_cache`` reuses the products just created — no new
+    # columns; the pure-bilinear entry stays byte-identical), same default-OFF
+    # flag (``DISCOPT_MULTILINEAR_COUPLING_RLT``).
+    if exp.multilinear and exp.coupling_rlt:
+        ref_i = vi if vi.size == 1 else IndexExpression(vi, eli)
+        exp.add_bitlink_rlt(ref_i, base_lo, bits, other_e, lo_o, hi_o)
     if const != 1.0:
         expanded = BinaryOp("*", Constant(const), expanded)
     return expanded
