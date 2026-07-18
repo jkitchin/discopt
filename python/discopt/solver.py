@@ -7093,6 +7093,52 @@ def solve_model(
     iteration = 0
     _deadline = t_start + time_limit
 
+    # --- #732 Stage 1-A: narrow-box branch-instead-of-taint --------------------
+    # (``DISCOPT_NARROW_BOX_BRANCH``, default OFF — bound-changing, awaits the §5
+    # graduation panel.) A nonconvex node whose relaxation LP fails numerically
+    # (the failure sentinel) is normally fathomed *non-rigorously*, which taints
+    # the tree's certified dual bound: its unproven subtree is dropped from the
+    # frontier, so the reported global bound is discarded (ex1252: the internal
+    # bound reaches the optimum yet the report collapses to ~0). When the flag is
+    # ON and the failed node's box is still spatially branchable, keep it OPEN
+    # instead — import ``-inf`` so the Rust child floor lifts it to the node's
+    # rigorous parent-inherited bound, and the brancher bisects it; its children
+    # re-solve on narrower, better-conditioned boxes (the probe shows the LP
+    # succeeds once the box shrinks). This reuses the sound "-inf stays open,
+    # floored at parent" mechanism the deadline path uses (#138).
+    #
+    # SOUNDNESS: convert ONLY a *branchable* node. An unbranchable node kept open
+    # would dead-end unbranched and could falsely certify (the #467 hazard), so a
+    # failed node below the spatial-branch width stays a (honest) sentinel fathom.
+    # The threshold is 2x the Rust brancher's ``SPATIAL_MIN_WIDTH`` (1e-6 relative),
+    # so a converted node is unambiguously above the width the brancher will split.
+    _narrow_box_branch = os.environ.get("DISCOPT_NARROW_BOX_BRANCH", "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+    _nbb_root_width = _root_ub_snapshot - _root_lb_snapshot
+    _nbb_int_mask = np.zeros(n_vars, dtype=bool)
+    for _off, _sz in zip(int_offsets, int_sizes):
+        _nbb_int_mask[int(_off) : int(_off) + int(_sz)] = True
+    _NBB_MIN_REL_WIDTH = 2e-6
+
+    def _nbb_is_branchable(_nlb, _nub) -> bool:
+        """Conservative: True iff some CONTINUOUS dimension is still wide enough for
+        the spatial brancher to split (relative width > 2x SPATIAL_MIN_WIDTH).
+        Integer-only branchability is deliberately excluded to stay conservative —
+        a false positive here risks a dead-end false certificate (#467)."""
+        _w = np.asarray(_nub, dtype=np.float64) - np.asarray(_nlb, dtype=np.float64)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            _rel = np.where(
+                (~_nbb_int_mask) & np.isfinite(_nbb_root_width) & (_nbb_root_width > 1e-15),
+                _w / _nbb_root_width,
+                0.0,
+            )
+        _rel = np.where(np.isfinite(_rel), _rel, 0.0)
+        return bool(np.any(_rel > _NBB_MIN_REL_WIDTH))
+
     # --- TX1: adaptive back-off for the strided in-tree node NLP -------------
     # DISCOPT_ADAPTIVE_NLP (default ON since G2, flag-graduation; =0 restores the
     # fixed stride). The strided node-NLP is
@@ -8423,6 +8469,17 @@ def solve_model(
         _taint_pop_lbs = None
         for i in range(n_batch):
             if result_lbs[i] >= _SENTINEL_THRESHOLD and not node_infeasible_mask[i]:
+                # #732 Stage 1-A: keep a branchable failed node OPEN (rigorous
+                # parent floor via the -inf import) instead of a taint-inducing
+                # non-rigorous fathom. Only when branchable — an unbranchable node
+                # kept open could dead-end unbranched and falsely certify (#467).
+                if _narrow_box_branch and _nbb_is_branchable(batch_lb[i], batch_ub[i]):
+                    result_lbs[i] = -np.inf
+                    result_feas[i] = False
+                    _lbc = np.clip(np.asarray(batch_lb[i], dtype=np.float64), -_SPC, _SPC)
+                    _ubc = np.clip(np.asarray(batch_ub[i], dtype=np.float64), -_SPC, _SPC)
+                    result_sols[i] = 0.5 * (_lbc + _ubc)
+                    continue
                 _nonrigorous_fathom = True
                 if _taint_pop_lbs is None:
                     _taint_pop_lbs = np.asarray(
