@@ -209,6 +209,43 @@ def solved_count_by_size(
     )
 
 
+def dual_bound_crosses_optimum(
+    bound: Optional[float],
+    optimum: Optional[float],
+    minimize: bool,
+    abs_tol: float = 1e-4,
+    rel_tol: float = 1e-4,
+) -> bool:
+    """Whether a reported dual bound is on the WRONG side of the known optimum.
+
+    A valid dual bound is sense-dependent (issue #759):
+
+    * **Minimize** — the bound is a *lower* bound, so it must satisfy
+      ``bound <= optimum``. It "crosses" (is unsound) when ``bound > optimum + tol``.
+    * **Maximize** — the bound is an *upper* bound, so it must satisfy
+      ``bound >= optimum``. It "crosses" (is unsound) when ``bound < optimum - tol``.
+
+    The classic soundness bug this guards is a *too-tight* dual bound that could
+    fathom the optimum. The OPPOSITE — a loose bound sitting on the far side of the
+    incumbent (a minimize lower bound below the optimum, or a maximize upper bound
+    above it) — is expected on an unconverged solve and is **not** a violation.
+
+    Applying the min-sense check (``bound > optimum``) blindly to a MAXIMIZE
+    instance is exactly the false positive that produced issue #759: ``syn05hfsg``
+    is a maximize problem whose valid upper bound legitimately exceeds its
+    incumbent/oracle. Panels that assess bound soundness MUST pass the model's
+    sense here rather than assuming minimize.
+
+    Returns ``False`` (no crossing to assess) when either value is missing.
+    """
+    if bound is None or optimum is None:
+        return False
+    tol = abs_tol + rel_tol * abs(optimum)
+    if minimize:
+        return bound > optimum + tol
+    return bound < optimum - tol
+
+
 def incorrect_count(
     results: list[SolveResult],
     reference: dict[str, float],

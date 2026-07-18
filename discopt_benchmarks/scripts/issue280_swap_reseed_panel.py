@@ -27,24 +27,37 @@ print(f"{_hdr_l} | {_hdr_off} | {_hdr_on} | verdict")
 for name in insts:
     opt = oracle(name)
     row = []
+    minimize = True
     for flag in ("0", "1"):
         os.environ["DISCOPT_MILP_SWAP_RESEED"] = flag
         m = from_nl(f"{NL}/{name}.nl")
+        minimize = m._objective.sense.name == "MINIMIZE"
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
             r = m.solve(time_limit=tl)
         row.append((r.objective, r.bound))
     (o0, b0), (o1, b1) = row
-    # soundness: for these min problems bound <= opt <= obj
-    snd = all(b is None or opt is None or b <= opt + 1e-4 for b in (b0, b1)) and all(
-        o is None or opt is None or o >= opt - 1e-4 for o in (o0, o1)
-    )
-    # primal verdict
+    # soundness (sense-aware, issue #759): a MINIMIZE dual bound is a lower bound
+    # (bound <= opt) and its incumbent stays >= opt; a MAXIMIZE dual bound is an
+    # upper bound (bound >= opt) and its incumbent stays <= opt. Applying the
+    # min-sense rule to a maximize instance flags its valid upper bound as unsound.
+    def _bound_ok(b, opt=opt, minimize=minimize):
+        if b is None or opt is None:
+            return True
+        return (b <= opt + 1e-4) if minimize else (b >= opt - 1e-4)
+
+    def _obj_ok(o, opt=opt, minimize=minimize):
+        if o is None or opt is None:
+            return True
+        return (o >= opt - 1e-4) if minimize else (o <= opt + 1e-4)
+
+    snd = all(_bound_ok(b) for b in (b0, b1)) and all(_obj_ok(o) for o in (o0, o1))
+    # primal verdict: "better" is smaller for MINIMIZE, larger for MAXIMIZE.
     if o0 is None or o1 is None:
         v = "?"
-    elif o1 < o0 - 1e-6:
+    elif (o1 < o0 - 1e-6) if minimize else (o1 > o0 + 1e-6):
         v = "ON BETTER primal"
-    elif o1 > o0 + 1e-6:
+    elif (o1 > o0 + 1e-6) if minimize else (o1 < o0 - 1e-6):
         v = "ON WORSE primal"
     else:
         v = "tie primal"
