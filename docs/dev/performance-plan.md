@@ -553,6 +553,97 @@ panel green for 3 consecutive nightlies before default-on.
 > the cutoff bind. Reproduction:
 > `discopt_benchmarks/scripts/ex1252_cutoff_obbt_falsification.py`.
 
+> **Falsified (2026-07-18, issue #721 — "piecewise-McCormick auto-trigger on
+> wide-range cubic/monomial blocks certifies ex1252").** #707's re-scope (record
+> above) pointed at a stronger cubic-block relaxation, with #721's most localized
+> direction being auto-triggered piecewise McCormick on the wide flow factors
+> (`x6,x7,x8 ∈ [0,2950]`), asserting the `x6²` secant is "the weakest single link".
+> The entry experiment measured the reformed-ex1252 dual bound (with #707's reform
+> applied) on the *actual* per-node engine (`MccormickLPRelaxer`) at the canonical
+> loosest node (LINE1 fixed, OBBT-tightened, `x0=2, x3=1`). **The bound is pinned at
+> `12658.06` across every available lever:**
+>
+> | lever at the loosest node | dual bound |
+> |---|---|
+> | baseline (standard McCormick) | 12658.06 |
+> | subdivide `x6` / subdivide `x12` (halves) | 12658.06 (from the #707 probe: 12658.1 both) |
+> | RLT cuts / level-1 RLT | 12658.06 |
+> | PSD (moment) cuts | 12658.06 |
+> | superposition cuts | 12658.06 |
+> | OBBT + optimum cutoff | 12658 (the #707 record) |
+>
+> Two corrections to the issue's framing fall out. **(1) `x6` is not the lever, and
+> neither is any flow.** At the *root* the flows are wide but the objective relaxes
+> to 0 (indicators free); at any *binding* node OBBT has already narrowed
+> `x6 → [1823,2950]` and `x12 → [116.7,175]`, so partitioning those narrow ranges is
+> inert. "Wide-range" and "binding" never coincide, so direction #1 (piecewise on
+> wide monomial factors) cannot bite on the real path. (A transient +27% signal from
+> partitioning `x12` on the *AMP MILP* engine — `build_milp_relaxation`, SOS2
+> partition binaries — proved to be a node-definition artifact: it appears only at a
+> *looser* box where the MILP is free to re-choose the active line, and vanishes on
+> the canonical box, where the AMP build is infeasible. It is not a cubic-block
+> tightening.) **(2) The wall is the objective coupling, not the cubic rows.** The
+> bound equals the objective's constant term `6329.03·x0·x3·x18 = 6329.03·2 =
+> 12658.06` *exactly*, yet the relaxed `x15 = 12.44 ≠ 0`: the reformed
+> `x15·(x0·x3·x18)` aux relaxes to its lower bound, so the `1800·x15` cost
+> contributes 0 to the bound regardless of `x15`. The cubic cost rows #721 targets
+> only *define* `x15`; tightening them cannot lift the bound while `x15`'s coupling
+> into the objective is itself loose in-relaxation. No wide-range-monomial partition
+> trigger shipped — it would be inert on the real path (and, keyed on range width,
+> would select `x6`, the *most* inert flow), per the `DISCOPT_CUT_INHERIT` lesson
+> (sound ≠ helpful). The real lever is the **objective coupling**, addressed next.
+> Reproduction: `discopt_benchmarks/scripts/ex1252_piecewise_lever_probe.py`; pinned
+> by `python/tests/test_ex1252_piecewise_lever.py`.
+
+> **Implemented, default-OFF (2026-07-18, issue #721 — objective-coupling RLT,
+> `DISCOPT_MULTILINEAR_COUPLING_RLT`).** Following the record above (the wall is the
+> `x15·(x0·x3·x18)` coupling, not the cubic rows), the entry experiment measured
+> `min x15` over the reformed loosest-node relaxation = **12.44** — the cubic/flow
+> rows *do* force `x15` up; the bound sits at the objective constant `12658.06` only
+> because the reformed `v_k = z_k·x15` big-M products decouple (with the reform's own
+> expansion bits fractional in the LP, every `v_k` relaxes to 0). Since the objective
+> is `12658.06 + 3600·x15` at the node, a valid coupling link makes `12658.06 +
+> 3600·12.44 = 57435` a **sound** bound the current relaxation simply leaves on the
+> table. The fix is RLT (issue direction #3): multiply each integer factor's exact
+> bit-linking equality (`x_i = lo + Σ2^k e_k`) and each AND hull (`z ≤ b`,
+> `z ≥ Σb−(n−1)`) by the non-negative continuous factor, tying `Σ2^k(e_k·c)` to
+> `x_i·c` and `v = z·c` to the per-bit products. Both levels are needed — the AND-hull
+> RLT alone does nothing (the leak is one level down, in the fractional expansion
+> bits); adding the bit-linking RLT (where `x_i·c` is McCormick-exact once `x_i` is
+> fixed) lifts the loosest-node bound to **57434.96**, matching the entry-experiment
+> prediction to the penny. Sound throughout (RLT rows are products of valid
+> identities/inequalities — never cut a feasible point; verified `bound ≤ opt` on
+> every run). **Kept default-OFF, not graduated:** the flag-OFF path is
+> byte-identical to #707 (same 90-column model, same 12658.06). The deterministic
+> node-budget A/B settles net effect (equal node count removes the wall-clock
+> nondeterminism that made the time-limited global dual erratic):
+>
+> | ex1252, ~400 B&B nodes | global dual | incumbent |
+> |---|---|---|
+> | flag OFF | 16071 | 143555 |
+> | flag ON | 16304 (+1.4%) | **134471** (closer to opt 128894) |
+>
+> So the large *node-level* lift (4.5× at a line-selected node) translates to only
+> **+1.4% on the global dual** — because the global dual is set by the *shallow*
+> indicator nodes near the root (objective still relaxes to ~0 there), not the deep
+> line-selected nodes the coupling RLT tightens. It does improve the *primal* side
+> (a better incumbent). **ex1252 stays a hard bound gap** — this is a SOTA-frontier
+> instance (SCIP does not certify it in 120 s either), and the coupling RLT does not
+> lift the *global* dual materially above the #707 ~48k plateau within a practical
+> budget. Net-positivity for graduation would need **deep-node gating** — apply the
+> RLT only once the integer factors are fixed by branching (a per-node cut, not an
+> upfront model transform), so shallow nodes don't pay for rows that cannot bite
+> there — plus the CLAUDE.md §5 corpus differential panel. The lever is sound and a
+> foundation; graduation is future work. `python/tests/test_ex1252_coupling_rlt.py`
+> pins soundness + the node-level lift + the byte-identical OFF path.
+> **Follow-up (same day):** the compounding probe
+> (`discopt_benchmarks/scripts/ex1252_compounding_probe.py`) confirms the RLT
+> *unlocks* the previously-falsified levers — `x6` subdivision now lifts a child
+> bound 57435→62071 and OBBT pins `x12` exactly / caps `x15` at 30.89 within
+> seconds (both provably inert pre-RLT) — and exposes an engine fragility
+> (0.0/`numerical` fallback bounds on narrow boxes). Full anatomy + staged
+> certification plan: `docs/dev/ex1252-certification-plan.md`.
+
 ## 7. Sequencing & rationale (revised by the measurement)
 
 ```
