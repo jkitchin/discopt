@@ -146,7 +146,12 @@ def test_local_branching_improves_incumbent():
     snap = _bounds_snapshot(m)
     # Start from a=0,b=0 (objective 1.0 + 0 = 1.0 at z=0.5).
     incumbent = np.array([0.0, 0.0, 0.5])
-    out = local_branching(m, incumbent, k=1)
+    # The default 2s slice (submip_time_limit gates the enumeration path's
+    # sub-NLP starts too) is not load-robust: on a cold, contended CI worker
+    # the first flip's JAX compile consumes it and the second flip never
+    # starts, returning the unimproved incumbent. A generous explicit budget
+    # keeps the strict-improvement assertion meaningful on any machine.
+    out = local_branching(m, incumbent, k=1, submip_time_limit=60.0)
     assert out is not None
     x, obj = out
     assert _is_integer_feasible(x, _get_integer_mask(m))

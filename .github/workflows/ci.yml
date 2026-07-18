@@ -279,6 +279,12 @@ jobs:
           restore-keys: |
             uv-${{ runner.os }}-py312-cov-
       - name: Install Python dependencies
+        # The optional-feature deps (sympy, pyomo, equinox/optax, onnx stack,
+        # litellm, xgboost, lightgbm) are installed here so the coverage gate
+        # measures the modules they unlock (symbolic envelopes, the Pyomo
+        # bridge, GNN branching, NN embedding readers, LLM helpers) with their
+        # existing fast tests instead of skipping them (#87). Keep this list in
+        # sync with the optional extras in pyproject.toml.
         run: |
           python -m venv .venv
           source .venv/bin/activate
@@ -286,11 +292,13 @@ jobs:
           uv pip install \
             jax jaxlib numpy scipy highspy cyipopt openpyxl scikit-learn pyyaml \
             pounce-solver \
+            sympy pyomo litellm equinox optax onnx onnxruntime xgboost lightgbm \
             pytest pytest-timeout pytest-xdist pytest-cov
           maturin develop
-      # --cov-fail-under temporarily lowered from 85 -> 70 -> 65 after the
-      # AMP merge (#86) dropped total project coverage to ~69%. Restore
-      # to 85 once AMP test coverage is expanded -- see #87.
+      # --cov-fail-under restored to 85 (#87) after the post-AMP-merge
+      # 85 -> 70 -> 65 lowering: the optional-dep unlock plus the
+      # property-test batteries measured 85.50% with this job's exact
+      # command and marker set (see the #87 PR for the run log).
       - name: Run pytest with coverage
         run: |
           source .venv/bin/activate
@@ -300,7 +308,7 @@ jobs:
             --ignore=python/tests/test_correctness.py \
             -n "${PYTEST_XDIST_WORKERS}" --dist loadgroup \
             --cov=discopt --cov-report=term-missing --cov-report=xml:coverage.xml \
-            --cov-fail-under=65
+            --cov-fail-under=85
         env:
           JAX_PLATFORMS: cpu
           JAX_ENABLE_X64: "1"

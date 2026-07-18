@@ -236,7 +236,7 @@ class NLPEvaluatorFromCUTEst:
     """
     NLP evaluator wrapping a CUTEst problem via PyCUTEst callbacks.
 
-    Provides the same interface as NLPEvaluator and NLPEvaluatorFromNl:
+    Provides the same interface as NLPEvaluator:
       - evaluate_objective(x) -> float
       - evaluate_gradient(x) -> ndarray
       - evaluate_hessian(x) -> ndarray

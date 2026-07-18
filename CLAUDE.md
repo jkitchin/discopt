@@ -129,7 +129,7 @@ pytest discopt_benchmarks/tests/ -v                      # Benchmark suite
 pytest discopt_benchmarks/tests/ -m smoke                # Quick CI smoke tests
 pytest discopt_benchmarks/tests/ -m "not slow"           # Skip long tests
 pytest discopt_benchmarks/tests/ -k test_correctness     # Single test file
-pytest discopt_benchmarks/tests/ --cov=benchmarks --cov=utils  # With coverage (≥65% floor; #87 tracks restoring 85%)
+pytest discopt_benchmarks/tests/ --cov=benchmarks --cov=utils  # With coverage (≥85% floor, restored by #87)
 ```
 
 ### Benchmarking
@@ -217,7 +217,7 @@ Optional LLM-powered features using litellm as a universal adapter (100+ provide
 - **Correctness is non-negotiable**: Every phase gate enforces `incorrect_count ≤ 0`. Never weaken this check.
 - **Numerical tolerances**: abs=1e-6, rel=1e-4, integrality=1e-5, factorization=1e-12 (defined in `conftest.py`).
 - **ruff** line-length is 100 chars, targeting Python 3.10+. Pinned to v0.14.6 across pre-commit and CI.
-- **Coverage** must stay ≥65% (temporary floor after AMP merge; #87 tracks restoring to 85%).
+- **Coverage** must stay ≥85% (restored by #87 after the post-AMP-merge lowering).
 - Tests have a 300-second default timeout (configurable in `pyproject.toml`).
 
 <!-- crucible-project -->
