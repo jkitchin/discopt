@@ -3803,6 +3803,17 @@ def solve_model(
     from discopt._jax.convexity.patterns import clear_declared_box_cache
 
     clear_declared_box_cache(model)
+    # The box-independent uniform-relaxation analysis (canonical DAG, DCP verdicts,
+    # interval enclosures) is pinned on the model and keyed by a structural token
+    # that does not hash parameter *values*. A parameter whose ``.value`` changed
+    # between solves leaves the token unchanged, so a stale relaxation embedding
+    # the OLD value would be reused on the spatial B&B path — an unsound bound on
+    # the re-solve (issue #742). Reset it here so each solve rebuilds against the
+    # current parameter values; within a solve it is still built once and reused
+    # across all B&B nodes.
+    from discopt._jax.uniform_relax import clear_analysis_cache
+
+    clear_analysis_cache(model)
     _convexity_time_budget = min(max(0.2 * float(time_limit), 0.5), 20.0)
     model._convexity_time_budget = _convexity_time_budget
     # #654: absolute solve deadline, anchored at ``_solve_t0`` (before all
