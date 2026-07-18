@@ -83,7 +83,10 @@ def _fmt(x, w=10, p=2):
 
 def main() -> int:
     print(f"#732 Stage-5 differential (ON vs OFF, {_TL}s, this container)\n")
-    hdr = f"{'instance':10s} {'arm':3s} {'status':12s} {'dual':>11s} {'incumbent':>13s} {'nodes':>6s} {'cert':>5s}"
+    hdr = (
+        f"{'instance':10s} {'arm':3s} {'status':12s} {'dual':>11s} "
+        f"{'incumbent':>13s} {'nodes':>6s} {'cert':>5s}"
+    )
     print(hdr)
     print("-" * len(hdr))
     violations: list[str] = []
@@ -98,18 +101,21 @@ def main() -> int:
         for arm, res in (("OFF", off), ("ON", on)):
             print(
                 f"{name:10s} {arm:3s} {res['status'][:12]:12s} "
-                f"{_fmt(res['bound'],11,2)} {_fmt(res['obj'],13,4)} "
+                f"{_fmt(res['bound'], 11, 2)} {_fmt(res['obj'], 13, 4)} "
                 f"{str(res['nodes']):>6s} {str(res['cert']):>5s}"
             )
         # --- soundness (hard) ---
-        for arm, res in (("OFF", off), ("ON", res if False else on)):
+        for arm, res in (("OFF", off), ("ON", on)):
             b = res["bound"]
-            if b is not None and opt is not None:
-                # minimize: dual bound must not exceed the optimum.
-                if b > opt + _ABS + 1e-4 * abs(opt):
-                    violations.append(f"{name} {arm}: dual {b:.4f} > optimum {opt:.4f}")
-            if b is not None and res["obj"] is not None and b > res["obj"] + _ABS + 1e-4 * abs(res["obj"]):
-                violations.append(f"{name} {arm}: dual {b:.4f} > incumbent {res['obj']:.4f}")
+            if b is None:
+                continue
+            # minimize: dual bound must not exceed the optimum...
+            if opt is not None and b > opt + _ABS + 1e-4 * abs(opt):
+                violations.append(f"{name} {arm}: dual {b:.4f} > optimum {opt:.4f}")
+            # ...nor its own incumbent.
+            o = res["obj"]
+            if o is not None and b > o + _ABS + 1e-4 * abs(o):
+                violations.append(f"{name} {arm}: dual {b:.4f} > incumbent {o:.4f}")
         # --- cert regression (hard) ---
         if off.get("cert") and not on.get("cert"):
             violations.append(f"{name}: ON lost the certificate OFF held")
