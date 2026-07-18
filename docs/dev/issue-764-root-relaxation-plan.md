@@ -77,23 +77,34 @@ and OBBT self-limits (loose relaxation → weak OBBT → loose relaxation).
    bilinear** (x0·x6/x9/x12, x1·x7/x10/x13, x2·x8/x11/x14, x15·x16, x16·x17), not integrality.
    Repro: `scratchpad` `pq_exp.py` / `pq_exp2.py`. Kill criterion met — do not pursue PQ or any
    level-1 RLT variant here.
-2. **Level-2 RLT / selective higher-degree products (now the leading candidate, but odds lowered).**
-   Since level-1 RLT is fully inert (candidate 1), the root can only move via products-of-products
-   (multiply *constraint pairs*, or bound-factor pairs → degree-2 monomials like `x0·x6·x9`). This is
-   O(n²) lifted columns — large — and level-1's complete inertness is a discouraging prior. Entry
-   experiment: a curated subset of degree-2 products among the loose group, solved sparse; kill if
-   < +0.02 before any implementation.
+2. **Level-2 RLT / higher-degree products — FALSIFIED (entry experiment, 2026-07-18).** Added
+   level-2 RLT rows `(-g)·(x_i-l_i)·(x_k-l_k) ≥ 0` for every linear form `g ≤ 0` × each loose product
+   pair (i,k), **expanded into explicit clean monomials** so discopt's classifier actually lifts them
+   (naive `(-g)*fi*fk` is dropped — `tri=0`; the expanded form yields `bil 47→293, tri 0→213`, i.e.
+   213 trilinear terms genuinely relaxed via trilinear McCormick). 121 constraints, solved sparse.
+   Result: root LP **0.8382 → 0.8382, delta = 0.0000**. Level-2 RLT is inert too. (Caveat: this uses
+   discopt's *trilinear-McCormick* relaxation of the degree-3 terms — a tighter trilinear hull could
+   in principle bind, but that is a second, more speculative layer; the standard hierarchy does
+   nothing here.) Repro: `scratchpad/rlt2b.py`. Kill criterion met.
 3. **Structured/higher-order SDP on the shared-variable blocks.** Diagonal Shor was inert (0.840);
    a moment/SDP relaxation on each shared-variable star (e.g. {x0, x6, x9, x12} and their products)
    might capture the joint constraint level-1 RLT misses. Entry experiment: solve the block-moment
    SDP offline (scs) over one leaf and measure.
 
-**Reality check from candidate 1.** McCormick = level-1 RLT = 0.838 here, and integer/naive-spatial
-branching are locally inert too, yet the continuous optimum is ≥ 0.955 — so the achievable gain
-lives in degree-≥2 / SDP territory (expensive, uncertain) or in *smart* spatial branching that the
-full B&B already exploits slowly (0.906→1.079 over 199 nodes). Both routes are research-grade with no
-guarantee; scope accordingly and always measure on `tanksize` itself first (the #727 lesson, now
-reinforced by level-1 RLT's exact no-op).
+**Reality check — the RLT hierarchy is exhausted.** Everything tractable is now measured inert at
+the root, bit-identically:
+
+    McCormick 0.838 = level-1 RLT 0.838 = level-2 RLT 0.838 (213 trilinears) ;
+    Shor SDP 0.840 ; 30-round OBBT 0.838 ; integers-fixed 0.838 ; naive bisection 0.838 (→8 leaves)
+
+Yet the continuous optimum is ≥ 0.955. That combination is the important signal: the gain is **not**
+in the polyhedral RLT hierarchy discopt can build, so candidate 3 (structured/higher-order SDP) is
+now the only untested relaxation route and is a long shot given Shor's inertness. The realistic path
+to the ≥0.955 bound is most likely **smart spatial branching** — the full B&B *does* climb
+(0.906→1.079 over 199 nodes) because it branches on the right variables, unlike the inert
+naive-widest bisection — i.e. this is a **branching-quality + throughput** problem more than a
+root-relaxation one. Reinforced #727 lesson: level-1 AND level-2 RLT are exact no-ops on the real
+instance; do not ship an RLT-family relaxation for this class.
 
 Branching-quality is a *secondary* finding: naive widest-variable bisection is inert (0.838 to 8
 leaves) while real B&B climbs, so the effective spatial-branching variable selection here is worth a
