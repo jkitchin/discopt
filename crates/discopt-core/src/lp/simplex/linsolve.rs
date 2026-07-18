@@ -636,19 +636,17 @@ impl LinearSolver for FeralLU {
     }
 
     fn ftran(&mut self, rhs: &mut [f64]) -> Result<(), LinError> {
-        // #671 hardening: in singular-perturb mode the factor is of a nearby `B'`,
-        // so every solve is refined against the true `B` in double-double precision.
-        // The early-exit keeps well-conditioned solves cheap. Off mode → raw.
-        if self.singular_perturb.is_some() {
-            return self.dd_refined(rhs, false);
-        }
+        // #671 hardening keeps the hot-loop solve RAW even in singular-perturb mode:
+        // the perturbation only floors an already-tiny pivot (~1e-13 → abs_floor), so
+        // `B' ≈ B` and the simplex's pricing/ratio decisions are essentially
+        // unchanged — while a per-solve double-double refine would be O(m²) per pivot
+        // (the retained basis is dense) and dominate. Accuracy is recovered where it
+        // is *certified*: the audit path calls [`ftran_refined`], which runs the
+        // double-double refinement (`dd_refined`) against the true `B`.
         self.ftran_raw(rhs)
     }
 
     fn btran(&mut self, rhs: &mut [f64]) -> Result<(), LinError> {
-        if self.singular_perturb.is_some() {
-            return self.dd_refined(rhs, true);
-        }
         self.btran_raw(rhs)
     }
 
