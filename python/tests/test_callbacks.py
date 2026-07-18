@@ -412,6 +412,268 @@ class TestCallbacksWithMILP:
         assert len(node_calls) > 0
 
 
+def _spatial_mi_model():
+    """Nonconvex spatial MINLP from issue #740.
+
+    min x + y + 2*b  s.t.  x*y >= 1,  x + y <= 4 + b,  x,y in [0,4], b binary.
+    Unconstrained-by-callback optimum is b=0 (objective 2.0, at x=y=1); vetoing
+    or cutting off every b=0 incumbent makes the true optimum b=1 (objective
+    4.0). The bilinear ``x*y`` forces the spatial (nonconvex) B&B path, whose
+    primal heuristics (sub-NLP, feasibility pump, LNS, per-node NLP polish)
+    find the b=0 point through side channels that bypass the batch-import
+    callback gate — the #740 bug.
+    """
+    m = discopt.Model("spatial_mi")
+    x = m.continuous("x", lb=0.0, ub=4.0)
+    y = m.continuous("y", lb=0.0, ub=4.0)
+    b = m.binary("b")
+    m.subject_to(x * y >= 1.0)
+    m.subject_to(x + y <= 4.0 + b)
+    m.minimize(x + y + 2.0 * b)
+    return m, (x, y, b)
+
+
+@pytest.mark.slow
+@needs_rust
+@pytest.mark.integration
+class TestIssue740HeuristicInjectionGate:
+    """#740: incumbent_callback / lazy_constraints were bypassed by heuristic
+    incumbent injections on the spatial MINLP path. The batch-import gate
+    (``_invoke_pre_import_callbacks``) honored them, but incumbents entering via
+    ``tree.inject_incumbent`` side channels (warm start, sub-NLP, feasibility
+    pump, LNS, per-node NLP polish, completeness guard) never consulted the
+    callbacks, so a vetoed / cut-off point was returned as the final
+    ``optimal`` incumbent. The fix funnels every injection through
+    ``_screen_heuristic_incumbent``.
+    """
+
+    def test_incumbent_callback_veto_on_spatial_path(self):
+        """A vetoed point must never be the returned incumbent: rejecting all
+        b=0 solutions forces the b=1 optimum (objective 4.0). Pre-fix this
+        returned the vetoed b=0 point with objective 2.0."""
+        m, _vars = _spatial_mi_model()
+        vetoed = []
+
+        def inc_cb(ctx, model, sol):
+            if sol["b"] < 0.5:
+                vetoed.append(dict(sol))
+                return False
+            return True
+
+        res = m.solve(incumbent_callback=inc_cb, time_limit=60.0)
+        assert res.status in ("optimal", "feasible")
+        assert res.x is not None
+        assert round(float(np.ravel(res.x["b"])[0])) == 1, (
+            f"vetoed b=0 point returned as incumbent (objective {res.objective})"
+        )
+        assert res.objective == pytest.approx(4.0, rel=1e-3)
+        # The callback actually fired (the b=0 point WAS encountered and vetoed).
+        assert len(vetoed) > 0
+
+    def test_lazy_constraints_cut_on_spatial_path(self):
+        """A point excluded by a lazy cut must never be the returned incumbent:
+        cutting off b=0 relaxation points with a ``b >= 1`` cut forces the b=1
+        optimum (objective 4.0). Pre-fix this converged to the excluded b=0
+        point with objective 2.0."""
+        m, (_x, _y, b) = _spatial_mi_model()
+        cuts_fired = []
+
+        def lazy_cb(ctx, model):
+            # b is the third flat variable (index 2)
+            if ctx.x_relaxation[2] < 0.5:
+                cuts_fired.append(1)
+                return [CutResult(terms=[(b, 1.0)], sense=">=", rhs=1.0)]
+            return []
+
+        res = m.solve(lazy_constraints=lazy_cb, time_limit=60.0)
+        assert res.status in ("optimal", "feasible")
+        assert res.x is not None
+        assert round(float(np.ravel(res.x["b"])[0])) == 1, (
+            f"cut-off b=0 point returned as incumbent (objective {res.objective})"
+        )
+        assert res.objective == pytest.approx(4.0, rel=1e-3)
+        assert len(cuts_fired) > 0
+
+    def test_warm_start_incumbent_is_screened(self):
+        """The warm-start injection is a side channel too: an initial point the
+        incumbent callback vetoes must not survive as the final incumbent."""
+        m, (x, y, b) = _spatial_mi_model()
+
+        def reject_b0(ctx, model, sol):
+            return not sol["b"] < 0.5
+
+        # Feasible b=0 warm start (x=y=1): objective 2.0, vetoed by the callback.
+        res = m.solve(
+            incumbent_callback=reject_b0,
+            initial_solution={x: 1.0, y: 1.0, b: 0.0},
+            time_limit=60.0,
+        )
+        assert res.status in ("optimal", "feasible")
+        assert round(float(np.ravel(res.x["b"])[0])) == 1
+        assert res.objective == pytest.approx(4.0, rel=1e-3)
+
+
+class TestScreenHeuristicIncumbent:
+    """Unit tests for the #740 single-candidate callback gate."""
+
+    class _FakeTree:
+        def __init__(self, incumbent=None):
+            self._inc = incumbent
+
+        def incumbent(self):
+            return self._inc
+
+        def stats(self):
+            return {"total_nodes": 7, "global_lower_bound": 1.5, "gap": 0.5}
+
+    @staticmethod
+    def _model():
+        m = discopt.Model("gate_unit")
+        x = m.continuous("x", lb=0.0, ub=4.0)
+        b = m.binary("b")
+        m.minimize(x + b)
+        m.subject_to(x + b >= 0.5)
+        return m
+
+    def test_veto_blocks_candidate(self):
+        from discopt.solver import _screen_heuristic_incumbent
+
+        m = self._model()
+        seen = []
+
+        def veto(ctx, model, sol):
+            seen.append(sol)
+            return False
+
+        ok = _screen_heuristic_incumbent(
+            model=m,
+            tree=self._FakeTree(),
+            t_start=0.0,
+            x=np.array([1.0, 0.0]),
+            obj=1.0,
+            int_offsets=[1],
+            int_sizes=[1],
+            lazy_constraints=None,
+            incumbent_callback=veto,
+            _cut_pool=None,
+        )
+        assert ok is False
+        assert len(seen) == 1
+
+    def test_lazy_cut_blocks_candidate_and_pools_cut(self):
+        from discopt._jax.cutting_planes import CutPool
+        from discopt.solver import _screen_heuristic_incumbent
+
+        m = self._model()
+        b = m._variables[1]
+        pool = CutPool(max_cuts=10)
+
+        def lazy(ctx, model):
+            return [CutResult(terms=[(b, 1.0)], sense=">=", rhs=1.0)]
+
+        ok = _screen_heuristic_incumbent(
+            model=m,
+            tree=self._FakeTree(),
+            t_start=0.0,
+            x=np.array([1.0, 0.0]),
+            obj=1.0,
+            int_offsets=[1],
+            int_sizes=[1],
+            lazy_constraints=lazy,
+            incumbent_callback=None,
+            _cut_pool=pool,
+        )
+        assert ok is False
+        assert len(pool) == 1
+
+    def test_accepting_callback_passes_candidate(self):
+        from discopt.solver import _screen_heuristic_incumbent
+
+        m = self._model()
+        ok = _screen_heuristic_incumbent(
+            model=m,
+            tree=self._FakeTree(),
+            t_start=0.0,
+            x=np.array([1.0, 0.0]),
+            obj=1.0,
+            int_offsets=[1],
+            int_sizes=[1],
+            lazy_constraints=None,
+            incumbent_callback=lambda ctx, model, sol: True,
+            _cut_pool=None,
+        )
+        assert ok is True
+
+    def test_non_integer_candidate_skips_callbacks(self):
+        """A fractional candidate can never become the incumbent
+        (``inject_incumbent`` re-verifies), so user code must not see it."""
+        from discopt.solver import _screen_heuristic_incumbent
+
+        m = self._model()
+        calls = []
+        ok = _screen_heuristic_incumbent(
+            model=m,
+            tree=self._FakeTree(),
+            t_start=0.0,
+            x=np.array([1.0, 0.4]),
+            obj=1.4,
+            int_offsets=[1],
+            int_sizes=[1],
+            lazy_constraints=None,
+            incumbent_callback=lambda ctx, model, sol: calls.append(1) or False,
+            _cut_pool=None,
+        )
+        assert ok is True
+        assert not calls
+
+    def test_non_improving_candidate_skips_callbacks(self):
+        """The callback contract is "a new incumbent is about to be accepted":
+        a candidate that cannot strictly improve the incumbent is passed
+        through uninspected (``inject_incumbent`` rejects it)."""
+        from discopt.solver import _screen_heuristic_incumbent
+
+        m = self._model()
+        calls = []
+        ok = _screen_heuristic_incumbent(
+            model=m,
+            tree=self._FakeTree(incumbent=(np.array([1.0, 0.0]), 1.0)),
+            t_start=0.0,
+            x=np.array([2.0, 0.0]),
+            obj=2.0,
+            int_offsets=[1],
+            int_sizes=[1],
+            lazy_constraints=None,
+            incumbent_callback=lambda ctx, model, sol: calls.append(1) or False,
+            _cut_pool=None,
+        )
+        assert ok is True
+        assert not calls
+
+    def test_callback_exception_fails_soft(self):
+        """Only the user callback may fail softly (INT-1 discipline): an
+        exception is logged and the candidate proceeds."""
+        from discopt.solver import _screen_heuristic_incumbent
+
+        m = self._model()
+
+        def bad(ctx, model, sol):
+            raise RuntimeError("intentional")
+
+        ok = _screen_heuristic_incumbent(
+            model=m,
+            tree=self._FakeTree(),
+            t_start=0.0,
+            x=np.array([1.0, 0.0]),
+            obj=1.0,
+            int_offsets=[1],
+            int_sizes=[1],
+            lazy_constraints=None,
+            incumbent_callback=bad,
+            _cut_pool=None,
+        )
+        assert ok is True
+
+
 class TestCallbackContext:
     def test_construction(self):
         ctx = CallbackContext(

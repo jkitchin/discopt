@@ -2201,6 +2201,120 @@ def _invoke_pre_import_callbacks(
                 )
 
 
+def _screen_heuristic_incumbent(
+    *,
+    model,
+    tree,
+    t_start,
+    x,
+    obj,
+    int_offsets,
+    int_sizes,
+    lazy_constraints,
+    incumbent_callback,
+    _cut_pool,
+    tree_bound_valid=True,
+) -> bool:
+    """Screen ONE incumbent candidate through the user's callback gate (#740).
+
+    ``_invoke_pre_import_callbacks`` above screens batch-evaluated relaxation
+    solutions before they are imported — but incumbents also enter the spatial
+    search through single-point side channels (warm start, feasibility pump,
+    subnlp, diving, LNS, integer-box search, the completeness guard), which
+    used to call ``tree.inject_incumbent`` directly. Any of those could
+    (re-)introduce a point the user's ``incumbent_callback`` vetoed or whose
+    ``lazy_constraints`` cuts exclude it, and the solve then reported that
+    point as ``optimal``. This is the same gate, applied to a single candidate
+    at the injection funnel.
+
+    Returns True when the candidate may be handed to ``inject_incumbent``.
+    Candidates that cannot become the incumbent anyway — not integer-feasible,
+    or not strictly better than the current incumbent (``inject_incumbent``
+    enforces strict improvement) — pass through without invoking user code:
+    the callback contract is "called when a new incumbent is about to be
+    accepted". A candidate that reaches the callbacks more than once (e.g. a
+    batch NLP solution injected here and later re-screened by the batch gate)
+    may invoke them more than once; the callbacks must therefore be safe to
+    re-invoke on the same point, which the pre-existing batch gate already
+    required across iterations.
+
+    Cuts returned by ``lazy_constraints`` are added to ``_cut_pool`` (always
+    non-None when ``lazy_constraints`` is set — see the pool setup in
+    ``solve_model``) so they tighten subsequent relaxations, exactly as on the
+    batch path.
+    """
+    from discopt._jax.cutting_planes import LinearCut
+    from discopt.callbacks import CallbackContext, cut_result_to_dense
+
+    x = np.asarray(x, dtype=np.float64)
+    if not _is_integer_feasible_solution(x, int_offsets, int_sizes):
+        return True  # cannot become an incumbent; inject_incumbent re-verifies
+
+    incumbent_info = tree.incumbent()
+    inc_obj = None
+    if incumbent_info is not None:
+        _, inc_obj = incumbent_info
+        if inc_obj >= _SENTINEL_THRESHOLD:
+            inc_obj = None
+    if inc_obj is not None and obj >= inc_obj:
+        return True  # not strictly improving; inject_incumbent rejects it
+
+    stats = tree.stats()
+
+    from discopt.modeling.core import ObjectiveSense as _ObjectiveSense
+
+    _cb_is_max = model._objective is not None and model._objective.sense == _ObjectiveSense.MAXIMIZE
+    _cb_bound = _certified_callback_bound(
+        stats.get("global_lower_bound"), tree_bound_valid, _cb_is_max
+    )
+    ctx = CallbackContext(
+        node_count=stats["total_nodes"],
+        incumbent_obj=inc_obj,
+        best_bound=_cb_bound,
+        gap=(stats.get("gap") if _cb_bound is not None else None),
+        elapsed_time=time.perf_counter() - t_start,
+        x_relaxation=x.copy(),
+        # A heuristic candidate carries no node relaxation bound; its own
+        # (internal-sense) objective is the honest value for the inspected point.
+        node_bound=float(obj),
+    )
+
+    # Only the user callback may fail softly; acting on its verdict is our code
+    # and stays OUTSIDE the swallow (INT-1, #413 — same discipline as the batch
+    # gate above).
+    if lazy_constraints is not None:
+        try:
+            cuts = lazy_constraints(ctx, model)
+        except Exception as e:
+            logger.warning("Lazy constraint callback raised an exception: %s", e)
+            cuts = None
+        if cuts:
+            # The excluded point must never be accepted even if cut insertion
+            # below fails: on an exception the injection simply never happens
+            # (the funnel returns via the raised error, not True).
+            for cut in cuts:
+                coeffs, rhs, sense = cut_result_to_dense(cut, model)
+                _cut_pool.add(LinearCut(coeffs=coeffs, rhs=rhs, sense=sense))
+            logger.info(
+                "Lazy constraint callback cut off a heuristic incumbent candidate (%d cut(s))",
+                len(cuts),
+            )
+            return False
+
+    if incumbent_callback is not None:
+        solution = _unpack_solution(model, x)
+        try:
+            accept = incumbent_callback(ctx, model, solution)
+        except Exception as e:
+            logger.warning("Incumbent callback raised an exception: %s", e)
+            accept = None
+        if accept is False:
+            logger.info("Incumbent callback rejected a heuristic incumbent candidate")
+            return False
+
+    return True
+
+
 def _unpack_solution(model: Model, x_flat: np.ndarray):
     """Convert flat solution vector to {var_name: array} dict."""
     result = {}
@@ -5990,6 +6104,35 @@ def solve_model(
         tree.set_nonconvex(True)
     _gap_certified = True
 
+    # --- #740: single funnel for every non-batch incumbent injection ---
+    # All warm-start / heuristic / completeness-guard injections on this
+    # (spatial) path MUST go through this wrapper, never
+    # ``tree.inject_incumbent`` directly: the batch import gate
+    # (``_invoke_pre_import_callbacks``) only screens batch-evaluated nodes, so
+    # a side channel injecting directly would bypass the user's
+    # ``lazy_constraints`` / ``incumbent_callback`` contract and could report a
+    # vetoed / cut-off point as the final ``optimal`` incumbent. Reads
+    # ``_gap_certified`` at call time so the surfaced ``best_bound`` honors the
+    # A1 taint gate exactly like the batch path.
+    def _inject_incumbent(x_cand, obj_cand):
+        if (lazy_constraints is not None or incumbent_callback is not None) and (
+            not _screen_heuristic_incumbent(
+                model=model,
+                tree=tree,
+                t_start=t_start,
+                x=x_cand,
+                obj=obj_cand,
+                int_offsets=int_offsets,
+                int_sizes=int_sizes,
+                lazy_constraints=lazy_constraints,
+                incumbent_callback=incumbent_callback,
+                _cut_pool=_cut_pool,
+                tree_bound_valid=_gap_certified,
+            )
+        ):
+            return False
+        return tree.inject_incumbent(x_cand, obj_cand)
+
     # --- B2-FIX (task #89): per-node taint accounting for the reported dual bound.
     # A non-rigorous sentinel fathom (a node whose local NLP merely failed and that
     # was pruned with no infeasibility proof) rightly decertifies *optimality*
@@ -6753,7 +6896,7 @@ def solve_model(
                 evaluator, initial_point, cl_list, cu_list
             )
             if ws_con_feas:
-                tree.inject_incumbent(initial_point, ws_obj)
+                _inject_incumbent(initial_point, ws_obj)
                 logger.info("Warm-start incumbent injected: obj=%.6g", ws_obj)
             else:
                 logger.info(
@@ -6812,7 +6955,7 @@ def solve_model(
                 if _ir_sn is not None and (_ir_best is None or _ir_sn[1] < _ir_best[1]):
                     _ir_best = _ir_sn
             if _ir_best is not None:
-                tree.inject_incumbent(_ir_best[0], float(_ir_best[1]))
+                _inject_incumbent(_ir_best[0], float(_ir_best[1]))
                 logger.info("integer-ratio witness incumbent injected: obj=%.6g", _ir_best[1])
         except Exception:  # pragma: no cover - defensive (never blocks the solve)
             logger.debug("integer-ratio witness injection skipped", exc_info=True)
@@ -7609,7 +7752,7 @@ def solve_model(
             # bound (local minima can exceed the global optimum).  Reset ALL
             # non-sentinel nodes to -inf so only convex relaxation bounds are
             # used.  For integer-feasible nodes, inject the NLP solution as
-            # an incumbent candidate via tree.inject_incumbent() and let the
+            # an incumbent candidate via the _inject_incumbent funnel and let the
             # Rust tree continue spatial branching on continuous variables.
             if not _model_is_convex:
                 _nlp_obj_backup = result_lbs.copy()
@@ -7624,7 +7767,7 @@ def solve_model(
                             # objective improves on the current best.
                             nlp_obj = float(_nlp_obj_backup[i])
                             if np.isfinite(nlp_obj):
-                                tree.inject_incumbent(result_sols[i].copy(), nlp_obj)
+                                _inject_incumbent(result_sols[i].copy(), nlp_obj)
                         # Reset ALL nonconvex nodes to -inf; convex bounds
                         # computed below will provide valid lower bounds.
                         result_lbs[i] = -np.inf
@@ -8049,9 +8192,7 @@ def solve_model(
                     elif not _model_is_convex:
                         if _is_integer_feasible_solution(nlp_result.x, int_offsets, int_sizes):
                             if np.isfinite(nlp_obj) and nlp_obj < _SENTINEL_THRESHOLD:
-                                tree.inject_incumbent(
-                                    np.asarray(nlp_result.x).copy(), float(nlp_obj)
-                                )
+                                _inject_incumbent(np.asarray(nlp_result.x).copy(), float(nlp_obj))
                         nlp_lb = convex_lb if convex_lb > -np.inf else -np.inf
 
                     # Guard: NaN and +inf lower bounds corrupt the Rust B&B
@@ -8500,7 +8641,7 @@ def solve_model(
                             evaluator, fp_sol, cl_list, cu_list
                         )
                         if np.isfinite(fp_obj) and fp_obj < _SENTINEL_THRESHOLD and fp_feas:
-                            tree.inject_incumbent(fp_sol, fp_obj)
+                            _inject_incumbent(fp_sol, fp_obj)
                             logger.info("Feasibility pump found incumbent: obj=%.6g", fp_obj)
                 except Exception as e:
                     logger.debug("Feasibility pump failed: %s", e)
@@ -8572,7 +8713,7 @@ def solve_model(
                                     and fp_obj2 < _SENTINEL_THRESHOLD
                                     and fp_feas2
                                 ):
-                                    tree.inject_incumbent(fp_sol2, fp_obj2)
+                                    _inject_incumbent(fp_sol2, fp_obj2)
                                     logger.info(
                                         "NLP-relaxation feasibility pump found incumbent: obj=%.6g",
                                         fp_obj2,
@@ -8621,7 +8762,7 @@ def solve_model(
                         if ils is not None:
                             _x_ils, _obj_ils = ils
                             if np.isfinite(_obj_ils) and _obj_ils < _SENTINEL_THRESHOLD:
-                                tree.inject_incumbent(_x_ils.copy(), float(_obj_ils))
+                                _inject_incumbent(_x_ils.copy(), float(_obj_ils))
                                 logger.info(
                                     "Integer local search found incumbent: obj=%.6g",
                                     _obj_ils,
@@ -8663,7 +8804,7 @@ def solve_model(
                                 evaluator, _x_dv, cl_list, cu_list
                             )
                             if np.isfinite(_obj_dv) and _obj_dv < _SENTINEL_THRESHOLD and _dv_feas:
-                                tree.inject_incumbent(np.asarray(_x_dv).copy(), _obj_dv)
+                                _inject_incumbent(np.asarray(_x_dv).copy(), _obj_dv)
                                 logger.info("Fractional diving found incumbent: obj=%.6g", _obj_dv)
                     except Exception as e:
                         logger.debug("Fractional diving failed: %s", e)
@@ -8718,7 +8859,7 @@ def solve_model(
                             evaluator, _x_cms, cl_list, cu_list
                         )
                         if np.isfinite(_obj_cms) and _obj_cms < _SENTINEL_THRESHOLD and _cms_feas:
-                            tree.inject_incumbent(np.asarray(_x_cms).copy(), float(_obj_cms))
+                            _inject_incumbent(np.asarray(_x_cms).copy(), float(_obj_cms))
                             logger.info("Continuous multistart found incumbent: obj=%.6g", _obj_cms)
                 except Exception as e:
                     logger.debug("Continuous multistart failed: %s", e)
@@ -8779,7 +8920,7 @@ def solve_model(
                         _x_sn, _obj_sn = _sn
                         _subnlp_feasible += 1
                         if np.isfinite(_obj_sn) and _obj_sn < _SENTINEL_THRESHOLD:
-                            tree.inject_incumbent(_x_sn.copy(), float(_obj_sn))
+                            _inject_incumbent(_x_sn.copy(), float(_obj_sn))
                             _subnlp_incumbent_updates += 1
                             logger.info("SubNLP incumbent (gams seed): obj=%.6g", _obj_sn)
 
@@ -8821,7 +8962,7 @@ def solve_model(
                     _x_sn, _obj_sn = _sn
                     _subnlp_feasible += 1
                     if np.isfinite(_obj_sn) and _obj_sn < _SENTINEL_THRESHOLD:
-                        tree.inject_incumbent(_x_sn.copy(), float(_obj_sn))
+                        _inject_incumbent(_x_sn.copy(), float(_obj_sn))
                         _subnlp_incumbent_updates += 1
                         logger.info("SubNLP incumbent (seed): obj=%.6g", _obj_sn)
             else:
@@ -8878,7 +9019,7 @@ def solve_model(
                     _x_sn, _obj_sn = _sn
                     _subnlp_feasible += 1
                     if np.isfinite(_obj_sn) and _obj_sn < _SENTINEL_THRESHOLD:
-                        tree.inject_incumbent(_x_sn.copy(), float(_obj_sn))
+                        _inject_incumbent(_x_sn.copy(), float(_obj_sn))
                         _subnlp_incumbent_updates += 1
                         logger.info("SubNLP incumbent: obj=%.6g (iter=%d)", _obj_sn, iteration)
 
@@ -8944,7 +9085,7 @@ def solve_model(
             for _x_en, _obj_en in _enum_results:
                 _subnlp_feasible += 1
                 if np.isfinite(_obj_en) and _obj_en < _SENTINEL_THRESHOLD:
-                    tree.inject_incumbent(_x_en.copy(), float(_obj_en))
+                    _inject_incumbent(_x_en.copy(), float(_obj_en))
                     _subnlp_incumbent_updates += 1
                     logger.info("SubNLP enum incumbent: obj=%.6g", _obj_en)
             if _enum_had_inc:
@@ -8999,7 +9140,7 @@ def solve_model(
                     logger.debug("integer_box_search raised: %s", _e)
                     _bx = None
                 if _bx is not None and np.isfinite(_bx[1]) and _bx[1] < _inc_box[1] - 1e-9:
-                    tree.inject_incumbent(_bx[0].copy(), float(_bx[1]))
+                    _inject_incumbent(_bx[0].copy(), float(_bx[1]))
                     _subnlp_incumbent_updates += 1
                     _last_box_inc_obj = float(_bx[1])
                     logger.info("Box-search incumbent: obj=%.6g (iter=%d)", _bx[1], iteration)
@@ -9087,7 +9228,7 @@ def solve_model(
                                 evaluator, _x_dv, cl_list, cu_list
                             )
                             if np.isfinite(_obj_dv) and _obj_dv < _SENTINEL_THRESHOLD and _dv_feas:
-                                tree.inject_incumbent(np.asarray(_x_dv).copy(), _obj_dv)
+                                _inject_incumbent(np.asarray(_x_dv).copy(), _obj_dv)
                                 logger.info("LNS node-diving incumbent: obj=%.6g", _obj_dv)
                     except Exception as _e:
                         logger.debug("LNS node-diving failed: %s", _e)
@@ -9123,7 +9264,7 @@ def solve_model(
                                 evaluator, _x_ri, cl_list, cu_list
                             )
                             if np.isfinite(_obj_ri) and _obj_ri < _SENTINEL_THRESHOLD and _ri_feas:
-                                tree.inject_incumbent(np.asarray(_x_ri).copy(), _obj_ri)
+                                _inject_incumbent(np.asarray(_x_ri).copy(), _obj_ri)
                                 _rins_improved = _obj_ri < _rins_obj0 - 1e-9
                                 logger.info("LNS RINS incumbent: obj=%.6g", _obj_ri)
                     except Exception as _e:
@@ -9163,7 +9304,7 @@ def solve_model(
                                 evaluator, _x_sw, cl_list, cu_list
                             )
                             if np.isfinite(_obj_sw) and _obj_sw < _SENTINEL_THRESHOLD and _sw_feas:
-                                tree.inject_incumbent(np.asarray(_x_sw).copy(), _obj_sw)
+                                _inject_incumbent(np.asarray(_x_sw).copy(), _obj_sw)
                                 _swap_improved = _obj_sw < float(_lns_inc[1]) - 1e-9
                                 logger.info("LNS one-hot swap incumbent: obj=%.6g", _obj_sw)
                     except Exception as _e:
@@ -9212,7 +9353,7 @@ def solve_model(
                                 evaluator, _x_lb, cl_list, cu_list
                             )
                             if np.isfinite(_obj_lb) and _obj_lb < _SENTINEL_THRESHOLD and _lb_feas:
-                                tree.inject_incumbent(np.asarray(_x_lb).copy(), _obj_lb)
+                                _inject_incumbent(np.asarray(_x_lb).copy(), _obj_lb)
                                 _lb_improved = _obj_lb < _lb_obj0 - 1e-9
                                 logger.info(
                                     "LNS local-branching incumbent: obj=%.6g (k=%d)",
@@ -9270,9 +9411,10 @@ def solve_model(
         # its objective EVER being recorded. The tree then exhausts while missing
         # that point and falsely certifies a worse incumbent (nvs19: certified
         # -1098.0 with -1098.4 feasible). Inject every such verified point here,
-        # ungated: ``inject_incumbent`` accepts only a strictly-improving feasible
-        # point and never touches the dual bound, so this only ever tightens the
-        # incumbent — it cannot make the search unsound, only complete.
+        # gated only by the user-callback funnel (#740): ``inject_incumbent``
+        # accepts only a strictly-improving feasible point and never touches the
+        # dual bound, so this only ever tightens the incumbent — it cannot make
+        # the search unsound, only complete.
         if not _model_is_convex and int_offsets:
             _cl = [c[0] for c in constraint_bounds] if constraint_bounds else None
             _cu = [c[1] for c in constraint_bounds] if constraint_bounds else None
@@ -9289,7 +9431,7 @@ def solve_model(
                     continue
                 _obj_i = float(evaluator.evaluate_objective(xr))
                 if np.isfinite(_obj_i) and _obj_i < _SENTINEL_THRESHOLD:
-                    tree.inject_incumbent(xr, _obj_i)
+                    _inject_incumbent(xr, _obj_i)
 
         # Interactive debugger: steer point — relaxations solved, results not
         # yet imported. Safe-steer (inject incumbent / branch hint) applies here;
@@ -9331,7 +9473,7 @@ def solve_model(
         # Did the incumbent strictly improve this iteration, from ANY source?
         # proc_stats["incumbent_updates"] counts only incumbents found in the
         # batch evaluation — NOT the sub-NLP / binary-seed heuristics, which
-        # inject directly via tree.inject_incumbent. For small nonconvex MINLPs
+        # inject directly via the _inject_incumbent funnel. For small nonconvex MINLPs
         # the optimum is routinely found by those heuristics, so gating the
         # cutoff-tightening phases on the batch counter alone left the tightened
         # global box (and thus all pruning) on the table and the gap never
