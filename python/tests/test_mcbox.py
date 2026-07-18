@@ -199,6 +199,65 @@ def test_division_zero_crossing_denominator_noinfo():
     assert not bool(jnp.isfinite(z.cv)) and not bool(jnp.isfinite(z.cc))
 
 
+# ---- subgradient validity AT THE BOX FACES/CORNERS ----
+# The interior-random ``_check`` never lands a base point exactly on a box face, but a
+# Kelley/LP iterate always sits on one (an LP optimum is a polytope vertex). There the
+# intrinsic envelopes used to hand back the ``jnp.clip`` tie subgradient (a 0.5-halved,
+# INVALID slope), so the McCormick cut could exclude the true optimum -> too-high bound.
+# These probe the support inequality with the base point pinned to corners/faces.
+@pytest.mark.parametrize(
+    "name,fn,lb,ub",
+    [
+        ("exp", lambda x: mc.exp(x), [0.0], [2.0]),
+        ("exp-neg-slope", lambda x: mc.exp(-0.6 * x), [0.2], [2.0]),
+        ("log", lambda x: mc.log(x), [0.5], [3.0]),
+        ("sqrt", lambda x: mc.sqrt(x), [0.1], [4.0]),
+        ("softplus", lambda x: mc.softplus(x), [-2.0], [2.0]),
+        ("abs", lambda x: mc.abs(x), [-2.0], [3.0]),
+        ("recip-of-affine", lambda x, y: x / y, [0.5, 1.0], [3.0, 4.0]),
+        ("composite", lambda x, y: y - mc.exp(-0.6 * x), [0.2, 0.3], [2.0, 0.89]),
+    ],
+)
+def test_subgradient_valid_at_box_faces(name, fn, lb, ub):
+    import itertools
+
+    lb, ub = np.asarray(lb, float), np.asarray(ub, float)
+    n = lb.size
+
+    @jax.jit
+    def one(p):
+        z = relax_through(fn, p, jnp.asarray(lb), jnp.asarray(ub))
+        return z.cv, z.cc, z.sub_cv, z.sub_cc
+
+    batch = jax.jit(jax.vmap(one))
+    corners = np.array(list(itertools.product(*zip(lb, ub))), dtype=float)
+    faces = []  # face-centre points: one coord pinned to a bound, others random
+    rng = np.random.default_rng(1)
+    for i in range(n):
+        for bnd in (lb[i], ub[i]):
+            for _ in range(15):
+                p = lb + rng.random(n) * (ub - lb)
+                p[i] = bnd
+                faces.append(p)
+    bases = np.vstack([corners, np.array(faces)]) if faces else corners
+    probes = lb + rng.random((2000, n)) * (ub - lb)
+    probes = np.vstack([probes, corners])
+    cvB, ccB, _, _ = (np.asarray(a) for a in batch(jnp.asarray(probes)))
+    cvA, ccA, scvA, sccA = (np.asarray(a) for a in batch(jnp.asarray(bases)))
+    tol = 1e-7
+    for k in range(len(bases)):
+        lin_cv = cvA[k] + (probes - bases[k]) @ scvA[k]
+        lin_cc = ccA[k] + (probes - bases[k]) @ sccA[k]
+        assert np.all(cvB >= lin_cv - tol * (abs(cvA[k]) + 1)), (
+            f"{name}: cv subgradient invalid at face base {bases[k]} "
+            f"(max {float(np.max(lin_cv - cvB)):.2e})"
+        )
+        assert np.all(ccB <= lin_cc + tol * (abs(ccA[k]) + 1)), (
+            f"{name}: cc subgradient invalid at face base {bases[k]} "
+            f"(max {float(np.max(ccB - lin_cc)):.2e})"
+        )
+
+
 # ---- sound-or-refuse ----
 def test_refuse_noninteger_power():
     with pytest.raises(UnsupportedMcboxOp):

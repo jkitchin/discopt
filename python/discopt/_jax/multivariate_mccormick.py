@@ -32,6 +32,7 @@ All functions are pure JAX and compatible with ``jax.jit``, ``jax.grad``, and
 
 from __future__ import annotations
 
+import jax
 import jax.numpy as jnp
 
 
@@ -39,6 +40,52 @@ def _safe_slope(f_lb, f_ub, g_lb, g_ub):
     """Slope of the secant line from (g_lb, f_lb) to (g_ub, f_ub)."""
     width = jnp.where(jnp.abs(g_ub - g_lb) < 1e-15, 1.0, g_ub - g_lb)
     return (f_ub - f_lb) / width
+
+
+def clip_inner(t, lo, hi):
+    """``jnp.clip(t, lo, hi)`` whose derivative **w.r.t. t** is 1 on the CLOSED
+    interval ``[lo, hi]`` (and 0 strictly outside), instead of the 0.5 that
+    ``jnp.clip`` returns at the exact boundary.
+
+    Why this matters for soundness: the composition rules feed ``clip(cv_g, g_lb,
+    g_ub)`` into a convex/concave envelope, and MCBox differentiates that composite to
+    get the McCormick **subgradient** (:func:`discopt._jax.mcbox._univariate_kernel`).
+    ``jnp.clip`` is ``min(max(t, lo), hi)``; at ``t == lo`` or ``t == hi`` the max/min
+    tie makes ``jax.grad`` return the *average* (0.5) subderivative. On the interior
+    that never fires, but a Kelley/LP iterate sits exactly on a **box face**, where
+    ``cv_g`` equals ``g_lb``/``g_ub`` — there the halved factor yields an INVALID
+    subgradient (the tangent over-/under-slopes the envelope and its cut can exclude the
+    true optimum → too-high bound → false fathom). Since ``cv_g``/``cc_g`` are always
+    within ``[g_lb, g_ub]`` for a valid relaxation, the valid subdifferential element at
+    a face is the *inner one-sided* derivative (slope 1), which this returns. The value
+    is identical to ``jnp.clip`` — only the boundary gradient is corrected."""
+    ct = jnp.clip(t, lo, hi)
+    inside = (t >= lo) & (t <= hi)
+    through = t + jax.lax.stop_gradient(ct - t)  # value ct, d/dt = 1
+    return jnp.where(inside, through, jax.lax.stop_gradient(ct))
+
+
+def clip_into(z, lo, hi):
+    """``jnp.clip(z, lo, hi)`` for a constant ``z`` clamped into the data-dependent
+    ``[lo, hi]`` (the ``mid(z_star, cv_g, cc_g)`` selection in the square/abs/pow
+    rules), whose derivative **w.r.t. the active bound** is 1 at the boundary tie.
+
+    When ``z <= lo`` the lower bound is active (``d/dlo = 1``); when ``z >= hi`` the
+    upper bound is active (``d/dhi = 1``); strictly inside, ``z`` is a constant so both
+    are 0. At the exact tie ``z == lo`` (or ``z == hi``) ``jnp.clip`` would split the
+    gradient 0.5/0.5; the inner element (the active bound taking full slope 1) is the
+    valid subdifferential choice — same reasoning as :func:`clip_inner`. Value
+    identical to ``jnp.clip``."""
+    cz = jnp.clip(z, lo, hi)
+    lo_active = z <= lo
+    hi_active = z >= hi
+    # value cz; d/dlo = 1 where lo active, d/dhi = 1 where hi active, else 0.
+    val = jnp.where(
+        lo_active,
+        lo + jax.lax.stop_gradient(cz - lo),
+        jnp.where(hi_active, hi + jax.lax.stop_gradient(cz - hi), jax.lax.stop_gradient(cz)),
+    )
+    return val
 
 
 def _secant_at(z, g_lb, f_lb, slope):
@@ -58,8 +105,8 @@ def _compose_monotone_convex_inc(f, cv_g, cc_g, g_lb, g_ub):
     f^{cv} = f, argmin = g_lb -> z_cv = clip(g_lb, cv_g, cc_g) = cv_g (when cv_g >= g_lb)
     f^{cc} = secant, argmax = g_ub -> z_cc = clip(g_ub, cv_g, cc_g) = cc_g (when cc_g <= g_ub)
     """
-    z_cv = jnp.clip(cv_g, g_lb, g_ub)
-    z_cc = jnp.clip(cc_g, g_lb, g_ub)
+    z_cv = clip_inner(cv_g, g_lb, g_ub)
+    z_cc = clip_inner(cc_g, g_lb, g_ub)
     f_lb, f_ub = f(g_lb), f(g_ub)
     slope = _safe_slope(f_lb, f_ub, g_lb, g_ub)
     cv = f(z_cv)
@@ -79,8 +126,8 @@ def _compose_monotone_concave_inc(f, cv_g, cc_g, g_lb, g_ub):
     f^{cv} = secant, argmin = g_lb (secant is increasing) -> z_cv = cv_g
     f^{cc} = f, argmax = g_ub -> z_cc = cc_g
     """
-    z_cv = jnp.clip(cv_g, g_lb, g_ub)
-    z_cc = jnp.clip(cc_g, g_lb, g_ub)
+    z_cv = clip_inner(cv_g, g_lb, g_ub)
+    z_cc = clip_inner(cc_g, g_lb, g_ub)
     f_lb, f_ub = f(g_lb), f(g_ub)
     slope = _safe_slope(f_lb, f_ub, g_lb, g_ub)
     cv = _secant_at(z_cv, g_lb, f_lb, slope)
@@ -131,11 +178,11 @@ def compose_square(cv_g, cc_g, g_lb, g_ub):
     secant slope = g_lb + g_ub; argmax of secant is g_ub if slope > 0, g_lb otherwise.
     """
     z_star_cv = jnp.clip(0.0, g_lb, g_ub)
-    z_cv = jnp.clip(z_star_cv, cv_g, cc_g)
+    z_cv = clip_into(z_star_cv, cv_g, cc_g)
 
     slope_sign_pos = (g_lb + g_ub) >= 0.0
     z_star_cc = jnp.where(slope_sign_pos, g_ub, g_lb)
-    z_cc = jnp.clip(z_star_cc, cv_g, cc_g)
+    z_cc = clip_into(z_star_cc, cv_g, cc_g)
 
     f_lb = g_lb * g_lb
     f_ub = g_ub * g_ub
@@ -152,14 +199,14 @@ def compose_abs(cv_g, cc_g, g_lb, g_ub):
     argmin of |z| on [g_lb, g_ub] is clip(0, g_lb, g_ub).
     """
     z_star_cv = jnp.clip(0.0, g_lb, g_ub)
-    z_cv = jnp.clip(z_star_cv, cv_g, cc_g)
+    z_cv = clip_into(z_star_cv, cv_g, cc_g)
 
     f_lb = jnp.abs(g_lb)
     f_ub = jnp.abs(g_ub)
     # Secant slope sign: |g_ub| >= |g_lb| iff g_lb + g_ub >= 0 (when interval contains 0).
     # In all cases, argmax of secant is g_ub if f_ub >= f_lb else g_lb.
     z_star_cc = jnp.where(f_ub >= f_lb, g_ub, g_lb)
-    z_cc = jnp.clip(z_star_cc, cv_g, cc_g)
+    z_cc = clip_into(z_star_cc, cv_g, cc_g)
 
     slope = _safe_slope(f_lb, f_ub, g_lb, g_ub)
     cv = jnp.abs(z_cv)
@@ -180,12 +227,12 @@ def compose_even_pow(cv_g, cc_g, g_lb, g_ub, n: int):
         raise ValueError(f"compose_even_pow requires even n >= 2, got {n}")
 
     z_star_cv = jnp.clip(0.0, g_lb, g_ub)
-    z_cv = jnp.clip(z_star_cv, cv_g, cc_g)
+    z_cv = clip_into(z_star_cv, cv_g, cc_g)
 
     f_lb = g_lb**n
     f_ub = g_ub**n
     z_star_cc = jnp.where(f_ub >= f_lb, g_ub, g_lb)
-    z_cc = jnp.clip(z_star_cc, cv_g, cc_g)
+    z_cc = clip_into(z_star_cc, cv_g, cc_g)
 
     slope = _safe_slope(f_lb, f_ub, g_lb, g_ub)
     cv = z_cv**n
@@ -220,8 +267,8 @@ def _compose_sigmoid_like(f, cv_g, cc_g, g_lb, g_ub, *, concave_on_right: bool):
     f_lb_v, f_ub_v = f(g_lb), f(g_ub)
     slope = _safe_slope(f_lb_v, f_ub_v, g_lb, g_ub)
 
-    z_cv_inner = jnp.clip(cv_g, g_lb, g_ub)
-    z_cc_inner = jnp.clip(cc_g, g_lb, g_ub)
+    z_cv_inner = clip_inner(cv_g, g_lb, g_ub)
+    z_cc_inner = clip_inner(cc_g, g_lb, g_ub)
 
     # Pure-half cases (TM2014 tight)
     if concave_on_right:

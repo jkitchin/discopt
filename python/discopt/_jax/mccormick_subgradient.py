@@ -28,6 +28,7 @@ from discopt.modeling.core import (
     BinaryOp,
     Constant,
     Constraint,
+    CustomCall,
     FunctionCall,
     ObjectiveSense,
     Parameter,
@@ -165,6 +166,37 @@ def _to_mcbox(expr, leaves, model):
             return fn(a)
         except UnsupportedMcboxOp as e:
             raise UnsupportedRelaxation(str(e)) from e
+
+    if isinstance(expr, CustomCall):
+        # P3.1: a hidden-DOF ``CustomCall`` becomes globally relaxable when its opaque
+        # jax callable traces through MCBox — the relaxation and its subgradients then
+        # fall out of the same rule-based propagation as any other operator, and the
+        # model can be certified while branching only on the true degrees of freedom
+        # (the CustomCall's internal intermediates never become branching variables).
+        #
+        # Sound-or-refuse (plan §0.3, §5-P3.1): the trace runs under
+        # ``strict_division`` — an opaque body offers no AST for the ``_is_affine_ast``
+        # guard, so variable-denominator division (the unvalidated non-affine reciprocal,
+        # nvs22) refuses rather than risk an invalid bound. A body written against
+        # anything MCBox does not support (raw ``jnp`` intrinsics on an MCBox, an
+        # unsupported op) raises here and routes to the caller's fallback (local-NLP /
+        # lifted) exactly as an opaque CustomCall does today — never a partial bound.
+        arg_boxes = [_to_mcbox(a, leaves, model) for a in expr.args]
+        try:
+            with _mcbox.strict_division():
+                result = expr.fn(*arg_boxes)
+        except UnsupportedRelaxation:
+            raise
+        except (UnsupportedMcboxOp, TypeError, ValueError, AttributeError) as e:
+            raise UnsupportedRelaxation(
+                f"CustomCall '{expr.name}' is not soundly MCBox-relaxable ({type(e).__name__}: {e})"
+            ) from e
+        if not isinstance(result, _mcbox.MCBox):
+            raise UnsupportedRelaxation(
+                f"CustomCall '{expr.name}' did not return a scalar MCBox "
+                f"(got {type(result).__name__}); reduce it to a scalar relaxation"
+            )
+        return result
 
     raise UnsupportedRelaxation(f"node type {type(expr).__name__}")
 

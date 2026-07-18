@@ -38,17 +38,48 @@ tight monomial hull incl. odd-power-over-sign-spanning).
 
 from __future__ import annotations
 
+import contextlib
 from dataclasses import dataclass
 from typing import cast
 
 import jax
 import jax.numpy as jnp
 
-from discopt._jax.multivariate_mccormick import _COMPOSITION_RULES
+from discopt._jax.multivariate_mccormick import _COMPOSITION_RULES, clip_inner
 
 
 class UnsupportedMcboxOp(Exception):
     """A subexpression is outside the sound MCBox scope — refuse, never approximate."""
+
+
+# ---------------------------------------------------------------- strict mode
+#
+# When tracing an OPAQUE user callable (a ``CustomCall`` body, P3.1) through MCBox,
+# there is no AST to inspect: the caller cannot apply the ``_is_affine_ast`` guard that
+# the reduced-space AST interpreter uses to refuse a non-affine division (whose ``cc``
+# subgradient is NOT validated — it excluded the true optimum on nvs22 by ~1.7e5, task
+# #69). To keep the CustomCall path sound-or-refuse, tracing runs under
+# :func:`strict_division`, in which variable-denominator division (``MCBox / MCBox``)
+# refuses loudly rather than emitting a possibly-unsound bound. Division by a numeric
+# constant (``MCBox / c``) stays sound and is always allowed. Non-strict (default) mode
+# is unchanged — the AST interpreter and the direct-MCBox tests keep their behavior.
+_STRICT_DIVISION = False
+
+
+@contextlib.contextmanager
+def strict_division():
+    """Refuse variable-denominator (``MCBox / MCBox``) division within this scope.
+
+    Used to trace opaque ``CustomCall`` bodies soundly (P3.1): the non-affine reciprocal
+    subgradient is not validated, and an opaque body offers no AST to gate it on, so the
+    only sound contract is to refuse. Constant-denominator division is unaffected."""
+    global _STRICT_DIVISION
+    prev = _STRICT_DIVISION
+    _STRICT_DIVISION = True
+    try:
+        yield
+    finally:
+        _STRICT_DIVISION = prev
 
 
 @jax.tree_util.register_pytree_node_class
@@ -105,6 +136,12 @@ class MCBox:
 
     def __truediv__(self, o):
         if isinstance(o, MCBox):
+            if _STRICT_DIVISION:
+                raise UnsupportedMcboxOp(
+                    "variable-denominator division inside an opaque CustomCall trace: the "
+                    "non-affine reciprocal cc-subgradient is not validated (nvs22, task #69) "
+                    "and there is no AST to gate it on — refuse (sound-or-refuse)"
+                )
             return _bilinear(self, _reciprocal(o))  # x/y = x * (1/y), sign-definite y
         c = jnp.asarray(o, dtype=jnp.float64)
         return _scalar_mul(self, 1.0 / c)
@@ -241,8 +278,11 @@ def _recip_kernel(cvg, ccg, lb, ub):
     # above ub; clamp into the valid interval first (still valid bounds on y, and where
     # 1/y is defined) so the reciprocal never extrapolates the secant / 1/(.) outside
     # the domain. Preserves soundness; gradient saturates on the clamped region.
-    cvg = jnp.clip(cvg, lb, ub)
-    ccg = jnp.clip(ccg, lb, ub)
+    # ``clip_inner`` (not ``jnp.clip``): the boundary derivative must be the inner
+    # one-sided slope (1), else a box-face iterate gets the halved clip-tie subgradient
+    # and an invalid reciprocal cut (same soundness bug as the intrinsic envelopes).
+    cvg = clip_inner(cvg, lb, ub)
+    ccg = clip_inner(ccg, lb, ub)
     width = ub - lb
     slope = (1.0 / ub - 1.0 / lb) / jnp.where(jnp.abs(width) > 1e-12, width, 1.0)
 
