@@ -1,16 +1,24 @@
 # #764 — Closing `tanksize`: from root-relaxation research to the closure plan
 
-Status: **RESOLVED 2026-07-18 — closure needs the Phase B Rust node kernel; everything cheaper is
-measured non-viable.** The #764 relaxer-discard fix (`DISCOPT_ROOT_LP_PROBE_TIGHT`, graduated
-default-ON) shipped and lifted `tanksize`'s frontier 0.853→0.92 and certified `syn05hfsg`. Two whole
-families of cheaper levers were then **run to ground and falsified** by entry experiments:
-(1) *root relaxation* — level-1 RLT, level-2 RLT, Shor SDP, OBBT-to-fixpoint, naive partitioning are
-all exact no-ops at the root (§candidates); (2) *Phase-A throughput* — OBBT probe scheduling is a
-wash (probes load-bearing), NLP starvation is at its floor, and the Python orchestration is diffuse
-(§"Phase A verdict"). The remaining path — the only one consistent with the evidence — is the
-**Rust per-node kernel** (`certification-gap-plan.md` C1 "architecture"): BARON closes `tanksize`
-with a 25 %-gap root and ~1300 nodes/s, so the deficit is node throughput, and in Python it is
-irreducible. This is a weeks-scale `certification-gap-plan` phase, not a #764 quick fix.
+Status: **RESOLVED 2026-07-18 — `tanksize`-in-seconds is not reachable by any lever discopt can
+implement; both axes are exhausted by measurement.** The #764 relaxer-discard fix
+(`DISCOPT_ROOT_LP_PROBE_TIGHT`, graduated default-ON) shipped and lifted `tanksize`'s frontier
+0.853→0.92 and certified `syn05hfsg`. Every cheaper-than-rewrite lever was then **run to ground and
+falsified** by entry experiments:
+- *root relaxation* — level-1 RLT, level-2 RLT, Shor SDP, OBBT-to-fixpoint, naive partitioning are
+  all exact no-ops at the root (§candidates);
+- *Phase-A throughput* — OBBT probe scheduling is a wash (probes load-bearing), NLP starvation is at
+  its floor, Python orchestration is diffuse (§"Phase A verdict");
+- *Phase-B Rust node kernel* — entry experiment run: ceiling is **regime-dependent** — ~10–14× on
+  the cold-rebuild-bound spatial class (casctanks; GO, but owned by `certification-gap-plan`), yet
+  only **~2.3× on `tanksize`** because ~half its wall is *native* OBBT LP solves that #723 showed
+  are irreducible (§"Phase B — entry experiment").
+
+**Net:** `tanksize` is in the KILL regime on both axes. The literal issue DoD is infeasible for this
+architecture; the only route left is a *different* per-node bounding scheme (far fewer than 2n LP
+probes) — the open, unowned research lever #723 named, not a faster implementation of the current
+one. **Reachable instead:** Phase B certifies `tanksize` in ~minutes and wins big on the
+cold-rebuild-bound majority of the slow-spatial class. Recommendation to the maintainer at the end.
 
 > **CORRECTION (2026-07-18, same day).** An earlier revision of this doc claimed the T2.4
 > `reduce_node` flag (`DISCOPT_NODE_REDUCE`) as "a measured first lever (+bound, +52 % throughput
@@ -228,18 +236,37 @@ diagnosis and the #723 closed verdict.)
    reliability on bilinear-violation (BARON's violation transfer). Node-count multiplier if it
    lands; entry experiment offline on captured trees.
 
-### Phase B — the Rust node kernel (the sole viable path; weeks; target ~1 ms/node, certify in seconds)
+### Phase B — the Rust node kernel — ENTRY EXPERIMENT RUN (2026-07-18): regime-split verdict
 
-With Phase A measured non-viable, this is **the** lever. The `certification-gap-plan.md` §2 "per-node
-language cost — **architecture**" gap: move the spatial node inner loop (bound patch → warm dual
-simplex → cutoff-FBBT/DBBT reduce → branch select) entirely into `discopt-core`, calling back to
-Python only for NLP heuristics and separation events. This is the only route to BARON-order µs–ms
-nodes and the issue's literal "certifies in seconds" DoD. It is a `certification-gap-plan.md`-scale
-phase (its C1 is the same diagnosis), owned there, not a #764 quick fix. Entry experiment before
-committing: a Rust prototype of the node loop over the already-Rust LP/FBBT/tree components on the
-global50 spatial subset, measured against the current Python loop (kill if < ~5× per-node speedup).
-Note the productive OBBT stays — Phase B makes its ~2n LPs cheap (warm dual simplex in-kernel), it
-does not remove them (A1 showed they are load-bearing).
+The entry experiment measures the **ceiling** speedup a Rust node loop can give = `total_wall /
+native_compute`, where native = the work a Rust loop cannot remove (Rust LP solves + pounce NLP;
+everything else — Python interpreter, JAX Python-side dispatch, numpy marshaling, Python interval
+arithmetic / McCormick build — is removable). Kill if ceiling < ~5×. Measured under cProfile:
+
+| instance | native (stays) | removable | ceiling | regime |
+|---|---|---|---|---|
+| **tanksize** | 42.8 % | 57.2 % | **2.3×** | OBBT-LP-bound (95 native Rust LP probes/node) |
+| **nvs05** | 50.7 % | 49.3 % | **2.0×** | OBBT-LP-bound |
+| **casctanks** | 7.0 % | 93.0 % | **14.2×** | cold-McCormick-rebuild-bound (`interval.__post_init__` 489 k calls, `_build_convexity_box`) |
+
+**Two regimes, opposite verdicts:**
+- **Cold-rebuild-bound class (casctanks-like — the `certification-gap-plan.md` C1 median, "lifted
+  McCormick LP cold-rebuilt from the DAG every node ~ half the wall"): GO.** Ceiling ~10–14×; the
+  Python McCormick/convexity-box rebuild dominates and a Rust incremental kernel removes it. Worth
+  the weeks — but it belongs to `certification-gap-plan` Phase 1/5, not #764.
+- **OBBT-LP-bound class (tanksize, nvs05): KILL for the ≥5× target.** Ceiling ~2.0–2.3× — ~half the
+  wall is *native Rust LP solves* (the productive OBBT probes), which #723 already showed do not
+  warm-start past 1.36×. Even a perfect Rust loop takes tanksize ~2 n/s → ~4.6 n/s: **thousands of
+  nodes to close ⇒ minutes, still not seconds.**
+
+**Consequence for #764's literal DoD.** tanksize sits in the KILL regime on *both* axes: its root
+relaxation is exhausted (all inert at 0.838) AND its per-node cost is dominated by genuine,
+irreducible OBBT simplex work (Phase B ceiling 2.3×). **Certifying tanksize "in seconds" is not
+reachable by any lever discopt can implement** without a fundamentally different node-bounding scheme
+that needs far fewer than 2n LP probes per node (the open, unowned research lever #723 named — a
+*different bounding scheme* for the functionally-dependent class, not a faster implementation of the
+same one). What is reachable: Phase B certifies tanksize in **~minutes** (2.3× × node-count help),
+and delivers the big win on the cold-rebuild-bound majority of the slow-spatial class.
 
 ### Gates (unchanged, binding)
 
@@ -247,3 +274,28 @@ Phase A items 3–4 are Regime-1 (bound-neutral: exact node-count + objective eq
 and Phase B are Regime-2 (flagged default-OFF → ON-vs-OFF corpus panel, cert-clean AND
 net-positive, `incorrect_count = 0`, no certification regressions). No instance-keyed logic
 anywhere; `tanksize`/`nvs05` are gate probes only.
+
+---
+
+## Recommendation to the maintainer (2026-07-18)
+
+The full #764 campaign is complete. Every lever that could close `tanksize` has been measured:
+
+1. **Ship** (done): the relaxer-discard fix, `DISCOPT_ROOT_LP_PROBE_TIGHT` default-ON — a sound,
+   panel-graduated win (tanksize frontier 0.853→0.92, `syn05hfsg` newly certified, byte-stable
+   elsewhere). This is the only code change #764 warranted and it is landed.
+2. **Falsified, recorded as binding negatives** (do not re-tread): root-relaxation hierarchy
+   (level-1/2 RLT, Shor SDP, OBBT, partitioning — root immovable at 0.838); Phase-A throughput
+   (OBBT scheduling wash, NLP at floor, orchestration diffuse); Phase-B ceiling only ~2.3× on
+   `tanksize` (native OBBT LPs).
+3. **`tanksize`-in-seconds is infeasible** for the current architecture. Recommend **retitling /
+   closing #764** as: *fix shipped; full closure requires a different per-node bounding scheme for
+   the functionally-dependent bilinear class (≪ 2n LP probes/node) — an open research lever inherited
+   from #723, unowned*. It is NOT a bound-quality problem (relaxation exhausted) and NOT a
+   port-to-Rust problem (Phase B is 2.3× here).
+4. **Separately worth doing** (own issue, `certification-gap-plan` scope, NOT #764): the **Phase B
+   Rust node kernel** for the cold-McCormick-rebuild-bound spatial class (casctanks-like, ceiling
+   ~10–14×) — the C1 "architecture" gap, the highest-leverage general throughput win surfaced here.
+
+The through-line: measurement killed four plausible directions before any unsound or ineffective code
+shipped — the CLAUDE.md §4 discipline working as intended.
