@@ -60,6 +60,31 @@ def test_bnb_certificate_on_integer_minlp_corpus():
 
 
 @pytest.mark.slow
+def test_bnb_untrusted_leaf_rederivation():
+    """A nonconvex bilinear solve's leaf bounds are re-derived by the checker
+    (rebuild the McCormick LP + verify the dual) -- trusting neither the solver's
+    bound nor the emitted LP. A tampered dual is rejected."""
+    m = dm.Model()
+    x = m.continuous("x", lb=0, ub=3)
+    y = m.continuous("y", lb=0, ub=3)
+    m.subject_to(x + y >= 2, name="c1")
+    m.minimize(x * y)
+    r = m.solve(emit_certificate=True, gap_tolerance=1e-3, time_limit=30)
+    cert = build_bnb_certificate(m, r, untrusted=True)
+    n_ut = cert["certificate"]["tree"].get("untrusted_leaves", 0)
+    assert n_ut >= 1, "expected at least one leaf re-derived untrusted"
+    ok, reason = check_certificate(cert)
+    assert ok, reason
+    assert "re-derived (untrusted)" in reason
+
+    # Corrupt an emitted untrusted dual -> the checker's weak-duality check fails.
+    leaf = next(n for n in cert["certificate"]["tree"]["nodes"] if "untrusted_dual" in n)
+    leaf["untrusted_dual"][0] = [999, 1]
+    ok2, _ = check_certificate(cert)
+    assert not ok2
+
+
+@pytest.mark.slow
 def test_bnb_recording_is_bound_neutral():
     m1 = _nonconvex_chain()
     off = m1.solve(gap_tolerance=1e-3, time_limit=60, max_nodes=500)
