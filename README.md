@@ -265,6 +265,11 @@ pip install discopt-doe
 discopt doe --help          # the plugin's verbs are now under the `discopt` CLI
 ```
 
+Dependent packages are tracked in
+[`.github/dependents.yml`](.github/dependents.yml); each discopt release
+automatically re-runs their CI and opens a review issue so breakage surfaces
+early (see [docs/dev/dependents.md](docs/dev/dependents.md)).
+
 ## Command-Line Interface
 
 After installation, the `discopt` command is available on your PATH:
