@@ -163,9 +163,26 @@ def solve_gdpopt_loa(
     # break the loop soundly if the master re-proposes an unresolved config.
     unresolved_int_configs: set[tuple[int, ...]] = set()
 
+    # #756: integer configurations proven infeasible that must be excluded with an
+    # *exact* single-point no-good. The binary-only exclusion form (``_add_no_good_cut``)
+    # is only valid when every discrete variable is 0/1; for a general integer it also
+    # cuts off feasible configurations (a certified false infeasible). When any discrete
+    # variable is non-binary we exclude each proven-infeasible point exactly via
+    # auxiliary-binary "move away" disjunctions built in the master (see
+    # ``_build_no_good_augmentation``).
+    all_binary_discrete = _discrete_vars_all_binary(int_indices, lb, ub)
+    no_good_configs: list[tuple[int, ...]] = []
+
+    # #756: terminal state must distinguish a rigorous infeasibility proof from a
+    # limit exhaustion. A timeout / iteration-cap / non-infeasible master verdict is
+    # NOT an infeasibility proof and must never be certified as ``infeasible``.
+    timed_out = False
+    master_infeasible = False
+
     for iteration in range(max_iterations):
         elapsed = time.perf_counter() - t_start
         if elapsed >= time_limit:
+            timed_out = True
             break
 
         # a. Build and solve master MILP
@@ -185,11 +202,26 @@ def solve_gdpopt_loa(
             time_limit=time_limit - elapsed,
             gap_tolerance=gap_tolerance,
             milp_solver=milp_solver,
+            no_good_configs=no_good_configs,
+            int_indices=int_indices,
         )
 
         if master_result is None or master_result.x is None:
-            # Master infeasible → problem is infeasible
-            logger.info("LOA: Master MILP infeasible at iteration %d", iteration)
+            # #756: only a rigorous INFEASIBLE verdict is an infeasibility proof.
+            # A master that returns no solution under a time/iteration limit (or a
+            # backend error) has proved nothing — never certify it as infeasible.
+            from discopt.solvers import SolveStatus
+
+            if master_result is not None and master_result.status == SolveStatus.INFEASIBLE:
+                master_infeasible = True
+                logger.info("LOA: Master MILP proven infeasible at iteration %d", iteration)
+            else:
+                logger.info(
+                    "LOA: Master MILP returned no solution (status=%s) at iteration %d; "
+                    "not treating as an infeasibility proof",
+                    None if master_result is None else master_result.status,
+                    iteration,
+                )
             break
 
         x_master = master_result.x[:n_vars]
@@ -251,9 +283,15 @@ def solve_gdpopt_loa(
             )
 
             if rigorously_infeasible:
-                # Proven infeasible ⇒ the no-good cut is valid (and provides the
-                # anti-cycling exclusion). Certification is preserved.
-                _add_no_good_cut(x_master, int_indices, oa_A_rows, oa_b_rows, n_vars)
+                # Proven infeasible ⇒ exclude EXACTLY this integer configuration
+                # (anti-cycling + certification preserved). The binary-only cut is
+                # valid only when every discrete variable is 0/1; for general
+                # integers it also cuts feasible points (#756), so route those
+                # through the exact auxiliary-binary no-good built in the master.
+                if all_binary_discrete:
+                    _add_no_good_cut(x_master, int_indices, oa_A_rows, oa_b_rows, n_vars)
+                else:
+                    no_good_configs.append(_int_config_key(x_master, int_indices))
             else:
                 # Non-rigorous failure ⇒ do NOT exclude this configuration.
                 # Record it as unresolved (result not certified) and break
@@ -297,7 +335,9 @@ def solve_gdpopt_loa(
     has_unresolved = len(unresolved_int_configs) > 0
 
     if incumbent is not None:
-        certified = (gap <= gap_tolerance) and not has_unresolved
+        # #756: a timeout means optimality was never proved — report "feasible",
+        # never "optimal", even if the last computed gap happens to be small.
+        certified = (gap <= gap_tolerance) and not has_unresolved and not timed_out
         status = "optimal" if certified else "feasible"
         x_dict = _build_x_dict(incumbent, reformulated)
         return SolveResult(
@@ -323,13 +363,30 @@ def solve_gdpopt_loa(
             gap_certified=False,
         )
 
+    if master_infeasible:
+        # The only path to a certified infeasible: the master relaxation (linear
+        # rows + valid OA cuts + exact single-point no-good exclusions) was proved
+        # infeasible by the MILP backend.
+        return SolveResult(
+            status="infeasible",
+            objective=None,
+            bound=bound,
+            gap=None,
+            x={},
+            wall_time=wall_time,
+        )
+
+    # #756: no incumbent and no infeasibility proof — the loop stopped on the time
+    # limit, the iteration cap, or a non-infeasible master verdict. None of these
+    # prove infeasibility, so return an uncertified "unknown" result.
     return SolveResult(
-        status="infeasible",
+        status="unknown",
         objective=None,
         bound=bound,
         gap=None,
         x={},
         wall_time=wall_time,
+        gap_certified=False,
     )
 
 
@@ -560,7 +617,15 @@ def _int_config_key(x_master, int_indices) -> tuple[int, ...]:
 
 
 def _add_no_good_cut(x_master, int_indices, oa_A_rows, oa_b_rows, n_vars):
-    """Add an integer-exclusion (no-good) cut."""
+    """Add a binary integer-exclusion (no-good) cut.
+
+    Valid ONLY when every discrete variable is 0/1: the single inequality below
+    excludes exactly the incumbent 0/1 configuration and keeps all other 0/1
+    configurations feasible. For general integer variables this form is UNSOUND
+    (it also cuts feasible non-0/1 configurations — issue #756); those callers
+    must use :func:`_build_no_good_augmentation` instead. Callers gate on
+    :func:`_discrete_vars_all_binary`.
+    """
     # sum_{i: y_i*=1} (1 - y_i) + sum_{i: y_i*=0} y_i >= 1
     # Equivalently: -sum_{y_i*=1} y_i + sum_{y_i*=0} y_i >= 1 - count(y_i*=1)
     # As <= form: sum_{y_i*=1} y_i - sum_{y_i*=0} y_i <= count(y_i*=1) - 1
@@ -575,6 +640,71 @@ def _add_no_good_cut(x_master, int_indices, oa_A_rows, oa_b_rows, n_vars):
             coeffs[idx] = -1.0
     oa_A_rows.append(coeffs)
     oa_b_rows.append(float(count_ones - 1))
+
+
+def _discrete_vars_all_binary(int_indices, lb, ub, tol: float = 1e-9) -> bool:
+    """True iff every discrete variable is a 0/1 variable (bounds ``[0, 1]``).
+
+    The binary-only no-good cut (:func:`_add_no_good_cut`) is valid only in this
+    case; otherwise the exact single-point exclusion is required (#756).
+    """
+    return all(abs(float(lb[i])) <= tol and abs(float(ub[i]) - 1.0) <= tol for i in int_indices)
+
+
+def _build_no_good_augmentation(no_good_configs, int_indices, lb, ub, n_base):
+    """Exact single-point integer no-good exclusions via auxiliary binaries (#756).
+
+    Each recorded integer configuration ``v*`` is excluded with the disjunction
+    "at least one discrete variable moves strictly away from its value at ``v*``".
+    For each variable ``z_i`` with value ``v`` and bounds ``[l, u]`` we add, when a
+    move is possible, a binary indicator forcing a real step:
+
+    * down (``v > l``): ``z_i + (u - v + 1)·gamma <= u`` — ``gamma = 1`` forces
+      ``z_i <= v - 1``;
+    * up (``v < u``): ``-z_i + (v + 1 - l)·delta <= -l`` — ``delta = 1`` forces
+      ``z_i >= v + 1``;
+
+    plus an aggregate ``sum(indicators) >= 1`` (as ``-sum <= -1``). This removes
+    EXACTLY the point ``v*`` — every other integer combination can activate the
+    indicator for a coordinate in which it differs — so the exclusion is sound for
+    general integers, not only 0/1. If a configuration is pinned at its bounds in
+    every coordinate (no move possible), the empty aggregate row ``0 <= -1`` makes
+    the master infeasible, which is correct: ``v*`` was then the only integer point.
+
+    Returns ``(rows, rhs, n_aux)`` with each row already width ``n_base + n_aux``.
+    """
+    pending: list[tuple[dict[int, float], dict[int, float], float]] = []
+    n_aux = 0
+    for config in no_good_configs:
+        indicator_cols: list[int] = []
+        for idx, v in zip(int_indices, config):
+            lo = float(lb[idx])
+            hi = float(ub[idx])
+            vv = float(v)
+            if vv > lo + 0.5:  # a strictly-lower integer exists
+                col = n_aux
+                n_aux += 1
+                pending.append(({idx: 1.0}, {col: (hi - vv + 1.0)}, hi))
+                indicator_cols.append(col)
+            if vv < hi - 0.5:  # a strictly-higher integer exists
+                col = n_aux
+                n_aux += 1
+                pending.append(({idx: -1.0}, {col: (vv + 1.0 - lo)}, -lo))
+                indicator_cols.append(col)
+        pending.append(({}, {c: -1.0 for c in indicator_cols}, -1.0))
+
+    n_total = n_base + n_aux
+    rows: list[np.ndarray] = []
+    rhs: list[float] = []
+    for var_coeffs, aux_coeffs, r in pending:
+        row = np.zeros(n_total)
+        for idx, c in var_coeffs.items():
+            row[idx] = c
+        for col, c in aux_coeffs.items():
+            row[n_base + col] = c
+        rows.append(row)
+        rhs.append(float(r))
+    return rows, rhs, n_aux
 
 
 def _solve_master_milp(
@@ -593,6 +723,8 @@ def _solve_master_milp(
     time_limit,
     gap_tolerance,
     milp_solver="auto",
+    no_good_configs=None,
+    int_indices=None,
 ):
     """Build and solve the master MILP."""
     try:
@@ -646,6 +778,24 @@ def _solve_master_milp(
             A_eq_rows.append(row)
             b_eq_vals.append(linear_b_rows[i])
 
+    # #756: exact single-point integer no-good exclusions add auxiliary binary
+    # columns to the master. Pad the existing rows with zeros for those columns and
+    # append the exclusion rows (all <= form).
+    n_extra = 0
+    ng_rows: list[np.ndarray] = []
+    ng_rhs: list[float] = []
+    if no_good_configs:
+        if int_indices is None:
+            int_indices = [i for i in range(n_vars) if integrality[i]]
+        ng_rows, ng_rhs, n_extra = _build_no_good_augmentation(
+            no_good_configs, int_indices, lb, ub, n_master
+        )
+    if n_extra > 0:
+        A_ub_rows = [np.concatenate([r, np.zeros(n_extra)]) for r in A_ub_rows]
+        A_eq_rows = [np.concatenate([r, np.zeros(n_extra)]) for r in A_eq_rows]
+        A_ub_rows.extend(ng_rows)
+        b_ub_vals = list(b_ub_vals) + list(ng_rhs)
+
     # Build arrays
     A_ub = np.array(A_ub_rows) if A_ub_rows else None
     b_ub = np.array(b_ub_vals) if b_ub_vals else None
@@ -671,6 +821,12 @@ def _solve_master_milp(
     # Integrality
     int_vec = np.zeros(n_master, dtype=np.int32)
     int_vec[:n_vars] = integrality
+
+    # #756: extend objective / bounds / integrality for the no-good aux binaries.
+    if n_extra > 0:
+        c = np.concatenate([c, np.zeros(n_extra)])
+        bounds_list = bounds_list + [(0.0, 1.0)] * n_extra
+        int_vec = np.concatenate([int_vec, np.ones(n_extra, dtype=np.int32)])
 
     return solve_milp(
         c=c,
