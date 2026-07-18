@@ -630,6 +630,59 @@ panel green for 3 consecutive nightlies before default-on.
 > Reproduction: `discopt_benchmarks/scripts/nvs05_obbt_probe_cost_measurement.py`;
 > pinned by `python/tests/test_perf_723_obbt_probe_cost.py`.
 
+> **Falsified (2026-07-18, #723 lever 3 re-scope — "cut the OBBT warm-start
+> rejection tail with a better warm-start strategy").** Entry experiment run
+> before any implementation (kill criterion set in advance: tail probe wall must
+> drop ≥ 50 %): capture every real OBBT probe from an nvs05 solve (per-sweep
+> matrix, per-probe objective/box/threaded basis), replay the captured stream
+> offline under each candidate strategy, and compare wall + results against the
+> baseline threading. Five measurements, one shared capture
+> (`nvs05_obbt_warmstart_replay.py`):
+>
+> 1. **Two-stage** (dual re-opt of the box change under the *previous* objective,
+>    then swap objectives from that primal-feasible basis — the direction the
+>    block above proposed): **1.10× slower on the tail**, oracle-gated ≤ 5 %.
+>    Diagnosis via the stage split: stage 1 (box change, same objective) costs
+>    ~0.85 ms — the box change was never the expensive part. The **objective flip
+>    itself** is: walking from `min x_i`'s optimal vertex to `min x_j`'s costs the
+>    ~220 pivots regardless of how fresh the starting basis is.
+> 2. **Self-warm floor** (re-solve each probe from its *own* optimal basis):
+>    p50 ~0.86 ms even on the tail, 100 % optimal — the LP is EASY from the right
+>    basis, ruling out degeneracy-stall; but the right basis isn't known ahead.
+> 3. **Per-objective basis memory** (warm `min/max x_j` from the basis that solved
+>    the *same objective* previously): the predicted per-probe win appears
+>    (tail-hit p50 7.0 → 1.3 ms) but ~1/3 of hits fail to transfer — the envelope
+>    matrix is rebuilt each round at the tightened box, and the coefficient drift
+>    rejects the basis → cold fallback — and those failures carry the wall.
+>    Aggregate: **1.02–1.07×**.
+> 4. **Hybrid upper bound** (memory + threaded fallback on rejection, i.e. the
+>    best an in-engine "try basis A, else basis B" could do, +0.3 ms detection):
+>    **1.34–1.36× probe wall ≈ ~8 % of nvs05 solve wall. This is the ceiling of
+>    the whole warm-start-strategy family** — below the ≥ 50 % kill criterion and
+>    below the bar for a correctness-critical engine change.
+> 5. **Solution-based probe filtering** (Gleixner/Berthold/Müller 2017 — skip a
+>    probe when a previously returned optimal point sits at the probe's bound):
+>    **unsound as naively implemented** — the returned vertex is feasible only to
+>    ~1e-6·scale, and on nvs05's ~1e4-scale boxes that slack fakes witnesses; the
+>    replay audit found **~45 % of "filterable" probes would actually have
+>    tightened** (a silent bound loosening, i.e. a correctness bug had it
+>    shipped). Even optimistically it caps at ~11 % of probe wall. A rigorous
+>    variant would need exactly-verified witnesses (directed-rounding feasibility
+>    check) and would keep only the sound remainder of that 11 %.
+>
+> **Standing conclusion for #723 lever 3 (three falsifications deep):** nvs05's
+> per-node OBBT LP wall (~1/3 of solve wall) is genuine simplex pivot work whose
+> per-probe floor (self-warm, ~1.3 ms mean incl. marshal) is ~3× below today's
+> ~4.4 ms mean, but no implementable warm-start/filter strategy tested reaches
+> that floor — the family caps at ~8 % of solve wall. Closing the remaining
+> BARON/SCIP gap on this class is NOT a warm-start orchestration problem; it
+> would need engine-level pivot-throughput work (pricing, degenerate-walk cost)
+> or a fundamentally different bounding scheme for the dependent-variable class
+> — both large, separate efforts with their own entry experiments. Lever 3 is
+> closed as measured-and-bounded; the issue's remaining wall-time gap on nvs05
+> is attributed, not mysterious. Reproduction:
+> `discopt_benchmarks/scripts/nvs05_obbt_warmstart_replay.py`.
+
 ## 7. Sequencing & rationale (revised by the measurement)
 
 ```
