@@ -1,0 +1,92 @@
+instance                     oracle |     OFFbound      ONbound |  drop  ONnodes | signal | cert
+4stufen                   1.163e+05 |     2.16e+04    1.932e+04 |  1874       95 | ON LOOSER bound  | CLEAN  [filter FIRED: dropped 1874 rows in 45 builds; timeout jitter nodes 63->95 obj None->None (both wall-limited)]
+alan                          2.925 |        2.925        2.925 |     0       21 | bound tie        | CLEAN
+bchoco06                       None |            1            1 |  1933       63 | ON tighter bound | CLEAN  [filter FIRED: dropped 1933 rows in 22 builds; timeout jitter nodes 31->63 obj None->None (both wall-limited)]
+bchoco07                       None |            1            1 |   654        7 | bound tie        | CLEAN  [filter FIRED: dropped 654 rows in 8 builds; timeout jitter nodes 15->7 obj None->None (both wall-limited)]
+bchoco08                       None |            1            1 |   886        3 | bound tie        | CLEAN  [filter FIRED: dropped 886 rows in 7 builds]
+beuster                   1.163e+05 |     1.99e+04     1.78e+04 |  1581       63 | ON LOOSER bound  | CLEAN  [filter FIRED: dropped 1581 rows in 29 builds]
+casctanks                     9.163 |        2.969        1.738 |   318       95 | ON LOOSER bound  | CLEAN  [filter FIRED: dropped 318 rows in 34 builds; timeout jitter nodes 127->95 obj None->None (both wall-limited)]
+chance                        29.89 |        29.89        29.89 |     0        0 | bound tie        | CLEAN
+clay0303hfsg              2.667e+04 |    2.667e+04    2.667e+04 |     0      443 | bound tie        | CLEAN
+contvar                   8.091e+05 |    1.841e+05     1.86e+05 |  1184       15 | ON tighter bound | CLEAN  [filter FIRED: dropped 1184 rows in 9 builds; timeout jitter nodes 15->15 obj 809149.8138135842->809149.813813658 (both wall-limited)]
+cvxnonsep_nsig30              130.6 |        130.6        130.6 |     0      171 | bound tie        | CLEAN
+cvxnonsep_psig30                 79 |           79           79 |     0       89 | bound tie        | CLEAN
+cvxnonsep_psig40r             86.55 |        86.54        86.54 |     0       95 | bound tie        | CLEAN
+dispatch                       3155 |         3155         3155 |     8        3 | bound tie        | CLEAN  [filter FIRED: dropped 8 rows in 1 builds]
+ex1221                        7.667 |        7.667        7.667 |     4        5 | bound tie        | CLEAN  [filter FIRED: dropped 4 rows in 1 builds]
+ex1222                        1.077 |        1.077        1.077 |     0        1 | bound tie        | CLEAN
+ex1224                      -0.9435 |      -0.9435      -0.9435 |     0        5 | bound tie        | CLEAN
+ex1225                           31 |           31           31 |     0        5 | bound tie        | CLEAN
+ex1226                          -17 |          -17          -17 |     0        3 | bound tie        | CLEAN
+ex14_1_9                         -0 |   -1.978e-16   -1.065e+06 |    55       41 | ON LOOSER bound  | CLEAN  [filter FIRED: dropped 55 rows in 9 builds; timeout jitter nodes 3->41 obj -1.9775220540513224e-16->-5.193575291582182e-09 (both wall-limited)]
+fac2                      3.318e+08 |    3.318e+08    3.318e+08 |     0       41 | bound tie        | CLEAN
+flay02m                       37.95 |        37.95        37.95 |     0        7 | bound tie        | CLEAN
+flay03m                       48.99 |        48.99        48.99 |     0      111 | bound tie        | CLEAN
+gbd                             2.2 |          2.2          2.2 |     0        3 | bound tie        | CLEAN
+gkocis                       -1.923 |       -1.923       -1.923 |     0        5 | bound tie        | CLEAN
+hda                           -5965 |   -1.802e+10   -6.447e+04 |   731        3 | ON tighter bound | CLEAN  [filter FIRED: dropped 731 rows in 6 builds]
+heatexch_gen1             1.549e+05 |    9.549e+04    9.549e+04 |   872      117 | bound tie        | CLEAN  [filter FIRED: dropped 872 rows in 36 builds; timeout jitter nodes 117->117 obj 167545.24112846807->167654.2718085331 (both wall-limited)]
+heatexch_gen2             6.358e+05 |    5.585e+05    5.573e+05 |  1182       31 | ON LOOSER bound  | CLEAN  [filter FIRED: dropped 1182 rows in 19 builds; timeout jitter nodes 35->31 obj 824551.3266797881->824551.3266797881 (both wall-limited)]
+heatexch_gen3             6.484e+04 |         None         None |   170        7 | n/a              | CLEAN  [filter FIRED: dropped 170 rows in 1 builds]
+m3                             37.8 |         37.8         37.8 |     0       47 | bound tie        | CLEAN
+nvs01                         12.47 |        12.47        12.47 |    34        3 | bound tie        | CLEAN  [filter FIRED: dropped 34 rows in 7 builds]
+nvs02                         5.964 |        5.964        5.964 |     0      337 | bound tie        | CLEAN
+nvs03                            16 |           16           16 |     0        5 | bound tie        | CLEAN
+nvs04                          0.72 |         0.72         0.72 |     0        5 | bound tie        | CLEAN
+nvs05                         5.471 |        5.471        5.461 | 28756     1227 | ON LOOSER bound  | !! cert regression: OFF certified, ON not; TERMINALITY CHANGE: OFF status=optimal ON status=feasible  [filter FIRED: dropped 28756 rows in 1947 builds]
+nvs06                          1.77 |         1.77         1.77 |   116        5 | bound tie        | CLEAN  [filter FIRED: dropped 116 rows in 6 builds]
+nvs07                             4 |            4            4 |     0        5 | bound tie        | CLEAN
+nvs08                         23.45 |        23.45        23.45 |    47        3 | bound tie        | CLEAN  [filter FIRED: dropped 47 rows in 7 builds]
+nvs09                        -43.13 |       -43.13        -43.9 |  8142      877 | ON LOOSER bound  | !! cert regression: OFF certified, ON not; TERMINALITY CHANGE: OFF status=optimal ON status=feasible  [filter FIRED: dropped 8142 rows in 639 builds]
+nvs10                        -310.8 |       -310.8       -310.8 |     0        5 | bound tie        | CLEAN
+nvs11                          -431 |         -431         -431 |     0       55 | bound tie        | CLEAN
+nvs12                        -481.2 |       -481.2       -481.2 |     0      231 | bound tie        | CLEAN
+nvs13                        -585.2 |       -585.2       -585.2 |  1080       21 | bound tie        | !! BOUND-NEUTRAL VIOLATION: node_count 23->21 [filter dropped 1080 rows]  [filter FIRED: dropped 1080 rows in 21 builds]
+nvs14                    -4.036e+04 |   -4.036e+04   -4.036e+04 |     0      223 | bound tie        | CLEAN
+nvs15                             1 |            1            1 |     0        7 | bound tie        | CLEAN
+nvs21                        -5.685 |       -5.685       -5.685 |   291       17 | bound tie        | !! BOUND-NEUTRAL VIOLATION: node_count 3->17 [filter dropped 291 rows]; BOUND-NEUTRAL VIOLATION: certified obj -5.684782628025259->-5.684782607923295  [filter FIRED: dropped 291 rows in 29 builds]
+McCormick 'nlp' objective bound is not a valid dual bound for nonconvex models (issue #120); falling back to the alphaBB underestimator. Use mccormick_bounds='lp' for a valid spatial relaxation on models with continuous variables.
+McCormick 'nlp' objective bound is not a valid dual bound for nonconvex models (issue #120); falling back to the alphaBB underestimator. Use mccormick_bounds='lp' for a valid spatial relaxation on models with continuous variables.
+oaer                         -1.923 |       -1.923       -1.923 |     0        3 | bound tie        | CLEAN
+st_e11                        189.3 |        189.3        189.3 |    19        5 | bound tie        | CLEAN  [filter FIRED: dropped 19 rows in 4 builds]
+st_e13                            2 |            2            2 |     8        3 | bound tie        | CLEAN  [filter FIRED: dropped 8 rows in 2 builds]
+st_e29                      -0.9435 |      -0.9435      -0.9435 |     0        5 | bound tie        | CLEAN
+st_e36                         -246 |         -246         -246 |    40       85 | bound tie        | CLEAN  [filter FIRED: dropped 40 rows in 12 builds]
+st_e38                         7198 |         7198         7198 |     0        3 | bound tie        | CLEAN
+st_miqp1                        281 |          281          281 |     0       15 | bound tie        | CLEAN
+st_miqp2                          2 |            2            2 |     0        9 | bound tie        | CLEAN
+st_miqp3                         -6 |           -6           -6 |     0        1 | bound tie        | CLEAN
+st_miqp4                      -4574 |        -4574        -4574 |     0        3 | bound tie        | CLEAN
+st_miqp5                     -333.9 |       -333.9       -333.9 |     0        1 | bound tie        | CLEAN
+st_test1                          0 |    -1.65e-08    -1.65e-08 |     0       15 | bound tie        | CLEAN
+st_testgr3                   -20.59 |       -20.59       -20.59 |     0      549 | bound tie        | CLEAN
+syn05hfsg                     837.7 |          911          911 |    27     4321 | bound tie        | !! off bound 911.007 > oracle 837.732; on bound 911.007 > oracle 837.732  [filter FIRED: dropped 27 rows in 9 builds; timeout jitter nodes 4649->4321 obj 837.732412391107->837.732412391107 (both wall-limited)]
+tanksize                      1.269 |       0.8529       0.8529 |   114      621 | bound tie        | CLEAN  [filter FIRED: dropped 114 rows in 14 builds; timeout jitter nodes 575->621 obj 1.2686437555126844->1.268643748747285 (both wall-limited)]
+tls2                            5.3 |          5.3          5.3 |     0      353 | bound tie        | CLEAN
+tspn05                        191.3 |        191.3        191.3 |    13       51 | bound tie        | CLEAN  [filter FIRED: dropped 13 rows in 13 builds]
+tspn08                        290.6 |         None         None |    16        1 | n/a              | CLEAN  [filter FIRED: dropped 16 rows in 4 builds]
+tspn10                        225.1 |         None         None |    11        1 | n/a              | CLEAN  [filter FIRED: dropped 11 rows in 4 builds]
+tspn12                        262.6 |         None         None |     7        1 | n/a              | CLEAN  [filter FIRED: dropped 7 rows in 4 builds]
+
+SUMMARY: {
+  "n_instances": 66,
+  "n_cert_fail": 5,
+  "n_filter_fired": 30,
+  "cert_clean": false,
+  "hda_tight_and_sound": true,
+  "hda_detail": "hda ON bound -64473.44240160173 (OFF -18016528426.50232, opt -5964.534084) tight&sound=True",
+  "soft_looser_partial_bounds": [
+    "4stufen",
+    "beuster",
+    "casctanks",
+    "ex14_1_9",
+    "heatexch_gen2",
+    "nvs05",
+    "nvs09"
+  ],
+  "net_positive": false,
+  "verdict": "HOLD"
+}
+
+VERDICT: HOLD
+wrote /private/tmp/claude-501/-Users-jkitchin-projects-discopt/2a449c94-d4ab-4a14-b4d0-7c46d5f54e12/scratchpad/full_panel.json
