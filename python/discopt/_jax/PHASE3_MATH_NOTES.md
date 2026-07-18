@@ -309,6 +309,14 @@ approach: it avoids the need for separate convexity verification.
 
 ## 6. GNN Branching Policy
 
+> **Removed 2026-07-18.** The GNN branching scaffold validated below was never
+> trained and was removed (#236, closed not-planned): the Stage-4 entry
+> experiment in `docs/dev/performance-plan.md` §6 showed branching -- including
+> real strong branching -- is not the lever for the slow instances (the slow
+> tail is bound/range-reduction limited), so a learned imitation of strong
+> branching could not pay off. This section is retained as a historical record
+> of the validation requirements.
+
 ### Background
 
 Gasse et al. (2019, NeurIPS) proposed learning branching policies via GNNs

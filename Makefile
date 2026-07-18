@@ -304,7 +304,6 @@ TEST_AMP := \
     python/tests/test_robust_uncertainty.py
 
 TEST_NN := \
-    python/tests/test_gnn_branching.py \
     python/tests/test_learned_relaxations.py \
     python/tests/test_nn_formulations.py
 

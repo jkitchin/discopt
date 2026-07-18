@@ -29,7 +29,6 @@ A hybrid Mixed-Integer Nonlinear Programming (MINLP) solver combining a Rust bac
 - **Cutting planes** -- reformulation-linearization (RLT, a first-class `rlt_cuts=True` option), PSD/SOC cuts for QCQP, and outer approximation (OA); `cuts='auto'` by default
 - **Primal heuristics** -- multi-start NLP, feasibility pump, diving, RINS, local branching
 - **Infeasibility diagnosis** -- irreducible infeasible subsystem (`compute_iis`) and conflict analysis / no-good cuts
-- **GNN branching policy** -- bipartite graph-neural-network scaffold for learned branching (experimental; ships untrained, see #236)
 - **Differentiable optimization** -- parameter sensitivity via envelope theorem and KKT implicit differentiation, including differentiable MILP/MIQP (fix-and-differentiate)
 - **.nl file import** -- read AMPL-format models via Rust parser
 - **Pyomo solver plugin** -- use discopt from existing Pyomo models via `SolverFactory("discopt")` (`pip install discopt[pyomo]`); see [docs/pyomo_solver.md](docs/pyomo_solver.md)

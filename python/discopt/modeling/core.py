@@ -3226,7 +3226,6 @@ class Model:
         stream: bool = False,
         deterministic: bool = True,
         partitions: int = 0,
-        branching_policy: str = "fractional",
         initial_solution: Optional[dict] = None,
         skip_convex_check: bool = False,
         nlp_bb: Optional[bool] = None,
@@ -3275,9 +3274,6 @@ class Model:
             legacy ``DISCOPT_RLT=1`` environment variable. Sound regardless of
             setting (a constraint×bound product never removes a feasible point).
             Passed through to :func:`discopt.solver.solve_model`.
-        branching_policy : str, default "fractional"
-            Variable selection policy: ``"fractional"`` (most-fractional)
-            or ``"gnn"`` (GNN scoring, future hook).
         initial_solution : dict, optional
             Initial feasible solution mapping Variable objects to values
             (scalars, lists, or numpy arrays).  Used as a warm-start point
@@ -3512,7 +3508,6 @@ class Model:
                     threads=threads,
                     deterministic=deterministic,
                     partitions=partitions,
-                    branching_policy=branching_policy,
                     initial_point=_x0_flat,
                     skip_convex_check=skip_convex_check,
                     nlp_bb=nlp_bb,

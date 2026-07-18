@@ -3417,7 +3417,6 @@ def solve_model(
     rlt: Union[bool, str] = "auto",
     cuts: str = "auto",
     partitions: int = 0,
-    branching_policy: str = "fractional",
     use_learned_relaxations: bool = False,
     mccormick_bounds: str = "auto",
     gdp_method: str = "big-m",
@@ -3531,9 +3530,6 @@ def solve_model(
         Cap on the number of inherited root-pool cut rows (keeps per-node LP
         size bounded). ``None`` (default) falls back to ``DISCOPT_ROOT_CUT_MAX``
         (default 200).
-    branching_policy : str, default "fractional"
-        Variable selection: ``"fractional"`` (most-fractional, default)
-        or ``"gnn"`` (GNN scoring hook; Rust handles actual branching).
     use_learned_relaxations : bool, default False
         Use ICNN-based learned convex relaxations instead of standard
         McCormick. Requires ``pip install discopt[gnn]`` (equinox + optax).
@@ -4023,7 +4019,6 @@ def solve_model(
         _note_ignored_mip_nlp("rlt", rlt != "auto")
         _note_ignored_mip_nlp("cuts", cuts != "auto")
         _note_ignored_mip_nlp("partitions", partitions != 0)
-        _note_ignored_mip_nlp("branching_policy", branching_policy != "fractional")
         _note_ignored_mip_nlp("use_learned_relaxations", use_learned_relaxations is not False)
         _note_ignored_mip_nlp("mccormick_bounds", mccormick_bounds != "auto")
         _note_ignored_mip_nlp("decomposition", decomposition is not None)
@@ -4131,7 +4126,6 @@ def solve_model(
         _note_ignored("sparse", sparse is not None)
         _note_ignored("cutting_planes", cutting_planes is not False)
         _note_ignored("partitions", partitions != 0)
-        _note_ignored("branching_policy", branching_policy != "fractional")
         _note_ignored("use_learned_relaxations", use_learned_relaxations is not False)
         _note_ignored("mccormick_bounds", mccormick_bounds != "auto")
         _note_ignored("nlp_bb", nlp_bb is not None)
@@ -4197,7 +4191,6 @@ def solve_model(
         _note_ignored_gp("strategy", strategy != "best_first")
         _note_ignored_gp("max_nodes", max_nodes != 100_000)
         _note_ignored_gp("partitions", partitions != 0)
-        _note_ignored_gp("branching_policy", branching_policy != "fractional")
         _note_ignored_gp("use_learned_relaxations", use_learned_relaxations is not False)
         _note_ignored_gp("mccormick_bounds", mccormick_bounds != "auto")
         _note_ignored_gp("gdp_method", gdp_method != "big-m")
@@ -4255,7 +4248,6 @@ def solve_model(
         _note_ignored_gp_minlp("batch_size", batch_size != 16)
         _note_ignored_gp_minlp("strategy", strategy != "best_first")
         _note_ignored_gp_minlp("partitions", partitions != 0)
-        _note_ignored_gp_minlp("branching_policy", branching_policy != "fractional")
         _note_ignored_gp_minlp("use_learned_relaxations", use_learned_relaxations is not False)
         _note_ignored_gp_minlp("mccormick_bounds", mccormick_bounds != "auto")
         _note_ignored_gp_minlp("gdp_method", gdp_method != "big-m")
@@ -8351,34 +8343,10 @@ def solve_model(
                     np.array(pb_vars, dtype=np.int64),
                 )
 
-        # --- Optional GNN branching scoring ---
-        # GNN computes variable scores and passes hints to Rust TreeManager,
-        # which uses them instead of most-fractional branching.
-        if branching_policy == "gnn":
-            from discopt._jax.gnn_policy import select_branch_variable_gnn
-            from discopt._jax.problem_graph import build_graph
-
-            hint_node_ids = []
-            hint_var_indices = []
-            for i in range(n_batch):
-                if result_lbs[i] < _SENTINEL_THRESHOLD and int(batch_ids[i]) not in priority_hinted:
-                    node_lb_i = np.array(batch_lb[i])
-                    node_ub_i = np.array(batch_ub[i])
-                    graph = build_graph(model, result_sols[i], node_lb_i, node_ub_i)
-                    var_idx = select_branch_variable_gnn(graph, params=None)
-                    if var_idx is not None:
-                        hint_node_ids.append(int(batch_ids[i]))
-                        hint_var_indices.append(var_idx)
-            if hint_node_ids:
-                tree.set_branch_hints(
-                    np.array(hint_node_ids, dtype=np.int64),
-                    np.array(hint_var_indices, dtype=np.int64),
-                )
-
         # --- Strong branching for unreliable pseudocost candidates ---
-        # For nodes without GNN hints, use LP-based strong branching when
-        # pseudocost observations are insufficient for reliable branching.
-        if branching_policy != "gnn" and iteration > 0:
+        # Use LP-based strong branching when pseudocost observations are
+        # insufficient for reliable branching.
+        if iteration > 0:
             sb_hint_ids: list[int] = []
             sb_hint_vars = []
             rel_thresh = tree.reliability_threshold()

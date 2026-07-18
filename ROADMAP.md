@@ -46,8 +46,7 @@ discopt followed a 4-phase development plan. Phases 1-4 are complete. Phases 5-7
 | Piecewise McCormick     | Done   | k-partition domain splitting, O(1/k^2) convergence      |
 | alphaBB underestimators | Done   | Hessian-based convexification (Adjiman/Floudas 1998)    |
 | Cutting planes (RLT/OA) | Done   | Bilinear RLT cuts, gradient OA, separation oracles      |
-| GNN branching policy    | Done   | Bipartite graph GNN, strong branching data collection   |
-| Solver integration      | Done   | partitions, branching_policy, cutting_planes parameters |
+| Solver integration      | Done   | partitions, cutting_planes parameters                   |
 |                         |        |                                                         |
 
 ## Phase 4: Polish + Release (complete)

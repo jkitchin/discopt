@@ -101,6 +101,25 @@ The release procedure that produces these entries is documented in
   (`fac2`/`cvxnonsep_nsig30` converge bit-identically at a fair budget).
   `DISCOPT_OBBT_CASCADE_AUX=0` restores the prior default-OFF behavior.
 
+### Removed
+
+- **Untrained GNN branching scaffold** (`chore`, #236, closed not-planned).
+  `branching_policy="gnn"` had always been inert — `solver.py` called
+  `select_branch_variable_gnn(graph, params=None)`, which falls back to
+  most-fractional, and no trained weights were ever shipped — so the option
+  silently behaved identically to the default. The Stage-4 entry experiment
+  (`docs/dev/performance-plan.md` §6, 2026-06-24) showed branching — including
+  real strong branching — is not the lever for the slow tail (bound/
+  range-reduction limited), so a learned imitation of strong branching cannot
+  pay off there and would fail the net-positive graduation gate. Removed
+  `_jax/gnn_policy.py`, `_jax/gnn_branching.py`, `_jax/problem_graph.py`
+  (`INTEGRALITY_TOL` moved into `_jax/strong_branching.py`), the
+  `branching_policy` parameter from `Model.solve()`/`solve_model()`/the CLI
+  (it had exactly one functional value), and the `gnn_branching` notebook.
+  The `gnn`/`learned` extras remain — equinox/optax still power the ICNN
+  learned-relaxations path. Default branching is unchanged: reliability
+  (pseudocost + priority + strong branching) in the Rust `TreeManager`.
+
 ## [0.6.0] - 2026-07-12
 
 ### Removed

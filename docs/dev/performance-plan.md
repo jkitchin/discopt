@@ -258,6 +258,15 @@ bound (`gap_certified` discipline). Low correctness risk.
 > multi-PR effort, not a quick change. A branching PR was **not** shipped because
 > the measurement shows it would not move the slow instances.
 >
+> **GNN-branching consequence (2026-07-18) — scaffold removed, #236 closed
+> not-planned.** The untrained GNN branching path (`branching_policy="gnn"`)
+> was removed rather than trained: it had always been inert (hardcoded
+> `params=None` → most-fractional fallback), and the entry experiment above
+> shows its best case — a cheap imitation of strong branching — cannot move
+> the slow tail, since *actual* strong/pseudocost/reliability branching
+> already does not. Revisit only if the slow tail stops being bound-limited
+> (post-#196 branch-and-reduce work).
+
 > **Bound-lifting follow-up (2026-06-24) — the one *ready* lever is measured-dead.**
 > `obbt.obbt_tighten_root(cascade_aux=True)` already implements OBBT-on-aux (#208):
 > capture OBBT's tightening of the lifted product/ratio aux columns and reverse-FBBT
