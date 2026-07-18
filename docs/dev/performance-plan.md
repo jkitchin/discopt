@@ -614,16 +614,28 @@ panel green for 3 consecutive nightlies before default-on.
 > prediction to the penny. Sound throughout (RLT rows are products of valid
 > identities/inequalities — never cut a feasible point; verified `bound ≤ opt` on
 > every run). **Kept default-OFF, not graduated:** the flag-OFF path is
-> byte-identical to #707 (same 90-column model, same 12658.06), but a full
-> time-limited solve is not yet a clean net-positive — the extra per-node `x_i·c`
-> bilinears cost throughput, and the time-limited *global* dual is high-variance
-> (ex1252: OFF 12658–31856, ON 0–22468 across 60–240 s budgets; ON ≥ OFF at 240 s but
-> the OFF number is not even monotonic run-to-run, so no clean net claim). The
-> node-level gain is deterministic and large; net-positivity is the open graduation
-> question and needs a corpus panel + deep-node gating (the RLT only bites once the
-> integer factors are fixed, so applying it everywhere over-pays at shallow nodes).
-> `python/tests/test_ex1252_coupling_rlt.py` pins soundness + the node-level lift +
-> the byte-identical OFF path.
+> byte-identical to #707 (same 90-column model, same 12658.06). The deterministic
+> node-budget A/B settles net effect (equal node count removes the wall-clock
+> nondeterminism that made the time-limited global dual erratic):
+>
+> | ex1252, ~400 B&B nodes | global dual | incumbent |
+> |---|---|---|
+> | flag OFF | 16071 | 143555 |
+> | flag ON | 16304 (+1.4%) | **134471** (closer to opt 128894) |
+>
+> So the large *node-level* lift (4.5× at a line-selected node) translates to only
+> **+1.4% on the global dual** — because the global dual is set by the *shallow*
+> indicator nodes near the root (objective still relaxes to ~0 there), not the deep
+> line-selected nodes the coupling RLT tightens. It does improve the *primal* side
+> (a better incumbent). **ex1252 stays a hard bound gap** — this is a SOTA-frontier
+> instance (SCIP does not certify it in 120 s either), and the coupling RLT does not
+> lift the *global* dual materially above the #707 ~48k plateau within a practical
+> budget. Net-positivity for graduation would need **deep-node gating** — apply the
+> RLT only once the integer factors are fixed by branching (a per-node cut, not an
+> upfront model transform), so shallow nodes don't pay for rows that cannot bite
+> there — plus the CLAUDE.md §5 corpus differential panel. The lever is sound and a
+> foundation; graduation is future work. `python/tests/test_ex1252_coupling_rlt.py`
+> pins soundness + the node-level lift + the byte-identical OFF path.
 
 ## 7. Sequencing & rationale (revised by the measurement)
 
