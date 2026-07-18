@@ -78,3 +78,32 @@ def test_bnb_emitter_refuses_without_recording():
     r = m.solve(gap_tolerance=1e-3, time_limit=60, max_nodes=500)  # no emit_certificate
     with pytest.raises(CertificateError):
         build_bnb_certificate(m, r)
+
+
+@pytest.mark.slow
+def test_cli_emits_and_checks_bnb_certificate(tmp_path, monkeypatch):
+    """`discopt solve --emit-certificate` on a nonconvex .nl -> a Tier-3 bnb cert
+    that `discopt cert-check` accepts."""
+    import json
+    import sys
+
+    from discopt.cli import main
+
+    nl = tmp_path / "nc.nl"
+    _nonconvex_chain().to_nl(str(nl))
+
+    def _run(argv):
+        monkeypatch.setattr(sys, "argv", argv)
+        with pytest.raises(SystemExit) as exc:
+            main()
+        return exc.value.code
+
+    _run(
+        ["discopt", "solve", str(nl), "--emit-certificate", "--out-dir", str(tmp_path),
+         "--quiet", "--gap", "1e-3"]
+    )
+    cert_path = tmp_path / "nc.cert.json"
+    assert cert_path.exists()
+    cert = json.loads(cert_path.read_text())
+    assert cert["certificate"]["tier"] == "bnb"
+    assert _run(["discopt", "cert-check", str(cert_path)]) == 0
