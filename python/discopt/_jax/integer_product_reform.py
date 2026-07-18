@@ -53,7 +53,7 @@ from discopt.modeling.core import (
 from discopt.solver_tuning import _env_flag
 
 from .factorable_reform import _collect_mul_factors
-from .term_classifier import distribute_products
+from .term_classifier import _compute_var_offset, distribute_products
 
 # Skip an integer factor whose range needs more than this many bits — the
 # expansion adds one binary and one aux product per bit, so a huge range would
@@ -141,6 +141,15 @@ class _Expander:
         #   _bigm_cache: (e._index, other._index, other_elem) -> big-M product aux
         self._and_cache: dict[tuple, Variable] = {}
         self._bigm_cache: dict[tuple, Variable] = {}
+        # Configuration metadata for the disjunctive config bound (#732 Stage 2).
+        # Collected on the multilinear path only: the flat indices of the
+        # integer factors of every exact-linearized product, split into
+        # *indicator-like* factors (range {0,1} — the configuration selectors)
+        # and *count-like* factors (range span >= 2 — e.g. pump counts). Pure
+        # metadata: never enters a bound or feasibility test here; the
+        # disjunctive pass uses it to enumerate/peel configuration boxes.
+        self.config_indicator_flats: set[int] = set()
+        self.config_count_flats: set[int] = set()
         # Coupling-RLT (issue #721, default-OFF ``DISCOPT_MULTILINEAR_COUPLING_RLT``).
         # For a continuous-times-AND product ``v = z*c`` with ``z = AND(bits)`` and a
         # non-negative continuous factor ``c``, the plain big-M envelope of ``v``
@@ -453,6 +462,18 @@ def _try_expand_mul(node: BinaryOp, model: Model, exp: _Expander) -> Optional[Ex
     lo_o = float(np.asarray(vo.lb).flat[elo])
     hi_o = float(np.asarray(vo.ub).flat[elo])
     expanded = _expand_product(base_lo, bits, other_e, lo_o, hi_o, exp)
+    # #732 Stage 2: the integer-BILINEAR expansion has the same L2 decoupling as
+    # the multilinear one — with the bits fractional in the LP, every
+    # ``v_k = e_k·other`` big-M product can relax to 0 (ex1252 multi-line
+    # configs: the pump-count couplings ``x9·x3 = 400·x18`` all collapse,
+    # pinning those config bounds at ~0). Tie the bit-linking equality to the
+    # other factor exactly as ``_try_expand_multilinear`` does. Multilinear-path
+    # only (its ``_bigm_cache`` reuses the products just created — no new
+    # columns; the pure-bilinear entry stays byte-identical), same default-OFF
+    # flag (``DISCOPT_MULTILINEAR_COUPLING_RLT``).
+    if exp.multilinear and exp.coupling_rlt:
+        ref_i = vi if vi.size == 1 else IndexExpression(vi, eli)
+        exp.add_bitlink_rlt(ref_i, base_lo, bits, other_e, lo_o, hi_o)
     if const != 1.0:
         expanded = BinaryOp("*", Constant(const), expanded)
     return expanded
@@ -512,6 +533,15 @@ def _try_expand_multilinear(node: BinaryOp, exp: _Expander) -> Optional[Expressi
     if len(cont_factors) > 1 or not int_refs:
         return None
     int_factors = [exp.expansion(v, el, lo, hi) for (v, el, lo, hi) in int_refs]
+
+    # #732 Stage 2: record the configuration structure of this product (pure
+    # metadata for the disjunctive config bound — never enters a bound here).
+    for v, el, lo_i, hi_i in int_refs:
+        flat = _compute_var_offset(v, exp.model) + el
+        if lo_i == 0 and hi_i == 1:
+            exp.config_indicator_flats.add(flat)
+        elif hi_i - lo_i >= 2:
+            exp.config_count_flats.add(flat)
 
     # Issue #721 (default-OFF coupling RLT): tie each integer factor's bit-linking
     # equality to the continuous factor, so the per-bit products ``e_k*c`` are pinned
@@ -842,6 +872,13 @@ def expand_integer_products(model: Model, implied=frozenset(), multilinear: bool
             return model
         new_model._constraints = rebuilt + exp.aux_constraints
         _attach_warm_start_spec(model, new_model, exp)
+        # #732 Stage 2: configuration metadata for the disjunctive config bound
+        # (flat indices over the ORIGINAL columns — the aux block is a suffix, so
+        # original offsets are unchanged by the reform). Empty sets when the
+        # model has no multilinear configuration structure. Dynamic attributes
+        # (like the warm-start spec) — read back via ``getattr``.
+        setattr(new_model, "_ipx_config_indicators", frozenset(exp.config_indicator_flats))
+        setattr(new_model, "_ipx_config_counts", frozenset(exp.config_count_flats))
         return new_model
     except Exception:
         return model

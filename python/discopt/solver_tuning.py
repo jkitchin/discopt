@@ -667,6 +667,25 @@ class SolverTuning:
     sub-NLP-verified and re-verified by ``inject_incumbent``); it never touches the
     dual bound or the certificate (heuristic-policy regime, CLAUDE.md §5)."""
 
+    disjunctive_config_bound: bool = field(
+        default_factory=lambda: _env_flag("DISCOPT_DISJUNCTIVE_CONFIG_BOUND", default=False)
+    )
+    """Root disjunctive configuration bound for the gated-configuration class
+    (``DISCOPT_DISJUNCTIVE_CONFIG_BOUND``, default **OFF**; #732 Stage 2).
+
+    When the integer-multilinear reform (#707) applies, enumerate the reform's
+    configuration-indicator patterns at the root, bound each configuration box by
+    FBBT -> OBBT -> LP with best-first unit-peeling on the configuration count
+    variables, and floor every optimal node bound at the min over configuration
+    leaves — a valid bound by partition (anytime-valid: unprocessed leaves
+    inherit the caller's existing root bound). Measured (ex1252, plan doc Stage
+    2): the standalone root pass certifies 37945 at a 48-leaf budget (tree at
+    400 nodes: 16304) and 63080 at 120 leaves once the Stage-4 spatial bisection
+    engages (through the ~48k plateau — the #721 acceptance bar); end-to-end
+    the reported global dual goes 0.0 -> 42725 (240 s solve) and 0.0 -> 74915
+    (600 s solve, deadline-governed leaf budget). Default-OFF pending the
+    CLAUDE.md §5 corpus differential panel."""
+
     obj_branch_priority: bool = field(
         default_factory=lambda: _env_flag("DISCOPT_OBJ_BRANCH_PRIORITY", default=True)
     )
