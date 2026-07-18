@@ -455,6 +455,44 @@ class SolverTuning:
     Default off pending a benchmark instance that measurably benefits (qap's
     indefinite-QP McCormick bound is ~0; see docs/dev/sparse-milp-plan.md T7/T12)."""
 
+    root_lp_probe_tight: bool = field(
+        default_factory=lambda: _env_flag("DISCOPT_ROOT_LP_PROBE_TIGHT", default=True)
+    )
+    """Probe the spatial-path McCormick LP relaxer over the FBBT/OBBT-**tightened**
+    root box rather than the raw declared model bounds when deciding whether to keep
+    it for the whole search (``DISCOPT_ROOT_LP_PROBE_TIGHT``, **GRADUATED default-ON**
+    #282 Workstream A; ``=0`` restores the legacy raw-box probe).
+
+    The keep/discard "probe" solves the McCormick LP once at the root. Run over the
+    *raw declared* bounds, a model whose continuous variables are declared ``[0, inf]``
+    (the process-synthesis ``*hfsg`` family, issue #282; also ``casctanks``) makes that
+    LP unbounded/None, so the rigorous relaxer is wrongly discarded (``_mc_mode =
+    "none"``) and the whole spatial search falls back to a far looser
+    alphaBB/interval/NLP root bound — even though the SAME relaxer yields a valid, much
+    tighter bound on the tightened box the solver has already computed (measured:
+    syn30hfsg root excess +955%→+571%, syn40hfsg +3041%→+2350%, syn15m02hfsg
+    +124.7%→+118.1%). With the tightened box the relaxer is kept and every node gets
+    the LP bound.
+
+    SOUND by construction (CLAUDE.md §5): the probe only decides *whether* to keep the
+    (rigorous outer-approximation) relaxer; every node still solves its own sub-box and
+    the relaxer bound joins via ``max``, so it can only *tighten* a node bound — never
+    cut a feasible point or cross the optimum. Bound-neutral (byte-identical) on every
+    model whose ``_mc_mode`` the probe does not change (the convex nlp_bb half, and all
+    bounded-box spatial models).
+
+    GRADUATED default-ON on the CLAUDE.md §5 Regime-2 panel
+    (``discopt_benchmarks/scripts/issue282_root_lp_probe_graduation_panel.py``; verdict
+    JSON under ``discopt_benchmarks/results/issue282/``): flag ON vs OFF over the
+    vendored 66-instance corpus + the 7-instance #282 panel. cert-clean — 0 flag-induced
+    soundness regressions across 73 instances (no dual bound past ``=opt=``, no
+    ``gap_certified True→False``, certified optima identical, incumbents differentially
+    feasibility-verified: the flag introduces no infeasibility); net-positive — the
+    affected spatial-McCormick set (``syn15m02hfsg``/``syn30hfsg``/``syn40hfsg`` +
+    ``casctanks``, the out-of-family generality probe) tightens the root dual bound,
+    everything else bound-neutral. A/B root values re-confirmed load-independent
+    (``results/issue282/root_lp_probe_ab_reconfirm_*.json``)."""
+
     rlt1_root_bound: bool = field(
         default_factory=lambda: _env_flag("DISCOPT_RLT1_ROOT_BOUND", default=False)
     )

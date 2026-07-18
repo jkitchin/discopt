@@ -1,0 +1,24 @@
+{
+  "flag": "DISCOPT_OBBT_ITERATE",
+  "pr": 720,
+  "issue": 282,
+  "workstream": "B",
+  "verdict": "HOLD",
+  "default": "OFF (opt-in, unchanged)",
+  "graduated": false,
+  "recorded_by": "issue-282 Workstream campaign (this run)",
+  "authority": "session owner correction #1 + #727 Track 1.2 graduation panel",
+  "evidence_url": "https://github.com/jkitchin/discopt/issues/727#issuecomment-5011711905",
+  "summary": [
+    "The DISCOPT_OBBT_ITERATE (#720) §5 graduation panel was already run as #727",
+    "Track 1.2. Verdict: HOLD. Sound (0 soundness violations) but net-negative-to-",
+    "neutral: 0/82 certifications gained. nvs24 root tightens +70% but that tighter",
+    "root converts to NO new certification -- it is a primal-gap + envelope-density",
+    "problem, not a sweep-count problem, so iterating the OBBT sweep 3->50 does not",
+    "close it. Cert-clean but not net-positive == the DISCOPT_CUT_INHERIT / #727",
+    "'sound != helpful' law -> the flag stays default-OFF (opt-in)."
+  ],
+  "panel_rerun": "NOT re-run this session (owner directive: do not re-run Workstream B's panel; the HOLD stands).",
+  "282_panel_relevance": "bound-neutral on syn*/rsyn* (0 bilinear structure); #720's real corpus is wide-box dense QCQP (nvs24 family).",
+  "action": "Keep DISCOPT_OBBT_ITERATE default-OFF. No code change, no PR. Workstream B closed."
+}

@@ -444,30 +444,30 @@ def _obbt_iterate_root_enabled() -> bool:
 
 
 def _root_lp_probe_tight_enabled() -> bool:
-    """Whether the #282 tightened-box root LP probe is on (env flag, default OFF).
+    """Whether the #282 tightened-box root LP probe is on (**GRADUATED default-ON**).
 
     The spatial path keeps the McCormick LP relaxer for the whole search only if a
     one-shot "probe" solve yields a valid bound at the root. That probe was run over
     the *raw declared* model bounds (``flat_variable_bounds(model)``), not the
     FBBT/OBBT-tightened root box. On a model with unbounded declared bounds (the
     process-synthesis ``*hfsg`` family, issue #282, has continuous variables
-    declared ``[0, inf]``) the LP is unbounded/None over that raw box, so the
-    relaxer is discarded (``_mc_mode = "none"``) and the whole spatial search falls
-    back to a far looser alphaBB/interval/NLP root bound — even though the SAME
-    relaxer produces a valid, much tighter bound on the tightened box the solver has
-    already computed (measured: syn30hfsg root excess +955% -> +571%, syn40hfsg
-    +3041% -> +2350%). With the flag on, the probe uses the tightened root box, so
-    the relaxer is kept and every node gets the LP bound. Sound: the probe only
-    decides whether to keep the relaxer; each node still solves its own (subset) box
-    and the LP is a rigorous outer approximation. Flag-gated (bound-changing) until
-    the CLAUDE.md Regime-2 panel graduates it. Default OFF.
+    declared ``[0, inf]``; also ``casctanks``) the LP is unbounded/None over that raw
+    box, so the relaxer is discarded (``_mc_mode = "none"``) and the whole spatial
+    search falls back to a far looser alphaBB/interval/NLP root bound — even though
+    the SAME relaxer produces a valid, much tighter bound on the tightened box the
+    solver has already computed (measured: syn30hfsg root excess +955% -> +571%,
+    syn40hfsg +3041% -> +2350%). Using the tightened root box keeps the relaxer and
+    every node gets the LP bound. Sound: the probe only decides whether to keep the
+    relaxer; each node still solves its own (subset) box and the LP is a rigorous
+    outer approximation (the bound joins via ``max`` — can only tighten).
+
+    GRADUATED default-ON (#282 Workstream A) via the ``SolverTuning`` field
+    :attr:`~discopt.solver_tuning.SolverTuning.root_lp_probe_tight` (per-solve,
+    discoverable, thread-safe); this reads it. ``DISCOPT_ROOT_LP_PROBE_TIGHT=0`` (or
+    ``tuning=SolverTuning(root_lp_probe_tight=False)``) restores the legacy raw-box
+    probe. See the field docstring for the graduation-panel evidence.
     """
-    return os.environ.get("DISCOPT_ROOT_LP_PROBE_TIGHT", "").strip().lower() in (
-        "1",
-        "true",
-        "yes",
-        "on",
-    )
+    return _tuning().root_lp_probe_tight
 
 
 # P3 branch-and-reduce: per-node probing (issue #632). When the in-tree FBBT

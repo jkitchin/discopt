@@ -93,3 +93,36 @@ def test_tightened_box_probe_tightens_root_bound_soundly():
 
     # And the tighter bound is still a valid upper bound on the optimum.
     assert on.root_bound >= _OPT - _TOL
+
+
+def _solve_default(budget: float = 8.0):
+    """Solve with NO ``DISCOPT_ROOT_LP_PROBE_TIGHT`` env var set — the shipped default."""
+    os.environ.pop("DISCOPT_ROOT_LP_PROBE_TIGHT", None)
+    m = from_nl(os.path.join(_DATA, f"{_INSTANCE}.nl"))
+    assert m._objective.sense == ObjectiveSense.MAXIMIZE
+    return m.solve(time_limit=budget, gap_tolerance=1e-4)
+
+
+@pytest.mark.slow
+def test_default_probe_tightens_root_bound_after_graduation():
+    """The tightened-box probe is GRADUATED default-ON (#282 Workstream A).
+
+    With no env var set, the shipped default must now produce the TIGHTER (kept-relaxer)
+    root bound — i.e. the default equals the explicit-``=1`` arm and is strictly tighter
+    than the explicit-``=0`` (legacy raw-box) arm. This fails before the default flip
+    (default == OFF == looser) and passes after — the graduation regression guard.
+    ``DISCOPT_ROOT_LP_PROBE_TIGHT=0`` remains the opt-out (asserted by the test above).
+    """
+    default = _solve_default()
+    off = _solve("0")
+
+    _assert_sound("default", default)
+    assert default.root_bound is not None and off.root_bound is not None
+
+    # Default (graduated ON) is strictly tighter than the legacy raw-box (=0) probe.
+    assert default.root_bound < off.root_bound - _TOL, (
+        f"default root_bound={default.root_bound} not tighter than legacy =0 "
+        f"root_bound={off.root_bound}; the default did not graduate to the kept-relaxer probe"
+    )
+    # And still a valid upper bound on the optimum.
+    assert default.root_bound >= _OPT - _TOL
