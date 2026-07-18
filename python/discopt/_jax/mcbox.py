@@ -31,24 +31,64 @@ provably-convex-
 envelope intrinsics exp/log/log2/log10/sqrt/softplus/abs (kernel-chain subgradient),
 and (P1.1) the S-shaped intrinsics tanh/atan/sigmoid/sinh — tight kernel-chain on a
 box that doesn't span the inflection, a sound constant-envelope fallback (jnp.where)
-on a spanning box (valid but loose; P1.1b can add the tight tangent envelope). Anything
-else refuses (sound-or-refuse). P1 continues coverage (trig, fractional powers, the
-tight monomial hull incl. odd-power-over-sign-spanning).
+on a spanning box (valid but loose; P1.1b can add the tight tangent envelope), and
+(P1.4) fractional/signomial powers x**a (non-integer a) over a strictly-positive base
+(no-information bracket when the base can reach x<=0, where x**a is undefined). Anything
+else refuses (sound-or-refuse). P1 continues coverage (trig, the tight monomial hull
+incl. odd-power-over-sign-spanning).
 """
 
 from __future__ import annotations
 
+import contextlib
 from dataclasses import dataclass
 from typing import cast
 
 import jax
 import jax.numpy as jnp
 
-from discopt._jax.multivariate_mccormick import _COMPOSITION_RULES
+from discopt._jax.multivariate_mccormick import (
+    _COMPOSITION_RULES,
+    clip_inner,
+    compose_even_pow,
+    compose_odd_pow,
+    compose_pow_frac,
+    odd_pow_tangent_coeff,
+)
 
 
 class UnsupportedMcboxOp(Exception):
     """A subexpression is outside the sound MCBox scope — refuse, never approximate."""
+
+
+# ---------------------------------------------------------------- strict mode
+#
+# When tracing an OPAQUE user callable (a ``CustomCall`` body, P3.1) through MCBox,
+# there is no AST to inspect: the caller cannot apply the ``_is_affine_ast`` guard that
+# the reduced-space AST interpreter uses to refuse a non-affine division (whose ``cc``
+# subgradient is NOT validated — it excluded the true optimum on nvs22 by ~1.7e5, task
+# #69). To keep the CustomCall path sound-or-refuse, tracing runs under
+# :func:`strict_division`, in which variable-denominator division (``MCBox / MCBox``)
+# refuses loudly rather than emitting a possibly-unsound bound. Division by a numeric
+# constant (``MCBox / c``) stays sound and is always allowed. Non-strict (default) mode
+# is unchanged — the AST interpreter and the direct-MCBox tests keep their behavior.
+_STRICT_DIVISION = False
+
+
+@contextlib.contextmanager
+def strict_division():
+    """Refuse variable-denominator (``MCBox / MCBox``) division within this scope.
+
+    Used to trace opaque ``CustomCall`` bodies soundly (P3.1): the non-affine reciprocal
+    subgradient is not validated, and an opaque body offers no AST to gate it on, so the
+    only sound contract is to refuse. Constant-denominator division is unaffected."""
+    global _STRICT_DIVISION
+    prev = _STRICT_DIVISION
+    _STRICT_DIVISION = True
+    try:
+        yield
+    finally:
+        _STRICT_DIVISION = prev
 
 
 @jax.tree_util.register_pytree_node_class
@@ -105,23 +145,36 @@ class MCBox:
 
     def __truediv__(self, o):
         if isinstance(o, MCBox):
+            if _STRICT_DIVISION:
+                raise UnsupportedMcboxOp(
+                    "variable-denominator division inside an opaque CustomCall trace: the "
+                    "non-affine reciprocal cc-subgradient is not validated (nvs22, task #69) "
+                    "and there is no AST to gate it on — refuse (sound-or-refuse)"
+                )
             return _bilinear(self, _reciprocal(o))  # x/y = x * (1/y), sign-definite y
         c = jnp.asarray(o, dtype=jnp.float64)
         return _scalar_mul(self, 1.0 / c)
 
     def __pow__(self, p):
-        if not (isinstance(p, int) or (isinstance(p, float) and float(p).is_integer())):
-            raise UnsupportedMcboxOp(f"non-integer power {p} (P1.4: signomial)")
-        n = int(p)
-        if n < 1:
-            raise UnsupportedMcboxOp(f"non-positive power {n}")
-        # Repeated multiplication through the (sign-agnostic, validated) bilinear rule:
-        # SOUND for every n>=1 and every sign regime. Looser than the tight monomial
-        # envelope (P1.3 replaces this with relax_pow's exact hull), but always valid.
-        out = self
-        for _ in range(n - 1):
-            out = out * self
-        return out
+        if isinstance(p, int) or (isinstance(p, float) and float(p).is_integer()):
+            n = int(p)
+            if n < 1:
+                raise UnsupportedMcboxOp(f"non-positive integer power {n}")
+            if n == 1:
+                return self
+            if n % 2 == 0:
+                # P1.3: even powers use the TIGHT monomial hull (exact convex
+                # envelope cv=x^n, secant cc) — materially tighter than repeated
+                # bilinear multiplication (e.g. x^2 on [-2,3]: exact cv=0 at x=0 vs
+                # repeated-mult's -4). Valid boundary subgradients via clip_into.
+                return _pow_even(self, n)
+            # P1.3: odd powers (n>=3) use the tight monomial hull — the convex/concave
+            # envelope with the tangent-line construction over sign-spanning boxes,
+            # tighter than repeated bilinear multiplication and (unlike relax_pow's
+            # piecewise cv) genuinely convex, so the kernel-chain subgradient is valid.
+            return _pow_odd(self, n)
+        # Non-integer exponent: signomial x**a over a POSITIVE base (P1.4).
+        return _pow_frac(self, float(p))
 
     # -- univariate intrinsics with provably-convex envelopes: the kernel-chain
     #    subgradient is valid directly (see _univariate). --
@@ -241,8 +294,11 @@ def _recip_kernel(cvg, ccg, lb, ub):
     # above ub; clamp into the valid interval first (still valid bounds on y, and where
     # 1/y is defined) so the reciprocal never extrapolates the secant / 1/(.) outside
     # the domain. Preserves soundness; gradient saturates on the clamped region.
-    cvg = jnp.clip(cvg, lb, ub)
-    ccg = jnp.clip(ccg, lb, ub)
+    # ``clip_inner`` (not ``jnp.clip``): the boundary derivative must be the inner
+    # one-sided slope (1), else a box-face iterate gets the halved clip-tie subgradient
+    # and an invalid reciprocal cut (same soundness bug as the intrinsic envelopes).
+    cvg = clip_inner(cvg, lb, ub)
+    ccg = clip_inner(ccg, lb, ub)
     width = ub - lb
     slope = (1.0 / ub - 1.0 / lb) / jnp.where(jnp.abs(width) > 1e-12, width, 1.0)
 
@@ -272,6 +328,81 @@ def _reciprocal(b):
         jnp.where(crosses, jnp.inf, r.hi),
         jnp.where(crosses, zero, r.sub_cv),
         jnp.where(crosses, zero, r.sub_cc),
+    )
+
+
+def _pow_even(base, n):
+    """``base ** n`` for an even integer ``n >= 2`` (P1.3, tight monomial hull).
+
+    ``x**n`` (even) is convex with its minimum at 0, so the exact convex envelope is
+    ``x**n`` itself and the concave overestimator is the secant — materially tighter
+    than the repeated-bilinear product, whose convex part is only the max of two tangent
+    lines. Value from :func:`compose_even_pow`; subgradient by the kernel chain (valid —
+    the envelope is convex and ``clip_into`` gives the valid boundary slope). The
+    interval is ``[0, max(lo^n, hi^n)]`` when the box spans 0, else ``[min, max]`` of the
+    endpoints (``x**n`` even is U-shaped)."""
+
+    def kernel(cv_g, cc_g, g_lb, g_ub):
+        return compose_even_pow(cv_g, cc_g, g_lb, g_ub, n)
+
+    lo, hi = base.lo, base.hi
+    e = (lo**n, hi**n)
+    spans = (lo < 0.0) & (hi > 0.0)
+    interval = (jnp.where(spans, 0.0, jnp.minimum(*e)), jnp.maximum(*e))
+    return _univariate_kernel(base, kernel, interval)
+
+
+def _pow_odd(base, n):
+    """``base ** n`` for an odd integer ``n >= 3`` (P1.3, tight monomial hull).
+
+    ``x**n`` (odd) is monotone increasing, so the interval is ``[lo**n, hi**n]``. The
+    convex/concave envelope (:func:`compose_odd_pow`) is tight and, over a sign-spanning
+    box, genuinely convex/concave via the tangent-line construction — so the kernel-chain
+    subgradient is valid (unlike the naive piecewise ``relax_pow`` cv). The tangent
+    coefficient is computed once at trace time (static ``n``)."""
+    cn = odd_pow_tangent_coeff(n)
+
+    def kernel(cv_g, cc_g, g_lb, g_ub):
+        return compose_odd_pow(cv_g, cc_g, g_lb, g_ub, n, cn)
+
+    interval = (base.lo**n, base.hi**n)
+    return _univariate_kernel(base, kernel, interval)
+
+
+def _pow_frac(base, a):
+    """``base ** a`` for a non-integer exponent ``a`` (P1.4, signomial).
+
+    ``x ** a`` is real only for ``x > 0`` when ``a`` is non-integer, so this is
+    sound-or-refuse on the sign of the base interval: over a strictly-positive box
+    (``lo > 0``) it uses the :func:`compose_pow_frac` envelope with the kernel-chain
+    subgradient (valid — the envelope is convex/concave per regime and ``clip_inner``
+    gives the valid boundary slope); a box that can reach ``x <= 0`` returns a
+    no-information bracket ``(-inf, +inf)`` (jit-safe via ``jnp.where``) that any
+    downstream consumer refuses. NaN discipline: the envelope is always evaluated on a
+    base clamped to ``>= eps > 0`` so the discarded ``jnp.where`` branch never produces
+    a NaN that would poison the subgradient."""
+    eps = 1e-12
+
+    def kernel(cv_g, cc_g, g_lb, g_ub):
+        g_lb_s = jnp.maximum(g_lb, eps)
+        g_ub_s = jnp.maximum(g_ub, eps)
+        return compose_pow_frac(cv_g, cc_g, g_lb_s, g_ub_s, a)
+
+    lo_s = jnp.maximum(base.lo, eps)
+    hi_s = jnp.maximum(base.hi, eps)
+    f_lo, f_hi = lo_s**a, hi_s**a
+    inc = a >= 0.0  # x**a increasing for a>0, decreasing for a<0
+    interval = (jnp.where(inc, f_lo, f_hi), jnp.where(inc, f_hi, f_lo))
+    r = _univariate_kernel(base, kernel, interval)
+    positive = base.lo > 0.0
+    zero = jnp.zeros_like(base.sub_cv)
+    return MCBox(
+        jnp.where(positive, r.cv, -jnp.inf),
+        jnp.where(positive, r.cc, jnp.inf),
+        jnp.where(positive, r.lo, -jnp.inf),
+        jnp.where(positive, r.hi, jnp.inf),
+        jnp.where(positive, r.sub_cv, zero),
+        jnp.where(positive, r.sub_cc, zero),
     )
 
 

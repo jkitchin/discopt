@@ -199,7 +199,182 @@ def test_division_zero_crossing_denominator_noinfo():
     assert not bool(jnp.isfinite(z.cv)) and not bool(jnp.isfinite(z.cc))
 
 
+# ---- subgradient validity AT THE BOX FACES/CORNERS ----
+# The interior-random ``_check`` never lands a base point exactly on a box face, but a
+# Kelley/LP iterate always sits on one (an LP optimum is a polytope vertex). There the
+# intrinsic envelopes used to hand back the ``jnp.clip`` tie subgradient (a 0.5-halved,
+# INVALID slope), so the McCormick cut could exclude the true optimum -> too-high bound.
+# These probe the support inequality with the base point pinned to corners/faces.
+@pytest.mark.parametrize(
+    "name,fn,lb,ub",
+    [
+        ("exp", lambda x: mc.exp(x), [0.0], [2.0]),
+        ("exp-neg-slope", lambda x: mc.exp(-0.6 * x), [0.2], [2.0]),
+        ("log", lambda x: mc.log(x), [0.5], [3.0]),
+        ("sqrt", lambda x: mc.sqrt(x), [0.1], [4.0]),
+        ("softplus", lambda x: mc.softplus(x), [-2.0], [2.0]),
+        ("abs", lambda x: mc.abs(x), [-2.0], [3.0]),
+        ("recip-of-affine", lambda x, y: x / y, [0.5, 1.0], [3.0, 4.0]),
+        ("composite", lambda x, y: y - mc.exp(-0.6 * x), [0.2, 0.3], [2.0, 0.89]),
+    ],
+)
+def test_subgradient_valid_at_box_faces(name, fn, lb, ub):
+    import itertools
+
+    lb, ub = np.asarray(lb, float), np.asarray(ub, float)
+    n = lb.size
+
+    @jax.jit
+    def one(p):
+        z = relax_through(fn, p, jnp.asarray(lb), jnp.asarray(ub))
+        return z.cv, z.cc, z.sub_cv, z.sub_cc
+
+    batch = jax.jit(jax.vmap(one))
+    corners = np.array(list(itertools.product(*zip(lb, ub))), dtype=float)
+    faces = []  # face-centre points: one coord pinned to a bound, others random
+    rng = np.random.default_rng(1)
+    for i in range(n):
+        for bnd in (lb[i], ub[i]):
+            for _ in range(15):
+                p = lb + rng.random(n) * (ub - lb)
+                p[i] = bnd
+                faces.append(p)
+    bases = np.vstack([corners, np.array(faces)]) if faces else corners
+    probes = lb + rng.random((2000, n)) * (ub - lb)
+    probes = np.vstack([probes, corners])
+    cvB, ccB, _, _ = (np.asarray(a) for a in batch(jnp.asarray(probes)))
+    cvA, ccA, scvA, sccA = (np.asarray(a) for a in batch(jnp.asarray(bases)))
+    tol = 1e-7
+    for k in range(len(bases)):
+        lin_cv = cvA[k] + (probes - bases[k]) @ scvA[k]
+        lin_cc = ccA[k] + (probes - bases[k]) @ sccA[k]
+        assert np.all(cvB >= lin_cv - tol * (abs(cvA[k]) + 1)), (
+            f"{name}: cv subgradient invalid at face base {bases[k]} "
+            f"(max {float(np.max(lin_cv - cvB)):.2e})"
+        )
+        assert np.all(ccB <= lin_cc + tol * (abs(ccA[k]) + 1)), (
+            f"{name}: cc subgradient invalid at face base {bases[k]} "
+            f"(max {float(np.max(ccB - lin_cc)):.2e})"
+        )
+
+
+# ---- P1.3: tight monomial hull for even powers ----
+@pytest.mark.parametrize(
+    "n,lb,ub",
+    [(2, -2.0, 3.0), (2, 1.0, 3.0), (4, -1.5, 2.0), (6, -1.0, 1.3), (2, -3.0, -0.5)],
+)
+def test_even_power_tight_hull_sound(n, lb, ub):
+    _check(lambda x: x**n, lambda v: v[0] ** n, [lb], [ub])
+
+
+def test_even_power_of_affine_combo():
+    _check(lambda x, y: (x + y) ** 2, lambda v: (v[0] + v[1]) ** 2, [-1.0, -1.0], [2.0, 2.0])
+
+
+def test_even_power_hull_is_exact_convex_envelope():
+    # The tight hull makes cv = x**n exactly (vs repeated-mult's loose max-of-tangents:
+    # x^2 on [-2,3] gave cv(0) = -4). Check cv == x**n on the convex envelope.
+    lb, ub = jnp.array([-2.0]), jnp.array([3.0])
+    for xv in [-2.0, -1.0, 0.0, 1.0, 2.0, 3.0]:
+        z = relax_through(lambda x: x**2, jnp.array([xv]), lb, ub)
+        assert float(z.cv) == pytest.approx(xv**2, abs=1e-9), f"cv not exact at x={xv}"
+
+
+@pytest.mark.parametrize(
+    "n,lb,ub",
+    [
+        (3, -2.0, 3.0),  # spanning
+        (3, -3.0, 1.0),  # box far negative -> tangent beyond ub -> chord
+        (3, 0.5, 3.0),  # convex (positive)
+        (3, -3.0, -0.5),  # concave (negative)
+        (5, -1.5, 2.0),
+        (7, -1.2, 1.4),
+    ],
+)
+def test_odd_power_tight_hull_sound(n, lb, ub):
+    # P1.3: odd powers use the tight convex/concave monomial hull (valid, and genuinely
+    # convex over sign-spanning boxes via the tangent-line construction).
+    _check(lambda x: x**n, lambda v: v[0] ** n, [lb], [ub])
+
+
+def test_odd_power_face_subgradients_valid():
+    for n, lb, ub in [(3, -2.0, 3.0), (5, -1.5, 2.0), (3, -3.0, 1.0)]:
+
+        @jax.jit
+        def one(p, _n=n, _lb=lb, _ub=ub):
+            z = relax_through(lambda x: x**_n, p, jnp.array([_lb]), jnp.array([_ub]))
+            return z.cv, z.cc, z.sub_cv, z.sub_cc
+
+        batch = jax.jit(jax.vmap(one))
+        probes = np.linspace(lb, ub, 500).reshape(-1, 1)
+        bases = np.array([[lb], [ub], [0.0], [0.5 * (lb + ub)]])
+        cvB, ccB, _, _ = (np.asarray(v) for v in batch(jnp.asarray(probes)))
+        cvA, ccA, scvA, sccA = (np.asarray(v) for v in batch(jnp.asarray(bases)))
+        for k in range(len(bases)):
+            lin_cv = cvA[k] + (probes - bases[k]) @ scvA[k]
+            lin_cc = ccA[k] + (probes - bases[k]) @ sccA[k]
+            assert np.all(cvB >= lin_cv - 1e-7 * (abs(cvA[k]) + 1)), f"n={n} cv face"
+            assert np.all(ccB <= lin_cc + 1e-7 * (abs(ccA[k]) + 1)), f"n={n} cc face"
+
+
+# ---- P1.4: fractional powers (signomials) over a positive base ----
+@pytest.mark.parametrize(
+    "a,lb,ub",
+    [
+        (0.5, 0.1, 4.0),  # concave increasing
+        (1.5, 0.2, 3.0),  # convex increasing
+        (2.5, 0.5, 2.0),  # convex increasing
+        (-0.5, 0.3, 3.0),  # convex decreasing
+        (-1.5, 0.5, 2.0),  # convex decreasing
+        (0.25, 1.0, 5.0),
+    ],
+)
+def test_fractional_power_relaxes_soundly(a, lb, ub):
+    _check(lambda x: x**a, lambda v: v[0] ** a, [lb], [ub])
+
+
+def test_fractional_power_of_affine_combo():
+    # composition: (2x + y + 1)**0.5 over a box keeping the base positive.
+    _check(
+        lambda x, y: (2.0 * x + y + 1.0) ** 0.5,
+        lambda v: (2.0 * v[0] + v[1] + 1.0) ** 0.5,
+        [0.0, 0.0],
+        [2.0, 3.0],
+    )
+
+
+def test_fractional_power_face_subgradients_valid():
+    # box faces (where a Kelley/LP iterate sits) must have valid subgradients.
+    for a, lb, ub in [(0.5, 0.1, 4.0), (1.5, 0.2, 3.0), (-0.5, 0.3, 3.0)]:
+
+        @jax.jit
+        def one(p, _a=a):
+            z = relax_through(lambda x: x**_a, p, jnp.array([lb]), jnp.array([ub]))
+            return z.cv, z.cc, z.sub_cv, z.sub_cc
+
+        batch = jax.jit(jax.vmap(one))
+        probes = np.linspace(lb, ub, 400).reshape(-1, 1)
+        bases = np.array([[lb], [ub], [0.5 * (lb + ub)]])
+        cvB, ccB, _, _ = (np.asarray(v) for v in batch(jnp.asarray(probes)))
+        cvA, ccA, scvA, sccA = (np.asarray(v) for v in batch(jnp.asarray(bases)))
+        for k in range(len(bases)):
+            lin_cv = cvA[k] + (probes - bases[k]) @ scvA[k]
+            lin_cc = ccA[k] + (probes - bases[k]) @ sccA[k]
+            assert np.all(cvB >= lin_cv - 1e-7 * (abs(cvA[k]) + 1)), f"a={a} cv face"
+            assert np.all(ccB <= lin_cc + 1e-7 * (abs(ccA[k]) + 1)), f"a={a} cc face"
+
+
+def test_fractional_power_nonpositive_base_no_info():
+    # x**a (non-integer a) is undefined for x <= 0 -> no-information bracket, not a
+    # wrong finite bound (jit-safe). Any consumer of a non-finite bracket refuses.
+    z = relax_through(lambda x: x**0.5, jnp.array([0.5]), jnp.array([-1.0]), jnp.array([2.0]))
+    assert not bool(jnp.isfinite(z.cv)) and not bool(jnp.isfinite(z.cc))
+
+
 # ---- sound-or-refuse ----
-def test_refuse_noninteger_power():
+def test_refuse_nonpositive_integer_power():
+    # x**0 / x**-2 (non-positive INTEGER exponent) still refuse (reciprocals go via /).
     with pytest.raises(UnsupportedMcboxOp):
-        relax_through(lambda x: x**1.5, jnp.array([1.0]), jnp.array([0.5]), jnp.array([3.0]))
+        relax_through(lambda x: x**0, jnp.array([1.0]), jnp.array([0.5]), jnp.array([3.0]))
+    with pytest.raises(UnsupportedMcboxOp):
+        relax_through(lambda x: x**-2, jnp.array([1.0]), jnp.array([0.5]), jnp.array([3.0]))

@@ -60,6 +60,7 @@ parts:
       - file: notebooks/convex_fast_path
       - file: notebooks/convexity_detection
       - file: notebooks/symbolic_envelopes
+      - file: notebooks/reduced_space_customcall
       - file: notebooks/suspect_head_to_head
       - file: notebooks/nlp_bb
       - file: notebooks/implicit_function_node

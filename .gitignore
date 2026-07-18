@@ -94,3 +94,7 @@ docs/notebooks/*.xlsx
 
 # stray solver listing files (GAMS/BARON .lst) — not part of the repo
 *.lst
+
+# scratchpad run logs (keep the harnesses, drop the outputs)
+scratchpad/*_out*.txt
+scratchpad/*.log

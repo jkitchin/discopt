@@ -2524,6 +2524,49 @@ def _model_contains_custom_call(model: Model) -> bool:
     return False
 
 
+def _flat_var_box(model: Model):
+    """Flat ``(lb, ub)`` float arrays over the model's variables (scalar & vector).
+
+    Mirrors the tree's flat column layout (each variable's elements contiguous, in
+    ``model._variables`` order). Used to probe the reduced-space MCBox relaxation on
+    the root box before committing a ``CustomCall`` model to the global path."""
+    lbs, ubs = [], []
+    for v in model._variables:
+        vlb = np.asarray(v.lb, dtype=np.float64).reshape(-1)
+        vub = np.asarray(v.ub, dtype=np.float64).reshape(-1)
+        if vlb.size == 1:
+            vlb = np.full(v.size, float(vlb[0]))
+        if vub.size == 1:
+            vub = np.full(v.size, float(vub[0]))
+        lbs.append(vlb)
+        ubs.append(vub)
+    lb = np.concatenate(lbs) if lbs else np.zeros(0, dtype=np.float64)
+    ub = np.concatenate(ubs) if ubs else np.zeros(0, dtype=np.float64)
+    return lb, ub
+
+
+def _custom_call_reduced_admissible(reduced_model: Model, n_orig: int) -> bool:
+    """P3.1 admission test: does every ``CustomCall`` in ``reduced_model`` trace
+    soundly through MCBox over the root box, so the model can be CERTIFIED GLOBALLY
+    on the reduced-space engine (branching on the original DOF)?
+
+    Sound-or-refuse: runs the reduced-space Kelley probe (one round) on the root box.
+    A ``status == "unsupported"`` (out of MCBox scope, or a non-affine division / raw
+    ``jnp`` intrinsic hidden in an opaque body, or a non-finite box) means the model is
+    NOT reduced-relaxable, so the caller keeps the existing local-NLP-only path. Any
+    other status means the relaxation builds → the global reduced-space solve is valid."""
+    try:
+        from discopt._jax.mccormick_subgradient import reduced_mccormick_lp_bound as _probe
+
+        lb, ub = _flat_var_box(reduced_model)
+        if lb.size < n_orig:
+            return False
+        res = _probe(reduced_model, lb[:n_orig], ub[:n_orig], max_rounds=1)
+        return res.status != "unsupported"
+    except Exception:  # pragma: no cover - defensive: any probe failure => stay local
+        return False
+
+
 def _model_contains_nonsmooth_node(model: Model) -> bool:
     """True if any objective/constraint body contains a non-smooth node.
 
@@ -4898,37 +4941,72 @@ def solve_model(
     rust_time = 0.0
     jax_time = 0.0
 
-    # --- AD-only user functions (dm.custom): force the local NLP path ---
-    # A CustomCall wraps an opaque JAX-traceable callable. discopt can autodiff
-    # it (so the local NLP path works), but the relaxation compiler, Rust
-    # presolve, .nl export, and nonlinear bound tightening cannot reason about
-    # it — global branch-and-bound would have no valid node relaxation. So we
-    # solve locally only (no global optimality certificate) and refuse when
-    # integer/binary variables force B&B. Placed before the DAG-walking
-    # presolve/infeasibility checks so they never see a CustomCall. See #27b.
+    # --- AD-only user functions (dm.custom) ---
+    # A CustomCall wraps an opaque JAX-traceable callable. discopt can autodiff it (so
+    # the local NLP path and dag_compiler value/grad work), and the Rust presolve /
+    # lifted McCormick build / .nl export cannot reason about it. Historically that
+    # forced the local-NLP-only path for every CustomCall model.
+    #
+    # P3.1/P3.2 (MAiNGO-parity, #713): a CustomCall whose opaque body traces soundly
+    # through MCBox is GLOBALLY RELAXABLE via the reduced-space engine — the relaxation
+    # and its subgradients propagate by rule over the ORIGINAL degrees of freedom, the
+    # model is branched DOF-only, and the internal intermediates stay hidden. So for an
+    # MCBox-relaxable CustomCall model we fall through to the global path with the
+    # reduced-space relaxation forced on (the lifted/Rust machinery it can't see through
+    # is skipped/soft-fails, and the Rust tree is bound-source-agnostic). Because there
+    # is now a valid node relaxation, this holds for INTEGER degrees of freedom too
+    # (P3.2): the tree branches the integer + continuous DOF and the reduced Kelley bound
+    # fathoms nodes. A model that is NOT reduced-relaxable (raw jnp intrinsics in the
+    # body, a non-affine hidden division, a non-scalar leaf, a non-finite box) keeps the
+    # local-NLP-only path when continuous, and RAISES when integers are present (global
+    # B&B then has no valid node relaxation) — sound-or-refuse. The check is placed
+    # before the DAG-walking presolve/infeasibility passes; those abstain on CustomCall
+    # (verified), so it is safe to fall through past them. See #27b, #713.
+    _force_reduced_space = False
     if _model_contains_custom_call(model):
-        if not _is_pure_continuous(model):
-            raise ValueError(
-                "Model contains a dm.custom(...) AD-only user function together "
-                "with integer/binary variables. Global branch-and-bound needs a "
-                "valid relaxation at each node, which an opaque callable cannot "
-                "provide. Rebuild the function from dm.* primitives (see dm.udf), "
-                "or remove the integer/binary variables."
+        _cc_reduced_model = _prereform_model if _prereform_model is not None else model
+        _cc_n_orig = (
+            int(_prereform_nvars)
+            if _prereform_model is not None
+            else int(sum(v.size for v in _cc_reduced_model._variables))
+        )
+        _cc_admissible = model._objective is not None and _custom_call_reduced_admissible(
+            _cc_reduced_model, _cc_n_orig
+        )
+        _cc_has_integers = not _is_pure_continuous(model)
+        if not _cc_admissible:
+            if _cc_has_integers:
+                raise ValueError(
+                    "Model contains a dm.custom(...) AD-only user function that is "
+                    "OUTSIDE the sound reduced-space (MCBox) scope, together with "
+                    "integer/binary variables. Global branch-and-bound needs a valid "
+                    "node relaxation, which a non-MCBox-relaxable opaque callable cannot "
+                    "provide. Express the body with MCBox-compatible ops (arithmetic + "
+                    "the discopt._jax.mcbox intrinsic namespace), rebuild it from dm.* "
+                    "primitives (see dm.udf), or remove the integer/binary variables."
+                )
+            logger.info(
+                "Model contains a dm.custom(...) AD-only user function outside the "
+                "sound reduced-space (MCBox) scope — solving on the local NLP path "
+                "only (no global optimality certificate)."
             )
+            result = _solve_continuous(
+                model,
+                time_limit,
+                ipopt_options,
+                t_start,
+                nlp_solver,
+                initial_point=initial_point,
+            )
+            result.gap_certified = False
+            return result
         logger.info(
-            "Model contains a dm.custom(...) AD-only user function — solving on "
-            "the local NLP path only (no global optimality certificate)."
+            "Model contains a dm.custom(...) function that traces soundly through "
+            "MCBox — solving GLOBALLY via the reduced-space engine (branching on the "
+            "original degrees of freedom%s; hidden intermediates stay hidden).",
+            ", integers included" if _cc_has_integers else "",
         )
-        result = _solve_continuous(
-            model,
-            time_limit,
-            ipopt_options,
-            t_start,
-            nlp_solver,
-            initial_point=initial_point,
-        )
-        result.gap_certified = False
-        return result
+        _force_reduced_space = True
 
     if nlp_solver == "pounce":
         logger.info("Using POUNCE (pure-Rust Ipopt port)")
@@ -6831,7 +6909,12 @@ def solve_model(
             "(MC<->AVM per-term lift) and is not implemented yet. Use 'lifted' "
             "(default), 'auto', or 'reduced'."
         )
-    _reduced_space_active = _relax_space == "reduced" and model._objective is not None
+    # ``_force_reduced_space`` is set at the CustomCall gate: a hidden-function model
+    # has no sound lifted relaxation, so reduced-space is the ONLY valid global engine
+    # for it and is forced on regardless of the (lifted/auto/reduced) tuning.
+    _reduced_space_active = (
+        _relax_space == "reduced" or _force_reduced_space
+    ) and model._objective is not None
     # The reduced-space evaluator relaxes over the ORIGINAL degrees of freedom only
     # (its whole premise — no auxiliary columns). Two adjustments are REQUIRED for a
     # sound bound (task #69, P2.3 root cause #2):

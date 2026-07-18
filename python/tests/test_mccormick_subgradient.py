@@ -189,13 +189,24 @@ def test_kelley_bound_detects_infeasible_relaxation():
 
 
 def test_kelley_bound_unsupported_returns_flag_not_crash():
-    # a non-integer power is still outside MCBox scope -> clean fallback, no crash
-    # (variable division x/y is now supported via the sign-definite reciprocal, P1.2)
+    # An intrinsic outside MCBox scope (sin has no composition kernel) -> clean fallback,
+    # no crash. (Variable division x/y via the sign-definite reciprocal is supported, P1.2;
+    # non-integer powers over a positive base are supported via the signomial hull, P1.4.)
+    m = dm.Model()
+    x = m.continuous("x", 1, lb=0.5, ub=3.0)
+    m.minimize(dm.sin(x[0]))
+    r = reduced_mccormick_lp_bound(m, [0.5], [3.0])
+    assert r.status == "unsupported"  # falls back cleanly; no partial/invalid bound
+
+
+def test_kelley_bound_signomial_power_supported():
+    # P1.4: a non-integer power over a positive base now relaxes (was "unsupported").
     m = dm.Model()
     x = m.continuous("x", 1, lb=0.5, ub=3.0)
     m.minimize(x[0] ** 1.5)
     r = reduced_mccormick_lp_bound(m, [0.5], [3.0])
-    assert r.status == "unsupported"  # falls back cleanly; no partial/invalid bound
+    assert r.status == "optimal"
+    assert r.bound <= 0.5**1.5 + 1e-6  # valid lower bound on the true min 0.5**1.5
 
 
 def test_kelley_bound_variable_division_sound():
