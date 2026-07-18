@@ -70,7 +70,14 @@ failure-triggered by design.
 If (2) fails again, the issue does **not** close by fiat — see §7
 (contingencies). Correctness rules; never weaken the panel to pass.
 
-## 2. Step 1 — port the failure-triggered refactor onto current `main`
+## 2. Step 1 — port the failure-triggered refactor onto current `main` ✅ DONE (commit on branch)
+
+**Status: complete.** Hand-ported the three production hunks (cherry-pick would
+have dragged in the #732 reverts). Guardrail check passed: `git diff origin/main`
+on both `_jax` files shows only the row-filter changes — no #732 hunk reverted.
+Panel artifact `rowfilter_diff_panel.py` brought over; test file updated
+(byte-identical regression extended to nvs09/bchoco07/beuster/casctanks). Package
+built (maturin/Rust extension compiles); fast row-filter tests pass (4/4).
 
 Branch: `claude/issue-671-resolution-lm4bdh`, reset onto latest `origin/main`.
 
