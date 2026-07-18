@@ -61,13 +61,15 @@ def _incumbent_feasible(model, r) -> bool:
 
 
 def run(name, tl):
-    from discopt.modeling.core import from_nl
+    from discopt.modeling.core import ObjectiveSense, from_nl
 
     opt = oracle(name)
     arms = {}
+    minimize = True
     for flag in ("0", "1"):
         os.environ["DISCOPT_MILP_SWAP_RESEED"] = flag
         m = from_nl(f"{NL}/{name}.nl")
+        minimize = m._objective.sense == ObjectiveSense.MINIMIZE
         t0 = time.time()
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
@@ -81,31 +83,49 @@ def run(name, tl):
             "wall": round(time.time() - t0, 2),
             "incumbent_feasible": _incumbent_feasible(m, r),
         }
-    return {"instance": name, "oracle": opt, **arms}
+    return {"instance": name, "oracle": opt, "minimize": minimize, **arms}
 
 
 def assess(rec):
-    """Per-instance cert-clean + net-positive verdict (min sense)."""
+    """Per-instance cert-clean + net-positive verdict.
+
+    Sense-aware (issue #759): the dual bound is a *lower* bound for a MINIMIZE
+    problem (sound iff ``bound <= opt``) and an *upper* bound for a MAXIMIZE
+    problem (sound iff ``bound >= opt``). The primal side mirrors this: a MINIMIZE
+    incumbent never drops below the optimum, a MAXIMIZE incumbent never rises above
+    it. Applying the min-sense check blindly flags every maximize instance's valid
+    bound as a violation (the ``syn05hfsg`` false positive).
+    """
     opt = rec["oracle"]
     off, on = rec["off"], rec["on"]
+    minimize = rec.get("minimize", True)
     tol = 1e-4 * (1 + abs(opt)) if opt is not None else 1e-4
     problems = []
     # cert-clean
     for arm_name, a in (("off", off), ("on", on)):
-        if opt is not None and a["bound"] is not None and a["bound"] > opt + tol:
-            problems.append(f"{arm_name} bound {a['bound']} > oracle {opt}")
-        if opt is not None and a["obj"] is not None and a["obj"] < opt - tol:
-            problems.append(f"{arm_name} obj {a['obj']} < oracle {opt} (beats optimum)")
+        if opt is not None and a["bound"] is not None:
+            crossed = (a["bound"] > opt + tol) if minimize else (a["bound"] < opt - tol)
+            if crossed:
+                side = "above" if minimize else "below"
+                problems.append(f"{arm_name} bound {a['bound']} crosses oracle {opt} ({side})")
+        if opt is not None and a["obj"] is not None:
+            beats = (a["obj"] < opt - tol) if minimize else (a["obj"] > opt + tol)
+            if beats:
+                problems.append(f"{arm_name} obj {a['obj']} beats oracle {opt}")
         if not a["incumbent_feasible"]:
             problems.append(f"{arm_name} incumbent INFEASIBLE")
     if off["gap_certified"] and not on["gap_certified"]:
         problems.append("cert regression: OFF certified, ON not")
-    # net-positive (primal, min sense)
+    # net-positive (primal): "better" is a smaller objective for MINIMIZE, a
+    # larger one for MAXIMIZE (issue #759 sense-awareness).
     prim = "n/a"
     if off["obj"] is not None and on["obj"] is not None:
-        if on["obj"] < off["obj"] - 1e-6:
+        delta = on["obj"] - off["obj"]
+        improved = (delta < -1e-6) if minimize else (delta > 1e-6)
+        worsened = (delta > 1e-6) if minimize else (delta < -1e-6)
+        if improved:
             prim = "ON better"
-        elif on["obj"] > off["obj"] + 1e-6:
+        elif worsened:
             prim = "ON WORSE"
         else:
             prim = "tie"
