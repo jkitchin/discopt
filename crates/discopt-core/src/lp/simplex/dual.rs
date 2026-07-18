@@ -84,8 +84,19 @@ pub fn solve_lp_warm_csc(
     let sol = solve_lp_warm_csc_inner(sp, m, n, c, l, u, b, start, opts);
     if let Some(sp2) = retry_sp {
         if matches!(sol.status, LpStatus::Numerical | LpStatus::IterLimit) {
+            // Bound the hardened re-solve: a completed factorization lets the simplex
+            // *proceed* on the near-singular basis, but the ill-conditioned LP can
+            // still pivot-grind (this is the intrinsic hardness #671 tracks). Cap the
+            // pivots (size-derived, ≤ the caller's `max_iter`) so a node that would
+            // grind bails with `IterLimit` and falls through to the original verdict
+            // (candidate A) instead of hanging — the flag can only *rescue*, never
+            // stall the solve. A clean hardened solve finishes far inside the cap.
+            let opts_h = SimplexOptions {
+                max_iter: hardening_retry_iter_cap(m, n).min(opts.max_iter),
+                ..opts.clone()
+            };
             let hardened = super::linsolve::with_hardening_active(|| {
-                solve_lp_warm_csc_inner(sp2, m, n, c, l, u, b, start, opts)
+                solve_lp_warm_csc_inner(sp2, m, n, c, l, u, b, start, &opts_h)
             });
             if matches!(
                 hardened.status,
@@ -96,6 +107,15 @@ pub fn solve_lp_warm_csc(
         }
     }
     sol
+}
+
+/// Pivot cap for the #671 hardened re-solve: `8·(m+n) + 2000`, so a healthy solve
+/// (a few multiples of `m+n` pivots) always finishes inside it while a degenerate
+/// near-singular grind is bounded well below the `100 000`-pivot default.
+fn hardening_retry_iter_cap(m: usize, n: usize) -> usize {
+    8usize
+        .saturating_mul(m.saturating_add(n))
+        .saturating_add(2000)
 }
 
 /// The body of [`solve_lp_warm_csc`] (scaling + warm/cold solve + the #649 unscaled
