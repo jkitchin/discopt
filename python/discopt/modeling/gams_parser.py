@@ -1255,10 +1255,85 @@ class _ModelBuilder:
             self.param_values[name] = dict(gt.data)
         # Process assignment statements for known params/scalars
         for pname, domain, dollar, expr in self.p.param_assigns:
-            if pname in self.scalar_values and not domain:
-                val = self._eval_const_expr(expr)
-                if val is not None:
-                    self.scalar_values[pname] = val
+            self._apply_param_assign(pname, domain, dollar, expr, {})
+
+    def _lookup_set_elements(self, name: str) -> list[str] | None:
+        """Resolve a set/alias name to its element list, or None if unknown."""
+        resolved = self.p.aliases.get(name, name)
+        if resolved in self.set_elements:
+            return self.set_elements[resolved]
+        for k, v in self.set_elements.items():
+            if k.lower() == resolved.lower():
+                return v
+        return None
+
+    def _apply_param_assign(self, pname: str, domain: list[str], dollar, expr, env: dict):
+        """Execute one parameter/scalar assignment statement.
+
+        Handles scalar targets (``s = expr``) and indexed targets
+        (``p(i) = expr``, ``p('a') = expr``), iterating free domain positions
+        over their set elements; loop indices arrive pre-bound in ``env``.
+        An assignment whose $-condition or right-hand side cannot be
+        evaluated raises :class:`GamsParseError` — silently dropping it
+        would build a wrong model with no diagnostic (#745).
+        """
+        import itertools
+
+        if not domain:
+            if dollar is not None:
+                cond = self._eval_dollar_cond(dollar, env)
+                if cond is None:
+                    raise GamsParseError(f"Cannot evaluate $-condition on assignment to '{pname}'")
+                if cond == 0.0:
+                    return
+            val = self._eval_const_expr_with_env(expr, env)
+            if val is None:
+                raise GamsParseError(
+                    f"Cannot evaluate right-hand side of assignment to '{pname}'; "
+                    f"refusing to silently drop the assignment"
+                )
+            if pname in self.scalar_values:
+                self.scalar_values[pname] = val
+                return
+            gp = self.p.parameters.get(pname)
+            if gp is not None and gp.domain:
+                raise GamsParseError(f"Assignment to indexed parameter '{pname}' without a domain")
+            # scalar (0-dim) parameter declared via Parameter
+            self.scalar_values[pname] = val
+            self.param_values[pname] = {("",): val}
+            return
+
+        # Indexed target: fix loop-bound positions, iterate free set positions,
+        # and treat non-set entries as concrete element labels (p('a') = ...).
+        index_sets: list[list[str]] = []
+        for d in domain:
+            if d in env:
+                index_sets.append([env[d]])
+            else:
+                elems = self._lookup_set_elements(d)
+                if elems is not None:
+                    index_sets.append(list(elems))
+                else:
+                    index_sets.append([d])
+        for combo in itertools.product(*index_sets):
+            local_env = dict(env)
+            for d, elem in zip(domain, combo):
+                local_env[d] = elem
+            if dollar is not None:
+                cond = self._eval_dollar_cond(dollar, local_env)
+                if cond is None:
+                    raise GamsParseError(f"Cannot evaluate $-condition on assignment to '{pname}'")
+                if cond == 0.0:
+                    continue
+            val = self._eval_const_expr_with_env(expr, local_env)
+            if val is None:
+                raise GamsParseError(
+                    f"Cannot evaluate right-hand side of assignment to "
+                    f"'{pname}({', '.join(combo)})'; refusing to silently drop "
+                    f"the assignment"
+                )
+            key: object = tuple(combo) if len(combo) > 1 else combo[0]
+            self.param_values.setdefault(pname, {})[key] = val
 
     def _execute_loops(self):
         """Execute loop/if statements, modifying scalars, params, and bounds."""
@@ -1310,14 +1385,7 @@ class _ModelBuilder:
 
         # Process any param assignments from the body
         for pname, domain, dollar, expr in body_parser.param_assigns:
-            val = self._eval_const_expr_with_env(expr, env)
-            if val is not None:
-                if pname in self.scalar_values and not domain:
-                    self.scalar_values[pname] = val
-                elif pname in self.param_values and domain:
-                    keys = [env.get(d, d) for d in domain]
-                    key = tuple(keys) if len(keys) > 1 else keys[0]
-                    self.param_values[pname][key] = val
+            self._apply_param_assign(pname, domain, dollar, expr, env)
 
         # Process any bound assignments from the body
         for b in body_parser.bounds:
@@ -1329,7 +1397,20 @@ class _ModelBuilder:
                 )
 
     def _eval_const_expr_with_env(self, expr, env: dict) -> float | None:
-        """Evaluate a constant expression with loop index substitution."""
+        """Evaluate a constant expression with loop-index substitution.
+
+        Returns None when the expression is not a compile-time constant
+        (e.g. it references a variable). Callers decide whether None is a
+        signal ("this is not constant", used when probing) or an error
+        (assignment statements refuse loudly rather than dropping, #745).
+        The ``env`` maps loop/domain index names to concrete set elements;
+        it is threaded through every recursion so compound expressions like
+        ``ord(i) * 10`` fold correctly inside loops and indexed assignments.
+        """
+        import itertools
+
+        if isinstance(expr, ExprNum):
+            return expr.value
         if isinstance(expr, ExprRef):
             if expr.name in env:
                 # Resolve to scalar value if it's a scalar ref
@@ -1352,7 +1433,7 @@ class _ModelBuilder:
                     if isinstance(idx, ExprRef) and idx.name in env:
                         indices.append(env[idx.name])
                     else:
-                        v = self._eval_const_expr(idx)
+                        v = self._eval_const_expr_with_env(idx, env)
                         if v is not None:
                             indices.append(str(int(v)) if v == int(v) else str(v))
                         else:
@@ -1364,25 +1445,15 @@ class _ModelBuilder:
                 tkey = tuple(indices)
                 if tkey in pdata:
                     return float(pdata[tkey])
+                # GAMS semantics: unset parameter entries read as 0
                 return 0.0
             return None
-        # Fall back to standard const eval
-        return self._eval_const_expr(expr)
-
-    def _eval_const_expr(self, expr) -> float | None:
-        """Evaluate a constant expression (no variables)."""
-        if isinstance(expr, ExprNum):
-            return expr.value
-        if isinstance(expr, ExprRef):
-            if expr.name in self.scalar_values:
-                return self.scalar_values[expr.name]
-            return None
         if isinstance(expr, ExprUnaryMinus):
-            v = self._eval_const_expr(expr.operand)
+            v = self._eval_const_expr_with_env(expr.operand, env)
             return -v if v is not None else None
         if isinstance(expr, ExprBinOp):
-            lv = self._eval_const_expr(expr.left)
-            rv = self._eval_const_expr(expr.right)
+            lv = self._eval_const_expr_with_env(expr.left, env)
+            rv = self._eval_const_expr_with_env(expr.right, env)
             if lv is None or rv is None:
                 return None
             if expr.op == "+":
@@ -1409,7 +1480,7 @@ class _ModelBuilder:
             if expr.op == "<>":
                 return 1.0 if lv != rv else 0.0
         if isinstance(expr, ExprFunc):
-            raw_args = [self._eval_const_expr(a) for a in expr.args]
+            raw_args = [self._eval_const_expr_with_env(a, env) for a in expr.args]
             if any(a is None for a in raw_args):
                 return None
             fargs: list[float] = [a for a in raw_args if a is not None]
@@ -1418,6 +1489,10 @@ class _ModelBuilder:
                 return math.exp(fargs[0])
             if fn == "log":
                 return math.log(fargs[0])
+            if fn == "log2":
+                return math.log2(fargs[0])
+            if fn == "log10":
+                return math.log10(fargs[0])
             if fn == "sqrt":
                 return math.sqrt(fargs[0])
             if fn == "sqr":
@@ -1430,10 +1505,90 @@ class _ModelBuilder:
                 return math.sin(fargs[0])
             if fn == "cos":
                 return math.cos(fargs[0])
+            if fn == "tan":
+                return math.tan(fargs[0])
+            if fn == "arcsin":
+                return math.asin(fargs[0])
+            if fn == "arccos":
+                return math.acos(fargs[0])
+            if fn == "arctan":
+                return math.atan(fargs[0])
+            if fn == "sinh":
+                return math.sinh(fargs[0])
+            if fn == "cosh":
+                return math.cosh(fargs[0])
+            if fn == "tanh":
+                return math.tanh(fargs[0])
+            # GAMS min/max take two or more arguments
+            if fn == "min":
+                return float(min(fargs))
+            if fn == "max":
+                return float(max(fargs))
+            if fn == "ceil":
+                return float(math.ceil(fargs[0]))
+            if fn == "floor":
+                return float(math.floor(fargs[0]))
+            if fn == "round":
+                ndigits = int(fargs[1]) if len(fargs) > 1 else 0
+                return float(round(fargs[0], ndigits))
+            if fn == "mod":
+                # GAMS mod(a, b) = a - b*trunc(a/b), which is fmod semantics
+                return float(math.fmod(fargs[0], fargs[1])) if fargs[1] != 0 else None
+            if fn == "sign":
+                return float((fargs[0] > 0) - (fargs[0] < 0))
+            if fn == "signpower":
+                a, p = fargs[0], fargs[1]
+                return float(math.copysign(abs(a) ** p, a)) if a != 0 else 0.0
+            if fn == "sigmoid":
+                return float(1.0 / (1.0 + math.exp(-fargs[0])))
+            # uniform/normal are nondeterministic and errorf's build-path
+            # mapping is unsettled — leave them unevaluable (None) so
+            # assignment sites refuse loudly instead of folding silently.
+            return None
+        if isinstance(expr, (ExprSum, ExprProd)):
+            is_sum = isinstance(expr, ExprSum)
+            index_sets = []
+            for iname in expr.index_names:
+                elems = self._lookup_set_elements(iname)
+                if elems is None:
+                    return None
+                index_sets.append(elems)
+            acc = 0.0 if is_sum else 1.0
+            for combo in itertools.product(*index_sets):
+                local_env = dict(env)
+                for iname, elem in zip(expr.index_names, combo):
+                    local_env[iname] = elem
+                if expr.dollar_cond is not None:
+                    cond = self._eval_dollar_cond(expr.dollar_cond, local_env)
+                    if cond is None:
+                        return None
+                    if cond == 0.0:
+                        continue
+                v = self._eval_const_expr_with_env(expr.body, local_env)
+                if v is None:
+                    return None
+                acc = acc + v if is_sum else acc * v
+            return acc
+        if isinstance(expr, ExprOrd):
+            sname = expr.set_name
+            if sname in env:
+                elem = env[sname]
+                elems = self._lookup_set_elements(sname)
+                if elems is not None and elem in elems:
+                    return float(elems.index(elem) + 1)
+                # Loop index named differently from its set: search all sets
+                for other in self.set_elements.values():
+                    if elem in other:
+                        return float(other.index(elem) + 1)
+            return None
         if isinstance(expr, ExprCard):
             elems = self.set_elements.get(expr.set_name, [])
             return float(len(elems))
         return None
+
+    def _eval_const_expr(self, expr) -> float | None:
+        """Evaluate a constant expression (no variables, no loop indices)."""
+        return self._eval_const_expr_with_env(expr, {})
 
     def _eval_dollar_cond(self, expr, env: dict) -> float | None:
         """Evaluate a dollar condition with loop index substitution.
@@ -1508,8 +1663,8 @@ class _ModelBuilder:
         if isinstance(expr, ExprCard):
             elems = self.set_elements.get(expr.set_name, [])
             return float(len(elems))
-        # Fallback to constant evaluation
-        return self._eval_const_expr(expr)
+        # Fallback to constant evaluation (keep the loop-index env)
+        return self._eval_const_expr_with_env(expr, env)
 
     def _create_variables(self, m):
         for name, gv in self.p.variables.items():
@@ -2151,10 +2306,18 @@ class _ModelBuilder:
                 if sn in self.set_elements:
                     index_sets.append(self.set_elements[sn])
                 else:
+                    matched = False
                     for k, v in self.set_elements.items():
                         if k.lower() == sn.lower():
                             index_sets.append(v)
+                            matched = True
                             break
+                    if not matched:
+                        # Concrete element label (e.g. ``x.l('a') = 1``):
+                        # treat as a literal single element, mirroring
+                        # _apply_bounds — previously this dimension was
+                        # dropped and idx[0] raised IndexError (#745).
+                        index_sets.append([sn])
             for combo in itertools.product(*index_sets):
                 if b.dollar_cond is not None:
                     env = dict(zip(b.domain, combo))

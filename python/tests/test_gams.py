@@ -405,6 +405,25 @@ class TestGamsLoopExecution:
         # Loop should set p(1)=10, p(2)=20, p(3)=30
         assert m._objective is not None
         assert len(m._constraints) == 3
+        # The loop-assigned values must actually reach the objective
+        # coefficients — asserting only the constraint count let all-zero
+        # coefficients go unnoticed (#745).
+        from discopt.modeling import core
+
+        consts = set()
+        stack = [m._objective.expression]
+        while stack:
+            node = stack.pop()
+            if isinstance(node, core.Constant):
+                if node.value.ndim == 0:
+                    consts.add(float(node.value))
+            elif isinstance(node, core.BinaryOp):
+                stack.extend([node.left, node.right])
+            elif isinstance(node, core.UnaryOp):
+                stack.append(node.operand)
+            elif isinstance(node, core.IndexExpression):
+                stack.append(node.base)
+        assert {10.0, 20.0, 30.0} <= consts
 
 
 # ── Lag/lead tests ─────────────────────────────────────────────
