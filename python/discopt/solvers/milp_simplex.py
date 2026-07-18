@@ -245,9 +245,18 @@ def _fbbt_eq_bounds(
         minrest = sum_min[rows] - np.where(min_inf, 0.0, min_term)
         maxrest = sum_max[rows] - np.where(max_inf, 0.0, max_term)
         # z_j = (b_i - rest)/a_ij; the rest-interval endpoints give z_j's bounds.
-        lo_cand = np.where(pos, (b_r - maxrest) / vals, (b_r - minrest) / vals)
+        # The quotient is computed densely over every stored coefficient, so on the
+        # ill-conditioned narrow/RLT boxes this runs on (coefficient spreads of ~1e26
+        # over ~1e-300 denormals — the same class as milp_relaxation.py's Stage-1B
+        # guard, #732) a handful of entries overflow to inf / divide by a denormal /
+        # go nan. Those results are rigorously discarded below by the ``*_valid`` mask
+        # AND the ``np.isfinite`` filter, so the transient inf/nan never reaches a
+        # bound — suppress the spurious RuntimeWarnings without changing any value
+        # (bound-neutral by construction; the arithmetic is byte-identical).
+        with np.errstate(over="ignore", divide="ignore", invalid="ignore"):
+            lo_cand = np.where(pos, (b_r - maxrest) / vals, (b_r - minrest) / vals)
+            hi_cand = np.where(pos, (b_r - minrest) / vals, (b_r - maxrest) / vals)
         lo_valid = np.where(pos, maxrest_finite, minrest_finite)
-        hi_cand = np.where(pos, (b_r - minrest) / vals, (b_r - maxrest) / vals)
         hi_valid = np.where(pos, minrest_finite, maxrest_finite)
 
         new_lo = np.full(lb.shape[0], -np.inf)
