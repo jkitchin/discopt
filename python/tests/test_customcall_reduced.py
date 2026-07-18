@@ -281,6 +281,20 @@ def test_admission_integer_model_admits():
     assert _admissible(b) is True
 
 
+def test_nonaffine_denominator_ast_refusal_stands():
+    # GUARD (P1.2, do not remove): the reduced-space AST interpreter refuses a
+    # non-affine denominator. The clip_inner box-face fix repaired the intrinsic-
+    # envelope subgradients, but a 300-wide-box fuzz (plan §7 P1.2) showed the
+    # non-affine RECIPROCAL subgradient is still invalid (cv-violation ~1.1e3), so the
+    # refusal MUST stand until a validated non-affine reciprocal envelope exists.
+    m = dm.Model()
+    v = m.continuous("v", 3, lb=[1.0, 1.0, 1.0], ub=[5.0, 3.0, 3.0])
+    m.minimize(v[0])
+    m.subject_to(v[0] / (v[1] * v[2]) >= 0.2)  # non-affine denominator
+    rb = reduced_mccormick_lp_bound(m, [1.0, 1.0, 1.0], [5.0, 3.0, 3.0])
+    assert rb.status == "unsupported"
+
+
 def test_nonrelaxable_custom_plus_integer_raises_at_gate():
     # A non-MCBox-relaxable body (raw jnp) + integers has no valid node relaxation, so
     # the solver refuses at the gate. This fires BEFORE any NLP solve (no backend needed).
