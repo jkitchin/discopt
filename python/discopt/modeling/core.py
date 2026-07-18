@@ -1726,6 +1726,16 @@ class SolveResult:
     # paths when iteration/provenance data is available.
     mip_nlp_trace: Optional[dict[str, object]] = None
 
+    # Tier-3 (spatial B&B) certificate support. Populated ONLY when
+    # ``solve(emit_certificate=True)`` and the spatial-B&B path ran; None on every
+    # default solve, so recording is bound-neutral. ``bnb_tree`` is the list of
+    # recorded node dicts from ``PyTreeManager.tree_records()`` (id, parent, box,
+    # local_lower_bound, status); ``bnb_leaf_duals`` maps node id -> that node's
+    # McCormick LP dual / safe-bound witness (see docs/dev/lean-certificate-plan.md
+    # §12). Consumed by ``discopt.certificate.build_bnb_certificate``.
+    bnb_tree: Optional[list] = None
+    bnb_leaf_duals: Optional[dict] = None
+
     # Examiner-style validation report (populated if validate=True).
     validation_report: Optional[object] = None
 
