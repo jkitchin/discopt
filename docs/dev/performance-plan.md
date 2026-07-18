@@ -567,7 +567,7 @@ panel green for 3 consecutive nightlies before default-on.
 > branched node's box against its McCormick relaxation): the load-bearing lever
 > that lets the nvs05/welded-beam class certify at modest node counts (it pins the
 > functionally-dependent continuous outputs once the integer drivers are fixed).
-> Two measurements (`nvs05_obbt_probe_refactor_measurement.py`):
+> Two findings (`nvs05_obbt_probe_cost_measurement.py`):
 >
 > 1. **The probes are productive, not wasteful — capping rounds trades bound for
 >    wall.** Per-node OBBT runs up to `_PER_NODE_OBBT_ROUNDS` (3) sweeps, stopping
@@ -583,32 +583,51 @@ panel green for 3 consecutive nightlies before default-on.
 >    warm-start basis threaded probe→probe via `_PersistentProbeLP`, equilibrate-
 >    once-per-sweep, `build_incremental=False`).
 >
-> 2. **The residual per-probe cost is redundant basis *re-factorization*, not
->    pivoting.** The warm probes do a **median of 0 simplex pivots** (the previous
->    probe's optimal basis stays optimal for the next objective on this degenerate
->    relaxation) yet each still costs ~5 ms, on an LP of m≈326 rows / n≈90 cols.
->    That ~5 ms is a full factorization of the 326-dim basis: the stateless
->    `discopt._rust.solve_lp_warm_csc_py` binding rebuilds a fresh `Simplex` and
->    factorizes the basis on **every** probe, even though the constraint matrix is
->    identical across the whole sweep and (for 0-pivot probes) the basis is
->    unchanged. Cold-fallback probes cost ~13 ms (≈640–950 probes/15 s window on
->    nvs05 ⇒ ~25 % of wall). BARON/SCIP do these OBBT probes in microseconds
->    precisely because they re-solve from a *kept* factorization.
+> 2. **The per-probe cost is degenerate simplex *pivoting*, not factorization —
+>    and factorization reuse was implemented and measured NET-NEUTRAL (a second
+>    falsification).** The per-probe wall is *bimodal* (nvs05, ~635 probes/12 s):
+>    p50 ≈ 3.5 ms, p90 ≈ 12.7 ms, p99 ≈ 20 ms — ~66 % are cheap warm re-solves and
+>    the **~29 % expensive tail (≥5 ms) is 62 % of all probe wall**. The expensive
+>    probes are warm-start *rejections*: OBBT applies its tightenings mid-sweep and
+>    the objective flips each probe (`min x_i` → `min x_{i+1}`), so the threaded
+>    previous basis is both primal-infeasible (box shrank) and dual-infeasible
+>    (objective changed) → the warm dual and warm primal are both rejected and the
+>    probe does a near-cold two-phase re-solve of **~220 primal pivots** (per-call
+>    `DISCOPT_PROFILE`: `FtUpdate`/`AlphaFtran`/`PriceBtran` ≈ 220 each). Note the
+>    `iters` field returned by `solve_lp_warm_csc_py` reports **0** for these
+>    (the cold/primal-fallback path does not surface its pivot count) — which is why
+>    an earlier reading mislabeled the probes "0-pivot"; the phase counters are the
+>    ground truth. The LP is tiny (m ≈ 325, n ≈ 90, **nnz ≈ 1116, 0.8 % dense**), so
+>    its sparse basis factorization is only ~0.4 ms/call, equilibration ~0.003 ms,
+>    and Python↔Rust marshaling negligible — none is the bottleneck; the ~220
+>    degenerate pivots are.
 >
-> **Re-scope (bound-neutral follow-up):** reuse the basis factorization across
-> probes that share the sweep matrix — a persistent probe-LP handle mirroring the
-> existing `PreparedDual::reoptimize` factorization-*clone* in
-> `crates/discopt-core/src/lp/simplex/dual.rs` (which already reuses a factorized
-> basis when only bounds/RHS change), generalized to swap the probe objective per
-> call. This is a *bound-neutral* engine change (the returned optimum is the same
-> vertex), so it is verified by a byte-identical `node_count` + certified
-> `objective` panel rather than a differential bound gate — but it is a change to
-> the correctness-critical LP core (this file's §9 and the nvs22 false-certificate
-> history live here), so it ships as its own reviewed PR with cargo differential
-> tests, not folded into an orchestration change. `clay0303hfsg` is a *different*
-> bottleneck (0 per-node OBBT probes on the same panel — it is FBBT/JAX-bound per
-> the issue's own split), so this lever is scoped to the OBBT-probe class only.
-> Reproduction: `discopt_benchmarks/scripts/nvs05_obbt_probe_refactor_measurement.py`;
+>    A bit-identical **factorization-reuse** engine change was built to test the
+>    "re-factorization dominates" hypothesis: a persistent `discopt._rust.ProbeLp`
+>    handle + `ProbeFactorCache` that reuses a *fresh* `factorize_sparse` across
+>    probes sharing the sweep matrix (mirroring `PreparedDual::reoptimize`'s
+>    factorization-clone), behind `DISCOPT_OBBT_FACTOR_REUSE` (default-OFF), with
+>    cargo cached-vs-stateless differential tests. It was **cert-clean** (byte-
+>    identical status + `node_count` + objective bits on the certifying panel
+>    ex1224/st_e29/st_e36/fac2, each in a fresh process; 0 mismatches over a 609-probe
+>    in-situ A/B) but **net-neutral (~1.0×)**: reusing a ~0.4 ms factorization can
+>    not move a ~220-pivot cost. Per the `DISCOPT_CUT_INHERIT` lesson (sound ≠
+>    helpful — a cert-clean but neutral change stays out, measurement recorded), the
+>    change was **reverted**, not shipped.
+>
+> **Re-scope (the real lever):** cut the warm-start *rejection* tail — reduce the
+> ~29 % of probes that fall to a ~220-pivot near-cold re-solve because box-tightening
+> **and** objective-flip together invalidate the threaded basis. Directions (each a
+> distinct, higher-risk LP/OBBT-algorithm change needing its own entry experiment +
+> byte-identical panel, and a bounded per-probe pivot budget so the tail can never
+> blow up): a probe/basis strategy that keeps a warm start feasible across the two
+> simultaneous changes (e.g. re-optimize box changes with the dual from a *shared*
+> per-sweep basis before swapping the objective, rather than threading probe→probe);
+> or a bounded phase-1 from the node's LP-optimal basis. Factorization/scaling/
+> marshaling are all measured-small and are **not** the lever. `clay0303hfsg` is a
+> *different* bottleneck (0 per-node OBBT probes on the same panel — FBBT/JAX-bound
+> per the issue's own split), so this lever is scoped to the OBBT-probe class only.
+> Reproduction: `discopt_benchmarks/scripts/nvs05_obbt_probe_cost_measurement.py`;
 > pinned by `python/tests/test_perf_723_obbt_probe_cost.py`.
 
 ## 7. Sequencing & rationale (revised by the measurement)

@@ -1,19 +1,26 @@
 """Entry-experiment pins for #723 lever 3 — "cap per-node LP solves".
 
 The issue's lever 3 proposed capping nvs05's ~59 per-node LP solves. The entry
-experiment (``discopt_benchmarks/scripts/nvs05_obbt_probe_refactor_measurement.py``,
+experiment (``discopt_benchmarks/scripts/nvs05_obbt_probe_cost_measurement.py``,
 recorded in ``docs/dev/performance-plan.md`` §6) FALSIFIED that framing and
-root-caused the residual cost instead. These tests pin the two structural facts
-the writeup rests on, so a future engine change that invalidates either flags
-that the #723 §6 note needs revisiting:
+located the real per-probe cost. These tests pin the two structural facts the
+writeup rests on, so a future engine change that invalidates either flags that
+the #723 §6 note needs revisiting:
 
 1. **Per-node OBBT rounds are load-bearing** (NOT diminishing) — the later
-   sweeps still tighten a substantial share of what the first sweep does, so
-   "cap rounds/probes" trades bound quality for wall time, it is not a free cut.
-2. **Warm probes do ~0 simplex pivots** on a non-trivial (m ≫ 1) LP — proving the
-   per-probe cost is basis re-factorization in the stateless
-   ``solve_lp_warm_csc_py`` binding, not pivoting or "too many LPs". This is the
-   evidence for the scoped bound-neutral fix (factorization reuse across probes).
+   sweeps still tighten, so "cap rounds/probes" trades bound quality for wall
+   time, it is not a free cut.
+2. **The per-probe cost is a pivot-heavy tail, not a uniform per-call overhead.**
+   The per-probe wall is *bimodal* — most probes are cheap warm re-solves, but a
+   ~quarter are near-cold re-solves (warm start rejected by simultaneous
+   box-tightening + objective-flip) doing ~220 simplex pivots, and that tail is
+   the majority of probe wall. This is why the factorization-reuse experiment
+   (``DISCOPT_OBBT_FACTOR_REUSE``, since reverted) was net-neutral: reusing a
+   ~0.4 ms sparse factorization cannot move a ~220-pivot cost.
+
+   NOTE the ``iters`` field returned by ``solve_lp_warm_csc_py`` reports 0 for the
+   near-cold tail (the cold/primal-fallback path does not surface its pivot
+   count), so this test pins the tail via the *wall distribution*, not ``iters``.
 
 Instrumentation-only: the patched wrappers delegate to the real implementations,
 so the solve itself is unchanged. nvs05 is the vendored probe for the OBBT-probe
@@ -22,6 +29,7 @@ class (functionally-dependent continuous intermediates → per-node OBBT engages
 
 from __future__ import annotations
 
+import time
 from pathlib import Path
 
 import discopt._jax.obbt as obbtmod
@@ -35,15 +43,15 @@ _NL_DIR = Path(__file__).parent / "data" / "minlplib_nl"
 
 
 def _instrumented_solve(inst: str, time_limit: float):
-    """Solve ``inst`` while recording OBBT sweep economics + per-probe pivots.
+    """Solve ``inst`` while recording OBBT sweep economics + per-probe wall times.
 
-    Returns ``(by_round, probe_recs)`` where ``by_round[i] = [probes, tightened,
-    calls]`` for sweep index ``i`` and ``probe_recs`` is a list of
-    ``(iters, warm, m, n)`` per probe LP.
+    Returns ``(by_round, probe_walls_ms)`` where ``by_round[i] = [probes,
+    tightened, calls]`` for sweep index ``i`` and ``probe_walls_ms`` is the list
+    of per-probe LP wall times in milliseconds.
     """
     sweep_log: list[tuple[int, int]] = []
     calls: list[list[tuple[int, int]]] = []
-    probe_recs: list[tuple[int, bool, int, int]] = []
+    probe_walls: list[float] = []
 
     _orig_run = obbtmod.run_obbt_on_relaxation
     _orig_tighten = obbtmod.obbt_tighten_root
@@ -71,7 +79,8 @@ def _instrumented_solve(inst: str, time_limit: float):
             warm = warm_basis is not None
             cs0 = np.ascontiguousarray(warm_basis[0], dtype=np.int8) if warm else None
             bv0 = np.ascontiguousarray(warm_basis[1], dtype=np.int64) if warm else None
-            _r = solve_lp_warm_csc_py(
+            t0 = time.perf_counter()
+            solve_lp_warm_csc_py(
                 np.ascontiguousarray(c_std),
                 m,
                 n + m,
@@ -86,7 +95,7 @@ def _instrumented_solve(inst: str, time_limit: float):
                 1e-9,
                 100_000,
             )
-            probe_recs.append((int(_r[3]), bool(warm), m, n))
+            probe_walls.append((time.perf_counter() - t0) * 1e3)
             return super().solve(c, lb_arr, ub_arr, warm_basis)
 
     obbtmod.run_obbt_on_relaxation = _run
@@ -107,7 +116,7 @@ def _instrumented_solve(inst: str, time_limit: float):
             row[0] += probes
             row[1] += tight
             row[2] += 1
-    return by_round, probe_recs
+    return by_round, probe_walls
 
 
 def test_per_node_obbt_iterates_beyond_the_first_sweep():
@@ -140,31 +149,31 @@ def test_per_node_obbt_iterates_beyond_the_first_sweep():
     )
 
 
-def test_warm_obbt_probes_are_refactorization_bound():
-    """Warm probes do ~0 pivots on a non-trivial LP → cost is re-factorization.
+def test_per_probe_cost_has_a_pivot_heavy_tail():
+    """Per-probe wall is bimodal — a heavy tail dominates, so the cost is pivoting.
 
-    Pins the #723 §6 root cause: the residual per-node LP cost is NOT pivoting
-    (median 0 pivots) and NOT a small toy LP (m is hundreds of rows), so the
-    multi-ms/probe wall is the stateless binding re-factorizing the basis every
-    probe. This is the evidence for the scoped bound-neutral fix (share the
-    factorization across probes on the fixed sweep matrix).
+    Pins the #723 §6 (corrected) root cause: the per-probe cost is NOT a uniform
+    per-call overhead (which a factorization/scaling/marshaling story would
+    predict, and which factorization reuse would have cut) but a *heavy-tailed*
+    distribution — a minority of probes whose warm start is rejected do near-cold
+    ~220-pivot re-solves and dominate the wall. If this tail ever flattened
+    (p90 ≈ p50), the cost would be uniform and the §6 "cost is the warm-start
+    rejection tail, not factorization" note would be stale.
+
+    Uses a *ratio* (p90 / p50), which is invariant to absolute machine speed, so
+    it is robust across CI hosts; the measured ratio is ~3–4×.
     """
-    _, probe_recs = _instrumented_solve("nvs05", time_limit=15.0)
-    warm = [r for r in probe_recs if r[1]]
-    if len(warm) < 20:
-        pytest.skip("too few warm OBBT probes recorded to characterize the cost")
-
-    iters = np.array([r[0] for r in warm])
-    m_rows = np.array([r[2] for r in warm])
-    # Warm probes are essentially pivot-free (previous optimal basis stays
-    # optimal for the next objective on this degenerate relaxation).
-    assert np.median(iters) <= 2, (
-        f"warm probes median pivots={np.median(iters):.0f} — the 0-pivot premise "
-        "of the #723 §6 refactorization root-cause no longer holds"
-    )
-    # And the LP is large enough that a per-probe basis factorization is the real
-    # cost (a handful-of-rows LP would refactor in microseconds).
-    assert np.median(m_rows) >= 50, (
-        f"OBBT LP has only ~{np.median(m_rows):.0f} rows — re-factorization would "
-        "be negligible; the #723 §6 cost attribution should be re-measured"
+    _, walls = _instrumented_solve("nvs05", time_limit=15.0)
+    if len(walls) < 30:
+        pytest.skip("too few OBBT probes recorded to characterize the distribution")
+    w = np.array(walls)
+    p50 = float(np.percentile(w, 50))
+    p90 = float(np.percentile(w, 90))
+    assert p50 > 0.0, "degenerate timing (p50==0)"
+    # Heavy tail: the slow (warm-rejection, pivot-heavy) probes are well above the
+    # cheap-warm median. Lenient 1.8× floor (measured ~3–4×) absorbs host noise.
+    assert p90 >= 1.8 * p50, (
+        f"per-probe wall not heavy-tailed (p90={p90:.2f}ms vs p50={p50:.2f}ms) — if the "
+        "distribution is now uniform, the #723 §6 'cost is the warm-start-rejection "
+        "pivot tail, not factorization' root-cause should be re-measured"
     )
