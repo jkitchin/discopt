@@ -1,0 +1,26 @@
+================================================================================
+BAR 1 — CERT-CLEAN (soundness, ON config)
+  incorrect_count = 0
+  gap_certified regressions (True->False) = []
+
+BAR 2 — NET-POSITIVE
+  pooling certs GAINED (ON cert, OFF not): []
+  all certs GAINED: []
+  certs LOST: []
+  bound TIGHTER ON (n=3):
+     + ('genpooling_lee2', -4085.391588421504, -4082.740593128069)
+     + ('genpooling_meyer04', 690667.9395829941, 691414.9817248019)
+     + ('wastewater04m2', 89.7231204858072, 89.72383642419732)
+  bound LOOSER ON (regressions, n=2):
+     - ('4stufen', 21601.18397827762, 20712.174649142544)
+     - ('beuster', 19307.919416496567, 19114.22707640636)
+
+Instances that CHANGED at all ON vs OFF: ['4stufen', 'beuster', 'genpooling_lee2', 'genpooling_meyer04', 'wastewater04m2']
+
+================================================================================
+instance                  senseOFF                     ON                      
+4stufen                   min  time b=21601.183978     time b=20712.174649      nodes 63->31 wall 64.408->60.267
+beuster                   min  time b=19307.919416     time b=19114.227076      nodes 63->63 wall 61.499->61.067
+genpooling_lee2           min  feas b=-4085.391588     feas b=-4082.740593      nodes 475->467 wall 60.003->60.003
+genpooling_meyer04        min  feas b=690667.93958     feas b=691414.98172      nodes 1195->1217 wall 60.32->60.096
+wastewater04m2            min  time b=89.723120485     time b=89.723836424      nodes 2335->2463 wall 60.207->60.006
