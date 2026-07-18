@@ -75,7 +75,7 @@ for var, name, K in [(12, "x12", 2), (12, "x12", 4), (12, "x12", 8), (6, "x6", 4
         kids.append(b)
     finite = [b for b in kids if isinstance(b, float)]
     mn = min(finite) if finite else None
-    shown = ["%.0f" % b if isinstance(b, float) else b for b in kids]
+    shown = [f"{b:.0f}" if isinstance(b, float) else b for b in kids]
     print(f"[A] subdivide {name} into {K}: proved bound = {mn}   children={shown}")
 
 # B: cutoff-driven OBBT at the deep node — inert pre-RLT; does it bite now?
