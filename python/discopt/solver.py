@@ -5268,6 +5268,7 @@ def solve_model(
                 in_tree_presolve_repr=_model_repr,
                 rens_enabled=rens,
                 _lns_enabled=_lns_enabled,
+                precomputed_is_convex=_root_is_convex,
             )
 
     # --- Extract variable info ---
@@ -10116,6 +10117,7 @@ def _solve_nlp_bb(
     in_tree_presolve_repr=None,
     rens_enabled: bool = True,
     _lns_enabled: bool = True,
+    precomputed_is_convex: Optional[bool] = None,
 ) -> SolveResult:
     """Solve a MINLP via nonlinear Branch & Bound (NLP-BB).
 
@@ -10131,19 +10133,32 @@ def _solve_nlp_bb(
     from discopt._jax.gdp_reformulate import reformulate_gdp
     from discopt.modeling.core import ObjectiveSense
 
+    model_before_gdp = model
     model = reformulate_gdp(model, method="big-m")
 
     rust_time = 0.0
     jax_time = 0.0
 
     # --- Convexity gate ---
+    # #723: the caller (``solve_model`` dispatch) has already run the memoized
+    # convexity classifier on this exact model+bounds and only routes here when
+    # it verdicts convex. Reuse that verdict instead of re-classifying — the
+    # classifier is eigenvalue/LP-heavy (fac2: ~0.8 s per call), and this was a
+    # redundant second full classification per solve (and a third/fourth inside
+    # the RENS sub-solve). Bound-neutral: identical model, identical bounds, and
+    # the reuse only applies when GDP reformulation was a no-op (``model`` is the
+    # same object the caller classified); otherwise fall back to a fresh classify
+    # on the reformed model (unchanged behavior).
     _gap_certified = True
-    try:
-        from discopt._jax.convexity import classify_model as _classify_model
+    if precomputed_is_convex is not None and model is model_before_gdp:
+        _model_is_convex = bool(precomputed_is_convex)
+    else:
+        try:
+            from discopt._jax.convexity import classify_model as _classify_model
 
-        _model_is_convex, _ = _classify_model(model, use_certificate=True)
-    except Exception:
-        _model_is_convex = False
+            _model_is_convex, _ = _classify_model(model, use_certificate=True)
+        except Exception:
+            _model_is_convex = False
 
     if not _model_is_convex and not skip_convex_check:
         logger.warning(
