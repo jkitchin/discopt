@@ -553,6 +553,64 @@ panel green for 3 consecutive nightlies before default-on.
 > the cutoff bind. Reproduction:
 > `discopt_benchmarks/scripts/ex1252_cutoff_obbt_falsification.py`.
 
+> **Falsified + root-caused (2026-07-18, issue #723 lever 3 — "cap per-node LP
+> solves; nvs05 does ~59 LP/node").** #723's first three levers are handled:
+> convexity re-classification is de-duped (commit `ecff43e`), the RENS primal
+> heuristic is throttled by the default-ON G2 governor (`heuristic_governor.py`,
+> `EXPENSIVE_SOURCES = {"rens"}`), and the interval-`__mul__` / JIT-recompile
+> overheads are cut (`ecff43e`, `bfc9d55`). Lever 3 — "nvs05 does ~59 per-node LP
+> solves; find why and *bound it*" — was the open one, and the entry experiment
+> (measurement before code, Dev-Philosophy #4) **falsified the "cap it" framing**
+> and relocated the cost.
+>
+> The per-node LP solves are **per-node OBBT** (`obbt_tighten_root` on each
+> branched node's box against its McCormick relaxation): the load-bearing lever
+> that lets the nvs05/welded-beam class certify at modest node counts (it pins the
+> functionally-dependent continuous outputs once the integer drivers are fixed).
+> Two measurements (`nvs05_obbt_probe_refactor_measurement.py`):
+>
+> 1. **The probes are productive, not wasteful — capping rounds trades bound for
+>    wall.** Per-node OBBT runs up to `_PER_NODE_OBBT_ROUNDS` (3) sweeps, stopping
+>    at a `sweep_tight == 0` fixpoint. On nvs05 the sweeps do **not** diminish —
+>    over a representative solve (≥15 s, reaching branched nodes; the first few
+>    root-adjacent nodes fixpoint faster) rounds 1/2/3 each tighten ~18 bounds/call
+>    and almost every such call runs the full 3 sweeps without hitting the fixpoint
+>    (the McCormick envelope keeps tightening as the box shrinks). So "the LPs are
+>    far too many" is the wrong diagnosis:
+>    capping rounds/probes would loosen the per-node bound → **more** B&B nodes, a
+>    bound-for-wall trade, not a free cut. The bound-neutral affordability levers on
+>    the probe loop are already taken (fixed-column skip at `width <= min_width`,
+>    warm-start basis threaded probe→probe via `_PersistentProbeLP`, equilibrate-
+>    once-per-sweep, `build_incremental=False`).
+>
+> 2. **The residual per-probe cost is redundant basis *re-factorization*, not
+>    pivoting.** The warm probes do a **median of 0 simplex pivots** (the previous
+>    probe's optimal basis stays optimal for the next objective on this degenerate
+>    relaxation) yet each still costs ~5 ms, on an LP of m≈326 rows / n≈90 cols.
+>    That ~5 ms is a full factorization of the 326-dim basis: the stateless
+>    `discopt._rust.solve_lp_warm_csc_py` binding rebuilds a fresh `Simplex` and
+>    factorizes the basis on **every** probe, even though the constraint matrix is
+>    identical across the whole sweep and (for 0-pivot probes) the basis is
+>    unchanged. Cold-fallback probes cost ~13 ms (≈640–950 probes/15 s window on
+>    nvs05 ⇒ ~25 % of wall). BARON/SCIP do these OBBT probes in microseconds
+>    precisely because they re-solve from a *kept* factorization.
+>
+> **Re-scope (bound-neutral follow-up):** reuse the basis factorization across
+> probes that share the sweep matrix — a persistent probe-LP handle mirroring the
+> existing `PreparedDual::reoptimize` factorization-*clone* in
+> `crates/discopt-core/src/lp/simplex/dual.rs` (which already reuses a factorized
+> basis when only bounds/RHS change), generalized to swap the probe objective per
+> call. This is a *bound-neutral* engine change (the returned optimum is the same
+> vertex), so it is verified by a byte-identical `node_count` + certified
+> `objective` panel rather than a differential bound gate — but it is a change to
+> the correctness-critical LP core (this file's §9 and the nvs22 false-certificate
+> history live here), so it ships as its own reviewed PR with cargo differential
+> tests, not folded into an orchestration change. `clay0303hfsg` is a *different*
+> bottleneck (0 per-node OBBT probes on the same panel — it is FBBT/JAX-bound per
+> the issue's own split), so this lever is scoped to the OBBT-probe class only.
+> Reproduction: `discopt_benchmarks/scripts/nvs05_obbt_probe_refactor_measurement.py`;
+> pinned by `python/tests/test_perf_723_obbt_probe_cost.py`.
+
 ## 7. Sequencing & rationale (revised by the measurement)
 
 ```
