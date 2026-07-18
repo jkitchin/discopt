@@ -47,7 +47,12 @@ from typing import cast
 import jax
 import jax.numpy as jnp
 
-from discopt._jax.multivariate_mccormick import _COMPOSITION_RULES, clip_inner, compose_pow_frac
+from discopt._jax.multivariate_mccormick import (
+    _COMPOSITION_RULES,
+    clip_inner,
+    compose_even_pow,
+    compose_pow_frac,
+)
 
 
 class UnsupportedMcboxOp(Exception):
@@ -153,9 +158,17 @@ class MCBox:
             n = int(p)
             if n < 1:
                 raise UnsupportedMcboxOp(f"non-positive integer power {n}")
-            # Repeated multiplication through the (sign-agnostic, validated) bilinear
-            # rule: SOUND for every n>=1 and every sign regime. Looser than the tight
-            # monomial envelope (P1.3), but always valid.
+            if n % 2 == 0:
+                # P1.3: even powers use the TIGHT monomial hull (exact convex
+                # envelope cv=x^n, secant cc) — materially tighter than repeated
+                # bilinear multiplication (e.g. x^2 on [-2,3]: exact cv=0 at x=0 vs
+                # repeated-mult's -4). Valid boundary subgradients via clip_into.
+                return _pow_even(self, n)
+            # Odd powers: repeated multiplication through the (sign-agnostic,
+            # validated) bilinear rule — SOUND for every odd n and every sign regime.
+            # Looser than the tight odd-power hull (the sign-spanning convex hull needs
+            # a transcendental tangent point for n>=5; deferred, tightness-only), but
+            # always valid.
             out = self
             for _ in range(n - 1):
                 out = out * self
@@ -316,6 +329,27 @@ def _reciprocal(b):
         jnp.where(crosses, zero, r.sub_cv),
         jnp.where(crosses, zero, r.sub_cc),
     )
+
+
+def _pow_even(base, n):
+    """``base ** n`` for an even integer ``n >= 2`` (P1.3, tight monomial hull).
+
+    ``x**n`` (even) is convex with its minimum at 0, so the exact convex envelope is
+    ``x**n`` itself and the concave overestimator is the secant — materially tighter
+    than the repeated-bilinear product, whose convex part is only the max of two tangent
+    lines. Value from :func:`compose_even_pow`; subgradient by the kernel chain (valid —
+    the envelope is convex and ``clip_into`` gives the valid boundary slope). The
+    interval is ``[0, max(lo^n, hi^n)]`` when the box spans 0, else ``[min, max]`` of the
+    endpoints (``x**n`` even is U-shaped)."""
+
+    def kernel(cv_g, cc_g, g_lb, g_ub):
+        return compose_even_pow(cv_g, cc_g, g_lb, g_ub, n)
+
+    lo, hi = base.lo, base.hi
+    e = (lo**n, hi**n)
+    spans = (lo < 0.0) & (hi > 0.0)
+    interval = (jnp.where(spans, 0.0, jnp.minimum(*e)), jnp.maximum(*e))
+    return _univariate_kernel(base, kernel, interval)
 
 
 def _pow_frac(base, a):

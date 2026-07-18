@@ -258,6 +258,34 @@ def test_subgradient_valid_at_box_faces(name, fn, lb, ub):
         )
 
 
+# ---- P1.3: tight monomial hull for even powers ----
+@pytest.mark.parametrize(
+    "n,lb,ub",
+    [(2, -2.0, 3.0), (2, 1.0, 3.0), (4, -1.5, 2.0), (6, -1.0, 1.3), (2, -3.0, -0.5)],
+)
+def test_even_power_tight_hull_sound(n, lb, ub):
+    _check(lambda x: x**n, lambda v: v[0] ** n, [lb], [ub])
+
+
+def test_even_power_of_affine_combo():
+    _check(lambda x, y: (x + y) ** 2, lambda v: (v[0] + v[1]) ** 2, [-1.0, -1.0], [2.0, 2.0])
+
+
+def test_even_power_hull_is_exact_convex_envelope():
+    # The tight hull makes cv = x**n exactly (vs repeated-mult's loose max-of-tangents:
+    # x^2 on [-2,3] gave cv(0) = -4). Check cv == x**n on the convex envelope.
+    lb, ub = jnp.array([-2.0]), jnp.array([3.0])
+    for xv in [-2.0, -1.0, 0.0, 1.0, 2.0, 3.0]:
+        z = relax_through(lambda x: x**2, jnp.array([xv]), lb, ub)
+        assert float(z.cv) == pytest.approx(xv**2, abs=1e-9), f"cv not exact at x={xv}"
+
+
+def test_odd_power_still_sound():
+    # Odd powers keep the sound (looser) repeated-mult path, incl. sign-spanning.
+    _check(lambda x: x**3, lambda v: v[0] ** 3, [-2.0], [3.0])
+    _check(lambda x: x**5, lambda v: v[0] ** 5, [-1.5], [1.2])
+
+
 # ---- P1.4: fractional powers (signomials) over a positive base ----
 @pytest.mark.parametrize(
     "a,lb,ub",
