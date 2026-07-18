@@ -433,3 +433,39 @@ the mechanism SCIP uses to reach +16%. That is a bounded-increment-free campaign
 
 **Corrected not-the-lever list:** OBBT/range-reduction for `*hfsg` (§R2-6 target — falsified in
 R3-1; the relaxer was discarded, not weak).
+
+### R3-4 Graduation to default-ON (#764, 2026-07-18)
+
+Issue #764 (`tanksize` closure-speed gap) surfaced the same pathology outside the `*hfsg` family:
+a bilinear tank-sizing model with continuous vars declared `[0, inf]`, whose McCormick relaxer was
+discarded by the raw-box probe, leaving the frontier dual bound at 0.8529 (looser than BARON's
+root 0.9553). This is the R3-2 lever's target class, so #764 ran the CLAUDE.md §5 Regime-2
+graduation gate over the **complete affected set** of the vendored corpus.
+
+**Panel scope.** The flag can only flip the keep/discard decision when the declared box is
+unbounded (on a bounded box both probe boxes are finite → same decision → provable no-op,
+confirmed byte-identical on `ex1221/ex1222/st_miqp1/flay02m/nvs01`). So the affected set is exactly
+the 24 vendored instances with ≥1 infinite declared bound; the panel ran all 24 ON-vs-OFF at a 30 s
+budget with the `global50` oracle for soundness.
+
+**Result — both gate bars green:**
+- *cert-clean*: 0 unsound bounds, no dual bound past its reference optimum, no certificate-invariant
+  (`bound ≤ incumbent` / `≥` for max) violation, no incumbent past its oracle, **0 certification
+  regressions**. The 3 no-bound-change instances (`bchoco07`, `clay0303hfsg`, `heatexch_gen2`) only
+  explore more nodes (cheaper LP nodes), same/less wall.
+- *net-positive*: `syn05hfsg` moved **feasible → optimal** (upper bound 1310.6 → 837.73, wall
+  30.2 → 15.2 s, nodes 557 → 185) and `tanksize`'s root dual bound tightened **0.8529 → 0.9063**;
+  every previously-certifying instance stayed byte-stable (identical bound and node count) with no
+  wall or bound regression.
+
+One passing graduation-gate run meeting both bars suffices under the 2026-07-17 policy, so
+`_root_lp_probe_tight_enabled()` now **defaults ON**; `DISCOPT_ROOT_LP_PROBE_TIGHT=0` restores the
+legacy raw-box probe. Regression guard: `test_default_is_graduated_on` (default behaves like the ON
+arm) + `test_flag_defaults_on_and_respects_optout` in `python/tests/test_issue282_root_lp_probe.py`.
+Panel artifact: `discopt_benchmarks/results/issue764_root_lp_probe_tight_graduation_panel.json`.
+
+**Not closed by #764.** `tanksize` still does not *certify* within seconds — with the relaxer kept,
+its root bound tightens but full closure remains throughput-bound (~2–10 nodes/s vs BARON's ~1300):
+the per-node Python/JAX orchestration cost (#723) is the residual blocker, and the deeper root
+tightening for this class (iterated OBBT, #282 body) is orthogonal. #764 closes the "relaxer
+wrongly discarded" half; the throughput half stays with #723.

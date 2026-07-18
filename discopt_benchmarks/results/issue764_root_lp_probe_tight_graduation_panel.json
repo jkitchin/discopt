@@ -1,0 +1,571 @@
+{
+  "issue": 764,
+  "flag": "DISCOPT_ROOT_LP_PROBE_TIGHT",
+  "gate": "CLAUDE.md Regime-2 (cert-clean + net-positive)",
+  "time_limit_s": 30,
+  "corpus": "python/tests/data/minlplib_nl (24 unbounded-box affected + 5 bounded no-op)",
+  "verdict": {
+    "cert_clean": "PASS",
+    "net_positive": "PASS",
+    "helped": [
+      "syn05hfsg (feasible->optimal, 2x faster)",
+      "tanksize (root 0.8529->0.9063)"
+    ],
+    "unsound": [],
+    "cert_regressions": [],
+    "wall_regressions": []
+  },
+  "rows": [
+    {
+      "instance": "4stufen",
+      "maximize": false,
+      "known": null,
+      "off": {
+        "status": "time_limit",
+        "obj": null,
+        "bound": 20282.05073873644,
+        "nodes": 3,
+        "wall": 32.89
+      },
+      "on": {
+        "status": "time_limit",
+        "obj": null,
+        "bound": 20282.05073873644,
+        "nodes": 3,
+        "wall": 30.54
+      }
+    },
+    {
+      "instance": "alan",
+      "maximize": false,
+      "known": 2.925,
+      "off": {
+        "status": "optimal",
+        "obj": 2.9249999983013426,
+        "bound": 2.9249999983013426,
+        "nodes": 21,
+        "wall": 0.1
+      },
+      "on": {
+        "status": "optimal",
+        "obj": 2.9249999983013426,
+        "bound": 2.9249999983013426,
+        "nodes": 21,
+        "wall": 0.09
+      }
+    },
+    {
+      "instance": "bchoco06",
+      "maximize": true,
+      "known": null,
+      "off": {
+        "status": "time_limit",
+        "obj": null,
+        "bound": 0.9999775725261241,
+        "nodes": 3,
+        "wall": 39.55
+      },
+      "on": {
+        "status": "time_limit",
+        "obj": null,
+        "bound": 0.9999775725261241,
+        "nodes": 3,
+        "wall": 36.72
+      }
+    },
+    {
+      "instance": "bchoco07",
+      "maximize": true,
+      "known": null,
+      "off": {
+        "status": "time_limit",
+        "obj": null,
+        "bound": 2.9500190039537375,
+        "nodes": 3,
+        "wall": 36.08
+      },
+      "on": {
+        "status": "time_limit",
+        "obj": null,
+        "bound": 2.9500190039537375,
+        "nodes": 7,
+        "wall": 32.14
+      }
+    },
+    {
+      "instance": "bchoco08",
+      "maximize": true,
+      "known": null,
+      "off": {
+        "status": "time_limit",
+        "obj": null,
+        "bound": 2.97299786579779,
+        "nodes": 7,
+        "wall": 77.0
+      },
+      "on": {
+        "status": "time_limit",
+        "obj": null,
+        "bound": 2.97299786579779,
+        "nodes": 7,
+        "wall": 34.25
+      }
+    },
+    {
+      "instance": "beuster",
+      "maximize": false,
+      "known": null,
+      "off": {
+        "status": "time_limit",
+        "obj": null,
+        "bound": 6395.108328058908,
+        "nodes": 3,
+        "wall": 31.4
+      },
+      "on": {
+        "status": "time_limit",
+        "obj": null,
+        "bound": 6395.108328058908,
+        "nodes": 3,
+        "wall": 36.24
+      }
+    },
+    {
+      "instance": "casctanks",
+      "maximize": false,
+      "known": 9.163479388,
+      "off": {
+        "status": "time_limit",
+        "obj": null,
+        "bound": -90.17862329759835,
+        "nodes": 3,
+        "wall": 38.68
+      },
+      "on": {
+        "status": "time_limit",
+        "obj": null,
+        "bound": -90.17862329759835,
+        "nodes": 3,
+        "wall": 34.65
+      }
+    },
+    {
+      "instance": "chance",
+      "maximize": false,
+      "known": 29.89437816,
+      "off": {
+        "status": "optimal",
+        "obj": 29.894378154271102,
+        "bound": 29.894378154271102,
+        "nodes": 0,
+        "wall": 0.5
+      },
+      "on": {
+        "status": "optimal",
+        "obj": 29.894378154271102,
+        "bound": 29.894378154271102,
+        "nodes": 0,
+        "wall": 0.18
+      }
+    },
+    {
+      "instance": "clay0303hfsg",
+      "maximize": false,
+      "known": 26669.10957,
+      "off": {
+        "status": "time_limit",
+        "obj": null,
+        "bound": null,
+        "nodes": 63,
+        "wall": 30.45
+      },
+      "on": {
+        "status": "time_limit",
+        "obj": null,
+        "bound": null,
+        "nodes": 223,
+        "wall": 30.11
+      }
+    },
+    {
+      "instance": "contvar",
+      "maximize": false,
+      "known": null,
+      "off": {
+        "status": "time_limit",
+        "obj": null,
+        "bound": 183631.67859162716,
+        "nodes": 3,
+        "wall": 33.9
+      },
+      "on": {
+        "status": "time_limit",
+        "obj": null,
+        "bound": 183632.31163441093,
+        "nodes": 3,
+        "wall": 35.86
+      }
+    },
+    {
+      "instance": "cvxnonsep_psig40r",
+      "maximize": false,
+      "known": 86.5451047,
+      "off": {
+        "status": "optimal",
+        "obj": 86.54527995164959,
+        "bound": 86.53873600363832,
+        "nodes": 95,
+        "wall": 12.13
+      },
+      "on": {
+        "status": "optimal",
+        "obj": 86.54527995164959,
+        "bound": 86.53873600363832,
+        "nodes": 95,
+        "wall": 10.46
+      }
+    },
+    {
+      "instance": "dispatch",
+      "maximize": false,
+      "known": 3155.287927,
+      "off": {
+        "status": "optimal",
+        "obj": 3155.2879266989694,
+        "bound": 3155.2879042186782,
+        "nodes": 3,
+        "wall": 0.82
+      },
+      "on": {
+        "status": "optimal",
+        "obj": 3155.2879266989694,
+        "bound": 3155.2879042186782,
+        "nodes": 3,
+        "wall": 0.61
+      }
+    },
+    {
+      "instance": "ex14_1_9",
+      "maximize": false,
+      "known": null,
+      "off": {
+        "status": "feasible",
+        "obj": -1.9775220540513224e-16,
+        "bound": -1.9775220540513224e-16,
+        "nodes": 3,
+        "wall": 0.5
+      },
+      "on": {
+        "status": "feasible",
+        "obj": -1.9775220540513224e-16,
+        "bound": -1.9775220540513224e-16,
+        "nodes": 3,
+        "wall": 0.28
+      }
+    },
+    {
+      "instance": "gkocis",
+      "maximize": false,
+      "known": -1.923098738,
+      "off": {
+        "status": "optimal",
+        "obj": -1.9230987798770212,
+        "bound": -1.9230988280923489,
+        "nodes": 5,
+        "wall": 1.57
+      },
+      "on": {
+        "status": "optimal",
+        "obj": -1.9230987798770212,
+        "bound": -1.9230988280923489,
+        "nodes": 5,
+        "wall": 1.08
+      }
+    },
+    {
+      "instance": "hda",
+      "maximize": false,
+      "known": -5964.534084,
+      "off": {
+        "status": "time_limit",
+        "obj": null,
+        "bound": -18016528426.50232,
+        "nodes": 3,
+        "wall": 50.81
+      },
+      "on": {
+        "status": "time_limit",
+        "obj": null,
+        "bound": -18016528426.50232,
+        "nodes": 3,
+        "wall": 38.78
+      }
+    },
+    {
+      "instance": "heatexch_gen1",
+      "maximize": false,
+      "known": null,
+      "off": {
+        "status": "time_limit",
+        "obj": null,
+        "bound": 38183.5317460179,
+        "nodes": 3,
+        "wall": 41.45
+      },
+      "on": {
+        "status": "time_limit",
+        "obj": null,
+        "bound": 38183.5317460179,
+        "nodes": 3,
+        "wall": 36.51
+      }
+    },
+    {
+      "instance": "heatexch_gen2",
+      "maximize": false,
+      "known": null,
+      "off": {
+        "status": "time_limit",
+        "obj": null,
+        "bound": 555767.7902857271,
+        "nodes": 3,
+        "wall": 34.77
+      },
+      "on": {
+        "status": "time_limit",
+        "obj": null,
+        "bound": 555767.7902857271,
+        "nodes": 7,
+        "wall": 31.74
+      }
+    },
+    {
+      "instance": "heatexch_gen3",
+      "maximize": false,
+      "known": null,
+      "off": {
+        "status": "time_limit",
+        "obj": null,
+        "bound": null,
+        "nodes": 3,
+        "wall": 170.4
+      },
+      "on": {
+        "status": "time_limit",
+        "obj": null,
+        "bound": null,
+        "nodes": 3,
+        "wall": 30.08
+      }
+    },
+    {
+      "instance": "m3",
+      "maximize": false,
+      "known": 37.8,
+      "off": {
+        "status": "optimal",
+        "obj": 37.799999669978845,
+        "bound": 37.79999951039202,
+        "nodes": 47,
+        "wall": 8.75
+      },
+      "on": {
+        "status": "optimal",
+        "obj": 37.799999669978845,
+        "bound": 37.79999951039202,
+        "nodes": 47,
+        "wall": 9.09
+      }
+    },
+    {
+      "instance": "nvs05",
+      "maximize": false,
+      "known": 5.470934108,
+      "off": {
+        "status": "feasible",
+        "obj": 8.731956986640078,
+        "bound": 3.5424806722956146,
+        "nodes": 65,
+        "wall": 30.11
+      },
+      "on": {
+        "status": "feasible",
+        "obj": 8.731956986640078,
+        "bound": 3.5424806722956146,
+        "nodes": 65,
+        "wall": 30.18
+      }
+    },
+    {
+      "instance": "oaer",
+      "maximize": false,
+      "known": -1.923098514,
+      "off": {
+        "status": "optimal",
+        "obj": -1.923098499884843,
+        "bound": -1.923098601139822,
+        "nodes": 3,
+        "wall": 1.11
+      },
+      "on": {
+        "status": "optimal",
+        "obj": -1.923098499884843,
+        "bound": -1.923098601139822,
+        "nodes": 3,
+        "wall": 0.93
+      }
+    },
+    {
+      "instance": "syn05hfsg",
+      "maximize": true,
+      "known": null,
+      "off": {
+        "status": "feasible",
+        "obj": 837.7324123911069,
+        "bound": 1310.5886090079973,
+        "nodes": 557,
+        "wall": 30.23
+      },
+      "on": {
+        "status": "optimal",
+        "obj": 837.732412391107,
+        "bound": 837.732412391107,
+        "nodes": 185,
+        "wall": 15.21
+      }
+    },
+    {
+      "instance": "tanksize",
+      "maximize": false,
+      "known": 1.268643754,
+      "off": {
+        "status": "feasible",
+        "obj": 1.2686437852365295,
+        "bound": 0.8528765311589279,
+        "nodes": 53,
+        "wall": 30.62
+      },
+      "on": {
+        "status": "feasible",
+        "obj": 1.2686437852381225,
+        "bound": 0.9062752969659813,
+        "nodes": 51,
+        "wall": 30.17
+      }
+    },
+    {
+      "instance": "tls2",
+      "maximize": false,
+      "known": 5.3,
+      "off": {
+        "status": "feasible",
+        "obj": 9.29999987524207,
+        "bound": 2.5000000041392685,
+        "nodes": 373,
+        "wall": 30.29
+      },
+      "on": {
+        "status": "feasible",
+        "obj": 9.29999987524207,
+        "bound": 2.5000000041392685,
+        "nodes": 373,
+        "wall": 30.64
+      }
+    },
+    {
+      "instance": "ex1221",
+      "maximize": false,
+      "known": 7.667180069,
+      "off": {
+        "status": "optimal",
+        "obj": 7.667180068813135,
+        "bound": 7.667180068813077,
+        "nodes": 5,
+        "wall": 1.28
+      },
+      "on": {
+        "status": "optimal",
+        "obj": 7.667180068813135,
+        "bound": 7.667180068813077,
+        "nodes": 5,
+        "wall": 0.7
+      }
+    },
+    {
+      "instance": "ex1222",
+      "maximize": false,
+      "known": 1.076543083,
+      "off": {
+        "status": "optimal",
+        "obj": 1.0765430833322625,
+        "bound": 1.0765430463031964,
+        "nodes": 1,
+        "wall": 0.6
+      },
+      "on": {
+        "status": "optimal",
+        "obj": 1.0765430833322625,
+        "bound": 1.0765430463031964,
+        "nodes": 1,
+        "wall": 0.28
+      }
+    },
+    {
+      "instance": "st_miqp1",
+      "maximize": false,
+      "known": 281.0,
+      "off": {
+        "status": "optimal",
+        "obj": 280.9999999906497,
+        "bound": 280.9999999906497,
+        "nodes": 15,
+        "wall": 0.02
+      },
+      "on": {
+        "status": "optimal",
+        "obj": 280.9999999906497,
+        "bound": 280.9999999906497,
+        "nodes": 15,
+        "wall": 0.02
+      }
+    },
+    {
+      "instance": "flay02m",
+      "maximize": false,
+      "known": 37.94733192,
+      "off": {
+        "status": "optimal",
+        "obj": 37.94733186383461,
+        "bound": 37.947331804569515,
+        "nodes": 7,
+        "wall": 0.71
+      },
+      "on": {
+        "status": "optimal",
+        "obj": 37.94733186383461,
+        "bound": 37.947331804569515,
+        "nodes": 7,
+        "wall": 0.45
+      }
+    },
+    {
+      "instance": "nvs01",
+      "maximize": false,
+      "known": 12.46966882,
+      "off": {
+        "status": "optimal",
+        "obj": 12.46966882156821,
+        "bound": 12.46966882156821,
+        "nodes": 3,
+        "wall": 1.42
+      },
+      "on": {
+        "status": "optimal",
+        "obj": 12.46966882156821,
+        "bound": 12.46966882156821,
+        "nodes": 3,
+        "wall": 1.28
+      }
+    }
+  ]
+}
