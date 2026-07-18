@@ -366,6 +366,7 @@ def build_bnb_certificate(
     feas_tol: float = DEFAULT_FEAS_TOL,
     int_tol: float = DEFAULT_INT_TOL,
     gap_tol: float = 1e-4,
+    untrusted: bool = False,
 ) -> dict:
     """Build a Tier-3 (spatial branch-and-bound) global-optimality certificate.
 
@@ -426,7 +427,41 @@ def build_bnb_certificate(
 
     cert["dualBound"] = to_rational(float(result.bound)) if result.bound is not None else None
     cert["tolerances"]["gap"] = to_rational(gap_tol)
+
+    if untrusted:
+        _attach_untrusted_leaf_duals(cert, nodes)
     return base
+
+
+def _attach_untrusted_leaf_duals(cert: dict, nodes: list[dict]) -> None:
+    """Attach an independently-derived exact dual to each leaf in the quadratic
+    fragment, so the checker can re-derive that leaf's bound without trusting the
+    solver's recorded bound (see ``certificate.relax``). Best-effort: leaves outside
+    the fragment (or where an exact dual is not recovered) stay trusted."""
+
+    from .relax import NotQuadratic, build_leaf_lp, leaf_dual
+    from .schema import as_fraction
+
+    model = cert["model"]
+    child_ids = {n["parent"] for n in nodes if n["parent"] is not None}
+    n_untrusted = 0
+    for n in nodes:
+        if n["id"] in child_ids or n.get("infeasible"):
+            continue
+        lo = [as_fraction(v) for v in n["lb"]]
+        hi = [as_fraction(v) for v in n["ub"]]
+        try:
+            lp = build_leaf_lp(model, lo, hi)
+        except NotQuadratic:
+            continue
+        res = leaf_dual(lp)
+        if res is None:
+            continue
+        bound, y = res
+        n["untrusted_bound"] = [bound.numerator, bound.denominator]
+        n["untrusted_dual"] = [[yi.numerator, yi.denominator] for yi in y]
+        n_untrusted += 1
+    cert["tree"]["untrusted_leaves"] = n_untrusted
 
 
 def write_certificate(cert: dict, path: Union[str, Path]) -> None:

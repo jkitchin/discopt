@@ -370,15 +370,24 @@ real convex integer MINLP (`nvs03`) certifies via this path. The pure-integer MI
 driver and decomposition paths are not yet wired (they return no `bnb_tree`, so the
 emitter refuses and the CLI falls back to Tier-1/2) — a follow-on.
 
-**What is still trusted (the remaining untrusted-ness upgrade).** The current
-Tier-3 checker **trusts the solver's recorded per-leaf `local_lower_bound`** as a
-valid lower bound; it does not yet re-derive each leaf bound from scratch. The
-fully-untrusted version reconstructs each leaf's McCormick relaxation LP from the
-model + box and verifies the captured leaf **dual** by weak duality via the shipped
-`certificate.bnb` kernel (`certified_leaf_bound`) — turning "trust discopt's node
-bound" into "check the dual." The leaf duals are already captured for this; the
-remaining work is the per-leaf LP reconstruction (the same relaxation-compiler
-lifting the emitter would share).
+**Untrusted per-leaf re-derivation (built, `untrusted=True`).** For the **quadratic
+fragment** (linear + bilinear + square bodies), `build_bnb_certificate(model, result,
+untrusted=True)` attaches to each leaf an independently-derived **exact dual**, and
+`check_bnb_certificate` re-derives that leaf's bound by **rebuilding the McCormick
+relaxation LP itself** (`certificate/relax.py`) from the model + leaf box and
+verifying the dual by weak duality — so it trusts neither the solver's recorded
+bound nor any emitted LP, only the dual, which a tamper breaks (`Aᵀy ≠ c`). The
+compiler (`relax.py`) extracts each body's quadratic form, lifts products to aux
+columns, and emits box + McCormick envelope rows; the emitter recovers an exact
+rational dual from a SciPy solve's active/marginal support via exact Fraction
+elimination (`leaf_dual`), verified exactly before it is attached (a failed
+recovery leaves that leaf trusted — best-effort, never unsound). Verified
+end-to-end (`test_certificate_relax.py`, `test_bnb_untrusted_leaf_rederivation`):
+`min -x²` re-derives its exact `-4`, a bilinear leaf re-derives a valid bound, and
+a corrupted dual is rejected. This certifies the **clean-McCormick** bound (no
+cuts); where that closes the gap the incumbent is untrusted-certified globally
+optimal. Higher-degree / transcendental leaves stay trusted (documented) —
+their untrusted upgrade is the interval/envelope work shared with Tiers 1/3-Lean.
 
 **Lean obligations.** Encouragingly, most of Tier 3 is **Lean-core (no Mathlib)**:
 `LPDuality.lean` (weak duality is exact linear algebra over `Rat`) and

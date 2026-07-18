@@ -345,17 +345,29 @@ def _check_bnb(cert: dict) -> tuple[bool, str]:
     if not ok:
         return False, f"tree does not cover the root box: {why}"
 
-    # (c) Global lower bound = min over leaves of the recorded leaf bound.
+    # (c) Global lower bound = min over leaves of the leaf bound. For a leaf with
+    # an emitted `untrusted_dual`, the checker rebuilds that leaf's McCormick LP
+    # from the model + box itself and verifies the dual by weak duality -- an
+    # independently-derived bound that trusts neither the solver's recorded bound
+    # nor the emitted LP. Leaves without one keep the (trusted) recorded bound.
     child_ids = {n["parent"] for n in nodes if n["parent"] is not None}
     leaf_bound = None
+    n_untrusted = 0
     for n in nodes:
         if n["id"] in child_ids:
             continue  # internal (branched) node
         if n.get("infeasible"):
             continue  # empty leaf -> contributes +inf
-        lb = as_fraction(n.get("local_lower_bound"))
-        if lb is None:
-            return False, f"leaf node {n['id']} has no finite lower bound (cannot certify)"
+        if "untrusted_dual" in n:
+            ub, why = _untrusted_leaf_bound(body["model"], n)
+            if ub is None:
+                return False, f"leaf node {n['id']}: {why}"
+            lb = ub
+            n_untrusted += 1
+        else:
+            lb = as_fraction(n.get("local_lower_bound"))
+            if lb is None:
+                return False, f"leaf node {n['id']} has no finite lower bound (cannot certify)"
         leaf_bound = lb if leaf_bound is None else min(leaf_bound, lb)
     if leaf_bound is None:
         return False, "every leaf is infeasible but an incumbent was certified feasible"
@@ -373,7 +385,31 @@ def _check_bnb(cert: dict) -> tuple[bool, str]:
     gap_closed = (objval - leaf_bound) <= gap_tol
     n_leaves = sum(1 for n in nodes if n["id"] not in child_ids)
     detail = "global optimum within gap" if gap_closed else "valid dual bound (gap open)"
+    trust = f"; {n_untrusted}/{n_leaves} leaf bounds re-derived (untrusted)" if n_untrusted else ""
     return True, (
         f"bnb: {len(nodes)} nodes / {n_leaves} leaves cover the root box; "
-        f"dualBound {float(claimed):.8g} <= min leaf bound; {detail}"
+        f"dualBound {float(claimed):.8g} <= min leaf bound; {detail}{trust}"
     )
+
+
+def _untrusted_leaf_bound(model: dict, node: dict) -> tuple[Fraction | None, str]:
+    """Re-derive a leaf's lower bound: rebuild its McCormick LP from the model + box
+    and verify the emitted dual by weak duality. Returns ``(bound, "")`` or
+    ``(None, reason)``. The checker builds ``A,b,c`` itself, so it trusts only the
+    dual (which it verifies), not the solver's bound or any emitted LP."""
+    from .bnb import lp_lower_bound
+    from .relax import NotQuadratic, build_leaf_lp
+
+    lo = [as_fraction(v) for v in node["lb"]]
+    hi = [as_fraction(v) for v in node["ub"]]
+    try:
+        lp = build_leaf_lp(model, lo, hi)
+    except NotQuadratic as exc:
+        return None, f"untrusted re-derivation failed (not quadratic): {exc}"
+    y = [as_fraction(v) for v in node["untrusted_dual"]]
+    if len(y) != len(lp["A"]):
+        return None, "untrusted dual length != rebuilt LP row count"
+    ok, bound = lp_lower_bound(lp["A"], lp["b"], lp["c"], y)
+    if not ok:
+        return None, f"untrusted dual does not certify a bound: {bound}"
+    return bound + lp["obj_const"], ""
