@@ -471,6 +471,43 @@ class SolverTuning:
     bound toward the RLT-1 optimum; each iterate is already a valid lower bound, so
     an early stop is sound (just looser)."""
 
+    shor_sdp_root_bound: bool = field(
+        default_factory=lambda: _env_flag("DISCOPT_SHOR_SDP_ROOT_BOUND", default=False)
+    )
+    """Add a **strong-Shor SDP** lower bound at the root for constrained all-binary
+    QPs (``DISCOPT_SHOR_SDP_ROOT_BOUND``, default off; root-only, §5 bound-changing).
+
+    The global moment-matrix PSD constraint ``M = [[1, x'],[x, X]] >= 0`` that no
+    local (<=6-var) moment cut can enforce, *plus* the lifted-equality RLT rows,
+    the McCormick box on ``X``, and the gangster rows (the *plain* Shor SDP is
+    falsified on this class — unbounded on qap; see
+    ``docs/dev/issue-661-qap-sdp-entry-experiment-2026-07-17.md``). Solved with the
+    first-order conic solver SCS (optional dependency ``discopt[sdp]``; missing
+    solver -> sound no-op), and the surfaced value is the **safe dual bound**
+    recomputed from the returned multipliers (``shor_sdp_safe_dual_bound`` — the
+    SDP analogue of the Neumaier-Shcherbina safe LP bound: valid for *any*
+    multipliers by weak duality plus an eigenvalue-shift on the dual slack matrix,
+    so solver convergence affects only tightness, never soundness), never the
+    solver's approximate objective. Joins ``_root_relaxation_lower_bound``'s
+    candidates via ``max`` — it can only raise the bound. Measured (entry
+    experiment): qap root ~0 (McCormick) -> 377098 = 97.1 % of the optimum 388214
+    (RLT-1 LP gauge 352891, published dual 149106) at ~86 s; exact on brute-forced
+    synthetic Koopmans-Beckmann QAPs. **Default off**: an ~86 s root cost is a
+    deliberate opt-in, and graduation needs the §5 corpus-wide differential panel."""
+
+    shor_sdp_max_dim: int = field(default_factory=lambda: _env_int("DISCOPT_SHOR_SDP_MAX_DIM", 400))
+    """Size guard for :attr:`shor_sdp_root_bound`: skip (sound no-op) when the
+    moment-matrix dimension ``n + 1`` exceeds this (``DISCOPT_SHOR_SDP_MAX_DIM``,
+    default 400 — admits qap's 226, blocks a runaway SDP on a much larger model)."""
+
+    shor_sdp_time_limit: float = field(
+        default_factory=lambda: _env_float("DISCOPT_SHOR_SDP_TIME_LIMIT", 120.0)
+    )
+    """Wall-clock budget in seconds for the SCS solve behind
+    :attr:`shor_sdp_root_bound` (``DISCOPT_SHOR_SDP_TIME_LIMIT``, default 120 —
+    covers qap's ~86 s root solve). An early stop is sound: the safe dual bound is
+    valid at any iterate, just looser."""
+
     node_bound_mode: str = field(
         default_factory=lambda: os.environ.get("DISCOPT_NODE_BOUND_MODE", "lp")
     )

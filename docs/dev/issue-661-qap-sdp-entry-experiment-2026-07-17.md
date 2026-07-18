@@ -119,3 +119,34 @@ the bare moment-matrix PSD.
 `discopt_benchmarks/results/issue661/qap_shor_sdp_repro.py` (synthetic + real qap);
 raw numbers in `qap_shor_sdp_summary_2026-07-17.json`, `qap_shor_plain.json`,
 `qap_shor_rlt1_gangster.json` in the same directory.
+
+## Production integration (2026-07-18)
+
+The conditional GO above landed as `python/discopt/_jax/shor_sdp.py`:
+
+- **Strong Shor only** (PSD moment matrix + `diag(X)=x` + model rows +
+  lifted-equality RLT + McCormick box on X + gangster), assembled generally from
+  the model's linear equalities via the same extraction helpers as the RLT-1 path
+  (`_extract_linear_constraints`, `_reconstruct_quadratic_objective`,
+  `_mutually_exclusive_pairs`) — no problem-name keying. The falsified plain-Shor
+  formulation was not implemented.
+- **Root-only, default-off** (`DISCOPT_SHOR_SDP_ROOT_BOUND`), joined by `max` with
+  the other candidates in `solver.py::_root_relaxation_lower_bound`; guards
+  `DISCOPT_SHOR_SDP_MAX_DIM` (default 400) and `DISCOPT_SHOR_SDP_TIME_LIMIT`
+  (default 120 s). SCS is an optional dependency (`discopt[sdp]`); missing solver
+  is a sound no-op.
+- **The blocking safe-dual requirement is implemented**
+  (`shor_sdp_safe_dual_bound`): the surfaced value is never the first-order
+  objective but the rigorous weak-duality bound recomputed from the returned
+  multipliers — inequality multipliers clamped `>= 0`, dual slack matrix
+  `S = C + Σ y1 A + Σ y2 G` assembled in float64 with magnitude-scaled margins,
+  and the eigenvalue shift `min(0, λ_min(S) − margin) · tr_ub(M)` with
+  `tr(M) = 1 + Σ x_i <= n+1`. Valid for *any* multipliers, so solver convergence
+  affects tightness only (the NS-safe property, lifted to SDP).
+- **Measured** (`python/tests/test_shor_sdp_root_bound.py` + local runs): the safe
+  bound recovers ≥ 99.99 % of the brute-force optimum on synthetic
+  Koopmans–Beckmann QAPs n=4/5/6 (e.g. n=6: 2517.99 vs 2518, 0.1 s), never crosses
+  it, and survives adversarial dual perturbation. Real-qap root measurement stands
+  at the entry experiment's 377098 (86 s, SCS).
+- **Default-on graduation** still requires the §5 corpus-wide differential panel
+  (cert-clean + net-positive) — not attempted here.

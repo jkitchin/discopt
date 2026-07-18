@@ -3102,6 +3102,35 @@ def _root_relaxation_lower_bound(
             except Exception as lag_exc:  # pragma: no cover - defensive
                 logger.debug("root RLT-1 Lagrangian bound skipped: %s", lag_exc)
 
+        # Strong-Shor SDP root bound (issue #661): the global moment-matrix PSD
+        # constraint + lifted-equality RLT + McCormick box on X + gangster rows,
+        # solved with a first-order conic solver (SCS, optional dep). The surfaced
+        # value is the *safe dual bound* recomputed from the returned multipliers
+        # (rigorous for any multipliers by weak duality + an eigenvalue shift on
+        # the dual slack matrix), never the solver's approximate objective, so it
+        # joins the `max` below — it can only raise the bound. Root-only. Opt-in
+        # (`DISCOPT_SHOR_SDP_ROOT_BOUND`, default off); any ineligibility, missing
+        # solver, or failure is a sound no-op.
+        shor_bound: Optional[float] = None
+        if getattr(_tun, "shor_sdp_root_bound", False) and not _fb_stop(_have):
+            try:
+                from discopt._jax.model_utils import binary_flat_cols as _bfc
+                from discopt._jax.shor_sdp import shor_sdp_lower_bound
+
+                _sb, _sdim = shor_sdp_lower_bound(
+                    model,
+                    relax,
+                    _relax_info,
+                    binary_vars=_bfc(model),
+                    time_limit=float(getattr(_tun, "shor_sdp_time_limit", 120.0)),
+                    max_dim=int(getattr(_tun, "shor_sdp_max_dim", 400)),
+                )
+                if _sdim and _sb is not None and np.isfinite(_sb):
+                    shor_bound = float(_sb)
+                    _have.append(shor_bound)
+            except Exception as sdp_exc:  # pragma: no cover - defensive
+                logger.debug("root strong-Shor SDP bound skipped: %s", sdp_exc)
+
         budget = min(10.0, max(1.0, time_limit * 0.1))
         # Checkpoint: the static-envelope solve is optional tightening only once a
         # strengthened candidate (PSD/RLT) already landed; with those default-off
@@ -3161,7 +3190,7 @@ def _root_relaxation_lower_bound(
         # (tighter) one is the better rigorous bound.
         candidates = [
             b
-            for b in (plain_bound, sep_bound, psd_bound, rlt_bound, rlt_lag_bound)
+            for b in (plain_bound, sep_bound, psd_bound, rlt_bound, rlt_lag_bound, shor_bound)
             if b is not None
         ]
         if candidates:

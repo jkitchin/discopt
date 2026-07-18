@@ -49,6 +49,9 @@ cutest = ["pycutest>=1.8.0"]
 # `discopt gams-register` to merge into an existing gamsconfig.yaml.
 gams = ["gamsapi[core]>=45", "pyyaml>=6"]
 llm = ["litellm>=1.0"]
+# First-order conic solver for the strong-Shor SDP root bound (issue #661,
+# `DISCOPT_SHOR_SDP_ROOT_BOUND`). Missing scs is a sound no-op.
+sdp = ["scs>=3.2"]
 nn = ["onnx>=1.14", "onnxruntime>=1.16"]
 # Use discopt as a Pyomo solver: `SolverFactory("discopt")`. Pure-Python bridge
 # that round-trips through a temporary AMPL .nl file. See docs/pyomo_solver.md.
