@@ -20,6 +20,7 @@ import os
 os.environ["JAX_PLATFORMS"] = "cpu"
 os.environ["JAX_ENABLE_X64"] = "1"
 
+import time
 from pathlib import Path
 
 import discopt.modeling as dm
@@ -235,6 +236,81 @@ def test_flag_with_unextendable_seed_does_not_crash():
         os.environ.pop("DISCOPT_INTEGER_MULTILINEAR_REFORM", None)
     # Solve still completes soundly (seed simply dropped).
     assert res.objective is None or res.objective >= -1.0 - 1e-4
+
+
+@pytest.mark.correctness
+def test_wide_multilinear_reform_guard_degrades_instead_of_hanging():
+    """Monomial-blowup guard (#707/#732 blocker a). A product of many integer
+    factors distributes into ``prod_i (1 + nbits_i)`` binary monomials — a
+    12-factor ``[0,7]`` product is ``4**12 ~ 16.7M`` — each minting an AND aux.
+    Before the guard this explodes the *reform build* (nvs09, a 10-factor real
+    instance, hung the pass for minutes before the post-build column guard could
+    reject it). The early estimate must abort the pass and return the ORIGINAL
+    model (exactly the flag-off path), fast — and must NOT fire on a legitimate
+    small reform.
+
+    General/class test (Dev-Philosophy #2): the synthetic wide product stands in
+    for the nvs09 structure, so this pins the mechanism with no corpus dependency
+    and no multi-minute runtime.
+    """
+    m = dm.Model("wide")
+    factors = [m.integer(f"a{i}", lb=0, ub=7) for i in range(12)]
+    prod = factors[0]
+    for f in factors[1:]:
+        prod = prod * f
+    m.minimize(-prod)
+    assert has_integer_multilinear_reformulation_work(m)
+
+    t0 = time.perf_counter()
+    r = reformulate_integer_multilinear(m)
+    dt = time.perf_counter() - t0
+    # Degrades to the flag-off model (guard aborted the pass)...
+    assert r is m, "blown-up reform must return the original model, not a partial build"
+    # ...and does so from the range estimate alone — no ~16M-monomial build.
+    assert dt < 5.0, f"reform guard took {dt:.1f}s — it should abort on the estimate, not build"
+
+    # Inertness: a legitimate small product (4 factors [0,3] -> 3**4 = 81 monomials,
+    # well under the cap) must still reform, so the guard never over-triggers.
+    m2 = dm.Model("small")
+    g = [m2.integer(f"b{i}", lb=0, ub=3) for i in range(4)]
+    p2 = g[0]
+    for f in g[1:]:
+        p2 = p2 * f
+    m2.subject_to(g[0] + g[1] + g[2] + g[3] <= 6)
+    m2.minimize(-p2)
+    assert reformulate_integer_multilinear(m2) is not m2, "guard falsely aborted a small reform"
+
+
+@pytest.mark.slow
+@pytest.mark.correctness
+def test_nvs09_reform_on_certifies_and_terminates():
+    """nvs09 end-to-end with the flag ON (#732 graduation blocker a). Its objective
+    carries a 10-factor integer-multilinear product ([3,9] each -> ``4**10 ~ 1.05M``
+    monomials) that hung the reform build for minutes and left the instance
+    uncertified. With the blowup guard the reform degrades to the (fast, certifying)
+    flag-off path: the solve must terminate well within the budget and certify the
+    known optimum, sound throughout. Fails-before: without the guard this test times
+    out in the reform build."""
+    nvs09_path = Path(__file__).parent / "data" / "minlplib_nl" / "nvs09.nl"
+    if not nvs09_path.exists():
+        pytest.skip("nvs09.nl not present in this corpus")
+    nvs09_opt = -43.134336
+    os.environ["DISCOPT_INTEGER_MULTILINEAR_REFORM"] = "1"
+    try:
+        m = dm.from_nl(str(nvs09_path))
+        t0 = time.perf_counter()
+        res = m.solve(time_limit=60)
+        dt = time.perf_counter() - t0
+    finally:
+        os.environ.pop("DISCOPT_INTEGER_MULTILINEAR_REFORM", None)
+    # Terminates fast (the reform no longer hangs) — generous margin for CI load.
+    assert dt < 55.0, f"nvs09 reform-on took {dt:.1f}s — the build guard should keep it fast"
+    # Sound and certifies the known optimum.
+    if res.bound is not None and math.isfinite(res.bound):
+        assert res.bound <= nvs09_opt + 1e-2, f"nvs09 UNSOUND bound {res.bound}"
+    assert res.objective is not None and res.objective <= nvs09_opt + 1e-2, (
+        f"nvs09 incumbent {res.objective} did not reach the optimum {nvs09_opt}"
+    )
 
 
 @pytest.mark.slow
