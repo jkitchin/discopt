@@ -636,6 +636,13 @@ panel green for 3 consecutive nightlies before default-on.
 > there — plus the CLAUDE.md §5 corpus differential panel. The lever is sound and a
 > foundation; graduation is future work. `python/tests/test_ex1252_coupling_rlt.py`
 > pins soundness + the node-level lift + the byte-identical OFF path.
+> **Follow-up (same day):** the compounding probe
+> (`discopt_benchmarks/scripts/ex1252_compounding_probe.py`) confirms the RLT
+> *unlocks* the previously-falsified levers — `x6` subdivision now lifts a child
+> bound 57435→62071 and OBBT pins `x12` exactly / caps `x15` at 30.89 within
+> seconds (both provably inert pre-RLT) — and exposes an engine fragility
+> (0.0/`numerical` fallback bounds on narrow boxes). Full anatomy + staged
+> certification plan: `docs/dev/ex1252-certification-plan.md`.
 
 ## 7. Sequencing & rationale (revised by the measurement)
 
