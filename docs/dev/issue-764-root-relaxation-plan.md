@@ -323,9 +323,18 @@ certificate path in a single session. The `node_reduce` module was removed again
 `main`); recover it from git when the marginals prerequisite lands.
 
 Ordered Phase 2 plan:
-1. Cold-path marginals (`milp.solve(want_marginals=True)` → `reduced_costs`/`safe_bound` on the cold
-   result), with a property test: `d = c − Aᵀy` matches a reference dual solve to 1e-9 on a box
-   panel, and the reduction is tighten-only (feasible-point sweep — no valid point cut).
+1. **Cold-path marginals — DONE (2026-07-18), bound-neutral.** `milp.solve(want_marginals=True)` now
+   populates `MilpRelaxationResult.{row_dual, reduced_costs}` on the direct warm-simplex pure-LP path
+   (`_solve_lp_warm`, original scale — no equilibration unscaling needed), and the cold McCormick node
+   solve (`_solve_at_node_impl`) exports `MccormickLPResult.{reduced_costs[:n_orig], safe_bound}` from
+   the pre-separation solve. Pure read-only side-channel (nothing consumes it yet). Verified: 6
+   property tests (`python/tests/test_phase2_cold_marginals.py`) — `d = c − Aᵀy` exact, strong
+   duality (`safe_bound ≤ bound`), KKT complementary slackness (validates `y` is the true dual), DBBT
+   tighten-only (never crosses a bound), and bound-neutrality (flag on/off identical bound/status);
+   LP/relaxation suite 1380 passed, smoke 827 passed; tanksize/nvs05/ex1221/st_miqp1 byte-identical
+   node counts. NOTE for step 3: at the root box only ~1 structural reduced cost is nonzero (most
+   vars basic); DBBT's leverage grows at branched nodes where more vars sit at bounds — the step-3
+   entry experiment must measure DBBT tightening *over the tree*, not at the root.
 2. Re-wire `reduce_node` at the two node-LP sites + `set_node_bounds` child export (restore from
    `f2bfe63`), gated by a fresh `DISCOPT_PHASE2_DBBT` flag (NOT the retired `NODE_REDUCE`).
 3. **Couple with OBBT** — the actual lever: when DBBT is on, cut the per-node OBBT budget (DBBT is
