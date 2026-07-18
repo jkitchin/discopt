@@ -1,0 +1,157 @@
+# Issue #671 — GSW LP iterative-refinement kernel (the precision layer above feral)
+
+Follow-up to the #671 entry experiment (`issue-671-hda-exact-lp-entry-experiment-2026-07-17.md`,
+PR #708), which **CONFIRMED** that hda's loose dual bound (−1.80e10, candidate A / #662)
+is a *precision artifact*, not a relaxation property: solving the same root
+McCormick LP with high-precision residuals recovers the true root value ≈ −6.47e4
+(≈5.4 orders tighter). The confirmed lever is **LP iterative refinement**
+(Gleixner–Steffy–Wolter 2016): solve in double, compute the residual against the
+original data in higher-than-double precision, scale it up, re-solve a correction
+LP in double, iterate.
+
+This doc records the **kernel** that lever needs, landed as a self-contained,
+cargo-tested Rust module, and the integration + factorization-hardening plan for
+turning it into hda's tight production bound.
+
+## What landed (this change)
+
+`crates/discopt-core/src/lp/simplex/refine.rs` — a precision layer *above* the
+double-precision simplex, with **no wiring into any default solve path** (so every
+existing solve is byte-identical and the certifying panel is bound-neutral by
+construction; see §"Verification regime"). Three pieces:
+
+1. **High-precision residual primitive** — `residual_dd` / `dot_dd`. Pure-Rust
+   *double-double* (≈106-bit) accumulation via the `two_sum`/`two_prod` error-free
+   transforms (the latter using a fused multiply-add). No new dependencies. This
+   is the GSW primitive: it computes `b − A x` (and `c − Aᵀ y`) to full float64
+   accuracy even when the individual products dwarf the true residual — the case
+   that makes a naive float64 dot return noise, or `0`.
+
+2. **GSW primal-dual refinement loop** — `refine(...)`, generic over a
+   `CorrectionSolver` (the fixed-`A` inner double solver — in production, the
+   warm-started node simplex). Each round:
+   - computes the primal residual `b − A x*` and dual residual `c − Aᵀ y*` in
+     double-double,
+   - scales each up toward O(1) (`Δp`, `Δd`),
+   - solves a correction subproblem with the **same `A`** and shifted
+     objective/rhs/bounds in double,
+   - folds the scaled-down correction back into the incumbent `(x*, y*)`.
+
+   The incumbent is kept **exactly box-feasible every round** because the
+   correction's bounds are `Δp·(l − x*) ≤ x̄ ≤ Δp·(u − x*)`, so
+   `x* + x̄/Δp ∈ [l, u]` identically. Convergence is geometric (≈16 digits/round
+   for a solver returning ≈1e-16-accurate corrections).
+
+3. **Neumaier–Shcherbina safe bound** — `ns_safe_bound(y, …)`, the same
+   weak-duality lower bound `g(y) = bᵀy + Σ_j min_{x_j∈box}(c − Aᵀy)_j x_j` the
+   MILP boundary already applies to candidate A's drifted dual
+   (`milp_simplex._safe_lp_lower_bound_std`) and that `primal::safe_bound` uses in
+   its tests. `g(y)` is valid for **any** `y`, so a refined dual can only *tighten*
+   the certificate — never lift a bound above the true optimum. Refinement improves
+   the multiplier fed into this function; it changes no guard, tolerance, or
+   fallback.
+
+### Why the precision has to live here, not inside feral
+
+feral's *existing* double-precision iterative refinement (`with_numeric_focus`)
+was already falsified on hda (issue body: "byte-identical, no effect — residual
+computed in double can't recover ~1e14 loss"). GSW is a **different layer**: the
+residual is computed against the original problem data at *higher-than-double*
+precision (`residual_dd`), then a **double** correction solve consumes it. Only the
+residual is high-precision. That is exactly what this module adds, and exactly what
+a feral-internal double-precision refine cannot.
+
+## Cargo-validated results (`cargo test -p discopt-core --lib refine`, 12 tests)
+
+| test | what it proves |
+|---|---|
+| `two_sum_is_exact`, `two_prod_is_exact` | the error-free transforms are exact (the precision floor of the whole layer) |
+| `residual_dd_survives_catastrophic_cancellation` | `1e16 + 1 − 1e16`: naive float64 → `0`, `residual_dd` → the exact `1` |
+| `residual_dd_recovers_arrhenius_scale_product_error` | at hda's `6.3e10 × 1.96e-13` Arrhenius magnitudes, `residual_dd` recovers the sub-ulp product tail naive drops to `0` |
+| `dot_dd_beats_naive_on_cancellation` | double-double dot resolves a cancellation naive gets wrong |
+| `refine_exact_solver_reproduces_optimum_bound` | the GSW loop + `ns_safe_bound` reproduce the true LP optimum |
+| `refine_extracts_accuracy_below_the_inner_solvers_grid` | given an inner solver capped at **1e-4** accuracy, refinement drives the true residual **< 1e-9** — the core GSW guarantee (accuracy past the inner solver's floor), the analogue of escaping HiGHS's ~1e-7 feasibility-tolerance floor on hda |
+| `refine_tightens_a_drifted_dual_on_an_ill_conditioned_lp` | on a 1e8-range LP, a single lossy solve gives a **drifted dual → loose** safe bound; refinement tightens it to the optimum (candidate A → tight, in miniature) |
+| `ns_safe_bound_is_never_above_optimum_for_arbitrary_dual` | soundness: `g(y) ≤ opt` for arbitrary `y` — the property candidate A relies on |
+
+Full suite green: `cargo test -p discopt-core --lib` → **470 passed**; `cargo
+clippy -p discopt-core --lib` clean.
+
+The `…grid` and `…drifted_dual` tests are the honest model of hda: the obstacle
+there is **not** float64 arithmetic cancellation in a single residual (hda's
+balancing terms are ~1e-11, only ~1 digit of cancellation) — it is a **fixed
+tolerance floor** (HiGHS's ~1e-7; feral's growth guards) that a single double
+solve cannot see under. GSW's scale-up-and-resolve is what escapes that floor, and
+that is precisely what these two tests exercise with a deliberately floor-limited
+inner solver.
+
+## Integration seam (follow-up, default-OFF, failure-triggered)
+
+The kernel is deliberately **unwired**. The production seam is a one-call-site
+change at the numerical-failure branch that already computes candidate A:
+
+- Rust: `dual.rs::solve_lp_warm_csc`, on `LpStatus::Numerical`, would build a
+  `CorrectionSolver` over the same CSC `A` (a thin adapter over the existing
+  warm-started simplex) and call `refine(...)`, then export the **refined** dual
+  in the existing `LpSolve::dual` field. No Python change is then required — the
+  boundary's existing `_safe_lp_lower_bound(dual, …)` (`milp_simplex.py:691`)
+  automatically tightens from the better dual.
+- Behind a new **default-OFF** flag `DISCOPT_LP_ITERATIVE_REFINEMENT` (a
+  `SolverTuning` field alongside `node_numerical_dual_bound`), **root-only /
+  numerical-failure-triggered** — never the hot per-node engine. Flag OFF ⇒ the
+  path is byte-identical to today.
+- Candidate A (#662) stays as the fallback: if refinement fails to converge (or
+  the inner solve fails), the drifted-dual NS bound is still emitted, so the seam
+  can only *improve* hda's bound, never lose it.
+
+### The remaining blocker (the harder, feral-touching half)
+
+Per the issue, GSW alone does **not** rescue hda without a **working factorization
+on near-singular bases**. hda's root LP defeats feral with an FT `Growth`
+*factorization failure* — the simplex cannot even return the inaccurate
+approximate solution GSW refines; it returns nothing. GSW's correction solves reuse
+the same `A`, so they hit the same near-singular bases. The correction *rhs/bounds*
+are better-scaled (residual scaled to O(1)), which helps conditioning, but the
+rank deficiency (~13–43) is scale-invariant, so a correction solve can still land
+on a singular basis. Closing #671 end-to-end therefore also needs one of:
+
+- **rank-revealing / regularized LU** (pivot to reveal the rank, regularize the
+  dependent rows), or
+- **basis management** that steers the simplex off the near-singular vertices, or
+- an **exact-rational** correction solve on the (small) failing sub-block only —
+  the E2 core was 2×3; a real exact-LP library (QSopt_ex / SoPlex-exact) is routine
+  at 3008×1140.
+
+This half is out of scope for this change (it modifies feral's hot factorization
+and needs its own bound-neutral panel). The kernel here is the prerequisite layer
+it plugs into.
+
+## Verification regime (unchanged from the issue; Dev-Philosophy #5)
+
+- **Bound-neutral by construction now:** the module is unwired, so `node_count` and
+  certified `objective` are exactly unchanged on every already-solving instance —
+  nothing calls it. `cargo test -p discopt-core` green (470).
+- **When wired (follow-up):** default-OFF flag; the certifying panel runs with the
+  flag OFF (byte-identical) and ON (fires only on numerical-failure nodes). The NS
+  bound is sound for any dual, and incumbents remain independently
+  feasibility-verified; `incorrect_count ≤ 0` with zero slack. Target acceptance:
+  hda reports a **tight** finite dual bound (materially closer to opt −5964.53 than
+  candidate A's −1.80e10, i.e. ≈ −6.47e4, the true root McCormick value), no panel
+  regression.
+
+## Scope honesty
+
+This tightens the **certificate**. It does **not** close hda's optimality gap: the
+residual between −6.47e4 and opt −5964.53 is the genuine McCormick relaxation gap
+at the root box (branch-and-reduce / a stronger relaxation — an orthogonal effort),
+not anything LP precision can touch.
+
+## References
+
+- #517 (first finite bound), #662 (candidate A, merged), #664 (superseded),
+  #708 (entry experiment, docs-only).
+- Gleixner, Steffy, Wolter, *Iterative Refinement for Linear Programming*,
+  INFORMS J. Comput. 28(3), 2016.
+- `crates/discopt-core/src/lp/simplex/refine.rs`,
+  `docs/dev/issue-671-hda-exact-lp-entry-experiment-2026-07-17.md`,
+  `docs/dev/hda-no-bound-simplex-robustness-2026-07-16.md`.
