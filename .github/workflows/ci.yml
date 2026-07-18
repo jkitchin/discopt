@@ -295,11 +295,10 @@ jobs:
             sympy pyomo litellm equinox optax onnx onnxruntime xgboost lightgbm \
             pytest pytest-timeout pytest-xdist pytest-cov
           maturin develop
-      # --cov-fail-under was temporarily lowered 85 -> 70 -> 65 after the
-      # AMP merge (#86). #87 is restoring it: raised back to 80 with the
-      # optional-dep unlock + the AMP/solver/parser test batteries
-      # (measured 83%+ locally with this job's exact command); the final
-      # bump to 85 lands when the remaining breadth modules are covered.
+      # --cov-fail-under restored to 85 (#87) after the post-AMP-merge
+      # 85 -> 70 -> 65 lowering: the optional-dep unlock plus the
+      # property-test batteries measured 85.50% with this job's exact
+      # command and marker set (see the #87 PR for the run log).
       - name: Run pytest with coverage
         run: |
           source .venv/bin/activate
@@ -309,7 +308,7 @@ jobs:
             --ignore=python/tests/test_correctness.py \
             -n "${PYTEST_XDIST_WORKERS}" --dist loadgroup \
             --cov=discopt --cov-report=term-missing --cov-report=xml:coverage.xml \
-            --cov-fail-under=80
+            --cov-fail-under=85
         env:
           JAX_PLATFORMS: cpu
           JAX_ENABLE_X64: "1"
