@@ -290,7 +290,18 @@ interval fallback that the failure path would have used.
   bound-loop and needs its own bound-neutral panel, so it is recorded as a
   follow-up tightening rather than gating this graduation.
 
-## 6. Step 5 — graduate and protect
+## 6. Step 5 — graduate and protect ✅ DONE
+
+**Status: complete.** Default flipped to ON (`_env_flag(..., default=True)`),
+`=0` opt-out + legacy no-filter path intact. Docstring updated with the
+graduation record + SOFT-loss/monotone disposition. Regression tests: defaults-on
++ `=0` opt-out; hda tight bound at DEFAULT settings; hda `=0` opt-out restores the
+loose candidate-A floor (legacy path intact). Re-ran `pytest -m smoke` with the
+new default ON: **827 passed, 15 skipped, 2 xpassed** — identical to default-OFF
+(the filter is inert on every cleanly-solving smoke instance). Guardrail
+re-checked: production diff vs `main` reverts no #732 hunk.
+
+### (original Step 5)
 
 1. Flip the default: `relax_row_filter` → `_env_flag("DISCOPT_RELAX_ROW_FILTER",
    default=True)`. Keep the `=0` opt-out and the legacy no-filter path intact.

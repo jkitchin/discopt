@@ -27,6 +27,7 @@ If the instance list is omitted, every *.nl in <corpus_dir> is run.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import math
 import os
@@ -137,12 +138,9 @@ def run(path, name, tl):
     # positives — a genuine flag-induced node_count change survives it (both arms
     # warm), so it cannot mask a real regression.
     os.environ[FLAG] = "0"
-    with warnings.catch_warnings():
+    with warnings.catch_warnings(), contextlib.suppress(Exception):
         warnings.simplefilter("ignore")
-        try:
-            from_nl(path).solve(time_limit=min(tl, 10.0))
-        except Exception:
-            pass
+        from_nl(path).solve(time_limit=min(tl, 10.0))
     for flag in ("0", "1"):
         os.environ[FLAG] = flag
         _DROP_COUNTER["rows"] = 0
@@ -215,9 +213,9 @@ def assess(rec):
         )
     # timeout heuristic: node counts under a time budget are only comparable when
     # both arms actually terminate (not wall-limited).
-    TERMINAL = ("optimal", "infeasible", "OPTIMAL", "INFEASIBLE", "unbounded")
-    off_term = off["status"] in TERMINAL
-    on_term = on["status"] in TERMINAL
+    terminal = ("optimal", "infeasible", "OPTIMAL", "INFEASIBLE", "unbounded")
+    off_term = off["status"] in terminal
+    on_term = on["status"] in terminal
     both_terminate = off_term and on_term
 
     def _obj_changed():
@@ -268,9 +266,7 @@ def assess(rec):
                 )
     elif off_term != on_term:
         # one arm solves, the other doesn't -> the filter changed terminality.
-        problems.append(
-            f"TERMINALITY CHANGE: OFF status={off['status']} ON status={on['status']}"
-        )
+        problems.append(f"TERMINALITY CHANGE: OFF status={off['status']} ON status={on['status']}")
     else:
         # both wall-limited: node/obj differences are jitter, not a code effect.
         if off["nodes"] != on["nodes"] or off["obj"] != on["obj"]:
@@ -311,8 +307,11 @@ def main():
     _install_drop_counter()
     rows = []
     n_fail = n_fired = 0
-    print(f"{'instance':22s} {'oracle':>12s} | {'OFFbound':>12s} {'ONbound':>12s} "
-          f"| {'drop':>5s} {'ONnodes':>8s} | signal | cert", flush=True)
+    print(
+        f"{'instance':22s} {'oracle':>12s} | {'OFFbound':>12s} {'ONbound':>12s} "
+        f"| {'drop':>5s} {'ONnodes':>8s} | signal | cert",
+        flush=True,
+    )
     for name in names:
         path = os.path.join(corpus_dir, f"{name}.nl")
         if not os.path.exists(path):
@@ -332,7 +331,7 @@ def main():
         rec["inert"] = inert
         rows.append(rec)
         n_fail += bool(problems)
-        n_fired += (not inert)
+        n_fired += not inert
         cert = "CLEAN" if not problems else "!! " + "; ".join(problems)
         if notes:
             cert += "  [" + "; ".join(notes) + "]"
