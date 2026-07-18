@@ -14,6 +14,7 @@ import logging
 import math
 import os
 import time
+import weakref
 from typing import TYPE_CHECKING, Any, Callable, Optional, TypeVar, Union, cast
 
 import numpy as np
@@ -518,6 +519,126 @@ _ROOT_FIXPOINT_MIN_GAP = 1e-4
 # per-node LP catastrophically slow on large models (casctanks, 500 vars: 359 s
 # for one node), so it is auto-engaged only at or below this lifted-variable count.
 _AUTO_RLT_LEVEL1_MAX_VARS = 50
+
+
+def _rlt_root_gain(model: "Model") -> Optional[float]:
+    """Relative root-bound improvement from build-time level-1 RLT, or ``None``.
+
+    Solves the root McCormick LP relaxation once with and once without RLT over the
+    model's current box and returns ``|b_rlt − b_noRLT| / (|b_noRLT| + 1)`` — the
+    productivity signal that separates the RLT-*productive* class (pooling: RLT
+    closes the root, gain ≈ 0.68) from the RLT-*inert* class (heatexch: root
+    unchanged, gain ≈ 1e-11). Returns ``None`` on any failure (unsolved root,
+    non-finite bound, relaxer error) so the caller declines the widening rather than
+    risk a regression. Read-only on ``model`` and bounded in time; called at most
+    once per solve via the ``_RLT_ROOT_GAIN_CACHE`` memo below.
+    """
+    try:
+        import numpy as _np
+
+        from discopt._jax.mccormick_lp import MccormickLPRelaxer
+
+        lb = _np.concatenate(
+            [_np.atleast_1d(_np.asarray(v.lb, float) * _np.ones(v.size)) for v in model._variables]
+        )
+        ub = _np.concatenate(
+            [_np.atleast_1d(_np.asarray(v.ub, float) * _np.ones(v.size)) for v in model._variables]
+        )
+
+        def _root(rlt: bool) -> Optional[float]:
+            r = MccormickLPRelaxer(model, rlt_cuts=rlt, rlt_level1=rlt, psd_cuts=False)
+            res = r.solve_at_node(lb, ub, time_limit=_RLT_ROOT_PROBE_TIME_S, separate=True)
+            if res is None or res.status != "optimal" or res.lower_bound is None:
+                return None
+            b = float(res.lower_bound)
+            return b if _np.isfinite(b) else None
+
+        b0 = _root(False)
+        b1 = _root(True)
+        if b0 is None or b1 is None:
+            return None
+        return abs(b1 - b0) / (abs(b0) + 1.0)
+    except Exception:  # pragma: no cover - defensive; decline widening on any failure
+        return None
+
+
+# One-time-per-solve memo for the root-productivity probe. Both gate call sites
+# (build-time level-1 and the per-node cut policy) see the same root box, so the
+# verdict is identical and the two root LP solves run only once. A WeakKeyDictionary
+# auto-evicts when the model is collected — no unbounded growth and no id-reuse stale
+# hit across solves.
+_RLT_ROOT_GAIN_CACHE: "weakref.WeakKeyDictionary[Any, Optional[float]]" = (
+    weakref.WeakKeyDictionary()
+)
+# Time budget (s) for each of the two root LP solves in the productivity probe. Small:
+# the sparse size ceiling keeps the admitted relaxations tiny (measured <=1.6 s each).
+_RLT_ROOT_PROBE_TIME_S = 5.0
+
+
+def _rlt_sparse_admit(model: "Model", n_vars: int) -> bool:
+    """Structure- and productivity-aware widening of the RLT auto-engage gate
+    (issue #727, flag-gated).
+
+    The raw ``_AUTO_RLT_LEVEL1_MAX_VARS`` / ``_AUTO_CUTS_MAX_VARS`` variable-count
+    caps are a poor proxy for RLT cost: what makes build-time level-1 RLT expensive
+    is the number of lifted product columns/rows, which grows ~linearly with the
+    variable count for a **sparse-bilinear** model (pooling / bilinear-flow network)
+    but quadratically for a **dense** QCQP. Medium pooling instances therefore have a
+    cheap, root-closing RLT relaxation yet are excluded by the raw cap — the measured
+    #727 gap ("weak McCormick root bound" on the pooling / bilinear-network family):
+    with RLT the root certifies in seconds; without it the McCormick bound is ~2-3x
+    loose and the solve times out.
+
+    Two conditions, both required when ``rlt_sparse_auto`` is on:
+
+    1. **Structure** — product-term count ≤ ``rlt_sparse_max_terms`` (the lifted-column
+       budget: sparse bilinear vs dense QCQP) AND variable count ≤
+       ``rlt_sparse_max_vars`` (a ceiling on the enlarged per-node re-solve cost, and
+       on the probe cost below).
+    2. **Productivity** (when ``rlt_sparse_root_probe`` is on) — a bounded root probe
+       must show a relative root-bound improvement ≥ ``rlt_sparse_min_root_gain``.
+       Structure alone admits models where RLT is *sound but net-negative*: heatexch is
+       sparse bilinear yet RLT leaves the root bound unchanged (~1e-11), so the heavier
+       node LP only starves branching. The probe keeps the productive class (pooling,
+       ~0.68) and drops the inert one.
+
+    Returns ``False`` (no widening) when the flag is off, so default dispatch is
+    byte-identical, and declines on any probe failure (never regress the default). RLT
+    is sound regardless of engagement, so this only trades relaxation size for bound
+    tightness, never correctness.
+    """
+    tun = _tuning()
+    if not getattr(tun, "rlt_sparse_auto", False):
+        return False
+    if n_vars > int(tun.rlt_sparse_max_vars):
+        return False
+    try:
+        from discopt._jax.term_classifier import classify_nonlinear_terms
+
+        terms = classify_nonlinear_terms(model)
+        n_terms = (
+            len(terms.bilinear)
+            + len(getattr(terms, "trilinear", []))
+            + len(getattr(terms, "multilinear", []))
+        )
+    except Exception:  # pragma: no cover - defensive; abstain (no widening) on failure
+        return False
+    if n_terms > int(tun.rlt_sparse_max_terms):
+        return False
+    # Structure passed. Apply the productivity gate unless explicitly disabled.
+    if not getattr(tun, "rlt_sparse_root_probe", True):
+        return True
+    try:
+        if model not in _RLT_ROOT_GAIN_CACHE:
+            _RLT_ROOT_GAIN_CACHE[model] = _rlt_root_gain(model)
+        gain = _RLT_ROOT_GAIN_CACHE[model]
+    except TypeError:  # pragma: no cover - model not weakref-able; probe without memo
+        gain = _rlt_root_gain(model)
+    if gain is None:
+        return False  # probe failed → decline (never regress the default path)
+    return gain >= float(tun.rlt_sparse_min_root_gain)
+
+
 # Convex-objective node bound (the supporting-hyperplane lower bound for a model
 # whose minimized objective is a convex quadratic). No size cap: the bound is a
 # deterministic projected-gradient solve on the constant Hessian and is valid at
@@ -2772,7 +2893,10 @@ def _apply_auto_cut_policy(model: "Model", relaxer) -> None:
 
     try:
         n = sum(v.size for v in model._variables)
-        if n > _AUTO_CUTS_MAX_VARS:
+        # Sparse-bilinear widening (issue #727, flag-gated default-off): admit the
+        # per-node RLT cut family for a medium pooling / bilinear-network model whose
+        # product structure is sparse, past the raw variable-count gate.
+        if n > _AUTO_CUTS_MAX_VARS and not _rlt_sparse_admit(model, n):
             return  # size gate: leave cuts off
         has_linear_constraints = bool(_linear_constraint_forms(model, n))
         if has_linear_constraints:
@@ -6050,7 +6174,13 @@ def solve_model(
         # The per-node cut family is untouched (this only adds the root tightening),
         # and RLT is sound, so this trades bound tightness for size, never
         # correctness. An explicit rlt=True/False still wins.
-        _auto_rlt_level1 = _rlt_on is None and n_vars <= _AUTO_RLT_LEVEL1_MAX_VARS
+        # The raw variable-count cap excludes medium sparse-bilinear models
+        # (pooling / bilinear-flow networks) whose RLT relaxation is small and
+        # root-closing; ``_rlt_sparse_admit`` widens the gate for exactly that
+        # structural class when ``rlt_sparse_auto`` is on (issue #727, default off).
+        _auto_rlt_level1 = _rlt_on is None and (
+            n_vars <= _AUTO_RLT_LEVEL1_MAX_VARS or _rlt_sparse_admit(model, n_vars)
+        )
         _eff_rlt_level1 = bool(_rlt_on) or _auto_rlt_level1
 
         # The spatial path needs at least one variable it can branch on: a
