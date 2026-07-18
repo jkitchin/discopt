@@ -193,12 +193,29 @@ class Interval:
         # dominate). Genuine ±∞ corners are left untouched — only NaN is
         # replaced.
         with np.errstate(invalid="ignore"):
-            a = _nan_corner_to_zero(self.lo * other.lo)
-            b = _nan_corner_to_zero(self.lo * other.hi)
-            c = _nan_corner_to_zero(self.hi * other.lo)
-            d = _nan_corner_to_zero(self.hi * other.hi)
-        lo = np.minimum(np.minimum(a, b), np.minimum(c, d))
-        hi = np.maximum(np.maximum(a, b), np.maximum(c, d))
+            a = self.lo * other.lo
+            b = self.lo * other.hi
+            c = self.hi * other.lo
+            d = self.hi * other.hi
+            lo = np.minimum(np.minimum(a, b), np.minimum(c, d))
+            hi = np.maximum(np.maximum(a, b), np.maximum(c, d))
+            # #723: a NaN corner can arise *only* from ``0 * ±∞`` (every other
+            # operand pair is finite×finite or a genuine ±∞ product), and
+            # ``np.minimum``/``np.maximum`` propagate it into ``lo``/``hi``. So
+            # we detect it on the (already computed) result rather than paying
+            # four ``np.nan_to_num`` calls on every multiply — the interval AD /
+            # monotonicity walkers build millions of these and the vast majority
+            # have finite endpoints, where the cleanup is a no-op. Bound-neutral:
+            # on the finite fast path ``_nan_corner_to_zero`` is the identity, so
+            # the min/max are identical; only when a NaN actually appears do we
+            # redo the corners with the ``0 * ±∞ -> 0`` convention (C-36).
+            if bool(np.isnan(lo).any()) or bool(np.isnan(hi).any()):
+                a = _nan_corner_to_zero(a)
+                b = _nan_corner_to_zero(b)
+                c = _nan_corner_to_zero(c)
+                d = _nan_corner_to_zero(d)
+                lo = np.minimum(np.minimum(a, b), np.minimum(c, d))
+                hi = np.maximum(np.maximum(a, b), np.maximum(c, d))
         return Interval(_round_down(lo), _round_up(hi))
 
     __rmul__ = __mul__
