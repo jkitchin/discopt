@@ -171,7 +171,22 @@ Cheap checks before running anything heavy:
    `−18016528426.5` byte-identical. Also nvs05 + nvs09 ON-vs-OFF: identical
    status/certificate/node_count/objective.
 
-## 4. Step 3 — standard verification battery
+## 4. Step 3 — standard verification battery ✅ DONE
+
+**Status: complete, all green.**
+- row-filter + candidate-A (#517) + NS-decline (#362) + refinement (#671)
+  fast suites: **9 passed**.
+- `cargo test -p discopt-core --lib`: **479 passed**, 0 failed.
+- `pytest python/tests -m smoke`: **827 passed, 15 skipped, 2 xpassed**, 0
+  failed (347 s).
+- `pytest python/tests/test_adversarial_recent_fixes.py -m slow`: 9 passed;
+  `test_large_dense_jacobian_no_crash` failed *only* under CPU contention
+  (its `wall < budget + 40 s` deadline). Re-run in isolation: **PASSED at
+  25.84 s**. Not a regression — the port is default-OFF and byte-identical to
+  `main` on that test's path (the flag is unset, so the added block is
+  skipped).
+
+### (original checklist)
 
 - `pytest python/tests/test_relax_row_filter.py -v`
 - `pytest python/tests/test_issue_671_lp_iterative_refinement.py -m "not slow"`
