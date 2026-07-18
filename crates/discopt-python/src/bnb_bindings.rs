@@ -8,7 +8,20 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
-use discopt_core::bnb::{NodeId, NodeResult, SelectionStrategy, TreeManager, VarBranchInfo};
+use discopt_core::bnb::{
+    NodeId, NodeResult, NodeStatus, SelectionStrategy, TreeManager, VarBranchInfo,
+};
+
+/// Map a node's terminal status to a stable lowercase string for the certificate.
+fn node_status_str(status: NodeStatus) -> &'static str {
+    match status {
+        NodeStatus::Pending => "pending",
+        NodeStatus::Evaluated => "evaluated",
+        NodeStatus::Branched => "branched",
+        NodeStatus::Pruned => "pruned",
+        NodeStatus::Fathomed => "fathomed",
+    }
+}
 
 /// Python wrapper around the Rust TreeManager for B&B search.
 #[pyclass]
@@ -319,6 +332,31 @@ impl PyTreeManager {
         dict.set_item("bound_unresolved", s.bound_unresolved)?;
         dict.set_item("unresolved_floor", s.unresolved_floor)?;
         Ok(dict)
+    }
+
+    /// Export the entire B&B tree for Tier-3 certificate construction.
+    ///
+    /// Returns a list of per-node dicts ``{id, parent, depth, lb, ub,
+    /// local_lower_bound, status}`` where ``status`` is one of ``pending`` /
+    /// ``evaluated`` / ``branched`` / ``pruned`` / ``fathomed`` and ``parent`` is
+    /// ``None`` for the root. Read-only and bound-neutral — calling it does not
+    /// alter the search. Python reconstructs branch decisions from parent/child box
+    /// differences and checks the covering.
+    fn tree_records<'py>(&self, py: Python<'py>) -> PyResult<Vec<Bound<'py, PyDict>>> {
+        let recs = self.inner.tree_records();
+        let mut out = Vec::with_capacity(recs.len());
+        for r in recs {
+            let d = PyDict::new(py);
+            d.set_item("id", r.id)?;
+            d.set_item("parent", r.parent)?;
+            d.set_item("depth", r.depth)?;
+            d.set_item("lb", PyArray1::from_vec(py, r.lb))?;
+            d.set_item("ub", PyArray1::from_vec(py, r.ub))?;
+            d.set_item("local_lower_bound", r.local_lower_bound)?;
+            d.set_item("status", node_status_str(r.status))?;
+            out.push(d);
+        }
+        Ok(out)
     }
 
     /// R3a measurement accessor (temporary, behavior-neutral): per-variable
