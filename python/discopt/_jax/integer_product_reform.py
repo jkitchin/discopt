@@ -109,9 +109,12 @@ class _Expander:
     """Creates and caches the binary expansion of integer factor variables and
     accumulates the linking ``x_i == lo + sum 2^k e_k`` constraints."""
 
-    def __init__(self, model: Model, implied=frozenset(), participation=None):
+    def __init__(self, model: Model, implied=frozenset(), participation=None, multilinear=False):
         self.model = model
         self.implied = implied
+        # When True, also exact-linearize integer-multilinear products (>=3 factors,
+        # <=1 continuous) — issue #707. Left off for the pure-bilinear entry points.
+        self.multilinear = multilinear
         # (var._index, elem) -> number of bilinear products the factor appears in;
         # the more-shared factor is expanded so its bits are reused (fewer vars).
         self.participation = participation or {}
@@ -131,6 +134,12 @@ class _Expander:
         # Cleared if an aux column cannot be described (defensive): then the whole
         # spec is discarded and no warm start is mapped rather than one misaligned.
         self.spec_ok = True
+        # Caches for the multilinear path (issue #707) so a binary monomial shared
+        # across several product terms is lifted once: key -> aux Variable.
+        #   _and_cache: tuple(sorted bit _index) -> binary AND aux
+        #   _bigm_cache: (e._index, other._index, other_elem) -> big-M product aux
+        self._and_cache: dict[tuple, Variable] = {}
+        self._bigm_cache: dict[tuple, Variable] = {}
 
     def expansion(self, var: Variable, elem: int, lo: int, hi: int):
         key = (var._index, elem)
@@ -178,6 +187,15 @@ class _Expander:
         # meaningless, not just at true infinity.
         if not (abs(lo_o) <= _BIGM_BOUND_CAP and abs(hi_o) <= _BIGM_BOUND_CAP):
             raise ValueError("cannot big-M-linearize a product with an unbounded factor")
+        # Reuse an identical ``e * other`` product if one was already lifted (the
+        # multilinear expansion can request the same AND-aux times continuous
+        # factor across several monomials). Keyed on the scalar refs. Scoped to the
+        # multilinear path so the pure-bilinear reform stays byte-identical (its
+        # blowup-guard threshold depends on the exact aux count — issue #707).
+        _oref = _scalar_var_ref(other) if self.multilinear else None
+        _ckey = (e._index, _oref[0]._index, _oref[1]) if _oref is not None else None
+        if _ckey is not None and _ckey in self._bigm_cache:
+            return self._bigm_cache[_ckey]
         v = Variable(
             f"_ipx_v{self._counter}",
             VarType.CONTINUOUS,
@@ -212,7 +230,43 @@ class _Expander:
         # v - other - hi_o*e + hi_o >= 0   (i.e. v >= other - hi_o*(1-e))
         body_l = BinaryOp("-", BinaryOp("-", v, other), BinaryOp("*", Constant(hi_o), e))
         ac.append(Constraint(BinaryOp("+", body_l, Constant(hi_o)), ">=", 0.0))
+        if _ckey is not None:
+            self._bigm_cache[_ckey] = v
         return v
+
+    def and_product(self, bits: "list[Variable]") -> Variable:
+        """Return a **binary** aux ``z = prod_i e_i`` for a set of binary variables
+        ``e_i`` via the exact multilinear-AND hull
+
+            z <= e_i  (each i),   z >= sum_i e_i - (n-1),   z in {0,1}.
+
+        At ``e_i in {0,1}`` these force ``z = 1`` iff every ``e_i = 1`` — the exact
+        (integral) convex hull of the binary product, tighter than a term-wise
+        McCormick envelope. Shared monomials are lifted once (``_and_cache``)."""
+        key = tuple(sorted(b._index for b in bits))
+        cached = self._and_cache.get(key)
+        if cached is not None:
+            return cached
+        n = len(bits)
+        z = Variable(f"_ipx_z{self._counter}", VarType.BINARY, (), 0.0, 1.0, self.model)
+        self._counter += 1
+        self.model._variables.append(z)
+        # z is exactly the product of its binary inputs, so it reconstructs from a
+        # point over the originals once its inputs are reconstructed. Record the
+        # AND spec (evaluated after every input bit, which are appended earlier).
+        self.aux_spec.append(("and", (z._index, 0), [(b._index, 0) for b in bits]))
+        ac = self.aux_constraints
+        # z - e_i <= 0  (each factor upper-bounds the product)
+        for b in bits:
+            ac.append(Constraint(BinaryOp("-", z, b), "<=", 0.0))
+        # z - sum_i e_i + (n-1) >= 0  (bits is non-empty: n >= 2 at every call site)
+        s: Expression = bits[0]
+        for b in bits[1:]:
+            s = BinaryOp("+", s, b)
+        body = BinaryOp("+", BinaryOp("-", z, s), Constant(float(n - 1)))
+        ac.append(Constraint(body, ">=", 0.0))
+        self._and_cache[key] = z
+        return z
 
 
 def _expand_product(
@@ -322,6 +376,110 @@ def _try_expand_mul(node: BinaryOp, model: Model, exp: _Expander) -> Optional[Ex
     return expanded
 
 
+def _classify_multilinear_factors(node: BinaryOp, exp: _Expander):
+    """Split a product *node* into ``(const, int_refs, cont_factors)`` where
+    ``int_refs`` is a list of ``(var, elem, lo, hi)`` integer variable factors (with
+    multiplicity, one per occurrence) and ``cont_factors`` is a list of
+    ``(scalar_expr, lo, hi)`` for the continuous variable factors. **No expansion
+    columns are created** — this is a pure inspection so a term that fails the
+    reformability guard leaves the model untouched. Returns ``None`` when a factor
+    is not a scalar variable / constant, or there are fewer than three variable
+    factors (the bilinear/square cases are handled elsewhere)."""
+    factors = _collect_mul_factors(node)
+    const = 1.0
+    var_refs: list[tuple[Expression, Variable, int]] = []
+    for f in factors:
+        if isinstance(f, Constant):
+            const *= float(f.value)
+            continue
+        ref = _scalar_var_ref(f)
+        if ref is None:
+            return None  # a non-scalar / non-constant factor — leave to McCormick
+        var_refs.append((f, ref[0], ref[1]))
+    if len(var_refs) < 3:
+        return None
+    int_refs: list[tuple[Variable, int, int, int]] = []
+    cont_factors: list[tuple[Expression, float, float]] = []
+    for e, v, el in var_refs:
+        rng = _int_factor_range(v, el, exp.implied)
+        if rng is not None:
+            int_refs.append((v, el, rng[0], rng[1]))
+        else:
+            lo = float(np.asarray(v.lb).flat[el])
+            hi = float(np.asarray(v.ub).flat[el])
+            cont_factors.append((e, lo, hi))
+    return const, int_refs, cont_factors
+
+
+def _try_expand_multilinear(node: BinaryOp, exp: _Expander) -> Optional[Expression]:
+    """Exactly linearize an *integer-multilinear* product (>=3 variable factors,
+    every factor but at most one integer/binary-valued). Binary-expand each integer
+    factor, distribute the product into binary monomials (using ``e^2 = e``), lift
+    each monomial to its exact hull (an ``and_product`` aux, or the bit itself for a
+    single-bit monomial), and — for the lone continuous factor, if any —
+    big-M-lift ``continuous * monomial``. Returns a purely linear expression, or
+    ``None`` when the term is not of this class (e.g. two continuous factors → a
+    genuine continuous nonlinearity left to McCormick)."""
+    split = _classify_multilinear_factors(node, exp)
+    if split is None:
+        return None
+    const, int_refs, cont_factors = split
+    # At most one continuous factor (to the first power): two distinct or a repeated
+    # continuous factor is a genuine continuous bilinear/square — not exact-linear.
+    # Guard BEFORE creating any expansion column so a bailed term is a true no-op.
+    if len(cont_factors) > 1 or not int_refs:
+        return None
+    int_factors = [exp.expansion(v, el, lo, hi) for (v, el, lo, hi) in int_refs]
+
+    # Distribute the product of the integer factors into monomials over the binary
+    # bits. ``poly`` maps a tuple of distinct bit Variables (sorted by index) to its
+    # integer coefficient; ``e^2 = e`` collapses repeated bits (repeated integer
+    # factor) via the ``any(b is ek ...)`` idempotence check.
+    poly: dict[tuple, float] = {(): 1.0}
+    for lo, bits in int_factors:
+        newpoly: dict[tuple, float] = {}
+        for key, coef in poly.items():
+            if lo != 0.0:
+                newpoly[key] = newpoly.get(key, 0.0) + coef * float(lo)
+            for ck, ek in bits:
+                nk = (
+                    key
+                    if any(b is ek for b in key)
+                    else tuple(sorted((*key, ek), key=lambda b: b._index))
+                )
+                newpoly[nk] = newpoly.get(nk, 0.0) + coef * float(ck)
+        poly = newpoly
+
+    cont = cont_factors[0] if cont_factors else None
+    out: Optional[Expression] = None
+    for key, coef in poly.items():
+        c = const * coef
+        if c == 0.0:
+            continue
+        # Lift the pure-binary monomial ``prod(key)`` to a single 0/1 quantity — the
+        # bit itself, or a binary AND aux; both are ``Variable`` (needed by big-M).
+        if len(key) == 0:
+            mono: Optional[Variable] = None  # empty product == 1
+        elif len(key) == 1:
+            mono = key[0]
+        else:
+            mono = exp.and_product(list(key))
+        if cont is not None:
+            cexpr, clo, chi = cont
+            if mono is None:
+                term_expr: Expression = cexpr  # 1 * continuous
+            else:
+                term_expr = exp.bigm_product(mono, cexpr, clo, chi)  # continuous * 0/1
+        else:
+            if mono is None:
+                out = Constant(c) if out is None else BinaryOp("+", out, Constant(c))
+                continue
+            term_expr = mono
+        term = term_expr if c == 1.0 else BinaryOp("*", Constant(c), term_expr)
+        out = term if out is None else BinaryOp("+", out, term)
+    return out if out is not None else Constant(0.0)
+
+
 def _rewrite(expr: Expression, model: Model, exp: _Expander) -> Expression:
     """Recursively rewrite integer-factor bilinear products in *expr*."""
     if isinstance(expr, BinaryOp):
@@ -330,6 +488,10 @@ def _rewrite(expr: Expression, model: Model, exp: _Expander) -> Expression:
             if sq is not None:
                 return sq
         if expr.op == "*":
+            if exp.multilinear:
+                ml = _try_expand_multilinear(expr, exp)
+                if ml is not None:
+                    return ml
             replaced = _try_expand_mul(expr, model, exp)
             if replaced is not None:
                 return replaced
@@ -436,18 +598,62 @@ def _has_int_square(expr: Expression, implied) -> bool:
     return False
 
 
-def has_integer_product_work(model: Model, implied=frozenset()) -> bool:
+def _has_int_multilinear(expr: Expression, implied) -> bool:
+    """True if *expr* contains an *integer-multilinear* product this pass can
+    exactly linearize: a ``*`` term with >=3 scalar-variable factors, at least one
+    integer-valued (declared or *implied*) and at most one continuous factor. (Two
+    continuous factors is a genuine continuous nonlinearity; fewer than three
+    variable factors is the bilinear/square case handled separately.)"""
+    if isinstance(expr, BinaryOp):
+        if expr.op == "*":
+            refs = [
+                _scalar_var_ref(f)
+                for f in _collect_mul_factors(expr)
+                if not isinstance(f, Constant)
+            ]
+            if len(refs) >= 3 and all(r is not None for r in refs):
+                n_int = sum(1 for (vi, eli) in refs if _int_factor_range(vi, eli, implied))  # type: ignore[misc]
+                n_cont = len(refs) - n_int
+                if n_int >= 1 and n_cont <= 1:
+                    return True
+        return _has_int_multilinear(expr.left, implied) or _has_int_multilinear(expr.right, implied)
+    c = getattr(expr, "operand", None)
+    if isinstance(c, Expression) and _has_int_multilinear(c, implied):
+        return True
+    for attr in ("args", "terms"):
+        seq = getattr(expr, attr, None)
+        if isinstance(seq, (list, tuple)):
+            if any(isinstance(x, Expression) and _has_int_multilinear(x, implied) for x in seq):
+                return True
+    return False
+
+
+def has_integer_product_work(model: Model, implied=frozenset(), multilinear: bool = False) -> bool:
     """True if any constraint/objective has an integer-factor bilinear product or
-    integer square (integer or *implied*-integer factor) this pass can linearize."""
+    integer square (integer or *implied*-integer factor) this pass can linearize.
+    When *multilinear* is set, also detect integer-multilinear products (issue
+    #707)."""
     try:
         for body in _bodies(model):
             found = []
             _for_each_int_bilinear(body, implied, lambda ints: found.append(True))
             if found or _has_int_square(body, implied):
                 return True
+            if multilinear and _has_int_multilinear(body, implied):
+                return True
     except Exception:
         return False
     return False
+
+
+def has_integer_multilinear_work(model: Model, implied=frozenset()) -> bool:
+    """True if any constraint/objective has an integer-*multilinear* product
+    (>=3 factors, <=1 continuous, >=1 integer/implied-integer) — the class the
+    ``DISCOPT_INTEGER_MULTILINEAR_REFORM`` pass linearizes (issue #707)."""
+    try:
+        return any(_has_int_multilinear(body, implied) for body in _bodies(model))
+    except Exception:
+        return False
 
 
 def has_nonconvex_integer_bilinear(model: Model) -> bool:
@@ -487,21 +693,28 @@ def _participation(model: Model, implied) -> dict:
     return counts
 
 
-def expand_integer_products(model: Model, implied=frozenset()) -> Model:
+def expand_integer_products(model: Model, implied=frozenset(), multilinear: bool = False) -> Model:
     """Return a model equivalent to *model* with integer-factor bilinear products
     binary-expanded + big-M-linearized to their exact (pure-MILP) form. ``implied``
     is an optional set of ``(var._index, elem)`` treated as integer-valued in
-    addition to declared integers. Returns *model* unchanged when no such product
-    exists or on any unexpected error (never regresses)."""
+    addition to declared integers. When *multilinear* is set, also exact-linearize
+    integer-multilinear products (>=3 factors, <=1 continuous — issue #707).
+    Returns *model* unchanged when no such product exists or on any unexpected error
+    (never regresses)."""
     try:
-        if not has_integer_product_work(model, implied):
+        if not has_integer_product_work(model, implied, multilinear=multilinear):
             return model
         new_model = Model(model.name)
         new_model._variables = list(model._variables)
         new_model._parameters = list(model._parameters)
         new_model._rebuild_name_index()  # keep the name cache in sync (M7)
         new_model._objective = model._objective
-        exp = _Expander(new_model, implied=implied, participation=_participation(model, implied))
+        exp = _Expander(
+            new_model,
+            implied=implied,
+            participation=_participation(model, implied),
+            multilinear=multilinear,
+        )
 
         rebuilt: list[Constraint] = []
         for c in model._constraints:
@@ -563,6 +776,9 @@ def _attach_warm_start_spec(model: Model, new_model: Model, exp: "_Expander") ->
             if entry[0] == "bit":
                 _, src, k, lo, nbits = entry
                 translated.append(("bit", _flat(src), k, lo, nbits))
+            elif entry[0] == "and":
+                _, z_key, in_keys = entry
+                translated.append(("and", _flat(z_key), [_flat(kk) for kk in in_keys]))
             else:  # "prod"
                 _, e_key, o_key = entry
                 translated.append(("prod", _flat(e_key), _flat(o_key)))
@@ -606,6 +822,12 @@ def extend_initial_point(reformed: Model, x0) -> Optional[np.ndarray]:
             if abs(n - nr) > 1e-6 or nr < 0 or nr > (1 << nbits) - 1:
                 return None
             out.append(float((nr >> k) & 1))
+        elif entry[0] == "and":  # z = prod of already-reconstructed input bits
+            _, _zi, in_idxs = entry
+            prod = 1.0
+            for ii in in_idxs:
+                prod *= float(out[ii])
+            out.append(prod)
         else:  # "prod": v = e * other, both already reconstructed above
             _, ei, oi = entry
             out.append(float(out[ei] * out[oi]))
@@ -634,5 +856,32 @@ def reformulate_integer_bilinear(model: Model) -> Model:
 
         implied = frozenset(detect_implied_integers(model))
         return expand_integer_products(model, implied)
+    except Exception:
+        return model
+
+
+def has_integer_multilinear_reformulation_work(model: Model) -> bool:
+    """True if the model has an integer-*multilinear* product (>=3 factors, <=1
+    continuous, >=1 declared/implied-integer) that the ``#707`` pass linearizes."""
+    try:
+        from .implied_integer import detect_implied_integers
+
+        implied = frozenset(detect_implied_integers(model))
+        return has_integer_multilinear_work(model, implied)
+    except Exception:
+        return False
+
+
+def reformulate_integer_multilinear(model: Model) -> Model:
+    """End-to-end pass (issue #707): detect implied-integer factors, then exactly
+    linearize every integer-factor bilinear **and** integer-multilinear product
+    (>=3 factors, <=1 continuous). A no-op (returns *model*) when nothing applies.
+    Gated by ``DISCOPT_INTEGER_MULTILINEAR_REFORM``; the caller decides whether the
+    result is adopted (pure-MILP → MILP engine, else kept on the spatial path)."""
+    try:
+        from .implied_integer import detect_implied_integers
+
+        implied = frozenset(detect_implied_integers(model))
+        return expand_integer_products(model, implied, multilinear=True)
     except Exception:
         return model

@@ -515,6 +515,44 @@ panel green for 3 consecutive nightlies before default-on.
 > open, and it is open on a hard-bound, not an engine, gap. Reproduction:
 > `discopt_benchmarks/scripts/joint_correlation_moment_probe.py`.
 
+> **Falsified (2026-07-18, issue #707 — "cutoff-driven range reduction certifies
+> the ex1252 class").** #707 shipped the flow-aware integer-multilinear envelope
+> (`DISCOPT_INTEGER_MULTILINEAR_REFORM`), which lifts ex1252's dual bound off its
+> structural 5134 floor by exact-linearizing the objective's integer-multilinear
+> terms `(c+1800·x15)·x0·x3·x18`. That closes the barrier the issue *diagnosed*,
+> but does not certify ex1252 — the reformed dual climbs only to ~48k (opt
+> 128893.74). The natural next hypothesis was that discopt's dual lags because it
+> never gets an incumbent early, so cutoff-driven OBBT/DBBT never fires; the entry
+> experiment fed the **known optimum in as an objective cutoff** and ran root OBBT
+> before writing any code:
+>
+> | box | OBBT no-cutoff | OBBT + cutoff=opt | note |
+> |---|---|---|---|
+> | root (all indicators free) | 0.0 | **0.0** | obj relaxes to 0 → cutoff never binds |
+> | line-1 selected (x18=1) | 12658 | **12658** | identical; cutoff still slack (12658 ≪ 128893) |
+> | + subdivide continuous x12 | 12658 | 12658 | branching the flows does not move it |
+> | + fix integer x0=2,x3=1 (loosest node) | 12658 | 12658 | vs true ≈128893 → **~10× loose** |
+>
+> **The cutoff is inert at every level**: the relaxation is so loose (12658 on the
+> binding node) that `obj ≤ 128893` is trivially satisfied, so it propagates
+> nothing — range reduction / incumbent cutoff is **not** the lever. **Root
+> cause:** the continuous cost rows `x15 = a·x6³ + b·x6²·x12 + c·x12²·x6`
+> (`x6∈[0,2950]`, `x12∈[0,350]`) are relaxed term-wise, and the `w=x6²` lift secant
+> alone spans `w∈[0,8.7M]` — enormously loose, feeding every downstream term. Even
+> with the line selected *and* the integer flow factors fixed, the McCormick
+> relaxation of the cubic gives 12658 vs a true value ~10× higher; subdividing the
+> continuous flows does not tighten it. SCIP's dual reaches 128438 (0.35% gap) at
+> 120 s — its cubic relaxation + cuts are ~10× tighter on exactly this block; and
+> **SCIP itself does not certify ex1252 in 120 s**, so this is a SOTA-frontier
+> bound gap, not an engine/throughput fix. Re-scope (issue #721): the lever is a
+> **stronger relaxation of the wide-range cubic block** — auto piecewise-McCormick
+> on wide monomial factors (the `x6²` secant first), edge-concave/vertex-polyhedral
+> envelopes extended to cubic (non-quadratic) blocks (catalog §7's open item), and
+> RLT tying the cubic equality to the bound/bilinear rows — *not* cutoff/OBBT
+> orchestration, which only compounds once the relaxation is strong enough to make
+> the cutoff bind. Reproduction:
+> `discopt_benchmarks/scripts/ex1252_cutoff_obbt_falsification.py`.
+
 ## 7. Sequencing & rationale (revised by the measurement)
 
 ```
