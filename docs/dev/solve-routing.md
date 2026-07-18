@@ -36,10 +36,11 @@ solve_model(...)                                          [solver.py:2017]
   │     solver="bb"       ──► force B&B (skip GP auto fast-paths)
   │     solver=None       ──► fall through
   │
-  ├─ GDP INTERCEPT (model has disjunctions / logic)
-  │     gdp_method="oa"    ──► Outer Approximation (solve_oa)
-  │     gdp_method="loa"   ──► LOA decomposition
+  ├─ GDP INTERCEPT (model has disjunctions / logic)          [two-axis contract → §4]
+  │     gdp_method="oa"    ──► Outer Approximation (solve_oa) (deprecated → mip-nlp/oa)
+  │     gdp_method="loa"   ──► LOA decomposition   (native disjunctive axis)
   │     gdp_method="big-m"/"hull" ──► reformulate_gdp → standard MINLP (continue)
+  │     NB: native gdp_method (loa) + solver="mip-nlp" ──► ValueError (contradictory; §4)
   │
   ├─ PRE-DISPATCH REWRITES  (sequential; each may replace `model`)
   │     1. factorable_reformulate   (clear sign-definite denominators / lift factorable terms)
@@ -214,3 +215,49 @@ while True:
 > (clay0204m 43%→12%) but cannot escape far basins (syn40m) — there the heuristics
 > return worse points than the B&B's own node incumbent, so the residual gap is a
 > global-*search* problem, not a primal one. See `performance-plan.md`.
+
+---
+
+## 4. Two-axis solver API contract (locked, #323)
+
+The solver API has **two orthogonal axes**. They answer different questions and
+must never be aliased together. This contract was agreed while reviewing #319/#320
+and locked by #323 so later work does not drift; the enforcement below ships and is
+tested — do not weaken it without re-litigating the contract.
+
+**Axis 1 — `gdp_method`: *how a disjunctive model is handled.*** Either reformulate
+the disjunctions into an algebraic MIP/MINLP, or solve the disjunctive form
+*natively* via a logic-based method.
+
+| `gdp_method` | Meaning | Kind |
+|---|---|---|
+| `big-m`, `hull`, `mbigm`, `auto` | reformulate disjunctions → algebraic MIP/MINLP | reformulation |
+| `loa` | logic-based OA, solved natively on the disjunctive form (`solve_gdpopt_loa`) | native disjunctive |
+| `oa` | *deprecated* — was "OA solver + big-M reform"; now warns and reforms as `big-m` | deprecated |
+| `gloa` | *reserved* — global logic-based OA, native axis; not yet implemented | reserved (native) |
+
+**Axis 2 — `solver` / `mip_nlp_method`: *how the resulting algebraic MIP/MINLP is
+solved.*** With `solver="mip-nlp"`, `mip_nlp_method` selects the decomposition
+algorithm: `oa`, `ecp`, `fp`, `goa`, `lp_nlp_bb` (implemented); `roa` (reserved).
+
+### The two locked rules
+
+1. **Native-disjunctive `gdp_method` + `solver="mip-nlp"` raises.** Requesting a
+   native `gdp_method` (`loa`) together with `solver="mip-nlp"` is contradictory —
+   one says "solve the disjunctions natively," the other says "reformulate to
+   algebraic and decompose." This raises a clear `ValueError` rather than silently
+   reformulating away the native request.
+   Enforced: `solver.py` (`native_gdp_methods = {"loa"}` guard, ~line 3819).
+   Test: `test_mip_nlp_rejects_native_gdp_solver_method` (`python/tests/test_mip_nlp.py`).
+
+2. **`goa` ≠ `gloa`; they must stay distinct and must not be aliased.** `goa` is a
+   `mip_nlp_method` (generalized/global OA over the *algebraic* MINLP). `gloa`
+   (global *logic-based* OA) belongs on the *native* `gdp_method` axis and is
+   reserved — requesting it as a `mip_nlp_method` raises and points the caller at
+   `goa` (algebraic) vs the `gdp_method` axis (logic-based).
+   Enforced: `mip_nlp.py` `_normalize_method` (~line 638).
+   Test: `test_mip_nlp_method_gloa_is_reserved_for_gdp_axis` (`python/tests/test_mip_nlp.py`).
+
+Line anchors are approximate — grep the named guards/tests if they drift. The
+umbrella "establish the two-axis API" work is tracked in
+`mip-nlp-upstream-readiness.md` (issue #111).
