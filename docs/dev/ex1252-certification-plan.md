@@ -177,6 +177,20 @@ counts *before* continuous/spatial dimensions collapses the shallow-node floor.
    OBBT+LP bound), recursing one level (pump counts) on configs that stay weak.
    With deliverable 1's amplification, the surviving weak set is exactly the
    multi-line configs — the recursion targets their pump-count integers.
+   *Recursion entry experiment (2026-07-18,
+   `ex1252_pump_recursion_probe.py`, config (1,1,0), zero-dichotomies `{0}` vs
+   `[1,3]` on the 4 active pump vars):* **12/16 children prune** (LP-infeasible)
+   — the dichotomy eliminates hard; 2 children bound (62027 and 6814 — the
+   all-pumps-on child needs one value-split level `{1},{2},{3}` to climb); 2
+   children are `numerical` — genuinely infeasible (head equation
+   `x18 = 0.0025·x9·x3` with both line-1 pumps zero) but the ill-conditioned LP
+   cannot Farkas-certify it and OBBT does not cross. **The same contradiction is
+   provable by interval FBBT alone**, so the pass must run a per-box FBBT step
+   before the LP — the Rust binding exposes exactly this
+   (`tighten_var_bounds` + `fbbt`/`fbbt_with_cutoff`). Implementation shape:
+   per config box, FBBT → OBBT(cutoff) → LP; prune on any of the three; recurse
+   zero-dichotomies then value-splits on the weakest surviving child, under a
+   node/LP budget; return max(root bound, min over leaves).
 3. Only then revisit in-tree branching (the correct mechanism is dichotomy
    branching on config variables regardless of fractionality — a tree-side
    change, larger scope).
