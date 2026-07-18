@@ -125,6 +125,24 @@ def run(path, name, tl):
     opt = oracle(name)
     arms = {}
     sense = "minimize"
+    # Equal-warmth warmup (measured 2026-07-18). The FIRST solve of an instance
+    # in a process can differ in node_count from later solves of the SAME
+    # instance — per-instance JAX retrace / structure-cache population changes
+    # timing-budgeted per-node work, hence branching (measured on tls2:
+    # 421 nodes cold -> 353 nodes warm, IDENTICAL for flag OFF and ON). Without
+    # this, the OFF arm (always measured first) is cold and the ON arm warm, a
+    # FALSE bound-neutral violation attributed to the flag. A discarded warmup
+    # solve puts BOTH arms at equal warmth so any residual node_count difference
+    # is a real code effect, not warmup ordering. This only removes false
+    # positives — a genuine flag-induced node_count change survives it (both arms
+    # warm), so it cannot mask a real regression.
+    os.environ[FLAG] = "0"
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        try:
+            from_nl(path).solve(time_limit=min(tl, 10.0))
+        except Exception:
+            pass
     for flag in ("0", "1"):
         os.environ[FLAG] = flag
         _DROP_COUNTER["rows"] = 0
