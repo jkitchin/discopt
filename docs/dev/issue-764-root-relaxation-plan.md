@@ -294,6 +294,45 @@ anywhere; `tanksize`/`nvs05` are gate probes only.
 
 ---
 
+## Phase 2 implementation attempt — the marginals blocker (2026-07-18)
+
+Started building the cheap reduced-cost DBBT lever (item 3): recovered the property-tested
+`node_reduce` module (removed #581, restorable at `f2bfe63^:python/discopt/_jax/node_reduce.py`) —
+its DBBT math is sound (`d_j > 0 ⇒ x_j ≤ l_j + gap/d_j`, `gap = cutoff − safe_bound ≥ 0`,
+tighten-only, integer endpoints rounded inward). But wiring it revealed a **hard prerequisite that
+also explains the #685 net-negative verdict**:
+
+- DBBT needs the node LP's **reduced costs**. Those are produced *only* by the **incremental/warm**
+  node path (`_try_incremental_node` → `solve_assembled_full(return_cert=True)`).
+- The incremental engine is **built only for models with a "composite lift"** — `_inc is None` for
+  `tanksize` (and much of the spatial class). Those nodes take the **cold** path, whose `milp.solve()`
+  **discards the Rust simplex's duals** (its result exposes only `bound/objective/x`, no `dual`).
+- So on the whole non-composite-lift class, T2.4's `reduce_node` had **no reduced costs** and
+  silently no-op'd — it added overhead for zero tightening. That, not a fundamental defect, is why
+  the #685 held-out gate scored it net-negative. Instrumented on `tanksize`: **0 of 24 node solves
+  produced reduced costs** with `want_marginals=True`.
+
+**Corrected scope for Phase 2.** The real first task is **cold-path marginal extraction**, not
+wiring `reduce_node`: thread the row duals `y` (already returned by `solve_lp_warm_csc_py`) through
+`milp.solve()` → the separation chain → `MccormickLPResult`, compute `d = c − Aᵀy` on the certified
+final solve, then DBBT can run on the cold-path class. This is a change in the **hottest
+sound-critical LP code** — a wrong reduced cost tightens a bound that can cut the optimum
+(false-optimal, the #1 failure). It ships default-OFF behind a flag and needs the full Regime-2
+graduation panel. It is a multi-day, sound-first task, deliberately **not** rushed into the
+certificate path in a single session. The `node_reduce` module was removed again (no dead code on
+`main`); recover it from git when the marginals prerequisite lands.
+
+Ordered Phase 2 plan:
+1. Cold-path marginals (`milp.solve(want_marginals=True)` → `reduced_costs`/`safe_bound` on the cold
+   result), with a property test: `d = c − Aᵀy` matches a reference dual solve to 1e-9 on a box
+   panel, and the reduction is tighten-only (feasible-point sweep — no valid point cut).
+2. Re-wire `reduce_node` at the two node-LP sites + `set_node_bounds` child export (restore from
+   `f2bfe63`), gated by a fresh `DISCOPT_PHASE2_DBBT` flag (NOT the retired `NODE_REDUCE`).
+3. **Couple with OBBT** — the actual lever: when DBBT is on, cut the per-node OBBT budget (DBBT is
+   the cheap every-node reduction; OBBT becomes selective / occasional). Entry experiment:
+   total-wall-to-close on `tanksize` (win) with no regression on the #685 set (ex5_3_3/spring/qapw).
+4. Graduation panel over the corpus (cert-clean + net-positive), then default-ON.
+
 ## Recommendation to the maintainer (2026-07-18)
 
 The corrected diagnosis: **`tanksize` is a pure per-node-throughput problem.** It needs ~450 nodes
