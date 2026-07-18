@@ -10,13 +10,15 @@ x15 was decoupled and both levers were measured fully inert
 Certification at this node needs min x15: 12.44 -> 32.28.
 
 Measured result (2026-07-18, recorded in docs/dev/ex1252-certification-plan.md):
-  * x6 subdivision now lifts a child bound 57435 -> 62071 (+8%; pre-RLT provably 0)
-  * OBBT now pins x12 to exactly 175.0 and caps x15 at 30.89 within seconds
-    (pre-RLT: no movement at all)
-  * engine fragility exposed: narrow/pinned child boxes can return 0.0 /
-    (numerical) / (error) fallback bounds — sound but weak, and they destroy the
-    proved min-child bound exactly at the nodes certification needs (Stage 1 of
-    the plan).
+  * x6 subdivision now lifts child bounds 57435 -> 62071/66932/92706 (monotone
+    in x6; pre-RLT provably 0 movement) — proved 4-way min-child bound 62071.
+  * OBBT now pins x12 to exactly 175.0, caps x15 at 30.89 within seconds, and at
+    rounds=8 proves the whole config box EMPTY (``infeasible=True`` — the config
+    is pruned outright). Pre-RLT: no movement at all.
+  * The first run of this probe also exposed the Stage-1 engine fragility (child
+    bounds collapsing to a 0.0 floor via a directional-widening bug in the
+    conditioning clamp; crossed boxes crashing to ``error``) — both fixed, see
+    the plan doc's Stage 1 record and ``python/tests/test_narrow_box_bounds.py``.
 
 Run: ``python -m discopt_benchmarks.scripts.ex1252_compounding_probe``
 """
@@ -79,27 +81,35 @@ for var, name, K in [(12, "x12", 2), (12, "x12", 4), (12, "x12", 8), (6, "x6", 4
     print(f"[A] subdivide {name} into {K}: proved bound = {mn}   children={shown}")
 
 # B: cutoff-driven OBBT at the deep node — inert pre-RLT; does it bite now?
+# NOTE (#732 Stage 1): with more rounds OBBT's tightening can CROSS a bound —
+# that is a proof the config box is EMPTY, flagged via ``res.infeasible`` (the
+# solver's call sites prune on it; a crossed box handed onward now yields the
+# correct ``infeasible`` verdict from solve_at_node rather than a build crash).
 for cutoff, tag in [(None, "no-cutoff"), (OPT, "cutoff=opt")]:
     res = obbt_tighten_root(
         r, lb.copy(), ub.copy(), rounds=8, time_limit_per_lp=0.3, incumbent_cutoff=cutoff
     )
-    b2 = bd(res.lb, res.ub)
+    b2 = "CONFIG PRUNED (box empty)" if res.infeasible else bd(res.lb, res.ub)
     print(
         f"[B] OBBT({tag:10s}): x6[{res.lb[6]:.0f},{res.ub[6]:.0f}] "
         f"x12[{res.lb[12]:.1f},{res.ub[12]:.1f}] x15[{res.lb[15]:.2f},{res.ub[15]:.2f}] "
-        f"-> bound {b2}"
+        f"infeasible={res.infeasible} -> {b2}"
     )
 
 # B2: compounding loop — OBBT(cutoff) then subdivide x12 on the tightened box.
 res = obbt_tighten_root(
     r, lb.copy(), ub.copy(), rounds=8, time_limit_per_lp=0.3, incumbent_cutoff=OPT
 )
-l2, u2 = res.lb.copy(), res.ub.copy()
-edges = np.linspace(float(l2[12]), float(u2[12]), 5)
-kids = []
-for i in range(4):
-    lo, hi = l2.copy(), u2.copy()
-    lo[12], hi[12] = edges[i], edges[i + 1]
-    kids.append(bd(lo, hi))
-finite = [b for b in kids if isinstance(b, float)]
-print(f"[B2] OBBT(cutoff) + subdivide x12 into 4: proved bound = {min(finite) if finite else None}")
+if res.infeasible:
+    print("[B2] OBBT(cutoff) proves the config box empty — node pruned outright.")
+else:
+    l2, u2 = res.lb.copy(), res.ub.copy()
+    edges = np.linspace(float(l2[12]), float(u2[12]), 5)
+    kids = []
+    for i in range(4):
+        lo, hi = l2.copy(), u2.copy()
+        lo[12], hi[12] = edges[i], edges[i + 1]
+        kids.append(bd(lo, hi))
+    finite = [b for b in kids if isinstance(b, float)]
+    mn = min(finite) if finite else None
+    print(f"[B2] OBBT(cutoff) + subdivide x12 into 4: proved bound = {mn}")

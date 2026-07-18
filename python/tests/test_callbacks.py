@@ -412,6 +412,268 @@ class TestCallbacksWithMILP:
         assert len(node_calls) > 0
 
 
+def _spatial_mi_model():
+    """Nonconvex spatial MINLP from issue #740.
+
+    min x + y + 2*b  s.t.  x*y >= 1,  x + y <= 4 + b,  x,y in [0,4], b binary.
+    Unconstrained-by-callback optimum is b=0 (objective 2.0, at x=y=1); vetoing
+    or cutting off every b=0 incumbent makes the true optimum b=1 (objective
+    4.0). The bilinear ``x*y`` forces the spatial (nonconvex) B&B path, whose
+    primal heuristics (sub-NLP, feasibility pump, LNS, per-node NLP polish)
+    find the b=0 point through side channels that bypass the batch-import
+    callback gate — the #740 bug.
+    """
+    m = discopt.Model("spatial_mi")
+    x = m.continuous("x", lb=0.0, ub=4.0)
+    y = m.continuous("y", lb=0.0, ub=4.0)
+    b = m.binary("b")
+    m.subject_to(x * y >= 1.0)
+    m.subject_to(x + y <= 4.0 + b)
+    m.minimize(x + y + 2.0 * b)
+    return m, (x, y, b)
+
+
+@pytest.mark.slow
+@needs_rust
+@pytest.mark.integration
+class TestIssue740HeuristicInjectionGate:
+    """#740: incumbent_callback / lazy_constraints were bypassed by heuristic
+    incumbent injections on the spatial MINLP path. The batch-import gate
+    (``_invoke_pre_import_callbacks``) honored them, but incumbents entering via
+    ``tree.inject_incumbent`` side channels (warm start, sub-NLP, feasibility
+    pump, LNS, per-node NLP polish, completeness guard) never consulted the
+    callbacks, so a vetoed / cut-off point was returned as the final
+    ``optimal`` incumbent. The fix funnels every injection through
+    ``_screen_heuristic_incumbent``.
+    """
+
+    def test_incumbent_callback_veto_on_spatial_path(self):
+        """A vetoed point must never be the returned incumbent: rejecting all
+        b=0 solutions forces the b=1 optimum (objective 4.0). Pre-fix this
+        returned the vetoed b=0 point with objective 2.0."""
+        m, _vars = _spatial_mi_model()
+        vetoed = []
+
+        def inc_cb(ctx, model, sol):
+            if sol["b"] < 0.5:
+                vetoed.append(dict(sol))
+                return False
+            return True
+
+        res = m.solve(incumbent_callback=inc_cb, time_limit=60.0)
+        assert res.status in ("optimal", "feasible")
+        assert res.x is not None
+        assert round(float(np.ravel(res.x["b"])[0])) == 1, (
+            f"vetoed b=0 point returned as incumbent (objective {res.objective})"
+        )
+        assert res.objective == pytest.approx(4.0, rel=1e-3)
+        # The callback actually fired (the b=0 point WAS encountered and vetoed).
+        assert len(vetoed) > 0
+
+    def test_lazy_constraints_cut_on_spatial_path(self):
+        """A point excluded by a lazy cut must never be the returned incumbent:
+        cutting off b=0 relaxation points with a ``b >= 1`` cut forces the b=1
+        optimum (objective 4.0). Pre-fix this converged to the excluded b=0
+        point with objective 2.0."""
+        m, (_x, _y, b) = _spatial_mi_model()
+        cuts_fired = []
+
+        def lazy_cb(ctx, model):
+            # b is the third flat variable (index 2)
+            if ctx.x_relaxation[2] < 0.5:
+                cuts_fired.append(1)
+                return [CutResult(terms=[(b, 1.0)], sense=">=", rhs=1.0)]
+            return []
+
+        res = m.solve(lazy_constraints=lazy_cb, time_limit=60.0)
+        assert res.status in ("optimal", "feasible")
+        assert res.x is not None
+        assert round(float(np.ravel(res.x["b"])[0])) == 1, (
+            f"cut-off b=0 point returned as incumbent (objective {res.objective})"
+        )
+        assert res.objective == pytest.approx(4.0, rel=1e-3)
+        assert len(cuts_fired) > 0
+
+    def test_warm_start_incumbent_is_screened(self):
+        """The warm-start injection is a side channel too: an initial point the
+        incumbent callback vetoes must not survive as the final incumbent."""
+        m, (x, y, b) = _spatial_mi_model()
+
+        def reject_b0(ctx, model, sol):
+            return not sol["b"] < 0.5
+
+        # Feasible b=0 warm start (x=y=1): objective 2.0, vetoed by the callback.
+        res = m.solve(
+            incumbent_callback=reject_b0,
+            initial_solution={x: 1.0, y: 1.0, b: 0.0},
+            time_limit=60.0,
+        )
+        assert res.status in ("optimal", "feasible")
+        assert round(float(np.ravel(res.x["b"])[0])) == 1
+        assert res.objective == pytest.approx(4.0, rel=1e-3)
+
+
+class TestScreenHeuristicIncumbent:
+    """Unit tests for the #740 single-candidate callback gate."""
+
+    class _FakeTree:
+        def __init__(self, incumbent=None):
+            self._inc = incumbent
+
+        def incumbent(self):
+            return self._inc
+
+        def stats(self):
+            return {"total_nodes": 7, "global_lower_bound": 1.5, "gap": 0.5}
+
+    @staticmethod
+    def _model():
+        m = discopt.Model("gate_unit")
+        x = m.continuous("x", lb=0.0, ub=4.0)
+        b = m.binary("b")
+        m.minimize(x + b)
+        m.subject_to(x + b >= 0.5)
+        return m
+
+    def test_veto_blocks_candidate(self):
+        from discopt.solver import _screen_heuristic_incumbent
+
+        m = self._model()
+        seen = []
+
+        def veto(ctx, model, sol):
+            seen.append(sol)
+            return False
+
+        ok = _screen_heuristic_incumbent(
+            model=m,
+            tree=self._FakeTree(),
+            t_start=0.0,
+            x=np.array([1.0, 0.0]),
+            obj=1.0,
+            int_offsets=[1],
+            int_sizes=[1],
+            lazy_constraints=None,
+            incumbent_callback=veto,
+            _cut_pool=None,
+        )
+        assert ok is False
+        assert len(seen) == 1
+
+    def test_lazy_cut_blocks_candidate_and_pools_cut(self):
+        from discopt._jax.cutting_planes import CutPool
+        from discopt.solver import _screen_heuristic_incumbent
+
+        m = self._model()
+        b = m._variables[1]
+        pool = CutPool(max_cuts=10)
+
+        def lazy(ctx, model):
+            return [CutResult(terms=[(b, 1.0)], sense=">=", rhs=1.0)]
+
+        ok = _screen_heuristic_incumbent(
+            model=m,
+            tree=self._FakeTree(),
+            t_start=0.0,
+            x=np.array([1.0, 0.0]),
+            obj=1.0,
+            int_offsets=[1],
+            int_sizes=[1],
+            lazy_constraints=lazy,
+            incumbent_callback=None,
+            _cut_pool=pool,
+        )
+        assert ok is False
+        assert len(pool) == 1
+
+    def test_accepting_callback_passes_candidate(self):
+        from discopt.solver import _screen_heuristic_incumbent
+
+        m = self._model()
+        ok = _screen_heuristic_incumbent(
+            model=m,
+            tree=self._FakeTree(),
+            t_start=0.0,
+            x=np.array([1.0, 0.0]),
+            obj=1.0,
+            int_offsets=[1],
+            int_sizes=[1],
+            lazy_constraints=None,
+            incumbent_callback=lambda ctx, model, sol: True,
+            _cut_pool=None,
+        )
+        assert ok is True
+
+    def test_non_integer_candidate_skips_callbacks(self):
+        """A fractional candidate can never become the incumbent
+        (``inject_incumbent`` re-verifies), so user code must not see it."""
+        from discopt.solver import _screen_heuristic_incumbent
+
+        m = self._model()
+        calls = []
+        ok = _screen_heuristic_incumbent(
+            model=m,
+            tree=self._FakeTree(),
+            t_start=0.0,
+            x=np.array([1.0, 0.4]),
+            obj=1.4,
+            int_offsets=[1],
+            int_sizes=[1],
+            lazy_constraints=None,
+            incumbent_callback=lambda ctx, model, sol: calls.append(1) or False,
+            _cut_pool=None,
+        )
+        assert ok is True
+        assert not calls
+
+    def test_non_improving_candidate_skips_callbacks(self):
+        """The callback contract is "a new incumbent is about to be accepted":
+        a candidate that cannot strictly improve the incumbent is passed
+        through uninspected (``inject_incumbent`` rejects it)."""
+        from discopt.solver import _screen_heuristic_incumbent
+
+        m = self._model()
+        calls = []
+        ok = _screen_heuristic_incumbent(
+            model=m,
+            tree=self._FakeTree(incumbent=(np.array([1.0, 0.0]), 1.0)),
+            t_start=0.0,
+            x=np.array([2.0, 0.0]),
+            obj=2.0,
+            int_offsets=[1],
+            int_sizes=[1],
+            lazy_constraints=None,
+            incumbent_callback=lambda ctx, model, sol: calls.append(1) or False,
+            _cut_pool=None,
+        )
+        assert ok is True
+        assert not calls
+
+    def test_callback_exception_fails_soft(self):
+        """Only the user callback may fail softly (INT-1 discipline): an
+        exception is logged and the candidate proceeds."""
+        from discopt.solver import _screen_heuristic_incumbent
+
+        m = self._model()
+
+        def bad(ctx, model, sol):
+            raise RuntimeError("intentional")
+
+        ok = _screen_heuristic_incumbent(
+            model=m,
+            tree=self._FakeTree(),
+            t_start=0.0,
+            x=np.array([1.0, 0.0]),
+            obj=1.0,
+            int_offsets=[1],
+            int_sizes=[1],
+            lazy_constraints=None,
+            incumbent_callback=bad,
+            _cut_pool=None,
+        )
+        assert ok is True
+
+
 class TestCallbackContext:
     def test_construction(self):
         ctx = CallbackContext(
@@ -564,3 +826,168 @@ class TestCallbackBoundSoundness:
                 assert b <= res.bound + 1e-4, (
                     f"callback best_bound {b} over-reports the final certified bound {res.bound}"
                 )
+
+
+# ── #748: MILP / convex-MIQP classifier dispatch honors callbacks ──
+
+
+def _pure_milp_748():
+    """Pure MILP (no exp() forcing) classified ``ProblemClass.MILP``.
+
+    min x + 10*y   s.t.  3*x + 2*y >= 5,   x,y integer in [0,3].
+
+    The LP relaxation root is fractional (x=5/3, y=0) so B&B branches and the
+    UNIQUE integer optimum is x=2, y=0 (obj 2.0). A callback that rejects x>=2
+    must drive the solve to the acceptable optimum x=1, y=1 (obj 11.0).
+
+    Pre-#748 this model routed to ``_solve_milp_bb`` (or ``_solve_milp_simplex``),
+    which never consulted the callback and returned the vetoed x=2 point as
+    ``optimal`` — the silent-drop bug. After the fix it falls through to the
+    spatial B&B, which honors the callback.
+    """
+    m = discopt.Model("milp748")
+    x = m.integer("x", lb=0, ub=3)
+    y = m.integer("y", lb=0, ub=3)
+    m.minimize(x + 10 * y)
+    m.subject_to(3 * x + 2 * y >= 5, name="c")
+    return m, x, y
+
+
+def _convex_miqp_748():
+    """Convex MIQP (no exp() forcing) classified ``ProblemClass.MIQP``.
+
+    min (x - 2.2)**2 + 3*y   s.t.  x + y >= 1,   x integer in [0,3], y binary.
+
+    Convex quadratic objective, fractional QP root (x=2.2) so B&B branches; the
+    UNIQUE integer optimum is x=2, y=0 (obj 0.04). A callback rejecting exactly
+    x==2 drives the solve to the acceptable optimum x=3, y=0 (obj 0.64) — which
+    is the QP-integer-optimum of the x>=3 branch, so the convex spatial B&B
+    reaches it.
+
+    Pre-#748 this routed to ``_solve_miqp_bb`` (convex MIQP B&B) which never
+    consulted the callback and returned the vetoed x=2 point as ``optimal``.
+    """
+    m = discopt.Model("miqp748")
+    x = m.integer("x", lb=0, ub=3)
+    y = m.binary("y")
+    m.minimize((x - 2.2) ** 2 + 3 * y)
+    m.subject_to(x + y >= 1, name="c")
+    return m, x, y
+
+
+@pytest.mark.slow
+@needs_rust
+@pytest.mark.integration
+class TestIssue748MilpMiqpCallbackDispatch:
+    """#748: the problem-classifier dispatch routed a MILP / convex-MIQP model
+    with ``incumbent_callback`` / ``lazy_constraints`` to specialized engines
+    (``_solve_milp_simplex`` / ``_solve_milp_bb`` / ``_solve_miqp_bb``) that never
+    received or consulted the callbacks — the rejection/cut was dropped SILENTLY
+    and the vetoed/cut-off point was returned as ``optimal`` (a soundness bug for
+    lazy constraints; an API violation for incumbent rejection). The fix routes
+    these models to the spatial B&B (which honors both callbacks, #740) when a
+    callback is present. These use PURE MILP / convex MIQP models (NO ``exp()``)
+    so they exercise the newly-fixed dispatch; the pre-existing tests all add an
+    ``exp()`` term to force MINLP classification and dodge this path.
+    """
+
+    @staticmethod
+    def _x(sol):
+        return round(float(np.ravel(sol["x"])[0]))
+
+    def test_milp_incumbent_callback_honored(self):
+        """Pure MILP + rejecting incumbent_callback: the vetoed x>=2 optimum
+        (returned by the MILP engine pre-fix) must NOT be the incumbent."""
+        m, _x, _y = _pure_milp_748()
+
+        def reject_x_ge_2(ctx, model, sol):
+            return float(np.ravel(sol["x"])[0]) <= 1.5
+
+        res = m.solve(incumbent_callback=reject_x_ge_2, time_limit=60)
+        assert res.status in ("optimal", "feasible")
+        assert res.x is not None
+        xv = round(float(np.ravel(res.x["x"])[0]))
+        assert xv <= 1, f"vetoed x={xv} (>=2) returned as incumbent (obj {res.objective})"
+        assert res.objective == pytest.approx(11.0, rel=1e-3)
+
+    def test_milp_lazy_constraint_honored(self):
+        """Pure MILP + lazy cut x<=1: the cut-off x>=2 optimum must NOT be the
+        returned incumbent."""
+        m, x, _y = _pure_milp_748()
+
+        def lazy_cut(ctx, model):
+            if round(float(ctx.x_relaxation[0])) >= 2:
+                return [CutResult(terms=[(x, 1.0)], sense="<=", rhs=1.0)]
+            return []
+
+        res = m.solve(lazy_constraints=lazy_cut, time_limit=60)
+        assert res.status in ("optimal", "feasible")
+        assert res.x is not None
+        xv = round(float(np.ravel(res.x["x"])[0]))
+        assert xv <= 1, f"cut-off x={xv} (>=2) returned as incumbent (obj {res.objective})"
+        assert res.objective == pytest.approx(11.0, rel=1e-3)
+
+    def test_convex_miqp_incumbent_callback_honored(self):
+        """Convex MIQP + rejecting incumbent_callback: the vetoed x==2 optimum
+        (returned by the convex MIQP engine pre-fix) must NOT be the incumbent;
+        the solve must reach the acceptable x=3 optimum instead."""
+        m, _x, _y = _convex_miqp_748()
+
+        def reject_x_eq_2(ctx, model, sol):
+            return self._x(sol) != 2
+
+        res = m.solve(incumbent_callback=reject_x_eq_2, time_limit=60)
+        assert res.status in ("optimal", "feasible")
+        assert res.x is not None
+        xv = round(float(np.ravel(res.x["x"])[0]))
+        assert xv != 2, f"vetoed x=2 returned as incumbent (obj {res.objective})"
+        assert res.objective == pytest.approx(0.64, rel=1e-3)
+
+    def test_milp_no_callback_unchanged(self):
+        """Sanity: a pure MILP WITHOUT callbacks still solves to its true
+        optimum (the specialized engine path is unchanged)."""
+        m, _x, _y = _pure_milp_748()
+        res = m.solve(time_limit=60)
+        assert res.status == "optimal"
+        assert res.objective == pytest.approx(2.0, rel=1e-3)
+        assert round(float(np.ravel(res.x["x"])[0])) == 2
+
+    def test_convex_miqp_no_callback_unchanged(self):
+        """Sanity: a convex MIQP WITHOUT callbacks still solves to its true
+        optimum (the convex MIQP engine path is unchanged)."""
+        m, _x, _y = _convex_miqp_748()
+        res = m.solve(time_limit=60)
+        assert res.status == "optimal"
+        assert res.objective == pytest.approx(0.04, abs=1e-3)
+        assert round(float(np.ravel(res.x["x"])[0])) == 2
+
+    def test_reproduction_sketch_never_returns_vetoed_point(self):
+        """The issue's exact reproduction sketch (a tight-integer-root MILP whose
+        LP relaxation is already integer-optimal). Pre-fix it silently returned
+        the vetoed x=1 point certified ``optimal``. After the fix the vetoed
+        point is never returned: because the rejected root leaves nothing to
+        branch, the spatial B&B reports an honest UNCERTIFIED result
+        (feasibility undetermined) rather than either the vetoed point OR a
+        certified-false ``infeasible`` — the callback rejection is a non-rigorous
+        fathom, so certification is withheld (#748 / CLAUDE.md §1)."""
+        m = discopt.Model("milp748_sketch")
+        x = m.binary("x")
+        y = m.binary("y")
+        m.minimize(x + 2 * y)
+        m.subject_to(x + y >= 1)
+
+        res = m.solve(
+            incumbent_callback=lambda ctx, model, sol: float(sol["x"]) < 0.5,
+            time_limit=30,
+        )
+        # The vetoed x=1 point must never be returned as the incumbent.
+        if res.x is not None:
+            assert round(float(np.ravel(res.x["x"])[0])) == 0, (
+                f"vetoed x=1 point returned as incumbent (status {res.status})"
+            )
+        # And a feasible model must never be CERTIFIED infeasible (a false
+        # certificate is the worst-class error; the pre-backstop code returned
+        # exactly this).
+        assert not (res.status == "infeasible" and res.gap_certified), (
+            "feasible model falsely certified infeasible"
+        )

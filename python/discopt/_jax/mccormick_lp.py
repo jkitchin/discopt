@@ -228,6 +228,14 @@ def _append_relax_rows(milp, A_rows, b_rows) -> None:
 # the deadline from receiving a zero/negative budget the backend would reject).
 _SOLVE_DEADLINE_FLOOR_S = 0.05
 
+# Empty-box guard tolerance (#732 Stage 1): a node box whose lower bound crosses
+# its upper bound by more than this (relative to the bound magnitude) is a
+# genuinely empty box — ``solve_at_node`` answers ``infeasible`` (the
+# definitionally correct verdict) instead of crashing the relaxation build. A
+# crossing within the tolerance is treated as float round-off and repaired by
+# widening to the enclosing box (sound — widening only enlarges the relaxation).
+_EMPTY_BOX_TOL = 1e-6
+
 # Cap on constraints probed per node by the (opt-in, default-OFF) G-convexity
 # separator (#181) — bounds the per-node interval-Hessian certification cost.
 _GCONV_MAX_CONSTRAINTS = 16
@@ -425,6 +433,15 @@ class MccormickLPRelaxer:
         # ratio-of-integer-products structure; ``solve_at_node`` then max-combines
         # the partitioner's sound node bound with the LP bound.
         self._integer_ratio_partitioner = None
+        # Disjunctive configuration floor (#732 Stage 2, flag-gated default-OFF):
+        # stashed on the model by the solver's root disjunctive-config pass. A
+        # valid lower bound over the ROOT box is valid over every node's sub-box,
+        # so ``solve_at_node`` max-combines it into every optimal node bound —
+        # the same plumbing precedent as the integer-ratio partitioner.
+        _dcf = getattr(model, "_disjunctive_config_floor", None)
+        self._disjunctive_floor: Optional[float] = (
+            float(_dcf) if _dcf is not None and np.isfinite(_dcf) else None
+        )
         # Pre-compute which original columns are integer/binary so that
         # integrality is preserved (only aux columns get relaxed).
         flags: list[int] = []
@@ -926,6 +943,26 @@ class MccormickLPRelaxer:
 
         See :meth:`_solve_at_node_impl` for the full parameter contract.
         """
+        # Empty-box guard (#732 Stage 1). A node whose box is crossed (lb > ub)
+        # contains no point at all, so ``infeasible`` is the definitionally
+        # correct verdict for the box given — previously the crossed box crashed
+        # the relaxation build (``Interval lo > hi``) into a diagnostic-free
+        # ``status="error"``, losing the prune that a sound tightener (OBBT
+        # returning ``infeasible=True``) had already earned. Two tiers so a
+        # hair-crossing from float round-off can never trigger a false prune:
+        # a crossing beyond the conservative tolerance is a genuinely empty box
+        # (the observed case is a binary crossed by a full unit); a crossing
+        # within it is repaired by WIDENING to the enclosing box — widening only
+        # enlarges the relaxed feasible set, so the bound stays valid.
+        node_lb = np.asarray(node_lb, dtype=np.float64)
+        node_ub = np.asarray(node_ub, dtype=np.float64)
+        _cross = node_lb - node_ub
+        if np.any(_cross > _EMPTY_BOX_TOL * np.maximum(1.0, np.abs(node_ub))):
+            return MccormickLPResult(status="infeasible")
+        if np.any(_cross > 0.0):
+            _lo = np.minimum(node_lb, node_ub)
+            _hi = np.maximum(node_lb, node_ub)
+            node_lb, node_ub = _lo, _hi
         res = self._solve_at_node_impl(
             node_lb,
             node_ub,
@@ -1008,7 +1045,23 @@ class MccormickLPRelaxer:
                 # infeasible → the *default-path* separators tightened the loose base
                 # to empty, a rigorous fathom, since every separated cut is valid).
                 res = pool_free
-        return self._apply_integer_ratio_partition(res, node_lb, node_ub, out_cuts)
+        res = self._apply_integer_ratio_partition(res, node_lb, node_ub, out_cuts)
+        # #732 Stage 2 (flag-gated default-OFF at wiring time): floor every
+        # optimal node bound at the root disjunctive-configuration bound. The
+        # floor is a valid lower bound over the ROOT box, hence over every
+        # node's sub-box; raising an optimal node bound to it is sound and
+        # flows through the tree's existing bound plumbing. Every other verdict
+        # passes through untouched.
+        if (
+            self._disjunctive_floor is not None
+            and out_cuts is None
+            and res.status == "optimal"
+            and res.lower_bound is not None
+            and np.isfinite(res.lower_bound)
+            and res.lower_bound < self._disjunctive_floor
+        ):
+            res = dataclasses.replace(res, lower_bound=float(self._disjunctive_floor))
+        return res
 
     def set_integer_ratio_partitioner(self, partitioner) -> None:
         """Attach an :class:`~discopt._jax.integer_ratio.IntegerRatioPartitioner`.
@@ -1232,11 +1285,22 @@ class MccormickLPRelaxer:
         # and routes genuine unbounded variables through the simplex's correct
         # free-variable handling. Mirrors the root path's
         # ``sanitize_relaxation_for_conditioning``.
+        #
+        # The widening must be DIRECTIONAL (#732 Stage 1): a crossing lower bound
+        # always drops to -inf and a crossing upper bound always rises to +inf.
+        # The old sign-based mapping sent a large-*positive* lower bound to +inf
+        # (and a large-negative upper bound to -inf), i.e. it PINNED the box to
+        # [+inf, +inf) instead of widening it — a nonsense LP the simplex reports
+        # as spuriously "unbounded", which the objective-floor fallback then turns
+        # into a uselessly weak node bound (ex1252 config children: the x6^3
+        # monomial aux has lb 1.9e10 >= the 1e10 cap on high-speed sub-boxes,
+        # collapsing the child bound from ~62k to the 0.0 floor). Sentinel cases
+        # (lo <= -cap / hi >= +cap) behave identically under both mappings.
         _cap = _RELAX_NUMERIC_CAP
         milp._bounds = [
             (
-                lo if abs(lo) < _cap else (-np.inf if lo < 0 else np.inf),
-                hi if abs(hi) < _cap else (np.inf if hi > 0 else -np.inf),
+                lo if abs(lo) < _cap else -np.inf,
+                hi if abs(hi) < _cap else np.inf,
             )
             for (lo, hi) in milp._bounds
         ]

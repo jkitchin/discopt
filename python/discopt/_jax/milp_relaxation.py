@@ -687,10 +687,15 @@ def sanitize_relaxation_for_conditioning(
         A = None
         b = None
 
+    # Directional widening (#732 Stage 1): a crossing lower bound always drops to
+    # -inf and a crossing upper bound always rises to +inf. The old sign-based
+    # mapping pinned a large-positive lower bound to +inf (a [+inf, +inf) box —
+    # not a widening), which is how the docstring's "widening" contract was
+    # silently violated; see the solve_at_node clamp for the measured failure.
     bounds = [
         (
-            lo if abs(lo) < cap else (-np.inf if lo < 0 else np.inf),
-            hi if abs(hi) < cap else (np.inf if hi > 0 else -np.inf),
+            lo if abs(lo) < cap else -np.inf,
+            hi if abs(hi) < cap else np.inf,
         )
         for (lo, hi) in model._bounds
     ]
@@ -1775,6 +1780,65 @@ def _uniform_relaxation_delegate(
     return milp, vm
 
 
+# ── #671 hda-certification lever: float64-intractable-row filter ─────────────
+# Per-row thresholds validated by the entry experiment on hda's exported root LP
+# (docs/dev/hda-certification-rowfilter-entry-2026-07-18.md): a row whose
+# nonzero coefficients span more than RATIO orders, or contain a coefficient
+# outside [ABS_LO, ABS_HI], cannot have its satisfaction resolved in float64 at
+# the LP feasibility tolerance (hda: 130 such rows made every float64 engine
+# false-fail while contributing ZERO root tightness — dropping them let the
+# in-house simplex solve clean at tau=0 with the NS-certified tight bound).
+_ROW_FILTER_RATIO = 1e6
+_ROW_FILTER_ABS_HI = 1e8
+_ROW_FILTER_ABS_LO = 1e-8
+
+
+def _filter_unresolvable_rows(milp: "MilpRelaxationModel") -> int:
+    """Drop float64-intractable rows from ``milp`` in place; return the count.
+
+    SOUND BY CONSTRUCTION: removing relaxation rows yields a superset feasible
+    region — a valid (weaker) outer approximation. The dual bound can only
+    loosen, never falsify ("weaken but never falsify"). Tightness impact is
+    instance-dependent and gated by the §5 corpus differential panel; on the
+    hda class the dropped rows carry no tightness and un-poison the LP.
+
+    Preserves the container kind (sparse stays CSR, dense stays ndarray) so
+    downstream row-append paths keep working; empty rows are never dropped (an
+    empty infeasible row ``0 <= b < 0`` is a rigorous infeasibility proof).
+    """
+    a_ub = milp._A_ub
+    if a_ub is None or milp._b_ub is None:
+        return 0
+    was_sparse = sp.issparse(a_ub)
+    a_csr = sp.csr_matrix(a_ub)
+    m = a_csr.shape[0]
+    if m == 0:
+        return 0
+    absd = np.abs(a_csr.data)
+    keep = np.ones(m, dtype=bool)
+    indptr = a_csr.indptr
+    for i in range(m):
+        s, e = indptr[i], indptr[i + 1]
+        if s == e:
+            continue  # empty row: keep (may encode a rigorous infeasibility)
+        seg = absd[s:e]
+        hi = seg.max()
+        lo = seg.min()
+        # Absolute checks first, then the ratio as a multiply: `hi / lo` overflows
+        # on a denormal `lo` (same verdict, noisy RuntimeWarning); after the
+        # absolute checks pass, `lo >= ABS_LO` so `lo * RATIO` cannot overflow.
+        if hi > _ROW_FILTER_ABS_HI or lo < _ROW_FILTER_ABS_LO or hi > lo * _ROW_FILTER_RATIO:
+            keep[i] = False
+    dropped = int(m - keep.sum())
+    if dropped == 0:
+        return 0
+    filtered = a_csr[keep]
+    milp._A_ub = filtered if was_sparse else filtered.toarray()
+    milp._b_ub = np.asarray(milp._b_ub)[keep]
+    logger.debug("relax_row_filter: dropped %d/%d float64-intractable rows (#671)", dropped, m)
+    return dropped
+
+
 def build_milp_relaxation(
     model: Model,
     terms: NonlinearTerms,
@@ -1870,7 +1934,7 @@ def build_milp_relaxation(
     # federated collectors/separators below (being deleted stage-by-stage). The
     # engine is a valid outer relaxation by construction; product-side tightness
     # parity is the deferred polish pass.
-    return _uniform_relaxation_delegate(
+    milp, varmap = _uniform_relaxation_delegate(
         model,
         flat_lb,
         flat_ub,
@@ -1882,6 +1946,11 @@ def build_milp_relaxation(
         disc_state=disc_state,
         build_deadline=build_deadline,
     )
+    # #671 hda-certification lever: optionally drop float64-intractable rows
+    # (default OFF; sound by superset — see _filter_unresolvable_rows).
+    if _tuning().relax_row_filter:
+        _filter_unresolvable_rows(milp)
+    return milp, varmap
 
 
 # --------------------------------------------------------------------------- #

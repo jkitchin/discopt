@@ -508,6 +508,29 @@ def _get_analysis_cache(model: Model) -> _ModelAnalysisCache:
     return cache
 
 
+def clear_analysis_cache(model: Model) -> None:
+    """Drop the box-independent relaxation analysis cache pinned on ``model``.
+
+    The cache (canonical DAG, reconstructed exprs, DCP verdicts, compiled fns,
+    and interval enclosures in ``bounds_by_box``) is keyed by ``_analysis_token``
+    — ``(len(_variables), len(_constraints), id(_objective))`` — which guards
+    *structural* changes only and intentionally does NOT hash parameter *values*
+    (they can be large arrays; hashing them on the per-node cache lookup would be
+    a hot-path cost). Parameters are constant within a solve, so across the B&B
+    nodes of one solve the token is stable and the cache is correctly reused (the
+    intended win). But changing a :class:`~discopt.modeling.core.Parameter`'s
+    ``.value`` *between* solves — the supported use of parameters — leaves the
+    token unchanged while the cached interval bounds still embed the OLD value,
+    so the stale relaxation would be reused on the spatial B&B path and yield an
+    incorrect (unsound) bound on the re-solve (issue #742: NBI's per-weight
+    subproblems change the CHIM-target parameters between solves and stalled at
+    the dominated ``t = 0`` CHIM point). ``solve_model`` calls this at the start
+    of every solve, in lockstep with the convexity-classification reset, so each
+    solve rebuilds the analysis against the current parameter values.
+    """
+    model.__dict__.pop(_ANALYSIS_ATTR, None)
+
+
 def _node_support_cols(node: CNode) -> Optional[tuple[int, ...]]:
     """Original columns a node's interval enclosure can depend on.
 

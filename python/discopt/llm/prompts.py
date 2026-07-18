@@ -65,8 +65,7 @@ The solver hit the time limit before proving optimality. Explain:
 1. The current solution quality (gap, feasibility)
 2. B&B progress: nodes explored, gap closure rate
 3. Whether the incumbent solution is likely close to optimal
-4. Suggestions: increase time_limit, use partitions for tighter relaxations, \
-adjust branching_policy
+4. Suggestions: increase time_limit, use partitions for tighter relaxations
 5. Time breakdown analysis (Rust/JAX/Python fractions)
 
 Model and result details:
@@ -79,7 +78,6 @@ The solver hit the node limit. Explain:
 1. Current solution quality and gap
 2. Whether the B&B tree is growing too fast (weak relaxations)
 3. Suggestions: increase max_nodes, use cutting_planes=True, increase partitions
-4. Whether a different branching_policy might help
 
 Model and result details:
 {model_text}

@@ -9,13 +9,15 @@ rows force ``x15 ≥ 12.44``, yet the big-M product envelope lets the ``1800·x1
 contribute nothing — pinning the loosest-node bound at the objective constant
 12658.06). The coupling RLT multiplies each integer factor's bit-linking equality
 and each AND hull by the (non-negative) continuous factor, tying the disaggregated
-products back to ``x15``. This lifts the loosest-node bound to ~57435 — a large,
-**sound** tightening (the RLT rows are products of valid identities/inequalities, so
-they never cut a feasible point).
+products back to ``x15``; the #732 Stage-2 extension applies the same bit-link RLT
+to the integer-BILINEAR expansion path (the pump-count couplings). Together they
+lift the line-1-only config-node bound 12658 -> ~65654 (~5.2x) — a large, **sound**
+tightening (the RLT rows are products of valid identities/inequalities, so they
+never cut a feasible point).
 
 These tests lock: (1) the OFF path is byte-identical to #707 (same bound, same var
-count); (2) the ON path lifts the node bound to ~57435 and is sound (≤ the true
-optimum); (3) no feasible point is cut. The flag stays default-OFF — in a full
+count); (2) the ON path lifts the config-node bound to ~65654 and is sound (≤ the
+true optimum); (3) no feasible point is cut. The flag stays default-OFF — in a full
 time-limited solve the extra per-node bilinears currently cost enough throughput to
 be net-negative on the *global* dual (see §6), so graduation waits on deep-node
 gating; here we pin soundness and the node-level gain.
@@ -39,10 +41,14 @@ from discopt._jax.obbt import obbt_tighten_root
 
 pytestmark = [pytest.mark.relaxation, pytest.mark.correctness]
 
-OFF_BOUND = 6329.03 * 2.0  # 12658.06 — objective constant; #707 baseline at the node
-ON_BOUND = 57434.96  # coupling-RLT lifted bound (12658.06 + 3600·min_x15, min_x15≈12.44)
+OFF_BOUND = 6329.03 * 2.0  # 12658.06 — objective constant; #707 baseline at the config
+ON_BOUND = 65653.83  # coupling-RLT (multilinear + bilinear bit-link) lifted bound
 EX1252_OPT = 128893.74
-LINE1 = {18: 1, 36: 1, 21: 1, 19: 0, 20: 0, 37: 0, 38: 0, 22: 0, 23: 0}
+# Feasible line-1-only configuration: indicators + their equality-pinned binaries.
+# (The original anchor — LINE1 + x0=2, x3=1 — is a config OBBT proves EMPTY at
+# rounds=8; the #732 Stage-2 bilinear RLT tightens its raw node to correctly
+# expose that infeasibility, so pins live on this feasible config instead.)
+CONFIG_100 = ((18, 36, 1.0), (19, 37, 0.0), (20, 38, 0.0))
 
 
 def _nl_path() -> Path:
@@ -55,7 +61,7 @@ def _nl_path() -> Path:
     raise FileNotFoundError("ex1252.nl not found")
 
 
-def _loosest_node_bound(monkeypatch, coupling_rlt: bool):
+def _config_node_bound(monkeypatch, coupling_rlt: bool):
     # monkeypatch reverts the env change automatically (conftest guards against
     # leaked DISCOPT_* mutations under xdist).
     monkeypatch.setenv("DISCOPT_MULTILINEAR_COUPLING_RLT", "1" if coupling_rlt else "0")
@@ -64,17 +70,12 @@ def _loosest_node_bound(monkeypatch, coupling_rlt: bool):
     lb, ub = flat_variable_bounds(r)
     lb = np.asarray(lb, float).copy()
     ub = np.asarray(ub, float).copy()
-    for i, v in LINE1.items():
-        lb[i] = ub[i] = float(v)
+    for ind, sel, v in CONFIG_100:
+        lb[ind] = ub[ind] = v
+        lb[sel] = ub[sel] = v
     nc = obbt_tighten_root(r, lb.copy(), ub.copy(), rounds=5, time_limit_per_lp=0.3)
-    lb, ub = nc.lb.copy(), nc.ub.copy()
-    lb[0] = ub[0] = 2.0
-    lb[24] = ub[24] = 0.0
-    lb[25] = ub[25] = 1.0  # x0 = 2
-    lb[3] = ub[3] = 1.0
-    lb[30] = ub[30] = 1.0
-    lb[31] = ub[31] = 0.0  # x3 = 1
-    res = MccormickLPRelaxer(r).solve_at_node(lb.copy(), ub.copy())
+    assert not nc.infeasible, "the line-1-only config is feasible"
+    res = MccormickLPRelaxer(r).solve_at_node(nc.lb.copy(), nc.ub.copy())
     assert res.status == "optimal", f"status {res.status}"
     return float(res.lower_bound), n_vars
 
@@ -82,15 +83,16 @@ def _loosest_node_bound(monkeypatch, coupling_rlt: bool):
 def test_off_path_is_707_baseline(monkeypatch):
     """Flag OFF: byte-identical to #707 — bound at the objective-constant floor, no
     extra columns (the coupling RLT adds nothing when disabled)."""
-    bound, n_vars = _loosest_node_bound(monkeypatch, coupling_rlt=False)
+    bound, n_vars = _config_node_bound(monkeypatch, coupling_rlt=False)
     assert bound == pytest.approx(OFF_BOUND, abs=1e-2)
     assert n_vars == 90, f"OFF path must not add columns; got {n_vars}"
 
 
 def test_on_path_lifts_bound_soundly(monkeypatch):
-    """Flag ON: the coupling RLT lifts the loosest-node bound ~4.5x, and it stays
-    sound — a valid dual bound never exceeds the true optimum."""
-    bound, n_vars = _loosest_node_bound(monkeypatch, coupling_rlt=True)
+    """Flag ON: the coupling RLT (multilinear + #732 Stage-2 bilinear bit-link)
+    lifts the config-node bound ~5.2x, and it stays sound — a valid dual bound
+    never exceeds the true optimum."""
+    bound, n_vars = _config_node_bound(monkeypatch, coupling_rlt=True)
     assert bound == pytest.approx(ON_BOUND, rel=1e-3), f"expected ~{ON_BOUND}, got {bound}"
     assert bound > OFF_BOUND + 1000.0, "coupling RLT must materially lift the bound"
     assert bound <= EX1252_OPT + 1e-2, f"UNSOUND: bound {bound} > optimum {EX1252_OPT}"
@@ -100,8 +102,8 @@ def test_on_path_lifts_bound_soundly(monkeypatch):
 def test_coupling_rlt_does_not_cut_the_optimum(monkeypatch):
     """Soundness: the true optimal point (bound ≤ opt) is never cut — the ON bound is
     a valid lower bound, strictly below the instance optimum (no over-tightening)."""
-    on_bound, _ = _loosest_node_bound(monkeypatch, coupling_rlt=True)
+    on_bound, _ = _config_node_bound(monkeypatch, coupling_rlt=True)
     assert on_bound <= EX1252_OPT + 1e-2
-    off_bound, _ = _loosest_node_bound(monkeypatch, coupling_rlt=False)
+    off_bound, _ = _config_node_bound(monkeypatch, coupling_rlt=False)
     # Monotone: adding valid RLT rows can only tighten (raise) the bound.
     assert on_bound >= off_bound - 1e-6, "valid RLT rows must never loosen the bound"
