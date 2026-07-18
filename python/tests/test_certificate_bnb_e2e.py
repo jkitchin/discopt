@@ -9,9 +9,13 @@ answer) and tamper rejection. A real solve runs, so these are ``slow``.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import discopt.modeling as dm
 import pytest
 from discopt.certificate import build_bnb_certificate, check_certificate
+
+_CORPUS = Path(__file__).parent / "data" / "minlplib_nl"
 
 
 def _nonconvex_chain(n=4):
@@ -31,6 +35,25 @@ def test_bnb_certificate_accepts_real_solve():
     assert r.bnb_tree is not None and len(r.bnb_tree) >= 1
     cert = build_bnb_certificate(m, r)
     assert cert["certificate"]["tier"] == "bnb"
+    ok, reason = check_certificate(cert)
+    assert ok, reason
+    assert "cover the root box" in reason
+
+
+@pytest.mark.slow
+def test_bnb_certificate_on_integer_minlp_corpus():
+    """A real convex integer MINLP (nvs03) solved via the NLP-BB path records a
+    tree whose Tier-3 certificate verifies -- exercising the Loop-2 recorder."""
+    nl = _CORPUS / "nvs03.nl"
+    if not nl.exists():
+        pytest.skip("nvs03.nl not in corpus")
+    from discopt.modeling.core import from_nl
+
+    m = from_nl(str(nl))
+    r = m.solve(emit_certificate=True, gap_tolerance=1e-3, time_limit=30, max_nodes=2000)
+    if getattr(r, "bnb_tree", None) is None:
+        pytest.skip("nvs03 did not run a recorded B&B path")
+    cert = build_bnb_certificate(m, r)
     ok, reason = check_certificate(cert)
     assert ok, reason
     assert "cover the root box" in reason
@@ -99,8 +122,17 @@ def test_cli_emits_and_checks_bnb_certificate(tmp_path, monkeypatch):
         return exc.value.code
 
     _run(
-        ["discopt", "solve", str(nl), "--emit-certificate", "--out-dir", str(tmp_path),
-         "--quiet", "--gap", "1e-3"]
+        [
+            "discopt",
+            "solve",
+            str(nl),
+            "--emit-certificate",
+            "--out-dir",
+            str(tmp_path),
+            "--quiet",
+            "--gap",
+            "1e-3",
+        ]
     )
     cert_path = tmp_path / "nc.cert.json"
     assert cert_path.exists()

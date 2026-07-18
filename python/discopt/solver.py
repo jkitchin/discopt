@@ -6217,6 +6217,7 @@ def solve_model(
             in_tree_presolve_repr=_model_repr,
             rens_enabled=rens,
             _lns_enabled=_lns_enabled,
+            emit_certificate=emit_certificate,
         )
 
     # --- Problem classification: dispatch LP/QP to specialized solvers ---
@@ -6623,6 +6624,7 @@ def solve_model(
                 rens_enabled=rens,
                 _lns_enabled=_lns_enabled,
                 precomputed_is_convex=_root_is_convex,
+                emit_certificate=emit_certificate,
             )
 
     # --- Extract variable info ---
@@ -11733,6 +11735,7 @@ def _solve_nlp_bb(
     rens_enabled: bool = True,
     _lns_enabled: bool = True,
     precomputed_is_convex: Optional[bool] = None,
+    emit_certificate: bool = False,
 ) -> SolveResult:
     """Solve a MINLP via nonlinear Branch & Bound (NLP-BB).
 
@@ -12966,6 +12969,11 @@ def _solve_nlp_bb(
         constraint_duals=constraint_duals,
         bound_duals_lower=bound_duals_lower,
         bound_duals_upper=bound_duals_upper,
+        # Tier-3 tree (NLP-BB path). Its per-node bound is the NLP objective -- a
+        # valid lower bound only for convex MINLPs; nonconvex nodes carry -inf,
+        # which the certificate checker rejects. No McCormick LP here, so no leaf
+        # duals. Only emitted when recording is on (bound-neutral otherwise).
+        bnb_tree=(tree.tree_records() if emit_certificate else None),
     )
 
 

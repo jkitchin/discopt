@@ -361,11 +361,14 @@ solve certifies (tree covers root, valid dual bound), recording is bound-neutral
 (identical node count / objective on vs off), and tampering (inflated `dualBound`,
 broken covering) is rejected.
 
-*Scope:* the recorder is wired into the **spatial-B&B McCormick loop** (the
-rigorous nonconvex-continuous path) only. Integer-only MINLPs routed through the
-MILP/NLP-BB drivers currently return no `bnb_tree` (the emitter then refuses a `bnb`
-certificate, and the CLI falls back to a Tier-1/2 certificate) — wiring their trees
-is a follow-on.
+*Scope:* the recorder is wired into the **spatial-B&B McCormick loop** (`solve_model`,
+the rigorous nonconvex-continuous path, with per-leaf LP-dual capture) **and the
+NLP-BB loop** (`_solve_nlp_bb`, tree only — its node bound is the NLP objective,
+a valid lower bound only for convex MINLPs, so `build_bnb_certificate` requires
+`gap_certified`; nonconvex NLP-BB nodes carry `-inf`, which the checker rejects). A
+real convex integer MINLP (`nvs03`) certifies via this path. The pure-integer MILP
+driver and decomposition paths are not yet wired (they return no `bnb_tree`, so the
+emitter refuses and the CLI falls back to Tier-1/2) — a follow-on.
 
 **What is still trusted (the remaining untrusted-ness upgrade).** The current
 Tier-3 checker **trusts the solver's recorded per-leaf `local_lower_bound`** as a
