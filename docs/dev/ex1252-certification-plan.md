@@ -91,20 +91,34 @@ The unblocking lever. Default-OFF `DISCOPT_MULTILINEAR_COUPLING_RLT`; OFF path
 byte-identical to #707; sound (RLT of valid identities, `bound ≤ opt` verified);
 pinned by `python/tests/test_ex1252_coupling_rlt.py`.
 
-### Stage 1 — engine hardening on narrow/pinned boxes *(P0 prerequisite)*
-**Problem:** child solves on OBBT-pinned or finely subdivided boxes return
+### Stage 1 — engine hardening on narrow/pinned boxes *(DONE 2026-07-18)*
+**Problem:** child solves on OBBT-pinned or finely subdivided boxes returned
 `0.0`/`(numerical)`/`(error)` fallbacks (§2), collapsing proved bounds.
-**Entry experiment:** a battery of the §2 child boxes; count certified verdicts
-vs fallbacks; bisect the failure (suspects: degenerate `lb==ub` rows after the
-pin, big-M conditioning on narrow `x6` slices, equilibration interaction).
-**Fix shape:** whatever the root cause, the fix must produce a *certified*
-optimal/infeasible verdict on those boxes — never a silent weak floor. This is a
-correctness-adjacent robustness item and benefits every instance, not just this
-class.
-**Kill criterion:** none — a sound engine must handle these boxes; if a specific
-LP is genuinely intractable, the node must inherit the parent bound (sound,
-already ≥ 57435 here) rather than 0.0. *Inheriting the parent bound instead of a
-weaker fallback is itself most of the win.*
+**Root causes found (bisect: deterministic, order-independent — not warm/pool
+state):**
+1. *Directional-widening bug in the conditioning clamp* (`solve_at_node` +
+   `sanitize_relaxation_for_conditioning`): a bound crossing the 1e10 numeric cap
+   was mapped to ±inf **by sign**, so a large-*positive lower* bound became
+   `+inf` — a pinned `[+inf, +inf)` box, not the documented widening. The ex1252
+   `x6³` monomial aux (lb 1.9e10 on high-speed sub-boxes) hit exactly this; the
+   simplex reported the nonsense LP `unbounded` and the objective-floor fallback
+   collapsed the child bound to 0.0. **Fixed**: a crossing bound now always
+   widens outward (lo → −inf, hi → +inf); the ±sentinel cases the clamp was
+   written for behave identically.
+2. *Crossed (empty) boxes crashed the build* into a diagnostic-free `error`:
+   OBBT correctly flags a crossed tightening as `infeasible=True` (a proof the
+   box is empty — at this config it fires at rounds=8, pruning the whole config
+   outright), but a crossed box handed to `solve_at_node` crashed
+   (`Interval lo > hi`). **Fixed**: `solve_at_node` now answers a genuinely
+   crossed box with the definitionally correct `infeasible`, and repairs
+   hair-crossings (float round-off) by widening — which can never false-prune.
+
+**Measured after the fix** (same battery): children 2/3 go `0.0 → 66932 / 92706`
+(certified, monotone in `x6`; proved 4-way min-child bound 62071 vs 0.0 before),
+and the OBBT-crossed box returns `infeasible` (correct prune) instead of `error`.
+Both LP relaxations only widen or prune-on-empty, so the change is sound by
+construction; `python/tests/test_narrow_box_bounds.py` pins fails-before/
+passes-after (4 tests, incl. the false-prune guard for hair-crossings).
 
 ### Stage 2 — configuration-first branching (L3, the dominant lever)
 **Hypothesis:** branching indicators → reform expansion bits (`_ipx_e*`) → pump

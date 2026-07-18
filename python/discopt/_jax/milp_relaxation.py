@@ -687,10 +687,15 @@ def sanitize_relaxation_for_conditioning(
         A = None
         b = None
 
+    # Directional widening (#732 Stage 1): a crossing lower bound always drops to
+    # -inf and a crossing upper bound always rises to +inf. The old sign-based
+    # mapping pinned a large-positive lower bound to +inf (a [+inf, +inf) box —
+    # not a widening), which is how the docstring's "widening" contract was
+    # silently violated; see the solve_at_node clamp for the measured failure.
     bounds = [
         (
-            lo if abs(lo) < cap else (-np.inf if lo < 0 else np.inf),
-            hi if abs(hi) < cap else (np.inf if hi > 0 else -np.inf),
+            lo if abs(lo) < cap else -np.inf,
+            hi if abs(hi) < cap else np.inf,
         )
         for (lo, hi) in model._bounds
     ]
