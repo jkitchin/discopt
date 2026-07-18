@@ -2100,10 +2100,24 @@ def _invoke_pre_import_callbacks(
        an incumbent). The cuts will tighten subsequent relaxations.
     2. Call ``incumbent_callback``. If it returns False, mark the node as
        infeasible.
+
+    Returns the number of nodes rejected (by a lazy cut or an incumbent-callback
+    ``False``). A rejection sentinels a node whose relaxation is genuinely
+    FEASIBLE, so it is a *non-rigorous* fathom (issue #748): the removed region
+    is not proven to contain no acceptable point — the callback merely excluded
+    the specific integer point found. The caller must therefore flag
+    ``_nonrigorous_fathom`` so a tree that later exhausts with no accepted
+    incumbent reports ``unknown`` (feasibility undetermined) rather than falsely
+    certifying ``infeasible``. Without this, a pure-MILP whose LP-relaxation root
+    is already integer-optimal but callback-rejected (nothing left to branch)
+    certified a FALSE infeasibility (CLAUDE.md §1). This runs AFTER the batch's
+    own non-rigorous-sentinel sweep, so the caller must account for these
+    rejections separately.
     """
     from discopt._jax.cutting_planes import LinearCut
     from discopt.callbacks import CallbackContext, cut_result_to_dense
 
+    n_rejected = 0
     incumbent_info = tree.incumbent()
     inc_obj = None
     if incumbent_info is not None:
@@ -2173,6 +2187,7 @@ def _invoke_pre_import_callbacks(
                 # fail, the point the cuts exclude must never be accepted as an
                 # incumbent. This assignment precedes any fallible cut math.
                 result_lbs[i] = _INFEASIBILITY_SENTINEL
+                n_rejected += 1
                 for cut in cuts:
                     coeffs, rhs, sense = cut_result_to_dense(cut, model)
                     _cut_pool.add(LinearCut(coeffs=coeffs, rhs=rhs, sense=sense))
@@ -2195,10 +2210,13 @@ def _invoke_pre_import_callbacks(
                 accept = None
             if accept is False:
                 result_lbs[i] = _INFEASIBILITY_SENTINEL
+                n_rejected += 1
                 logger.info(
                     "Incumbent callback rejected solution at node %d",
                     int(result_ids[i]),
                 )
+
+    return n_rejected
 
 
 def _screen_heuristic_incumbent(
@@ -5467,53 +5485,73 @@ def solve_model(
             else:
                 return _solve_qp(model, t_start, prefer_pounce=nlp_solver == "pounce")
         elif problem_class == ProblemClass.MILP:
-            # Warm-started-simplex engine (nlp_solver="simplex"): the whole MILP
-            # B&B runs in Rust with dual-warm-started simplex node solves. Opt-in;
-            # falls through to the default path if unavailable.
-            if nlp_solver == "simplex":
-                if lagrangian_bound:
-                    logger.warning(
-                        "lagrangian_bound is ignored with nlp_solver='simplex' (the "
-                        "monolithic Rust MILP engine has no per-node hook); use the "
-                        "default nlp_solver='pounce' MILP path to enable it."
+            # #748: the specialized MILP engines (``_solve_milp_simplex`` /
+            # ``_solve_milp_bb``) do not receive or consult ``lazy_constraints``
+            # / ``incumbent_callback``, so a callback-rejected or cut-off
+            # integer-feasible point would be silently accepted as the incumbent
+            # — a soundness bug for lazy constraints (the callback defines the
+            # true feasible set) and an API-contract violation for an incumbent
+            # rejection. When either callback is present, do NOT dispatch to the
+            # specialized engine: fall through (no return) to the spatial
+            # McCormick Branch-and-Bound path below, which honors both callbacks
+            # (#740) — the same fall-through the nonconvex-MIQP branch and the
+            # NLP-BB auto-select already take. Trades the specialized engine's
+            # speed for correctness (CLAUDE.md §1). This mirrors the #740 fix on
+            # the spatial path.
+            if lazy_constraints is None and incumbent_callback is None:
+                # Warm-started-simplex engine (nlp_solver="simplex"): the whole MILP
+                # B&B runs in Rust with dual-warm-started simplex node solves. Opt-in;
+                # falls through to the default path if unavailable.
+                if nlp_solver == "simplex":
+                    if lagrangian_bound:
+                        logger.warning(
+                            "lagrangian_bound is ignored with nlp_solver='simplex' (the "
+                            "monolithic Rust MILP engine has no per-node hook); use the "
+                            "default nlp_solver='pounce' MILP path to enable it."
+                        )
+                    _simplex_res = _solve_milp_simplex(
+                        model,
+                        time_limit,
+                        gap_tolerance,
+                        max_nodes,
+                        t_start,
+                        initial_point=initial_point,
                     )
-                _simplex_res = _solve_milp_simplex(
+                    if _simplex_res is not None:
+                        return _simplex_res
+                # POUNCE-only mode (nlp_solver="pounce", the universal default)
+                # routes to the self-hosted B&B and bypasses HiGHS entirely. An
+                # interior-point method is the wrong tool for the *linear* node LPs
+                # (no warm-start across branches, interior smearing, no basis), so
+                # the per-node engine defaults to the exact-vertex warm-started
+                # **simplex** (node_engine="simplex"); it degrades to the POUNCE IPM
+                # node path inside _solve_milp_bb if the simplex binding is absent.
+                # The B&B itself is sound, runs the continuous-repair root dive for
+                # an early incumbent, recovers stalled nodes, and reduced-cost-fixes.
+                _pounce_only = nlp_solver == "pounce"
+                return _solve_milp_bb(
                     model,
                     time_limit,
                     gap_tolerance,
+                    batch_size,
+                    strategy,
                     max_nodes,
                     t_start,
-                    initial_point=initial_point,
+                    prefer_pounce=_pounce_only,
+                    # Node LP relaxations are linear — always solve them with the
+                    # structured engine (exact-vertex Rust simplex, degrading to
+                    # POUNCE), regardless of nlp_solver. nlp_solver governs only the
+                    # NLP subproblem solver. The JAX LP-IPM node path was retired (#370).
+                    node_engine="simplex",
+                    lagrangian_bound=lagrangian_bound,
+                    lagrangian_frequency=lagrangian_frequency,
                 )
-                if _simplex_res is not None:
-                    return _simplex_res
-            # POUNCE-only mode (nlp_solver="pounce", the universal default)
-            # routes to the self-hosted B&B and bypasses HiGHS entirely. An
-            # interior-point method is the wrong tool for the *linear* node LPs
-            # (no warm-start across branches, interior smearing, no basis), so
-            # the per-node engine defaults to the exact-vertex warm-started
-            # **simplex** (node_engine="simplex"); it degrades to the POUNCE IPM
-            # node path inside _solve_milp_bb if the simplex binding is absent.
-            # The B&B itself is sound, runs the continuous-repair root dive for
-            # an early incumbent, recovers stalled nodes, and reduced-cost-fixes.
-            _pounce_only = nlp_solver == "pounce"
-            return _solve_milp_bb(
-                model,
-                time_limit,
-                gap_tolerance,
-                batch_size,
-                strategy,
-                max_nodes,
-                t_start,
-                prefer_pounce=_pounce_only,
-                # Node LP relaxations are linear — always solve them with the
-                # structured engine (exact-vertex Rust simplex, degrading to
-                # POUNCE), regardless of nlp_solver. nlp_solver governs only the
-                # NLP subproblem solver. The JAX LP-IPM node path was retired (#370).
-                node_engine="simplex",
-                lagrangian_bound=lagrangian_bound,
-                lagrangian_frequency=lagrangian_frequency,
+            logger.info(
+                "MILP with a lazy_constraints/incumbent_callback — routing to spatial "
+                "Branch-and-Bound (the specialized MILP engine cannot honor these "
+                "callbacks; #748)"
             )
+            # Fall through to the spatial/McCormick path below.
         elif problem_class == ProblemClass.MIQP:
             # A convex MIQP may use the convex MIQP B&B; a NONCONVEX one must
             # NOT. `_solve_miqp_bb` assumes a convex node QP (a convex relaxation
@@ -5534,25 +5572,41 @@ def solve_model(
                 _root_constraint_mask,
             ) = _classify_model_convexity(model, failure_label="MIQP convexity detection failed")
             if _root_convexity_known and _root_is_convex:
-                # Convex MIQP via discopt's own self-hosted B&B (POUNCE node QP
-                # relaxations) — HiGHS-free by design (issue #359 / pure-Rust
-                # goal). The convex node QP is solved to global optimality, so the
-                # B&B bound is valid.
-                return _solve_miqp_bb(
-                    model,
-                    time_limit,
-                    gap_tolerance,
-                    batch_size,
-                    strategy,
-                    max_nodes,
-                    t_start,
-                    prefer_pounce=True,
+                # #748: the convex MIQP B&B (``_solve_miqp_bb``) does not receive
+                # or consult ``lazy_constraints`` / ``incumbent_callback``, so a
+                # callback-rejected or cut-off integer point would be silently
+                # accepted (soundness bug for lazy constraints; API violation for
+                # incumbent rejection). When either callback is present, fall
+                # through (no return) to the spatial McCormick Branch-and-Bound
+                # path below, which honors both (#740) — same as the nonconvex
+                # MIQP branch. Trades speed for correctness (CLAUDE.md §1).
+                if lazy_constraints is None and incumbent_callback is None:
+                    # Convex MIQP via discopt's own self-hosted B&B (POUNCE node QP
+                    # relaxations) — HiGHS-free by design (issue #359 / pure-Rust
+                    # goal). The convex node QP is solved to global optimality, so the
+                    # B&B bound is valid.
+                    return _solve_miqp_bb(
+                        model,
+                        time_limit,
+                        gap_tolerance,
+                        batch_size,
+                        strategy,
+                        max_nodes,
+                        t_start,
+                        prefer_pounce=True,
+                    )
+                logger.info(
+                    "Convex MIQP with a lazy_constraints/incumbent_callback — routing "
+                    "to spatial Branch-and-Bound (the convex MIQP engine cannot honor "
+                    "these callbacks; #748)"
                 )
-            logger.info(
-                "Nonconvex MIQP detected — routing to spatial Branch-and-Bound "
-                "(convex MIQP solvers would certify a local stationary point)"
-            )
-            # Fall through to the spatial/McCormick path below.
+                # Fall through to the spatial/McCormick path below.
+            else:
+                logger.info(
+                    "Nonconvex MIQP detected — routing to spatial Branch-and-Bound "
+                    "(convex MIQP solvers would certify a local stationary point)"
+                )
+                # Fall through to the spatial/McCormick path below.
 
     # --- Materialize builder-resident linear constraint rows (issue #681) ---
     # The fast-construction API (``add_linear_constraints`` / the
@@ -9367,7 +9421,7 @@ def solve_model(
 
         # --- User callbacks: lazy constraints and incumbent filtering ---
         if lazy_constraints is not None or incumbent_callback is not None:
-            _invoke_pre_import_callbacks(
+            _n_cb_rejected = _invoke_pre_import_callbacks(
                 model=model,
                 tree=tree,
                 t_start=t_start,
@@ -9384,6 +9438,20 @@ def solve_model(
                 _cut_pool=_cut_pool,
                 tree_bound_valid=_gap_certified,
             )
+            # #748: a callback rejection sentinels a FEASIBLE node without proving
+            # its region empty of acceptable points — a non-rigorous fathom. It is
+            # applied here, AFTER the batch's own non-rigorous-sentinel sweep
+            # (which cannot see these late sentinels), so record it now. This
+            # prevents a tree that later drains with no accepted incumbent from
+            # falsely certifying "infeasible": the terminal logic routes a
+            # non-rigorous exhaustion to "unknown" (feasibility undetermined)
+            # instead (the tight-integer-root pure-MILP case where the callback
+            # rejects the LP-optimal root and nothing remains to branch). It does
+            # NOT touch _taint_floor_internal, so a solve that DOES find an
+            # accepted incumbent and closes its frontier gap still certifies as
+            # before — only the no-incumbent false-infeasible is corrected.
+            if _n_cb_rejected:
+                _nonrigorous_fathom = True
 
         # Convex-objective node bound (applied at the single point every node's
         # bound funnels through, so it covers all upstream paths). When the
