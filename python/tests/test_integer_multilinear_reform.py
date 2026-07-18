@@ -20,6 +20,7 @@ import os
 os.environ["JAX_PLATFORMS"] = "cpu"
 os.environ["JAX_ENABLE_X64"] = "1"
 
+import time
 from pathlib import Path
 
 import discopt.modeling as dm
@@ -194,13 +195,26 @@ def test_ex1252_multilinear_reform_sound_and_lifts_bound():
     optimum) and lifts well past the structural 5134 floor that the term-wise
     trilinear McCormick envelope plateaus at. Certification of the full instance
     additionally needs the residual continuous-cubic barrier to close (spatial
-    branching); here we lock soundness + the bound lift, which is the #707 gain."""
-    os.environ["DISCOPT_INTEGER_MULTILINEAR_REFORM"] = "1"
+    branching); here we lock soundness + the bound lift, which is the #707 gain.
+
+    Budget-aware adoption (#732 blocker b): on the gated-configuration class the
+    reform is only adopted once the budget affords its payoff (``time_limit >=
+    180`` s); below that the flag-on solve is byte-identical to flag-off (a
+    separate assertion in the graduation panel). So this exercises an adopting
+    budget (200 s) with the full graduation stack."""
+    keys = [
+        "DISCOPT_INTEGER_MULTILINEAR_REFORM",
+        "DISCOPT_MULTILINEAR_COUPLING_RLT",
+        "DISCOPT_DISJUNCTIVE_CONFIG_BOUND",
+    ]
+    for k in keys:
+        os.environ[k] = "1"
     try:
         m = dm.from_nl(str(_DATA / "ex1252.nl"))
-        res = m.solve(time_limit=60)
+        res = m.solve(time_limit=200)
     finally:
-        os.environ.pop("DISCOPT_INTEGER_MULTILINEAR_REFORM", None)
+        for k in keys:
+            os.environ.pop(k, None)
     assert res.bound is not None and math.isfinite(res.bound)
     # Sound: a valid dual bound never exceeds the true optimum.
     assert res.bound <= _EX1252_OPT + 1e-2, (
@@ -212,6 +226,50 @@ def test_ex1252_multilinear_reform_sound_and_lifts_bound():
     # The tightening: the bound clears the 5134 floor the term-wise envelope stalls at.
     assert res.bound > 5134.5, (
         f"ex1252 multilinear-reform bound {res.bound} did not lift past the 5134 floor"
+    )
+
+
+@pytest.mark.slow
+@pytest.mark.correctness
+def test_ex1252_short_budget_declines_reform_no_regression():
+    """Budget-aware adoption (#732 blocker b). On the gated-configuration class the
+    reform's payoff (the disjunctive floor / deep spatial recursion) cannot engage
+    at a short budget, so the exact-linearization is pure per-node-LP cost there:
+    measured, ex1252@60 s flag-on collapsed the tree dual 9273 -> 0 and lost the
+    incumbent. The gate declines adoption below the payoff budget, so a short-budget
+    flag-on solve is byte-identical to flag-off. Fails-before: without the gate the
+    flag-on arm adopts the heavier reformed model and diverges (different relaxation
+    -> different bound and search).
+
+    A node limit (not a wall limit) makes the comparison deterministic; the 120 s
+    budget stays below the 180 s adoption threshold so the reform is declined."""
+
+    def _solve(flag_on):
+        keys = [
+            "DISCOPT_INTEGER_MULTILINEAR_REFORM",
+            "DISCOPT_MULTILINEAR_COUPLING_RLT",
+            "DISCOPT_DISJUNCTIVE_CONFIG_BOUND",
+        ]
+        for k in keys:
+            os.environ.pop(k, None)
+        if flag_on:
+            for k in keys:
+                os.environ[k] = "1"
+        try:
+            return dm.from_nl(str(_DATA / "ex1252.nl")).solve(time_limit=120, max_nodes=5)
+        finally:
+            for k in keys:
+                os.environ.pop(k, None)
+
+    off, on = _solve(False), _solve(True)
+    # Reform declined at this budget -> identical model -> identical node-limited
+    # search: same bound and same node count, deterministically.
+    assert off.bound is not None and on.bound is not None
+    assert abs(on.bound - off.bound) <= 1e-6, (
+        f"short-budget flag-on dual {on.bound} != flag-off {off.bound} — reform not declined"
+    )
+    assert on.node_count == off.node_count, (
+        f"short-budget flag-on nodes {on.node_count} != flag-off {off.node_count}"
     )
 
 
@@ -235,6 +293,81 @@ def test_flag_with_unextendable_seed_does_not_crash():
         os.environ.pop("DISCOPT_INTEGER_MULTILINEAR_REFORM", None)
     # Solve still completes soundly (seed simply dropped).
     assert res.objective is None or res.objective >= -1.0 - 1e-4
+
+
+@pytest.mark.correctness
+def test_wide_multilinear_reform_guard_degrades_instead_of_hanging():
+    """Monomial-blowup guard (#707/#732 blocker a). A product of many integer
+    factors distributes into ``prod_i (1 + nbits_i)`` binary monomials — a
+    12-factor ``[0,7]`` product is ``4**12 ~ 16.7M`` — each minting an AND aux.
+    Before the guard this explodes the *reform build* (nvs09, a 10-factor real
+    instance, hung the pass for minutes before the post-build column guard could
+    reject it). The early estimate must abort the pass and return the ORIGINAL
+    model (exactly the flag-off path), fast — and must NOT fire on a legitimate
+    small reform.
+
+    General/class test (Dev-Philosophy #2): the synthetic wide product stands in
+    for the nvs09 structure, so this pins the mechanism with no corpus dependency
+    and no multi-minute runtime.
+    """
+    m = dm.Model("wide")
+    factors = [m.integer(f"a{i}", lb=0, ub=7) for i in range(12)]
+    prod = factors[0]
+    for f in factors[1:]:
+        prod = prod * f
+    m.minimize(-prod)
+    assert has_integer_multilinear_reformulation_work(m)
+
+    t0 = time.perf_counter()
+    r = reformulate_integer_multilinear(m)
+    dt = time.perf_counter() - t0
+    # Degrades to the flag-off model (guard aborted the pass)...
+    assert r is m, "blown-up reform must return the original model, not a partial build"
+    # ...and does so from the range estimate alone — no ~16M-monomial build.
+    assert dt < 5.0, f"reform guard took {dt:.1f}s — it should abort on the estimate, not build"
+
+    # Inertness: a legitimate small product (4 factors [0,3] -> 3**4 = 81 monomials,
+    # well under the cap) must still reform, so the guard never over-triggers.
+    m2 = dm.Model("small")
+    g = [m2.integer(f"b{i}", lb=0, ub=3) for i in range(4)]
+    p2 = g[0]
+    for f in g[1:]:
+        p2 = p2 * f
+    m2.subject_to(g[0] + g[1] + g[2] + g[3] <= 6)
+    m2.minimize(-p2)
+    assert reformulate_integer_multilinear(m2) is not m2, "guard falsely aborted a small reform"
+
+
+@pytest.mark.slow
+@pytest.mark.correctness
+def test_nvs09_reform_on_certifies_and_terminates():
+    """nvs09 end-to-end with the flag ON (#732 graduation blocker a). Its objective
+    carries a 10-factor integer-multilinear product ([3,9] each -> ``4**10 ~ 1.05M``
+    monomials) that hung the reform build for minutes and left the instance
+    uncertified. With the blowup guard the reform degrades to the (fast, certifying)
+    flag-off path: the solve must terminate well within the budget and certify the
+    known optimum, sound throughout. Fails-before: without the guard this test times
+    out in the reform build."""
+    nvs09_path = Path(__file__).parent / "data" / "minlplib_nl" / "nvs09.nl"
+    if not nvs09_path.exists():
+        pytest.skip("nvs09.nl not present in this corpus")
+    nvs09_opt = -43.134336
+    os.environ["DISCOPT_INTEGER_MULTILINEAR_REFORM"] = "1"
+    try:
+        m = dm.from_nl(str(nvs09_path))
+        t0 = time.perf_counter()
+        res = m.solve(time_limit=60)
+        dt = time.perf_counter() - t0
+    finally:
+        os.environ.pop("DISCOPT_INTEGER_MULTILINEAR_REFORM", None)
+    # Terminates fast (the reform no longer hangs) — generous margin for CI load.
+    assert dt < 55.0, f"nvs09 reform-on took {dt:.1f}s — the build guard should keep it fast"
+    # Sound and certifies the known optimum.
+    if res.bound is not None and math.isfinite(res.bound):
+        assert res.bound <= nvs09_opt + 1e-2, f"nvs09 UNSOUND bound {res.bound}"
+    assert res.objective is not None and res.objective <= nvs09_opt + 1e-2, (
+        f"nvs09 incumbent {res.objective} did not reach the optimum {nvs09_opt}"
+    )
 
 
 @pytest.mark.slow
