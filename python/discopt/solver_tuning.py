@@ -594,9 +594,11 @@ class SolverTuning:
     leaves — a valid bound by partition (anytime-valid: unprocessed leaves
     inherit the caller's existing root bound). Measured (ex1252, plan doc Stage
     2): the standalone root pass certifies 37945 at a 48-leaf budget (tree at
-    400 nodes: 16304), and end-to-end at equal solve settings the reported
-    global dual goes 0.0 -> 42725. Default-OFF pending the CLAUDE.md §5 corpus
-    differential panel."""
+    400 nodes: 16304) and 63080 at 120 leaves once the Stage-4 spatial bisection
+    engages (through the ~48k plateau — the #721 acceptance bar); end-to-end
+    the reported global dual goes 0.0 -> 42725 (240 s solve) and 0.0 -> 74915
+    (600 s solve, deadline-governed leaf budget). Default-OFF pending the
+    CLAUDE.md §5 corpus differential panel."""
 
     obj_branch_priority: bool = field(
         default_factory=lambda: _env_flag("DISCOPT_OBJ_BRANCH_PRIORITY", default=True)

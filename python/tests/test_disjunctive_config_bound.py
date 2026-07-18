@@ -85,6 +85,33 @@ def test_anytime_validity_tiny_budget(monkeypatch):
 
 
 @pytest.mark.slow
+def test_ex1252_spatial_recursion_clears_721_bar(monkeypatch):
+    """#732 Stage 4: with continuous bisection at count-complete leaves, the pass
+    breaks the ~48k plateau — the original #721 acceptance bar ("global dual
+    climbs materially above ~48k") — with no incumbent and no tree.
+
+    Measured 63080 at a 120-leaf budget (48-leaf behavior is byte-identical to
+    Stage 2: counts are still splittable there, so the spatial extension only
+    engages deeper).
+    """
+    r = _reformed(monkeypatch)
+    lb, ub = flat_variable_bounds(r)
+    res = compute_disjunctive_config_bound(
+        r,
+        np.asarray(lb),
+        np.asarray(ub),
+        max_leaf_solves=120,
+        deadline=time.perf_counter() + 240.0,
+    )
+    assert res.bound is not None
+    assert res.bound <= EX1252_OPT + 1e-2, f"UNSOUND: {res.bound} > optimum {EX1252_OPT}"
+    assert res.bound >= 48000.0, (
+        f"spatial recursion bound {res.bound} fell below the #721 bar (48k) — "
+        "re-run the plan-doc Stage-4 measurement before shipping a change here"
+    )
+
+
+@pytest.mark.slow
 def test_ex1252_pass_clears_stage2_gate(monkeypatch):
     """The full-budget root pass certifies a sound bound above the Stage-2 bar.
 

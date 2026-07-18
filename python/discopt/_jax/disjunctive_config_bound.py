@@ -85,6 +85,7 @@ class _Leaf:
     certified: bool = False
     attempts: int = 0
     depth: int = 0
+    spatial_depth: int = 0  # number of continuous bisections on this path
     terminal: bool = False  # no splittable variable remains / budget-terminal
     key: tuple = field(default_factory=tuple)
 
@@ -119,14 +120,39 @@ def _box_fbbt(model: Model, lb: np.ndarray, ub: np.ndarray):
         return lb, ub, False
 
 
-def _split_var(leaf: _Leaf, count_flats: list[int]) -> Optional[int]:
-    """First configuration count variable with integer width >= 1 in the leaf box."""
+def _split_var(
+    leaf: _Leaf,
+    count_flats: list[int],
+    cont_flats: list[int],
+    root_width: np.ndarray,
+    max_spatial_depth: int,
+) -> Optional[tuple[str, int]]:
+    """Next split for the leaf: a count unit-peel, else a continuous bisection.
+
+    Count variables first (fixing the configuration is what couples the cost
+    terms); once none has integer width left, fall to spatial bisection of the
+    widest-relative continuous nonlinear participant (#732 Stage 4 — the cubic
+    block's x6-class variables; measured +12.5% min-child per split at the
+    config box), capped at ``max_spatial_depth`` bisections per path.
+    """
     for j in count_flats:
         lo = np.ceil(leaf.lb[j] - 1e-9)
         hi = np.floor(leaf.ub[j] + 1e-9)
         if hi - lo >= 1.0:
-            return j
-    return None
+            return ("count", j)
+    if leaf.spatial_depth >= max_spatial_depth:
+        return None
+    best_j, best_rel = None, 0.05  # ignore near-pinned variables
+    for j in cont_flats:
+        w = float(leaf.ub[j] - leaf.lb[j])
+        rw = float(root_width[j])
+        if rw > 0.0 and np.isfinite(rw):
+            rel = w / rw
+            if rel > best_rel:
+                best_rel, best_j = rel, j
+    if best_j is None:
+        return None
+    return ("cont", best_j)
 
 
 def compute_disjunctive_config_bound(
@@ -141,6 +167,7 @@ def compute_disjunctive_config_bound(
     obbt_rounds: int = 3,
     obbt_lp_time: float = 0.2,
     root_floor: float = -np.inf,
+    max_spatial_depth: int = 6,
 ) -> DisjunctiveConfigResult:
     """Compute the disjunctive configuration bound over ``[lb, ub]``.
 
@@ -164,6 +191,27 @@ def compute_disjunctive_config_bound(
 
     from discopt._jax.mccormick_lp import MccormickLPRelaxer
     from discopt._jax.obbt import obbt_tighten_root
+
+    # #732 Stage 4: continuous bisection candidates — nonlinear-term participants
+    # that are neither configuration counts nor indicators (the cubic block's
+    # x6-class variables on ex1252). Structural, never name-keyed.
+    cont_flats: list[int] = []
+    try:
+        from discopt._jax.term_classifier import classify_nonlinear_terms
+
+        _terms = classify_nonlinear_terms(model)
+        _part: set[int] = set()
+        for _grp in (_terms.bilinear, _terms.trilinear, _terms.multilinear):
+            for _t in _grp or []:
+                _part.update(int(_x) for _x in _t)
+        for _t in _terms.monomial or []:
+            _part.add(int(_t[0]))
+        cont_flats = sorted(_part - set(count_flats) - set(indicators))
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.debug("disjunctive pass: continuous candidates skipped: %s", exc)
+    root_width = np.where(
+        np.isfinite(ub - lb), ub - lb, np.inf
+    )  # spatial ranking is relative to the root width
 
     relaxer = MccormickLPRelaxer(model)
 
@@ -248,16 +296,27 @@ def compute_disjunctive_config_bound(
         if leaf.terminal:
             break  # weakest leaf can no longer improve
         if leaf.certified or leaf.attempts > 0:
-            j = _split_var(leaf, count_flats)
-            if j is None:
+            split = _split_var(leaf, count_flats, cont_flats, root_width, max_spatial_depth)
+            if split is None:
                 leaf.terminal = True
                 continue
-            lo = float(np.ceil(leaf.lb[j] - 1e-9))
-            left = _Leaf(leaf.lb.copy(), leaf.ub.copy(), leaf.bound, depth=leaf.depth + 1)
-            left.ub[j] = lo
-            left.lb[j] = min(left.lb[j], lo)
-            right = _Leaf(leaf.lb.copy(), leaf.ub.copy(), leaf.bound, depth=leaf.depth + 1)
-            right.lb[j] = lo + 1.0
+            kind, j = split
+            sd = leaf.spatial_depth + (1 if kind == "cont" else 0)
+            left = _Leaf(
+                leaf.lb.copy(), leaf.ub.copy(), leaf.bound, depth=leaf.depth + 1, spatial_depth=sd
+            )
+            right = _Leaf(
+                leaf.lb.copy(), leaf.ub.copy(), leaf.bound, depth=leaf.depth + 1, spatial_depth=sd
+            )
+            if kind == "count":
+                lo = float(np.ceil(leaf.lb[j] - 1e-9))
+                left.ub[j] = lo
+                left.lb[j] = min(left.lb[j], lo)
+                right.lb[j] = lo + 1.0
+            else:  # continuous bisection at the midpoint (#732 Stage 4)
+                mid = 0.5 * (float(leaf.lb[j]) + float(leaf.ub[j]))
+                left.ub[j] = mid
+                right.lb[j] = mid
             survivors.remove(leaf)
             for child in (left, right):
                 if _out_of_budget():

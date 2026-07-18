@@ -4850,13 +4850,19 @@ def solve_model(
                                     flat_variable_bounds as _dcb_flat,
                                 )
 
-                                _dcb_budget = min(0.25 * float(time_limit), 60.0)
+                                _dcb_budget = min(0.25 * float(time_limit), 150.0)
                                 _dcb_lb, _dcb_ub = _dcb_flat(model)
                                 _dcb = compute_disjunctive_config_bound(
                                     model,
                                     np.asarray(_dcb_lb, dtype=np.float64),
                                     np.asarray(_dcb_ub, dtype=np.float64),
                                     deadline=time.perf_counter() + _dcb_budget,
+                                    # The wall deadline governs in-solve; the leaf
+                                    # cap is a runaway backstop only (the module
+                                    # default of 48 would stop a 150 s budget at
+                                    # ~50 s, pinning the floor at the shallow
+                                    # 42.7k instead of the deep-regime 63k).
+                                    max_leaf_solves=1000,
                                 )
                                 if _dcb.bound is not None and np.isfinite(_dcb.bound):
                                     model._disjunctive_config_floor = float(_dcb.bound)

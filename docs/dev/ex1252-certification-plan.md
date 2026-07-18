@@ -225,16 +225,34 @@ incumbent?
 feasible and > 20% below incumbent, the cubic gap (Stage 4) is bigger than the
 search gap and Stage 4 is promoted above Stage 2 in effort.
 
-### Stage 4 — cubic-block tightening at configs (L4; #721's original directions, now unblocked)
+### Stage 4 — cubic-block tightening at configs *(option 1 DONE 2026-07-18 — the
+plateau breaks; #721's acceptance bar exceeded)*
 In increasing effort, measured at the OBBT-tightened config box:
-1. **Spatial branching on `x6`** — already works (+8%/split measured); Stage 2's
-   priority order just needs to reach it after the integers.
+1. **Spatial bisection of the cubic block at count-complete leaves — DONE.**
+   Kill bar (≥ 10% leaf lift) was already met by the Stage-1 battery (config-box
+   x6 children: parent 65654 → min-child 73848, +12.5%). Implemented inside the
+   disjunctive pass: once a leaf has no configuration count left to peel,
+   bisect the **widest-relative continuous nonlinear participant** (structural:
+   nonlinear-term participants minus counts/indicators — the x6-class), capped
+   at `max_spatial_depth` bisections per path. **Measured:** the standalone pass
+   goes 37945 (48 leaves — byte-identical to Stage 2, spatial only engages
+   deeper) → **63080 at 120 leaves** (129 s, no incumbent, no tree) — through
+   the ~48k plateau, i.e. **the original #721 acceptance criterion ("global
+   dual climbs materially above ~48k") is formally exceeded**. Wiring budget
+   raised to `min(25% of time_limit, 150 s)` with a deadline-governed leaf
+   budget (the module's 48-leaf default was capping the in-solve pass at the
+   shallow regime). **End-to-end: the reported global dual on a 600 s solve goes
+   0.0 (flag OFF) → 74915 (flag ON)** — 58% of the optimum, with a better
+   incumbent as well (131124 vs 134471); the in-solve pass beats the standalone
+   63080 because the root box is presolve/FBBT-tightened before it runs. Session
+   trajectory of the certified dual: 5134 (pre-#707) → ~16k (#707) → 42725 →
+   **74915**. Pinned by `test_ex1252_spatial_recursion_clears_721_bar` (≥ 48k).
 2. **Piecewise-McCormick auto-trigger gated on integer-complete nodes** — #721's
-   direction #1, provably inert pre-RLT, now expected to bite; entry experiment:
-   k = 4/8 partitions on `x6` at the config box, measure the `min x15` lift.
+   direction #1; held in reserve — option 1 did not stall, so per the plan's
+   ordering this stays unbuilt until the spatial lever plateaus (record the
+   measurement then).
 3. **Edge-concave / αBB envelope for the cubic rows** (catalog §7's open item) —
-   one-shot tighter envelope of `x15 = a·x6³ + b·x6²·x12 + c·x12²·x6` over the
-   config box; highest effort, only if 1–2 stall.
+   highest effort, only if 1–2 stall.
 **Kill criterion per option:** < 10% `min x15` lift at the config box → drop that
 option (recorded, not retried).
 
