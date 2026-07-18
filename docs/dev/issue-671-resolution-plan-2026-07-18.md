@@ -199,7 +199,39 @@ Cheap checks before running anything heavy:
 - `cargo test -p discopt-core` (no Rust change expected in the port; run it
   anyway — the refine/regularized_lu modules live there)
 
-## 5. Step 4 — re-run the owner's graduation panel
+## 5. Step 4 — re-run the owner's graduation panel ⏳ IN PROGRESS
+
+**Run 2026-07-18b (first re-run, HOLD — one artifact):** 66-instance corpus +
+hda, OFF vs ON, corpus TL 60 s / hda TL 120 s. Result: hda CLEAN and delivering
+the target (**ON −64473.44**, sound ≤ opt −5964.53, tight ≫ candidate-A
+−1.80e10); nvs05/nvs09/nvs13/nvs21 all clean (the always-on build-time
+regressions are gone); bchoco07/08 SOFT looser partial bounds (both-arms-timeout
+supersets — allowed). The **only** cert-fail: **tls2 node_count 421→353 with
+`drop=0`** (filter never fired).
+
+**Diagnosis (decisive):** `drop=0` means the filter was provably inert on tls2
+(zero rows dropped ⇒ the ON arm runs byte-identical code to OFF). Reproduced the
+node_count difference as a **harness warmup artifact**, not a code effect:
+
+| tls2 solve (fresh process) | flag | node_count |
+|---|---|---|
+| OFF #1 (process's first solve of tls2, cold) | OFF | **421** |
+| ON #1 (warm) | ON | 353 |
+| OFF #2 (warm) | OFF | 353 |
+| OFF #3 (warm) | OFF | 353 |
+
+At **equal warmth, OFF == ON == 353**; only cold-vs-warm differs (421 vs 353),
+identically for both flags. The panel measured each instance's OFF arm first
+(cold for that instance's JAX shape) then ON arm (warm), misattributing the
+cold→warm wobble to the flag. A 3 s discarded warmup makes OFF == ON == 353.
+
+**Fix + re-run 2026-07-18c (in progress):** added an equal-warmth warmup
+pre-solve to the panel's `run()` (`min(tl, 10 s)`, discarded) so both arms are
+measured warm. This removes only false positives — a genuine flag-induced node
+change survives it (both arms warm). Re-running the full corpus for a clean
+verdict; expect tls2 CLEAN ⇒ cert-clean ⇒ GRADUATE.
+
+### (original Step 4)
 
 Use the owner's harness, not the branch's older `rowfilter_diff_panel.py`
 (the owner's is the §5 two-bar gate, sense-aware — it carries the syn05hfsg
