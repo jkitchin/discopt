@@ -5285,30 +5285,6 @@ def solve_model(
         except Exception as e:
             logger.debug("Root presolve failed: %s", e)
 
-    # --- Activity-based big-M coefficient tightening (#282, opt-in) ---
-    # Shrinks big-M coefficients on binary-indicator rows toward the FBBT
-    # activity slack. Bound-changing (it strictly tightens the LP relaxation
-    # without removing any integer-feasible point), so it is gated behind
-    # ``DISCOPT_COEF_TIGHTEN`` (default OFF, CLAUDE.md §5). Runs once at the
-    # root here, before dispatch, so it benefits BOTH the NLP-BB and the
-    # spatial B&B paths. Rewrites the Python constraint DAG in place — the
-    # only place tightened coefficients reach the relaxation compiler. Skipped
-    # once the budget is blown (#654): declining it leaves the original,
-    # still-valid rows.
-    if presolve and not _deadline_exhausted():
-        try:
-            from discopt.solvers._root_presolve import (
-                coef_tighten_enabled,
-                tighten_bigm_coefficients,
-            )
-
-            if coef_tighten_enabled():
-                n_ct = tighten_bigm_coefficients(model)
-                if n_ct > 0:
-                    logger.info("Coefficient tightening: strengthened %d big-M rows", n_ct)
-        except Exception as e:
-            logger.debug("Coefficient tightening failed: %s", e)
-
     # --- Reverse-AD interval tightening (M9 of #51, opt-in) ---
     # Iterates Gauss-Seidel reverse-mode interval AD over every
     # constraint to a fixed point and writes back tighter scalar bounds.
