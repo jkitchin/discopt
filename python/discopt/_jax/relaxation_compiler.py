@@ -1297,13 +1297,20 @@ def _compile_relax_node(
         return fn
 
     if isinstance(expr, CustomCall):
+        # The LIFTED McCormick compiler cannot relax an opaque node: there is no
+        # auxiliary column to lift it onto. The sound global route for a hidden
+        # function is the REDUCED-SPACE engine (MCBox), which the solver selects
+        # automatically for MCBox-relaxable continuous models (plan P3.1, #713) —
+        # it never goes through this compiler. This raise is therefore the correct
+        # sound-or-refuse behavior for the lifted path (the solver's per-node lifted
+        # build catches it and the reduced-space bound takes over).
         raise NotImplementedError(
-            f"Cannot build a McCormick relaxation for the opaque AD-only user "
-            f"function {expr.name!r} (dm.custom). Global / spatial branch-and-bound "
-            f"needs rigorous convex/concave relaxations, which an opaque callable "
-            f"cannot provide. Solve on the local NLP path (pure-continuous models "
-            f"route there automatically), or rebuild the function from dm.* "
-            f"primitives and use dm.udf."
+            f"Cannot build a LIFTED McCormick relaxation for the opaque AD-only user "
+            f"function {expr.name!r} (dm.custom): an opaque node has no auxiliary "
+            f"column to lift. discopt relaxes such a function through the reduced-space "
+            f"engine instead (automatic for MCBox-relaxable continuous models); a body "
+            f"using raw jnp intrinsics / a non-affine hidden division routes to the "
+            f"local NLP path. Rebuild from dm.* primitives (dm.udf) for the lifted path."
         )
 
     raise TypeError(f"Unhandled expression type: {type(expr).__name__}")

@@ -455,12 +455,24 @@ class CustomCall(Expression):
 
     Consequences (enforced by the solver and the export/relaxation layers):
 
-    - A model containing a ``CustomCall`` is solved on the **local NLP path
-      only** -- the result carries **no global optimality certificate**
-      (``gap_certified`` is ``False``).
-    - The solver **raises** if integer/binary variables are present, because
-      global B&B has no valid node relaxation for an opaque callable.
-    - Relaxation compilation and ``.nl`` export **raise** a clear error.
+    - If the opaque body traces soundly through discopt's reduced-space McCormick
+      type (``MCBox`` -- arithmetic ``+ - * / **`` and the ``discopt._jax.mcbox``
+      intrinsic namespace), a **continuous** model is now solved **globally with a
+      certificate** via the reduced-space engine, branching only on the original
+      degrees of freedom while the callable's internal intermediates stay hidden
+      (MAiNGO-parity plan P3.1, #713). A body that uses raw ``jnp`` intrinsics on
+      its arguments (e.g. ``jnp.exp(x)`` rather than an ``MCBox``-aware op), a
+      non-affine hidden division, a non-scalar leaf, or an unbounded box is **not**
+      reduced-relaxable and falls back to the **local NLP path only** (no global
+      certificate, ``gap_certified`` is ``False``) -- sound-or-refuse.
+    - The solver **raises** if integer/binary variables are present (global B&B over
+      integer DOF for a hidden-function model is plan P3.2, not yet implemented).
+    - Rust presolve/FBBT does not run on a hidden model (the Rust IR has no opaque
+      node); interval bounds on the ``CustomCall`` output come from the ``MCBox``
+      ``lo/hi`` propagated during the reduced-space trace (Python interval only).
+    - Relaxation compilation (the *lifted* McCormick compiler, which has no
+      auxiliary column for an opaque node) and ``.nl`` export **raise** a clear
+      error; the reduced-space path is the sound relaxation route.
 
     Built via :func:`custom`; do not instantiate directly in user code.
     """

@@ -169,3 +169,94 @@ def test_reduced_is_valid_relaxation_of_flattened():
     assert rb.status == "optimal" and rbf.status == "optimal"
     # both are valid lower bounds; reduced is looser-or-equal to lifted (never tighter)
     assert rb.bound <= rbf.bound + 1e-4
+
+
+# ---------------------------------------------------------------------------
+# P3.1 hardening: the solver's admission gate (backend-free).
+#
+# ``_custom_call_reduced_admissible`` decides whether a continuous CustomCall model
+# is routed to the GLOBAL reduced-space solve (certified) or kept on the local-NLP
+# path (uncertified). This is the sound-or-refuse boundary and needs no NLP backend
+# to test — it is pure relaxation-buildability. (The end-to-end certified solve via
+# ``m.solve()`` needs an NLP backend for node incumbents and is exercised in CI.)
+# ---------------------------------------------------------------------------
+
+
+def _admissible(build):
+    from discopt.solver import _custom_call_reduced_admissible
+
+    m, n = build()
+    return _custom_call_reduced_admissible(m, n)
+
+
+def test_admission_pure_arithmetic_objective_admits():
+    def b():
+        m = dm.Model()
+        x = m.continuous("x", lb=-10, ub=10)
+        m.minimize(dm.custom(lambda x: (x - 3.0) ** 2)(x))
+        return m, 1
+
+    assert _admissible(b) is True
+
+
+def test_admission_custom_in_constraint_admits():
+    def b():
+        m = dm.Model()
+        x = m.continuous("x", lb=-10, ub=10)
+        m.minimize(x)
+        m.subject_to(dm.custom(lambda x: x**2)(x) <= 4.0)
+        return m, 1
+
+    assert _admissible(b) is True
+
+
+def test_admission_raw_jnp_intrinsic_refuses():
+    # jnp.exp on the argument is not intercepted by MCBox -> not reduced-relaxable.
+    def b():
+        m = dm.Model()
+        v = m.continuous("v", 2, lb=[0.0, 0.0], ub=[2.0, 1.5])
+        m.minimize(dm.custom(lambda a, c: a * jnp.exp(c) - a * c)(v[0], v[1]))
+        return m, 2
+
+    assert _admissible(b) is False
+
+
+def test_admission_vector_leaf_refuses():
+    def b():
+        m = dm.Model()
+        x = m.continuous("x", 3, lb=-10, ub=10)
+        m.minimize(dm.custom(lambda x: jnp.sum(x**2))(x))
+        return m, 3
+
+    assert _admissible(b) is False
+
+
+def test_admission_nonaffine_hidden_division_refuses():
+    def b():
+        m = dm.Model()
+        v = m.continuous("v", 3, lb=[1.0, 1.0, 1.0], ub=[2.0, 2.0, 2.0])
+        m.minimize(dm.custom(lambda x, y, z: x / (y * z))(v[0], v[1], v[2]))
+        return m, 3
+
+    assert _admissible(b) is False
+
+
+def test_admission_unbounded_box_refuses():
+    def b():
+        m = dm.Model()
+        x = m.continuous("x", lb=0.0, ub=jnp.inf)
+        m.minimize(dm.custom(lambda x: (x - 3.0) ** 2)(x))
+        return m, 1
+
+    assert _admissible(b) is False
+
+
+def test_admission_dispatched_transcendental_admits():
+    # A body that dispatches to the MCBox op namespace (not raw jnp) IS relaxable.
+    def b():
+        m = dm.Model()
+        v = m.continuous("v", 2, lb=[0.2, 0.2], ub=[2.0, 2.0])
+        m.minimize(dm.custom(lambda c, t: _unit(c, t, 0.8))(v[0], v[1]))
+        return m, 2
+
+    assert _admissible(b) is True
