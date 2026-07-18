@@ -178,8 +178,8 @@ A `lean/` Lake project. Modules:
 | **0 (this effort)** | Design doc + Tier-1 emitter + Python reference checker + Lean checker sources + end-to-end demo | Tier 1 feasibility (rational ops) |
 | 1 | `IntervalArith` over all `MathFunc`; feasibility over the transcendental set | Tier 1, full factorable |
 | 2 | convex/KKT emitter + Python checker **(done, exact QP/QCQP — §11)**; `Convex.lean` soundness proof pending Mathlib | Tier 2 (convex QP/QCQP) |
-| 3 | `LPDuality` + `Covering` + linear/MILP leaves | Tier 3 (MILP) |
-| 4 | `Envelopes` McCormick/bilinear | Tier 3 (QP/QCQP) |
+| 3 | exact-rational Tier-3 kernel (covering, LP weak duality, Farkas) **(done — §12)**; recorder/emitter + `LPDuality`/`Covering` Lean (core, no Mathlib) pending | Tier 3 (MILP / polynomial) |
+| 4 | McCormick envelopes **(bilinear/square done in kernel — §12)**; `Envelopes.lean` (Rat) + emitter pending | Tier 3 (QP/QCQP) |
 | 5 | Remaining `MathFunc` envelopes | Tier 3, full factorable |
 
 ## 9. Phase-0 as-built (this slice)
@@ -275,3 +275,78 @@ auto-selecting the strongest tier, the convex block in
 `scripts/lean_certificate_demo.py`, and `test_convex_*` in
 `python/tests/test_certificate.py` (accept genuine; reject tampered multiplier,
 open gap, non-convex objective, negative dual; emitter refuses maximize).
+
+## 12. Tier 3 (spatial branch-and-bound) — detailed design & as-built kernel
+
+**Theorem.** For a *nonconvex* model, spatial branch-and-bound proves global
+optimality by exhausting the domain: the branch tree's **leaf boxes cover the root
+box**, and **every leaf is fathomed** — either *infeasible* (its relaxation is
+empty, a Farkas ray) or *by bound* (its relaxation has a certified lower bound
+`leaf_lb`). Then over each leaf no point beats `leaf_lb`, so
+`min_leaves leaf_lb =: L` is a valid **global lower bound**; if `L ≥ incumbentValue`
+the gap is closed and the incumbent is globally optimal. No leaf's relaxation, and
+no branching decision, needs to be trusted — each is *checked*.
+
+**Trust-minimizing architecture.** The certificate carries the **tree** (per-node
+box, branch variable/point, children) and, per bound-fathomed leaf, an **LP dual**
+(and per infeasible leaf a **Farkas ray**). Two soundness obligations, both
+exact-rational:
+
+1. *Covering* — each branch node's two children reproduce the parent box with one
+   coordinate split (spatial `x≤s | x≥s`; integer `x≤⌊s⌋ | x≥⌈s⌉`, whose open gap is
+   sound only for integer columns). Pure combinatorics ⇒ leaves cover the root.
+2. *Per-leaf bound* — the leaf's relaxation LP is a **valid** outer approximation
+   (removes no true-feasible point), and the emitted **dual** certifies `leaf_lb` by
+   **LP weak duality** (`y≥0`, `Aᵀy=c` ⇒ `b·y ≤ optimum`). Validity is the
+   anti-unsound-cut gate: every LP row must be a box bound or a **closed-form
+   McCormick row** the checker *recomputes from the leaf box* (so a tampered
+   coefficient or an injected cut is caught). Farkas rays certify empty leaves.
+
+The strongest form has the checker **reconstruct** each leaf's McCormick relaxation
+from the model + box itself (trusting only the dual + tree); the as-built kernel
+takes the emitted LP and verifies every row is recognized-valid, which is
+equivalent for the McCormick fragment.
+
+**What is exact-rational (shipped & tested — `certificate/bnb.py`).** The entire
+Tier-3 *soundness kernel* is exact rational and model-agnostic:
+`check_tree_covers`, `mccormick_bilinear`/`mccormick_square` (closed-form valid
+envelopes), `lp_lower_bound` (weak-duality certified bound), `farkas_infeasible`,
+and `certified_leaf_bound` (valid-rows + dual). Verified on the nonconvex
+`min -x²` over `[0,2]`: lifting `w=x²`, the McCormick relaxation's weak-duality
+bound is exactly `-4` (the global optimum), and an injected non-McCormick cut is
+rejected (`test_certificate_bnb.py`). Notably, **weak duality and covering are
+exact and problem-independent** — only per-term *relaxation validity* is
+term-type-specific, so the polynomial/bilinear (QCQP) class is fully covered now;
+the general factorable case adds one recomputable envelope family per `MathFunc`
+(the algebraic ones exact; transcendental ones are the Mathlib phase).
+
+**Float → rational bridge.** A leaf's LP dual comes from the float simplex; emit it
+as rationals and the exact weak-duality check yields a rigorous bound. discopt
+already computes a Neumaier–Shcherbina directed-rounding safe bound
+(`_jax/mccormick_lp.py`, `safe_bound`) — the sound float→rational rounding the
+emitter uses so `Aᵀy=c` holds exactly (or is relaxed to the safe side).
+
+**Remaining engineering (the emitter/recorder).** Unlike Tiers 1–2, whose data is
+already on `SolveResult`, Tier-3 needs per-leaf data the solver currently discards.
+An opt-in **recorder** (default OFF, bound-neutral) must retain, per fathomed leaf:
+the box, fathom reason, the McCormick LP dual / Farkas ray, and the branch
+decisions — hooking `TreeManager::process_evaluated`
+(`crates/discopt-core/src/bnb/tree_manager.rs`) and the `MccormickLPResult`
+marginals (`dual`, `reduced_costs`, `safe_bound`). Then `build_bnb_certificate`
+serializes the tree + duals, and `check_bnb_certificate` composes the shipped
+kernel (covering → per-leaf `certified_leaf_bound`/Farkas → `L` vs incumbent).
+
+**Lean obligations.** Encouragingly, most of Tier 3 is **Lean-core (no Mathlib)**:
+`LPDuality.lean` (weak duality is exact linear algebra over `Rat`) and
+`Covering.lean` (box union is combinatorial) need no analysis; `Envelopes.lean`'s
+McCormick bilinear/square validity is provable over an ordered field (`Rat`). So a
+**nonconvex-*polynomial* global-optimality certificate is checkable in Lean core** —
+only the transcendental envelopes (`exp`/`log`/…) pull in Mathlib. `bnb.py` is the
+executable specification those Lean checkers must match.
+
+**As-built (this change).** `certificate/bnb.py` (covering, McCormick
+bilinear/square, LP weak duality, Farkas, `certified_leaf_bound`) and
+`python/tests/test_certificate_bnb.py` (7 tests: covering accept/reject, envelope
+validity, weak-duality bound, unsound-cut rejection, Farkas). The full
+recorder/emitter and `check_bnb_certificate` composition are scoped above as the
+next step.
