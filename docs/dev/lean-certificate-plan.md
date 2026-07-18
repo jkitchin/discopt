@@ -146,8 +146,11 @@ A `lean/` Lake project. Modules:
   (`crates/discopt-core/src/bnb/tree_manager.rs`) and the `MccormickLPResult` return
   path (`python/discopt/_jax/mccormick_lp.py`, which already computes the
   Neumaier–Shcherbina `safe_bound`).
-- **Serialize / CLI:** extend `result_io.py`; add `discopt solve --emit-certificate`.
-  The Lean checker is a separate `lake exe check cert.json` step.
+- **CLI (done):** `discopt solve --emit-certificate` writes `<stub>.cert.json`
+  (re-loading the model via `from_nl`, as `--sol` does), and `discopt cert-check
+  <file>` runs the reference checker (exit 0 ACCEPT / 1 REJECT). The Lean checker is
+  the separate `lake exe check cert.json` step. (`result_io.py` is intentionally
+  left untouched — it holds only a `SolveResult`, not the model the emitter needs.)
 
 ## 7. Risks and open questions
 
@@ -193,6 +196,11 @@ What ships in this change:
    checker over `ℚ` against Lean core (no Mathlib), with `checkFeasible_sound`.
 4. **Demo** `scripts/lean_certificate_demo.py` — solve a small NLP + a small MILP, emit
    certificates, run the reference checker (accept), tamper, re-check (reject).
+5. **CLI** `discopt solve --emit-certificate` + `discopt cert-check` (in
+   `python/discopt/cli.py`), so the emit→check loop is usable from the shell.
+6. **Corpus generalization** `python/tests/test_certificate_corpus.py` — certifies real
+   MINLPLib instances (`alan`, `nvs03`) end-to-end and confirms a transcendental instance
+   (`nvs01`, `sqrt`) is correctly refused.
 
 **Environment note:** in the sandbox this slice was authored in, the org egress policy
 blocks GitHub release assets (elan/Lean binaries return 403), so the Lean project could
