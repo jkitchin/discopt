@@ -195,13 +195,26 @@ def test_ex1252_multilinear_reform_sound_and_lifts_bound():
     optimum) and lifts well past the structural 5134 floor that the term-wise
     trilinear McCormick envelope plateaus at. Certification of the full instance
     additionally needs the residual continuous-cubic barrier to close (spatial
-    branching); here we lock soundness + the bound lift, which is the #707 gain."""
-    os.environ["DISCOPT_INTEGER_MULTILINEAR_REFORM"] = "1"
+    branching); here we lock soundness + the bound lift, which is the #707 gain.
+
+    Budget-aware adoption (#732 blocker b): on the gated-configuration class the
+    reform is only adopted once the budget affords its payoff (``time_limit >=
+    180`` s); below that the flag-on solve is byte-identical to flag-off (a
+    separate assertion in the graduation panel). So this exercises an adopting
+    budget (200 s) with the full graduation stack."""
+    keys = [
+        "DISCOPT_INTEGER_MULTILINEAR_REFORM",
+        "DISCOPT_MULTILINEAR_COUPLING_RLT",
+        "DISCOPT_DISJUNCTIVE_CONFIG_BOUND",
+    ]
+    for k in keys:
+        os.environ[k] = "1"
     try:
         m = dm.from_nl(str(_DATA / "ex1252.nl"))
-        res = m.solve(time_limit=60)
+        res = m.solve(time_limit=200)
     finally:
-        os.environ.pop("DISCOPT_INTEGER_MULTILINEAR_REFORM", None)
+        for k in keys:
+            os.environ.pop(k, None)
     assert res.bound is not None and math.isfinite(res.bound)
     # Sound: a valid dual bound never exceeds the true optimum.
     assert res.bound <= _EX1252_OPT + 1e-2, (
@@ -213,6 +226,50 @@ def test_ex1252_multilinear_reform_sound_and_lifts_bound():
     # The tightening: the bound clears the 5134 floor the term-wise envelope stalls at.
     assert res.bound > 5134.5, (
         f"ex1252 multilinear-reform bound {res.bound} did not lift past the 5134 floor"
+    )
+
+
+@pytest.mark.slow
+@pytest.mark.correctness
+def test_ex1252_short_budget_declines_reform_no_regression():
+    """Budget-aware adoption (#732 blocker b). On the gated-configuration class the
+    reform's payoff (the disjunctive floor / deep spatial recursion) cannot engage
+    at a short budget, so the exact-linearization is pure per-node-LP cost there:
+    measured, ex1252@60 s flag-on collapsed the tree dual 9273 -> 0 and lost the
+    incumbent. The gate declines adoption below the payoff budget, so a short-budget
+    flag-on solve is byte-identical to flag-off. Fails-before: without the gate the
+    flag-on arm adopts the heavier reformed model and diverges (different relaxation
+    -> different bound and search).
+
+    A node limit (not a wall limit) makes the comparison deterministic; the 120 s
+    budget stays below the 180 s adoption threshold so the reform is declined."""
+
+    def _solve(flag_on):
+        keys = [
+            "DISCOPT_INTEGER_MULTILINEAR_REFORM",
+            "DISCOPT_MULTILINEAR_COUPLING_RLT",
+            "DISCOPT_DISJUNCTIVE_CONFIG_BOUND",
+        ]
+        for k in keys:
+            os.environ.pop(k, None)
+        if flag_on:
+            for k in keys:
+                os.environ[k] = "1"
+        try:
+            return dm.from_nl(str(_DATA / "ex1252.nl")).solve(time_limit=120, max_nodes=5)
+        finally:
+            for k in keys:
+                os.environ.pop(k, None)
+
+    off, on = _solve(False), _solve(True)
+    # Reform declined at this budget -> identical model -> identical node-limited
+    # search: same bound and same node count, deterministically.
+    assert off.bound is not None and on.bound is not None
+    assert abs(on.bound - off.bound) <= 1e-6, (
+        f"short-budget flag-on dual {on.bound} != flag-off {off.bound} — reform not declined"
+    )
+    assert on.node_count == off.node_count, (
+        f"short-budget flag-on nodes {on.node_count} != flag-off {off.node_count}"
     )
 
 

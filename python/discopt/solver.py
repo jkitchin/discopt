@@ -5017,6 +5017,26 @@ def solve_model(
                     # with the flag off — never a regression.
                     _iml_n1 = sum(v.size for v in _iml._variables)
                     _iml_adopt = _iml_pure_milp or _iml_n1 <= 4 * max(_iml_n0, 16)
+                    # Budget-aware adoption for the disjunctive-eligible spatial-path
+                    # reform (#732 blocker b). On the gated-configuration class
+                    # (ex1252: the reform records configuration indicators, and its
+                    # payoff is the disjunctive config-bound floor / deep spatial
+                    # recursion) the exact-linearization only pays for its heavier
+                    # per-node LPs once that payoff mechanism can engage — which needs
+                    # a generous budget (the disjunctive pass engages at
+                    # ``min(0.25*time_limit, 150) >= 45`` s, i.e. ``time_limit >=
+                    # 180`` s). Below that the reform is pure cost: measured on
+                    # ex1252@60 s the reformed tree dual collapses 9273 -> 0 (heavier
+                    # LPs halve node throughput and the floor pass is skipped) and the
+                    # incumbent is lost, versus the flag-off spatial path's 9273. So on
+                    # the config class, keep the flag-off path until the budget affords
+                    # the payoff. A non-config reform (nvs05: payoff is the direct
+                    # node-LP tightening, +0.19 dual at equal nodes @60 s) and a
+                    # pure-MILP reform (MILP-engine route, cheap+exact) are unaffected.
+                    if _iml_adopt and not _iml_pure_milp:
+                        _iml_config = getattr(_iml, "_ipx_config_indicators", None) or ()
+                        if _iml_config and min(0.25 * float(time_limit), 150.0) < 45.0:
+                            _iml_adopt = False
                     if _iml_adopt:
                         _did_multilinear_reform = True
                         model = _iml
