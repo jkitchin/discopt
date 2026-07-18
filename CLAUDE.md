@@ -71,6 +71,37 @@ discopt is a hybrid Mixed-Integer Nonlinear Programming (MINLP) solver combining
 - Benchmark/perf claims in a PR must include the measurement (suite, baseline,
   numbers), not adjectives.
 
+### Working on an issue
+
+Default to **finishing**. An issue is done when the work it asks for is complete —
+not when a first increment lands. The lifecycle:
+
+1. **Confirm it's still relevant; reframe if needed.** Many issues go stale or were
+   opened mid-fix against assumptions that no longer hold. Before writing code,
+   re-read the issue against the current tree; if its premise has shifted, restate
+   the goal (a comment on the issue, or edit it) before proceeding. A wrong or stale
+   framing wastes the whole effort.
+2. **Plan the implementation.** State what "done" means for *this* issue and the
+   steps to get there before building. Honor the entry-experiment discipline (§4):
+   if the work rests on a hypothesis, run the falsifying experiment on **real corpus
+   instances** first — a mechanism validated only on a synthetic proxy can be a
+   no-op on the real class (the #727 RLT lesson: synthetic root-gain 0.68, real
+   gain 0.0).
+3. **Work to completion; avoid issue proliferation.** The goal is to complete the
+   work the issue asks for, not to advance it and hand off. Prefer doing the whole
+   job over splitting it. Splitting — filing a follow-up and closing the original —
+   is the *exception*, taken only when the scope genuinely must expand beyond the
+   issue; when you do split, the follow-up must be detailed enough to pick up
+   independently (e.g. #114→#741, #572→#713).
+4. **Work in a branch or worktree; use a PR to check CI.** Never on `main` (see the
+   Workflow rules above); the PR is how CI validates the change. Use `Closes #N`
+   only when the PR actually finishes the issue; use `Contributes to #N` for a
+   partial or default-off increment.
+5. **Close the loop with a succinct summary.** When the work is done, give a short
+   summary of what changed and how it was verified, ending with an explicit
+   statement of **whether the issue can be closed or not** — and if not, exactly
+   what remains.
+
 ## Canonical planning documents
 
 - `docs/dev/certification-gap-plan.md` — the performance roadmap (per-node engine,
