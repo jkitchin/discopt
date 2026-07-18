@@ -16,13 +16,20 @@ certified ranges come out WIDER than box-implied because the Lagrangian corner
 certificate is weak in non-coordinate directions — recorded in
 ``docs/dev/performance-plan.md`` §6.
 
+Task 2 (integer signomial MINLPs) adds the ``nsig`` mode: it loads the in-repo
+``cvxnonsep_nsig30`` (15 continuous + 15 integer variables, one mixed-sign
+signomial constraint), confirms the classifier now admits it, and runs a
+budgeted integer solve — recovering the known integer optimum 130.6287 as an
+integer-feasible incumbent with a sound dual bound.
+
 Usage::
 
-    python discopt_benchmarks/scripts/sgo_741_tightening_probe.py [ex3_1_2|ex7_2_3|xi]
+    python discopt_benchmarks/scripts/sgo_741_tightening_probe.py [ex3_1_2|ex7_2_3|xi|nsig]
 """
 
 from __future__ import annotations
 
+import os
 import sys
 import time
 
@@ -140,6 +147,48 @@ def xi_falsification():
                 )
 
 
+def nsig_integer_probe(max_nodes=2000, time_limit=150.0):
+    """Task 2: admit + soundly solve the integer signomial MINLP cvxnonsep_nsig30."""
+    from discopt.modeling.core import from_nl
+
+    path = os.path.join(
+        os.path.dirname(__file__),
+        "..",
+        "..",
+        "python",
+        "tests",
+        "data",
+        "minlplib_nl",
+        "cvxnonsep_nsig30.nl",
+    )
+    if not os.path.exists(path):
+        print("cvxnonsep_nsig30.nl not present; skipping nsig probe")
+        return
+    m = from_nl(path)
+    struct = classify_signomial_global(m)
+    if struct is None:
+        print("cvxnonsep_nsig30: ABSTAINED (unexpected)")
+        return
+    oracle = 130.6287
+    print(
+        f"cvxnonsep_nsig30: u-dim={len(struct.u_lb)} "
+        f"integer-coords={len(struct.integer_coords)} cons={len(struct.constraint_terms)}"
+    )
+    t0 = time.perf_counter()
+    res = solve_signomial_global(m, gap_tolerance=1e-4, max_nodes=max_nodes, time_limit=time_limit)
+    wall = time.perf_counter() - t0
+    print(
+        f"  status={res.status} certified={res.gap_certified} obj={res.objective} "
+        f"bound={res.bound} nodes={res.node_count} wall={wall:.1f}s   (oracle {oracle})"
+    )
+    if res.bound is not None and res.bound > oracle + 1e-2:
+        print("  *** SOUNDNESS VIOLATION: dual bound above oracle ***")
+    if res.x is not None:
+        ints = [float(res.x[n][0]) for n in list(res.x)[15:30]]
+        allint = all(abs(v - round(v)) < 1e-6 for v in ints)
+        print(f"  incumbent integers all integral: {allint}; obj vs oracle: {res.objective}")
+
+
 if __name__ == "__main__":
     which = sys.argv[1] if len(sys.argv) > 1 else "all"
     if which in ("all", "ex3_1_2"):
@@ -148,3 +197,5 @@ if __name__ == "__main__":
         probe("ex7_2_3", *ex7_2_3())
     if which in ("all", "xi"):
         xi_falsification()
+    if which in ("all", "nsig"):
+        nsig_integer_probe()

@@ -817,6 +817,45 @@ panel green for 3 consecutive nightlies before default-on.
 > `python/tests/test_signomial_global.py` (§6 block). `DISCOPT_SGO` remains
 > default-OFF — graduation (issue Task 3) needs the corpus panel.
 
+> **Shipped (2026-07-18, issue #741 Task 2 — integer signomial MINLPs; admits
+> the `cvxnonsep_nsig*` family).** Entry experiment on the in-repo
+> `cvxnonsep_nsig30` (the corpus `.nl` is present; 15 continuous + 15 integer
+> vars, one mixed-sign signomial row) found the constraint is
+> `1 − 0.2·exp(a·u) ≤ 0` — a *single* negative monomial — so it is EXACTLY
+> convex-representable: dividing by the positive `0.2·exp(a·u)` gives the
+> log-linear halfspace `a·u ≥ log 5` (identical feasible set). A direct convex
+> solve of the reformulated continuous relaxation returns **130.479973** =
+> exactly the issue's stated continuous relaxation value, confirming the exact
+> transform (Task 1 lever 2 / Lundell–Westerlund single-sign power transform) is
+> the "tighter continuous relaxation prerequisite" Task 2 names — the DC secant
+> of that same row bounds only ~55.9 at 30-dim. Shipped both pieces, all
+> certified-sound and default-OFF behind `DISCOPT_SGO`: (1) `_exact_convex_pack`
+> replaces every single-negative-monomial row with its exact convex posynomial
+> form (its node relaxation is then exact, not a secant), keeping the untransformed
+> body for genuine feasibility verification; (2) integer branching wrapping the
+> continuous node relaxation — integer bound rounding (empty enclosed-integer
+> range ⇒ certified integer-infeasible prune), most-fractional branch with an
+> integer-domain-split fallback, and integer-feasible incumbent recovery (fix
+> each integer to an enclosed integer, solve the continuous remainder, verify
+> every true constraint). The node relaxation relaxes integers to the continuous
+> box, so every bound is a valid lower bound on the integer optimum; a fully
+> pruned tree returns a rigorous `status="infeasible"` certificate. Measured:
+> small integer MINLPs and box-only integer programs certify to their
+> brute-force optima in ≤6 nodes; `cvxnonsep_nsig30` is admitted and its
+> integer-feasible incumbent reaches the exact oracle **130.62871264** (bound
+> climbs to ~101 at ~140 nodes / 150 s — sound, converging; full certification of
+> the 30-var box is the same wide-box corner-certification frontier as ex7_2_3,
+> not in-budget). The exact transform additionally collapses the Task-1 4-var
+> probe to a **root** certification (0 branch nodes). Classifier abstains on
+> binary / 0-lb variables (the log lift needs `x > 0`). Regression tests (§8
+> block, `python/tests/test_signomial_global.py`): exact-transform feasible-set
+> equivalence + convexity, integer-MINLP certification vs brute force, integer
+> node bound ≤ every integer-feasible point, certified integer infeasibility,
+> box-only integer, flag-gated `Model.solve()`, and a slow `nsig30` admission
+> probe. Reproduction: `discopt_benchmarks/scripts/sgo_741_tightening_probe.py
+> nsig`. `DISCOPT_SGO` stays default-OFF (Task 3 graduation still pending the
+> corpus panel).
+
 ## 7. Sequencing & rationale (revised by the measurement)
 
 ```

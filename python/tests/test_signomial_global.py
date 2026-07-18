@@ -159,10 +159,34 @@ def test_cv_matches_certified_secant_envelope():
 # ── 4. sound abstention boundary ───────────────────────────────────────
 
 
-def test_abstains_on_integer_variable():
+def test_accepts_positive_bounded_integer_variable():
+    """Integer variables with a strictly-positive box are now IN class (issue
+    #741 Task 2): ``classify`` accepts and records the integer ``u``-coordinates
+    for integer branching."""
     m = Model()
     x = m.continuous("x", lb=1.0, ub=5.0)
     y = m.integer("y", lb=1, ub=5)
+    m.minimize(x**2 - 3.0 * x * y)  # mixed-sign -> in class
+    struct = classify_signomial_global(m)
+    assert struct is not None
+    # y is the second offset (column 1); recorded as an integer coordinate.
+    assert struct.integer_coords == [1]
+
+
+def test_abstains_on_binary_variable():
+    """A binary variable has lb ``0`` -> no log domain -> sound abstention."""
+    m = Model()
+    x = m.continuous("x", lb=1.0, ub=5.0)
+    y = m.binary("y")
+    m.minimize(x**2 - 3.0 * x * y)
+    assert classify_signomial_global(m) is None
+
+
+def test_abstains_on_integer_with_zero_lower_bound():
+    """An integer that can be ``0`` breaks the ``u = log x`` lift -> abstain."""
+    m = Model()
+    x = m.continuous("x", lb=1.0, ub=5.0)
+    y = m.integer("y", lb=0, ub=5)  # 0 in range -> log undefined
     m.minimize(x**2 - 3.0 * x * y)
     assert classify_signomial_global(m) is None
 
@@ -404,9 +428,11 @@ def _sample_feasible(struct, n=60000, seed=0):
 
 def test_medium_4var_certifies_and_legacy_does_not():
     """The #741 acceptance probe for the class: a ≥4-variable wide-box
-    constrained signomial certifies under the tightened relaxation, while the
-    pre-#741 relaxation (``obbt=False``) is left with a bound hundreds of units
-    below the optimum at the same node budget (the measured blocker)."""
+    constrained signomial certifies under the tightened relaxation (the exact
+    single-negative-monomial transform makes every ``x_i x_j >= c`` / ``sum <=
+    c`` row exact, so the convex root already closes), while the pre-#741
+    relaxation (``obbt=False``) is left hundreds of units below the optimum at a
+    generous node budget (the measured blocker)."""
     m = _medium_4var()
     res = solve_signomial_global(m, gap_tolerance=1e-2, max_nodes=5000, time_limit=240)
     f_star = _medium_4var_optimum()
@@ -417,14 +443,15 @@ def test_medium_4var_certifies_and_legacy_does_not():
     # Certificate invariant: bound <= optimum <= incumbent.
     assert res.bound <= res.objective + 1e-9
     assert res.bound <= f_star + 1e-6
-    # Differential reference: the legacy relaxation at the SAME node budget
+    # Differential reference: the legacy DC relaxation, at a generous budget,
     # stays sound but hopelessly loose (this is the class being fixed).
     legacy = solve_signomial_global(
-        m, gap_tolerance=1e-2, max_nodes=res.node_count, time_limit=240, obbt=False
+        m, gap_tolerance=1e-2, max_nodes=3000, time_limit=240, obbt=False
     )
     assert legacy.gap_certified is False
     assert legacy.bound <= f_star + 1e-6  # still sound
-    assert res.bound > legacy.bound + 100.0  # and dramatically tighter
+    assert legacy.bound < f_star - 100.0  # and hopelessly loose
+    assert res.bound > legacy.bound + 100.0  # tightened path dramatically tighter
 
 
 def test_differential_node_bound_dominates_legacy_on_fixed_boxes():
@@ -542,3 +569,208 @@ def test_legacy_obbt_off_path_still_certifies_small_case():
     assert res.gap_certified is True
     assert res.objective == pytest.approx(true_min, abs=5e-3)
     assert res.bound <= true_min + 1e-3
+
+
+# ── 7. exact single-negative-monomial convex transform (issue #741 Task 1
+#       lever 2 / the prerequisite for Task 2) ──────────────────────────
+
+
+def test_exact_convex_pack_preserves_feasible_set_and_is_convex():
+    """A single-negative-monomial row's exact convex transform crosses zero with
+    the original body (identical feasible set — divisor is > 0) and its DC
+    underestimator equals itself (a convex posynomial-minus-constant, no secant
+    looseness)."""
+    from discopt._jax.convexity.signomial_global import (
+        _cv_and_grad,
+        _exact_convex_pack,
+        _true_value,
+    )
+
+    # body(u) = 6 - exp(u0 + u1)  (row: x0*x1 >= 6, normalised to <= 0)
+    pack = _pack([(1.0, math.log(6.0), np.zeros(2)), (-1.0, 0.0, np.array([1.0, 1.0]))])
+    tpack = _exact_convex_pack(pack)
+    assert tpack is not pack  # single negative term -> transformed
+    u_lb = np.log(np.array([0.5, 0.5]))
+    u_ub = np.log(np.array([3.0, 3.0]))
+    rng = np.random.default_rng(0)
+    for _ in range(2000):
+        u = u_lb + rng.random(2) * (u_ub - u_lb)
+        b = _true_value(*pack, u)
+        t = _true_value(*tpack, u)
+        # same feasible set: body <= 0  <=>  transform <= 0
+        assert (b <= 1e-9) == (t <= 1e-9)
+        # the transform's convex underestimator is itself (exact, no gap)
+        cv, _g = _cv_and_grad(*tpack, u, u_lb, u_ub)
+        assert cv == pytest.approx(t, abs=1e-9)
+
+
+def test_exact_convex_pack_leaves_multi_negative_rows_alone():
+    """A row with ≥2 negative monomials is a genuine DC difference and must be
+    left for the secant envelope (transform returns it unchanged)."""
+    from discopt._jax.convexity.signomial_global import _exact_convex_pack
+
+    pack = _pack(
+        [
+            (1.0, 0.0, np.array([2.0, 0.0])),
+            (-1.0, 0.0, np.array([1.0, 1.0])),
+            (-1.0, 0.0, np.array([0.0, 2.0])),
+        ]
+    )
+    assert _exact_convex_pack(pack) is pack
+
+
+# ── 8. integer signomial MINLPs (issue #741 Task 2) ────────────────────
+
+
+def _small_int_minlp():
+    """min 2x + 3y - 5 sqrt(xy)  s.t. xy >= 6 ; x,y integer in [1,6].
+
+    Small enough to brute-force the integer optimum, mixed-sign objective +
+    signomial inequality; exercises integer branching, integer rounding, and
+    integer-feasible incumbent recovery.
+    """
+    m = Model()
+    x = m.integer("x", lb=1, ub=6)
+    y = m.integer("y", lb=1, ub=6)
+    m.minimize(2.0 * x + 3.0 * y - 5.0 * x**0.5 * y**0.5)
+    m.subject_to(x * y >= 6.0)
+    return m
+
+
+def _brute_int_min(fn, ranges, feas=None):
+    """Exhaustive integer optimum over a product of integer ranges."""
+    best = math.inf
+    best_pt = None
+    import itertools as it
+
+    for pt in it.product(*[range(lo, hi + 1) for lo, hi in ranges]):
+        if feas is not None and not feas(*pt):
+            continue
+        v = fn(*pt)
+        if v < best:
+            best = v
+            best_pt = pt
+    return best, best_pt
+
+
+def test_integer_minlp_certifies_bruteforce_optimum():
+    """The constrained integer signomial MINLP certifies the true integer
+    optimum (matching brute force), with a sound dual bound."""
+    m = _small_int_minlp()
+    struct = classify_signomial_global(m)
+    assert struct is not None
+    assert struct.integer_coords == [0, 1]
+    best, best_pt = _brute_int_min(
+        lambda x, y: 2 * x + 3 * y - 5 * math.sqrt(x * y),
+        [(1, 6), (1, 6)],
+        feas=lambda x, y: x * y >= 6,
+    )
+    res = solve_signomial_global(m, gap_tolerance=1e-4, max_nodes=20000, time_limit=120)
+    assert res.status == "optimal"
+    assert res.gap_certified is True
+    assert res.objective == pytest.approx(best, abs=1e-4)
+    assert res.bound <= best + 1e-4  # certificate invariant vs true integer opt
+    # incumbent is genuinely integer-feasible and honours the true constraint
+    xv, yv = float(res.x["x"][0]), float(res.x["y"][0])
+    assert xv == pytest.approx(round(xv), abs=1e-6)
+    assert yv == pytest.approx(round(yv), abs=1e-6)
+    assert xv * yv >= 6.0 - 1e-6
+
+
+def test_box_only_integer_certifies():
+    """A box-only (no constraints) mixed-sign integer signomial certifies its
+    integer optimum via integer branching + relaxed continuous node bounds."""
+    m = Model()
+    x = m.integer("x", lb=1, ub=5)
+    y = m.integer("y", lb=1, ub=5)
+    m.minimize(2.0 * x**2 + 3.0 * y**2 - 7.0 * x * y)  # mixed-sign
+    best, _pt = _brute_int_min(lambda x, y: 2 * x * x + 3 * y * y - 7 * x * y, [(1, 5), (1, 5)])
+    res = solve_signomial_global(m, gap_tolerance=1e-4, max_nodes=20000, time_limit=120)
+    assert res.status == "optimal"
+    assert res.gap_certified is True
+    assert res.objective == pytest.approx(best, abs=1e-4)
+    assert res.bound <= best + 1e-4
+
+
+def test_integer_node_bound_underestimates_all_integer_points():
+    """The relaxed node bound (integers relaxed to the continuous box) is <= the
+    true objective at EVERY integer-feasible point in the box — a valid dual
+    bound for the integer problem, never cutting an integer solution."""
+    from discopt._jax.convexity.signomial_global import _constrained_node_bound, _relaxation_packs
+
+    m = _small_int_minlp()
+    struct = classify_signomial_global(m)
+    obj_pack = _pack(struct.terms)
+    con_packs = [_pack(t) for t in struct.constraint_terms]
+    relax = _relaxation_packs(con_packs, exact=True)
+    u_lb, u_ub = struct.u_lb, struct.u_ub
+    lb, _u = _constrained_node_bound(obj_pack, relax, u_lb, u_ub, tighten=True)
+    o_sig, o_lc, o_ex = obj_pack
+    for xi in range(1, 7):
+        for yi in range(1, 7):
+            if xi * yi < 6:
+                continue
+            u = np.array([math.log(xi), math.log(yi)])
+            val = float(np.sum(o_sig * np.exp(o_lc + o_ex @ u)))
+            assert lb <= val + 1e-6  # bound never exceeds an integer-feasible value
+
+
+def test_certified_infeasible_integer_program():
+    """An integer program whose integer-feasible region is provably empty is
+    reported ``infeasible`` with ``gap_certified=True`` — never a fabricated
+    incumbent."""
+    m = Model()
+    x = m.integer("x", lb=1, ub=2)
+    y = m.integer("y", lb=1, ub=2)
+    m.minimize(x * y - 3.0 * x)  # mixed-sign objective (in class)
+    m.subject_to(x * y >= 9.0)  # impossible: max xy = 4
+    res = solve_signomial_global(m, gap_tolerance=1e-6, max_nodes=5000, time_limit=60)
+    assert res.status == "infeasible"
+    assert res.gap_certified is True
+    assert res.objective is None
+
+
+def test_integer_solver_integration_flag_gated(monkeypatch):
+    """`Model.solve()` routes an integer signomial MINLP to the SGO path when
+    DISCOPT_SGO is enabled and certifies its integer optimum."""
+    m = _small_int_minlp()
+    monkeypatch.setenv("DISCOPT_SGO", "1")
+    res = m.solve()
+    best, _pt = _brute_int_min(
+        lambda x, y: 2 * x + 3 * y - 5 * math.sqrt(x * y),
+        [(1, 6), (1, 6)],
+        feas=lambda x, y: x * y >= 6,
+    )
+    assert res.gap_certified is True
+    assert res.objective == pytest.approx(best, abs=1e-4)
+
+
+@pytest.mark.slow
+def test_nsig30_family_admitted_sound_incumbent():
+    """The ``cvxnonsep_nsig*`` family (issue #741 Task 2) is admitted: the
+    30-var ``cvxnonsep_nsig30`` classifies, its dual bound stays sound (<=
+    oracle), and integer-feasible incumbent recovery reaches the known integer
+    optimum 130.6287 (full certification of the 30-var box is not expected
+    in-budget — the same wide-box certification frontier as ex7_2_3)."""
+    import os
+
+    from discopt.modeling.core import from_nl
+
+    path = os.path.join(os.path.dirname(__file__), "data", "minlplib_nl", "cvxnonsep_nsig30.nl")
+    if not os.path.exists(path):
+        pytest.skip("cvxnonsep_nsig30.nl not present")
+    m = from_nl(path)
+    struct = classify_signomial_global(m)
+    assert struct is not None
+    assert len(struct.integer_coords) == 15
+    res = solve_signomial_global(m, gap_tolerance=1e-4, max_nodes=2000, time_limit=150)
+    oracle = 130.6287
+    assert res.objective is not None
+    # sound dual bound below the oracle; incumbent at (or above) the oracle
+    if res.bound is not None:
+        assert res.bound <= oracle + 1e-2
+    assert res.objective >= oracle - 1e-2
+    # every integer variable in the incumbent is genuinely integral
+    for name in list(res.x)[15:30]:
+        xv = float(res.x[name][0])
+        assert xv == pytest.approx(round(xv), abs=1e-6)

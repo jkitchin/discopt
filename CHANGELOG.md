@@ -12,6 +12,38 @@ The release procedure that produces these entries is documented in
 
 ### Added
 
+- **SGO integer signomial MINLPs + exact single-negative-monomial transform**
+  (`feat`, #741 Task 2, inside the default-off `DISCOPT_SGO` path). The signomial
+  global optimizer now admits the `cvxnonsep_nsig*` family — positive-bounded
+  **integer** variables — via integer spatial branching that wraps the same
+  continuous node relaxation (which relaxes integers to the continuous log-box,
+  so every node bound stays a valid lower bound on the integer optimum). Adds:
+  certified integer bound rounding (an empty enclosed-integer range prunes a node
+  as integer-infeasible), most-fractional integer branch selection with an
+  integer-domain-split fallback, and integer-feasible incumbent recovery (fix
+  each integer to an enclosed integer, solve the continuous remainder, and
+  verify every true constraint — so a reported incumbent is genuinely integer-
+  feasible). A fully pruned integer tree yields a rigorous `status="infeasible"`
+  certificate. Enabling this required the **exact convex reformulation of
+  single-negative-monomial constraint rows** (issue #741 Task 1 lever 2 / the
+  Lundell–Westerlund single-sign power transform): a row `Pplus(u) − c·exp(a·u) ≤
+  0` with one negative monomial is exactly convex-representable as the posynomial
+  `Σ exp(log_cₖ − log c + (bₖ − a)·u) ≤ 1` (identical feasible set — the divisor
+  is positive), so that row's node relaxation becomes *exact* instead of the
+  loose DC secant. Measured: `cvxnonsep_nsig30` (15 continuous + 15 integer vars)
+  is admitted and its integer-feasible incumbent reaches the known optimum
+  130.6287 with a sound dual bound (full certification of the 30-var box is not
+  in-budget — the same wide-box certification frontier as ex7_2_3); small
+  integer MINLPs and box-only integer programs certify to their brute-force
+  optima in a handful of nodes. The exact transform also makes the Task-1 4-var
+  probe certify at the root (0 branch nodes). Classifier still abstains on binary
+  / zero-lower-bound variables (the log lift needs `x > 0`). The pre-#741
+  reference path (`obbt=False`) keeps the all-DC-secant relaxation; `DISCOPT_SGO`
+  stays default-OFF (graduation is Task 3, pending the corpus panel). Falsified
+  in passing (recorded in `docs/dev/performance-plan.md` §6): using the corner
+  certificate to tighten single-monomial secant *argument* ranges is a dead end.
+  Reproduction: `discopt_benchmarks/scripts/sgo_741_tightening_probe.py nsig`.
+
 - **SGO constrained node tightening** (`feat`, #741, inside the default-off
   `DISCOPT_SGO` path). The signomial global optimizer's constrained node
   relaxation — previously sound but too loose to certify anything beyond 2-var

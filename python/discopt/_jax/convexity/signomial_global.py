@@ -130,6 +130,12 @@ class SignomialGlobalStructure:
     ingest). An empty list is the box-only class (unchanged legacy behaviour).
     ``offsets`` is the union of every offset appearing in the objective or any
     constraint, so ``u`` spans all participating variables.
+
+    ``integer_coords`` lists the ``u``-column indices whose model variable is
+    INTEGER (issue #741 Task 2). An empty list is the pure-continuous class
+    (unchanged legacy behaviour); a non-empty list switches on integer spatial
+    branching + integer bound rounding + integer-feasible incumbent recovery in
+    :func:`solve_signomial_global`, wrapping the same continuous node relaxation.
     """
 
     terms: list
@@ -138,6 +144,7 @@ class SignomialGlobalStructure:
     u_ub: np.ndarray
     offset_to_var: dict[int, tuple[str, int, int]]  # offset -> (name, size, local_idx)
     constraint_terms: list = field(default_factory=list)
+    integer_coords: list[int] = field(default_factory=list)
 
 
 def _offset_layout(model: Model) -> dict[int, tuple[str, int, int, float, float]]:
@@ -180,21 +187,27 @@ def classify_signomial_global(model: Model) -> Optional[SignomialGlobalStructure
     """Recognise a signomial program (box, or box + signomial inequalities).
 
     Abstains (``None``) unless *all* hold: a single MINIMISE objective; every
-    variable continuous with a strictly-positive, finite ``[lb, ub]`` (so the
-    ``u = log x`` box is bounded); the objective is a signomial
-    (:func:`is_signomial`); **every constraint is a signomial inequality**
-    (``<=`` / ``>=`` — an equality signomial or any non-signomial body ->
-    abstain); and the program is genuinely mixed-sign *somewhere* — the objective
-    is mixed-sign, or some normalised constraint body carries a negative term.
-    A program with no negative term anywhere is a posynomial/GP that the exact GP
-    path owns, so we abstain and leave it untouched.
+    variable continuous **or integer** with a strictly-positive, finite
+    ``[lb, ub]`` (so the ``u = log x`` box is bounded — a ``0``-valued binary or
+    an integer that can be ``0`` breaks the log lift and abstains); the objective
+    is a signomial (:func:`is_signomial`); **every constraint is a signomial
+    inequality** (``<=`` / ``>=`` — an equality signomial or any non-signomial
+    body -> abstain); and the program is genuinely mixed-sign *somewhere* — the
+    objective is mixed-sign, or some normalised constraint body carries a
+    negative term. A program with no negative term anywhere is a posynomial/GP
+    that the exact GP path owns, so we abstain and leave it untouched.
 
     With no constraints this is the original box-only class (bound is the exact
     optimum). With signomial constraints each body is normalised to ``body <= 0``
     (a ``>=`` row is sign-flipped) and relaxed per node by its certified convex DC
     underestimator ``cv(u) <= body(u)`` — a valid *outer* approximation whose
     feasible region contains the true one — so the node bound is a valid dual
-    bound and a closed tree certifies the constrained optimum.
+    bound and a closed tree certifies the constrained optimum. **Integer**
+    variables (issue #741 Task 2) are recorded in ``integer_coords`` and driven
+    by integer spatial branching in the solver; the per-node relaxation simply
+    relaxes them to the continuous log-box (a valid lower bound, since the
+    integer-feasible region is a subset), so soundness is unchanged and a closed
+    tree certifies the integer optimum.
     """
     from discopt.modeling.core import ObjectiveSense
 
@@ -202,9 +215,12 @@ def classify_signomial_global(model: Model) -> Optional[SignomialGlobalStructure
         return None
     if model._objective.sense != ObjectiveSense.MINIMIZE:
         return None
+    # Track which flat offsets belong to integer variables (Task 2).
+    integer_offsets: set[int] = set()
+    offset = 0
     for v in model._variables:
-        if v.var_type != VarType.CONTINUOUS:
-            return None
+        if v.var_type not in (VarType.CONTINUOUS, VarType.INTEGER):
+            return None  # binary / other -> out of class (0-lb breaks the log lift)
         lb = np.asarray(v.lb, dtype=np.float64).reshape(-1)
         ub = np.asarray(v.ub, dtype=np.float64).reshape(-1)
         if not np.all(np.isfinite(lb)) or not np.all(np.isfinite(ub)):
@@ -213,6 +229,9 @@ def classify_signomial_global(model: Model) -> Optional[SignomialGlobalStructure
             return None
         if np.any(ub < lb):
             return None
+        if v.var_type == VarType.INTEGER:
+            integer_offsets.update(range(offset, offset + v.size))
+        offset += v.size
 
     obj_form = is_signomial(model._objective.expression, model)
     if obj_form is None:
@@ -264,6 +283,7 @@ def classify_signomial_global(model: Model) -> Optional[SignomialGlobalStructure
     u_lb = np.array([math.log(layout[o][3]) for o in offsets], dtype=np.float64)
     u_ub = np.array([math.log(layout[o][4]) for o in offsets], dtype=np.float64)
     offset_to_var = {o: (layout[o][0], layout[o][1], layout[o][2]) for o in offsets}
+    integer_coords = [j for j, o in enumerate(offsets) if o in integer_offsets]
     return SignomialGlobalStructure(
         terms=obj_terms,
         offsets=offsets,
@@ -271,6 +291,7 @@ def classify_signomial_global(model: Model) -> Optional[SignomialGlobalStructure
         u_ub=u_ub,
         offset_to_var=offset_to_var,
         constraint_terms=constraint_terms,
+        integer_coords=integer_coords,
     )
 
 
@@ -306,6 +327,59 @@ def _pack(terms):
     log_c = np.array([t[1] for t in terms], dtype=np.float64)
     exps = np.array([np.asarray(t[2], dtype=np.float64) for t in terms], dtype=np.float64)
     return sig, log_c, exps
+
+
+def _exact_convex_pack(pack):
+    """Exact convex reformulation of a single-negative-monomial constraint row.
+
+    A signomial inequality ``body(u) = Pplus(u) - c*exp(a.u) <= 0`` with exactly
+    ONE negative monomial ``c*exp(a.u)`` (``c > 0``; ``a`` possibly all-zero for a
+    negative *constant*) is EXACTLY convex-representable: dividing by the strictly
+    positive ``c*exp(a.u)`` gives the equivalent posynomial constraint
+
+        sum_k exp(log_c_k - log c + (b_k - a).u)  -  1  <= 0,
+
+    whose feasible set equals ``{body <= 0}`` (the divisor is > 0 everywhere). The
+    reformulated body is a posynomial minus the constant ``1`` — a *convex*
+    function — so its per-node DC underestimator is itself (the single negative
+    monomial is a constant, whose secant is exact), i.e. the node relaxation of
+    this row becomes exact instead of the loose secant of ``exp(a.u)``. This is
+    the Lundell–Westerlund single-sign power transform / catalog §-"single-sign
+    row" exact treatment named in issue #741 Task 1 lever 2, and the prerequisite
+    that lets the ``cvxnonsep_nsig*`` family (Task 2) certify.
+
+    Returns the transformed ``(sig, log_c, exps)`` pack, or the input unchanged
+    when the row has zero or ≥2 negative monomials (a genuine ``Pplus - Pminus``
+    difference that still needs the DC secant envelope).
+    """
+    sig, log_c, exps = pack
+    neg = sig < 0.0
+    if int(np.sum(neg)) != 1:
+        return pack  # 0 or ≥2 negative terms -> keep the DC secant treatment
+    a = exps[neg][0]
+    log_c_neg = log_c[neg][0]  # = log c
+    pos = ~neg
+    n_pos = int(np.sum(pos))
+    # Transformed positive posynomial terms exp(log_c_k - log c + (b_k - a).u).
+    new_sig = np.concatenate([np.ones(n_pos), [-1.0]])
+    new_lc = np.concatenate([log_c[pos] - log_c_neg, [0.0]])  # last: the constant -1
+    new_ex = np.concatenate([exps[pos] - a[None, :], np.zeros((1, exps.shape[1]))], axis=0)
+    return new_sig, new_lc, new_ex
+
+
+def _relaxation_packs(con_packs, *, exact):
+    """Convex relaxation packs for the node bound: exact rows where possible.
+
+    When ``exact`` (the #741 tightened path) each single-negative-monomial row is
+    replaced by its exact convex reformulation (:func:`_exact_convex_pack`); all
+    other rows are unchanged. When ``exact`` is False the original packs are
+    returned verbatim, preserving the pre-#741 all-DC-secant reference exactly.
+    The *true* (untransformed) packs are always kept separately for genuine
+    feasibility verification of incumbents.
+    """
+    if not exact:
+        return list(con_packs)
+    return [_exact_convex_pack(p) for p in con_packs]
 
 
 def _true_value(sig, log_c, exps, u):
@@ -920,6 +994,137 @@ def _true_feasible_value(obj_pack, con_packs, u_lb, u_ub, u_init):
     return val, u
 
 
+# ──────────────────────────────────────────────────────────────────────
+# Integer signomial MINLPs (issue #741 Task 2): integer branching wrapping
+# the continuous node relaxation. The relaxation itself relaxes integers to
+# the continuous log-box, so every node bound is a valid lower bound on the
+# integer optimum (the integer-feasible region is a subset of the box); these
+# helpers add the integer bound rounding, branch selection, and integer-
+# feasible incumbent recovery that make a closed tree certify that optimum.
+# ──────────────────────────────────────────────────────────────────────
+
+# Tolerance for treating exp(u_j) as an integer, and outward slack when
+# rounding an integer coordinate's box to its enclosed integers (rounding
+# OUTWARD — keeping more — is the soundness-safe direction: never drop a
+# feasible integer to a float artefact).
+_INT_TOL = 1e-6
+
+
+def _int_range(alb_j, aub_j):
+    """Enclosed integer range ``[lo, hi]`` of the log-box ``[alb_j, aub_j]``.
+
+    Returns integer ``lo = ceil(exp(alb_j))``, ``hi = floor(exp(aub_j))`` with a
+    small outward slack so a value that is an integer up to ``_INT_TOL`` is kept.
+    ``lo > hi`` signals the coordinate encloses no integer (an infeasible node).
+    """
+    lo = math.ceil(math.exp(alb_j) - _INT_TOL)
+    hi = math.floor(math.exp(aub_j) + _INT_TOL)
+    return lo, hi
+
+
+def _integer_round_box(alb, aub, integer_coords):
+    """Tighten each integer coordinate's log-box to its enclosed integers.
+
+    A valid tightening: any integer-feasible point has ``x_j`` integer in
+    ``[ceil(exp(alb_j)), floor(exp(aub_j))]``, so shrinking the box to
+    ``[log lo, log hi]`` cuts no integer-feasible point. Returns the tightened
+    ``(alb, aub)``, or ``None`` when some integer coordinate encloses no integer
+    (a certified integer-infeasible node -> prune).
+    """
+    nlb = alb.copy()
+    nub = aub.copy()
+    for j in integer_coords:
+        lo, hi = _int_range(alb[j], aub[j])
+        if lo > hi:
+            return None
+        nlb[j] = math.log(lo)
+        nub[j] = math.log(hi)
+    return nlb, nub
+
+
+def _integer_branch_coord(u_star, alb, aub, integer_coords):
+    """Pick the most-fractional integer coordinate to branch on, or ``None``.
+
+    A coordinate is a branch candidate only if its enclosed integer range still
+    holds ≥2 integers (so branching splits it) and ``exp(u*_j)`` is fractional
+    beyond ``_INT_TOL``. Returns ``(j, floor_j)`` — branch into ``x_j <= floor``
+    and ``x_j >= floor+1`` — or ``None`` when every integer coordinate already
+    sits at an integer (the relaxation point is integer-feasible in its integers).
+    """
+    best_j = -1
+    best_frac = _INT_TOL
+    best_floor = 0
+    for j in integer_coords:
+        lo, hi = _int_range(alb[j], aub[j])
+        if lo >= hi:
+            continue  # pinned to a single integer; nothing to branch
+        xj = math.exp(float(u_star[j]))
+        xj = min(max(xj, lo), hi)
+        fl = math.floor(xj)
+        frac = xj - fl
+        frac = min(frac, 1.0 - frac)  # distance to the nearest integer
+        if frac > best_frac:
+            best_frac = frac
+            best_j = j
+            best_floor = fl
+    if best_j < 0:
+        return None
+    return best_j, best_floor
+
+
+def _integer_split_coord(alb, aub, integer_coords):
+    """Pick a non-singleton integer coordinate to domain-split, or ``None``.
+
+    The cleanup branch for when the relaxation point is integral in every
+    integer coordinate yet some integer domain still spans ≥2 values (so the
+    node is not a true leaf): split the widest such domain at its integer
+    midpoint into ``x_j <= mid`` and ``x_j >= mid+1``. Returns ``(j, mid)`` with
+    ``mid`` in ``[lo, hi-1]`` (both children non-empty), or ``None`` when every
+    integer coordinate is pinned to a single integer.
+    """
+    best_j = -1
+    best_span = 0
+    best_mid = 0
+    for j in integer_coords:
+        lo, hi = _int_range(alb[j], aub[j])
+        if lo >= hi:
+            continue
+        span = hi - lo
+        if span > best_span:
+            best_span = span
+            best_j = j
+            best_mid = (lo + hi) // 2  # in [lo, hi-1] since lo < hi
+    if best_j < 0:
+        return None
+    return best_j, best_mid
+
+
+def _integer_incumbent(obj_pack, con_packs, alb, aub, integer_coords, u_hint):
+    """Recover a genuinely integer-feasible incumbent by fixing + local solve.
+
+    Each integer coordinate is fixed to an enclosed integer (the one nearest the
+    relaxation point ``u_hint``), then the TRUE continuous problem is solved over
+    the remaining continuous coordinates via :func:`_true_feasible_value`, which
+    independently verifies every true constraint. The returned point therefore
+    has each integer variable at an exact integer AND satisfies every original
+    constraint — a valid integer-feasible upper bound. Returns ``(inf, None)``
+    when no integer sits in some coordinate's range or the fixed continuous solve
+    finds no feasible point.
+    """
+    falb = alb.copy()
+    faub = aub.copy()
+    for j in integer_coords:
+        lo, hi = _int_range(alb[j], aub[j])
+        if lo > hi:
+            return math.inf, None
+        xj = math.exp(float(u_hint[j])) if u_hint is not None else 0.5 * (lo + hi)
+        val = int(round(xj))
+        val = min(max(val, lo), hi)
+        falb[j] = faub[j] = math.log(val)
+    start = np.clip(u_hint, falb, faub) if u_hint is not None else 0.5 * (falb + faub)
+    return _true_feasible_value(obj_pack, con_packs, falb, faub, start)
+
+
 # OBBT effort: the root box is tightened to a fixpoint (secants tighten as the
 # box shrinks, so rounds compound); descendant nodes get one refresh round.
 _OBBT_ROOT_ROUNDS = 8
@@ -975,11 +1180,21 @@ def solve_signomial_global(
     obj_pack = (sig, log_c, exps)
     u_lb0, u_ub0 = struct.u_lb, struct.u_ub
 
-    # Box-only (no constraints) keeps the original certified path exactly;
-    # signomial constraints switch on the DC-outer-approximation node bound
-    # (valid relaxation) + true-problem feasible incumbent recovery.
+    # Box-only continuous (no constraints, no integers) keeps the original
+    # certified path exactly. Signomial constraints switch on the DC-outer-
+    # approximation node bound; integer variables (Task 2) additionally switch on
+    # integer branching + rounding + integer-feasible incumbent recovery. Both
+    # wrap the same continuous node relaxation, so the constrained/integer path
+    # is taken whenever either is present.
     constrained = bool(struct.constraint_terms)
+    integer_coords = list(struct.integer_coords)
+    has_int = bool(integer_coords)
+    constrained_path = constrained or has_int
     con_packs = [_pack(t) for t in struct.constraint_terms] if constrained else []
+    # Node-bound relaxation packs: single-negative-monomial rows treated EXACTLY
+    # (the convex power transform) under the #741 tightened path; the untransformed
+    # ``con_packs`` are kept for genuine feasibility verification of incumbents.
+    relax_packs = _relaxation_packs(con_packs, exact=obbt)
 
     incumbent = math.inf
     inc_u: Optional[np.ndarray] = None
@@ -990,27 +1205,42 @@ def solve_signomial_global(
             incumbent = true_val
             inc_u = u_star
 
+    def try_incumbent(alb, aub, u_hint):
+        """Recover a genuinely feasible incumbent over ``[alb, aub]``.
+
+        Integer programs fix each integer variable to an enclosed integer and
+        solve the continuous remainder (:func:`_integer_incumbent`), so the point
+        is integer-feasible; continuous programs solve the true problem directly
+        (:func:`_true_feasible_value`). Both independently verify every true
+        constraint, so a returned incumbent is always genuinely feasible.
+        """
+        if has_int:
+            return _integer_incumbent(obj_pack, con_packs, alb, aub, integer_coords, u_hint)
+        return _true_feasible_value(obj_pack, con_packs, alb, aub, u_hint)
+
     def eval_node(alb, aub):
-        """Box-only rigorous node bound (:func:`_node_lower_bound`), unchanged;
-        the incumbent is ``S`` at the node point, always feasible."""
+        """Box-only *continuous* rigorous node bound (:func:`_node_lower_bound`),
+        unchanged; the incumbent is ``S`` at the node point, always feasible.
+        Only used when there are no constraints AND no integer variables."""
         lb, u_star, true_val = _node_lower_bound(sig, log_c, exps, alb, aub)
         register(u_star, true_val)
         return lb
 
     def eval_constrained(alb, aub, parent_lb, do_obbt=True, u_start=None):
-        """Constrained node: certified bound + (optional) certified tightening.
+        """Constrained/integer node: certified bound + (optional) tightening.
 
         Returns ``(lb, alb, aub, u_star, shrank)`` with the box possibly
-        OBBT-tightened (``u_star`` the relaxation's solve point, kept for
-        gap-guided branching; ``shrank`` whether OBBT usefully contracted the
-        box — descendants of a node whose OBBT was a no-op skip OBBT until the
-        incumbent improves, a pure cost saving), or ``(lb, None, None, None,
-        False)`` when the node is certified prunable — either relaxed-infeasible
-        (``lb = inf``: the box holds no feasible point at all) or emptied by
-        the incumbent objective cut (``lb`` = the cut value ``>= incumbent``:
-        every feasible point in the box is worse than the incumbent, so the
-        leaf's certified bound is the cut, never ``inf``). With ``obbt=False``
-        this is exactly the pre-#741 node evaluation.
+        OBBT-tightened and (for integer programs) rounded to its enclosed
+        integers (``u_star`` the relaxation's solve point, kept for gap-guided
+        branching; ``shrank`` whether OBBT usefully contracted the box), or
+        ``(lb, None, None, None, False)`` when the node is certified prunable —
+        relaxed-infeasible (``lb = inf``), integer-empty (``lb = inf``: no
+        integer in some coordinate's range), or emptied by the incumbent
+        objective cut (``lb`` = the cut value ``>= incumbent``). The node
+        relaxation relaxes integers to the continuous log-box, so ``lb`` is a
+        valid lower bound on the integer optimum. With ``obbt=False`` the
+        continuous relaxation is the pre-#741 DC path (integer machinery still
+        applies — it is entirely new to Task 2).
         """
         shrank = False
         if obbt:
@@ -1021,7 +1251,7 @@ def solve_signomial_global(
                     return math.inf, None, None, None, False
             if do_obbt:
                 rounds = _OBBT_ROOT_ROUNDS if parent_lb is None else _OBBT_NODE_ROUNDS
-                tightened = _obbt_tighten(obj_pack, con_packs, alb, aub, incumbent, rounds=rounds)
+                tightened = _obbt_tighten(obj_pack, relax_packs, alb, aub, incumbent, rounds=rounds)
                 if tightened is None:
                     if math.isfinite(incumbent):
                         cut = incumbent + _OBBT_MARGIN * max(1.0, abs(incumbent))
@@ -1030,9 +1260,17 @@ def solve_signomial_global(
                 old_width = aub - alb
                 alb, aub = tightened
                 shrank = bool(np.any((aub - alb) < 0.99 * old_width))
+        if has_int:
+            # Round the (possibly OBBT-tightened) box to its enclosed integers —
+            # a valid tightening that cuts no integer-feasible point; an empty
+            # range certifies the node integer-infeasible.
+            rounded = _integer_round_box(alb, aub, integer_coords)
+            if rounded is None:
+                return math.inf, None, None, None, False
+            alb, aub = rounded
         hint = inc_u if (obbt and inc_u is not None) else None
         lb, u_star = _constrained_node_bound(
-            obj_pack, con_packs, alb, aub, tighten=obbt, u_hint=hint, u_start=u_start
+            obj_pack, relax_packs, alb, aub, tighten=obbt, u_hint=hint, u_start=u_start
         )
         if obbt:
             # Certified floor + monotone inheritance (child box ⊆ parent box, so
@@ -1041,7 +1279,7 @@ def solve_signomial_global(
             lb = max(lb, _interval_min(sig, log_c, exps, alb, aub))
             if parent_lb is not None:
                 lb = max(lb, parent_lb)
-        val, u_feas = _true_feasible_value(obj_pack, con_packs, alb, aub, u_star)
+        val, u_feas = try_incumbent(alb, aub, u_star)
         if u_feas is not None:
             register(u_feas, val)
         return lb, alb, aub, u_star, shrank
@@ -1050,13 +1288,13 @@ def solve_signomial_global(
     nodes = 0
     min_fathomed_init = math.inf
 
-    if constrained:
+    if constrained_path:
         # Root multistart to seed a feasible incumbent (a good bound is what lets
         # the gap close; a valid dual bound holds regardless of finding one).
         rng = np.random.default_rng(0)
         for _ in range(8):
             start = u_lb0 + rng.random(u_lb0.shape[0]) * (u_ub0 - u_lb0)
-            val, u_feas = _true_feasible_value(obj_pack, con_packs, u_lb0, u_ub0, start)
+            val, u_feas = try_incumbent(u_lb0, u_ub0, start)
             if u_feas is not None:
                 register(u_feas, val)
         root_lb, rlb, rub, rstar, rshrank = eval_constrained(u_lb0, u_ub0, None)
@@ -1111,32 +1349,62 @@ def solve_signomial_global(
             break
         nodes += 1
         width = aub - alb
-        j = int(np.argmax(width))
-        if constrained and obbt and ustar is not None:
-            # Gap-guided branching: split the coordinate carrying the largest
-            # DC secant-gap attribution at the node's relaxation point, and
-            # split *at* that point (clipped inside the box) so both children
-            # exclude it. Falls back to widest-dimension when the relaxation is
-            # already gap-free at ``ustar``.
-            scores = _branch_scores([obj_pack] + con_packs, ustar, alb, aub)
-            usable = width >= _MIN_LOG_WIDTH
-            if usable.any() and float(np.max(np.where(usable, scores, -1.0))) > 1e-12:
-                j = int(np.argmax(np.where(usable, scores, -1.0)))
-        if width[j] < _MIN_LOG_WIDTH:
-            # Cannot refine further: this box is a point-leaf; its bound stands.
-            min_fathomed = min(min_fathomed, lb)
-            continue
-        mid = 0.5 * (alb[j] + aub[j])
-        if constrained and obbt and ustar is not None:
-            mid = float(np.clip(ustar[j], alb[j] + 0.2 * width[j], aub[j] - 0.2 * width[j]))
-        for take_upper in (False, True):
+
+        # Branch: integer variables first (split the most-fractional integer
+        # coordinate at its floor/ceil, excluding the fractional gap from both
+        # children — valid, no integer lives there), else spatial branching on a
+        # continuous coordinate. ``splits`` is a list of (take_upper, cut) pairs.
+        int_branch = (
+            _integer_branch_coord(ustar, alb, aub, integer_coords)
+            if (has_int and ustar is not None)
+            else None
+        )
+        if int_branch is not None:
+            # Priority 1: a fractional integer at the relaxation point.
+            j, fl = int_branch
+            # low child: x_j <= fl -> u_j <= log(fl); high child: x_j >= fl+1.
+            splits = [(False, math.log(fl)), (True, math.log(fl + 1))]
+        else:
+            # Priority 2: spatial branching on a continuous coordinate. Integer
+            # coordinates are never split spatially (they only integer-branch),
+            # so exclude them from the continuous candidates.
+            branchable = width >= _MIN_LOG_WIDTH
+            if has_int:
+                branchable = branchable.copy()
+                branchable[integer_coords] = False
+            if branchable.any():
+                j = int(np.argmax(np.where(branchable, width, -1.0)))
+                if constrained_path and obbt and ustar is not None:
+                    # Gap-guided: split the branchable coordinate carrying the
+                    # largest DC secant-gap attribution at the relaxation point.
+                    scores = _branch_scores([obj_pack] + relax_packs, ustar, alb, aub)
+                    if float(np.max(np.where(branchable, scores, -1.0))) > 1e-12:
+                        j = int(np.argmax(np.where(branchable, scores, -1.0)))
+                mid = 0.5 * (alb[j] + aub[j])
+                if constrained_path and obbt and ustar is not None:
+                    mid = float(np.clip(ustar[j], alb[j] + 0.2 * width[j], aub[j] - 0.2 * width[j]))
+                splits = [(False, mid), (True, mid)]
+            else:
+                # Priority 3: no continuous coordinate left, but the relaxation
+                # point is integral in every integer coordinate while some
+                # integer domain still spans ≥2 values — domain-split it (else
+                # the wide-box relaxation bound would fathom as a false leaf).
+                split = _integer_split_coord(alb, aub, integer_coords) if has_int else None
+                if split is None:
+                    # True point-leaf: every integer pinned, no continuous coord.
+                    min_fathomed = min(min_fathomed, lb)
+                    continue
+                j, mid_int = split
+                splits = [(False, math.log(mid_int)), (True, math.log(mid_int + 1))]
+
+        for take_upper, cut in splits:
             clb = alb.copy()
             cub = aub.copy()
             if take_upper:
-                clb[j] = mid
+                clb[j] = cut
             else:
-                cub[j] = mid
-            if constrained:
+                cub[j] = cut
+            if constrained_path:
                 # Adaptive OBBT: re-run when the parent's round usefully shrank,
                 # when the incumbent improved since the parent was evaluated (a
                 # stronger objective cut), or when the box has contracted enough
@@ -1180,7 +1448,7 @@ def solve_signomial_global(
         # frontier emptied at the objective-cut value (cut = incumbent + margin).
         global_lb = min(global_lb, incumbent)
     infeasible_certified = bool(
-        constrained
+        constrained_path
         and not finite
         and status == "optimal"
         and not heap
@@ -1219,7 +1487,13 @@ def solve_signomial_global(
 
     x_values = None
     if inc_u is not None:
-        x_by_offset = {off: math.exp(float(inc_u[k])) for k, off in enumerate(struct.offsets)}
+        # Integer-variable offsets: report exact integers (the incumbent pinned
+        # them to log(integer), so exp is an integer up to float noise).
+        int_offsets = {struct.offsets[j] for j in integer_coords}
+        x_by_offset = {}
+        for k, off in enumerate(struct.offsets):
+            xv = math.exp(float(inc_u[k]))
+            x_by_offset[off] = float(round(xv)) if off in int_offsets else xv
         # Assemble full x per variable (participating offsets carry the solution;
         # any variable absent from the objective takes its lower bound).
         layout = _offset_layout(model)
