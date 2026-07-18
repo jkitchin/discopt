@@ -1544,6 +1544,20 @@ def _to_nnf(expr: LogicalExpression) -> LogicalExpression:
                     LogicalAnd(LogicalNot(inner.left), inner.right),
                 )
             )
+        elif isinstance(inner, LogicalAtLeast):
+            # ~(sum >= k)  ≡  sum <= k-1  ≡  atmost(k-1, ops)
+            return LogicalAtMost(inner.k - 1, inner.operands)
+        elif isinstance(inner, LogicalAtMost):
+            # ~(sum <= k)  ≡  sum >= k+1  ≡  atleast(k+1, ops)
+            return LogicalAtLeast(inner.k + 1, inner.operands)
+        elif isinstance(inner, LogicalExactly):
+            # ~(sum == k)  ≡  sum <= k-1  |  sum >= k+1
+            return _to_nnf(
+                LogicalOr(
+                    LogicalAtMost(inner.k - 1, inner.operands),
+                    LogicalAtLeast(inner.k + 1, inner.operands),
+                )
+            )
         else:
             return expr
     elif isinstance(expr, LogicalAnd):
@@ -1611,7 +1625,20 @@ def _nnf_to_cnf_clauses(expr: LogicalExpression, model: Model, add_aux_binary) -
         right_lit = _tseitin_var(expr.right, model, add_aux_binary)
         return [left_lit + right_lit]
 
-    return []
+    # Cardinality atom nested inside a boolean combination: introduce a
+    # Tseitin auxiliary constrained to imply the atom, then emit the
+    # single-literal clause forcing that auxiliary true. Silently returning
+    # [] here would widen the feasible set (issue #750).
+    elif isinstance(expr, (LogicalAtLeast, LogicalAtMost, LogicalExactly)):
+        return [_tseitin_var(expr, model, add_aux_binary)]
+
+    # No expression should reach here in NNF. Refuse loudly rather than
+    # silently dropping the constraint and widening the feasible set.
+    raise NotImplementedError(
+        f"Cannot linearize logical sub-expression of type "
+        f"{type(expr).__name__!r} during GDP reformulation; refusing to "
+        f"silently drop it (would widen the feasible set). See issue #750."
+    )
 
 
 def _tseitin_var(expr: LogicalExpression, model: Model, add_aux_binary) -> list[tuple]:
@@ -1626,8 +1653,15 @@ def _tseitin_var(expr: LogicalExpression, model: Model, add_aux_binary) -> list[
     if isinstance(expr, LogicalNot) and isinstance(expr.operand, BooleanVar):
         return [(_get_binary_var(expr.operand), False)]
 
-    # Create auxiliary binary: aux <-> expr
+    # Create auxiliary binary: aux -> expr
     aux = add_aux_binary("_tseitin")
+
+    # Cardinality atom: emit the big-M implication aux -> (cardinality)
+    # directly; it has no CNF-clause representation.
+    if isinstance(expr, (LogicalAtLeast, LogicalAtMost, LogicalExactly)):
+        for cons in _cardinality_implication_constraints(aux, expr):
+            model._constraints.append(cons)
+        return [(aux, True)]
 
     # Get the sub-clauses for expr
     sub_clauses = _nnf_to_cnf_clauses(expr, model, add_aux_binary)
@@ -1646,6 +1680,48 @@ def _tseitin_var(expr: LogicalExpression, model: Model, add_aux_binary) -> list[
     #   building, the above is sufficient for correctness.
 
     return [(aux, True)]
+
+
+def _cardinality_implication_constraints(aux, expr: LogicalExpression) -> list[Constraint]:
+    """Build linear constraints encoding ``aux -> <cardinality atom>``.
+
+    Used when a ``LogicalAtLeast`` / ``LogicalAtMost`` / ``LogicalExactly``
+    atom appears nested inside a boolean combination and is lowered via a
+    Tseitin auxiliary ``aux``. Only the forward implication is needed: the
+    auxiliary occurs positively in exactly one clause, so it is existentially
+    chosen, and ``aux -> atom`` is sufficient for soundness (see issue #750).
+
+    Big-M form (``n`` = number of operands, ``s`` = sum of operand binaries):
+      atleast(k):  s >= k*aux           (aux=0 => trivially true)
+      atmost(k):   s <= n - (n-k)*aux   (aux=0 => s <= n, trivially true)
+      exactly(k):  both of the above.
+    """
+    operands = expr.operands
+    n = len(operands)
+    var_sum = _wrap(0.0)
+    for op in operands:
+        var_sum = var_sum + _get_binary_var(op)
+
+    constraints: list[Constraint] = []
+    if isinstance(expr, (LogicalAtLeast, LogicalExactly)):
+        # s - k*aux >= 0
+        constraints.append(
+            Constraint(
+                body=var_sum - _wrap(float(expr.k)) * aux,
+                sense=">=",
+                rhs=0.0,
+            )
+        )
+    if isinstance(expr, (LogicalAtMost, LogicalExactly)):
+        # s + (n-k)*aux - n <= 0
+        constraints.append(
+            Constraint(
+                body=var_sum + _wrap(float(n - expr.k)) * aux - _wrap(float(n)),
+                sense="<=",
+                rhs=0.0,
+            )
+        )
+    return constraints
 
 
 def _clause_to_constraint(clause: list[tuple], name: str | None = None) -> Constraint:

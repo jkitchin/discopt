@@ -1119,6 +1119,72 @@ class TestLogicalConstraints:
         y_sum = sum(result.x["y"])
         assert y_sum == pytest.approx(2.0, abs=1e-4)
 
+    # ── #750: cardinality atoms nested inside boolean combinations ──
+    #
+    # Before the fix, `_nnf_to_cnf_clauses` returned [] for a nested
+    # LogicalAtLeast/AtMost/Exactly, silently dropping it and widening the
+    # feasible set (A=1,B=0,C=0 wrongly satisfied `A & atleast(1,B,C)`).
+
+    @staticmethod
+    def _nested_reform_feasible(builder, va, vb, vc):
+        """Is the assignment (A,B,C) feasible after GDP reformulation?"""
+        m = dm.Model("nested_card")
+        a, b, c = m.boolean("A"), m.boolean("B"), m.boolean("C")
+        builder(m, a, b, c)
+        for var, val in ((a, va), (b, vb), (c, vc)):
+            m.logical(var if val == 1 else ~var)
+        m.minimize(a.variable * 0)
+        return m.solve(time_limit=30).status == "optimal"
+
+    def _assert_matches_truth(self, builder, truth):
+        for va in (0, 1):
+            for vb in (0, 1):
+                for vc in (0, 1):
+                    got = self._nested_reform_feasible(builder, va, vb, vc)
+                    want = truth(va, vb, vc)
+                    assert got == want, (
+                        f"A={va} B={vb} C={vc}: reformulated feasible={got}, expected={want}"
+                    )
+
+    def test_nested_atleast_in_and_not_dropped(self):
+        """#750: `A & atleast(1,B,C)` must reject A=1,B=0,C=0."""
+        self._assert_matches_truth(
+            lambda m, a, b, c: m.logical(a & dm.atleast(1, b, c)),
+            lambda a, b, c: a == 1 and (b + c) >= 1,
+        )
+
+    def test_nested_atleast_in_or_not_dropped(self):
+        self._assert_matches_truth(
+            lambda m, a, b, c: m.logical(a | dm.atleast(2, b, c)),
+            lambda a, b, c: a == 1 or (b + c) >= 2,
+        )
+
+    def test_nested_atmost_in_or_not_dropped(self):
+        self._assert_matches_truth(
+            lambda m, a, b, c: m.logical(a | dm.atmost(1, b, c)),
+            lambda a, b, c: a == 1 or (b + c) <= 1,
+        )
+
+    def test_nested_exactly_in_and_not_dropped(self):
+        self._assert_matches_truth(
+            lambda m, a, b, c: m.logical(a & dm.exactly(2, b, c)),
+            lambda a, b, c: a == 1 and (b + c) == 2,
+        )
+
+    def test_nested_negated_atleast_not_dropped(self):
+        """~atleast(1,B,C) nested must lower to atmost(0,B,C), not vanish."""
+        self._assert_matches_truth(
+            lambda m, a, b, c: m.logical(~dm.atleast(1, b, c) | a),
+            lambda a, b, c: (not ((b + c) >= 1)) or a == 1,
+        )
+
+    def test_nested_negated_exactly_not_dropped(self):
+        """~exactly(1,B,C) nested must lower to atmost(0)|atleast(2)."""
+        self._assert_matches_truth(
+            lambda m, a, b, c: m.logical(~dm.exactly(1, b, c) & a),
+            lambda a, b, c: ((b + c) != 1) and a == 1,
+        )
+
     def test_logical_equivalent_to_solve(self):
         """Y[0].equivalent_to(Y[1]) forces Y[0] == Y[1]."""
         m = dm.Model("test_equiv")
