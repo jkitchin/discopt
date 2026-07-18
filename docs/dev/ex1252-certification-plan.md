@@ -256,7 +256,45 @@ In increasing effort, measured at the OBBT-tightened config box:
 **Kill criterion per option:** < 10% `min x15` lift at the config box → drop that
 option (recorded, not retried).
 
-### Stage 5 — graduation (CLAUDE.md §5)
+### Stage 5 — graduation panel *(RUN 2026-07-18 — verdict: NOT eligible; flags
+stay default-OFF, measurement recorded)*
+
+**Instruments:** `check_cert_neutrality` OFF (environment sanity) and ON (the
+flag stack: reform + coupling RLT + disjunctive bound) over the 49-instance cert
+panel, plus a 9-instance ON-vs-OFF differential on the reform-firing subset
+(nvs01/05/09/16/22, st_e36/e40, ex1252, ex1252a) at the 60 s fair budget.
+
+**Findings:**
+1. *Environmental noise:* clay0303hfsg / st_e38 / tls2 violate the committed
+   baseline **in the OFF arm too** (this container is slower than the baseline
+   machine) — not flag-attributable.
+2. *nvs09 loses its certificate ON* (optimal in 9 s OFF → 0 nodes, wall overrun
+   ON). **Attributed to the pre-existing #707 reform flag**: reform-only
+   reproduces it identically (78 s, 0 nodes) with none of this branch's code —
+   a root-phase stall on the reformed nvs09 needing its own diagnosis.
+3. *Short-budget dual regression on the flagship:* at 60 s, reform+RLT costs
+   ex1252's tree bound (14347 → ~0; bigger LPs → fewer nodes at equal time)
+   while improving the primal side (incumbent 204321 → 134471). The stack pays
+   off only at generous budgets (600 s: 0 → 74915).
+4. *Two defects the panel caught were fixed on the spot:* the pass's leaf
+   solves carried no time limit (nvs09 ON overran a 60 s budget to 115 s; with
+   the fix, nvs09@300 s **certifies optimal with the full stack ON**, 103 s),
+   and the pass now engages only when its budget is ≥ 45 s (below that the
+   stack's pass is byte-identical to OFF — the 60 s panel behavior is restored
+   to reform+RLT-only).
+5. *Genuine wins where structure fires:* nvs05 bound 3.81 → 4.10 (equal
+   nodes); ex1252 primal 204321 → 134471; ex1252 dual 0 → 74915 at 600 s;
+   6 of 9 firing instances byte-identical (guards reject the reform).
+
+**Verdict (per the `DISCOPT_CUT_INHERIT` discipline):** sound throughout (no
+bound ever crossed its reference; every violation is environmental or
+pre-existing-#707), but **not net-positive at the fair budget** — the flags stay
+default-OFF. Graduation blockers, in order: (a) the pre-existing #707 nvs09
+root-phase stall, (b) the short-budget dual cost of reform+RLT on the
+ex1252 class (candidate fix: budget-aware reform adoption). Re-run this panel
+after those land.
+
+### Stage 5-original — graduation (CLAUDE.md §5)
 Class detector: `has_integer_multilinear_reformulation_work(model)` (the #707
 trigger) — i.e. the gated-configuration class, *not* an ex1252 special case.
 Panel: corpus differential run, flag ON vs OFF — cert-clean (`incorrect_count =

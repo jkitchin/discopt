@@ -4842,6 +4842,9 @@ def solve_model(
                             # no new threading. Budgeted to a fraction of the
                             # solve's wall budget; a declined/failed pass
                             # stashes nothing and the solve is unchanged.
+                            class _DcbSkip(Exception):
+                                pass
+
                             try:
                                 from discopt._jax.disjunctive_config_bound import (
                                     compute_disjunctive_config_bound,
@@ -4850,7 +4853,16 @@ def solve_model(
                                     flat_variable_bounds as _dcb_flat,
                                 )
 
+                                # Engagement gate (#732 Stage-5 panel): at short
+                                # budgets the pass cannot reach its productive
+                                # regime and only eats the root phase (60 s panel:
+                                # ex1252 bound 14347 -> 0.0, nvs09 loses its
+                                # certificate). Engage only when the solve budget
+                                # affords a >= 45 s pass; below that the stack is
+                                # byte-identical to flag-OFF.
                                 _dcb_budget = min(0.25 * float(time_limit), 150.0)
+                                if _dcb_budget < 45.0:
+                                    raise _DcbSkip()
                                 _dcb_lb, _dcb_ub = _dcb_flat(model)
                                 _dcb = compute_disjunctive_config_bound(
                                     model,

@@ -253,7 +253,10 @@ def compute_disjunctive_config_bound(
             leaf.lb, leaf.ub = ob.lb.copy(), ob.ub.copy()
         except Exception as exc:  # pragma: no cover - defensive
             logger.debug("disjunctive pass: OBBT abstained: %s", exc)
-        node = relaxer.solve_at_node(leaf.lb.copy(), leaf.ub.copy())
+        _tl = None
+        if deadline is not None:
+            _tl = max(deadline - time.perf_counter(), 1.0)
+        node = relaxer.solve_at_node(leaf.lb.copy(), leaf.ub.copy(), time_limit=_tl)
         if node.status == "infeasible":
             res.n_pruned_infeasible += 1
             return None
