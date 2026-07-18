@@ -151,10 +151,6 @@ module = "discopt.solvers.nlp_pounce"
 disable_error_code = "no-any-return"
 
 [[tool.mypy.overrides]]
-module = "discopt._jax.nl_evaluator"
-disable_error_code = "no-any-return"
-
-[[tool.mypy.overrides]]
 module = "discopt._jax.pounce_layer"
 disable_error_code = "no-any-return"
 
