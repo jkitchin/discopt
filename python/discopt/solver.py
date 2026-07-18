@@ -4579,10 +4579,11 @@ def solve_model(
                         # Extend a user warm start over the appended aux columns so the
                         # (longer) reformed vector is not silently dropped. Purely primal:
                         # the driver re-validates it, so it never affects the dual bound.
+                        # If it cannot be extended (e.g. an off-integer seed), drop it
+                        # entirely — a shorter vector against the grown model would crash
+                        # the downstream integrality check on the spatial path.
                         if initial_point is not None:
-                            _iml_x0 = _iml_extend(model, initial_point)
-                            if _iml_x0 is not None:
-                                initial_point = _iml_x0
+                            initial_point = _iml_extend(model, initial_point)
     except Exception as _iml_exc:  # pragma: no cover - defensive
         logger.debug("integer-multilinear reformulation skipped: %s", _iml_exc)
 

@@ -205,6 +205,28 @@ def test_ex1252_multilinear_reform_sound_and_lifts_bound():
     )
 
 
+@pytest.mark.correctness
+def test_flag_with_unextendable_seed_does_not_crash():
+    """A user warm start that cannot be extended across the big-M lift (e.g. an
+    off-integer value on an expanded factor) must be dropped, not left as a
+    length-mismatched vector against the grown model — which would crash the
+    downstream integrality check on the spatial path."""
+    m = dm.Model("tri")
+    a = m.integer("a", lb=0, ub=3)
+    b = m.integer("b", lb=0, ub=3)
+    c = m.integer("c", lb=0, ub=3)
+    m.subject_to(a + b + c <= 3)
+    m.minimize(-(a * b * c))
+    os.environ["DISCOPT_INTEGER_MULTILINEAR_REFORM"] = "1"
+    try:
+        # a=0.5 is fractional on an expanded integer factor → not extendable.
+        res = m.solve(time_limit=20, initial_solution={a: 0.5, b: 1.0, c: 1.0})
+    finally:
+        os.environ.pop("DISCOPT_INTEGER_MULTILINEAR_REFORM", None)
+    # Solve still completes soundly (seed simply dropped).
+    assert res.objective is None or res.objective >= -1.0 - 1e-4
+
+
 @pytest.mark.slow
 @pytest.mark.correctness
 def test_flag_does_not_regress_easy_instance():
