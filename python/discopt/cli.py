@@ -397,6 +397,11 @@ def _cmd_solve(args):
     tuning = _parse_tuning(args.tuning)
     if tuning:
         overrides["tuning"] = tuning
+    if args.emit_certificate:
+        # Record the spatial-B&B tree during the solve so the strongest (Tier-3)
+        # certificate can be emitted; bound-neutral, and a no-op on paths that
+        # don't run spatial B&B.
+        overrides["emit_certificate"] = True
 
     from discopt.profiles import resolve_options
 
@@ -418,9 +423,11 @@ def _cmd_solve(args):
 
     payload = options_to_payload(options)
 
-    # Solve: warm daemon when available, in-process fallback otherwise.
+    # Solve: warm daemon when available, in-process fallback otherwise. Certificate
+    # recording runs in-process: the recorded B&B tree does not cross the daemon
+    # socket (it is not part of the serialized result schema).
     result = None
-    if not args.no_daemon:
+    if not args.no_daemon and not args.emit_certificate:
         from discopt import daemon
 
         resp = daemon.solve_via_daemon(nl, payload, hard_deadline=args.hard_timeout)
@@ -454,6 +461,7 @@ def _cmd_solve(args):
     if args.emit_certificate:
         from discopt.certificate import (
             CertificateError,
+            build_bnb_certificate,
             build_convex_certificate,
             build_feasibility_certificate,
             write_certificate,
@@ -461,16 +469,20 @@ def _cmd_solve(args):
         from discopt.modeling.core import from_nl
 
         cmodel = from_nl(nl)
-        # Emit the strongest certificate the solve supports: a Tier-2 convex
-        # global-optimality certificate when the solver certified convexity,
-        # otherwise a Tier-1 feasibility certificate.
-        try:
+
+        # Emit the strongest certificate the solve supports: Tier-3 spatial-B&B
+        # global optimality when a B&B tree was recorded, else Tier-2 convex, else
+        # Tier-1 feasibility.
+        def _build():
+            if getattr(result, "bnb_tree", None) is not None:
+                return build_bnb_certificate(cmodel, result), "bnb global-optimality"
             try:
-                cert = build_convex_certificate(cmodel, result)
-                tier = "convex global-optimality"
+                return build_convex_certificate(cmodel, result), "convex global-optimality"
             except CertificateError:
-                cert = build_feasibility_certificate(cmodel, result)
-                tier = "feasibility"
+                return build_feasibility_certificate(cmodel, result), "feasibility"
+
+        try:
+            cert, tier = _build()
             p = base_dir / f"{stub}.cert.json"
             write_certificate(cert, p)
             wrote.append(f"{p} ({tier})")

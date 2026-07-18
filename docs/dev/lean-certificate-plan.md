@@ -146,11 +146,15 @@ A `lean/` Lake project. Modules:
   (`crates/discopt-core/src/bnb/tree_manager.rs`) and the `MccormickLPResult` return
   path (`python/discopt/_jax/mccormick_lp.py`, which already computes the
   Neumaier–Shcherbina `safe_bound`).
-- **CLI (done):** `discopt solve --emit-certificate` writes `<stub>.cert.json`
-  (re-loading the model via `from_nl`, as `--sol` does), and `discopt cert-check
-  <file>` runs the reference checker (exit 0 ACCEPT / 1 REJECT). The Lean checker is
-  the separate `lake exe check cert.json` step. (`result_io.py` is intentionally
-  left untouched — it holds only a `SolveResult`, not the model the emitter needs.)
+- **CLI (done):** `discopt solve --emit-certificate` runs the solve with tree
+  recording on and writes `<stub>.cert.json` at the **strongest tier the solve
+  supports** — Tier-3 `bnb` when a spatial-B&B tree was recorded, else Tier-2
+  convex, else Tier-1 feasibility (re-loading the model via `from_nl`, as `--sol`
+  does). Recording forces the in-process solve (the tree does not cross the daemon
+  socket). `discopt cert-check <file>` runs the reference checker (exit 0 ACCEPT /
+  1 REJECT). The Lean checker is the separate `lake exe check cert.json` step.
+  (`result_io.py` is intentionally left untouched — it holds only a `SolveResult`,
+  not the model the emitter needs.)
 
 ## 7. Risks and open questions
 
