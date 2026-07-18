@@ -959,11 +959,15 @@ impl ExprArena {
             ExprNode::UnaryOp { op, operand } => match op {
                 UnOp::Neg => self.max_degree(*operand),
                 UnOp::Abs => {
-                    // abs is not polynomial in general, but for structure
-                    // detection we treat abs(linear) as degree 1.
-                    let d = self.max_degree(*operand);
-                    if d <= 1 {
-                        d
+                    // abs(constant) is a constant, but abs of anything
+                    // variable-dependent is piecewise and NOT polynomial:
+                    // classifying abs(linear) as degree 1 routed |x| models
+                    // onto the LP fast path, whose extractors bake in one
+                    // side's slope and certify a false optimum / drop the
+                    // constraint (issue #739). FunctionCall(Abs) below already
+                    // returns usize::MAX for the same reason.
+                    if self.max_degree(*operand) == 0 {
+                        0
                     } else {
                         usize::MAX
                     }
@@ -1775,6 +1779,59 @@ mod tests {
         });
         assert!(!arena.is_linear(exp_x));
         assert!(!arena.is_quadratic(exp_x));
+    }
+
+    #[test]
+    fn test_abs_of_variable_is_not_linear_or_quadratic() {
+        // Issue #739: abs(linear) is piecewise linear, NOT linear. Classifying
+        // it as degree 1 sent |x| models down the LP fast path, which baked in
+        // one side's slope (false optimal certificate / dropped constraint).
+        let mut arena = ExprArena::new();
+        let x0 = arena.add(ExprNode::Variable {
+            name: "x".into(),
+            index: 0,
+            size: 1,
+            shape: vec![],
+        });
+        let abs_x = arena.add(ExprNode::UnaryOp {
+            op: UnOp::Abs,
+            operand: x0,
+        });
+        assert!(!arena.is_linear(abs_x));
+        assert!(!arena.is_quadratic(abs_x));
+
+        // abs buried in an otherwise-linear sum still poisons the degree.
+        let c3 = arena.add(ExprNode::Constant(3.0));
+        let sum = arena.add(ExprNode::BinaryOp {
+            op: BinOp::Add,
+            left: abs_x,
+            right: c3,
+        });
+        assert!(!arena.is_linear(sum));
+        assert!(!arena.is_quadratic(sum));
+    }
+
+    #[test]
+    fn test_abs_of_constant_is_constant_degree() {
+        // abs of a genuine constant folds to degree 0: x + |c| must stay linear.
+        let mut arena = ExprArena::new();
+        let c = arena.add(ExprNode::Constant(-3.0));
+        let abs_c = arena.add(ExprNode::UnaryOp {
+            op: UnOp::Abs,
+            operand: c,
+        });
+        let x0 = arena.add(ExprNode::Variable {
+            name: "x".into(),
+            index: 0,
+            size: 1,
+            shape: vec![],
+        });
+        let sum = arena.add(ExprNode::BinaryOp {
+            op: BinOp::Add,
+            left: x0,
+            right: abs_c,
+        });
+        assert!(arena.is_linear(sum));
     }
 
     #[test]
