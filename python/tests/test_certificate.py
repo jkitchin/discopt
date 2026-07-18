@@ -14,10 +14,21 @@ import discopt.modeling as dm
 import pytest
 from discopt.certificate import (
     CertificateError,
+    build_convex_certificate,
     build_feasibility_certificate,
     check_certificate,
     write_certificate,
 )
+
+
+def _convex_qp(ub_x=10):
+    """min (x-2)^2 + (y-1)^2 s.t. x+y<=2 -- convex QP with an active constraint."""
+    m = dm.Model()
+    x = m.continuous("x", lb=0, ub=ub_x)
+    y = m.continuous("y", lb=0, ub=10)
+    m.subject_to(x + y <= 2, name="c1")
+    m.minimize((x - 2) ** 2 + (y - 1) ** 2)
+    return m, m.solve()
 
 
 def _nlp():
@@ -145,3 +156,94 @@ def test_emitter_refuses_without_incumbent():
     empty = SolveResult(status="infeasible")
     with pytest.raises(CertificateError):
         build_feasibility_certificate(m, empty)
+
+
+# ── Tier 2: convex / KKT global optimality ───────────────────────────────────
+@pytest.mark.smoke
+def test_convex_certificate_accepts_constraint_active():
+    m, r = _convex_qp()
+    cert = build_convex_certificate(m, r)
+    body = cert["certificate"]
+    assert body["tier"] == "convex"
+    assert "dualBound" in body and "kkt" in body
+    ok, reason = check_certificate(cert)
+    assert ok, reason
+    assert "global optimum" in reason
+
+
+@pytest.mark.smoke
+def test_convex_certificate_accepts_bound_active():
+    # ub=1 forces the upper bound active at the optimum (x*=1): pins bound-dual sign.
+    m, r = _convex_qp(ub_x=1)
+    cert = build_convex_certificate(m, r)
+    assert check_certificate(cert)[0]
+
+
+@pytest.mark.smoke
+def test_convex_rejects_tampered_multiplier():
+    m, r = _convex_qp()
+    cert = build_convex_certificate(m, r)
+    cert["certificate"]["kkt"]["constraint_multipliers"][0] = [5, 1]  # breaks stationarity
+    ok, reason = check_certificate(cert)
+    assert not ok and "stationarity" in reason.lower()
+
+
+@pytest.mark.smoke
+def test_convex_rejects_open_gap():
+    m, r = _convex_qp()
+    cert = build_convex_certificate(m, r)
+    cert["certificate"]["dualBound"] = [0, 1]  # claim a bound below the optimum
+    ok, reason = check_certificate(cert)
+    assert not ok and "gap" in reason.lower()
+
+
+@pytest.mark.smoke
+def test_convex_checker_rejects_nonconvex_objective():
+    # Swap the objective for a NON-convex bilinear body x*y (indefinite Hessian),
+    # keeping the reported value equal to its value at x* so feasibility still
+    # passes -- so the ONLY thing that can reject is the convexity test.
+    from fractions import Fraction
+
+    m, r = _convex_qp()
+    cert = build_convex_certificate(m, r)
+    body = cert["certificate"]
+    xv = [Fraction(n, d) for n, d in body["incumbent"]["x"]]
+    body["model"]["objective"]["body"] = {
+        "k": "mul",
+        "l": {"k": "var", "i": 0},
+        "r": {"k": "var", "i": 1},
+    }
+    val = xv[0] * xv[1]
+    body["incumbent"]["objectiveValue"] = [val.numerator, val.denominator]
+    body["dualBound"] = [val.numerator, val.denominator]
+    ok, reason = check_certificate(cert)
+    assert not ok and "convex" in reason.lower()
+
+
+@pytest.mark.smoke
+def test_convex_checker_rejects_negated_dual_feasibility():
+    m, r = _convex_qp()
+    cert = build_convex_certificate(m, r)
+    # A negative inequality multiplier is dual-infeasible (and breaks stationarity).
+    num, den = cert["certificate"]["kkt"]["constraint_multipliers"][0]
+    cert["certificate"]["kkt"]["constraint_multipliers"][0] = [-num, den]
+    assert not check_certificate(cert)[0]
+
+
+@pytest.mark.smoke
+def test_convex_emitter_refuses_maximize():
+    m = dm.Model()
+    x = m.continuous("x", lb=0, ub=1)
+    m.maximize(-((x - 0.5) ** 2))  # concave max == convex min, but emitter is min-only
+    r = m.solve()
+    with pytest.raises(CertificateError):
+        build_convex_certificate(m, r)
+
+
+@pytest.mark.smoke
+def test_convex_certificate_json_round_trip():
+    m, r = _convex_qp()
+    cert = build_convex_certificate(m, r)
+    reloaded = json.loads(json.dumps(cert))
+    assert check_certificate(reloaded)[0]
+    assert reloaded == cert

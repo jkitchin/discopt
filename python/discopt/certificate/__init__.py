@@ -29,6 +29,7 @@ from __future__ import annotations
 
 from .emit import (
     CertificateError,
+    build_convex_certificate,
     build_feasibility_certificate,
     write_certificate,
 )
@@ -36,6 +37,7 @@ from .refcheck import check_certificate
 
 __all__ = [
     "CertificateError",
+    "build_convex_certificate",
     "build_feasibility_certificate",
     "write_certificate",
     "check_certificate",

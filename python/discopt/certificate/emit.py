@@ -15,7 +15,7 @@ rather than silently emitting something a checker might wrongly accept.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Union
+from typing import Any, Optional, Union
 
 import numpy as np
 
@@ -277,6 +277,81 @@ def build_feasibility_certificate(
             },
         },
     }
+
+
+def _flatten_bound_duals(model: Model, duals: Optional[dict]) -> list[Optional[Rational]]:
+    """Flatten a ``{var_name: array}`` KKT bound-multiplier dict to column order."""
+    duals = duals or {}
+    flat: list[Optional[Rational]] = []
+    for var in model._variables:
+        vals = np.asarray(duals.get(var.name, 0.0), dtype=np.float64).ravel()
+        if vals.size == 1 and var.size > 1:
+            vals = np.full(var.size, float(vals))
+        for k in range(var.size):
+            v = float(vals[k]) if k < vals.size else 0.0
+            flat.append(to_rational(v))
+    return flat
+
+
+def build_convex_certificate(
+    model: Model,
+    result: SolveResult,
+    *,
+    feas_tol: float = DEFAULT_FEAS_TOL,
+    int_tol: float = DEFAULT_INT_TOL,
+    kkt_tol: float = 1e-5,
+) -> dict:
+    """Build a Tier-2 (convex / KKT) *global-optimality* certificate.
+
+    For a convex model, a KKT point with valid multipliers is a global minimizer,
+    so the certificate carries -- on top of the Tier-1 feasibility data -- the KKT
+    multipliers (constraint duals + variable-bound duals) and the certified dual
+    bound. The checker re-derives gradients/Hessians from the model and verifies
+    convexity + the KKT conditions, concluding ``dualBound == objectiveValue``
+    (gap closed). This ships the *exact-rational* QP/QCQP subclass (constant
+    Hessians); transcendental-convex models are a later, Mathlib-backed phase.
+
+    Preconditions (else :class:`CertificateError`): a minimize objective, a
+    finite incumbent, ``gap_certified`` true, and ``convex_fast_path`` true (the
+    solver certified the model convex and solved it to a KKT point). The emitter
+    does *not* itself judge convexity -- the checker does, from the witness.
+    """
+    if model._objective is None or _enum_value(model._objective.sense) != "minimize":
+        raise CertificateError(
+            "Tier-2 convex certificate currently supports minimize objectives only "
+            "(negate a maximize model, or use a Tier-1 feasibility certificate)"
+        )
+    if not getattr(result, "gap_certified", False):
+        raise CertificateError(
+            "result is not gap-certified; a Tier-2 global-optimality certificate "
+            "requires a certified solve (use build_feasibility_certificate instead)"
+        )
+    if not getattr(result, "convex_fast_path", False):
+        raise CertificateError(
+            "result did not take the convex fast path; Tier-2 requires a solve the "
+            "solver certified convex (use build_feasibility_certificate instead)"
+        )
+
+    base = build_feasibility_certificate(model, result, feas_tol=feas_tol, int_tol=int_tol)
+    cert = base["certificate"]
+    cert["tier"] = "convex"
+
+    cdual = getattr(result, "constraint_duals", None) or {}
+    lam = [
+        to_rational(float(np.asarray(cdual.get(c["name"], 0.0))))
+        for c in cert["model"]["constraints"]
+    ]
+    cert["kkt"] = {
+        "constraint_multipliers": lam,
+        "bound_lower": _flatten_bound_duals(model, getattr(result, "bound_duals_lower", None)),
+        "bound_upper": _flatten_bound_duals(model, getattr(result, "bound_duals_upper", None)),
+    }
+    # At a convex KKT point the incumbent value IS the global optimum, so the
+    # certified dual bound equals it; the checker verifies the KKT data that
+    # justifies this.
+    cert["dualBound"] = cert["incumbent"]["objectiveValue"]
+    cert["tolerances"]["kkt"] = to_rational(kkt_tol)
+    return base
 
 
 def write_certificate(cert: dict, path: Union[str, Path]) -> None:
