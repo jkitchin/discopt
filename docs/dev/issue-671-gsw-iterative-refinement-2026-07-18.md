@@ -156,14 +156,54 @@ whose node LPs solve cleanly never trigger it (test:
 - Candidate-A regression suite (`test_issue_517_*`, `test_issue362_*`) still green
   — the failure branch is unchanged with the flag OFF.
 
-### Remaining principled follow-up (not required for hda's bound)
+### Factorization hardening (the feral-touching half) — built, validated, wired; does NOT rescue hda's bound
 
-The GSW `refine` kernel would supersede the τ-sweep once feral gains a
-**rank-revealing / regularized LU** so its correction solves return consistent
-approximate solutions to refine (the τ-sweep is the pragmatic stand-in that works
-with feral's current factorization). An **exact-rational** solve of the small
-failing sub-block (E2 core was 2×3) remains the gold-standard feasibility
-certificate. Both are orthogonal to the now-delivered tight bound.
+The second half of the issue: make feral's LU survive the near-singular bases so a
+node LP can return `optimal` at τ=0. feral exposes `LuSingularAction::PerturbToEps
+{ abs_floor }`, which floors *only* the singular pivots (a localized regularization
+→ a nearby `B'`, not a uniform `B + εI`) and completes instead of aborting.
+
+**Primitive — CONFIRMED** (`crates/discopt-core/src/lp/simplex/regularized_lu.rs`,
+7 cargo tests). On near-singular / exactly-singular bases where feral's default
+`Fail` aborts, `PerturbToEps` + double-double refinement recovers the solve to
+residual ~0 (growth 1.0); the boundary case (solution loading the near-singular
+direction) recovers too, provided `abs_floor` sits below the genuine small pivots.
+The capability lives on `FeralLU::with_singular_perturb`; the double-double
+refinement (`dd_refined`, sparse-aware `residual_matvec_dd`) is what recovers
+accuracy past the perturbed factor's error (feral's own double-precision refine was
+falsified on this class).
+
+**Wiring — safe, default-OFF** (flag `DISCOPT_LP_FACTORIZATION_HARDENING`). Mirrors
+the #85 dense-retry: a thread-local `hardening_active()` makes `node_feral_lu()`
+build a hardened factor; `dual::solve_lp_warm_csc` re-runs the solve under
+`with_hardening_active` once a strict solve exits `Numerical`/`IterLimit`. The
+re-solve is bounded (`8·(m+n)+2000` pivots **and** a 3 s wall deadline) so it can
+only *rescue*, never stall. Flag OFF ⇒ byte-identical (measured: hda bound
+`−18016528426.5` unchanged; `node_lu_is_plain_when_hardening_inactive`).
+
+**Measured end-to-end on hda — the hardening does NOT rescue the bound.** With the
+flag ON, hda's reported bound stays at candidate A's `−1.80e10` (the hardened
+re-solve bails at its bound and falls through). The reason is decisive and worth
+recording (Dev-Philosophy #4): **`PerturbToEps` unblocks the *factorization*, but
+hda's McCormick LP is still too *degenerate to pivot* to optimality** — the simplex
+grinds the same near-singular vertex geometry a completed factor does not change.
+Contrast the **RHS regularization** lever (`DISCOPT_LP_ITERATIVE_REFINEMENT`, shipped
+above), which *does* give hda its tight `−6.45e4`: perturbing the RHS moves the
+optimum *off* the degenerate vertex, so the simplex reaches a clean optimum. So for
+**hda's bound, RHS regularization is the working lever**; factorization hardening is
+a correct, safe, validated primitive that may rescue *other*, less-degenerate
+numerical-failure instances (where a completed factor lets the simplex finish) but
+is not what hda needs. It stays default-OFF pending a corpus-wide panel that finds
+the instances it *does* help.
+
+### Remaining principled follow-up
+
+The GSW `refine` kernel would supersede the τ-sweep once feral gains a **true
+rank-revealing LU** *and* the degenerate-pivot problem above is addressed (a
+completed factor is necessary but not sufficient — hda shows the vertex geometry,
+not just the linear algebra, is the obstacle). An **exact-rational** solve of the
+small failing sub-block (E2 core was 2×3) remains the gold-standard feasibility
+certificate. Both are orthogonal to the delivered τ-regularized tight bound.
 
 ## Verification regime (Dev-Philosophy #5)
 
