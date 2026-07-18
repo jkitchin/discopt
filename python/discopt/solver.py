@@ -4312,6 +4312,38 @@ def solve_model(
             if gp_minlp_result is not None:
                 return gp_minlp_result
 
+    # --- Signomial (mixed-sign) global fast path (opt-in, DISCOPT_SGO; OFF) ---
+    # A mixed-sign signomial minimised over a strictly-positive box is
+    # non-convex with no exact convex reformulation, so the GP path abstains
+    # (issue #114). This scheme certifies that class via spatial branch-and-bound
+    # on the certified log-domain DC envelope: every node bound is a rigorous
+    # dual bound and a closed tree certifies the global optimum. It changes
+    # default-solve behaviour for a class of models, so per the bound-changing
+    # flag discipline it stays behind a default-OFF env flag until a differential
+    # panel graduates it. ``classify_signomial_global`` bails cheaply on anything
+    # outside the class (integer vars, extra constraints, single-sign / non-
+    # signomial objective), preserving the sound GP abstention.
+    if (
+        _solver is None
+        and not _has_bb_callbacks
+        and not skip_convex_check
+        and os.environ.get("DISCOPT_SGO", "0").strip().lower() in ("1", "true", "yes", "on")
+    ):
+        from discopt._jax.convexity.signomial_global import (
+            classify_signomial_global,
+            solve_signomial_global,
+        )
+
+        if classify_signomial_global(model) is not None:
+            sgo_result = solve_signomial_global(
+                model,
+                time_limit=time_limit,
+                gap_tolerance=gap_tolerance,
+                max_nodes=max_nodes if max_nodes else 100000,
+            )
+            if sgo_result is not None:
+                return sgo_result
+
     # --- Benders / Lagrangian decomposition: opt-in, structure-exploiting ---
     if decomposition is not None:
         if decomposition == "benders":
