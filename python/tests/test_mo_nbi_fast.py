@@ -53,12 +53,9 @@ def test_nbi_fast_anchor_recovery_and_nondominance():
     assert filter_nondominated(obj).all()
 
 
-@pytest.mark.xfail(
-    reason="#742: NBI interior subproblems return their unmoved CHIM starting "
-    "points (dominated, off the analytic front). Probe flips when fixed.",
-    strict=False,
-)
 def test_nbi_fast_interior_points_on_front():
+    # Regression probe for #742 (fixed on main): NBI interior points must lie
+    # on the analytic Pareto front, not their CHIM starting points.
     m, objs = _build_biobj_qp()
     front = normal_boundary_intersection(m, objs, n_points=5)
     for p in front.points:

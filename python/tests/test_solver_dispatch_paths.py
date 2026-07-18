@@ -79,12 +79,9 @@ def test_warm_start_used_as_incumbent():
     assert res.objective == pytest.approx(2.0, abs=1e-4)
 
 
-@pytest.mark.xfail(
-    reason="#740: heuristic incumbents bypass the lazy-constraints gate on the "
-    "spatial MINLP path. Probe asserts the cut-respecting optimum.",
-    strict=False,
-)
 def test_lazy_constraints_on_spatial_batch_loop():
+    # Regression probe for #740 (fixed on main): heuristic incumbents must be
+    # screened against user lazy constraints.
     # Reject b=0 solutions via a lazy cut b >= 1: the certified optimum then
     # moves to the b=1 branch (x=y=1, objective 4).
     m, x, y, b = _bilinear_binary_model()
@@ -104,12 +101,9 @@ def test_lazy_constraints_on_spatial_batch_loop():
     assert res.x["b"] == pytest.approx(1.0, abs=1e-5)
 
 
-@pytest.mark.xfail(
-    reason="#740: heuristic incumbents bypass the incumbent_callback veto on the "
-    "spatial MINLP path. Probe asserts the veto-respecting optimum.",
-    strict=False,
-)
 def test_incumbent_callback_veto_on_spatial_batch_loop():
+    # Regression probe for #740 (fixed on main): a vetoed incumbent must never
+    # be returned, whatever path found it.
     # Vetoing every b=0 incumbent forces the accepted optimum to b=1.
     m, x, y, b = _bilinear_binary_model()
     vetoed = []
