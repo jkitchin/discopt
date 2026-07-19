@@ -23,7 +23,12 @@ SCIP's convex-MINLP path (LP/NLP-based branch-and-cut, Quesada–Grossmann).
 ### K0 — architecture entry experiment. **DONE** (#796, #797)
 15–18× node reduction validated. No further work.
 
-### K1 — Rust LP-OA node relaxation. **IN PROGRESS**
+### K1 — Rust LP-OA node relaxation. **DONE — GATE PASSED (2026-07-19)**
+K1a–K1d built and committed. The K1 gate (`issue798_k1_bytecheck.py`): the Rust
+node relaxation matches the Python reference `node_relax(separate=False)` to
+**max|Δ| ~1e-11** (≪1e-6) over the root box + 6 child boxes on all 4 convex panel
+instances. Safe (Neumaier–Shcherbina) bound certifies under FBBT-finite bounds
+(what the K2 tree provides), sound and exact. Details in the work log below.
 Build the OA LP over a box (linear rows + OA tangents of convex nonlinear rows;
 refresh box-dependent rows per node), solve via the warm in-house simplex, return
 the LP dual bound.
@@ -131,6 +136,31 @@ primal regression.
   separation (#782/#797).
 
 ## Work log (append newest first)
+
+- **2026-07-19 (iter 4): K1d DONE → K1 GATE PASSED.**
+  - PyO3 binding `solve_convex_node_py` (`crates/discopt-python/src/convex_bindings.rs`,
+    registered in `lib.rs`): nested-CSR flat arrays (linear ≤/= rows; nl rows →
+    terms → affine args) → `ConvexKernelSpec` → `solve_node`; returns
+    `{status, bound (NS safe), raw_bound (LP optimum), x, oa_rounds, n_tangents}`.
+  - Producer `build_convex_arrays(rm, lo, hi)` + gate harness
+    `issue798_k1_bytecheck.py`: reuses the decompose probe + RootModel. Result:
+    **max|Δraw| ~1e-11 over 28 boxes, all 4 instances → PASS.**
+  - Safe-bound finding: NS returns None under the raw INFINITE structural upper
+    bounds (roundoff rc meets inf bound — the tanksize lesson). Verified the safe
+    bound certifies under FBBT-finite bounds (finite, sound `safe ≤ py+tol`, exact)
+    on all 4 → the K2 tree, which runs FBBT per node, will fathom on a certified
+    bound. **K2 action item:** assemble node bounds from the FBBT-propagated box,
+    not the raw global box, so the NS bound certifies.
+  - **Next: K2** — best-bound tree + in-tree separation. Fork `bnb/spatial_tree.rs`
+    (best-bound heap, FBBT via a convex-spec propagator, honest TimeLimit,
+    safe-bound fathoming). Wire the Rust separators `lp/gomory.rs` (`separate_gomory_cols`),
+    `lp/mir.rs` (`separate_mir`), `lp/cover.rs` (`separate_cover_csc`),
+    `lp/cut_select.rs` (`select_cuts`) into the node LP, re-separated fresh per node
+    over the node box (node-local — the C-43 lesson). Gate: `assert_cut_valid` per
+    cut + feasible-point test (no integer-feasible point removed) + nodes-to-certify
+    within ~2× of the prototype (67/60/46/55). Note: the Rust GMI needs the LP
+    basis + integrality; solve_node currently returns only x — K2 must expose the
+    final basis (or re-solve to get it) to drive `separate_gomory_cols`.
 
 - **2026-07-19 (iter 3):** Built K1a+K1b+K1c in `crates/discopt-core/src/bnb/convex_kernel.rs`
   (7 unit tests, clippy-clean, all committed):
