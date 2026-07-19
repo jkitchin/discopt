@@ -346,6 +346,132 @@ pub fn affine_square_aux_bounds(coeff: f64, cst: f64, li: f64, ui: f64) -> (f64,
     square_aux_bounds(t_lo, t_hi)
 }
 
+/// Interval `[lo, hi]` of the linear form `const + sum(coeffs[k]*x[cols[k]])` over the
+/// node box `(box_lo, box_hi)` — the standard interval enclosure (a positive coeff
+/// takes the low/high endpoint, a negative coeff flips them).
+#[inline]
+pub fn linform_interval(
+    cols: &[usize],
+    coeffs: &[f64],
+    cst: f64,
+    box_lo: &[f64],
+    box_hi: &[f64],
+) -> (f64, f64) {
+    let mut lo = cst;
+    let mut hi = cst;
+    for (k, &c) in coeffs.iter().enumerate() {
+        let j = cols[k];
+        if c >= 0.0 {
+            lo += c * box_lo[j];
+            hi += c * box_hi[j];
+        } else {
+            lo += c * box_hi[j];
+            hi += c * box_lo[j];
+        }
+    }
+    (lo, hi)
+}
+
+/// The (up to) 4 McCormick rows for `w = A * B`, where `A` and `B` are affine forms
+/// `A = a_const + sum a_coeffs[k]*x[a_cols[k]]` and likewise `B`, over the node box.
+/// Mirrors `uniform_relax._emit_mccormick` byte-for-byte: with `A`/`B` interval
+/// enclosures `[aL,aH]`/`[bL,bH]` the rows are
+/// ```text
+///   w >= bL*A + aL*B - aL*bL ,  w >= bH*A + aH*B - aH*bH
+///   w <= bL*A + aH*B - aH*bL ,  w <= bH*A + aL*B - aL*bH
+/// ```
+/// (a row is skipped when an endpoint product is non-finite — the aux interval floor
+/// stands). Each emitted row is pushed to `out` as `(cols, coeffs, rhs)` of a
+/// `sum(coeffs*x) <= rhs` inequality, with coefficients on shared columns merged (so
+/// `x_i*(x_i+…)` folds its two `x_i` contributions). This generalizes
+/// [`bilinear_rows`] (both forms single bare columns) to the variable × linear-form
+/// and linear-form × linear-form products the factorable engine emits.
+#[allow(clippy::too_many_arguments)]
+pub fn bilinear_linform_rows(
+    a_cols: &[usize],
+    a_coeffs: &[f64],
+    a_const: f64,
+    b_cols: &[usize],
+    b_coeffs: &[f64],
+    b_const: f64,
+    w: usize,
+    box_lo: &[f64],
+    box_hi: &[f64],
+    out: &mut Vec<(Vec<usize>, Vec<f64>, f64)>,
+) {
+    let (a_lo, a_hi) = linform_interval(a_cols, a_coeffs, a_const, box_lo, box_hi);
+    let (b_lo, b_hi) = linform_interval(b_cols, b_coeffs, b_const, box_lo, box_hi);
+    // (coef_a, coef_b, cc, sign) — identical order/values to `_emit_mccormick`.
+    let specs = [
+        (b_lo, a_lo, -a_lo * b_lo, 1.0f64),
+        (b_hi, a_hi, -a_hi * b_hi, 1.0),
+        (b_lo, a_hi, -a_hi * b_lo, -1.0),
+        (b_hi, a_lo, -a_lo * b_hi, -1.0),
+    ];
+    for (coef_a, coef_b, cc, sign) in specs {
+        if !(coef_a.is_finite() && coef_b.is_finite() && cc.is_finite()) {
+            continue;
+        }
+        // Accumulate coefficients per column (a and b may share columns), plus w.
+        // Column order in the emitted row: w, then a's columns, then any new b cols.
+        let mut cols: Vec<usize> = Vec::with_capacity(1 + a_cols.len() + b_cols.len());
+        let mut coeffs: Vec<f64> = Vec::with_capacity(cols.capacity());
+        let idx_of = |cols: &mut Vec<usize>, coeffs: &mut Vec<f64>, col: usize| -> usize {
+            if let Some(p) = cols.iter().position(|&c| c == col) {
+                p
+            } else {
+                cols.push(col);
+                coeffs.push(0.0);
+                cols.len() - 1
+            }
+        };
+        let pw = idx_of(&mut cols, &mut coeffs, w);
+        coeffs[pw] += -sign;
+        for (k, &ac) in a_coeffs.iter().enumerate() {
+            let p = idx_of(&mut cols, &mut coeffs, a_cols[k]);
+            coeffs[p] += sign * coef_a * ac;
+        }
+        for (k, &bc) in b_coeffs.iter().enumerate() {
+            let p = idx_of(&mut cols, &mut coeffs, b_cols[k]);
+            coeffs[p] += sign * coef_b * bc;
+        }
+        let rhs = -sign * (cc + coef_a * a_const + coef_b * b_const);
+        out.push((cols, coeffs, rhs));
+    }
+}
+
+/// Auxiliary bounds for `w = A * B` — the interval product of the two forms'
+/// enclosures over the box. Mirrors `_interval_mul(interval(A), interval(B))`.
+#[allow(clippy::too_many_arguments)]
+pub fn bilinear_linform_aux_bounds(
+    a_cols: &[usize],
+    a_coeffs: &[f64],
+    a_const: f64,
+    b_cols: &[usize],
+    b_coeffs: &[f64],
+    b_const: f64,
+    box_lo: &[f64],
+    box_hi: &[f64],
+) -> (f64, f64) {
+    let (a_lo, a_hi) = linform_interval(a_cols, a_coeffs, a_const, box_lo, box_hi);
+    let (b_lo, b_hi) = linform_interval(b_cols, b_coeffs, b_const, box_lo, box_hi);
+    let p = [a_lo * b_lo, a_lo * b_hi, a_hi * b_lo, a_hi * b_hi];
+    let mut lo = f64::INFINITY;
+    let mut hi = f64::NEG_INFINITY;
+    for v in p {
+        if v.is_nan() {
+            continue;
+        }
+        lo = lo.min(v);
+        hi = hi.max(v);
+    }
+    if lo > hi {
+        (f64::NEG_INFINITY, f64::INFINITY)
+    } else {
+        (lo, hi)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -574,6 +700,96 @@ mod tests {
             for r in &rows {
                 assert!(sat(r, &x, 1e-9), "affine-square true point {xi} cut");
             }
+        }
+    }
+
+    // Compare a variable-width row (cols, coeffs, rhs) against a Python-reference
+    // map {col: coeff} + rhs (order-independent).
+    fn assert_wide_row(
+        row: &(Vec<usize>, Vec<f64>, f64),
+        expect: &[(usize, f64)],
+        expect_rhs: f64,
+    ) {
+        let (cols, coeffs, rhs) = row;
+        let mut got: Vec<(usize, f64)> = cols
+            .iter()
+            .zip(coeffs.iter())
+            .filter(|(_, &c)| c.abs() > 1e-12)
+            .map(|(&j, &c)| (j, c))
+            .collect();
+        got.sort_by_key(|(j, _)| *j);
+        let mut exp: Vec<(usize, f64)> = expect.to_vec();
+        exp.sort_by_key(|(j, _)| *j);
+        assert_eq!(got.len(), exp.len(), "col count: {got:?} vs {exp:?}");
+        for ((gj, gc), (ej, ec)) in got.iter().zip(exp.iter()) {
+            assert_eq!(gj, ej, "col mismatch");
+            assert!((gc - ec).abs() < 1e-9, "coeff {gc} != {ec} at col {gj}");
+        }
+        assert!((rhs - expect_rhs).abs() < 1e-9, "rhs {rhs} != {expect_rhs}");
+    }
+
+    /// EXACT match to `_emit_mccormick` for a variable × linear-form product
+    /// `w = x0 * (1.7 x1 + 0.4 x2 + 0.5)` over x0∈[1,3], x1∈[2,5], x2∈[-1,4].
+    #[test]
+    fn bilinear_linform_matches_emit_mccormick_var_times_form() {
+        // box (only the referenced columns matter; w=9 needs the arrays long enough).
+        let lo = vec![1.0, 2.0, -1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
+        let hi = vec![3.0, 5.0, 4.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
+        let mut out = Vec::new();
+        bilinear_linform_rows(&[0], &[1.0], 0.0, &[1, 2], &[1.7, 0.4], 0.5, 9, &lo, &hi, &mut out);
+        assert_eq!(out.len(), 4);
+        assert_wide_row(&out[0], &[(0, 3.5), (1, 1.7), (2, 0.4), (9, -1.0)], 3.0);
+        assert_wide_row(&out[1], &[(0, 10.6), (1, 5.1), (2, 1.2), (9, -1.0)], 30.3);
+        assert_wide_row(&out[2], &[(0, -3.5), (1, -5.1), (2, -1.2), (9, 1.0)], -9.0);
+        assert_wide_row(&out[3], &[(0, -10.6), (1, -1.7), (2, -0.4), (9, 1.0)], -10.1);
+        // aux bounds = interval(A)*interval(B) = [1,3]*[3.5,10.6] = [3.5, 31.8].
+        let (alo, ahi) = bilinear_linform_aux_bounds(&[0], &[1.0], 0.0, &[1, 2], &[1.7, 0.4], 0.5, &lo, &hi);
+        assert!((alo - 3.5).abs() < 1e-9 && (ahi - 31.8).abs() < 1e-9);
+    }
+
+    /// Shared-column merge: `w = x0 * (x0 + x1)` — the two x0 contributions fold into
+    /// one coefficient. Matches `_emit_mccormick`.
+    #[test]
+    fn bilinear_linform_merges_shared_columns() {
+        let lo = vec![1.0, 0.0, 0.0, 0.0, 0.0, 0.0];
+        let hi = vec![2.0, 3.0, 0.0, 0.0, 0.0, 0.0];
+        let mut out = Vec::new();
+        bilinear_linform_rows(&[0], &[1.0], 0.0, &[0, 1], &[1.0, 1.0], 0.0, 5, &lo, &hi, &mut out);
+        assert_eq!(out.len(), 4);
+        assert_wide_row(&out[0], &[(0, 2.0), (1, 1.0), (5, -1.0)], 1.0);
+        assert_wide_row(&out[1], &[(0, 7.0), (1, 2.0), (5, -1.0)], 10.0);
+        assert_wide_row(&out[2], &[(0, -3.0), (1, -2.0), (5, 1.0)], -2.0);
+        assert_wide_row(&out[3], &[(0, -6.0), (1, -1.0), (5, 1.0)], -5.0);
+    }
+
+    /// A single-column × single-column linform product reproduces `bilinear_rows`
+    /// (the general path subsumes the special one).
+    #[test]
+    fn bilinear_linform_reduces_to_bilinear_rows() {
+        let lo = vec![-1.0, 2.0, 0.0];
+        let hi = vec![3.0, 5.0, 0.0];
+        let special = bilinear_rows(0, 1, 2, -1.0, 3.0, 2.0, 5.0);
+        let mut general = Vec::new();
+        bilinear_linform_rows(&[0], &[1.0], 0.0, &[1], &[1.0], 0.0, 2, &lo, &hi, &mut general);
+        assert_eq!(general.len(), 4);
+        // Same SET of rows (the McCormick hull) — `_emit_mccormick` emits the two
+        // over-rows in the opposite order to `_bilinear_rows`, so match set-wise: each
+        // special row is reproduced by some general row.
+        let norm = |cols: &[usize], coeffs: &[f64], rhs: f64| -> Vec<(usize, i64)> {
+            let mut v: Vec<(usize, i64)> = cols
+                .iter()
+                .zip(coeffs.iter())
+                .filter(|(_, &c)| c.abs() > 1e-12)
+                .map(|(&j, &c)| (j, (c * 1e6).round() as i64))
+                .collect();
+            v.push((usize::MAX, (rhs * 1e6).round() as i64));
+            v.sort();
+            v
+        };
+        let gset: Vec<_> = general.iter().map(|(c, k, r)| norm(c, k, *r)).collect();
+        for s in &special {
+            let key = norm(&s.cols[..s.nnz], &s.coeffs[..s.nnz], s.rhs);
+            assert!(gset.contains(&key), "special row {key:?} not in general set");
         }
     }
 

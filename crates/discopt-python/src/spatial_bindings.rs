@@ -16,7 +16,7 @@
 //! `fixed_cols`/`fixed_coeffs`, plus `fixed_rhs` (each row is `<= rhs`).
 #![allow(clippy::too_many_arguments, clippy::type_complexity)]
 
-use discopt_core::bnb::spatial_kernel::{EnvTerm, FixedRow, SpatialKernelSpec};
+use discopt_core::bnb::spatial_kernel::{BlfTerm, EnvTerm, FixedRow, SpatialKernelSpec};
 use discopt_core::bnb::spatial_tree::{solve_spatial_tree, SpatialTreeConfig, TreeStatus};
 use discopt_core::lp::simplex::SimplexOptions;
 use numpy::{PyArray1, PyReadonlyArray1};
@@ -34,6 +34,8 @@ use pyo3::types::PyDict;
     n_cols, n_orig, c, integrality, global_lo, global_hi,
     fixed_row_ptr, fixed_cols, fixed_coeffs, fixed_rhs,
     term_kind, term_i, term_j, term_out, term_p, term_coeff, term_cst,
+    blf_w, blf_a_ptr, blf_a_cols, blf_a_coeffs, blf_a_const,
+    blf_b_ptr, blf_b_cols, blf_b_coeffs, blf_b_const,
     obbt_candidates,
     max_nodes=100_000, gap_tol=1e-6, int_tol=1e-5, mccormick_tol=1e-6,
     min_box_width=1e-9, run_obbt=true,
@@ -57,6 +59,15 @@ pub fn solve_spatial_tree_py<'py>(
     term_p: PyReadonlyArray1<'py, i64>,
     term_coeff: PyReadonlyArray1<'py, f64>,
     term_cst: PyReadonlyArray1<'py, f64>,
+    blf_w: PyReadonlyArray1<'py, i64>,
+    blf_a_ptr: PyReadonlyArray1<'py, i64>,
+    blf_a_cols: PyReadonlyArray1<'py, i64>,
+    blf_a_coeffs: PyReadonlyArray1<'py, f64>,
+    blf_a_const: PyReadonlyArray1<'py, f64>,
+    blf_b_ptr: PyReadonlyArray1<'py, i64>,
+    blf_b_cols: PyReadonlyArray1<'py, i64>,
+    blf_b_coeffs: PyReadonlyArray1<'py, f64>,
+    blf_b_const: PyReadonlyArray1<'py, f64>,
     obbt_candidates: PyReadonlyArray1<'py, i64>,
     max_nodes: usize,
     gap_tol: f64,
@@ -153,6 +164,44 @@ pub fn solve_spatial_tree_py<'py>(
         terms.push(term);
     }
 
+    // Affine-form product terms (CSR-encoded forms A, B).
+    let blf_w = blf_w.as_slice()?;
+    let a_ptr = blf_a_ptr.as_slice()?;
+    let a_cols = blf_a_cols.as_slice()?;
+    let a_coeffs = blf_a_coeffs.as_slice()?;
+    let a_const = blf_a_const.as_slice()?;
+    let b_ptr = blf_b_ptr.as_slice()?;
+    let b_cols = blf_b_cols.as_slice()?;
+    let b_coeffs = blf_b_coeffs.as_slice()?;
+    let b_const = blf_b_const.as_slice()?;
+    let n_blf = blf_w.len();
+    if a_ptr.len() != n_blf + 1
+        || b_ptr.len() != n_blf + 1
+        || a_const.len() != n_blf
+        || b_const.len() != n_blf
+    {
+        return Err(PyValueError::new_err(
+            "blf_*_ptr must have length n_blf+1 and blf_*_const length n_blf",
+        ));
+    }
+    let mut blf_terms = Vec::with_capacity(n_blf);
+    for t in 0..n_blf {
+        let (as_, ae) = (a_ptr[t] as usize, a_ptr[t + 1] as usize);
+        let (bs, be) = (b_ptr[t] as usize, b_ptr[t + 1] as usize);
+        if ae > a_cols.len() || ae > a_coeffs.len() || be > b_cols.len() || be > b_coeffs.len() {
+            return Err(PyValueError::new_err("blf form pointer out of range"));
+        }
+        blf_terms.push(BlfTerm {
+            a_cols: a_cols[as_..ae].iter().map(|&v| v as usize).collect(),
+            a_coeffs: a_coeffs[as_..ae].to_vec(),
+            a_const: a_const[t],
+            b_cols: b_cols[bs..be].iter().map(|&v| v as usize).collect(),
+            b_coeffs: b_coeffs[bs..be].to_vec(),
+            b_const: b_const[t],
+            w: blf_w[t] as usize,
+        });
+    }
+
     let spec = SpatialKernelSpec {
         n_cols,
         n_orig,
@@ -162,6 +211,7 @@ pub fn solve_spatial_tree_py<'py>(
         global_hi: global_hi.to_vec(),
         fixed_rows,
         terms,
+        blf_terms,
         obbt_candidates: obbt_candidates.as_slice()?.iter().map(|&v| v as usize).collect(),
     };
 

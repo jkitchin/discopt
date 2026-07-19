@@ -172,11 +172,43 @@ def build_spatial_kernel_spec(model, bounds: Optional[tuple] = None) -> Optional
         env_rows.update(rows)
         claimed_aux.add(int(out))
 
-    for (i, j), w in rel.bilinear_map.items():
-        rows = _claim(w, (i, j), 4)
-        if rows is None:
+    # Affine-form products w = A*B (bilinear x_i*x_j AND variable × linear-form / form
+    # × form) — every McCormick product the factorable engine emitted, from the
+    # relaxer's bilinear_linform_specs. These generalize the single-column bilinear
+    # path and cover the multi-column products (tanksize's `x_i·(Σ aₖxₖ)`) that the
+    # bilinear_map alone misses. Each becomes a BlfTerm; the kernel regenerates the
+    # 4 McCormick rows per box.
+    blf_w: list[int] = []
+    blf_a_ptr: list[int] = [0]
+    blf_a_cols: list[int] = []
+    blf_a_coeffs: list[float] = []
+    blf_a_const: list[float] = []
+    blf_b_ptr: list[int] = [0]
+    blf_b_cols: list[int] = []
+    blf_b_coeffs: list[float] = []
+    blf_b_const: list[float] = []
+    for (w, a_dict, a_const, b_dict, b_const) in rel.bilinear_linform_specs:
+        if int(w) in claimed_aux:
+            continue
+        a_items = sorted((int(k), float(v)) for k, v in a_dict.items())
+        b_items = sorted((int(k), float(v)) for k, v in b_dict.items())
+        a_cols_t = [k for k, _ in a_items]
+        b_cols_t = [k for k, _ in b_items]
+        allowed = set(a_cols_t) | set(b_cols_t) | {int(w)}
+        rows = [int(r) for r in rows_with_col(int(w)) if support(r) <= allowed]
+        if not rows:
             return None
-        _push(0, i, j, w, 0, 0.0, 0.0, rows)
+        env_rows.update(rows)
+        claimed_aux.add(int(w))
+        blf_w.append(int(w))
+        blf_a_cols.extend(a_cols_t)
+        blf_a_coeffs.extend(v for _, v in a_items)
+        blf_a_ptr.append(len(blf_a_cols))
+        blf_a_const.append(float(a_const))
+        blf_b_cols.extend(b_cols_t)
+        blf_b_coeffs.extend(v for _, v in b_items)
+        blf_b_ptr.append(len(blf_b_cols))
+        blf_b_const.append(float(b_const))
     for (i, p), w in rel.monomial_map.items():
         if int(w) in claimed_aux:
             continue
@@ -304,6 +336,15 @@ def build_spatial_kernel_spec(model, bounds: Optional[tuple] = None) -> Optional
         term_p=np.asarray(tp, dtype=np.int64),
         term_coeff=np.asarray(tcoeff, dtype=np.float64),
         term_cst=np.asarray(tcst, dtype=np.float64),
+        blf_w=np.asarray(blf_w, dtype=np.int64),
+        blf_a_ptr=np.asarray(blf_a_ptr, dtype=np.int64),
+        blf_a_cols=np.asarray(blf_a_cols, dtype=np.int64),
+        blf_a_coeffs=np.asarray(blf_a_coeffs, dtype=np.float64),
+        blf_a_const=np.asarray(blf_a_const, dtype=np.float64),
+        blf_b_ptr=np.asarray(blf_b_ptr, dtype=np.int64),
+        blf_b_cols=np.asarray(blf_b_cols, dtype=np.int64),
+        blf_b_coeffs=np.asarray(blf_b_coeffs, dtype=np.float64),
+        blf_b_const=np.asarray(blf_b_const, dtype=np.float64),
         obbt_candidates=np.asarray(obbt_candidates, dtype=np.int64),
         # Metadata (stripped before the kernel call): map the kernel's internal
         # minimize-convention value back to model units — model = sign*(internal+off).

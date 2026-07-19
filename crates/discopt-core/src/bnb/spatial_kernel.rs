@@ -145,6 +145,31 @@ impl EnvTerm {
     }
 }
 
+/// A product of two affine forms `w = A * B`, `A = a_const + Σ a_coeffs·x[a_cols]`
+/// and likewise `B`, relaxed by the general McCormick envelope
+/// ([`mccormick_patch::bilinear_linform_rows`]). This is the variable × linear-form /
+/// linear-form × linear-form product the factorable engine emits when a bilinear
+/// factor is a linear combination it did not lift to its own column
+/// (`_emit_mccormick`); its envelope rows span all of `a_cols ∪ b_cols ∪ {w}`, so —
+/// unlike the fixed-width [`EnvTerm`] variants — it carries variable-length forms.
+#[derive(Clone, Debug)]
+pub struct BlfTerm {
+    /// Columns of the first affine form `A`.
+    pub a_cols: Vec<usize>,
+    /// Coefficients of `A`, aligned with `a_cols`.
+    pub a_coeffs: Vec<f64>,
+    /// Constant term of `A`.
+    pub a_const: f64,
+    /// Columns of the second affine form `B`.
+    pub b_cols: Vec<usize>,
+    /// Coefficients of `B`, aligned with `b_cols`.
+    pub b_coeffs: Vec<f64>,
+    /// Constant term of `B`.
+    pub b_const: f64,
+    /// Output (auxiliary) column `w = A * B`.
+    pub w: usize,
+}
+
 /// The box-independent structure Python hands to the native kernel once per solve.
 #[derive(Clone, Debug)]
 pub struct SpatialKernelSpec {
@@ -162,8 +187,10 @@ pub struct SpatialKernelSpec {
     pub global_hi: Vec<f64>,
     /// Box-independent linear constraint rows (`<= rhs`).
     pub fixed_rows: Vec<FixedRow>,
-    /// Lifted-term envelope descriptors.
+    /// Fixed-width lifted-term envelope descriptors.
     pub terms: Vec<EnvTerm>,
+    /// Affine-form product terms `w = A*B` (variable-width envelopes).
+    pub blf_terms: Vec<BlfTerm>,
     /// Structural columns to probe with OBBT (empty disables the sweep).
     pub obbt_candidates: Vec<usize>,
 }
@@ -231,15 +258,33 @@ pub fn assemble_node_lp(spec: &SpatialKernelSpec, lo: &[f64], hi: &[f64]) -> Ass
             u[a] = u[a].min(ahi);
         }
     }
+    for t in &spec.blf_terms {
+        let (alo, ahi) = mc::bilinear_linform_aux_bounds(
+            &t.a_cols, &t.a_coeffs, t.a_const, &t.b_cols, &t.b_coeffs, t.b_const, lo, hi,
+        );
+        if alo.is_finite() {
+            l[t.w] = l[t.w].max(alo);
+        }
+        if ahi.is_finite() {
+            u[t.w] = u[t.w].min(ahi);
+        }
+    }
 
-    // Rows: fixed rows, then per-term envelope rows.
-    let mut rows: Vec<(Vec<usize>, Vec<f64>, f64)> =
-        Vec::with_capacity(spec.fixed_rows.len() + spec.terms.len() * 4);
+    // Rows: fixed rows, then per-term envelope rows (fixed-width, then affine-form).
+    let mut rows: Vec<(Vec<usize>, Vec<f64>, f64)> = Vec::with_capacity(
+        spec.fixed_rows.len() + spec.terms.len() * 4 + spec.blf_terms.len() * 4,
+    );
     for fr in &spec.fixed_rows {
         rows.push((fr.cols.clone(), fr.coeffs.clone(), fr.rhs));
     }
     for t in &spec.terms {
         t.push_rows(lo, hi, &mut rows);
+    }
+    for t in &spec.blf_terms {
+        mc::bilinear_linform_rows(
+            &t.a_cols, &t.a_coeffs, t.a_const, &t.b_cols, &t.b_coeffs, t.b_const, t.w, lo, hi,
+            &mut rows,
+        );
     }
 
     let m = rows.len();
@@ -364,6 +409,7 @@ mod tests {
             global_hi: vec![2.0, 2.0, 1e20],
             fixed_rows: vec![],
             terms: vec![EnvTerm::Bilinear { i: 0, j: 1, w: 2 }],
+            blf_terms: vec![],
             obbt_candidates: vec![0, 1],
         }
     }
@@ -386,6 +432,45 @@ mod tests {
         // 4 envelope rows -> m=4, n_total = 3 + 4.
         assert_eq!(lp.m, 4);
         assert_eq!(lp.n_total, 7);
+    }
+
+    #[test]
+    fn blf_term_single_columns_matches_bilinear() {
+        // w = A*B with A={x0}, B={x1} (single-column forms) must give the SAME node
+        // bound as the EnvTerm::Bilinear spec — the general path subsumes the special.
+        let lo = vec![1.0, 1.0, -1e20];
+        let hi = vec![2.0, 2.0, 1e20];
+        let opts = SimplexOptions::default();
+        let bilinear = solve_spatial_node(&bilinear_spec(), &lo, &hi, false, &opts);
+        let blf_spec = SpatialKernelSpec {
+            n_cols: 3,
+            n_orig: 2,
+            c: vec![0.0, 0.0, 1.0],
+            integrality: vec![false, false, false],
+            global_lo: vec![1.0, 1.0, -1e20],
+            global_hi: vec![2.0, 2.0, 1e20],
+            fixed_rows: vec![],
+            terms: vec![],
+            blf_terms: vec![BlfTerm {
+                a_cols: vec![0],
+                a_coeffs: vec![1.0],
+                a_const: 0.0,
+                b_cols: vec![1],
+                b_coeffs: vec![1.0],
+                b_const: 0.0,
+                w: 2,
+            }],
+            obbt_candidates: vec![0, 1],
+        };
+        let blf = solve_spatial_node(&blf_spec, &lo, &hi, false, &opts);
+        assert_eq!(blf.status, LpStatus::Optimal);
+        assert!(
+            (blf.bound - bilinear.bound).abs() < 1e-7,
+            "blf bound {} != bilinear bound {}",
+            blf.bound,
+            bilinear.bound
+        );
+        assert!((blf.bound - 1.0).abs() < 1e-6, "blf bound {} != 1", blf.bound);
     }
 
     #[test]

@@ -189,7 +189,15 @@ pub fn solve_spatial_tree(
         if node.status != LpStatus::Optimal {
             continue;
         }
-        let bound = node.bound; // rigorous safe lower bound
+        // Rigorous safe lower bound for this region, inheriting the parent's bound as
+        // a floor: `parent_bound` is a valid lower bound for the parent region, which
+        // CONTAINS this child, so the child's region optimum is `>= parent_bound`.
+        // Taking the max keeps the bound finite and monotone when the node's own safe
+        // bound is looser or uncertifiable (`-inf` — e.g. non-finite duals from an
+        // ill-conditioned McCormick LP on tanksize), which would otherwise poison the
+        // global lower bound. Sound: `max(safe, parent)` is still `<=` the true region
+        // optimum since both terms are.
+        let bound = node.bound.max(parent_bound);
         // Fathom by bound vs incumbent. The region's valid lower bound is `bound`.
         if let Some(inc) = incumbent {
             if bound >= inc - config.gap_tol {
@@ -224,7 +232,8 @@ pub fn solve_spatial_tree(
                 break;
             }
         }
-        // (b) every lifted term McCormick-tight.
+        // (b) every lifted term McCormick-tight — fixed-width EnvTerms and the
+        //     affine-form product (BlfTerm) terms alike.
         let width = |c: usize| hi[c] - lo[c];
         let mut worst_gap = 0.0f64;
         let mut branch_col: Option<usize> = None;
@@ -233,6 +242,25 @@ pub fn solve_spatial_tree(
             if gap > worst_gap {
                 worst_gap = gap;
                 branch_col = Some(col);
+            }
+        }
+        for t in &spec.blf_terms {
+            let a_val = t.a_const + dot_form(&t.a_cols, &t.a_coeffs, x);
+            let b_val = t.b_const + dot_form(&t.b_cols, &t.b_coeffs, x);
+            let gap = (x[t.w] - a_val * b_val).abs();
+            if gap > worst_gap {
+                worst_gap = gap;
+                // Spatial-branch the widest operand column across A ∪ B.
+                let mut best = None;
+                let mut best_w = -1.0f64;
+                for &c in t.a_cols.iter().chain(t.b_cols.iter()) {
+                    let cw = width(c);
+                    if cw > best_w {
+                        best_w = cw;
+                        best = Some(c);
+                    }
+                }
+                branch_col = best;
             }
         }
         let terms_tight = worst_gap <= config.mccormick_tol;
@@ -329,6 +357,11 @@ fn dot(a: &[f64], b: &[f64]) -> f64 {
     a.iter().zip(b.iter()).map(|(x, y)| x * y).sum()
 }
 
+/// `Σ coeffs[k] * x[cols[k]]` — the value of a sparse affine form's linear part.
+fn dot_form(cols: &[usize], coeffs: &[f64], x: &[f64]) -> f64 {
+    cols.iter().zip(coeffs.iter()).map(|(&c, &a)| a * x[c]).sum()
+}
+
 /// Pull a split point strictly inside `(lo, hi)` so both children are nonempty; if
 /// `p` sits at a bound, use the midpoint.
 fn clamp_interior(p: f64, lo: f64, hi: f64) -> f64 {
@@ -364,6 +397,7 @@ mod tests {
                 rhs: -3.0,
             }],
             terms: vec![EnvTerm::Bilinear { i: 0, j: 1, w: 2 }],
+            blf_terms: vec![],
             obbt_candidates: vec![0, 1],
         }
     }
@@ -403,6 +437,7 @@ mod tests {
             global_hi: vec![2.0],
             fixed_rows: vec![],
             terms: vec![],
+            blf_terms: vec![],
             obbt_candidates: vec![],
         };
         let cfg = SpatialTreeConfig {
