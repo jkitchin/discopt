@@ -2,6 +2,7 @@
 
 pub mod branching;
 pub mod in_tree_presolve;
+pub mod mccormick_patch;
 pub mod milp_driver;
 pub mod node;
 pub mod pool;
