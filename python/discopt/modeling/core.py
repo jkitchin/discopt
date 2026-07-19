@@ -1472,6 +1472,16 @@ class SolveResult:
     # Examiner-style validation report (populated if validate=True).
     validation_report: Optional[object] = None
 
+    # Set True when the final incumbent-verification guard (Model.solve, default
+    # on) found the returned incumbent INFEASIBLE in the ORIGINAL problem — a
+    # false primal, which can only arise from an unsound presolve mutation or a
+    # heuristic bug. When True, the incumbent (``x``/``objective``) has been
+    # withheld and ``gap_certified`` forced False (a false primal is never
+    # reported as a valid or certified solution). This should never be True on
+    # correct solver code; it exists so such a bug cannot silently escape as a
+    # false result (regression guard for the #770/#772 class).
+    incumbent_verification_failed: bool = False
+
     # LLM explanation (populated if llm=True)
     _explanation: Optional[str] = None
     _model: Optional["Model"] = None
@@ -1671,6 +1681,77 @@ def _require_no_shape(shape, ctor: str) -> None:
             f"{ctor}(): 'over=' (named-set index) and 'shape=' are mutually "
             "exclusive; an indexed variable's size is determined by its set."
         )
+
+
+# --- Polynomial-degree classifier for the incumbent-verification guard (#772) ---
+# Pure-Python and JAX-free: distinguishes the LP/MILP/QP/MIQP "fast family" (linear
+# constraints + linear-or-quadratic objective, solved via the JAX-free Rust/POUNCE
+# paths) from genuinely nonlinear models. The guard's snapshot builds a JAX evaluator,
+# so it must be skipped for the fast family to preserve the JAX-free cold start of
+# LP/MILP/QP/MIQP solves (test_lazy_jax_linear_path). Errs toward "nonlinear" on any
+# unknown node — the safe direction: the guard runs (extra coverage), never a wrong skip.
+_INF_DEGREE = float("inf")
+
+
+def _expression_degree(e) -> float:
+    """Polynomial degree of ``e`` in the decision variables; ``inf`` for anything that
+    is not a polynomial (transcendental, variable power, variable denominator, opaque)."""
+    if isinstance(e, (int, float)):
+        return 0
+    if isinstance(e, Constant):
+        return 0
+    if isinstance(e, Variable):
+        return 1
+    if isinstance(e, IndexExpression):
+        return _expression_degree(e.base)
+    if isinstance(e, SumExpression):
+        return _expression_degree(e.operand)
+    if isinstance(e, SumOverExpression):
+        return max((_expression_degree(t) for t in e.terms), default=0)
+    if isinstance(e, UnaryOp):
+        return _expression_degree(e.operand) if e.op == "neg" else _INF_DEGREE
+    if isinstance(e, (FunctionCall, CustomCall)):
+        return _INF_DEGREE
+    if isinstance(e, MatMulExpression):
+        return _expression_degree(e.left) + _expression_degree(e.right)
+    if isinstance(e, BinaryOp):
+        left, right = _expression_degree(e.left), _expression_degree(e.right)
+        if e.op in ("+", "-"):
+            return max(left, right)
+        if e.op == "*":
+            return left + right
+        if e.op == "/":
+            return left if right == 0 else _INF_DEGREE
+        if e.op == "**":
+            k = (
+                e.right.value
+                if isinstance(e.right, Constant)
+                else (e.right if isinstance(e.right, (int, float)) else None)
+            )
+            try:
+                return (
+                    left * int(k)
+                    if (k is not None and float(k).is_integer() and k >= 0)
+                    else _INF_DEGREE
+                )
+            except (TypeError, ValueError):
+                return _INF_DEGREE
+        return _INF_DEGREE
+    return _INF_DEGREE  # unknown node -> treat as nonlinear (guard runs; safe direction)
+
+
+def _is_fast_linear_quadratic_family(model) -> bool:
+    """True for LP/MILP/QP/MIQP: linear constraints and a linear-or-quadratic objective
+    (the JAX-free solve families). Used to skip the JAX-importing incumbent-verification
+    snapshot on those paths so their cold start stays JAX-free."""
+    obj = model._objective.expression if model._objective is not None else None
+    if obj is not None and _expression_degree(obj) > 2:
+        return False
+    for c in model._constraints:
+        body = getattr(c, "body", None)
+        if body is not None and _expression_degree(body) > 1:
+            return False
+    return True
 
 
 class Model:
@@ -3234,6 +3315,7 @@ class Model:
         node_callback: Optional[Callable] = None,
         solver: Optional[str] = None,
         validate: bool = False,
+        verify_incumbent: bool = True,
         gauss_newton: bool = False,
         tuning: Optional["SolverTuning"] = None,
         debug: Any = None,
@@ -3495,6 +3577,38 @@ class Model:
 
             _debug_guard = _dbg.attach(_dbg.make_session(debug))
 
+        # --- Final-incumbent verification snapshot (#772 guard, default on) ---
+        # ``solve_model``'s presolve mutates this model's constraint DAG IN PLACE,
+        # so any feasibility check taken AFTER the solve reflects the (possibly
+        # unsoundly) mutated model — it cannot catch a false primal produced by an
+        # unsound presolve (the #770 class, where the incumbent is feasible in the
+        # mutated model but not the original). Capture a COMPILED feasibility
+        # evaluator of the ORIGINAL model here, before any mutation: a compiled JAX
+        # evaluator has its structure baked in, so it remains a faithful, immutable
+        # representation of the original problem across the solve (verified: it
+        # agrees with a freshly parsed model after a real presolve run). Built once
+        # and cache-warm for the solve itself; fully wrapped so it can never break a
+        # solve.
+        import logging as _logging
+
+        # Skip the (JAX-importing) snapshot for the LP/MILP/QP/MIQP fast family: those
+        # paths are JAX-free by design and do not run the nonlinear presolve mutation
+        # this guard defends against, so building a JAX evaluator there would regress
+        # their JAX-free cold start (``_is_fast_linear_quadratic_family`` is pure-Python).
+        _verify_snap = None
+        if verify_incumbent and self._constraints and not _is_fast_linear_quadratic_family(self):
+            try:
+                from discopt._jax.nlp_evaluator import cached_evaluator
+
+                _verify_snap = (
+                    cached_evaluator(self),
+                    [v.name for v in self._variables],
+                )
+            except Exception as _snap_exc:  # pragma: no cover - defensive
+                _logging.getLogger("discopt.solver").debug(
+                    "incumbent-verification snapshot skipped: %s", _snap_exc
+                )
+
         # Install a process-global wall-clock deadline that JAX-compiled
         # while_loops (LP/QP/NLP IPM) can poll via host callback so they
         # self-terminate within ``time_limit + ε`` instead of running to
@@ -3524,6 +3638,46 @@ class Model:
 
         # Attach model reference and auto-generate LLM explanation
         result._model = self
+
+        # --- Verify the final incumbent against the ORIGINAL problem (#772) ---
+        # A reported incumbent that is INFEASIBLE in the original model is a false
+        # primal — the worst error class (CLAUDE.md §1). It cannot happen on correct
+        # solver code, but if an unsound presolve mutation or a heuristic bug ever
+        # produces one, this guard refuses to return it: withhold the incumbent and
+        # decertify, loudly. The check is deliberately LOOSE (abs tol 1e-3) so it can
+        # never flag an incumbent that is feasible within the solver's own tolerance
+        # — only a gross violation (the #770 violations were 0.4–17.6) trips it.
+        if _verify_snap is not None and result.x is not None:
+            try:
+                import numpy as _np
+
+                from discopt._jax.primal_heuristics import _check_constraint_feasibility
+
+                _snap_ev, _snap_names = _verify_snap
+                _flat = _np.concatenate(
+                    [
+                        _np.atleast_1d(_np.asarray(result.x[_n], dtype=_np.float64)).ravel()
+                        for _n in _snap_names
+                    ]
+                )
+                if not _check_constraint_feasibility(_snap_ev, _flat, tol=1e-3):
+                    _logging.getLogger("discopt.solver").error(
+                        "FALSE PRIMAL DETECTED: the reported incumbent (objective=%s) is "
+                        "INFEASIBLE in the original problem. This indicates an unsound presolve "
+                        "mutation or a heuristic bug. Withholding the incumbent and decertifying "
+                        "— the result is NOT a valid solution.",
+                        result.objective,
+                    )
+                    result.incumbent_verification_failed = True
+                    result.gap_certified = False
+                    result.x = None
+                    result.objective = None
+                    result.gap = None
+            except Exception as _ver_exc:  # pragma: no cover - defensive
+                _logging.getLogger("discopt.solver").debug(
+                    "incumbent verification skipped: %s", _ver_exc
+                )
+
         if llm:
             try:
                 result._explanation = result._explain_with_llm()
