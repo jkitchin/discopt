@@ -40,6 +40,46 @@ propagation. So:
 
 Repro: `pyscipopt` ablation + `writeStatistics` (Propagators / Constraints sections).
 
+## C2 ENTRY EXPERIMENT (2026-07-19) — GO: propagation climbs the bound on the real instance
+
+Ran the falsifying experiment before any C2 build
+(`discopt_benchmarks/scripts/issue764_c2_propagation_entry.py`; raw trajectory in
+`results/issue764_c2_propagation_entry_20260719.txt`). Setup: best-bound B&B over tanksize's
+presolved root box, incumbent seeded (1.2686437615, mirroring SCIP having it at node 1), each node =
+**FBBT fixpoint** (linear rows + bidirectional affine-form-product + sqrt + integer rounding +
+objective cutoff — **zero LP probes**) then ONE trusted `MccormickLPRelaxer.solve_at_node` LP for
+the node bound, then spatial branching. Control arm: identical loop, propagation off.
+
+Dose-response (global dual bound):
+
+| propagation strength | bound trajectory |
+|---|---|
+| **off** (control) | **0.83824 — perfectly flat, 300 nodes, zero movement** |
+| v1: strict-sign reverse division, widest-var midpoint branch | 0.891 @300, **hard stall** (= discopt's recorded OBBT-off 0.89 stall) |
+| v2: + one-sided extended division (`B∈[0,bhi], w>0 ⇒ A ≥ w_lo/b_hi`) + LP-point spatial branch | 0.904 @51 → 0.920 @600 → 0.930 @1000 → **0.956 @1800–3000, still stepping up, no stall** (1306 propagation-infeasibility prunes) |
+| SCIP reference | 1.053 @50 → 1.193 @200 → closed @1391 |
+
+**Verdict: GO.** The kill criterion (stuck ≤0.86 @300) is decisively not hit. The mechanism is
+confirmed on the real instance with a clean three-level dose-response — the bound moves exactly as
+much as the propagation is strong, and the control proves nothing else moves it. Two calibrations
+that bound the build:
+
+1. **Naive FBBT is NOT enough** — v1's 0.891 stall reproduces discopt's existing stall exactly.
+   The load-bearing ingredients (each broke a stall when added): the **extended zero-touching
+   reverse division** (tanksize's variables sit at 0, so strict-sign reverse propagation is mostly
+   blocked) and **LP-point spatial branching**. Closing at SCIP's node-rate needs SCIP-grade
+   propagation strength + violation/reliability branching on top.
+2. **C1 × C2 is the synthesis.** The prototype runs ~32 ms/node (≥30 ms of it the Python LP). The
+   native kernel (built this session) does that node LP in ~1–2 ms — so even at the prototype's
+   node-rate (slower than SCIP's), tens of thousands of propagation-driven nodes run in tens of
+   seconds natively. Neither axis alone suffices (throughput alone: bound frozen at 0.838;
+   propagation alone at Python speed: climbing but slow); together they are the credible path.
+
+**Next (the C2 build):** port the propagation pass into the native kernel — linear + product
+(with extended division) + sqrt fixpoint, cutoff-coupled, run per node BEFORE the LP — replacing
+the ~95-probe OBBT sweep as the default tightening; branch at the LP point; then the bound-neutral
+and net-positive graduation panels per the CLAUDE.md regime-2 protocol.
+
 ---
 
 
