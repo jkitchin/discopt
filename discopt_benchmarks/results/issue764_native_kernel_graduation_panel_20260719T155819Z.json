@@ -1,0 +1,1641 @@
+{
+ "rows": {
+  "4stufen": {
+   "off": {
+    "instance": "4stufen",
+    "flag": "0",
+    "engaged": false,
+    "sense": "min",
+    "wall": 65.97874259700029,
+    "status": "time_limit",
+    "objective": null,
+    "bound": 20712.174649243756,
+    "node_count": 3
+   },
+   "on": {
+    "instance": "4stufen",
+    "flag": "1",
+    "engaged": false,
+    "sense": "min",
+    "wall": 65.03308448999996,
+    "status": "time_limit",
+    "objective": null,
+    "bound": 20712.174649243756,
+    "node_count": 3
+   }
+  },
+  "alan": {
+   "off": {
+    "instance": "alan",
+    "flag": "0",
+    "engaged": false,
+    "sense": "min",
+    "wall": 0.4843489380000392,
+    "status": "optimal",
+    "objective": 2.9249999983013426,
+    "bound": 2.9249999983013426,
+    "node_count": 21
+   },
+   "on": {
+    "instance": "alan",
+    "flag": "1",
+    "engaged": false,
+    "sense": "min",
+    "wall": 0.5133015250003155,
+    "status": "optimal",
+    "objective": 2.9249999983013426,
+    "bound": 2.9249999983013426,
+    "node_count": 21
+   }
+  },
+  "bchoco06": {
+   "off": {
+    "instance": "bchoco06",
+    "flag": "0",
+    "engaged": false,
+    "sense": "max",
+    "wall": 61.767116216999966,
+    "status": "time_limit",
+    "objective": null,
+    "bound": 0.9999775725261241,
+    "node_count": 3
+   },
+   "on": {
+    "instance": "bchoco06",
+    "flag": "1",
+    "engaged": false,
+    "sense": "max",
+    "wall": 68.14024136299986,
+    "status": "time_limit",
+    "objective": null,
+    "bound": 0.9999775725261241,
+    "node_count": 3
+   }
+  },
+  "bchoco07": {
+   "off": {
+    "instance": "bchoco07",
+    "flag": "0",
+    "engaged": false,
+    "sense": "max",
+    "wall": 62.55323056399993,
+    "status": "time_limit",
+    "objective": null,
+    "bound": 2.9500190039537375,
+    "node_count": 7
+   },
+   "on": {
+    "instance": "bchoco07",
+    "flag": "1",
+    "engaged": false,
+    "sense": "max",
+    "wall": 102.19304254899998,
+    "status": "time_limit",
+    "objective": null,
+    "bound": 2.9500190039537375,
+    "node_count": 3
+   }
+  },
+  "bchoco08": {
+   "off": {
+    "instance": "bchoco08",
+    "flag": "0",
+    "engaged": false,
+    "sense": "max",
+    "wall": 103.86888898400002,
+    "status": "time_limit",
+    "objective": null,
+    "bound": 2.97299786579779,
+    "node_count": 3
+   },
+   "on": {
+    "instance": "bchoco08",
+    "flag": "1",
+    "engaged": false,
+    "sense": "max",
+    "wall": 64.70324742899993,
+    "status": "time_limit",
+    "objective": null,
+    "bound": 2.97299786579779,
+    "node_count": 7
+   }
+  },
+  "beuster": {
+   "off": {
+    "instance": "beuster",
+    "flag": "0",
+    "engaged": false,
+    "sense": "min",
+    "wall": 67.10533234000013,
+    "status": "time_limit",
+    "objective": null,
+    "bound": 6395.108328058908,
+    "node_count": 3
+   },
+   "on": {
+    "instance": "beuster",
+    "flag": "1",
+    "engaged": false,
+    "sense": "min",
+    "wall": 67.25953163199983,
+    "status": "time_limit",
+    "objective": null,
+    "bound": 6395.108328058908,
+    "node_count": 3
+   }
+  },
+  "casctanks": {
+   "off": {
+    "instance": "casctanks",
+    "flag": "0",
+    "engaged": false,
+    "sense": "min",
+    "wall": 65.87407540699996,
+    "status": "time_limit",
+    "objective": null,
+    "bound": -90.17862329759835,
+    "node_count": 3
+   },
+   "on": {
+    "instance": "casctanks",
+    "flag": "1",
+    "engaged": false,
+    "sense": "min",
+    "wall": 88.11257222099994,
+    "status": "time_limit",
+    "objective": null,
+    "bound": -90.17862329759835,
+    "node_count": 3
+   }
+  },
+  "chance": {
+   "off": {
+    "instance": "chance",
+    "flag": "0",
+    "engaged": false,
+    "sense": "min",
+    "wall": 1.2108276409999235,
+    "status": "optimal",
+    "objective": 29.894378154271102,
+    "bound": 29.894378154271102,
+    "node_count": 0
+   },
+   "on": {
+    "instance": "chance",
+    "flag": "1",
+    "engaged": false,
+    "sense": "min",
+    "wall": 1.0765635919997294,
+    "status": "optimal",
+    "objective": 29.894378154271102,
+    "bound": 29.894378154271102,
+    "node_count": 0
+   }
+  },
+  "clay0303hfsg": {
+   "off": {
+    "instance": "clay0303hfsg",
+    "flag": "0",
+    "engaged": false,
+    "sense": "min",
+    "wall": 60.07254383500003,
+    "status": "time_limit",
+    "objective": null,
+    "bound": null,
+    "node_count": 319
+   },
+   "on": {
+    "instance": "clay0303hfsg",
+    "flag": "1",
+    "engaged": false,
+    "sense": "min",
+    "wall": 81.7786054180001,
+    "status": "feasible",
+    "objective": 26669.10955143314,
+    "bound": 25922.91765917036,
+    "node_count": 439
+   }
+  },
+  "contvar": {
+   "off": {
+    "instance": "contvar",
+    "flag": "0",
+    "engaged": false,
+    "sense": "min",
+    "wall": 64.93696690600018,
+    "status": "time_limit",
+    "objective": null,
+    "bound": 183632.31163441093,
+    "node_count": 3
+   },
+   "on": {
+    "instance": "contvar",
+    "flag": "1",
+    "status": "child_timeout",
+    "engaged": false
+   }
+  },
+  "cvxnonsep_nsig30": {
+   "off": {
+    "instance": "cvxnonsep_nsig30",
+    "flag": "0",
+    "engaged": false,
+    "sense": "min",
+    "wall": 13.152040788999784,
+    "status": "optimal",
+    "objective": 130.6287111692529,
+    "bound": 130.61841392487688,
+    "node_count": 165
+   },
+   "on": {
+    "instance": "cvxnonsep_nsig30",
+    "flag": "1",
+    "engaged": false,
+    "sense": "min",
+    "wall": 10.166139934000057,
+    "status": "optimal",
+    "objective": 130.6287111692529,
+    "bound": 130.61841392487688,
+    "node_count": 165
+   }
+  },
+  "cvxnonsep_psig30": {
+   "off": {
+    "instance": "cvxnonsep_psig30",
+    "flag": "0",
+    "engaged": false,
+    "sense": "min",
+    "wall": 6.548118936999799,
+    "status": "optimal",
+    "objective": 78.99885435294289,
+    "bound": 78.99179874365787,
+    "node_count": 89
+   },
+   "on": {
+    "instance": "cvxnonsep_psig30",
+    "flag": "1",
+    "engaged": false,
+    "sense": "min",
+    "wall": 4.1807754880001085,
+    "status": "optimal",
+    "objective": 78.99885435294289,
+    "bound": 78.99179874365787,
+    "node_count": 89
+   }
+  },
+  "cvxnonsep_psig40r": {
+   "off": {
+    "instance": "cvxnonsep_psig40r",
+    "flag": "0",
+    "engaged": false,
+    "sense": "min",
+    "wall": 15.99437256400006,
+    "status": "optimal",
+    "objective": 86.54527995164959,
+    "bound": 86.53873600363832,
+    "node_count": 95
+   },
+   "on": {
+    "instance": "cvxnonsep_psig40r",
+    "flag": "1",
+    "engaged": false,
+    "sense": "min",
+    "wall": 14.474255911,
+    "status": "optimal",
+    "objective": 86.54527995164959,
+    "bound": 86.53873600363832,
+    "node_count": 95
+   }
+  },
+  "dispatch": {
+   "off": {
+    "instance": "dispatch",
+    "flag": "0",
+    "engaged": false,
+    "sense": "min",
+    "wall": 2.11246221600004,
+    "status": "optimal",
+    "objective": 3155.2879266989694,
+    "bound": 3155.2879042186782,
+    "node_count": 3
+   },
+   "on": {
+    "instance": "dispatch",
+    "flag": "1",
+    "engaged": true,
+    "sense": "min",
+    "wall": 1.2535802080001304,
+    "status": "optimal",
+    "objective": 3155.2879266857854,
+    "bound": 3155.2878615366776,
+    "node_count": 23,
+    "incumbent_feasible": true,
+    "verified_obj": 3155.2879266857854
+   }
+  },
+  "ex1221": {
+   "off": {
+    "instance": "ex1221",
+    "flag": "0",
+    "engaged": false,
+    "sense": "min",
+    "wall": 1.5918669520001458,
+    "status": "optimal",
+    "objective": 7.667180068813135,
+    "bound": 7.667180068813077,
+    "node_count": 5
+   },
+   "on": {
+    "instance": "ex1221",
+    "flag": "1",
+    "engaged": false,
+    "sense": "min",
+    "wall": 1.70655909900006,
+    "status": "optimal",
+    "objective": 7.667180068813135,
+    "bound": 7.667180068813077,
+    "node_count": 5
+   }
+  },
+  "ex1222": {
+   "off": {
+    "instance": "ex1222",
+    "flag": "0",
+    "engaged": false,
+    "sense": "min",
+    "wall": 1.5773123599997234,
+    "status": "optimal",
+    "objective": 1.0765430833322625,
+    "bound": 1.0765430463031964,
+    "node_count": 1
+   },
+   "on": {
+    "instance": "ex1222",
+    "flag": "1",
+    "engaged": false,
+    "sense": "min",
+    "wall": 1.3065027269999518,
+    "status": "optimal",
+    "objective": 1.0765430833322625,
+    "bound": 1.0765430463031964,
+    "node_count": 1
+   }
+  },
+  "ex1224": {
+   "off": {
+    "instance": "ex1224",
+    "flag": "0",
+    "engaged": false,
+    "sense": "min",
+    "wall": 6.424471406000066,
+    "status": "optimal",
+    "objective": -0.9434704942820806,
+    "bound": -0.9434705000000166,
+    "node_count": 5
+   },
+   "on": {
+    "instance": "ex1224",
+    "flag": "1",
+    "engaged": false,
+    "sense": "min",
+    "wall": 5.861058830000275,
+    "status": "optimal",
+    "objective": -0.9434704942820806,
+    "bound": -0.9434705000000166,
+    "node_count": 5
+   }
+  },
+  "ex1225": {
+   "off": {
+    "instance": "ex1225",
+    "flag": "0",
+    "engaged": false,
+    "sense": "min",
+    "wall": 4.405266984000264,
+    "status": "optimal",
+    "objective": 30.999999913557566,
+    "bound": 30.999999913557566,
+    "node_count": 5
+   },
+   "on": {
+    "instance": "ex1225",
+    "flag": "1",
+    "engaged": false,
+    "sense": "min",
+    "wall": 4.767004790000101,
+    "status": "optimal",
+    "objective": 30.999999913557566,
+    "bound": 30.999999913557566,
+    "node_count": 5
+   }
+  },
+  "ex1226": {
+   "off": {
+    "instance": "ex1226",
+    "flag": "0",
+    "engaged": false,
+    "sense": "min",
+    "wall": 2.191682387000128,
+    "status": "optimal",
+    "objective": -17.000000003887443,
+    "bound": -17.000000003887443,
+    "node_count": 3
+   },
+   "on": {
+    "instance": "ex1226",
+    "flag": "1",
+    "engaged": false,
+    "sense": "min",
+    "wall": 2.0489774699999543,
+    "status": "optimal",
+    "objective": -17.000000003887443,
+    "bound": -17.000000003887443,
+    "node_count": 3
+   }
+  },
+  "ex14_1_9": {
+   "off": {
+    "instance": "ex14_1_9",
+    "flag": "0",
+    "engaged": false,
+    "sense": "min",
+    "wall": 1.5027881920000254,
+    "status": "feasible",
+    "objective": -1.9775220540513224e-16,
+    "bound": -1.9775220540513224e-16,
+    "node_count": 3
+   },
+   "on": {
+    "instance": "ex14_1_9",
+    "flag": "1",
+    "engaged": false,
+    "sense": "min",
+    "wall": 1.303438387999904,
+    "status": "feasible",
+    "objective": -1.9775220540513224e-16,
+    "bound": -1.9775220540513224e-16,
+    "node_count": 3
+   }
+  },
+  "fac2": {
+   "off": {
+    "instance": "fac2",
+    "flag": "0",
+    "engaged": false,
+    "sense": "min",
+    "wall": 13.74018210300028,
+    "status": "optimal",
+    "objective": 331837498.18201387,
+    "bound": 331837497.561812,
+    "node_count": 39
+   },
+   "on": {
+    "instance": "fac2",
+    "flag": "1",
+    "engaged": false,
+    "sense": "min",
+    "wall": 12.658176586000081,
+    "status": "optimal",
+    "objective": 331837498.18201387,
+    "bound": 331837497.561812,
+    "node_count": 39
+   }
+  },
+  "flay02m": {
+   "off": {
+    "instance": "flay02m",
+    "flag": "0",
+    "engaged": false,
+    "sense": "min",
+    "wall": 1.7048919720000413,
+    "status": "optimal",
+    "objective": 37.947331863834606,
+    "bound": 37.94733180456953,
+    "node_count": 7
+   },
+   "on": {
+    "instance": "flay02m",
+    "flag": "1",
+    "engaged": false,
+    "sense": "min",
+    "wall": 1.5142982669999583,
+    "status": "optimal",
+    "objective": 37.947331863834606,
+    "bound": 37.94733180456953,
+    "node_count": 7
+   }
+  },
+  "flay03m": {
+   "off": {
+    "instance": "flay03m",
+    "flag": "0",
+    "engaged": false,
+    "sense": "min",
+    "wall": 17.116350303999752,
+    "status": "optimal",
+    "objective": 48.98979479383543,
+    "bound": 48.98979470823039,
+    "node_count": 107
+   },
+   "on": {
+    "instance": "flay03m",
+    "flag": "1",
+    "engaged": false,
+    "sense": "min",
+    "wall": 17.545955221999975,
+    "status": "optimal",
+    "objective": 48.98979479383543,
+    "bound": 48.98979470823039,
+    "node_count": 107
+   }
+  },
+  "gbd": {
+   "off": {
+    "instance": "gbd",
+    "flag": "0",
+    "engaged": false,
+    "sense": "min",
+    "wall": 0.450419982999847,
+    "status": "optimal",
+    "objective": 2.199999982504936,
+    "bound": 2.199999982504936,
+    "node_count": 3
+   },
+   "on": {
+    "instance": "gbd",
+    "flag": "1",
+    "engaged": false,
+    "sense": "min",
+    "wall": 0.45919176100005643,
+    "status": "optimal",
+    "objective": 2.199999982504936,
+    "bound": 2.199999982504936,
+    "node_count": 3
+   }
+  },
+  "gkocis": {
+   "off": {
+    "instance": "gkocis",
+    "flag": "0",
+    "engaged": false,
+    "sense": "min",
+    "wall": 2.6339551380001467,
+    "status": "optimal",
+    "objective": -1.9230987798770212,
+    "bound": -1.9230988280923489,
+    "node_count": 5
+   },
+   "on": {
+    "instance": "gkocis",
+    "flag": "1",
+    "engaged": false,
+    "sense": "min",
+    "wall": 2.4771334399997613,
+    "status": "optimal",
+    "objective": -1.9230987798770212,
+    "bound": -1.9230988280923489,
+    "node_count": 5
+   }
+  },
+  "hda": {
+   "off": {
+    "instance": "hda",
+    "flag": "0",
+    "engaged": false,
+    "sense": "min",
+    "wall": 71.9147355619998,
+    "status": "time_limit",
+    "objective": null,
+    "bound": -18016528426.50232,
+    "node_count": 3
+   },
+   "on": {
+    "instance": "hda",
+    "flag": "1",
+    "engaged": false,
+    "sense": "min",
+    "wall": 71.61421148199997,
+    "status": "time_limit",
+    "objective": null,
+    "bound": -18016528426.50232,
+    "node_count": 3
+   }
+  },
+  "heatexch_gen1": {
+   "off": {
+    "instance": "heatexch_gen1",
+    "flag": "0",
+    "engaged": false,
+    "sense": "min",
+    "wall": 60.6009188160001,
+    "status": "time_limit",
+    "objective": null,
+    "bound": 38183.5317460179,
+    "node_count": 7
+   },
+   "on": {
+    "instance": "heatexch_gen1",
+    "flag": "1",
+    "engaged": false,
+    "sense": "min",
+    "wall": 61.3322478049995,
+    "status": "time_limit",
+    "objective": null,
+    "bound": 38183.5317460179,
+    "node_count": 7
+   }
+  },
+  "heatexch_gen2": {
+   "off": {
+    "instance": "heatexch_gen2",
+    "flag": "0",
+    "engaged": false,
+    "sense": "min",
+    "wall": 60.8370507110003,
+    "status": "time_limit",
+    "objective": null,
+    "bound": 555767.7902857271,
+    "node_count": 7
+   },
+   "on": {
+    "instance": "heatexch_gen2",
+    "flag": "1",
+    "engaged": false,
+    "sense": "min",
+    "wall": 61.02406389200041,
+    "status": "feasible",
+    "objective": 824551.3265726111,
+    "bound": 555767.7902857271,
+    "node_count": 3
+   }
+  },
+  "heatexch_gen3": {
+   "off": {
+    "instance": "heatexch_gen3",
+    "flag": "0",
+    "status": "child_timeout",
+    "engaged": false
+   },
+   "on": {
+    "instance": "heatexch_gen3",
+    "flag": "1",
+    "status": "child_timeout",
+    "engaged": false
+   }
+  },
+  "m3": {
+   "off": {
+    "instance": "m3",
+    "flag": "0",
+    "engaged": false,
+    "sense": "min",
+    "wall": 11.507247458000165,
+    "status": "optimal",
+    "objective": 37.799999669978845,
+    "bound": 37.79999951039202,
+    "node_count": 47
+   },
+   "on": {
+    "instance": "m3",
+    "flag": "1",
+    "engaged": false,
+    "sense": "min",
+    "wall": 11.010654310000064,
+    "status": "optimal",
+    "objective": 37.799999669978845,
+    "bound": 37.79999951039202,
+    "node_count": 47
+   }
+  },
+  "nvs01": {
+   "off": {
+    "instance": "nvs01",
+    "flag": "0",
+    "engaged": false,
+    "sense": "min",
+    "wall": 3.002199661999839,
+    "status": "optimal",
+    "objective": 12.46966882156821,
+    "bound": 12.46966882156821,
+    "node_count": 3
+   },
+   "on": {
+    "instance": "nvs01",
+    "flag": "1",
+    "engaged": false,
+    "sense": "min",
+    "wall": 2.6598218029994314,
+    "status": "optimal",
+    "objective": 12.46966882156821,
+    "bound": 12.46966882156821,
+    "node_count": 3
+   }
+  },
+  "nvs02": {
+   "off": {
+    "instance": "nvs02",
+    "flag": "0",
+    "engaged": false,
+    "sense": "min",
+    "wall": 0.49227811399941857,
+    "status": "optimal",
+    "objective": 5.96418452307,
+    "bound": 5.96418452307,
+    "node_count": 337
+   },
+   "on": {
+    "instance": "nvs02",
+    "flag": "1",
+    "engaged": false,
+    "sense": "min",
+    "wall": 0.48819823899975745,
+    "status": "optimal",
+    "objective": 5.96418452307,
+    "bound": 5.96418452307,
+    "node_count": 337
+   }
+  },
+  "nvs03": {
+   "off": {
+    "instance": "nvs03",
+    "flag": "0",
+    "engaged": false,
+    "sense": "min",
+    "wall": 1.0940453950006486,
+    "status": "optimal",
+    "objective": 16.0,
+    "bound": 15.99999972676511,
+    "node_count": 5
+   },
+   "on": {
+    "instance": "nvs03",
+    "flag": "1",
+    "engaged": false,
+    "sense": "min",
+    "wall": 0.9474586510004883,
+    "status": "optimal",
+    "objective": 16.0,
+    "bound": 15.99999972676511,
+    "node_count": 5
+   }
+  },
+  "nvs04": {
+   "off": {
+    "instance": "nvs04",
+    "flag": "0",
+    "engaged": false,
+    "sense": "min",
+    "wall": 1.7083277010005986,
+    "status": "optimal",
+    "objective": 0.720000000000006,
+    "bound": 0.7199999999999773,
+    "node_count": 5
+   },
+   "on": {
+    "instance": "nvs04",
+    "flag": "1",
+    "engaged": false,
+    "sense": "min",
+    "wall": 1.55823337000038,
+    "status": "optimal",
+    "objective": 0.720000000000006,
+    "bound": 0.7199999999999773,
+    "node_count": 5
+   }
+  },
+  "nvs05": {
+   "off": {
+    "instance": "nvs05",
+    "flag": "0",
+    "engaged": false,
+    "sense": "min",
+    "wall": 60.05784671799938,
+    "status": "feasible",
+    "objective": 8.731956986640078,
+    "bound": 3.8053689243357476,
+    "node_count": 115
+   },
+   "on": {
+    "instance": "nvs05",
+    "flag": "1",
+    "engaged": false,
+    "sense": "min",
+    "wall": 60.11494442700041,
+    "status": "feasible",
+    "objective": 8.731956986640078,
+    "bound": 3.8053689243357476,
+    "node_count": 115
+   }
+  },
+  "nvs06": {
+   "off": {
+    "instance": "nvs06",
+    "flag": "0",
+    "engaged": false,
+    "sense": "min",
+    "wall": 2.999857410000004,
+    "status": "optimal",
+    "objective": 1.7703125,
+    "bound": 1.7703124999999627,
+    "node_count": 5
+   },
+   "on": {
+    "instance": "nvs06",
+    "flag": "1",
+    "engaged": false,
+    "sense": "min",
+    "wall": 2.560533980999935,
+    "status": "optimal",
+    "objective": 1.7703125,
+    "bound": 1.7703124999999627,
+    "node_count": 5
+   }
+  },
+  "nvs07": {
+   "off": {
+    "instance": "nvs07",
+    "flag": "0",
+    "engaged": false,
+    "sense": "min",
+    "wall": 0.12575380299949757,
+    "status": "optimal",
+    "objective": 4.0,
+    "bound": 4.0,
+    "node_count": 5
+   },
+   "on": {
+    "instance": "nvs07",
+    "flag": "1",
+    "engaged": false,
+    "sense": "min",
+    "wall": 0.11766518200056453,
+    "status": "optimal",
+    "objective": 4.0,
+    "bound": 4.0,
+    "node_count": 5
+   }
+  },
+  "nvs08": {
+   "off": {
+    "instance": "nvs08",
+    "flag": "0",
+    "engaged": false,
+    "sense": "min",
+    "wall": 2.9596217939997587,
+    "status": "optimal",
+    "objective": 23.449727347139827,
+    "bound": 23.44972734516655,
+    "node_count": 3
+   },
+   "on": {
+    "instance": "nvs08",
+    "flag": "1",
+    "engaged": false,
+    "sense": "min",
+    "wall": 2.5784398940004394,
+    "status": "optimal",
+    "objective": 23.449727347139827,
+    "bound": 23.44972734516655,
+    "node_count": 3
+   }
+  },
+  "nvs09": {
+   "off": {
+    "instance": "nvs09",
+    "flag": "0",
+    "engaged": false,
+    "sense": "min",
+    "wall": 12.27616050100005,
+    "status": "optimal",
+    "objective": -43.134336918035295,
+    "bound": -43.13433691803662,
+    "node_count": 5
+   },
+   "on": {
+    "instance": "nvs09",
+    "flag": "1",
+    "engaged": false,
+    "sense": "min",
+    "wall": 10.441064104999896,
+    "status": "optimal",
+    "objective": -43.134336918035295,
+    "bound": -43.13433691803662,
+    "node_count": 5
+   }
+  },
+  "nvs10": {
+   "off": {
+    "instance": "nvs10",
+    "flag": "0",
+    "engaged": false,
+    "sense": "min",
+    "wall": 0.2353353420003259,
+    "status": "optimal",
+    "objective": -310.7999999999999,
+    "bound": -310.7999999999999,
+    "node_count": 5
+   },
+   "on": {
+    "instance": "nvs10",
+    "flag": "1",
+    "engaged": false,
+    "sense": "min",
+    "wall": 0.2488628430000972,
+    "status": "optimal",
+    "objective": -310.7999999999999,
+    "bound": -310.7999999999999,
+    "node_count": 5
+   }
+  },
+  "nvs11": {
+   "off": {
+    "instance": "nvs11",
+    "flag": "0",
+    "engaged": false,
+    "sense": "min",
+    "wall": 0.9123460849996263,
+    "status": "optimal",
+    "objective": -430.99999999999966,
+    "bound": -430.99999999999966,
+    "node_count": 55
+   },
+   "on": {
+    "instance": "nvs11",
+    "flag": "1",
+    "engaged": false,
+    "sense": "min",
+    "wall": 0.8955926319995342,
+    "status": "optimal",
+    "objective": -430.99999999999966,
+    "bound": -430.99999999999966,
+    "node_count": 55
+   }
+  },
+  "nvs12": {
+   "off": {
+    "instance": "nvs12",
+    "flag": "0",
+    "engaged": false,
+    "sense": "min",
+    "wall": 3.350161422000383,
+    "status": "optimal",
+    "objective": -481.20000000000005,
+    "bound": -481.20000000000005,
+    "node_count": 231
+   },
+   "on": {
+    "instance": "nvs12",
+    "flag": "1",
+    "engaged": false,
+    "sense": "min",
+    "wall": 3.193883965999703,
+    "status": "optimal",
+    "objective": -481.20000000000005,
+    "bound": -481.20000000000005,
+    "node_count": 231
+   }
+  },
+  "nvs13": {
+   "off": {
+    "instance": "nvs13",
+    "flag": "0",
+    "engaged": false,
+    "sense": "min",
+    "wall": 9.45275329099968,
+    "status": "optimal",
+    "objective": -585.2,
+    "bound": -585.200000207621,
+    "node_count": 17
+   },
+   "on": {
+    "instance": "nvs13",
+    "flag": "1",
+    "engaged": true,
+    "sense": "min",
+    "wall": 5.9437120580005285,
+    "status": "optimal",
+    "objective": -585.2000000000003,
+    "bound": -585.2000000000003,
+    "node_count": 649,
+    "incumbent_feasible": true,
+    "verified_obj": -585.2
+   }
+  },
+  "nvs14": {
+   "off": {
+    "instance": "nvs14",
+    "flag": "0",
+    "engaged": false,
+    "sense": "min",
+    "wall": 0.4651775920001455,
+    "status": "optimal",
+    "objective": -40358.15476929996,
+    "bound": -40358.15476929999,
+    "node_count": 223
+   },
+   "on": {
+    "instance": "nvs14",
+    "flag": "1",
+    "engaged": false,
+    "sense": "min",
+    "wall": 0.4559205549994658,
+    "status": "optimal",
+    "objective": -40358.15476929996,
+    "bound": -40358.15476929999,
+    "node_count": 223
+   }
+  },
+  "nvs15": {
+   "off": {
+    "instance": "nvs15",
+    "flag": "0",
+    "engaged": false,
+    "sense": "min",
+    "wall": 0.18299616100011917,
+    "status": "optimal",
+    "objective": 1.0,
+    "bound": 1.0,
+    "node_count": 7
+   },
+   "on": {
+    "instance": "nvs15",
+    "flag": "1",
+    "engaged": false,
+    "sense": "min",
+    "wall": 0.1774460859996907,
+    "status": "optimal",
+    "objective": 1.0,
+    "bound": 1.0,
+    "node_count": 7
+   }
+  },
+  "nvs21": {
+   "off": {
+    "instance": "nvs21",
+    "flag": "0",
+    "engaged": false,
+    "sense": "min",
+    "wall": 8.760941558999548,
+    "status": "optimal",
+    "objective": -5.684782628025259,
+    "bound": -5.684782628025259,
+    "node_count": 3
+   },
+   "on": {
+    "instance": "nvs21",
+    "flag": "1",
+    "engaged": false,
+    "sense": "min",
+    "wall": 8.22635252300006,
+    "status": "optimal",
+    "objective": -5.684782628025259,
+    "bound": -5.684782628025259,
+    "node_count": 3
+   }
+  },
+  "oaer": {
+   "off": {
+    "instance": "oaer",
+    "flag": "0",
+    "engaged": false,
+    "sense": "min",
+    "wall": 2.3818207829999665,
+    "status": "optimal",
+    "objective": -1.923098499884843,
+    "bound": -1.923098601139822,
+    "node_count": 3
+   },
+   "on": {
+    "instance": "oaer",
+    "flag": "1",
+    "engaged": false,
+    "sense": "min",
+    "wall": 2.173949071999232,
+    "status": "optimal",
+    "objective": -1.923098499884843,
+    "bound": -1.923098601139822,
+    "node_count": 3
+   }
+  },
+  "st_e11": {
+   "off": {
+    "instance": "st_e11",
+    "flag": "0",
+    "engaged": false,
+    "sense": "min",
+    "wall": 4.115744042000188,
+    "status": "optimal",
+    "objective": 189.31162970681882,
+    "bound": 189.31162966433996,
+    "node_count": 5
+   },
+   "on": {
+    "instance": "st_e11",
+    "flag": "1",
+    "engaged": false,
+    "sense": "min",
+    "wall": 3.9546560700000555,
+    "status": "optimal",
+    "objective": 189.31162970681882,
+    "bound": 189.31162966433996,
+    "node_count": 5
+   }
+  },
+  "st_e13": {
+   "off": {
+    "instance": "st_e13",
+    "flag": "0",
+    "engaged": false,
+    "sense": "min",
+    "wall": 1.3599237660000654,
+    "status": "optimal",
+    "objective": 2.0000003463351197,
+    "bound": 1.9999999825187809,
+    "node_count": 3
+   },
+   "on": {
+    "instance": "st_e13",
+    "flag": "1",
+    "engaged": true,
+    "sense": "min",
+    "wall": 0.9468849600007161,
+    "status": "optimal",
+    "objective": 1.9999999825187946,
+    "bound": 1.9999999825187946,
+    "node_count": 1,
+    "incumbent_feasible": true,
+    "verified_obj": 1.9999999825187946
+   }
+  },
+  "st_e29": {
+   "off": {
+    "instance": "st_e29",
+    "flag": "0",
+    "engaged": false,
+    "sense": "min",
+    "wall": 5.974596999999449,
+    "status": "optimal",
+    "objective": -0.9434704942820806,
+    "bound": -0.9434705000000166,
+    "node_count": 5
+   },
+   "on": {
+    "instance": "st_e29",
+    "flag": "1",
+    "engaged": false,
+    "sense": "min",
+    "wall": 6.1298737429997345,
+    "status": "optimal",
+    "objective": -0.9434704942820806,
+    "bound": -0.9434705000000166,
+    "node_count": 5
+   }
+  },
+  "st_e36": {
+   "off": {
+    "instance": "st_e36",
+    "flag": "0",
+    "engaged": false,
+    "sense": "min",
+    "wall": 14.358842399999958,
+    "status": "optimal",
+    "objective": -245.99999999999997,
+    "bound": -246.00000000170422,
+    "node_count": 85
+   },
+   "on": {
+    "instance": "st_e36",
+    "flag": "1",
+    "engaged": false,
+    "sense": "min",
+    "wall": 13.421192050999707,
+    "status": "optimal",
+    "objective": -245.99999999999997,
+    "bound": -246.00000000170422,
+    "node_count": 85
+   }
+  },
+  "st_e38": {
+   "off": {
+    "instance": "st_e38",
+    "flag": "0",
+    "engaged": false,
+    "sense": "min",
+    "wall": 2.071590044999539,
+    "status": "optimal",
+    "objective": 7197.727116826533,
+    "bound": 7197.727116826533,
+    "node_count": 3
+   },
+   "on": {
+    "instance": "st_e38",
+    "flag": "1",
+    "engaged": false,
+    "sense": "min",
+    "wall": 1.9256306929992206,
+    "status": "optimal",
+    "objective": 7197.727116826533,
+    "bound": 7197.727116826533,
+    "node_count": 3
+   }
+  },
+  "st_miqp1": {
+   "off": {
+    "instance": "st_miqp1",
+    "flag": "0",
+    "engaged": false,
+    "sense": "min",
+    "wall": 0.46681218600042484,
+    "status": "optimal",
+    "objective": 280.9999999906497,
+    "bound": 280.9999999906497,
+    "node_count": 15
+   },
+   "on": {
+    "instance": "st_miqp1",
+    "flag": "1",
+    "engaged": false,
+    "sense": "min",
+    "wall": 0.4383002780004972,
+    "status": "optimal",
+    "objective": 280.9999999906497,
+    "bound": 280.9999999906497,
+    "node_count": 15
+   }
+  },
+  "st_miqp2": {
+   "off": {
+    "instance": "st_miqp2",
+    "flag": "0",
+    "engaged": false,
+    "sense": "min",
+    "wall": 0.45866264200049045,
+    "status": "optimal",
+    "objective": 2.0,
+    "bound": 2.0,
+    "node_count": 9
+   },
+   "on": {
+    "instance": "st_miqp2",
+    "flag": "1",
+    "engaged": false,
+    "sense": "min",
+    "wall": 0.48464825700011716,
+    "status": "optimal",
+    "objective": 2.0,
+    "bound": 2.0,
+    "node_count": 9
+   }
+  },
+  "st_miqp3": {
+   "off": {
+    "instance": "st_miqp3",
+    "flag": "0",
+    "engaged": false,
+    "sense": "min",
+    "wall": 0.4361833309994836,
+    "status": "optimal",
+    "objective": -6.0,
+    "bound": -6.0,
+    "node_count": 1
+   },
+   "on": {
+    "instance": "st_miqp3",
+    "flag": "1",
+    "engaged": false,
+    "sense": "min",
+    "wall": 0.43152691000068444,
+    "status": "optimal",
+    "objective": -6.0,
+    "bound": -6.0,
+    "node_count": 1
+   }
+  },
+  "st_miqp4": {
+   "off": {
+    "instance": "st_miqp4",
+    "flag": "0",
+    "engaged": false,
+    "sense": "min",
+    "wall": 0.4479288260008616,
+    "status": "optimal",
+    "objective": -4574.000004423649,
+    "bound": -4574.000004423649,
+    "node_count": 3
+   },
+   "on": {
+    "instance": "st_miqp4",
+    "flag": "1",
+    "engaged": false,
+    "sense": "min",
+    "wall": 0.47742034799921385,
+    "status": "optimal",
+    "objective": -4574.000004423649,
+    "bound": -4574.000004423649,
+    "node_count": 3
+   }
+  },
+  "st_miqp5": {
+   "off": {
+    "instance": "st_miqp5",
+    "flag": "0",
+    "engaged": false,
+    "sense": "min",
+    "wall": 0.4873573019995092,
+    "status": "optimal",
+    "objective": -333.8888902720728,
+    "bound": -333.8888902720728,
+    "node_count": 1
+   },
+   "on": {
+    "instance": "st_miqp5",
+    "flag": "1",
+    "engaged": false,
+    "sense": "min",
+    "wall": 0.46743817800052057,
+    "status": "optimal",
+    "objective": -333.8888902720728,
+    "bound": -333.8888902720728,
+    "node_count": 1
+   }
+  },
+  "st_test1": {
+   "off": {
+    "instance": "st_test1",
+    "flag": "0",
+    "engaged": false,
+    "sense": "min",
+    "wall": 0.47000768699945183,
+    "status": "optimal",
+    "objective": -1.6495994490692313e-08,
+    "bound": -1.6495994490692313e-08,
+    "node_count": 15
+   },
+   "on": {
+    "instance": "st_test1",
+    "flag": "1",
+    "engaged": false,
+    "sense": "min",
+    "wall": 0.5120706329998939,
+    "status": "optimal",
+    "objective": -1.6495994490692313e-08,
+    "bound": -1.6495994490692313e-08,
+    "node_count": 15
+   }
+  },
+  "st_testgr3": {
+   "off": {
+    "instance": "st_testgr3",
+    "flag": "0",
+    "engaged": false,
+    "sense": "min",
+    "wall": 0.7944134159997702,
+    "status": "optimal",
+    "objective": -20.59,
+    "bound": -20.59070709795548,
+    "node_count": 549
+   },
+   "on": {
+    "instance": "st_testgr3",
+    "flag": "1",
+    "engaged": false,
+    "sense": "min",
+    "wall": 0.7919125640000857,
+    "status": "optimal",
+    "objective": -20.59,
+    "bound": -20.59070709795548,
+    "node_count": 549
+   }
+  },
+  "syn05hfsg": {
+   "off": {
+    "instance": "syn05hfsg",
+    "flag": "0",
+    "engaged": false,
+    "sense": "max",
+    "wall": 21.566461340999922,
+    "status": "optimal",
+    "objective": 837.732412391107,
+    "bound": 837.732412391107,
+    "node_count": 185
+   },
+   "on": {
+    "instance": "syn05hfsg",
+    "flag": "1",
+    "engaged": false,
+    "sense": "max",
+    "wall": 20.83710636699925,
+    "status": "optimal",
+    "objective": 837.732412391107,
+    "bound": 837.732412391107,
+    "node_count": 185
+   }
+  },
+  "tanksize": {
+   "off": {
+    "instance": "tanksize",
+    "flag": "0",
+    "engaged": false,
+    "sense": "min",
+    "wall": 60.38041340499967,
+    "status": "feasible",
+    "objective": 1.2686437852381225,
+    "bound": 0.9220743571430717,
+    "node_count": 91
+   },
+   "on": {
+    "instance": "tanksize",
+    "flag": "1",
+    "engaged": true,
+    "sense": "min",
+    "wall": 50.2077460670007,
+    "status": "optimal",
+    "objective": 1.268643752557795,
+    "bound": 1.2685440897020883,
+    "node_count": 11379,
+    "incumbent_feasible": true,
+    "verified_obj": 1.268643752557795
+   }
+  },
+  "tls2": {
+   "off": {
+    "instance": "tls2",
+    "flag": "0",
+    "engaged": false,
+    "sense": "min",
+    "wall": 49.09969044600075,
+    "status": "optimal",
+    "objective": 5.299999922109238,
+    "bound": 5.3,
+    "node_count": 421
+   },
+   "on": {
+    "instance": "tls2",
+    "flag": "1",
+    "engaged": false,
+    "sense": "min",
+    "wall": 46.12586456899953,
+    "status": "optimal",
+    "objective": 5.299999922109238,
+    "bound": 5.3,
+    "node_count": 421
+   }
+  },
+  "tspn05": {
+   "off": {
+    "instance": "tspn05",
+    "flag": "0",
+    "engaged": false,
+    "sense": "min",
+    "wall": 44.48800572399978,
+    "status": "optimal",
+    "objective": 191.2552076849416,
+    "bound": 191.25510622527844,
+    "node_count": 51
+   },
+   "on": {
+    "instance": "tspn05",
+    "flag": "1",
+    "engaged": false,
+    "sense": "min",
+    "wall": 42.42981292700006,
+    "status": "optimal",
+    "objective": 191.2552076849416,
+    "bound": 191.25510622527844,
+    "node_count": 51
+   }
+  },
+  "tspn08": {
+   "off": {
+    "instance": "tspn08",
+    "flag": "0",
+    "engaged": false,
+    "sense": "min",
+    "wall": 41.828556075999586,
+    "status": "feasible",
+    "objective": 290.56685374735093,
+    "bound": null,
+    "node_count": 1
+   },
+   "on": {
+    "instance": "tspn08",
+    "flag": "1",
+    "engaged": false,
+    "sense": "min",
+    "wall": 38.19774940700063,
+    "status": "feasible",
+    "objective": 290.56685374735093,
+    "bound": null,
+    "node_count": 1
+   }
+  },
+  "tspn10": {
+   "off": {
+    "instance": "tspn10",
+    "flag": "0",
+    "engaged": false,
+    "sense": "min",
+    "wall": 28.468893682999806,
+    "status": "feasible",
+    "objective": 225.12607139732683,
+    "bound": null,
+    "node_count": 1
+   },
+   "on": {
+    "instance": "tspn10",
+    "flag": "1",
+    "engaged": false,
+    "sense": "min",
+    "wall": 23.43908536700019,
+    "status": "feasible",
+    "objective": 225.12607139732683,
+    "bound": null,
+    "node_count": 1
+   }
+  },
+  "tspn12": {
+   "off": {
+    "instance": "tspn12",
+    "flag": "0",
+    "engaged": false,
+    "sense": "min",
+    "wall": 49.167301985999984,
+    "status": "feasible",
+    "objective": 262.6473952506017,
+    "bound": null,
+    "node_count": 1
+   },
+   "on": {
+    "instance": "tspn12",
+    "flag": "1",
+    "engaged": false,
+    "sense": "min",
+    "wall": 15.6250470949999,
+    "status": "feasible",
+    "objective": 262.64739525060224,
+    "bound": null,
+    "node_count": 1
+   }
+  }
+ },
+ "verdict": {
+  "cert_clean": true,
+  "cert_violations": [],
+  "net_positive": true,
+  "engaged": [
+   "dispatch",
+   "nvs13",
+   "st_e13",
+   "tanksize"
+  ],
+  "helped": [
+   "tanksize"
+  ],
+  "median_nonengaged_wall_delta_s": -0.14627304800023921,
+  "overhead_ok": true,
+  "errored": [
+   "contvar: ON child_timeout ()",
+   "heatexch_gen3: OFF child_timeout ()",
+   "heatexch_gen3: ON child_timeout ()"
+  ],
+  "no_oracle_instances": [
+   "4stufen",
+   "bchoco06",
+   "bchoco07",
+   "bchoco08",
+   "beuster",
+   "casctanks",
+   "clay0303hfsg",
+   "contvar",
+   "cvxnonsep_nsig30",
+   "cvxnonsep_psig30",
+   "cvxnonsep_psig40r",
+   "ex1224",
+   "ex1225",
+   "ex14_1_9",
+   "fac2",
+   "flay02m",
+   "flay03m",
+   "gkocis",
+   "hda",
+   "heatexch_gen1",
+   "heatexch_gen2",
+   "heatexch_gen3",
+   "m3",
+   "nvs21",
+   "st_e11",
+   "st_e29",
+   "st_miqp5",
+   "st_testgr3",
+   "syn05hfsg",
+   "tanksize",
+   "tls2",
+   "tspn05",
+   "tspn08",
+   "tspn10",
+   "tspn12"
+  ],
+  "n_nonengaged_measured": 60,
+  "graduate": true
+ }
+}

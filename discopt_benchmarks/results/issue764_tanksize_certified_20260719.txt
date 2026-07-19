@@ -28,3 +28,18 @@ end-to-end m.solve() with DISCOPT_NATIVE_SPATIAL_KERNEL=1:
 Certificate brackets the oracle in every run: bound <= 1.2686437540 <= incumbent.
 Optimal is the honest post-fix semantics (bound >= incumbent - gap_tol enforced).
 Regression test: python/tests/test_spatial_native_kernel.py::test_tanksize_certifies_natively.
+
+## FINAL (Task 1/2/3, 2026-07-19)
+Driver-side seeded end-to-end m.solve() with DISCOPT_NATIVE_SPATIAL_KERNEL=1:
+  status=optimal  obj=1.2686437526  bound=1.2685440897  nodes=11379  wall=~50 s
+  |obj - oracle| = 1.44e-9 ; certificate brackets oracle (bound <= 1.2686437540 <= incumbent).
+Seed: NLP relaxation + free-binary enumeration (5 free -> 32 sub-NLPs) -> best verified
+feasible point (obj 1.2686437526) -> initial_incumbent. ~255 s -> ~50 s (5x).
+
+Graduation panel (issue764_native_kernel_graduation_panel_20260719T155819Z):
+  cert-clean PASS (0 violations); net-positive PASS (median non-engaged wall Δ=-0.146 s,
+  4 engaged: dispatch/nvs13/st_e13/tanksize, tanksize feasible->optimal).
+Default decision: KEEP OPT-IN (default OFF). Flipping default-ON breaks 20 smoke tests
+(native kernel short-circuits Python-engine callbacks/heuristics/pools/bound-modes) and
+the kernel lacks a wall budget (contvar OFF 65 s -> ON >200 s). Graduation deferred to
+those two follow-ups; panel PASS records the engine as sound + net-helpful.

@@ -447,10 +447,38 @@ def _native_spatial_kernel_enabled() -> bool:
     """Whether the #764 native Rust spatial-B&B kernel is engaged (**default OFF**;
     ``DISCOPT_NATIVE_SPATIAL_KERNEL=1`` opts in). Bound-changing / experimental — the
     whole per-node loop moves into ``discopt-core`` (envelope patch + warm OBBT sweep
-    + safe-bound pruning + spatial branch). Gated OFF pending the §5 graduation panel;
-    the producer declines any model it cannot reproduce bound-neutrally, and the
-    driver falls back to the Python path on decline, so ON never changes a certified
-    answer, only which engine computes it (subject to the panel)."""
+    + safe-bound pruning + spatial branch). The producer declines any model it cannot
+    reproduce bound-neutrally, and the driver falls back to the Python path on decline,
+    so ON never changes a certified answer, only which engine computes it.
+
+    Graduation status (#764, panel 2026-07-19,
+    ``discopt_benchmarks/results/issue764_native_kernel_graduation_panel_20260719T155819Z.json``):
+    the Regime-2 graduation panel (ON vs OFF over the 66-instance in-repo corpus, 60 s
+    budget) PASSED BOTH bars — cert-clean with ZERO violations (every ON-optimal
+    objective matches OFF to tol, no dual bound past a reference optimum, no
+    optimal->non-optimal regression, all 4 engaged incumbents — dispatch, nvs13,
+    st_e13, tanksize — independently feasibility-verified) AND net-positive (median
+    non-engaged wall Δ = −0.146 s, i.e. ON slightly faster; tanksize moves
+    feasible→**optimal**, the issue's headline win, in ~50 s seeded).
+
+    The default is nonetheless kept **OFF** because flipping it is not yet SAFE as a
+    default, and CLAUDE.md puts safety/gate-integrity before performance:
+      1. Blast radius — with the flag forced ON, 20 ``-m smoke`` tests fail (807 pass)
+         because the native kernel short-circuits Python-engine machinery those tests
+         exercise (incumbent/node callbacks, RENS/SubNLP heuristic paths, solution
+         pools, warm-start incumbents, ``mccormick_bounds`` modes, deadline handling,
+         batched node processing, lazy constraints). These are not native-kernel
+         correctness failures — they are validated Python-engine behaviors a default-ON
+         would silently disable. Making default-ON safe needs native-kernel feature
+         parity (or pass-through) and/or re-scoping those tests to the engine they
+         validate — substantial follow-up, and doing it hastily would mean weakening
+         validations to green a gate (forbidden).
+      2. No wall budget — the kernel runs to ``max_nodes`` with no time limit, so on a
+         covered-but-hard instance it can run away (panel: ``contvar`` OFF 65 s → ON
+         >200 s, an instance neither flag certifies). A default must be runaway-safe.
+    Graduating to default-ON is deferred to those two follow-ups; the panel PASS is the
+    evidence the engine itself is sound and net-helpful. Opt in with the env var to use
+    it today (e.g. to certify tanksize)."""
     return os.environ.get("DISCOPT_NATIVE_SPATIAL_KERNEL", "").strip().lower() in (
         "1",
         "true",

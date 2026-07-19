@@ -255,3 +255,63 @@ ceiling ~2.3×" underestimated this: it assumed the OBBT probe LPs stay at their
 cold cost, but in-kernel warm dual-simplex probes (no marshaling) target the ~0.1–0.9 ms floor —
 so the real ceiling on the OBBT-bound class is well above 2.3×. That native node kernel is the
 work; it is weeks of Rust, not a configuration, and every cheaper alternative is now measured out.
+
+## RESOLUTION (2026-07-19)
+
+The pessimism above ("the native kernel does not certify tanksize") was **superseded**
+by the C2 nonlinear-propagation pass + finite-slack safe bounds landed on this branch:
+the native kernel now **certifies tanksize** (0 uncertified nodes, certificate brackets
+the oracle 1.2686437540).
+
+**Seeded wall time (Task 1).** `_try_native_spatial_kernel` now seeds the kernel's
+`initial_incumbent` from a *rigorously-verified* feasible point: solve the continuous
+NLP relaxation once, pin the presolve-fixed integers, enumerate every 0/1 assignment of
+the free binaries (tanksize: 5 free → 32 sub-NLPs), keep the best point that passes
+`_native_kernel_verify_point` (bounds + constraints to abs=1e-6/rel=1e-4, integrality
+1e-5) and use its TRUE objective. End-to-end `m.solve()` with the flag ON:
+
+| run | status | objective | bound | nodes | wall |
+|---|---|---|---|---|---|
+| unseeded | optimal | 1.2686457461 | 1.2685457806 | 78 667 | ~255 s |
+| **seeded** | **optimal** | **1.2686437526** | 1.2685440897 | **11 379** | **~50 s** |
+
+A ~5× speedup; the seeded objective is within 1.4e-9 of the oracle and the certificate
+brackets it (`bound ≤ 1.2686437540 ≤ incumbent`).
+
+**Graduation panel (Task 2).** `discopt_benchmarks/scripts/issue764_native_kernel_graduation_panel.py`
+ran ON-vs-OFF over the 66-instance in-repo corpus (60 s budget, subprocess-isolated).
+Artifact: `discopt_benchmarks/results/issue764_native_kernel_graduation_panel_20260719T155819Z.{json,txt}`.
+
+- **cert-clean: PASS — 0 violations.** Every ON-optimal objective matches OFF to
+  abs=1e-6/rel=1e-4; no ON dual bound past a reference optimum; no optimal→non-optimal
+  regression; all 4 engaged incumbents (dispatch, nvs13, st_e13, tanksize)
+  independently feasibility-verified against the original model.
+- **net-positive: PASS (by the median bar).** Median non-engaged wall Δ = **−0.146 s**
+  (ON slightly *faster*); tanksize moves **feasible→optimal** (headline win); st_e13,
+  nvs13, dispatch engage and are ≤ OFF. Producer-probe overhead on cleanly-completing
+  decliners is < 0.5 s; the large ± deltas (bchoco07 +40 s, bchoco08 −39 s) are
+  timeout-instance wrap-up noise.
+
+**Default decision: KEEP OPT-IN (default OFF) — do NOT flip to default-ON, despite both
+panel bars passing.** Two safety blockers, and CLAUDE.md puts safety/gate-integrity
+before performance:
+
+1. **Blast radius on the smoke gate.** With the flag forced ON, **20 of the `-m smoke`
+   tests fail** (807 pass) — all exercising Python-engine machinery the native kernel
+   short-circuits (incumbent/node callbacks, RENS/SubNLP heuristic paths, solution
+   pools, warm-start incumbents, `mccormick_bounds` modes, deadline handling, batched
+   node processing, lazy constraints). Not native-kernel *correctness* failures, but a
+   default-ON would silently disable a large body of validated Python-engine behavior
+   and break a hard PR gate. Greening it by editing 20+ tests would be weakening
+   validations to pass a gate (forbidden).
+2. **No wall budget.** The kernel runs to `max_nodes` with no time limit, so on a
+   covered-but-hard instance it can run away — panel `contvar`: OFF 65 s → ON >200 s
+   (an instance neither flag certifies). A default must be runaway-safe.
+
+The panel PASS is the evidence the engine is sound and net-helpful; graduation to
+default-ON is deferred to two follow-ups: (a) give the native kernel a wall-time budget
+(no runaways), and (b) native-kernel feature parity / pass-through (or re-scope the
+Python-engine smoke tests to the engine they validate) so default-ON does not silently
+disable callbacks/heuristics/pools. Until then the flag stays opt-in
+(`DISCOPT_NATIVE_SPATIAL_KERNEL=1`) — which already certifies tanksize, the issue's
+definition of done.
