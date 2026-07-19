@@ -6,15 +6,35 @@ on "root relaxation quality"**: the root is NOT the gap.
 
 ## The numbers
 
-| | root dual bound | nodes | time | node rate |
-|---|---|---|---|---|
-| **SCIP** | **0.949** | 1351 | 1.46 s | **~925 nodes/s** |
-| **discopt** | ~0.92 (frontier) | ~450 to close | >300 s (times out) | **~2–10 nodes/s** |
+> **CORRECTED (2026-07-19, direct measurement).** An earlier version of this table listed SCIP
+> root 0.949 / discopt ~0.92. Those figures were wrong. Direct pyscipopt root solves
+> (`limits/nodes=1`) give SCIP root **0.8508** (cuts on) / **0.8383** (separation off); discopt
+> root is **0.8402**. The qualitative conclusion (throughput, not root) is unchanged and in fact
+> *strengthened* — SCIP's root advantage over discopt is ~0.01, essentially zero, not 0.03.
 
-**SCIP's root bound (0.949) ≈ discopt's (0.92).** SCIP does *not* start from a tighter
-relaxation. Both climb the dual bound from ~0.95 to the optimum 1.2686 by **branching**
-(SCIP: 0.95 @root → 1.13 @100 nodes → 1.27 @1351). The entire difference is **node
-throughput: ~100–450×**.
+| root dual bound | value | nodes to close | time | node rate |
+|---|---|---|---|---|
+| **SCIP**, cut loop on (`nodes=1`) | **0.8508** | 1351 | 1.46 s | **~925 nodes/s** |
+| **SCIP**, separation off | 0.8383 | — | — | — |
+| **discopt** root | **0.8402** | ~450 to close | >300 s (times out) | **~2–10 nodes/s** |
+| oracle optimum | 1.2686 | | | |
+
+**discopt's root (0.8402) already MATCHES SCIP's fully cut-loaded root (0.8508).** SCIP does *not*
+start from a tighter relaxation — its entire cut loop closes only **2.91 % of the root-to-opt gap**
+(0.8383 → 0.8508). Both solvers climb from ~0.84 to the optimum 1.2686 by **branching**. The entire
+difference is **node throughput: ~100–450×**.
+
+### Cut-reachability sub-finding (2026-07-19) — real gap, but irrelevant
+
+Instrumented tanksize's default solve: **zero cut separators are invoked** across the spatial
+McCormick B&B (Gomory/MIR/c-MIR/aggregation/RLT/root-cover loop all called 0×, even with
+`GOMORY_CUTS_ENABLED=True` + `DISCOPT_CMIR_AGGREGATION=1` forced). The integer-cut machinery lives
+entirely in `_solve_milp_bb` (the MILP path); tanksize takes the spatial path, which has **no cut
+seam**. So there *is* a genuine cut-reachability (plumbing) gap the prior P3 NO-GO work never tested
+on the spatial path — **but building the seam would not help**: SCIP's own cut loop, the ceiling any
+seam could reach, gains only 2.91 % of the root gap, and discopt's root already sits at SCIP's
+cut-loaded level. Direct kill-criterion measurement; the cut line is NO-GO for tanksize, now on the
+real instance (not a proxy). The lever is per-node throughput (C1), not cuts (C3).
 
 ## What SCIP does per node that discopt doesn't
 
@@ -44,20 +64,27 @@ OBBT instead of branching, another reason it leans on OBBT.
 
 ## The honest conclusion — what reaching SCIP performance actually requires
 
-It is **throughput**, and it is two coupled architectural gaps (both = `certification-gap-plan`
-core, not a missed flag — every relevant flag was tested here and none helps):
+It is **throughput**, and — corrected by the 2026-07-19 direct measurement — it is **one**
+architectural gap, not two:
 
-1. **Cut-engine quality (C3):** make discopt's integer/bilinear cuts *effective* on this class
-   so **cuts drive the bound climb (SCIP's mechanism), replacing per-node OBBT**. This is the
-   higher-leverage first step: it removes the 95-LP/node cost, and the separators already exist
-   (they just underperform). Today they are inert-to-harmful here.
-2. **Native per-node engine (C1):** the ~100× Python/JAX per-node overhead vs SCIP's native C.
+1. **Native per-node engine (C1):** the ~100× Python/JAX per-node overhead vs SCIP's native C.
+   This is the sole lever. Move the per-node loop into `discopt-core` so its ~95 warm OBBT probes
+   cost SCIP-like time.
 
-**Correction to the earlier campaign framing:** the RLT/SDP "root relaxation" research was a
-detour — SCIP's own root is 0.95, so a tighter root was never the blocker. The blocker is
-per-node *throughput*, and specifically that discopt substitutes expensive OBBT for the cheap
-cuts SCIP uses. There is no single flag being skipped; matching SCIP is the cut-engine +
-native-node work.
+2. ~~**Cut-engine quality (C3):**~~ **RULED OUT for tanksize (measured).** The earlier version of
+   this doc called cuts "the higher-leverage first step." That was wrong: SCIP's *own* cut loop
+   closes only **2.91 %** of tanksize's root gap, and discopt's root (0.8402) already matches
+   SCIP's cut-loaded root (0.8508). A perfect cut engine — matching SCIP's separators exactly —
+   could therefore gain **at most ~3 %** of the root gap here. Cuts do **not** drive tanksize's
+   bound climb for *either* solver; branching throughput does. Do NOT build a spatial cut seam for
+   this class. (The reachability gap is real — 0 separators reached — but its ceiling is ~3 %.)
+
+**Correction to the earlier campaign framing:** the RLT/SDP "root relaxation" research *and* the
+cut-engine hypothesis were both detours — SCIP's own cut-loaded root (0.8508) ≈ discopt's (0.8402),
+so neither a tighter relaxation nor better cuts is the blocker. The blocker is per-node
+*throughput*: discopt substitutes expensive per-node OBBT for cheap fast branching, and does that
+OBBT in Python/JAX at ~100× SCIP's per-node cost. There is no single flag being skipped, and no cut
+family to add; matching SCIP is the native-node (C1) work alone.
 
 ## Deep dive: why discopt's branching stalls but SCIP's climbs (2026-07-19)
 
