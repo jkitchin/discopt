@@ -106,7 +106,7 @@ fn pct(sorted_us: &[f64], p: f64) -> f64 {
     sorted_us[idx]
 }
 
-fn report(tag: &str, times_us: &mut Vec<f64>, iters: &[usize], statuses: &[LpStatus]) {
+fn report(tag: &str, times_us: &mut [f64], iters: &[usize], statuses: &[LpStatus]) {
     times_us.sort_by(|a, b| a.partial_cmp(b).unwrap());
     let total_s: f64 = times_us.iter().sum::<f64>() / 1e6;
     let nsolve = times_us.len();
@@ -521,8 +521,8 @@ fn main() -> ExitCode {
                         continue;
                     }
                     let mut d = s_view.c[j];
-                    for r in 0..m {
-                        d -= y[r] * s_view.a[r * n + j];
+                    for (r, &yr) in y.iter().enumerate() {
+                        d -= yr * s_view.a[r * n + j];
                     }
                     let stj = st[j];
                     let v = match stj {
