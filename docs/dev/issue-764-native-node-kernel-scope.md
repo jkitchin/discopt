@@ -180,6 +180,25 @@ Goal: confirm the in-Rust node is ≥5× faster than today's Python node before 
    objective) and the throughput panel (median slowdown vs SCIP/BARON on the global50 spatial
    subset). This is the remaining major increment.
 
+## What tanksize still needs, precisely (2026-07-19)
+
+With the solver wiring done (item 5, flag `DISCOPT_NATIVE_SPATIAL_KERNEL`), tanksize reaches the
+hand-off with finite root-OBBT bounds and the producer *builds a spec* — but declines via its
+box-independence guard, because its uniform relaxation contains **36 support-6 box-dependent rows**
+the term maps do not capture. Inspection (row 68: `cols [0,12,18,21,24,59]`,
+`vals [1,1.7,0.4,0.2,0.1,-1]`) shows these are **variable × linear-form** McCormick envelopes:
+`w = x_i · L` where `L = Σ aₖ xₖ + c` is a linear combination the factorable engine products against
+`x_i` *without lifting `L` to its own aux first*, so the McCormick rows expand `L` across its
+component columns (multi-column support), beyond the kernel's single-column `EnvTerm::Bilinear`.
+
+**Actionable follow-up to certify tanksize:** add `EnvTerm::BilinearAffine { i, linear_form:
+[(col,coeff)], const, w }` to the Rust kernel — its 4 McCormick rows over `[L_lo, L_hi]` (interval of
+`L` on the node box) generalize `bilinear_rows` with the `j`-factor a linear form — and the matching
+producer detection. Everything else (node kernel, safe bound, tree loop, OBBT sweep, PyO3, solver
+wiring, sense mapping, box-independence guard) is done and sound; this one envelope type is the
+remaining coverage gap for the tanksize class. Until then tanksize declines cleanly and the driver
+returns the correct Python-path result.
+
 ## Status snapshot (2026-07-19)
 
 Built + tested + pushed this session: the entire Rust native spatial kernel (`bnb/mccormick_patch`,
