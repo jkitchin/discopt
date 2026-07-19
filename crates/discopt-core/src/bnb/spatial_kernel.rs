@@ -22,6 +22,7 @@
 
 use crate::bnb::mccormick_patch as mc;
 use crate::bnb::obbt_sweep::{obbt_probe_sweep, ObbtSweepResult};
+use crate::lp::simplex::refine::ns_safe_bound_csc;
 use crate::lp::simplex::sparse::SparseCols;
 use crate::lp::simplex::{primal::solve_lp_cols, LpStatus, SimplexOptions};
 
@@ -189,9 +190,12 @@ pub struct AssembledLp {
 pub struct SpatialNodeResult {
     /// LP status of the node relaxation solve.
     pub status: LpStatus,
-    /// Node relaxation objective (a lower bound for a min-sense problem). The
-    /// rigorous Neumaier–Shcherbina safe bound is a follow-up; [`Self::dual`] is
-    /// returned so the caller can compute it.
+    /// Rigorous Neumaier–Shcherbina safe lower bound for the node relaxation
+    /// (`<=` the true LP optimum at any conditioning), computed from the row duals
+    /// via [`ns_safe_bound_csc`]. `-inf` when the bound cannot be certified (a
+    /// nonzero reduced cost meets an infinite bound) — sound: a `-inf` bound never
+    /// fathoms. **Never** the raw simplex objective, which can drift *above* the
+    /// true optimum on an ill-conditioned basis and cause an unsound fathom.
     pub bound: f64,
     /// Primal relaxation point, length `n_total` (structural + slacks).
     pub x: Vec<f64>,
@@ -301,6 +305,19 @@ pub fn solve_spatial_node(
     let sol = solve_lp_cols(lp.sp.clone(), lp.m, lp.n_total, &c, &lp.l, &lp.u, &lp.b, opts);
     let mut n_lp_solves = 1usize;
 
+    // Rigorous safe lower bound from the row duals — NEVER the raw simplex objective
+    // (which can drift above the true optimum and cause an unsound fathom). `-inf`
+    // when uncertifiable, which never prunes.
+    let bound = if sol.status == LpStatus::Optimal {
+        let (col_ptr, row_idx, vals) = lp.sp.raw();
+        ns_safe_bound_csc(
+            &sol.dual, &c, col_ptr, row_idx, vals, lp.m, lp.n_total, &lp.b, &lp.l, &lp.u,
+        )
+        .unwrap_or(f64::NEG_INFINITY)
+    } else {
+        f64::NEG_INFINITY
+    };
+
     let mut tightened = Vec::new();
     if run_obbt && sol.status == LpStatus::Optimal && !spec.obbt_candidates.is_empty() {
         let sweep: ObbtSweepResult = obbt_probe_sweep(
@@ -320,7 +337,7 @@ pub fn solve_spatial_node(
 
     SpatialNodeResult {
         status: sol.status,
-        bound: sol.obj,
+        bound,
         x: sol.x,
         dual: sol.dual,
         tightened,
@@ -359,7 +376,9 @@ mod tests {
         let opts = SimplexOptions::default();
         let res = solve_spatial_node(&spec, &lo, &hi, false, &opts);
         assert_eq!(res.status, LpStatus::Optimal);
-        // min w over the McCormick hull on [0,2]^2 is 0.
+        // min w over the McCormick hull on [0,2]^2 is 0; the SAFE bound reproduces
+        // it (well-conditioned) and is never above the true optimum (soundness).
+        assert!(res.bound <= 0.0 + 1e-9, "safe bound {} above true optimum 0", res.bound);
         assert!(res.bound.abs() < 1e-7, "bound {} != 0", res.bound);
         // aux w column bound derived from the box: [0*0, 2*2] = [0,4].
         let lp = assemble_node_lp(&spec, &lo, &hi);
@@ -379,6 +398,8 @@ mod tests {
         let opts = SimplexOptions::default();
         let res = solve_spatial_node(&spec, &lo, &hi, false, &opts);
         assert_eq!(res.status, LpStatus::Optimal);
+        // Safe bound reproduces the tightened optimum and never exceeds it.
+        assert!(res.bound <= 1.0 + 1e-9, "safe bound {} above true optimum 1", res.bound);
         assert!((res.bound - 1.0).abs() < 1e-6, "bound {} != 1", res.bound);
     }
 
