@@ -137,6 +137,35 @@ primal regression.
 
 ## Work log (append newest first)
 
+- **2026-07-19 (iter 6): K2c/K2d DONE (tree + gate). Correctness PERFECT; WALL is
+  the real bottleneck (measured) → warm-start rework is the priority.**
+  - Tree PyO3 binding `solve_convex_tree_py` + panel gate `issue798_k2_tree_gate.py`.
+  - **Correctness gate PASSES (non-negotiable):** all 4 instances certify `optimal`
+    with dual bound = oracle optimum EXACTLY (1296.12/1721.45/1269.93/67.71),
+    cert-clean, no false optimal, no bound below oracle. The tree is sound.
+  - **Separation:** added MIR (c-MIR family) — measured lever (kernel closed 38% of
+    syn40m's root gap vs the prototype's 78%; GMI+cover alone left it open). MIR
+    more than halved total panel nodes (2232→1006; rsyn0815m 1301→141, syn40m
+    365→211). rsyn0805m regressed 287→377 (MIR crowds GMI in the top-8 `select_cuts`
+    — a per-family cut budget would fix it).
+  - **Node-count gate: FAIL** — 377/277/141/211 = 3.0–5.6× the prototype
+    (67/60/46/55), down from 4–28× but above the 2× bar. NOT weakened.
+  - **DECISIVE MEASUREMENT (the K4 metric): kernel WALL = 25–36 s/instance**, NOT
+    sub-second — 64× SCIP's 0.5–0.8 s. The "Rust nodes are ~1000× faster" prior was
+    WRONG for this kernel: it is ~87 ms/node. **Root cause: `solve_node_cut`
+    re-assembles the LP from scratch (`SparseCols::from_csc`) and COLD-solves it on
+    every OA round × every separation round — ~60–120 cold LP solves/node.** The K1
+    "box-reassembly" shortcut (fine for the K1 byte-check) is the bottleneck.
+  - **NEXT PRIORITY — K2e: warm-start / growing-LP node solve.** Rework
+    `oa_converge`/`solve_node_cut` to the milp_driver pattern: assemble the node LP
+    ONCE, append OA-tangent rows and cut rows IN PLACE (`augment_csc_with_cuts`
+    style), warm-start each re-solve from the previous basis
+    (`PreparedDual::reoptimize` / `solve_lp_cols_warm`, with the P1.0
+    `expel_zero_artificials` basis). This directly attacks the 64× wall gap and is
+    the honest right fix (deferred from K2a/b). Re-measure wall vs the NLP-BB path
+    after. Only then are K3 (primal) and K4 (graduation) meaningful — a slow kernel
+    can't graduate on wall.
+
 - **2026-07-19 (iter 5): K2a/b DONE — in-node separation.**
   - Refactored `solve_node` → `oa_converge` helper (K1 path unchanged) + new
     `solve_node_cut` (K2): OA-converge, then separate `separate_cover_csc` +
