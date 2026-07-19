@@ -142,11 +142,23 @@ Goal: confirm the in-Rust node is ≥5× faster than today's Python node before 
    objective-swap primitive** (`PreparedPrimal`: build the scaled matrix + LU once, then
    re-price/re-pivot for each unit `c` warm from the node basis) — new simplex-internals work,
    coupled to item 4, not a standalone unit.
-4. The Rust spatial node orchestrator + `SpatialKernelSpec` PyO3 interface; strided NLP callback.
-   **This is the decisive integration** — it assembles the patched LP (item 1–2), runs the warm
-   solve + OBBT loop (item 3), FBBT, DBBT, and branching in one Rust loop. The entry-experiment kill
-   criterion lands here: run one tanksize node end-to-end in Rust and time vs the ~420 ms Python
-   node — **kill if `< 5×`**.
+4. The Rust spatial node orchestrator — **Rust side DONE (2026-07-19)**. Entry experiment cleared at
+   ~9× (step 2 above). Built and tested entirely in `discopt-core`:
+   - `bnb/spatial_kernel.rs` — `SpatialKernelSpec` (the box-independent hand-off) + `EnvTerm`
+     {Bilinear, Monomial, AffineSquare, Sqrt} + `assemble_node_lp` (regenerates every box-dependent
+     envelope row + aux bound in closed form, builds standard-form `[A|I]z=b` in CSC) +
+     `solve_spatial_node` (assemble → solve → OBBT sweep, warm-started from the node basis).
+   - Rigorous safe bound: `refine::ns_safe_bound_csc` (CSC twin of the dense Neumaier–Shcherbina,
+     bit-identical, DD precision) wired as the node bound — never the raw simplex objective.
+   - `bnb/spatial_tree.rs` — the full spatial B&B loop: safe-bound pruning, OBBT box tightening,
+     sufficient-condition incumbent acceptance (integers integral AND every term McCormick-tight),
+     covering branch (integer floor/ceil or spatial worst-gap split). Sound by construction.
+
+   **Remaining bridge to run on tanksize (the back half):** (a) the `SpatialKernelSpec` PyO3 surface
+   in `crates/discopt-python/`; (b) the **Python producer** that extracts the spec from the JAX
+   McCormick compiler (identify each lifted term's type + operand/output columns, the fixed linear
+   rows, objective, integrality, OBBT candidates) — the hardest remaining plumbing, coupled to
+   `MccormickLPRelaxer`; (c) the strided NLP primal-heuristic callback.
 5. Wire behind a flag; bound-neutral graduation panel (exact node_count + objective), then the
    throughput panel (median slowdown vs SCIP/BARON on the global50 spatial subset).
 
