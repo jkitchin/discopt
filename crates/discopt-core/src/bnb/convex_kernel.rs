@@ -864,11 +864,15 @@ impl ConvexKernelSpec {
             }
         }
         // Final integer rounding on the box.
-        for j in 0..self.n {
-            if self.integrality[j] {
-                lo[j] = (lo[j] - 1e-9).ceil();
-                hi[j] = (hi[j] + 1e-9).floor();
-                if lo[j] > hi[j] + 1e-7 {
+        for ((lj, hj), &is_int) in lo
+            .iter_mut()
+            .zip(hi.iter_mut())
+            .zip(self.integrality.iter())
+        {
+            if is_int {
+                *lj = (*lj - 1e-9).ceil();
+                *hj = (*hj + 1e-9).floor();
+                if *lj > *hj + 1e-7 {
                     return false;
                 }
             }
@@ -880,8 +884,8 @@ impl ConvexKernelSpec {
     /// row satisfied to `oa_tol`)? Such an LP vertex is genuinely feasible → a
     /// valid incumbent (the minimal LP-NLP-BB primal; K3 adds NLP/rounding).
     fn is_integer_feasible(&self, x: &[f64], int_tol: f64, oa_tol: f64) -> bool {
-        for j in 0..self.n {
-            if self.integrality[j] && (x[j] - x[j].round()).abs() > int_tol {
+        for (&is_int, &xj) in self.integrality.iter().zip(x.iter()) {
+            if is_int && (xj - xj.round()).abs() > int_tol {
                 return false;
             }
         }
@@ -892,9 +896,9 @@ impl ConvexKernelSpec {
     fn most_fractional(&self, x: &[f64], int_tol: f64) -> Option<usize> {
         let mut best = int_tol;
         let mut bj = None;
-        for j in 0..self.n {
-            if self.integrality[j] {
-                let f = x[j] - x[j].floor();
+        for (j, (&is_int, &xj)) in self.integrality.iter().zip(x.iter()).enumerate() {
+            if is_int {
+                let f = xj - xj.floor();
                 let d = f.min(1.0 - f);
                 if d > best {
                     best = d;
