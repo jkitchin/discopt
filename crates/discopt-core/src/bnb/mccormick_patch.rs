@@ -122,11 +122,7 @@ pub fn monomial_rows(i: usize, s: usize, li: f64, ui: f64, p: i32) -> [EnvRow; 4
     // slope is 0/0; fall back to the endpoint derivative so the "secant" collapses
     // to the tangent at the pinned point. Guarded on EXACT zero width only — for any
     // positive width the true secant is the sound convex overestimator.
-    let slope = if ui <= li {
-        dfl
-    } else {
-        (fu - fl) / (ui - li)
-    };
+    let slope = if ui <= li { dfl } else { (fu - fl) / (ui - li) };
     let convex = (p % 2 == 0) || (li >= 0.0);
     let row = |cx: f64, cs: f64, rhs: f64| EnvRow {
         cols: [i, s, 0],
@@ -136,17 +132,17 @@ pub fn monomial_rows(i: usize, s: usize, li: f64, ui: f64, p: i32) -> [EnvRow; 4
     };
     if convex {
         [
-            row(dfl, -1.0, dfl * li - fl),        // tangent at li:  s >= f'(li)(x-li)+f(li)
-            row(dfm, -1.0, dfm * mid - fm),       // tangent at midpoint
-            row(dfu, -1.0, dfu * ui - fu),        // tangent at ui
-            row(-slope, 1.0, fl - slope * li),    // secant (overestimator): s <= ...
+            row(dfl, -1.0, dfl * li - fl), // tangent at li:  s >= f'(li)(x-li)+f(li)
+            row(dfm, -1.0, dfm * mid - fm), // tangent at midpoint
+            row(dfu, -1.0, dfu * ui - fu), // tangent at ui
+            row(-slope, 1.0, fl - slope * li), // secant (overestimator): s <= ...
         ]
     } else {
         [
-            row(-dfl, 1.0, fl - dfl * li),        // tangent at li (overestimator): s <= ...
-            row(-dfm, 1.0, fm - dfm * mid),       // tangent at midpoint
-            row(-dfu, 1.0, fu - dfu * ui),        // tangent at ui
-            row(slope, -1.0, slope * li - fl),    // secant (underestimator): s >= ...
+            row(-dfl, 1.0, fl - dfl * li), // tangent at li (overestimator): s <= ...
+            row(-dfm, 1.0, fm - dfm * mid), // tangent at midpoint
+            row(-dfu, 1.0, fu - dfu * ui), // tangent at ui
+            row(slope, -1.0, slope * li - fl), // secant (underestimator): s >= ...
         ]
     }
 }
@@ -156,7 +152,14 @@ pub fn monomial_rows(i: usize, s: usize, li: f64, ui: f64, p: i32) -> [EnvRow; 4
 /// convex for every `t` (no sign gating). Mirrors `_affine_square_rows`; each row is
 /// `(coeff_on_x, coeff_on_w, rhs)`, columns `(j, w)`.
 #[inline]
-pub fn affine_square_rows(j: usize, w: usize, coeff: f64, cst: f64, li: f64, ui: f64) -> [EnvRow; 4] {
+pub fn affine_square_rows(
+    j: usize,
+    w: usize,
+    coeff: f64,
+    cst: f64,
+    li: f64,
+    ui: f64,
+) -> [EnvRow; 4] {
     let tl = coeff * li + cst;
     let tu = coeff * ui + cst;
     let (t_lo, t_hi) = if tl <= tu { (tl, tu) } else { (tu, tl) };
@@ -172,9 +175,9 @@ pub fn affine_square_rows(j: usize, w: usize, coeff: f64, cst: f64, li: f64, ui:
         rhs,
     };
     [
-        row(-slope * coeff, 1.0, a + slope * cst),                    // secant (overestimator)
+        row(-slope * coeff, 1.0, a + slope * cst), // secant (overestimator)
         row(2.0 * t_lo * coeff, -1.0, t_lo * t_lo - 2.0 * t_lo * cst), // tangent at t_lo
-        row(2.0 * mid * coeff, -1.0, mid * mid - 2.0 * mid * cst),     // tangent at midpoint
+        row(2.0 * mid * coeff, -1.0, mid * mid - 2.0 * mid * cst), // tangent at midpoint
         row(2.0 * t_hi * coeff, -1.0, t_hi * t_hi - 2.0 * t_hi * cst), // tangent at t_hi
     ]
 }
@@ -612,7 +615,11 @@ mod tests {
             let w = (coeff * xi + cst).sqrt();
             let x = [xi, w];
             for r in &rows {
-                assert!(sat(r, &x, 1e-9), "sqrt true point {xi} cut: residual {}", r.residual(&x));
+                assert!(
+                    sat(r, &x, 1e-9),
+                    "sqrt true point {xi} cut: residual {}",
+                    r.residual(&x)
+                );
             }
         }
     }
@@ -627,7 +634,11 @@ mod tests {
         for &(xi, xj) in &[(li, lj), (li, uj), (ui, lj), (ui, uj)] {
             let x = [xi, xj, xi * xj];
             for r in &rows {
-                assert!(sat(r, &x, 1e-9), "corner ({xi},{xj}) residual {}", r.residual(&x));
+                assert!(
+                    sat(r, &x, 1e-9),
+                    "corner ({xi},{xj}) residual {}",
+                    r.residual(&x)
+                );
             }
         }
     }
@@ -645,7 +656,11 @@ mod tests {
                 let xj = lj + (uj - lj) * (b as f64) / (n as f64);
                 let x = [xi, xj, xi * xj];
                 for r in &rows {
-                    assert!(sat(r, &x, 1e-9), "true product cut: residual {}", r.residual(&x));
+                    assert!(
+                        sat(r, &x, 1e-9),
+                        "true product cut: residual {}",
+                        r.residual(&x)
+                    );
                 }
             }
         }
@@ -736,14 +751,30 @@ mod tests {
         let lo = vec![1.0, 2.0, -1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
         let hi = vec![3.0, 5.0, 4.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
         let mut out = Vec::new();
-        bilinear_linform_rows(&[0], &[1.0], 0.0, &[1, 2], &[1.7, 0.4], 0.5, 9, &lo, &hi, &mut out);
+        bilinear_linform_rows(
+            &[0],
+            &[1.0],
+            0.0,
+            &[1, 2],
+            &[1.7, 0.4],
+            0.5,
+            9,
+            &lo,
+            &hi,
+            &mut out,
+        );
         assert_eq!(out.len(), 4);
         assert_wide_row(&out[0], &[(0, 3.5), (1, 1.7), (2, 0.4), (9, -1.0)], 3.0);
         assert_wide_row(&out[1], &[(0, 10.6), (1, 5.1), (2, 1.2), (9, -1.0)], 30.3);
         assert_wide_row(&out[2], &[(0, -3.5), (1, -5.1), (2, -1.2), (9, 1.0)], -9.0);
-        assert_wide_row(&out[3], &[(0, -10.6), (1, -1.7), (2, -0.4), (9, 1.0)], -10.1);
+        assert_wide_row(
+            &out[3],
+            &[(0, -10.6), (1, -1.7), (2, -0.4), (9, 1.0)],
+            -10.1,
+        );
         // aux bounds = interval(A)*interval(B) = [1,3]*[3.5,10.6] = [3.5, 31.8].
-        let (alo, ahi) = bilinear_linform_aux_bounds(&[0], &[1.0], 0.0, &[1, 2], &[1.7, 0.4], 0.5, &lo, &hi);
+        let (alo, ahi) =
+            bilinear_linform_aux_bounds(&[0], &[1.0], 0.0, &[1, 2], &[1.7, 0.4], 0.5, &lo, &hi);
         assert!((alo - 3.5).abs() < 1e-9 && (ahi - 31.8).abs() < 1e-9);
     }
 
@@ -754,7 +785,18 @@ mod tests {
         let lo = vec![1.0, 0.0, 0.0, 0.0, 0.0, 0.0];
         let hi = vec![2.0, 3.0, 0.0, 0.0, 0.0, 0.0];
         let mut out = Vec::new();
-        bilinear_linform_rows(&[0], &[1.0], 0.0, &[0, 1], &[1.0, 1.0], 0.0, 5, &lo, &hi, &mut out);
+        bilinear_linform_rows(
+            &[0],
+            &[1.0],
+            0.0,
+            &[0, 1],
+            &[1.0, 1.0],
+            0.0,
+            5,
+            &lo,
+            &hi,
+            &mut out,
+        );
         assert_eq!(out.len(), 4);
         assert_wide_row(&out[0], &[(0, 2.0), (1, 1.0), (5, -1.0)], 1.0);
         assert_wide_row(&out[1], &[(0, 7.0), (1, 2.0), (5, -1.0)], 10.0);
@@ -770,7 +812,18 @@ mod tests {
         let hi = vec![3.0, 5.0, 0.0];
         let special = bilinear_rows(0, 1, 2, -1.0, 3.0, 2.0, 5.0);
         let mut general = Vec::new();
-        bilinear_linform_rows(&[0], &[1.0], 0.0, &[1], &[1.0], 0.0, 2, &lo, &hi, &mut general);
+        bilinear_linform_rows(
+            &[0],
+            &[1.0],
+            0.0,
+            &[1],
+            &[1.0],
+            0.0,
+            2,
+            &lo,
+            &hi,
+            &mut general,
+        );
         assert_eq!(general.len(), 4);
         // Same SET of rows (the McCormick hull) — `_emit_mccormick` emits the two
         // over-rows in the opposite order to `_bilinear_rows`, so match set-wise: each
@@ -789,7 +842,10 @@ mod tests {
         let gset: Vec<_> = general.iter().map(|(c, k, r)| norm(c, k, *r)).collect();
         for s in &special {
             let key = norm(&s.cols[..s.nnz], &s.coeffs[..s.nnz], s.rhs);
-            assert!(gset.contains(&key), "special row {key:?} not in general set");
+            assert!(
+                gset.contains(&key),
+                "special row {key:?} not in general set"
+            );
         }
     }
 

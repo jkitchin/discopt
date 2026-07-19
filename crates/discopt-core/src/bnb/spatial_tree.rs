@@ -158,7 +158,9 @@ fn term_true_value(t: &EnvTerm, x: &[f64]) -> Option<f64> {
             let t = coeff * x[j] + cst;
             t * t
         }
-        EnvTerm::Sqrt { x: xc, coeff, cst, .. } => {
+        EnvTerm::Sqrt {
+            x: xc, coeff, cst, ..
+        } => {
             let arg = coeff * x[xc] + cst;
             if arg < 0.0 {
                 return None;
@@ -236,7 +238,12 @@ pub fn solve_spatial_tree(
     // best-bound the heap top is exactly that frontier minimum.
     let mut global_lb_closed = f64::INFINITY;
 
-    while let Some(QNode { pb: parent_bound, lo, hi }) = heap.pop() {
+    while let Some(QNode {
+        pb: parent_bound,
+        lo,
+        hi,
+    }) = heap.pop()
+    {
         // Fathom by the parent bound if the incumbent already dominates it. The
         // region's valid lower bound is `parent_bound`.
         if let Some(inc) = incumbent {
@@ -272,7 +279,13 @@ pub fn solve_spatial_tree(
         let mut lo = lo;
         let mut hi = hi;
         if config.run_propagation
-            && !propagate_spec_fixpoint(spec, &mut lo, &mut hi, incumbent, config.propagation_rounds)
+            && !propagate_spec_fixpoint(
+                spec,
+                &mut lo,
+                &mut hi,
+                incumbent,
+                config.propagation_rounds,
+            )
         {
             let contrib = incumbent.unwrap_or(f64::INFINITY).max(parent_bound);
             global_lb_closed = global_lb_closed.min(contrib);
@@ -430,18 +443,34 @@ pub fn solve_spatial_tree(
             let hi2 = hi.clone();
             lo2[split_col] = f + 1.0;
             if hi1[split_col] >= lo1[split_col] - 1e-12 {
-                heap.push(QNode { pb: bound, lo: lo1, hi: hi1 });
+                heap.push(QNode {
+                    pb: bound,
+                    lo: lo1,
+                    hi: hi1,
+                });
             }
             if hi2[split_col] >= lo2[split_col] - 1e-12 {
-                heap.push(QNode { pb: bound, lo: lo2, hi: hi2 });
+                heap.push(QNode {
+                    pb: bound,
+                    lo: lo2,
+                    hi: hi2,
+                });
             }
         } else {
             let mut hi1 = hi.clone();
             hi1[split_col] = split_at;
             let mut lo2 = lo.clone();
             lo2[split_col] = split_at;
-            heap.push(QNode { pb: bound, lo: lo.clone(), hi: hi1 });
-            heap.push(QNode { pb: bound, lo: lo2, hi: hi.clone() });
+            heap.push(QNode {
+                pb: bound,
+                lo: lo.clone(),
+                hi: hi1,
+            });
+            heap.push(QNode {
+                pb: bound,
+                lo: lo2,
+                hi: hi.clone(),
+            });
         }
     }
 
@@ -488,7 +517,10 @@ fn dot(a: &[f64], b: &[f64]) -> f64 {
 
 /// `Σ coeffs[k] * x[cols[k]]` — the value of a sparse affine form's linear part.
 fn dot_form(cols: &[usize], coeffs: &[f64], x: &[f64]) -> f64 {
-    cols.iter().zip(coeffs.iter()).map(|(&c, &a)| a * x[c]).sum()
+    cols.iter()
+        .zip(coeffs.iter())
+        .map(|(&c, &a)| a * x[c])
+        .sum()
 }
 
 /// Pull a split point strictly inside `(lo, hi)` so both children are nonempty; if
@@ -546,7 +578,11 @@ mod tests {
         // Global optimum is 2.0.
         assert!((inc - 2.0).abs() < 1e-3, "incumbent {inc} != 2.0");
         // Soundness: global bound never above the true optimum.
-        assert!(res.bound <= 2.0 + 1e-6, "bound {} above optimum 2.0", res.bound);
+        assert!(
+            res.bound <= 2.0 + 1e-6,
+            "bound {} above optimum 2.0",
+            res.bound
+        );
         // The incumbent point is feasible: x*y == w and x+y>=3.
         let x = &res.incumbent_x;
         assert!((x[0] * x[1] - x[2]).abs() < 1e-4, "w != x*y at incumbent");

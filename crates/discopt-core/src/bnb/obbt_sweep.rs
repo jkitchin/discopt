@@ -183,7 +183,15 @@ mod tests {
         let res = obbt_probe_sweep(&sp, m, n, &b, &l, &u, &[0usize], &start, &opts);
         // OBBT over [0.5,1.5] recovers min 0.5 / max 1.5 (the box binds, not the LP),
         // so the bound is unchanged — never loosened toward the LP's [0,2].
-        assert!(res.bounds[0].0 >= 0.5 - 1e-9, "lower loosened: {}", res.bounds[0].0);
-        assert!(res.bounds[0].1 <= 1.5 + 1e-9, "upper loosened: {}", res.bounds[0].1);
+        assert!(
+            res.bounds[0].0 >= 0.5 - 1e-9,
+            "lower loosened: {}",
+            res.bounds[0].0
+        );
+        assert!(
+            res.bounds[0].1 <= 1.5 + 1e-9,
+            "upper loosened: {}",
+            res.bounds[0].1
+        );
     }
 }
