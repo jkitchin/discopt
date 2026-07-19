@@ -126,9 +126,16 @@ pub fn solve_spatial_tree_py<'py>(
     let tcoeff = term_coeff.as_slice()?;
     let tcst = term_cst.as_slice()?;
     let nt = kind.len();
-    if [ti.len(), tj.len(), tout.len(), tp.len(), tcoeff.len(), tcst.len()]
-        .iter()
-        .any(|&l| l != nt)
+    if [
+        ti.len(),
+        tj.len(),
+        tout.len(),
+        tp.len(),
+        tcoeff.len(),
+        tcst.len(),
+    ]
+    .iter()
+    .any(|&l| l != nt)
     {
         return Err(PyValueError::new_err(
             "all term_* arrays must have the same length",
@@ -216,7 +223,11 @@ pub fn solve_spatial_tree_py<'py>(
         fixed_rows,
         terms,
         blf_terms,
-        obbt_candidates: obbt_candidates.as_slice()?.iter().map(|&v| v as usize).collect(),
+        obbt_candidates: obbt_candidates
+            .as_slice()?
+            .iter()
+            .map(|&v| v as usize)
+            .collect(),
     };
 
     let cfg = SpatialTreeConfig {

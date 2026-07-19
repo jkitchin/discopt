@@ -118,17 +118,47 @@ node LPs in E0LPBIN1) + `crates/discopt-core/src/bin/e0_warm_bench.rs`
    2.57). Every warm entry (`solve_lp_warm`, `PreparedDual::prepare`) silently
    rejects it and cold-falls-back at ~11 ms/child → 90/s. Bench-side
    slack-completion and crossover/`recover_basis` cannot repair the mislabeled
-   statuses; the fix belongs in `solve_lp`'s basis finalization. NOTE: this
-   defect plausibly degrades today's production OBBT/probe warm paths on the
-   same LP class — verify when fixing.
+   statuses; the fix belongs in `solve_lp`'s basis finalization.
+
+   **RESOLVED (2026-07-19), gated default-OFF.** Root cause: phase-1 parks
+   *zero-valued* (degenerate) basic artificials in slackless equality rows;
+   `drive_out_basic_artificials` only expels artificials with value > 1e-9, so
+   they survive phase 2, and the emission substitution finds no zero-valued
+   singleton slack to swap (equality rows have none) → short + mislabeled basis.
+   Fix: `expel_zero_basic_artificials` finalization pass drives them out via
+   t=0 degenerate pivots on any nonbasic real column with a nonzero tableau
+   entry in the row (a pure representation change: x/obj/duals invariant on the
+   vertex). Measured: rsyn0805m warm 90 → 392/s per-call, **kernel pattern
+   1,419/s** (> the 500/s gate); nvs09 25.5k/s and tanksize 1.2k/s unchanged.
+
+   *Bound-changing, so gated* (the honest measurement): with the pass always-on
+   it also fills rows an inequality LP left short (nonzero slack → no zero-valued
+   singleton), so warm-start engages where it previously cold-fell-back and the
+   tree-exploration *sequence* changes — `node_count` drifts on the
+   **deterministic** instances `nvs02` (337→339) and `nvs15` (7→11). (The larger
+   apparent drift on time-limited instances — contvar/nvs05/tanksize/tls2/tspn* —
+   is wall-budget *timing noise*, not the change: `contvar.bound` differs even
+   between two identical-code runs, so those are excluded from the neutrality
+   comparison, which is only meaningful on instances that solve to completion.)
+   Per CLAUDE.md §5 a `node_count`-changing change is bound-changing, so it ships
+   behind `SimplexOptions::expel_zero_artificials` (**default false**; every
+   Python binding constructs it false). **Proven neutral OFF:** node_count +
+   objective + status + cert byte-identical to the pre-change baseline on all 46
+   deterministic (optimal/infeasible) vendored instances. The branch-and-cut
+   kernel opts in (it *needs* warm-start to succeed); default-on graduation waits
+   on the §5 panel. Fails-before/
+   passes-after regression test `full_basis_on_slackless_equality_rows_p1_0`
+   (cold basis 5/7 → fixed 7/7, same optimum). (branch
+   `fix/p1.0-basis-finalization`.)
 3. **P1.0b: syn40m-class numerical robustness.** The 832×940 big-M standard
    form defeats the cold simplex (`Numerical`, 336 ms). Hardening item;
    in-process HiGHS as the kernel LP remains the named fallback.
 
-**Kill-criterion disposition:** not tripped as a capability verdict (26k/s on
-the same machinery; rsyn's 90/s is a diagnosed, fixable handoff defect) — but
-the pass is CONDITIONAL: P1 loop code may not start until P1.0 lands and
-rsyn0805m measures ≥ 500/s on this bench.
+**Kill-criterion disposition:** PASSED. P1.0 has landed (rsyn0805m kernel
+pattern 1,399/s ≥ 500/s gate), so the E0 conditional pass is now unconditional
+on the node-rate axis. P1.0b (syn40m numerical robustness) remains open as a
+hardening item but does not block P1 (the in-process-HiGHS fallback covers it).
+E1 is the next entry experiment.
 
 **E1 (days) — template-refresh parity.** For the envelope families covering
 the certifying panel: analyze-phase templates + Rust refresh must reproduce

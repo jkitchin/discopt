@@ -130,6 +130,7 @@ fn opts(inst: &Instance) -> MilpOptions {
             deadline: None,
             warm_stall_guard: true,
             warm_stall_cap_override: None,
+            expel_zero_artificials: false,
         },
     }
 }

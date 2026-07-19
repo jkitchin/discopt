@@ -101,9 +101,7 @@ impl EnvTerm {
     /// by structural column). `None` for `Sqrt` on a base box that dips below 0.
     fn aux_bounds(&self, lo: &[f64], hi: &[f64]) -> Option<(f64, f64)> {
         Some(match *self {
-            EnvTerm::Bilinear { i, j, .. } => {
-                mc::bilinear_aux_bounds(lo[i], hi[i], lo[j], hi[j])
-            }
+            EnvTerm::Bilinear { i, j, .. } => mc::bilinear_aux_bounds(lo[i], hi[i], lo[j], hi[j]),
             EnvTerm::Monomial { i, p, .. } => mc::monomial_aux_bounds(lo[i], hi[i], p),
             EnvTerm::AffineSquare { j, coeff, cst, .. } => {
                 mc::affine_square_aux_bounds(coeff, cst, lo[j], hi[j])
@@ -119,11 +117,7 @@ impl EnvTerm {
     fn push_rows(&self, lo: &[f64], hi: &[f64], out: &mut Vec<(Vec<usize>, Vec<f64>, f64)>) {
         let emit = |rows: &[mc::EnvRow], out: &mut Vec<(Vec<usize>, Vec<f64>, f64)>| {
             for r in rows {
-                out.push((
-                    r.cols[..r.nnz].to_vec(),
-                    r.coeffs[..r.nnz].to_vec(),
-                    r.rhs,
-                ));
+                out.push((r.cols[..r.nnz].to_vec(), r.coeffs[..r.nnz].to_vec(), r.rhs));
             }
         };
         match *self {
@@ -135,7 +129,8 @@ impl EnvTerm {
                 emit(&mc::affine_square_rows(j, w, coeff, cst, lo[j], hi[j]), out)
             }
             EnvTerm::Sqrt { x, w, coeff, cst } => {
-                if let Some(rows) = mc::univariate_rows(x, w, coeff, cst, lo[x], hi[x], mc::Univariate::Sqrt)
+                if let Some(rows) =
+                    mc::univariate_rows(x, w, coeff, cst, lo[x], hi[x], mc::Univariate::Sqrt)
                 {
                     emit(&rows, out);
                 }
@@ -260,7 +255,14 @@ pub fn assemble_node_lp(spec: &SpatialKernelSpec, lo: &[f64], hi: &[f64]) -> Ass
     }
     for t in &spec.blf_terms {
         let (alo, ahi) = mc::bilinear_linform_aux_bounds(
-            &t.a_cols, &t.a_coeffs, t.a_const, &t.b_cols, &t.b_coeffs, t.b_const, lo, hi,
+            &t.a_cols,
+            &t.a_coeffs,
+            t.a_const,
+            &t.b_cols,
+            &t.b_coeffs,
+            t.b_const,
+            lo,
+            hi,
         );
         if alo.is_finite() {
             l[t.w] = l[t.w].max(alo);
@@ -271,9 +273,8 @@ pub fn assemble_node_lp(spec: &SpatialKernelSpec, lo: &[f64], hi: &[f64]) -> Ass
     }
 
     // Rows: fixed rows, then per-term envelope rows (fixed-width, then affine-form).
-    let mut rows: Vec<(Vec<usize>, Vec<f64>, f64)> = Vec::with_capacity(
-        spec.fixed_rows.len() + spec.terms.len() * 4 + spec.blf_terms.len() * 4,
-    );
+    let mut rows: Vec<(Vec<usize>, Vec<f64>, f64)> =
+        Vec::with_capacity(spec.fixed_rows.len() + spec.terms.len() * 4 + spec.blf_terms.len() * 4);
     for fr in &spec.fixed_rows {
         rows.push((fr.cols.clone(), fr.coeffs.clone(), fr.rhs));
     }
@@ -282,7 +283,15 @@ pub fn assemble_node_lp(spec: &SpatialKernelSpec, lo: &[f64], hi: &[f64]) -> Ass
     }
     for t in &spec.blf_terms {
         mc::bilinear_linform_rows(
-            &t.a_cols, &t.a_coeffs, t.a_const, &t.b_cols, &t.b_coeffs, t.b_const, t.w, lo, hi,
+            &t.a_cols,
+            &t.a_coeffs,
+            t.a_const,
+            &t.b_cols,
+            &t.b_coeffs,
+            t.b_const,
+            t.w,
+            lo,
+            hi,
             &mut rows,
         );
     }
@@ -331,7 +340,11 @@ pub fn assemble_node_lp(spec: &SpatialKernelSpec, lo: &[f64], hi: &[f64]) -> Ass
     for (r, (rc, rcoef, rhs)) in rows.iter().enumerate() {
         let mut min_act = 0.0f64;
         for (c, v) in rc.iter().zip(rcoef.iter()) {
-            min_act += if *v > 0.0 { v * lfull[*c] } else { v * ufull[*c] };
+            min_act += if *v > 0.0 {
+                v * lfull[*c]
+            } else {
+                v * ufull[*c]
+            };
         }
         let cap = if min_act.is_finite() {
             (rhs - min_act).max(0.0)
@@ -375,7 +388,16 @@ pub fn solve_spatial_node(
     // trusted path uses and unscales x/dual/ray back to the original space, so the
     // safe-bound evaluation sees well-conditioned certificates against the
     // original system.
-    let sol = solve_lp_cols_scaled(lp.sp.clone(), lp.m, lp.n_total, &c, &lp.l, &lp.u, &lp.b, opts);
+    let sol = solve_lp_cols_scaled(
+        lp.sp.clone(),
+        lp.m,
+        lp.n_total,
+        &c,
+        &lp.l,
+        &lp.u,
+        &lp.b,
+        opts,
+    );
     let mut n_lp_solves = 1usize;
 
     // Rigorous safe lower bound from the row duals — NEVER the raw simplex objective
@@ -452,7 +474,11 @@ mod tests {
         assert_eq!(res.status, LpStatus::Optimal);
         // min w over the McCormick hull on [0,2]^2 is 0; the SAFE bound reproduces
         // it (well-conditioned) and is never above the true optimum (soundness).
-        assert!(res.bound <= 0.0 + 1e-9, "safe bound {} above true optimum 0", res.bound);
+        assert!(
+            res.bound <= 0.0 + 1e-9,
+            "safe bound {} above true optimum 0",
+            res.bound
+        );
         assert!(res.bound.abs() < 1e-7, "bound {} != 0", res.bound);
         // aux w column bound derived from the box: [0*0, 2*2] = [0,4].
         let lp = assemble_node_lp(&spec, &lo, &hi);
@@ -498,7 +524,11 @@ mod tests {
             blf.bound,
             bilinear.bound
         );
-        assert!((blf.bound - 1.0).abs() < 1e-6, "blf bound {} != 1", blf.bound);
+        assert!(
+            (blf.bound - 1.0).abs() < 1e-6,
+            "blf bound {} != 1",
+            blf.bound
+        );
     }
 
     #[test]
@@ -512,7 +542,11 @@ mod tests {
         let res = solve_spatial_node(&spec, &lo, &hi, false, &opts);
         assert_eq!(res.status, LpStatus::Optimal);
         // Safe bound reproduces the tightened optimum and never exceeds it.
-        assert!(res.bound <= 1.0 + 1e-9, "safe bound {} above true optimum 1", res.bound);
+        assert!(
+            res.bound <= 1.0 + 1e-9,
+            "safe bound {} above true optimum 1",
+            res.bound
+        );
         assert!((res.bound - 1.0).abs() < 1e-6, "bound {} != 1", res.bound);
     }
 
@@ -535,7 +569,10 @@ mod tests {
         assert_eq!(res.tightened.len(), 2);
         assert_eq!(res.n_lp_solves, 1 + 4); // node + 2 candidates * 2 probes
         for (idx, &(glo, ghi)) in res.tightened.iter().enumerate() {
-            assert!(glo >= lo[idx] - 1e-9 && ghi <= hi[idx] + 1e-9, "loosened candidate {idx}");
+            assert!(
+                glo >= lo[idx] - 1e-9 && ghi <= hi[idx] + 1e-9,
+                "loosened candidate {idx}"
+            );
             // x+y<=2 with the other var >=0 gives max x = 2, min x = 0.
             assert!((glo - 0.0).abs() < 1e-6 && (ghi - 2.0).abs() < 1e-6);
         }

@@ -158,6 +158,7 @@ fn main() -> ExitCode {
         deadline: None,
         warm_stall_guard: true,
         warm_stall_cap_override: None,
+        expel_zero_artificials: true,
     };
 
     let mut l = lp_data.l.clone();
@@ -439,110 +440,8 @@ fn main() -> ExitCode {
     match prepared {
         None => {
             println!("  prepared: root basis not usable (prepare returned None)");
-            // diagnose: basis size, duplicate basics, dual-feasibility violation
-            let m = s_view.m;
-            let n = s_view.n;
-            let bv = &s_root.basis.basic_vars;
-            let st = &s_root.basis.col_status;
-            println!(
-                "    diag: basic_vars.len()={} (m={}), col_status.len()={} (n={})",
-                bv.len(),
-                m,
-                st.len(),
-                n
-            );
-            let mut seen = vec![false; n];
-            let mut dups = 0;
-            for &j in bv {
-                if seen[j] {
-                    dups += 1;
-                }
-                seen[j] = true;
-            }
-            println!("    diag: duplicate basic columns: {dups}");
-            if bv.len() == m {
-                // dense B^T y = c_B, then reduced costs
-                let mut bt = vec![0.0f64; m * m];
-                for (slot, &j) in bv.iter().enumerate() {
-                    for r in 0..m {
-                        bt[slot * m + r] = s_view.a[r * n + j]; // B^T row=slot? build B col=slot
-                    }
-                }
-                // solve B^T y = c_B with naive Gaussian elimination (bench-only)
-                let mut aug = vec![0.0f64; m * (m + 1)];
-                for i in 0..m {
-                    for k in 0..m {
-                        // (B^T)[i][k] = B[k][i] = a[.. row .. col bv[i]] — careful:
-                        // B's column slot k is A's column bv[k]; B[r][k]=a[r][bv[k]]
-                        // (B^T)[i][k] = B[k? no: B^T[i][k] = B[k][i]
-                        aug[i * (m + 1) + k] = bt[i * m + k]; // bt[slot*m+r] = B[r][slot] => bt row=slot is column slot of B = row of B^T ✓
-                        let _ = k;
-                    }
-                    aug[i * (m + 1) + m] = s_view.c[bv[i]];
-                }
-                for col in 0..m {
-                    // partial pivot
-                    let mut piv = col;
-                    for r in (col + 1)..m {
-                        if aug[r * (m + 1) + col].abs() > aug[piv * (m + 1) + col].abs() {
-                            piv = r;
-                        }
-                    }
-                    if aug[piv * (m + 1) + col].abs() < 1e-14 {
-                        println!("    diag: B^T singular at col {col}");
-                        break;
-                    }
-                    if piv != col {
-                        for k in 0..=m {
-                            aug.swap(col * (m + 1) + k, piv * (m + 1) + k);
-                        }
-                    }
-                    let d = aug[col * (m + 1) + col];
-                    for r in 0..m {
-                        if r == col {
-                            continue;
-                        }
-                        let f = aug[r * (m + 1) + col] / d;
-                        if f != 0.0 {
-                            for k in col..=m {
-                                aug[r * (m + 1) + k] -= f * aug[col * (m + 1) + k];
-                            }
-                        }
-                    }
-                }
-                let y: Vec<f64> = (0..m)
-                    .map(|i| aug[i * (m + 1) + m] / aug[i * (m + 1) + i])
-                    .collect();
-                let mut worst = 0.0f64;
-                let mut worst_j = 0usize;
-                let mut n_viol = 0usize;
-                for j in 0..n {
-                    if seen[j] {
-                        continue;
-                    }
-                    let mut d = s_view.c[j];
-                    for (r, &yr) in y.iter().enumerate() {
-                        d -= yr * s_view.a[r * n + j];
-                    }
-                    let stj = st[j];
-                    let v = match stj {
-                        0 => (-d).max(0.0), // at lower: need d >= -tol
-                        1 => d.max(0.0),    // at upper: need d <= tol
-                        _ => d.abs(),       // free/other nonbasic
-                    };
-                    if v > 1e-7 {
-                        n_viol += 1;
-                        if v > worst {
-                            worst = v;
-                            worst_j = j;
-                        }
-                    }
-                }
-                println!(
-                    "    diag: dual-infeasible nonbasics: {n_viol}, worst |viol|={worst:.3e} at col {worst_j} (status {})",
-                    st[worst_j]
-                );
-            }
+            // (basis-deficiency diagnostics removed — P1.0 fixed; this arm
+            // should no longer be reached on full-rank LPs.)
         }
         Some(pd) => {
             println!("  prepared: LU factorize+verify in {prep_us:.0} us");

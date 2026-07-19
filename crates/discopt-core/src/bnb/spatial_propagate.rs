@@ -514,7 +514,11 @@ mod tests {
         let mut lo = vec![0.0, 0.0, 1.0];
         let mut hi = vec![2.0, 3.0, 6.0];
         assert!(propagate_spec_fixpoint(&spec, &mut lo, &mut hi, None, 10));
-        assert!(lo[0] >= 1.0 / 3.0 - 1e-6, "x lo {} (extended reverse)", lo[0]);
+        assert!(
+            lo[0] >= 1.0 / 3.0 - 1e-6,
+            "x lo {} (extended reverse)",
+            lo[0]
+        );
         assert!(lo[1] >= 0.5 - 1e-6, "y lo {} (extended reverse)", lo[1]);
     }
 
@@ -547,7 +551,13 @@ mod tests {
         }];
         let mut lo = vec![0.0];
         let mut hi = vec![10.0];
-        assert!(!propagate_spec_fixpoint(&spec, &mut lo, &mut hi, Some(1.0), 10));
+        assert!(!propagate_spec_fixpoint(
+            &spec,
+            &mut lo,
+            &mut hi,
+            Some(1.0),
+            10
+        ));
     }
 
     /// The tanksize chain in miniature: cutoff tightens the objective variable, a
@@ -576,11 +586,25 @@ mod tests {
         }];
         let mut lo = vec![0.0, 1.0, 1.0, 0.0];
         let mut hi = vec![10.0, 4.0, 4.0, 100.0];
-        assert!(propagate_spec_fixpoint(&spec, &mut lo, &mut hi, Some(2.0), 15));
+        assert!(propagate_spec_fixpoint(
+            &spec,
+            &mut lo,
+            &mut hi,
+            Some(2.0),
+            15
+        ));
         assert!(hi[0] <= 2.0 + 1e-6, "obj hi {}", hi[0]);
         assert!(hi[3] <= 2.0 + 1e-5, "w hi {} (via linear row)", hi[3]);
-        assert!(hi[1] <= 2.0 + 1e-4, "x1 hi {} (via reverse division)", hi[1]);
-        assert!(hi[2] <= 2.0 + 1e-4, "x2 hi {} (via reverse division)", hi[2]);
+        assert!(
+            hi[1] <= 2.0 + 1e-4,
+            "x1 hi {} (via reverse division)",
+            hi[1]
+        );
+        assert!(
+            hi[2] <= 2.0 + 1e-4,
+            "x2 hi {} (via reverse division)",
+            hi[2]
+        );
     }
 
     /// Tighten-only + outward guard: propagation never widens and never crosses.

@@ -93,6 +93,29 @@ pub struct SimplexOptions {
     /// Exists so a test can drive a deterministic, small cap without depending on
     /// LP size; production always leaves it `None`.
     pub warm_stall_cap_override: Option<usize>,
+    /// Expel **zero-valued basic artificials** from the final (phase-2 optimal)
+    /// basis so the emitted basis is full-rank in real columns whenever the
+    /// constraint rows are — the precondition every warm-start entry point
+    /// (`solve_lp_warm`, `PreparedDual::prepare`) requires (P1.0,
+    /// `docs/dev/scip-parity-kernel-plan.md`). On the slackless equality rows of
+    /// the convex big-M relaxations, phase-1 parks a degenerate (value-0) basic
+    /// artificial the strict reduced-cost rule never expels; the legacy emission
+    /// finds no zero-valued singleton slack to substitute (equality rows have
+    /// none) and emits a SHORT, mislabelled basis, so warm-start silently
+    /// cold-falls-back (measured: rsyn0805m 90/s vs the ~1 400/s kernel rate the
+    /// full basis unlocks). When `true`, a finalization pass drives them out via
+    /// `t = 0` degenerate pivots (x/obj/duals invariant on the vertex).
+    ///
+    /// Default `false`. This is **bound-changing on the default path**, not
+    /// neutral: it also fills rows an inequality LP left short (a nonzero slack →
+    /// no zero-valued singleton), so warm-start engages where it previously
+    /// cold-fell-back, changing the *sequence* of node solves within a time
+    /// budget (node_count drifts on ~7/66 vendored instances — all sound: each
+    /// node's LP optimum is bit-identical, only the degenerate dual vector, hence
+    /// the safe bound value, may differ, always ≤ the true optimum). So it ships
+    /// OFF and is opted into only by the branch-and-cut kernel path (which needs
+    /// warm-start to succeed), pending the CLAUDE.md §5 graduation panel.
+    pub expel_zero_artificials: bool,
 }
 
 impl SimplexOptions {
@@ -131,6 +154,7 @@ impl Default for SimplexOptions {
             deadline: None,
             warm_stall_guard: true,
             warm_stall_cap_override: None,
+            expel_zero_artificials: false,
         }
     }
 }

@@ -526,6 +526,25 @@ fn solution_within_tolerance(
     audit_feasibility(cols, m, n, b, l, u, x) == Feasibility::Ok
 }
 
+// Test-only FORCE for the P1.0 finalization pass (independent of
+// `SimplexOptions::expel_zero_artificials`), so one regression test can solve
+// the SAME LP with the pass on and off and assert fails-before / passes-after
+// without threading options through the test helper. Compiled out entirely in
+// release (returns a `const false`).
+#[cfg(test)]
+thread_local! {
+    static P1_EXPEL_FORCED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+#[cfg(test)]
+fn p1_expel_forced_for_test() -> bool {
+    P1_EXPEL_FORCED.with(|c| c.get())
+}
+#[cfg(not(test))]
+#[inline(always)]
+fn p1_expel_forced_for_test() -> bool {
+    false
+}
+
 struct Simplex<'a> {
     cols: SparseCols, // CSC of the constraint matrix; the sole matrix view (pricing,
     // residual, audit all go through it — no dense `m×n` copy is kept)
@@ -548,6 +567,10 @@ struct Simplex<'a> {
     /// Primal unbounded ray (length `n`), captured when [`Self::simplex_loop`]
     /// detects unboundedness so [`Self::assemble`] can export it; empty until then.
     unbounded_ray: Vec<f64>,
+    /// Copied from [`SimplexOptions::expel_zero_artificials`] (P1.0): run the
+    /// zero-valued-basic-artificial finalization pass so warm-start gets a full
+    /// basis. Default `false` (bound-changing; kernel path opts in).
+    expel_zero_artificials: bool,
 }
 
 impl<'a> Simplex<'a> {
@@ -601,6 +624,7 @@ impl<'a> Simplex<'a> {
             lb,
             ub,
             unbounded_ray: Vec::new(),
+            expel_zero_artificials: opts.expel_zero_artificials,
         }
     }
 
@@ -1151,6 +1175,103 @@ impl<'a> Simplex<'a> {
                         xb = self.basic_values(art_sign)?;
                     }
                 }
+            }
+        }
+        Ok(())
+    }
+
+    /// Drive every ZERO-valued basic artificial out of the final (phase-2
+    /// optimal) basis via degenerate pivots, so the emitted basis is full-rank
+    /// in real columns whenever the constraint rows are (P1.0). See the call
+    /// site for the full rationale.
+    ///
+    /// For each basic slot holding an artificial at value 0: compute the pivot
+    /// row `ρ = e_slotᵀ B⁻¹`, pick the largest-|entry| nonbasic REAL column `q`
+    /// with `|ρᵀA_q| > PIVOT_MIN`, and pivot it in. The step length is 0 (the
+    /// artificial is already 0 and every basic value is preserved), so this is a
+    /// pure representation change: `A x = b`, the bounds, the optimum, and the
+    /// row duals are all invariant. A row with no such column is genuinely
+    /// redundant; its artificial is left basic (the caller's warm path declines
+    /// a short basis, unchanged). `Err` only on a factorization breakdown, which
+    /// the caller ignores (basis emitted as-is, exactly as before this pass).
+    fn expel_zero_basic_artificials(&mut self, art_sign: &[f64]) -> Result<(), ()> {
+        const PIVOT_MIN: f64 = 1e-7;
+        const ART_TOL: f64 = 1e-9;
+        // Cheap early-out: healthy solves leave no basic artificial at all.
+        if !self.basis.iter().any(|&j| j >= self.n) {
+            return Ok(());
+        }
+        let mut xb = self.basic_values(art_sign)?;
+        let mut updates_since_refac = 0usize;
+        // NEUTRALITY: the legacy emission substitutes, for a basic artificial in
+        // constraint row `r`, that row's own zero-valued structural SINGLETON
+        // (its slack in the `[A_ub|I]` standard form every production node LP
+        // uses) — a pure relabel. To keep that path byte-identical, this pass is
+        // a no-op on any artificial row that HAS such a singleton (the legacy
+        // relabel then emits the identical basis). It only acts on the new case:
+        // a slackless row (an equality row of the convex big-M relaxations),
+        // where no singleton exists and the legacy path emitted a short basis.
+        // Precompute the row → zero-valued-singleton map exactly as emission does.
+        let mut singleton_row: Vec<bool> = vec![false; self.m];
+        for j in 0..self.n {
+            if self.stat[j] == BASIC || self.nb_value(j) != 0.0 {
+                continue;
+            }
+            let (rows, _) = self.cols.col(j);
+            if rows.len() == 1 {
+                singleton_row[rows[0]] = true;
+            }
+        }
+        // One attempt per row; a slot that admits no entering column is redundant
+        // and permanently skipped (the loop always makes progress / terminates).
+        for slot in 0..self.m {
+            if self.basis[slot] < self.n || xb[slot].abs() > ART_TOL {
+                continue; // real column, or a nonzero artificial (a real residual)
+            }
+            // The artificial's constraint row (column n+r is ±eᵣ).
+            let r = self.basis[slot] - self.n;
+            if r < self.m && singleton_row[r] {
+                continue; // legacy emission handles this row identically — stay neutral
+            }
+            // Pivot row ρ = e_slotᵀ B⁻¹.
+            let mut rho = vec![0.0; self.m];
+            rho[slot] = 1.0;
+            if self.lu.btran(&mut rho).is_err() {
+                return Err(());
+            }
+            // Largest-|pivot| nonbasic real column in this row.
+            let mut q: Option<usize> = None;
+            let mut best = PIVOT_MIN;
+            for j in 0..self.n {
+                if self.stat[j] == BASIC {
+                    continue;
+                }
+                let arj = self.col_dot(j, &rho, art_sign);
+                if arj.abs() > best {
+                    best = arj.abs();
+                    q = Some(j);
+                }
+            }
+            let q = match q {
+                Some(q) => q,
+                None => continue, // genuinely redundant row: leave the artificial
+            };
+            // Degenerate pivot: q enters basic (value 0, since it sits at a bound
+            // and the step is 0), the artificial leaves nonbasic at its [0,0] bound.
+            let leaving = self.basis[slot];
+            self.stat[leaving] = AT_LOWER; // artificial fixed at [0,0]
+            self.slot_of[leaving] = -1;
+            self.basis[slot] = q;
+            self.slot_of[q] = slot as i64;
+            self.stat[q] = BASIC;
+            xb[slot] = self.nb_value(q); // = the bound value; basic-at-its-bound (0-step)
+            let col = self.column(q, art_sign);
+            let need_refac = self.lu.update(slot, &col).is_err();
+            updates_since_refac += 1;
+            if need_refac || updates_since_refac >= 48 {
+                self.refactorize(art_sign)?;
+                updates_since_refac = 0;
+                xb = self.basic_values(art_sign)?;
             }
         }
         Ok(())
@@ -1725,6 +1846,35 @@ impl<'a> Simplex<'a> {
         };
         let ray = std::mem::take(&mut self.unbounded_ray);
 
+        // P1.0 (scip-parity-kernel-plan): drive out any ZERO-valued basic
+        // artificial that survived phase 2, so the emitted basis is a full,
+        // correctly-labelled basis of real columns whenever the rows are
+        // full-rank. `drive_out_basic_artificials` (phase 1) only expels
+        // artificials with value > 1e-9 (a real infeasibility residual); a
+        // *degenerate* basic artificial (value 0) on a slackless row — the
+        // mass-balance equality rows of the convex big-M relaxations — is not
+        // touched there, survives to here, and (below) has no zero-valued
+        // structural singleton to substitute, so the basis was emitted SHORT
+        // and mislabelled. Every warm-start consumer (`PreparedDual`,
+        // `run_warm`) then rejects it and silently cold-solves (measured:
+        // rsyn0805m 534/537 basics → 90 solves/s instead of ~26k). This pass
+        // pivots a nonbasic real column with a nonzero entry in the artificial's
+        // row into the basis via a t=0 degenerate pivot: x_B, the optimum, and
+        // the duals are all unchanged (pure basis-representation change), and
+        // the leaving artificial goes nonbasic at its fixed [0,0] bound
+        // (trivially dual-feasible). Only a genuinely rank-deficient (redundant)
+        // row admits no such column; there the artificial legitimately stays and
+        // the basis is short exactly as before — the warm path still declines,
+        // but now honestly rather than on a mislabelled basis. Runs only on the
+        // certified-Optimal path; failure-safe (a factor breakdown leaves the
+        // basis as-is). Byte-neutral: x/obj/dual are not read from the basis
+        // beyond this point except as the representation the warm path consumes.
+        if status == LpStatus::Optimal
+            && (self.expel_zero_artificials || p1_expel_forced_for_test())
+        {
+            let _ = self.expel_zero_basic_artificials(art_sign);
+        }
+
         // Export a *complete*, row-ordered basis of real columns (length m).
         //
         // Phase 2 can leave an artificial (column ≥ self.n) basic at value 0 on a
@@ -2273,6 +2423,128 @@ mod tests {
             (g - r.obj).abs() < 1e-3,
             "safe bound {g} too loose vs {}",
             r.obj
+        );
+    }
+
+    fn solve_with_p1_expel(
+        a: &[f64],
+        m: usize,
+        n: usize,
+        b: &[f64],
+        c: &[f64],
+        l: &[f64],
+        u: &[f64],
+        enabled: bool,
+    ) -> LpSolve {
+        P1_EXPEL_FORCED.with(|cell| cell.set(enabled));
+        let r = solve(a, m, n, b, c, l, u);
+        P1_EXPEL_FORCED.with(|cell| cell.set(false));
+        r
+    }
+
+    /// Build a slackless equality LP that reproduces the P1.0 phase-1 stall:
+    /// a `k×k` grid of "lift" columns whose row-couplings (`row_i: Σ_j x_ij = 1`
+    /// and `col_j: Σ_i x_ij = 1`, a doubly-stochastic / assignment polytope with
+    /// one redundant row DROPPED so the system is full rank `2k−1`) is padded
+    /// with `extra` duplicate columns that price at reduced-cost ≈ 0 — the exact
+    /// redundant-column structure of the lifted McCormick relaxations on which
+    /// phase-1 parks a zero-valued basic artificial the strict reduced-cost rule
+    /// never expels. Returns `(a_rowmajor, m, n, b, c, l, u)`.
+    fn build_stall_lp(
+        k: usize,
+        extra: usize,
+    ) -> (
+        Vec<f64>,
+        usize,
+        usize,
+        Vec<f64>,
+        Vec<f64>,
+        Vec<f64>,
+        Vec<f64>,
+    ) {
+        let nvar = k * k;
+        // rows: k row-sums + (k-1) col-sums (drop the last col-sum → full rank).
+        let m = k + (k - 1);
+        let ncol = nvar + extra;
+        let mut a = vec![0.0f64; m * ncol];
+        for i in 0..k {
+            for j in 0..k {
+                a[i * ncol + (i * k + j)] = 1.0; // row i sum
+            }
+        }
+        for j in 0..(k - 1) {
+            for i in 0..k {
+                a[(k + j) * ncol + (i * k + j)] = 1.0; // col j sum
+            }
+        }
+        // duplicate columns (copies of existing lift columns) — the rc≈0 bait.
+        for d in 0..extra {
+            let src = d % nvar;
+            for r in 0..m {
+                a[r * ncol + nvar + d] = a[r * ncol + src];
+            }
+        }
+        let b = vec![1.0; m];
+        let c: Vec<f64> = (0..ncol).map(|j| ((j * 13 + 5) % 7) as f64 * 0.1).collect();
+        let l = vec![0.0; ncol];
+        let u = vec![1.0; ncol];
+        (a, m, ncol, b, c, l, u)
+    }
+
+    #[test]
+    fn full_basis_on_slackless_equality_rows_p1_0() {
+        // P1.0 regression: a FULL-RANK slackless equality system with the
+        // redundant-column structure of the lifted convex relaxations. It made
+        // solve_lp emit a deficient, mislabelled basis (rsyn0805m: 534/537
+        // basics → warm-start cold-fell-back at 90/s instead of ~26k). Phase-1
+        // parks zero-valued basic artificials the strict reduced-cost rule never
+        // expels; the finalization pass must drive them out via degenerate
+        // pivots so the emitted basis is full-rank in real columns and
+        // warm-start acceptable. The `4×4` assignment polytope (last col-sum
+        // dropped → rank 7 over 16 vars) reproduces it minimally: cold basis 5/7.
+        let (a, m, n, b, c, l, u) = build_stall_lp(4, 0);
+
+        let off = solve_with_p1_expel(&a, m, n, &b, &c, &l, &u, false);
+        let on = solve_with_p1_expel(&a, m, n, &b, &c, &l, &u, true);
+
+        // Both find the same (correct) optimum — the pass is bound-neutral.
+        assert_eq!(on.status, LpStatus::Optimal);
+        assert_eq!(off.status, LpStatus::Optimal);
+        assert!((off.obj - on.obj).abs() < 1e-9, "pass changed the optimum");
+        assert!(
+            on.x.iter().zip(&off.x).all(|(a, b)| (a - b).abs() < 1e-9),
+            "pass changed the solution point"
+        );
+
+        // Fails-before: WITHOUT the pass the basis is deficient (< m real cols).
+        let off_full =
+            off.basis.basic_vars.len() == m && off.basis.basic_vars.iter().all(|&j| j < n);
+        assert!(
+            !off_full,
+            "test no longer reproduces the P1.0 deficiency (off basis full: {:?}) — re-point it",
+            off.basis.basic_vars
+        );
+
+        // Passes-after: WITH the pass, a full real basis (warm-start-acceptable).
+        assert_eq!(
+            on.basis.basic_vars.len(),
+            m,
+            "basis still deficient: {:?}",
+            on.basis.basic_vars
+        );
+        assert!(
+            on.basis.basic_vars.iter().all(|&j| j < n),
+            "basis holds a non-real (artificial) column: {:?}",
+            on.basis.basic_vars
+        );
+        // Dual-consistent: the row duals reproduce the objective via the safe
+        // bound (a mislabelled basis would not).
+        assert!(!on.dual.is_empty());
+        let g = safe_bound(&on.dual, &c, &a, m, n, &b, &l, &u);
+        assert!(
+            (g - on.obj).abs() < 1e-6,
+            "safe bound {g} != obj {}",
+            on.obj
         );
     }
 
