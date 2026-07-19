@@ -28,6 +28,35 @@ Build the OA LP over a box (linear rows + OA tangents of convex nonlinear rows;
 refresh box-dependent rows per node), solve via the warm in-house simplex, return
 the LP dual bound.
 
+**Architecture decision (K1) — composite-of-affine convex rows. VERIFIED GO.**
+Rust must evaluate `g_i(x)` and `∇g_i(x)` at LP vertices discovered *during* the
+node loop. Rather than a full autodiff engine in Rust, each convex nonlinear row
+is marshaled as a **composite-of-affine** descriptor:
+`g_i(x) = a_i·x + b_i + Σ_t coeff_t·func_t(p_t·x + q_t) ≤ rhs_i`, so Rust needs
+only closed-form univariate `f/f'` per `MathFunc` (extending `mccormick_patch`'s
+`Univariate`). This is the OA-canonical convex class SCIP linearizes this way.
+Rows that don't fit → the analyze-once producer returns `None` → keep the NLP-BB
+path (the sound boundary, exactly like `spatial_producer`).
+
+*Entry experiment (CLAUDE.md §4), `issue798_convex_decompose_probe.py`:* every
+nonlinear row of all 4 panel instances (3/6/11/28 rows) decomposes into this form
+and the reconstruction reproduces the JAX evaluator's **value AND gradient** to
+machine precision (max_verr 4e-16, **max_gerr 0.0**). Its `decompose`/`eval_decomp`/
+`grad_decomp` are the reusable producer (emit the flat-array marshaling).
+
+**K1 build steps (each testable):**
+- **K1a — Rust univariate `f/f'` table** (`eval_and_deriv(MathFunc, t) -> (f, fp)`)
+  for the convex-certifiable funcs (log/exp/sqrt/log1p first). Unit-test vs finite
+  differences. Independent of marshaling.
+- **K1b — `ConvexKernelSpec`** (linear rows CSR, objective `c`, integrality, box,
+  nonlinear rows as `Vec<CompositeRow>`), + `oa_tangent(row, x) -> EnvRow` reusing
+  the `EnvRow` cut container.
+- **K1c — node LP-OA relaxation over a box**: assemble CSC LP (linear rows +
+  accumulated OA tangents), `solve_lp_cols_scaled`, add tangents for violated
+  nonlinear rows, warm re-solve to OA convergence; return `ns_safe_bound_csc`.
+- **K1d — PyO3 binding + Python byte-check harness** vs `_RootLP`/prototype
+  `node_relax(separate=False)` over the root box + perturbed child boxes.
+
 **Gate:** on ≥5 convex instances (`rsyn0805m`, `rsyn0810m`, `rsyn0815m`,
 `syn40m`, + one more), the Rust node bound matches the Python `_RootLP`/prototype
 `RootModel` LP-OA bound to **≤1e-6** over (a) the root box and (b) perturbed child
