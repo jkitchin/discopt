@@ -156,15 +156,26 @@ primal regression.
     re-assembles the LP from scratch (`SparseCols::from_csc`) and COLD-solves it on
     every OA round × every separation round — ~60–120 cold LP solves/node.** The K1
     "box-reassembly" shortcut (fine for the K1 byte-check) is the bottleneck.
-  - **NEXT PRIORITY — K2e: warm-start / growing-LP node solve.** Rework
-    `oa_converge`/`solve_node_cut` to the milp_driver pattern: assemble the node LP
-    ONCE, append OA-tangent rows and cut rows IN PLACE (`augment_csc_with_cuts`
-    style), warm-start each re-solve from the previous basis
-    (`PreparedDual::reoptimize` / `solve_lp_cols_warm`, with the P1.0
-    `expel_zero_artificials` basis). This directly attacks the 64× wall gap and is
-    the honest right fix (deferred from K2a/b). Re-measure wall vs the NLP-BB path
-    after. Only then are K3 (primal) and K4 (graduation) meaningful — a slow kernel
-    can't graduate on wall.
+  - **NEXT PRIORITY — K2e: warm-start node solve (precise design).** The wall cost
+    is the COLD re-solve each round, not CSC rebuild. The fix is warm-starting, via
+    an **append-only** row order so the basis carries across rounds:
+    - Assembly order becomes `base (le + eq)` ‖ `extra_rows` (OA tangents AND cuts,
+      in add-order). Structural cols `[0,n)` and base-slack cols never move; each
+      new row appends its slack at the END. So the previous solve's `Basis` extends
+      to the new size by making the new slack basic (`extend_basis` idiom) → a valid
+      dual-repairable warm start.
+    - Unify tangents+cuts into one `extra_rows: Vec<AsmRow>`. A cut generated over
+      the current standard-form cols stays valid next round (cols are append-only) →
+      **`substitute_slacks` is no longer needed** (drop it). Express OA tangents,
+      GMI, cover, MIR all as one row-add.
+    - Warm re-solve with `solve_lp_warm_scaled_csc(&LpView{a:dense,…}, b, &basis,
+      opts, &sp)` (SCALED — keep it, NS certification depends on equilibration; the
+      dense `a` build is O(m·n) ≪ a cold solve). `expel_zero_artificials: true`.
+    - Keep the K2 gate cert-clean (bound = opt EXACTLY) and all 10 Rust tests as the
+      guard. Re-measure wall vs the NLP-BB path (`dm.from_nl(...).solve()`).
+    - Compose with the sep-rounds sweep result (fewer rounds may already cut wall
+      2–3×). Only then are K3 (primal) and K4 (graduation) meaningful — a slow
+      kernel can't graduate on wall.
 
 - **2026-07-19 (iter 5): K2a/b DONE — in-node separation.**
   - Refactored `solve_node` → `oa_converge` helper (K1 path unchanged) + new
