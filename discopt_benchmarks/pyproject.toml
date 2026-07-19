@@ -86,6 +86,7 @@ select = ["E", "F", "W", "I", "N", "UP", "B", "A", "C4", "SIM", "TCH"]
 # cut-management probe (standard linear-algebra notation), same slack as the
 # Stage 0/2 probes it extends.
 "scripts/issue781_cutmgmt_probe.py" = ["N803", "N806", "C408", "B905"]
+"scripts/issue786_intree_value_probe.py" = ["N803", "N806", "C408", "B905"]
 
 [tool.coverage.run]
 source = ["benchmarks", "utils"]
