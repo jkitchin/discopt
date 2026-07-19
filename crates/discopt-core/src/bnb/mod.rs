@@ -8,6 +8,7 @@ pub mod node;
 pub mod obbt_sweep;
 pub mod pool;
 pub mod spatial_kernel;
+pub mod spatial_tree;
 pub mod tree_manager;
 
 // Re-export primary public types for convenience.
