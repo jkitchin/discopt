@@ -143,6 +143,64 @@ def test_solver_flag_on_matches_flag_off():
     assert abs(on.objective - 2.0) < 1e-3
 
 
+@pytest.mark.slow
+def test_tanksize_certifies_natively():
+    """#764 definition of done: the native kernel certifies tanksize at the default
+    gap tolerance. Seeded with the known feasible value (the fast path, ~30 s); the
+    unseeded run also certifies (~190 s, measured 2026-07-19). Locks in the quality
+    ratchet: finite slack bounds (0 uncertified nodes) + propagation + honest
+    Optimal semantics (bound >= incumbent - gap_tol, never a false certificate)."""
+    import os
+
+    nl = os.path.join(os.path.dirname(__file__), "data", "minlplib_nl", "tanksize.nl")
+    if not os.path.exists(nl):
+        pytest.skip("tanksize.nl fixture not present")
+    import discopt.solver as S
+    from discopt import _rust
+    from discopt.modeling.core import from_nl
+
+    cap = {}
+
+    def grab(model, lb, ub, n_vars, *a, **k):
+        cap.update(
+            model=model,
+            lb=np.asarray(lb, float)[:n_vars].copy(),
+            ub=np.asarray(ub, float)[:n_vars].copy(),
+        )
+        return None
+
+    prev_env = os.environ.get("DISCOPT_NATIVE_SPATIAL_KERNEL")
+    prev_fn = S._try_native_spatial_kernel
+    try:
+        os.environ["DISCOPT_NATIVE_SPATIAL_KERNEL"] = "1"
+        S._try_native_spatial_kernel = grab
+        from_nl(nl).solve(time_limit=10.0)
+    finally:
+        S._try_native_spatial_kernel = prev_fn
+        if prev_env is None:
+            os.environ.pop("DISCOPT_NATIVE_SPATIAL_KERNEL", None)
+        else:
+            os.environ["DISCOPT_NATIVE_SPATIAL_KERNEL"] = prev_env
+
+    spec = build_spatial_kernel_spec(cap["model"], bounds=(cap["lb"], cap["ub"]))
+    assert spec is not None
+    meta = {k: spec.pop(k) for k in list(spec) if k.startswith("meta_")}
+    sign, off = meta["meta_obj_sense_sign"], meta["meta_obj_offset"]
+    oracle = 1.2686437540
+    res = _rust.solve_spatial_tree_py(
+        **spec, max_nodes=50000, gap_tol=1e-4, initial_incumbent=1.2686437614652892
+    )
+    assert res["status"] == "optimal", res["status"]
+    inc = sign * (res["incumbent"] + off)
+    bound = sign * (res["bound"] + off)
+    # Certificate brackets the oracle; the gap is genuinely closed; every node
+    # certified (the finite-slack-bounds fix).
+    assert abs(inc - oracle) < 1e-5, f"incumbent {inc} vs oracle {oracle}"
+    assert bound <= oracle + 1e-9, f"bound {bound} above oracle {oracle}"
+    assert inc - bound <= 1e-4 + 1e-9, f"gap {inc - bound} not closed"
+    assert res["n_uncertified"] == 0, f"{res['n_uncertified']} uncertified nodes"
+
+
 def test_unbounded_relaxation_declines():
     """tanksize's raw .nl box is unbounded, so the McCormick relaxation has infinite
     aux ranges (invalid). The producer must decline soundly (return None) rather than

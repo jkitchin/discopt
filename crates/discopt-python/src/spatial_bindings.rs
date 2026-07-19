@@ -248,5 +248,6 @@ pub fn solve_spatial_tree_py<'py>(
     out.set_item("bound", res.bound)?;
     out.set_item("node_count", res.node_count)?;
     out.set_item("n_lp_solves", res.n_lp_solves)?;
+    out.set_item("n_uncertified", res.n_uncertified)?;
     Ok(out)
 }

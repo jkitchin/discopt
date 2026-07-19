@@ -110,6 +110,33 @@ QUALITY** — (a) richer node LP rows (the trusted build's extra families), (b) 
 propagation (more atoms, better ordering), (c) violation/reliability branching. The infrastructure
 (cheap propagated nodes at ~2.6 ms) is in place; the quality ratchet is the follow-on.
 
+## QUALITY RATCHET RESULT (2026-07-19) — **tanksize CERTIFIED natively**
+
+Diagnosed the 0.937 plateau before building (§4 discipline): new `n_uncertified` telemetry showed
+**51.6 % of nodes (10 315 / 20 000) had uncertifiable safe bounds** — the plateau was a
+**certification artifact**, not relaxation looseness. Root cause: `ns_safe_bound_csc` returns
+`None` whenever a nonzero reduced cost meets a `>= 1e20` bound, and the kernel's **slack columns
+carried `u = 1e20`** — so a roundoff-level slack reduced cost (`rc = −y_r ≈ −1e−13`) killed the
+whole certificate, and stuck subtrees froze at ancestor bounds. Equilibrated node solves alone did
+NOT fix it (51.4 % after switching to `solve_lp_cols_scaled` — kept anyway for conditioning);
+**finite min-activity slack upper bounds** (`s_r = b_r − min_activity_r`, finite because every
+structural bound is) fixed it outright: **0 / 10 653 nodes uncertified**.
+
+| run | result |
+|---|---|
+| seeded incumbent | **optimal**, gap 9.97e-05, 10 653 nodes, **26.9 s** (2.53 ms/node, 1 LP/node) |
+| unseeded (self-contained) | **optimal**, gap 1.00e-04, 78 667 nodes, 191.8 s |
+| end-to-end `m.solve()` (flag ON) | **optimal**, obj 1.2686457, bound 1.2685458, 190.8 s |
+
+Every certificate brackets the oracle (`bound <= 1.2686437540 <= incumbent`), `Optimal` is the
+honest post-fix semantics (`bound >= incumbent − gap_tol` enforced), and the run is locked by
+`test_tanksize_certifies_natively`. The "richer node rows" turned out unnecessary for tanksize —
+the rows were adequate; half the certificates were being discarded. **The #764 definition of done
+(certify tanksize at default tolerances) is met** — 27 s seeded / 192 s self-contained vs the
+Python path's >300 s timeout at a 32.8 % gap. Remaining follow-ons for parity with SCIP's 1.46 s:
+seed the driver with a cheap NLP-heuristic incumbent (27 s path), then per-node throughput +
+propagation-strength polish. Raw numbers: `results/issue764_tanksize_certified_20260719.txt`.
+
 ---
 
 

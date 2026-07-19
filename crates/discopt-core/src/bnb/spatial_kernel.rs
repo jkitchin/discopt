@@ -24,7 +24,7 @@ use crate::bnb::mccormick_patch as mc;
 use crate::bnb::obbt_sweep::{obbt_probe_sweep, ObbtSweepResult};
 use crate::lp::simplex::refine::ns_safe_bound_csc;
 use crate::lp::simplex::sparse::SparseCols;
-use crate::lp::simplex::{primal::solve_lp_cols, LpStatus, SimplexOptions};
+use crate::lp::simplex::{primal::solve_lp_cols_scaled, LpStatus, SimplexOptions};
 
 /// A box-independent linear constraint row `sum(coeffs[k] * x[cols[k]]) <= rhs`
 /// (senses are normalized to `<=` by the Python producer; an `==` row is two `<=`).
@@ -316,11 +316,31 @@ pub fn assemble_node_lp(spec: &SpatialKernelSpec, lo: &[f64], hi: &[f64]) -> Ass
     }
     let sp = SparseCols::from_csc(col_ptr, row_idx, vals);
 
-    // Full column bounds: structural (l/u) then slacks [0, +inf).
+    // Full column bounds: structural (l/u) then slacks. Slack upper bounds are
+    // FINITE, derived from row min-activity: `s_r = b_r − (A x)_r <= b_r − min_r`
+    // with `min_r = Σ_j min(a_rj l_j, a_rj u_j)` finite because every structural
+    // bound is. This is load-bearing for certification (quality ratchet,
+    // 2026-07-19): the Neumaier–Shcherbina evaluation returns `None` whenever a
+    // nonzero reduced cost meets an infinite (`>= 1e20`) bound, and slacks at
+    // `1e20` made a roundoff-level `rc = −y_r ≈ −1e−13` on ANY slack kill the
+    // whole certificate — measured 51 % of tanksize nodes uncertified. A finite
+    // slack range keeps the NS term bounded and the certificate finite.
     let mut lfull = l;
     let mut ufull = u;
     lfull.extend(std::iter::repeat(0.0).take(m));
-    ufull.extend(std::iter::repeat(1e20).take(m));
+    for (r, (rc, rcoef, rhs)) in rows.iter().enumerate() {
+        let mut min_act = 0.0f64;
+        for (c, v) in rc.iter().zip(rcoef.iter()) {
+            min_act += if *v > 0.0 { v * lfull[*c] } else { v * ufull[*c] };
+        }
+        let cap = if min_act.is_finite() {
+            (rhs - min_act).max(0.0)
+        } else {
+            1e20
+        };
+        debug_assert_eq!(ufull.len(), n_cols + r);
+        ufull.push(cap.min(1e20));
+    }
 
     AssembledLp {
         sp,
@@ -347,7 +367,15 @@ pub fn solve_spatial_node(
     let mut c = spec.c.clone();
     c.resize(lp.n_total, 0.0);
 
-    let sol = solve_lp_cols(lp.sp.clone(), lp.m, lp.n_total, &c, &lp.l, &lp.u, &lp.b, opts);
+    // EQUILIBRATED solve (quality ratchet, 2026-07-19): tanksize-class node LPs
+    // span ~1e6 in coefficient magnitude and the raw simplex then yields duals the
+    // Neumaier-Shcherbina certification rejects — measured 51.6 % of nodes
+    // uncertified (-inf safe bound), freezing whole subtrees at ancestor bounds.
+    // `solve_lp_cols_scaled` applies the same geometric-mean equilibration the
+    // trusted path uses and unscales x/dual/ray back to the original space, so the
+    // safe-bound evaluation sees well-conditioned certificates against the
+    // original system.
+    let sol = solve_lp_cols_scaled(lp.sp.clone(), lp.m, lp.n_total, &c, &lp.l, &lp.u, &lp.b, opts);
     let mut n_lp_solves = 1usize;
 
     // Rigorous safe lower bound from the row duals — NEVER the raw simplex objective

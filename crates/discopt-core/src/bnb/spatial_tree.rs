@@ -139,6 +139,12 @@ pub struct SpatialTreeResult {
     pub node_count: usize,
     /// Total LP solves across all nodes (relaxation + OBBT probes).
     pub n_lp_solves: usize,
+    /// Nodes whose LP solved to optimality but whose Neumaier–Shcherbina safe
+    /// bound could NOT be certified (`-inf` — non-finite duals / infinite-bound
+    /// reduced costs). These nodes carry only their inherited parent bound, so a
+    /// subtree of them freezes the frontier — the diagnostic for a bound plateau
+    /// caused by certification failure rather than relaxation looseness.
+    pub n_uncertified: usize,
 }
 
 /// True value of a lifted term at the point `x` (structural columns), for the
@@ -219,6 +225,7 @@ pub fn solve_spatial_tree(
     let mut incumbent_x: Vec<f64> = Vec::new();
     let mut node_count = 0usize;
     let mut n_lp_solves = 0usize;
+    let mut n_uncertified = 0usize;
 
     // Global lower bound = min, over every region that leaves the tree WITHOUT being
     // subdivided (pruned / infeasible / feasible-leaf / width-exhausted), of a valid
@@ -251,6 +258,7 @@ pub fn solve_spatial_tree(
                 bound: gb,
                 node_count,
                 n_lp_solves,
+                n_uncertified,
             };
         }
         node_count += 1;
@@ -273,6 +281,9 @@ pub fn solve_spatial_tree(
 
         let node = solve_spatial_node(spec, &lo, &hi, config.run_obbt, opts);
         n_lp_solves += node.n_lp_solves;
+        if node.status == LpStatus::Optimal && node.bound == f64::NEG_INFINITY {
+            n_uncertified += 1;
+        }
 
         // Infeasible node: empty region, contributes +inf (nothing).
         if node.status != LpStatus::Optimal {
@@ -456,6 +467,7 @@ pub fn solve_spatial_tree(
                 bound,
                 node_count,
                 n_lp_solves,
+                n_uncertified,
             }
         }
         None => SpatialTreeResult {
@@ -465,6 +477,7 @@ pub fn solve_spatial_tree(
             bound: f64::INFINITY,
             node_count,
             n_lp_solves,
+            n_uncertified,
         },
     }
 }
