@@ -173,9 +173,19 @@ primal regression.
       dense `a` build is O(m·n) ≪ a cold solve). `expel_zero_artificials: true`.
     - Keep the K2 gate cert-clean (bound = opt EXACTLY) and all 10 Rust tests as the
       guard. Re-measure wall vs the NLP-BB path (`dm.from_nl(...).solve()`).
-    - Compose with the sep-rounds sweep result (fewer rounds may already cut wall
-      2–3×). Only then are K3 (primal) and K4 (graduation) meaningful — a slow
-      kernel can't graduate on wall.
+    - **Sep-rounds sweep — FALSIFIED as a wall lever (rsyn0805m):** sr2/4/6/12 →
+      1641/1143/741/377 nodes but 35.6/37.6/32.9/33.8 s — **wall is ~invariant**
+      (~33 s) while nodes drop 4×. More cuts = fewer nodes but the same total
+      LP-solve work; reducing sep rounds does NOT cut wall. Warm-starting the
+      per-solve is the ONLY lever. (Keep sep rounds at 12 — best node count, same
+      wall.)
+    - **NS-scaling risk RESOLVED:** `solve_lp_warm_scaled_csc` DOES equilibrate
+      (dual.rs:42–50 scale→warm-solve→unscale x/dual), so warm re-solves stay
+      NS-certifiable — the cold `solve_lp_cols_scaled` certification carries over.
+    - `PreparedDual::prepare` uses `sp` for the matrix and only `lp.{m,n,l,u,c}` —
+      `lp.a` is unused, so pass an empty `a` in the `LpView` (no dense build needed).
+    - Only after warm-start lands are K3 (primal) and K4 (graduation) meaningful —
+      a slow kernel can't graduate on wall.
 
 - **2026-07-19 (iter 5): K2a/b DONE — in-node separation.**
   - Refactored `solve_node` → `oa_converge` helper (K1 path unchanged) + new
