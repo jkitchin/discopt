@@ -26,13 +26,17 @@
 //! as the Python `_RootLP` root-cut path does. K1 is byte-checked against that
 //! reference so any divergence is caught.
 
+use crate::lp::basis::{Basis, BASIC};
 use crate::lp::cover::separate_cover_csc;
+use crate::lp::crossover::LpView;
 use crate::lp::cut_select::select_cuts;
 use crate::lp::gomory::{separate_gomory_cols, GomoryCut};
 use crate::lp::mir::separate_mir;
 use crate::lp::simplex::refine::ns_safe_bound_csc;
 use crate::lp::simplex::sparse::SparseCols;
-use crate::lp::simplex::{primal::solve_lp_cols_scaled, LpStatus, SimplexOptions};
+use crate::lp::simplex::{
+    primal::solve_lp_cols_scaled, solve_lp_warm_scaled_csc, LpStatus, SimplexOptions,
+};
 
 /// A univariate function admissible in a convex composite row, carrying its own
 /// closed-form value and derivative. Extend as new convex-certifiable functions
@@ -358,158 +362,7 @@ impl ConvexKernelSpec {
         max_oa_rounds: usize,
         opts: &SimplexOptions,
     ) -> ConvexNodeResult {
-        let mut tangents: Vec<LinRow> = Vec::new();
-        let oc = self.oa_converge(lo, hi, &[], &mut tangents, oa_tol, max_oa_rounds, opts);
-        ConvexNodeResult {
-            status: oc.status,
-            bound: oc.bound,
-            raw_bound: oc.raw_bound,
-            x: oc.x,
-            oa_rounds: oc.rounds,
-            n_tangents: tangents.len(),
-        }
-    }
-
-    /// Run the OA relaxation to convergence over `(lo, hi)` with the given
-    /// accumulated integrality `cuts` (structural `≤` rows). Appends fresh OA
-    /// tangents to `tangents` in place. Returns the final assembled LP state
-    /// (for separation) alongside the rigorous bound.
-    #[allow(clippy::too_many_arguments)]
-    fn oa_converge(
-        &self,
-        lo: &[f64],
-        hi: &[f64],
-        cuts: &[LinRow],
-        tangents: &mut Vec<LinRow>,
-        oa_tol: f64,
-        max_oa_rounds: usize,
-        opts: &SimplexOptions,
-    ) -> OaOutcome {
-        debug_assert_eq!(lo.len(), self.n);
-        debug_assert_eq!(hi.len(), self.n);
-        let sign = if self.sense_max { -1.0 } else { 1.0 };
-        let mut last_x = vec![0.0f64; self.n];
-        let mut rounds = 0usize;
-        let trivial = if self.sense_max {
-            f64::INFINITY
-        } else {
-            f64::NEG_INFINITY
-        };
-        let mut last_bound = trivial;
-        let mut last_raw = trivial;
-
-        for _ in 0..max_oa_rounds.max(1) {
-            rounds += 1;
-            // ≤ rows: original linear, then OA tangents, then integrality cuts;
-            // then = rows. Original le rows stay first (cover's `n_orig_rows`).
-            let mut rows: Vec<AsmRow> = Vec::with_capacity(
-                self.le_rows.len() + tangents.len() + cuts.len() + self.eq_rows.len(),
-            );
-            for r in self
-                .le_rows
-                .iter()
-                .chain(tangents.iter())
-                .chain(cuts.iter())
-            {
-                rows.push(AsmRow {
-                    cols: r.cols.clone(),
-                    coeffs: r.coeffs.clone(),
-                    rhs: r.rhs,
-                    is_eq: false,
-                });
-            }
-            for r in &self.eq_rows {
-                rows.push(AsmRow {
-                    cols: r.cols.clone(),
-                    coeffs: r.coeffs.clone(),
-                    rhs: r.rhs,
-                    is_eq: true,
-                });
-            }
-            let (sp, m, n_total, b, l, u) = assemble(self.n, lo, hi, &rows);
-            let mut c = vec![0.0f64; n_total];
-            for (cj, sc) in c.iter_mut().zip(self.c.iter()) {
-                *cj = sign * sc;
-            }
-            let sol = solve_lp_cols_scaled(sp.clone(), m, n_total, &c, &l, &u, &b, opts);
-            if sol.status != LpStatus::Optimal {
-                // Sound model-sense sentinel — never falsely survives fathoming.
-                let sentinel = match (sol.status, self.sense_max) {
-                    (LpStatus::Infeasible, true) => f64::NEG_INFINITY,
-                    (LpStatus::Infeasible, false) => f64::INFINITY,
-                    (_, true) => f64::INFINITY,
-                    (_, false) => f64::NEG_INFINITY,
-                };
-                return OaOutcome {
-                    status: sol.status,
-                    bound: sentinel,
-                    raw_bound: sentinel,
-                    x: vec![0.0; self.n],
-                    rounds,
-                    optimal: None,
-                };
-            }
-            last_x.copy_from_slice(&sol.x[..self.n]);
-            let raw_bound = sign * sol.obj;
-            let (col_ptr, row_idx, vals) = sp.raw();
-            let safe_min = ns_safe_bound_csc(
-                &sol.dual, &c, col_ptr, row_idx, vals, m, n_total, &b, &l, &u,
-            );
-            let bound = match safe_min {
-                Some(v) => sign * v,
-                None if self.sense_max => f64::INFINITY,
-                None => f64::NEG_INFINITY,
-            };
-            last_bound = bound;
-            last_raw = raw_bound;
-
-            // Add OA tangents for violated convex rows at this vertex.
-            let mut added = false;
-            for row in &self.nl_rows {
-                if row.residual(&last_x) > oa_tol {
-                    if let Some(cut) = row.oa_tangent(&last_x) {
-                        tangents.push(LinRow {
-                            cols: cut.cols,
-                            coeffs: cut.coeffs,
-                            rhs: cut.rhs,
-                        });
-                        added = true;
-                    }
-                }
-            }
-            if !added {
-                // Converged: return the final LP state for separation.
-                return OaOutcome {
-                    status: LpStatus::Optimal,
-                    bound,
-                    raw_bound,
-                    x: last_x,
-                    rounds,
-                    optimal: Some(Box::new(OptimalLp {
-                        sp,
-                        m,
-                        n_total,
-                        b,
-                        l,
-                        u,
-                        rows,
-                        basis: sol.basis,
-                        x_full: sol.x,
-                    })),
-                };
-            }
-        }
-        // Hit the OA round cap without converging: return the last valid safe
-        // bound (still sound — a looser relaxation optimum). No separation state,
-        // since the OA is not tight, but the bound is usable for fathoming.
-        OaOutcome {
-            status: LpStatus::Optimal,
-            bound: last_bound,
-            raw_bound: last_raw,
-            x: last_x,
-            rounds,
-            optimal: None,
-        }
+        self.solve_node_cut(lo, hi, oa_tol, max_oa_rounds, 0, opts)
     }
 
     /// K2: the LP-OA node relaxation WITH in-tree integrality separation. Runs
@@ -519,6 +372,7 @@ impl ConvexKernelSpec {
     /// C-43 lesson) and rewritten over structural columns by substituting the
     /// slacks `s_r = b_r − A_r·x`, so each is a valid inequality for the node's
     /// integer-feasible set.
+    #[allow(clippy::too_many_arguments)]
     pub fn solve_node_cut(
         &self,
         lo: &[f64],
@@ -528,58 +382,164 @@ impl ConvexKernelSpec {
         max_sep_rounds: usize,
         opts: &SimplexOptions,
     ) -> ConvexNodeResult {
-        let mut tangents: Vec<LinRow> = Vec::new();
-        let mut cuts: Vec<LinRow> = Vec::new();
-        let mut oc = self.oa_converge(lo, hi, &cuts, &mut tangents, oa_tol, max_oa_rounds, opts);
+        debug_assert_eq!(lo.len(), self.n);
+        debug_assert_eq!(hi.len(), self.n);
+        let sign = if self.sense_max { -1.0 } else { 1.0 };
+        let trivial = if self.sense_max {
+            f64::INFINITY
+        } else {
+            f64::NEG_INFINITY
+        };
 
-        for _ in 0..max_sep_rounds {
-            let Some(opt) = oc.optimal.as_ref() else {
-                break;
+        // Base rows: `le` (≤) then `eq` (=). OA tangents and cuts are APPENDED
+        // after the base, so structural and base-slack columns never move and the
+        // optimal basis carries (extended) across every re-solve — the wall lever.
+        let mut rows: Vec<AsmRow> = Vec::with_capacity(self.le_rows.len() + self.eq_rows.len());
+        for r in &self.le_rows {
+            rows.push(AsmRow {
+                cols: r.cols.clone(),
+                coeffs: r.coeffs.clone(),
+                rhs: r.rhs,
+                is_eq: false,
+            });
+        }
+        for r in &self.eq_rows {
+            rows.push(AsmRow {
+                cols: r.cols.clone(),
+                coeffs: r.coeffs.clone(),
+                rhs: r.rhs,
+                is_eq: true,
+            });
+        }
+        let n_base = rows.len();
+
+        let mut basis: Option<Basis> = None;
+        let mut last_x = vec![0.0f64; self.n];
+        let mut last_bound = trivial;
+        let mut last_raw = trivial;
+        let mut oa_rounds = 0usize;
+        let mut sep_used = 0usize;
+        // Generous safety cap on total (OA + separation) re-solves; normal
+        // convergence exits far sooner.
+        let iter_cap = max_oa_rounds.max(1) * (max_sep_rounds + 1) + max_sep_rounds + 4;
+
+        for _ in 0..iter_cap {
+            oa_rounds += 1;
+            let (sp, m, n_total, b, l, u) = assemble(self.n, lo, hi, &rows);
+            let mut c = vec![0.0f64; n_total];
+            for (cj, sc) in c.iter_mut().zip(self.c.iter()) {
+                *cj = sign * sc;
+            }
+            // Warm-start from the carried basis (extended so the appended rows'
+            // slacks are basic); cold+scaled on the first solve. The warm path
+            // equilibrates and falls back to a cold solve when the basis is
+            // unusable, so the result is always correct — only faster.
+            let sol = match &basis {
+                Some(bs) => {
+                    let ext = extend_basis(bs.clone(), n_total);
+                    let lp = LpView {
+                        a: &[],
+                        m,
+                        n: n_total,
+                        c: &c,
+                        l: &l,
+                        u: &u,
+                    };
+                    solve_lp_warm_scaled_csc(&lp, &b, &ext, opts, &sp)
+                }
+                None => solve_lp_cols_scaled(sp.clone(), m, n_total, &c, &l, &u, &b, opts),
             };
-            if oc.status != LpStatus::Optimal {
+            if sol.status != LpStatus::Optimal {
+                // Sound model-sense sentinel — never falsely survives fathoming.
+                let sentinel = match (sol.status, self.sense_max) {
+                    (LpStatus::Infeasible, true) => f64::NEG_INFINITY,
+                    (LpStatus::Infeasible, false) => f64::INFINITY,
+                    (_, true) => f64::INFINITY,
+                    (_, false) => f64::NEG_INFINITY,
+                };
+                return ConvexNodeResult {
+                    status: sol.status,
+                    bound: sentinel,
+                    raw_bound: sentinel,
+                    x: vec![0.0; self.n],
+                    oa_rounds,
+                    n_tangents: rows.len() - n_base,
+                };
+            }
+            basis = Some(sol.basis.clone());
+            last_x.copy_from_slice(&sol.x[..self.n]);
+            last_raw = sign * sol.obj;
+            let (col_ptr, row_idx, vals) = sp.raw();
+            let safe_min = ns_safe_bound_csc(
+                &sol.dual, &c, col_ptr, row_idx, vals, m, n_total, &b, &l, &u,
+            );
+            last_bound = match safe_min {
+                Some(v) => sign * v,
+                None if self.sense_max => f64::INFINITY,
+                None => f64::NEG_INFINITY,
+            };
+
+            // 1. OA tangents for violated convex rows at this vertex (append).
+            let mut added = false;
+            for row in &self.nl_rows {
+                if row.residual(&last_x) > oa_tol {
+                    if let Some(cut) = row.oa_tangent(&last_x) {
+                        rows.push(AsmRow {
+                            cols: cut.cols,
+                            coeffs: cut.coeffs,
+                            rhs: cut.rhs,
+                            is_eq: false,
+                        });
+                        added = true;
+                    }
+                }
+            }
+            if added {
+                continue; // OA not yet converged
+            }
+            // 2. OA converged. Separate integrality cuts if budget remains.
+            if sep_used >= max_sep_rounds {
                 break;
             }
-            // Integrality over the full column set: structural, then slacks (never).
-            let mut is_int_full = vec![false; opt.n_total];
+            sep_used += 1;
+            let mut is_int_full = vec![false; n_total];
             is_int_full[..self.n].copy_from_slice(&self.integrality);
-
             let mut raw = separate_cover_csc(
-                &opt.sp,
-                opt.n_total,
-                opt.m,
-                &opt.l,
-                &opt.u,
-                &opt.b,
-                &opt.x_full,
+                &sp,
+                n_total,
+                m,
+                &l,
+                &u,
+                &b,
+                &sol.x,
                 self.n,
                 &is_int_full,
                 self.le_rows.len(),
                 opts.tol,
             );
             raw.extend(separate_gomory_cols(
-                &opt.sp,
-                opt.m,
-                opt.n_total,
-                &opt.l,
-                &opt.u,
-                &opt.b,
-                &opt.basis,
+                &sp,
+                m,
+                n_total,
+                &l,
+                &u,
+                &b,
+                &sol.basis,
                 &is_int_full,
                 opts.tol,
                 1e7,
             ));
-            // MIR (c-MIR family) over the structural ≤ rows — the lever the
-            // GMI+cover pair leaves open (measured: closes ~2× more of syn40m's
-            // root gap). MIR cuts are structural (no slack part); express each in
-            // the standard-form ≥ convention (pad to n_total) so select_cuts and
-            // substitute_slacks handle it uniformly with GMI/cover.
+            // MIR (c-MIR family) over the structural ≤ rows — the lever GMI+cover
+            // leave open (measured: closes ~2× more of syn40m's root gap). MIR cuts
+            // are structural; express in the standard-form ≥ convention so they
+            // flow through select_cuts + substitute_slacks with GMI/cover.
             {
                 let mut a_ub: Vec<f64> = Vec::new();
                 let mut b_ub: Vec<f64> = Vec::new();
-                for row in opt.rows.iter().filter(|r| !r.is_eq) {
+                for row in rows.iter().filter(|r| !r.is_eq) {
                     let mut dense = vec![0.0f64; self.n];
-                    for (c, v) in row.cols.iter().zip(row.coeffs.iter()) {
-                        dense[*c] = *v;
+                    for (cc, vv) in row.cols.iter().zip(row.coeffs.iter()) {
+                        dense[*cc] = *vv;
                     }
                     a_ub.extend_from_slice(&dense);
                     b_ub.push(row.rhs);
@@ -588,15 +548,14 @@ impl ConvexKernelSpec {
                     for mc in separate_mir(
                         &a_ub,
                         &b_ub,
-                        &opt.l[..self.n],
-                        &opt.u[..self.n],
+                        &l[..self.n],
+                        &u[..self.n],
                         &self.integrality,
-                        &opt.x_full[..self.n],
+                        &sol.x[..self.n],
                         opts.tol,
                         1e7,
                     ) {
-                        // MirCut `coeffs·x ≤ rhs` → ≥ form `(−coeffs)·x ≥ −rhs`.
-                        let mut coeffs = vec![0.0f64; opt.n_total];
+                        let mut coeffs = vec![0.0f64; n_total];
                         for (j, &v) in mc.coeffs.iter().enumerate() {
                             coeffs[j] = -v;
                         }
@@ -610,56 +569,47 @@ impl ConvexKernelSpec {
             if raw.is_empty() {
                 break;
             }
-            let selected = select_cuts(raw, &opt.x_full, 8, 1e-4, 0.90);
+            let selected = select_cuts(raw, &sol.x, 8, 1e-4, 0.90);
             if selected.is_empty() {
                 break;
             }
-            let mut added = 0usize;
+            let mut added_cuts = 0usize;
             for gc in &selected {
-                if let Some(lin) = substitute_slacks(gc, &opt.rows, self.n) {
-                    cuts.push(lin);
-                    added += 1;
+                if let Some(lin) = substitute_slacks(gc, &rows, self.n) {
+                    rows.push(AsmRow {
+                        cols: lin.cols,
+                        coeffs: lin.coeffs,
+                        rhs: lin.rhs,
+                        is_eq: false,
+                    });
+                    added_cuts += 1;
                 }
             }
-            if added == 0 {
+            if added_cuts == 0 {
                 break;
             }
-            oc = self.oa_converge(lo, hi, &cuts, &mut tangents, oa_tol, max_oa_rounds, opts);
         }
 
         ConvexNodeResult {
-            status: oc.status,
-            bound: oc.bound,
-            raw_bound: oc.raw_bound,
-            x: oc.x,
-            oa_rounds: oc.rounds,
-            n_tangents: tangents.len() + cuts.len(),
+            status: LpStatus::Optimal,
+            bound: last_bound,
+            raw_bound: last_raw,
+            x: last_x,
+            oa_rounds,
+            n_tangents: rows.len() - n_base,
         }
     }
 }
 
-/// Final assembled LP state at OA convergence (for in-node separation).
-struct OptimalLp {
-    sp: SparseCols,
-    m: usize,
-    n_total: usize,
-    b: Vec<f64>,
-    l: Vec<f64>,
-    u: Vec<f64>,
-    rows: Vec<AsmRow>,
-    basis: crate::lp::basis::Basis,
-    x_full: Vec<f64>,
-}
-
-/// Outcome of one OA convergence run.
-struct OaOutcome {
-    status: LpStatus,
-    bound: f64,
-    raw_bound: f64,
-    x: Vec<f64>,
-    rounds: usize,
-    /// `Some` only on a converged Optimal solve — the LP state for separation.
-    optimal: Option<Box<OptimalLp>>,
+/// Extend a stored basis to `n_total` columns by making the appended slack
+/// columns basic — a valid, dual-repairable warm start after rows/cols were
+/// appended (each new column is its row's slack). No-op when already spanning.
+fn extend_basis(mut basis: Basis, n_total: usize) -> Basis {
+    for j in basis.col_status.len()..n_total {
+        basis.col_status.push(BASIC);
+        basis.basic_vars.push(j);
+    }
+    basis
 }
 
 /// Rewrite a standard-form cut `Σ coeffs·z ≥ rhs` (z = structural ‖ slacks) over
