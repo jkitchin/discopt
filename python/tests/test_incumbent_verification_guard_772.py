@@ -30,7 +30,7 @@ def test_guard_inert_on_valid_solve():
     m = dm.Model()
     x = m.continuous("x", lb=0.0, ub=10.0)
     y = m.continuous("y", lb=0.0, ub=10.0)
-    m.subject_to(x + y >= 1.0)
+    m.subject_to(x * x + y * y >= 0.5)  # nonlinear constraint -> the guard runs
     m.minimize(x * x + y * y)
     r = m.solve(time_limit=10)
     assert r.incumbent_verification_failed is False
@@ -68,7 +68,8 @@ def test_guard_withholds_injected_false_primal(monkeypatch):
     m = dm.Model()
     x = m.continuous("x", lb=0.0, ub=10.0)
     y = m.continuous("y", lb=0.0, ub=10.0)
-    m.subject_to(x + y <= 1.0)  # (3, 3) violates this by 5 — grossly infeasible
+    # nonlinear constraint (so the guard runs); (3, 3) gives 18 > 1 — grossly infeasible
+    m.subject_to(x * x + y * y <= 1.0)
     m.minimize(x + y)
 
     def _fake_solve_model(model, **kwargs):
@@ -96,7 +97,7 @@ def test_verify_incumbent_false_disables_guard(monkeypatch):
     m = dm.Model()
     x = m.continuous("x", lb=0.0, ub=10.0)
     y = m.continuous("y", lb=0.0, ub=10.0)
-    m.subject_to(x + y <= 1.0)
+    m.subject_to(x * x + y * y <= 1.0)  # nonlinear -> the guard runs
     m.minimize(x + y)
 
     def _fake_solve_model(model, **kwargs):

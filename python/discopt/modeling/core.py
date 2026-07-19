@@ -1683,6 +1683,77 @@ def _require_no_shape(shape, ctor: str) -> None:
         )
 
 
+# --- Polynomial-degree classifier for the incumbent-verification guard (#772) ---
+# Pure-Python and JAX-free: distinguishes the LP/MILP/QP/MIQP "fast family" (linear
+# constraints + linear-or-quadratic objective, solved via the JAX-free Rust/POUNCE
+# paths) from genuinely nonlinear models. The guard's snapshot builds a JAX evaluator,
+# so it must be skipped for the fast family to preserve the JAX-free cold start of
+# LP/MILP/QP/MIQP solves (test_lazy_jax_linear_path). Errs toward "nonlinear" on any
+# unknown node — the safe direction: the guard runs (extra coverage), never a wrong skip.
+_INF_DEGREE = float("inf")
+
+
+def _expression_degree(e) -> float:
+    """Polynomial degree of ``e`` in the decision variables; ``inf`` for anything that
+    is not a polynomial (transcendental, variable power, variable denominator, opaque)."""
+    if isinstance(e, (int, float)):
+        return 0
+    if isinstance(e, Constant):
+        return 0
+    if isinstance(e, Variable):
+        return 1
+    if isinstance(e, IndexExpression):
+        return _expression_degree(e.base)
+    if isinstance(e, SumExpression):
+        return _expression_degree(e.operand)
+    if isinstance(e, SumOverExpression):
+        return max((_expression_degree(t) for t in e.terms), default=0)
+    if isinstance(e, UnaryOp):
+        return _expression_degree(e.operand) if e.op == "neg" else _INF_DEGREE
+    if isinstance(e, (FunctionCall, CustomCall)):
+        return _INF_DEGREE
+    if isinstance(e, MatMulExpression):
+        return _expression_degree(e.left) + _expression_degree(e.right)
+    if isinstance(e, BinaryOp):
+        left, right = _expression_degree(e.left), _expression_degree(e.right)
+        if e.op in ("+", "-"):
+            return max(left, right)
+        if e.op == "*":
+            return left + right
+        if e.op == "/":
+            return left if right == 0 else _INF_DEGREE
+        if e.op == "**":
+            k = (
+                e.right.value
+                if isinstance(e.right, Constant)
+                else (e.right if isinstance(e.right, (int, float)) else None)
+            )
+            try:
+                return (
+                    left * int(k)
+                    if (k is not None and float(k).is_integer() and k >= 0)
+                    else _INF_DEGREE
+                )
+            except (TypeError, ValueError):
+                return _INF_DEGREE
+        return _INF_DEGREE
+    return _INF_DEGREE  # unknown node -> treat as nonlinear (guard runs; safe direction)
+
+
+def _is_fast_linear_quadratic_family(model) -> bool:
+    """True for LP/MILP/QP/MIQP: linear constraints and a linear-or-quadratic objective
+    (the JAX-free solve families). Used to skip the JAX-importing incumbent-verification
+    snapshot on those paths so their cold start stays JAX-free."""
+    obj = model._objective.expression if model._objective is not None else None
+    if obj is not None and _expression_degree(obj) > 2:
+        return False
+    for c in model._constraints:
+        body = getattr(c, "body", None)
+        if body is not None and _expression_degree(body) > 1:
+            return False
+    return True
+
+
 class Model:
     """
     A Mixed-Integer Nonlinear Program.
@@ -3520,8 +3591,12 @@ class Model:
         # solve.
         import logging as _logging
 
+        # Skip the (JAX-importing) snapshot for the LP/MILP/QP/MIQP fast family: those
+        # paths are JAX-free by design and do not run the nonlinear presolve mutation
+        # this guard defends against, so building a JAX evaluator there would regress
+        # their JAX-free cold start (``_is_fast_linear_quadratic_family`` is pure-Python).
         _verify_snap = None
-        if verify_incumbent and self._constraints:
+        if verify_incumbent and self._constraints and not _is_fast_linear_quadratic_family(self):
             try:
                 from discopt._jax.nlp_evaluator import cached_evaluator
 
