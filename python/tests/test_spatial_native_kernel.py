@@ -90,13 +90,40 @@ def test_incumbent_point_is_feasible():
     assert x[0] + x[1] >= 3.0 - 1e-4
 
 
-def test_unsupported_model_returns_none():
-    """A model outside the incremental subset (sqrt) yields None (Python fallback)."""
+def test_sqrt_model_is_supported():
+    """sqrt IS covered by the native kernel (EnvTerm::Sqrt); producer builds a spec."""
     from discopt.modeling.core import sqrt as dsqrt
 
     m = Model()
     x = m.continuous("x", lb=1.0, ub=4.0)
     m.minimize(dsqrt(x) + x)
     spec = build_spatial_kernel_spec(m)
-    # sqrt is not covered by the incremental engine -> producer declines.
+    assert spec is not None
+    assert (np.asarray(spec["term_kind"]) == 3).sum() == 1  # one sqrt term
+
+
+def test_unsupported_atom_returns_none():
+    """A model using an atom the kernel does not implement (exp) yields None."""
+    from discopt.modeling.core import exp as dexp
+
+    m = Model()
+    x = m.continuous("x", lb=0.0, ub=2.0)
+    m.minimize(dexp(x) + x)
+    spec = build_spatial_kernel_spec(m)
+    assert spec is None
+
+
+def test_unbounded_relaxation_declines():
+    """tanksize's raw .nl box is unbounded, so the McCormick relaxation has infinite
+    aux ranges (invalid). The producer must decline soundly (return None) rather than
+    emit a spec whose node LP is degenerate — feeding presolved finite bounds is the
+    follow-up. This is the guard that keeps the native path from ever being wrong."""
+    import os
+
+    nl = os.path.join(os.path.dirname(__file__), "data", "minlplib_nl", "tanksize.nl")
+    if not os.path.exists(nl):
+        pytest.skip("tanksize.nl fixture not present")
+    from discopt.modeling.core import from_nl
+
+    spec = build_spatial_kernel_spec(from_nl(nl))
     assert spec is None
