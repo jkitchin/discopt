@@ -225,6 +225,11 @@ class UniformRelaxation:
     # integrality is applied by the delegate; this carries the ENGINE-created integer
     # aux (e.g. the trig-square selector binaries) so the delegate marks them too.
     integrality: list = dataclasses.field(default_factory=list)
+    # Univariate intrinsic atoms ``w = fname(coeff*x_i + const)`` whose argument is
+    # affine in ONE original variable — entries ``(fname, w, var_idx, coeff, const)``.
+    # Exposed so the native-kernel producer (#764) can emit the box-independent term
+    # descriptor (e.g. ``sqrt``) whose envelope the Rust kernel regenerates per box.
+    univariate_atom_specs: list = dataclasses.field(default_factory=list)
 
 
 # --------------------------------------------------------------------------- #
@@ -3247,6 +3252,7 @@ def build_uniform_relaxation(
         ratio_map=dict(ctx.ratio_map),
         finite_domain_trig_square_tables=list(ctx.finite_domain_trig_square_tables),
         integrality=list(ctx.integrality),
+        univariate_atom_specs=list(ctx.univariate_atom_specs),
     )
 
 
