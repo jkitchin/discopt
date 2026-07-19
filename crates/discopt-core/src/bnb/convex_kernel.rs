@@ -672,6 +672,432 @@ fn substitute_slacks(gc: &GomoryCut, rows: &[AsmRow], n_struct: usize) -> Option
     })
 }
 
+// ── K2c: best-bound branch-and-cut tree ──────────────────────────────────────
+
+/// Terminal state of the convex kernel tree. `Optimal` is emitted ONLY when the
+/// dual bound has closed onto the incumbent within `gap_tol` — a residual gap
+/// yields `Exhausted`/`NodeLimit`/`TimeLimit`, never a falsely-upgraded optimum.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ConvexTreeStatus {
+    /// Certified optimal (dual bound closed onto the incumbent).
+    Optimal,
+    /// Node budget exhausted with a residual gap.
+    NodeLimit,
+    /// Wall-clock deadline hit with a residual gap.
+    TimeLimit,
+    /// Tree fully explored but the residual gap did not close to `gap_tol`
+    /// (numerical), or no incumbent was found.
+    Exhausted,
+    /// The root relaxation is infeasible.
+    Infeasible,
+}
+
+/// Configuration for [`ConvexKernelSpec::solve_tree`].
+#[derive(Clone, Debug)]
+pub struct ConvexTreeConfig {
+    /// Node budget.
+    pub max_nodes: usize,
+    /// Relative optimality gap tolerance.
+    pub gap_tol: f64,
+    /// Integrality tolerance.
+    pub int_tol: f64,
+    /// OA nonlinear-residual tolerance.
+    pub oa_tol: f64,
+    /// Per-node OA round cap.
+    pub max_oa_rounds: usize,
+    /// Per-node separation round cap (0 = no in-tree cutting).
+    pub max_sep_rounds: usize,
+    /// FBBT propagation round cap per node.
+    pub fbbt_rounds: usize,
+    /// Optional wall-clock deadline.
+    pub deadline: Option<std::time::Instant>,
+    /// Optional known-feasible incumbent objective (model sense) to seed pruning.
+    pub initial_incumbent: Option<f64>,
+}
+
+impl Default for ConvexTreeConfig {
+    fn default() -> Self {
+        Self {
+            max_nodes: 100_000,
+            gap_tol: 1e-4,
+            int_tol: 1e-5,
+            oa_tol: 1e-6,
+            max_oa_rounds: 60,
+            max_sep_rounds: 12,
+            fbbt_rounds: 20,
+            deadline: None,
+            initial_incumbent: None,
+        }
+    }
+}
+
+/// Result of a convex kernel tree solve.
+#[derive(Clone, Debug)]
+pub struct ConvexTreeResult {
+    /// Terminal status.
+    pub status: ConvexTreeStatus,
+    /// Best feasible objective (model sense), or `None` if none was found.
+    pub incumbent: Option<f64>,
+    /// Structural point of the incumbent (empty if none).
+    pub incumbent_x: Vec<f64>,
+    /// Best dual bound in the model sense (upper bound for max, lower for min).
+    pub bound: f64,
+    /// Nodes processed.
+    pub node_count: usize,
+}
+
+/// A worklist node: the box `(lo, hi)` and the parent's rigorous dual bound.
+struct TreeNode {
+    key: f64, // best-bound priority: pop the most promising node first (max-heap).
+    parent_bound: f64,
+    lo: Vec<f64>,
+    hi: Vec<f64>,
+}
+impl PartialEq for TreeNode {
+    fn eq(&self, other: &Self) -> bool {
+        self.key == other.key
+    }
+}
+impl Eq for TreeNode {}
+impl PartialOrd for TreeNode {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+impl Ord for TreeNode {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.key.total_cmp(&other.key)
+    }
+}
+
+impl ConvexKernelSpec {
+    /// Interval FBBT over the linear rows (`≤` and `=`, both directions) plus
+    /// integer rounding, tightening `(lo, hi)` in place to a fixpoint. Returns
+    /// `false` if the box is proven empty. REQUIRED before the node LP: it makes
+    /// the structural bounds finite so the Neumaier–Shcherbina safe bound
+    /// certifies (an infinite structural bound meeting a roundoff reduced cost
+    /// makes NS decline — the K1d finding).
+    pub fn propagate_fbbt(&self, lo: &mut [f64], hi: &mut [f64], max_rounds: usize) -> bool {
+        // Each pass tightens `a·x ≤ rhs` rows; equalities contribute both `a·x ≤ b`
+        // and `−a·x ≤ −b`.
+        let apply = |lo: &mut [f64],
+                     hi: &mut [f64],
+                     cols: &[usize],
+                     coeffs: &[f64],
+                     rhs: f64|
+         -> Option<bool> {
+            // Returns Some(changed) or None if the box is proven empty.
+            let mut changed = false;
+            for (jpos, &j) in cols.iter().enumerate() {
+                let aj = coeffs[jpos];
+                if aj == 0.0 {
+                    continue;
+                }
+                // rest = Σ_{k≠j} min contribution (a_k>0 → lo, else hi).
+                let mut rest = 0.0;
+                let mut ok = true;
+                for (kpos, &k) in cols.iter().enumerate() {
+                    if kpos == jpos {
+                        continue;
+                    }
+                    let ak = coeffs[kpos];
+                    let v = if ak > 0.0 { lo[k] } else { hi[k] };
+                    if !v.is_finite() {
+                        ok = false;
+                        break;
+                    }
+                    rest += ak * v;
+                }
+                if !ok {
+                    continue;
+                }
+                let bnd = (rhs - rest) / aj;
+                if aj > 0.0 {
+                    let nb = if self.integrality[j] {
+                        (bnd + 1e-9).floor()
+                    } else {
+                        bnd
+                    };
+                    if nb < hi[j] - 1e-9 {
+                        hi[j] = nb;
+                        changed = true;
+                    }
+                } else {
+                    let nb = if self.integrality[j] {
+                        (bnd - 1e-9).ceil()
+                    } else {
+                        bnd
+                    };
+                    if nb > lo[j] + 1e-9 {
+                        lo[j] = nb;
+                        changed = true;
+                    }
+                }
+                if lo[j] > hi[j] + 1e-7 {
+                    return None;
+                }
+            }
+            Some(changed)
+        };
+
+        for _ in 0..max_rounds.max(1) {
+            let mut changed = false;
+            for row in &self.le_rows {
+                match apply(lo, hi, &row.cols, &row.coeffs, row.rhs) {
+                    None => return false,
+                    Some(c) => changed |= c,
+                }
+            }
+            for row in &self.eq_rows {
+                match apply(lo, hi, &row.cols, &row.coeffs, row.rhs) {
+                    None => return false,
+                    Some(c) => changed |= c,
+                }
+                let neg: Vec<f64> = row.coeffs.iter().map(|v| -v).collect();
+                match apply(lo, hi, &row.cols, &neg, -row.rhs) {
+                    None => return false,
+                    Some(c) => changed |= c,
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
+        // Final integer rounding on the box.
+        for j in 0..self.n {
+            if self.integrality[j] {
+                lo[j] = (lo[j] - 1e-9).ceil();
+                hi[j] = (hi[j] + 1e-9).floor();
+                if lo[j] > hi[j] + 1e-7 {
+                    return false;
+                }
+            }
+        }
+        true
+    }
+
+    /// Is `x` integer-integral on all integer columns AND OA-tight (every convex
+    /// row satisfied to `oa_tol`)? Such an LP vertex is genuinely feasible → a
+    /// valid incumbent (the minimal LP-NLP-BB primal; K3 adds NLP/rounding).
+    fn is_integer_feasible(&self, x: &[f64], int_tol: f64, oa_tol: f64) -> bool {
+        for j in 0..self.n {
+            if self.integrality[j] && (x[j] - x[j].round()).abs() > int_tol {
+                return false;
+            }
+        }
+        self.nl_rows.iter().all(|r| r.residual(x) <= oa_tol)
+    }
+
+    /// The most-fractional integer column, or `None` if all are integral.
+    fn most_fractional(&self, x: &[f64], int_tol: f64) -> Option<usize> {
+        let mut best = int_tol;
+        let mut bj = None;
+        for j in 0..self.n {
+            if self.integrality[j] {
+                let f = x[j] - x[j].floor();
+                let d = f.min(1.0 - f);
+                if d > best {
+                    best = d;
+                    bj = Some(j);
+                }
+            }
+        }
+        bj
+    }
+
+    /// The objective `c·x` in the model sense.
+    fn objective(&self, x: &[f64]) -> f64 {
+        self.c.iter().zip(x.iter()).map(|(c, x)| c * x).sum()
+    }
+
+    /// Best-bound LP-OA branch-and-cut over the global box `(lb, hi)`. Best-bound
+    /// worklist, per-node FBBT + `solve_node_cut`, sound fathoming on the NS safe
+    /// bound, branch on the most-fractional integer. Never reports `Optimal`
+    /// unless the dual bound closes onto the incumbent within `gap_tol`.
+    pub fn solve_tree(&self, config: &ConvexTreeConfig, opts: &SimplexOptions) -> ConvexTreeResult {
+        let sense = if self.sense_max { 1.0 } else { -1.0 };
+        // Work in a "maximize sense·bound" convention: priority = sense·bound so
+        // the heap always pops the most promising node; incumbent improves when
+        // sense·obj increases; fathom when sense·dual ≤ sense·incumbent + gap.
+        let worse = f64::NEG_INFINITY; // sense·(worst possible objective)
+        let mut inc_sense = config.initial_incumbent.map(|v| sense * v).unwrap_or(worse);
+        let mut incumbent_x: Vec<f64> = Vec::new();
+
+        // Root node over the FBBT-propagated global box.
+        let mut root_lo = self.lb.clone();
+        let mut root_hi = self.ub.clone();
+        if !self.propagate_fbbt(&mut root_lo, &mut root_hi, config.fbbt_rounds) {
+            return ConvexTreeResult {
+                status: ConvexTreeStatus::Infeasible,
+                incumbent: None,
+                incumbent_x: Vec::new(),
+                bound: worse,
+                node_count: 0,
+            };
+        }
+
+        let mut heap = std::collections::BinaryHeap::new();
+        heap.push(TreeNode {
+            key: f64::INFINITY,
+            parent_bound: sense * f64::INFINITY, // sense·(trivial dual bound)
+            lo: root_lo,
+            hi: root_hi,
+        });
+
+        let mut node_count = 0usize;
+        let mut status = ConvexTreeStatus::Exhausted;
+        // Global dual bound (sense convention): max over the frontier of node duals.
+        let mut global_dual_sense = f64::INFINITY;
+
+        while let Some(node) = heap.pop() {
+            // Global dual bound = best (largest sense·bound) still on the frontier,
+            // including this node.
+            global_dual_sense = node.parent_bound.max(
+                heap.iter()
+                    .map(|n| n.parent_bound)
+                    .fold(f64::NEG_INFINITY, f64::max),
+            );
+
+            // Gap check: if the best remaining dual has closed onto the incumbent,
+            // the whole tree is certified.
+            if inc_sense > worse
+                && global_dual_sense <= inc_sense + config.gap_tol * inc_sense.abs().max(1.0)
+            {
+                status = ConvexTreeStatus::Optimal;
+                break;
+            }
+            if config
+                .deadline
+                .is_some_and(|d| std::time::Instant::now() >= d)
+            {
+                status = ConvexTreeStatus::TimeLimit;
+                break;
+            }
+            if node_count >= config.max_nodes {
+                status = ConvexTreeStatus::NodeLimit;
+                break;
+            }
+            // Fathom by parent bound vs incumbent.
+            if inc_sense > worse
+                && node.parent_bound <= inc_sense + config.gap_tol * inc_sense.abs().max(1.0)
+            {
+                continue;
+            }
+            node_count += 1;
+
+            // FBBT the child box (root already propagated, but branching added
+            // bounds that propagate further).
+            let mut lo = node.lo;
+            let mut hi = node.hi;
+            if !self.propagate_fbbt(&mut lo, &mut hi, config.fbbt_rounds) {
+                continue; // empty box → fathom
+            }
+
+            let r = self.solve_node_cut(
+                &lo,
+                &hi,
+                config.oa_tol,
+                config.max_oa_rounds,
+                config.max_sep_rounds,
+                opts,
+            );
+            if r.status != LpStatus::Optimal {
+                continue; // infeasible/unbounded region → skip
+            }
+            // Node dual in the sense convention, floored by the parent (rigorous:
+            // a child's bound can only be ≤ the parent's in sense convention).
+            let node_dual_sense = (sense * r.bound).min(node.parent_bound);
+            if !node_dual_sense.is_finite() {
+                // Uncertified node bound → cannot fathom on it, but we can still
+                // branch to make progress; treat its dual as the parent's.
+            }
+            // Fathom by node bound.
+            if inc_sense > worse
+                && node_dual_sense <= inc_sense + config.gap_tol * inc_sense.abs().max(1.0)
+            {
+                continue;
+            }
+
+            // Incumbent from an integer-feasible OA-tight vertex.
+            if self.is_integer_feasible(&r.x, config.int_tol, config.oa_tol * 10.0) {
+                let obj_sense = sense * self.objective(&r.x);
+                if obj_sense > inc_sense {
+                    inc_sense = obj_sense;
+                    incumbent_x = r.x.clone();
+                }
+                continue; // integral node → nothing to branch
+            }
+
+            // Branch on the most-fractional integer.
+            let Some(j) = self.most_fractional(&r.x, config.int_tol) else {
+                continue;
+            };
+            let xj = r.x[j];
+            let branch_key = node_dual_sense;
+            // Down child: x_j ≤ floor(x_j).
+            {
+                let clo = lo.clone();
+                let mut chi = hi.clone();
+                chi[j] = xj.floor();
+                if clo[j] <= chi[j] + 1e-9 {
+                    heap.push(TreeNode {
+                        key: branch_key,
+                        parent_bound: node_dual_sense,
+                        lo: clo,
+                        hi: chi,
+                    });
+                }
+            }
+            // Up child: x_j ≥ ceil(x_j).
+            {
+                let mut clo = lo;
+                let chi = hi;
+                clo[j] = xj.ceil();
+                if clo[j] <= chi[j] + 1e-9 {
+                    heap.push(TreeNode {
+                        key: branch_key,
+                        parent_bound: node_dual_sense,
+                        lo: clo,
+                        hi: chi,
+                    });
+                }
+            }
+        }
+
+        if heap.is_empty() && status == ConvexTreeStatus::Exhausted {
+            // Frontier drained: the global dual collapses to the incumbent.
+            global_dual_sense = inc_sense;
+            if inc_sense > worse {
+                status = ConvexTreeStatus::Optimal;
+            }
+        }
+
+        let incumbent = if inc_sense > worse {
+            Some(sense * inc_sense)
+        } else {
+            None
+        };
+        let bound = if global_dual_sense.is_finite() {
+            sense * global_dual_sense
+        } else if inc_sense > worse {
+            sense * inc_sense
+        } else {
+            sense * f64::INFINITY
+        };
+        ConvexTreeResult {
+            status: if incumbent.is_none() && status == ConvexTreeStatus::Optimal {
+                ConvexTreeStatus::Exhausted
+            } else {
+                status
+            },
+            incumbent,
+            incumbent_x,
+            bound,
+            node_count,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -907,6 +1333,84 @@ mod tests {
             r1.bound >= 1.0 - 1e-6,
             "UNSOUND: bound {} < integer optimum 1.0",
             r1.bound
+        );
+    }
+
+    /// K2c: the tree certifies a small MILP. `max x0+x1 s.t. x0+x1≤1.5,
+    /// x∈{0,1}²` → integer optimum 1 (branching + fathoming, no nl rows).
+    #[test]
+    fn tree_certifies_milp() {
+        let spec = ConvexKernelSpec {
+            n: 2,
+            c: vec![1.0, 1.0],
+            sense_max: true,
+            integrality: vec![true, true],
+            lb: vec![0.0, 0.0],
+            ub: vec![1.0, 1.0],
+            le_rows: vec![LinRow {
+                cols: vec![0, 1],
+                coeffs: vec![1.0, 1.0],
+                rhs: 1.5,
+            }],
+            eq_rows: vec![],
+            nl_rows: vec![],
+        };
+        let cfg = ConvexTreeConfig::default();
+        let r = spec.solve_tree(&cfg, &opts());
+        assert_eq!(r.status, ConvexTreeStatus::Optimal, "status {:?}", r.status);
+        let inc = r.incumbent.expect("incumbent");
+        assert!((inc - 1.0).abs() < 1e-6, "incumbent {inc} != 1.0");
+        // Dual bound is a valid upper bound that closed onto the incumbent.
+        assert!(
+            r.bound >= inc - 1e-6 && r.bound <= inc + 1e-4,
+            "bound {} vs inc {inc}",
+            r.bound
+        );
+    }
+
+    /// K2c: the tree certifies a small convex MINLP.
+    /// `max x + k  s.t.  k ≤ x,  exp(x) ≤ 5,  x∈[0,10] cont, k∈{0..3} int`.
+    /// exp(x)≤5 → x ≤ ln5 ≈ 1.6094; k ≤ x → k=1. Optimum ≈ ln5 + 1 ≈ 2.6094.
+    #[test]
+    fn tree_certifies_convex_minlp() {
+        let spec = ConvexKernelSpec {
+            n: 2, // x0 = x (cont), x1 = k (int)
+            c: vec![1.0, 1.0],
+            sense_max: true,
+            integrality: vec![false, true],
+            lb: vec![0.0, 0.0],
+            ub: vec![10.0, 3.0],
+            le_rows: vec![LinRow {
+                cols: vec![1, 0],
+                coeffs: vec![1.0, -1.0], // k − x ≤ 0
+                rhs: 0.0,
+            }],
+            eq_rows: vec![],
+            nl_rows: vec![ConvexRow {
+                lin: Affine::default(),
+                terms: vec![CompositeTerm {
+                    coeff: 1.0,
+                    func: ConvexFunc::Exp,
+                    arg: Affine {
+                        cols: vec![0],
+                        coeffs: vec![1.0],
+                        cst: 0.0,
+                    },
+                }],
+                rhs: 5.0,
+            }],
+        };
+        let cfg = ConvexTreeConfig::default();
+        let r = spec.solve_tree(&cfg, &opts());
+        assert_eq!(r.status, ConvexTreeStatus::Optimal, "status {:?}", r.status);
+        let inc = r.incumbent.expect("incumbent");
+        let truth = 5.0_f64.ln() + 1.0;
+        assert!((inc - truth).abs() < 1e-3, "incumbent {inc} != {truth}");
+        // Sound: the dual bound never below the true optimum (it's an UPPER bound).
+        assert!(
+            r.bound >= truth - 1e-3,
+            "UNSOUND dual bound {} < truth {truth}",
+            r.bound
         );
     }
 
