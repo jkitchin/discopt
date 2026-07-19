@@ -100,14 +100,39 @@ Goal: confirm the in-Rust node is ≥5× faster than today's Python node before 
 
 ## Build order
 
-1. Port `incremental_mccormick` to Rust (`bnb/mccormick_patch.rs`) with the bilinear+square subset;
-   bound-neutrality gate vs the cold build. (Bound-neutral, testable in isolation.)
-2. Extend the patcher to sqrt/fractional-power/trilinear (covers tanksize + the general spatial
-   class). Same gate.
-3. In-Rust warm OBBT probe loop over `presolve/obbt.rs` candidates (shared basis).
+1. **DONE (2026-07-19)** — Port `incremental_mccormick` to Rust (`bnb/mccormick_patch.rs`).
+   Faithful ports of the three families `IncrementalMcCormickLP._patch` actually dispatches on:
+   `_bilinear_rows` (4 rows), `_monomial_rows` (4 rows incl. the box-midpoint tangent — `p=2` is the
+   plain square), `_affine_square_rows` (4 rows), plus their aux-bound helpers. **Correctness note:**
+   the first cut shipped a textbook 3-row `_square_rows`, which `_patch` never calls — the cold build
+   uses the tighter 4-row midpoint-tangent hull, so a 3-row port would produce a weaker bound and
+   fail neutrality. Fixed. Bound-neutrality gate at the formula level: differential fixtures assert
+   exact equality (`<1e-12`) to values generated from the Python reference functions.
+2. **DONE (2026-07-19)** — Extend to `sqrt`. `univariate_rows(...)` ports `uniform_relax._emit_1d`
+   (secant + tangents at `t_lo`/mid/`t_hi`, sign by curvature) with a `Univariate` atom enum;
+   `Sqrt` is instantiated (concave) — the only atom `tanksize` needs beyond products/squares (its
+   `.nl` = `o2` multiply ×84 + `o39` sqrt ×3). Fixtures pin exact equality to `_emit_1d` on bare and
+   affine sqrt; returns `None` (aux-floor) on degenerate/undefined boxes, matching `tight=False`.
+   The enum makes fractional-power/log/exp/trilinear drop-in extensions of the same row machinery
+   (remaining item-2 tail, not needed for tanksize). **The patcher now covers tanksize's full atom
+   set.** (`cargo test -p discopt-core mccormick_patch`: 16 passed; full lib suite 495 passed.)
+3. In-Rust warm OBBT probe loop over `presolve/obbt.rs` candidates (shared basis). *Depends on a
+   resident node LP to probe* — i.e. the item-4 assembly. `obbt_candidates`/`apply_obbt_bounds`/
+   `extract_linear_rows` exist; the missing piece is the objective-swapping warm-simplex loop.
 4. The Rust spatial node orchestrator + `SpatialKernelSpec` PyO3 interface; strided NLP callback.
+   **This is the decisive integration** — it assembles the patched LP (item 1–2), runs the warm
+   solve + OBBT loop (item 3), FBBT, DBBT, and branching in one Rust loop. The entry-experiment kill
+   criterion lands here: run one tanksize node end-to-end in Rust and time vs the ~420 ms Python
+   node — **kill if `< 5×`**.
 5. Wire behind a flag; bound-neutral graduation panel (exact node_count + objective), then the
    throughput panel (median slowdown vs SCIP/BARON on the global50 spatial subset).
 
 All phases keep the Python cold path as the trusted fallback and validation oracle — the kernel can
 never change a certificate, only its speed.
+
+**Honest-ceiling reminder (do not lose):** even with items 1–5 complete, the native kernel gets
+tanksize to ~minutes / tens of nodes-per-second, **not** SCIP's ~925 n/s. Full SCIP parity on
+tanksize *also* needs an effective per-node cut engine so the ~95-probe OBBT count collapses toward
+~1 LP/node (C3) — inert on this bilinear class today, a separate/harder research line. The native
+kernel is the broad throughput win (≈10–14× on the cold-rebuild-bound class); it is necessary but
+not sufficient for tanksize parity alone.
