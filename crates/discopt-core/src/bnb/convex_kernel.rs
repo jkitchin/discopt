@@ -252,9 +252,16 @@ pub struct ConvexNodeResult {
     /// LP status of the final OA relaxation solve.
     pub status: LpStatus,
     /// Rigorous dual bound in the MODEL's sense (a valid upper bound for a
-    /// maximization, lower bound for a minimization). `±inf` when uncertifiable or
-    /// the relaxation is infeasible — sound (never fathoms).
+    /// maximization, lower bound for a minimization) — the Neumaier–Shcherbina
+    /// safe bound, negated for sense. `±inf` when uncertifiable (e.g. a nonzero
+    /// reduced cost meets an infinite structural bound) or the relaxation is
+    /// infeasible — sound (never fathoms). This is what the tree fathoms on.
     pub bound: f64,
+    /// The RAW simplex LP optimum in the model's sense (not directed-rounded).
+    /// Diagnostic / byte-check use only — NEVER fathom on this (it can drift above
+    /// the true optimum on an ill-conditioned basis). Equals `bound` up to the NS
+    /// safety margin when the bound certifies.
+    pub raw_bound: f64,
     /// Structural primal point at the final OA vertex (length `n`).
     pub x: Vec<f64>,
     /// Number of OA rounds (LP solves) performed.
@@ -355,6 +362,7 @@ impl ConvexKernelSpec {
         let mut last_x = vec![0.0f64; self.n];
         let mut status = LpStatus::Optimal;
         let mut bound = f64::NEG_INFINITY;
+        let mut raw_bound = f64::NEG_INFINITY;
         let mut rounds = 0usize;
 
         for _ in 0..max_oa_rounds.max(1) {
@@ -403,12 +411,15 @@ impl ConvexKernelSpec {
                 return ConvexNodeResult {
                     status,
                     bound: sentinel,
+                    raw_bound: sentinel,
                     x: last_x,
                     oa_rounds: rounds,
                     n_tangents: tangents.len(),
                 };
             }
             last_x.copy_from_slice(&sol.x[..self.n]);
+            // Raw LP optimum in the model sense (diagnostic; never fathom on it).
+            raw_bound = sign * sol.obj;
 
             // Rigorous safe bound on min(c·x) from the row duals; negate for sense.
             let (col_ptr, row_idx, vals) = sp.raw();
@@ -448,6 +459,7 @@ impl ConvexKernelSpec {
         ConvexNodeResult {
             status,
             bound,
+            raw_bound,
             x: last_x,
             oa_rounds: rounds,
             n_tangents: tangents.len(),
