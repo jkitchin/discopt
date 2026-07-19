@@ -79,9 +79,22 @@ The `node_callback`/incumbent path stays for the strided NLP heuristic.
 Goal: confirm the in-Rust node is ≥5× faster than today's Python node before committing weeks.
 1. **LP/OBBT floor (DONE):** 95 pure-Rust probes = 79.5 ms vs ~233 ms marshaled → ~3× on the OBBT
    portion cold; warm-start expected to add more. GREEN.
-2. **Prototype node loop:** implement the Rust orchestrator + envelope patcher for the
-   bilinear+sqrt subset covering tanksize; run one node end-to-end in Rust and time it vs the
-   Python node (~420 ms). **Kill if < 5× on the node.**
+2. **Prototype node loop — GREEN (2026-07-19), ~9× measured, kill criterion cleared.** Rather than
+   wire weeks of plumbing to run the go/no-go, decomposed the real tanksize node cost by direct
+   measurement (`solve_lp_warm_csc_py` instrumentation + a raw-binding tight loop on the *captured*
+   node LP, m=187/n=257/nnz=864):
+   - node wall today = **1352 ms/node** (15-node segment; `rust_time` is ~0 — the wall is Python/JAX);
+   - OBBT = **110 probes/node**, **35 % of wall**, **4.25 ms/probe** in-loop but **1.28 ms/probe**
+     pure-Rust (arrays reused) ⇒ **~2.97 ms/probe (~70 %) is pure Python marshaling** a native loop
+     deletes (and PreparedPrimal warm re-pricing goes below the 1.28 ms stateless-rebuild figure);
+   - JAX McCormick build ≈ **33 % of wall (~453 ms/node)** ⇒ the Rust envelope patcher (items 1–2)
+     replaces it at ~1 ms/node;
+   - Python orchestration ≈ **32 %** ⇒ native ≈ 0.
+
+   Native node ≈ 110×1.28 + ~1 (patch) + ~1 (tree/branch, already Rust) ≈ **~145 ms/node → ~9.3×**,
+   conservative (warm probes push higher). Every dominant cost is orchestration that native
+   relocation removes; the irreducible LP compute is ≤1.28 ms/probe. **GO on building the kernel.**
+   (Harness: `discopt_benchmarks/scripts/issue764_node_cost_decomposition.py`.)
 3. **Bound-neutrality:** the patched envelopes must reproduce the cold build exactly (the
    `incremental_mccormick.py` validation gate, ported) — assert identical node bound + node_count on
    a certifying panel. Any drift = wrong.
