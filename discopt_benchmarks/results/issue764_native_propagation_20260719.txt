@@ -1,0 +1,19 @@
+# #764 C2 — native kernel with FBBT propagation on tanksize (2026-07-19)
+# Config: propagation ON (default), OBBT OFF (default), best-bound, gap_tol=1e-4,
+# initial_incumbent=1.2686437615 (known feasible value). ~1 LP solve per node
+# (SCIP-like node profile; zero OBBT probes). oracle = 1.2686437540.
+
+## Run 2 — AFTER the premature-fathom soundness fix (honest statuses)
+nodes<=3000:   node_limit bound=0.92689 inc=1.2686438 n=3000   7.7s  (2.58 ms/node)
+nodes<=20000:  node_limit bound=0.93702 inc=1.2686438 n=20000  73.6s (3.68 ms/node)
+nodes<=100000: node_limit bound=0.93702 inc=1.2686438 n=100000 389s  (3.89 ms/node)
+# -> bound climbs 0.838 -> 0.937 then plateaus (flat 20k->100k). NOT certified.
+# Without propagation the bound is frozen at 0.838 forever (prior measurement).
+
+## Run 1 — BEFORE the fix (RETAINED AS THE BUG RECORD; the "optimal" below was a
+## FALSE certificate: feasible leaves closed regions with uncertified bounds and
+## exhaustion mislabeled itself optimal at bound=0.937 vs incumbent=1.2686).
+nodes<=600:    node_limit bound=0.90112 inc=1.2686437614652892 n=600   lp=595   1.55s
+nodes<=3000:   node_limit bound=0.92689 inc=1.2686437614652892 n=3000  lp=2986  7.82s
+nodes<=20000:  node_limit bound=0.93702 inc=1.2686437445391878 n=20000 lp=19873 55.06s
+nodes<=100000: optimal    bound=0.93702 inc=1.2686437445391878 n=20547 lp=20417 56.33s   # <-- FALSE (fixed)

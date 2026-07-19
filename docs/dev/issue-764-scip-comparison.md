@@ -80,6 +80,36 @@ that bound the build:
 the ~95-probe OBBT sweep as the default tightening; branch at the LP point; then the bound-neutral
 and net-positive graduation panels per the CLAUDE.md regime-2 protocol.
 
+## C2 BUILD RESULT (2026-07-19) — propagation in the native kernel; honest measurement
+
+Built `bnb/spatial_propagate.rs` (the validated propagator: linear rows + affine-form products
+with **extended zero-touching division** + sqrt/monomial/affine-square forward+reverse + integer
+rounding + objective cutoff, outward-guarded, fixpoint) and wired it into `spatial_tree` per node
+BEFORE the LP, default ON with OBBT default OFF (the validated recipe); `initial_incumbent` seeds
+the cutoff coupling. Node profile is now SCIP-like: **~1 LP solve per node, zero OBBT probes,
+~2.6 ms/node**.
+
+**Soundness bug found & fixed during validation:** the first native run reported `optimal` at
+20 547 nodes with bound 0.937 vs incumbent 1.2686 — a **false certificate**. Root cause: a feasible
+leaf closed its region unconditionally after accepting the incumbent even when the region's
+rigorous bound did not certify (the region could hold better points), and exhaustion then labeled
+itself `Optimal`. Fixed: a feasible leaf closes only when `bound >= incumbent - gap_tol` (else it
+keeps branching, with a widest-column fallback), and exhaustion returns `Optimal` only when the
+final bound genuinely closes the gap — a new honest `Exhausted` status otherwise. Regression test
+`optimal_status_implies_certified_gap` locks it.
+
+**Honest tanksize measurement post-fix** (`results/issue764_native_propagation_20260719.txt`):
+bound climbs **0.838 → 0.927 @3k → 0.937 @20k, then plateaus flat through 100k nodes**. Without
+propagation the bound is frozen at 0.838 forever, so the mechanism works and the node economics are
+right — but the climb stalls at 0.937, well short of certification (1.2686). The prototype with the
+*trusted Python relaxer* per node reached 0.956 @3k — richer per-node relaxation (separable
+objective floor, convex-lift OA, separation) than the kernel's bare McCormick+BLF rows — and SCIP
+reaches 1.269 @1391 with far stronger propagation + enforcement linearization (8 946 cuts) +
+reliability branching. **Remaining gap to certify tanksize natively: per-node relaxation/propagation
+QUALITY** — (a) richer node LP rows (the trusted build's extra families), (b) SCIP-strength
+propagation (more atoms, better ordering), (c) violation/reliability branching. The infrastructure
+(cheap propagated nodes at ~2.6 ms) is in place; the quality ratchet is the follow-on.
+
 ---
 
 

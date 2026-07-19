@@ -38,7 +38,8 @@ use pyo3::types::PyDict;
     blf_b_ptr, blf_b_cols, blf_b_coeffs, blf_b_const,
     obbt_candidates,
     max_nodes=100_000, gap_tol=1e-6, int_tol=1e-5, mccormick_tol=1e-6,
-    min_box_width=1e-9, run_obbt=true,
+    min_box_width=1e-9, run_obbt=false, run_propagation=true,
+    propagation_rounds=15, initial_incumbent=None,
 ))]
 pub fn solve_spatial_tree_py<'py>(
     py: Python<'py>,
@@ -75,6 +76,9 @@ pub fn solve_spatial_tree_py<'py>(
     mccormick_tol: f64,
     min_box_width: f64,
     run_obbt: bool,
+    run_propagation: bool,
+    propagation_rounds: usize,
+    initial_incumbent: Option<f64>,
 ) -> PyResult<Bound<'py, PyDict>> {
     let c = c.as_slice()?;
     let integrality = integrality.as_slice()?;
@@ -222,6 +226,9 @@ pub fn solve_spatial_tree_py<'py>(
         mccormick_tol,
         min_box_width,
         run_obbt,
+        run_propagation,
+        propagation_rounds,
+        initial_incumbent,
     };
     let opts = SimplexOptions::default();
 
@@ -231,6 +238,7 @@ pub fn solve_spatial_tree_py<'py>(
     let status = match res.status {
         TreeStatus::Optimal => "optimal",
         TreeStatus::NodeLimit => "node_limit",
+        TreeStatus::Exhausted => "exhausted",
         TreeStatus::Infeasible => "infeasible",
     };
     let out = PyDict::new(py);

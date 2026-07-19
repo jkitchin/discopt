@@ -19,6 +19,7 @@
 //!   feasible point is ever lost.
 
 use crate::bnb::spatial_kernel::{solve_spatial_node, EnvTerm, SpatialKernelSpec};
+use crate::bnb::spatial_propagate::propagate_spec_fixpoint;
 use crate::lp::simplex::{LpStatus, SimplexOptions};
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
@@ -56,10 +57,18 @@ impl Ord for QNode {
 /// Termination status of the tree solve.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TreeStatus {
-    /// The gap closed to `gap_tol` (global bound met the incumbent).
+    /// The gap closed to `gap_tol` (global bound met the incumbent) — a genuine
+    /// certificate: every region was either explored or fathomed with a rigorous
+    /// bound `>= incumbent - gap_tol`.
     Optimal,
     /// The node budget was exhausted with the gap still open.
     NodeLimit,
+    /// The worklist emptied but the certified global bound did NOT reach
+    /// `incumbent - gap_tol` — some regions could only be closed with weaker
+    /// rigorous bounds (width-exhausted boxes, uncertifiable node duals). The
+    /// incumbent and `bound` are both valid; the gap between them is honest
+    /// residual uncertainty. NEVER reported as `Optimal`.
+    Exhausted,
     /// No feasible point exists (the root relaxation was infeasible).
     Infeasible,
 }
@@ -77,8 +86,26 @@ pub struct SpatialTreeConfig {
     pub mccormick_tol: f64,
     /// Minimum box width worth spatial-branching (avoids infinite splitting).
     pub min_box_width: f64,
-    /// Whether to run the in-kernel OBBT sweep at each node.
+    /// Whether to run the in-kernel OBBT sweep at each node. Default OFF since the
+    /// C2 entry experiment (2026-07-19): cheap FBBT propagation is the validated
+    /// default tightening; OBBT's ~2·n LP probes/node are the expensive substitute
+    /// it replaces.
     pub run_obbt: bool,
+    /// Whether to run the FBBT fixpoint propagation at each node BEFORE the LP:
+    /// linear rows, products with extended division, sqrt/monomial/affine-square,
+    /// integer rounding, and the objective cutoff. Default ON — the C2-validated
+    /// mechanism that climbs the dual bound (zero LP solves).
+    pub run_propagation: bool,
+    /// Fixpoint round cap for the per-node propagation.
+    pub propagation_rounds: usize,
+    /// Externally-supplied valid upper bound — the objective value (internal
+    /// minimize units) of a KNOWN feasible point (e.g. from an NLP heuristic).
+    /// Seeded as the initial incumbent (with an empty `incumbent_x`, since the
+    /// point lives with the caller): it prunes and cutoff-propagates exactly like
+    /// an internally-found incumbent, and is reported back unchanged if never
+    /// improved. Soundness requires the value to genuinely be attained by a
+    /// feasible point.
+    pub initial_incumbent: Option<f64>,
 }
 
 impl Default for SpatialTreeConfig {
@@ -89,7 +116,10 @@ impl Default for SpatialTreeConfig {
             int_tol: 1e-5,
             mccormick_tol: 1e-6,
             min_box_width: 1e-9,
-            run_obbt: true,
+            run_obbt: false,
+            run_propagation: true,
+            propagation_rounds: 15,
+            initial_incumbent: None,
         }
     }
 }
@@ -176,7 +206,16 @@ pub fn solve_spatial_tree(
         lo: spec.global_lo.clone(),
         hi: spec.global_hi.clone(),
     });
-    let mut incumbent: Option<f64> = None;
+    // Root box widths (for root-relative branch scoring in the fallback rule).
+    let root_w: Vec<f64> = spec
+        .global_lo
+        .iter()
+        .zip(spec.global_hi.iter())
+        .map(|(l, h)| (h - l).max(1e-12))
+        .collect();
+    // An externally-supplied feasible value seeds the incumbent (empty point —
+    // the caller holds it); it prunes and cutoff-propagates like any incumbent.
+    let mut incumbent: Option<f64> = config.initial_incumbent;
     let mut incumbent_x: Vec<f64> = Vec::new();
     let mut node_count = 0usize;
     let mut n_lp_solves = 0usize;
@@ -216,6 +255,22 @@ pub fn solve_spatial_tree(
         }
         node_count += 1;
 
+        // FBBT fixpoint propagation BEFORE the LP (C2, entry experiment GO
+        // 2026-07-19): linear rows + products (extended division) + 1-D terms +
+        // integer rounding + objective cutoff, zero LP solves. Tightens the box the
+        // LP and the children see; a box proven empty under the cutoff is fathomed
+        // with region lower bound `incumbent` (no feasible point beats it there),
+        // or `+inf` when no cutoff was active (genuinely empty region).
+        let mut lo = lo;
+        let mut hi = hi;
+        if config.run_propagation
+            && !propagate_spec_fixpoint(spec, &mut lo, &mut hi, incumbent, config.propagation_rounds)
+        {
+            let contrib = incumbent.unwrap_or(f64::INFINITY).max(parent_bound);
+            global_lb_closed = global_lb_closed.min(contrib);
+            continue;
+        }
+
         let node = solve_spatial_node(spec, &lo, &hi, config.run_obbt, opts);
         n_lp_solves += node.n_lp_solves;
 
@@ -241,8 +296,6 @@ pub fn solve_spatial_tree(
         }
 
         // Apply OBBT-tightened bounds to the box (tighten-only, sound).
-        let mut lo = lo;
-        let mut hi = hi;
         if config.run_obbt {
             for (k, &cand) in spec.obbt_candidates.iter().enumerate() {
                 if k < node.tightened.len() {
@@ -300,37 +353,57 @@ pub fn solve_spatial_tree(
         let terms_tight = worst_gap <= config.mccormick_tol;
 
         if int_ok && terms_tight {
-            // Feasible leaf: accept if it improves the incumbent. The objective is
+            // Feasible point: accept if it improves the incumbent. The objective is
             // linear over the (now-tight) lifted columns, so `cᵀx` is the true
-            // objective at this feasible point. The region contributes the SAFE node
-            // bound (`<=` its true optimum), NOT the feasible value cᵀx — an upper
-            // bound would corrupt the global lower bound.
+            // objective at this feasible point.
             let obj = dot(&spec.c, x);
             if incumbent.map(|inc| obj < inc - 1e-12).unwrap_or(true) {
                 incumbent = Some(obj);
                 incumbent_x = x[..spec.n_cols].to_vec();
             }
-            global_lb_closed = global_lb_closed.min(bound);
-            continue;
+            // CLOSE the region ONLY when its rigorous bound certifies that no
+            // point in it beats the incumbent by more than the gap. A feasible
+            // point does NOT prove the region optimal — with a loose bound the
+            // region may hold BETTER points, so it must be branched further
+            // (closing here would be a premature fathom → a false certificate).
+            let inc_now = incumbent.unwrap();
+            if bound >= inc_now - config.gap_tol {
+                global_lb_closed = global_lb_closed.min(bound);
+                continue;
+            }
+            // fall through to branching (branch_col may be None: all terms tight —
+            // the widest-column fallback below picks the split).
         }
 
         // --- Branch --- //
         // Prefer closing an integer infeasibility; else spatial-branch the worst
-        // McCormick gap. Fall back to the widest branchable box if neither picks.
-        let (split_col, split_at) = if let Some(j) = frac_int {
-            (j, x[j].floor() + 0.5) // integer branch: <= floor, >= ceil
-        } else if let Some(col) = branch_col {
-            if width(col) <= config.min_box_width {
-                // Term is un-splittable (already pinned) yet not tight — numerical;
-                // accept the box as exhausted to avoid an infinite loop. The region's
-                // valid lower bound is the safe node `bound`.
-                global_lb_closed = global_lb_closed.min(bound);
-                continue;
+        // McCormick gap; else (all terms tight but the bound uncertified) the widest
+        // root-relative original column. A region with no branchable column left is
+        // closed with its honest rigorous `bound` (surfaced as `Exhausted` if that
+        // leaves the gap open — never silently upgraded to `Optimal`).
+        let fallback = || -> Option<(usize, f64)> {
+            let mut best: Option<(f64, usize)> = None;
+            for j in 0..spec.n_orig {
+                let wj = hi[j] - lo[j];
+                if wj > config.min_box_width.max(1e-9) {
+                    let rw = wj / root_w[j];
+                    if best.map(|(bw, _)| rw > bw).unwrap_or(true) {
+                        best = Some((rw, j));
+                    }
+                }
             }
+            best.map(|(_, j)| (j, clamp_interior(x[j], lo[j], hi[j])))
+        };
+        let pick = if let Some(j) = frac_int {
+            Some((j, x[j].floor() + 0.5)) // integer branch: <= floor, >= ceil
+        } else if let Some(col) = branch_col.filter(|&c| width(c) > config.min_box_width) {
             // Spatial branch at the LP value, pulled to the interior.
-            let p = clamp_interior(x[col], lo[col], hi[col]);
-            (col, p)
+            Some((col, clamp_interior(x[col], lo[col], hi[col])))
         } else {
+            fallback()
+        };
+        let Some((split_col, split_at)) = pick else {
+            // No branchable column: close with the honest rigorous bound.
             global_lb_closed = global_lb_closed.min(bound);
             continue;
         };
@@ -361,21 +434,30 @@ pub fn solve_spatial_tree(
         }
     }
 
-    // Worklist empty: every region was explored. The reported bound is the min safe
-    // bound over all closed regions — a rigorous global lower bound (`<=` the true
-    // optimum), never the incumbent (an upper bound). It is `<=` the incumbent
-    // because the feasible leaf that set the incumbent contributed its own safe bound.
+    // Worklist empty: every region was explored or fathomed. The reported bound is
+    // the min rigorous bound over all closed regions — a valid global lower bound
+    // (`<=` the true optimum), never the incumbent (an upper bound). `Optimal` is
+    // claimed ONLY when that bound actually closes the gap; a residual gap (from
+    // width-exhausted boxes or uncertifiable node duals) is surfaced honestly as
+    // `Exhausted` — both the incumbent and the bound remain valid, but the tree
+    // does NOT certify optimality.
     match incumbent {
-        Some(inc) => SpatialTreeResult {
-            status: TreeStatus::Optimal,
-            incumbent,
-            incumbent_x,
-            // Clamp to the incumbent so a loose safe bound never reports a gap wider
-            // than the true one; still `<=` the true optimum.
-            bound: global_lb_closed.min(inc),
-            node_count,
-            n_lp_solves,
-        },
+        Some(inc) => {
+            let bound = global_lb_closed.min(inc);
+            let status = if bound >= inc - config.gap_tol {
+                TreeStatus::Optimal
+            } else {
+                TreeStatus::Exhausted
+            };
+            SpatialTreeResult {
+                status,
+                incumbent,
+                incumbent_x,
+                bound,
+                node_count,
+                n_lp_solves,
+            }
+        }
         None => SpatialTreeResult {
             status: TreeStatus::Infeasible,
             incumbent: None,
@@ -456,6 +538,40 @@ mod tests {
         let x = &res.incumbent_x;
         assert!((x[0] * x[1] - x[2]).abs() < 1e-4, "w != x*y at incumbent");
         assert!(x[0] + x[1] >= 3.0 - 1e-4, "x+y>=3 violated");
+    }
+
+    /// Regression (premature-fathom fix): a feasible leaf whose region bound does
+    /// NOT certify must keep branching until the gap genuinely closes — `Optimal`
+    /// is only ever reported with `bound >= incumbent - gap_tol`.
+    #[test]
+    fn optimal_status_implies_certified_gap() {
+        let spec = xy_min_spec();
+        let cfg = SpatialTreeConfig {
+            max_nodes: 5000,
+            gap_tol: 1e-5,
+            ..SpatialTreeConfig::default()
+        };
+        let res = solve_spatial_tree(&spec, &cfg, &SimplexOptions::default());
+        if res.status == TreeStatus::Optimal {
+            let inc = res.incumbent.expect("Optimal implies incumbent");
+            assert!(
+                res.bound >= inc - cfg.gap_tol - 1e-12,
+                "Optimal with open gap: bound {} vs incumbent {}",
+                res.bound,
+                inc
+            );
+        }
+        // And an externally seeded incumbent is honored + reported back.
+        let cfg2 = SpatialTreeConfig {
+            initial_incumbent: Some(2.0), // the true optimum, externally known
+            ..cfg
+        };
+        let res2 = solve_spatial_tree(&spec, &cfg2, &SimplexOptions::default());
+        assert!(res2.incumbent.is_some());
+        assert!(res2.incumbent.unwrap() <= 2.0 + 1e-9);
+        if res2.status == TreeStatus::Optimal {
+            assert!(res2.bound >= res2.incumbent.unwrap() - cfg2.gap_tol - 1e-12);
+        }
     }
 
     // A pure integer-branch case: minimize -x s.t. x in [0,2] integer, no terms.
