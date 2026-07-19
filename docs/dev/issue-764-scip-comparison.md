@@ -58,3 +58,37 @@ detour — SCIP's own root is 0.95, so a tighter root was never the blocker. The
 per-node *throughput*, and specifically that discopt substitutes expensive OBBT for the cheap
 cuts SCIP uses. There is no single flag being skipped; matching SCIP is the cut-engine +
 native-node work.
+
+## Deep dive: why discopt's branching stalls but SCIP's climbs (2026-07-19)
+
+Investigated whether discopt's spatial branching is the gap. Findings:
+
+- **discopt already uses pseudocost + strong (reliability) branching** (`tree.score_candidates` +
+  `_strong_branch_lp`), like SCIP — the Rust `select_spatial_branch_variable` widest-box rule is
+  only the fallback. So branching is not naively broken.
+- **The looseness is distributed, decisively.** At the root LP solution, branching *any* single
+  continuous variable at its LP value `x*` gives **0.0000 bound gain** (all 26 candidates,
+  measured). Tightening one variable never helps because the other products' McCormick slack
+  compensates. Only *coordinated* tightening moves the bound: narrowing `x16` to a ±0.05 window
+  (not a single branch — a deep contraction) jumps 0.838→1.05.
+- This is exactly why discopt uses per-node OBBT: OBBT tightens *all* boxes at once (the coordinated
+  move), where single-variable branching cannot. SCIP climbs because it does ~925 cheap nodes/s —
+  each node's branch contributes a little and the volume compounds; discopt at 2–10 nodes/s cannot
+  afford that volume, so it substitutes the (expensive, coordinated) OBBT.
+
+## Final synthesis — the one thing to fix
+
+There is **no missed flag or heuristic** — relaxation (RLT/SDP), cheap DBBT, cuts, selective OBBT,
+and branching were each measured and none is the shortcut. The gap is singular and architectural:
+
+> **SCIP does a node in ~1 ms (native C: warm dual-simplex LP + propagation + cheap pooled cuts).
+> discopt does a node in ~100–500 ms (Python/JAX orchestration + ~95 OBBT LP solves it cannot drop,
+> because its cheap tightening — cuts, reduced-cost DBBT — is inert on this bilinear class).**
+
+To reach SCIP performance discopt must move the per-node loop — bound patch → **warm** LP → OBBT
+probes (warm dual-simplex, in-kernel, no Python marshaling between probes) → propagation → branch —
+into `discopt-core` (the C1 "per-node language cost — architecture" gap). The earlier "Phase B
+ceiling ~2.3×" underestimated this: it assumed the OBBT probe LPs stay at their current ~2.4 ms
+cold cost, but in-kernel warm dual-simplex probes (no marshaling) target the ~0.1–0.9 ms floor —
+so the real ceiling on the OBBT-bound class is well above 2.3×. That native node kernel is the
+work; it is weeks of Rust, not a configuration, and every cheaper alternative is now measured out.
