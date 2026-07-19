@@ -10929,6 +10929,71 @@ def _solve_nlp_bb(
             gap_certified=_gap_certified,
         )
 
+    # --- Root cutting-plane stage (#781, DISCOPT_NLPBB_ROOT_CUTS, default-OFF) ---
+    # Generates integrality-valid cuts (GMI from the HiGHS tableau + c-MIR +
+    # cover under pooled top-K selection) over the OA root LP and appends them
+    # as model constraints BEFORE the evaluator/tree are built, so every node
+    # NLP relaxation tightens. Sound: runs only on the convex-certified route
+    # with a verified-linear objective; cuts are satisfied by every integer-
+    # feasible point, so no incumbent is ever cut (and the #779 guard verifies
+    # the final incumbent against the pristine pre-solve model regardless).
+    # Write-back honors the #772 lessons: each cut is a NEW Constraint with the
+    # full row folded into the body and ``rhs=0.0``. The applied cuts remain in
+    # the model after the solve (valid rows; keeps result.constraint_duals
+    # aligned). Failure-safe: any error degrades to the flag-off path.
+    _root_cut_bound: Optional[float] = None
+    _root_cut_count = 0
+    # Top-level solves only: RENS/local-branching sub-solves recurse into this
+    # function (with rens_enabled/_lns_enabled False) and must not pay for —
+    # or mutate their restricted models with — a second root-cut stage.
+    if _model_is_convex and rens_enabled and _lns_enabled:
+        try:
+            from discopt.solvers._root_cuts import (
+                generate_root_cuts,
+                nlpbb_root_cuts_enabled,
+            )
+
+            if nlpbb_root_cuts_enabled() and all(
+                getattr(v, "size", 1) == 1 for v in model._variables
+            ):
+                from discopt.modeling.core import Constraint as _RCConstraint
+
+                _rc_is_int = np.zeros(n_vars, bool)
+                for _off, _sz in zip(int_offsets, int_sizes):
+                    _rc_is_int[_off : _off + _sz] = True
+                _rc_is_bin = _rc_is_int & (lb == 0.0) & (ub == 1.0)
+                t_jax_start = time.perf_counter()
+                _rc_ev = _make_evaluator(model)  # pre-cut evaluator (cached)
+                _rc_budget = max(2.0, min(10.0, 0.2 * float(time_limit)))
+                _rc = generate_root_cuts(
+                    model, _rc_ev, lb, ub, _rc_is_int, _rc_is_bin, time_budget_s=_rc_budget
+                )
+                jax_time += time.perf_counter() - t_jax_start
+                _rc_blocks = model._variables
+                for _rc_a, _rc_r in _rc.cuts:
+                    _rc_body = None
+                    for _j in np.nonzero(np.abs(_rc_a) > 1e-15)[0]:
+                        _term = float(_rc_a[_j]) * _rc_blocks[int(_j)]
+                        _rc_body = _term if _rc_body is None else _rc_body + _term
+                    if _rc_body is None:
+                        continue
+                    _rc_body = _rc_body + (-float(_rc_r))
+                    model._constraints.append(_RCConstraint(_rc_body, "<=", 0.0, None))
+                    _root_cut_count += 1
+                _root_cut_bound = _rc.lp_bound
+                if _root_cut_count:
+                    logger.info(
+                        "NLP-BB root cuts (#781): applied %d cuts over %d rounds "
+                        "(%d productive), root LP bound %.6g",
+                        _root_cut_count,
+                        _rc.rounds_run,
+                        _rc.productive_rounds,
+                        _root_cut_bound if _root_cut_bound is not None else float("nan"),
+                    )
+        except Exception as e:
+            logger.debug("NLP-BB root cuts skipped: %s", e)
+            _root_cut_bound = None
+
     t_rust_start = time.perf_counter()
     tree = PyTreeManager(
         n_vars,
@@ -11963,6 +12028,32 @@ def _solve_nlp_bb(
     if _root_glb_internal is not None and np.isfinite(_root_glb_internal):
         root_bound_val = -_root_glb_internal if _nlpbb_is_max else _root_glb_internal
         if obj_val is not None and np.isfinite(obj_val):
+            root_gap_val = abs(obj_val - root_bound_val) / max(1.0, abs(obj_val))
+
+    # --- Root-cut bound composition (#781) ---
+    # The root cutting-plane LP bound is a valid dual bound (LP optimum over an
+    # outer approximation of the integer-feasible set: OA tangents of the
+    # convex-certified rows + integrality-valid cuts). Compose it with the tree
+    # bound by taking the TIGHTER of the two valid bounds, for the reported
+    # bound/gap and the root diagnostics. Deliberately conservative: it never
+    # upgrades ``gap_certified`` or the status — the LP is floating-point
+    # (HiGHS) and sits outside the trusted-node machinery, so certification
+    # continues to come solely from the tree logic above.
+    if _root_cut_bound is not None and np.isfinite(_root_cut_bound):
+        _rcb = float(_root_cut_bound)
+
+        def _tighter(a: Optional[float], b: float) -> float:
+            if a is None or not np.isfinite(a):
+                return b
+            return min(a, b) if _nlpbb_is_max else max(a, b)
+
+        _new_bound = _tighter(bound_val, _rcb)
+        if bound_val is None or _new_bound != bound_val:
+            bound_val = _new_bound
+            if obj_val is not None and np.isfinite(obj_val):
+                gap_val = abs(obj_val - bound_val) / max(1.0, abs(obj_val))
+        root_bound_val = _tighter(root_bound_val, _rcb)
+        if obj_val is not None and np.isfinite(obj_val) and root_bound_val is not None:
             root_gap_val = abs(obj_val - root_bound_val) / max(1.0, abs(obj_val))
 
     return SolveResult(
