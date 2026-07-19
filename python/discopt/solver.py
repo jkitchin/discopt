@@ -6579,7 +6579,7 @@ def solve_model(
     # returns None with no import/side effect, so the default path below is byte-for-byte
     # unchanged; when ON it only takes over on a fully-certified native solve, else falls
     # through to the trusted Python search.
-    _native_result = _try_native_spatial_kernel(
+    _native_result: Optional[SolveResult] = _try_native_spatial_kernel(
         model, lb, ub, n_vars, gap_tolerance, max_nodes, t_start, rust_time, jax_time
     )
     if _native_result is not None:

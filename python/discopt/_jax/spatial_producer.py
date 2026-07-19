@@ -116,12 +116,7 @@ def build_spatial_kernel_spec(model, bounds: Optional[tuple] = None) -> Optional
         return None
 
     # Decline lifted families the Rust kernel does not implement yet.
-    if (
-        rel.trilinear_map
-        or rel.multilinear_map
-        or rel.ratio_map
-        or rel.composite_multivar_specs
-    ):
+    if rel.trilinear_map or rel.multilinear_map or rel.ratio_map or rel.composite_multivar_specs:
         return None
     if any(fname != "sqrt" for (fname, *_rest) in rel.univariate_atom_specs):
         return None
@@ -150,7 +145,7 @@ def build_spatial_kernel_spec(model, bounds: Optional[tuple] = None) -> Optional
     tcoeff: list[float] = []
     tcst: list[float] = []
 
-    def _claim(aux: int, operands: tuple, want: Optional[int]) -> Optional[list]:
+    def _claim(aux: int, operands: tuple, want: Optional[int]) -> Optional[list[int]]:
         """Rows owned by this term = rows touching ``aux`` whose support ⊆ operands∪aux.
         Returns the row list, or None if ``want`` is set and the count differs."""
         allowed = set(operands) | {aux}
@@ -187,7 +182,7 @@ def build_spatial_kernel_spec(model, bounds: Optional[tuple] = None) -> Optional
     blf_b_cols: list[int] = []
     blf_b_coeffs: list[float] = []
     blf_b_const: list[float] = []
-    for (w, a_dict, a_const, b_dict, b_const) in rel.bilinear_linform_specs:
+    for w, a_dict, a_const, b_dict, b_const in rel.bilinear_linform_specs:
         if int(w) in claimed_aux:
             continue
         a_items = sorted((int(k), float(v)) for k, v in a_dict.items())
@@ -195,7 +190,7 @@ def build_spatial_kernel_spec(model, bounds: Optional[tuple] = None) -> Optional
         a_cols_t = [k for k, _ in a_items]
         b_cols_t = [k for k, _ in b_items]
         allowed = set(a_cols_t) | set(b_cols_t) | {int(w)}
-        rows = [int(r) for r in rows_with_col(int(w)) if support(r) <= allowed]
+        rows: Optional[list[int]] = [int(r) for r in rows_with_col(int(w)) if support(r) <= allowed]
         if not rows:
             return None
         env_rows.update(rows)
@@ -232,7 +227,7 @@ def build_spatial_kernel_spec(model, bounds: Optional[tuple] = None) -> Optional
         if rows is None:
             return None
         _push(2, j, -1, w, 0, coeff, cst, rows)
-    for (fname, w, var, coeff, cst) in rel.univariate_atom_specs:
+    for fname, w, var, coeff, cst in rel.univariate_atom_specs:
         if int(w) in claimed_aux:
             continue
         # sqrt only (guarded above). Its concave envelope is up to 4 rows; accept

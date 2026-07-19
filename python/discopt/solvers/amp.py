@@ -27,7 +27,7 @@ import time
 from dataclasses import dataclass
 from functools import lru_cache
 from importlib.util import find_spec
-from typing import Any, Callable, Optional, Sequence, cast
+from typing import Any, Callable, Optional, Sequence, TypedDict, cast
 
 import numpy as np
 
@@ -58,6 +58,15 @@ from discopt.modeling.core import (
 logger = logging.getLogger(__name__)
 _DEFAULT_MAX_OA_CUTS = 128
 _SMALL_INT_FALLBACK_MAX_ASSIGNMENTS = 128
+
+
+class _BackendKw(TypedDict, total=False):
+    """Optional keyword passed through to ``MilpRelaxationModel.solve``. Kept as a
+    ``total=False`` TypedDict (not ``dict[str, str]``) so the ``**`` splat is known to
+    carry only ``backend`` — otherwise mypy conservatively treats the splat as able to
+    reach ``solve``'s ``want_marginals: bool`` keyword and flags a str/bool mismatch."""
+
+    backend: str
 
 
 # ---------------------------------------------------------------------------
@@ -987,7 +996,7 @@ def _solve_milp_with_oa_recovery(
         # Pass `backend` only when non-default so the default path calls
         # `.solve(time_limit, gap_tolerance)` exactly as before (keeps minimal
         # `.solve` implementations / mocks working).
-        _backend_kw = {} if milp_solver == "auto" else {"backend": milp_solver}
+        _backend_kw: _BackendKw = {} if milp_solver == "auto" else {"backend": milp_solver}
         milp_result = milp_model.solve(
             time_limit=time_limit,
             gap_tolerance=gap_tolerance,
@@ -1830,7 +1839,7 @@ def _run_partitioned_obbt(
             objective_bound_valid=True,
         )
         start = time.perf_counter()
-        _backend_kw = {} if milp_solver == "auto" else {"backend": milp_solver}
+        _backend_kw: _BackendKw = {} if milp_solver == "auto" else {"backend": milp_solver}
         result = subproblem.solve(
             time_limit=subproblem_limit,
             gap_tolerance=gap_tolerance,
