@@ -113,6 +113,36 @@ def test_unsupported_atom_returns_none():
     assert spec is None
 
 
+def test_solver_flag_on_matches_flag_off():
+    """The DISCOPT_NATIVE_SPATIAL_KERNEL flag (solver.py hand-off) gives the same
+    optimum as the default path on a covered model, and OFF is the default."""
+    import os
+
+    def build():
+        m = Model()
+        x = m.continuous("x", lb=0.0, ub=2.0)
+        y = m.continuous("y", lb=0.0, ub=2.0)
+        m.subject_to(x + y >= 3)
+        m.minimize(x * y)
+        return m
+
+    prev = os.environ.get("DISCOPT_NATIVE_SPATIAL_KERNEL")
+    try:
+        os.environ.pop("DISCOPT_NATIVE_SPATIAL_KERNEL", None)
+        off = build().solve(time_limit=30)
+        os.environ["DISCOPT_NATIVE_SPATIAL_KERNEL"] = "1"
+        on = build().solve(time_limit=30)
+    finally:
+        if prev is None:
+            os.environ.pop("DISCOPT_NATIVE_SPATIAL_KERNEL", None)
+        else:
+            os.environ["DISCOPT_NATIVE_SPATIAL_KERNEL"] = prev
+    assert off.status == "optimal" and on.status == "optimal"
+    assert abs(off.objective - on.objective) < 1e-3
+    # OFF must not exceed the true optimum; ON must agree.
+    assert abs(on.objective - 2.0) < 1e-3
+
+
 def test_unbounded_relaxation_declines():
     """tanksize's raw .nl box is unbounded, so the McCormick relaxation has infinite
     aux ranges (invalid). The producer must decline soundly (return None) rather than

@@ -443,6 +443,97 @@ def _obbt_iterate_root_enabled() -> bool:
     )
 
 
+def _native_spatial_kernel_enabled() -> bool:
+    """Whether the #764 native Rust spatial-B&B kernel is engaged (**default OFF**;
+    ``DISCOPT_NATIVE_SPATIAL_KERNEL=1`` opts in). Bound-changing / experimental — the
+    whole per-node loop moves into ``discopt-core`` (envelope patch + warm OBBT sweep
+    + safe-bound pruning + spatial branch). Gated OFF pending the §5 graduation panel;
+    the producer declines any model it cannot reproduce bound-neutrally, and the
+    driver falls back to the Python path on decline, so ON never changes a certified
+    answer, only which engine computes it (subject to the panel)."""
+    return os.environ.get("DISCOPT_NATIVE_SPATIAL_KERNEL", "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+
+
+def _try_native_spatial_kernel(
+    model,
+    lb,
+    ub,
+    n_vars,
+    gap_tolerance,
+    max_nodes,
+    t_start,
+    rust_time,
+    jax_time,
+):
+    """Issue #764: if the native Rust spatial kernel is enabled and the model is in
+    its covered subset — scalar variables; bilinear / monomial / affine-square / sqrt
+    terms; a valid McCormick relaxation at the presolved box ``[lb, ub]`` — run the
+    ENTIRE spatial B&B inside ``discopt-core`` and return a :class:`SolveResult`; else
+    ``None`` so the caller runs the trusted Python path.
+
+    Soundness: the producer declines (``None``) any model it cannot reproduce
+    bound-neutrally, and only a fully-certified native solve (``status == 'optimal'``,
+    i.e. the tree was exhausted with a rigorous safe global bound) is taken — a
+    node-limited or declined run falls through to the Python path, never reporting a
+    partial or unverified result. The kernel's incumbent satisfies the model's linear
+    rows (they are fixed rows in its LP) and every lifted term to ``mccormick_tol``.
+    The internal minimize-convention objective/bound are mapped to model units via the
+    producer's ``sign*(value + offset)`` metadata."""
+    if not _native_spatial_kernel_enabled():
+        return None
+    try:
+        from discopt._jax.spatial_producer import solve_with_native_kernel
+
+        res = solve_with_native_kernel(
+            model,
+            bounds=(
+                np.asarray(lb, dtype=np.float64)[:n_vars],
+                np.asarray(ub, dtype=np.float64)[:n_vars],
+            ),
+            max_nodes=int(max_nodes),
+            gap_tol=float(gap_tolerance),
+        )
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.debug("native spatial kernel skipped: %s", exc)
+        return None
+    if res is None:
+        return None  # model outside the covered subset -> Python path
+    if res.get("status") != "optimal" or res.get("incumbent") is None:
+        return None  # not fully certified -> Python path (never report a partial)
+
+    sign = float(res["meta_obj_sense_sign"])
+    off = float(res["meta_obj_offset"])
+    obj_val = sign * (float(res["incumbent"]) + off)
+    bound_val = sign * (float(res["bound"]) + off)
+    x_flat = np.asarray(res["incumbent_x"], dtype=np.float64)[:n_vars]
+    x_dict = _unpack_solution(model, x_flat)
+    wall_time = time.perf_counter() - t_start
+    gap_val = abs(obj_val - bound_val) / (abs(obj_val) + 1e-10)
+    logger.info(
+        "native spatial kernel (#764) solved: obj=%.6g bound=%.6g nodes=%d",
+        obj_val,
+        bound_val,
+        int(res["node_count"]),
+    )
+    return SolveResult(
+        status="optimal",
+        objective=obj_val,
+        bound=bound_val,
+        gap=gap_val,
+        x=x_dict,
+        wall_time=wall_time,
+        node_count=int(res["node_count"]),
+        rust_time=rust_time,
+        jax_time=jax_time,
+        python_time=wall_time - rust_time - jax_time,
+    )
+
+
 def _root_lp_probe_tight_enabled() -> bool:
     """Whether the #282 tightened-box root LP probe is on (**default ON**; ``=0`` opts out).
 
@@ -6119,6 +6210,19 @@ def solve_model(
     # loop's incumbent-cutoff OBBT, whose bounds are not valid for a global bound.
     _root_lb_snapshot = np.asarray(lb, dtype=np.float64).copy()
     _root_ub_snapshot = np.asarray(ub, dtype=np.float64).copy()
+
+    # --- #764: native Rust spatial-B&B kernel (default OFF, DISCOPT_NATIVE_SPATIAL_KERNEL) ---
+    # Hand off here — after root FBBT + non-cutoff root OBBT have finished, so [lb, ub]
+    # is the finite root box the McCormick relaxation needs (tanksize's raw box is
+    # unbounded; this is the first point it is fully bounded). When the flag is OFF this
+    # returns None with no import/side effect, so the default path below is byte-for-byte
+    # unchanged; when ON it only takes over on a fully-certified native solve, else falls
+    # through to the trusted Python search.
+    _native_result = _try_native_spatial_kernel(
+        model, lb, ub, n_vars, gap_tolerance, max_nodes, t_start, rust_time, jax_time
+    )
+    if _native_result is not None:
+        return _native_result
 
     # --- #654: deadline-exhausted short-circuit before the spatial search build ---
     # Everything below (the per-node NLP evaluator's one-time XLA compile, the

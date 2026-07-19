@@ -34,10 +34,21 @@ import scipy.sparse as sp
 _TOL = 1e-12
 
 
-def build_spatial_kernel_spec(model) -> Optional[dict]:
+def build_spatial_kernel_spec(model, bounds: Optional[tuple] = None) -> Optional[dict]:
     """Return the flat-array ``SpatialKernelSpec`` kwargs for
     ``discopt._rust.solve_spatial_tree_py``, or ``None`` if the model uses a lifted
-    term family the native kernel does not implement (caller falls back to Python)."""
+    term family the native kernel does not implement (caller falls back to Python).
+
+    ``bounds`` optionally overrides the original-variable box with presolved finite
+    bounds ``(lb, ub)`` (each length ``n_orig``) — required for models whose raw
+    ``.nl`` box is unbounded (e.g. tanksize), where the McCormick relaxation is only
+    valid after the solver's FBBT/OBBT presolve.
+
+    The returned dict also carries two ``meta_``-prefixed keys —
+    ``meta_obj_sense_sign`` and ``meta_obj_offset`` — for mapping the kernel's
+    internal (minimize-convention) objective/bound back to model units:
+    ``model_value = sign * (internal + offset)``. Callers pass the non-``meta_`` keys
+    to the kernel; :func:`solve_with_native_kernel` strips them automatically."""
     from discopt._jax.uniform_relax import build_uniform_relaxation
     from discopt.modeling.core import VarType
 
@@ -48,8 +59,14 @@ def build_spatial_kernel_spec(model) -> Optional[dict]:
         return None
     n_orig = len(model._variables)
 
-    lb = np.array([float(np.min(v.lb)) for v in model._variables], dtype=np.float64)
-    ub = np.array([float(np.max(v.ub)) for v in model._variables], dtype=np.float64)
+    if bounds is not None:
+        lb = np.asarray(bounds[0], dtype=np.float64).copy()
+        ub = np.asarray(bounds[1], dtype=np.float64).copy()
+        if lb.shape != (n_orig,) or ub.shape != (n_orig,):
+            return None
+    else:
+        lb = np.array([float(np.min(v.lb)) for v in model._variables], dtype=np.float64)
+        ub = np.array([float(np.max(v.ub)) for v in model._variables], dtype=np.float64)
 
     def _build(box_lb, box_ub):
         # Skip the separable objective floor and convex-lift OA rows: both are
@@ -193,6 +210,36 @@ def build_spatial_kernel_spec(model) -> Optional[dict]:
             return None
         _push(3, var, -1, w, 0, coeff, cst, rows)
 
+    # SOUNDNESS VALIDATION: every non-envelope row MUST be box-independent — that is
+    # the whole premise of passing it through as a fixed row while the kernel
+    # regenerates only the term envelopes per box. Verify by comparing the probe build
+    # against the real-box build row-for-row: the lifted structure (and thus row
+    # order) is identical across boxes, so a fixed row whose coefficients or rhs differ
+    # between the two boxes is actually a box-DEPENDENT envelope the term maps did not
+    # capture (e.g. a factorable-intermediate product tanksize lifts beyond its 9
+    # bilinear + 3 sqrt terms). Freezing such a row would produce an unsound / infeasible
+    # relaxation, so DECLINE — the caller keeps the trusted Python path.
+    Ar = sp.csr_matrix(rel_real.model._A_ub, dtype=np.float64)
+    Ar.sort_indices()
+    br = np.asarray(rel_real.model._b_ub, dtype=np.float64).ravel()
+    if Ar.shape != A.shape or br.shape[0] != b.shape[0]:
+        return None
+    rp_indptr, rp_indices, rp_data = Ar.indptr, Ar.indices, Ar.data
+    for r in range(A.shape[0]):
+        if r in env_rows:
+            continue
+        # Same nonzero pattern + values + rhs at both boxes?
+        p0, p1 = indptr[r], indptr[r + 1]
+        q0, q1 = rp_indptr[r], rp_indptr[r + 1]
+        if (p1 - p0) != (q1 - q0):
+            return None
+        if not np.array_equal(indices[p0:p1], rp_indices[q0:q1]):
+            return None
+        if not np.allclose(data[p0:p1], rp_data[q0:q1], rtol=1e-9, atol=1e-9):
+            return None
+        if abs(float(b[r]) - float(br[r])) > 1e-6 * (1.0 + abs(float(br[r]))):
+            return None
+
     # Fixed (box-independent) rows: everything not owned by a term envelope.
     fixed_row_ptr = [0]
     fixed_cols: list[int] = []
@@ -218,10 +265,9 @@ def build_spatial_kernel_spec(model) -> Optional[dict]:
         return None
     global_lo = bnds[:, 0].copy()
     global_hi = bnds[:, 1].copy()
-    # Original columns take the model variable bounds (the branchable box).
-    for k, v in enumerate(model._variables):
-        global_lo[k] = float(np.min(v.lb))
-        global_hi[k] = float(np.max(v.ub))
+    # Original columns take the (possibly presolved) branchable box.
+    global_lo[:n_orig] = lb
+    global_hi[:n_orig] = ub
 
     integrality = np.zeros(ncol, dtype=np.int64)
     for k, v in enumerate(model._variables):
@@ -259,15 +305,23 @@ def build_spatial_kernel_spec(model) -> Optional[dict]:
         term_coeff=np.asarray(tcoeff, dtype=np.float64),
         term_cst=np.asarray(tcst, dtype=np.float64),
         obbt_candidates=np.asarray(obbt_candidates, dtype=np.int64),
+        # Metadata (stripped before the kernel call): map the kernel's internal
+        # minimize-convention value back to model units — model = sign*(internal+off).
+        meta_obj_sense_sign=float(getattr(rel, "obj_sense_sign", 1.0)),
+        meta_obj_offset=float(getattr(rel, "obj_offset", 0.0)),
     )
 
 
-def solve_with_native_kernel(model, **config):
+def solve_with_native_kernel(model, bounds: Optional[tuple] = None, **config):
     """Convenience: produce the spec and run the native kernel. Returns the result
-    dict from ``solve_spatial_tree_py``, or ``None`` if the model is unsupported."""
-    spec = build_spatial_kernel_spec(model)
+    dict from ``solve_spatial_tree_py`` (with ``meta_*`` echoed back), or ``None`` if
+    the model is unsupported."""
+    spec = build_spatial_kernel_spec(model, bounds=bounds)
     if spec is None:
         return None
     from discopt import _rust
 
-    return _rust.solve_spatial_tree_py(**spec, **config)
+    meta = {k: spec.pop(k) for k in list(spec) if k.startswith("meta_")}
+    res = _rust.solve_spatial_tree_py(**spec, **config)
+    res.update(meta)
+    return res
