@@ -94,6 +94,42 @@ re-solves under bound flips on the *real* LPs (rsyn0805m root LP + cuts ≈
 rsyn-class LP → the in-house simplex cannot carry the kernel; re-scope
 (in-process HiGHS as kernel LP is the named fallback) before any loop code.
 
+### E0 RESULTS (2026-07-19) — CONDITIONAL PASS; two named hardening prerequisites
+
+Harness: `discopt_benchmarks/scripts/e0_export_lp.py` (exports the four real
+node LPs in E0LPBIN1) + `crates/discopt-core/src/bin/e0_warm_bench.rs`
+(three arms; 2000 branching-shaped bound flips each; release build).
+
+| real node LP | m×n | per-call warm (`solve_lp_warm`) | kernel pattern (`PreparedDual`, scale+CSC+LU amortized) |
+|---|---|---|---|
+| nvs09 spatial lifted | 292×374 | 2,100/s (466 µs) | **25,928/s — 38 µs p50, 3.9 pivots, obj moved 2000/2000** |
+| tanksize spatial lifted | 187×257 | 678–2,252/s | **1,288/s** (941 µs, 68 pivots — real pivot work) |
+| rsyn0805m OA+cuts | 537×635 | **90–115/s — every call a silent ~11 ms cold fallback** | blocked (see P1.0) |
+| syn40m OA+cuts | 832×940 | — | cold solve exits `Numerical` after 336 ms |
+
+**Findings:**
+1. **The premise holds.** Where the machinery composes, the in-house simplex
+   reaches SCIP-class node rates: ~26k solves/s on nvs09 — ~3 orders of
+   magnitude above the Python-orchestrated ~10–50 ms/node, and 50× above its
+   own per-call warm entry. The scale+CSC+LU amortization IS the kernel win.
+2. **P1.0 (new, blocking): cold-path basis finalization defect.** `solve_lp`
+   on rsyn0805m returns a DEFICIENT basis (534 basics for m=537; pivotless
+   rows 2/9/340) with 2 mislabeled nonbasic statuses (reduced-cost violation
+   2.57). Every warm entry (`solve_lp_warm`, `PreparedDual::prepare`) silently
+   rejects it and cold-falls-back at ~11 ms/child → 90/s. Bench-side
+   slack-completion and crossover/`recover_basis` cannot repair the mislabeled
+   statuses; the fix belongs in `solve_lp`'s basis finalization. NOTE: this
+   defect plausibly degrades today's production OBBT/probe warm paths on the
+   same LP class — verify when fixing.
+3. **P1.0b: syn40m-class numerical robustness.** The 832×940 big-M standard
+   form defeats the cold simplex (`Numerical`, 336 ms). Hardening item;
+   in-process HiGHS as the kernel LP remains the named fallback.
+
+**Kill-criterion disposition:** not tripped as a capability verdict (26k/s on
+the same machinery; rsyn's 90/s is a diagnosed, fixable handoff defect) — but
+the pass is CONDITIONAL: P1 loop code may not start until P1.0 lands and
+rsyn0805m measures ≥ 500/s on this bench.
+
 **E1 (days) — template-refresh parity.** For the envelope families covering
 the certifying panel: analyze-phase templates + Rust refresh must reproduce
 the Python-built rows (≤1 ulp) on all 62 vendored instances at the root box
