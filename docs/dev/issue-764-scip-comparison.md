@@ -4,6 +4,45 @@ Ran SCIP 10.0 (pyscipopt 6.2.1) on `tanksize.nl` directly. This settles what dis
 missing to reach SCIP performance — and **corrects an earlier over-emphasis in this campaign
 on "root relaxation quality"**: the root is NOT the gap.
 
+## MECHANISM TRACE (2026-07-19) — the decisive finding: propagation, not OBBT/cuts/throughput
+
+Ablating SCIP on tanksize (60 s cap) pins exactly what climbs the dual bound:
+
+| config | nodes | time | closes? |
+|---|---|---|---|
+| default | 1351 | 1.6 s | ✓ |
+| OBBT propagator off | 1771 | 1.9 s | ✓ |
+| separation (cuts) off | 1559 | 1.6 s | ✓ |
+| OBBT + cuts off | 1391 | 1.0 s | ✓ (faster!) |
+| **propagation off** | **183 018** | **60 s** | **✗ (dual stuck 1.253)** |
+
+**Domain propagation is the sole lever.** OBBT and cuts are near-irrelevant (SCIP is *faster*
+without them). Per-propagator domain-reduction counts (OBBT+cuts off) localize it to the
+**nonlinear constraint handler: 38 258 DomReds** (linear 12 766; every standalone propagator
+combined ~48). SCIP propagates *bidirectionally through the product constraints*
+(`w = x·y` ⟹ tighten `x,y` from `w` and `w` from `x,y`), cutoff-coupled — cheap (no LP solves),
+which is why it does **1391 fast nodes**. Bound trajectory (pure propagation+branching, OBBT+cuts
+off): 0.833 @1 → 1.053 @50 → 1.193 @200 → 1.269 @1391. SCIP has the incumbent (1.2686) from node 1.
+
+**Why this reframes #764.** discopt uses the OPPOSITE recipe: its FBBT is too weak to climb this
+bound (recorded: OBBT-off → 0.89, stalls), so it substitutes **expensive per-node OBBT** (~95 LP
+solves/node) to get the coordinated tightening SCIP gets for free from strong nonlinear
+propagation. So:
+* The **native-kernel throughput work (C1)** — and the in-kernel **OBBT sweep** it centers on —
+  optimizes the WRONG axis for tanksize. Fast OBBT nodes still climb the bound slowly; the native
+  kernel is bound-neutral on tanksize (root 0.838 = trusted) but does not certify it (bound frozen
+  at 0.838 across DFS/best-bound to 20 000 nodes — reproduced).
+* The **real lever is per-node nonlinear-propagation QUALITY** (reverse-McCormick / product FBBT,
+  cutoff-coupled, iterated) — the branch-and-reduce line (C2). SCIP has it; discopt does not.
+  Building SCIP-strength nonlinear propagation (so the bound climbs via cheap propagation instead
+  of expensive OBBT) is the actual path to certifying tanksize, and is distinct from everything
+  the native kernel delivers.
+
+Repro: `pyscipopt` ablation + `writeStatistics` (Propagators / Constraints sections).
+
+---
+
+
 ## The numbers
 
 > **CORRECTED (2026-07-19, direct measurement).** An earlier version of this table listed SCIP
