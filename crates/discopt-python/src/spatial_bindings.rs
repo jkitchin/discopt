@@ -23,10 +23,11 @@ use numpy::{PyArray1, PyReadonlyArray1};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
+use std::time::{Duration, Instant};
 
 /// Solve a spatial-B&B problem with the native Rust kernel.
 ///
-/// Returns a dict: `status` ("optimal"|"node_limit"|"infeasible"), `incumbent`
+/// Returns a dict: `status` ("optimal"|"node_limit"|"time_limit"|"infeasible"), `incumbent`
 /// (float or None), `incumbent_x` (length-`n_cols` array or empty), `bound`
 /// (global lower bound), `node_count`, `n_lp_solves`.
 #[pyfunction]
@@ -39,7 +40,7 @@ use pyo3::types::PyDict;
     obbt_candidates,
     max_nodes=100_000, gap_tol=1e-6, int_tol=1e-5, mccormick_tol=1e-6,
     min_box_width=1e-9, run_obbt=false, run_propagation=true,
-    propagation_rounds=15, initial_incumbent=None,
+    propagation_rounds=15, initial_incumbent=None, time_limit_s=None,
 ))]
 pub fn solve_spatial_tree_py<'py>(
     py: Python<'py>,
@@ -79,6 +80,7 @@ pub fn solve_spatial_tree_py<'py>(
     run_propagation: bool,
     propagation_rounds: usize,
     initial_incumbent: Option<f64>,
+    time_limit_s: Option<f64>,
 ) -> PyResult<Bound<'py, PyDict>> {
     let c = c.as_slice()?;
     let integrality = integrality.as_slice()?;
@@ -230,8 +232,37 @@ pub fn solve_spatial_tree_py<'py>(
             .collect(),
     };
 
+    // Budget semantics, deliberately explicit at the boundary rather than left to
+    // the caller. Two spellings mean "no wall-clock cap" (`None` and `+inf`); a
+    // NaN or negative budget is a caller bug and is refused loudly; and `0.0`
+    // means an EXHAUSTED budget -- stop before node 0. Mapping `0.0` to "no
+    // deadline" would turn a spent budget into an unbounded search, exactly the
+    // runaway this parameter exists to prevent, so it is handled as an ordinary
+    // (already-elapsed) deadline below rather than special-cased away.
+    let deadline = match time_limit_s {
+        None => None,
+        // `+inf` is the natural way to spell "no limit". Rejecting it would push a
+        // ValueError into the driver's defensive `except`, silently disabling the
+        // kernel for every uncapped solve rather than running it unbounded.
+        Some(seconds) if seconds == f64::INFINITY => None,
+        Some(seconds) if seconds.is_nan() || seconds < 0.0 => {
+            return Err(PyValueError::new_err(
+                "time_limit_s must be non-negative and not NaN (use None or +inf for no limit)",
+            ));
+        }
+        Some(seconds) => {
+            let duration = Duration::try_from_secs_f64(seconds)
+                .map_err(|_| PyValueError::new_err("time_limit_s is too large"))?;
+            Some(
+                Instant::now()
+                    .checked_add(duration)
+                    .ok_or_else(|| PyValueError::new_err("time_limit_s is too large"))?,
+            )
+        }
+    };
     let cfg = SpatialTreeConfig {
         max_nodes,
+        deadline,
         gap_tol,
         int_tol,
         mccormick_tol,
@@ -249,6 +280,7 @@ pub fn solve_spatial_tree_py<'py>(
     let status = match res.status {
         TreeStatus::Optimal => "optimal",
         TreeStatus::NodeLimit => "node_limit",
+        TreeStatus::TimeLimit => "time_limit",
         TreeStatus::Exhausted => "exhausted",
         TreeStatus::Infeasible => "infeasible",
     };

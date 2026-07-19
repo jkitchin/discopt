@@ -8,6 +8,8 @@ native path certifies the correct global optimum and agrees with the trusted
 the binding.
 """
 
+import time
+
 import numpy as np
 import pytest
 from discopt import Model
@@ -87,6 +89,128 @@ def test_incumbent_point_is_feasible():
     # w (col 2) == x*y and x+y >= 3.
     assert abs(x[0] * x[1] - x[2]) < 1e-4
     assert x[0] + x[1] >= 3.0 - 1e-4
+
+
+def test_native_kernel_zero_time_limit_is_honest():
+    """#788: an already-expired budget stops before the root node and never returns
+    a false ``optimal`` status. The untouched root frontier still gives the rigorous
+    (if weak) ``-inf`` lower bound for this minimization problem."""
+    res = solve_with_native_kernel(_bilinear_min(), time_limit_s=0.0)
+    assert res is not None
+    assert res["status"] == "time_limit"
+    assert res["node_count"] == 0
+    assert res["incumbent"] is None
+    assert res["bound"] == -np.inf
+
+
+def test_binding_budget_spellings_are_explicit():
+    """#788: the four budget spellings, pinned at the boundary. ``None`` and ``+inf``
+    both mean "no cap"; ``0.0`` means an EXHAUSTED budget and must stop before node 0
+    -- reading it as "no deadline" would turn a spent budget into exactly the runaway
+    search this parameter exists to prevent; NaN/negative is a caller bug, refused
+    loudly rather than guessed at."""
+    uncapped = solve_with_native_kernel(_bilinear_min(), time_limit_s=float("inf"))
+    assert uncapped["status"] == "optimal"
+    assert abs(uncapped["incumbent"] - 2.0) < 1e-3
+    # ...and identical to omitting the argument entirely.
+    assert uncapped["status"] == solve_with_native_kernel(_bilinear_min())["status"]
+
+    spent = solve_with_native_kernel(_bilinear_min(), time_limit_s=0.0)
+    assert spent["status"] == "time_limit"
+    assert spent["node_count"] == 0
+
+    for bad in (-1.0, float("-inf"), float("nan")):
+        with pytest.raises(ValueError):
+            solve_with_native_kernel(_bilinear_min(), time_limit_s=bad)
+
+
+def test_driver_passes_remaining_time_and_surfaces_partial_result(monkeypatch):
+    """#788: ``Model.solve(time_limit=...)`` reaches the PyO3 deadline and a native
+    timeout returns directly instead of restarting the Python spatial engine."""
+    import discopt.solver as S
+
+    captured = {}
+
+    def fake_seed(*args, **kwargs):
+        # A verified feasible corner for the model below, in internal minimize units.
+        return 2.0, np.array([2.0, 1.0])
+
+    def fake_native(**kwargs):
+        captured.update(kwargs)
+        return {
+            "status": "time_limit",
+            "incumbent": 2.0,
+            "incumbent_x": np.array([], dtype=float),
+            "bound": 1.5,
+            "node_count": 7,
+            "n_lp_solves": 7,
+            "n_uncertified": 0,
+        }
+
+    monkeypatch.setattr(S, "_native_kernel_seed", fake_seed)
+    monkeypatch.setattr(_rust, "solve_spatial_tree_py", fake_native)
+    monkeypatch.setenv("DISCOPT_NATIVE_SPATIAL_KERNEL", "1")
+
+    result = _bilinear_min().solve(time_limit=10.0, verify_incumbent=False)
+
+    assert 0.0 <= captured["time_limit_s"] <= 10.0
+    assert result.status == "time_limit"
+    assert result.objective == pytest.approx(2.0)
+    assert result.bound == pytest.approx(1.5)
+    assert result.node_count == 7
+    assert result.gap_certified is True
+
+
+def test_non_finite_time_limit_requests_an_uncapped_native_search(monkeypatch):
+    """#788: a non-finite budget means "no wall-clock cap" and must reach the binding
+    as ``time_limit_s=None``. Passing the non-finite value straight through would be
+    rejected by the binding, and the driver's defensive ``except`` would swallow that
+    rejection — silently disabling the kernel for every uncapped solve."""
+    import discopt.solver as S
+
+    captured = {}
+
+    def fake_native(**kwargs):
+        captured.update(kwargs)
+        return {
+            "status": "optimal",
+            "incumbent": 2.0,
+            "incumbent_x": np.array([2.0, 1.0]),
+            "bound": 2.0,
+            "node_count": 3,
+            "n_lp_solves": 3,
+            "n_uncertified": 0,
+        }
+
+    monkeypatch.setattr(S, "_native_kernel_seed", lambda *a, **k: (None, None))
+    monkeypatch.setattr(_rust, "solve_spatial_tree_py", fake_native)
+    monkeypatch.setenv("DISCOPT_NATIVE_SPATIAL_KERNEL", "1")
+
+    result = _bilinear_min().solve(time_limit=float("inf"), verify_incumbent=False)
+
+    assert "time_limit_s" in captured, "native binding was never reached"
+    assert captured["time_limit_s"] is None
+    assert result.status == "optimal"
+
+
+def test_expired_outer_deadline_skips_native_seed_work(monkeypatch):
+    """The optional seed heuristic is part of the same #788 wall-clock contract."""
+    import discopt.solver as S
+
+    def must_not_run(*args, **kwargs):  # pragma: no cover - executed only on failure
+        raise AssertionError("seed candidates started after the outer deadline")
+
+    monkeypatch.setattr(S, "_native_kernel_seed_candidates", must_not_run)
+    value, point = S._native_kernel_seed(
+        _bilinear_min(),
+        np.array([0.0, 0.0]),
+        np.array([2.0, 2.0]),
+        1.0,
+        0.0,
+        2,
+        outer_deadline=time.perf_counter() - 1.0,
+    )
+    assert value is None and point is None
 
 
 def test_sqrt_model_is_supported():

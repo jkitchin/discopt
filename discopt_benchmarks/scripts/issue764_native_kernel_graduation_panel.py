@@ -75,10 +75,34 @@ def _run_child(instance: str, flag: str) -> int:
     nl = str(_CORPUS / f"{instance}.nl")
     out: dict = {"instance": instance, "flag": flag, "engaged": False}
 
-    # Engagement detection: wrap the native hand-off; it returns non-None only on a
-    # fully-certified native solve. Also stash the model so we can feasibility-verify.
+    # Two distinct signals, deliberately NOT conflated:
+    #   ``binding_called``/``native_time_s`` instrument the Rust entry itself, so a
+    #     run that reached the kernel is distinguishable from one the producer
+    #     declined, and native-kernel time is separable from producer/setup time.
+    #   ``engaged`` keeps its original meaning -- the native result was actually
+    #     surfaced as the answer. A binding call whose result is discarded (e.g.
+    #     ``node_limit`` -> Python fallback) must not count as engagement, or the
+    #     panel overstates native coverage.
+    binding_called = {"v": False}
+    native_status = {"v": None}
+    native_time = {"v": 0.0}
     engaged = {"v": False}
     orig_fn = solver_mod._try_native_spatial_kernel
+    from discopt import _rust
+
+    orig_rust_fn = _rust.solve_spatial_tree_py
+
+    def _wrapped_rust(*a, **k):
+        binding_called["v"] = True
+        t_native = time.perf_counter()
+        try:
+            r = orig_rust_fn(*a, **k)
+        finally:
+            native_time["v"] += time.perf_counter() - t_native
+        native_status["v"] = r.get("status")
+        return r
+
+    _rust.solve_spatial_tree_py = _wrapped_rust
 
     def _wrapped(*a, **k):
         r = orig_fn(*a, **k)
@@ -100,6 +124,9 @@ def _run_child(instance: str, flag: str) -> int:
         out["bound"] = None if r.bound is None else float(r.bound)
         out["node_count"] = int(r.node_count)
         out["engaged"] = bool(engaged["v"])
+        out["binding_called"] = bool(binding_called["v"])
+        out["native_status"] = native_status["v"]
+        out["native_time_s"] = float(native_time["v"])
 
         # Independent incumbent feasibility verification (ON + engaged + optimal).
         if flag == "1" and engaged["v"] and str(r.status) == "optimal" and r.x is not None:
@@ -119,6 +146,7 @@ def _run_child(instance: str, flag: str) -> int:
         out["error"] = repr(exc)
     finally:
         solver_mod._try_native_spatial_kernel = orig_fn
+        _rust.solve_spatial_tree_py = orig_rust_fn
 
     print("RESULT_JSON " + json.dumps(out))
     return 0
