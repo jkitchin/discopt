@@ -511,6 +511,28 @@ class SolverTuning:
     everything else bound-neutral. A/B root values re-confirmed load-independent
     (``results/issue282/root_lp_probe_ab_reconfirm_*.json``)."""
 
+    coef_tighten: bool = field(
+        default_factory=lambda: _env_flag("DISCOPT_COEF_TIGHTEN", default=False)
+    )
+    """Activity-based big-M coefficient tightening at the root (issue #282/#774,
+    ``DISCOPT_COEF_TIGHTEN``, **default OFF**; §5 bound-changing, opt-in).
+
+    Rewrites each linear inequality carrying a binary indicator, shrinking the
+    binary's coefficient toward the FBBT/probing activity slack of the rest of the
+    row (Savelsbergh positive-coefficient + fixed-charge negative-coefficient
+    cases). Feasible-set-**equivalent** — no integer-feasible point is added or
+    removed — so the LP relaxation tightens at fractional binaries while every
+    integer corner is preserved. The rewrite is emitted in ``from_nl``'s native
+    normal form (constant in the body, ``con.rhs == 0``); the #770 revert (#773)
+    was a malformed write-back that split the constant across body and rhs and
+    admitted a false primal (rsyn0805m 1441.99 > =opt= 1296.12), re-derived and
+    fixed in #774.
+
+    Default OFF pending a net-positive graduation panel: #282 Stage 4 measured it
+    tightens the root (syn40m ~56% of the discopt→SCIP spread) but certifies
+    nothing extra on the panel, so it ships as a sound opt-in lever (HOLD, sound ≠
+    helpful — the DISCOPT_CUT_INHERIT lesson) rather than default-ON."""
+
     rlt1_root_bound: bool = field(
         default_factory=lambda: _env_flag("DISCOPT_RLT1_ROOT_BOUND", default=False)
     )
