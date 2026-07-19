@@ -317,3 +317,82 @@ def test_unbounded_relaxation_declines():
 
     spec = build_spatial_kernel_spec(from_nl(nl))
     assert spec is None
+
+
+# ── #789: native-kernel feature-safety routing + final-incumbent verification ──
+
+
+def _bilinear_binary_minlp():
+    """Nonconvex bilinear MINLP with a binary (the model on which the kernel's
+    tree incumbent is a false primal — the #789 verification case)."""
+    m = Model("bb_mi")
+    x = m.continuous("x", lb=0.0, ub=4.0)
+    y = m.continuous("y", lb=0.0, ub=4.0)
+    b = m.binary("b")
+    m.subject_to(x * y >= 1.0)
+    m.subject_to(x + y <= 4.0 + b)
+    m.minimize(x + y + 2.0 * b)
+    return m
+
+
+def _with_kernel_on(monkeypatch):
+    monkeypatch.setenv("DISCOPT_NATIVE_SPATIAL_KERNEL", "1")
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"incumbent_callback": (lambda ctx, model, sol: None)},
+        {"node_callback": (lambda ctx, model: None)},
+        {"lazy_constraints": (lambda ctx, model, sol: [])},
+        {"mccormick_bounds": "none"},
+        {"use_learned_relaxations": True},
+    ],
+)
+def test_kernel_feature_safe_declines_return_correct_optimum(monkeypatch, kwargs):
+    """#789: with the kernel ON, a solve requesting a Python-engine feature the
+    kernel does not honour must route to the Python engine and still certify the
+    true optimum (obj 2.0) — never a withheld/None result."""
+    _with_kernel_on(monkeypatch)
+    m = _bilinear_binary_minlp()
+    res = m.solve(time_limit=120.0, **kwargs)
+    assert res.status in ("optimal", "feasible"), res.status
+    assert res.objective == pytest.approx(2.0, abs=1e-4), res.objective
+
+
+def test_kernel_feature_safe_predicate_units():
+    """The predicate declines each unsupported-feature request and accepts a
+    plain solve."""
+    from discopt.solver import _native_kernel_feature_safe as safe
+
+    base = dict(
+        mccormick_bounds="auto",
+        initial_point=None,
+        lazy_constraints=None,
+        incumbent_callback=None,
+        node_callback=None,
+        kwargs={},
+    )
+    assert safe(**base) is True
+    assert safe(**{**base, "incumbent_callback": lambda *a: None}) is False
+    assert safe(**{**base, "node_callback": lambda *a: None}) is False
+    assert safe(**{**base, "lazy_constraints": lambda *a: []}) is False
+    assert safe(**{**base, "initial_point": np.zeros(3)}) is False
+    assert safe(**{**base, "mccormick_bounds": "none"}) is False
+    assert safe(**{**base, "kwargs": {"iteration_callback": lambda *a: None}}) is False
+    assert safe(**{**base, "kwargs": {"solution_pool": []}}) is False
+    assert safe(**{**base, "kwargs": {"tuning": object()}}) is False
+
+
+def test_kernel_verifies_final_incumbent_and_declines_false_primal(monkeypatch):
+    """#789: on a covered model where the kernel's tree incumbent is INFEASIBLE
+    in the original (a false primal), the kernel must verify its own final
+    incumbent and decline (route to the Python engine), so the reported result
+    is the true optimum — not the #779-withheld None. A plain (feature-safe)
+    solve exercises the verification path directly."""
+    _with_kernel_on(monkeypatch)
+    m = _bilinear_binary_minlp()
+    res = m.solve(time_limit=120.0)
+    assert res.objective is not None, "withheld/None: false primal escaped kernel verification"
+    assert res.objective == pytest.approx(2.0, abs=1e-4), res.objective
+    assert not getattr(res, "incumbent_verification_failed", False)

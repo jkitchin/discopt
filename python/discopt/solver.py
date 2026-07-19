@@ -487,6 +487,56 @@ def _native_spatial_kernel_enabled() -> bool:
     )
 
 
+def _native_kernel_feature_safe(
+    *,
+    mccormick_bounds,
+    initial_point,
+    lazy_constraints,
+    incumbent_callback,
+    node_callback,
+    kwargs,
+) -> bool:
+    """Whether the native spatial kernel may take over this solve (#789).
+
+    The kernel runs the ENTIRE spatial B&B inside ``discopt-core`` and so does
+    not exercise the Python-engine machinery layered on the interpreter loop:
+    node/incumbent/iteration callbacks, lazy-constraint injection, the solution
+    pool, warm-start incumbents, non-default McCormick bound modes, and any
+    per-solve ``tuning`` whose stats/behaviour a caller inspects. Those are real
+    contracts (encoded by the smoke suite), so when a solve REQUESTS one, we
+    decline here and route it to the trusted Python engine, taking the native
+    path only when the solve is feature-safe. This is the #789 "route
+    unsupported models to the Python engine" resolution — no test is weakened,
+    and the fast native path is still taken for the plain certified-optimal
+    solves it was graduated on (tanksize et al.).
+
+    Declining is always sound: it only ever *widens* which solves use the
+    already-trusted default path.
+    """
+    if incumbent_callback is not None or node_callback is not None:
+        return False
+    if kwargs.get("iteration_callback") is not None:
+        return False
+    if lazy_constraints:
+        return False
+    if initial_point is not None:
+        return False
+    # A non-default McCormick bound mode changes the relaxation the caller asked
+    # for; the kernel always builds its own McCormick relaxation, so honour the
+    # request by routing to the Python engine (e.g. ``mccormick_bounds="none"``).
+    if mccormick_bounds is not None and str(mccormick_bounds) != "auto":
+        return False
+    # Solution-pool collection is a Python-engine feature the kernel does not fill.
+    if kwargs.get("solution_pool") is not None or kwargs.get("solution_pool_capacity"):
+        return False
+    # An explicit per-solve tuning object may enable/disable levers whose
+    # solver_stats a caller inspects (e.g. cut-inherit pool stats); the kernel
+    # emits none of those, so route explicit-tuning solves to the Python engine.
+    if kwargs.get("tuning") is not None:
+        return False
+    return True
+
+
 def _root_lp_probe_tight_enabled() -> bool:
     """Whether the #282 tightened-box root LP probe is on (**GRADUATED default-ON**).
 
@@ -867,6 +917,40 @@ def _try_native_spatial_kernel(
         x_flat = np.asarray(seed_point, dtype=np.float64)[:n_vars]
     else:
         return None  # no usable incumbent point -> Python path (never fabricate one)
+
+    # #789: rigorously verify the FINAL reported incumbent against the ORIGINAL
+    # model before returning it as a certified optimum. The kernel solves a
+    # McCormick relaxation with its own integrality handling; on some models
+    # (e.g. a bilinear coupled to a binary in a way the kernel's rounding does
+    # not reproduce exactly) its tree incumbent is infeasible in the original —
+    # a false primal the #779 final-incumbent guard would catch and withhold,
+    # turning a solvable model into a null result. Verifying here instead means
+    # the kernel *declines* such a model (returns None), so the trusted Python
+    # engine solves it and reports the true optimum. Sound and conservative:
+    # declining only ever widens use of the already-trusted default path, and
+    # the kernel is still taken on every model whose incumbent verifies (the
+    # tanksize-class it was graduated on). ``x_flat`` is original-variable order
+    # (``n_vars`` slots) — the same layout ``_native_kernel_verify_point`` reads.
+    _ok, _model_obj = _native_kernel_verify_point(model, x_flat[:n_orig])
+    if not _ok:
+        logger.debug(
+            "native spatial kernel: final incumbent failed original-model "
+            "verification (obj=%.6g) — routing to the Python engine (#789)",
+            obj_val,
+        )
+        return None
+    # Prefer the independently-recomputed true objective (exact model units) over
+    # the kernel's mapped relaxation reading when they agree within tolerance; a
+    # gross disagreement is itself a decline signal.
+    if _model_obj is not None and abs(_model_obj - obj_val) > 1e-4 * (1.0 + abs(obj_val)):
+        logger.debug(
+            "native spatial kernel: reported obj %.6g disagrees with verified "
+            "obj %.6g — routing to the Python engine (#789)",
+            obj_val,
+            _model_obj,
+        )
+        return None
+
     x_dict = _unpack_solution(model, x_flat)
     wall_time = time.perf_counter() - t_start
     gap_val = abs(obj_val - bound_val) / (abs(obj_val) + 1e-10)
@@ -6579,9 +6663,22 @@ def solve_model(
     # returns None with no import/side effect, so the default path below is byte-for-byte
     # unchanged; when ON it only takes over on a fully-certified native solve, else falls
     # through to the trusted Python search.
-    _native_result: Optional[SolveResult] = _try_native_spatial_kernel(
-        model, lb, ub, n_vars, gap_tolerance, max_nodes, t_start, rust_time, jax_time
-    )
+    # #789: only take the native path when the solve is feature-safe — it does
+    # not exercise the Python-engine contracts (callbacks, lazy constraints,
+    # solution pool, warm-start, non-default McCormick modes, explicit tuning),
+    # so a solve requesting any of those is routed to the trusted Python engine.
+    _native_result: Optional[SolveResult] = None
+    if _native_kernel_feature_safe(
+        mccormick_bounds=mccormick_bounds,
+        initial_point=initial_point,
+        lazy_constraints=lazy_constraints,
+        incumbent_callback=incumbent_callback,
+        node_callback=node_callback,
+        kwargs=kwargs,
+    ):
+        _native_result = _try_native_spatial_kernel(
+            model, lb, ub, n_vars, gap_tolerance, max_nodes, t_start, rust_time, jax_time
+        )
     if _native_result is not None:
         return _native_result
 
