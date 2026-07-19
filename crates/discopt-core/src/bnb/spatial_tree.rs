@@ -20,6 +20,38 @@
 
 use crate::bnb::spatial_kernel::{solve_spatial_node, EnvTerm, SpatialKernelSpec};
 use crate::lp::simplex::{LpStatus, SimplexOptions};
+use std::cmp::Ordering;
+use std::collections::BinaryHeap;
+
+/// An open B&B node in the best-bound frontier: its box and the inherited lower
+/// bound `pb` (the parent's rigorous bound, a valid lower bound for this region).
+/// Ordered so a max-heap yields the SMALLEST `pb` first (best-bound search): the
+/// lowest-bound region is explored + tightened first, which is what lifts the global
+/// frontier minimum — pure DFS leaves low-bound siblings unexplored and the reported
+/// bound stuck at the root value.
+struct QNode {
+    pb: f64,
+    lo: Vec<f64>,
+    hi: Vec<f64>,
+}
+
+impl PartialEq for QNode {
+    fn eq(&self, o: &Self) -> bool {
+        self.pb == o.pb
+    }
+}
+impl Eq for QNode {}
+impl PartialOrd for QNode {
+    fn partial_cmp(&self, o: &Self) -> Option<Ordering> {
+        Some(self.cmp(o))
+    }
+}
+impl Ord for QNode {
+    fn cmp(&self, o: &Self) -> Ordering {
+        // Reverse: BinaryHeap is a max-heap, we want the min `pb` on top.
+        o.pb.partial_cmp(&self.pb).unwrap_or(Ordering::Equal)
+    }
+}
 
 /// Termination status of the tree solve.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -134,10 +166,16 @@ pub fn solve_spatial_tree(
     config: &SpatialTreeConfig,
     opts: &SimplexOptions,
 ) -> SpatialTreeResult {
-    // Worklist of (lo, hi, parent_bound). DFS (stack) finds incumbents fast; the
-    // global bound is the min parent_bound over open nodes plus the running node.
-    let mut stack: Vec<(Vec<f64>, Vec<f64>, f64)> =
-        vec![(spec.global_lo.clone(), spec.global_hi.clone(), f64::NEG_INFINITY)];
+    // Best-bound frontier: a min-heap on the inherited lower bound. Exploring the
+    // lowest-bound region first lifts the global frontier minimum (the reported dual
+    // bound) as fast as possible — the key to certifying instances like tanksize
+    // whose bound climbs only slowly.
+    let mut heap: BinaryHeap<QNode> = BinaryHeap::new();
+    heap.push(QNode {
+        pb: f64::NEG_INFINITY,
+        lo: spec.global_lo.clone(),
+        hi: spec.global_hi.clone(),
+    });
     let mut incumbent: Option<f64> = None;
     let mut incumbent_x: Vec<f64> = Vec::new();
     let mut node_count = 0usize;
@@ -148,16 +186,11 @@ pub fn solve_spatial_tree(
     // lower bound for that region. Each contribution is a safe bound (`<=` the
     // region's true optimum), so the accumulated min is `<=` the true global optimum
     // — a rigorous lower bound. Branched regions contribute nothing (their children
-    // do). Open stack nodes carry their `parent_bound` as a valid region lower bound.
+    // do). Open frontier nodes carry their `pb` as a valid region lower bound; under
+    // best-bound the heap top is exactly that frontier minimum.
     let mut global_lb_closed = f64::INFINITY;
-    let open_min = |stack: &[(Vec<f64>, Vec<f64>, f64)]| -> f64 {
-        stack
-            .iter()
-            .map(|(_, _, pb)| *pb)
-            .fold(f64::INFINITY, f64::min)
-    };
 
-    while let Some((lo, hi, parent_bound)) = stack.pop() {
+    while let Some(QNode { pb: parent_bound, lo, hi }) = heap.pop() {
         // Fathom by the parent bound if the incumbent already dominates it. The
         // region's valid lower bound is `parent_bound`.
         if let Some(inc) = incumbent {
@@ -168,9 +201,10 @@ pub fn solve_spatial_tree(
         }
         if node_count >= config.max_nodes {
             // Global bound = min(closed regions, open frontier, this unpopped node).
-            let gb = global_lb_closed
-                .min(open_min(&stack))
-                .min(parent_bound);
+            // Under best-bound the heap top is the frontier minimum, but take the full
+            // min defensively.
+            let frontier = heap.iter().map(|n| n.pb).fold(f64::INFINITY, f64::min);
+            let gb = global_lb_closed.min(frontier).min(parent_bound);
             return SpatialTreeResult {
                 status: TreeStatus::NodeLimit,
                 incumbent,
@@ -312,18 +346,18 @@ pub fn solve_spatial_tree(
             let hi2 = hi.clone();
             lo2[split_col] = f + 1.0;
             if hi1[split_col] >= lo1[split_col] - 1e-12 {
-                stack.push((lo1, hi1, bound));
+                heap.push(QNode { pb: bound, lo: lo1, hi: hi1 });
             }
             if hi2[split_col] >= lo2[split_col] - 1e-12 {
-                stack.push((lo2, hi2, bound));
+                heap.push(QNode { pb: bound, lo: lo2, hi: hi2 });
             }
         } else {
             let mut hi1 = hi.clone();
             hi1[split_col] = split_at;
             let mut lo2 = lo.clone();
             lo2[split_col] = split_at;
-            stack.push((lo.clone(), hi1, bound));
-            stack.push((lo2, hi.clone(), bound));
+            heap.push(QNode { pb: bound, lo: lo.clone(), hi: hi1 });
+            heap.push(QNode { pb: bound, lo: lo2, hi: hi.clone() });
         }
     }
 
