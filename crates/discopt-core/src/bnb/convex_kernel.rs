@@ -29,6 +29,7 @@
 use crate::lp::cover::separate_cover_csc;
 use crate::lp::cut_select::select_cuts;
 use crate::lp::gomory::{separate_gomory_cols, GomoryCut};
+use crate::lp::mir::separate_mir;
 use crate::lp::simplex::refine::ns_safe_bound_csc;
 use crate::lp::simplex::sparse::SparseCols;
 use crate::lp::simplex::{primal::solve_lp_cols_scaled, LpStatus, SimplexOptions};
@@ -567,6 +568,45 @@ impl ConvexKernelSpec {
                 opts.tol,
                 1e7,
             ));
+            // MIR (c-MIR family) over the structural ≤ rows — the lever the
+            // GMI+cover pair leaves open (measured: closes ~2× more of syn40m's
+            // root gap). MIR cuts are structural (no slack part); express each in
+            // the standard-form ≥ convention (pad to n_total) so select_cuts and
+            // substitute_slacks handle it uniformly with GMI/cover.
+            {
+                let mut a_ub: Vec<f64> = Vec::new();
+                let mut b_ub: Vec<f64> = Vec::new();
+                for row in opt.rows.iter().filter(|r| !r.is_eq) {
+                    let mut dense = vec![0.0f64; self.n];
+                    for (c, v) in row.cols.iter().zip(row.coeffs.iter()) {
+                        dense[*c] = *v;
+                    }
+                    a_ub.extend_from_slice(&dense);
+                    b_ub.push(row.rhs);
+                }
+                if !b_ub.is_empty() {
+                    for mc in separate_mir(
+                        &a_ub,
+                        &b_ub,
+                        &opt.l[..self.n],
+                        &opt.u[..self.n],
+                        &self.integrality,
+                        &opt.x_full[..self.n],
+                        opts.tol,
+                        1e7,
+                    ) {
+                        // MirCut `coeffs·x ≤ rhs` → ≥ form `(−coeffs)·x ≥ −rhs`.
+                        let mut coeffs = vec![0.0f64; opt.n_total];
+                        for (j, &v) in mc.coeffs.iter().enumerate() {
+                            coeffs[j] = -v;
+                        }
+                        raw.push(GomoryCut {
+                            coeffs,
+                            rhs: -mc.rhs,
+                        });
+                    }
+                }
+            }
             if raw.is_empty() {
                 break;
             }
