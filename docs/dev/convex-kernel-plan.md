@@ -137,6 +137,31 @@ primal regression.
 
 ## Work log (append newest first)
 
+- **2026-07-19 (iter 5): K2a/b DONE — in-node separation.**
+  - Refactored `solve_node` → `oa_converge` helper (K1 path unchanged) + new
+    `solve_node_cut` (K2): OA-converge, then separate `separate_cover_csc` +
+    `separate_gomory_cols` under `select_cuts` (efficacy×orthogonality, top-8),
+    re-converge, up to `max_sep_rounds`. Node-local (C-43).
+  - Cut bridge: the Rust separators emit cuts over standard-form columns
+    (structural ‖ slacks); `substitute_slacks` rewrites each over structural
+    columns via `s_r = b_r − A_r·x` (an identity on the feasible set → valid),
+    added as a `≤` `LinRow`. Keeps the box-reassembly design; no growing-LP rewrite.
+  - Test: cover cut closes `max x0+x1 s.t. x0+x1≤1.5, x∈{0,1}²` from LP 1.5 → 1.0
+    (integer hull), strictly tighter AND sound (never below the integer optimum).
+    8 unit tests pass, clippy clean.
+  - **Next: K2c** — the best-bound tree (`solve_tree` on `ConvexKernelSpec`).
+    Node = box + parent bound; best-bound heap. Per node: (1) **linear FBBT**
+    propagator over `le_rows`+`eq_rows` (both directions) + integer rounding —
+    REQUIRED: it makes bounds finite so the NS safe bound certifies (the K1d
+    action item; without it the root's infinite bounds → uncertifiable → the tree
+    can't fathom); (2) `solve_node_cut` over the propagated box; (3) fathom by
+    safe bound vs incumbent; (4) branch on the most-fractional integer into two
+    covering children; (5) incumbent from integer-integral + OA-tight LP vertices
+    (minimal primal — K3 adds the NLP/rounding). Honest `TimeLimit`/`Exhausted`
+    (never a false `Optimal`). Fork the loop shape from `bnb/spatial_tree.rs`.
+    Then **K2d** — the panel gate: nodes-to-certify vs the prototype (67/60/46/55,
+    within ~2×) + feasible-point test on the real convex panel.
+
 - **2026-07-19 (iter 4): K1d DONE → K1 GATE PASSED.**
   - PyO3 binding `solve_convex_node_py` (`crates/discopt-python/src/convex_bindings.rs`,
     registered in `lib.rs`): nested-CSR flat arrays (linear ≤/= rows; nl rows →
