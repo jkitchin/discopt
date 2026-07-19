@@ -487,6 +487,33 @@ def _native_spatial_kernel_enabled() -> bool:
     )
 
 
+def _root_lp_probe_tight_enabled() -> bool:
+    """Whether the #282 tightened-box root LP probe is on (**GRADUATED default-ON**).
+
+    The spatial path keeps the McCormick LP relaxer for the whole search only if a
+    one-shot "probe" solve yields a valid bound at the root. That probe was run over
+    the *raw declared* model bounds (``flat_variable_bounds(model)``), not the
+    FBBT/OBBT-tightened root box. On a model with unbounded declared bounds (the
+    process-synthesis ``*hfsg`` family, issue #282, has continuous variables
+    declared ``[0, inf]``; also ``casctanks``) the LP is unbounded/None over that raw
+    box, so the relaxer is discarded (``_mc_mode = "none"``) and the whole spatial
+    search falls back to a far looser alphaBB/interval/NLP root bound — even though
+    the SAME relaxer produces a valid, much tighter bound on the tightened box the
+    solver has already computed (measured: syn30hfsg root excess +955% -> +571%,
+    syn40hfsg +3041% -> +2350%). Using the tightened root box keeps the relaxer and
+    every node gets the LP bound. Sound: the probe only decides whether to keep the
+    relaxer; each node still solves its own (subset) box and the LP is a rigorous
+    outer approximation (the bound joins via ``max`` — can only tighten).
+
+    GRADUATED default-ON (#282 Workstream A) via the ``SolverTuning`` field
+    :attr:`~discopt.solver_tuning.SolverTuning.root_lp_probe_tight` (per-solve,
+    discoverable, thread-safe); this reads it. ``DISCOPT_ROOT_LP_PROBE_TIGHT=0`` (or
+    ``tuning=SolverTuning(root_lp_probe_tight=False)``) restores the legacy raw-box
+    probe. See the field docstring for the graduation-panel evidence.
+    """
+    return _tuning().root_lp_probe_tight
+
+
 # Wall budget (seconds) for the incumbent-seeding NLP heuristics (#764 Task 1). A
 # SubNLP solve (fix rounded integers, solve the continuous NLP) from the presolved
 # box midpoint — plus a stratified continuous multistart for pure-continuous models —
@@ -860,45 +887,6 @@ def _try_native_spatial_kernel(
         rust_time=rust_time,
         jax_time=jax_time,
         python_time=wall_time - rust_time - jax_time,
-    )
-
-
-def _root_lp_probe_tight_enabled() -> bool:
-    """Whether the #282 tightened-box root LP probe is on (**default ON**; ``=0`` opts out).
-
-    The spatial path keeps the McCormick LP relaxer for the whole search only if a
-    one-shot "probe" solve yields a valid bound at the root. Historically that probe
-    was run over the *raw declared* model bounds (``flat_variable_bounds(model)``),
-    not the FBBT/OBBT-tightened root box the search actually uses. On a model with
-    unbounded declared bounds (the process-synthesis ``*hfsg`` family and the
-    bilinear tank-sizing class, issue #282, have continuous variables declared
-    ``[0, inf]``) the LP is unbounded/None over that raw box — a box **no node ever
-    solves** — so the relaxer was discarded (``_mc_mode = "none"``) and the whole
-    spatial search fell back to a far looser alphaBB/interval/NLP root bound, even
-    though the SAME relaxer produces a valid, much tighter bound on the tightened
-    box the solver has already computed. Probing the box that is actually used keeps
-    the relaxer and gives every node the LP bound. Sound: the probe only decides
-    whether to keep the relaxer; each node still solves its own (subset) box and the
-    LP is a rigorous outer approximation, so it can only *tighten* a bound the
-    fallback also computes — never loosen one, never touch an incumbent.
-
-    Graduated default-ON (#764) after the CLAUDE.md Regime-2 panel: ON-vs-OFF over
-    the in-repo corpus's complete affected set (all 24 unbounded-declared-box
-    instances — the only ones whose keep/discard decision the flag can flip; it is a
-    provable no-op on bounded-box models, confirmed byte-identical on spot-checks).
-    The run was BOTH (1) cert-clean — 0 unsound bounds, no dual bound past its
-    reference optimum, no certificate-invariant violation, no incumbent past its
-    oracle, no certification regression — AND (2) net-positive: ``syn05hfsg`` moved
-    feasible→**optimal** (bound 1310.6→837.73 upper, 2x faster) and ``tanksize``'s
-    dual bound tightened 0.8529→0.9063, with every previously-certifying instance
-    byte-stable (identical bound and node count) and no wall or bound regression.
-    ``DISCOPT_ROOT_LP_PROBE_TIGHT=0`` restores the legacy raw-box probe.
-    """
-    return os.environ.get("DISCOPT_ROOT_LP_PROBE_TIGHT", "").strip().lower() not in (
-        "0",
-        "false",
-        "no",
-        "off",
     )
 
 
@@ -5495,6 +5483,26 @@ def solve_model(
                     # with the flag off — never a regression.
                     _iml_n1 = sum(v.size for v in _iml._variables)
                     _iml_adopt = _iml_pure_milp or _iml_n1 <= 4 * max(_iml_n0, 16)
+                    # Budget-aware adoption for the disjunctive-eligible spatial-path
+                    # reform (#732 blocker b). On the gated-configuration class
+                    # (ex1252: the reform records configuration indicators, and its
+                    # payoff is the disjunctive config-bound floor / deep spatial
+                    # recursion) the exact-linearization only pays for its heavier
+                    # per-node LPs once that payoff mechanism can engage — which needs
+                    # a generous budget (the disjunctive pass engages at
+                    # ``min(0.25*time_limit, 150) >= 45`` s, i.e. ``time_limit >=
+                    # 180`` s). Below that the reform is pure cost: measured on
+                    # ex1252@60 s the reformed tree dual collapses 9273 -> 0 (heavier
+                    # LPs halve node throughput and the floor pass is skipped) and the
+                    # incumbent is lost, versus the flag-off spatial path's 9273. So on
+                    # the config class, keep the flag-off path until the budget affords
+                    # the payoff. A non-config reform (nvs05: payoff is the direct
+                    # node-LP tightening, +0.19 dual at equal nodes @60 s) and a
+                    # pure-MILP reform (MILP-engine route, cheap+exact) are unaffected.
+                    if _iml_adopt and not _iml_pure_milp:
+                        _iml_config = getattr(_iml, "_ipx_config_indicators", None) or ()
+                        if _iml_config and min(0.25 * float(time_limit), 150.0) < 45.0:
+                            _iml_adopt = False
                     if _iml_adopt:
                         _did_multilinear_reform = True
                         model = _iml
@@ -5742,6 +5750,30 @@ def solve_model(
                 )
         except Exception as e:
             logger.debug("Root presolve failed: %s", e)
+
+    # --- Activity-based big-M coefficient tightening (#282, opt-in) ---
+    # Shrinks big-M coefficients on binary-indicator rows toward the FBBT
+    # activity slack. Bound-changing (it strictly tightens the LP relaxation
+    # without removing any integer-feasible point), so it is gated behind
+    # ``DISCOPT_COEF_TIGHTEN`` (default OFF, CLAUDE.md §5). Runs once at the
+    # root here, before dispatch, so it benefits BOTH the NLP-BB and the
+    # spatial B&B paths. Rewrites the Python constraint DAG in place — the
+    # only place tightened coefficients reach the relaxation compiler. Skipped
+    # once the budget is blown (#654): declining it leaves the original,
+    # still-valid rows.
+    if presolve and not _deadline_exhausted():
+        try:
+            from discopt.solvers._root_presolve import (
+                coef_tighten_enabled,
+                tighten_bigm_coefficients,
+            )
+
+            if coef_tighten_enabled():
+                n_ct = tighten_bigm_coefficients(model)
+                if n_ct > 0:
+                    logger.info("Coefficient tightening: strengthened %d big-M rows", n_ct)
+        except Exception as e:
+            logger.debug("Coefficient tightening failed: %s", e)
 
     # --- Reverse-AD interval tightening (M9 of #51, opt-in) ---
     # Iterates Gauss-Seidel reverse-mode interval AD over every
@@ -11474,6 +11506,77 @@ def _solve_nlp_bb(
             gap_certified=_gap_certified,
         )
 
+    # --- Root cutting-plane stage (#781, DISCOPT_NLPBB_ROOT_CUTS, default-OFF) ---
+    # Generates integrality-valid cuts (GMI from the HiGHS tableau + c-MIR +
+    # cover under pooled top-K selection) over the OA root LP and appends them
+    # as model constraints BEFORE the evaluator/tree are built, so every node
+    # NLP relaxation tightens. Sound: runs only on the convex-certified route
+    # with a verified-linear objective; cuts are satisfied by every integer-
+    # feasible point, so no incumbent is ever cut (and the #779 guard verifies
+    # the final incumbent against the pristine pre-solve model regardless).
+    # Write-back honors the #772 lessons: each cut is a NEW Constraint with the
+    # full row folded into the body and ``rhs=0.0``. The applied cuts remain in
+    # the model after the solve (valid rows; keeps result.constraint_duals
+    # aligned). Failure-safe: any error degrades to the flag-off path.
+    _root_cut_bound: Optional[float] = None
+    _root_cut_count = 0
+    # Top-level solves only: RENS/local-branching sub-solves recurse into this
+    # function (with rens_enabled/_lns_enabled False) and must not pay for —
+    # or mutate their restricted models with — a second root-cut stage.
+    if _model_is_convex and rens_enabled and _lns_enabled:
+        try:
+            from discopt.solvers._root_cuts import (
+                generate_root_cuts,
+                nlpbb_root_cuts_enabled,
+            )
+
+            if nlpbb_root_cuts_enabled() and all(
+                getattr(v, "size", 1) == 1 for v in model._variables
+            ):
+                from discopt.modeling.core import Constraint as _RCConstraint
+
+                _rc_is_int = np.zeros(n_vars, bool)
+                for _off, _sz in zip(int_offsets, int_sizes):
+                    _rc_is_int[_off : _off + _sz] = True
+                _rc_is_bin = _rc_is_int & (lb == 0.0) & (ub == 1.0)
+                t_jax_start = time.perf_counter()
+                _rc_ev = _make_evaluator(model)  # pre-cut evaluator (cached)
+                _rc_budget = max(2.0, min(10.0, 0.2 * float(time_limit)))
+                _rc = generate_root_cuts(
+                    model, _rc_ev, lb, ub, _rc_is_int, _rc_is_bin, time_budget_s=_rc_budget
+                )
+                jax_time += time.perf_counter() - t_jax_start
+                _rc_blocks = model._variables
+                for _rc_a, _rc_r in _rc.cuts:
+                    _rc_body = None
+                    for _j in np.nonzero(np.abs(_rc_a) > 1e-15)[0]:
+                        _term = float(_rc_a[_j]) * _rc_blocks[int(_j)]
+                        _rc_body = _term if _rc_body is None else _rc_body + _term
+                    if _rc_body is None:
+                        continue
+                    # Model-row safety margin: GMI cuts are TIGHT at integer
+                    # points (measured slack ~5e-10 at a verified optimum), so
+                    # an unrelaxed row could reject a tolerance-feasible
+                    # incumbent at acceptance time. Relaxing by 1e-7·scale is
+                    # far below the bound signal but above FP noise.
+                    _rc_rhs = float(_rc_r) + 1e-7 * (1.0 + abs(float(_rc_r)))
+                    _rc_body = _rc_body + (-_rc_rhs)
+                    model._constraints.append(_RCConstraint(_rc_body, "<=", 0.0, None))
+                    _root_cut_count += 1
+                _root_cut_bound = _rc.lp_bound
+                if _root_cut_count:
+                    logger.info(
+                        "NLP-BB root cuts (#781): applied %d cuts over %d rounds "
+                        "(%d productive), root LP bound %.6g",
+                        _root_cut_count,
+                        _rc.rounds_run,
+                        _rc.productive_rounds,
+                        _root_cut_bound if _root_cut_bound is not None else float("nan"),
+                    )
+        except Exception as e:
+            logger.debug("NLP-BB root cuts skipped: %s", e)
+            _root_cut_bound = None
+
     t_rust_start = time.perf_counter()
     tree = PyTreeManager(
         n_vars,
@@ -12508,6 +12611,32 @@ def _solve_nlp_bb(
     if _root_glb_internal is not None and np.isfinite(_root_glb_internal):
         root_bound_val = -_root_glb_internal if _nlpbb_is_max else _root_glb_internal
         if obj_val is not None and np.isfinite(obj_val):
+            root_gap_val = abs(obj_val - root_bound_val) / max(1.0, abs(obj_val))
+
+    # --- Root-cut bound composition (#781) ---
+    # The root cutting-plane LP bound is a valid dual bound (LP optimum over an
+    # outer approximation of the integer-feasible set: OA tangents of the
+    # convex-certified rows + integrality-valid cuts). Compose it with the tree
+    # bound by taking the TIGHTER of the two valid bounds, for the reported
+    # bound/gap and the root diagnostics. Deliberately conservative: it never
+    # upgrades ``gap_certified`` or the status — the LP is floating-point
+    # (HiGHS) and sits outside the trusted-node machinery, so certification
+    # continues to come solely from the tree logic above.
+    if _root_cut_bound is not None and np.isfinite(_root_cut_bound):
+        _rcb = float(_root_cut_bound)
+
+        def _tighter(a: Optional[float], b: float) -> float:
+            if a is None or not np.isfinite(a):
+                return b
+            return min(a, b) if _nlpbb_is_max else max(a, b)
+
+        _new_bound = _tighter(bound_val, _rcb)
+        if bound_val is None or _new_bound != bound_val:
+            bound_val = _new_bound
+            if obj_val is not None and np.isfinite(obj_val):
+                gap_val = abs(obj_val - bound_val) / max(1.0, abs(obj_val))
+        root_bound_val = _tighter(root_bound_val, _rcb)
+        if obj_val is not None and np.isfinite(obj_val) and root_bound_val is not None:
             root_gap_val = abs(obj_val - root_bound_val) / max(1.0, abs(obj_val))
 
     return SolveResult(

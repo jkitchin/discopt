@@ -1253,3 +1253,63 @@ Stage-1 validation patch (route `diving` through a per-model evaluator cache):
 > and reducing the ~10 s Rust presolve. Both are Rust-engine efforts with their own
 > bound-neutral gates; neither is a quick win. Recorded here so the next attempt
 > starts from the measurement, not the guess.
+
+> **Falsified (2026-07-18, issue #727 sub-cluster C — "sound FBBT/activity
+> finite-bound derivation certifies the 1-node-stall unbounded-declared nonconvex
+> NLPs demo7/chakra").** Hypothesis (from the #727 small-nonconvex diagnosis): these
+> pure-continuous nonconvex NLPs stall at 1 node because they declare unbounded
+> variable sides (`[0,inf]`), so the root McCormick relaxer is unbounded and cannot
+> bound/branch; SCIP derives finite bounds by constraint/activity propagation, so
+> discopt should too — derive the missing bounds (FBBT/activity) so the relaxer
+> builds and spatial B&B engages, with a >50 % root-gap reduction on demo7 as the
+> GO bar. **Entry experiment falsified BOTH prongs of the kill criterion.**
+>
+> 1. **The feasible region is genuinely unbounded — the constraints do NOT imply
+>    the missing bounds.** demo7 (70 vars, quadratic obj + one convex-quadratic
+>    equality) has 18 linear "slack" columns (x32–x43, x53, x54, …) that are
+>    genuinely unbounded: `bootstrap_finite_bounds` (exact LP `max x_i` over the
+>    full linear subsystem, incl. equalities) returns unbounded for them, and
+>    demo7's only nonlinear constraint (constraint 0) does not contain them, so no
+>    nonlinear propagation can bound them either. FBBT + linear-OBBT + nonlinear
+>    tightening iterated to a fixpoint — even with the incumbent objective cutoff
+>    `obj ≤ V` added as an explicit constraint — leaves them open. chakra (62 vars,
+>    all-equality, `−Σ cᵢ xᵢ^0.1` **anti-coercive concave** objective, relaxer
+>    `bound=None`) is worse: its objective *wants* the vars to grow, so no cutoff
+>    bounds them, and every finite bound would have to flow through the fractional
+>    -power equalities; linear bootstrap finitizes 0/60.
+>
+> 2. **Any finite cap on the genuinely-unbounded columns is demonstrably UNSOUND;
+>    the sound sub-derivation that IS available gives 0 % gap reduction.** Measured
+>    on demo7 (opt −1,589,042): capping the open columns at **1e6 yields dual bound
+>    −1,568,959 — ABOVE the optimum, i.e. it CUTS the optimum (unsound)**; 1e8
+>    happens to land sound (−1,589,053, 0.001 % gap) only because the largest
+>    optimal slack value is x67 ≈ 1.65e6; 1e10+ fails numerically. There is no
+>    principled sound cap — the working window is luck, exactly the arbitrary cap
+>    the task forbids.
+>
+> **Genuine sound sub-finding (recorded for independent follow-up, NOT a #727
+> fix).** `nonlinear_bound_tightening._flatten_sum` does not distribute `neg` over
+> a nested sum, so `neg(Σ −aᵢ xᵢ² + bᵢ xᵢ)` (how the .nl reader renders demo7's
+> constraint-0 convex quadratic) stays an opaque atomic term and the
+> `SeparableQuadraticUpperBoundRule` never sees its squares. Teaching `_flatten_sum`
+> to recurse through `UnaryOp("neg")` (sound, exact) lets that rule bound demo7's
+> **nonlinear** vars from constraint 0 alone (x0≤12480, x1≤3531, x4≤14116 —
+> independently verified NOT to cut the optimum: opt x0/x1/x4 = 1844/892/3794).
+> But this ALONE moves the final #727 bound by **0 %** (stays −6.35e6, 299 % gap):
+> the derived bounds are ~7× the optimum (loose McCormick envelope), and OBBT
+> cannot sharpen them because it bails on the 18 still-open genuinely-unbounded
+> slack columns. So the fix is *sound but not net-positive for this cluster*
+> (the `DISCOPT_CUT_INHERIT` pattern); it may help other separable-convex-quadratic
+> instances whose ONLY blocker is the nonlinear var (not unbounded slacks) — worth
+> a scoped FBBT-completeness issue on its own merits, gated per §5, but it does not
+> close sub-cluster C.
+>
+> **Re-scope.** demo7/chakra are not one lever and not a bounded FBBT fix. Closing
+> them soundly needs either (a) a McCormick relaxer that handles genuinely-free
+> (obj-coeff-0, nonlinear-free) columns as free LP columns instead of requiring a
+> finite cap — a relaxer-internals effort whose payoff (demo7 certifies at 0.00 %
+> once x0–x5 are additionally OBBT-tightened) is real but out of scope here — or
+> (b) accepting these as genuinely-hard residuals. Recorded as such; no ship, no
+> arbitrary cap. Reproduction: the `_flatten_sum` neg-distribution monkeypatch +
+> `bootstrap_finite_bounds`/`tighten_nonlinear_bounds`/`MccormickLPRelaxer.solve_at_node`
+> probes in the #727 sub-cluster-C session.

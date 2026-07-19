@@ -1989,7 +1989,14 @@ def build_milp_relaxation(
     # federated collectors/separators below (being deleted stage-by-stage). The
     # engine is a valid outer relaxation by construction; product-side tightness
     # parity is the deferred polish pass.
-    milp, varmap = _uniform_relaxation_delegate(
+    # #671 row filter is FAILURE-TRIGGERED at the solve layer
+    # (mccormick_lp._solve_at_node_impl), NOT applied here at build time: an
+    # always-on build-time filter drops rows that carry genuine tightness on
+    # already-solving instances (in-repo panel: 10/66 regressions incl. nvs09
+    # losing its `optimal` certificate). Only when a node LP actually breaks down
+    # numerically do we drop the float64-intractable rows and re-solve — sound by
+    # superset, and byte-identical on every already-solving node.
+    return _uniform_relaxation_delegate(
         model,
         flat_lb,
         flat_ub,
@@ -2001,11 +2008,6 @@ def build_milp_relaxation(
         disc_state=disc_state,
         build_deadline=build_deadline,
     )
-    # #671 hda-certification lever: optionally drop float64-intractable rows
-    # (default OFF; sound by superset — see _filter_unresolvable_rows).
-    if _tuning().relax_row_filter:
-        _filter_unresolvable_rows(milp)
-    return milp, varmap
 
 
 # --------------------------------------------------------------------------- #

@@ -141,6 +141,22 @@ class _Expander:
         #   _bigm_cache: (e._index, other._index, other_elem) -> big-M product aux
         self._and_cache: dict[tuple, Variable] = {}
         self._bigm_cache: dict[tuple, Variable] = {}
+        # Early monomial-blowup guard (#707/#732 blocker a). A multilinear product
+        # distributes into ``prod_i (1 + nbits_i)`` binary monomials, each >=2-bit
+        # one minting an AND aux + big-M columns. On wide-multiplicity products this
+        # explodes the *build* long before the post-build column guard in
+        # ``expand_integer_products`` can reject it — nvs09 (10 factors x [3,9] ->
+        # 4^10 ~ 1.4M monomials) hangs the reformulation for minutes. We accumulate a
+        # cheap per-term estimate (from the factor ranges alone, no columns minted)
+        # and abort the whole pass once it exceeds ``_ml_monomial_cap``. Any reform
+        # that trips this would be rejected by the post-build/adoption guards anyway
+        # (the multilinear aux columns alone, <= the estimate, already blow the
+        # ``max(1000, 6*n_orig)`` cap), so the abort yields exactly the flag-OFF model
+        # — bound-neutral by construction. The floor sits ~46x above the largest
+        # observed legitimate reform (ex1252 cum-est 108) and ~280x below the nvs09
+        # blowup, so it never fires on an adoptable reform.
+        self._ml_est_columns = 0
+        self._ml_monomial_cap = max(5000, 12 * len(model._variables))
         # Configuration metadata for the disjunctive config bound (#732 Stage 2).
         # Collected on the multilinear path only: the flat indices of the
         # integer factors of every exact-linearized product, split into
@@ -532,6 +548,23 @@ def _try_expand_multilinear(node: BinaryOp, exp: _Expander) -> Optional[Expressi
     # Guard BEFORE creating any expansion column so a bailed term is a true no-op.
     if len(cont_factors) > 1 or not int_refs:
         return None
+
+    # Early monomial-blowup guard (#707/#732 blocker a) — estimate the distributed
+    # monomial count from the factor ranges *before* minting any expansion column,
+    # and abort the whole pass once the cumulative estimate exceeds the cap (see
+    # ``_Expander.__init__``). ``expand_integer_products`` catches the raise and
+    # returns the original model, so a blown-up reform degrades to exactly the
+    # flag-OFF path instead of hanging (nvs09).
+    _est = 1
+    for _v, _el, _lo, _hi in int_refs:
+        _est *= 1 + max(1, math.ceil(math.log2(_hi - _lo + 1)))
+    exp._ml_est_columns += _est
+    if exp._ml_est_columns > exp._ml_monomial_cap:
+        raise ValueError(
+            "integer-multilinear reform monomial estimate "
+            f"{exp._ml_est_columns} exceeds cap {exp._ml_monomial_cap}"
+        )
+
     int_factors = [exp.expansion(v, el, lo, hi) for (v, el, lo, hi) in int_refs]
 
     # #732 Stage 2: record the configuration structure of this product (pure

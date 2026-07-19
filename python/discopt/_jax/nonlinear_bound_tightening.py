@@ -550,6 +550,16 @@ def _flatten_sum(expr, scale: float, out: list[tuple[float, object]]) -> None:
         _flatten_sum(expr.left, scale, out)
         _flatten_sum(expr.right, -scale, out)
         return
+    # Distribute negation over its operand: neg(a + b) == (-a) + (-b) is an exact
+    # identity, so pushing the sign inward lets the additive walk see the full
+    # structure underneath a `neg` (e.g. a `neg(sum-of-squares)` term whose
+    # squares would otherwise be hidden inside one opaque leaf, invisible to the
+    # downstream quadratic/interval bounding rules). This mirrors the negation
+    # handling already in `_flatten_sum_terms` (convexity/patterns.py) and is a
+    # sound normalization — it never removes a feasible point (#777).
+    if isinstance(expr, UnaryOp) and expr.op == "neg":
+        _flatten_sum(expr.operand, -scale, out)
+        return
     out.append((scale, expr))
 
 

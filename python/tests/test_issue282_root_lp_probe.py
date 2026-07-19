@@ -27,7 +27,8 @@ affected set (all 24 unbounded-declared-box instances) was cert-clean and
 net-positive (``syn05hfsg`` feasible→optimal 2x faster, ``tanksize`` root
 0.8529→0.9063, byte-stable elsewhere), so the tightened-box probe is now the
 **default**; ``DISCOPT_ROOT_LP_PROBE_TIGHT=0`` restores the legacy raw-box probe.
-``test_default_is_graduated_on`` pins that the default behaves like the ON arm.
+``test_default_probe_tightens_root_bound_after_graduation`` pins that the default
+behaves like the ON arm.
 """
 
 from __future__ import annotations
@@ -39,7 +40,6 @@ os.environ.setdefault("JAX_ENABLE_X64", "1")
 
 import pytest  # noqa: E402
 from discopt.modeling.core import ObjectiveSense, from_nl  # noqa: E402
-from discopt.solver import _root_lp_probe_tight_enabled  # noqa: E402
 
 _DATA = os.path.join(os.path.dirname(__file__), "data", "minlplib_nl")
 
@@ -103,48 +103,34 @@ def test_tightened_box_probe_tightens_root_bound_soundly():
     assert on.root_bound >= _OPT - _TOL
 
 
-def test_flag_defaults_on_and_respects_optout():
-    """The tightened-box probe is graduated default-ON; ``=0`` (and friends) opt out."""
-    saved = os.environ.pop("DISCOPT_ROOT_LP_PROBE_TIGHT", None)
-    try:
-        # Unset -> ON (graduated default, #764).
-        assert _root_lp_probe_tight_enabled() is True
-        for off in ("0", "false", "no", "off", "OFF", "False"):
-            os.environ["DISCOPT_ROOT_LP_PROBE_TIGHT"] = off
-            assert _root_lp_probe_tight_enabled() is False, off
-        for on in ("1", "true", "yes", "on", ""):
-            os.environ["DISCOPT_ROOT_LP_PROBE_TIGHT"] = on
-            assert _root_lp_probe_tight_enabled() is True, repr(on)
-    finally:
-        os.environ.pop("DISCOPT_ROOT_LP_PROBE_TIGHT", None)
-        if saved is not None:
-            os.environ["DISCOPT_ROOT_LP_PROBE_TIGHT"] = saved
+def _solve_default(budget: float = 8.0):
+    """Solve with NO ``DISCOPT_ROOT_LP_PROBE_TIGHT`` env var set — the shipped default."""
+    os.environ.pop("DISCOPT_ROOT_LP_PROBE_TIGHT", None)
+    m = from_nl(os.path.join(_DATA, f"{_INSTANCE}.nl"))
+    assert m._objective.sense == ObjectiveSense.MAXIMIZE
+    return m.solve(time_limit=budget, gap_tolerance=1e-4)
 
 
 @pytest.mark.slow
-def test_default_is_graduated_on():
-    """With no env override, the solve must behave like the ON arm, not the legacy OFF.
+def test_default_probe_tightens_root_bound_after_graduation():
+    """The tightened-box probe is GRADUATED default-ON (#282 Workstream A).
 
-    This is the regression guard for the #764 default flip: before graduation the
-    unset default discarded the relaxer (loose bound identical to ``=0``); after it,
-    the default keeps the relaxer and the root dual bound is strictly tighter than the
-    explicit legacy ``=0`` arm — while staying a valid upper bound on the optimum.
+    With no env var set, the shipped default must now produce the TIGHTER (kept-relaxer)
+    root bound — i.e. the default equals the explicit-``=1`` arm and is strictly tighter
+    than the explicit-``=0`` (legacy raw-box) arm. This fails before the default flip
+    (default == OFF == looser) and passes after — the graduation regression guard.
+    ``DISCOPT_ROOT_LP_PROBE_TIGHT=0`` remains the opt-out (asserted by the test above).
     """
-    saved = os.environ.pop("DISCOPT_ROOT_LP_PROBE_TIGHT", None)
-    try:
-        m = from_nl(os.path.join(_DATA, f"{_INSTANCE}.nl"))
-        default = m.solve(time_limit=8.0, gap_tolerance=1e-4)
-    finally:
-        if saved is not None:
-            os.environ["DISCOPT_ROOT_LP_PROBE_TIGHT"] = saved
-
-    legacy_off = _solve("0")
+    default = _solve_default()
+    off = _solve("0")
 
     _assert_sound("default", default)
-    assert default.root_bound is not None and legacy_off.root_bound is not None
-    # Default (graduated ON) yields a strictly tighter upper bound than legacy OFF.
-    assert default.root_bound < legacy_off.root_bound - _TOL, (
-        f"default root_bound={default.root_bound} not tighter than legacy OFF="
-        f"{legacy_off.root_bound}; the default flip did not take effect"
+    assert default.root_bound is not None and off.root_bound is not None
+
+    # Default (graduated ON) is strictly tighter than the legacy raw-box (=0) probe.
+    assert default.root_bound < off.root_bound - _TOL, (
+        f"default root_bound={default.root_bound} not tighter than legacy =0 "
+        f"root_bound={off.root_bound}; the default did not graduate to the kept-relaxer probe"
     )
+    # And still a valid upper bound on the optimum.
     assert default.root_bound >= _OPT - _TOL
