@@ -137,6 +137,29 @@ primal regression.
 
 ## Work log (append newest first)
 
+- **2026-07-19 (iter 7): K2e warm-start node solve DONE — ~2× wall, cert-clean.**
+  - Unified `oa_converge`+`solve_node_cut` into one growing-LP loop: base `[le, eq]`
+    assembled once, OA tangents + cuts APPENDED (append-only → columns stable), each
+    re-solve WARM from the carried+extended basis via `solve_lp_warm_scaled_csc`
+    (equilibrates → NS still certifies; cold fallback → always correct).
+  - **Total wall 124s → 64.6s (~2×); per-node ~6× faster** (rsyn0815m 177→29 ms/node).
+    All 4 cert-clean (bound = optimum EXACTLY). 10 tests pass, clippy clean.
+  - **Node counts rose 1006→2512** — the loop's row order perturbs vertex/cut
+    selection on these degenerate big-M LPs (A/B: cold-in-new-loop rsyn0815m 738 /
+    TIMED OUT at 120s; warm 1185 / 34s — warm rescues the heavier tree). Net wall
+    still 2× better, so committed; the node blowup is tree-quality, addressed next.
+  - **REMAINING SCIP-parity levers (still ~30× off SCIP's ~2s for the 4):**
+    1. **Parent→child basis inheritance** (the big one): each node's FIRST solve is
+       still COLD. Store the node's optimal `Basis` on its `TreeNode`; a child (one
+       branching bound changed) dual-reoptimizes from it in a few pivots
+       (`solve_lp_warm_scaled_csc` from the inherited basis). This is how SCIP amortizes
+       — likely the dominant remaining win. Thread a `Option<Basis>` through the heap
+       node and into `solve_node_cut`'s first solve.
+    2. **Node count** — stronger branching (pseudocost/reliability vs most-fractional)
+       and/or a row order that keeps the tree small; investigate the degeneracy
+       sensitivity. Fewer nodes compounds with (1).
+    3. Then K3 primal + K4 graduation.
+
 - **2026-07-19 (iter 6): K2c/K2d DONE (tree + gate). Correctness PERFECT; WALL is
   the real bottleneck (measured) → warm-start rework is the priority.**
   - Tree PyO3 binding `solve_convex_tree_py` + panel gate `issue798_k2_tree_gate.py`.
