@@ -132,6 +132,30 @@ primal regression.
 
 ## Work log (append newest first)
 
+- **2026-07-19 (iter 3):** Built K1a+K1b+K1c in `crates/discopt-core/src/bnb/convex_kernel.rs`
+  (7 unit tests, clippy-clean, all committed):
+  - **K1a** `ConvexFunc {Log,Exp,Sqrt,Log1p}` — `eval` / `eval_and_deriv` (the OA
+    tangent primitive). Tested vs finite differences + known values.
+  - **K1b** `Affine`/`CompositeTerm`/`ConvexRow` — `value`, `gradient_dense`,
+    `oa_tangent → LinCut`. Tested: value+grad correctness, multivar grad vs FD,
+    and the soundness property (tangent exact at x̄, underestimates convex g
+    everywhere = valid relaxation cut).
+  - **K1c** `ConvexKernelSpec` + `solve_node(lo,hi,oa_tol,max_rounds,opts)` — the
+    node LP-OA relaxation: standard-form `[A|I]z=b` assembly (≤ rows get a
+    min-activity-capped slack, = rows a slack fixed at 0 — the finite-slack
+    certification lesson), minimize `sign·c·x` via `solve_lp_cols_scaled`,
+    separate OA tangents for violated rows, re-solve to OA convergence, dual bound
+    = `ns_safe_bound_csc` negated to model sense (rigorous upper bound for max).
+    Tested: OA loop converges to `ln5` on `max t s.t. exp(t)≤5`; linear node
+    reproduces the LP optimum in one solve.
+  - **Next: K1d** — PyO3 binding (flat arrays → `ConvexKernelSpec` → `solve_node`)
+    in `crates/discopt-python/src/`, a Python producer built from `RootModel`
+    (reuse `issue798_convex_decompose_probe.decompose` + RootModel's
+    A_le/b_le/A_eq/b_eq/c/bounds/integrality), and the byte-check harness: Rust
+    `solve_node` bound vs Python `_RootLP`/prototype `node_relax(separate=False)`
+    over the root box + perturbed child boxes, gate ≤1e-6. Needs a maturin rebuild
+    of the extension. This is the K1 GATE.
+
 - **2026-07-19 (iter 1):** Branch `feat/798-convex-kernel-k1` off main; cherry-picked
   the LP-OA prototype reference (`issue786_lpoa_bandc_prototype.py`). Mapped the
   Python byte-check reference (`_RootLP`). Rust asset map in progress. Next: write
