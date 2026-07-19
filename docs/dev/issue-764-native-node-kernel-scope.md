@@ -154,13 +154,41 @@ Goal: confirm the in-Rust node is ≥5× faster than today's Python node before 
      sufficient-condition incumbent acceptance (integers integral AND every term McCormick-tight),
      covering branch (integer floor/ceil or spatial worst-gap split). Sound by construction.
 
-   **Remaining bridge to run on tanksize (the back half):** (a) the `SpatialKernelSpec` PyO3 surface
-   in `crates/discopt-python/`; (b) the **Python producer** that extracts the spec from the JAX
-   McCormick compiler (identify each lifted term's type + operand/output columns, the fixed linear
-   rows, objective, integrality, OBBT candidates) — the hardest remaining plumbing, coupled to
-   `MccormickLPRelaxer`; (c) the strided NLP primal-heuristic callback.
-5. Wire behind a flag; bound-neutral graduation panel (exact node_count + objective), then the
-   throughput panel (median slowdown vs SCIP/BARON on the global50 spatial subset).
+   **PyO3 surface — DONE (2026-07-19).** `crates/discopt-python/src/spatial_bindings.rs`
+   (`solve_spatial_tree_py`): flat-array `SpatialKernelSpec` in, result dict out, GIL released for
+   the solve. Smoke-tested end-to-end from Python.
+
+   **Python producer — DONE for bounded models (2026-07-19).**
+   `python/discopt/_jax/spatial_producer.py` reads the uniform factorable relaxation: structure on a
+   probe box (clean 4-row envelopes), finite bounds on the real box; envelope rows = a term's
+   `{operands, aux}` support, everything else box-independent fixed rows; covers bilinear / monomial
+   / affine-square / **sqrt**. Validated end-to-end (producer → PyO3 → kernel) against known optima
+   AND `model.solve()` (bound-neutral) on bilinear-min/max + square-min;
+   `python/tests/test_spatial_native_kernel.py` (9 passed). Sound decline (`None`) for unsupported
+   atoms (exp/trilinear/…) and invalid relaxations. `uniform_relax.UniformRelaxation` now exposes
+   `univariate_atom_specs` for the sqrt descriptor.
+
+   **Remaining to reach tanksize specifically:** tanksize's raw `.nl` box is **unbounded** (26 vars
+   ∞, FBBT bounds 15, **11 need relaxation-based OBBT**), so the McCormick relaxation is invalid at
+   the raw box and the producer declines it (soundly). Finite root bounds require the solver's full
+   presolve (FBBT + OBBT) — which is exactly where the kernel wires in (item 5): after presolve
+   establishes finite bounds, build the spec from the presolved model and hand off. Plus the strided
+   NLP primal-heuristic callback.
+5. Wire into `solver.py` behind a flag: after the solver's presolve gives finite root bounds, build
+   the `SpatialKernelSpec` and run the native kernel instead of the Python B&B loop (fallback to the
+   Python path on `None`/decline). Then the bound-neutral graduation panel (exact node_count +
+   objective) and the throughput panel (median slowdown vs SCIP/BARON on the global50 spatial
+   subset). This is the remaining major increment.
+
+## Status snapshot (2026-07-19)
+
+Built + tested + pushed this session: the entire Rust native spatial kernel (`bnb/mccormick_patch`,
+`obbt_sweep`, `spatial_kernel`, `spatial_tree`, `refine::ns_safe_bound_csc` — 500+ core tests), the
+PyO3 surface, and the generalized Python producer (9 end-to-end tests). Cut engine ruled OUT for
+tanksize by direct measurement (SCIP cuts close 2.91 %; discopt root already matches SCIP's cut
+root). Entry experiment GREEN at ~9×. The native path runs end-to-end and is bound-neutral on
+bounded bilinear/monomial/sqrt models; tanksize itself waits only on the presolve-bounds wiring
+(item 5).
 
 All phases keep the Python cold path as the trusted fallback and validation oracle — the kernel can
 never change a certificate, only its speed.
