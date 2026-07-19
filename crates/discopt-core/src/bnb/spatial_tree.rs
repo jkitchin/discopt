@@ -23,6 +23,7 @@ use crate::bnb::spatial_propagate::propagate_spec_fixpoint;
 use crate::lp::simplex::{LpStatus, SimplexOptions};
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
+use std::time::Instant;
 
 /// An open B&B node in the best-bound frontier: its box and the inherited lower
 /// bound `pb` (the parent's rigorous bound, a valid lower bound for this region).
@@ -63,6 +64,8 @@ pub enum TreeStatus {
     Optimal,
     /// The node budget was exhausted with the gap still open.
     NodeLimit,
+    /// The wall-clock budget was exhausted with the gap still open.
+    TimeLimit,
     /// The worklist emptied but the certified global bound did NOT reach
     /// `incumbent - gap_tol` — some regions could only be closed with weaker
     /// rigorous bounds (width-exhausted boxes, uncertifiable node duals). The
@@ -78,6 +81,10 @@ pub enum TreeStatus {
 pub struct SpatialTreeConfig {
     /// Maximum nodes to process before returning [`TreeStatus::NodeLimit`].
     pub max_nodes: usize,
+    /// Absolute monotonic-clock deadline. Checked before every node so an expired
+    /// solve returns its best incumbent and rigorous frontier bound without ever
+    /// claiming [`TreeStatus::Optimal`]. `None` means no wall-clock limit.
+    pub deadline: Option<Instant>,
     /// Absolute gap `incumbent − global_bound` at/below which the solve stops.
     pub gap_tol: f64,
     /// Integrality tolerance for incumbent acceptance / integer branching.
@@ -112,6 +119,7 @@ impl Default for SpatialTreeConfig {
     fn default() -> Self {
         Self {
             max_nodes: 100_000,
+            deadline: None,
             gap_tol: 1e-6,
             int_tol: 1e-5,
             mccormick_tol: 1e-6,
@@ -244,6 +252,25 @@ pub fn solve_spatial_tree(
         hi,
     }) = heap.pop()
     {
+        if config
+            .deadline
+            .is_some_and(|deadline| Instant::now() >= deadline)
+        {
+            // Global bound = min(closed regions, open frontier, this unprocessed
+            // node). Every term is rigorous for its region, so the partial result
+            // remains an honest certificate even though the gap is still open.
+            let frontier = heap.iter().map(|n| n.pb).fold(f64::INFINITY, f64::min);
+            let gb = global_lb_closed.min(frontier).min(parent_bound);
+            return SpatialTreeResult {
+                status: TreeStatus::TimeLimit,
+                incumbent,
+                incumbent_x,
+                bound: gb,
+                node_count,
+                n_lp_solves,
+                n_uncertified,
+            };
+        }
         // Fathom by the parent bound if the incumbent already dominates it. The
         // region's valid lower bound is `parent_bound`.
         if let Some(inc) = incumbent {
@@ -647,5 +674,22 @@ mod tests {
         assert_eq!(res.status, TreeStatus::Optimal);
         assert!((res.incumbent.unwrap() - (-2.0)).abs() < 1e-9);
         assert!((res.incumbent_x[0] - 2.0).abs() < 1e-9);
+    }
+
+    /// Issue #788: an expired wall-clock budget must retain the best known
+    /// incumbent/bound and, above all, must never be upgraded to `Optimal`.
+    #[test]
+    fn expired_deadline_returns_honest_time_limit() {
+        let spec = xy_min_spec();
+        let cfg = SpatialTreeConfig {
+            deadline: Some(Instant::now()),
+            initial_incumbent: Some(2.0),
+            ..SpatialTreeConfig::default()
+        };
+        let res = solve_spatial_tree(&spec, &cfg, &SimplexOptions::default());
+        assert_eq!(res.status, TreeStatus::TimeLimit);
+        assert_eq!(res.node_count, 0);
+        assert_eq!(res.incumbent, Some(2.0));
+        assert_eq!(res.bound, f64::NEG_INFINITY);
     }
 }

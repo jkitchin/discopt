@@ -461,6 +461,19 @@ def _native_spatial_kernel_enabled() -> bool:
     non-engaged wall Δ = −0.146 s, i.e. ON slightly faster; tanksize moves
     feasible→**optimal**, the issue's headline win, in ~50 s seeded).
 
+    NOT REPRODUCED on an unloaded machine (#788 re-run, panel
+    ``...20260719T191450Z.json``, measured on the pre-#789 base 46803d7c + the #788
+    patch — the engaged set may shift once #789's feature-safe routing is in play, so
+    RE-RUN before relying on the counts): cert-clean still PASSES with zero violations, but
+    net-positive FAILS (engaged=4, helped=**0**). The headline win does not survive —
+    that panel's OFF run had tanksize at ``feasible``/60.4 s only because the machine
+    was loaded (it also logged 3 ``child_timeout``s); quiet, the Python path certifies
+    tanksize in 21.4 s vs the kernel's 22.6 s. Per CLAUDE.md §4 the measurement wins,
+    so treat "net-positive" as UNPROVEN, not established. This does not affect the
+    default (already OFF for the independent blast-radius reasons below) and is not a
+    #788 regression: the wall-clock budget never bound on any engaged instance (all
+    four returned ``optimal``). Re-establishing net-positive is #764 follow-up work.
+
     The default is nonetheless kept **OFF** because flipping it is not yet SAFE as a
     default, and CLAUDE.md puts safety/gate-integrity before performance:
       1. Blast radius — with the flag forced ON, 20 ``-m smoke`` tests fail (807 pass)
@@ -684,6 +697,9 @@ def _native_kernel_seed_candidates(model, lb, ub, n_orig, deadline):
     binaries (tanksize: rounding the relaxation is integer-infeasible, but 5 free
     binaries enumerate to 32 sub-NLPs, several feasible). A continuous multistart is
     added for the pure-continuous case."""
+    if time.perf_counter() >= deadline:
+        return
+
     import itertools
 
     from discopt.modeling.core import VarType
@@ -715,7 +731,7 @@ def _native_kernel_seed_candidates(model, lb, ub, n_orig, deadline):
             options={
                 "print_level": 0,
                 "max_iter": 500,
-                "max_wall_time": max(0.5, min(4.0, deadline - time.perf_counter())),
+                "max_wall_time": max(1e-3, min(4.0, deadline - time.perf_counter())),
             },
         )
         if getattr(r, "x", None) is not None:
@@ -746,7 +762,7 @@ def _native_kernel_seed_candidates(model, lb, ub, n_orig, deadline):
                         x0,
                         evaluator=ev,
                         backend=backend,
-                        time_budget=max(0.3, min(3.0, deadline - time.perf_counter())),
+                        time_budget=max(1e-3, min(3.0, deadline - time.perf_counter())),
                     )
                 except Exception as exc:  # pragma: no cover - defensive
                     logger.debug("native seed subnlp raised: %s", exc)
@@ -761,7 +777,7 @@ def _native_kernel_seed_candidates(model, lb, ub, n_orig, deadline):
                     xr,
                     evaluator=ev,
                     backend=backend,
-                    time_budget=max(0.5, min(4.0, deadline - time.perf_counter())),
+                    time_budget=max(1e-3, min(4.0, deadline - time.perf_counter())),
                 )
             except Exception as exc:  # pragma: no cover - defensive
                 logger.debug("native seed subnlp raised: %s", exc)
@@ -787,7 +803,7 @@ def _native_kernel_seed_candidates(model, lb, ub, n_orig, deadline):
             logger.debug("native seed multistart raised: %s", exc)
 
 
-def _native_kernel_seed(model, lb, ub, sign, off, n_orig):
+def _native_kernel_seed(model, lb, ub, sign, off, n_orig, outer_deadline=None):
     """Return ``(internal_value, point)`` — a genuinely-attained incumbent to seed the
     native solve (``internal_value`` in kernel-internal minimize units, ``point`` the
     verified original-variable vector) — or ``(None, None)`` if no verified feasible
@@ -806,6 +822,10 @@ def _native_kernel_seed(model, lb, ub, sign, off, n_orig):
     cutoff-propagate but can never loosen a bound or invent an incumbent, so an
     unverifiable candidate is simply dropped and the full solve runs unseeded."""
     deadline = time.perf_counter() + float(_NATIVE_SEED_HEURISTIC_S)
+    if outer_deadline is not None:
+        deadline = min(deadline, float(outer_deadline))
+    if time.perf_counter() >= deadline:
+        return None, None
     best_internal: Optional[float] = None
     best_point = None
     for x_cand in _native_kernel_seed_candidates(model, lb, ub, n_orig, deadline):
@@ -833,6 +853,7 @@ def _try_native_spatial_kernel(
     n_vars,
     gap_tolerance,
     max_nodes,
+    time_limit,
     t_start,
     rust_time,
     jax_time,
@@ -844,11 +865,12 @@ def _try_native_spatial_kernel(
     ``None`` so the caller runs the trusted Python path.
 
     Soundness: the producer declines (``None``) any model it cannot reproduce
-    bound-neutrally, and only a fully-certified native solve (``status == 'optimal'``,
-    i.e. the tree was exhausted with a rigorous safe global bound) is taken — a
-    node-limited or declined run falls through to the Python path, never reporting a
-    partial or unverified result. The kernel's incumbent satisfies the model's linear
-    rows (they are fixed rows in its LP) and every lifted term to ``mccormick_tol``.
+    bound-neutrally. A fully-certified native solve (``status == 'optimal'``) is
+    returned as optimal; a wall-clock-limited native solve returns its rigorous
+    partial incumbent/bound with ``status == 'time_limit'``. Node-limited or declined
+    runs retain the established Python fallback. The kernel's incumbent satisfies the
+    model's linear rows (they are fixed rows in its LP) and every lifted term to
+    ``mccormick_tol``.
     The internal minimize-convention objective/bound are mapped to model units via the
     producer's ``sign*(value + offset)`` metadata.
 
@@ -858,7 +880,8 @@ def _try_native_spatial_kernel(
     prunes with a tight cutoff from node 0 (tanksize: ~190 s -> ~27 s). Seeding only
     ever changes *which* certified answer path is walked (a valid upper bound prunes,
     it never loosens a bound or invents an incumbent); an unverified candidate is
-    discarded and the full solve runs unseeded."""
+    discarded and the full solve runs unseeded. Issue #788 caps both this seed phase
+    and the native tree against the outer ``Model.solve(time_limit=...)`` deadline."""
     if not _native_spatial_kernel_enabled():
         return None
     try:
@@ -880,6 +903,12 @@ def _try_native_spatial_kernel(
         n_orig = int(spec["n_orig"])
 
         # Task 1: obtain a cheap, rigorously-verified feasible seed for the cutoff.
+        # A non-finite budget means "no wall-clock cap": carry it as ``None`` rather
+        # than an infinite deadline, so the kernel is asked for an uncapped search
+        # instead of rejecting a non-finite ``time_limit_s`` (which the defensive
+        # ``except`` below would swallow, silently disabling the kernel outright).
+        _outer_budget = float(time_limit)
+        outer_deadline = t_start + _outer_budget if math.isfinite(_outer_budget) else None
         initial_incumbent, seed_point = _native_kernel_seed(
             model,
             np.asarray(lb, dtype=np.float64)[:n_vars],
@@ -887,9 +916,17 @@ def _try_native_spatial_kernel(
             sign,
             off,
             n_orig,
+            outer_deadline,
         )
 
-        solve_kwargs = dict(max_nodes=int(max_nodes), gap_tol=float(gap_tolerance))
+        remaining = (
+            None if outer_deadline is None else max(0.0, outer_deadline - time.perf_counter())
+        )
+        solve_kwargs = dict(
+            max_nodes=int(max_nodes),
+            gap_tol=float(gap_tolerance),
+            time_limit_s=remaining,
+        )
         if initial_incumbent is not None:
             solve_kwargs["initial_incumbent"] = float(initial_incumbent)
         res = _rust.solve_spatial_tree_py(**spec, **solve_kwargs)
@@ -899,15 +936,20 @@ def _try_native_spatial_kernel(
         return None
     if res is None:
         return None  # model outside the covered subset -> Python path
-    if res.get("status") != "optimal" or res.get("incumbent") is None:
-        return None  # not fully certified -> Python path (never report a partial)
+    native_status = res.get("status")
+    if native_status not in ("optimal", "time_limit"):
+        return None  # other incomplete exits retain the established Python fallback
+    if native_status == "optimal" and res.get("incumbent") is None:
+        return None  # an optimal result must carry a feasible incumbent
 
     sign = float(res["meta_obj_sense_sign"])
     off = float(res["meta_obj_offset"])
-    obj_val = sign * (float(res["incumbent"]) + off)
+    obj_val = sign * (float(res["incumbent"]) + off) if res.get("incumbent") is not None else None
     bound_val = sign * (float(res["bound"]) + off)
     x_incumbent = np.asarray(res["incumbent_x"], dtype=np.float64)
-    if x_incumbent.shape[0] >= n_vars:
+    if obj_val is None:
+        x_flat = None
+    elif x_incumbent.shape[0] >= n_vars:
         # The kernel found (and re-recorded) its own improving incumbent point.
         x_flat = x_incumbent[:n_vars]
     elif seed_point is not None and seed_point.shape[0] >= n_vars:
@@ -915,8 +957,14 @@ def _try_native_spatial_kernel(
         # kernel carries no point (``incumbent_x`` empty) — report OUR verified seed
         # point, whose true objective equals ``res['incumbent']`` by construction.
         x_flat = np.asarray(seed_point, dtype=np.float64)[:n_vars]
-    else:
+    elif native_status == "optimal":
         return None  # no usable incumbent point -> Python path (never fabricate one)
+    else:
+        # A time-limited search may carry an incumbent VALUE (e.g. the seeded cutoff)
+        # with no corresponding point in this process. Report the rigorous bound but
+        # never fabricate a primal witness for it.
+        obj_val = None
+        x_flat = None
 
     # #789: rigorously verify the FINAL reported incumbent against the ORIGINAL
     # model before returning it as a certified optimum. The kernel solves a
@@ -931,37 +979,41 @@ def _try_native_spatial_kernel(
     # the kernel is still taken on every model whose incumbent verifies (the
     # tanksize-class it was graduated on). ``x_flat`` is original-variable order
     # (``n_vars`` slots) — the same layout ``_native_kernel_verify_point`` reads.
-    _ok, _model_obj = _native_kernel_verify_point(model, x_flat[:n_orig])
-    if not _ok:
-        logger.debug(
-            "native spatial kernel: final incumbent failed original-model "
-            "verification (obj=%.6g) — routing to the Python engine (#789)",
-            obj_val,
-        )
-        return None
-    # Prefer the independently-recomputed true objective (exact model units) over
-    # the kernel's mapped relaxation reading when they agree within tolerance; a
-    # gross disagreement is itself a decline signal.
-    if _model_obj is not None and abs(_model_obj - obj_val) > 1e-4 * (1.0 + abs(obj_val)):
-        logger.debug(
-            "native spatial kernel: reported obj %.6g disagrees with verified "
-            "obj %.6g — routing to the Python engine (#789)",
-            obj_val,
-            _model_obj,
-        )
-        return None
+    # #788: a time-limited exit may carry no primal at all; there is nothing to
+    # verify then, and the bound-only result below is reported without one.
+    if x_flat is not None:
+        _ok, _model_obj = _native_kernel_verify_point(model, x_flat[:n_orig])
+        if not _ok:
+            logger.debug(
+                "native spatial kernel: final incumbent failed original-model "
+                "verification (obj=%.6g) — routing to the Python engine (#789)",
+                obj_val,
+            )
+            return None
+        # Prefer the independently-recomputed true objective (exact model units) over
+        # the kernel's mapped relaxation reading when they agree within tolerance; a
+        # gross disagreement is itself a decline signal.
+        if _model_obj is not None and abs(_model_obj - obj_val) > 1e-4 * (1.0 + abs(obj_val)):
+            logger.debug(
+                "native spatial kernel: reported obj %.6g disagrees with verified "
+                "obj %.6g — routing to the Python engine (#789)",
+                obj_val,
+                _model_obj,
+            )
+            return None
 
-    x_dict = _unpack_solution(model, x_flat)
+    x_dict = _unpack_solution(model, x_flat) if x_flat is not None else None
     wall_time = time.perf_counter() - t_start
-    gap_val = abs(obj_val - bound_val) / (abs(obj_val) + 1e-10)
+    gap_val = abs(obj_val - bound_val) / (abs(obj_val) + 1e-10) if obj_val is not None else None
     logger.info(
-        "native spatial kernel (#764) solved: obj=%.6g bound=%.6g nodes=%d",
+        "native spatial kernel (#764) exited %s: obj=%s bound=%.6g nodes=%d",
+        native_status,
         obj_val,
         bound_val,
         int(res["node_count"]),
     )
     return SolveResult(
-        status="optimal",
+        status=native_status,
         objective=obj_val,
         bound=bound_val,
         gap=gap_val,
@@ -971,6 +1023,7 @@ def _try_native_spatial_kernel(
         rust_time=rust_time,
         jax_time=jax_time,
         python_time=wall_time - rust_time - jax_time,
+        gap_certified=math.isfinite(bound_val),
     )
 
 
@@ -6661,8 +6714,8 @@ def solve_model(
     # is the finite root box the McCormick relaxation needs (tanksize's raw box is
     # unbounded; this is the first point it is fully bounded). When the flag is OFF this
     # returns None with no import/side effect, so the default path below is byte-for-byte
-    # unchanged; when ON it only takes over on a fully-certified native solve, else falls
-    # through to the trusted Python search.
+    # unchanged; when ON it takes over on a certified optimum or an honest native
+    # time-limit exit. Other incomplete exits fall through to the trusted Python search.
     # #789: only take the native path when the solve is feature-safe — it does
     # not exercise the Python-engine contracts (callbacks, lazy constraints,
     # solution pool, warm-start, non-default McCormick modes, explicit tuning),
@@ -6677,7 +6730,16 @@ def solve_model(
         kwargs=kwargs,
     ):
         _native_result = _try_native_spatial_kernel(
-            model, lb, ub, n_vars, gap_tolerance, max_nodes, t_start, rust_time, jax_time
+            model,
+            lb,
+            ub,
+            n_vars,
+            gap_tolerance,
+            max_nodes,
+            time_limit,
+            t_start,
+            rust_time,
+            jax_time,
         )
     if _native_result is not None:
         return _native_result
