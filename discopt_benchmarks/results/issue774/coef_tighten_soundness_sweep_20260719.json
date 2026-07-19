@@ -1,0 +1,681 @@
+{
+ "panel": {
+  "rsyn0805m": {
+   "off": {
+    "status": "feasible",
+    "obj": 1055.8450068825605,
+    "bound": 1864.8382362707575,
+    "nodes": 159,
+    "sense": "max",
+    "guard_tripped": false,
+    "certified": false
+   },
+   "on": {
+    "status": "feasible",
+    "obj": 1105.6973877505081,
+    "bound": 1732.4325697124777,
+    "nodes": 191,
+    "sense": "max",
+    "guard_tripped": false,
+    "certified": false
+   }
+  },
+  "rsyn0810m": {
+   "off": {
+    "status": "feasible",
+    "obj": 1417.3003310497224,
+    "bound": 2533.7453636044916,
+    "nodes": 159,
+    "sense": "max",
+    "guard_tripped": false,
+    "certified": false
+   },
+   "on": {
+    "status": "feasible",
+    "obj": 1467.152711825676,
+    "bound": 2482.7946477166197,
+    "nodes": 127,
+    "sense": "max",
+    "guard_tripped": false,
+    "certified": false
+   }
+  },
+  "rsyn0815m": {
+   "off": {
+    "status": "feasible",
+    "obj": 1041.5274786964821,
+    "bound": 1987.4794272946203,
+    "nodes": 127,
+    "sense": "max",
+    "guard_tripped": false,
+    "certified": false
+   },
+   "on": {
+    "status": "feasible",
+    "obj": 1056.9194382270575,
+    "bound": 2201.0204439606696,
+    "nodes": 63,
+    "sense": "max",
+    "guard_tripped": false,
+    "certified": false
+   }
+  },
+  "syn40m": {
+   "off": {
+    "status": "feasible",
+    "obj": 30.965221147428323,
+    "bound": 1242.9493064124918,
+    "nodes": 383,
+    "sense": "max",
+    "guard_tripped": false,
+    "certified": false
+   },
+   "on": {
+    "status": "feasible",
+    "obj": -38.167335436361924,
+    "bound": 649.5219426809613,
+    "nodes": 191,
+    "sense": "max",
+    "guard_tripped": false,
+    "certified": false
+   }
+  }
+ },
+ "corpus": {
+  "4stufen": {
+   "status": "time_limit",
+   "obj": null,
+   "bound": 21475.147700500194,
+   "nodes": 31,
+   "sense": "min",
+   "guard_tripped": false,
+   "certified": false
+  },
+  "alan": {
+   "status": "optimal",
+   "obj": 2.9249999982491564,
+   "bound": 2.9249999982491564,
+   "nodes": 17,
+   "sense": "min",
+   "guard_tripped": false,
+   "certified": true
+  },
+  "bchoco06": {
+   "status": "time_limit",
+   "obj": null,
+   "bound": 0.9999775725261153,
+   "nodes": 3,
+   "sense": "max",
+   "guard_tripped": false,
+   "certified": false
+  },
+  "bchoco07": {
+   "status": "time_limit",
+   "obj": null,
+   "bound": 0.9999909424986716,
+   "nodes": 15,
+   "sense": "max",
+   "guard_tripped": false,
+   "certified": false
+  },
+  "bchoco08": {
+   "status": "time_limit",
+   "obj": null,
+   "bound": 1.0000000000038425,
+   "nodes": 7,
+   "sense": "max",
+   "guard_tripped": false,
+   "certified": false
+  },
+  "beuster": {
+   "status": "time_limit",
+   "obj": null,
+   "bound": 6354.897306639267,
+   "nodes": 15,
+   "sense": "min",
+   "guard_tripped": false,
+   "certified": false
+  },
+  "casctanks": {
+   "status": "time_limit",
+   "obj": null,
+   "bound": -90.178623297559,
+   "nodes": 7,
+   "sense": "min",
+   "guard_tripped": false,
+   "certified": false
+  },
+  "chance": {
+   "status": "optimal",
+   "obj": 29.894378154271102,
+   "bound": 29.894378154271102,
+   "nodes": 0,
+   "sense": "min",
+   "guard_tripped": false,
+   "certified": true
+  },
+  "clay0303hfsg": {
+   "status": "feasible",
+   "obj": 26669.10955142754,
+   "bound": 19513.272337060724,
+   "nodes": 173,
+   "sense": "min",
+   "guard_tripped": false,
+   "certified": false
+  },
+  "contvar": {
+   "status": "time_limit",
+   "obj": null,
+   "bound": 180782.85932835488,
+   "nodes": 3,
+   "sense": "min",
+   "guard_tripped": false,
+   "certified": false
+  },
+  "cvxnonsep_nsig30": {
+   "status": "optimal",
+   "obj": 130.62871116925294,
+   "bound": 130.61841392487688,
+   "nodes": 165,
+   "sense": "min",
+   "guard_tripped": false,
+   "certified": true
+  },
+  "cvxnonsep_psig30": {
+   "status": "optimal",
+   "obj": 78.9988543529429,
+   "bound": 78.99179874365787,
+   "nodes": 89,
+   "sense": "min",
+   "guard_tripped": false,
+   "certified": true
+  },
+  "cvxnonsep_psig40r": {
+   "status": "optimal",
+   "obj": 86.54527995164958,
+   "bound": 86.53873600363832,
+   "nodes": 95,
+   "sense": "min",
+   "guard_tripped": false,
+   "certified": true
+  },
+  "dispatch": {
+   "status": "optimal",
+   "obj": 3155.28792669897,
+   "bound": 3155.28790421789,
+   "nodes": 3,
+   "sense": "min",
+   "guard_tripped": false,
+   "certified": true
+  },
+  "ex1221": {
+   "status": "optimal",
+   "obj": 7.6671800686281255,
+   "bound": 7.6671800686281255,
+   "nodes": 5,
+   "sense": "min",
+   "guard_tripped": false,
+   "certified": true
+  },
+  "ex1222": {
+   "status": "optimal",
+   "obj": 1.0765430833322625,
+   "bound": 1.0765430463031964,
+   "nodes": 1,
+   "sense": "min",
+   "guard_tripped": false,
+   "certified": true
+  },
+  "ex1224": {
+   "status": "optimal",
+   "obj": -0.9434704942820806,
+   "bound": -0.9434705000000164,
+   "nodes": 5,
+   "sense": "min",
+   "guard_tripped": false,
+   "certified": true
+  },
+  "ex1225": {
+   "status": "optimal",
+   "obj": 30.999999913557566,
+   "bound": 30.999999913557566,
+   "nodes": 5,
+   "sense": "min",
+   "guard_tripped": false,
+   "certified": true
+  },
+  "ex1226": {
+   "status": "optimal",
+   "obj": -17.000000003887443,
+   "bound": -17.000000003887443,
+   "nodes": 3,
+   "sense": "min",
+   "guard_tripped": false,
+   "certified": true
+  },
+  "ex14_1_9": {
+   "status": "feasible",
+   "obj": -1.9775220540513224e-16,
+   "bound": -1.9775220540513224e-16,
+   "nodes": 3,
+   "sense": "min",
+   "guard_tripped": false,
+   "certified": false
+  },
+  "fac2": {
+   "status": "optimal",
+   "obj": 331837498.18201387,
+   "bound": 331837497.5618008,
+   "nodes": 25,
+   "sense": "min",
+   "guard_tripped": false,
+   "certified": true
+  },
+  "flay02m": {
+   "status": "optimal",
+   "obj": 37.947331863834634,
+   "bound": 37.94733180456956,
+   "nodes": 7,
+   "sense": "min",
+   "guard_tripped": false,
+   "certified": true
+  },
+  "flay03m": {
+   "status": "optimal",
+   "obj": 48.98979479383571,
+   "bound": 48.98979479322051,
+   "nodes": 111,
+   "sense": "min",
+   "guard_tripped": false,
+   "certified": true
+  },
+  "gbd": {
+   "status": "optimal",
+   "obj": 2.1999999850603995,
+   "bound": 2.1999999850603995,
+   "nodes": 1,
+   "sense": "min",
+   "guard_tripped": false,
+   "certified": true
+  },
+  "gkocis": {
+   "status": "optimal",
+   "obj": -1.9230986523768174,
+   "bound": -1.9230988096417576,
+   "nodes": 3,
+   "sense": "min",
+   "guard_tripped": false,
+   "certified": true
+  },
+  "hda": {
+   "status": "time_limit",
+   "obj": null,
+   "bound": -15208954203347.346,
+   "nodes": 1,
+   "sense": "min",
+   "guard_tripped": false,
+   "certified": false
+  },
+  "heatexch_gen1": {
+   "status": "time_limit",
+   "obj": null,
+   "bound": 40276.48124465793,
+   "nodes": 3,
+   "sense": "min",
+   "guard_tripped": false,
+   "certified": false
+  },
+  "heatexch_gen2": {
+   "status": "feasible",
+   "obj": 757844.9077777817,
+   "bound": 556990.0125079431,
+   "nodes": 7,
+   "sense": "min",
+   "guard_tripped": false,
+   "certified": false
+  },
+  "heatexch_gen3": {
+   "status": "time_limit",
+   "obj": null,
+   "bound": null,
+   "nodes": 3,
+   "sense": "min",
+   "guard_tripped": false,
+   "certified": false
+  },
+  "m3": {
+   "status": "optimal",
+   "obj": 37.799999669978845,
+   "bound": 37.79999951039202,
+   "nodes": 47,
+   "sense": "min",
+   "guard_tripped": false,
+   "certified": true
+  },
+  "nvs01": {
+   "status": "optimal",
+   "obj": 12.46966882156821,
+   "bound": 12.46966882156821,
+   "nodes": 3,
+   "sense": "min",
+   "guard_tripped": false,
+   "certified": true
+  },
+  "nvs02": {
+   "status": "optimal",
+   "obj": 5.96418452307,
+   "bound": 5.96418452307,
+   "nodes": 337,
+   "sense": "min",
+   "guard_tripped": false,
+   "certified": true
+  },
+  "nvs03": {
+   "status": "optimal",
+   "obj": 16.0,
+   "bound": 15.99999972676511,
+   "nodes": 5,
+   "sense": "min",
+   "guard_tripped": false,
+   "certified": true
+  },
+  "nvs04": {
+   "status": "optimal",
+   "obj": 0.720000000000006,
+   "bound": 0.7199999999999773,
+   "nodes": 5,
+   "sense": "min",
+   "guard_tripped": false,
+   "certified": true
+  },
+  "nvs05": {
+   "status": "feasible",
+   "obj": 8.731956986640078,
+   "bound": 3.8053367777828426,
+   "nodes": 131,
+   "sense": "min",
+   "guard_tripped": false,
+   "certified": false
+  },
+  "nvs06": {
+   "status": "optimal",
+   "obj": 1.7703125,
+   "bound": 1.7703124999999627,
+   "nodes": 5,
+   "sense": "min",
+   "guard_tripped": false,
+   "certified": true
+  },
+  "nvs07": {
+   "status": "optimal",
+   "obj": 4.0,
+   "bound": 4.0,
+   "nodes": 5,
+   "sense": "min",
+   "guard_tripped": false,
+   "certified": true
+  },
+  "nvs08": {
+   "status": "optimal",
+   "obj": 23.449727347139827,
+   "bound": 23.44972734516655,
+   "nodes": 3,
+   "sense": "min",
+   "guard_tripped": false,
+   "certified": true
+  },
+  "nvs09": {
+   "status": "optimal",
+   "obj": -43.134336918035295,
+   "bound": -43.13433691803662,
+   "nodes": 5,
+   "sense": "min",
+   "guard_tripped": false,
+   "certified": true
+  },
+  "nvs10": {
+   "status": "optimal",
+   "obj": -310.7999999999999,
+   "bound": -310.7999999999999,
+   "nodes": 5,
+   "sense": "min",
+   "guard_tripped": false,
+   "certified": true
+  },
+  "nvs11": {
+   "status": "optimal",
+   "obj": -430.99999999999966,
+   "bound": -430.99999999999966,
+   "nodes": 55,
+   "sense": "min",
+   "guard_tripped": false,
+   "certified": true
+  },
+  "nvs12": {
+   "status": "optimal",
+   "obj": -481.20000000000005,
+   "bound": -481.20000000000005,
+   "nodes": 231,
+   "sense": "min",
+   "guard_tripped": false,
+   "certified": true
+  },
+  "nvs13": {
+   "status": "optimal",
+   "obj": -585.2,
+   "bound": -585.2000000002046,
+   "nodes": 19,
+   "sense": "min",
+   "guard_tripped": false,
+   "certified": true
+  },
+  "nvs14": {
+   "status": "optimal",
+   "obj": -40358.15476929996,
+   "bound": -40358.15476929999,
+   "nodes": 223,
+   "sense": "min",
+   "guard_tripped": false,
+   "certified": true
+  },
+  "nvs15": {
+   "status": "optimal",
+   "obj": 1.0,
+   "bound": 1.0,
+   "nodes": 7,
+   "sense": "min",
+   "guard_tripped": false,
+   "certified": true
+  },
+  "nvs21": {
+   "status": "optimal",
+   "obj": -5.684782628025259,
+   "bound": -5.684782628025259,
+   "nodes": 3,
+   "sense": "min",
+   "guard_tripped": false,
+   "certified": true
+  },
+  "oaer": {
+   "status": "optimal",
+   "obj": -1.9230984998848466,
+   "bound": -1.923098601139822,
+   "nodes": 3,
+   "sense": "min",
+   "guard_tripped": false,
+   "certified": true
+  },
+  "st_e11": {
+   "status": "optimal",
+   "obj": 189.31162970681882,
+   "bound": 189.31162966433996,
+   "nodes": 5,
+   "sense": "min",
+   "guard_tripped": false,
+   "certified": true
+  },
+  "st_e13": {
+   "status": "optimal",
+   "obj": 2.0000003463351197,
+   "bound": 1.9999999825187809,
+   "nodes": 3,
+   "sense": "min",
+   "guard_tripped": false,
+   "certified": true
+  },
+  "st_e29": {
+   "status": "optimal",
+   "obj": -0.9434704942820806,
+   "bound": -0.9434705000000164,
+   "nodes": 5,
+   "sense": "min",
+   "guard_tripped": false,
+   "certified": true
+  },
+  "st_e36": {
+   "status": "optimal",
+   "obj": -245.99999999999997,
+   "bound": -246.00000000170442,
+   "nodes": 85,
+   "sense": "min",
+   "guard_tripped": false,
+   "certified": true
+  },
+  "st_e38": {
+   "status": "optimal",
+   "obj": 7197.727116826533,
+   "bound": 7197.727116826533,
+   "nodes": 3,
+   "sense": "min",
+   "guard_tripped": false,
+   "certified": true
+  },
+  "st_miqp1": {
+   "status": "optimal",
+   "obj": 280.9999999906497,
+   "bound": 280.9999999906497,
+   "nodes": 15,
+   "sense": "min",
+   "guard_tripped": false,
+   "certified": true
+  },
+  "st_miqp2": {
+   "status": "optimal",
+   "obj": 2.0,
+   "bound": 2.0,
+   "nodes": 9,
+   "sense": "min",
+   "guard_tripped": false,
+   "certified": true
+  },
+  "st_miqp3": {
+   "status": "optimal",
+   "obj": -6.0,
+   "bound": -6.0,
+   "nodes": 1,
+   "sense": "min",
+   "guard_tripped": false,
+   "certified": true
+  },
+  "st_miqp4": {
+   "status": "optimal",
+   "obj": -4574.000002482959,
+   "bound": -4574.000002482959,
+   "nodes": 1,
+   "sense": "min",
+   "guard_tripped": false,
+   "certified": true
+  },
+  "st_miqp5": {
+   "status": "optimal",
+   "obj": -333.8888902488093,
+   "bound": -333.8888902488093,
+   "nodes": 1,
+   "sense": "min",
+   "guard_tripped": false,
+   "certified": true
+  },
+  "st_test1": {
+   "status": "optimal",
+   "obj": -1.7279093690879156e-08,
+   "bound": -1.7279093690879156e-08,
+   "nodes": 15,
+   "sense": "min",
+   "guard_tripped": false,
+   "certified": true
+  },
+  "st_testgr3": {
+   "status": "optimal",
+   "obj": -20.59,
+   "bound": -20.59070709795548,
+   "nodes": 549,
+   "sense": "min",
+   "guard_tripped": false,
+   "certified": true
+  },
+  "syn05hfsg": {
+   "status": "optimal",
+   "obj": 837.732411648862,
+   "bound": 837.732411648862,
+   "nodes": 145,
+   "sense": "max",
+   "guard_tripped": false,
+   "certified": true
+  },
+  "tanksize": {
+   "status": "feasible",
+   "obj": 1.268643761465288,
+   "bound": 0.9221092536047468,
+   "nodes": 121,
+   "sense": "min",
+   "guard_tripped": false,
+   "certified": false
+  },
+  "tls2": {
+   "status": "feasible",
+   "obj": 5.299999998071545,
+   "bound": 4.308475192420458,
+   "nodes": 229,
+   "sense": "min",
+   "guard_tripped": false,
+   "certified": false
+  },
+  "tspn05": {
+   "status": "optimal",
+   "obj": 191.25520768494238,
+   "bound": 191.25510622528546,
+   "nodes": 51,
+   "sense": "min",
+   "guard_tripped": false,
+   "certified": true
+  },
+  "tspn08": {
+   "status": "feasible",
+   "obj": 290.56685374735457,
+   "bound": null,
+   "nodes": 1,
+   "sense": "min",
+   "guard_tripped": false,
+   "certified": false
+  },
+  "tspn10": {
+   "status": "feasible",
+   "obj": 225.1260713973292,
+   "bound": null,
+   "nodes": 1,
+   "sense": "min",
+   "guard_tripped": false,
+   "certified": false
+  },
+  "tspn12": {
+   "status": "feasible",
+   "obj": 262.64739525060224,
+   "bound": null,
+   "nodes": 1,
+   "sense": "min",
+   "guard_tripped": false,
+   "certified": false
+  }
+ },
+ "violations": []
+}
