@@ -10,7 +10,6 @@ the binding.
 
 import numpy as np
 import pytest
-
 from discopt import Model
 
 _rust = pytest.importorskip("discopt._rust")
@@ -199,6 +198,109 @@ def test_tanksize_certifies_natively():
     assert bound <= oracle + 1e-9, f"bound {bound} above oracle {oracle}"
     assert inc - bound <= 1e-4 + 1e-9, f"gap {inc - bound} not closed"
     assert res["n_uncertified"] == 0, f"{res['n_uncertified']} uncertified nodes"
+
+
+def test_native_seed_verify_point_accepts_and_rejects():
+    """#764 Task 1: the seed verifier accepts a genuinely feasible point (returning its
+    TRUE objective) and rejects an infeasible one. This is the soundness gate that
+    stands between a heuristic candidate and the kernel's incumbent cutoff — an
+    unverified seed would poison the certificate."""
+    import discopt.solver as S
+
+    m = Model()
+    x = m.continuous("x", lb=0.0, ub=2.0)
+    y = m.continuous("y", lb=0.0, ub=2.0)
+    m.subject_to(x + y >= 3)
+    m.minimize(x * y)
+    # Feasible corner (2, 1): x+y=3, objective x*y = 2.0.
+    ok, obj = S._native_kernel_verify_point(m, np.array([2.0, 1.0]))
+    assert ok is True
+    assert obj is not None and abs(obj - 2.0) < 1e-9
+    # Infeasible (0, 0): x+y = 0 < 3 -> rejected, no objective vouched.
+    ok2, obj2 = S._native_kernel_verify_point(m, np.array([0.0, 0.0]))
+    assert ok2 is False and obj2 is None
+
+
+def test_native_seed_verify_point_respects_integrality():
+    """A fractional value on an integer variable is rejected (integrality 1e-5)."""
+    import discopt.solver as S
+
+    m = Model()
+    n = m.integer("n", lb=0, ub=5)
+    m.minimize((n - 2) * (n - 2))
+    ok_int, _ = S._native_kernel_verify_point(m, np.array([2.0]))
+    assert ok_int is True
+    ok_frac, obj_frac = S._native_kernel_verify_point(m, np.array([2.5]))
+    assert ok_frac is False and obj_frac is None
+
+
+def test_driver_seeded_incumbent_is_feasibility_verified():
+    """#764 Task 1: with the flag ON the driver seeds the native kernel from a verified
+    feasible point; the reported incumbent must itself be independently
+    feasibility-verifiable against the original model, and match the true optimum."""
+    import os
+
+    import discopt.solver as S
+
+    def build():
+        m = Model()
+        x = m.continuous("x", lb=0.0, ub=2.0)
+        y = m.continuous("y", lb=0.0, ub=2.0)
+        m.subject_to(x + y >= 3)
+        m.minimize(x * y)
+        return m
+
+    prev = os.environ.get("DISCOPT_NATIVE_SPATIAL_KERNEL")
+    try:
+        os.environ["DISCOPT_NATIVE_SPATIAL_KERNEL"] = "1"
+        r = build().solve(time_limit=30)
+    finally:
+        if prev is None:
+            os.environ.pop("DISCOPT_NATIVE_SPATIAL_KERNEL", None)
+        else:
+            os.environ["DISCOPT_NATIVE_SPATIAL_KERNEL"] = prev
+    assert r.status == "optimal"
+    assert abs(r.objective - 2.0) < 1e-4
+    assert r.bound <= r.objective + 1e-9  # certificate invariant (min sense)
+    m2 = build()
+    x_flat = np.array(
+        [float(np.asarray(r.x[v.name]).reshape(-1)[0]) for v in m2._variables],
+        dtype=np.float64,
+    )
+    ok, obj = S._native_kernel_verify_point(m2, x_flat)
+    assert ok is True, "reported incumbent must be independently feasibility-verified"
+    assert abs(obj - r.objective) < 1e-6
+
+
+@pytest.mark.slow
+def test_tanksize_driver_seeded_certifies():
+    """#764 Task 1 (definition of done, driver path): a full ``m.solve()`` with the flag
+    ON certifies tanksize via the DRIVER-side seed (SubNLP free-binary enumeration ->
+    verified feasible point -> ``initial_incumbent``). Asserts the certificate brackets
+    the oracle AND the seed engaged — node_count well below the ~78,667 of the unseeded
+    run (measured ~11,379 nodes / ~50 s seeded, 2026-07-19)."""
+    import os
+
+    nl = os.path.join(os.path.dirname(__file__), "data", "minlplib_nl", "tanksize.nl")
+    if not os.path.exists(nl):
+        pytest.skip("tanksize.nl fixture not present")
+    from discopt.modeling.core import from_nl
+
+    oracle = 1.2686437540
+    prev = os.environ.get("DISCOPT_NATIVE_SPATIAL_KERNEL")
+    try:
+        os.environ["DISCOPT_NATIVE_SPATIAL_KERNEL"] = "1"
+        r = from_nl(nl).solve(time_limit=200)
+    finally:
+        if prev is None:
+            os.environ.pop("DISCOPT_NATIVE_SPATIAL_KERNEL", None)
+        else:
+            os.environ["DISCOPT_NATIVE_SPATIAL_KERNEL"] = prev
+    assert r.status == "optimal", r.status
+    assert abs(r.objective - oracle) < 1e-4, f"objective {r.objective} vs oracle {oracle}"
+    assert r.bound <= oracle + 1e-6, f"bound {r.bound} above oracle {oracle}"
+    # The seed engaged: far fewer nodes than the unseeded ~78,667.
+    assert r.node_count < 40000, f"node_count {r.node_count} suggests the seed did not engage"
 
 
 def test_unbounded_relaxation_declines():
