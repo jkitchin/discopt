@@ -443,6 +443,50 @@ def _obbt_iterate_root_enabled() -> bool:
     )
 
 
+def _native_spatial_kernel_enabled() -> bool:
+    """Whether the #764 native Rust spatial-B&B kernel is engaged (**default OFF**;
+    ``DISCOPT_NATIVE_SPATIAL_KERNEL=1`` opts in). Bound-changing / experimental — the
+    whole per-node loop moves into ``discopt-core`` (envelope patch + warm OBBT sweep
+    + safe-bound pruning + spatial branch). The producer declines any model it cannot
+    reproduce bound-neutrally, and the driver falls back to the Python path on decline,
+    so ON never changes a certified answer, only which engine computes it.
+
+    Graduation status (#764, panel 2026-07-19,
+    ``discopt_benchmarks/results/issue764_native_kernel_graduation_panel_20260719T155819Z.json``):
+    the Regime-2 graduation panel (ON vs OFF over the 66-instance in-repo corpus, 60 s
+    budget) PASSED BOTH bars — cert-clean with ZERO violations (every ON-optimal
+    objective matches OFF to tol, no dual bound past a reference optimum, no
+    optimal->non-optimal regression, all 4 engaged incumbents — dispatch, nvs13,
+    st_e13, tanksize — independently feasibility-verified) AND net-positive (median
+    non-engaged wall Δ = −0.146 s, i.e. ON slightly faster; tanksize moves
+    feasible→**optimal**, the issue's headline win, in ~50 s seeded).
+
+    The default is nonetheless kept **OFF** because flipping it is not yet SAFE as a
+    default, and CLAUDE.md puts safety/gate-integrity before performance:
+      1. Blast radius — with the flag forced ON, 20 ``-m smoke`` tests fail (807 pass)
+         because the native kernel short-circuits Python-engine machinery those tests
+         exercise (incumbent/node callbacks, RENS/SubNLP heuristic paths, solution
+         pools, warm-start incumbents, ``mccormick_bounds`` modes, deadline handling,
+         batched node processing, lazy constraints). These are not native-kernel
+         correctness failures — they are validated Python-engine behaviors a default-ON
+         would silently disable. Making default-ON safe needs native-kernel feature
+         parity (or pass-through) and/or re-scoping those tests to the engine they
+         validate — substantial follow-up, and doing it hastily would mean weakening
+         validations to green a gate (forbidden).
+      2. No wall budget — the kernel runs to ``max_nodes`` with no time limit, so on a
+         covered-but-hard instance it can run away (panel: ``contvar`` OFF 65 s → ON
+         >200 s, an instance neither flag certifies). A default must be runaway-safe.
+    Graduating to default-ON is deferred to those two follow-ups; the panel PASS is the
+    evidence the engine itself is sound and net-helpful. Opt in with the env var to use
+    it today (e.g. to certify tanksize)."""
+    return os.environ.get("DISCOPT_NATIVE_SPATIAL_KERNEL", "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+
+
 def _root_lp_probe_tight_enabled() -> bool:
     """Whether the #282 tightened-box root LP probe is on (**GRADUATED default-ON**).
 
@@ -468,6 +512,382 @@ def _root_lp_probe_tight_enabled() -> bool:
     probe. See the field docstring for the graduation-panel evidence.
     """
     return _tuning().root_lp_probe_tight
+
+
+# Wall budget (seconds) for the incumbent-seeding NLP heuristics (#764 Task 1). A
+# SubNLP solve (fix rounded integers, solve the continuous NLP) from the presolved
+# box midpoint — plus a stratified continuous multistart for pure-continuous models —
+# finds a genuine feasible point whose TRUE objective seeds the native full solve's
+# cutoff. Cheap relative to the full search, and seeding turns tanksize's ~190 s
+# unseeded solve into a small fraction of that. (Best-bound node selection is a poor
+# incumbent finder — an unseeded node-budget probe found no feasible point for
+# tanksize even at 20k nodes — so we use the NLP heuristics the trusted path already
+# uses to seed its first incumbent.)
+_NATIVE_SEED_HEURISTIC_S = 12.0
+
+
+def _native_kernel_verify_point(model, x_flat):
+    """Rigorously verify that ``x_flat`` (length ``n_orig``, original-variable order)
+    is feasible for the ORIGINAL model, and return ``(True, model_objective)`` with the
+    point's TRUE objective in model units, or ``(False, None)``.
+
+    Soundness (#764 Task 1): this gates whether a value may seed the native kernel's
+    incumbent cutoff. An unverified seed would poison every downstream certificate, so
+    the contract is strict — it returns ``True`` ONLY when the model evaluator
+    successfully evaluated every constraint AND the objective and every residual is
+    within the repo tolerances (bounds/constraints abs=1e-6 + rel=1e-4, integrality
+    1e-5). Any evaluator failure, shape mismatch, or non-finite value yields
+    ``(False, None)`` — never an optimistic pass. The objective returned is recomputed
+    from the original variables (independent of the kernel's McCormick aux columns), so
+    it is the genuinely-attained value, not an optimistic relaxation reading."""
+    from discopt.modeling.core import Constraint, ObjectiveSense, VarType
+
+    abs_tol, rel_tol, int_tol = 1e-6, 1e-4, 1e-5
+    x_flat = np.asarray(x_flat, dtype=np.float64)
+    if not np.all(np.isfinite(x_flat)):
+        return False, None
+
+    # Variable bounds + integrality against the ORIGINAL declared model. Bounds use the
+    # repo's COMBINED tolerance (abs=1e-6 + rel=1e-4 * |bound|): a local NLP returns a
+    # bound-active variable a few ULPs off its bound, and on a large-magnitude bound
+    # (tanksize x41 lb=536) a 4e-6 absolute slack is 8e-9 relative — inside the regime
+    # the whole solver (and its trusted incumbents) operate in. This is the same
+    # abs+rel tolerance the constraint residual check below uses.
+    off = 0
+    for v in model._variables:
+        size = int(getattr(v, "size", 1))
+        vals = x_flat[off : off + size]
+        if vals.shape[0] != size:
+            return False, None
+        lb_flat = np.asarray(v.lb, dtype=np.float64).flatten()
+        ub_flat = np.asarray(v.ub, dtype=np.float64).flatten()
+        lb_tol = abs_tol + rel_tol * np.abs(lb_flat)
+        ub_tol = abs_tol + rel_tol * np.abs(ub_flat)
+        if np.any(vals < lb_flat - lb_tol) or np.any(vals > ub_flat + ub_tol):
+            return False, None
+        if v.var_type in (VarType.INTEGER, VarType.BINARY):
+            if np.any(np.abs(vals - np.round(vals)) > int_tol):
+                return False, None
+        off += size
+
+    try:
+        from discopt._jax.nlp_evaluator import NLPEvaluator
+
+        evaluator = NLPEvaluator(model)
+        if evaluator.n_constraints > 0:
+            cons = np.asarray(evaluator.evaluate_constraints(x_flat), dtype=np.float64)
+            idx = 0
+            for c in model._constraints:
+                if not isinstance(c, Constraint):
+                    continue
+                if idx >= cons.shape[0]:
+                    return False, None  # evaluator produced fewer rows than constraints
+                val = float(cons[idx])
+                if not math.isfinite(val):
+                    return False, None
+                tol = abs_tol + rel_tol * abs(val)
+                if c.sense == "<=":
+                    if val > tol:
+                        return False, None
+                elif c.sense == ">=":
+                    if val < -tol:
+                        return False, None
+                elif c.sense == "==":
+                    if abs(val) > tol:
+                        return False, None
+                else:
+                    return False, None  # unknown sense -> refuse to vouch for the point
+                idx += 1
+        obj_min = float(evaluator.evaluate_objective(x_flat))
+    except Exception as exc:  # evaluator could not vouch -> NOT verified
+        logger.debug("native seed verification skipped (evaluator error): %s", exc)
+        return False, None
+    if not math.isfinite(obj_min):
+        return False, None
+    # ``evaluate_objective`` negates the body for a MAXIMIZE model (it minimizes the
+    # negation); undo that so the returned value is the objective in model units.
+    if model._objective.sense == ObjectiveSense.MAXIMIZE:
+        model_obj = -obj_min
+    else:
+        model_obj = obj_min
+    return True, float(model_obj)
+
+
+# Cap on the number of FREE binaries (span > 0.5 in the presolved box) the seed
+# enumerates over: 2**k sub-NLP solves. Presolve typically fixes most, leaving a
+# handful (tanksize: 5 of 9 free). Above this the enumeration is skipped for a single
+# rounding sub-NLP so a wide MINLP cannot cause a combinatorial blow-up.
+_NATIVE_SEED_MAX_FREE_BINARIES = 10
+
+
+def _native_kernel_seed_candidates(model, lb, ub, n_orig, deadline):
+    """Yield candidate feasible points (flat) for the native-kernel seed, from the SAME
+    NLP heuristics the trusted spatial path uses to find its first incumbent — general
+    across the covered subset (MINLP *and* pure-continuous). Each yielded point is only
+    a CANDIDATE; the caller re-verifies it rigorously before it may seed anything.
+
+    Strategy: solve the continuous NLP relaxation once (from the presolved-box
+    midpoint) for a warm continuous base, then FIX the presolve-pinned integers to
+    their box value and ENUMERATE every 0/1 assignment of the FREE binaries (span > 0.5
+    in the presolved box), running a sub-NLP per combo. This lands genuine
+    integer-feasible points a single nearest-rounding sub-NLP misses on tightly-coupled
+    binaries (tanksize: rounding the relaxation is integer-infeasible, but 5 free
+    binaries enumerate to 32 sub-NLPs, several feasible). A continuous multistart is
+    added for the pure-continuous case."""
+    import itertools
+
+    from discopt.modeling.core import VarType
+
+    lb = np.asarray(lb, dtype=np.float64)
+    ub = np.asarray(ub, dtype=np.float64)
+    lb_c = np.clip(lb, -_SPC, _SPC)
+    ub_c = np.clip(ub, -_SPC, _SPC)
+    midpoint = 0.5 * (lb_c + ub_c)
+
+    # Flat integer positions (scalar-variable covered subset: flat index == var index).
+    int_pos = [
+        i for i, v in enumerate(model._variables) if v.var_type in (VarType.INTEGER, VarType.BINARY)
+    ]
+    free_int = [i for i in int_pos if i < n_orig and (ub[i] - lb[i]) > 0.5]
+
+    ev = None
+    backend = None
+    xr = None
+    try:
+        from discopt._jax.nlp_evaluator import NLPEvaluator
+        from discopt.solvers.nlp_backend import get_nlp_solver
+
+        ev = NLPEvaluator(model)
+        backend = get_nlp_solver("auto")
+        r = backend(
+            ev,
+            midpoint,
+            options={
+                "print_level": 0,
+                "max_iter": 500,
+                "max_wall_time": max(0.5, min(4.0, deadline - time.perf_counter())),
+            },
+        )
+        if getattr(r, "x", None) is not None:
+            xr = np.asarray(r.x, dtype=np.float64)
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.debug("native seed relaxation solve failed: %s", exc)
+
+    base = xr.copy() if xr is not None else midpoint.copy()
+    # Pin presolve-fixed integers to their box value in the continuous base.
+    for i in int_pos:
+        if i < base.shape[0] and i not in free_int:
+            base[i] = float(np.round(0.5 * (lb[i] + ub[i])))
+
+    try:
+        from discopt._jax.primal_heuristics import subnlp
+
+        if len(free_int) <= _NATIVE_SEED_MAX_FREE_BINARIES:
+            for combo in itertools.product((0.0, 1.0), repeat=len(free_int)):
+                if time.perf_counter() >= deadline:
+                    break
+                x0 = base.copy()
+                for idx, val in zip(free_int, combo):
+                    if idx < x0.shape[0]:
+                        x0[idx] = val
+                try:
+                    cand = subnlp(
+                        model,
+                        x0,
+                        evaluator=ev,
+                        backend=backend,
+                        time_budget=max(0.3, min(3.0, deadline - time.perf_counter())),
+                    )
+                except Exception as exc:  # pragma: no cover - defensive
+                    logger.debug("native seed subnlp raised: %s", exc)
+                    cand = None
+                if cand is not None and cand[0] is not None:
+                    yield np.asarray(cand[0], dtype=np.float64)
+        elif xr is not None and time.perf_counter() < deadline:
+            # Too many free binaries to enumerate: one nearest-rounding sub-NLP.
+            try:
+                cand = subnlp(
+                    model,
+                    xr,
+                    evaluator=ev,
+                    backend=backend,
+                    time_budget=max(0.5, min(4.0, deadline - time.perf_counter())),
+                )
+            except Exception as exc:  # pragma: no cover - defensive
+                logger.debug("native seed subnlp raised: %s", exc)
+                cand = None
+            if cand is not None and cand[0] is not None:
+                yield np.asarray(cand[0], dtype=np.float64)
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.debug("native seed subnlp import/setup failed: %s", exc)
+
+    if not int_pos and time.perf_counter() < deadline:
+        try:
+            from discopt._jax.primal_heuristics import continuous_multistart
+
+            cand = continuous_multistart(
+                model,
+                n_starts=int(min(64, max(16, 2 * int(n_orig)))),
+                evaluator=ev,
+                deadline=deadline,
+            )
+            if cand is not None and cand[0] is not None:
+                yield np.asarray(cand[0], dtype=np.float64)
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.debug("native seed multistart raised: %s", exc)
+
+
+def _native_kernel_seed(model, lb, ub, sign, off, n_orig):
+    """Return ``(internal_value, point)`` — a genuinely-attained incumbent to seed the
+    native solve (``internal_value`` in kernel-internal minimize units, ``point`` the
+    verified original-variable vector) — or ``(None, None)`` if no verified feasible
+    point is available.
+
+    Draws candidate feasible points from :func:`_native_kernel_seed_candidates`,
+    RIGOROUSLY re-verifies each against the original model
+    (:func:`_native_kernel_verify_point`), maps its TRUE objective to internal units via
+    ``internal = sign * model_obj - offset`` (the inverse of the producer's
+    ``model = sign * (internal + offset)``, exact since ``sign in {+1,-1}``), and keeps
+    the BEST (lowest internal value = tightest sound cutoff) over all candidates found
+    before the deadline. A heuristic's own reported objective is never trusted directly.
+    The verified point is returned too so the driver can report it if the seeded full
+    solve proves optimality without ever improving on (and thus re-recording) the seed.
+    A verified feasible objective is only ever an *upper bound*: seeding it can prune and
+    cutoff-propagate but can never loosen a bound or invent an incumbent, so an
+    unverifiable candidate is simply dropped and the full solve runs unseeded."""
+    deadline = time.perf_counter() + float(_NATIVE_SEED_HEURISTIC_S)
+    best_internal: Optional[float] = None
+    best_point = None
+    for x_cand in _native_kernel_seed_candidates(model, lb, ub, n_orig, deadline):
+        if x_cand.shape[0] < n_orig:
+            continue
+        point = x_cand[:n_orig].copy()
+        ok, model_obj = _native_kernel_verify_point(model, point)
+        if not ok:
+            continue
+        internal = sign * float(model_obj) - off
+        if not math.isfinite(internal):
+            continue
+        if best_internal is None or internal < best_internal:
+            best_internal = internal
+            best_point = point
+    if best_internal is None:
+        return None, None
+    return best_internal, best_point
+
+
+def _try_native_spatial_kernel(
+    model,
+    lb,
+    ub,
+    n_vars,
+    gap_tolerance,
+    max_nodes,
+    t_start,
+    rust_time,
+    jax_time,
+):
+    """Issue #764: if the native Rust spatial kernel is enabled and the model is in
+    its covered subset — scalar variables; bilinear / monomial / affine-square / sqrt
+    terms; a valid McCormick relaxation at the presolved box ``[lb, ub]`` — run the
+    ENTIRE spatial B&B inside ``discopt-core`` and return a :class:`SolveResult`; else
+    ``None`` so the caller runs the trusted Python path.
+
+    Soundness: the producer declines (``None``) any model it cannot reproduce
+    bound-neutrally, and only a fully-certified native solve (``status == 'optimal'``,
+    i.e. the tree was exhausted with a rigorous safe global bound) is taken — a
+    node-limited or declined run falls through to the Python path, never reporting a
+    partial or unverified result. The kernel's incumbent satisfies the model's linear
+    rows (they are fixed rows in its LP) and every lifted term to ``mccormick_tol``.
+    The internal minimize-convention objective/bound are mapped to model units via the
+    producer's ``sign*(value + offset)`` metadata.
+
+    Task 1 (#764): before the full solve, a short unseeded probe run finds a
+    McCormick-tight candidate point which is RIGOROUSLY verified feasible against the
+    original model; its true objective seeds ``initial_incumbent`` so the full search
+    prunes with a tight cutoff from node 0 (tanksize: ~190 s -> ~27 s). Seeding only
+    ever changes *which* certified answer path is walked (a valid upper bound prunes,
+    it never loosens a bound or invents an incumbent); an unverified candidate is
+    discarded and the full solve runs unseeded."""
+    if not _native_spatial_kernel_enabled():
+        return None
+    try:
+        from discopt import _rust
+        from discopt._jax.spatial_producer import build_spatial_kernel_spec
+
+        spec = build_spatial_kernel_spec(
+            model,
+            bounds=(
+                np.asarray(lb, dtype=np.float64)[:n_vars],
+                np.asarray(ub, dtype=np.float64)[:n_vars],
+            ),
+        )
+        if spec is None:
+            return None  # model outside the covered subset -> Python path
+        meta = {k: spec.pop(k) for k in list(spec) if k.startswith("meta_")}
+        sign = float(meta["meta_obj_sense_sign"])
+        off = float(meta["meta_obj_offset"])
+        n_orig = int(spec["n_orig"])
+
+        # Task 1: obtain a cheap, rigorously-verified feasible seed for the cutoff.
+        initial_incumbent, seed_point = _native_kernel_seed(
+            model,
+            np.asarray(lb, dtype=np.float64)[:n_vars],
+            np.asarray(ub, dtype=np.float64)[:n_vars],
+            sign,
+            off,
+            n_orig,
+        )
+
+        solve_kwargs = dict(max_nodes=int(max_nodes), gap_tol=float(gap_tolerance))
+        if initial_incumbent is not None:
+            solve_kwargs["initial_incumbent"] = float(initial_incumbent)
+        res = _rust.solve_spatial_tree_py(**spec, **solve_kwargs)
+        res.update(meta)
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.debug("native spatial kernel skipped: %s", exc)
+        return None
+    if res is None:
+        return None  # model outside the covered subset -> Python path
+    if res.get("status") != "optimal" or res.get("incumbent") is None:
+        return None  # not fully certified -> Python path (never report a partial)
+
+    sign = float(res["meta_obj_sense_sign"])
+    off = float(res["meta_obj_offset"])
+    obj_val = sign * (float(res["incumbent"]) + off)
+    bound_val = sign * (float(res["bound"]) + off)
+    x_incumbent = np.asarray(res["incumbent_x"], dtype=np.float64)
+    if x_incumbent.shape[0] >= n_vars:
+        # The kernel found (and re-recorded) its own improving incumbent point.
+        x_flat = x_incumbent[:n_vars]
+    elif seed_point is not None and seed_point.shape[0] >= n_vars:
+        # Seeded solve proved optimality without ever improving on the seed, so the
+        # kernel carries no point (``incumbent_x`` empty) — report OUR verified seed
+        # point, whose true objective equals ``res['incumbent']`` by construction.
+        x_flat = np.asarray(seed_point, dtype=np.float64)[:n_vars]
+    else:
+        return None  # no usable incumbent point -> Python path (never fabricate one)
+    x_dict = _unpack_solution(model, x_flat)
+    wall_time = time.perf_counter() - t_start
+    gap_val = abs(obj_val - bound_val) / (abs(obj_val) + 1e-10)
+    logger.info(
+        "native spatial kernel (#764) solved: obj=%.6g bound=%.6g nodes=%d",
+        obj_val,
+        bound_val,
+        int(res["node_count"]),
+    )
+    return SolveResult(
+        status="optimal",
+        objective=obj_val,
+        bound=bound_val,
+        gap=gap_val,
+        x=x_dict,
+        wall_time=wall_time,
+        node_count=int(res["node_count"]),
+        rust_time=rust_time,
+        jax_time=jax_time,
+        python_time=wall_time - rust_time - jax_time,
+    )
 
 
 # P3 branch-and-reduce: per-node probing (issue #632). When the in-tree FBBT
@@ -1532,6 +1952,52 @@ def _cached_structural_linear_mask(evaluator, m):
     except Exception:
         pass
     return mask
+
+
+def _reduce_node_and_stage(
+    reduce_node_fn,
+    model,
+    i,
+    batch_lb,
+    batch_ub,
+    lp_result,
+    tree,
+    cutoff,
+    pending,
+):
+    """Run per-node cheap reduction (Phase 2 / cert:T2.4b) and stage the child box.
+
+    Calls ``reduce_node`` on node ``i``'s box using the just-solved node LP's
+    marginals (``lp_result`` carries ``reduced_costs``/``safe_bound`` when the LP
+    requested them) plus cutoff-FBBT. On a strictly smaller box it updates
+    ``batch_lb[i]``/``batch_ub[i]`` (so downstream branching/hints see the tighter
+    box) and records it in ``pending[i]`` for the ``set_node_bounds`` child export.
+    Returns True iff the reduction proved the node infeasible under the cutoff (a
+    rigorous fathom). Tighten-only: any failure leaves the box unchanged."""
+    try:
+        cur_lb = np.asarray(batch_lb[i], dtype=np.float64)
+        cur_ub = np.asarray(batch_ub[i], dtype=np.float64)
+        # do_fbbt=False: the FREE reduced-cost DBBT only — no per-node Rust
+        # ``fbbt_with_cutoff`` repr rebuild. The rebuild is the expensive, disruptive
+        # part (it re-derives a full box that perturbs the child search); the DBBT
+        # from the node LP's own reduced costs is the ~zero-cost BARON-style move
+        # this lever is about. cutoff-FBBT can be re-added selectively in step 3.
+        res = reduce_node_fn(model, cur_lb, cur_ub, lp_result, cutoff, do_fbbt=False)
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.debug("reduce_node failed at node %d: %s", i, exc)
+        return False
+    if res.infeasible:
+        return True
+    if res.n_tightened > 0:
+        new_lb = np.maximum(cur_lb, res.lb)
+        new_ub = np.minimum(cur_ub, res.ub)
+        # Guard against an empty box from float noise (fathom).
+        if np.any(new_lb > new_ub + 1e-9):
+            return True
+        batch_lb[i] = new_lb.tolist()
+        batch_ub[i] = new_ub.tolist()
+        pending[i] = (new_lb, new_ub)
+    return False
 
 
 def _tighten_node_bounds_with_status(evaluator, node_lb, node_ub, cl_list, cu_list, max_rounds=3):
@@ -6106,6 +6572,19 @@ def solve_model(
     _root_lb_snapshot = np.asarray(lb, dtype=np.float64).copy()
     _root_ub_snapshot = np.asarray(ub, dtype=np.float64).copy()
 
+    # --- #764: native Rust spatial-B&B kernel (default OFF, DISCOPT_NATIVE_SPATIAL_KERNEL) ---
+    # Hand off here — after root FBBT + non-cutoff root OBBT have finished, so [lb, ub]
+    # is the finite root box the McCormick relaxation needs (tanksize's raw box is
+    # unbounded; this is the first point it is fully bounded). When the flag is OFF this
+    # returns None with no import/side effect, so the default path below is byte-for-byte
+    # unchanged; when ON it only takes over on a fully-certified native solve, else falls
+    # through to the trusted Python search.
+    _native_result: Optional[SolveResult] = _try_native_spatial_kernel(
+        model, lb, ub, n_vars, gap_tolerance, max_nodes, t_start, rust_time, jax_time
+    )
+    if _native_result is not None:
+        return _native_result
+
     # --- #654: deadline-exhausted short-circuit before the spatial search build ---
     # Everything below (the per-node NLP evaluator's one-time XLA compile, the
     # McCormick LP relaxer build, and the node loop) is *optional* search apparatus:
@@ -6753,22 +7232,24 @@ def solve_model(
                     # can actually relax.
                     try:
                         _probe_lb, _probe_ub = flat_variable_bounds(model)
-                        # #282 (flag-gated): probe the relaxer over the FBBT/OBBT-
-                        # TIGHTENED root box rather than the raw declared model
-                        # bounds. The keep/discard decision above solves the
-                        # McCormick LP once at ``(_probe_lb, _probe_ub)``; on a
-                        # model with unbounded declared bounds (e.g. syn30hfsg's
-                        # x0..x4 = [0, inf]) that LP is unbounded/None over the raw
-                        # box, so the relaxer is wrongly discarded (``_mc_mode =
-                        # "none"``) and the whole spatial search falls back to a far
-                        # looser alphaBB/interval/NLP root bound — even though the
-                        # SAME relaxer yields a valid, much tighter bound on the
-                        # already-computed tightened box (syn30hfsg root +955% ->
-                        # +571%, syn40hfsg +3041% -> +2350%). Every node the tree
-                        # then solves uses its own box (subset of this one), so
-                        # keeping the relaxer here is sound; the probe only decides
-                        # whether to keep it, never a bound. Default OFF; graduates
-                        # through the CLAUDE.md Regime-2 panel gate.
+                        # #282/#764 (default ON, ``DISCOPT_ROOT_LP_PROBE_TIGHT=0``
+                        # opts out): probe the relaxer over the FBBT/OBBT-TIGHTENED
+                        # root box rather than the raw declared model bounds. The
+                        # keep/discard decision above solves the McCormick LP once at
+                        # ``(_probe_lb, _probe_ub)``; on a model with unbounded
+                        # declared bounds (e.g. syn30hfsg's x0..x4 = [0, inf], or
+                        # tanksize's bilinear tank-sizing vars) that LP is
+                        # unbounded/None over the raw box — a box NO node ever solves
+                        # — so the relaxer was wrongly discarded (``_mc_mode =
+                        # "none"``) and the whole spatial search fell back to a far
+                        # looser alphaBB/interval/NLP root bound, even though the SAME
+                        # relaxer yields a valid, much tighter bound on the
+                        # already-computed tightened box (syn05hfsg feasible->optimal,
+                        # tanksize root 0.8529->0.9063). Every node the tree then
+                        # solves uses its own box (subset of this one), so keeping the
+                        # relaxer here is sound; the probe only decides whether to keep
+                        # it, never a bound. Graduated through the CLAUDE.md Regime-2
+                        # panel gate (#764).
                         if _root_lp_probe_tight_enabled():
                             _probe_lb = np.asarray(lb, dtype=np.float64)
                             _probe_ub = np.asarray(ub, dtype=np.float64)
@@ -7449,12 +7930,27 @@ def solve_model(
             _pn_obbt_topk,
         )
 
-    # --- Per-node cheap reduction (cert:T2.4b) — DEPRECATED/REMOVED (#581) ---
-    # The ``DISCOPT_NODE_REDUCE`` flag (reduce_node: cutoff-FBBT + free DBBT from
-    # the node-LP reduced costs + integer RC-fixing, feeding the tightened box to
-    # the children) was default-OFF and graduated-gated net-negative (#685), so it
-    # was removed rather than left in default-OFF limbo. The default path never
-    # entered it; removing the gated branch is byte-identical.
+    # --- Per-node cheap reduced-cost DBBT (Phase 2, #764; flag default OFF) ---
+    # After each spatial node LP solve, run ``reduce_node`` (free DBBT from the node
+    # LP reduced costs + integer RC-fixing + cutoff-FBBT) and feed the tightened box
+    # to the child nodes via ``tree.set_node_bounds`` before the tree branches.
+    # Gated to the LP-relaxer spatial path (the only path exposing node-LP marginals)
+    # and behind ``DISCOPT_PHASE2_DBBT`` (default OFF). The predecessor
+    # ``DISCOPT_NODE_REDUCE`` (removed #581) needed reduced costs that the cold LP
+    # path did not produce, so it no-op'd on the non-composite-lift class (the #685
+    # net-negative); #764 step 1 added cold-path marginals, so the reduction now
+    # actually fires here.
+    _phase2_dbbt_enabled = _tuning().phase2_dbbt and _mc_lp_relaxer is not None
+    _node_reduce_fn: Any = None
+    if _phase2_dbbt_enabled:
+        try:
+            from discopt._jax.node_reduce import reduce_node as _node_reduce_fn
+
+            logger.debug("per-node DBBT enabled (Phase 2, #764)")
+        except Exception as _nr_exc:  # pragma: no cover - defensive
+            logger.debug("reduce_node import failed; disabling Phase 2 DBBT: %s", _nr_exc)
+            _phase2_dbbt_enabled = False
+            _node_reduce_fn = None
 
     # --- Reduced-space McCormick per-node bounding (MAiNGO-parity §2 P2.3) ---
     # ``DISCOPT_RELAX_SPACE=reduced`` swaps the lifted per-node LP for a Kelley
@@ -7739,6 +8235,21 @@ def solve_model(
             break
 
         node_infeasible_mask = np.zeros(n_batch, dtype=bool)
+
+        # Phase 2 (#764) per-node DBBT staging for THIS batch: the incumbent cutoff
+        # and a {batch_index: (lb, ub)} map of reduced child boxes, applied via
+        # ``set_node_bounds`` just before the tree branches (below).
+        _nr_pending: dict = {}
+        _nr_cutoff = None
+        if _phase2_dbbt_enabled:
+            _nr_inc = tree.incumbent()
+            _nr_cutoff = (
+                float(_nr_inc[1])
+                if _nr_inc is not None
+                and np.isfinite(_nr_inc[1])
+                and _nr_inc[1] < _SENTINEL_THRESHOLD
+                else None
+            )
 
         # Apply the current global box to each exported node (issue: cutoff
         # tightening was dead). Phase C (incumbent-cutoff OBBT) and Phase C3
@@ -8133,7 +8644,7 @@ def solve_model(
                             time_limit=max(_node_remaining, _DEADLINE_NODE_FLOOR_S),
                             inherited_cuts=_root_cut_pool,
                             separate=True,
-                            want_marginals=False,
+                            want_marginals=_phase2_dbbt_enabled,
                             # THRU-4: with the root pool inherited, skip the per-node
                             # square/PSD point-separation loops (sound: their cut
                             # families are box-independent and already in the pool)
@@ -8168,6 +8679,28 @@ def solve_model(
                             result_feas[i] = False
                         else:
                             result_lbs[i] = max(result_lbs[i], float(mc_res.lower_bound))
+                    # Phase 2 (#764): reduce the node box from THIS solve's marginals
+                    # (free DBBT, no extra LP) + cutoff-FBBT, and stage the tightened
+                    # box for the child export (applied via set_node_bounds below).
+                    # Skip the ROOT batch (iteration 0): reducing before the root
+                    # primal heuristic runs perturbs its multistart and degrades the
+                    # first incumbent (mirrors the per-node OBBT root skip, #287); the
+                    # reduction's value is on branched nodes.
+                    if _phase2_dbbt_enabled and _node_reduce_fn is not None and iteration >= 1:
+                        if _reduce_node_and_stage(
+                            _node_reduce_fn,
+                            model,
+                            i,
+                            batch_lb,
+                            batch_ub,
+                            mc_res,
+                            tree,
+                            _nr_cutoff,
+                            _nr_pending,
+                        ):
+                            node_infeasible_mask[i] = True
+                            result_lbs[i] = _INFEASIBILITY_SENTINEL
+                            result_feas[i] = False
             if not _model_is_convex:
                 for i in range(n_batch):
                     if result_lbs[i] == -np.inf:
@@ -8467,7 +9000,7 @@ def solve_model(
                             time_limit=max(_deadline - time.perf_counter(), _DEADLINE_NODE_FLOOR_S),
                             inherited_cuts=_root_cut_pool,
                             separate=True,
-                            want_marginals=False,
+                            want_marginals=_phase2_dbbt_enabled,
                             # THRU-4: with the root pool inherited, skip the per-node
                             # square/PSD point-separation loops (sound: their cut
                             # families are box-independent and already in the pool)
@@ -8510,6 +9043,30 @@ def solve_model(
                             result_feas[i] = False
                         else:
                             result_lbs[i] = max(cur, mc_lp_lb)
+                    # Phase 2 (#764): free DBBT + cutoff-FBBT from this serial node
+                    # solve's marginals; stage the tightened child box. Skip the root
+                    # batch (iteration 0) — see the batch-path note above (#287).
+                    if (
+                        _phase2_dbbt_enabled
+                        and _node_reduce_fn is not None
+                        and iteration >= 1
+                        and mc_lp_res is not None
+                        and mc_lp_res.status != "infeasible"
+                    ):
+                        if _reduce_node_and_stage(
+                            _node_reduce_fn,
+                            model,
+                            i,
+                            batch_lb,
+                            batch_ub,
+                            mc_lp_res,
+                            tree,
+                            _nr_cutoff,
+                            _nr_pending,
+                        ):
+                            node_infeasible_mask[i] = True
+                            result_lbs[i] = _INFEASIBILITY_SENTINEL
+                            result_feas[i] = False
 
                 # Nonconvex finalize (mirrors the batch path at the top of this
                 # iteration).  Runs AFTER every bound source (NLP, alphaBB,
@@ -9696,6 +10253,26 @@ def solve_model(
         ):
             _debug_quit = True
             break
+
+        # Phase 2 (#764): export each node's DBBT/FBBT-reduced box to the Rust tree
+        # BEFORE it branches, so the children inherit the tightened bounds. Sound:
+        # ``reduce_node`` only ever shrinks a box using valid (LP-dual + cutoff)
+        # inequalities, so the contraction removes no feasible point better than the
+        # incumbent. Skipped for any node already fathomed this round.
+        if _phase2_dbbt_enabled and _nr_pending:
+            t_rust_start = time.perf_counter()
+            for _bi, (_nlb, _nub) in _nr_pending.items():
+                if node_infeasible_mask[_bi] or result_lbs[_bi] >= _SENTINEL_THRESHOLD:
+                    continue
+                try:
+                    tree.set_node_bounds(
+                        int(batch_ids[_bi]),
+                        np.asarray(_nlb, dtype=np.float64),
+                        np.asarray(_nub, dtype=np.float64),
+                    )
+                except Exception as _sb_exc:  # pragma: no cover - defensive
+                    logger.debug("set_node_bounds failed at node %d: %s", _bi, _sb_exc)
+            rust_time += time.perf_counter() - t_rust_start
 
         # Import results back to Rust tree
         t_rust_start = time.perf_counter()

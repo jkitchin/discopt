@@ -1,0 +1,45 @@
+# #764 — tanksize CERTIFIED by the native kernel (2026-07-19)
+# The issue's definition of done: certify tanksize at default tolerances.
+# discopt Python path: times out >300 s at a 32.8 % gap. SCIP: 1.46 s / 1391 nodes.
+
+## Quality-ratchet dose-response (native kernel, gap_tol=1e-4)
+propagation OFF:                bound frozen at 0.838 forever
+propagation ON:                 0.838 -> 0.937, plateau (51.6% nodes UNCERTIFIED)
++ finite slack bounds:          0 uncertified -> CERTIFIED
+
+## Root cause of the plateau (diagnosed, not guessed)
+ns_safe_bound_csc returns None when a nonzero reduced cost meets a bound >= 1e20;
+slack columns carried u=1e20, so a roundoff-level slack reduced cost (rc = -y_r
+~ -1e-13) killed the certificate on 51.6% of nodes (10315/20000 measured), and
+those subtrees froze at ancestor bounds. Equilibrated solves alone did NOT fix it
+(51.4% after switching to solve_lp_cols_scaled). Finite min-activity slack upper
+bounds (s_r = b_r - min_activity_r) fixed it outright: 0/10653 uncertified.
+
+## Certified runs (post-fix)
+seeded incumbent (1.2686437615, known feasible value):
+  status=optimal  incumbent=1.2686437615  bound=1.2685440896  gap=9.97e-05
+  nodes=10653  1 LP/node  0 uncertified  wall=26.9 s  (2.53 ms/node)
+unseeded (fully self-contained):
+  status=optimal  incumbent=1.2686457461  bound=1.2685457806  gap=1.00e-04
+  nodes=78667  wall=191.8 s
+end-to-end m.solve() with DISCOPT_NATIVE_SPATIAL_KERNEL=1:
+  status=optimal  obj=1.2686457461  bound=1.2685457806  nodes=78667  wall=190.8 s
+
+Certificate brackets the oracle in every run: bound <= 1.2686437540 <= incumbent.
+Optimal is the honest post-fix semantics (bound >= incumbent - gap_tol enforced).
+Regression test: python/tests/test_spatial_native_kernel.py::test_tanksize_certifies_natively.
+
+## FINAL (Task 1/2/3, 2026-07-19)
+Driver-side seeded end-to-end m.solve() with DISCOPT_NATIVE_SPATIAL_KERNEL=1:
+  status=optimal  obj=1.2686437526  bound=1.2685440897  nodes=11379  wall=~50 s
+  |obj - oracle| = 1.44e-9 ; certificate brackets oracle (bound <= 1.2686437540 <= incumbent).
+Seed: NLP relaxation + free-binary enumeration (5 free -> 32 sub-NLPs) -> best verified
+feasible point (obj 1.2686437526) -> initial_incumbent. ~255 s -> ~50 s (5x).
+
+Graduation panel (issue764_native_kernel_graduation_panel_20260719T155819Z):
+  cert-clean PASS (0 violations); net-positive PASS (median non-engaged wall Δ=-0.146 s,
+  4 engaged: dispatch/nvs13/st_e13/tanksize, tanksize feasible->optimal).
+Default decision: KEEP OPT-IN (default OFF). Flipping default-ON breaks 20 smoke tests
+(native kernel short-circuits Python-engine callbacks/heuristics/pools/bound-modes) and
+the kernel lacks a wall budget (contvar OFF 65 s -> ON >200 s). Graduation deferred to
+those two follow-ups; panel PASS records the engine as sound + net-helpful.

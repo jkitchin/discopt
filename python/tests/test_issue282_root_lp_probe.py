@@ -21,6 +21,14 @@ differential-bound + soundness invariants (CLAUDE.md §5):
   * neither bound crosses the true optimum (a valid dual bound of a MAXIMIZE problem
     is an upper bound: it must stay >= the optimum), and
   * no incumbent beats the true optimum (feasible-point check).
+
+Graduation (#764): the ON-vs-OFF differential over the in-repo corpus's complete
+affected set (all 24 unbounded-declared-box instances) was cert-clean and
+net-positive (``syn05hfsg`` feasible→optimal 2x faster, ``tanksize`` root
+0.8529→0.9063, byte-stable elsewhere), so the tightened-box probe is now the
+**default**; ``DISCOPT_ROOT_LP_PROBE_TIGHT=0`` restores the legacy raw-box probe.
+``test_default_probe_tightens_root_bound_after_graduation`` pins that the default
+behaves like the ON arm.
 """
 
 from __future__ import annotations

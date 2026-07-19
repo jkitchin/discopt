@@ -1372,7 +1372,9 @@ class MccormickLPRelaxer:
                     self._pool_stats["inherited_rows"] += _pool_rows_appended
         _n_base_rows = 0 if milp._A_ub is None else _sparse_rows(milp._A_ub)
 
-        res = milp.solve(time_limit=_remaining(), backend=self._backend)
+        res = milp.solve(
+            time_limit=_remaining(), backend=self._backend, want_marginals=want_marginals
+        )
 
         # C-42: the inherited pool is an ACCELERATOR, never a dependency — a node
         # solve must be no worse with it than without it. The warm/equilibrated
@@ -1406,7 +1408,9 @@ class MccormickLPRelaxer:
             _n_base_rows = _n_pre_pool_rows
             skip_pool_separators = False
             self._pool_stats["dropped_nodes"] += 1
-            res = milp.solve(time_limit=_remaining(), backend=self._backend)
+            res = milp.solve(
+                time_limit=_remaining(), backend=self._backend, want_marginals=want_marginals
+            )
 
         # #671 float64-intractable-row filter — FAILURE-TRIGGERED. When the node LP
         # breaks down without a certified verdict (the hda-class ill-conditioned
@@ -1673,7 +1677,29 @@ class MccormickLPRelaxer:
         if bound is None or not np.isfinite(bound):
             return MccormickLPResult(status=res.status)
         x_orig = np.asarray(x_source.x)[: self._n_orig].copy()
-        return MccormickLPResult(status="optimal", lower_bound=float(bound), x=x_orig)
+        _out = MccormickLPResult(status="optimal", lower_bound=float(bound), x=x_orig)
+        if want_marginals:
+            # Cold-path node-LP marginals (Phase 2 / cert:T2.4a): take the
+            # reduced costs + NS-safe bound from the PRE-separation direct warm-simplex
+            # solve (``_presep_res``). That solve is a valid McCormick relaxation and
+            # its ``(reduced_costs, safe_bound)`` are a mutually-consistent pair on the
+            # original scale, so DBBT's ``gap = cutoff - safe_bound`` and ``d_j`` refer
+            # to the same LP — sound (a weaker but valid reduction than post-separation
+            # would give). Only the first ``n_orig`` STRUCTURAL columns are exported
+            # (DBBT/RC-fixing tighten original variables; aux columns are branched by
+            # the tree). ``None`` on any path that did not produce marginals
+            # (equilibrated/generic/MILP-B&B, or a cut-changed column count) — DBBT
+            # then no-ops, still sound. Pure side-channel: does not touch ``bound``.
+            _rc = getattr(_presep_res, "reduced_costs", None)
+            _sb = getattr(_presep_res, "safe_bound", None)
+            if _rc is not None:
+                _rc = np.asarray(_rc, dtype=np.float64)
+                if _rc.shape[0] >= self._n_orig:
+                    _out.reduced_costs = _rc[: self._n_orig]
+                    _out.safe_bound = (
+                        float(_sb) if _sb is not None and np.isfinite(_sb) else float(bound)
+                    )
+        return _out
 
     def _has_unbounded_nonlinear_col(self, milp) -> bool:
         """True if any nonlinear-term original column has a non-finite bound.

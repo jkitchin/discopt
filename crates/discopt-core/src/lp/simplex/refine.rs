@@ -255,6 +255,59 @@ pub fn ns_safe_bound(
     }
 }
 
+/// CSC twin of [`ns_safe_bound`]: the Neumaier–Shcherbina safe lower bound for
+/// `min cᵀx s.t. A x = b, l ≤ x ≤ u` where `A` is given column-major as the raw
+/// CSC arrays (`col_ptr` length `n+1`, `row_idx`/`vals` the nonzeros). Identical
+/// arithmetic and rigor to the dense version — `bᵀy` and each column's `(Aᵀy)_j`
+/// at double-double precision, then the reduced-cost box term — so the result is a
+/// rigorous lower bound (`≤` the true optimum) at any conditioning. Returns `None`
+/// when a nonzero reduced cost meets an infinite bound (no finite certificate) or a
+/// dual is non-finite. Used by the native spatial node kernel, whose node LPs are
+/// CSC, so no dense `m×n` matrix is ever materialized to certify the bound.
+#[allow(clippy::too_many_arguments)]
+pub fn ns_safe_bound_csc(
+    y: &[f64],
+    c: &[f64],
+    col_ptr: &[usize],
+    row_idx: &[usize],
+    vals: &[f64],
+    m: usize,
+    n: usize,
+    b: &[f64],
+    l: &[f64],
+    u: &[f64],
+) -> Option<f64> {
+    if y.len() != m || !y.iter().all(|v| v.is_finite()) {
+        return None;
+    }
+    debug_assert_eq!(col_ptr.len(), n + 1);
+    let mut g = dot_dd(b, y);
+    for j in 0..n {
+        // (Aᵀy)_j = sum over column j's nonzeros of vals[p]*y[row_idx[p]], in DD.
+        let mut aty = Dd::zero();
+        for p in col_ptr[j]..col_ptr[j + 1] {
+            aty = aty.add_prod(vals[p], y[row_idx[p]]);
+        }
+        let rc = c[j] - aty.to_f64();
+        if rc > 0.0 {
+            if l[j] <= -REFINE_INF {
+                return None;
+            }
+            g += rc * l[j];
+        } else if rc < 0.0 {
+            if u[j] >= REFINE_INF {
+                return None;
+            }
+            g += rc * u[j];
+        }
+    }
+    if g.is_finite() {
+        Some(g)
+    } else {
+        None
+    }
+}
+
 /// The primal-dual solution of a correction subproblem: `x` (length `n`) and the
 /// row duals `y` (length `m`) under the crate's dual convention (so that
 /// [`ns_safe_bound`] applied to `y` is a valid lower bound).
@@ -795,6 +848,63 @@ mod tests {
             if let Some(g) = ns_safe_bound(&[y0], &c, &a, m, n, &b, &l, &u) {
                 assert!(g <= -8.0 + 1e-9, "g({y0}) = {g} exceeds optimum −8");
             }
+        }
+    }
+
+    // Dense a (row-major m×n) -> CSC arrays (col_ptr, row_idx, vals).
+    fn dense_to_csc(a: &[f64], m: usize, n: usize) -> (Vec<usize>, Vec<usize>, Vec<f64>) {
+        let mut col_ptr = vec![0usize; n + 1];
+        for j in 0..n {
+            for i in 0..m {
+                if a[i * n + j] != 0.0 {
+                    col_ptr[j + 1] += 1;
+                }
+            }
+            col_ptr[j + 1] += col_ptr[j];
+        }
+        let mut row_idx = vec![0usize; col_ptr[n]];
+        let mut vals = vec![0.0f64; col_ptr[n]];
+        let mut pos = col_ptr.clone();
+        for j in 0..n {
+            for i in 0..m {
+                let v = a[i * n + j];
+                if v != 0.0 {
+                    row_idx[pos[j]] = i;
+                    vals[pos[j]] = v;
+                    pos[j] += 1;
+                }
+            }
+        }
+        (col_ptr, row_idx, vals)
+    }
+
+    /// The CSC safe bound is BIT-IDENTICAL to the dense one for arbitrary duals,
+    /// on both a well-scaled and an ill-scaled (1e8) LP — same DD arithmetic.
+    #[test]
+    fn ns_safe_bound_csc_matches_dense() {
+        // Well-scaled small LP.
+        let (a, m, n, c, b, l, u) = small_lp();
+        let (cp, ri, v) = dense_to_csc(&a, m, n);
+        for &y0 in &[-3.7, -1.0, 0.0, 0.5, 2.3, 10.0] {
+            let dense = ns_safe_bound(&[y0], &c, &a, m, n, &b, &l, &u);
+            let csc = ns_safe_bound_csc(&[y0], &c, &cp, &ri, &v, m, n, &b, &l, &u);
+            assert_eq!(dense, csc, "mismatch at y={y0} (well-scaled)");
+        }
+        // Ill-scaled LP (1e8 row) — the case DD precision exists for.
+        let a2 = vec![
+            1e8, 1.0, 1.0, 0.0, //
+            0.0, 1.0, 0.0, 1.0, //
+        ];
+        let (m2, n2) = (2, 4);
+        let c2 = vec![-1.0, -1.0, 0.0, 0.0];
+        let b2 = vec![1e8, 5.0];
+        let l2 = vec![0.0, 0.0, 0.0, 0.0];
+        let u2 = vec![1.0, 10.0, REFINE_INF, REFINE_INF];
+        let (cp2, ri2, v2) = dense_to_csc(&a2, m2, n2);
+        for &yy in &[[-1.0, -1.0], [0.3, 2.7], [1e-7, -4.0]] {
+            let dense = ns_safe_bound(&yy, &c2, &a2, m2, n2, &b2, &l2, &u2);
+            let csc = ns_safe_bound_csc(&yy, &c2, &cp2, &ri2, &v2, m2, n2, &b2, &l2, &u2);
+            assert_eq!(dense, csc, "mismatch at y={yy:?} (ill-scaled)");
         }
     }
 }

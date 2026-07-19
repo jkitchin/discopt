@@ -650,6 +650,30 @@ class SolverTuning:
     node_nlp_stride: int = field(default_factory=lambda: _env_int("DISCOPT_NODE_NLP_STRIDE", 4))
     """Solve the node NLP every k-th node (``DISCOPT_NODE_NLP_STRIDE``, default 4)."""
 
+    phase2_dbbt: bool = field(
+        default_factory=lambda: _env_flag("DISCOPT_PHASE2_DBBT", default=False)
+    )
+    """Per-node cheap reduced-cost DBBT + cutoff-FBBT (Phase 2, issue #764).
+
+    ``DISCOPT_PHASE2_DBBT`` (**default OFF**, bound-changing / Regime-2). After each
+    spatial node LP solve, run ``reduce_node`` — free duality-based bound tightening
+    from the node LP's reduced costs (``d_j > 0 ⇒ x_j ≤ l_j + gap/d_j``,
+    ``gap = cutoff − safe_bound ≥ 0``, integer endpoints rounded inward) plus
+    cutoff-FBBT — and feed the tightened box to the children via ``set_node_bounds``.
+    This is BARON's signature move: cheap reduction from information the node LP
+    already produced (no extra LP solves), the intended replacement for the
+    exhaustive ~2n-LP per-node OBBT on the loose-root / big-tree class.
+
+    Distinct from the retired ``DISCOPT_NODE_REDUCE`` (removed #581): that flag ran
+    the same reduction but the reduced costs it needed were produced ONLY on the
+    incremental/warm LP path, so on the non-composite-lift class (``tanksize`` etc.,
+    which takes the cold path) it silently no-op'd — the #685 net-negative verdict.
+    #764 step 1 added cold-path marginals, so DBBT now actually fires there; this
+    flag re-introduces the sound consumer on top of that prerequisite. Ships OFF
+    until the graduation panel (cert-clean + net-positive), and until the step-3
+    OBBT-coupling entry experiment shows total-wall-to-close improves without
+    regressing the #685 set."""
+
     adaptive_nlp: bool = field(
         default_factory=lambda: _env_flag("DISCOPT_ADAPTIVE_NLP", default=True)
     )

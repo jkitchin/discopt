@@ -433,3 +433,100 @@ the mechanism SCIP uses to reach +16%. That is a bounded-increment-free campaign
 
 **Corrected not-the-lever list:** OBBT/range-reduction for `*hfsg` (§R2-6 target — falsified in
 R3-1; the relaxer was discarded, not weak).
+
+### R3-4 Graduation to default-ON (#764, 2026-07-18)
+
+Issue #764 (`tanksize` closure-speed gap) surfaced the same pathology outside the `*hfsg` family:
+a bilinear tank-sizing model with continuous vars declared `[0, inf]`, whose McCormick relaxer was
+discarded by the raw-box probe, leaving the frontier dual bound at 0.8529 (looser than BARON's
+root 0.9553). This is the R3-2 lever's target class, so #764 ran the CLAUDE.md §5 Regime-2
+graduation gate over the **complete affected set** of the vendored corpus.
+
+**Panel scope.** The flag can only flip the keep/discard decision when the declared box is
+unbounded (on a bounded box both probe boxes are finite → same decision → provable no-op,
+confirmed byte-identical on `ex1221/ex1222/st_miqp1/flay02m/nvs01`). So the affected set is exactly
+the 24 vendored instances with ≥1 infinite declared bound; the panel ran all 24 ON-vs-OFF at a 30 s
+budget with the `global50` oracle for soundness.
+
+**Result — both gate bars green:**
+- *cert-clean*: 0 unsound bounds, no dual bound past its reference optimum, no certificate-invariant
+  (`bound ≤ incumbent` / `≥` for max) violation, no incumbent past its oracle, **0 certification
+  regressions**. The 3 no-bound-change instances (`bchoco07`, `clay0303hfsg`, `heatexch_gen2`) only
+  explore more nodes (cheaper LP nodes), same/less wall.
+- *net-positive*: `syn05hfsg` moved **feasible → optimal** (upper bound 1310.6 → 837.73, wall
+  30.2 → 15.2 s, nodes 557 → 185) and `tanksize`'s root dual bound tightened **0.8529 → 0.9063**;
+  every previously-certifying instance stayed byte-stable (identical bound and node count) with no
+  wall or bound regression.
+
+One passing graduation-gate run meeting both bars suffices under the 2026-07-17 policy, so
+`_root_lp_probe_tight_enabled()` now **defaults ON**; `DISCOPT_ROOT_LP_PROBE_TIGHT=0` restores the
+legacy raw-box probe. Regression guard: `test_default_is_graduated_on` (default behaves like the ON
+arm) + `test_flag_defaults_on_and_respects_optout` in `python/tests/test_issue282_root_lp_probe.py`.
+Panel artifact: `discopt_benchmarks/results/issue764_root_lp_probe_tight_graduation_panel.json`.
+
+**Residual blocker after #764 (dug in 2026-07-18).** `tanksize` still does not *certify* within
+seconds. The optimal incumbent is found at **node 0** (`incumbent=1.26864` = opt), so this is purely
+a bound-closure problem — it fails on two compounding walls:
+
+- *Wall 1 — the relaxation bound climbs too slowly.* The McCormick envelope on the bilinear
+  `50·xᵢ·xⱼ` terms is weak; #764 lifts the frontier bound 0.853→0.92 (per-node OBBT adds a real
+  +0.03 over relaxer-alone) but that is still below BARON's *root* 0.955, so closing 0.92→1.27
+  demands a large tree.
+- *Wall 2 — nodes are slow (~2 nodes/s), LP-bound.* Per-node cost (~860 ms/node): ~32% Rust simplex
+  (the node relaxation bound + duality/OBBT tightening — ~2n LP probes/node over the
+  functionally-dependent intermediates x27–x35), ~10% pounce NLP, ~35% Python/JAX orchestration
+  (`numpy.asarray` marshaling ~11k calls/node, `nonlinear_bound_tightening` re-walking the static
+  expression DAG ~58k calls/node, interval arithmetic ~7k calls/node). Toggling per-node OBBT off
+  doubles throughput to 3.3 nodes/s but drops the bound to 0.89 and still does not close — the two
+  walls compound.
+
+Note **#723 is CLOSED (completed, 2026-07-18)**: it fixed the convexity-cache / RENS-governor /
+JAX-dispatch overheads and closed its per-node-LP lever as *measured-and-bounded* (the OBBT probes
+are productive, and no implementable warm-start strategy reaches the simplex floor). The only
+needle-movers it named for this class are explicitly out of scope and **currently untracked**:
+(1) a non-LP-probe **bounding scheme for the functionally-dependent-variable class** (replace the
+~2n LP probes/node), and (2) **engine-level simplex pivot throughput** on the degenerate
+objective-flip walk. #764 closes the "relaxer wrongly discarded" half; full closure of `tanksize`
+needs the §R3-5 lever.
+
+### R3-5 `tanksize` residual is a root-relaxation-*quality* wall, not box tightness or throughput (2026-07-18)
+
+Attempting to close `tanksize` after #764, every **sound, in-tree lever was tried and falsified as a
+close** (entry-experiment discipline, §4 — measurements recorded so the negatives are binding):
+
+Measured directly on the root McCormick LP over the FBBT box (`MccormickLPRelaxer.solve_at_node`),
+integers relaxed:
+
+| root relaxation lever | root LP bound | verdict |
+|---|---|---|
+| McCormick (baseline) | **0.838** | — |
+| + level-1 RLT (`rlt_level1=True` / `DISCOPT_RLT=1`) | 0.838 | **exactly no-op** — RLT-inert on this structure (#727 lesson, confirmed on a real instance) |
+| + `obbt_tighten_root`, 30 rounds (121 bounds tightened) | 0.838 | **exactly no-op** — box tightening does not move the root |
+| + Shor SDP (`DISCOPT_SHOR_SDP_ROOT_BOUND=1`) | 0.840 | SDP-inert |
+| full-solve frontier with #764 relaxer + per-node OBBT | 0.92 @ dozens of nodes | frontier climbs, root stuck |
+
+The bilinear structure is dense and pooling-like: 47 products with heavily shared variables (x0
+multiplies x18/x21/x24/x6/x9/x12; x18 multiplies x0/x6/x9/x12). BARON's root reaches **0.955**, so a
+stronger relaxation demonstrably exists (the continuous-relaxation global optimum is ≥ 0.955), but
+none of discopt's current machinery captures it.
+
+**Why box tightening can't fix it.** FBBT already derives finite boxes for the "unbounded" flows
+(`x0∈[1,40]`, `x6∈[0,992]`, `x7∈[0,1680]`); they are not unbounded, just *wide*. The McCormick
+envelope gap on a bilinear `xᵢ·xⱼ` scales with the box-width product, and OBBT derives its bounds
+*from that same loose McCormick* — a chicken-and-egg (loose relaxation → weak OBBT → loose
+relaxation). Directly measured: 30 OBBT rounds tighten 121 bounds yet leave x0/x6/x7 wide (they are
+the free vars in the objective-defining bilinears) and the root LP at 0.838, unchanged. BARON/SCIP
+break it with stronger relaxations + reliability branching, not more OBBT.
+
+**Extrapolated node budget.** With every bound lever on, the frontier climbs 0.906→1.079 (199
+nodes)→1.145 (677 nodes); reaching the 1.2686 optimum needs *thousands* of nodes. So even a 10×
+throughput win (lever 2) would not reach "seconds" — the binding constraint is **root-relaxation
+quality** (Wall 1), which neither #764 nor any existing relaxation flag moves.
+
+**Disposition.** `tanksize` closure is a **research-grade relaxation lever**, not a bounded in-tree
+change: term-wise/joint bilinear tightening (dense multi-term McCormick, structured RLT that is
+non-inert on this bilinear-in-inequality form, or an αBB/edge-concave enhancement) that lifts the
+*root* toward BARON's 0.955. Per CLAUDE.md §1–§3 no single-instance hack or gate weakening is
+admissible to force a close, so this is left as scoped, evidenced future work rather than shipped
+unsound. #764's relaxer fix (frontier 0.853→0.92, and `syn05hfsg` certified) is the sound,
+validated increment that ships now.

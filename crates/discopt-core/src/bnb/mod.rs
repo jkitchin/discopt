@@ -2,9 +2,14 @@
 
 pub mod branching;
 pub mod in_tree_presolve;
+pub mod mccormick_patch;
 pub mod milp_driver;
 pub mod node;
+pub mod obbt_sweep;
 pub mod pool;
+pub mod spatial_kernel;
+pub mod spatial_propagate;
+pub mod spatial_tree;
 pub mod tree_manager;
 
 // Re-export primary public types for convenience.

@@ -225,6 +225,16 @@ class UniformRelaxation:
     # integrality is applied by the delegate; this carries the ENGINE-created integer
     # aux (e.g. the trig-square selector binaries) so the delegate marks them too.
     integrality: list = dataclasses.field(default_factory=list)
+    # Univariate intrinsic atoms ``w = fname(coeff*x_i + const)`` whose argument is
+    # affine in ONE original variable — entries ``(fname, w, var_idx, coeff, const)``.
+    # Exposed so the native-kernel producer (#764) can emit the box-independent term
+    # descriptor (e.g. ``sqrt``) whose envelope the Rust kernel regenerates per box.
+    univariate_atom_specs: list = dataclasses.field(default_factory=list)
+    # Affine-form product envelopes `w = A*B` emitted by `_emit_mccormick` — entries
+    # `(w, dict(A.coeffs), A.const, dict(B.coeffs), B.const)`. Exposed so the
+    # native-kernel producer (#764) can emit a `BlfTerm` per product (bilinear and the
+    # variable × linear-form / form × form products the factorable engine folds).
+    bilinear_linform_specs: list = dataclasses.field(default_factory=list)
 
 
 # --------------------------------------------------------------------------- #
@@ -636,6 +646,14 @@ class _Builder:
         # AMP ``disc_state`` recovery) can add per-interval secant/tangent envelopes
         # when ``x_i`` is partitioned. Entries: ``(fname, w, var_idx, coeff, const)``.
         self.univariate_atom_specs: list[tuple[str, int, int, float, float]] = []
+        # Affine-form product envelopes emitted by ``_emit_mccormick`` — each entry
+        # ``(w, dict(A.coeffs), A.const, dict(B.coeffs), B.const)`` records the
+        # box-INDEPENDENT structure of a product ``w = A*B`` of two affine forms (a
+        # bare bilinear x_i*x_j, or the variable × linear-form / form × form products
+        # the factorable engine folds). The native-kernel producer (#764) emits a
+        # ``BlfTerm`` from each so the Rust kernel regenerates the McCormick rows per
+        # box; the interval bounds are recomputed there, so only the structure is kept.
+        self.bilinear_linform_specs: list[tuple[int, dict, float, dict, float]] = []
         self._ivbox = _interval_box(model, flat_lb, flat_ub)
         # Validation-only: aux column -> the modeling Expression whose exact value
         # that column represents (the node itself, a relaxed power, or a McCormick
@@ -1805,6 +1823,11 @@ def _emit_mccormick(ctx: _Builder, w: int, la: LinForm, ba, lb_: LinForm, bb) ->
     """
     aL, aH = ba
     bL, bH = bb
+    # Record the box-independent product structure for the native-kernel producer
+    # (#764): w = A*B with A=la, B=lb_. Bounds are recomputed per box by the kernel.
+    ctx.bilinear_linform_specs.append(
+        (w, dict(la.coeffs), float(la.const), dict(lb_.coeffs), float(lb_.const))
+    )
     for coef_a, coef_b, cc, sign in (
         (bL, aL, -aL * bL, +1.0),  # w >= aL*b + bL*a - aL*bL
         (bH, aH, -aH * bH, +1.0),  # w >= aH*b + bH*a - aH*bH
@@ -3247,6 +3270,8 @@ def build_uniform_relaxation(
         ratio_map=dict(ctx.ratio_map),
         finite_domain_trig_square_tables=list(ctx.finite_domain_trig_square_tables),
         integrality=list(ctx.integrality),
+        univariate_atom_specs=list(ctx.univariate_atom_specs),
+        bilinear_linform_specs=list(ctx.bilinear_linform_specs),
     )
 
 

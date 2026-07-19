@@ -237,6 +237,18 @@ class MilpRelaxationResult:
     # to "unavailable" so the generic / MILP-B&B paths are unaffected.
     safe_bound: Optional[float] = None
     farkas_certified: bool = False
+    # Node-LP marginals (cert:T2.4a / Phase 2), populated only when a solve is
+    # requested with ``want_marginals=True`` on the direct warm-simplex pure-LP
+    # path (``_solve_lp_warm``). ``row_dual`` is the row-dual vector ``y`` of the
+    # standard-form ``A_ub x <= b_ub`` system; ``reduced_costs`` is ``d = c - Aᵀy``
+    # over the FULL column set of THIS solve (the caller slices the first ``n_orig``
+    # structural columns for DBBT). Both are on the ORIGINAL (un-equilibrated)
+    # objective/constraint scale — the direct path never rescales — so they need no
+    # unscaling. A pure read-only side-channel: nothing in the default path consumes
+    # them, so populating them is bound-neutral. ``None`` on every other path
+    # (equilibrated/generic/MILP-B&B), where DBBT simply no-ops (still sound).
+    row_dual: Optional[np.ndarray] = None
+    reduced_costs: Optional[np.ndarray] = None
 
 
 class MilpRelaxationModel:
@@ -285,6 +297,8 @@ class MilpRelaxationModel:
         time_limit: Optional[float] = None,
         gap_tolerance: float = 1e-4,
         backend: str = "auto",
+        *,
+        want_marginals: bool = False,
     ) -> MilpRelaxationResult:
         from discopt.solvers import SolveStatus
         from discopt.solvers.lp_backend import get_milp_solver
@@ -309,7 +323,7 @@ class MilpRelaxationModel:
             and self._A_ub is not None
             and _tuning().lp_warmstart
         ):
-            warm = self._solve_lp_warm()
+            warm = self._solve_lp_warm(want_marginals=want_marginals)
             # A warm-start ``infeasible`` on an ill-conditioned LP can be a
             # numerical false-negative; fall through to the equilibrated re-verify
             # below rather than trust it (a false-infeasible would unsoundly prune
@@ -480,7 +494,7 @@ class MilpRelaxationModel:
             status=status_str, objective=obj, bound=bound, x=result.x, safe_bound=safe_bound
         )
 
-    def _solve_lp_warm(self) -> Optional["MilpRelaxationResult"]:
+    def _solve_lp_warm(self, *, want_marginals: bool = False) -> Optional["MilpRelaxationResult"]:
         """Pure-LP warm-started re-solve via the Rust dual simplex.
 
         Reuses the cached optimal basis from the previous ``.solve()`` when the
@@ -490,6 +504,11 @@ class MilpRelaxationModel:
         path (binding unavailable, or an ``iter_limit``/``numerical`` exit). The
         returned objective/bound is the true LP optimum — warm-start is a pure
         speed optimization, never a correctness one.
+
+        When ``want_marginals`` is set and the solve is optimal, the returned
+        result additionally carries ``row_dual`` (``y``) and ``reduced_costs``
+        (``d = c - Aᵀy`` over the full column set), both on the original scale (this
+        path never rescales). Pure side-channel — never affects the bound/status.
         """
         from discopt.solvers import SolveStatus
 
@@ -546,6 +565,34 @@ class MilpRelaxationModel:
         safe_bound = None
         if cert.safe_bound is not None and self._objective_bound_valid:
             safe_bound = float(cert.safe_bound) + self._obj_offset
+        row_dual = None
+        reduced_costs = None
+        if (
+            want_marginals
+            and status_str == "optimal"
+            and self._objective_bound_valid
+            and getattr(cert, "dual", None) is not None
+        ):
+            # d = c - Aᵀy over the FULL column set of this (original-scale) LP. The
+            # objective is stored scaled by ``_obj_sign``/offset; reduced costs are a
+            # property of the constraint geometry + objective *direction*, and DBBT
+            # only reads their SIGN and magnitude relative to the same-scale bound
+            # gap, so compute them on the stored ``self._c`` (the solver's own
+            # objective row) to stay self-consistent with ``safe_bound``. A shape
+            # mismatch (cuts changed the column count vs the cached ``_c``) yields
+            # ``None`` — sound, DBBT no-ops. Never raises into the solve path.
+            try:
+                y = np.asarray(cert.dual, dtype=np.float64).ravel()
+                c_vec = np.asarray(self._c, dtype=np.float64).ravel()
+                A_csr = sp.csr_matrix(self._A_ub)
+                if A_csr.shape[0] == y.shape[0] and A_csr.shape[1] == c_vec.shape[0]:
+                    d = c_vec - np.asarray(A_csr.T @ y, dtype=np.float64).ravel()
+                    if np.all(np.isfinite(d)):
+                        row_dual = y
+                        reduced_costs = d
+            except Exception:  # pragma: no cover - defensive; marginals are optional
+                row_dual = None
+                reduced_costs = None
         return MilpRelaxationResult(
             status=status_str,
             objective=obj,
@@ -553,6 +600,8 @@ class MilpRelaxationModel:
             x=result.x,
             safe_bound=safe_bound,
             farkas_certified=bool(cert.farkas_certified),
+            row_dual=row_dual,
+            reduced_costs=reduced_costs,
         )
 
     def _solve_lp_warm_equilibrated(self) -> Optional["MilpRelaxationResult"]:
