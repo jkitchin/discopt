@@ -9,15 +9,18 @@
 //! module is the Rust port of that closed-form math, so the per-node envelope patch
 //! can run inside the native node loop with no Python boundary crossing.
 //!
-//! Scope of this first increment: the three term families the Python `_patch`
-//! actually dispatches on —
+//! Current coverage — the term families the Python `_patch` dispatches on, plus the
+//! univariate `sqrt` atom `tanksize` needs:
+//!
 //!   * bilinear products `w = x_i * x_j` (`_bilinear_rows`, 4 McCormick rows);
 //!   * integer powers `s = x_i^p` on a sign-definite box (`_monomial_rows`, the
 //!     secant + tangents at `li`, the box midpoint, and `ui` — 4 rows; `p = 2` is
 //!     the plain square);
-//!   * affine squares `w = (a*x_j + c)^2` (`_affine_square_rows`, 4 rows).
-//! Subsequent increments extend it to `sqrt` / general fractional-power / trilinear
-//! terms (the coverage `tanksize` needs).
+//!   * affine squares `w = (a*x_j + c)^2` (`_affine_square_rows`, 4 rows);
+//!   * univariate `sqrt` (`_emit_1d`, secant + 3 tangents; the concave case).
+//!
+//! Subsequent increments extend the univariate path to general fractional-power /
+//! log / exp atoms and to trilinear products.
 //!
 //! CRITICAL — bound-neutrality: the formulas here mirror the functions
 //! `IncrementalMcCormickLP._patch` calls (`_bilinear_rows`, `_monomial_rows`,
@@ -176,6 +179,123 @@ pub fn affine_square_rows(j: usize, w: usize, coeff: f64, cst: f64, li: f64, ui:
     ]
 }
 
+/// Minimum base-box width below which the 1-D envelope collapses to the aux
+/// interval floor (matches `uniform_relax._MIN_WIDTH`).
+pub const MIN_WIDTH: f64 = 1e-12;
+
+/// A univariate atom `w = f(t)` with `t = coeff*x + const`, relaxed by its exact
+/// two-sided 1-D envelope (secant + tangents). The variants carry their own
+/// curvature and closed-form `f`/`f'`; extend this enum to widen coverage.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Univariate {
+    /// `f(t) = sqrt(t)` — concave on `t >= 0` (the coverage `tanksize` needs).
+    Sqrt,
+}
+
+/// Curvature of a univariate atom over its (sign-definite) box.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Curv {
+    /// Convex: secant overestimates, tangents underestimate.
+    Convex,
+    /// Concave: secant underestimates, tangents overestimate.
+    Concave,
+}
+
+impl Univariate {
+    /// The atom's curvature over its valid box.
+    pub fn curvature(&self) -> Curv {
+        match self {
+            Univariate::Sqrt => Curv::Concave,
+        }
+    }
+
+    /// Evaluate `f(t)`.
+    pub fn f(&self, t: f64) -> f64 {
+        match self {
+            Univariate::Sqrt => t.sqrt(),
+        }
+    }
+
+    /// Evaluate `f'(t)`.
+    pub fn fp(&self, t: f64) -> f64 {
+        match self {
+            Univariate::Sqrt => 0.5 / t.sqrt(),
+        }
+    }
+}
+
+/// The exact two-sided 1-D envelope of `w = atom(coeff*x + const)` over
+/// `x in [x_lo, x_hi]` — secant + tangents at `t_lo`, the box midpoint, and `t_hi`
+/// (`t = coeff*x + const`). Mirrors `uniform_relax._emit_1d` row-for-row (same
+/// secant/tangent construction, same sign convention per curvature, same
+/// `(secant, tan@lo, tan@mid, tan@hi)` order).
+///
+/// Returns `None` — matching `_emit_1d`'s `tight = False` — when the base box is
+/// degenerate/unbounded (`width < MIN_WIDTH`) or `f` is non-finite on the box
+/// (e.g. `sqrt` of a negative endpoint); the caller then relies on the aux
+/// interval bound alone. Each row is `(coeff_on_x, coeff_on_w, rhs)`, cols `(x, w)`.
+#[inline]
+pub fn univariate_rows(
+    x: usize,
+    w: usize,
+    coeff: f64,
+    cst: f64,
+    x_lo: f64,
+    x_hi: f64,
+    atom: Univariate,
+) -> Option<[EnvRow; 4]> {
+    let ta = coeff * x_lo + cst;
+    let tb = coeff * x_hi + cst;
+    let (t_lo, t_hi) = if ta <= tb { (ta, tb) } else { (tb, ta) };
+    let width = t_hi - t_lo;
+    if !t_lo.is_finite() || !t_hi.is_finite() || width < MIN_WIDTH {
+        return None;
+    }
+    let flo = atom.f(t_lo);
+    let fhi = atom.f(t_hi);
+    if !flo.is_finite() || !fhi.is_finite() {
+        return None;
+    }
+    let slope = (fhi - flo) / width;
+    let mid = 0.5 * (t_lo + t_hi);
+    // sign = +1 for convex, -1 for concave (mirrors _emit_1d's ±1.0 dispatch).
+    let s = match atom.curvature() {
+        Curv::Convex => 1.0,
+        Curv::Concave => -1.0,
+    };
+    let row = |cx: f64, cw: f64, rhs: f64| EnvRow {
+        cols: [x, w, 0],
+        coeffs: [cx, cw, 0.0],
+        nnz: 2,
+        rhs,
+    };
+    // secant: sign*w <= sign*(flo + slope*(t - t_lo)); intercept a = flo - slope*t_lo.
+    let a = flo - slope * t_lo;
+    let secant = row(-s * slope * coeff, s, s * (a + slope * cst));
+    // tangent at t0: sign*w >= sign*(f(t0) + f'(t0)*(t - t0)).
+    let tangent = |t0: f64| {
+        let g = atom.f(t0);
+        let gp = atom.fp(t0);
+        let intercept = g - gp * t0;
+        row(s * gp * coeff, -s, -s * intercept - s * gp * cst)
+    };
+    Some([secant, tangent(t_lo), tangent(mid), tangent(t_hi)])
+}
+
+/// Auxiliary-variable bounds for `w = sqrt(coeff*x + const)` over `x in [x_lo,x_hi]`
+/// (sqrt is monotone increasing on `t >= 0`, so the aux range is the image of the
+/// base-box endpoints). Returns `None` if the base box dips below 0 (sqrt undefined).
+#[inline]
+pub fn sqrt_aux_bounds(coeff: f64, cst: f64, x_lo: f64, x_hi: f64) -> Option<(f64, f64)> {
+    let ta = coeff * x_lo + cst;
+    let tb = coeff * x_hi + cst;
+    let (t_lo, t_hi) = if ta <= tb { (ta, tb) } else { (tb, ta) };
+    if t_lo < 0.0 {
+        return None;
+    }
+    Some((t_lo.sqrt(), t_hi.sqrt()))
+}
+
 /// Auxiliary-variable bounds for `w = x_i * x_j` — the min/max over the box corners.
 /// Mirrors `_bilinear_aux_bounds`.
 #[inline]
@@ -320,6 +440,55 @@ mod tests {
         assert_row_eq(&rows[2], &[0.0, -1.0], 0.0);
         assert_row_eq(&rows[3], &[20.0, -1.0], 35.0);
         assert_eq!(affine_square_aux_bounds(2.0, -1.0, -2.0, 3.0), (0.0, 25.0));
+    }
+
+    #[test]
+    fn sqrt_bare_matches_emit_1d_reference() {
+        // _emit_1d(sqrt, t=x, [1,4], concave): bare sqrt(x), col x=0, col w=1.
+        let rows = univariate_rows(0, 1, 1.0, 0.0, 1.0, 4.0, Univariate::Sqrt).unwrap();
+        assert_row_eq(&rows[0], &[0.333333333333, -1.0], -0.666666666667); // secant
+        assert_row_eq(&rows[1], &[-0.5, 1.0], 0.5); // tangent @ t_lo=1
+        assert_row_eq(&rows[2], &[-0.316227766017, 1.0], 0.790569415042); // tangent @ mid=2.5
+        assert_row_eq(&rows[3], &[-0.25, 1.0], 1.0); // tangent @ t_hi=4
+        assert_eq!(sqrt_aux_bounds(1.0, 0.0, 1.0, 4.0), Some((1.0, 2.0)));
+    }
+
+    #[test]
+    fn sqrt_affine_matches_emit_1d_reference() {
+        // _emit_1d(sqrt, t=2x+1, x in [1,4] -> t in [3,9], concave).
+        let rows = univariate_rows(0, 1, 2.0, 1.0, 1.0, 4.0, Univariate::Sqrt).unwrap();
+        assert_row_eq(&rows[0], &[0.422649730810, -1.0], -1.309401076759); // secant
+        assert_row_eq(&rows[1], &[-0.577350269190, 1.0], 1.154700538379); // tangent @ t_lo=3
+        assert_row_eq(&rows[2], &[-0.408248290464, 1.0], 1.428869016624); // tangent @ mid=6
+        assert_row_eq(&rows[3], &[-0.333333333333, 1.0], 1.666666666667); // tangent @ t_hi=9
+    }
+
+    /// Degenerate/undefined boxes yield no tight rows (aux floor only), matching
+    /// `_emit_1d`'s `tight = False` return.
+    #[test]
+    fn sqrt_degenerate_or_undefined_yields_none() {
+        // pinned base box (width 0)
+        assert!(univariate_rows(0, 1, 1.0, 0.0, 2.0, 2.0, Univariate::Sqrt).is_none());
+        // base dips below zero -> sqrt undefined at the low endpoint
+        assert!(univariate_rows(0, 1, 1.0, 0.0, -1.0, 4.0, Univariate::Sqrt).is_none());
+        assert!(sqrt_aux_bounds(1.0, 0.0, -1.0, 4.0).is_none());
+    }
+
+    /// Concave sqrt hull validly contains w = sqrt(t) over the box, and the secant
+    /// underestimates while the tangents overestimate.
+    #[test]
+    fn sqrt_hull_valid_and_two_sided() {
+        let (coeff, cst, x_lo, x_hi) = (2.0, 1.0, 1.0, 4.0);
+        let rows = univariate_rows(0, 1, coeff, cst, x_lo, x_hi, Univariate::Sqrt).unwrap();
+        let n = 20;
+        for a in 0..=n {
+            let xi = x_lo + (x_hi - x_lo) * (a as f64) / (n as f64);
+            let w = (coeff * xi + cst).sqrt();
+            let x = [xi, w];
+            for r in &rows {
+                assert!(sat(r, &x, 1e-9), "sqrt true point {xi} cut: residual {}", r.residual(&x));
+            }
+        }
     }
 
     // --- Envelope validity / geometry (belt-and-braces over the fixture equality). ---
