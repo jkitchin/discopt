@@ -143,8 +143,13 @@ pub fn solve_spatial_tree(
     let mut node_count = 0usize;
     let mut n_lp_solves = 0usize;
 
-    // Global lower bound = min over open nodes of their best-known bound. Tracked as
-    // the min of stack entries' parent_bound; refreshed after each pop.
+    // Global lower bound = min, over every region that leaves the tree WITHOUT being
+    // subdivided (pruned / infeasible / feasible-leaf / width-exhausted), of a valid
+    // lower bound for that region. Each contribution is a safe bound (`<=` the
+    // region's true optimum), so the accumulated min is `<=` the true global optimum
+    // — a rigorous lower bound. Branched regions contribute nothing (their children
+    // do). Open stack nodes carry their `parent_bound` as a valid region lower bound.
+    let mut global_lb_closed = f64::INFINITY;
     let open_min = |stack: &[(Vec<f64>, Vec<f64>, f64)]| -> f64 {
         stack
             .iter()
@@ -153,16 +158,19 @@ pub fn solve_spatial_tree(
     };
 
     while let Some((lo, hi, parent_bound)) = stack.pop() {
-        // Fathom by the parent bound if the incumbent already dominates it.
+        // Fathom by the parent bound if the incumbent already dominates it. The
+        // region's valid lower bound is `parent_bound`.
         if let Some(inc) = incumbent {
             if parent_bound >= inc - config.gap_tol {
+                global_lb_closed = global_lb_closed.min(parent_bound);
                 continue;
             }
         }
         if node_count >= config.max_nodes {
-            let gb = incumbent
-                .map(|inc| inc.min(open_min(&stack)).min(parent_bound))
-                .unwrap_or_else(|| open_min(&stack).min(parent_bound));
+            // Global bound = min(closed regions, open frontier, this unpopped node).
+            let gb = global_lb_closed
+                .min(open_min(&stack))
+                .min(parent_bound);
             return SpatialTreeResult {
                 status: TreeStatus::NodeLimit,
                 incumbent,
@@ -177,14 +185,15 @@ pub fn solve_spatial_tree(
         let node = solve_spatial_node(spec, &lo, &hi, config.run_obbt, opts);
         n_lp_solves += node.n_lp_solves;
 
-        // Infeasible node: nothing below it.
+        // Infeasible node: empty region, contributes +inf (nothing).
         if node.status != LpStatus::Optimal {
             continue;
         }
         let bound = node.bound; // rigorous safe lower bound
-        // Fathom by bound vs incumbent.
+        // Fathom by bound vs incumbent. The region's valid lower bound is `bound`.
         if let Some(inc) = incumbent {
             if bound >= inc - config.gap_tol {
+                global_lb_closed = global_lb_closed.min(bound);
                 continue;
             }
         }
@@ -229,14 +238,17 @@ pub fn solve_spatial_tree(
         let terms_tight = worst_gap <= config.mccormick_tol;
 
         if int_ok && terms_tight {
-            // Feasible: accept if it improves the incumbent. The objective is linear
-            // over the (now-tight) lifted columns, so `bound == cᵀx` is the true
-            // objective at this feasible point; use the LP objective value cᵀx.
+            // Feasible leaf: accept if it improves the incumbent. The objective is
+            // linear over the (now-tight) lifted columns, so `cᵀx` is the true
+            // objective at this feasible point. The region contributes the SAFE node
+            // bound (`<=` its true optimum), NOT the feasible value cᵀx — an upper
+            // bound would corrupt the global lower bound.
             let obj = dot(&spec.c, x);
             if incumbent.map(|inc| obj < inc - 1e-12).unwrap_or(true) {
                 incumbent = Some(obj);
                 incumbent_x = x[..spec.n_cols].to_vec();
             }
+            global_lb_closed = global_lb_closed.min(bound);
             continue;
         }
 
@@ -248,13 +260,16 @@ pub fn solve_spatial_tree(
         } else if let Some(col) = branch_col {
             if width(col) <= config.min_box_width {
                 // Term is un-splittable (already pinned) yet not tight — numerical;
-                // accept the box as exhausted to avoid an infinite loop.
+                // accept the box as exhausted to avoid an infinite loop. The region's
+                // valid lower bound is the safe node `bound`.
+                global_lb_closed = global_lb_closed.min(bound);
                 continue;
             }
             // Spatial branch at the LP value, pulled to the interior.
             let p = clamp_interior(x[col], lo[col], hi[col]);
             (col, p)
         } else {
+            global_lb_closed = global_lb_closed.min(bound);
             continue;
         };
 
@@ -284,14 +299,18 @@ pub fn solve_spatial_tree(
         }
     }
 
-    // Worklist empty: the gap is closed. Global bound = incumbent (proven optimal),
-    // or +inf incumbent-less (infeasible).
+    // Worklist empty: every region was explored. The reported bound is the min safe
+    // bound over all closed regions — a rigorous global lower bound (`<=` the true
+    // optimum), never the incumbent (an upper bound). It is `<=` the incumbent
+    // because the feasible leaf that set the incumbent contributed its own safe bound.
     match incumbent {
         Some(inc) => SpatialTreeResult {
             status: TreeStatus::Optimal,
             incumbent,
             incumbent_x,
-            bound: inc,
+            // Clamp to the incumbent so a loose safe bound never reports a gap wider
+            // than the true one; still `<=` the true optimum.
+            bound: global_lb_closed.min(inc),
             node_count,
             n_lp_solves,
         },
