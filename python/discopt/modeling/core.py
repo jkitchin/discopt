@@ -1472,6 +1472,16 @@ class SolveResult:
     # Examiner-style validation report (populated if validate=True).
     validation_report: Optional[object] = None
 
+    # Set True when the final incumbent-verification guard (Model.solve, default
+    # on) found the returned incumbent INFEASIBLE in the ORIGINAL problem — a
+    # false primal, which can only arise from an unsound presolve mutation or a
+    # heuristic bug. When True, the incumbent (``x``/``objective``) has been
+    # withheld and ``gap_certified`` forced False (a false primal is never
+    # reported as a valid or certified solution). This should never be True on
+    # correct solver code; it exists so such a bug cannot silently escape as a
+    # false result (regression guard for the #770/#772 class).
+    incumbent_verification_failed: bool = False
+
     # LLM explanation (populated if llm=True)
     _explanation: Optional[str] = None
     _model: Optional["Model"] = None
@@ -3234,6 +3244,7 @@ class Model:
         node_callback: Optional[Callable] = None,
         solver: Optional[str] = None,
         validate: bool = False,
+        verify_incumbent: bool = True,
         gauss_newton: bool = False,
         tuning: Optional["SolverTuning"] = None,
         debug: Any = None,
@@ -3495,6 +3506,34 @@ class Model:
 
             _debug_guard = _dbg.attach(_dbg.make_session(debug))
 
+        # --- Final-incumbent verification snapshot (#772 guard, default on) ---
+        # ``solve_model``'s presolve mutates this model's constraint DAG IN PLACE,
+        # so any feasibility check taken AFTER the solve reflects the (possibly
+        # unsoundly) mutated model — it cannot catch a false primal produced by an
+        # unsound presolve (the #770 class, where the incumbent is feasible in the
+        # mutated model but not the original). Capture a COMPILED feasibility
+        # evaluator of the ORIGINAL model here, before any mutation: a compiled JAX
+        # evaluator has its structure baked in, so it remains a faithful, immutable
+        # representation of the original problem across the solve (verified: it
+        # agrees with a freshly parsed model after a real presolve run). Built once
+        # and cache-warm for the solve itself; fully wrapped so it can never break a
+        # solve.
+        import logging as _logging
+
+        _verify_snap = None
+        if verify_incumbent and self._constraints:
+            try:
+                from discopt._jax.nlp_evaluator import cached_evaluator
+
+                _verify_snap = (
+                    cached_evaluator(self),
+                    [v.name for v in self._variables],
+                )
+            except Exception as _snap_exc:  # pragma: no cover - defensive
+                _logging.getLogger("discopt.solver").debug(
+                    "incumbent-verification snapshot skipped: %s", _snap_exc
+                )
+
         # Install a process-global wall-clock deadline that JAX-compiled
         # while_loops (LP/QP/NLP IPM) can poll via host callback so they
         # self-terminate within ``time_limit + ε`` instead of running to
@@ -3524,6 +3563,46 @@ class Model:
 
         # Attach model reference and auto-generate LLM explanation
         result._model = self
+
+        # --- Verify the final incumbent against the ORIGINAL problem (#772) ---
+        # A reported incumbent that is INFEASIBLE in the original model is a false
+        # primal — the worst error class (CLAUDE.md §1). It cannot happen on correct
+        # solver code, but if an unsound presolve mutation or a heuristic bug ever
+        # produces one, this guard refuses to return it: withhold the incumbent and
+        # decertify, loudly. The check is deliberately LOOSE (abs tol 1e-3) so it can
+        # never flag an incumbent that is feasible within the solver's own tolerance
+        # — only a gross violation (the #770 violations were 0.4–17.6) trips it.
+        if _verify_snap is not None and result.x is not None:
+            try:
+                import numpy as _np
+
+                from discopt._jax.primal_heuristics import _check_constraint_feasibility
+
+                _snap_ev, _snap_names = _verify_snap
+                _flat = _np.concatenate(
+                    [
+                        _np.atleast_1d(_np.asarray(result.x[_n], dtype=_np.float64)).ravel()
+                        for _n in _snap_names
+                    ]
+                )
+                if not _check_constraint_feasibility(_snap_ev, _flat, tol=1e-3):
+                    _logging.getLogger("discopt.solver").error(
+                        "FALSE PRIMAL DETECTED: the reported incumbent (objective=%s) is "
+                        "INFEASIBLE in the original problem. This indicates an unsound presolve "
+                        "mutation or a heuristic bug. Withholding the incumbent and decertifying "
+                        "— the result is NOT a valid solution.",
+                        result.objective,
+                    )
+                    result.incumbent_verification_failed = True
+                    result.gap_certified = False
+                    result.x = None
+                    result.objective = None
+                    result.gap = None
+            except Exception as _ver_exc:  # pragma: no cover - defensive
+                _logging.getLogger("discopt.solver").debug(
+                    "incumbent verification skipped: %s", _ver_exc
+                )
+
         if llm:
             try:
                 result._explanation = result._explain_with_llm()
