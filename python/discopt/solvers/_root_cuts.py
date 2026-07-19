@@ -456,6 +456,7 @@ def generate_root_cuts(
     obj, x, duals, h = oa_converge()
     if x is None:
         return RootCutResult()
+    b0 = obj  # OA-only root LP bound (pre-cut baseline for the quality gate)
 
     applied: list = []
     productive = 0
@@ -507,6 +508,18 @@ def generate_root_cuts(
         obj = new_obj
         if not chosen:
             break
+
+    # Quality gate: keep the stage's output only when the cutting loop actually
+    # MOVED the root LP bound past the OA-only baseline. On instances where the
+    # OA outer approximation is structurally weak (measured: clay0303hfsg's
+    # root LP bound is 0.0 vs opt 26669 — trivial), the cuts cannot help the
+    # bound and their per-node row cost is pure regression; skipping them makes
+    # the flag a no-op there (trivially sound).
+    if obj is None or b0 is None:
+        return RootCutResult(rounds_run=rounds, productive_rounds=productive)
+    gain = (b0 - obj) if root.sense_max else (obj - b0)
+    if gain <= 1e-6 * max(1.0, abs(b0)):
+        return RootCutResult(rounds_run=rounds, productive_rounds=productive)
 
     # Keep only the cuts binding at the final LP optimum: they carry the final
     # bound; slack cuts only bloat every node NLP. (Validity is unaffected —

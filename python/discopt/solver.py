@@ -10977,7 +10977,13 @@ def _solve_nlp_bb(
                         _rc_body = _term if _rc_body is None else _rc_body + _term
                     if _rc_body is None:
                         continue
-                    _rc_body = _rc_body + (-float(_rc_r))
+                    # Model-row safety margin: GMI cuts are TIGHT at integer
+                    # points (measured slack ~5e-10 at a verified optimum), so
+                    # an unrelaxed row could reject a tolerance-feasible
+                    # incumbent at acceptance time. Relaxing by 1e-7·scale is
+                    # far below the bound signal but above FP noise.
+                    _rc_rhs = float(_rc_r) + 1e-7 * (1.0 + abs(float(_rc_r)))
+                    _rc_body = _rc_body + (-_rc_rhs)
                     model._constraints.append(_RCConstraint(_rc_body, "<=", 0.0, None))
                     _root_cut_count += 1
                 _root_cut_bound = _rc.lp_bound
