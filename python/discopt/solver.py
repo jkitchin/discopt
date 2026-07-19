@@ -1546,6 +1546,52 @@ def _cached_structural_linear_mask(evaluator, m):
     return mask
 
 
+def _reduce_node_and_stage(
+    reduce_node_fn,
+    model,
+    i,
+    batch_lb,
+    batch_ub,
+    lp_result,
+    tree,
+    cutoff,
+    pending,
+):
+    """Run per-node cheap reduction (Phase 2 / cert:T2.4b) and stage the child box.
+
+    Calls ``reduce_node`` on node ``i``'s box using the just-solved node LP's
+    marginals (``lp_result`` carries ``reduced_costs``/``safe_bound`` when the LP
+    requested them) plus cutoff-FBBT. On a strictly smaller box it updates
+    ``batch_lb[i]``/``batch_ub[i]`` (so downstream branching/hints see the tighter
+    box) and records it in ``pending[i]`` for the ``set_node_bounds`` child export.
+    Returns True iff the reduction proved the node infeasible under the cutoff (a
+    rigorous fathom). Tighten-only: any failure leaves the box unchanged."""
+    try:
+        cur_lb = np.asarray(batch_lb[i], dtype=np.float64)
+        cur_ub = np.asarray(batch_ub[i], dtype=np.float64)
+        # do_fbbt=False: the FREE reduced-cost DBBT only — no per-node Rust
+        # ``fbbt_with_cutoff`` repr rebuild. The rebuild is the expensive, disruptive
+        # part (it re-derives a full box that perturbs the child search); the DBBT
+        # from the node LP's own reduced costs is the ~zero-cost BARON-style move
+        # this lever is about. cutoff-FBBT can be re-added selectively in step 3.
+        res = reduce_node_fn(model, cur_lb, cur_ub, lp_result, cutoff, do_fbbt=False)
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.debug("reduce_node failed at node %d: %s", i, exc)
+        return False
+    if res.infeasible:
+        return True
+    if res.n_tightened > 0:
+        new_lb = np.maximum(cur_lb, res.lb)
+        new_ub = np.minimum(cur_ub, res.ub)
+        # Guard against an empty box from float noise (fathom).
+        if np.any(new_lb > new_ub + 1e-9):
+            return True
+        batch_lb[i] = new_lb.tolist()
+        batch_ub[i] = new_ub.tolist()
+        pending[i] = (new_lb, new_ub)
+    return False
+
+
 def _tighten_node_bounds_with_status(evaluator, node_lb, node_ub, cl_list, cu_list, max_rounds=3):
     """Constraint-based bound tightening (FBBT) for a single B&B node.
 
@@ -7419,12 +7465,27 @@ def solve_model(
             _pn_obbt_topk,
         )
 
-    # --- Per-node cheap reduction (cert:T2.4b) — DEPRECATED/REMOVED (#581) ---
-    # The ``DISCOPT_NODE_REDUCE`` flag (reduce_node: cutoff-FBBT + free DBBT from
-    # the node-LP reduced costs + integer RC-fixing, feeding the tightened box to
-    # the children) was default-OFF and graduated-gated net-negative (#685), so it
-    # was removed rather than left in default-OFF limbo. The default path never
-    # entered it; removing the gated branch is byte-identical.
+    # --- Per-node cheap reduced-cost DBBT (Phase 2, #764; flag default OFF) ---
+    # After each spatial node LP solve, run ``reduce_node`` (free DBBT from the node
+    # LP reduced costs + integer RC-fixing + cutoff-FBBT) and feed the tightened box
+    # to the child nodes via ``tree.set_node_bounds`` before the tree branches.
+    # Gated to the LP-relaxer spatial path (the only path exposing node-LP marginals)
+    # and behind ``DISCOPT_PHASE2_DBBT`` (default OFF). The predecessor
+    # ``DISCOPT_NODE_REDUCE`` (removed #581) needed reduced costs that the cold LP
+    # path did not produce, so it no-op'd on the non-composite-lift class (the #685
+    # net-negative); #764 step 1 added cold-path marginals, so the reduction now
+    # actually fires here.
+    _phase2_dbbt_enabled = _tuning().phase2_dbbt and _mc_lp_relaxer is not None
+    _node_reduce_fn: Any = None
+    if _phase2_dbbt_enabled:
+        try:
+            from discopt._jax.node_reduce import reduce_node as _node_reduce_fn
+
+            logger.debug("per-node DBBT enabled (Phase 2, #764)")
+        except Exception as _nr_exc:  # pragma: no cover - defensive
+            logger.debug("reduce_node import failed; disabling Phase 2 DBBT: %s", _nr_exc)
+            _phase2_dbbt_enabled = False
+            _node_reduce_fn = None
 
     # --- Reduced-space McCormick per-node bounding (MAiNGO-parity §2 P2.3) ---
     # ``DISCOPT_RELAX_SPACE=reduced`` swaps the lifted per-node LP for a Kelley
@@ -7709,6 +7770,21 @@ def solve_model(
             break
 
         node_infeasible_mask = np.zeros(n_batch, dtype=bool)
+
+        # Phase 2 (#764) per-node DBBT staging for THIS batch: the incumbent cutoff
+        # and a {batch_index: (lb, ub)} map of reduced child boxes, applied via
+        # ``set_node_bounds`` just before the tree branches (below).
+        _nr_pending: dict = {}
+        _nr_cutoff = None
+        if _phase2_dbbt_enabled:
+            _nr_inc = tree.incumbent()
+            _nr_cutoff = (
+                float(_nr_inc[1])
+                if _nr_inc is not None
+                and np.isfinite(_nr_inc[1])
+                and _nr_inc[1] < _SENTINEL_THRESHOLD
+                else None
+            )
 
         # Apply the current global box to each exported node (issue: cutoff
         # tightening was dead). Phase C (incumbent-cutoff OBBT) and Phase C3
@@ -8103,7 +8179,7 @@ def solve_model(
                             time_limit=max(_node_remaining, _DEADLINE_NODE_FLOOR_S),
                             inherited_cuts=_root_cut_pool,
                             separate=True,
-                            want_marginals=False,
+                            want_marginals=_phase2_dbbt_enabled,
                             # THRU-4: with the root pool inherited, skip the per-node
                             # square/PSD point-separation loops (sound: their cut
                             # families are box-independent and already in the pool)
@@ -8138,6 +8214,28 @@ def solve_model(
                             result_feas[i] = False
                         else:
                             result_lbs[i] = max(result_lbs[i], float(mc_res.lower_bound))
+                    # Phase 2 (#764): reduce the node box from THIS solve's marginals
+                    # (free DBBT, no extra LP) + cutoff-FBBT, and stage the tightened
+                    # box for the child export (applied via set_node_bounds below).
+                    # Skip the ROOT batch (iteration 0): reducing before the root
+                    # primal heuristic runs perturbs its multistart and degrades the
+                    # first incumbent (mirrors the per-node OBBT root skip, #287); the
+                    # reduction's value is on branched nodes.
+                    if _phase2_dbbt_enabled and _node_reduce_fn is not None and iteration >= 1:
+                        if _reduce_node_and_stage(
+                            _node_reduce_fn,
+                            model,
+                            i,
+                            batch_lb,
+                            batch_ub,
+                            mc_res,
+                            tree,
+                            _nr_cutoff,
+                            _nr_pending,
+                        ):
+                            node_infeasible_mask[i] = True
+                            result_lbs[i] = _INFEASIBILITY_SENTINEL
+                            result_feas[i] = False
             if not _model_is_convex:
                 for i in range(n_batch):
                     if result_lbs[i] == -np.inf:
@@ -8437,7 +8535,7 @@ def solve_model(
                             time_limit=max(_deadline - time.perf_counter(), _DEADLINE_NODE_FLOOR_S),
                             inherited_cuts=_root_cut_pool,
                             separate=True,
-                            want_marginals=False,
+                            want_marginals=_phase2_dbbt_enabled,
                             # THRU-4: with the root pool inherited, skip the per-node
                             # square/PSD point-separation loops (sound: their cut
                             # families are box-independent and already in the pool)
@@ -8480,6 +8578,30 @@ def solve_model(
                             result_feas[i] = False
                         else:
                             result_lbs[i] = max(cur, mc_lp_lb)
+                    # Phase 2 (#764): free DBBT + cutoff-FBBT from this serial node
+                    # solve's marginals; stage the tightened child box. Skip the root
+                    # batch (iteration 0) — see the batch-path note above (#287).
+                    if (
+                        _phase2_dbbt_enabled
+                        and _node_reduce_fn is not None
+                        and iteration >= 1
+                        and mc_lp_res is not None
+                        and mc_lp_res.status != "infeasible"
+                    ):
+                        if _reduce_node_and_stage(
+                            _node_reduce_fn,
+                            model,
+                            i,
+                            batch_lb,
+                            batch_ub,
+                            mc_lp_res,
+                            tree,
+                            _nr_cutoff,
+                            _nr_pending,
+                        ):
+                            node_infeasible_mask[i] = True
+                            result_lbs[i] = _INFEASIBILITY_SENTINEL
+                            result_feas[i] = False
 
                 # Nonconvex finalize (mirrors the batch path at the top of this
                 # iteration).  Runs AFTER every bound source (NLP, alphaBB,
@@ -9666,6 +9788,26 @@ def solve_model(
         ):
             _debug_quit = True
             break
+
+        # Phase 2 (#764): export each node's DBBT/FBBT-reduced box to the Rust tree
+        # BEFORE it branches, so the children inherit the tightened bounds. Sound:
+        # ``reduce_node`` only ever shrinks a box using valid (LP-dual + cutoff)
+        # inequalities, so the contraction removes no feasible point better than the
+        # incumbent. Skipped for any node already fathomed this round.
+        if _phase2_dbbt_enabled and _nr_pending:
+            t_rust_start = time.perf_counter()
+            for _bi, (_nlb, _nub) in _nr_pending.items():
+                if node_infeasible_mask[_bi] or result_lbs[_bi] >= _SENTINEL_THRESHOLD:
+                    continue
+                try:
+                    tree.set_node_bounds(
+                        int(batch_ids[_bi]),
+                        np.asarray(_nlb, dtype=np.float64),
+                        np.asarray(_nub, dtype=np.float64),
+                    )
+                except Exception as _sb_exc:  # pragma: no cover - defensive
+                    logger.debug("set_node_bounds failed at node %d: %s", _bi, _sb_exc)
+            rust_time += time.perf_counter() - t_rust_start
 
         # Import results back to Rust tree
         t_rust_start = time.perf_counter()

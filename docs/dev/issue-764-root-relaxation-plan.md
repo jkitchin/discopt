@@ -335,12 +335,28 @@ Ordered Phase 2 plan:
    node counts. NOTE for step 3: at the root box only ~1 structural reduced cost is nonzero (most
    vars basic); DBBT's leverage grows at branched nodes where more vars sit at bounds — the step-3
    entry experiment must measure DBBT tightening *over the tree*, not at the root.
-2. Re-wire `reduce_node` at the two node-LP sites + `set_node_bounds` child export (restore from
-   `f2bfe63`), gated by a fresh `DISCOPT_PHASE2_DBBT` flag (NOT the retired `NODE_REDUCE`).
-3. **Couple with OBBT** — the actual lever: when DBBT is on, cut the per-node OBBT budget (DBBT is
-   the cheap every-node reduction; OBBT becomes selective / occasional). Entry experiment:
-   total-wall-to-close on `tanksize` (win) with no regression on the #685 set (ex5_3_3/spring/qapw).
-4. Graduation panel over the corpus (cert-clean + net-positive), then default-ON.
+2. **Re-wire `reduce_node` behind `DISCOPT_PHASE2_DBBT` — DONE (2026-07-18), sound; but the cheap
+   DBBT is VACUOUS on the target class.** Wired at both node-LP solve sites + `set_node_bounds`
+   child export (fresh flag, default OFF; root-skip like OBBT; `do_fbbt=False` = the free
+   reduced-cost DBBT only — the per-node FBBT rebuild was expensive AND disruptive, degrading the
+   tanksize incumbent 1.2686→1.35, so it is dropped). Sound: flag-ON soundness panel 0 violations,
+   adversarial suite 10/10, smoke 827; flag-OFF byte-identical (guarded).
+   **Decisive measurement:** with marginals flowing (23/23 node solves carry reduced costs), DBBT
+   produces **0 tightenings on tanksize** — `gap/d_j` exceeds the box width because the bound-gap is
+   large. Reduced-cost DBBT only bites when the bound is *already tight*; it fires on tight-bound
+   instances (gkocis 2 tightened + 2 fathomed, ex1221 1 fathomed) but is **vacuous exactly on the
+   loose-bound class #764 targets**. This is the relaxation-quality wall from the reduction side:
+   BARON's DBBT closes tanksize because BARON's root (0.955) is tight; discopt's (0.84) is loose, so
+   the same free reduction cannot bite. **Cheap DBBT does not close tanksize — confirmed, not
+   assumed.**
+3. **Couple with OBBT (step 3) — reframed by step 2.** The "DBBT replaces OBBT" thesis is weakened:
+   DBBT is vacuous where OBBT is load-bearing (loose bound). The remaining question step 3 can still
+   test: whether DBBT's cheap *fathoming* (it did fathom nodes on gkocis/ex1221) plus a *selective*
+   OBBT beats always-OBBT on total-wall — but the bound-tightening half of the lever is now known to
+   be inert on the target class. Entry experiment unchanged (total-wall-to-close on tanksize + #685
+   regression guard); expectation lowered.
+4. Graduation panel over the corpus (cert-clean + net-positive), then default-ON — only if step 3
+   shows a net win; the vacuity finding makes that unlikely for the tanksize class specifically.
 
 ## Recommendation to the maintainer (2026-07-18)
 
