@@ -119,6 +119,16 @@ Goal: confirm the in-Rust node is ≥5× faster than today's Python node before 
 3. In-Rust warm OBBT probe loop over `presolve/obbt.rs` candidates (shared basis). *Depends on a
    resident node LP to probe* — i.e. the item-4 assembly. `obbt_candidates`/`apply_obbt_bounds`/
    `extract_linear_rows` exist; the missing piece is the objective-swapping warm-simplex loop.
+   **Design finding (2026-07-19):** OBBT varies the *objective* (min/max eₖ) over a *fixed*
+   polytope, so the natural warm start is the **primal** simplex from the node's optimal basis
+   (primal-feasible for every OBBT objective), not the dual (`reoptimize` re-solves for new
+   *bounds* but bakes `c` into `PreparedDual`). The existing `solve_lp_cols_warm(cols, …, c, …,
+   start, …)` does exactly one such probe but **consumes `cols` by value** — driving ~190
+   unit-objective probes/node through it would clone the CSC matrix per probe, re-paying the
+   O(nnz) setup we are trying to remove. So item 3 needs a new **prepared-factorization
+   objective-swap primitive** (`PreparedPrimal`: build the scaled matrix + LU once, then
+   re-price/re-pivot for each unit `c` warm from the node basis) — new simplex-internals work,
+   coupled to item 4, not a standalone unit.
 4. The Rust spatial node orchestrator + `SpatialKernelSpec` PyO3 interface; strided NLP callback.
    **This is the decisive integration** — it assembles the patched LP (item 1–2), runs the warm
    solve + OBBT loop (item 3), FBBT, DBBT, and branching in one Rust loop. The entry-experiment kill
