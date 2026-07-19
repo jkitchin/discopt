@@ -26,6 +26,10 @@
 //! as the Python `_RootLP` root-cut path does. K1 is byte-checked against that
 //! reference so any divergence is caught.
 
+use crate::lp::simplex::refine::ns_safe_bound_csc;
+use crate::lp::simplex::sparse::SparseCols;
+use crate::lp::simplex::{primal::solve_lp_cols_scaled, LpStatus, SimplexOptions};
+
 /// A univariate function admissible in a convex composite row, carrying its own
 /// closed-form value and derivative. Extend as new convex-certifiable functions
 /// appear; an unknown function makes the Python producer decline the instance
@@ -204,9 +208,257 @@ impl ConvexRow {
     }
 }
 
+/// A sparse linear row `Σ coeffs·x[cols]  {≤,=}  rhs`.
+#[derive(Clone, Debug)]
+pub struct LinRow {
+    /// Column indices.
+    pub cols: Vec<usize>,
+    /// Coefficients aligned with `cols`.
+    pub coeffs: Vec<f64>,
+    /// Right-hand side.
+    pub rhs: f64,
+}
+
+/// The analyze-once convex-kernel problem (marshaled from Python once per solve).
+///
+/// Objective sense is carried explicitly: the in-house simplex MINIMIZES, so a
+/// `sense_max` model is solved by minimizing `−c·x` and the rigorous safe bound is
+/// negated back to a valid UPPER bound on the maximization.
+#[derive(Clone, Debug)]
+pub struct ConvexKernelSpec {
+    /// Structural column count.
+    pub n: usize,
+    /// Objective coefficients (declared model sense).
+    pub c: Vec<f64>,
+    /// `true` → maximize `c·x`; `false` → minimize.
+    pub sense_max: bool,
+    /// Per-column integrality.
+    pub integrality: Vec<bool>,
+    /// Global column lower bounds.
+    pub lb: Vec<f64>,
+    /// Global column upper bounds.
+    pub ub: Vec<f64>,
+    /// Linear `≤` rows.
+    pub le_rows: Vec<LinRow>,
+    /// Linear `=` rows.
+    pub eq_rows: Vec<LinRow>,
+    /// Convex nonlinear `≤` rows (outer-approximated by tangents).
+    pub nl_rows: Vec<ConvexRow>,
+}
+
+/// Result of one convex node's LP-OA relaxation.
+#[derive(Clone, Debug)]
+pub struct ConvexNodeResult {
+    /// LP status of the final OA relaxation solve.
+    pub status: LpStatus,
+    /// Rigorous dual bound in the MODEL's sense (a valid upper bound for a
+    /// maximization, lower bound for a minimization). `±inf` when uncertifiable or
+    /// the relaxation is infeasible — sound (never fathoms).
+    pub bound: f64,
+    /// Structural primal point at the final OA vertex (length `n`).
+    pub x: Vec<f64>,
+    /// Number of OA rounds (LP solves) performed.
+    pub oa_rounds: usize,
+    /// Number of OA tangent cuts accumulated.
+    pub n_tangents: usize,
+}
+
+/// One row of the standard-form assembly, tagged by sense.
+struct AsmRow {
+    cols: Vec<usize>,
+    coeffs: Vec<f64>,
+    rhs: f64,
+    is_eq: bool,
+}
+
+/// Assemble the standard-form node LP `[A | I] z = b` over the box `(lo, hi)`.
+///
+/// Every row gets an explicit slack: `≤` rows a slack in `[0, cap]` (cap from row
+/// min-activity, keeping the Neumaier–Shcherbina term finite — the tanksize
+/// certification lesson), `=` rows a slack fixed at `0`. Returns
+/// `(sp, m, n_total, b, l, u)`.
+fn assemble(
+    n_cols: usize,
+    lo: &[f64],
+    hi: &[f64],
+    rows: &[AsmRow],
+) -> (SparseCols, usize, usize, Vec<f64>, Vec<f64>, Vec<f64>) {
+    let m = rows.len();
+    let n_total = n_cols + m;
+    let mut cols: Vec<Vec<(usize, f64)>> = vec![Vec::new(); n_total];
+    let mut b = vec![0.0f64; m];
+    for (r, row) in rows.iter().enumerate() {
+        b[r] = row.rhs;
+        for (c, v) in row.cols.iter().zip(row.coeffs.iter()) {
+            debug_assert!(*c < n_cols, "row references column out of range");
+            cols[*c].push((r, *v));
+        }
+        cols[n_cols + r].push((r, 1.0)); // slack
+    }
+    let mut col_ptr = Vec::with_capacity(n_total + 1);
+    let mut row_idx = Vec::new();
+    let mut vals = Vec::new();
+    col_ptr.push(0usize);
+    for col in &cols {
+        for (r, v) in col {
+            row_idx.push(*r);
+            vals.push(*v);
+        }
+        col_ptr.push(row_idx.len());
+    }
+    let sp = SparseCols::from_csc(col_ptr, row_idx, vals);
+
+    let mut l = lo.to_vec();
+    let mut u = hi.to_vec();
+    l.extend(std::iter::repeat(0.0).take(m));
+    for row in rows.iter() {
+        if row.is_eq {
+            u.push(0.0); // slack fixed at 0 → equality
+            continue;
+        }
+        // ≤ row: finite slack cap from min-activity (keeps NS bound finite).
+        let mut min_act = 0.0f64;
+        for (c, v) in row.cols.iter().zip(row.coeffs.iter()) {
+            min_act += if *v > 0.0 { v * l[*c] } else { v * u[*c] };
+        }
+        let cap = if min_act.is_finite() {
+            (row.rhs - min_act).max(0.0)
+        } else {
+            1e20
+        };
+        u.push(cap.min(1e20));
+    }
+    (sp, m, n_total, b, l, u)
+}
+
+impl ConvexKernelSpec {
+    /// Solve the LP-OA node relaxation over the box `(lo, hi)` (length `n`):
+    /// linear rows + OA tangents refined to OA convergence, solved by the warm
+    /// in-house simplex. Returns the rigorous dual bound in the model's sense.
+    ///
+    /// `oa_tol`: nonlinear-residual tolerance to add a tangent. `max_oa_rounds`:
+    /// safety cap on the OA loop.
+    pub fn solve_node(
+        &self,
+        lo: &[f64],
+        hi: &[f64],
+        oa_tol: f64,
+        max_oa_rounds: usize,
+        opts: &SimplexOptions,
+    ) -> ConvexNodeResult {
+        debug_assert_eq!(lo.len(), self.n);
+        debug_assert_eq!(hi.len(), self.n);
+        // Objective: minimize c·x (min sense) or −c·x (max sense).
+        let sign = if self.sense_max { -1.0 } else { 1.0 };
+
+        let mut tangents: Vec<LinRow> = Vec::new();
+        let mut last_x = vec![0.0f64; self.n];
+        let mut status = LpStatus::Optimal;
+        let mut bound = f64::NEG_INFINITY;
+        let mut rounds = 0usize;
+
+        for _ in 0..max_oa_rounds.max(1) {
+            rounds += 1;
+            // Build the row list: ≤ (linear + tangents), then = rows.
+            let mut rows: Vec<AsmRow> =
+                Vec::with_capacity(self.le_rows.len() + tangents.len() + self.eq_rows.len());
+            for r in self.le_rows.iter().chain(tangents.iter()) {
+                rows.push(AsmRow {
+                    cols: r.cols.clone(),
+                    coeffs: r.coeffs.clone(),
+                    rhs: r.rhs,
+                    is_eq: false,
+                });
+            }
+            for r in &self.eq_rows {
+                rows.push(AsmRow {
+                    cols: r.cols.clone(),
+                    coeffs: r.coeffs.clone(),
+                    rhs: r.rhs,
+                    is_eq: true,
+                });
+            }
+            let (sp, m, n_total, b, l, u) = assemble(self.n, lo, hi, &rows);
+            let mut c = vec![0.0f64; n_total];
+            for (cj, sc) in c.iter_mut().zip(self.c.iter()) {
+                *cj = sign * sc;
+            }
+            let sol = solve_lp_cols_scaled(sp.clone(), m, n_total, &c, &l, &u, &b, opts);
+            status = sol.status;
+            if status != LpStatus::Optimal {
+                // Non-Optimal relaxation → return a sound model-sense sentinel that
+                // never falsely survives fathoming. Callers key off `status` and
+                // treat any non-Optimal node as "skip region".
+                //   Infeasible: the box is empty → prune. Report the WORST bound
+                //     (−inf for max / +inf for min) so it contributes nothing.
+                //   Unbounded/Numerical: no certified bound → report the trivial
+                //     bound (+inf for max / −inf for min) so it never fathoms.
+                let sentinel = match (status, self.sense_max) {
+                    (LpStatus::Infeasible, true) => f64::NEG_INFINITY,
+                    (LpStatus::Infeasible, false) => f64::INFINITY,
+                    (_, true) => f64::INFINITY,
+                    (_, false) => f64::NEG_INFINITY,
+                };
+                last_x.iter_mut().for_each(|v| *v = 0.0);
+                return ConvexNodeResult {
+                    status,
+                    bound: sentinel,
+                    x: last_x,
+                    oa_rounds: rounds,
+                    n_tangents: tangents.len(),
+                };
+            }
+            last_x.copy_from_slice(&sol.x[..self.n]);
+
+            // Rigorous safe bound on min(c·x) from the row duals; negate for sense.
+            let (col_ptr, row_idx, vals) = sp.raw();
+            let safe_min = ns_safe_bound_csc(
+                &sol.dual, &c, col_ptr, row_idx, vals, m, n_total, &b, &l, &u,
+            );
+            bound = match safe_min {
+                Some(v) => sign * v, // max: −(safe lower on −c·x) = safe upper on c·x
+                None => {
+                    if self.sense_max {
+                        f64::INFINITY
+                    } else {
+                        f64::NEG_INFINITY
+                    }
+                }
+            };
+
+            // Separate OA tangents for violated convex rows at this vertex.
+            let mut added = false;
+            for row in &self.nl_rows {
+                if row.residual(&last_x) > oa_tol {
+                    if let Some(cut) = row.oa_tangent(&last_x) {
+                        tangents.push(LinRow {
+                            cols: cut.cols,
+                            coeffs: cut.coeffs,
+                            rhs: cut.rhs,
+                        });
+                        added = true;
+                    }
+                }
+            }
+            if !added {
+                break;
+            }
+        }
+
+        ConvexNodeResult {
+            status,
+            bound,
+            x: last_x,
+            oa_rounds: rounds,
+            n_tangents: tangents.len(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::lp::simplex::SimplexOptions;
 
     const N: usize = 4;
 
@@ -330,5 +582,85 @@ mod tests {
                 "tangent overestimates g at x={x:?}: {lhs} > {rhs}"
             );
         }
+    }
+
+    fn opts() -> SimplexOptions {
+        SimplexOptions {
+            expel_zero_artificials: true,
+            ..Default::default()
+        }
+    }
+
+    /// K1c: the OA loop converges to the true convex bound. Model:
+    /// `max t  s.t.  exp(t) ≤ 5,  t ∈ [0, 10]` → optimum `t* = ln 5 ≈ 1.6094`.
+    #[test]
+    fn node_oa_loop_converges_to_convex_optimum() {
+        let spec = ConvexKernelSpec {
+            n: 1,
+            c: vec![1.0],
+            sense_max: true,
+            integrality: vec![false],
+            lb: vec![0.0],
+            ub: vec![10.0],
+            le_rows: vec![],
+            eq_rows: vec![],
+            nl_rows: vec![ConvexRow {
+                lin: Affine::default(),
+                terms: vec![CompositeTerm {
+                    coeff: 1.0,
+                    func: ConvexFunc::Exp,
+                    arg: Affine {
+                        cols: vec![0],
+                        coeffs: vec![1.0],
+                        cst: 0.0,
+                    },
+                }],
+                rhs: 5.0,
+            }],
+        };
+        let r = spec.solve_node(&[0.0], &[10.0], 1e-9, 60, &opts());
+        assert_eq!(r.status, LpStatus::Optimal);
+        let truth = 5.0_f64.ln();
+        // OA outer-approximates from OUTSIDE → bound is a valid UPPER bound on the
+        // max, converging DOWN to truth. Must be ≥ truth (sound) and close.
+        assert!(
+            r.bound >= truth - 1e-6,
+            "bound {} below truth {}",
+            r.bound,
+            truth
+        );
+        assert!(
+            r.bound <= truth + 1e-4,
+            "bound {} not converged to truth {}",
+            r.bound,
+            truth
+        );
+        assert!(r.oa_rounds > 1, "OA should take several rounds");
+    }
+
+    /// K1c: a linear-only node reproduces the LP optimum exactly (no OA rounds
+    /// beyond the first), and the safe bound is a valid upper bound.
+    #[test]
+    fn node_linear_only_matches_lp() {
+        // max 2·x0 + 3·x1  s.t.  x0 + x1 ≤ 4,  x0,x1 ∈ [0,3]  → x0=1,x1=3, obj=11.
+        let spec = ConvexKernelSpec {
+            n: 2,
+            c: vec![2.0, 3.0],
+            sense_max: true,
+            integrality: vec![false, false],
+            lb: vec![0.0, 0.0],
+            ub: vec![3.0, 3.0],
+            le_rows: vec![LinRow {
+                cols: vec![0, 1],
+                coeffs: vec![1.0, 1.0],
+                rhs: 4.0,
+            }],
+            eq_rows: vec![],
+            nl_rows: vec![],
+        };
+        let r = spec.solve_node(&[0.0, 0.0], &[3.0, 3.0], 1e-9, 10, &opts());
+        assert_eq!(r.status, LpStatus::Optimal);
+        assert!((r.bound - 11.0).abs() < 1e-6, "bound {} != 11", r.bound);
+        assert_eq!(r.oa_rounds, 1, "linear node needs one solve");
     }
 }
