@@ -109,7 +109,17 @@ no false optimal, 2 fall back soundly on the #779 incumbent verification —
 incorrect_count 0); **net-positive PROVEN** (kernel certifies the convex panel in
 ~24 s vs the NLP-BB path timing out uncertified in 482 s). Flag stays default-OFF
 per policy; graduation to default-ON is a follow-up once broader corpus coverage
-accrues. Original K4 spec below.
+accrues.
+
+**Scope (narrowed 2026-07-19, owner-approved):** the kernel targets the
+**smaller/quickly-certifiable** convex MINLPs, where it is SCIP-competitive
+(syn05m/10m/15m certify in 0.6–1.1 s). `try_convex_solve` gives it a bounded
+attempt (`min(time_limit, DISCOPT_CONVEX_KERNEL_BUDGET=120 s)`) and uses the result
+only when it CERTIFIES; larger instances it can't finish in budget (rsyn0820m/0830m
+— which find no incumbent, a primal gap) fall back to NLP-BB with the full time
+budget rather than stalling. **SCIP-parity on larger convex MINLPs, the unmet K2
+node-count gate (2.5–5.3× vs prototype), the primal/rounding heuristic, and the
+default-ON graduation are tracked in #800.** Original K4 spec below.
 
 
 `DISCOPT_CONVEX_KERNEL` default-OFF → §5 Regime-2 panel scored on
