@@ -382,6 +382,42 @@ net-positive). No task may weaken a validation, fallback, or soundness guard to 
 
 ## Work log (append newest first)
 
+- **2026-07-20 (#800 T2): RELIABILITY / STRONG BRANCHING — FALSIFIED (kill hit).**
+  Entry experiment (CLAUDE.md §4) before any production default change, on the
+  seeded config-B panel (post-T1 baseline = T0-B **950** nodes, **~24 s**). Built
+  reliability branching behind `DISCOPT_CVX_RELIB=η` (strong-branch the top-K=8
+  pseudocost candidates with < η observations: FBBT + OA-converge each tentative
+  child LP, score by observed `down_gain·up_gain`, seed pseudocosts). Swept η:
+  - η=0 (baseline) **950 nodes / 23.9 s** · η=4 **1004 / 30.7 s (+5.7% nodes)** ·
+    η=8 **1038 / 32.9 s (+9.3%)** · η=16 **1182 / 40.7 s (+24.4%)**. All cert-clean.
+  - **KILL CRITERION HIT.** T2 kills unless a variant cuts panel nodes ≥20%
+    (950 → ≤760) *and* does not raise wall. **Every η raises BOTH panel nodes and
+    wall** — net-negative on both metrics.
+  - **First run was a bug, not a result (recorded so it isn't re-walked):** the
+    initial probe compared the node's *cut-tightened* `raw_bound` (a solve WITH
+    separation) against *cut-free* child probes (`max_sep_rounds=0`); for max sense
+    every gain clamped to 0 → all candidates tied → branching degraded to index
+    order AND pseudocosts were poisoned → 8–11k nodes / 250–330 s. Fixed by taking
+    the reference from a cut-consistent OA-only probe of the node box. The numbers
+    above are the CORRECTED, cert-clean measurement.
+  - **What the corrected measurement says:** strong branching genuinely HELPS some
+    instances (rsyn0805m 353→181, −49%; rsyn0810m 177→153) but HURTS others
+    (rsyn0815m 281→385; syn40m 139→285) — the honest signature of strong branching
+    on an *easy* family where baseline pseudocost branching is already near-optimal.
+    Net panel: worse. The per-node strong-branch cost (cold OA probes, 2×K per node)
+    also inflates wall by 28–70%.
+  - **Root limitation (informs sequencing):** a *correct* strong branch needs a
+    CHEAP child LP solve; the kernel re-assembles + cold-solves per node, so each
+    probe is expensive AND its cut-free bound mispredicts the child's real
+    cut-tightened bound. Cheap warm child solves are exactly **T3's unbuilt
+    dual-feasible warm-restart** machinery. **T2 sequenced before T3 is handicapped
+    on both cost and accuracy** — reliability branching should be revisited only
+    after T3 lands, if at all.
+  - Scaffolding reverted (no dead flags, §3); kernel bit-identical to T0 baseline
+    (10 Rust convex tests pass). **SURFACED to the human: two consecutive
+    node-count levers (T1 row-order, T2 branching) now falsified — the K2
+    node-count gate looks unreachable via search-quality levers; re-scope needed.**
+
 - **2026-07-20 (#800 T1): ROW-ORDER / DEGENERACY LEVER — FALSIFIED (kill hit).**
   Entry experiment (CLAUDE.md §4) run BEFORE any production change, on the seeded
   config-B panel (rsyn0805m/0810m/0815m/syn40m; T0-B baseline **950** nodes-to-certify).
