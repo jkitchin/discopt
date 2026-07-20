@@ -382,6 +382,196 @@ net-positive). No task may weaken a validation, fallback, or soundness guard to 
 
 ## Work log (append newest first)
 
+- **2026-07-20 (#800 CLOSE-OUT, owner-approved): scoped win; SCIP-parity re-scoped
+  to #807.** After three entry-experiment kills (T1/T2/T3 below), the owner elected
+  to close #800 on its scoped win rather than continue T4–T7 (all moot: T4 primal is
+  a no-op — T0 shows rsyn0820m/0830m certify within 120 s; T5 budget already
+  suffices; T6 node gate would fail with T1/T2/T3 dead; T7 net-positive already
+  proven in #798). **Delivered by #800:** (1) two pinned canonical baselines (T0,
+  config A production + config B seeded) + first-incumbent-latency instrumentation;
+  (2) confirmation the full panel **certifies cert-clean within the 120 s budget**
+  (no primal gap — the "2 fallbacks" were a 45 s-budget artifact); (3) three durable
+  falsifications ruling out the cheap search-quality levers. **NOT delivered:**
+  SCIP-parity wall (~2 s vs 7–80 s) and the K2 node-count gate (≤2×; measured
+  2.5–6.1×) — both re-scoped to **#807 (native-warm-LP architecture)**, the one lever
+  #801's close and T3's architectural finding point to. Kernel is bit-identical to
+  the T0 baseline (+ the T0 instrumentation); `DISCOPT_CONVEX_KERNEL` stays
+  default-OFF (graduation deferred to #807). PR #805 flipped ready-for-review as the
+  falsification record.
+
+- **2026-07-20 (#800 T3): DUAL-FEASIBLE WARM-CHILD RESTART — FALSIFIED (kill hit,
+  both conditions). + #801 cross-reference + architectural finding.**
+  Entry experiment (CLAUDE.md §4) before any default change. Built the warm-child
+  path behind `DISCOPT_CVX_WARMCHILD=1`: capture each node's base-only first-solve
+  optimal basis (`ConvexNodeResult.first_basis`), thread it through the tree node,
+  and warm each child's FIRST base-LP solve from the parent's basis via the dual
+  path (`solve_lp_warm_scaled_csc` → `PreparedDual::prepare` → dual reoptimize;
+  cold fallback when unusable). Measured ON vs OFF on the seeded config-B panel:
+  - OFF (baseline) **950 nodes / 24.4 s**. ON **1120 nodes / 27.4 s**. Cert-clean.
+  - **KILL — condition 1 (bound-neutrality): NODE DRIFT on all 4** (rsyn0805m
+    353→465, rsyn0810m 177→155, rsyn0815m 281→329, syn40m 139→171; 950→1120,
+    +18%). T3 is *strictly bound-neutral* (flavor i) — `node_count` MUST be
+    bit-identical; any drift means the change is wrong. The warm start lands on a
+    DIFFERENT degenerate vertex than the cold solve (the T1 degeneracy lesson: these
+    big-M LPs have many optimal vertices), so the fractional x, OA tangents, and
+    tree all change. Warming the first solve **cannot** preserve the tree on this
+    family — the two are fundamentally incompatible here.
+  - **KILL — condition 2 (wall): ON is SLOWER** (27.4 s vs 24.4 s, +12%), not the
+    required ≥15% faster. The warm machinery's overhead (factorize the parent basis
+    + dual-feasibility check + frequent cold fallback — the base-only parent basis
+    is usually NOT dual-feasible for the child, because the branching variable was
+    chosen from the parent's cut-converged solution, not its base-only vertex)
+    exceeds the cold-solve cost. This reproduces iter-8's falsification via the DUAL
+    path too — confirming iter-8's negative was the mechanism, not the primal/dual
+    choice.
+  - **Architectural finding (the real lesson).** #801 (just closed) pins BARON's
+    per-node advantage as "native warm LPs + reduced-cost range reduction". This
+    kernel CANNOT get the native-warm-LP benefit within its current architecture:
+    it re-assembles the base LP per node, and the parent's cut-converged optimal
+    basis (where the branch var is basic-fractional → dual-feasible) is over a
+    DIFFERENT, larger LP than the child's base-only first solve, while the parent's
+    base-only basis (right dimensions) is neither dual-feasible for the child nor
+    bound-neutral to warm from. A true native-warm-LP B&B (SCIP/BARON) keeps ONE LP
+    and modifies bounds in place across the whole tree, warm-reoptimizing — a
+    different architecture than this per-node-reassembly kernel. Getting "native
+    warm LPs" is an **architectural rewrite**, not a warm-start knob.
+  - Scaffolding reverted (no dead flags, §3); kernel bit-identical to T0 baseline
+    (10 Rust convex tests pass). **THIRD consecutive kill (T1 row-order, T2
+    branching, T3 warm restart).** All three per-node/search levers the #800 list
+    named are now falsified on this family. **SURFACED: the K2 node-count gate AND
+    the ~2× SCIP wall bar are not reachable via the planned levers on this
+    architecture; #800 should close on the T0 scoped win (panel certifies within the
+    120 s budget, cert-clean, net-positive vs NLP-BB) with the SCIP-parity gap
+    re-scoped to a native-warm-LP architecture follow-up.**
+
+- **2026-07-20 (#800 T2): RELIABILITY / STRONG BRANCHING — FALSIFIED (kill hit).**
+  Entry experiment (CLAUDE.md §4) before any production default change, on the
+  seeded config-B panel (post-T1 baseline = T0-B **950** nodes, **~24 s**). Built
+  reliability branching behind `DISCOPT_CVX_RELIB=η` (strong-branch the top-K=8
+  pseudocost candidates with < η observations: FBBT + OA-converge each tentative
+  child LP, score by observed `down_gain·up_gain`, seed pseudocosts). Swept η:
+  - η=0 (baseline) **950 nodes / 23.9 s** · η=4 **1004 / 30.7 s (+5.7% nodes)** ·
+    η=8 **1038 / 32.9 s (+9.3%)** · η=16 **1182 / 40.7 s (+24.4%)**. All cert-clean.
+  - **KILL CRITERION HIT.** T2 kills unless a variant cuts panel nodes ≥20%
+    (950 → ≤760) *and* does not raise wall. **Every η raises BOTH panel nodes and
+    wall** — net-negative on both metrics.
+  - **First run was a bug, not a result (recorded so it isn't re-walked):** the
+    initial probe compared the node's *cut-tightened* `raw_bound` (a solve WITH
+    separation) against *cut-free* child probes (`max_sep_rounds=0`); for max sense
+    every gain clamped to 0 → all candidates tied → branching degraded to index
+    order AND pseudocosts were poisoned → 8–11k nodes / 250–330 s. Fixed by taking
+    the reference from a cut-consistent OA-only probe of the node box. The numbers
+    above are the CORRECTED, cert-clean measurement.
+  - **What the corrected measurement says:** strong branching genuinely HELPS some
+    instances (rsyn0805m 353→181, −49%; rsyn0810m 177→153) but HURTS others
+    (rsyn0815m 281→385; syn40m 139→285) — the honest signature of strong branching
+    on an *easy* family where baseline pseudocost branching is already near-optimal.
+    Net panel: worse. The per-node strong-branch cost (cold OA probes, 2×K per node)
+    also inflates wall by 28–70%.
+  - **Root limitation (informs sequencing):** a *correct* strong branch needs a
+    CHEAP child LP solve; the kernel re-assembles + cold-solves per node, so each
+    probe is expensive AND its cut-free bound mispredicts the child's real
+    cut-tightened bound. Cheap warm child solves are exactly **T3's unbuilt
+    dual-feasible warm-restart** machinery. **T2 sequenced before T3 is handicapped
+    on both cost and accuracy** — reliability branching should be revisited only
+    after T3 lands, if at all.
+  - Scaffolding reverted (no dead flags, §3); kernel bit-identical to T0 baseline
+    (10 Rust convex tests pass). **SURFACED to the human: two consecutive
+    node-count levers (T1 row-order, T2 branching) now falsified — the K2
+    node-count gate looks unreachable via search-quality levers; re-scope needed.**
+
+- **2026-07-20 (#800 T1): ROW-ORDER / DEGENERACY LEVER — FALSIFIED (kill hit).**
+  Entry experiment (CLAUDE.md §4) run BEFORE any production change, on the seeded
+  config-B panel (rsyn0805m/0810m/0815m/syn40m; T0-B baseline **950** nodes-to-certify).
+  Swept all three levers the T1 spec names, via OFF-by-default experimental knobs;
+  measured panel total nodes-to-certify per variant (all cert-clean: bound ≥ oracle,
+  closed onto it):
+  - **Branching tie-break** (`select_branch` among near-equal pseudocost scores):
+    0=first-index (baseline) **950** / 1=last-index 1076 / 2=most-fractional 960 /
+    3=max-degree 1018.
+  - **Base ≤-row order** (permute the ≤ block → different slack columns → different
+    degenerate vertex): 0=producer (baseline) **950** / 1=sparsest-first 968 /
+    2=densest-first 1222 / 3=reversed 1774.
+  - **Cut-append order** (reverse selected-cut append): 0=baseline **950** /
+    1=reversed 1080.
+  - **KILL CRITERION HIT.** T1 kills unless some ordering cuts panel nodes ≥15%
+    (950 → ≤807) without raising wall. Across **9 non-baseline variants over 3
+    distinct ordering mechanisms, NONE reduces panel total below 950** — the best
+    non-baseline was 960 (+1.1% *more* nodes), and most were far worse. The producer
+    order + first-index branching (the T0 baseline) is already the best of everything
+    tested.
+  - **What the measurement says (record, do not re-walk):** row order genuinely
+    perturbs node count *a lot* (reversed ≤-order 950→1774; individual instances
+    swing wildly, e.g. rsyn0815m 261↔1237 across orderings) — confirming the
+    degeneracy sensitivity the hypothesis named — but it is **unbiased variance, not
+    a systematic lever**: no single ordering wins the panel, and per-instance gains
+    (rsyn0805m improves under several orderings) are cancelled by per-instance losses
+    (rsyn0815m blows up). The iter-6 "738 vs 1301" evidence was one such swing, not a
+    recoverable systematic order. The 2.5–6.1× node gap to the prototype must be
+    closed by a real mechanism (**T2 reliability/strong branching**), not by
+    reordering. **Do not re-attempt row-order / cut-order / branching-tie-break as a
+    node-count lever on this family.**
+  - **Scaffolding reverted** (CLAUDE.md §3, no dead flags): the three experimental
+    knobs (`DISCOPT_CVX_BRANCH`/`ROWORD`/`CUTORD`) and the sweep harness are removed;
+    the kernel is bit-identical to the T0 baseline (10 Rust convex tests pass). This
+    work-log table is the durable falsification record (performance-plan §6 house
+    style). **SURFACED to the human for re-scoping per the loop protocol.**
+
+- **2026-07-20 (#800 T0): CANONICAL BASELINE PINNED — cert-clean, both anchors.**
+  - **Instrumentation (measurement-only, bound-neutral):** added first-incumbent
+    latency to the kernel — `ConvexTreeResult.first_incumbent_node` /
+    `first_incumbent_secs` (unseeded runs; `None` when seeded or no incumbent),
+    surfaced through the PyO3 dict (`solve_convex_tree_py`). No search change:
+    it only records `(node_count, wall)` when the first incumbent is set. 10 Rust
+    convex tests pass.
+  - **Config A — production/unseeded, `issue800_t0_baseline.py`, budget=120 s**
+    (the wall / node_count / first-incumbent-latency + graduation anchor; mirrors
+    `try_convex_solve` incl. the #779 verify). **cert-clean PASS, incorrect=0**:
+
+    | instance  | status  | wall_s | nodes | inc_node | inc_lat_s | bound      | opt        |
+    |-----------|---------|-------:|------:|---------:|----------:|-----------:|-----------:|
+    | rsyn0805m | optimal |   7.81 |   353 |      233 |      5.52 |  1296.1207 |  1296.1206 |
+    | rsyn0810m | optimal |   8.29 |   315 |      257 |      6.96 |  1721.4721 |  1721.4477 |
+    | rsyn0815m | optimal |   6.70 |   237 |      161 |      4.90 |  1269.9288 |  1269.9256 |
+    | rsyn0820m | optimal |  80.52 |  1805 |     1798 |     80.43 |  1150.4160 |  1150.3005 |
+    | rsyn0830m | optimal |  50.80 |  1172 |     1067 |     46.70 |   510.0722 |   510.0720 |
+    | syn05m    | optimal |   0.00 |     3 |        2 |      0.00 |   837.7324 |   837.7324 |
+    | syn10m    | optimal |   0.00 |     1 |        1 |      0.00 |  1267.3536 |  1267.3536 |
+    | syn15m    | optimal |   0.15 |    19 |       14 |      0.13 |   853.2848 |   853.2847 |
+    | syn20m    | optimal |   0.58 |    43 |       28 |      0.47 |   924.2642 |   924.2633 |
+    | syn40m    | optimal |  17.93 |   631 |      213 |      7.42 |    67.7136 |    67.7133 |
+
+    Panel wall ≈ **173.7 s** (dominated by rsyn0820m 80.5 s + rsyn0830m 50.8 s).
+    Every bound ≥ oracle optimum and closed onto it; every incumbent #779-verified.
+  - **Config B — seeded nodes-to-certify, `issue798_k2_tree_gate.py`** (the K2
+    dual-side gate anchor; oracle incumbent seeded to isolate nodes-to-certify):
+
+    | instance  | nodes | proto | ratio  | bound     | opt       |
+    |-----------|------:|------:|-------:|----------:|----------:|
+    | rsyn0805m |   353 |    67 | 5.27×  | 1296.2224 | 1296.1206 |
+    | rsyn0810m |   177 |    60 | 2.95×  | 1721.5101 | 1721.4477 |
+    | rsyn0815m |   281 |    46 | 6.11×  | 1269.9261 | 1269.9256 |
+    | syn40m    |   139 |    55 | 2.53×  |   67.7133 |   67.7133 |
+
+    Seeded panel total = **950 nodes**. **K2 gate: FAIL** on the node-count bar
+    (2.53–6.11× > 2× prototype); cert-clean holds (bound ≥ opt, closed onto it).
+    This is the standing unmet dual-side lever T1/T2 target.
+  - **KEY FINDING (re-scopes T4/T5).** At the **120 s production budget the full
+    panel certifies cert-clean**, including rsyn0820m (80.5 s) and rsyn0830m
+    (50.8 s) — the two "fallbacks" in the #798 K4 narrative. Those fallbacks were a
+    **45 s-budget artifact** (`issue798_convex_family_certclean.py` used
+    `time_limit=45`), NOT a fundamental primal gap: both find a #779-verified
+    incumbent (inc_node 1798 / 1067) and certify within 120 s. Consequence:
+    **T4's premise** (rsyn0820m/0830m find *no* incumbent within budget) does not
+    hold at the production budget — the T4 entry experiment must first re-confirm
+    the root cause at budget=120 s; the remaining large-instance gap is **wall /
+    node-count (dual-side, T1–T3)**, not primal starvation. **T5** (budget) is
+    largely already satisfied at 120 s; the lever is closing wall so the slowest
+    (rsyn0820m 80.5 s) drops well under budget.
+  - **Pinned scripts:** config A `discopt_benchmarks/scripts/issue800_t0_baseline.py`
+    (budget arg, default 120); config B `discopt_benchmarks/scripts/issue798_k2_tree_gate.py`
+    (seeded, 4 prototype instances). Every later T-task cites these numbers.
+
 - **2026-07-19 (iter 10): K4 producer + convexity gate + SOUNDNESS FIX + gate tests.**
   - **Production producer** `python/discopt/solvers/_convex_kernel.py`:
     `build_convex_spec(model)` extracts linear rows + linear objective +

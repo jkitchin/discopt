@@ -418,6 +418,8 @@ pub fn solve_convex_tree_py<'py>(
     out.set_item("incumbent_x", PyArray1::from_slice(py, &res.incumbent_x))?;
     out.set_item("bound", res.bound)?;
     out.set_item("node_count", res.node_count)?;
+    out.set_item("first_incumbent_node", res.first_incumbent_node)?;
+    out.set_item("first_incumbent_secs", res.first_incumbent_secs)?;
     Ok(out)
 }
 
