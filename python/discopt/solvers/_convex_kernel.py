@@ -373,12 +373,17 @@ def try_convex_solve(
 ) -> Optional[SolveResult]:
     """Route `model` to the native convex kernel, or return ``None`` to fall back.
 
-    Returns a `SolveResult` when `DISCOPT_CONVEX_KERNEL` is enabled AND the model
-    passes the convexity gate AND the certified incumbent is independently verified
-    feasible against the pristine model (the #779 guard). Returns ``None`` in every
-    other case — flag off, non-convex, or an unverifiable incumbent — so the caller
-    keeps the (always-correct) default path. NEVER reports an unverified incumbent.
+    Scoped to the smaller/quickly-certifiable convex MINLPs (#798): the kernel gets
+    a BOUNDED attempt (``min(time_limit, DISCOPT_CONVEX_KERNEL_BUDGET)``, default
+    120 s) and its result is used ONLY when it fully **certifies optimality** and
+    the incumbent is verified feasible against the pristine model (#779). Everything
+    else — flag off, non-convex, not-certified-within-budget, no incumbent, or an
+    unverifiable incumbent — returns ``None`` so the caller keeps the (always-correct)
+    default path with its full time budget. This bounds the kernel's cost on large
+    instances it cannot finish (tracked separately for SCIP-parity) and never
+    reports an unsound or uncertified result. Proven-infeasible roots are surfaced.
     """
+    import os
     import time
 
     import numpy as np
@@ -391,31 +396,27 @@ def try_convex_solve(
     if spec is None:
         return None
 
+    budget = min(time_limit, float(os.environ.get("DISCOPT_CONVEX_KERNEL_BUDGET", "120")))
     t0 = time.perf_counter()
     r = solve_convex_tree(
         spec,
-        time_limit_s=time_limit,
+        time_limit_s=budget,
         gap_tol=gap_tolerance,
         initial_incumbent=None,
     )
     wall = time.perf_counter() - t0
 
-    status_map = {
-        "optimal": "optimal",
-        "exhausted": "feasible",
-        "node_limit": "node_limit",
-        "time_limit": "time_limit",
-        "infeasible": "infeasible",
-    }
-    status = status_map.get(r["status"], "error")
     incumbent = r["incumbent"]
     inc_x = np.asarray(r["incumbent_x"], float)
 
-    if incumbent is None or inc_x.size == 0:
-        # No incumbent found — surface as infeasible/limit (dual bound only).
-        if status == "infeasible":
-            return SolveResult(status="infeasible", bound=r["bound"], wall_time=wall, nlp_bb=False)
-        return None  # limit without incumbent → let the default path try
+    if r["status"] == "infeasible":
+        return SolveResult(status="infeasible", bound=r["bound"], wall_time=wall, nlp_bb=False)
+    # Use the kernel result ONLY when it CERTIFIED optimality within budget; any
+    # limit / feasible-only / no-incumbent outcome defers to the default path,
+    # which then gets the caller's full time budget.
+    if r["status"] != "optimal" or incumbent is None or inc_x.size == 0:
+        return None
+    status = "optimal"
 
     # Map the flat structural point back onto the ORIGINAL model's variables
     # (reformulation appends aux columns, so the original vars are a prefix), and
