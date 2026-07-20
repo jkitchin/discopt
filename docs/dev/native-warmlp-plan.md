@@ -1,8 +1,20 @@
 # Native-Warm-LP Convex Kernel — implementation plan (issue #807)
 
-**Status:** not started. This is the durable, loop-executable spec for the #807
-rewrite: one persistent LP, bounds modified in place across the whole tree,
+**Status:** W0 DONE — **GO, scoped to the pool-saturating `rsyn*` family**
+(owner-approved 2026-07-20). W1 next. This is the durable, loop-executable spec for
+the #807 rewrite: one persistent LP, bounds modified in place across the whole tree,
 dual-warm reoptimized per node — the SCIP/BARON per-node-throughput architecture.
+
+**SCOPE (W0 finding, owner-approved).** The native-warm-LP kernel targets the
+**`rsyn*` family** (rsyn0805m/0810m/0815m/0820m/0830m), where W0 measured **8–10×**
+warm-vs-cold per node and where the #800 panel-wall gap actually lives (rsyn0820m
+80 s / rsyn0830m 50 s dominate config-A's 174 s). **`syn40m` is OUT OF SCOPE**: W0
+proved it is *OA-round-bound* (~7 new tangents/node, derived by cold AND warm alike),
+so the first-solve warm advantage is a small fraction of its node cost — a
+relaxation-quality limit no warm-LP or tangent-GC strategy can move (measured:
+1.00×→1.25× with GC). syn40m (and any OA-round-bound instance) **routes to the
+existing cold `solve_node_cut` path**; syn05–20m are ≤0.6 s and irrelevant either
+way. All #807 gates below are scored on the **`rsyn*` subset**.
 It survives context loss: each work iteration reads this doc in full, takes the
 first unfinished task, runs its entry experiment BEFORE implementing (CLAUDE.md
 §4), honors the kill criterion, and records measured results in the work log
@@ -230,7 +242,11 @@ dead flags), record the falsification, commit+push, STOP and surface. Any
 correctness regression (a bound above its reference, a false optimal, an
 unverified incumbent, cert-fail) → STOP immediately and surface.
 
-### W0 — entry experiment: in-place dual reoptimize on the real instance. **BLOCKING.**
+### W0 — entry experiment: in-place dual reoptimize on the real instance. **DONE — GO (scoped to `rsyn*`).**
+*Result (2026-07-20, work log):* the primitive is validated + sound + cert-clean;
+warm-vs-cold **8–10×** on rsyn0815m (pool saturates). syn40m is OA-round-bound
+(1.0–1.25×) → out of scope (routes to cold). Owner approved scoping #807 to `rsyn*`.
+Original spec below.
 - **Goal.** Validate the core claim — same-LP bound-change dual reoptimize is
   much cheaper than today's per-node cold pipeline — on a REAL panel instance
   before any architecture is built.
