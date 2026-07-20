@@ -395,6 +395,40 @@ regression ⇒ revert, record, done. Search-order regime (flavor ii).
 
 ## 8. Work log (append newest first)
 
+- **2026-07-20 (#807 W2 PRODUCTION NET — DEFINITIVE): native-warm-LP is SOUND but a
+  3× REGRESSION on the certifying panel → #807 premise falsified; recommend close on
+  the W1 scoped finding.** Ran the real #807 target — the config-A UNSEEDED rsyn*
+  production panel (incl. the big rsyn0820m/0830m), cuts on, flag ON vs OFF
+  (`issue807_w2_production.py`):
+  - OFF (shipped path): **148.7 s, all 5 certify** (rsyn0805m/0810m/0815m
+    7.9/8.1/6.3 s, rsyn0820m 77 s, rsyn0830m 49 s), cert-clean.
+  - ON (native-warm-LP): **434.9 s (3× SLOWER)**, cert-clean but **rsyn0820m and
+    rsyn0830m REGRESS from certified to TIME_LIMIT** (180 s each, unfinished);
+    rsyn0815m blows up 237→1235 nodes / 6.3→62 s. Only rsyn0810m improved.
+  - **DEFINITIVE: the per-node warm advantage does NOT net out on the full
+    cut-driven certifying tree — it is a large regression.** Root cause is
+    fundamental and matches every prior signal: over the hundreds–thousands of nodes
+    a certifying tree needs (rsyn0820m ~1800), the PERSISTENT tangent pool bloats, so
+    every warm solve runs over a huge accumulated-tangent LP — SLOWER than the
+    baseline's small fresh per-node LP; per-node cost is dominated by cut separation
+    (identical ON/OFF), which the warm-LP cannot accelerate; and search-order
+    variance blows up node counts. The tangent-pool warmth that gave W0's 8–10× /
+    W1's 4× in low-node micro-regimes is a LIABILITY at scale (the same bloat that
+    put syn40m out of scope — now hitting rsyn* on the real tree).
+  - **The #800→#801→#807 arc resolves.** #800: node-count levers (row-order, strong
+    branching) all falsified. #801: named per-node throughput ("native warm LPs +
+    RCRR") as BARON's edge. #807: built native warm LPs — the per-node throughput is
+    REAL (W0/W1) but does NOT translate to a panel wall win on the certifying tree
+    (W2). No incremental lever over this per-node-reassembly-or-persistent kernel
+    delivers SCIP-parity; the gap is more fundamental (SCIP's LP kernel, presolve,
+    and integrated cut/bound management beyond these levers).
+  - **RECOMMENDATION: close #807 on the W1 scoped finding.** Deliverables: the
+    native-warm-LP node solve is built, SOUND, and cert-clean behind
+    `DISCOPT_CVX_NATIVELP` (default-OFF, flag-OFF bit-identical); W0/W1 prove the
+    per-node warm primitive (8–10× / 4×); W2 proves — with a durable measurement —
+    that it does not net out on the certifying panel (3× regression). Keep the flag
+    default-OFF. **SURFACED to the owner.**
+
 - **2026-07-20 (#807 W2 v2): NODE-LOCAL cuts — SOUND ✓ but wall net-negative on the
   seeded panel (tangent-pool bloat) → SURFACED.** Owner-chosen re-scope after the
   box-tagged failure. Design: persist ONLY the globally-valid tangent pool (warm
