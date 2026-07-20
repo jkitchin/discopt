@@ -320,3 +320,52 @@ class TestFastPathEquivalence:
         for p in SUPPLY:
             used = sum(vals[(p, k)] for k in DEMAND)
             assert used <= SUPPLY[p] + 1e-5
+
+
+class TestExpressionDegreeDeepRecursion:
+    """Regression for #810: `_expression_degree` (the fast-family guard) must not
+    overflow the Python recursion stack on deeply nested expressions — a long
+    left-associated sum used to crash `solve()` with `RecursionError`.
+    """
+
+    def test_degree_matches_on_small_expressions(self):
+        from discopt.modeling.core import _expression_degree
+
+        m = dm.Model("deg")
+        x = [m.continuous(f"x{i}", lb=0, ub=1) for i in range(3)]
+        assert _expression_degree(x[0] + x[1] + x[2]) == 1
+        assert _expression_degree(x[0] * x[1]) == 2
+        assert _expression_degree(x[0] ** 3) == 3
+        assert _expression_degree(x[0] * x[1] * x[2]) == 3
+        assert _expression_degree(dm.sqrt(x[0])) == float("inf")  # transcendental
+
+    def test_deep_left_associated_sum_no_recursionerror(self):
+        import functools
+        import operator
+
+        from discopt.modeling.core import _expression_degree
+
+        m = dm.Model("deep")
+        # Depth well past CPython's ~1000-frame default recursion limit.
+        terms = [m.continuous(f"y{i}", lb=0, ub=1) for i in range(6000)]
+        expr = functools.reduce(operator.add, terms)  # ((((y0+y1)+y2)+...)
+        assert _expression_degree(expr) == 1  # linear, and no RecursionError
+
+    def test_solve_with_deep_sum_does_not_crash(self):
+        # A model with a deep left-associated sum in both the objective AND a
+        # constraint body must solve, not raise RecursionError from the
+        # incumbent-verification degree guard (which runs over `self._constraints`
+        # -- exactly the path that crashed on autocorr_bern* in the benchmark, #810).
+        m = dm.Model("deepsolve")
+        n = 3000
+        x = [m.continuous(f"x{i}", lb=0, ub=1) for i in range(n)]
+        obj = x[0]
+        deep = x[0]
+        for i in range(1, n):
+            obj = obj + (i % 3) * x[i]  # deep left-associated chain
+            deep = deep + x[i]
+        m.minimize(obj)
+        m.subject_to(deep >= 1.0)  # deep-sum constraint body triggers the guard
+        r = m.solve(time_limit=30, gap_tolerance=1e-4)
+        assert r.status in ("optimal", "feasible")
+        assert r.objective is not None

@@ -1693,36 +1693,56 @@ def _require_no_shape(shape, ctor: str) -> None:
 _INF_DEGREE = float("inf")
 
 
-def _expression_degree(e) -> float:
-    """Polynomial degree of ``e`` in the decision variables; ``inf`` for anything that
-    is not a polynomial (transcendental, variable power, variable denominator, opaque)."""
-    if isinstance(e, (int, float)):
-        return 0
-    if isinstance(e, Constant):
+def _degree_child_nodes(e) -> tuple:
+    """The sub-expressions whose polynomial degree ``e``'s degree depends on.
+
+    Deliberately narrow: a ``**`` reads its RHS as a *constant exponent* (not a
+    degree), and non-``neg`` unary / opaque nodes short-circuit to ``inf`` without
+    inspecting children, so those children are not returned.
+    """
+    if isinstance(e, IndexExpression):
+        return (e.base,)
+    if isinstance(e, SumExpression):
+        return (e.operand,)
+    if isinstance(e, SumOverExpression):
+        return tuple(e.terms)
+    if isinstance(e, UnaryOp):
+        return (e.operand,) if e.op == "neg" else ()
+    if isinstance(e, MatMulExpression):
+        return (e.left, e.right)
+    if isinstance(e, BinaryOp):
+        return (e.left,) if e.op == "**" else (e.left, e.right)
+    return ()  # leaves (int/float/Constant/Variable) and opaque (FunctionCall/...)
+
+
+def _degree_combine(e, child_degs: list[float]) -> float:
+    """Degree of ``e`` from its children's degrees (aligned with
+    :func:`_degree_child_nodes`). Mirrors the original per-node rules exactly."""
+    if isinstance(e, (int, float, Constant)):
         return 0
     if isinstance(e, Variable):
         return 1
     if isinstance(e, IndexExpression):
-        return _expression_degree(e.base)
+        return child_degs[0]
     if isinstance(e, SumExpression):
-        return _expression_degree(e.operand)
+        return child_degs[0]
     if isinstance(e, SumOverExpression):
-        return max((_expression_degree(t) for t in e.terms), default=0)
+        return max(child_degs, default=0)
     if isinstance(e, UnaryOp):
-        return _expression_degree(e.operand) if e.op == "neg" else _INF_DEGREE
+        return child_degs[0] if e.op == "neg" else _INF_DEGREE
     if isinstance(e, (FunctionCall, CustomCall)):
         return _INF_DEGREE
     if isinstance(e, MatMulExpression):
-        return _expression_degree(e.left) + _expression_degree(e.right)
+        return child_degs[0] + child_degs[1]
     if isinstance(e, BinaryOp):
-        left, right = _expression_degree(e.left), _expression_degree(e.right)
         if e.op in ("+", "-"):
-            return max(left, right)
+            return max(child_degs[0], child_degs[1])
         if e.op == "*":
-            return left + right
+            return child_degs[0] + child_degs[1]
         if e.op == "/":
-            return left if right == 0 else _INF_DEGREE
+            return child_degs[0] if child_degs[1] == 0 else _INF_DEGREE
         if e.op == "**":
+            left = child_degs[0]
             k = (
                 e.right.value
                 if isinstance(e.right, Constant)
@@ -1738,6 +1758,32 @@ def _expression_degree(e) -> float:
                 return _INF_DEGREE
         return _INF_DEGREE
     return _INF_DEGREE  # unknown node -> treat as nonlinear (guard runs; safe direction)
+
+
+def _expression_degree(root) -> float:
+    """Polynomial degree of ``root`` in the decision variables; ``inf`` for anything
+    that is not a polynomial (transcendental, variable power, variable denominator,
+    opaque).
+
+    Iterative post-order over the expression DAG with memoization by node identity,
+    so a deeply nested expression (e.g. a long left-associated sum) never overflows
+    the Python recursion stack, and shared sub-expressions are walked once (#810).
+    """
+    memo: dict[int, float] = {}
+    stack = [root]
+    while stack:
+        e = stack[-1]
+        if id(e) in memo:
+            stack.pop()
+            continue
+        kids = _degree_child_nodes(e)
+        pending = [c for c in kids if id(c) not in memo]
+        if pending:
+            stack.extend(pending)  # compute children first (no recursion)
+            continue
+        memo[id(e)] = _degree_combine(e, [memo[id(c)] for c in kids])
+        stack.pop()
+    return memo[id(root)]
 
 
 def _is_fast_linear_quadratic_family(model) -> bool:
