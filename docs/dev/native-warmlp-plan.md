@@ -379,4 +379,45 @@ regression ⇒ revert, record, done. Search-order regime (flavor ii).
 
 ## 8. Work log (append newest first)
 
-*(empty — W0 not started)*
+- **2026-07-20 (#807 W0): primitive VALIDATED + SOUND, but the permanent-tangent-
+  pool amortization FALSIFIED on syn40m → SURFACED for re-scope.**
+  Probe: `crates/discopt-core/src/bnb/convex_kernel.rs` (`W0WarmLp` + a shared-LP
+  best-bound OA-only mini-tree, temporary) + PyO3 `convex_warmlp_probe_py` +
+  `discopt_benchmarks/scripts/issue807_w0_probe.py`. Seeded config-B, 120 nodes,
+  cold `solve_node_cut(sep=0)` vs shared-LP warm dual-reoptimize on identical
+  boxes. NODE-box slack caps (a W0 correction to §3.2's fixed-root-caps: raw-box
+  caps hit the K1d infinite-bound NS failure; node-box caps certify AND stay warm,
+  since a slack cap change is just another bound the dual path reoptimizes).
+  - **VALIDATED — the core primitive works.** rsyn0815m **9.90× amortized**
+    (2nd-half median; pool saturates → most nodes need 0 new tangents → the whole
+    node is one warm solve). Adjacent-node warm pivots median **1–2**, jump-node
+    **13** (best-bound jumps cost more, as expected — the W3 lever).
+  - **SOUND — the real invariant holds.** Every warm bound is a valid dual bound
+    vs the oracle (worst-case sound margin **+0.34 / +1.85**, never below opt);
+    **NS certifies on every node**. The warm/cold parity gap (≤2.7e-4 at
+    oa_tol=1e-6) is pure **OA-tolerance slack**, confirmed: tightening oa_tol to
+    1e-9 collapses it to **1.7e-7 / 1.3e-7**. Warm and cold OA-converge to
+    different-but-both-valid tangent sets; there is no mechanism error. (The plan's
+    ≤1e-6 W0 parity threshold was mis-specified — the right checks are soundness +
+    OA-tolerance agreement, both PASS.)
+  - **FALSIFIED — permanent-pool amortization for many-nl-row instances.**
+    **syn40m 1.01× amortized (KILL vs the ≥2× bar).** Its tangent pool **never
+    saturates**: 0→817 rows over 120 nodes (~6–7 NEW tangents *every* node, 625 of
+    830 added after node 10). §3.1's "0–2 new tangents/node once the pool warms"
+    does not hold — syn40m's many nonlinear rows need fresh linearization points in
+    every branched region, so the permanent pool bloats the LP (each warm solve
+    over 800+ rows costs as much as a cold solve over the node's own ~few tangents),
+    erasing the warm-start win. The per-SOLVE warm advantage is still real (adjacent
+    pivots 2); it's the pool GROWTH that kills the net.
+  - **This is a re-scope, not a clean GO or whole-issue KILL.** The primitive +
+    soundness are proven; only the "permanent tangent pool" *design choice* (§3.1)
+    is falsified, and only for the many-nl-row class. Identified fix: **tangent-pool
+    GC/aging** (cap the pool, drop stale tangents, re-derive on demand — SCIP ages
+    cuts exactly so; §3.4 already contemplates GC for cuts, just not tangents).
+    Applying it now would improvise past a stated kill criterion, so per the loop
+    protocol this is **surfaced to the owner** with the options: (a) add tangent-GC
+    to the architecture and re-run W0 (likely rescues syn40m — the primitive is
+    sound and fast per-solve); (b) scope #807 to the pool-saturating (`rsyn*`)
+    family; (c) treat as a whole-issue kill. **Recommendation: (a).** Probe + this
+    record committed; draft PR opened; kernel shipped paths untouched (probe is a
+    separate binding, not wired into `solve_tree`).

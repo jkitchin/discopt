@@ -420,3 +420,129 @@ pub fn solve_convex_tree_py<'py>(
     out.set_item("node_count", res.node_count)?;
     Ok(out)
 }
+
+/// W0 entry-experiment probe (#807, TEMPORARY). Runs the seeded best-bound
+/// OA-only mini-tree and returns per-node cold-vs-warm measurements as parallel
+/// arrays: `{cold_us, warm_us, warm_pivots, bound_diff, ns_ok, new_tangents,
+/// pool_before, is_jump}`. Reverted after W0 records its GO/KILL.
+#[pyfunction]
+#[pyo3(signature = (
+    n, c, integrality, lo, hi, sense_max,
+    le_row_ptr, le_cols, le_coeffs, le_rhs,
+    eq_row_ptr, eq_cols, eq_coeffs, eq_rhs,
+    nl_rhs, nl_lin_const, nl_lin_ptr, nl_lin_cols, nl_lin_coeffs, nl_term_ptr,
+    term_coeff, term_func, term_arg_const, term_arg_ptr, term_arg_cols, term_arg_coeffs,
+    max_stats=25, gap_tol=1e-4, int_tol=1e-5, oa_tol=1e-6,
+    max_oa_rounds=60, fbbt_rounds=20, initial_incumbent=None,
+))]
+#[allow(clippy::too_many_arguments)]
+pub fn convex_warmlp_probe_py<'py>(
+    py: Python<'py>,
+    n: usize,
+    c: PyReadonlyArray1<'py, f64>,
+    integrality: PyReadonlyArray1<'py, i64>,
+    lo: PyReadonlyArray1<'py, f64>,
+    hi: PyReadonlyArray1<'py, f64>,
+    sense_max: bool,
+    le_row_ptr: PyReadonlyArray1<'py, i64>,
+    le_cols: PyReadonlyArray1<'py, i64>,
+    le_coeffs: PyReadonlyArray1<'py, f64>,
+    le_rhs: PyReadonlyArray1<'py, f64>,
+    eq_row_ptr: PyReadonlyArray1<'py, i64>,
+    eq_cols: PyReadonlyArray1<'py, i64>,
+    eq_coeffs: PyReadonlyArray1<'py, f64>,
+    eq_rhs: PyReadonlyArray1<'py, f64>,
+    nl_rhs: PyReadonlyArray1<'py, f64>,
+    nl_lin_const: PyReadonlyArray1<'py, f64>,
+    nl_lin_ptr: PyReadonlyArray1<'py, i64>,
+    nl_lin_cols: PyReadonlyArray1<'py, i64>,
+    nl_lin_coeffs: PyReadonlyArray1<'py, f64>,
+    nl_term_ptr: PyReadonlyArray1<'py, i64>,
+    term_coeff: PyReadonlyArray1<'py, f64>,
+    term_func: PyReadonlyArray1<'py, i64>,
+    term_arg_const: PyReadonlyArray1<'py, f64>,
+    term_arg_ptr: PyReadonlyArray1<'py, i64>,
+    term_arg_cols: PyReadonlyArray1<'py, i64>,
+    term_arg_coeffs: PyReadonlyArray1<'py, f64>,
+    max_stats: usize,
+    gap_tol: f64,
+    int_tol: f64,
+    oa_tol: f64,
+    max_oa_rounds: usize,
+    fbbt_rounds: usize,
+    initial_incumbent: Option<f64>,
+) -> PyResult<Bound<'py, PyDict>> {
+    let arrays = SpecArrays {
+        n,
+        sense_max,
+        c,
+        integrality,
+        lo,
+        hi,
+        le_row_ptr,
+        le_cols,
+        le_coeffs,
+        le_rhs,
+        eq_row_ptr,
+        eq_cols,
+        eq_coeffs,
+        eq_rhs,
+        nl_rhs,
+        nl_lin_const,
+        nl_lin_ptr,
+        nl_lin_cols,
+        nl_lin_coeffs,
+        nl_term_ptr,
+        term_coeff,
+        term_func,
+        term_arg_const,
+        term_arg_ptr,
+        term_arg_cols,
+        term_arg_coeffs,
+    };
+    let spec = arrays.build()?;
+    let config = ConvexTreeConfig {
+        max_nodes: 100_000,
+        gap_tol,
+        int_tol,
+        oa_tol,
+        max_oa_rounds,
+        max_sep_rounds: 0,
+        fbbt_rounds,
+        deadline: None,
+        initial_incumbent,
+    };
+    let opts = SimplexOptions {
+        expel_zero_artificials: true,
+        ..Default::default()
+    };
+    let stats = spec.warmlp_w0_probe(&config, &opts, max_stats);
+    let cold: Vec<f64> = stats.iter().map(|s| s.cold_us).collect();
+    let warm: Vec<f64> = stats.iter().map(|s| s.warm_us).collect();
+    let pivots: Vec<f64> = stats.iter().map(|s| s.warm_pivots as f64).collect();
+    let bound_diff: Vec<f64> = stats.iter().map(|s| s.bound_diff).collect();
+    let ns_ok: Vec<f64> = stats
+        .iter()
+        .map(|s| if s.ns_ok { 1.0 } else { 0.0 })
+        .collect();
+    let new_tan: Vec<f64> = stats.iter().map(|s| s.new_tangents as f64).collect();
+    let pool: Vec<f64> = stats.iter().map(|s| s.pool_before as f64).collect();
+    let jump: Vec<f64> = stats
+        .iter()
+        .map(|s| if s.is_jump { 1.0 } else { 0.0 })
+        .collect();
+    let cold_bound: Vec<f64> = stats.iter().map(|s| s.cold_bound).collect();
+    let warm_bound: Vec<f64> = stats.iter().map(|s| s.warm_bound).collect();
+    let out = PyDict::new(py);
+    out.set_item("cold_bound", PyArray1::from_slice(py, &cold_bound))?;
+    out.set_item("warm_bound", PyArray1::from_slice(py, &warm_bound))?;
+    out.set_item("cold_us", PyArray1::from_slice(py, &cold))?;
+    out.set_item("warm_us", PyArray1::from_slice(py, &warm))?;
+    out.set_item("warm_pivots", PyArray1::from_slice(py, &pivots))?;
+    out.set_item("bound_diff", PyArray1::from_slice(py, &bound_diff))?;
+    out.set_item("ns_ok", PyArray1::from_slice(py, &ns_ok))?;
+    out.set_item("new_tangents", PyArray1::from_slice(py, &new_tan))?;
+    out.set_item("pool_before", PyArray1::from_slice(py, &pool))?;
+    out.set_item("is_jump", PyArray1::from_slice(py, &jump))?;
+    Ok(out)
+}

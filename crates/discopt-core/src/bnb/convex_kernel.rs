@@ -1138,6 +1138,390 @@ impl ConvexKernelSpec {
     }
 }
 
+// ===========================================================================
+// W0 ENTRY-EXPERIMENT PROBE (#807) — TEMPORARY, reverted after W0 records.
+// Measures the core native-warm-LP claim: a SHARED LP (base rows + a growing,
+// globally-valid OA-tangent pool with FIXED root-box slack caps) whose optimal
+// basis is carried across nodes and dual-warm reoptimized per node via
+// bounds-in-place, vs today's per-node cold `solve_node_cut`. No cuts (OA only),
+// exactly the W0 scope. NOT wired into any shipped path.
+// ===========================================================================
+
+/// Per-node W0 measurement.
+#[derive(Clone, Debug, Default)]
+pub struct W0NodeStat {
+    /// Cold `solve_node_cut(sep=0)` wall, microseconds.
+    pub cold_us: f64,
+    /// Warm shared-LP node solve (reoptimize + OA-reconverge) wall, microseconds.
+    pub warm_us: f64,
+    /// Dual-simplex pivots the warm node solve took (summed over OA rounds).
+    pub warm_pivots: usize,
+    /// |warm bound − cold bound| (model sense) — the parity check.
+    pub bound_diff: f64,
+    /// Warm solve produced a finite, certifying NS safe bound.
+    pub ns_ok: bool,
+    /// New tangents the warm path had to append (pool-amortization metric).
+    pub new_tangents: usize,
+    /// Tangent-pool size entering this node.
+    pub pool_before: usize,
+    /// This node was a best-bound JUMP (its parent was not the previous node).
+    pub is_jump: bool,
+    /// Cold node bound (model sense) — the reference.
+    pub cold_bound: f64,
+    /// Warm node bound (model sense) — checked against the oracle for soundness.
+    pub warm_bound: f64,
+}
+
+/// The shared-LP prototype for W0: base rows ‖ a growing OA-tangent pool with
+/// FIXED root-box slack caps, a carried basis, structural bounds set per node.
+struct W0WarmLp {
+    n: usize,
+    sign: f64,
+    rows: Vec<AsmRow>,
+    b: Vec<f64>,    // per row: rhs
+    sp: SparseCols, // cached CSC of `rows`
+    dirty: bool,    // rows changed since `sp` last built
+    basis: Option<Basis>,
+}
+
+impl W0WarmLp {
+    fn new(spec: &ConvexKernelSpec) -> Self {
+        let sign = if spec.sense_max { -1.0 } else { 1.0 };
+        let mut rows: Vec<AsmRow> = Vec::new();
+        for r in &spec.le_rows {
+            rows.push(AsmRow {
+                cols: r.cols.clone(),
+                coeffs: r.coeffs.clone(),
+                rhs: r.rhs,
+                is_eq: false,
+            });
+        }
+        for r in &spec.eq_rows {
+            rows.push(AsmRow {
+                cols: r.cols.clone(),
+                coeffs: r.coeffs.clone(),
+                rhs: r.rhs,
+                is_eq: true,
+            });
+        }
+        W0WarmLp {
+            n: spec.n,
+            sign,
+            b: rows.iter().map(|r| r.rhs).collect(),
+            rows,
+            sp: SparseCols::from_csc(vec![0], Vec::new(), Vec::new()),
+            dirty: true,
+            basis: None,
+        }
+    }
+
+    /// NODE-box slack cap for a row (eq → 0; ≤ → (rhs − min-activity over the
+    /// node box)⁺) — matches `assemble`, keeping the NS safe bound finite.
+    fn cap_for(&self, row: &AsmRow, lo: &[f64], hi: &[f64]) -> f64 {
+        if row.is_eq {
+            return 0.0;
+        }
+        let mut min_act = 0.0f64;
+        for (c, v) in row.cols.iter().zip(row.coeffs.iter()) {
+            min_act += if *v > 0.0 { v * lo[*c] } else { v * hi[*c] };
+        }
+        if min_act.is_finite() {
+            (row.rhs - min_act).clamp(0.0, 1e20)
+        } else {
+            1e20
+        }
+    }
+
+    /// Rebuild the cached CSC of `[A | I]` from `rows` (structural cols + one
+    /// slack per row). Same layout as `assemble`, but slack caps live in `l_u`.
+    fn rebuild_sp(&mut self) {
+        let m = self.rows.len();
+        let n_total = self.n + m;
+        let mut cols: Vec<Vec<(usize, f64)>> = vec![Vec::new(); n_total];
+        for (r, row) in self.rows.iter().enumerate() {
+            for (c, v) in row.cols.iter().zip(row.coeffs.iter()) {
+                cols[*c].push((r, *v));
+            }
+            cols[self.n + r].push((r, 1.0));
+        }
+        let mut col_ptr = Vec::with_capacity(n_total + 1);
+        let mut row_idx = Vec::new();
+        let mut vals = Vec::new();
+        col_ptr.push(0usize);
+        for col in &cols {
+            for (r, v) in col {
+                row_idx.push(*r);
+                vals.push(*v);
+            }
+            col_ptr.push(row_idx.len());
+        }
+        self.sp = SparseCols::from_csc(col_ptr, row_idx, vals);
+        self.dirty = false;
+    }
+
+    /// Full bounds vector: `[lo ‖ hi]` structural, `[0, node-box cap]` per slack.
+    fn l_u(&self, lo: &[f64], hi: &[f64]) -> (Vec<f64>, Vec<f64>) {
+        let m = self.rows.len();
+        let mut l = lo.to_vec();
+        let mut u = hi.to_vec();
+        l.extend(std::iter::repeat(0.0).take(m));
+        for row in &self.rows {
+            u.push(self.cap_for(row, lo, hi));
+        }
+        (l, u)
+    }
+
+    /// Solve the OA node relaxation over `(lo, hi)` on the shared LP, warm from
+    /// the carried basis, appending only the tangents this box still violates.
+    /// Returns `(bound, raw, pivots, new_tangents, ns_ok)` — `None` if infeasible.
+    #[allow(clippy::too_many_arguments)]
+    fn solve_node(
+        &mut self,
+        spec: &ConvexKernelSpec,
+        lo: &[f64],
+        hi: &[f64],
+        oa_tol: f64,
+        max_oa_rounds: usize,
+        opts: &SimplexOptions,
+    ) -> Option<(f64, f64, usize, usize, bool)> {
+        let mut pivots = 0usize;
+        let mut new_tangents = 0usize;
+        let mut last_bound = self.sign * f64::NEG_INFINITY; // placeholder
+        let mut last_raw = 0.0f64;
+        let mut ns_ok = false;
+        let iter_cap = max_oa_rounds.max(1) + 4;
+        for _ in 0..iter_cap {
+            if self.dirty {
+                self.rebuild_sp();
+            }
+            let m = self.rows.len();
+            let n_total = self.n + m;
+            let (l, u) = self.l_u(lo, hi);
+            let mut c = vec![0.0f64; n_total];
+            for (cj, sc) in c.iter_mut().zip(spec.c.iter()) {
+                *cj = self.sign * sc;
+            }
+            let sol = match &self.basis {
+                Some(bs) => {
+                    let ext = extend_basis(bs.clone(), n_total);
+                    let lp = LpView {
+                        a: &[],
+                        m,
+                        n: n_total,
+                        c: &c,
+                        l: &l,
+                        u: &u,
+                    };
+                    solve_lp_warm_scaled_csc(&lp, &self.b, &ext, opts, &self.sp)
+                }
+                None => {
+                    solve_lp_cols_scaled(self.sp.clone(), m, n_total, &c, &l, &u, &self.b, opts)
+                }
+            };
+            pivots += sol.iters;
+            if sol.status != LpStatus::Optimal {
+                return None; // infeasible/unbounded child
+            }
+            self.basis = Some(sol.basis.clone());
+            let x: Vec<f64> = sol.x[..self.n].to_vec();
+            last_raw = self.sign * sol.obj;
+            let (col_ptr, row_idx, vals) = self.sp.raw();
+            let ns = ns_safe_bound_csc(
+                &sol.dual, &c, col_ptr, row_idx, vals, m, n_total, &self.b, &l, &u,
+            );
+            last_bound = match ns {
+                Some(v) => {
+                    ns_ok = v.is_finite();
+                    self.sign * v
+                }
+                None => {
+                    ns_ok = false;
+                    if spec.sense_max {
+                        f64::INFINITY
+                    } else {
+                        f64::NEG_INFINITY
+                    }
+                }
+            };
+            // Append only still-violated tangents (globally valid → permanent).
+            let mut added = false;
+            for row in &spec.nl_rows {
+                if row.residual(&x) > oa_tol {
+                    if let Some(cut) = row.oa_tangent(&x) {
+                        let ar = AsmRow {
+                            cols: cut.cols,
+                            coeffs: cut.coeffs,
+                            rhs: cut.rhs,
+                            is_eq: false,
+                        };
+                        self.b.push(ar.rhs);
+                        self.rows.push(ar);
+                        self.dirty = true;
+                        added = true;
+                        new_tangents += 1;
+                    }
+                }
+            }
+            if !added {
+                return Some((last_bound, last_raw, pivots, new_tangents, ns_ok));
+            }
+        }
+        Some((last_bound, last_raw, pivots, new_tangents, ns_ok))
+    }
+}
+
+/// A worklist node for the W0 mini best-bound tree (parent id → jump detection).
+struct W0Node {
+    key: f64,
+    lo: Vec<f64>,
+    hi: Vec<f64>,
+    id: u64,
+    parent_id: u64,
+}
+impl PartialEq for W0Node {
+    fn eq(&self, o: &Self) -> bool {
+        self.key == o.key
+    }
+}
+impl Eq for W0Node {}
+impl PartialOrd for W0Node {
+    fn partial_cmp(&self, o: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(o))
+    }
+}
+impl Ord for W0Node {
+    fn cmp(&self, o: &Self) -> std::cmp::Ordering {
+        self.key.total_cmp(&o.key)
+    }
+}
+
+impl ConvexKernelSpec {
+    /// W0 probe (#807): run a seeded best-bound OA-only mini-tree; at each node
+    /// measure today's cold `solve_node_cut(sep=0)` against the shared-LP warm
+    /// node solve on identical boxes. Collects up to `max_stats` node stats.
+    pub fn warmlp_w0_probe(
+        &self,
+        config: &ConvexTreeConfig,
+        opts: &SimplexOptions,
+        max_stats: usize,
+    ) -> Vec<W0NodeStat> {
+        let sense = if self.sense_max { 1.0 } else { -1.0 };
+        let inc_sense = config.initial_incumbent.map(|v| sense * v);
+        let mut warm = W0WarmLp::new(self);
+        let mut pcosts = Pseudocosts::new(self.n);
+        let mut stats: Vec<W0NodeStat> = Vec::new();
+
+        let mut root_lo = self.lb.clone();
+        let mut root_hi = self.ub.clone();
+        if !self.propagate_fbbt(&mut root_lo, &mut root_hi, config.fbbt_rounds) {
+            return stats;
+        }
+        let mut heap = std::collections::BinaryHeap::new();
+        let mut next_id = 1u64;
+        heap.push(W0Node {
+            key: f64::INFINITY,
+            lo: root_lo,
+            hi: root_hi,
+            id: 0,
+            parent_id: u64::MAX,
+        });
+        let mut last_popped = u64::MAX;
+
+        while let Some(node) = heap.pop() {
+            if stats.len() >= max_stats {
+                break;
+            }
+            let is_jump = node.parent_id != last_popped;
+            last_popped = node.id;
+            let mut lo = node.lo;
+            let mut hi = node.hi;
+            if !self.propagate_fbbt(&mut lo, &mut hi, config.fbbt_rounds) {
+                continue;
+            }
+            // COLD: today's per-node pipeline (OA only).
+            let t0 = std::time::Instant::now();
+            let cold = self.solve_node_cut(&lo, &hi, config.oa_tol, config.max_oa_rounds, 0, opts);
+            let cold_us = t0.elapsed().as_secs_f64() * 1e6;
+            if cold.status != LpStatus::Optimal {
+                continue;
+            }
+            // WARM: shared-LP bounds-in-place reoptimize.
+            let pool_before = warm
+                .rows
+                .len()
+                .saturating_sub(self.le_rows.len() + self.eq_rows.len());
+            let t1 = std::time::Instant::now();
+            let warm_res =
+                warm.solve_node(self, &lo, &hi, config.oa_tol, config.max_oa_rounds, opts);
+            let warm_us = t1.elapsed().as_secs_f64() * 1e6;
+            if let Some((wbound, _wraw, wpivots, wnew, wns)) = warm_res {
+                stats.push(W0NodeStat {
+                    cold_us,
+                    warm_us,
+                    warm_pivots: wpivots,
+                    bound_diff: (wbound - cold.bound).abs(),
+                    ns_ok: wns,
+                    new_tangents: wnew,
+                    pool_before,
+                    is_jump,
+                    cold_bound: cold.bound,
+                    warm_bound: wbound,
+                });
+            }
+            // Drive the tree with the COLD result (realistic boxes).
+            let node_dual_sense = sense * cold.bound;
+            if let Some(inc) = inc_sense {
+                if node_dual_sense <= inc + config.gap_tol * inc.abs().max(1.0) {
+                    continue; // fathom
+                }
+            }
+            if self.is_integer_feasible(&cold.x, config.int_tol, config.oa_tol * 10.0) {
+                continue;
+            }
+            let Some(j) = self.select_branch(&cold.x, &pcosts, config.int_tol) else {
+                continue;
+            };
+            let xj = cold.x[j];
+            let frac = xj - xj.floor();
+            if node_dual_sense.is_finite() {
+                pcosts.update(j, -node_dual_sense, -node_dual_sense, frac, true);
+            }
+            let key = node_dual_sense;
+            {
+                let clo = lo.clone();
+                let mut chi = hi.clone();
+                chi[j] = xj.floor();
+                if clo[j] <= chi[j] + 1e-9 {
+                    heap.push(W0Node {
+                        key,
+                        lo: clo,
+                        hi: chi,
+                        id: next_id,
+                        parent_id: node.id,
+                    });
+                    next_id += 1;
+                }
+            }
+            {
+                let mut clo = lo;
+                let chi = hi;
+                clo[j] = xj.ceil();
+                if clo[j] <= chi[j] + 1e-9 {
+                    heap.push(W0Node {
+                        key,
+                        lo: clo,
+                        hi: chi,
+                        id: next_id,
+                        parent_id: node.id,
+                    });
+                    next_id += 1;
+                }
+            }
+        }
+        stats
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
