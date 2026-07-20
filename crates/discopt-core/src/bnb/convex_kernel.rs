@@ -735,6 +735,12 @@ pub struct ConvexTreeResult {
     pub bound: f64,
     /// Nodes processed.
     pub node_count: usize,
+    /// `node_count` at which the FIRST incumbent was found (unseeded runs only;
+    /// `None` if no incumbent was found or the run was seeded). Measurement-only.
+    pub first_incumbent_node: Option<usize>,
+    /// Wall-clock seconds from tree start to the first incumbent (unseeded runs
+    /// only; `None` otherwise). Measurement-only — never affects search.
+    pub first_incumbent_secs: Option<f64>,
 }
 
 /// A worklist node: the box `(lo, hi)`, the parent's rigorous dual bound, and the
@@ -918,6 +924,11 @@ impl ConvexKernelSpec {
     /// bound, branch on the most-fractional integer. Never reports `Optimal`
     /// unless the dual bound closes onto the incumbent within `gap_tol`.
     pub fn solve_tree(&self, config: &ConvexTreeConfig, opts: &SimplexOptions) -> ConvexTreeResult {
+        let start = std::time::Instant::now();
+        // First-incumbent latency (measurement-only; unseeded runs). Records the
+        // node index and wall-clock seconds when the tree first finds an incumbent.
+        let seeded = config.initial_incumbent.is_some();
+        let mut first_inc: Option<(usize, f64)> = None;
         let sense = if self.sense_max { 1.0 } else { -1.0 };
         // Work in a "maximize sense·bound" convention: priority = sense·bound so
         // the heap always pops the most promising node; incumbent improves when
@@ -940,6 +951,8 @@ impl ConvexKernelSpec {
                 incumbent_x: Vec::new(),
                 bound: worse,
                 node_count: 0,
+                first_incumbent_node: None,
+                first_incumbent_secs: None,
             };
         }
 
@@ -1051,6 +1064,9 @@ impl ConvexKernelSpec {
                 if obj_sense > inc_sense {
                     inc_sense = obj_sense;
                     incumbent_x = r.x.clone();
+                    if !seeded && first_inc.is_none() {
+                        first_inc = Some((node_count, start.elapsed().as_secs_f64()));
+                    }
                 }
                 continue; // integral node → nothing to branch
             }
@@ -1134,6 +1150,8 @@ impl ConvexKernelSpec {
             incumbent_x,
             bound,
             node_count,
+            first_incumbent_node: first_inc.map(|(nc, _)| nc),
+            first_incumbent_secs: first_inc.map(|(_, s)| s),
         }
     }
 }
