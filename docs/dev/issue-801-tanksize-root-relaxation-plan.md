@@ -1,7 +1,18 @@
 # #801 — `tanksize` root relaxation (research-grade): execution plan
 
-Status: **PLAN — not started.** This document is the step-by-step plan for executing
-issue #801 (split from #798 §3). It is written to be picked up cold.
+Status: **RESOLVED 2026-07-20 — all residuals FALSIFIED; recommend closing #801.**
+Every genuinely-untested residual is measured inert on the real `tanksize` root
+(entry experiments, converged solvers): the order-1 dense moment/Shor SDP (0.8401),
+the order-2 star moment/Lasserre relaxation — the dominating test of the "tighter
+trilinear hull" caveat — (0.8400), and PQ (no target: the split group is integer,
+integers-fixed → 0.838). The 0.838→≥0.955 gap is **not accessible to any convex
+relaxation of the products through the moment/SDP hierarchy up to order 2**, which
+decisively extends the #764 "the gain is NOT in the RLT hierarchy" conclusion. The
+recorded path for `tanksize` itself remains throughput (#800 / `certification-gap-plan`
+Phase B), not relaxation. Full falsification record in §9 below. Execution plan
+retained below for provenance.
+
+This document was the step-by-step plan for executing issue #801 (split from #798 §3).
 
 Goal of the issue: the root bound on `tanksize` is `lb(x17)` = **0.8382** (McCormick
 LP over the FBBT box) vs BARON's root of **0.955**. #801 asks whether any residual
@@ -221,3 +232,96 @@ A root gain alone does not ship. In order:
 | Marginals for attribution | `MccormickLPResult.reduced_costs` / `row_dual` (#764 Phase 2 step 1, `python/tests/test_phase2_cold_marginals.py`) |
 | Existing #764 scripts | `discopt_benchmarks/scripts/issue764_*.py` (node-cost decomposition, cut attribution) |
 | Results home | `discopt_benchmarks/results/issue801/` (create; JSON + md, timestamped) |
+
+---
+
+## 9. Falsification record (2026-07-20) — measured, binding negatives
+
+Executed per the plan; all probes committed under
+`discopt_benchmarks/scripts/issue801_*.py`, artifacts under
+`discopt_benchmarks/results/issue801/`. House style: hypothesis / measurement /
+verdict (performance-plan §6). **Do NOT re-walk these.**
+
+### Stage 0 — baseline reproduced on HEAD
+Root McCormick LP over the FBBT box, integers relaxed = **0.8382369708575** — exactly
+the #764 figure. Notable: it equals `fbbt lb(x17)` to 13 digits, i.e. the McCormick
+LP does not improve on interval propagation for the objective. Box-injection plumbing
+validated (forcing `lb(x17)=1.0` moves the root to 1.0).
+`issue801_root_probe.py`.
+
+### Stage 1 — attribution + structural audit (steers/kills Stage 2)
+- **Integers-fixed root = 0.8382369708575** (bit-identical). Fixing the 9 integer
+  split vars x18..x26 to their optimal leaf `{1,0,0,0,1,0,0,0,1}` leaves the root
+  unchanged → the entire gap is the **continuous×continuous core** (11 products):
+  the flow stars x0:{6,9,12}, x1:{7,10,13}, x2:{8,11,14} and the objective chain
+  x16:{15,17}. Reconfirms #764 on HEAD.
+- **Ceiling C:** reliable bracket **C ∈ [0.955 (BARON root), 1.2686 (incumbent)]**;
+  a bounded multistart local NLP was uninformative (landed at a 9.35 local min), so
+  it did not tighten the bracket. Max root gain available ≤ ~0.117–0.43.
+- **PQ audit:** the split group x18..x26 is **integer** (selection vars, 13
+  simplex-like rows), not fractional proportions, and integers-fixed→0.838, so a
+  pooling-PQ formulation has **no target in the continuous core**. Combined with the
+  #764 finding that the full level-1 RLT closure (which already contains every
+  product family) is bit-identical inert, **Stage 2c does not run** (no product
+  family outside the falsified closure).
+  `issue801_stage1_attribution.py`.
+
+### Stage 2b — order-1 dense moment (Shor) SDP — FALSIFIED
+- *Hypothesis:* the joint constraint among products sharing a variable (the #764
+  candidate 3, never run) is captured by a moment/SDP relaxation over the stars; the
+  **dense** order-1 moment matrix over all 47 vars dominates every block/star version.
+- *Construction:* self-contained QCQP moment SDP built from the instance's own exact
+  quadratic forms (extracted by finite differences; faithfulness gate: the
+  McCormick-only QCQP-LP reproduces 0.8382, ✓). PSD on M=[[1,x'],[x,X]] + McCormick
+  box, solved three ways for trust.
+- *Measurement:* **x17 = 0.8401**, agreeing across (1) a **converged** scaled SCS
+  (status `solved`, M PSD to 1e-6, feasibility residuals ~1e-7, M00=1.0), (2) a
+  rigorous scaled PSD cutting-plane (HiGHS per round, frozen at 0.8401), and (3) a
+  rigorous unscaled cutting-plane (0.8401). The +0.0018 over 0.8382 is entirely from
+  dropping the sqrt equality (con 18), not from the PSD. **A caution recorded for the
+  next agent:** an *unconverged* SCS run on the *unscaled* problem reported a spurious
+  1.143 — a non-convergence/scaling artifact (the moment entries span 0..8e6). Never
+  trust an `inaccurate`/`max_iters` SCS objective; rescale to [0,1] and audit
+  feasibility.
+- *Verdict:* **KILL** (gain 0.0018 < 0.005 threshold, and not from the PSD). Dense
+  order-1 moment SDP inert ⟹ every block/star order-1 SDP inert.
+  `issue801_stage2b_moment_sdp.py`, `issue801_stage2b_psd_cuts.py`,
+  `issue801_stage2b_scaled.py`.
+
+### Stage 2a — order-2 star moment (Lasserre), the tighter-trilinear-hull test — FALSIFIED
+- *Hypothesis:* #764 left one caveat open — its level-2 RLT used recursive trilinear
+  McCormick; a tighter trilinear hull "could in principle bind." The **dominating**
+  test is a sparse order-2 moment (Lasserre) relaxation on the stars: its PSD moment
+  matrix relaxes the degree-3/4 monomials (the trilinear terms) tighter than recursive
+  McCormick and keeps them consistent, so it dominates both the literal hull
+  refinement and the recorded RLT-2.
+- *Construction:* base 48×48 moment PSD + one order-2 moment PSD block per star
+  (dims 15,15,15,10 over the degree-≤2 monomial basis), stars variable-disjoint so no
+  cross-star coupling; linking equalities tie the blocks' degree-≤2 entries to the
+  base. Scaled to [0,1].
+- *Measurement:* **x17 = 0.8400** (converged SCS, status `solved`); corroborated by a
+  rigorous order-2 cutting-plane frozen at 0.8401 while actively separating star
+  eigenvector cuts.
+- *Verdict:* **KILL** (gain 0.0018 < 0.005, not from the higher-order moments). The
+  trilinear/higher-order polyhedral+moment route is closed.
+  `issue801_stage2a_order2.py`, `issue801_stage2a_scs.py`.
+
+### Consolidated reality check (extends the #764 "RLT hierarchy exhausted" table)
+```
+McCormick 0.8382 = level-1 RLT 0.8382 = level-2 RLT 0.8382 (#764)
+  = order-1 dense moment/Shor SDP 0.8401 (converged) = order-2 star Lasserre 0.8400 (converged)
+diagonal Shor 0.840 (#764) ; 30-round OBBT 0.838 (#764) ; integers-fixed 0.8382
+Yet C ∈ [0.955, 1.2686].
+```
+The 0.838→≥0.955 gap is **not accessible to the polyhedral (RLT) or moment (SDP,
+order ≤2) hierarchy** on the real instance. This is the important signal, now
+rigorously extended two full moment-hierarchy levels beyond #764. `tanksize`'s own
+path to "seconds" is **per-node throughput** (#800 / `certification-gap-plan` Phase B),
+not a stronger root relaxation.
+
+### Recommendation
+**Close #801.** Its literal DoD (a residual root-relaxation lever for `tanksize`) is
+falsified: every genuinely-untested candidate is measured inert with converged
+solvers, on the real instance, entry-experiment-first. No sound, net-positive
+bound-changing mechanism exists to ship, so there is nothing to graduate. The
+throughput lever lives in #800 / the certification-gap plan.

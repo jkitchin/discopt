@@ -1,0 +1,9 @@
+{
+  "n_quad_cons": 20,
+  "n_lin_cons": 53,
+  "n_product_pairs": 47,
+  "max_abs_q_ii": 0.0,
+  "mccormick_qcqp_lp": 0.8400570979040455,
+  "baseline": 0.8382369708575385,
+  "faithful": true
+}

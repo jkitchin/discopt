@@ -33,7 +33,6 @@ os.environ.setdefault("JAX_PLATFORMS", "cpu")
 os.environ.setdefault("JAX_ENABLE_X64", "1")
 
 import numpy as np  # noqa: E402
-
 from discopt._jax.mccormick_lp import MccormickLPRelaxer  # noqa: E402
 from discopt.modeling.core import from_nl  # noqa: E402
 from discopt.tightening import fbbt_box  # noqa: E402
