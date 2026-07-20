@@ -45,6 +45,10 @@ fn _rust(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(convex_bindings::solve_convex_node_py, m)?)?;
     m.add_function(wrap_pyfunction!(convex_bindings::solve_convex_tree_py, m)?)?;
     m.add_function(wrap_pyfunction!(
+        convex_bindings::convex_warmlp_probe_py,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
         spatial_bindings::solve_spatial_tree_py,
         m
     )?)?;
