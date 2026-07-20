@@ -461,37 +461,31 @@ def _native_spatial_kernel_enabled() -> bool:
     non-engaged wall Δ = −0.146 s, i.e. ON slightly faster; tanksize moves
     feasible→**optimal**, the issue's headline win, in ~50 s seeded).
 
-    NOT REPRODUCED on an unloaded machine (#788 re-run, panel
-    ``...20260719T191450Z.json``, measured on the pre-#789 base 46803d7c + the #788
-    patch — the engaged set may shift once #789's feature-safe routing is in play, so
-    RE-RUN before relying on the counts): cert-clean still PASSES with zero violations, but
-    net-positive FAILS (engaged=4, helped=**0**). The headline win does not survive —
-    that panel's OFF run had tanksize at ``feasible``/60.4 s only because the machine
-    was loaded (it also logged 3 ``child_timeout``s); quiet, the Python path certifies
-    tanksize in 21.4 s vs the kernel's 22.6 s. Per CLAUDE.md §4 the measurement wins,
-    so treat "net-positive" as UNPROVEN, not established. This does not affect the
-    default (already OFF for the independent blast-radius reasons below) and is not a
-    #788 regression: the wall-clock budget never bound on any engaged instance (all
-    four returned ``optimal``). Re-establishing net-positive is #764 follow-up work.
-
-    The default is nonetheless kept **OFF** because flipping it is not yet SAFE as a
-    default, and CLAUDE.md puts safety/gate-integrity before performance:
-      1. Blast radius — with the flag forced ON, 20 ``-m smoke`` tests fail (807 pass)
-         because the native kernel short-circuits Python-engine machinery those tests
-         exercise (incumbent/node callbacks, RENS/SubNLP heuristic paths, solution
-         pools, warm-start incumbents, ``mccormick_bounds`` modes, deadline handling,
-         batched node processing, lazy constraints). These are not native-kernel
-         correctness failures — they are validated Python-engine behaviors a default-ON
-         would silently disable. Making default-ON safe needs native-kernel feature
-         parity (or pass-through) and/or re-scoping those tests to the engine they
-         validate — substantial follow-up, and doing it hastily would mean weakening
-         validations to green a gate (forbidden).
-      2. No wall budget — the kernel runs to ``max_nodes`` with no time limit, so on a
-         covered-but-hard instance it can run away (panel: ``contvar`` OFF 65 s → ON
-         >200 s, an instance neither flag certifies). A default must be runaway-safe.
-    Graduating to default-ON is deferred to those two follow-ups; the panel PASS is the
-    evidence the engine itself is sound and net-helpful. Opt in with the env var to use
-    it today (e.g. to certify tanksize)."""
+    Default-ON decision, re-measured on the current base (#802, 2026-07-19). The two
+    historical blockers below are now BOTH RESOLVED, so the decision rests purely on
+    net-positive — which is NOT reliably established (it flips with machine load), so
+    the default stays **OFF** per CLAUDE.md §4 (a cert-clean but not-cleanly-net-positive
+    flag stays OFF — the ``DISCOPT_CUT_INHERIT`` lesson):
+      1. Blast radius — RESOLVED. With the flag forced ON, ``-m smoke`` now passes
+         **831/831, 0 failures** (was 20 failures / 807 pass on the pre-#789 base). The
+         feature-safe routing (#789/#794) made the native kernel decline / pass through
+         the models those tests exercise (callbacks, RENS/SubNLP, pools, warm-start,
+         deadlines, lazy constraints), so a default-ON no longer silently disables them.
+      2. Runaway — RESOLVED by #788/#795: ``_try_native_spatial_kernel`` passes
+         ``time_limit_s = remaining`` (from the outer ``Model.solve`` deadline), so the
+         kernel no longer runs unbounded to ``max_nodes``.
+      3. Net-positive — NOT ESTABLISHED (machine-load-dependent). The headline
+         ``tanksize`` win flips with load: on an idle machine the Python path certifies
+         in ~21 s ≈ the kernel's ~22 s (helped 0); under load the Python path degrades to
+         ``feasible``/uncertified (~90 s, timing out) while the kernel still certifies
+         ``optimal`` in ~21 s. So the kernel is more ROBUST (consistent certification),
+         but a stable corpus-wide net-positive is unproven — per §4 an unstable/neutral
+         result does not graduate a default.
+    Graduating to default-ON is now a **single one-line flip** of the return below,
+    gated solely on a clean, reproducible net-positive from the Regime-2 panel
+    (``issue764_native_kernel_graduation_panel.py``) run on a VERIFIED-IDLE machine —
+    the last remaining bar (#802 keeps default-OFF pending that; cert-clean already
+    passes). Opt in with the env var to use it today (e.g. to robustly certify tanksize)."""
     return os.environ.get("DISCOPT_NATIVE_SPATIAL_KERNEL", "").strip().lower() in (
         "1",
         "true",
