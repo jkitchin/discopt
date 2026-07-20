@@ -395,6 +395,28 @@ regression ⇒ revert, record, done. Search-order regime (flavor ii).
 
 ## 8. Work log (append newest first)
 
+- **2026-07-20 (#807 W1): persistent-LP tree integration (OA-only) — PASS, 4.0×.**
+  Promoted the W0 warm solver to return a `ConvexNodeResult` and wired it into
+  `solve_tree` behind `DISCOPT_CVX_NATIVELP` (default-OFF): a gated branch swaps the
+  per-node cold `solve_node_cut` for the shared persistent LP (bounds-in-place
+  dual-warm + tangent aging/GC at cap `NATIVELP_POOL_CAP=600`). OFF takes the exact
+  original call → bit-identical. Gate `issue807_w1_bytecheck.py` (seeded rsyn*
+  subset, OA-only, `max_sep_rounds=0`, flag ON vs OFF):
+  - **Representative cap (600 nodes, ≈ the cut-driven W2 tree size): 4.0× panel**
+    (OFF 6.8 s → ON 1.7 s), **cert-clean both**. Per instance: rsyn0805m 8.0×,
+    rsyn0810m 5.9×, rsyn0815m 2.4× — the ≥2× per-node bar cleared decisively. Node
+    bounds MATCH ON vs OFF (rsyn0805m/0810m bit-identical; rsyn0815m differs by
+    OA-slack 1566.40 vs 1566.54, both sound ≥ oracle) → the byte-check parity holds.
+  - **Deep OA-only cap (4000 nodes): only 1.65× panel** — recorded because it shows
+    the OA-only *pathology*: with NO cuts the seeded tree explores a huge region, so
+    even rsyn0815m's pool grows past saturation and bloats the LP (rsyn0805m/0810m
+    still 3–3.6×, rsyn0815m flat). This is why W2 (cuts → ~350-node trees → saturated
+    pool) is where the full speedup lands; the OA-only regime understates it.
+  - **Verification.** `cargo test -p discopt-core convex` 10 passed (flag-OFF);
+    clippy clean; flag-OFF path is the unchanged `solve_node_cut` call (bit-identical
+    by construction). W1 is OA-only by design — cuts are W2; the outer
+    `DISCOPT_CONVEX_KERNEL` production path is untouched (inner flag default-OFF).
+
 - **2026-07-20 (#807 W0 addendum): tangent-GC FALSIFIED as the syn40m rescue
   (owner-chosen option a). Root cause CONFIRMED: syn40m is OA-round-bound.**
   Implemented SCIP-style tangent aging + GC in the probe (`W0WarmLp::age_and_gc`:

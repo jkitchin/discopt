@@ -929,6 +929,13 @@ impl ConvexKernelSpec {
         // most-fractional. Costs are learned in the tree's own "maximize sense·bound"
         // convention negated to a minimize (lower-bound-rising) convention.
         let mut pcosts = Pseudocosts::new(self.n);
+        // #807 W1: optional shared persistent LP (bounds-in-place dual-warm node
+        // solves). `None` unless DISCOPT_CVX_NATIVELP is set → OFF is bit-identical.
+        let mut warm = if native_lp_enabled() {
+            Some(W0WarmLp::new(self))
+        } else {
+            None
+        };
 
         // Root node over the FBBT-propagated global box.
         let mut root_lo = self.lb.clone();
@@ -1008,14 +1015,27 @@ impl ConvexKernelSpec {
                 continue; // empty box → fathom
             }
 
-            let r = self.solve_node_cut(
-                &lo,
-                &hi,
-                config.oa_tol,
-                config.max_oa_rounds,
-                config.max_sep_rounds,
-                opts,
-            );
+            // Node relaxation: the shared persistent LP (warm, OA-only — W1) when
+            // DISCOPT_CVX_NATIVELP is on, else today's per-node cold `solve_node_cut`
+            // (unchanged default path). Both return a sound, NS-certified dual bound.
+            let r = if let Some(w) = warm.as_mut() {
+                match w.solve_node(self, &lo, &hi, config.oa_tol, config.max_oa_rounds, opts) {
+                    Some((res, _pivots, _new_tan)) => {
+                        w.age_and_gc(opts.tol.max(1e-7), NATIVELP_POOL_CAP, NATIVELP_MAX_AGE);
+                        res
+                    }
+                    None => continue, // infeasible child → fathom
+                }
+            } else {
+                self.solve_node_cut(
+                    &lo,
+                    &hi,
+                    config.oa_tol,
+                    config.max_oa_rounds,
+                    config.max_sep_rounds,
+                    opts,
+                )
+            };
             if r.status != LpStatus::Optimal {
                 continue; // infeasible/unbounded region → skip
             }
@@ -1137,6 +1157,28 @@ impl ConvexKernelSpec {
         }
     }
 }
+
+/// `DISCOPT_CVX_NATIVELP` opt-in (default-OFF) — route `solve_tree`'s node solves
+/// through the shared persistent LP (bounds-in-place dual-warm reoptimize) instead
+/// of a per-node cold `solve_node_cut`. Scoped to the pool-saturating `rsyn*`
+/// family (#807 W0); OFF is bit-identical to the shipped path. Read once.
+fn native_lp_enabled() -> bool {
+    use std::sync::OnceLock;
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| {
+        std::env::var("DISCOPT_CVX_NATIVELP")
+            .ok()
+            .map(|v| !matches!(v.trim(), "" | "0" | "false" | "False"))
+            .unwrap_or(false)
+    })
+}
+
+/// Tangent-pool GC cap for the persistent LP (generous: on the saturating `rsyn*`
+/// family the pool settles well below this, so GC rarely fires and the warm chain
+/// is preserved; it only bounds pathological growth).
+const NATIVELP_POOL_CAP: usize = 600;
+/// Rounds a tangent must sit non-binding before it is eligible for GC.
+const NATIVELP_MAX_AGE: u32 = 10;
 
 // ===========================================================================
 // W0 ENTRY-EXPERIMENT PROBE (#807) — TEMPORARY, reverted after W0 records.
@@ -1330,7 +1372,7 @@ impl W0WarmLp {
 
     /// Solve the OA node relaxation over `(lo, hi)` on the shared LP, warm from
     /// the carried basis, appending only the tangents this box still violates.
-    /// Returns `(bound, raw, pivots, new_tangents, ns_ok)` — `None` if infeasible.
+    /// Returns `(ConvexNodeResult, pivots, new_tangents)` — `None` if infeasible.
     #[allow(clippy::too_many_arguments)]
     fn solve_node(
         &mut self,
@@ -1340,14 +1382,16 @@ impl W0WarmLp {
         oa_tol: f64,
         max_oa_rounds: usize,
         opts: &SimplexOptions,
-    ) -> Option<(f64, f64, usize, usize, bool)> {
+    ) -> Option<(ConvexNodeResult, usize, usize)> {
         let mut pivots = 0usize;
         let mut new_tangents = 0usize;
         let mut last_bound = self.sign * f64::NEG_INFINITY; // placeholder
         let mut last_raw = 0.0f64;
-        let mut ns_ok = false;
+        let mut last_x = vec![0.0f64; self.n];
+        let mut oa_rounds = 0usize;
         let iter_cap = max_oa_rounds.max(1) + 4;
         for _ in 0..iter_cap {
+            oa_rounds += 1;
             if self.dirty {
                 self.rebuild_sp();
             }
@@ -1382,24 +1426,16 @@ impl W0WarmLp {
             self.basis = Some(sol.basis.clone());
             self.last_full_x = sol.x.clone();
             let x: Vec<f64> = sol.x[..self.n].to_vec();
+            last_x.copy_from_slice(&x);
             last_raw = self.sign * sol.obj;
             let (col_ptr, row_idx, vals) = self.sp.raw();
             let ns = ns_safe_bound_csc(
                 &sol.dual, &c, col_ptr, row_idx, vals, m, n_total, &self.b, &l, &u,
             );
             last_bound = match ns {
-                Some(v) => {
-                    ns_ok = v.is_finite();
-                    self.sign * v
-                }
-                None => {
-                    ns_ok = false;
-                    if spec.sense_max {
-                        f64::INFINITY
-                    } else {
-                        f64::NEG_INFINITY
-                    }
-                }
+                Some(v) => self.sign * v,
+                None if spec.sense_max => f64::INFINITY,
+                None => f64::NEG_INFINITY,
             };
             // Append only still-violated tangents (globally valid → permanent).
             let mut added = false;
@@ -1422,10 +1458,18 @@ impl W0WarmLp {
                 }
             }
             if !added {
-                return Some((last_bound, last_raw, pivots, new_tangents, ns_ok));
+                break;
             }
         }
-        Some((last_bound, last_raw, pivots, new_tangents, ns_ok))
+        let result = ConvexNodeResult {
+            status: LpStatus::Optimal,
+            bound: last_bound,
+            raw_bound: last_raw,
+            x: last_x,
+            oa_rounds,
+            n_tangents: self.rows.len() - self.n_base,
+        };
+        Some((result, pivots, new_tangents))
     }
 }
 
@@ -1517,13 +1561,14 @@ impl ConvexKernelSpec {
             let warm_us = t1.elapsed().as_secs_f64() * 1e6;
             // Tangent aging + GC (bounds the pool for many-nl-row instances).
             warm.age_and_gc(opts.tol.max(1e-7), gc_pool_cap, gc_max_age);
-            if let Some((wbound, _wraw, wpivots, wnew, wns)) = warm_res {
+            if let Some((wres, wpivots, wnew)) = warm_res {
+                let wbound = wres.bound;
                 stats.push(W0NodeStat {
                     cold_us,
                     warm_us,
                     warm_pivots: wpivots,
                     bound_diff: (wbound - cold.bound).abs(),
-                    ns_ok: wns,
+                    ns_ok: wbound.is_finite(),
                     new_tangents: wnew,
                     pool_before,
                     is_jump,
