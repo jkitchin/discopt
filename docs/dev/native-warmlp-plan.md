@@ -395,6 +395,41 @@ regression ⇒ revert, record, done. Search-order regime (flavor ii).
 
 ## 8. Work log (append newest first)
 
+- **2026-07-20 (#807 W2 v2): NODE-LOCAL cuts — SOUND ✓ but wall net-negative on the
+  seeded panel (tangent-pool bloat) → SURFACED.** Owner-chosen re-scope after the
+  box-tagged failure. Design: persist ONLY the globally-valid tangent pool (warm
+  across nodes); separate GMI/cover/MIR **node-locally** and ROLL THEM BACK to the
+  post-OA base+tangent snapshot before the next node (`solve_node` snapshots
+  `(rows.len, basis)` at first OA convergence, `rollback_cuts` truncates + restores
+  after). Cuts never cross nodes → C-43 by construction, exactly like the shipped
+  `solve_node_cut`. No box-tagging / containment / `effective_bounds`; the original
+  3-arg `substitute_slacks` is correct (no deactivation).
+  - **SOUNDNESS: PASS (the box-tagged bug is GONE).** W2 gate (seeded rsyn* panel,
+    cuts on, flag ON): **cert-clean**, every dual bound ≥ oracle and closed onto it
+    (rsyn0805m 1296.1207, rsyn0810m 1721.4571, rsyn0815m 1269.9258 vs opts
+    1296.1206/1721.4477/1269.9256). 10 Rust convex tests pass; flag-OFF bit-identical.
+  - **WALL: net-negative on the seeded panel.** ON **26.2 s vs OFF 19.9 s**. Split:
+    rsyn0805m 7.5→5.5 s (nodes 353→241) and rsyn0810m 4.4→3.3 s (177→143) **improve**,
+    but rsyn0815m **regresses** 8.0→17.4 s (nodes 281→**461**, over the 1.5× bar 421).
+  - **Root finding (the W0 bloat, now on the full tree).** Per node OFF cold-solves a
+    SMALL fresh LP (base + this node's few tangents); ON warm-solves the PERSISTENT
+    LP whose tangent pool grows to hundreds of rows over a certifying tree, so each
+    (even warm) solve is over a bigger LP → per-node cost 31 ms (ON) vs 24.5 ms (OFF).
+    The tangent pool that amortized OA at low node counts (W1's 4×) becomes a
+    LIABILITY over hundreds of nodes — the same bloat that put syn40m out of scope.
+    Plus the certifying tree's per-node cost is dominated by cut separation (identical
+    ON/OFF), so the warm base-solve advantage is a small fraction; and search-order
+    variance blew up rsyn0815m's node count.
+  - **Consequence.** The native-warm-LP advantage is real per-node (W0 8–10×, W1 4×
+    OA-only) but **does not net out on the full cut-driven certifying tree** for the
+    rsyn* panel: tangent-pool bloat + cut-separation domination + search-order
+    variance. The node-local implementation is SOUND and committable (default-OFF,
+    helps 2/3 seeded instances) but does not meet W2's ≤12 s wall bar. **SURFACED to
+    the owner:** (a) run the config-A PRODUCTION panel (unseeded, incl. the big
+    rsyn0820m/0830m) to get the real net before judging; (b) tighten the tangent-pool
+    GC cap to fight bloat; (c) accept W1 as the #807 scoped win (warm-LP proven
+    per-node but not net-positive on the certifying panel) and close.
+
 - **2026-07-20 (#807 W2): box-tagged PERSISTENT cuts — FAILED on soundness AND
   wall → reverted, SURFACED for re-scope to node-local cuts.**
   Built the §3.1–3.2 design: `RowKind` = Base/Tangent/`Cut{dlo,dhi,rhs}`; per-node

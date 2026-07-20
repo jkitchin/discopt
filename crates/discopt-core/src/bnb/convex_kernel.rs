@@ -1015,11 +1015,20 @@ impl ConvexKernelSpec {
                 continue; // empty box → fathom
             }
 
-            // Node relaxation: the shared persistent LP (warm, OA-only — W1) when
-            // DISCOPT_CVX_NATIVELP is on, else today's per-node cold `solve_node_cut`
-            // (unchanged default path). Both return a sound, NS-certified dual bound.
+            // Node relaxation: the shared persistent LP (warm tangent pool +
+            // node-local cuts — W2) when DISCOPT_CVX_NATIVELP is on, else today's
+            // per-node cold `solve_node_cut` (unchanged default path). Both return a
+            // sound, NS-certified dual bound.
             let r = if let Some(w) = warm.as_mut() {
-                match w.solve_node(self, &lo, &hi, config.oa_tol, config.max_oa_rounds, opts) {
+                match w.solve_node(
+                    self,
+                    &lo,
+                    &hi,
+                    config.oa_tol,
+                    config.max_oa_rounds,
+                    config.max_sep_rounds,
+                    opts,
+                ) {
                     Some((res, _pivots, _new_tan)) => {
                         w.age_and_gc(opts.tol.max(1e-7), NATIVELP_POOL_CAP, NATIVELP_MAX_AGE);
                         res
@@ -1331,6 +1340,27 @@ impl W0WarmLp {
         }
     }
 
+    /// Roll node-local cuts (and any post-cut tangents) off the shared LP back to
+    /// the post-OA base+tangent `restore` snapshot, restoring its basis so the next
+    /// node warm-starts from base+tangents. `None` (infeasible before OA converged)
+    /// → keep the tangents grown so far but drop the carried basis (next solve cold).
+    fn rollback_cuts(&mut self, restore: Option<(usize, Basis)>) {
+        match restore {
+            Some((len, basis)) => {
+                if self.rows.len() != len {
+                    self.rows.truncate(len);
+                    self.b.truncate(len);
+                    self.age.truncate(len);
+                    self.dirty = true;
+                }
+                self.basis = Some(basis);
+            }
+            None => {
+                self.basis = None;
+            }
+        }
+    }
+
     /// Rebuild the cached CSC of `[A | I]` from `rows` (structural cols + one
     /// slack per row). Same layout as `assemble`, but slack caps live in `l_u`.
     fn rebuild_sp(&mut self) {
@@ -1370,9 +1400,14 @@ impl W0WarmLp {
         (l, u)
     }
 
-    /// Solve the OA node relaxation over `(lo, hi)` on the shared LP, warm from
-    /// the carried basis, appending only the tangents this box still violates.
-    /// Returns `(ConvexNodeResult, pivots, new_tangents)` — `None` if infeasible.
+    /// Solve the node relaxation over `(lo, hi)` on the shared LP, warm from the
+    /// carried basis: OA-converge (globally-valid tangents PERSIST), then separate
+    /// integrality cuts up to `max_sep_rounds` — but the cuts are **NODE-LOCAL**:
+    /// after the node they are ROLLED BACK to the post-OA base+tangent snapshot, so
+    /// no cut ever persists into another node (C-43 by construction, exactly like
+    /// the shipped `solve_node_cut`). Only the tangent pool carries the warmth
+    /// across nodes. Returns `(ConvexNodeResult, pivots, new_tangents)` — `None`
+    /// if infeasible.
     #[allow(clippy::too_many_arguments)]
     fn solve_node(
         &mut self,
@@ -1381,6 +1416,7 @@ impl W0WarmLp {
         hi: &[f64],
         oa_tol: f64,
         max_oa_rounds: usize,
+        max_sep_rounds: usize,
         opts: &SimplexOptions,
     ) -> Option<(ConvexNodeResult, usize, usize)> {
         let mut pivots = 0usize;
@@ -1389,7 +1425,12 @@ impl W0WarmLp {
         let mut last_raw = 0.0f64;
         let mut last_x = vec![0.0f64; self.n];
         let mut oa_rounds = 0usize;
-        let iter_cap = max_oa_rounds.max(1) + 4;
+        let mut sep_used = 0usize;
+        // Snapshot of the base+tangent state (row count + optimal basis) taken at
+        // first OA convergence — the point rolled back to after this node so cuts
+        // (and any post-cut tangents) never leak into the next node.
+        let mut restore: Option<(usize, Basis)> = None;
+        let iter_cap = max_oa_rounds.max(1) * (max_sep_rounds + 1) + max_sep_rounds + 4;
         for _ in 0..iter_cap {
             oa_rounds += 1;
             if self.dirty {
@@ -1421,6 +1462,7 @@ impl W0WarmLp {
             };
             pivots += sol.iters;
             if sol.status != LpStatus::Optimal {
+                self.rollback_cuts(restore); // clean base+tangent state for the next node
                 return None; // infeasible/unbounded child
             }
             self.basis = Some(sol.basis.clone());
@@ -1437,19 +1479,18 @@ impl W0WarmLp {
                 None if spec.sense_max => f64::INFINITY,
                 None => f64::NEG_INFINITY,
             };
-            // Append only still-violated tangents (globally valid → permanent).
+            // 1. OA tangents for still-violated convex rows (globally valid → persist).
             let mut added = false;
             for row in &spec.nl_rows {
                 if row.residual(&x) > oa_tol {
                     if let Some(cut) = row.oa_tangent(&x) {
-                        let ar = AsmRow {
+                        self.b.push(cut.rhs);
+                        self.rows.push(AsmRow {
                             cols: cut.cols,
                             coeffs: cut.coeffs,
                             rhs: cut.rhs,
                             is_eq: false,
-                        };
-                        self.b.push(ar.rhs);
-                        self.rows.push(ar);
+                        });
                         self.age.push(0);
                         self.dirty = true;
                         added = true;
@@ -1457,7 +1498,101 @@ impl W0WarmLp {
                     }
                 }
             }
-            if !added {
+            if added {
+                continue; // OA not yet converged
+            }
+            // OA converged: snapshot the base+tangent restore point once.
+            if restore.is_none() {
+                restore = Some((self.rows.len(), sol.basis.clone()));
+            }
+            // 2. Separate NODE-LOCAL integrality cuts if the budget remains.
+            if sep_used >= max_sep_rounds {
+                break;
+            }
+            sep_used += 1;
+            let mut is_int_full = vec![false; n_total];
+            is_int_full[..self.n].copy_from_slice(&spec.integrality);
+            let mut raw = separate_cover_csc(
+                &self.sp,
+                n_total,
+                m,
+                &l,
+                &u,
+                &self.b,
+                &sol.x,
+                self.n,
+                &is_int_full,
+                spec.le_rows.len(),
+                opts.tol,
+            );
+            raw.extend(separate_gomory_cols(
+                &self.sp,
+                m,
+                n_total,
+                &l,
+                &u,
+                &self.b,
+                &sol.basis,
+                &is_int_full,
+                opts.tol,
+                1e7,
+            ));
+            {
+                let mut a_ub: Vec<f64> = Vec::new();
+                let mut b_ub: Vec<f64> = Vec::new();
+                for row in self.rows.iter().filter(|r| !r.is_eq) {
+                    let mut dense = vec![0.0f64; self.n];
+                    for (cc, vv) in row.cols.iter().zip(row.coeffs.iter()) {
+                        dense[*cc] = *vv;
+                    }
+                    a_ub.extend_from_slice(&dense);
+                    b_ub.push(row.rhs);
+                }
+                if !b_ub.is_empty() {
+                    for mc in separate_mir(
+                        &a_ub,
+                        &b_ub,
+                        &l[..self.n],
+                        &u[..self.n],
+                        &spec.integrality,
+                        &sol.x[..self.n],
+                        opts.tol,
+                        1e7,
+                    ) {
+                        let mut coeffs = vec![0.0f64; n_total];
+                        for (j, &v) in mc.coeffs.iter().enumerate() {
+                            coeffs[j] = -v;
+                        }
+                        raw.push(GomoryCut {
+                            coeffs,
+                            rhs: -mc.rhs,
+                        });
+                    }
+                }
+            }
+            if raw.is_empty() {
+                break;
+            }
+            let selected = select_cuts(raw, &sol.x, 8, 1e-4, 0.90);
+            if selected.is_empty() {
+                break;
+            }
+            let mut added_cuts = 0usize;
+            for gc in &selected {
+                if let Some(lin) = substitute_slacks(gc, &self.rows, self.n) {
+                    self.b.push(lin.rhs);
+                    self.rows.push(AsmRow {
+                        cols: lin.cols,
+                        coeffs: lin.coeffs,
+                        rhs: lin.rhs,
+                        is_eq: false,
+                    });
+                    self.age.push(0);
+                    self.dirty = true;
+                    added_cuts += 1;
+                }
+            }
+            if added_cuts == 0 {
                 break;
             }
         }
@@ -1467,8 +1602,10 @@ impl W0WarmLp {
             raw_bound: last_raw,
             x: last_x,
             oa_rounds,
-            n_tangents: self.rows.len() - self.n_base,
+            n_tangents: 0,
         };
+        // Roll the node-local cuts back off the shared LP; tangents persist.
+        self.rollback_cuts(restore);
         Some((result, pivots, new_tangents))
     }
 }
@@ -1557,7 +1694,7 @@ impl ConvexKernelSpec {
                 .saturating_sub(self.le_rows.len() + self.eq_rows.len());
             let t1 = std::time::Instant::now();
             let warm_res =
-                warm.solve_node(self, &lo, &hi, config.oa_tol, config.max_oa_rounds, opts);
+                warm.solve_node(self, &lo, &hi, config.oa_tol, config.max_oa_rounds, 0, opts);
             let warm_us = t1.elapsed().as_secs_f64() * 1e6;
             // Tangent aging + GC (bounds the pool for many-nl-row instances).
             warm.age_and_gc(opts.tol.max(1e-7), gc_pool_cap, gc_max_age);
