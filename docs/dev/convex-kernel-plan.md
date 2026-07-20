@@ -103,6 +103,9 @@ certified `SolveResult`; `None` → default path for flag-off / non-convex /
 unverifiable). Validation: 8 producer/gate/routing tests pass; **smoke suite passed**
 (default path unaffected); **adversarial suite 10 passed** (no regression);
 **Regime-2 corpus panel cert-clean** (66 instances: routed 1, declined 65,
+incorrect_count 0); **convex-family sweep cert-clean** (10 rsyn/syn instances,
+`issue798_convex_family_certclean.py`: 8 certify optimal with sound dual bound and
+no false optimal, 2 fall back soundly on the #779 incumbent verification —
 incorrect_count 0); **net-positive PROVEN** (kernel certifies the convex panel in
 ~24 s vs the NLP-BB path timing out uncertified in 482 s). Flag stays default-OFF
 per policy; graduation to default-ON is a follow-up once broader corpus coverage
