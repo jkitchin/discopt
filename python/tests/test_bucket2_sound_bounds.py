@@ -159,19 +159,23 @@ def test_nvs16_produces_sound_finite_bound():
 
 @pytest.mark.correctness
 def test_nvs16_full_solve_does_not_anchor_on_garbage_bound():
-    """#248: the live solve factorable-reforms nvs16 into aux vars including
-    ``_fr_aux == x1**6``, whose defining equality the relaxer cannot linearize
-    (x1**6 over [0,200] spans [0, 6.4e13], past the monomial magnitude cap) and
-    therefore DROPS. Dropping the sole constraint on a wide-boxed aux variable
-    that the objective depends on frees it, and minimizing drove the dual bound to
-    a garbage **-5.08e11** (~100% gap, never certifies) — even though the
-    objective is a sum of squares trivially ``>= 0``.
+    """#248: the live solve factorable-reforms nvs16 into monomial-lift aux vars
+    including ``_fr_aux == x1**6``, whose box spans [0, 6.4e13] (past the 1e10
+    aux-bound cap). The uniform relaxer DOES represent these auxes as rows, but the
+    McCormick under-estimators over such wide boxes are so loose that — with the
+    aux carrying a NEGATIVE objective coefficient — the LP drives it to its box
+    edge and sinks the objective bound to a garbage **-5e11** (~100% gap, never
+    certifies), even though the objective is a sum of squares trivially ``>= 0``.
 
-    The relaxer now detects that the omitted constraint frees an objective-linked,
-    otherwise-unconstrained, wide-boxed variable, marks the objective bound
-    invalid, and falls back to the rigorous alphaBB / prereform-interval bound.
-    The raw-model root-bound test above never caught this because it does not run
-    the factorable reform — the bug only appears in the full solve pipeline."""
+    The relaxer now detects that the objective's box-interval floor is garbage-wide
+    (``obj_box_lb < -1e10``), marks the objective bound invalid, and falls back to
+    the rigorous alphaBB / prereform-interval bound. Note this is NOT the freed-
+    column case (the aux IS in the constraint rows) — the box-floor magnitude is
+    the signal. The raw-model root-bound test above never caught this because it
+    does not run the factorable reform — the bug only appears in the full solve
+    pipeline. Regressed silently at #632 (d897f033, uniform-relax cutover) which
+    dropped the original milp_relaxation ``_omitted_obj_linked`` guard; the
+    correctness marker is excluded from the PR-fast CI lane, so CI never caught it."""
     m = dm.from_nl(str(_DATA / "nvs16.nl"))
     r = m.solve(time_limit=20)
     assert r.objective is not None and abs(r.objective - 0.703125) < 1e-3
