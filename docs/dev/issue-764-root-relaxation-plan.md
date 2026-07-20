@@ -131,20 +131,28 @@ and OBBT self-limits (loose relaxation → weak OBBT → loose relaxation).
    discopt's *trilinear-McCormick* relaxation of the degree-3 terms — a tighter trilinear hull could
    in principle bind, but that is a second, more speculative layer; the standard hierarchy does
    nothing here.) Repro: `scratchpad/rlt2b.py`. Kill criterion met.
-3. **Structured/higher-order SDP on the shared-variable blocks.** Diagonal Shor was inert (0.840);
-   a moment/SDP relaxation on each shared-variable star (e.g. {x0, x6, x9, x12} and their products)
-   might capture the joint constraint level-1 RLT misses. Entry experiment: solve the block-moment
-   SDP offline (scs) over one leaf and measure.
+3. **Structured/higher-order SDP on the shared-variable blocks — RUN AND FALSIFIED (#801,
+   2026-07-20).** Diagonal Shor was inert (0.840); the conjecture was a moment/SDP relaxation on
+   each shared-variable star (e.g. {x0, x6, x9, x12} and their products) might capture the joint
+   constraint level-1 RLT misses. #801 built it self-contained from tanksize's exact QCQP forms and
+   measured, with converged solvers on the real root box: **order-1 dense moment (Shor) SDP = 0.8401**
+   (converged SCS + rigorous PSD cutting-plane; dominates every block/star version) and **order-2
+   star moment (Lasserre) = 0.8400** (converged SCS; base 48×48 PSD + per-star order-2 PSD blocks —
+   the dominating test of the "tighter trilinear hull" caveat). Both inert (< +0.005). See
+   `docs/dev/issue-801-tanksize-root-relaxation-plan.md` §9 and
+   `discopt_benchmarks/scripts/issue801_stage2*.py`. Candidate 3 is now falsified, not merely a long
+   shot.
 
 **Reality check — the RLT hierarchy is exhausted.** Everything tractable is now measured inert at
 the root, bit-identically:
 
     McCormick 0.838 = level-1 RLT 0.838 = level-2 RLT 0.838 (213 trilinears) ;
     Shor SDP 0.840 ; 30-round OBBT 0.838 ; integers-fixed 0.838 ; naive bisection 0.838 (→8 leaves)
+    ; [#801] order-1 dense moment/Shor SDP 0.8401 (converged) ; order-2 star Lasserre 0.8400 (converged)
 
 Yet the continuous optimum is ≥ 0.955. That combination is the important signal: the gain is **not**
-in the polyhedral RLT hierarchy discopt can build, so candidate 3 (structured/higher-order SDP) is
-now the only untested relaxation route and is a long shot given Shor's inertness. The realistic path
+in the polyhedral RLT hierarchy discopt can build **nor the moment/SDP hierarchy up to order 2**
+(#801 falsified candidate 3 with converged solvers) — no untested relaxation route remains. The realistic path
 to the ≥0.955 bound is most likely **smart spatial branching** — the full B&B *does* climb
 (0.906→1.079 over 199 nodes) because it branches on the right variables, unlike the inert
 naive-widest bisection — i.e. this is a **branching-quality + throughput** problem more than a

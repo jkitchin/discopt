@@ -1,0 +1,46 @@
+{
+  "method": "order-2 star moment SDP via SCS (base 48x48 PSD + per-star order-2 PSD blocks)",
+  "stars": [
+    [
+      0,
+      6,
+      9,
+      12
+    ],
+    [
+      1,
+      7,
+      10,
+      13
+    ],
+    [
+      2,
+      8,
+      11,
+      14
+    ],
+    [
+      15,
+      16,
+      17
+    ]
+  ],
+  "baseline": 0.8382369708575385,
+  "order1_moment_sdp": 0.8401,
+  "scs_status": "solved",
+  "order2_scs_x17": 0.8400294973564257,
+  "gain_over_baseline": 0.0017925264988872813,
+  "cones": [
+    48,
+    15,
+    15,
+    15,
+    10
+  ],
+  "n_eq": 248,
+  "n_in": 4990,
+  "oracle": 1.268643754,
+  "baron_root": 0.955,
+  "kill_threshold": 0.005,
+  "verdict": "KILL (order-2 star moment inert; trilinear/higher-order route closed)"
+}

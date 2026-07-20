@@ -1,0 +1,127 @@
+{
+  "method": "rigorous PSD cutting-plane on full moment LP (HiGHS per round)",
+  "baseline": 0.8382369708575385,
+  "mccormick_full_moment_lp_round0": 0.8400840613180973,
+  "final_bound": null,
+  "gain_over_baseline": null,
+  "oracle": 1.268643754,
+  "rounds": 19,
+  "converged_psd": false,
+  "trajectory": [
+    {
+      "round": 0,
+      "bound": 0.8400840613180973,
+      "lambda_min": -334.40430096631604,
+      "n_rows": 4560
+    },
+    {
+      "round": 1,
+      "bound": 0.8400570979040456,
+      "lambda_min": -300.1571960069575,
+      "n_rows": 4564
+    },
+    {
+      "round": 2,
+      "bound": 0.8400579115475126,
+      "lambda_min": -14069.483536445829,
+      "n_rows": 4568
+    },
+    {
+      "round": 3,
+      "bound": 0.8400570979040456,
+      "lambda_min": -4824.933090336864,
+      "n_rows": 4572
+    },
+    {
+      "round": 4,
+      "bound": 0.8400570979040455,
+      "lambda_min": -171348.37679239176,
+      "n_rows": 4576
+    },
+    {
+      "round": 5,
+      "bound": 0.8400570979040481,
+      "lambda_min": -2566.579449006597,
+      "n_rows": 4580
+    },
+    {
+      "round": 6,
+      "bound": 0.8400570979040456,
+      "lambda_min": -4529.694910450638,
+      "n_rows": 4584
+    },
+    {
+      "round": 7,
+      "bound": 0.8400570990267461,
+      "lambda_min": -15554.533069308873,
+      "n_rows": 4588
+    },
+    {
+      "round": 8,
+      "bound": 0.8400570979040456,
+      "lambda_min": -10407.00632186784,
+      "n_rows": 4592
+    },
+    {
+      "round": 9,
+      "bound": 0.8400570979040406,
+      "lambda_min": -2119.6276924010167,
+      "n_rows": 4596
+    },
+    {
+      "round": 10,
+      "bound": 0.8400570979040454,
+      "lambda_min": -1961.6998827200607,
+      "n_rows": 4600
+    },
+    {
+      "round": 11,
+      "bound": 0.8400570979066262,
+      "lambda_min": -4153.393234903631,
+      "n_rows": 4604
+    },
+    {
+      "round": 12,
+      "bound": 0.8400570979040454,
+      "lambda_min": -5086.180102594885,
+      "n_rows": 4608
+    },
+    {
+      "round": 13,
+      "bound": 0.8400571434335781,
+      "lambda_min": -3951.2889914895914,
+      "n_rows": 4612
+    },
+    {
+      "round": 14,
+      "bound": 0.8400570979040454,
+      "lambda_min": -6119.2117650637865,
+      "n_rows": 4616
+    },
+    {
+      "round": 15,
+      "bound": 0.8400840796219622,
+      "lambda_min": -36960.63237292288,
+      "n_rows": 4620
+    },
+    {
+      "round": 16,
+      "bound": 0.8400570979591109,
+      "lambda_min": -706.5732942608038,
+      "n_rows": 4624
+    },
+    {
+      "round": 17,
+      "bound": 0.8400570979051047,
+      "lambda_min": -1395.3604006090384,
+      "n_rows": 4628
+    },
+    {
+      "round": 18,
+      "status": 4,
+      "bound": null
+    }
+  ],
+  "kill_threshold": 0.005,
+  "verdict": "GO-CANDIDATE (SDP moves root \u2014 verify generality + rigor in Stage 3)"
+}

@@ -1,0 +1,102 @@
+{
+  "question": "how is tanksize solvable if the root relaxation is immovable at 0.838?",
+  "answer": "spatial branch-and-bound: McCormick tightens as the box shrinks, so the TREE closes the gap \u2014 not a stronger root. SCIP/BARON do the same, just with far cheaper/faster nodes + range reduction. Even BARON's root (0.955) is 25% short of the optimum (1.2686); the tree does the rest.",
+  "root_mccormick_bound": 0.8382369708575385,
+  "baron_root_bound": 0.955,
+  "oracle": 1.268643754,
+  "naive_widest_box_branching": {
+    "trajectory": [
+      {
+        "nodes": 1,
+        "dual_bound": 0.8382369708575385,
+        "gap_to_opt": 0.4304067831424615
+      },
+      {
+        "nodes": 2,
+        "dual_bound": 0.8382369708575385,
+        "gap_to_opt": 0.4304067831424615
+      },
+      {
+        "nodes": 3,
+        "dual_bound": 0.8382369708575385,
+        "gap_to_opt": 0.4304067831424615
+      },
+      {
+        "nodes": 6,
+        "dual_bound": 0.8382369708575385,
+        "gap_to_opt": 0.4304067831424615
+      },
+      {
+        "nodes": 11,
+        "dual_bound": 0.8382369708575385,
+        "gap_to_opt": 0.4304067831424615
+      },
+      {
+        "nodes": 21,
+        "dual_bound": 0.8382369708575385,
+        "gap_to_opt": 0.4304067831424615
+      },
+      {
+        "nodes": 41,
+        "dual_bound": 0.8382369708575385,
+        "gap_to_opt": 0.4304067831424615
+      },
+      {
+        "nodes": 81,
+        "dual_bound": 0.8382369708575385,
+        "gap_to_opt": 0.4304067831424615
+      },
+      {
+        "nodes": 161,
+        "dual_bound": 0.8382369708575385,
+        "gap_to_opt": 0.4304067831424615
+      },
+      {
+        "nodes": 321,
+        "dual_bound": 0.8382369708575385,
+        "gap_to_opt": 0.4304067831424615
+      },
+      {
+        "nodes": 400,
+        "dual_bound": 0.8382369708575385,
+        "gap_to_opt": 0.4304067831424615
+      }
+    ],
+    "final_dual_bound": 0.8382369708575385,
+    "note": "INERT \u2014 reproduces #764: naive widest-box bisection never climbs off 0.838 (branches on huge-box flows that don't bind the objective)."
+  },
+  "discopt_real_solver": {
+    "trajectory": [
+      {
+        "time_s": 3.0,
+        "status": "time_limit",
+        "dual_bound": 0.8401973767604355,
+        "nodes": 3,
+        "incumbent": null
+      },
+      {
+        "time_s": 10.0,
+        "status": "time_limit",
+        "dual_bound": 0.8401973767604317,
+        "nodes": 7,
+        "incumbent": null
+      },
+      {
+        "time_s": 30.0,
+        "status": "feasible",
+        "dual_bound": 0.9220250291795922,
+        "nodes": 55,
+        "incumbent": 1.2686437852381225
+      },
+      {
+        "time_s": 60.0,
+        "status": "feasible",
+        "dual_bound": 0.92207462916963,
+        "nodes": 135,
+        "incumbent": 1.2686437614652726
+      }
+    ],
+    "note": "CLIMBS \u2014 good spatial branching lifts the dual bound 0.838 -> ~0.92 over ~135 nodes (-> optimum ~1.2686 at ~450 nodes per #764). This is the mechanism that solves tanksize."
+  },
+  "conclusion": "#801 shows the ROOT can't be cheaply strengthened (moment/RLT hierarchy inert), which is consistent with solvability: the lever is the TREE + per-node throughput (#800 native kernel), not the root."
+}

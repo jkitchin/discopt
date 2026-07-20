@@ -1,0 +1,52 @@
+{
+  "method": "scaled [0,1] moment SDP: rigorous PSD cutting-plane + SCS cross-check",
+  "baseline": 0.8382369708575385,
+  "oracle": 1.268643754,
+  "baron_root": 0.955,
+  "psd_cut_x17_bound": 0.8400571485836162,
+  "psd_cut_gain": 0.0018201777260777874,
+  "psd_cut_converged": false,
+  "psd_cut_rounds": 60,
+  "scs_status": "solved",
+  "scs_x17_bound": 0.8400697721095821,
+  "scs_audit": {
+    "M_lambda_min": -1.1331343297174773e-06,
+    "M00": 0.9999999999935312,
+    "max_eq_residual": 7.39494137036445e-08,
+    "max_ineq_violation": 6.619232534710306e-05
+  },
+  "kill_threshold": 0.005,
+  "verdict": "KILL (SDP inert on the real instance)",
+  "trajectory_tail": [
+    {
+      "round": 55,
+      "t17": 9.894648897928565e-07,
+      "lambda_min": -0.004078251096776187,
+      "rows": 4886
+    },
+    {
+      "round": 56,
+      "t17": 9.906675584099455e-07,
+      "lambda_min": -0.005282982540054144,
+      "rows": 4892
+    },
+    {
+      "round": 57,
+      "t17": 9.89464138286418e-07,
+      "lambda_min": -0.0026938324982356578,
+      "rows": 4898
+    },
+    {
+      "round": 58,
+      "t17": 9.906787820757097e-07,
+      "lambda_min": -0.004893671031243373,
+      "rows": 4904
+    },
+    {
+      "round": 59,
+      "t17": 9.894885366381654e-07,
+      "lambda_min": -0.0058416961964850925,
+      "rows": 4910
+    }
+  ]
+}
