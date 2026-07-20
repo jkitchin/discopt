@@ -137,6 +137,25 @@ primal regression.
 
 ## Work log (append newest first)
 
+- **2026-07-19 (iter 9): pseudocost branching — 2.6× wall (64.6s → 24.4s), cert-clean.**
+  - Replaced most-fractional with SCIP product-rule pseudocost branching (reuse
+    `bnb::branching::Pseudocosts`). `TreeNode` carries its `(var, frac, is_down)`;
+    the pseudocost is updated with the tightening gain once the node's dual is known.
+  - **Nodes 507/483/1185/337 → 353/177/281/139** (rsyn0815m 4.2× fewer);
+    **total wall 64.6s → 24.4s**. Cumulative vs cold baseline: **124s → 24.4s (5×)**.
+    All cert-clean (bound = optimum EXACTLY). Now ~10× off SCIP's ~2s (was ~30×).
+  - Remaining perf gap to SCIP: still per-node cost (each node ~20-50 cold+warm LP
+    solves) + node count (353/177/281/139 vs prototype 67/60/46/55, 2.5-5.3×).
+    Next candidate levers: reliability branching (strong-branch the top pseudocost
+    candidates early), better cut management, or revisiting parent→child warm with
+    a proper dual-feasible restart. Diminishing returns; K4 graduation may already
+    hold (kernel decisively beats the NLP-BB path — see below).
+  - **NLP-BB head-to-head (in progress):** the current NLP-BB path
+    (`dm.from_nl(name).solve(time_limit=120)`) did not finish even ONE instance in
+    ~10 min — it times out (>120 s) on instances the kernel now certifies in
+    ~4-8 s. Strong evidence the kernel is a net-positive K4 graduation candidate on
+    wall regardless of SCIP parity. (Confirm the exact numbers when the run ends.)
+
 - **2026-07-19 (iter 8): K3 satisfied; parent→child basis inheritance FALSIFIED;
   measuring vs NLP-BB.**
   - **K3 (primal) is effectively DONE.** The tree certifies UNSEEDED on the panel
