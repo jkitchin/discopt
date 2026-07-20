@@ -26,6 +26,7 @@
 //! as the Python `_RootLP` root-cut path does. K1 is byte-checked against that
 //! reference so any divergence is caught.
 
+use crate::bnb::branching::Pseudocosts;
 use crate::lp::basis::{Basis, BASIC};
 use crate::lp::cover::separate_cover_csc;
 use crate::lp::crossover::LpView;
@@ -736,12 +737,15 @@ pub struct ConvexTreeResult {
     pub node_count: usize,
 }
 
-/// A worklist node: the box `(lo, hi)` and the parent's rigorous dual bound.
+/// A worklist node: the box `(lo, hi)`, the parent's rigorous dual bound, and the
+/// branching that created it — `(var, frac_at_parent, is_down)` — used to update
+/// pseudocosts once this node's own bound is known.
 struct TreeNode {
     key: f64, // best-bound priority: pop the most promising node first (max-heap).
     parent_bound: f64,
     lo: Vec<f64>,
     hi: Vec<f64>,
+    branch: Option<(usize, f64, bool)>,
 }
 impl PartialEq for TreeNode {
     fn eq(&self, other: &Self) -> bool {
@@ -882,17 +886,22 @@ impl ConvexKernelSpec {
         self.nl_rows.iter().all(|r| r.residual(x) <= oa_tol)
     }
 
-    /// The most-fractional integer column, or `None` if all are integral.
-    fn most_fractional(&self, x: &[f64], int_tol: f64) -> Option<usize> {
-        let mut best = int_tol;
+    /// The fractional integer column with the highest pseudocost score (SCIP
+    /// product rule); falls back toward most-fractional for unobserved variables
+    /// (their default pseudocost makes the score track fractionality). `None` if
+    /// all integers are integral.
+    fn select_branch(&self, x: &[f64], pcosts: &Pseudocosts, int_tol: f64) -> Option<usize> {
+        let mut best = f64::NEG_INFINITY;
         let mut bj = None;
         for (j, (&is_int, &xj)) in self.integrality.iter().zip(x.iter()).enumerate() {
             if is_int {
                 let f = xj - xj.floor();
-                let d = f.min(1.0 - f);
-                if d > best {
-                    best = d;
-                    bj = Some(j);
+                if f.min(1.0 - f) > int_tol {
+                    let s = pcosts.score(j, f);
+                    if s > best {
+                        best = s;
+                        bj = Some(j);
+                    }
                 }
             }
         }
@@ -916,6 +925,10 @@ impl ConvexKernelSpec {
         let worse = f64::NEG_INFINITY; // sense·(worst possible objective)
         let mut inc_sense = config.initial_incumbent.map(|v| sense * v).unwrap_or(worse);
         let mut incumbent_x: Vec<f64> = Vec::new();
+        // Pseudocost branching (SCIP product rule) — far fewer nodes than
+        // most-fractional. Costs are learned in the tree's own "maximize sense·bound"
+        // convention negated to a minimize (lower-bound-rising) convention.
+        let mut pcosts = Pseudocosts::new(self.n);
 
         // Root node over the FBBT-propagated global box.
         let mut root_lo = self.lb.clone();
@@ -936,6 +949,7 @@ impl ConvexKernelSpec {
             parent_bound: sense * f64::INFINITY, // sense·(trivial dual bound)
             lo: root_lo,
             hi: root_hi,
+            branch: None,
         });
 
         let mut node_count = 0usize;
@@ -1005,6 +1019,14 @@ impl ConvexKernelSpec {
                 // Uncertified node bound → cannot fathom on it, but we can still
                 // branch to make progress; treat its dual as the parent's.
             }
+            // Learn a pseudocost from the branch that created this node. In the
+            // minimize (lower-bound-rising) convention the bound is −sense·dual, so
+            // the gain of tightening = node.parent_bound − node_dual_sense ≥ 0.
+            if let Some((var, frac, is_down)) = node.branch {
+                if node_dual_sense.is_finite() && node.parent_bound.is_finite() {
+                    pcosts.update(var, -node.parent_bound, -node_dual_sense, frac, is_down);
+                }
+            }
             // Fathom by node bound.
             if inc_sense > worse
                 && node_dual_sense <= inc_sense + config.gap_tol * inc_sense.abs().max(1.0)
@@ -1022,11 +1044,12 @@ impl ConvexKernelSpec {
                 continue; // integral node → nothing to branch
             }
 
-            // Branch on the most-fractional integer.
-            let Some(j) = self.most_fractional(&r.x, config.int_tol) else {
+            // Branch on the highest pseudocost-score fractional integer.
+            let Some(j) = self.select_branch(&r.x, &pcosts, config.int_tol) else {
                 continue;
             };
             let xj = r.x[j];
+            let frac = xj - xj.floor();
             let branch_key = node_dual_sense;
             // Down child: x_j ≤ floor(x_j).
             {
@@ -1039,6 +1062,7 @@ impl ConvexKernelSpec {
                         parent_bound: node_dual_sense,
                         lo: clo,
                         hi: chi,
+                        branch: Some((j, frac, true)),
                     });
                 }
             }
@@ -1053,6 +1077,7 @@ impl ConvexKernelSpec {
                         parent_bound: node_dual_sense,
                         lo: clo,
                         hi: chi,
+                        branch: Some((j, frac, false)),
                     });
                 }
             }
