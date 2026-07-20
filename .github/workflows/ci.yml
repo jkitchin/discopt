@@ -186,6 +186,87 @@ jobs:
           PYTEST_MEMORY_LIMIT_MB: "32768"
           PYTEST_XDIST_WORKERS: "2"
 
+  python-correctness:
+    # Fast-correctness lane: runs the `correctness`-marked tests that are NOT
+    # `slow` on every PR. The `python-fast` job deliberately EXCLUDES the
+    # `correctness` marker (and `--ignore`s test_correctness.py), so a soundness
+    # regression in a fast known-optima test could — and did — merge silently:
+    # #248's nvs16 garbage-bound guard regressed at the #632 uniform-relax cutover
+    # and sat unnoticed for a full release cycle because no PR job ran the
+    # `correctness` marker. This lane closes that gap. It runs only the cheap
+    # subset (`not slow`); the full known-optima sweep (including `slow`
+    # correctness) remains the nightly `python-coverage` job's responsibility.
+    name: Python correctness (fast subset, 3.12, ubuntu)
+    runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          # Match the workspace used by maturin so the cargo build cache hits.
+          workspaces: ". -> target"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install uv
+        run: |
+          python -m pip install --upgrade pip
+          pip install uv
+      - name: Install system dependencies (Ipopt)
+        # See the python-fast job for why the microsoft/azure-cli apt source is
+        # dropped and the install is retried with backoff.
+        run: |
+          sudo rm -f /etc/apt/sources.list.d/microsoft-prod.list \
+                     /etc/apt/sources.list.d/azure-cli.list || true
+          for i in 1 2 3; do
+            sudo apt-get update && sudo apt-get install -y --no-install-recommends \
+              coinor-libipopt-dev liblapack-dev libblas-dev gfortran && break
+            echo "apt attempt $i failed; retrying in $((i * 15))s..." >&2
+            sleep $((i * 15))
+          done
+      - name: Cache uv pip wheels
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/uv
+          key: uv-${{ runner.os }}-py312-${{ hashFiles('pyproject.toml', 'Cargo.lock', '.github/workflows/ci.yml') }}
+          restore-keys: |
+            uv-${{ runner.os }}-py312-
+      - name: Install Python dependencies
+        run: |
+          python -m venv .venv
+          source .venv/bin/activate
+          uv pip install maturin
+          uv pip install \
+            jax jaxlib numpy scipy highspy cyipopt openpyxl scikit-learn pyyaml \
+            pounce-solver \
+            pytest pytest-timeout pytest-xdist
+          maturin develop
+      - name: Run pytest (fast correctness, serial)
+        run: |
+          source .venv/bin/activate
+          # The bare `-m "correctness and ..."` deliberately OVERRIDES the
+          # pyproject `addopts` marker expression (which deselects `correctness`)
+          # so the fast known-optima tests DO run here. `not slow` keeps the lane
+          # PR-cheap; the excluded markers mirror python-fast so the heavy/env-
+          # dependent suites stay on their own jobs. test_correctness.py is NOT
+          # ignored here (unlike python-fast) — it is the point of this lane.
+          # Run SERIALLY (no xdist): a soundness lane must be deterministic, and
+          # some correctness tests validate global/claim state that xdist can
+          # order-mask (the same reason python-claims-serial runs -n0). The subset
+          # is ~5 min serially (287 tests locally), so determinism costs little.
+          scripts/run_memory_capped_pytest.sh pytest python/tests/ \
+            -q --tb=short --timeout=120 -p no:cacheprovider \
+            -m "correctness and not slow and not integration and not amp_benchmark and not requires_cyipopt and not memory_heavy" \
+            --ignore=python/tests/test_amp.py \
+            --durations=20
+        env:
+          JAX_PLATFORMS: cpu
+          JAX_ENABLE_X64: "1"
+          PYTEST_MEMORY_LIMIT_MB: "32768"
+
   python-claims-serial:
     # Relaxation claim-arbitration tests, run SERIALLY (-n0). The federated
     # lifted-relaxation "claimers" are arbitrated by a hand-maintained defer-list
