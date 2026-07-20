@@ -162,6 +162,224 @@ primal regression.
 - Cut *selection* alone ≈ add-everything; the lever is the GMI *family* + sustained
   separation (#782/#797).
 
+## #800 — executable task list (loop-executable)
+
+**Goal (#800).** Certify the *full* convex `rsyn*`/`syn*` panel (through
+rsyn0820m/0830m and syn40m) within **~2× SCIP wall**, **cert-clean**
+(`incorrect_count ≤ 0`, dual bound = oracle optimum exactly, honest
+`TimeLimit`/`Exhausted`, no false optimal), with the **K2 node-count gate met**
+(nodes-to-certify ≤ 2× the prototype 67/60/46/55), then re-scope the kernel's time
+budget and **graduate `DISCOPT_CONVEX_KERNEL` toward default-ON** through the
+CLAUDE.md §5 Regime-2 panel. #798 shipped the kernel scoped to the
+smaller/quickly-certifiable convex MINLPs; the large-instance gap is node count
+(dominant driver), per-node cold LP solves, and a primal gap on the 2 fallbacks.
+Each task below is self-contained and loop-executable: an agent reads this list,
+takes the first `todo` task, runs its **entry experiment on the real `rsyn*`/`syn*`
+panel BEFORE implementing** (CLAUDE.md §4), abandons on the kill criterion, and
+otherwise implements to the done-when gate and records the result in the work log.
+
+**Scoping-lever framing (correction — read before starting).** #800's DoD said
+"lift the size cap in `_convex_kernel.build_convex_spec`." **There is no size cap
+there** — the gate (`build_convex_spec` → `_build`) is *purely structural*
+(linear objective, every nl row decomposes composite-of-affine, every term convex
+in `≤` normal form). The actual scoping lever is the **time budget** in
+`try_convex_solve`: `budget = min(time_limit, DISCOPT_CONVEX_KERNEL_BUDGET)`
+(default 120 s); a large instance gets a *bounded attempt* and falls back to NLP-BB
+if it doesn't certify in budget. "Lifting the cap" = closing the wall gap so the
+panel certifies inside a sane budget, then re-scoping that budget (T5) — not
+touching the structural gate.
+
+**Regime note.** Three flavors appear below. (i) *Strictly bound-neutral* (T3
+warm-restart, a pure per-node LP-solve speedup): assert **`node_count` AND certified
+objective EXACTLY unchanged** on the panel, only wall moves — any node drift means
+the change is wrong. (ii) *Search-order* (T1 row-order, T2 branching, T4 primal):
+these **intentionally change `node_count`** (the optimized metric) but introduce no
+new relaxation — the per-node LP bound at a fixed box is identical, so the invariant
+holds by construction; verify **cert-clean** (dual bound = oracle optimum exactly,
+`bound ≥ incumbent`, every incumbent #779-verified, `assert_cut_valid` on any cut
+whose selection shifts) and treat `node_count`/wall/latency as the measured target.
+(iii) *Graduation* (T7): the §5 Regime-2 flag-ON-vs-OFF corpus gate (cert-clean +
+net-positive). No task may weaken a validation, fallback, or soundness guard to pass.
+
+### T0 — Canonical baseline measurement (pin the anchor). **BLOCKING, do first.**
+- **Goal.** One pinned measurement config + script that records, for the whole
+  convex panel, the numbers every later task compares against — so ratios are
+  anchored and the two pre-existing configs stop being conflated.
+- **Hypothesis + evidence.** #800's wall table (rsyn0805/0810/0815m 8–10 s,
+  syn40m 37 s) does **not** reconcile with iter-9's 24.4 s seeded panel: they are
+  *different configs* — iter-9/`issue798_k2_tree_gate.py` **seeds** the oracle
+  incumbent (isolates the dual side = nodes-to-certify) and pre-dates iter-10's
+  soundness fix; the wall table is the **unseeded production path**
+  (`try_convex_solve`, post iter-10). Any optimization measured against the wrong
+  baseline is uninterpretable.
+- **Entry experiment + kill criterion.** None to falsify — this is instrumentation,
+  not a hypothesis. Pin **two** labeled measurements over the panel
+  {rsyn0805m/0810m/0815m/0820m/0830m, syn05m/10m/15m/20m/40m}: **(A) production/
+  unseeded** wall + `node_count` + **first-incumbent latency** via a
+  `try_convex_solve` harness (extend `issue798_convex_family_certclean.py`; this is
+  the wall/latency + graduation anchor); **(B) seeded nodes-to-certify** via
+  `issue798_k2_tree_gate.py` (the K2 dual-side gate anchor). Kill only if a run is
+  not cert-clean — then stop and file the correctness regression before any perf work.
+- **Verification regime.** Measurement only; assert cert-clean on both (dual bound
+  = oracle optimum exactly, no false optimal, incumbents #779-verified).
+- **Done-when.** A committed baseline table (config A and config B, per instance:
+  wall, `node_count`, first-incumbent latency, seeded nodes-to-certify vs prototype)
+  recorded in the work log, with the pinned scripts named. Every later task cites
+  these numbers.
+
+### T1 — Row-order / degeneracy sensitivity (cheapest node-count win).
+- **Goal.** Recover the node-count lost to LP row order so the panel's seeded
+  nodes-to-certify moves toward the ≤2× prototype bar, wall unchanged-or-better.
+- **Hypothesis + evidence.** The K2e append-only restructure (iter 6/7) raised nodes
+  **1006→2512 (~2.5×)** — "the loop's row order perturbs vertex/cut selection on
+  these degenerate big-M LPs" (iter 7); iter 6 A/B saw a cold rsyn0815m at 738 vs a
+  differently-ordered 1301. This is a search-quality artifact of ordering on
+  degenerate LPs, currently under-weighted, and is the cheapest node lever
+  (no new mechanism, only ordering / tie-break / anti-degeneracy).
+- **Entry experiment + kill criterion.** BEFORE implementing, sweep the candidate
+  row orderings / degeneracy tie-breaks (e.g. base-row ordering, cut-append order,
+  Bland/anti-cycling on ties) on the seeded panel (config B) and record
+  nodes-to-certify per ordering. **Kill** if no ordering reduces panel total
+  nodes-to-certify by **≥15%** vs the T0 config-B baseline without raising wall —
+  then abandon and record the falsification.
+- **Verification regime.** Search-order (flavor ii): `node_count` is the target and
+  will move; assert cert-clean (dual bound = oracle optimum exactly, `bound ≥
+  incumbent`, incumbents #779-verified, `assert_cut_valid` on selected cuts). The
+  10 Rust tests + K2 gate stay green.
+- **Done-when.** Panel seeded nodes-to-certify reduced ≥15% vs T0-B, cert-clean,
+  wall not worse; new nodes/wall recorded against T0.
+
+### T2 — Reliability / strong branching (cut node count).
+- **Goal.** Drive nodes-to-certify further toward the ≤2× prototype bar by
+  strong-branching the top pseudocost candidates early (reliability branching).
+- **Hypothesis + evidence.** Pseudocost branching already gave 2.6× wall / up to 4.2×
+  fewer nodes (iter 9: 507/483/1185/337 → 353/177/281/139); the remaining node gap to
+  the prototype (2.5–5.3×) is the named next lever ("reliability branching — strong-
+  branch the top pseudocost candidates early", iters 7/9). Reliability branching is
+  SCIP's default and the standard node-count reducer on this family.
+- **Entry experiment + kill criterion.** BEFORE implementing, prototype reliability
+  branching (strong-branch the top-k pseudocost candidates until each is reliable)
+  on the seeded panel (config B) and record nodes-to-certify **and** wall (strong
+  branching costs extra LP solves per node — the trade must net out). **Kill** if it
+  does not reduce panel nodes-to-certify by **≥20%** *or* raises panel wall — then
+  abandon and record.
+- **Verification regime.** Search-order (flavor ii): `node_count` is the target;
+  assert cert-clean (dual = optimum exactly, `bound ≥ incumbent`, incumbents
+  #779-verified). Rust tests + K2 gate green.
+- **Done-when.** Panel nodes-to-certify ≥20% below post-T1 baseline AND panel wall
+  not worse, cert-clean; numbers recorded.
+
+### T3 — Dual-feasible parent→child warm restart (the harder amortization).
+- **Goal.** Make each child node's *first* LP solve a warm dual-reoptimize from a
+  proper dual-feasible starting basis (a few pivots) instead of a cold solve,
+  cutting per-node wall with `node_count` **exactly unchanged**.
+- **Hypothesis + evidence.** Each node's first solve is still **cold** (iters 6/7);
+  this is SCIP's dominant amortization. **The idea is sound; the prior attempt failed
+  on restart *mechanics*, not the idea** — iter 8's parent→child *base-basis*
+  inheritance was cert-clean and cut nodes slightly (2512→2072) but wall went
+  **UP 64.6→92.8 s (+28 s)** because the parent base basis is a poor primal warm
+  start across the tighter child box (warm-attempt + factorize + dual-feas check,
+  then cold fallback). The fix is a **dual-feasible** restart across the single
+  branching bound change (`PreparedDual::prepare` from the parent's *optimal* basis),
+  which is exactly the case dual simplex reoptimizes cheaply — a distinct mechanism
+  from the falsified base-basis inheritance.
+- **Entry experiment + kill criterion.** BEFORE a full build, prototype the
+  dual-feasible reoptimize on the child's first solve for one panel instance and
+  measure **pivots-to-reoptimize** and **wall** vs the cold solve; confirm the
+  parent's optimal basis is dual-feasible for the child LP (same objective, tighter
+  box → bound change only) so dual simplex applies. **Kill** if the dual reoptimize
+  does not beat the cold solve on per-node wall on that instance, or if panel wall is
+  not **≥15%** below the T2 baseline — abandon and record (do **not** re-walk the
+  base-basis inheritance; that specific mechanism is falsified).
+- **Verification regime.** *Strictly bound-neutral* (flavor i): the LP, box, and
+  optimum are identical — assert **`node_count` AND certified objective EXACTLY
+  unchanged** on the panel; only wall moves. Any node drift ⇒ the restart is wrong.
+  NS certification must still hold (keep the scaled warm path — `dual.rs` equilibrates).
+- **Done-when.** Panel wall ≥15% below T2 baseline with `node_count` bit-identical
+  and cert-clean; per-node wall + pivots recorded against T0.
+
+### T4 — K3 primal: rounding/diving to close the 2 fallbacks (primal gap, distinct).
+- **Goal.** Find a certified incumbent for rsyn0820m/rsyn0830m within budget so they
+  certify instead of falling back — a **primal** (incumbent-finding) workstream,
+  separate from the K2 node/wall work.
+- **Hypothesis + evidence.** The 2 fallbacks decline at the **#779 incumbent
+  verification** — "likely no certified incumbent within the budget, a large-instance
+  timeout rather than an infeasible incumbent" (#800). On the smaller panel the primal
+  is *not* the bottleneck (iter 8: seeded ≡ unseeded node counts), so this is
+  specifically the large-instance primal-starvation case a rounding/diving heuristic
+  at integer-feasible LP points targets (K3; cuts live in the LP, never in the NLP →
+  primal never starved, dissolving the #781 HOLD).
+- **Entry experiment + kill criterion.** FIRST confirm the root cause on
+  rsyn0820m/0830m: instrument `try_convex_solve` to record whether the budget expires
+  with **no incumbent** vs an incumbent that **fails #779**. Only if it's *no
+  incumbent* proceed; then prototype a rounding/diving heuristic at LP integer-feasible
+  points and measure **first-incumbent latency**. **Kill** if the heuristic does not
+  produce a #779-verified incumbent on at least one of the two within a 120 s budget —
+  abandon and record (the gap may then be dual-side, i.e. T1–T3 territory).
+- **Verification regime.** Search-order/primal (flavor ii): the dual bound is
+  unchanged; every heuristic incumbent is **#779-verified feasible against the
+  pristine model** before acceptance (never a false or infeasible incumbent), certified
+  objective = oracle optimum exactly. K3 kill invariant: ON must never return `None`
+  where the NLP-BB path finds an incumbent.
+- **Done-when.** rsyn0820m/0830m certify optimal cert-clean within budget (or the
+  root cause is proven dual-side and the task is re-scoped/closed with that finding
+  recorded); first-incumbent latency recorded.
+
+### T5 — Re-scope the kernel time budget (the reframed "size cap").
+- **Goal.** Once T1–T4 close the wall gap, raise/adapt `DISCOPT_CONVEX_KERNEL_BUDGET`
+  so the full panel certifies *inside* budget instead of a premature fallback —
+  without ever letting a large instance stall past an honest limit.
+- **Hypothesis + evidence.** The scoping lever is the budget in `try_convex_solve`
+  (`min(time_limit, DISCOPT_CONVEX_KERNEL_BUDGET=120 s)`), **not** a structural cap in
+  `build_convex_spec` (there is none). After T1–T4 the panel wall should fall well
+  under 120 s, so the current budget already permits certification; the task is to
+  confirm and, if needed, tune the default so no panel instance falls back for time.
+- **Entry experiment + kill criterion.** Re-run the T0 config-A production harness
+  post-T1–T4 and record per-instance wall vs budget. **Kill/defer** if any panel
+  instance still exceeds a sane budget (≥120 s) — the wall work is unfinished; return
+  to T1–T3 rather than inflate the budget to mask a slow solve (§3: no tolerance/limit
+  tweak to pass a gate).
+- **Verification regime.** Search-order/config (flavor ii): fallback path and honest
+  `TimeLimit` semantics unchanged; assert cert-clean on the full panel via config A.
+  Never report a false `optimal` for a budget-exhausted solve.
+- **Done-when.** Full panel certifies within the (possibly re-tuned) budget on the
+  production path, cert-clean, fallback still sound for anything over budget.
+
+### T6 — K2 node-count gate + panel-wall confirmation (checkpoint).
+- **Goal.** Confirm the #800 numeric bars are met on the panel before graduation:
+  nodes-to-certify ≤ 2× prototype AND wall ≤ ~2× SCIP, cert-clean.
+- **Hypothesis + evidence.** The K2 node-count gate is the standing unmet bar
+  (2.5–5.3× → ≤2×, #800 / iter 6); wall ~2× SCIP is the #800 DoD. This checkpoint
+  ties T1–T5 to those thresholds so graduation isn't attempted early.
+- **Entry experiment + kill criterion.** None — this is the gate re-run
+  (`issue798_k2_tree_gate.py` for nodes; config-A harness for wall). **Kill/return**
+  to the relevant node/wall task if either bar is unmet.
+- **Verification regime.** Gate re-run; cert-clean assertion (dual = optimum exactly,
+  no false optimal, incumbents #779-verified).
+- **Done-when.** `issue798_k2_tree_gate.py` reports PASS (nodes ≤2× prototype,
+  cert-clean) AND config-A panel wall ≤ ~2× SCIP; numbers recorded.
+
+### T7 — Graduation: Regime-2 corpus panel → `DISCOPT_CONVEX_KERNEL` default-ON.
+- **Goal.** Graduate the flag toward default-ON via the CLAUDE.md §5 Regime-2 gate
+  (flag ON vs OFF over the in-repo corpus): cert-clean AND net-positive.
+- **Hypothesis + evidence.** #798 proved net-positive on the smaller family (kernel
+  certifies in ~24 s vs NLP-BB timing out uncertified at 482 s) and cert-clean on the
+  66-instance Regime-2 panel; #800 extends that to the full `rsyn*`/`syn*` panel once
+  T6 passes. §5 requires one passing graduation-gate run meeting BOTH bars.
+- **Entry experiment + kill criterion.** Run the Regime-2 corpus panel flag-ON vs
+  flag-OFF (`issue798_regime2_panel.py` + the convex-family sweep). **Kill** if the
+  ON run shows ANY of: `incorrect_count > 0`, a bound above its reference optimum, a
+  `gap_certified=True` instance regressing to uncertified, an unverified incumbent, or
+  a net node/wall regression on a routed family — leave the flag default-OFF and record
+  (the `DISCOPT_CUT_INHERIT` lesson: sound-but-neutral stays OFF).
+- **Verification regime.** *Graduation* (flavor iii): §5 Regime-2 — (1) cert-clean
+  (`incorrect_count = 0`, no bound above reference, no certification regression,
+  incumbents independently feasibility-verified) AND (2) net-positive (measurably
+  helpful on node/wall). Keep the `=0` opt-out and the NLP-BB fallback intact.
+- **Done-when.** One passing graduation-gate run meeting both bars → flip
+  `DISCOPT_CONVEX_KERNEL` default-ON (opt-out preserved); or, if not net-positive,
+  the flag stays OFF with the measurement recorded and #800 closes on the scoped win.
+
 ## Work log (append newest first)
 
 - **2026-07-19 (iter 10): K4 producer + convexity gate + SOUNDNESS FIX + gate tests.**
