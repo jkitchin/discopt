@@ -1,0 +1,37 @@
+{
+ "rsyn0805m": {
+  "opt": 1296.120603,
+  "cut_nodes": 67,
+  "cut_status": "feasible",
+  "nocut_nodes": 1188,
+  "nocut_status": "feasible",
+  "node_reduction": 17.73134328358209
+ },
+ "rsyn0810m": {
+  "opt": 1721.447711,
+  "cut_nodes": 60,
+  "cut_status": "feasible",
+  "nocut_nodes": 956,
+  "nocut_status": "feasible",
+  "node_reduction": 15.933333333333334
+ },
+ "rsyn0815m": {
+  "opt": 1269.925649,
+  "cut_nodes": 46,
+  "cut_status": "feasible",
+  "nocut_nodes": 835,
+  "nocut_status": "feasible",
+  "node_reduction": 18.152173913043477
+ },
+ "syn40m": {
+  "opt": 67.71325586,
+  "cut_nodes": 55,
+  "cut_status": "feasible",
+  "nocut_nodes": 816,
+  "nocut_status": "feasible",
+  "node_reduction": 14.836363636363636
+ },
+ "_summary": {
+  "median_reduction": 17.73134328358209
+ }
+}
