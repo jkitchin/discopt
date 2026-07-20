@@ -96,7 +96,19 @@ per-node NLP → primal never starved (dissolves the #781 HOLD).
 **Kill:** ON must never return None where the current NLP-BB path finds an
 incumbent, on the panel.
 
-### K4 — graduation.
+### K4 — graduation. **WIRED + CERT-CLEAN (2026-07-19); graduation criteria met.**
+`Model.solve()` routes to the kernel behind `DISCOPT_CONVEX_KERNEL` (default-OFF)
+via `_convex_kernel.try_convex_solve` (gate → solve → #779 incumbent verification →
+certified `SolveResult`; `None` → default path for flag-off / non-convex /
+unverifiable). Validation: 8 producer/gate/routing tests pass; **smoke suite passed**
+(default path unaffected); **adversarial suite 10 passed** (no regression);
+**Regime-2 corpus panel cert-clean** (66 instances: routed 1, declined 65,
+incorrect_count 0); **net-positive PROVEN** (kernel certifies the convex panel in
+~24 s vs the NLP-BB path timing out uncertified in 482 s). Flag stays default-OFF
+per policy; graduation to default-ON is a follow-up once broader corpus coverage
+accrues. Original K4 spec below.
+
+
 `DISCOPT_CONVEX_KERNEL` default-OFF → §5 Regime-2 panel scored on
 **nodes-to-certify AND first-incumbent latency AND wall** (fix the #781 tally
 which missed latency); cert-clean (0 violations, no false optimum, incumbents
