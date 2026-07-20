@@ -410,6 +410,14 @@ _EMPTY_BOX = np.empty(0, dtype=np.float64)
 _BOUNDS_CACHE_CAP = 500_000
 # Cap on the per-node proven/abstained curvature-box lists (drop-oldest).
 _CERT_LIST_CAP = 8
+# #248: magnitude past which the objective's box-interval floor is treated as
+# garbage — the factorable-reform signature where a wide-boxed monomial-lift
+# auxiliary (e.g. nvs16's ``_fr_aux == x1**6`` over [0, 6.4e13]) with a negative
+# objective coefficient sinks the LP objective bound to a garbage-but-sound value
+# (~-5e11) that anchors the tree and never certifies. The LP bound is refused so
+# the solver falls back to the rigorous alphaBB/interval bound. Matches the
+# relaxation's 1e10 aux-bound cap (milp_relaxation._RELAX_NUMERIC_CAP).
+_OBJ_BOX_FLOOR_GARBAGE_CAP = 1e10
 
 
 class _TracedEvalFn:
@@ -3155,6 +3163,19 @@ def build_uniform_relaxation(
         else:
             obj_box_lb += contrib
     if not math.isfinite(obj_box_lb):
+        obj_bound_valid = False
+    # #248: when the objective's box-interval floor is garbage-wide, the LP
+    # objective bound is untrustworthy and must be refused so the solver falls
+    # back to the rigorous alphaBB/interval bound. This is the factorable-reform
+    # signature: a monomial-lift auxiliary (e.g. nvs16's x1**6 over [0, 6.4e13])
+    # carries a wide box AND a negative objective coefficient, so the loose
+    # McCormick rows let the LP drive it to that box edge and sink the objective
+    # to a garbage-but-sound bound (~-5e11 vs true 0.703) that anchors the tree
+    # and never certifies. The aux is IN the rows (not omitted), so the freed-
+    # column check above doesn't catch it — the box-floor magnitude does.
+    # Refusing only ever tightens (falls back to a rigorous bound), never loosens
+    # below truth, so a rare false refusal costs nodes, not soundness.
+    elif obj_box_lb < -_OBJ_BOX_FLOOR_GARBAGE_CAP:
         obj_bound_valid = False
 
     # ── Separable objective lower bound (issue #640 Bucket 1 — federation-parity) ──
