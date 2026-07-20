@@ -434,6 +434,7 @@ pub fn solve_convex_tree_py<'py>(
     term_coeff, term_func, term_arg_const, term_arg_ptr, term_arg_cols, term_arg_coeffs,
     max_stats=25, gap_tol=1e-4, int_tol=1e-5, oa_tol=1e-6,
     max_oa_rounds=60, fbbt_rounds=20, initial_incumbent=None,
+    gc_pool_cap=0, gc_max_age=5,
 ))]
 #[allow(clippy::too_many_arguments)]
 pub fn convex_warmlp_probe_py<'py>(
@@ -471,6 +472,8 @@ pub fn convex_warmlp_probe_py<'py>(
     max_oa_rounds: usize,
     fbbt_rounds: usize,
     initial_incumbent: Option<f64>,
+    gc_pool_cap: usize,
+    gc_max_age: u32,
 ) -> PyResult<Bound<'py, PyDict>> {
     let arrays = SpecArrays {
         n,
@@ -516,7 +519,7 @@ pub fn convex_warmlp_probe_py<'py>(
         expel_zero_artificials: true,
         ..Default::default()
     };
-    let stats = spec.warmlp_w0_probe(&config, &opts, max_stats);
+    let stats = spec.warmlp_w0_probe(&config, &opts, max_stats, gc_pool_cap, gc_max_age);
     let cold: Vec<f64> = stats.iter().map(|s| s.cold_us).collect();
     let warm: Vec<f64> = stats.iter().map(|s| s.warm_us).collect();
     let pivots: Vec<f64> = stats.iter().map(|s| s.warm_pivots as f64).collect();

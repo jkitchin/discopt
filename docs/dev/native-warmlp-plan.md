@@ -379,6 +379,33 @@ regression ⇒ revert, record, done. Search-order regime (flavor ii).
 
 ## 8. Work log (append newest first)
 
+- **2026-07-20 (#807 W0 addendum): tangent-GC FALSIFIED as the syn40m rescue
+  (owner-chosen option a). Root cause CONFIRMED: syn40m is OA-round-bound.**
+  Implemented SCIP-style tangent aging + GC in the probe (`W0WarmLp::age_and_gc`:
+  age each non-binding tangent, drop the most-aged when the pool exceeds a cap;
+  dropping is sound — the OA loop re-derives on demand). Re-ran W0 at pool cap 150:
+  - **GC bounds the pool but does NOT rescue the ratio.** syn40m pool 817→166 rows,
+    but amortized warm-vs-cold **1.00× → 1.25×** (still ≪ 2×). rsyn0815m stays
+    **GO: 10.07× → 8.65×** (GC costs a little; still decisive). Cert-clean + sound
+    throughout (margins unchanged; parity still OA-slack, 1.4e-4→1.4e-7 at 1e-9).
+  - **Why GC can't help (the definitive finding):** GC drops tangents syn40m
+    immediately needs back → **re-derivation churn** — total new tangents
+    **830 → 2525** (→ 5173 at oa_tol=1e-9). It trades pool size for OA work,
+    net-neutral. The real bottleneck is that **syn40m nodes are OA-round-bound**:
+    ~7 NEW tangents/node to OA-converge, which BOTH the cold and warm paths must
+    derive (both warm the within-node OA re-solves already). The native-warm-LP
+    advantage lives ONLY in the FIRST solve per node — a small fraction of an
+    OA-round-heavy node — so no warm-LP or pool strategy can move syn40m. This is
+    inherent to syn40m's many highly-curved nonlinear rows (a relaxation-quality
+    property), NOT a per-node-throughput problem.
+  - **Consequence.** The native-warm-LP architecture is validated, sound, and
+    decisively net-positive (8–10×) on the **pool-saturating `rsyn*` family** — which
+    is exactly where the #800 panel-wall gap lives (rsyn0820m 80 s / rsyn0830m 50 s
+    dominate config-A's 174 s). It is a no-op on the **OA-round-bound** class
+    (syn40m; the tiny syn05–20m are ≤0.6 s and irrelevant). Owner option (a) is
+    falsified; **re-surfaced with (b) scope #807 to `rsyn*` [recommended — captures
+    the wall gap] vs (c) whole-issue kill.** Probe + this record committed.
+
 - **2026-07-20 (#807 W0): primitive VALIDATED + SOUND, but the permanent-tangent-
   pool amortization FALSIFIED on syn40m → SURFACED for re-scope.**
   Probe: `crates/discopt-core/src/bnb/convex_kernel.rs` (`W0WarmLp` + a shared-LP

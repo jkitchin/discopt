@@ -1178,9 +1178,12 @@ struct W0WarmLp {
     n: usize,
     sign: f64,
     rows: Vec<AsmRow>,
-    b: Vec<f64>,    // per row: rhs
-    sp: SparseCols, // cached CSC of `rows`
-    dirty: bool,    // rows changed since `sp` last built
+    b: Vec<f64>,           // per row: rhs
+    age: Vec<u32>,         // per row: rounds non-binding (base rows stay 0, never GC'd)
+    n_base: usize,         // base rows never aged/dropped
+    last_full_x: Vec<f64>, // last solve's full point (structural ‖ slacks), for aging
+    sp: SparseCols,        // cached CSC of `rows`
+    dirty: bool,           // rows changed since `sp` last built
     basis: Option<Basis>,
 }
 
@@ -1204,15 +1207,69 @@ impl W0WarmLp {
                 is_eq: true,
             });
         }
+        let n_base = rows.len();
         W0WarmLp {
             n: spec.n,
             sign,
             b: rows.iter().map(|r| r.rhs).collect(),
+            age: vec![0; n_base],
+            n_base,
+            last_full_x: Vec::new(),
             rows,
             sp: SparseCols::from_csc(vec![0], Vec::new(), Vec::new()),
             dirty: true,
             basis: None,
         }
+    }
+
+    /// SCIP-style tangent aging + GC (#807 W0 re-scope): age each tangent by the
+    /// rounds it sits non-binding at the last optimum (reset when it binds), then,
+    /// if the tangent pool exceeds `pool_cap`, drop the most-aged non-binding
+    /// tangents down to `pool_cap`. Dropping a tangent is SOUND — it only loosens
+    /// the (still valid) relaxation, and the OA loop re-derives it if a later node
+    /// violates that row. Base rows are never dropped. A drop invalidates the basis
+    /// (next solve cold). `pool_cap == 0` disables GC.
+    fn age_and_gc(&mut self, tol: f64, pool_cap: usize, max_age: u32) {
+        if self.last_full_x.len() < self.n + self.rows.len() {
+            return;
+        }
+        for r in self.n_base..self.rows.len() {
+            let slack = self.last_full_x[self.n + r].abs();
+            if slack > tol {
+                self.age[r] = self.age[r].saturating_add(1);
+            } else {
+                self.age[r] = 0;
+            }
+        }
+        let n_tan = self.rows.len() - self.n_base;
+        if pool_cap == 0 || n_tan <= pool_cap {
+            return;
+        }
+        // Candidates: aged, non-binding tangents; most-aged dropped first.
+        let mut drop_idx: Vec<usize> = (self.n_base..self.rows.len())
+            .filter(|&r| self.age[r] >= max_age)
+            .collect();
+        drop_idx.sort_by_key(|&r| std::cmp::Reverse(self.age[r]));
+        drop_idx.truncate(n_tan.saturating_sub(pool_cap));
+        if drop_idx.is_empty() {
+            return;
+        }
+        let drop: std::collections::HashSet<usize> = drop_idx.into_iter().collect();
+        let mut keep_rows = Vec::with_capacity(self.rows.len() - drop.len());
+        let mut keep_b = Vec::with_capacity(keep_rows.capacity());
+        let mut keep_age = Vec::with_capacity(keep_rows.capacity());
+        for (r, row) in self.rows.drain(..).enumerate() {
+            if !drop.contains(&r) {
+                keep_b.push(self.b[r]);
+                keep_age.push(self.age[r]);
+                keep_rows.push(row);
+            }
+        }
+        self.rows = keep_rows;
+        self.b = keep_b;
+        self.age = keep_age;
+        self.dirty = true;
+        self.basis = None; // dropped rows → carried basis no longer valid
     }
 
     /// NODE-box slack cap for a row (eq → 0; ≤ → (rhs − min-activity over the
@@ -1323,6 +1380,7 @@ impl W0WarmLp {
                 return None; // infeasible/unbounded child
             }
             self.basis = Some(sol.basis.clone());
+            self.last_full_x = sol.x.clone();
             let x: Vec<f64> = sol.x[..self.n].to_vec();
             last_raw = self.sign * sol.obj;
             let (col_ptr, row_idx, vals) = self.sp.raw();
@@ -1356,6 +1414,7 @@ impl W0WarmLp {
                         };
                         self.b.push(ar.rhs);
                         self.rows.push(ar);
+                        self.age.push(0);
                         self.dirty = true;
                         added = true;
                         new_tangents += 1;
@@ -1404,6 +1463,8 @@ impl ConvexKernelSpec {
         config: &ConvexTreeConfig,
         opts: &SimplexOptions,
         max_stats: usize,
+        gc_pool_cap: usize,
+        gc_max_age: u32,
     ) -> Vec<W0NodeStat> {
         let sense = if self.sense_max { 1.0 } else { -1.0 };
         let inc_sense = config.initial_incumbent.map(|v| sense * v);
@@ -1454,6 +1515,8 @@ impl ConvexKernelSpec {
             let warm_res =
                 warm.solve_node(self, &lo, &hi, config.oa_tol, config.max_oa_rounds, opts);
             let warm_us = t1.elapsed().as_secs_f64() * 1e6;
+            // Tangent aging + GC (bounds the pool for many-nl-row instances).
+            warm.age_and_gc(opts.tol.max(1e-7), gc_pool_cap, gc_max_age);
             if let Some((wbound, _wraw, wpivots, wnew, wns)) = warm_res {
                 stats.push(W0NodeStat {
                     cold_us,

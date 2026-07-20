@@ -48,13 +48,14 @@ def pctl(xs, q):
     return xs[i]
 
 
-def run(name: str, oa_tol: float = 1e-6) -> dict:
+def run(name: str, oa_tol: float = 1e-6, gc_pool_cap: int = 0) -> dict:
     opt = PANEL[name]["opt"]
     rm = RootModel(name)
     arrays = build_convex_arrays(rm, rm.lb, rm.ub)
     r = _rust.convex_warmlp_probe_py(
         **arrays, max_stats=MAX_STATS, gap_tol=1e-4, int_tol=1e-5, oa_tol=oa_tol,
         max_oa_rounds=60, fbbt_rounds=20, initial_incumbent=float(opt),
+        gc_pool_cap=gc_pool_cap, gc_max_age=5,
     )
     cold = list(r["cold_us"])
     warm = list(r["warm_us"])
@@ -119,32 +120,36 @@ def run(name: str, oa_tol: float = 1e-6) -> dict:
                 max_bdiff=max_bdiff, all_ns=all_ns, sound=sound)
 
 
-def main() -> bool:
-    print("########## oa_tol=1e-6 (production) ##########")
-    results = [run(n, oa_tol=1e-6) for n in INSTANCES]
-    print("\n########## oa_tol=1e-9 (parity diagnostic — gap should shrink) ##########")
-    tight = [run(n, oa_tol=1e-9) for n in INSTANCES]
+GC_CAP = 150  # tangent-pool cap (W0 re-scope: bound the pool for many-nl-row cases)
 
-    print("\n================ W0 VERDICT ================")
-    print("Speed: warm dual-reoptimize vs cold node solve. Kill if amortized "
-          "median <2x.\nParity: warm/cold agree to OA tolerance (both valid dual "
-          "bounds); the\n1e-9 run below confirms the residual gap is OA slack, not "
-          "a mechanism error.\nSoundness (the real invariant): every warm bound is "
-          "a valid dual bound vs oracle.")
+
+def main() -> bool:
+    print("########## oa_tol=1e-6, GC OFF (baseline, permanent pool) ##########")
+    base = [run(n, oa_tol=1e-6, gc_pool_cap=0) for n in INSTANCES]
+    print(f"\n########## oa_tol=1e-6, GC ON (tangent pool cap={GC_CAP}) ##########")
+    gc = [run(n, oa_tol=1e-6, gc_pool_cap=GC_CAP) for n in INSTANCES]
+    print("\n########## oa_tol=1e-9, GC ON (parity diagnostic) ##########")
+    tight = [run(n, oa_tol=1e-9, gc_pool_cap=GC_CAP) for n in INSTANCES]
+
+    print("\n================ W0 VERDICT (with tangent-GC) ================")
+    print("GC bounds the pool so the warm advantage survives on many-nl-row "
+          "instances.\nSpeed: amortized warm-vs-cold >=2x. Soundness: every warm "
+          "bound valid vs oracle.\nParity: OA-tolerance slack (1e-9 run collapses "
+          "it), not a mechanism error.")
     ok = True
-    for r, t in zip(results, tight):
-        speed_ok = r["amort_ratio"] >= 2.0
-        ns_ok = r["all_ns"]
-        sound_ok = r["sound"]
-        # Parity shrinks when OA is tightened → confirms OA-slack (not a bug).
-        oa_slack_confirmed = t["max_bdiff"] <= r["max_bdiff"] * 1.5
+    for b, g, t in zip(base, gc, tight):
+        speed_ok = g["amort_ratio"] >= 2.0
+        ns_ok = g["all_ns"]
+        sound_ok = g["sound"]
+        oa_slack_confirmed = t["max_bdiff"] <= g["max_bdiff"] * 1.5
         good = speed_ok and ns_ok and sound_ok and oa_slack_confirmed
         ok = ok and good
-        print(f"{r['name']:10s} amortized={r['amort_ratio']:.2f}x (>=2 {speed_ok})  "
-              f"NS={ns_ok}  SOUND={sound_ok}  "
-              f"parity 1e-6→1e-9: {r['max_bdiff']:.1e}→{t['max_bdiff']:.1e} "
-              f"(OA-slack {oa_slack_confirmed})  => {'GO' if good else 'KILL'}")
-    print(f"\nW0 {'GO — build W1' if ok else 'KILL — #807 architecture falsified'}")
+        print(f"{g['name']:10s} amortized: GC-off={b['amort_ratio']:.2f}x → "
+              f"GC-on={g['amort_ratio']:.2f}x (>=2 {speed_ok})  NS={ns_ok}  "
+              f"SOUND={sound_ok}  parity 1e-6→1e-9: {g['max_bdiff']:.1e}→"
+              f"{t['max_bdiff']:.1e} (OA-slack {oa_slack_confirmed})  "
+              f"=> {'GO' if good else 'KILL'}")
+    print(f"\nW0 {'GO — build W1' if ok else 'KILL/RE-SCOPE — see per-instance'}")
     return ok
 
 
