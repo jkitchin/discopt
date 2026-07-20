@@ -382,6 +382,51 @@ net-positive). No task may weaken a validation, fallback, or soundness guard to 
 
 ## Work log (append newest first)
 
+- **2026-07-20 (#800 T3): DUAL-FEASIBLE WARM-CHILD RESTART — FALSIFIED (kill hit,
+  both conditions). + #801 cross-reference + architectural finding.**
+  Entry experiment (CLAUDE.md §4) before any default change. Built the warm-child
+  path behind `DISCOPT_CVX_WARMCHILD=1`: capture each node's base-only first-solve
+  optimal basis (`ConvexNodeResult.first_basis`), thread it through the tree node,
+  and warm each child's FIRST base-LP solve from the parent's basis via the dual
+  path (`solve_lp_warm_scaled_csc` → `PreparedDual::prepare` → dual reoptimize;
+  cold fallback when unusable). Measured ON vs OFF on the seeded config-B panel:
+  - OFF (baseline) **950 nodes / 24.4 s**. ON **1120 nodes / 27.4 s**. Cert-clean.
+  - **KILL — condition 1 (bound-neutrality): NODE DRIFT on all 4** (rsyn0805m
+    353→465, rsyn0810m 177→155, rsyn0815m 281→329, syn40m 139→171; 950→1120,
+    +18%). T3 is *strictly bound-neutral* (flavor i) — `node_count` MUST be
+    bit-identical; any drift means the change is wrong. The warm start lands on a
+    DIFFERENT degenerate vertex than the cold solve (the T1 degeneracy lesson: these
+    big-M LPs have many optimal vertices), so the fractional x, OA tangents, and
+    tree all change. Warming the first solve **cannot** preserve the tree on this
+    family — the two are fundamentally incompatible here.
+  - **KILL — condition 2 (wall): ON is SLOWER** (27.4 s vs 24.4 s, +12%), not the
+    required ≥15% faster. The warm machinery's overhead (factorize the parent basis
+    + dual-feasibility check + frequent cold fallback — the base-only parent basis
+    is usually NOT dual-feasible for the child, because the branching variable was
+    chosen from the parent's cut-converged solution, not its base-only vertex)
+    exceeds the cold-solve cost. This reproduces iter-8's falsification via the DUAL
+    path too — confirming iter-8's negative was the mechanism, not the primal/dual
+    choice.
+  - **Architectural finding (the real lesson).** #801 (just closed) pins BARON's
+    per-node advantage as "native warm LPs + reduced-cost range reduction". This
+    kernel CANNOT get the native-warm-LP benefit within its current architecture:
+    it re-assembles the base LP per node, and the parent's cut-converged optimal
+    basis (where the branch var is basic-fractional → dual-feasible) is over a
+    DIFFERENT, larger LP than the child's base-only first solve, while the parent's
+    base-only basis (right dimensions) is neither dual-feasible for the child nor
+    bound-neutral to warm from. A true native-warm-LP B&B (SCIP/BARON) keeps ONE LP
+    and modifies bounds in place across the whole tree, warm-reoptimizing — a
+    different architecture than this per-node-reassembly kernel. Getting "native
+    warm LPs" is an **architectural rewrite**, not a warm-start knob.
+  - Scaffolding reverted (no dead flags, §3); kernel bit-identical to T0 baseline
+    (10 Rust convex tests pass). **THIRD consecutive kill (T1 row-order, T2
+    branching, T3 warm restart).** All three per-node/search levers the #800 list
+    named are now falsified on this family. **SURFACED: the K2 node-count gate AND
+    the ~2× SCIP wall bar are not reachable via the planned levers on this
+    architecture; #800 should close on the T0 scoped win (panel certifies within the
+    120 s budget, cert-clean, net-positive vs NLP-BB) with the SCIP-parity gap
+    re-scoped to a native-warm-LP architecture follow-up.**
+
 - **2026-07-20 (#800 T2): RELIABILITY / STRONG BRANCHING — FALSIFIED (kill hit).**
   Entry experiment (CLAUDE.md §4) before any production default change, on the
   seeded config-B panel (post-T1 baseline = T0-B **950** nodes, **~24 s**). Built
