@@ -137,6 +137,35 @@ primal regression.
 
 ## Work log (append newest first)
 
+- **2026-07-19 (iter 8): K3 satisfied; parent→child basis inheritance FALSIFIED;
+  measuring vs NLP-BB.**
+  - **K3 (primal) is effectively DONE.** The tree certifies UNSEEDED on the panel
+    (`initial_incumbent=None`): all 4 optimal, incumbents found at integer-feasible
+    OA-tight leaf vertices, verified feasible to tolerance by `is_integer_feasible`
+    (nl residual ≤ oa_tol, int ≤ int_tol — the #779-style guard, already present).
+    **Node counts are IDENTICAL seeded vs unseeded** (rsyn0815m 1185=1185) → the
+    primal is NOT the bottleneck; rounding/NLP heuristics would give ~0 here.
+    Incumbent objective slightly exceeds the true optimum (OA-vertex is an
+    overestimate; rel 2.5e-6, within the rel-1e-4 tolerance) — a genuinely-feasible
+    objective via an NLP polish is deferred (within tolerance, needs a Python NLP
+    callback, low value on this family). Existing tree tests already run unseeded.
+  - **Parent→child base-basis inheritance — FALSIFIED (measurement wins, §4).**
+    Implemented (store the node's base-LP basis on `TreeNode`, warm the child's
+    first solve via `solve_lp_warm_scaled_csc`), cert-clean, nodes slightly down
+    (2512→2072) — but **wall UP 64.6s→92.8s** (per-node 26→45 ms). The parent's
+    base basis is a poor warm start across the tighter child box (warm-attempt +
+    factorize + dual-feasibility check, then likely cold fallback / slow
+    reoptimize, costs more than a direct cold solve). **Reverted.** Revisiting it
+    needs deeper simplex warm-start work (why `PreparedDual::prepare` fails or
+    reoptimizes slowly across the branching bound change), not a quick win.
+  - **Best committed state: within-node warm-start, 64.6s total, cert-clean.**
+  - **Next:** measuring the kernel vs the current NLP-BB path
+    (`dm.from_nl(name).solve()`) head-to-head — the actual K4 graduation criterion.
+    If the kernel already beats NLP-BB on wall, it's a net-positive graduation
+    candidate independent of SCIP parity. Remaining perf lever: node-count reduction
+    (the loop's row order raised nodes ~2.5× vs the old loop — investigate branching
+    / row order), which compounds with the warm-start.
+
 - **2026-07-19 (iter 7): K2e warm-start node solve DONE — ~2× wall, cert-clean.**
   - Unified `oa_converge`+`solve_node_cut` into one growing-LP loop: base `[le, eq]`
     assembled once, OA tangents + cuts APPENDED (append-only → columns stable), each
