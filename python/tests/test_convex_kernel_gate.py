@@ -23,6 +23,17 @@ def _scalar(m, expr_fn, name):
     m.constraint(dm.RangeSet(1), lambda _i: expr_fn(), name=name, fast=False)
 
 
+def _convex_minlp():
+    # max x + k  s.t.  k ≤ x,  exp(x) ≤ 5 (→ x ≤ ln 5),  x∈[0,10], k∈{0..3} int.
+    m = dm.Model()
+    x = m.continuous("x", lb=0.0, ub=10.0)
+    k = m.integer("k", lb=0, ub=3)
+    _scalar(m, lambda: k - x <= 0, "kx")
+    _scalar(m, lambda: dm.exp(x) <= 5.0, "expc")
+    m.maximize(x + k)
+    return m
+
+
 def test_convex_minlp_is_routed_and_certified_soundly():
     # max x + k  s.t.  k ≤ x,  exp(x) ≤ 5 (→ x ≤ ln 5),  x∈[0,10], k∈{0..3} int.
     # Optimum: x = ln 5, k = 1 → ln 5 + 1.
@@ -84,3 +95,41 @@ def test_nonlinear_objective_falls_back():
     _scalar(m, lambda: x + z <= 4.0, "lin")
     m.maximize(dm.log(x) + z)  # nonlinear objective → cannot be an LP objective
     assert build_convex_spec(m) is None, "nonlinear objective must fall back"
+
+
+def test_model_solve_routes_to_kernel_when_flag_on(monkeypatch):
+    """DISCOPT_CONVEX_KERNEL=1 → Model.solve() routes a convex MINLP to the kernel
+    and returns the certified optimum, verified feasible against the pristine model."""
+    monkeypatch.setenv("DISCOPT_CONVEX_KERNEL", "1")
+    truth = float(np.log(5.0)) + 1.0
+    r = _convex_minlp().solve(time_limit=30)
+    assert r.status == "optimal"
+    assert r.gap_certified
+    assert abs(r.objective - truth) < 1e-3, f"objective {r.objective} != {truth}"
+    assert r.bound >= r.objective - 1e-6 * max(1.0, abs(r.objective))  # cert invariant
+
+
+def test_model_solve_default_path_when_flag_off(monkeypatch):
+    """Flag off → the convex fast path is not taken; the default path still solves
+    the same model to the same optimum (both paths must agree)."""
+    monkeypatch.setenv("DISCOPT_CONVEX_KERNEL", "0")
+    truth = float(np.log(5.0)) + 1.0
+    r = _convex_minlp().solve(time_limit=30)
+    assert r.status in ("optimal", "feasible")
+    assert r.objective is not None and abs(r.objective - truth) < 1e-2
+
+
+def test_nonconvex_uses_default_path_even_with_flag_on(monkeypatch):
+    """Flag on but non-convex (bilinear) → the gate declines, so the default
+    (spatial) path handles it and still returns a feasible/optimal result."""
+    monkeypatch.setenv("DISCOPT_CONVEX_KERNEL", "1")
+    m = dm.Model()
+    a = m.continuous("a", lb=0.0, ub=2.0)
+    b = m.continuous("b", lb=0.0, ub=2.0)
+    z = m.binary("z")
+    _scalar(m, lambda: a * b <= 1.0, "bilin")
+    _scalar(m, lambda: a + b + z <= 5.0, "lin")
+    m.maximize(a + b + z)
+    r = m.solve(time_limit=30)
+    assert r.status in ("optimal", "feasible")
+    assert r.objective is not None

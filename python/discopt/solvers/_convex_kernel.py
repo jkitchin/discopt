@@ -31,7 +31,10 @@ term makes the whole model fall back.
 from __future__ import annotations
 
 import os
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
+
+if TYPE_CHECKING:
+    from discopt.modeling.core import SolveResult
 
 import numpy as np
 
@@ -363,3 +366,113 @@ def solve_convex_tree(spec: dict, *, time_limit_s: Optional[float] = None, **cfg
     )
     result: dict = dict(_rust.solve_convex_tree_py(**spec, **params))
     return result
+
+
+def try_convex_solve(
+    model, *, time_limit: float = 3600.0, gap_tolerance: float = 1e-4
+) -> Optional[SolveResult]:
+    """Route `model` to the native convex kernel, or return ``None`` to fall back.
+
+    Returns a `SolveResult` when `DISCOPT_CONVEX_KERNEL` is enabled AND the model
+    passes the convexity gate AND the certified incumbent is independently verified
+    feasible against the pristine model (the #779 guard). Returns ``None`` in every
+    other case — flag off, non-convex, or an unverifiable incumbent — so the caller
+    keeps the (always-correct) default path. NEVER reports an unverified incumbent.
+    """
+    import time
+
+    import numpy as np
+
+    from discopt.modeling.core import SolveResult
+
+    if not convex_kernel_enabled():
+        return None
+    spec = build_convex_spec(model)
+    if spec is None:
+        return None
+
+    t0 = time.perf_counter()
+    r = solve_convex_tree(
+        spec,
+        time_limit_s=time_limit,
+        gap_tol=gap_tolerance,
+        initial_incumbent=None,
+    )
+    wall = time.perf_counter() - t0
+
+    status_map = {
+        "optimal": "optimal",
+        "exhausted": "feasible",
+        "node_limit": "node_limit",
+        "time_limit": "time_limit",
+        "infeasible": "infeasible",
+    }
+    status = status_map.get(r["status"], "error")
+    incumbent = r["incumbent"]
+    inc_x = np.asarray(r["incumbent_x"], float)
+
+    if incumbent is None or inc_x.size == 0:
+        # No incumbent found — surface as infeasible/limit (dual bound only).
+        if status == "infeasible":
+            return SolveResult(status="infeasible", bound=r["bound"], wall_time=wall, nlp_bb=False)
+        return None  # limit without incumbent → let the default path try
+
+    # Map the flat structural point back onto the ORIGINAL model's variables
+    # (reformulation appends aux columns, so the original vars are a prefix), and
+    # VERIFY feasibility against the pristine model — the #779 guard. Any violation
+    # beyond tolerance ⇒ fall back rather than report an unsound incumbent.
+    x_dict, x_flat = _unflatten(model, inc_x)
+    if not _incumbent_is_feasible(model, x_flat):
+        return None
+
+    gap = None
+    if incumbent not in (None, 0.0):
+        gap = abs(incumbent - r["bound"]) / max(1.0, abs(incumbent))
+    return SolveResult(
+        status=status,
+        objective=float(incumbent),
+        bound=float(r["bound"]),
+        gap=gap,
+        x=x_dict,
+        wall_time=wall,
+        node_count=int(r["node_count"]),
+        gap_certified=(status == "optimal"),
+        nlp_bb=False,
+    )
+
+
+def _unflatten(model, inc_x):
+    """(dict name→array, flat original-var vector) from the kernel's structural x."""
+    import numpy as np
+
+    x_dict = {}
+    flat = []
+    off = 0
+    for v in model._variables:
+        vals = np.asarray(inc_x[off : off + v.size], float)
+        off += v.size
+        flat.extend(vals.tolist())
+        x_dict[v.name] = vals.reshape(v.shape) if v.shape else vals.reshape(())
+    return x_dict, np.asarray(flat, float)
+
+
+def _incumbent_is_feasible(model, x_flat, tol: float = 1e-5) -> bool:
+    """#779: evaluate the PRISTINE model's constraints at `x_flat`; True iff feasible."""
+    import numpy as np
+
+    from discopt._jax.nlp_evaluator import NLPEvaluator
+
+    try:
+        ev = NLPEvaluator(model)
+        g = np.asarray(ev.evaluate_constraints(x_flat), float)
+    except Exception:
+        return False
+    for gi, con in zip(g, model._constraints):
+        s = con.sense if isinstance(con.sense, str) else con.sense.value
+        if s == "<=" and gi > tol:
+            return False
+        if s == ">=" and gi < -tol:
+            return False
+        if s not in ("<=", ">=") and abs(gi) > tol:
+            return False
+    return True

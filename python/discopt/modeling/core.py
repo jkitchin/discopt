@@ -3564,6 +3564,23 @@ class Model:
                 time_limit=time_limit, gap_tolerance=gap_tolerance, **kwargs
             )
 
+        # Convex LP-OA branch-and-cut kernel fast path (#798, gated by
+        # DISCOPT_CONVEX_KERNEL, default-OFF). ``try_convex_solve`` routes ONLY
+        # provably-convex composite-of-affine MINLPs and returns a fully-certified
+        # SolveResult whose incumbent is verified feasible against this pristine
+        # model (#779); it returns None — falling through to the default path
+        # below, untouched — for the flag-off case, any non-convex model, or an
+        # unverifiable incumbent. Wrapped so a kernel error can never break solve.
+        if not skip_convex_check:
+            try:
+                from discopt.solvers._convex_kernel import try_convex_solve
+
+                _ck_res = try_convex_solve(self, time_limit=time_limit, gap_tolerance=gap_tolerance)
+            except Exception:
+                _ck_res = None
+            if _ck_res is not None:
+                return _ck_res
+
         from discopt._jax.deadline import deadline_scope
         from discopt.solver import solve_model
 
