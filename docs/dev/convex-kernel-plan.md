@@ -382,6 +382,43 @@ net-positive). No task may weaken a validation, fallback, or soundness guard to 
 
 ## Work log (append newest first)
 
+- **2026-07-20 (#800 T1): ROW-ORDER / DEGENERACY LEVER — FALSIFIED (kill hit).**
+  Entry experiment (CLAUDE.md §4) run BEFORE any production change, on the seeded
+  config-B panel (rsyn0805m/0810m/0815m/syn40m; T0-B baseline **950** nodes-to-certify).
+  Swept all three levers the T1 spec names, via OFF-by-default experimental knobs;
+  measured panel total nodes-to-certify per variant (all cert-clean: bound ≥ oracle,
+  closed onto it):
+  - **Branching tie-break** (`select_branch` among near-equal pseudocost scores):
+    0=first-index (baseline) **950** / 1=last-index 1076 / 2=most-fractional 960 /
+    3=max-degree 1018.
+  - **Base ≤-row order** (permute the ≤ block → different slack columns → different
+    degenerate vertex): 0=producer (baseline) **950** / 1=sparsest-first 968 /
+    2=densest-first 1222 / 3=reversed 1774.
+  - **Cut-append order** (reverse selected-cut append): 0=baseline **950** /
+    1=reversed 1080.
+  - **KILL CRITERION HIT.** T1 kills unless some ordering cuts panel nodes ≥15%
+    (950 → ≤807) without raising wall. Across **9 non-baseline variants over 3
+    distinct ordering mechanisms, NONE reduces panel total below 950** — the best
+    non-baseline was 960 (+1.1% *more* nodes), and most were far worse. The producer
+    order + first-index branching (the T0 baseline) is already the best of everything
+    tested.
+  - **What the measurement says (record, do not re-walk):** row order genuinely
+    perturbs node count *a lot* (reversed ≤-order 950→1774; individual instances
+    swing wildly, e.g. rsyn0815m 261↔1237 across orderings) — confirming the
+    degeneracy sensitivity the hypothesis named — but it is **unbiased variance, not
+    a systematic lever**: no single ordering wins the panel, and per-instance gains
+    (rsyn0805m improves under several orderings) are cancelled by per-instance losses
+    (rsyn0815m blows up). The iter-6 "738 vs 1301" evidence was one such swing, not a
+    recoverable systematic order. The 2.5–6.1× node gap to the prototype must be
+    closed by a real mechanism (**T2 reliability/strong branching**), not by
+    reordering. **Do not re-attempt row-order / cut-order / branching-tie-break as a
+    node-count lever on this family.**
+  - **Scaffolding reverted** (CLAUDE.md §3, no dead flags): the three experimental
+    knobs (`DISCOPT_CVX_BRANCH`/`ROWORD`/`CUTORD`) and the sweep harness are removed;
+    the kernel is bit-identical to the T0 baseline (10 Rust convex tests pass). This
+    work-log table is the durable falsification record (performance-plan §6 house
+    style). **SURFACED to the human for re-scoping per the loop protocol.**
+
 - **2026-07-20 (#800 T0): CANONICAL BASELINE PINNED — cert-clean, both anchors.**
   - **Instrumentation (measurement-only, bound-neutral):** added first-incumbent
     latency to the kernel — `ConvexTreeResult.first_incumbent_node` /
