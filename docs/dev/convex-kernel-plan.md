@@ -382,6 +382,61 @@ net-positive). No task may weaken a validation, fallback, or soundness guard to 
 
 ## Work log (append newest first)
 
+- **2026-07-20 (#800 T0): CANONICAL BASELINE PINNED — cert-clean, both anchors.**
+  - **Instrumentation (measurement-only, bound-neutral):** added first-incumbent
+    latency to the kernel — `ConvexTreeResult.first_incumbent_node` /
+    `first_incumbent_secs` (unseeded runs; `None` when seeded or no incumbent),
+    surfaced through the PyO3 dict (`solve_convex_tree_py`). No search change:
+    it only records `(node_count, wall)` when the first incumbent is set. 10 Rust
+    convex tests pass.
+  - **Config A — production/unseeded, `issue800_t0_baseline.py`, budget=120 s**
+    (the wall / node_count / first-incumbent-latency + graduation anchor; mirrors
+    `try_convex_solve` incl. the #779 verify). **cert-clean PASS, incorrect=0**:
+
+    | instance  | status  | wall_s | nodes | inc_node | inc_lat_s | bound      | opt        |
+    |-----------|---------|-------:|------:|---------:|----------:|-----------:|-----------:|
+    | rsyn0805m | optimal |   7.81 |   353 |      233 |      5.52 |  1296.1207 |  1296.1206 |
+    | rsyn0810m | optimal |   8.29 |   315 |      257 |      6.96 |  1721.4721 |  1721.4477 |
+    | rsyn0815m | optimal |   6.70 |   237 |      161 |      4.90 |  1269.9288 |  1269.9256 |
+    | rsyn0820m | optimal |  80.52 |  1805 |     1798 |     80.43 |  1150.4160 |  1150.3005 |
+    | rsyn0830m | optimal |  50.80 |  1172 |     1067 |     46.70 |   510.0722 |   510.0720 |
+    | syn05m    | optimal |   0.00 |     3 |        2 |      0.00 |   837.7324 |   837.7324 |
+    | syn10m    | optimal |   0.00 |     1 |        1 |      0.00 |  1267.3536 |  1267.3536 |
+    | syn15m    | optimal |   0.15 |    19 |       14 |      0.13 |   853.2848 |   853.2847 |
+    | syn20m    | optimal |   0.58 |    43 |       28 |      0.47 |   924.2642 |   924.2633 |
+    | syn40m    | optimal |  17.93 |   631 |      213 |      7.42 |    67.7136 |    67.7133 |
+
+    Panel wall ≈ **173.7 s** (dominated by rsyn0820m 80.5 s + rsyn0830m 50.8 s).
+    Every bound ≥ oracle optimum and closed onto it; every incumbent #779-verified.
+  - **Config B — seeded nodes-to-certify, `issue798_k2_tree_gate.py`** (the K2
+    dual-side gate anchor; oracle incumbent seeded to isolate nodes-to-certify):
+
+    | instance  | nodes | proto | ratio  | bound     | opt       |
+    |-----------|------:|------:|-------:|----------:|----------:|
+    | rsyn0805m |   353 |    67 | 5.27×  | 1296.2224 | 1296.1206 |
+    | rsyn0810m |   177 |    60 | 2.95×  | 1721.5101 | 1721.4477 |
+    | rsyn0815m |   281 |    46 | 6.11×  | 1269.9261 | 1269.9256 |
+    | syn40m    |   139 |    55 | 2.53×  |   67.7133 |   67.7133 |
+
+    Seeded panel total = **950 nodes**. **K2 gate: FAIL** on the node-count bar
+    (2.53–6.11× > 2× prototype); cert-clean holds (bound ≥ opt, closed onto it).
+    This is the standing unmet dual-side lever T1/T2 target.
+  - **KEY FINDING (re-scopes T4/T5).** At the **120 s production budget the full
+    panel certifies cert-clean**, including rsyn0820m (80.5 s) and rsyn0830m
+    (50.8 s) — the two "fallbacks" in the #798 K4 narrative. Those fallbacks were a
+    **45 s-budget artifact** (`issue798_convex_family_certclean.py` used
+    `time_limit=45`), NOT a fundamental primal gap: both find a #779-verified
+    incumbent (inc_node 1798 / 1067) and certify within 120 s. Consequence:
+    **T4's premise** (rsyn0820m/0830m find *no* incumbent within budget) does not
+    hold at the production budget — the T4 entry experiment must first re-confirm
+    the root cause at budget=120 s; the remaining large-instance gap is **wall /
+    node-count (dual-side, T1–T3)**, not primal starvation. **T5** (budget) is
+    largely already satisfied at 120 s; the lever is closing wall so the slowest
+    (rsyn0820m 80.5 s) drops well under budget.
+  - **Pinned scripts:** config A `discopt_benchmarks/scripts/issue800_t0_baseline.py`
+    (budget arg, default 120); config B `discopt_benchmarks/scripts/issue798_k2_tree_gate.py`
+    (seeded, 4 prototype instances). Every later T-task cites these numbers.
+
 - **2026-07-19 (iter 10): K4 producer + convexity gate + SOUNDNESS FIX + gate tests.**
   - **Production producer** `python/discopt/solvers/_convex_kernel.py`:
     `build_convex_spec(model)` extracts linear rows + linear objective +
