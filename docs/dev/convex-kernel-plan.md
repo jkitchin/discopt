@@ -382,6 +382,23 @@ net-positive). No task may weaken a validation, fallback, or soundness guard to 
 
 ## Work log (append newest first)
 
+- **2026-07-20 (#800 CLOSE-OUT, owner-approved): scoped win; SCIP-parity re-scoped
+  to #807.** After three entry-experiment kills (T1/T2/T3 below), the owner elected
+  to close #800 on its scoped win rather than continue T4–T7 (all moot: T4 primal is
+  a no-op — T0 shows rsyn0820m/0830m certify within 120 s; T5 budget already
+  suffices; T6 node gate would fail with T1/T2/T3 dead; T7 net-positive already
+  proven in #798). **Delivered by #800:** (1) two pinned canonical baselines (T0,
+  config A production + config B seeded) + first-incumbent-latency instrumentation;
+  (2) confirmation the full panel **certifies cert-clean within the 120 s budget**
+  (no primal gap — the "2 fallbacks" were a 45 s-budget artifact); (3) three durable
+  falsifications ruling out the cheap search-quality levers. **NOT delivered:**
+  SCIP-parity wall (~2 s vs 7–80 s) and the K2 node-count gate (≤2×; measured
+  2.5–6.1×) — both re-scoped to **#807 (native-warm-LP architecture)**, the one lever
+  #801's close and T3's architectural finding point to. Kernel is bit-identical to
+  the T0 baseline (+ the T0 instrumentation); `DISCOPT_CONVEX_KERNEL` stays
+  default-OFF (graduation deferred to #807). PR #805 flipped ready-for-review as the
+  falsification record.
+
 - **2026-07-20 (#800 T3): DUAL-FEASIBLE WARM-CHILD RESTART — FALSIFIED (kill hit,
   both conditions). + #801 cross-reference + architectural finding.**
   Entry experiment (CLAUDE.md §4) before any default change. Built the warm-child
