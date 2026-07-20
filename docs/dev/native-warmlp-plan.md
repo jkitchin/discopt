@@ -395,6 +395,18 @@ regression ⇒ revert, record, done. Search-order regime (flavor ii).
 
 ## 8. Work log (append newest first)
 
+- **2026-07-20 (#807 W2 GC-cap sweep — owner-requested; does NOT rescue).** Swept
+  the tangent-pool GC cap (`DISCOPT_CVX_POOLCAP`) on the seeded rsyn* subset, flag-ON:
+  **600→26.2 s, 200→23.4 s, 100→23.8 s, 50→22.5 s** (all sound). Tightening the cap
+  helps ~15% (bloat vs churn trade bottoms out near cap 50–200) but the **best
+  (22.5 s) still loses to OFF's 19.9 s** — and this is only the SMALL seeded rsyn;
+  the big rsyn0820m/0830m (1800-node trees, where the production regression caused
+  timeouts) would churn re-deriving tangents under a tight cap, not improve.
+  **Confirmed: GC tuning does not rescue the regression** — the bloat/cut-domination
+  is fundamental to the persistent-warm-LP approach on the certifying tree. Knob
+  reverted (default-off path isn't graduating). Recommendation stands: close #807 on
+  the W1 scoped finding.
+
 - **2026-07-20 (#807 W2 PRODUCTION NET — DEFINITIVE): native-warm-LP is SOUND but a
   3× REGRESSION on the certifying panel → #807 premise falsified; recommend close on
   the W1 scoped finding.** Ran the real #807 target — the config-A UNSEEDED rsyn*
