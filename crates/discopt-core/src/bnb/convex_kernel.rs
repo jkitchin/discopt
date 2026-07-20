@@ -954,13 +954,19 @@ impl ConvexKernelSpec {
 
         let mut node_count = 0usize;
         let mut status = ConvexTreeStatus::Exhausted;
-        // Global dual bound (sense convention): max over the frontier of node duals.
-        let mut global_dual_sense = f64::INFINITY;
+        // Rigorous reported dual bound: the max dual bound over every node that
+        // leaves the tree WITHOUT being branched (fathomed-by-bound, integer-feasible,
+        // no-branch-var). Each such node's dual is a valid upper bound on its
+        // subtree's optimum, so this is a valid upper bound on the whole problem —
+        // and, unlike the frontier max, it never drops below the true optimum when
+        // a late (tolerance-feasible) incumbent is accepted. `+= frontier` at the end.
+        let mut leaf_dual_sense = f64::NEG_INFINITY;
 
         while let Some(node) = heap.pop() {
             // Global dual bound = best (largest sense·bound) still on the frontier,
             // including this node.
-            global_dual_sense = node.parent_bound.max(
+            // Frontier max (sense convention) — drives the gap-close TERMINATION test.
+            let global_dual_sense = node.parent_bound.max(
                 heap.iter()
                     .map(|n| n.parent_bound)
                     .fold(f64::NEG_INFINITY, f64::max),
@@ -989,6 +995,7 @@ impl ConvexKernelSpec {
             if inc_sense > worse
                 && node.parent_bound <= inc_sense + config.gap_tol * inc_sense.abs().max(1.0)
             {
+                leaf_dual_sense = leaf_dual_sense.max(node.parent_bound);
                 continue;
             }
             node_count += 1;
@@ -1031,11 +1038,15 @@ impl ConvexKernelSpec {
             if inc_sense > worse
                 && node_dual_sense <= inc_sense + config.gap_tol * inc_sense.abs().max(1.0)
             {
+                leaf_dual_sense = leaf_dual_sense.max(node_dual_sense);
                 continue;
             }
 
-            // Incumbent from an integer-feasible OA-tight vertex.
+            // Incumbent from an integer-feasible OA-tight vertex. The node's own
+            // (rigorous) dual bound is a valid upper bound on this leaf and is
+            // recorded so the reported bound never sits below the incumbent.
             if self.is_integer_feasible(&r.x, config.int_tol, config.oa_tol * 10.0) {
+                leaf_dual_sense = leaf_dual_sense.max(node_dual_sense);
                 let obj_sense = sense * self.objective(&r.x);
                 if obj_sense > inc_sense {
                     inc_sense = obj_sense;
@@ -1046,6 +1057,7 @@ impl ConvexKernelSpec {
 
             // Branch on the highest pseudocost-score fractional integer.
             let Some(j) = self.select_branch(&r.x, &pcosts, config.int_tol) else {
+                leaf_dual_sense = leaf_dual_sense.max(node_dual_sense);
                 continue;
             };
             let xj = r.x[j];
@@ -1083,21 +1095,30 @@ impl ConvexKernelSpec {
             }
         }
 
-        if heap.is_empty() && status == ConvexTreeStatus::Exhausted {
-            // Frontier drained: the global dual collapses to the incumbent.
-            global_dual_sense = inc_sense;
-            if inc_sense > worse {
-                status = ConvexTreeStatus::Optimal;
-            }
+        if heap.is_empty() && status == ConvexTreeStatus::Exhausted && inc_sense > worse {
+            // Frontier drained with an incumbent: fully certified.
+            status = ConvexTreeStatus::Optimal;
         }
+        // Reported dual bound = max over all tree leaves (fathomed/incumbent) AND
+        // the nodes still on the frontier at termination — a rigorous upper bound
+        // (sense convention) on the true optimum.
+        let frontier_max = heap
+            .iter()
+            .map(|n| n.parent_bound)
+            .fold(f64::NEG_INFINITY, f64::max);
+        let dual_sense = leaf_dual_sense.max(frontier_max);
 
+        // The incumbent objective from a tolerance-feasible OA vertex can slightly
+        // exceed the true optimum (hence the rigorous dual bound). Report it clamped
+        // to the dual bound so the certificate stays consistent (bound ≥ incumbent
+        // for max / ≤ for min); the incumbent POINT is still returned.
         let incumbent = if inc_sense > worse {
-            Some(sense * inc_sense)
+            Some(sense * inc_sense.min(dual_sense))
         } else {
             None
         };
-        let bound = if global_dual_sense.is_finite() {
-            sense * global_dual_sense
+        let bound = if dual_sense.is_finite() {
+            sense * dual_sense
         } else if inc_sense > worse {
             sense * inc_sense
         } else {
@@ -1429,6 +1450,14 @@ mod tests {
         assert!(
             r.bound >= truth - 1e-3,
             "UNSOUND dual bound {} < truth {truth}",
+            r.bound
+        );
+        // Certificate invariant (max): the reported dual bound must never sit below
+        // the reported incumbent — the bug the production K4 path surfaced when a
+        // tolerance-feasible OA-vertex incumbent exceeded the frontier dual.
+        assert!(
+            r.bound >= inc - 1e-9 * inc.abs().max(1.0),
+            "certificate invariant violated: bound {} < incumbent {inc}",
             r.bound
         );
     }
