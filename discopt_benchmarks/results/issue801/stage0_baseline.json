@@ -1,0 +1,17 @@
+{
+  "instance": "tanksize",
+  "objective": "minimize x17 (flat idx 17)",
+  "n_vars": 47,
+  "fbbt_lb_x17": 0.8382369708575652,
+  "fbbt_ub_x17": 1840.3519439564081,
+  "root_mccormick_lp": 0.8382369708575385,
+  "baseline_ref": 0.8382,
+  "reproduced_0p8382": true,
+  "oracle": 1.268643754,
+  "root_gap_to_oracle": 0.4304067831424615,
+  "injection_sanity": {
+    "injected_lb_x17": 1.0,
+    "root_after_injection": 0.999999999999968,
+    "moved": true
+  }
+}
