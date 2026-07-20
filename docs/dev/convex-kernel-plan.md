@@ -119,7 +119,9 @@ only when it CERTIFIES; larger instances it can't finish in budget (rsyn0820m/08
 — which find no incumbent, a primal gap) fall back to NLP-BB with the full time
 budget rather than stalling. **SCIP-parity on larger convex MINLPs, the unmet K2
 node-count gate (2.5–5.3× vs prototype), the primal/rounding heuristic, and the
-default-ON graduation are tracked in #800.** Original K4 spec below.
+default-ON graduation are tracked in #800.** #798's §3 secondary threads (native
+spatial kernel default-ON; tanksize root relaxation) are split into #801 so #798
+closes with its primary build (PR #799). Original K4 spec below.
 
 
 `DISCOPT_CONVEX_KERNEL` default-OFF → §5 Regime-2 panel scored on
