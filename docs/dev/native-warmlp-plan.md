@@ -395,6 +395,41 @@ regression ⇒ revert, record, done. Search-order regime (flavor ii).
 
 ## 8. Work log (append newest first)
 
+- **2026-07-20 (#807 W2): box-tagged PERSISTENT cuts — FAILED on soundness AND
+  wall → reverted, SURFACED for re-scope to node-local cuts.**
+  Built the §3.1–3.2 design: `RowKind` = Base/Tangent/`Cut{dlo,dhi,rhs}`; per-node
+  `effective_bounds` activates a cut iff node box ⊆ its derivation box (else raises
+  its rhs to max-activity → vacuous); ported cover/GMI/MIR separation into the
+  persistent solve with a `b_eff`-aware `substitute_slacks`; box-tags each cut with
+  the node box; GC maintains the pool. W2 gate (`issue807_w2_gate.py`, seeded rsyn*
+  panel, cuts on, flag ON vs OFF):
+  - **SOUNDNESS FAILURE (the make-or-break).** Flag-ON, rsyn0815m dual bound
+    **1269.3402 < oracle 1269.9256** — for this maximization the dual bound is an
+    UPPER bound and must be ≥ opt, so a bound *below* the optimum means a box-tagged
+    cut **removed the true optimum**: an unsound cut. Flag-OFF (node-local cuts, the
+    shipped path) gives 1269.9261 ≥ opt — sound. The soundness gate caught it
+    exactly as designed. (The revert means nothing unsound is committed; the bug was
+    behind the default-OFF flag, never shipped.)
+  - **WALL FAILURE (independent).** Flag-ON **198.5 s vs OFF 19.2 s — ~10× SLOWER**,
+    even on the sound instances (rsyn0805m 39.7 s vs 7.4 s). The per-node cut
+    activation (containment + activity recomputation over a growing cut set,
+    rebuilding `effective_bounds` every solve) + LP bloat + GC basis invalidation
+    dominate. Nodes also blew the 1.5× bar (rsyn0810m 281>265, rsyn0815m 433>421).
+    W2 wall bar was ≤12 s; got 198 s.
+  - **Verdict: the PERSISTENT box-tagged cut design (§3.1–3.2) does not deliver** —
+    unsound as implemented AND slow by construction. Both point the same way: cuts
+    should NOT persist across nodes. **Reverted to the sound W1 state** (RowKind
+    removed, 10 Rust convex tests pass, kernel back to the W1-committed code); the
+    W2 gate script is kept as the reproduction.
+  - **Recommended re-scope — NODE-LOCAL cuts.** Persist ONLY the globally-valid
+    tangent pool (W1's proven 4× win, warm across nodes); derive GMI/cover/MIR cuts
+    **node-locally** (added during a node's separation, rolled back before the next
+    node — save the post-OA base+tangent basis, restore after the node). This is
+    **guaranteed sound** (C-43 trivially — cuts never cross nodes, exactly like the
+    shipped `solve_node_cut`), avoids all per-node cut-activation overhead, and keeps
+    both the tangent warmth and the cut node-reduction. **SURFACED to the owner:**
+    node-local cuts (recommended) vs debugging the box-tagged persistent approach.
+
 - **2026-07-20 (#807 W1): persistent-LP tree integration (OA-only) — PASS, 4.0×.**
   Promoted the W0 warm solver to return a `ConvexNodeResult` and wired it into
   `solve_tree` behind `DISCOPT_CVX_NATIVELP` (default-OFF): a gated branch swaps the
