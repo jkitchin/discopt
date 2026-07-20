@@ -150,11 +150,21 @@ primal regression.
     candidates early), better cut management, or revisiting parent→child warm with
     a proper dual-feasible restart. Diminishing returns; K4 graduation may already
     hold (kernel decisively beats the NLP-BB path — see below).
-  - **NLP-BB head-to-head (in progress):** the current NLP-BB path
-    (`dm.from_nl(name).solve(time_limit=120)`) did not finish even ONE instance in
-    ~10 min — it times out (>120 s) on instances the kernel now certifies in
-    ~4-8 s. Strong evidence the kernel is a net-positive K4 graduation candidate on
-    wall regardless of SCIP parity. (Confirm the exact numbers when the run ends.)
+  - **NLP-BB head-to-head — DECISIVE (K4 net-positive PROVEN):** the current
+    NLP-BB path (`dm.from_nl(name).solve(time_limit=120)`) times out
+    **uncertified** on ALL 4 (status `feasible`, `gap_certified=False`, 120 s each,
+    482 s total), and its incumbents are poor (rsyn0805m 1105.7 vs opt 1296.1;
+    syn40m −38.2 vs 67.7). The convex kernel **certifies all 4 optimal in 24.4 s**
+    (~20× faster) with `bound = optimum EXACTLY`. The kernel doesn't merely win on
+    wall — it CERTIFIES the convex family that the NLP-BB path cannot certify at
+    all in 120 s. This is #798's goal and a clear K4 graduation case (cert-clean +
+    net-positive, both bars).
+  - **Next: K4 graduation** — wire the kernel into `Model.solve()` routing for the
+    convex MINLP family behind `DISCOPT_CONVEX_KERNEL` (default-OFF), with the
+    analyze-once producer detecting composite-of-affine convexity and falling back
+    to NLP-BB otherwise; run the Regime-2 corpus panel (cert-clean, no false
+    optimum, incumbents verified). Perf polish (toward SCIP's ~2 s) is now optional
+    — the kernel is already a large, cert-clean improvement over the status quo.
 
 - **2026-07-19 (iter 8): K3 satisfied; parent→child basis inheritance FALSIFIED;
   measuring vs NLP-BB.**
