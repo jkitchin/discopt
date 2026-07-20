@@ -137,6 +137,35 @@ primal regression.
 
 ## Work log (append newest first)
 
+- **2026-07-19 (iter 10): K4 producer + convexity gate + SOUNDNESS FIX + gate tests.**
+  - **Production producer** `python/discopt/solvers/_convex_kernel.py`:
+    `build_convex_spec(model)` extracts linear rows + linear objective +
+    integrality + bounds from a real `discopt.Model`, decomposes convex nl rows
+    (composite-of-affine), marshals to `solve_convex_tree_py`, or returns `None`
+    → NLP-BB fallback. **Rigorous convexity gate:** route only if the objective is
+    linear, every nl row decomposes, and every term is convex in the row's `≤`
+    normal form (convex func & coeff≥0, or concave & coeff≤0; `≥` rows negated);
+    nonlinear equalities / unknown structure fall back. `solve_convex_tree()` runs
+    the kernel; `convex_kernel_enabled()` reads `DISCOPT_CONVEX_KERNEL` (default-OFF).
+  - **SOUNDNESS FIX** (surfaced by the unseeded production path — the seeded K2
+    gate hid it): a tolerance-feasible OA-vertex incumbent can exceed the frontier
+    dual, so the reported bound sat BELOW the incumbent (invariant `bound≥incumbent`
+    violated; rsyn0805m bound 1296.1003 < inc 1296.1207). Fixed: report the dual
+    bound as the max dual over ALL tree leaves + the frontier (rigorous, ≥ true opt)
+    and clamp the incumbent to it. Verified unseeded: `bound ≥ incumbent` AND
+    `bound ≥ oracle optimum` on all 4. Locked by a Rust assertion.
+  - **5 Python gate tests** (`test_convex_kernel_gate.py`): convex routes +
+    certifies soundly; bilinear / wrong-curvature / nonlinear-equality /
+    nonlinear-objective all fall back. All pass. 10 Rust tests pass.
+  - **Remaining K4:** (a) route `Model.solve()` behind `DISCOPT_CONVEX_KERNEL`
+    (default-OFF) — a careful, soundness-critical integration into
+    `python/discopt/solver.py`: when the flag is ON and `build_convex_spec` returns
+    a spec, run the kernel + verify the incumbent vs the pristine model (#779) +
+    map the result to `SolveResult`; otherwise the existing path, untouched. NEVER
+    route an un-gated model. (b) Regime-2 corpus panel (flag ON vs OFF): cert-clean
+    (0 incorrect, no false optimum, incumbents verified) + net-positive. Perf polish
+    toward SCIP's ~2 s is optional (kernel already decisively beats NLP-BB).
+
 - **2026-07-19 (iter 9): pseudocost branching — 2.6× wall (64.6s → 24.4s), cert-clean.**
   - Replaced most-fractional with SCIP product-rule pseudocost branching (reuse
     `bnb::branching::Pseudocosts`). `TreeNode` carries its `(var, frac, is_down)`;
