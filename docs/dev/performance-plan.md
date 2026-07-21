@@ -1343,3 +1343,37 @@ Stage-1 validation patch (route `diving` through a per-model evaluator cache):
 > a term-count threshold would falsely skip cheap-but-numerous-term instances); the
 > wall-clock deadline measures reality instead. Graduation gated on the flag-ON-vs-OFF
 > differential panel (`generality_sweep` arm `root_build_deadline`).
+
+## 12. #818 B1 throughput: FBBT structural-match caching is sound-but-not-helpful (falsified 2026-07-21)
+
+> **Entry experiment + falsification (#818).** cProfile of the cleanest B1
+> micro-benchmarks (ex9_1_1 8.3s, ball_mk2_10 4.8s, ex14_2_7 9.9s, nvs21 1.7s — SCIP
+> ~noise) decomposed the slowdown: node NLP-solve cost is **node-count-bound** (a full
+> NLP per node where SCIP uses an LP; ball_mk2_10 opens **2046 nodes** on 10 vars),
+> per-node nonlinear FBBT is 20-27% (`tighten_nonlinear_bounds`), root OBBT dominates
+> a few (ex14_2_7 4.9s / 104 probes), and JAX dispatch is ~3s on ex14_2_7.
+>
+> **Hypothesis (bound-neutral lever): cache the per-node FBBT structural matching.**
+> The rule matchers re-walk the immutable constraint DAG every node (`_constant_value`
+> **1.03M calls**, `scalar_flat_index` 474k, `match`/`walk`) over a structure that is
+> invariant across B&B nodes — only the box changes. Memoized the bound-INDEPENDENT
+> matchers (`_match_scaled_linear_var/_square_var/_affine_var`, `scalar_flat_index`) in
+> a per-metadata `_match_cache` (attached via `object.__setattr__` on the frozen
+> dataclass; invalidated with the metadata on constraint-DAG change; `is`-identity
+> checked against `id()` reuse).
+>
+> **Result: bound-neutral but NOT net-positive → not shipped.** Node_count and
+> objective were **exactly** unchanged on a 10-instance panel (ex9_1_1 233, ball_mk2
+> 1023, nvs02 337, … bit-identical) — the cache is sound. But it moved wall by **<3%**:
+> `tighten_nonlinear_bounds` cumtime 2.174s→2.046s (~0.13s), and the decorator overhead
+> (`wrapper` 0.078s) plus a counterproductive `scalar_flat_index` memo (0.093→0.113s —
+> the function is too cheap to cache) nearly cancel it. FBBT matching is simply **not
+> the wall bottleneck** — the node NLP-solve count is. This is the `DISCOPT_CUT_INHERIT`
+> pattern (sound ≠ helpful; §5): recorded and reverted rather than shipped as complexity
+> for no gain. Baseline/verify harness: `scratchpad/fbbt_baseline.json`,
+> `scratchpad/prof_818.py`.
+>
+> **Standing conclusion for #818 B1.** The lever is fewer/cheaper node relaxations —
+> the in-progress convex **LP-OA branch-and-cut kernel (#799/#804)**, not per-node
+> Python-overhead trimming. Root-OBBT budgeting (ex14_2_7 class) is a separate
+> bound-CHANGING candidate (needs the §5 panel).
