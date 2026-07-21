@@ -69,3 +69,28 @@ def test_827_trivial_seed_does_not_regress_control():
     assert abs(on.objective - off.objective) < 1e-4, (
         f"#827 trivial seed regressed a control: OFF={off.objective} ON={on.objective}"
     )
+
+
+@pytest.mark.slow
+@pytest.mark.correctness
+@pytest.mark.skipif(
+    not (BENCH / "chimera_k64ising-01.nl").exists(),
+    reason="chimera_k64ising-01.nl (benchmark corpus) absent",
+)
+def test_827_family_c_milp_bb_seeds_initial_point():
+    """#827 family C: chimera (1192 integer vars, 0 constraints, MAXIMIZE Ising)
+    routes to _solve_milp_bb, which now honors ``initial_point``. With the trivial
+    seed ON it surfaces a feasible incumbent where OFF finds none.
+
+    NOTE: chimera is severely wall-budget-bound (#814), so this is a slow test; the
+    incumbent is a floor (the trivial all-zeros point), not the optimum (24.3) — a
+    good Ising primal is separate. We assert only that a SOUND feasible incumbent
+    is returned (for MAXIMIZE, obj must not exceed the known optimum)."""
+    on = _solve("chimera_k64ising-01", "1", 5.0)
+    assert on.objective is not None, (
+        "#827 family C: _solve_milp_bb did not seed initial_point (no incumbent)"
+    )
+    # MAXIMIZE: a feasible incumbent can never exceed the true optimum (24.3).
+    assert on.objective <= 24.3 + 1e-3, (
+        f"#827 family C: unsound incumbent {on.objective} exceeds the optimum 24.3"
+    )

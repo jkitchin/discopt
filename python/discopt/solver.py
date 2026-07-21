@@ -6321,6 +6321,7 @@ def solve_model(
                     node_engine="simplex",
                     lagrangian_bound=lagrangian_bound,
                     lagrangian_frequency=lagrangian_frequency,
+                    initial_point=initial_point,
                 )
             logger.info(
                 "MILP with a lazy_constraints/incumbent_callback — routing to spatial "
@@ -16192,6 +16193,7 @@ def _solve_milp_bb(
     node_engine: str = "pounce",
     lagrangian_bound: bool = False,
     lagrangian_frequency: int = 1,
+    initial_point: Optional[np.ndarray] = None,
 ) -> SolveResult:
     """Solve a MILP via B&B with LP relaxation solves at each node.
 
@@ -16324,6 +16326,35 @@ def _solve_milp_bb(
     t_rust_start = time.perf_counter()
     tree = PyTreeManager(n_vars, lb.tolist(), ub.tolist(), int_offsets, int_sizes, strategy)
     tree.initialize()
+    # #827 (family C): seed a warm-start incumbent from ``initial_point`` (e.g. the
+    # trivial-point primal seed computed in ``solve_model``). The MILP/MIQP path did
+    # not previously consult ``initial_point``; without it, models like
+    # chimera_k64ising (1192 integer vars, 0 constraints — every integer box point
+    # is feasible) never surface an incumbent even though one is trivial. Verify
+    # BOTH integer and constraint feasibility against the true model, then inject —
+    # only when the point matches the tree's column count (no slack expansion), so a
+    # general MILP whose model-space point is shorter than ``n_vars`` is skipped.
+    if initial_point is not None:
+        try:
+            from discopt._jax.nlp_evaluator import cached_evaluator
+            from discopt._jax.primal_heuristics import (
+                _check_constraint_feasibility as _ip_cc,
+            )
+
+            _ip_x = np.asarray(initial_point, dtype=np.float64)
+            _ip_int_ok = all(
+                not np.any(np.abs(_ip_x[o : o + s] - np.round(_ip_x[o : o + s])) > 1e-5)
+                for o, s in zip(int_offsets, int_sizes)
+            )
+            if _ip_x.shape[0] >= n_vars and _ip_int_ok and np.all(np.isfinite(_ip_x)):
+                _ip_ev = cached_evaluator(model)
+                if _ip_cc(_ip_ev, _ip_x[:n_vars], tol=1e-6):
+                    _ip_obj = float(_ip_ev.evaluate_objective(_ip_x[:n_vars]))
+                    if np.isfinite(_ip_obj):
+                        tree.inject_incumbent(_ip_x[:n_vars].copy(), _ip_obj)
+                        logger.info("MILP warm-start incumbent (initial_point): obj=%.6g", _ip_obj)
+        except Exception as _ip_exc:
+            logger.debug("initial_point seed skipped: %s", _ip_exc)
     if _root_incumbent is not None:
         _z_inc, _x_inc = _root_incumbent
         tree.inject_incumbent(np.asarray(_x_inc[:n_vars], dtype=np.float64).copy(), float(_z_inc))
