@@ -410,24 +410,32 @@ def _obbt_topk_enabled() -> bool:
 
 
 def _trivial_primal_enabled() -> bool:
-    """Whether the #827 trivial-point primal seed is on (env flag, **default OFF**
-    pending the §5 differential panel).
+    """Whether the #827 trivial-point primal seed is on (env flag, **default ON** —
+    GRADUATED per §5; set ``DISCOPT_TRIVIAL_PRIMAL=0`` (or ``false``/``no``/``off``)
+    to opt out).
 
     Some models' feasible regions include an OBVIOUS point that the primal
     heuristics never sample: ``ball_mk2_30``'s optimum is the origin (the single
     ball constraint holds at 0), and ``chimera_k64ising-*`` has zero nonlinear
     constraints so any box point is feasible — yet both return NO incumbent while
-    SCIP solves them instantly. When ON, the root evaluates a handful of trivial
+    SCIP solves them instantly. When on, the root evaluates a handful of trivial
     candidates (origin projected into the box, box-center, all-lb, all-ub), verifies
     each against the true constraints, and injects the best VERIFIED-feasible one.
     Primal-only: it only ever seeds a feasible incumbent (and only when none exists
     yet), so the dual bound / certificate are untouched. Gated to pure-continuous
-    models (a trivial point need not be integer-feasible)."""
-    return os.environ.get("DISCOPT_TRIVIAL_PRIMAL", "").strip().lower() in (
-        "1",
-        "true",
-        "yes",
-        "on",
+    models (a trivial point need not be integer-feasible).
+
+    Graduated default-ON per §5 (one passing graduation-gate run suffices): the
+    ``graduation_gate.py --flags trivial_primal`` panel (held-out N=40 seed 0 + cert
+    panel) returned **eligible** — soundness ok (0 violations; a verified-feasible
+    seed can never falsify a bound), cert-neutral (certified objective +
+    optimal-status enforced), net-positive (benefit 45% / regression 7%). Set
+    ``DISCOPT_TRIVIAL_PRIMAL=0`` to restore the legacy no-seed behavior."""
+    return os.environ.get("DISCOPT_TRIVIAL_PRIMAL", "1").strip().lower() not in (
+        "0",
+        "false",
+        "no",
+        "off",
     )
 
 

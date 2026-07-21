@@ -177,6 +177,18 @@ ARMS: dict[str, dict] = {
     # or trips the ``_objective_bound_valid`` gate to None — so it can change (weaken)
     # a fallback bound: ``bound_changing``. No cheap static proxy — the overrun is a
     # runtime build-cost property (like lu_density_route / node_numerical_dual_bound).
+    # Trivial-point primal seed (#827/#829): at the root, evaluate a handful of
+    # obvious candidate points (origin-in-box, box-center, all-lb, all-ub), verify
+    # each against the TRUE constraints, and inject the best verified-feasible one as
+    # a warm-start incumbent when none exists yet. Primal-only and soundness-safe (a
+    # verified-feasible point can never falsify a bound), but it seeds an incumbent
+    # that enables pruning -> node_count changes -> ``bound_changing`` regime. No
+    # static structure proxy (whether a trivial point is feasible is a runtime fact).
+    "trivial_primal": {
+        "env": {"DISCOPT_TRIVIAL_PRIMAL": "1"},
+        "struct_attr": None,
+        "regime": "bound_changing",
+    },
     "root_build_deadline": {
         "env": {"DISCOPT_ROOT_BUILD_DEADLINE": "1"},
         "struct_attr": None,
@@ -200,6 +212,8 @@ GRADUATION_ARMS = (
     "node_numerical_dual_bound",
     # #832/#814 base root-build deadline, wired 2026-07-21
     "root_build_deadline",
+    # #827/#829 trivial-point primal seed, wired 2026-07-21
+    "trivial_primal",
 )
 
 # correctness tolerance (matches conftest abs=1e-6, rel=1e-4)

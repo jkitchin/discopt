@@ -7,11 +7,13 @@ origin (any x_i = +/-1 makes the sum strictly positive), so the origin is the
 unique feasible point and the optimum (obj 0). discopt's B&B never samples it and
 returns NO incumbent; SCIP solves it in 0.02s.
 
-With `DISCOPT_TRIVIAL_PRIMAL=1`, `solve_model` seeds a trivial feasible point
+With the trivial-primal seed on, `solve_model` seeds a trivial feasible point
 (origin / box-center / bound corners) as the `initial_point`, which the sub-solver
 re-verifies (constraint AND integer feasibility) and injects as an incumbent.
 
-Default OFF pending the §5 panel; flag-OFF behavior is unchanged. Corpus-gated.
+GRADUATED default-ON per §5 (gate: benefit 45% / regression 7%, soundness ok,
+cert-neutral); `DISCOPT_TRIVIAL_PRIMAL=0` restores the legacy no-seed behavior.
+Corpus-gated.
 """
 
 from __future__ import annotations
@@ -44,7 +46,8 @@ def _solve(inst: str, flag: str, tl: float):
     reason="ball_mk2_30.nl (benchmark corpus) absent",
 )
 def test_827_trivial_seed_finds_ball_mk2_incumbent():
-    """flag OFF finds NO incumbent; flag ON finds the origin (the optimum, obj 0)."""
+    """opt-out (=0) finds NO incumbent; seed on (=1) finds the origin (the optimum,
+    obj 0)."""
     off = _solve("ball_mk2_30", "0", 8.0)
     on = _solve("ball_mk2_30", "1", 8.0)
     assert off.objective is None, (
@@ -52,6 +55,26 @@ def test_827_trivial_seed_finds_ball_mk2_incumbent():
     )
     assert on.objective is not None and abs(on.objective) < 1e-4, (
         f"#827: trivial seed failed to find the ball_mk2 optimum 0.0 (got {on.objective})"
+    )
+
+
+@pytest.mark.slow
+@pytest.mark.correctness
+@pytest.mark.skipif(
+    not (BENCH / "ball_mk2_30.nl").exists(),
+    reason="ball_mk2_30.nl (benchmark corpus) absent",
+)
+def test_827_graduated_default_finds_ball_mk2_incumbent():
+    """GRADUATED (#829): with the env UNSET (the new default-ON), ball_mk2_30 finds
+    its incumbent — the seed is now the default path, not opt-in."""
+    prev = os.environ.pop("DISCOPT_TRIVIAL_PRIMAL", None)
+    try:
+        r = dm.from_nl(str(BENCH / "ball_mk2_30.nl")).solve(time_limit=8.0)
+    finally:
+        if prev is not None:
+            os.environ["DISCOPT_TRIVIAL_PRIMAL"] = prev
+    assert r.objective is not None and abs(r.objective) < 1e-4, (
+        f"#829: graduated default failed to find the ball_mk2 optimum 0.0 (got {r.objective})"
     )
 
 
