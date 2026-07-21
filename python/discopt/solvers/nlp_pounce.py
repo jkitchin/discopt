@@ -151,14 +151,25 @@ def solve_nlp(
     status_code = info.get("status", -100)
     status = _IPOPT_STATUS_MAP.get(status_code, SolveStatus.ERROR)
 
-    # pounce#248: POUNCE can spuriously report UNBOUNDED on a BOUNDED but ill-scaled
-    # problem (jit1: objective bounded below, every variable box-constrained, yet
-    # UNBOUNDED — while cyipopt solves the identical problem to OPTIMAL). A local NLP
-    # cannot prove GLOBAL unboundedness anyway, so an UNBOUNDED verdict here is
-    # untrustworthy. Retry once with the KKT-valid cyipopt backend and adopt its
-    # result ONLY if it converges to a definitive OPTIMAL — so a genuinely unbounded
-    # relaxation (where cyipopt also fails to converge) keeps POUNCE's verdict.
-    # Best-effort: a missing cyipopt install or any error falls through unchanged.
+    # POUNCE can report UNBOUNDED on a problem that in fact has a finite optimum,
+    # where a local NLP cannot legitimately prove GLOBAL unboundedness anyway — so an
+    # UNBOUNDED verdict here is untrustworthy. Retry once with the KKT-valid cyipopt
+    # backend and adopt its result ONLY if it converges to a definitive OPTIMAL, so a
+    # genuinely unbounded relaxation (where cyipopt also fails to converge) keeps
+    # POUNCE's verdict. Best-effort: a missing cyipopt install or any error falls
+    # through unchanged.
+    #
+    # DO NOT REMOVE this on the strength of pounce#248 alone. #248 ("Fix spurious
+    # UNBOUNDED on BOUNDED, ill-scaled NLPs", fixed 2026-07) resolves only the fully
+    # box-constrained root case: raw POUNCE now returns OPTIMAL on jit1's root
+    # continuous relaxation. But jit1's B&B NODE subproblems carry variables with
+    # ub=+inf (x12–x16, …), which are OUTSIDE #248's bounded class — and on current
+    # POUNCE (0.9.0) all 59 of jit1's node solves still return UNBOUNDED, so removing
+    # this retry regresses jit1 to status=unknown / no incumbent. Verified by removing
+    # it and re-solving: 59/59 UNBOUNDED, obj=None. The remaining case (UNBOUNDED on
+    # an unbounded-box subproblem that has a finite optimum) is tracked upstream as
+    # pounce#252 (#248 follow-up); this guard stays until that is fixed AND re-verified
+    # end-to-end on jit1.
     if status == SolveStatus.UNBOUNDED:
         try:
             from discopt.solvers.nlp_ipopt import solve_nlp as _solve_cyipopt
