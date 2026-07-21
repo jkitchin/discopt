@@ -161,7 +161,7 @@ def _expr_is_scalar(expr: Expression, model: Model) -> bool:
     if isinstance(expr, Parameter):
         return int(getattr(expr, "size", 1)) == 1
     if isinstance(expr, Constant):
-        return np.size(getattr(expr, "value", 0)) == 1
+        return bool(np.size(getattr(expr, "value", 0)) == 1)
     if isinstance(expr, IndexExpression):
         idx = expr.index
         if isinstance(idx, (int, np.integer)):
