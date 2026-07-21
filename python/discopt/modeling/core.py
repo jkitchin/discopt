@@ -229,6 +229,20 @@ class Expression:
     # ── Indexing for array variables ──
 
     def __getitem__(self, idx):
+        # Out-of-bounds guard (issue #816) lives on the *operator*, not on the
+        # ``IndexExpression`` constructor: the expression-graph machinery (GAMS
+        # import, NL export resolver, signomial/sign-domain pattern matching)
+        # deliberately builds ``IndexExpression(base, idx)`` with out-of-range,
+        # non-integer, or too-many-index values as lazy nodes that it resolves
+        # conservatively later, and must never raise on construction. User-facing
+        # ``x[i]`` typos, by contrast, should fail loudly — but only for the
+        # unambiguous integer cases (a plain int, or a full-arity all-int tuple);
+        # slices, ellipsis, wrong-arity, and non-integer indices stay lenient.
+        base_shape = _known_shape(self)
+        if base_shape is not None and len(base_shape) >= 1:
+            err = _integer_index_out_of_range(base_shape, idx)
+            if err is not None:
+                raise err
         return IndexExpression(self, idx)
 
     # ── Shape / length / iteration for array-valued expressions (issue #816) ──
@@ -393,25 +407,45 @@ def _index_result_shape(base_shape: tuple[int, ...], index) -> Optional[tuple[in
 
     Builds a zero-storage broadcast *view* of the base shape (no allocation, even
     for large variables) and applies the *same* index the JAX compiler applies at
-    evaluation time (``base[index]`` — see ``dag_compiler._compile_node``). A
-    genuine out-of-range integer index therefore raises ``IndexError`` here, at
-    build time, instead of silently constructing an ``IndexExpression`` that would
-    index out of bounds during the solve. An index whose result shape cannot be
-    determined statically (symbolic/exotic index objects) yields ``None`` =
-    "unknown" — never a false rejection.
+    evaluation time (``base[index]`` — see ``dag_compiler._compile_node``). This
+    is a pure *best-effort shape query*: it NEVER raises. Any index numpy cannot
+    resolve against the shape (out of range, too many indices, a symbolic/exotic
+    index object) yields ``None`` = "unknown". The out-of-bounds *guard* that
+    surfaces user typos lives in :meth:`Expression.__getitem__`, so that internal
+    lazy ``IndexExpression`` construction stays conservative.
     """
     try:
         probe = np.broadcast_to(np.zeros((), dtype=np.int8), base_shape)
-    except Exception:
-        return None
-    try:
         return tuple(int(d) for d in np.shape(probe[index]))
-    except IndexError:
-        # Out-of-range index: a real error the user should see now, not a silent
-        # expression that breaks at evaluation time (issue #816).
-        raise
     except Exception:
         return None
+
+
+def _integer_index_out_of_range(base_shape: tuple[int, ...], idx):
+    """Return an ``IndexError`` to raise if *idx* is pure-integer indexing that is
+    out of range for *base_shape*, else ``None`` (issue #816).
+
+    Only a plain integer or a full-arity all-integer tuple is checked — exactly
+    the ``x[99]`` / ``X[i, j]`` typo the issue calls out. Slices, ellipsis,
+    ``newaxis``, non-integer keys, and wrong-arity (too-many / too-few) tuples
+    are left to the lenient path: those are the lazy forms the expression-graph
+    machinery constructs and resolves downstream, so tightening them here would
+    be a false rejection.
+    """
+    if isinstance(idx, (int, np.integer)):
+        idx_tuple: tuple = (int(idx),)
+    elif (
+        isinstance(idx, tuple)
+        and len(idx) == len(base_shape)
+        and all(isinstance(i, (int, np.integer)) for i in idx)
+    ):
+        idx_tuple = tuple(int(i) for i in idx)
+    else:
+        return None
+    for axis, (i, n) in enumerate(zip(idx_tuple, base_shape)):
+        if i < -n or i >= n:
+            return IndexError(f"index {i} is out of bounds for axis {axis} with size {n}")
+    return None
 
 
 class IndexExpression(Expression):
@@ -420,16 +454,15 @@ class IndexExpression(Expression):
     def __init__(self, base: Expression, index):
         self.base = base
         self.index = index
-        # Static shape inference + out-of-bounds guard (issue #816). When the
-        # base is a *shaped* (ndim >= 1) node, compute the numpy result shape;
-        # this also raises ``IndexError`` for a genuinely out-of-range integer
-        # index rather than building a silently-invalid node. A scalar base
-        # (shape ``()``) is left untouched: indexing a scalar with ``x[0]`` is a
-        # pre-existing leniency in the DSL (the LLM builder and callers that
-        # treat a size-1/scalar variable as indexable rely on it), and #816 is
-        # about array indexing, so we do not change scalar behaviour here. An
-        # unknown base shape is likewise not checkable — conservative, never a
-        # false rejection.
+        # Best-effort static shape inference only (issue #816). Construction is
+        # intentionally non-raising: the out-of-bounds guard lives on the ``[]``
+        # operator (:meth:`Expression.__getitem__`) so that direct
+        # ``IndexExpression(base, idx)`` construction by the expression-graph
+        # machinery — which uses out-of-range / non-integer / too-many-index
+        # forms as lazy nodes — stays conservative. A shaped (ndim >= 1) base
+        # with a statically resolvable index gets a concrete shape; everything
+        # else (scalar base, unknown base, or an index numpy cannot resolve)
+        # stays shape-unknown.
         base_shape = _known_shape(base)
         if base_shape is not None and len(base_shape) >= 1:
             self._shape = _index_result_shape(base_shape, index)
