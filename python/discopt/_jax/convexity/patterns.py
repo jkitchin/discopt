@@ -668,6 +668,18 @@ def quadratic_curvature(expr: Expression, model: Model) -> Optional[Curvature]:
     Q, _c, _const = data
     if np.allclose(Q, 0.0, atol=1e-10):
         return Curvature.AFFINE
+    # #814: `_quadratic_data` returns Q as a full n_total x n_total dense matrix,
+    # so a quadratic that involves only a few variables (e.g. one gas-pipe flow
+    # term in gastrans582's 2186-var model) still triggers an O(n_total^3)
+    # eigvalsh — which grinds the root relaxation build for 75s+ before B&B even
+    # starts. Restrict the eigenproblem to the nonzero SUPPORT of Q: the omitted
+    # rows/cols are all-zero, contributing exactly-zero eigenvalues that can never
+    # flip the CONVEX (min >= 0) or CONCAVE (max <= 0) sign tests below, so the
+    # classification is identical while the eigvalsh cost drops to the support
+    # dimension (a handful of vars).
+    support = np.nonzero(np.any(np.abs(Q) > 1e-12, axis=0))[0]
+    if 0 < support.size < Q.shape[0]:
+        Q = Q[np.ix_(support, support)]
     eigvals = np.linalg.eigvalsh(Q)
     if float(np.min(eigvals)) >= -1e-10:
         return Curvature.CONVEX
