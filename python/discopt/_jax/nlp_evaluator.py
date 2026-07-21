@@ -164,6 +164,10 @@ def evaluator_fingerprint(model: Model) -> tuple:
     return (
         id(model._objective),
         tuple(id(c) for c in model._constraints),
+        # #840: fast-path constraints are part of the evaluator's constraint set, so
+        # they must be in the fingerprint — else a model that gains a fast family
+        # would reuse a stale evaluator built without it.
+        tuple(id(c) for c in getattr(model, "_fast_constraints", ())),
         tuple(id(v) for v in model._variables),
         tuple(id(p) for p in model._parameters),
         bool(getattr(model, "_gauss_newton_hessian", False)),
@@ -348,8 +352,16 @@ class NLPEvaluator:
         # bodies at call time. This lets DAEBuilder emit one big vector body
         # instead of thousands of scalar closures — the XLA trace shrinks from
         # O(nfe*ncp) scalar ops to O(1) bulk ops.
+        # #840: include fast-path single-variable-affine constraints (emitted to the
+        # Rust builder, stored in ``model._fast_constraints``, absent from
+        # ``_constraints``) so the evaluator's view — and hence
+        # ``_check_constraint_feasibility`` and the #772 incumbent guard — reflects the
+        # COMPLETE constraint set. Without them, a fast-indexed model looks
+        # unconstrained and any point (e.g. all-zeros on an assignment MILP) passes.
         self._source_constraints: list[Constraint] = [
-            c for c in model._constraints if isinstance(c, Constraint)
+            c
+            for c in (*model._constraints, *getattr(model, "_fast_constraints", ()))
+            if isinstance(c, Constraint)
         ]
         constraint_fns = [
             compile_constraint_params(c, model, self._param_index) for c in self._source_constraints

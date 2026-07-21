@@ -2097,6 +2097,18 @@ class Model:
         # introduces a name also adds it here.
         self._names: set[str] = set()
         self._constraints: list[Constraint] = []
+        # #840: single-variable-affine constraint families emitted through the fast
+        # path (``constraint(fast=True)`` -> ``_try_fast_linear_family``) are NOT
+        # appended to ``_constraints`` because they are already emitted as sparse rows
+        # into the Rust builder (adding them there too would double-count them in the
+        # native solve). But the NLPEvaluator, ``_check_constraint_feasibility``, and
+        # the #772 incumbent-verification guard build their view of the model from the
+        # Constraint objects, so without this store they are BLIND to fast constraints
+        # (evaluate_constraints -> [], the guard accepts any point — the #840
+        # false-primal hole). We keep the generated Constraint objects here so those
+        # consumers see the COMPLETE constraint set, while the native solve keeps
+        # reading only the builder rows. Never fed to the builder/native path.
+        self._fast_constraints: list[Constraint] = []
         self._objective: Optional[Objective] = None
         # R4: names of lifted product-factor auxes whose interval spans 0, set by
         # the factorable reform under ``DISCOPT_LIFT_ZERO_SPANNING_FACTORS`` so the
@@ -2785,8 +2797,11 @@ class Model:
 
         members = {m: c for m, c in generated}
         if fast and self._try_fast_linear_family([c for _, c in generated], name):
-            # Rows were emitted into the Rust builder; keep the Constraint
-            # objects only for introspection (not in self._constraints).
+            # Rows were emitted into the Rust builder; keep the Constraint objects in
+            # ``_fast_constraints`` (NOT ``_constraints`` — that would double-count them
+            # in the native solve) so the NLPEvaluator / feasibility check / #772 guard
+            # see the complete constraint set (#840). Introspection view still returned.
+            self._fast_constraints.extend(c for _, c in generated)
             return IndexedConstraint(name, index_set, members, fast=True)
         for _, c in generated:
             self._constraints.append(c)
