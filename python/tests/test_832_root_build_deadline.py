@@ -64,27 +64,37 @@ def test_832_flag_on_bounds_gastrans_fallback(monkeypatch):
 
 @pytest.mark.slow
 @pytest.mark.skipif(not _GAS.exists(), reason="gastrans582_mild11.nl (benchmark corpus) absent")
-def test_832_flag_off_still_overruns_gastrans(monkeypatch):
-    """Flag OFF (default): the base build is left whole, so gastrans582 still
-    overruns — proving the default path is genuinely untouched (and that the flag,
-    not some unrelated change, is what bounds it)."""
+def test_832_default_bounds_gastrans_fallback(monkeypatch):
+    """GRADUATED (#832): with the env UNSET (the new default-ON), the gastrans582
+    fallback is bounded to ~grant — the fix is now the default path."""
     monkeypatch.delenv("DISCOPT_ROOT_BUILD_DEADLINE", raising=False)
+    _val, dt = _fallback(_GAS, budget=3.0)
+    assert dt < 6.0, f"#832: default (graduated ON) fallback took {dt:.1f}s, not bounded"
+
+
+@pytest.mark.slow
+@pytest.mark.skipif(not _GAS.exists(), reason="gastrans582_mild11.nl (benchmark corpus) absent")
+def test_832_opt_out_restores_overrun(monkeypatch):
+    """Opt-out (``=0``): the legacy whole-base-build path is preserved — gastrans582
+    overruns again — proving the graduation kept the opt-out and the old behavior."""
+    monkeypatch.setenv("DISCOPT_ROOT_BUILD_DEADLINE", "0")
     _val_off, dt_off = _fallback(_GAS, budget=3.0)
     assert dt_off > 8.0, (
-        f"#832: flag-OFF fallback took only {dt_off:.1f}s — expected the ~15s default "
-        "overrun; the default path may have changed"
+        f"#832: opt-out (=0) fallback took only {dt_off:.1f}s — the legacy overrun path "
+        "should be restored by =0"
     )
 
 
 @pytest.mark.parametrize("inst", ["syn05hfsg", "casctanks", "nvs11"])
 def test_832_flag_byte_identical_on_normal_instance(monkeypatch, inst):
-    """Soundness: on an instance whose base build finishes before the deadline, flag
-    ON and OFF produce the IDENTICAL bound — the deadline only ever affects a build
-    that would otherwise overrun, never the default result."""
+    """Soundness: on an instance whose base build finishes before the deadline, the
+    graduated-ON default and the ``=0`` opt-out produce the IDENTICAL bound — the
+    deadline only ever affects a build that would otherwise overrun, never the
+    default result."""
     p = _INREPO / f"{inst}.nl"
     if not p.exists():
         pytest.skip(f"{inst}.nl absent")
-    monkeypatch.delenv("DISCOPT_ROOT_BUILD_DEADLINE", raising=False)
+    monkeypatch.setenv("DISCOPT_ROOT_BUILD_DEADLINE", "0")
     val_off, _ = _fallback(p)
     monkeypatch.setenv("DISCOPT_ROOT_BUILD_DEADLINE", "1")
     val_on, _ = _fallback(p)
