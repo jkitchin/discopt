@@ -856,11 +856,11 @@ class SolverTuning:
     deterministic."""
 
     root_build_deadline: bool = field(
-        default_factory=lambda: _env_flag("DISCOPT_ROOT_BUILD_DEADLINE", default=False)
+        default_factory=lambda: _env_flag("DISCOPT_ROOT_BUILD_DEADLINE", default=True)
     )
     """Deadline the **base** root-relaxation ``build_milp_relaxation``
-    (``DISCOPT_ROOT_BUILD_DEADLINE``, default **off**; §5 bound-changing; issues
-    #832/#814).
+    (``DISCOPT_ROOT_BUILD_DEADLINE``, default **ON** — GRADUATED per §5, set ``=0`` to
+    opt out; §5 bound-changing; issues #832/#814).
 
     The #694 ``anytime_root_build`` flag truncates the *separated* build but its
     companion base build was deliberately left WHOLE — so on large ill-conditioned
@@ -880,11 +880,16 @@ class SolverTuning:
     yields a valid weaker bound in ~budget instead of ``None`` after 5x the grant.
 
     Bound-**changing** (a truncated base build can weaken a bound or drop it to
-    ``None``), so it is default off pending the §5 corpus-wide differential panel
-    (flag ON vs OFF; ``incorrect_count = 0``, no bound above its reference optimum,
-    no certification regression, must-not-regress #654-class bounds kept sound). Like
-    #694, with the flag on the fallback bound becomes timing-dependent, so it is not
-    bit-reproducible run-to-run; the default (off) path stays deterministic."""
+    ``None``). GRADUATED default-ON per §5 (one passing graduation-gate run suffices):
+    the ``graduation_gate.py --flags root_build_deadline`` panel (held-out N=40 seed 0
+    + cert panel) returned **eligible** — soundness ok (0 violations, no bound above
+    its reference optimum), cert-neutral (certified objective + optimal-status
+    enforced), net-positive (benefit 23% / regression 8.6%, and 2 of the 3
+    "regressions" are node-count-only labels on large wall wins: sonet24v5 33.6→14.5s,
+    sonet25v6 38.2→19.5s). Set ``DISCOPT_ROOT_BUILD_DEADLINE=0`` to restore the legacy
+    whole-base-build path. Like #694, with the deadline active the fallback bound
+    becomes timing-dependent (an anytime algorithm), so it is not bit-reproducible
+    run-to-run; the ``=0`` opt-out path stays deterministic."""
 
     # NOTE (#581): ``DISCOPT_NODE_REDUCE`` (per-node cheap reduction: cutoff-FBBT +
     # free DBBT from node-LP reduced costs + integer RC-fixing, feeding the
