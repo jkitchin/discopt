@@ -11539,6 +11539,39 @@ def _solve_continuous(
     _c_bound = obj_val if status == "optimal" else None
     _c_gap = _optimal_relative_gap(obj_val) if status == "optimal" and obj_val is not None else None
 
+    # #815: this single-NLP path reports the solver's returned point as the
+    # incumbent. A local NLP that stalls at the time/iteration limit — or, on a
+    # problem with unbounded variables, one that terminates at a non-KKT point —
+    # can hand back an INFEASIBLE iterate (emfl050_3_3/emfl100_3_3: the NLP stalls
+    # at an all-10 point violating the distance-defining equalities by ~9.5, and
+    # this path would otherwise report it as objective=594). Reporting that point
+    # as an incumbent is a false primal. Verify feasibility HERE, at the source,
+    # with the SAME loose check the final incumbent-verification guard (#772) uses
+    # (abs tol 1e-3 — it can only flag a gross violation, never a point feasible
+    # within the solver's own tolerance), and withhold an infeasible point so a
+    # bogus incumbent never propagates. This only ever removes a bad incumbent;
+    # the path carries no valid dual bound when it is not "optimal", so refusing
+    # here can never loosen a bound below truth (soundness is untouched).
+    if x_dict is not None and nlp_result.x is not None:
+        from discopt._jax.primal_heuristics import (
+            _check_constraint_feasibility as _cc_feas_verify,
+        )
+
+        if not _cc_feas_verify(evaluator, np.asarray(nlp_result.x, dtype=np.float64), tol=1e-3):
+            logger.warning(
+                "continuous NLP returned an infeasible point (status=%s, obj=%s); "
+                "withholding the incumbent — no feasible solution was found.",
+                status,
+                obj_val,
+            )
+            obj_val = None
+            x_dict = None
+            _c_bound = None
+            _c_gap = None
+            # An unverified point can never be reported as a proven optimum.
+            if status == "optimal":
+                status = "unknown"
+
     return SolveResult(
         status=status,
         objective=obj_val,
