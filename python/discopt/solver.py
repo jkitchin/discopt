@@ -411,7 +411,7 @@ def _obbt_topk_enabled() -> bool:
 
 def _sane_multistart_enabled() -> bool:
     """Whether the #817 sane-start multistart for the pure-continuous single-NLP
-    path is on (env flag, **default OFF** pending the §5 differential panel).
+    path is on (env flag, **default OFF** — see the graduation panel below).
 
     The single box-center start (clipped to ``|x| <= _X0_CLIP = 10``) sends the
     local NLP into a bad basin on models with unbounded variables: it stalls at an
@@ -421,7 +421,20 @@ def _sane_multistart_enabled() -> bool:
     tries a few start magnitudes smallest-first (they converge fastest), each with
     a bounded budget, and keeps the best VERIFIED-feasible result. Primal-only: it
     can only find a feasible incumbent that would otherwise be missed; the dual
-    bound / certificate are untouched (this path emits no valid global bound)."""
+    bound / certificate are untouched (this path emits no valid global bound).
+
+    Graduation panel (34 pure-continuous instances, tl=25s, OFF vs ON;
+    ``discopt_benchmarks/results/issue817_multistart_panel_20260721.jsonl``):
+    **cert-clean** (0 false primals, bounds identical OFF/ON, 0 certification
+    regressions, 30 controls byte-identical) but **NOT decisively net-positive**:
+    only 1 of 14 gap instances gained an incumbent (pooling_foulds4tp), the gains
+    are timing-flaky (pooling_foulds3tp gains at tl=18 but not tl=25), and the
+    early-stop cost a *worse* feasible max on lip. Most gap instances still return
+    nothing because they are setup-throughput-bound (#814: they overran to 30-55s
+    and never finished), so the fix cannot realize its benefit until #814 is
+    addressed. Per the DISCOPT_CUT_INHERIT lesson (sound != helpful), the flag
+    stays **default OFF**; re-panel after #814 (and after removing the early-stop
+    quality regression) before graduating."""
     return os.environ.get("DISCOPT_SANE_MULTISTART", "").strip().lower() in (
         "1",
         "true",
