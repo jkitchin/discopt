@@ -1770,7 +1770,7 @@ def _convex_objective_lower_bound(evaluator, node_lb, node_ub) -> float:
     nlb = np.asarray(node_lb, dtype=np.float64)
     nub = np.asarray(node_ub, dtype=np.float64)
     if not (np.all(np.isfinite(nlb)) and np.all(np.isfinite(nub))) or np.any(nub < nlb):
-        return -np.inf
+        return float("-inf")
     n = nlb.shape[0]
     center = 0.5 * (nlb + nub)
 
@@ -1783,9 +1783,9 @@ def _convex_objective_lower_bound(evaluator, node_lb, node_ub) -> float:
         H = np.asarray(evaluator.evaluate_hessian(center), dtype=np.float64)
         g0 = np.asarray(evaluator.evaluate_gradient(center), dtype=np.float64)
     except (ValueError, ArithmeticError, RuntimeError):
-        return -np.inf
+        return float("-inf")
     if H.shape != (n, n) or not (np.all(np.isfinite(H)) and np.all(np.isfinite(g0))):
-        return -np.inf
+        return float("-inf")
     H = 0.5 * (H + H.T)  # symmetrize the (symmetric) convex Hessian
     g = g0 - H @ center
 
@@ -1824,13 +1824,13 @@ def _convex_objective_lower_bound(evaluator, node_lb, node_ub) -> float:
     # Supporting hyperplane at x_hat: f(x_hat) + min_box grad.(x - x_hat).
     grad = H @ x_hat + g
     if not np.all(np.isfinite(grad)):
-        return -np.inf
+        return float("-inf")
     fx = f(x_hat)
     tangent_min = fx + float(
         np.sum(np.where(grad >= 0.0, grad * (nlb - x_hat), grad * (nub - x_hat)))
     )
     if not np.isfinite(tangent_min):
-        return -np.inf
+        return float("-inf")
     # Magnitude-scaled margin so the float64 hyperplane evaluation stays a valid
     # (never-too-high) lower bound despite rounding — the same safe-bound discipline
     # as ``obbt._ns_safe_lp_lower_bound``.
@@ -9549,7 +9549,7 @@ def solve_model(
             if _abs_gap <= _DEFAULT_ABS_GAP_TOL:
                 return True
             _denom = max(abs(_ub), abs(_batch_relax_lb), 1e-10)
-            return _abs_gap / _denom <= gap_tolerance
+            return bool(_abs_gap / _denom <= gap_tolerance)
 
         # --- Feasibility pump after root node ---
         if iteration == 0 and not _fp_ran:

@@ -45,6 +45,7 @@ from discopt.modeling.core import (
     # Logical functions
     atleast,
     atmost,
+    concatenate,
     cos,
     cosh,
     custom,
@@ -76,6 +77,7 @@ from discopt.modeling.core import (
     sinh,
     softplus,
     sqrt,
+    stack,
     # Aggregation
     sum,
     tan,
@@ -135,6 +137,8 @@ __all__ = [
     "sum",
     "prod",
     "norm",
+    "concatenate",
+    "stack",
     "tanh",
     "SolveResult",
     "SolveUpdate",

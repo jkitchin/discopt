@@ -5,12 +5,12 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Iterable, Optional, Sequence
+from typing import Any, Iterable, Optional, Sequence, TypeAlias
 
 import numpy as np
 
 _CONSTRAINT_INF = 1e19
-VectorLike = Sequence[float] | np.ndarray
+VectorLike: TypeAlias = Sequence[float] | np.ndarray
 
 
 class MIPNLPRootSearchStatus(str, Enum):

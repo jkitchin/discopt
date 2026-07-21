@@ -114,7 +114,7 @@ class Ellipsoid:
 
     @property
     def dim(self) -> int:
-        return self.center.size
+        return int(self.center.size)
 
     def support(self, s: np.ndarray) -> tuple[float, float]:
         """Range ``[min, max]`` of the linear functional ``s . x`` over ``E``.

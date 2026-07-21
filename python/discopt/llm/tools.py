@@ -652,9 +652,10 @@ class ModelBuilder:
         # Bare math-function names (grammar: `exp(x)`, not `dm.exp(x)`), plus the
         # reductions the tool schema advertises. These resolve to the *modeling*
         # (`dm`) functions, not Python builtins: `sum`/`abs` must operate on the
-        # expression DAG (builtin `sum(var)` would iterate a Variable forever via
-        # the sequence protocol). Model variables/params from the builder
-        # namespace resolve for `Name` nodes but are NOT callable here.
+        # expression DAG as a whole (builtin `sum(var)` would instead fold the
+        # variable element-wise along its leading axis — correct for a vector but
+        # not the reduction the schema advertises). Model variables/params from
+        # the builder namespace resolve for `Name` nodes but are NOT callable here.
         _math = {
             fn: getattr(dm, fn)
             for fn in (

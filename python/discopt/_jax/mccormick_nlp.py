@@ -130,7 +130,7 @@ def _solve_relaxation_with_pounce(
     from discopt.solvers.nlp_pounce import solve_nlp as solve_nlp_pounce
 
     if not POUNCE_AVAILABLE:
-        return -np.inf
+        return float("-inf")
 
     lb = np.asarray(node_lb, dtype=np.float64)
     ub = np.asarray(node_ub, dtype=np.float64)
@@ -151,13 +151,13 @@ def _solve_relaxation_with_pounce(
     if deadline is not None:
         remaining = deadline - time.perf_counter()
         if remaining <= 0.0:
-            return -np.inf
+            return float("-inf")
         opts["max_wall_time"] = float(remaining)
 
     try:
         result = solve_nlp_pounce(ev, x0, constraint_bounds=constraint_bounds, options=opts)
     except Exception:
-        return -np.inf
+        return float("-inf")
 
     # Mirror the POUNCE/Ipopt acceptance set: optimal, acceptable, stalled
     # (Search_Direction_Becomes_Too_Small → UNBOUNDED in the discopt enum),
@@ -168,12 +168,12 @@ def _solve_relaxation_with_pounce(
         SolveStatus.ITERATION_LIMIT,
         SolveStatus.UNBOUNDED,
     ):
-        return -np.inf
+        return float("-inf")
     if result.objective is None:
-        return -np.inf
+        return float("-inf")
     val = float(result.objective)
     if not np.isfinite(val):
-        return -np.inf
+        return float("-inf")
     return val
 
 
@@ -207,7 +207,7 @@ def solve_mccormick_relaxation_nlp(
         Valid lower bound (float), or -inf on failure.
     """
     if _deadline_expired(deadline):
-        return -np.inf
+        return float("-inf")
 
     lb = jnp.asarray(node_lb, dtype=jnp.float64)
     ub = jnp.asarray(node_ub, dtype=jnp.float64)
@@ -222,12 +222,12 @@ def solve_mccormick_relaxation_nlp(
         cv_t = float(cv_test)
         cc_t = float(cc_test)
         if not (np.isfinite(cv_t) and np.isfinite(cc_t)):
-            return -np.inf
+            return float("-inf")
     except Exception:
-        return -np.inf
+        return float("-inf")
 
     if _deadline_expired(deadline):
-        return -np.inf
+        return float("-inf")
 
     con_fns_tuple = tuple(con_relax_fns) if con_relax_fns else None
     senses_tuple = tuple(con_senses) if con_senses else None

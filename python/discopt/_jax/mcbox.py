@@ -111,7 +111,7 @@ class MCBox:
 
     @property
     def n(self) -> int:
-        return self.sub_cv.shape[0]
+        return int(self.sub_cv.shape[0])
 
     # -- affine arithmetic --
     def __add__(self, o):
