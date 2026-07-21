@@ -91,9 +91,14 @@ def test_guard_withholds_injected_false_primal(monkeypatch):
     assert r.gap_certified is False
 
 
-def test_verify_incumbent_false_disables_guard(monkeypatch):
-    """``verify_incumbent=False`` restores the pre-guard behavior (the same injected
-    false primal passes through unflagged) — the opt-out works."""
+def test_verify_incumbent_false_still_withholds_false_primal(monkeypatch):
+    """#822: ``verify_incumbent=False`` no longer disables the soundness withhold.
+
+    Returning an incumbent infeasible in the ORIGINAL model is the cardinal error
+    (CLAUDE.md §1); a user flag must not be able to enable it. The verification is a
+    cache hit on a nonlinear solve (the evaluator is already built), so it is
+    effectively free and now always runs. (Previously the flag opted out of the
+    guard — a soundness hole: a false primal from any path would be returned.)"""
     m = dm.Model()
     x = m.continuous("x", lb=0.0, ub=10.0)
     y = m.continuous("y", lb=0.0, ub=10.0)
@@ -101,6 +106,7 @@ def test_verify_incumbent_false_disables_guard(monkeypatch):
     m.minimize(x + y)
 
     def _fake_solve_model(model, **kwargs):
+        # x=y=3 grossly violates x^2 + y^2 <= 1 (value 18) — a false primal.
         return SolveResult(
             status="optimal",
             objective=6.0,
@@ -112,5 +118,6 @@ def test_verify_incumbent_false_disables_guard(monkeypatch):
 
     monkeypatch.setattr(solver_mod, "solve_model", _fake_solve_model)
     r = m.solve(time_limit=5, verify_incumbent=False)
-    assert r.incumbent_verification_failed is False
-    assert r.x is not None  # not withheld — guard was off
+    assert r.incumbent_verification_failed is True  # guard fires even with the flag off
+    assert r.x is None  # withheld
+    assert r.objective is None

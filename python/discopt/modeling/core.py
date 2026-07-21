@@ -3915,8 +3915,16 @@ class Model:
         # paths are JAX-free by design and do not run the nonlinear presolve mutation
         # this guard defends against, so building a JAX evaluator there would regress
         # their JAX-free cold start (``_is_fast_linear_quadratic_family`` is pure-Python).
+        #
+        # #822: the snapshot is NOT gated on ``verify_incumbent``. Returning an
+        # incumbent that is infeasible in the original model is the cardinal error
+        # (CLAUDE.md §1); a user flag must not be able to disable that soundness
+        # withhold. On a nonlinear solve the evaluator is already built during the
+        # solve, so ``cached_evaluator(self)`` here is a cache hit (~0 ms) — the
+        # verification is effectively free and now always runs. ``verify_incumbent``
+        # is retained for API compatibility but no longer suppresses the withhold.
         _verify_snap = None
-        if verify_incumbent and self._constraints and not _is_fast_linear_quadratic_family(self):
+        if self._constraints and not _is_fast_linear_quadratic_family(self):
             try:
                 from discopt._jax.nlp_evaluator import cached_evaluator
 
