@@ -24,6 +24,16 @@ dev = [
     "pytest-cov>=4.1",
     "mutmut>=2.4",              # Mutation testing
 ]
+gdplib = [
+    # GDPlib GDP benchmark corpus (issue #823). Install gdplib FROM SOURCE — the
+    # PyPI wheel omits the model data files, so most builders raise
+    # FileNotFoundError. Oracles: highspy (HiGHS) verifies the linear subset,
+    # pyscipopt (bundles SCIP) the nonlinear subset. Both optional at runtime.
+    "pyomo>=6.7",
+    "gdplib @ git+https://github.com/SECQUOIA/gdplib.git",
+    "highspy>=1.7",
+    "pyscipopt>=5.0",
+]
 
 [project.scripts]
 discopt-bench = "run_benchmarks:main"
