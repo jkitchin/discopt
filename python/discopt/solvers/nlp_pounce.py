@@ -151,6 +151,27 @@ def solve_nlp(
     status_code = info.get("status", -100)
     status = _IPOPT_STATUS_MAP.get(status_code, SolveStatus.ERROR)
 
+    # pounce#248: POUNCE can spuriously report UNBOUNDED on a BOUNDED but ill-scaled
+    # problem (jit1: objective bounded below, every variable box-constrained, yet
+    # UNBOUNDED — while cyipopt solves the identical problem to OPTIMAL). A local NLP
+    # cannot prove GLOBAL unboundedness anyway, so an UNBOUNDED verdict here is
+    # untrustworthy. Retry once with the KKT-valid cyipopt backend and adopt its
+    # result ONLY if it converges to a definitive OPTIMAL — so a genuinely unbounded
+    # relaxation (where cyipopt also fails to converge) keeps POUNCE's verdict.
+    # Best-effort: a missing cyipopt install or any error falls through unchanged.
+    if status == SolveStatus.UNBOUNDED:
+        try:
+            from discopt.solvers.nlp_ipopt import solve_nlp as _solve_cyipopt
+
+            _retry = _solve_cyipopt(
+                evaluator, x0, constraint_bounds=constraint_bounds, options=options
+            )
+            if _retry.status == SolveStatus.OPTIMAL:
+                _logger.debug("pounce UNBOUNDED overturned by cyipopt (OPTIMAL); adopting")
+                return _retry
+        except Exception as _retry_exc:  # noqa: BLE001 — fallback is best-effort
+            _logger.debug("cyipopt UNBOUNDED-retry skipped: %s", _retry_exc)
+
     multipliers = info.get("mult_g", None)
     if multipliers is not None and len(multipliers) == 0:
         multipliers = None
