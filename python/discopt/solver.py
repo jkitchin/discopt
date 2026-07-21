@@ -3744,17 +3744,38 @@ def _root_relaxation_lower_bound(
     # lower bound (§8; never the §8.1 "truncate a bound-producing solve" nor the §8.2
     # Rust LP native deadline — this bounds the Python build only).
     #
-    # The BASE build (``build_milp_relaxation`` just below) is deliberately left
-    # WHOLE: it feeds the ``objective_bound_valid`` soundness gate and the
-    # plain/PSD/RLT candidates, and truncating it can trip that gate (a dropped
-    # constraint can un-bound an objective cost column -> a spuriously invalid base
-    # LP -> the whole fallback would abandon every candidate, LOSING the bound rather
-    # than weakening it — the rule-1 case §8 forbids). Only the independent ``sep``
-    # build, which constructs its own relaxation and is the class's sole producer, is
-    # truncated. ``None`` off the flag => the legacy monolithic build, byte-identical.
+    # The BASE build (``build_milp_relaxation`` just below) is left WHOLE by default:
+    # it feeds the ``objective_bound_valid`` soundness gate and the plain/PSD/RLT
+    # candidates, and truncating it can trip that gate (a dropped constraint can
+    # un-bound an objective cost column -> a spuriously invalid base LP -> the whole
+    # fallback would abandon every candidate, LOSING the bound rather than weakening
+    # it — the rule-1 case §8 forbids). Only the independent ``sep`` build, which
+    # constructs its own relaxation and is the class's sole producer, is truncated by
+    # the #694 ``anytime_root_build`` flag. ``None`` off both flags => the legacy
+    # monolithic build, byte-identical.
+    #
+    # #832/#814: on large ill-conditioned instances the base build ALONE overruns the
+    # grant several-fold and dominates the whole fallback (gastrans582_mild11: ~10.5s
+    # base DCP build, 5.2x overrun, 93% of the time is the Python build not the Rust
+    # LP). The ``root_build_deadline`` flag (default off, §5 bound-changing) also
+    # deadlines the base build: its constraint-row loop stops at the grant, and a
+    # truncated-but-``obj_bound_valid`` relaxation is a valid WEAKER bound (dropping
+    # rows only enlarges the feasible set), while a truncation that un-bounds a cost
+    # column trips the existing gate below and returns None (weaker, never falsified).
+    # ``root_build_deadline`` is the umbrella: it bounds the WHOLE fallback build
+    # phase (base + separated), so the fallback honors its grant end-to-end. #694's
+    # ``anytime_root_build`` is the narrower, separately-characterized sep-only lever;
+    # either flag deadlines the separated build, but only ``root_build_deadline`` also
+    # deadlines the base build. The deadline is the fallback's own grant, so once it
+    # is spent every remaining build truncates immediately (a fully-linearized
+    # objective with zero constraint rows is still a valid, very weak lower bound).
+    _base_deadline_on = getattr(_tuning(), "root_build_deadline", False)
     _build_deadline: Optional[float] = None
-    if getattr(_tuning(), "anytime_root_build", False):
+    if getattr(_tuning(), "anytime_root_build", False) or _base_deadline_on:
         _build_deadline = _fb_t0 + max(0.0, float(time_limit))
+    _base_build_deadline: Optional[float] = None
+    if _base_deadline_on:
+        _base_build_deadline = _fb_t0 + max(0.0, float(time_limit))
 
     try:
         terms = classify_nonlinear_terms(model)
@@ -3763,6 +3784,7 @@ def _root_relaxation_lower_bound(
             terms,
             DiscretizationState(),
             bound_override=(root_lb, root_ub),
+            build_deadline=_base_build_deadline,
         )
         if not relax._objective_bound_valid:
             return None

@@ -171,6 +171,17 @@ ARMS: dict[str, dict] = {
         "struct_attr": None,
         "regime": "bound_changing",
     },
+    # Base root-relaxation build deadline (#832/#814): deadlines the base (and sep)
+    # ``build_milp_relaxation`` so the fallback honors its grant. A truncated base
+    # build is a valid WEAKER relaxation (dropped rows only enlarge the feasible set)
+    # or trips the ``_objective_bound_valid`` gate to None — so it can change (weaken)
+    # a fallback bound: ``bound_changing``. No cheap static proxy — the overrun is a
+    # runtime build-cost property (like lu_density_route / node_numerical_dual_bound).
+    "root_build_deadline": {
+        "env": {"DISCOPT_ROOT_BUILD_DEADLINE": "1"},
+        "struct_attr": None,
+        "regime": "bound_changing",
+    },
     "all": {"env": dict(FLAGS_ON), "struct_attr": None, "regime": "bound_changing"},
 }
 
@@ -187,6 +198,8 @@ GRADUATION_ARMS = (
     "lu_density_route",
     # #517/#362 NS dual safe bound, wired 2026-07-16
     "node_numerical_dual_bound",
+    # #832/#814 base root-build deadline, wired 2026-07-21
+    "root_build_deadline",
 )
 
 # correctness tolerance (matches conftest abs=1e-6, rel=1e-4)

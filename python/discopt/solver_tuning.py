@@ -855,6 +855,37 @@ class SolverTuning:
     bit-reproducible run-to-run; the default (off) path is unaffected and stays
     deterministic."""
 
+    root_build_deadline: bool = field(
+        default_factory=lambda: _env_flag("DISCOPT_ROOT_BUILD_DEADLINE", default=False)
+    )
+    """Deadline the **base** root-relaxation ``build_milp_relaxation``
+    (``DISCOPT_ROOT_BUILD_DEADLINE``, default **off**; §5 bound-changing; issues
+    #832/#814).
+
+    The #694 ``anytime_root_build`` flag truncates the *separated* build but its
+    companion base build was deliberately left WHOLE — so on large ill-conditioned
+    instances the base build alone overruns the grant several-fold. Measured
+    (``gastrans582_mild11``, budget 3.0s): the base DCP build takes ~10.5 s and the
+    fallback returns ``None`` after ~15.5 s (5.2x overrun) — 93 % of the time is the
+    Python DCP relaxation build, **not** the Rust LP (2.77 ms factorize); see #832.
+
+    When on, ``_root_relaxation_lower_bound`` passes a ``build_deadline`` (its own
+    grant) to the base build, so its constraint-row loop stops adding rows once the
+    grant is spent. Sound: the objective is fully linearized before the constraint
+    loop, so a prefix of rows is a valid **weaker** outer relaxation (dropping rows
+    only enlarges the feasible set -> the LP min stays a valid lower bound); if a
+    dropped constraint un-bounds an objective cost column the existing
+    ``_objective_bound_valid`` gate returns ``None`` (weaker, never falsified). On
+    ``gastrans582`` the truncated base build is still ``obj_bound_valid=True`` and
+    yields a valid weaker bound in ~budget instead of ``None`` after 5x the grant.
+
+    Bound-**changing** (a truncated base build can weaken a bound or drop it to
+    ``None``), so it is default off pending the §5 corpus-wide differential panel
+    (flag ON vs OFF; ``incorrect_count = 0``, no bound above its reference optimum,
+    no certification regression, must-not-regress #654-class bounds kept sound). Like
+    #694, with the flag on the fallback bound becomes timing-dependent, so it is not
+    bit-reproducible run-to-run; the default (off) path stays deterministic."""
+
     # NOTE (#581): ``DISCOPT_NODE_REDUCE`` (per-node cheap reduction: cutoff-FBBT +
     # free DBBT from node-LP reduced costs + integer RC-fixing, feeding the
     # tightened box to the children) was DEPRECATED and removed. It was a
