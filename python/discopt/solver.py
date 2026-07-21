@@ -409,6 +409,27 @@ def _obbt_topk_enabled() -> bool:
     return os.environ.get("DISCOPT_OBBT_TOPK", "").strip().lower() in ("1", "true", "yes", "on")
 
 
+def _sane_multistart_enabled() -> bool:
+    """Whether the #817 sane-start multistart for the pure-continuous single-NLP
+    path is on (env flag, **default OFF** pending the §5 differential panel).
+
+    The single box-center start (clipped to ``|x| <= _X0_CLIP = 10``) sends the
+    local NLP into a bad basin on models with unbounded variables: it stalls at an
+    INFEASIBLE iterate (emfl050/pooling_foulds3tp/squfl010-080persp report obj
+    594 / -320 / 217k, all infeasible) even though a start at ``|x| <= 1``
+    converges to the FEASIBLE optimum (10.4 / -8.0 / 503.6). When ON, the path
+    tries a few start magnitudes smallest-first (they converge fastest), each with
+    a bounded budget, and keeps the best VERIFIED-feasible result. Primal-only: it
+    can only find a feasible incumbent that would otherwise be missed; the dual
+    bound / certificate are untouched (this path emits no valid global bound)."""
+    return os.environ.get("DISCOPT_SANE_MULTISTART", "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+
+
 # #282 iterate-root-OBBT-to-convergence (flag-gated, default OFF). The root OBBT
 # over the McCormick LP already iterates and rebuilds the envelope on the
 # tightened box each sweep (``obbt_tighten_root``), but at the default
@@ -11460,54 +11481,104 @@ def _solve_continuous(
     lb, ub = tightened_lb, tightened_ub
     lb_clipped = np.clip(lb, -_SPC, _SPC)
     ub_clipped = np.clip(ub, -_SPC, _SPC)
-    if initial_point is not None:
-        x0 = np.clip(initial_point, lb, ub)
-        logger.info("Using warm-start point for continuous NLP")
-    else:
-        x0 = 0.5 * (lb_clipped + ub_clipped)
-        # Variables that are effectively unbounded on both sides can collapse
-        # to midpoint 0 even after nonlinear tightening produces a compact
-        # box. Zero is a stationary or nonsmooth point for common atoms
-        # (sin/cos, sqrt(x^2), abs), so keep the original sentinel-bound
-        # signal when nudging starts away from that pathological point.
+    # ``_X0_CLIP``: on problems with one-sided large bounds (e.g. x >= 1e-5 with
+    # no upper bound), the midpoint of the clipped [-_SPC, _SPC] range lands at
+    # ~50, which sends exp/log NLPs into overflow territory and crashes ipopt.
+    # Tighten the starting-point range to keep initial iterates in a numerically
+    # safe zone while still respecting actual bounds.
+    _X0_CLIP = 10.0
+
+    def _base_center() -> np.ndarray:
+        c = 0.5 * (lb_clipped + ub_clipped)
+        # Variables effectively unbounded on both sides collapse to midpoint 0 even
+        # after tightening; 0 is a stationary/nonsmooth point for common atoms
+        # (sin/cos, sqrt(x^2), abs), so nudge those away from that pathological
+        # point using the original sentinel-bound signal.
         fully_unbounded = (raw_lb <= -_BOUND_WARN_THRESHOLD) & (raw_ub >= _BOUND_WARN_THRESHOLD)
-        x0 = np.where(fully_unbounded, 0.5, x0)
-        # On problems with one-sided large bounds (e.g. x >= 1e-5 with no
-        # upper bound), the midpoint of the clipped [-_SPC, _SPC] range
-        # lands at ~50, which sends exp/log NLPs into overflow territory
-        # and crashes ipopt. Tighten the starting-point range to keep
-        # initial iterates in a numerically safe zone while still
-        # respecting actual bounds.
-        _X0_CLIP = 10.0
-        x0 = np.clip(x0, np.maximum(lb, -_X0_CLIP), np.minimum(ub, _X0_CLIP))
+        return np.where(fully_unbounded, 0.5, c)
+
+    def _start_at_cap(cap: float) -> np.ndarray:
+        return cast(np.ndarray, np.clip(_base_center(), np.maximum(lb, -cap), np.minimum(ub, cap)))
+
+    if initial_point is not None:
+        starts = [np.clip(initial_point, lb, ub)]
+        logger.info("Using warm-start point for continuous NLP")
+    elif _sane_multistart_enabled():
+        # #817: the single |x|<=10 box-center start stalls the NLP into a bad,
+        # infeasible basin on unbounded-variable models. Try smaller start
+        # magnitudes first (they converge fastest to the feasible basin) and keep
+        # the |x|<=10 start last so nothing that worked before is lost. Dedup
+        # identical vectors (finite-bounded models collapse to one start).
+        _seen: list[np.ndarray] = []
+        starts = []
+        for _cap in (0.5, 1.0, _X0_CLIP):
+            _s = _start_at_cap(_cap)
+            if not any(np.array_equal(_s, _p) for _p in _seen):
+                _seen.append(_s)
+                starts.append(_s)
+    else:
+        starts = [_start_at_cap(_X0_CLIP)]
 
     opts = dict(ipopt_options) if ipopt_options else {}
     opts.setdefault("print_level", 0)
-
-    # Pass remaining time budget to NLP solver so stalled subproblems
-    # don't run unbounded (see issue #5).
-    remaining = time_limit - (time.perf_counter() - t_start)
-    opts["max_wall_time"] = max(remaining, 0.1)
-
     constraint_bounds = None
     backend_evaluator = cast("NLPEvaluator", _BoundOverrideEvaluator(evaluator, lb, ub))
 
-    t_jax_start = time.perf_counter()
-    if nlp_solver == "pounce":
-        from discopt.solvers.nlp_pounce import solve_nlp as solve_nlp_pounce
+    def _run_nlp(x0v: np.ndarray, budget: float):
+        o = dict(opts)
+        o["max_wall_time"] = max(budget, 0.1)
+        # A starved iteration/tolerance budget stops the NLP at a non-KKT,
+        # infeasible iterate (emfl from x0=1 stalls at obj 59.4 without these but
+        # converges to the feasible 10.4 with them). Set generous defaults so a
+        # sane start can actually reach the feasible basin.
+        o.setdefault("max_iter", 1000)
+        o.setdefault("tol", 1e-7)
+        if nlp_solver == "pounce":
+            from discopt.solvers.nlp_pounce import solve_nlp as solve_nlp_pounce
 
-        nlp_result = solve_nlp_pounce(
-            backend_evaluator, x0, constraint_bounds=constraint_bounds, options=opts
-        )
-    else:
+            return solve_nlp_pounce(
+                backend_evaluator, x0v, constraint_bounds=constraint_bounds, options=o
+            )
         # "ipm"/"sparse_ipm" resolve to POUNCE upstream (the JAX IPM is retired);
         # only "ipopt"/"cyipopt" reach this branch.
         from discopt.solvers.nlp_ipopt import solve_nlp
 
-        nlp_result = solve_nlp(
-            backend_evaluator, x0, constraint_bounds=constraint_bounds, options=opts
+        return solve_nlp(backend_evaluator, x0v, constraint_bounds=constraint_bounds, options=o)
+
+    # Feasibility check reused across starts (same loose 1e-3 as the #772 guard,
+    # so a "feasible" pick here is never withheld downstream).
+    from discopt._jax.primal_heuristics import _check_constraint_feasibility as _cc_feas_ms
+
+    t_jax_start = time.perf_counter()
+    nlp_result = None
+    best_feasible = False
+    best_obj = math.inf
+    for _x0 in starts:
+        _remaining = time_limit - (time.perf_counter() - t_start)
+        if _remaining <= 0.0 and nlp_result is not None:
+            break
+        # Each start needs enough wall time to actually CONVERGE (a starved NLP
+        # merely TIME_LIMITs at an infeasible iterate). The smallest-cap start
+        # (tried first) is the most likely to reach the feasible basin, so give
+        # every start the FULL remaining budget and rely on early-stop (below) to
+        # skip the rest once one lands a feasible point. A start that stalls uses
+        # the budget but leaves the result no worse than the single-start baseline.
+        _budget = _remaining
+        _res = _run_nlp(_x0, _budget)
+        _feas = _res.x is not None and _cc_feas_ms(
+            evaluator, np.asarray(_res.x, dtype=np.float64), tol=1e-3
         )
+        _o = float(_res.objective) if _res.objective is not None else math.inf
+        if _feas and (not best_feasible or _o < best_obj):
+            nlp_result, best_feasible, best_obj = _res, True, _o
+        elif nlp_result is None:
+            nlp_result = _res  # keep a result to report status when none is feasible
+        # A feasible KKT point of a convex node is global; for the common convex /
+        # single-basin case the first converged start is the answer — stop early.
+        if _feas and _res.status == SolveStatus.OPTIMAL:
+            break
     jax_time += time.perf_counter() - t_jax_start
+    assert nlp_result is not None
 
     wall_time = time.perf_counter() - t_start
     python_time = wall_time - jax_time
