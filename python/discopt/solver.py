@@ -11540,12 +11540,15 @@ def _solve_continuous(
     def _run_nlp(x0v: np.ndarray, budget: float):
         o = dict(opts)
         o["max_wall_time"] = max(budget, 0.1)
-        # A starved iteration/tolerance budget stops the NLP at a non-KKT,
-        # infeasible iterate (emfl from x0=1 stalls at obj 59.4 without these but
-        # converges to the feasible 10.4 with them). Set generous defaults so a
-        # sane start can actually reach the feasible basin.
-        o.setdefault("max_iter", 1000)
-        o.setdefault("tol", 1e-7)
+        # Generous iteration/tolerance defaults so a sane start can reach the
+        # feasible basin (emfl from x0=1 stalls at a non-KKT infeasible obj 59.4
+        # without them, converges to the feasible 10.4 with them). Applied ONLY on
+        # the multistart path: the default single-start path must stay byte-
+        # identical (setting these here shifts convergence at the ~1e-8 level and
+        # breaks tight-tolerance parity tests — #824 CI).
+        if _sane_multistart_enabled():
+            o.setdefault("max_iter", 1000)
+            o.setdefault("tol", 1e-7)
         if nlp_solver == "pounce":
             from discopt.solvers.nlp_pounce import solve_nlp as solve_nlp_pounce
 
