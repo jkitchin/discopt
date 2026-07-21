@@ -409,6 +409,28 @@ def _obbt_topk_enabled() -> bool:
     return os.environ.get("DISCOPT_OBBT_TOPK", "").strip().lower() in ("1", "true", "yes", "on")
 
 
+def _trivial_primal_enabled() -> bool:
+    """Whether the #827 trivial-point primal seed is on (env flag, **default OFF**
+    pending the §5 differential panel).
+
+    Some models' feasible regions include an OBVIOUS point that the primal
+    heuristics never sample: ``ball_mk2_30``'s optimum is the origin (the single
+    ball constraint holds at 0), and ``chimera_k64ising-*`` has zero nonlinear
+    constraints so any box point is feasible — yet both return NO incumbent while
+    SCIP solves them instantly. When ON, the root evaluates a handful of trivial
+    candidates (origin projected into the box, box-center, all-lb, all-ub), verifies
+    each against the true constraints, and injects the best VERIFIED-feasible one.
+    Primal-only: it only ever seeds a feasible incumbent (and only when none exists
+    yet), so the dual bound / certificate are untouched. Gated to pure-continuous
+    models (a trivial point need not be integer-feasible)."""
+    return os.environ.get("DISCOPT_TRIVIAL_PRIMAL", "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+
+
 # #282 iterate-root-OBBT-to-convergence (flag-gated, default OFF). The root OBBT
 # over the McCormick LP already iterates and rebuilds the envelope on the
 # tightened box each sweep (``obbt_tighten_root``), but at the default
@@ -6188,6 +6210,44 @@ def solve_model(
             f"and MIQCQP models only; "
             f"classified this model as {problem_class.value!r}."
         )
+
+    # #827: trivial-point primal seed. When no warm start is given, seed a feasible
+    # OBVIOUS point (ball_mk2 — 30 integer vars in [-1,1] — has its optimum at the
+    # origin, which satisfies its single ball constraint) as ``initial_point``; the
+    # sub-solvers re-verify BOTH constraint feasibility AND integer feasibility
+    # before injecting it as an incumbent, closing the "no incumbent" gap on models
+    # whose primal never samples the obvious feasible point. The candidates (origin,
+    # box-center, bound corners) are integer-feasible whenever the integer bounds
+    # are integral (as in ball_mk2); a non-integer candidate is simply filtered by
+    # the sub-solver's ``ws_int_feas`` check (no harm). Sound: verified here AND
+    # re-verified downstream before injection, so bound/certificate are untouched.
+    if _trivial_primal_enabled() and initial_point is None:
+        try:
+            from discopt._jax.nlp_evaluator import cached_evaluator
+            from discopt._jax.primal_heuristics import _check_constraint_feasibility as _tp_cc
+
+            _tp_ev = cached_evaluator(model)
+            _tp_lb, _tp_ub = (np.asarray(b, dtype=np.float64) for b in _tp_ev.variable_bounds)
+            _tp_lo = np.clip(_tp_lb, -_SPC, _SPC)
+            _tp_hi = np.clip(_tp_ub, -_SPC, _SPC)
+            _tp_best = None
+            for _tp_x in (
+                np.clip(np.zeros_like(_tp_lb), _tp_lb, _tp_ub),  # origin into the box
+                0.5 * (_tp_lo + _tp_hi),  # box center
+                _tp_lo,  # all lower bounds
+                _tp_hi,  # all upper bounds
+            ):
+                _tp_x = np.asarray(_tp_x, dtype=np.float64)
+                if not np.all(np.isfinite(_tp_x)) or not _tp_cc(_tp_ev, _tp_x, tol=1e-6):
+                    continue
+                _tp_o = float(_tp_ev.evaluate_objective(_tp_x))
+                if np.isfinite(_tp_o) and (_tp_best is None or _tp_o < _tp_best[1]):
+                    _tp_best = (_tp_x, _tp_o)
+            if _tp_best is not None:
+                initial_point = _tp_best[0]
+                logger.info("Trivial-point primal seed as initial_point (obj=%.6g)", _tp_best[1])
+        except Exception as _tp_exc:
+            logger.debug("Trivial-point primal seed failed: %s", _tp_exc)
 
     _pure_continuous_force_spatial = False
     if problem_class is not None:
