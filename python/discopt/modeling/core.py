@@ -231,6 +231,69 @@ class Expression:
     def __getitem__(self, idx):
         return IndexExpression(self, idx)
 
+    # ── Shape / length / iteration for array-valued expressions (issue #816) ──
+
+    @property
+    def shape(self) -> tuple[int, ...]:
+        """Static numpy-style shape of this expression.
+
+        Inferred from the operands for the nodes whose shape follows
+        unambiguously from numpy broadcasting: leaf ``Variable``/``Parameter``/
+        ``Constant``, their element-wise ``+ - * / **`` / ``neg`` / ``abs``
+        compositions, indexing/slicing, and element-wise function calls
+        (``exp``, ``sqrt``, ``sin``, …). Raises :class:`AttributeError` when the
+        shape is not statically known (reductions, matmul, custom calls, …) so
+        that ``getattr(expr, "shape", default)`` and ``hasattr(expr, "shape")``
+        keep their pre-existing behaviour for shape-unknown nodes.
+        """
+        s = _known_shape(self)
+        if s is None:
+            raise AttributeError(f"{type(self).__name__} has no statically known shape")
+        return s
+
+    @shape.setter
+    def shape(self, value: tuple[int, ...]) -> None:
+        # Leaf nodes (Variable/Parameter) store their declared shape here; the
+        # getter then surfaces it through the same ``_known_shape`` path used for
+        # composite nodes, keeping a single source of truth.
+        self._shape = value
+
+    def __len__(self) -> int:
+        """Length along the leading axis (``shape[0]``) for array expressions.
+
+        Raises ``TypeError`` for scalar or shape-unknown expressions, matching
+        numpy's behaviour for 0-d arrays. Defining ``__len__`` alongside
+        ``__iter__`` stops Python from falling back to the legacy
+        sequence-iteration protocol that — because out-of-range indexing now
+        raises ``IndexError`` — used to loop forever (issue #816).
+        """
+        s = _known_shape(self)
+        if s is None:
+            raise TypeError(
+                f"object of type '{type(self).__name__}' has no len(): its "
+                "shape is not statically known"
+            )
+        if len(s) == 0:
+            raise TypeError(f"len() of unsized scalar {type(self).__name__}")
+        return int(s[0])
+
+    def __iter__(self) -> "Iterator[Expression]":
+        """Yield the leading-axis elements (``expr[0]``, ``expr[1]``, …).
+
+        Raises ``TypeError`` for scalar or shape-unknown expressions instead of
+        hanging, so ``list(x)``, ``sum(x)``, ``np.array(x)`` and unpacking
+        behave like numpy for shaped variables (issue #816).
+        """
+        s = _known_shape(self)
+        if s is None:
+            raise TypeError(
+                f"cannot iterate over {type(self).__name__} with unknown shape; "
+                "index it explicitly instead"
+            )
+        if len(s) == 0:
+            raise TypeError(f"cannot iterate over scalar {type(self).__name__}")
+        return (self[i] for i in range(int(s[0])))
+
     # ── Matrix operations ──
 
     def __matmul__(self, other):
@@ -324,12 +387,54 @@ class Variable(Expression):
         return f"{self.name}{list(self.shape)}"
 
 
+def _index_result_shape(base_shape: tuple[int, ...], index) -> Optional[tuple[int, ...]]:
+    """Numpy result shape of ``base_shape[index]``, or ``None`` when static
+    inference is not possible (issue #816).
+
+    Builds a zero-storage broadcast *view* of the base shape (no allocation, even
+    for large variables) and applies the *same* index the JAX compiler applies at
+    evaluation time (``base[index]`` — see ``dag_compiler._compile_node``). A
+    genuine out-of-range integer index therefore raises ``IndexError`` here, at
+    build time, instead of silently constructing an ``IndexExpression`` that would
+    index out of bounds during the solve. An index whose result shape cannot be
+    determined statically (symbolic/exotic index objects) yields ``None`` =
+    "unknown" — never a false rejection.
+    """
+    try:
+        probe = np.broadcast_to(np.zeros((), dtype=np.int8), base_shape)
+    except Exception:
+        return None
+    try:
+        return tuple(int(d) for d in np.shape(probe[index]))
+    except IndexError:
+        # Out-of-range index: a real error the user should see now, not a silent
+        # expression that breaks at evaluation time (issue #816).
+        raise
+    except Exception:
+        return None
+
+
 class IndexExpression(Expression):
     """Result of indexing into an array variable: x[i] or x[0, 1]."""
 
     def __init__(self, base: Expression, index):
         self.base = base
         self.index = index
+        # Static shape inference + out-of-bounds guard (issue #816). When the
+        # base is a *shaped* (ndim >= 1) node, compute the numpy result shape;
+        # this also raises ``IndexError`` for a genuinely out-of-range integer
+        # index rather than building a silently-invalid node. A scalar base
+        # (shape ``()``) is left untouched: indexing a scalar with ``x[0]`` is a
+        # pre-existing leniency in the DSL (the LLM builder and callers that
+        # treat a size-1/scalar variable as indexable rely on it), and #816 is
+        # about array indexing, so we do not change scalar behaviour here. An
+        # unknown base shape is likewise not checkable — conservative, never a
+        # false rejection.
+        base_shape = _known_shape(base)
+        if base_shape is not None and len(base_shape) >= 1:
+            self._shape = _index_result_shape(base_shape, index)
+        else:
+            self._shape = None
 
     def __repr__(self):
         return f"{self.base}[{self.index}]"
@@ -339,10 +444,11 @@ def _known_shape(node: "Expression") -> Optional[tuple[int, ...]]:
     """Best-effort static shape of an expression, or ``None`` when unknown (M8).
 
     Deliberately *conservative*: it returns a concrete shape only for the nodes
-    whose shape follows unambiguously from numpy broadcast rules — leaves
-    (``Variable``/``Constant``/``Parameter``) and element-wise ``BinaryOp`` /
-    ``UnaryOp`` compositions thereof (whose shape is cached at construction). For
-    every other node (indexing, matmul, reductions, function calls, custom calls,
+    whose shape follows unambiguously from numpy rules — leaves
+    (``Variable``/``Constant``/``Parameter``), element-wise ``BinaryOp`` /
+    ``UnaryOp`` compositions, indexing/slicing (``IndexExpression``), and
+    element-wise ``FunctionCall`` (all of which cache their shape at
+    construction). For every other node (matmul, reductions, custom calls,
     indexed containers, …) it returns ``None`` = "don't know", so the caller must
     treat ``None`` as "cannot check" and never raise. This guarantees the M8
     shape guard only ever fires on a *provably* incompatible pair and never
@@ -351,13 +457,11 @@ def _known_shape(node: "Expression") -> Optional[tuple[int, ...]]:
     cached = getattr(node, "_shape", _UNSET_SHAPE)
     if cached is not _UNSET_SHAPE:
         # ``cached`` is either a concrete shape tuple or ``None`` (computed-unknown).
+        # Variable/Parameter store their declared shape here via the ``shape``
+        # setter, so they are covered by this branch too.
         return None if cached is None else tuple(cached)
-    if isinstance(node, Variable):
-        return node.shape
     if isinstance(node, Constant):
         return tuple(node.value.shape)
-    if isinstance(node, Parameter):
-        return node.shape
     return None
 
 
@@ -430,12 +534,64 @@ class UnaryOp(Expression):
         return f"{self.op}({self.operand})"
 
 
+# Named functions that are element-wise: their output shape is the numpy
+# broadcast of their argument shapes. Reductions (``prod``) and any other
+# non-element-wise name are deliberately excluded so their shape is reported as
+# unknown (``None``) rather than mis-inferred (issue #816). Kept in sync with the
+# ``FunctionCall``-producing helpers below and the JAX/Rust evaluators, which
+# apply these functions element-wise.
+_ELEMENTWISE_FUNCS: frozenset = frozenset(
+    {
+        "exp",
+        "log",
+        "log2",
+        "log10",
+        "log1p",
+        "sqrt",
+        "sin",
+        "cos",
+        "tan",
+        "atan",
+        "asin",
+        "acos",
+        "sinh",
+        "cosh",
+        "asinh",
+        "acosh",
+        "atanh",
+        "erf",
+        "tanh",
+        "sigmoid",
+        "softplus",
+        "abs",
+        "sign",
+        "min",
+        "max",
+    }
+)
+
+
 class FunctionCall(Expression):
     """Named function call: exp(x), log(x), sin(x), etc."""
 
     def __init__(self, func_name: str, *args: Expression):
         self.func_name = func_name
         self.args = args
+        # Element-wise functions preserve / broadcast their argument shapes, so
+        # cache the result shape to let it flow through subsequent element-wise
+        # ops (issue #816). Non-element-wise names (e.g. the reduction ``prod``)
+        # keep an unknown shape.
+        if func_name in _ELEMENTWISE_FUNCS:
+            shp: Optional[tuple[int, ...]] = ()
+            for a in args:
+                s = _known_shape(a)
+                if s is None:
+                    shp = None
+                    break
+                shp = _broadcast_shapes(func_name, shp, s)
+            self._shape = shp
+        else:
+            self._shape = None
 
     def __repr__(self):
         arg_str = ", ".join(str(a) for a in self.args)
@@ -1170,6 +1326,74 @@ def _multiply_terms(terms: list["Expression"]) -> Expression:
     for t in terms[1:]:
         result = result * t
     return result
+
+
+def _to_expr_object_array(a) -> np.ndarray:
+    """Coerce *a* into a numpy object ndarray of scalar expressions (issue #816).
+
+    Accepts a shaped :class:`Expression` (its scalar elements are pulled out by
+    indexing along every axis), an existing ndarray, or a (possibly nested)
+    list/tuple of expressions/numbers. Used by :func:`concatenate` / :func:`stack`
+    to assemble a vector from pieces without adding a new DAG node type — each
+    element remains an ordinary scalar expression the solver already handles.
+    """
+    if isinstance(a, np.ndarray):
+        return a if a.dtype == object else a.astype(object)
+    if isinstance(a, Expression):
+        s = _known_shape(a)
+        if s is None:
+            raise TypeError(
+                "concatenate()/stack() need expressions with a statically known "
+                f"shape; got a {type(a).__name__} whose shape is not known. Index "
+                "the pieces explicitly, or assemble the array from scalars."
+            )
+        out = np.empty(s, dtype=object)
+        if s == ():
+            out[()] = a
+            return out
+        for idx in np.ndindex(s):
+            out[idx] = a[idx]
+        return out
+    if isinstance(a, (list, tuple)):
+        subs = [_to_expr_object_array(x) for x in a]
+        if subs and all(sub.ndim == 0 for sub in subs):
+            out = np.empty(len(subs), dtype=object)
+            for i, sub in enumerate(subs):
+                out[i] = sub[()]
+            return out
+        return np.stack(subs, axis=0) if subs else np.empty(0, dtype=object)
+    # Plain scalar / number.
+    out = np.empty((), dtype=object)
+    out[()] = a
+    return out
+
+
+def concatenate(arrays: Sequence, axis: int = 0) -> np.ndarray:
+    """Join a sequence of array-valued expressions along an existing axis.
+
+    Mirrors :func:`numpy.concatenate`. Each entry of *arrays* may be a shaped
+    expression (e.g. ``x[:-1]``), an object ndarray of scalar expressions, or a
+    (nested) list/tuple of scalar expressions/numbers. The result is a numpy
+    object ndarray whose entries are scalar expressions, so it supports indexing,
+    iteration, ``.shape`` and element-wise arithmetic — exactly what the
+    method-of-lines "boundary value, interior values, boundary value" assembly
+    pattern needs (issue #816).
+
+    Note: to concatenate a scalar boundary value, wrap it in a length-1 sequence
+    (``[p_left]``) so it has a leading axis to join along, as numpy requires.
+    """
+    parts = [_to_expr_object_array(a) for a in arrays]
+    return np.concatenate(parts, axis=axis)
+
+
+def stack(arrays: Sequence, axis: int = 0) -> np.ndarray:
+    """Stack a sequence of array-valued expressions along a new axis.
+
+    Mirrors :func:`numpy.stack`; see :func:`concatenate` for the accepted element
+    forms and the object-ndarray result contract (issue #816).
+    """
+    parts = [_to_expr_object_array(a) for a in arrays]
+    return np.stack(parts, axis=axis)
 
 
 def norm(x: Expression, ord: Union[int, float, str] = 2) -> Expression:

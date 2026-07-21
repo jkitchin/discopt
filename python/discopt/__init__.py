@@ -155,6 +155,9 @@ from discopt.modeling import (
     VarType as VarType,
 )
 from discopt.modeling import (
+    concatenate as concatenate,
+)
+from discopt.modeling import (
     cos as cos,
 )
 from discopt.modeling import (
@@ -168,6 +171,9 @@ from discopt.modeling import (
 )
 from discopt.modeling import (
     sqrt as sqrt,
+)
+from discopt.modeling import (
+    stack as stack,
 )
 from discopt.modeling import (
     tan as tan,
