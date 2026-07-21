@@ -33,6 +33,20 @@ def _has_highs() -> bool:
         return False
 
 
+def _has_scip() -> bool:
+    try:
+        import pyscipopt  # noqa: F401
+
+        return True
+    except ImportError:
+        return False
+
+
+def _spec(name):
+    (spec,) = gr.discover_models(include=[name])
+    return spec
+
+
 # ── discovery ──────────────────────────────────────────────────────────────
 
 
@@ -123,8 +137,50 @@ def test_max_variables_skips_large_models():
 
 
 def test_reference_optima_seed_is_sane():
+    import math
+
     ref = gr.reference_optima()
     assert ref.get("jobshop") == pytest.approx(11.0)
+    # SCIP-certified nonlinear seeds are present and finite.
+    for name in ("positioning", "cstr", "small_batch", "syngas", "water_network"):
+        assert name in ref
+        assert math.isfinite(ref[name])
+    assert ref["cstr"] == pytest.approx(3.0543118, abs=1e-4)
+    # Models SCIP did NOT prove within budget must not be seeded.
+    for unproven in ("methanol", "batch_processing", "gdp_col"):
+        assert unproven not in ref
+
+
+# ── SCIP oracle (nonlinear subset) ──────────────────────────────────────────
+
+
+@pytest.mark.skipif(not _has_scip(), reason="pyscipopt (SCIP) not installed")
+def test_scip_certifies_nonlinear_optimum():
+    """SCIP returns the certified optimum for a small nonlinear GDP (ex1_linan_2023)."""
+    obj = gr._solve_with_scip(_spec("ex1_linan_2023"), method="bigm", time_limit=60)
+    assert obj is not None
+    assert obj == pytest.approx(-0.9996, abs=1e-3)
+
+
+@pytest.mark.skipif(not _has_scip(), reason="pyscipopt (SCIP) not installed")
+def test_scip_declines_when_not_proven():
+    """A time budget too small to prove optimality yields no oracle value, not a guess."""
+    # 0s wall budget -> SCIP cannot certify -> None (never a bare incumbent).
+    obj = gr._solve_with_scip(_spec("cstr"), method="bigm", time_limit=0.0)
+    assert obj is None
+
+
+@pytest.mark.correctness
+@pytest.mark.slow
+@pytest.mark.skipif(not _has_scip(), reason="pyscipopt (SCIP) not installed")
+def test_scip_is_oracle_for_nonlinear_end_to_end():
+    """A nonlinear model gets a SCIP oracle, and discopt stays sound against it."""
+    run = gr.solve_model(_spec("ex1_linan_2023"), method="bigm", time_limit=60, oracle=True)
+    assert run.is_linear is False
+    assert run.oracle_source == "scip"
+    assert run.oracle_objective == pytest.approx(-0.9996, abs=1e-3)
+    assert run.false_optimum is False, run.note
+    assert run.bound_crosses is False, run.note
 
 
 # ── soundness assessment (solver-free, deterministic) ───────────────────────

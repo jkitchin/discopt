@@ -81,23 +81,28 @@ The CLI exits nonzero if any run trips a soundness flag, so it can gate CI.
 ## Correctness strategy (the non-negotiable part)
 
 Per `CLAUDE.md` §1 the product is the *certificate*, so a benchmark that only
-measures speed is not enough — every run is checked for soundness:
+measures speed is not enough — every run is checked against an independent oracle,
+selected most-trusted-first:
 
-- **Linear GDP models** → the reformulation is an MILP, and **HiGHS** (`appsi_highs`)
-  is used as an exact, independent oracle. discopt's certified objective must match.
-- **Nonlinear GDP models** → HiGHS is *not* a valid oracle. We fall back to (a) a
-  small table of verified reference optima (`reference_optima()`) and (b) a
-  bigm-vs-hull self-consistency check. Seeding a reference value requires
-  independent verification first (an external global solver, or agreement across
-  reformulations plus the GDPlib documentation) — never the solver-under-test alone.
-- Two flags are raised and surfaced loudly, never masked: a **false optimum**
-  (`OPTIMAL` but objective disagrees with the oracle) and a **bound crossing** (dual
-  bound on the wrong side of the oracle). Either is a hard failure — `incorrect_count`
-  must stay 0.
+1. **HiGHS** (`appsi_highs`) on the **linear** subset — the reformulation is an MILP,
+   so HiGHS is an exact, independent oracle. discopt's certified objective must match.
+2. **SCIP** (`pyscipopt`, which bundles SCIP) on the **nonlinear** subset — a global
+   MINLP solver reading the *same* AMPL `.nl` discopt solves. SCIP's objective is
+   used **only when SCIP proves global optimality** (status `optimal`, gap ≈ 0); an
+   unconverged SCIP run yields an incumbent/bound, never a certified optimum, so it
+   is discarded rather than trusted.
+3. **`reference_optima()`** — the SCIP-certified values, baked in as regression
+   anchors and used offline / when `pyscipopt` is absent.
 
-An external global solver (BARON / SCIP / Couenne), where licensed/installed, is
-the natural oracle to add for the nonlinear subset; the runner's oracle hook is
-structured to accept one.
+Three flags are raised and surfaced loudly, never masked:
+- **impossible incumbent** — *any* feasible incumbent (even `FEASIBLE`, not
+  `OPTIMAL`) beating the oracle optimum: it violates a constraint (false primal, cf.
+  #815). The most dangerous case, and it does not require an `OPTIMAL` claim.
+- **false optimum** — `OPTIMAL` but the certified objective disagrees with the oracle.
+- **bound crossing** — the dual bound sits on the wrong side of the optimum.
+
+Any of these is a hard failure — `incorrect_count` must stay 0, and the CLI exits
+nonzero. BARON / Couenne could be added the same way SCIP was, behind the oracle hook.
 
 ## Model inventory (source install, this environment)
 
@@ -129,22 +134,50 @@ Sizes are the *reformulated* (`gdp.bigm`) model; `class` is discopt-relevant
 | kaibel, mod_hens | — | — | ERR | build needs ipopt |
 | reverse_electrodialysis | — | — | ERR | build needs GAMS |
 
+## discopt vs SCIP (12 small models, big-M, 60 s each)
+
+Both solvers read the **same** big-M `.nl`, so this is a fair head-to-head. SCIP 10
+(via `pyscipopt`) is the oracle; its proven optima seed `reference_optima()`.
+
+| model | discopt status | discopt obj | SCIP status | SCIP obj (opt) |
+|---|---|---:|---|---:|
+| jobshop | optimal | 11.0 | optimal | 11.0 |
+| ex1_linan_2023 | optimal | −0.9996 | optimal | −0.9996 |
+| positioning | feasible | 2570.62 | optimal | −8.06414 |
+| cstr | feasible | 4.06191 | optimal | 3.05431 |
+| small_batch | time_limit | — | optimal | 167427.65 |
+| spectralog | time_limit | — | optimal | 12.0893 |
+| syngas | time_limit | — | optimal | 4669.02 |
+| water_network | time_limit | — | optimal | 348337.04 |
+| modprodnet | time_limit | — | optimal | 3592.92 |
+| methanol | time_limit | — | timelimit | −1793.43 (gap ~130%) |
+| batch_processing | time_limit | — | timelimit | 679365 (gap 3%) |
+| gdp_col | time_limit | — | timelimit | 20355.1 (gap ~110%) |
+
+**SCIP: 9/12 proven optimal** (all ≤ 41 s). **discopt: 2/12 optimal, 2 loose-feasible,
+8 no incumbent.** The three SCIP left unproven are *not* seeded.
+
 ## Findings & limitations
 
-- **The bridge works and is sound where checkable.** `jobshop` solves to the
-  certified optimum via both reformulations and matches HiGHS exactly.
+- **Sound, but far slower/weaker than SCIP on this set.** Every discopt result is on
+  the correct side of SCIP's bound — where both prove optimality they agree to the
+  digit; discopt's feasible incumbents (positioning, cstr) sit *above* the min optimum
+  as a valid incumbent must. **Zero soundness violations.** This is the
+  certification-gap story, quantified.
 - **Nonlinear GDPlib instances are genuinely hard for discopt today** and are good
   stress material, not CI fodder: several hit the time limit and overrun it (the
   known [#814](https://github.com/jkitchin/discopt/issues/814) time-limit-overrun
-  behavior — e.g. `small_batch` ran well past a 5 s budget). Use conservative limits
-  and expect `feasible`/`time_limit` rather than `optimal` on the nonlinear corpus.
-- **Only the linear subset gets an independent oracle here.** Verifying the
-  nonlinear subset needs a global MINLP solver; that's the main follow-up.
+  behavior — e.g. `small_batch` ran well past a 5 s budget; SCIP by contrast stops
+  cleanly at its limit). Expect `feasible`/`time_limit`, not `optimal`, on the
+  nonlinear corpus.
+- **The oracle gap is now closed for the small nonlinear subset** via SCIP; the
+  larger models (biofuel, stranded_gas, grid) still need a longer SCIP budget to
+  certify.
 
 ## Suggested next steps
 
-1. Add a global-MINLP oracle (BARON/SCIP/Couenne) so the nonlinear subset gets
-   independent objective verification, then seed `reference_optima()` from it.
+1. Extend the SCIP-certified `reference_optima()` to the larger models with a longer
+   budget; optionally add BARON/Couenne behind the same oracle hook for redundancy.
 2. Wire a curated `gdplib_small` suite into the nightly correctness lane (linear
    models + short-limit nonlinear feasibility), gating on `incorrect_count == 0`.
 3. Optionally add a direct **Pyomo GDP → discopt native GDP** converter so discopt's

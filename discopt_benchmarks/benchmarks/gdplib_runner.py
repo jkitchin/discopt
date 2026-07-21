@@ -18,11 +18,13 @@ the MINLPLib and CUTEst runners.
 
 Correctness (the non-negotiable gate, per ``CLAUDE.md``): where an independent
 oracle exists we cross-check discopt's certified objective against it and count
-any disagreement as *incorrect*. Most GDPlib models are **nonlinear**, for which
-HiGHS is not a valid oracle; for those we fall back to (a) verified reference
-optima from :func:`reference_optima` and (b) a bigm-vs-hull self-consistency check.
-A discopt objective *strictly better* than a known optimum, or a dual bound on the
-wrong side of it, is a soundness violation and is surfaced loudly — never masked.
+any disagreement as *incorrect*. Oracles, most-trusted first: **HiGHS** for the
+linear (MILP) subset (exact); **SCIP** (``pyscipopt``) for the nonlinear subset,
+but only when SCIP proves global optimality; and a table of SCIP-certified
+:func:`reference_optima` as an offline fallback. A discopt objective *strictly
+better* than the oracle optimum (an infeasible incumbent / false primal), a
+claimed-optimal objective that disagrees, or a dual bound on the wrong side of the
+optimum, is a soundness violation and is surfaced loudly — never masked.
 
 Requirements (``pip install discopt-benchmarks[gdplib]``): ``pyomo`` and
 ``gdplib``. Install ``gdplib`` **from source** — the PyPI wheel omits the model
@@ -31,7 +33,9 @@ data files (``.dat`` / ``.xlsx`` / ``.txt``), so most builders raise
 
     pip install "gdplib @ git+https://github.com/SECQUOIA/gdplib.git"
 
-An independent oracle for the *linear* GDP subset needs ``highspy`` (``appsi_highs``).
+The oracles are optional: the linear subset needs ``highspy`` (``appsi_highs``);
+the nonlinear subset needs ``pyscipopt`` (bundles SCIP). Absent both, checks fall
+back to the :func:`reference_optima` table.
 """
 
 from __future__ import annotations
@@ -176,10 +180,24 @@ def reference_optima() -> dict[str, float]:
     GDPlib documentation). Used by :func:`assess_correctness` as the oracle for
     models HiGHS cannot check (nonlinear). Extend this as values are verified — a
     seed here is a *regression anchor*, not a target to tune toward.
+
+    All entries below were certified by **SCIP 10** (``gap = 0``) on the big-M
+    reformulation, and the optimum of a GDP is method-independent, so the same
+    value anchors both big-M and hull. Models where SCIP did *not* prove optimality
+    within its budget (methanol, batch_processing, gdp_col) are deliberately absent
+    — an unproven incumbent is not a certified optimum and must never seed an oracle.
     """
     return {
-        # jobshop: linear GDP, discopt bigm/hull both certify 11.0, HiGHS agrees.
+        # jobshop is also HiGHS-checkable (linear); the rest are nonlinear GDPs.
         "jobshop": 11.0,
+        "ex1_linan_2023": -0.9995999999999999,
+        "positioning": -8.064136166293226,
+        "small_batch": 167427.6515668371,
+        "cstr": 3.0543118059526293,
+        "spectralog": 12.089261322767793,
+        "syngas": 4669.0234827946,
+        "water_network": 348337.03671302047,
+        "modprodnet": 3592.924373781839,
     }
 
 
@@ -261,7 +279,7 @@ class ModelRun:
     is_linear: bool
     minimize: bool
     oracle_objective: float | None = None
-    oracle_source: str | None = None  # "highs" | "reference" | None
+    oracle_source: str | None = None  # "highs" | "scip" | "reference" | None
     # Soundness flags — any True is a hard failure (never mask these).
     false_optimum: bool = False  # certified optimal but disagrees with oracle
     bound_crosses: bool = False  # dual bound on the wrong side of the oracle
@@ -393,9 +411,17 @@ def _node_count(res) -> int:
 def _attach_oracle(run: ModelRun, spec: GDPModelSpec, method: str, time_limit: float) -> None:
     """Populate ``run.oracle_objective`` / ``oracle_source``.
 
-    Priority: (1) HiGHS for a linear reformulation (exact, independent); else
-    (2) a verified reference optimum keyed by model name. HiGHS is *only* sound on
-    a linear model, so it is never used on a nonlinear one.
+    Oracle priority, most-trusted first:
+
+    1. **HiGHS** on a *linear* reformulation — exact, independent, cheap. HiGHS
+       cannot handle a nonlinear model, so it is used only when ``is_linear``.
+    2. **SCIP** (a global MINLP solver, via ``pyscipopt``) — a valid oracle for the
+       nonlinear subset, but *only when it proves global optimality* (gap ≈ 0). An
+       unproven SCIP incumbent is a mere upper bound, never a certified optimum, so
+       it is discarded rather than used as the equality oracle.
+    3. **Verified reference optimum** keyed by model name (see
+       :func:`reference_optima`) — the SCIP-certified values, used offline / when
+       ``pyscipopt`` is absent.
     """
     if run.is_linear:
         obj = _solve_with_highs(spec, method, time_limit)
@@ -403,6 +429,11 @@ def _attach_oracle(run: ModelRun, spec: GDPModelSpec, method: str, time_limit: f
             run.oracle_objective = obj
             run.oracle_source = "highs"
             return
+    scip_obj = _solve_with_scip(spec, method, time_limit)
+    if scip_obj is not None:
+        run.oracle_objective = scip_obj
+        run.oracle_source = "scip"
+        return
     ref = reference_optima().get(spec.name)
     if ref is not None:
         run.oracle_objective = ref
@@ -422,6 +453,51 @@ def _solve_with_highs(spec: GDPModelSpec, method: str, time_limit: float) -> flo
         TransformationFactory(f"gdp.{method}").apply_to(m)
         solver.solve(m)
         return _objective_value(m)
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _solve_with_scip(spec: GDPModelSpec, method: str, time_limit: float) -> float | None:
+    """Solve the reformulation with SCIP (``pyscipopt``) as a global oracle.
+
+    Returns SCIP's objective **only if SCIP proved global optimality** within
+    ``time_limit`` (status ``optimal`` and gap ≈ 0); otherwise ``None`` — an
+    unconverged SCIP run yields only an incumbent/bound, not a certified optimum.
+    The reformulated Pyomo model is handed to SCIP through the same AMPL ``.nl``
+    encoding the discopt bridge uses, so both solvers see identical input.
+    """
+    import os
+    import tempfile
+
+    from pyomo.core import TransformationFactory
+    from pyomo.repn.plugins.nl_writer import NLWriter
+
+    try:
+        import pyscipopt
+    except ImportError:
+        return None
+
+    try:
+        m = spec.builder()
+        TransformationFactory(f"gdp.{method}").apply_to(m)
+        with tempfile.TemporaryDirectory(prefix="gdplib_scip_") as d:
+            nl_path = os.path.join(d, "model.nl")
+            with open(nl_path, "w") as stream:
+                NLWriter().write(
+                    m,
+                    stream,
+                    linear_presolve=False,
+                    scale_model=False,
+                    skip_trivial_constraints=False,
+                )
+            sm = pyscipopt.Model()
+            sm.hideOutput()
+            sm.setParam("limits/time", float(time_limit))
+            sm.readProblem(nl_path)
+            sm.optimize()
+            if sm.getStatus() != "optimal" or abs(sm.getGap()) > 1e-6:
+                return None  # not certified -> not a usable equality oracle
+            return float(sm.getObjVal())
     except Exception:  # noqa: BLE001
         return None
 
@@ -510,7 +586,11 @@ def _print_run(run: ModelRun) -> None:
     if run.false_optimum or run.bound_crosses:
         flag = "  ✗ SOUNDNESS"
     elif run.oracle_source and r.is_solved:
-        flag = f"  ✓ vs {run.oracle_source}"
+        flag = f"  ✓ vs {run.oracle_source} ({run.oracle_objective:.6g})"
+    elif run.oracle_source and r.is_feasible:
+        # Feasible but not proven optimal: show the certified optimum + the gap
+        # to it, so a loose incumbent is visible (and its soundness is confirmed).
+        flag = f"  ~ {run.oracle_source} opt={run.oracle_objective:.6g}"
     line = (
         f"  {run.name:42s} {r.status.value:11s} obj={obj:>12s} "
         f"nodes={r.node_count:>7d} {r.wall_time:6.1f}s{flag}"

@@ -126,9 +126,11 @@ python -m benchmarks.gdplib_runner --max-variables 500 --output reports/gdplib.j
 ```
 
 The runner reformulates each GDP (`gdp.bigm` / `gdp.hull`) and solves it through the
-`discopt.pyomo` bridge, cross-checking the linear subset against HiGHS. See
+`discopt.pyomo` bridge, cross-checking every run against an independent oracle:
+**HiGHS** for the linear subset and **SCIP** (`pyscipopt`) for the nonlinear subset
+(used only when SCIP proves optimality). See
 [`docs/dev/gdplib-benchmarking.md`](../docs/dev/gdplib-benchmarking.md) for the full
-recipe, the model inventory, and the correctness strategy.
+recipe, the model inventory, the discopt-vs-SCIP results, and the correctness strategy.
 
 ## Phase Gate Criteria
 
