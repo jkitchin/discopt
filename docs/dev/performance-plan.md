@@ -1313,3 +1313,33 @@ Stage-1 validation patch (route `diving` through a per-model evaluator cache):
 > arbitrary cap. Reproduction: the `_flatten_sum` neg-distribution monkeypatch +
 > `bootstrap_finite_bounds`/`tighten_nonlinear_bounds`/`MccormickLPRelaxer.solve_at_node`
 > probes in the #727 sub-cluster-C session.
+
+## 11. Root-relaxation fallback wall overrun (#832/#814): the residual is the Python DCP build, not the Rust LP
+
+> **Diagnosis + falsification (2026-07-21, issue #832).** #832 was filed (as a
+> #814 residual) claiming the `gastrans582` root-relaxation overrun is a Rust LP
+> setup/factorization that ignores `SimplexOptions::deadline` before the first
+> pivot. The §4 entry experiment on current `main` (post-#831) **falsified the
+> premise.** Direct call `_root_relaxation_lower_bound(gastrans582_mild11,
+> budget=3.0s)`: `bound=None  total_wall=15.46s  build_time=14.31s (3 builds)
+> Rust_LP=1.15s → 5.2× overrun`. Every faulthandler sample lands in
+> `build_milp_relaxation` (Python DCP convexity classification), and the Rust
+> `DISCOPT_PROFILE` shows the basis factorize at **2.77 ms** (`DualPrepare`) with the
+> pivot loop already deadline-polled (`DualPivotLoop` 1.07 s). Threading a deadline
+> into the Rust LU would fix **0.0 s** of the 14.3 s — the #727 RLT trap
+> (mechanism validated only against a mis-attributed proxy). Reproduction:
+> `scratchpad/repro_832.py` (localization) and the base-build split showing the base
+> build alone is ~10.5 s and un-skippable (feeds `_objective_bound_valid`),
+> consistent across variants (mild11 10.34 s, cold13 10.10 s → the class).
+>
+> **Fix (Lever 1, measured not predicted).** #694 already deadlines the *separated*
+> build but left its companion base build WHOLE. `DISCOPT_ROOT_BUILD_DEADLINE`
+> (default off, §5 bound-changing) deadlines the base build too, making the whole
+> fallback honor its grant: a truncated base build is a valid **weaker** relaxation
+> (dropped rows only enlarge the feasible set) or trips the existing
+> `_objective_bound_valid` gate to `None` (weaker, never falsified). gastrans582:
+> **15.46 s → 3.56 s (5.2× → 1.2×)**, same `None` outcome — a pure wall win. A static
+> size predictor was rejected as fragile (per-term build cost spans 185 µs–14 ms, so
+> a term-count threshold would falsely skip cheap-but-numerous-term instances); the
+> wall-clock deadline measures reality instead. Graduation gated on the flag-ON-vs-OFF
+> differential panel (`generality_sweep` arm `root_build_deadline`).
