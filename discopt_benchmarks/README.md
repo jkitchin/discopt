@@ -111,6 +111,25 @@ uncontrolled local Python environment for those solver-dependent examples.
 | `subsolver` | LP/NLP subsolver-only benchmarks     | varies    | 300s       |
 | `nightly`   | CI regression suite                  | ~100      | 1800s      |
 
+## GDPlib (Generalized Disjunctive Programming) benchmarks
+
+Benchmark discopt against the [SECQUOIA GDPlib](https://github.com/SECQUOIA/gdplib)
+corpus of Pyomo GDP models. Install the extra (GDPlib **from source** — the PyPI
+wheel omits data files), then use `benchmarks/gdplib_runner.py`:
+
+```bash
+pip install "discopt-benchmarks[gdplib]"      # pyomo + gdplib(source) + highspy
+
+python -m benchmarks.gdplib_runner --list                     # discovered models
+python -m benchmarks.gdplib_runner --models jobshop --methods bigm hull
+python -m benchmarks.gdplib_runner --max-variables 500 --output reports/gdplib.json
+```
+
+The runner reformulates each GDP (`gdp.bigm` / `gdp.hull`) and solves it through the
+`discopt.pyomo` bridge, cross-checking the linear subset against HiGHS. See
+[`docs/dev/gdplib-benchmarking.md`](../docs/dev/gdplib-benchmarking.md) for the full
+recipe, the model inventory, and the correctness strategy.
+
 ## Phase Gate Criteria
 
 Each phase has automated pass/fail criteria defined in `config/benchmarks.toml`.
