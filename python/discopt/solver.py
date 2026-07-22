@@ -14028,10 +14028,51 @@ def _solve_lp_matrix(
             infeasibility_certificate=getattr(result, "infeasibility_certificate", None),
         )
     if result.status == SolveStatus.UNBOUNDED:
+        # #850 Obs 1: an interior-point engine (POUNCE) treats a declared finite
+        # bound whose magnitude is in [1e15, 1e20) as ±infinity — its barrier
+        # cannot condition so huge a finite bound, so it relaxes it to the IPM
+        # sentinel (lp_pounce._FINITE_BOUND_THRESHOLD). The box the IPM actually
+        # solves over is then LARGER than the declared box, and an UNBOUNDED
+        # verdict can be an artifact of that relaxation rather than a property of
+        # the problem AS POSED. The exact simplex, whose infinity threshold is
+        # 1e20, honors such a bound as finite and returns OPTIMAL at the corner —
+        # the sound certificate (e.g. the default continuous box ±9.999e19, which
+        # is deliberately just below 1e20). When any declared bound was relaxed
+        # this way, decline to certify UNBOUNDED and fall through (return None) so
+        # the caller tries the exact simplex, yielding a certificate consistent
+        # with the declared box across every backend. A genuinely unbounded
+        # direction survives: the simplex sees any true ±inf (|b| ≥ 1e20) bound
+        # and reports UNBOUNDED itself.
+        if _declared_box_relaxed_to_ipm_inf(bounds):
+            logger.debug(
+                "%s reported UNBOUNDED but a declared finite bound (|b| in "
+                "[1e15, 1e20)) was relaxed to the IPM infinity; deferring to the "
+                "exact simplex for a certificate consistent with the declared box "
+                "(#850).",
+                engine,
+            )
+            return None
         return SolveResult(status="unbounded", wall_time=wall_time)
     if result.status == SolveStatus.TIME_LIMIT:
         return SolveResult(status="time_limit", wall_time=wall_time)
     return None
+
+
+def _declared_box_relaxed_to_ipm_inf(bounds) -> bool:
+    """True if any declared bound magnitude is in ``[1e15, 1e20)``.
+
+    Such a bound is finite to the exact simplex (whose infinity threshold is
+    ``1e20``) but is relaxed to ``±infinity`` by the interior-point LP engine
+    (``lp_pounce._FINITE_BOUND_THRESHOLD = 1e15``). It is exactly this window
+    that makes the two engines disagree on whether the problem is bounded
+    (issue #850 Obs 1). A bound at or beyond ``1e20`` (or ``±inf``) is genuinely
+    infinite for both engines and is not counted; a bound below ``1e15`` is
+    finite for both.
+    """
+    if not bounds:
+        return False
+    arr = np.abs(np.asarray([(lo, hi) for lo, hi in bounds], dtype=np.float64))
+    return bool(np.any((arr >= 1e15) & (arr < 1e20)))
 
 
 def _solve_qp(model: Model, t_start: float, prefer_pounce: bool = False) -> SolveResult:
@@ -14275,27 +14316,52 @@ def _solve_qcp_gurobi(
     return SolveResult(status="error", wall_time=wall_time, node_count=result.node_count)
 
 
-def _matrix_solution_feasible(x, A_ub, b_ub, A_eq, b_eq, bounds, tol=1e-6) -> bool:
+def _matrix_solution_feasible(x, A_ub, b_ub, A_eq, b_eq, bounds, tol=1e-6, rtol=1e-9) -> bool:
     """Check a matrix-form LP/QP solution against its own constraints.
 
     Engines can mislabel results: HiGHS's QP solver has been observed to
     return a constraint-violating point flagged kOptimal (violation ~7.5 on a
     small random strictly convex QP). A point failing its own constraints is
     never accepted as optimal — the caller falls through to the next engine.
+
+    The per-row test is ``|viol_i| <= tol + rtol*scale_i`` where the row scale
+    ``scale_i = sum_j |A_ij|*|x_j|`` is the row's additive term magnitude — the
+    same combined absolute/relative convention as
+    :func:`discopt._jax.primal_heuristics._check_constraint_feasibility`
+    (discopt's authoritative incumbent-feasibility check). The earlier ``tol *
+    (1 + max|x|)`` scaling used a SINGLE global scale — the largest variable
+    across ALL rows — which on a large-RHS row inflated the tolerance far past
+    discopt's own constraint tolerance: for ``x <= 1e4`` the threshold became
+    ``1e-6 * 1e4 = 1e-2``, so an interior-point primal sitting ``1e-4`` on the
+    infeasible side of the row (POUNCE's fixed Ipopt ``constr_viol_tol`` floor)
+    was accepted as "optimal" — a super-optimal, constraint-infeasible incumbent
+    (issue #850 Obs 3). With the per-row term scale that same point is rejected
+    (threshold ``1e-6 + 1e-9*1e4 ≈ 1.1e-5``) and the caller degrades to the exact
+    simplex, which hits the constraint exactly (parity with ipm/ipopt). ``rtol``
+    is kept extremely tight (1e-9) so only cancellation noise proportional to the
+    row terms is forgiven; a gross mislabel (the ~7.5 HiGHS case) is still caught.
+    A bound row ``lo <= x_i <= hi`` has term scale ``|x_i|`` (unit coefficient).
     """
     x = np.asarray(x, dtype=np.float64)
     if not np.all(np.isfinite(x)):
         return False
-    scale = 1.0 + float(np.max(np.abs(x)))
+    absx = np.abs(x)
     if A_ub is not None and b_ub is not None and len(b_ub):
-        if np.max(np.asarray(A_ub) @ x - np.asarray(b_ub)) > tol * scale:
+        A_ub = np.asarray(A_ub, dtype=np.float64)
+        viol = A_ub @ x - np.asarray(b_ub, dtype=np.float64)
+        row_scale = np.abs(A_ub) @ absx
+        if np.any(viol > tol + rtol * row_scale):
             return False
     if A_eq is not None and b_eq is not None and len(b_eq):
-        if np.max(np.abs(np.asarray(A_eq) @ x - np.asarray(b_eq))) > tol * scale:
+        A_eq = np.asarray(A_eq, dtype=np.float64)
+        viol = np.abs(A_eq @ x - np.asarray(b_eq, dtype=np.float64))
+        row_scale = np.abs(A_eq) @ absx
+        if np.any(viol > tol + rtol * row_scale):
             return False
     if bounds is not None:
         for xi, (lo, hi) in zip(x, bounds):
-            if xi < lo - tol * scale or xi > hi + tol * scale:
+            row_tol = tol + rtol * abs(xi)
+            if xi < lo - row_tol or xi > hi + row_tol:
                 return False
     return True
 
