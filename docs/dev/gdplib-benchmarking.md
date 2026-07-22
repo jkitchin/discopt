@@ -122,22 +122,32 @@ native converter, but every model is checked against an independent optimum.
 ## Correctness strategy (the non-negotiable part)
 
 Per `CLAUDE.md` §1 the product is the *certificate*, so a benchmark that only
-measures speed is not enough — every run is checked against an independent oracle,
-selected most-trusted-first:
+measures speed is not enough — every run is checked against an independent oracle.
+**Every oracle value is feasibility-verified**: it is trusted only when the solver
+*proved* optimality *and* the incumbent it returned, evaluated in the real pyomo
+model, satisfies every constraint (`_max_constraint_violation ≤ tol`, scale-
+normalized). The rationale is exact — a claimed optimum *below* the true optimum is
+a claimed feasible point that isn't feasible — so this is the guard against a
+below-true oracle *masking* a discopt false primal (the hole that let the old
+pyscipopt-`.nl` path certify a false cstr optimum; see the correctness finding
+below). Oracles, most-trusted-first:
 
-1. **HiGHS** (`appsi_highs`) on the **linear** subset — the reformulation is an MILP,
-   so HiGHS is an exact, independent oracle. Used **only when HiGHS proves optimality**
-   (termination `optimal`) within a bounded time limit; an interrupted MILP yields a
-   bare incumbent that, if trusted, would flag discopt's *correct* optimum as an
-   impossible incumbent, so it is discarded (issue #823 review, finding #1 — the
-   HiGHS gate now mirrors the SCIP one). discopt's certified objective must match.
-2. **SCIP** (`pyscipopt`, which bundles SCIP) on the **nonlinear** subset — a global
-   MINLP solver reading the *same* AMPL `.nl` discopt solves. SCIP's objective is
-   used **only when SCIP proves global optimality** (status `optimal`, gap ≈ 0); an
-   unconverged SCIP run yields an incumbent/bound, never a certified optimum, so it
-   is discarded rather than trusted.
-3. **`reference_optima()`** — the SCIP-certified values, baked in as regression
-   anchors and used offline / when `pyscipopt` is absent.
+1. **HiGHS** (`appsi_highs`) on the **linear** subset — an exact, independent MILP
+   oracle. Used only when it proves optimality (termination `optimal`) within a
+   bounded time limit *and* its incumbent is verified feasible; an interrupted MILP
+   yields a bare incumbent that, if trusted, would flag discopt's *correct* optimum
+   as impossible (#823 review finding #1).
+2. **SCIP and BARON via GAMS** on the **nonlinear** subset — global solvers on a
+   *solution-loadable* path, so their incumbents are feasibility-verifiable (unlike
+   pyscipopt reading a hand-written `.nl`, which cannot map its solution back through
+   the `gdp.bigm` indicator aliases). Used only when the gap genuinely closes
+   (`lb == ub` — GAMS can tag a time-limit incumbent `optimal`) *and* the incumbent
+   verifies feasible. When both solvers return a verified optimum they must **agree**;
+   a disagreement is refused loudly (trust neither). One verified solver suffices for
+   soundness. **The pyscipopt-`.nl` path is no longer trusted as an oracle** — it
+   remains only as a raw diagnostic column in `scripts/reeval_gdplib.py`.
+3. **`reference_optima()`** — the BARON-confirmed values, baked in as regression
+   anchors and used offline / when GAMS is absent (e.g. CI).
 
 Three flags are raised and surfaced loudly, never masked:
 - **impossible incumbent** — *any* feasible incumbent (even `FEASIBLE`, not
@@ -214,25 +224,32 @@ a *false* optimum, see below), 3 time-limit incumbents. **BARON** — 10 proven
 soundness violations.** Prior baseline (PR #825) was discopt 2/12 optimal — the perf
 work moved 5 models into proven-optimal and 3 more onto the true optimum.
 
-### ⚠ Correctness finding: a false SCIP optimum on cstr (and a wrong seed it produced)
+### ⚠ Correctness finding (RESOLVED): a false SCIP optimum on cstr, and the oracle hardening it prompted
 
-The `_solve_with_scip` oracle (pyscipopt reading a hand-written `.nl`) reported
-**cstr = 3.0543 with gap 0** — but that is *below* the true minimum. Two independent
-solvers through a solution-loadable path (**BARON and SCIP, both via GAMS**) prove
-**3.0620** with a pyomo-verified feasible point (max constraint violation ~1e-6), and
-discopt's own incumbent agrees at 3.0620. So pyscipopt-via-`.nl` solved a
-mis-encoded/relaxed cstr yet certified it — a classic false optimum. Consequences and
-actions:
+The old pyscipopt-`.nl` oracle reported **cstr = 3.0543 with gap 0** — *below* the
+true minimum. Two independent solvers through a solution-loadable path (**BARON and
+SCIP, both via GAMS**) prove **3.0620** with a pyomo-verified feasible point (max
+constraint violation ~1e-6), and discopt's own incumbent agrees at 3.0620. So
+pyscipopt-via-`.nl` solved a mis-encoded/relaxed cstr yet certified it — a classic
+false optimum. It could not be caught by re-checking the incumbent, because a
+pyscipopt-`.nl` solution does not map back through the `gdp.bigm` indicator-variable
+aliases (verified: the recycle indicators stay unset). What changed:
 
-- `reference_optima()["cstr"]` is corrected `3.0543118 → 3.0620073` (BARON-proven).
-  Every *other* seed was re-verified against BARON's independent proof and confirmed.
+- `reference_optima()["cstr"]` corrected `3.0543118 → 3.0620073` (BARON-proven);
+  every *other* seed was re-verified against BARON's independent proof and confirmed,
+  and `batch_processing` (679365.33) was added (BARON now certifies it).
 - discopt's cstr result was therefore **correct all along** (it found the true 3.0620,
   just didn't prove it) — the earlier "feasible-loose" label was an artifact of the
-  false reference, now fixed.
-- **The `pyscipopt`-`.nl` oracle path can seed a below-true value**, which as a
-  minimize oracle can *mask* a real discopt false primal — a soundness-surveillance
-  hole. Hardening it (use the GAMS path that loads a pyomo-verifiable solution, or
-  cross-check every seed against BARON) is the priority oracle follow-up on #823.
+  false reference.
+- **Oracle hardened (`_attach_oracle`):** the runner now (1) *feasibility-verifies
+  every oracle incumbent* in the real pyomo model — a claimed optimum below the true
+  optimum is exactly a claimed feasible point that isn't feasible, so this is the
+  direct guard against a below-true oracle masking a discopt false primal; (2) routes
+  the nonlinear oracle through the *solution-loadable* GAMS path (SCIP **and** BARON,
+  requiring agreement) instead of the unverifiable pyscipopt-`.nl` path; and (3)
+  requires a genuinely closed gap (`lb == ub`), not GAMS's `optimal` tag. Regression
+  tests: the deterministic feasibility-verifier (accept/reject/unset) runs in CI, and
+  a GAMS-gated test asserts the cstr oracle is now ~3.0620, never the below-true 3.0543.
 
 ## Findings & limitations
 

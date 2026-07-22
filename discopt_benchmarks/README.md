@@ -126,9 +126,11 @@ python -m benchmarks.gdplib_runner --max-variables 500 --output reports/gdplib.j
 ```
 
 The runner reformulates each GDP (`gdp.bigm` / `gdp.hull`) and solves it through the
-`discopt.pyomo` bridge, cross-checking every run against an independent oracle:
-**HiGHS** for the linear subset and **SCIP** (`pyscipopt`) for the nonlinear subset
-(each used only when it *proves* optimality).
+`discopt.pyomo` bridge, cross-checking every run against an independent, **feasibility-
+verified** oracle: **HiGHS** for the linear subset and **SCIP + BARON via GAMS** for
+the nonlinear subset (each trusted only when it *proves* optimality **and** its
+incumbent verifies feasible in the pyomo model; two solvers must agree). Falls back to
+the BARON-confirmed `reference_optima()` table when GAMS is absent.
 
 A curated subset is also rebuilt in discopt's **native** GDP API (no Pyomo bridge),
 exercising discopt's own disjunction machinery and needing only discopt:
@@ -136,7 +138,7 @@ exercising discopt's own disjunction machinery and needing only discopt:
 ```bash
 python -m benchmarks.gdplib_native --list                     # native models
 python -m benchmarks.gdplib_native --time-limit 120           # solve + soundness-check
-python scripts/reeval_gdplib.py                               # discopt-vs-SCIP head-to-head
+REEVAL_BARON=1 python scripts/reeval_gdplib.py               # discopt vs SCIP vs BARON
 ```
 
 See [`docs/dev/gdplib-benchmarking.md`](../docs/dev/gdplib-benchmarking.md) for the
