@@ -27,8 +27,12 @@ dev = [
 gdplib = [
     # GDPlib GDP benchmark corpus (issue #823). Install gdplib FROM SOURCE — the
     # PyPI wheel omits the model data files, so most builders raise
-    # FileNotFoundError. Oracles: highspy (HiGHS) verifies the linear subset,
-    # pyscipopt (bundles SCIP) the nonlinear subset. Both optional at runtime.
+    # FileNotFoundError. Oracles: highspy (HiGHS) verifies the linear subset; the
+    # nonlinear subset is verified by SCIP/BARON via GAMS (an external tool, not
+    # pip-installable — see docs) with per-incumbent feasibility checks. pyscipopt
+    # remains only for the raw diagnostic column in scripts/reeval_gdplib.py; it is
+    # NOT trusted as a correctness oracle (its .nl path certified a false optimum,
+    # #823). All optional at runtime; absent them, checks use reference_optima().
     "pyomo>=6.7",
     "gdplib @ git+https://github.com/SECQUOIA/gdplib.git",
     "highspy>=1.7",

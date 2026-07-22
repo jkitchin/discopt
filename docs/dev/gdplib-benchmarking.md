@@ -1,8 +1,11 @@
 # Benchmarking discopt against GDPlib (issue #823)
 
-**Status:** implemented. Runner + tests + optional-dependency extra landed;
-`jobshop` verified end-to-end against the HiGHS oracle. This doc is the "figure out
-how" writeup requested in [#823](https://github.com/jkitchin/discopt/issues/823)
+**Status:** implemented. Pyomo-bridge runner + a native-discopt subset + tests +
+optional-dependency extra landed; `jobshop` verified end-to-end against the HiGHS
+oracle. The discopt-vs-SCIP table was **re-run 2026-07-22** after recent performance
+work (5/12 now proven optimal, up from 2/12 — see below), and the HiGHS oracle was
+hardened to require a *proven* optimum (review finding #1). This doc is the "figure
+out how" writeup requested in [#823](https://github.com/jkitchin/discopt/issues/823)
 (suggested by David Bernal Neira in [#819](https://github.com/jkitchin/discopt/issues/819)).
 
 ## What GDPlib is
@@ -37,10 +40,12 @@ print(res.solver.termination_condition, pyo.value(m.makespan))
 
 `gdp.bigm` (big-M) and `gdp.hull` (convex-hull / perspective) are the two standard
 reformulations. Both round-trip cleanly through the bridge; on `jobshop` they
-certify the same optimum (11.0). discopt also has a *native* GDP modeling API
-(`either_or`, `make_disjunct`, `m.logical(...)`, see `python/tests/test_gdp.py`),
-but the Pyomo-reformulation path is what lets us benchmark the existing corpus
-without hand-porting 20+ models.
+certify the same optimum (11.0). The Pyomo-reformulation path is what lets us
+benchmark the *whole* corpus without hand-porting 20+ models — but it means
+**Pyomo**, not discopt, lowers the disjunctions. To also exercise discopt's *own*
+disjunction machinery, a curated subset is additionally rebuilt in discopt's native
+GDP API (`either_or`, `make_disjunct`/`add_disjunction`) — see
+[Native discopt models](#native-discopt-models) below.
 
 ## Installation caveats (learned the hard way)
 
@@ -78,21 +83,71 @@ python -m benchmarks.gdplib_runner --max-variables 500 --time-limit 120 --output
 
 The CLI exits nonzero if any run trips a soundness flag, so it can gate CI.
 
+## Native discopt models
+
+`discopt_benchmarks/benchmarks/gdplib_native.py` rebuilds a curated subset of GDPlib
+problems **directly in discopt's native modeling API** instead of going through
+Pyomo's `gdp.bigm`/`gdp.hull`. The runner above measures discopt *solving a model
+Pyomo lowered*; the native path measures discopt lowering the disjunctions **itself**
+(its in-house big-M/hull + the integrality-aware FBBT that branches on the selector
+binaries). Two independent lowerings of the same math cross-check each other, and the
+native builders need **only discopt** — not pyomo or gdplib — since the model is
+transcribed from the GDPlib source, not imported.
+
+```bash
+cd discopt_benchmarks
+python -m benchmarks.gdplib_native --list                 # native models
+python -m benchmarks.gdplib_native --time-limit 120        # solve + soundness-check all
+```
+
+Each native builder is **tested to reach the same SCIP-certified optimum** as its
+Pyomo-bridged counterpart (`reference_optima()`); a GDP's optimum is
+reformulation-independent, so an equivalent native encoding of the feasible set is
+faithful iff it certifies that optimum. Ported so far:
+
+| native model | structure exercised | certified optimum |
+|---|---|---:|
+| `jobshop` | 2-way linear ordering disjunctions | 11.0 |
+| `ex1_linan_2023` | two xor grid disjunctions + excluded disjunct, nonconvex objective | −0.9996 |
+| `small_batch` | k-way unit-count disjunction per stage, `exp` objective | 167427.65 |
+
+Not yet ported (candidates, with the transcription reason they were deferred):
+`cstr` (944-LOC reactor superstructure with recycle), `positioning` (25×5 embedded
+data tables), and the larger process models (`syngas`, `water_network`, `methanol`,
+`modprodnet`, `batch_processing`, `gdp_col`). Port from the gdplib source and add a
+certified-optimum test before listing them. This is the concrete, verified form of
+the "exercise discopt's own GDP path" follow-up — narrower than a full Pyomo-GDP →
+native converter, but every model is checked against an independent optimum.
+
 ## Correctness strategy (the non-negotiable part)
 
 Per `CLAUDE.md` §1 the product is the *certificate*, so a benchmark that only
-measures speed is not enough — every run is checked against an independent oracle,
-selected most-trusted-first:
+measures speed is not enough — every run is checked against an independent oracle.
+**Every oracle value is feasibility-verified**: it is trusted only when the solver
+*proved* optimality *and* the incumbent it returned, evaluated in the real pyomo
+model, satisfies every constraint (`_max_constraint_violation ≤ tol`, scale-
+normalized). The rationale is exact — a claimed optimum *below* the true optimum is
+a claimed feasible point that isn't feasible — so this is the guard against a
+below-true oracle *masking* a discopt false primal (the hole that let the old
+pyscipopt-`.nl` path certify a false cstr optimum; see the correctness finding
+below). Oracles, most-trusted-first:
 
-1. **HiGHS** (`appsi_highs`) on the **linear** subset — the reformulation is an MILP,
-   so HiGHS is an exact, independent oracle. discopt's certified objective must match.
-2. **SCIP** (`pyscipopt`, which bundles SCIP) on the **nonlinear** subset — a global
-   MINLP solver reading the *same* AMPL `.nl` discopt solves. SCIP's objective is
-   used **only when SCIP proves global optimality** (status `optimal`, gap ≈ 0); an
-   unconverged SCIP run yields an incumbent/bound, never a certified optimum, so it
-   is discarded rather than trusted.
-3. **`reference_optima()`** — the SCIP-certified values, baked in as regression
-   anchors and used offline / when `pyscipopt` is absent.
+1. **HiGHS** (`appsi_highs`) on the **linear** subset — an exact, independent MILP
+   oracle. Used only when it proves optimality (termination `optimal`) within a
+   bounded time limit *and* its incumbent is verified feasible; an interrupted MILP
+   yields a bare incumbent that, if trusted, would flag discopt's *correct* optimum
+   as impossible (#823 review finding #1).
+2. **SCIP and BARON via GAMS** on the **nonlinear** subset — global solvers on a
+   *solution-loadable* path, so their incumbents are feasibility-verifiable (unlike
+   pyscipopt reading a hand-written `.nl`, which cannot map its solution back through
+   the `gdp.bigm` indicator aliases). Used only when the gap genuinely closes
+   (`lb == ub` — GAMS can tag a time-limit incumbent `optimal`) *and* the incumbent
+   verifies feasible. When both solvers return a verified optimum they must **agree**;
+   a disagreement is refused loudly (trust neither). One verified solver suffices for
+   soundness. **The pyscipopt-`.nl` path is no longer trusted as an oracle** — it
+   remains only as a raw diagnostic column in `scripts/reeval_gdplib.py`.
+3. **`reference_optima()`** — the BARON-confirmed values, baked in as regression
+   anchors and used offline / when GAMS is absent (e.g. CI).
 
 Three flags are raised and surfaced loudly, never masked:
 - **impossible incumbent** — *any* feasible incumbent (even `FEASIBLE`, not
@@ -134,45 +189,88 @@ Sizes are the *reformulated* (`gdp.bigm`) model; `class` is discopt-relevant
 | kaibel, mod_hens | — | — | ERR | build needs ipopt |
 | reverse_electrodialysis | — | — | ERR | build needs GAMS |
 
-## discopt vs SCIP (12 small models, big-M, 60 s each)
+## discopt vs SCIP vs BARON (12 small models, big-M, 60 s each)
 
-Both solvers read the **same** big-M `.nl`, so this is a fair head-to-head. SCIP 10
-(via `pyscipopt`) is the oracle; its proven optima seed `reference_optima()`.
+Re-run **2026-07-22** after the recent performance work. discopt and SCIP
+(`pyscipopt`) read the same big-M `.nl`; BARON is run via GAMS (`optcr=0`) as an
+independent third global solver. `reference optimum` is the value **both BARON and
+SCIP prove** (see the cstr correction below). Reproduce discopt/SCIP with
+`python scripts/reeval_gdplib.py`.
 
-| model | discopt status | discopt obj | SCIP status | SCIP obj (opt) |
-|---|---|---:|---|---:|
-| jobshop | optimal | 11.0 | optimal | 11.0 |
-| ex1_linan_2023 | optimal | −0.9996 | optimal | −0.9996 |
-| positioning | feasible | 2570.62 | optimal | −8.06414 |
-| cstr | feasible | 4.06191 | optimal | 3.05431 |
-| small_batch | time_limit | — | optimal | 167427.65 |
-| spectralog | time_limit | — | optimal | 12.0893 |
-| syngas | time_limit | — | optimal | 4669.02 |
-| water_network | time_limit | — | optimal | 348337.04 |
-| modprodnet | time_limit | — | optimal | 3592.92 |
-| methanol | time_limit | — | timelimit | −1793.43 (gap ~130%) |
-| batch_processing | time_limit | — | timelimit | 679365 (gap 3%) |
-| gdp_col | time_limit | — | timelimit | 20355.1 (gap ~110%) |
+Legend: **opt** = proven optimal (gap 0); *feas* = feasible incumbent, not proven;
+*inc* = incumbent only (time limit, gap open); — = no incumbent.
 
-**SCIP: 9/12 proven optimal** (all ≤ 41 s). **discopt: 2/12 optimal, 2 loose-feasible,
-8 no incumbent.** The three SCIP left unproven are *not* seeded.
+| model | reference opt | discopt | s | SCIP (pyscipopt) | s | BARON (GAMS) | s |
+|---|---:|---|---:|---|---:|---|---:|
+| jobshop | 11.0 | **opt** 11.0 | 0.1 | opt 11.0 | 0.0 | opt 11.0 | 1.2 |
+| ex1_linan_2023 | −0.9996 | **opt** −0.9996 | 8.7 | opt −0.9996 | 0.0 | opt −0.9996 | 0.9 |
+| positioning | −8.06414 | **opt** −8.06414 | 10.9 | opt −8.06414 | 0.5 | opt −8.06414 | 1.2 |
+| small_batch | 167427.65 | **opt** 167427.65 | 11.4 | opt 167427.65 | 0.0 | opt 167427.66 | 0.9 |
+| modprodnet | 3592.92 | **opt** 3592.92 | 25.3 | opt 3592.92 | 0.1 | opt 3592.92 | 1.1 |
+| cstr | **3.06201** | *feas* 3.06202 | 61.2 | **opt 3.05431 ⚠ false** | 16.4 | opt 3.06201 | 8.7 |
+| spectralog | 12.0893 | *feas* 12.0893 | 60.4 | opt 12.0893 | 8.9 | opt 12.0893 | 1.4 |
+| water_network | 348337.04 | *feas* 348337.04 | 63.2 | opt 348337.04 | 6.3 | opt 348337.04 | 22.8 |
+| syngas | 4669.02 | — | 89.0 | opt 4669.02 | 4.1 | opt 4669.02 | 1.7 |
+| batch_processing | 679365.33 | — | 63.2 | *inc* 679365 | 60.2 | opt 679365.33 | 41.9 |
+| methanol | *(unproven)* | *feas* −1793.43 | 61.8 | *inc* −1574.57 | 60.0 | *inc* −1793.43 | 61.9 |
+| gdp_col | *(unproven)* | *feas* 20100.3 | 65.9 | *inc* 22283.5 | 60.0 | *inc* 20008.7 | 61.2 |
+
+**Score (12 models): discopt** — 5 proven optimal, 3 more *reach* the reference
+optimum without closing the gap (cstr, spectralog, water_network), 1 matches the
+best-known unproven incumbent (methanol), 2 no incumbent (syngas, batch_processing),
+1 slightly-worse incumbent (gdp_col). **SCIP (pyscipopt)** — 9 proven (one, cstr, is
+a *false* optimum, see below), 3 time-limit incumbents. **BARON** — 10 proven
+(everything except methanol/gdp_col, where it returns the best incumbent). **0 discopt
+soundness violations.** Prior baseline (PR #825) was discopt 2/12 optimal — the perf
+work moved 5 models into proven-optimal and 3 more onto the true optimum.
+
+### ⚠ Correctness finding (RESOLVED): a false SCIP optimum on cstr, and the oracle hardening it prompted
+
+The old pyscipopt-`.nl` oracle reported **cstr = 3.0543 with gap 0** — *below* the
+true minimum. Two independent solvers through a solution-loadable path (**BARON and
+SCIP, both via GAMS**) prove **3.0620** with a pyomo-verified feasible point (max
+constraint violation ~1e-6), and discopt's own incumbent agrees at 3.0620. So
+pyscipopt-via-`.nl` solved a mis-encoded/relaxed cstr yet certified it — a classic
+false optimum. It could not be caught by re-checking the incumbent, because a
+pyscipopt-`.nl` solution does not map back through the `gdp.bigm` indicator-variable
+aliases (verified: the recycle indicators stay unset). What changed:
+
+- `reference_optima()["cstr"]` corrected `3.0543118 → 3.0620073` (BARON-proven);
+  every *other* seed was re-verified against BARON's independent proof and confirmed,
+  and `batch_processing` (679365.33) was added (BARON now certifies it).
+- discopt's cstr result was therefore **correct all along** (it found the true 3.0620,
+  just didn't prove it) — the earlier "feasible-loose" label was an artifact of the
+  false reference.
+- **Oracle hardened (`_attach_oracle`):** the runner now (1) *feasibility-verifies
+  every oracle incumbent* in the real pyomo model — a claimed optimum below the true
+  optimum is exactly a claimed feasible point that isn't feasible, so this is the
+  direct guard against a below-true oracle masking a discopt false primal; (2) routes
+  the nonlinear oracle through the *solution-loadable* GAMS path (SCIP **and** BARON,
+  requiring agreement) instead of the unverifiable pyscipopt-`.nl` path; and (3)
+  requires a genuinely closed gap (`lb == ub`), not GAMS's `optimal` tag. Regression
+  tests: the deterministic feasibility-verifier (accept/reject/unset) runs in CI, and
+  a GAMS-gated test asserts the cstr oracle is now ~3.0620, never the below-true 3.0543.
 
 ## Findings & limitations
 
-- **Sound, but far slower/weaker than SCIP on this set.** Every discopt result is on
-  the correct side of SCIP's bound — where both prove optimality they agree to the
-  digit; discopt's feasible incumbents (positioning, cstr) sit *above* the min optimum
-  as a valid incumbent must. **Zero soundness violations.** This is the
-  certification-gap story, quantified.
-- **Nonlinear GDPlib instances are genuinely hard for discopt today** and are good
-  stress material, not CI fodder: several hit the time limit and overrun it (the
-  known [#814](https://github.com/jkitchin/discopt/issues/814) time-limit-overrun
-  behavior — e.g. `small_batch` ran well past a 5 s budget; SCIP by contrast stops
-  cleanly at its limit). Expect `feasible`/`time_limit`, not `optimal`, on the
-  nonlinear corpus.
-- **The oracle gap is now closed for the small nonlinear subset** via SCIP; the
-  larger models (biofuel, stranded_gas, grid) still need a longer SCIP budget to
-  certify.
+- **Sound throughout, and now competitive on the small subset.** Where discopt proves
+  optimality it agrees with BARON to the digit; its feasible-only incumbents sit on
+  the valid side of the true optimum. **Zero discopt soundness violations** — the
+  certification-gap story has narrowed substantially since PR #825, without weakening
+  any check. (The one false optimum on the sweep was SCIP's, not discopt's.)
+- **A strong primal on the hardest two.** On methanol and gdp_col — which neither SCIP
+  nor BARON certifies in 60 s — discopt matches BARON's best incumbent on methanol and
+  is within 0.5 % on gdp_col, both far ahead of SCIP's incumbent. No certified optimum
+  exists yet, so this is "strong incumbent, still unproven"; a longer BARON/SCIP run to
+  certify is the priority.
+- **The remaining gap is dual-side, not primal, on most of the set.** cstr, spectralog
+  and water_network *find* the reference optimum but do not prove it in 60 s (a bounding
+  gap, [#818](https://github.com/jkitchin/discopt/issues/818)); only syngas and
+  batch_processing still find no incumbent (the [#817](https://github.com/jkitchin/discopt/issues/817)
+  primal gap). Mild time-limit overruns persist (most within a few s of 60 s; syngas
+  worst at 89 s) — the [#814](https://github.com/jkitchin/discopt/issues/814) behavior.
+- **The oracle gap is closed for the small nonlinear subset** via BARON+SCIP; the
+  larger models (biofuel, stranded_gas, grid) still need a longer budget to certify.
 
 ## Suggested next steps
 
@@ -180,6 +278,12 @@ Both solvers read the **same** big-M `.nl`, so this is a fair head-to-head. SCIP
    budget; optionally add BARON/Couenne behind the same oracle hook for redundancy.
 2. Wire a curated `gdplib_small` suite into the nightly correctness lane (linear
    models + short-limit nonlinear feasibility), gating on `incorrect_count == 0`.
-3. Optionally add a direct **Pyomo GDP → discopt native GDP** converter so discopt's
-   own disjunction/big-M/hull machinery is exercised instead of Pyomo's — a stronger
-   test of discopt's GDP path than the reformulate-then-solve route.
+3. Grow the native-discopt subset (`gdplib_native.py`) beyond the current three —
+   `cstr`, `positioning`, and the larger process models — porting each from source
+   with a certified-optimum test. The hand-ported route already exercises discopt's
+   own disjunction/big-M/hull machinery; a general **Pyomo GDP → discopt native GDP**
+   converter would generalize it to the whole corpus and remains the stronger,
+   optional end goal.
+4. Certify methanol and gdp_col (a longer SCIP/BARON budget) — discopt already returns
+   a better incumbent than SCIP's 60 s incumbent on both, but neither is proven, so
+   they need an independent optimum before they can anchor `reference_optima()`.

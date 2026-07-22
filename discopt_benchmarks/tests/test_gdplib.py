@@ -33,12 +33,12 @@ def _has_highs() -> bool:
         return False
 
 
-def _has_scip() -> bool:
+def _has_gams() -> bool:
     try:
-        import pyscipopt  # noqa: F401
+        import pyomo.environ as pyo
 
-        return True
-    except ImportError:
+        return bool(pyo.SolverFactory("gams").available(exception_flag=False))
+    except Exception:
         return False
 
 
@@ -125,6 +125,43 @@ def test_jobshop_oracle_is_highs():
     assert run.oracle_objective == pytest.approx(11.0, abs=1e-2)
 
 
+def test_highs_declines_when_not_optimal(monkeypatch):
+    """HiGHS is trusted as the equality oracle only on a *proven* optimum (#823 #1).
+
+    A non-optimal termination (time limit hit, interrupted) must yield ``None`` — a
+    bare incumbent, if trusted, would flag discopt's correct optimum as an
+    impossible incumbent. The corpus's linear models solve instantly (jobshop is
+    optimal even at ``time_limit=0``), so the interrupted path is injected here.
+    """
+    import types
+
+    import pyomo.environ as pyo
+    from pyomo.opt import TerminationCondition
+
+    class _FakeHighs:
+        def __init__(self):
+            self.config = types.SimpleNamespace(time_limit=None)
+
+        def available(self, exception_flag=False):
+            return True
+
+        def solve(self, m):
+            # Load a bare (garbage) incumbent, as an interrupted MILP solve would:
+            # without the optimality gate this value would be returned and wrongly
+            # trusted as the oracle. With the gate, the non-optimal status wins.
+            for v in m.component_data_objects(pyo.Var, active=True):
+                v.set_value(v.lb if v.lb is not None else 0.0, skip_validation=True)
+            results = types.SimpleNamespace()
+            results.solver = types.SimpleNamespace(
+                termination_condition=TerminationCondition.maxTimeLimit
+            )
+            return results
+
+    monkeypatch.setattr(pyo, "SolverFactory", lambda name: _FakeHighs())
+    obj = gr._solve_with_highs(_spec("jobshop"), method="bigm", time_limit=0.0)
+    assert obj is None
+
+
 # ── classification & robustness ─────────────────────────────────────────────
 
 
@@ -141,44 +178,85 @@ def test_reference_optima_seed_is_sane():
 
     ref = gr.reference_optima()
     assert ref.get("jobshop") == pytest.approx(11.0)
-    # SCIP-certified nonlinear seeds are present and finite.
+    # BARON-confirmed nonlinear seeds are present and finite.
     for name in ("positioning", "cstr", "small_batch", "syngas", "water_network"):
         assert name in ref
         assert math.isfinite(ref[name])
-    assert ref["cstr"] == pytest.approx(3.0543118, abs=1e-4)
-    # Models SCIP did NOT prove within budget must not be seeded.
-    for unproven in ("methanol", "batch_processing", "gdp_col"):
+    # cstr: BARON-proven 3.0620 (pyscipopt-.nl's 3.0543 was a false optimum, #823).
+    assert ref["cstr"] == pytest.approx(3.0620073, abs=1e-3)
+    assert ref["cstr"] > 3.0543118, "cstr must be the true optimum, not the below-true false value"
+    # batch_processing is BARON-certified; methanol/gdp_col remain unproven and unseeded.
+    assert ref["batch_processing"] == pytest.approx(679365.33, rel=1e-4)
+    for unproven in ("methanol", "gdp_col"):
         assert unproven not in ref
 
 
-# ── SCIP oracle (nonlinear subset) ──────────────────────────────────────────
+# ── Oracle hardening: feasibility verification (#823) ───────────────────────
+#
+# The core guard is solver-free and runs in CI: an oracle value is trusted only if
+# its incumbent is feasible in the real pyomo model. A claimed optimum below the true
+# optimum is a claimed feasible point that isn't feasible, so this closes the hole
+# where the old pyscipopt-.nl path certified a below-true cstr optimum.
 
 
-@pytest.mark.skipif(not _has_scip(), reason="pyscipopt (SCIP) not installed")
-def test_scip_certifies_nonlinear_optimum():
-    """SCIP returns the certified optimum for a small nonlinear GDP (ex1_linan_2023)."""
-    obj = gr._solve_with_scip(_spec("ex1_linan_2023"), method="bigm", time_limit=60)
+def _tiny_pyomo_model(x_value):
+    """min x s.t. x >= 1, 0 <= x <= 10, with x loaded at *x_value*."""
+    import pyomo.environ as pyo
+
+    m = pyo.ConcreteModel()
+    m.x = pyo.Var(bounds=(0, 10))
+    m.c = pyo.Constraint(expr=m.x >= 1)
+    m.obj = pyo.Objective(expr=m.x, sense=pyo.minimize)
+    m.x.set_value(x_value, skip_validation=True)
+    return m
+
+
+def test_feasibility_check_accepts_feasible_point():
+    m = _tiny_pyomo_model(1.0)  # satisfies x >= 1
+    viol = gr._max_constraint_violation(m)
+    assert viol is not None and viol <= gr._ORACLE_FEAS_TOL
+
+
+def test_feasibility_check_rejects_infeasible_point():
+    m = _tiny_pyomo_model(0.0)  # violates x >= 1 by 1.0
+    viol = gr._max_constraint_violation(m)
+    assert viol is not None and viol > gr._ORACLE_FEAS_TOL
+
+
+def test_feasibility_check_rejects_unset_solution():
+    """An incompletely loaded solution is 'not certified feasible', never OK."""
+    import pyomo.environ as pyo
+
+    m = _tiny_pyomo_model(1.0)
+    m.y = pyo.Var(bounds=(0, 5))  # left unset -> cannot certify feasibility
+    m.cy = pyo.Constraint(expr=m.y <= 3)
+    assert gr._max_constraint_violation(m) is None
+
+
+@pytest.mark.skipif(not _has_gams(), reason="GAMS (SCIP/BARON subsolvers) not available")
+def test_gams_oracle_certifies_nonlinear_optimum():
+    """SCIP via GAMS returns the feasibility-verified optimum for a nonlinear GDP."""
+    obj = gr._solve_with_gams(_spec("ex1_linan_2023"), method="bigm", time_limit=60, solver="scip")
     assert obj is not None
     assert obj == pytest.approx(-0.9996, abs=1e-3)
 
 
-@pytest.mark.skipif(not _has_scip(), reason="pyscipopt (SCIP) not installed")
-def test_scip_declines_when_not_proven():
-    """A time budget too small to prove optimality yields no oracle value, not a guess."""
-    # 0s wall budget -> SCIP cannot certify -> None (never a bare incumbent).
-    obj = gr._solve_with_scip(_spec("cstr"), method="bigm", time_limit=0.0)
-    assert obj is None
+@pytest.mark.skipif(not _has_gams(), reason="GAMS not available")
+def test_gams_oracle_declines_when_gap_open():
+    """A 0 s budget cannot close the gap -> no oracle value (never a bare incumbent)."""
+    assert gr._solve_with_gams(_spec("cstr"), method="bigm", time_limit=0.0, solver="scip") is None
 
 
 @pytest.mark.correctness
 @pytest.mark.slow
-@pytest.mark.skipif(not _has_scip(), reason="pyscipopt (SCIP) not installed")
-def test_scip_is_oracle_for_nonlinear_end_to_end():
-    """A nonlinear model gets a SCIP oracle, and discopt stays sound against it."""
-    run = gr.solve_model(_spec("ex1_linan_2023"), method="bigm", time_limit=60, oracle=True)
-    assert run.is_linear is False
-    assert run.oracle_source == "scip"
-    assert run.oracle_objective == pytest.approx(-0.9996, abs=1e-3)
+@pytest.mark.skipif(not _has_gams(), reason="GAMS not available")
+def test_hardened_oracle_rejects_false_cstr_optimum():
+    """Regression for the #823 false optimum: the oracle now certifies cstr's *true*
+    optimum (~3.0620), not the below-true 3.0543 the pyscipopt-.nl path reported."""
+    run = gr.solve_model(_spec("cstr"), method="bigm", time_limit=60, oracle=True)
+    assert run.oracle_source in ("scip+baron", "scip-gams", "baron-gams")
+    assert run.oracle_objective == pytest.approx(3.0620, abs=1e-3)
+    assert run.oracle_objective > 3.0543118, "must be true optimum, not the below-true value"
     assert run.false_optimum is False, run.note
     assert run.bound_crosses is False, run.note
 

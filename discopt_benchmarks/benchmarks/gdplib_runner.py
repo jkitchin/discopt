@@ -18,13 +18,20 @@ the MINLPLib and CUTEst runners.
 
 Correctness (the non-negotiable gate, per ``CLAUDE.md``): where an independent
 oracle exists we cross-check discopt's certified objective against it and count
-any disagreement as *incorrect*. Oracles, most-trusted first: **HiGHS** for the
-linear (MILP) subset (exact); **SCIP** (``pyscipopt``) for the nonlinear subset,
-but only when SCIP proves global optimality; and a table of SCIP-certified
-:func:`reference_optima` as an offline fallback. A discopt objective *strictly
-better* than the oracle optimum (an infeasible incumbent / false primal), a
-claimed-optimal objective that disagrees, or a dual bound on the wrong side of the
-optimum, is a soundness violation and is surfaced loudly — never masked.
+any disagreement as *incorrect*. **Every oracle value is feasibility-verified** —
+trusted only when the solver proved optimality *and* its incumbent, evaluated in
+the real pyomo model, satisfies every constraint (:func:`_max_constraint_violation`).
+This is deliberate: a claimed optimum below the true optimum is exactly a claimed
+feasible point that isn't feasible, and an unverified one can *mask* a discopt false
+primal — the hole that let the old pyscipopt-``.nl`` path certify a below-true cstr
+optimum (#823). Oracles, most-trusted first: **HiGHS** for the linear (MILP) subset
+(exact); **SCIP and BARON via GAMS** for the nonlinear subset (a solution-loadable,
+verifiable path — when both prove optimality they must agree, else neither is
+trusted); and the BARON-confirmed :func:`reference_optima` table as an offline
+fallback. A discopt objective *strictly better* than the oracle optimum (an
+infeasible incumbent / false primal), a claimed-optimal objective that disagrees, or
+a dual bound on the wrong side of the optimum, is a soundness violation surfaced
+loudly — never masked.
 
 Requirements (``pip install discopt-benchmarks[gdplib]``): ``pyomo`` and
 ``gdplib``. Install ``gdplib`` **from source** — the PyPI wheel omits the model
@@ -33,9 +40,9 @@ data files (``.dat`` / ``.xlsx`` / ``.txt``), so most builders raise
 
     pip install "gdplib @ git+https://github.com/SECQUOIA/gdplib.git"
 
-The oracles are optional: the linear subset needs ``highspy`` (``appsi_highs``);
-the nonlinear subset needs ``pyscipopt`` (bundles SCIP). Absent both, checks fall
-back to the :func:`reference_optima` table.
+The oracles are optional: the linear subset needs ``highspy`` (``appsi_highs``); the
+nonlinear subset needs **GAMS** (with SCIP/BARON subsolvers). Absent them, checks
+fall back to the :func:`reference_optima` table (which is itself BARON-confirmed).
 """
 
 from __future__ import annotations
@@ -181,11 +188,22 @@ def reference_optima() -> dict[str, float]:
     models HiGHS cannot check (nonlinear). Extend this as values are verified — a
     seed here is a *regression anchor*, not a target to tune toward.
 
-    All entries below were certified by **SCIP 10** (``gap = 0``) on the big-M
-    reformulation, and the optimum of a GDP is method-independent, so the same
-    value anchors both big-M and hull. Models where SCIP did *not* prove optimality
-    within its budget (methanol, batch_processing, gdp_col) are deliberately absent
-    — an unproven incumbent is not a certified optimum and must never seed an oracle.
+    Every entry is **independently confirmed by BARON** (via GAMS, ``optcr=0``,
+    ``lb == ub``) as well as SCIP, and a GDP's optimum is reformulation-independent,
+    so the same value anchors both big-M and hull. Models neither solver proves
+    within budget (methanol, gdp_col) are deliberately absent — an unproven incumbent
+    is not a certified optimum and must never seed an oracle.
+
+    **cstr correction (2026-07-22):** the value here was originally ``3.0543118``,
+    taken from the old pyscipopt-``.nl`` oracle path. That path returned a *false
+    optimum* for cstr — ``3.0543 < 3.0620``, i.e. **below** the true minimum —
+    apparently solving a mis-encoded/relaxed model yet reporting ``gap = 0``. Two
+    independent solvers via a solution-loadable path (BARON and SCIP, both through
+    GAMS) prove ``3.0620`` with a pyomo-verified feasible point (max constraint
+    violation ~1e-6), and discopt's own incumbent agrees. The seed is corrected to the
+    BARON-proven value. Lesson: a single solver's "proven optimal" through a lossy file
+    path is not trustworthy — which is why the oracle now feasibility-verifies every
+    incumbent and routes the global check through GAMS (see :func:`_attach_oracle`).
     """
     return {
         # jobshop is also HiGHS-checkable (linear); the rest are nonlinear GDPs.
@@ -193,11 +211,12 @@ def reference_optima() -> dict[str, float]:
         "ex1_linan_2023": -0.9995999999999999,
         "positioning": -8.064136166293226,
         "small_batch": 167427.6515668371,
-        "cstr": 3.0543118059526293,
+        "cstr": 3.0620073,  # BARON-proven; pyscipopt-.nl gave a false 3.0543 (see docstring)
         "spectralog": 12.089261322767793,
         "syngas": 4669.0234827946,
         "water_network": 348337.03671302047,
         "modprodnet": 3592.924373781839,
+        "batch_processing": 679365.33,  # BARON-certified (SCIP left it unproven at 60s)
     }
 
 
@@ -408,20 +427,74 @@ def _node_count(res) -> int:
         return 0
 
 
+# Feasibility tolerance for accepting an oracle's incumbent as a real feasible point
+# (scale-normalized per constraint — see :func:`_max_constraint_violation`).
+_ORACLE_FEAS_TOL = 1e-5
+
+
+def _max_constraint_violation(pyomo_model) -> float | None:
+    """Largest **scale-normalized** violation of the solution currently loaded in
+    *pyomo_model*, or ``None`` if any active constraint/variable cannot be evaluated.
+
+    This is the core of oracle hardening (#823). A claimed optimum *below* the true
+    optimum is exactly a claimed feasible point that is **not** feasible (no feasible
+    point beats the minimum), so an oracle value is trustworthy only if its incumbent,
+    evaluated in the real pyomo model, actually satisfies every constraint. The
+    pyscipopt-``.nl`` path could not be verified this way — its solution does not map
+    back through the ``gdp.bigm`` indicator-variable aliases — which is precisely how
+    it certified a below-true cstr optimum unchecked. A ``None`` return (unevaluable /
+    incompletely loaded solution) is treated as *not certified feasible*, never as OK.
+
+    Per-constraint violation is normalized by ``1 + |body|`` so a large-magnitude
+    balance (e.g. water_network ~3e5) is judged on relative, not absolute, slack.
+    """
+    import pyomo.environ as pyo
+
+    worst = 0.0
+    for c in pyomo_model.component_data_objects(pyo.Constraint, active=True):
+        try:
+            body = float(pyo.value(c.body))
+        except Exception:
+            return None  # a constraint we cannot evaluate -> feasibility unproven
+        scale = 1.0 + abs(body)
+        if c.has_lb():
+            lo = float(pyo.value(c.lower))
+            worst = max(worst, (lo - body) / scale)
+        if c.has_ub():
+            hi = float(pyo.value(c.upper))
+            worst = max(worst, (body - hi) / scale)
+    for v in pyomo_model.component_data_objects(pyo.Var, active=True):
+        val = v.value
+        if val is None:
+            return None  # an unset variable -> solution not fully loaded
+        if v.lb is not None:
+            worst = max(worst, (float(v.lb) - float(val)) / (1.0 + abs(float(v.lb))))
+        if v.ub is not None:
+            worst = max(worst, (float(val) - float(v.ub)) / (1.0 + abs(float(v.ub))))
+    return worst
+
+
 def _attach_oracle(run: ModelRun, spec: GDPModelSpec, method: str, time_limit: float) -> None:
-    """Populate ``run.oracle_objective`` / ``oracle_source``.
+    """Populate ``run.oracle_objective`` / ``oracle_source`` with a **verified** oracle.
 
-    Oracle priority, most-trusted first:
+    Every oracle value is trusted only if the solver *proved* optimality **and** the
+    returned incumbent is confirmed feasible in the real pyomo model
+    (:func:`_max_constraint_violation` ≤ tol). This closes the #823 hole where an
+    unverifiable oracle seeded a below-true optimum that could mask a discopt false
+    primal. Priority, most-trusted first:
 
-    1. **HiGHS** on a *linear* reformulation — exact, independent, cheap. HiGHS
-       cannot handle a nonlinear model, so it is used only when ``is_linear``.
-    2. **SCIP** (a global MINLP solver, via ``pyscipopt``) — a valid oracle for the
-       nonlinear subset, but *only when it proves global optimality* (gap ≈ 0). An
-       unproven SCIP incumbent is a mere upper bound, never a certified optimum, so
-       it is discarded rather than used as the equality oracle.
-    3. **Verified reference optimum** keyed by model name (see
-       :func:`reference_optima`) — the SCIP-certified values, used offline / when
-       ``pyscipopt`` is absent.
+    1. **HiGHS** on a *linear* reformulation — exact, independent, feasibility-verified.
+    2. **Global via GAMS** (SCIP and BARON) — a solution-loadable path, so the
+       incumbent is feasibility-verifiable (unlike pyscipopt-``.nl``). When both
+       solvers return a verified proven optimum they must **agree**; a disagreement is
+       refused loudly (never trust an inconsistent oracle). One verified solver alone
+       is sufficient for soundness (its incumbent is a real feasible point).
+    3. **Verified reference optimum** (:func:`reference_optima`) — the BARON-confirmed
+       table, used offline / when GAMS is absent (e.g. CI).
+
+    The pyscipopt-``.nl`` path is **deliberately no longer trusted** here: its solution
+    cannot be mapped back for verification, and it demonstrably certified a false cstr
+    optimum. `scripts/reeval_gdplib.py` still shows it as a raw diagnostic column.
     """
     if run.is_linear:
         obj = _solve_with_highs(spec, method, time_limit)
@@ -429,11 +502,27 @@ def _attach_oracle(run: ModelRun, spec: GDPModelSpec, method: str, time_limit: f
             run.oracle_objective = obj
             run.oracle_source = "highs"
             return
-    scip_obj = _solve_with_scip(spec, method, time_limit)
-    if scip_obj is not None:
-        run.oracle_objective = scip_obj
-        run.oracle_source = "scip"
+
+    scip = _solve_with_gams(spec, method, time_limit, "scip")
+    baron = _solve_with_gams(spec, method, time_limit, "baron")
+    if scip is not None and baron is not None:
+        tol = 1e-4 + 1e-3 * max(abs(scip), abs(baron))
+        if abs(scip - baron) > tol:
+            run.note = (
+                f"ORACLE INCONSISTENCY: GAMS/SCIP={scip:.8g} vs GAMS/BARON={baron:.8g} "
+                "— refusing to trust either as the certified optimum"
+            ).strip()
+            return  # two proven+verified solvers must agree; if not, trust neither
+        run.oracle_objective = scip
+        run.oracle_source = "scip+baron"
         return
+    if scip is not None:
+        run.oracle_objective, run.oracle_source = scip, "scip-gams"
+        return
+    if baron is not None:
+        run.oracle_objective, run.oracle_source = baron, "baron-gams"
+        return
+
     ref = reference_optima().get(spec.name)
     if ref is not None:
         run.oracle_objective = ref
@@ -441,9 +530,18 @@ def _attach_oracle(run: ModelRun, spec: GDPModelSpec, method: str, time_limit: f
 
 
 def _solve_with_highs(spec: GDPModelSpec, method: str, time_limit: float) -> float | None:
-    """Solve the (linear) reformulation with HiGHS as an independent oracle."""
+    """Solve the (linear) reformulation with HiGHS as an independent oracle.
+
+    Returns HiGHS's objective **only if HiGHS proved global optimality** within
+    ``time_limit`` (termination ``optimal``) **and** the returned incumbent is verified
+    feasible in the pyomo model; otherwise ``None``. An unconverged MILP yields only a
+    suboptimal incumbent (would flag discopt's correct optimum as impossible, #823
+    finding #1), and an infeasible/incompletely-loaded incumbent must never seed the
+    oracle (the general #823 hardening).
+    """
     import pyomo.environ as pyo
     from pyomo.core import TransformationFactory
+    from pyomo.opt import TerminationCondition
 
     try:
         solver = pyo.SolverFactory("appsi_highs")
@@ -451,53 +549,63 @@ def _solve_with_highs(spec: GDPModelSpec, method: str, time_limit: float) -> flo
             return None
         m = spec.builder()
         TransformationFactory(f"gdp.{method}").apply_to(m)
-        solver.solve(m)
+        # Bound HiGHS's runtime so a hard MILP cannot hang the sweep, and demand a
+        # proven optimum (default rel/abs MIP gaps ≈ 0) before trusting the value.
+        solver.config.time_limit = float(time_limit)
+        results = solver.solve(m)
+        if results.solver.termination_condition != TerminationCondition.optimal:
+            return None
+        viol = _max_constraint_violation(m)
+        if viol is None or viol > _ORACLE_FEAS_TOL:
+            return None  # incumbent not confirmed feasible -> not a usable oracle
         return _objective_value(m)
     except Exception:  # noqa: BLE001
         return None
 
 
-def _solve_with_scip(spec: GDPModelSpec, method: str, time_limit: float) -> float | None:
-    """Solve the reformulation with SCIP (``pyscipopt``) as a global oracle.
+def _solve_with_gams(
+    spec: GDPModelSpec, method: str, time_limit: float, solver: str
+) -> float | None:
+    """Solve the reformulation with a global solver via **GAMS** as a verified oracle.
 
-    Returns SCIP's objective **only if SCIP proved global optimality** within
-    ``time_limit`` (status ``optimal`` and gap ≈ 0); otherwise ``None`` — an
-    unconverged SCIP run yields only an incumbent/bound, not a certified optimum.
-    The reformulated Pyomo model is handed to SCIP through the same AMPL ``.nl``
-    encoding the discopt bridge uses, so both solvers see identical input.
+    ``solver`` is a GAMS subsolver name (``"scip"`` / ``"baron"``). Returns its
+    objective **only if** (a) the optimality gap genuinely closed (``lb == ub`` — GAMS
+    can tag a time-limit incumbent ``optimal``, so we check the bounds, not the label)
+    **and** (b) the incumbent GAMS loaded back into the pyomo model is verified feasible
+    (:func:`_max_constraint_violation` ≤ tol). Otherwise ``None``.
+
+    GAMS round-trips the solution into the pyomo model — including the ``gdp.bigm``
+    indicator aliases the pyscipopt-``.nl`` path mangled — so, unlike that path, the
+    returned optimum is feasibility-checkable. This is the mechanism that would have
+    rejected the false cstr optimum (#823). ``None`` when GAMS is unavailable.
     """
-    import os
-    import tempfile
-
+    import pyomo.environ as pyo
     from pyomo.core import TransformationFactory
-    from pyomo.repn.plugins.nl_writer import NLWriter
 
     try:
-        import pyscipopt
-    except ImportError:
-        return None
-
-    try:
+        gams = pyo.SolverFactory("gams")
+        if not gams.available(exception_flag=False):
+            return None
         m = spec.builder()
         TransformationFactory(f"gdp.{method}").apply_to(m)
-        with tempfile.TemporaryDirectory(prefix="gdplib_scip_") as d:
-            nl_path = os.path.join(d, "model.nl")
-            with open(nl_path, "w") as stream:
-                NLWriter().write(
-                    m,
-                    stream,
-                    linear_presolve=False,
-                    scale_model=False,
-                    skip_trivial_constraints=False,
-                )
-            sm = pyscipopt.Model()
-            sm.hideOutput()
-            sm.setParam("limits/time", float(time_limit))
-            sm.readProblem(nl_path)
-            sm.optimize()
-            if sm.getStatus() != "optimal" or abs(sm.getGap()) > 1e-6:
-                return None  # not certified -> not a usable equality oracle
-            return float(sm.getObjVal())
+        # optcr defaults to 0.1 in GAMS — force a full gap closure, capped by reslim.
+        res = gams.solve(
+            m,
+            solver=solver,
+            add_options=[f"option reslim={float(time_limit)}; option optcr=1e-9;"],
+            tee=False,
+        )
+        prob = res.problem[0] if hasattr(res.problem, "__getitem__") else res.problem
+        lb, ub = getattr(prob, "lower_bound", None), getattr(prob, "upper_bound", None)
+        if lb is None or ub is None:
+            return None
+        lb, ub = float(lb), float(ub)
+        if abs(lb - ub) > 1e-6 + 1e-6 * abs(ub):
+            return None  # gap not closed -> incumbent only, not a certified optimum
+        viol = _max_constraint_violation(m)
+        if viol is None or viol > _ORACLE_FEAS_TOL:
+            return None  # proven "optimum" whose point isn't feasible -> reject (#823)
+        return _objective_value(m)
     except Exception:  # noqa: BLE001
         return None
 
