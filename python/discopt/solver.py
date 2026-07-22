@@ -6514,6 +6514,8 @@ def solve_model(
             t_start,
             nlp_solver,
             initial_point=initial_point,
+            gap_tolerance=gap_tolerance,
+            certify_convex=True,
         )
         result.convex_fast_path = True
         if result.status == "optimal":
@@ -11564,6 +11566,122 @@ def _resolve_heuristic_backend(nlp_solver: str) -> Optional[Callable]:
     return None
 
 
+# Relative projected-gradient stationarity above which a reported ``optimal`` on
+# the convex single-NLP path is not trusted (issue #849). At a genuine optimum the
+# unscaled projected gradient is ~1e-10 relative; this threshold is far looser so a
+# converged IPM point (which stops slightly inside its bounds) is never spuriously
+# rejected, yet a non-stationary termination (O(0.1)–O(1)) is always caught.
+_KKT_STATIONARITY_REL_TOL = 1e-4
+
+
+def _convex_nlp_certificate_gap(
+    evaluator: "NLPEvaluator",
+    x: np.ndarray,
+    multipliers: Optional[np.ndarray],
+    lb: np.ndarray,
+    ub: np.ndarray,
+    cl: np.ndarray,
+    cu: np.ndarray,
+    obj_internal: Optional[float],
+) -> Optional[tuple[float, float]]:
+    """Recompute the *unscaled* KKT optimality residuals of a convex single-NLP.
+
+    Under convexity the KKT conditions are sufficient for global optimality, so a
+    backend that reports ``optimal`` is only trustworthy when the returned point is
+    an actual KKT point of the ORIGINAL (unscaled) problem. A gradient/interior IPM
+    under aggressive automatic scaling can satisfy its *scaled* stopping test at a
+    point that grossly violates the *unscaled* KKT complementarity — reporting
+    ``optimal`` at a point ~20x short of the optimum with the binding constraint
+    nowhere near active while certifying a dual bound that crosses the true optimum
+    (issue #849). This recomputes the residuals so the caller can withhold the
+    certificate. Only the solver's CONSTRAINT multipliers ``λ`` are trusted; the
+    variable box is handled from the primal geometry.
+
+    Returns ``(stationarity_rel, complementarity_rel)`` — both dimensionless and ~0
+    at a true optimum — or ``None`` when the certificate cannot be assessed
+    (constraints present but no multipliers, or a dual-INFEASIBLE multiplier that
+    would invalidate the dual bound), which the caller treats as "not certified".
+
+    * ``stationarity_rel``: the box-projected-gradient optimality measure
+      ``||x − clip(x − r, lb, ub)||_∞`` for the reduced gradient ``r = ∇f + Jᵀλ``,
+      over ``r``'s own magnitude scale. This is the standard first-order measure for
+      a box: it equals ``|r_j|`` on an interior variable (so a near-zero gradient
+      never blows up, even against a distant bound), collapses to ~0 at or near a
+      bound the gradient points toward (an IPM stopping just inside, or a variable
+      pinned by ``lb==ub``), and stays large only when a materially-interior
+      variable has a non-vanishing gradient. No fragile "exactly on the bound?"
+      threshold is needed.
+    * ``complementarity_rel``: the constraint complementarity duality gap
+      ``−Σ λ_i c_i(x)|_active`` over ``1 + |f(x)|``. With stationarity satisfied this
+      equals ``f(x) − d(λ)`` for the valid convex dual bound ``d(λ) = min_box f+λ·c``,
+      so a large value means the incumbent is provably far from the bound these
+      multipliers support — not a certified optimum (the #849 signature: a nonzero
+      multiplier on a hugely-slack constraint).
+
+    All quantities are in the evaluator's INTERNAL minimization space
+    (``obj_internal`` is the minimized objective, i.e. ``-f`` for a maximize model),
+    so the results are sign-independent.
+    """
+    m = evaluator.n_constraints
+    n = evaluator.n_variables
+    if m > 0 and multipliers is None:
+        # Cannot reconstruct complementarity without constraint multipliers; the
+        # caller withholds the certificate rather than trust an unverifiable one.
+        return None
+
+    lam = (
+        np.asarray(multipliers, dtype=np.float64)
+        if multipliers is not None
+        else np.zeros(m, dtype=np.float64)
+    )
+
+    grad = np.asarray(evaluator.evaluate_gradient(x), dtype=np.float64)
+    if m > 0:
+        jac = np.asarray(evaluator.evaluate_jacobian(x), dtype=np.float64).reshape(m, n)
+        jtlam = jac.T @ lam
+        cons = np.asarray(evaluator.evaluate_constraints(x), dtype=np.float64)
+        jac_row_inf = np.max(np.abs(jac), axis=1) if jac.size else np.zeros(m)
+    else:
+        jtlam = np.zeros(n, dtype=np.float64)
+        cons = np.empty(0, dtype=np.float64)
+        jac_row_inf = np.zeros(0)
+
+    _INF = 1e19  # bound sentinel: ±1e20 (constraints) / large var bounds read as ∞
+
+    # Projected-gradient stationarity: pg = x − clip(x − r, lb, ub). Bounded by
+    # |r_j| for interior points (no amplification against a distant bound) and ~0
+    # at/near a bound the gradient points toward.
+    reduced = grad + jtlam
+    step = x - reduced
+    lb_c = np.where(lb > -_INF, lb, -np.inf)
+    ub_c = np.where(ub < _INF, ub, np.inf)
+    proj = np.clip(step, lb_c, ub_c)
+    pg = x - proj
+    stat = float(np.max(np.abs(pg))) if pg.size else 0.0
+    stat_scale = 1.0 + (float(np.max(np.abs(grad))) if grad.size else 0.0)
+    stat_scale += float(np.max(np.abs(jtlam))) if jtlam.size else 0.0
+    stationarity_rel = stat / stat_scale
+
+    # Constraint complementarity + dual-feasibility of λ. Each active-side
+    # multiplier contributes its slack to the bound it is associated with
+    # (λ>0 ↔ upper cu, λ<0 ↔ lower cl). A nonzero multiplier that points at an
+    # ABSENT (infinite) bound is dual-infeasible: the Lagrangian dual bound is then
+    # not valid, so the certificate cannot be trusted (return None).
+    comp = 0.0
+    for i in range(m):
+        li = float(lam[i])
+        if li > 0.0 and cu[i] < _INF:
+            comp += li * (cu[i] - cons[i])
+        elif li < 0.0 and cl[i] > -_INF:
+            comp += (-li) * (cons[i] - cl[i])
+        elif abs(li) * float(jac_row_inf[i]) > 1e-9 * stat_scale:
+            return None
+
+    f_scale = 1.0 + (abs(float(obj_internal)) if obj_internal is not None else 0.0)
+    complementarity_rel = comp / f_scale
+    return stationarity_rel, complementarity_rel
+
+
 def _solve_continuous(
     model: Model,
     time_limit: float,
@@ -11571,6 +11689,8 @@ def _solve_continuous(
     t_start: float,
     nlp_solver: str = "ipopt",
     initial_point: Optional[np.ndarray] = None,
+    gap_tolerance: float = 1e-6,
+    certify_convex: bool = False,
 ) -> SolveResult:
     """Solve a purely continuous model directly with NLP solver (no B&B)."""
     # Single-NLP solves need reliable KKT convergence. The pure-JAX IPM's
@@ -11679,6 +11799,60 @@ def _solve_continuous(
     bound_duals_lower = _unpack_bound_duals(model, nlp_result.bound_multipliers_lower)
     bound_duals_upper = _unpack_bound_duals(model, nlp_result.bound_multipliers_upper)
 
+    _gap_certified = True
+
+    # Convex single-NLP certificate gate (issue #849). On the convexity-CERTIFIED
+    # fast path a reported ``optimal`` is taken as a *global* optimality
+    # certificate — but the NLP backend's stopping test runs on its internally
+    # SCALED problem, so under a large objective/constraint coefficient it can
+    # declare success at a point that satisfies the scaled test yet grossly
+    # violates the UNSCALED KKT conditions (min -x s.t. x²≤1e18 reported optimal at
+    # x≈6.4e7 with the constraint nowhere near active and a certified dual bound
+    # BELOW the true optimum). Under convexity, KKT is sufficient for global
+    # optimality, so recompute the unscaled residuals here and withhold the
+    # certificate when they are not met: without a genuine KKT point the single NLP
+    # has only found a feasible incumbent, not a proven optimum. Only ever
+    # DOWNGRADES a certificate (never upgrades / loosens a bound), so it cannot
+    # introduce a false optimum or a wrong bound — the honest ``iteration_limit``
+    # it falls back to is exactly what the neighbouring problem scales already
+    # report. Gated on ``certify_convex`` so the convexity-UNKNOWN caller (which
+    # already strips the bound) is unaffected.
+    if certify_convex and status == "optimal" and nlp_result.x is not None:
+        try:
+            _cl_g, _cu_g = _infer_constraint_bounds(model, evaluator)
+            _cert = _convex_nlp_certificate_gap(
+                evaluator,
+                np.asarray(nlp_result.x, dtype=np.float64),
+                nlp_result.multipliers,
+                np.asarray(lb, dtype=np.float64),
+                np.asarray(ub, dtype=np.float64),
+                np.asarray(_cl_g, dtype=np.float64),
+                np.asarray(_cu_g, dtype=np.float64),
+                nlp_result.objective,
+            )
+        except Exception as _cert_exc:  # pragma: no cover - defensive
+            # A failure to *evaluate* the certificate cannot be allowed to crash an
+            # otherwise-successful solve; withholding the certificate is the safe
+            # outcome (it only ever downgrades), so treat it as unassessable.
+            logger.warning("KKT certificate check failed to evaluate (%s); withholding", _cert_exc)
+            _cert = None
+        if (
+            _cert is None
+            or _cert[0] > _KKT_STATIONARITY_REL_TOL
+            or _cert[1] > max(gap_tolerance, 1e-6)
+        ):
+            logger.warning(
+                "Convex NLP reported optimal but the unscaled KKT residuals are not "
+                "certifiable (stationarity_rel=%s, complementarity_rel=%s, "
+                "gap_tol=%s); withholding the optimality certificate and reporting "
+                "iteration_limit (issue #849).",
+                "unassessable" if _cert is None else f"{_cert[0]:.3e}",
+                "unassessable" if _cert is None else f"{_cert[1]:.3e}",
+                gap_tolerance,
+            )
+            status = "iteration_limit"
+            _gap_certified = False
+
     # Root-node certification metrics (cert:T0.1). This path has no B&B tree —
     # the single NLP solve at the root box is the whole solve, so the root
     # bound/gap/time equal the reported ones.
@@ -11735,6 +11909,7 @@ def _solve_continuous(
         root_bound=_c_bound,
         root_gap=_c_gap,
         root_time=wall_time,
+        gap_certified=_gap_certified,
     )
 
 
