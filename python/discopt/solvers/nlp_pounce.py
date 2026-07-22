@@ -151,37 +151,14 @@ def solve_nlp(
     status_code = info.get("status", -100)
     status = _IPOPT_STATUS_MAP.get(status_code, SolveStatus.ERROR)
 
-    # POUNCE can report UNBOUNDED on a problem that in fact has a finite optimum,
-    # where a local NLP cannot legitimately prove GLOBAL unboundedness anyway — so an
-    # UNBOUNDED verdict here is untrustworthy. Retry once with the KKT-valid cyipopt
-    # backend and adopt its result ONLY if it converges to a definitive OPTIMAL, so a
-    # genuinely unbounded relaxation (where cyipopt also fails to converge) keeps
-    # POUNCE's verdict. Best-effort: a missing cyipopt install or any error falls
-    # through unchanged.
-    #
-    # DO NOT REMOVE this on the strength of pounce#248 alone. #248 ("Fix spurious
-    # UNBOUNDED on BOUNDED, ill-scaled NLPs", fixed 2026-07) resolves only the fully
-    # box-constrained root case: raw POUNCE now returns OPTIMAL on jit1's root
-    # continuous relaxation. But jit1's B&B NODE subproblems carry variables with
-    # ub=+inf (x12–x16, …), which are OUTSIDE #248's bounded class — and on current
-    # POUNCE (0.9.0) all 59 of jit1's node solves still return UNBOUNDED, so removing
-    # this retry regresses jit1 to status=unknown / no incumbent. Verified by removing
-    # it and re-solving: 59/59 UNBOUNDED, obj=None. The remaining case (UNBOUNDED on
-    # an unbounded-box subproblem that has a finite optimum) is tracked upstream as
-    # pounce#252 (#248 follow-up); this guard stays until that is fixed AND re-verified
-    # end-to-end on jit1.
-    if status == SolveStatus.UNBOUNDED:
-        try:
-            from discopt.solvers.nlp_ipopt import solve_nlp as _solve_cyipopt
-
-            _retry = _solve_cyipopt(
-                evaluator, x0, constraint_bounds=constraint_bounds, options=options
-            )
-            if _retry.status == SolveStatus.OPTIMAL:
-                _logger.debug("pounce UNBOUNDED overturned by cyipopt (OPTIMAL); adopting")
-                return _retry
-        except Exception as _retry_exc:  # noqa: BLE001 — fallback is best-effort
-            _logger.debug("cyipopt UNBOUNDED-retry skipped: %s", _retry_exc)
+    # (The interim cyipopt-retry-on-UNBOUNDED guard was removed once pounce#258 fixed
+    # the actual root cause. jit1's B&B nodes converged to the node optimum and then
+    # returned Ipopt status 3 "Search_Direction_Becomes_Too_Small", which this file's
+    # _IPOPT_STATUS_MAP mis-mapped to UNBOUNDED — the false verdict the guard papered
+    # over. pounce#258 makes the strict certificate reachable under strong objective
+    # scaling, and the code-3 mis-map is fixed in nlp_ipopt._IPOPT_STATUS_MAP. Verified
+    # post-#258: jit1's 26 node solves all return OPTIMAL, jit1 solves to 173982.61 on
+    # pure POUNCE with no retry.)
 
     multipliers = info.get("mult_g", None)
     if multipliers is not None and len(multipliers) == 0:
