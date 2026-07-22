@@ -95,7 +95,7 @@ def is_qubo(model: Model) -> bool:
     model has no feasibility to satisfy — *any* binary point is feasible — so a
     quadratic-form local search is a sound, purely-primal constructor.
     """
-    if model._constraints or getattr(model, "_fast_constraints", None):
+    if model._constraints or model._num_builder_constraint_rows():
         return False
     if model._objective is None:
         return False

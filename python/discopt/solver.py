@@ -6271,7 +6271,12 @@ def solve_model(
         _is_qubo_model = (
             model._objective is not None
             and not model._constraints
-            and not getattr(model, "_fast_constraints", None)
+            # #840: a QUBO is UNCONSTRAINED; count every fast-path linear row (both the
+            # ``constraint(fast=True)`` and direct ``add_linear_constraints`` API live
+            # only in the builder blocks), not just the retired ``_fast_constraints``
+            # mirror — else a binary-quadratic model carrying builder rows would be
+            # misclassified as a QUBO and its constraints ignored. Pure-Python, JAX-free.
+            and not model._num_builder_constraint_rows()
             and bool(model._variables)
             and all(
                 v.var_type in (VarType.BINARY, VarType.INTEGER)

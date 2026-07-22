@@ -11,16 +11,21 @@ point was accepted. That is a soundness hole: an infeasible incumbent on a
 fast-indexed model would be certified (the #829 trivial-primal seed exposed it by
 injecting all-zeros on an assignment MILP → false optimum obj 0 vs the true 9).
 
-The fix tracks the fast families in ``model._fast_constraints`` and the NLPEvaluator
-includes them, so its constraint view is complete.
+The fix makes ``model._builder_linear_blocks`` the single source of truth for the
+fast-path linear rows: the NLPEvaluator materializes them on demand via
+``Model._builder_linear_constraints()``, so its constraint view is complete for BOTH
+fast paths — ``constraint(fast=True)`` AND the direct ``add_linear_constraints`` matrix
+API — with no separate ``_fast_constraints`` mirror to fall out of sync or double-count
+once the nonlinear path materializes the rows into ``_constraints``.
 """
 
 from __future__ import annotations
 
 import discopt.modeling as dm
 import numpy as np
+import scipy.sparse as sp
 from discopt._jax.nlp_evaluator import cached_evaluator
-from discopt._jax.primal_heuristics import _check_constraint_feasibility
+from discopt._jax.primal_heuristics import _check_constraint_feasibility, is_qubo
 
 _WORKERS = ["w1", "w2", "w3"]
 _TASKS = ["a", "b", "c"]
@@ -80,3 +85,76 @@ def test_840_fast_and_slow_solve_agree():
     rs = _assignment(fast=False).solve()
     assert rf.objective == rs.objective, f"fast {rf.objective} != slow {rs.objective}"
     assert abs(rf.objective - 10.0) < 1e-6, f"#840: optimum drifted to {rf.objective}"
+
+
+def _mixed_fast_nonlinear():
+    """A fast=True indexed family mixed with a nonlinear constraint, so the model takes
+    the spatial/nonlinear path (which materializes builder rows into ``_constraints``)."""
+    m = dm.Model("mixed")
+    w = m.set("w", _WORKERS)
+    t = m.set("t", _TASKS)
+    assign = m.binary("assign", over=w * t)
+    c = m.continuous("c", lb=0, ub=5)
+    m.minimize(dm.sum(_ACOST[(i, j)] * assign[i, j] for i in w for j in t))
+    m.constraint(w, lambda i: dm.sum(assign[i, j] for j in t) == 1, name="one_task", fast=True)
+    m.constraint(t, lambda j: dm.sum(assign[i, j] for i in w) == 1, name="one_worker", fast=True)
+    m.subject_to(c * c <= 4, name="nl")
+    return m
+
+
+def test_840_no_double_count_after_materialization():
+    """Regression: the fast rows must be counted EXACTLY once. When the nonlinear path
+    materializes the builder blocks into ``_constraints``, the evaluator must still see
+    the same total — not each fast row twice (the double-count a separate mirror would
+    have caused)."""
+    m = _mixed_fast_nonlinear()
+    before = cached_evaluator(m).n_constraints
+    assert before == 7, f"#840: pre-materialize evaluator sees {before} (want 7)"
+    n = m._materialize_builder_linear_rows()
+    assert n == 6, f"#840: materialized {n} rows (want 6)"
+    after = cached_evaluator(m).n_constraints
+    assert after == 7, f"#840: post-materialize evaluator sees {after} (want 7 — double-counted?)"
+    # Idempotent: a second materialization is a no-op and does not re-inflate the count.
+    assert m._materialize_builder_linear_rows() == 0
+    assert cached_evaluator(m).n_constraints == 7
+
+
+def _direct_matrix_model():
+    """A model whose only linear constraint is added through the direct
+    ``add_linear_constraints`` matrix API (no Constraint object, no fast-indexed
+    family), plus a nonlinear constraint to force the spatial path."""
+    m = dm.Model("direct")
+    x = m.continuous("x", shape=(3,), lb=0, ub=5)
+    m.minimize(x[0] + x[1] + x[2])
+    A = sp.csr_matrix(np.array([[1.0, 1.0, 1.0]]))
+    m.add_linear_constraints(A, x, "==", np.array([3.0]), "sumeq")
+    m.subject_to(x[0] * x[1] <= 4, name="nl")
+    return m
+
+
+def test_840_direct_matrix_rows_visible_to_guard():
+    """The direct ``add_linear_constraints`` matrix API also bypasses ``_constraints``;
+    the guard/feasibility evaluator (built on the pristine model BEFORE the solver
+    materializes anything) must still see those rows, or all-zeros — which violates
+    ``x0+x1+x2==3`` — would be wrongly accepted as feasible (the same false-primal class
+    as the fast-indexed hole)."""
+    m = _direct_matrix_model()
+    ev = cached_evaluator(m)
+    assert ev.n_constraints == 2, f"#840: evaluator sees {ev.n_constraints} (want 2: nl + sumeq)"
+    assert _check_constraint_feasibility(ev, np.zeros(3), tol=1e-6) is False, (
+        "#840: all-zeros wrongly accepted — the direct-matrix row is invisible to the guard"
+    )
+    # a point on the equality plane inside the nonlinear region is feasible
+    assert _check_constraint_feasibility(ev, np.array([1.0, 1.0, 1.0]), tol=1e-6) is True
+
+
+def test_840_qubo_not_fooled_by_builder_constraints():
+    """A QUBO is UNCONSTRAINED. A binary-quadratic model carrying a builder-resident
+    linear row must NOT be misclassified as a QUBO (which would let the QUBO local
+    search treat any binary point as feasible, ignoring the constraint)."""
+    m = dm.Model("q")
+    b = m.binary("b", shape=(3,))
+    m.minimize(b[0] * b[1] + b[2])
+    A = sp.csr_matrix(np.array([[1.0, 1.0, 1.0]]))
+    m.add_linear_constraints(A, b, "<=", np.array([2.0]), "card")
+    assert is_qubo(m) is False, "#840: a constrained binary-quadratic model misread as QUBO"

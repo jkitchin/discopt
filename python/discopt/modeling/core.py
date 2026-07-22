@@ -2097,18 +2097,18 @@ class Model:
         # introduces a name also adds it here.
         self._names: set[str] = set()
         self._constraints: list[Constraint] = []
-        # #840: single-variable-affine constraint families emitted through the fast
-        # path (``constraint(fast=True)`` -> ``_try_fast_linear_family``) are NOT
-        # appended to ``_constraints`` because they are already emitted as sparse rows
-        # into the Rust builder (adding them there too would double-count them in the
-        # native solve). But the NLPEvaluator, ``_check_constraint_feasibility``, and
-        # the #772 incumbent-verification guard build their view of the model from the
-        # Constraint objects, so without this store they are BLIND to fast constraints
-        # (evaluate_constraints -> [], the guard accepts any point — the #840
-        # false-primal hole). We keep the generated Constraint objects here so those
-        # consumers see the COMPLETE constraint set, while the native solve keeps
-        # reading only the builder rows. Never fed to the builder/native path.
-        self._fast_constraints: list[Constraint] = []
+        # #840: linear families emitted through the fast paths — ``constraint(fast=True)``
+        # (via ``_try_fast_linear_family``) and the direct ``add_linear_constraints``
+        # matrix API — are NOT appended to ``_constraints``: they are emitted as sparse
+        # rows into the Rust builder and recorded on ``_builder_linear_blocks`` (adding
+        # them to ``_constraints`` too would double-count them in the native solve). The
+        # NLPEvaluator, ``_check_constraint_feasibility``, and the #772 incumbent guard
+        # build their view of the model from Constraint objects, so they would be BLIND
+        # to these rows (evaluate_constraints -> [], the guard accepts any point — the
+        # #840 false-primal hole). To close that hole for BOTH fast paths with a single
+        # source of truth, those consumers materialize the builder rows on demand via
+        # ``_builder_linear_constraints()``; the builder blocks stay the sole store, so
+        # there is no separate mirror to fall out of sync or double-count.
         self._objective: Optional[Objective] = None
         # R4: names of lifted product-factor auxes whose interval spans 0, set by
         # the factorable reform under ``DISCOPT_LIFT_ZERO_SPANNING_FACTORS`` so the
@@ -2797,11 +2797,12 @@ class Model:
 
         members = {m: c for m, c in generated}
         if fast and self._try_fast_linear_family([c for _, c in generated], name):
-            # Rows were emitted into the Rust builder; keep the Constraint objects in
-            # ``_fast_constraints`` (NOT ``_constraints`` — that would double-count them
-            # in the native solve) so the NLPEvaluator / feasibility check / #772 guard
-            # see the complete constraint set (#840). Introspection view still returned.
-            self._fast_constraints.extend(c for _, c in generated)
+            # Rows were emitted into the Rust builder (recorded on
+            # ``_builder_linear_blocks``), NOT appended to ``_constraints`` — that would
+            # double-count them in the native solve. The NLPEvaluator / feasibility check
+            # / #772 guard recover them from the builder blocks via
+            # ``_builder_linear_constraints()`` (#840), so their view stays complete
+            # without a separate mirror. Introspection view still returned.
             return IndexedConstraint(name, index_set, members, fast=True)
         for _, c in generated:
             self._constraints.append(c)
@@ -3940,6 +3941,18 @@ class Model:
         # is retained for API compatibility but no longer suppresses the withhold.
         _verify_snap = None
         if self._constraints and not _is_fast_linear_quadratic_family(self):
+            # #840: this model is genuinely nonlinear (an expression constraint plus a
+            # nonlinear objective or constraint), so it routes to spatial B&B, which
+            # materializes any builder-resident linear rows (``add_linear_constraints`` /
+            # the ``constraint(fast=True)`` fast path) into ``_constraints`` at solve time
+            # regardless. Materializing them HERE first — before the verification snapshot
+            # — means the snapshot and the solve build their evaluator on the identical
+            # ``_constraints`` (same objects, empty builder → identical fingerprint), so
+            # they share ONE compiled evaluator instead of each compiling the linear rows
+            # separately. Model-preserving (relocates rows, does not alter the feasible
+            # set); the solve-time materialization becomes a no-op.
+            if self._num_builder_constraint_rows() > 0:
+                self._materialize_builder_linear_rows()
             try:
                 from discopt._jax.nlp_evaluator import cached_evaluator
 
@@ -4237,6 +4250,48 @@ class Model:
             return 0
         return int(builtins_sum(int(A.shape[0]) for A, *_ in blocks))
 
+    def _builder_linear_constraints(self) -> list[Constraint]:
+        """Materialize the builder-resident linear rows as fresh :class:`Constraint`
+        objects **without mutating the model**.
+
+        The fast-construction paths (``add_linear_constraints`` and the
+        ``Model.constraint`` linear fast path) record their rows only on
+        ``self._builder_linear_blocks`` — never in ``self._constraints``. Consumers
+        that build a constraint view from :class:`Constraint` objects (the
+        ``NLPEvaluator``, ``_check_constraint_feasibility``, and the #772
+        incumbent-verification guard) call this to recover that missing slice, so
+        their view reflects the COMPLETE constraint set regardless of which fast path
+        produced a row (#840). This is the *read-only* counterpart to
+        ``_materialize_builder_linear_rows`` (which relocates the rows in place); both
+        share the row→Constraint translation so the two stay identical. Returns an
+        empty list once the blocks have been materialized/cleared.
+        """
+        from discopt.export._common import iter_builder_linear_rows
+
+        out: list[Constraint] = []
+        for row in iter_builder_linear_rows(self):
+            body: Optional[Expression] = None
+            for v, local, coeff in row.terms:
+                if v.shape == ():
+                    comp: Expression = v
+                elif len(v.shape) <= 1:
+                    comp = v[local]
+                else:
+                    comp = v[tuple(int(i) for i in np.unravel_index(local, v.shape))]
+                term = coeff * comp
+                body = term if body is None else body + term
+            if body is None:
+                body = Constant(np.float64(0.0))
+            if row.sense == "<=":
+                c = body <= row.rhs
+            elif row.sense == ">=":
+                c = body >= row.rhs
+            else:
+                c = body == row.rhs
+            c.name = row.name
+            out.append(c)
+        return out
+
     def _materialize_builder_linear_rows(self) -> int:
         """Rewrite builder-resident linear constraint rows as expression constraints.
 
@@ -4265,35 +4320,11 @@ class Model:
         between two internal representations without changing the feasible set,
         the objective, or ``num_constraints``.
         """
-        from discopt.export._common import iter_builder_linear_rows
-
         blocks = getattr(self, "_builder_linear_blocks", None)
         if not blocks:
             return 0
 
-        rows = iter_builder_linear_rows(self)
-        new_constraints: list[Constraint] = []
-        for row in rows:
-            body: Optional[Expression] = None
-            for v, local, coeff in row.terms:
-                if v.shape == ():
-                    comp: Expression = v
-                elif len(v.shape) <= 1:
-                    comp = v[local]
-                else:
-                    comp = v[tuple(int(i) for i in np.unravel_index(local, v.shape))]
-                term = coeff * comp
-                body = term if body is None else body + term
-            if body is None:
-                body = Constant(np.float64(0.0))
-            if row.sense == "<=":
-                c = body <= row.rhs
-            elif row.sense == ">=":
-                c = body >= row.rhs
-            else:
-                c = body == row.rhs
-            c.name = row.name
-            new_constraints.append(c)
+        new_constraints = self._builder_linear_constraints()
 
         # Reset the Rust builder so it no longer carries the constraint rows
         # (avoids a double-count in ``model_to_repr``), preserving the variable
