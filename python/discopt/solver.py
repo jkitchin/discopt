@@ -431,6 +431,29 @@ def _trivial_primal_enabled() -> bool:
     )
 
 
+def _qubo_primal_enabled() -> bool:
+    """Whether the #843 QUBO local-search primal is on (env flag, **default OFF**
+    pending the §5 differential panel).
+
+    An unconstrained binary quadratic model (``chimera_k64ising``: 1192 binary vars,
+    0 constraints, indefinite MAXIMIZE Ising) returns NO incumbent — its dense
+    B&B never lands a good binary point, and the #827 trivial seed only gave the
+    useless all-zeros floor. When on, a greedy-1opt + tabu local search on the
+    quadratic form (``primal_heuristics.qubo_local_search``) constructs a real
+    feasible incumbent (chimera-01: 7.2 vs opt 24.3) and injects it as
+    ``initial_point``. Purely primal and sound: an unconstrained QUBO has no
+    feasibility to violate (any binary point is feasible), so the dual bound /
+    certificate are untouched. Gated to the QUBO structure via
+    ``primal_heuristics.is_qubo`` (so it never fires on the JAX-free LP/MILP cold
+    -start path, which is not a QUBO)."""
+    return os.environ.get("DISCOPT_QUBO_PRIMAL", "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+
+
 # #282 iterate-root-OBBT-to-convergence (flag-gated, default OFF). The root OBBT
 # over the McCormick LP already iterates and rebuilds the envelope on the
 # tightened box each sweep (``obbt_tighten_root``), but at the default
@@ -6232,6 +6255,41 @@ def solve_model(
             f"and MIQCQP models only; "
             f"classified this model as {problem_class.value!r}."
         )
+
+    # #843: QUBO local-search primal. For an unconstrained binary quadratic model
+    # (chimera_k64ising), a greedy-1opt + tabu local search on the quadratic form lands
+    # a real feasible incumbent where the dense B&B and the #827 trivial seed find none
+    # (chimera-01: 7.2 vs opt 24.3). Runs before the generic trivial seed (more specific
+    # + far better for this structure) and ONLY when the model is a QUBO (all-binary, 0
+    # constraints, quadratic objective) — so it never touches the JAX-free LP/MILP
+    # cold-start path. Sound: any binary point is feasible (no constraints to violate),
+    # so it only ever seeds a valid incumbent; the dual bound / certificate are untouched.
+    if _qubo_primal_enabled() and initial_point is None:
+        # Detect the QUBO structure with a JAX-FREE check BEFORE importing the (JAX)
+        # heuristic — otherwise ``import primal_heuristics`` would pull JAX in on every
+        # LP/MILP solve and break the cold-start invariant (test_lazy_jax_linear_path).
+        _is_qubo_model = (
+            model._objective is not None
+            and not model._constraints
+            and not getattr(model, "_fast_constraints", None)
+            and bool(model._variables)
+            and all(
+                v.var_type in (VarType.BINARY, VarType.INTEGER)
+                and bool(np.all(np.asarray(v.lb, dtype=np.float64).ravel() == 0.0))
+                and bool(np.all(np.asarray(v.ub, dtype=np.float64).ravel() == 1.0))
+                for v in model._variables
+            )
+        )
+        if _is_qubo_model:
+            try:
+                from discopt._jax.primal_heuristics import qubo_local_search
+
+                _qubo_x = qubo_local_search(model, deadline=t_start + max(float(time_limit), 0.0))
+                if _qubo_x is not None:
+                    initial_point = _qubo_x
+                    logger.info("QUBO local-search primal seed as initial_point")
+            except Exception as _qubo_exc:  # noqa: BLE001 — best-effort primal seed
+                logger.debug("QUBO primal seed failed: %s", _qubo_exc)
 
     # #827: trivial-point primal seed. When no warm start is given, seed a feasible
     # OBVIOUS point (ball_mk2 — 30 integer vars in [-1,1] — has its optimum at the

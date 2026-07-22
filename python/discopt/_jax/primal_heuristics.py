@@ -86,6 +86,129 @@ def _get_variable_bounds(model: Model) -> tuple[np.ndarray, np.ndarray]:
     return np.concatenate(lbs), np.concatenate(ubs)
 
 
+def is_qubo(model: Model) -> bool:
+    """True if *model* is an unconstrained binary quadratic program (QUBO).
+
+    That is: every variable is binary-valued (BINARY, or INTEGER with a [0, 1]
+    box), there are no constraints (general or fast), and the objective is at most
+    quadratic. This is the ``chimera_k64ising`` / Max-Cut structure (#843). Such a
+    model has no feasibility to satisfy — *any* binary point is feasible — so a
+    quadratic-form local search is a sound, purely-primal constructor.
+    """
+    if model._constraints or getattr(model, "_fast_constraints", None):
+        return False
+    if model._objective is None:
+        return False
+    for v in model._variables:
+        if v.var_type not in (VarType.BINARY, VarType.INTEGER):
+            return False
+        lo = np.asarray(v.lb, dtype=np.float64).ravel()
+        hi = np.asarray(v.ub, dtype=np.float64).ravel()
+        if not (np.all(lo == 0.0) and np.all(hi == 1.0)):
+            return False
+    return True
+
+
+def qubo_local_search(
+    model: Model,
+    *,
+    evaluator: Optional[NLPEvaluator] = None,
+    deadline: Optional[float] = None,
+    max_starts: int = 12,
+    iters_per_start: int = 4000,
+    tenure: int = 20,
+    seed: int = 0,
+) -> Optional[np.ndarray]:
+    """Greedy-1opt + tabu local search on a binary QUBO (#843).
+
+    Minimizes the evaluator's INTERNAL objective ``½xᵀHx + cᵀx`` over ``{0,1}ⁿ`` —
+    which is exactly the internal minimize form the solver uses (negated already for
+    a MAXIMIZE), so the caller can inject the returned binary point as ``x0`` /
+    incumbent and the reported objective sense is handled by the solver as usual.
+
+    The Hessian ``H`` is constant (quadratic objective), so each 1-flip's objective
+    delta is ``δ·g + ½·H_kk`` (δ = ±1) and the gradient updates incrementally
+    (``g += δ·H[:,k]``) — O(nnz) per flip. Tabu (with an aspiration override on a new
+    global best) escapes the shallow local optima plain greedy gets stuck in. Runs
+    from zeros / ones / stratified-random starts and returns the best binary point,
+    or ``None`` if the model is not a QUBO or no point improves on all-zeros.
+
+    Purely primal and sound: an unconstrained QUBO has no feasibility to violate, so
+    any binary point is a valid incumbent; the dual bound / certificate are untouched.
+    """
+    if not is_qubo(model):
+        return None
+    ev = evaluator if evaluator is not None else cached_evaluator(model)
+    n = ev.n_variables
+    if n == 0:
+        return None
+    z = np.zeros(n, dtype=np.float64)
+    # Build the (constant, quadratic) objective Hessian from the sparse structure +
+    # values, NOT the dense ``evaluate_hessian`` — the latter is a JAX dense n×n eval
+    # (~3.5s / 1192 vars) that would blow the heuristic's budget, while
+    # hessian_structure + evaluate_hessian_values is O(nnz) (~ms). hessian_structure is
+    # the lower triangle (Ipopt convention), so symmetrize L -> L + Lᵀ - diag(L).
+    try:
+        rows, cols = (np.asarray(a, dtype=np.int64) for a in ev.hessian_structure())
+        vals = np.asarray(
+            ev.evaluate_hessian_values(z, 1.0, np.zeros(ev.n_constraints)), dtype=np.float64
+        )
+        if rows.size != vals.size:
+            return None
+        H = np.zeros((n, n), dtype=np.float64)
+        H[rows, cols] = vals
+        H = H + H.T - np.diag(np.diag(H))
+    except Exception:  # noqa: BLE001 — fall back to the dense path if the sparse API is absent
+        H = np.asarray(ev.evaluate_hessian(z), dtype=np.float64)
+        if H.shape != (n, n):
+            return None
+    c = np.asarray(ev.evaluate_gradient(z), dtype=np.float64)
+    Hdiag = np.diag(H)
+
+    def one_pass(x0: np.ndarray, iters: int) -> tuple[np.ndarray, float]:
+        x = x0.astype(np.float64).copy()
+        g = H @ x + c
+        cur = 0.5 * x @ H @ x + c @ x
+        best, bestx = cur, x.copy()
+        tabu_until = np.full(n, -1, dtype=np.int64)
+        for it in range(iters):
+            delta = 1.0 - 2.0 * x
+            dobj = delta * g + 0.5 * Hdiag  # Δ internal objective per flip
+            allowed = np.where(tabu_until <= it, dobj, np.inf)
+            aspire = np.where(cur + dobj < best - 1e-9, dobj, np.inf)  # override tabu on new best
+            pick = np.minimum(allowed, aspire)
+            k = int(np.argmin(pick))
+            if not np.isfinite(pick[k]):
+                k = int(np.argmin(dobj))
+            d = delta[k]
+            x[k] = 1.0 - x[k]
+            cur += dobj[k]
+            g = g + d * H[:, k]
+            tabu_until[k] = it + tenure
+            if cur < best - 1e-9:
+                best, bestx = cur, x.copy()
+        return bestx, best
+
+    rng = np.random.default_rng(seed)
+    starts = [z, np.ones(n)]
+    starts += [(rng.random(n) > 0.5).astype(np.float64) for _ in range(max(0, max_starts - 2))]
+    best_x: Optional[np.ndarray] = None
+    best_internal = np.inf
+    for i, x0 in enumerate(starts):
+        # Always run the first (zeros) pass — the Hessian/gradient extraction above is a
+        # one-time JAX compile that can exceed a tight deadline, and returning a good
+        # incumbent matters more than never overrunning by one cheap local search.
+        if i > 0 and deadline is not None and time.perf_counter() >= deadline:
+            break
+        xb, ib = one_pass(x0, iters_per_start)
+        if ib < best_internal - 1e-9:
+            best_internal, best_x = ib, xb
+    # Only return a point that beats the trivial all-zeros incumbent (internal 0.0).
+    if best_x is None or best_internal >= -1e-9:
+        return None
+    return best_x
+
+
 def _generate_starts(
     lb: np.ndarray,
     ub: np.ndarray,
