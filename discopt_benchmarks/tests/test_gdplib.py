@@ -125,6 +125,43 @@ def test_jobshop_oracle_is_highs():
     assert run.oracle_objective == pytest.approx(11.0, abs=1e-2)
 
 
+def test_highs_declines_when_not_optimal(monkeypatch):
+    """HiGHS is trusted as the equality oracle only on a *proven* optimum (#823 #1).
+
+    A non-optimal termination (time limit hit, interrupted) must yield ``None`` — a
+    bare incumbent, if trusted, would flag discopt's correct optimum as an
+    impossible incumbent. The corpus's linear models solve instantly (jobshop is
+    optimal even at ``time_limit=0``), so the interrupted path is injected here.
+    """
+    import types
+
+    import pyomo.environ as pyo
+    from pyomo.opt import TerminationCondition
+
+    class _FakeHighs:
+        def __init__(self):
+            self.config = types.SimpleNamespace(time_limit=None)
+
+        def available(self, exception_flag=False):
+            return True
+
+        def solve(self, m):
+            # Load a bare (garbage) incumbent, as an interrupted MILP solve would:
+            # without the optimality gate this value would be returned and wrongly
+            # trusted as the oracle. With the gate, the non-optimal status wins.
+            for v in m.component_data_objects(pyo.Var, active=True):
+                v.set_value(v.lb if v.lb is not None else 0.0, skip_validation=True)
+            results = types.SimpleNamespace()
+            results.solver = types.SimpleNamespace(
+                termination_condition=TerminationCondition.maxTimeLimit
+            )
+            return results
+
+    monkeypatch.setattr(pyo, "SolverFactory", lambda name: _FakeHighs())
+    obj = gr._solve_with_highs(_spec("jobshop"), method="bigm", time_limit=0.0)
+    assert obj is None
+
+
 # ── classification & robustness ─────────────────────────────────────────────
 
 

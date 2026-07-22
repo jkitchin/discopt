@@ -441,9 +441,19 @@ def _attach_oracle(run: ModelRun, spec: GDPModelSpec, method: str, time_limit: f
 
 
 def _solve_with_highs(spec: GDPModelSpec, method: str, time_limit: float) -> float | None:
-    """Solve the (linear) reformulation with HiGHS as an independent oracle."""
+    """Solve the (linear) reformulation with HiGHS as an independent oracle.
+
+    Returns HiGHS's objective **only if HiGHS proved global optimality** within
+    ``time_limit`` (termination ``optimal``); otherwise ``None``. An unconverged or
+    interrupted MILP solve yields only a suboptimal incumbent, never a certified
+    optimum — trusting it as the equality oracle would flag discopt's *correct*
+    optimum as an impossible incumbent (issue #823 review, finding #1). The
+    optimality gate and time limit mirror the SCIP oracle path so both oracles are
+    equally rigorous.
+    """
     import pyomo.environ as pyo
     from pyomo.core import TransformationFactory
+    from pyomo.opt import TerminationCondition
 
     try:
         solver = pyo.SolverFactory("appsi_highs")
@@ -451,7 +461,12 @@ def _solve_with_highs(spec: GDPModelSpec, method: str, time_limit: float) -> flo
             return None
         m = spec.builder()
         TransformationFactory(f"gdp.{method}").apply_to(m)
-        solver.solve(m)
+        # Bound HiGHS's runtime so a hard MILP cannot hang the sweep, and demand a
+        # proven optimum (default rel/abs MIP gaps ≈ 0) before trusting the value.
+        solver.config.time_limit = float(time_limit)
+        results = solver.solve(m)
+        if results.solver.termination_condition != TerminationCondition.optimal:
+            return None
         return _objective_value(m)
     except Exception:  # noqa: BLE001
         return None
