@@ -179,59 +179,81 @@ Sizes are the *reformulated* (`gdp.bigm`) model; `class` is discopt-relevant
 | kaibel, mod_hens | — | — | ERR | build needs ipopt |
 | reverse_electrodialysis | — | — | ERR | build needs GAMS |
 
-## discopt vs SCIP (12 small models, big-M, 60 s each)
+## discopt vs SCIP vs BARON (12 small models, big-M, 60 s each)
 
-Both solvers read the **same** big-M `.nl`, so this is a fair head-to-head. SCIP 10
-(via `pyscipopt`) is the oracle; its proven optima seed `reference_optima()`.
-Re-run **2026-07-22** after the recent performance work; the parenthetical is the
-prior result (PR #825, the numbers this table replaces). Reproduce with
-`python scripts/reeval_gdplib.py` (see below).
+Re-run **2026-07-22** after the recent performance work. discopt and SCIP
+(`pyscipopt`) read the same big-M `.nl`; BARON is run via GAMS (`optcr=0`) as an
+independent third global solver. `reference optimum` is the value **both BARON and
+SCIP prove** (see the cstr correction below). Reproduce discopt/SCIP with
+`python scripts/reeval_gdplib.py`.
 
-| model | discopt outcome | discopt obj | discopt s | SCIP | SCIP obj | SCIP s |
-|---|---|---:|---:|---|---:|---:|
-| jobshop | **optimal** | 11.0 | 0.1 | optimal | 11.0 | 0.0 |
-| ex1_linan_2023 | **optimal** | −0.9996 | 8.7 | optimal | −0.9996 | 0.0 |
-| positioning | **optimal** *(was feasible-loose)* | −8.06414 | 10.9 | optimal | −8.06414 | 0.5 |
-| small_batch | **optimal** *(was no incumbent)* | 167427.65 | 11.4 | optimal | 167427.65 | 0.0 |
-| modprodnet | **optimal** *(was no incumbent)* | 3592.92 | 25.3 | optimal | 3592.92 | 0.1 |
-| spectralog | found opt, not proven *(was none)* | 12.0893 | 60.4 | optimal | 12.0893 | 8.9 |
-| water_network | found opt, not proven *(was none)* | 348337.04 | 63.2 | optimal | 348337.04 | 6.3 |
-| cstr | feasible-loose (+0.25 %) | 3.06202 | 61.2 | optimal | 3.05431 | 16.4 |
-| syngas | no incumbent | — | 89.0 | optimal | 4669.02 | 4.1 |
-| batch_processing | no incumbent | — | 63.2 | timelimit | 679365 | 60.2 |
-| methanol | feasible, **beats SCIP incumbent** | −1793.43 | 61.8 | timelimit | −1574.57 | 60.0 |
-| gdp_col | feasible, **beats SCIP incumbent** | 20100.3 | 65.9 | timelimit | 22283.5 | 60.0 |
+Legend: **opt** = proven optimal (gap 0); *feas* = feasible incumbent, not proven;
+*inc* = incumbent only (time limit, gap open); — = no incumbent.
 
-**discopt now: 5/12 proven optimal, 2 more reach the true optimum without closing the
-gap, 1 near-optimal feasible, 2 no incumbent — 0 soundness violations.** On the two
-models neither solver certifies (methanol, gdp_col) discopt returns a *strictly
-better* feasible incumbent than SCIP's 60 s incumbent (min sense; neither proven).
-**SCIP: 9/12 proven optimal** (unchanged). Prior baseline was discopt 2/12 optimal,
-2 loose-feasible, 8 no incumbent — the recent perf work moved 5 models from
-no-incumbent/loose into proven-or-optimal territory.
+| model | reference opt | discopt | s | SCIP (pyscipopt) | s | BARON (GAMS) | s |
+|---|---:|---|---:|---|---:|---|---:|
+| jobshop | 11.0 | **opt** 11.0 | 0.1 | opt 11.0 | 0.0 | opt 11.0 | 1.2 |
+| ex1_linan_2023 | −0.9996 | **opt** −0.9996 | 8.7 | opt −0.9996 | 0.0 | opt −0.9996 | 0.9 |
+| positioning | −8.06414 | **opt** −8.06414 | 10.9 | opt −8.06414 | 0.5 | opt −8.06414 | 1.2 |
+| small_batch | 167427.65 | **opt** 167427.65 | 11.4 | opt 167427.65 | 0.0 | opt 167427.66 | 0.9 |
+| modprodnet | 3592.92 | **opt** 3592.92 | 25.3 | opt 3592.92 | 0.1 | opt 3592.92 | 1.1 |
+| cstr | **3.06201** | *feas* 3.06202 | 61.2 | **opt 3.05431 ⚠ false** | 16.4 | opt 3.06201 | 8.7 |
+| spectralog | 12.0893 | *feas* 12.0893 | 60.4 | opt 12.0893 | 8.9 | opt 12.0893 | 1.4 |
+| water_network | 348337.04 | *feas* 348337.04 | 63.2 | opt 348337.04 | 6.3 | opt 348337.04 | 22.8 |
+| syngas | 4669.02 | — | 89.0 | opt 4669.02 | 4.1 | opt 4669.02 | 1.7 |
+| batch_processing | 679365.33 | — | 63.2 | *inc* 679365 | 60.2 | opt 679365.33 | 41.9 |
+| methanol | *(unproven)* | *feas* −1793.43 | 61.8 | *inc* −1574.57 | 60.0 | *inc* −1793.43 | 61.9 |
+| gdp_col | *(unproven)* | *feas* 20100.3 | 65.9 | *inc* 22283.5 | 60.0 | *inc* 20008.7 | 61.2 |
+
+**Score (12 models): discopt** — 5 proven optimal, 3 more *reach* the reference
+optimum without closing the gap (cstr, spectralog, water_network), 1 matches the
+best-known unproven incumbent (methanol), 2 no incumbent (syngas, batch_processing),
+1 slightly-worse incumbent (gdp_col). **SCIP (pyscipopt)** — 9 proven (one, cstr, is
+a *false* optimum, see below), 3 time-limit incumbents. **BARON** — 10 proven
+(everything except methanol/gdp_col, where it returns the best incumbent). **0 discopt
+soundness violations.** Prior baseline (PR #825) was discopt 2/12 optimal — the perf
+work moved 5 models into proven-optimal and 3 more onto the true optimum.
+
+### ⚠ Correctness finding: a false SCIP optimum on cstr (and a wrong seed it produced)
+
+The `_solve_with_scip` oracle (pyscipopt reading a hand-written `.nl`) reported
+**cstr = 3.0543 with gap 0** — but that is *below* the true minimum. Two independent
+solvers through a solution-loadable path (**BARON and SCIP, both via GAMS**) prove
+**3.0620** with a pyomo-verified feasible point (max constraint violation ~1e-6), and
+discopt's own incumbent agrees at 3.0620. So pyscipopt-via-`.nl` solved a
+mis-encoded/relaxed cstr yet certified it — a classic false optimum. Consequences and
+actions:
+
+- `reference_optima()["cstr"]` is corrected `3.0543118 → 3.0620073` (BARON-proven).
+  Every *other* seed was re-verified against BARON's independent proof and confirmed.
+- discopt's cstr result was therefore **correct all along** (it found the true 3.0620,
+  just didn't prove it) — the earlier "feasible-loose" label was an artifact of the
+  false reference, now fixed.
+- **The `pyscipopt`-`.nl` oracle path can seed a below-true value**, which as a
+  minimize oracle can *mask* a real discopt false primal — a soundness-surveillance
+  hole. Hardening it (use the GAMS path that loads a pyomo-verifiable solution, or
+  cross-check every seed against BARON) is the priority oracle follow-up on #823.
 
 ## Findings & limitations
 
-- **Sound throughout, and now competitive on the small subset.** Every discopt result
-  is on the correct side of SCIP's bound; where both prove optimality they agree to
-  the digit, and discopt's feasible-only incumbents sit on the valid side of the
-  optimum. **Zero soundness violations** across the sweep — the certification-gap
-  story has narrowed substantially on this class since PR #825, not by weakening any
-  check.
-- **A strong primal on the hardest two.** On methanol and gdp_col — which SCIP cannot
-  certify in 60 s — discopt's incumbent beats SCIP's. These have **no certified
-  optimum**, so this is "better incumbent, still unproven," not a proven win; they are
-  the priority for a longer SCIP/BARON run to certify (and to confirm feasibility
-  independently), and are deliberately absent from `reference_optima()`.
-- **The remaining gap is dual-side + time-limit, not primal.** spectralog and
-  water_network *find* the certified optimum but do not prove it in 60 s (a bounding
-  gap, [#818](https://github.com/jkitchin/discopt/issues/818)); syngas and
+- **Sound throughout, and now competitive on the small subset.** Where discopt proves
+  optimality it agrees with BARON to the digit; its feasible-only incumbents sit on
+  the valid side of the true optimum. **Zero discopt soundness violations** — the
+  certification-gap story has narrowed substantially since PR #825, without weakening
+  any check. (The one false optimum on the sweep was SCIP's, not discopt's.)
+- **A strong primal on the hardest two.** On methanol and gdp_col — which neither SCIP
+  nor BARON certifies in 60 s — discopt matches BARON's best incumbent on methanol and
+  is within 0.5 % on gdp_col, both far ahead of SCIP's incumbent. No certified optimum
+  exists yet, so this is "strong incumbent, still unproven"; a longer BARON/SCIP run to
+  certify is the priority.
+- **The remaining gap is dual-side, not primal, on most of the set.** cstr, spectralog
+  and water_network *find* the reference optimum but do not prove it in 60 s (a bounding
+  gap, [#818](https://github.com/jkitchin/discopt/issues/818)); only syngas and
   batch_processing still find no incumbent (the [#817](https://github.com/jkitchin/discopt/issues/817)
   primal gap). Mild time-limit overruns persist (most within a few s of 60 s; syngas
-  the worst at 89 s) — the [#814](https://github.com/jkitchin/discopt/issues/814)
-  behavior, now much smaller than the prior "blew past a 5 s budget" framing.
-- **The oracle gap is closed for the small nonlinear subset** via SCIP; the larger
-  models (biofuel, stranded_gas, grid) still need a longer SCIP budget to certify.
+  worst at 89 s) — the [#814](https://github.com/jkitchin/discopt/issues/814) behavior.
+- **The oracle gap is closed for the small nonlinear subset** via BARON+SCIP; the
+  larger models (biofuel, stranded_gas, grid) still need a longer budget to certify.
 
 ## Suggested next steps
 

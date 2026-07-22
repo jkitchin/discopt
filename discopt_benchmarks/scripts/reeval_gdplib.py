@@ -6,8 +6,12 @@ fixed wall budget, and classifies discopt's outcome against the SCIP-certified
 :func:`benchmarks.gdplib_runner.reference_optima`. Requires the ``[gdplib]`` extra
 plus ``pyscipopt``; run from ``discopt_benchmarks/``::
 
-    python scripts/reeval_gdplib.py                 # 60 s/solve (default)
+    python scripts/reeval_gdplib.py                 # discopt + SCIP, 60 s/solve
+    REEVAL_BARON=1 python scripts/reeval_gdplib.py  # add BARON via GAMS (needs GAMS)
     REEVAL_LIMIT=120 REEVAL_METHOD=hull python scripts/reeval_gdplib.py
+
+BARON is a third, independent global solver: it run cstr through a solution-loadable
+path that exposed the pyscipopt-``.nl`` false optimum (3.0543 vs the true 3.0620).
 """
 
 from __future__ import annotations
@@ -81,6 +85,46 @@ def scip_solve(spec, method, time_limit):
                 "wall": None, "proved": False}
 
 
+def baron_solve(spec, method, time_limit):
+    """BARON via GAMS as an independent third global solver (None if GAMS absent).
+
+    GAMS loads the solution back into the pyomo model, so BARON's incumbent is
+    feasibility-checkable here — the property that caught the pyscipopt-``.nl`` false
+    optimum on cstr. ``proved`` requires a genuinely closed gap (``lb == ub``); GAMS
+    can label a time-limit incumbent ``optimal``, so we check the bounds, not the tag.
+    """
+    import pyomo.environ as pyo
+    from pyomo.core import TransformationFactory
+
+    try:
+        gams = pyo.SolverFactory("gams")
+        if not gams.available(exception_flag=False):
+            return None
+        m = spec.builder()
+        TransformationFactory(f"gdp.{method}").apply_to(m)
+        t0 = time.time()
+        res = gams.solve(
+            m, solver="baron",
+            add_options=[f"option reslim={time_limit}; option optcr=1e-6;"], tee=False,
+        )
+        wall = time.time() - t0
+        try:
+            obj = float(pyo.value(next(m.component_data_objects(pyo.Objective, active=True))))
+        except Exception:
+            obj = None
+        prob = res.problem[0]
+        lb, ub = getattr(prob, "lower_bound", None), getattr(prob, "upper_bound", None)
+        proved = (
+            lb is not None and ub is not None
+            and abs(float(lb) - float(ub)) <= 1e-4 + 1e-4 * abs(float(ub))
+        )
+        return {"status": str(res.solver.termination_condition), "obj": obj,
+                "wall": wall, "proved": proved}
+    except Exception as exc:  # noqa: BLE001
+        return {"status": f"error:{type(exc).__name__}", "obj": None,
+                "wall": None, "proved": False}
+
+
 def classify(name, run):
     ref = REF.get(name)
     r = run.discopt
@@ -101,9 +145,13 @@ def classify(name, run):
 
 
 def main():
+    use_baron = os.environ.get("REEVAL_BARON") == "1"
     rows = []
-    print(f"# discopt vs SCIP on GDPlib ({METHOD}, {TIME_LIMIT:.0f}s/solve)\n")
+    title = "discopt vs SCIP" + (" vs BARON" if use_baron else "")
+    print(f"# {title} on GDPlib ({METHOD}, {TIME_LIMIT:.0f}s/solve)\n")
     hdr = f"{'model':18s} {'certified':>12s} | {'discopt':>28s} | {'SCIP':>26s}"
+    if use_baron:
+        hdr += f" | {'BARON':>22s}"
     print(hdr)
     print("-" * len(hdr))
     for name in MODELS:
@@ -128,13 +176,23 @@ def main():
             s_cell = f"{s_flag:8s} {s_obj:>9s} {s_wall:>6s}"
         else:
             s_cell = "n/a"
-        print(f"{name:18s} {ref_s:>12s} | {d_cell:>28s} | {s_cell:>26s}")
+        line = f"{name:18s} {ref_s:>12s} | {d_cell:>28s} | {s_cell:>26s}"
+        baron = baron_solve(spec, METHOD, TIME_LIMIT) if use_baron else None
+        if use_baron:
+            if baron and baron["obj"] is not None:
+                b_flag = "opt" if baron["proved"] else baron["status"][:8]
+                b_wall = f"{baron['wall']:.1f}s" if baron["wall"] is not None else "—"
+                b_cell = f"{b_flag:8s} {baron['obj']:>9.6g} {b_wall:>6s}"
+            else:
+                b_cell = "n/a"
+            line += f" | {b_cell:>22s}"
+        print(line)
         rows.append({
             "model": name, "certified": ref, "discopt_class": cls,
             "discopt_status": d.status.value, "discopt_obj": d.objective,
             "discopt_wall": d.wall_time, "discopt_nodes": d.node_count,
             "false_optimum": run.false_optimum, "bound_crosses": run.bound_crosses,
-            "scip": scip,
+            "scip": scip, "baron": baron,
         })
 
     n = len(rows)

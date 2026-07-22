@@ -178,13 +178,16 @@ def test_reference_optima_seed_is_sane():
 
     ref = gr.reference_optima()
     assert ref.get("jobshop") == pytest.approx(11.0)
-    # SCIP-certified nonlinear seeds are present and finite.
+    # BARON-confirmed nonlinear seeds are present and finite.
     for name in ("positioning", "cstr", "small_batch", "syngas", "water_network"):
         assert name in ref
         assert math.isfinite(ref[name])
-    assert ref["cstr"] == pytest.approx(3.0543118, abs=1e-4)
-    # Models SCIP did NOT prove within budget must not be seeded.
-    for unproven in ("methanol", "batch_processing", "gdp_col"):
+    # cstr: BARON-proven 3.0620 (pyscipopt-.nl's 3.0543 was a false optimum, #823).
+    assert ref["cstr"] == pytest.approx(3.0620073, abs=1e-3)
+    assert ref["cstr"] > 3.0543118, "cstr must be the true optimum, not the below-true false value"
+    # batch_processing is BARON-certified; methanol/gdp_col remain unproven and unseeded.
+    assert ref["batch_processing"] == pytest.approx(679365.33, rel=1e-4)
+    for unproven in ("methanol", "gdp_col"):
         assert unproven not in ref
 
 

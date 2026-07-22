@@ -181,11 +181,23 @@ def reference_optima() -> dict[str, float]:
     models HiGHS cannot check (nonlinear). Extend this as values are verified — a
     seed here is a *regression anchor*, not a target to tune toward.
 
-    All entries below were certified by **SCIP 10** (``gap = 0``) on the big-M
-    reformulation, and the optimum of a GDP is method-independent, so the same
-    value anchors both big-M and hull. Models where SCIP did *not* prove optimality
-    within its budget (methanol, batch_processing, gdp_col) are deliberately absent
-    — an unproven incumbent is not a certified optimum and must never seed an oracle.
+    Every entry is **independently confirmed by BARON** (via GAMS, ``optcr=0``,
+    ``lb == ub``) as well as SCIP, and a GDP's optimum is reformulation-independent,
+    so the same value anchors both big-M and hull. Models neither solver proves
+    within budget (methanol, gdp_col) are deliberately absent — an unproven incumbent
+    is not a certified optimum and must never seed an oracle.
+
+    **cstr correction (2026-07-22):** the value here was originally ``3.0543118``,
+    taken from the ``_solve_with_scip`` path (pyscipopt reading a hand-written
+    ``.nl``). That path returned a *false optimum* for cstr — ``3.0543 < 3.0620``,
+    i.e. **below** the true minimum — apparently solving a mis-encoded/relaxed model
+    yet reporting ``gap = 0``. Two independent solvers via a solution-loadable path
+    (BARON and SCIP, both through GAMS) prove ``3.0620`` with a pyomo-verified
+    feasible point (max constraint violation ~1e-6), and discopt's own incumbent
+    agrees. The seed is corrected to the BARON-proven value. Lesson: a single
+    solver's "proven optimal" through a lossy file path is not trustworthy; the
+    ``_solve_with_scip`` oracle can seed a below-true value and must be cross-checked
+    (tracked for the oracle-hardening follow-up on #823).
     """
     return {
         # jobshop is also HiGHS-checkable (linear); the rest are nonlinear GDPs.
@@ -193,11 +205,12 @@ def reference_optima() -> dict[str, float]:
         "ex1_linan_2023": -0.9995999999999999,
         "positioning": -8.064136166293226,
         "small_batch": 167427.6515668371,
-        "cstr": 3.0543118059526293,
+        "cstr": 3.0620073,  # BARON-proven; pyscipopt-.nl gave a false 3.0543 (see docstring)
         "spectralog": 12.089261322767793,
         "syngas": 4669.0234827946,
         "water_network": 348337.03671302047,
         "modprodnet": 3592.924373781839,
+        "batch_processing": 679365.33,  # BARON-certified (SCIP left it unproven at 60s)
     }
 
 
