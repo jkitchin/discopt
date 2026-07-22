@@ -33,7 +33,15 @@ _IPOPT_STATUS_MAP: dict[int, SolveStatus] = {
     0: SolveStatus.OPTIMAL,  # Solve_Succeeded
     1: SolveStatus.OPTIMAL,  # Solved_To_Acceptable_Level
     2: SolveStatus.ERROR,  # Infeasible_Problem_Detected (local only)
-    3: SolveStatus.UNBOUNDED,  # Search_Direction_Becomes_Too_Small
+    # Ipopt code 3 = Search_Direction_Becomes_Too_Small: the IPM stalled on a tiny
+    # step, typically AT/near a local solution it cannot certify to tolerance — NOT
+    # unboundedness (that is code 4, Diverging_Iterates). Mapping it to UNBOUNDED made
+    # a converged-but-uncertified node look like an unbounded relaxation, which a local
+    # NLP can never prove; on jit1's B&B nodes this produced a false UNBOUNDED cascade
+    # (pounce#257/#258) that forced a cyipopt-retry workaround. Treat it as a
+    # non-converged limit — the B&B handles it soundly (non-pruning, uncertified),
+    # never as a false unbounded verdict.
+    3: SolveStatus.ITERATION_LIMIT,  # Search_Direction_Becomes_Too_Small (stalled, not unbounded)
     4: SolveStatus.ERROR,  # Diverging_Iterates
     5: SolveStatus.ERROR,  # User_Requested_Stop
     6: SolveStatus.ERROR,  # Feasible_Point_Found (not optimal)

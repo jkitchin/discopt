@@ -161,7 +161,7 @@ jobs:
           uv pip install maturin
           uv pip install \
             jax jaxlib numpy scipy highspy cyipopt openpyxl scikit-learn pyyaml \
-            pounce-solver \
+            "pounce-solver @ git+https://github.com/jkitchin/pounce.git@main#subdirectory=python" \
             pytest pytest-timeout pytest-xdist
           maturin develop
       - name: Run pytest (PR-fast, parallel)
@@ -241,7 +241,7 @@ jobs:
           uv pip install maturin
           uv pip install \
             jax jaxlib numpy scipy highspy cyipopt openpyxl scikit-learn pyyaml \
-            pounce-solver \
+            "pounce-solver @ git+https://github.com/jkitchin/pounce.git@main#subdirectory=python" \
             pytest pytest-timeout pytest-xdist
           maturin develop
       - name: Run pytest (fast correctness, serial)
@@ -302,7 +302,7 @@ jobs:
           uv pip install maturin
           uv pip install \
             jax jaxlib numpy scipy highspy openpyxl scikit-learn pyyaml \
-            pounce-solver \
+            "pounce-solver @ git+https://github.com/jkitchin/pounce.git@main#subdirectory=python" \
             pytest pytest-timeout pytest-xdist
           maturin develop
       - name: Run pytest (claim-boundary, serial)
@@ -372,7 +372,7 @@ jobs:
           uv pip install maturin
           uv pip install \
             jax jaxlib numpy scipy highspy cyipopt openpyxl scikit-learn pyyaml \
-            pounce-solver \
+            "pounce-solver @ git+https://github.com/jkitchin/pounce.git@main#subdirectory=python" \
             sympy pyomo litellm equinox optax onnx onnxruntime xgboost lightgbm \
             pytest pytest-timeout pytest-xdist pytest-cov
           maturin develop

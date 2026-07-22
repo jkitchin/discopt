@@ -40,7 +40,7 @@ jobs:
           source .venv/bin/activate
           pip install maturin
           pip install numpy scipy "jax[cpu]" pytest pytest-timeout
-          pip install pounce-solver || echo "pounce-solver unavailable; cert panel may skip nonlinear instances"
+          pip install "pounce-solver @ git+https://github.com/jkitchin/pounce.git@main#subdirectory=python" || echo "pounce-solver unavailable; cert panel may skip nonlinear instances"
           maturin develop --release
       - name: Run the graduation gate CI subset (cert-neutrality + incorrect_count)
         run: |

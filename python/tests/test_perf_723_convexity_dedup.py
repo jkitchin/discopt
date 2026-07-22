@@ -62,7 +62,11 @@ def test_convexity_dedup_on_nlp_bb_path(monkeypatch):
     # count is platform-FP-dependent for this nonconvex instance (39 local vs 41
     # CI), so here we only assert it did not blow up.
     assert res.node_count < 100
-    assert res.objective == pytest.approx(331837498.18201387, rel=1e-9)
+    # Optimum pinned to the solver's actual tolerance (abs=1e-6, rel=1e-4), not a
+    # spurious 1e-9: pounce#258 (refuse a certificate masked by extreme objective
+    # scale, continue to the true minimum) legitimately shifted the last digits on
+    # this ~3.3e8-scale nonconvex objective (331837498.18 -> 331837497.84, ~1e-9 rel).
+    assert res.objective == pytest.approx(331837498.18201387, rel=1e-6)
     # Pre-#723 this was 4; the dedup brings it to 2 (one per solve_model entry).
     assert calls["n"] <= 2, f"convexity classified {calls['n']}x (expected <= 2)"
 
