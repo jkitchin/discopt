@@ -11573,6 +11573,11 @@ def _resolve_heuristic_backend(nlp_solver: str) -> Optional[Callable]:
 # rejected, yet a non-stationary termination (O(0.1)–O(1)) is always caught.
 _KKT_STATIONARITY_REL_TOL = 1e-4
 
+# Golden-section iterations for the box dual-gap refutation line search (#853).
+# ~50 narrows the bracket to ~1e-10 of the segment — ample to expose a real
+# descent (the failure it targets drops the objective by O(1), not O(1e-10)).
+_FW_LINE_SEARCH_ITERS = 50
+
 
 def _convex_nlp_certificate_gap(
     evaluator: "NLPEvaluator",
@@ -11583,6 +11588,7 @@ def _convex_nlp_certificate_gap(
     cl: np.ndarray,
     cu: np.ndarray,
     obj_internal: Optional[float],
+    gap_tolerance: float = 1e-6,
 ) -> Optional[tuple[float, float]]:
     """Recompute the *unscaled* KKT optimality residuals of a convex single-NLP.
 
@@ -11679,6 +11685,80 @@ def _convex_nlp_certificate_gap(
 
     f_scale = 1.0 + (abs(float(obj_internal)) if obj_internal is not None else 0.0)
     complementarity_rel = comp / f_scale
+
+    # --- Sound better-point refutation over the box (issue #853) ---
+    # ``stationarity_rel`` above uses a UNIT step, so an interior point of a convex
+    # objective whose gradient asymptotically vanishes (e.g. min -log(x): ∇f = -1/x
+    # → 0) reads as stationary even though the true minimum sits at a distant box
+    # bound in the descent direction — a false certificate whose dual bound crosses
+    # the true optimum. The reduced Lagrangian gradient ``reduced`` still points
+    # along genuine descent there. Under convexity the box-minimum of the Lagrangian
+    # L(y)=f(y)+λ·c(y) is the valid dual bound d(λ); if we can EXHIBIT a feasible box
+    # point y with L(y) < L(x) − tol, then f(x)−d(λ) > tol and these multipliers do
+    # NOT certify x. Move each coordinate to the finite bound ``reduced`` points
+    # toward (the Frank–Wolfe vertex) and 1-D-minimize L along the segment. This only
+    # ever returns None (caller withholds) and only with an exhibited witness, so it
+    # cannot create a false certificate; and because it reads the ACTUAL L, a
+    # spurious direction from a near-zero (numerically noisy) gradient finds no real
+    # descent and does not fire — a genuine optimum, which has no better feasible
+    # point, is never rejected.
+    y_fw = x.copy()
+    moved = False
+    for j in range(n):
+        rj = float(reduced[j])
+        if rj > 0.0 and np.isfinite(lb_c[j]) and lb_c[j] < x[j]:
+            y_fw[j] = lb_c[j]
+            moved = True
+        elif rj < 0.0 and np.isfinite(ub_c[j]) and ub_c[j] > x[j]:
+            y_fw[j] = ub_c[j]
+            moved = True
+    if moved:
+        d = y_fw - x
+        # Linearized (Frank–Wolfe) gap UPPER-bounds the true box gap of the convex
+        # Lagrangian, so if even it is within tolerance no witness can exist — skip
+        # the search. Otherwise a real descent may be present; confirm with L.
+        fw_lin_gap = -float(reduced @ d)
+        lam_cons0 = float(lam @ cons) if m > 0 else 0.0
+        L0 = (
+            float(obj_internal)
+            if obj_internal is not None
+            else float(evaluator.evaluate_objective(x))
+        ) + lam_cons0
+        margin = max(gap_tolerance, 1e-6) * (1.0 + abs(L0))
+        if fw_lin_gap > margin:
+
+            def _lag(t: float) -> float:
+                y = x + t * d
+                val = float(evaluator.evaluate_objective(y))
+                if m > 0:
+                    val += float(lam @ np.asarray(evaluator.evaluate_constraints(y), np.float64))
+                return val if np.isfinite(val) else np.inf
+
+            # Golden-section minimization of the convex map t ↦ L(x + t·d) on [0, 1];
+            # ``best`` is a valid upper bound on min_box L. The FW vertex (t=1) is
+            # probed explicitly so a monotone-to-the-bound descent is always caught.
+            gr = 0.6180339887498949
+            a, b = 0.0, 1.0
+            c_ = b - gr * (b - a)
+            e_ = a + gr * (b - a)
+            fc, fe = _lag(c_), _lag(e_)
+            best = min(L0, _lag(1.0), fc, fe)
+            for _ in range(_FW_LINE_SEARCH_ITERS):
+                if fc < fe:
+                    b, e_, fe = e_, c_, fc
+                    c_ = b - gr * (b - a)
+                    fc = _lag(c_)
+                else:
+                    a, c_, fc = c_, e_, fe
+                    e_ = a + gr * (b - a)
+                    fe = _lag(e_)
+                best = min(best, fc, fe)
+            if L0 - best > margin:
+                # An in-box point beats the incumbent Lagrangian by more than the
+                # optimality tolerance: the dual bound these multipliers support is
+                # more than tol below f(x). Withhold the certificate.
+                return None
+
     return stationarity_rel, complementarity_rel
 
 
@@ -11829,6 +11909,7 @@ def _solve_continuous(
                 np.asarray(_cl_g, dtype=np.float64),
                 np.asarray(_cu_g, dtype=np.float64),
                 nlp_result.objective,
+                gap_tolerance=gap_tolerance,
             )
         except Exception as _cert_exc:  # pragma: no cover - defensive
             # A failure to *evaluate* the certificate cannot be allowed to crash an
