@@ -88,6 +88,36 @@ def test_neglog_scale_sweep_is_sound(ub):
     _assert_sound(f"ub={ub:.0e}", r, -math.log(ub))
 
 
+@pytest.mark.parametrize("solver", ["ipm", "ipopt", "pounce"])
+def test_neglog_default_box_not_false_optimal(solver):
+    """Sibling of #853 found in Round-6 re-testing: the DEFAULT/large box escaped the
+    first fix because the Frank-Wolfe refutation capped finite bounds at 1e19, so the
+    default ub=9.999e19 (a real finite bound per #850) formed no vertex and the
+    interior stall was certified at -18.97 vs the true -46.05 (bound crossing by 27).
+    ``min -log(x)`` with lb=1 and NO explicit ub must not be certified optimal."""
+    m = dm.Model("neg_log_default")
+    x = m.continuous("x", lb=1.0)  # default ub = 9.999e19 (< 1e20, a finite bound)
+    m.minimize(-dm.log(x))
+    r = m.solve(nlp_solver=solver)
+    _assert_sound("default-box", r, -math.log(9.999e19))
+    assert not (r.status == "optimal" and r.gap_certified), (
+        f"default box: still emits a certificate (status={r.status}, "
+        f"gap_certified={r.gap_certified}, obj={r.objective!r})"
+    )
+
+
+@pytest.mark.parametrize("ub", [1e19, 5e19, 9e19], ids=lambda v: f"ub={v:.0e}")
+def test_neglog_large_finite_box_not_false_optimal(ub):
+    """Any explicit finite ub in [1e19, 1e20) is a real bound (only |b| >= 1e20 is the
+    true infinity), so the interior stall must not be certified there either."""
+    r = _neglog(ub).solve(nlp_solver="ipm")
+    _assert_sound(f"ub={ub:.0e}", r, -math.log(ub))
+    assert not (r.status == "optimal" and r.gap_certified), (
+        f"ub={ub:.0e}: still emits a certificate (status={r.status}, "
+        f"gap_certified={r.gap_certified})"
+    )
+
+
 @pytest.mark.parametrize("ub", [1e4, 1e6, 1e8], ids=lambda v: f"ub={v:.0e}")
 def test_neglog_reachable_boundary_still_certifies(ub):
     """When the boundary optimum is reachable (ub <= 1e8) the genuine optimum must

@@ -11702,15 +11702,26 @@ def _convex_nlp_certificate_gap(
     # spurious direction from a near-zero (numerically noisy) gradient finds no real
     # descent and does not fire — a genuine optimum, which has no better feasible
     # point, is never rejected.
+    # Finite-bound cutoff for the FW vertex: discopt's true bound-infinity is 1e20
+    # (|b| >= 1e20 is genuinely unbounded, left to unbounded detection). A large-but-
+    # FINITE bound — including the default ~9.999e19 box, which #850 fixes as a real
+    # finite bound — is a genuine constraint the witness must respect, so the vertex
+    # is formed there. The projected-gradient `_INF = 1e19` cap above is deliberately
+    # NOT reused: capping at 1e19 drops the default box and lets its interior stall
+    # escape refutation, an unsound certificate whose bound crosses the true optimum
+    # (issue #853 sibling: min -log(x) on the default/large box certified at -18.97 vs
+    # true -46.05). The line search reads the ACTUAL objective, so a huge-but-benign
+    # bound (no real descent toward it) still does not fire.
+    _BOUND_INF = 1e20
     y_fw = x.copy()
     moved = False
     for j in range(n):
         rj = float(reduced[j])
-        if rj > 0.0 and np.isfinite(lb_c[j]) and lb_c[j] < x[j]:
-            y_fw[j] = lb_c[j]
+        if rj > 0.0 and lb[j] > -_BOUND_INF and lb[j] < x[j]:
+            y_fw[j] = float(lb[j])
             moved = True
-        elif rj < 0.0 and np.isfinite(ub_c[j]) and ub_c[j] > x[j]:
-            y_fw[j] = ub_c[j]
+        elif rj < 0.0 and ub[j] < _BOUND_INF and ub[j] > x[j]:
+            y_fw[j] = float(ub[j])
             moved = True
     if moved:
         d = y_fw - x
