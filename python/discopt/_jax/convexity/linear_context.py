@@ -73,14 +73,19 @@ def _compute_var_offset(var: Variable, model: Model) -> int:
     return model._flat_var_offset(var)
 
 
-def extract_affine(
+def extract_affine_sparse(
     expr: Expression, model: Model, n_vars: int
-) -> Optional[tuple[np.ndarray, float]]:
-    """Return ``(coeffs, const)`` for an affine scalar expression.
+) -> Optional[tuple[dict[int, float], float]]:
+    """Return ``({flat_index: coeff}, const)`` for an affine scalar expression.
 
     Walks the DAG collecting linear coefficients. Returns ``None``
     when the expression contains any nonlinear operator or shape that
     doesn't reduce to a scalar affine form.
+
+    The walk was always sparse internally; this exposes it, so a caller assembling a
+    matrix does not have to round-trip through a dense ``n_vars`` row per constraint
+    (issue #875). Indices outside ``[0, n_vars)`` are dropped, exactly as the dense
+    form's bounds check did.
     """
 
     def walk(node: Expression, scale: float) -> Optional[tuple[dict[int, float], float]]:
@@ -168,10 +173,25 @@ def extract_affine(
     if result is None:
         return None
     coeffs_dict, const = result
+    return {i: v for i, v in coeffs_dict.items() if 0 <= i < n_vars}, const
+
+
+def extract_affine(
+    expr: Expression, model: Model, n_vars: int
+) -> Optional[tuple[np.ndarray, float]]:
+    """Dense view of :func:`extract_affine_sparse` — ``(coeffs, const)`` or ``None``.
+
+    Identical coefficients, constant and refusals; only the representation differs.
+    Prefer the sparse form in any per-constraint scan that goes on to assemble a
+    matrix: see :func:`build_linear_context` for why (issue #875).
+    """
+    sparse = extract_affine_sparse(expr, model, n_vars)
+    if sparse is None:
+        return None
+    coeffs_dict, const = sparse
     coeffs = np.zeros(n_vars, dtype=np.float64)
     for idx, v in coeffs_dict.items():
-        if 0 <= idx < n_vars:
-            coeffs[idx] = v
+        coeffs[idx] = v
     return coeffs, const
 
 
@@ -302,13 +322,31 @@ def build_linear_context(model: Model) -> Optional[LinearContext]:
         ub[offset : offset + v.size] = vub
         offset += v.size
 
-    ub_rows: list[tuple[np.ndarray, float]] = []
-    eq_rows: list[tuple[np.ndarray, float]] = []
+    # Sparse rows, materialised once at the end (#875). The rows are collected as
+    # ``({flat_index: coeff}, rhs)`` and scattered into a single pre-allocated
+    # ``(m, n)`` array rather than built as ``m`` dense ``n``-vectors and
+    # ``np.vstack``-ed.
+    #
+    # The measurement, because it contradicts the obvious guess. Profiling this
+    # function at n_vars=128,000 with 300 rows: ``np.vstack`` was 3.015 s of 3.032 s
+    # (99.4%), while all 302 ``np.zeros`` calls together were 0.002 s and the affine
+    # walk 0.008 s. The per-row dense allocation is nearly free — ``calloc`` hands
+    # back lazily-mapped zero pages — and the cost is ``vstack`` COPYING m x n
+    # float64 (307 MB here) and faulting in every one of those pages. Allocating the
+    # (m, n) array directly costs 0.0001 s for the same reason.
+    #
+    # So scattering only the nonzeros makes the assembly O(nnz) instead of O(m * n),
+    # and it also keeps peak RSS at the pages actually written rather than the whole
+    # matrix. Same output, exactly: entries absent from a row's dict are 0.0 in both
+    # forms. On watercontamination0202 this function was 15.8 s over 2 calls, the
+    # second-largest phase left in the #875 root setup.
+    ub_rows: list[tuple[dict[int, float], float]] = []
+    eq_rows: list[tuple[dict[int, float], float]] = []
 
     for c in model._constraints:
         if not isinstance(c, Constraint):
             continue
-        aff = extract_affine(c.body, model, n_vars)
+        aff = extract_affine_sparse(c.body, model, n_vars)
         if aff is None:
             continue
         coeffs, const = aff
@@ -317,16 +355,27 @@ def build_linear_context(model: Model) -> Optional[LinearContext]:
         if c.sense == "<=":
             ub_rows.append((coeffs, adjusted_rhs))
         elif c.sense == ">=":
-            ub_rows.append((-coeffs, -adjusted_rhs))
+            ub_rows.append(({i: -v for i, v in coeffs.items()}, -adjusted_rhs))
         elif c.sense == "==":
             eq_rows.append((coeffs, adjusted_rhs))
 
-    A_ub = np.vstack([r[0] for r in ub_rows]) if ub_rows else np.zeros((0, n_vars))
-    b_ub = np.array([r[1] for r in ub_rows], dtype=np.float64) if ub_rows else np.zeros(0)
-    A_eq = np.vstack([r[0] for r in eq_rows]) if eq_rows else np.zeros((0, n_vars))
-    b_eq = np.array([r[1] for r in eq_rows], dtype=np.float64) if eq_rows else np.zeros(0)
+    def _materialise(rows: list[tuple[dict[int, float], float]]) -> tuple[np.ndarray, np.ndarray]:
+        A = np.zeros((len(rows), n_vars), dtype=np.float64)
+        for r, (coeffs, _rhs) in enumerate(rows):
+            for i, v in coeffs.items():
+                A[r, i] = v
+        b = np.array([rhs for _coeffs, rhs in rows], dtype=np.float64)
+        return A, b
+
+    A_ub, b_ub = _materialise(ub_rows)
+    A_eq, b_eq = _materialise(eq_rows)
 
     return LinearContext(n_vars=n_vars, lb=lb, ub=ub, A_ub=A_ub, b_ub=b_ub, A_eq=A_eq, b_eq=b_eq)
 
 
-__all__ = ["LinearContext", "build_linear_context", "extract_affine"]
+__all__ = [
+    "LinearContext",
+    "build_linear_context",
+    "extract_affine",
+    "extract_affine_sparse",
+]
