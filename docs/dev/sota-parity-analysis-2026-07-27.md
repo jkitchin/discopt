@@ -294,6 +294,71 @@ stats) for whatever remains after (a) and (b).
 > recovered point against the pristine model. Bound-changing ⇒ full §5 differential
 > panel before any default.
 
+> **P2(a″) entry-experiment result (2026-07-27, iteration 4, Contributes to #844).
+> Coupling substitution to bound tightening: KILLED before implementation.**
+> Harness: `discopt_benchmarks/scripts/presolve_roundloop_census.py` (seed 20260727,
+> 300 instances drawn from the 1,610-instance mirrored corpus, 297 examined).
+>
+> The hypothesis after #888 was that the residual gap (866 vars vs SCIP's 566 on
+> `watercontamination0202`; 30–36 % of the corpus touched vs SCIP's 52.9 %) is caused by
+> `substitute_to_fixpoint` sweeping substitution against *itself* and never against
+> bound propagation — i.e. that a SCIP-style round loop (substitute → tighten → fix on
+> `lo == hi` → substitute) would close it. **Both halves are falsified by measurement.**
+>
+> 1. **The corpus ceiling is 34.7 %, against a pre-registered 45 % bar.** The metric
+>    "fraction of instances with any variable-count reduction" is *order-independent*
+>    for this loop: when substitution eliminates nothing the reduced model **is** the
+>    pristine model (`substitute.rs:393` returns `model.clone()`; asserted empirically
+>    on 6 instances), so FBBT-first and FBBT-second give the same answer. The ceiling is
+>    therefore exactly `{substitution reduces} ∪ {FBBT collapses ≥1 block}` =
+>    **103/297 = 34.7 %**, versus 90/297 = 30.3 % shipped. Only **13 instances**
+>    (`blend480/531`, `kport40`, `mpbp_04/07/09/21/31`, `pooling_adhya4pq`, `ramsey`,
+>    `st_bpv1`, `waterund01/14`) are ones a round loop could newly touch. Giving every
+>    ambiguous case the benefit of the doubt — the 5 instances whose FBBT hit the time
+>    budget while showing zero, plus the 3 that did not complete — the strict upper
+>    bound is **37.0 %**, still 8 points below the bar.
+> 2. **On `watercontamination0202` the loop terminates at 866 vars, unchanged.** After
+>    `substitute(4)` (106,711 → 866 in 0.076 s), `fbbt_fixed_point` on the reduced model
+>    tightens **859 of 866** bounds in 0.178 s and collapses **zero** of them to a
+>    point — zero continuous, zero integer, zero binary. No fixing is available, so the
+>    next substitution round has nothing new and the loop stops. The second kill clause
+>    ("must beat 866") is unreachable for this mechanism.
+>
+> **What the same measurement establishes positively**, and should be read before the
+> next iteration is scoped:
+>
+> * **A fixing tolerance is not needed, and must not be used.** Across the sample,
+>   9,349 blocks collapse at width **exactly 0.0**; only **18** land in `(0, 1e-6]`.
+>   Fixing on exact `lo == hi` therefore costs essentially nothing and *cuts nothing* —
+>   which matters because a tolerant fixing is a feasible-set reduction and a wrong one
+>   is a false certificate, not a rounding error. This also keeps the mechanism inside
+>   the constraint recorded at `orchestrator.rs:132-147`, where writing general
+>   FBBT-tightened bounds back into the returned model was deliberately rejected.
+> * **Order matters for the reduction *magnitude*, opposite to intuition.** On
+>   `watercontamination0202`, FBBT on the *pristine* model collapses **99,821 of
+>   106,711** variables outright (106,704 bounds tightened) — SCIP's 38,396 `FixedVars`
+>   are reproducible by our own FBBT. But it leaves ~6,890 variables, far *worse* than
+>   substitution-first's 866. Substitution subsumes those fixings; that is why the
+>   post-substitution collapse count is zero, and it is evidence the shipped order is
+>   the right one.
+> * **The real gap on that instance is FBBT throughput, not FBBT strength.** That
+>   pristine-model FBBT run took **≈216 s** (measured under load, so an upper estimate)
+>   against SCIP's **0.19 s for its entire 6-round presolve** — three orders of
+>   magnitude. Corpus-wide the pass is cheap (median 0.002 s, p90 0.79 s) but its tail
+>   is not: 7 of 297 instances exhausted a 20 s budget, 5 of them producing no
+>   tightening at all.
+> * **The mechanism is not worthless — it is mis-targeted.** It is worth 118 new
+>   fixings on `gastrans582_cold13` (112 continuous + 6 binary) and 5 on `gastrans040`,
+>   which is precisely the nonlinear-equality-dense family where substitution stalls at
+>   1.60×/1.37×. If it is ever built, `gastrans*` — not `watercontamination0202` —
+>   is the class to gate it on.
+>
+> **Retraction (§11).** The claim published in the #888 review thread — that the
+> 866-vs-566 residual "is" propagation-driven fixing and that coupling FBBT would close
+> it — is withdrawn. Our FBBT finds nothing to fix on the reduced model. Whatever
+> produces SCIP's extra ~300 variables of reduction there, it is not domain collapse
+> reachable from our post-substitution model.
+
 **Evidence it is required:** the G-B table — six instances at "no incumbent in 60 s" vs
 SCIP ≤ 18.7 s, all with `=opt=` oracles. Evidence of tractability: plunging's measured
 17× quality jump on the same class (#880); `ball_mk2_30`'s node loop reaches bound −26.9
