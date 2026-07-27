@@ -196,6 +196,55 @@ likely a one-line gate, blocked on reproducing the #843 discrepancy. **(c) genui
 primal constructors** (LP feasibility pump, pscost diving — both named by SCIP's own
 stats) for whatever remains after (a) and (b).
 
+> **P2(a) entry-experiment result (2026-07-27, iteration 2, Contributes to #844).**
+> The wiring hypothesis above — *"the first question is wiring, not new algorithms"* —
+> is **FALSIFIED**. Existing passes invoked directly on the instances (scripts
+> `discopt_benchmarks/scripts/presolve_reduction_{entry,census}.py`) achieve, best
+> case across `{eliminate, aggregate, factorable_elim, simplify, fbbt}`:
+>
+> | instance | discopt achieved (wall/term) | SCIP reference |
+> |---|---|---|
+> | `gastrans040` | 279 → 269 vars (**1.04×**), 1.6 s NoProgress | 279 → 80 (**3.5×**), 0.06 s |
+> | `gastrans582_cold13` | 2,186 → 2,025 vars (**1.08×**), 60 s TimeBudget | 2,186 → 598 (**3.7×**), 5.4 s |
+> | `watercontamination0202` | 106,711 → 106,711 vars (**1.00×**) FULL_SET / 106,369 (aggregate-alone, **342 vars in 30 s**) | 106,711 → 566 (**189×**), 0.19 s |
+>
+> Two independent root causes, **both new-algorithm, not wiring**:
+> 1. **No general affine substitution.** `eliminate`/`aggregate`/`factorable_elim`
+>    each require the eliminated variable to appear in *exactly one expression*
+>    (its defining equality, nowhere else). SCIP substitutes a doubleton-defined
+>    variable *out of every row and the objective* it appears in. On `gastrans040`
+>    the census finds 105 doubleton equalities but `aggregate` fires on only 10 —
+>    the rest define variables that also appear in inequalities, so the precondition
+>    rejects them. This is the binding limit where time is *not* the constraint
+>    (`gastrans040` finished with NoProgress at 1.04×).
+> 2. **Superlinear implementation.** `aggregate_variables_until` rescans every
+>    constraint per aggregation (O(applications × rows)); measured ≈11 aggregations/s
+>    on `watercontamination0202` (342 in 30 s), projecting **~2.6 h** for the full
+>    reduction SCIP does in 0.19 s. In `FULL_SET` the slow `eliminate` pass starves
+>    `aggregate` of the shared budget → 1.00× (0 vars) in 60 s.
+>
+> Plus a **plumbing** gap that blocks *using* any reduction even if achieved: the
+> reduced `ModelRepr` is discarded on the solve path (`propagate_bounds_to_model`
+> copies bounds only; `solver.py:6043` never consumes the aggregated model), and
+> **no postsolve is chained** — `AggregationRecord` is recorded but never inverted
+> (`orchestrator.rs:140`, `aggregate.rs:79`: *"does not currently chain post-solve
+> recovery"*), so solutions cannot be reported/verified in original variables.
+>
+> **Structural census (`watercontamination0202`):** 106,201 equalities (0 nonlinear),
+> = 15,834 singleton + 81,821 doubleton + 8,546 ≥3-var linear. **92 % of the reduction
+> is plain 1-or-2-var equality aggregation** — so the *transform class* SCIP uses is
+> not exotic, but discopt has no scalable, substitute-everywhere implementation of it,
+> and 8 % (8,546 rows) additionally needs ≥3-var Gaussian elimination that no pass has.
+>
+> **Kill verdict: NEW-ALGORITHM. STOP — do not build a new presolver in this
+> iteration.** Scope for a follow-up (P2(a′)): (i) a batch substitution-graph
+> aggregator (union-find over doubleton/singleton equalities, one rewrite pass,
+> substitute-everywhere semantics) replacing the O(n²) rescan; (ii) ≥3-var free-column
+> Gaussian elimination; (iii) a reduced-model solve entry + postsolve chain that
+> inverts `AggregationRecord`/`factorable_elim` records and feasibility-verifies the
+> recovered point against the pristine model. Bound-changing ⇒ full §5 differential
+> panel before any default.
+
 **Evidence it is required:** the G-B table — six instances at "no incumbent in 60 s" vs
 SCIP ≤ 18.7 s, all with `=opt=` oracles. Evidence of tractability: plunging's measured
 17× quality jump on the same class (#880); `ball_mk2_30`'s node loop reaches bound −26.9
