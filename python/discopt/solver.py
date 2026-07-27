@@ -5702,8 +5702,16 @@ def solve_model(
                     _fr_sz.append(_v.size)
                 _fr_o += _v.size
             _, _fr_lb, _fr_ub, _, _ = _extract_variable_info(model)
+            _fr_left = _remaining_budget()
             _fr_lb, _fr_ub, _fr_infeas, _fr_changed = tighten_root_bounds_with_fbbt(
-                model, _fr_lb, _fr_ub, _fr_off, _fr_sz
+                model,
+                _fr_lb,
+                _fr_ub,
+                _fr_off,
+                _fr_sz,
+                time_limit_ms=(
+                    None if not math.isfinite(_fr_left) else max(1, int(1000 * _fr_left))
+                ),
             )
             if not _fr_infeas and _fr_changed:
                 from discopt.solvers.amp import _apply_flat_bounds_to_model
@@ -12154,6 +12162,31 @@ def _solve_continuous(
     )
 
 
+def _fbbt_budget_ms(time_limit: float, t_start: float) -> int | None:
+    """Remaining wall budget as whole milliseconds for a root-FBBT call, or ``None``.
+
+    ``tighten_root_bounds_with_fbbt`` runs up to ``max_iter=20`` full sweeps and has no
+    escape without ``time_limit_ms``. Three of its four call sites had none: the spatial
+    path was capped by #863, but ``_solve_nlp_bb`` (the convex-MINLP route),
+    ``_solve_miqp_bb`` and one ``solve_model`` site ran it to completion.
+
+    That stayed hidden until the sparse ``LinearContext`` (#875) made convexity
+    classification succeed on ``watercontamination0202`` (106,711 vars / 107,209 rows,
+    2.9 s to classify, reports convex) instead of running out of budget. The model then
+    routed to a QP/NLP path whose FBBT does not return, turning a 47 s solve into a
+    >1200 s hang. The dense 15.7 s context build had been acting as the accidental
+    budget guard for a route that had none.
+
+    ``time_limit`` may be ``inf`` for an explicitly uncapped solve; that must become
+    ``None`` (unlimited), never ``int(inf)``, which raises OverflowError and would turn
+    "no time limit" into a crash.
+    """
+    left = max(0.0, float(time_limit) - (time.perf_counter() - t_start))
+    if not math.isfinite(left):
+        return None
+    return max(1, int(1000 * left))
+
+
 def _solve_nlp_bb(
     model: Model,
     time_limit: float,
@@ -12235,6 +12268,7 @@ def _solve_nlp_bb(
         ub,
         int_offsets,
         int_sizes,
+        time_limit_ms=_fbbt_budget_ms(time_limit, t_start),
     )
     rust_time += time.perf_counter() - t_rust_start
     if root_infeasible:
@@ -17434,7 +17468,12 @@ def _solve_miqp_bb(
     from discopt.solvers._root_presolve import tighten_root_bounds_with_fbbt
 
     lb, ub, root_infeasible, _ = tighten_root_bounds_with_fbbt(
-        model, lb, ub, int_offsets, int_sizes
+        model,
+        lb,
+        ub,
+        int_offsets,
+        int_sizes,
+        time_limit_ms=_fbbt_budget_ms(time_limit, t_start),
     )
     rust_time += time.perf_counter() - t_rust_start
     if root_infeasible:

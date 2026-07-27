@@ -27,6 +27,7 @@ from dataclasses import dataclass
 from typing import Optional
 
 import numpy as np
+import scipy.sparse as sp
 
 from discopt.modeling.core import (
     BinaryOp,
@@ -57,6 +58,20 @@ _LP_ENCLOSURE_MARGIN = 1e-7
 # unaffected; only the pathological ill-conditioned probes hit the cap and abstain.
 _LP_POUNCE_TIME_LIMIT = 0.5
 
+# Largest linear system for which the POUNCE range LP is attempted at all. Above this
+# the box-only enclosure is used instead: sound (a valid, looser outer bound -- see the
+# module docstring), and convexity then abstains rather than mis-proving.
+#
+# Why a size guard is needed at all (#875): the LP is capped per solve, but convexity
+# analysis issues MANY range queries, so the cost is (number of probes) x (cap) and the
+# cap alone does not bound it. Until the context build was made sparse this was hidden
+# -- assembling a dense 106,201 x 106,711 A_eq took 15.7 s and consumed the
+# classifier's whole budget before a single range query ran. Making the build 52x
+# faster (15.66 s -> 0.30 s) *unlocked* that work and turned a slow classification into
+# a hang, which is the failure this guard removes. A speedup that exposes unbounded
+# downstream work is not a speedup.
+_LP_MAX_ROWS = 20_000
+
 
 # ──────────────────────────────────────────────────────────────────────
 # Affine coefficient extraction
@@ -73,10 +88,10 @@ def _compute_var_offset(var: Variable, model: Model) -> int:
     return model._flat_var_offset(var)
 
 
-def extract_affine(
+def extract_affine_sparse(
     expr: Expression, model: Model, n_vars: int
-) -> Optional[tuple[np.ndarray, float]]:
-    """Return ``(coeffs, const)`` for an affine scalar expression.
+) -> Optional[tuple[dict[int, float], float]]:
+    """Return ``({col: coeff}, const)`` for an affine scalar expression.
 
     Walks the DAG collecting linear coefficients. Returns ``None``
     when the expression contains any nonlinear operator or shape that
@@ -168,11 +183,48 @@ def extract_affine(
     if result is None:
         return None
     coeffs_dict, const = result
+    return {k: v for k, v in coeffs_dict.items() if 0 <= k < n_vars}, const
+
+
+def extract_affine(
+    expr: Expression, model: Model, n_vars: int
+) -> Optional[tuple[np.ndarray, float]]:
+    """Dense view of :func:`extract_affine_sparse`, kept for callers that want a row.
+
+    Allocates a length-``n_vars`` vector, so it is the wrong entry point for a
+    per-constraint scan over a wide model -- that is what cost #875 15.7 s and 23 GB.
+    Prefer the sparse core.
+    """
+    got = extract_affine_sparse(expr, model, n_vars)
+    if got is None:
+        return None
+    coeffs_dict, const = got
     coeffs = np.zeros(n_vars, dtype=np.float64)
     for idx, v in coeffs_dict.items():
-        if 0 <= idx < n_vars:
-            coeffs[idx] = v
+        coeffs[idx] = v
     return coeffs, const
+
+
+def _rows_to_sparse(rows: list[dict[int, float]], n_vars: int) -> sp.csr_matrix:
+    """CSR from a list of (col -> coeff) dicts, never materializing a dense row."""
+    indptr = [0]
+    indices: list[int] = []
+    data: list[float] = []
+    for r in rows:
+        for k in sorted(r):
+            v = r[k]
+            if v != 0.0:
+                indices.append(k)
+                data.append(v)
+        indptr.append(len(indices))
+    return sp.csr_matrix(
+        (
+            np.asarray(data, dtype=np.float64),
+            np.asarray(indices, dtype=np.int64),
+            np.asarray(indptr, dtype=np.int64),
+        ),
+        shape=(len(rows), n_vars),
+    )
 
 
 def _is_scalar_const(expr: Expression) -> bool:
@@ -195,8 +247,8 @@ def _scalar_value(expr: Expression) -> float:
 class LinearContext:
     """Linear relaxation of a model for affine range queries.
 
-    ``A_ub x <= b_ub``, ``A_eq x = b_eq``, ``lb <= x <= ub``. The
-    coefficient matrices may be empty arrays (no linear constraints);
+    ``A_ub x <= b_ub``, ``A_eq x = b_eq``, ``lb <= x <= ub``. The coefficient
+    matrices are scipy CSR and may have zero rows (no linear constraints);
     variable bounds are always present. ``n_vars`` is the flattened
     decision-variable dimension.
     """
@@ -204,9 +256,9 @@ class LinearContext:
     n_vars: int
     lb: np.ndarray
     ub: np.ndarray
-    A_ub: np.ndarray
+    A_ub: "sp.csr_matrix"
     b_ub: np.ndarray
-    A_eq: np.ndarray
+    A_eq: "sp.csr_matrix"
     b_eq: np.ndarray
 
     def affine_range(self, coeffs: np.ndarray, const: float) -> tuple[float, float]:
@@ -220,7 +272,14 @@ class LinearContext:
         lo_box, hi_box = _box_range(coeffs, self.lb, self.ub)
         lo_box += const
         hi_box += const
-        if self.A_ub.size == 0 and self.A_eq.size == 0:
+        # ``.nnz``, not ``.size``: on a scipy sparse matrix ``.size`` IS nnz, so the
+        # two happen to agree here -- but relying on that is the trap recorded in
+        # CLAUDE.md (``.size`` means rows x cols on dense, nnz on sparse). Say what is
+        # meant: no nonzero rows means the box-only enclosure is already optimal.
+        if self.A_ub.nnz == 0 and self.A_eq.nnz == 0:
+            return lo_box, hi_box
+        # Too big to probe with an LP per query: fall back to the sound box bound.
+        if self.A_ub.shape[0] + self.A_eq.shape[0] > _LP_MAX_ROWS:
             return lo_box, hi_box
 
         from discopt.solvers import SolveStatus
@@ -229,9 +288,9 @@ class LinearContext:
         # ``bounds`` as (lo, hi) tuples; POUNCE maps ±inf via its own sentinel.
         bounds = [(float(lo), float(hi)) for lo, hi in zip(self.lb, self.ub)]
 
-        A_ub = self.A_ub if self.A_ub.size else None
+        A_ub = self.A_ub if self.A_ub.nnz else None
         b_ub = self.b_ub if self.b_ub.size else None
-        A_eq = self.A_eq if self.A_eq.size else None
+        A_eq = self.A_eq if self.A_eq.nnz else None
         b_eq = self.b_eq if self.b_eq.size else None
 
         try:
@@ -302,13 +361,13 @@ def build_linear_context(model: Model) -> Optional[LinearContext]:
         ub[offset : offset + v.size] = vub
         offset += v.size
 
-    ub_rows: list[tuple[np.ndarray, float]] = []
-    eq_rows: list[tuple[np.ndarray, float]] = []
+    ub_rows: list[tuple[dict[int, float], float]] = []
+    eq_rows: list[tuple[dict[int, float], float]] = []
 
     for c in model._constraints:
         if not isinstance(c, Constraint):
             continue
-        aff = extract_affine(c.body, model, n_vars)
+        aff = extract_affine_sparse(c.body, model, n_vars)
         if aff is None:
             continue
         coeffs, const = aff
@@ -317,16 +376,31 @@ def build_linear_context(model: Model) -> Optional[LinearContext]:
         if c.sense == "<=":
             ub_rows.append((coeffs, adjusted_rhs))
         elif c.sense == ">=":
-            ub_rows.append((-coeffs, -adjusted_rhs))
+            ub_rows.append(({k: -v for k, v in coeffs.items()}, -adjusted_rhs))
         elif c.sense == "==":
             eq_rows.append((coeffs, adjusted_rhs))
 
-    A_ub = np.vstack([r[0] for r in ub_rows]) if ub_rows else np.zeros((0, n_vars))
+    # Assemble SPARSE. These matrices are extremely thin: on
+    # ``watercontamination0202`` (106,711 vars / 107,209 rows) the equality block is
+    # 106,201 x 106,711 holding **205,720 nonzeros** -- 0.0018% dense -- and a dense
+    # ``vstack`` of it is 90.7 GB of ``nbytes``, which drove peak RSS from 0.38 GB to
+    # 23.1 GB and cost 15.7 s of a 30 s ``time_limit`` (#875). Same defect class that
+    # #868 removed from the QP extractors and #878 from ``_any_linear_constraint_form``:
+    # one dense length-n row materialized per constraint and then kept.
+    #
+    # ``_rows_to_sparse`` consumes the (col -> coeff) dicts ``extract_affine_sparse``
+    # already builds internally, so nothing is densified at any point.
+    A_ub = _rows_to_sparse([r[0] for r in ub_rows], n_vars)
     b_ub = np.array([r[1] for r in ub_rows], dtype=np.float64) if ub_rows else np.zeros(0)
-    A_eq = np.vstack([r[0] for r in eq_rows]) if eq_rows else np.zeros((0, n_vars))
+    A_eq = _rows_to_sparse([r[0] for r in eq_rows], n_vars)
     b_eq = np.array([r[1] for r in eq_rows], dtype=np.float64) if eq_rows else np.zeros(0)
 
     return LinearContext(n_vars=n_vars, lb=lb, ub=ub, A_ub=A_ub, b_ub=b_ub, A_eq=A_eq, b_eq=b_eq)
 
 
-__all__ = ["LinearContext", "build_linear_context", "extract_affine"]
+__all__ = [
+    "LinearContext",
+    "build_linear_context",
+    "extract_affine",
+    "extract_affine_sparse",
+]
