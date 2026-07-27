@@ -24,9 +24,10 @@ arguments we fall back to the declared variable box.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional
+from typing import Optional, Union
 
 import numpy as np
+import scipy.sparse as sp
 
 from discopt.modeling.core import (
     BinaryOp,
@@ -73,14 +74,23 @@ def _compute_var_offset(var: Variable, model: Model) -> int:
     return model._flat_var_offset(var)
 
 
-def extract_affine(
+def extract_affine_sparse(
     expr: Expression, model: Model, n_vars: int
-) -> Optional[tuple[np.ndarray, float]]:
-    """Return ``(coeffs, const)`` for an affine scalar expression.
+) -> Optional[tuple[dict[int, float], float]]:
+    """Return ``({col: coeff}, const)`` for an affine scalar expression.
 
-    Walks the DAG collecting linear coefficients. Returns ``None``
-    when the expression contains any nonlinear operator or shape that
-    doesn't reduce to a scalar affine form.
+    The sparse core of :func:`extract_affine`: identical walk, identical
+    recognition rules and refusals, but it stops before materialising the dense
+    length-``n_vars`` row. A constraint body's support is a handful of columns
+    however many variables the model has, so building the dense row per
+    constraint made assembling a model's linear rows ``O(rows x n_vars)`` in both
+    time and memory — measured at a FIXED 400 rows (800 nonzeros total),
+    ``build_linear_context`` cost 0.076 s / 6.4 MB at 2,000 variables and
+    2.406 s / 409.6 MB at 128,000 (#875 item 3). Prefer this form for anything
+    that scans constraints; :func:`extract_affine` remains for single-expression
+    probes that genuinely want a dense vector.
+
+    Out-of-range columns are dropped, matching :func:`extract_affine`.
     """
 
     def walk(node: Expression, scale: float) -> Optional[tuple[dict[int, float], float]]:
@@ -168,10 +178,28 @@ def extract_affine(
     if result is None:
         return None
     coeffs_dict, const = result
+    return {i: v for i, v in coeffs_dict.items() if 0 <= i < n_vars}, const
+
+
+def extract_affine(
+    expr: Expression, model: Model, n_vars: int
+) -> Optional[tuple[np.ndarray, float]]:
+    """Return ``(coeffs, const)`` for an affine scalar expression.
+
+    Walks the DAG collecting linear coefficients. Returns ``None``
+    when the expression contains any nonlinear operator or shape that
+    doesn't reduce to a scalar affine form.
+
+    Dense view of :func:`extract_affine_sparse` — same walk, same refusals, same
+    coefficients, materialised into a length-``n_vars`` array.
+    """
+    sparse = extract_affine_sparse(expr, model, n_vars)
+    if sparse is None:
+        return None
+    coeffs_dict, const = sparse
     coeffs = np.zeros(n_vars, dtype=np.float64)
     for idx, v in coeffs_dict.items():
-        if 0 <= idx < n_vars:
-            coeffs[idx] = v
+        coeffs[idx] = v
     return coeffs, const
 
 
@@ -204,10 +232,27 @@ class LinearContext:
     n_vars: int
     lb: np.ndarray
     ub: np.ndarray
-    A_ub: np.ndarray
+    # SPARSE (CSR) since #875: one dense length-``n_vars`` row per constraint made
+    # assembly O(rows x n_vars). ``solve_lp`` already accepts either form, so the
+    # matrices flow through unchanged. Typed permissively because a caller
+    # constructing a context by hand (tests do) may still pass dense arrays.
+    A_ub: Union[np.ndarray, sp.spmatrix]
     b_ub: np.ndarray
-    A_eq: np.ndarray
+    A_eq: Union[np.ndarray, sp.spmatrix]
     b_eq: np.ndarray
+
+    @staticmethod
+    def _n_rows(A: Union[np.ndarray, sp.spmatrix]) -> int:
+        """Row count of either storage form.
+
+        Deliberately NOT ``A.size``: on a dense array that is ``rows * n_vars``, but
+        on a sparse one it is the NONZERO count, so an all-zero-coefficient row set
+        would read as "no linear rows" and silently skip the LP that the dense form
+        ran. Row count is what the caller actually means and matches the dense
+        behaviour exactly (``n_vars >= 1`` is guaranteed — ``build_linear_context``
+        returns ``None`` for a model with no variables).
+        """
+        return int(A.shape[0]) if A is not None else 0
 
     def affine_range(self, coeffs: np.ndarray, const: float) -> tuple[float, float]:
         """Sound enclosure of ``coeffs · x + const`` over the relaxation.
@@ -220,7 +265,7 @@ class LinearContext:
         lo_box, hi_box = _box_range(coeffs, self.lb, self.ub)
         lo_box += const
         hi_box += const
-        if self.A_ub.size == 0 and self.A_eq.size == 0:
+        if self._n_rows(self.A_ub) == 0 and self._n_rows(self.A_eq) == 0:
             return lo_box, hi_box
 
         from discopt.solvers import SolveStatus
@@ -302,31 +347,62 @@ def build_linear_context(model: Model) -> Optional[LinearContext]:
         ub[offset : offset + v.size] = vub
         offset += v.size
 
-    ub_rows: list[tuple[np.ndarray, float]] = []
-    eq_rows: list[tuple[np.ndarray, float]] = []
+    # SPARSE row collection: ``({col: coeff}, rhs)`` per row, never a dense vector.
+    # The dense form allocated and kept one length-``n_vars`` array PER CONSTRAINT,
+    # making this ``O(rows x n_vars)`` in time and memory even though a body's
+    # support is a handful of columns — 409 MB and 2.4 s for 400 two-term rows over
+    # 128,000 variables, and 15.8 s on ``watercontamination0202`` (#875 item 3).
+    ub_terms: list[tuple[dict[int, float], float]] = []
+    eq_terms: list[tuple[dict[int, float], float]] = []
 
     for c in model._constraints:
         if not isinstance(c, Constraint):
             continue
-        aff = extract_affine(c.body, model, n_vars)
+        aff = extract_affine_sparse(c.body, model, n_vars)
         if aff is None:
             continue
         coeffs, const = aff
         # body sense rhs  →  (coeffs · x + const)  sense  rhs
         adjusted_rhs = float(c.rhs) - const
         if c.sense == "<=":
-            ub_rows.append((coeffs, adjusted_rhs))
+            ub_terms.append((coeffs, adjusted_rhs))
         elif c.sense == ">=":
-            ub_rows.append((-coeffs, -adjusted_rhs))
+            # Negated into the ``<=`` system. Negating the dict is O(support), not
+            # the O(n_vars) the dense ``-coeffs`` copy cost.
+            ub_terms.append(({i: -v for i, v in coeffs.items()}, -adjusted_rhs))
         elif c.sense == "==":
-            eq_rows.append((coeffs, adjusted_rhs))
+            eq_terms.append((coeffs, adjusted_rhs))
 
-    A_ub = np.vstack([r[0] for r in ub_rows]) if ub_rows else np.zeros((0, n_vars))
-    b_ub = np.array([r[1] for r in ub_rows], dtype=np.float64) if ub_rows else np.zeros(0)
-    A_eq = np.vstack([r[0] for r in eq_rows]) if eq_rows else np.zeros((0, n_vars))
-    b_eq = np.array([r[1] for r in eq_rows], dtype=np.float64) if eq_rows else np.zeros(0)
+    def _assemble(rows: list[tuple[dict[int, float], float]]) -> sp.csr_matrix:
+        data: list[float] = []
+        indices: list[int] = []
+        indptr: list[int] = [0]
+        for coeffs, _rhs in rows:
+            indices.extend(coeffs.keys())
+            data.extend(coeffs.values())
+            indptr.append(len(indices))
+        M = sp.csr_matrix(
+            (
+                np.asarray(data, dtype=np.float64),
+                np.asarray(indices, dtype=np.int64),
+                np.asarray(indptr, dtype=np.int64),
+            ),
+            shape=(len(rows), n_vars),
+        )
+        M.sort_indices()  # canonical CSR: deterministic, and what consumers expect
+        return M
+
+    A_ub = _assemble(ub_terms)
+    b_ub = np.array([r[1] for r in ub_terms], dtype=np.float64) if ub_terms else np.zeros(0)
+    A_eq = _assemble(eq_terms)
+    b_eq = np.array([r[1] for r in eq_terms], dtype=np.float64) if eq_terms else np.zeros(0)
 
     return LinearContext(n_vars=n_vars, lb=lb, ub=ub, A_ub=A_ub, b_ub=b_ub, A_eq=A_eq, b_eq=b_eq)
 
 
-__all__ = ["LinearContext", "build_linear_context", "extract_affine"]
+__all__ = [
+    "LinearContext",
+    "build_linear_context",
+    "extract_affine",
+    "extract_affine_sparse",
+]
