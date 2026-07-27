@@ -4684,7 +4684,7 @@ def solve_model(
     if _sub is not None:
         import inspect as _inspect
 
-        _reduced_model, _sub_chain, _sub_pristine = _sub
+        _reduced_model, _sub_chain, _sub_pristine, _sub_prep_s = _sub
         _frame = _inspect.currentframe()
         if _frame is None:  # pragma: no cover - no Python frame introspection
             raise RuntimeError(
@@ -4696,6 +4696,9 @@ def solve_model(
         _fwd = {k: _lv[k] for k in _names if k != "model"}
         if _kwname:
             _fwd.update(_lv[_kwname])
+        # Charge the reduction's own wall time against the caller's budget so
+        # ``solve(time_limit=N)`` still tracks N end to end.
+        _fwd["time_limit"] = max(1.0, float(time_limit) - _sub_prep_s)
         with _sub_scope():
             _sub_result = solve_model(_reduced_model, **_fwd)
         _lifted: Optional[SolveResult] = _sub_lift_result(

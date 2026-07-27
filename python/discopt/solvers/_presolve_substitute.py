@@ -36,6 +36,7 @@ from __future__ import annotations
 import logging
 import os
 import threading
+import time
 from typing import TYPE_CHECKING, Any, Optional
 
 import numpy as np
@@ -69,12 +70,14 @@ def _in_reduced_solve() -> bool:
     return bool(getattr(_state, "active", False))
 
 
-def build_reduced(model) -> Optional[tuple[Any, Any, Any]]:
-    """``(reduced_model, chain, pristine_repr)`` or ``None`` if not applicable.
+def build_reduced(model) -> Optional[tuple[Any, Any, Any, float]]:
+    """``(reduced_model, chain, pristine_repr, elapsed_s)`` or ``None``.
 
     ``None`` means "nothing to gain / not safe here": the flag is off, the Rust
     repr could not be built, the model carries complementarity relations, or no
-    variable was eliminated.
+    variable was eliminated. ``elapsed_s`` is the wall time this preparation
+    consumed, so the caller can charge it against the solve's ``time_limit``
+    rather than handing the reduced solve a fresh full budget.
     """
     if not substitution_enabled() or _in_reduced_solve():
         return None
@@ -85,6 +88,7 @@ def build_reduced(model) -> Optional[tuple[Any, Any, Any]]:
         logger.debug("substitution presolve unavailable: %s", exc)
         return None
 
+    t0 = time.perf_counter()
     pristine = model_to_repr(model, getattr(model, "_builder", None))
     reduced_repr, chain = pristine.substitute(4)
     if chain.refused is not None:
@@ -93,15 +97,17 @@ def build_reduced(model) -> Optional[tuple[Any, Any, Any]]:
     if chain.variables_eliminated == 0:
         return None
     reduced_model = model_from_repr(reduced_repr, f"{model.name}_substituted")
+    elapsed = time.perf_counter() - t0
     logger.info(
-        "substitution presolve: %d -> %d vars, %d -> %d constraints (%d sweeps)",
+        "substitution presolve: %d -> %d vars, %d -> %d constraints (%d sweeps, %.3fs)",
         pristine.n_vars,
         reduced_repr.n_vars,
         pristine.n_constraints,
         reduced_repr.n_constraints,
         chain.n_sweeps,
+        elapsed,
     )
-    return reduced_model, chain, pristine
+    return reduced_model, chain, pristine, elapsed
 
 
 def _flat_point(model, x_dict) -> Optional[np.ndarray]:
@@ -124,7 +130,7 @@ def lift_result(
     Returns ``None`` when the result cannot be lifted **and verified**, in which
     case the caller must fall back to the ordinary solve path.
     """
-    from discopt.solvers._convex_kernel import _incumbent_is_feasible, _unflatten
+    from discopt.solvers._convex_kernel import _unflatten
 
     if result is None:
         return None
@@ -149,13 +155,19 @@ def lift_result(
         return None
 
     # #779 guard: the lifted point must be feasible for the PRISTINE model.
-    if not _incumbent_is_feasible(model, x_full, tol=_FEAS_TOL):
-        logger.warning(
-            "substitution postsolve: lifted incumbent is infeasible for the "
-            "pristine model; discarding it and falling back"
-        )
-        return None
-
+    #
+    # The check runs through the Rust evaluator on ``pristine_repr`` — the
+    # un-presolved ``ModelRepr`` built from this very model — rather than
+    # ``_convex_kernel._incumbent_is_feasible``, which builds a JAX
+    # ``NLPEvaluator``. Two reasons, in order:
+    #   1. it is *stronger*: it checks variable bounds as well as constraints,
+    #      and bounds are exactly what a substitution transfers;
+    #   2. the JAX path does not scale to the models this pass targets. On
+    #      watercontamination0202 (106,711 vars / 107,209 rows) the Rust check
+    #      is 0.008 s while the JAX path had not returned after 119 s
+    #      (measured, same point, same process) — verification alone would have
+    #      consumed several times the solve budget the reduction is meant to
+    #      save.
     obj_pristine, con_viol, bnd_viol = pristine_repr.evaluate_point(x_full.tolist())
     if not np.isfinite(obj_pristine):
         logger.warning("substitution postsolve: non-finite pristine objective; discarding")
