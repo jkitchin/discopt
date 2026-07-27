@@ -30,6 +30,7 @@ fn _rust(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<batch::PyBatchDispatcher>()?;
     m.add_class::<bnb_bindings::PyTreeManager>()?;
     m.add_class::<expr_bindings::PyModelRepr>()?;
+    m.add_class::<expr_bindings::PySubstitutionChain>()?;
     m.add_class::<expr_bindings::PyModelBuilder>()?;
     m.add_function(wrap_pyfunction!(expr_bindings::model_to_repr, m)?)?;
     m.add_function(wrap_pyfunction!(nl_bindings::parse_nl_file, m)?)?;
