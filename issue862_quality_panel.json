@@ -1,0 +1,107 @@
+{
+ "time_limit": 60.0,
+ "flag": "DISCOPT_LP_SPATIAL_FALLBACK",
+ "solu": "/Users/jkitchin/Dropbox/projects/discopt-minlp-benchmark/minlplib.solu",
+ "gate": {
+  "gains": 2,
+  "no_incumbent_off": 2,
+  "net_positive_applies": true,
+  "net_positive_ok": true,
+  "lost_incumbents": 0,
+  "cert_regressions": 0,
+  "overshoots": 0,
+  "unsound": 0,
+  "false_primals": 0,
+  "ok": true
+ },
+ "quality": {
+  "off": {
+   "scored": 0,
+   "unscored": 2,
+   "with_incumbent": 0,
+   "false_primals": 0,
+   "mean_gap": null,
+   "median_gap": null,
+   "worst_gap": null,
+   "worst_instance": null
+  },
+  "on": {
+   "scored": 2,
+   "unscored": 0,
+   "with_incumbent": 2,
+   "false_primals": 0,
+   "mean_gap": 0.027777777777777735,
+   "median_gap": 0.027777777777777735,
+   "worst_gap": 0.05555555555555547,
+   "worst_instance": "tln6"
+  },
+  "regressions": [],
+  "ok": true
+ },
+ "rows": {
+  "off": [
+   {
+    "name": "tln4",
+    "objective": null,
+    "optimum": 8.3,
+    "sense": "min",
+    "bound": 1.7285714285714286,
+    "status": "time_limit",
+    "gap_certified": false,
+    "node_count": 55359,
+    "wall": 60.38298958307132,
+    "incumbent_verification_failed": false,
+    "error": null,
+    "primal_gap": null,
+    "relative_excess": null
+   },
+   {
+    "name": "tln6",
+    "objective": null,
+    "optimum": 15.3,
+    "sense": "min",
+    "bound": 2.3,
+    "status": "time_limit",
+    "gap_certified": false,
+    "node_count": 16063,
+    "wall": 60.45130879106,
+    "incumbent_verification_failed": false,
+    "error": null,
+    "primal_gap": null,
+    "relative_excess": null
+   }
+  ],
+  "on": [
+   {
+    "name": "tln4",
+    "objective": 8.299999999999999,
+    "optimum": 8.3,
+    "sense": "min",
+    "bound": 7.019108280254426,
+    "status": "time_limit",
+    "gap_certified": false,
+    "node_count": 49133,
+    "wall": 60.39670670800842,
+    "incumbent_verification_failed": false,
+    "error": null,
+    "primal_gap": 0.0,
+    "relative_excess": -2.1401889631328316e-16
+   },
+   {
+    "name": "tln6",
+    "objective": 16.2,
+    "optimum": 15.3,
+    "sense": "min",
+    "bound": 4.736971607344093,
+    "status": "time_limit",
+    "gap_certified": false,
+    "node_count": 19471,
+    "wall": 60.449505041120574,
+    "incumbent_verification_failed": false,
+    "error": null,
+    "primal_gap": 0.05555555555555547,
+    "relative_excess": 0.05882352941176461
+   }
+  ]
+ }
+}

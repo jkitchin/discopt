@@ -1,0 +1,32 @@
+{
+  "schema_version": 1,
+  "status": "optimal",
+  "objective": -0.9434704942820806,
+  "bound": -0.9434705000000164,
+  "gap": 1.6542323066914832e-14,
+  "wall_time": 1.3266222500242293,
+  "node_count": 5,
+  "mip_count": 0,
+  "rust_time": 0.00011870800517499447,
+  "jax_time": 0.03279920911882073,
+  "python_time": 1.2937043329002336,
+  "convex_fast_path": false,
+  "nlp_bb": false,
+  "gap_certified": true,
+  "subnlp_calls": 1,
+  "subnlp_feasible": 1,
+  "subnlp_incumbent_updates": 1,
+  "x": {
+    "x0": 0.9699999995764018,
+    "x1": 0.9924999998694952,
+    "x2": 0.9799999946175193,
+    "x3": 0.0,
+    "x4": 1.0,
+    "x5": 1.0,
+    "x6": 1.0,
+    "x7": 0.0,
+    "x8": 1.0,
+    "x9": 1.0,
+    "x10": 0.0
+  }
+}
