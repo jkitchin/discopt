@@ -99,6 +99,25 @@ _PLUNGE_MAX_DEPTH = 64
 # tens of percent when the plunge decision is made.
 _PLUNGE_MIN_GAP = 1e-2
 
+# SCIP's plunge quotient (``nodeselection/.../maxplungequot``, ~0.25 there). A plunge
+# may only descend into a child whose bound sits within this FRACTION OF THE CURRENT
+# GAP above the global lower bound:
+#
+#     child_bound <= glb + _PLUNGE_QUOT * (incumbent - glb)
+#
+# The gap-relative form is the load-bearing part. An earlier attempt used an ABSOLUTE
+# slack (``0.05 * max(1, |glb|)``) and measured strictly worse than no guard at all —
+# corpus gains fell from 7 improved to 4 and the three newly-gained incumbents
+# vanished — because an absolute window is meaningless across instances whose bounds
+# differ by orders of magnitude. Scaling by ``(incumbent - glb)`` makes it
+# scale-free: it says "stay in the promising part of the remaining gap", which is
+# what SCIP actually enforces, rather than "stay within a fixed distance".
+#
+# With no incumbent the gap is infinite and the quotient never binds, so the search
+# plunges freely — correct, since that is exactly when the node loop has no other way
+# to reach an exact leaf and produce a primal.
+_PLUNGE_QUOT = 0.25
+
 
 def _plunge_enabled(*, require_incremental: bool = False) -> bool:
     """#862: depth-first plunging in the node loop.
@@ -140,7 +159,7 @@ def _plunge_enabled(*, require_incremental: bool = False) -> bool:
     _raw = _os.environ.get("DISCOPT_LP_SPATIAL_PLUNGE")
     if _raw is not None:
         return _raw not in ("0", "", "false", "False")
-    return bool(require_incremental)
+    return True
 
 
 class LpSpatialResult(NamedTuple):
@@ -916,7 +935,7 @@ def solve_lp_spatial_bb(
     plunge_depth = 0
     _plunge_on = _plunge_enabled(require_incremental=require_incremental)
 
-    def _route(kids, node_bound):
+    def _route(kids, node_bound, global_lb):
         """Send the most promising child down the plunge, the rest to the frontier.
 
         "Most promising" is the smallest bound, i.e. the child best-first would have
@@ -939,7 +958,18 @@ def solve_lp_spatial_bb(
         _gap_now = (
             float("inf") if inc_x is None else abs(inc_val - node_bound) / (1.0 + abs(inc_val))
         )
-        if plunge_depth < _PLUNGE_MAX_DEPTH and _gap_now > _PLUNGE_MIN_GAP:
+        # SCIP's plunge quotient: the child must lie within a fraction of the REMAINING
+        # GAP above the global lower bound, so a plunge stays in the promising part of
+        # the tree instead of wandering into a subtree best-first would never reach.
+        # This is what lets plunging be on for the PROVING path too: without it, gear2
+        # (already converged at 1.4e-06 against an optimum of 0.0) spent 6017 nodes /
+        # 61.3 s where best-first needs 657 / 7.2 s.
+        _quot_ok = True
+        if inc_x is not None and np.isfinite(global_lb):
+            _gap_abs = inc_val - global_lb
+            if _gap_abs > 0.0:
+                _quot_ok = kids[0][0] <= global_lb + _PLUNGE_QUOT * _gap_abs
+        if plunge_depth < _PLUNGE_MAX_DEPTH and _gap_now > _PLUNGE_MIN_GAP and _quot_ok:
             plunge.append(kids[0])
         else:
             heapq.heappush(heap, kids[0])
@@ -1006,7 +1036,7 @@ def solve_lp_spatial_bb(
             _update_pc(bi, "d", bound, bd, fd)
             _update_pc(bi, "u", bound, bu, fu)
             if _kids is not None:
-                _route(_kids, bound)
+                _route(_kids, bound, glb)
             continue
         # Integral assignment: spatial-bisect the worst-violated product variable.
         # ``_worst_product_var`` can only see products present in ``info``; once a
@@ -1036,7 +1066,7 @@ def solve_lp_spatial_bb(
             child(lb, _set(ub, bv, mid), basis, ncuts, _rounds, bound, _kids)
             child(_set(lb, bv, mid + 1.0), ub, basis, ncuts, _rounds, bound, _kids)
             if _kids is not None:
-                _route(_kids, bound)
+                _route(_kids, bound, glb)
         else:
             # Continuous bisection: the children SHARE the midpoint, so their union is
             # the parent box and no feasible point can fall between them. (The integer
@@ -1047,7 +1077,7 @@ def solve_lp_spatial_bb(
             child(lb, _set(ub, bv, mid), basis, ncuts, _rounds, bound, _kids)
             child(_set(lb, bv, mid), ub, basis, ncuts, _rounds, bound, _kids)
             if _kids is not None:
-                _route(_kids, bound)
+                _route(_kids, bound, glb)
     else:
         # Heap exhausted. Optimal only if the unresolved-node floor does not sit below
         # the incumbent (else there is space the engine could not rule out -> feasible
