@@ -143,7 +143,8 @@ session scratchpad.) Mechanism attribution for all five P2 instances:
 Three consequences. (1) **`watercontamination0202` is a presolve problem, not a primal
 problem** — no incumbent constructor competes with deleting 99.5 % of the model; discopt
 runs its entire root setup at full 106k size (#875's measured floor ≈ 27 s is *paying for
-the un-presolved model*). (2) `ball_mk2_30` needs only a trivial-point probe — note the
+the un-presolved model*). **⚠ FALSIFIED 2026-07-27 — see §G-G.1 below; it is both, and
+the residual after presolve is primal.** (2) `ball_mk2_30` needs only a trivial-point probe — note the
 open discrepancy with #843's claim that the graduated trivial seed already resolves it;
 defaults measurement shows no incumbent, so the seed's cold-start gating likely excludes
 this class (same gate that excludes chimera, per #843). (3) The do-not-staff entry
@@ -152,6 +153,54 @@ this class (same gate that excludes chimera, per #843). (3) The do-not-staff ent
 nvs family only. **Restarts and conflict analysis measured NOT implicated on these five;
 they remain unmeasured on the 40 jointly-proved slow-ratio panel — an open evidence task,
 not a claimed non-area.**
+
+**G-G.1. FALSIFICATION (2026-07-27, after #888 landed).** Three claims made above and in
+#888's PR body are retracted here per CLAUDE.md §11. All three were contradicted by
+measurement *after* the presolve work was scoped on them.
+
+1. **"`watercontamination0202` is a presolve problem, not a primal problem" — FALSE; it is
+   both, and the binding half is primal.** End-to-end with `DISCOPT_PRESOLVE_SUBSTITUTE=1`
+   (60 s budget, subprocess-isolated, `substitute_targets_e2e.json`): the flag turns
+   `time_limit`/**no incumbent** into `feasible` with objective **3190.4506** against
+   `=opt= 125.1956151` — a **2449 % primal gap**. Deleting 99.5 % of the model bought a
+   first incumbent and nothing more. The reduction is real; the claim that it is what
+   stands between us and this instance is not.
+2. **The "189×" headline describes one instance, not a class.** Random 300-instance census
+   (seed 20260727, mirrored corpus): discopt's substitution pass reduces **nothing on
+   64.3 %**, reaches ≥3× on **1/300**, and ≥10× on **0/300**. SCIP 10.0.2's *full* presolve
+   on the same sample: nothing on 47.1 %, ≥3× on 8/297, ≥10× on **0/297**. Only 15 of 1610
+   corpus instances have ≥10k vars with <5 % nonlinear rows. Independently corroborated by
+   #888's own §5 panel: 13 of 66 vendored instances had anything to substitute, and the
+   flag gained **0 incumbents and 0 certifications** (48/48 certified, 54/54 incumbents,
+   both arms).
+3. **"Substitution is single-pass, and coupling it to bound tightening is the residual
+   gap" — WRONG MECHANISM.** (My framing when dispatching the follow-up; retracted before
+   it was built.) `substitute_to_fixpoint` already iterates, and it **saturates at 2
+   sweeps** — 4 and 8 sweeps buy exactly zero on `watercontamination0202`,
+   `gastrans582_cold13`, and `gastrans040`. Nor are we doing *less* aggregation than SCIP:
+   we eliminate **105,845** vars by aggregation vs SCIP's **67,587**. The residual is that
+   SCIP's other 38,396 removals are **bound-driven fixings** (78,959 `ChgBounds`), a
+   *different mechanism* we do not have at all — plus dual reductions, implied-free column
+   elimination, and coefficient tightening. SCIP needs 6 rounds because its rounds
+   alternate mechanisms; ours needs 2 because it only re-runs one. The gap is
+   single-*mechanism*, not single-*pass*.
+
+**Consequence for prioritization.** SCIP itself gets no reduction on 47.1 % of the random
+300 and never reaches 10×, yet still beats us broadly — so closing our 35.7 % → 52.9 %
+reduction-rate gap should not be expected to move the corpus geomean. The FBBT-coupled
+propagation/fixing loop remains the honest completion of this mechanism and is cheap (the
+`SubstDef::Fixed` postsolve inversion is already built), but it is **deferred, not
+top-priority**: it would land a second default-OFF flag with the same measured 0-incumbent,
+0-certification profile as #888 — the `DISCOPT_CUT_INHERIT` lesson (sound ≠ helpful).
+Priority returns to what #844 is actually titled: **primal constructors** (LP feasibility
+pump, pscost diving), which is where the 2449 % gap above lives.
+
+**Open blocker on the #888 flag (must clear before it could ever graduate default-ON):**
+`hda` bound quality regresses OFF −64,473 → ON −1.56e8 — sound (weaker, correct direction)
+but far looser. Also noted, *not* caused by the flag: `tanksize`'s incumbent violates a
+variable bound by 1.60e-6 on the pristine model, bit-identical in both arms, which the
+panel's `FEAS_TOL = 1e-5` (`substitute_diff_panel.py:33`) hides — that tolerance is looser
+than the repo's abs=1e-6 and should be tightened.
 
 **G-F. `no_bound` family (8/62) — relaxation strength on family D** (tls2/tspn-class,
 `baron-gap-plan.md` G5): the dual bound never moves, so no budget helps. Distinct from

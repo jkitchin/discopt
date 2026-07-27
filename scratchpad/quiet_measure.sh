@@ -1,0 +1,48 @@
+#!/bin/bash
+# Wait for the machine to go quiet, then measure the #844 fallback overshoot.
+# Two prior measurement rounds were invalidated by concurrent CPU load, so this
+# gates on load average before collecting anything.
+cd /Users/jkitchin/projects/discopt
+for i in $(seq 1 120); do          # up to ~60 min
+  L=$(uptime | sed 's/.*averages*: *//' | awk '{print $1}' | tr -d ',')
+  BUSY=$(ps aux | awk '$3>50 {c++} END{print c+0}')
+  if awk "BEGIN{exit !($L < 4.0)}" && [ "$BUSY" -eq 0 ]; then
+    echo "QUIET at attempt $i (load=$L, busy procs=$BUSY) -- measuring"
+    break
+  fi
+  [ $((i % 10)) -eq 1 ] && echo "  waiting: load=$L busy=$BUSY"
+  sleep 30
+done
+L=$(uptime | sed 's/.*averages*: *//' | awk '{print $1}' | tr -d ',')
+echo "=== starting measurement at load=$L ==="
+JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 python - <<PYEOF
+import os, time
+os.environ["JAX_PLATFORMS"]="cpu"; os.environ["JAX_ENABLE_X64"]="1"
+import warnings; warnings.filterwarnings("ignore")
+import numpy as np
+from discopt.modeling.core import from_nl
+BM=os.path.expanduser("~/Dropbox/projects/discopt-minlp-benchmark/minlplib/nl")
+TL=60.0
+CASES=[("tln4",8.3),("tln5",10.3),("tln6",15.3),("ball_mk2_30",0.0),
+       ("nvs04",0.72),("nvs06",1.7703125),("nvs09",-43.134),("nvs15",1.0)]
+res={}
+for nm,opt in CASES:
+    for fb in ("0","1"):
+        os.environ["DISCOPT_LP_SPATIAL_FALLBACK"]=fb
+        t=time.perf_counter(); r=from_nl(f"{BM}/{nm}.nl").solve(time_limit=TL)
+        w=time.perf_counter()-t
+        res[(nm,fb)]=(r.objective, r.bound, bool(r.gap_certified), w)
+        print(f"  {nm:12s} FB={fb} obj={r.objective} bound={r.bound} "
+              f"gapc={r.gap_certified} wall={w:6.1f}s ratio={w/TL:4.2f}x opt={opt}", flush=True)
+print()
+print("=== VERDICT ===")
+gains=regr=cert=over=0
+for nm,opt in CASES:
+    o0,_,c0,w0=res[(nm,"0")]; o1,b1,c1,w1=res[(nm,"1")]
+    if o0 is None and o1 is not None: gains+=1
+    if o0 is not None and o1 is None: regr+=1
+    if c0 and not c1: cert+=1
+    if w1 > TL*1.25: over+=1; print(f"  OVERSHOOT {nm}: {w1:.1f}s vs {TL}s ({w1/TL:.2f}x)")
+print(f"  gains={gains} lost_incumbents={regr} cert_regressions={cert} overshoots={over}")
+print(f"  DEFAULT-ON OK: {gains>0 and regr==0 and cert==0 and over==0}")
+PYEOF
