@@ -4648,6 +4648,69 @@ def solve_model(
     if _root_cut_max < 1:
         raise ValueError(f"root_cut_max must be >= 1, got {_root_cut_max}")
 
+    # --- Presolve substitution entry (#844, P2(a′), opt-in) ---------------
+    # Solve a REDUCED model in which every variable determined by a linear
+    # equality has been substituted out of every row and the objective, then
+    # lift the incumbent back through the postsolve chain and verify it against
+    # the PRISTINE model (#779). Bound-changing in the sense of CLAUDE.md §5
+    # (it rewrites the model the relaxation is built from), so it is gated
+    # behind ``DISCOPT_PRESOLVE_SUBSTITUTE``, default OFF. Declined whenever a
+    # caller-supplied object is expressed in the ORIGINAL variable space —
+    # a warm-start point, a callback, lazy constraints or a decomposition
+    # structure — because handing those to the reduced model would silently
+    # misinterpret them.
+    try:
+        from discopt.solvers._presolve_substitute import (
+            build_reduced as _sub_build_reduced,
+        )
+        from discopt.solvers._presolve_substitute import (
+            lift_result as _sub_lift_result,
+        )
+        from discopt.solvers._presolve_substitute import (
+            reduced_solve_scope as _sub_scope,
+        )
+
+        _sub_blocked = (
+            initial_point is not None
+            or lazy_constraints is not None
+            or incumbent_callback is not None
+            or node_callback is not None
+            or decomposition_structure is not None
+        )
+        _sub = None if _sub_blocked else _sub_build_reduced(model)
+    except Exception as _sub_exc:  # pragma: no cover - capability probe
+        logger.debug("substitution presolve entry unavailable: %s", _sub_exc)
+        _sub = None
+    if _sub is not None:
+        import inspect as _inspect
+
+        _reduced_model, _sub_chain, _sub_pristine, _sub_prep_s = _sub
+        _frame = _inspect.currentframe()
+        if _frame is None:  # pragma: no cover - no Python frame introspection
+            raise RuntimeError(
+                "DISCOPT_PRESOLVE_SUBSTITUTE needs frame introspection to forward "
+                "solve arguments to the reduced solve; this interpreter does not "
+                "provide it. Unset the flag to use the default path."
+            )
+        _names, _, _kwname, _lv = _inspect.getargvalues(_frame)
+        _fwd = {k: _lv[k] for k in _names if k != "model"}
+        if _kwname:
+            _fwd.update(_lv[_kwname])
+        # Charge the reduction's own wall time against the caller's budget so
+        # ``solve(time_limit=N)`` still tracks N end to end.
+        _fwd["time_limit"] = max(1.0, float(time_limit) - _sub_prep_s)
+        with _sub_scope():
+            _sub_result = solve_model(_reduced_model, **_fwd)
+        _lifted: Optional[SolveResult] = _sub_lift_result(
+            model, _reduced_model, _sub_chain, _sub_pristine, _sub_result
+        )
+        if _lifted is not None:
+            return _lifted
+        logger.warning(
+            "substitution presolve: result could not be lifted and verified; "
+            "re-solving the original model"
+        )
+
     # Anchor the whole-solve clock HERE, before any reformulation / presolve /
     # relaxation-build work — not at the B&B loop entry below. Preprocessing
     # (root presolve, OBBT, relaxation build) can take tens of seconds on large

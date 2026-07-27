@@ -880,6 +880,182 @@ impl PyModelRepr {
             stats.into(),
         ))
     }
+
+    /// Run the batch substitution-graph aggregator (issue #844, P2(a′)).
+    ///
+    /// Returns `(reduced_repr, chain)`. `chain` is a [`PySubstitutionChain`]
+    /// that owns every intermediate model and knows how to lift a reduced
+    /// point back to the original variable space via `chain.postsolve(x)`.
+    ///
+    /// Refuses (returns the model unchanged, `chain.n_sweeps == 0`, with
+    /// `chain.refused` set) when the model carries complementarity relations:
+    /// those reference variable indices outside `ModelRepr`, which this pass
+    /// renumbers.
+    #[pyo3(signature = (max_sweeps=4))]
+    fn substitute(&self, max_sweeps: usize) -> PyResult<(PyModelRepr, PySubstitutionChain)> {
+        use discopt_core::presolve::substitute_to_fixpoint;
+
+        if !self.complementarities.is_empty() {
+            return Ok((
+                PyModelRepr {
+                    inner: self.inner.clone(),
+                    complementarities: self.complementarities.clone(),
+                },
+                PySubstitutionChain {
+                    models: vec![self.inner.clone()],
+                    chain: Vec::new(),
+                    refused: Some("model carries complementarity relations".to_string()),
+                },
+            ));
+        }
+
+        let (models, chain) = substitute_to_fixpoint(&self.inner, max_sweeps);
+        let reduced = models.last().expect("seeded with the input model").clone();
+        Ok((
+            PyModelRepr {
+                inner: reduced,
+                complementarities: Vec::new(),
+            },
+            PySubstitutionChain {
+                models,
+                chain,
+                refused: None,
+            },
+        ))
+    }
+
+    /// Evaluate the objective and the maximum constraint/bound violation of a
+    /// flat scalar point against **this** model. Used to feasibility-verify a
+    /// postsolved incumbent against the pristine model.
+    ///
+    /// Returns `(objective, max_constraint_violation, max_bound_violation)`.
+    fn evaluate_point(&self, x: Vec<f64>) -> PyResult<(f64, f64, f64)> {
+        use discopt_core::expr::ConstraintSense;
+        if x.len() != self.inner.n_vars {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "point has {} entries, model has {} scalar vars",
+                x.len(),
+                self.inner.n_vars
+            )));
+        }
+        let obj = self.inner.evaluate_objective(&x);
+        let mut max_con = 0.0f64;
+        for c in &self.inner.constraints {
+            let v = self.inner.evaluate_expr(c.body, &x);
+            let viol = match c.sense {
+                ConstraintSense::Eq => (v - c.rhs).abs(),
+                ConstraintSense::Le => (v - c.rhs).max(0.0),
+                ConstraintSense::Ge => (c.rhs - v).max(0.0),
+            };
+            if viol.is_nan() {
+                return Ok((obj, f64::NAN, f64::NAN));
+            }
+            max_con = max_con.max(viol);
+        }
+        let mut max_bnd = 0.0f64;
+        for v in &self.inner.variables {
+            for k in 0..v.size {
+                let xi = x[v.offset + k];
+                let lo = *v.lb.get(k).unwrap_or(&f64::NEG_INFINITY);
+                let hi = *v.ub.get(k).unwrap_or(&f64::INFINITY);
+                max_bnd = max_bnd.max((lo - xi).max(0.0)).max((xi - hi).max(0.0));
+            }
+        }
+        Ok((obj, max_con, max_bnd))
+    }
+}
+
+/// Postsolve payload for [`PyModelRepr::substitute`].
+///
+/// Owns every intermediate model produced by the substitution sweeps so that a
+/// reduced-space point can be lifted back to the original variable space
+/// without the caller having to keep them alive or re-derive the mapping.
+#[pyclass(name = "SubstitutionChain")]
+pub struct PySubstitutionChain {
+    models: Vec<ModelRepr>,
+    chain: Vec<discopt_core::presolve::SubstitutionStats>,
+    refused: Option<String>,
+}
+
+#[pymethods]
+impl PySubstitutionChain {
+    /// Number of substitution sweeps applied.
+    #[getter]
+    fn n_sweeps(&self) -> usize {
+        self.chain.len()
+    }
+
+    /// Why the pass declined to run at all, if it did.
+    #[getter]
+    fn refused(&self) -> Option<String> {
+        self.refused.clone()
+    }
+
+    /// Total variable blocks eliminated across all sweeps.
+    #[getter]
+    fn variables_eliminated(&self) -> usize {
+        self.chain.iter().map(|s| s.variables_eliminated).sum()
+    }
+
+    /// Per-sweep counter dicts, oldest first.
+    fn sweep_stats(&self, py: Python<'_>) -> PyResult<PyObject> {
+        let out = pyo3::types::PyList::empty(py);
+        for st in &self.chain {
+            let d = PyDict::new(py);
+            d.set_item("variables_eliminated", st.variables_eliminated)?;
+            d.set_item("equalities_dropped", st.equalities_dropped)?;
+            d.set_item("candidate_rows", st.candidate_rows)?;
+            d.set_item("cycles_rejected", st.cycles_rejected)?;
+            d.set_item("pivots_rejected", st.pivots_rejected)?;
+            d.set_item("growth_rejected", st.growth_rejected)?;
+            d.set_item("ineligible_rejected", st.ineligible_rejected)?;
+            d.set_item("infeasible_detected", st.infeasible_detected)?;
+            d.set_item("aborted", st.aborted.clone())?;
+            out.append(d)?;
+        }
+        Ok(out.into_any().unbind())
+    }
+
+    /// Definition records for sweep `i`, as
+    /// `{"eliminated_block", "kind", ...}` dicts.
+    fn records(&self, py: Python<'_>, sweep: usize) -> PyResult<PyObject> {
+        let st = self
+            .chain
+            .get(sweep)
+            .ok_or_else(|| pyo3::exceptions::PyIndexError::new_err(format!("no sweep {sweep}")))?;
+        let out = pyo3::types::PyList::empty(py);
+        for r in &st.records {
+            let rd = PyDict::new(py);
+            rd.set_item("eliminated_block", r.eliminated_block)?;
+            match r.def {
+                discopt_core::presolve::SubstDef::Fixed(v) => {
+                    rd.set_item("kind", "fixed")?;
+                    rd.set_item("value", v)?;
+                }
+                discopt_core::presolve::SubstDef::Affine {
+                    source_block,
+                    coeff,
+                    offset,
+                } => {
+                    rd.set_item("kind", "affine")?;
+                    rd.set_item("source_block", source_block)?;
+                    rd.set_item("coeff", coeff)?;
+                    rd.set_item("offset", offset)?;
+                }
+            }
+            out.append(rd)?;
+        }
+        Ok(out.into_any().unbind())
+    }
+
+    /// Lift a reduced-space flat point back to the original variable space.
+    ///
+    /// Raises `ValueError` when the point cannot be inverted — a solution that
+    /// cannot be recovered must be discarded, never reported.
+    fn postsolve(&self, x: Vec<f64>) -> PyResult<Vec<f64>> {
+        discopt_core::presolve::postsolve_chain(&self.models, &self.chain, &x)
+            .map_err(pyo3::exceptions::PyValueError::new_err)
+    }
 }
 
 // ─────────────────────────────────────────────────────────────

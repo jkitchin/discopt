@@ -5282,6 +5282,73 @@ def _rebalance_deep_sum(expr: "Expression") -> "Expression":
     return terms[0]
 
 
+def model_from_repr(rep, name: str) -> Model:
+    """Build a Python :class:`Model` from a Rust ``ModelRepr``.
+
+    Shared by :func:`from_nl` (whose ``rep`` comes from the ``.nl`` parser) and
+    by the presolve substitution entry (#844), whose ``rep`` is a *reduced*
+    model produced by ``ModelRepr.substitute``. Variables are created in block
+    order, so the resulting model's flat variable vector is index-compatible
+    with ``rep``'s.
+
+    Complementarity relations are **not** reconstructed here — they live
+    outside ``ModelRepr`` and are threaded separately by :func:`from_nl`.
+    """
+    from discopt._jax.nl_reconstruction import reconstruct_dag
+
+    m = Model(name)
+
+    var_types = rep.var_types()
+    var_names = rep.var_names()
+    var_shapes = rep.var_shapes()
+    for i in range(len(var_names)):
+        vt = var_types[i]
+        vname = var_names[i]
+        lb_vals = rep.var_lb(i)
+        ub_vals = rep.var_ub(i)
+        shape_list = var_shapes[i]
+        shape = tuple(shape_list) if shape_list else ()
+        lb = np.array(lb_vals).reshape(shape) if shape else float(lb_vals[0])
+        ub = np.array(ub_vals).reshape(shape) if shape else float(ub_vals[0])
+
+        if vt == "continuous":
+            m.continuous(vname, shape=shape, lb=lb, ub=ub)
+        elif vt == "binary":
+            var = m.binary(vname, shape=shape)
+            # Preserve the parsed bounds (X-3 / M2 / INT-2): `Model.binary` hardcodes
+            # ``[0, 1]``, so a bound-narrowed or fixed binary (e.g. ``lb == ub == 1``,
+            # routine Pyomo/presolve output) would silently un-fix, giving the wrong
+            # optimum on the round-trip. Clamp the parsed bounds into ``[0, 1]`` (a
+            # binary column is 0/1 by definition) and stamp them onto the variable.
+            var.lb = np.broadcast_to(np.clip(np.asarray(lb, dtype=np.float64), 0.0, 1.0), shape)
+            var.ub = np.broadcast_to(np.clip(np.asarray(ub, dtype=np.float64), 0.0, 1.0), shape)
+        elif vt == "integer":
+            m.integer(vname, shape=shape, lb=lb, ub=ub)
+
+    objective_expr, constraint_tuples = reconstruct_dag(rep, m._variables)
+
+    # #654: rebalance pathologically deep ``+`` chains (flat sums parsed as depth-N
+    # left chains) so downstream recursive tree-walks don't overflow the stack.
+    # A no-op below _SUM_REBALANCE_DEPTH, so ordinary models are byte-identical.
+    obj_expr: Expression = _rebalance_deep_sum(objective_expr)
+
+    if rep.objective_sense == "minimize":
+        m.minimize(obj_expr)
+    else:
+        m.maximize(obj_expr)
+
+    for body, sense, rhs in constraint_tuples:
+        body_expr: Expression = _rebalance_deep_sum(body)
+        if sense == "<=":
+            m.subject_to(body_expr <= rhs)
+        elif sense == ">=":
+            m.subject_to(body_expr >= rhs)
+        elif sense == "==":
+            m.subject_to(body_expr == rhs)
+
+    return m
+
+
 def from_nl(path: str) -> Model:
     """
     Import a model from AMPL .nl format.
@@ -5305,71 +5372,15 @@ def from_nl(path: str) -> Model:
     >>> model = dm.from_nl("problem.nl")
     >>> result = model.solve()
     """
-    from discopt._jax.nl_reconstruction import (
-        reconstruct_complementarities,
-        reconstruct_dag,
-    )
+    import os
+
+    from discopt._jax.nl_reconstruction import reconstruct_complementarities
     from discopt._rust import parse_nl_file
 
     nl_repr = parse_nl_file(path)
 
-    # Build a Python Model from the parsed representation
-    import os
-
     model_name = os.path.splitext(os.path.basename(path))[0]
-    m = Model(model_name)
-
-    # Create variables matching the .nl file
-    var_types = nl_repr.var_types()
-    var_names = nl_repr.var_names()
-    var_shapes = nl_repr.var_shapes()
-    for i in range(len(var_names)):
-        vt = var_types[i]
-        name = var_names[i]
-        lb_vals = nl_repr.var_lb(i)
-        ub_vals = nl_repr.var_ub(i)
-        shape_list = var_shapes[i]
-        shape = tuple(shape_list) if shape_list else ()
-        lb = np.array(lb_vals).reshape(shape) if shape else float(lb_vals[0])
-        ub = np.array(ub_vals).reshape(shape) if shape else float(ub_vals[0])
-
-        if vt == "continuous":
-            m.continuous(name, shape=shape, lb=lb, ub=ub)
-        elif vt == "binary":
-            var = m.binary(name, shape=shape)
-            # Preserve the parsed bounds (X-3 / M2 / INT-2): `Model.binary` hardcodes
-            # ``[0, 1]``, so a bound-narrowed or fixed binary (e.g. ``lb == ub == 1``,
-            # routine Pyomo/presolve output) would silently un-fix, giving the wrong
-            # optimum on the round-trip. Clamp the parsed bounds into ``[0, 1]`` (a
-            # binary column is 0/1 by definition) and stamp them onto the variable.
-            var.lb = np.broadcast_to(np.clip(np.asarray(lb, dtype=np.float64), 0.0, 1.0), shape)
-            var.ub = np.broadcast_to(np.clip(np.asarray(ub, dtype=np.float64), 0.0, 1.0), shape)
-        elif vt == "integer":
-            m.integer(name, shape=shape, lb=lb, ub=ub)
-
-    # Reconstruct the expression DAG from the Rust arena
-    objective_expr, constraint_tuples = reconstruct_dag(nl_repr, m._variables)
-
-    # #654: rebalance pathologically deep ``+`` chains (flat sums parsed as depth-N
-    # left chains) so downstream recursive tree-walks don't overflow the stack.
-    # A no-op below _SUM_REBALANCE_DEPTH, so ordinary models are byte-identical.
-    obj_expr: Expression = _rebalance_deep_sum(objective_expr)
-
-    # Set the objective with the reconstructed expression
-    if nl_repr.objective_sense == "minimize":
-        m.minimize(obj_expr)
-    else:
-        m.maximize(obj_expr)
-
-    # Add constraints from the reconstructed DAG
-    for body, sense, rhs in constraint_tuples:
-        body_expr: Expression = _rebalance_deep_sum(body)
-        if sense == "<=":
-            m.subject_to(body_expr <= rhs)
-        elif sense == ">=":
-            m.subject_to(body_expr >= rhs)
-        elif sense == "==":
-            m.subject_to(body_expr == rhs)
+    m = model_from_repr(nl_repr, model_name)
 
     # Complementarity (type-5) rows: lower each ``body ⊥ x`` relation through the
     # exact GDP disjunction machinery instead of adding it as an ordinary

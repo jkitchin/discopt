@@ -43,6 +43,7 @@ pub mod reduction_constraints;
 pub mod redundancy;
 pub mod scaling;
 pub mod simplify;
+pub mod substitute;
 pub mod symmetry;
 
 pub use aggregate::{
@@ -81,4 +82,8 @@ pub use reduction_constraints::{detect_reduction_constraints, ReductionStats};
 pub use redundancy::{detect_row_redundancy, RedundancyStats};
 pub use scaling::{compute_equilibration, ScalingFactors, ScalingStats};
 pub use simplify::{simplify, simplify_until, SimplifyResult};
+pub use substitute::{
+    postsolve_chain, postsolve_point, substitute_to_fixpoint, substitute_variables, SubstDef,
+    SubstitutionRecord, SubstitutionStats,
+};
 pub use symmetry::{detect_symmetries, Orbit, SymmetryStats};
