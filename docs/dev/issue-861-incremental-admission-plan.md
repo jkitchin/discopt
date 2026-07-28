@@ -781,3 +781,5 @@ engine's interval propagation — where any divergence is a bound-neutrality
 violation — for no measured gain. Owner decision (2026-07-28): finish T6, close
 #861, and file a follow-up targeting the large-model tail where the cost model
 says admission actually pays (`hda`: 20.41 ms/node, 722 vars).
+
+RALPH-861-COMPLETE
