@@ -17,6 +17,12 @@ discretization, anything — :attr:`ok` is ``False`` and the caller falls back t
 trusted per-node builder. The incremental path can therefore never change a result,
 only its speed.
 
+A term's envelope rows are identified NUMERICALLY (each closed-form row must match
+exactly one candidate on the probe box), not by support containment alone: a lifted
+*model constraint* over the same variables has the same support — ``x0*x1 >= 60``
+becomes ``{aux: -1} <= -60`` — and counting it as an envelope row declined the whole
+structure (#861). Unmatched candidates are box-independent and stay unpatched.
+
 Scope: the box-dependent terms it regenerates are bilinear products ``w=x_i*x_j``
 (4 McCormick rows), integer powers ``s=x_i**p`` (secant + 3 tangents, matching an
 empty ``DiscretizationState``) and affine squares ``w=(c*x_j+d)**2``. A monomial is
@@ -431,12 +437,84 @@ class IncrementalMcCormickLP:
             lo, hi = indptr[k], indptr[k + 1]
             return {int(indices[t]) for t in range(lo, hi) if abs(data[t]) > _TOL}
 
+        def _entries(k):
+            lo, hi = indptr[k], indptr[k + 1]
+            return {int(indices[t]): float(data[t]) for t in range(lo, hi)}
+
+        def _select(cand, expected, label):
+            """The subset of ``cand`` that IS this term's box-dependent envelope.
+
+            Support containment alone does not identify an envelope row (#861). A
+            *model constraint* over the same variables is lifted to a row whose
+            support is also contained in ``{operands, aux}`` — ``x0*x1 >= 60``
+            becomes the single-column row ``{aux: -1} <= -60`` — so the old
+            ``len(rows) != 4`` check counted lifted model rows as envelope rows and
+            declined the whole structure (6 corpus instances: prob02, prob03,
+            st_e01, st_e08, st_e09, st_e11).
+
+            Identify them NUMERICALLY instead: on the probe box the closed-form
+            envelope this class regenerates is exactly what the cold build emitted,
+            so each expected row matches exactly one candidate. Any candidate left
+            over is box-INDEPENDENT (a lifted model row) and is simply not patched —
+            it stays in ``base_A`` untouched. That classification is not taken on
+            faith: were such a row actually box-dependent, the cold build would emit
+            different values on a different validation box and :meth:`_validate`
+            would fail with a row-set mismatch, declining as before.
+
+            Requiring EXACTLY ONE match per expected row is what keeps this safe: an
+            ambiguous match (two candidates equal within tolerance) means we cannot
+            say which row the patch owns, so we decline rather than guess.
+
+            Returns the matched rows in ASCENDING index order — deliberately NOT in
+            match order. ``_patch`` zips this list against the closed-form list
+            positionally, and ascending order is what it has always used; measured
+            over the 31 admitted instances (630 terms), the match order is a
+            *rotation* of ascending order on 30 of them, so assigning in match order
+            would permute the rows of every node LP and put the exactly-unchanged
+            node-count gate at risk for zero benefit. Either assignment describes the
+            same polytope (:meth:`_rowset` is order-free); this one is byte-identical
+            to the pre-#861 behaviour wherever the term already had exactly 4 rows.
+            """
+            chosen: list[int] = []
+            used: set[int] = set()
+            for coeffs, rhs in expected:
+                hits = []
+                for k in cand:
+                    if k in used:
+                        continue
+                    ent = _entries(k)
+                    if not math.isclose(float(b[k]), rhs, rel_tol=1e-9, abs_tol=1e-9):
+                        continue
+                    if all(
+                        math.isclose(ent.get(c, 0.0), v, rel_tol=1e-9, abs_tol=1e-9)
+                        for c, v in coeffs.items()
+                    ):
+                        hits.append(k)
+                if len(hits) != 1:
+                    raise ValueError(
+                        f"{label}: {len(hits)} of {len(cand)} candidate rows match the "
+                        f"closed-form envelope row {coeffs} <= {rhs} (need exactly 1)"
+                    )
+                used.add(hits[0])
+                chosen.append(hits[0])
+            return sorted(chosen)
+
+        def _coeffs(pairs):
+            """Column -> coefficient, SUMMING duplicates (a term whose operands
+            coincide, e.g. ``x_i*x_i``, contributes twice to the same column)."""
+            d: dict[int, float] = {}
+            for c, v in pairs:
+                d[int(c)] = d.get(int(c), 0.0) + float(v)
+            return d
+
         self.bilin_rows = {}
         for (i, j), a in self.bilinear.items():
-            rows = [int(k) for k in _rows_with_col(a) if _support(k) <= {i, j, a}]
-            if len(rows) != 4:
-                raise ValueError(f"bilinear ({i},{j}) -> {len(rows)} rows, expected 4")
-            self.bilin_rows[(i, j, a)] = rows
+            cand = [int(k) for k in _rows_with_col(a) if _support(k) <= {i, j, a}]
+            expected = [
+                (_coeffs([(i, ci), (j, cj), (a, cw)]), rhs)
+                for ci, cj, cw, rhs in _bilinear_rows(i, j, a, lb_p[i], ub_p[i], lb_p[j], ub_p[j])
+            ]
+            self.bilin_rows[(i, j, a)] = _select(cand, expected, f"bilinear ({i},{j})")
         # monomial x_i**p, any p >= 2. Only an ODD power needs a sign-definite root
         # box (see the ``_root_sign`` note above); an even power is convex on all of
         # R and keeps its 4-row envelope across a sign change, so it is admitted on a
@@ -450,17 +528,23 @@ class IncrementalMcCormickLP:
                     "(the envelope switches between the 4-row secant/tangent hull and "
                     "the 2-facet S-hull, which the fixed row pattern cannot express)"
                 )
-            rows = [int(k) for k in _rows_with_col(a) if _support(k) <= {i, a}]
-            if len(rows) != 4:
-                raise ValueError(f"monomial x_{i}^{p} -> {len(rows)} rows, expected 4")
-            self.mono_rows[(i, a, p)] = rows
+            cand = [int(k) for k in _rows_with_col(a) if _support(k) <= {i, a}]
+            expected = [
+                (_coeffs([(i, ci), (a, cs)]), rhs)
+                for ci, cs, rhs in _monomial_rows(lb_p[i], ub_p[i], p)
+            ]
+            self.mono_rows[(i, a, p)] = _select(cand, expected, f"monomial x_{i}^{p}")
         # affine square (c*x_j + d)**2 -> aux: 4 secant/tangent rows over {j, aux}.
         self.affsq_rows = {}
         for (j, a), (coeff, const) in self.affine_square.items():
-            rows = [int(k) for k in _rows_with_col(a) if _support(k) <= {j, a}]
-            if len(rows) != 4:
-                raise ValueError(f"affine square ({j},{a}) -> {len(rows)} rows, expected 4")
-            self.affsq_rows[(j, a, coeff, const)] = rows
+            cand = [int(k) for k in _rows_with_col(a) if _support(k) <= {j, a}]
+            expected = [
+                (_coeffs([(j, cx), (a, cw)]), rhs)
+                for cx, cw, rhs in _affine_square_rows(coeff, const, lb_p[j], ub_p[j])
+            ]
+            self.affsq_rows[(j, a, coeff, const)] = _select(
+                cand, expected, f"affine square ({j},{a})"
+            )
         # the union of all product rows must be exactly the box-dependent rows
         self._prod_rows = set()
         for rs in self.bilin_rows.values():

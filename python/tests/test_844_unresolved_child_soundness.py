@@ -32,13 +32,51 @@ import pytest  # noqa: E402
 
 
 def _model() -> dm.Model:
-    """Pure-integer MINIMIZE with bilinear coupling: in scope, and needs branching."""
+    """Pure-integer MINIMIZE whose incremental structure does NOT build, so the
+    engine relaxes through ``_relax_bound`` — the function this test injects into.
+
+    Uses a TRILINEAR coupling. The original fixture used bilinear *constraints*,
+    which declined the fast path only because a constraint on the product lifted to
+    a 5th row over the term's own columns and the structure miscounted it as an
+    envelope row. #861 fixed that, the model started building a structure, the
+    engine stopped calling ``_relax_bound`` — and the injection below silently
+    stopped firing. The test's own vacuity guard caught it (that is what the guard
+    is for), but the fixture had to become durable: trilinear lifts are outside the
+    closed-form patch's covered families by design, so this decline is a property of
+    the mathematics rather than of a bug. The precondition is asserted below.
+    """
     m = dm.Model("unresolved_child")
     xs = [m.integer(f"x{i}", lb=0, ub=8) for i in range(4)]
     m.minimize(sum((i + 1) * xs[i] for i in range(4)))
-    for i in range(3):
-        m.subject_to(xs[i] * xs[i + 1] >= 6)
+    for i in range(2):
+        m.subject_to(xs[i] * xs[i + 1] * xs[i + 2] >= 6)
     return m
+
+
+def _incremental_model() -> dm.Model:
+    """Same shape, but its structure DOES build — so the engine relaxes through the
+    incremental fast path instead. Since #861 that is the common case, and the
+    unresolved-child soundness property must hold there too."""
+    m = dm.Model("unresolved_child_fast")
+    xs = [m.integer(f"x{i}", lb=0, ub=8) for i in range(4)]
+    m.minimize(sum(xs[i] * xs[i + 1] for i in range(3)))
+    for i in range(3):
+        m.subject_to(xs[i] + xs[i + 1] >= 5)
+    return m
+
+
+def _structure_builds(model) -> bool:
+    from discopt._jax.incremental_mccormick import IncrementalMcCormickLP
+    from discopt._jax.term_classifier import classify_nonlinear_terms
+
+    return bool(IncrementalMcCormickLP(model, classify_nonlinear_terms(model), deadline=None).ok)
+
+
+def test_fixtures_exercise_the_paths_they_claim():
+    """Guard the guards: the injection points below are path-specific, so a fixture
+    that silently switched paths would make them vacuous (exactly what #861 did)."""
+    assert not _structure_builds(_model()), "cold-path fixture now builds a structure"
+    assert _structure_builds(_incremental_model()), "fast-path fixture no longer builds"
 
 
 def test_baseline_is_certifiable():
@@ -97,6 +135,47 @@ def test_failed_child_relaxation_never_yields_a_false_certificate(monkeypatch):
         assert res.objective == pytest.approx(truth.objective, rel=1e-6), (
             f"FALSE OPTIMUM: certified {res.objective} over unexamined space "
             f"(true optimum {truth.objective})"
+        )
+
+
+def test_failed_child_on_the_incremental_path_never_yields_a_false_certificate(monkeypatch):
+    """The same soundness property, on the FAST path.
+
+    The test above injects into ``_relax_bound``, which the engine only calls when
+    the incremental structure declined. Since #861 most in-scope models build one,
+    so that injection no longer covers the common case: the engine relaxes through
+    ``IncrementalMcCormickLP.solve``. Inject there instead and require the same
+    property — no certified verdict over space the engine could not examine.
+    """
+    from discopt._jax.incremental_mccormick import IncrementalMcCormickLP
+
+    truth = lpsb.solve_lp_spatial_bb(_incremental_model(), time_limit=30.0, gap_tolerance=1e-4)
+    assert truth is not None and truth.status == "optimal", "control lost its certificate"
+
+    real_solve = IncrementalMcCormickLP.solve
+    state = {"calls": 0, "failures": 0}
+
+    def flaky(self, lb, ub, **kw):
+        state["calls"] += 1
+        if state["calls"] > 3:  # let the root and first nodes succeed
+            state["failures"] += 1
+            return None, None, None  # unresolved: no bound, no point, no basis
+        return real_solve(self, lb, ub, **kw)
+
+    monkeypatch.setattr(IncrementalMcCormickLP, "solve", flaky)
+    res = lpsb.solve_lp_spatial_bb(_incremental_model(), time_limit=30.0, gap_tolerance=1e-4)
+
+    assert state["failures"] > 0, "injection never failed a node solve — test would be vacuous"
+    assert res is not None
+    assert res.status != "infeasible", (
+        "FALSE INFEASIBILITY on the incremental path: engine declared a feasible model "
+        f"infeasible after {state['failures']} unresolvable children (true optimum "
+        f"{truth.objective})"
+    )
+    if res.status == "optimal":
+        assert res.objective == pytest.approx(truth.objective, rel=1e-6), (
+            f"FALSE OPTIMUM on the incremental path: certified {res.objective} over "
+            f"unexamined space (true optimum {truth.objective})"
         )
 
 
