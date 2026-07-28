@@ -46,8 +46,30 @@ def _spatial_minlp() -> dm.Model:
     return m
 
 
+@pytest.fixture
+def python_node_loop(monkeypatch):
+    """Pin the PYTHON global spatial B&B loop, which is the path these tests guard.
+
+    ``DISCOPT_NATIVE_SPATIAL_KERNEL`` graduated to default-ON (#764, 2026-07-27), and
+    the native Rust engine is a *different* node loop: it runs its own reductions
+    (``obbt_probe_sweep`` + ``propagate_spec_fixpoint``) and never calls
+    ``run_in_tree_presolve``, which is referenced nowhere outside its own unit tests.
+    So with the new default this model routes into Rust and the counter reads 0 —
+    measured: kernel ON ``optimal`` obj -3.31e-08 with 0 firings, kernel OFF
+    ``optimal`` obj -2.73e-08 with 1 firing. Same certified answer either way, so
+    nothing is lost; the counter simply belongs to the other engine.
+
+    Pinning the engine is the scope fix, NOT a weakening: the guard still fails if PF1
+    disconnects from the Python loop, which is exactly what #632 asked it to catch.
+    What it deliberately does not cover is per-node reduction inside the native
+    kernel — that is the graduation panel's job (``issue764_*_panel.py``), and
+    conflating the two is what would make this test vacuous.
+    """
+    monkeypatch.setenv("DISCOPT_NATIVE_SPATIAL_KERNEL", "0")
+
+
 @pytest.mark.unit
-def test_global_loop_invokes_reduce_kernel_when_stride_on():
+def test_global_loop_invokes_reduce_kernel_when_stride_on(python_node_loop):
     """stride>=1 => the global spatial B&B node loop calls the FBBT reduce kernel
     (>0 firings). This is the PF1 wiring the spike found missing (was 0)."""
     m = _spatial_minlp()
@@ -60,7 +82,7 @@ def test_global_loop_invokes_reduce_kernel_when_stride_on():
 
 
 @pytest.mark.unit
-def test_global_loop_skips_reduce_kernel_when_stride_off():
+def test_global_loop_skips_reduce_kernel_when_stride_off(python_node_loop):
     """stride==0 => the kernel is disabled and never fires (pre-PF1 behaviour)."""
     m = _spatial_minlp()
     m.solve(time_limit=20, in_tree_presolve_stride=0)
