@@ -6502,9 +6502,9 @@ def solve_model(
     # the JAX-free MIQP classification gate + ``extract_qp_data`` ladder).
     # ``discopt.qubo_primal`` is JAX-free (gate AND search; the ladder's autodiff
     # last resort is the sole JAX rung), so the default-ON seed never pulls the JAX
-    # cold start onto the LP/MILP path (test_lazy_jax_linear_path). Sound: any binary point is feasible
-    # (no constraints to violate), so it only ever seeds a valid incumbent; the dual
-    # bound / certificate are untouched.
+    # cold start onto the LP/MILP path (test_lazy_jax_linear_path). Sound: any
+    # binary point is feasible (no constraints to violate), so it only ever seeds
+    # a valid incumbent; the dual bound / certificate are untouched.
     if _qubo_primal_enabled() and initial_point is None:
         try:
             from discopt.qubo_primal import qubo_local_search
