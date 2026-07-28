@@ -1,6 +1,8 @@
 """Issue #764 — Regime-2 graduation panel for the native Rust spatial B&B kernel.
 
-Runs every ``.nl`` in ``python/tests/data/minlplib_nl/`` twice — with
+Runs every ``.nl`` in the UNION of ``python/tests/data/minlplib_nl/`` and
+``python/tests/data/minlplib/`` (119 instances; neither directory is a superset of
+the other — see ``_CORPUS_DIRS``) twice — with
 ``DISCOPT_NATIVE_SPATIAL_KERNEL`` OFF then ON — at a 60 s budget, one subprocess
 per (instance, flag) so env / JAX / global-counter state is fully isolated. It
 records per instance: status, objective, bound, node_count, wall, whether the
@@ -19,19 +21,44 @@ It then evaluates the two CLAUDE.md Regime-2 bars over ALL instances:
     timeout->optimal), AND does not measurably harm the rest — the median wall
     delta on NON-engaged instances (the producer-probe decline overhead) is small
     (<= max(0.5 s, 5 %)).
+  * QUALITY-CLEAN (#902): ON must not return a WORSE incumbent than OFF, nor lose
+    a primal OFF found. This is deliberately separate from cert-clean — a worse
+    answer under a still-valid bound is not a soundness failure — but it blocks
+    graduation, because "sound" was never the bar. It exists because every
+    cert check requires one side to be ``optimal``, so when neither certifies the
+    panel was blind to the answer actually returned. That is how the original
+    graduation missed nvs19 (ON -315.0, 71% off; OFF -1097.6, 0.1% off).
 
 Reference optima come from ``docs/dev/data/cert-optima.json``; instances absent
 from it skip the oracle check and are SAID SO in the summary. Errored solves are
 LABELED errored, never silently dropped.
 
+LOAD ROBUSTNESS (#902). The verdict rests on wall-clock outcomes at a fixed budget,
+so ambient load changes which instances hit the limit — it can change the verdict,
+not merely the numbers. Rather than demand a quiet machine (a blocking load gate was
+tried and is unusable on a real workstation), the panel runs in two stages and makes
+the VERDICT robust:
+
+  * STAGE 1 screens every instance once, to OBSERVE which ones engage the kernel.
+    A screen awards nothing; it only decides what stage 2 re-runs.
+  * STAGE 2 re-runs the DECISIVE instances (engaged, or the arms disagreed)
+    ``PANEL_REPLICATES`` times with the arms INTERLEAVED, and requires differences to
+    reproduce: a win must hold in EVERY replicate, a regression in a MAJORITY, and an
+    instance whose replicates disagree on status is QUARANTINED as unresolved.
+
+So load can move an instance into "unresolved" but can no longer make the verdict
+wrong. Load is recorded (start/peak) for the reader; it never blocks the run.
+
 Usage (parent):
     python discopt_benchmarks/scripts/issue764_native_kernel_graduation_panel.py
+Env: PANEL_REPLICATES (default 3), PANEL_ONLY, PANEL_LIMIT.
 Child mode (internal): --solve <instance> <0|1>
 """
 
 from __future__ import annotations
 
 import json
+import math
 import os
 import subprocess
 import sys
@@ -41,7 +68,43 @@ from pathlib import Path
 
 _BENCH_ROOT = Path(__file__).resolve().parent.parent
 _REPO_ROOT = _BENCH_ROOT.parent
-_CORPUS = _REPO_ROOT / "python" / "tests" / "data" / "minlplib_nl"
+# BOTH in-repo corpora, unioned (#902). These two directories are NOT nested and
+# neither is a superset of the other: ``minlplib_nl`` has 66 instances,
+# ``minlplib`` has 81, they share only 28, and the union is 119. Panelling one
+# alone silently omits whole families.
+#
+# That is not hypothetical — it is why this panel graduated the kernel while
+# missing a regression. ``minlplib_nl`` (the only corpus this panel used) does not
+# contain nvs17/nvs19/nvs24, precisely the family where the kernel engages and
+# returns incumbents 71% from the reference optimum (#902). Conversely
+# ``tanksize`` — the single instance whose improvement carried the net-positive
+# bar — exists ONLY in ``minlplib_nl``. So neither directory alone can both
+# justify and falsify this flag; the union is the minimum honest panel.
+_CORPUS_DIRS = (
+    _REPO_ROOT / "python" / "tests" / "data" / "minlplib_nl",
+    _REPO_ROOT / "python" / "tests" / "data" / "minlplib",
+)
+_CORPUS = _CORPUS_DIRS[0]  # retained for messages that name a single directory
+
+
+def _corpus_instances() -> list[str]:
+    """Sorted union of instance stems across every corpus directory."""
+    names: set[str] = set()
+    for d in _CORPUS_DIRS:
+        if d.is_dir():
+            names.update(p.stem for p in d.glob("*.nl"))
+    return sorted(names)
+
+
+def _instance_path(instance: str):
+    """Resolve an instance to whichever corpus directory holds it."""
+    for d in _CORPUS_DIRS:
+        p = d / f"{instance}.nl"
+        if p.exists():
+            return p
+    raise FileNotFoundError(f"{instance}.nl not found in {[str(d) for d in _CORPUS_DIRS]}")
+
+
 _CERT_OPTIMA = _REPO_ROOT / "docs" / "dev" / "data" / "cert-optima.json"
 _RESULTS_DIR = _BENCH_ROOT / "results"
 
@@ -75,7 +138,7 @@ def _run_child(instance: str, flag: str) -> int:
     import numpy as np
     from discopt.modeling.core import ObjectiveSense, from_nl
 
-    nl = str(_CORPUS / f"{instance}.nl")
+    nl = str(_instance_path(instance))
     out: dict = {"instance": instance, "flag": flag, "engaged": False}
 
     # Two distinct signals, deliberately NOT conflated:
@@ -179,6 +242,97 @@ def _solve_one(instance: str, flag: str) -> dict:
     }
 
 
+# --------------------------------------------------------------------------- #
+# Load robustness (#902): REPLICATE THE DECISIVE INSTANCES, don't wait for quiet.
+#
+# The net-positive bar is a wall-time comparison at a fixed 60 s budget, so ambient
+# load does not merely add noise to the numbers — it decides which instances hit the
+# limit, i.e. it changes the *statuses* the verdict is computed from. This panel
+# previously had no defence against that at all and would emit a verdict under load 24
+# indistinguishable from a clean one.
+#
+# The first attempt was a blocking load gate (refuse to start until 1-min load < 2.5).
+# Rejected in practice: on a real workstation it simply never runs — it is a wish, not
+# a test. Two other designs were tried and MEASURED to fail:
+#
+#   * Budget deterministic WORK (max_nodes) instead of wall time. Solves are indeed
+#     bit-reproducible that way (3 reps x 3 instances x both arms: 6/6 identical
+#     status/objective/bound/node_count, taken under load 3-5). But
+#     ``_try_native_spatial_kernel`` returns None on a ``node_limit`` exit, so the
+#     kernel FALLS BACK to the Python path and ``engaged=False`` on every instance
+#     tested (nvs17, nvs19, tanksize). A node-budgeted panel compares OFF against OFF:
+#     perfectly deterministic and perfectly meaningless — the same "comparing ON
+#     against ON" blindness that produced #902. Node counts are not even a comparable
+#     unit across the arms (nvs19: 69 Python nodes vs 67,678 native nodes).
+#   * Statically PRE-FILTER to the producer's covered subset, so only those instances
+#     are A/B'd and the freed budget pays for replication. ``build_spatial_kernel_spec``
+#     answers in 1.2 s for all 119 (32 covered), but over the RAW DECLARED bounds — and
+#     the kernel is handed the POST-FBBT/OBBT box. ``tanksize``, the flag's headline
+#     win, is declined over raw bounds and accepted over the presolved one. As an
+#     exclusion gate it silently drops the instance carrying the verdict. Engagement
+#     must be OBSERVED, never predicted.
+#
+# So: keep the wall budget, and make the VERDICT robust instead of the machine quiet.
+# Decisive instances are re-run R times, arms interleaved, and a difference only counts
+# if it REPRODUCES. The asymmetry is deliberate — a graduation gate should be hard to
+# pass and easy to fail:
+#
+#   * a WIN (helped) counts only if it holds in EVERY replicate;
+#   * a REGRESSION fires if it holds in a MAJORITY, and is reported if it holds in any;
+#   * an instance whose replicates disagree on status is UNSTABLE and is quarantined —
+#     it can neither justify nor condemn the flag, and is listed as unresolved.
+#
+# Load can therefore only ever move an instance into "unresolved". It can no longer
+# make the verdict wrong. Load is still recorded (start/peak) so a reader can see the
+# conditions, but it never blocks the run.
+_REPLICATES = int(os.environ.get("PANEL_REPLICATES", "3"))
+
+
+def _load1() -> float:
+    """1-minute load average, or ``nan`` where the platform has none."""
+    try:
+        return float(os.getloadavg()[0])
+    except (OSError, AttributeError):  # pragma: no cover - platform without loadavg
+        return float("nan")
+
+
+def _solve_replicated(instance: str, reps: int) -> tuple[list[dict], list[dict]]:
+    """Run ``instance`` ``reps`` times per arm, INTERLEAVED (OFF, ON, OFF, ON, ...).
+
+    Interleaving is what makes the pairing valid under drifting load (CLAUDE.md §9):
+    running all the OFF reps and then all the ON reps would charge any slow period
+    entirely to one arm. Returns ``(off_runs, on_runs)``.
+    """
+    off_runs: list[dict] = []
+    on_runs: list[dict] = []
+    for _ in range(max(1, reps)):
+        off_runs.append(_solve_one(instance, "0"))
+        on_runs.append(_solve_one(instance, "1"))
+    return off_runs, on_runs
+
+
+def _statuses_agree(runs: list[dict]) -> bool:
+    """Whether every replicate of one arm reached the same status."""
+    if not runs:
+        return False
+    return len({str(r.get("status")) for r in runs}) == 1
+
+
+def _median_objective(runs: list[dict]) -> float | None:
+    """Median objective across replicates, or ``None`` if no replicate found a primal.
+
+    Median rather than best/worst so a single load-perturbed replicate cannot swing the
+    reported value; the stability of the set is judged separately by
+    :func:`_statuses_agree`.
+    """
+    vals = [r["objective"] for r in runs if r.get("objective") is not None]
+    if not vals:
+        return None
+    vals.sort()
+    n = len(vals)
+    return float(vals[n // 2]) if n % 2 else float(0.5 * (vals[n // 2 - 1] + vals[n // 2]))
+
+
 def main() -> int:
     if len(sys.argv) >= 4 and sys.argv[1] == "--solve":
         return _run_child(sys.argv[2], sys.argv[3])
@@ -209,7 +363,7 @@ def main() -> int:
     except Exception as _exc:  # corpus absent (CI) or resolver missing: vendored only
         print(f"note: minlplib.solu not merged ({_exc}); using vendored optima only", flush=True)
 
-    instances = sorted(p.stem for p in _CORPUS.glob("*.nl"))
+    instances = _corpus_instances()
     # Optional smoke subset (validation only): PANEL_LIMIT=N runs the first N, and
     # PANEL_ONLY=a,b,c runs exactly those. Unset -> the full corpus.
     only = os.environ.get("PANEL_ONLY", "").strip()
@@ -229,10 +383,22 @@ def main() -> int:
         flush=True,
     )
 
+    load_start = _load1()
+    load_peak = 0.0 if math.isnan(load_start) else load_start
+    print(f"1-min load at start: {load_start:.2f} (recorded, not gated).", flush=True)
+
+    # ---- STAGE 1: screen every instance once, to OBSERVE which ones engage -------
+    # Engagement is observed rather than predicted: the producer is handed the
+    # post-presolve box, so a static prediction over declared bounds has false
+    # negatives (it drops tanksize). A screen cannot award or deny graduation; it only
+    # decides what stage 2 must re-run.
     rows: dict[str, dict] = {}
     for i, inst in enumerate(instances, 1):
         off = _solve_one(inst, "0")
         on = _solve_one(inst, "1")
+        _l = _load1()
+        if not math.isnan(_l):
+            load_peak = max(load_peak, _l)
         rows[inst] = {"off": off, "on": on}
         eng = "ENGAGED" if on.get("engaged") else "decline"
         print(
@@ -243,7 +409,57 @@ def main() -> int:
             flush=True,
         )
 
+    # ---- STAGE 2: replicate the DECISIVE instances ------------------------------
+    # Decisive = the kernel engaged, OR the two arms disagreed on status or objective.
+    # Everything else contributes only the producer-probe overhead median, which no
+    # single instance can swing. Taking the UNION of those criteria (rather than
+    # engagement alone) means an instance that regressed WITHOUT engaging is still
+    # re-run rather than waved through.
+    decisive = sorted(
+        inst
+        for inst, r in rows.items()
+        if r["on"].get("engaged")
+        or str(r["off"].get("status")) != str(r["on"].get("status"))
+        or not _obj_match(r["off"].get("objective"), r["on"].get("objective"))
+    )
+    if _REPLICATES > 1 and decisive:
+        print(
+            f"\nSTAGE 2: replicating {len(decisive)} decisive instance(s) "
+            f"x{_REPLICATES}, arms interleaved: {', '.join(decisive)}",
+            flush=True,
+        )
+        for j, inst in enumerate(decisive, 1):
+            off_runs, on_runs = _solve_replicated(inst, _REPLICATES)
+            _l = _load1()
+            if not math.isnan(_l):
+                load_peak = max(load_peak, _l)
+            off_stable = _statuses_agree(off_runs)
+            on_stable = _statuses_agree(on_runs)
+            rows[inst]["replicates"] = {
+                "off": off_runs,
+                "on": on_runs,
+                "off_stable": off_stable,
+                "on_stable": on_stable,
+                "stable": off_stable and on_stable,
+                "off_median_objective": _median_objective(off_runs),
+                "on_median_objective": _median_objective(on_runs),
+            }
+            print(
+                f"  [{j}/{len(decisive)}] {inst:20s} "
+                f"OFF={[str(r.get('status')) for r in off_runs]} "
+                f"ON={[str(r.get('status')) for r in on_runs]} "
+                f"{'STABLE' if off_stable and on_stable else 'UNSTABLE -> quarantined'}",
+                flush=True,
+            )
+
     verdict = _evaluate(rows, optima)
+    # Record the load this run ACTUALLY ran at. A run that starts quiet and then
+    # competes with a background job for an hour is exactly the confound §9 describes,
+    # and only the peak reveals it. Recorded, never used to block.
+    verdict["load_start"] = load_start
+    verdict["load_peak"] = load_peak
+    verdict["replicates"] = _REPLICATES
+    verdict["decisive_instances"] = decisive
 
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     _RESULTS_DIR.mkdir(parents=True, exist_ok=True)
@@ -263,6 +479,8 @@ def _evaluate(rows: dict, optima: dict) -> dict:
     errored: list[str] = []
     engaged_insts: list[str] = []
     helped: list[str] = []  # engaged AND ON strictly better outcome than OFF
+    quality_violations: list[str] = []  # ON answer worse than OFF (#902)
+    unstable: list[str] = []  # replicates disagreed -> quarantined, carries no verdict
     non_engaged_wall_delta: list[float] = []
     no_oracle: list[str] = []
 
@@ -339,9 +557,93 @@ def _evaluate(rows: dict, optima: dict) -> dict:
                         f"reported {on.get('objective')}"
                     )
 
+        # (5) INCUMBENT-QUALITY regression (#902). Checks 1-4 above all require at
+        # least one side to be ``optimal``: (1) needs BOTH optimal, (2) needs OFF
+        # optimal, (4) needs ON optimal. So when NEITHER run certifies — the common
+        # case on hard instances — every check above is skipped and the panel is
+        # blind to the answer actually returned.
+        #
+        # That is exactly how the #764 graduation missed nvs19: ON came back
+        # ``time_limit`` with objective -315.0 (71% from the reference optimum
+        # -1098.4) while OFF came back ``feasible`` with -1097.6 (0.1% off) in 9
+        # nodes. Neither status is ``optimal``, so nothing fired, and the flag
+        # graduated. The dual bounds stayed valid throughout, so this is NOT a
+        # soundness failure — which is why it belongs in its own gate rather than
+        # in ``cert_violations`` — but shipping a default that makes the returned
+        # answer 71% worse is precisely the "net-positive" bar in CLAUDE.md §5.
+        #
+        # Compared sense-aware and only where OFF actually produced something, so a
+        # genuine improvement (ON finds a primal where OFF found none) can never
+        # register as a regression.
+        # Replicated evidence governs where it exists (#902). An instance whose
+        # replicates disagree on status is UNSTABLE: the machine, not the flag, is
+        # deciding its outcome, so it is quarantined — it can neither justify (helped)
+        # nor condemn (quality violation) the flag, and is reported as unresolved.
+        # This is what lets the panel run on a busy machine: load can move an instance
+        # into "unresolved", but it can no longer make the verdict wrong.
+        rep = pair.get("replicates")
+        if rep is not None and not rep.get("stable", False):
+            unstable.append(
+                f"{inst}: replicates disagree — "
+                f"OFF={[str(r.get('status')) for r in rep['off']]} "
+                f"ON={[str(r.get('status')) for r in rep['on']]}"
+            )
+            continue
+
+        if rep is not None:
+            off_obj = rep.get("off_median_objective")
+            on_obj = rep.get("on_median_objective")
+        else:
+            off_obj, on_obj = off.get("objective"), on.get("objective")
+
+        if off_obj is not None and on_obj is None:
+            quality_violations.append(
+                f"{inst}: PRIMAL LOST — OFF found {off_obj} ({off_status}), "
+                f"ON returned no incumbent ({on_status})"
+            )
+        elif off_obj is not None and on_obj is not None:
+            qtol = _ABS_TOL + _REL_TOL * max(abs(off_obj), abs(on_obj))
+            worse = (on_obj > off_obj + qtol) if sense == "min" else (on_obj < off_obj - qtol)
+            # With replicates, require the regression to hold in a MAJORITY of PAIRED
+            # runs as well as in the medians. A win must survive every replicate but a
+            # regression need only survive most of them: a graduation gate should be
+            # hard to pass and easy to fail.
+            if worse and rep is not None:
+                paired = list(zip(rep["off"], rep["on"], strict=True))
+                n_worse = 0
+                for o_run, n_run in paired:
+                    o_v, n_v = o_run.get("objective"), n_run.get("objective")
+                    if o_v is None or n_v is None:
+                        continue
+                    t = _ABS_TOL + _REL_TOL * max(abs(o_v), abs(n_v))
+                    n_worse += int((n_v > o_v + t) if sense == "min" else (n_v < o_v - t))
+                worse = n_worse * 2 > len(paired)
+            if worse:
+                ref = optima.get(inst)
+                detail = ""
+                if ref is not None and abs(ref) > 0:
+                    detail = (
+                        f" [vs reference {ref}: OFF {100 * abs(off_obj - ref) / abs(ref):.1f}% off,"
+                        f" ON {100 * abs(on_obj - ref) / abs(ref):.1f}% off]"
+                    )
+                quality_violations.append(
+                    f"{inst}: INCUMBENT WORSE under ON — OFF={off_obj} ({off_status}) "
+                    f"vs ON={on_obj} ({on_status}){detail}"
+                    + ("" if rep is None else f" [reproduced over {_REPLICATES} replicates]")
+                )
+
         # Net-positive "helped": engaged AND ON reached optimal where OFF did not.
-        if engaged and on_status == "optimal" and off_status != "optimal":
-            helped.append(inst)
+        # Under replication this must hold in EVERY replicate — one lucky run is not a
+        # win, and the whole net-positive bar has historically rested on a single
+        # instance, so a flaky one must not be able to carry it.
+        if engaged:
+            if rep is not None:
+                if all(str(r.get("status")) == "optimal" for r in rep["on"]) and not any(
+                    str(r.get("status")) == "optimal" for r in rep["off"]
+                ):
+                    helped.append(inst)
+            elif on_status == "optimal" and off_status != "optimal":
+                helped.append(inst)
 
     non_engaged_wall_delta.sort()
     median_delta = 0.0
@@ -354,15 +656,23 @@ def _evaluate(rows: dict, optima: dict) -> dict:
         )
 
     cert_clean = len(cert_violations) == 0
+    # Answer quality is a SEPARATE gate from soundness. A worse incumbent under a
+    # valid bound is not a certification failure, so it does not belong in
+    # cert_violations -- but it must still block graduation, because "the flag is
+    # sound" was never the bar. CLAUDE.md 5 requires net-positive too (#902).
+    quality_clean = len(quality_violations) == 0
     overhead_ok = median_delta <= max(0.5, 0.05 * _TIME_LIMIT)
-    net_positive = (len(engaged_insts) > 0) and (len(helped) > 0) and overhead_ok
+    net_positive = (len(engaged_insts) > 0) and (len(helped) > 0) and overhead_ok and quality_clean
 
     return {
         "cert_clean": cert_clean,
         "cert_violations": cert_violations,
+        "quality_clean": quality_clean,
+        "quality_violations": quality_violations,
         "net_positive": net_positive,
         "engaged": engaged_insts,
         "helped": helped,
+        "unstable": unstable,
         "median_nonengaged_wall_delta_s": median_delta,
         "overhead_ok": overhead_ok,
         "errored": errored,
@@ -370,7 +680,7 @@ def _evaluate(rows: dict, optima: dict) -> dict:
         "oracle_total": len(rows),
         "oracle_covered": len(rows) - len(no_oracle),
         "n_nonengaged_measured": len(non_engaged_wall_delta),
-        "graduate": cert_clean and net_positive,
+        "graduate": cert_clean and quality_clean and net_positive,
     }
 
 
@@ -381,8 +691,26 @@ def _render_summary(rows: dict, v: dict, optima: dict, stamp: str) -> str:
         f"# corpus: {len(rows)} instances, budget {_TIME_LIMIT:.0f}s, OFF vs ON, "
         f"subprocess-isolated. Reference optima: {len(optima)} entries."
     )
+    # The load this run ran at is part of the result, not metadata (#902): the
+    # net-positive bar is a wall-time comparison at a fixed budget, so a reader must be
+    # able to see whether the machine was quiet without taking it on faith.
+    _ls, _lp = v.get("load_start"), v.get("load_peak")
+    if _ls is not None:
+        lines.append(
+            f"# machine load: start {_ls:.2f}, peak {_lp:.2f} (recorded, not gated — "
+            f"robustness comes from {v.get('replicates', 1)}x replication of the "
+            f"{len(v.get('decisive_instances', []))} decisive instance(s), not from a "
+            f"quiet machine)"
+        )
     lines.append("")
     lines.append("## VERDICT")
+    _qv = v.get("quality_violations", [])
+    lines.append(
+        f"quality-clean  : {'PASS' if v.get('quality_clean', True) else 'FAIL'} "
+        f"({len(_qv)} incumbent-quality regressions)"
+    )
+    for _line in _qv[:20]:
+        lines.append(f"    - {_line}")
     # Oracle COVERAGE is part of the verdict line, not a footnote further down. This
     # panel previously printed "cert-clean : PASS (0 violations)" while silently
     # checking only 31 of 66 instances — its oracle file was missing 21 optima that
@@ -405,6 +733,17 @@ def _render_summary(rows: dict, v: dict, optima: dict, stamp: str) -> str:
         f"median non-engaged wall Δ={v['median_nonengaged_wall_delta_s']:+.3f}s over "
         f"{v['n_nonengaged_measured']} instances, overhead_ok={v['overhead_ok']})"
     )
+    # Quarantined instances are part of the verdict's honesty, not a footnote: an
+    # UNRESOLVED instance is the panel saying "the machine decided this one, not the
+    # flag". Reporting the count next to the bars keeps a run that resolved almost
+    # nothing from reading like a clean pass.
+    _uns = v.get("unstable", [])
+    lines.append(
+        f"  unresolved   : {len(_uns)} instance(s) quarantined for replicate "
+        f"disagreement (carry no verdict either way)"
+    )
+    for _line in _uns[:20]:
+        lines.append(f"    - {_line}")
     _grad = "YES — flip default ON" if v["graduate"] else "NO — keep opt-in"
     lines.append(f"  GRADUATE     : {_grad}")
     lines.append("")

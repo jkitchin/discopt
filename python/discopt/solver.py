@@ -528,7 +528,11 @@ def _native_spatial_kernel_enabled() -> bool:
          ``optimal`` in ~21 s. So the kernel is more ROBUST (consistent certification),
          but a stable corpus-wide net-positive is unproven — per §4 an unstable/neutral
          result does not graduate a default.
-    GRADUATED default-ON 2026-07-27 (panel
+    GRADUATED default-ON 2026-07-27, then UNGRADUATED 2026-07-28 (#902) — see the
+    note at the end of this docstring; the graduating panel below was blind to an
+    incumbent-quality regression, to half the corpus, and to machine load, and the
+    default is now OFF again. Original graduation record retained for history, but
+    read it knowing the instrument that produced it was defective (panel
     ``issue764_native_kernel_graduation_panel_20260728T002442Z.json``). The last bar —
     a clean, reproducible net-positive on a VERIFIED-IDLE machine — is now met, and the
     load confound that blocked it four times is gone rather than argued away: the runner
@@ -558,9 +562,82 @@ def _native_spatial_kernel_enabled() -> bool:
     the Python path certifies in ~21 s (helped 0)": on today's tree OFF never certifies
     ``tanksize`` at a 60 s budget. Recorded per CLAUDE.md §11.
 
-    ``DISCOPT_NATIVE_SPATIAL_KERNEL=0`` is the opt-out and the Python path is untouched,
-    per §5 (a graduated flag keeps its off-switch and its legacy path)."""
-    return os.environ.get("DISCOPT_NATIVE_SPATIAL_KERNEL", "1").strip().lower() not in (
+    **UNGRADUATED 2026-07-28 (#902) — back to opt-in, default OFF, pending a VALID
+    panel.** The flag shipped default-ON returning incumbents ~71% from the reference
+    optimum on nvs17/nvs19/nvs24. Two things were wrong, and both are now fixed; the
+    default is nonetheless OFF, for the reason in "Why still OFF" below.
+
+    *The defect.* :func:`_native_kernel_seed_candidates` enumerated the literal
+    ``itertools.product((0.0, 1.0), ...)`` over every FREE integer — a list filtered
+    only on span > 0.5 ("not pinned by presolve"), never on being binary. Correct for
+    the binary models the seed was built against (tanksize: 9 integers, every box
+    ``[0,0]``/``[0,1]``/``[1,1]``), it pins every variable to 0 or 1 on an
+    all-general-integer model, so on the nvs family (eight-ish integers in ``[0, 200]``,
+    continuous relaxation at ``[1.98, 6.54, 2.82, 2.20, 7.48, 6.20, 6.77]``) every
+    candidate was a ``{0,1}`` corner point. nvs19's seed of -315.0 was *exactly* the
+    incumbent the kernel then reported after 9,303 nodes — the tree never improved on
+    it. The seed now brackets each free integer's relaxation value
+    (:func:`_native_seed_bracket`), which on a binary box still yields exactly
+    ``{0, 1}``, so the graduated class enumerates identically:
+
+    | instance | seed before | seed after | seed wall |
+    |---|---|---|---|
+    | nvs17 | -312.6 (71.6% off) | **-1100.4 (exact)** | 8.1 s -> **1.0 s** |
+    | nvs19 | -315.0 (71.3% off) | **-1098.2 (0.0% off)** | 12.0 s -> **1.4 s** |
+    | nvs24 | -292.6 (71.7% off) | **-1031.8 (0.1% off)** | 12.1 s -> **4.2 s** |
+
+    Separately, :func:`_native_kernel_verify_point` built a fresh ``NLPEvaluator`` per
+    call — 697 JAX retraces / 8.5 s inside a 12 s seed phase on nvs19 — and now uses
+    ``cached_evaluator``. That is a pure cost fix: it changes the verification's speed,
+    never its verdict. Together these also dissolve the "fixed 12 s seed phase"
+    symptom: the 12 s was a cap the enumeration burned because every sub-NLP started
+    from a garbage corner, not a fixed price.
+
+    *The instrument.* The panel that graduated this flag could not see what it shipped,
+    for three independent reasons — all now fixed in
+    ``discopt_benchmarks/scripts/issue764_native_kernel_graduation_panel.py``: it
+    enumerated only ``minlplib_nl`` (66), which does NOT contain nvs17/19/24 (while
+    ``tanksize``, its headline win, exists only there — so neither corpus alone can
+    both justify and falsify the flag; it now panels the 119-instance union); every
+    certification check required a side to be ``optimal``, so when neither run
+    certified nothing fired at all (a ``quality_clean`` gate now compares incumbents
+    directly); and it was silently load-sensitive — the budget is wall-clock, so load
+    changes which instances hit the limit and therefore which *statuses* the verdict is
+    computed from, and it would emit a verdict under load 24 indistinguishable from a
+    clean one.
+
+    That third hole was first plugged with a blocking load gate (refuse to start until
+    1-min load < 2.5). **That was replaced**: on a real workstation it never runs, so it
+    is a wish rather than a test. Two further designs were tried and MEASURED to fail —
+    a deterministic ``max_nodes`` budget makes solves bit-reproducible (6/6 identical
+    across replicates) but ``node_limit`` sends the kernel back to the Python path, so
+    the panel compares OFF against OFF; and a static producer pre-filter drops
+    ``tanksize``, the instance carrying the verdict, because the producer is handed the
+    *presolved* box and the filter sees declared bounds. What ships instead is
+    replication: the decisive instances are re-run with the arms interleaved, a win must
+    hold in EVERY replicate, a regression in a majority, and an instance whose
+    replicates disagree is quarantined as unresolved. Load can now only move an instance
+    to "unresolved" — it can no longer make the verdict wrong — and the panel runs on a
+    busy machine (verified end-to-end at load 2.2 rising to 5.9: 4/4 decisive instances
+    STABLE, 0 quarantined).
+
+    *Why still OFF.* Re-measured post-fix on nvs17/19/24 + tanksize the panel returns
+    ``GRADUATE: YES`` — nvs17 goes ``feasible`` -> ``optimal``, nvs24 gains a primal OFF
+    never finds, nvs19 beats OFF (-1098.2 vs -1097.6). But that is a 4-instance probe,
+    and §5 requires a corpus-wide differential panel. Since the only panel this flag
+    ever passed was blind on all three counts above, **no valid graduation panel has
+    ever been run for it** — the 2026-07-27 graduation was not validly earned
+    independently of the seed defect. So the default returns to OFF until a clean
+    119-instance replicated run passes, which is the re-graduation gate
+    tracked in #902. The cost of that conservatism is explicit: ``tanksize`` and
+    ``nvs17`` both go ``optimal`` -> ``feasible`` at a 60 s budget with the kernel off.
+
+    ``DISCOPT_NATIVE_SPATIAL_KERNEL=1`` opts back in. Still open on the kernel itself
+    (measured, not yet root-caused): it abandons ~1/3 of its wall budget — nvs19/nvs24
+    exit at ~39 s of a 60 s limit — and its accounting fields are wrong on this path
+    (``rust_time`` reads ~1e-4 s for a ~7 s Rust tree, ``jax_time`` 0.0), so do not
+    build gates on them."""
+    return os.environ.get("DISCOPT_NATIVE_SPATIAL_KERNEL", "0").strip().lower() not in (
         "0",
         "false",
         "no",
@@ -702,9 +779,18 @@ def _native_kernel_verify_point(model, x_flat):
         off += size
 
     try:
-        from discopt._jax.nlp_evaluator import NLPEvaluator
+        # ``cached_evaluator``, not ``NLPEvaluator(model)``: this is called once per
+        # seed candidate (and once more on the final incumbent), and constructing an
+        # evaluator re-traces and re-compiles the model's JAX constraint/objective/
+        # Jacobian callables every time. Profiling #902 measured 697 traces / 8.5 s
+        # inside a 12 s seed phase on nvs19 — the same defect ``cached_evaluator`` was
+        # introduced to fix for the diving heuristic. The cache is keyed on the model's
+        # structural fingerprint and reads bounds/parameters live, so a cached
+        # evaluator computes byte-identical residuals: this changes only the cost of
+        # the verification, never its verdict.
+        from discopt._jax.nlp_evaluator import cached_evaluator
 
-        evaluator = NLPEvaluator(model)
+        evaluator = cached_evaluator(model)
         if evaluator.n_constraints > 0:
             cons = np.asarray(evaluator.evaluate_constraints(x_flat), dtype=np.float64)
             idx = 0
@@ -744,11 +830,57 @@ def _native_kernel_verify_point(model, x_flat):
     return True, float(model_obj)
 
 
-# Cap on the number of FREE binaries (span > 0.5 in the presolved box) the seed
+# Cap on the number of FREE integers (span > 0.5 in the presolved box) the seed
 # enumerates over: 2**k sub-NLP solves. Presolve typically fixes most, leaving a
 # handful (tanksize: 5 of 9 free). Above this the enumeration is skipped for a single
 # rounding sub-NLP so a wide MINLP cannot cause a combinatorial blow-up.
-_NATIVE_SEED_MAX_FREE_BINARIES = 10
+_NATIVE_SEED_MAX_FREE_INTEGERS = 10
+
+
+def _native_seed_bracket(x_rel: float, lo_b: float, up_b: float) -> tuple[float, ...]:
+    """The two integer values BRACKETING ``x_rel`` inside ``[lo_b, up_b]``, nearest first.
+
+    This is the per-variable candidate set the seed enumeration crosses (#902). It is
+    written as a bracket rather than a literal ``(0.0, 1.0)`` because the enumeration
+    must generalize from binaries to GENERAL integers:
+
+    * On a **binary** box ``[0, 1]`` it returns exactly ``{0, 1}`` for every relaxation
+      value — including ``x_rel == 1.0``, thanks to the ``up_b - 1`` clamp on the floor.
+      So the class the #764 seed was graduated on (tanksize: 5 free binaries -> 32
+      sub-NLPs) enumerates precisely the same 2**k assignments as before.
+    * On a **general-integer** box (nvs17/19/24: eight-ish integers in ``[0, 200]``) it
+      returns the floor/ceil pair around the continuous relaxation. The previous code
+      crossed the literal ``(0.0, 1.0)`` over every free integer, pinning each one to 0
+      or 1 — a corner of a ``[0, 200]^n`` box nowhere near the relaxation, which landed
+      at ``[1.98, 6.54, 2.82, 2.20, 7.48, 6.20, 6.77]`` on nvs17. Every seed it produced
+      was a ``{0,1}`` vector ~71% off the reference optimum (#902).
+
+    Nearest-first ordering matters because the enumeration is deadline-bounded and
+    ``itertools.product`` is lexicographic: the FIRST combination crossed is the
+    nearest-rounding point (the classic sub-NLP start), and the combinations that follow
+    flip the least-confident variables first. On a wide box only a prefix of the 2**k
+    product is reached before the deadline, so that prefix must be the promising one.
+    """
+    if not math.isfinite(x_rel):
+        x_rel = 0.5 * (lo_b + up_b)
+    # Clamp against the INTEGER box, not the raw bounds. A box may carry non-integer
+    # endpoints (presolve tightening a general integer to e.g. ``[0.5, 3.5]``), and
+    # clamping to those directly would emit a fractional candidate — these values are
+    # assigned straight into integer slots, so that would be a defect.
+    ilo = math.ceil(lo_b)
+    ihi = math.floor(up_b)
+    if ihi < ilo:
+        # No integer lies inside the box at all (e.g. ``[0.5, 0.7]``). Nothing here is a
+        # valid assignment; hand back the nearest integer as a sub-NLP START point only
+        # (the caller re-verifies every candidate, and ``subnlp`` clips to bounds), so a
+        # degenerate box costs one wasted solve rather than a bogus seed.
+        return (float(ilo),)
+    lo = min(max(math.floor(x_rel), ilo), max(ilo, ihi - 1))
+    hi = min(lo + 1, ihi)
+    if hi <= lo:
+        # A box admitting exactly one integer (e.g. ``[0, 0.6]``).
+        return (float(lo),)
+    return (float(lo), float(hi)) if abs(x_rel - lo) <= abs(x_rel - hi) else (float(hi), float(lo))
 
 
 def _native_kernel_seed_candidates(model, lb, ub, n_orig, deadline):
@@ -759,12 +891,21 @@ def _native_kernel_seed_candidates(model, lb, ub, n_orig, deadline):
 
     Strategy: solve the continuous NLP relaxation once (from the presolved-box
     midpoint) for a warm continuous base, then FIX the presolve-pinned integers to
-    their box value and ENUMERATE every 0/1 assignment of the FREE binaries (span > 0.5
-    in the presolved box), running a sub-NLP per combo. This lands genuine
+    their box value and ENUMERATE the FREE integers (span > 0.5 in the presolved box)
+    over the two values BRACKETING each one's relaxation value
+    (:func:`_native_seed_bracket`), running a sub-NLP per combo. This lands genuine
     integer-feasible points a single nearest-rounding sub-NLP misses on tightly-coupled
-    binaries (tanksize: rounding the relaxation is integer-infeasible, but 5 free
+    integers (tanksize: rounding the relaxation is integer-infeasible, but 5 free
     binaries enumerate to 32 sub-NLPs, several feasible). A continuous multistart is
-    added for the pure-continuous case."""
+    added for the pure-continuous case.
+
+    The bracket is what makes the enumeration general (#902). It previously crossed the
+    literal ``(0.0, 1.0)`` over every free integer — correct for the binaries the #764
+    seed was graduated on, but on an all-general-integer model it pinned each variable
+    to 0 or 1 regardless of its box, so on nvs17/19/24 (``[0, 200]`` integers) every
+    candidate was a ``{0,1}`` corner point and the best verified seed came out ~71% off
+    the reference optimum. On a binary box the bracket still yields exactly ``{0, 1}``,
+    so this generalizes the enumeration without perturbing that class."""
     if time.perf_counter() >= deadline:
         return
 
@@ -816,14 +957,23 @@ def _native_kernel_seed_candidates(model, lb, ub, n_orig, deadline):
     try:
         from discopt._jax.primal_heuristics import subnlp
 
-        if len(free_int) <= _NATIVE_SEED_MAX_FREE_BINARIES:
-            for combo in itertools.product((0.0, 1.0), repeat=len(free_int)):
+        if len(free_int) <= _NATIVE_SEED_MAX_FREE_INTEGERS:
+            # Per-free-integer candidate values: the two integers bracketing this
+            # variable's continuous-relaxation value, nearest first (#902). On a binary
+            # box this is exactly ``(0.0, 1.0)`` — the graduated behaviour — and on a
+            # general-integer box it tracks the relaxation instead of pinning to 0/1.
+            cand_vals = [
+                _native_seed_bracket(float(base[i]), float(lb[i]), float(ub[i]))
+                for i in free_int
+                if i < base.shape[0]
+            ]
+            enum_idx = [i for i in free_int if i < base.shape[0]]
+            for combo in itertools.product(*cand_vals) if cand_vals else [()]:
                 if time.perf_counter() >= deadline:
                     break
                 x0 = base.copy()
-                for idx, val in zip(free_int, combo):
-                    if idx < x0.shape[0]:
-                        x0[idx] = val
+                for idx, val in zip(enum_idx, combo):
+                    x0[idx] = val
                 try:
                     cand = subnlp(
                         model,
