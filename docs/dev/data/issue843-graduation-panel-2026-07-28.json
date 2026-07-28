@@ -1,0 +1,250 @@
+{
+  "timestamp": "2026-07-28T20-22-03",
+  "quick": false,
+  "n1_no_fire_checked": 66,
+  "n2_differential": [
+    {
+      "instance": "gbd",
+      "off": {
+        "status": "optimal",
+        "objective": 2.199999982504936,
+        "node_count": 3,
+        "wall": 0.37
+      },
+      "on": {
+        "status": "optimal",
+        "objective": 2.199999982504936,
+        "node_count": 3,
+        "wall": 0.02
+      },
+      "identical": true
+    },
+    {
+      "instance": "alan",
+      "off": {
+        "status": "optimal",
+        "objective": 2.9249999983013426,
+        "node_count": 21,
+        "wall": 0.07
+      },
+      "on": {
+        "status": "optimal",
+        "objective": 2.9249999983013426,
+        "node_count": 21,
+        "wall": 0.06
+      },
+      "identical": true
+    },
+    {
+      "instance": "ex1222",
+      "off": {
+        "status": "optimal",
+        "objective": 1.0765430833322625,
+        "node_count": 1,
+        "wall": 0.87
+      },
+      "on": {
+        "status": "optimal",
+        "objective": 1.0765430833322625,
+        "node_count": 1,
+        "wall": 0.26
+      },
+      "identical": true
+    },
+    {
+      "instance": "st_e13",
+      "off": {
+        "status": "optimal",
+        "objective": 1.9999999825187946,
+        "node_count": 1,
+        "wall": 0.19
+      },
+      "on": {
+        "status": "optimal",
+        "objective": 1.9999999825187946,
+        "node_count": 1,
+        "wall": 0.18
+      },
+      "identical": true
+    },
+    {
+      "instance": "st_miqp1",
+      "off": {
+        "status": "optimal",
+        "objective": 280.9999999906497,
+        "node_count": 15,
+        "wall": 0.02
+      },
+      "on": {
+        "status": "optimal",
+        "objective": 280.9999999906497,
+        "node_count": 15,
+        "wall": 0.02
+      },
+      "identical": true
+    },
+    {
+      "instance": "st_miqp2",
+      "off": {
+        "status": "optimal",
+        "objective": 2.0,
+        "node_count": 9,
+        "wall": 0.03
+      },
+      "on": {
+        "status": "optimal",
+        "objective": 2.0,
+        "node_count": 9,
+        "wall": 0.03
+      },
+      "identical": true
+    },
+    {
+      "instance": "st_test1",
+      "off": {
+        "status": "optimal",
+        "objective": -1.6495994490692313e-08,
+        "node_count": 15,
+        "wall": 0.06
+      },
+      "on": {
+        "status": "optimal",
+        "objective": -1.6495994490692313e-08,
+        "node_count": 15,
+        "wall": 0.04
+      },
+      "identical": true
+    },
+    {
+      "instance": "nvs04",
+      "off": {
+        "status": "optimal",
+        "objective": 0.720000000000006,
+        "node_count": 5,
+        "wall": 0.36
+      },
+      "on": {
+        "status": "optimal",
+        "objective": 0.720000000000006,
+        "node_count": 5,
+        "wall": 0.31
+      },
+      "identical": true
+    }
+  ],
+  "s1_small_oracle": [
+    {
+      "seed": 0,
+      "optimum": 27.0,
+      "objective": 27.0,
+      "status": "optimal"
+    },
+    {
+      "seed": 1,
+      "optimum": 20.0,
+      "objective": 20.0,
+      "status": "optimal"
+    },
+    {
+      "seed": 2,
+      "optimum": 30.0,
+      "objective": 30.0,
+      "status": "optimal"
+    },
+    {
+      "seed": 3,
+      "optimum": 23.0,
+      "objective": 23.0,
+      "status": "optimal"
+    },
+    {
+      "seed": 4,
+      "optimum": 39.0,
+      "objective": 39.0,
+      "status": "optimal"
+    }
+  ],
+  "s2_structure_differential": [
+    {
+      "instance": "chimera_c4",
+      "off": {
+        "status": "time_limit",
+        "objective": 22.0,
+        "bound": 323.0,
+        "node_count": 621,
+        "wall": 30.3
+      },
+      "on": {
+        "status": "feasible",
+        "objective": 208.0,
+        "bound": 319.00000000006924,
+        "node_count": 511,
+        "wall": 30.0
+      },
+      "on_not_worse": true,
+      "on_strictly_better": true
+    },
+    {
+      "instance": "dense_n60",
+      "off": {
+        "status": "time_limit",
+        "objective": null,
+        "bound": 731.0,
+        "node_count": 15,
+        "wall": 30.5
+      },
+      "on": {
+        "status": "feasible",
+        "objective": 326.0,
+        "bound": 766.5000000006279,
+        "node_count": 7,
+        "wall": 33.0
+      },
+      "on_not_worse": true,
+      "on_strictly_better": true
+    },
+    {
+      "instance": "chimera_c8",
+      "off": {
+        "status": "time_limit",
+        "objective": 12.0,
+        "bound": 1454.0,
+        "node_count": 62,
+        "wall": 61.7
+      },
+      "on": {
+        "status": "feasible",
+        "objective": 846.0,
+        "bound": 1472.0000000010311,
+        "node_count": 3,
+        "wall": 62.6
+      },
+      "on_not_worse": true,
+      "on_strictly_better": true
+    },
+    {
+      "instance": "chimera_c12",
+      "off": {
+        "status": "time_limit",
+        "objective": null,
+        "bound": 3348.0,
+        "node_count": 18,
+        "wall": 120.3
+      },
+      "on": {
+        "status": "feasible",
+        "objective": 1770.0,
+        "bound": 8880.000000002858,
+        "node_count": 3,
+        "wall": 124.4
+      },
+      "on_not_worse": true,
+      "on_strictly_better": true
+    }
+  ],
+  "executed_assertions": 87,
+  "violations": [],
+  "cert_clean": true,
+  "net_positive": true,
+  "s2_strictly_better_count": 4
+}
