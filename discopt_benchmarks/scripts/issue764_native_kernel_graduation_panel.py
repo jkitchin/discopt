@@ -41,6 +41,7 @@ Child mode (internal): --solve <instance> <0|1>
 from __future__ import annotations
 
 import json
+import math
 import os
 import subprocess
 import sys
@@ -224,6 +225,65 @@ def _solve_one(instance: str, flag: str) -> dict:
     }
 
 
+# Load gate (#902). The net-positive bar is a WALL-TIME comparison at a fixed 60 s
+# budget, so ambient CPU load does not merely add noise — it decides which instances
+# time out, i.e. it changes the *statuses* the verdict is computed from. CLAUDE.md §9
+# requires a load gate for any timing claim, and the #764 graduation history is a list
+# of load confounds ("the load confound that blocked it four times"). That gate lived
+# in a separate hand-rolled runner, so THIS script — the thing whose exit code decides
+# graduation — would happily produce a verdict under load 24 and report it as clean.
+# It now refuses to start until the 1-minute load average is below the threshold, and
+# records the load it actually ran at in the summary so a reader can audit it.
+_LOAD_GATE_MAX = float(os.environ.get("PANEL_LOAD_MAX", "2.5"))
+_LOAD_GATE_WAIT_S = float(os.environ.get("PANEL_LOAD_WAIT_S", "900"))
+
+
+def _load1() -> float:
+    """1-minute load average, or ``nan`` where the platform has none."""
+    try:
+        return float(os.getloadavg()[0])
+    except (OSError, AttributeError):  # pragma: no cover - platform without loadavg
+        return float("nan")
+
+
+def _await_quiet_machine() -> float:
+    """Block until the machine is quiet enough to time on; return the starting load.
+
+    Refuses (exits non-zero) rather than measuring under load: a panel that runs anyway
+    and prints a verdict is worse than one that does not run, because the verdict is
+    indistinguishable from a clean one. ``PANEL_LOAD_MAX=0`` disables the gate for a
+    quality-only run where wall time is not being claimed.
+    """
+    if _LOAD_GATE_MAX <= 0:
+        print("load gate DISABLED (PANEL_LOAD_MAX=0) — wall-time results are not citable.")
+        return _load1()
+    waited = 0.0
+    while True:
+        load1 = _load1()
+        if math.isnan(load1):  # platform has no loadavg; proceed, but say so
+            print("note: no load average on this platform; load gate skipped.", flush=True)
+            return load1
+        if load1 < _LOAD_GATE_MAX:
+            print(f"load gate PASSED: 1-min load {load1:.2f} < {_LOAD_GATE_MAX:.2f}.", flush=True)
+            return load1
+        if waited >= _LOAD_GATE_WAIT_S:
+            print(
+                f"LOAD GATE FAILED: 1-min load {load1:.2f} >= {_LOAD_GATE_MAX:.2f} after "
+                f"{waited:.0f}s. Refusing to produce a timing verdict under load "
+                f"(CLAUDE.md §9). Quiet the machine, raise PANEL_LOAD_WAIT_S, or set "
+                f"PANEL_LOAD_MAX=0 for an explicitly non-citable quality-only run.",
+                flush=True,
+            )
+            raise SystemExit(2)
+        print(
+            f"  waiting for a quiet machine: 1-min load {load1:.2f} >= "
+            f"{_LOAD_GATE_MAX:.2f} ({waited:.0f}/{_LOAD_GATE_WAIT_S:.0f}s)",
+            flush=True,
+        )
+        time.sleep(30.0)
+        waited += 30.0
+
+
 def main() -> int:
     if len(sys.argv) >= 4 and sys.argv[1] == "--solve":
         return _run_child(sys.argv[2], sys.argv[3])
@@ -274,10 +334,16 @@ def main() -> int:
         flush=True,
     )
 
+    load_start = _await_quiet_machine()
+
     rows: dict[str, dict] = {}
+    load_peak = 0.0 if math.isnan(load_start) else load_start
     for i, inst in enumerate(instances, 1):
         off = _solve_one(inst, "0")
         on = _solve_one(inst, "1")
+        _l = _load1()
+        if not math.isnan(_l):
+            load_peak = max(load_peak, _l)
         rows[inst] = {"off": off, "on": on}
         eng = "ENGAGED" if on.get("engaged") else "decline"
         print(
@@ -289,6 +355,12 @@ def main() -> int:
         )
 
     verdict = _evaluate(rows, optima)
+    # Record the load this run ACTUALLY ran at, not just that the gate passed at t=0.
+    # A run that starts quiet and then competes with a background job for an hour is
+    # exactly the confound §9 describes, and only the peak reveals it.
+    verdict["load_start"] = load_start
+    verdict["load_peak"] = load_peak
+    verdict["load_gate_max"] = _LOAD_GATE_MAX
 
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     _RESULTS_DIR.mkdir(parents=True, exist_ok=True)
@@ -474,6 +546,17 @@ def _render_summary(rows: dict, v: dict, optima: dict, stamp: str) -> str:
         f"# corpus: {len(rows)} instances, budget {_TIME_LIMIT:.0f}s, OFF vs ON, "
         f"subprocess-isolated. Reference optima: {len(optima)} entries."
     )
+    # The load this run ran at is part of the result, not metadata (#902): the
+    # net-positive bar is a wall-time comparison at a fixed budget, so a reader must be
+    # able to see whether the machine was quiet without taking it on faith.
+    _ls, _lp = v.get("load_start"), v.get("load_peak")
+    if _ls is not None:
+        lines.append(
+            f"# machine load: start {_ls:.2f}, peak {_lp:.2f} "
+            f"(gate {v.get('load_gate_max', 0):.2f}"
+            + (", DISABLED — wall times not citable" if not v.get("load_gate_max") else "")
+            + ")"
+        )
     lines.append("")
     lines.append("## VERDICT")
     _qv = v.get("quality_violations", [])
