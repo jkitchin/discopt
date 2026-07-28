@@ -1,0 +1,2048 @@
+{
+ "rows": {
+  "4stufen": {
+   "off": {
+    "instance": "4stufen",
+    "flag": "0",
+    "engaged": false,
+    "sense": "min",
+    "wall": 64.51426662504673,
+    "status": "time_limit",
+    "objective": null,
+    "bound": 21601.18397827762,
+    "node_count": 63,
+    "binding_called": false,
+    "native_status": null,
+    "native_time_s": 0.0
+   },
+   "on": {
+    "instance": "4stufen",
+    "flag": "1",
+    "engaged": false,
+    "sense": "min",
+    "wall": 63.324499499984086,
+    "status": "time_limit",
+    "objective": null,
+    "bound": 21601.18397827762,
+    "node_count": 63,
+    "binding_called": false,
+    "native_status": null,
+    "native_time_s": 0.0
+   }
+  },
+  "alan": {
+   "off": {
+    "instance": "alan",
+    "flag": "0",
+    "engaged": false,
+    "sense": "min",
+    "wall": 0.17055845796130598,
+    "status": "optimal",
+    "objective": 2.924999998301341,
+    "bound": 2.924999998301341,
+    "node_count": 21,
+    "binding_called": false,
+    "native_status": null,
+    "native_time_s": 0.0
+   },
+   "on": {
+    "instance": "alan",
+    "flag": "1",
+    "engaged": false,
+    "sense": "min",
+    "wall": 0.15718408301472664,
+    "status": "optimal",
+    "objective": 2.924999998301341,
+    "bound": 2.924999998301341,
+    "node_count": 21,
+    "binding_called": false,
+    "native_status": null,
+    "native_time_s": 0.0
+   }
+  },
+  "bchoco06": {
+   "off": {
+    "instance": "bchoco06",
+    "flag": "0",
+    "engaged": false,
+    "sense": "max",
+    "wall": 61.712263625115156,
+    "status": "time_limit",
+    "objective": null,
+    "bound": 1.0,
+    "node_count": 31,
+    "binding_called": false,
+    "native_status": null,
+    "native_time_s": 0.0
+   },
+   "on": {
+    "instance": "bchoco06",
+    "flag": "1",
+    "engaged": false,
+    "sense": "max",
+    "wall": 61.548480957979336,
+    "status": "time_limit",
+    "objective": null,
+    "bound": 1.0,
+    "node_count": 31,
+    "binding_called": false,
+    "native_status": null,
+    "native_time_s": 0.0
+   }
+  },
+  "bchoco07": {
+   "off": {
+    "instance": "bchoco07",
+    "flag": "0",
+    "engaged": false,
+    "sense": "max",
+    "wall": 61.91783862514421,
+    "status": "time_limit",
+    "objective": null,
+    "bound": 1.000000000000228,
+    "node_count": 3,
+    "binding_called": false,
+    "native_status": null,
+    "native_time_s": 0.0
+   },
+   "on": {
+    "instance": "bchoco07",
+    "flag": "1",
+    "engaged": false,
+    "sense": "max",
+    "wall": 67.9927026249934,
+    "status": "time_limit",
+    "objective": null,
+    "bound": 1.000000000000228,
+    "node_count": 3,
+    "binding_called": false,
+    "native_status": null,
+    "native_time_s": 0.0
+   }
+  },
+  "bchoco08": {
+   "off": {
+    "instance": "bchoco08",
+    "flag": "0",
+    "engaged": false,
+    "sense": "max",
+    "wall": 71.69662470906042,
+    "status": "time_limit",
+    "objective": null,
+    "bound": 1.0000000000038425,
+    "node_count": 3,
+    "binding_called": false,
+    "native_status": null,
+    "native_time_s": 0.0
+   },
+   "on": {
+    "instance": "bchoco08",
+    "flag": "1",
+    "engaged": false,
+    "sense": "max",
+    "wall": 68.29306175000966,
+    "status": "time_limit",
+    "objective": null,
+    "bound": 1.0000000000038425,
+    "node_count": 3,
+    "binding_called": false,
+    "native_status": null,
+    "native_time_s": 0.0
+   }
+  },
+  "beuster": {
+   "off": {
+    "instance": "beuster",
+    "flag": "0",
+    "engaged": false,
+    "sense": "min",
+    "wall": 63.011902707861736,
+    "status": "time_limit",
+    "objective": null,
+    "bound": 19903.462069658257,
+    "node_count": 63,
+    "binding_called": false,
+    "native_status": null,
+    "native_time_s": 0.0
+   },
+   "on": {
+    "instance": "beuster",
+    "flag": "1",
+    "engaged": false,
+    "sense": "min",
+    "wall": 61.70934412488714,
+    "status": "time_limit",
+    "objective": null,
+    "bound": 6395.108328043027,
+    "node_count": 7,
+    "binding_called": false,
+    "native_status": null,
+    "native_time_s": 0.0
+   }
+  },
+  "casctanks": {
+   "off": {
+    "instance": "casctanks",
+    "flag": "0",
+    "engaged": false,
+    "sense": "min",
+    "wall": 65.77988037513569,
+    "status": "time_limit",
+    "objective": null,
+    "bound": 2.9571233120015106,
+    "node_count": 127,
+    "binding_called": false,
+    "native_status": null,
+    "native_time_s": 0.0
+   },
+   "on": {
+    "instance": "casctanks",
+    "flag": "1",
+    "engaged": false,
+    "sense": "min",
+    "wall": 63.12568008387461,
+    "status": "time_limit",
+    "objective": null,
+    "bound": 2.9571233120015106,
+    "node_count": 127,
+    "binding_called": false,
+    "native_status": null,
+    "native_time_s": 0.0
+   }
+  },
+  "chance": {
+   "off": {
+    "instance": "chance",
+    "flag": "0",
+    "engaged": false,
+    "sense": "min",
+    "wall": 0.5601805001497269,
+    "status": "optimal",
+    "objective": 29.894378154271102,
+    "bound": 29.894378154271102,
+    "node_count": 0,
+    "binding_called": false,
+    "native_status": null,
+    "native_time_s": 0.0
+   },
+   "on": {
+    "instance": "chance",
+    "flag": "1",
+    "engaged": false,
+    "sense": "min",
+    "wall": 0.46986300009302795,
+    "status": "optimal",
+    "objective": 29.894378154271102,
+    "bound": 29.894378154271102,
+    "node_count": 0,
+    "binding_called": false,
+    "native_status": null,
+    "native_time_s": 0.0
+   }
+  },
+  "clay0303hfsg": {
+   "off": {
+    "instance": "clay0303hfsg",
+    "flag": "0",
+    "engaged": false,
+    "sense": "min",
+    "wall": 33.99345337506384,
+    "status": "optimal",
+    "objective": 26669.109551432713,
+    "bound": 26669.109513572886,
+    "node_count": 417,
+    "binding_called": false,
+    "native_status": null,
+    "native_time_s": 0.0
+   },
+   "on": {
+    "instance": "clay0303hfsg",
+    "flag": "1",
+    "engaged": false,
+    "sense": "min",
+    "wall": 33.69704545917921,
+    "status": "optimal",
+    "objective": 26669.109551432713,
+    "bound": 26669.109513572886,
+    "node_count": 417,
+    "binding_called": false,
+    "native_status": null,
+    "native_time_s": 0.0
+   }
+  },
+  "contvar": {
+   "off": {
+    "instance": "contvar",
+    "flag": "0",
+    "engaged": false,
+    "sense": "min",
+    "wall": 61.27064862498082,
+    "status": "feasible",
+    "objective": 809149.8119727827,
+    "bound": 183632.7659824633,
+    "node_count": 15,
+    "binding_called": false,
+    "native_status": null,
+    "native_time_s": 0.0
+   },
+   "on": {
+    "instance": "contvar",
+    "flag": "1",
+    "engaged": false,
+    "sense": "min",
+    "wall": 62.653060792014,
+    "status": "feasible",
+    "objective": 809149.8116985043,
+    "bound": 183632.7659824633,
+    "node_count": 15,
+    "binding_called": false,
+    "native_status": null,
+    "native_time_s": 0.0
+   }
+  },
+  "cvxnonsep_nsig30": {
+   "off": {
+    "instance": "cvxnonsep_nsig30",
+    "flag": "0",
+    "engaged": false,
+    "sense": "min",
+    "wall": 2.5358932081144303,
+    "status": "optimal",
+    "objective": 130.62871116925294,
+    "bound": 130.61841392487688,
+    "node_count": 165,
+    "binding_called": false,
+    "native_status": null,
+    "native_time_s": 0.0
+   },
+   "on": {
+    "instance": "cvxnonsep_nsig30",
+    "flag": "1",
+    "engaged": false,
+    "sense": "min",
+    "wall": 2.2458180421963334,
+    "status": "optimal",
+    "objective": 130.62871116925294,
+    "bound": 130.61841392487688,
+    "node_count": 165,
+    "binding_called": false,
+    "native_status": null,
+    "native_time_s": 0.0
+   }
+  },
+  "cvxnonsep_psig30": {
+   "off": {
+    "instance": "cvxnonsep_psig30",
+    "flag": "0",
+    "engaged": false,
+    "sense": "min",
+    "wall": 1.1139651250559837,
+    "status": "optimal",
+    "objective": 78.9988543529429,
+    "bound": 78.99179874365787,
+    "node_count": 89,
+    "binding_called": false,
+    "native_status": null,
+    "native_time_s": 0.0
+   },
+   "on": {
+    "instance": "cvxnonsep_psig30",
+    "flag": "1",
+    "engaged": false,
+    "sense": "min",
+    "wall": 1.0361104581970721,
+    "status": "optimal",
+    "objective": 78.9988543529429,
+    "bound": 78.99179874365787,
+    "node_count": 89,
+    "binding_called": false,
+    "native_status": null,
+    "native_time_s": 0.0
+   }
+  },
+  "cvxnonsep_psig40r": {
+   "off": {
+    "instance": "cvxnonsep_psig40r",
+    "flag": "0",
+    "engaged": false,
+    "sense": "min",
+    "wall": 2.8725509580690414,
+    "status": "optimal",
+    "objective": 86.54527995164958,
+    "bound": 86.53873600363832,
+    "node_count": 95,
+    "binding_called": false,
+    "native_status": null,
+    "native_time_s": 0.0
+   },
+   "on": {
+    "instance": "cvxnonsep_psig40r",
+    "flag": "1",
+    "engaged": false,
+    "sense": "min",
+    "wall": 2.8484247499145567,
+    "status": "optimal",
+    "objective": 86.54527995164958,
+    "bound": 86.53873600363832,
+    "node_count": 95,
+    "binding_called": false,
+    "native_status": null,
+    "native_time_s": 0.0
+   }
+  },
+  "dispatch": {
+   "off": {
+    "instance": "dispatch",
+    "flag": "0",
+    "engaged": false,
+    "sense": "min",
+    "wall": 0.8824062920175493,
+    "status": "optimal",
+    "objective": 3155.28792669897,
+    "bound": 3155.28790421789,
+    "node_count": 3,
+    "binding_called": false,
+    "native_status": null,
+    "native_time_s": 0.0
+   },
+   "on": {
+    "instance": "dispatch",
+    "flag": "1",
+    "engaged": true,
+    "sense": "min",
+    "wall": 0.6940510829444975,
+    "status": "optimal",
+    "objective": 3155.2879266857854,
+    "bound": 3155.2878615366776,
+    "node_count": 23,
+    "binding_called": true,
+    "native_status": "optimal",
+    "native_time_s": 0.0022815419360995293,
+    "incumbent_feasible": true,
+    "verified_obj": 3155.2879266857854
+   }
+  },
+  "ex1221": {
+   "off": {
+    "instance": "ex1221",
+    "flag": "0",
+    "engaged": false,
+    "sense": "min",
+    "wall": 0.814512750133872,
+    "status": "optimal",
+    "objective": 7.667180068813135,
+    "bound": 7.667180068813077,
+    "node_count": 5,
+    "binding_called": false,
+    "native_status": null,
+    "native_time_s": 0.0
+   },
+   "on": {
+    "instance": "ex1221",
+    "flag": "1",
+    "engaged": false,
+    "sense": "min",
+    "wall": 0.8250182499177754,
+    "status": "optimal",
+    "objective": 7.667180068813135,
+    "bound": 7.667180068813077,
+    "node_count": 5,
+    "binding_called": false,
+    "native_status": null,
+    "native_time_s": 0.0
+   }
+  },
+  "ex1222": {
+   "off": {
+    "instance": "ex1222",
+    "flag": "0",
+    "engaged": false,
+    "sense": "min",
+    "wall": 0.5689905411563814,
+    "status": "optimal",
+    "objective": 1.0765430833322625,
+    "bound": 1.0765430463031964,
+    "node_count": 1,
+    "binding_called": false,
+    "native_status": null,
+    "native_time_s": 0.0
+   },
+   "on": {
+    "instance": "ex1222",
+    "flag": "1",
+    "engaged": false,
+    "sense": "min",
+    "wall": 0.5666333748959005,
+    "status": "optimal",
+    "objective": 1.0765430833322625,
+    "bound": 1.0765430463031964,
+    "node_count": 1,
+    "binding_called": false,
+    "native_status": null,
+    "native_time_s": 0.0
+   }
+  },
+  "ex1224": {
+   "off": {
+    "instance": "ex1224",
+    "flag": "0",
+    "engaged": false,
+    "sense": "min",
+    "wall": 1.7513505420647562,
+    "status": "optimal",
+    "objective": -0.9434704942820806,
+    "bound": -0.9434705000000164,
+    "node_count": 5,
+    "binding_called": false,
+    "native_status": null,
+    "native_time_s": 0.0
+   },
+   "on": {
+    "instance": "ex1224",
+    "flag": "1",
+    "engaged": false,
+    "sense": "min",
+    "wall": 1.8022676249966025,
+    "status": "optimal",
+    "objective": -0.9434704942820806,
+    "bound": -0.9434705000000164,
+    "node_count": 5,
+    "binding_called": false,
+    "native_status": null,
+    "native_time_s": 0.0
+   }
+  },
+  "ex1225": {
+   "off": {
+    "instance": "ex1225",
+    "flag": "0",
+    "engaged": false,
+    "sense": "min",
+    "wall": 1.1586454580537975,
+    "status": "optimal",
+    "objective": 30.999999913557566,
+    "bound": 30.999999913557566,
+    "node_count": 5,
+    "binding_called": false,
+    "native_status": null,
+    "native_time_s": 0.0
+   },
+   "on": {
+    "instance": "ex1225",
+    "flag": "1",
+    "engaged": false,
+    "sense": "min",
+    "wall": 1.0601617919746786,
+    "status": "optimal",
+    "objective": 30.999999913557566,
+    "bound": 30.999999913557566,
+    "node_count": 5,
+    "binding_called": false,
+    "native_status": null,
+    "native_time_s": 0.0
+   }
+  },
+  "ex1226": {
+   "off": {
+    "instance": "ex1226",
+    "flag": "0",
+    "engaged": false,
+    "sense": "min",
+    "wall": 0.627726084087044,
+    "status": "optimal",
+    "objective": -17.000000003887443,
+    "bound": -17.000000003887443,
+    "node_count": 3,
+    "binding_called": false,
+    "native_status": null,
+    "native_time_s": 0.0
+   },
+   "on": {
+    "instance": "ex1226",
+    "flag": "1",
+    "engaged": false,
+    "sense": "min",
+    "wall": 0.6284577089827508,
+    "status": "optimal",
+    "objective": -17.000000003887443,
+    "bound": -17.000000003887443,
+    "node_count": 3,
+    "binding_called": false,
+    "native_status": null,
+    "native_time_s": 0.0
+   }
+  },
+  "ex14_1_9": {
+   "off": {
+    "instance": "ex14_1_9",
+    "flag": "0",
+    "engaged": false,
+    "sense": "min",
+    "wall": 0.5150695000775158,
+    "status": "optimal",
+    "objective": -1.9775220540513224e-16,
+    "bound": -1.9775220540513224e-16,
+    "node_count": 3,
+    "binding_called": false,
+    "native_status": null,
+    "native_time_s": 0.0
+   },
+   "on": {
+    "instance": "ex14_1_9",
+    "flag": "1",
+    "engaged": false,
+    "sense": "min",
+    "wall": 0.5110164589714259,
+    "status": "optimal",
+    "objective": -1.9775220540513224e-16,
+    "bound": -1.9775220540513224e-16,
+    "node_count": 3,
+    "binding_called": false,
+    "native_status": null,
+    "native_time_s": 0.0
+   }
+  },
+  "fac2": {
+   "off": {
+    "instance": "fac2",
+    "flag": "0",
+    "engaged": false,
+    "sense": "min",
+    "wall": 4.06120141595602,
+    "status": "optimal",
+    "objective": 331837497.8394821,
+    "bound": 331837497.54563797,
+    "node_count": 39,
+    "binding_called": false,
+    "native_status": null,
+    "native_time_s": 0.0
+   },
+   "on": {
+    "instance": "fac2",
+    "flag": "1",
+    "engaged": false,
+    "sense": "min",
+    "wall": 4.161503167124465,
+    "status": "optimal",
+    "objective": 331837497.8394821,
+    "bound": 331837497.54563797,
+    "node_count": 39,
+    "binding_called": false,
+    "native_status": null,
+    "native_time_s": 0.0
+   }
+  },
+  "flay02m": {
+   "off": {
+    "instance": "flay02m",
+    "flag": "0",
+    "engaged": false,
+    "sense": "min",
+    "wall": 0.7048168329056352,
+    "status": "optimal",
+    "objective": 37.947331863834606,
+    "bound": 37.94733180456953,
+    "node_count": 7,
+    "binding_called": false,
+    "native_status": null,
+    "native_time_s": 0.0
+   },
+   "on": {
+    "instance": "flay02m",
+    "flag": "1",
+    "engaged": false,
+    "sense": "min",
+    "wall": 0.6241197078488767,
+    "status": "optimal",
+    "objective": 37.947331863834606,
+    "bound": 37.94733180456953,
+    "node_count": 7,
+    "binding_called": false,
+    "native_status": null,
+    "native_time_s": 0.0
+   }
+  },
+  "flay03m": {
+   "off": {
+    "instance": "flay03m",
+    "flag": "0",
+    "engaged": false,
+    "sense": "min",
+    "wall": 6.508139790967107,
+    "status": "optimal",
+    "objective": 48.98979479383543,
+    "bound": 48.98979470823028,
+    "node_count": 107,
+    "binding_called": false,
+    "native_status": null,
+    "native_time_s": 0.0
+   },
+   "on": {
+    "instance": "flay03m",
+    "flag": "1",
+    "engaged": false,
+    "sense": "min",
+    "wall": 8.359688458964229,
+    "status": "optimal",
+    "objective": 48.98979479383543,
+    "bound": 48.98979470823028,
+    "node_count": 107,
+    "binding_called": false,
+    "native_status": null,
+    "native_time_s": 0.0
+   }
+  },
+  "gbd": {
+   "off": {
+    "instance": "gbd",
+    "flag": "0",
+    "engaged": false,
+    "sense": "min",
+    "wall": 0.21421833289787173,
+    "status": "optimal",
+    "objective": 2.199999982504936,
+    "bound": 2.199999982504936,
+    "node_count": 3,
+    "binding_called": false,
+    "native_status": null,
+    "native_time_s": 0.0
+   },
+   "on": {
+    "instance": "gbd",
+    "flag": "1",
+    "engaged": false,
+    "sense": "min",
+    "wall": 0.19543929095380008,
+    "status": "optimal",
+    "objective": 2.199999982504936,
+    "bound": 2.199999982504936,
+    "node_count": 3,
+    "binding_called": false,
+    "native_status": null,
+    "native_time_s": 0.0
+   }
+  },
+  "gkocis": {
+   "off": {
+    "instance": "gkocis",
+    "flag": "0",
+    "engaged": false,
+    "sense": "min",
+    "wall": 1.4167789579369128,
+    "status": "optimal",
+    "objective": -1.9230987798770212,
+    "bound": -1.9230988280923489,
+    "node_count": 5,
+    "binding_called": false,
+    "native_status": null,
+    "native_time_s": 0.0
+   },
+   "on": {
+    "instance": "gkocis",
+    "flag": "1",
+    "engaged": false,
+    "sense": "min",
+    "wall": 1.4425538331270218,
+    "status": "optimal",
+    "objective": -1.9230987798770212,
+    "bound": -1.9230988280923489,
+    "node_count": 5,
+    "binding_called": false,
+    "native_status": null,
+    "native_time_s": 0.0
+   }
+  },
+  "hda": {
+   "off": {
+    "instance": "hda",
+    "flag": "0",
+    "engaged": false,
+    "sense": "min",
+    "wall": 73.28218395798467,
+    "status": "time_limit",
+    "objective": null,
+    "bound": -64473.44240160173,
+    "node_count": 3,
+    "binding_called": false,
+    "native_status": null,
+    "native_time_s": 0.0
+   },
+   "on": {
+    "instance": "hda",
+    "flag": "1",
+    "engaged": false,
+    "sense": "min",
+    "wall": 80.10056479205377,
+    "status": "time_limit",
+    "objective": null,
+    "bound": -64473.44240160173,
+    "node_count": 3,
+    "binding_called": false,
+    "native_status": null,
+    "native_time_s": 0.0
+   }
+  },
+  "heatexch_gen1": {
+   "off": {
+    "instance": "heatexch_gen1",
+    "flag": "0",
+    "engaged": false,
+    "sense": "min",
+    "wall": 70.4088235842064,
+    "status": "time_limit",
+    "objective": null,
+    "bound": 38183.5317460179,
+    "node_count": 3,
+    "binding_called": false,
+    "native_status": null,
+    "native_time_s": 0.0
+   },
+   "on": {
+    "instance": "heatexch_gen1",
+    "flag": "1",
+    "engaged": false,
+    "sense": "min",
+    "wall": 61.332203374942765,
+    "status": "feasible",
+    "objective": 167545.24112846807,
+    "bound": 95491.07142842615,
+    "node_count": 117,
+    "binding_called": false,
+    "native_status": null,
+    "native_time_s": 0.0
+   }
+  },
+  "heatexch_gen2": {
+   "off": {
+    "instance": "heatexch_gen2",
+    "flag": "0",
+    "engaged": false,
+    "sense": "min",
+    "wall": 62.88394304201938,
+    "status": "feasible",
+    "objective": 824551.3266797881,
+    "bound": 558512.8882203752,
+    "node_count": 35,
+    "binding_called": false,
+    "native_status": null,
+    "native_time_s": 0.0
+   },
+   "on": {
+    "instance": "heatexch_gen2",
+    "flag": "1",
+    "engaged": false,
+    "sense": "min",
+    "wall": 61.279286209028214,
+    "status": "feasible",
+    "objective": 824551.3266797881,
+    "bound": 558512.8882203752,
+    "node_count": 35,
+    "binding_called": false,
+    "native_status": null,
+    "native_time_s": 0.0
+   }
+  },
+  "heatexch_gen3": {
+   "off": {
+    "instance": "heatexch_gen3",
+    "flag": "0",
+    "engaged": false,
+    "sense": "min",
+    "wall": 61.7714246250689,
+    "status": "time_limit",
+    "objective": null,
+    "bound": null,
+    "node_count": 15,
+    "binding_called": false,
+    "native_status": null,
+    "native_time_s": 0.0
+   },
+   "on": {
+    "instance": "heatexch_gen3",
+    "flag": "1",
+    "engaged": false,
+    "sense": "min",
+    "wall": 61.24494787491858,
+    "status": "time_limit",
+    "objective": null,
+    "bound": null,
+    "node_count": 7,
+    "binding_called": false,
+    "native_status": null,
+    "native_time_s": 0.0
+   }
+  },
+  "m3": {
+   "off": {
+    "instance": "m3",
+    "flag": "0",
+    "engaged": false,
+    "sense": "min",
+    "wall": 3.291631625033915,
+    "status": "optimal",
+    "objective": 37.799999669978845,
+    "bound": 37.79999951039202,
+    "node_count": 47,
+    "binding_called": false,
+    "native_status": null,
+    "native_time_s": 0.0
+   },
+   "on": {
+    "instance": "m3",
+    "flag": "1",
+    "engaged": false,
+    "sense": "min",
+    "wall": 3.627927999943495,
+    "status": "optimal",
+    "objective": 37.799999669978845,
+    "bound": 37.79999951039202,
+    "node_count": 47,
+    "binding_called": false,
+    "native_status": null,
+    "native_time_s": 0.0
+   }
+  },
+  "nvs01": {
+   "off": {
+    "instance": "nvs01",
+    "flag": "0",
+    "engaged": false,
+    "sense": "min",
+    "wall": 1.6154769589193165,
+    "status": "optimal",
+    "objective": 12.46966882156821,
+    "bound": 12.46966882156821,
+    "node_count": 3,
+    "binding_called": false,
+    "native_status": null,
+    "native_time_s": 0.0
+   },
+   "on": {
+    "instance": "nvs01",
+    "flag": "1",
+    "engaged": false,
+    "sense": "min",
+    "wall": 1.391912957886234,
+    "status": "optimal",
+    "objective": 12.46966882156821,
+    "bound": 12.46966882156821,
+    "node_count": 3,
+    "binding_called": false,
+    "native_status": null,
+    "native_time_s": 0.0
+   }
+  },
+  "nvs02": {
+   "off": {
+    "instance": "nvs02",
+    "flag": "0",
+    "engaged": false,
+    "sense": "min",
+    "wall": 1.1269848749507219,
+    "status": "optimal",
+    "objective": 5.96418452307,
+    "bound": 5.96418452307,
+    "node_count": 345,
+    "binding_called": false,
+    "native_status": null,
+    "native_time_s": 0.0
+   },
+   "on": {
+    "instance": "nvs02",
+    "flag": "1",
+    "engaged": false,
+    "sense": "min",
+    "wall": 0.9220992079935968,
+    "status": "optimal",
+    "objective": 5.96418452307,
+    "bound": 5.96418452307,
+    "node_count": 345,
+    "binding_called": false,
+    "native_status": null,
+    "native_time_s": 0.0
+   }
+  },
+  "nvs03": {
+   "off": {
+    "instance": "nvs03",
+    "flag": "0",
+    "engaged": false,
+    "sense": "min",
+    "wall": 0.7263847079593688,
+    "status": "optimal",
+    "objective": 16.0,
+    "bound": 15.99999972676511,
+    "node_count": 5,
+    "binding_called": false,
+    "native_status": null,
+    "native_time_s": 0.0
+   },
+   "on": {
+    "instance": "nvs03",
+    "flag": "1",
+    "engaged": false,
+    "sense": "min",
+    "wall": 0.6702932079788297,
+    "status": "optimal",
+    "objective": 16.0,
+    "bound": 15.99999972676511,
+    "node_count": 5,
+    "binding_called": false,
+    "native_status": null,
+    "native_time_s": 0.0
+   }
+  },
+  "nvs04": {
+   "off": {
+    "instance": "nvs04",
+    "flag": "0",
+    "engaged": false,
+    "sense": "min",
+    "wall": 0.7474524171557277,
+    "status": "optimal",
+    "objective": 0.720000000000006,
+    "bound": 0.7199999999999773,
+    "node_count": 5,
+    "binding_called": false,
+    "native_status": null,
+    "native_time_s": 0.0
+   },
+   "on": {
+    "instance": "nvs04",
+    "flag": "1",
+    "engaged": false,
+    "sense": "min",
+    "wall": 0.8150673331692815,
+    "status": "optimal",
+    "objective": 0.720000000000006,
+    "bound": 0.7199999999999773,
+    "node_count": 5,
+    "binding_called": false,
+    "native_status": null,
+    "native_time_s": 0.0
+   }
+  },
+  "nvs05": {
+   "off": {
+    "instance": "nvs05",
+    "flag": "0",
+    "engaged": false,
+    "sense": "min",
+    "wall": 44.29997266619466,
+    "status": "optimal",
+    "objective": 5.470934126405679,
+    "bound": 5.470650231139077,
+    "node_count": 287,
+    "binding_called": false,
+    "native_status": null,
+    "native_time_s": 0.0
+   },
+   "on": {
+    "instance": "nvs05",
+    "flag": "1",
+    "engaged": false,
+    "sense": "min",
+    "wall": 55.22832558420487,
+    "status": "optimal",
+    "objective": 5.470934126405679,
+    "bound": 5.470650231139077,
+    "node_count": 287,
+    "binding_called": false,
+    "native_status": null,
+    "native_time_s": 0.0
+   }
+  },
+  "nvs06": {
+   "off": {
+    "instance": "nvs06",
+    "flag": "0",
+    "engaged": false,
+    "sense": "min",
+    "wall": 2.565032625105232,
+    "status": "optimal",
+    "objective": 1.7703125,
+    "bound": 1.7703124999999627,
+    "node_count": 5,
+    "binding_called": false,
+    "native_status": null,
+    "native_time_s": 0.0
+   },
+   "on": {
+    "instance": "nvs06",
+    "flag": "1",
+    "engaged": false,
+    "sense": "min",
+    "wall": 1.6623468329198658,
+    "status": "optimal",
+    "objective": 1.7703125,
+    "bound": 1.7703124999999627,
+    "node_count": 5,
+    "binding_called": false,
+    "native_status": null,
+    "native_time_s": 0.0
+   }
+  },
+  "nvs07": {
+   "off": {
+    "instance": "nvs07",
+    "flag": "0",
+    "engaged": false,
+    "sense": "min",
+    "wall": 0.49251129082404077,
+    "status": "optimal",
+    "objective": 4.0,
+    "bound": 4.0,
+    "node_count": 5,
+    "binding_called": false,
+    "native_status": null,
+    "native_time_s": 0.0
+   },
+   "on": {
+    "instance": "nvs07",
+    "flag": "1",
+    "engaged": false,
+    "sense": "min",
+    "wall": 0.5624919577967376,
+    "status": "optimal",
+    "objective": 4.0,
+    "bound": 4.0,
+    "node_count": 5,
+    "binding_called": false,
+    "native_status": null,
+    "native_time_s": 0.0
+   }
+  },
+  "nvs08": {
+   "off": {
+    "instance": "nvs08",
+    "flag": "0",
+    "engaged": false,
+    "sense": "min",
+    "wall": 2.582924749935046,
+    "status": "optimal",
+    "objective": 23.449727347139827,
+    "bound": 23.44972734516655,
+    "node_count": 3,
+    "binding_called": false,
+    "native_status": null,
+    "native_time_s": 0.0
+   },
+   "on": {
+    "instance": "nvs08",
+    "flag": "1",
+    "engaged": false,
+    "sense": "min",
+    "wall": 2.0111307920888066,
+    "status": "optimal",
+    "objective": 23.449727347139827,
+    "bound": 23.44972734516655,
+    "node_count": 3,
+    "binding_called": false,
+    "native_status": null,
+    "native_time_s": 0.0
+   }
+  },
+  "nvs09": {
+   "off": {
+    "instance": "nvs09",
+    "flag": "0",
+    "engaged": false,
+    "sense": "min",
+    "wall": 4.905681791948155,
+    "status": "optimal",
+    "objective": -43.134336918035295,
+    "bound": -43.13433691803662,
+    "node_count": 5,
+    "binding_called": false,
+    "native_status": null,
+    "native_time_s": 0.0
+   },
+   "on": {
+    "instance": "nvs09",
+    "flag": "1",
+    "engaged": false,
+    "sense": "min",
+    "wall": 5.672707041958347,
+    "status": "optimal",
+    "objective": -43.134336918035295,
+    "bound": -43.13433691803662,
+    "node_count": 5,
+    "binding_called": false,
+    "native_status": null,
+    "native_time_s": 0.0
+   }
+  },
+  "nvs10": {
+   "off": {
+    "instance": "nvs10",
+    "flag": "0",
+    "engaged": false,
+    "sense": "min",
+    "wall": 0.5646272921003401,
+    "status": "optimal",
+    "objective": -310.7999999999999,
+    "bound": -310.7999999999999,
+    "node_count": 5,
+    "binding_called": false,
+    "native_status": null,
+    "native_time_s": 0.0
+   },
+   "on": {
+    "instance": "nvs10",
+    "flag": "1",
+    "engaged": false,
+    "sense": "min",
+    "wall": 0.45233825012110174,
+    "status": "optimal",
+    "objective": -310.7999999999999,
+    "bound": -310.7999999999999,
+    "node_count": 5,
+    "binding_called": false,
+    "native_status": null,
+    "native_time_s": 0.0
+   }
+  },
+  "nvs11": {
+   "off": {
+    "instance": "nvs11",
+    "flag": "0",
+    "engaged": false,
+    "sense": "min",
+    "wall": 0.6797895841300488,
+    "status": "optimal",
+    "objective": -431.0000000000085,
+    "bound": -431.0000000000085,
+    "node_count": 55,
+    "binding_called": false,
+    "native_status": null,
+    "native_time_s": 0.0
+   },
+   "on": {
+    "instance": "nvs11",
+    "flag": "1",
+    "engaged": false,
+    "sense": "min",
+    "wall": 0.6647258340381086,
+    "status": "optimal",
+    "objective": -431.0000000000085,
+    "bound": -431.0000000000085,
+    "node_count": 55,
+    "binding_called": false,
+    "native_status": null,
+    "native_time_s": 0.0
+   }
+  },
+  "nvs12": {
+   "off": {
+    "instance": "nvs12",
+    "flag": "0",
+    "engaged": false,
+    "sense": "min",
+    "wall": 1.3038702919147909,
+    "status": "optimal",
+    "objective": -481.20000000001,
+    "bound": -481.20000000001,
+    "node_count": 231,
+    "binding_called": false,
+    "native_status": null,
+    "native_time_s": 0.0
+   },
+   "on": {
+    "instance": "nvs12",
+    "flag": "1",
+    "engaged": false,
+    "sense": "min",
+    "wall": 1.3230889169499278,
+    "status": "optimal",
+    "objective": -481.20000000001,
+    "bound": -481.20000000001,
+    "node_count": 231,
+    "binding_called": false,
+    "native_status": null,
+    "native_time_s": 0.0
+   }
+  },
+  "nvs13": {
+   "off": {
+    "instance": "nvs13",
+    "flag": "0",
+    "engaged": false,
+    "sense": "min",
+    "wall": 3.714889833005145,
+    "status": "optimal",
+    "objective": -585.2,
+    "bound": -585.2000000002046,
+    "node_count": 19,
+    "binding_called": false,
+    "native_status": null,
+    "native_time_s": 0.0
+   },
+   "on": {
+    "instance": "nvs13",
+    "flag": "1",
+    "engaged": true,
+    "sense": "min",
+    "wall": 2.5700546249281615,
+    "status": "optimal",
+    "objective": -585.2000000000003,
+    "bound": -585.2000000000003,
+    "node_count": 649,
+    "binding_called": true,
+    "native_status": "optimal",
+    "native_time_s": 0.061047625029459596,
+    "incumbent_feasible": true,
+    "verified_obj": -585.2
+   }
+  },
+  "nvs14": {
+   "off": {
+    "instance": "nvs14",
+    "flag": "0",
+    "engaged": false,
+    "sense": "min",
+    "wall": 1.134031750028953,
+    "status": "optimal",
+    "objective": -40358.15476929995,
+    "bound": -40358.154769299996,
+    "node_count": 129,
+    "binding_called": false,
+    "native_status": null,
+    "native_time_s": 0.0
+   },
+   "on": {
+    "instance": "nvs14",
+    "flag": "1",
+    "engaged": false,
+    "sense": "min",
+    "wall": 0.9913798328489065,
+    "status": "optimal",
+    "objective": -40358.15476929995,
+    "bound": -40358.154769299996,
+    "node_count": 129,
+    "binding_called": false,
+    "native_status": null,
+    "native_time_s": 0.0
+   }
+  },
+  "nvs15": {
+   "off": {
+    "instance": "nvs15",
+    "flag": "0",
+    "engaged": false,
+    "sense": "min",
+    "wall": 0.060421207919716835,
+    "status": "optimal",
+    "objective": 1.0,
+    "bound": 1.0,
+    "node_count": 7,
+    "binding_called": false,
+    "native_status": null,
+    "native_time_s": 0.0
+   },
+   "on": {
+    "instance": "nvs15",
+    "flag": "1",
+    "engaged": false,
+    "sense": "min",
+    "wall": 0.05860762484371662,
+    "status": "optimal",
+    "objective": 1.0,
+    "bound": 1.0,
+    "node_count": 7,
+    "binding_called": false,
+    "native_status": null,
+    "native_time_s": 0.0
+   }
+  },
+  "nvs21": {
+   "off": {
+    "instance": "nvs21",
+    "flag": "0",
+    "engaged": false,
+    "sense": "min",
+    "wall": 4.102655625203624,
+    "status": "optimal",
+    "objective": -5.684782628025259,
+    "bound": -5.684782628025259,
+    "node_count": 3,
+    "binding_called": false,
+    "native_status": null,
+    "native_time_s": 0.0
+   },
+   "on": {
+    "instance": "nvs21",
+    "flag": "1",
+    "engaged": false,
+    "sense": "min",
+    "wall": 3.129758750088513,
+    "status": "optimal",
+    "objective": -5.684782628025259,
+    "bound": -5.684782628025259,
+    "node_count": 3,
+    "binding_called": false,
+    "native_status": null,
+    "native_time_s": 0.0
+   }
+  },
+  "oaer": {
+   "off": {
+    "instance": "oaer",
+    "flag": "0",
+    "engaged": false,
+    "sense": "min",
+    "wall": 0.9674259170424193,
+    "status": "optimal",
+    "objective": -1.9230984998848466,
+    "bound": -1.923098601139822,
+    "node_count": 3,
+    "binding_called": false,
+    "native_status": null,
+    "native_time_s": 0.0
+   },
+   "on": {
+    "instance": "oaer",
+    "flag": "1",
+    "engaged": false,
+    "sense": "min",
+    "wall": 0.9332986669614911,
+    "status": "optimal",
+    "objective": -1.9230984998848466,
+    "bound": -1.923098601139822,
+    "node_count": 3,
+    "binding_called": false,
+    "native_status": null,
+    "native_time_s": 0.0
+   }
+  },
+  "st_e11": {
+   "off": {
+    "instance": "st_e11",
+    "flag": "0",
+    "engaged": false,
+    "sense": "min",
+    "wall": 1.5852548331022263,
+    "status": "optimal",
+    "objective": 189.31162974131917,
+    "bound": 189.31162968661766,
+    "node_count": 27,
+    "binding_called": false,
+    "native_status": null,
+    "native_time_s": 0.0
+   },
+   "on": {
+    "instance": "st_e11",
+    "flag": "1",
+    "engaged": false,
+    "sense": "min",
+    "wall": 1.5837030410766602,
+    "status": "optimal",
+    "objective": 189.31162974131917,
+    "bound": 189.31162968661766,
+    "node_count": 27,
+    "binding_called": false,
+    "native_status": null,
+    "native_time_s": 0.0
+   }
+  },
+  "st_e13": {
+   "off": {
+    "instance": "st_e13",
+    "flag": "0",
+    "engaged": false,
+    "sense": "min",
+    "wall": 0.556796875083819,
+    "status": "optimal",
+    "objective": 2.0000003463351197,
+    "bound": 1.9999999825187809,
+    "node_count": 3,
+    "binding_called": false,
+    "native_status": null,
+    "native_time_s": 0.0
+   },
+   "on": {
+    "instance": "st_e13",
+    "flag": "1",
+    "engaged": true,
+    "sense": "min",
+    "wall": 0.48120316583663225,
+    "status": "optimal",
+    "objective": 1.9999999825187946,
+    "bound": 1.9999999825187946,
+    "node_count": 1,
+    "binding_called": true,
+    "native_status": "optimal",
+    "native_time_s": 2.487492747604847e-05,
+    "incumbent_feasible": true,
+    "verified_obj": 1.9999999825187946
+   }
+  },
+  "st_e29": {
+   "off": {
+    "instance": "st_e29",
+    "flag": "0",
+    "engaged": false,
+    "sense": "min",
+    "wall": 1.7726939159911126,
+    "status": "optimal",
+    "objective": -0.9434704942820806,
+    "bound": -0.9434705000000164,
+    "node_count": 5,
+    "binding_called": false,
+    "native_status": null,
+    "native_time_s": 0.0
+   },
+   "on": {
+    "instance": "st_e29",
+    "flag": "1",
+    "engaged": false,
+    "sense": "min",
+    "wall": 1.7606093329377472,
+    "status": "optimal",
+    "objective": -0.9434704942820806,
+    "bound": -0.9434705000000164,
+    "node_count": 5,
+    "binding_called": false,
+    "native_status": null,
+    "native_time_s": 0.0
+   }
+  },
+  "st_e36": {
+   "off": {
+    "instance": "st_e36",
+    "flag": "0",
+    "engaged": false,
+    "sense": "min",
+    "wall": 3.7610051669180393,
+    "status": "optimal",
+    "objective": -245.99999999999997,
+    "bound": -246.00000000170442,
+    "node_count": 85,
+    "binding_called": false,
+    "native_status": null,
+    "native_time_s": 0.0
+   },
+   "on": {
+    "instance": "st_e36",
+    "flag": "1",
+    "engaged": false,
+    "sense": "min",
+    "wall": 3.5337766658049077,
+    "status": "optimal",
+    "objective": -245.99999999999997,
+    "bound": -246.00000000170442,
+    "node_count": 85,
+    "binding_called": false,
+    "native_status": null,
+    "native_time_s": 0.0
+   }
+  },
+  "st_e38": {
+   "off": {
+    "instance": "st_e38",
+    "flag": "0",
+    "engaged": false,
+    "sense": "min",
+    "wall": 0.6863526250235736,
+    "status": "optimal",
+    "objective": 7197.727116826533,
+    "bound": 7197.727116826533,
+    "node_count": 3,
+    "binding_called": false,
+    "native_status": null,
+    "native_time_s": 0.0
+   },
+   "on": {
+    "instance": "st_e38",
+    "flag": "1",
+    "engaged": false,
+    "sense": "min",
+    "wall": 0.6722596669569612,
+    "status": "optimal",
+    "objective": 7197.727116826533,
+    "bound": 7197.727116826533,
+    "node_count": 3,
+    "binding_called": false,
+    "native_status": null,
+    "native_time_s": 0.0
+   }
+  },
+  "st_miqp1": {
+   "off": {
+    "instance": "st_miqp1",
+    "flag": "0",
+    "engaged": false,
+    "sense": "min",
+    "wall": 0.14495504181832075,
+    "status": "optimal",
+    "objective": 280.9999999906497,
+    "bound": 280.9999999906497,
+    "node_count": 15,
+    "binding_called": false,
+    "native_status": null,
+    "native_time_s": 0.0
+   },
+   "on": {
+    "instance": "st_miqp1",
+    "flag": "1",
+    "engaged": false,
+    "sense": "min",
+    "wall": 0.14206091593950987,
+    "status": "optimal",
+    "objective": 280.9999999906497,
+    "bound": 280.9999999906497,
+    "node_count": 15,
+    "binding_called": false,
+    "native_status": null,
+    "native_time_s": 0.0
+   }
+  },
+  "st_miqp2": {
+   "off": {
+    "instance": "st_miqp2",
+    "flag": "0",
+    "engaged": false,
+    "sense": "min",
+    "wall": 0.1465779161080718,
+    "status": "optimal",
+    "objective": 2.0,
+    "bound": 2.0,
+    "node_count": 9,
+    "binding_called": false,
+    "native_status": null,
+    "native_time_s": 0.0
+   },
+   "on": {
+    "instance": "st_miqp2",
+    "flag": "1",
+    "engaged": false,
+    "sense": "min",
+    "wall": 0.20080979098565876,
+    "status": "optimal",
+    "objective": 2.0,
+    "bound": 2.0,
+    "node_count": 9,
+    "binding_called": false,
+    "native_status": null,
+    "native_time_s": 0.0
+   }
+  },
+  "st_miqp3": {
+   "off": {
+    "instance": "st_miqp3",
+    "flag": "0",
+    "engaged": false,
+    "sense": "min",
+    "wall": 0.15797966718673706,
+    "status": "optimal",
+    "objective": -6.0,
+    "bound": -6.0,
+    "node_count": 1,
+    "binding_called": false,
+    "native_status": null,
+    "native_time_s": 0.0
+   },
+   "on": {
+    "instance": "st_miqp3",
+    "flag": "1",
+    "engaged": false,
+    "sense": "min",
+    "wall": 0.1425250000320375,
+    "status": "optimal",
+    "objective": -6.0,
+    "bound": -6.0,
+    "node_count": 1,
+    "binding_called": false,
+    "native_status": null,
+    "native_time_s": 0.0
+   }
+  },
+  "st_miqp4": {
+   "off": {
+    "instance": "st_miqp4",
+    "flag": "0",
+    "engaged": false,
+    "sense": "min",
+    "wall": 0.14865075005218387,
+    "status": "optimal",
+    "objective": -4574.000004423649,
+    "bound": -4574.000004423649,
+    "node_count": 3,
+    "binding_called": false,
+    "native_status": null,
+    "native_time_s": 0.0
+   },
+   "on": {
+    "instance": "st_miqp4",
+    "flag": "1",
+    "engaged": false,
+    "sense": "min",
+    "wall": 0.14769529085606337,
+    "status": "optimal",
+    "objective": -4574.000004423649,
+    "bound": -4574.000004423649,
+    "node_count": 3,
+    "binding_called": false,
+    "native_status": null,
+    "native_time_s": 0.0
+   }
+  },
+  "st_miqp5": {
+   "off": {
+    "instance": "st_miqp5",
+    "flag": "0",
+    "engaged": false,
+    "sense": "min",
+    "wall": 0.1503542501013726,
+    "status": "optimal",
+    "objective": -333.8888902488093,
+    "bound": -333.8888902488093,
+    "node_count": 1,
+    "binding_called": false,
+    "native_status": null,
+    "native_time_s": 0.0
+   },
+   "on": {
+    "instance": "st_miqp5",
+    "flag": "1",
+    "engaged": false,
+    "sense": "min",
+    "wall": 0.1493580408859998,
+    "status": "optimal",
+    "objective": -333.8888902488093,
+    "bound": -333.8888902488093,
+    "node_count": 1,
+    "binding_called": false,
+    "native_status": null,
+    "native_time_s": 0.0
+   }
+  },
+  "st_test1": {
+   "off": {
+    "instance": "st_test1",
+    "flag": "0",
+    "engaged": false,
+    "sense": "min",
+    "wall": 0.15165841695852578,
+    "status": "optimal",
+    "objective": -1.6495994490692313e-08,
+    "bound": -1.6495994490692313e-08,
+    "node_count": 15,
+    "binding_called": false,
+    "native_status": null,
+    "native_time_s": 0.0
+   },
+   "on": {
+    "instance": "st_test1",
+    "flag": "1",
+    "engaged": false,
+    "sense": "min",
+    "wall": 0.1529435000848025,
+    "status": "optimal",
+    "objective": -1.6495994490692313e-08,
+    "bound": -1.6495994490692313e-08,
+    "node_count": 15,
+    "binding_called": false,
+    "native_status": null,
+    "native_time_s": 0.0
+   }
+  },
+  "st_testgr3": {
+   "off": {
+    "instance": "st_testgr3",
+    "flag": "0",
+    "engaged": false,
+    "sense": "min",
+    "wall": 0.21642870805226266,
+    "status": "optimal",
+    "objective": -20.59,
+    "bound": -20.59070709795548,
+    "node_count": 549,
+    "binding_called": false,
+    "native_status": null,
+    "native_time_s": 0.0
+   },
+   "on": {
+    "instance": "st_testgr3",
+    "flag": "1",
+    "engaged": false,
+    "sense": "min",
+    "wall": 0.21307349996641278,
+    "status": "optimal",
+    "objective": -20.59,
+    "bound": -20.59070709795548,
+    "node_count": 549,
+    "binding_called": false,
+    "native_status": null,
+    "native_time_s": 0.0
+   }
+  },
+  "syn05hfsg": {
+   "off": {
+    "instance": "syn05hfsg",
+    "flag": "0",
+    "engaged": false,
+    "sense": "max",
+    "wall": 6.392833875026554,
+    "status": "optimal",
+    "objective": 837.732412391107,
+    "bound": 837.732412391107,
+    "node_count": 185,
+    "binding_called": false,
+    "native_status": null,
+    "native_time_s": 0.0
+   },
+   "on": {
+    "instance": "syn05hfsg",
+    "flag": "1",
+    "engaged": false,
+    "sense": "max",
+    "wall": 5.548307874938473,
+    "status": "optimal",
+    "objective": 837.732412391107,
+    "bound": 837.732412391107,
+    "node_count": 185,
+    "binding_called": false,
+    "native_status": null,
+    "native_time_s": 0.0
+   }
+  },
+  "tanksize": {
+   "off": {
+    "instance": "tanksize",
+    "flag": "0",
+    "engaged": false,
+    "sense": "min",
+    "wall": 60.3244804169517,
+    "status": "feasible",
+    "objective": 1.2686437614652872,
+    "bound": 1.2360101066798688,
+    "node_count": 369,
+    "binding_called": false,
+    "native_status": null,
+    "native_time_s": 0.0
+   },
+   "on": {
+    "instance": "tanksize",
+    "flag": "1",
+    "engaged": true,
+    "sense": "min",
+    "wall": 17.334111124975607,
+    "status": "optimal",
+    "objective": 1.2686437525577947,
+    "bound": 1.2685440897016123,
+    "node_count": 11451,
+    "binding_called": true,
+    "native_status": "optimal",
+    "native_time_s": 14.934922583866864,
+    "incumbent_feasible": true,
+    "verified_obj": 1.2686437525577947
+   }
+  },
+  "tls2": {
+   "off": {
+    "instance": "tls2",
+    "flag": "0",
+    "engaged": false,
+    "sense": "min",
+    "wall": 35.10747154196724,
+    "status": "optimal",
+    "objective": 5.299999922109238,
+    "bound": 5.3,
+    "node_count": 421,
+    "binding_called": false,
+    "native_status": null,
+    "native_time_s": 0.0
+   },
+   "on": {
+    "instance": "tls2",
+    "flag": "1",
+    "engaged": false,
+    "sense": "min",
+    "wall": 35.295996916946024,
+    "status": "optimal",
+    "objective": 5.299999922109238,
+    "bound": 5.3,
+    "node_count": 421,
+    "binding_called": false,
+    "native_status": null,
+    "native_time_s": 0.0
+   }
+  },
+  "tspn05": {
+   "off": {
+    "instance": "tspn05",
+    "flag": "0",
+    "engaged": false,
+    "sense": "min",
+    "wall": 10.158880291040987,
+    "status": "optimal",
+    "objective": 191.25520768494238,
+    "bound": 191.25510622528546,
+    "node_count": 51,
+    "binding_called": false,
+    "native_status": null,
+    "native_time_s": 0.0
+   },
+   "on": {
+    "instance": "tspn05",
+    "flag": "1",
+    "engaged": false,
+    "sense": "min",
+    "wall": 9.661936916876584,
+    "status": "optimal",
+    "objective": 191.25520768494238,
+    "bound": 191.25510622528546,
+    "node_count": 51,
+    "binding_called": false,
+    "native_status": null,
+    "native_time_s": 0.0
+   }
+  },
+  "tspn08": {
+   "off": {
+    "instance": "tspn08",
+    "flag": "0",
+    "engaged": false,
+    "sense": "min",
+    "wall": 9.677977540995926,
+    "status": "feasible",
+    "objective": 290.56685374735457,
+    "bound": null,
+    "node_count": 1,
+    "binding_called": false,
+    "native_status": null,
+    "native_time_s": 0.0
+   },
+   "on": {
+    "instance": "tspn08",
+    "flag": "1",
+    "engaged": false,
+    "sense": "min",
+    "wall": 9.748663124861196,
+    "status": "feasible",
+    "objective": 290.56685374735457,
+    "bound": null,
+    "node_count": 1,
+    "binding_called": false,
+    "native_status": null,
+    "native_time_s": 0.0
+   }
+  },
+  "tspn10": {
+   "off": {
+    "instance": "tspn10",
+    "flag": "0",
+    "engaged": false,
+    "sense": "min",
+    "wall": 10.782024207990617,
+    "status": "feasible",
+    "objective": 225.1260713973292,
+    "bound": null,
+    "node_count": 1,
+    "binding_called": false,
+    "native_status": null,
+    "native_time_s": 0.0
+   },
+   "on": {
+    "instance": "tspn10",
+    "flag": "1",
+    "engaged": false,
+    "sense": "min",
+    "wall": 10.360881000058725,
+    "status": "feasible",
+    "objective": 225.1260713973292,
+    "bound": null,
+    "node_count": 1,
+    "binding_called": false,
+    "native_status": null,
+    "native_time_s": 0.0
+   }
+  },
+  "tspn12": {
+   "off": {
+    "instance": "tspn12",
+    "flag": "0",
+    "engaged": false,
+    "sense": "min",
+    "wall": 7.963673624908552,
+    "status": "feasible",
+    "objective": 262.64739525060224,
+    "bound": null,
+    "node_count": 1,
+    "binding_called": false,
+    "native_status": null,
+    "native_time_s": 0.0
+   },
+   "on": {
+    "instance": "tspn12",
+    "flag": "1",
+    "engaged": false,
+    "sense": "min",
+    "wall": 8.008732208050787,
+    "status": "feasible",
+    "objective": 262.64739525060224,
+    "bound": null,
+    "node_count": 1,
+    "binding_called": false,
+    "native_status": null,
+    "native_time_s": 0.0
+   }
+  }
+ },
+ "verdict": {
+  "cert_clean": true,
+  "cert_violations": [],
+  "net_positive": true,
+  "engaged": [
+   "dispatch",
+   "nvs13",
+   "st_e13",
+   "tanksize"
+  ],
+  "helped": [
+   "tanksize"
+  ],
+  "median_nonengaged_wall_delta_s": -0.014578354079276323,
+  "overhead_ok": true,
+  "errored": [],
+  "no_oracle_instances": [
+   "4stufen",
+   "bchoco06",
+   "bchoco07",
+   "bchoco08",
+   "beuster",
+   "casctanks",
+   "clay0303hfsg",
+   "contvar",
+   "cvxnonsep_nsig30",
+   "cvxnonsep_psig30",
+   "cvxnonsep_psig40r",
+   "ex1224",
+   "ex1225",
+   "ex14_1_9",
+   "fac2",
+   "flay02m",
+   "flay03m",
+   "gkocis",
+   "hda",
+   "heatexch_gen1",
+   "heatexch_gen2",
+   "heatexch_gen3",
+   "m3",
+   "nvs21",
+   "st_e11",
+   "st_e29",
+   "st_miqp5",
+   "st_testgr3",
+   "syn05hfsg",
+   "tanksize",
+   "tls2",
+   "tspn05",
+   "tspn08",
+   "tspn10",
+   "tspn12"
+  ],
+  "n_nonengaged_measured": 62,
+  "graduate": true
+ }
+}

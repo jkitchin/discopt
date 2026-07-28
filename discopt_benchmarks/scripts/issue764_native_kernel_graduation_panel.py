@@ -63,10 +63,13 @@ def _obj_match(a, b) -> bool:
 def _run_child(instance: str, flag: str) -> int:
     os.environ.setdefault("JAX_PLATFORMS", "cpu")
     os.environ.setdefault("JAX_ENABLE_X64", "1")
-    if flag == "1":
-        os.environ["DISCOPT_NATIVE_SPATIAL_KERNEL"] = "1"
-    else:
-        os.environ.pop("DISCOPT_NATIVE_SPATIAL_KERNEL", None)
+    # Set BOTH arms explicitly. Unsetting used to mean OFF, but the flag graduated to
+    # default-ON (#764, 2026-07-27), so ``pop`` now yields ON and the panel would
+    # compare ON against ON — silently, forever, reporting helped=0 and never able to
+    # catch a regression. Verified live the moment the default flipped: tanksize
+    # engaged in both arms. An A/B harness must never infer an arm from a default it
+    # does not control.
+    os.environ["DISCOPT_NATIVE_SPATIAL_KERNEL"] = "1" if flag == "1" else "0"
 
     import discopt.solver as solver_mod
     import numpy as np
@@ -183,6 +186,28 @@ def main() -> int:
     optima: dict = {}
     if _CERT_OPTIMA.exists():
         optima = json.loads(_CERT_OPTIMA.read_text())
+    # Widen from the full MINLPLib oracle when the corpus is installed. The vendored
+    # file is the CI-safe floor (no corpus there); ``minlplib.solu`` is the ground
+    # truth and carries far more. Keeping only the vendored file is how this panel
+    # came to skip 21 of 66 instances — including its own headline win — while
+    # reporting a clean pass. The two sources were verified to AGREE on all 37
+    # entries they shared, so vendored values win ties only to keep runs
+    # reproducible when the corpus is absent.
+    _solu_added = 0
+    try:
+        if str(_BENCH_ROOT) not in sys.path:
+            sys.path.insert(0, str(_BENCH_ROOT))
+        from utils.corpus import solu_path  # noqa: PLC0415
+
+        _sp = solu_path()
+        if _sp is not None:
+            for _line in _sp.read_text().splitlines():
+                _f = _line.split()
+                if len(_f) >= 3 and _f[0] == "=opt=" and _f[1] not in optima:
+                    optima[_f[1]] = float(_f[2])
+                    _solu_added += 1
+    except Exception as _exc:  # corpus absent (CI) or resolver missing: vendored only
+        print(f"note: minlplib.solu not merged ({_exc}); using vendored optima only", flush=True)
 
     instances = sorted(p.stem for p in _CORPUS.glob("*.nl"))
     # Optional smoke subset (validation only): PANEL_LIMIT=N runs the first N, and
@@ -197,7 +222,10 @@ def main() -> int:
     print(
         f"#764 native-kernel graduation panel: {len(instances)} instances, "
         f"budget {_TIME_LIMIT:.0f}s, OFF then ON, subprocess-isolated.\n"
-        f"Reference optima: {len(optima)} entries in {_CERT_OPTIMA.name}.\n",
+        f"Reference optima: {len(optima)} entries "
+        f"({_CERT_OPTIMA.name} + {_solu_added} merged from minlplib.solu).\n"
+        f"Oracle coverage of this corpus: "
+        f"{sum(1 for i in instances if i in optima)}/{len(instances)}.\n",
         flush=True,
     )
 
@@ -339,6 +367,8 @@ def _evaluate(rows: dict, optima: dict) -> dict:
         "overhead_ok": overhead_ok,
         "errored": errored,
         "no_oracle_instances": no_oracle,
+        "oracle_total": len(rows),
+        "oracle_covered": len(rows) - len(no_oracle),
         "n_nonengaged_measured": len(non_engaged_wall_delta),
         "graduate": cert_clean and net_positive,
     }
@@ -353,9 +383,21 @@ def _render_summary(rows: dict, v: dict, optima: dict, stamp: str) -> str:
     )
     lines.append("")
     lines.append("## VERDICT")
+    # Oracle COVERAGE is part of the verdict line, not a footnote further down. This
+    # panel previously printed "cert-clean : PASS (0 violations)" while silently
+    # checking only 31 of 66 instances — its oracle file was missing 21 optima that
+    # ``minlplib.solu`` carries, INCLUDING ``tanksize``, the instance the run's own
+    # net-positive bar rests on. A PASS that reads as "checked everything" when it
+    # checked half the corpus is the failure mode CLAUDE.md §6 is about: an instrument
+    # that measures less than it appears to and is believed.
+    _cov = v.get("oracle_covered", 0)
+    _tot = v.get("oracle_total", 0)
+    _pct = (100.0 * _cov / _tot) if _tot else 0.0
     lines.append(
         f"  cert-clean   : {'PASS' if v['cert_clean'] else 'FAIL'} "
-        f"({len(v['cert_violations'])} violation(s))"
+        f"({len(v['cert_violations'])} violation(s); "
+        f"oracle-checked {_cov}/{_tot} instances = {_pct:.0f}%, "
+        f"{len(v['no_oracle_instances'])} unchecked)"
     )
     lines.append(
         f"  net-positive : {'PASS' if v['net_positive'] else 'FAIL'} "

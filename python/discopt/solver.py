@@ -528,16 +528,43 @@ def _native_spatial_kernel_enabled() -> bool:
          ``optimal`` in ~21 s. So the kernel is more ROBUST (consistent certification),
          but a stable corpus-wide net-positive is unproven — per §4 an unstable/neutral
          result does not graduate a default.
-    Graduating to default-ON is now a **single one-line flip** of the return below,
-    gated solely on a clean, reproducible net-positive from the Regime-2 panel
-    (``issue764_native_kernel_graduation_panel.py``) run on a VERIFIED-IDLE machine —
-    the last remaining bar (#802 keeps default-OFF pending that; cert-clean already
-    passes). Opt in with the env var to use it today (e.g. to robustly certify tanksize)."""
-    return os.environ.get("DISCOPT_NATIVE_SPATIAL_KERNEL", "").strip().lower() in (
-        "1",
-        "true",
-        "yes",
-        "on",
+    GRADUATED default-ON 2026-07-27 (panel
+    ``issue764_native_kernel_graduation_panel_20260728T002442Z.json``). The last bar —
+    a clean, reproducible net-positive on a VERIFIED-IDLE machine — is now met, and the
+    load confound that blocked it four times is gone rather than argued away: the runner
+    refused to start until no foreign ``cargo``/``pytest`` was running and 1-min load was
+    < 2.5 (it waited 300 s, started at load1 = **2.31**), on a tree verified identical to
+    ``origin/main`` with the loaded ``_rust`` extension checked current.
+
+      * **cert-clean: PASS.** The panel reports 0 violations over the 31 instances in
+        ``cert-optima.json``. Verified INDEPENDENTLY and more strictly against
+        ``minlplib.solu`` (980 ``=opt=``): **307 comparisons, 0 violations** — no false
+        primal, no dual bound past a reference optimum (sense read per arm), and the
+        ``bound <= incumbent`` certificate invariant checked on every ``optimal`` row.
+        That covers 52 of 66 instances; only 14 genuinely lack an ``=opt=``. Note the
+        panel's own oracle file is MISSING 21 optima that ``minlplib.solu`` carries,
+        including ``tanksize`` — so the panel skipped the oracle check on its own
+        headline win. Widening its oracle source is tracked as follow-up.
+      * **net-positive: PASS.** engaged 4/66 (dispatch, nvs13, st_e13, tanksize),
+        helped 1 (tanksize ``feasible`` -> ``optimal``), median non-engaged wall
+        delta **-0.015 s** over 62 instances (i.e. the producer-probe decline overhead is
+        not measurable), no instance regressed.
+
+    The ``helped=1`` was checked for the load artifact this docstring previously warned
+    about, because the whole bar rests on it. Isolated, interleaved, 2 reps on a quiet
+    box: OFF ``feasible`` 61.5 s / 61.5 s, ON ``optimal`` 18.6 s / 18.7 s — reproducible
+    to 0.1 s, with ON's objective matching ``=opt= 1.268643754`` to 1.4e-9. So the win is
+    real. That also **falsifies** this docstring's earlier claim that "on an idle machine
+    the Python path certifies in ~21 s (helped 0)": on today's tree OFF never certifies
+    ``tanksize`` at a 60 s budget. Recorded per CLAUDE.md §11.
+
+    ``DISCOPT_NATIVE_SPATIAL_KERNEL=0`` is the opt-out and the Python path is untouched,
+    per §5 (a graduated flag keeps its off-switch and its legacy path)."""
+    return os.environ.get("DISCOPT_NATIVE_SPATIAL_KERNEL", "1").strip().lower() not in (
+        "0",
+        "false",
+        "no",
+        "off",
     )
 
 
