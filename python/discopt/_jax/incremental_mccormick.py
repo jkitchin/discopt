@@ -275,6 +275,14 @@ class IncrementalMcCormickLP:
         self.ok = False
         self.model = model
         self.terms = terms
+        # Why this structure declined, or ``None`` when it was admitted (#861). The
+        # reason used to exist ONLY as the ``logger.debug`` line below, so a caller
+        # measuring coverage had to scrape a log to learn anything — and
+        # ``getattr(inc, "reason", None)`` returning ``None`` for a missing attribute
+        # reads as "declined for no reason", which cost a wrong triage pass. Storing
+        # it makes the decline reason a first-class, measurable property; nothing in
+        # the solve path branches on it (it is diagnostic only).
+        self.decline_reason: str | None = None
         self._validated_regimes = frozenset()  # sign regimes _validate exercised
         self._deadline = (
             deadline if deadline is not None else getattr(model, "_solve_deadline", None)
@@ -285,6 +293,7 @@ class IncrementalMcCormickLP:
         # use the trusted per-node cold build. No-op when budget remains (the common
         # case) or when no deadline was stashed (construction outside a solve).
         if self._deadline is not None and time.perf_counter() > self._deadline:
+            self.decline_reason = "deadline already spent before construction"
             return
         try:
             self._build_structure()
@@ -295,6 +304,7 @@ class IncrementalMcCormickLP:
             # feasibility pump. A silently-declined structure is exactly how #844's
             # overshoot hid for two rounds of measurement, so record why.
             self.ok = False
+            self.decline_reason = f"{type(exc).__name__}: {exc}"
             logger.debug(
                 "IncrementalMcCormickLP declined to build: %s: %s", type(exc).__name__, exc
             )
@@ -746,6 +756,7 @@ class IncrementalMcCormickLP:
         for lb, ub in rng_boxes:
             if _deadline is not None and time.perf_counter() > _deadline:
                 self.ok = False
+                self.decline_reason = "deadline spent during validation"
                 return
             for i in range(self.n):
                 regimes.add(self._box_sign_regime(float(lb[i]), float(ub[i])))
