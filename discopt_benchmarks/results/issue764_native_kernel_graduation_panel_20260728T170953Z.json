@@ -1,0 +1,155 @@
+{
+ "rows": {
+  "nvs17": {
+   "off": {
+    "instance": "nvs17",
+    "flag": "0",
+    "engaged": false,
+    "sense": "min",
+    "wall": 39.43964908388443,
+    "status": "feasible",
+    "objective": -1100.4000000000003,
+    "bound": -1104.8319902490978,
+    "node_count": 67,
+    "binding_called": false,
+    "native_status": null,
+    "native_time_s": 0.0
+   },
+   "on": {
+    "instance": "nvs17",
+    "flag": "1",
+    "engaged": true,
+    "sense": "min",
+    "wall": 24.62075095786713,
+    "status": "optimal",
+    "objective": -1100.4,
+    "bound": -1100.4000000000015,
+    "node_count": 60405,
+    "binding_called": true,
+    "native_status": "optimal",
+    "native_time_s": 15.693571000127122,
+    "incumbent_feasible": true,
+    "verified_obj": -1100.4000000000003
+   }
+  },
+  "nvs19": {
+   "off": {
+    "instance": "nvs19",
+    "flag": "0",
+    "engaged": false,
+    "sense": "min",
+    "wall": 41.51790820900351,
+    "status": "feasible",
+    "objective": -1097.6,
+    "bound": -1103.8403736117978,
+    "node_count": 17,
+    "binding_called": false,
+    "native_status": null,
+    "native_time_s": 0.0
+   },
+   "on": {
+    "instance": "nvs19",
+    "flag": "1",
+    "engaged": true,
+    "sense": "min",
+    "wall": 39.6866813339293,
+    "status": "time_limit",
+    "objective": -298.4,
+    "bound": -2142.0571428571516,
+    "node_count": 36367,
+    "binding_called": true,
+    "native_status": "time_limit",
+    "native_time_s": 26.658065708121285
+   }
+  },
+  "nvs24": {
+   "off": {
+    "instance": "nvs24",
+    "flag": "0",
+    "engaged": false,
+    "sense": "min",
+    "wall": 72.74421724979766,
+    "status": "time_limit",
+    "objective": null,
+    "bound": -5045.357782517491,
+    "node_count": 5212,
+    "binding_called": false,
+    "native_status": null,
+    "native_time_s": 0.0
+   },
+   "on": {
+    "instance": "nvs24",
+    "flag": "1",
+    "engaged": true,
+    "sense": "min",
+    "wall": 39.64931104099378,
+    "status": "time_limit",
+    "objective": -292.6,
+    "bound": -104540.90344828146,
+    "node_count": 12022,
+    "binding_called": true,
+    "native_status": "time_limit",
+    "native_time_s": 26.583083084085956
+   }
+  },
+  "tanksize": {
+   "off": {
+    "instance": "tanksize",
+    "flag": "0",
+    "engaged": false,
+    "sense": "min",
+    "wall": 60.354482292197645,
+    "status": "feasible",
+    "objective": 1.2686437614652872,
+    "bound": 1.2360103837760203,
+    "node_count": 393,
+    "binding_called": false,
+    "native_status": null,
+    "native_time_s": 0.0
+   },
+   "on": {
+    "instance": "tanksize",
+    "flag": "1",
+    "engaged": true,
+    "sense": "min",
+    "wall": 17.39113925001584,
+    "status": "optimal",
+    "objective": 1.2686437525577947,
+    "bound": 1.2685440897016123,
+    "node_count": 11451,
+    "binding_called": true,
+    "native_status": "optimal",
+    "native_time_s": 14.734157915925607,
+    "incumbent_feasible": true,
+    "verified_obj": 1.2686437525577947
+   }
+  }
+ },
+ "verdict": {
+  "cert_clean": true,
+  "cert_violations": [],
+  "quality_clean": false,
+  "quality_violations": [
+   "nvs19: INCUMBENT WORSE under ON \u2014 OFF=-1097.6 (feasible) vs ON=-298.4 (time_limit) [vs reference -1098.4: OFF 0.1% off, ON 72.8% off]"
+  ],
+  "net_positive": false,
+  "engaged": [
+   "nvs17",
+   "nvs19",
+   "nvs24",
+   "tanksize"
+  ],
+  "helped": [
+   "nvs17",
+   "tanksize"
+  ],
+  "median_nonengaged_wall_delta_s": 0.0,
+  "overhead_ok": true,
+  "errored": [],
+  "no_oracle_instances": [],
+  "oracle_total": 4,
+  "oracle_covered": 4,
+  "n_nonengaged_measured": 0,
+  "graduate": false
+ }
+}

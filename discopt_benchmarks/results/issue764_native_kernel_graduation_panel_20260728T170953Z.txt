@@ -1,0 +1,19 @@
+# #764 native-kernel graduation panel — 20260728T170953Z
+# corpus: 4 instances, budget 60s, OFF vs ON, subprocess-isolated. Reference optima: 980 entries.
+
+## VERDICT
+quality-clean  : FAIL (1 incumbent-quality regressions)
+    - nvs19: INCUMBENT WORSE under ON — OFF=-1097.6 (feasible) vs ON=-298.4 (time_limit) [vs reference -1098.4: OFF 0.1% off, ON 72.8% off]
+  cert-clean   : PASS (0 violation(s); oracle-checked 4/4 instances = 100%, 0 unchecked)
+  net-positive : FAIL (engaged=4, helped=2, median non-engaged wall Δ=+0.000s over 0 instances, overhead_ok=True)
+  GRADUATE     : NO — keep opt-in
+
+## ENGAGED instances (4): nvs17, nvs19, nvs24, tanksize
+## HELPED  (engaged, ON optimal where OFF was not) (2): nvs17, tanksize
+
+## PER-INSTANCE (engaged rows first)
+  instance             OFF status   ON status    eng         objOFF          objON        boundON    wOFF     wON
+  nvs17                feasible     optimal      Y   -1100.40000000        -1100.4 -1100.40000000    39.4    24.6
+  nvs19                feasible     time_limit   Y          -1097.6         -298.4 -2142.05714285    41.5    39.7
+  nvs24                time_limit   time_limit   Y             None         -292.6 -104540.903448    72.7    39.6
+  tanksize             feasible     optimal      Y   1.268643761465 1.268643752557 1.268544089701    60.4    17.4
