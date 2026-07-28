@@ -14,14 +14,34 @@ plan task (or one T5 sub-task) per iteration, end to end:
    the repo itself: the "## Progress ledger" section at the bottom of the plan
    doc (create it on the first iteration), merged/open PRs (`gh pr list
    --state all --search "861"`), and the latest admission-sweep results in
-   `discopt_benchmarks/results/`. If an iteration before you left a PR open,
-   your job this iteration is to finish it: check CI (`gh pr checks`), fix
-   failures, merge it with `gh pr merge --merge`, verify the linked issue state
-   afterwards, and update the ledger. Never start a new task while the previous
-   task's PR is unmerged.
+   `discopt_benchmarks/results/`.
 2. **Pick the next unstarted task** in plan order (T1, T2, T3, T4, T5a, T5b,
    T5c, T6, T7). Re-read the task's entry in §5 plus the design section (§2)
    and evidence (§1) it references.
+
+   **Do not wait on CI or on a merge to start the next task** (owner decision,
+   2026-07-28 — three consecutive iterations were spent idling on ~20-minute CI
+   cycles). Concretely:
+   - Merge a finished PR with `gh pr merge --merge --auto` and move on in the
+     same iteration. Do not block on the full CI matrix; the *local* gates below
+     are what you actually rely on.
+   - If a previous PR is still open when you start, branch the next task **off
+     that PR's branch** (stacked) rather than off `main`, and target the PR's
+     branch in `--base`. Rebase onto `main` once the parent merges.
+   - Still check back on any PR you left open: if its CI went red, fixing it is
+     the *first* thing you do in the iteration that notices, before continuing
+     the new task.
+
+   **This relaxes PROCESS gates only, never CORRECTNESS gates.** The §4 gates
+   stay mandatory and stay *local* (they are what makes an admission widening
+   safe): the admission sweep with `--baseline`, the node-parity panel on newly
+   admitted instances, the oracle check, and — the lesson from T3 — CI's exact
+   fast marker selection run locally before pushing:
+   `pytest python/tests/ -m "not slow and not correctness and not integration and
+   not amp_benchmark and not requires_cyipopt and not memory_heavy"
+   --ignore=python/tests/test_correctness.py --ignore=python/tests/test_amp.py`.
+   Never merge a PR whose local gates you have not run, and never merge one whose
+   CI has actually gone red.
 3. **Run the task's entry experiment first** if the plan marks it as not yet
    executed, or if `python/discopt/_jax/incremental_mccormick.py`,
    `python/discopt/_jax/uniform_relax.py`, or

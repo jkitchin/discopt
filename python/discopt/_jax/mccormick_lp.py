@@ -556,6 +556,13 @@ class MccormickLPRelaxer:
                 # inherits; and by skipping the fast path during pool capture
                 # (``out_cuts``) so the pool actually separates. Bound-changing
                 # behaviour is verified by the differential-neutrality check.
+                # No ``box=`` here, deliberately: this relaxer is constructed before
+                # it knows which box the caller will branch in, so the structure
+                # anchors its probe/validation boxes to the model's own bounds
+                # (#861's default). ``lp_spatial_bb`` DOES have a post-OBBT root box
+                # and passes it. Handing this call site a guessed box would be worse
+                # than the default — the boxes must be reachable, and only the caller
+                # knows what it tightened.
                 _inc = IncrementalMcCormickLP(model, self._terms)
                 if _inc.ok:
                     self._inc = _inc

@@ -550,7 +550,14 @@ def solve_lp_spatial_bb(
     if _ambient is not None and float(_ambient) > t0:
         _own_deadline = min(_own_deadline, float(_ambient))
 
-    _inc = IncrementalMcCormickLP(model, terms, deadline=_own_deadline)
+    # Pass the ROOT box this engine will actually branch in — post-FBBT/OBBT, not the
+    # model's declared bounds. The structure's probe box and ``_validate``'s comparison
+    # boxes are generated inside it (#861), so anchoring them here is what makes them
+    # reachable; and for a model whose declared box is unbounded (ex1233: 28 infinite
+    # bounds) or whose raw-box relaxation has no valid objective bound (st_e04), it is
+    # the difference between a structure that can be judged at all and one that fails
+    # at the probe build.
+    _inc = IncrementalMcCormickLP(model, terms, deadline=_own_deadline, box=(lb0, ub0))
     # The incremental patch writes closed-form envelope coefficients straight from the
     # box endpoints, so an infinite bound on a column it patches would inject
     # ``inf``/``nan`` into the node LP with no row-level guard to catch it (the cold

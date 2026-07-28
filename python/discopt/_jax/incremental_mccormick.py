@@ -269,7 +269,7 @@ def _affine_square_aux_bounds(coeff, const, li, ui):
 class IncrementalMcCormickLP:
     """Build the McCormick LP structure once; patch box-dependent rows per node."""
 
-    def __init__(self, model, terms, deadline=None):
+    def __init__(self, model, terms, deadline=None, box=None):
         """``deadline`` — absolute ``time.perf_counter()`` budget for construction.
 
         Overrides the ambient ``model._solve_deadline`` stash. Pass it whenever the
@@ -277,10 +277,29 @@ class IncrementalMcCormickLP:
         ``_solve_deadline`` is written once per ``solve_model`` call and never
         cleared, so a *later* in-process consumer reads an already-expired deadline
         and silently declines to build (#844).
+
+        ``box`` — the caller's ROOT box ``(lb, ub)`` over the original columns,
+        normally the *presolved* one (post-FBBT/OBBT). Both the probe box and the
+        validation boxes are generated inside it (#861), so they describe boxes the
+        B&B tree can actually reach. Defaults to the model's declared bounds.
+
+        Passing the presolved box matters for two reasons beyond realism. A model
+        whose declared box is unbounded (``ex1233``: 28 infinite bounds) or whose
+        raw-box relaxation has no valid objective bound (``st_e04``) cannot be
+        judged at all from the declared bounds — the structure build fails before
+        anything can be compared. And a tightened box is the one the tree actually
+        branches in, so anchoring to it makes ``_validate``'s comparison boxes
+        reachable rather than hypothetical.
         """
         self.ok = False
         self.model = model
         self.terms = terms
+        self._box = None
+        if box is not None:
+            _blb = np.asarray(box[0], dtype=np.float64).ravel()
+            _bub = np.asarray(box[1], dtype=np.float64).ravel()
+            if _blb.size == _bub.size == len(model._variables):
+                self._box = (_blb.copy(), _bub.copy())
         # Why this structure declined, or ``None`` when it was admitted (#861). The
         # reason used to exist ONLY as the ``logger.debug`` line below, so a caller
         # measuring coverage had to scrape a log to learn anything — and
@@ -350,6 +369,87 @@ class IncrementalMcCormickLP:
         c = np.asarray(relax._c, dtype=np.float64).ravel()
         return A, b, bnds, c, info, relax
 
+    def _root_box(self):
+        """The root box every probe/validation box is generated inside: the caller's
+        (presolved) ``box`` when given, else the model's declared bounds."""
+        if self._box is not None:
+            return self._box[0].copy(), self._box[1].copy()
+        return (
+            np.array([float(np.min(v.lb)) for v in self.model._variables]),
+            np.array([float(np.max(v.ub)) for v in self.model._variables]),
+        )
+
+    @staticmethod
+    def _finite_root_interval(rl, ru, i):
+        """``(lo, hi)`` finite stand-in for a root interval with an infinite end.
+
+        The probe box needs finite, distinct, sign-matched endpoints to expose each
+        product's row support; an infinite endpoint cannot serve. Substitute a finite
+        window ANCHORED at the finite end (so the probe still sits inside the reachable
+        region on that side) and fall back to the historical synthetic magnitudes only
+        when BOTH ends are infinite. This is a structure-identification device, not a
+        bound: the layout it reveals is box-independent, and ``_validate`` re-checks
+        every row against a cold build on the real boxes."""
+        lo_inf, hi_inf = not math.isfinite(rl), not math.isfinite(ru)
+        if lo_inf and hi_inf:
+            return 1.0, 7.0 + i
+        if lo_inf:
+            return ru - (8.0 + i), ru
+        if hi_inf:
+            return rl, rl + (8.0 + i)
+        return rl, ru
+
+    def _probe_box(self):
+        """The box the STRUCTURE is identified on — now generated inside the root box.
+
+        Requirements, unchanged: strictly *sign-matched* to each variable's root sign
+        regime (so the cached convex/concave power rows match the cold build's regime)
+        and with distinct endpoints so every McCormick coefficient is nonzero and a
+        product's row support reveals ``{factors, aux}`` cleanly.
+
+        What changed (#861): the endpoints are now interior points of the model's real
+        root interval instead of the synthetic ``[1, 7+k]`` / ``[-(7+k), -1]``. The
+        synthetic box is frequently UNREACHABLE — on ``gear`` the root box is
+        ``[12,60]^4`` and the probe ran on ``[1,7+k]``, where the engine takes a
+        different decomposition route for the ratio ``x0*x1/(x2*x3)`` (log/reciprocal
+        columns), so the structure was built over a 15-column layout while every real
+        node builds 10 and ``_validate`` reported a ``column-count mismatch``. That was
+        the single largest decline bucket after the row-classifier fix.
+
+        The inset keeps the probe strictly interior (no endpoint sits exactly on a root
+        bound, and no coordinate is 0) so coefficients stay nonzero; a degenerate root
+        interval (``lb == ub``, an already-fixed variable) is passed through as the
+        point it is."""
+        root_lb, root_ub = self._root_box()
+        n = root_lb.size
+        lb_p = np.empty(n)
+        ub_p = np.empty(n)
+        for k in range(n):
+            rl, ru = self._finite_root_interval(float(root_lb[k]), float(root_ub[k]), k)
+            if not (ru > rl):  # pinned at the root — nothing to probe with
+                lb_p[k] = ub_p[k] = rl
+                continue
+            w = ru - rl
+            # Distinct per-variable insets keep the endpoints from lining up across
+            # variables (which would make two products' rows numerically identical and
+            # ambiguous to the row matcher).
+            lo = rl + (0.11 + 0.017 * (k % 7)) * w
+            hi = ru - (0.13 + 0.013 * (k % 5)) * w
+            if not (hi > lo):  # very narrow interval: fall back to the raw endpoints
+                lo, hi = rl, ru
+            # Keep the probe sign-matched to the ROOT regime. A spanning root gets the
+            # positive side (matching the historical probe, which used a positive box
+            # for every non-negative-definite variable) so an even power's cached rows
+            # are built in the same regime the cold build uses there.
+            if self._root_sign[k] < 0:
+                hi = min(hi, -_TOL * (1.0 + abs(hi)))
+                lo = min(lo, hi - 1e-6 * (1.0 + abs(hi)))
+            else:
+                lo = max(lo, _TOL * (1.0 + abs(lo)))
+                hi = max(hi, lo + 1e-6 * (1.0 + abs(lo)))
+            lb_p[k], ub_p[k] = lo, hi
+        return lb_p, ub_p
+
     def _build_structure(self):
         n = len(self.model._variables)
         # Per-variable ROOT sign regime (cert:T1.2). ``+1`` = ``lb>=0``, ``-1`` =
@@ -361,19 +461,10 @@ class IncrementalMcCormickLP:
         # cannot express, so those stay unmappable (#861). An EVEN power is convex on
         # all of R, so its envelope is the same 4 rows in every regime and it is
         # mapped regardless of root sign.
-        root_lb = np.array([float(np.min(v.lb)) for v in self.model._variables])
-        root_ub = np.array([float(np.max(v.ub)) for v in self.model._variables])
+        root_lb, root_ub = self._root_box()
         self._root_sign = np.where(root_lb >= 0.0, 1, np.where(root_ub <= 0.0, -1, 0))
-        # probe box: distinct, strictly *sign-matched* bounds so every McCormick
-        # coefficient is nonzero (row support reveals {factors, aux} cleanly) and
-        # the cached convex/concave power rows match the cold build's regime.
-        lb_p = np.empty(n)
-        ub_p = np.empty(n)
-        for k in range(n):
-            if self._root_sign[k] < 0:
-                lb_p[k], ub_p[k] = -(7.0 + k), -1.0
-            else:
-                lb_p[k], ub_p[k] = 1.0, 7.0 + k
+        lb_p, ub_p = self._probe_box()
+        self._probe_lb, self._probe_ub = lb_p, ub_p
         A, b, bnds, c, info, _relax_probe = self._full_build(lb_p, ub_p)  # A is CSR (sparse)
         # Decline only genuinely huge structures — now measured by NONZEROS (the
         # sparse footprint), not dense cells. qap's lift is ~172k nnz (trivial);
@@ -778,42 +869,69 @@ class IncrementalMcCormickLP:
         never exercised (C-21). Since #861 those same boxes are what proves an
         even-power envelope on a straddling box reproduces the cold build: the
         ``span``/``span_wide`` trials put ``lb<0<ub`` on every spanning var.
+
+        Since #861 every interval is generated INSIDE the model's real root box
+        rather than at synthetic absolute magnitudes. The old set used fixed
+        magnitudes (``[0.5+0.3i, …]``, and ``lb=0`` on even trials) which for most
+        models are *not reachable*: on ``gear``, whose root box is ``[12,60]^4``, it
+        compared against boxes with ``lb=0``. Anchoring makes ``_validate`` compare
+        the patch against the cold build on boxes the tree can actually branch into
+        — which is the whole point of the check — and it is what lets a model whose
+        decomposition route depends on its bounds (a ratio's log-space route needs
+        strictly positive operands) be validated at all.
+
+        Measured when this changed: **36 admitted before, 36 after, 0 flips** — no
+        currently-admitted model relied on an unreachable comparison box, so no
+        latent patch/cold divergence was hiding behind one.
         """
         # Per trial, ``kind`` says how each spanning var sits relative to zero;
         # sign-definite vars follow their root sign with a varying width/offset.
         kinds = ["shift_pos", "zero_lb", "span", "neg", "span_wide", "degen"]
+        root_lb, root_ub = self._root_box()
         boxes = []
         for t, kind in enumerate(kinds):
-            w = 2.0 + (t % 3)
             lo = np.empty(self.n)
             hi = np.empty(self.n)
             for i in range(self.n):
-                if self._root_sign[i] < 0:
-                    # Negative-definite root: stay ub<=0 (reachable sub-box).
-                    hi[i] = -0.5 - 0.3 * i
-                    lo[i] = hi[i] - w
-                elif self._root_sign[i] > 0:
-                    # Positive-definite root: stay lb>=0 (reachable sub-box). Even
-                    # trials touch the lb==0 boundary.
-                    lo[i] = (0.5 + 0.3 * i) if (t % 2) else 0.0
-                    hi[i] = lo[i] + w
-                else:
-                    # Spanning root: exercise the negative / zero-spanning regimes
-                    # that real nodes reach and the old validation set never did.
-                    off = 0.2 * i
-                    if kind == "shift_pos":
-                        lo[i], hi[i] = 0.5 + off, 0.5 + off + w
-                    elif kind == "zero_lb":
-                        lo[i], hi[i] = 0.0, w
-                    elif kind == "span":
-                        lo[i], hi[i] = -(1.0 + off), 1.0 + off
-                    elif kind == "neg":
-                        hi[i] = -0.5 - off
-                        lo[i] = hi[i] - w
-                    elif kind == "span_wide":
-                        lo[i], hi[i] = -(2.0 + off + w), 1.5 + off
-                    else:  # degen
-                        lo[i] = hi[i] = -0.5 - off
+                rl, ru = self._finite_root_interval(float(root_lb[i]), float(root_ub[i]), i)
+                w = ru - rl
+                if w <= 0.0:  # pinned at the root: the only reachable box is the point
+                    lo[i] = hi[i] = rl
+                    continue
+                if self._root_sign[i] != 0:
+                    # Sign-definite root: every sub-box keeps that sign automatically,
+                    # so vary WHERE in the root interval the box sits — full width,
+                    # lb-touching, interior, ub-touching — rather than its sign. No
+                    # degenerate trial: pinning a sign-definite var is outside the
+                    # scope these envelopes are validated for (see :meth:`_rowset` on
+                    # the pinned-box vacuity rule, which covers integer branching).
+                    frac = [
+                        (0.0, 1.0),
+                        (0.0, 0.5),
+                        (0.25, 0.75),
+                        (0.5, 1.0),
+                        (0.05 * (1 + i % 3), 0.95),
+                        (0.4, 1.0),
+                    ][t]
+                    lo[i], hi[i] = rl + frac[0] * w, rl + frac[1] * w
+                    continue
+                # Spanning root (rl < 0 < ru): drive the negative / zero-spanning /
+                # pinned regimes real nodes reach, all INSIDE [rl, ru].
+                neg, pos = -rl, ru  # both > 0 here
+                if kind == "shift_pos":
+                    lo[i], hi[i] = 0.1 * pos, pos
+                elif kind == "zero_lb":
+                    lo[i], hi[i] = 0.0, 0.7 * pos
+                elif kind == "span":
+                    lo[i], hi[i] = -0.5 * neg, 0.5 * pos
+                elif kind == "neg":
+                    lo[i], hi[i] = rl, -0.1 * neg
+                elif kind == "span_wide":
+                    lo[i], hi[i] = rl, ru
+                else:  # degen — a spanning var pinned by branching
+                    lo[i] = hi[i] = -0.25 * neg
+                if hi[i] < lo[i]:  # degenerate slice of a very narrow root interval
+                    lo[i] = hi[i] = 0.5 * (rl + ru)
             boxes.append((lo, hi))
         return boxes
 

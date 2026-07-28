@@ -1,0 +1,106 @@
+{
+  "_README": [
+    "Reference optima for in-repo corpus instances that have NO entry in MINLPLib's",
+    "minlplib.solu snapshot (~/Dropbox/projects/discopt-minlp-benchmark/minlplib.solu).",
+    "",
+    "Only 2 of the 81 instances in python/tests/data/minlplib/ are missing from that",
+    "file: st_e17 and meanvar. Before this file existed, a probe that wanted to check",
+    "them had nothing to read -- and during issue #861 that led to an oracle value",
+    "being INVENTED for st_e17 (1.0), which produced a spurious 'false optimum /",
+    "bound above optimum' report against discopt's correct answer of 376.2919. The",
+    "fix is not to be more careful when typing numbers; it is to have the number on",
+    "disk with its provenance. Never hand-type a reference optimum.",
+    "",
+    "Each value below was established by running INDEPENDENT external global solvers",
+    "on the exact .nl file in this repository, not copied from a paper or a memory.",
+    "Reproduce with the commands in each entry's 'reproduce' field.",
+    "",
+    "Consumed by discopt_benchmarks/scripts/incremental_oracle_check.py, which merges",
+    "these entries with minlplib.solu (minlplib.solu wins on any overlap, so this file",
+    "can never override an upstream reference)."
+  ],
+  "instances": {
+    "st_e17": {
+      "value": 376.291905403861,
+      "marker": "opt",
+      "sense": "minimize",
+      "established": "2026-07-28",
+      "solvers": {
+        "scip": {
+          "version": "homebrew /opt/homebrew/bin/scip",
+          "objective": 376.291905403861,
+          "dual_bound": 376.291905403861,
+          "gap": 0.0,
+          "status": "optimal solution found",
+          "nodes": 1,
+          "solution": {"x0": 8.16961144386222, "x1": 7.56140716412845}
+        },
+        "baron": {
+          "version": "GAMS 53 Resources/baron",
+          "objective": 376.2919,
+          "model_status": "1 Optimal",
+          "solver_status": "1 Normal Completion",
+          "solution": {"x0": 8.17, "x1": 7.5607}
+        },
+        "couenne": {
+          "version": "/Applications/AMPL/couenne",
+          "status": "Optimal",
+          "cutoff": 376.28840798,
+          "lower_bound": 376.288,
+          "note": "looser default gap tolerance; consistent with SCIP/BARON"
+        }
+      },
+      "discopt": {
+        "objective": 376.2919323217,
+        "bound": 376.2918929614,
+        "status": "optimal",
+        "verdict": "CORRECT - agrees with SCIP/BARON to ~7 significant figures"
+      },
+      "reproduce": [
+        "scip -c \"read st_e17.nl optimize display solution quit\"",
+        "gams st_e17.gms  (NLP=baron, optcr=0, optca=0; model transcribed from the .nl:",
+        "  min 29.4*x0 + 18*x1  s.t.  6 - (x0 - 0.2458*sqr(x0)/x1) <= 0,",
+        "  x0 in [0, 115.8], x1 in [1e-5, 30])",
+        "couenne st_e17.nl"
+      ]
+    },
+    "meanvar": {
+      "value": 5.24339865067014,
+      "marker": "opt",
+      "sense": "minimize",
+      "established": "2026-07-28",
+      "solvers": {
+        "scip": {
+          "version": "homebrew /opt/homebrew/bin/scip",
+          "objective": 5.24339865067014,
+          "dual_bound": 5.24339865067014,
+          "gap": 0.0,
+          "status": "optimal solution found",
+          "nodes": 1
+        },
+        "couenne": {
+          "version": "/Applications/AMPL/couenne",
+          "status": "Optimal",
+          "lower_bound": 5.2434,
+          "upper_bound": 5.2434,
+          "gap": 0.0,
+          "nodes": 338
+        },
+        "baron": {
+          "status": "NOT RUN",
+          "why": "the GAMS BARON binary does not read .nl, and this model's objective is a dense 8-variable quadratic form; hand-transcribing it to GAMS is exactly the error class this file exists to prevent. Two independent global solvers (SCIP, Couenne) agree to 6 significant figures at a 0% gap, and the model is a convex mean-variance QP, where a local optimum is global."
+        }
+      },
+      "discopt": {
+        "objective": 5.2433990152,
+        "bound": 5.2433990152,
+        "status": "optimal",
+        "verdict": "CORRECT - agrees with SCIP/Couenne to ~7 significant figures (3.6e-7 absolute, 7e-8 relative)"
+      },
+      "reproduce": [
+        "scip -c \"read meanvar.nl optimize display solution quit\"",
+        "couenne meanvar.nl"
+      ]
+    }
+  }
+}
