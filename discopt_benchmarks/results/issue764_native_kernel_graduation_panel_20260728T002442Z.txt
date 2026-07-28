@@ -1,0 +1,82 @@
+# #764 native-kernel graduation panel — 20260728T002442Z
+# corpus: 66 instances, budget 60s, OFF vs ON, subprocess-isolated. Reference optima: 37 entries.
+
+## VERDICT
+  cert-clean   : PASS (0 violation(s))
+  net-positive : PASS (engaged=4, helped=1, median non-engaged wall Δ=-0.015s over 62 instances, overhead_ok=True)
+  GRADUATE     : YES — flip default ON
+
+## ENGAGED instances (4): dispatch, nvs13, st_e13, tanksize
+## HELPED  (engaged, ON optimal where OFF was not) (1): tanksize
+
+## NO REFERENCE OPTIMUM (oracle check skipped) (35):
+  4stufen, bchoco06, bchoco07, bchoco08, beuster, casctanks, clay0303hfsg, contvar, cvxnonsep_nsig30, cvxnonsep_psig30, cvxnonsep_psig40r, ex1224, ex1225, ex14_1_9, fac2, flay02m, flay03m, gkocis, hda, heatexch_gen1, heatexch_gen2, heatexch_gen3, m3, nvs21, st_e11, st_e29, st_miqp5, st_testgr3, syn05hfsg, tanksize, tls2, tspn05, tspn08, tspn10, tspn12
+
+## PER-INSTANCE (engaged rows first)
+  instance             OFF status   ON status    eng         objOFF          objON        boundON    wOFF     wON
+  dispatch             optimal      optimal      Y   3155.287926698 3155.287926685 3155.287861536     0.9     0.7
+  nvs13                optimal      optimal      Y           -585.2 -585.200000000 -585.200000000     3.7     2.6
+  st_e13               optimal      optimal      Y   2.000000346335 1.999999982518 1.999999982518     0.6     0.5
+  tanksize             feasible     optimal      Y   1.268643761465 1.268643752557 1.268544089701    60.3    17.3
+  4stufen              time_limit   time_limit   .             None           None 21601.18397827    64.5    63.3
+  alan                 optimal      optimal      .   2.924999998301 2.924999998301 2.924999998301     0.2     0.2
+  bchoco06             time_limit   time_limit   .             None           None            1.0    61.7    61.5
+  bchoco07             time_limit   time_limit   .             None           None 1.000000000000    61.9    68.0
+  bchoco08             time_limit   time_limit   .             None           None 1.000000000003    71.7    68.3
+  beuster              time_limit   time_limit   .             None           None 6395.108328043    63.0    61.7
+  casctanks            time_limit   time_limit   .             None           None 2.957123312001    65.8    63.1
+  chance               optimal      optimal      .   29.89437815427 29.89437815427 29.89437815427     0.6     0.5
+  clay0303hfsg         optimal      optimal      .   26669.10955143 26669.10955143 26669.10951357    34.0    33.7
+  contvar              feasible     feasible     .   809149.8119727 809149.8116985 183632.7659824    61.3    62.7
+  cvxnonsep_nsig30     optimal      optimal      .   130.6287111692 130.6287111692 130.6184139248     2.5     2.2
+  cvxnonsep_psig30     optimal      optimal      .   78.99885435294 78.99885435294 78.99179874365     1.1     1.0
+  cvxnonsep_psig40r    optimal      optimal      .   86.54527995164 86.54527995164 86.53873600363     2.9     2.8
+  ex1221               optimal      optimal      .   7.667180068813 7.667180068813 7.667180068813     0.8     0.8
+  ex1222               optimal      optimal      .   1.076543083332 1.076543083332 1.076543046303     0.6     0.6
+  ex1224               optimal      optimal      .   -0.94347049428 -0.94347049428 -0.94347050000     1.8     1.8
+  ex1225               optimal      optimal      .   30.99999991355 30.99999991355 30.99999991355     1.2     1.1
+  ex1226               optimal      optimal      .   -17.0000000038 -17.0000000038 -17.0000000038     0.6     0.6
+  ex14_1_9             optimal      optimal      .   -1.97752205405 -1.97752205405 -1.97752205405     0.5     0.5
+  fac2                 optimal      optimal      .   331837497.8394 331837497.8394 331837497.5456     4.1     4.2
+  flay02m              optimal      optimal      .   37.94733186383 37.94733186383 37.94733180456     0.7     0.6
+  flay03m              optimal      optimal      .   48.98979479383 48.98979479383 48.98979470823     6.5     8.4
+  gbd                  optimal      optimal      .   2.199999982504 2.199999982504 2.199999982504     0.2     0.2
+  gkocis               optimal      optimal      .   -1.92309877987 -1.92309877987 -1.92309882809     1.4     1.4
+  hda                  time_limit   time_limit   .             None           None -64473.4424016    73.3    80.1
+  heatexch_gen1        time_limit   feasible     .             None 167545.2411284 95491.07142842    70.4    61.3
+  heatexch_gen2        feasible     feasible     .   824551.3266797 824551.3266797 558512.8882203    62.9    61.3
+  heatexch_gen3        time_limit   time_limit   .             None           None           None    61.8    61.2
+  m3                   optimal      optimal      .   37.79999966997 37.79999966997 37.79999951039     3.3     3.6
+  nvs01                optimal      optimal      .   12.46966882156 12.46966882156 12.46966882156     1.6     1.4
+  nvs02                optimal      optimal      .    5.96418452307  5.96418452307  5.96418452307     1.1     0.9
+  nvs03                optimal      optimal      .             16.0           16.0 15.99999972676     0.7     0.7
+  nvs04                optimal      optimal      .   0.720000000000 0.720000000000 0.719999999999     0.7     0.8
+  nvs05                optimal      optimal      .   5.470934126405 5.470934126405 5.470650231139    44.3    55.2
+  nvs06                optimal      optimal      .        1.7703125      1.7703125 1.770312499999     2.6     1.7
+  nvs07                optimal      optimal      .              4.0            4.0            4.0     0.5     0.6
+  nvs08                optimal      optimal      .   23.44972734713 23.44972734713 23.44972734516     2.6     2.0
+  nvs09                optimal      optimal      .   -43.1343369180 -43.1343369180 -43.1343369180     4.9     5.7
+  nvs10                optimal      optimal      .   -310.799999999 -310.799999999 -310.799999999     0.6     0.5
+  nvs11                optimal      optimal      .   -431.000000000 -431.000000000 -431.000000000     0.7     0.7
+  nvs12                optimal      optimal      .   -481.200000000 -481.200000000 -481.200000000     1.3     1.3
+  nvs14                optimal      optimal      .   -40358.1547692 -40358.1547692 -40358.1547692     1.1     1.0
+  nvs15                optimal      optimal      .              1.0            1.0            1.0     0.1     0.1
+  nvs21                optimal      optimal      .   -5.68478262802 -5.68478262802 -5.68478262802     4.1     3.1
+  oaer                 optimal      optimal      .   -1.92309849988 -1.92309849988 -1.92309860113     1.0     0.9
+  st_e11               optimal      optimal      .   189.3116297413 189.3116297413 189.3116296866     1.6     1.6
+  st_e29               optimal      optimal      .   -0.94347049428 -0.94347049428 -0.94347050000     1.8     1.8
+  st_e36               optimal      optimal      .   -245.999999999 -245.999999999 -246.000000001     3.8     3.5
+  st_e38               optimal      optimal      .   7197.727116826 7197.727116826 7197.727116826     0.7     0.7
+  st_miqp1             optimal      optimal      .   280.9999999906 280.9999999906 280.9999999906     0.1     0.1
+  st_miqp2             optimal      optimal      .              2.0            2.0            2.0     0.1     0.2
+  st_miqp3             optimal      optimal      .             -6.0           -6.0           -6.0     0.2     0.1
+  st_miqp4             optimal      optimal      .   -4574.00000442 -4574.00000442 -4574.00000442     0.1     0.1
+  st_miqp5             optimal      optimal      .   -333.888890248 -333.888890248 -333.888890248     0.2     0.1
+  st_test1             optimal      optimal      .   -1.64959944906 -1.64959944906 -1.64959944906     0.2     0.2
+  st_testgr3           optimal      optimal      .           -20.59         -20.59 -20.5907070979     0.2     0.2
+  syn05hfsg            optimal      optimal      .   837.7324123911 837.7324123911 837.7324123911     6.4     5.5
+  tls2                 optimal      optimal      .   5.299999922109 5.299999922109            5.3    35.1    35.3
+  tspn05               optimal      optimal      .   191.2552076849 191.2552076849 191.2551062252    10.2     9.7
+  tspn08               feasible     feasible     .   290.5668537473 290.5668537473           None     9.7     9.7
+  tspn10               feasible     feasible     .   225.1260713973 225.1260713973           None    10.8    10.4
+  tspn12               feasible     feasible     .   262.6473952506 262.6473952506           None     8.0     8.0
