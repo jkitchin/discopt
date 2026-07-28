@@ -202,6 +202,83 @@ variable bound by 1.60e-6 on the pristine model, bit-identical in both arms, whi
 panel's `FEAS_TOL = 1e-5` (`substitute_diff_panel.py:33`) hides — that tolerance is looser
 than the repo's abs=1e-6 and should be tightened.
 
+**G-G.2. ENTRY EXPERIMENT for the LP feasibility pump (2026-07-27) — the pump already
+exists; what blocks it is upstream of any pump.** Run before writing any code, per §4 and
+the #727 RLT lesson. Harness `discopt_benchmarks/scripts/issue844_fp_entry.py`, corpus
+resolved through `utils/corpus.py` (mirror, not synced), panel = vendored
+`config/baron_global50.txt` (50) + the three §G-G targets = **53 instances**, sense read
+per model (0 MAXIMIZE in this panel). 207 root probes + 106 solve probes + 35 engine
+probes executed; harness exits non-zero at zero.
+
+*Q1 — what exists.* Three FP-shaped constructors, read from source:
+
+| where | kind | reachable on the default nonconvex path? |
+|---|---|---|
+| `_jax/primal_heuristics.py:341` `feasibility_pump` | round → **pin** integers → re-solve continuous NLP, ≤5 rounds, random ±1 perturbation | **yes** — root, `solver.py:9926` and `:12903`. Not a projection pump: it never changes the relaxation objective, so on an all-integer model it degenerates to round-and-check (#844's own wording, confirmed) |
+| `solvers/oa.py:1920` `_run_feasibility_pump` | MindtPy-style L1/L2 projection, MILP master + NLP projection + no-good cuts | no — OA/GDP route (convex MINLP, highspy) |
+| `_jax/lp_spatial_bb.py:802` `feasibility_pump` (closure) | **the real thing**: Fischetti-Glover-Lodi objective pump over the McCormick LP, cycle-breaking perturbation, exact verification; called at the root (`:904`) and at every node (`:992`) | **no, on the target class** — see Q2 |
+
+So #844's ask ("LP-based feasibility pump … over a tightened McCormick relaxation") is
+**built**. The task is reachability, not construction.
+
+*Q2 — is there a fractional LP point to pump?* Yes, broadly. Root McCormick LP (engine's
+own sequence: `classify_nonlinear_terms` → `flat_variable_bounds` → root OBBT when the box
+has an infinite endpoint → `_relax_bound`) solves on **50/53** (45 raw, 5 after OBBT;
+median 0.25 s, p90 0.28 s, max 56.5 s), fails on 3 (`fac2`, `hda`, `st_miqp3`). Of the 50,
+**35 carry ≥1 fractional integer coordinate** and 15 come back already integral. So the
+answer is *not* "upstream of the LP" — except on two of the five instances that matter:
+
+* `watercontamination0202`: **0 of 7** integer coordinates fractional at the root
+  (max_frac 0.0). There is nothing to pump. FP is definitively not its mechanism.
+* `hda`: no root LP at all.
+* `gastrans040` **12/48** fractional (root LP 0.27 s), `gastrans582_cold13` **57/250**
+  (30.9 s), `casctanks` **33/40** — these three are genuinely pumpable.
+
+*Q3 — today's primal, so "better" is a number.* Default path, subprocess-isolated, two
+budgets to bracket time-to-first-incumbent (an `incumbent_callback` was **not** used: it
+disables the native spatial kernel outright at `solver.py:570`, so a callback-instrumented
+timing measures a different code path):
+
+| budget | incumbent | optimal | scored vs `=opt=` | false primals | mean gap | worst gap |
+|---|---|---|---|---|---|---|
+| 10 s | 46/53 | 44 | 45 | **0** | 0.0083 | 0.3735 |
+| 60 s | 48/53 | 47 | 47 | **0** | **0.0000** | **0.0000** |
+
+First incumbent ≤10 s on 46, in (10,60] on 2 (`clay0303hfsg`, `tls2`), **never** on 5:
+`casctanks`, `gastrans040`, `gastrans582_cold13`, `hda`, `watercontamination0202`. Where
+discopt produces an incumbent at all it is already at the reference optimum — the primal
+gap is not a quality problem on this panel, it is a **binary existence problem on 5
+instances**.
+
+*The finding that decides the next step.* The FGL pump's first statement is
+`if not _inc.ok: return None` (`lp_spatial_bb.py:815`) — it is skipped entirely when
+`IncrementalMcCormickLP` does not build. Measured over the 35 pumpable instances, invoking
+the host engine exactly as the #844 fallback does (`modeling/core.py:4320`:
+`use_obbt=False, require_incremental=True`) but with `mixed=True`:
+
+* **27 of 35 declined** — including all three pumpable no-incumbent targets
+  (`gastrans040`, `gastrans582_cold13`, `casctanks`).
+* 8 ran; all 8 found an incumbent, 0 false primals.
+
+The cause is **not** the budget, **not** the infinite box, and **not** the #860 scope gate.
+Building `IncrementalMcCormickLP` directly and reading `.ok` with debug logging on:
+`gastrans040` → `ValueError: column-count mismatch` in 0.07 s; `casctanks` / `tls2` /
+`tanksize` / `gastrans582_cold13` → `ValueError: bounds mismatch` in ≤0.36 s. These are the
+patcher's **own `_validate` self-check** (`incremental_mccormick.py:759,765`): the
+closed-form per-node patch does not reproduce the full build on this class, so the
+structure declines — and with it the cuts and the pump.
+
+Confirmed end-to-end: with `require_incremental=False` the engine runs the cold path (pump
+a no-op) and still returns nothing — `gastrans040` 19 nodes / 21 s / no incumbent,
+`casctanks` 3 nodes / bound 5.65 / no incumbent, `gastrans582_cold13` declines outright.
+
+**Consequence: do not implement a second feasibility pump.** A new pump would sit behind
+the identical `_inc.ok` gate and be a no-op on exactly the instances it was written for —
+the #727 RLT failure mode, predicted in advance this time. The measured blocker is the
+incremental McCormick patch/validate path, which is upstream of every LP-reading primal
+constructor (pump, diving, and the root cut rounds alike). Scoping decision required before
+any build.
+
 **G-F. `no_bound` family (8/62) — relaxation strength on family D** (tls2/tspn-class,
 `baron-gap-plan.md` G5): the dual bound never moves, so no budget helps. Distinct from
 G-B (those have vacuous-but-moving bounds); untouched by everything shipped this month.
