@@ -129,8 +129,9 @@ and a dual bound **9.6x weaker**.
 
 ## §3 Workstreams
 
-Ordered by expected value at time of writing. Reorder freely as evidence lands —
-that is what makes this modular.
+Ordered by expected value. **Card C is the top card** — it carries the largest
+measured effect (a 3-order-of-magnitude NLP/node spread). Reorder freely as
+evidence lands; that is what makes this modular.
 
 ---
 
@@ -198,39 +199,83 @@ net-positive.
 
 ---
 
-### Card C — Node regime: what puts an instance in the fast loop?
+### Card C — Node regime: NLP-per-node is the dominant cost, and it is not admission
 
-> **Status:** **MEASUREMENT PENDING** — this card's evidence is being gathered as
-> of 2026-07-28. **Depends on:** nothing. **Blocks:** the priority order of A/B.
+> **Status:** OPEN — **evidence complete, this is the top card.**
+> **Depends on:** nothing. **Supersedes:** the "is admission the lever?" question.
 
-**Hypothesis.** discopt has two node regimes separated by ~100–1000x throughput,
-and which one an instance lands in dominates every other cost.
+**Finding.** discopt has two node regimes separated by ~100-800x throughput, and
+the separator is **how many NLP solves each node costs** — not relaxation
+building, and not incremental-McCormick admission.
 
-**Evidence (preliminary, single-machine, contended).**
+Measured 2026-07-28 (25 s limit, load avg 4.4-5.4; ratios are the load-robust
+quantities here):
 
-| instance | nodes | wall | solve_nlp calls | NLP share | regime |
+| instance | nodes | nodes/s | solve_nlp | **NLP/node** | admitted |
 |---|---|---|---|---|---|
-| nvs17 | 13,822 | 16.5 s | 83 (0.006/node) | 7% | **fast** (~838 nodes/s) |
-| nvs21 | 3 | 2.7 s | 60 (**20/node**) | 61% | **slow** (but solves optimal) |
-| hda | 3 | 81 s | 8 | 45% | **slow** (no primal) |
+| nvs17 | 13,555 | 798.6 | 82 | **0.01** | True |
+| nvs19 | 4,913 | 296.5 | 61 | **0.01** | True |
+| nvs24 | 1,353 | 81.0 | 33 | **0.02** | True |
+| util | 501 | 74.6 | 2 | **0.00** | False |
+| nvs20 | 105 | 12.3 | 33 | 0.31 | False |
+| kall_circles_c8a | 95 | 3.8 | 68 | 0.72 | False |
+| st_e35 | 31 | 1.2 | 43 | 1.39 | False |
+| ex1225 | 5 | 6.5 | 133 | **26.60** | False |
+| nvs01 | 3 | 3.5 | 69 | **23.00** | False |
+| nvs21 | 3 | 1.7 | 60 | **20.00** | False |
+| gear4 | 3 | 8.5 | 124 | **41.33** | False |
+| hda | 3 | 0.1 | 0 | 0.00 (root-bound) | False |
 
-**Entry experiment.** Across ~10 instances spanning both regimes, correlate
-node throughput against: incremental-McCormick admission, native-kernel
-handling, size, integrality, and problem class. **Answer from data which factor
-predicts the regime.**
+**The spread is three orders of magnitude: 0.01 vs 20-41 NLP solves per node.**
 
-**Kill criterion / why this card is honest.** I closed #861 and #896 concluding
-admission delivers ~1.0x — but that A/B ran **only on instances solving in under
-a second**. If admission gates the fast regime on *hard* instances, that
-conclusion was scoped too narrowly and **#896 should be reopened**. If admission
-does not correlate, the regime is set by something else and A/B keep their
-priority. Both answers are useful; a confident wrong one is not.
+**Admission correlates but does NOT cause.** All 3 admitted instances are fast
+and all 8 slow ones are declined (`admitted among FAST 3/4, among SLOW 0/8`) —
+a strong association. But two independent pieces of evidence say admission is a
+**marker**, not the mechanism:
 
-**Note against over-reading the preliminary table:** `nvs20`, `util` and `nvs01`
-are all *declined* yet solve to proven optimality quickly — so "declined" plainly
-does not imply "slow". Any correlation here is at best partial.
+* **`util` is declined and fast** (74.6 nodes/s, 2 NLP calls total). Admission is
+  not necessary for the fast regime.
+* **The causal test says no.** #861's A/B toggled `DISCOPT_INCREMENTAL_MC` on the
+  *same* instances and measured **1.0x** (independently re-verified; if anything
+  0-5% slower). Toggling admission changes the per-node *build* path but does not
+  move an instance between the NLP-per-node and LP-per-node engines — so it
+  cannot and does not change the regime.
 
----
+The honest reading: admission and the fast regime share a common cause — the
+model being in scope for the McCormick-LP-per-node engine. Nice structures (clean
+bilinear/integer QCQP) both admit *and* route to the LP loop. **This vindicates
+the #861/#896 closures** (admission itself is not a lever) while pointing at a
+much larger one.
+
+**Hypothesis.** The lever is *routing and NLP count*: either widen how many
+instances reach the LP-per-node engine, or cut the 20-41 NLP solves per node the
+default path pays.
+
+**Entry experiment.** For the 20-41 NLP/node instances (gear4, ex1225, nvs01,
+nvs21), attribute those calls: which caller issues them (strong branching? bound
+tightening? heuristics? per-node NLP relaxation?), and how many are *required*
+for correctness versus opportunistic. Then determine why each instance does not
+route to the LP-per-node engine — is it out of scope structurally, or declined by
+a gate that could be widened soundly? Print per-caller counts; a single dominant
+caller would make this a narrow, high-value fix.
+
+**Kill criterion.** If the NLP calls are irreducible (each genuinely required for
+a sound bound, no cheaper LP equivalent) AND the routing is a true structural
+scope limit rather than a conservative gate, then this is an architectural
+rewrite rather than a card, and it should be re-scoped as such rather than
+attempted incrementally. Also: `certification-gap-plan.md` Phase D already
+removed the *separation/strong-branch* POUNCE calls (2.0-2.7x on nvs17/nvs13) —
+confirm you are not re-treading that; the remaining calls are a different caller.
+
+**Gates.** Any routing widening is bound-changing (`CLAUDE.md` §5): differential
+bound test, feasible-point sampling, flag-gated default-off until a corpus panel
+is both cert-clean and net-positive. Reducing NLP *count* while preserving the
+same bounds is bound-neutral and must prove exact `node_count`/objective
+invariance.
+
+**Caveat.** 12 instances, one machine, under load. The three-order-of-magnitude
+NLP/node split is far too large to be a load artifact, but the ordering *within*
+each regime is not reliable at this sample size.
 
 ### Card D — Root throughput on the presolve-bound class
 
