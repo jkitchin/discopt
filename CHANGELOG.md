@@ -91,6 +91,24 @@ The release procedure that produces these entries is documented in
 
 ### Changed
 
+- **The #843 QUBO/Ising local-search primal is now default-ON** (`perf`, #843,
+  graduating the #846 seed; opt out with `DISCOPT_QUBO_PRIMAL=0`). An
+  unconstrained all-binary quadratic model (the `chimera_k64ising` /Max-Cut
+  structure) used to return **no incumbent**; the greedy-1opt + tabu seed now
+  fires by default and lands a sound one. Graduated on the §5 differential
+  panel (`docs/dev/data/issue843-qubo-primal-graduation.md`): structural
+  no-fire proven on all 67 vendored instances, byte-identical ON-vs-OFF on the
+  fast corpus subset, brute-force-exact on small QUBOs, and strictly better on
+  every structure-carrying case (generated chimera-topology Ising: C8 512-var
+  none→846, C12 1152-var none→1770; 0 soundness violations). At graduation the
+  heuristic moved to the JAX-free `discopt/qubo_primal.py` (structural gate +
+  MIQP classification gate + the `extract_qp_data` ladder instead of the JAX
+  Hessian), so the default-ON gate keeps the pure LP/MILP cold-start path
+  JAX-free; a linear objective is now explicitly left to the exact simplex
+  MILP path and a degree>2 objective is refused (the #846 code did not enforce
+  the degree cap its docstring claimed). The in-pass deadline poll (every 256
+  tabu iterations) bounds the seed's cost on any budget.
+
 - **`gap_certified` now requires BOTH ends of a gap** (`fix`, #875). A limit exit
   with a valid dual bound but *no incumbent* used to report
   `status="time_limit", objective=None, gap=None, gap_certified=True` — a certified
