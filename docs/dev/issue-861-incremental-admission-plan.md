@@ -839,4 +839,41 @@ The 45 remaining declines are correct and their reasons are attributable via
 ``decline_reason`` and the admission sweep, so if the cost model ever changes the
 work can be re-opened against evidence rather than assumption.
 
+## hda vs SCIP — external calibration (2026-07-28)
+
+Asked while closing #896: is hda slow in SCIP too? Measured, same `.nl`, same
+machine.
+
+| | discopt 60 s | SCIP 60 s | SCIP 300 s |
+|---|---|---|---|
+| status | time_limit | time limit | time limit |
+| nodes | **3** | 5,065 | 27,546 |
+| incumbent | **none** | **-5964.534** (12 solutions) | **-5964.534** (61 solutions) |
+| dual bound | **-64,473** | -6,720.4 | -6,656.0 |
+| gap | n/a (no primal) | 12.67% | 11.59% |
+
+Reference optimum (`minlplib.solu`): **-5964.534084**.
+
+Two conclusions, and they point in opposite directions.
+
+**hda is genuinely hard — for everyone.** SCIP does not close it either: 300 s and
+27.5k nodes move the dual bound only from -6720 to -6656, still an 11.6% gap. So
+"discopt cannot prove hda" is not by itself a discopt defect.
+
+**But discopt is far behind on the parts that matter, and none of them is
+relaxation building.** SCIP finds the true optimum within 60 s and keeps 12
+solutions; discopt finds **no incumbent at all**. SCIP explores 5,065 nodes to
+discopt's 3. discopt's dual bound is **~10x weaker** (-64,473 vs -6,720). SCIP's
+first LP solves in 0.04 s / 2,024 iterations, while discopt's node LP takes
+~0.6-1.0 s and, on a naive box, fails to return a bound at all (the #671
+float64-intractable-row class).
+
+This is the strongest available confirmation that closing #896 was right. The
+issue proposed spending significant, bound-neutrality-risky effort on relaxation
+*building*, which is 4.1% of hda's solve. The measured gaps are elsewhere
+entirely: no primal (the #862 incumbent-quality workstream), a dual bound an
+order of magnitude loose, and a node LP three to four orders of magnitude slower
+than SCIP's. Any future hda work should start there, with its own entry
+experiment.
+
 RALPH-861-COMPLETE
