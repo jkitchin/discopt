@@ -714,3 +714,70 @@ or to drop the tape in favour of a hybrid that calls the engine's own bound
 propagation (parity by construction rather than by reimplementation), and to stop
 treating raw admission count as the objective. **Not started pending an owner
 decision on which of those to pursue.**
+
+### T6 — odd power on a straddling root box: WON'T-FIX (measured)
+
+Entry probe (fresh, this session): row count the COLD build emits for ``s = x**p``
+over a straddling box vs sign-definite ones, read off the lifted matrix:
+
+    p=2  straddling -> 4 rows    positive -> 4    negative -> 4
+    p=3  straddling -> 2 rows    positive -> 4    negative -> 4
+    p=4  straddling -> 4 rows    positive -> 4    negative -> 4
+    p=5  straddling -> 2 rows    positive -> 4    negative -> 4
+
+D6's condition was "0 rows (curvature abstains) => drop the gate". The answer is
+**2 rows**, not 0: the cold build emits a genuinely different row FAMILY there
+(the 2-facet S-hull), so the D6 escape does not apply and the sub-item closes as
+**won't-fix**, exactly as the issue's DoD item 3 permits.
+
+Not claimed impossible — claimed disproportionate. The 4-row reserved pattern
+*could* in principle carry 2 real facets plus 2 vacuous rows (``_rowset`` drops
+vacuous rows, the mechanism #873 introduced for pinned boxes). What makes it not
+worth building is the facets themselves: an S-hull facet is the tangent drawn
+from the opposite endpoint, whose tangency point is the root of a degree-``p``
+equation — closed-form only for small ``p``, a numerical solve in general, and
+each one must reproduce the engine's emission bit-for-bit or the structure is not
+bound-neutral. That is real machinery for a class with exactly **one** consumer in
+the corpus (``ex8_5_4``), which the fast path already serves correctly via the
+cold build.
+
+Already pinned in-repo by
+``test_861_monomial_span_zero.py::test_odd_power_monomial_still_declines_on_a_root_box_spanning_zero``
+plus the row-count table in that file's docstring, so the decision is verifiable
+rather than asserted.
+
+---
+
+## T7 — close-out (2026-07-28)
+
+**Final sweep, original baseline -> now:** admitted **31 -> 36** of 81, declined
+50 -> 45. Newly admitted: `prob02`, `prob03`, `st_e01`, `st_e08`, `st_e09`. Zero
+admitted->declined flips at any step.
+
+| bucket | baseline | final | what happened |
+|---|---|---|---|
+| `bounds mismatch` | 24 | 38 | grew *by design* — instances moved here from the two artifact buckets, now declining for an honest, attributable reason (an unpatched lifted family) instead of a box artifact |
+| `column-count mismatch` | 14 | **3** | artifact removed; the 3 survivors (`nvs01`, `nvs21`, `st_e17`) are genuinely box-unstable and must decline |
+| `envelope row count != 4` | 6 | **0** | eliminated — the misclassification is fixed |
+| `no valid bound / no rows` | 5 | **3** | infinite-root instances now reach `_validate` instead of dying at the probe build |
+| odd power on straddling root | 1 | 1 | won't-fix, measured (T6) |
+
+**Issue DoD status.** (1) Triage the two dominant buckets — **done**, with a
+verdict per bucket and the finding that `bounds mismatch` was *not* an
+over-strict comparison but genuine missing coverage. (2) Fix or correctly narrow
+the comparison so admission rises, bound-neutrality clean — **done**: +5
+admitted, both artifact buckets collapsed, and every gate clean at every step
+(360-comparison parity panel with a firing control, 0 oracle violations, 0
+flips). (3) Odd power — **decided** (won't-fix, T6, measured). (4) Before/after
+sweep over the same corpus — **done**, committed as JSON at each step.
+
+**Not done, and why:** T5's family-coverage work (the patch tape). Its premise is
+falsified by measurement — see the §7 addendum above: the staging is backwards
+(the tape is a prerequisite, not a follow-on), the instances it targets are the
+ones where patching saves least (median cold build 0.20 ms; only 5 of 45 exceed
+1 ms), and admission delivers **0.96–1.03x end-to-end** on that class, inside the
+noise floor set by declined-instance controls. Building it would reimplement the
+engine's interval propagation — where any divergence is a bound-neutrality
+violation — for no measured gain. Owner decision (2026-07-28): finish T6, close
+#861, and file a follow-up targeting the large-model tail where the cost model
+says admission actually pays (`hda`: 20.41 ms/node, 722 vars).

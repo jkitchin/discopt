@@ -1,0 +1,798 @@
+{
+ "admitted": 36,
+ "declined": 45,
+ "instances": {
+  "alan": {
+   "n": 8,
+   "finite_root": false,
+   "admitted": false,
+   "reason": "ValueError: bounds mismatch",
+   "bucket": "bounds mismatch",
+   "secs": 0.012
+  },
+  "carton7": {
+   "n": 328,
+   "finite_root": false,
+   "admitted": true,
+   "reason": null,
+   "bucket": "admitted",
+   "ncol": 528,
+   "n_bilinear": 200,
+   "n_monomial": 0,
+   "n_affine_square": 0,
+   "secs": 0.155
+  },
+  "chance": {
+   "n": 4,
+   "finite_root": false,
+   "admitted": false,
+   "reason": "ValueError: bounds mismatch",
+   "bucket": "bounds mismatch",
+   "secs": 0.002
+  },
+  "dispatch": {
+   "n": 4,
+   "finite_root": false,
+   "admitted": true,
+   "reason": null,
+   "bucket": "admitted",
+   "ncol": 10,
+   "n_bilinear": 3,
+   "n_monomial": 3,
+   "n_affine_square": 0,
+   "secs": 0.004
+  },
+  "ex1221": {
+   "n": 5,
+   "finite_root": true,
+   "admitted": false,
+   "reason": "ValueError: bounds mismatch",
+   "bucket": "bounds mismatch",
+   "secs": 0.001
+  },
+  "ex1222": {
+   "n": 3,
+   "finite_root": true,
+   "admitted": false,
+   "reason": "ValueError: bounds mismatch",
+   "bucket": "bounds mismatch",
+   "secs": 0.001
+  },
+  "ex1223a": {
+   "n": 7,
+   "finite_root": true,
+   "admitted": true,
+   "reason": null,
+   "bucket": "admitted",
+   "ncol": 13,
+   "n_bilinear": 0,
+   "n_monomial": 3,
+   "n_affine_square": 3,
+   "secs": 0.004
+  },
+  "ex1225": {
+   "n": 8,
+   "finite_root": true,
+   "admitted": false,
+   "reason": "ValueError: bounds mismatch",
+   "bucket": "bounds mismatch",
+   "secs": 0.001
+  },
+  "ex1226": {
+   "n": 5,
+   "finite_root": true,
+   "admitted": false,
+   "reason": "ValueError: bounds mismatch",
+   "bucket": "bounds mismatch",
+   "secs": 0.001
+  },
+  "ex1233": {
+   "n": 52,
+   "finite_root": false,
+   "admitted": false,
+   "reason": "ValueError: bounds mismatch",
+   "bucket": "bounds mismatch",
+   "secs": 0.01
+  },
+  "ex1252": {
+   "n": 39,
+   "finite_root": true,
+   "admitted": false,
+   "reason": "ValueError: bounds mismatch",
+   "bucket": "bounds mismatch",
+   "secs": 0.007
+  },
+  "ex1252a": {
+   "n": 24,
+   "finite_root": true,
+   "admitted": false,
+   "reason": "ValueError: bounds mismatch",
+   "bucket": "bounds mismatch",
+   "secs": 0.005
+  },
+  "ex1263": {
+   "n": 92,
+   "finite_root": true,
+   "admitted": true,
+   "reason": null,
+   "bucket": "admitted",
+   "ncol": 108,
+   "n_bilinear": 16,
+   "n_monomial": 0,
+   "n_affine_square": 0,
+   "secs": 0.015
+  },
+  "ex1264": {
+   "n": 88,
+   "finite_root": true,
+   "admitted": true,
+   "reason": null,
+   "bucket": "admitted",
+   "ncol": 104,
+   "n_bilinear": 16,
+   "n_monomial": 0,
+   "n_affine_square": 0,
+   "secs": 0.021
+  },
+  "ex1265": {
+   "n": 130,
+   "finite_root": true,
+   "admitted": true,
+   "reason": null,
+   "bucket": "admitted",
+   "ncol": 155,
+   "n_bilinear": 25,
+   "n_monomial": 0,
+   "n_affine_square": 0,
+   "secs": 0.021
+  },
+  "ex1266": {
+   "n": 180,
+   "finite_root": true,
+   "admitted": true,
+   "reason": null,
+   "bucket": "admitted",
+   "ncol": 216,
+   "n_bilinear": 36,
+   "n_monomial": 0,
+   "n_affine_square": 0,
+   "secs": 0.03
+  },
+  "ex8_1_1": {
+   "n": 2,
+   "finite_root": true,
+   "admitted": false,
+   "reason": "ValueError: bounds mismatch",
+   "bucket": "bounds mismatch",
+   "secs": 0.001
+  },
+  "ex8_5_4": {
+   "n": 5,
+   "finite_root": false,
+   "admitted": false,
+   "reason": "ValueError: monomial x_2^3: odd power on a root box spanning zero (the envelope switches between the 4-row secant/tangent hull and the 2-facet S-hull, which the fixed row pattern cannot express)",
+   "bucket": "odd power on straddling root",
+   "secs": 0.002
+  },
+  "fuel": {
+   "n": 15,
+   "finite_root": false,
+   "admitted": true,
+   "reason": null,
+   "bucket": "admitted",
+   "ncol": 21,
+   "n_bilinear": 0,
+   "n_monomial": 6,
+   "n_affine_square": 0,
+   "secs": 0.004
+  },
+  "gbd": {
+   "n": 4,
+   "finite_root": true,
+   "admitted": true,
+   "reason": null,
+   "bucket": "admitted",
+   "ncol": 5,
+   "n_bilinear": 0,
+   "n_monomial": 1,
+   "n_affine_square": 0,
+   "secs": 0.002
+  },
+  "gear": {
+   "n": 4,
+   "finite_root": true,
+   "admitted": false,
+   "reason": "ValueError: bounds mismatch",
+   "bucket": "bounds mismatch",
+   "secs": 0.001
+  },
+  "gear2": {
+   "n": 28,
+   "finite_root": true,
+   "admitted": false,
+   "reason": "ValueError: bounds mismatch",
+   "bucket": "bounds mismatch",
+   "secs": 0.002
+  },
+  "gear3": {
+   "n": 8,
+   "finite_root": true,
+   "admitted": false,
+   "reason": "ValueError: bounds mismatch",
+   "bucket": "bounds mismatch",
+   "secs": 0.001
+  },
+  "gear4": {
+   "n": 6,
+   "finite_root": false,
+   "admitted": false,
+   "reason": "ValueError: bounds mismatch",
+   "bucket": "bounds mismatch",
+   "secs": 0.001
+  },
+  "hda": {
+   "n": 722,
+   "finite_root": false,
+   "admitted": false,
+   "reason": "ValueError: bounds mismatch",
+   "bucket": "bounds mismatch",
+   "secs": 0.096
+  },
+  "kall_circles_c8a": {
+   "n": 22,
+   "finite_root": true,
+   "admitted": false,
+   "reason": "ValueError: bounds mismatch",
+   "bucket": "bounds mismatch",
+   "secs": 0.013
+  },
+  "mathopt3": {
+   "n": 6,
+   "finite_root": false,
+   "admitted": false,
+   "reason": "ValueError: bounds mismatch",
+   "bucket": "bounds mismatch",
+   "secs": 0.003
+  },
+  "mathopt5_2": {
+   "n": 1,
+   "finite_root": true,
+   "admitted": false,
+   "reason": "ValueError: relaxation has no valid bound / no rows",
+   "bucket": "no valid bound / no rows",
+   "secs": 0.002
+  },
+  "meanvar": {
+   "n": 8,
+   "finite_root": true,
+   "admitted": true,
+   "reason": null,
+   "bucket": "admitted",
+   "ncol": 36,
+   "n_bilinear": 21,
+   "n_monomial": 7,
+   "n_affine_square": 0,
+   "secs": 0.012
+  },
+  "meanvarx": {
+   "n": 35,
+   "finite_root": false,
+   "admitted": true,
+   "reason": null,
+   "bucket": "admitted",
+   "ncol": 63,
+   "n_bilinear": 21,
+   "n_monomial": 7,
+   "n_affine_square": 0,
+   "secs": 0.015
+  },
+  "nvs01": {
+   "n": 3,
+   "finite_root": true,
+   "admitted": false,
+   "reason": "ValueError: column-count mismatch",
+   "bucket": "column-count mismatch",
+   "secs": 0.002
+  },
+  "nvs02": {
+   "n": 8,
+   "finite_root": true,
+   "admitted": true,
+   "reason": null,
+   "bucket": "admitted",
+   "ncol": 16,
+   "n_bilinear": 7,
+   "n_monomial": 1,
+   "n_affine_square": 0,
+   "secs": 0.005
+  },
+  "nvs03": {
+   "n": 2,
+   "finite_root": true,
+   "admitted": true,
+   "reason": null,
+   "bucket": "admitted",
+   "ncol": 5,
+   "n_bilinear": 0,
+   "n_monomial": 1,
+   "n_affine_square": 2,
+   "secs": 0.003
+  },
+  "nvs04": {
+   "n": 2,
+   "finite_root": true,
+   "admitted": false,
+   "reason": "ValueError: bounds mismatch",
+   "bucket": "bounds mismatch",
+   "secs": 0.001
+  },
+  "nvs05": {
+   "n": 8,
+   "finite_root": false,
+   "admitted": false,
+   "reason": "ValueError: bounds mismatch",
+   "bucket": "bounds mismatch",
+   "secs": 0.006
+  },
+  "nvs06": {
+   "n": 2,
+   "finite_root": true,
+   "admitted": false,
+   "reason": "ValueError: bounds mismatch",
+   "bucket": "bounds mismatch",
+   "secs": 0.002
+  },
+  "nvs07": {
+   "n": 3,
+   "finite_root": true,
+   "admitted": false,
+   "reason": "ValueError: bounds mismatch",
+   "bucket": "bounds mismatch",
+   "secs": 0.001
+  },
+  "nvs08": {
+   "n": 3,
+   "finite_root": true,
+   "admitted": false,
+   "reason": "ValueError: bounds mismatch",
+   "bucket": "bounds mismatch",
+   "secs": 0.001
+  },
+  "nvs10": {
+   "n": 2,
+   "finite_root": true,
+   "admitted": true,
+   "reason": null,
+   "bucket": "admitted",
+   "ncol": 5,
+   "n_bilinear": 1,
+   "n_monomial": 2,
+   "n_affine_square": 0,
+   "secs": 0.003
+  },
+  "nvs11": {
+   "n": 3,
+   "finite_root": true,
+   "admitted": true,
+   "reason": null,
+   "bucket": "admitted",
+   "ncol": 9,
+   "n_bilinear": 3,
+   "n_monomial": 3,
+   "n_affine_square": 0,
+   "secs": 0.004
+  },
+  "nvs12": {
+   "n": 4,
+   "finite_root": true,
+   "admitted": true,
+   "reason": null,
+   "bucket": "admitted",
+   "ncol": 14,
+   "n_bilinear": 6,
+   "n_monomial": 4,
+   "n_affine_square": 0,
+   "secs": 0.005
+  },
+  "nvs13": {
+   "n": 5,
+   "finite_root": true,
+   "admitted": true,
+   "reason": null,
+   "bucket": "admitted",
+   "ncol": 20,
+   "n_bilinear": 10,
+   "n_monomial": 5,
+   "n_affine_square": 0,
+   "secs": 0.008
+  },
+  "nvs14": {
+   "n": 8,
+   "finite_root": true,
+   "admitted": true,
+   "reason": null,
+   "bucket": "admitted",
+   "ncol": 16,
+   "n_bilinear": 7,
+   "n_monomial": 1,
+   "n_affine_square": 0,
+   "secs": 0.004
+  },
+  "nvs15": {
+   "n": 3,
+   "finite_root": true,
+   "admitted": true,
+   "reason": null,
+   "bucket": "admitted",
+   "ncol": 8,
+   "n_bilinear": 2,
+   "n_monomial": 3,
+   "n_affine_square": 0,
+   "secs": 0.003
+  },
+  "nvs16": {
+   "n": 2,
+   "finite_root": true,
+   "admitted": false,
+   "reason": "ValueError: bounds mismatch",
+   "bucket": "bounds mismatch",
+   "secs": 0.002
+  },
+  "nvs17": {
+   "n": 7,
+   "finite_root": true,
+   "admitted": true,
+   "reason": null,
+   "bucket": "admitted",
+   "ncol": 35,
+   "n_bilinear": 21,
+   "n_monomial": 7,
+   "n_affine_square": 0,
+   "secs": 0.016
+  },
+  "nvs18": {
+   "n": 6,
+   "finite_root": true,
+   "admitted": true,
+   "reason": null,
+   "bucket": "admitted",
+   "ncol": 27,
+   "n_bilinear": 15,
+   "n_monomial": 6,
+   "n_affine_square": 0,
+   "secs": 0.011
+  },
+  "nvs19": {
+   "n": 8,
+   "finite_root": true,
+   "admitted": true,
+   "reason": null,
+   "bucket": "admitted",
+   "ncol": 44,
+   "n_bilinear": 28,
+   "n_monomial": 8,
+   "n_affine_square": 0,
+   "secs": 0.024
+  },
+  "nvs20": {
+   "n": 16,
+   "finite_root": true,
+   "admitted": false,
+   "reason": "ValueError: bounds mismatch",
+   "bucket": "bounds mismatch",
+   "secs": 0.025
+  },
+  "nvs21": {
+   "n": 3,
+   "finite_root": true,
+   "admitted": false,
+   "reason": "ValueError: column-count mismatch",
+   "bucket": "column-count mismatch",
+   "secs": 0.001
+  },
+  "nvs22": {
+   "n": 8,
+   "finite_root": false,
+   "admitted": false,
+   "reason": "ValueError: bounds mismatch",
+   "bucket": "bounds mismatch",
+   "secs": 0.006
+  },
+  "nvs23": {
+   "n": 9,
+   "finite_root": true,
+   "admitted": true,
+   "reason": null,
+   "bucket": "admitted",
+   "ncol": 54,
+   "n_bilinear": 36,
+   "n_monomial": 9,
+   "n_affine_square": 0,
+   "secs": 0.029
+  },
+  "nvs24": {
+   "n": 10,
+   "finite_root": true,
+   "admitted": true,
+   "reason": null,
+   "bucket": "admitted",
+   "ncol": 65,
+   "n_bilinear": 45,
+   "n_monomial": 10,
+   "n_affine_square": 0,
+   "secs": 0.039
+  },
+  "prob02": {
+   "n": 6,
+   "finite_root": true,
+   "admitted": true,
+   "reason": null,
+   "bucket": "admitted",
+   "ncol": 11,
+   "n_bilinear": 5,
+   "n_monomial": 0,
+   "n_affine_square": 0,
+   "secs": 0.003
+  },
+  "prob03": {
+   "n": 2,
+   "finite_root": true,
+   "admitted": true,
+   "reason": null,
+   "bucket": "admitted",
+   "ncol": 3,
+   "n_bilinear": 1,
+   "n_monomial": 0,
+   "n_affine_square": 0,
+   "secs": 0.001
+  },
+  "prob06": {
+   "n": 2,
+   "finite_root": true,
+   "admitted": true,
+   "reason": null,
+   "bucket": "admitted",
+   "ncol": 4,
+   "n_bilinear": 0,
+   "n_monomial": 2,
+   "n_affine_square": 0,
+   "secs": 0.002
+  },
+  "prob10": {
+   "n": 2,
+   "finite_root": true,
+   "admitted": true,
+   "reason": null,
+   "bucket": "admitted",
+   "ncol": 5,
+   "n_bilinear": 0,
+   "n_monomial": 0,
+   "n_affine_square": 2,
+   "secs": 0.003
+  },
+  "st_e01": {
+   "n": 2,
+   "finite_root": true,
+   "admitted": true,
+   "reason": null,
+   "bucket": "admitted",
+   "ncol": 3,
+   "n_bilinear": 1,
+   "n_monomial": 0,
+   "n_affine_square": 0,
+   "secs": 0.001
+  },
+  "st_e02": {
+   "n": 3,
+   "finite_root": true,
+   "admitted": false,
+   "reason": "ValueError: bounds mismatch",
+   "bucket": "bounds mismatch",
+   "secs": 0.001
+  },
+  "st_e03": {
+   "n": 10,
+   "finite_root": true,
+   "admitted": false,
+   "reason": "ValueError: bounds mismatch",
+   "bucket": "bounds mismatch",
+   "secs": 0.002
+  },
+  "st_e04": {
+   "n": 4,
+   "finite_root": true,
+   "admitted": false,
+   "reason": "ValueError: relaxation has no valid bound / no rows",
+   "bucket": "no valid bound / no rows",
+   "secs": 0.001
+  },
+  "st_e05": {
+   "n": 5,
+   "finite_root": true,
+   "admitted": false,
+   "reason": "ValueError: bounds mismatch",
+   "bucket": "bounds mismatch",
+   "secs": 0.001
+  },
+  "st_e06": {
+   "n": 3,
+   "finite_root": true,
+   "admitted": false,
+   "reason": "ValueError: bounds mismatch",
+   "bucket": "bounds mismatch",
+   "secs": 0.001
+  },
+  "st_e07": {
+   "n": 10,
+   "finite_root": true,
+   "admitted": false,
+   "reason": "ValueError: bounds mismatch",
+   "bucket": "bounds mismatch",
+   "secs": 0.001
+  },
+  "st_e08": {
+   "n": 2,
+   "finite_root": true,
+   "admitted": true,
+   "reason": null,
+   "bucket": "admitted",
+   "ncol": 5,
+   "n_bilinear": 1,
+   "n_monomial": 2,
+   "n_affine_square": 0,
+   "secs": 0.002
+  },
+  "st_e09": {
+   "n": 2,
+   "finite_root": true,
+   "admitted": true,
+   "reason": null,
+   "bucket": "admitted",
+   "ncol": 3,
+   "n_bilinear": 1,
+   "n_monomial": 0,
+   "n_affine_square": 0,
+   "secs": 0.001
+  },
+  "st_e11": {
+   "n": 3,
+   "finite_root": true,
+   "admitted": false,
+   "reason": "ValueError: bounds mismatch",
+   "bucket": "bounds mismatch",
+   "secs": 0.001
+  },
+  "st_e13": {
+   "n": 2,
+   "finite_root": true,
+   "admitted": true,
+   "reason": null,
+   "bucket": "admitted",
+   "ncol": 3,
+   "n_bilinear": 0,
+   "n_monomial": 1,
+   "n_affine_square": 0,
+   "secs": 0.001
+  },
+  "st_e15": {
+   "n": 5,
+   "finite_root": true,
+   "admitted": false,
+   "reason": "ValueError: bounds mismatch",
+   "bucket": "bounds mismatch",
+   "secs": 0.001
+  },
+  "st_e17": {
+   "n": 2,
+   "finite_root": true,
+   "admitted": false,
+   "reason": "ValueError: column-count mismatch",
+   "bucket": "column-count mismatch",
+   "secs": 0.001
+  },
+  "st_e18": {
+   "n": 2,
+   "finite_root": true,
+   "admitted": true,
+   "reason": null,
+   "bucket": "admitted",
+   "ncol": 4,
+   "n_bilinear": 0,
+   "n_monomial": 2,
+   "n_affine_square": 0,
+   "secs": 0.002
+  },
+  "st_e27": {
+   "n": 4,
+   "finite_root": true,
+   "admitted": true,
+   "reason": null,
+   "bucket": "admitted",
+   "ncol": 6,
+   "n_bilinear": 0,
+   "n_monomial": 2,
+   "n_affine_square": 0,
+   "secs": 0.002
+  },
+  "st_e31": {
+   "n": 112,
+   "finite_root": false,
+   "admitted": true,
+   "reason": null,
+   "bucket": "admitted",
+   "ncol": 120,
+   "n_bilinear": 6,
+   "n_monomial": 2,
+   "n_affine_square": 0,
+   "secs": 0.017
+  },
+  "st_e35": {
+   "n": 32,
+   "finite_root": true,
+   "admitted": false,
+   "reason": "ValueError: relaxation has no valid bound / no rows",
+   "bucket": "no valid bound / no rows",
+   "secs": 0.009
+  },
+  "st_e36": {
+   "n": 2,
+   "finite_root": true,
+   "admitted": false,
+   "reason": "ValueError: bounds mismatch",
+   "bucket": "bounds mismatch",
+   "secs": 0.964
+  },
+  "st_e38": {
+   "n": 4,
+   "finite_root": true,
+   "admitted": false,
+   "reason": "ValueError: bounds mismatch",
+   "bucket": "bounds mismatch",
+   "secs": 0.002
+  },
+  "st_e40": {
+   "n": 4,
+   "finite_root": false,
+   "admitted": false,
+   "reason": "ValueError: bounds mismatch",
+   "bucket": "bounds mismatch",
+   "secs": 0.004
+  },
+  "st_ph10": {
+   "n": 2,
+   "finite_root": false,
+   "admitted": true,
+   "reason": null,
+   "bucket": "admitted",
+   "ncol": 4,
+   "n_bilinear": 0,
+   "n_monomial": 2,
+   "n_affine_square": 0,
+   "secs": 0.002
+  },
+  "syn05m": {
+   "n": 20,
+   "finite_root": false,
+   "admitted": false,
+   "reason": "ValueError: bounds mismatch",
+   "bucket": "bounds mismatch",
+   "secs": 0.002
+  },
+  "trig": {
+   "n": 1,
+   "finite_root": true,
+   "admitted": false,
+   "reason": "ValueError: bounds mismatch",
+   "bucket": "bounds mismatch",
+   "secs": 0.001
+  },
+  "util": {
+   "n": 145,
+   "finite_root": false,
+   "admitted": false,
+   "reason": "ValueError: bounds mismatch",
+   "bucket": "bounds mismatch",
+   "secs": 0.009
+  }
+ }
+}
