@@ -782,4 +782,61 @@ violation — for no measured gain. Owner decision (2026-07-28): finish T6, clos
 #861, and file a follow-up targeting the large-model tail where the cost model
 says admission actually pays (`hda`: 20.41 ms/node, 722 vars).
 
+---
+
+## #896 close-out — the large-model tail does not pay either (2026-07-28)
+
+#861 closed by re-scoping its residual family-coverage work to #896, on the
+premise that admission would pay on the large-model tail even though it measured
+~1.00x on the small one. **That premise was also false**, and #896 is now closed
+won't-fix on its own binding entry experiment.
+
+Profiling the REAL solve (not a per-build microbenchmark) across every instance
+in that tail:
+
+| instance | wall | relaxation build | build share | node solves |
+|---|---|---|---|---|
+| hda | 81.2 s | 3.37 s | **4.1%** | **3** |
+| ex1233 | 31.1 s | 1.89 s | 6.1% | 43 |
+| kall_circles_c8a | 30.0 s | 1.53 s | 5.1% | 32 |
+| nvs20 | 9.5 s | 0.20 s | 2.1% | 0 |
+| util | 6.9 s | 0.06 s | 0.8% | 0 |
+
+Relaxation building is 0.8-6.1% of wall time everywhere. hda's real costs are NLP
+subsolves (44.9%), root presolve (18.5%) and convexity classification (14.8%).
+
+**The methodological lesson, which is the reusable part.** #896 was scoped off a
+per-build microbenchmark — "hda: 20.41 ms/node, the one that matters" — without
+checking **how many nodes hda actually runs** (three, in 81 seconds) or what else
+dominates. The incremental structure exists to amortize per-node building across
+*thousands* of nodes; hda is not that workload. Cost-per-call is not impact:
+impact is cost-per-call x call-count / total. A microbenchmark that is accurate
+in isolation can still support a completely wrong scoping decision, and this plan
+now contains two instances of the same shape — the fabricated oracle values in
+§7, and this.
+
+Three intermediate measurements in the #896 session were themselves invalid and
+were retracted rather than quietly dropped (CLAUDE.md rule 11):
+
+* "warm-start gives 1.00x on hda" — the LP had **returned None (failed)** both
+  times, so it timed a failure twice and ``in_basis`` was silently ``None``. hda
+  is the known #671 case where float64-intractable rows false-fail every engine
+  without the row filter.
+* a "3% Amdahl ceiling" from build-vs-node-solve alone, which ignored the
+  warm-start effect entirely — it would have produced the right verdict for the
+  wrong reason.
+* six ``solve_at_node`` timings on a hand-substituted ``+/-1e3`` box where **0 of
+  6 nodes produced a bound** — timing a failing path.
+
+Each was caught by asking "did this actually succeed?" rather than "what number
+came out?". That question is the cheapest instrument in this repo.
+
+**Net position for the incremental McCormick path.** Admission is worth having
+where it is already free (31 -> 36 instances, all artifact declines removed), and
+is NOT worth extending by reimplementing the engine's interval propagation: the
+measured benefit is ~1.00x on the small class and <=6% ceiling on the large one.
+The 45 remaining declines are correct and their reasons are attributable via
+``decline_reason`` and the admission sweep, so if the cost model ever changes the
+work can be re-opened against evidence rather than assumption.
+
 RALPH-861-COMPLETE
