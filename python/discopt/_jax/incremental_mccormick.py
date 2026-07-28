@@ -301,7 +301,7 @@ class IncrementalMcCormickLP:
 
     # -- construction ------------------------------------------------------ #
 
-    def _full_build(self, lb, ub):
+    def _full_build(self, lb, ub, track_aux_exprs: bool = False):
         from discopt._jax.discretization import DiscretizationState
         from discopt._jax.milp_relaxation import build_milp_relaxation
 
@@ -318,6 +318,7 @@ class IncrementalMcCormickLP:
             bound_override=(lb, ub),
             skip_separable_floor=True,
             skip_convex_lift=True,
+            track_aux_exprs=track_aux_exprs,
         )
         if not relax._objective_bound_valid or relax._A_ub is None:
             raise ValueError("relaxation has no valid bound / no rows")
@@ -358,7 +359,9 @@ class IncrementalMcCormickLP:
                 lb_p[k], ub_p[k] = -(7.0 + k), -1.0
             else:
                 lb_p[k], ub_p[k] = 1.0, 7.0 + k
-        A, b, bnds, c, info, _relax_probe = self._full_build(lb_p, ub_p)  # A is CSR (sparse)
+        A, b, bnds, c, info, _relax_probe = self._full_build(
+            lb_p, ub_p, track_aux_exprs=True
+        )  # A is CSR (sparse)
         # Decline only genuinely huge structures — now measured by NONZEROS (the
         # sparse footprint), not dense cells. qap's lift is ~172k nnz (trivial);
         # this guards a pathological lift whose sparse `.data` copy per node would
@@ -392,6 +395,16 @@ class IncrementalMcCormickLP:
         self.bilinear = dict(info.get("bilinear", {}))
         self.monomial = dict(info.get("monomial", {}))  # any integer power p >= 2
         self.affine_square = dict(info.get("affine_square", {}))  # (var,aux)->(coeff,const)
+        # #844: every aux column the build minted, as ``col -> pinned expression``.
+        # ``_patch`` below owns closed forms for bilinear / monomial / affine-square
+        # only; before this, EVERY other lifted column silently kept its ROOT-box
+        # bounds at every node. That is not bound-neutral against the cold build, so
+        # ``_validate`` refused and the entire mixed factorable class fell back to a
+        # full ``build_milp_relaxation`` per node with cuts disabled (gastrans040: ~150
+        # rebuilds in 45 s). Re-evaluating these expressions over the node box
+        # reproduces the cold build exactly, because that is literally how the builder
+        # minted them: ``new_aux(*self.bounds(node))``.
+        self.aux_expr = dict(info.get("aux_expr", {}))
 
         # C-44: per-column identity vector for this fixed lifted layout. The
         # incremental structure never rebuilds columns (``_patch`` only rewrites
@@ -577,10 +590,56 @@ class IncrementalMcCormickLP:
                 data[pos[(k, a)]] = cw
                 b[k] = rhs
             bounds[a, 0], bounds[a, 1] = _affine_square_aux_bounds(coeff, const, li, ui)
+        # Columns no closed-form family owns. Left alone they keep the ROOT-box
+        # bounds copied from ``base_bounds`` above — wider than the cold build on any
+        # shrunken node box, hence not bound-neutral, hence ``_validate`` refuses and
+        # the whole class loses the incremental path AND cuts. Regenerate them the way
+        # the builder minted them: the interval image of the atom over THIS box.
+        for a, expr in self._unowned_aux():
+            lo_a, hi_a = self._interval_aux(expr, lb, ub)
+            bounds[a, 0], bounds[a, 1] = lo_a, hi_a
         A = sp.csr_matrix(
             (data, self._base_indices, self._base_indptr), shape=self._base_shape, copy=False
         )
         return A, b, bounds
+
+    def _unowned_aux(self):
+        """``(col, expr)`` for every aux column the closed-form families do NOT own.
+
+        Computed once and cached: the lifted layout is fixed for the life of the
+        structure (``_patch`` only rewrites values, never columns), so the ownership
+        partition cannot change between nodes.
+        """
+        cached = getattr(self, "_unowned_cache", None)
+        if cached is not None:
+            return cached
+        owned = {a for (_i, _j, a) in self.bilin_rows}
+        owned |= {a for (_i, a, _p) in self.mono_rows}
+        owned |= {a for (_j, a, _c, _k) in self.affsq_rows}
+        out = [(a, e) for a, e in sorted(self.aux_expr.items()) if a not in owned and a >= self.n]
+        self._unowned_cache = out
+        return out
+
+    def _interval_aux(self, expr, lb, ub):
+        """Interval image of ``expr`` over ``[lb,ub]``, matching the cold build exactly.
+
+        Deliberately mirrors ``uniform_relax._Builder.bounds`` — same
+        ``evaluate_interval`` call, same non-finite -> +-inf normalization. Any drift
+        here shows up as a ``_validate`` ``bounds mismatch``, i.e. it fails loudly and
+        declines the fast path rather than silently shipping a different polytope.
+        """
+        from discopt._jax.convexity.interval_eval import evaluate_interval
+        from discopt._jax.uniform_relax import _interval_box
+
+        box = _interval_box(self.model, np.asarray(lb, float), np.asarray(ub, float))
+        enc = evaluate_interval(expr, self.model, box)
+        lo = float(np.asarray(enc.lo))
+        hi = float(np.asarray(enc.hi))
+        if not math.isfinite(lo):
+            lo = -math.inf
+        if not math.isfinite(hi):
+            hi = math.inf
+        return lo, hi
 
     # -- soundness gate ---------------------------------------------------- #
 

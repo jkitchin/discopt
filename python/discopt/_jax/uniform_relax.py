@@ -221,6 +221,17 @@ class UniformRelaxation:
     # Finite-domain trig-square selector tables (issue #640 Bucket 1). Consumed by
     # the delegate to populate the ``finite_domain_trig_square_tables`` varmap family.
     finite_domain_trig_square_tables: list = dataclasses.field(default_factory=list)
+    # aux column -> pinned expression node, for EVERY aux the build minted (#844).
+    # Each aux is created as ``new_aux(*self.bounds(node))``, i.e. the interval image
+    # of its node over the build box. The incremental McCormick patcher owns closed
+    # forms for only three families (bilinear / monomial / affine-square) and left
+    # every other lifted column at ROOT-box width, which is not bound-neutral against
+    # the cold build, so ``_validate`` refused and the whole mixed factorable class
+    # fell back to a full rebuild per node with cuts disabled. Re-evaluating this
+    # expression over the node box reproduces the cold build exactly (entry
+    # experiment: 12/12 exact to 1e-9), so exporting it is what lets the patch own
+    # 100% of columns rather than 50-79%. Empty unless the build was asked to track.
+    aux_expr: dict = dataclasses.field(default_factory=dict)
     # Per-column integrality (0/1) over ALL columns (orig ∪ aux). Original-variable
     # integrality is applied by the delegate; this carries the ENGINE-created integer
     # aux (e.g. the trig-square selector binaries) so the delegate marks them too.
@@ -3032,6 +3043,7 @@ def build_uniform_relaxation(
     skip_convex_lift: bool = False,
     disc_state: object = None,
     build_deadline: Optional[float] = None,
+    track_aux_exprs: bool = False,
 ) -> UniformRelaxation:
     """Build the uniform factorable relaxation of ``model`` over ``box``.
 
@@ -3094,7 +3106,14 @@ def build_uniform_relaxation(
     # expressions, DCP verdicts, compiled value/grad fns, and curvature certificates.
     analysis = _get_analysis_cache(model)
     dag: CanonicalDAG = analysis.dag
-    ctx = _Builder(model, flat_lb, flat_ub, analysis, skip_convex_lift=skip_convex_lift)
+    ctx = _Builder(
+        model,
+        flat_lb,
+        flat_ub,
+        analysis,
+        track_aux_exprs=track_aux_exprs,
+        skip_convex_lift=skip_convex_lift,
+    )
 
     # Objective -> c, obj_offset (minimize convention; maximize is negated so the
     # reported LP bound is a valid lower bound on the minimize-equivalent, matching
@@ -3309,6 +3328,7 @@ def build_uniform_relaxation(
         integrality=list(ctx.integrality),
         univariate_atom_specs=list(ctx.univariate_atom_specs),
         bilinear_linform_specs=list(ctx.bilinear_linform_specs),
+        aux_expr=dict(ctx.aux_expr),
     )
 
 

@@ -1838,6 +1838,7 @@ def _uniform_relaxation_delegate(
     skip_convex_lift: bool = False,
     disc_state: object = None,
     build_deadline: Optional[float] = None,
+    track_aux_exprs: bool = False,
 ) -> tuple["MilpRelaxationModel", dict]:
     """Build the default relaxation through the uniform factorable engine (#632).
 
@@ -1865,6 +1866,7 @@ def _uniform_relaxation_delegate(
         skip_convex_lift=skip_convex_lift,
         disc_state=disc_state,
         build_deadline=build_deadline,
+        track_aux_exprs=track_aux_exprs,
     )
     milp = rel.model
     n_total = int(np.size(milp._c))
@@ -1925,6 +1927,11 @@ def _uniform_relaxation_delegate(
     # encodings of sin/cos(int-affine)^2 the engine emitted, surfaced for callers
     # that census them (the rows are already in the relaxation).
     vm["finite_domain_trig_square_tables"] = list(rel.finite_domain_trig_square_tables)
+    # #844: aux column -> pinned expression, for EVERY lifted column, so the
+    # incremental McCormick patch can regenerate the bounds of columns no closed-form
+    # family owns. Empty unless the caller asked to track (the default), so this is a
+    # no-op for every existing consumer.
+    vm["aux_expr"] = dict(rel.aux_expr)
     return milp, vm
 
 
@@ -2002,6 +2009,7 @@ def build_milp_relaxation(
     skip_separable_floor: bool = False,
     skip_convex_lift: bool = False,
     build_deadline: Optional[float] = None,
+    track_aux_exprs: bool = False,
 ) -> tuple["MilpRelaxationModel", dict]:
     """Build a MILP relaxation with piecewise McCormick for bilinear/monomial terms.
 
@@ -2100,6 +2108,7 @@ def build_milp_relaxation(
         skip_convex_lift=skip_convex_lift,
         disc_state=disc_state,
         build_deadline=build_deadline,
+        track_aux_exprs=track_aux_exprs,
     )
 
 
