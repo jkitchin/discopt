@@ -129,7 +129,8 @@ and a dual bound **9.6x weaker**.
 
 ## §3 Workstreams
 
-Ordered by expected value. **Card C is the top card** — it carries the largest
+Ordered by expected value. **Card F is the top card** (a live default-ON
+regression, #902); **Card C is blocked by it** — it carries the largest
 measured effect (a 3-order-of-magnitude NLP/node spread). Reorder freely as
 evidence lands; that is what makes this modular.
 
@@ -199,83 +200,80 @@ net-positive.
 
 ---
 
-### Card C — Node regime: NLP-per-node is the dominant cost, and it is not admission
+### Card C — Node regime: the gate is NATIVE-KERNEL ENGAGEMENT
 
-> **Status:** OPEN — **evidence complete, this is the top card.**
-> **Depends on:** nothing. **Supersedes:** the "is admission the lever?" question.
+> **Status:** OPEN. **Depends on:** nothing. **Blocks:** nothing.
+> **Corrected 2026-07-28** — see "What this card got wrong" below.
 
-**Finding.** discopt has two node regimes separated by ~100-800x throughput, and
-the separator is **how many NLP solves each node costs** — not relaxation
-building, and not incremental-McCormick admission.
+**Finding.** Node throughput splits into two regimes ~100-1000x apart, and the
+gate is whether the **native Rust spatial kernel engages**
+(`solver.py:_try_native_spatial_kernel` -> `spatial_producer.build_spatial_kernel_spec`),
+*not* incremental-McCormick admission and *not* NLP-per-node.
 
-Measured 2026-07-28 (25 s limit, load avg 4.4-5.4; ratios are the load-robust
-quantities here):
+Measured over 16 instances (30 s limit, contended box; percentages and regime
+classes are robust to the load, absolute walls are not):
 
-| instance | nodes | nodes/s | solve_nlp | **NLP/node** | admitted |
+| instance | nodes | nodes/s | NLP/node | incMcC admitted | **kernel engaged** |
 |---|---|---|---|---|---|
-| nvs17 | 13,555 | 798.6 | 82 | **0.01** | True |
-| nvs19 | 4,913 | 296.5 | 61 | **0.01** | True |
-| nvs24 | 1,353 | 81.0 | 33 | **0.02** | True |
-| util | 501 | 74.6 | 2 | **0.00** | False |
-| nvs20 | 105 | 12.3 | 33 | 0.31 | False |
-| kall_circles_c8a | 95 | 3.8 | 68 | 0.72 | False |
-| st_e35 | 31 | 1.2 | 43 | 1.39 | False |
-| ex1225 | 5 | 6.5 | 133 | **26.60** | False |
-| nvs01 | 3 | 3.5 | 69 | **23.00** | False |
-| nvs21 | 3 | 1.7 | 60 | **20.00** | False |
-| gear4 | 3 | 8.5 | 124 | **41.33** | False |
-| hda | 3 | 0.1 | 0 | 0.00 (root-bound) | False |
+| nvs17 | 25,905 | 1,320 | 0.00 | True | **YES** |
+| nvs19 | 8,740 | 443 | 0.01 | True | **YES** |
+| nvs24 | 2,810 | 142 | 0.01 | True | **YES** |
+| util | 501 | 75 | 0.00 | **False** | **YES** |
+| ex1233 | 111 | 3.7 | 0.68 | False | no |
+| kall_circles_c8a | 89 | 3.0 | 0.80 | False | no |
+| ex1252 | 85 | 2.8 | 0.62 | False | no |
+| st_e35 | 31 | 1.0 | 1.39 | False | no |
+| casctanks | 7 | 0.2 | 4.29 | False | no |
+| hda | 7 | 0.2 | 0 | False | no |
 
-**The spread is three orders of magnitude: 0.01 vs 20-41 NLP solves per node.**
+Within-kernel Rust throughput is ~**3,700 nodes/s** (nvs17: 25,905 nodes in ~7 s
+of actual tree time), versus 0.1-4 nodes/s in the Python loop.
 
-**Admission correlates but does NOT cause.** All 3 admitted instances are fast
-and all 8 slow ones are declined (`admitted among FAST 3/4, among SLOW 0/8`) —
-a strong association. But two independent pieces of evidence say admission is a
-**marker**, not the mechanism:
+**What this card got wrong, and the methodological lesson.** An earlier version
+of this card claimed the separator was *NLP solves per node*. That was a
+**symptom, not the gate** — instances stuck in the Python loop pay 20-41 NLP/node
+*because* they are in that loop. Worse, the probe used to test kernel engagement
+called `build_spatial_kernel_spec(model)` on **raw declared bounds**, but that
+gate is **bounds-dependent**: `util` is declined on raw bounds and engages at the
+presolved box. *Probe engagement at the presolved box, or during a real solve, or
+you will get the wrong answer.* (Independently re-checked: the kernel genuinely
+declines prob02/st_e01/st_e09/nvs01/ex1225/gear even during a real solve, so the
+#861/#896 A/B validity is unaffected — those did run the Python path.)
 
-* **`util` is declined and fast** (74.6 nodes/s, 2 NLP calls total). Admission is
-  not necessary for the fast regime.
-* **The causal test says no.** #861's A/B toggled `DISCOPT_INCREMENTAL_MC` on the
-  *same* instances and measured **1.0x** (independently re-verified; if anything
-  0-5% slower). Toggling admission changes the per-node *build* path but does not
-  move an instance between the NLP-per-node and LP-per-node engines — so it
-  cannot and does not change the regime.
+**Incremental-McCormick admission is a proxy, not the gate.** `util` is declined
+by incMcC yet runs the fast regime. This is consistent with, and independently
+re-confirms, the #861/#896 conclusion that flipping admission alone moves nothing
+(§4). Widening the **kernel's** covered subset is the lever; widening incMcC
+admission is not.
 
-The honest reading: admission and the fast regime share a common cause — the
-model being in scope for the McCormick-LP-per-node engine. Nice structures (clean
-bilinear/integer QCQP) both admit *and* route to the LP loop. **This vindicates
-the #861/#896 closures** (admission itself is not a lever) while pointing at a
-much larger one.
+**Third row of the picture, important for not over-reading nodes/s:** small
+instances that fathom in <= 3-15 nodes (nvs01, gear, gear4, st_e38, gbd) are
+quick in *any* regime because they never pay the per-node loop more than a few
+times. **Nodes/s is only a meaningful regime signal when the tree is nontrivial.**
 
-**Hypothesis.** The lever is *routing and NLP count*: either widen how many
-instances reach the LP-per-node engine, or cut the 20-41 NLP solves per node the
-default path pays.
+**Hypothesis.** Widening kernel-spec coverage (at the presolved box) moves
+instances into the fast regime, and that is the largest single throughput lever
+available.
 
-**Entry experiment.** For the 20-41 NLP/node instances (gear4, ex1225, nvs01,
-nvs21), attribute those calls: which caller issues them (strong branching? bound
-tightening? heuristics? per-node NLP relaxation?), and how many are *required*
-for correctness versus opportunistic. Then determine why each instance does not
-route to the LP-per-node engine — is it out of scope structurally, or declined by
-a gate that could be widened soundly? Print per-caller counts; a single dominant
-caller would make this a narrow, high-value fix.
+**Entry experiment.** For each slow instance, determine *why*
+`build_spatial_kernel_spec` declines **at its presolved box** — an unimplemented
+lifted family, a scalar-variable restriction, a non-finite bound, or an invalid
+McCormick at that box. Bucket the declines the way #861's `decline_reason` did for
+the Python path; the buckets tell you whether this is a small coverage extension
+or an engine rewrite.
 
-**Kill criterion.** If the NLP calls are irreducible (each genuinely required for
-a sound bound, no cheaper LP equivalent) AND the routing is a true structural
-scope limit rather than a conservative gate, then this is an architectural
-rewrite rather than a card, and it should be re-scoped as such rather than
-attempted incrementally. Also: `certification-gap-plan.md` Phase D already
-removed the *separation/strong-branch* POUNCE calls (2.0-2.7x on nvs17/nvs13) —
-confirm you are not re-treading that; the remaining calls are a different caller.
+**Kill criterion — read this before starting.** **Fast is not good.** Card F
+records that the three fastest instances here (all kernel-engaged) return
+incumbents 3%/71%/72% from the reference optimum, and that on nvs17/nvs19 the
+*Python* path finds essentially the exact optimum in 9-37 nodes. **Do not widen
+kernel coverage until Card F is resolved** — on current evidence that would route
+*more* instances onto a path that produces worse answers. If Card F shows the
+quality defect is intrinsic to the kernel's search rather than its seed, this card
+should be closed rather than pursued.
 
-**Gates.** Any routing widening is bound-changing (`CLAUDE.md` §5): differential
-bound test, feasible-point sampling, flag-gated default-off until a corpus panel
-is both cert-clean and net-positive. Reducing NLP *count* while preserving the
-same bounds is bound-neutral and must prove exact `node_count`/objective
-invariance.
-
-**Caveat.** 12 instances, one machine, under load. The three-order-of-magnitude
-NLP/node split is far too large to be a load artifact, but the ordering *within*
-each regime is not reliable at this sample size.
+**Gates.** Routing widening is bound-changing (`CLAUDE.md` §5). Additionally, and
+because of Card F: **incumbent quality vs the reference optimum must be a scored
+metric**, not just bound validity and throughput.
 
 ### Card D — Root throughput on the presolve-bound class
 
@@ -327,6 +325,48 @@ binding.
 
 ---
 
+### Card F — Native-kernel answer quality (the #764 graduation regression)
+
+> **Status:** OPEN — **filed as #902.** **Blocks:** Card C.
+
+**Finding.** The #764 native kernel graduated **default-ON** on 2026-07-27 and
+returns dramatically worse incumbents than the Python path it replaced on the
+nvs family, while exploring 100-1000x more nodes. Direct A/B on the flag, 30 s:
+
+| instance | kernel | status | objective | bound | nodes | vs reference |
+|---|---|---|---|---|---|---|
+| nvs17 | ON | time_limit | -1090.8 | -1168.91 | 42,007 | 0.9% off |
+| nvs17 | OFF | feasible | **-1100.4** | -1105.89 | **37** | **exact** |
+| nvs19 | ON | time_limit | **-315.0** | -5592.54 | 9,303 | **71.3% off** |
+| nvs19 | OFF | feasible | **-1097.6** | -1104.24 | **9** | **0.1% off** |
+| nvs24 | ON | time_limit | **-292.6** | -155,345 | 3,019 | **71.7% off** |
+| nvs24 | OFF | time_limit | none | -106,418 | 2,806 | no primal, 1.5x tighter bound |
+
+**Soundness:** not a false certificate — the dual bounds stay valid. This is a
+quality and dual-tightness regression. But `gap_certified=True` is reported
+alongside a 71%-wrong incumbent, which reads as endorsement.
+
+**Contributing factors (measured).**
+1. A **fixed 12 s seed phase** (`_NATIVE_SEED_HEURISTIC_S`, `solver.py:657`) is
+   ~60% of kernel wall; on nvs19 it is dominated by `_native_kernel_verify_point`
+   (60 calls, 10.4 s) retriggering JAX tracing — **697 traces, 8.5 s**. The seed
+   it yields is already 71-83% off and the ~7 s tree never recovers it.
+2. The kernel **abandons ~1/3 of its budget** — `time_limit` at ~20.5 s of 30 s,
+   reproduced unprofiled, despite `remaining ~= 17 s` being computed correctly.
+3. `rust_time`/`jax_time` are **broken on the native path** (nvs19:
+   `rust_time=0.0001 s` for a ~7 s Rust run). Do not gate on those fields.
+
+**Entry experiment.** Re-run #764's graduation panel with **incumbent quality vs
+reference optimum as a scored metric**, including nvs17/19/24. *Kill:* if the nvs
+family was in-panel and passed, this reproduction is machine-specific — chase that
+instead.
+
+**Gates.** Any re-graduation must meet `CLAUDE.md` §5's *net-positive* bar on
+answer quality, not only bound validity and throughput. Calibration: SCIP proves
+all three optimal in <3 s on the same contended box.
+
+---
+
 ## §4 Binding negative results — do not re-propose
 
 These are **falsified or measured-not-helpful**. Re-proposing one requires new
@@ -345,6 +385,35 @@ evidence that the original measurement was wrong, stated explicitly.
 **The pattern worth internalising:** four of these were *sound but not helpful*.
 Correctness is necessary and nowhere near sufficient. Budget entry experiments
 accordingly.
+
+---
+
+## §4b Other measured findings without a card yet
+
+Recorded so they are not lost; each needs a card before any work starts.
+
+* **`hda` overruns its deadline by 55%** — 46.5 s against a 30 s limit. Root
+  presolve (7.5 s), convexity classification (6.6 s) and relaxation build (4.0 s)
+  run to completion regardless of budget. This is the #832-family overrun still
+  alive on the root path. **75% of hda's wall is JAX tracing** (`core.bind`,
+  34.7 s of 46.5 s) — the substrate under every other phase.
+* **`tspn08` finds the exact optimum at node 1 in 9.8 s, then stops** with
+  `bound=None` and status `feasible`, leaving 20 s of a 30 s budget unused. No
+  certification loop ever runs. The inverse of the no-primal failure.
+* **`gap_certified=True` coexists with poor answers** (nvs24: certified, 72% off,
+  bound 152x too deep). The flag means "the bound is rigorous", but as surfaced it
+  reads as endorsement of the *solution*. A reporting-semantics issue, not a
+  soundness one.
+* **The old cost model is partly stale.** `gear4` and `st_e38` — poster children
+  of the June CC2/CC3 profiles (`gear4` 5,921 nodes / 70 s; `st_e38` "272x
+  slower") — now solve in **<1 s at 3 nodes**. `casctanks` still fails (no primal).
+  **Do not cite June profiles as current evidence without re-measuring.**
+* **`root_gap` is `None` everywhere** — the field exists and aggregation exists,
+  but the producer was never wired (`certification-gap-plan.md` T0.1). Any card
+  wanting root-quality metrics must land that first.
+* **Where discopt is AHEAD of SCIP**, worth protecting in any change: `gear4`
+  3 nodes vs SCIP's 899; `casctanks` dual bound ~2.9 vs SCIP's −14.9; `st_e38` at
+  parity.
 
 ---
 
@@ -373,6 +442,10 @@ ad-hoc probes.**
 * **Timing needs interleaving, a load gate, and a spread** — and state your
   *resolvability*: at 1–8% relative sd, a 1.3x effect is 4–30 sigma out (so the
   null is resolvable) but anything under ~5% is not.
+* **Probe a gate the way production calls it.** `build_spatial_kernel_spec` is
+  **bounds-dependent**: probing it with raw declared bounds declines `util`, which
+  *does* engage at the presolved box. A gate probed under the wrong preconditions
+  answers a different question than the one you asked.
 * **Do not create your own load.** Running three profiling agents concurrently
   invalidates all three. Serialise timing work, or report shares/ratios only.
 
