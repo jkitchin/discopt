@@ -653,3 +653,131 @@ Fixed at the level of method, not the individual numbers:
     returns `5.2433990`, **correct to ~7 significant figures**.
   The merge rule is `minlplib.solu` wins on any overlap, so a local measurement
   can only fill a gap, never override upstream.
+
+---
+
+## §7 addendum — T5's premise is falsified by measurement (2026-07-28)
+
+Three measurements taken as T5a's entry experiment, together, invalidate the T5
+design and its staging. Recorded per CLAUDE.md §4 (the measurement wins) before
+any T5 code was written.
+
+**1. The staging is backwards — the bounds tape is a PREREQUISITE, not a follow-on.**
+Classifying all 457 product specs in the `bounds mismatch` bucket by what their
+operand forms reference:
+
+    BARE_BILINEAR 179    ORIG_FORM 27    AUX 251   (55% reference an AUX column)
+
+Only **6** instances (`alan`, `kall_circles_c8a`, `st_e05`, `st_e07`, `st_e11`,
+`util`) have products over original columns only, which is all T5a-as-scoped can
+patch. The other **24** reference aux columns whose bounds are themselves
+box-dependent and produced upstream by the engine — so they need the ordered
+bounds tape (planned as T5c, *last*). T5a → T5b → T5c cannot be executed in that
+order.
+
+**2. The instances T5 would admit are the ones where patching saves least.**
+Per-node cold-build cost over the corpus:
+
+    ADMITTED (fast path today)   n=36  median 0.20 ms  p90 1.10 ms  max 9.42 ms
+    DECLINED (T5 would admit)    n=45  median 0.20 ms  p90 1.14 ms  max 20.41 ms
+
+Only **5 of 45** declined instances have a cold build above 1 ms: `hda`
+(20.41 ms, 722 vars), `ex1233`, `kall_circles_c8a`, `nvs20`, `util`. For the
+other 40 the per-node build being replaced costs ~0.2 ms.
+
+**3. Admission delivers no measurable end-to-end speedup on that class.**
+Interleaved A/B (never sequential), 3 repeats, `DISCOPT_INCREMENTAL_MC` 1 vs 0,
+load checked before and after (load average 2.6 → 4.9):
+
+    prob02  0.38±0.04 / 0.37±0.01 = 0.96x     nvs01   1.05±0.15 / 1.04±0.20 = 0.99x
+    st_e01  0.50±0.01 / 0.48±0.01 = 0.96x     ex1225  1.09±0.30 / 1.07±0.36 = 0.98x
+    st_e09  0.56±0.01 / 0.58±0.03 = 1.03x     gear    0.54±0.07 / 0.55±0.01 = 1.02x
+
+`prob02`/`st_e01`/`st_e09` are ADMITTED (so ON exercises the fast path, OFF the
+cold one); `nvs01`/`ex1225`/`gear` are DECLINED and therefore run the cold path
+either way — they are the **noise-floor control**, and the admitted instances are
+indistinguishable from it. Validity checked (CLAUDE.md rule 8): the native #764
+kernel returns `None` for all six, so they genuinely run the Python path and the
+env var genuinely toggles it. (`st_e13` IS handled natively and was excluded.)
+
+**Conclusion.** T5 as designed is the largest and riskiest task in this plan — it
+reimplements the engine's interval propagation as a replayable tape, where any
+divergence is a bound-neutrality violation — and measurement says it would buy
+~1.00x on 40 of the 45 instances it targets. That is the `DISCOPT_CUT_INHERIT`
+shape exactly: sound is not the same as helpful, and a cert-clean but
+neutral change does not earn its risk.
+
+Where admission *should* pay is the large-model tail — `hda` above all (20.41 ms
+per node, 722 variables) — and `hda` sits in the AUX-tape class. So the honest
+re-scope is to target the tape at the families the large instances actually need,
+or to drop the tape in favour of a hybrid that calls the engine's own bound
+propagation (parity by construction rather than by reimplementation), and to stop
+treating raw admission count as the objective. **Not started pending an owner
+decision on which of those to pursue.**
+
+### T6 — odd power on a straddling root box: WON'T-FIX (measured)
+
+Entry probe (fresh, this session): row count the COLD build emits for ``s = x**p``
+over a straddling box vs sign-definite ones, read off the lifted matrix:
+
+    p=2  straddling -> 4 rows    positive -> 4    negative -> 4
+    p=3  straddling -> 2 rows    positive -> 4    negative -> 4
+    p=4  straddling -> 4 rows    positive -> 4    negative -> 4
+    p=5  straddling -> 2 rows    positive -> 4    negative -> 4
+
+D6's condition was "0 rows (curvature abstains) => drop the gate". The answer is
+**2 rows**, not 0: the cold build emits a genuinely different row FAMILY there
+(the 2-facet S-hull), so the D6 escape does not apply and the sub-item closes as
+**won't-fix**, exactly as the issue's DoD item 3 permits.
+
+Not claimed impossible — claimed disproportionate. The 4-row reserved pattern
+*could* in principle carry 2 real facets plus 2 vacuous rows (``_rowset`` drops
+vacuous rows, the mechanism #873 introduced for pinned boxes). What makes it not
+worth building is the facets themselves: an S-hull facet is the tangent drawn
+from the opposite endpoint, whose tangency point is the root of a degree-``p``
+equation — closed-form only for small ``p``, a numerical solve in general, and
+each one must reproduce the engine's emission bit-for-bit or the structure is not
+bound-neutral. That is real machinery for a class with exactly **one** consumer in
+the corpus (``ex8_5_4``), which the fast path already serves correctly via the
+cold build.
+
+Already pinned in-repo by
+``test_861_monomial_span_zero.py::test_odd_power_monomial_still_declines_on_a_root_box_spanning_zero``
+plus the row-count table in that file's docstring, so the decision is verifiable
+rather than asserted.
+
+---
+
+## T7 — close-out (2026-07-28)
+
+**Final sweep, original baseline -> now:** admitted **31 -> 36** of 81, declined
+50 -> 45. Newly admitted: `prob02`, `prob03`, `st_e01`, `st_e08`, `st_e09`. Zero
+admitted->declined flips at any step.
+
+| bucket | baseline | final | what happened |
+|---|---|---|---|
+| `bounds mismatch` | 24 | 38 | grew *by design* — instances moved here from the two artifact buckets, now declining for an honest, attributable reason (an unpatched lifted family) instead of a box artifact |
+| `column-count mismatch` | 14 | **3** | artifact removed; the 3 survivors (`nvs01`, `nvs21`, `st_e17`) are genuinely box-unstable and must decline |
+| `envelope row count != 4` | 6 | **0** | eliminated — the misclassification is fixed |
+| `no valid bound / no rows` | 5 | **3** | infinite-root instances now reach `_validate` instead of dying at the probe build |
+| odd power on straddling root | 1 | 1 | won't-fix, measured (T6) |
+
+**Issue DoD status.** (1) Triage the two dominant buckets — **done**, with a
+verdict per bucket and the finding that `bounds mismatch` was *not* an
+over-strict comparison but genuine missing coverage. (2) Fix or correctly narrow
+the comparison so admission rises, bound-neutrality clean — **done**: +5
+admitted, both artifact buckets collapsed, and every gate clean at every step
+(360-comparison parity panel with a firing control, 0 oracle violations, 0
+flips). (3) Odd power — **decided** (won't-fix, T6, measured). (4) Before/after
+sweep over the same corpus — **done**, committed as JSON at each step.
+
+**Not done, and why:** T5's family-coverage work (the patch tape). Its premise is
+falsified by measurement — see the §7 addendum above: the staging is backwards
+(the tape is a prerequisite, not a follow-on), the instances it targets are the
+ones where patching saves least (median cold build 0.20 ms; only 5 of 45 exceed
+1 ms), and admission delivers **0.96–1.03x end-to-end** on that class, inside the
+noise floor set by declined-instance controls. Building it would reimplement the
+engine's interval propagation — where any divergence is a bound-neutrality
+violation — for no measured gain. Owner decision (2026-07-28): finish T6, close
+#861, and file a follow-up targeting the large-model tail where the cost model
+says admission actually pays (`hda`: 20.41 ms/node, 722 vars).
