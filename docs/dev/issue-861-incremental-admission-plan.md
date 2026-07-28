@@ -587,3 +587,69 @@ Append one entry per landed task (§0.1 recovers loop state from here).
     unstable class. Also `gear`/`gear2`/`gear3` are rescuable as predicted but
     **`gear4` is NEEDS_BOX** (infinite root box), so it depends on the
     caller-passed box, not on box anchoring.
+
+### T4 — root-anchored probe & validation boxes + caller-passed box — PR (this branch)
+
+* **Sweep (G2): 36 -> 36 admitted, 0 flips.** T4 gains no admissions on its own —
+  as §3 predicted — but it removes the *box artifact*, converting artifact
+  declines into honest family-coverage declines that T5 can act on:
+
+  | bucket | T3 | T4 |
+  |---|---|---|
+  | `bounds mismatch` | 25 | **38** |
+  | `column-count mismatch` | 14 | **3** |
+  | `no valid bound / no rows` | 5 | **3** |
+  | odd power on straddling root | 1 | 1 |
+
+* **The residual `column-count mismatch` set is exactly `{nvs01, nvs21, st_e17}`** —
+  precisely the three the T4 entry experiment predicted as genuinely box-unstable
+  (their lifted decomposition changes on *reachable* interior sub-boxes; nvs01
+  11 -> 15 columns). A confirmed prediction, and the negative control: a widening
+  that admitted these would have stopped detecting real patch/cold divergence.
+* **What changed.** `_probe_box()` and `_validation_boxes()` now generate every
+  interval inside the model's root box (`_root_box()`), and the constructor takes
+  `box=(lb, ub)` so a caller can supply its *presolved* root box —
+  `lp_spatial_bb` passes its post-OBBT `(lb0, ub0)`. `mccormick_lp` deliberately
+  does NOT pass one (it is constructed before it knows the branching box; a
+  guessed box would be worse than the model's own bounds). `_finite_root_interval`
+  gives an infinite endpoint a finite stand-in anchored at the finite side, which
+  is what lets the ex1233/alan/util class reach `_validate` at all instead of
+  dying at the probe build (`no valid bound` 5 -> 3).
+* **Gates:** G1 — `python/tests/test_861_root_anchored_boxes.py`, 14 tests, pass
+  after / fail before (note: for the three negative-control cases the fail-before
+  is the constructor signature change, not behaviour — their value is that they
+  *pass* after). Includes a regime-coverage test proving anchoring did not cost
+  the C-21 sign-regime spread. G3 — node-parity panel over 18 admitted instances,
+  **360 LP comparisons, 0 disagreements**. G4 — oracle check, **0 violations**.
+  G6 — CI's exact fast selection locally: **7347 passed, 29 skipped, 5 xfailed,
+  2 xpassed, 0 failures**; ruff clean.
+
+### Oracle hygiene — two fabricated reference values, and the fix
+
+Twice in this issue I checked results against a reference optimum I had **typed
+from memory rather than read**: `st_e11` against `0.067038` (true value
+`189.3116297`) and `st_e17` against `1.0` (it has **no** `=opt=` entry in
+`minlplib.solu` at all). Both produced spurious "false optimum / bound above
+optimum" reports against answers that were correct; both evaporated on re-check.
+
+Fixed at the level of method, not the individual numbers:
+
+* `discopt_benchmarks/scripts/incremental_oracle_check.py` **parses**
+  `minlplib.solu`, never accepts a typed value, distinguishes a certified
+  `optimal` objective (checkable) from a `time_limit` incumbent (not a
+  correctness claim), always checks the dual bound whatever the status, and
+  reports an instance with no reference as `NO-ORACLE` instead of passing it.
+* Only **2 of 81** corpus instances lack a MINLPLib reference: `st_e17` and
+  `meanvar`. Both are now established by **independent external global solvers**
+  on the exact in-repo `.nl` and recorded with full provenance in
+  `discopt_benchmarks/data/local_oracle.json`:
+  - `st_e17 = 376.291905403861` — SCIP (proven, gap 0%, dual = primal), BARON via
+    GAMS (Model Status 1 Optimal, `376.2919`), Couenne (Optimal). discopt returns
+    `376.2919323`, bound `376.2918930` — **correct to ~7 significant figures**.
+  - `meanvar = 5.24339865067014` — SCIP (proven, gap 0%) and Couenne (0% gap,
+    338 nodes) agree; BARON not run and the entry says so and why (its GAMS
+    binary does not read `.nl`, and hand-transcribing a dense 8-variable
+    quadratic is the very error class this file exists to prevent). discopt
+    returns `5.2433990`, **correct to ~7 significant figures**.
+  The merge rule is `minlplib.solu` wins on any overlap, so a local measurement
+  can only fill a gap, never override upstream.
