@@ -1,0 +1,20 @@
+# #764 native-kernel graduation panel — 20260728T192956Z
+# corpus: 4 instances, budget 60s, OFF vs ON, subprocess-isolated. Reference optima: 980 entries.
+# machine load: start 2.21, peak 5.93 (recorded, not gated — robustness comes from 3x replication of the 4 decisive instance(s), not from a quiet machine)
+
+## VERDICT
+quality-clean  : PASS (0 incumbent-quality regressions)
+  cert-clean   : PASS (0 violation(s); oracle-checked 4/4 instances = 100%, 0 unchecked)
+  net-positive : PASS (engaged=4, helped=2, median non-engaged wall Δ=+0.000s over 0 instances, overhead_ok=True)
+  unresolved   : 0 instance(s) quarantined for replicate disagreement (carry no verdict either way)
+  GRADUATE     : YES — flip default ON
+
+## ENGAGED instances (4): nvs17, nvs19, nvs24, tanksize
+## HELPED  (engaged, ON optimal where OFF was not) (2): nvs17, tanksize
+
+## PER-INSTANCE (engaged rows first)
+  instance             OFF status   ON status    eng         objOFF          objON        boundON    wOFF     wON
+  nvs17                feasible     optimal      Y   -1100.40000000 -1100.40000000 -1100.40000000    39.5    16.8
+  nvs19                feasible     time_limit   Y          -1097.6        -1098.2 -1638.50000000    40.7    39.4
+  nvs24                time_limit   time_limit   Y             None -1031.79999999 -97917.7976190    71.7    39.4
+  tanksize             feasible     optimal      Y   1.268643761465 1.268643752557 1.268544089701    60.4    17.3

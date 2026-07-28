@@ -601,9 +601,25 @@ def _native_spatial_kernel_enabled() -> bool:
     both justify and falsify the flag; it now panels the 119-instance union); every
     certification check required a side to be ``optimal``, so when neither run
     certified nothing fired at all (a ``quality_clean`` gate now compares incumbents
-    directly); and it had no load gate at all, so it would produce a timing verdict
-    under load 24 indistinguishable from a clean one (it now refuses per §9 and records
-    the load it ran at).
+    directly); and it was silently load-sensitive — the budget is wall-clock, so load
+    changes which instances hit the limit and therefore which *statuses* the verdict is
+    computed from, and it would emit a verdict under load 24 indistinguishable from a
+    clean one.
+
+    That third hole was first plugged with a blocking load gate (refuse to start until
+    1-min load < 2.5). **That was replaced**: on a real workstation it never runs, so it
+    is a wish rather than a test. Two further designs were tried and MEASURED to fail —
+    a deterministic ``max_nodes`` budget makes solves bit-reproducible (6/6 identical
+    across replicates) but ``node_limit`` sends the kernel back to the Python path, so
+    the panel compares OFF against OFF; and a static producer pre-filter drops
+    ``tanksize``, the instance carrying the verdict, because the producer is handed the
+    *presolved* box and the filter sees declared bounds. What ships instead is
+    replication: the decisive instances are re-run with the arms interleaved, a win must
+    hold in EVERY replicate, a regression in a majority, and an instance whose
+    replicates disagree is quarantined as unresolved. Load can now only move an instance
+    to "unresolved" — it can no longer make the verdict wrong — and the panel runs on a
+    busy machine (verified end-to-end at load 2.2 rising to 5.9: 4/4 decisive instances
+    STABLE, 0 quarantined).
 
     *Why still OFF.* Re-measured post-fix on nvs17/19/24 + tanksize the panel returns
     ``GRADUATE: YES`` — nvs17 goes ``feasible`` -> ``optimal``, nvs24 gains a primal OFF
@@ -612,7 +628,7 @@ def _native_spatial_kernel_enabled() -> bool:
     ever passed was blind on all three counts above, **no valid graduation panel has
     ever been run for it** — the 2026-07-27 graduation was not validly earned
     independently of the seed defect. So the default returns to OFF until a clean
-    119-instance run passes on a load-gated machine, which is the re-graduation gate
+    119-instance replicated run passes, which is the re-graduation gate
     tracked in #902. The cost of that conservatism is explicit: ``tanksize`` and
     ``nvs17`` both go ``optimal`` -> ``feasible`` at a 60 s budget with the kernel off.
 

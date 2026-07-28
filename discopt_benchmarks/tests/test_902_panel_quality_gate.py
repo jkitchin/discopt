@@ -238,3 +238,142 @@ def test_maximize_sense_is_respected():
     }
     v = m._evaluate(rows, {"tanksize": 2.0})
     assert v["quality_clean"] is False, "a maximize objective dropping 100 -> 10 is worse"
+
+
+# ---------------------------------------------------------------------------
+# Replication + instability quarantine (#902, second round)
+#
+# The first fix for load-sensitivity was a blocking load gate ("refuse to start
+# until 1-min load < 2.5"). On a real workstation that never runs -- it is a wish,
+# not a test. Two alternatives were measured and rejected before landing on
+# replication (both recorded in the panel's own comments):
+#   * a deterministic max_nodes budget makes solves bit-reproducible but the kernel
+#     falls back to Python on a node_limit exit, so the panel compares OFF vs OFF;
+#   * a static producer pre-filter drops tanksize, the instance carrying the verdict.
+# What survived: re-run the decisive instances, require differences to REPRODUCE,
+# and quarantine instances whose replicates disagree.
+# ---------------------------------------------------------------------------
+
+
+def _runs(statuses, objectives, engaged, sense="min"):
+    """A list of replicate result dicts for one arm."""
+    return [
+        {
+            "status": s,
+            "objective": o,
+            "bound": None,
+            "node_count": 1,
+            "wall": 10.0,
+            "sense": sense,
+            "engaged": engaged,
+        }
+        for s, o in zip(statuses, objectives, strict=True)
+    ]
+
+
+def _with_replicates(pair: dict, off_runs: list, on_runs: list, mod) -> dict:
+    """Attach a replicate block shaped exactly as the panel's stage 2 writes it."""
+    off_stable = mod._statuses_agree(off_runs)
+    on_stable = mod._statuses_agree(on_runs)
+    pair["replicates"] = {
+        "off": off_runs,
+        "on": on_runs,
+        "off_stable": off_stable,
+        "on_stable": on_stable,
+        "stable": off_stable and on_stable,
+        "off_median_objective": mod._median_objective(off_runs),
+        "on_median_objective": mod._median_objective(on_runs),
+    }
+    return pair
+
+
+def test_unstable_instance_is_quarantined_not_counted_as_a_regression():
+    """An instance whose replicates disagree on status is the MACHINE deciding, not
+    the flag. It must be reported as unresolved and must not fire the quality gate --
+    otherwise a busy machine manufactures regressions."""
+    m = _load()
+    # ON flaps between time_limit and optimal across replicates -> unstable.
+    pair = _with_replicates(
+        _nvs19_regression(),
+        _runs(["feasible"] * 3, [-1097.6] * 3, False),
+        _runs(["time_limit", "optimal", "time_limit"], [-315.0, -1098.0, -315.0], True),
+        m,
+    )
+    v = m._evaluate({"nvs19": pair}, {"nvs19": -1098.4})
+    assert v["quality_clean"] is True, "an unstable instance must not fire the gate"
+    assert any("nvs19" in u for u in v["unstable"]), "instability must be REPORTED"
+    assert "nvs19" not in v["helped"], "an unstable instance cannot justify the flag either"
+
+
+def test_reproducible_regression_still_fires_under_replication():
+    """The #902 regression is stable, so replication must NOT dilute it -- the whole
+    point is to keep real signal while dropping machine noise."""
+    m = _load()
+    pair = _with_replicates(
+        _nvs19_regression(),
+        _runs(["feasible"] * 3, [-1097.6] * 3, False),
+        _runs(["time_limit"] * 3, [-315.0, -312.0, -315.0], True),
+        m,
+    )
+    v = m._evaluate({"nvs19": pair}, {"nvs19": -1098.4})
+    assert v["quality_clean"] is False
+    assert v["unstable"] == []
+    assert any("reproduced over" in q for q in v["quality_violations"])
+
+
+def test_a_win_must_hold_in_every_replicate():
+    """A flaky win cannot carry net-positive. The bar has historically rested on a
+    SINGLE instance (tanksize), so one lucky replicate must not graduate a flag."""
+    m = _load()
+    flaky = _with_replicates(
+        _tanksize_win(),
+        _runs(["time_limit"] * 3, [None] * 3, False),
+        _runs(["optimal", "time_limit", "optimal"], [2.0, None, 2.0], True),
+        m,
+    )
+    v = m._evaluate({"tanksize": flaky}, {"tanksize": 2.0})
+    assert "tanksize" not in v["helped"], "a win that did not reproduce must not count"
+    assert v["net_positive"] is False
+
+
+def test_a_reproducible_win_does_count():
+    """Control for the test above: the same win, stable across replicates, still
+    graduates. A gate that rejects everything is as useless as one that accepts
+    everything."""
+    m = _load()
+    solid = _with_replicates(
+        _tanksize_win(),
+        _runs(["time_limit"] * 3, [None] * 3, False),
+        _runs(["optimal"] * 3, [2.0] * 3, True),
+        m,
+    )
+    v = m._evaluate({"tanksize": solid}, {"tanksize": 2.0})
+    assert "tanksize" in v["helped"]
+    assert v["net_positive"] is True and v["graduate"] is True
+
+
+def test_median_objective_ignores_replicates_with_no_primal():
+    m = _load()
+    # The None replicate is dropped, leaving two values -> their average.
+    assert m._median_objective(_runs(["a", "b", "c"], [None, -5.0, -7.0], True)) == -6.0
+    # Odd count after dropping -> the true middle value, not an average.
+    assert m._median_objective(_runs(["a", "b", "c", "d"], [None, -5.0, -7.0, -9.0], True)) == -7.0
+    # No replicate found a primal at all.
+    assert m._median_objective(_runs(["a"], [None], True)) is None
+    assert m._median_objective([]) is None
+
+
+def test_statuses_agree_detects_disagreement():
+    m = _load()
+    assert m._statuses_agree(_runs(["optimal"] * 3, [1.0] * 3, True)) is True
+    assert m._statuses_agree(_runs(["optimal", "time_limit"], [1.0, 1.0], True)) is False
+    assert m._statuses_agree([]) is False
+
+
+def test_blocking_load_gate_is_gone():
+    """Regression guard on the DESIGN: the panel must not reacquire a gate that
+    blocks on machine quietness. Robustness comes from replication."""
+    m = _load()
+    assert not hasattr(m, "_await_quiet_machine")
+    assert not hasattr(m, "_LOAD_GATE_MAX")
+    assert hasattr(m, "_REPLICATES")
