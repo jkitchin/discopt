@@ -1,0 +1,153 @@
+{
+ "rows": {
+  "nvs17": {
+   "off": {
+    "instance": "nvs17",
+    "flag": "0",
+    "engaged": false,
+    "sense": "min",
+    "wall": 39.403092165943235,
+    "status": "feasible",
+    "objective": -1100.4000000000003,
+    "bound": -1104.8319902490978,
+    "node_count": 65,
+    "binding_called": false,
+    "native_status": null,
+    "native_time_s": 0.0
+   },
+   "on": {
+    "instance": "nvs17",
+    "flag": "1",
+    "engaged": true,
+    "sense": "min",
+    "wall": 16.742013707989827,
+    "status": "optimal",
+    "objective": -1100.4000000000003,
+    "bound": -1100.4000000000015,
+    "node_count": 60403,
+    "binding_called": true,
+    "native_status": "optimal",
+    "native_time_s": 15.359211625065655,
+    "incumbent_feasible": true,
+    "verified_obj": -1100.4000000000003
+   }
+  },
+  "nvs19": {
+   "off": {
+    "instance": "nvs19",
+    "flag": "0",
+    "engaged": false,
+    "sense": "min",
+    "wall": 40.41664220811799,
+    "status": "feasible",
+    "objective": -1097.6,
+    "bound": -1103.8403736117978,
+    "node_count": 17,
+    "binding_called": false,
+    "native_status": null,
+    "native_time_s": 0.0
+   },
+   "on": {
+    "instance": "nvs19",
+    "flag": "1",
+    "engaged": true,
+    "sense": "min",
+    "wall": 39.3843109998852,
+    "status": "time_limit",
+    "objective": -1098.2,
+    "bound": -1638.8500000000033,
+    "node_count": 68444,
+    "binding_called": true,
+    "native_status": "time_limit",
+    "native_time_s": 37.379097500117496
+   }
+  },
+  "nvs24": {
+   "off": {
+    "instance": "nvs24",
+    "flag": "0",
+    "engaged": false,
+    "sense": "min",
+    "wall": 71.20508841704577,
+    "status": "time_limit",
+    "objective": null,
+    "bound": -5045.357782517491,
+    "node_count": 5441,
+    "binding_called": false,
+    "native_status": null,
+    "native_time_s": 0.0
+   },
+   "on": {
+    "instance": "nvs24",
+    "flag": "1",
+    "engaged": true,
+    "sense": "min",
+    "wall": 39.38377550011501,
+    "status": "time_limit",
+    "objective": -1031.7999999999997,
+    "bound": -97812.95000000062,
+    "node_count": 15991,
+    "binding_called": true,
+    "native_status": "time_limit",
+    "native_time_s": 34.58266416704282
+   }
+  },
+  "tanksize": {
+   "off": {
+    "instance": "tanksize",
+    "flag": "0",
+    "engaged": false,
+    "sense": "min",
+    "wall": 60.505028375191614,
+    "status": "feasible",
+    "objective": 1.2686437614652872,
+    "bound": 1.1980609660859773,
+    "node_count": 337,
+    "binding_called": false,
+    "native_status": null,
+    "native_time_s": 0.0
+   },
+   "on": {
+    "instance": "tanksize",
+    "flag": "1",
+    "engaged": true,
+    "sense": "min",
+    "wall": 17.707756916992366,
+    "status": "optimal",
+    "objective": 1.2686437525577947,
+    "bound": 1.2685440897016123,
+    "node_count": 11451,
+    "binding_called": true,
+    "native_status": "optimal",
+    "native_time_s": 15.152202917030081,
+    "incumbent_feasible": true,
+    "verified_obj": 1.2686437525577947
+   }
+  }
+ },
+ "verdict": {
+  "cert_clean": true,
+  "cert_violations": [],
+  "quality_clean": true,
+  "quality_violations": [],
+  "net_positive": true,
+  "engaged": [
+   "nvs17",
+   "nvs19",
+   "nvs24",
+   "tanksize"
+  ],
+  "helped": [
+   "nvs17",
+   "tanksize"
+  ],
+  "median_nonengaged_wall_delta_s": 0.0,
+  "overhead_ok": true,
+  "errored": [],
+  "no_oracle_instances": [],
+  "oracle_total": 4,
+  "oracle_covered": 4,
+  "n_nonengaged_measured": 0,
+  "graduate": true
+ }
+}
