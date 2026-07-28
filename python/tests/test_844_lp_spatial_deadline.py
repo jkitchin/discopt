@@ -53,19 +53,47 @@ def _integer_model(n: int = 12) -> dm.Model:
 
 def _incremental_model(n: int = 12) -> dm.Model:
     """Like :func:`_integer_model`, but with the bilinear terms in the OBJECTIVE so the
-    incremental McCormick structure actually builds.
-
-    ``_integer_model`` does *not* build one — its bilinear constraint rows lift to 5
-    envelope rows where the closed-form patch emits 4 — so every test using it
-    exercises the per-node cold build. That is the right control for the deadline
-    tests, but useless for asserting anything about the fast path.
-    """
+    incremental McCormick structure actually builds."""
     m = dm.Model("incremental_probe")
     xs = [m.integer(f"x{i}", lb=0, ub=20) for i in range(n)]
     m.minimize(sum(xs[i] * xs[i + 1] for i in range(n - 1)))
     for i in range(n - 1):
         m.subject_to(xs[i] + xs[i + 1] >= 7)
     return m
+
+
+def _no_incremental_model(n: int = 8) -> dm.Model:
+    """In scope for the engine, but its incremental structure does NOT build — the
+    control for anything asserting cold-path behaviour.
+
+    Uses a TRILINEAR coupling. ``_integer_model``'s bilinear *constraints* used to
+    serve this role, because a constraint on the product lifted to a 5th row over
+    the term's own columns and the structure declined counting it as an envelope
+    row. That was a defect (#861), not a property: envelope rows are now identified
+    numerically and ``_integer_model`` builds a structure, which silently turned
+    every test relying on it into a fast-path test. Trilinear lifts are outside the
+    closed-form patch's covered families by design (it regenerates bilinear /
+    integer-power / affine-square envelopes only), so this decline is a stable
+    property of the mathematics rather than of a bug.
+
+    Callers must still assert :func:`_declines_incremental` rather than trust this
+    docstring — that is what makes the rot loud instead of silent.
+    """
+    m = dm.Model("no_incremental_probe")
+    xs = [m.integer(f"x{i}", lb=0, ub=20) for i in range(n)]
+    m.minimize(sum((i + 1) * xs[i] for i in range(n)))
+    for i in range(n - 2):
+        m.subject_to(xs[i] * xs[i + 1] * xs[i + 2] >= 12)
+    return m
+
+
+def _declines_incremental(model) -> tuple[bool, str]:
+    """``(declined, reason)`` for ``model``'s incremental structure."""
+    from discopt._jax.incremental_mccormick import IncrementalMcCormickLP
+    from discopt._jax.term_classifier import classify_nonlinear_terms
+
+    inc = IncrementalMcCormickLP(model, classify_nonlinear_terms(model), deadline=None)
+    return (not inc.ok), (inc.decline_reason or "")
 
 
 def test_model_is_in_scope():
@@ -161,15 +189,29 @@ def test_engine_does_not_degrade_after_a_previous_solve(monkeypatch):
 def test_require_incremental_declines_when_the_fast_path_is_unavailable():
     """``require_incremental=True`` must decline rather than run the cold path.
 
-    ``_integer_model`` is in scope but its structure does not build, so it is exactly
-    the case the #844 fallback must refuse: on ball_mk2_30 (same situation) the cold
-    path spent 61 s on the root LP alone against a 21 s reserve and returned nothing.
+    ``_no_incremental_model`` is in scope but its structure does not build, so it is
+    exactly the case the #844 fallback must refuse: on ball_mk2_30 (same situation)
+    the cold path spent 61 s on the root LP alone against a 21 s reserve and returned
+    nothing.
     """
-    m = _integer_model(8)
-    assert solve_lp_spatial_bb(m, time_limit=4.0, require_incremental=True) is None
+    m = _no_incremental_model(8)
+    # PRECONDITION, asserted rather than assumed: this guard is only meaningful for a
+    # model whose fast path is genuinely unavailable. #861 made the previous fixture
+    # (bilinear constraints) build a structure, which turned this into a test that the
+    # engine declines a model it can actually serve — it failed loudly, but only
+    # because the assertion below happened to be `is None`. Assert the premise so a
+    # future coverage widening points at the fixture instead.
+    declined, reason = _declines_incremental(m)
+    assert declined, (
+        "fixture no longer declines the incremental structure — pick a family the "
+        "closed-form patch still does not cover, else this guard is vacuous"
+    )
+    assert solve_lp_spatial_bb(m, time_limit=4.0, require_incremental=True) is None, (
+        f"engine ran the cold path despite require_incremental (decline reason: {reason})"
+    )
     # …while the default (cold path allowed) still runs, so the decline is caused by
     # the flag and not by the model being out of scope.
-    assert solve_lp_spatial_bb(_integer_model(8), time_limit=4.0) is not None
+    assert solve_lp_spatial_bb(_no_incremental_model(8), time_limit=4.0) is not None
     # And a model whose structure DOES build is unaffected by the flag.
     assert (
         solve_lp_spatial_bb(_incremental_model(8), time_limit=4.0, require_incremental=True)

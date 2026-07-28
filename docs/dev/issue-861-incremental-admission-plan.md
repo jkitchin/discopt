@@ -534,6 +534,56 @@ Append one entry per landed task (§0.1 recovers loop state from here).
   `st_e11 = 189.3116297`, which discopt matches (obj `189.31162974`, bound
   `189.31162969`). There was no violation. Re-run with the corrected oracle:
   7 checked, 0 violations.
+* **CI caught what the local suites did not — fixture rot (read this before T4/T5).**
+  Smoke + adversarial + the incremental/native files all passed locally, but CI's
+  broader `Python fast` lane failed two #844 tests. Neither was a behaviour
+  regression: both fixtures **depended on the defect being fixed**.
+  - `test_844_lp_spatial_deadline.py` built its "fast path unavailable" control
+    from bilinear *constraints*, and its docstring even documented the reason —
+    "its bilinear constraint rows lift to 5 envelope rows where the closed-form
+    patch emits 4". That is precisely the misclassification T3 fixes, so the
+    model started building a structure and the `require_incremental` guard was
+    asserting that the engine declines a model it can now serve.
+  - `test_844_unresolved_child_soundness.py` injects failures into
+    `_relax_bound` — the **cold-path** entry point. Its model started using the
+    fast path, so the injection never fired and its own vacuity guard
+    (`assert state["failures"] > 0`) failed. **The guard worked exactly as
+    intended**; without it the test would have passed while asserting nothing.
+  Both repaired by making the premise DURABLE and EXPLICIT: fixtures now use a
+  **trilinear** coupling (outside the closed-form patch's families by design, so
+  the decline is a property of the mathematics, not of a bug) and each test
+  **asserts its own precondition** so a future coverage widening points at the
+  fixture instead of failing obscurely. Added
+  `test_failed_child_on_the_incremental_path_never_yields_a_false_certificate`,
+  which injects into `IncrementalMcCormickLP.solve` so the unresolved-child
+  soundness property is covered on the **fast path** — now the common case, and
+  previously untested.
+  **Standing lesson for T4/T5:** every admission widening can silently convert a
+  cold-path test into a fast-path test. Before opening a PR, run CI's exact fast
+  selection locally, not just `-m smoke`:
+  `pytest python/tests/ -m "not slow and not correctness and not integration and
+  not amp_benchmark and not requires_cyipopt and not memory_heavy"
+  --ignore=python/tests/test_correctness.py --ignore=python/tests/test_amp.py`
+  and grep the diff's blast radius for tests whose fixtures assume a decline.
 * **Next:** T4 (root-anchored probe/validation boxes + caller-passed presolved
-  box). Entry experiment already executed (§1-B), including its negative control
-  (nvs01/st_e35 must still decline).
+  box). Entry experiment already executed (§1-B) and **re-run at T3 HEAD over all
+  45 declined instances** (210 uniform builds), which sharpens §3 and corrects it:
+  - **RESCUABLE (28)** — layout identical across the root box and 6 reachable
+    root-anchored sub-boxes: `ex1221 ex1222 ex1225 ex1226 ex1252 ex1252a ex8_1_1
+    gear gear2 gear3 kall_circles_c8a mathopt5_2 nvs04 nvs06 nvs07 nvs08 nvs16
+    nvs20 st_e02 st_e03 st_e05 st_e06 st_e07 st_e11 st_e15 st_e36 st_e38 trig`.
+    This is an UPPER BOUND on what box-anchoring alone can convert — most still
+    need T5 patch coverage — not a prediction of T4's admission gain.
+  - **UNSTABLE (3)** — layout genuinely flips on a reachable sub-box; T4's
+    negative control: `nvs01` (11→15 cols), `nvs21`, `st_e17` (5→8 cols).
+  - **NEEDS_BOX (14)** — infinite raw root box or invalid root relaxation, so
+    nothing can be judged until the caller's presolved box is passed: `alan
+    chance ex1233 ex8_5_4 gear4 hda mathopt3 nvs05 nvs22 st_e04 st_e35 st_e40
+    syn05m util`.
+  - **Corrections to §3/§7:** the plan named `nvs01` + `st_e35` as the unstable
+    pair. Measured, the unstable set is `nvs01`, `nvs21`, `st_e17`; **`st_e35` is
+    NEEDS_BOX** (its ROOT relaxation has no valid bound), so its stability cannot
+    be judged until a presolved box is passed — it was mis-attributed to the
+    unstable class. Also `gear`/`gear2`/`gear3` are rescuable as predicted but
+    **`gear4` is NEEDS_BOX** (infinite root box), so it depends on the
+    caller-passed box, not on box anchoring.
