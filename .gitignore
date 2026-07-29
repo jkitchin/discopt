@@ -39,7 +39,10 @@ coverage.svg
 
 # Benchmark results and reports
 /results/
-/reports/
+# `/reports/*` rather than `/reports/`: git cannot re-include a file whose parent
+# DIRECTORY is excluded, so excluding the directory would make the negation below a
+# silent no-op.
+/reports/*
 /discopt_benchmarks/reports/
 # ...except the Phase 0 Regime-N baselines. These are not run output, they are the
 # frozen REFERENCE every Regime-N card is gated against (consolidation plan §0.1):
