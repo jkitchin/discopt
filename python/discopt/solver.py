@@ -23,6 +23,7 @@ import numpy as np
 # nonlinear bound tightening) are imported lazily at their nonlinear-path call
 # sites, so a pure LP/MILP/MIQP solve never pays JAX/XLA cold-start.
 from discopt._env import env_bool, env_float, env_int, env_str
+from discopt._jax import tightening_schedule as _ts
 from discopt._jax.model_utils import flat_variable_bounds
 from discopt._jax.problem_classifier import dense_A as _dense_A
 from discopt._jax.problem_classifier import dense_Q as _dense_Q
@@ -4852,6 +4853,12 @@ def solve_model(
     # clamp its own internal budget to the time actually left.
     _solve_t0 = time.perf_counter()
 
+    # Card 3a: start a fresh record of the declared tightening schedule for this
+    # solve, so ``TighteningSchedule.explain()`` afterwards describes THIS solve.
+    # Pure bookkeeping — the recorder writes a thread-local dict and returns
+    # ``None``; no ``_ts.record`` call below participates in a decision.
+    _ts.reset_run()
+
     def _remaining_budget() -> float:
         return max(0.0, float(time_limit) - (time.perf_counter() - _solve_t0))
 
@@ -5898,6 +5905,11 @@ def solve_model(
             _fr_lb, _fr_ub, _fr_infeas, _fr_changed = tighten_root_bounds_with_fbbt(
                 model, _fr_lb, _fr_ub, _fr_off, _fr_sz
             )
+            _ts.record(
+                "pre_factorable_fbbt",
+                infeasible=bool(_fr_infeas),
+                detail="changed" if _fr_changed else "no change",
+            )
             if not _fr_infeas and _fr_changed:
                 from discopt.solvers.amp import _apply_flat_bounds_to_model
 
@@ -6258,6 +6270,11 @@ def solve_model(
                 time_limit_ms=int(_presolve_budget_s * 1000),
             )
             n_tightened = propagate_bounds_to_model(model, _model_repr)
+            _ts.record(
+                "rust_root_presolve",
+                detail=str(_presolve_stats.get("termination", "")),
+            )
+            _ts.record("propagate_bounds_to_model", n_tightened=int(n_tightened))
             elim = _presolve_stats.get("elimination", {})
             poly = _presolve_stats.get("polynomial", {})
             if elim.get("variables_fixed", 0) > 0 or n_tightened > 0:
@@ -6291,6 +6308,7 @@ def solve_model(
 
             if coef_tighten_enabled():
                 n_ct = tighten_bigm_coefficients(model)
+                _ts.record("bigm_coefficient_tightening", n_tightened=int(n_ct))
                 if n_ct > 0:
                     logger.info("Coefficient tightening: strengthened %d big-M rows", n_ct)
         except Exception as e:
@@ -6307,6 +6325,7 @@ def solve_model(
             from discopt._jax.presolve_pipeline import run_reverse_ad_tightening
 
             n_rad = run_reverse_ad_tightening(model)
+            _ts.record("reverse_ad_tightening", n_tightened=int(n_rad))
             if n_rad > 0:
                 logger.info("Reverse-AD presolve tightened %d variable bounds", n_rad)
         except Exception as e:
@@ -6478,6 +6497,15 @@ def solve_model(
     # replaces the constraint set the box was derived from. Identity, not a flag,
     # is the guard.
     _declared_tightening_model = model
+    if _declared_tightening is None:
+        # The pass raised and both consumers degrade to "no information"; say so
+        # rather than record a fabricated zero.
+        _ts.declined("declared_box_tightening", "pass raised (see debug log)")
+    else:
+        _ts.record(
+            "declared_box_tightening",
+            n_tightened=int(getattr(_declared_tightening[2], "n_tightened", 0) or 0),
+        )
     _check_finite_bounds(model, _declared_tightening)
     nonlinear_infeasibility = _detect_nonlinear_bound_infeasibility(model, _declared_tightening)
     if nonlinear_infeasibility is not None:
@@ -7017,6 +7045,11 @@ def solve_model(
         time_limit_ms=_fbbt_budget_ms,
     )
     rust_time += time.perf_counter() - t_rust_start
+    _ts.record(
+        "root_fbbt",
+        infeasible=bool(root_infeasible),
+        wall_s=time.perf_counter() - t_rust_start,
+    )
     if root_infeasible:
         wall_time = time.perf_counter() - t_start
         return SolveResult(
@@ -7073,6 +7106,11 @@ def solve_model(
         if _dt_lb.shape == lb.shape and _dt_ub.shape == ub.shape:
             lb = np.maximum(lb, _dt_lb)
             ub = np.minimum(ub, _dt_ub)
+            _ts.record("declared_box_intersect", detail="intersected")
+        else:
+            _ts.declined("declared_box_intersect", "variable count changed")
+    else:
+        _ts.declined("declared_box_intersect", "no declared box / model rebound")
     lb, ub, _nl_root_infeasible = _apply_nonlinear_tightening_with_status(model, lb, ub)
     # An empty box is a rigorous infeasibility proof (both inputs to the intersection
     # are valid outer bounds of the same feasible set), routed through the existing
@@ -7224,6 +7262,12 @@ def solve_model(
                     jax_time=jax_time,
                     python_time=wall_time - rust_time - jax_time,
                 )
+            _ts.record(
+                "root_obbt",
+                n_tightened=int(_obbt_res.n_tightened),
+                wall_s=float(_obbt_res.total_lp_time),
+                detail=f"rounds={_obbt_res.n_rounds}",
+            )
             if _obbt_res.n_tightened > 0:
                 lb = np.maximum(lb, _obbt_res.lb)
                 ub = np.minimum(ub, _obbt_res.ub)
@@ -8997,6 +9041,9 @@ def solve_model(
                 batch_lb[i] = t_lb.tolist()
                 batch_ub[i] = t_ub.tolist()
             _reduce_timers["fbbt"] += time.perf_counter() - _t_fbbt
+            # Card 3a: one record per batch, not per node — the schedule recorder
+            # must not become a per-node cost on the hot loop.
+            _ts.record("node_jacobian_fbbt", wall_s=time.perf_counter() - _t_fbbt)
 
         # --- In-tree presolve / branch-and-reduce (PF1, issue #632) ---
         # Wire the persistent Rust FBBT(+reduce) kernel into the GLOBAL spatial
@@ -9057,6 +9104,7 @@ def solve_model(
                         batch_lb[i] = list(_itp_delta["lb"])
                         batch_ub[i] = list(_itp_delta["ub"])
                 _reduce_timers["fbbt"] += time.perf_counter() - _t_itp
+                _ts.record("node_in_tree_presolve", wall_s=time.perf_counter() - _t_itp)
             except Exception as _itp_exc:  # pragma: no cover - defensive
                 logger.debug("global in-tree presolve skipped: %s", _itp_exc)
 
@@ -9120,6 +9168,7 @@ def solve_model(
                 if _pn_res.infeasible:
                     node_infeasible_mask[i] = True
                     continue
+                _ts.record("node_obbt", n_tightened=int(_pn_res.n_tightened))
                 if _pn_res.n_tightened > 0:
                     batch_lb[i] = np.asarray(_pn_res.lb, dtype=np.float64).tolist()
                     batch_ub[i] = np.asarray(_pn_res.ub, dtype=np.float64).tolist()
@@ -11063,6 +11112,11 @@ def solve_model(
                             # under the #902 quality gate.
                             cascade_aux=False,
                         )
+                        _ts.record(
+                            "incumbent_cutoff_obbt",
+                            n_tightened=int(obbt_result.n_tightened),
+                            infeasible=bool(obbt_result.infeasible),
+                        )
                         if not obbt_result.infeasible and obbt_result.n_tightened > 0:
                             lb = obbt_result.lb
                             ub = obbt_result.ub
@@ -11088,6 +11142,7 @@ def solve_model(
                         )
                         fbbt_lbs = np.asarray(fbbt_lbs, dtype=np.float64)
                         fbbt_ubs = np.asarray(fbbt_ubs, dtype=np.float64)
+                        _ts.record("incumbent_cutoff_fbbt")
                         # C-40: apply cutoff-FBBT bounds only when the Rust repr's
                         # variable layout provably aligns 1:1 with the flat B&B
                         # columns — i.e. it returns exactly ``n_vars`` intervals and
@@ -12493,6 +12548,7 @@ def _solve_nlp_bb(
         int_sizes,
     )
     rust_time += time.perf_counter() - t_rust_start
+    _ts.record("nlp_bb_root_fbbt", infeasible=bool(root_infeasible))
     if root_infeasible:
         wall_time = time.perf_counter() - t_start
         return SolveResult(
@@ -12796,6 +12852,7 @@ def _solve_nlp_bb(
                     continue
                 batch_lb[i] = t_lb.tolist()
                 batch_ub[i] = t_ub.tolist()
+            _ts.record("nlp_bb_node_jacobian_fbbt")
 
         # B3: persistent in-tree FBBT via the Rust kernel, gated by
         # depth-stride. Best-effort — silently skipped if shape doesn't
@@ -12843,6 +12900,7 @@ def _solve_nlp_bb(
                     elif delta["ran"]:
                         batch_lb[i] = list(delta["lb"])
                         batch_ub[i] = list(delta["ub"])
+                _ts.record("nlp_bb_node_in_tree_presolve")
             except Exception as _e:
                 logger.debug("in-tree presolve skipped: %s", _e)
 
