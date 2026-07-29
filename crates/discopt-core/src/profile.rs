@@ -18,11 +18,14 @@ use std::time::Instant;
 
 static ENABLED: AtomicBool = AtomicBool::new(false);
 
-/// Enable profiling iff `DISCOPT_PROFILE` is present in the environment. Cheap to
-/// call repeatedly; the first call per process fixes the flag.
+/// Enable profiling iff `DISCOPT_PROFILE` is truthy (see [`crate::env::env_bool`]).
+/// Cheap to call repeatedly; the first call per process fixes the flag.
+///
+/// This was a *presence* test, so `DISCOPT_PROFILE=0` used to switch profiling ON.
+/// It now honours the repo's `=0` escape-hatch convention.
 pub fn init_from_env() {
     ENABLED.store(
-        std::env::var_os("DISCOPT_PROFILE").is_some(),
+        crate::env::env_bool("DISCOPT_PROFILE", false),
         Ordering::Relaxed,
     );
 }

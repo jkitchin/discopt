@@ -25,10 +25,16 @@ gate.
 | arm (this gate) | env flag(s) | regime | target structure |
 |---|---|---|---|
 | `root_fixpoint` | `DISCOPT_ROOT_FIXPOINT=1` | bound-changing | reduce-responsive box (≥1 var, ≥1 con) |
-| `node_reduce` | `DISCOPT_NODE_REDUCE=1` | bound-changing | reduce-responsive box |
 | `psd_cost_gate` | `DISCOPT_PSD_COST_GATE=1` | bound-changing | QCQP (any Q[C]P family) |
 | `lift_zero_spanning` | `DISCOPT_LIFT_ZERO_SPANNING_FACTORS=1` | bound-changing | products of zero-spanning factors (R4) |
 | `lift_loose_products` | `DISCOPT_LIFT_LOOSE_PRODUCTS=1` | bound-changing | loose composite products (TD-A) |
+
+`node_reduce` (`DISCOPT_NODE_REDUCE`) was an arm of this gate and is **gone**: it
+gated net-negative (PR #685 — benefit 24% / regression 18% on the held-out N=20 arm)
+and was removed in #581, flag and all. The *module* it drove
+(`python/discopt/_jax/node_reduce.py`) survived: `reduce_node()` is now wired to the
+Phase-2 DBBT lever `DISCOPT_PHASE2_DBBT` (a `SolverTuning` field) instead. Full flag
+index: `docs/reference/flags.md`.
 
 The `off` control and the `all` bundle are also defined as arms for cross-checks
 (`all` reproduces the pre-G1.2 bundled sweep). The escape-hatch convention holds

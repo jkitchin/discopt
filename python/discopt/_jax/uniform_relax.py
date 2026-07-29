@@ -46,12 +46,12 @@ from __future__ import annotations
 
 import dataclasses
 import math
-import os
 import time
 from typing import Callable, Optional, cast
 
 import numpy as np
 
+from discopt._env import env_bool
 from discopt._jax.canonical_expr import (
     CanonicalDAG,
     CNode,
@@ -800,9 +800,7 @@ class _Builder:
         v: object = cache.get(nid, _UNSET)
         if v is not _UNSET:
             return v
-        import os
-
-        if os.environ.get("DISCOPT_ANALYTIC_SEPGRAD") == "1":
+        if env_bool("DISCOPT_ANALYTIC_SEPGRAD", False):
             v = self._compiled_analytic(node)
             if v is not None:
                 cache[nid] = v
@@ -1490,7 +1488,7 @@ def _build_univariate_call(ctx: _Builder, node: CNode, w: int) -> Envelope:
     fname: str = node.payload
     # Log-sum-exp atom (gated): emit the convex softmax-tangent OA instead of the
     # loose concave ``log(sum exp)`` relaxation. Off by default => byte-identical.
-    if fname == "log" and os.environ.get("DISCOPT_LOGSUMEXP_ATOM") == "1":
+    if fname == "log" and env_bool("DISCOPT_LOGSUMEXP_ATOM", False):
         _lse = _lse_terms(ctx, node)
         if _lse is not None and _emit_lse(ctx, w, _lse):
             # tight=False keeps the aux interval floor (over side); the tangent
@@ -1498,7 +1496,7 @@ def _build_univariate_call(ctx: _Builder, node: CNode, w: int) -> Envelope:
             return Envelope(rows=[], tight=False)
     # Euclidean-norm atom (gated): convex OA of sqrt(sum t^2) instead of the loose
     # concave sqrt(square-sum). Off by default => byte-identical.
-    if fname == "sqrt" and os.environ.get("DISCOPT_NORM_ATOM") == "1":
+    if fname == "sqrt" and env_bool("DISCOPT_NORM_ATOM", False):
         _nt = _norm_terms(ctx, node)
         if _nt is not None and _emit_norm(ctx, w, _nt):
             return Envelope(rows=[], tight=False)
@@ -2119,7 +2117,7 @@ def _build_product(ctx: _Builder, node: CNode, w: int) -> Envelope:
     # byte-identical. ``lo>0`` guards the domain (``x*log(x)`` -> nan at x=0, and
     # its lower tangent slope ``log x + 1`` -> -inf); on ``lo<=0`` fall through to
     # the sound product path.
-    if os.environ.get("DISCOPT_ENTROPY_ATOM") == "1":
+    if env_bool("DISCOPT_ENTROPY_ATOM", False):
         _ent = _entropy_prod_var(ctx, node)
         if _ent is not None:
             _lt, _lo, _hi = _ent
@@ -2129,7 +2127,7 @@ def _build_product(ctx: _Builder, node: CNode, w: int) -> Envelope:
     # xexp atom (gated): recognize ``t*exp(t)`` on its convex region ``t>=-2`` and emit
     # the exact 1-D convex envelope. ``lo<-2`` (spans the inflection) or an overflow-prone
     # ``hi`` => fall through to the sound product path. Off by default => byte-identical.
-    if os.environ.get("DISCOPT_XEXP_ATOM") == "1":
+    if env_bool("DISCOPT_XEXP_ATOM", False):
         _xe = _xexp_prod_var(ctx, node)
         if _xe is not None:
             _lt, _lo, _hi = _xe
@@ -2137,7 +2135,7 @@ def _build_product(ctx: _Builder, node: CNode, w: int) -> Envelope:
                 _tight = _emit_1d(ctx, w, _lt, _lo, _hi, _xexp, _xexp_prime, "convex")
                 return Envelope(rows=[], tight=_tight)
     # Relative-entropy atom (gated): joint convex OA of x*log(x/y). Off => identical.
-    if os.environ.get("DISCOPT_RELENT_ATOM") == "1":
+    if env_bool("DISCOPT_RELENT_ATOM", False):
         _re = _relent_vars(ctx, node)
         if _re is not None and _emit_relent(ctx, w, _re[0], _re[1], _re[2]):
             return Envelope(rows=[], tight=False)

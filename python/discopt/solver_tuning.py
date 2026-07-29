@@ -24,18 +24,25 @@ unaffected.
 
 from __future__ import annotations
 
-import os
 from contextvars import ContextVar
 from dataclasses import dataclass, field, fields
 from typing import Optional
 
+from discopt._env import env_bool, env_enum, env_float, env_int, env_str
+
+#: Selector values accepted by ``DISCOPT_TRILINEAR`` (unset ⇒ the default path).
+TRILINEAR_CHOICES = ("nested", "meyer", "exact")
+
 
 def _env_flag(name: str, *, default: bool) -> bool:
-    """``DISCOPT_<name>`` as a boolean (``"0"`` is false, anything else true)."""
-    raw = os.environ.get(name)
-    if raw is None:
-        return default
-    return raw != "0"
+    """``DISCOPT_<name>`` as a boolean, per :mod:`discopt._env`'s truth table.
+
+    Kept as a thin alias so the ~30 field factories below read the same as before;
+    the parse itself lives in one place now. Historically this was ``raw != "0"``,
+    which made ``DISCOPT_RLT=false`` turn RLT **on** — see CHANGELOG (Unreleased →
+    Fixed) for the flags whose non-``0``/``1`` spellings changed meaning.
+    """
+    return env_bool(name, default)
 
 
 def _env_cut_inherit(name: str) -> Optional[bool]:
@@ -48,28 +55,28 @@ def _env_cut_inherit(name: str) -> Optional[bool]:
       33.55 vs the oracle 6.058; the nvs06-class reroute C-42 only partially
       fixed). Per CLAUDE.md §1 a false certificate blocks any default-ON flip, so
       the gated behaviour stays OPT-IN until that soundness bug is fixed.
-    * ``"0"`` ⇒ ``False`` (explicit force-off, identical to unset today);
     * ``"gated"`` / ``"auto"`` ⇒ ``None`` (structure-gated opt-in: inherit iff a
       non-empty root pool is separated — the pool-fires predicate);
-    * anything else (e.g. ``"1"``) ⇒ ``True`` (force-on).
+    * otherwise the standard boolean table (``0/false/no/off`` ⇒ ``False``,
+      ``1/true/yes/on`` ⇒ ``True``, anything else raises).
+
+    The tri-state is the reason this flag keeps a bespoke reader: ``None`` is a
+    third *behaviour*, not a missing value.
     """
-    raw = os.environ.get(name)
-    if raw is None:
-        return False
-    low = raw.strip().lower()
-    if low in ("gated", "auto"):
+    raw = env_str(name)
+    if raw is not None and raw.strip().lower() in ("gated", "auto"):
         return None
-    return raw != "0"
+    return env_bool(name, False)
 
 
-def _env_int(name: str, default: int) -> int:
-    raw = os.environ.get(name)
-    return default if raw is None else int(raw)
+def _env_trilinear() -> Optional[str]:
+    """``DISCOPT_TRILINEAR`` as a selector over :data:`TRILINEAR_CHOICES`.
 
-
-def _env_float(name: str, default: float) -> float:
-    raw = os.environ.get(name)
-    return default if raw is None else float(raw)
+    One env var drives three mutually-exclusive boolean fields, so it is read as an
+    enum: unset ⇒ ``None`` (all three off, the default path); an unrecognized value
+    now raises instead of silently selecting nothing.
+    """
+    return env_enum("DISCOPT_TRILINEAR", None, TRILINEAR_CHOICES)
 
 
 @dataclass(frozen=True)
@@ -227,7 +234,7 @@ class SolverTuning:
     (see ``docs/dev/performance-plan.md``)."""
 
     rlt_sparse_max_vars: int = field(
-        default_factory=lambda: _env_int("DISCOPT_RLT_SPARSE_MAX_VARS", 200)
+        default_factory=lambda: env_int("DISCOPT_RLT_SPARSE_MAX_VARS", 200)
     )
     """Variable-count ceiling for the sparse-bilinear RLT widening
     (``DISCOPT_RLT_SPARSE_MAX_VARS``, default 200). Bounds the per-node re-solve cost
@@ -235,7 +242,7 @@ class SolverTuning:
     when ``rlt_sparse_auto`` is on."""
 
     rlt_sparse_max_terms: int = field(
-        default_factory=lambda: _env_int("DISCOPT_RLT_SPARSE_MAX_TERMS", 300)
+        default_factory=lambda: env_int("DISCOPT_RLT_SPARSE_MAX_TERMS", 300)
     )
     """Product-term (lifted-column) budget for the sparse-bilinear RLT widening
     (``DISCOPT_RLT_SPARSE_MAX_TERMS``, default 300). Counts bilinear + trilinear +
@@ -266,7 +273,7 @@ class SolverTuning:
     default). Set to off to recover the structure-only gate (for A/B)."""
 
     rlt_sparse_min_root_gain: float = field(
-        default_factory=lambda: _env_float("DISCOPT_RLT_SPARSE_MIN_ROOT_GAIN", 1e-2)
+        default_factory=lambda: env_float("DISCOPT_RLT_SPARSE_MIN_ROOT_GAIN", 1e-2)
     )
     """Minimum relative root-bound improvement for the productivity gate to engage the
     sparse RLT widening (``DISCOPT_RLT_SPARSE_MIN_ROOT_GAIN``, default 1e-2 = 1%). The
@@ -274,11 +281,11 @@ class SolverTuning:
     (heatexch 1e-11 vs pooling 0.68), so the exact value is not sensitive; 1% requires
     a real, non-noise tightening. Only consulted when ``rlt_sparse_root_probe`` is on."""
 
-    rlt_quad_max: int = field(default_factory=lambda: _env_int("DISCOPT_RLT_QUAD_MAX", 256))
+    rlt_quad_max: int = field(default_factory=lambda: env_int("DISCOPT_RLT_QUAD_MAX", 256))
     """Column cap for quadratic RLT (``DISCOPT_RLT_QUAD_MAX``, default 256)."""
 
     multilinear_rlt_max: int = field(
-        default_factory=lambda: _env_int("DISCOPT_MULTILINEAR_RLT_MAX", 4)
+        default_factory=lambda: env_int("DISCOPT_MULTILINEAR_RLT_MAX", 4)
     )
     """Max arity for multilinear RLT lifting (``DISCOPT_MULTILINEAR_RLT_MAX``)."""
 
@@ -288,20 +295,20 @@ class SolverTuning:
     """Separate multilinear McCormick cuts (``DISCOPT_MULTILINEAR_SEPARATE``)."""
 
     trilinear_nested: bool = field(
-        default_factory=lambda: os.environ.get("DISCOPT_TRILINEAR") == "nested"
+        default_factory=lambda: _env_trilinear() == "nested"
     )
     """Force the legacy nested-bilinear trilinear path
     (``DISCOPT_TRILINEAR=nested``; equivalent to the default unless another
     trilinear selector is explicitly set)."""
 
     trilinear_meyer: bool = field(
-        default_factory=lambda: os.environ.get("DISCOPT_TRILINEAR") == "meyer"
+        default_factory=lambda: _env_trilinear() == "meyer"
     )
     """Use the Meyer-Floudas/Rikun trilinear convex-hull envelope
     (``DISCOPT_TRILINEAR=meyer``, default off)."""
 
     trilinear_exact: bool = field(
-        default_factory=lambda: os.environ.get("DISCOPT_TRILINEAR") == "exact"
+        default_factory=lambda: _env_trilinear() == "exact"
     )
     """Use the best-of-three nested trilinear envelope
     (``DISCOPT_TRILINEAR=exact``, default off)."""
@@ -375,7 +382,7 @@ class SolverTuning:
     ``docs/dev/flag-graduation-redo-2026-07-07.md``."""
 
     psd_cost_gate_budget: float = field(
-        default_factory=lambda: _env_float("DISCOPT_PSD_COST_GATE_BUDGET", 1.0)
+        default_factory=lambda: env_float("DISCOPT_PSD_COST_GATE_BUDGET", 1.0)
     )
     """PSD wall budget per node as a multiple of that node's base LP-solve wall
     (``DISCOPT_PSD_COST_GATE_BUDGET``, default 1.0). The PSD loop stops once its
@@ -383,7 +390,7 @@ class SolverTuning:
     when :attr:`psd_cost_gate` is on."""
 
     psd_cost_gate_tau: float = field(
-        default_factory=lambda: _env_float("DISCOPT_PSD_COST_GATE_TAU", 1e-4)
+        default_factory=lambda: env_float("DISCOPT_PSD_COST_GATE_TAU", 1e-4)
     )
     """Relative diminishing-returns threshold for the PSD loop
     (``DISCOPT_PSD_COST_GATE_TAU``, default 1e-4). A round whose LP-bound
@@ -544,7 +551,7 @@ class SolverTuning:
     graduates once a fast *sparse* rigorous LP oracle exists at that scale (see
     docs/dev/sparse-milp-plan.md §RLT1)."""
 
-    rlt1_max_pairs: int = field(default_factory=lambda: _env_int("DISCOPT_RLT1_MAX_PAIRS", 60_000))
+    rlt1_max_pairs: int = field(default_factory=lambda: env_int("DISCOPT_RLT1_MAX_PAIRS", 60_000))
     """Size guard for :attr:`rlt1_root_bound`: skip (sound no-op) when the all-pairs
     lift ``n(n-1)/2`` exceeds this (``DISCOPT_RLT1_MAX_PAIRS``, default 60000 —
     admits qap's 25200 pairs, blocks a runaway build on a much larger model)."""
@@ -569,7 +576,7 @@ class SolverTuning:
     the sparse inner oracle (see docs/dev/rlt-lagrangian-plan.md §3)."""
 
     rlt1_lagrangian_max_iter: int = field(
-        default_factory=lambda: _env_int("DISCOPT_RLT1_LAGRANGIAN_MAX_ITER", 300)
+        default_factory=lambda: env_int("DISCOPT_RLT1_LAGRANGIAN_MAX_ITER", 300)
     )
     """Subgradient iteration budget for :attr:`rlt1_lagrangian`
     (``DISCOPT_RLT1_LAGRANGIAN_MAX_ITER``, default 300). More iterations tighten the
@@ -600,13 +607,13 @@ class SolverTuning:
     synthetic Koopmans-Beckmann QAPs. **Default off**: an ~86 s root cost is a
     deliberate opt-in, and graduation needs the §5 corpus-wide differential panel."""
 
-    shor_sdp_max_dim: int = field(default_factory=lambda: _env_int("DISCOPT_SHOR_SDP_MAX_DIM", 400))
+    shor_sdp_max_dim: int = field(default_factory=lambda: env_int("DISCOPT_SHOR_SDP_MAX_DIM", 400))
     """Size guard for :attr:`shor_sdp_root_bound`: skip (sound no-op) when the
     moment-matrix dimension ``n + 1`` exceeds this (``DISCOPT_SHOR_SDP_MAX_DIM``,
     default 400 — admits qap's 226, blocks a runaway SDP on a much larger model)."""
 
     shor_sdp_time_limit: float = field(
-        default_factory=lambda: _env_float("DISCOPT_SHOR_SDP_TIME_LIMIT", 120.0)
+        default_factory=lambda: env_float("DISCOPT_SHOR_SDP_TIME_LIMIT", 120.0)
     )
     """Wall-clock budget in seconds for the SCS solve behind
     :attr:`shor_sdp_root_bound` (``DISCOPT_SHOR_SDP_TIME_LIMIT``, default 120 —
@@ -614,13 +621,15 @@ class SolverTuning:
     valid at any iterate, just looser."""
 
     node_bound_mode: str = field(
-        default_factory=lambda: os.environ.get("DISCOPT_NODE_BOUND_MODE", "lp")
+        default_factory=lambda: env_enum("DISCOPT_NODE_BOUND_MODE", "lp", ("lp", "milp"))
     )
     """Per-node dual bound: ``"lp"`` (default, lifted-McCormick LP) or ``"milp"``
     (legacy nested integer MILP node solve) — ``DISCOPT_NODE_BOUND_MODE``."""
 
     relax_space: str = field(
-        default_factory=lambda: os.environ.get("DISCOPT_RELAX_SPACE", "lifted")
+        default_factory=lambda: env_enum(
+            "DISCOPT_RELAX_SPACE", "lifted", ("auto", "lifted", "reduced", "hybrid")
+        )
     )
     """Per-node relaxation *space* for the McCormick dual bound
     (``DISCOPT_RELAX_SPACE``, MAiNGO-parity plan §2 P2.3). Values:
@@ -647,7 +656,7 @@ class SolverTuning:
     *raise* a node bound up to (never above) the true box optimum, never cut a
     feasible point."""
 
-    node_nlp_stride: int = field(default_factory=lambda: _env_int("DISCOPT_NODE_NLP_STRIDE", 4))
+    node_nlp_stride: int = field(default_factory=lambda: env_int("DISCOPT_NODE_NLP_STRIDE", 4))
     """Solve the node NLP every k-th node (``DISCOPT_NODE_NLP_STRIDE``, default 4)."""
 
     phase2_dbbt: bool = field(
@@ -725,7 +734,7 @@ class SolverTuning:
     certificate math are untouched. Set ``DISCOPT_CONTINUOUS_MULTISTART=0`` to
     restore the prior behavior."""
 
-    ils_solve_cap: int = field(default_factory=lambda: _env_int("DISCOPT_ILS_SOLVE_CAP", 2))
+    ils_solve_cap: int = field(default_factory=lambda: env_int("DISCOPT_ILS_SOLVE_CAP", 2))
     """Sub-NLP solve cap for the ``integer_local_search`` objective-descent
     (``DISCOPT_ILS_SOLVE_CAP``, **default 2 = ON** since ILS-DEFAULT, #530-followup).
 
@@ -891,15 +900,20 @@ class SolverTuning:
     becomes timing-dependent (an anytime algorithm), so it is not bit-reproducible
     run-to-run; the ``=0`` opt-out path stays deterministic."""
 
-    # NOTE (#581): ``DISCOPT_NODE_REDUCE`` (per-node cheap reduction: cutoff-FBBT +
-    # free DBBT from node-LP reduced costs + integer RC-fixing, feeding the
-    # tightened box to the children) was DEPRECATED and removed. It was a
-    # default-OFF, bound-changing flag that graduated-gated net-negative (PR #685:
+    # NOTE (#581): the ``DISCOPT_NODE_REDUCE`` *flag* (per-node cheap reduction:
+    # cutoff-FBBT + free DBBT from node-LP reduced costs + integer RC-fixing,
+    # feeding the tightened box to the children) was DEPRECATED and removed. It was
+    # a default-OFF, bound-changing flag that graduated-gated net-negative (PR #685:
     # benefit 24% / regression 18% on the held-out N=20 arm — regressed ex5_3_3,
     # spring, qapw) — sound but not helpful, so it is removed rather than left in
-    # default-OFF limbo. Removing the default-OFF gated branch (and its
-    # ``discopt._jax.node_reduce`` module) is byte-identical to the shipped
-    # default path (which never entered it).
+    # default-OFF limbo. Removing the default-OFF gated branch is byte-identical to
+    # the shipped default path (which never entered it).
+    #
+    # CORRECTION (Phase 1 Card 1a): the ``discopt._jax.node_reduce`` **module** was
+    # NOT removed — this note used to claim it was, while ``solver.py:8580`` imports
+    # ``reduce_node`` and runs it in the spatial node loop. Its live gate is
+    # :attr:`phase2_dbbt` (``DISCOPT_PHASE2_DBBT``, default OFF) above. Only the
+    # ``DISCOPT_NODE_REDUCE`` flag is gone.
 
     def __post_init__(self) -> None:
         if self.rlt_quad_max < 1:

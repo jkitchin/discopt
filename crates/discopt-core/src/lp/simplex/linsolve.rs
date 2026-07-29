@@ -199,10 +199,7 @@ fn route_dense_decision(m: usize, nnz: usize, params: &LuParams, density_route: 
 /// Set `DISCOPT_LU_DENSITY_ROUTE=0` to restore the historical dense-preferring
 /// routing byte-identically.
 fn density_route_enabled() -> bool {
-    !route_suppressed()
-        && std::env::var("DISCOPT_LU_DENSITY_ROUTE")
-            .map(|v| v != "0")
-            .unwrap_or(true)
+    !route_suppressed() && crate::env::env_bool("DISCOPT_LU_DENSITY_ROUTE", true)
 }
 
 std::thread_local! {
@@ -245,9 +242,7 @@ pub(crate) const HARDENING_ABS_FLOOR: f64 = 1e-14;
 /// fails again must fall through to the existing fallback chain, never recurse).
 pub(crate) fn hardening_retry_available() -> bool {
     !FACTORIZATION_HARDENING_ACTIVE.with(|s| s.get())
-        && std::env::var("DISCOPT_LP_FACTORIZATION_HARDENING")
-            .map(|v| v != "0")
-            .unwrap_or(false)
+        && crate::env::env_bool("DISCOPT_LP_FACTORIZATION_HARDENING", false)
 }
 
 /// Whether the hardened factorization mode is active on this thread (a hardened

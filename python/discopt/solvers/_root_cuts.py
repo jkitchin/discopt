@@ -38,10 +38,11 @@ panel (cert-clean + net-positive).
 from __future__ import annotations
 
 import logging
-import os
 from dataclasses import dataclass, field
 
 import numpy as np
+
+from discopt._env import env_bool
 
 logger = logging.getLogger(__name__)
 
@@ -60,8 +61,7 @@ POOL_MAX = 4000
 
 def nlpbb_root_cuts_enabled() -> bool:
     """Whether the ``DISCOPT_NLPBB_ROOT_CUTS`` opt-in flag is set (default OFF)."""
-    val = os.environ.get("DISCOPT_NLPBB_ROOT_CUTS", "0").strip().lower()
-    return val not in ("", "0", "false", "off", "no")
+    return env_bool("DISCOPT_NLPBB_ROOT_CUTS", False)
 
 
 @dataclass

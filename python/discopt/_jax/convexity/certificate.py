@@ -29,11 +29,11 @@ Adjiman, Dallwig, Floudas, Neumaier (1998), "αBB — I. Theoretical
 
 from __future__ import annotations
 
-import os
 from typing import Optional
 
 import numpy as np
 
+from discopt._env import env_bool
 from discopt.modeling.core import Constraint, Expression, Model
 
 from .eigenvalue import gershgorin_lambda_max, gershgorin_lambda_min, psd_2x2_sufficient
@@ -61,12 +61,7 @@ def _psd_qform_enabled() -> bool:
 
     Enable with ``DISCOPT_PSD_QFORM=1`` (also ``true``/``yes``/``on``).
     """
-    return os.environ.get("DISCOPT_PSD_QFORM", "0").strip().lower() in (
-        "1",
-        "true",
-        "yes",
-        "on",
-    )
+    return env_bool("DISCOPT_PSD_QFORM", False)
 
 
 def _certify_quadratic_psd(expr: Expression, model: Model) -> Optional[Curvature]:

@@ -135,12 +135,9 @@ def _plunge_enabled(*, require_incremental: bool = False) -> bool:
 
     Opt in with ``DISCOPT_LP_SPATIAL_PLUNGE=1``.
     """
-    import os as _os
+    from discopt._env import env_bool
 
-    _raw = _os.environ.get("DISCOPT_LP_SPATIAL_PLUNGE")
-    if _raw is not None:
-        return _raw not in ("0", "", "false", "False")
-    return bool(require_incremental)
+    return env_bool("DISCOPT_LP_SPATIAL_PLUNGE", bool(require_incremental))
 
 
 class LpSpatialResult(NamedTuple):

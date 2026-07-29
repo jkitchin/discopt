@@ -32,11 +32,12 @@ a vertex-hull "underestimator" that cuts off true points, so detection
 from __future__ import annotations
 
 import logging
-import os
 from dataclasses import dataclass
 from itertools import product
 
 import numpy as np
+
+from discopt._env import env_bool
 
 logger = logging.getLogger(__name__)
 
@@ -58,12 +59,7 @@ def _separation_lp_solver():
     routing is not byte-for-byte identical to POUNCE — the derived cut can differ
     (both sound). It is validated node-neutral on the cert baseline before shipping.
     """
-    use_simplex = os.environ.get("DISCOPT_SEPARATION_LP_SIMPLEX", "1").strip().lower() not in (
-        "0",
-        "false",
-        "no",
-        "off",
-    )
+    use_simplex = env_bool("DISCOPT_SEPARATION_LP_SIMPLEX", True)
     if use_simplex:
         try:
             from discopt.solvers.lp_simplex import SIMPLEX_AVAILABLE, solve_lp

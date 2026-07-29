@@ -1357,12 +1357,12 @@ impl<'a> Simplex<'a> {
             v >= self.lb[j] - ftol && v <= self.ub[j] + ftol
         });
         if !feasible {
-            if std::env::var("DISCOPT_T14_DBG").is_ok() {
+            if crate::env::env_bool("DISCOPT_T14_DBG", false) {
                 eprintln!("T14 REJECT primal-infeasible");
             }
             return Err(self.cols);
         }
-        if std::env::var("DISCOPT_T14_DBG").is_ok() {
+        if crate::env::env_bool("DISCOPT_T14_DBG", false) {
             eprintln!("T14 ACCEPT");
         }
         // Warm basis is nonsingular + primal-feasible → primal phase 2 only.

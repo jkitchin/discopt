@@ -27,8 +27,13 @@ on integrality. Soundness: the McCormick LP is a valid OUTER relaxation and both
 true optimum satisfies these inequalities — the reduction never removes it. Every
 tightening is an intersection (never loosens); any failure returns the box unchanged.
 
-Behind the ``node_reduce`` / ``DISCOPT_NODE_REDUCE`` flag at the solver integration
-point (default OFF until T2.6); this module is pure and flag-agnostic.
+Gating (as of #581). The original ``node_reduce`` / ``DISCOPT_NODE_REDUCE`` flag was
+removed after it gated net-negative (PR #685: benefit 24% / regression 18%); do not
+look for it. This module was **not** removed with it — ``reduce_node()`` is live
+behind the Phase-2 DBBT lever ``DISCOPT_PHASE2_DBBT`` (the ``phase2_dbbt``
+:class:`~discopt.solver_tuning.SolverTuning` field, default OFF), imported at
+``solver.py:8580`` and applied in the spatial node loop. The module itself is pure
+and flag-agnostic.
 """
 
 from __future__ import annotations

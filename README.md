@@ -330,6 +330,12 @@ Tutorial notebooks are available in `docs/notebooks/`:
 - **Decision-Focused Learning** -- differentiable optimization in ML pipelines
 - **GDP Tutorial** -- disjunctive programming, logical constraints, big-M/hull/LOA reformulations
 
+**Reference:** [`docs/reference/flags.md`](docs/reference/flags.md) is the generated
+index of every `DISCOPT_*` environment flag — name, default, kind
+(graduated / parked / permanent / debug), owning issue, and the single truth table
+they all parse by (`1/true/yes/on` vs `0/false/no/off`; anything else is refused
+loudly). Regenerate it with `python scripts/gen_flag_docs.py`.
+
 Full documentation is built with Jupyter Book: `jupyter-book build docs/`
 
 ## Project Statistics

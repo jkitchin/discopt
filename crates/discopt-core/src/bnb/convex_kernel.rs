@@ -1514,12 +1514,7 @@ impl ConvexKernelSpec {
 fn native_lp_enabled() -> bool {
     use std::sync::OnceLock;
     static ON: OnceLock<bool> = OnceLock::new();
-    *ON.get_or_init(|| {
-        std::env::var("DISCOPT_CVX_NATIVELP")
-            .ok()
-            .map(|v| !matches!(v.trim(), "" | "0" | "false" | "False"))
-            .unwrap_or(false)
-    })
+    *ON.get_or_init(|| crate::env::env_bool("DISCOPT_CVX_NATIVELP", false))
 }
 
 /// Tangent-pool GC cap for the persistent LP (generous: on the saturating `rsyn*`

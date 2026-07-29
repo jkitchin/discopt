@@ -779,11 +779,13 @@ pub fn parse_nl_with_complementarity(
     // Disabled again before the model leaves the parser so downstream mutating
     // passes (presolve/reformulation) keep plain append semantics.
     //
-    // `DISCOPT_DISABLE_CSE` is a measurement/escape hatch: when set, the arena is
+    // `DISCOPT_DISABLE_CSE` is a measurement/escape hatch: when truthy, the arena is
     // built with plain append (pre-CSE behavior). Because interning only ever
     // merges structurally-identical nodes, the two builds are evaluation-identical;
     // the flag exists to quantify the node-count lever and as a safety fallback.
-    let cse_enabled = std::env::var_os("DISCOPT_DISABLE_CSE").is_none();
+    // This was a presence test, so `DISCOPT_DISABLE_CSE=0` used to *disable* CSE;
+    // it now honours the shared truth table.
+    let cse_enabled = !crate::env::env_bool("DISCOPT_DISABLE_CSE", false);
     if cse_enabled {
         arena.enable_interning();
     }

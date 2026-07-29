@@ -111,15 +111,9 @@ def _lp_spatial_fallback_enabled() -> bool:
     common root cause is that the McCormick relaxation on this family is ~250x loose
     at the root, so no rounding-based heuristic reading it can do better.
     """
-    import os as _os
+    from discopt._env import env_bool
 
-    return _os.environ.get("DISCOPT_LP_SPATIAL_FALLBACK", "1") not in (
-        "0",
-        "",
-        "false",
-        "False",
-        "off",
-    )
+    return env_bool("DISCOPT_LP_SPATIAL_FALLBACK", True)
 
 
 def _lp_spatial_mixed_fallback_enabled() -> bool:
@@ -193,15 +187,9 @@ def _lp_spatial_mixed_fallback_enabled() -> bool:
     ``docs/dev/issue-860-lp-spatial-mixed-scope.md`` §4,
     ``scratchpad/panel860_flag.json``.
     """
-    import os as _os
+    from discopt._env import env_bool
 
-    return _os.environ.get("DISCOPT_LP_SPATIAL_MIXED", "0") not in (
-        "0",
-        "",
-        "false",
-        "False",
-        "off",
-    )
+    return env_bool("DISCOPT_LP_SPATIAL_MIXED", False)
 
 
 if TYPE_CHECKING:

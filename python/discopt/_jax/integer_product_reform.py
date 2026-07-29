@@ -40,6 +40,7 @@ from typing import Optional
 
 import numpy as np
 
+from discopt._env import env_bool
 from discopt.modeling.core import (
     BinaryOp,
     Constant,
@@ -50,7 +51,6 @@ from discopt.modeling.core import (
     Variable,
     VarType,
 )
-from discopt.solver_tuning import _env_flag
 
 from .factorable_reform import _collect_mul_factors
 from .term_classifier import _compute_var_offset, distribute_products
@@ -177,7 +177,7 @@ class _Expander:
         # exact AND hull ``z <= b`` / ``z >= sum b - (n-1)`` with ``c >= 0``) tie ``v``
         # back to ``c``, lifting the bound sound-ly (entry experiment: 12658 ->
         # ~57435 at that node). See docs/dev/performance-plan.md §6.
-        self.coupling_rlt = _env_flag("DISCOPT_MULTILINEAR_COUPLING_RLT", default=False)
+        self.coupling_rlt = env_bool("DISCOPT_MULTILINEAR_COUPLING_RLT", False)
 
     def expansion(self, var: Variable, elem: int, lo: int, hi: int):
         key = (var._index, elem)

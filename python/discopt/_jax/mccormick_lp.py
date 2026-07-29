@@ -18,13 +18,13 @@ from __future__ import annotations
 
 import dataclasses
 import logging
-import os
 import time
 from dataclasses import dataclass
 from typing import Optional
 
 import numpy as np
 
+from discopt._env import env_bool
 from discopt._jax.discretization import DiscretizationState
 from discopt._jax.milp_relaxation import (
     _LIFT_MAX_CROSS_TERM_ARG_MAGNITUDE,
@@ -532,7 +532,7 @@ class MccormickLPRelaxer:
         # row-for-row validation cold-build the relaxation a handful of times) for
         # callers that only want the relaxer's model/terms/disc and never invoke
         # ``solve_at_node`` (e.g. structural OBBT), avoiding wasted cold builds.
-        if build_incremental and os.environ.get("DISCOPT_INCREMENTAL_MC", "1") != "0":
+        if build_incremental and env_bool("DISCOPT_INCREMENTAL_MC", True):
             try:
                 from discopt._jax.incremental_mccormick import IncrementalMcCormickLP
 

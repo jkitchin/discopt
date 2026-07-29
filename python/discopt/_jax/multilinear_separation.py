@@ -28,11 +28,12 @@ so the loop can stop at any round and the bound stays valid.
 
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass
 from itertools import product
 
 import numpy as np
+
+from discopt._env import env_bool
 
 # Cold-simplex pivot cap for the multilinear vertex-hull LP. The hull LP has
 # ``2^n`` λ columns and ``n+1`` rows; on the widest ones (``n``≈10 → 1024
@@ -79,12 +80,7 @@ def _separation_lp_simplex_enabled() -> bool:
     separator (:func:`discopt._jax.edge_concave._separation_lp_solver`) and
     strong branching; ``"0"`` restores the POUNCE-IPM-only path.
     """
-    return os.environ.get("DISCOPT_SEPARATION_LP_SIMPLEX", "1").strip().lower() not in (
-        "0",
-        "false",
-        "no",
-        "off",
-    )
+    return env_bool("DISCOPT_SEPARATION_LP_SIMPLEX", True)
 
 
 @dataclass(frozen=True)

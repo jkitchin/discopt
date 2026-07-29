@@ -87,6 +87,7 @@ parts:
   - caption: API Reference
     chapters:
       - file: api
+      - file: reference/flags
   - caption: Appendix
     chapters:
       - file: comparison

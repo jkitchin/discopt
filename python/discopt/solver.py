@@ -12,7 +12,6 @@ from __future__ import annotations
 import functools
 import logging
 import math
-import os
 import time
 import weakref
 from typing import TYPE_CHECKING, Any, Callable, Optional, TypeVar, Union, cast
@@ -23,6 +22,7 @@ import numpy as np
 # does not pull in JAX. The JAX-dependent helpers (NLPEvaluator, alphaBB,
 # nonlinear bound tightening) are imported lazily at their nonlinear-path call
 # sites, so a pure LP/MILP/MIQP solve never pays JAX/XLA cold-start.
+from discopt._env import env_bool, env_float, env_int, env_str
 from discopt._jax.model_utils import flat_variable_bounds
 from discopt._jax.problem_classifier import dense_A as _dense_A
 from discopt._jax.problem_classifier import dense_Q as _dense_Q
@@ -408,7 +408,7 @@ _PER_NODE_OBBT_TOPK = 20
 
 def _obbt_topk_enabled() -> bool:
     """Whether the T2.5 scored top-k OBBT de-gate is on (env flag, default OFF)."""
-    return os.environ.get("DISCOPT_OBBT_TOPK", "").strip().lower() in ("1", "true", "yes", "on")
+    return env_bool("DISCOPT_OBBT_TOPK", False)
 
 
 def _trivial_primal_enabled() -> bool:
@@ -425,12 +425,7 @@ def _trivial_primal_enabled() -> bool:
     Primal-only: it only ever seeds a feasible incumbent (and only when none exists
     yet), so the dual bound / certificate are untouched. Gated to pure-continuous
     models (a trivial point need not be integer-feasible)."""
-    return os.environ.get("DISCOPT_TRIVIAL_PRIMAL", "").strip().lower() in (
-        "1",
-        "true",
-        "yes",
-        "on",
-    )
+    return env_bool("DISCOPT_TRIVIAL_PRIMAL", False)
 
 
 def _qubo_primal_enabled() -> bool:
@@ -451,12 +446,7 @@ def _qubo_primal_enabled() -> bool:
     ``qubo_primal.is_qubo``, and both the gate and the search are JAX-free, so
     the default-ON seed never pulls the JAX cold start onto the pure LP/MILP
     path (``test_lazy_jax_linear_path``)."""
-    return os.environ.get("DISCOPT_QUBO_PRIMAL", "").strip().lower() not in (
-        "0",
-        "false",
-        "no",
-        "off",
-    )
+    return env_bool("DISCOPT_QUBO_PRIMAL", True)
 
 
 # #282 iterate-root-OBBT-to-convergence (flag-gated, default OFF). The root OBBT
@@ -485,12 +475,7 @@ _OBBT_ITERATE_MIN_BOX_WIDTH = 10.0
 
 def _obbt_iterate_root_enabled() -> bool:
     """Whether the #282 iterate-root-OBBT-to-convergence lever is on (default OFF)."""
-    return os.environ.get("DISCOPT_OBBT_ITERATE", "").strip().lower() in (
-        "1",
-        "true",
-        "yes",
-        "on",
-    )
+    return env_bool("DISCOPT_OBBT_ITERATE", False)
 
 
 def _native_spatial_kernel_enabled() -> bool:
@@ -640,12 +625,7 @@ def _native_spatial_kernel_enabled() -> bool:
     exit at ~39 s of a 60 s limit — and its accounting fields are wrong on this path
     (``rust_time`` reads ~1e-4 s for a ~7 s Rust tree, ``jax_time`` 0.0), so do not
     build gates on them."""
-    return os.environ.get("DISCOPT_NATIVE_SPATIAL_KERNEL", "0").strip().lower() not in (
-        "0",
-        "false",
-        "no",
-        "off",
-    )
+    return env_bool("DISCOPT_NATIVE_SPATIAL_KERNEL", False)
 
 
 def _native_kernel_feature_safe(
@@ -1256,20 +1236,12 @@ def _try_native_spatial_kernel(
 # because it costs O(discrete) extra FBBT solves per firing.
 def _node_probing_enabled() -> bool:
     """Whether P3 per-node probing is on (``DISCOPT_NODE_PROBING``, default OFF)."""
-    return os.environ.get("DISCOPT_NODE_PROBING", "").strip().lower() in (
-        "1",
-        "true",
-        "yes",
-        "on",
-    )
+    return env_bool("DISCOPT_NODE_PROBING", False)
 
 
 def _node_probe_max_vars() -> int:
     """Per-node probing budget (discrete vars probed per firing); default 32."""
-    try:
-        return max(0, int(os.environ.get("DISCOPT_NODE_PROBE_MAX_VARS", "32")))
-    except ValueError:
-        return 32
+    return max(0, env_int("DISCOPT_NODE_PROBE_MAX_VARS", 32))
 
 
 # PF1 (issue #632): telemetry counting how many times the in-tree presolve
@@ -1469,12 +1441,7 @@ _POUNCE_BATCH_MULTISTART = False
 # trips "unsendable ... dropped on another thread" under pytest-xdist and can
 # perturb MIQP-batch certification; and the speedup is neutral-to-modest. Enable
 # explicitly once PyNlProblem is made Send-safe.
-_NLP_NATIVE_DEFAULT = os.environ.get("DISCOPT_NLP_NATIVE", "0").lower() not in (
-    "0",
-    "false",
-    "no",
-    "off",
-)
+_NLP_NATIVE_DEFAULT = env_bool("DISCOPT_NLP_NATIVE", False)
 
 
 def _native_nlp_enabled(options: dict) -> bool:
@@ -3309,12 +3276,7 @@ def _strong_branch_lp(
         # "pounce"). Node-neutrality is validated on the cert baseline: the simplex
         # vertex optimum and the IPM analytic-center objective agree to LP
         # tolerance, so the argmax branch decision is unchanged.
-        _sb_simplex = os.environ.get("DISCOPT_SEPARATION_LP_SIMPLEX", "1").strip().lower() not in (
-            "0",
-            "false",
-            "no",
-            "off",
-        )
+        _sb_simplex = env_bool("DISCOPT_SEPARATION_LP_SIMPLEX", True)
         solve_lp = get_lp_solver(prefer_pounce=prefer_pounce and not _sb_simplex)
     except ImportError:
         return None  # strong branching is optional; fall back to pseudocosts
@@ -3874,8 +3836,8 @@ _RENS_BUDGET_CAP_S = 8.0
 # These env reads are *defaults only*: they are resolved per call inside
 # ``solve_model`` (kwarg wins when given), so unlike module-frozen constants they
 # can be set after ``import discopt`` and differ per Model/per solve.
-_ROOT_CUT_POOL_ROUNDS_ENV = int(os.environ.get("DISCOPT_ROOT_CUT_ROUNDS", "0"))
-_ROOT_CUT_POOL_MAX_ENV = int(os.environ.get("DISCOPT_ROOT_CUT_MAX", "200"))
+_ROOT_CUT_POOL_ROUNDS_ENV = env_int("DISCOPT_ROOT_CUT_ROUNDS", 0)
+_ROOT_CUT_POOL_MAX_ENV = env_int("DISCOPT_ROOT_CUT_MAX", 200)
 
 # Marchand-Wolsey aggregation c-MIR separator (cert:P3). DEFAULT-OFF, bound-
 # changing per CLAUDE.md §5: it ships dark behind this flag until proven on
@@ -3883,13 +3845,7 @@ _ROOT_CUT_POOL_MAX_ENV = int(os.environ.get("DISCOPT_ROOT_CUT_MAX", "200"))
 # The separator is validity-gated (nonnegative row combination + valid MIR ⇒
 # valid cut; Rust ``aggregation_validity_random_systems`` property test), so
 # enabling it can only add valid cuts, never a false certificate.
-_CMIR_AGGREGATION_ENV_DEFAULT = os.environ.get("DISCOPT_CMIR_AGGREGATION", "0").lower() not in (
-    "0",
-    "",
-    "false",
-    "no",
-    "off",
-)
+_CMIR_AGGREGATION_ENV_DEFAULT = env_bool("DISCOPT_CMIR_AGGREGATION", False)
 
 
 def _cmir_aggregation_enabled() -> bool:
@@ -3897,10 +3853,7 @@ def _cmir_aggregation_enabled() -> bool:
 
     Re-reads ``DISCOPT_CMIR_AGGREGATION`` each call (default-off) so tests and
     callers can toggle it after import; falls back to the import-time default."""
-    val = os.environ.get("DISCOPT_CMIR_AGGREGATION")
-    if val is None:
-        return _CMIR_AGGREGATION_ENV_DEFAULT
-    return val.lower() not in ("0", "", "false", "no", "off")
+    return env_bool("DISCOPT_CMIR_AGGREGATION", _CMIR_AGGREGATION_ENV_DEFAULT)
 
 
 def _p3_force_cut_path_enabled() -> bool:
@@ -3920,10 +3873,7 @@ def _p3_force_cut_path_enabled() -> bool:
 
     Default-OFF and math-neutral when off: with the flag unset the reroute is
     unchanged, so default dispatch/behavior is bit-for-bit identical."""
-    val = os.environ.get("DISCOPT_P3_FORCE_CUT_PATH")
-    if val is None:
-        return False
-    return val.lower() not in ("0", "", "false", "no", "off")
+    return env_bool("DISCOPT_P3_FORCE_CUT_PATH", False)
 
 
 def _apply_auto_cut_policy(model: "Model", relaxer) -> None:
@@ -5481,7 +5431,7 @@ def solve_model(
         _solver is None
         and not _has_bb_callbacks
         and not skip_convex_check
-        and os.environ.get("DISCOPT_GP_MINLP", "0").strip().lower() in ("1", "true", "yes", "on")
+        and env_bool("DISCOPT_GP_MINLP", False)
     ):
         from discopt.gp import classify_gp_minlp, solve_gp_minlp
 
@@ -5515,7 +5465,7 @@ def solve_model(
         _solver is None
         and not _has_bb_callbacks
         and not skip_convex_check
-        and os.environ.get("DISCOPT_SGO", "0").strip().lower() in ("1", "true", "yes", "on")
+        and env_bool("DISCOPT_SGO", False)
     ):
         from discopt._jax.convexity.signomial_global import (
             classify_signomial_global,
@@ -5566,7 +5516,7 @@ def solve_model(
             from discopt.decomposition.learning import record_outcome
             from discopt.decomposition.learning.store import RecordStore
 
-            _store_path = os.environ.get("DISCOPT_DECOMP_STORE")
+            _store_path = env_str("DISCOPT_DECOMP_STORE")
             _store = (
                 RecordStore(path=_store_path) if (_store_path or record_decomposition) else None
             )
@@ -8368,9 +8318,9 @@ def solve_model(
     # skipped improver can never yield a wrong optimum — at worst a handful of
     # instances take more nodes. ``DISCOPT_HEUR_BUDGET=0`` restores the prior
     # always-on behaviour.
-    _heur_budget_on = os.environ.get("DISCOPT_HEUR_BUDGET", "1") != "0"
-    _HEUR_BUDGET_OFFSET = float(os.environ.get("DISCOPT_HEUR_OFFSET", "0"))  # root contingent
-    _HEUR_BUDGET_QUOT = float(os.environ.get("DISCOPT_HEUR_QUOT", "0.5"))  # per processed node
+    _heur_budget_on = env_bool("DISCOPT_HEUR_BUDGET", True)
+    _HEUR_BUDGET_OFFSET = env_float("DISCOPT_HEUR_OFFSET", 0.0)  # root contingent
+    _HEUR_BUDGET_QUOT = env_float("DISCOPT_HEUR_QUOT", 0.5)  # per processed node
     _HEUR_SUCCESS_GAIN = 3.0  # SCIP's 3·(found+1)/(calls+1) success weighting
     # Cost (sub-NLP-solve-equivalents) of each *budgeted* improver — the heavier
     # standalone-strength components: the binary-seed *enumeration* phase and the
@@ -8443,12 +8393,7 @@ def solve_model(
     # failed node below the spatial-branch width stays a (honest) sentinel fathom.
     # The threshold is 2x the Rust brancher's ``SPATIAL_MIN_WIDTH`` (1e-6 relative),
     # so a converted node is unambiguously above the width the brancher will split.
-    _narrow_box_branch = os.environ.get("DISCOPT_NARROW_BOX_BRANCH", "").strip().lower() in (
-        "1",
-        "true",
-        "yes",
-        "on",
-    )
+    _narrow_box_branch = env_bool("DISCOPT_NARROW_BOX_BRANCH", False)
     _nbb_root_width = _root_ub_snapshot - _root_lb_snapshot
     _nbb_int_mask = np.zeros(n_vars, dtype=bool)
     for _off, _sz in zip(int_offsets, int_sizes):
@@ -8500,7 +8445,7 @@ def solve_model(
     # heuristic, so skipping one is always sound: it can change which incumbent is
     # found and when (node counts may shift) but never the dual bound or the
     # returned optimum. Off switch: ``DISCOPT_ROOT_BUDGET_GATE=0``.
-    _root_budget_gate_on = os.environ.get("DISCOPT_ROOT_BUDGET_GATE", "1") != "0"
+    _root_budget_gate_on = env_bool("DISCOPT_ROOT_BUDGET_GATE", True)
     # Worst-case observed root/heuristic NLP wall (self-calibrating per model +
     # machine); seeds a default until the first solve is measured. Used to refuse
     # launching a new heuristic NLP when the time left cannot absorb another
@@ -11247,7 +11192,7 @@ def solve_model(
                         # keeps the still-valid pool.
                         if (
                             getattr(_mc_lp_relaxer, "_inc", None) is not None
-                            and os.environ.get("DISCOPT_ROOT_FIXPOINT_REPOOL") == "1"
+                            and env_bool("DISCOPT_ROOT_FIXPOINT_REPOOL", False)
                             and _remaining_budget() > _DEADLINE_NODE_FLOOR_S
                         ):
                             try:
@@ -12645,9 +12590,9 @@ def _solve_nlp_bb(
     # node-proportional budget, so improvers that stop paying off shut themselves off.
     # Soundness is untouched: B&B stays exhaustive, so a skipped improver can only
     # cost nodes, never a wrong optimum. DISCOPT_HEUR_BUDGET=0 restores always-on.
-    _heur_budget_on = os.environ.get("DISCOPT_HEUR_BUDGET", "1") != "0"
-    _HEUR_BUDGET_OFFSET = float(os.environ.get("DISCOPT_HEUR_OFFSET", "0"))
-    _HEUR_BUDGET_QUOT = float(os.environ.get("DISCOPT_HEUR_QUOT", "0.5"))
+    _heur_budget_on = env_bool("DISCOPT_HEUR_BUDGET", True)
+    _HEUR_BUDGET_OFFSET = env_float("DISCOPT_HEUR_OFFSET", 0.0)
+    _HEUR_BUDGET_QUOT = env_float("DISCOPT_HEUR_QUOT", 0.5)
     _HEUR_SUCCESS_GAIN = 3.0
     _HEUR_COST = {"rins": 5.0, "lbranch": 10.0}
     _heur_state = {"calls": 0, "found": 0, "cost": 0.0}
@@ -16830,7 +16775,7 @@ def _solve_milp_simplex(
             # independently re-verified feasible + integral) and net-positive
             # (3/15 graphpart instances strictly better primal, 12 tie, 0 worse).
             # ``DISCOPT_MILP_SWAP_RESEED=0`` remains the opt-out.
-            if os.environ.get("DISCOPT_MILP_SWAP_RESEED", "1") != "0":
+            if env_bool("DISCOPT_MILP_SWAP_RESEED", True):
                 _swap_seed = _one_hot_swap_reseed(
                     model, np.asarray(x_struct, dtype=np.float64), _reentry_remaining
                 )

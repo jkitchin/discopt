@@ -58,9 +58,10 @@ set to ``rens`` only): 0 certified-objective degradations, 0 lost incumbents,
 
 from __future__ import annotations
 
-import os
 import threading
 from dataclasses import dataclass, field
+
+from discopt._env import env_bool
 
 # ---- global policy constants (NOT per-instance / per-name) -------------------
 
@@ -105,13 +106,7 @@ def _governor_enabled() -> bool:
     the escape hatch that restores the pre-governor byte-identical behaviour — a
     graduated default, never a dead flag.
     """
-    return os.environ.get("DISCOPT_HEURISTIC_GOVERNOR", "1").lower() not in (
-        "0",
-        "off",
-        "false",
-        "no",
-        "",
-    )
+    return env_bool("DISCOPT_HEURISTIC_GOVERNOR", True)
 
 
 @dataclass

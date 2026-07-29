@@ -34,12 +34,13 @@ bound-changing work ships behind a flag until a differential panel passes).
 from __future__ import annotations
 
 import logging
-import os
 import threading
 import time
 from typing import TYPE_CHECKING, Any, Optional
 
 import numpy as np
+
+from discopt._env import env_bool
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from discopt.modeling.core import SolveResult
@@ -57,13 +58,7 @@ _state = threading.local()
 
 def substitution_enabled() -> bool:
     """True when ``DISCOPT_PRESOLVE_SUBSTITUTE`` is set to a truthy value."""
-    return os.environ.get("DISCOPT_PRESOLVE_SUBSTITUTE", "0").strip().lower() not in (
-        "",
-        "0",
-        "false",
-        "off",
-        "no",
-    )
+    return env_bool("DISCOPT_PRESOLVE_SUBSTITUTE", False)
 
 
 def _in_reduced_solve() -> bool:

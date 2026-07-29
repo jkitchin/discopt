@@ -28,6 +28,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 from discopt import __version__
+from discopt._env import env_bool, env_float, env_int
 
 logger = logging.getLogger(__name__)
 
@@ -73,17 +74,31 @@ _FINGERPRINT = _source_fingerprint()
 
 
 def _env_flag(name: str) -> bool:
-    return os.environ.get(name, "0").lower() in ("1", "true", "yes", "on")
+    """A daemon boolean, per :mod:`discopt._env`'s truth table (default OFF).
+
+    ``name`` is built by f-string from the daemon's ``env_prefix``, so it is not a
+    greppable literal; the expanded names are registered in
+    :data:`discopt._flag_registry.FLAG_REGISTRY` (see ``DAEMON_PREFIXES`` /
+    ``DAEMON_SUFFIXES``) and covered by ``test_flag_registry.py``.
+    """
+    return env_bool(name, False)
 
 
 def _resolve(explicit, env_name: str, default, cast):
-    """Pick an explicit arg, else an env override, else a default; ``cast`` typed."""
+    """Pick an explicit arg, else an env override, else a default; ``cast`` typed.
+
+    ``cast`` is :class:`int` or :class:`float`; the env read goes through
+    :func:`discopt._env.env_int` / :func:`~discopt._env.env_float` so a malformed
+    value names the flag instead of raising a bare ``ValueError``. As with
+    :func:`_env_flag`, ``env_name`` is f-string-built and registered expanded.
+    """
     if explicit is not None:
         return cast(explicit)
-    raw = os.environ.get(env_name)
-    if raw is not None:
-        return cast(raw)
-    return cast(default)
+    if cast is int:
+        return env_int(env_name, int(default))
+    if cast is float:
+        return env_float(env_name, float(default))
+    raise TypeError(f"_resolve: unsupported cast {cast!r} for {env_name}")
 
 
 def _current_rss_mb() -> float:

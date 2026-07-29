@@ -99,9 +99,9 @@ def _lift_zero_spanning_factors_enabled() -> bool:
     ``docs/dev/flag-graduation-redo-2026-07-07.md``. ``=0`` restores the old
     byte-identical (no-tagging) behavior.
     """
-    import os
+    from discopt._env import env_bool
 
-    return os.environ.get("DISCOPT_LIFT_ZERO_SPANNING_FACTORS", "1") != "0"
+    return env_bool("DISCOPT_LIFT_ZERO_SPANNING_FACTORS", True)
 
 
 def _lift_loose_products_enabled() -> bool:
@@ -143,9 +143,9 @@ def _lift_loose_products_enabled() -> bool:
     reduction (OBBT/branch-and-reduce), not a lifting problem. See
     ``docs/dev/uncertified-tail-plan-results-2026-07-06.md`` §TD-A.
     """
-    import os
+    from discopt._env import env_bool
 
-    return os.environ.get("DISCOPT_LIFT_LOOSE_PRODUCTS", "1") != "0"
+    return env_bool("DISCOPT_LIFT_LOOSE_PRODUCTS", True)
 
 
 # Transcendental univariate calls whose integer power TD-A lifts. Restricted to

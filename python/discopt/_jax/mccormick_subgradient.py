@@ -21,6 +21,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
+from discopt._env import env_enum
 from discopt._jax import mcbox as _mcbox
 from discopt._jax.mcbox import UnsupportedMcboxOp, mcbox_leaves
 from discopt._jax.relaxation_compiler import _resolve_scalar_var_offset
@@ -308,7 +309,6 @@ def reduced_mccormick_lp_bound(
     use scipy/HiGHS instead (debug/fallback); the simplex path also falls back to scipy
     automatically if the Rust binding is unavailable.
     """
-    import os
 
     import scipy.optimize as sopt
 
@@ -326,7 +326,7 @@ def reduced_mccormick_lp_bound(
     # the real lower bound, so a wide inert box suffices (a None here yields NaN there).
     T_BIG = 1e15
     bounds = [(float(lb[i]), float(ub[i])) for i in range(n)] + [(-T_BIG, T_BIG)]
-    backend = "scipy" if os.environ.get("DISCOPT_REDUCED_LP_BACKEND") == "scipy" else "simplex"
+    backend = env_enum("DISCOPT_REDUCED_LP_BACKEND", "simplex", ("simplex", "scipy"))
     milp = None
     A_all: list = []
     rhs_all: list = []

@@ -84,7 +84,6 @@ value in ``python/tests/data/known_optima.toml``.
 
 from __future__ import annotations
 
-import os
 from typing import TYPE_CHECKING, Optional
 
 if TYPE_CHECKING:
@@ -92,6 +91,7 @@ if TYPE_CHECKING:
 
 import numpy as np
 
+from discopt._env import env_bool, env_float
 from discopt.modeling.core import (
     BinaryOp,
     Constant,
@@ -649,7 +649,7 @@ def _marshal(n, c, sense_max, is_int, lb, ub, le_rows, eq_rows, nl_specs) -> dic
 
 def convex_kernel_enabled() -> bool:
     """`DISCOPT_CONVEX_KERNEL` opt-in (default-OFF)."""
-    return os.environ.get("DISCOPT_CONVEX_KERNEL", "0") not in ("0", "", "false", "False")
+    return env_bool("DISCOPT_CONVEX_KERNEL", False)
 
 
 def dominated_cols_enabled() -> bool:
@@ -664,7 +664,7 @@ def dominated_cols_enabled() -> bool:
     off takes the instance from `optimal` back to `exhausted`, and it is
     bit-identical (no-op) on every other in-repo instance the kernel routes.
     """
-    return os.environ.get("DISCOPT_CVX_DOMINATED_COLS", "1") not in ("0", "", "false", "False")
+    return env_bool("DISCOPT_CVX_DOMINATED_COLS", True)
 
 
 def solve_convex_tree(spec: dict, *, time_limit_s: Optional[float] = None, **cfg) -> dict:
@@ -702,7 +702,6 @@ def try_convex_solve(
     instances it cannot finish (tracked separately for SCIP-parity) and never
     reports an unsound or uncertified result. Proven-infeasible roots are surfaced.
     """
-    import os
     import time
 
     import numpy as np
@@ -715,7 +714,7 @@ def try_convex_solve(
     if spec is None:
         return None
 
-    budget = min(time_limit, float(os.environ.get("DISCOPT_CONVEX_KERNEL_BUDGET", "120")))
+    budget = min(time_limit, env_float("DISCOPT_CONVEX_KERNEL_BUDGET", 120.0))
     t0 = time.perf_counter()
     r = solve_convex_tree(
         spec,

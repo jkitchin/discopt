@@ -8,6 +8,7 @@
 pub mod amp;
 pub mod bnb;
 pub mod decomp;
+pub mod env;
 pub mod expr;
 pub mod lp;
 pub mod nl_parser;

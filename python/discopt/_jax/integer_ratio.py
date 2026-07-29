@@ -48,12 +48,13 @@ from __future__ import annotations
 
 import logging
 import math
-import os
 import time
 from dataclasses import dataclass
 from typing import Optional
 
 import numpy as np
+
+from discopt._env import env_bool
 
 logger = logging.getLogger(__name__)
 
@@ -85,7 +86,7 @@ def enabled() -> bool:
     after the 66-instance differential panel passed with ``incorrect_count=0``
     and zero certification regressions (see
     ``docs/dev/integer-ratio-partition-2026-07-16.md`` §5b)."""
-    return os.environ.get("DISCOPT_INTEGER_RATIO_PARTITION", "1") != "0"
+    return env_bool("DISCOPT_INTEGER_RATIO_PARTITION", True)
 
 
 @dataclass(frozen=True)

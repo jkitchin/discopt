@@ -120,6 +120,61 @@ The release procedure that produces these entries is documented in
 
 ### Fixed
 
+- **One truth table for every `DISCOPT_*` flag** (`fix`, consolidation plan Phase 1
+  Card 1a). The repo had **seven incompatible boolean parse idioms**, so the same
+  string meant opposite things depending on which flag carried it: `DISCOPT_RLT=false`
+  turned RLT **on** (`raw != "0"`), `DISCOPT_CONVEX_KERNEL=off` turned the kernel
+  **on**, `DISCOPT_SGO=2` turned SGO **off**, `DISCOPT_PROFILE=0` **enabled**
+  profiling (a Rust presence test), and the empty string was true under three idioms
+  and false under four. Every read now goes through `discopt._env`
+  (`env_bool`/`env_int`/`env_float`/`env_str`/`env_enum`) and its Rust twin
+  `crates/discopt-core/src/env.rs`, with one table: `1`/`true`/`yes`/`on` → true,
+  `0`/`false`/`no`/`off` → false (case-insensitive, whitespace-trimmed), unset or
+  empty → the flag's default, **anything else raises `ValueError` naming the flag
+  and the accepted values** instead of silently picking an arm. The `=0` escape
+  hatch that every graduated flag documents is unchanged.
+
+  **Compatibility.** Only non-`0`/`1` spellings change meaning, and no change is
+  silent — a value that no longer means what it used to now either flips to the
+  obvious reading or raises:
+
+  - `false` / `no` / `off` now mean **false** for the 46 `SolverTuning` flags
+    (`DISCOPT_RLT`, `DISCOPT_RLT_QUAD`, `DISCOPT_CUT_INHERIT`, …), which read
+    `raw != "0"` and treated them as **true**.
+  - `off` now means **false** for `DISCOPT_CONVEX_KERNEL`,
+    `DISCOPT_CVX_DOMINATED_COLS`, `DISCOPT_LP_SPATIAL_FALLBACK`,
+    `DISCOPT_LP_SPATIAL_MIXED`, `DISCOPT_LP_SPATIAL_PLUNGE` and the Rust
+    `DISCOPT_CVX_NATIVELP`, which excluded only `0`/``/`false`/`False`.
+  - `=0` now **disables** the three Rust presence-test flags `DISCOPT_PROFILE`,
+    `DISCOPT_DISABLE_CSE` and `DISCOPT_T14_DBG`; previously *any* value, `0`
+    included, enabled them — the opposite of the repo's own `=0` convention.
+  - An **empty** value (`DISCOPT_X=`) now uniformly means "unset, use the default",
+    where the old idioms split four/three on whether it was false or true.
+  - `true` / `yes` / `on` now enable the flags whose idiom was `== "1"`
+    (`DISCOPT_ROOT_FIXPOINT_REPOOL`, the `*_ATOM` family, `DISCOPT_ANALYTIC_SEPGRAD`,
+    `DISCOPT_GAMS_NO_DAEMON`) and the flags whose idiom was an explicit
+    `in ("1","true","yes","on")` list already accepted them.
+  - Anything else (`2`, `ture`, `enabled`) now **raises** on the Python side, where
+    it used to select an arm at random depending on the idiom; the Rust side warns
+    on stderr and takes the default (a solver kernel has no exception channel).
+  - `DISCOPT_TRILINEAR`, `DISCOPT_NODE_BOUND_MODE`, `DISCOPT_RELAX_SPACE` and
+    `DISCOPT_REDUCED_LP_BACKEND` are parsed as enums and reject an unknown value
+    instead of silently selecting nothing.
+
+  All default values are unchanged, so a run with no `DISCOPT_*` set is
+  bit-identical (verified by the Regime-N panel check). New:
+  `docs/reference/flags.md` (generated from `discopt._flag_registry.FLAG_REGISTRY`
+  plus the `SolverTuning` fields by `scripts/gen_flag_docs.py`) is the first
+  enumeration of the flag surface, and a CI grep-gate keeps raw
+  `os.environ.get("DISCOPT_` out of `python/discopt`.
+
+- **Stale flag documentation corrected** (`docs`, Phase 1 Card 1a).
+  `docs/dev/flag-graduation-protocol.md` listed `DISCOPT_NODE_REDUCE` as a live
+  parked arm although #581 removed it, and `solver_tuning.py` claimed the
+  `discopt._jax.node_reduce` **module** was removed with it while `solver.py:8580`
+  imports and runs it. Reality: the flag is gone, the module is live behind
+  `DISCOPT_PHASE2_DBBT`. Both notes and the module header now say so.
+
 - **The convex kernel's `clay0303hfsg` "false optimum" was a false CERTIFICATE, not
   an invalid relaxation** (`fix(correctness)`, #879). #879 recorded three
   mutually-inconsistent `optimal` results on `clay0303hfsg` (28351.42 / 36397.83 /

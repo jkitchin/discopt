@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 import logging
-import os
 from typing import Any
 
 import numpy as np
 
+from discopt._env import env_bool
 from discopt.modeling.core import Constraint, Model
 
 logger = logging.getLogger(__name__)
@@ -20,8 +20,7 @@ def coef_tighten_enabled() -> bool:
     only smaller than the original, never larger, so it is sound, but it stays
     default-OFF until a corpus-wide differential panel graduates it.
     """
-    val = os.environ.get("DISCOPT_COEF_TIGHTEN", "0").strip().lower()
-    return val not in ("", "0", "false", "off", "no")
+    return env_bool("DISCOPT_COEF_TIGHTEN", False)
 
 
 def _round_integral_bounds(

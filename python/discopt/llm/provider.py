@@ -17,8 +17,9 @@ Configuration priority:
 from __future__ import annotations
 
 import logging
-import os
 from typing import Any
+
+from discopt._env import env_str
 
 logger = logging.getLogger(__name__)
 
@@ -29,7 +30,7 @@ def _get_model(model: str | None = None) -> str:
     """Resolve model string from argument, env var, or default."""
     if model is not None:
         return model
-    return os.environ.get("DISCOPT_LLM_MODEL", DEFAULT_MODEL)
+    return env_str("DISCOPT_LLM_MODEL", DEFAULT_MODEL) or DEFAULT_MODEL
 
 
 def complete(

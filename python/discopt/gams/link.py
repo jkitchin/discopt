@@ -24,6 +24,7 @@ import os
 import sys
 from typing import TYPE_CHECKING
 
+from discopt._env import env_bool
 from discopt.modeling.core import Model, SolveResult, VarType
 
 from .gmo_translate import model_from_gmo
@@ -458,7 +459,7 @@ def main(argv: list[str] | None = None) -> int:
     if control_file is None:
         sys.stderr.write(f"discopt-gams: no control file found in arguments: {args}\n")
         return 1
-    if os.environ.get("DISCOPT_GAMS_NO_DAEMON", "0") != "1":
+    if not env_bool("DISCOPT_GAMS_NO_DAEMON", False):
         from .daemon import solve_via_daemon
 
         rc = solve_via_daemon(control_file, sysdir=sysdir)

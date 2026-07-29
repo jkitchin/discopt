@@ -49,6 +49,8 @@ import logging as _logging
 import os as _os
 import sys as _sys
 
+from discopt._env import env_bool as _env_bool
+
 if _os.environ.get("JAX_ENABLE_X64", "1") != "0":
     _os.environ.setdefault("JAX_ENABLE_X64", "1")
     # The env var only takes effect if jax has not been imported yet. If the
@@ -91,7 +93,7 @@ if _os.environ.get("JAX_ENABLE_X64", "1") != "0":
 #     both to 0 so the small-but-frequent kernels actually get cached.
 if (
     _os.environ.get("JAX_COMPILATION_CACHE_DIR") is None
-    and _os.environ.get("DISCOPT_DISABLE_JAX_CACHE", "0") == "0"
+    and not _env_bool("DISCOPT_DISABLE_JAX_CACHE", False)
 ):
     _cache_root = _os.environ.get("XDG_CACHE_HOME") or _os.path.join(
         _os.path.expanduser("~"), ".cache"
@@ -285,5 +287,5 @@ def _eager_import_solve_path() -> None:
             )
 
 
-if _os.environ.get("DISCOPT_EAGER_IMPORTS", "0") == "1":
+if _env_bool("DISCOPT_EAGER_IMPORTS", False):
     _eager_import_solve_path()

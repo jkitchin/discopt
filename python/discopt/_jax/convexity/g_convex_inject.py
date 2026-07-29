@@ -46,10 +46,9 @@ G-convex (i.e. ``body`` is G-concave) the same construction applies to
 
 from __future__ import annotations
 
-import os
-
 import numpy as np
 
+from discopt._env import env_bool
 from discopt.modeling.core import Constraint, Model, Variable
 
 from . import interval as iv
@@ -65,12 +64,7 @@ _DEFAULT_POINTS = 3
 
 def g_convex_cuts_enabled() -> bool:
     """Whether ``DISCOPT_G_CONVEX_CUTS`` enables the injector (default OFF)."""
-    return os.environ.get("DISCOPT_G_CONVEX_CUTS", "0").strip().lower() in (
-        "1",
-        "true",
-        "yes",
-        "on",
-    )
+    return env_bool("DISCOPT_G_CONVEX_CUTS", False)
 
 
 def _scalar_offsets(model: Model) -> "dict[int, Variable] | None":

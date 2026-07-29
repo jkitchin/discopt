@@ -39,13 +39,13 @@ flag-agnostic.
 from __future__ import annotations
 
 import logging
-import os
 import time
 from dataclasses import dataclass, field
 from typing import Optional
 
 import numpy as np
 
+from discopt._env import env_bool
 from discopt.modeling.core import Model
 
 logger = logging.getLogger(__name__)
@@ -390,7 +390,7 @@ def _stage_obbt(
     except Exception:
         return lb, ub, False, 0
 
-    cascade_aux = os.environ.get("DISCOPT_OBBT_CASCADE_AUX", "1") != "0"
+    cascade_aux = env_bool("DISCOPT_OBBT_CASCADE_AUX", True)
     try:
         res = obbt_tighten_root(
             model,
