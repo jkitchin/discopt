@@ -432,8 +432,53 @@ Two verified compute-then-discard defects:
 
 ## Phase 3 — One tightening pipeline (the presolve consolidation)
 
-> **Status:** OPEN. **Depends:** Phase 2 (its measurements decide what survives).
-> **Est:** 3–4 sessions.
+> **Status:** PARTIAL 2026-07-29 — **3a(a), 3b and 3c landed; 3a(b) and 3d NOT
+> started.** **Depends:** Phase 2 (its measurements decide what survives).
+> **Gated against:** `reports/panel_baseline_f154dcff.json` — still the current
+> baseline. Phase 2 did **not** re-baseline: its own verification block records
+> `--check` PASS with 255 comparisons on `f557b056`, i.e. Card 2c.1's declared-box
+> intersection turned out node-neutral on the panel, so the Phase 0 artifact
+> remains the gate.
+>
+> **Landed.**
+> - **3a(a) — `TighteningSchedule` declared and enforced.**
+>   `python/discopt/_jax/tightening_schedule.py` declares four schedules (root 9
+>   stages, NLP-BB root 1, spatial node 6, NLP-BB node 2 — **18 stages**), each
+>   with its anchor, its gate in the source's own terms, and a soundness note. An
+>   AST conformance test asserts the anchors occur in the declared order inside
+>   the host functions, and `record()` at each site makes `schedule.explain()`
+>   report the real last-run verdict. Regime N by construction — nothing moved.
+> - **3b — entry experiment ran; premise falsified, no winner.** See §6 and the
+>   card. Nothing deleted, nothing adopted; the real finding (the wired-in `fbbt`
+>   pass cannot compose with any other pass's tightenings) is filed as Card 3e.
+> - **3c — standing parity test landed.** 175 decided nodes, 5,612 bound
+>   comparisons, 0 violations on all three hard invariants.
+>
+> **NOT started, and deliberately so (§0.6 — named, not an implicit TODO).**
+> - **3a(b) — the Regime-C de-duplications.** Single
+>   `tighten_root_bounds_with_fbbt` invocation policy, one Python reduced-cost
+>   fixer, OBBT entry points 3 -> 1. Each needs its own differential panel
+>   (~32 min each here) and each is bound-changing; none was run, so none shipped.
+>   The Card 3a(a) declaration is the prerequisite that makes them auditable and
+>   it is now in place. **Note the Card 2c.1 precedent before starting:** the
+>   plan's assumption that the repeated `tighten_root_bounds_with_fbbt` sites are
+>   the same computation is *exactly* the assumption Card 2c.1 falsified for
+>   `_declared_box_tightening`. The declared root schedule now shows **two**
+>   distinct FBBT stages before dispatch (`pre_factorable_fbbt` at solver.py:5905,
+>   gated on `has_factorable_work`, and `root_fbbt` at :7038) plus a third on the
+>   NLP-BB path — verify they are the same computation before consolidating.
+> - **3d — adopt the Rust presolve's model rewrites.** Not started. Per the
+>   session's instruction, a partially-wired repr adoption that changes what the
+>   relaxation compiler sees is the most dangerous change in this plan, and half
+>   of it is worse than none of it.
+> - **3e — the FBBT composition defect** (filed by 3b, not built).
+>
+> **`heldout50`: SKIPPED — local only.** No MINLPLib snapshot in this
+> environment, so every measurement above is corpus-local (119 in-repo instances).
+> All three landed cards are Regime N or measurement-only, so the missing
+> generalization arm cannot have admitted an unmeasured bound change.
+>
+> **Est:** 3–4 sessions (2 remaining).
 
 The audit found ~30 mechanisms, 6 FBBTs, 5 reduced-cost fixers, no sequencer beyond
 the Rust orchestrator, and `tighten_root_bounds_with_fbbt` invoked from 5
@@ -529,15 +574,62 @@ LOCATION").
 mechanism). Regime C. **Do not** instead delete the three passes: the measurement
 says they do real work, just not work that reaches the consumer.
 
-### Card 3c — Node-tightening parity across kernels
+### Card 3c — Node-tightening parity across kernels — **LANDED**
+
+> **Status:** LANDED 2026-07-29. `python/tests/test_node_tightening_parity.py`
+> (10 tests: 6 per-instance `slow`, 2 native-kernel `slow`, 1 totals `slow`, 1
+> `smoke`). Node streams are captured by wrapping the two real node-tightening
+> entry points during real solves, so the boxes are the ones the engines actually
+> decide. Measured on the current tree: **175 decided nodes, 5,612 bound
+> comparisons, 491 contraction checks, 158 monotonicity checks, 108 soundness
+> checks**, 4 spatial-loop + 2 NLP-BB-loop instances.
+>
+> Two engines branch differently, so their node *streams* cannot be aligned. What
+> is compared is the stack **as a function on a box**: for each node,
+> `P = Python(B0)`, `S = Kernel(Python(B0))` (what ships) and the counterfactual
+> `K = Kernel(B0)`. Four invariants:
+>
+> | | invariant | kind | result |
+> |---|---|---|---|
+> | I1 | every stack only shrinks its input box | hard | 0 violations / 491 |
+> | I2 | a box containing a known-feasible point still contains it after tightening, on every stack | hard, never to be relaxed | 0 violations / 108 |
+> | I3 | `Kernel(Python(B0))` inside `Kernel(B0)` — the kernel is monotone in its input box | hard | 0 violations / 158 |
+> | I4 | the Card 2b asymmetry, as a **ceiling** with counts | ledger | pooled 5.6 % (11/175); per-instance ceiling 60 %, applied only above 10 decided nodes |
+>
+> I4 is deliberately a ceiling, not an equality: Card 2b established that the
+> kernel does **not** subsume the Python pass, so equality would fail on the known
+> gap and a floor would fail when Phase 5 *closes* it. The test fails on a **new**
+> divergence — a kernel edit that starts losing inferences it used to make.
+>
+> The I2 witness is built by variable **name** against the evaluator's own model,
+> so a reformulated column order cannot make the soundness check silently vacuous;
+> auxiliary coordinates with no reported value are skipped rather than assumed.
+>
+> **Two measured findings recorded for Phase 5.**
+> (a) The **native spatial kernel served ZERO solves** on both arms of the
+> end-to-end test (`nvs05`, `st_e05`; 2 producer calls, 0 served) — the producer
+> declined and the ON arm ran the Python loop. That arm therefore proves the
+> *fallback* is certificate-safe, not that the kernel agrees, and the test prints
+> that rather than reading the agreement as parity. This is review §2.5.2 ("the
+> Python fallback is load-bearing") measured, and it is exactly the population
+> Phase 5's coverage census must rank.
+> (b) `propagate_spec_fixpoint` has **no PyO3 binding**, which is *why* the native
+> kernel cannot be compared box-by-box at all. Phase 5 should add one and upgrade
+> this test's native arm from end-to-end to the box-level comparison; the harness
+> is already written and shared.
+>
+> The MILP driver — the fourth stack — ships `node_propagation=false`, so it
+> decides no node boxes on defaults. Rather than ignore it, a `smoke` test asserts
+> that default straight off `solve_milp_py.__text_signature__`, so the day it
+> graduates ON this file fails and forces the driver into the comparison.
+>
+> `ex1264`/`ex1263` were dropped from the instance list after measuring **zero**
+> decided nodes at this budget — their arm of the comparison was vacuous. The
+> totals test is what keeps that from recurring silently: it fails on zero decided
+> nodes, zero bound comparisons, or a run that exercised only one Python loop.
 
 Per review §2.5.1, the Python spatial path, the native kernel, and the MILP driver
-run different node-tightening stacks with nothing asserting equivalence. Add a
-**differential node-tightening test**: for a sample of corpus instances, run N
-nodes on each engaged path and assert the propagated child boxes agree (or that
-the kernel's are tighter — never looser) within tolerance. This is a standing
-test, not a one-off; it becomes the guard that Phase 5's coverage expansion cannot
-silently weaken node tightening.
+run different node-tightening stacks with nothing asserting equivalence.
 
 ---
 
