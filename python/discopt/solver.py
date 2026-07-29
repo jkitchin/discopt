@@ -22,6 +22,7 @@ import numpy as np
 # does not pull in JAX. The JAX-dependent helpers (NLPEvaluator, alphaBB,
 # nonlinear bound tightening) are imported lazily at their nonlinear-path call
 # sites, so a pure LP/MILP/MIQP solve never pays JAX/XLA cold-start.
+from discopt import routing as _rt
 from discopt._env import env_bool, env_float, env_int, env_str
 from discopt._jax import tightening_schedule as _ts
 from discopt._jax.model_utils import flat_variable_bounds
@@ -4289,6 +4290,35 @@ def _scoped_deep_recursion(fn: _F) -> _F:
     return cast(_F, wrapper)
 
 
+def _routing_walk(fn: _F) -> _F:
+    """Bracket a solve with the Card 4a route-walk recorder.
+
+    Two jobs, neither of which can affect what the solver decides:
+
+    * open/close the per-thread walk, so ``discopt.routing.explain()`` after a
+      solve describes *that* solve. Nested solves (the substitution-presolve
+      route re-enters ``solve_model``) share the outermost walk instead of
+      clobbering it;
+    * honour ``explain_routing=True`` by printing the walk after the solve.
+
+    The bracket lives in a decorator rather than in ``solve_model`` because the
+    function has 60+ early returns; a decorator covers every one of them without
+    touching a single return statement (Regime N).
+    """
+
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        _rt.enter_solve()
+        try:
+            return fn(*args, **kwargs)
+        finally:
+            _rt.exit_solve()
+            if kwargs.get("explain_routing"):
+                print(_rt.explain())
+
+    return cast(_F, wrapper)
+
+
 # Backend-specific keyword arguments that ``solve_model`` forwards through its
 # own ``**kwargs`` to an optional backend (AMP / gurobi / mip-nlp / GP / the
 # lp-spatial path). These are NOT named parameters of ``solve_model`` but are
@@ -4414,6 +4444,7 @@ def solve_model_accepted_kwargs() -> frozenset[str]:
     return frozenset(named | _BACKEND_PASSTHROUGH_KWARGS)
 
 
+@_routing_walk
 @_scoped_deep_recursion
 @_scoped_tuning
 @_debug_outermost_solve
@@ -4471,6 +4502,11 @@ def solve_model(
     root_cut_max: Optional[int] = None,
     _lns_enabled: bool = True,
     rens: bool = True,
+    # Card 4a: print the declared route walk (discopt.routing.ROUTE_TABLE) with
+    # each gate's real verdict after the solve. Diagnostic only — consumed by the
+    # ``_routing_walk`` decorator; ``solve_model``'s body never reads it, so it
+    # cannot influence a dispatch decision.
+    explain_routing: bool = False,
     **kwargs,
 ) -> SolveResult:
     """
@@ -4813,6 +4849,7 @@ def solve_model(
         logger.debug("substitution presolve entry unavailable: %s", _sub_exc)
         _sub = None
     if _sub is not None:
+        _rt.entered("substitution_presolve")
         import inspect as _inspect
 
         _reduced_model, _sub_chain, _sub_pristine, _sub_prep_s = _sub
@@ -4940,6 +4977,7 @@ def solve_model(
     # and ``lp_spatial=True`` is a documented public kwarg. The capability is kept and
     # is opt-in; what is not shipped by default is a measured loss.
     if kwargs.get("lp_spatial", False):
+        _rt.entered("lp_spatial_engine")
         try:
             from discopt._jax.lp_spatial_bb import solve_lp_spatial_bb
             from discopt.modeling.core import _lp_spatial_mixed_fallback_enabled
@@ -5042,6 +5080,7 @@ def solve_model(
 
     # --- MIP-NLP decomposition solver family ---
     if _solver == "mip-nlp":
+        _rt.entered("solver_mip_nlp")
         import warnings
 
         from discopt.solvers.mip_nlp import solve_mip_nlp
@@ -5190,6 +5229,7 @@ def solve_model(
 
     # --- AMP (Adaptive Multivariate Partitioning) global solver ---
     if _solver == "amp":
+        _rt.entered("solver_amp")
         import warnings
 
         from discopt.solvers.amp import solve_amp
@@ -5285,6 +5325,7 @@ def solve_model(
 
     # --- GP (geometric programming) log-space convex fast path ---
     if _solver == "gp":
+        _rt.entered("solver_gp")
         import warnings
 
         from discopt.gp import classify_gp, solve_gp
@@ -5340,6 +5381,7 @@ def solve_model(
 
     # --- GP-MINLP (y-space node relaxations + integer B&B) fast path ---
     if _solver == "gp-minlp":
+        _rt.entered("solver_gp_minlp")
         import warnings
 
         from discopt.gp import classify_gp_minlp, solve_gp_minlp
@@ -5411,6 +5453,7 @@ def solve_model(
         or kwargs.get("iteration_callback") is not None
     )
     if _solver is None and not _has_bb_callbacks and not skip_convex_check:
+        _rt.entered("auto_gp")
         from discopt.gp import classify_gp, solve_gp
 
         if classify_gp(model) is not None:
@@ -5440,6 +5483,7 @@ def solve_model(
         and not skip_convex_check
         and env_bool("DISCOPT_GP_MINLP", False)
     ):
+        _rt.entered("auto_gp_minlp")
         from discopt.gp import classify_gp_minlp, solve_gp_minlp
 
         if classify_gp_minlp(model) is not None:
@@ -5474,6 +5518,7 @@ def solve_model(
         and not skip_convex_check
         and env_bool("DISCOPT_SGO", False)
     ):
+        _rt.entered("auto_signomial_global")
         from discopt._jax.convexity.signomial_global import (
             classify_signomial_global,
             solve_signomial_global,
@@ -5491,6 +5536,7 @@ def solve_model(
 
     # --- Benders / Lagrangian decomposition: opt-in, structure-exploiting ---
     if decomposition is not None:
+        _rt.entered("decomposition")
         if decomposition == "benders":
             from discopt.decomposition.benders import solve_benders
 
@@ -5554,6 +5600,7 @@ def solve_model(
 
     # --- Deprecated compatibility route: OA is a MINLP solver strategy, not a GDP method. ---
     if gdp_method == "oa":
+        _rt.entered("gdp_oa")
         import warnings
 
         from discopt._jax.gdp_reformulate import reformulate_gdp
@@ -5614,6 +5661,7 @@ def solve_model(
 
     # --- LOA decomposition: intercept before GDP reformulation ---
     if gdp_method == "loa":
+        _rt.entered("gdp_loa")
         from discopt.solvers.gdpopt_loa import solve_gdpopt_loa
 
         loa_kwargs = {}
@@ -6421,6 +6469,7 @@ def solve_model(
     # (verified), so it is safe to fall through past them. See #27b, #713.
     _force_reduced_space = False
     if _model_contains_custom_call(model):
+        _rt.entered("custom_call_reduced_space")
         _cc_reduced_model = _prereform_model if _prereform_model is not None else model
         _cc_n_orig = (
             int(_prereform_nvars)
@@ -6509,6 +6558,7 @@ def solve_model(
     _check_finite_bounds(model, _declared_tightening)
     nonlinear_infeasibility = _detect_nonlinear_bound_infeasibility(model, _declared_tightening)
     if nonlinear_infeasibility is not None:
+        _rt.entered("nonlinear_bound_infeasible")
         logger.info(
             "Nonlinear bound tightening proved model infeasible: %s", nonlinear_infeasibility
         )
@@ -6549,6 +6599,7 @@ def solve_model(
         # be silently dropped and the excluded point accepted as the optimum.
         # Refuse loudly rather than return a wrong answer (CLAUDE.md §3); these
         # callbacks are supported on the spatial-B&B path (``nlp_bb=False``).
+        _rt.entered("nlp_bb_forced")
         if lazy_constraints is not None or incumbent_callback is not None:
             _rejected = []
             if lazy_constraints is not None:
@@ -6593,6 +6644,7 @@ def solve_model(
         problem_class = None
 
     if _solver == "gurobi":
+        _rt.entered("solver_gurobi")
         if problem_class is None:
             raise NotImplementedError(
                 "solver='gurobi' requires problem classification and currently "
@@ -6692,8 +6744,10 @@ def solve_model(
     _pure_continuous_force_spatial = False
     if problem_class is not None:
         if problem_class == ProblemClass.LP:
+            _rt.entered("class_lp")
             return _solve_lp(model, t_start, time_limit, prefer_pounce=nlp_solver == "pounce")
         elif problem_class == ProblemClass.QP:
+            _rt.entered("class_qp")
             if _pure_continuous:
                 if _pure_continuous_convexity_known and _pure_continuous_is_convex:
                     return _solve_qp(model, t_start, prefer_pounce=nlp_solver == "pounce")
@@ -6714,6 +6768,7 @@ def solve_model(
             # NLP-BB auto-select already take. Trades the specialized engine's
             # speed for correctness (CLAUDE.md §1). This mirrors the #740 fix on
             # the spatial path.
+            _rt.entered("class_milp")
             if lazy_constraints is None and incumbent_callback is None:
                 # Warm-started-simplex engine (nlp_solver="simplex"): the whole MILP
                 # B&B runs in Rust with dual-warm-started simplex node solves. Opt-in;
@@ -6769,6 +6824,10 @@ def solve_model(
                 "callbacks; #748)"
             )
             # Fall through to the spatial/McCormick path below.
+            _rt.fell_through(
+                "class_milp",
+                "lazy_constraints/incumbent_callback present (#748)",
+            )
         elif problem_class == ProblemClass.MIQP:
             # A convex MIQP may use the convex MIQP B&B; a NONCONVEX one must
             # NOT. `_solve_miqp_bb` assumes a convex node QP (a convex relaxation
@@ -6783,6 +6842,7 @@ def solve_model(
             # through (no return) to the sound spatial McCormick Branch-and-Bound
             # below, which branches the integers and bounds each node with a valid
             # outer relaxation.
+            _rt.entered("class_miqp")
             (
                 _root_convexity_known,
                 _root_is_convex,
@@ -6818,12 +6878,20 @@ def solve_model(
                     "these callbacks; #748)"
                 )
                 # Fall through to the spatial/McCormick path below.
+                _rt.fell_through(
+                    "class_miqp",
+                    "convex MIQP + lazy_constraints/incumbent_callback (#748)",
+                )
             else:
                 logger.info(
                     "Nonconvex MIQP detected — routing to spatial Branch-and-Bound "
                     "(convex MIQP solvers would certify a local stationary point)"
                 )
                 # Fall through to the spatial/McCormick path below.
+                _rt.fell_through(
+                    "class_miqp",
+                    "nonconvex MIQP - the convex B&B would certify a local optimum",
+                )
 
     # --- Materialize builder-resident linear constraint rows (issue #681) ---
     # The fast-construction API (``add_linear_constraints`` / the
@@ -6861,6 +6929,7 @@ def solve_model(
 
     # --- Convex NLP fast path: skip B&B for convex continuous problems ---
     if _pure_continuous and _pure_continuous_convexity_known and _pure_continuous_is_convex:
+        _rt.entered("pure_continuous_convex_nlp")
         logger.info("Convex NLP detected — solving with single NLP (global optimality guaranteed)")
         result = _solve_continuous(
             model,
@@ -6933,6 +7002,7 @@ def solve_model(
         and not _pure_continuous_force_spatial
         and (skip_convex_check or not _pure_continuous_convexity_known)
     ):
+        _rt.entered("pure_continuous_unclassified")
         _cont_result = _solve_continuous(
             model,
             time_limit,
@@ -6985,6 +7055,7 @@ def solve_model(
     # loop, which enforces both correctly, rather than silently drop the
     # rejection and accept the excluded point.
     if nlp_bb is None and lazy_constraints is None and incumbent_callback is None:
+        _rt.entered("nlp_bb_auto")
         if not _root_convexity_known:
             _root_convexity_known, _root_is_convex, _root_constraint_mask = (
                 _classify_model_convexity(
@@ -7051,6 +7122,7 @@ def solve_model(
         wall_s=time.perf_counter() - t_rust_start,
     )
     if root_infeasible:
+        _rt.entered("root_fbbt_infeasible")
         wall_time = time.perf_counter() - t_start
         return SolveResult(
             status="infeasible",
@@ -7118,6 +7190,7 @@ def solve_model(
     if not _nl_root_infeasible and np.any(lb > ub + 1e-9):
         _nl_root_infeasible = True
     if _nl_root_infeasible:
+        _rt.entered("nonlinear_root_infeasible")
         wall_time = time.perf_counter() - t_start
         return SolveResult(
             status="infeasible",
@@ -7249,6 +7322,7 @@ def solve_model(
                 cascade_aux=False,
             )
             if _obbt_res.infeasible:
+                _rt.entered("root_obbt_infeasible")
                 wall_time = time.perf_counter() - t_start
                 return SolveResult(
                     status="infeasible",
@@ -7320,6 +7394,7 @@ def solve_model(
             jax_time,
         )
     if _native_result is not None:
+        _rt.entered("native_spatial_kernel")
         return _native_result
 
     # --- #654: deadline-exhausted short-circuit before the spatial search build ---
@@ -7341,6 +7416,7 @@ def solve_model(
     # never falsifies it. When budget remains, ``_deadline_exhausted()`` is False and
     # this is byte-identical to the pre-fix path (the search runs as before).
     if _deadline_exhausted():
+        _rt.entered("deadline_exhausted")
         from discopt.modeling.core import ObjectiveSense as _ObjSenseSC
 
         _rr_bound: Optional[float] = None
@@ -8873,6 +8949,7 @@ def solve_model(
     # user-interrupted exit proves nothing, so the status decision below must
     # not fall through to a certified "infeasible"/"optimal".
     _debug_quit = False
+    _rt.entered("spatial_branch_and_bound")
     while True:
         elapsed = time.perf_counter() - t_start
         if elapsed >= time_limit:

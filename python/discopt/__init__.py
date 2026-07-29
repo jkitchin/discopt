@@ -91,9 +91,8 @@ if _os.environ.get("JAX_ENABLE_X64", "1") != "0":
 #   * JAX's default MIN_COMPILE_TIME_SECS is 1.0 s, which would skip discopt's
 #     ~15 ms compiles entirely, and MIN_ENTRY_SIZE_BYTES defaults nonzero — set
 #     both to 0 so the small-but-frequent kernels actually get cached.
-if (
-    _os.environ.get("JAX_COMPILATION_CACHE_DIR") is None
-    and not _env_bool("DISCOPT_DISABLE_JAX_CACHE", False)
+if _os.environ.get("JAX_COMPILATION_CACHE_DIR") is None and not _env_bool(
+    "DISCOPT_DISABLE_JAX_CACHE", False
 ):
     _cache_root = _os.environ.get("XDG_CACHE_HOME") or _os.path.join(
         _os.path.expanduser("~"), ".cache"
@@ -218,6 +217,39 @@ def estimate_parameters(*args, **kwargs):
     from discopt.estimate import estimate_parameters as _ep
 
     return _ep(*args, **kwargs)
+
+
+def explain_routing(model, **solve_kwargs) -> str:
+    """Solve ``model`` and return the solve-path route walk (Card 4a).
+
+    ``discopt.solver.solve_model`` chooses between ~30 engines with a sequence of
+    gates declared in :mod:`discopt.routing`.  This runs the solve and renders
+    that declaration with each gate's *real* verdict — which gates were false,
+    which one dispatched, and which matched their gate and deliberately **fell
+    through** to the generic spatial loop (the #740/#748 callback fall-throughs).
+    The tightening schedule (:mod:`discopt._jax.tightening_schedule`) is appended,
+    so one call explains both the engine that ran and the bound-tightening stages
+    inside it.
+
+    Parameters
+    ----------
+    model : Model
+        The model to solve.
+    **solve_kwargs
+        Forwarded verbatim to :func:`discopt.solver.solve_model`, so the walk
+        describes the solve the caller actually cares about.
+
+    Returns
+    -------
+    str
+        The rendered route walk.  ``Model.solve(explain_routing=True)`` prints
+        the same text as a side effect of the solve.
+    """
+    from discopt import routing as _routing
+    from discopt.solver import solve_model as _solve_model
+
+    _solve_model(model, **solve_kwargs)
+    return _routing.explain()
 
 
 def chat(llm_model: str | None = None, verbose: bool = True):
