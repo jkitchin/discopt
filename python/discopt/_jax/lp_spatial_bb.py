@@ -65,7 +65,6 @@ from typing import NamedTuple, Optional
 import numpy as np
 
 from discopt.modeling.core import Model, ObjectiveSense, VarType
-from discopt.solver_tuning import current as _tuning_current
 
 logger = logging.getLogger(__name__)
 
@@ -504,11 +503,14 @@ def solve_lp_spatial_bb(
                 rounds=5,
                 deadline=time.perf_counter() + _obbt_budget,
                 time_limit_per_lp=min(0.5, max(0.05, _obbt_budget / 10.0)),
-                # Card 2a: graduated #208 aux cascade, resolved once in
-                # SolverTuning. This is this loop's ROOT OBBT — the same scope the
-                # #208 gate measured — and it previously took the function default
-                # (False) while the feature was documented as default-ON.
-                cascade_aux=_tuning_current().obbt_cascade_aux,
+                # Card 2a: the #208 aux cascade is OFF here EXPLICITLY, because it
+                # is UNMEASURED, not because it was measured harmful. The Card 2a
+                # panel's call tap recorded zero ``obbt_tighten_root`` calls from
+                # this module over all 119 corpus instances, so the corpus cannot
+                # gate it either way, and §0.1 does not allow shipping an unmeasured
+                # bound change. Turning it on needs a panel that actually engages
+                # this engine (the nvs17/19/24 integer-product family).
+                cascade_aux=False,
             )
             if not r.infeasible:
                 # Integrality rounding applies to INTEGER columns only. Flooring a

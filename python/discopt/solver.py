@@ -7151,10 +7151,20 @@ def solve_model(
                 superposition=(relaxation_arithmetic == "superposition"),
                 prefer_pounce=nlp_solver == "pounce",
                 min_improvement=_obbt_min_impr,
-                # Card 2a: the graduated #208 aux cascade, resolved once in
-                # SolverTuning. This root site used to take the function default
-                # (False) while the documentation called the feature default-ON.
-                cascade_aux=_tuning().obbt_cascade_aux,
+                # Card 2a: the #208 aux cascade is OFF here, EXPLICITLY and by
+                # measurement — not by falling through to the function default,
+                # which is how it ended up off at five of six sites in the first
+                # place. The Card 2a differential panel (119 instances, 45 s,
+                # reports/card2a_cascade_aux_on.json; 578 comparisons) was
+                # cert-clean with the cascade live at every site, but FAILED the
+                # #902 incumbent-quality gate, and an interleaved replicated A/B
+                # against the pre-card tree localised part of the harm to THIS
+                # site: on ex1252a the root dual bound collapses 14086.2 -> 4.3e-319
+                # (5/5 replicates) and ex1252's incumbent degrades, with the
+                # certifying population moving only -10 nodes of 37,110. Per
+                # CLAUDE.md §5 sound-but-not-helpful stays off. See the plan's §6
+                # falsification log (Card 2a entry).
+                cascade_aux=False,
             )
             if _obbt_res.infeasible:
                 wall_time = time.perf_counter() - t_start
@@ -8554,16 +8564,21 @@ def solve_model(
     )
     _per_node_obbt_enabled = _pn_obbt_small or _pn_obbt_degated
     _pn_obbt_topk = _PER_NODE_OBBT_TOPK if _pn_obbt_degated else None
-    # Card 2a: the #208 aux cascade at the per-node site. ``obbt_tighten_root``
-    # treats ``cascade_aux`` and ``top_k`` as mutually exclusive by contract — it
-    # forces ``top_k=None`` when cascading, because the cascade needs the full
-    # column vector. On the T2.5 de-gated path ``top_k`` is the *affordability*
-    # budget that admits per-node OBBT above the size cap at all, so letting the
-    # cascade nullify it would turn a bounded O(top_k) probe count back into
-    # O(n_vars) on exactly the large models the cap exists for. The cascade is
-    # therefore off wherever a top-k budget is in force; below the cap
-    # (``top_k is None``, the default path) it is on.
-    _pn_obbt_cascade_aux = _tuning().obbt_cascade_aux and _pn_obbt_topk is None
+    # Card 2a: the #208 aux cascade is OFF at the per-node site, EXPLICITLY and by
+    # measurement. Two independent reasons, either of which is sufficient:
+    #   * The #208 graduation measured a ROOT-ONLY cascade and said so ("it runs
+    #     root-only (no per-node cost)"); a per-node cascade is outside the
+    #     evidence that graduated the flag.
+    #   * ``obbt_tighten_root`` treats ``cascade_aux`` and ``top_k`` as mutually
+    #     exclusive by contract — it forces ``top_k=None`` when cascading. On the
+    #     T2.5 de-gated path ``top_k`` is the *affordability* budget that admits
+    #     per-node OBBT above the size cap at all, so a cascade here would turn a
+    #     bounded O(top_k) probe count back into O(n_vars) on exactly the large
+    #     models the cap exists for.
+    # Measured: with the cascade live here the panel fired it 317 times over 12
+    # instances for one gain (st_e04 103 -> 97 nodes, confirmed by pinning this
+    # site off in an interleaved A/B) and no other change on the certifying
+    # population, against the quality regression recorded at the root site above.
     _pn_obbt_spent = 0.0
     _pn_obbt_budget_total = time_limit * _PER_NODE_OBBT_BUDGET_FRAC
     if _per_node_obbt_enabled:
@@ -9049,7 +9064,7 @@ def solve_model(
                         time_limit_per_lp=_PER_NODE_OBBT_PER_LP_S,
                         prefer_pounce=nlp_solver == "pounce",
                         top_k=_pn_obbt_topk,
-                        cascade_aux=_pn_obbt_cascade_aux,
+                        cascade_aux=False,  # Card 2a: see the per-node setup above
                     )
                 except Exception as _pn_exc:  # pragma: no cover - defensive
                     logger.debug("per-node OBBT failed: %s", _pn_exc)
@@ -10993,11 +11008,16 @@ def solve_model(
                             deadline=time.perf_counter() + 5.0,
                             time_limit_per_lp=0.1,
                             prefer_pounce=nlp_solver == "pounce",
-                            # Card 2a: graduated #208 aux cascade, resolved once in
-                            # SolverTuning. This is a whole-box (root-scope) OBBT that
-                            # fires only on incumbent improvement, so it carries the
-                            # same cost profile as the root site, not the per-node one.
-                            cascade_aux=_tuning().obbt_cascade_aux,
+                            # Card 2a: the #208 aux cascade is OFF here, EXPLICITLY
+                            # and by measurement. This site re-runs OBBT with the new
+                            # incumbent as a cutoff and REPLACES the global box, so a
+                            # cascade here steers the rest of the search. Interleaved
+                            # replicated A/B vs the pre-card tree: it buys nvs06
+                            # 5 -> 3 and st_e36 85 -> 83 nodes (both still optimal,
+                            # same objective) and costs ex1252 a 52 % worse incumbent
+                            # (134263.6 -> 204321.6, 3/3 replicates). Net-negative
+                            # under the #902 quality gate.
+                            cascade_aux=False,
                         )
                         if not obbt_result.infeasible and obbt_result.n_tightened > 0:
                             lb = obbt_result.lb

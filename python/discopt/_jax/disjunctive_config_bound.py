@@ -47,7 +47,6 @@ from typing import Optional
 import numpy as np
 
 from discopt.modeling.core import Model
-from discopt.solver_tuning import current as _tuning_current
 
 logger = logging.getLogger(__name__)
 
@@ -247,11 +246,13 @@ def compute_disjunctive_config_bound(
                 time_limit_per_lp=obbt_lp_time,
                 incumbent_cutoff=incumbent,
                 deadline=deadline,
-                # Card 2a: graduated #208 aux cascade, resolved once in SolverTuning.
-                # This site OBBTs a *leaf box* of the indicator enumeration, whose
-                # cost profile is per-leaf rather than root — the differential panel
-                # (see the Card 2a report) is what decides whether it stays on.
-                cascade_aux=_tuning_current().obbt_cascade_aux,
+                # Card 2a: the #208 aux cascade is OFF here EXPLICITLY, because it
+                # is UNMEASURED. The whole pass sits behind
+                # ``SolverTuning.disjunctive_config_bound`` (default OFF), so the
+                # Card 2a panel could not exercise it, and this is a *per-leaf* OBBT
+                # — outside the root-only scope the #208 gate measured. It should be
+                # measured with that flag, not shipped on its coat-tails.
+                cascade_aux=False,
             )
             if ob.infeasible:
                 res.n_pruned_infeasible += 1
