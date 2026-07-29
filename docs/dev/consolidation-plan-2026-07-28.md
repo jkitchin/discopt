@@ -432,59 +432,109 @@ Two verified compute-then-discard defects:
 
 ## Phase 3 — One tightening pipeline (the presolve consolidation)
 
-> **Status:** PARTIAL 2026-07-29 — **3a(a), 3b and 3c landed; 3a(b) and 3d NOT
-> started.** **Depends:** Phase 2 (its measurements decide what survives).
+> **Status:** PARTIAL — **CLOSED 2026-07-29 by owner decision.** 3a(a), 3b and 3c
+> LANDED; **3a(b) and 3d DEFERRED-BY-OWNER** (see below). Phase 4 starts next and
+> takes exclusive access to `solver.py`.
+> **Depends:** Phase 2 (its measurements decided what survives).
 > **Gated against:** `reports/panel_baseline_f154dcff.json` — still the current
 > baseline. Phase 2 did **not** re-baseline: its own verification block records
 > `--check` PASS with 255 comparisons on `f557b056`, i.e. Card 2c.1's declared-box
 > intersection turned out node-neutral on the panel, so the Phase 0 artifact
-> remains the gate.
+> remains the gate. Phase 3's final `--check` on `acd5feaf` reproduces it exactly:
+> **255 comparisons, PASS**, 1944.3 s, load start 0.57 peak 2.43.
 >
-> **Landed.**
+> ### Why this phase closes here — the finding that re-sequenced it
+>
+> Across Phases 2–3 the **mechanical** redundancy proved real and condensed
+> cleanly: seven boolean parse idioms became one truth table (1a), ~4,900 lines of
+> provably-dead passes and orphan modules went (1b). But **every semantic
+> redundancy that was actually measured turned out not to be redundant**:
+>
+> | card | the claimed duplicate | what the measurement found |
+> |---|---|---|
+> | 2b | Rust `in_tree_presolve` subsumes the per-node Python Jacobian FBBT | **two distinct inference classes** the kernel lacks — 278/1,495 nodes (18.6 %) |
+> | 2c.1 | "the identical 17-rule pass runs twice" | **not the same computation** — different input box, model state and position relative to dispatch |
+> | 3b | `fbbt` and `fbbt_fp` are the same FBBT, keep the faster | **no winner** — different, complementary fixpoints; composing beats either |
+>
+> So the tightening layer is a **differentiated stack that was undocumented**, not
+> an accreted duplicate. The right deliverable there is the schedule object plus
+> the documentation of what each stage is for and why it is skippable — which is
+> Card 3a(a), landed — **not** deletion. That reframing is why 3a(b) and 3d are
+> deferred rather than merely unfinished.
+>
+> ### Landed
+>
 > - **3a(a) — `TighteningSchedule` declared and enforced.**
->   `python/discopt/_jax/tightening_schedule.py` declares four schedules (root 9
->   stages, NLP-BB root 1, spatial node 6, NLP-BB node 2 — **18 stages**), each
->   with its anchor, its gate in the source's own terms, and a soundness note. An
->   AST conformance test asserts the anchors occur in the declared order inside
->   the host functions, and `record()` at each site makes `schedule.explain()`
->   report the real last-run verdict. Regime N by construction — nothing moved.
-> - **3b — entry experiment ran; premise falsified, no winner.** See §6 and the
->   card. Nothing deleted, nothing adopted; the real finding (the wired-in `fbbt`
->   pass cannot compose with any other pass's tightenings) is filed as Card 3e.
+>   `python/discopt/_jax/tightening_schedule.py` declares four schedules
+>   (root 9 stages, NLP-BB root 1, spatial node 6, NLP-BB node 2 — **18 stages**),
+>   each with its anchor, its gate in the source's own terms, and a soundness note.
+>   An AST conformance test asserts the anchors occur in the declared order inside
+>   the host functions; `record()` at each site makes `schedule.explain()` report
+>   the real last-run verdict. Regime N by construction — nothing moved.
+>   The AST probe earned its keep immediately (it rejected a wrong first draft
+>   ordering) and surfaced **three stages §2.3's listing never named**: the
+>   pre-factorable-reform FBBT, the Phase C incumbent-cutoff OBBT and the Phase C3
+>   incumbent-cutoff FBBT.
+> - **3b — entry experiment ran; premise falsified, no winner.** 11,088 executed
+>   bound comparisons. Nothing deleted, nothing adopted; the real finding is
+>   **Card 3e**. §6 has the full attribution.
 > - **3c — standing parity test landed.** 175 decided nodes, 5,612 bound
->   comparisons, 0 violations on all three hard invariants.
+>   comparisons, **0 violations on all three hard invariants** (contraction,
+>   soundness floor, kernel monotonicity); pooled Card-2b asymmetry 5.6 %.
 >
-> **NOT started, and deliberately so (§0.6 — named, not an implicit TODO).**
-> - **3a(b) — the Regime-C de-duplications.** Single
->   `tighten_root_bounds_with_fbbt` invocation policy, one Python reduced-cost
->   fixer, OBBT entry points 3 -> 1. Each needs its own differential panel
->   (~32 min each here) and each is bound-changing; none was run, so none shipped.
->   The Card 3a(a) declaration is the prerequisite that makes them auditable and
->   it is now in place. **Note the Card 2c.1 precedent before starting:** the
->   plan's assumption that the repeated `tighten_root_bounds_with_fbbt` sites are
->   the same computation is *exactly* the assumption Card 2c.1 falsified for
->   `_declared_box_tightening`. The declared root schedule now shows **two**
->   distinct FBBT stages before dispatch (`pre_factorable_fbbt` at solver.py:5905,
->   gated on `has_factorable_work`, and `root_fbbt` at :7038) plus a third on the
->   NLP-BB path — verify they are the same computation before consolidating.
-> - **3d — adopt the Rust presolve's model rewrites.** Not started. Per the
->   session's instruction, a partially-wired repr adoption that changes what the
->   relaxation compiler sees is the most dangerous change in this plan, and half
->   of it is worse than none of it.
-> - **3e — the FBBT composition defect** (filed by 3b, not built).
+> ### DEFERRED BY OWNER — 3a(b), the Regime-C de-duplications
 >
-> **`heldout50`: SKIPPED — local only.** No MINLPLib snapshot in this
-> environment, so every measurement above is corpus-local (119 in-repo instances).
-> All three landed cards are Regime N or measurement-only, so the missing
-> generalization arm cannot have admitted an unmeasured bound change.
+> Single `tighten_root_bounds_with_fbbt` invocation policy; one Python
+> reduced-cost fixer; OBBT entry points 3 -> 1. **Not started, and not to be
+> started as consolidation work.** Rationale: the table above. Every semantic
+> de-duplication this plan proposed and then measured was wrong about the
+> mechanisms being duplicates, so these three are to be treated as *hypotheses to
+> falsify first*, not cleanups to perform.
 >
-> **Est:** 3–4 sessions (2 remaining).
+> **What a future session needs to pick this up cold.** The prerequisite is now in
+> place: the root schedule is declared, so the sites are enumerable rather than
+> hunted. It already shows the card's premise is doubtful — there are **three**
+> distinct `tighten_root_bounds_with_fbbt` stages with **different gates**, not one
+> repeated call:
+> `pre_factorable_fbbt` (`solver.py:5905`, gated `has_factorable_work(model)`,
+> runs *before* the factorable reform so its interval checks see finite bounds,
+> issue #138), `root_fbbt` (`:7038`, unconditional, last step before tree creation,
+> budget-capped per #863) and `nlp_bb_root_fbbt` (`:12543`, at `_solve_nlp_bb`
+> entry). Run the Card 2c.1-shaped entry experiment — do the calls see the same
+> input box and the same model state? — **before** writing any consolidation. Each
+> arm is Regime C and needs its own differential panel (~32 min on this machine).
+>
+> ### DEFERRED BY OWNER — 3d, adopt the Rust presolve's model rewrites
+>
+> **Re-classified: this is gap-closure work belonging next to Phase 5, not
+> consolidation work ahead of the modularization.** Its premise is measured and
+> stands (Card 2c.2: 8,614 non-bound rewrites on 32/119 instances, zero bound
+> contribution), and the card body below is unchanged and still accurate. What
+> changed is its *position*: solving from the presolved repr changes what the
+> relaxation compiler sees, which is a capability change of the same family as
+> Phase 5's kernel coverage expansion, and it should be sequenced against that
+> work rather than run before `solve_model` is carved up. Not started here — per
+> §0 and the session brief, a partially-wired repr adoption is the most dangerous
+> change in this plan and half of it is worse than none of it.
+>
+> ### Filed, not built
+>
+> - **Card 3e** — the wired-in `fbbt` pass cannot compose with any other presolve
+>   pass's tightenings (measured 0 composed bounds in 7/7 instances against 48 for
+>   `fbbt_fp`). Regime C, one-line mechanism (a seed parameter on
+>   `fbbt_with_cutoff_until`). Evidence is durable in three places: this card, the
+>   §6 Card 3b entry, and the `fbbt_fp.rs` header.
+>
+> **`heldout50`: SKIPPED — local only.** No MINLPLib snapshot in this environment,
+> so every measurement above is corpus-local (119 in-repo instances). All three
+> landed cards are Regime N or measurement-only, so the missing generalization arm
+> cannot have admitted an unmeasured bound change.
 
 The audit found ~30 mechanisms, 6 FBBTs, 5 reduced-cost fixers, no sequencer beyond
 the Rust orchestrator, and `tighten_root_bounds_with_fbbt` invoked from 5
 uncoordinated sites.
 
-### Card 3a — `TighteningSchedule` object
+### Card 3a — `TighteningSchedule` object — **(a) LANDED, (b) DEFERRED-BY-OWNER**
 
 One module (`python/discopt/_jax/tightening_schedule.py` or promote
 `presolve_pipeline.py`) declaring the **root schedule** and the **node schedule**
@@ -552,7 +602,7 @@ behind a default-OFF `DISCOPT_*` flag per §0.7 and graduates on a differential
 panel with the #902 quality gate. Do **not** instead adopt `fbbt_fp` wholesale:
 Card 3b measured its result to be `max_iterations`-dependent.
 
-### Card 3d — Adopt the Rust presolve's model rewrites (filed by Card 2c.2)
+### Card 3d — Adopt the Rust presolve's model rewrites (filed by Card 2c.2) — **DEFERRED-BY-OWNER, re-sequenced next to Phase 5**
 
 **Measured, not hypothesised** (Card 2c.2, 119 instances, 8,206 per-pass deltas
 examined, `reports/card2c_presolve_rewrites.json`): `simplify`,
@@ -787,17 +837,28 @@ solve wall, before/after, interleaved (§0.5).
 
 ```
 Phase 0 (baseline + heldout panel)
-  ├─► Phase 1 (hygiene: flags, dead code)        [independent cards]
-  ├─► Phase 2 (wiring defects)  ─► Phase 3 (tightening pipeline)
-  ├─► Phase 4 (routing + decomposition)          [after 1a]
+  ├─► Phase 1 (hygiene: flags, dead code)        [independent cards]     DONE
+  ├─► Phase 2 (wiring defects)  ─► Phase 3 (3a(a)+3b+3c only)            DONE
+  │        └─► Phase 4 (routing + decomposition)  ◄── NEXT, exclusive solver.py
   ├─► Phase 5 (kernel convergence; 5.4 convex-kernel graduation may run first)
+  │        └─► Card 3d (adopt the presolved repr) — MOVED here from Phase 3
   ├─► Phase 6a/6b/6d (presolve scale, CSE, floor) [6c strictly after Phase 5]
   └─► Phase 7 (islands/docs/deferred-tail)       [anytime]
 ```
 
+**Re-sequencing, 2026-07-29 (owner).** Phase 4 now follows Phase 3's *landed*
+cards rather than a complete Phase 3: 3a(b) and 3d are deferred (see the Phase 3
+block), so nothing else in Phase 3 needs `solver.py` and Phase 4 can take it
+exclusively. **Card 3d moves adjacent to Phase 5** — adopting the presolved repr
+changes what the relaxation compiler sees, which is gap-closure of the same family
+as kernel-coverage expansion, not consolidation to be done ahead of the
+modularization. Card 3e (the FBBT composition defect) is unscheduled and may run
+any time after Phase 4 releases `solver.py`; it touches `crates/` only.
+
 Parallelism guidance for Opus sessions: Phases 1, 2, 7 are safe concurrently
 (disjoint files). Phases 3 and 4 both edit `solver.py` — serialize them. Phase 5
-touches `crates/` + producer files — safe alongside 1/2/7, coordinate with 3c.
+touches `crates/` + producer files — safe alongside 1/2/7, coordinate with 3c
+(whose parity test is the guard Phase 5's expansions must keep green).
 
 ## §6. Falsification log (append-only, per §0.3)
 
@@ -1026,4 +1087,88 @@ the declared box and intersects. That is a defect in exactly the "one tightening
 pipeline" this phase exists to fix, it is general (no instance keying), and the fix
 is a seed parameter on `fbbt_with_cutoff_until`. Filed as **Card 3e** (Phase 3);
 Regime C, not built here.
+
+### 2026-07-29 — Card 3c: "the four node-tightening stacks reach equivalent fixed points, or the kernel's are tighter" — **CONFIRMED where measurable, with two gaps recorded**
+
+**Claim under test** (review §2.5.1). The Python spatial loop, the Python NLP-BB
+loop, the native Rust spatial kernel and the MILP driver run different per-node
+tightening stacks and nothing asserts they agree. The card's invariant: the boxes
+agree, or the kernel's are tighter — **never looser**.
+
+**Experiment.** `python/tests/test_node_tightening_parity.py`, a standing test
+rather than a script. Node streams are captured by wrapping the two real node
+entry points during real solves, so the boxes compared are the ones the engines
+actually decide. Per node: `P = Python(B0)`, `S = Kernel(Python(B0))` (what
+ships), `K = Kernel(B0)` (counterfactual — sound because `in_tree_presolve` takes
+`&self` and is a pure function of repr/box/depth/incumbent).
+
+- **executed: 175 decided nodes, 5,612 bound comparisons, 491 contraction checks,
+  158 monotonicity checks, 108 soundness checks**; 4 spatial-loop and 2
+  NLP-BB-loop instances (the totals test fails if either loop is unexercised).
+- **I1 contraction — 0 violations / 491.** No stack ever grows a box.
+- **I2 soundness floor — 0 violations / 108.** A box containing a known-feasible
+  witness still contains it after every stack. The witness is matched by variable
+  **name** against the evaluator's own model, so a reformulated column order
+  cannot make the check silently vacuous.
+- **I3 kernel monotonicity — 0 violations / 158.** `Kernel(Python(B0))` is inside
+  `Kernel(B0)`; without this, "the kernel is at least as tight" is unprovable.
+- **I4 the Card 2b asymmetry** — pooled 5.6 % (11/175 nodes) on this subset, in
+  line with Card 2b's 18.6 % over a larger sample. Encoded as a **ceiling with
+  counts**, not an equality: equality would fail on the known gap and a floor
+  would fail when Phase 5 *closes* it.
+
+**Two measured gaps recorded for Phase 5, not papered over.**
+
+1. **The native spatial kernel served ZERO solves** on both end-to-end arms
+   (`nvs05`, `st_e05`; 2 producer calls, 0 served): `_native_kernel_feature_safe`
+   declined and the ON arm ran the Python loop. So that arm currently proves the
+   *fallback* is certificate-safe, not that the kernel agrees — and the test says
+   so in its output rather than reading the agreement as parity. This is review
+   §2.5.2 ("the Python fallback is load-bearing, not legacy") measured, and it is
+   exactly the population Phase 5.1's coverage census must rank.
+2. **`propagate_spec_fixpoint` has no PyO3 binding**, which is *why* the native
+   kernel cannot be compared box-by-box at all. Phase 5 should add one and upgrade
+   this test's native arm from end-to-end to the box-level comparison; the harness
+   is already written and shared.
+
+**Incidental:** `ex1264`/`ex1263` were dropped from the instance list after
+measuring **zero** decided nodes at the test's budget — their arm of the
+comparison was vacuous, the §6-of-CLAUDE.md failure mode. The totals test now
+fails on zero decided nodes, zero comparisons, or a single-loop run, so that
+cannot recur silently.
+
+### 2026-07-29 — Phase 3 close-out: what was verified on the final tree, and what was not
+
+Recorded because §0.6 asks for what was run, and because a partially-verified tree
+described as verified is the same defect as an instrument that measures nothing.
+
+**Verified on the final tree `acd5feaf`:**
+- `panel_baseline.py --check reports/panel_baseline_f154dcff.json`:
+  **comparisons executed: 255** (node_count 85, certified objective 85, status 85)
+  over 85 comparable of 119 rows — **PASS: no node-count or certified-objective
+  drift.** 1944.3 s, load start 0.57 peak 2.43; 19 non-comparable rows reported
+  and not gating.
+- `pytest python/tests/test_tightening_schedule.py`: 12 passed.
+
+**Verified on `4f78b8cc`** (the tree one commit earlier; the only later change is
+`acd5feaf`, a dict-key correction confined to a `record()` keyword argument):
+- `pytest python/tests/test_node_tightening_parity.py`: 10 passed.
+
+**Verified on `14a40a05`** (Card 3a(a)'s tree, before 3b/3c):
+- `pytest -m smoke python/tests`: **856 passed, 16 skipped, 2 xpassed**
+  (844 before this phase; the +12 are `test_tightening_schedule.py`).
+
+**Verified on the edited Rust sources:** `cargo test -p discopt-core`
+**536 + 4 + 1 passed** (the only Rust change in this phase is a comment block).
+
+**NOT re-run on the final tree, and the owner's close-out instruction was to start
+no further measurement:** `pytest -m smoke python/tests`,
+`pytest -m smoke discopt_benchmarks/tests`, and
+`pytest -m slow python/tests/test_adversarial_recent_fixes.py`. The residual risk
+is bounded — between `14a40a05` and `acd5feaf` the only `solver.py` change is the
+one-key `record()` fix, and the Regime-N panel (which solves all 119 corpus
+instances end to end) **did** run on the final tree and passed with 255
+comparisons — but the smoke and adversarial suites should be re-run at the head of
+Phase 4 before any new `solver.py` edit, and this note is here so that is not
+forgotten.
 
