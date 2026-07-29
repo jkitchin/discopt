@@ -83,8 +83,34 @@ mandatory.
 
 ## Phase 0 — Measurement substrate (prerequisite for everything)
 
-> **Status:** OPEN. **Depends:** nothing. **Regime:** N (pure tooling).
+> **Status:** LANDED 2026-07-29 (tasks 1 and 3 complete; task 2's script + wiring
+> complete, its list awaits a machine with the snapshot). **Depends:** nothing.
+> **Regime:** N (pure tooling — no solver behavior touched).
 > **Est:** 1–2 sessions.
+>
+> **What exists now.** `discopt_benchmarks/scripts/panel_baseline.py` (producer +
+> `--check`), `reports/panel_baseline_f154dcff.json` (119 instances, 45 s budget,
+> defaults, clean tree: 87 optimal / 16 feasible / 15 time_limit / 1 child_timeout,
+> 2166 s wall, 85 rows in the Regime-N comparable population),
+> `discopt_benchmarks/scripts/select_heldout50.py` + `[suites.heldout50]` +
+> `run_benchmarks.py`'s `requires_corpus_snapshot` refusal, and
+> `discopt_benchmarks/tests/test_panel_baseline.py` (12 tests).
+>
+> **Use it like this.** A Regime-N card runs
+> `python -u discopt_benchmarks/scripts/panel_baseline.py --check
+> reports/panel_baseline_f154dcff.json` and pastes the *executed-comparison count*
+> into the PR alongside the verdict. A count of zero is a failure, not a pass. When
+> a card legitimately re-baselines (a new default lands), generate a fresh
+> `panel_baseline_<sha>.json` and say in the PR which baseline the next card gates
+> against.
+>
+> **Two things the card did not close.** (a) `heldout50` cannot be drawn in an
+> environment without the MINLPLib snapshot, so the committed list is a placeholder
+> and every consumer refuses loudly (`heldout50: SKIPPED — local only`, exit 3)
+> rather than passing empty; the owner materializes it with one command. (b) The
+> baseline surfaced a solver finding, not a tooling one: `heatexch_gen3` under
+> `time_limit=45` runs **233.4 s** (5.2× its own budget, re-measured standalone).
+> Phase 0 labels it `child_timeout` and changes nothing; it wants its own issue.
 
 The review found one systemic evaluation risk: `global50` is both the iteration set
 and the graduation gate set (`benchmarks.toml:82-95`), and Regime N currently has no
