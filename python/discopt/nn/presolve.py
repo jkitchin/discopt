@@ -162,25 +162,27 @@ def tighten_network(
 
 
 class NNPresolvePass:
-    """A presolve pass that tightens an embedded NN's activation bounds
-    and reports dead ReLUs.
+    """**Informational v0 — not wired into any solve path.**
+
+    A presolve pass that tightens an embedded NN's activation bounds and reports
+    dead ReLUs. Nothing constructs it during a solve, and ``run()`` performs **no
+    bound writeback** to the model: it computes activation bounds and dead-ReLU
+    masks and surfaces them on the returned delta under the
+    ``nn_implications``/``nn_neurons_dead`` keys (one entry per dead neuron)
+    purely for inspection. Call it yourself to inspect a network; do not expect
+    it to change a solve.
 
     Constructor binds the pass to a specific network and to the variable
     block index housing the network's input vector. Use this when the
     NN is embedded in a Python ``Model`` whose variables include the
     network's input layer.
 
-    The pass is *informational* in v0 and is not wired into any solve
-    path: no orchestrator constructs it, and ``run()`` performs **no
-    bound writeback** to the model. It computes activation bounds and
-    dead-ReLU masks and surfaces them on the returned delta under the
-    ``nn_implications``/``nn_neurons_dead`` keys (one entry per dead
-    neuron) purely for inspection; the orchestrator treats these unknown
-    keys as inert. Wiring this into ``run_root_presolve(python_passes=...)``
-    so dead-ReLU implications can fix big-M binaries after root
-    tightening is future work (v1), tracked in the nn-module plan
-    (T-N2.2); it requires the entry experiment that measures whether
-    root FBBT/OBBT tightens NN input boxes enough to kill neurons.
+    Wiring it in so dead-ReLU implications can fix big-M binaries after root
+    tightening is future work (v1), tracked in the nn-module plan (T-N2.2); it
+    requires the entry experiment that measures whether root FBBT/OBBT tightens
+    NN input boxes enough to kill neurons. (The A3 ``python_passes=`` handshake
+    it was originally written against was deleted as unreachable in Phase 1
+    Card 1b, so v1 needs a new host as well.)
 
     :param network: the embedded :class:`NetworkDefinition`.
     :param input_block_index: variable block index of the input layer
@@ -263,7 +265,7 @@ class NNPresolvePass:
         # Stash on the delta for downstream consumers. The orchestrator's
         # protocol doesn't carry a typed nn-implication slot in v0, so
         # we extend the dict directly with an "nn_implications" key —
-        # delta_made_progress treats unknown keys as inert.
+        # Unknown delta keys are inert to every consumer.
         delta["nn_implications"] = impls
         delta["nn_neurons_dead"] = int(result.n_neurons_dead)
         return delta

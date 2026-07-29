@@ -1,45 +1,30 @@
-"""Python-side presolve package — A3 of the presolve roadmap.
+"""Python-side presolve helpers.
 
-This package implements the Rust↔Python presolve handshake. Python passes
-that need to call into JAX (e.g. the convexity detector, the NN-embedded
-MINLP presolver, reverse-mode interval AD) live here and conform to the
-:class:`PresolvePass` protocol so they can run inside the orchestrator's
-fixed-point loop alongside the Rust kernels.
+This package used to implement the **A3 Rust↔Python presolve handshake**:
+``run_orchestrated_presolve`` interleaved Python passes between Rust orchestrator
+sweeps, and three passes (``ConvexReformPass``, ``ReverseADPass``,
+``SeparabilityPass``) existed only to be run by it. Phase 1 Card 1b deleted the
+handshake — verified unreachable: no production caller ever passed
+``python_passes=`` to ``run_root_presolve``, so the whole layer ran only in its own
+tests. The live equivalents survive elsewhere: reverse-AD tightening is
+``presolve_pipeline.run_reverse_ad_tightening`` (called from ``solver.py``), and
+convexity detection lives in :mod:`discopt._jax.convexity`.
 
-Top-level exports:
+What remains here:
 
-- :class:`PresolvePass` — protocol every Python pass implements.
-- :class:`PresolveResult`, :class:`PresolveDelta` — Python mirrors of the
-  Rust data carriers, used by the orchestrator wrapper to assemble a
-  deterministic, byte-stable record.
-- :func:`run_orchestrated_presolve` — Python wrapper that interleaves
-  Python passes between Rust orchestrator sweeps to a fixed point.
-- :func:`make_python_delta` — helper for Python passes to construct a
-  delta dict in the same shape Rust passes emit.
+- :class:`PresolvePass` / :func:`make_python_delta` / :class:`PresolveDelta` — the
+  delta contract, still used by :mod:`discopt.nn.presolve`.
+- :func:`detect_separability` / :class:`SeparabilityReport` — standalone
+  block-separability analysis (no pass wrapper).
 """
 
-from .convex_reform import ConvexReformPass
-from .orchestrator import run_orchestrated_presolve
-from .protocol import (
-    PresolveDelta,
-    PresolvePass,
-    PresolveResult,
-    delta_made_progress,
-    make_python_delta,
-)
-from .reverse_ad import ReverseADPass
-from .separability import SeparabilityPass, SeparabilityReport, detect_separability
+from .protocol import PresolveDelta, PresolvePass, make_python_delta
+from .separability import SeparabilityReport, detect_separability
 
 __all__ = [
     "PresolvePass",
     "PresolveDelta",
-    "PresolveResult",
     "make_python_delta",
-    "delta_made_progress",
-    "run_orchestrated_presolve",
-    "ConvexReformPass",
-    "ReverseADPass",
-    "SeparabilityPass",
     "SeparabilityReport",
     "detect_separability",
 ]

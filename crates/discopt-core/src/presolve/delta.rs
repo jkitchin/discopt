@@ -128,14 +128,6 @@ pub struct PresolveDelta {
     /// Structural facts detected by this pass.
     pub structure: StructureManifest,
 
-    // ─── Diagnostics that DO NOT count as progress ───────────────
-    /// Curtis–Reid row scale factors, one per constraint. `None` for
-    /// passes that do not compute scaling. Recorded for downstream
-    /// LP/NLP solvers to consume; populating this field does not
-    /// trigger orchestrator iteration on its own.
-    pub row_scales: Option<Vec<f64>>,
-    /// Curtis–Reid column scale factors, one per variable block.
-    pub col_scales: Option<Vec<f64>>,
 
     // ─── Accounting ───────────────────────────────────────────────
     /// Wall-clock time spent in this pass invocation (milliseconds).
@@ -161,8 +153,6 @@ impl PresolveDelta {
             constraints_rewritten: Vec::new(),
             aux_constraints_introduced: 0,
             structure: StructureManifest::default(),
-            row_scales: None,
-            col_scales: None,
             wall_time_ms: 0.0,
             work_units: 0,
         }

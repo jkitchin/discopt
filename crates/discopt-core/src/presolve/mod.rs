@@ -7,8 +7,6 @@
 //!   implications and fixings.
 //! - **Simplify** (`simplify`): Integer bound rounding, Big-M
 //!   strengthening, and redundant constraint removal.
-//! - **OBBT** (`obbt`): Optimality-Based Bound Tightening helpers
-//!   (LP solving lives on the Python side).
 //! - **Eliminate** (`eliminate`): M10 variable elimination via
 //!   singleton equality detection.
 //! - **Polynomial reformulation** (`polynomial`): M4+M5 polynomial-to-
@@ -27,21 +25,17 @@ pub mod aggregate;
 pub mod cliques;
 pub mod coefficient_strengthening;
 pub mod delta;
-pub mod duality;
 pub mod eliminate;
 pub mod factorable_elim;
 pub mod fbbt;
 pub mod fbbt_fp;
 pub mod implied_bounds;
-pub mod obbt;
 pub mod orchestrator;
 pub mod pass;
 pub mod passes;
 pub mod polynomial;
 pub mod probing;
-pub mod reduction_constraints;
 pub mod redundancy;
-pub mod scaling;
 pub mod simplify;
 pub mod substitute;
 pub mod symmetry;
@@ -55,7 +49,6 @@ pub use delta::{
     Implication as DeltaImplication, PresolveDelta, StructureManifest, TerminationReason,
     VarAggregation,
 };
-pub use duality::{reduced_cost_fixing, ReducedCostInfo, ReducedCostStats};
 pub use eliminate::{eliminate_variables, eliminate_variables_until, EliminationStats};
 pub use factorable_elim::{factorable_eliminate, FactorableElimStats};
 pub use fbbt::{
@@ -64,13 +57,12 @@ pub use fbbt::{
 };
 pub use fbbt_fp::{fbbt_fixed_point, FbbtFpOptions, FbbtFpStats};
 pub use implied_bounds::{propagate_implied_bounds, ImpliedBoundsStats};
-pub use obbt::{apply_obbt_bounds, extract_linear_rows, obbt_candidates, LinearRow, ObbtResult};
 pub use orchestrator::{run as run_orchestrator, OrchestratorOptions, PresolveResult};
 pub use pass::{PassCategory, PresolveContext, PresolvePass};
 pub use passes::{
     AggregatePass, CliquePass, CoefficientStrengtheningPass, EliminatePass, FactorableElimPass,
     FbbtFixedPointPass, FbbtPass, ImpliedBoundsPass, PolynomialReformPass, ProbingPass,
-    ReducedCostFixingPass, ReductionConstraintsPass, RedundancyPass, ScalingPass, SimplifyPass,
+    RedundancyPass, SimplifyPass,
 };
 pub use polynomial::{
     reformulate_polynomial, try_polynomial, Monomial, Polynomial, ReformulationStats,
@@ -78,9 +70,7 @@ pub use polynomial::{
 pub use probing::{
     probe_binary_vars, probe_node_bounds, Implication, NodeProbeResult, ProbingResult,
 };
-pub use reduction_constraints::{detect_reduction_constraints, ReductionStats};
 pub use redundancy::{detect_row_redundancy, RedundancyStats};
-pub use scaling::{compute_equilibration, ScalingFactors, ScalingStats};
 pub use simplify::{simplify, simplify_until, SimplifyResult};
 pub use substitute::{
     postsolve_chain, postsolve_point, substitute_to_fixpoint, substitute_variables, SubstDef,

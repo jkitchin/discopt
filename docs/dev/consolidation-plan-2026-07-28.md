@@ -142,9 +142,63 @@ detecting a deliberate 1-node perturbation (test); `heldout50` resolvable locall
 
 ## Phase 1 — Mechanical hygiene (bound-neutral, immediately shippable)
 
-> **Status:** OPEN. **Depends:** Phase 0 for the check artifact (soft — 1a/1b can
-> land with the existing corpus check). **Regime:** N throughout.
-> **Est:** 2–3 sessions. Cards independent of each other.
+> **Status:** LANDED 2026-07-29 (Cards 1a and 1b both complete).
+> **Depends:** Phase 0 for the check artifact. **Regime:** N throughout.
+>
+> **What exists now (1a).** `python/discopt/_env.py`
+> (`env_bool`/`env_int`/`env_float`/`env_str`/`env_enum` — one truth table,
+> `ValueError` on anything outside it) and its Rust twin
+> `crates/discopt-core/src/env.rs` (same table; unparseable warns on stderr and
+> takes the default, since a kernel has no exception channel). All 57 inline
+> Python reads migrated (27 in `solver.py`); `solver_tuning.py`'s helpers rewired,
+> `_env_cut_inherit` keeping its tri-state. The three Rust presence-test flags
+> (`DISCOPT_PROFILE`, `DISCOPT_DISABLE_CSE`, `DISCOPT_T14_DBG`) now honour `=0`.
+> `python/discopt/_flag_registry.py` holds 73 rows plus `solver_tuning_flags()`,
+> which recovers the 46 `SolverTuning` flags from the dataclass by AST instead of
+> a hand-copy; `scripts/gen_flag_docs.py` generates `docs/reference/flags.md`
+> (119 flags), linked from README and `docs/_toc.yml`.
+> `python/tests/test_flag_registry.py` (17 tests) locks the truth table, the
+> registry closure, the daemon suffix list, the doc's freshness, and the
+> **CI grep-gate**: zero raw `os.environ.get("DISCOPT_` outside
+> `_env.py`/`solver_tuning.py`. Every default is unchanged; CHANGELOG
+> (Unreleased → Fixed) lists every flag whose non-`0`/`1` spellings changed.
+>
+> **What exists now (1b).** −4,889 net lines: `presolve/obbt.rs`, the A3
+> Rust↔Python handshake (`run_orchestrated_presolve` + `ConvexReformPass` +
+> `ReverseADPass` + `SeparabilityPass` + the two protocol helpers only they used),
+> the three never-enabled Rust passes (`scaling.rs`, `duality.rs`,
+> `reduction_constraints.rs`) with their adapters / pass names /
+> `reduced_cost_info` plumbing / `row_scales`+`col_scales` delta fields, five
+> orphaned PyO3 exports (`solve_lp_py`, `crossover_to_vertex_py`,
+> `recover_basis_py`, `PyBatchDispatcher`+`batch.rs`, `parse_nl_string`), and three
+> orphaned `_jax` modules (`embedding.py`, `operator_relaxations.py`,
+> `soc_cuts.py`). `fbbt_fp.rs` and `symmetry.rs` are parked with header comments
+> naming Card 3b and Phase 7.3. `nn/presolve.py` is kept, with its "informational
+> v0, not wired into any solve path" caveat moved to the first line of the class
+> docstring.
+>
+> **What the card said to delete and re-verification saved.** Six targets had live
+> callers in the directories §0.2 names, so they are NOT provably unreachable:
+> `solve_convex_node_py` and `convex_warmlp_probe_py`
+> (`discopt_benchmarks/scripts/issue798_k1_bytecheck.py` — the K1 gate — and
+> `issue807_w0_probe.py`), `SubstitutionChain` (a CLAUDE.md §8 load-marker
+> assertion in `presolve_roundloop_census.py`, and the return type of the live
+> `PyModelRepr.substitute`), `_jax/claim_audit.py` (two benchmark scripts),
+> `_jax/symbolic/domains/power.py` + `_jax/symbolic/registry.py` +
+> `_jax/symbolic/certified_learned.py` + `_jax/pounce_layer.py` (all imported by
+> notebooks that are in `docs/_toc.yml`), `_jax/symbolic/signed_signomial.py`
+> (imported by the live `_jax/symbolic/patterns.py`), and `_jax/icnn_trainer.py`
+> (named in `learned_relaxations.py`'s error message as the way to produce its
+> inputs). `parse_nl_string`'s tests were **migrated, not deleted** — they now
+> round-trip through the live `parse_nl_file`, so no `.nl`-parser coverage was
+> traded for the deletion (§0.4).
+>
+> **One finding for Phase 2, not fixed here.** `_jax/superposition.py` looks
+> test-only but is not dead: `MccormickLPRelaxer` threads
+> `superposition=(relaxation_arithmetic == "superposition")` into
+> `build_milp_relaxation`, which **accepts the argument and ignores it**
+> (`_SUPERPOSITION_FUNCS` is likewise defined and never read). That is a wiring
+> defect of the Card 2a/2c family, not dead code; the module is kept.
 
 ### Card 1a — One flag helper, one truth table
 

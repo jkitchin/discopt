@@ -36,7 +36,6 @@ def presolve(r, passes, cap_ms):
         work_unit_budget=0,
         fbbt_max_iter=20,
         fbbt_tol=1e-8,
-        reduced_cost_info=None,
     )
     return new_r, stats, time.time() - t0
 

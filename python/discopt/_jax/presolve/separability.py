@@ -34,8 +34,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from .protocol import make_python_delta
-
 
 @dataclass(frozen=True)
 class SeparabilityReport:
@@ -157,37 +155,7 @@ def detect_separability(model: Any) -> SeparabilityReport:
     )
 
 
-class SeparabilityPass:
-    """Block-separability detection as a presolve pass.
-
-    Args:
-        model: the Python ``Model`` whose constraints + objective
-            define the variable-co-occurrence graph.
-    """
-
-    name = "separability"
-
-    def __init__(self, model: Any) -> None:
-        self.model = model
-        self.last_report: SeparabilityReport | None = None
-
-    def run(self, model_repr: Any) -> dict:
-        delta = make_python_delta(self.name)
-        try:
-            report = detect_separability(self.model)
-        except Exception:
-            return delta
-        self.last_report = report
-        delta["work_units"] = len(self.model._constraints) + 1
-        delta["separable_blocks"] = [list(b) for b in report.blocks]
-        delta["separable"] = bool(report.separable)
-        delta["constraint_block"] = list(report.constraint_block)
-        delta["objective_block"] = int(report.objective_block)
-        return delta
-
-
 __all__ = [
-    "SeparabilityPass",
     "SeparabilityReport",
     "detect_separability",
 ]

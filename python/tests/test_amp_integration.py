@@ -1412,13 +1412,6 @@ class TestMilpRelaxation:
                 convhull_formulation="bogus",
             )
 
-    def test_embedding_helper_rejects_non_sos2_compatible_encoding(self):
-        """Binary counting codes are invalid for SOS2 once adjacency breaks."""
-        from discopt._jax.embedding import build_embedding_map
-
-        with pytest.raises(ValueError, match="only works for exactly 2 partitions"):
-            build_embedding_map(5, encoding="binary")
-
     def test_embedding_requires_sos2_formulation(self):
         """Embedded binaries should be rejected for non-SOS2 formulations."""
         m = _make_nlp1()

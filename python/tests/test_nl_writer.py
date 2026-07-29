@@ -543,7 +543,7 @@ class TestNLWriterRoundTrip:
     @pytest.fixture
     def has_rust_parser(self):
         try:
-            from discopt._rust import parse_nl_string  # noqa: F401
+            from discopt._rust import parse_nl_file  # noqa: F401
 
             return True
         except ImportError:

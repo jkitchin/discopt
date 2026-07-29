@@ -677,14 +677,9 @@ impl PyModelRepr {
     /// which kernels run and in what order. Recognised identifiers:
     /// `"eliminate"`, `"aggregate"`, `"redundancy"`,
     /// `"polynomial_reform"`, `"simplify"`, `"implied_bounds"`,
-    /// `"fbbt"`, `"fbbt_fixed_point"`, `"probing"`, `"scaling"`,
-    /// `"cliques"`, `"reduced_cost_fixing"`.
+    /// `"fbbt"`, `"fbbt_fixed_point"`, `"probing"`, `"cliques"`,
+    /// `"coefficient_strengthening"`, `"factorable_elim"`.
     ///
-    /// `reduced_cost_info`, when given, is a dict with keys
-    /// `lp_value: float`, `cutoff: float`, `reduced_costs: list[float]`
-    /// (one per variable block). Required for the
-    /// `"reduced_cost_fixing"` pass to do anything; otherwise that pass
-    /// is a no-op.
     /// Default order matches the historical
     /// `_jax/presolve_pipeline.py:run_root_presolve` behaviour:
     /// `["eliminate", "simplify", "fbbt", "probing"]`. Polynomial
@@ -708,7 +703,6 @@ impl PyModelRepr {
         work_unit_budget=0,
         fbbt_max_iter=20,
         fbbt_tol=1e-8,
-        reduced_cost_info=None,
     ))]
     fn presolve(
         &self,
@@ -719,50 +713,12 @@ impl PyModelRepr {
         work_unit_budget: u64,
         fbbt_max_iter: usize,
         fbbt_tol: f64,
-        reduced_cost_info: Option<Bound<'_, PyDict>>,
     ) -> PyResult<(PyModelRepr, PyObject)> {
         use discopt_core::presolve::{
             run_orchestrator, AggregatePass, CliquePass, CoefficientStrengtheningPass,
             EliminatePass, FactorableElimPass, FbbtFixedPointPass, FbbtPass, ImpliedBoundsPass,
-            OrchestratorOptions, PolynomialReformPass, PresolvePass, ProbingPass,
-            ReducedCostFixingPass, ReducedCostInfo, ReductionConstraintsPass, RedundancyPass,
-            ScalingPass, SimplifyPass,
-        };
-
-        // Parse the optional reduced-cost-fixing info dict once, up
-        // front, so that every "reduced_cost_fixing" pass instance
-        // shares the same input.
-        let rc_info: Option<ReducedCostInfo> = match reduced_cost_info {
-            Some(d) => {
-                let lp_value: f64 = d
-                    .get_item("lp_value")?
-                    .ok_or_else(|| {
-                        pyo3::exceptions::PyKeyError::new_err(
-                            "reduced_cost_info missing 'lp_value'",
-                        )
-                    })?
-                    .extract()?;
-                let cutoff: f64 = d
-                    .get_item("cutoff")?
-                    .ok_or_else(|| {
-                        pyo3::exceptions::PyKeyError::new_err("reduced_cost_info missing 'cutoff'")
-                    })?
-                    .extract()?;
-                let reduced_costs: Vec<f64> = d
-                    .get_item("reduced_costs")?
-                    .ok_or_else(|| {
-                        pyo3::exceptions::PyKeyError::new_err(
-                            "reduced_cost_info missing 'reduced_costs'",
-                        )
-                    })?
-                    .extract()?;
-                Some(ReducedCostInfo {
-                    lp_value,
-                    cutoff,
-                    reduced_costs,
-                })
-            }
-            None => None,
+            OrchestratorOptions, PolynomialReformPass, PresolvePass, ProbingPass, RedundancyPass,
+            SimplifyPass,
         };
 
         let pass_names: Vec<String> = passes.unwrap_or_else(|| {
@@ -794,12 +750,7 @@ impl PyModelRepr {
                     tol: fbbt_tol,
                     max_visits: 0,
                 }),
-                "scaling" => Box::new(ScalingPass),
                 "cliques" => Box::new(CliquePass),
-                "reduced_cost_fixing" => Box::new(ReducedCostFixingPass {
-                    info: rc_info.clone(),
-                }),
-                "reduction_constraints" => Box::new(ReductionConstraintsPass),
                 "coefficient_strengthening" => Box::new(CoefficientStrengtheningPass),
                 "factorable_elim" => Box::new(FactorableElimPass),
                 "probing" => Box::new(ProbingPass::default()),
@@ -853,12 +804,6 @@ impl PyModelRepr {
                 aggs.append(ad)?;
             }
             dd.set_item("vars_aggregated", aggs)?;
-            if let Some(rs) = &d.row_scales {
-                dd.set_item("row_scales", rs.clone())?;
-            }
-            if let Some(cs) = &d.col_scales {
-                dd.set_item("col_scales", cs.clone())?;
-            }
             if !d.structure.cliques.is_empty() {
                 let edges: Vec<(usize, usize)> = d.structure.cliques.clone();
                 dd.set_item("cliques", edges)?;

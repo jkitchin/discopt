@@ -69,24 +69,6 @@ def make_python_delta(pass_name: str, pass_iter: int = 0) -> dict:
     }
 
 
-def delta_made_progress(delta: dict) -> bool:
-    """Whether a delta represents observable progress.
-
-    Mirrors ``PresolveDelta::made_progress`` on the Rust side. Used by
-    the orchestrator wrapper to detect a fixed point across Rust and
-    Python passes.
-    """
-    return (
-        int(delta.get("bounds_tightened", 0)) > 0
-        or int(delta.get("aux_vars_introduced", 0)) > 0
-        or int(delta.get("aux_constraints_introduced", 0)) > 0
-        or len(delta.get("constraints_removed", []) or []) > 0
-        or len(delta.get("constraints_rewritten", []) or []) > 0
-        or len(delta.get("vars_fixed", []) or []) > 0
-        or len(delta.get("vars_aggregated", []) or []) > 0
-    )
-
-
 @dataclass
 class PresolveDelta:
     """Dataclass mirror of a Rust ``PresolveDelta``.
@@ -121,23 +103,4 @@ class PresolveDelta:
             "vars_aggregated": list(self.vars_aggregated),
             "work_units": self.work_units,
             "wall_time_ms": self.wall_time_ms,
-        }
-
-
-@dataclass
-class PresolveResult:
-    """Aggregate result from :func:`run_orchestrated_presolve`."""
-
-    model_repr: Any
-    deltas: list[dict]
-    iterations: int
-    terminated_by: str
-
-    def __iter__(self):
-        # Allow ``model, stats = run_orchestrated_presolve(...)``.
-        yield self.model_repr
-        yield {
-            "iterations": self.iterations,
-            "terminated_by": self.terminated_by,
-            "deltas": self.deltas,
         }

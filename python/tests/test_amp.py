@@ -183,19 +183,6 @@ def test_amp_integration_tier_selects_memory_heavy_marker():
     assert "scripts/run_memory_capped_pytest.sh python -m pytest" in output
 
 
-def test_embedding_map_single_partition_uses_no_selector_bits():
-    """One SOS2 interval does not need an embedded binary selector."""
-    from discopt._jax.embedding import EmbeddingMap, build_embedding_map
-
-    embedding = build_embedding_map(2, encoding="gray")
-
-    assert isinstance(embedding, EmbeddingMap)
-    assert embedding.bit_count == 0
-    assert embedding.codes == ((),)
-    assert embedding.positive_sets == ()
-    assert embedding.negative_sets == ()
-
-
 def test_memory_capped_pytest_wrapper_dry_run():
     """The pytest wrapper should expose the command and resource caps for diagnosis."""
     repo = Path(__file__).resolve().parents[2]
@@ -1126,14 +1113,6 @@ def test_issue64_minlptests_minmax_objective_uses_lifted_bound(
     assert milp_model._objective_bound_valid is True
     assert result.status == "optimal"
     assert result.objective == pytest.approx(expected_relaxation_obj, abs=1e-8)
-
-
-def test_tan_range_rejects_near_asymptote_endpoints():
-    from discopt._jax.operator_relaxations import tan_range as _tan_range
-
-    near_asymptote = np.pi / 2.0 - 5e-4
-
-    assert _tan_range(near_asymptote - 1e-5, near_asymptote) is None
 
 
 def test_tan_abs_minlptests_objective_linearizes_without_fallback(caplog):

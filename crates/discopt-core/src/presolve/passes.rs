@@ -21,7 +21,6 @@ use super::aggregate::aggregate_variables_until;
 use super::cliques::extract_cliques;
 use super::coefficient_strengthening::coefficient_strengthening;
 use super::delta::{count_tightened, Implication as DeltaImpl, PresolveDelta, VarAggregation};
-use super::duality::{reduced_cost_fixing, ReducedCostInfo};
 use super::eliminate::eliminate_variables_until;
 use super::factorable_elim::factorable_eliminate_until;
 use super::fbbt::{fbbt_with_cutoff_until, Interval};
@@ -30,9 +29,7 @@ use super::implied_bounds::propagate_implied_bounds;
 use super::pass::{PassCategory, PresolveContext, PresolvePass};
 use super::polynomial::reformulate_polynomial;
 use super::probing::probe_binary_vars_until;
-use super::reduction_constraints::detect_reduction_constraints;
 use super::redundancy::detect_row_redundancy;
-use super::scaling::compute_equilibration;
 use super::simplify::simplify_until;
 
 // ─────────────────────────────────────────────────────────────────
@@ -317,38 +314,6 @@ impl PresolvePass for RedundancyPass {
 }
 
 // ─────────────────────────────────────────────────────────────────
-// Equilibration scaling (E1 — Curtis–Reid row/col scale factors)
-// ─────────────────────────────────────────────────────────────────
-
-/// Adapter for `scaling::compute_equilibration` (E1 of the roadmap).
-///
-/// Computes Curtis–Reid geometric-mean scale factors for the linear
-/// part of the model and exposes them on the delta (`row_scales`,
-/// `col_scales`). The pass does not modify the model or bounds — it
-/// only emits the numbers, so its delta does NOT count as progress
-/// for the orchestrator's fixed-point check. Downstream LP/NLP
-/// solvers consume the factors from the delta log.
-#[derive(Debug, Default, Clone)]
-pub struct ScalingPass;
-
-impl PresolvePass for ScalingPass {
-    fn name(&self) -> &'static str {
-        "scaling"
-    }
-    fn category(&self) -> PassCategory {
-        PassCategory::BoundsOnly
-    }
-    fn run(&mut self, ctx: &mut PresolveContext) -> PresolveDelta {
-        let (factors, stats) = compute_equilibration(&ctx.model);
-        let mut delta = PresolveDelta::empty("scaling", ctx.iter);
-        delta.row_scales = Some(factors.row_scales);
-        delta.col_scales = Some(factors.col_scales);
-        delta.work_units = stats.linear_rows_sampled as u64;
-        delta
-    }
-}
-
-// ─────────────────────────────────────────────────────────────────
 // Watch-list FBBT (B4 — fixed-point bound propagation)
 // ─────────────────────────────────────────────────────────────────
 
@@ -467,49 +432,6 @@ impl PresolvePass for CliquePass {
 }
 
 // ─────────────────────────────────────────────────────────────────
-// Reduced-cost fixing (E2 — domain reduction via LP duality)
-// ─────────────────────────────────────────────────────────────────
-
-/// Adapter for `duality::reduced_cost_fixing` (E2 of the roadmap).
-///
-/// Holds the LP-duality information (`lp_value`, `cutoff`,
-/// `reduced_costs`) needed to apply reduced-cost fixing. The orchestrator
-/// runs this pass after the relaxation has been solved upstream; the
-/// pass adapter is constructed with the LP info already populated.
-///
-/// When `info` is `None` the pass is a no-op — the LP info has not been
-/// supplied. This lets the pass be present in a default pipeline before
-/// the A3 Rust↔Python handshake (P3) is wired through.
-#[derive(Debug, Clone, Default)]
-pub struct ReducedCostFixingPass {
-    /// LP / NLP relaxation info. `None` ⇒ no-op.
-    pub info: Option<ReducedCostInfo>,
-}
-
-impl PresolvePass for ReducedCostFixingPass {
-    fn name(&self) -> &'static str {
-        "reduced_cost_fixing"
-    }
-    fn category(&self) -> PassCategory {
-        PassCategory::BoundsOnly
-    }
-    fn run(&mut self, ctx: &mut PresolveContext) -> PresolveDelta {
-        let mut delta = PresolveDelta::empty("reduced_cost_fixing", ctx.iter);
-        let info = match &self.info {
-            Some(i) => i,
-            None => return delta,
-        };
-        let before = ctx.bounds.clone();
-        let stats = reduced_cost_fixing(&ctx.model, &mut ctx.bounds, info);
-        delta.bounds_tightened = count_tightened(&before, &ctx.bounds);
-        delta.var_bounds_after = Some(ctx.bounds.clone());
-        delta.vars_fixed = stats.vars_fixed;
-        delta.work_units = stats.blocks_examined as u64;
-        delta
-    }
-}
-
-// ─────────────────────────────────────────────────────────────────
 // Polynomial reformulation (M4 + M5)
 // ─────────────────────────────────────────────────────────────────
 
@@ -545,50 +467,6 @@ impl PresolvePass for PolynomialReformPass {
         delta.work_units = (stats.constraints_rewritten + stats.constraints_skipped) as u64;
         delta.structure.reformulated_polynomial_constraints =
             (0..stats.constraints_rewritten).collect();
-        delta
-    }
-}
-
-// ─────────────────────────────────────────────────────────────────
-// Reduction-constraint detection (D3 of #53)
-// ─────────────────────────────────────────────────────────────────
-
-/// Adapter for `reduction_constraints::detect_reduction_constraints`.
-///
-/// Detects sum-of-squares (or sum-of-even-powers) inequalities of the
-/// form `Σ cᵢ · ∏ xⱼ^(2 kⱼ) ≤ r` with `r ≤ 0`, and tightens every
-/// participating variable's bounds to `[0, 0]`. Marks the constraint
-/// as redundant and stamps the indices into
-/// `delta.constraints_removed` so the redundancy pass can drop them on
-/// the next sweep. Surfaces structural infeasibility immediately
-/// (e.g. `x² ≤ -1`).
-#[derive(Debug, Default, Clone)]
-pub struct ReductionConstraintsPass;
-
-impl PresolvePass for ReductionConstraintsPass {
-    fn name(&self) -> &'static str {
-        "reduction_constraints"
-    }
-    fn category(&self) -> PassCategory {
-        PassCategory::BoundsOnly
-    }
-    fn run(&mut self, ctx: &mut PresolveContext) -> PresolveDelta {
-        let before = ctx.bounds.clone();
-        let stats = detect_reduction_constraints(&ctx.model, &mut ctx.bounds);
-        let mut delta = PresolveDelta::empty("reduction_constraints", ctx.iter);
-        delta.bounds_tightened = count_tightened(&before, &ctx.bounds);
-        delta.var_bounds_after = Some(ctx.bounds.clone());
-        delta.vars_fixed = stats
-            .vars_fixed_to_zero
-            .into_iter()
-            .map(|b| (b, 0.0))
-            .collect();
-        delta.constraints_removed = stats.constraints_made_redundant;
-        delta.work_units = stats.constraints_examined as u64;
-        // Infeasibility surfaces through the bounds array (the kernel
-        // writes an empty Interval); the orchestrator's standard
-        // is_empty() check terminates the loop with TerminationReason::
-        // Infeasible.
         delta
     }
 }

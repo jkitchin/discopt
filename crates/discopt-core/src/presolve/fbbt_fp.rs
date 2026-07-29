@@ -1,5 +1,18 @@
 //! Watch-list FBBT to a true fixed point (B4 of the presolve roadmap).
 //!
+//! ## PARKED — entry experiment for Card 3b (consolidation plan 2026-07-28)
+//!
+//! This pass is **implemented but never enabled on any solve path**. It was NOT
+//! deleted with the other never-enabled presolve passes in Phase 1 Card 1b,
+//! because its header (below) claims to *supersede* the wired-in sweep FBBT in
+//! `fbbt.rs` — "wasteful … oscillates in the tail" — and that claim has never
+//! been measured. Card 3b is that measurement: A/B `fbbt` vs `fbbt_fp` on the
+//! corpus root + node streams, asserting **fixpoint equality** (both are FBBT;
+//! any bound difference is a bug in one of them, to be investigated before
+//! proceeding) and recording the wall delta. The winner becomes the only Rust
+//! DAG-FBBT and the loser is deleted. Do not delete this file before that
+//! experiment runs.
+//!
 //! ## What this pass does
 //!
 //! Runs forward/backward bound propagation as a constraint-by-constraint

@@ -23,19 +23,3 @@ pub fn parse_nl_file(path: &str) -> PyResult<PyModelRepr> {
         model, compl,
     ))
 }
-
-/// Parse .nl content from a string and return a PyModelRepr.
-///
-/// Arguments:
-///     content: The full text content of a .nl file.
-///
-/// Returns:
-///     PyModelRepr wrapping the parsed model.
-#[pyfunction]
-pub fn parse_nl_string(content: &str) -> PyResult<PyModelRepr> {
-    let (model, compl) = nl_parser::parse_nl_with_complementarity(content)
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("{e}")))?;
-    Ok(PyModelRepr::from_model_repr_with_complementarity(
-        model, compl,
-    ))
-}

@@ -294,22 +294,16 @@ class SolverTuning:
     )
     """Separate multilinear McCormick cuts (``DISCOPT_MULTILINEAR_SEPARATE``)."""
 
-    trilinear_nested: bool = field(
-        default_factory=lambda: _env_trilinear() == "nested"
-    )
+    trilinear_nested: bool = field(default_factory=lambda: _env_trilinear() == "nested")
     """Force the legacy nested-bilinear trilinear path
     (``DISCOPT_TRILINEAR=nested``; equivalent to the default unless another
     trilinear selector is explicitly set)."""
 
-    trilinear_meyer: bool = field(
-        default_factory=lambda: _env_trilinear() == "meyer"
-    )
+    trilinear_meyer: bool = field(default_factory=lambda: _env_trilinear() == "meyer")
     """Use the Meyer-Floudas/Rikun trilinear convex-hull envelope
     (``DISCOPT_TRILINEAR=meyer``, default off)."""
 
-    trilinear_exact: bool = field(
-        default_factory=lambda: _env_trilinear() == "exact"
-    )
+    trilinear_exact: bool = field(default_factory=lambda: _env_trilinear() == "exact")
     """Use the best-of-three nested trilinear envelope
     (``DISCOPT_TRILINEAR=exact``, default off)."""
 

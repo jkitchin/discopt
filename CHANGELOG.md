@@ -118,6 +118,61 @@ The release procedure that produces these entries is documented in
   so it cannot manufacture a certificate, and the dual `bound` is left in place
   because a bound with no incumbent is still a valid bound.
 
+### Removed
+
+- **~4,900 lines of provably-unreachable code** (`refactor`, consolidation plan
+  Phase 1 Card 1b). Every deletion was re-verified against `python/`, `crates/`,
+  `discopt_benchmarks/`, `scripts/`, `design/` and `docs/` before removal (plan
+  §0.2); nothing on a solve path changed, and the Regime-N panel is byte-clean.
+
+  - `crates/discopt-core/src/presolve/obbt.rs` (623 lines, zero callers — the
+    OBBT that runs is the Python `_jax/obbt.py`).
+  - The **A3 Rust↔Python presolve handshake**: `_jax/presolve/orchestrator.py`'s
+    `run_orchestrated_presolve` plus the three passes only it could run
+    (`ConvexReformPass`, `ReverseADPass`, `SeparabilityPass`) and the two
+    protocol helpers only it used (`delta_made_progress`, `PresolveResult`).
+    No production caller ever passed `python_passes=` to `run_root_presolve`, so
+    `run_root_presolve` loses that parameter too. The live equivalents are
+    untouched: `presolve_pipeline.run_reverse_ad_tightening` (called from
+    `solver.py`), `discopt._jax.convexity`, and `detect_separability` (kept, minus
+    its pass wrapper). `discopt.nn.presolve.NNPresolvePass` is also kept — its
+    "informational v0, not wired into any solve path" caveat now opens the class
+    docstring instead of hiding in the fourth paragraph.
+  - **Three never-enabled Rust presolve passes** and their plumbing:
+    `scaling.rs` (Curtis-Reid equilibration), `duality.rs` (reduced-cost fixing —
+    the live reduced-cost fixing is the MILP driver's and `_jax/node_reduce.py`'s)
+    and `reduction_constraints.rs`. With them go the `ScalingPass` /
+    `ReducedCostFixingPass` / `ReductionConstraintsPass` adapters, the
+    `"scaling"` / `"reduced_cost_fixing"` / `"reduction_constraints"` pass names
+    on `PyModelRepr.presolve`, its `reduced_cost_info` parameter, the
+    `row_scales`/`col_scales` delta fields, and the corresponding
+    `run_root_presolve(scaling=, reduced_cost=, reduced_cost_info=,
+    reduction_constraints=)` keywords. No production call site set any of them.
+  - **Five orphaned PyO3 exports**: `solve_lp_py`, `crossover_to_vertex_py`,
+    `recover_basis_py`, `PyBatchDispatcher` (with `crates/discopt-python/src/batch.rs`)
+    and `parse_nl_string`. The Rust internals they wrapped are untouched and keep
+    their own Rust tests; the live LP entry points are `solve_lp_warm_csc_py` /
+    `solve_lp_batch_py`. The `.nl` parser tests keep every assertion — they now
+    round-trip through the live `parse_nl_file`.
+  - **Three orphaned `_jax` modules**: `embedding.py` (Gray-code SOS2 embedding),
+    `operator_relaxations.py` (trig ranges) and `soc_cuts.py` — no module in
+    `discopt` imported any of them.
+
+  **Explicitly NOT deleted**, against the card's first pass, because
+  re-verification found live callers or planned entry experiments:
+  `fbbt_fp.rs` and `symmetry.rs` (parked with a header comment naming Card 3b and
+  Phase 7.3), `_jax/claim_audit.py` and the `solve_convex_node_py` /
+  `convex_warmlp_probe_py` / `SubstitutionChain` exports (all called from
+  `discopt_benchmarks/scripts/`), `_jax/pounce_layer.py`,
+  `_jax/symbolic/{registry,certified_learned,domains/power}.py` (all used by
+  `docs/notebooks/symbolic_envelopes.ipynb` / `differentiable_*.ipynb`),
+  `_jax/symbolic/signed_signomial.py` (imported by `_jax/symbolic/patterns.py`),
+  `_jax/icnn_trainer.py` (the training half of `learned_relaxations`, named in its
+  error message) and `_jax/superposition.py` — the last is not dead code but a
+  *wiring* defect: `MccormickLPRelaxer` threads `superposition=` into
+  `build_milp_relaxation`, which accepts the argument and ignores it. That belongs
+  to Phase 2, not to a dead-code card.
+
 ### Fixed
 
 - **One truth table for every `DISCOPT_*` flag** (`fix`, consolidation plan Phase 1

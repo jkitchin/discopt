@@ -46,11 +46,7 @@ def run_root_presolve(
     redundancy: bool = True,
     polynomial: bool = False,
     implied_bounds: bool = True,
-    scaling: bool = False,
     cliques: bool = False,
-    reduced_cost: bool = False,
-    reduced_cost_info: dict | None = None,
-    reduction_constraints: bool = False,
     coefficient_strengthening: bool = True,
     factorable_elim: bool = True,
     fbbt: bool = True,
@@ -61,7 +57,6 @@ def run_root_presolve(
     probing: bool = True,
     max_iterations: int = 16,
     time_limit_ms: int = 0,
-    python_passes=None,
 ) -> tuple[Any, dict]:
     """Run the root-stage presolve sequence on ``model_repr``.
 
@@ -102,8 +97,6 @@ def run_root_presolve(
         pass_names.append("simplify")
     if coefficient_strengthening:
         pass_names.append("coefficient_strengthening")
-    if scaling:
-        pass_names.append("scaling")
     if implied_bounds:
         pass_names.append("implied_bounds")
     if fbbt:
@@ -114,41 +107,18 @@ def run_root_presolve(
         pass_names.append("probing")
     if cliques:
         pass_names.append("cliques")
-    if reduced_cost:
-        pass_names.append("reduced_cost_fixing")
-    if reduction_constraints:
-        pass_names.append("reduction_constraints")
 
-    if not pass_names and not python_passes:
+    if not pass_names:
         return model_repr, {}
 
-    if python_passes:
-        # A3 handshake path: interleave Python passes between Rust
-        # orchestrator sweeps to a fixed point.
-        from discopt._jax.presolve.orchestrator import run_orchestrated_presolve
-
-        new_repr, raw = run_orchestrated_presolve(
-            model_repr,
-            rust_passes=pass_names,
-            python_passes=python_passes,
-            max_iterations=max_iterations,
-            time_limit_ms=time_limit_ms,
-            rust_kwargs={
-                "fbbt_max_iter": fbbt_max_iter,
-                "fbbt_tol": fbbt_tol,
-                "reduced_cost_info": reduced_cost_info,
-            },
-        )
-    else:
-        new_repr, raw = model_repr.presolve(
-            passes=pass_names,
-            max_iterations=max_iterations,
-            time_limit_ms=time_limit_ms,
-            work_unit_budget=0,
-            fbbt_max_iter=fbbt_max_iter,
-            fbbt_tol=fbbt_tol,
-            reduced_cost_info=reduced_cost_info,
-        )
+    new_repr, raw = model_repr.presolve(
+        passes=pass_names,
+        max_iterations=max_iterations,
+        time_limit_ms=time_limit_ms,
+        work_unit_budget=0,
+        fbbt_max_iter=fbbt_max_iter,
+        fbbt_tol=fbbt_tol,
+    )
 
     stats: dict = {
         "iterations": raw["iterations"],
@@ -181,24 +151,9 @@ def run_root_presolve(
         "bounds_tightened": 0,
         "linear_rows_examined": 0,
     }
-    scaling_total: dict = {
-        "row_scales": None,
-        "col_scales": None,
-        "linear_rows_sampled": 0,
-    }
     cliques_total: dict = {
         "edges": [],
         "linear_rows_scanned": 0,
-    }
-    rcf_total: dict = {
-        "bounds_tightened": 0,
-        "vars_fixed": [],
-        "blocks_examined": 0,
-    }
-    rc_total: dict = {
-        "bounds_tightened": 0,
-        "vars_fixed_to_zero": [],
-        "constraints_made_redundant": [],
     }
     for d in raw["deltas"]:
         if d["pass_name"] == "eliminate":
@@ -220,24 +175,10 @@ def run_root_presolve(
         elif d["pass_name"] == "implied_bounds":
             implied_total["bounds_tightened"] += int(d.get("bounds_tightened", 0))
             implied_total["linear_rows_examined"] += int(d.get("work_units", 0))
-        elif d["pass_name"] == "scaling":
-            if d.get("row_scales") is not None:
-                scaling_total["row_scales"] = list(d["row_scales"])
-            if d.get("col_scales") is not None:
-                scaling_total["col_scales"] = list(d["col_scales"])
-            scaling_total["linear_rows_sampled"] = int(d.get("work_units", 0))
         elif d["pass_name"] == "cliques":
             edges = d.get("cliques", []) or []
             cliques_total["edges"] = list(edges)
             cliques_total["linear_rows_scanned"] = int(d.get("work_units", 0))
-        elif d["pass_name"] == "reduced_cost_fixing":
-            rcf_total["bounds_tightened"] += int(d.get("bounds_tightened", 0))
-            rcf_total["blocks_examined"] += int(d.get("work_units", 0))
-            rcf_total["vars_fixed"].extend(d.get("vars_fixed", []) or [])
-        elif d["pass_name"] == "reduction_constraints":
-            rc_total["bounds_tightened"] += int(d.get("bounds_tightened", 0))
-            rc_total["vars_fixed_to_zero"].extend(idx for idx, _ in (d.get("vars_fixed", []) or []))
-            rc_total["constraints_made_redundant"].extend(d.get("constraints_removed", []) or [])
     if eliminate:
         stats["elimination"] = elim_total
     if aggregate:
@@ -246,14 +187,8 @@ def run_root_presolve(
         stats["redundancy"] = redundancy_total
     if implied_bounds:
         stats["implied_bounds"] = implied_total
-    if scaling:
-        stats["scaling"] = scaling_total
     if cliques:
         stats["cliques"] = cliques_total
-    if reduced_cost:
-        stats["reduced_cost_fixing"] = rcf_total
-    if reduction_constraints:
-        stats["reduction_constraints"] = rc_total
     if polynomial:
         stats["polynomial"] = poly_total
     if fbbt:

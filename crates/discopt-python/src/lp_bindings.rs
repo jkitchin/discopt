@@ -17,7 +17,7 @@ use discopt_core::bnb::milp_driver::{
 };
 use discopt_core::lp::aggregation::separate_aggregation_mir;
 use discopt_core::lp::basis::{recover_basis, Basis, BASIC};
-use discopt_core::lp::crossover::{crossover_to_vertex, LpView};
+use discopt_core::lp::crossover::LpView;
 use discopt_core::lp::gomory::separate_gomory;
 use discopt_core::lp::mir::separate_mir;
 use discopt_core::lp::simplex::{
@@ -30,80 +30,6 @@ use numpy::{
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
-
-/// Push an interior LP optimum `x` to a vertex of the optimal face.
-///
-/// `a` is the C-contiguous `m × n` equality-constraint matrix; `c`, `lb`, `ub`
-/// are length `n`. Returns the vertex as a new length-`n` array (same objective
-/// and feasibility as `x`). `max_iter = 0` selects the `n + 1` default.
-#[pyfunction]
-#[pyo3(signature = (x, a, c, lb, ub, tol=1e-7, max_iter=0))]
-pub fn crossover_to_vertex_py<'py>(
-    py: Python<'py>,
-    x: PyReadonlyArray1<'py, f64>,
-    a: PyReadonlyArray2<'py, f64>,
-    c: PyReadonlyArray1<'py, f64>,
-    lb: PyReadonlyArray1<'py, f64>,
-    ub: PyReadonlyArray1<'py, f64>,
-    tol: f64,
-    max_iter: usize,
-) -> PyResult<Bound<'py, PyArray1<f64>>> {
-    let dims = a.shape();
-    let (m, n) = (dims[0], dims[1]);
-    let a_flat = a
-        .as_slice()
-        .map_err(|_| PyValueError::new_err("`a` must be C-contiguous"))?;
-    let lp = LpView {
-        a: a_flat,
-        m,
-        n,
-        c: c.as_slice()?,
-        l: lb.as_slice()?,
-        u: ub.as_slice()?,
-    };
-    let xv = crossover_to_vertex(x.as_slice()?, &lp, tol, max_iter);
-    Ok(PyArray1::from_vec(py, xv))
-}
-
-/// Recover a simplex basis at the vertex `x` of the standard-form LP.
-///
-/// Returns `(col_status, basic_vars)` — `col_status` is a length-`n` `int8`
-/// array of HiGHS `HighsBasisStatus` codes (`0`=AtLower, `1`=Basic,
-/// `2`=AtUpper) and `basic_vars` the `m` basic column indices — or `None` when
-/// `x` is not a basic feasible solution (see `recover_basis`).
-#[pyfunction]
-#[pyo3(signature = (x, a, c, lb, ub, tol=1e-7))]
-pub fn recover_basis_py<'py>(
-    py: Python<'py>,
-    x: PyReadonlyArray1<'py, f64>,
-    a: PyReadonlyArray2<'py, f64>,
-    c: PyReadonlyArray1<'py, f64>,
-    lb: PyReadonlyArray1<'py, f64>,
-    ub: PyReadonlyArray1<'py, f64>,
-    tol: f64,
-) -> PyResult<Option<(Bound<'py, PyArray1<i8>>, Bound<'py, PyArray1<i64>>)>> {
-    let dims = a.shape();
-    let (m, n) = (dims[0], dims[1]);
-    let a_flat = a
-        .as_slice()
-        .map_err(|_| PyValueError::new_err("`a` must be C-contiguous"))?;
-    let lp = LpView {
-        a: a_flat,
-        m,
-        n,
-        c: c.as_slice()?,
-        l: lb.as_slice()?,
-        u: ub.as_slice()?,
-    };
-    match recover_basis(x.as_slice()?, &lp, tol) {
-        Some(b) => {
-            let status = PyArray1::from_vec(py, b.col_status);
-            let basic: Vec<i64> = b.basic_vars.iter().map(|&v| v as i64).collect();
-            Ok(Some((status, PyArray1::from_vec(py, basic))))
-        }
-        None => Ok(None),
-    }
-}
 
 /// Separate Gomory mixed-integer cuts at the vertex `x` of the standard-form LP.
 ///
@@ -273,62 +199,6 @@ pub fn aggregation_mir_cuts_py<'py>(
     }
     let coeffs = PyArray1::from_vec(py, flat).reshape([k, n])?;
     Ok(Some((coeffs, PyArray1::from_vec(py, rhs))))
-}
-
-/// Solve a standard-form LP `min cᵀx s.t. A x = b, lb ≤ x ≤ ub` with the
-/// warm-startable revised simplex (cold start). `a` is C-contiguous `m × n`.
-/// Returns `(status, x, obj, iters)` where status is one of `optimal`,
-/// `infeasible`, `unbounded`, `iter_limit`, `numerical`. For validation against
-/// HiGHS / Netlib.
-#[pyfunction]
-#[pyo3(signature = (c, a, b, lb, ub, tol=1e-9, max_iter=100_000))]
-pub fn solve_lp_py<'py>(
-    py: Python<'py>,
-    c: PyReadonlyArray1<'py, f64>,
-    a: PyReadonlyArray2<'py, f64>,
-    b: PyReadonlyArray1<'py, f64>,
-    lb: PyReadonlyArray1<'py, f64>,
-    ub: PyReadonlyArray1<'py, f64>,
-    tol: f64,
-    max_iter: usize,
-) -> PyResult<(String, Bound<'py, PyArray1<f64>>, f64, usize)> {
-    let dims = a.shape();
-    let (m, n) = (dims[0], dims[1]);
-    let a_flat = a
-        .as_slice()
-        .map_err(|_| PyValueError::new_err("`a` must be C-contiguous"))?;
-    let lp = LpView {
-        a: a_flat,
-        m,
-        n,
-        c: c.as_slice()?,
-        l: lb.as_slice()?,
-        u: ub.as_slice()?,
-    };
-    let opts = SimplexOptions {
-        tol,
-        max_iter,
-        deadline: None,
-        // F2: warm dual-simplex stall guard on by default (size-derived cap →
-        // cold fallback on trip; bound-neutral). Cold-only entry points ignore it.
-        warm_stall_guard: true,
-        warm_stall_cap_override: None,
-        expel_zero_artificials: false,
-    };
-    let sol = simplex_solve_lp(&lp, b.as_slice()?, &opts);
-    let status = match sol.status {
-        LpStatus::Optimal => "optimal",
-        LpStatus::Infeasible => "infeasible",
-        LpStatus::Unbounded => "unbounded",
-        LpStatus::IterLimit => "iter_limit",
-        LpStatus::Numerical => "numerical",
-    };
-    Ok((
-        status.to_string(),
-        PyArray1::from_vec(py, sol.x),
-        sol.obj,
-        sol.iters,
-    ))
 }
 
 /// Build a dual-simplex warm-start basis from a previous solve's

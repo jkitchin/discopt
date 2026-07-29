@@ -23,7 +23,7 @@ from pathlib import Path
 
 import discopt.modeling.core as dm
 import pytest
-from discopt._rust import parse_nl_string
+from discopt._rust import parse_nl_file
 
 _FIXTURE = Path(__file__).parent / "data" / "mpcc_complementarity.nl"
 
@@ -31,6 +31,23 @@ _FIXTURE = Path(__file__).parent / "data" / "mpcc_complementarity.nl"
 #   min (x-1)^2 + (y-1)^2   s.t.   0 <= x  ⊥  y >= 0,   x,y in [0,10]
 # Global optimum: 1.0 at (0,1) or (1,0).
 _NL = _FIXTURE.read_text()
+
+
+def parse_nl_string(content: str):
+    """Parse ``.nl`` text through the live file parser.
+
+    The ``parse_nl_string`` PyO3 binding was deleted in Phase 1 Card 1b (its only
+    callers were tests). Routing the same text through a temp file and
+    ``parse_nl_file`` — the entry point ``from_nl`` uses — preserves every
+    assertion below against the same ``nl_parser`` kernel.
+    """
+    fd, path = tempfile.mkstemp(suffix=".nl", prefix="test_nl_")
+    with os.fdopen(fd, "w") as f:
+        f.write(content)
+    try:
+        return parse_nl_file(path)
+    finally:
+        os.unlink(path)
 
 
 def test_parser_records_pair_and_no_fabricated_constraint():

@@ -1,5 +1,16 @@
 //! Symmetry detection (D4 of issue #51).
 //!
+//! ## PARKED — entry experiment for Phase 7.3 (consolidation plan 2026-07-28)
+//!
+//! This pass is **implemented but never enabled on any solve path**. It was NOT
+//! deleted with the other never-enabled presolve passes in Phase 1 Card 1b,
+//! because orbital fixing is SOTA-relevant and this detector is the substrate a
+//! future orbital-fixing card would build on. Phase 7.3 files the entry
+//! experiment: name the corpus class whose symmetric structure would prove the
+//! feature matters, and the kill criterion. Until that experiment runs, this is
+//! parked, not dead — the tanksize ablation is the standing warning against
+//! staffing features merely because SOTA solvers have them.
+//!
 //! Detects variable permutation symmetries in the model by comparing
 //! structural signatures of each scalar variable's "column" — its
 //! coefficient pattern across constraints and the objective, together

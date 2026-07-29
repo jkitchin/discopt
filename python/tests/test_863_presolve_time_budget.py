@@ -87,7 +87,6 @@ def _presolve(repr_, passes, time_limit_ms):
         work_unit_budget=0,
         fbbt_max_iter=10,
         fbbt_tol=1e-9,
-        reduced_cost_info=None,
     )
 
 

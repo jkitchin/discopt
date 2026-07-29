@@ -22,7 +22,7 @@ pytestmark = pytest.mark.unit
 
 # Try importing the .nl parser binding; skip all tests if unavailable.
 try:
-    from discopt._rust import parse_nl_file, parse_nl_string
+    from discopt._rust import parse_nl_file
 
     HAS_NL_BINDINGS = True
 except ImportError:
@@ -212,8 +212,24 @@ def _write_nl(content: str) -> str:
     return path
 
 
+def parse_nl_string(content: str):
+    """Parse ``.nl`` text through the file parser.
+
+    The ``parse_nl_string`` PyO3 binding was deleted in Phase 1 Card 1b (its only
+    callers were these tests). The coverage it provided — every ``.nl`` construct
+    below, through the real ``nl_parser`` kernel and its ``PyModelRepr``
+    conversion — is preserved by round-tripping the same text through a temp file
+    and the LIVE ``parse_nl_file`` entry point that ``from_nl`` uses.
+    """
+    path = _write_nl(content)
+    try:
+        return parse_nl_file(path)
+    finally:
+        os.unlink(path)
+
+
 # ─────────────────────────────────────────────────────────────
-# Tests: parse_nl_string
+# Tests: parsing .nl text (through the live file parser)
 # ─────────────────────────────────────────────────────────────
 
 
