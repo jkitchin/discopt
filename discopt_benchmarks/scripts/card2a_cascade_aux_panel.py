@@ -95,6 +95,7 @@ def _run_child(instance: str, budget: float) -> int:
     import discopt  # noqa: PLC0415
     import discopt._jax.obbt as _obbt_mod  # noqa: PLC0415
     from discopt.modeling.core import ObjectiveSense, from_nl  # noqa: PLC0415
+
     from scripts.panel_baseline import instance_path  # noqa: PLC0415
 
     # --- the call tap ------------------------------------------------------- #

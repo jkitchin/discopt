@@ -66,6 +66,7 @@ def _run_child(instance: str) -> int:
     from discopt._jax.presolve_pipeline import run_root_presolve  # noqa: PLC0415
     from discopt._rust import model_to_repr  # noqa: PLC0415
     from discopt.modeling.core import from_nl  # noqa: PLC0415
+
     from scripts.panel_baseline import instance_path  # noqa: PLC0415
 
     out: dict = {
@@ -93,7 +94,7 @@ def _run_child(instance: str) -> int:
             name = str(d["pass_name"])
             agg = per_pass.setdefault(
                 name,
-                {f: 0 for f in (*_LIST_FIELDS, *_INT_FIELDS)} | {"bounds_tightened": 0, "n": 0},
+                dict.fromkeys((*_LIST_FIELDS, *_INT_FIELDS), 0) | {"bounds_tightened": 0, "n": 0},
             )
             agg["n"] += 1
             agg["bounds_tightened"] += int(d.get("bounds_tightened", 0))
@@ -117,9 +118,7 @@ def _solve_one(instance: str) -> dict:
     env.setdefault("JAX_PLATFORMS", "cpu")
     env.setdefault("JAX_ENABLE_X64", "1")
     try:
-        proc = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=_CHILD_TIMEOUT, env=env
-        )
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=_CHILD_TIMEOUT, env=env)
     except subprocess.TimeoutExpired:
         return {"instance": instance, "error": "child_timeout"}
     for line in proc.stdout.splitlines():
@@ -135,9 +134,7 @@ def main(argv: list[str] | None = None) -> int:
 
     p = argparse.ArgumentParser(description="Card 2c.2 entry experiment.")
     p.add_argument("--subset", help="integer count or comma-separated instance names")
-    p.add_argument(
-        "--out", default=str(_REPO_ROOT / "reports" / "card2c_presolve_rewrites.json")
-    )
+    p.add_argument("--out", default=str(_REPO_ROOT / "reports" / "card2c_presolve_rewrites.json"))
     args = p.parse_args(argv)
 
     from scripts.panel_baseline import _resolve_subset, corpus_instances  # noqa: PLC0415
@@ -165,7 +162,7 @@ def main(argv: list[str] | None = None) -> int:
             agg = per_pass.get(name)
             if not agg:
                 continue
-            t = totals.setdefault(name, {k: 0 for k in agg})
+            t = totals.setdefault(name, dict.fromkeys(agg, 0))
             for k, val in agg.items():
                 t[k] += int(val)
             nonbound = sum(int(agg[f]) for f in (*_LIST_FIELDS, *_INT_FIELDS))
@@ -229,8 +226,7 @@ def main(argv: list[str] | None = None) -> int:
     print("=" * 78, flush=True)
     if n_deltas == 0:
         print(
-            "FAIL: zero per-pass deltas examined — the probe measured nothing "
-            "(CLAUDE.md §6).",
+            "FAIL: zero per-pass deltas examined — the probe measured nothing (CLAUDE.md §6).",
             flush=True,
         )
         return 3

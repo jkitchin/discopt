@@ -6471,6 +6471,13 @@ def solve_model(
     _declared_tightening = _declared_box_tightening(
         model, deadline=time.perf_counter() + _nbt_budget_s
     )
+    # Card 2c.1: remember WHICH model object this box describes. The tightened box
+    # is carried forward to the root working box below instead of being discarded,
+    # and that is only valid while ``model`` is still the same object — the convex
+    # fast path can rebind it (``factorable_reformulate(clear_only=True)``), which
+    # replaces the constraint set the box was derived from. Identity, not a flag,
+    # is the guard.
+    _declared_tightening_model = model
     _check_finite_bounds(model, _declared_tightening)
     nonlinear_infeasibility = _detect_nonlinear_bound_infeasibility(model, _declared_tightening)
     if nonlinear_infeasibility is not None:
@@ -7034,7 +7041,44 @@ def solve_model(
     # relaxation node is otherwise sentinel-pruned, which taints the spatial dual
     # bound so the (already-found) optimum cannot be certified. Runs before the root
     # OBBT below so OBBT's min/max LPs over the relaxation are themselves bounded.
+    #
+    # Card 2c.1 — stop discarding the declared-box tightening. The same 17-rule pass
+    # already ran once at the top of ``solve_model`` (``_declared_box_tightening``),
+    # and its *box* was thrown away: only ``stats.infeasible`` (the pre-dispatch
+    # infeasibility proof) and ``stats.n_tightened`` (a warning string) survived.
+    #
+    # The consolidation plan called these two calls "the identical pass run twice".
+    # They are NOT (falsification recorded in the plan's §6 log, Card 2c.1 entry):
+    # the first runs on the *declared* box, before dispatch, on the pre-classification
+    # model; this one runs on the *Rust-FBBT-tightened* box, after dispatch, after
+    # ``propagate_bounds_to_model``, and after the model may have been mutated or
+    # rebound. Neither call can replace the other — the first must precede dispatch
+    # because paths that return before this point (LP/QP/convex) rely on its
+    # infeasibility proof, and this one sees a strictly tighter input box.
+    #
+    # What CAN be consolidated is the discard. The first call's box is a valid
+    # tightening of the declared box and intersecting it here is sound both ways:
+    #   * every mutation between the two points only ADDS rows (builder-resident
+    #     linear rows are materialized), so the feasible set only shrinks and a box
+    #     valid there is valid here — and the one place the model can be *replaced*
+    #     is caught by the identity guard above;
+    #   * it is an intersection, so it can only tighten, never loosen.
+    # The payoff is not a saved pass — this pass still runs — it is that the earlier
+    # pass's work survives when THIS one is truncated by its #875 deadline, which on
+    # the large-model class is exactly when it gets truncated. The shape guard covers
+    # any reformulation that changed the variable count.
+    if _declared_tightening is not None and _declared_tightening_model is model:
+        _dt_lb = np.asarray(_declared_tightening[0], dtype=np.float64)
+        _dt_ub = np.asarray(_declared_tightening[1], dtype=np.float64)
+        if _dt_lb.shape == lb.shape and _dt_ub.shape == ub.shape:
+            lb = np.maximum(lb, _dt_lb)
+            ub = np.minimum(ub, _dt_ub)
     lb, ub, _nl_root_infeasible = _apply_nonlinear_tightening_with_status(model, lb, ub)
+    # An empty box is a rigorous infeasibility proof (both inputs to the intersection
+    # are valid outer bounds of the same feasible set), routed through the existing
+    # return below so no new terminal path is introduced.
+    if not _nl_root_infeasible and np.any(lb > ub + 1e-9):
+        _nl_root_infeasible = True
     if _nl_root_infeasible:
         wall_time = time.perf_counter() - t_start
         return SolveResult(

@@ -1212,19 +1212,22 @@ def _decompose_product(
     return scalar[0], var_indices
 
 
-# Univariate functions whose superposition cuts are supported: smooth on any
-# box the lifted aux already validated, so the Chebyshev kernel encloses them
-# rigorously. ``abs`` (non-smooth) and ``tan`` (poles) are deliberately omitted.
-_SUPERPOSITION_FUNCS = {
-    "exp",
-    "log",
-    "log2",
-    "log10",
-    "sqrt",
-    "reciprocal",
-    "sin",
-    "cos",
-}
+# NOTE (consolidation plan, Card 2c). ``_SUPERPOSITION_FUNCS`` used to live here —
+# the set of univariate functions whose M8 superposition cuts the federated build
+# would emit. It was **defined and never read**: the #632 cutover moved the whole
+# default build to ``uniform_relax.build_uniform_relaxation``, which deleted the
+# consumer and left the table behind (verified: the only remaining occurrence in
+# the repo was this definition). Deleted as dead.
+#
+# The ``superposition`` PARAMETER is deliberately NOT deleted with it. It is one of
+# five arguments ``build_milp_relaxation`` documents as ignored-for-signature-
+# compatibility since #632 (``terms``, ``incumbent``, ``oa_cuts``,
+# ``convhull_ebd*``, ``superposition``), and ``_jax/superposition.py`` is a live,
+# tested, rigorous cut generator that the uniform engine has not re-adopted — an
+# unfinished capability, not a removed one. Removing one of the five arguments in
+# isolation would erase the only marker of where it plugs in while leaving the
+# other four; retiring the whole ignored-argument family belongs to the
+# ``build_milp_relaxation`` signature cleanup in Phase 4 (Card 4b).
 
 
 def _linear_constraint_forms(model: Model, n_vars: int) -> list[tuple[np.ndarray, float]]:

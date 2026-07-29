@@ -119,15 +119,15 @@ def _run_child(instance: str, budget: float) -> int:
     os.environ.setdefault("JAX_PLATFORMS", "cpu")
     os.environ.setdefault("JAX_ENABLE_X64", "1")
 
-    import numpy as np  # noqa: PLC0415
-
     import discopt  # noqa: PLC0415
     import discopt.solver as _solver  # noqa: PLC0415
+    import numpy as np  # noqa: PLC0415
     from discopt._rust import PyModelRepr  # noqa: PLC0415
     from discopt.modeling.core import from_nl  # noqa: PLC0415
+
     from scripts.panel_baseline import instance_path  # noqa: PLC0415
 
-    S: dict = {
+    S: dict = {  # noqa: N806 — counter bag, deliberately shouty
         "py_calls": 0,
         "py_infeasible": 0,
         "itp_calls": 0,
@@ -142,13 +142,20 @@ def _run_child(instance: str, budget: float) -> int:
         "rust_only_nodes": 0,
         "rust_only_bounds": 0,
         "py_tightened_pre_rust_nodes": 0,
+        # Attribution (which half of the Python pass carries the inference).
+        "attributed_nodes": 0,
+        "nl_only_nodes": 0,
+        "jac_only_nodes": 0,
+        "both_nodes": 0,
     }
     box_of: dict[bytes, tuple] = {}
     last_repr: list = []
     examples: list[str] = []
 
     def _key(lb, ub) -> bytes:
-        return np.asarray(lb, dtype=np.float64).tobytes() + np.asarray(ub, dtype=np.float64).tobytes()
+        a = np.asarray(lb, dtype=np.float64).tobytes()
+        b = np.asarray(ub, dtype=np.float64).tobytes()
+        return a + b
 
     _orig_py = _solver._tighten_node_bounds_with_status
     _orig_itp = PyModelRepr.in_tree_presolve
@@ -177,7 +184,16 @@ def _run_child(instance: str, budget: float) -> int:
         else:
             if np.any(t_lb > b0_lb + 1e-12) or np.any(t_ub < b0_ub - 1e-12):
                 S["py_tightened_pre_rust_nodes"] += 1
-            box_of[_key(t_lb, t_ub)] = (b0_lb, b0_ub)
+            # ATTRIBUTION ARM. ``_tighten_node_bounds_with_status`` is two
+            # mechanisms in one: the 17-rule structural/interval nonlinear pass
+            # (``_apply_nonlinear_tightening_with_status``) and the Jacobian
+            # linear-row FBBT loop wrapped around it. Recording the nonlinear-only
+            # box lets the counterfactual below say WHICH half the Rust kernel is
+            # missing, which is what the card asks the kill branch to file.
+            nl_lb, nl_ub, _nl_inf = _solver._apply_nonlinear_tightening_with_status(
+                evaluator._model, b0_lb.copy(), b0_ub.copy()
+            )
+            box_of[_key(t_lb, t_ub)] = (b0_lb, b0_ub, nl_lb, nl_ub)
         return t_lb, t_ub, inf
 
     def _itp_wrap(self, node_lb, node_ub, **kw):
@@ -195,6 +211,7 @@ def _run_child(instance: str, budget: float) -> int:
             S["unmatched_boxes"] += 1
             return d_p
         d_0 = _orig_itp(self, b0[0], b0[1], **kw)
+        d_nl = _orig_itp(self, b0[2], b0[3], **kw)
         S["compared_nodes"] += 1
 
         if d_p["infeasible"] != d_0["infeasible"]:
@@ -223,6 +240,22 @@ def _run_child(instance: str, budget: float) -> int:
         if k:
             S["py_only_nodes"] += 1
             S["py_only_bounds"] += k
+            # Attribute: is the nonlinear-only arm already as tight as the full
+            # Python pass, only tighter than Rust(B0), or neither?
+            lb_n = np.asarray(d_nl["lb"], dtype=np.float64)
+            ub_n = np.asarray(d_nl["ub"], dtype=np.float64)
+            nl_beats_rust = bool((lb_n > lb_0 + tol_lb).any() or (ub_n < ub_0 - tol_ub).any())
+            jac_beats_nl = bool(
+                (lb_p > lb_n + _REL * np.maximum(1.0, np.abs(lb_n))).any()
+                or (ub_p < ub_n - _REL * np.maximum(1.0, np.abs(ub_n))).any()
+            )
+            S["attributed_nodes"] += 1
+            if nl_beats_rust and jac_beats_nl:
+                S["both_nodes"] += 1
+            elif nl_beats_rust:
+                S["nl_only_nodes"] += 1
+            elif jac_beats_nl:
+                S["jac_only_nodes"] += 1
             if len(examples) < 12:
                 j = int(np.flatnonzero(strict_lb | strict_ub)[0])
                 examples.append(
@@ -346,6 +379,13 @@ def main(argv: list[str] | None = None) -> int:
         flush=True,
     )
     print(
+        f"attribution over {tot.get('attributed_nodes', 0)} Python-only bound nodes: "
+        f"nonlinear-rules-only={tot.get('nl_only_nodes', 0)}  "
+        f"jacobian-FBBT-only={tot.get('jac_only_nodes', 0)}  "
+        f"both={tot.get('both_nodes', 0)}",
+        flush=True,
+    )
+    print(
         f"nodes where the Python pass tightened SOMETHING before Rust ran: "
         f"{tot.get('py_tightened_pre_rust_nodes', 0)} "
         f"(this is NOT the criterion — Rust may re-derive all of it)",
@@ -370,8 +410,9 @@ def main(argv: list[str] | None = None) -> int:
         f"(kill criterion: > 0.5%)",
         flush=True,
     )
-    print(f"VERDICT: {'DO NOT DELETE' if frac > 0.005 else 'DELETION IS SAFE TO PROCEED'}",
-          flush=True)
+    print(
+        f"VERDICT: {'DO NOT DELETE' if frac > 0.005 else 'DELETION IS SAFE TO PROCEED'}", flush=True
+    )
     print("=" * 78, flush=True)
     return 1 if frac > 0.005 else 0
 

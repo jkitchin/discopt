@@ -286,7 +286,75 @@ LOC delta reported in the PR (~5,000 expected).
 
 ## Phase 2 — Wiring defects (small, measured, mostly Regime C)
 
-> **Status:** OPEN. **Depends:** Phase 0. **Est:** 2–3 sessions.
+> **Status:** LANDED 2026-07-29 — but **two of the three cards landed as
+> measured NOs**, which is the outcome their own gates produced, not a shortfall.
+> **Depends:** Phase 0. **Regime:** C (2a), C→killed (2b), N (2c.1), measurement
+> only (2c.2).
+>
+> **Card 2a — LANDED, extra sites measured NET-NEGATIVE and are off explicitly.**
+> `SolverTuning.obbt_cascade_aux` is now the single resolution point for
+> `DISCOPT_OBBT_CASCADE_AUX` (moved out of `_flag_registry`; `docs/reference/flags.md`
+> regenerated), all six `obbt_tighten_root` call sites pass `cascade_aux`
+> **explicitly**, and `TestCascadeAuxWiredAtEverySite` fails any future call site
+> that omits it (AST walk over `python/discopt`, prints its 6 executed assertions).
+> The differential panel (`discopt_benchmarks/scripts/card2a_cascade_aux_panel.py`,
+> artifact `reports/card2a_cascade_aux_on.json`) was **cert-clean, 0 violations over
+> 578 executed comparisons**, and **failed the #902 quality gate**; per-site
+> attribution by interleaved replicated A/B against the pre-card tree put the harm
+> at the root and incumbent sites and the only per-node gain at one instance. All
+> five newly-wired sites therefore ship `cascade_aux=False` with the measurement
+> cited at the call site. Numbers in §6.
+>
+> **Card 2b — KILLED by its entry experiment (do NOT delete).** The hypothesis was
+> that Rust `in_tree_presolve` subsumes the per-node Python Jacobian FBBT. It does
+> not: **278 of 1,495 decided nodes (18.6 %)** carry a Python-only inference — 37×
+> the card's 0.5 % kill criterion — over 82,316 individual bound comparisons on 25
+> corpus instances. Both per-node call sites stay. Probe:
+> `discopt_benchmarks/scripts/card2b_fbbt_subsumption_entry.py`. Numbers, the
+> attribution of *which* half of the pass Rust is missing, and the follow-up scope
+> in §6.
+>
+> **Card 2c.1 — LANDED (Regime N).** The plan's premise ("the identical pass runs
+> twice") is **falsified**: the two calls differ in input box, model state and
+> position relative to dispatch, so neither can replace the other. What was really
+> being discarded — the first call's tightened *box* — is now intersected into the
+> root working box, guarded by model identity and array shape. Regime-N spot check
+> clean; full panel below.
+>
+> **Card 2c.2 — measured, filed, NOT built (as the card instructs).** Over all 119
+> corpus instances the three passes produce **zero** bound tightenings and
+> **8,614 non-bound rewrites on 32 instances (27 %)**: `simplify` removes 8,439
+> rows on 31 instances, `redundancy` 149 rows on 2, `coefficient_strengthening`
+> rewrites 26 rows on 2. That is far past "near-zero", so removing the passes is
+> wrong and repr-level adoption is the fix — which the card explicitly scopes out.
+> Filed as **Phase 3 sub-card 3d** below. Probe:
+> `discopt_benchmarks/scripts/card2c_presolve_rewrites_entry.py`, artifact
+> `reports/card2c_presolve_rewrites.json`.
+>
+> **Superposition wiring defect (Phase 1's hand-off) — resolved as: dead table
+> deleted, live-but-unfinished parameter kept.** `_SUPERPOSITION_FUNCS` was defined
+> and never read (the #632 cutover deleted its consumer) and is gone. The
+> `superposition=` parameter is *not* removed: `build_milp_relaxation` documents
+> five arguments as ignored-for-signature-compatibility since #632, and
+> `_jax/superposition.py` is a live, tested cut generator the uniform engine has not
+> re-adopted — an unfinished feature, not a removed one. Retiring the whole
+> ignored-argument family belongs to Card 4b's signature cleanup.
+>
+> **`heldout50`: SKIPPED — local only.** This environment has no MINLPLib snapshot,
+> so the Regime-C gate for Card 2a ran on the in-repo 119-instance corpus (both
+> `minlplib_nl` and `minlplib`, the union Phase 0 froze) plus targeted interleaved
+> replicated A/B. The generalization arm the plan asks for was **not** run and this
+> verdict is therefore corpus-local. Card 2a's outcome is a *negative* (sites stay
+> off), so the missing arm cannot have admitted an unmeasured bound change.
+>
+> **Two findings that are not Phase 2's, surfaced by Phase 2's panel.**
+> (a) `contvar` blows well past its budget on **both** trees (>400 s against a 45 s
+> limit, interleaved A/B, and Phase 1's own `--check` already recorded
+> `contvar: child_timeout`), so it joins `heatexch_gen3` as a budget-overrun
+> instance wanting its own issue. (b) The Rust presolve orchestrator terminates on
+> `IterationCap` for 48 of 119 instances — it never reaches a fixpoint inside 16
+> sweeps — while `simplify` reports row removals on every sweep. Worth a look
+> alongside 3d.
 
 ### Card 2a — `cascade_aux` at all six sites
 
@@ -371,6 +439,28 @@ streams: fixpoint equality (must be identical — both are FBBT; any bound diffe
 is a bug in one of them, investigate before proceeding) and wall time. Winner
 becomes the only Rust DAG-FBBT; loser is deleted. Regime N if fixpoints match
 (expected), with the wall delta recorded.
+
+### Card 3d — Adopt the Rust presolve's model rewrites (filed by Card 2c.2)
+
+**Measured, not hypothesised** (Card 2c.2, 119 instances, 8,206 per-pass deltas
+examined, `reports/card2c_presolve_rewrites.json`): `simplify`,
+`redundancy` and `coefficient_strengthening` contribute **zero bound tightenings**
+— so `propagate_bounds_to_model`, the only bridge back to the Python DAG, carries
+**nothing** from them — while producing **8,614 non-bound rewrites on 32 of 119
+instances (27 %)**: 8,439 rows removed by `simplify` (31 instances), 149 by
+`redundancy` (`carton7`, `tanksize`), 26 rows rewritten by
+`coefficient_strengthening` (`gbd`, `hda`).
+
+Their output is not *entirely* wasted — the presolved repr is kept and drives the
+Rust root FBBT and in-tree FBBT — but nothing reaches the Python relaxation
+compiler, which is what builds every node LP. This is also *why* a second, stronger
+Python coefficient-tightener exists (`solvers/_root_presolve.py`'s "NOTE ON
+LOCATION").
+
+**Scope:** solve from the presolved repr with a postsolve chain, using the
+`DISCOPT_PRESOLVE_SUBSTITUTE` machinery as the pattern (§6a names the same
+mechanism). Regime C. **Do not** instead delete the three passes: the measurement
+says they do real work, just not work that reaches the consumer.
 
 ### Card 3c — Node-tightening parity across kernels
 
@@ -552,4 +642,169 @@ touches `crates/` + producer files — safe alongside 1/2/7, coordinate with 3c.
 
 ## §6. Falsification log (append-only, per §0.3)
 
-*(empty — every entry experiment records its outcome here, pass or kill.)*
+### 2026-07-29 — Card 2a: "the graduated cascade should be on at all six sites" — **FALSIFIED**
+
+**Hypothesis.** `DISCOPT_OBBT_CASCADE_AUX` graduated default-ON in #208 but is
+resolved at 1 of 6 `obbt_tighten_root` sites; wiring the other five should reproduce
+the #208 verdict (cert-clean and net-positive) at those sites too.
+
+**Kill criterion.** The §0.1 Regime-C gate: cert-clean AND net-positive AND the
+#902 incumbent-quality gate.
+
+**Experiment 1 — differential panel.** `card2a_cascade_aux_panel.py`, 119 in-repo
+instances (both corpus dirs), 45 s, defaults, cascade live at all six sites, against
+the frozen Phase 0 baseline `panel_baseline_f154dcff.json` (whose reproducibility on
+this tree Phase 1's `--check` had just established, 255 comparisons PASS).
+The child taps `obbt_tighten_root` and records caller `file:line` + the `cascade_aux`
+it received, so "no change" cannot be confused with "never ran".
+
+- **Sites actually engaged** (487 cascade-ON calls at the new sites):
+  `solver.py:7145` root OBBT — 79 calls / 79 instances; `solver.py:10987`
+  incumbent-improvement OBBT — 91 / 70; `solver.py:9042` per-node OBBT — 317 / 12;
+  `root_reduce.py:400` (the pre-existing site) — 82 / 48.
+  **`lp_spatial_bb.py` and `disjunctive_config_bound.py`: ZERO calls** — the corpus
+  does not reach them (the latter sits behind a default-OFF flag).
+- **cert-clean: PASS**, 0 violations over **578 executed comparisons**
+  (objective agreement 87, optimality regression 87, bound-vs-proven-oracle 67,
+  certification 117, quality 103, node 117).
+- **quality-clean: FAIL** — `ex1252` incumbent 134263.585 → 204321.632 (+52 %).
+- **Net:** nodes 37,110 → 37,139 (+29, +0.1 %) over 117 paired rows; certifications
+  +1 (`nvs18`) / −0 ; 22 rows changed node count.
+
+**Experiment 2 — attribution, interleaved replicated A/B vs the pre-card tree**
+(`git worktree` at `HEAD~1`, each child asserting `discopt.__file__` and the
+presence/absence of the `obbt_cascade_aux` marker before solving, arms interleaved
+per replicate, load 0.09–0.43):
+
+| instance | pre-card | all sites ON | per-node OFF | per-node+incumbent OFF |
+|---|---|---|---|---|
+| ex1252 obj | 134263.585 (3/3) | 204321.632 (3/3) | 204321.6 / 134471.6 (unstable) | 134471.559 (2/2) |
+| ex1252a obj | 177860.742 (3/3) | 134263.587 (3/3) | 134263.587 | 134263.587 |
+| ex1252a bound | 14086.222 | **4.257e-319** | 4.257e-319 | 4.257e-319 |
+| nvs06 nodes | 5 | 3 | 3 | 5 |
+| st_e36 nodes | 85 | 83 | 83 | 85 |
+| st_e04 nodes | 103 | 97 | 103 | — |
+
+So: the **incumbent-improvement site** owns the `nvs06`/`st_e36` node gains *and*
+`ex1252`'s 52 % primal regression; the **per-node site** owns `st_e04` alone (317
+calls over 12 instances to buy 6 nodes); the **root site** alone still collapses
+`ex1252a`'s dual bound 14086 → ~0. Every row above reproduced exactly across its
+replicates.
+
+**Verdict.** Sound everywhere, helpful essentially nowhere: −10 nodes of 37,110 on
+the certifying population against a reproduced 52 % incumbent regression and a
+reproduced dual-bound collapse. This is the `DISCOPT_CUT_INHERIT` lesson again —
+cert-clean but not net-positive stays off. All five sites ship `cascade_aux=False`
+**explicitly**, with the measurement at the call site; the two zero-call sites are
+off as *unmeasured* (§0.1 forbids shipping an unmeasured bound change), not as
+measured-harmful.
+
+**What did land:** one resolution point (`SolverTuning.obbt_cascade_aux`), five
+accidental defaults turned into five documented decisions, and a standing AST test
+that makes the omission a failure. Behaviourally the tree is identical to the
+pre-card tree at all five sites, so `panel_baseline_f154dcff.json` remains the gate.
+
+**Not attributable to this card:** the panel's `contvar` ON-arm `child_timeout`.
+Interleaved A/B kills **both** trees at >400 s (2 replicates each), and Phase 1's
+own `--check` log already recorded `contvar: child_timeout`.
+
+### 2026-07-29 — Card 2b: "Rust `in_tree_presolve` subsumes the per-node Python Jacobian FBBT" — **FALSIFIED, deletion abandoned**
+
+**Hypothesis.** `_tighten_node_bounds_with_status` (O(m·n²) Python, every node, both
+Python B&B loops) is redundant against the Rust kernel that runs immediately after
+it from the exact DAG.
+
+**Kill criterion (from the card).** >0.5 % of nodes showing a Python-only inference
+⇒ do not delete.
+
+**Experiment.** `card2b_fbbt_subsumption_entry.py`. Today a node's box becomes
+`Rust(Python(B0))`; after the deletion it becomes `Rust(B0)`. The probe computes
+**both**, per node, on real node streams — legitimate because Rust
+`in_tree_presolve` takes `&self` and is a pure function of (repr, box, depth,
+incumbent), so the counterfactual arm cannot perturb the search it observes. A
+Python-only inference is a coordinate of `Rust(Python(B0))` strictly inside
+`Rust(B0)` at 1e-12 relative, or a node Python fathomed that `Rust(B0)` does not.
+25 instances drawn from the Phase 0 baseline by `node_count > 0 and not
+convex_fast_path`, covering both loops, 20 s each.
+
+- **executed: 1,458 node counterfactuals + 37 fathom counterfactuals = 1,495 decided
+  nodes; 82,316 individual bound comparisons.**
+- **Python-only inference nodes: 278 / 1,495 = 18.60 %** — 37× the kill criterion.
+  Also 3 Python-only fathoms and 186 unmatched boxes (counted, not dropped).
+- Concentrated but not exotic: `flay03m` 212/218 nodes, `clay0303hfsg` 39/78,
+  `syn05hfsg` 9/170, `m3` 8/86, `tanksize` 6/17, `st_e05` 3/55, `nvs22` 1/27.
+- Typical shape — Python *pins* a variable the Rust kernel leaves open:
+  `[0, 1.4387] → [1.4387, 1.4387]`, `[7.5, 10] → [10, 10]`.
+
+**Which half is missing** (attribution re-run over the 7 affected instances, 648
+node counterfactuals, 47,460 bound comparisons): of 274 Python-only bound nodes,
+**147 come from the Jacobian linear-row FBBT alone**, **83 from the structural /
+interval nonlinear rules alone** (`_apply_nonlinear_tightening_with_status`), **44
+from both**. So the Rust kernel is missing *two* distinct inference classes, not
+one, and the larger is the Jacobian-linearized row FBBT with its structural-
+linearity mask.
+
+**Verdict.** Do not delete; both per-node call sites stay. Porting is not the small
+job the card's "port it if small" branch anticipated — it is two mechanisms
+(a Jacobian-sampled linear-row FBBT with the #27a structural mask, and the 17-rule
+`tighten_nonlinear_bounds` set including `DefinedVariableForwardRule`). It belongs
+with Phase 3's one-tightening-pipeline work / Phase 5's kernel convergence, where
+the Rust node kernel is the substrate being extended anyway. **The G-A per-node cost
+finding stands, but this deletion is not the way to collect it.**
+
+### 2026-07-29 — Card 2c.1: "the identical 17-rule pass runs twice" — **FALSIFIED (premise), consolidated differently**
+
+**Claim under test** (plan Card 2c.1 / review §2.3): `_declared_box_tightening`
+discards its box, then "the identical pass re-runs" later and is applied; running it
+once should be Regime-N.
+
+**Falsification (static, verified against the tree).** The two calls are not the
+same computation:
+
+| | first call | second call |
+|---|---|---|
+| input box | `flat_variable_bounds(model)` — the **declared** box | the working box, **after** `propagate_bounds_to_model` and the Rust root FBBT |
+| model state | pre-dispatch, pre-materialization | post-dispatch; the model may have been mutated (builder rows materialized) or **rebound** (`factorable_reformulate(clear_only=True)` on the convex fast path) |
+| deadline | a fresh 15 %-of-budget slice | the solve's absolute `_solve_deadline` |
+| position | **before** LP/QP/convex dispatch, several of which return without ever reaching the second call | after it |
+
+Neither can replace the other: the first must precede dispatch because the paths
+that return early depend on its infeasibility proof, and the second sees a strictly
+tighter input box. Running "once" as written would have been a behaviour change, not
+a refactor.
+
+**What shipped instead.** The *discard* is what was wrong, and that is fixed: the
+first call's tightened box is intersected into the root working box before the
+second pass, guarded by (a) `model` object identity — the one place the model can be
+replaced — and (b) array-shape equality, which catches any reformulation that
+changed the variable count. Sound in both directions: every mutation between the two
+points only adds rows (feasible set shrinks, so a valid box stays valid), and an
+intersection can only tighten. An empty intersection is routed through the existing
+infeasible return rather than introducing a new terminal path. The payoff is not a
+saved pass — it is that the earlier pass's work survives when the second is
+truncated by its #875 deadline, which on the large-model class is exactly when it
+truncates.
+
+### 2026-07-29 — Card 2c.2: "the dropped Rust presolve rewrites are near-zero" — **FALSIFIED; filed as Card 3d, not built**
+
+**Experiment.** `card2c_presolve_rewrites_entry.py` builds each corpus repr exactly
+as `solve_model` does and runs the orchestrator with `solve_model`'s own arguments,
+tabulating per-pass deltas. **119 instances, 8,206 per-pass deltas examined, 0
+errored.**
+
+| pass | invocations | rows removed | rows rewritten | **bounds tightened** | instances with non-bound rewrites |
+|---|---|---|---|---|---|
+| `simplify` | 912 | 8,439 | 0 | **0** | **31** |
+| `redundancy` | 912 | 149 | 0 | **0** | 2 (`carton7`, `tanksize`) |
+| `coefficient_strengthening` | 912 | 0 | 26 | **0** | 2 (`gbd`, `hda`) |
+
+**32 of 119 instances (27 %) carry a non-bound rewrite**, and all three passes
+tighten **zero** bounds — so `propagate_bounds_to_model`, the only bridge into the
+Python DAG, carries literally nothing from them. Both halves of the card's decision
+rule are therefore answered: removing the passes is wrong (they do real work), and
+adoption is the fix. Per the card's own instruction, adoption is **not built here**;
+it is filed as **Card 3d** with these counts.
+
+**Incidental:** the orchestrator terminates on `IterationCap` for 48/119 instances
+(never reaching a fixpoint in 16 sweeps), `NoProgress` 67, `TimeBudget` 3,
+`Infeasible` 1.
