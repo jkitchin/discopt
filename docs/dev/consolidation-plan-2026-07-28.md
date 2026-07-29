@@ -685,7 +685,80 @@ run different node-tightening stacks with nothing asserting equivalence.
 
 ## Phase 4 — Routing made explicit (the solver.py decomposition, part 1)
 
-> **Status:** OPEN. **Depends:** Phase 1 (flag helper). **Est:** 3–5 sessions.
+> **Status:** **4a LANDED**, **4b PARTIAL (1 of 5 modules)**, **4c NOT STARTED**
+> (2026-07-29). **Depends:** Phase 1 (flag helper). **Regime:** N throughout.
+>
+> **What exists now (4a).** `python/discopt/routing.py` declares **29 routes** —
+> every dispatch gate in `solve_model`, in the order the function evaluates them —
+> each with the gate *verbatim in the source's own terms*, the handler it
+> dispatches to, why it exists, and (for 12 of them) what makes it decline.
+> `python/tests/test_routing.py` (14 `smoke` tests) is what makes the declaration
+> authoritative rather than decorative:
+>
+> | test | what a regression looks like |
+> |---|---|
+> | markers occur in the declared order | a gate added / deleted / moved / renamed |
+> | one `entered()` per route, closure both ways | an undeclared gate, or a route nobody records |
+> | declared handler is called in the route's own region | the declaration drifting into fiction |
+> | **the three #740/#748 guards are still in the source** | a fall-through turned back into an early `return` |
+> | the two branch-level fall-throughs still call `fell_through()` | the runtime walk silently losing a decline |
+>
+> The last two are soundness tests, not style. `_solve_milp_bb`, `_solve_miqp_bb`
+> and `_solve_nlp_bb` neither receive nor consult `lazy_constraints` /
+> `incumbent_callback`; for a lazy constraint the callback *defines* the feasible
+> set, so an engine that never consults it would accept a point outside it and
+> certify it. `class_milp`, `class_miqp` and `nlp_bb_auto` therefore match their
+> gate and decline, and the guards are pinned at source level.
+>
+> Recording is one line per route at branch entry (`_rt.entered(...)`) plus a
+> `_rt.fell_through(...)` at each branch-level #748 decline — a thread-local dict
+> write with no control-flow effect. The open/close bracket is a **decorator**
+> (`_routing_walk`), which covers all 64 early returns without touching a single
+> `return`. `discopt.explain_routing(model, **kw)` and
+> `Model.solve(explain_routing=True)` render the walk with each gate's real
+> verdict, composing Card 3a's `tightening_schedule.explain()` so one call shows
+> both the engine chosen and the tightening stages inside it.
+>
+> **One design decision worth recording.** The marker says `entered`, not
+> `taken`, and *which route dispatched* is derived in `explain()` as the last
+> route to record (a dispatching branch returns, so nothing after it can record).
+> Marking entry as "taken" would have been an instrument reporting a result it
+> never measured: 11 of the 29 routes run a second, finer classification inside
+> the branch (`classify_gp`, a convexity check, an engine that may return `None`)
+> and continue on when it declines. The naive version printed **three** routes as
+> "TAKEN" on a small MINLP.
+>
+> **What exists now (4b).** `python/discopt/solver.py` is now the package
+> `python/discopt/solver/` (`git mv`, rename recorded, so `git log --follow` is
+> preserved) and the first module is carved out: **`solver/native_kernel.py`,
+> 796 lines** — the eight-function #764 native-spatial-kernel cluster (engagement
+> gate, feature safety, seed construction + rigorous seed verification, the
+> driver) plus its three constants. Provably a pure move: 7 of the 8 moved
+> functions are **AST-identical** to their pre-move selves and the 8th differs
+> only by the deferred `_unpack_solution` import that breaks the package cycle;
+> all **124** stay-behind functions are AST-identical.
+>
+> `solver/__init__.py` is **17,569 lines** (from 18,211 at the head of Phase 4).
+> `solve_model` is unchanged at **7,622 lines** and remains the largest function.
+> The card's "no file > 2,500 lines / no function > 300 lines" target is **not**
+> met and cannot be met by moving whole functions — see the §6 coupling census.
+>
+> **Verification.** 4a and 4b were panel-gated **separately, each on its own
+> tree**, against `reports/panel_baseline_f154dcff.json`; numbers in §6.
+>
+> **What remains, exactly.**
+> - **4b:** the four other modules the card names (`setup`, `reformulate`,
+>   `root`, `results` — and `spatial_loop`). §6 shows why they are not next:
+>   they are *inline statement blocks of `solve_model`*, not functions, sharing a
+>   closure of 200+ locals, so moving one is a signature-design problem rather
+>   than a move. The tractable next step is a **`solver/_common.py` leaf-helper
+>   layer** (`_unpack_solution`, `_pack_solution`, `_extract_variable_info`,
+>   `_gap_converged`, `_decompose_eq_slack_form`, the shared constants), which
+>   drops the engine functions' module-level dependency counts into single digits
+>   and unblocks `milp.py` (`_solve_milp_bb` + `_solve_miqp_bb` +
+>   `_solve_milp_simplex`, ~1,500 lines) and `matrix_backends.py`.
+> - **4c:** not started. `lp_spatial_bb.py`, `gp/solve_gp_minlp` and
+>   `signomial_global` still reimplement node selection with raw `heapq`.
 
 ### Card 4a — Dispatch table extraction
 
@@ -1172,3 +1245,124 @@ comparisons — but the smoke and adversarial suites should be re-run at the hea
 Phase 4 before any new `solver.py` edit, and this note is here so that is not
 forgotten.
 
+
+### 2026-07-29 — Phase 4 Step 0: Phase 3's three un-re-run suites, re-run on the untouched tree
+
+Phase 3's close-out flagged three suites it could not re-run on its final tree and
+asked that they run at the head of Phase 4 before any new `solver.py` edit. Done,
+on `33e06fb6` with nothing modified:
+
+- `pytest -m smoke python/tests` — **857 passed, 16 skipped, 2 xpassed**, 656 s.
+  The +1 against Phase 3's recorded 856 is Card 3c's own `smoke` test in
+  `test_node_tightening_parity.py`, which landed *after* the tree that 856 was
+  measured on; not a new test and not a regression.
+- `pytest -m smoke discopt_benchmarks/tests` — **51 passed, 1 skipped** (matches).
+- `pytest -m slow python/tests/test_adversarial_recent_fixes.py` — **10 passed**,
+  233 s (matches).
+
+Phase 3's residual risk is therefore closed rather than merely bounded.
+
+### 2026-07-29 — Card 4a: dispatch table extraction — **LANDED, Regime N clean**
+
+**Scope check first.** The card says "~20 sequential gates". The AST census found
+**29**, because four of them are the `problem_class` sub-branches (LP / QP / MILP /
+MIQP) that the review's dispatch tree counts as one. All 29 are declared; the extra
+nine are not new behaviour, only previously-uncounted gates.
+
+**Verification.** `panel_baseline.py --check reports/panel_baseline_f154dcff.json`
+on the Card 4a tree: **comparisons executed 255** (node_count 85, certified
+objective 85, status 85) over 85 comparable of 119 rows — **PASS**, no node-count
+or certified-objective drift. 2226.7 s wall, load start 0.20 peak 2.33. 17
+non-comparable rows reported and not gating, all budget-dependent
+(`status=time_limit`/`feasible`, plus `tls2` certified at 97 % of its budget);
+Phase 3's run reported 19 of the same character.
+`pytest python/tests/test_routing.py` — 14 passed, executed assertions
+`{order: 1, marker: 180, handler: 23, guard: 6, recorder: 12}` = 222.
+
+**A finding worth keeping.** The first version recorded each gate as `taken` at
+branch entry and rendered the first such record as "the route that dispatched". On
+a 2-variable MINLP it printed **three** routes as TAKEN (`auto_gp`, `nlp_bb_auto`,
+`spatial_branch_and_bound`), because 11 of the 29 routes run a second, finer
+classification *inside* the branch and continue when it declines. The marker is now
+`entered` and the dispatcher is derived as the last route to record — sound because
+a dispatching branch returns, so nothing after it can record. This is CLAUDE.md §6
+applied to a debugging instrument: the naive version would have answered "which
+engine solved this?" with a number it never measured.
+
+### 2026-07-29 — Card 4b entry experiment: "`solve_model` splits into five modules by pure moves" — **FALSIFIED for four of the five; one module landed**
+
+**Hypothesis (the card's own).** With routing extracted, `solve_model` splits along
+its phase banners into `setup.py` / `reformulate.py` / `root.py` / `spatial_loop.py`
+/ `results.py` as **pure moves plus imports**, Regime N, one module per PR, target
+no file > 2,500 lines and no function > 300 lines.
+
+**Kill criterion.** A candidate whose move is not expressible as relocating whole
+functions — i.e. one that would require inventing a parameter list or a context
+object — is not a "pure move" and falsifies the card's method for that module.
+
+**Experiment 1 — what the five named modules actually are.** AST census of
+`solve_model` on the Phase-4 head tree (`33e06fb6`, before Card 4a):
+**7,576 lines, 318 top-level statements, 64 `return`s (63 of them early), 558
+`if`s, and one 2,495-line inline `while` loop.** Four of the five
+named modules (`setup`, `reformulate`, `root`, `spatial_loop`) are *inline
+statement blocks of `solve_model`*, not functions: they read and write a shared
+closure of 200+ locals (`_mc_lp_relaxer`, `_root_lb_snapshot`, `rust_time`,
+`_gap_certified`, …). Moving one is a signature-design problem — decide what
+crosses the boundary, in which direction, and prove the choice bound-neutral — not
+a `git mv` of a `def`. `results.py` is the same shape: the return block reads ~40
+locals accumulated across the whole function.
+
+**Experiment 2 — coupling census over the movable *functions*.** For each
+top-level function that is a plausible module member, the number of
+`solver.py`-level names it references (constants, sibling helpers, imports),
+computed by AST with local bindings subtracted:
+
+| function | LOC | module-level deps |
+|---|---|---|
+| `_solve_nlp_bb` | 1,256 | **44** (including `solve_model` itself — a cycle) |
+| `_solve_milp_bb` | 632 | 28 |
+| `_solve_miqp_bb` | 500 | 23 |
+| `_solve_continuous` | 230 | 21 |
+| `_solve_qp_matrix` | 193 | 16 |
+| `_solve_milp_simplex` | 354 | 13 |
+| **native-kernel cluster (8 fns)** | **694** | **1** (`_unpack_solution`) |
+
+Every engine function reaches 13–44 sibling names, so moving one alone creates an
+import cycle back into `solver`. The native-kernel cluster is the single exception
+— its dependency closure touches exactly one solver-level helper — which is why it
+is the module that landed.
+
+**Experiment 3 — the hazard the card did not anticipate: monkeypatch seams.** A
+census over `python/tests` and `discopt_benchmarks` found **30+ distinct
+`discopt.solver` attributes that tests replace** (`_solve_batch_pounce` ×6,
+`_solve_milp_simplex` ×4, `_solve_lp_matrix` ×4, `_root_cover_cut_loop` ×4,
+`_native_kernel_seed` ×2, …). A pure move plus a re-export leaves
+`monkeypatch.setattr(discopt.solver, "_f", fake)` **succeeding and doing nothing**:
+the moved call site resolves `_f` in its own module. `raising=True` does not help,
+because the re-exported attribute exists. At least one such seam is a *negative*
+assertion (`must_not_run` in `test_expired_outer_deadline_skips_native_seed_work`)
+which would then pass vacuously — a CLAUDE.md §6 instrument-measures-nothing
+failure introduced by a refactor.
+
+**Rule adopted, and applied to the landed module:** a moved function that any test
+*patches* is **not** re-exported from `discopt.solver`, so a stale patch raises
+`AttributeError` instead of silently no-op'ing; a moved function that tests only
+*call* may be re-exported using the explicit `x as x` form. Under that rule
+`_native_kernel_seed` and `_native_kernel_seed_candidates` are not re-exported and
+their three test sites were repointed at `discopt.solver.native_kernel`. **Any
+future 4b move must run this census for its own cluster.**
+
+**What landed, and its proof of purity.** `solver.py` → `solver/__init__.py` (git
+rename recorded) plus `solver/native_kernel.py` (796 lines). **7 of the 8 moved
+functions are AST-identical** to their pre-move selves; the 8th
+(`_try_native_spatial_kernel`) differs by exactly three added lines, the deferred
+`from discopt.solver import _unpack_solution` that breaks the package cycle. All
+**124** stay-behind functions are AST-identical.
+
+**Verdict.** The card's method holds for *function clusters* and is falsified for
+the four inline-block modules. The next tractable step is **not** one of the card's
+five names: it is a `solver/_common.py` leaf-helper layer, which drops the engine
+functions' dependency counts into single digits and unblocks `milp.py` (~1,500
+lines) and `matrix_backends.py`. Carving the inline blocks needs `solve_model`'s
+locals turned into an explicit state object first — a larger, separate piece of
+work that should be scoped on its own rather than smuggled into a "pure move" card.

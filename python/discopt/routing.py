@@ -1,7 +1,8 @@
 """The declared solve-path routing table (consolidation plan Card 4a).
 
-``solver.solve_model`` decides *which engine solves the model* with roughly
-thirty sequential gates spread over 2,900 lines.  Before this module that
+``solver.solve_model`` decides *which engine solves the model* with 29
+sequential gates spread over ~4,060 lines (the span from the first gate to the
+spatial loop it falls through to).  Before this module that
 dispatch tree existed only as the physical order of those ``if`` statements:
 there was no artefact to read, no way to ask "why did this model take the
 spatial loop?", and nothing that would fail when a gate moved, was deleted, or

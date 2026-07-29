@@ -127,7 +127,10 @@ def test_binding_budget_spellings_are_explicit():
 def test_driver_passes_remaining_time_and_surfaces_partial_result(monkeypatch):
     """#788: ``Model.solve(time_limit=...)`` reaches the PyO3 deadline and a native
     timeout returns directly instead of restarting the Python spatial engine."""
-    import discopt.solver as S
+    # Card 4b: the seed helper lives in ``native_kernel`` now, and is
+    # deliberately not re-exported from ``discopt.solver`` — patching the
+    # old location would succeed and do nothing.
+    from discopt.solver import native_kernel as S
 
     captured = {}
 
@@ -166,7 +169,10 @@ def test_non_finite_time_limit_requests_an_uncapped_native_search(monkeypatch):
     as ``time_limit_s=None``. Passing the non-finite value straight through would be
     rejected by the binding, and the driver's defensive ``except`` would swallow that
     rejection — silently disabling the kernel for every uncapped solve."""
-    import discopt.solver as S
+    # Card 4b: the seed helper lives in ``native_kernel`` now, and is
+    # deliberately not re-exported from ``discopt.solver`` — patching the
+    # old location would succeed and do nothing.
+    from discopt.solver import native_kernel as S
 
     captured = {}
 
@@ -195,7 +201,8 @@ def test_non_finite_time_limit_requests_an_uncapped_native_search(monkeypatch):
 
 def test_expired_outer_deadline_skips_native_seed_work(monkeypatch):
     """The optional seed heuristic is part of the same #788 wall-clock contract."""
-    import discopt.solver as S
+    # Card 4b: patch where the function is defined (see above).
+    from discopt.solver import native_kernel as S
 
     def must_not_run(*args, **kwargs):  # pragma: no cover - executed only on failure
         raise AssertionError("seed candidates started after the outer deadline")
@@ -520,3 +527,37 @@ def test_kernel_verifies_final_incumbent_and_declines_false_primal(monkeypatch):
     assert res.objective is not None, "withheld/None: false primal escaped kernel verification"
     assert res.objective == pytest.approx(2.0, abs=1e-4), res.objective
     assert not getattr(res, "incumbent_verification_failed", False)
+
+
+def test_patched_seed_helpers_are_not_re_exported_from_discopt_solver():
+    """Card 4b re-export policy: a *patched* symbol must not be re-exported.
+
+    ``_native_kernel_seed`` / ``_native_kernel_seed_candidates`` moved into
+    ``discopt.solver.native_kernel``. If ``discopt.solver`` re-exported them,
+    ``monkeypatch.setattr(discopt.solver, "_native_kernel_seed", fake)`` would
+    still succeed while the real call site inside ``native_kernel`` kept using
+    the original function — a patch that silently does nothing. One of the seams
+    above is a *negative* assertion (``must_not_run``), so the vacuous version
+    would read as a pass. Absence of the re-export turns that into a loud
+    ``AttributeError`` instead (CLAUDE.md §6).
+
+    The names this package genuinely calls stay re-exported, and the assertions
+    below check both directions so the test cannot pass by the module having
+    been emptied.
+    """
+    import discopt.solver as S
+    from discopt.solver import native_kernel as NK
+
+    patched = ("_native_kernel_seed", "_native_kernel_seed_candidates")
+    for name in patched:
+        assert hasattr(NK, name), f"{name} vanished from native_kernel"
+        assert not hasattr(S, name), (
+            f"discopt.solver re-exports {name}, which tests monkeypatch — a patch "
+            "aimed at discopt.solver would then silently do nothing. Patch "
+            "discopt.solver.native_kernel instead of re-exporting it here."
+        )
+    for name in ("_try_native_spatial_kernel", "_native_kernel_feature_safe"):
+        assert getattr(S, name) is getattr(NK, name), (
+            f"{name} must stay re-exported: solve_model resolves it from "
+            "discopt.solver's globals, and two tests replace it there."
+        )

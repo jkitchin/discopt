@@ -25,7 +25,10 @@ _rust = pytest.importorskip("discopt._rust")
 if not hasattr(_rust, "solve_spatial_tree_py"):
     pytest.skip("native spatial kernel binding not built", allow_module_level=True)
 
-import discopt.solver as S  # noqa: E402
+# Card 4b: every solver symbol this file uses now lives in the
+# ``native_kernel`` module; two of them are deliberately not re-exported
+# from ``discopt.solver``, so import them from their defining module.
+from discopt.solver import native_kernel as S  # noqa: E402
 
 # --------------------------------------------------------------------------------
 # _native_seed_bracket — the per-variable candidate set
