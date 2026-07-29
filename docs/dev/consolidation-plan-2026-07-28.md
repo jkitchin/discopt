@@ -1762,3 +1762,54 @@ measurement above is the entry evidence for it.
 counted as "decisive" — 20 rows were replicated where 6 were real, which is where
 most of the 10,734 s went; and the panel gained a `--rescore` mode so a corrected
 gate never requires another three-hour run.
+
+### 2026-07-29 — Phase 5 close-out: what was run on the final tree
+
+Recorded because §0.6 asks for it, and because Phase 3's close-out established the
+house rule that a partially-verified tree described as verified is the same defect
+as an instrument that measures nothing.
+
+**Regime N (the gate for every bound-neutral change in this phase).**
+`panel_baseline.py --check reports/panel_baseline_f154dcff.json` on the Phase-5
+tree: **comparisons executed 255** (node_count 85, certified objective 85, status
+85) over 85 comparable of 119 rows — **PASS: no node-count or certified-objective
+drift.** 18 non-comparable rows reported and not gating, all budget-dependent, the
+same character Phase 3 (19) and Card 4a (17) reported. This is the load-bearing
+result of the phase's safety argument: the census instrumentation only executes
+behind `DISCOPT_NATIVE_SPATIAL_KERNEL` (default OFF), and the 5.4 deduction
+subtracts a value that is **exactly** `0.0` with `DISCOPT_CONVEX_KERNEL` off, so
+the default path is unchanged *by construction* — and the panel confirms it
+*by measurement*.
+
+**Suites.**
+
+| suite | result |
+|---|---|
+| `pytest -m smoke python/tests` | **871 passed**, 16 skipped, 2 xpassed, 503 s |
+| `pytest -m smoke discopt_benchmarks/tests` | **51 passed**, 1 skipped, 32 s |
+| `pytest -m slow python/tests/test_adversarial_recent_fixes.py` | **10 passed**, 225 s |
+| `pytest python/tests/test_node_tightening_parity.py -m slow` | **12 passed**, 77 s |
+| `pytest python/tests/test_phase5_convex_kernel_budget.py` (incl. `-m slow`) | **3 passed** |
+| `ruff check` / `ruff format --check` on every changed file | clean |
+| `cargo test -p discopt-core` | **not run — no Rust source was touched in this phase** |
+
+The smoke count moved 857 → 871 against Phase 4's record. That is **not** this
+phase: `pytest -m smoke python/tests --collect-only` reports **877 collected on
+this tree and 877 on the base commit `c346fd73`** (checked in a worktree), i.e.
+Phase 5 adds zero smoke tests — the delta belongs to Card 4b's tree, which landed
+after the 857 was recorded.
+
+**Card 3c's parity arm is no longer vacuous.** With the served instances added it
+reports **served 3 of 5 producer calls** (was 0 of 2), over 140 decided nodes,
+4,070 bound comparisons, 394 contraction checks, 127 monotonicity checks, 100
+soundness checks and 17 native checks; pooled Python-only-inference rate 5.0 %.
+
+**Disclosed measurement condition (CLAUDE.md §9).** The Regime-N check and the test
+suites ran *concurrently* with the differential panel on a 4-core box; load peaked
+at 4.72. This is disclosed rather than hidden because the panel's `net-positive`
+bar is wall-based: `clay0303hfsg`'s quarantine is plausibly a consequence of it,
+and the +0.060 s median non-engaged delta should be read as an upper bound rather
+than a precise figure. Neither affects the gates that decided the verdict —
+cert-clean and quality-clean are status/objective comparisons, and the Regime-N
+gate is node-count and certified-objective equality, which returned the same 85
+comparable rows and the same 255 comparisons as every prior run.
