@@ -1,17 +1,51 @@
 //! Watch-list FBBT to a true fixed point (B4 of the presolve roadmap).
 //!
-//! ## PARKED — entry experiment for Card 3b (consolidation plan 2026-07-28)
+//! ## PARKED — Card 3b ran, and it did NOT produce a winner (2026-07-29)
 //!
-//! This pass is **implemented but never enabled on any solve path**. It was NOT
-//! deleted with the other never-enabled presolve passes in Phase 1 Card 1b,
-//! because its header (below) claims to *supersede* the wired-in sweep FBBT in
-//! `fbbt.rs` — "wasteful … oscillates in the tail" — and that claim has never
-//! been measured. Card 3b is that measurement: A/B `fbbt` vs `fbbt_fp` on the
-//! corpus root + node streams, asserting **fixpoint equality** (both are FBBT;
-//! any bound difference is a bug in one of them, to be investigated before
-//! proceeding) and recording the wall delta. The winner becomes the only Rust
-//! DAG-FBBT and the loser is deleted. Do not delete this file before that
-//! experiment runs.
+//! This pass is implemented but never enabled on any solve path. Phase 1 Card 1b
+//! parked it rather than deleting it because the header below claims to
+//! *supersede* the wired-in sweep FBBT in `fbbt.rs` — "wasteful … oscillates in
+//! the tail". Card 3b measured that claim on the 119-instance in-repo corpus
+//! (`discopt_benchmarks/scripts/card3b_fbbt_vs_fbbt_fp_entry.py`, artifact
+//! `reports/card3b_fbbt_vs_fbbt_fp.json`; 11,088 executed bound comparisons,
+//! 3 interleaved replicates, 0 errored). The card's premise — "both are FBBT, so
+//! the fixpoints must be identical; any difference is a bug in one of them" — is
+//! **falsified**, and neither pass may replace the other:
+//!
+//! 1. **`fbbt.rs` is not deletable under any outcome.** This file imports
+//!    `forward_propagate`, `backward_propagate`, `snap_integral_interval`,
+//!    `Interval` and `FEAS_TOL` from it, and `fbbt_with_cutoff` is the wired-in
+//!    kernel behind the root FBBT and `in_tree_presolve`.
+//! 2. **The fixpoints genuinely differ and neither dominates.** 11 of 119
+//!    instances disagree on 183 of 11,088 bounds (fp tighter 170, sweep tighter
+//!    13). On `st_e03` the sweep pass is 2.3 % tighter on one bound and the
+//!    watch-list pass is tighter on others, and running **both** in either order
+//!    beats either alone (block2.lo: sweep 0.012676, fp 0.012381, sweep→fp
+//!    0.013482). FBBT has a unique greatest fixpoint only on monotone/linear
+//!    systems; on the cyclic nonconvex DAGs here the reachable fixpoint is
+//!    visit-order dependent — Belotti–Cafieri–Lee–Liberti (2010), cited below.
+//!    Both boxes are valid outer approximations, so this is not a soundness bug
+//!    in either kernel.
+//! 3. **This pass does not terminate at the fixed point it claims.** Inside the
+//!    orchestrator it reports `IterationCap`, not `NoProgress`, on 11 instances:
+//!    per-sweep `bounds_tightened` plateaus at 35 (`4stufen`) / 89 (`util`) and
+//!    never reaches zero — asymptotic sub-tolerance drift on cyclic DAGs. Its
+//!    output therefore depends on `max_iterations`, and it costs 6.2× the sweep
+//!    pass on `util` (261 ms vs 42 ms) to buy that. On the 104 instances where
+//!    both converge it is 2.4× *faster* (ratio 0.410) — the header's speed claim
+//!    holds there, its termination claim does not.
+//!
+//! **The finding worth carrying forward is about the wired-in pass, not this
+//! one.** `FbbtPass::run` calls `fbbt_with_cutoff_until(&ctx.model, …)`, which
+//! seeds `var_bounds` from the *declared* box and never reads `ctx.bounds`; the
+//! orchestrator deliberately never writes tightened bounds back into `ctx.model`
+//! (see `orchestrator.rs`, for LP-dual validity). So the wired-in FBBT pass
+//! **structurally cannot compose with any other presolve pass's tightenings** —
+//! measured 0 composed bounds in 7/7 instances against 48 for this pass. Filed as
+//! plan Card 3e.
+//!
+//! Keep this file: it is the working reference implementation of a seeded,
+//! composing DAG-FBBT that Card 3e needs.
 //!
 //! ## What this pass does
 //!

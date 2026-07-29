@@ -456,14 +456,56 @@ in `solve_model` (review §2.3 wiring listing). Rules:
   (`obbt_tighten_root` becomes the single door with modes; `run_obbt` /
   `run_obbt_on_relaxation` become internal).
 
-### Card 3b — `fbbt` vs `fbbt_fp` (entry experiment)
+### Card 3b — `fbbt` vs `fbbt_fp` (entry experiment) — **RAN; premise falsified, no winner**
 
-`fbbt_fp.rs:15-20` claims to supersede the wired-in sweep FBBT ("wasteful…
-oscillates in the tail") yet was never enabled. A/B on the corpus root + node
-streams: fixpoint equality (must be identical — both are FBBT; any bound difference
-is a bug in one of them, investigate before proceeding) and wall time. Winner
-becomes the only Rust DAG-FBBT; loser is deleted. Regime N if fixpoints match
-(expected), with the wall delta recorded.
+> **Status:** LANDED 2026-07-29 as a measured NO. The card's premise — "both are
+> FBBT, so the fixpoints must be identical; pick the faster, delete the loser" —
+> is falsified on both halves. 11,088 executed bound comparisons over 119
+> instances: 11 instances disagree on 183 bounds, `fbbt_fp` tighter on 170 and
+> `fbbt` tighter on 13, with **neither dominating** (on `st_e03` running both in
+> either order beats either alone). `fbbt.rs` was never deletable — `fbbt_fp.rs`
+> imports its kernels — and `fbbt_fp` cannot replace the wired-in pass because it
+> reports `IterationCap`, not `NoProgress`, on 11 instances, so its result depends
+> on `max_iterations`, and it costs 6.2× on `util` for that. `fbbt_fp.rs` stays
+> parked with its header rewritten from an unmeasured claim into the measurement.
+> Probe: `card3b_fbbt_vs_fbbt_fp_entry.py` (+ `--diagnose`, 22 checks), artifact
+> `reports/card3b_fbbt_vs_fbbt_fp.json`. Full attribution in §6.
+>
+> **What it found instead, and it is bigger than the card:** the wired-in `fbbt`
+> pass **structurally cannot compose with any other presolve pass's tightenings**
+> (0 composed bounds in 7/7 instances, against 48 for `fbbt_fp`). Filed as Card 3e.
+
+`fbbt_fp.rs:15-20` claimed to supersede the wired-in sweep FBBT ("wasteful…
+oscillates in the tail") yet was never enabled. The A/B ran on the corpus root
+streams: fixpoint equality and wall time, 3 interleaved replicates.
+
+### Card 3e — the root FBBT pass cannot see the other passes' bounds (filed by Card 3b)
+
+**Measured, not hypothesised** (Card 3b, 119 instances, 14 executed composition
+checks). `FbbtPass::run` (`crates/discopt-core/src/presolve/passes.rs`) calls
+`fbbt_with_cutoff_until(&ctx.model, …)`, which seeds `var_bounds` from
+`model.variables` — the **declared** box — and never reads `ctx.bounds`; the
+adapter then intersects the result back in. The orchestrator deliberately never
+writes tightened bounds into `ctx.model`'s `VarInfo` (documented at
+`orchestrator.rs`: mutating declared bounds can flip an inactive bound active and
+change LP duals). The two facts together mean the wired-in FBBT pass **re-derives
+the same box on every sweep** and can never propagate from what `eliminate`,
+`simplify`, `implied_bounds`, `coefficient_strengthening` or `probing` just
+proved.
+
+Evidence: at `max_iterations=1` — one sweep, so no pass can re-run and launder the
+result — `[implied_bounds, X]` beats `intersect(X@1, implied_bounds@1)` on **0**
+bounds for `fbbt` across 7/7 instances and on **48** bounds for `fbbt_fp`. Every
+disagreeing corpus row shows `fbbt[NoProgress, iters=2]`: the orchestrator's
+fixpoint loop stops at sweep 2 because sweep 2 reproduces sweep 1 exactly.
+
+**Scope.** Add a seed parameter to `fbbt_with_cutoff_until` (initialise
+`var_bounds` as `declared ∩ seed` instead of `declared`) and pass `ctx.bounds`
+from `FbbtPass::run`. `fbbt_fp.rs` is the working reference for the seeded form.
+**Regime C** — it strictly tightens the root box, so it is bound-changing; ships
+behind a default-OFF `DISCOPT_*` flag per §0.7 and graduates on a differential
+panel with the #902 quality gate. Do **not** instead adopt `fbbt_fp` wholesale:
+Card 3b measured its result to be `max_iterations`-dependent.
 
 ### Card 3d — Adopt the Rust presolve's model rewrites (filed by Card 2c.2)
 
@@ -833,3 +875,63 @@ it is filed as **Card 3d** with these counts.
 **Incidental:** the orchestrator terminates on `IterationCap` for 48/119 instances
 (never reaching a fixpoint in 16 sweeps), `NoProgress` 67, `TimeBudget` 3,
 `Infeasible` 1.
+
+### 2026-07-29 — Card 3b: "`fbbt` and `fbbt_fp` are both FBBT, so their fixpoints must be identical; pick the faster and delete the loser" — **FALSIFIED on both halves**
+
+**Hypothesis (the card's own).** `fbbt_fp.rs:15-20` claims to supersede the
+wired-in sweep FBBT ("wasteful … oscillates in the tail") yet was never enabled.
+A/B the two on the corpus; fixpoint equality is *expected* (both are FBBT over the
+same DAG, and `fbbt_fp` literally imports `forward_propagate` /
+`backward_propagate` from `fbbt`), so any bound difference is a bug in one of them.
+The faster becomes the only Rust DAG-FBBT; the loser is deleted.
+
+**Kill criterion.** A fixpoint disagreement that is *not* a bug in either kernel
+kills the "pick a winner, delete the loser" plan, because the two passes are then
+not substitutes.
+
+**Experiment.** `discopt_benchmarks/scripts/card3b_fbbt_vs_fbbt_fp_entry.py`. Both
+passes run **alone**, through the same orchestrator entry (`PyModelRepr.presolve`),
+from the same repr, same tolerance (1e-8), `max_iterations=16`; 3 interleaved
+A/B/A/B replicates per instance; 119 in-repo corpus instances; load 0.18 at start,
+1.35 at end. Artifact `reports/card3b_fbbt_vs_fbbt_fp.json`.
+
+- **executed: 11,088 bound comparisons over 119 instances, 0 errored.**
+- **11 instances disagree on 183 bounds** — `fbbt_fp` tighter on 170, `fbbt`
+  tighter on 13. Not equality, and not one-directional.
+- Wall on the **104 both-converged** instances: `fbbt` 0.617 s vs `fbbt_fp`
+  0.253 s summed — **ratio 0.410**, i.e. the watch-list pass is 2.4× faster
+  *where it converges*.
+
+**Attribution** (`--diagnose`, 22 executed checks). Three separate causes, none of
+which is a soundness bug in either kernel:
+
+| # | cause | evidence |
+|---|---|---|
+| 1 | **The wired-in `fbbt` pass cannot compose.** `FbbtPass::run` calls `fbbt_with_cutoff_until(&ctx.model, …)`, which seeds from the **declared** box and never reads `ctx.bounds`; the adapter then intersects. The orchestrator deliberately never writes tightened bounds back into `ctx.model` (documented in `orchestrator.rs`, for LP-dual validity), so the pass re-derives the same box every sweep. | At `max_iterations=1` (so no pass can re-run and launder the result), `[implied_bounds, X]` beats `intersect(X@1, prior@1)` on **0** bounds for `fbbt` across 7/7 instances, and on **48** bounds for `fbbt_fp`. Every disagreeing row shows `fbbt[NoProgress, iters=2]` — the signature of a pass computing the same thing every sweep. |
+| 2 | **Fixpoint order-dependence on cyclic nonconvex DAGs.** FBBT has a unique greatest fixpoint only on monotone/linear systems. Both boxes are valid outer approximations; **neither dominates**. | `st_e03` block2.lo: `fbbt` 0.012676, `fbbt_fp` 0.012381, `fbbt→fp` **0.013482**, `fp→fbbt` 0.013468 — composing beats *either* singleton. This is the mechanism `fbbt_fp`'s own header cites (Belotti–Cafieri–Lee–Liberti 2010). |
+| 3 | **Float accumulation at ~1e-10 relative** from a different visit order (`ex1252`, `ex1252a`, `hda`), below any decision threshold. | e.g. `ex1252` block10.hi 385.8840406063522 vs 385.8840406893461. |
+
+**A third finding, fatal to adopting `fbbt_fp` as-is.** Its header claims it
+"terminates the moment the queue is empty — that's the true fixed point, no
+`max_iter` artefact". Inside the orchestrator it reports **`IterationCap`, not
+`NoProgress`**, on 11 instances: per-sweep `bounds_tightened` plateaus at 35
+(`4stufen`) / 89 (`util`) and never reaches zero — asymptotic sub-tolerance drift.
+Its output therefore **depends on `max_iterations`**, and it costs **6.2×** the
+sweep pass on `util` (261 ms vs 42 ms) to buy that drift.
+
+**Verdict — no winner; nothing deleted, nothing adopted.** `fbbt.rs` was never
+deletable (`fbbt_fp.rs` imports its kernels; `fbbt_with_cutoff` backs the root FBBT
+and `in_tree_presolve`), and `fbbt_fp` cannot replace the `fbbt` pass while its
+result is budget-dependent. `fbbt_fp.rs` stays parked, with its header rewritten
+from an unmeasured claim into this measurement, and with the note that it is the
+working reference implementation of a *seeded, composing* DAG-FBBT.
+
+**What the card actually found, and it is bigger than the card.** The wired-in FBBT
+pass — the one every solve runs — **cannot see any other presolve pass's
+tightenings**. `eliminate`, `simplify`, `implied_bounds`, `probing` and
+`coefficient_strengthening` all tighten `ctx.bounds`; `fbbt` then re-derives from
+the declared box and intersects. That is a defect in exactly the "one tightening
+pipeline" this phase exists to fix, it is general (no instance keying), and the fix
+is a seed parameter on `fbbt_with_cutoff_until`. Filed as **Card 3e** (Phase 3);
+Regime C, not built here.
+
