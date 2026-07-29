@@ -287,8 +287,33 @@ heuristic suite (incumbents are not the problem — the *proof* is).
 | Cut pool w/ aging on default path                      | yes                                 | opt-in path only                   | wiring                |
 | CSE / defined-variable sharing                         | preserved & exploited               | discarded                          | **missing**           |
 | Quadratic/structure recognition in core                | yes                                 | Python-side convexity only         | missing               |
-| Root-gap instrumentation                               | n/a (internal)                      | schema exists, never populated     | missing               |
+| Root-gap instrumentation                               | n/a (internal)                      | populated (83% of the in-repo panel) | wiring (partial)    |
 | Parallel tree search                                   | partial                             | no                                 | out of scope here     |
+
+**Root-gap row, updated 2026-07-29 (consolidation plan Phase 0.3).** The schema
+(`SolveResult.root_bound`/`root_gap`/`root_time`, and
+`benchmarks.metrics.SolveResult.root_gap`) is now *populated by a run that is
+checked in*: `discopt_benchmarks/scripts/panel_baseline.py` writes it per instance,
+and `reports/panel_baseline_f154dcff.json` is the first such artifact — 119
+instances at a 45 s budget on defaults. Measured coverage there:
+
+* `root_gap` (solver-reported, incumbent-relative): **99/119 = 83 %**. The 20
+  unpopulated rows break down as 15 `time_limit`, 3 `feasible`, 1 `child_timeout`,
+  1 `optimal`; 16 of the 20 have no incumbent at all, so there is nothing to
+  relativize the root bound against. That tail is exactly the population a later
+  cuts/propagation card most wants to score and currently cannot.
+* `root_gap_vs_reference` (`|ref − root_bound| / max(1, |ref|)`, measured against
+  the **oracle** rather than this run's incumbent, so a root-bound change is not
+  confounded with a primal-heuristic change): **65/119 = 55 %**, over the 67 rows
+  for which `utils.reference_optima` has any oracle at all. Median **0.235**.
+
+So the row is no longer "never populated", but it is not closed either: coverage is
+83 %, below the ≥ 90 % `root_gap_coverage` bar `[gates.cert0]` sets (that gate is
+scoped to `global50`, not to this panel — the two numbers are not interchangeable).
+Note the floored-relative convention makes `root_gap_vs_reference` a raw *absolute*
+distance whenever `|ref| < 1` (e.g. `ex14_1_9`, reference 0, reports 1.07e6); that
+matches `SolveResult.root_gap`'s own convention and is intentional, but a card
+reading these numbers as percentages would misread that row.
 
 ---
 
