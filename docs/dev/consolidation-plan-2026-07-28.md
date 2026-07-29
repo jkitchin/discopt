@@ -347,6 +347,31 @@ LOC delta reported in the PR (~5,000 expected).
 > verdict is therefore corpus-local. Card 2a's outcome is a *negative* (sites stay
 > off), so the missing arm cannot have admitted an unmeasured bound change.
 >
+> **Verification (final tree `f557b056`, 2026-07-29).** The committed defaults are:
+> cascade ON at `root_reduce` only (unchanged from before the phase), explicit
+> `cascade_aux=False` at the other five sites, both per-node Python FBBT calls
+> retained, the declared-box tightening carried forward, `_SUPERPOSITION_FUNCS`
+> deleted. No Rust source was touched, so `cargo test -p discopt-core` was not
+> required; the prebuilt extension was asserted loaded from the repo before every
+> measurement (CLAUDE.md §8).
+> - `panel_baseline.py --check reports/panel_baseline_f154dcff.json`:
+>   **comparisons executed: 255** (node_count 85, certified objective 85, status 85)
+>   over 85 comparable of 119 rows — **PASS: no node-count or certified-objective
+>   drift.** 1914.2 s wall, load start 0.17 peak 2.03. 20 non-comparable rows
+>   reported and not gating.
+> - `pytest -m smoke python/tests`: **844 passed, 16 skipped, 2 xpassed** (identical
+>   to Phase 1's counts). `pytest -m smoke discopt_benchmarks/tests`: **51 passed,
+>   1 skipped**. `pytest -m slow python/tests/test_adversarial_recent_fixes.py`:
+>   **10 passed**. `ruff check` / `ruff format --check`: clean on all 12 changed
+>   files.
+> - **Isolation note.** A concurrent session began editing this working tree
+>   (Phase 3 Card 3a's `tightening_schedule`) at 12:08 UTC, after the panel and the
+>   `python/tests` smoke run had completed on the clean tree. The adversarial suite,
+>   the benchmark smoke suite and the lint were **re-run in a `git worktree` pinned
+>   to `f557b056`**, with the child asserting the Card 2c.1 marker present and the
+>   foreign `tightening_schedule` import absent before running. Nothing in this
+>   phase's commits contains that session's work (verified against the commit stat).
+>
 > **Two findings that are not Phase 2's, surfaced by Phase 2's panel.**
 > (a) `contvar` blows well past its budget on **both** trees (>400 s against a 45 s
 > limit, interleaved A/B, and Phase 1's own `--check` already recorded
