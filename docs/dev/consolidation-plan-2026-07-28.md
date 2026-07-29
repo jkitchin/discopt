@@ -193,6 +193,27 @@ detecting a deliberate 1-node perturbation (test); `heldout50` resolvable locall
 > round-trip through the live `parse_nl_file`, so no `.nl`-parser coverage was
 > traded for the deletion (§0.4).
 >
+> **Verification (both cards, final tree, 2026-07-29).** The Rust extension was
+> rebuilt from the edited sources and its loaded state asserted before any
+> measurement (§0.5 / CLAUDE.md §8): `discopt.__file__` and `_rust.__file__` under
+> the repo, the five deleted PyO3 exports **absent**, five kept exports present,
+> and `presolve(passes=["scaling"])` raising `unknown presolve pass` — so the panel
+> exercised **new Python + new Rust**, not a stale prebuilt `.so`.
+> - `panel_baseline.py --check reports/panel_baseline_f154dcff.json`:
+>   **comparisons executed: 255** (node_count 85, certified objective 85, status 85)
+>   over 85 comparable of 119 baseline rows — **PASS: no node-count or
+>   certified-objective drift.** 1943.3 s wall, load start 0.21 peak 2.73. 20
+>   non-comparable rows reported and not gating (budget-dependent `time_limit` /
+>   `feasible` statuses, plus `heatexch_gen3`'s known `child_timeout`).
+> - `pytest -m smoke python/tests`: 844 passed, 16 skipped, 2 xpassed (846 before
+>   1b; the −2 are the two tests of the deleted `_jax` modules).
+>   `pytest -m smoke discopt_benchmarks/tests`: 51 passed, 1 skipped.
+> - `pytest -m slow python/tests/test_adversarial_recent_fixes.py`: **10 passed**,
+>   including the load-sensitive `test_large_dense_jacobian_no_crash`.
+> - `cargo test -p discopt-core`: 536 + 4 + 1 passed (567 before 1b; the −31 are the
+>   deleted kernels' own tests). `ruff check` / `ruff format --check` clean on every
+>   changed file.
+>
 > **One finding for Phase 2, not fixed here.** `_jax/superposition.py` looks
 > test-only but is not dead: `MccormickLPRelaxer` threads
 > `superposition=(relaxation_arithmetic == "superposition")` into
