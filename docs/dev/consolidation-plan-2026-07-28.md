@@ -2199,3 +2199,57 @@ any panel: run the seeded kernel from the *unseeded* orchestrator's own final bo
 the box that run already certified — and determine whether `casctanks` is an
 orchestrator bookkeeping bug (`ctx.bounds` not a valid seed for `ctx.model`) or an
 FBBT `FEAS_TOL` question on one instance.
+
+### 2026-07-29 — Phase 5.5 / Card 3e close-out: what was run on the final tree
+
+Recorded because §0.6 asks for it, and because Phase 3's close-out established the
+house rule that a partially-verified tree described as verified is the same defect as
+an instrument that measures nothing.
+
+**Regime N.** `panel_baseline.py --check reports/panel_baseline_f154dcff.json` on the
+final tree — with the Rust `.so` **rebuilt** by `maturin build --release`, which is
+the reason this gate is not optional here: `DISCOPT_FBBT_SEED` is default-OFF and
+`seed=None` is asserted bit-for-bit identical in the Rust test, but a rebuilt binary
+is still a rebuilt binary.
+
+```
+comparisons executed: 255 (node_count 85, certified objective 85, status 85)
+                      over 85 comparable of 119 baseline rows
+PASS: no node-count or certified-objective drift.
+```
+
+Identical population and comparison count to Phase 5's run (255 / 85). **14**
+non-comparable rows reported and not gating, all budget-dependent — the same
+character as Phase 5 (18), Phase 3 (19) and Card 4a (17). Wall 2,008.5 s, load start
+0.82 peak 2.89.
+
+**Suites.**
+
+| suite | result |
+|---|---|
+| `pytest -m smoke python/tests` | **882 passed**, 16 skipped, 2 xpassed, 487 s |
+| `pytest -m smoke discopt_benchmarks/tests` | **51 passed**, 1 skipped, 33 s |
+| `pytest -m slow python/tests/test_adversarial_recent_fixes.py` | **10 passed**, 225 s |
+| `pytest python/tests/test_node_tightening_parity.py -m slow` | **12 passed**, 76 s |
+| `pytest python/tests/test_incumbent_verifier_scale.py` (incl. `-m slow`) | **16 passed** |
+| `pytest python/tests/test_flag_registry.py` | **17 passed** |
+| `cargo test -p discopt-core` | **542 passed**, 0 failed (Rust was touched) |
+| `ruff check` / `ruff format --check` on every changed file | clean |
+| `cargo fmt` on the changed crates | clean (an unrelated `delta.rs` reformat was reverted to keep the diff scoped) |
+
+The smoke count moved 871 → **882**, and that delta is attributable rather than
+mysterious: `test_incumbent_verifier_scale.py` contributes exactly **11** `smoke`
+tests (its other 5 are 4 `unit` and 1 `slow`). 871 + 11 = 882.
+
+**heldout50: SKIPPED — local only** (the MINLPLib snapshot is not in this
+environment). Card 3e's §5 differential panel: **not run**, deliberately — see the
+Card 3e §6 entry; the entry experiment ended the card before the panel was the right
+spend.
+
+**Disclosed measurement condition (CLAUDE.md §9).** The Regime-N check ran
+*concurrently* with `discopt_benchmarks` smoke, the adversarial suite and the parity
+suite (load start 0.82, peak 2.89); the `python/tests` smoke suite ran alone
+afterwards. No verdict on this tree is wall-based — Regime N gates on node-count and
+certified-objective equality, the sweeps gate on verdict flips and bound counts — so
+contention can only move a row out of the comparable population, and it did not: the
+same 85 comparable rows and 255 comparisons as every prior run.
