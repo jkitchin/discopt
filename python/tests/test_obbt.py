@@ -1017,6 +1017,74 @@ class TestCascadeAuxGraduatedDefault:
         assert captured["cascade_aux"] is False
 
 
+class TestCascadeAuxWiredAtEverySite:
+    """Consolidation-plan Card 2a: ``cascade_aux`` is passed **explicitly** at every
+    production ``obbt_tighten_root`` call site.
+
+    The defect this locks out is silent: the parameter's *function* default is
+    ``False``, so a site that simply omits it runs the legacy behaviour while the
+    docs (and the flag registry) advertise the feature as graduated default-ON. That
+    is exactly how five of six sites ended up off. An omission is invisible in
+    review; this test makes it a failure.
+
+    It is also the proof that the ``DISCOPT_OBBT_CASCADE_AUX=0`` arm is bit-identical
+    to the pre-Card-2a tree: with the flag off every site passes ``cascade_aux=False``,
+    which is precisely what the old code did (one site explicitly, five by default).
+    """
+
+    #: Every non-test module under ``python/discopt`` that calls ``obbt_tighten_root``.
+    EXPECTED_SITES = 6
+
+    def _call_sites(self):
+        import ast  # noqa: PLC0415
+        from pathlib import Path  # noqa: PLC0415
+
+        import discopt  # noqa: PLC0415
+
+        root = Path(discopt.__file__).resolve().parent
+        sites = []
+        for path in sorted(root.rglob("*.py")):
+            tree = ast.parse(path.read_text(), filename=str(path))
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.Call):
+                    continue
+                fn = node.func
+                name = fn.attr if isinstance(fn, ast.Attribute) else getattr(fn, "id", None)
+                if name != "obbt_tighten_root":
+                    continue
+                kwargs = {kw.arg for kw in node.keywords if kw.arg is not None}
+                sites.append((path.name, node.lineno, kwargs))
+        return sites
+
+    def test_every_site_passes_cascade_aux_explicitly(self):
+        sites = self._call_sites()
+        # Executed-assertion count (CLAUDE.md §6): a walker that finds nothing and
+        # asserts nothing reads exactly like a pass.
+        print(f"executed cascade_aux call-site assertions: {len(sites)}")
+        assert len(sites) == self.EXPECTED_SITES, (
+            f"expected {self.EXPECTED_SITES} obbt_tighten_root call sites in "
+            f"python/discopt, found {len(sites)}: "
+            + ", ".join(f"{f}:{ln}" for f, ln, _ in sites)
+            + " — a new site must decide cascade_aux explicitly (Card 2a)."
+        )
+        missing = [f"{f}:{ln}" for f, ln, kw in sites if "cascade_aux" not in kw]
+        assert not missing, (
+            "obbt_tighten_root call site(s) omitting cascade_aux, so they silently "
+            "take the legacy function default False: " + ", ".join(missing)
+        )
+
+    def test_flag_off_disables_the_cascade_everywhere(self, monkeypatch):
+        """``=0`` is the documented opt-out; it must reach every site's value."""
+        from discopt.solver_tuning import SolverTuning  # noqa: PLC0415
+
+        monkeypatch.setenv("DISCOPT_OBBT_CASCADE_AUX", "0")
+        assert SolverTuning().obbt_cascade_aux is False
+        monkeypatch.setenv("DISCOPT_OBBT_CASCADE_AUX", "1")
+        assert SolverTuning().obbt_cascade_aux is True
+        monkeypatch.delenv("DISCOPT_OBBT_CASCADE_AUX")
+        assert SolverTuning().obbt_cascade_aux is True
+
+
 # ─────────────────────────────────────────────────────────────
 # C-15: run_obbt must clamp the raw LP vertex to the NS-safe bound
 # ─────────────────────────────────────────────────────────────

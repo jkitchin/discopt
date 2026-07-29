@@ -7151,6 +7151,10 @@ def solve_model(
                 superposition=(relaxation_arithmetic == "superposition"),
                 prefer_pounce=nlp_solver == "pounce",
                 min_improvement=_obbt_min_impr,
+                # Card 2a: the graduated #208 aux cascade, resolved once in
+                # SolverTuning. This root site used to take the function default
+                # (False) while the documentation called the feature default-ON.
+                cascade_aux=_tuning().obbt_cascade_aux,
             )
             if _obbt_res.infeasible:
                 wall_time = time.perf_counter() - t_start
@@ -8550,6 +8554,16 @@ def solve_model(
     )
     _per_node_obbt_enabled = _pn_obbt_small or _pn_obbt_degated
     _pn_obbt_topk = _PER_NODE_OBBT_TOPK if _pn_obbt_degated else None
+    # Card 2a: the #208 aux cascade at the per-node site. ``obbt_tighten_root``
+    # treats ``cascade_aux`` and ``top_k`` as mutually exclusive by contract — it
+    # forces ``top_k=None`` when cascading, because the cascade needs the full
+    # column vector. On the T2.5 de-gated path ``top_k`` is the *affordability*
+    # budget that admits per-node OBBT above the size cap at all, so letting the
+    # cascade nullify it would turn a bounded O(top_k) probe count back into
+    # O(n_vars) on exactly the large models the cap exists for. The cascade is
+    # therefore off wherever a top-k budget is in force; below the cap
+    # (``top_k is None``, the default path) it is on.
+    _pn_obbt_cascade_aux = _tuning().obbt_cascade_aux and _pn_obbt_topk is None
     _pn_obbt_spent = 0.0
     _pn_obbt_budget_total = time_limit * _PER_NODE_OBBT_BUDGET_FRAC
     if _per_node_obbt_enabled:
@@ -9035,6 +9049,7 @@ def solve_model(
                         time_limit_per_lp=_PER_NODE_OBBT_PER_LP_S,
                         prefer_pounce=nlp_solver == "pounce",
                         top_k=_pn_obbt_topk,
+                        cascade_aux=_pn_obbt_cascade_aux,
                     )
                 except Exception as _pn_exc:  # pragma: no cover - defensive
                     logger.debug("per-node OBBT failed: %s", _pn_exc)
@@ -10978,6 +10993,11 @@ def solve_model(
                             deadline=time.perf_counter() + 5.0,
                             time_limit_per_lp=0.1,
                             prefer_pounce=nlp_solver == "pounce",
+                            # Card 2a: graduated #208 aux cascade, resolved once in
+                            # SolverTuning. This is a whole-box (root-scope) OBBT that
+                            # fires only on incumbent improvement, so it carries the
+                            # same cost profile as the root site, not the per-node one.
+                            cascade_aux=_tuning().obbt_cascade_aux,
                         )
                         if not obbt_result.infeasible and obbt_result.n_tightened > 0:
                             lb = obbt_result.lb

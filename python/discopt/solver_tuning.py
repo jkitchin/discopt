@@ -677,6 +677,29 @@ class SolverTuning:
     OBBT-coupling entry experiment shows total-wall-to-close improves without
     regressing the #685 set."""
 
+    obbt_cascade_aux: bool = field(
+        default_factory=lambda: _env_flag("DISCOPT_OBBT_CASCADE_AUX", default=True)
+    )
+    """#208 reverse-FBBT aux cascade inside :func:`obbt_tighten_root`
+    (``DISCOPT_OBBT_CASCADE_AUX``, **default ON** since the #208 graduation — ``=0``
+    restores the legacy OFF behaviour at every site).
+
+    OBBT tightens the *lifted auxiliary* columns of the McCormick relaxation as well
+    as the original ones; the cascade captures that tightening and propagates it back
+    onto the original variables through the nonlinear term definitions (reverse
+    FBBT), recovering the hyperbolic/root bounds the linear McCormick rows cannot
+    express. Sound by construction (an OBBT aux bound is valid over the relaxation
+    polytope, which outer-approximates the MINLP feasible set).
+
+    Moved here from ``_flag_registry`` by consolidation-plan Card 2a: the flag was
+    resolved at exactly **one** of the six ``obbt_tighten_root`` call sites
+    (``root_reduce._stage_obbt``), so the graduated default was silently off at the
+    other five. It is now resolved once, here, and consulted by every site that the
+    Card 2a differential panel showed to be net-positive. The two sites the panel
+    left off pass ``cascade_aux=False`` **explicitly**, with the measurement cited
+    at the call site — never implicitly by falling through to the function
+    default."""
+
     adaptive_nlp: bool = field(
         default_factory=lambda: _env_flag("DISCOPT_ADAPTIVE_NLP", default=True)
     )

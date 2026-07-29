@@ -45,8 +45,8 @@ from typing import Optional
 
 import numpy as np
 
-from discopt._env import env_bool
 from discopt.modeling.core import Model
+from discopt.solver_tuning import current as _tuning_current
 
 logger = logging.getLogger(__name__)
 
@@ -390,7 +390,12 @@ def _stage_obbt(
     except Exception:
         return lb, ub, False, 0
 
-    cascade_aux = env_bool("DISCOPT_OBBT_CASCADE_AUX", True)
+    # Card 2a: resolved ONCE, in SolverTuning, for all six obbt_tighten_root sites
+    # (this used to be the only site that resolved it at all). ``current()`` returns
+    # the solve's published tuning, or a fresh env-resolved one outside a solve —
+    # so the value is exactly what the inline env read (default True) returned here
+    # before.
+    cascade_aux = _tuning_current().obbt_cascade_aux
     try:
         res = obbt_tighten_root(
             model,

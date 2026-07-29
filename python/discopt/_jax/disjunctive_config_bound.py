@@ -47,6 +47,7 @@ from typing import Optional
 import numpy as np
 
 from discopt.modeling.core import Model
+from discopt.solver_tuning import current as _tuning_current
 
 logger = logging.getLogger(__name__)
 
@@ -246,6 +247,11 @@ def compute_disjunctive_config_bound(
                 time_limit_per_lp=obbt_lp_time,
                 incumbent_cutoff=incumbent,
                 deadline=deadline,
+                # Card 2a: graduated #208 aux cascade, resolved once in SolverTuning.
+                # This site OBBTs a *leaf box* of the indicator enumeration, whose
+                # cost profile is per-leaf rather than root — the differential panel
+                # (see the Card 2a report) is what decides whether it stays on.
+                cascade_aux=_tuning_current().obbt_cascade_aux,
             )
             if ob.infeasible:
                 res.n_pruned_infeasible += 1

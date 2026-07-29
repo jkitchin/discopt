@@ -370,13 +370,11 @@ _ROWS: "list[FlagSpec]" = [
         None,
         "Root cut loop on the NLP-B&B path.",
     ),
-    FlagSpec(
-        "DISCOPT_OBBT_CASCADE_AUX",
-        True,
-        "graduated",
-        None,
-        "Cascade OBBT-tightened original-variable bounds into the auxiliary (lifted) columns.",
-    ),
+    # NOTE: ``DISCOPT_OBBT_CASCADE_AUX`` used to live here. Consolidation-plan
+    # Card 2a moved it into ``SolverTuning.obbt_cascade_aux`` so it is resolved
+    # ONCE for all six ``obbt_tighten_root`` call sites instead of at the single
+    # ``root_reduce`` site. It is documented by ``solver_tuning_flags()``; listing
+    # it in both places would trip ``test_registry_and_solver_tuning_do_not_overlap``.
     # ------------------------------------------------------------- convex kernel
     FlagSpec(
         "DISCOPT_CONVEX_KERNEL",

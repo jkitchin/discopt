@@ -34,9 +34,9 @@ Per CLAUDE.md §5, new behavior ships default-OFF behind a `parked` flag and onl
 becomes `graduated` when a corpus-wide differential panel is both cert-clean and
 net-positive.
 
-## Flags (73)
+## Flags (72)
 
-### `graduated` (14)
+### `graduated` (13)
 
 | flag | default | side | issue | description |
 | --- | --- | --- | --- | --- |
@@ -50,7 +50,6 @@ net-positive.
 | `DISCOPT_LP_SPATIAL_FALLBACK` | `1` (on) | python | — | Allow the LP-spatial path to fall back to the generic spatial loop. |
 | `DISCOPT_LU_DENSITY_ROUTE` | `1` (on) | rust | #602/#612 | Density-based routing between the sparse and dense LU factorizations. `=0` restores the historical dense-preferring routing byte-identically. |
 | `DISCOPT_MILP_SWAP_RESEED` | `1` (on) | python | — | One-hot swap reseeding of the MILP incumbent on re-entry (graphpart family). `=0` is the opt-out. |
-| `DISCOPT_OBBT_CASCADE_AUX` | `1` (on) | python | — | Cascade OBBT-tightened original-variable bounds into the auxiliary (lifted) columns. |
 | `DISCOPT_QUBO_PRIMAL` | `1` (on) | python | #843 | Greedy-1opt + tabu local search seeding an incumbent on unconstrained binary quadratic models. Graduated 2026; `=0` restores the no-seed path. |
 | `DISCOPT_ROOT_BUDGET_GATE` | `1` (on) | python | — | Refuse to launch a root heuristic NLP that cannot fit in the remaining wall budget. Primal-only, so skipping is always sound. |
 | `DISCOPT_SEPARATION_LP_SIMPLEX` | `1` (on) | python | — | Solve separation / strong-branching LPs with the in-house warm simplex instead of a cold POUNCE IPM solve. `=0` restores the caller's backend. |
@@ -131,7 +130,7 @@ net-positive.
 
 ## `SolverTuning` fields
 
-These 46 flags are the *legacy* spelling of a typed
+These 47 flags are the *legacy* spelling of a typed
 `discopt.solver_tuning.SolverTuning` field. Prefer the object — it is
 per-solve, thread-safe, validated, and discoverable:
 
@@ -160,6 +159,7 @@ The env var supplies the field's *default* when it is not passed explicitly.
 | `DISCOPT_NODE_NLP_STRIDE` | `node_nlp_stride` | `4` | Solve the node NLP every k-th node (`DISCOPT_NODE_NLP_STRIDE`, default 4). |
 | `DISCOPT_NODE_NUMERICAL_DUAL_BOUND` | `node_numerical_dual_bound` | `1` (on) | Attach a Neumaier–Shcherbina safe lower bound from the in-house simplex's *own* dual candidate when the node LP solve breaks down numerically (`DISCOPT_NODE_NUMERICAL_DUAL_BOUND`, default ON since the #362 graduation — … |
 | `DISCOPT_NS_SHARP_MARGIN` | `ns_sharp_margin` | `1` (on) | Replace the flat `1e-9`-relative Neumaier–Shcherbina evaluation margin with a rigorous forward-error bound computed from the actual data (Higham dot-product gammas + interval corners on sign-uncertain reduced costs) … |
+| `DISCOPT_OBBT_CASCADE_AUX` | `obbt_cascade_aux` | `1` (on) | #208 reverse-FBBT aux cascade inside :func:`obbt_tighten_root` (`DISCOPT_OBBT_CASCADE_AUX`, **default ON** since the #208 graduation — `=0` restores the legacy OFF behaviour at every site). OBBT tightens the *lifted … |
 | `DISCOPT_OBJ_BRANCH_PRIORITY` | `obj_branch_priority` | `1` (on) | Prioritize branching on objective-defining variables (`DISCOPT_OBJ_BRANCH_PRIORITY`, default ON). Graduated per T2.6 with 3 consecutive green held-out verdicts (composed with the density LU route): BR-3 #602 (verdict … |
 | `DISCOPT_PHASE2_DBBT` | `phase2_dbbt` | `0` (off) | Per-node cheap reduced-cost DBBT + cutoff-FBBT (Phase 2, issue #764). `DISCOPT_PHASE2_DBBT` (**default OFF**, bound-changing / Regime-2). After each spatial node LP solve, run `reduce_node` — free duality-based bound … |
 | `DISCOPT_PSD_COST_GATE` | `psd_cost_gate` | `1` (on) | Adaptive cost-aware gate on the per-node PSD (moment) cut separation loop (`DISCOPT_PSD_COST_GATE`, default **ON** since G1.3; `DISCOPT_PSD_COST_GATE=0` is the escape hatch). PSD separation dominates the QCQP root wall … |
@@ -191,4 +191,4 @@ The env var supplies the field's *default* when it is not passed explicitly.
 | `DISCOPT_TRILINEAR` | `trilinear_nested` | `0` (off) | Force the legacy nested-bilinear trilinear path (`DISCOPT_TRILINEAR=nested`; equivalent to the default unless another trilinear selector is explicitly set). |
 | `DISCOPT_TRILINEAR_RLT` | `trilinear_rlt` | `1` (on) | Trilinear RLT rows (`DISCOPT_TRILINEAR_RLT`, default on). |
 
-**Total: 119 flags** — 73 in the registry, 46 `SolverTuning` fields.
+**Total: 119 flags** — 72 in the registry, 47 `SolverTuning` fields.
