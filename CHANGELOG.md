@@ -12,6 +12,19 @@ The release procedure that produces these entries is documented in
 
 ### Added
 
+- **Native-kernel decline reason codes and the Phase 5 coverage census**
+  (`feat`, consolidation plan Phase 5.1). `discopt._jax.spatial_producer` now
+  reports *why* it declined a model (18 coded sites, `producer_stats()`), and
+  `discopt.solver.native_kernel` reports why the engagement gate or the driver
+  declined (`kernel_engagement_stats()`: 8 gate contracts, 9 driver outcomes).
+  Both are thread-local counters that no solve path reads, so every branch
+  returns exactly what it returned before. `phase5_kernel_coverage_census.py`
+  joins them with the routing walk and the frozen wall baseline and ranks the
+  missing features. Measured over 119 in-repo instances: the kernel **serves 20**
+  (20.6 % of baseline wall), 61 decline in the producer (69 %), 37 never reach the
+  gate (10 %); the top gaps are `term_trilinear` (17 instances / 437.6 s) and
+  `infinite_aux_bounds` (9 / 379.6 s).
+
 - **Perspective terms in the convex-kernel producer** (`feat`, #865, inside the
   default-off `DISCOPT_CONVEX_KERNEL` path). Hull-reformulated (`*hfsg`) models
   write their disjunctive nonlinearities as the perspective `s·f(a/s)` with the
@@ -174,6 +187,26 @@ The release procedure that produces these entries is documented in
   to Phase 2, not to a dead-code card.
 
 ### Fixed
+
+- **A declined convex-kernel attempt no longer doubles the time budget**
+  (`fix`, consolidation plan Phase 5.4, inside the default-off
+  `DISCOPT_CONVEX_KERNEL` path). `Model.solve` gave the kernel
+  `min(time_limit, DISCOPT_CONVEX_KERNEL_BUDGET)` seconds and then called
+  `solve_model` with the caller's **full** `time_limit` again, so an
+  eligible-but-uncertifiable model paid the attempt on top of its whole default
+  budget. Measured on `clay0303hfsg` at a 10 s budget, arms interleaved, 2
+  replicates: kernel ON **25.24 s** (sd 0.12) vs OFF 13.52 s (sd 0.05) — 2.5x the
+  stated limit, and the in-repo reproduction of the `watercontamination0202`
+  counter-case. `_convex_kernel.last_attempt_seconds()` now publishes the attempt
+  wall (the convexity classification included: 2.34 s on `clay0303hfsg`) and
+  `Model.solve` deducts it; ON drops to 16.01 s, excess over OFF −80.6 %. The
+  reading is **exactly 0.0** with the flag off, so the default path is
+  bit-identical.
+
+  A fractional kernel budget — the obvious guard — was measured and **not
+  shipped**: `clay0303hfsg` needs ~93 % of a 45 s budget to certify (attempt cost
+  41.9 s = 2.34 s classification + 39.55 s tree), so any cap below that turns the
+  corpus's only certification win back into `feasible`.
 
 - **One truth table for every `DISCOPT_*` flag** (`fix`, consolidation plan Phase 1
   Card 1a). The repo had **seven incompatible boolean parse idioms**, so the same

@@ -795,9 +795,92 @@ tree manager. If Phase 5 retires `lp_spatial_bb`'s class first, skip its port.
 
 ## Phase 5 — Kernel convergence (the G-A architecture gap; now unblocked)
 
-> **Status:** OPEN — **unblocked by #904**. **Depends:** Phase 0; Card 3c
-> strongly recommended first (it is the safety net). **Est:** the long pole;
-> many sessions, incremental by design.
+> **Status:** **5.1 LANDED** (the coverage census — the ranking every other
+> sub-card is sequenced against), **5.4 PARTIAL** (the misroute guard landed; the
+> flag does **not** graduate — its deciding population is not in this
+> environment), **5.2 / 5.3 OPEN** (2026-07-29). **Depends:** Phase 0; Card 3c
+> (the safety net). **Est:** the long pole; many sessions, incremental by design.
+>
+> ### What exists now (5.1 — the census)
+>
+> `discopt_benchmarks/scripts/phase5_kernel_coverage_census.py` +
+> `reports/phase5_kernel_coverage_census_c346fd73.json`, built on decline reason
+> codes added to the producer (`_jax/spatial_producer.py`: 18 coded sites,
+> `producer_stats()`) and to the engagement path (`solver/native_kernel.py`: 8
+> gate contracts + 9 driver outcomes, `kernel_engagement_stats()`). The producer
+> is **tapped at its real call site** — the presolved root box — because a static
+> pre-filter reading declared bounds gets the answer wrong on exactly the
+> instances that matter (#902 measured it dropping `tanksize`).
+>
+> **119 in-repo instances, 45 s, `DISCOPT_NATIVE_SPATIAL_KERNEL=1`. Executed: 119
+> rows, 82 feature-gate calls, 82 producer calls, 61 declines, 20 served, 0
+> unclassified.**
+>
+> | bucket | inst | baseline wall (s) | % wall | unsolved at 45 s |
+> |---|---|---|---|---|
+> | `producer` (a relaxation feature the kernel cannot build) | 61 | 1328.8 | 69.0 % | 21 |
+> | `served` (the kernel solved it) | 20 | 397.7 | 20.6 % | 9 |
+> | `never_reached` (another route dispatched first) | 37 | 197.2 | 10.2 % | 2 |
+> | `driver` (spec built, answer rejected) | 1 | 2.3 | 0.1 % | 0 |
+>
+> **Ranked producer gaps — this ordering, not intuition, sequences 5.2:**
+>
+> | # | decline code | inst | wall (s) | % | notes |
+> |---|---|---|---|---|---|
+> | 1 | `term_trilinear` | 17 | 437.6 | 22.7 % | nvs*/bchoco*/st_e3*/ex1252* — needs a trilinear `EnvTerm` in Rust |
+> | 2 | `infinite_aux_bounds` | 9 | 379.6 | 19.7 % | 4stufen, beuster, carton7, contvar, ex14_1_9, gear4, hda, heatexch_gen1/2 |
+> | 3 | `probe_real_shape_mismatch` | 3 | 158.9 | 8.2 % | casctanks, st_e04, st_e35 |
+> | 4 | `probe_objective_bound_invalid` | 4 | 155.3 | 8.1 % | the whole `tspn*` family — the G-F `no_bound` class |
+> | 5 | `fixed_row_box_dependent:coeffs` | 9 | 109.7 | 5.7 % | an unmodelled box-dependent envelope family; the guard is working, the coverage is missing |
+> | 6 | `blf_row_count` (5 or 6) | 7 | 45.0 | 2.3 % | #861 over-claiming; the Python incremental engine already solves this **numerically** (`incremental_mccormick._select`) and the producer only declines |
+> | 7 | `term_ratio` | 3 | 9.6 | 0.5 % | gear, gear2, gear3 |
+> | 8 | `term_univariate:{log,exp,cos,sin}` | 6 | 11.4 | 0.6 % | one atom each |
+>
+> **The census falsifies Card 3c's headline framing, and that matters for
+> sequencing.** Card 3c recorded "the native spatial kernel served ZERO solves"
+> — true of its 2-instance end-to-end arm (`nvs05` declines `term_trilinear`,
+> `st_e05` declines `blf_row_count:6`), and *not* true of the corpus: the kernel
+> already serves **20 of 119** instances carrying 20.6 % of the baseline wall
+> (dispatch, fuel, nvs13/17/18/19/20/23/24, prob06, st_e06/07/13/17/18/27/31,
+> st_ph10, tanksize, util). The coverage problem is real and is 69 % of the wall
+> — but it is an expansion problem, not a from-zero problem, and Card 3c's parity
+> test should draw its native arm from the **served** list above so that arm stops
+> being vacuous.
+>
+> ### What exists now (5.4 — the misroute guard; the flag stays OFF)
+>
+> The graduation blocker Phase 5.4 names is the misroute class. Its mechanism is
+> now measured, reproduced in-repo, fixed and guarded — see the §6 entries dated
+> 2026-07-29 (`Phase 5.4 entry experiment` and `Phase 5.4 fractional budget`).
+> Summary: `Model.solve` gave the kernel `min(time_limit, 120)` s and then handed
+> `solve_model` the caller's **full** budget again, so an eligible-but-uncertifiable
+> model paid the attempt *on top of* its whole default budget —
+> `clay0303hfsg` at a 10 s budget: ON **25.24 s** (sd 0.12) vs OFF 13.52 s
+> (sd 0.05). `_convex_kernel.last_attempt_seconds()` now publishes the attempt
+> wall and `Model.solve` deducts it (16.01 s post-fix, excess over OFF
+> −80.6 %), with `python/tests/test_phase5_convex_kernel_budget.py` as the
+> standing guard (it fails on the pre-fix arithmetic).
+>
+> **The flag does not graduate, and the reason is population, not evidence
+> quality.** Measured over all 119 in-repo instances, `build_convex_spec` accepts
+> exactly **four**: `clay0303hfsg`, `cvxnonsep_psig40r`, `syn05hfsg`, `syn05m`.
+> The family this flag exists for is 136 `.nl` files in the MINLPLib snapshot and
+> the deciding counter-case (`watercontamination0202`) is snapshot-only. Both are
+> recorded as **SKIPPED — local only**. What the in-repo panel *can* and does
+> settle is the other direction — that turning the flag on does not harm the 115
+> instances it never routes — and the four it routes; the verdict is in §6.
+>
+> ### What 5.2 should take next
+>
+> Not `term_trilinear` first despite its rank: it is a new Rust envelope family
+> (patcher + differential fixtures + parity extension). The cheap, general,
+> already-solved-elsewhere row is **#6, `blf_row_count`** — the producer declines
+> models whose lifted model constraints share a term's support, while
+> `IncrementalMcCormickLP._select` identifies exactly the same envelope rows
+> *numerically* on the probe box and has done since #861. Porting that matcher is
+> a Python change worth 7 instances, and it is the prerequisite shape for every
+> later family. `term_trilinear` is the right *second* card, and it is where the
+> wall is.
 
 The review's central finding: the 50–500× per-node interpreter cost is the dominant
 wall-clock gap, the machinery to fix it (native spatial kernel, `spatial_propagate`)
@@ -1366,3 +1449,194 @@ functions' dependency counts into single digits and unblocks `milp.py` (~1,500
 lines) and `matrix_backends.py`. Carving the inline blocks needs `solve_model`'s
 locals turned into an explicit state object first — a larger, separate piece of
 work that should be scoped on its own rather than smuggled into a "pure move" card.
+
+### 2026-07-29 — Phase 5.1: "the native spatial kernel serves nothing; coverage starts from zero" — **FALSIFIED; it already serves 20 of 119**
+
+**Claim under test.** Card 3c's recorded finding, inherited by this phase as its
+premise: *"the native spatial kernel served ZERO solves on both end-to-end arms
+(nvs05, st_e05; 2 producer calls, 0 served)"*. Phase 5.1's census was commissioned
+to rank *why* the producer declines — which presupposes it mostly declines.
+
+**Instrument.** Reason codes did not exist, so they were added first (Regime N: a
+thread-local dict write in place of each bare `return None`, every branch returning
+exactly what it returned before): 18 coded producer sites
+(`_jax/spatial_producer.py`, `producer_stats()`), 8 feature-gate contracts and 9
+driver outcomes (`solver/native_kernel.py`, `kernel_engagement_stats()`). The
+census (`discopt_benchmarks/scripts/phase5_kernel_coverage_census.py`) taps the
+producer at its **real call site**, i.e. on the presolved root box after root FBBT
++ OBBT — deliberately not a static pre-filter, which #902 measured dropping
+`tanksize` because the filter sees declared bounds and the producer sees presolved
+ones. Each child exits the moment its classification is decided, so a decline costs
+root-setup wall rather than a full budget; wall-at-stake is therefore joined from
+the frozen `reports/panel_baseline_f154dcff.json`, never from the census run.
+
+**Executed: 119 rows, 82 feature-gate calls, 82 producer calls, 61 declines, 20
+served, 0 unclassified.** 753 s wall, load 1.10 → 3.10. Artifact
+`reports/phase5_kernel_coverage_census_c346fd73.json`.
+
+**The falsification.** The kernel serves **20 of 119** instances (dispatch, fuel,
+nvs13, nvs17, nvs18, nvs19, nvs20, nvs23, nvs24, prob06, st_e06, st_e07, st_e13,
+st_e17, st_e18, st_e27, st_e31, st_ph10, tanksize, util) carrying **397.7 s = 20.6 %**
+of the baseline wall. Card 3c's "zero" was true of its two instances and false of
+the corpus: `nvs05` declines `term_trilinear` and `st_e05` declines
+`blf_row_count:6`, so its native arm happened to draw two decline cases out of a
+population where 1 in 6 is served. Recorded per CLAUDE.md §11 — Card 3c's own
+statement was that the *arm* proved the fallback safe rather than the kernel, which
+was scrupulous; what this falsifies is the phase-level premise that coverage starts
+from zero. **Consequence for Card 3c:** its `test_native_spatial_kernel_agrees_end_to_end`
+parametrization should be drawn from the served list, or its arm stays vacuous.
+
+**The ranking (the deliverable).**
+
+| bucket | inst | wall (s) | % | unsolved |
+|---|---|---|---|---|
+| `producer` | 61 | 1328.8 | 69.0 % | 21 |
+| `served` | 20 | 397.7 | 20.6 % | 9 |
+| `never_reached` | 37 | 197.2 | 10.2 % | 2 |
+| `driver` | 1 | 2.3 | 0.1 % | 0 |
+
+| # | producer decline code | inst | wall (s) | % |
+|---|---|---|---|---|
+| 1 | `term_trilinear` | 17 | 437.6 | 22.7 % |
+| 2 | `infinite_aux_bounds` | 9 | 379.6 | 19.7 % |
+| 3 | `probe_real_shape_mismatch` | 3 | 158.9 | 8.2 % |
+| 4 | `probe_objective_bound_invalid` | 4 | 155.3 | 8.1 % |
+| 5 | `fixed_row_box_dependent:coeffs` | 9 | 109.7 | 5.7 % |
+| 6 | `blf_row_count:{5,6}` | 7 | 45.0 | 2.3 % |
+| 7 | `term_ratio` | 3 | 9.6 | 0.5 % |
+| 8 | `term_univariate:{log,exp,cos,sin}` | 6 | 11.4 | 0.6 % |
+
+`never_reached` splits `nlp_bb_auto` 10 / `class_milp` 13 / `class_miqp` 10 / four
+singletons — i.e. 10.2 % of the wall is routing, not kernel coverage, and no
+coverage work touches it. **`heldout50`: SKIPPED — local only** (no MINLPLib
+snapshot in this environment), so the census covers the 119-instance in-repo union
+only.
+
+**Two incidental findings, recorded rather than fixed.** (a) `prob10` is the single
+`driver:objective_disagreement` row — the producer built a spec, the kernel solved,
+and the driver rejected its own answer because the recomputed objective disagreed
+beyond 1e-4 relative. That is the #789 guard working, and it is also a bug lead.
+(b) The entire `tspn*` family declines on `probe_objective_bound_invalid`, which
+means the G-F `no_bound` family and the kernel-coverage gap are the *same*
+population on this corpus.
+
+**A by-product #902 should read, labelled as the weak evidence it is.** The census
+ran `DISCOPT_NATIVE_SPATIAL_KERNEL=1` at the *same* 45 s budget the frozen Phase-0
+baseline used with the flag off, so on the 20 served rows the two artifacts form an
+unreplicated, non-interleaved ON/OFF pair. Cross-checked (27 executed comparisons,
+sense-aware, oracle from `utils.reference_optima`): **0 objective regressions, 0
+bounds past a proven reference**, and **4 certifications gained** —
+
+| instance | OFF (baseline, flag off) | ON (census, flag on) |
+|---|---|---|
+| `st_e31` | `feasible` 47.9 s | **`optimal` 6.4 s** |
+| `nvs18` | `feasible` 29.8 s | **`optimal` 7.2 s** |
+| `nvs20` | `feasible` 45.8 s | **`optimal` 8.9 s** |
+| `util` | `feasible` 46.1 s, obj 1059.32 | **`optimal` 15.4 s, obj 999.58** |
+
+plus two strict incumbent improvements under ON (`nvs19` −1097.6 → −1098.2 against
+`=opt=` −1098.4; `util` above). This is **not** a graduation verdict: the arms are
+not interleaved, not replicated, and come from two different runs on a machine
+whose load differed. It is a reason for #902's re-graduation panel to be run, and a
+prediction of what it should find.
+
+### 2026-07-29 — Phase 5.4 entry experiment: "the convex-kernel misroute is an instance quirk" — **FALSIFIED; it is the budget arithmetic, and it reproduces in-repo**
+
+**Hypothesis.** `watercontamination0202`'s counter-case (classifies convex in 2.9 s,
+then runs 2001 s with no bound vs 49 s spatial; `sota-parity-analysis-2026-07-27.md`
+§3 G-C) is not instance-specific. `Model.solve` gives the kernel
+`min(time_limit, DISCOPT_CONVEX_KERNEL_BUDGET=120)` s, adopts the result **only**
+when it certifies, and then calls `solve_model` with the caller's **full**
+`time_limit` again (`modeling/core.py`) — the elapsed attempt is never deducted. So
+*any* eligible-but-uncertifiable model pays its whole default budget **plus** the
+attempt.
+
+**Kill criterion (the card's own).** If no eligible in-repo instance's ON-arm wall
+materially exceeds its budget while OFF's does not, the hazard is not reproducible
+here and the fix is re-scoped rather than built.
+
+**Experiment.** `discopt_benchmarks/scripts/phase5_convex_kernel_budget_entry.py`.
+Eligibility is **measured, not assumed** — `build_convex_spec` over all 119 in-repo
+instances accepts exactly four (`clay0303hfsg`, `cvxnonsep_psig40r`, `syn05hfsg`,
+`syn05m`; 119 executed probes, 0 errored). Arms interleaved within each replicate,
+2 replicates, one subprocess per (instance, arm), each child asserting the arm the
+loaded module reports rather than the arm requested.
+
+*Round 1, 45 s budget (16 solves, 4 paired comparisons, load 0.25 → 2.78):*
+
+| instance | OFF wall | ON wall | Δ | statuses |
+|---|---|---|---|---|
+| `clay0303hfsg` | 46.66 s | 42.53 s | −4.13 s | OFF feasible×2 → **ON optimal×2** |
+| `cvxnonsep_psig40r` | 16.29 s | 17.45 s | +1.16 s | optimal both |
+| `syn05hfsg` | 23.40 s | 1.13 s | **−22.27 s** | optimal both |
+| `syn05m` | 3.07 s | 0.92 s | −2.14 s | optimal both |
+
+→ **hazard KILLED at 45 s**, and the flag looks strongly positive on the eligible
+set (one certification gained, one 20.7× speedup).
+
+*Round 2, 10 s budget — a budget the kernel provably cannot meet on `clay0303hfsg`
+(16 solves, load 2.07 → 1.63):*
+
+| instance | OFF wall | ON wall | Δ |
+|---|---|---|---|
+| `clay0303hfsg` | 13.52 s (sd 0.05) | **25.24 s (sd 0.12)** | **+11.71 s on a 10 s request** |
+| `cvxnonsep_psig40r` | 11.10 s | 11.21 s | +0.10 s |
+| `syn05hfsg` | 10.68 s | 1.31 s | −9.37 s |
+| `syn05m` | 3.34 s | 0.94 s | −2.40 s |
+
+→ **hazard CONFIRMED**, reproduced in both replicates, 2.5× the stated limit. The
+mechanism is general and the two rounds together say precisely what it is: the
+overrun appears exactly when the attempt *fails*, which a 45 s budget on this
+corpus never provokes and a 10 s budget always does.
+
+**Fix.** `_convex_kernel.last_attempt_seconds()` publishes the attempt wall — the
+spec build **included**, because `build_convex_spec` is the convexity
+classification and on this class it is 2.34 s (`clay0303hfsg`) / 1.16 s
+(`cvxnonsep_psig40r`), not a rounding error — and `Model.solve` subtracts it from
+`_primary_tl`. It is **exactly 0.0** when the flag is off (reset on entry; the
+clock starts after the flag check), so the default path subtracts a literal zero
+and every deadline below it is bit-identical: Regime N on defaults, by construction
+rather than by hope.
+
+**Measured after:** `clay0303hfsg` at 10 s goes **25.24 → 16.01 s**; excess over
+OFF **+11.71 → +2.27 s (−80.6 %)**. The residual +2.27 s is the one-off convexity
+classification, which is not removable without declining before classifying.
+Standing guard: `python/tests/test_phase5_convex_kernel_budget.py`, which fails on
+the pre-fix arithmetic (24.69 s for an 8 s request, verified by simulating the old
+`_primary_tl`) and passes after (13.79 s), and which refuses to pass vacuously —
+it asserts the attempt was actually declined.
+
+### 2026-07-29 — Phase 5.4: "cap the kernel attempt at a fraction of the budget" — **FALSIFIED before it was built**
+
+**Hypothesis (this card's first design).** The clean guard for the misroute class
+is a fractional share: give the kernel `min(f·T, 120)` s so the trusted default
+path always keeps `(1−f)·T`. `f = 0.35` was the candidate, matching the existing
+`_fb_reserve = 0.35 * time_limit` precedent in the same function.
+
+**Kill criterion.** If the measured attempt cost of any instance the flag *helps*
+exceeds `f·T` at the panel budget, the cap buys safety by destroying the win, and
+the design dies.
+
+**Experiment (attempt-cost decomposition, 120 s cap, one process per instance).**
+
+| instance | parse | `build_convex_spec` | `solve_convex_tree` | total | kernel status |
+|---|---|---|---|---|---|
+| `clay0303hfsg` | 0.01 s | 2.34 s | **39.55 s** | **41.9 s** | `optimal`, 211 nodes |
+| `cvxnonsep_psig40r` | 0.00 s | 1.16 s | 0.00 s | 1.16 s | `exhausted` at the root, bound −inf |
+| `syn05hfsg` | 0.00 s | 0.92 s | 0.01 s | 0.93 s | `optimal`, 2 nodes |
+| `syn05m` | 0.00 s | 0.75 s | 0.02 s | 0.77 s | `optimal`, 3 nodes |
+
+**Verdict — killed.** `clay0303hfsg` needs **~93 %** of a 45 s budget to certify, so
+every `f < 0.93` turns the corpus's only certification win (OFF `feasible` → ON
+`optimal`) back into `feasible`. The cap was dropped rather than shipped as a knob
+defaulting to a no-op (CLAUDE.md §3: no dead flags). What ships instead is the
+deduction alone, which bounds the *contract* (`solve(time_limit=T)` stays ≈ T)
+without touching the attempt itself.
+
+Two things this measurement also settles. (a) `cvxnonsep_psig40r`'s +1.16 s ON-arm
+delta at 45 s is **exactly** its spec-build cost — the kernel declines at the root
+in 0.00 s — so the "producer probe overhead" on the non-routed population is the
+convexity classification and nothing else. (b) The docs' "`clay0303hfsg` certifies
+in ~7 s" (plan §5.4, from #882) does **not** reproduce on this machine at this
+tree: it is 41.9 s. Recorded per CLAUDE.md §11 for whoever plans against that
+number next.

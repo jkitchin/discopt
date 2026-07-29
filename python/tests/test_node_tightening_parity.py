@@ -411,8 +411,27 @@ def test_node_tightening_parity(instance):
         )
 
 
+#: Instances the native spatial kernel actually SERVES, drawn from the Phase 5.1
+#: coverage census (``reports/phase5_kernel_coverage_census_c346fd73.json``:
+#: 20 of 119 served, 397.7 s of baseline wall). Card 3c parametrized this arm on
+#: ``nvs05``/``st_e05`` and recorded that the kernel served zero solves; the census
+#: showed that was a two-instance sampling artifact (``nvs05`` declines
+#: ``term_trilinear``, ``st_e05`` declines ``blf_row_count:6``) on a corpus where
+#: 1 in 6 instances IS served. An arm that only ever exercises declines compares
+#: the Python fallback against itself — the CLAUDE.md §6 failure mode — so the
+#: parametrization now carries both kinds:
+#:
+#: * ``st_e13`` / ``dispatch`` / ``nvs13`` — SERVED (census wall 1.06 / 1.45 /
+#:   2.41 s, all ``optimal``), so the ON arm really is the kernel's certificate;
+#: * ``nvs05`` / ``st_e05`` — DECLINED, kept deliberately, because "the producer
+#:   declines and the fallback still certifies" is itself a property worth guarding
+#:   and is what the original arm proved.
+_NATIVE_SERVED = ("st_e13", "dispatch", "nvs13")
+_NATIVE_DECLINED = ("nvs05", "st_e05")
+
+
 @pytest.mark.slow
-@pytest.mark.parametrize("instance", ("nvs05", "st_e05"))
+@pytest.mark.parametrize("instance", _NATIVE_SERVED + _NATIVE_DECLINED)
 def test_native_spatial_kernel_agrees_end_to_end(instance):
     """The fourth engine, compared where it can be: at the certificate.
 
@@ -495,6 +514,17 @@ def test_native_spatial_kernel_agrees_end_to_end(instance):
             assert a.bound <= b.objective + 1e-4 * max(1.0, abs(b.objective)), (
                 f"{name}: certified bound {a.bound} exceeds the other arm's incumbent {b.objective}"
             )
+    # An instance the census recorded as SERVED must still be served here, or this
+    # arm has silently degraded back to comparing the fallback against itself. A
+    # coverage REGRESSION in the producer would show up exactly this way.
+    if instance in _NATIVE_SERVED:
+        assert engaged["1"]["served"] > 0, (
+            f"{instance} is on the Phase 5.1 served list "
+            f"(reports/phase5_kernel_coverage_census_c346fd73.json) but the kernel "
+            f"served 0 of {engaged['1']['n']} producer calls here — either kernel "
+            "coverage regressed or this instance no longer belongs on the list. "
+            "Do not silence this by shortening the list; re-run the census."
+        )
     assert checks > 0, "the native-kernel arm asserted nothing"
     TOTALS["native_checks"] += checks
 
@@ -527,16 +557,22 @@ def test_parity_probe_actually_decided_nodes():
         f"{_PYTHON_ONLY_NODE_RATE_CEILING:.0%} envelope — the kernel lost inferences."
     )
     assert TOTALS["native_checks"] > 0, "the native-kernel arm asserted nothing"
-    # Not an assertion: the producer legitimately declines feature-unsafe models,
-    # and that IS the review's §2.5.2 finding. Reported so a run where the kernel
-    # never served a node is visible rather than mistaken for agreement.
-    if TOTALS["native_served"] == 0:
-        print(
-            "[parity-native] NOTE: the native spatial kernel served ZERO solves "
-            f"across {TOTALS['native_calls']} producer calls — the ON arm ran the "
-            "Python loop, so this arm confirms the fallback is certificate-safe, "
-            "not that the kernel agrees. Phase 5 must widen this."
-        )
+    # Card 3c printed a NOTE here because it measured zero served solves. Phase
+    # 5.1's census showed that was a sampling artifact — the kernel serves 20 of
+    # 119 corpus instances — so the parametrization now includes served instances
+    # and this is a hard assertion. A run in which the kernel serves nothing means
+    # the native arm proved only that the fallback is safe, which is a strictly
+    # weaker claim than the one this file is named for.
+    print(
+        f"[parity-native] served {TOTALS['native_served']} of "
+        f"{TOTALS['native_calls']} producer calls"
+    )
+    assert TOTALS["native_served"] > 0, (
+        f"the native spatial kernel served ZERO solves across "
+        f"{TOTALS['native_calls']} producer calls. Per the Phase 5.1 census "
+        "(20/119 served) at least the _NATIVE_SERVED instances must engage it; "
+        "zero means kernel coverage regressed and this arm is now vacuous."
+    )
 
 
 @pytest.mark.smoke
