@@ -41,6 +41,11 @@ coverage.svg
 /results/
 /reports/
 /discopt_benchmarks/reports/
+# ...except the Phase 0 Regime-N baselines. These are not run output, they are the
+# frozen REFERENCE every Regime-N card is gated against (consolidation plan §0.1):
+# `panel_baseline.py --check reports/panel_baseline_<sha>.json` is meaningless if
+# the baseline is not in the repository at the sha it names.
+!/reports/panel_baseline_*.json
 
 # Generated course material (built from python/discopt/course/)
 /course/
