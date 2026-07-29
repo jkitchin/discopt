@@ -30,12 +30,81 @@ differential fixtures), so the native relaxation is bound-neutral with the build
 
 from __future__ import annotations
 
+import threading
 from typing import Optional
 
 import numpy as np
 import scipy.sparse as sp
 
 _TOL = 1e-12
+
+
+# --------------------------------------------------------------------------- #
+# Decline-reason instrumentation (consolidation plan Phase 5, Step 1)          #
+#                                                                             #
+# Card 3c measured the native spatial kernel serving ZERO end-to-end solves    #
+# while the producer was called twice — the producer declined and the Python   #
+# loop ran. It could say *that* it declined but not *why*, so the coverage     #
+# census that must order every Phase-5 sub-card had nothing to rank. This      #
+# block is that missing instrument: every ``return None`` below routes through #
+# :func:`_decline`, which names the missing feature.                           #
+#                                                                             #
+# Regime N by construction: ``_decline(code)`` returns ``None`` exactly as the #
+# bare ``return None`` it replaces, and records into thread-local counters that #
+# nothing in the solve path reads. Per CLAUDE.md §6 the counters are the point  #
+# — a census that cannot prove the producer was reached is a census of nothing. #
+# --------------------------------------------------------------------------- #
+class _ProducerStats(threading.local):
+    def __init__(self) -> None:  # pragma: no cover - trivial
+        self.calls = 0
+        self.specs = 0
+        self.declines = 0
+        self.reasons: dict[str, int] = {}
+        self.last: Optional[str] = None
+        self.last_detail: str = ""
+
+
+_STATS = _ProducerStats()
+
+
+def _stats() -> _ProducerStats:
+    if not hasattr(_STATS, "calls"):  # pragma: no cover - fresh thread
+        _STATS.__init__()
+    return _STATS
+
+
+def reset_producer_stats() -> None:
+    """Clear this thread's producer decline counters."""
+    _stats().__init__()
+
+
+def producer_stats() -> dict:
+    """This thread's producer call/decline counters.
+
+    ``calls`` is the executed-probe count the census asserts non-zero;
+    ``reasons`` maps ``code`` (or ``code:detail``) to how many calls declined for
+    it; ``last``/``last_detail`` describe the most recent decline.
+    """
+    st = _stats()
+    return {
+        "calls": int(st.calls),
+        "specs": int(st.specs),
+        "declines": int(st.declines),
+        "reasons": dict(st.reasons),
+        "last": st.last,
+        "last_detail": st.last_detail,
+    }
+
+
+def _decline(code: str, detail: str = "") -> None:
+    """Record *why* the producer declined, and return ``None`` (the decline)."""
+    st = _stats()
+    st.declines += 1
+    key = code if not detail else f"{code}:{detail}"
+    st.reasons[key] = st.reasons.get(key, 0) + 1
+    st.last = code
+    st.last_detail = detail
+    return None
 
 
 def build_spatial_kernel_spec(model, bounds: Optional[tuple] = None) -> Optional[dict]:
@@ -53,6 +122,7 @@ def build_spatial_kernel_spec(model, bounds: Optional[tuple] = None) -> Optional
     internal (minimize-convention) objective/bound back to model units:
     ``model_value = sign * (internal + offset)``. Callers pass the non-``meta_`` keys
     to the kernel; :func:`solve_with_native_kernel` strips them automatically."""
+    _stats().calls += 1
     from discopt._jax.uniform_relax import build_uniform_relaxation
     from discopt.modeling.core import VarType
 
@@ -60,14 +130,14 @@ def build_spatial_kernel_spec(model, bounds: Optional[tuple] = None) -> Optional
     # variable objects one-to-one only when each has size 1. Vector variables shift
     # the layout and are a follow-up.
     if any(int(getattr(v, "size", 1)) != 1 for v in model._variables):
-        return None
+        return _decline("vector_variables")
     n_orig = len(model._variables)
 
     if bounds is not None:
         lb = np.asarray(bounds[0], dtype=np.float64).copy()
         ub = np.asarray(bounds[1], dtype=np.float64).copy()
         if lb.shape != (n_orig,) or ub.shape != (n_orig,):
-            return None
+            return _decline("bounds_shape_mismatch")
     else:
         lb = np.array([float(np.min(v.lb)) for v in model._variables], dtype=np.float64)
         ub = np.array([float(np.max(v.ub)) for v in model._variables], dtype=np.float64)
@@ -103,11 +173,13 @@ def build_spatial_kernel_spec(model, bounds: Optional[tuple] = None) -> Optional
 
     rel = _build(lb_p, ub_p)
     milp = rel.model
-    if milp._A_ub is None or not getattr(milp, "_objective_bound_valid", True):
-        return None
+    if milp._A_ub is None:
+        return _decline("probe_relaxation_no_rows")
+    if not getattr(milp, "_objective_bound_valid", True):
+        return _decline("probe_objective_bound_invalid")
     rel_real = _build(lb, ub)
     if rel_real.model._A_ub is None:
-        return None
+        return _decline("real_relaxation_no_rows")
     # Soundness guard: if the relaxation has no valid objective bound at the real box
     # — e.g. an unbounded original variable makes a bilinear/monomial aux range
     # infinite, so the McCormick envelope is degenerate — decline rather than emit a
@@ -115,15 +187,27 @@ def build_spatial_kernel_spec(model, bounds: Optional[tuple] = None) -> Optional
     # unbounded and the trusted solver first runs FBBT/presolve to finite bounds;
     # feeding the native kernel presolved bounds is the follow-up. #764.)
     if not getattr(rel_real.model, "_objective_bound_valid", False):
-        return None
+        return _decline("real_objective_bound_invalid")
     if np.isinf(np.asarray(rel_real.model._bounds, dtype=np.float64)).any():
-        return None
+        return _decline("infinite_aux_bounds")
 
-    # Decline lifted families the Rust kernel does not implement yet.
-    if rel.trilinear_map or rel.multilinear_map or rel.ratio_map or rel.composite_multivar_specs:
-        return None
-    if any(fname != "sqrt" for (fname, *_rest) in rel.univariate_atom_specs):
-        return None
+    # Decline lifted families the Rust kernel does not implement yet. Reported one
+    # family per code (and one code per univariate atom NAME) because the Phase-5
+    # coverage census ranks *which feature to build next* off these counts — a single
+    # "unsupported term family" bucket would rank nothing.
+    if rel.trilinear_map:
+        return _decline("term_trilinear")
+    if rel.multilinear_map:
+        return _decline("term_multilinear")
+    if rel.ratio_map:
+        return _decline("term_ratio")
+    if rel.composite_multivar_specs:
+        return _decline("term_composite_multivar")
+    _bad_atoms = sorted(
+        {str(fname) for (fname, *_rest) in rel.univariate_atom_specs if fname != "sqrt"}
+    )
+    if _bad_atoms:
+        return _decline("term_univariate", ",".join(_bad_atoms))
 
     A = sp.csr_matrix(milp._A_ub, dtype=np.float64)
     A.sort_indices()
@@ -213,9 +297,9 @@ def build_spatial_kernel_spec(model, bounds: Optional[tuple] = None) -> Optional
         # (13 instances, 6 of them reachable), and NONE claims fewer — so this
         # predicate declines exactly the misclassified terms and no working ones.
         if rows is not None and len(rows) != 4:
-            return None
+            return _decline("blf_row_count", str(len(rows)))
         if not rows:
-            return None
+            return _decline("blf_no_rows")
         env_rows.update(rows)
         claimed_aux.add(int(w))
         blf_w.append(int(w))
@@ -232,7 +316,7 @@ def build_spatial_kernel_spec(model, bounds: Optional[tuple] = None) -> Optional
             continue
         rows = _claim(w, (i,), 4)
         if rows is None:
-            return None
+            return _decline("monomial_row_count")
         _push(1, i, -1, w, p, 0.0, 0.0, rows)
     for (i, p), w in rel.univariate_square_map.items():
         # x_i**2 is often registered in BOTH monomial_map and univariate_square_map
@@ -241,14 +325,14 @@ def build_spatial_kernel_spec(model, bounds: Optional[tuple] = None) -> Optional
             continue
         rows = _claim(w, (i,), 4)
         if rows is None:
-            return None
+            return _decline("univariate_square_row_count")
         _push(1, i, -1, w, int(p), 0.0, 0.0, rows)
     for (j, w), (coeff, cst) in rel.affine_square_map.items():
         if int(w) in claimed_aux:
             continue
         rows = _claim(w, (j,), 4)
         if rows is None:
-            return None
+            return _decline("affine_square_row_count")
         _push(2, j, -1, w, 0, coeff, cst, rows)
     for fname, w, var, coeff, cst in rel.univariate_atom_specs:
         if int(w) in claimed_aux:
@@ -257,7 +341,7 @@ def build_spatial_kernel_spec(model, bounds: Optional[tuple] = None) -> Optional
         # whatever the build emitted for this box (>=1), the kernel regenerates them.
         rows = _claim(w, (var,), None)
         if not rows:
-            return None
+            return _decline("sqrt_no_rows")
         _push(3, var, -1, w, 0, coeff, cst, rows)
 
     # SOUNDNESS VALIDATION: every non-envelope row MUST be box-independent — that is
@@ -273,7 +357,7 @@ def build_spatial_kernel_spec(model, bounds: Optional[tuple] = None) -> Optional
     Ar.sort_indices()
     br = np.asarray(rel_real.model._b_ub, dtype=np.float64).ravel()
     if Ar.shape != A.shape or br.shape[0] != b.shape[0]:
-        return None
+        return _decline("probe_real_shape_mismatch")
     rp_indptr, rp_indices, rp_data = Ar.indptr, Ar.indices, Ar.data
     for r in range(A.shape[0]):
         if r in env_rows:
@@ -282,13 +366,13 @@ def build_spatial_kernel_spec(model, bounds: Optional[tuple] = None) -> Optional
         p0, p1 = indptr[r], indptr[r + 1]
         q0, q1 = rp_indptr[r], rp_indptr[r + 1]
         if (p1 - p0) != (q1 - q0):
-            return None
+            return _decline("fixed_row_box_dependent", "nnz")
         if not np.array_equal(indices[p0:p1], rp_indices[q0:q1]):
-            return None
+            return _decline("fixed_row_box_dependent", "pattern")
         if not np.allclose(data[p0:p1], rp_data[q0:q1], rtol=1e-9, atol=1e-9):
-            return None
+            return _decline("fixed_row_box_dependent", "coeffs")
         if abs(float(b[r]) - float(br[r])) > 1e-6 * (1.0 + abs(float(br[r]))):
-            return None
+            return _decline("fixed_row_box_dependent", "rhs")
 
     # Fixed (box-independent) rows: everything not owned by a term envelope.
     fixed_row_ptr = [0]
@@ -309,10 +393,10 @@ def build_spatial_kernel_spec(model, bounds: Optional[tuple] = None) -> Optional
     # cost, and the factorable intermediate aux are only bounded by these. The column
     # layout is identical to the probe build (structure is box-independent).
     if int(np.size(rel_real.model._c)) != ncol:
-        return None
+        return _decline("real_col_count_mismatch")
     bnds = np.asarray(rel_real.model._bounds, dtype=np.float64)
     if bnds.shape != (ncol, 2):
-        return None
+        return _decline("bounds_matrix_shape")
     global_lo = bnds[:, 0].copy()
     global_hi = bnds[:, 1].copy()
     # Original columns take the (possibly presolved) branchable box.
@@ -334,8 +418,9 @@ def build_spatial_kernel_spec(model, bounds: Optional[tuple] = None) -> Optional
     ]
 
     if c.shape[0] != ncol:
-        return None
+        return _decline("objective_col_mismatch")
 
+    _stats().specs += 1
     return dict(
         n_cols=ncol,
         n_orig=n_orig,

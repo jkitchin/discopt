@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import logging
 import math
+import threading
 import time
 from typing import Optional
 
@@ -39,6 +40,8 @@ logger = logging.getLogger(__name__)
 __all__ = [
     "_native_spatial_kernel_enabled",
     "_native_kernel_feature_safe",
+    "kernel_engagement_stats",
+    "reset_kernel_engagement_stats",
     "_native_kernel_verify_point",
     "_native_seed_bracket",
     "_native_kernel_seed_candidates",
@@ -49,6 +52,90 @@ __all__ = [
     "_NATIVE_SEED_MAX_FREE_INTEGERS",
     "_NLP_NATIVE_DEFAULT",
 ]
+
+
+# --------------------------------------------------------------------------- #
+# Engagement instrumentation (consolidation plan Phase 5, Step 1)             #
+#                                                                             #
+# Card 3c measured "2 producer calls, 0 served" and could not say why. Three   #
+# distinct things can stop this kernel serving a solve, and a census that      #
+# cannot tell them apart ranks nothing:                                        #
+#                                                                             #
+#   1. the solve never reaches the gate at all (another route dispatched);     #
+#   2. :func:`_native_kernel_feature_safe` declines (a Python-engine contract   #
+#      the kernel does not fill);                                              #
+#   3. the producer declines (a relaxation feature the kernel cannot build) or  #
+#      the driver rejects the kernel's own answer (verification, status).       #
+#                                                                             #
+# Case 3's producer half is instrumented in                                    #
+# ``discopt._jax.spatial_producer.producer_stats``; cases 2 and the driver half #
+# of 3 are instrumented here. Regime N: every recorder is a dict write on a     #
+# thread-local that nothing in the solve path reads, and every branch returns   #
+# exactly what it returned before.                                             #
+# --------------------------------------------------------------------------- #
+class _EngagementStats(threading.local):
+    def __init__(self) -> None:  # pragma: no cover - trivial
+        self.gate_calls = 0
+        self.gate_safe = 0
+        self.gate_reasons: dict[str, int] = {}
+        self.attempts = 0
+        self.served = 0
+        self.outcomes: dict[str, int] = {}
+        self.last_gate_reason: Optional[str] = None
+        self.last_outcome: Optional[str] = None
+
+
+_ENGAGEMENT = _EngagementStats()
+
+
+def _eng() -> _EngagementStats:
+    if not hasattr(_ENGAGEMENT, "gate_calls"):  # pragma: no cover - fresh thread
+        _ENGAGEMENT.__init__()
+    return _ENGAGEMENT
+
+
+def reset_kernel_engagement_stats() -> None:
+    """Clear this thread's native-kernel engagement counters."""
+    _eng().__init__()
+
+
+def kernel_engagement_stats() -> dict:
+    """This thread's native-kernel engagement counters.
+
+    ``gate_calls`` / ``attempts`` are the executed-probe counts a census must
+    assert non-zero (CLAUDE.md §6); ``gate_reasons`` names which Python-engine
+    contract made the feature gate decline, and ``outcomes`` names how each
+    driver attempt ended (``served`` on the one path that returns a result).
+    """
+    st = _eng()
+    return {
+        "gate_calls": int(st.gate_calls),
+        "gate_safe": int(st.gate_safe),
+        "gate_reasons": dict(st.gate_reasons),
+        "attempts": int(st.attempts),
+        "served": int(st.served),
+        "outcomes": dict(st.outcomes),
+        "last_gate_reason": st.last_gate_reason,
+        "last_outcome": st.last_outcome,
+    }
+
+
+def _gate_decline(code: str) -> bool:
+    """Record which feature-gate contract declined, and return ``False``."""
+    st = _eng()
+    st.gate_reasons[code] = st.gate_reasons.get(code, 0) + 1
+    st.last_gate_reason = code
+    return False
+
+
+def _outcome(code: str):
+    """Record how one driver attempt ended. Returns ``None`` (the decline)."""
+    st = _eng()
+    st.outcomes[code] = st.outcomes.get(code, 0) + 1
+    st.last_outcome = code
+    if code == "served":
+        st.served += 1
+    return None
 
 
 def _native_spatial_kernel_enabled() -> bool:
@@ -227,27 +314,31 @@ def _native_kernel_feature_safe(
     Declining is always sound: it only ever *widens* which solves use the
     already-trusted default path.
     """
-    if incumbent_callback is not None or node_callback is not None:
-        return False
+    _eng().gate_calls += 1
+    if incumbent_callback is not None:
+        return _gate_decline("incumbent_callback")
+    if node_callback is not None:
+        return _gate_decline("node_callback")
     if kwargs.get("iteration_callback") is not None:
-        return False
+        return _gate_decline("iteration_callback")
     if lazy_constraints:
-        return False
+        return _gate_decline("lazy_constraints")
     if initial_point is not None:
-        return False
+        return _gate_decline("initial_point")
     # A non-default McCormick bound mode changes the relaxation the caller asked
     # for; the kernel always builds its own McCormick relaxation, so honour the
     # request by routing to the Python engine (e.g. ``mccormick_bounds="none"``).
     if mccormick_bounds is not None and str(mccormick_bounds) != "auto":
-        return False
+        return _gate_decline("mccormick_bounds")
     # Solution-pool collection is a Python-engine feature the kernel does not fill.
     if kwargs.get("solution_pool") is not None or kwargs.get("solution_pool_capacity"):
-        return False
+        return _gate_decline("solution_pool")
     # An explicit per-solve tuning object may enable/disable levers whose
     # solver_stats a caller inspects (e.g. cut-inherit pool stats); the kernel
     # emits none of those, so route explicit-tuning solves to the Python engine.
     if kwargs.get("tuning") is not None:
-        return False
+        return _gate_decline("tuning")
+    _eng().gate_safe += 1
     return True
 
 
@@ -631,6 +722,7 @@ def _try_native_spatial_kernel(
     and the native tree against the outer ``Model.solve(time_limit=...)`` deadline."""
     if not _native_spatial_kernel_enabled():
         return None
+    _eng().attempts += 1
     try:
         from discopt import _rust
         from discopt._jax.spatial_producer import build_spatial_kernel_spec
@@ -643,7 +735,9 @@ def _try_native_spatial_kernel(
             ),
         )
         if spec is None:
-            return None  # model outside the covered subset -> Python path
+            # The producer's own reason code says WHICH feature is missing —
+            # ``spatial_producer.producer_stats()['last']``.
+            return _outcome("producer_declined")  # outside the covered subset
         meta = {k: spec.pop(k) for k in list(spec) if k.startswith("meta_")}
         sign = float(meta["meta_obj_sense_sign"])
         off = float(meta["meta_obj_offset"])
@@ -680,14 +774,15 @@ def _try_native_spatial_kernel(
         res.update(meta)
     except Exception as exc:  # pragma: no cover - defensive
         logger.debug("native spatial kernel skipped: %s", exc)
-        return None
+        return _outcome(f"exception:{type(exc).__name__}")
     if res is None:
-        return None  # model outside the covered subset -> Python path
+        return _outcome("kernel_returned_none")  # outside the covered subset
     native_status = res.get("status")
     if native_status not in ("optimal", "time_limit"):
-        return None  # other incomplete exits retain the established Python fallback
+        # other incomplete exits retain the established Python fallback
+        return _outcome(f"status_{native_status}")
     if native_status == "optimal" and res.get("incumbent") is None:
-        return None  # an optimal result must carry a feasible incumbent
+        return _outcome("optimal_without_incumbent")
 
     sign = float(res["meta_obj_sense_sign"])
     off = float(res["meta_obj_offset"])
@@ -705,7 +800,8 @@ def _try_native_spatial_kernel(
         # point, whose true objective equals ``res['incumbent']`` by construction.
         x_flat = np.asarray(seed_point, dtype=np.float64)[:n_vars]
     elif native_status == "optimal":
-        return None  # no usable incumbent point -> Python path (never fabricate one)
+        # no usable incumbent point -> Python path (never fabricate one)
+        return _outcome("optimal_without_point")
     else:
         # A time-limited search may carry an incumbent VALUE (e.g. the seeded cutoff)
         # with no corresponding point in this process. Report the rigorous bound but
@@ -736,7 +832,7 @@ def _try_native_spatial_kernel(
                 "verification (obj=%.6g) — routing to the Python engine (#789)",
                 obj_val,
             )
-            return None
+            return _outcome("final_incumbent_unverified")
         # Prefer the independently-recomputed true objective (exact model units) over
         # the kernel's mapped relaxation reading when they agree within tolerance; a
         # gross disagreement is itself a decline signal.
@@ -747,7 +843,7 @@ def _try_native_spatial_kernel(
                 obj_val,
                 _model_obj,
             )
-            return None
+            return _outcome("objective_disagreement")
 
     # Deferred (Card 4b): the package __init__ imports this module, so a
     # module-level import of its helper would be a cycle.
@@ -763,6 +859,7 @@ def _try_native_spatial_kernel(
         bound_val,
         int(res["node_count"]),
     )
+    _outcome("served")
     return SolveResult(
         status=native_status,
         objective=obj_val,

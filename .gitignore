@@ -49,6 +49,10 @@ coverage.svg
 # `panel_baseline.py --check reports/panel_baseline_<sha>.json` is meaningless if
 # the baseline is not in the repository at the sha it names.
 !/reports/panel_baseline_*.json
+# ...and the Phase 5 coverage census, for the same reason: it is the ranking that
+# ORDERS the Phase-5 sub-cards (plan Phase 5.1), so a later card must be able to
+# read the table it is sequenced against rather than re-derive it.
+!/reports/phase5_kernel_coverage_census_*.json
 
 # Generated course material (built from python/discopt/course/)
 /course/

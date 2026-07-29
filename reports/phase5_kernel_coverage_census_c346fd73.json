@@ -1,0 +1,4665 @@
+{
+  "baseline": "reports/panel_baseline_f154dcff.json",
+  "budget": 45.0,
+  "executed": {
+    "attempts": 82,
+    "gate_calls": 82,
+    "producer_calls": 82,
+    "producer_declines": 61,
+    "rows": 119,
+    "served": 20,
+    "unclassified": 0
+  },
+  "flag": "DISCOPT_NATIVE_SPATIAL_KERNEL=1",
+  "git_dirty": true,
+  "git_sha": "c346fd73",
+  "instrument_marker": "phase5-census-v1",
+  "load_peak": 3.1015625,
+  "load_start": 1.10302734375,
+  "rows": [
+    {
+      "budget": 45.0,
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "engagement": {
+        "attempts": 1,
+        "gate_calls": 1,
+        "gate_reasons": {},
+        "gate_safe": 1,
+        "last_gate_reason": null,
+        "last_outcome": null,
+        "outcomes": {},
+        "served": 0
+      },
+      "instance": "4stufen",
+      "instrument_marker": "phase5-census-v1",
+      "n_cons": 98,
+      "n_vars": 149,
+      "phase": "producer_declined",
+      "producer": {
+        "calls": 1,
+        "declines": 1,
+        "last": "infinite_aux_bounds",
+        "last_detail": "",
+        "reasons": {
+          "infinite_aux_bounds": 1
+        },
+        "specs": 0
+      },
+      "routing": {
+        "dispatched": "nlp_bb_auto",
+        "entered": [
+          "auto_gp",
+          "nlp_bb_auto"
+        ]
+      },
+      "wall_to_gate": 10.774429853000584
+    },
+    {
+      "bound": 2.9249999983013426,
+      "budget": 45.0,
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "engagement": {
+        "attempts": 0,
+        "gate_calls": 0,
+        "gate_reasons": {},
+        "gate_safe": 0,
+        "last_gate_reason": null,
+        "last_outcome": null,
+        "outcomes": {},
+        "served": 0
+      },
+      "gap_certified": true,
+      "instance": "alan",
+      "instrument_marker": "phase5-census-v1",
+      "n_cons": 7,
+      "n_vars": 8,
+      "node_count": 21,
+      "objective": 2.9249999983013426,
+      "phase": "solve_returned",
+      "producer": {
+        "calls": 0,
+        "declines": 0,
+        "last": null,
+        "last_detail": "",
+        "reasons": {},
+        "specs": 0
+      },
+      "routing": {
+        "dispatched": "class_miqp",
+        "entered": [
+          "auto_gp",
+          "class_miqp"
+        ]
+      },
+      "status": "optimal",
+      "wall": 0.5018618510002852
+    },
+    {
+      "budget": 45.0,
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "engagement": {
+        "attempts": 1,
+        "gate_calls": 1,
+        "gate_reasons": {},
+        "gate_safe": 1,
+        "last_gate_reason": null,
+        "last_outcome": null,
+        "outcomes": {},
+        "served": 0
+      },
+      "instance": "bchoco06",
+      "instrument_marker": "phase5-census-v1",
+      "n_cons": 134,
+      "n_vars": 118,
+      "phase": "producer_declined",
+      "producer": {
+        "calls": 1,
+        "declines": 1,
+        "last": "term_trilinear",
+        "last_detail": "",
+        "reasons": {
+          "term_trilinear": 1
+        },
+        "specs": 0
+      },
+      "routing": {
+        "dispatched": "nlp_bb_auto",
+        "entered": [
+          "auto_gp",
+          "nlp_bb_auto"
+        ]
+      },
+      "wall_to_gate": 7.029444234000039
+    },
+    {
+      "budget": 45.0,
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "engagement": {
+        "attempts": 1,
+        "gate_calls": 1,
+        "gate_reasons": {},
+        "gate_safe": 1,
+        "last_gate_reason": null,
+        "last_outcome": null,
+        "outcomes": {},
+        "served": 0
+      },
+      "instance": "bchoco07",
+      "instrument_marker": "phase5-census-v1",
+      "n_cons": 153,
+      "n_vars": 134,
+      "phase": "producer_declined",
+      "producer": {
+        "calls": 1,
+        "declines": 1,
+        "last": "term_trilinear",
+        "last_detail": "",
+        "reasons": {
+          "term_trilinear": 1
+        },
+        "specs": 0
+      },
+      "routing": {
+        "dispatched": "nlp_bb_auto",
+        "entered": [
+          "auto_gp",
+          "nlp_bb_auto"
+        ]
+      },
+      "wall_to_gate": 8.732825553000112
+    },
+    {
+      "budget": 45.0,
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "engagement": {
+        "attempts": 1,
+        "gate_calls": 1,
+        "gate_reasons": {},
+        "gate_safe": 1,
+        "last_gate_reason": null,
+        "last_outcome": null,
+        "outcomes": {},
+        "served": 0
+      },
+      "instance": "bchoco08",
+      "instrument_marker": "phase5-census-v1",
+      "n_cons": 190,
+      "n_vars": 168,
+      "phase": "producer_declined",
+      "producer": {
+        "calls": 1,
+        "declines": 1,
+        "last": "term_trilinear",
+        "last_detail": "",
+        "reasons": {
+          "term_trilinear": 1
+        },
+        "specs": 0
+      },
+      "routing": {
+        "dispatched": "nlp_bb_auto",
+        "entered": [
+          "auto_gp",
+          "nlp_bb_auto"
+        ]
+      },
+      "wall_to_gate": 13.71537716199964
+    },
+    {
+      "budget": 45.0,
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "engagement": {
+        "attempts": 1,
+        "gate_calls": 1,
+        "gate_reasons": {},
+        "gate_safe": 1,
+        "last_gate_reason": null,
+        "last_outcome": null,
+        "outcomes": {},
+        "served": 0
+      },
+      "instance": "beuster",
+      "instrument_marker": "phase5-census-v1",
+      "n_cons": 114,
+      "n_vars": 157,
+      "phase": "producer_declined",
+      "producer": {
+        "calls": 1,
+        "declines": 1,
+        "last": "infinite_aux_bounds",
+        "last_detail": "",
+        "reasons": {
+          "infinite_aux_bounds": 1
+        },
+        "specs": 0
+      },
+      "routing": {
+        "dispatched": "nlp_bb_auto",
+        "entered": [
+          "auto_gp",
+          "nlp_bb_auto"
+        ]
+      },
+      "wall_to_gate": 14.898095292999642
+    },
+    {
+      "budget": 45.0,
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "engagement": {
+        "attempts": 1,
+        "gate_calls": 1,
+        "gate_reasons": {},
+        "gate_safe": 1,
+        "last_gate_reason": null,
+        "last_outcome": null,
+        "outcomes": {},
+        "served": 0
+      },
+      "instance": "carton7",
+      "instrument_marker": "phase5-census-v1",
+      "n_cons": 687,
+      "n_vars": 328,
+      "phase": "producer_declined",
+      "producer": {
+        "calls": 1,
+        "declines": 1,
+        "last": "infinite_aux_bounds",
+        "last_detail": "",
+        "reasons": {
+          "infinite_aux_bounds": 1
+        },
+        "specs": 0
+      },
+      "routing": {
+        "dispatched": "nlp_bb_auto",
+        "entered": [
+          "auto_gp",
+          "nlp_bb_auto"
+        ]
+      },
+      "wall_to_gate": 15.6081179039993
+    },
+    {
+      "budget": 45.0,
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "engagement": {
+        "attempts": 1,
+        "gate_calls": 1,
+        "gate_reasons": {},
+        "gate_safe": 1,
+        "last_gate_reason": null,
+        "last_outcome": null,
+        "outcomes": {},
+        "served": 0
+      },
+      "instance": "casctanks",
+      "instrument_marker": "phase5-census-v1",
+      "n_cons": 517,
+      "n_vars": 500,
+      "phase": "producer_declined",
+      "producer": {
+        "calls": 1,
+        "declines": 1,
+        "last": "probe_real_shape_mismatch",
+        "last_detail": "",
+        "reasons": {
+          "probe_real_shape_mismatch": 1
+        },
+        "specs": 0
+      },
+      "routing": {
+        "dispatched": "nlp_bb_auto",
+        "entered": [
+          "auto_gp",
+          "nlp_bb_auto"
+        ]
+      },
+      "wall_to_gate": 20.581856499999958
+    },
+    {
+      "bound": 29.894378154271102,
+      "budget": 45.0,
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "engagement": {
+        "attempts": 0,
+        "gate_calls": 0,
+        "gate_reasons": {},
+        "gate_safe": 0,
+        "last_gate_reason": null,
+        "last_outcome": null,
+        "outcomes": {},
+        "served": 0
+      },
+      "gap_certified": true,
+      "instance": "chance",
+      "instrument_marker": "phase5-census-v1",
+      "n_cons": 3,
+      "n_vars": 4,
+      "node_count": 0,
+      "objective": 29.894378154271102,
+      "phase": "solve_returned",
+      "producer": {
+        "calls": 0,
+        "declines": 0,
+        "last": null,
+        "last_detail": "",
+        "reasons": {},
+        "specs": 0
+      },
+      "routing": {
+        "dispatched": "pure_continuous_convex_nlp",
+        "entered": [
+          "auto_gp",
+          "pure_continuous_convex_nlp"
+        ]
+      },
+      "status": "optimal",
+      "wall": 1.3445538890000535
+    },
+    {
+      "bound": null,
+      "budget": 45.0,
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "engagement": {
+        "attempts": 0,
+        "gate_calls": 0,
+        "gate_reasons": {},
+        "gate_safe": 0,
+        "last_gate_reason": null,
+        "last_outcome": null,
+        "outcomes": {},
+        "served": 0
+      },
+      "gap_certified": false,
+      "instance": "clay0303hfsg",
+      "instrument_marker": "phase5-census-v1",
+      "n_cons": 150,
+      "n_vars": 99,
+      "node_count": 351,
+      "objective": null,
+      "phase": "solve_returned",
+      "producer": {
+        "calls": 0,
+        "declines": 0,
+        "last": null,
+        "last_detail": "",
+        "reasons": {},
+        "specs": 0
+      },
+      "routing": {
+        "dispatched": "nlp_bb_auto",
+        "entered": [
+          "auto_gp",
+          "nlp_bb_auto"
+        ]
+      },
+      "status": "time_limit",
+      "wall": 47.377640691000124
+    },
+    {
+      "budget": 45.0,
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "engagement": {
+        "attempts": 1,
+        "gate_calls": 1,
+        "gate_reasons": {},
+        "gate_safe": 1,
+        "last_gate_reason": null,
+        "last_outcome": null,
+        "outcomes": {},
+        "served": 0
+      },
+      "instance": "contvar",
+      "instrument_marker": "phase5-census-v1",
+      "n_cons": 284,
+      "n_vars": 296,
+      "phase": "producer_declined",
+      "producer": {
+        "calls": 1,
+        "declines": 1,
+        "last": "infinite_aux_bounds",
+        "last_detail": "",
+        "reasons": {
+          "infinite_aux_bounds": 1
+        },
+        "specs": 0
+      },
+      "routing": {
+        "dispatched": "nlp_bb_auto",
+        "entered": [
+          "auto_gp",
+          "nlp_bb_auto"
+        ]
+      },
+      "wall_to_gate": 15.355205514999398
+    },
+    {
+      "bound": 130.61841392487688,
+      "budget": 45.0,
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "engagement": {
+        "attempts": 0,
+        "gate_calls": 0,
+        "gate_reasons": {},
+        "gate_safe": 0,
+        "last_gate_reason": null,
+        "last_outcome": null,
+        "outcomes": {},
+        "served": 0
+      },
+      "gap_certified": true,
+      "instance": "cvxnonsep_nsig30",
+      "instrument_marker": "phase5-census-v1",
+      "n_cons": 1,
+      "n_vars": 30,
+      "node_count": 165,
+      "objective": 130.6287111692529,
+      "phase": "solve_returned",
+      "producer": {
+        "calls": 0,
+        "declines": 0,
+        "last": null,
+        "last_detail": "",
+        "reasons": {},
+        "specs": 0
+      },
+      "routing": {
+        "dispatched": "nlp_bb_auto",
+        "entered": [
+          "auto_gp",
+          "nlp_bb_auto"
+        ]
+      },
+      "status": "optimal",
+      "wall": 12.440528965998965
+    },
+    {
+      "bound": 78.99179874365787,
+      "budget": 45.0,
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "engagement": {
+        "attempts": 0,
+        "gate_calls": 0,
+        "gate_reasons": {},
+        "gate_safe": 0,
+        "last_gate_reason": null,
+        "last_outcome": null,
+        "outcomes": {},
+        "served": 0
+      },
+      "gap_certified": true,
+      "instance": "cvxnonsep_psig30",
+      "instrument_marker": "phase5-census-v1",
+      "n_cons": 0,
+      "n_vars": 30,
+      "node_count": 89,
+      "objective": 78.99885435294289,
+      "phase": "solve_returned",
+      "producer": {
+        "calls": 0,
+        "declines": 0,
+        "last": null,
+        "last_detail": "",
+        "reasons": {},
+        "specs": 0
+      },
+      "routing": {
+        "dispatched": "nlp_bb_auto",
+        "entered": [
+          "auto_gp",
+          "nlp_bb_auto"
+        ]
+      },
+      "status": "optimal",
+      "wall": 4.896989735001625
+    },
+    {
+      "bound": 86.53873600363832,
+      "budget": 45.0,
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "engagement": {
+        "attempts": 0,
+        "gate_calls": 0,
+        "gate_reasons": {},
+        "gate_safe": 0,
+        "last_gate_reason": null,
+        "last_outcome": null,
+        "outcomes": {},
+        "served": 0
+      },
+      "gap_certified": true,
+      "instance": "cvxnonsep_psig40r",
+      "instrument_marker": "phase5-census-v1",
+      "n_cons": 42,
+      "n_vars": 82,
+      "node_count": 95,
+      "objective": 86.54527995164959,
+      "phase": "solve_returned",
+      "producer": {
+        "calls": 0,
+        "declines": 0,
+        "last": null,
+        "last_detail": "",
+        "reasons": {},
+        "specs": 0
+      },
+      "routing": {
+        "dispatched": "nlp_bb_auto",
+        "entered": [
+          "auto_gp",
+          "nlp_bb_auto"
+        ]
+      },
+      "status": "optimal",
+      "wall": 17.147008270998413
+    },
+    {
+      "bound": 3155.2878615366776,
+      "budget": 45.0,
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "engagement": {
+        "attempts": 1,
+        "gate_calls": 1,
+        "gate_reasons": {},
+        "gate_safe": 1,
+        "last_gate_reason": null,
+        "last_outcome": "served",
+        "outcomes": {
+          "served": 1
+        },
+        "served": 1
+      },
+      "gap_certified": true,
+      "instance": "dispatch",
+      "instrument_marker": "phase5-census-v1",
+      "n_cons": 2,
+      "n_vars": 4,
+      "node_count": 23,
+      "objective": 3155.2879266857854,
+      "phase": "solve_returned",
+      "producer": {
+        "calls": 1,
+        "declines": 0,
+        "last": null,
+        "last_detail": "",
+        "reasons": {},
+        "specs": 1
+      },
+      "routing": {
+        "dispatched": "native_spatial_kernel",
+        "entered": [
+          "auto_gp",
+          "nlp_bb_auto",
+          "native_spatial_kernel"
+        ]
+      },
+      "status": "optimal",
+      "wall": 1.452695740001218
+    },
+    {
+      "budget": 45.0,
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "engagement": {
+        "attempts": 1,
+        "gate_calls": 1,
+        "gate_reasons": {},
+        "gate_safe": 1,
+        "last_gate_reason": null,
+        "last_outcome": null,
+        "outcomes": {},
+        "served": 0
+      },
+      "instance": "ex1221",
+      "instrument_marker": "phase5-census-v1",
+      "n_cons": 5,
+      "n_vars": 5,
+      "phase": "producer_declined",
+      "producer": {
+        "calls": 1,
+        "declines": 1,
+        "last": "fixed_row_box_dependent",
+        "last_detail": "coeffs",
+        "reasons": {
+          "fixed_row_box_dependent:coeffs": 1
+        },
+        "specs": 0
+      },
+      "routing": {
+        "dispatched": "nlp_bb_auto",
+        "entered": [
+          "auto_gp",
+          "nlp_bb_auto"
+        ]
+      },
+      "wall_to_gate": 0.9233940080011962
+    },
+    {
+      "budget": 45.0,
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "engagement": {
+        "attempts": 1,
+        "gate_calls": 1,
+        "gate_reasons": {},
+        "gate_safe": 1,
+        "last_gate_reason": null,
+        "last_outcome": null,
+        "outcomes": {},
+        "served": 0
+      },
+      "instance": "ex1222",
+      "instrument_marker": "phase5-census-v1",
+      "n_cons": 3,
+      "n_vars": 3,
+      "phase": "producer_declined",
+      "producer": {
+        "calls": 1,
+        "declines": 1,
+        "last": "term_univariate",
+        "last_detail": "exp",
+        "reasons": {
+          "term_univariate:exp": 1
+        },
+        "specs": 0
+      },
+      "routing": {
+        "dispatched": "nlp_bb_auto",
+        "entered": [
+          "auto_gp",
+          "nlp_bb_auto"
+        ]
+      },
+      "wall_to_gate": 0.6599070699994627
+    },
+    {
+      "bound": 4.579582397947032,
+      "budget": 45.0,
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "engagement": {
+        "attempts": 0,
+        "gate_calls": 0,
+        "gate_reasons": {},
+        "gate_safe": 0,
+        "last_gate_reason": null,
+        "last_outcome": null,
+        "outcomes": {},
+        "served": 0
+      },
+      "gap_certified": true,
+      "instance": "ex1223a",
+      "instrument_marker": "phase5-census-v1",
+      "n_cons": 9,
+      "n_vars": 7,
+      "node_count": 3,
+      "objective": 4.579582406521569,
+      "phase": "solve_returned",
+      "producer": {
+        "calls": 0,
+        "declines": 0,
+        "last": null,
+        "last_detail": "",
+        "reasons": {},
+        "specs": 0
+      },
+      "routing": {
+        "dispatched": "nlp_bb_auto",
+        "entered": [
+          "auto_gp",
+          "nlp_bb_auto"
+        ]
+      },
+      "status": "optimal",
+      "wall": 1.2240079929997592
+    },
+    {
+      "budget": 45.0,
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "engagement": {
+        "attempts": 1,
+        "gate_calls": 1,
+        "gate_reasons": {},
+        "gate_safe": 1,
+        "last_gate_reason": null,
+        "last_outcome": null,
+        "outcomes": {},
+        "served": 0
+      },
+      "instance": "ex1224",
+      "instrument_marker": "phase5-census-v1",
+      "n_cons": 7,
+      "n_vars": 11,
+      "phase": "producer_declined",
+      "producer": {
+        "calls": 1,
+        "declines": 1,
+        "last": "term_trilinear",
+        "last_detail": "",
+        "reasons": {
+          "term_trilinear": 1
+        },
+        "specs": 0
+      },
+      "routing": {
+        "dispatched": "nlp_bb_auto",
+        "entered": [
+          "auto_gp",
+          "nlp_bb_auto"
+        ]
+      },
+      "wall_to_gate": 0.9223519480001414
+    },
+    {
+      "budget": 45.0,
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "engagement": {
+        "attempts": 1,
+        "gate_calls": 1,
+        "gate_reasons": {},
+        "gate_safe": 1,
+        "last_gate_reason": null,
+        "last_outcome": null,
+        "outcomes": {},
+        "served": 0
+      },
+      "instance": "ex1225",
+      "instrument_marker": "phase5-census-v1",
+      "n_cons": 10,
+      "n_vars": 8,
+      "phase": "producer_declined",
+      "producer": {
+        "calls": 1,
+        "declines": 1,
+        "last": "fixed_row_box_dependent",
+        "last_detail": "coeffs",
+        "reasons": {
+          "fixed_row_box_dependent:coeffs": 1
+        },
+        "specs": 0
+      },
+      "routing": {
+        "dispatched": "nlp_bb_auto",
+        "entered": [
+          "auto_gp",
+          "nlp_bb_auto"
+        ]
+      },
+      "wall_to_gate": 0.6261529340008565
+    },
+    {
+      "budget": 45.0,
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "engagement": {
+        "attempts": 1,
+        "gate_calls": 1,
+        "gate_reasons": {},
+        "gate_safe": 1,
+        "last_gate_reason": null,
+        "last_outcome": null,
+        "outcomes": {},
+        "served": 0
+      },
+      "instance": "ex1226",
+      "instrument_marker": "phase5-census-v1",
+      "n_cons": 5,
+      "n_vars": 5,
+      "phase": "producer_declined",
+      "producer": {
+        "calls": 1,
+        "declines": 1,
+        "last": "fixed_row_box_dependent",
+        "last_detail": "coeffs",
+        "reasons": {
+          "fixed_row_box_dependent:coeffs": 1
+        },
+        "specs": 0
+      },
+      "routing": {
+        "dispatched": "nlp_bb_auto",
+        "entered": [
+          "auto_gp",
+          "nlp_bb_auto"
+        ]
+      },
+      "wall_to_gate": 0.6545383780012344
+    },
+    {
+      "budget": 45.0,
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "engagement": {
+        "attempts": 1,
+        "gate_calls": 1,
+        "gate_reasons": {},
+        "gate_safe": 1,
+        "last_gate_reason": null,
+        "last_outcome": null,
+        "outcomes": {},
+        "served": 0
+      },
+      "instance": "ex1233",
+      "instrument_marker": "phase5-census-v1",
+      "n_cons": 64,
+      "n_vars": 52,
+      "phase": "producer_declined",
+      "producer": {
+        "calls": 1,
+        "declines": 1,
+        "last": "fixed_row_box_dependent",
+        "last_detail": "coeffs",
+        "reasons": {
+          "fixed_row_box_dependent:coeffs": 1
+        },
+        "specs": 0
+      },
+      "routing": {
+        "dispatched": "nlp_bb_auto",
+        "entered": [
+          "auto_gp",
+          "nlp_bb_auto"
+        ]
+      },
+      "wall_to_gate": 3.1711707360009314
+    },
+    {
+      "budget": 45.0,
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "engagement": {
+        "attempts": 1,
+        "gate_calls": 1,
+        "gate_reasons": {},
+        "gate_safe": 1,
+        "last_gate_reason": null,
+        "last_outcome": null,
+        "outcomes": {},
+        "served": 0
+      },
+      "instance": "ex1252",
+      "instrument_marker": "phase5-census-v1",
+      "n_cons": 43,
+      "n_vars": 39,
+      "phase": "producer_declined",
+      "producer": {
+        "calls": 1,
+        "declines": 1,
+        "last": "term_trilinear",
+        "last_detail": "",
+        "reasons": {
+          "term_trilinear": 1
+        },
+        "specs": 0
+      },
+      "routing": {
+        "dispatched": "nlp_bb_auto",
+        "entered": [
+          "auto_gp",
+          "nlp_bb_auto"
+        ]
+      },
+      "wall_to_gate": 1.6352986880010576
+    },
+    {
+      "budget": 45.0,
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "engagement": {
+        "attempts": 1,
+        "gate_calls": 1,
+        "gate_reasons": {},
+        "gate_safe": 1,
+        "last_gate_reason": null,
+        "last_outcome": null,
+        "outcomes": {},
+        "served": 0
+      },
+      "instance": "ex1252a",
+      "instrument_marker": "phase5-census-v1",
+      "n_cons": 34,
+      "n_vars": 24,
+      "phase": "producer_declined",
+      "producer": {
+        "calls": 1,
+        "declines": 1,
+        "last": "term_trilinear",
+        "last_detail": "",
+        "reasons": {
+          "term_trilinear": 1
+        },
+        "specs": 0
+      },
+      "routing": {
+        "dispatched": "nlp_bb_auto",
+        "entered": [
+          "auto_gp",
+          "nlp_bb_auto"
+        ]
+      },
+      "wall_to_gate": 1.1192977559985593
+    },
+    {
+      "bound": 19.6,
+      "budget": 45.0,
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "engagement": {
+        "attempts": 0,
+        "gate_calls": 0,
+        "gate_reasons": {},
+        "gate_safe": 0,
+        "last_gate_reason": null,
+        "last_outcome": null,
+        "outcomes": {},
+        "served": 0
+      },
+      "gap_certified": true,
+      "instance": "ex1263",
+      "instrument_marker": "phase5-census-v1",
+      "n_cons": 55,
+      "n_vars": 92,
+      "node_count": 10005,
+      "objective": 19.6,
+      "phase": "solve_returned",
+      "producer": {
+        "calls": 0,
+        "declines": 0,
+        "last": null,
+        "last_detail": "",
+        "reasons": {},
+        "specs": 0
+      },
+      "routing": {
+        "dispatched": "class_milp",
+        "entered": [
+          "auto_gp",
+          "class_milp"
+        ]
+      },
+      "status": "optimal",
+      "wall": 3.6908173589999933
+    },
+    {
+      "bound": 8.6,
+      "budget": 45.0,
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "engagement": {
+        "attempts": 0,
+        "gate_calls": 0,
+        "gate_reasons": {},
+        "gate_safe": 0,
+        "last_gate_reason": null,
+        "last_outcome": null,
+        "outcomes": {},
+        "served": 0
+      },
+      "gap_certified": true,
+      "instance": "ex1264",
+      "instrument_marker": "phase5-census-v1",
+      "n_cons": 55,
+      "n_vars": 88,
+      "node_count": 13555,
+      "objective": 8.6,
+      "phase": "solve_returned",
+      "producer": {
+        "calls": 0,
+        "declines": 0,
+        "last": null,
+        "last_detail": "",
+        "reasons": {},
+        "specs": 0
+      },
+      "routing": {
+        "dispatched": "class_milp",
+        "entered": [
+          "auto_gp",
+          "class_milp"
+        ]
+      },
+      "status": "optimal",
+      "wall": 4.459989106999274
+    },
+    {
+      "bound": 10.299999999999999,
+      "budget": 45.0,
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "engagement": {
+        "attempts": 0,
+        "gate_calls": 0,
+        "gate_reasons": {},
+        "gate_safe": 0,
+        "last_gate_reason": null,
+        "last_outcome": null,
+        "outcomes": {},
+        "served": 0
+      },
+      "gap_certified": true,
+      "instance": "ex1265",
+      "instrument_marker": "phase5-census-v1",
+      "n_cons": 74,
+      "n_vars": 130,
+      "node_count": 1555,
+      "objective": 10.3,
+      "phase": "solve_returned",
+      "producer": {
+        "calls": 0,
+        "declines": 0,
+        "last": null,
+        "last_detail": "",
+        "reasons": {},
+        "specs": 0
+      },
+      "routing": {
+        "dispatched": "class_milp",
+        "entered": [
+          "auto_gp",
+          "class_milp"
+        ]
+      },
+      "status": "optimal",
+      "wall": 4.255992194999635
+    },
+    {
+      "bound": 16.3,
+      "budget": 45.0,
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "engagement": {
+        "attempts": 0,
+        "gate_calls": 0,
+        "gate_reasons": {},
+        "gate_safe": 0,
+        "last_gate_reason": null,
+        "last_outcome": null,
+        "outcomes": {},
+        "served": 0
+      },
+      "gap_certified": true,
+      "instance": "ex1266",
+      "instrument_marker": "phase5-census-v1",
+      "n_cons": 95,
+      "n_vars": 180,
+      "node_count": 6005,
+      "objective": 16.3,
+      "phase": "solve_returned",
+      "producer": {
+        "calls": 0,
+        "declines": 0,
+        "last": null,
+        "last_detail": "",
+        "reasons": {},
+        "specs": 0
+      },
+      "routing": {
+        "dispatched": "class_milp",
+        "entered": [
+          "auto_gp",
+          "class_milp"
+        ]
+      },
+      "status": "optimal",
+      "wall": 7.554612523001197
+    },
+    {
+      "budget": 45.0,
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "engagement": {
+        "attempts": 1,
+        "gate_calls": 1,
+        "gate_reasons": {},
+        "gate_safe": 1,
+        "last_gate_reason": null,
+        "last_outcome": null,
+        "outcomes": {},
+        "served": 0
+      },
+      "instance": "ex14_1_9",
+      "instrument_marker": "phase5-census-v1",
+      "n_cons": 2,
+      "n_vars": 2,
+      "phase": "producer_declined",
+      "producer": {
+        "calls": 1,
+        "declines": 1,
+        "last": "infinite_aux_bounds",
+        "last_detail": "",
+        "reasons": {
+          "infinite_aux_bounds": 1
+        },
+        "specs": 0
+      },
+      "routing": {
+        "dispatched": "nlp_bb_auto",
+        "entered": [
+          "auto_gp",
+          "nlp_bb_auto"
+        ]
+      },
+      "wall_to_gate": 0.642196437000166
+    },
+    {
+      "budget": 45.0,
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "engagement": {
+        "attempts": 1,
+        "gate_calls": 1,
+        "gate_reasons": {},
+        "gate_safe": 1,
+        "last_gate_reason": null,
+        "last_outcome": null,
+        "outcomes": {},
+        "served": 0
+      },
+      "instance": "ex8_1_1",
+      "instrument_marker": "phase5-census-v1",
+      "n_cons": 0,
+      "n_vars": 2,
+      "phase": "producer_declined",
+      "producer": {
+        "calls": 1,
+        "declines": 1,
+        "last": "term_univariate",
+        "last_detail": "cos,sin",
+        "reasons": {
+          "term_univariate:cos,sin": 1
+        },
+        "specs": 0
+      },
+      "routing": {
+        "dispatched": "nlp_bb_auto",
+        "entered": [
+          "auto_gp",
+          "nlp_bb_auto"
+        ]
+      },
+      "wall_to_gate": 0.5478759399993578
+    },
+    {
+      "budget": 45.0,
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "engagement": {
+        "attempts": 1,
+        "gate_calls": 1,
+        "gate_reasons": {},
+        "gate_safe": 1,
+        "last_gate_reason": null,
+        "last_outcome": null,
+        "outcomes": {},
+        "served": 0
+      },
+      "instance": "ex8_5_4",
+      "instrument_marker": "phase5-census-v1",
+      "n_cons": 4,
+      "n_vars": 5,
+      "phase": "producer_declined",
+      "producer": {
+        "calls": 1,
+        "declines": 1,
+        "last": "real_objective_bound_invalid",
+        "last_detail": "",
+        "reasons": {
+          "real_objective_bound_invalid": 1
+        },
+        "specs": 0
+      },
+      "routing": {
+        "dispatched": "nlp_bb_auto",
+        "entered": [
+          "auto_gp",
+          "nlp_bb_auto"
+        ]
+      },
+      "wall_to_gate": 0.9107275180012948
+    },
+    {
+      "budget": 45.0,
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "engagement": {
+        "attempts": 1,
+        "gate_calls": 1,
+        "gate_reasons": {},
+        "gate_safe": 1,
+        "last_gate_reason": null,
+        "last_outcome": null,
+        "outcomes": {},
+        "served": 0
+      },
+      "instance": "fac2",
+      "instrument_marker": "phase5-census-v1",
+      "n_cons": 33,
+      "n_vars": 66,
+      "phase": "producer_declined",
+      "producer": {
+        "calls": 1,
+        "declines": 1,
+        "last": "real_objective_bound_invalid",
+        "last_detail": "",
+        "reasons": {
+          "real_objective_bound_invalid": 1
+        },
+        "specs": 0
+      },
+      "routing": {
+        "dispatched": "nlp_bb_auto",
+        "entered": [
+          "auto_gp",
+          "nlp_bb_auto"
+        ]
+      },
+      "wall_to_gate": 4.755035780000981
+    },
+    {
+      "bound": 37.94733180456953,
+      "budget": 45.0,
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "engagement": {
+        "attempts": 0,
+        "gate_calls": 0,
+        "gate_reasons": {},
+        "gate_safe": 0,
+        "last_gate_reason": null,
+        "last_outcome": null,
+        "outcomes": {},
+        "served": 0
+      },
+      "gap_certified": true,
+      "instance": "flay02m",
+      "instrument_marker": "phase5-census-v1",
+      "n_cons": 11,
+      "n_vars": 14,
+      "node_count": 7,
+      "objective": 37.947331863834606,
+      "phase": "solve_returned",
+      "producer": {
+        "calls": 0,
+        "declines": 0,
+        "last": null,
+        "last_detail": "",
+        "reasons": {},
+        "specs": 0
+      },
+      "routing": {
+        "dispatched": "nlp_bb_auto",
+        "entered": [
+          "auto_gp",
+          "nlp_bb_auto"
+        ]
+      },
+      "status": "optimal",
+      "wall": 1.7088677949996054
+    },
+    {
+      "bound": 48.98979470823039,
+      "budget": 45.0,
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "engagement": {
+        "attempts": 0,
+        "gate_calls": 0,
+        "gate_reasons": {},
+        "gate_safe": 0,
+        "last_gate_reason": null,
+        "last_outcome": null,
+        "outcomes": {},
+        "served": 0
+      },
+      "gap_certified": true,
+      "instance": "flay03m",
+      "instrument_marker": "phase5-census-v1",
+      "n_cons": 24,
+      "n_vars": 26,
+      "node_count": 107,
+      "objective": 48.98979479383546,
+      "phase": "solve_returned",
+      "producer": {
+        "calls": 0,
+        "declines": 0,
+        "last": null,
+        "last_detail": "",
+        "reasons": {},
+        "specs": 0
+      },
+      "routing": {
+        "dispatched": "nlp_bb_auto",
+        "entered": [
+          "auto_gp",
+          "nlp_bb_auto"
+        ]
+      },
+      "status": "optimal",
+      "wall": 17.93024338900068
+    },
+    {
+      "bound": 8566.118825140456,
+      "budget": 45.0,
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "engagement": {
+        "attempts": 1,
+        "gate_calls": 1,
+        "gate_reasons": {},
+        "gate_safe": 1,
+        "last_gate_reason": null,
+        "last_outcome": "served",
+        "outcomes": {
+          "served": 1
+        },
+        "served": 1
+      },
+      "gap_certified": true,
+      "instance": "fuel",
+      "instrument_marker": "phase5-census-v1",
+      "n_cons": 15,
+      "n_vars": 15,
+      "node_count": 157,
+      "objective": 8566.118923028072,
+      "phase": "solve_returned",
+      "producer": {
+        "calls": 1,
+        "declines": 0,
+        "last": null,
+        "last_detail": "",
+        "reasons": {},
+        "specs": 1
+      },
+      "routing": {
+        "dispatched": "native_spatial_kernel",
+        "entered": [
+          "auto_gp",
+          "nlp_bb_auto",
+          "native_spatial_kernel"
+        ]
+      },
+      "status": "optimal",
+      "wall": 1.845176436001566
+    },
+    {
+      "bound": 2.199999982504936,
+      "budget": 45.0,
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "engagement": {
+        "attempts": 0,
+        "gate_calls": 0,
+        "gate_reasons": {},
+        "gate_safe": 0,
+        "last_gate_reason": null,
+        "last_outcome": null,
+        "outcomes": {},
+        "served": 0
+      },
+      "gap_certified": true,
+      "instance": "gbd",
+      "instrument_marker": "phase5-census-v1",
+      "n_cons": 4,
+      "n_vars": 4,
+      "node_count": 3,
+      "objective": 2.199999982504936,
+      "phase": "solve_returned",
+      "producer": {
+        "calls": 0,
+        "declines": 0,
+        "last": null,
+        "last_detail": "",
+        "reasons": {},
+        "specs": 0
+      },
+      "routing": {
+        "dispatched": "class_miqp",
+        "entered": [
+          "auto_gp",
+          "class_miqp"
+        ]
+      },
+      "status": "optimal",
+      "wall": 0.4500774489988544
+    },
+    {
+      "budget": 45.0,
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "engagement": {
+        "attempts": 1,
+        "gate_calls": 1,
+        "gate_reasons": {},
+        "gate_safe": 1,
+        "last_gate_reason": null,
+        "last_outcome": null,
+        "outcomes": {},
+        "served": 0
+      },
+      "instance": "gear",
+      "instrument_marker": "phase5-census-v1",
+      "n_cons": 0,
+      "n_vars": 4,
+      "phase": "producer_declined",
+      "producer": {
+        "calls": 1,
+        "declines": 1,
+        "last": "term_ratio",
+        "last_detail": "",
+        "reasons": {
+          "term_ratio": 1
+        },
+        "specs": 0
+      },
+      "routing": {
+        "dispatched": "nlp_bb_auto",
+        "entered": [
+          "auto_gp",
+          "nlp_bb_auto"
+        ]
+      },
+      "wall_to_gate": 0.10717350599952624
+    },
+    {
+      "budget": 45.0,
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "engagement": {
+        "attempts": 1,
+        "gate_calls": 1,
+        "gate_reasons": {},
+        "gate_safe": 1,
+        "last_gate_reason": null,
+        "last_outcome": null,
+        "outcomes": {},
+        "served": 0
+      },
+      "instance": "gear2",
+      "instrument_marker": "phase5-census-v1",
+      "n_cons": 4,
+      "n_vars": 28,
+      "phase": "producer_declined",
+      "producer": {
+        "calls": 1,
+        "declines": 1,
+        "last": "term_ratio",
+        "last_detail": "",
+        "reasons": {
+          "term_ratio": 1
+        },
+        "specs": 0
+      },
+      "routing": {
+        "dispatched": "nlp_bb_auto",
+        "entered": [
+          "auto_gp",
+          "nlp_bb_auto"
+        ]
+      },
+      "wall_to_gate": 0.6632042760011245
+    },
+    {
+      "budget": 45.0,
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "engagement": {
+        "attempts": 1,
+        "gate_calls": 1,
+        "gate_reasons": {},
+        "gate_safe": 1,
+        "last_gate_reason": null,
+        "last_outcome": null,
+        "outcomes": {},
+        "served": 0
+      },
+      "instance": "gear3",
+      "instrument_marker": "phase5-census-v1",
+      "n_cons": 4,
+      "n_vars": 8,
+      "phase": "producer_declined",
+      "producer": {
+        "calls": 1,
+        "declines": 1,
+        "last": "term_ratio",
+        "last_detail": "",
+        "reasons": {
+          "term_ratio": 1
+        },
+        "specs": 0
+      },
+      "routing": {
+        "dispatched": "nlp_bb_auto",
+        "entered": [
+          "auto_gp",
+          "nlp_bb_auto"
+        ]
+      },
+      "wall_to_gate": 0.6273815910008125
+    },
+    {
+      "budget": 45.0,
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "engagement": {
+        "attempts": 1,
+        "gate_calls": 1,
+        "gate_reasons": {},
+        "gate_safe": 1,
+        "last_gate_reason": null,
+        "last_outcome": null,
+        "outcomes": {},
+        "served": 0
+      },
+      "instance": "gear4",
+      "instrument_marker": "phase5-census-v1",
+      "n_cons": 1,
+      "n_vars": 6,
+      "phase": "producer_declined",
+      "producer": {
+        "calls": 1,
+        "declines": 1,
+        "last": "infinite_aux_bounds",
+        "last_detail": "",
+        "reasons": {
+          "infinite_aux_bounds": 1
+        },
+        "specs": 0
+      },
+      "routing": {
+        "dispatched": "nlp_bb_auto",
+        "entered": [
+          "auto_gp",
+          "nlp_bb_auto"
+        ]
+      },
+      "wall_to_gate": 0.5851836250003544
+    },
+    {
+      "budget": 45.0,
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "engagement": {
+        "attempts": 1,
+        "gate_calls": 1,
+        "gate_reasons": {},
+        "gate_safe": 1,
+        "last_gate_reason": null,
+        "last_outcome": null,
+        "outcomes": {},
+        "served": 0
+      },
+      "instance": "gkocis",
+      "instrument_marker": "phase5-census-v1",
+      "n_cons": 8,
+      "n_vars": 11,
+      "phase": "producer_declined",
+      "producer": {
+        "calls": 1,
+        "declines": 1,
+        "last": "term_univariate",
+        "last_detail": "log",
+        "reasons": {
+          "term_univariate:log": 1
+        },
+        "specs": 0
+      },
+      "routing": {
+        "dispatched": "nlp_bb_auto",
+        "entered": [
+          "auto_gp",
+          "nlp_bb_auto"
+        ]
+      },
+      "wall_to_gate": 0.6257581480003864
+    },
+    {
+      "budget": 45.0,
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "engagement": {
+        "attempts": 1,
+        "gate_calls": 1,
+        "gate_reasons": {},
+        "gate_safe": 1,
+        "last_gate_reason": null,
+        "last_outcome": null,
+        "outcomes": {},
+        "served": 0
+      },
+      "instance": "hda",
+      "instrument_marker": "phase5-census-v1",
+      "n_cons": 718,
+      "n_vars": 722,
+      "phase": "producer_declined",
+      "producer": {
+        "calls": 1,
+        "declines": 1,
+        "last": "infinite_aux_bounds",
+        "last_detail": "",
+        "reasons": {
+          "infinite_aux_bounds": 1
+        },
+        "specs": 0
+      },
+      "routing": {
+        "dispatched": "nlp_bb_auto",
+        "entered": [
+          "auto_gp",
+          "nlp_bb_auto"
+        ]
+      },
+      "wall_to_gate": 24.40156546899925
+    },
+    {
+      "budget": 45.0,
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "engagement": {
+        "attempts": 1,
+        "gate_calls": 1,
+        "gate_reasons": {},
+        "gate_safe": 1,
+        "last_gate_reason": null,
+        "last_outcome": null,
+        "outcomes": {},
+        "served": 0
+      },
+      "instance": "heatexch_gen1",
+      "instrument_marker": "phase5-census-v1",
+      "n_cons": 120,
+      "n_vars": 112,
+      "phase": "producer_declined",
+      "producer": {
+        "calls": 1,
+        "declines": 1,
+        "last": "infinite_aux_bounds",
+        "last_detail": "",
+        "reasons": {
+          "infinite_aux_bounds": 1
+        },
+        "specs": 0
+      },
+      "routing": {
+        "dispatched": "nlp_bb_auto",
+        "entered": [
+          "auto_gp",
+          "nlp_bb_auto"
+        ]
+      },
+      "wall_to_gate": 1.9256185530011862
+    },
+    {
+      "budget": 45.0,
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "engagement": {
+        "attempts": 1,
+        "gate_calls": 1,
+        "gate_reasons": {},
+        "gate_safe": 1,
+        "last_gate_reason": null,
+        "last_outcome": null,
+        "outcomes": {},
+        "served": 0
+      },
+      "instance": "heatexch_gen2",
+      "instrument_marker": "phase5-census-v1",
+      "n_cons": 166,
+      "n_vars": 148,
+      "phase": "producer_declined",
+      "producer": {
+        "calls": 1,
+        "declines": 1,
+        "last": "infinite_aux_bounds",
+        "last_detail": "",
+        "reasons": {
+          "infinite_aux_bounds": 1
+        },
+        "specs": 0
+      },
+      "routing": {
+        "dispatched": "nlp_bb_auto",
+        "entered": [
+          "auto_gp",
+          "nlp_bb_auto"
+        ]
+      },
+      "wall_to_gate": 3.5608656570002495
+    },
+    {
+      "bound": null,
+      "budget": 45.0,
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "engagement": {
+        "attempts": 0,
+        "gate_calls": 0,
+        "gate_reasons": {},
+        "gate_safe": 0,
+        "last_gate_reason": null,
+        "last_outcome": null,
+        "outcomes": {},
+        "served": 0
+      },
+      "gap_certified": false,
+      "instance": "heatexch_gen3",
+      "instrument_marker": "phase5-census-v1",
+      "n_cons": 510,
+      "n_vars": 580,
+      "node_count": 3,
+      "objective": null,
+      "phase": "solve_returned",
+      "producer": {
+        "calls": 0,
+        "declines": 0,
+        "last": null,
+        "last_detail": "",
+        "reasons": {},
+        "specs": 0
+      },
+      "routing": {
+        "dispatched": null,
+        "entered": []
+      },
+      "status": "time_limit",
+      "wall": 50.80719868900087
+    },
+    {
+      "budget": 45.0,
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "engagement": {
+        "attempts": 1,
+        "gate_calls": 1,
+        "gate_reasons": {},
+        "gate_safe": 1,
+        "last_gate_reason": null,
+        "last_outcome": null,
+        "outcomes": {},
+        "served": 0
+      },
+      "instance": "kall_circles_c8a",
+      "instrument_marker": "phase5-census-v1",
+      "n_cons": 86,
+      "n_vars": 22,
+      "phase": "producer_declined",
+      "producer": {
+        "calls": 1,
+        "declines": 1,
+        "last": "fixed_row_box_dependent",
+        "last_detail": "coeffs",
+        "reasons": {
+          "fixed_row_box_dependent:coeffs": 1
+        },
+        "specs": 0
+      },
+      "routing": {
+        "dispatched": "nlp_bb_auto",
+        "entered": [
+          "auto_gp",
+          "nlp_bb_auto"
+        ]
+      },
+      "wall_to_gate": 1.206506927999726
+    },
+    {
+      "bound": 37.79999951039202,
+      "budget": 45.0,
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "engagement": {
+        "attempts": 0,
+        "gate_calls": 0,
+        "gate_reasons": {},
+        "gate_safe": 0,
+        "last_gate_reason": null,
+        "last_outcome": null,
+        "outcomes": {},
+        "served": 0
+      },
+      "gap_certified": true,
+      "instance": "m3",
+      "instrument_marker": "phase5-census-v1",
+      "n_cons": 43,
+      "n_vars": 26,
+      "node_count": 47,
+      "objective": 37.799999669978845,
+      "phase": "solve_returned",
+      "producer": {
+        "calls": 0,
+        "declines": 0,
+        "last": null,
+        "last_detail": "",
+        "reasons": {},
+        "specs": 0
+      },
+      "routing": {
+        "dispatched": "nlp_bb_auto",
+        "entered": [
+          "auto_gp",
+          "nlp_bb_auto"
+        ]
+      },
+      "status": "optimal",
+      "wall": 11.799268016000497
+    },
+    {
+      "budget": 45.0,
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "engagement": {
+        "attempts": 1,
+        "gate_calls": 1,
+        "gate_reasons": {},
+        "gate_safe": 1,
+        "last_gate_reason": null,
+        "last_outcome": null,
+        "outcomes": {},
+        "served": 0
+      },
+      "instance": "mathopt3",
+      "instrument_marker": "phase5-census-v1",
+      "n_cons": 7,
+      "n_vars": 6,
+      "phase": "producer_declined",
+      "producer": {
+        "calls": 1,
+        "declines": 1,
+        "last": "term_trilinear",
+        "last_detail": "",
+        "reasons": {
+          "term_trilinear": 1
+        },
+        "specs": 0
+      },
+      "routing": {
+        "dispatched": "nlp_bb_auto",
+        "entered": [
+          "auto_gp",
+          "nlp_bb_auto"
+        ]
+      },
+      "wall_to_gate": 0.7808236210003088
+    },
+    {
+      "budget": 45.0,
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "engagement": {
+        "attempts": 1,
+        "gate_calls": 1,
+        "gate_reasons": {},
+        "gate_safe": 1,
+        "last_gate_reason": null,
+        "last_outcome": null,
+        "outcomes": {},
+        "served": 0
+      },
+      "instance": "mathopt5_2",
+      "instrument_marker": "phase5-census-v1",
+      "n_cons": 0,
+      "n_vars": 1,
+      "phase": "producer_declined",
+      "producer": {
+        "calls": 1,
+        "declines": 1,
+        "last": "term_univariate",
+        "last_detail": "cos",
+        "reasons": {
+          "term_univariate:cos": 1
+        },
+        "specs": 0
+      },
+      "routing": {
+        "dispatched": "nlp_bb_auto",
+        "entered": [
+          "auto_gp",
+          "nlp_bb_auto"
+        ]
+      },
+      "wall_to_gate": 0.1008141100010107
+    },
+    {
+      "bound": 5.24339901522791,
+      "budget": 45.0,
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "engagement": {
+        "attempts": 0,
+        "gate_calls": 0,
+        "gate_reasons": {},
+        "gate_safe": 0,
+        "last_gate_reason": null,
+        "last_outcome": null,
+        "outcomes": {},
+        "served": 0
+      },
+      "gap_certified": true,
+      "instance": "meanvar",
+      "instrument_marker": "phase5-census-v1",
+      "n_cons": 2,
+      "n_vars": 8,
+      "node_count": 0,
+      "objective": 5.24339901522791,
+      "phase": "solve_returned",
+      "producer": {
+        "calls": 0,
+        "declines": 0,
+        "last": null,
+        "last_detail": "",
+        "reasons": {},
+        "specs": 0
+      },
+      "routing": {
+        "dispatched": "class_qp",
+        "entered": [
+          "auto_gp",
+          "class_qp"
+        ]
+      },
+      "status": "optimal",
+      "wall": 0.44218798099973355
+    },
+    {
+      "bound": 14.369231356314272,
+      "budget": 45.0,
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "engagement": {
+        "attempts": 0,
+        "gate_calls": 0,
+        "gate_reasons": {},
+        "gate_safe": 0,
+        "last_gate_reason": null,
+        "last_outcome": null,
+        "outcomes": {},
+        "served": 0
+      },
+      "gap_certified": true,
+      "instance": "meanvarx",
+      "instrument_marker": "phase5-census-v1",
+      "n_cons": 44,
+      "n_vars": 35,
+      "node_count": 17,
+      "objective": 14.369231356314272,
+      "phase": "solve_returned",
+      "producer": {
+        "calls": 0,
+        "declines": 0,
+        "last": null,
+        "last_detail": "",
+        "reasons": {},
+        "specs": 0
+      },
+      "routing": {
+        "dispatched": "class_miqp",
+        "entered": [
+          "auto_gp",
+          "class_miqp"
+        ]
+      },
+      "status": "optimal",
+      "wall": 0.9324622500007536
+    },
+    {
+      "budget": 45.0,
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "engagement": {
+        "attempts": 1,
+        "gate_calls": 1,
+        "gate_reasons": {},
+        "gate_safe": 1,
+        "last_gate_reason": null,
+        "last_outcome": null,
+        "outcomes": {},
+        "served": 0
+      },
+      "instance": "nvs01",
+      "instrument_marker": "phase5-census-v1",
+      "n_cons": 3,
+      "n_vars": 3,
+      "phase": "producer_declined",
+      "producer": {
+        "calls": 1,
+        "declines": 1,
+        "last": "term_trilinear",
+        "last_detail": "",
+        "reasons": {
+          "term_trilinear": 1
+        },
+        "specs": 0
+      },
+      "routing": {
+        "dispatched": "nlp_bb_auto",
+        "entered": [
+          "auto_gp",
+          "nlp_bb_auto"
+        ]
+      },
+      "wall_to_gate": 0.6826205540000956
+    },
+    {
+      "bound": 5.96418452307,
+      "budget": 45.0,
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "engagement": {
+        "attempts": 0,
+        "gate_calls": 0,
+        "gate_reasons": {},
+        "gate_safe": 0,
+        "last_gate_reason": null,
+        "last_outcome": null,
+        "outcomes": {},
+        "served": 0
+      },
+      "gap_certified": true,
+      "instance": "nvs02",
+      "instrument_marker": "phase5-census-v1",
+      "n_cons": 3,
+      "n_vars": 8,
+      "node_count": 345,
+      "objective": 5.96418452307,
+      "phase": "solve_returned",
+      "producer": {
+        "calls": 0,
+        "declines": 0,
+        "last": null,
+        "last_detail": "",
+        "reasons": {},
+        "specs": 0
+      },
+      "routing": {
+        "dispatched": "class_milp",
+        "entered": [
+          "auto_gp",
+          "class_milp"
+        ]
+      },
+      "status": "optimal",
+      "wall": 1.1097515009987546
+    },
+    {
+      "bound": 15.99999972676511,
+      "budget": 45.0,
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "engagement": {
+        "attempts": 0,
+        "gate_calls": 0,
+        "gate_reasons": {},
+        "gate_safe": 0,
+        "last_gate_reason": null,
+        "last_outcome": null,
+        "outcomes": {},
+        "served": 0
+      },
+      "gap_certified": true,
+      "instance": "nvs03",
+      "instrument_marker": "phase5-census-v1",
+      "n_cons": 2,
+      "n_vars": 2,
+      "node_count": 5,
+      "objective": 16.0,
+      "phase": "solve_returned",
+      "producer": {
+        "calls": 0,
+        "declines": 0,
+        "last": null,
+        "last_detail": "",
+        "reasons": {},
+        "specs": 0
+      },
+      "routing": {
+        "dispatched": "nonlinear_bound_infeasible",
+        "entered": [
+          "auto_gp",
+          "nlp_bb_auto",
+          "nonlinear_bound_infeasible"
+        ]
+      },
+      "status": "optimal",
+      "wall": 1.1329342090011778
+    },
+    {
+      "budget": 45.0,
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "engagement": {
+        "attempts": 1,
+        "gate_calls": 1,
+        "gate_reasons": {},
+        "gate_safe": 1,
+        "last_gate_reason": null,
+        "last_outcome": null,
+        "outcomes": {},
+        "served": 0
+      },
+      "instance": "nvs04",
+      "instrument_marker": "phase5-census-v1",
+      "n_cons": 0,
+      "n_vars": 2,
+      "phase": "producer_declined",
+      "producer": {
+        "calls": 1,
+        "declines": 1,
+        "last": "fixed_row_box_dependent",
+        "last_detail": "coeffs",
+        "reasons": {
+          "fixed_row_box_dependent:coeffs": 1
+        },
+        "specs": 0
+      },
+      "routing": {
+        "dispatched": "nlp_bb_auto",
+        "entered": [
+          "auto_gp",
+          "nlp_bb_auto"
+        ]
+      },
+      "wall_to_gate": 0.6179038350001065
+    },
+    {
+      "budget": 45.0,
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "engagement": {
+        "attempts": 1,
+        "gate_calls": 1,
+        "gate_reasons": {},
+        "gate_safe": 1,
+        "last_gate_reason": null,
+        "last_outcome": null,
+        "outcomes": {},
+        "served": 0
+      },
+      "instance": "nvs05",
+      "instrument_marker": "phase5-census-v1",
+      "n_cons": 9,
+      "n_vars": 8,
+      "phase": "producer_declined",
+      "producer": {
+        "calls": 1,
+        "declines": 1,
+        "last": "term_trilinear",
+        "last_detail": "",
+        "reasons": {
+          "term_trilinear": 1
+        },
+        "specs": 0
+      },
+      "routing": {
+        "dispatched": "nlp_bb_auto",
+        "entered": [
+          "auto_gp",
+          "nlp_bb_auto"
+        ]
+      },
+      "wall_to_gate": 1.8990492100001575
+    },
+    {
+      "budget": 45.0,
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "engagement": {
+        "attempts": 1,
+        "gate_calls": 1,
+        "gate_reasons": {},
+        "gate_safe": 1,
+        "last_gate_reason": null,
+        "last_outcome": null,
+        "outcomes": {},
+        "served": 0
+      },
+      "instance": "nvs06",
+      "instrument_marker": "phase5-census-v1",
+      "n_cons": 0,
+      "n_vars": 2,
+      "phase": "producer_declined",
+      "producer": {
+        "calls": 1,
+        "declines": 1,
+        "last": "term_trilinear",
+        "last_detail": "",
+        "reasons": {
+          "term_trilinear": 1
+        },
+        "specs": 0
+      },
+      "routing": {
+        "dispatched": "nlp_bb_auto",
+        "entered": [
+          "auto_gp",
+          "nlp_bb_auto"
+        ]
+      },
+      "wall_to_gate": 0.59835221999856
+    },
+    {
+      "bound": 4.0,
+      "budget": 45.0,
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "engagement": {
+        "attempts": 0,
+        "gate_calls": 0,
+        "gate_reasons": {},
+        "gate_safe": 0,
+        "last_gate_reason": null,
+        "last_outcome": null,
+        "outcomes": {},
+        "served": 0
+      },
+      "gap_certified": true,
+      "instance": "nvs07",
+      "instrument_marker": "phase5-census-v1",
+      "n_cons": 2,
+      "n_vars": 3,
+      "node_count": 5,
+      "objective": 4.0,
+      "phase": "solve_returned",
+      "producer": {
+        "calls": 0,
+        "declines": 0,
+        "last": null,
+        "last_detail": "",
+        "reasons": {},
+        "specs": 0
+      },
+      "routing": {
+        "dispatched": "class_milp",
+        "entered": [
+          "auto_gp",
+          "class_milp"
+        ]
+      },
+      "status": "optimal",
+      "wall": 0.639078027999858
+    },
+    {
+      "budget": 45.0,
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "engagement": {
+        "attempts": 1,
+        "gate_calls": 1,
+        "gate_reasons": {},
+        "gate_safe": 1,
+        "last_gate_reason": null,
+        "last_outcome": null,
+        "outcomes": {},
+        "served": 0
+      },
+      "instance": "nvs08",
+      "instrument_marker": "phase5-census-v1",
+      "n_cons": 3,
+      "n_vars": 3,
+      "phase": "producer_declined",
+      "producer": {
+        "calls": 1,
+        "declines": 1,
+        "last": "fixed_row_box_dependent",
+        "last_detail": "coeffs",
+        "reasons": {
+          "fixed_row_box_dependent:coeffs": 1
+        },
+        "specs": 0
+      },
+      "routing": {
+        "dispatched": "nlp_bb_auto",
+        "entered": [
+          "auto_gp",
+          "nlp_bb_auto"
+        ]
+      },
+      "wall_to_gate": 0.6771292800003721
+    },
+    {
+      "budget": 45.0,
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "engagement": {
+        "attempts": 1,
+        "gate_calls": 1,
+        "gate_reasons": {},
+        "gate_safe": 1,
+        "last_gate_reason": null,
+        "last_outcome": null,
+        "outcomes": {},
+        "served": 0
+      },
+      "instance": "nvs09",
+      "instrument_marker": "phase5-census-v1",
+      "n_cons": 0,
+      "n_vars": 10,
+      "phase": "producer_declined",
+      "producer": {
+        "calls": 1,
+        "declines": 1,
+        "last": "term_trilinear",
+        "last_detail": "",
+        "reasons": {
+          "term_trilinear": 1
+        },
+        "specs": 0
+      },
+      "routing": {
+        "dispatched": "nlp_bb_auto",
+        "entered": [
+          "auto_gp",
+          "nlp_bb_auto"
+        ]
+      },
+      "wall_to_gate": 0.8930944390012883
+    },
+    {
+      "bound": -310.7999999999999,
+      "budget": 45.0,
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "engagement": {
+        "attempts": 0,
+        "gate_calls": 0,
+        "gate_reasons": {},
+        "gate_safe": 0,
+        "last_gate_reason": null,
+        "last_outcome": null,
+        "outcomes": {},
+        "served": 0
+      },
+      "gap_certified": true,
+      "instance": "nvs10",
+      "instrument_marker": "phase5-census-v1",
+      "n_cons": 2,
+      "n_vars": 2,
+      "node_count": 5,
+      "objective": -310.7999999999999,
+      "phase": "solve_returned",
+      "producer": {
+        "calls": 0,
+        "declines": 0,
+        "last": null,
+        "last_detail": "",
+        "reasons": {},
+        "specs": 0
+      },
+      "routing": {
+        "dispatched": "class_milp",
+        "entered": [
+          "auto_gp",
+          "class_milp"
+        ]
+      },
+      "status": "optimal",
+      "wall": 0.7566581119990587
+    },
+    {
+      "bound": -431.0000000000085,
+      "budget": 45.0,
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "engagement": {
+        "attempts": 0,
+        "gate_calls": 0,
+        "gate_reasons": {},
+        "gate_safe": 0,
+        "last_gate_reason": null,
+        "last_outcome": null,
+        "outcomes": {},
+        "served": 0
+      },
+      "gap_certified": true,
+      "instance": "nvs11",
+      "instrument_marker": "phase5-census-v1",
+      "n_cons": 3,
+      "n_vars": 3,
+      "node_count": 55,
+      "objective": -431.0000000000085,
+      "phase": "solve_returned",
+      "producer": {
+        "calls": 0,
+        "declines": 0,
+        "last": null,
+        "last_detail": "",
+        "reasons": {},
+        "specs": 0
+      },
+      "routing": {
+        "dispatched": "class_milp",
+        "entered": [
+          "auto_gp",
+          "class_milp"
+        ]
+      },
+      "status": "optimal",
+      "wall": 1.4727072120003868
+    },
+    {
+      "bound": -481.20000000001,
+      "budget": 45.0,
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "engagement": {
+        "attempts": 0,
+        "gate_calls": 0,
+        "gate_reasons": {},
+        "gate_safe": 0,
+        "last_gate_reason": null,
+        "last_outcome": null,
+        "outcomes": {},
+        "served": 0
+      },
+      "gap_certified": true,
+      "instance": "nvs12",
+      "instrument_marker": "phase5-census-v1",
+      "n_cons": 4,
+      "n_vars": 4,
+      "node_count": 231,
+      "objective": -481.20000000001,
+      "phase": "solve_returned",
+      "producer": {
+        "calls": 0,
+        "declines": 0,
+        "last": null,
+        "last_detail": "",
+        "reasons": {},
+        "specs": 0
+      },
+      "routing": {
+        "dispatched": "class_milp",
+        "entered": [
+          "auto_gp",
+          "class_milp"
+        ]
+      },
+      "status": "optimal",
+      "wall": 3.8200042250009574
+    },
+    {
+      "bound": -585.2,
+      "budget": 45.0,
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "engagement": {
+        "attempts": 1,
+        "gate_calls": 1,
+        "gate_reasons": {},
+        "gate_safe": 1,
+        "last_gate_reason": null,
+        "last_outcome": "served",
+        "outcomes": {
+          "served": 1
+        },
+        "served": 1
+      },
+      "gap_certified": true,
+      "instance": "nvs13",
+      "instrument_marker": "phase5-census-v1",
+      "n_cons": 5,
+      "n_vars": 5,
+      "node_count": 637,
+      "objective": -585.2,
+      "phase": "solve_returned",
+      "producer": {
+        "calls": 1,
+        "declines": 0,
+        "last": null,
+        "last_detail": "",
+        "reasons": {},
+        "specs": 1
+      },
+      "routing": {
+        "dispatched": "native_spatial_kernel",
+        "entered": [
+          "auto_gp",
+          "nlp_bb_auto",
+          "native_spatial_kernel"
+        ]
+      },
+      "status": "optimal",
+      "wall": 2.4086640040004568
+    },
+    {
+      "bound": -40358.154769299996,
+      "budget": 45.0,
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "engagement": {
+        "attempts": 0,
+        "gate_calls": 0,
+        "gate_reasons": {},
+        "gate_safe": 0,
+        "last_gate_reason": null,
+        "last_outcome": null,
+        "outcomes": {},
+        "served": 0
+      },
+      "gap_certified": true,
+      "instance": "nvs14",
+      "instrument_marker": "phase5-census-v1",
+      "n_cons": 3,
+      "n_vars": 8,
+      "node_count": 129,
+      "objective": -40358.15476929995,
+      "phase": "solve_returned",
+      "producer": {
+        "calls": 0,
+        "declines": 0,
+        "last": null,
+        "last_detail": "",
+        "reasons": {},
+        "specs": 0
+      },
+      "routing": {
+        "dispatched": "class_milp",
+        "entered": [
+          "auto_gp",
+          "class_milp"
+        ]
+      },
+      "status": "optimal",
+      "wall": 1.6882879090007918
+    },
+    {
+      "bound": 1.0,
+      "budget": 45.0,
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "engagement": {
+        "attempts": 0,
+        "gate_calls": 0,
+        "gate_reasons": {},
+        "gate_safe": 0,
+        "last_gate_reason": null,
+        "last_outcome": null,
+        "outcomes": {},
+        "served": 0
+      },
+      "gap_certified": true,
+      "instance": "nvs15",
+      "instrument_marker": "phase5-census-v1",
+      "n_cons": 1,
+      "n_vars": 3,
+      "node_count": 7,
+      "objective": 1.0,
+      "phase": "solve_returned",
+      "producer": {
+        "calls": 0,
+        "declines": 0,
+        "last": null,
+        "last_detail": "",
+        "reasons": {},
+        "specs": 0
+      },
+      "routing": {
+        "dispatched": "class_milp",
+        "entered": [
+          "auto_gp",
+          "class_milp"
+        ]
+      },
+      "status": "optimal",
+      "wall": 0.27263920799850894
+    },
+    {
+      "budget": 45.0,
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "engagement": {
+        "attempts": 1,
+        "gate_calls": 1,
+        "gate_reasons": {},
+        "gate_safe": 1,
+        "last_gate_reason": null,
+        "last_outcome": null,
+        "outcomes": {},
+        "served": 0
+      },
+      "instance": "nvs16",
+      "instrument_marker": "phase5-census-v1",
+      "n_cons": 0,
+      "n_vars": 2,
+      "phase": "producer_declined",
+      "producer": {
+        "calls": 1,
+        "declines": 1,
+        "last": "real_objective_bound_invalid",
+        "last_detail": "",
+        "reasons": {
+          "real_objective_bound_invalid": 1
+        },
+        "specs": 0
+      },
+      "routing": {
+        "dispatched": "nlp_bb_auto",
+        "entered": [
+          "auto_gp",
+          "nlp_bb_auto"
+        ]
+      },
+      "wall_to_gate": 0.5995006680004735
+    },
+    {
+      "bound": -1302.711111111113,
+      "budget": 45.0,
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "engagement": {
+        "attempts": 1,
+        "gate_calls": 1,
+        "gate_reasons": {},
+        "gate_safe": 1,
+        "last_gate_reason": null,
+        "last_outcome": "served",
+        "outcomes": {
+          "served": 1
+        },
+        "served": 1
+      },
+      "gap_certified": true,
+      "instance": "nvs17",
+      "instrument_marker": "phase5-census-v1",
+      "n_cons": 7,
+      "n_vars": 7,
+      "node_count": 26691,
+      "objective": -1100.4000000000003,
+      "phase": "solve_returned",
+      "producer": {
+        "calls": 1,
+        "declines": 0,
+        "last": null,
+        "last_detail": "",
+        "reasons": {},
+        "specs": 1
+      },
+      "routing": {
+        "dispatched": "native_spatial_kernel",
+        "entered": [
+          "auto_gp",
+          "nlp_bb_auto",
+          "native_spatial_kernel"
+        ]
+      },
+      "status": "time_limit",
+      "wall": 29.80402351900011
+    },
+    {
+      "bound": -778.4000000000004,
+      "budget": 45.0,
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "engagement": {
+        "attempts": 1,
+        "gate_calls": 1,
+        "gate_reasons": {},
+        "gate_safe": 1,
+        "last_gate_reason": null,
+        "last_outcome": "served",
+        "outcomes": {
+          "served": 1
+        },
+        "served": 1
+      },
+      "gap_certified": true,
+      "instance": "nvs18",
+      "instrument_marker": "phase5-census-v1",
+      "n_cons": 6,
+      "n_vars": 6,
+      "node_count": 7593,
+      "objective": -778.4,
+      "phase": "solve_returned",
+      "producer": {
+        "calls": 1,
+        "declines": 0,
+        "last": null,
+        "last_detail": "",
+        "reasons": {},
+        "specs": 1
+      },
+      "routing": {
+        "dispatched": "native_spatial_kernel",
+        "entered": [
+          "auto_gp",
+          "nlp_bb_auto",
+          "native_spatial_kernel"
+        ]
+      },
+      "status": "optimal",
+      "wall": 7.1745577179990505
+    },
+    {
+      "bound": -5646.0,
+      "budget": 45.0,
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "engagement": {
+        "attempts": 1,
+        "gate_calls": 1,
+        "gate_reasons": {},
+        "gate_safe": 1,
+        "last_gate_reason": null,
+        "last_outcome": "served",
+        "outcomes": {
+          "served": 1
+        },
+        "served": 1
+      },
+      "gap_certified": true,
+      "instance": "nvs19",
+      "instrument_marker": "phase5-census-v1",
+      "n_cons": 8,
+      "n_vars": 8,
+      "node_count": 9069,
+      "objective": -1098.2,
+      "phase": "solve_returned",
+      "producer": {
+        "calls": 1,
+        "declines": 0,
+        "last": null,
+        "last_detail": "",
+        "reasons": {},
+        "specs": 1
+      },
+      "routing": {
+        "dispatched": "native_spatial_kernel",
+        "entered": [
+          "auto_gp",
+          "nlp_bb_auto",
+          "native_spatial_kernel"
+        ]
+      },
+      "status": "time_limit",
+      "wall": 29.923539827999775
+    },
+    {
+      "bound": 230.92216293970512,
+      "budget": 45.0,
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "engagement": {
+        "attempts": 1,
+        "gate_calls": 1,
+        "gate_reasons": {},
+        "gate_safe": 1,
+        "last_gate_reason": null,
+        "last_outcome": "served",
+        "outcomes": {
+          "served": 1
+        },
+        "served": 1
+      },
+      "gap_certified": true,
+      "instance": "nvs20",
+      "instrument_marker": "phase5-census-v1",
+      "n_cons": 8,
+      "n_vars": 16,
+      "node_count": 105,
+      "objective": 230.92216293970512,
+      "phase": "solve_returned",
+      "producer": {
+        "calls": 1,
+        "declines": 0,
+        "last": null,
+        "last_detail": "",
+        "reasons": {},
+        "specs": 1
+      },
+      "routing": {
+        "dispatched": "native_spatial_kernel",
+        "entered": [
+          "auto_gp",
+          "nlp_bb_auto",
+          "native_spatial_kernel"
+        ]
+      },
+      "status": "optimal",
+      "wall": 8.885291005999534
+    },
+    {
+      "budget": 45.0,
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "engagement": {
+        "attempts": 1,
+        "gate_calls": 1,
+        "gate_reasons": {},
+        "gate_safe": 1,
+        "last_gate_reason": null,
+        "last_outcome": null,
+        "outcomes": {},
+        "served": 0
+      },
+      "instance": "nvs21",
+      "instrument_marker": "phase5-census-v1",
+      "n_cons": 2,
+      "n_vars": 3,
+      "phase": "producer_declined",
+      "producer": {
+        "calls": 1,
+        "declines": 1,
+        "last": "term_trilinear",
+        "last_detail": "",
+        "reasons": {
+          "term_trilinear": 1
+        },
+        "specs": 0
+      },
+      "routing": {
+        "dispatched": "nlp_bb_auto",
+        "entered": [
+          "auto_gp",
+          "nlp_bb_auto"
+        ]
+      },
+      "wall_to_gate": 0.6294177879990457
+    },
+    {
+      "budget": 45.0,
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "engagement": {
+        "attempts": 1,
+        "gate_calls": 1,
+        "gate_reasons": {},
+        "gate_safe": 1,
+        "last_gate_reason": null,
+        "last_outcome": null,
+        "outcomes": {},
+        "served": 0
+      },
+      "instance": "nvs22",
+      "instrument_marker": "phase5-census-v1",
+      "n_cons": 9,
+      "n_vars": 8,
+      "phase": "producer_declined",
+      "producer": {
+        "calls": 1,
+        "declines": 1,
+        "last": "term_trilinear",
+        "last_detail": "",
+        "reasons": {
+          "term_trilinear": 1
+        },
+        "specs": 0
+      },
+      "routing": {
+        "dispatched": "nlp_bb_auto",
+        "entered": [
+          "auto_gp",
+          "nlp_bb_auto"
+        ]
+      },
+      "wall_to_gate": 1.1333731739996438
+    },
+    {
+      "bound": -25495.92500000028,
+      "budget": 45.0,
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "engagement": {
+        "attempts": 1,
+        "gate_calls": 1,
+        "gate_reasons": {},
+        "gate_safe": 1,
+        "last_gate_reason": null,
+        "last_outcome": "served",
+        "outcomes": {
+          "served": 1
+        },
+        "served": 1
+      },
+      "gap_certified": true,
+      "instance": "nvs23",
+      "instrument_marker": "phase5-census-v1",
+      "n_cons": 9,
+      "n_vars": 9,
+      "node_count": 4417,
+      "objective": -1124.8,
+      "phase": "solve_returned",
+      "producer": {
+        "calls": 1,
+        "declines": 0,
+        "last": null,
+        "last_detail": "",
+        "reasons": {},
+        "specs": 1
+      },
+      "routing": {
+        "dispatched": "native_spatial_kernel",
+        "entered": [
+          "auto_gp",
+          "nlp_bb_auto",
+          "native_spatial_kernel"
+        ]
+      },
+      "status": "time_limit",
+      "wall": 29.935736294999515
+    },
+    {
+      "bound": -135054.75523285585,
+      "budget": 45.0,
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "engagement": {
+        "attempts": 1,
+        "gate_calls": 1,
+        "gate_reasons": {},
+        "gate_safe": 1,
+        "last_gate_reason": null,
+        "last_outcome": "served",
+        "outcomes": {
+          "served": 1
+        },
+        "served": 1
+      },
+      "gap_certified": false,
+      "instance": "nvs24",
+      "instrument_marker": "phase5-census-v1",
+      "n_cons": 10,
+      "n_vars": 10,
+      "node_count": 3669,
+      "objective": null,
+      "phase": "solve_returned",
+      "producer": {
+        "calls": 1,
+        "declines": 0,
+        "last": null,
+        "last_detail": "",
+        "reasons": {},
+        "specs": 1
+      },
+      "routing": {
+        "dispatched": "native_spatial_kernel",
+        "entered": [
+          "auto_gp",
+          "nlp_bb_auto",
+          "native_spatial_kernel"
+        ]
+      },
+      "status": "time_limit",
+      "wall": 45.66709769099907
+    },
+    {
+      "budget": 45.0,
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "engagement": {
+        "attempts": 1,
+        "gate_calls": 1,
+        "gate_reasons": {},
+        "gate_safe": 1,
+        "last_gate_reason": null,
+        "last_outcome": null,
+        "outcomes": {},
+        "served": 0
+      },
+      "instance": "oaer",
+      "instrument_marker": "phase5-census-v1",
+      "n_cons": 7,
+      "n_vars": 9,
+      "phase": "producer_declined",
+      "producer": {
+        "calls": 1,
+        "declines": 1,
+        "last": "term_univariate",
+        "last_detail": "log",
+        "reasons": {
+          "term_univariate:log": 1
+        },
+        "specs": 0
+      },
+      "routing": {
+        "dispatched": "nlp_bb_auto",
+        "entered": [
+          "auto_gp",
+          "nlp_bb_auto"
+        ]
+      },
+      "wall_to_gate": 0.6900000959994941
+    },
+    {
+      "bound": 112235.0,
+      "budget": 45.0,
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "engagement": {
+        "attempts": 0,
+        "gate_calls": 0,
+        "gate_reasons": {},
+        "gate_safe": 0,
+        "last_gate_reason": null,
+        "last_outcome": null,
+        "outcomes": {},
+        "served": 0
+      },
+      "gap_certified": true,
+      "instance": "prob02",
+      "instrument_marker": "phase5-census-v1",
+      "n_cons": 8,
+      "n_vars": 6,
+      "node_count": 177,
+      "objective": 112235.0,
+      "phase": "solve_returned",
+      "producer": {
+        "calls": 0,
+        "declines": 0,
+        "last": null,
+        "last_detail": "",
+        "reasons": {},
+        "specs": 0
+      },
+      "routing": {
+        "dispatched": "class_milp",
+        "entered": [
+          "auto_gp",
+          "class_milp"
+        ]
+      },
+      "status": "optimal",
+      "wall": 0.9327579800010426
+    },
+    {
+      "bound": 10.0,
+      "budget": 45.0,
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "engagement": {
+        "attempts": 0,
+        "gate_calls": 0,
+        "gate_reasons": {},
+        "gate_safe": 0,
+        "last_gate_reason": null,
+        "last_outcome": null,
+        "outcomes": {},
+        "served": 0
+      },
+      "gap_certified": true,
+      "instance": "prob03",
+      "instrument_marker": "phase5-census-v1",
+      "n_cons": 1,
+      "n_vars": 2,
+      "node_count": 11,
+      "objective": 10.0,
+      "phase": "solve_returned",
+      "producer": {
+        "calls": 0,
+        "declines": 0,
+        "last": null,
+        "last_detail": "",
+        "reasons": {},
+        "specs": 0
+      },
+      "routing": {
+        "dispatched": "class_milp",
+        "entered": [
+          "auto_gp",
+          "class_milp"
+        ]
+      },
+      "status": "optimal",
+      "wall": 0.5774154509999789
+    },
+    {
+      "bound": 1.177122069585283,
+      "budget": 45.0,
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "engagement": {
+        "attempts": 1,
+        "gate_calls": 1,
+        "gate_reasons": {},
+        "gate_safe": 1,
+        "last_gate_reason": null,
+        "last_outcome": "served",
+        "outcomes": {
+          "served": 1
+        },
+        "served": 1
+      },
+      "gap_certified": true,
+      "instance": "prob06",
+      "instrument_marker": "phase5-census-v1",
+      "n_cons": 2,
+      "n_vars": 2,
+      "node_count": 1,
+      "objective": 1.1771242763406757,
+      "phase": "solve_returned",
+      "producer": {
+        "calls": 1,
+        "declines": 0,
+        "last": null,
+        "last_detail": "",
+        "reasons": {},
+        "specs": 1
+      },
+      "routing": {
+        "dispatched": "native_spatial_kernel",
+        "entered": [
+          "auto_gp",
+          "nlp_bb_auto",
+          "native_spatial_kernel"
+        ]
+      },
+      "status": "optimal",
+      "wall": 1.1856242550002207
+    },
+    {
+      "bound": 3.445503788218336,
+      "budget": 45.0,
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "engagement": {
+        "attempts": 1,
+        "gate_calls": 1,
+        "gate_reasons": {},
+        "gate_safe": 1,
+        "last_gate_reason": null,
+        "last_outcome": "objective_disagreement",
+        "outcomes": {
+          "objective_disagreement": 1
+        },
+        "served": 0
+      },
+      "gap_certified": true,
+      "instance": "prob10",
+      "instrument_marker": "phase5-census-v1",
+      "n_cons": 2,
+      "n_vars": 2,
+      "node_count": 15,
+      "objective": 3.4455037948230816,
+      "phase": "solve_returned",
+      "producer": {
+        "calls": 1,
+        "declines": 0,
+        "last": null,
+        "last_detail": "",
+        "reasons": {},
+        "specs": 1
+      },
+      "routing": {
+        "dispatched": "spatial_branch_and_bound",
+        "entered": [
+          "auto_gp",
+          "nlp_bb_auto",
+          "spatial_branch_and_bound"
+        ]
+      },
+      "status": "optimal",
+      "wall": 2.7140176520006207
+    },
+    {
+      "budget": 45.0,
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "engagement": {
+        "attempts": 1,
+        "gate_calls": 1,
+        "gate_reasons": {},
+        "gate_safe": 1,
+        "last_gate_reason": null,
+        "last_outcome": null,
+        "outcomes": {},
+        "served": 0
+      },
+      "instance": "st_e01",
+      "instrument_marker": "phase5-census-v1",
+      "n_cons": 1,
+      "n_vars": 2,
+      "phase": "producer_declined",
+      "producer": {
+        "calls": 1,
+        "declines": 1,
+        "last": "blf_row_count",
+        "last_detail": "5",
+        "reasons": {
+          "blf_row_count:5": 1
+        },
+        "specs": 0
+      },
+      "routing": {
+        "dispatched": "nlp_bb_auto",
+        "entered": [
+          "auto_gp",
+          "nlp_bb_auto"
+        ]
+      },
+      "wall_to_gate": 0.5857035499993799
+    },
+    {
+      "budget": 45.0,
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "engagement": {
+        "attempts": 1,
+        "gate_calls": 1,
+        "gate_reasons": {},
+        "gate_safe": 1,
+        "last_gate_reason": null,
+        "last_outcome": null,
+        "outcomes": {},
+        "served": 0
+      },
+      "instance": "st_e02",
+      "instrument_marker": "phase5-census-v1",
+      "n_cons": 3,
+      "n_vars": 3,
+      "phase": "producer_declined",
+      "producer": {
+        "calls": 1,
+        "declines": 1,
+        "last": "fixed_row_box_dependent",
+        "last_detail": "coeffs",
+        "reasons": {
+          "fixed_row_box_dependent:coeffs": 1
+        },
+        "specs": 0
+      },
+      "routing": {
+        "dispatched": "nlp_bb_auto",
+        "entered": [
+          "auto_gp",
+          "nlp_bb_auto"
+        ]
+      },
+      "wall_to_gate": 0.6074765169996681
+    },
+    {
+      "budget": 45.0,
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "engagement": {
+        "attempts": 1,
+        "gate_calls": 1,
+        "gate_reasons": {},
+        "gate_safe": 1,
+        "last_gate_reason": null,
+        "last_outcome": null,
+        "outcomes": {},
+        "served": 0
+      },
+      "instance": "st_e03",
+      "instrument_marker": "phase5-census-v1",
+      "n_cons": 7,
+      "n_vars": 10,
+      "phase": "producer_declined",
+      "producer": {
+        "calls": 1,
+        "declines": 1,
+        "last": "term_trilinear",
+        "last_detail": "",
+        "reasons": {
+          "term_trilinear": 1
+        },
+        "specs": 0
+      },
+      "routing": {
+        "dispatched": "nlp_bb_auto",
+        "entered": [
+          "auto_gp",
+          "nlp_bb_auto"
+        ]
+      },
+      "wall_to_gate": 0.7106220740006393
+    },
+    {
+      "budget": 45.0,
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "engagement": {
+        "attempts": 1,
+        "gate_calls": 1,
+        "gate_reasons": {},
+        "gate_safe": 1,
+        "last_gate_reason": null,
+        "last_outcome": null,
+        "outcomes": {},
+        "served": 0
+      },
+      "instance": "st_e04",
+      "instrument_marker": "phase5-census-v1",
+      "n_cons": 2,
+      "n_vars": 4,
+      "phase": "producer_declined",
+      "producer": {
+        "calls": 1,
+        "declines": 1,
+        "last": "probe_real_shape_mismatch",
+        "last_detail": "",
+        "reasons": {
+          "probe_real_shape_mismatch": 1
+        },
+        "specs": 0
+      },
+      "routing": {
+        "dispatched": "nlp_bb_auto",
+        "entered": [
+          "auto_gp",
+          "nlp_bb_auto"
+        ]
+      },
+      "wall_to_gate": 1.0595510470011504
+    },
+    {
+      "budget": 45.0,
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "engagement": {
+        "attempts": 1,
+        "gate_calls": 1,
+        "gate_reasons": {},
+        "gate_safe": 1,
+        "last_gate_reason": null,
+        "last_outcome": null,
+        "outcomes": {},
+        "served": 0
+      },
+      "instance": "st_e05",
+      "instrument_marker": "phase5-census-v1",
+      "n_cons": 3,
+      "n_vars": 5,
+      "phase": "producer_declined",
+      "producer": {
+        "calls": 1,
+        "declines": 1,
+        "last": "blf_row_count",
+        "last_detail": "6",
+        "reasons": {
+          "blf_row_count:6": 1
+        },
+        "specs": 0
+      },
+      "routing": {
+        "dispatched": "nlp_bb_auto",
+        "entered": [
+          "auto_gp",
+          "nlp_bb_auto"
+        ]
+      },
+      "wall_to_gate": 0.6239539600010175
+    },
+    {
+      "bound": 0.0,
+      "budget": 45.0,
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "engagement": {
+        "attempts": 1,
+        "gate_calls": 1,
+        "gate_reasons": {},
+        "gate_safe": 1,
+        "last_gate_reason": null,
+        "last_outcome": "served",
+        "outcomes": {
+          "served": 1
+        },
+        "served": 1
+      },
+      "gap_certified": true,
+      "instance": "st_e06",
+      "instrument_marker": "phase5-census-v1",
+      "n_cons": 3,
+      "n_vars": 3,
+      "node_count": 1,
+      "objective": 0.0,
+      "phase": "solve_returned",
+      "producer": {
+        "calls": 1,
+        "declines": 0,
+        "last": null,
+        "last_detail": "",
+        "reasons": {},
+        "specs": 1
+      },
+      "routing": {
+        "dispatched": "native_spatial_kernel",
+        "entered": [
+          "auto_gp",
+          "nlp_bb_auto",
+          "native_spatial_kernel"
+        ]
+      },
+      "status": "optimal",
+      "wall": 1.274899911999455
+    },
+    {
+      "bound": -400.00000412647967,
+      "budget": 45.0,
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "engagement": {
+        "attempts": 1,
+        "gate_calls": 1,
+        "gate_reasons": {},
+        "gate_safe": 1,
+        "last_gate_reason": null,
+        "last_outcome": "served",
+        "outcomes": {
+          "served": 1
+        },
+        "served": 1
+      },
+      "gap_certified": true,
+      "instance": "st_e07",
+      "instrument_marker": "phase5-census-v1",
+      "n_cons": 7,
+      "n_vars": 10,
+      "node_count": 57,
+      "objective": -400.00000412647967,
+      "phase": "solve_returned",
+      "producer": {
+        "calls": 1,
+        "declines": 0,
+        "last": null,
+        "last_detail": "",
+        "reasons": {},
+        "specs": 1
+      },
+      "routing": {
+        "dispatched": "native_spatial_kernel",
+        "entered": [
+          "auto_gp",
+          "nlp_bb_auto",
+          "native_spatial_kernel"
+        ]
+      },
+      "status": "optimal",
+      "wall": 1.611124729999574
+    },
+    {
+      "budget": 45.0,
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "engagement": {
+        "attempts": 1,
+        "gate_calls": 1,
+        "gate_reasons": {},
+        "gate_safe": 1,
+        "last_gate_reason": null,
+        "last_outcome": null,
+        "outcomes": {},
+        "served": 0
+      },
+      "instance": "st_e08",
+      "instrument_marker": "phase5-census-v1",
+      "n_cons": 2,
+      "n_vars": 2,
+      "phase": "producer_declined",
+      "producer": {
+        "calls": 1,
+        "declines": 1,
+        "last": "blf_row_count",
+        "last_detail": "5",
+        "reasons": {
+          "blf_row_count:5": 1
+        },
+        "specs": 0
+      },
+      "routing": {
+        "dispatched": "nlp_bb_auto",
+        "entered": [
+          "auto_gp",
+          "nlp_bb_auto"
+        ]
+      },
+      "wall_to_gate": 0.6841380740006571
+    },
+    {
+      "budget": 45.0,
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "engagement": {
+        "attempts": 1,
+        "gate_calls": 1,
+        "gate_reasons": {},
+        "gate_safe": 1,
+        "last_gate_reason": null,
+        "last_outcome": null,
+        "outcomes": {},
+        "served": 0
+      },
+      "instance": "st_e09",
+      "instrument_marker": "phase5-census-v1",
+      "n_cons": 1,
+      "n_vars": 2,
+      "phase": "producer_declined",
+      "producer": {
+        "calls": 1,
+        "declines": 1,
+        "last": "blf_row_count",
+        "last_detail": "5",
+        "reasons": {
+          "blf_row_count:5": 1
+        },
+        "specs": 0
+      },
+      "routing": {
+        "dispatched": "nlp_bb_auto",
+        "entered": [
+          "auto_gp",
+          "nlp_bb_auto"
+        ]
+      },
+      "wall_to_gate": 0.6269859120002366
+    },
+    {
+      "budget": 45.0,
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "engagement": {
+        "attempts": 1,
+        "gate_calls": 1,
+        "gate_reasons": {},
+        "gate_safe": 1,
+        "last_gate_reason": null,
+        "last_outcome": null,
+        "outcomes": {},
+        "served": 0
+      },
+      "instance": "st_e11",
+      "instrument_marker": "phase5-census-v1",
+      "n_cons": 2,
+      "n_vars": 3,
+      "phase": "producer_declined",
+      "producer": {
+        "calls": 1,
+        "declines": 1,
+        "last": "blf_row_count",
+        "last_detail": "6",
+        "reasons": {
+          "blf_row_count:6": 1
+        },
+        "specs": 0
+      },
+      "routing": {
+        "dispatched": "nlp_bb_auto",
+        "entered": [
+          "auto_gp",
+          "nlp_bb_auto"
+        ]
+      },
+      "wall_to_gate": 0.8575032249991636
+    },
+    {
+      "bound": 1.9999999825187946,
+      "budget": 45.0,
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "engagement": {
+        "attempts": 1,
+        "gate_calls": 1,
+        "gate_reasons": {},
+        "gate_safe": 1,
+        "last_gate_reason": null,
+        "last_outcome": "served",
+        "outcomes": {
+          "served": 1
+        },
+        "served": 1
+      },
+      "gap_certified": true,
+      "instance": "st_e13",
+      "instrument_marker": "phase5-census-v1",
+      "n_cons": 2,
+      "n_vars": 2,
+      "node_count": 1,
+      "objective": 1.9999999825187946,
+      "phase": "solve_returned",
+      "producer": {
+        "calls": 1,
+        "declines": 0,
+        "last": null,
+        "last_detail": "",
+        "reasons": {},
+        "specs": 1
+      },
+      "routing": {
+        "dispatched": "native_spatial_kernel",
+        "entered": [
+          "auto_gp",
+          "nlp_bb_auto",
+          "native_spatial_kernel"
+        ]
+      },
+      "status": "optimal",
+      "wall": 1.057326975000251
+    },
+    {
+      "budget": 45.0,
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "engagement": {
+        "attempts": 1,
+        "gate_calls": 1,
+        "gate_reasons": {},
+        "gate_safe": 1,
+        "last_gate_reason": null,
+        "last_outcome": null,
+        "outcomes": {},
+        "served": 0
+      },
+      "instance": "st_e15",
+      "instrument_marker": "phase5-census-v1",
+      "n_cons": 5,
+      "n_vars": 5,
+      "phase": "producer_declined",
+      "producer": {
+        "calls": 1,
+        "declines": 1,
+        "last": "fixed_row_box_dependent",
+        "last_detail": "coeffs",
+        "reasons": {
+          "fixed_row_box_dependent:coeffs": 1
+        },
+        "specs": 0
+      },
+      "routing": {
+        "dispatched": "nlp_bb_auto",
+        "entered": [
+          "auto_gp",
+          "nlp_bb_auto"
+        ]
+      },
+      "wall_to_gate": 0.9005844940002135
+    },
+    {
+      "bound": 376.29189296143693,
+      "budget": 45.0,
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "engagement": {
+        "attempts": 1,
+        "gate_calls": 1,
+        "gate_reasons": {},
+        "gate_safe": 1,
+        "last_gate_reason": null,
+        "last_outcome": "served",
+        "outcomes": {
+          "served": 1
+        },
+        "served": 1
+      },
+      "gap_certified": true,
+      "instance": "st_e17",
+      "instrument_marker": "phase5-census-v1",
+      "n_cons": 1,
+      "n_vars": 2,
+      "node_count": 37,
+      "objective": 376.29193232165574,
+      "phase": "solve_returned",
+      "producer": {
+        "calls": 1,
+        "declines": 0,
+        "last": null,
+        "last_detail": "",
+        "reasons": {},
+        "specs": 1
+      },
+      "routing": {
+        "dispatched": "native_spatial_kernel",
+        "entered": [
+          "auto_gp",
+          "pure_continuous_convex_nlp",
+          "nlp_bb_auto",
+          "native_spatial_kernel"
+        ]
+      },
+      "status": "optimal",
+      "wall": 6.143988748999618
+    },
+    {
+      "bound": -2.828427125796591,
+      "budget": 45.0,
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "engagement": {
+        "attempts": 1,
+        "gate_calls": 1,
+        "gate_reasons": {},
+        "gate_safe": 1,
+        "last_gate_reason": null,
+        "last_outcome": "served",
+        "outcomes": {
+          "served": 1
+        },
+        "served": 1
+      },
+      "gap_certified": true,
+      "instance": "st_e18",
+      "instrument_marker": "phase5-census-v1",
+      "n_cons": 4,
+      "n_vars": 2,
+      "node_count": 1,
+      "objective": -2.828427125796591,
+      "phase": "solve_returned",
+      "producer": {
+        "calls": 1,
+        "declines": 0,
+        "last": null,
+        "last_detail": "",
+        "reasons": {},
+        "specs": 1
+      },
+      "routing": {
+        "dispatched": "native_spatial_kernel",
+        "entered": [
+          "auto_gp",
+          "nlp_bb_auto",
+          "native_spatial_kernel"
+        ]
+      },
+      "status": "optimal",
+      "wall": 1.2030770829987887
+    },
+    {
+      "bound": 1.999999960440178,
+      "budget": 45.0,
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "engagement": {
+        "attempts": 1,
+        "gate_calls": 1,
+        "gate_reasons": {},
+        "gate_safe": 1,
+        "last_gate_reason": null,
+        "last_outcome": "served",
+        "outcomes": {
+          "served": 1
+        },
+        "served": 1
+      },
+      "gap_certified": true,
+      "instance": "st_e27",
+      "instrument_marker": "phase5-census-v1",
+      "n_cons": 6,
+      "n_vars": 4,
+      "node_count": 3,
+      "objective": 1.999999960440178,
+      "phase": "solve_returned",
+      "producer": {
+        "calls": 1,
+        "declines": 0,
+        "last": null,
+        "last_detail": "",
+        "reasons": {},
+        "specs": 1
+      },
+      "routing": {
+        "dispatched": "native_spatial_kernel",
+        "entered": [
+          "auto_gp",
+          "class_miqp",
+          "nlp_bb_auto",
+          "native_spatial_kernel"
+        ]
+      },
+      "status": "optimal",
+      "wall": 1.1681211939994682
+    },
+    {
+      "budget": 45.0,
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "engagement": {
+        "attempts": 1,
+        "gate_calls": 1,
+        "gate_reasons": {},
+        "gate_safe": 1,
+        "last_gate_reason": null,
+        "last_outcome": null,
+        "outcomes": {},
+        "served": 0
+      },
+      "instance": "st_e29",
+      "instrument_marker": "phase5-census-v1",
+      "n_cons": 7,
+      "n_vars": 11,
+      "phase": "producer_declined",
+      "producer": {
+        "calls": 1,
+        "declines": 1,
+        "last": "term_trilinear",
+        "last_detail": "",
+        "reasons": {
+          "term_trilinear": 1
+        },
+        "specs": 0
+      },
+      "routing": {
+        "dispatched": "nlp_bb_auto",
+        "entered": [
+          "auto_gp",
+          "nlp_bb_auto"
+        ]
+      },
+      "wall_to_gate": 0.9430082840008254
+    },
+    {
+      "bound": -2.0000000237499327,
+      "budget": 45.0,
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "engagement": {
+        "attempts": 1,
+        "gate_calls": 1,
+        "gate_reasons": {},
+        "gate_safe": 1,
+        "last_gate_reason": null,
+        "last_outcome": "served",
+        "outcomes": {
+          "served": 1
+        },
+        "served": 1
+      },
+      "gap_certified": true,
+      "instance": "st_e31",
+      "instrument_marker": "phase5-census-v1",
+      "n_cons": 135,
+      "n_vars": 112,
+      "node_count": 1,
+      "objective": -2.0000000237499327,
+      "phase": "solve_returned",
+      "producer": {
+        "calls": 1,
+        "declines": 0,
+        "last": null,
+        "last_detail": "",
+        "reasons": {},
+        "specs": 1
+      },
+      "routing": {
+        "dispatched": "native_spatial_kernel",
+        "entered": [
+          "auto_gp",
+          "nlp_bb_auto",
+          "native_spatial_kernel"
+        ]
+      },
+      "status": "optimal",
+      "wall": 6.3582774979986425
+    },
+    {
+      "budget": 45.0,
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "engagement": {
+        "attempts": 1,
+        "gate_calls": 1,
+        "gate_reasons": {},
+        "gate_safe": 1,
+        "last_gate_reason": null,
+        "last_outcome": null,
+        "outcomes": {},
+        "served": 0
+      },
+      "instance": "st_e35",
+      "instrument_marker": "phase5-census-v1",
+      "n_cons": 39,
+      "n_vars": 32,
+      "phase": "producer_declined",
+      "producer": {
+        "calls": 1,
+        "declines": 1,
+        "last": "probe_real_shape_mismatch",
+        "last_detail": "",
+        "reasons": {
+          "probe_real_shape_mismatch": 1
+        },
+        "specs": 0
+      },
+      "routing": {
+        "dispatched": "nlp_bb_auto",
+        "entered": [
+          "auto_gp",
+          "nlp_bb_auto"
+        ]
+      },
+      "wall_to_gate": 3.3475539610008127
+    },
+    {
+      "budget": 45.0,
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "engagement": {
+        "attempts": 1,
+        "gate_calls": 1,
+        "gate_reasons": {},
+        "gate_safe": 1,
+        "last_gate_reason": null,
+        "last_outcome": null,
+        "outcomes": {},
+        "served": 0
+      },
+      "instance": "st_e36",
+      "instrument_marker": "phase5-census-v1",
+      "n_cons": 2,
+      "n_vars": 2,
+      "phase": "producer_declined",
+      "producer": {
+        "calls": 1,
+        "declines": 1,
+        "last": "term_trilinear",
+        "last_detail": "",
+        "reasons": {
+          "term_trilinear": 1
+        },
+        "specs": 0
+      },
+      "routing": {
+        "dispatched": "nlp_bb_auto",
+        "entered": [
+          "auto_gp",
+          "nlp_bb_auto"
+        ]
+      },
+      "wall_to_gate": 1.9020375719992444
+    },
+    {
+      "budget": 45.0,
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "engagement": {
+        "attempts": 1,
+        "gate_calls": 1,
+        "gate_reasons": {},
+        "gate_safe": 1,
+        "last_gate_reason": null,
+        "last_outcome": null,
+        "outcomes": {},
+        "served": 0
+      },
+      "instance": "st_e38",
+      "instrument_marker": "phase5-census-v1",
+      "n_cons": 3,
+      "n_vars": 4,
+      "phase": "producer_declined",
+      "producer": {
+        "calls": 1,
+        "declines": 1,
+        "last": "term_trilinear",
+        "last_detail": "",
+        "reasons": {
+          "term_trilinear": 1
+        },
+        "specs": 0
+      },
+      "routing": {
+        "dispatched": "nlp_bb_auto",
+        "entered": [
+          "auto_gp",
+          "nlp_bb_auto"
+        ]
+      },
+      "wall_to_gate": 0.6196862060005515
+    },
+    {
+      "budget": 45.0,
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "engagement": {
+        "attempts": 1,
+        "gate_calls": 1,
+        "gate_reasons": {},
+        "gate_safe": 1,
+        "last_gate_reason": null,
+        "last_outcome": null,
+        "outcomes": {},
+        "served": 0
+      },
+      "instance": "st_e40",
+      "instrument_marker": "phase5-census-v1",
+      "n_cons": 8,
+      "n_vars": 4,
+      "phase": "producer_declined",
+      "producer": {
+        "calls": 1,
+        "declines": 1,
+        "last": "blf_row_count",
+        "last_detail": "6",
+        "reasons": {
+          "blf_row_count:6": 1
+        },
+        "specs": 0
+      },
+      "routing": {
+        "dispatched": "nlp_bb_auto",
+        "entered": [
+          "auto_gp",
+          "nlp_bb_auto"
+        ]
+      },
+      "wall_to_gate": 0.8531252920001862
+    },
+    {
+      "bound": 280.9999999906497,
+      "budget": 45.0,
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "engagement": {
+        "attempts": 0,
+        "gate_calls": 0,
+        "gate_reasons": {},
+        "gate_safe": 0,
+        "last_gate_reason": null,
+        "last_outcome": null,
+        "outcomes": {},
+        "served": 0
+      },
+      "gap_certified": true,
+      "instance": "st_miqp1",
+      "instrument_marker": "phase5-census-v1",
+      "n_cons": 1,
+      "n_vars": 5,
+      "node_count": 15,
+      "objective": 280.9999999906497,
+      "phase": "solve_returned",
+      "producer": {
+        "calls": 0,
+        "declines": 0,
+        "last": null,
+        "last_detail": "",
+        "reasons": {},
+        "specs": 0
+      },
+      "routing": {
+        "dispatched": "class_miqp",
+        "entered": [
+          "auto_gp",
+          "class_miqp"
+        ]
+      },
+      "status": "optimal",
+      "wall": 0.4870533739995153
+    },
+    {
+      "bound": 2.0,
+      "budget": 45.0,
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "engagement": {
+        "attempts": 0,
+        "gate_calls": 0,
+        "gate_reasons": {},
+        "gate_safe": 0,
+        "last_gate_reason": null,
+        "last_outcome": null,
+        "outcomes": {},
+        "served": 0
+      },
+      "gap_certified": true,
+      "instance": "st_miqp2",
+      "instrument_marker": "phase5-census-v1",
+      "n_cons": 3,
+      "n_vars": 4,
+      "node_count": 9,
+      "objective": 2.0,
+      "phase": "solve_returned",
+      "producer": {
+        "calls": 0,
+        "declines": 0,
+        "last": null,
+        "last_detail": "",
+        "reasons": {},
+        "specs": 0
+      },
+      "routing": {
+        "dispatched": "class_miqp",
+        "entered": [
+          "auto_gp",
+          "class_miqp"
+        ]
+      },
+      "status": "optimal",
+      "wall": 0.4736128530003043
+    },
+    {
+      "bound": -6.0,
+      "budget": 45.0,
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "engagement": {
+        "attempts": 0,
+        "gate_calls": 0,
+        "gate_reasons": {},
+        "gate_safe": 0,
+        "last_gate_reason": null,
+        "last_outcome": null,
+        "outcomes": {},
+        "served": 0
+      },
+      "gap_certified": true,
+      "instance": "st_miqp3",
+      "instrument_marker": "phase5-census-v1",
+      "n_cons": 1,
+      "n_vars": 2,
+      "node_count": 1,
+      "objective": -6.0,
+      "phase": "solve_returned",
+      "producer": {
+        "calls": 0,
+        "declines": 0,
+        "last": null,
+        "last_detail": "",
+        "reasons": {},
+        "specs": 0
+      },
+      "routing": {
+        "dispatched": "class_miqp",
+        "entered": [
+          "auto_gp",
+          "class_miqp"
+        ]
+      },
+      "status": "optimal",
+      "wall": 0.4606777310000325
+    },
+    {
+      "bound": -4574.000004423649,
+      "budget": 45.0,
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "engagement": {
+        "attempts": 0,
+        "gate_calls": 0,
+        "gate_reasons": {},
+        "gate_safe": 0,
+        "last_gate_reason": null,
+        "last_outcome": null,
+        "outcomes": {},
+        "served": 0
+      },
+      "gap_certified": true,
+      "instance": "st_miqp4",
+      "instrument_marker": "phase5-census-v1",
+      "n_cons": 4,
+      "n_vars": 6,
+      "node_count": 3,
+      "objective": -4574.000004423649,
+      "phase": "solve_returned",
+      "producer": {
+        "calls": 0,
+        "declines": 0,
+        "last": null,
+        "last_detail": "",
+        "reasons": {},
+        "specs": 0
+      },
+      "routing": {
+        "dispatched": "class_miqp",
+        "entered": [
+          "auto_gp",
+          "class_miqp"
+        ]
+      },
+      "status": "optimal",
+      "wall": 0.4531197770011204
+    },
+    {
+      "bound": -333.8888902720728,
+      "budget": 45.0,
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "engagement": {
+        "attempts": 0,
+        "gate_calls": 0,
+        "gate_reasons": {},
+        "gate_safe": 0,
+        "last_gate_reason": null,
+        "last_outcome": null,
+        "outcomes": {},
+        "served": 0
+      },
+      "gap_certified": true,
+      "instance": "st_miqp5",
+      "instrument_marker": "phase5-census-v1",
+      "n_cons": 13,
+      "n_vars": 7,
+      "node_count": 1,
+      "objective": -333.8888902720728,
+      "phase": "solve_returned",
+      "producer": {
+        "calls": 0,
+        "declines": 0,
+        "last": null,
+        "last_detail": "",
+        "reasons": {},
+        "specs": 0
+      },
+      "routing": {
+        "dispatched": "class_miqp",
+        "entered": [
+          "auto_gp",
+          "class_miqp"
+        ]
+      },
+      "status": "optimal",
+      "wall": 0.5187609960012196
+    },
+    {
+      "bound": -10.500000164988112,
+      "budget": 45.0,
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "engagement": {
+        "attempts": 1,
+        "gate_calls": 1,
+        "gate_reasons": {},
+        "gate_safe": 1,
+        "last_gate_reason": null,
+        "last_outcome": "served",
+        "outcomes": {
+          "served": 1
+        },
+        "served": 1
+      },
+      "gap_certified": true,
+      "instance": "st_ph10",
+      "instrument_marker": "phase5-census-v1",
+      "n_cons": 4,
+      "n_vars": 2,
+      "node_count": 1,
+      "objective": -10.500000164988112,
+      "phase": "solve_returned",
+      "producer": {
+        "calls": 1,
+        "declines": 0,
+        "last": null,
+        "last_detail": "",
+        "reasons": {},
+        "specs": 1
+      },
+      "routing": {
+        "dispatched": "native_spatial_kernel",
+        "entered": [
+          "auto_gp",
+          "class_qp",
+          "nlp_bb_auto",
+          "native_spatial_kernel"
+        ]
+      },
+      "status": "optimal",
+      "wall": 1.2950411969995912
+    },
+    {
+      "bound": -1.6495994490692313e-08,
+      "budget": 45.0,
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "engagement": {
+        "attempts": 0,
+        "gate_calls": 0,
+        "gate_reasons": {},
+        "gate_safe": 0,
+        "last_gate_reason": null,
+        "last_outcome": null,
+        "outcomes": {},
+        "served": 0
+      },
+      "gap_certified": true,
+      "instance": "st_test1",
+      "instrument_marker": "phase5-census-v1",
+      "n_cons": 1,
+      "n_vars": 5,
+      "node_count": 15,
+      "objective": -1.6495994490692313e-08,
+      "phase": "solve_returned",
+      "producer": {
+        "calls": 0,
+        "declines": 0,
+        "last": null,
+        "last_detail": "",
+        "reasons": {},
+        "specs": 0
+      },
+      "routing": {
+        "dispatched": "class_miqp",
+        "entered": [
+          "auto_gp",
+          "class_miqp"
+        ]
+      },
+      "status": "optimal",
+      "wall": 0.43433216199991875
+    },
+    {
+      "bound": -20.59070709795548,
+      "budget": 45.0,
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "engagement": {
+        "attempts": 0,
+        "gate_calls": 0,
+        "gate_reasons": {},
+        "gate_safe": 0,
+        "last_gate_reason": null,
+        "last_outcome": null,
+        "outcomes": {},
+        "served": 0
+      },
+      "gap_certified": true,
+      "instance": "st_testgr3",
+      "instrument_marker": "phase5-census-v1",
+      "n_cons": 20,
+      "n_vars": 20,
+      "node_count": 549,
+      "objective": -20.59,
+      "phase": "solve_returned",
+      "producer": {
+        "calls": 0,
+        "declines": 0,
+        "last": null,
+        "last_detail": "",
+        "reasons": {},
+        "specs": 0
+      },
+      "routing": {
+        "dispatched": "class_miqp",
+        "entered": [
+          "auto_gp",
+          "class_miqp"
+        ]
+      },
+      "status": "optimal",
+      "wall": 0.829901315000825
+    },
+    {
+      "budget": 45.0,
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "engagement": {
+        "attempts": 1,
+        "gate_calls": 1,
+        "gate_reasons": {},
+        "gate_safe": 1,
+        "last_gate_reason": null,
+        "last_outcome": null,
+        "outcomes": {},
+        "served": 0
+      },
+      "instance": "syn05hfsg",
+      "instrument_marker": "phase5-census-v1",
+      "n_cons": 58,
+      "n_vars": 42,
+      "phase": "producer_declined",
+      "producer": {
+        "calls": 1,
+        "declines": 1,
+        "last": "blf_row_count",
+        "last_detail": "5",
+        "reasons": {
+          "blf_row_count:5": 1
+        },
+        "specs": 0
+      },
+      "routing": {
+        "dispatched": "nlp_bb_auto",
+        "entered": [
+          "auto_gp",
+          "nlp_bb_auto"
+        ]
+      },
+      "wall_to_gate": 1.0855376340005023
+    },
+    {
+      "bound": 837.7324096873247,
+      "budget": 45.0,
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "engagement": {
+        "attempts": 0,
+        "gate_calls": 0,
+        "gate_reasons": {},
+        "gate_safe": 0,
+        "last_gate_reason": null,
+        "last_outcome": null,
+        "outcomes": {},
+        "served": 0
+      },
+      "gap_certified": true,
+      "instance": "syn05m",
+      "instrument_marker": "phase5-census-v1",
+      "n_cons": 28,
+      "n_vars": 20,
+      "node_count": 9,
+      "objective": 837.7323995316158,
+      "phase": "solve_returned",
+      "producer": {
+        "calls": 0,
+        "declines": 0,
+        "last": null,
+        "last_detail": "",
+        "reasons": {},
+        "specs": 0
+      },
+      "routing": {
+        "dispatched": "nlp_bb_auto",
+        "entered": [
+          "auto_gp",
+          "nlp_bb_auto"
+        ]
+      },
+      "status": "optimal",
+      "wall": 3.150799810000535
+    },
+    {
+      "bound": 1.267539241756442,
+      "budget": 45.0,
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "engagement": {
+        "attempts": 1,
+        "gate_calls": 1,
+        "gate_reasons": {},
+        "gate_safe": 1,
+        "last_gate_reason": null,
+        "last_outcome": "served",
+        "outcomes": {
+          "served": 1
+        },
+        "served": 1
+      },
+      "gap_certified": true,
+      "instance": "tanksize",
+      "instrument_marker": "phase5-census-v1",
+      "n_cons": 74,
+      "n_vars": 47,
+      "node_count": 8921,
+      "objective": 1.2686437525577945,
+      "phase": "solve_returned",
+      "producer": {
+        "calls": 1,
+        "declines": 0,
+        "last": null,
+        "last_detail": "",
+        "reasons": {},
+        "specs": 1
+      },
+      "routing": {
+        "dispatched": "native_spatial_kernel",
+        "entered": [
+          "auto_gp",
+          "nlp_bb_auto",
+          "native_spatial_kernel"
+        ]
+      },
+      "status": "time_limit",
+      "wall": 45.66701502499927
+    },
+    {
+      "bound": 3.00185791060984,
+      "budget": 45.0,
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "engagement": {
+        "attempts": 0,
+        "gate_calls": 0,
+        "gate_reasons": {},
+        "gate_safe": 0,
+        "last_gate_reason": null,
+        "last_outcome": null,
+        "outcomes": {},
+        "served": 0
+      },
+      "gap_certified": false,
+      "instance": "tls2",
+      "instrument_marker": "phase5-census-v1",
+      "n_cons": 24,
+      "n_vars": 37,
+      "node_count": 419,
+      "objective": 6.299999911869455,
+      "phase": "solve_returned",
+      "producer": {
+        "calls": 0,
+        "declines": 0,
+        "last": null,
+        "last_detail": "",
+        "reasons": {},
+        "specs": 0
+      },
+      "routing": {
+        "dispatched": "nlp_bb_auto",
+        "entered": [
+          "auto_gp",
+          "nlp_bb_auto"
+        ]
+      },
+      "status": "feasible",
+      "wall": 45.754190116000245
+    },
+    {
+      "budget": 45.0,
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "engagement": {
+        "attempts": 1,
+        "gate_calls": 1,
+        "gate_reasons": {},
+        "gate_safe": 1,
+        "last_gate_reason": null,
+        "last_outcome": null,
+        "outcomes": {},
+        "served": 0
+      },
+      "instance": "trig",
+      "instrument_marker": "phase5-census-v1",
+      "n_cons": 1,
+      "n_vars": 1,
+      "phase": "producer_declined",
+      "producer": {
+        "calls": 1,
+        "declines": 1,
+        "last": "term_univariate",
+        "last_detail": "cos,sin",
+        "reasons": {
+          "term_univariate:cos,sin": 1
+        },
+        "specs": 0
+      },
+      "routing": {
+        "dispatched": "nlp_bb_auto",
+        "entered": [
+          "auto_gp",
+          "nlp_bb_auto"
+        ]
+      },
+      "wall_to_gate": 0.5514625020005042
+    },
+    {
+      "budget": 45.0,
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "engagement": {
+        "attempts": 1,
+        "gate_calls": 1,
+        "gate_reasons": {},
+        "gate_safe": 1,
+        "last_gate_reason": null,
+        "last_outcome": null,
+        "outcomes": {},
+        "served": 0
+      },
+      "instance": "tspn05",
+      "instrument_marker": "phase5-census-v1",
+      "n_cons": 10,
+      "n_vars": 20,
+      "phase": "producer_declined",
+      "producer": {
+        "calls": 1,
+        "declines": 1,
+        "last": "probe_objective_bound_invalid",
+        "last_detail": "",
+        "reasons": {
+          "probe_objective_bound_invalid": 1
+        },
+        "specs": 0
+      },
+      "routing": {
+        "dispatched": "nlp_bb_auto",
+        "entered": [
+          "auto_gp",
+          "nlp_bb_auto"
+        ]
+      },
+      "wall_to_gate": 0.8651626179998857
+    },
+    {
+      "budget": 45.0,
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "engagement": {
+        "attempts": 1,
+        "gate_calls": 1,
+        "gate_reasons": {},
+        "gate_safe": 1,
+        "last_gate_reason": null,
+        "last_outcome": null,
+        "outcomes": {},
+        "served": 0
+      },
+      "instance": "tspn08",
+      "instrument_marker": "phase5-census-v1",
+      "n_cons": 18,
+      "n_vars": 44,
+      "phase": "producer_declined",
+      "producer": {
+        "calls": 1,
+        "declines": 1,
+        "last": "probe_objective_bound_invalid",
+        "last_detail": "",
+        "reasons": {
+          "probe_objective_bound_invalid": 1
+        },
+        "specs": 0
+      },
+      "routing": {
+        "dispatched": "nlp_bb_auto",
+        "entered": [
+          "auto_gp",
+          "nlp_bb_auto"
+        ]
+      },
+      "wall_to_gate": 1.587274071000138
+    },
+    {
+      "budget": 45.0,
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "engagement": {
+        "attempts": 1,
+        "gate_calls": 1,
+        "gate_reasons": {},
+        "gate_safe": 1,
+        "last_gate_reason": null,
+        "last_outcome": null,
+        "outcomes": {},
+        "served": 0
+      },
+      "instance": "tspn10",
+      "instrument_marker": "phase5-census-v1",
+      "n_cons": 21,
+      "n_vars": 65,
+      "phase": "producer_declined",
+      "producer": {
+        "calls": 1,
+        "declines": 1,
+        "last": "probe_objective_bound_invalid",
+        "last_detail": "",
+        "reasons": {
+          "probe_objective_bound_invalid": 1
+        },
+        "specs": 0
+      },
+      "routing": {
+        "dispatched": "nlp_bb_auto",
+        "entered": [
+          "auto_gp",
+          "nlp_bb_auto"
+        ]
+      },
+      "wall_to_gate": 2.3682272790010757
+    },
+    {
+      "budget": 45.0,
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "engagement": {
+        "attempts": 1,
+        "gate_calls": 1,
+        "gate_reasons": {},
+        "gate_safe": 1,
+        "last_gate_reason": null,
+        "last_outcome": null,
+        "outcomes": {},
+        "served": 0
+      },
+      "instance": "tspn12",
+      "instrument_marker": "phase5-census-v1",
+      "n_cons": 26,
+      "n_vars": 90,
+      "phase": "producer_declined",
+      "producer": {
+        "calls": 1,
+        "declines": 1,
+        "last": "probe_objective_bound_invalid",
+        "last_detail": "",
+        "reasons": {
+          "probe_objective_bound_invalid": 1
+        },
+        "specs": 0
+      },
+      "routing": {
+        "dispatched": "nlp_bb_auto",
+        "entered": [
+          "auto_gp",
+          "nlp_bb_auto"
+        ]
+      },
+      "wall_to_gate": 3.495187051999892
+    },
+    {
+      "bound": 999.5787502353639,
+      "budget": 45.0,
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "engagement": {
+        "attempts": 1,
+        "gate_calls": 1,
+        "gate_reasons": {},
+        "gate_safe": 1,
+        "last_gate_reason": null,
+        "last_outcome": "served",
+        "outcomes": {
+          "served": 1
+        },
+        "served": 1
+      },
+      "gap_certified": true,
+      "instance": "util",
+      "instrument_marker": "phase5-census-v1",
+      "n_cons": 167,
+      "n_vars": 145,
+      "node_count": 501,
+      "objective": 999.5787502353639,
+      "phase": "solve_returned",
+      "producer": {
+        "calls": 1,
+        "declines": 0,
+        "last": null,
+        "last_detail": "",
+        "reasons": {},
+        "specs": 1
+      },
+      "routing": {
+        "dispatched": "native_spatial_kernel",
+        "entered": [
+          "auto_gp",
+          "nlp_bb_auto",
+          "native_spatial_kernel"
+        ]
+      },
+      "status": "optimal",
+      "wall": 15.409110082000552
+    }
+  ],
+  "schema": "phase5_kernel_coverage_census/1",
+  "timestamp": "2026-07-29T16:41:59Z",
+  "total_wall_seconds": 753.1313524080006
+}
