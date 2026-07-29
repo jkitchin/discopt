@@ -84,6 +84,7 @@ value in ``python/tests/data/known_optima.toml``.
 
 from __future__ import annotations
 
+import threading
 from typing import TYPE_CHECKING, Optional
 
 if TYPE_CHECKING:
@@ -687,6 +688,34 @@ def solve_convex_tree(spec: dict, *, time_limit_s: Optional[float] = None, **cfg
     return result
 
 
+# Wall spent on the LAST convex-kernel attempt in this thread, whether or not the
+# attempt was adopted (consolidation plan Phase 5.4). ``Model.solve`` deducts it
+# from the budget it hands the default path, so a declined attempt can no longer
+# make a ``time_limit=T`` solve run for ~2T.
+class _AttemptClock(threading.local):
+    def __init__(self) -> None:  # pragma: no cover - trivial
+        self.seconds = 0.0
+
+
+_ATTEMPT = _AttemptClock()
+
+
+def last_attempt_seconds() -> float:
+    """Wall of the last convex-kernel attempt on this thread, in seconds.
+
+    **Exactly 0.0 when the flag is off**, and that is load-bearing rather than
+    cosmetic: ``Model.solve`` subtracts this from the budget it passes to
+    ``solve_model``, so a nonzero reading on the default path would perturb every
+    deadline-sensitive decision in a Regime-N-visible way. :func:`try_convex_solve`
+    therefore resets it to 0.0 on entry and only starts the clock *after* the
+    flag check, so a flag-off solve subtracts a literal zero.
+    """
+    st = _ATTEMPT
+    if not hasattr(st, "seconds"):  # pragma: no cover - fresh thread
+        st.__init__()
+    return float(st.seconds)
+
+
 def try_convex_solve(
     model, *, time_limit: float = 3600.0, gap_tolerance: float = 1e-4
 ) -> Optional[SolveResult]:
@@ -698,9 +727,28 @@ def try_convex_solve(
     the incumbent is verified feasible against the pristine model (#779). Everything
     else — flag off, non-convex, not-certified-within-budget, no incumbent, or an
     unverifiable incumbent — returns ``None`` so the caller keeps the (always-correct)
-    default path with its full time budget. This bounds the kernel's cost on large
-    instances it cannot finish (tracked separately for SCIP-parity) and never
-    reports an unsound or uncertified result. Proven-infeasible roots are surfaced.
+    default path. Proven-infeasible roots are surfaced.
+
+    **Budget accounting (consolidation plan Phase 5.4).** The attempt is bounded,
+    but until this was fixed it was *additive*: ``Model.solve`` called
+    ``solve_model`` afterwards with the caller's FULL ``time_limit``, so an
+    eligible-but-uncertifiable model paid the attempt on top of its whole default
+    budget. Measured in-repo, ``clay0303hfsg`` at a **10 s** budget:
+    ON 25.2 s (sd 0.12) vs OFF 13.5 s (sd 0.05), reproduced in both replicates —
+    2.5x the stated limit. That is the mechanism behind the
+    ``watercontamination0202`` counter-case Phase 5.4 names as the graduation
+    blocker. :func:`last_attempt_seconds` publishes the attempt wall (spec build
+    included — it is 2.34 s on ``clay0303hfsg`` and 1.16 s on
+    ``cvxnonsep_psig40r``, i.e. not negligible) and ``Model.solve`` subtracts it.
+
+    **Why the attempt is NOT capped to a fraction of the budget**, which was this
+    card's first design: measured attempt costs on the four in-repo eligible
+    instances are ``clay0303hfsg`` 41.9 s (spec 2.34 + tree 39.55, certifies),
+    ``cvxnonsep_psig40r`` 1.16 s (declines at the root), ``syn05hfsg`` 0.93 s,
+    ``syn05m`` 0.77 s. ``clay0303hfsg`` therefore needs ~93 % of a 45 s budget to
+    certify, so ANY fractional cap below that turns the corpus's only
+    certification win (OFF ``feasible`` -> ON ``optimal``) back into ``feasible``.
+    The fraction was dropped rather than shipped as a dead knob; see the plan's §6.
     """
     import time
 
@@ -708,9 +756,18 @@ def try_convex_solve(
 
     from discopt.modeling.core import SolveResult
 
+    _ATTEMPT.seconds = 0.0
     if not convex_kernel_enabled():
         return None
-    spec = build_convex_spec(model)
+    # Clock starts HERE, after the flag check, so a flag-off solve reads exactly
+    # 0.0 (see ``last_attempt_seconds``). It covers the spec build deliberately:
+    # ``build_convex_spec`` is the convexity classification, and on the
+    # counter-case class that classification is itself seconds of wall.
+    _attempt_t0 = time.perf_counter()
+    try:
+        spec = build_convex_spec(model)
+    finally:
+        _ATTEMPT.seconds = time.perf_counter() - _attempt_t0
     if spec is None:
         return None
 
@@ -723,6 +780,7 @@ def try_convex_solve(
         initial_incumbent=None,
     )
     wall = time.perf_counter() - t0
+    _ATTEMPT.seconds = time.perf_counter() - _attempt_t0
 
     incumbent = r["incumbent"]
     inc_x = np.asarray(r["incumbent_x"], float)

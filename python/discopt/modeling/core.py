@@ -4079,11 +4079,30 @@ class Model:
         # model (#779); it returns None — falling through to the default path
         # below, untouched — for the flag-off case, any non-convex model, or an
         # unverifiable incumbent. Wrapped so a kernel error can never break solve.
+        #
+        # Phase 5.4: a DECLINED attempt is no longer free. ``_ck_elapsed`` is the
+        # wall the attempt actually spent (spec build included) and it is deducted
+        # from the budget handed to ``solve_model`` below, so ``solve(time_limit=T)``
+        # can no longer run for ~2T because a convex-eligible model failed to
+        # certify. Measured before the fix, ``clay0303hfsg`` at a 10 s budget:
+        # kernel ON 25.2 s (sd 0.12) vs OFF 13.5 s (sd 0.05), both replicates —
+        # the in-repo reproduction of the ``watercontamination0202`` counter-case
+        # that Phase 5.4 names as the graduation blocker.
+        #
+        # ``last_attempt_seconds()`` is EXACTLY 0.0 whenever DISCOPT_CONVEX_KERNEL
+        # is off (it is reset on entry and the clock starts after the flag check),
+        # so the default path subtracts a literal zero and every deadline below is
+        # bit-identical — this stays Regime N on defaults.
+        _ck_elapsed = 0.0
         if not skip_convex_check:
             try:
-                from discopt.solvers._convex_kernel import try_convex_solve
+                from discopt.solvers._convex_kernel import (
+                    last_attempt_seconds,
+                    try_convex_solve,
+                )
 
                 _ck_res = try_convex_solve(self, time_limit=time_limit, gap_tolerance=gap_tolerance)
+                _ck_elapsed = last_attempt_seconds()
             except Exception:
                 _ck_res = None
             if _ck_res is not None:
@@ -4198,7 +4217,11 @@ class Model:
                     # large factorable models, so the cheaper mistake is this one.
             except Exception:
                 _fb_reserve = 0.0
-        _primary_tl = time_limit - _fb_reserve
+        # ``max(0.0, ...)``: a kernel attempt that consumed the whole budget leaves
+        # nothing, and ``solve_model`` handles a spent budget through its existing
+        # ``_deadline_exhausted`` short-circuit (a rigorous root-relaxation bound,
+        # never a certified claim) rather than by running an unbounded search.
+        _primary_tl = max(0.0, time_limit - _fb_reserve - _ck_elapsed)
 
         try:
             with deadline_scope(_primary_tl):

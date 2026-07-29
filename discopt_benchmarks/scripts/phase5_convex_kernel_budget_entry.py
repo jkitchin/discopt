@@ -257,7 +257,9 @@ def main(argv: list[str] | None = None) -> int:
         )
 
     _REPORTS_DIR.mkdir(exist_ok=True)
-    out = _REPORTS_DIR / f"phase5_convex_kernel_budget_entry_{_short_sha()}.json"
+    out = (
+        _REPORTS_DIR / f"phase5_convex_kernel_budget_entry_{_short_sha()}_b{int(args.budget)}.json"
+    )
     out.write_text(
         json.dumps(
             {
