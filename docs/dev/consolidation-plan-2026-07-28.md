@@ -866,9 +866,35 @@ tree manager. If Phase 5 retires `lp_spatial_bb`'s class first, skip its port.
 > exactly **four**: `clay0303hfsg`, `cvxnonsep_psig40r`, `syn05hfsg`, `syn05m`.
 > The family this flag exists for is 136 `.nl` files in the MINLPLib snapshot and
 > the deciding counter-case (`watercontamination0202`) is snapshot-only. Both are
-> recorded as **SKIPPED — local only**. What the in-repo panel *can* and does
-> settle is the other direction — that turning the flag on does not harm the 115
-> instances it never routes — and the four it routes; the verdict is in §6.
+> recorded as **SKIPPED — local only**.
+>
+> The §5 differential panel ran anyway, over all 119, both arms, ×3 replication on
+> the decisive rows (10,734 s; artifact
+> `reports/phase5_convex_kernel_diff_panel_670911ed.json`; full verdict verbatim in
+> §6):
+>
+> ```
+> cert-clean    : PASS (0)          [613 executed checks]
+> quality-clean : PASS (0)
+> net-positive  : FAIL (engaged 3, helped 0, median non-engaged wall delta
+>                       +0.060s over 116, overhead_ok=True)
+> GRADUATE      : NO
+> ```
+>
+> So the two questions the in-repo corpus *can* answer are answered — turning the
+> flag on is cert-clean and quality-clean corpus-wide, and it costs **+0.060 s
+> median** on the 116 instances it never routes (that is the convexity
+> classification and nothing else). `helped = 0` because the one instance that
+> would carry the bar, `clay0303hfsg`, was **quarantined as unresolved** (ON
+> `optimal` ×3, OFF `feasible`/`time_limit`/`feasible`) — the #902 replication
+> machinery refusing to let ambient load decide a verdict. The cleaner measurement
+> of the same win is the entry experiment (quiet machine, interleaved, 2
+> replicates): OFF `feasible` ×2 → ON `optimal` ×2, 46.66 s → 42.53 s.
+>
+> **`DISCOPT_CONVEX_KERNEL` therefore stays default-OFF.** What would graduate it,
+> stated so the next session does not re-derive it: the same panel over the 136-file
+> convex family plus `watercontamination0202`, on a machine with the snapshot, with
+> `clay0303hfsg` resolving stably.
 >
 > ### What 5.2 should take next
 >
@@ -1640,3 +1666,99 @@ convexity classification and nothing else. (b) The docs' "`clay0303hfsg` certifi
 in ~7 s" (plan §5.4, from #882) does **not** reproduce on this machine at this
 tree: it is 41.9 s. Recorded per CLAUDE.md §11 for whoever plans against that
 number next.
+
+### 2026-07-29 — Phase 5.4 graduation panel for `DISCOPT_CONVEX_KERNEL` — **GRADUATE: NO** (cert-clean and quality-clean PASS; net-positive unproven on a population this environment does not have)
+
+**The panel.** `discopt_benchmarks/scripts/phase5_convex_kernel_diff_panel.py`, all
+**119** in-repo instances (union of both corpus dirs), 45 s budget, OFF vs ON with
+both arms written explicitly in every child, one subprocess per (instance, arm),
+stage-2 replication ×3 with the arms interleaved on the decisive rows. Wall
+**10,734 s**, load start 0.82 peak 4.72. Artifact
+`reports/phase5_convex_kernel_diff_panel_670911ed.json`.
+
+**Verdict, verbatim after the rescore described below:**
+
+```
+## VERDICT
+  cert-clean    : PASS (0)
+  verification notes (symmetric, NOT charged to the flag): 1
+      - nvs22: incumbent fails independent verification in BOTH arms (pre-existing, not attributable to the flag)
+  quality-clean : PASS (0)
+  net-positive  : FAIL (engaged 3, helped 0, median non-engaged wall delta +0.060s over 116, overhead_ok=True)
+  GRADUATE      : NO
+
+  eligible : 4 -> ['clay0303hfsg', 'cvxnonsep_psig40r', 'syn05hfsg', 'syn05m']
+  adopted  : 3 -> ['clay0303hfsg', 'syn05hfsg', 'syn05m']
+  helped   : 0 -> []
+  unresolved: 1
+      - clay0303hfsg: replicates disagree — OFF=['feasible', 'time_limit', 'feasible'] ON=['optimal', 'optimal', 'optimal']
+  EXECUTED CHECKS : 613 {'objective': 86, 'optimality': 86, 'bound_oracle': 132, 'quality': 103, 'verify': 206}
+```
+
+**What the panel settles.** (1) **Cert-clean and quality-clean over the whole
+corpus**: 613 executed checks — 86 certified-objective agreements, 86
+certification-regression checks, 132 dual-bound-vs-proven-oracle checks, 103
+incumbent-quality comparisons, 206 independent incumbent verifications — with
+**zero** violations. (2) **The cost of turning the flag on for the 116 instances it
+does not route is +0.060 s median.** That is the convexity classification and
+nothing else, corroborated exactly by the attempt-cost decomposition above
+(`cvxnonsep_psig40r`: spec 1.16 s, tree 0.00 s). Both were open questions and both
+are now answered.
+
+**Why it does not graduate — two independent reasons, neither of which is "the
+evidence looks bad".**
+
+1. **Population.** `build_convex_spec` accepts **4 of 119** in-repo instances
+   (measured: 119 executed probes, 0 errored). The family this flag exists for is
+   136 `.nl` files in the MINLPLib snapshot and the deciding counter-case
+   `watercontamination0202` is snapshot-only. **Full convex-family panel: SKIPPED —
+   local only. `watercontamination0202` misroute counter-case: SKIPPED — local
+   only.** `sota-parity-analysis-2026-07-27.md` §4 P3 said this in advance ("the
+   in-repo corpus alone cannot graduate this flag"); this run measured it rather
+   than assuming it.
+2. **`helped = 0` under this session's load.** The one instance that would have
+   carried the bar, `clay0303hfsg`, is **quarantined as unresolved**: ON is
+   `optimal` in all three replicates, OFF is `feasible`/`time_limit`/`feasible`.
+   The replication machinery did exactly what #902 built it for — load moved the row
+   to unresolved instead of making the verdict wrong. The cleaner measurement of the
+   same instance is the entry experiment above (quiet machine, 2 interleaved
+   replicates, 45 s): OFF `feasible` ×2 / ON `optimal` ×2, 46.66 s → 42.53 s. So the
+   win is real and the *panel* could not certify it on a busy machine; per §0.1 an
+   unresolved row awards nothing, and the flag stays **default-OFF**.
+
+**A harness defect this panel found and fixed in itself — the first verdict was
+`cert-clean: FAIL (2)` and it was wrong.** Both violations were `nvs22`, one per
+arm, i.e. **identical in OFF and ON**. Root-caused rather than tuned around: the
+incumbent fails on two *defined-variable equality* rows,
+
+| row | residual | variable value | relative |
+|---|---|---|---|
+| `x4 = 4243.28/(x2·x3)` | 1.71e-5 | 2121.64 | 8.1e-9 |
+| `x5 = ((59405.9+2121.64·x3)·x6)/(…)` | 2.64e-4 | 10782.7 | 2.4e-8 |
+
+and the reported objective matches `=opt= 6.05822` to **5.7e-8**. The verifier's
+tolerance is `abs_tol + rel_tol·|residual|`, which on an equality row degenerates to
+a pure absolute 1e-6 **no matter how large the row is** — so a defined variable of
+magnitude 1e4 can never pass. Nothing was relaxed: the gate was rescoped to the
+question a *differential* panel actually asks — a verification failure is a cert
+violation when it is **asymmetric** (ON fails, OFF passes); a failure reproduced in
+both arms is by construction not flag-caused and is reported as a
+`verification note` with the same prominence. Re-scored from the stored rows
+(`--rescore`, no re-solve: the rows are the measurement, the verdict is a function
+of them).
+
+**Named follow-up, not fixed here (out of Phase 5's scope, and it is a solver-wide
+question):** *the incumbent verifiers' tolerance has no row-scale term.*
+`solver/native_kernel._native_kernel_verify_point` and
+`solvers/_convex_kernel._incumbent_is_feasible` both reject `nvs22`'s certified
+optimum. Either the tolerance should carry a scale term (`abs + rel·‖row terms‖`
+rather than `abs + rel·|residual|`), or `nvs22`'s certificate is being issued at a
+tolerance the repo's own verifiers do not accept — and which of those is true is a
+correctness question that deserves its own investigation with its own panel. The
+measurement above is the entry evidence for it.
+
+**Two harness defects also fixed for the next run** (neither changed this verdict):
+`_obj_match(None, None)` returned False, so every no-incumbent-in-both-arms row
+counted as "decisive" — 20 rows were replicated where 6 were real, which is where
+most of the 10,734 s went; and the panel gained a `--rescore` mode so a corrected
+gate never requires another three-hour run.

@@ -1,0 +1,356 @@
+{
+  "budget": 10.0,
+  "comparisons": 4,
+  "eligible": [
+    "clay0303hfsg",
+    "cvxnonsep_psig40r",
+    "syn05hfsg",
+    "syn05m"
+  ],
+  "executed_solves": 16,
+  "git_sha": "b30cc332",
+  "hazard": [
+    "clay0303hfsg: ON 16.0s (sd 0.57) vs OFF 13.7s (sd 0.32) on a 10s budget"
+  ],
+  "load_end": 1.27685546875,
+  "load_start": 0.6884765625,
+  "reps": 2,
+  "rows": [
+    {
+      "bound": null,
+      "budget": 10.0,
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "flag": "0",
+      "gap_certified": false,
+      "instance": "clay0303hfsg",
+      "kernel_enabled": false,
+      "node_count": 3,
+      "objective": null,
+      "rep": 0,
+      "sense": "min",
+      "status": "time_limit",
+      "wall": 13.419061290000172
+    },
+    {
+      "bound": null,
+      "budget": 10.0,
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "flag": "1",
+      "gap_certified": false,
+      "instance": "clay0303hfsg",
+      "kernel_enabled": true,
+      "node_count": 0,
+      "objective": null,
+      "rep": 0,
+      "sense": "min",
+      "status": "time_limit",
+      "wall": 16.571315270000923
+    },
+    {
+      "bound": 86.54514617246643,
+      "budget": 10.0,
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "flag": "0",
+      "gap_certified": true,
+      "instance": "cvxnonsep_psig40r",
+      "kernel_enabled": false,
+      "node_count": 63,
+      "objective": 86.54527995164959,
+      "rep": 0,
+      "sense": "min",
+      "status": "optimal",
+      "wall": 11.201177842000106
+    },
+    {
+      "bound": 86.43498814319877,
+      "budget": 10.0,
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "flag": "1",
+      "gap_certified": false,
+      "instance": "cvxnonsep_psig40r",
+      "kernel_enabled": true,
+      "node_count": 47,
+      "objective": 86.54527995164959,
+      "rep": 0,
+      "sense": "min",
+      "status": "feasible",
+      "wall": 10.166063189999477
+    },
+    {
+      "bound": 854.4442886425633,
+      "budget": 10.0,
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "flag": "0",
+      "gap_certified": false,
+      "instance": "syn05hfsg",
+      "kernel_enabled": false,
+      "node_count": 41,
+      "objective": 837.7324008979798,
+      "rep": 0,
+      "sense": "max",
+      "status": "feasible",
+      "wall": 10.879552191001494
+    },
+    {
+      "bound": 837.7324008979797,
+      "budget": 10.0,
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "flag": "1",
+      "gap_certified": true,
+      "instance": "syn05hfsg",
+      "kernel_enabled": true,
+      "node_count": 2,
+      "objective": 837.7324008979797,
+      "rep": 0,
+      "sense": "max",
+      "status": "optimal",
+      "wall": 1.4148031229997287
+    },
+    {
+      "bound": 837.7324096873247,
+      "budget": 10.0,
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "flag": "0",
+      "gap_certified": true,
+      "instance": "syn05m",
+      "kernel_enabled": false,
+      "node_count": 9,
+      "objective": 837.7323995316158,
+      "rep": 0,
+      "sense": "max",
+      "status": "optimal",
+      "wall": 3.7310093249998317
+    },
+    {
+      "bound": 837.7324008979797,
+      "budget": 10.0,
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "flag": "1",
+      "gap_certified": true,
+      "instance": "syn05m",
+      "kernel_enabled": true,
+      "node_count": 3,
+      "objective": 837.7324008979796,
+      "rep": 0,
+      "sense": "max",
+      "status": "optimal",
+      "wall": 0.8579080969993811
+    },
+    {
+      "bound": null,
+      "budget": 10.0,
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "flag": "0",
+      "gap_certified": false,
+      "instance": "clay0303hfsg",
+      "kernel_enabled": false,
+      "node_count": 3,
+      "objective": null,
+      "rep": 1,
+      "sense": "min",
+      "status": "time_limit",
+      "wall": 14.053258505000485
+    },
+    {
+      "bound": null,
+      "budget": 10.0,
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "flag": "1",
+      "gap_certified": false,
+      "instance": "clay0303hfsg",
+      "kernel_enabled": true,
+      "node_count": 0,
+      "objective": null,
+      "rep": 1,
+      "sense": "min",
+      "status": "time_limit",
+      "wall": 15.439678003000154
+    },
+    {
+      "bound": 86.46369846819947,
+      "budget": 10.0,
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "flag": "0",
+      "gap_certified": false,
+      "instance": "cvxnonsep_psig40r",
+      "kernel_enabled": false,
+      "node_count": 61,
+      "objective": 86.54527995164959,
+      "rep": 1,
+      "sense": "min",
+      "status": "feasible",
+      "wall": 11.181688183000006
+    },
+    {
+      "bound": 86.43498814319877,
+      "budget": 10.0,
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "flag": "1",
+      "gap_certified": false,
+      "instance": "cvxnonsep_psig40r",
+      "kernel_enabled": true,
+      "node_count": 47,
+      "objective": 86.54527995164959,
+      "rep": 1,
+      "sense": "min",
+      "status": "feasible",
+      "wall": 10.199286733000918
+    },
+    {
+      "bound": 851.0639474502201,
+      "budget": 10.0,
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "flag": "0",
+      "gap_certified": false,
+      "instance": "syn05hfsg",
+      "kernel_enabled": false,
+      "node_count": 83,
+      "objective": 837.7324123911069,
+      "rep": 1,
+      "sense": "max",
+      "status": "feasible",
+      "wall": 10.720771480999247
+    },
+    {
+      "bound": 837.7324008979797,
+      "budget": 10.0,
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "flag": "1",
+      "gap_certified": true,
+      "instance": "syn05hfsg",
+      "kernel_enabled": true,
+      "node_count": 2,
+      "objective": 837.7324008979797,
+      "rep": 1,
+      "sense": "max",
+      "status": "optimal",
+      "wall": 1.0453801680014294
+    },
+    {
+      "bound": 837.7324096873247,
+      "budget": 10.0,
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "flag": "0",
+      "gap_certified": true,
+      "instance": "syn05m",
+      "kernel_enabled": false,
+      "node_count": 9,
+      "objective": 837.7323995316158,
+      "rep": 1,
+      "sense": "max",
+      "status": "optimal",
+      "wall": 3.0180358390007314
+    },
+    {
+      "bound": 837.7324008979797,
+      "budget": 10.0,
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "flag": "1",
+      "gap_certified": true,
+      "instance": "syn05m",
+      "kernel_enabled": true,
+      "node_count": 3,
+      "objective": 837.7324008979796,
+      "rep": 1,
+      "sense": "max",
+      "status": "optimal",
+      "wall": 0.8486403139995673
+    }
+  ],
+  "schema": "phase5_convex_budget_entry/1",
+  "summary": [
+    {
+      "instance": "clay0303hfsg",
+      "off_obj": [
+        null,
+        null
+      ],
+      "off_status": [
+        "time_limit",
+        "time_limit"
+      ],
+      "off_wall_mean": 13.736159897500329,
+      "off_wall_sd": 0.3170986075001565,
+      "on_obj": [
+        null,
+        null
+      ],
+      "on_status": [
+        "time_limit",
+        "time_limit"
+      ],
+      "on_wall_mean": 16.00549663650054,
+      "on_wall_sd": 0.5658186335003847
+    },
+    {
+      "instance": "cvxnonsep_psig40r",
+      "off_obj": [
+        86.54527995164959,
+        86.54527995164959
+      ],
+      "off_status": [
+        "optimal",
+        "feasible"
+      ],
+      "off_wall_mean": 11.191433012500056,
+      "off_wall_sd": 0.0097448295000504,
+      "on_obj": [
+        86.54527995164959,
+        86.54527995164959
+      ],
+      "on_status": [
+        "feasible",
+        "feasible"
+      ],
+      "on_wall_mean": 10.182674961500197,
+      "on_wall_sd": 0.01661177150072035
+    },
+    {
+      "instance": "syn05hfsg",
+      "off_obj": [
+        837.7324008979798,
+        837.7324123911069
+      ],
+      "off_status": [
+        "feasible",
+        "feasible"
+      ],
+      "off_wall_mean": 10.80016183600037,
+      "off_wall_sd": 0.07939035500112368,
+      "on_obj": [
+        837.7324008979797,
+        837.7324008979797
+      ],
+      "on_status": [
+        "optimal",
+        "optimal"
+      ],
+      "on_wall_mean": 1.230091645500579,
+      "on_wall_sd": 0.18471147749914962
+    },
+    {
+      "instance": "syn05m",
+      "off_obj": [
+        837.7323995316158,
+        837.7323995316158
+      ],
+      "off_status": [
+        "optimal",
+        "optimal"
+      ],
+      "off_wall_mean": 3.3745225820002815,
+      "off_wall_sd": 0.3564867429995502,
+      "on_obj": [
+        837.7324008979796,
+        837.7324008979796
+      ],
+      "on_status": [
+        "optimal",
+        "optimal"
+      ],
+      "on_wall_mean": 0.8532742054994742,
+      "on_wall_sd": 0.004633891499906895
+    }
+  ],
+  "verdict": "CONFIRMED"
+}

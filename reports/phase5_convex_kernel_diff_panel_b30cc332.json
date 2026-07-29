@@ -1,0 +1,255 @@
+{
+  "budget": 20.0,
+  "eligible": [
+    "syn05m"
+  ],
+  "git_sha": "b30cc332",
+  "instances": [
+    "alan",
+    "nvs05",
+    "syn05m"
+  ],
+  "pairs": {
+    "alan": {
+      "off": {
+        "adopted": false,
+        "attempt_s": 0.0,
+        "bound": 2.9249999983013426,
+        "budget": 20.0,
+        "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+        "eligible": false,
+        "flag": "0",
+        "gap_certified": true,
+        "has_attempt_clock": true,
+        "instance": "alan",
+        "kernel_enabled": false,
+        "node_count": 21,
+        "objective": 2.9249999983013426,
+        "sense": "min",
+        "status": "optimal",
+        "verified": true,
+        "wall": 0.49397912499989616
+      },
+      "on": {
+        "adopted": false,
+        "attempt_s": 0.06196666399955575,
+        "bound": 2.9249999983013426,
+        "budget": 20.0,
+        "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+        "eligible": false,
+        "flag": "1",
+        "gap_certified": true,
+        "has_attempt_clock": true,
+        "instance": "alan",
+        "kernel_enabled": true,
+        "node_count": 21,
+        "objective": 2.9249999983013426,
+        "sense": "min",
+        "status": "optimal",
+        "verified": true,
+        "wall": 0.5408111619999545
+      }
+    },
+    "nvs05": {
+      "off": {
+        "adopted": false,
+        "attempt_s": 0.0,
+        "bound": 3.5139117087764977,
+        "budget": 20.0,
+        "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+        "eligible": false,
+        "flag": "0",
+        "gap_certified": false,
+        "has_attempt_clock": true,
+        "instance": "nvs05",
+        "kernel_enabled": false,
+        "node_count": 25,
+        "objective": 8.731956986640078,
+        "sense": "min",
+        "status": "feasible",
+        "verified": true,
+        "wall": 20.17138164300013
+      },
+      "on": {
+        "adopted": false,
+        "attempt_s": 0.10879141800069192,
+        "bound": 3.5139117087764977,
+        "budget": 20.0,
+        "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+        "eligible": false,
+        "flag": "1",
+        "gap_certified": false,
+        "has_attempt_clock": true,
+        "instance": "nvs05",
+        "kernel_enabled": true,
+        "node_count": 25,
+        "objective": 8.731956986640078,
+        "sense": "min",
+        "status": "feasible",
+        "verified": true,
+        "wall": 20.35272248599904
+      }
+    },
+    "syn05m": {
+      "off": {
+        "adopted": false,
+        "attempt_s": 0.0,
+        "bound": 837.7324096873247,
+        "budget": 20.0,
+        "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+        "eligible": true,
+        "flag": "0",
+        "gap_certified": true,
+        "has_attempt_clock": true,
+        "instance": "syn05m",
+        "kernel_enabled": false,
+        "node_count": 9,
+        "objective": 837.7323995316158,
+        "sense": "max",
+        "status": "optimal",
+        "verified": true,
+        "wall": 2.24071097200067
+      },
+      "on": {
+        "adopted": true,
+        "attempt_s": 0.23673744900042948,
+        "bound": 837.7324008979797,
+        "budget": 20.0,
+        "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+        "eligible": true,
+        "flag": "1",
+        "gap_certified": true,
+        "has_attempt_clock": true,
+        "instance": "syn05m",
+        "kernel_enabled": true,
+        "node_count": 3,
+        "objective": 837.7324008979796,
+        "sense": "max",
+        "status": "optimal",
+        "verified": true,
+        "wall": 0.33058189100120217
+      },
+      "replicates": {
+        "off": [
+          {
+            "adopted": false,
+            "attempt_s": 0.0,
+            "bound": 837.7324096873247,
+            "budget": 20.0,
+            "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+            "eligible": true,
+            "flag": "0",
+            "gap_certified": true,
+            "has_attempt_clock": true,
+            "instance": "syn05m",
+            "kernel_enabled": false,
+            "node_count": 9,
+            "objective": 837.7323995316158,
+            "sense": "max",
+            "status": "optimal",
+            "verified": true,
+            "wall": 2.40429257300093
+          },
+          {
+            "adopted": false,
+            "attempt_s": 0.0,
+            "bound": 837.7324096873247,
+            "budget": 20.0,
+            "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+            "eligible": true,
+            "flag": "0",
+            "gap_certified": true,
+            "has_attempt_clock": true,
+            "instance": "syn05m",
+            "kernel_enabled": false,
+            "node_count": 9,
+            "objective": 837.7323995316158,
+            "sense": "max",
+            "status": "optimal",
+            "verified": true,
+            "wall": 2.381480804999228
+          }
+        ],
+        "off_median_objective": 837.7323995316158,
+        "on": [
+          {
+            "adopted": true,
+            "attempt_s": 0.2529848249996576,
+            "bound": 837.7324008979797,
+            "budget": 20.0,
+            "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+            "eligible": true,
+            "flag": "1",
+            "gap_certified": true,
+            "has_attempt_clock": true,
+            "instance": "syn05m",
+            "kernel_enabled": true,
+            "node_count": 3,
+            "objective": 837.7324008979796,
+            "sense": "max",
+            "status": "optimal",
+            "verified": true,
+            "wall": 0.3618928300002153
+          },
+          {
+            "adopted": true,
+            "attempt_s": 0.24248247400100809,
+            "bound": 837.7324008979797,
+            "budget": 20.0,
+            "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+            "eligible": true,
+            "flag": "1",
+            "gap_certified": true,
+            "has_attempt_clock": true,
+            "instance": "syn05m",
+            "kernel_enabled": true,
+            "node_count": 3,
+            "objective": 837.7324008979796,
+            "sense": "max",
+            "status": "optimal",
+            "verified": true,
+            "wall": 0.3411373140006617
+          }
+        ],
+        "on_median_objective": 837.7324008979796,
+        "stable": true
+      }
+    }
+  },
+  "reps": 2,
+  "schema": "phase5_convex_diff_panel/1",
+  "verdict": {
+    "cert_clean": true,
+    "cert_violations": [],
+    "decisive_instances": [
+      "syn05m"
+    ],
+    "engaged": [
+      "syn05m"
+    ],
+    "errored": [],
+    "executed_checks": {
+      "bound_oracle": 4,
+      "objective": 2,
+      "optimality": 2,
+      "quality": 3,
+      "verify": 6
+    },
+    "executed_total": 17,
+    "graduate": false,
+    "helped": [],
+    "load_peak": 1.23486328125,
+    "load_start": 1.1572265625,
+    "median_nonengaged_wall_delta_s": 0.11408643999948254,
+    "n_nonengaged_measured": 2,
+    "net_positive": false,
+    "no_oracle_instances": [
+      "syn05m"
+    ],
+    "overhead_ok": true,
+    "quality_clean": true,
+    "quality_violations": [],
+    "replicates": 2,
+    "unstable": []
+  }
+}

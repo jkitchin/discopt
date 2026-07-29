@@ -53,6 +53,10 @@ coverage.svg
 # ORDERS the Phase-5 sub-cards (plan Phase 5.1), so a later card must be able to
 # read the table it is sequenced against rather than re-derive it.
 !/reports/phase5_kernel_coverage_census_*.json
+# ...and the Phase 5.4 differential panel, which is the Regime-C evidence for the
+# DISCOPT_CONVEX_KERNEL graduation decision recorded in the plan's §6.
+!/reports/phase5_convex_kernel_diff_panel_*.json
+!/reports/phase5_convex_kernel_budget_entry_*.json
 
 # Generated course material (built from python/discopt/course/)
 /course/
