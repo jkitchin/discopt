@@ -2016,3 +2016,61 @@ synthetic large-scale row, and real `nvs22`. The **9 that pass in both arms are 
 (model-global scale, 1-norm scale, `rel_tol` coefficient, raised absolute floor) each
 still rejecting the bad point they were built to catch. A fix that had merely loosened
 the tolerance would have failed those nine.
+
+### 2026-07-29 — Phase 5.5 corpus sweep: "the row-scale term buys permissiveness" — **FALSIFIED, and the widening is bounded at 1.5e-8 relative**
+
+`discopt_benchmarks/scripts/verifier_scale_sweep.py`, all **119** in-repo instances,
+20 s budget, one subprocess per instance. Every returned incumbent is scored under
+**both** tolerance forms *on one tree* — the old `abs + rel·|residual|` loop is
+re-implemented inline in the probe, so the comparison is of forms rather than of git
+revisions. Artifact `reports/verifier_scale_sweep_030b44f4.json`. Wall 1,329.9 s,
+load 0.68 → 1.65.
+
+```
+## VERDICT
+  EXECUTED COMPARISONS : 99
+  agree                : 98
+  False -> True (old wrongly rejected) : 1
+      nvs22   worst_abs=2.6410e-04  worst_rel=1.5240e-08  (row scale 1.7329e+04)
+              status=optimal  certified=True
+  True -> False (new rejects)          : 0
+  worst RELATIVE violation newly accepted: 1.5240e-08
+```
+
+**What this bounds.** Corpus-wide the two forms disagree on **exactly one** incumbent,
+the one that started this card, and the largest relative violation the new form
+accepts anywhere is **1.52e-8** — 65× inside the 1e-6 relative tolerance. `True →
+False` is **0**: nothing that verified before stops verifying. So the widening is not
+a blank cheque; it is one instance, at a relative residual three orders of magnitude
+below the tolerance, on a certificate that matches the published optimum to 5.7e-8.
+
+**Two things this sweep honestly does *not* show, said rather than implied.**
+(1) The 20 s budget leaves 20 of 119 instances without an incumbent, so the scored
+population is 99, not 119. (2) The **row-alignment** defects (§6 entry 2) do not fire
+on this corpus at all: every `.nl` instance parses to scalar rows (`max flat size 1`)
+and none uses the builder fast path, so `from_nl` cannot reach them. The single
+"rows the OLD loop never examined" row (`nvs22`, 1 of 9) is the old loop's *early
+exit* on its first failing row, not the alignment bug. Defects 2 and 3 are reachable
+through the Python modeling API and `add_linear_constraints` — which is precisely
+what `test_vector_constraint_rows_beyond_the_first_are_checked` and
+`test_builder_resident_linear_rows_are_checked` cover, and why they, not this sweep,
+are the evidence for those two.
+
+### 2026-07-29 — Phase 5.5: `nvs22` re-measured on Phase 5.4's own panel child
+
+Not a re-derivation from the unit tests: the actual differential-panel child, both
+arms, ×2, 45 s, on the fixed tree.
+
+```
+OFF rep1  status=optimal obj=6.058219942618198 node_count=35 verified=true
+OFF rep2  status=optimal obj=6.058219942618198 node_count=35 verified=true
+ON  rep1  status=optimal obj=6.058219942618198 node_count=35 verified=true  attempt_s=0.112
+ON  rep2  status=optimal obj=6.058219942618198 node_count=35 verified=true  attempt_s=0.106
+```
+
+`verified` was **false in both arms** before this card and is **true in both** after.
+The panel's single symmetric `verification note` therefore disappears, and it
+disappears for the right reason — the incumbent's worst relative row violation is
+1.5e-8, not because a tolerance was widened to swallow it. Phase 5.4's differential
+scoping is left exactly as Phase 5 wrote it (it is the right question for a
+differential panel); only its comment is updated to record the resolution.

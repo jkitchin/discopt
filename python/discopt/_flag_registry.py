@@ -398,6 +398,20 @@ _ROWS: "list[FlagSpec]" = [
         "#798",
         "Wall-clock budget (s) for a convex-kernel attempt before falling back.",
     ),
+    FlagSpec(
+        "DISCOPT_FBBT_SEED",
+        False,
+        "parked",
+        "consolidation-plan Card 3e",
+        "Seed the Rust root FBBT pass from the presolve orchestrator's running box "
+        "instead of only the model's declared box (read Python-side in "
+        "`_jax/presolve_pipeline.run_root_presolve`, forwarded as the "
+        "`fbbt_seed_from_ctx` kwarg of `PyModelRepr.presolve`). Without it the "
+        "wired-in `fbbt` pass re-derives the declared box on every sweep and can "
+        "compose with NO other pass's tightenings (measured: 0 composed bounds "
+        "across 7/7 instances, against `fbbt_fp`'s 48). Bound-changing (strictly "
+        "tightening), so it is default-OFF until a differential panel graduates it.",
+    ),
     # ------------------------------------------------------------- reformulation
     FlagSpec(
         "DISCOPT_LIFT_ZERO_SPANNING_FACTORS",

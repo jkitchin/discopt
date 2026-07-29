@@ -703,6 +703,7 @@ impl PyModelRepr {
         work_unit_budget=0,
         fbbt_max_iter=20,
         fbbt_tol=1e-8,
+        fbbt_seed_from_ctx=false,
     ))]
     fn presolve(
         &self,
@@ -713,6 +714,7 @@ impl PyModelRepr {
         work_unit_budget: u64,
         fbbt_max_iter: usize,
         fbbt_tol: f64,
+        fbbt_seed_from_ctx: bool,
     ) -> PyResult<(PyModelRepr, PyObject)> {
         use discopt_core::presolve::{
             run_orchestrator, AggregatePass, CliquePass, CoefficientStrengtheningPass,
@@ -745,6 +747,10 @@ impl PyModelRepr {
                     max_iter: fbbt_max_iter,
                     tol: fbbt_tol,
                     incumbent_bound: None,
+                    // Card 3e (DISCOPT_FBBT_SEED). Default false = historical
+                    // behaviour: the kernel re-derives the declared box and composes
+                    // with no other pass's tightenings.
+                    seed_from_ctx: fbbt_seed_from_ctx,
                 }),
                 "fbbt_fixed_point" => Box::new(FbbtFixedPointPass {
                     tol: fbbt_tol,

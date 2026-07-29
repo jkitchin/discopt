@@ -53,7 +53,7 @@ pub use eliminate::{eliminate_variables, eliminate_variables_until, EliminationS
 pub use factorable_elim::{factorable_eliminate, FactorableElimStats};
 pub use fbbt::{
     backward_propagate, fbbt, fbbt_until, fbbt_with_cutoff, fbbt_with_cutoff_until,
-    forward_propagate, Interval,
+    fbbt_with_cutoff_until_seeded, forward_propagate, Interval,
 };
 pub use fbbt_fp::{fbbt_fixed_point, FbbtFpOptions, FbbtFpStats};
 pub use implied_bounds::{propagate_implied_bounds, ImpliedBoundsStats};

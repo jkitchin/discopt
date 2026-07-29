@@ -53,6 +53,7 @@ def run_root_presolve(
     fbbt_fixed_point: bool = False,
     fbbt_max_iter: int = 20,
     fbbt_tol: float = 1e-8,
+    fbbt_seed_from_ctx: bool | None = None,
     simplify: bool = True,
     probing: bool = True,
     max_iterations: int = 16,
@@ -69,6 +70,11 @@ def run_root_presolve(
             assumes a fixed n_vars must opt in.
         fbbt: enable forward/backward bound tightening.
         fbbt_max_iter, fbbt_tol: forwarded to the FBBT kernel.
+        fbbt_seed_from_ctx: seed the FBBT kernel from the orchestrator's
+            running box instead of only the model's declared box (Card 3e).
+            ``None`` reads ``DISCOPT_FBBT_SEED`` (default off). Without it
+            the wired-in ``fbbt`` pass composes with no other pass's
+            tightenings — it re-derives the declared box every sweep.
         simplify: enable integer rounding / big-M / redundancy pass.
         probing: enable binary-variable probing.
         max_iterations: cap on full sweeps over the pass list. The
@@ -111,6 +117,11 @@ def run_root_presolve(
     if not pass_names:
         return model_repr, {}
 
+    if fbbt_seed_from_ctx is None:
+        from discopt._env import env_bool
+
+        fbbt_seed_from_ctx = env_bool("DISCOPT_FBBT_SEED", False)
+
     new_repr, raw = model_repr.presolve(
         passes=pass_names,
         max_iterations=max_iterations,
@@ -118,6 +129,7 @@ def run_root_presolve(
         work_unit_budget=0,
         fbbt_max_iter=fbbt_max_iter,
         fbbt_tol=fbbt_tol,
+        fbbt_seed_from_ctx=bool(fbbt_seed_from_ctx),
     )
 
     stats: dict = {

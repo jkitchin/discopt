@@ -23,7 +23,7 @@ use super::coefficient_strengthening::coefficient_strengthening;
 use super::delta::{count_tightened, Implication as DeltaImpl, PresolveDelta, VarAggregation};
 use super::eliminate::eliminate_variables_until;
 use super::factorable_elim::factorable_eliminate_until;
-use super::fbbt::{fbbt_with_cutoff_until, Interval};
+use super::fbbt::{fbbt_with_cutoff_until_seeded, Interval};
 use super::fbbt_fp::{fbbt_fixed_point, FbbtFpOptions};
 use super::implied_bounds::propagate_implied_bounds;
 use super::pass::{PassCategory, PresolveContext, PresolvePass};
@@ -45,6 +45,16 @@ pub struct FbbtPass {
     pub tol: f64,
     /// Optional incumbent objective bound for cutoff propagation.
     pub incumbent_bound: Option<f64>,
+    /// Seed the FBBT kernel from the orchestrator's running box (`ctx.bounds`)
+    /// instead of only the model's declared box — consolidation plan Card 3e.
+    ///
+    /// Default **false**, which is the historical behaviour bit-for-bit. With it
+    /// false the pass cannot see any other pass's tightenings (measured: 0 composed
+    /// bounds across 7/7 instances against `fbbt_fp`'s 48), because
+    /// `fbbt_with_cutoff_until` re-derives `var_bounds` from `model.variables` and
+    /// the orchestrator deliberately never writes tightened bounds back into
+    /// `ctx.model`. Bound-changing (strictly tightening), hence flagged.
+    pub seed_from_ctx: bool,
 }
 
 impl Default for FbbtPass {
@@ -53,6 +63,7 @@ impl Default for FbbtPass {
             max_iter: 20,
             tol: 1e-8,
             incumbent_bound: None,
+            seed_from_ctx: false,
         }
     }
 }
@@ -70,12 +81,22 @@ impl PresolvePass for FbbtPass {
         // orchestrator's budget checked only between passes, made this pass overrun a
         // 7.5 s budget by >12x on watercontamination0202 (#863). FBBT is anytime, so
         // bailing yields a valid looser box.
-        let new_bounds = fbbt_with_cutoff_until(
+        // Card 3e: when seeded, the kernel starts from `declared ∩ ctx.bounds`, so it
+        // can propagate from what `eliminate` / `simplify` / `implied_bounds` /
+        // `coefficient_strengthening` / `probing` just proved. Unseeded (the default)
+        // it re-derives the declared box every sweep and composes with nothing.
+        let seed: Option<&[Interval]> = if self.seed_from_ctx {
+            Some(ctx.bounds.as_slice())
+        } else {
+            None
+        };
+        let new_bounds = fbbt_with_cutoff_until_seeded(
             &ctx.model,
             self.max_iter,
             self.tol,
             self.incumbent_bound,
             ctx.deadline,
+            seed,
         );
         // Intersect with the orchestrator's running bounds — the kernel
         // ignores the caller's current state and re-derives from the

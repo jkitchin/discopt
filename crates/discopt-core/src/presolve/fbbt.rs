@@ -1185,8 +1185,50 @@ pub fn fbbt_with_cutoff_until(
     incumbent_bound: Option<f64>,
     deadline: Option<Instant>,
 ) -> Vec<Interval> {
+    fbbt_with_cutoff_until_seeded(model, max_iter, tol, incumbent_bound, deadline, None)
+}
+
+/// Like [`fbbt_with_cutoff_until`] but starts from `declared ∩ seed` instead of the
+/// model's declared box (consolidation plan Card 3e).
+///
+/// **Why this exists.** `FbbtPass::run` calls the unseeded form, which re-derives
+/// `var_bounds` from `model.variables` — the *declared* box — and never reads
+/// `ctx.bounds`. The orchestrator deliberately never writes tightened bounds back
+/// into `ctx.model`'s `VarInfo` (mutating declared bounds can flip an inactive bound
+/// active and change LP duals), so the wired-in FBBT pass **structurally cannot
+/// compose** with anything `eliminate`, `simplify`, `implied_bounds`,
+/// `coefficient_strengthening` or `probing` just proved: it re-derives the same box on
+/// every sweep and the orchestrator's fixpoint loop stops at sweep 2 with
+/// `NoProgress`. Card 3b measured that at `max_iterations=1`: `[implied_bounds, X]`
+/// beats `intersect(X@1, implied_bounds@1)` on **0** bounds for `fbbt` across 7/7
+/// instances, against **48** for `fbbt_fp`.
+///
+/// **Soundness.** `seed` must be a valid (over-approximating) box for the model —
+/// `ctx.bounds` is, being an intersection of valid inferences. Intersecting it into
+/// the initial `var_bounds` only ever shrinks the starting box, and `backward_propagate`
+/// only ever tightens, so the result is a valid box that is a subset of the unseeded
+/// result. It is therefore bound-*changing* (strictly tightening), which is why the
+/// caller ships it behind a default-OFF flag and graduates it on a differential panel.
+///
+/// A `seed` shorter than `model.variables` seeds the prefix it covers and leaves the
+/// rest at their declared intervals; a longer one is truncated. Both are the safe
+/// direction — an unseeded variable is merely looser.
+pub fn fbbt_with_cutoff_until_seeded(
+    model: &ModelRepr,
+    max_iter: usize,
+    tol: f64,
+    incumbent_bound: Option<f64>,
+    deadline: Option<Instant>,
+    seed: Option<&[Interval]>,
+) -> Vec<Interval> {
     let n_vars = model.variables.len();
     let mut var_bounds: Vec<Interval> = model.variables.iter().map(seed_block_interval).collect();
+    if let Some(seed) = seed {
+        let n = var_bounds.len().min(seed.len());
+        for i in 0..n {
+            var_bounds[i] = var_bounds[i].intersect(&seed[i]);
+        }
+    }
 
     // Determine the objective cutoff constraint (if any).
     let obj_cutoff: Option<(ExprId, Interval)> = incumbent_bound.map(|bound| {
@@ -1862,6 +1904,55 @@ mod tests {
             assert_eq!(x.lo, y.lo);
             assert_eq!(x.hi, y.hi);
         }
+    }
+
+    #[test]
+    fn seeded_fbbt_composes_where_the_unseeded_form_cannot() {
+        // Card 3e. `x + y <= 10` with `x, y in [0, 100]`. Unseeded, FBBT can only
+        // conclude `x <= 10` and `y <= 10` from the declared box — that is the whole
+        // of what the wired-in pass ever derives, on every sweep, forever.
+        //
+        // Now suppose an EARLIER pass (implied_bounds, probing, eliminate, …) proved
+        // `y >= 8`. That fact lives in `ctx.bounds` and never in `model.variables`, so
+        // the unseeded kernel cannot see it and still reports `x <= 10`. Seeded, the
+        // same kernel derives `x <= 2`. This is the 0-vs-48 composition gap in one
+        // model, and it is the only behavioural difference the flag makes.
+        let model = make_linear_model();
+
+        let unseeded = fbbt_with_cutoff_until(&model, 10, 1e-8, None, None);
+        assert!(
+            (unseeded[0].hi - 10.0).abs() < 1e-10,
+            "control: unseeded must derive x <= 10, got {}",
+            unseeded[0].hi
+        );
+
+        let seed = vec![Interval::new(0.0, 100.0), Interval::new(8.0, 100.0)];
+        let seeded = fbbt_with_cutoff_until_seeded(&model, 10, 1e-8, None, None, Some(&seed));
+        assert!(
+            (seeded[0].hi - 2.0).abs() < 1e-10,
+            "seeded must compose y >= 8 into x <= 2, got {}",
+            seeded[0].hi
+        );
+
+        // Seeding only ever tightens: the seeded box is contained in the unseeded one.
+        for (i, (s, u)) in seeded.iter().zip(unseeded.iter()).enumerate() {
+            assert!(s.lo >= u.lo - 1e-12, "var {i} lo loosened");
+            assert!(s.hi <= u.hi + 1e-12, "var {i} hi tightened the wrong way");
+        }
+
+        // `seed = None` is bit-for-bit the historical path (what the default-OFF flag
+        // guarantees).
+        let none_seed = fbbt_with_cutoff_until_seeded(&model, 10, 1e-8, None, None, None);
+        for (x, y) in none_seed.iter().zip(unseeded.iter()) {
+            assert_eq!(x.lo, y.lo);
+            assert_eq!(x.hi, y.hi);
+        }
+
+        // A short seed covers its prefix and leaves the rest declared (safe direction).
+        let short = vec![Interval::new(0.0, 3.0)];
+        let short_res = fbbt_with_cutoff_until_seeded(&model, 10, 1e-8, None, None, Some(&short));
+        assert!(short_res[0].hi <= 3.0 + 1e-12);
+        assert!((short_res[1].hi - 10.0).abs() < 1e-10);
     }
 
     #[test]

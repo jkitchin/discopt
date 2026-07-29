@@ -34,7 +34,7 @@ Per CLAUDE.md §5, new behavior ships default-OFF behind a `parked` flag and onl
 becomes `graduated` when a corpus-wide differential panel is both cert-clean and
 net-positive.
 
-## Flags (72)
+## Flags (73)
 
 ### `graduated` (13)
 
@@ -54,7 +54,7 @@ net-positive.
 | `DISCOPT_ROOT_BUDGET_GATE` | `1` (on) | python | — | Refuse to launch a root heuristic NLP that cannot fit in the remaining wall budget. Primal-only, so skipping is always sound. |
 | `DISCOPT_SEPARATION_LP_SIMPLEX` | `1` (on) | python | — | Solve separation / strong-branching LPs with the in-house warm simplex instead of a cold POUNCE IPM solve. `=0` restores the caller's backend. |
 
-### `parked` (27)
+### `parked` (28)
 
 | flag | default | side | issue | description |
 | --- | --- | --- | --- | --- |
@@ -64,6 +64,7 @@ net-positive.
 | `DISCOPT_CONVEX_KERNEL` | `0` (off) | python | #798/#779 | Route certifiable convex MINLPs into the native convex kernel; the result is adopted only when it certifies optimality and verifies feasible. |
 | `DISCOPT_CVX_NATIVELP` | `0` (off) | rust | #807 | Route convex-kernel node solves through the shared persistent LP (bounds-in-place dual-warm reoptimize) instead of a cold per-node solve. |
 | `DISCOPT_ENTROPY_ATOM` | `0` (off) | python | — | Recognize `x*log(x)` on `x>0` and emit its exact 1-D convex envelope. |
+| `DISCOPT_FBBT_SEED` | `0` (off) | python | consolidation-plan Card 3e | Seed the Rust root FBBT pass from the presolve orchestrator's running box instead of only the model's declared box (read Python-side in `_jax/presolve_pipeline.run_root_presolve`, forwarded as the `fbbt_seed_from_ctx` … |
 | `DISCOPT_GP_MINLP` | `0` (off) | python | — | Geometric-programming MINLP fast path (`discopt.gp.solve_gp_minlp`). |
 | `DISCOPT_G_CONVEX_CUTS` | `0` (off) | python | — | Inject cuts derived from g-convexity certificates. |
 | `DISCOPT_LOGSUMEXP_ATOM` | `0` (off) | python | — | Emit the convex softmax-tangent OA for `log(sum exp(.))` instead of the loose concave `log` relaxation. |
@@ -191,4 +192,4 @@ The env var supplies the field's *default* when it is not passed explicitly.
 | `DISCOPT_TRILINEAR` | `trilinear_nested` | `0` (off) | Force the legacy nested-bilinear trilinear path (`DISCOPT_TRILINEAR=nested`; equivalent to the default unless another trilinear selector is explicitly set). |
 | `DISCOPT_TRILINEAR_RLT` | `trilinear_rlt` | `1` (on) | Trilinear RLT rows (`DISCOPT_TRILINEAR_RLT`, default on). |
 
-**Total: 119 flags** — 72 in the registry, 47 `SolverTuning` fields.
+**Total: 120 flags** — 73 in the registry, 47 `SolverTuning` fields.
