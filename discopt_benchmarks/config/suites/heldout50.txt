@@ -1,0 +1,36 @@
+# heldout50 — Phase 0 generalization panel (consolidation plan §Phase 0.2)
+#
+# PLACEHOLDER — NOT YET MATERIALIZED ON THIS CHECKOUT.
+#
+# This file is intentionally empty of instance names. The panel is drawn from the
+# full MINLPLib snapshot (~4,800 .nl instances + minlplib.solu + minlplib_types.csv
+# + problems_{small,short,medium,long}.txt), which is a LOCAL-ONLY artifact: it is
+# not vendored into this repository and does not exist in CI. The draw therefore
+# cannot be performed here, and an empty list must NEVER be mistaken for a panel
+# that ran and found nothing wrong.
+#
+# Consequences of this file being empty, by design:
+#   * `run_benchmarks.py --suite heldout50` and `--gate heldout50` REFUSE to run,
+#     printing "heldout50: SKIPPED — local only" and exiting non-zero.
+#   * Any Regime-C gate that names heldout50 records SKIPPED, never PASS.
+#
+# To materialize it (deterministic — same snapshot + same seed => same 50 names):
+#
+#     # 1. Install the snapshot, or point at it explicitly:
+#     export DISCOPT_MINLP_BENCH=~/Dropbox/projects/discopt-minlp-benchmark
+#     # (a non-synced mirror at ~/projects/discopt-minlp-benchmark is preferred —
+#     #  see discopt_benchmarks/utils/corpus.py and scripts/refresh_benchmark_mirror.sh)
+#
+#     # 2. Draw the panel (overwrites this file):
+#     python discopt_benchmarks/scripts/select_heldout50.py
+#
+#     # 3. Commit the result. The generated header records the snapshot path, the
+#     #    seed, the eligible population and the stratum count, so the draw is
+#     #    traceable and reproducible.
+#
+# Rotation: bump `--seed`. The default seed (20260728) is what the committed list
+# should be drawn with unless a rotation is deliberately recorded in the plan doc.
+#
+# Disjointness the selector asserts before writing: no overlap with
+# config/baron_global50.txt, nor with either in-repo .nl corpus
+# (python/tests/data/minlplib_nl, python/tests/data/minlplib).

@@ -142,10 +142,63 @@ def main():
         return
 
     if args.gate:
+        _require_corpus_snapshot(args.gate)
         _run_gate_check(args)
         return
 
+    _require_corpus_snapshot(args.suite)
     _run_benchmark(args)
+
+
+def _require_corpus_snapshot(suite_name: str | None) -> None:
+    """Refuse — loudly, non-zero — to run a suite whose corpus is not installed.
+
+    A suite may declare ``requires_corpus_snapshot = true`` when its instance list
+    is drawn from the local-only MINLPLib snapshot (``heldout50``, consolidation
+    plan §Phase 0.2). Such a suite resolves to an EMPTY instance list in CI or on a
+    fresh checkout, and an empty run reports zero failures — i.e. it reads exactly
+    like a pass. That is the failure mode CLAUDE.md §6 exists for, and it is worse
+    here than elsewhere because ``heldout50`` is a *graduation* arm: a Regime-C
+    change would appear to have generalized on evidence that was never collected.
+
+    So the arm records ``heldout50: SKIPPED — local only`` and exits non-zero. A
+    caller that wants to proceed without it must say so explicitly, and the run
+    that did not include it must not be reported as one that did.
+    """
+    if not suite_name:
+        return
+    cfg = _load_suite_config(suite_name)
+    if not cfg or not cfg.get("requires_corpus_snapshot"):
+        return
+
+    from utils.corpus import corpus_root
+
+    root = corpus_root()
+    names = _read_instance_list(cfg.get("instance_list"))
+    if root is not None and names:
+        return
+
+    reasons = []
+    if root is None:
+        reasons.append(
+            "no usable MINLPLib snapshot ($DISCOPT_MINLP_BENCH, "
+            "~/projects/discopt-minlp-benchmark, ~/Dropbox/projects/discopt-minlp-benchmark)"
+        )
+    if not names:
+        reasons.append(
+            f"instance list {cfg.get('instance_list')} carries no instance names "
+            f"(not yet materialized)"
+        )
+    print(f"\n{suite_name}: SKIPPED — local only", file=sys.stderr)
+    for r in reasons:
+        print(f"  reason: {r}", file=sys.stderr)
+    print(
+        f"  Materialize it with: python discopt_benchmarks/scripts/select_{suite_name}.py\n"
+        f"  This run produced NO {suite_name} evidence and must not be reported as though "
+        f"it did.",
+        file=sys.stderr,
+    )
+    sys.exit(3)
 
 
 def _list_suites():
@@ -161,6 +214,7 @@ def _list_suites():
         "phase2":        "Phase 2 validation (medium instances, ≤50 vars)",
         "phase3":        "Phase 3 validation (large instances, ≤100 vars)",
         "comparison":    "Head-to-head solver comparison (curated set)",
+        "heldout50":     "Held-out generalization panel, disjoint from global50 (LOCAL ONLY)",
         "nightly":       "Nightly CI regression suite (100 instances)",
         "global_opt":    "Global optimality verification (known optima)",
         "lp":            "Pure LP instances",

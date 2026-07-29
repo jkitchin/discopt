@@ -95,6 +95,30 @@ sources = ["minlplib"]
 instance_list = "config/baron_global50.txt"
 time_limit_seconds = 60
 
+[suites.heldout50]
+# The GENERALIZATION half of the Regime-C gate (consolidation plan §Phase 0.2).
+# `global50` is simultaneously the iteration set and the graduation gate set, so a
+# flag tuned until global50 is green and then graduated on global50 has been scored
+# against its own training data. `heldout50` is a seeded, stratified draw from the
+# full MINLPLib snapshot that is DISJOINT from global50 and from both in-repo .nl
+# corpora, so a Regime-C card must show its change generalizes rather than merely
+# that it did not regress where it was developed. A Regime-C gate requires BOTH:
+# global50 as the regression watch, heldout50 as the generalization evidence.
+#
+# LOCAL ONLY. The draw needs the MINLPLib snapshot (~4,800 .nl + minlplib.solu +
+# minlplib_types.csv + problems_*.txt), which is NOT vendored and does not exist in
+# CI. `requires_corpus_snapshot` makes that a loud, non-zero refusal rather than a
+# silent empty run: `run_benchmarks.py` prints "heldout50: SKIPPED — local only"
+# and exits non-zero when the snapshot (or the drawn list) is absent. An empty
+# panel must never read as a passing panel.
+#
+# Materialize with: python discopt_benchmarks/scripts/select_heldout50.py
+description = "Held-out generalization panel: ~50 stratified MINLPLib instances disjoint from global50 (LOCAL ONLY)"
+sources = ["minlplib"]
+instance_list = "config/suites/heldout50.txt"
+requires_corpus_snapshot = true
+time_limit_seconds = 60
+
 [suites.nightly]
 description = "Nightly CI regression suite"
 sources = ["minlplib"]
