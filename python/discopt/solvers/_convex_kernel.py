@@ -834,22 +834,21 @@ def _unflatten(model, inc_x):
 
 
 def _incumbent_is_feasible(model, x_flat, tol: float = 1e-5) -> bool:
-    """#779: evaluate the PRISTINE model's constraints at `x_flat`; True iff feasible."""
-    import numpy as np
+    """#779: evaluate the PRISTINE model at `x_flat`; True iff the point is feasible.
 
-    from discopt._jax.nlp_evaluator import NLPEvaluator
+    Delegates to :func:`discopt.validation.feasibility.verify_point`, the repo's
+    single verifier. The hand-rolled loop this replaced had four measured defects
+    (transcripts in that module's header): it zipped flat evaluator rows against
+    ``model._constraints`` — so it ACCEPTED a point violating row 2 of a size-3
+    vector constraint by 5.0, raised ``AttributeError`` mid-loop on a model carrying
+    an SOS constraint, ignored ``Constraint.rhs``, and never checked variable bounds
+    or integrality at all. Its tolerance was also a flat absolute ``tol`` with no
+    row-scale term, which rejects ``nvs22``'s certified optimum.
 
-    try:
-        ev = NLPEvaluator(model)
-        g = np.asarray(ev.evaluate_constraints(x_flat), float)
-    except Exception:
-        return False
-    for gi, con in zip(g, model._constraints):
-        s = con.sense if isinstance(con.sense, str) else con.sense.value
-        if s == "<=" and gi > tol:
-            return False
-        if s == ">=" and gi < -tol:
-            return False
-        if s not in ("<=", ">=") and abs(gi) > tol:
-            return False
-    return True
+    ``tol`` keeps its meaning as the absolute floor (unchanged at 1e-5 for this
+    caller) and is also the relative coefficient on the row scale, so an ordinary
+    unit-scale row is judged exactly as before.
+    """
+    from discopt.validation.feasibility import verify_point
+
+    return bool(verify_point(model, x_flat, abs_tol=tol).ok)

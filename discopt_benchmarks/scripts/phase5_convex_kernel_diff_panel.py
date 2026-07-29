@@ -271,14 +271,23 @@ def _verdict(pairs: dict, budget: float) -> dict:
         # cannot fix. Symmetric failures are NOT dropped: they are collected in
         # ``verification_notes`` and printed with the same prominence.
         #
-        # Measured instance of exactly this: ``nvs22`` fails in both arms on two
+        # Measured instance of exactly this: ``nvs22`` failed in both arms on two
         # defined-variable EQUALITY rows, residuals 1.71e-5 and 2.64e-4 against
         # variable values 2121.64 and 10782.7 — relative residuals 8.1e-9 and
         # 2.4e-8, with the incumbent objective matching ``=opt= 6.05822`` to 5.7e-8.
-        # The verifier's tolerance is ``abs + rel*|residual|``, which on an equality
+        # The verifier's tolerance was ``abs + rel*|residual|``, which on an equality
         # row degenerates to a pure absolute 1e-6 no matter how large the row is.
-        # That is a real finding about the verifier and it needs its own issue; it is
-        # not evidence about DISCOPT_CONVEX_KERNEL.
+        # That was a real finding about the verifier and NOT evidence about
+        # DISCOPT_CONVEX_KERNEL, which is why the gate is scoped this way.
+        #
+        # RESOLVED 2026-07-29 (plan card "the incumbent verifier's tolerance is
+        # scale-blind"): every verifier now delegates to
+        # ``discopt.validation.feasibility.verify_point``, whose row tolerance is
+        # ``abs_tol * max(1, |b_i|, max_j |J_ij|*max(1,|x_j|))``. Re-measured on this
+        # panel's own child, both arms, x2: ``nvs22`` now records
+        # ``verified: true`` (worst relative row violation 1.5e-8). The differential
+        # scoping stays — it is the right question for a differential panel — but it
+        # is no longer load-bearing for this instance.
         off_ver, on_ver = off.get("verified"), on.get("verified")
         for row in (off, on):
             if row.get("objective") is not None:

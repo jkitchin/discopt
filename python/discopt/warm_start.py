@@ -246,34 +246,57 @@ def check_feasibility(
             )
         offset += size
 
-    # Constraint feasibility (requires evaluator)
+    # Constraint feasibility (requires evaluator).
+    #
+    # Rows are enumerated from the evaluator's OWN row map (``_source_constraints``
+    # x ``_constraint_flat_sizes``), not from ``model._constraints``. The two are not
+    # the same list and the difference was a measured defect (2026-07-29): the
+    # evaluator emits one row per FLAT ELEMENT, so advancing one index per constraint
+    # OBJECT left every row after the first of a vector constraint unexamined, and
+    # ``model._constraints`` also misses the builder-resident linear rows that
+    # ``add_linear_constraints`` puts only in the Rust arena (the evaluator unions
+    # them in). ``Constraint.rhs`` is subtracted rather than assumed zero.
+    #
+    # The tolerance here stays a flat absolute ``tol`` on purpose: this is a
+    # user-facing warm-start diagnostic, not a certificate gate, and the row-scale
+    # term that ``discopt.validation.feasibility.verify_point`` applies exists to stop
+    # a *certificate* being rejected for a relatively-tiny residual. A warm start has
+    # no certificate to protect, so the strict reading is the useful one.
     try:
         from discopt._jax.nlp_evaluator import NLPEvaluator
-        from discopt.modeling.core import Constraint
 
         evaluator = NLPEvaluator(model)
         if evaluator.n_constraints > 0:
-            cons = evaluator.evaluate_constraints(x_flat)
+            cons = np.asarray(evaluator.evaluate_constraints(x_flat), dtype=np.float64)
             idx = 0
-            for c in model._constraints:
-                if not isinstance(c, Constraint):
-                    continue
-                val = cons[idx]
-                if c.sense == "<=":
-                    if val > tol:
-                        name = c.name or f"constraint_{idx}"
-                        violations.append(f"Constraint '{name}': value {val:.6g} > 0 (sense <=)")
-                elif c.sense == "==":
-                    if abs(val) > tol:
-                        name = c.name or f"constraint_{idx}"
-                        violations.append(
-                            f"Constraint '{name}': |value| = {abs(val):.6g} != 0 (sense ==)"
-                        )
-                elif c.sense == ">=":
-                    if val < -tol:
-                        name = c.name or f"constraint_{idx}"
-                        violations.append(f"Constraint '{name}': value {val:.6g} < 0 (sense >=)")
-                idx += 1
+            for c, sz in zip(
+                evaluator._source_constraints,
+                np.asarray(evaluator._constraint_flat_sizes).tolist(),
+            ):
+                sense = c.sense if isinstance(c.sense, str) else getattr(c.sense, "value", c.sense)
+                rhs = float(c.rhs)
+                for k in range(int(sz)):
+                    val = float(cons[idx]) - rhs
+                    base = c.name or f"constraint_{idx}"
+                    name = f"{base}[{k}]" if int(sz) > 1 else base
+                    if sense == "<=":
+                        if val > tol:
+                            violations.append(
+                                f"Constraint '{name}': value {val:.6g} > 0 (sense <=)"
+                            )
+                    elif sense == "==":
+                        if abs(val) > tol:
+                            violations.append(
+                                f"Constraint '{name}': |value| = {abs(val):.6g} != 0 (sense ==)"
+                            )
+                    elif sense == ">=":
+                        if val < -tol:
+                            violations.append(
+                                f"Constraint '{name}': value {val:.6g} < 0 (sense >=)"
+                            )
+                    else:
+                        violations.append(f"Constraint '{name}': unknown sense {sense!r}")
+                    idx += 1
     except Exception as e:
         logger.debug("Feasibility check skipped (evaluator error): %s", e)
 

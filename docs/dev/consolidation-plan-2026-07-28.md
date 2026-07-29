@@ -941,6 +941,121 @@ feature-by-feature, graduating each expansion on the panel**, exactly as
 
 ---
 
+## Phase 5.5 — the incumbent verifier is scale-blind (filed by the 5.4 panel) — **LANDED**
+
+> **Status:** LANDED 2026-07-29. **Depends:** nothing. **Regime:** neither N nor C
+> as the plan defines them — see "Which regime" below. **Est:** done.
+>
+> Phase 5.4's differential panel first scored `cert-clean: FAIL(2)` and the failures
+> were the **verifier's**, not the solver's. Phase 5 rescoped its gate to asymmetric
+> failures (correct for a differential panel) and filed the underlying defect as a
+> named follow-up, because it is a solver-wide correctness question and CLAUDE.md §1
+> puts correctness before performance. This card is that follow-up, closed.
+>
+> ### The defect, stated exactly
+>
+> Every certificate-gating incumbent verifier used the tolerance
+> `abs_tol + rel_tol * |residual|`. That is **self-referential** — keyed on the very
+> quantity being judged. Solving it for an equality row: the row passes iff
+> `|r| <= abs + rel·|r|` iff `|r| <= abs/(1 - rel)`. With `abs=1e-6, rel=1e-4` that
+> is `1.0001e-6`: a pure **absolute** 1e-6 on every row scale, and the `rel_tol` term
+> is arithmetically dead. The same collapse holds for `<=` / `>=`.
+>
+> **`nvs22`'s certificate is not the problem — the verifier was.** Measured (probe
+> `verifier_scale_sweep.py`, and the §6 entry): status `optimal`, objective
+> `6.058219942618198` against MINLPLib `=opt= 6.05822` (5.7e-8), and the two rows
+> that failed carry **relative** residuals 8.1e-9 and 1.5e-8 on row scales 2.1e3 and
+> 1.7e4. The opposite conclusion the card was told to consider — "the certificate is
+> issued at a tolerance the repo's own verifiers do not accept" — is falsified by
+> those numbers, and it is worth saying loudly that it *was* checked.
+>
+> ### Three more defects the fix surfaced, all in the wrongly-ACCEPT direction
+>
+> Found by an entry experiment written to falsify the assumption that the two
+> verifiers examined the rows they claimed to (probe transcript in §6):
+>
+> | # | defect | measured consequence |
+> |---|---|---|
+> | 2 | one row index per *constraint object* vs one evaluator row per *flat element* | a point violating row 2 of a size-3 vector constraint **by 5.0** was returned FEASIBLE by both verifiers |
+> | 3 | `model._constraints` misses builder-resident linear rows (`add_linear_constraints`) | such a model looks unconstrained to the verifier |
+> | 4 | `Constraint.rhs` ignored (body compared against 0); non-`Constraint` classes skipped (native kernel) or `AttributeError` mid-loop (convex kernel) | wrong verdict in both directions; a whole constraint class vouched for without being read |
+>
+> `_incumbent_is_feasible` additionally checked **neither variable bounds nor
+> integrality** — a fractional value on an INTEGER variable passed.
+>
+> ### What exists now
+>
+> `python/discopt/validation/feasibility.py` — one verifier, `verify_point`, exported
+> from `discopt.validation`. Rows are enumerated from the **evaluator's own row map**
+> (`_source_constraints` × `_constraint_flat_sizes`), which is what makes defects 2
+> and 3 structurally impossible rather than fixed-by-hand. Tolerance:
+>
+> ```
+> violation_i <= abs_tol * scale_i ,  scale_i = max(1, |b_i|, max_j |J_ij|·max(1,|x_j|))
+> ```
+>
+> `scale_i` is the **examiner's** row scale (`validation/examiner.py`, "Examiner's
+> scaled mode") — reused, not reinvented (§0.8). Consumers rewired:
+> `solver/native_kernel._native_kernel_verify_point` (the native-kernel seed gate),
+> `solvers/_convex_kernel._incumbent_is_feasible` (the #779 adoption gate, and the
+> independent verifier both Regime-C panels call), and `warm_start.check_feasibility`
+> (alignment/rhs only — see below).
+>
+> ### Which regime, and why this is stricter rather than looser (§0.4)
+>
+> Not Regime C: it changes no bound, cut or routing. Not plain Regime N either: it
+> deliberately changes a *verdict function*. The bar it was held to instead is the one
+> §0.4 implies — **the fix must be more correct, not more permissive**, demonstrated
+> both ways:
+>
+> * **Four wrongly-accept holes closed** (defects 2–4 plus the missing
+>   bounds/integrality), each with a regression test that fails on the old code.
+> * **The one widening is bounded and calibrated.** The relative coefficient is
+>   `abs_tol` (1e-6), **not** the repo's `rel_tol` (1e-4) — reusing `rel_tol` would
+>   have put the floor at 1.01e-4 and loosened every unit-scale row 100×. With
+>   `scale_i >= 1` and coefficient `abs_tol`, a unit-scale row's tolerance is
+>   *exactly* the pre-existing absolute 1e-6. The same function's variable-bound check
+>   has carried a scale term with the 100× looser `rel_tol` coefficient since #764;
+>   this makes the row check consistent with it and tighter.
+> * **Four naive widenings that would have accepted a bad point are each killed by a
+>   test**: a model-global `max_j |x_j|` scale (accepts a unit row violated by 1e-2
+>   next to a 1e9 variable); a 1-norm row scale (accepts a 0.5 violation on a row of
+>   10^3-magnitude cancelling terms); `rel_tol` as the coefficient (accepts 5e-5 on a
+>   unit row); simply raising the absolute floor to 1e-3 (accepts 5e-4 on a unit row).
+> * **Refusal beats approximation** (§3): unknown sense, unevaluable constraint class,
+>   evaluator failure, non-finite value, row-count disagreement and point-length
+>   mismatch all return *not verified with a reason*, never an optimistic pass. When
+>   the Jacobian cannot be formed the scale degrades to `max(1, |b_i|)` — the strict
+>   direction; a verifier that cannot measure a row's scale must not widen for it.
+>
+> `warm_start.check_feasibility` got the alignment/rhs fix but **keeps its flat
+> absolute tolerance on purpose**: it is a user-facing warm-start diagnostic with no
+> certificate to protect, so the strict reading is the useful one. Stated in the code.
+>
+> ### Verification
+>
+> `python/tests/test_incumbent_verifier_scale.py`, 16 tests (15 `smoke`/`unit`, 1
+> `slow`+`correctness` on the real `nvs22`). **7 of the 16 fail on the pre-fix
+> consumers** (proved in a worktree at `bb3b6c73` carrying only the new module and the
+> new test file, so the failure is attributable to the consumers and not to a missing
+> import); all 16 pass after. The 9 that pass in both are the §0.4 locks — they assert
+> the strictness that must *not* move.
+>
+> Corpus evidence: `discopt_benchmarks/scripts/verifier_scale_sweep.py` +
+> `reports/verifier_scale_sweep_<sha>.json` score every in-repo incumbent under both
+> tolerance forms on one tree (the old form re-implemented inline, so the comparison
+> is of *forms* rather than of git revisions). Verdict in §6.
+>
+> Panel re-measurement: Phase 5.4's own child, `nvs22`, both arms, ×2 — `verified`
+> flips **false → true in both arms**, i.e. the panel's single symmetric
+> `verification note` disappears, and it disappears for the right reason (worst
+> relative row violation 1.5e-8, not a widened tolerance). The panel's differential
+> scoping is left as Phase 5 wrote it and its comment updated to record the fix.
+>
+> **Can this card close: YES.** No follow-up filed; nothing deferred.
+
+---
+
 ## Phase 6 — Missing mechanisms (gap closure beyond the kernel)
 
 > **Status:** OPEN. **Depends:** Phase 0; independent of Phases 3–4; 6b after 5.4.
@@ -1813,3 +1928,91 @@ than a precise figure. Neither affects the gates that decided the verdict —
 cert-clean and quality-clean are status/objective comparisons, and the Regime-N
 gate is node-count and certified-objective equality, which returned the same 85
 comparable rows and the same 255 comparisons as every prior run.
+
+### 2026-07-29 — Phase 5.5 entry experiment 1: "`nvs22`'s certificate is issued at a tolerance the repo's own verifiers do not accept" — **FALSIFIED; the verifier is wrong, the certificate is right**
+
+The card was explicitly told this could go either way, and that the opposite
+conclusion would mean a shipped certificate is wrong. It was run before any code was
+written. Probe: solve `nvs22` (`python/tests/data/minlplib/nvs22.nl`, 45 s, defaults),
+take the returned incumbent, and score every row against its own scale. Marker
+asserted: `discopt.__file__ = /home/user/discopt/python/discopt/__init__.py`.
+**EXECUTED CHECKS: 10.**
+
+```
+status optimal  obj 6.058219942618198  bound 6.058219942618198  certified True
+VERDICT native_kernel._native_kernel_verify_point: False None
+VERDICT _convex_kernel._incumbent_is_feasible    : False
+
+row                                             sense    violation      scale     relative
+((neg((((59405.9 + (2121.64*x3))*x6)/((x…  ==   2.6410e-04  1.7329e+04  1.5240e-08
+((neg((4243.28/(x2*x3))) + x4) - 0)        ==   1.7080e-05  2.1216e+03  8.0506e-09
+((neg(sqrt(((0.25*(x3**2)) + (((0.5*x0)…  ==   2.6426e-08  3.1623e+00  8.3566e-09
+((neg(((0.5*x3)/x6)) + x7) - 0)            ==   2.2108e-09  1.0000e+00  2.2108e-09
+
+rows violating pure-absolute 1e-6        : 2
+rows violating abs 1e-6 + rel 1e-4·scale : 0
+n_constraints (evaluator rows): 9   Constraint instances: 9   max flat size: 1
+```
+
+**Kill criterion and verdict.** The hypothesis dies if the offending residuals are
+small *relative to their rows*. They are: 1.5e-8 and 8.1e-9, against an objective
+that matches MINLPLib `=opt= 6.05822` to 5.7e-8. So the certificate is sound and the
+verifier's tolerance is the defect. Recorded loudly per the card's instruction,
+because the alternative reading would have been a shipped-certificate bug.
+
+**The arithmetic, since it is the whole finding.** `tol = abs + rel·|residual|` on an
+equality row accepts iff `|r| <= abs + rel·|r|` iff `|r| <= abs/(1 - rel)` =
+**1.0001e-6** for `abs=1e-6, rel=1e-4`. The `rel_tol` term is dead: the tolerance is a
+pure absolute 1e-6 at every row scale. A residual-scaled tolerance is self-referential
+and *shrinks toward the absolute floor as the residual shrinks*, which is exactly
+backwards from what a relative tolerance is for.
+
+### 2026-07-29 — Phase 5.5 entry experiment 2: "the two verifiers examine the rows they claim to" — **FALSIFIED; both ACCEPT a point violating a row by 5.0**
+
+Run because a tolerance fix that leaves the row enumeration wrong fixes nothing. Four
+constructed models, each with a grossly infeasible point; kill criterion stated in the
+probe ("if a grossly infeasible point is REJECTED by both on every case, the
+hypothesis is dead"). **EXECUTED CHECKS: 8.**
+
+```
+[A vector<=, row2 violated by 5.0] rows=3  nk=True   ck=True      <-- BOTH WRONG
+[B two scalars, 2nd violated by 5.0] rows=2  nk=False  ck=False
+[C SOS then equality, eq violated by 4.0] rows=1 nk=False ck=RAISED AttributeError(
+      "'_SOSConstraint' object has no attribute 'sense'")
+[D rhs=5 constraint, w=50] rows=1  nk=False  ck=False
+FINDING: A: native_kernel WRONGLY ACCEPTED an infeasible point
+FINDING: A: convex_kernel WRONGLY ACCEPTED an infeasible point
+FINDINGS: 2
+```
+
+Case A is the row-alignment defect: `NLPEvaluator.evaluate_constraints` emits one row
+per **flat element**, both loops advanced one index per **constraint object**, so a
+size-3 vector constraint had rows 1 and 2 never read. Case C is the same class one
+level up — `model._constraints` carries classes the evaluator's row set does not, and
+the two loops respectively skipped them silently and crashed on them. Case D returns
+the right verdict for the wrong reason (`rhs` is ignored; the body is compared against
+0), which flips to a wrong verdict as soon as the feasible side is tested — locked by
+`test_nonzero_rhs_is_subtracted_in_both_directions`.
+
+After the fix the same probe prints **FINDINGS: 0** with all four rejected.
+
+### 2026-07-29 — Phase 5.5: the regression suite fails on the pre-fix consumers
+
+Per the workflow rule that new behaviour needs a test failing before and passing
+after, and per §8 (verify which code you loaded): a worktree at `bb3b6c73` was given
+**only** the new `validation/feasibility.py` and the new test file, leaving
+`native_kernel.py` / `_convex_kernel.py` at their pre-fix state — so a failure is
+attributable to the consumers and not to a missing import.
+
+```
+BEFORE (bb3b6c73 + new module + new test):  6 failed, 9 passed  (+ the slow nvs22 test: 1 failed)
+AFTER  (this tree):                        15 passed            (+ the slow nvs22 test: 1 passed)
+```
+
+The 7 failures are exactly the defect set: vector-row alignment, builder-resident
+rows, `rhs`, unevaluable classes, missing bounds/integrality on the convex path, the
+synthetic large-scale row, and real `nvs22`. The **9 that pass in both arms are the
+§0.4 locks** — unit-scale tolerance unchanged, and the four naive widenings
+(model-global scale, 1-norm scale, `rel_tol` coefficient, raised absolute floor) each
+still rejecting the bad point they were built to catch. A fix that had merely loosened
+the tolerance would have failed those nine.
