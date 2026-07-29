@@ -602,6 +602,56 @@ behind a default-OFF `DISCOPT_*` flag per §0.7 and graduates on a differential
 panel with the #902 quality gate. Do **not** instead adopt `fbbt_fp` wholesale:
 Card 3b measured its result to be `max_iterations`-dependent.
 
+### Card 3e — the root FBBT pass cannot see the other passes' bounds (filed by Card 3b) — **MECHANISM LANDED, DEFAULT-OFF; GRADUATION REFUSED**
+
+> **Status:** 2026-07-29. The seed mechanism is implemented and shipped behind
+> `DISCOPT_FBBT_SEED` (**default-OFF**, `parked`). It does **not** graduate, and the
+> graduation panel was **not** run — the entry experiment stopped it first. Below is
+> what was measured; the full transcript is the §6 entry of the same date.
+>
+> **What exists now.** `fbbt_with_cutoff_until_seeded(…, seed: Option<&[Interval]>)`
+> starts from `declared ∩ seed`; `fbbt_with_cutoff_until` delegates with `None`, so
+> the unseeded path is untouched (asserted bit-for-bit by the new Rust test).
+> `FbbtPass.seed_from_ctx` (default `false`) passes `ctx.bounds`. Reachable from
+> Python via the new `fbbt_seed_from_ctx` kwarg of `PyModelRepr.presolve`, read from
+> `DISCOPT_FBBT_SEED` in `run_root_presolve`. Entry probe:
+> `discopt_benchmarks/scripts/card3e_fbbt_seed_entry.py`, artifact
+> `reports/card3e_fbbt_seed_entry_be705694.json`.
+>
+> **Entry experiment, 119 instances, 11,058 executed bound comparisons.**
+>
+> | | result |
+> |---|---|
+> | mechanism is a no-op (the kill criterion) | **NO** — 129 bounds tightened on 9 of 119 instances (`util` +76, `heatexch_gen3` +28, `hda` +12, `casctanks` +5, `4stufen`/`beuster`/`st_e03` +2, `st_e11`/`st_e17` +1) |
+> | containment invariant (seeded box ⊆ unseeded box) | **VIOLATED on 1 instance** — `casctanks`, 5 bounds looser |
+> | end-to-end effect (3 instances, both arms) | `st_e03` and `hda` identical; **`util` 159 → 217 nodes at an identical bound and objective** |
+>
+> **The containment violation is not a budget artifact, and that is why this stops
+> here.** Re-run at 11.25 s / 60 s / 300 s presolve budgets, the split is identical
+> every time: OFF terminates `IterationCap` at 16 orchestrator iterations, ON
+> terminates **`Infeasible` at iteration 2**. So the seeded pass declares the
+> `casctanks` root box *empty*. The end-to-end solve does not currently act on it
+> (`DISCOPT_FBBT_SEED=1` returns the same `time_limit` / bound `-90.17862569095436`
+> as OFF), so **no false-infeasible ships** — but a presolve that can call a root box
+> empty is one consumer away from doing exactly that, and CLAUDE.md §1 does not let a
+> flag graduate over that signal.
+>
+> **Verdict: GRADUATE NO, and the differential panel was deliberately not run.**
+> Running a three-hour panel to decide the net-positive question would have been the
+> wrong order of work: the card already has (a) an unexplained infeasibility
+> declaration and (b) the only end-to-end datum pointing the wrong way. Per §0.3 the
+> entry experiment is what decides whether to build further, and it said stop.
+>
+> **What remains, stated so the next session does not re-derive it.** Root-cause the
+> `casctanks` `Infeasible` **before** any graduation attempt: is `ctx.bounds` an
+> invalid seed for `ctx.model` at that point (an orchestrator bookkeeping bug — the
+> serious reading), or is the composed box genuinely empty to within `FEAS_TOL` (an
+> FBBT interval-arithmetic/tolerance question on one instance)? The distinguishing
+> experiment is to run the seeded kernel from the *unseeded* orchestrator's own final
+> box, which the orchestrator has already certified. Only if that clears should the
+> §5 panel be spent. `casctanks` is also census rank #3 (`probe_real_shape_mismatch`),
+> so it is an instance this plan is going to keep meeting.
+
 ### Card 3d — Adopt the Rust presolve's model rewrites (filed by Card 2c.2) — **DEFERRED-BY-OWNER, re-sequenced next to Phase 5**
 
 **Measured, not hypothesised** (Card 2c.2, 119 instances, 8,206 per-pass deltas
@@ -2074,3 +2124,78 @@ disappears for the right reason — the incumbent's worst relative row violation
 1.5e-8, not because a tolerance was widened to swallow it. Phase 5.4's differential
 scoping is left exactly as Phase 5 wrote it (it is the right question for a
 differential panel); only its comment is updated to record the resolution.
+
+### 2026-07-29 — Card 3e entry experiment: "seeding the root FBBT from `ctx.bounds` is a sound, helpful tightening" — **HALF CONFIRMED, HALF KILLED; flag stays OFF**
+
+`discopt_benchmarks/scripts/card3e_fbbt_seed_entry.py`, all **119** in-repo
+instances, root presolve only, one subprocess per instance, 11.25 s presolve budget
+(what production gives the pass on a 45 s solve). Marker asserted before any
+measurement: `run_root_presolve` must expose `fbbt_seed_from_ctx`, else the child
+exits 2 rather than measuring the wrong tree. Artifact
+`reports/card3e_fbbt_seed_entry_be705694.json`. Wall 223.7 s, load 0.95 → 1.58.
+
+```
+## VERDICT
+  EXECUTED BOUND COMPARISONS : 11058
+  comparable instances       : 119 of 119
+  instances tightened by seed: 9
+      util +76   heatexch_gen3 +28   hda +12   casctanks +5
+      4stufen +2   beuster +2   st_e03 +2   st_e11 +1   st_e17 +1
+  TOTAL bounds tightened     : 129
+  budget-dependent rows (arms stopped differently): 8
+  SOUNDNESS: instances loosened : 1
+      casctanks  [{var 339: off_lo 0.021650635 -> on_lo 0.017677670}, …]
+FAIL: the seeded arm LOOSENED a bound — the seed is not a valid box
+```
+
+**Confirmed half.** The kill criterion was "zero bounds tightened corpus-wide". It is
+not zero: **129 bounds on 9 of 119 instances**. Card 3b's mechanism claim survives
+contact with the real corpus — this is not a synthetic-only effect (the #727 RLT
+failure mode), and the composition gap it names is real.
+
+**Killed half, and it is the one that decides the card.** The probe's containment
+assertion — seeding can only shrink the starting box and `backward_propagate` only
+tightens, so the seeded result must be *contained* in the unseeded one — fails on
+`casctanks`. Run down rather than attributed to the budget:
+
+```
+budget= 11250ms  OFF[IterationCap, iters=16]  ON[Infeasible, iters=2]  tightened=5  loosened=5
+budget= 60000ms  OFF[IterationCap, iters=16]  ON[Infeasible, iters=2]  tightened=5  loosened=5
+budget=300000ms  OFF[IterationCap, iters=16]  ON[Infeasible, iters=2]  tightened=5  loosened=5
+```
+
+Identical at 27× the budget: **the seeded pass declares the `casctanks` root box
+empty**, and the orchestrator stops at iteration 2 with `Infeasible` instead of
+running its 16. The "loosening" is that early stop. `casctanks` has no reference
+optimum in the in-repo oracle (`reference_oracle("casctanks") -> None`) and neither
+arm finds an incumbent at 45 s, so there is no feasible witness on hand to call this
+a *proven* false infeasible — but there is equally nothing supporting the box being
+empty, and a presolve that can empty a root box is one consumer away from a false
+`infeasible` certificate. Checked, and recorded because the negative matters:
+end-to-end `DISCOPT_FBBT_SEED=1` on `casctanks` returns the **same**
+`time_limit` / bound `-90.17862569095436` as OFF, so **no false infeasible ships
+today**.
+
+**The only end-to-end datum points the wrong way too.** Three instances, both arms,
+45 s:
+
+| instance | OFF | ON |
+|---|---|---|
+| `util` | `feasible` obj 1059.3160203762593 bound 999.5538990472674 **159 nodes** | same obj, same bound, **217 nodes** |
+| `st_e03` | `optimal` −1161.3366118602887, 53 nodes | identical |
+| `hda` | `time_limit`, bound −64473.44240243703, 3 nodes | identical |
+
+`util` is the instance with the largest presolve gain (+76 bounds) and it costs 58
+nodes for an identical bound — the tightening changes the branching order without
+improving the relaxation. Three instances is not a net-positive verdict and is not
+offered as one; it is the reason the three-hour panel was **not** spent.
+
+**Verdict.** `DISCOPT_FBBT_SEED` ships **default-OFF** and does not graduate. Per
+§0.3 the entry experiment exists to decide whether to keep building, and it said
+stop: an unexplained infeasibility declaration outranks an unmeasured net-positive
+question. The mechanism, its Rust test, and this measurement are landed so the next
+session starts from evidence rather than from the hypothesis. What must happen before
+any panel: run the seeded kernel from the *unseeded* orchestrator's own final box —
+the box that run already certified — and determine whether `casctanks` is an
+orchestrator bookkeeping bug (`ctx.bounds` not a valid seed for `ctx.model`) or an
+FBBT `FEAS_TOL` question on one instance.
