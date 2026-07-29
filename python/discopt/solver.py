@@ -6272,7 +6272,7 @@ def solve_model(
             n_tightened = propagate_bounds_to_model(model, _model_repr)
             _ts.record(
                 "rust_root_presolve",
-                detail=str(_presolve_stats.get("termination", "")),
+                detail=str(_presolve_stats.get("terminated_by", "")),
             )
             _ts.record("propagate_bounds_to_model", n_tightened=int(n_tightened))
             elim = _presolve_stats.get("elimination", {})
