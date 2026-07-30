@@ -1,0 +1,80 @@
+discopt.__file__      = /home/user/discopt/python/discopt/__init__.py
+core.__file__         = /home/user/discopt/python/discopt/modeling/core.py
+marker 'always 0.0 in normalized form' present in Constraint.__doc__: True
+corpus instances found: 66
+  4stufen.nl                   rows=    98 nonzero_rhs=0
+  alan.nl                      rows=     7 nonzero_rhs=0
+  bchoco06.nl                  rows=   134 nonzero_rhs=0
+  bchoco07.nl                  rows=   153 nonzero_rhs=0
+  bchoco08.nl                  rows=   190 nonzero_rhs=0
+  beuster.nl                   rows=   114 nonzero_rhs=0
+  casctanks.nl                 rows=   517 nonzero_rhs=0
+  chance.nl                    rows=     3 nonzero_rhs=0
+  clay0303hfsg.nl              rows=   150 nonzero_rhs=0
+  contvar.nl                   rows=   284 nonzero_rhs=0
+  cvxnonsep_nsig30.nl          rows=     1 nonzero_rhs=0
+  cvxnonsep_psig30.nl          rows=     0 nonzero_rhs=0
+  cvxnonsep_psig40r.nl         rows=    42 nonzero_rhs=0
+  dispatch.nl                  rows=     2 nonzero_rhs=0
+  ex1221.nl                    rows=     5 nonzero_rhs=0
+  ex1222.nl                    rows=     3 nonzero_rhs=0
+  ex1224.nl                    rows=     7 nonzero_rhs=0
+  ex1225.nl                    rows=    10 nonzero_rhs=0
+  ex1226.nl                    rows=     5 nonzero_rhs=0
+  ex14_1_9.nl                  rows=     2 nonzero_rhs=0
+  fac2.nl                      rows=    33 nonzero_rhs=0
+  flay02m.nl                   rows=    11 nonzero_rhs=0
+  flay03m.nl                   rows=    24 nonzero_rhs=0
+  gbd.nl                       rows=     4 nonzero_rhs=0
+  gkocis.nl                    rows=     8 nonzero_rhs=0
+  hda.nl                       rows=   718 nonzero_rhs=0
+  heatexch_gen1.nl             rows=   120 nonzero_rhs=0
+  heatexch_gen2.nl             rows=   166 nonzero_rhs=0
+  heatexch_gen3.nl             rows=   510 nonzero_rhs=0
+  m3.nl                        rows=    43 nonzero_rhs=0
+  nvs01.nl                     rows=     3 nonzero_rhs=0
+  nvs02.nl                     rows=     3 nonzero_rhs=0
+  nvs03.nl                     rows=     2 nonzero_rhs=0
+  nvs04.nl                     rows=     0 nonzero_rhs=0
+  nvs05.nl                     rows=     9 nonzero_rhs=0
+  nvs06.nl                     rows=     0 nonzero_rhs=0
+  nvs07.nl                     rows=     2 nonzero_rhs=0
+  nvs08.nl                     rows=     3 nonzero_rhs=0
+  nvs09.nl                     rows=     0 nonzero_rhs=0
+  nvs10.nl                     rows=     2 nonzero_rhs=0
+  nvs11.nl                     rows=     3 nonzero_rhs=0
+  nvs12.nl                     rows=     4 nonzero_rhs=0
+  nvs13.nl                     rows=     5 nonzero_rhs=0
+  nvs14.nl                     rows=     3 nonzero_rhs=0
+  nvs15.nl                     rows=     1 nonzero_rhs=0
+  nvs21.nl                     rows=     2 nonzero_rhs=0
+  oaer.nl                      rows=     7 nonzero_rhs=0
+  st_e11.nl                    rows=     2 nonzero_rhs=0
+  st_e13.nl                    rows=     2 nonzero_rhs=0
+  st_e29.nl                    rows=     7 nonzero_rhs=0
+  st_e36.nl                    rows=     2 nonzero_rhs=0
+  st_e38.nl                    rows=     3 nonzero_rhs=0
+  st_miqp1.nl                  rows=     1 nonzero_rhs=0
+  st_miqp2.nl                  rows=     3 nonzero_rhs=0
+  st_miqp3.nl                  rows=     1 nonzero_rhs=0
+  st_miqp4.nl                  rows=     4 nonzero_rhs=0
+  st_miqp5.nl                  rows=    13 nonzero_rhs=0
+  st_test1.nl                  rows=     1 nonzero_rhs=0
+  st_testgr3.nl                rows=    20 nonzero_rhs=0
+  syn05hfsg.nl                 rows=    58 nonzero_rhs=0
+  tanksize.nl                  rows=    74 nonzero_rhs=0
+  tls2.nl                      rows=    24 nonzero_rhs=0
+  tspn05.nl                    rows=    10 nonzero_rhs=0
+  tspn08.nl                    rows=    18 nonzero_rhs=0
+  tspn10.nl                    rows=    21 nonzero_rhs=0
+  tspn12.nl                    rows=    26 nonzero_rhs=0
+
+control arm: rows=1 nonzero_rhs=1 -> ['CONTROL[0] name=None rhs=5.0']
+operator arm: rows=1 nonzero_rhs=0
+
+========================================================================
+EXECUTED_RHS_COMPARISONS 3705
+MODELS_LOADED            66
+LOAD_FAILURES            0
+CORPUS_VIOLATIONS        0
+H-RHS HOLDS on this population: no supported constructor emits a non-zero rhs; the control arm proves the probe can see one.
