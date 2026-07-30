@@ -4113,3 +4113,65 @@ first pass and in none of the replicates is recorded as `TRANSIENT`. That is why
 transient row is printed in full, lands in the exit summary and the check artifact,
 and is capped at `--max-transient`. It is a disclosure, not a dismissal — and the
 substantive fix is ledger row 15b (deterministic work budgets), not a bigger `R`.
+
+### 2026-07-30 — Open-ledger item 15 close-out: what was run on the final tree
+
+Recorded per §0.6. Tree: `08543244` (a concurrent session's test-parallelism commit,
+**no file overlap** with this work) + this session's three commits. `HEAD == origin`
+asserted before every commit. Compiled `.so` marker asserted **inside every probe
+child, not once at the start**: `strings` on
+`_rust.cpython-311-x86_64-linux-gnu.so` finds `subtol_crossings_repaired`, and
+`item15_root_budget_probe.py::_assert_loaded_build` re-checks both
+`discopt.__file__` and that marker in each of the ~400 subprocesses it spawned,
+raising `SystemExit` rather than measuring a stale build (CLAUDE.md §8).
+**Nothing under `python/` or `crates/` was touched**, so `cargo test -p discopt-core`
+and `mypy python/discopt/` were **not run** — the change is confined to
+`discopt_benchmarks/` and `docs/`.
+
+| suite | result |
+|---|---|
+| `pytest discopt_benchmarks/tests/test_panel_baseline.py` | **PASS — 21 passed** (10.97 s). Was 12 before; the 9 new arms are the three adjudication verdicts, the zero-replicate refusal, the signature's field set, the two comparator arms, the load-gate refusal, and the `--replicates 0` escape hatch |
+| `pytest discopt_benchmarks/tests -m smoke` | **PASS — 53 passed, 1 skipped** (31.5 s). Pre-session 51; +2 are the load-gate and `--replicates 0` arms |
+| `pytest python/tests -m smoke` | **PASS — 947 passed**, 16 skipped, 7,756 deselected, 2 xpassed (453.1 s) — identical to the pre-session count |
+| `pytest -m slow python/tests/test_adversarial_recent_fixes.py` | **PASS — 10 passed** (207.5 s) |
+| `ruff check` + `ruff format --check` on the three touched files | clean |
+| `cargo test -p discopt-core` | **not run — `crates/` untouched** |
+| `mypy python/discopt/` | **not run — `python/` untouched** |
+| heldout50 | **SKIPPED — local only.** Not available in this environment |
+
+**Regime N — the hardened gate, both directions.**
+
+| arm | result |
+|---|---|
+| full 119-instance `--check` on the unmodified tree, nothing else on the box | **PASS.** `comparisons executed (total): 255 = 255 first-pass + 0 adjudication over 85 comparable row(s); flagged 0, adjudicated 0, transient 0`. 1931.6 s, load start 0.47 peak 2.39. 15 non-comparable drift rows reported and not gating. `ex1266` (6005 nodes) and `gear2` (3 nodes) both reproduced the frozen baseline exactly. Artifact `reports/item15_panel_check_hardened.json` |
+| `--check --subset gear2` against the clean frozen baseline | **PASS**, 3 executed comparisons |
+| `--check --subset gear2` against a baseline whose `gear2` node count was perturbed by **one** (3 → 4) | **FAIL, exit 1.** 12 executed comparisons = 3 first-pass + 9 adjudication; 3/3 isolated replicates `nodes=3`; verdict **CONFIRMED**; transient 0 |
+
+The same 255/85 comparison population as Phase 3, Phase 5, Card 3e, Card 4a and
+Card 4c. The gate now passes clean *and* still fails on a one-node injection — on
+the instance whose flakiness opened the item.
+
+**Disclosed measurement conditions (CLAUDE.md §9).** The box is a 4-core container
+and was **shared with another Claude session this session** (it landed
+`08543244` mid-run); that is disclosed rather than assumed away, and it is why the
+`--arm clockscale` population sweep carries an explicit `alpha = 1.0` control —
+85/85 rows reproducing the frozen baseline is the evidence that no foreign load
+contaminated it. Nothing else was run during the clockscale sweep, the load-arm
+reproduction, or the full panel `--check`; the suites were run only after the panel
+finished. The `--arm load` "idle" condition ran at a *decaying* 1-minute average of
+1.9–4.1 (residue of the preceding sweep plus the panel child's own JAX/BLAS
+threads) and still reproduced the baseline exactly on both instances, which is
+itself the calibration behind the `--max-load` default of 2.0. All 24 spinner
+processes were killed and verified gone (`ps --sort=-pcpu`) before any subsequent
+measurement — the §9 "check for stray load you created yourself" step, which has
+invalidated a round in this repo before.
+
+**Can item 15 close? YES.** The defect is root-caused with executed counts, the
+remedy is implemented with the alternative explicitly rejected and why, the "does
+not weaken the gate" constraint is demonstrated rather than argued, and the plan
+carries the addendum every later card must follow. What is *not* closed, and is
+filed rather than hidden: **ledger row 15b** — the solver still decides how much
+work to do by reading a clock, and until that is replaced with deterministic work
+budgets, an identical model and `time_limit` are not guaranteed to give an identical
+tree across machines. Adjudication makes the gate trustworthy; it does not make the
+solver reproducible.
