@@ -148,7 +148,7 @@ detecting a deliberate 1-node perturbation (test); `heldout50` resolvable locall
 excludes rows whose *terminal status* is budget-dependent. That is necessary and it
 is not sufficient. The root-cause experiment (§6, "open-ledger item 15") measured
 what the filter cannot see: **the solver's search path is a function of the wall
-clock at 81 Python decision sites**, and on `gear2` the one that fires is the root
+clock at 78 Python decision sites**, and on `gear2` the one that fires is the root
 primal heuristic. `solver/__init__.py:9660` hands `integer_local_search`
 `time_budget = min(5.0, 0.15·time_limit)`, and its descent runs
 `while improved and time.perf_counter() < deadline` until that wall deadline expires
@@ -184,8 +184,8 @@ Adjudication verdicts, and what each means for the card:
 * **CONFIRMED** — the replicates unanimously disagree with the baseline. Real
   drift; the card **fails Regime N**. A bound-neutrality violation is deterministic
   (the changed code runs every time), so this is the arm every genuine regression
-  lands in — which is why the hardening does not weaken the gate (§0.4). This is
-  asserted, not argued: `test_check_detects_a_perturbed_node_count` injects a
+  lands in — which is why the hardening does not weaken the gate (§0.4). That is
+  tested, not argued: `test_check_detects_a_perturbed_node_count` injects a
   one-node perturbation and requires the verdict to be `CONFIRMED` and explicitly
   *not* `TRANSIENT`.
 * **NONDETERMINISTIC** — the replicates disagree with *each other*. The instance
@@ -1804,8 +1804,8 @@ this environment cannot adjudicate.
 | 12 | **Phase 7** — islands, refusal tests, deferred tail | not started, unblocked, cheap | Support-tier docstrings on the six zero-inbound packages; one test per load-bearing refusal (`multistage.py:47`, `gdpopt_loa.py:628`); file the SOTA long-tail entry experiments as issues |
 | 13 | **heldout50 panel** | never run here | Local-only corpus. Every card that names it has recorded "SKIPPED — local only" |
 | 14 | **28 parked flags** | default-OFF, each with its own record | Each needs its own Regime-C graduation panel; several (this one, `DISCOPT_CUT_INHERIT`, `DISCOPT_CONVEX_KERNEL`, `DISCOPT_FBBT_SEED`) have measured refusals recorded and should not be re-proposed without new evidence |
-| 15 | **The Regime-N panel is no longer reproducible instance-for-instance here** (filed 2026-07-30) | **ROOT-CAUSED AND CLOSED 2026-07-30** — and the premise was wrong: it is *not* "Phase 0 work, not solver work" | The cause is the solver, not the harness: the search reads the wall clock at **81** Python decision sites, and the root primal heuristic (`integer_local_search`, `time_budget=min(5.0, 0.15·time_limit)`) runs to its deadline every time (5.02 s consumed of 5.00 s). Forcing that budget alone steps `gear2` 3 → 91 → 93 nodes with nothing else changed. Fixed at the gate by **replicate-and-agree adjudication** (Phase 0 addendum); the alternative — widening the `comparable` filter — was **rejected**: it would have to exclude `gear2`-class rows (`optimal`, certified, 15 % of budget) permanently, weakening detection in violation of §0.4, and it does not even cover `ex1266`, whose flake was whole-solve starvation with a 0.03 s root |
-| 15b | **The solver decides how much work to do by reading a clock** (filed 2026-07-30 by item 15) | measured, not fixed — the *real* fix behind item 15's gate-level remedy | Deterministic work budgets (LP iterations, sub-NLP counts) in place of wall-clock budgets on `integer_local_search` and its 80 siblings, so an identical model + `time_limit` gives an identical tree on any machine. Solver change, Regime C (it changes the search), its own card. Until then adjudication tells a card *whether* a deviation is code-induced, but the tree is genuinely not reproducible across machine speeds |
+| 15 | **The Regime-N panel is no longer reproducible instance-for-instance here** (filed 2026-07-30) | **ROOT-CAUSED AND CLOSED 2026-07-30** — and the premise was wrong: it is *not* "Phase 0 work, not solver work" | The cause is the solver, not the harness: the search reads the wall clock at **78** Python decision sites, and the root primal heuristic (`integer_local_search`, `time_budget=min(5.0, 0.15·time_limit)`) runs to its deadline every time (5.02 s consumed of 5.00 s). Forcing that budget alone steps `gear2` 3 → 91 → 93 nodes with nothing else changed. Fixed at the gate by **replicate-and-agree adjudication** (Phase 0 addendum); the alternative — widening the `comparable` filter — was **rejected**: it would have to exclude `gear2`-class rows (`optimal`, certified, 15 % of budget) permanently, weakening detection in violation of §0.4, and it does not even cover `ex1266`, whose flake was whole-solve starvation with a 0.03 s root |
+| 15b | **The solver decides how much work to do by reading a clock** (filed 2026-07-30 by item 15) | measured, not fixed — the *real* fix behind item 15's gate-level remedy | Deterministic work budgets (LP iterations, sub-NLP counts) in place of wall-clock budgets on `integer_local_search` and its 77 siblings, so an identical model + `time_limit` gives an identical tree on any machine. Solver change, Regime C (it changes the search), its own card. Until then adjudication tells a card *whether* a deviation is code-induced, but the tree is genuinely not reproducible across machine speeds |
 
 Parallelism guidance for Opus sessions: Phases 1, 2, 7 are safe concurrently
 (disjoint files). Phases 3 and 4 both edit `solver.py` — serialize them. Phase 5
@@ -3967,3 +3967,149 @@ probe were each run with nothing else on the box, and the Card 6a A/B arms were
 §6 entries is wall-based except the explicitly-labelled `st_e11`/`syn05hfsg` wall
 comparison, which was measured alone at 120 s with two order-balanced replicates per
 arm.
+
+### 2026-07-30 — Open-ledger item 15: "the Regime-N panel's instance-for-instance irreproducibility is a harness artifact, closable in Phase 0" — **FALSIFIED. It is the solver, the panel was right to flag it, and the ledger's own framing was wrong**
+
+**Hypothesis** (ledger row 15, as filed): two runs of the same tree flagging a
+*different single* instance is "environment sensitivity of the harness on this 4-core
+container", closable by "a per-instance replicate-and-agree rule, or extending the
+`comparable` filter to exclude rows whose *preprocessing* phases are budget-sensitive.
+**Phase 0 work, not solver work.**"
+
+**Kill criterion.** If a *specific* wall-clock-gated phase can be shown to move
+`node_count` on a flagged instance with everything else held identical, then the
+irreproducibility is a property of the solver's budget arithmetic, not of the
+harness's bookkeeping — the last sentence of the hypothesis is false, and any remedy
+that only edits the `comparable` filter is treating a symptom.
+
+**Experiment.** `discopt_benchmarks/scripts/item15_root_budget_probe.py`, four arms,
+artifacts `reports/item15_*.json`. Every child asserts `discopt.__file__` *and* the
+`subtol_crossings_repaired` marker inside `_rust*.so` before it measures anything
+(CLAUDE.md §8) and raises rather than swallowing (§7); a child that emits no
+`RESULT_JSON` is a hard error, not a skipped row.
+
+**Static census first.** `time.perf_counter()` / `time.monotonic()` / `deadline`
+comparisons that gate a *branch* (not merely a report) in `python/discopt/`:
+**78 sites**, led by `solver/__init__.py` (26), `_jax/primal_heuristics.py` (10),
+`_jax/mccormick_lp.py` (6), `solver/native_kernel.py` (5), `_jax/obbt.py` (5). Plus
+57 `Instant::now` sites in `crates/`. The search reads the clock everywhere.
+(Derivation, so the figure is auditable rather than asserted: `grep -rnE
+"perf_counter\(\) *[<>=]|perf_counter\(\) *- *[A-Za-z_0-9.]+ *[<>]|monotonic\(\) *>=|
+_deadline_exhausted\(\)|deadline_exceeded\(\)|_remaining_budget\(\)"` over
+`python/discopt/` excluding `llm/` matches **82** lines; **4** of those are the helper
+*definitions* and their docstrings, leaving **78** that gate a branch.)
+
+**Arm 1 — `--arm observe`: the first candidate is ruled OUT.** The ledger and the
+plan both suspected root OBBT (`_obbt_budget = min(min(max(time_limit·0.1, 2.0),
+15.0), _remaining_budget())`, `solver/__init__.py:6549`, and the candidate sweep
+breaks on `deadline` at `obbt.py:1199/1229`). Measured on `gear2`, `ex1266`, `gear`,
+`gear3`, `gear4` at 45 s, idle box: **5 observations, 9 `obbt_tighten_root` calls
+observed, 0 of them returned at or past their deadline.** Consumed 2–45 ms against
+4.5–5.0 s budgets — root OBBT converges long before its clock and cannot be the
+mechanism. `ex1266` never calls it at all (`root_time` 0.03 s of a 6.1 s solve).
+
+**Arm 2 — `--arm forcebudget --phase ils`: the causal arm.** `gear2` spends 5.96 s of
+its 6.56 s wall in the *root*, and a `cProfile` of the whole solve puts 5.0 s of it in
+`primal_heuristics.integer_local_search` (called from `solver/__init__.py:9660` with
+`time_budget=min(5.0, 0.15·time_limit)`, descending
+`while improved and time.perf_counter() < deadline`, `primal_heuristics.py:768`).
+Forcing that one budget, everything else identical, 2 replicates each, idle box —
+**12 executed comparisons, 0 errors** (`reports/item15_forcebudget_ils_gear2.json`):
+
+| forced ILS budget | node_count | certified objective |
+|---|---|---|
+| 5.00 s (the default) | **3**, 3 | 1.155529714729433e-07 |
+| 4.00 s | **3**, **91** | 1.1555e-07 / 1.2492e-07 |
+| 3.00 s | 91, 91 | 1.2492237047931615e-07 |
+| 2.00 s | 91, 91 | 1.2492e-07 |
+| 1.00 s | 91, 91 | 1.2492e-07 |
+| 0.50 s | 93, 93 | 1.2492e-07 |
+
+and the heuristic **consumed 5.02 s of its 5.00 s budget** — it never converges, it
+always runs out. So the default sits directly on a cliff edge, and which side of it
+the run lands on is decided by how fast the machine was for those five seconds. The
+objective moves too (1.1555e-07 → 1.2492e-07, Δ = 9.4e-9) but stays *inside* the
+panel's `1e-8 + 1e-9·|obj|` tolerance — which is exactly why the recorded failure
+reported one violation (node count) and not two.
+
+**Arm 3 — `--arm clockscale`: does it generalise?** Scaling `time.perf_counter` /
+`time.monotonic` by `alpha` is, from the solver's point of view, indistinguishable
+from a machine `alpha` times slower, and reaches all 78 Python sites at once. Over
+the **entire 85-row Regime-N comparable population** at alphas 1.0/1.25/1.5/2.0 —
+**255 executed comparisons** (`reports/item15_clockscale_comparable.json`):
+
+* **alpha = 1.0 control: 85 of 85 rows reproduce the FROZEN baseline exactly, 0
+  mismatches.** The tree is unchanged, the harness is sound, and the two recorded
+  failures were not the tree.
+* alpha = 1.25: **0** of 85 moved. alpha = 1.5: **0** of 85 moved.
+* alpha = 2.0: **1** of 85 moved — `gear2`, 3 → 91 nodes, status and certification
+  unchanged. The same step the forced-budget arm produced, from an independent knob.
+
+The emulation is a **lower bound**: it cannot reach `crates/`. `ex1266` does not move
+even at alpha = 8 (`reports/item15_clockscale_ex1266.json`, 4 comparisons) because its
+whole-solve budget is enforced Rust-side.
+
+**Arm 4 — `--arm load`: both recorded failure modes, reproduced on demand.** 24 busy
+processes on 4 cores, 2 replicates per condition — **8 executed observations**
+(`reports/item15_load_reproduction.json`):
+
+| instance | idle | loaded (24 spinners) | which recorded failure this is |
+|---|---|---|---|
+| `ex1266` | `optimal`, **6005**, **6005** | **`time_limit`**, **1**, **7** | run A (status flip, certification lost, node collapse) |
+| `gear2` | `optimal` cert, **3**, **3** | `optimal` cert, **91**, **93** | run B (status and certificate intact, node count drifts) |
+
+`gear2` under load is not even self-consistent (91 vs 93) — `NONDETERMINISTIC` by the
+adjudicator's own definition. Two mechanisms, not one: `ex1266` is whole-solve budget
+starvation (its root is 0.03 s — **not a preprocessing phase at all**), `gear2` is the
+root primal heuristic's wall budget.
+
+**Verdict: FALSIFIED, on the part that matters.** The irreproducibility is real and it
+is the **solver's**, not the harness's. The ledger's "Phase 0 work, not solver work" is
+retracted in place (see the retraction block in the Card 6a/3d/`tls2` close-out entry,
+CLAUDE.md §11).
+
+**Which remedy, and why not the other.** The ledger offered two.
+
+* **Rejected — widen the `comparable` filter to exclude budget-sensitive rows.**
+  Three independent reasons, in order of severity. (1) *It cannot be implemented
+  without violating CLAUDE.md §2.* There is no static property that marks `gear2`:
+  it is `optimal`, `gap_certified`, and finishes in **15 %** of its budget, so every
+  filter Phase 0 has admits it. The only way to *know* it is sensitive is to run it
+  at several clock scales — i.e. the replicate machinery — and the only cheap
+  alternative is a hardcoded instance list keyed to problem names, which is exactly
+  what §2 forbids. (2) *It is a permanent weakening (§0.4).* An excluded row never
+  gates again, including against a real regression; adjudication costs a row's
+  gating only on the run where it actually deviated. (3) *It does not even cover the
+  observed defect set.* `ex1266`'s failure is whole-solve starvation with a 0.03 s
+  root, so a filter on *preprocessing* budget-sensitivity — the ledger's own wording
+  — would not have excluded it.
+* **Chosen — per-instance replicate-and-agree adjudication** (Phase 0 addendum;
+  `_adjudicate` in `panel_baseline.py`). It keeps every row in the gate and decides
+  per *observation* rather than per *instance*.
+
+**Proof it does not weaken detection of real drift (§0.4 is not satisfied by
+argument).** A bound-neutrality violation is deterministic — the changed code runs on
+every replicate — so it lands in `CONFIRMED` and still fails. Demonstrated end to end
+on the *flaky instance itself*: `gear2`'s frozen row perturbed by **one node** (3 → 4),
+`--check --subset gear2`:
+
+```
+comparisons executed (total): 12 = 3 first-pass + 9 adjudication over 1 comparable row(s)
+  gear2 replicate 1/3: optimal nodes=3 ... 2/3: optimal nodes=3 ... 3/3: optimal nodes=3
+  -> gear2: CONFIRMED — 3/3 isolated replicates agree with each other and DISAGREE
+                        with the baseline — reproducible drift.
+FAIL: gear2: NODE COUNT drift 4 -> 3
+```
+
+and the clean arm on the same row PASSES with 3 executed comparisons, so the failure
+is attributable to the injected perturbation and not to ambient flakiness. The same
+property is pinned in CI by `test_check_detects_a_perturbed_node_count`, which now
+requires the verdict to be `CONFIRMED` and explicitly **not** `TRANSIENT`, and by five
+pure-logic arms covering all three verdicts, the zero-replicate refusal, and the
+signature's field set.
+
+**The residual, stated rather than hidden.** A *rare* real drift that fires in the
+first pass and in none of the replicates is recorded as `TRANSIENT`. That is why every
+transient row is printed in full, lands in the exit summary and the check artifact,
+and is capped at `--max-transient`. It is a disclosure, not a dismissal — and the
+substantive fix is ledger row 15b (deterministic work budgets), not a bigger `R`.

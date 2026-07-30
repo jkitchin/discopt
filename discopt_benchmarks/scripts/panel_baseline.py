@@ -52,7 +52,7 @@ Replicate-and-agree adjudication (open-ledger item 15)
 
 The ``comparable`` filter above is necessary but **not sufficient**, and that was
 measured, not guessed. The solver's search path is a function of the wall clock at
-81 Python decision sites: the root primal heuristic
+78 Python decision sites: the root primal heuristic
 (``primal_heuristics.integer_local_search``) is handed
 ``time_budget=min(5.0, 0.15·time_limit)`` and descends the integer lattice *until
 that wall deadline*, so how good an incumbent the root produces — and therefore how

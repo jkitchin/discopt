@@ -86,7 +86,7 @@ def _child(
     # ``perf_counter() + budget`` and polls ``perf_counter()``. Running the clock
     # ``alpha`` times faster is therefore indistinguishable, from the solver's
     # point of view, from running on a machine ``alpha`` times slower — which is
-    # what ambient load does. This reaches ALL 81 Python wall-clock branch sites
+    # what ambient load does. This reaches ALL 78 Python wall-clock branch sites
     # at once instead of one hand-picked phase. (It does NOT reach the ~50
     # ``Instant::now`` sites in ``crates/``, so it measures a LOWER bound on
     # budget sensitivity.) No module does ``from time import perf_counter``, so
