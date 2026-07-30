@@ -1432,10 +1432,12 @@ tree manager. If Phase 5 retires `lp_spatial_bb`'s class first, skip its port.
 
 ### Phase 5.2 — the census re-read by ladder position (open-ledger item 8) — **MEASURED; NOTHING BUILT, AND THAT IS THE RESULT**
 
-> **Status:** three entry experiments run 2026-07-30, **all three killed**. **Regime:**
-> none — no solver code changed, so neither N nor C applies and **no flag was
-> registered and no default moved**. **Depends:** Phase 5.1 (the census). **Est:** done
-> as scoped; what remains is a different card, named below.
+> **Status:** three entry experiments run 2026-07-30, **all three killed**; one
+> Regime-N instrument fix landed. **Regime:** N for the one code change (the
+> `unbounded_root_box` / `infinite_aux_bounds` decline split — both arms return `None`
+> identically and nothing in the solve path reads the counters); **no flag was
+> registered, no coverage expanded and no default moved**. **Depends:** Phase 5.1 (the
+> census). **Est:** done as scoped; what remains is a different card, named below.
 >
 > #### What item 8 asked, and what the corpus answered
 >
@@ -1524,7 +1526,7 @@ tree manager. If Phase 5 retires `lp_spatial_bb`'s class first, skip its port.
 > | vector corpus / routing / tightening schedule / solver state / flag registry | ditto |
 > | `ruff check` + `ruff format --check` + `mypy` (2.1.0) | ditto |
 > | `cargo test -p discopt-core` | **not run — no Rust touched** |
-> | Regime-N `panel_baseline.py --check` | ditto |
+> | Regime-N `panel_baseline.py --check` (the decline split is the only code change) | ditto |
 > | `heldout50` / MINLPLib snapshot | **SKIPPED — local only** |
 >
 > **Parity-guard note.** `python/tests/test_node_tightening_parity.py` is the standing
@@ -2158,11 +2160,32 @@ built; no flag was registered; no default changed.
 Recorded per §0.6. Tree: `4f3cd17d` (item 11's close-out) + this session's commits.
 `HEAD == origin` asserted before every commit.
 
-**Three entry experiments, three kills, zero solver-code changes.** The session
-produced no behavior change, so there is **no Regime C panel and no graduation** — per
-§0.3 a card that cannot survive its entry experiment does not proceed to a build, and
-per the item-8 brief a graduation shipped default-ON without a clean panel is the worst
-possible outcome. What the corpus now says, in one table:
+**Three entry experiments, three kills, and one instrument fix the measurements
+support.** No coverage expanded, so there is **no Regime C panel and no graduation** —
+per §0.3 a card that cannot survive its entry experiment does not proceed to a build,
+and per the item-8 brief a graduation shipped default-ON without a clean panel is the
+worst possible outcome. The one code change is **Regime N**: splitting the
+`infinite_aux_bounds` decline into `unbounded_root_box` and `infinite_aux_bounds`, so
+the census can rank the two disjoint classes E8.1/E8.2 measured. Both arms return
+`None` exactly as the single arm they replace and nothing in the solve path reads the
+counters. Verified on the corpus at the real call site: the 9 instances split **6
+`unbounded_root_box`** (`carton7`, `contvar`, `ex14_1_9`, `gear4`, `heatexch_gen1`,
+`heatexch_gen2`) / **3 `infinite_aux_bounds`** (`4stufen`, `beuster`, `hda`) — exactly
+the 6/3 the diagnostic predicted — with every downstream verdict unchanged.
+Regression test:
+`test_spatial_native_kernel.py::test_unbounded_root_box_and_infinite_aux_are_distinct_decline_codes`
+(fails on the pre-item-8 producer with `- unbounded_root_box / + infinite_aux_bounds`;
+its second arm asserts a finite box still *produces* a spec, so it cannot pass by
+declining everything).
+
+**A note on the probe that caught its own author.** Adding the explanatory comment
+above put a second literal `np.isinf(` in the producer source, and
+`phase52_infinite_aux_entry.py` — which asserts exactly one call site before installing
+its bypass shim — **refused to measure and exited non-zero** rather than report nine
+`None` declines as a pass. That is CLAUDE.md §6 working as designed; the comment was
+reworded, not the assertion.
+
+What the corpus now says, in one table:
 
 | census rank | code | inst | attributed | **measured recoverable** | owner of the fix |
 |---|---|---|---|---|---|

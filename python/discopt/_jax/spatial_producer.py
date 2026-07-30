@@ -197,7 +197,26 @@ def build_spatial_kernel_spec(model, bounds: Optional[tuple] = None) -> Optional
     # feeding the native kernel presolved bounds is the follow-up. #764.)
     if not getattr(rel_real.model, "_objective_bound_valid", False):
         return _decline("real_objective_bound_invalid")
-    if np.isinf(np.asarray(rel_real.model._bounds, dtype=np.float64)).any():
+    # ONE test, but TWO disjoint classes — and merging them made the Phase 5.1
+    # coverage census rank a chimera. Open-ledger item 8's entry experiment
+    # (``reports/phase52_infinite_aux_entry_4f3cd17d.json``) measured the 9 corpus
+    # instances that reach here: **6** carry an unbounded *presolved root box* on
+    # ORIGINAL columns — the solver's own FBBT/OBBT could not bound the variable, a
+    # McCormick envelope over an unbounded box does not exist, and no relaxation- or
+    # producer-side change reaches it (the lever is presolve propagation quality) —
+    # while **3** carry only free AUX columns from atoms the relaxer refused to
+    # envelope (13 of 17, 16 of 20 and 3 of 6 of them appear in no relaxation row at
+    # all). They need different work, so the census must be able to rank them
+    # separately. Regime N by construction: both arms return ``None`` exactly as the
+    # single arm they replace, and nothing in the solve path reads the counters.
+    # Kept to a SINGLE ``numpy.isinf`` call site — the item-8 probe asserts that
+    # before installing the bypass shim its framing arm depends on.
+    _bnds_real = np.asarray(rel_real.model._bounds, dtype=np.float64)
+    _inf_mask = np.isinf(_bnds_real)
+    if _inf_mask.any():
+        _per_col = np.asarray(_inf_mask).reshape(_bnds_real.shape[0], -1).any(axis=1)
+        if bool(np.asarray(_per_col)[:n_orig].any()):
+            return _decline("unbounded_root_box")
         return _decline("infinite_aux_bounds")
 
     # Decline lifted families the Rust kernel does not implement yet. Reported one

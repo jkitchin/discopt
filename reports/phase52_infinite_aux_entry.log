@@ -11,19 +11,19 @@
 ====================================================================================================
 PHASE 5.2 ENTRY EXPERIMENT — census rank #2 `infinite_aux_bounds`
 ====================================================================================================
-tree 4f3cd17d-dirty  budget 45.0s  instances 9  wall 96.0s  load 0.60->1.57
+tree dd1bb86b-dirty  budget 45.0s  instances 9  wall 100.4s  load 0.79->1.04
 
 --- E8.1 FRAMING: bypass the gate, where does the ladder stop next? ------------------------------
 instance          reproduced            next decline                    spec?    wall(s)
 4stufen           infinite_aux_bounds   blf_row_count:0                 no          47.2
 beuster           infinite_aux_bounds   term_trilinear                  no          50.2
-carton7           infinite_aux_bounds   NONE (spec built)               yes         78.0
-contvar           infinite_aux_bounds   term_trilinear                  no          51.1
-ex14_1_9          infinite_aux_bounds   fixed_row_box_dependent:coeffs  no           1.4
-gear4             infinite_aux_bounds   term_ratio                      no           2.0
+carton7           unbounded_root_box    NONE (spec built)               yes         78.0
+contvar           unbounded_root_box    term_trilinear                  no          51.1
+ex14_1_9          unbounded_root_box    fixed_row_box_dependent:coeffs  no           1.4
+gear4             unbounded_root_box    term_ratio                      no           2.0
 hda               infinite_aux_bounds   term_ratio                      no          56.6
-heatexch_gen1     infinite_aux_bounds   term_univariate:log             no          46.8
-heatexch_gen2     infinite_aux_bounds   term_univariate:log             no          46.3
+heatexch_gen1     unbounded_root_box    term_univariate:log             no          46.8
+heatexch_gen2     unbounded_root_box    term_univariate:log             no          46.3
 
   reach row-claiming with the gate bypassed: 1 / 9  (carton7)
   wall of the reachable set: 78.0s of 1926.0s corpus = 4.1%   (whole group 379.6s = 19.7%)
@@ -60,7 +60,7 @@ heatexch_gen2        339        55     20/35      25     5       20          55 
   crashed                         0
   diagnosed                       9
   fbbt_row_scans                  115766
-  fbbt_tightenings                855
+  fbbt_tightenings                856
   infinite_columns_examined       229
   instances                       9
   relaxations_built               9
@@ -71,4 +71,4 @@ heatexch_gen2        339        55     20/35      25     5       20          55 
   E8.2 hypothesis: infinities repairable by FBBT on the relaxation's own rows; KILL if >=5 of 9 survive.  survived 9  -> KILLED
   JOINT (the only set a producer-side card could actually serve): 0  (none)
 
-artifact: reports/phase52_infinite_aux_entry_4f3cd17d.json
+artifact: reports/phase52_infinite_aux_entry_dd1bb86b.json

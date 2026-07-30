@@ -450,6 +450,44 @@ def test_unbounded_relaxation_declines():
     assert spec is None
 
 
+# ── item 8 / Phase 5.2: the unbounded-box decline is TWO classes, named apart ──
+
+
+def test_unbounded_root_box_and_infinite_aux_are_distinct_decline_codes():
+    """One producer test, two disjoint decline classes.
+
+    The Phase 5.1 census reported a single ``infinite_aux_bounds`` bucket (9
+    instances, 19.7 % of corpus wall). Item 8's entry experiment measured that 6 of
+    those 9 are an unbounded **presolved root box** on ORIGINAL columns — nothing on
+    the relaxation or producer side reaches those; the lever is presolve propagation
+    — while 3 are free AUX columns from atoms the relaxer refused to envelope. They
+    need different work, so a census that cannot tell them apart ranks a chimera.
+
+    Both arms return ``None`` (the decline is unchanged); only the reason code
+    differs, and this asserts the code, which is what the census ranks on. Fails on
+    the pre-item-8 producer, which reported ``infinite_aux_bounds`` for both.
+    """
+    from discopt._jax.spatial_producer import producer_stats, reset_producer_stats
+
+    # (a) ORIGINAL column unbounded at the box handed to the producer.
+    m = Model("unbounded_orig")
+    x = m.continuous("x", lb=0.0, ub=2.0)
+    y = m.continuous("y", lb=0.0, ub=2.0)
+    m.subject_to(x + y >= 1.0)
+    m.minimize(x * y)
+    reset_producer_stats()
+    spec = build_spatial_kernel_spec(m, bounds=(np.array([0.0, 0.0]), np.array([2.0, np.inf])))
+    assert spec is None
+    assert producer_stats()["last"] == "unbounded_root_box"
+
+    # (b) A finite original box still produces a spec — the guard is not a blanket
+    #     refusal, so the test cannot pass by declining everything.
+    reset_producer_stats()
+    spec_ok = build_spatial_kernel_spec(m, bounds=(np.array([0.0, 0.0]), np.array([2.0, 2.0])))
+    assert spec_ok is not None
+    assert producer_stats()["declines"] == 0
+
+
 # ── #789: native-kernel feature-safety routing + final-incumbent verification ──
 
 
