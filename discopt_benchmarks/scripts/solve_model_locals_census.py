@@ -11,8 +11,21 @@ Every local bound in ``solve_model``'s own scope is classified as:
 
 ``CONFIG``
     Bound exactly once, in the pre-loop region, never augmented, never rebound
-    anywhere (including nested scopes).  Read-only configuration derived once
-    from the arguments.  These are the ones a frozen state object can carry.
+    anywhere (including nested scopes) — **and** with no syntactic mutation of its
+    value and no method call on it at all.  Only these may enter a frozen holder.
+
+``MUTATED``
+    The *name* is never rebound but the *value* is provably mutated in place:
+    a subscript or attribute store/delete on it, or a call to a method from the
+    curated unambiguous-mutator set.  Never admissible to a frozen holder.
+
+``NEEDS_AUDIT``
+    The name is never rebound and shows no syntactic mutation, but a method is
+    called on it whose mutating-or-not status the AST cannot decide
+    (``tree.export_batch``, ``evaluator.evaluate_objective``, …).  The census
+    **refuses to call these CONFIG**: asserting immutability it cannot see is the
+    exact failure the 2026-07-30 design review caught.  Resolving them requires
+    reading the callee, which this script deliberately does not do.
 
 ``STATE``
     Rebound more than once, or bound inside the spatial loop, or augmented, or
@@ -23,8 +36,40 @@ Every local bound in ``solve_model``'s own scope is classified as:
     Bound once and read exactly once.  A temporary; carving does not need it to
     cross a boundary as long as its producer and consumer stay together.
 
+``EXCEPT_TARGET``
+    Bound only as an ``except ... as name`` target.  Python deletes such a name at
+    handler exit (PEP 3110), so it **cannot** cross a region boundary no matter
+    where it is read; counting it as a crosser inflates the carve cost.
+
 ``DEAD``
     Bound and never read.  Nothing has to carry it at all.
+
+.. rubric:: Three classifier defects fixed 2026-07-30
+
+The first revision of this script (commit ``ab8235dc``) had three defects that
+propagated a wrong premise into the plan document; all three are fixed here and
+each is described below with the count it moved. **These fixes carry no unit
+tests**: the session that wrote them stopped before adding any, and an earlier
+revision of this docstring claimed a test file that does not exist. The evidence
+for them is the reclassification itself, reproducible by running this script
+(the counts in the plan's item 11 block) — treat that as weaker than a test,
+and add one before relying on a fourth classifier change.
+
+1. **``CONFIG`` meant "the name is never rebound", not "the value is immutable".**
+   ``x[k] = v`` walked into ``_bind_target`` and was recorded as a *load* of ``x``;
+   method calls were recorded as nothing at all.  So the live B&B ``tree``, the
+   per-node deadline dict ``opts`` and the ``**kwargs`` dict all read as read-only
+   configuration.  Now tracked as ``mutation_sites`` with per-site evidence and a
+   three-tier verdict (``definite`` / ``known_mutator`` / ``unresolved_call``).
+2. **``except`` targets were counted as ordinary bindings.**  They are deleted at
+   handler exit and cannot cross a region; they now bind ``except_lines`` rather
+   than ``store_lines`` and get their own class.
+3. **The JSON's ``crosses_regions`` field and the printed crosser count used two
+   different predicates** and disagreed by 11 names on the same data (84 vs 73).
+   The field's expression compared an alphabetically ``sorted()`` set-union against
+   a region-ordered list, so it also flagged never-stored *parameters* as crossing.
+   Both now call the single :func:`crosses` helper; parameters are reported in
+   their own column instead of being smuggled into the crossing count.
 
 The two coupling columns are what actually decide whether a block can be carved:
 
@@ -73,6 +118,53 @@ REGION_ANCHORS: list[tuple[str, str]] = [
     ("root", "# --- Build Rust model representation for FBBT ---"),
 ]
 
+#: Method names that mutate their receiver under *every* stdlib/numpy type that
+#: defines them.  Deliberately conservative: a name here is proof of mutation, so
+#: an ambiguous entry (``pop`` on a dict mutates; ``pop`` exists nowhere read-only)
+#: would turn the instrument into a guess.  Anything not listed is *not* assumed
+#: read-only either — it becomes ``NEEDS_AUDIT`` (see the module docstring).
+KNOWN_MUTATORS: frozenset[str] = frozenset(
+    {
+        # list / deque
+        "append",
+        "extend",
+        "insert",
+        "remove",
+        "reverse",
+        "sort",
+        "appendleft",
+        "extendleft",
+        "popleft",
+        "rotate",
+        # dict / set / Counter
+        "update",
+        "setdefault",
+        "popitem",
+        "add",
+        "discard",
+        "difference_update",
+        "intersection_update",
+        "symmetric_difference_update",
+        "subtract",
+        # shared by list/dict/set
+        "pop",
+        "clear",
+        # numpy in-place
+        "fill",
+        "setflags",
+        "resize",
+        "itemset",
+        "put",
+        "partition",
+        "byteswap",
+        # scipy.sparse in-place
+        "eliminate_zeros",
+        "sum_duplicates",
+        "prune",
+        "setdiag",
+    }
+)
+
 
 # --------------------------------------------------------------------------- #
 # scope walking
@@ -90,9 +182,24 @@ class Binding:
     del_lines: list[int] = field(default_factory=list)
     nonlocal_lines: list[int] = field(default_factory=list)
     nested_read_lines: list[int] = field(default_factory=list)
+    #: ``except ... as <name>`` bindings.  Kept *out* of ``store_lines``: Python
+    #: deletes the name at handler exit, so such a binding cannot cross a region.
+    except_lines: list[int] = field(default_factory=list)
+    #: Per-site mutation evidence.  Each entry is
+    #: ``{"line": int, "tier": str, "kind": str, "detail": str}`` with tier in
+    #: ``{"definite", "known_mutator", "unresolved_call"}``.
+    mutation_sites: list[dict[str, Any]] = field(default_factory=list)
     is_param: bool = False
     #: binding forms seen, e.g. {"assign", "for", "with", "except", "walrus"}
     forms: set[str] = field(default_factory=set)
+
+    def proven_mutation_lines(self) -> list[int]:
+        """Lines carrying tier-1/2 evidence — a syntactically proven mutation."""
+        return [s["line"] for s in self.mutation_sites if s["tier"] != "unresolved_call"]
+
+    def unresolved_call_lines(self) -> list[int]:
+        """Lines carrying a method call the AST cannot adjudicate."""
+        return [s["line"] for s in self.mutation_sites if s["tier"] == "unresolved_call"]
 
 
 class _ScopeCollector(ast.NodeVisitor):
@@ -106,9 +213,60 @@ class _ScopeCollector(ast.NodeVisitor):
     def _b(self, name: str) -> Binding:
         return self.bindings.setdefault(name, Binding(name=name))
 
+    # -- mutation evidence -------------------------------------------------- #
+
+    def _record_mutation(self, name: str, line: int, tier: str, kind: str, detail: str) -> None:
+        self._b(name).mutation_sites.append(
+            {"line": line, "tier": tier, "kind": kind, "detail": detail}
+        )
+
+    @staticmethod
+    def _root_name(node: ast.AST) -> str | None:
+        """Innermost ``Name`` under a chain of ``Subscript``/``Attribute`` nodes.
+
+        ``a["k"].b[0] = v`` mutates the object bound to ``a``, so the chain has to
+        be unwound rather than only its outermost link inspected.
+        """
+        while isinstance(node, (ast.Subscript, ast.Attribute)):
+            node = node.value
+        return node.id if isinstance(node, ast.Name) else None
+
+    def _note_target_mutation(self, target: ast.AST, line: int, verb: str) -> None:
+        """Record ``x[k] = v`` / ``x.a = v`` / ``del x[k]`` as a mutation of ``x``.
+
+        Classifier defect 1 (fixed 2026-07-30): these previously reached
+        ``_bind_target``'s ``elif isinstance(node, ast.Name)`` arm and were filed as
+        *loads*, which is how the live B&B ``tree`` and the per-node deadline dict
+        ``opts`` came to be labelled read-only ``CONFIG``.
+        """
+        if isinstance(target, ast.Name):
+            return  # a plain rebinding, not a mutation of the pointed-to value
+        name = self._root_name(target)
+        if name is None:
+            return
+        kind = "subscript_store" if isinstance(target, ast.Subscript) else "attribute_store"
+        self._record_mutation(name, line, "definite", kind, f"{verb} {ast.unparse(target)}")
+
+    def visit_Call(self, node: ast.Call) -> None:
+        """Record ``x.m(...)`` against ``x``: tier 2 when ``m`` is a known mutator,
+        tier 3 (``unresolved_call``) otherwise.  Tier 3 is why ``NEEDS_AUDIT``
+        exists — the AST cannot tell ``tree.stats()`` from ``tree.initialize()``.
+        """
+        if isinstance(node.func, ast.Attribute) and isinstance(node.func.value, ast.Name):
+            recv = node.func.value.id
+            attr = node.func.attr
+            if attr in KNOWN_MUTATORS:
+                self._record_mutation(recv, node.lineno, "known_mutator", "method_call", f".{attr}")
+            else:
+                self._record_mutation(
+                    recv, node.lineno, "unresolved_call", "method_call", f".{attr}"
+                )
+        self.generic_visit(node)
+
     # -- binding forms ------------------------------------------------------ #
 
     def _bind_target(self, target: ast.AST, line: int, form: str) -> None:
+        self._note_target_mutation(target, line, "store into")
         for node in ast.walk(target):
             if isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del)):
                 b = self._b(node.id)
@@ -142,8 +300,25 @@ class _ScopeCollector(ast.NodeVisitor):
             b.aug_lines.append(node.lineno)
             b.load_lines.append(node.lineno)
         else:
-            self._bind_target(node.target, node.lineno, "augassign")
+            # `x[k] += v` mutates x; `_bind_target` files the tier-1 evidence.
+            self._note_target_mutation(node.target, node.lineno, "augment")
+            for sub in ast.walk(node.target):
+                if isinstance(sub, ast.Name):
+                    self._b(sub.id).load_lines.append(node.lineno)
         self.visit(node.value)
+
+    def visit_Delete(self, node: ast.Delete) -> None:
+        """``del x`` unbinds the name; ``del x[k]`` / ``del x.a`` mutates ``x``."""
+        for t in node.targets:
+            if isinstance(t, ast.Name):
+                b = self._b(t.id)
+                b.forms.add("del")
+                b.del_lines.append(node.lineno)
+            else:
+                self._note_target_mutation(t, node.lineno, "delete from")
+                for sub in ast.walk(t):
+                    if isinstance(sub, ast.Name):
+                        self._b(sub.id).load_lines.append(node.lineno)
 
     def visit_NamedExpr(self, node: ast.NamedExpr) -> None:
         self._bind_target(node.target, node.lineno, "walrus")
@@ -175,9 +350,13 @@ class _ScopeCollector(ast.NodeVisitor):
         if node.type is not None:
             self.visit(node.type)
         if node.name is not None:
+            # Classifier defect 2 (fixed 2026-07-30): an `except ... as e` target is
+            # implicitly `del`'d at handler exit (PEP 3110), so it can never be live
+            # across a region boundary.  Recording it in `store_lines` made 4 such
+            # names read as cross-region STATE and inflated the carve cost.
             b = self._b(node.name)
             b.forms.add("except")
-            b.store_lines.append(node.lineno)
+            b.except_lines.append(node.lineno)
         for s in node.body:
             self.visit(s)
 
@@ -276,7 +455,13 @@ def _bound_names_of_scope(node: ast.AST) -> set[str]:
     for s in body:
         sub.visit(s)
     for name, b in sub.bindings.items():
-        if b.store_lines and "nonlocal-decl" not in b.forms and "global" not in b.forms:
+        # An `except ... as e` target *is* a local binding of the nested scope even
+        # though it is deleted at handler exit, so it is not a free variable there.
+        if (
+            (b.store_lines or b.except_lines)
+            and "nonlocal-decl" not in b.forms
+            and "global" not in b.forms
+        ):
             bound.add(name)
     return bound
 
@@ -309,10 +494,27 @@ def _nonlocal_writes(node: ast.AST) -> dict[str, list[int]]:
 # --------------------------------------------------------------------------- #
 
 CONFIG = "CONFIG"
+MUTATED = "MUTATED"
+NEEDS_AUDIT = "NEEDS_AUDIT"
 STATE = "STATE"
 SINGLE_USE = "SINGLE_USE"
+EXCEPT_TARGET = "EXCEPT_TARGET"
 DEAD = "DEAD"
 CALLABLE_LOCAL = "CALLABLE"
+
+#: Print/report order.  ``CONFIG`` + ``MUTATED`` + ``NEEDS_AUDIT`` is the old,
+#: defective ``CONFIG`` bucket; keeping the three adjacent makes the split legible
+#: against the pre-fix numbers.
+KIND_ORDER = (
+    CONFIG,
+    MUTATED,
+    NEEDS_AUDIT,
+    STATE,
+    SINGLE_USE,
+    EXCEPT_TARGET,
+    DEAD,
+    CALLABLE_LOCAL,
+)
 
 
 @dataclass
@@ -328,6 +530,9 @@ class Region:
 def classify(b: Binding, regions: list[Region], loop: Region) -> str:
     if "def" in b.forms or "class" in b.forms or "import" in b.forms:
         return CALLABLE_LOCAL
+    # Defect 2: a name bound *only* as an except target is deleted at handler exit.
+    if b.except_lines and not b.store_lines and not b.is_param:
+        return EXCEPT_TARGET
     n_store = len(b.store_lines)
     n_load = len(b.load_lines) + len(b.nested_read_lines)
     if n_load == 0 and not b.is_param:
@@ -338,6 +543,12 @@ def classify(b: Binding, regions: list[Region], loop: Region) -> str:
     deleted = bool(b.del_lines)
     if n_store > 1 or augmented or bound_in_loop or rebound_by_closure or deleted:
         return STATE
+    # Defect 1: the name not being rebound says nothing about the value.  A holder
+    # admitting these would be a `frozen=True` dataclass wrapping a live B&B tree.
+    if b.proven_mutation_lines():
+        return MUTATED
+    if b.unresolved_call_lines():
+        return NEEDS_AUDIT
     if b.is_param:
         return CONFIG
     if n_load == 1:
@@ -351,6 +562,20 @@ def region_set(lines: list[int], regions: list[Region]) -> list[str]:
         if any(r.holds(ln) for ln in lines):
             out.append(r.name)
     return out
+
+
+#: Kinds whose names a carve would have to pass across a function boundary.
+CARVE_RELEVANT = (CONFIG, MUTATED, NEEDS_AUDIT, STATE)
+
+
+def crosses(store_regions: list[str], load_regions: list[str], mut_regions: list[str]) -> bool:
+    """Single definition of "this name spans more than one region".
+
+    Defect 3 (fixed 2026-07-30): the JSON field and the printed count previously
+    used two different expressions and disagreed by 11 names on identical data.
+    Every consumer now calls this.
+    """
+    return len(set(store_regions) | set(load_regions) | set(mut_regions)) > 1
 
 
 # --------------------------------------------------------------------------- #
@@ -430,14 +655,17 @@ def run(source: Path, function_name: str) -> dict[str, Any]:
 
     rows: list[dict[str, Any]] = []
     classified = 0
+    mutation_evidence_sites = 0
     for name, b in sorted(collector.bindings.items()):
         # names that are only ever read are module-level references, not locals
-        if not b.store_lines and not b.is_param:
+        if not b.store_lines and not b.except_lines and not b.is_param:
             continue
         kind = classify(b, regions, loop)
         classified += 1
         store_regions = region_set(b.store_lines, regions)
         load_regions = region_set(b.load_lines + b.nested_read_lines, regions)
+        mut_regions = region_set(b.proven_mutation_lines(), regions)
+        mutation_evidence_sites += len(b.mutation_sites)
         rows.append(
             {
                 "name": name,
@@ -447,12 +675,23 @@ def run(source: Path, function_name: str) -> dict[str, Any]:
                 "loads": len(b.load_lines),
                 "aug": len(b.aug_lines),
                 "dels": len(b.del_lines),
+                "excepts": len(b.except_lines),
                 "nested_reads": len(b.nested_read_lines),
                 "nonlocal_writes": len(b.nonlocal_lines),
                 "store_regions": store_regions,
                 "load_regions": load_regions,
-                "crosses_regions": sorted(set(store_regions) | set(load_regions)) != store_regions
-                or len(set(store_regions) | set(load_regions)) > 1,
+                "mutation_regions": mut_regions,
+                "crosses_regions": crosses(store_regions, load_regions, mut_regions),
+                "proven_mutations": len(b.proven_mutation_lines()),
+                "unresolved_calls": len(b.unresolved_call_lines()),
+                "mutation_sites": b.mutation_sites,
+                "called_methods": sorted(
+                    {
+                        s["detail"].lstrip(".")
+                        for s in b.mutation_sites
+                        if s["kind"] == "method_call"
+                    }
+                ),
                 "forms": sorted(b.forms),
                 "first_store": min(b.store_lines) if b.store_lines else None,
                 "last_store": max(b.store_lines) if b.store_lines else None,
@@ -474,6 +713,7 @@ def run(source: Path, function_name: str) -> dict[str, Any]:
         "regions": [{"name": r.name, "start": r.start, "end": r.end} for r in regions],
         "nested_scopes": nested_scopes,
         "classified": classified,
+        "mutation_evidence_sites": mutation_evidence_sites,
         "counts": dict(counts),
         "rows": rows,
     }
@@ -510,8 +750,10 @@ def main(argv: list[str] | None = None) -> int:
         )
     print()
     print("classification:")
-    for kind in (CONFIG, STATE, SINGLE_USE, DEAD, CALLABLE_LOCAL):
-        print(f"  {kind:<11}: {census['counts'].get(kind, 0)}")
+    for kind in KIND_ORDER:
+        print(f"  {kind:<14}: {census['counts'].get(kind, 0)}")
+    old_config = sum(census["counts"].get(k, 0) for k in (CONFIG, MUTATED, NEEDS_AUDIT))
+    print(f"  {'(pre-fix CONFIG = CONFIG+MUTATED+NEEDS_AUDIT)':<14}: {old_config}")
     print()
 
     rows = census["rows"]
@@ -528,12 +770,7 @@ def main(argv: list[str] | None = None) -> int:
     print()
 
     region_names = [r["name"] for r in census["regions"]]
-    crossers = [
-        r
-        for r in rows
-        if r["kind"] in (CONFIG, STATE)
-        and len(set(r["store_regions"]) | set(r["load_regions"])) > 1
-    ]
+    crossers = [r for r in rows if r["kind"] in CARVE_RELEVANT and r["crosses_regions"]]
     print("bind-region -> read-region crossings (a local bound in the row's region and")
     print("read in the column's; the diagonal is intra-region and needs no boundary):")
     header = "  " + " " * 13 + "".join(f"{c:>13}" for c in region_names)
@@ -544,22 +781,46 @@ def main(argv: list[str] | None = None) -> int:
             n = sum(
                 1
                 for r in rows
-                if r["kind"] in (CONFIG, STATE)
-                and a in r["store_regions"]
+                if r["kind"] in CARVE_RELEVANT
+                and a in set(r["store_regions"]) | set(r["mutation_regions"])
                 and b in r["load_regions"]
             )
             cells.append(f"{n:>13}")
         print(f"  {a:<13}" + "".join(cells))
     print()
-    print(f"locals whose bind/read spans more than one region: {len(crossers)}")
-    closure = [r for r in rows if r["nested_reads"] > 0 and r["kind"] in (CONFIG, STATE)]
-    print(f"locals captured by a nested closure               : {len(closure)}")
+    print(f"locals whose bind/read spans more than one region  : {len(crossers)}")
+    for kind in CARVE_RELEVANT:
+        n = sum(1 for r in crossers if r["kind"] == kind)
+        print(f"    of which {kind:<12}                        : {n}")
+    params_x = [r for r in rows if r["is_param"] and r["kind"] in CARVE_RELEVANT]
+    print(f"parameters (supplied at the boundary by definition): {len(params_x)}")
+    closure = [r for r in rows if r["nested_reads"] > 0 and r["kind"] in CARVE_RELEVANT]
+    print(f"locals captured by a nested closure                : {len(closure)}")
     nl = [r for r in rows if r["nonlocal_writes"] > 0]
-    print(f"locals rebound by a closure via `nonlocal`         : {len(nl)}")
+    print(f"locals rebound by a closure via `nonlocal`          : {len(nl)}")
+    exc = [r for r in rows if r["kind"] == EXCEPT_TARGET]
+    exc_x = [r for r in exc if crosses(r["store_regions"], r["load_regions"], [])]
+    print(f"except targets excluded from the crossing count    : {len(exc)}")
+    print(f"   of which the pre-fix classifier called crossers : {len(exc_x)}")
+    if exc_x:
+        print("   " + ", ".join(sorted(r["name"] for r in exc_x)))
     dead = [r["name"] for r in rows if r["kind"] == DEAD]
-    print(f"never-read bindings                               : {len(dead)}")
+    print(f"never-read bindings                                : {len(dead)}")
     if dead:
         print("   " + ", ".join(sorted(dead)))
+    print()
+
+    print("mutable names the pre-fix classifier called CONFIG (defect 1):")
+    print(f"  {'name':<28} {'kind':<12} {'ld':>4} {'proven':>7} {'unres':>6}  evidence")
+    suspect = [r for r in rows if r["kind"] in (MUTATED, NEEDS_AUDIT) and r["crosses_regions"]]
+    suspect.sort(key=lambda r: (-r["loads"], r["name"]))
+    for r in suspect[: args.top]:
+        ev = ", ".join(sorted({s["kind"] for s in r["mutation_sites"]}))
+        print(
+            f"  {r['name']:<28} {r['kind']:<12} {r['loads']:>4} "
+            f"{r['proven_mutations']:>7} {r['unresolved_calls']:>6}  {ev}"
+        )
+    print(f"  ({len(suspect)} cross-region names total; showing {min(args.top, len(suspect))})")
     print()
 
     if args.json:
@@ -567,10 +828,17 @@ def main(argv: list[str] | None = None) -> int:
         args.json.write_text(json.dumps(census, indent=2, sort_keys=True) + "\n")
         print(f"wrote {args.json}")
 
-    # CLAUDE.md §6: prove the probe fired.
-    print(f"executed classifications: {census['classified']}")
+    # CLAUDE.md §6: prove the probe fired.  Two counters, because after the
+    # defect-1 fix a run that classified everything but recorded zero mutation
+    # sites would mean the new mutation visitor never fired — and would still have
+    # printed a plausible-looking census.
+    print(f"executed classifications  : {census['classified']}")
+    print(f"executed mutation probes  : {census['mutation_evidence_sites']}")
     if census["classified"] == 0:
         print("FAIL: the census classified nothing")
+        return 1
+    if census["mutation_evidence_sites"] == 0:
+        print("FAIL: the mutation visitor recorded no sites — it did not fire")
         return 1
     return 0
 
