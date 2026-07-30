@@ -18,9 +18,10 @@ This module closes that loop:
 Soundness rules, in force regardless of what the reduced solve reports:
 
 - an incumbent that cannot be inverted, or whose lifted point is not feasible
-  for the **pristine** model (the #779 guard), is *discarded* — this function
-  returns ``None`` and the caller runs the ordinary path. A point that cannot
-  be verified is never reported;
+  for the **pristine** model (the #779 guard) — rows, variable bounds *and*
+  integrality (Card 6a) — is *discarded*: this function returns ``None`` and the
+  caller runs the ordinary path. A point that cannot be verified is never
+  reported;
 - the reported objective is the one **recomputed on the pristine model** at the
   lifted point, not the reduced model's number, and the two must agree;
 - the dual bound is carried over unchanged, which is valid because the
@@ -51,6 +52,8 @@ logger = logging.getLogger(__name__)
 _OBJ_TOL = 1e-6
 #: Feasibility tolerance for the pristine-model check (matches the #779 guard).
 _FEAS_TOL = 1e-5
+#: Integrality tolerance for the lifted point (CLAUDE.md "Numerical tolerances").
+_INT_TOL = 1e-5
 
 #: Re-entrancy guard: the reduced solve must not substitute again.
 _state = threading.local()
@@ -181,12 +184,56 @@ def lift_result(
             max(con_viol, bnd_viol),
         )
         return None
+    bad_int = integrality_violation(model, x_full)
+    if bad_int is not None:
+        logger.warning(
+            "substitution postsolve: lifted point violates integrality on %s by %.3g; "
+            "discarding incumbent",
+            bad_int[0],
+            bad_int[1],
+        )
+        return None
 
     x_dict, _ = _unflatten(model, x_full)
     result.x = x_dict
     result.objective = float(obj_pristine)
     result._model = model
     return result
+
+
+def integrality_violation(model, x_full: np.ndarray) -> Optional[tuple[str, float]]:
+    """``(variable name, worst |x - round(x)|)`` for the first integral block that
+    the lifted point does not satisfy, or ``None`` when every one of them does.
+
+    Card 6a. ``ModelRepr.evaluate_point`` — the Rust guard :func:`lift_result`
+    relies on — checks rows and variable bounds and **nothing else**. It is
+    integrality-blind, so a lifted point with a fractional integer passes it and
+    is reported as the answer. Today's substitution pass never eliminates an
+    integral block (``substitute.rs`` "Scope (v0)"), so the hole is not reachable
+    through *this* transform; it is reachable through any other repr transform
+    that reuses this postsolve entry — which is precisely what Card 3d proposes —
+    and the guard is the last check before a point becomes the reported solution.
+    Completing it here is CLAUDE.md §3 (fix the guard, do not lean on an upstream
+    invariant), not a speculative feature.
+
+    Kept as a numpy pass over the declared blocks rather than delegating to
+    :func:`discopt.validation.feasibility.verify_point`: that verifier builds a
+    JAX ``NLPEvaluator``, which is exactly the path the #779 comment below
+    measured at >119 s on this pass's target models against 0.008 s for the Rust
+    evaluator. O(n) integrality costs nothing and keeps that measurement intact.
+    """
+    from discopt.modeling.core import VarType
+
+    off = 0
+    for v in model._variables:
+        size = int(v.size)
+        if v.var_type in (VarType.INTEGER, VarType.BINARY):
+            vals = np.asarray(x_full[off : off + size], dtype=float)
+            dev = np.abs(vals - np.round(vals))
+            if dev.size and float(np.max(dev)) > _INT_TOL:
+                return v.name, float(np.max(dev))
+        off += size
+    return None
 
 
 def reduced_model_n_vars(reduced_model) -> int:
