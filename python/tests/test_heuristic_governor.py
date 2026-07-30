@@ -50,7 +50,9 @@ def test_escape_hatch_restores_off(monkeypatch):
     The graduated default keeps a live escape hatch (not a dead flag): with =0 every
     source is allowed, record() is a no-op, and no stats accumulate.
     """
-    for hatch in ("0", "off", "false", "no", ""):
+    # `""` is deliberately absent: since the flag-parse unification an empty value
+    # means "unset, use the default" (ON), not "off". See test_env_parsing_default_on.
+    for hatch in ("0", "off", "false", "no"):
         monkeypatch.setenv("DISCOPT_HEURISTIC_GOVERNOR", hatch)
         g = HeuristicGovernor()
         # even a closed gap on an expensive source is allowed when OFF
@@ -166,9 +168,16 @@ def test_env_parsing_default_on(monkeypatch):
         monkeypatch.setenv("DISCOPT_HEURISTIC_GOVERNOR", v)
         assert _governor_enabled() is True
     # the escape hatch: only these disable it
-    for v in ("0", "off", "false", "", "no"):
+    for v in ("0", "off", "false", "no"):
         monkeypatch.setenv("DISCOPT_HEURISTIC_GOVERNOR", v)
         assert _governor_enabled() is False
     # UNSET is now the graduated default: ON
     monkeypatch.delenv("DISCOPT_HEURISTIC_GOVERNOR", raising=False)
+    assert _governor_enabled() is True
+    # EMPTY is unset, not off. This flag used to spell its escape hatch with `""`
+    # included; the flag-parse unification made empty mean "use the default"
+    # uniformly, because the same value read as *on* under three other idioms
+    # (architecture review §2.4, CHANGELOG "Unreleased → Fixed"). The documented
+    # `=0` hatch above is unaffected — only the empty spelling moved.
+    monkeypatch.setenv("DISCOPT_HEURISTIC_GOVERNOR", "")
     assert _governor_enabled() is True

@@ -68,17 +68,48 @@ def test_default_is_on_for_the_fallback_and_off_for_the_engine(monkeypatch):
 
 @pytest.mark.parametrize(
     "raw,expected",
-    [("1", True), ("true", True), ("0", False), ("false", False), ("", False)],
+    [("1", True), ("true", True), ("0", False), ("false", False)],
 )
 def test_env_var_forces_both_ways_including_the_fallback(monkeypatch, raw, expected):
     """An explicit setting overrides the per-path default in BOTH directions.
 
     ``=0`` must switch the fallback off too, otherwise there is no way to reproduce
     the pre-#862 behaviour for a bisect.
+
+    The empty string is deliberately NOT in this table — see
+    :func:`test_empty_value_means_unset_not_off`.
     """
     monkeypatch.setenv("DISCOPT_LP_SPATIAL_PLUNGE", raw)
     assert _plunge_enabled(require_incremental=True) is expected
     assert _plunge_enabled(require_incremental=False) is expected
+
+
+def test_empty_value_means_unset_not_off(monkeypatch):
+    """``DISCOPT_LP_SPATIAL_PLUNGE=`` resolves to each path's own default.
+
+    Before the flag-parse unification the empty string was an *off* spelling here,
+    while three other idioms read it as *on* — the same value meant opposite things
+    depending on which flag you set it on (architecture review §2.4). One table now
+    maps unset and empty alike to the caller's default (CHANGELOG "Unreleased →
+    Fixed"; ``docs/reference/flags.md``), so this asserts empty is indistinguishable
+    from unset rather than pinning a single boolean: the two paths have *different*
+    defaults, which is the whole point of the #862 scoping.
+    """
+    monkeypatch.delenv("DISCOPT_LP_SPATIAL_PLUNGE", raising=False)
+    unset_fallback = _plunge_enabled(require_incremental=True)
+    unset_engine = _plunge_enabled(require_incremental=False)
+    # The defaults this flag exists to scope: ON for the #844 fallback, OFF elsewhere.
+    assert unset_fallback is True
+    assert unset_engine is False
+
+    monkeypatch.setenv("DISCOPT_LP_SPATIAL_PLUNGE", "")
+    assert _plunge_enabled(require_incremental=True) is unset_fallback
+    assert _plunge_enabled(require_incremental=False) is unset_engine
+
+    # ...and the =0 escape hatch still switches both off, unchanged by the unification.
+    monkeypatch.setenv("DISCOPT_LP_SPATIAL_PLUNGE", "0")
+    assert _plunge_enabled(require_incremental=True) is False
+    assert _plunge_enabled(require_incremental=False) is False
 
 
 def test_plunge_depth_cap_is_finite():

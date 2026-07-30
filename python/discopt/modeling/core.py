@@ -4629,9 +4629,20 @@ class Model:
                 f"'{self_name}'."
             )
 
-    def validate(self):
+    def validate(self, *, for_solve: bool = True):
         """
         Validate model consistency.
+
+        Parameters
+        ----------
+        for_solve
+            Also enforce the checks that only the *solve* path needs — currently
+            the normalized-``rhs`` rejection (see :func:`_reject_unnormalized_rhs`).
+            Consumers that represent a row faithfully rather than solving it pass
+            ``False``: the ``.nl`` writer honours ``Constraint.rhs`` (it folds the
+            body constant into the row bound), so a model it can export correctly
+            must not be refused just because the solver could not solve it. Default
+            ``True``, so ``solve`` and direct calls are unchanged.
 
         Raises
         ------
@@ -4667,7 +4678,7 @@ class Model:
             # ``subject_to`` catches the public door, but constraints also arrive by
             # direct ``_constraints.append`` and by internal rebuilds that propagate
             # ``c.rhs`` verbatim, and ``solve`` always comes through here.
-            if isinstance(c, Constraint):
+            if for_solve and isinstance(c, Constraint):
                 _reject_unnormalized_rhs(c, where="Model.validate", index=ci)
             cname = getattr(c, "name", None)
             if cname is None:

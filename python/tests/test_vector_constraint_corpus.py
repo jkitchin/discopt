@@ -336,20 +336,44 @@ def test_the_corpus_contains_a_genuine_pre55_failure():
 # --------------------------------------------------------------------------- #
 @pytest.mark.smoke
 def test_zz_totals_prove_the_suite_fired():
-    """Runs last (``zz`` prefix). CLAUDE.md §6."""
-    print(f"[vec-corpus] totals: {TOTALS}")
-    assert TOTALS["rows_examined"] > 0, "no evaluator rows examined"
-    assert TOTALS["verifier_verdicts"] > 0, "no verifier verdicts recorded"
-    assert TOTALS["pre55_verdicts"] > 0, "the pre-5.5 discriminator never ran"
-    expected_wrong = sum(1 for c in CASES if c.pre55_row_indexing_accepts)
-    assert TOTALS["pre55_wrong_accepts"] == expected_wrong, (
-        f"{TOTALS['pre55_wrong_accepts']} wrong-accepts recorded but {expected_wrong} "
-        "cases declare one — the parametrized discriminator did not run on every case"
+    """Runs last (``zz`` prefix). CLAUDE.md §6.
+
+    **Self-contained by design.** This guard re-derives the corpus-wide claim itself
+    instead of trusting the module-level ``TOTALS`` accumulator to have seen every
+    parametrized case. Under ``pytest-xdist`` (CI's PR-fast job runs
+    ``-n <workers> --dist loadgroup``) each worker is a separate process with its own
+    ``TOTALS``, so an accumulator-only assertion fails with a partial count — 3 of 6
+    — which says nothing about the corpus and everything about the scheduler. The
+    cases are tiny synthetic models, so recomputing costs milliseconds and holds
+    under xdist, ``-k`` filtering, and single-test invocation alike.
+    """
+    print(f"[vec-corpus] totals (this worker): {TOTALS}")
+
+    # Re-derive: run the pre-5.5 discriminator over every declared case here.
+    declared_wrong = [c for c in CASES if c.pre55_row_indexing_accepts]
+    recomputed = 0
+    for case in CASES:
+        model = case.build()
+        accepted = _pre55_verify(model, np.asarray(case.infeasible, dtype=np.float64))
+        assert accepted is case.pre55_row_indexing_accepts, (
+            f"{case.name}: pre-5.5 row loop accepted={accepted}, corpus declares "
+            f"{case.pre55_row_indexing_accepts} — the discriminator drifted"
+        )
+        if accepted:
+            recomputed += 1
+    assert recomputed == len(declared_wrong), (
+        f"{recomputed} wrong-accepts re-derived but {len(declared_wrong)} declared"
     )
     # Measured 2026-07-30: 6 of the 7 cases break the pre-5.5 row loop. The floor
     # is what stops the corpus being whittled down to a vacuous one case.
-    assert TOTALS["pre55_wrong_accepts"] >= 6, (
-        f"only {TOTALS['pre55_wrong_accepts']} demonstrated wrong-accepts (was 6); "
-        "this corpus is no longer proving the misalignment class is covered"
+    assert recomputed >= 6, (
+        f"only {recomputed} demonstrated wrong-accepts (was 6); this corpus is no "
+        "longer proving the misalignment class is covered"
     )
+
+    # The accumulator still has to show *this* worker did real work — it just no
+    # longer has to have seen the whole corpus.
+    assert TOTALS["rows_examined"] > 0, "no evaluator rows examined"
+    assert TOTALS["verifier_verdicts"] > 0, "no verifier verdicts recorded"
+    assert TOTALS["pre55_verdicts"] > 0, "the pre-5.5 discriminator never ran"
     assert TOTALS["bound_assertions"] > 0, "the in-bounds premise was never checked"
