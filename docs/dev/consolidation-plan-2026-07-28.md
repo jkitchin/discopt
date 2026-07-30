@@ -1460,7 +1460,8 @@ tree manager. If Phase 5 retires `lp_spatial_bb`'s class first, skip its port.
 >   columns, an unbounded presolved root box, and a bypassed spec carrying 24 infinite
 >   entries in `global_lo`/`global_hi` — an unbounded node LP whose safe-bound
 >   evaluation is invalid. The other 8 decline immediately on another missing feature.
-> * The code name is a misnomer hiding **two disjoint classes, neither producer-side**:
+> * The code name was a misnomer hiding **two disjoint classes, neither producer-side**
+>   (**now split** — see the Regime-N change in the status line):
 >   **6 of 9** have an unbounded *presolved root box* on original columns (a McCormick
 >   envelope over an unbounded box does not exist — this is the presolve
 >   propagation-quality lever `issue-764-scip-comparison.md` names), and **3 of 9**
@@ -1513,9 +1514,10 @@ tree manager. If Phase 5 retires `lp_spatial_bb`'s class first, skip its port.
 >
 > #### Verification run on the final tree (2026-07-30)
 >
-> No solver code changed this session — the diff is two probe scripts, their artifacts
-> and this document — so the Regime-N question is whether the tree still behaves as
-> item 11 left it, not whether a change is bound-neutral.
+> The diff is two probe scripts, their artifacts, this document, and **one Regime-N
+> producer change** — the decline-code split. It cannot move a bound (both arms return
+> `None` identically; `_decline` writes thread-local counters no solve path reads), so
+> the panel is confirming that, not adjudicating a tightening.
 >
 > | suite | result |
 > |---|---|
