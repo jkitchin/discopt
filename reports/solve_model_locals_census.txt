@@ -1,31 +1,33 @@
 source              : python/discopt/solver/__init__.py
-function            : solve_model lines 3732-11353 (7622 LOC)
-top-level statements: 319
+function            : solve_model lines 3738-11383 (7646 LOC)
+top-level statements: 323
 parameters          : 51
-spatial loop        : lines 8234-10728
+spatial loop        : lines 8260-10758
 nested scopes       : 41
 
 regions (Card 4b's five module names, anchored on the source's banners):
-  setup          3732-4966   ( 1235 LOC)
-  reformulate    4967-5548   (  582 LOC)
-  root           5549-8233   ( 2685 LOC)
-  loop           8234-10728  ( 2495 LOC)
-  results       10729-11353  (  625 LOC)
+  setup          3738-4972   ( 1235 LOC)
+  reformulate    4973-5554   (  582 LOC)
+  root           5555-8259   ( 2705 LOC)
+  loop           8260-10758  ( 2499 LOC)
+  results       10759-11383  (  625 LOC)
 
 classification:
-  CONFIG     : 205
-  STATE      : 404
-  SINGLE_USE : 104
-  DEAD       : 6
-  CALLABLE   : 132
+  CONFIG        : 166
+  MUTATED       : 28
+  NEEDS_AUDIT   : 14
+  STATE         : 375
+  SINGLE_USE    : 84
+  EXCEPT_TARGET : 29
+  DEAD          : 6
+  CALLABLE      : 132
+  (pre-fix CONFIG = CONFIG+MUTATED+NEEDS_AUDIT): 208
 
-top 40 STATE locals by rebind count:
+top 30 STATE locals by rebind count:
   name                                         st    ld  aug  nest  regions
-  e                                            25    25    0     0  loop+root
   i                                            22   182    0     0  loop
   _gap_certified                               13     7    0     1  loop+results+root
   model                                        11   228    0     9  loop+reformulate+results+root+setup
-  _e                                           11    11    0     0  loop+results+root
   bound_val                                     9    31    0     0  results
   lb                                            8    28    0     0  loop+results+root
   ub                                            8    27    0     0  loop+results+root
@@ -33,21 +35,16 @@ top 40 STATE locals by rebind count:
   status                                        8     5    0     0  results
   gap_val                                       8     3    0     0  results
   _mc_lp_relaxer                                6    34    0     0  loop+results+root
-  rust_time                                     6    16    5     0  loop+results+root
   _root_cut_pool                                6     8    0     0  loop+results+root
   _root_is_convex                               6     6    0     0  root
   _sn                                           6     6    0     0  loop
-  _subnlp_incumbent_updates                     6     6    5     0  loop+results+root
   nlp_lb                                        6     5    0     0  loop
   _debug_quit                                   6     1    0     0  loop+results+root
   initial_point                                 5    26    0     0  reformulate+root+setup
   result                                        5    15    0     0  root+setup
   wall_time                                     5    13    0     0  results+root
   _model_repr                                   5    11    0     0  loop+root
-  _subnlp_calls                                 5     9    4     0  loop+results+root
   convex_lb                                     5     6    0     0  loop
-  t_rust_start                                  5     6    0     0  loop+root
-  _subnlp_feasible                              5     5    4     0  loop+results+root
   _bound_from_taint_recovery                    5     2    0     0  results
   _root_constraint_mask                         5     2    0     0  root
   nlp_solver                                    4    45    0     0  loop+reformulate+root+setup
@@ -58,24 +55,46 @@ top 40 STATE locals by rebind count:
   _A_pool                                       4     8    0     0  root
   _convex_constraint_mask                       4     8    0     0  loop+root
   _root_convexity_known                         4     6    0     0  root
-  exc                                           4     6    0     0  loop+root+setup
-  _sz                                           4     5    0     0  loop+results+root
-  _b_pool                                       4     4    0     0  root
 
 bind-region -> read-region crossings (a local bound in the row's region and
 read in the column's; the diagonal is intra-region and needs no boundary):
                        setup  reformulate         root         loop      results
-  setup                   42            4           10            3            1
-  reformulate              4           33           12            3            3
-  root                     6            5          151           85           44
-  loop                     1            0           13          287           24
-  results                  0            0            6            5           44
+  setup                   42            4           10            2            1
+  reformulate              4           32           11            3            3
+  root                     5            4          144           65           40
+  loop                     0            0           11          269           22
+  results                  0            0            5            5           44
 
-locals whose bind/read spans more than one region: 153
-locals captured by a nested closure               : 40
-locals rebound by a closure via `nonlocal`         : 0
-never-read bindings                               : 6
+locals whose bind/read spans more than one region  : 132
+    of which CONFIG                              : 62
+    of which MUTATED                             : 8
+    of which NEEDS_AUDIT                         : 4
+    of which STATE                               : 58
+parameters (supplied at the boundary by definition): 51
+locals captured by a nested closure                : 40
+locals rebound by a closure via `nonlocal`          : 0
+except targets excluded from the crossing count    : 29
+   of which the pre-fix classifier called crossers : 4
+   _dep_exc, _e, e, exc
+never-read bindings                                : 6
    _, _frac_parts, _has_continuous_var, _lns_swap_applicable, _scores, inc_sol
 
+mutable names the pre-fix classifier called CONFIG (defect 1):
+  name                         kind           ld  proven  unres  evidence
+  tree                         NEEDS_AUDIT    54       0     43  method_call
+  evaluator                    NEEDS_AUDIT    53       0      4  method_call
+  _timers                      MUTATED        46      16      0  attribute_store
+  _heur                        MUTATED        44      25      0  attribute_store
+  _lazy                        MUTATED        29      16      0  attribute_store
+  kwargs                       MUTATED        27       9      4  method_call
+  _pn_obbt                     MUTATED        15       5      0  attribute_store
+  _adaptive_nlp_state          MUTATED        13       6      0  subscript_store
+  opts                         MUTATED        10       5      0  method_call, subscript_store
+  rlt                          NEEDS_AUDIT     7       0      2  method_call
+  _heuristic_governor          NEEDS_AUDIT     6       0      6  method_call
+  _reduce_timers               MUTATED         3       3      0  subscript_store
+  (12 cross-region names total; showing 12)
+
 wrote reports/solve_model_locals_census.json
-executed classifications: 851
+executed classifications  : 834
+executed mutation probes  : 367

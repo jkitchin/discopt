@@ -25,7 +25,8 @@ Every local bound in ``solve_model``'s own scope is classified as:
     (``tree.export_batch``, ``evaluator.evaluate_objective``, …).  The census
     **refuses to call these CONFIG**: asserting immutability it cannot see is the
     exact failure the 2026-07-30 design review caught.  Resolving them requires
-    reading the callee, which this script deliberately does not do.
+    reading the callee, which this script deliberately does not do — that is
+    ``solve_model_config_mutability_audit.py``'s job.
 
 ``STATE``
     Rebound more than once, or bound inside the spatial loop, or augmented, or
@@ -48,12 +49,10 @@ Every local bound in ``solve_model``'s own scope is classified as:
 
 The first revision of this script (commit ``ab8235dc``) had three defects that
 propagated a wrong premise into the plan document; all three are fixed here and
-each is described below with the count it moved. **These fixes carry no unit
-tests**: the session that wrote them stopped before adding any, and an earlier
-revision of this docstring claimed a test file that does not exist. The evidence
-for them is the reclassification itself, reproducible by running this script
-(the counts in the plan's item 11 block) — treat that as weaker than a test,
-and add one before relying on a fourth classifier change.
+each is pinned by a test in ``discopt_benchmarks/tests/test_locals_census.py``.
+Those tests are written against **synthetic sources with known answers** rather
+than against ``solve_model``, because a test that only asserted properties of the
+real 7,600-line function would pass just as happily if a visitor stopped firing.
 
 1. **``CONFIG`` meant "the name is never rebound", not "the value is immutable".**
    ``x[k] = v`` walked into ``_bind_target`` and was recorded as a *load* of ``x``;
