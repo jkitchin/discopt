@@ -2429,6 +2429,69 @@ A later `ruff format` pass (needed because `rlt` → `_cfg.rlt` overflowed the
 100-char limit at three sites) was re-checked against the same proof afterwards and
 left the delta at exactly the one inserted statement.
 
+### 2026-07-30 — Item 11 (Fable-corrected recipe) close-out: what was run
+
+Recorded per §0.6. Tree: `cdd1ee2b` + this session's commits. Compiled `.so` marker
+asserted before the panel run (`strings` finds `subtol_crossings_repaired`) and
+`discopt.solver.__file__` resolves into this tree, not a site-packages copy
+(CLAUDE.md §8). **Rust untouched**, so `cargo test -p discopt-core` was not run.
+
+| gate | result |
+|---|---|
+| Regime N `panel_baseline --check reports/panel_baseline_f154dcff.json` | **PASS.** `comparisons executed (total): 255 = 255 first-pass + 0 adjudication over 85 comparable row(s); flagged 0, adjudicated 0, transient 0` → `PASS: no node-count or certified-objective drift.` 1999.3 s, load start 0.37 peak 2.18, ran alone. Artifact `reports/item11_panel_check_commit4.log` |
+| `pytest python/tests -m smoke` | **PASS — 956 passed**, 16 skipped, 7,757 deselected, 2 xpassed (412 s). Pre-session 953; the +3 are the new `RootConfig` tests |
+| `pytest discopt_benchmarks/tests -m smoke` | **PASS — 78 passed, 1 skipped**, 378 deselected (57 s). Pre-session 53; the +25 are `test_locals_census.py` and `test_config_mutability_audit.py` |
+| `pytest -m slow python/tests/test_adversarial_recent_fixes.py` | **PASS — 10 passed** (180 s). See the disclosure below |
+| `test_solver_state` + `test_routing` + `test_tightening_schedule` + `test_node_tightening_parity` + `test_vector_constraint_corpus` + `test_flag_registry` | **PASS — 93 passed**, 12 deselected |
+| `mypy python/discopt/ --ignore-missing-imports` | **Success — 320 source files.** Version asserted, not assumed: the image shipped **1.19.1**, and the recipe requires **2.1.0** because an older local shim reports a false Success. Upgraded with `uv tool install mypy==2.1.0` and `--version` re-checked before running |
+| `ruff check python/` + `ruff format --check` | clean. The four new/modified `discopt_benchmarks` files are clean too; the 563 pre-existing findings elsewhere in that directory are untouched and predate this session |
+| heldout50 | **SKIPPED — local only** |
+
+**One flaky failure, disclosed rather than buried.**
+`test_large_dense_jacobian_no_crash` failed **once**, in a run launched while the
+benchmark smoke suite was still finishing. It does not reproduce: it passes alone
+(25.5 s) and in a clean full-file re-run (10 passed). Per CLAUDE.md §9 a timing
+result taken under self-inflicted contention is not a result, and item 15 already
+established that wall-clock-bounded tests in this repo flake under load. It is
+recorded as a load artifact, not as a green tick.
+
+**The AST conformance suites were not touched.** `test_routing.py` and
+`test_tightening_schedule.py` assert marker *order inside* `solve_model`; they pass
+unchanged, which is the expected result for a rename that moves no statements.
+Neither was edited or silenced.
+
+**The monkeypatch hazard did not apply, as a fact rather than an assumption.** The
+30+ patched `discopt.solver` attributes are module-level *functions*. This session
+moved no function and re-exported nothing — it added one import and renamed reads
+inside one function body — so no `monkeypatch.setattr` seam changed meaning and the
+negative assertion in `test_expired_outer_deadline_skips_native_seed_work` cannot
+have gone vacuous.
+
+**Effect on the census.**
+
+| | before | after |
+|---|---|---|
+| threaded locals | 21 | **40** |
+| cross-region names | 136 | 132 (−4 `except` artifacts) + the 19 now behind `_cfg` |
+| `root`→`loop` | 68 | 65 |
+
+**Can item 11 close? NO, and the honest-outcome clause does not fire either.** The
+clause was armed for "25+ of the config group mutated in place"; the audit measured
+**11 of 85**, with **64 cleared**, so `RootConfig` is the right vehicle and it
+landed. What remains is bounded and now *instrumented* rather than guessed: the
+cleared-but-unthreaded names (53 candidates, of which 19 are done), the
+loop-reading tranche where ledger 15b must be watched, the McCormick relaxation
+cluster (~17), and — in its own commit with its own gate run, deliberately not
+bundled — the soundness-critical certificate cluster (~9, `_gap_certified` alone
+rebound 13 times across all three regions).
+
+**The `setup`/`reformulate` carve is now cheaper than before this session, but the
+census had already made it cheap.** Those two regions were measured at 14 and 18
+outbound names; this session removed `gdp_method` from `reformulate`'s outbound set
+and several `setup` outbounds, and — more usefully — the audit now says which of
+the remaining ones are safe to pass by value. That is a marginal gain on a boundary
+that was never the hard one. The hard boundary is still `root`→`loop`.
+
 ### 2026-07-30 — Open-ledger item 11 close-out: what was run on the final tree
 
 Recorded per §0.6. Tree: `d7b374f6` (item 15's close-out) + this session's
