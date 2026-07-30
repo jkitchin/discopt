@@ -56,6 +56,11 @@ _TOL = 1e-12
 # --------------------------------------------------------------------------- #
 class _ProducerStats(threading.local):
     def __init__(self) -> None:  # pragma: no cover - trivial
+        self.reset()
+
+    def reset(self) -> None:
+        """Zero every counter. Named rather than re-calling ``__init__`` on the
+        instance, which mypy rejects as unsound (the instance could be a subclass)."""
         self.calls = 0
         self.specs = 0
         self.declines = 0
@@ -69,13 +74,13 @@ _STATS = _ProducerStats()
 
 def _stats() -> _ProducerStats:
     if not hasattr(_STATS, "calls"):  # pragma: no cover - fresh thread
-        _STATS.__init__()
+        _STATS.reset()
     return _STATS
 
 
 def reset_producer_stats() -> None:
     """Clear this thread's producer decline counters."""
-    _stats().__init__()
+    _stats().reset()
 
 
 def producer_stats() -> dict:
@@ -96,8 +101,12 @@ def producer_stats() -> dict:
     }
 
 
-def _decline(code: str, detail: str = "") -> None:
-    """Record *why* the producer declined, and return ``None`` (the decline)."""
+def _decline(code: str, detail: str = "") -> Optional[dict]:
+    """Record *why* the producer declined, and return ``None`` (the decline).
+
+    Typed as the producer's own return type — always ``None`` — so call sites can
+    write ``return _decline(...)`` and stay type-checked.
+    """
     st = _stats()
     st.declines += 1
     key = code if not detail else f"{code}:{detail}"

@@ -75,6 +75,11 @@ __all__ = [
 # --------------------------------------------------------------------------- #
 class _EngagementStats(threading.local):
     def __init__(self) -> None:  # pragma: no cover - trivial
+        self.reset()
+
+    def reset(self) -> None:
+        """Zero every counter. Named rather than re-calling ``__init__`` on the
+        instance, which mypy rejects as unsound (the instance could be a subclass)."""
         self.gate_calls = 0
         self.gate_safe = 0
         self.gate_reasons: dict[str, int] = {}
@@ -90,13 +95,13 @@ _ENGAGEMENT = _EngagementStats()
 
 def _eng() -> _EngagementStats:
     if not hasattr(_ENGAGEMENT, "gate_calls"):  # pragma: no cover - fresh thread
-        _ENGAGEMENT.__init__()
+        _ENGAGEMENT.reset()
     return _ENGAGEMENT
 
 
 def reset_kernel_engagement_stats() -> None:
     """Clear this thread's native-kernel engagement counters."""
-    _eng().__init__()
+    _eng().reset()
 
 
 def kernel_engagement_stats() -> dict:

@@ -34,7 +34,7 @@ fully expanded and covered by their own test.
 from __future__ import annotations
 
 import os
-from typing import Optional, Sequence
+from typing import Optional, Sequence, overload
 
 __all__ = [
     "TRUE_VALUES",
@@ -139,6 +139,14 @@ def env_str(name: str, default: Optional[str] = None) -> Optional[str]:
     """
     raw = _raw(name)
     return default if raw is None else raw
+
+
+@overload
+def env_enum(name: str, default: str, choices: Sequence[str]) -> str: ...
+
+
+@overload
+def env_enum(name: str, default: None, choices: Sequence[str]) -> Optional[str]: ...
 
 
 def env_enum(

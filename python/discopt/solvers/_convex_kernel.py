@@ -694,6 +694,11 @@ def solve_convex_tree(spec: dict, *, time_limit_s: Optional[float] = None, **cfg
 # make a ``time_limit=T`` solve run for ~2T.
 class _AttemptClock(threading.local):
     def __init__(self) -> None:  # pragma: no cover - trivial
+        self.reset()
+
+    def reset(self) -> None:
+        """Zero the clock. Named rather than re-calling ``__init__`` on the
+        instance, which mypy rejects as unsound (the instance could be a subclass)."""
         self.seconds = 0.0
 
 
@@ -712,7 +717,7 @@ def last_attempt_seconds() -> float:
     """
     st = _ATTEMPT
     if not hasattr(st, "seconds"):  # pragma: no cover - fresh thread
-        st.__init__()
+        st.reset()
     return float(st.seconds)
 
 
