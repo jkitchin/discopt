@@ -72,6 +72,18 @@ coverage.svg
 # replicate-and-agree instead of narrowing the `comparable` population.
 !/reports/item15_*.json
 !/reports/item15_*.log
+# ...and the open-ledger item 11 census and mutability audit. These are not run
+# output either: they are the instrument every later item-11 increment reads to
+# decide which of `solve_model`'s locals may enter a *frozen* holder. The census's
+# first revision mislabelled the live B&B tree as read-only CONFIG and that wrong
+# premise reached the plan document, so the per-name table has to be in the
+# repository at the sha the plan cites — an increment that cannot re-read the
+# verdict it acted on cannot be reviewed.
+!/reports/solve_model_locals_census.json
+!/reports/solve_model_locals_census.txt
+!/reports/solve_model_config_mutability_audit.json
+!/reports/solve_model_config_mutability_audit.md
+!/reports/item11_*.log
 
 # Generated course material (built from python/discopt/course/)
 /course/

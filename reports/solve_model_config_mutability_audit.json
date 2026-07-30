@@ -1,0 +1,2051 @@
+{
+  "caught_only_transitively": [
+    "evaluator"
+  ],
+  "counts": {
+    "CLEAN": 16,
+    "IMMUTABLE_TYPE": 48,
+    "MUTATED_DIRECT": 8,
+    "MUTATED_METHOD": 2,
+    "MUTATED_TRANSITIVE": 1,
+    "UNRESOLVED": 10
+  },
+  "executed": {
+    "call_sites_examined": 640,
+    "callee_bodies_read": 247,
+    "callees_resolved": 453,
+    "classes_indexed": 466,
+    "functions_indexed": 3792,
+    "method_calls_examined": 112,
+    "names_audited": 85,
+    "python_files_indexed": 320,
+    "receiver_classes_inferred": 54,
+    "rust_files_scanned": 73,
+    "rust_methods_matched": 38,
+    "rust_signatures_indexed": 374
+  },
+  "function": "solve_model",
+  "immutable_locals_proved": 212,
+  "max_depth": 4,
+  "population": 85,
+  "population_loads": 902,
+  "rows": [
+    {
+      "called_methods": [],
+      "caught_only_transitively": false,
+      "census_kind": "CONFIG",
+      "direct": [],
+      "is_param": true,
+      "loads": 64,
+      "method": [],
+      "n_transitive": 0,
+      "n_unresolved": 17,
+      "name": "time_limit",
+      "transitive": [],
+      "unresolved": [
+        "depth limit reached following solve_model(time_limit) -> solve_amp(time_limit) -> _solve_amp_impl(time_limit) -> _resolve_presolve_bt_time_limits(remaining) -> _default_obbt_time_limit_per_lp(remaining)",
+        "depth limit reached following solve_model(time_limit) -> solve_mip_nlp(time_limit) -> _try_solve_shot_direct_strategy(time_limit) -> _try_direct_lp(time_limit) -> _solve_lp(time_limit)",
+        "depth limit reached following solve_model(time_limit) -> solve_mip_nlp(time_limit) -> _try_solve_shot_direct_strategy(time_limit) -> _try_direct_lp(time_limit) -> _solve_lp_gurobi(time_limit)",
+        "depth limit reached following solve_model(time_limit) -> solve_mip_nlp(time_limit) -> _try_solve_shot_direct_strategy(time_limit) -> _try_direct_lp(time_limit) -> _solve_lp_pounce(time_limit)",
+        "depth limit reached following solve_model(time_limit) -> solve_mip_nlp(time_limit) -> _try_solve_shot_direct_strategy(time_limit) -> _try_direct_milp(time_limit) -> _solve_milp_bb(time_limit)",
+        "depth limit reached following solve_model(time_limit) -> solve_mip_nlp(time_limit) -> _try_solve_shot_direct_strategy(time_limit) -> _try_direct_milp(time_limit) -> _solve_milp_gurobi(time_limit)"
+      ],
+      "verdict": "IMMUTABLE_TYPE"
+    },
+    {
+      "called_methods": [
+        "branch_var_counts",
+        "export_batch",
+        "import_results",
+        "incumbent",
+        "initialize",
+        "is_finished",
+        "node_depths",
+        "node_lower_bounds",
+        "process_evaluated",
+        "reliability_threshold",
+        "score_candidates",
+        "set_branch_deprioritized",
+        "set_branch_hints",
+        "set_node_bounds",
+        "set_nonconvex",
+        "set_sos1_selector_cols",
+        "set_spatial_integer_cols",
+        "stats"
+      ],
+      "caught_only_transitively": false,
+      "census_kind": "NEEDS_AUDIT",
+      "direct": [],
+      "is_param": false,
+      "loads": 54,
+      "method": [
+        {
+          "chain": [],
+          "channel": "rust_mut_self",
+          "detail": ".initialize() resolves to `fn initialize(&mut self, \u2026)`",
+          "where": "crates/discopt-core/src/bnb/tree_manager.rs, crates/discopt-python/src/bnb_bindings.rs"
+        },
+        {
+          "chain": [],
+          "channel": "rust_mut_self",
+          "detail": ".set_nonconvex() resolves to `fn set_nonconvex(&mut self, \u2026)`",
+          "where": "crates/discopt-core/src/bnb/tree_manager.rs, crates/discopt-python/src/bnb_bindings.rs"
+        },
+        {
+          "chain": [],
+          "channel": "rust_mut_self",
+          "detail": ".inject_incumbent() resolves to `fn inject_incumbent(&mut self, \u2026)`",
+          "where": "crates/discopt-core/src/bnb/tree_manager.rs, crates/discopt-python/src/bnb_bindings.rs"
+        },
+        {
+          "chain": [],
+          "channel": "rust_mut_self",
+          "detail": ".export_batch() resolves to `fn export_batch(&mut self, \u2026)`",
+          "where": "crates/discopt-core/src/bnb/tree_manager.rs, crates/discopt-python/src/bnb_bindings.rs"
+        },
+        {
+          "chain": [],
+          "channel": "rust_mut_self",
+          "detail": ".import_results() resolves to `fn import_results(&mut self, \u2026)`",
+          "where": "crates/discopt-core/src/bnb/tree_manager.rs, crates/discopt-python/src/bnb_bindings.rs"
+        },
+        {
+          "chain": [],
+          "channel": "rust_mut_self",
+          "detail": ".process_evaluated() resolves to `fn process_evaluated(&mut self, \u2026)`",
+          "where": "crates/discopt-core/src/bnb/tree_manager.rs, crates/discopt-python/src/bnb_bindings.rs"
+        },
+        {
+          "chain": [],
+          "channel": "rust_mut_self",
+          "detail": ".set_branch_hints() resolves to `fn set_branch_hints(&mut self, \u2026)`",
+          "where": "crates/discopt-python/src/bnb_bindings.rs"
+        },
+        {
+          "chain": [],
+          "channel": "rust_mut_self",
+          "detail": ".set_node_bounds() resolves to `fn set_node_bounds(&mut self, \u2026)`",
+          "where": "crates/discopt-core/src/bnb/tree_manager.rs, crates/discopt-python/src/bnb_bindings.rs"
+        },
+        {
+          "chain": [],
+          "channel": "rust_mut_self",
+          "detail": ".set_spatial_integer_cols() resolves to `fn set_spatial_integer_cols(&mut self, \u2026)`",
+          "where": "crates/discopt-core/src/bnb/tree_manager.rs, crates/discopt-python/src/bnb_bindings.rs"
+        },
+        {
+          "chain": [],
+          "channel": "rust_mut_self",
+          "detail": ".set_branch_deprioritized() resolves to `fn set_branch_deprioritized(&mut self, \u2026)`",
+          "where": "crates/discopt-core/src/bnb/tree_manager.rs, crates/discopt-python/src/bnb_bindings.rs"
+        },
+        {
+          "chain": [],
+          "channel": "rust_mut_self",
+          "detail": ".set_sos1_selector_cols() resolves to `fn set_sos1_selector_cols(&mut self, \u2026)`",
+          "where": "crates/discopt-core/src/bnb/tree_manager.rs, crates/discopt-python/src/bnb_bindings.rs"
+        }
+      ],
+      "n_transitive": 0,
+      "n_unresolved": 1,
+      "name": "tree",
+      "transitive": [],
+      "unresolved": [
+        "python/discopt/debug/__init__.py:195 -> build(\u2026) not defined under python/discopt"
+      ],
+      "verdict": "MUTATED_METHOD"
+    },
+    {
+      "called_methods": [
+        "evaluate_objective"
+      ],
+      "caught_only_transitively": true,
+      "census_kind": "NEEDS_AUDIT",
+      "direct": [],
+      "is_param": false,
+      "loads": 53,
+      "method": [],
+      "n_transitive": 1,
+      "n_unresolved": 30,
+      "name": "evaluator",
+      "transitive": [
+        {
+          "chain": [
+            "python/discopt/solver/__init__.py:8419",
+            "solve_model(evaluator)",
+            "_tighten_node_bounds_with_status(evaluator)"
+          ],
+          "channel": "store_into",
+          "detail": "evaluator._structural_linear_mask_cache",
+          "where": "python/discopt/solver/__init__.py:1566"
+        }
+      ],
+      "unresolved": [
+        ".evaluate_constraints() \u2014 receiver class unknown and 7 Python definitions",
+        ".evaluate_gradient() \u2014 receiver class unknown and 7 Python definitions",
+        ".evaluate_hessian() \u2014 receiver class unknown and 5 Python definitions",
+        ".evaluate_jacobian() \u2014 receiver class unknown and 7 Python definitions",
+        "python/discopt/_jax/primal_heuristics.py:323 -> backend(\u2026) not defined under python/discopt",
+        "python/discopt/_jax/primal_heuristics.py:387 -> _infer_constraint_bounds(\u2026) ambiguous: 2 definitions"
+      ],
+      "verdict": "MUTATED_TRANSITIVE"
+    },
+    {
+      "called_methods": [],
+      "caught_only_transitively": false,
+      "census_kind": "MUTATED",
+      "direct": [
+        {
+          "chain": [],
+          "channel": "census_attribute_store",
+          "detail": "store into _timers.rust_time",
+          "where": "python/discopt/solver/__init__.py:5738"
+        },
+        {
+          "chain": [],
+          "channel": "census_attribute_store",
+          "detail": "store into _timers.jax_time",
+          "where": "python/discopt/solver/__init__.py:5739"
+        },
+        {
+          "chain": [],
+          "channel": "census_attribute_store",
+          "detail": "store into _timers.t_rust_start",
+          "where": "python/discopt/solver/__init__.py:6385"
+        },
+        {
+          "chain": [],
+          "channel": "census_attribute_store",
+          "detail": "augment _timers.rust_time",
+          "where": "python/discopt/solver/__init__.py:6410"
+        },
+        {
+          "chain": [],
+          "channel": "census_attribute_store",
+          "detail": "store into _timers.t_rust_start",
+          "where": "python/discopt/solver/__init__.py:6772"
+        },
+        {
+          "chain": [],
+          "channel": "census_attribute_store",
+          "detail": "augment _timers.rust_time",
+          "where": "python/discopt/solver/__init__.py:6782"
+        },
+        {
+          "chain": [],
+          "channel": "census_attribute_store",
+          "detail": "store into _timers.t_jax_start",
+          "where": "python/discopt/solver/__init__.py:6785"
+        },
+        {
+          "chain": [],
+          "channel": "census_attribute_store",
+          "detail": "augment _timers.jax_time",
+          "where": "python/discopt/solver/__init__.py:6787"
+        },
+        {
+          "chain": [],
+          "channel": "census_attribute_store",
+          "detail": "store into _timers.t_rust_start",
+          "where": "python/discopt/solver/__init__.py:8281"
+        },
+        {
+          "chain": [],
+          "channel": "census_attribute_store",
+          "detail": "augment _timers.rust_time",
+          "where": "python/discopt/solver/__init__.py:8283"
+        },
+        {
+          "chain": [],
+          "channel": "census_attribute_store",
+          "detail": "store into _timers.t_jax_start",
+          "where": "python/discopt/solver/__init__.py:8561"
+        },
+        {
+          "chain": [],
+          "channel": "census_attribute_store",
+          "detail": "augment _timers.jax_time",
+          "where": "python/discopt/solver/__init__.py:9306"
+        },
+        {
+          "chain": [],
+          "channel": "census_attribute_store",
+          "detail": "store into _timers.t_rust_start",
+          "where": "python/discopt/solver/__init__.py:10407"
+        },
+        {
+          "chain": [],
+          "channel": "census_attribute_store",
+          "detail": "augment _timers.rust_time",
+          "where": "python/discopt/solver/__init__.py:10419"
+        },
+        {
+          "chain": [],
+          "channel": "census_attribute_store",
+          "detail": "store into _timers.t_rust_start",
+          "where": "python/discopt/solver/__init__.py:10422"
+        },
+        {
+          "chain": [],
+          "channel": "census_attribute_store",
+          "detail": "augment _timers.rust_time",
+          "where": "python/discopt/solver/__init__.py:10425"
+        }
+      ],
+      "is_param": false,
+      "loads": 46,
+      "method": [],
+      "n_transitive": 0,
+      "n_unresolved": 0,
+      "name": "_timers",
+      "transitive": [],
+      "unresolved": [],
+      "verdict": "MUTATED_DIRECT"
+    },
+    {
+      "called_methods": [],
+      "caught_only_transitively": false,
+      "census_kind": "MUTATED",
+      "direct": [
+        {
+          "chain": [],
+          "channel": "census_attribute_store",
+          "detail": "store into _heur.subnlp_backend_fn",
+          "where": "python/discopt/solver/__init__.py:7742"
+        },
+        {
+          "chain": [],
+          "channel": "census_attribute_store",
+          "detail": "store into _heur.subnlp_calls",
+          "where": "python/discopt/solver/__init__.py:7743"
+        },
+        {
+          "chain": [],
+          "channel": "census_attribute_store",
+          "detail": "store into _heur.subnlp_feasible",
+          "where": "python/discopt/solver/__init__.py:7744"
+        },
+        {
+          "chain": [],
+          "channel": "census_attribute_store",
+          "detail": "store into _heur.subnlp_incumbent_updates",
+          "where": "python/discopt/solver/__init__.py:7745"
+        },
+        {
+          "chain": [],
+          "channel": "census_attribute_store",
+          "detail": "store into _heur.lns_lb_calls",
+          "where": "python/discopt/solver/__init__.py:7756"
+        },
+        {
+          "chain": [],
+          "channel": "census_attribute_store",
+          "detail": "store into _heur.lns_dive_calls",
+          "where": "python/discopt/solver/__init__.py:7757"
+        },
+        {
+          "chain": [],
+          "channel": "census_attribute_store",
+          "detail": "store into _heur.lns_swap_misses",
+          "where": "python/discopt/solver/__init__.py:7764"
+        },
+        {
+          "chain": [],
+          "channel": "census_attribute_store",
+          "detail": "store into _heur.subnlp_backend_fn",
+          "where": "python/discopt/solver/__init__.py:7840"
+        },
+        {
+          "chain": [],
+          "channel": "census_attribute_store",
+          "detail": "store into _heur.subnlp_backend_fn",
+          "where": "python/discopt/solver/__init__.py:7843"
+        },
+        {
+          "chain": [],
+          "channel": "census_attribute_store",
+          "detail": "augment _heur.subnlp_calls",
+          "where": "python/discopt/solver/__init__.py:9828"
+        },
+        {
+          "chain": [],
+          "channel": "census_attribute_store",
+          "detail": "augment _heur.subnlp_feasible",
+          "where": "python/discopt/solver/__init__.py:9848"
+        },
+        {
+          "chain": [],
+          "channel": "census_attribute_store",
+          "detail": "augment _heur.subnlp_incumbent_updates",
+          "where": "python/discopt/solver/__init__.py:9851"
+        },
+        {
+          "chain": [],
+          "channel": "census_attribute_store",
+          "detail": "augment _heur.subnlp_calls",
+          "where": "python/discopt/solver/__init__.py:9870"
+        },
+        {
+          "chain": [],
+          "channel": "census_attribute_store",
+          "detail": "augment _heur.subnlp_feasible",
+          "where": "python/discopt/solver/__init__.py:9890"
+        },
+        {
+          "chain": [],
+          "channel": "census_attribute_store",
+          "detail": "augment _heur.subnlp_incumbent_updates",
+          "where": "python/discopt/solver/__init__.py:9893"
+        },
+        {
+          "chain": [],
+          "channel": "census_attribute_store",
+          "detail": "augment _heur.subnlp_calls",
+          "where": "python/discopt/solver/__init__.py:9920"
+        },
+        {
+          "chain": [],
+          "channel": "census_attribute_store",
+          "detail": "augment _heur.subnlp_feasible",
+          "where": "python/discopt/solver/__init__.py:9947"
+        },
+        {
+          "chain": [],
+          "channel": "census_attribute_store",
+          "detail": "augment _heur.subnlp_incumbent_updates",
+          "where": "python/discopt/solver/__init__.py:9950"
+        },
+        {
+          "chain": [],
+          "channel": "census_attribute_store",
+          "detail": "augment _heur.subnlp_calls",
+          "where": "python/discopt/solver/__init__.py:10011"
+        },
+        {
+          "chain": [],
+          "channel": "census_attribute_store",
+          "detail": "augment _heur.subnlp_feasible",
+          "where": "python/discopt/solver/__init__.py:10013"
+        },
+        {
+          "chain": [],
+          "channel": "census_attribute_store",
+          "detail": "augment _heur.subnlp_incumbent_updates",
+          "where": "python/discopt/solver/__init__.py:10016"
+        },
+        {
+          "chain": [],
+          "channel": "census_attribute_store",
+          "detail": "augment _heur.subnlp_incumbent_updates",
+          "where": "python/discopt/solver/__init__.py:10075"
+        },
+        {
+          "chain": [],
+          "channel": "census_attribute_store",
+          "detail": "augment _heur.lns_dive_calls",
+          "where": "python/discopt/solver/__init__.py:10142"
+        },
+        {
+          "chain": [],
+          "channel": "census_attribute_store",
+          "detail": "store into _heur.lns_swap_misses",
+          "where": "python/discopt/solver/__init__.py:10243"
+        },
+        {
+          "chain": [],
+          "channel": "census_attribute_store",
+          "detail": "augment _heur.lns_lb_calls",
+          "where": "python/discopt/solver/__init__.py:10257"
+        }
+      ],
+      "is_param": false,
+      "loads": 44,
+      "method": [],
+      "n_transitive": 0,
+      "n_unresolved": 0,
+      "name": "_heur",
+      "transitive": [],
+      "unresolved": [],
+      "verdict": "MUTATED_DIRECT"
+    },
+    {
+      "called_methods": [],
+      "caught_only_transitively": false,
+      "census_kind": "CONFIG",
+      "direct": [],
+      "is_param": false,
+      "loads": 40,
+      "method": [],
+      "n_transitive": 0,
+      "n_unresolved": 5,
+      "name": "t_start",
+      "transitive": [],
+      "unresolved": [
+        "depth limit reached following solve_model(t_start) -> _solve_milp_bb(t_start) -> _root_reduced_cost_fixing(t_start) -> _pounce_snap_incumbent(t_start) -> _pounce_recover_node_bound(t_start)",
+        "python/discopt/solver/__init__.py:13970 -> engine(\u2026) not defined under python/discopt",
+        "python/discopt/solver/__init__.py:16027 -> node_solve(\u2026) not defined under python/discopt",
+        "python/discopt/solver/__init__.py:16603 -> _node_solve(\u2026) not defined under python/discopt",
+        "python/discopt/solver/__init__.py:16828 -> _node_solve(\u2026) not defined under python/discopt"
+      ],
+      "verdict": "IMMUTABLE_TYPE"
+    },
+    {
+      "called_methods": [],
+      "caught_only_transitively": false,
+      "census_kind": "CONFIG",
+      "direct": [],
+      "is_param": false,
+      "loads": 31,
+      "method": [],
+      "n_transitive": 0,
+      "n_unresolved": 0,
+      "name": "cl_list",
+      "transitive": [],
+      "unresolved": [],
+      "verdict": "CLEAN"
+    },
+    {
+      "called_methods": [],
+      "caught_only_transitively": false,
+      "census_kind": "CONFIG",
+      "direct": [],
+      "is_param": true,
+      "loads": 31,
+      "method": [],
+      "n_transitive": 0,
+      "n_unresolved": 19,
+      "name": "gap_tolerance",
+      "transitive": [],
+      "unresolved": [
+        "depth limit reached following solve_model(gap_tolerance) -> _solve_nlp_bb(gap_tolerance) -> solve_model(gap_tolerance) -> _solve_continuous(gap_tolerance) -> _convex_nlp_certificate_gap(gap_tolerance)",
+        "depth limit reached following solve_model(gap_tolerance) -> _solve_nlp_bb(gap_tolerance) -> solve_model(gap_tolerance) -> local_branching(submip_gap_tolerance) -> _local_branching_submip(gap_tolerance)",
+        "depth limit reached following solve_model(gap_tolerance) -> _solve_nlp_bb(gap_tolerance) -> solve_model(gap_tolerance) -> solve_benders(gap_tolerance) -> solve_gbd(gap_tolerance)",
+        "depth limit reached following solve_model(gap_tolerance) -> solve_mip_nlp(gap_tolerance) -> _try_solve_shot_direct_strategy(gap_tolerance) -> _try_direct_milp(gap_tolerance) -> _solve_milp_bb(gap_tolerance)",
+        "depth limit reached following solve_model(gap_tolerance) -> solve_mip_nlp(gap_tolerance) -> _try_solve_shot_direct_strategy(gap_tolerance) -> _try_direct_milp(gap_tolerance) -> _solve_milp_gurobi(gap_tolerance)",
+        "depth limit reached following solve_model(gap_tolerance) -> solve_mip_nlp(gap_tolerance) -> _try_solve_shot_direct_strategy(gap_tolerance) -> _try_direct_milp(gap_tolerance) -> _solve_milp_simplex(gap_tolerance)"
+      ],
+      "verdict": "IMMUTABLE_TYPE"
+    },
+    {
+      "called_methods": [],
+      "caught_only_transitively": false,
+      "census_kind": "MUTATED",
+      "direct": [
+        {
+          "chain": [],
+          "channel": "census_attribute_store",
+          "detail": "store into _lazy.glb_ref",
+          "where": "python/discopt/solver/__init__.py:8248"
+        },
+        {
+          "chain": [],
+          "channel": "census_attribute_store",
+          "detail": "store into _lazy.armed",
+          "where": "python/discopt/solver/__init__.py:8249"
+        },
+        {
+          "chain": [],
+          "channel": "census_attribute_store",
+          "detail": "store into _lazy.stagnant_solves",
+          "where": "python/discopt/solver/__init__.py:8250"
+        },
+        {
+          "chain": [],
+          "channel": "census_attribute_store",
+          "detail": "store into _lazy.probe_spent",
+          "where": "python/discopt/solver/__init__.py:8251"
+        },
+        {
+          "chain": [],
+          "channel": "census_attribute_store",
+          "detail": "store into _lazy.mode",
+          "where": "python/discopt/solver/__init__.py:8252"
+        },
+        {
+          "chain": [],
+          "channel": "census_attribute_store",
+          "detail": "store into _lazy.resep_fires",
+          "where": "python/discopt/solver/__init__.py:8253"
+        },
+        {
+          "chain": [],
+          "channel": "census_attribute_store",
+          "detail": "store into _lazy.armed",
+          "where": "python/discopt/solver/__init__.py:8337"
+        },
+        {
+          "chain": [],
+          "channel": "census_attribute_store",
+          "detail": "store into _lazy.glb_ref",
+          "where": "python/discopt/solver/__init__.py:8338"
+        },
+        {
+          "chain": [],
+          "channel": "census_attribute_store",
+          "detail": "store into _lazy.stagnant_solves",
+          "where": "python/discopt/solver/__init__.py:8339"
+        },
+        {
+          "chain": [],
+          "channel": "census_attribute_store",
+          "detail": "store into _lazy.probe_spent",
+          "where": "python/discopt/solver/__init__.py:8340"
+        },
+        {
+          "chain": [],
+          "channel": "census_attribute_store",
+          "detail": "store into _lazy.mode",
+          "where": "python/discopt/solver/__init__.py:8342"
+        },
+        {
+          "chain": [],
+          "channel": "census_attribute_store",
+          "detail": "store into _lazy.mode",
+          "where": "python/discopt/solver/__init__.py:8348"
+        },
+        {
+          "chain": [],
+          "channel": "census_attribute_store",
+          "detail": "store into _lazy.mode",
+          "where": "python/discopt/solver/__init__.py:8350"
+        },
+        {
+          "chain": [],
+          "channel": "census_attribute_store",
+          "detail": "augment _lazy.stagnant_solves",
+          "where": "python/discopt/solver/__init__.py:8352"
+        },
+        {
+          "chain": [],
+          "channel": "census_attribute_store",
+          "detail": "augment _lazy.probe_spent",
+          "where": "python/discopt/solver/__init__.py:8354"
+        },
+        {
+          "chain": [],
+          "channel": "census_attribute_store",
+          "detail": "augment _lazy.resep_fires",
+          "where": "python/discopt/solver/__init__.py:8355"
+        }
+      ],
+      "is_param": false,
+      "loads": 29,
+      "method": [],
+      "n_transitive": 0,
+      "n_unresolved": 0,
+      "name": "_lazy",
+      "transitive": [],
+      "unresolved": [],
+      "verdict": "MUTATED_DIRECT"
+    },
+    {
+      "called_methods": [
+        "get",
+        "pop"
+      ],
+      "caught_only_transitively": false,
+      "census_kind": "MUTATED",
+      "direct": [
+        {
+          "chain": [],
+          "channel": "census_method_call",
+          "detail": ".pop",
+          "where": "python/discopt/solver/__init__.py:4353"
+        },
+        {
+          "chain": [],
+          "channel": "census_method_call",
+          "detail": ".pop",
+          "where": "python/discopt/solver/__init__.py:4366"
+        },
+        {
+          "chain": [],
+          "channel": "census_method_call",
+          "detail": ".pop",
+          "where": "python/discopt/solver/__init__.py:4381"
+        },
+        {
+          "chain": [],
+          "channel": "census_method_call",
+          "detail": ".pop",
+          "where": "python/discopt/solver/__init__.py:4382"
+        },
+        {
+          "chain": [],
+          "channel": "census_method_call",
+          "detail": ".pop",
+          "where": "python/discopt/solver/__init__.py:4409"
+        },
+        {
+          "chain": [],
+          "channel": "census_method_call",
+          "detail": ".pop",
+          "where": "python/discopt/solver/__init__.py:4421"
+        },
+        {
+          "chain": [],
+          "channel": "census_method_call",
+          "detail": ".pop",
+          "where": "python/discopt/solver/__init__.py:4556"
+        },
+        {
+          "chain": [],
+          "channel": "census_method_call",
+          "detail": ".pop",
+          "where": "python/discopt/solver/__init__.py:4935"
+        },
+        {
+          "chain": [],
+          "channel": "census_method_call",
+          "detail": ".pop",
+          "where": "python/discopt/solver/__init__.py:4956"
+        }
+      ],
+      "is_param": true,
+      "loads": 27,
+      "method": [],
+      "n_transitive": 0,
+      "n_unresolved": 0,
+      "name": "kwargs",
+      "transitive": [],
+      "unresolved": [],
+      "verdict": "MUTATED_DIRECT"
+    },
+    {
+      "called_methods": [],
+      "caught_only_transitively": false,
+      "census_kind": "CONFIG",
+      "direct": [],
+      "is_param": false,
+      "loads": 25,
+      "method": [],
+      "n_transitive": 0,
+      "n_unresolved": 3,
+      "name": "n_vars",
+      "transitive": [],
+      "unresolved": [
+        "python/discopt/solver/__init__.py:13422 -> Problem(\u2026) not defined under python/discopt",
+        "python/discopt/solver/__init__.py:6773 -> PyTreeManager(\u2026) not defined under python/discopt",
+        "python/discopt/solver/__init__.py:7620 -> BatchRelaxationEvaluator(\u2026) not defined under python/discopt"
+      ],
+      "verdict": "UNRESOLVED"
+    },
+    {
+      "called_methods": [],
+      "caught_only_transitively": false,
+      "census_kind": "CONFIG",
+      "direct": [],
+      "is_param": false,
+      "loads": 24,
+      "method": [],
+      "n_transitive": 0,
+      "n_unresolved": 2,
+      "name": "_deadline",
+      "transitive": [],
+      "unresolved": [
+        "python/discopt/solver/__init__.py:10147 -> fractional_diving(\u2026) slot 'deadline' lands on *args/**kwargs",
+        "python/discopt/solver/__init__.py:9719 -> fractional_diving(\u2026) slot 'deadline' lands on *args/**kwargs"
+      ],
+      "verdict": "IMMUTABLE_TYPE"
+    },
+    {
+      "called_methods": [],
+      "caught_only_transitively": false,
+      "census_kind": "CONFIG",
+      "direct": [],
+      "is_param": true,
+      "loads": 21,
+      "method": [],
+      "n_transitive": 0,
+      "n_unresolved": 7,
+      "name": "max_nodes",
+      "transitive": [],
+      "unresolved": [
+        "depth limit reached following solve_model(max_nodes) -> solve_mip_nlp(max_iterations) -> _try_solve_shot_direct_strategy(max_iterations) -> _try_direct_milp(max_iterations) -> _solve_milp_bb(max_nodes)",
+        "depth limit reached following solve_model(max_nodes) -> solve_mip_nlp(max_iterations) -> _try_solve_shot_direct_strategy(max_iterations) -> _try_direct_milp(max_iterations) -> _solve_milp_simplex(max_nodes)",
+        "depth limit reached following solve_model(max_nodes) -> solve_mip_nlp(max_iterations) -> _try_solve_shot_direct_strategy(max_iterations) -> _try_direct_qp(max_iterations) -> _solve_miqp_bb(max_nodes)",
+        "python/discopt/decomposition/benders/solver.py:187 -> BendersConfig(\u2026) not defined under python/discopt",
+        "python/discopt/decomposition/lagrangian/solver.py:109 -> LagrangianConfig(\u2026) not defined under python/discopt",
+        "python/discopt/solver/__init__.py:4868 -> solve(\u2026) not defined under python/discopt"
+      ],
+      "verdict": "IMMUTABLE_TYPE"
+    },
+    {
+      "called_methods": [],
+      "caught_only_transitively": false,
+      "census_kind": "CONFIG",
+      "direct": [],
+      "is_param": false,
+      "loads": 16,
+      "method": [],
+      "n_transitive": 0,
+      "n_unresolved": 0,
+      "name": "cu_list",
+      "transitive": [],
+      "unresolved": [],
+      "verdict": "CLEAN"
+    },
+    {
+      "called_methods": [],
+      "caught_only_transitively": false,
+      "census_kind": "CONFIG",
+      "direct": [],
+      "is_param": true,
+      "loads": 16,
+      "method": [],
+      "n_transitive": 0,
+      "n_unresolved": 0,
+      "name": "incumbent_callback",
+      "transitive": [],
+      "unresolved": [],
+      "verdict": "CLEAN"
+    },
+    {
+      "called_methods": [],
+      "caught_only_transitively": false,
+      "census_kind": "CONFIG",
+      "direct": [],
+      "is_param": true,
+      "loads": 16,
+      "method": [],
+      "n_transitive": 0,
+      "n_unresolved": 0,
+      "name": "lazy_constraints",
+      "transitive": [],
+      "unresolved": [],
+      "verdict": "CLEAN"
+    },
+    {
+      "called_methods": [],
+      "caught_only_transitively": false,
+      "census_kind": "MUTATED",
+      "direct": [
+        {
+          "chain": [],
+          "channel": "census_attribute_store",
+          "detail": "store into _pn_obbt.enabled",
+          "where": "python/discopt/solver/__init__.py:8031"
+        },
+        {
+          "chain": [],
+          "channel": "census_attribute_store",
+          "detail": "store into _pn_obbt.topk",
+          "where": "python/discopt/solver/__init__.py:8032"
+        },
+        {
+          "chain": [],
+          "channel": "census_attribute_store",
+          "detail": "store into _pn_obbt.spent",
+          "where": "python/discopt/solver/__init__.py:8048"
+        },
+        {
+          "chain": [],
+          "channel": "census_attribute_store",
+          "detail": "store into _pn_obbt.budget_total",
+          "where": "python/discopt/solver/__init__.py:8049"
+        },
+        {
+          "chain": [],
+          "channel": "census_attribute_store",
+          "detail": "augment _pn_obbt.spent",
+          "where": "python/discopt/solver/__init__.py:8549"
+        }
+      ],
+      "is_param": false,
+      "loads": 15,
+      "method": [],
+      "n_transitive": 0,
+      "n_unresolved": 0,
+      "name": "_pn_obbt",
+      "transitive": [],
+      "unresolved": [],
+      "verdict": "MUTATED_DIRECT"
+    },
+    {
+      "called_methods": [],
+      "caught_only_transitively": false,
+      "census_kind": "CONFIG",
+      "direct": [],
+      "is_param": true,
+      "loads": 14,
+      "method": [],
+      "n_transitive": 0,
+      "n_unresolved": 1,
+      "name": "gdp_method",
+      "transitive": [],
+      "unresolved": [
+        "python/discopt/_jax/gdp_reformulate.py:152 -> get(\u2026) slot 1 lands on *args/**kwargs"
+      ],
+      "verdict": "IMMUTABLE_TYPE"
+    },
+    {
+      "called_methods": [],
+      "caught_only_transitively": false,
+      "census_kind": "CONFIG",
+      "direct": [],
+      "is_param": false,
+      "loads": 14,
+      "method": [],
+      "n_transitive": 0,
+      "n_unresolved": 1,
+      "name": "int_sizes",
+      "transitive": [],
+      "unresolved": [
+        "python/discopt/solver/__init__.py:6773 -> PyTreeManager(\u2026) not defined under python/discopt"
+      ],
+      "verdict": "UNRESOLVED"
+    },
+    {
+      "called_methods": [],
+      "caught_only_transitively": false,
+      "census_kind": "MUTATED",
+      "direct": [
+        {
+          "chain": [],
+          "channel": "census_subscript_store",
+          "detail": "store into _adaptive_nlp_state['eff_stride']",
+          "where": "python/discopt/solver/__init__.py:8888"
+        },
+        {
+          "chain": [],
+          "channel": "census_subscript_store",
+          "detail": "store into _adaptive_nlp_state['eff_stride']",
+          "where": "python/discopt/solver/__init__.py:9292"
+        },
+        {
+          "chain": [],
+          "channel": "census_subscript_store",
+          "detail": "store into _adaptive_nlp_state['no_improve']",
+          "where": "python/discopt/solver/__init__.py:9293"
+        },
+        {
+          "chain": [],
+          "channel": "census_subscript_store",
+          "detail": "augment _adaptive_nlp_state['no_improve']",
+          "where": "python/discopt/solver/__init__.py:9295"
+        },
+        {
+          "chain": [],
+          "channel": "census_subscript_store",
+          "detail": "store into _adaptive_nlp_state['eff_stride']",
+          "where": "python/discopt/solver/__init__.py:9304"
+        },
+        {
+          "chain": [],
+          "channel": "census_subscript_store",
+          "detail": "store into _adaptive_nlp_state['no_improve']",
+          "where": "python/discopt/solver/__init__.py:9305"
+        }
+      ],
+      "is_param": false,
+      "loads": 13,
+      "method": [],
+      "n_transitive": 0,
+      "n_unresolved": 0,
+      "name": "_adaptive_nlp_state",
+      "transitive": [],
+      "unresolved": [],
+      "verdict": "MUTATED_DIRECT"
+    },
+    {
+      "called_methods": [],
+      "caught_only_transitively": false,
+      "census_kind": "CONFIG",
+      "direct": [],
+      "is_param": false,
+      "loads": 13,
+      "method": [],
+      "n_transitive": 0,
+      "n_unresolved": 1,
+      "name": "int_offsets",
+      "transitive": [],
+      "unresolved": [
+        "python/discopt/solver/__init__.py:6773 -> PyTreeManager(\u2026) not defined under python/discopt"
+      ],
+      "verdict": "UNRESOLVED"
+    },
+    {
+      "called_methods": [],
+      "caught_only_transitively": false,
+      "census_kind": "CONFIG",
+      "direct": [],
+      "is_param": false,
+      "loads": 11,
+      "method": [],
+      "n_transitive": 0,
+      "n_unresolved": 0,
+      "name": "_root_cut_max",
+      "transitive": [],
+      "unresolved": [],
+      "verdict": "CLEAN"
+    },
+    {
+      "called_methods": [],
+      "caught_only_transitively": false,
+      "census_kind": "CONFIG",
+      "direct": [],
+      "is_param": false,
+      "loads": 11,
+      "method": [],
+      "n_transitive": 0,
+      "n_unresolved": 0,
+      "name": "_solver",
+      "transitive": [],
+      "unresolved": [],
+      "verdict": "CLEAN"
+    },
+    {
+      "called_methods": [],
+      "caught_only_transitively": false,
+      "census_kind": "CONFIG",
+      "direct": [],
+      "is_param": true,
+      "loads": 11,
+      "method": [],
+      "n_transitive": 0,
+      "n_unresolved": 2,
+      "name": "ipopt_options",
+      "transitive": [],
+      "unresolved": [
+        "python/discopt/solver/__init__.py:4658 -> solve_gp(\u2026) slot 'ipopt_options' lands on *args/**kwargs",
+        "python/discopt/solver/__init__.py:4747 -> solve_gp(\u2026) slot 'ipopt_options' lands on *args/**kwargs"
+      ],
+      "verdict": "UNRESOLVED"
+    },
+    {
+      "called_methods": [],
+      "caught_only_transitively": false,
+      "census_kind": "CONFIG",
+      "direct": [],
+      "is_param": true,
+      "loads": 11,
+      "method": [],
+      "n_transitive": 0,
+      "n_unresolved": 0,
+      "name": "node_callback",
+      "transitive": [],
+      "unresolved": [],
+      "verdict": "CLEAN"
+    },
+    {
+      "called_methods": [
+        "setdefault"
+      ],
+      "caught_only_transitively": false,
+      "census_kind": "MUTATED",
+      "direct": [
+        {
+          "chain": [],
+          "channel": "census_method_call",
+          "detail": ".setdefault",
+          "where": "python/discopt/solver/__init__.py:6964"
+        },
+        {
+          "chain": [],
+          "channel": "census_method_call",
+          "detail": ".setdefault",
+          "where": "python/discopt/solver/__init__.py:6965"
+        },
+        {
+          "chain": [],
+          "channel": "census_method_call",
+          "detail": ".setdefault",
+          "where": "python/discopt/solver/__init__.py:6966"
+        },
+        {
+          "chain": [],
+          "channel": "census_subscript_store",
+          "detail": "store into opts['max_wall_time']",
+          "where": "python/discopt/solver/__init__.py:8278"
+        },
+        {
+          "chain": [],
+          "channel": "census_subscript_store",
+          "detail": "store into opts['max_wall_time']",
+          "where": "python/discopt/solver/__init__.py:8923"
+        }
+      ],
+      "is_param": false,
+      "loads": 10,
+      "method": [],
+      "n_transitive": 1,
+      "n_unresolved": 0,
+      "name": "opts",
+      "transitive": [
+        {
+          "chain": [
+            "python/discopt/solver/__init__.py:8935",
+            "solve_model(opts)",
+            "_solve_root_node_multistart(options)"
+          ],
+          "channel": "store_into",
+          "detail": "options['max_wall_time']",
+          "where": "python/discopt/solver/__init__.py:2056"
+        }
+      ],
+      "unresolved": [],
+      "verdict": "MUTATED_DIRECT"
+    },
+    {
+      "called_methods": [],
+      "caught_only_transitively": false,
+      "census_kind": "CONFIG",
+      "direct": [],
+      "is_param": true,
+      "loads": 9,
+      "method": [],
+      "n_transitive": 0,
+      "n_unresolved": 4,
+      "name": "batch_size",
+      "transitive": [],
+      "unresolved": [
+        "python/discopt/solver/__init__.py:12206 -> export_batch(\u2026) not defined under python/discopt",
+        "python/discopt/solver/__init__.py:16791 -> export_batch(\u2026) not defined under python/discopt",
+        "python/discopt/solver/__init__.py:17303 -> export_batch(\u2026) not defined under python/discopt",
+        "python/discopt/solver/__init__.py:8282 -> export_batch(\u2026) not defined under python/discopt"
+      ],
+      "verdict": "IMMUTABLE_TYPE"
+    },
+    {
+      "called_methods": [],
+      "caught_only_transitively": false,
+      "census_kind": "CONFIG",
+      "direct": [],
+      "is_param": true,
+      "loads": 9,
+      "method": [],
+      "n_transitive": 0,
+      "n_unresolved": 0,
+      "name": "cutting_planes",
+      "transitive": [],
+      "unresolved": [],
+      "verdict": "IMMUTABLE_TYPE"
+    },
+    {
+      "called_methods": [],
+      "caught_only_transitively": false,
+      "census_kind": "CONFIG",
+      "direct": [],
+      "is_param": true,
+      "loads": 9,
+      "method": [],
+      "n_transitive": 0,
+      "n_unresolved": 0,
+      "name": "mccormick_bounds",
+      "transitive": [],
+      "unresolved": [],
+      "verdict": "IMMUTABLE_TYPE"
+    },
+    {
+      "called_methods": [],
+      "caught_only_transitively": false,
+      "census_kind": "CONFIG",
+      "direct": [],
+      "is_param": true,
+      "loads": 9,
+      "method": [],
+      "n_transitive": 0,
+      "n_unresolved": 0,
+      "name": "skip_convex_check",
+      "transitive": [],
+      "unresolved": [],
+      "verdict": "IMMUTABLE_TYPE"
+    },
+    {
+      "called_methods": [],
+      "caught_only_transitively": false,
+      "census_kind": "CONFIG",
+      "direct": [],
+      "is_param": true,
+      "loads": 9,
+      "method": [],
+      "n_transitive": 0,
+      "n_unresolved": 4,
+      "name": "strategy",
+      "transitive": [],
+      "unresolved": [
+        "python/discopt/solver/__init__.py:12029 -> PyTreeManager(\u2026) not defined under python/discopt",
+        "python/discopt/solver/__init__.py:16610 -> PyTreeManager(\u2026) not defined under python/discopt",
+        "python/discopt/solver/__init__.py:17158 -> PyTreeManager(\u2026) not defined under python/discopt",
+        "python/discopt/solver/__init__.py:6773 -> PyTreeManager(\u2026) not defined under python/discopt"
+      ],
+      "verdict": "IMMUTABLE_TYPE"
+    },
+    {
+      "called_methods": [],
+      "caught_only_transitively": false,
+      "census_kind": "CONFIG",
+      "direct": [],
+      "is_param": true,
+      "loads": 9,
+      "method": [],
+      "n_transitive": 0,
+      "n_unresolved": 2,
+      "name": "threads",
+      "transitive": [],
+      "unresolved": [
+        "python/discopt/solver/__init__.py:14362 -> _gurobi_solve_qcp(\u2026) not defined under python/discopt",
+        "python/discopt/solver/__init__.py:14728 -> _gurobi_solve_milp(\u2026) not defined under python/discopt"
+      ],
+      "verdict": "IMMUTABLE_TYPE"
+    },
+    {
+      "called_methods": [],
+      "caught_only_transitively": false,
+      "census_kind": "CONFIG",
+      "direct": [],
+      "is_param": false,
+      "loads": 7,
+      "method": [],
+      "n_transitive": 0,
+      "n_unresolved": 0,
+      "name": "_solve_t0",
+      "transitive": [],
+      "unresolved": [],
+      "verdict": "IMMUTABLE_TYPE"
+    },
+    {
+      "called_methods": [],
+      "caught_only_transitively": false,
+      "census_kind": "CONFIG",
+      "direct": [],
+      "is_param": true,
+      "loads": 7,
+      "method": [],
+      "n_transitive": 0,
+      "n_unresolved": 0,
+      "name": "decomposition",
+      "transitive": [],
+      "unresolved": [],
+      "verdict": "IMMUTABLE_TYPE"
+    },
+    {
+      "called_methods": [
+        "lower"
+      ],
+      "caught_only_transitively": false,
+      "census_kind": "NEEDS_AUDIT",
+      "direct": [],
+      "is_param": true,
+      "loads": 7,
+      "method": [],
+      "n_transitive": 0,
+      "n_unresolved": 0,
+      "name": "rlt",
+      "transitive": [],
+      "unresolved": [],
+      "verdict": "IMMUTABLE_TYPE"
+    },
+    {
+      "called_methods": [],
+      "caught_only_transitively": false,
+      "census_kind": "CONFIG",
+      "direct": [],
+      "is_param": false,
+      "loads": 6,
+      "method": [],
+      "n_transitive": 0,
+      "n_unresolved": 0,
+      "name": "_HEUR_COST",
+      "transitive": [],
+      "unresolved": [],
+      "verdict": "CLEAN"
+    },
+    {
+      "called_methods": [
+        "allowed",
+        "record"
+      ],
+      "caught_only_transitively": false,
+      "census_kind": "NEEDS_AUDIT",
+      "direct": [],
+      "is_param": false,
+      "loads": 6,
+      "method": [
+        {
+          "chain": [],
+          "channel": "python_self_store",
+          "detail": ".allowed() assigns to self",
+          "where": "python/discopt/heuristic_governor.py:152 (HeuristicGovernor.allowed)"
+        },
+        {
+          "chain": [],
+          "channel": "python_self_store",
+          "detail": ".record() assigns to self",
+          "where": "python/discopt/heuristic_governor.py:171 (HeuristicGovernor.record)"
+        }
+      ],
+      "n_transitive": 0,
+      "n_unresolved": 0,
+      "name": "_heuristic_governor",
+      "transitive": [],
+      "unresolved": [],
+      "verdict": "MUTATED_METHOD"
+    },
+    {
+      "called_methods": [],
+      "caught_only_transitively": false,
+      "census_kind": "CONFIG",
+      "direct": [],
+      "is_param": true,
+      "loads": 6,
+      "method": [],
+      "n_transitive": 0,
+      "n_unresolved": 0,
+      "name": "nlp_bb",
+      "transitive": [],
+      "unresolved": [],
+      "verdict": "IMMUTABLE_TYPE"
+    },
+    {
+      "called_methods": [],
+      "caught_only_transitively": false,
+      "census_kind": "CONFIG",
+      "direct": [],
+      "is_param": true,
+      "loads": 6,
+      "method": [],
+      "n_transitive": 0,
+      "n_unresolved": 0,
+      "name": "partitions",
+      "transitive": [],
+      "unresolved": [],
+      "verdict": "IMMUTABLE_TYPE"
+    },
+    {
+      "called_methods": [],
+      "caught_only_transitively": false,
+      "census_kind": "CONFIG",
+      "direct": [],
+      "is_param": true,
+      "loads": 6,
+      "method": [],
+      "n_transitive": 0,
+      "n_unresolved": 1,
+      "name": "relaxation_arithmetic",
+      "transitive": [],
+      "unresolved": [
+        "depth limit reached following solve_model(relaxation_arithmetic) -> compile_objective_relaxation(arithmetic) -> compile_relaxation(arithmetic) -> _compile_relax_node(arithmetic) -> make_oa_relax(arithmetic)"
+      ],
+      "verdict": "IMMUTABLE_TYPE"
+    },
+    {
+      "called_methods": [],
+      "caught_only_transitively": false,
+      "census_kind": "CONFIG",
+      "direct": [],
+      "is_param": true,
+      "loads": 6,
+      "method": [],
+      "n_transitive": 0,
+      "n_unresolved": 3,
+      "name": "subnlp_options",
+      "transitive": [],
+      "unresolved": [
+        "python/discopt/solver/__init__.py:9831 -> _subnlp(\u2026) not defined under python/discopt",
+        "python/discopt/solver/__init__.py:9873 -> _subnlp(\u2026) not defined under python/discopt",
+        "python/discopt/solver/__init__.py:9932 -> _subnlp(\u2026) not defined under python/discopt"
+      ],
+      "verdict": "UNRESOLVED"
+    },
+    {
+      "called_methods": [],
+      "caught_only_transitively": false,
+      "census_kind": "CONFIG",
+      "direct": [],
+      "is_param": false,
+      "loads": 5,
+      "method": [],
+      "n_transitive": 0,
+      "n_unresolved": 0,
+      "name": "_convexity_time_budget",
+      "transitive": [],
+      "unresolved": [],
+      "verdict": "CLEAN"
+    },
+    {
+      "called_methods": [],
+      "caught_only_transitively": false,
+      "census_kind": "CONFIG",
+      "direct": [],
+      "is_param": false,
+      "loads": 5,
+      "method": [],
+      "n_transitive": 0,
+      "n_unresolved": 0,
+      "name": "_cut_inherit_enabled",
+      "transitive": [],
+      "unresolved": [],
+      "verdict": "IMMUTABLE_TYPE"
+    },
+    {
+      "called_methods": [],
+      "caught_only_transitively": false,
+      "census_kind": "CONFIG",
+      "direct": [],
+      "is_param": false,
+      "loads": 5,
+      "method": [],
+      "n_transitive": 0,
+      "n_unresolved": 0,
+      "name": "_obj_negate",
+      "transitive": [],
+      "unresolved": [],
+      "verdict": "IMMUTABLE_TYPE"
+    },
+    {
+      "called_methods": [],
+      "caught_only_transitively": false,
+      "census_kind": "CONFIG",
+      "direct": [],
+      "is_param": false,
+      "loads": 5,
+      "method": [],
+      "n_transitive": 0,
+      "n_unresolved": 1,
+      "name": "_root_cut_rounds",
+      "transitive": [],
+      "unresolved": [
+        "python/discopt/solver/__init__.py:7437 -> solve_at_node(\u2026) not defined under python/discopt"
+      ],
+      "verdict": "UNRESOLVED"
+    },
+    {
+      "called_methods": [],
+      "caught_only_transitively": false,
+      "census_kind": "CONFIG",
+      "direct": [],
+      "is_param": false,
+      "loads": 5,
+      "method": [],
+      "n_transitive": 0,
+      "n_unresolved": 2,
+      "name": "constraint_bounds",
+      "transitive": [],
+      "unresolved": [
+        "python/discopt/solver/__init__.py:13233 -> solve_nlp_pounce(\u2026) not defined under python/discopt",
+        "python/discopt/solver/__init__.py:8569 -> get_augmented_constraint_bounds(\u2026) not defined under python/discopt"
+      ],
+      "verdict": "UNRESOLVED"
+    },
+    {
+      "called_methods": [],
+      "caught_only_transitively": false,
+      "census_kind": "CONFIG",
+      "direct": [],
+      "is_param": false,
+      "loads": 5,
+      "method": [],
+      "n_transitive": 0,
+      "n_unresolved": 2,
+      "name": "gurobi_options",
+      "transitive": [],
+      "unresolved": [
+        "python/discopt/solver/__init__.py:14362 -> _gurobi_solve_qcp(\u2026) not defined under python/discopt",
+        "python/discopt/solver/__init__.py:14728 -> _gurobi_solve_milp(\u2026) not defined under python/discopt"
+      ],
+      "verdict": "UNRESOLVED"
+    },
+    {
+      "called_methods": [],
+      "caught_only_transitively": false,
+      "census_kind": "CONFIG",
+      "direct": [],
+      "is_param": true,
+      "loads": 5,
+      "method": [],
+      "n_transitive": 0,
+      "n_unresolved": 2,
+      "name": "in_tree_presolve_stride",
+      "transitive": [],
+      "unresolved": [
+        "python/discopt/solver/__init__.py:12275 -> in_tree_presolve(\u2026) not defined under python/discopt",
+        "python/discopt/solver/__init__.py:8471 -> in_tree_presolve(\u2026) not defined under python/discopt"
+      ],
+      "verdict": "IMMUTABLE_TYPE"
+    },
+    {
+      "called_methods": [],
+      "caught_only_transitively": false,
+      "census_kind": "CONFIG",
+      "direct": [],
+      "is_param": true,
+      "loads": 5,
+      "method": [],
+      "n_transitive": 0,
+      "n_unresolved": 1,
+      "name": "psd_cuts",
+      "transitive": [],
+      "unresolved": [
+        "python/discopt/solver/__init__.py:7153 -> MccormickLPRelaxer(\u2026) not defined under python/discopt"
+      ],
+      "verdict": "IMMUTABLE_TYPE"
+    },
+    {
+      "called_methods": [],
+      "caught_only_transitively": false,
+      "census_kind": "CONFIG",
+      "direct": [],
+      "is_param": true,
+      "loads": 5,
+      "method": [],
+      "n_transitive": 0,
+      "n_unresolved": 0,
+      "name": "subnlp_max_calls",
+      "transitive": [],
+      "unresolved": [],
+      "verdict": "IMMUTABLE_TYPE"
+    },
+    {
+      "called_methods": [],
+      "caught_only_transitively": false,
+      "census_kind": "CONFIG",
+      "direct": [],
+      "is_param": true,
+      "loads": 5,
+      "method": [],
+      "n_transitive": 0,
+      "n_unresolved": 0,
+      "name": "use_learned_relaxations",
+      "transitive": [],
+      "unresolved": [],
+      "verdict": "IMMUTABLE_TYPE"
+    },
+    {
+      "called_methods": [],
+      "caught_only_transitively": false,
+      "census_kind": "CONFIG",
+      "direct": [],
+      "is_param": false,
+      "loads": 4,
+      "method": [],
+      "n_transitive": 0,
+      "n_unresolved": 0,
+      "name": "_has_bb_callbacks",
+      "transitive": [],
+      "unresolved": [],
+      "verdict": "IMMUTABLE_TYPE"
+    },
+    {
+      "called_methods": [],
+      "caught_only_transitively": false,
+      "census_kind": "CONFIG",
+      "direct": [],
+      "is_param": true,
+      "loads": 4,
+      "method": [],
+      "n_transitive": 0,
+      "n_unresolved": 0,
+      "name": "deterministic",
+      "transitive": [],
+      "unresolved": [],
+      "verdict": "IMMUTABLE_TYPE"
+    },
+    {
+      "called_methods": [],
+      "caught_only_transitively": false,
+      "census_kind": "CONFIG",
+      "direct": [],
+      "is_param": false,
+      "loads": 3,
+      "method": [],
+      "n_transitive": 0,
+      "n_unresolved": 0,
+      "name": "_cut_inherit_mode",
+      "transitive": [],
+      "unresolved": [],
+      "verdict": "CLEAN"
+    },
+    {
+      "called_methods": [],
+      "caught_only_transitively": false,
+      "census_kind": "CONFIG",
+      "direct": [],
+      "is_param": true,
+      "loads": 3,
+      "method": [],
+      "n_transitive": 0,
+      "n_unresolved": 0,
+      "name": "_lns_enabled",
+      "transitive": [],
+      "unresolved": [],
+      "verdict": "IMMUTABLE_TYPE"
+    },
+    {
+      "called_methods": [],
+      "caught_only_transitively": false,
+      "census_kind": "CONFIG",
+      "direct": [],
+      "is_param": false,
+      "loads": 3,
+      "method": [],
+      "n_transitive": 0,
+      "n_unresolved": 0,
+      "name": "_pure_discrete",
+      "transitive": [],
+      "unresolved": [],
+      "verdict": "IMMUTABLE_TYPE"
+    },
+    {
+      "called_methods": [],
+      "caught_only_transitively": false,
+      "census_kind": "MUTATED",
+      "direct": [
+        {
+          "chain": [],
+          "channel": "census_subscript_store",
+          "detail": "augment _reduce_timers['fbbt']",
+          "where": "python/discopt/solver/__init__.py:8427"
+        },
+        {
+          "chain": [],
+          "channel": "census_subscript_store",
+          "detail": "augment _reduce_timers['fbbt']",
+          "where": "python/discopt/solver/__init__.py:8490"
+        },
+        {
+          "chain": [],
+          "channel": "census_subscript_store",
+          "detail": "store into _reduce_timers['obbt']",
+          "where": "python/discopt/solver/__init__.py:11325"
+        }
+      ],
+      "is_param": false,
+      "loads": 3,
+      "method": [],
+      "n_transitive": 0,
+      "n_unresolved": 0,
+      "name": "_reduce_timers",
+      "transitive": [],
+      "unresolved": [],
+      "verdict": "MUTATED_DIRECT"
+    },
+    {
+      "called_methods": [],
+      "caught_only_transitively": false,
+      "census_kind": "CONFIG",
+      "direct": [],
+      "is_param": false,
+      "loads": 3,
+      "method": [],
+      "n_transitive": 0,
+      "n_unresolved": 1,
+      "name": "_root_lb_snapshot",
+      "transitive": [],
+      "unresolved": [
+        "python/discopt/solver/__init__.py:3489 -> solve_at_node(\u2026) not defined under python/discopt"
+      ],
+      "verdict": "UNRESOLVED"
+    },
+    {
+      "called_methods": [],
+      "caught_only_transitively": false,
+      "census_kind": "CONFIG",
+      "direct": [],
+      "is_param": false,
+      "loads": 3,
+      "method": [],
+      "n_transitive": 0,
+      "n_unresolved": 1,
+      "name": "_root_ub_snapshot",
+      "transitive": [],
+      "unresolved": [
+        "python/discopt/solver/__init__.py:3489 -> solve_at_node(\u2026) not defined under python/discopt"
+      ],
+      "verdict": "UNRESOLVED"
+    },
+    {
+      "called_methods": [],
+      "caught_only_transitively": false,
+      "census_kind": "CONFIG",
+      "direct": [],
+      "is_param": true,
+      "loads": 3,
+      "method": [],
+      "n_transitive": 0,
+      "n_unresolved": 0,
+      "name": "decomposition_structure",
+      "transitive": [],
+      "unresolved": [],
+      "verdict": "CLEAN"
+    },
+    {
+      "called_methods": [],
+      "caught_only_transitively": false,
+      "census_kind": "CONFIG",
+      "direct": [],
+      "is_param": true,
+      "loads": 3,
+      "method": [],
+      "n_transitive": 0,
+      "n_unresolved": 0,
+      "name": "lagrangian_bound",
+      "transitive": [],
+      "unresolved": [],
+      "verdict": "IMMUTABLE_TYPE"
+    },
+    {
+      "called_methods": [],
+      "caught_only_transitively": false,
+      "census_kind": "CONFIG",
+      "direct": [],
+      "is_param": true,
+      "loads": 3,
+      "method": [],
+      "n_transitive": 0,
+      "n_unresolved": 0,
+      "name": "rlt_cuts",
+      "transitive": [],
+      "unresolved": [],
+      "verdict": "IMMUTABLE_TYPE"
+    },
+    {
+      "called_methods": [],
+      "caught_only_transitively": false,
+      "census_kind": "CONFIG",
+      "direct": [],
+      "is_param": true,
+      "loads": 3,
+      "method": [],
+      "n_transitive": 0,
+      "n_unresolved": 0,
+      "name": "root_cut_max",
+      "transitive": [],
+      "unresolved": [],
+      "verdict": "IMMUTABLE_TYPE"
+    },
+    {
+      "called_methods": [],
+      "caught_only_transitively": false,
+      "census_kind": "CONFIG",
+      "direct": [],
+      "is_param": true,
+      "loads": 3,
+      "method": [],
+      "n_transitive": 0,
+      "n_unresolved": 0,
+      "name": "root_cut_rounds",
+      "transitive": [],
+      "unresolved": [],
+      "verdict": "IMMUTABLE_TYPE"
+    },
+    {
+      "called_methods": [],
+      "caught_only_transitively": false,
+      "census_kind": "CONFIG",
+      "direct": [],
+      "is_param": true,
+      "loads": 3,
+      "method": [],
+      "n_transitive": 0,
+      "n_unresolved": 0,
+      "name": "subnlp_frequency",
+      "transitive": [],
+      "unresolved": [],
+      "verdict": "IMMUTABLE_TYPE"
+    },
+    {
+      "called_methods": [],
+      "caught_only_transitively": false,
+      "census_kind": "CONFIG",
+      "direct": [],
+      "is_param": false,
+      "loads": 2,
+      "method": [],
+      "n_transitive": 0,
+      "n_unresolved": 0,
+      "name": "_adaptive_nlp",
+      "transitive": [],
+      "unresolved": [],
+      "verdict": "CLEAN"
+    },
+    {
+      "called_methods": [],
+      "caught_only_transitively": false,
+      "census_kind": "CONFIG",
+      "direct": [],
+      "is_param": false,
+      "loads": 2,
+      "method": [],
+      "n_transitive": 0,
+      "n_unresolved": 0,
+      "name": "_captured_gams_initial_values",
+      "transitive": [],
+      "unresolved": [],
+      "verdict": "CLEAN"
+    },
+    {
+      "called_methods": [],
+      "caught_only_transitively": false,
+      "census_kind": "CONFIG",
+      "direct": [],
+      "is_param": false,
+      "loads": 2,
+      "method": [],
+      "n_transitive": 0,
+      "n_unresolved": 0,
+      "name": "_lns_has_integers",
+      "transitive": [],
+      "unresolved": [],
+      "verdict": "IMMUTABLE_TYPE"
+    },
+    {
+      "called_methods": [],
+      "caught_only_transitively": false,
+      "census_kind": "CONFIG",
+      "direct": [],
+      "is_param": false,
+      "loads": 2,
+      "method": [],
+      "n_transitive": 0,
+      "n_unresolved": 0,
+      "name": "_lns_k_schedule",
+      "transitive": [],
+      "unresolved": [],
+      "verdict": "CLEAN"
+    },
+    {
+      "called_methods": [],
+      "caught_only_transitively": false,
+      "census_kind": "CONFIG",
+      "direct": [],
+      "is_param": false,
+      "loads": 2,
+      "method": [],
+      "n_transitive": 0,
+      "n_unresolved": 0,
+      "name": "_mc_nlp_period",
+      "transitive": [],
+      "unresolved": [],
+      "verdict": "IMMUTABLE_TYPE"
+    },
+    {
+      "called_methods": [],
+      "caught_only_transitively": false,
+      "census_kind": "CONFIG",
+      "direct": [],
+      "is_param": false,
+      "loads": 2,
+      "method": [],
+      "n_transitive": 0,
+      "n_unresolved": 0,
+      "name": "_origin_has_continuous_var",
+      "transitive": [],
+      "unresolved": [],
+      "verdict": "CLEAN"
+    },
+    {
+      "called_methods": [],
+      "caught_only_transitively": false,
+      "census_kind": "CONFIG",
+      "direct": [],
+      "is_param": false,
+      "loads": 2,
+      "method": [],
+      "n_transitive": 0,
+      "n_unresolved": 0,
+      "name": "_use_convex_obj_bound",
+      "transitive": [],
+      "unresolved": [],
+      "verdict": "CLEAN"
+    },
+    {
+      "called_methods": [],
+      "caught_only_transitively": false,
+      "census_kind": "CONFIG",
+      "direct": [],
+      "is_param": true,
+      "loads": 2,
+      "method": [],
+      "n_transitive": 0,
+      "n_unresolved": 0,
+      "name": "cuts",
+      "transitive": [],
+      "unresolved": [],
+      "verdict": "IMMUTABLE_TYPE"
+    },
+    {
+      "called_methods": [],
+      "caught_only_transitively": false,
+      "census_kind": "CONFIG",
+      "direct": [],
+      "is_param": true,
+      "loads": 2,
+      "method": [],
+      "n_transitive": 0,
+      "n_unresolved": 0,
+      "name": "eigenvalue_root_bound",
+      "transitive": [],
+      "unresolved": [],
+      "verdict": "IMMUTABLE_TYPE"
+    },
+    {
+      "called_methods": [],
+      "caught_only_transitively": false,
+      "census_kind": "CONFIG",
+      "direct": [],
+      "is_param": true,
+      "loads": 2,
+      "method": [],
+      "n_transitive": 0,
+      "n_unresolved": 0,
+      "name": "lagrangian_frequency",
+      "transitive": [],
+      "unresolved": [],
+      "verdict": "IMMUTABLE_TYPE"
+    },
+    {
+      "called_methods": [],
+      "caught_only_transitively": false,
+      "census_kind": "CONFIG",
+      "direct": [],
+      "is_param": true,
+      "loads": 2,
+      "method": [],
+      "n_transitive": 0,
+      "n_unresolved": 0,
+      "name": "presolve_polynomial",
+      "transitive": [],
+      "unresolved": [],
+      "verdict": "IMMUTABLE_TYPE"
+    },
+    {
+      "called_methods": [],
+      "caught_only_transitively": false,
+      "census_kind": "CONFIG",
+      "direct": [],
+      "is_param": true,
+      "loads": 2,
+      "method": [],
+      "n_transitive": 0,
+      "n_unresolved": 0,
+      "name": "presolve_reverse_ad",
+      "transitive": [],
+      "unresolved": [],
+      "verdict": "IMMUTABLE_TYPE"
+    },
+    {
+      "called_methods": [],
+      "caught_only_transitively": false,
+      "census_kind": "CONFIG",
+      "direct": [],
+      "is_param": true,
+      "loads": 2,
+      "method": [],
+      "n_transitive": 0,
+      "n_unresolved": 0,
+      "name": "rens",
+      "transitive": [],
+      "unresolved": [],
+      "verdict": "IMMUTABLE_TYPE"
+    },
+    {
+      "called_methods": [],
+      "caught_only_transitively": false,
+      "census_kind": "CONFIG",
+      "direct": [],
+      "is_param": true,
+      "loads": 2,
+      "method": [],
+      "n_transitive": 0,
+      "n_unresolved": 0,
+      "name": "solver",
+      "transitive": [],
+      "unresolved": [],
+      "verdict": "IMMUTABLE_TYPE"
+    },
+    {
+      "called_methods": [],
+      "caught_only_transitively": false,
+      "census_kind": "CONFIG",
+      "direct": [],
+      "is_param": true,
+      "loads": 2,
+      "method": [],
+      "n_transitive": 0,
+      "n_unresolved": 0,
+      "name": "sparse",
+      "transitive": [],
+      "unresolved": [],
+      "verdict": "IMMUTABLE_TYPE"
+    },
+    {
+      "called_methods": [],
+      "caught_only_transitively": false,
+      "census_kind": "CONFIG",
+      "direct": [],
+      "is_param": true,
+      "loads": 2,
+      "method": [],
+      "n_transitive": 0,
+      "n_unresolved": 0,
+      "name": "subnlp_backend",
+      "transitive": [],
+      "unresolved": [],
+      "verdict": "IMMUTABLE_TYPE"
+    },
+    {
+      "called_methods": [],
+      "caught_only_transitively": false,
+      "census_kind": "CONFIG",
+      "direct": [],
+      "is_param": true,
+      "loads": 2,
+      "method": [],
+      "n_transitive": 0,
+      "n_unresolved": 0,
+      "name": "subnlp_enabled",
+      "transitive": [],
+      "unresolved": [],
+      "verdict": "IMMUTABLE_TYPE"
+    },
+    {
+      "called_methods": [],
+      "caught_only_transitively": false,
+      "census_kind": "CONFIG",
+      "direct": [],
+      "is_param": true,
+      "loads": 1,
+      "method": [],
+      "n_transitive": 0,
+      "n_unresolved": 1,
+      "name": "lagrangian_method",
+      "transitive": [],
+      "unresolved": [
+        "python/discopt/decomposition/lagrangian/solver.py:109 -> LagrangianConfig(\u2026) not defined under python/discopt"
+      ],
+      "verdict": "IMMUTABLE_TYPE"
+    },
+    {
+      "called_methods": [],
+      "caught_only_transitively": false,
+      "census_kind": "CONFIG",
+      "direct": [],
+      "is_param": true,
+      "loads": 1,
+      "method": [],
+      "n_transitive": 0,
+      "n_unresolved": 0,
+      "name": "record_decomposition",
+      "transitive": [],
+      "unresolved": [],
+      "verdict": "IMMUTABLE_TYPE"
+    },
+    {
+      "called_methods": [],
+      "caught_only_transitively": false,
+      "census_kind": "CONFIG",
+      "direct": [],
+      "is_param": true,
+      "loads": 1,
+      "method": [],
+      "n_transitive": 0,
+      "n_unresolved": 0,
+      "name": "structure_cuts",
+      "transitive": [],
+      "unresolved": [],
+      "verdict": "IMMUTABLE_TYPE"
+    }
+  ],
+  "source": "python/discopt/solver/__init__.py"
+}

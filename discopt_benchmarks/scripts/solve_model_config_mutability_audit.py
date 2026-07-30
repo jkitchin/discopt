@@ -156,6 +156,70 @@ NON_MUTATING_BUILTINS: frozenset[str] = frozenset(
     }
 )
 
+#: Library callables that copy or read their arguments rather than mutating them.
+#: ``np.array``/``np.asarray`` build a new array; ``functools.partial`` stores a
+#: reference without touching it; ``typing.cast`` is a runtime no-op; the logging
+#: helpers format. Checked *after* :data:`MUTATING_CALLABLES`, so an in-place numpy
+#: primitive cannot be cleared by appearing to be "just numpy".
+NON_MUTATING_LIBRARY: frozenset[str] = frozenset(
+    {
+        # numpy constructors / pure functions
+        "array",
+        "asarray",
+        "asanyarray",
+        "ascontiguousarray",
+        "zeros",
+        "ones",
+        "empty",
+        "full",
+        "zeros_like",
+        "ones_like",
+        "empty_like",
+        "full_like",
+        "concatenate",
+        "stack",
+        "hstack",
+        "vstack",
+        "column_stack",
+        "where",
+        "maximum",
+        "minimum",
+        "clip",
+        "unique",
+        "argsort",
+        "cumsum",
+        "isfinite",
+        "isnan",
+        "isinf",
+        "sign",
+        "sqrt",
+        "exp",
+        "log",
+        "atleast_1d",
+        "atleast_2d",
+        "flatnonzero",
+        "allclose",
+        "isclose",
+        "array_equal",
+        "searchsorted",
+        # copies
+        "deepcopy",
+        "copy",
+        # functional / typing / logging plumbing
+        "partial",
+        "cast",
+        "debug",
+        "info",
+        "warning",
+        "warn",
+        "error",
+        "exception",
+        "uniform",
+        "seed",
+        "default_rng",
+    }
+)
+
 #: Non-discopt callables that *do* mutate an argument in place.  Kept explicit so
 #: that filtering builtins for noise cannot quietly clear a real mutation.
 MUTATING_CALLABLES: frozenset[str] = frozenset(
@@ -248,6 +312,70 @@ READ_ONLY_METHODS: frozenset[str] = frozenset(
     }
 )
 
+#: Annotations naming a type whose instances are immutable in CPython.  A ``float``
+#: cannot be mutated by any callee, however deep the chain — so proving the type
+#: settles the question outright and beats every other channel.
+#:
+#: A bare ``None`` annotation is deliberately **excluded**.  Four of ``solve_model``'s
+#: parameters are annotated ``None`` (``lazy_constraints``, ``incumbent_callback``,
+#: ``node_callback``, ``decomposition_structure``) where the annotation records the
+#: *default*, not the type — the runtime values are callables and lists.  Reading
+#: those as "NoneType, therefore immutable" would be a false clear of exactly the
+#: kind this audit exists to prevent.
+IMMUTABLE_TYPE_NAMES: frozenset[str] = frozenset(
+    {"int", "float", "bool", "str", "bytes", "complex"}
+)
+
+#: Calls whose result is always an immutable scalar.
+SCALAR_RETURNING: frozenset[str] = frozenset(
+    {
+        "len",
+        "int",
+        "float",
+        "bool",
+        "str",
+        "repr",
+        "hash",
+        "id",
+        "ord",
+        "chr",
+        "hex",
+        "oct",
+        "format",
+        "abs",
+        "round",
+        "perf_counter",
+        "monotonic",
+        "process_time",
+        "time_ns",
+        "perf_counter_ns",
+        "isfinite",
+        "isnan",
+        "isinf",
+    }
+)
+
+#: Names whose automated verdict is ``UNRESOLVED`` and which were then adjudicated
+#: **by hand**, with the evidence recorded here so the reasoning is reviewable
+#: rather than lost in a session transcript.  These entries are reported alongside
+#: the automated verdict and deliberately **do not override it**: the JSON keeps
+#: saying UNRESOLVED, because a hand-adjudication is a claim by a person and the
+#: instrument should not launder it into a machine result.
+HAND_ADJUDICATED: dict[str, tuple[str, str]] = {
+    "int_offsets": (
+        "clean",
+        "Passed only to `PyTreeManager(...)` (crates/discopt-python/src/bnb_bindings.rs:36), "
+        "whose PyO3 signature takes `int_var_offsets: Vec<usize>` **by value** — extraction "
+        "copies the Python list into Rust-owned storage, so the caller's list is untouched.",
+    ),
+    "int_sizes": (
+        "clean",
+        "Same call, `int_var_sizes: Vec<usize>` by value "
+        "(crates/discopt-python/src/bnb_bindings.rs:37).",
+    ),
+}
+
+V_IMMUTABLE = "IMMUTABLE_TYPE"
 V_DIRECT = "MUTATED_DIRECT"
 V_TRANSITIVE = "MUTATED_TRANSITIVE"
 V_METHOD = "MUTATED_METHOD"
@@ -275,6 +403,31 @@ class FuncDef:
     def param_names(self) -> list[str]:
         a = self.node.args
         return [arg.arg for arg in [*a.posonlyargs, *a.args, *a.kwonlyargs]]
+
+    def accepts(self, call: ast.Call) -> bool:
+        """Could this definition legally receive ``call``?
+
+        Arity and keyword names only — enough to separate two same-named helpers
+        with different signatures, and never enough to *invent* a callee.
+        """
+        a = self.node.args
+        positional = [arg.arg for arg in [*a.posonlyargs, *a.args]]
+        kwonly = {arg.arg for arg in a.kwonlyargs}
+        if len(call.args) > len(positional) and a.vararg is None:
+            return False
+        if a.kwarg is None:
+            for kw in call.keywords:
+                if kw.arg is not None and kw.arg not in positional and kw.arg not in kwonly:
+                    return False
+        n_required = len(positional) - len(a.defaults)
+        supplied = set(positional[: len(call.args)]) | {
+            kw.arg for kw in call.keywords if kw.arg is not None
+        }
+        missing_required = any(p not in supplied for p in positional[:n_required])
+        # `f(**opts)` can supply anything, so a missing required parameter is only
+        # disqualifying when the call has no `**` unpacking.
+        has_star_star = any(kw.arg is None for kw in call.keywords)
+        return not (missing_required and not has_star_star)
 
     def bind(self, call: ast.Call) -> dict[int | str, str]:
         """Map each call argument to the parameter name it lands on.
@@ -305,6 +458,9 @@ class FuncIndex:
     #: from methods because a ``@dataclass`` has no ``__init__`` in the source, so
     #: probing for ``Cls.__init__`` misses exactly the classes this tree favours.
     class_names: set[str] = field(default_factory=set)
+    #: module -> names it binds via `from X import name` (unaliased).  Used to tell
+    #: a same-module `def` that really wins from one shadowed by an import.
+    imported_names: dict[str, set[str]] = field(default_factory=lambda: defaultdict(set))
     files_read: int = 0
 
     def add_file(self, path: Path) -> None:
@@ -316,6 +472,11 @@ class FuncIndex:
             raise
         self.files_read += 1
         module = str(path.relative_to(REPO_ROOT))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom):
+                for alias in node.names:
+                    if alias.asname is None:
+                        self.imported_names[module].add(alias.name)
         for node in tree.body:
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 self.by_name[node.name].append(FuncDef(node.name, module, node, path))
@@ -327,15 +488,45 @@ class FuncIndex:
                             FuncDef(f"{node.name}.{sub.name}", module, sub, path)
                         )
 
-    def resolve(self, name: str) -> FuncDef | None:
+    def resolve(
+        self,
+        name: str,
+        call: ast.Call | None = None,
+        caller_module: str | None = None,
+    ) -> FuncDef | None:
         """Exactly one definition, or ``None``.
 
         Ambiguity is *not* resolved by picking the first: two functions with the
         same name in different modules would make the chain a guess, and a guessed
         chain that ends in ``CLEAN`` is the failure mode this audit prevents.
+
+        When a ``call`` is supplied, ambiguity is first narrowed by **signature
+        compatibility**, which is a deduction rather than a guess. Both
+        ``_check_constraint_feasibility`` definitions in this tree are reachable by
+        name, but only the one in ``solver/__init__.py`` accepts four positional
+        arguments plus ``cl_list``/``cu_list``; the ``_jax`` one takes
+        ``(evaluator, x, tol, rtol)``. If exactly one candidate can accept the
+        call, that is the callee — if none or several can, it stays unresolved.
         """
         hits = self.by_name.get(name, [])
-        return hits[0] if len(hits) == 1 else None
+        if len(hits) == 1:
+            return hits[0]
+        if not hits:
+            return None
+        # Python's own rule first: a `def` in the calling module wins over a
+        # same-named function elsewhere, unless that module also imports the name
+        # unaliased.  Both `_check_constraint_feasibility` definitions accept four
+        # positional arguments, so arity cannot separate them — but the call sites
+        # are in `solver/__init__.py`, which defines one of them and imports the
+        # other only as `_tp_cc`.  That is a deduction, not a preference.
+        if caller_module is not None and name not in self.imported_names.get(caller_module, ()):
+            local = [fd for fd in hits if fd.module == caller_module]
+            if len(local) == 1:
+                return local[0]
+        if call is None:
+            return None
+        viable = [fd for fd in hits if fd.accepts(call)]
+        return viable[0] if len(viable) == 1 else None
 
 
 def build_index() -> FuncIndex:
@@ -441,6 +632,104 @@ def _alias_roots(expr: ast.AST | None) -> set[str]:
     if isinstance(expr, ast.Call) and isinstance(expr.func, ast.Attribute):
         return _alias_roots(expr.func.value)
     return set()
+
+
+def _annotation_is_immutable(ann: ast.AST | None) -> bool:
+    """Does ``ann`` name a type with no in-place mutation?  ``Optional``/unions
+    are immutable iff every member is (``None`` contributes nothing mutable)."""
+    if ann is None:
+        return False
+    if isinstance(ann, ast.Constant):
+        return False  # bare `None` — see IMMUTABLE_TYPE_NAMES
+    if isinstance(ann, ast.Name):
+        return ann.id in IMMUTABLE_TYPE_NAMES
+    if isinstance(ann, ast.Attribute):
+        return ann.attr in IMMUTABLE_TYPE_NAMES
+    if isinstance(ann, ast.BinOp) and isinstance(ann.op, ast.BitOr):  # `str | None`
+        return _member_ok(ann.left) and _member_ok(ann.right)
+    if isinstance(ann, ast.Subscript):
+        base = ann.value.id if isinstance(ann.value, ast.Name) else None
+        if base == "Optional":
+            return _member_ok(ann.slice)
+        if base == "Union":
+            elts = ann.slice.elts if isinstance(ann.slice, ast.Tuple) else [ann.slice]
+            return all(_member_ok(e) for e in elts)
+    return False
+
+
+def _member_ok(node: ast.AST) -> bool:
+    """A union member: immutable type, or literal ``None``."""
+    if isinstance(node, ast.Constant) and node.value is None:
+        return True
+    return _annotation_is_immutable(node)
+
+
+def immutable_locals(fn: ast.FunctionDef | ast.AsyncFunctionDef) -> set[str]:
+    """Names in ``fn`` provably bound to an immutable scalar.
+
+    Two sources: a parameter's type annotation (``time_limit: float``), and an
+    assignment whose right-hand side can only produce a scalar (``t_start =
+    time.perf_counter()``, ``n_vars = len(...)``, ``_deadline = t_start +
+    time_limit``). Iterated to a fixpoint so derived scalars settle.
+
+    This is the one channel that ends the question rather than bounding it: no
+    callee anywhere, in Python or in Rust, can mutate a ``float``. Before it
+    existed, ``time_limit`` (64 loads) came back UNRESOLVED merely because the
+    call-graph walk hit its depth limit four frames down.
+    """
+    a = fn.args
+    known: set[str] = set()
+    for arg in [*a.posonlyargs, *a.args, *a.kwonlyargs]:
+        if _annotation_is_immutable(arg.annotation):
+            known.add(arg.arg)
+
+    def scalar(expr: ast.AST | None) -> bool:
+        if expr is None:
+            return False
+        if isinstance(expr, ast.Constant):
+            return isinstance(expr.value, (int, float, bool, str, bytes, complex))
+        if isinstance(expr, ast.Name):
+            return expr.id in known
+        if isinstance(expr, ast.Compare):
+            return True  # comparison always yields bool
+        if isinstance(expr, ast.BoolOp):
+            return all(scalar(v) for v in expr.values)
+        if isinstance(expr, ast.UnaryOp):
+            return isinstance(expr.op, ast.Not) or scalar(expr.operand)
+        if isinstance(expr, ast.BinOp):
+            # `a + b` on two lists is a list, so both operands must be scalars.
+            return scalar(expr.left) and scalar(expr.right)
+        if isinstance(expr, ast.IfExp):
+            return scalar(expr.body) and scalar(expr.orelse)
+        if isinstance(expr, ast.Call):
+            func = expr.func
+            name = func.id if isinstance(func, ast.Name) else getattr(func, "attr", None)
+            return name in SCALAR_RETURNING
+        return False
+
+    for _ in range(4):
+        grew = False
+        for node in ast.walk(fn):
+            if not isinstance(node, (ast.Assign, ast.AnnAssign)) or node.value is None:
+                continue
+            if isinstance(node, ast.AnnAssign):
+                targets: list[ast.AST] = [node.target]
+                if _annotation_is_immutable(node.annotation) and isinstance(node.target, ast.Name):
+                    if node.target.id not in known:
+                        known.add(node.target.id)
+                        grew = True
+                    continue
+            else:
+                targets = list(node.targets)
+            if not scalar(node.value):
+                continue
+            for t in targets:
+                if isinstance(t, ast.Name) and t.id not in known:
+                    known.add(t.id)
+                    grew = True
+        if not grew:
+            break
+    return known
 
 
 def _rebound_names(target: ast.AST) -> set[str]:
@@ -807,11 +1096,11 @@ class Analyzer:
                     )
                 )
                 continue
-            if callee_name in NON_MUTATING_BUILTINS:
+            if callee_name in NON_MUTATING_BUILTINS or callee_name in NON_MUTATING_LIBRARY:
                 # Not a mutation and not an open question — do not report it as
                 # unresolved, or the handful of real edges drown in `len()` calls.
                 continue
-            callee = self.index.resolve(callee_name)
+            callee = self.index.resolve(callee_name, node, fn.module)
             if callee is None:
                 n = len(self.index.by_name.get(callee_name, []))
                 unresolved.append(
@@ -907,6 +1196,7 @@ def audit(source: Path, function_name: str) -> dict[str, Any]:
     if solve_model is None:
         raise SystemExit(f"could not resolve a unique top-level {function_name}")
     analyzer.infer_receiver_classes(solve_model)
+    immutables = immutable_locals(solve_model.node)
 
     results: list[dict[str, Any]] = []
     for row in population:
@@ -936,7 +1226,12 @@ def audit(source: Path, function_name: str) -> dict[str, Any]:
         )
         unresolved.extend(trans_unres)
 
-        if direct:
+        # An immutable scalar ends the question outright — but only when the name
+        # is bound at most once, so a rebinding to a non-scalar cannot hide behind
+        # a scalar first binding.
+        if name in immutables and row["stores"] <= 1 and not direct and not meth:
+            verdict = V_IMMUTABLE
+        elif direct:
             verdict = V_DIRECT
         elif meth:
             verdict = V_METHOD
@@ -976,6 +1271,7 @@ def audit(source: Path, function_name: str) -> dict[str, Any]:
         "population_loads": sum(r["loads"] for r in results),
         "max_depth": MAX_DEPTH,
         "counts": dict(counts),
+        "immutable_locals_proved": len(immutables),
         "caught_only_transitively": sorted(
             r["name"] for r in results if r["caught_only_transitively"]
         ),
@@ -1010,7 +1306,7 @@ def to_markdown(rep: dict[str, Any]) -> str:
         f"**Depth limit** {rep['max_depth']}.\n"
     )
     out.append("\n| verdict | names |\n|---|---|\n")
-    for v in (V_DIRECT, V_METHOD, V_TRANSITIVE, V_UNRESOLVED, V_CLEAN):
+    for v in (V_DIRECT, V_METHOD, V_TRANSITIVE, V_UNRESOLVED, V_IMMUTABLE, V_CLEAN):
         out.append(f"| `{v}` | {rep['counts'].get(v, 0)} |\n")
     out.append(
         f"\n**Caught only by transitive callee analysis** "
@@ -1021,6 +1317,14 @@ def to_markdown(rep: dict[str, Any]) -> str:
     out.append("\n## Executed counts (CLAUDE.md §6)\n\n| channel | count |\n|---|---|\n")
     for k, v in rep["executed"].items():
         out.append(f"| {k} | {v} |\n")
+    out.append("\n## Hand-adjudicated residue\n\n")
+    out.append(
+        "Automated verdict stays `UNRESOLVED` for these; the adjudication below is a "
+        "human claim with its evidence, recorded rather than folded into the machine "
+        "result.\n\n| name | adjudication | evidence |\n|---|---|---|\n"
+    )
+    for name, (verdict, why) in sorted(HAND_ADJUDICATED.items()):
+        out.append(f"| `{name}` | {verdict} | {why} |\n")
     out.append("\n## Per-name verdicts\n\n")
     out.append("| name | loads | census | verdict | evidence |\n|---|---|---|---|---|\n")
     for r in rep["rows"]:
@@ -1065,7 +1369,7 @@ def main(argv: list[str] | None = None) -> int:
 
     print(f"population        : {rep['population']} names, {rep['population_loads']} loads")
     print("verdicts:")
-    for v in (V_DIRECT, V_METHOD, V_TRANSITIVE, V_UNRESOLVED, V_CLEAN):
+    for v in (V_DIRECT, V_METHOD, V_TRANSITIVE, V_UNRESOLVED, V_IMMUTABLE, V_CLEAN):
         print(f"  {v:<20}: {rep['counts'].get(v, 0)}")
     print(
         f"caught ONLY transitively: {len(rep['caught_only_transitively'])} "
