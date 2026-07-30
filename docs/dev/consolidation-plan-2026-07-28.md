@@ -2362,9 +2362,35 @@ relaxation handles (`_mc_lp_relaxer`, `_mc_mode`, `_mc_obj_relax_fn`,
 `_mc_nlp_period`), the dual-bound certificate flags (`_gap_certified`,
 `_nonrigorous_fathom`, `_taint_floor_internal`, `_tree_bound_poisoned`,
 `_root_glb_internal`, `_convex_bound_untrusted`, `_root_rigorously_infeasible`,
-`_root_pool_bound`, `_debug_quit`), and the read-only root context (`evaluator`,
-`tree`, `t_start`, `_deadline`, `n_vars`, `int_offsets`, `int_sizes`, `cl_list`,
-`cu_list`, `constraint_bounds`, `opts`).
+`_root_pool_bound`, `_debug_quit`), and the genuinely read-only root context
+(`t_start`, `_deadline`, `n_vars`, `int_offsets`, `int_sizes`, `cl_list`,
+`cu_list`, `constraint_bounds`).
+
+> **Correction, 2026-07-30 (Fable design review).** An earlier revision of this
+> paragraph listed `evaluator`, `tree` and `opts` in that read-only group. **They
+> are not read-only.** The census classifies them CONFIG, but its CONFIG means
+> "the *name* is never rebound", not "the *value* is immutable" — and these three
+> are mutated in place throughout the solve: `tree` is the B&B tree itself
+> (`tree.initialize`, `export_batch`, `import_results`, `inject_incumbent`),
+> `evaluator` writes `_structural_linear_mask_cache`, and `opts` is written **per
+> node inside the loop** (`opts["max_wall_time"] = …`, two sites). Seven of the 84
+> CONFIG crossers are mutable this way and they carry **166 of the group's 775
+> loads (21 %)**, including the two most-loaded names in it (`tree` 54, `evaluator`
+> 53).
+>
+> Consequence for any later increment: a `frozen=True` dataclass "absorbing the
+> CONFIG crossers" would embed the live B&B tree and the per-node deadline dict in
+> a thing named *frozen config*, and because `frozen` only blocks field rebinding
+> the mutation would still work — silently. That is a **false guarantee, worse
+> than leaving them as locals**. Admission to any config holder requires a
+> per-name mutability audit (direct method calls, subscript/attribute assignment,
+> and in-place numpy ops), not the census label. `ndarray.setflags(write=False)`
+> on arrays that do enter is a cheap *true* guarantee.
+>
+> The census classifier itself needs the same fix before it is re-run: count
+> subscript-stores and mutator-method calls as stores, and exclude `except` targets
+> (Python auto-deletes them at handler exit, so they cannot cross a region — 7 of
+> the 80 STATE "crossers" are this artifact).
 
 The certificate cluster is deliberately **not** in this session's increment. It is
 the soundness-critical group — it decides whether a bound may be reported as
