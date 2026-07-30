@@ -79,7 +79,7 @@ net-positive.
 | `DISCOPT_NORM_ATOM` | `0` (off) | python | — | Emit the convex OA of `sqrt(sum t^2)` instead of the loose concave sqrt. |
 | `DISCOPT_OBBT_ITERATE` | `0` (off) | python | #282 | Iterate root OBBT to convergence instead of a fixed round budget. |
 | `DISCOPT_OBBT_TOPK` | `0` (off) | python | T2.5 | Scored top-k per-node OBBT de-gate; awaiting the differential + panel gates. |
-| `DISCOPT_PRESOLVE_SUBSTITUTE` | `0` (off) | python | — | Solve from the presolved representation (substitution + postsolve chain) rather than copying bounds only. |
+| `DISCOPT_PRESOLVE_SUBSTITUTE` | `0` (off) | python | — | Solve from the presolved representation (substitution + postsolve chain) rather than copying bounds only. **Graduation refused, Card 6a 2026-07-30**: the transform is exact (16,800+ executed comparisons, zero failures) … |
 | `DISCOPT_PSD_QFORM` | `0` (off) | python | — | PSD quadratic-form convexity certificate. |
 | `DISCOPT_RELENT_ATOM` | `0` (off) | python | — | Jointly-convex OA of the relative entropy `x*log(x/y)`. |
 | `DISCOPT_ROOT_FIXPOINT_REPOOL` | `0` (off) | python | — | Re-separate the root cut pool after a root-fixpoint bound tightening. |
