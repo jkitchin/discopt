@@ -1973,7 +1973,7 @@ this environment cannot adjudicate.
 | 8 | **Card 5.2 / 5.3** — kernel coverage expansion | **MEASURED 2026-07-30, NOTHING BUILT — and that is the result.** The card as scoped (`infinite_aux_bounds`) is **dead**; this row's own premise was wrong | Three entry experiments, three kills (§6, and the Phase 5.2 block). Rank #2's recoverable wall is **0.0 %, not 19.7 %** — 6 of 9 have an unbounded *presolved root box* (presolve propagation, not the kernel), 3 of 9 have free aux columns from atoms the relaxer refused to envelope. The re-pick (ranks #3+#5, **268.6 s / 13.9 %**, unmaskable by ladder position) is **relaxer-side**: unregistered `power` lifts + factorable-intermediate partial products, plus box-conditional row emission. Closing it means structural registration in `uniform_relax` + `EnvTerm` support, Regime C — a materially larger card than item 8 scoped, named in full in the Phase 5.2 block. **Binding protocol added: staff the census by LADDER POSITION, not by attributed wall** |
 | 9 | **Card 5.2-T** — `term_trilinear` | SCOPED, NOT STARTED (owner) | Not a new envelope family — the producer declines on mere *registration* of a trilinear product. Closing it is a producer-gate change plus a Regime-C panel |
 | 10 | **`DISCOPT_CONVEX_KERNEL`** | cert-clean and quality-clean, graduation NO | Net-positive on a population this environment does not have (Phase 5.4 verdict) — needs the heldout/local corpus |
-| 11 | **Card 4b modules 2–5** → **the state-object prerequisite** | **STARTED AND PARTLY LANDED 2026-07-30; the card itself does NOT close** | The prerequisite is built and proven: `python/discopt/solver/state.py` (4 `slots=True` dataclasses), **21 of 153** cross-region locals threaded, two Regime-N-clean panel runs, an AST-proof migration tool (`thread_solve_model_state.py`) and a both-directions conformance test. Closing it means threading the remaining ~115 — chiefly the `root`→`loop` 68 — then the carve is a separate card. The census also **corrects this row's own premise**: the coupling is 153 names on two boundaries, not "200+ locals", and `setup`/`reformulate` are nearly self-contained (14 / 18 outbound) |
+| 11 | **Card 4b modules 2–5** → **the state-object prerequisite** | **ADVANCED 2026-07-30 on the Fable-corrected recipe; the card still does NOT close** | Instruments first: the census had **three** classifier defects, all fixed and now test-pinned (`discopt_benchmarks/tests/test_locals_census.py`), and a new **transitive mutability audit** (`solve_model_config_mutability_audit.py`, `reports/solve_model_config_mutability_audit.md`) answers the question the design review said nobody had asked. Of the 85-name config-crosser population, **11 are mutated** (the review named 7) and **1 — `evaluator` — is visible only through a callee**. `RootConfig` (frozen, slots) then admits **19** audit-cleared parameters, 99 sites, AST-proved. Threaded total **40 of 153**. Closing it means the remaining cross-region names — chiefly the `root`→`loop` 65 — then the carve is a separate card |
 | 12 | **Phase 7** — islands, refusal tests, deferred tail | not started, unblocked, cheap | Support-tier docstrings on the six zero-inbound packages; one test per load-bearing refusal (`multistage.py:47`, `gdpopt_loa.py:628`); file the SOTA long-tail entry experiments as issues |
 | 13 | **heldout50 panel** | never run here | Local-only corpus. Every card that names it has recorded "SKIPPED — local only" |
 | 14 | **28 parked flags** | default-OFF, each with its own record | Each needs its own Regime-C graduation panel; several (this one, `DISCOPT_CUT_INHERIT`, `DISCOPT_CONVEX_KERNEL`, `DISCOPT_FBBT_SEED`) have measured refusals recorded and should not be re-proposed without new evidence |
@@ -2246,6 +2246,188 @@ largest genuinely-recoverable block (ranks #3 + #5, 12 instances, 268.6 s / 13.9
 now precisely characterized and is a **relaxer + kernel** card, and Card 5.2-T (rank
 #1, 7 instances / 6.2 %) remains the only producer-side entry in the top five. The
 ledger's item-8 row is updated to say exactly that.
+
+### 2026-07-30 — Open-ledger item 11, Fable-corrected recipe: the instruments were wrong in three ways, and the mutability question had never been asked
+
+This session ran the corrected recipe. Its first two tasks were entirely about the
+*instruments*, because the design review had shown that the number the plan was
+designing against was produced by a classifier that did not measure what its label
+claimed. Three findings below **correct the review itself**, which asked for its
+corrections to be verified rather than assumed.
+
+**Finding 1 — the census had three defects, not two.** The review named two. A
+third was found while fixing them and it is the one that produced the headline
+number: **the JSON's `crosses_regions` field and the printed crosser count used
+two different predicates**, disagreeing by 11 names on identical data. The field
+compared an alphabetically `sorted()` set-union against a region-ordered list, so
+it also flagged never-stored *parameters* as crossing. That is where the review's
+**84** came from — the printed count on the same artifact says **73**. Both now
+call one `crosses()` helper, and parameters are reported in their own column
+instead of being smuggled into the crossing count.
+
+**Finding 2 — the `except`-target artifact is 4, not 7.** The review's direction is
+right (PEP 3110 deletes the target at handler exit, so such a name cannot cross a
+region) but the magnitude is not. Measured under **both** predicates on **both**
+trees, the artifact is the same four names every time: `_dep_exc`, `_e`, `e`,
+`exc`. 29 names are bound only as `except` targets; only those four ever looked
+like crossers.
+
+**Finding 3 — the census was stale by one commit's worth of threading**, as the
+review said. Regenerated on the current tree. The corrected classifier moves
+**CONFIG 206 → 166** (−28 to a new `MUTATED` class, −12 to `NEEDS_AUDIT`),
+**SINGLE_USE 104 → 84** and **STATE 386 → 375** (−29 to `EXCEPT_TARGET`), and
+crossers **136 → 132**. The arithmetic closes exactly: zero names changed load
+count, and all 29 store-count changes are `except`-form.
+
+`CONFIG` now means what the plan always assumed it meant: never rebound, no
+syntactic mutation, **and no method call at all**. Anything with a method the AST
+cannot adjudicate becomes `NEEDS_AUDIT` — the census refuses to assert immutability
+it cannot see, which is the failure it committed the first time.
+
+### 2026-07-30 — Item 11 Task 2: the transitive mutability audit — **the review's premise CONFIRMED and its count RAISED; one name was invisible to every call site**
+
+**Hypothesis (the review's).** The census label is not evidence of immutability;
+admission to a frozen holder requires a per-name audit including **transitive
+mutation through callees**, which nobody had checked —
+"`cl_list`/`cu_list`/`int_offsets` looked read-only at every call site but no
+callee bodies were read".
+
+**Kill criterion, stated before the measurement (the honest-outcome clause).** If
+the audit showed the config group far more entangled than seven names — 25 or more
+mutated in place — then `RootConfig` is the wrong vehicle, and the session records
+the falsification and stops rather than building a holder that lies.
+
+**Instrument.** `discopt_benchmarks/scripts/solve_model_config_mutability_audit.py`
+over four channels: syntactic mutation inside `solve_model`; methods resolved
+through the receiver's inferred class or a Rust `fn m(&mut self, …)` signature;
+argument passing to a callee that mutates the parameter (depth 4, cycle-safe); and
+a proof from the *type* that no mutation is possible. Artifacts
+`reports/solve_model_config_mutability_audit.{json,md}`; tests
+`discopt_benchmarks/tests/test_config_mutability_audit.py`.
+
+**Result.** Population 85 (the review's "the 84", reproduced with the *pre-fix*
+predicate on purpose so the audit answers for every name the review reasoned
+about), 902 loads.
+
+| verdict | count |
+|---|---|
+| `MUTATED_DIRECT` | 8 |
+| `MUTATED_METHOD` | 2 |
+| `MUTATED_TRANSITIVE` | 1 |
+| `IMMUTABLE_TYPE` | 48 |
+| `CLEAN` | 16 |
+| `UNRESOLVED` | 10 |
+
+**11 mutated, not 7.** All seven the review named by hand are caught, plus the four
+state holders item 11 had already threaded (`_timers`, `_heur`, `_lazy`,
+`_pn_obbt`) — correctly mutable, and absent from the review's list.
+
+**One name is caught ONLY by transitive analysis: `evaluator`** (53 loads).
+`solve_model` calls nothing on it but `.evaluate_objective()`; the write is
+`evaluator._structural_linear_mask_cache = …` at `solver/__init__.py:1566`, inside
+a module-level helper the evaluator is *passed to*. No amount of call-site
+inspection would have found it. This is the review's point, demonstrated.
+
+**`cl_list` and `cu_list` come back CLEAN — with evidence this time.** Their only
+callee is `_check_constraint_feasibility`, which does `np.array(cl_list)`, a copy.
+Resolving that needed Python's own name rule (a same-module `def` wins unless the
+module imports the name unaliased): **both** definitions in the tree accept four
+positional arguments, so arity cannot separate them. `int_offsets`/`int_sizes`
+stay `UNRESOLVED` in the data and are hand-adjudicated clean in the report — PyO3
+takes `Vec<usize>` **by value** (`crates/discopt-python/src/bnb_bindings.rs:36-37`),
+so the Python lists are copied, not aliased. `HAND_ADJUDICATED` deliberately does
+**not** override the machine verdict, and a test enforces that: folding a human
+claim into a measurement leaves the next reader unable to tell which is which.
+
+**Verdict: the review's premise is CONFIRMED and its count raised, and the
+honest-outcome clause does NOT fire.** 11 of 85 is nowhere near the 25 that would
+have killed `RootConfig`; 64 of 85 are cleared, 48 of them by a proof from the type
+that no callee anywhere can mutate a `float`. The holder is the right vehicle,
+provided its membership is drawn from the audit rather than from the census label.
+
+**Three defects fixed inside the audit while building it**, recorded because each
+produced a *confident wrong answer* rather than an error, and each is now pinned
+by a test (CLAUDE.md §6–§7):
+
+1. `HeuristicGovernor.record` mutates through `st = self._get(source); st.calls +=
+   1`. A probe looking only for `self.x = …` cleared a governor that throttles the
+   per-node primal heuristics.
+2. A first taint rule propagated through *any* expression mentioning a name, so
+   `gap_tolerance` — a `float` — came back mutated, along with 17 others. Restricted
+   to alias-forming syntax.
+3. The next rule propagated through `d[k] = tainted`, which is the value escaping
+   *into* `d`, not `d` aliasing it. Restricted to rebinding targets.
+
+Conservatism is asymmetric by design: every unresolved edge degrades toward "not
+clean". An over-broad `MUTATED` costs a name a seat in `RootConfig`; an over-broad
+`CLEAN` mints the false guarantee the audit exists to prevent.
+
+### 2026-07-30 — Item 11 Task 3: `RootConfig`, and why it is a smaller object than the recipe expected
+
+**What landed.** `RootConfig` in `python/discopt/solver/state.py` — `frozen=True`,
+`slots=True` — holding **19** of `solve_model`'s parameters, **99** reference sites
+rewritten. Threaded total across item 11 is now **40 of 153**.
+
+**Membership is mechanical, not editorial.** A field is admitted only if the Task-2
+audit returns `IMMUTABLE_TYPE` or `CLEAN` for it. Every admitted field is a
+`str`/`int`/`bool`/`Optional` of one, so the freeze is a **true** guarantee:
+`frozen=True` blocks field rebinding and nothing more, and these types offer no
+in-place mutation to block. `test_root_config_is_frozen_and_holds_only_immutable_values`
+re-derives that rather than trusting the docstring, and says explicitly that an
+array admitted later needs `setflags(write=False)`.
+
+**Three things stay out on purpose.**
+
+* **The 11 mutable names.** They stay loose locals or live on the mutable holders.
+  They are the highest-load names in the group, and putting the live B&B `tree`
+  behind a type named *config* is the exact mislabel this class exists to avoid.
+* **`root_cut_max`, `root_cut_rounds`, `solver`** — excluded *although the audit
+  clears them*, because each has a derived twin (`_root_cut_max`, …) computed later
+  in the function. Carrying both is a shadow pair that drifts the first time one
+  side is updated and the other is not. `test_root_config_admits_no_shadow_pair`
+  enforces the exclusion by name.
+* **Every name read inside the innermost node loop.** This is a deliberate
+  experiment design and it is the reason the tranche is 19 rather than 53. Ledger
+  row 15b says a `LOAD_FAST` → `LOAD_ATTR` slowdown could move a node count with no
+  logic change, because the solver reads a clock at 78 Python sites to decide how
+  much work to do. Confining this tranche to `setup`/`reformulate`/`root`/`results`
+  means the gate below tests the *holder mechanism* with the loop-cost variable held
+  fixed. The loop-reading names — `time_limit` (64 loads), `t_start` (40),
+  `_deadline` (24) — are the next tranche, and are where 15b must be **watched**,
+  not assumed away. The recipe's own mitigation (each carved region unpacks the
+  config to locals at entry) is only available once regions are actually carved, so
+  it cannot be applied yet.
+
+**A new invariant, because the old one does not apply.** Every group threaded so
+far was a *computed local*, and the conformance test was "no longer bound in
+`solve_model`'s own scope". These are **parameters** — they stay bound by
+definition, so that test would pass vacuously. `test_root_config_parameters_are_read_only_at_construction`
+counts bare `Load` references to each of the 19 in `solve_model`'s own scope and
+requires **exactly one**, inside the `RootConfig(...)` construction. That is the
+property that actually stops a raw parameter and a resolved twin from becoming two
+sources of truth, and it is a strictly stronger guarantee than the one it replaces.
+
+**Proof of purity, including the part the tool cannot do.** The 99 substitutions
+were made by `thread_solve_model_state.py` (126 executed AST comparisons, 125
+sibling definitions proved identical). The tool **cannot** insert the construction,
+because it would rewrite that statement's own right-hand side into
+`RootConfig(gdp_method=_cfg.gdp_method, …)`. So the construction and the import
+were added by hand *after* the tool ran — and the hand edits are **proved
+separately** rather than asserted, which matters because "the tool proved it" would
+otherwise be a claim about a file that no longer exists:
+
+| check | result |
+|---|---|
+| top-level definitions compared | 195; only the `ImportFrom` and `solve_model` differ |
+| import delta | exactly `+RootConfig`, nothing removed |
+| `solve_model` delta | exactly **one** inserted statement at index 1 |
+| other statements | **323**, all AST-identical |
+| construction | keyword-only, 19 pairs, each proved `field=<identically-named parameter>` so a reorder cannot swap two values |
+| executed assertions | **217** |
+
+A later `ruff format` pass (needed because `rlt` → `_cfg.rlt` overflowed the
+100-char limit at three sites) was re-checked against the same proof afterwards and
+left the delta at exactly the one inserted statement.
 
 ### 2026-07-30 — Open-ledger item 11 close-out: what was run on the final tree
 
