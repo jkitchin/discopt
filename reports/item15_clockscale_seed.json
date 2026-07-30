@@ -1,0 +1,537 @@
+{
+ "arm": "clockscale",
+ "budget": 45.0,
+ "alphas": [
+  1.0,
+  1.25
+ ],
+ "rows": [
+  {
+   "instance": "gear2",
+   "budget": 45.0,
+   "force_obbt": null,
+   "force_ils": null,
+   "alpha": 1.0,
+   "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+   "rust_so": "/home/user/discopt/python/discopt/_rust.cpython-311-x86_64-linux-gnu.so",
+   "marker": "subtol_crossings_repaired",
+   "wall": 6.2545610509987455,
+   "status": "optimal",
+   "node_count": 3,
+   "objective": 1.155529714729433e-07,
+   "bound": -5e-324,
+   "root_bound": -5e-324,
+   "root_time": 5.873294852000072,
+   "gap_certified": true,
+   "obbt_calls": [
+    {
+     "budget_handed": 4.499995599000613,
+     "budget_original": 4.499995599000613,
+     "consumed": 0.048826293000274745,
+     "deadline_hit": false,
+     "n_tightened": 0,
+     "infeasible": false
+    },
+    {
+     "budget_handed": 4.999995752999894,
+     "budget_original": 4.999995752999894,
+     "consumed": 0.03213304199925915,
+     "deadline_hit": false,
+     "n_tightened": 0,
+     "infeasible": false
+    }
+   ],
+   "obbt_call_count": 2,
+   "obbt_deadline_hits": 0,
+   "ils_calls": [
+    {
+     "budget_original": 5.0,
+     "budget_handed": 5.0,
+     "consumed": 5.005808941000396,
+     "found": true,
+     "objective": 1.155529714729433e-07
+    }
+   ],
+   "ils_call_count": 1
+  },
+  {
+   "instance": "gear2",
+   "budget": 45.0,
+   "force_obbt": null,
+   "force_ils": null,
+   "alpha": 1.25,
+   "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+   "rust_so": "/home/user/discopt/python/discopt/_rust.cpython-311-x86_64-linux-gnu.so",
+   "marker": "subtol_crossings_repaired",
+   "wall": 5.121345256000495,
+   "status": "optimal",
+   "node_count": 3,
+   "objective": 1.155529714729433e-07,
+   "bound": -5e-324,
+   "root_bound": -5e-324,
+   "root_time": 5.973957969999901,
+   "gap_certified": true,
+   "obbt_calls": [
+    {
+     "budget_handed": 4.499994820000211,
+     "budget_original": 4.499994820000211,
+     "consumed": 0.057374097499632626,
+     "deadline_hit": false,
+     "n_tightened": 0,
+     "infeasible": false
+    },
+    {
+     "budget_handed": 4.9999941212481644,
+     "budget_original": 4.9999941212481644,
+     "consumed": 0.04444599374801328,
+     "deadline_hit": false,
+     "n_tightened": 0,
+     "infeasible": false
+    }
+   ],
+   "obbt_call_count": 2,
+   "obbt_deadline_hits": 0,
+   "ils_calls": [
+    {
+     "budget_original": 5.0,
+     "budget_handed": 5.0,
+     "consumed": 5.007448378750269,
+     "found": true,
+     "objective": 1.155529714729433e-07
+    }
+   ],
+   "ils_call_count": 1
+  },
+  {
+   "instance": "ex1266",
+   "budget": 45.0,
+   "force_obbt": null,
+   "force_ils": null,
+   "alpha": 1.0,
+   "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+   "rust_so": "/home/user/discopt/python/discopt/_rust.cpython-311-x86_64-linux-gnu.so",
+   "marker": "subtol_crossings_repaired",
+   "wall": 7.0424630630004685,
+   "status": "optimal",
+   "node_count": 6005,
+   "objective": 16.3,
+   "bound": 16.3,
+   "root_bound": 16.116666666666667,
+   "root_time": 0.033068114000343485,
+   "gap_certified": true,
+   "obbt_calls": [],
+   "obbt_call_count": 0,
+   "obbt_deadline_hits": 0,
+   "ils_calls": [],
+   "ils_call_count": 0
+  },
+  {
+   "instance": "ex1266",
+   "budget": 45.0,
+   "force_obbt": null,
+   "force_ils": null,
+   "alpha": 1.25,
+   "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+   "rust_so": "/home/user/discopt/python/discopt/_rust.cpython-311-x86_64-linux-gnu.so",
+   "marker": "subtol_crossings_repaired",
+   "wall": 6.871435558001394,
+   "status": "optimal",
+   "node_count": 6005,
+   "objective": 16.3,
+   "bound": 16.3,
+   "root_bound": 16.116666666666667,
+   "root_time": 0.04169994375115493,
+   "gap_certified": true,
+   "obbt_calls": [],
+   "obbt_call_count": 0,
+   "obbt_deadline_hits": 0,
+   "ils_calls": [],
+   "ils_call_count": 0
+  },
+  {
+   "instance": "gear",
+   "budget": 45.0,
+   "force_obbt": null,
+   "force_ils": null,
+   "alpha": 1.0,
+   "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+   "rust_so": "/home/user/discopt/python/discopt/_rust.cpython-311-x86_64-linux-gnu.so",
+   "marker": "subtol_crossings_repaired",
+   "wall": 0.8718113569993875,
+   "status": "optimal",
+   "node_count": 15,
+   "objective": 2.860864189286471e-07,
+   "bound": -5e-324,
+   "root_bound": -5e-324,
+   "root_time": 0.6424603779996687,
+   "gap_certified": true,
+   "obbt_calls": [
+    {
+     "budget_handed": 4.4999958890002745,
+     "budget_original": 4.4999958890002745,
+     "consumed": 0.021282511999743292,
+     "deadline_hit": false,
+     "n_tightened": 0,
+     "infeasible": false
+    },
+    {
+     "budget_handed": 4.999972347999574,
+     "budget_original": 4.999972347999574,
+     "consumed": 0.008395801000006031,
+     "deadline_hit": false,
+     "n_tightened": 0,
+     "infeasible": false
+    },
+    {
+     "budget_handed": 4.999995312000465,
+     "budget_original": 4.999995312000465,
+     "consumed": 0.00915718899886997,
+     "deadline_hit": false,
+     "n_tightened": 0,
+     "infeasible": false
+    }
+   ],
+   "obbt_call_count": 3,
+   "obbt_deadline_hits": 0,
+   "ils_calls": [
+    {
+     "budget_original": 5.0,
+     "budget_handed": 5.0,
+     "consumed": 3.79169996449491e-05,
+     "found": false,
+     "objective": null
+    }
+   ],
+   "ils_call_count": 1
+  },
+  {
+   "instance": "gear",
+   "budget": 45.0,
+   "force_obbt": null,
+   "force_ils": null,
+   "alpha": 1.25,
+   "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+   "rust_so": "/home/user/discopt/python/discopt/_rust.cpython-311-x86_64-linux-gnu.so",
+   "marker": "subtol_crossings_repaired",
+   "wall": 0.8853548420011066,
+   "status": "optimal",
+   "node_count": 15,
+   "objective": 2.860864189286471e-07,
+   "bound": -5e-324,
+   "root_bound": -5e-324,
+   "root_time": 0.8067494262504624,
+   "gap_certified": true,
+   "obbt_calls": [
+    {
+     "budget_handed": 4.499994573750882,
+     "budget_original": 4.499994573750882,
+     "consumed": 0.023671540000577806,
+     "deadline_hit": false,
+     "n_tightened": 0,
+     "infeasible": false
+    },
+    {
+     "budget_handed": 4.9999947462492855,
+     "budget_original": 4.9999947462492855,
+     "consumed": 0.010843854999620817,
+     "deadline_hit": false,
+     "n_tightened": 0,
+     "infeasible": false
+    },
+    {
+     "budget_handed": 4.999992542499967,
+     "budget_original": 4.999992542499967,
+     "consumed": 0.014023836250999011,
+     "deadline_hit": false,
+     "n_tightened": 0,
+     "infeasible": false
+    }
+   ],
+   "obbt_call_count": 3,
+   "obbt_deadline_hits": 0,
+   "ils_calls": [
+    {
+     "budget_original": 5.0,
+     "budget_handed": 5.0,
+     "consumed": 5.447999865282327e-05,
+     "found": false,
+     "objective": null
+    }
+   ],
+   "ils_call_count": 1
+  },
+  {
+   "instance": "gear3",
+   "budget": 45.0,
+   "force_obbt": null,
+   "force_ils": null,
+   "alpha": 1.0,
+   "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+   "rust_so": "/home/user/discopt/python/discopt/_rust.cpython-311-x86_64-linux-gnu.so",
+   "marker": "subtol_crossings_repaired",
+   "wall": 1.358416244000182,
+   "status": "optimal",
+   "node_count": 3,
+   "objective": 1.827380235298078e-08,
+   "bound": -5e-324,
+   "root_bound": -5e-324,
+   "root_time": 1.0358478010002727,
+   "gap_certified": true,
+   "obbt_calls": [
+    {
+     "budget_handed": 4.499996092999936,
+     "budget_original": 4.499996092999936,
+     "consumed": 0.02611410200006503,
+     "deadline_hit": false,
+     "n_tightened": 0,
+     "infeasible": false
+    },
+    {
+     "budget_handed": 4.999995743000909,
+     "budget_original": 4.999995743000909,
+     "consumed": 0.014103629000601359,
+     "deadline_hit": false,
+     "n_tightened": 0,
+     "infeasible": false
+    }
+   ],
+   "obbt_call_count": 2,
+   "obbt_deadline_hits": 0,
+   "ils_calls": [
+    {
+     "budget_original": 5.0,
+     "budget_handed": 5.0,
+     "consumed": 0.6799790349996329,
+     "found": true,
+     "objective": 1.827380235298078e-08
+    }
+   ],
+   "ils_call_count": 1
+  },
+  {
+   "instance": "gear3",
+   "budget": 45.0,
+   "force_obbt": null,
+   "force_ils": null,
+   "alpha": 1.25,
+   "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+   "rust_so": "/home/user/discopt/python/discopt/_rust.cpython-311-x86_64-linux-gnu.so",
+   "marker": "subtol_crossings_repaired",
+   "wall": 1.2611456260001432,
+   "status": "optimal",
+   "node_count": 3,
+   "objective": 1.827380235298078e-08,
+   "bound": -5e-324,
+   "root_bound": -5e-324,
+   "root_time": 1.1814964049990522,
+   "gap_certified": true,
+   "obbt_calls": [
+    {
+     "budget_handed": 4.49999483125066,
+     "budget_original": 4.49999483125066,
+     "consumed": 0.03008109374968626,
+     "deadline_hit": false,
+     "n_tightened": 0,
+     "infeasible": false
+    },
+    {
+     "budget_handed": 4.999995119998857,
+     "budget_original": 4.999995119998857,
+     "consumed": 0.017669728749751812,
+     "deadline_hit": false,
+     "n_tightened": 0,
+     "infeasible": false
+    }
+   ],
+   "obbt_call_count": 2,
+   "obbt_deadline_hits": 0,
+   "ils_calls": [
+    {
+     "budget_original": 5.0,
+     "budget_handed": 5.0,
+     "consumed": 0.7585582262508979,
+     "found": true,
+     "objective": 1.827380235298078e-08
+    }
+   ],
+   "ils_call_count": 1
+  },
+  {
+   "instance": "gear4",
+   "budget": 45.0,
+   "force_obbt": null,
+   "force_ils": null,
+   "alpha": 1.0,
+   "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+   "rust_so": "/home/user/discopt/python/discopt/_rust.cpython-311-x86_64-linux-gnu.so",
+   "marker": "subtol_crossings_repaired",
+   "wall": 1.621127845999581,
+   "status": "optimal",
+   "node_count": 3,
+   "objective": 1.6434284641271995,
+   "bound": 1.643427471831146,
+   "root_bound": 1.643427471831146,
+   "root_time": 1.2747437350008113,
+   "gap_certified": true,
+   "obbt_calls": [
+    {
+     "budget_handed": 4.499995480000507,
+     "budget_original": 4.499995480000507,
+     "consumed": 0.0024526870001864154,
+     "deadline_hit": false,
+     "n_tightened": 0,
+     "infeasible": false
+    },
+    {
+     "budget_handed": 4.999994970001353,
+     "budget_original": 4.999994970001353,
+     "consumed": 0.02866434499992465,
+     "deadline_hit": false,
+     "n_tightened": 10,
+     "infeasible": false
+    }
+   ],
+   "obbt_call_count": 2,
+   "obbt_deadline_hits": 0,
+   "ils_calls": [
+    {
+     "budget_original": 5.0,
+     "budget_handed": 5.0,
+     "consumed": 0.8240496420003183,
+     "found": true,
+     "objective": 45.360000392876316
+    }
+   ],
+   "ils_call_count": 1
+  },
+  {
+   "instance": "gear4",
+   "budget": 45.0,
+   "force_obbt": null,
+   "force_ils": null,
+   "alpha": 1.25,
+   "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+   "rust_so": "/home/user/discopt/python/discopt/_rust.cpython-311-x86_64-linux-gnu.so",
+   "marker": "subtol_crossings_repaired",
+   "wall": 1.6885961830012093,
+   "status": "optimal",
+   "node_count": 3,
+   "objective": 1.6434284641271995,
+   "bound": 1.643427471831146,
+   "root_bound": 1.643427471831146,
+   "root_time": 1.649174922498787,
+   "gap_certified": true,
+   "obbt_calls": [
+    {
+     "budget_handed": 4.4999943562488625,
+     "budget_original": 4.4999943562488625,
+     "consumed": 0.003203017500709393,
+     "deadline_hit": false,
+     "n_tightened": 0,
+     "infeasible": false
+    },
+    {
+     "budget_handed": 4.999993711251591,
+     "budget_original": 4.999993711251591,
+     "consumed": 0.047514796253381064,
+     "deadline_hit": false,
+     "n_tightened": 10,
+     "infeasible": false
+    }
+   ],
+   "obbt_call_count": 2,
+   "obbt_deadline_hits": 0,
+   "ils_calls": [
+    {
+     "budget_original": 5.0,
+     "budget_handed": 5.0,
+     "consumed": 1.0370606475007662,
+     "found": true,
+     "objective": 45.360000392876316
+    }
+   ],
+   "ils_call_count": 1
+  }
+ ],
+ "verdict": {
+  "gear2": {
+   "node_counts": {
+    "1.0": 3,
+    "1.25": 3
+   },
+   "statuses": {
+    "1.0": "optimal",
+    "1.25": "optimal"
+   },
+   "objectives": {
+    "1.0": 1.155529714729433e-07,
+    "1.25": 1.155529714729433e-07
+   },
+   "moved": false
+  },
+  "ex1266": {
+   "node_counts": {
+    "1.0": 6005,
+    "1.25": 6005
+   },
+   "statuses": {
+    "1.0": "optimal",
+    "1.25": "optimal"
+   },
+   "objectives": {
+    "1.0": 16.3,
+    "1.25": 16.3
+   },
+   "moved": false
+  },
+  "gear": {
+   "node_counts": {
+    "1.0": 15,
+    "1.25": 15
+   },
+   "statuses": {
+    "1.0": "optimal",
+    "1.25": "optimal"
+   },
+   "objectives": {
+    "1.0": 2.860864189286471e-07,
+    "1.25": 2.860864189286471e-07
+   },
+   "moved": false
+  },
+  "gear3": {
+   "node_counts": {
+    "1.0": 3,
+    "1.25": 3
+   },
+   "statuses": {
+    "1.0": "optimal",
+    "1.25": "optimal"
+   },
+   "objectives": {
+    "1.0": 1.827380235298078e-08,
+    "1.25": 1.827380235298078e-08
+   },
+   "moved": false
+  },
+  "gear4": {
+   "node_counts": {
+    "1.0": 3,
+    "1.25": 3
+   },
+   "statuses": {
+    "1.0": "optimal",
+    "1.25": "optimal"
+   },
+   "objectives": {
+    "1.0": 1.6434284641271995,
+    "1.25": 1.6434284641271995
+   },
+   "moved": false
+  }
+ },
+ "instances": 5,
+ "comparisons": 5,
+ "moved": 0,
+ "load1_at_write": 1.48046875
+}

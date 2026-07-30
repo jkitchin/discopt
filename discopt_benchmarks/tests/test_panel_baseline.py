@@ -30,9 +30,15 @@ if str(_BENCH_ROOT) not in sys.path:
     sys.path.insert(0, str(_BENCH_ROOT))
 
 from scripts.panel_baseline import (  # noqa: E402
+    _V_CONFIRMED,
+    _V_NONDET,
+    _V_TRANSIENT,
+    _adjudicate,
     _annotate,
+    _compare_hard,
     _obj_match,
     _resolve_subset,
+    _signature,
     corpus_instances,
 )
 
@@ -41,6 +47,11 @@ from scripts.panel_baseline import (  # noqa: E402
 # that reaches `optimal` deterministically would do.
 _FAST_INSTANCE = "alan"
 _BUDGET = "30"
+
+# The end-to-end arms run under pytest, which is itself load. The load gate
+# (item 15) is exercised by its own test; everywhere else it is waived explicitly
+# so a busy CI box cannot turn these assertions into a REFUSED exit.
+_ALLOW_LOAD = "--allow-load"
 
 
 class _FakeOracle:
@@ -117,8 +128,13 @@ def test_annotate_excludes_non_reproducible_rows_with_a_stated_reason(row, needl
 @pytest.mark.unit
 def test_root_gap_vs_reference_is_none_without_an_oracle():
     """Coverage is never faked: no oracle => no reference-relative root gap."""
-    row = {"instance": "x", "status": "optimal", "gap_certified": True, "wall": 1.0,
-           "root_bound": 9.0}
+    row = {
+        "instance": "x",
+        "status": "optimal",
+        "gap_certified": True,
+        "wall": 1.0,
+        "root_bound": 9.0,
+    }
     out = _annotate(row, budget=60.0, oracle=lambda _n: None)
     assert out["root_gap_vs_reference"] is None
     assert out["reference_optimum"] is None
@@ -154,7 +170,7 @@ def test_check_detects_a_perturbed_node_count(tmp_path: Path):
          drift" is a no-op that reads as a pass.
     """
     good = tmp_path / "baseline.json"
-    gen = _run(["--budget", _BUDGET, "--subset", _FAST_INSTANCE, "--out", str(good)])
+    gen = _run(["--budget", _BUDGET, "--subset", _FAST_INSTANCE, "--out", str(good), _ALLOW_LOAD])
     assert gen.returncode == 0, f"baseline generation failed:\n{gen.stdout[-3000:]}\n{gen.stderr}"
 
     base = json.loads(good.read_text())
@@ -166,7 +182,7 @@ def test_check_detects_a_perturbed_node_count(tmp_path: Path):
     )
 
     # ---- arm 1: clean re-check passes, with comparisons actually executed ----
-    clean = _run(["--check", str(good)])
+    clean = _run(["--check", str(good), _ALLOW_LOAD])
     assert clean.returncode == 0, f"clean --check failed:\n{clean.stdout[-3000:]}"
     assert _comparison_count(clean.stdout) > 0
     assert "PASS: no node-count" in clean.stdout
@@ -176,7 +192,7 @@ def test_check_detects_a_perturbed_node_count(tmp_path: Path):
     base["rows"][0]["node_count"] = int(row["node_count"]) + 1
     bad.write_text(json.dumps(base))
 
-    perturbed = _run(["--check", str(bad)])
+    perturbed = _run(["--check", str(bad), _ALLOW_LOAD])
     assert perturbed.returncode != 0, (
         "--check ACCEPTED a baseline whose node_count was perturbed by 1. The Regime-N "
         f"gate is a no-op.\n{perturbed.stdout[-3000:]}"
@@ -186,6 +202,16 @@ def test_check_detects_a_perturbed_node_count(tmp_path: Path):
     assert "NODE COUNT drift" in perturbed.stdout, (
         f"--check failed for some reason OTHER than the injected node-count drift:\n"
         f"{perturbed.stdout[-3000:]}"
+    )
+    # Item 15: the hardening must not be an escape hatch. A deterministic
+    # one-node perturbation has to survive replicate-and-agree as CONFIRMED
+    # drift, not be excused as environmental noise.
+    assert _V_CONFIRMED in perturbed.stdout, (
+        "the injected drift was NOT adjudicated as CONFIRMED — the replicate rule is "
+        f"masking real drift, which plan §0.4 forbids:\n{perturbed.stdout[-4000:]}"
+    )
+    assert f"{_V_TRANSIENT} (" not in perturbed.stdout, (
+        f"a deterministic perturbation was excused as TRANSIENT:\n{perturbed.stdout[-4000:]}"
     )
 
 
@@ -197,7 +223,7 @@ def test_check_refuses_a_baseline_with_no_comparable_rows(tmp_path: Path):
     non-comparable, which is exactly what an all-timeout panel would look like.
     """
     good = tmp_path / "baseline.json"
-    gen = _run(["--budget", _BUDGET, "--subset", _FAST_INSTANCE, "--out", str(good)])
+    gen = _run(["--budget", _BUDGET, "--subset", _FAST_INSTANCE, "--out", str(good), _ALLOW_LOAD])
     assert gen.returncode == 0, gen.stdout[-3000:]
 
     base = json.loads(good.read_text())
@@ -206,7 +232,142 @@ def test_check_refuses_a_baseline_with_no_comparable_rows(tmp_path: Path):
     empty = tmp_path / "baseline_nocmp.json"
     empty.write_text(json.dumps(base))
 
-    res = _run(["--check", str(empty)])
+    res = _run(["--check", str(empty), _ALLOW_LOAD])
     assert res.returncode != 0, f"a zero-comparison check reported success:\n{res.stdout[-3000:]}"
     assert _comparison_count(res.stdout) == 0
     assert "ZERO comparisons executed" in res.stdout
+
+
+# --------------------------------------------------------------------------- #
+# Open-ledger item 15: replicate-and-agree adjudication.                       #
+#                                                                             #
+# The panel's own defect was that a real drift and a container flake produced  #
+# identical output. These arms pin the three verdicts as PURE logic — no solve #
+# — so the classification can be reasoned about without a 36-minute panel, and #
+# so the "does not weaken the gate" property is asserted rather than argued.   #
+# --------------------------------------------------------------------------- #
+def _row(
+    node_count: int, objective: float = 1.0, status: str = "optimal", certified: bool = True
+) -> dict:
+    return {
+        "instance": "x",
+        "status": status,
+        "node_count": node_count,
+        "objective": objective,
+        "gap_certified": certified,
+        "wall": 1.0,
+        "comparable": True,
+    }
+
+
+@pytest.mark.unit
+def test_compare_hard_executes_three_comparisons_per_row():
+    """The executed count is a fact returned by the comparator, not an inference."""
+    viol, n = _compare_hard("x", _row(10), _row(10))
+    assert viol == []
+    assert n == 3, "a comparable row must contribute status + node_count + objective"
+
+
+@pytest.mark.unit
+def test_compare_hard_catches_each_gated_quantity():
+    assert any("NODE COUNT" in v for v in _compare_hard("x", _row(10), _row(11))[0])
+    assert any("CERTIFIED OBJECTIVE" in v for v in _compare_hard("x", _row(10), _row(10, 2.0))[0])
+    assert any(
+        "STATUS drift" in v for v in _compare_hard("x", _row(10), _row(10, status="time_limit"))[0]
+    )
+    lost = _compare_hard("x", _row(10), _row(10, certified=False))[0]
+    assert any("CERTIFICATION LOST" in v for v in lost)
+
+
+@pytest.mark.unit
+def test_adjudicate_confirms_deterministic_drift():
+    """THE property that makes the hardening legal (plan §0.4).
+
+    A real bound-neutrality violation is deterministic: the changed code runs on
+    every replicate. Unanimous replicates that disagree with the baseline must
+    FAIL, never be excused.
+    """
+    adj = _adjudicate("x", _row(10), [_row(11), _row(11), _row(11)])
+    assert adj["verdict"] == _V_CONFIRMED
+    assert adj["comparisons"] == 9
+    assert any("NODE COUNT" in v for v in adj["violations"])
+
+
+@pytest.mark.unit
+def test_adjudicate_calls_a_reproducing_row_transient():
+    adj = _adjudicate("x", _row(10), [_row(10), _row(10), _row(10)])
+    assert adj["verdict"] == _V_TRANSIENT
+    assert adj["comparisons"] == 9
+    assert adj["violations"] == []
+
+
+@pytest.mark.unit
+def test_adjudicate_flags_self_disagreement_as_nondeterministic():
+    """A row that will not reproduce ITSELF must fail under its own label.
+
+    Averaging it into a pass is precisely the paper-over this hardening exists to
+    avoid: it would hide solver-level nondeterminism behind a replicate rule.
+    """
+    adj = _adjudicate("x", _row(10), [_row(10), _row(91), _row(10)])
+    assert adj["verdict"] == _V_NONDET
+    assert "does not reproduce ITSELF" in adj["reason"]
+
+
+@pytest.mark.unit
+def test_adjudicate_refuses_to_pass_on_zero_replicates():
+    """No replicates must never adjudicate a flagged row into a pass."""
+    adj = _adjudicate("x", _row(10), [])
+    assert adj["verdict"] == _V_CONFIRMED
+    assert adj["comparisons"] == 0
+
+
+@pytest.mark.unit
+def test_signature_uses_exactly_the_gated_quantities():
+    """Self-agreement is judged on what the gate tests, and nothing else."""
+    assert _signature(_row(10)) == _signature(_row(10))
+    assert _signature(_row(10)) != _signature(_row(11))
+    assert _signature(_row(10)) != _signature(_row(10, status="feasible"))
+    assert _signature(_row(10)) != _signature(_row(10, certified=False))
+    # Two rows that both MATCH the baseline cannot be called disagreeing.
+    assert _signature(_row(10, 1.0)) == _signature(_row(10, 1.0 + 1e-12))
+    assert _signature(_row(10, 1.0)) != _signature(_row(10, 2.0))
+    # wall time is not gated, so it must not make replicates look inconsistent
+    a, b = _row(10), _row(10)
+    b["wall"] = 44.0
+    assert _signature(a) == _signature(b)
+
+
+@pytest.mark.smoke
+def test_check_refuses_to_run_above_the_load_gate(tmp_path: Path):
+    """A gate run under contention is not a gate (CLAUDE.md §9).
+
+    ``--max-load 0`` is unsatisfiable on any running machine, so this asserts the
+    refusal path exists and exits non-zero — a refusal can never launder a FAIL
+    into a PASS.
+    """
+    good = tmp_path / "baseline.json"
+    gen = _run(["--budget", _BUDGET, "--subset", _FAST_INSTANCE, "--out", str(good), _ALLOW_LOAD])
+    assert gen.returncode == 0, gen.stdout[-3000:]
+
+    res = _run(["--check", str(good), "--max-load", "0"])
+    assert res.returncode == 4, f"expected a load refusal, got {res.returncode}:\n{res.stdout}"
+    assert "REFUSED" in res.stdout
+    assert "PASS" not in res.stdout
+
+
+@pytest.mark.smoke
+def test_replicates_zero_restores_the_single_shot_gate_and_says_so(tmp_path: Path):
+    """The escape hatch must be loud, and must still fail on real drift."""
+    good = tmp_path / "baseline.json"
+    gen = _run(["--budget", _BUDGET, "--subset", _FAST_INSTANCE, "--out", str(good), _ALLOW_LOAD])
+    assert gen.returncode == 0, gen.stdout[-3000:]
+    base = json.loads(good.read_text())
+    base["rows"][0]["node_count"] = int(base["rows"][0]["node_count"]) + 1
+    bad = tmp_path / "perturbed.json"
+    bad.write_text(json.dumps(base))
+
+    res = _run(["--check", str(bad), "--replicates", "0", _ALLOW_LOAD])
+    assert res.returncode != 0
+    assert "--replicates 0" in res.stdout
+    assert "NODE COUNT drift" in res.stdout
+    assert _comparison_count(res.stdout) > 0

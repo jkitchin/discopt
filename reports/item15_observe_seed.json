@@ -1,0 +1,182 @@
+{
+ "arm": "observe",
+ "budget": 45.0,
+ "rows": [
+  {
+   "instance": "gear2",
+   "budget": 45.0,
+   "force_obbt": null,
+   "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+   "rust_so": "/home/user/discopt/python/discopt/_rust.cpython-311-x86_64-linux-gnu.so",
+   "marker": "subtol_crossings_repaired",
+   "wall": 6.884414160999768,
+   "status": "optimal",
+   "node_count": 3,
+   "objective": 1.155529714729433e-07,
+   "bound": -5e-324,
+   "root_bound": -5e-324,
+   "root_time": 5.963233297999977,
+   "gap_certified": true,
+   "obbt_calls": [
+    {
+     "budget_handed": 4.49999532900074,
+     "budget_original": 4.49999532900074,
+     "consumed": 0.045384679000562755,
+     "deadline_hit": false,
+     "n_tightened": 0,
+     "infeasible": false
+    },
+    {
+     "budget_handed": 4.999994280999999,
+     "budget_original": 4.999994280999999,
+     "consumed": 0.031582739999976184,
+     "deadline_hit": false,
+     "n_tightened": 0,
+     "infeasible": false
+    }
+   ],
+   "obbt_call_count": 2,
+   "obbt_deadline_hits": 0
+  },
+  {
+   "instance": "ex1266",
+   "budget": 45.0,
+   "force_obbt": null,
+   "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+   "rust_so": "/home/user/discopt/python/discopt/_rust.cpython-311-x86_64-linux-gnu.so",
+   "marker": "subtol_crossings_repaired",
+   "wall": 7.486396375000368,
+   "status": "optimal",
+   "node_count": 6005,
+   "objective": 16.3,
+   "bound": 16.3,
+   "root_bound": 16.116666666666667,
+   "root_time": 0.03347850199952518,
+   "gap_certified": true,
+   "obbt_calls": [],
+   "obbt_call_count": 0,
+   "obbt_deadline_hits": 0
+  },
+  {
+   "instance": "gear",
+   "budget": 45.0,
+   "force_obbt": null,
+   "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+   "rust_so": "/home/user/discopt/python/discopt/_rust.cpython-311-x86_64-linux-gnu.so",
+   "marker": "subtol_crossings_repaired",
+   "wall": 1.333750907000649,
+   "status": "optimal",
+   "node_count": 15,
+   "objective": 2.860864189286471e-07,
+   "bound": -5e-324,
+   "root_bound": -5e-324,
+   "root_time": 1.1356631389999166,
+   "gap_certified": true,
+   "obbt_calls": [
+    {
+     "budget_handed": 4.499995805000253,
+     "budget_original": 4.499995805000253,
+     "consumed": 0.018858503000046767,
+     "deadline_hit": false,
+     "n_tightened": 0,
+     "infeasible": false
+    },
+    {
+     "budget_handed": 4.999994646000232,
+     "budget_original": 4.999994646000232,
+     "consumed": 0.009063716999662574,
+     "deadline_hit": false,
+     "n_tightened": 0,
+     "infeasible": false
+    },
+    {
+     "budget_handed": 4.9999940759998935,
+     "budget_original": 4.9999940759998935,
+     "consumed": 0.00999666799998522,
+     "deadline_hit": false,
+     "n_tightened": 0,
+     "infeasible": false
+    }
+   ],
+   "obbt_call_count": 3,
+   "obbt_deadline_hits": 0
+  },
+  {
+   "instance": "gear3",
+   "budget": 45.0,
+   "force_obbt": null,
+   "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+   "rust_so": "/home/user/discopt/python/discopt/_rust.cpython-311-x86_64-linux-gnu.so",
+   "marker": "subtol_crossings_repaired",
+   "wall": 1.8525578740000128,
+   "status": "optimal",
+   "node_count": 3,
+   "objective": 1.827380235298078e-08,
+   "bound": -5e-324,
+   "root_bound": -5e-324,
+   "root_time": 1.1132761700000628,
+   "gap_certified": true,
+   "obbt_calls": [
+    {
+     "budget_handed": 4.499995446999492,
+     "budget_original": 4.499995446999492,
+     "consumed": 0.02669827199952124,
+     "deadline_hit": false,
+     "n_tightened": 0,
+     "infeasible": false
+    },
+    {
+     "budget_handed": 4.999995041999682,
+     "budget_original": 4.999995041999682,
+     "consumed": 0.014538667000124406,
+     "deadline_hit": false,
+     "n_tightened": 0,
+     "infeasible": false
+    }
+   ],
+   "obbt_call_count": 2,
+   "obbt_deadline_hits": 0
+  },
+  {
+   "instance": "gear4",
+   "budget": 45.0,
+   "force_obbt": null,
+   "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+   "rust_so": "/home/user/discopt/python/discopt/_rust.cpython-311-x86_64-linux-gnu.so",
+   "marker": "subtol_crossings_repaired",
+   "wall": 1.972367022999606,
+   "status": "optimal",
+   "node_count": 3,
+   "objective": 1.6434284641271995,
+   "bound": 1.643427471831146,
+   "root_bound": 1.643427471831146,
+   "root_time": 1.2497058050003034,
+   "gap_certified": true,
+   "obbt_calls": [
+    {
+     "budget_handed": 4.4999960009999995,
+     "budget_original": 4.4999960009999995,
+     "consumed": 0.0024749169997448917,
+     "deadline_hit": false,
+     "n_tightened": 0,
+     "infeasible": false
+    },
+    {
+     "budget_handed": 4.999995168000169,
+     "budget_original": 4.999995168000169,
+     "consumed": 0.028121191000536783,
+     "deadline_hit": false,
+     "n_tightened": 10,
+     "infeasible": false
+    }
+   ],
+   "obbt_call_count": 2,
+   "obbt_deadline_hits": 0
+  }
+ ],
+ "observations": 5,
+ "obbt_calls": 9,
+ "obbt_deadline_hits": 0,
+ "deadline_bound_instances": [],
+ "load1_at_write": 0.970703125
+}

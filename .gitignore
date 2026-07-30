@@ -66,6 +66,12 @@ coverage.svg
 # ...and the Card 4c H-RHS entry experiment, cited by the §6 entry that justifies
 # refusing a non-zero `Constraint.rhs` (66 models, 3,705 executed comparisons).
 !/reports/card4c_rhs_entry.log
+# ...and the open-ledger item 15 root-cause artifacts. They are the evidence that
+# the Regime-N panel's flakiness is the solver's wall-clock-bounded root heuristic
+# rather than the harness, which is what justifies hardening the gate by
+# replicate-and-agree instead of narrowing the `comparable` population.
+!/reports/item15_*.json
+!/reports/item15_*.log
 
 # Generated course material (built from python/discopt/course/)
 /course/

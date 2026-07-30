@@ -47,6 +47,53 @@ worse than no gate. So each row carries an explicit ``comparable`` flag:
 The two populations are printed separately and both counts appear in the exit
 summary. A run whose comparable population collapsed to zero fails.
 
+Replicate-and-agree adjudication (open-ledger item 15)
+------------------------------------------------------
+
+The ``comparable`` filter above is necessary but **not sufficient**, and that was
+measured, not guessed. The solver's search path is a function of the wall clock at
+81 Python decision sites: the root primal heuristic
+(``primal_heuristics.integer_local_search``) is handed
+``time_budget=min(5.0, 0.15·time_limit)`` and descends the integer lattice *until
+that wall deadline*, so how good an incumbent the root produces — and therefore how
+many nodes the tree needs — depends on how fast the machine was for those five
+seconds. On ``gear2`` this is a step function: 5.0 s of heuristic ⇒ **3 nodes**,
+≤3.0 s ⇒ **91 nodes**, and the default budget sits directly on the cliff edge. The
+row is `optimal`, `certified`, and finishes in 15 % of its budget, so *every*
+static filter admits it — and it still moves under ambient load.
+
+A single-shot exact comparison therefore cannot distinguish "the refactor changed
+the math" from "the container was busy". Adjudication closes that without giving up
+any detection power:
+
+1. Run the panel once. Rows with no violation are done.
+2. Any *flagged* row is re-run ``--replicates`` (default 3) more times, one at a
+   time. Then, per :func:`_adjudicate`:
+
+   * replicates unanimous **and** matching the baseline → ``TRANSIENT``: the
+     first-pass flag was environmental. Reported loudly, does not fail — but see
+     the noise budget below.
+   * replicates unanimous **and** disagreeing with the baseline → ``CONFIRMED``:
+     real drift. **FAIL.** A code change that moves the math is deterministic, so
+     this is the arm every genuine regression lands in.
+   * replicates disagreeing **with each other** → ``NONDETERMINISTIC``. **FAIL**,
+     under its own label: the instance does not reproduce itself, so nothing can be
+     gated on it and it must not be quietly averaged away.
+
+3. ``TRANSIENT`` verdicts are capped (``--max-transient``, default 3). Past the
+   cap the run FAILS as *environment too noisy to gate*: a panel that has to excuse
+   a dozen rows is not measuring the tree any more.
+
+The residual, stated rather than hidden: a *rare* real drift that fires in the
+first pass and in none of the replicates is recorded as ``TRANSIENT``. That is why
+every transient row is printed with its full before/after and lands in the exit
+summary — it is a disclosure, not a dismissal.
+
+The check also refuses to run at all above ``--max-load`` (default 1.0). The first
+of the two failures that opened item 15 was a panel run *concurrently with a pytest
+block* on a 4-core box; a gate that runs under contention is not a gate (CLAUDE.md
+§9). Refusing is exit-non-zero, so this can never convert a FAIL into a PASS.
+
 Root-gap instrumentation (plan task 0.3)
 ----------------------------------------
 
@@ -130,6 +177,23 @@ _DEFAULT_BUDGET = 60.0
 # Subprocess wall guard. The solve itself is bounded by the budget; this only
 # catches a child that wedges outside the solver's own clock.
 _CHILD_TIMEOUT_SLACK = 120.0
+
+# Replicate-and-agree adjudication (open-ledger item 15). Only flagged rows are
+# re-run, so the cost is zero on a clean panel and ~3 solves per flagged row
+# otherwise. Three is the smallest count that can tell "unanimous" from "split".
+_DEFAULT_REPLICATES = 3
+# How many rows may be excused as environmental before the RUN is declared
+# untrustworthy. One or two transients on a 4-core container is the observed
+# background rate; a dozen means the box is not fit to gate on.
+_DEFAULT_MAX_TRANSIENT = 3
+# Load gate (CLAUDE.md §9). The first failure that opened item 15 was a panel run
+# concurrently with a pytest block.
+_DEFAULT_MAX_LOAD = 1.0
+
+# Adjudication verdicts.
+_V_TRANSIENT = "TRANSIENT"
+_V_CONFIRMED = "CONFIRMED"
+_V_NONDET = "NONDETERMINISTIC"
 
 
 # --------------------------------------------------------------------------- #
@@ -508,6 +572,130 @@ def _obj_match(a: float | None, b: float | None) -> bool:
     return abs(a - b) <= _OBJ_TOL + _OBJ_RTOL * max(abs(a), abs(b))
 
 
+# --------------------------------------------------------------------------- #
+# Regime-N comparison — ONE implementation, used by the first pass and by every  #
+# replicate. Two copies of this logic is how a gate and its adjudicator drift    #
+# apart and start disagreeing about what a violation is.                        #
+# --------------------------------------------------------------------------- #
+def _compare_hard(inst: str, b: dict, n: dict) -> tuple[list[str], int]:
+    """Compare one *comparable* baseline row against a re-run row.
+
+    Returns ``(violations, comparisons_executed)``. The comparison count is
+    returned rather than inferred so the caller can print an executed count that
+    is a fact about this call, not an assumption (CLAUDE.md §6).
+    """
+    violations: list[str] = []
+    n_cmp = 0
+
+    n_cmp += 1  # status
+    if str(n.get("status")) != str(b.get("status")):
+        violations.append(
+            f"{inst}: STATUS drift {b.get('status')} -> {n.get('status')} "
+            f"(baseline certified in {b.get('wall', float('nan')):.1f}s)"
+        )
+    if not n.get("gap_certified", False):
+        violations.append(f"{inst}: CERTIFICATION LOST — baseline gap_certified=True, now False")
+
+    n_cmp += 1  # node count
+    if int(b["node_count"]) != int(n.get("node_count", -1)):
+        violations.append(
+            f"{inst}: NODE COUNT drift {b['node_count']} -> {n.get('node_count')} "
+            f"(Regime N requires exactly unchanged, improvement included)"
+        )
+
+    n_cmp += 1  # certified objective
+    if not _obj_match(b.get("objective"), n.get("objective")):
+        violations.append(
+            f"{inst}: CERTIFIED OBJECTIVE drift {b.get('objective')} -> "
+            f"{n.get('objective')} (tol {_OBJ_TOL:g} + {_OBJ_RTOL:g}·|obj|)"
+        )
+    return violations, n_cmp
+
+
+def _signature(row: dict) -> tuple:
+    """The gated content of a row, for replicate-vs-replicate identity.
+
+    Exactly the quantities :func:`_compare_hard` looks at — so "the replicates
+    agree with each other" means agreement on precisely what the gate tests, and
+    an instance cannot be called self-consistent on a field the gate ignores.
+    The objective is bucketed by the same tolerance the gate uses, so two
+    replicates that both *match the baseline* cannot be called disagreeing.
+    """
+    obj = row.get("objective")
+    # Quantise at the absolute tolerance; the relative term is negligible at panel
+    # scale and a coarser bucket would hide real drift.
+    obj_key: object = None if obj is None else round(float(obj) / _OBJ_TOL)
+    return (
+        str(row.get("status")),
+        bool(row.get("gap_certified")),
+        int(row.get("node_count", -1)),
+        obj_key,
+    )
+
+
+def _adjudicate(inst: str, base_row: dict, replicates: list[dict]) -> dict:
+    """Classify a flagged row from its own replicates (open-ledger item 15).
+
+    ``replicates`` are re-runs of ``inst`` alone, in sequence. The rule:
+
+    * every replicate matches the baseline            -> ``TRANSIENT``  (not fatal)
+    * replicates unanimous, and they disagree with it -> ``CONFIRMED``  (FATAL)
+    * replicates disagree with each other             -> ``NONDETERMINISTIC`` (FATAL)
+
+    A genuine bound-neutrality violation is deterministic — the changed code runs
+    every time — so it lands in ``CONFIRMED`` and still fails the gate. That is
+    the property that makes this hardening legal under plan §0.4.
+    """
+    if not replicates:
+        # Never silently "adjudicate" nothing into a pass.
+        return {
+            "instance": inst,
+            "verdict": _V_CONFIRMED,
+            "reason": "no replicates were run; the first-pass violation stands",
+            "replicates": 0,
+            "comparisons": 0,
+            "violations": [],
+        }
+
+    per_rep: list[list[str]] = []
+    n_cmp = 0
+    for r in replicates:
+        v, c = _compare_hard(inst, base_row, r)
+        per_rep.append(v)
+        n_cmp += c
+
+    sigs = {_signature(r) for r in replicates}
+    all_clean = all(not v for v in per_rep)
+    if len(sigs) > 1:
+        verdict = _V_NONDET
+        reason = (
+            f"{len(replicates)} isolated replicates produced {len(sigs)} distinct "
+            f"(status, certified, node_count, objective) signatures: {sorted(sigs)}. "
+            f"The instance does not reproduce ITSELF, so nothing can be gated on it."
+        )
+    elif all_clean:
+        verdict = _V_TRANSIENT
+        reason = (
+            f"{len(replicates)}/{len(replicates)} isolated replicates reproduce the "
+            f"baseline exactly; the first-pass deviation was environmental."
+        )
+    else:
+        verdict = _V_CONFIRMED
+        reason = (
+            f"{len(replicates)}/{len(replicates)} isolated replicates agree with each "
+            f"other and DISAGREE with the baseline — reproducible drift."
+        )
+    return {
+        "instance": inst,
+        "verdict": verdict,
+        "reason": reason,
+        "replicates": len(replicates),
+        "comparisons": n_cmp,
+        "signatures": sorted(str(s) for s in sigs),
+        "violations": sorted({v for vs in per_rep for v in vs}),
+    }
+
+
 def cmd_check(args: argparse.Namespace) -> int:
     """Re-run the baseline's instances and fail on any Regime-N drift."""
     path = Path(args.check)
@@ -537,10 +725,8 @@ def cmd_check(args: argparse.Namespace) -> int:
     # Counted, not assumed. A checker that executes zero comparisons and prints
     # "no drift" is the exact failure CLAUDE.md §6 is about, so the counts are
     # part of the verdict and zero is a FAILURE.
-    n_node_cmp = 0
-    n_obj_cmp = 0
-    n_status_cmp = 0
-    failures: list[str] = []
+    first_pass: dict[str, list[str]] = {}
+    n_hard_cmp = 0
     soft: list[str] = []
     missing: list[str] = []
 
@@ -563,47 +749,84 @@ def cmd_check(args: argparse.Namespace) -> int:
                 )
             continue
 
-        # Hard population.
-        n_status_cmp += 1
-        if str(n.get("status")) != str(b.get("status")):
-            failures.append(
-                f"{inst}: STATUS drift {b.get('status')} -> {n.get('status')} "
-                f"(baseline certified in {b.get('wall', float('nan')):.1f}s)"
-            )
-        if not n.get("gap_certified", False):
-            failures.append(
-                f"{inst}: CERTIFICATION LOST — baseline gap_certified=True, now False"
-            )
+        # Hard population — one shared comparator (see _compare_hard).
+        viol, c = _compare_hard(inst, b, n)
+        n_hard_cmp += c
+        if viol:
+            first_pass[inst] = viol
 
-        n_node_cmp += 1
-        if int(b["node_count"]) != int(n.get("node_count", -1)):
-            failures.append(
-                f"{inst}: NODE COUNT drift {b['node_count']} -> {n.get('node_count')} "
-                f"(Regime N requires exactly unchanged, improvement included)"
-            )
-
-        n_obj_cmp += 1
-        if not _obj_match(b.get("objective"), n.get("objective")):
-            failures.append(
-                f"{inst}: CERTIFIED OBJECTIVE drift {b.get('objective')} -> "
-                f"{n.get('objective')} (tol {_OBJ_TOL:g} + {_OBJ_RTOL:g}·|obj|)"
-            )
-
-    total_cmp = n_node_cmp + n_obj_cmp + n_status_cmp
+    n_comparable = sum(1 for i in instances if base_rows[i].get("comparable"))
     _print_summary(rows, meta)
     print(
-        f"\ncomparisons executed: {total_cmp} "
-        f"(node_count {n_node_cmp}, certified objective {n_obj_cmp}, status {n_status_cmp}) "
-        f"over {sum(1 for i in instances if base_rows[i].get('comparable'))} comparable "
-        f"of {len(instances)} baseline row(s)",
+        f"\ncomparisons executed: {n_hard_cmp} "
+        f"(3 per comparable row: status, node_count, certified objective) "
+        f"over {n_comparable} comparable of {len(instances)} baseline row(s)",
         flush=True,
     )
     if soft:
         print(f"\nNON-COMPARABLE drift ({len(soft)}) — reported, not gating:", flush=True)
         for s in soft:
             print(f"  - {s}", flush=True)
+
+    hard_failures: list[str] = []
     if missing:
-        failures.append(f"instances present in baseline but not re-run: {', '.join(missing)}")
+        hard_failures.append(f"instances present in baseline but not re-run: {', '.join(missing)}")
+
+    # ---- replicate-and-agree adjudication (open-ledger item 15) -------------
+    adjudications: list[dict] = []
+    n_adj_cmp = 0
+    if first_pass and args.replicates > 0:
+        print(
+            f"\nADJUDICATION: {len(first_pass)} row(s) flagged on the first pass; re-running "
+            f"each ALONE {args.replicates}x to separate real drift from container noise.\n"
+            f"  (unanimous + matches baseline = TRANSIENT; unanimous + differs = CONFIRMED "
+            f"drift, FAIL; replicates disagree with each other = NONDETERMINISTIC, FAIL)",
+            flush=True,
+        )
+        oracle = _oracle_fn()
+        for inst in sorted(first_pass):
+            reps: list[dict] = []
+            for k in range(args.replicates):
+                rep = _annotate(_solve_one(inst, budget), budget, oracle)
+                reps.append(rep)
+                print(
+                    f"  {inst:24s} replicate {k + 1}/{args.replicates}: "
+                    f"{str(rep.get('status')):11s} nodes={rep.get('node_count')} "
+                    f"obj={rep.get('objective')} cert={'Y' if rep.get('gap_certified') else '.'} "
+                    f"w={rep.get('wall', float('nan')):.1f}s load1={_load1():.2f}",
+                    flush=True,
+                )
+            adj = _adjudicate(inst, base_rows[inst], reps)
+            adj["first_pass_violations"] = first_pass[inst]
+            adjudications.append(adj)
+            n_adj_cmp += adj["comparisons"]
+            print(f"  -> {inst}: {adj['verdict']} — {adj['reason']}", flush=True)
+    elif first_pass:
+        # --replicates 0 keeps the legacy single-shot semantics as an escape
+        # hatch; it must never look like the hardened path.
+        print(
+            "\nWARNING: --replicates 0 — first-pass violations are NOT adjudicated. "
+            "This is the pre-item-15 single-shot gate and cannot tell drift from noise.",
+            flush=True,
+        )
+        for viol in first_pass.values():
+            hard_failures.extend(viol)
+
+    transient = [a for a in adjudications if a["verdict"] == _V_TRANSIENT]
+    for a in adjudications:
+        if a["verdict"] != _V_TRANSIENT:
+            hard_failures.append(f"{a['instance']}: {a['verdict']} — {a['reason']}")
+            hard_failures.extend(f"    {v}" for v in a["violations"] or a["first_pass_violations"])
+
+    total_cmp = n_hard_cmp + n_adj_cmp
+    print(
+        f"\ncomparisons executed (total): {total_cmp} "
+        f"= {n_hard_cmp} first-pass + {n_adj_cmp} adjudication "
+        f"over {n_comparable} comparable row(s); "
+        f"flagged {len(first_pass)}, adjudicated {len(adjudications)}, "
+        f"transient {len(transient)}",
+        flush=True,
+    )
 
     if total_cmp == 0:
         print(
@@ -614,13 +837,37 @@ def cmd_check(args: argparse.Namespace) -> int:
         )
         return 3
 
-    if failures:
-        print(f"\nFAIL: {len(failures)} Regime-N violation(s):", flush=True)
-        for f in failures:
+    if transient:
+        print(
+            f"\nTRANSIENT ({len(transient)}) — first-pass deviation NOT reproduced when the "
+            f"row was re-run alone. Disclosed, not dismissed:",
+            flush=True,
+        )
+        for a in transient:
+            for v in a["first_pass_violations"]:
+                print(f"  - {v}", flush=True)
+            print(f"      adjudicated: {a['reason']}", flush=True)
+    if len(transient) > args.max_transient:
+        hard_failures.append(
+            f"{len(transient)} transient row(s) > --max-transient {args.max_transient}: "
+            f"this container is too noisy for the panel to gate anything. Re-run on an "
+            f"idle machine; do not interpret the result."
+        )
+
+    if hard_failures:
+        print(f"\nFAIL: {len(hard_failures)} Regime-N violation(s):", flush=True)
+        for f in hard_failures:
             print(f"  - {f}", flush=True)
         return 1
 
-    print("\nPASS: no node-count or certified-objective drift.", flush=True)
+    if transient:
+        print(
+            f"\nPASS (with {len(transient)} adjudicated transient row(s)): no reproducible "
+            f"node-count or certified-objective drift.",
+            flush=True,
+        )
+    else:
+        print("\nPASS: no node-count or certified-objective drift.", flush=True)
     return 0
 
 
@@ -650,8 +897,50 @@ def main(argv: list[str] | None = None) -> int:
         help="an integer (first N instances) or a comma-separated list of instance names",
     )
     p.add_argument("--out", help="output path (default reports/panel_baseline_<sha>.json)")
+    p.add_argument(
+        "--replicates",
+        type=int,
+        default=_DEFAULT_REPLICATES,
+        help=f"--check only: re-run each FLAGGED row this many times alone and adjudicate "
+        f"(default {_DEFAULT_REPLICATES}; 0 restores the pre-item-15 single-shot gate)",
+    )
+    p.add_argument(
+        "--max-transient",
+        type=int,
+        default=_DEFAULT_MAX_TRANSIENT,
+        help=f"--check only: fail the RUN when more than this many rows adjudicate as "
+        f"environmental (default {_DEFAULT_MAX_TRANSIENT})",
+    )
+    p.add_argument(
+        "--max-load",
+        type=float,
+        default=_DEFAULT_MAX_LOAD,
+        help=f"refuse to start above this 1-minute load average (default {_DEFAULT_MAX_LOAD}); "
+        f"a gate run under contention is not a gate (CLAUDE.md §9)",
+    )
+    p.add_argument(
+        "--allow-load",
+        action="store_true",
+        help="run anyway above --max-load. The result is recorded as NOT gate-quality.",
+    )
     args = p.parse_args(argv)
     args.budget_explicit = any(a == "--budget" or a.startswith("--budget=") for a in argv)
+    if args.replicates < 0:
+        raise SystemExit("ERROR: --replicates must be >= 0")
+
+    # ---- load gate ---------------------------------------------------------
+    lv = _load1()
+    if not math.isnan(lv) and lv > args.max_load:
+        msg = (
+            f"1-minute load average is {lv:.2f} > --max-load {args.max_load:.2f}. "
+            f"Node counts on this panel are wall-clock sensitive by construction "
+            f"(the root primal heuristic runs to a wall deadline), so a run started "
+            f"under contention measures the container, not the tree."
+        )
+        if not args.allow_load:
+            print(f"REFUSED: {msg}\nRe-run on an idle box, or pass --allow-load.", flush=True)
+            return 4
+        print(f"WARNING (--allow-load): {msg} This run is NOT gate-quality.", flush=True)
 
     if args.check:
         return cmd_check(args)
