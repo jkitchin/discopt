@@ -1521,15 +1521,39 @@ tree manager. If Phase 5 retires `lp_spatial_bb`'s class first, skip its port.
 >
 > | suite | result |
 > |---|---|
-> | `pytest -m smoke` (python/tests) | see the item-8 close-out §6 entry |
-> | `pytest -m smoke` (discopt_benchmarks/tests) | ditto |
-> | adversarial (`test_adversarial_recent_fixes.py -m slow`) | ditto |
-> | node-tightening parity (smoke + slow) | ditto — **no newly-served class, so nothing was added to it**; Card 2b's 147/83/44 asymmetry is unchanged |
-> | vector corpus / routing / tightening schedule / solver state / flag registry | ditto |
-> | `ruff check` + `ruff format --check` + `mypy` (2.1.0) | ditto |
+> | `pytest -m smoke` (python/tests) | **953 passed**, 16 skipped, 2 xpassed, 471 s |
+> | `pytest -m smoke` (discopt_benchmarks/tests) | **53 passed**, 1 skipped |
+> | adversarial (`test_adversarial_recent_fixes.py -m slow`) | **10 passed**, 211 s |
+> | node-tightening parity (smoke + slow) | **16 passed** — **no newly-served class, so nothing was added to it**; Card 2b's 147/83/44 asymmetry untouched, `xdist_group` pin intact |
+> | `test_spatial_native_kernel.py` / `test_861_envelope_row_classifier.py` | **27 passed** / **9 passed** (the producer's own suites) |
+> | vector corpus / routing / tightening schedule / solver state / flag registry | **95 passed** |
+> | `ruff check python/` + `ruff format --check python/` | clean, except 2 **pre-existing** files (`test_log_square_relaxation.py`, `test_mo_augmecon2.py`, last touched by #632) that the locally-installed **ruff 0.15.8** would reformat and the CI-pinned **0.14.6** does not — tooling drift, not this session |
+> | `mypy python/discopt/ --ignore-missing-imports` | **mypy 2.1.0 asserted**; `Success: no issues found in 320 source files` |
 > | `cargo test -p discopt-core` | **not run — no Rust touched** |
-> | Regime-N `panel_baseline.py --check` (the decline split is the only code change) | ditto |
+> | Regime-N `panel_baseline.py --check` | **PASS**, verbatim below |
 > | `heldout50` / MINLPLib snapshot | **SKIPPED — local only** |
+>
+> **Regime-N gate, verbatim** (`reports/item8_panel_check.json`,
+> `reports/item8_panel_check.log`; 119 instances, 45 s, 2017.5 s wall, load
+> 0.97 → 2.05). The tree under test is content-identical to `f7abdb25` for `python/`
+> (the log records HEAD `dd1bb86b` + dirty working tree; the split was in the tree at
+> panel start and `git diff f7abdb25 -- python/` is empty):
+>
+> ```
+> comparisons executed: 255 (3 per comparable row: status, node_count, certified
+>                            objective) over 85 comparable of 119 baseline row(s)
+> comparisons executed (total): 255 = 255 first-pass + 0 adjudication over 85
+>                            comparable row(s); flagged 0, adjudicated 0, transient 0
+> PASS: no node-count or certified-objective drift.
+> ```
+>
+> **Adjudication verdict: nothing to adjudicate.** `flagged 0` — no row deviated at
+> all, so the item-15 replicate-and-agree machinery never fired and there is no
+> `TRANSIENT` / `CONFIRMED` / `NONDETERMINISTIC` classification to report. 15
+> non-comparable rows drifted and are **reported, not gating** (14 budget-dependent
+> statuses plus `tls2`, certified at 97 % of budget) — the same population the item-11
+> and item-15 runs recorded, and consistent with ledger 15b (the solver sizes its work
+> off a wall clock at 78 Python sites).
 >
 > **Parity-guard note.** `python/tests/test_node_tightening_parity.py` is the standing
 > guard that coverage expansion cannot silently weaken node tightening. This session
@@ -2205,8 +2229,23 @@ inflated — #3 and #5, the producer's last two tests — were ranked third and 
 are now the largest genuinely-recoverable entries. Nothing in the census file needs
 correcting; the reading protocol does, and it is written down here.
 
-**Suites run on the final tree** — see the verification block appended to the Phase 5.2
-card below.
+**Suites run on the final tree** — the full matrix, with the Regime-N gate quoted
+verbatim, is the verification block of the Phase 5.2 card. Summary: both smoke suites
+(953 + 53), adversarial (10), node-tightening parity smoke+slow (16), the producer's
+own suites (27 + 9), the five guard suites (95), `ruff check python/` clean,
+`mypy 2.1.0` Success over 320 files, and the Regime-N `--check` **PASS with 255
+executed comparisons over 85 comparable rows, 0 flagged / 0 adjudicated / 0
+transient** — so there is no adjudication verdict to report, because nothing deviated.
+`cargo test -p discopt-core` was not run: no Rust was touched.
+
+**Can item 8 close?** As scoped — *"take census rank #2"* — **yes, and it closes as a
+measured refusal**: the card is dead, the reason is recorded with executed counts, the
+instrument it depended on is fixed, and the ranking that sequences the rest of Phase 5
+is corrected. What does **not** close is Phase 5 kernel-coverage expansion itself: the
+largest genuinely-recoverable block (ranks #3 + #5, 12 instances, 268.6 s / 13.9 %) is
+now precisely characterized and is a **relaxer + kernel** card, and Card 5.2-T (rank
+#1, 7 instances / 6.2 %) remains the only producer-side entry in the top five. The
+ledger's item-8 row is updated to say exactly that.
 
 ### 2026-07-30 — Open-ledger item 11 close-out: what was run on the final tree
 
