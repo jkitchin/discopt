@@ -341,15 +341,15 @@ def test_signature_uses_exactly_the_gated_quantities():
 def test_check_refuses_to_run_above_the_load_gate(tmp_path: Path):
     """A gate run under contention is not a gate (CLAUDE.md §9).
 
-    ``--max-load 0`` is unsatisfiable on any running machine, so this asserts the
-    refusal path exists and exits non-zero — a refusal can never launder a FAIL
-    into a PASS.
+    A negative threshold is unsatisfiable on any machine (a load average is never
+    below zero), so this asserts the refusal path exists and exits non-zero — a
+    refusal can never launder a FAIL into a PASS.
     """
     good = tmp_path / "baseline.json"
     gen = _run(["--budget", _BUDGET, "--subset", _FAST_INSTANCE, "--out", str(good), _ALLOW_LOAD])
     assert gen.returncode == 0, gen.stdout[-3000:]
 
-    res = _run(["--check", str(good), "--max-load", "0"])
+    res = _run(["--check", str(good), "--max-load=-1"])
     assert res.returncode == 4, f"expected a load refusal, got {res.returncode}:\n{res.stdout}"
     assert "REFUSED" in res.stdout
     assert "PASS" not in res.stdout

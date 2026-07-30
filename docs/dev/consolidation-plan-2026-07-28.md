@@ -138,6 +138,72 @@ first.
 **Exit:** baseline artifact checked in under `reports/`; `--check` proves itself by
 detecting a deliberate 1-node perturbation (test); `heldout50` resolvable locally.
 
+### Phase 0 addendum — the hardened Regime-N gate (open-ledger item 15, 2026-07-30)
+
+> **Status:** LANDED. **Every Regime-N card from here on invokes the gate as
+> specified below**; the pre-item-15 single-shot form is no longer sufficient
+> evidence for a bound-neutrality claim.
+
+**Why the gate needed hardening.** Phase 0 shipped a `comparable` filter that
+excludes rows whose *terminal status* is budget-dependent. That is necessary and it
+is not sufficient. The root-cause experiment (§6, "open-ledger item 15") measured
+what the filter cannot see: **the solver's search path is a function of the wall
+clock at 81 Python decision sites**, and on `gear2` the one that fires is the root
+primal heuristic. `solver/__init__.py:9660` hands `integer_local_search`
+`time_budget = min(5.0, 0.15·time_limit)`, and its descent runs
+`while improved and time.perf_counter() < deadline` until that wall deadline expires
+— measured at **5.02 s consumed of a 5.00 s budget**, i.e. it never converges, it
+always runs out. Forcing that budget alone moves the gated node count as a step
+function (5.0 s → **3 nodes**, ≤3.0 s → **91**, 0.5 s → **93**) and the default sits
+directly on the cliff. `gear2` is `optimal`, `certified`, and done in 15 % of its
+budget, so *every* static filter admits it — and it still moves under ambient load.
+That is why two runs of the same tree flagged different single instances.
+
+**How a Regime-N card invokes the gate now.**
+
+```bash
+python -u discopt_benchmarks/scripts/panel_baseline.py \
+    --check reports/panel_baseline_f154dcff.json
+```
+
+Nothing else may be running on the box. The defaults are the gate:
+
+| knob | default | what it does |
+|---|---|---|
+| `--replicates` | 3 | a **flagged** row is re-run this many times *alone*, then adjudicated. Clean rows cost nothing. |
+| `--max-transient` | 3 | more than this many environmentally-excused rows fails the RUN as *too noisy to gate*. |
+| `--max-load` | 2.0 | refuses to **start** above this 1-minute load average (exit 4). `--allow-load` overrides and stamps the run NOT gate-quality. Honest about its reach: it would *not* have caught either observed failure (run A started at load 0.25 and the contention arrived afterwards) — it catches only "started a panel while something was already running". |
+| `--replicates 0` | — | escape hatch to the pre-item-15 single-shot gate. Prints a warning; **not acceptable as card evidence.** |
+
+Adjudication verdicts, and what each means for the card:
+
+* **TRANSIENT** — the flagged row's replicates unanimously reproduce the baseline.
+  The first-pass deviation was the container. Does not fail; is **printed in full**
+  and must be **pasted into the card's close-out** along with the counts. A card
+  that reports a PASS while hiding its transients has not reported its measurement.
+* **CONFIRMED** — the replicates unanimously disagree with the baseline. Real
+  drift; the card **fails Regime N**. A bound-neutrality violation is deterministic
+  (the changed code runs every time), so this is the arm every genuine regression
+  lands in — which is why the hardening does not weaken the gate (§0.4). This is
+  asserted, not argued: `test_check_detects_a_perturbed_node_count` injects a
+  one-node perturbation and requires the verdict to be `CONFIRMED` and explicitly
+  *not* `TRANSIENT`.
+* **NONDETERMINISTIC** — the replicates disagree with *each other*. The instance
+  does not reproduce itself, so nothing can be gated on it. **Fails**, under its own
+  label; it is never averaged into a pass.
+
+**What a card must paste.** The `comparisons executed (total): N = A first-pass + B
+adjudication` line, the flagged/adjudicated/transient counts, the `load start …
+peak …` line, and every TRANSIENT row in full. Zero comparisons is a failure, not a
+pass (§0.5).
+
+**What this does NOT fix, stated so no later card mistakes it for fixed.** The
+solver still decides how much work to do by reading a clock. Adjudication tells you
+*whether* a deviation is code-induced; it does not make the tree reproducible. The
+real fix is deterministic work budgets (LP iterations / sub-NLP counts) in place of
+wall-clock budgets on the root heuristic and its siblings — a solver change, Regime
+C, sized as its own card. It is filed as ledger row 15b, not done here.
+
 ---
 
 ## Phase 1 — Mechanical hygiene (bound-neutral, immediately shippable)
@@ -1738,7 +1804,8 @@ this environment cannot adjudicate.
 | 12 | **Phase 7** — islands, refusal tests, deferred tail | not started, unblocked, cheap | Support-tier docstrings on the six zero-inbound packages; one test per load-bearing refusal (`multistage.py:47`, `gdpopt_loa.py:628`); file the SOTA long-tail entry experiments as issues |
 | 13 | **heldout50 panel** | never run here | Local-only corpus. Every card that names it has recorded "SKIPPED — local only" |
 | 14 | **28 parked flags** | default-OFF, each with its own record | Each needs its own Regime-C graduation panel; several (this one, `DISCOPT_CUT_INHERIT`, `DISCOPT_CONVEX_KERNEL`, `DISCOPT_FBBT_SEED`) have measured refusals recorded and should not be re-proposed without new evidence |
-| 15 | **The Regime-N panel is no longer reproducible instance-for-instance here** (filed 2026-07-30) | measured, not fixed | Two runs of the same tree each flagged a *different single* instance (`ex1266`, then `gear2`); each is bit-identical to the baseline when re-run alone (3/3 and 5/5), and the session's only code change is measured unreachable on the gated path. Closing it means a per-instance replicate-and-agree rule, or extending the `comparable` filter to exclude rows whose *preprocessing* phases are budget-sensitive. Phase 0 work, not solver work |
+| 15 | **The Regime-N panel is no longer reproducible instance-for-instance here** (filed 2026-07-30) | **ROOT-CAUSED AND CLOSED 2026-07-30** — and the premise was wrong: it is *not* "Phase 0 work, not solver work" | The cause is the solver, not the harness: the search reads the wall clock at **81** Python decision sites, and the root primal heuristic (`integer_local_search`, `time_budget=min(5.0, 0.15·time_limit)`) runs to its deadline every time (5.02 s consumed of 5.00 s). Forcing that budget alone steps `gear2` 3 → 91 → 93 nodes with nothing else changed. Fixed at the gate by **replicate-and-agree adjudication** (Phase 0 addendum); the alternative — widening the `comparable` filter — was **rejected**: it would have to exclude `gear2`-class rows (`optimal`, certified, 15 % of budget) permanently, weakening detection in violation of §0.4, and it does not even cover `ex1266`, whose flake was whole-solve starvation with a 0.03 s root |
+| 15b | **The solver decides how much work to do by reading a clock** (filed 2026-07-30 by item 15) | measured, not fixed — the *real* fix behind item 15's gate-level remedy | Deterministic work budgets (LP iterations, sub-NLP counts) in place of wall-clock budgets on `integer_local_search` and its 80 siblings, so an identical model + `time_limit` gives an identical tree on any machine. Solver change, Regime C (it changes the search), its own card. Until then adjudication tells a card *whether* a deviation is code-induced, but the tree is genuinely not reproducible across machine speeds |
 
 Parallelism guidance for Opus sessions: Phases 1, 2, 7 are safe concurrently
 (disjoint files). Phases 3 and 4 both edit `solver.py` — serialize them. Phase 5
@@ -3881,6 +3948,16 @@ instance in this environment**; before it can gate again it needs either a
 per-instance replicate-and-agree rule or a `comparable` filter that also excludes rows
 whose *preprocessing* phases are budget-sensitive. That is a measurement-substrate
 task (Phase 0), not a solver task.
+
+> **RETRACTED 2026-07-30 (CLAUDE.md §11).** The last sentence above is wrong. The
+> root-cause experiment (see the final §6 entry, "open-ledger item 15") measured the
+> mechanism: it is the **solver's** wall-clock-bounded root primal heuristic, not the
+> harness's bookkeeping, and the flagged rows are not "preprocessing"-budget-sensitive
+> in the sense meant here — `gear2`'s root heuristic runs to a 5 s wall deadline every
+> time, and forcing that budget alone steps its node count 3 → 91 → 93. The remedy
+> shipped is a gate-level replicate-and-agree rule (Phase 0 addendum); the *substantive*
+> fix is deterministic work budgets in the solver, filed as ledger row 15b. The rest of
+> this entry's observations stand.
 
 **Disclosed measurement conditions (CLAUDE.md §9).** Run A's contention was
 self-inflicted and is the reason it is reported as invalidated rather than as a

@@ -89,10 +89,19 @@ first pass and in none of the replicates is recorded as ``TRANSIENT``. That is w
 every transient row is printed with its full before/after and lands in the exit
 summary — it is a disclosure, not a dismissal.
 
-The check also refuses to run at all above ``--max-load`` (default 1.0). The first
-of the two failures that opened item 15 was a panel run *concurrently with a pytest
-block* on a 4-core box; a gate that runs under contention is not a gate (CLAUDE.md
-§9). Refusing is exit-non-zero, so this can never convert a FAIL into a PASS.
+Both failure modes were reproduced on demand under real contention (24 busy
+processes on 4 cores, ``item15_root_budget_probe.py --arm load``, 8 executed
+observations): ``ex1266`` went ``optimal``/6005 nodes twice while idle and
+``time_limit``/1 and 7 nodes twice while loaded — the whole-solve budget starving,
+which is the *other* mechanism and is not a preprocessing phase at all — while
+``gear2`` stayed ``optimal`` and certified both times and moved 3 → 91 and 93.
+
+The check also refuses to start above ``--max-load`` (default 2.0, calibrated
+below). Stated honestly: this would **not** have caught either observed failure —
+one run started at load 0.25 and the contention arrived afterwards. It catches only
+the "started a panel while something was already running" mistake; adjudication is
+the actual remedy. Refusing is exit-non-zero, so it can never convert a FAIL into a
+PASS.
 
 Root-gap instrumentation (plan task 0.3)
 ----------------------------------------
@@ -186,9 +195,13 @@ _DEFAULT_REPLICATES = 3
 # untrustworthy. One or two transients on a 4-core container is the observed
 # background rate; a dozen means the box is not fit to gate on.
 _DEFAULT_MAX_TRANSIENT = 3
-# Load gate (CLAUDE.md §9). The first failure that opened item 15 was a panel run
-# concurrently with a pytest block.
-_DEFAULT_MAX_LOAD = 1.0
+# Load gate (CLAUDE.md §9), start-time only. Calibrated, not guessed: a single
+# panel child drives this 4-core box's 1-minute average to 2-4 all by itself (JAX
+# / BLAS threads), and the previously-recorded panel runs started at 0.25 and 1.16.
+# So >2.0 at START means something else is already running; anything below is
+# consistent with an idle box. Be honest about its reach — see the module
+# docstring: it would NOT have caught either of the two observed failures.
+_DEFAULT_MAX_LOAD = 2.0
 
 # Adjudication verdicts.
 _V_TRANSIENT = "TRANSIENT"
@@ -828,6 +841,38 @@ def cmd_check(args: argparse.Namespace) -> int:
         flush=True,
     )
 
+    if args.out:
+        # The card's evidence, machine-readable. Written BEFORE the verdict
+        # returns so a failing run still leaves its adjudication behind.
+        outp = Path(args.out)
+        outp.parent.mkdir(parents=True, exist_ok=True)
+        outp.write_text(
+            json.dumps(
+                {
+                    "schema": "panel_check/1",
+                    "baseline": str(path),
+                    "baseline_sha": base.get("git_sha"),
+                    "current_sha": _short_sha(),
+                    "budget_seconds": budget,
+                    "replicates": args.replicates,
+                    "max_transient": args.max_transient,
+                    "comparable_rows": n_comparable,
+                    "first_pass_comparisons": n_hard_cmp,
+                    "adjudication_comparisons": n_adj_cmp,
+                    "total_comparisons": total_cmp,
+                    "flagged": sorted(first_pass),
+                    "first_pass_violations": first_pass,
+                    "adjudications": adjudications,
+                    "non_comparable_drift": soft,
+                    **meta,
+                    "rows": rows,
+                },
+                indent=1,
+            )
+            + "\n"
+        )
+        print(f"check report written: {outp}", flush=True)
+
     if total_cmp == 0:
         print(
             "\nFAIL: ZERO comparisons executed. This check proved nothing — a probe that "
@@ -896,7 +941,12 @@ def main(argv: list[str] | None = None) -> int:
         "--subset",
         help="an integer (first N instances) or a comma-separated list of instance names",
     )
-    p.add_argument("--out", help="output path (default reports/panel_baseline_<sha>.json)")
+    p.add_argument(
+        "--out",
+        help="baseline mode: output path (default reports/panel_baseline_<sha>.json). "
+        "--check mode: where to write the machine-readable check report "
+        "(comparison counts + adjudications); omitted, only stdout is produced.",
+    )
     p.add_argument(
         "--replicates",
         type=int,
@@ -915,8 +965,9 @@ def main(argv: list[str] | None = None) -> int:
         "--max-load",
         type=float,
         default=_DEFAULT_MAX_LOAD,
-        help=f"refuse to start above this 1-minute load average (default {_DEFAULT_MAX_LOAD}); "
-        f"a gate run under contention is not a gate (CLAUDE.md §9)",
+        help=f"refuse to START above this 1-minute load average (default "
+        f"{_DEFAULT_MAX_LOAD}); a gate run under contention is not a gate (CLAUDE.md §9). "
+        f"Start-time only: it cannot see load that arrives after the run begins",
     )
     p.add_argument(
         "--allow-load",
