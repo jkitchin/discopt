@@ -912,6 +912,15 @@ Regime N exact-node-count. Deliverables: `Model.solve(explain_routing=True)` (or
 
 ### Card 4b — Carve `solve_model` into modules
 
+> **Status: modules 2–5 DROPPED by owner, 2026-07-30.** Module 1
+> (`solver/native_kernel.py`) landed and stays. The rest is closed, not deferred:
+> the entry experiment proved four of the five named modules are *inline statement
+> blocks* sharing a closure of 200+ locals, so they cannot be moved without first
+> extracting an explicit state object — a project in its own right that buys
+> maintainability, not correctness. With the benchmark's purpose confirmed as
+> **correctness validation**, that trade does not earn a session. Re-open only as a
+> deliberately scoped state-object card, never as "finish the carve-up".
+
 With routing extracted, split the monolith along its existing phase banners into
 `solver/` submodules: `setup.py` (validation, classification, convexity cache),
 `reformulate.py` (the 9 reformulation stages), `root.py` (root presolve/OBBT/cuts,
@@ -922,6 +931,20 @@ Regime N; `git log --follow` preserved by moving whole functions. Multiple PRs,
 one module each — **never one big-bang PR**.
 
 ### Card 4c — Three stray B&B loops onto `PyTreeManager`
+
+> **Status: NEXT (owner, 2026-07-30).** Promoted from "lowest priority" — that
+> ranking assumed a performance goal. Under a **correctness** goal this is the
+> highest-value consolidation left: three independent reimplementations of node
+> selection and pruning are three independent places a certificate invariant can
+> be wrong, and only one of them is audited.
+>
+> **Carries the vector-constraint corpus gap.** Phase 5.5 fixed incumbent verifiers
+> that were *accepting infeasible points* through row misalignment on vector
+> constraints — but every row in the in-repo `.nl` corpus is scalar, so the
+> 119-instance sweep cannot exercise that class and the fix rests on unit tests
+> alone. A correctness benchmark over this corpus is blind to it. Add
+> vector-constraint instances (built via the modeling API, not `from_nl`) to the
+> corpus used by the parity and verifier suites.
 
 `lp_spatial_bb.py`, `gp/solve_gp_minlp`, `signomial_global` reimplement node
 selection with raw `heapq`. Port each to `PyTreeManager` (same selection policy →
@@ -1368,6 +1391,23 @@ changes what the relaxation compiler sees, which is gap-closure of the same fami
 as kernel-coverage expansion, not consolidation to be done ahead of the
 modularization. Card 3e (the FBBT composition defect) is unscheduled and may run
 any time after Phase 4 releases `solver.py`; it touches `crates/` only.
+
+**Re-sequencing, 2026-07-30 (owner) — the benchmark is for CORRECTNESS, not speed.**
+That reprioritizes what is left:
+- **Card 4c is NEXT**, promoted from lowest priority (one audited tree manager for
+  every certificate-critical pruning decision), carrying the vector-constraint
+  corpus gap.
+- **Card 4b modules 2–5: DROPPED** (see its card) — maintainability, not
+  correctness, behind a state-object prerequisite.
+- **Card 6d (process floor): OFF the critical path** — pure wall-clock, no
+  certificate content. Keep for a later performance pass.
+- **Card 6a rises**: root-causing substitution's measured 2449 % primal gap is a
+  correctness investigation wearing a performance label.
+- Order from here: **4c → 3a(b) → 6a → 3d** (3d last and default-OFF; it is still
+  the most dangerous change in the plan), with 6b/6c/7 as capacity allows.
+- Standing requirement, after a container rollback silently destroyed a session:
+  every card asserts `HEAD == origin` **and** rebuilds/verifies the compiled `.so`
+  marker before measuring. Source-file checks alone missed a stale binary once.
 
 Parallelism guidance for Opus sessions: Phases 1, 2, 7 are safe concurrently
 (disjoint files). Phases 3 and 4 both edit `solver.py` — serialize them. Phase 5
