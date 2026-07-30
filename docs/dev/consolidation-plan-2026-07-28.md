@@ -1856,6 +1856,143 @@ touches `crates/` + producer files — safe alongside 1/2/7, coordinate with 3c
 
 ## §6. Falsification log (append-only, per §0.3)
 
+### 2026-07-30 — Open-ledger item 11 close-out: what was run on the final tree
+
+Recorded per §0.6. Tree: `d7b374f6` (item 15's close-out) + this session's
+commits. `HEAD == origin` asserted before every commit — the branch had not moved
+under this session at any point. Compiled `.so` marker asserted before **every**
+panel run: `strings _rust.cpython-311-x86_64-linux-gnu.so` finds
+`subtol_crossings_repaired` (CLAUDE.md §8), and `discopt.__file__` resolves to
+`/home/user/discopt/python/discopt/__init__.py`, i.e. the tree under test and not
+a site-packages copy.
+
+**What landed.**
+
+| commit | what |
+|---|---|
+| `ab8235dc` | the census: `discopt_benchmarks/scripts/solve_model_locals_census.py`, `reports/solve_model_locals_census.{json,txt}` on the unmodified tree, plus the AST-proof migration tool `thread_solve_model_state.py`. No solver code touched |
+| `4665bc40` | `python/discopt/solver/state.py` + `PhaseTimers` (4 locals, 46 sites) and `PrimalHeuristicState` (7 locals, 44 sites) threaded; `python/tests/test_solver_state.py` |
+| `d7964ece` | the Regime-N gate artifact for `4665bc40` |
+| `820246ec` | `LazyStallSeparationState` (6 locals, 29 sites) and `PerNodeOBBTBudget` (4 locals, 15 sites) threaded; the migration table made two-directional |
+
+**No code was moved out of `solve_model`.** That was the scope boundary and it
+held: `solve_model` is still one function, still in `solver/__init__.py`, and the
+carve is untouched. What changed is that 21 of its locals are now fields of named
+typed objects instead of members of an implicit closure.
+
+**Proof of purity — why this is a rename and not an edit.** Every one of the four
+migrations was performed by `thread_solve_model_state.py`, which does the textual
+rewrite from AST node positions and then *proves* it: it applies the same
+substitution to the original AST with a transformer and refuses to write unless
+`ast.dump(transformed_original) == ast.dump(reparsed_rewritten)` for
+`solve_model`, and unless all **125** sibling top-level definitions are
+AST-identical to their pre-rewrite selves. Executed comparisons per run: 126.
+
+| holder | locals | sites | reference substitutions | siblings proved identical |
+|---|---|---|---|---|
+| `_timers` | 4 | 46 | 46 | 125 |
+| `_heur` | 7 | 44 | 44 | 125 |
+| `_lazy` | 6 | 29 | 29 | 125 |
+| `_pn_obbt` | 4 | 15 | 15 | 125 |
+
+The tool also refuses when a migrated name exists at module level, because there a
+*missed* site would silently read the global instead of raising `NameError`
+(CLAUDE.md §7). None of the 21 collided; the refusal arm was never needed but is
+the reason a missed site is loud rather than silent.
+
+It refused once, correctly: `_lazy_glb_ref` was an `AnnAssign`, and rewriting the
+target to an attribute changes the node's `simple` flag, so the proof would not
+close. Converted to a plain assignment by hand first — behaviour-neutral by
+PEP 526 (annotations on *local* variables are never evaluated at runtime) — and
+the type now lives on the dataclass field.
+
+**Regime N — the hardened gate, twice, once per threading commit.**
+
+| tree | verdict |
+|---|---|
+| `4665bc40` (11 locals) | **PASS.** `comparisons executed (total): 255 = 255 first-pass + 0 adjudication over 85 comparable row(s); flagged 0, adjudicated 0, transient 0`. 1988.5 s, load start 0.17 peak 2.34. Artifact `reports/item11_panel_check_commit2.log` |
+| `820246ec` (21 locals) | **PASS.** `comparisons executed (total): 255 = 255 first-pass + 0 adjudication over 85 comparable row(s); flagged 0, adjudicated 0, transient 0`. 1949.1 s, load start 0.48 peak 1.81. Artifact `reports/item11_panel_check_commit3.log` |
+
+Zero rows were flagged on either run, so nothing reached adjudication and there
+are **no TRANSIENT rows to disclose** — per the Phase 0 addendum a card that hides
+transients has not reported its measurement, and here there are none. The 16
+non-comparable drift rows the gate prints are budget-dependent terminal statuses
+and are not gating; they are the same population Phase 3, Phase 5, Card 3e, Card
+4a, Card 4c and item 15 all saw. **Ledger row 15b applies and was honoured**: the
+verdict quoted is the adjudicator's, not a raw first-pass flag — there was simply
+nothing to adjudicate.
+
+**Suites.**
+
+| suite | result |
+|---|---|
+| `pytest python/tests -m smoke` | **PASS — 953 passed**, 16 skipped, 7,756 deselected, 2 xpassed (456.8 s). Pre-session 947; the +6 are `test_solver_state.py` |
+| `pytest discopt_benchmarks/tests -m smoke` | **PASS — 53 passed, 1 skipped**, 378 deselected (32.3 s) |
+| `pytest -m slow python/tests/test_adversarial_recent_fixes.py` | **PASS — 10 passed** (208.4 s) |
+| `test_routing.py` + `test_tightening_schedule.py` + `test_node_tightening_parity.py` + `test_vector_constraint_corpus.py` + `test_solver_state.py` | **PASS — 73 passed**, 12 deselected (12.7 s) |
+| `test_flag_registry.py` | **PASS — 17 passed** |
+| `mypy 2.1.0 python/discopt/ --ignore-missing-imports` | **Success — 320 source files.** Version asserted, not assumed: a local shim would have reported a false Success (CLAUDE.md §8 applied to the type checker) |
+| `ruff check python/`, `ruff format --check python/` | clean, apart from two offenders (`test_log_square_relaxation.py`, `test_mo_augmecon2.py`) verified dirty on `d7b374f6` before this session touched anything |
+| `cargo test -p discopt-core` | **not run — `crates/` untouched** |
+| heldout50 | **SKIPPED — local only.** Not available in this environment |
+
+The two AST conformance suites Card 3a(a) and Card 4a left behind
+(`test_tightening_schedule.py`, `test_routing.py`) assert marker *order inside
+`solve_model`*; they pass unchanged, which is the expected result for a change
+that renames locals and moves no statements. Neither was edited or silenced.
+
+**The monkeypatch hazard Card 4b measured did not apply, and that is a fact rather
+than an assumption.** The 30+ patched `discopt.solver` attributes are module-level
+*functions*; this card moved no function and re-exported nothing, so no
+`monkeypatch.setattr` seam changed meaning and the negative assertion in
+`test_expired_outer_deadline_skips_native_seed_work` cannot have gone vacuous. The
+standing re-export policy test in `test_spatial_native_kernel.py` passes.
+
+**Effect, measured on the census.**
+
+| | before | after |
+|---|---|---|
+| cross-region locals | 153 | **136** |
+| `root`→`loop` | 85 | **68** |
+| `root`→`results` | 44 | **41** |
+| `loop`→`results` | 24 | **17** |
+
+The arithmetic closes exactly: −21 migrated, +4 holders (the holders are
+themselves cross-region locals).
+
+**Can item 11 close? NO — and the honest-outcome clause does not apply either.**
+The census's kill criterion came back negative: the crossing names *do* cluster,
+so the object is not a cosmetic rename and the work is worth doing. But 21 of 153
+is a fifth of it. What remains is bounded and mechanical rather than uncertain —
+the tool, the gate, the conformance test and the naming policy all exist and are
+proven — and the next groups are named by the census itself: the McCormick
+relaxation handles (`_mc_lp_relaxer`, `_mc_mode`, `_mc_obj_relax_fn`,
+`_mc_con_relax_fns`, `_mc_con_senses`, `_mc_negate`, `_mc_obj_eval`,
+`_mc_nlp_period`), the dual-bound certificate flags (`_gap_certified`,
+`_nonrigorous_fathom`, `_taint_floor_internal`, `_tree_bound_poisoned`,
+`_root_glb_internal`, `_convex_bound_untrusted`, `_root_rigorously_infeasible`,
+`_root_pool_bound`, `_debug_quit`), and the read-only root context (`evaluator`,
+`tree`, `t_start`, `_deadline`, `n_vars`, `int_offsets`, `int_sizes`, `cl_list`,
+`cu_list`, `constraint_bounds`, `opts`).
+
+The certificate cluster is deliberately **not** in this session's increment. It is
+the soundness-critical group — it decides whether a bound may be reported as
+certified — it has the widest lifetime in the function (13 rebinds of
+`_gap_certified` alone, across all three regions), and it deserves a commit whose
+gate run is about nothing else. Bundling it behind two cheap increments would have
+made a `CONFIRMED` verdict unattributable, which is the whole reason this card
+worked in small commits.
+
+**One thing this card did NOT establish, stated so no later card assumes it.**
+Threading a local onto a `slots=True` dataclass replaces a `LOAD_FAST` with a
+`LOAD_ATTR`, and per ledger row 15b the solver decides how much work to do by
+reading a clock at 78 Python sites — so a *large enough* slowdown could move a
+node count without any logic changing. Two panel runs at 21 locals show no such
+effect (0 flagged rows both times), but that is evidence at this scale, not a
+proof that the remaining ~115 are free. A later increment that threads a local
+read inside the innermost node loop should watch for it rather than assume it
+away.
+
 ### 2026-07-30 — Open-ledger item 11 entry experiment: "`solve_model`'s locals are a 200+ closure that cannot be separated" — **HALF FALSIFIED. The closure is real; 200+ is not the coupling, and the coupling is concentrated on two boundaries**
 
 **Hypothesis (Card 4b's own, restated as item 11's premise).** The four dropped
