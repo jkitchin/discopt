@@ -58,7 +58,108 @@ __all__ = [
     "PerNodeOBBTBudget",
     "PhaseTimers",
     "PrimalHeuristicState",
+    "RootConfig",
 ]
+
+
+@dataclass(frozen=True, slots=True)
+class RootConfig:
+    """Solve-wide configuration that is **decided once and never mutated**.
+
+    .. rubric:: Why the admission rule is the interesting part
+
+    This is the only holder in this module that is ``frozen=True``, and freezing is
+    a promise. A 2026-07-30 design review caught the previous revision of the plan
+    about to break it: the locals census's ``CONFIG`` label meant "the *name* is
+    never rebound", **not** "the *value* is immutable", and eleven names carrying
+    that label are mutated in place — including the live B&B ``tree``, the
+    per-node deadline dict ``opts``, and ``kwargs``. Because ``frozen`` blocks only
+    field *rebinding*, a holder that admitted those would have offered a guarantee
+    it does not make, and the mutation would still have worked, silently. The
+    review's verdict was that such a holder is *worse than leaving them as locals*.
+
+    So membership here is not a judgement call. A name is admitted only if
+    ``discopt_benchmarks/scripts/solve_model_config_mutability_audit.py`` returns
+    ``IMMUTABLE_TYPE`` or ``CLEAN`` for it, over four channels: syntactic mutation
+    inside ``solve_model``, methods resolved through the receiver's class or a Rust
+    ``&mut self`` signature, transitive mutation through callees, and — the one
+    that settles most of this class outright — a proof from the type that no
+    mutation is possible at all. Every field below is a ``str``/``int``/``bool``
+    or an ``Optional`` of one: CPython gives these no in-place mutation, so the
+    freeze is a *true* guarantee rather than a decorative one.
+
+    ``reports/solve_model_config_mutability_audit.md`` is the per-name table, and
+    ``python/tests/test_solver_state.py`` re-derives it: a field whose audit
+    verdict is not a clear fails the suite rather than being caught by review.
+
+    .. rubric:: Resolved forms only
+
+    Three of ``solve_model``'s parameters have a *derived* twin computed later
+    (``root_cut_max``/``_root_cut_max``, ``root_cut_rounds``/``_root_cut_rounds``,
+    ``solver``/``_solver``). Carrying both would create a shadow pair that drifts
+    the first time one side is updated and the other is not, so none of the three
+    raw parameters is admitted; their resolved forms belong to a later holder built
+    after the root region computes them. A test enforces the exclusion.
+
+    .. rubric:: What deliberately stays a loose local
+
+    The mutable handles — ``tree``, ``evaluator``, ``opts``, ``kwargs``,
+    ``_adaptive_nlp_state``, ``_heuristic_governor``, ``_reduce_timers`` — stay
+    plain locals. They are the four highest-load names in the group, and putting
+    them behind a type named *config* is exactly the mislabel this class exists to
+    avoid. They are threaded onto the *mutable* holders in this module, or not at
+    all.
+
+    .. rubric:: Cost
+
+    Threading a local onto a ``slots=True`` dataclass replaces a ``LOAD_FAST`` with
+    a ``LOAD_ATTR``, and per the plan's ledger row 15b the solver reads a clock at
+    78 Python sites to decide how much work to do — so a large enough slowdown
+    could move a node count with no logic change. Every field admitted so far is
+    read only in the ``setup``/``reformulate``/``root``/``results`` regions, never
+    inside the innermost node loop, which keeps that variable out of the first
+    gate run rather than assuming it away. The names that *are* read in the loop
+    are a later tranche, and they are where 15b has to be watched.
+    """
+
+    #: GDP reformulation strategy (``"bigm"``, ``"hull"``, …).
+    gdp_method: str
+    #: How McCormick envelope bounds are sourced.
+    mccormick_bounds: str
+    #: Skip the root convexity detection pass.
+    skip_convex_check: bool
+    #: Node-selection strategy for the Rust tree manager.
+    strategy: str
+    #: Worker threads for batched node evaluation.
+    threads: int
+    #: RLT engagement: ``False``, ``True``, or a named mode.
+    rlt: bool | str
+    #: Whether RLT cut separation is enabled.
+    rlt_cuts: bool
+    #: Force/forbid the NLP branch-and-bound path; ``None`` means auto.
+    nlp_bb: bool | None
+    #: Piecewise partition count for relaxations.
+    partitions: int
+    #: PSD cut separation.
+    psd_cuts: bool
+    #: Cut family selection string.
+    cuts: str
+    #: Use learned relaxation coefficients where available.
+    use_learned_relaxations: bool
+    #: Eigenvalue-based root bounding.
+    eigenvalue_root_bound: bool
+    #: Lagrangian dual bound at the root.
+    lagrangian_bound: bool
+    #: How often the Lagrangian bound is recomputed.
+    lagrangian_frequency: int
+    #: Polynomial presolve rewrites.
+    presolve_polynomial: bool
+    #: Reverse-AD presolve pass.
+    presolve_reverse_ad: bool
+    #: Sub-NLP backend name.
+    subnlp_backend: str
+    #: Whether the sub-NLP primal heuristic layer runs at all.
+    subnlp_enabled: bool
 
 
 @dataclass(slots=True)

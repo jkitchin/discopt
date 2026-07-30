@@ -69,6 +69,7 @@ from discopt.solver.state import (
     PerNodeOBBTBudget,
     PhaseTimers,
     PrimalHeuristicState,
+    RootConfig,
 )
 from discopt.solver_tuning import current as _tuning
 from discopt.solver_tuning import reset_current as _reset_tuning
@@ -4028,6 +4029,40 @@ def solve_model(
         Contains solution values, objective, gap, node count, and
         per-layer profiling times (Rust, JAX, Python).
     """
+    # --- Solve-wide immutable configuration (consolidation plan, item 11) ---
+    # Nineteen parameters that are decided here and never rebound or mutated,
+    # gathered into one frozen holder so the later carve passes a named object
+    # instead of nineteen positional arguments.  Membership is not a judgement
+    # call: each name is cleared by
+    # ``discopt_benchmarks/scripts/solve_model_config_mutability_audit.py``
+    # (verdict IMMUTABLE_TYPE or CLEAN over four channels, including transitive
+    # mutation through callees).  This is the *only* place these parameters are
+    # read directly — every other read goes through ``_cfg``, which is what keeps
+    # a raw parameter and a derived twin from drifting apart.  See
+    # ``RootConfig``'s docstring for why the mutable handles (``tree``,
+    # ``evaluator``, ``opts``) are deliberately NOT here.
+    _cfg = RootConfig(
+        gdp_method=gdp_method,
+        mccormick_bounds=mccormick_bounds,
+        skip_convex_check=skip_convex_check,
+        strategy=strategy,
+        threads=threads,
+        rlt=rlt,
+        rlt_cuts=rlt_cuts,
+        nlp_bb=nlp_bb,
+        partitions=partitions,
+        psd_cuts=psd_cuts,
+        cuts=cuts,
+        use_learned_relaxations=use_learned_relaxations,
+        eigenvalue_root_bound=eigenvalue_root_bound,
+        lagrangian_bound=lagrangian_bound,
+        lagrangian_frequency=lagrangian_frequency,
+        presolve_polynomial=presolve_polynomial,
+        presolve_reverse_ad=presolve_reverse_ad,
+        subnlp_backend=subnlp_backend,
+        subnlp_enabled=subnlp_enabled,
+    )
+
     # --- Enforce float64 precision ---
     # JAX defaults to float32 unless JAX_ENABLE_X64=1 is set *before* importing
     # JAX.  ``discopt/__init__.py`` sets that env var at import time, so x64 is
@@ -4071,8 +4106,8 @@ def solve_model(
     # models, or "nlp" for the convex-model relaxation bound. See
     # docs/dev/correctness-issues.md (C-18).
     _valid_mccormick_bounds = {"auto", "nlp", "lp", "none"}
-    if mccormick_bounds not in _valid_mccormick_bounds:
-        if mccormick_bounds == "midpoint":
+    if _cfg.mccormick_bounds not in _valid_mccormick_bounds:
+        if _cfg.mccormick_bounds == "midpoint":
             raise ValueError(
                 "mccormick_bounds='midpoint' has been removed (correctness issue "
                 "C-18): it evaluated the convex underestimator at the box midpoint "
@@ -4084,7 +4119,7 @@ def solve_model(
                 "'nlp' for the convex-model relaxation bound."
             )
         raise ValueError(
-            f"Unknown mccormick_bounds={mccormick_bounds!r}. Choose one of "
+            f"Unknown mccormick_bounds={_cfg.mccormick_bounds!r}. Choose one of "
             f"{sorted(_valid_mccormick_bounds)}."
         )
 
@@ -4422,7 +4457,7 @@ def solve_model(
 
         gdp_methods = {"big-m", "hull", "mbigm", "auto"}
         native_gdp_methods = {"loa"}
-        if gdp_method == "oa":
+        if _cfg.gdp_method == "oa":
             warnings.warn(
                 "gdp_method='oa' is deprecated for selecting MINLP OA. Use "
                 "solver='mip-nlp', mip_nlp_method='oa'. Interpreting gdp_method "
@@ -4431,19 +4466,20 @@ def solve_model(
                 stacklevel=2,
             )
             resolved_gdp_method = "big-m"
-        elif gdp_method in gdp_methods:
-            resolved_gdp_method = gdp_method
-        elif gdp_method in native_gdp_methods:
+        elif _cfg.gdp_method in gdp_methods:
+            resolved_gdp_method = _cfg.gdp_method
+        elif _cfg.gdp_method in native_gdp_methods:
             allowed = ", ".join(sorted(gdp_methods))
             raise ValueError(
-                f"gdp_method={gdp_method!r} conflicts with solver='mip-nlp'. "
+                f"gdp_method={_cfg.gdp_method!r} conflicts with solver='mip-nlp'. "
                 "Use mip_nlp_method to select the MIP-NLP algorithm and reserve "
                 f"gdp_method for GDP reformulation methods: {allowed}."
             )
         else:
             allowed = ", ".join(sorted(gdp_methods | {"oa"}))
             raise ValueError(
-                f"Unknown gdp_method={gdp_method!r} for solver='mip-nlp'. Choose one of: {allowed}."
+                f"Unknown gdp_method={_cfg.gdp_method!r} for solver='mip-nlp'. "
+                f"Choose one of: {allowed}."
             )
 
         ignored_mip_nlp_options = []
@@ -4452,38 +4488,38 @@ def solve_model(
             if should_warn:
                 ignored_mip_nlp_options.append(name)
 
-        _note_ignored_mip_nlp("threads", threads != 1)
+        _note_ignored_mip_nlp("threads", _cfg.threads != 1)
         _note_ignored_mip_nlp("deterministic", deterministic is not True)
         _note_ignored_mip_nlp("batch_size", batch_size != 16)
-        _note_ignored_mip_nlp("strategy", strategy != "best_first")
+        _note_ignored_mip_nlp("strategy", _cfg.strategy != "best_first")
         _note_ignored_mip_nlp("ipopt_options", ipopt_options is not None)
         _note_ignored_mip_nlp("sparse", sparse is not None)
         _note_ignored_mip_nlp("cutting_planes", cutting_planes is not False)
-        _note_ignored_mip_nlp("psd_cuts", psd_cuts is not False)
-        _note_ignored_mip_nlp("rlt_cuts", rlt_cuts is not False)
-        _note_ignored_mip_nlp("rlt", rlt != "auto")
-        _note_ignored_mip_nlp("cuts", cuts != "auto")
-        _note_ignored_mip_nlp("partitions", partitions != 0)
-        _note_ignored_mip_nlp("use_learned_relaxations", use_learned_relaxations is not False)
-        _note_ignored_mip_nlp("mccormick_bounds", mccormick_bounds != "auto")
+        _note_ignored_mip_nlp("psd_cuts", _cfg.psd_cuts is not False)
+        _note_ignored_mip_nlp("rlt_cuts", _cfg.rlt_cuts is not False)
+        _note_ignored_mip_nlp("rlt", _cfg.rlt != "auto")
+        _note_ignored_mip_nlp("cuts", _cfg.cuts != "auto")
+        _note_ignored_mip_nlp("partitions", _cfg.partitions != 0)
+        _note_ignored_mip_nlp("use_learned_relaxations", _cfg.use_learned_relaxations is not False)
+        _note_ignored_mip_nlp("mccormick_bounds", _cfg.mccormick_bounds != "auto")
         _note_ignored_mip_nlp("decomposition", decomposition is not None)
-        _note_ignored_mip_nlp("lagrangian_bound", lagrangian_bound is not False)
-        _note_ignored_mip_nlp("lagrangian_frequency", lagrangian_frequency != 1)
-        _note_ignored_mip_nlp("skip_convex_check", skip_convex_check is not False)
-        _note_ignored_mip_nlp("nlp_bb", nlp_bb is not None)
+        _note_ignored_mip_nlp("lagrangian_bound", _cfg.lagrangian_bound is not False)
+        _note_ignored_mip_nlp("lagrangian_frequency", _cfg.lagrangian_frequency != 1)
+        _note_ignored_mip_nlp("skip_convex_check", _cfg.skip_convex_check is not False)
+        _note_ignored_mip_nlp("nlp_bb", _cfg.nlp_bb is not None)
         _note_ignored_mip_nlp("lazy_constraints", lazy_constraints is not None)
         _note_ignored_mip_nlp("incumbent_callback", incumbent_callback is not None)
         _note_ignored_mip_nlp("node_callback", node_callback is not None)
         _note_ignored_mip_nlp("presolve", presolve is not True)
-        _note_ignored_mip_nlp("presolve_polynomial", presolve_polynomial is not False)
-        _note_ignored_mip_nlp("presolve_reverse_ad", presolve_reverse_ad is not False)
+        _note_ignored_mip_nlp("presolve_polynomial", _cfg.presolve_polynomial is not False)
+        _note_ignored_mip_nlp("presolve_reverse_ad", _cfg.presolve_reverse_ad is not False)
         # PF1 (#632): default is now 1; warn only when the user overrode it, so a
         # default solve on the mip-nlp path stays quiet.
         _note_ignored_mip_nlp("in_tree_presolve_stride", in_tree_presolve_stride != 1)
-        _note_ignored_mip_nlp("eigenvalue_root_bound", eigenvalue_root_bound is not False)
+        _note_ignored_mip_nlp("eigenvalue_root_bound", _cfg.eigenvalue_root_bound is not False)
         _note_ignored_mip_nlp("relaxation_arithmetic", relaxation_arithmetic != "mccormick")
-        _note_ignored_mip_nlp("subnlp_enabled", subnlp_enabled is not True)
-        _note_ignored_mip_nlp("subnlp_backend", subnlp_backend != "auto")
+        _note_ignored_mip_nlp("subnlp_enabled", _cfg.subnlp_enabled is not True)
+        _note_ignored_mip_nlp("subnlp_backend", _cfg.subnlp_backend != "auto")
         _note_ignored_mip_nlp("subnlp_frequency", subnlp_frequency != 20)
         _note_ignored_mip_nlp("subnlp_max_calls", subnlp_max_calls != 200)
         _note_ignored_mip_nlp("subnlp_options", subnlp_options is not None)
@@ -4563,24 +4599,24 @@ def solve_model(
             if should_warn:
                 ignored_amp_options.append(name)
 
-        _note_ignored("threads", threads != 1)
+        _note_ignored("threads", _cfg.threads != 1)
         _note_ignored("deterministic", deterministic is not True)
         _note_ignored("batch_size", batch_size != 16)
-        _note_ignored("strategy", strategy != "best_first")
+        _note_ignored("strategy", _cfg.strategy != "best_first")
         _note_ignored("max_nodes", max_nodes != 100_000)
         _note_ignored("ipopt_options", ipopt_options is not None)
         _note_ignored("sparse", sparse is not None)
         _note_ignored("cutting_planes", cutting_planes is not False)
-        _note_ignored("partitions", partitions != 0)
-        _note_ignored("use_learned_relaxations", use_learned_relaxations is not False)
-        _note_ignored("mccormick_bounds", mccormick_bounds != "auto")
-        _note_ignored("nlp_bb", nlp_bb is not None)
+        _note_ignored("partitions", _cfg.partitions != 0)
+        _note_ignored("use_learned_relaxations", _cfg.use_learned_relaxations is not False)
+        _note_ignored("mccormick_bounds", _cfg.mccormick_bounds != "auto")
+        _note_ignored("nlp_bb", _cfg.nlp_bb is not None)
         _note_ignored("lazy_constraints", lazy_constraints is not None)
         _note_ignored("incumbent_callback", incumbent_callback is not None)
         _note_ignored("node_callback", node_callback is not None)
         amp_gdp_methods = {"big-m", "hull", "mbigm", "auto"}
-        amp_gdp_method = gdp_method if gdp_method in amp_gdp_methods else "big-m"
-        _note_ignored("gdp_method", gdp_method not in amp_gdp_methods)
+        amp_gdp_method = _cfg.gdp_method if _cfg.gdp_method in amp_gdp_methods else "big-m"
+        _note_ignored("gdp_method", _cfg.gdp_method not in amp_gdp_methods)
         if kwargs:
             ignored_amp_options.extend(sorted(kwargs))
         if ignored_amp_options:
@@ -4606,7 +4642,7 @@ def solve_model(
             model,
             time_limit=time_limit,
             nlp_solver=nlp_solver,
-            skip_convex_check=skip_convex_check,
+            skip_convex_check=_cfg.skip_convex_check,
             **amp_kwargs,
         )
 
@@ -4632,17 +4668,17 @@ def solve_model(
             if should_warn:
                 ignored_gp_options.append(name)
 
-        _note_ignored_gp("threads", threads != 1)
+        _note_ignored_gp("threads", _cfg.threads != 1)
         _note_ignored_gp("deterministic", deterministic is not True)
         _note_ignored_gp("batch_size", batch_size != 16)
-        _note_ignored_gp("strategy", strategy != "best_first")
+        _note_ignored_gp("strategy", _cfg.strategy != "best_first")
         _note_ignored_gp("max_nodes", max_nodes != 100_000)
-        _note_ignored_gp("partitions", partitions != 0)
-        _note_ignored_gp("use_learned_relaxations", use_learned_relaxations is not False)
-        _note_ignored_gp("mccormick_bounds", mccormick_bounds != "auto")
-        _note_ignored_gp("gdp_method", gdp_method != "big-m")
+        _note_ignored_gp("partitions", _cfg.partitions != 0)
+        _note_ignored_gp("use_learned_relaxations", _cfg.use_learned_relaxations is not False)
+        _note_ignored_gp("mccormick_bounds", _cfg.mccormick_bounds != "auto")
+        _note_ignored_gp("gdp_method", _cfg.gdp_method != "big-m")
         _note_ignored_gp("cutting_planes", cutting_planes is not False)
-        _note_ignored_gp("nlp_bb", nlp_bb is not None)
+        _note_ignored_gp("nlp_bb", _cfg.nlp_bb is not None)
         _note_ignored_gp("lazy_constraints", lazy_constraints is not None)
         _note_ignored_gp("incumbent_callback", incumbent_callback is not None)
         _note_ignored_gp("node_callback", node_callback is not None)
@@ -4691,16 +4727,16 @@ def solve_model(
             if should_warn:
                 ignored_gp_minlp_options.append(name)
 
-        _note_ignored_gp_minlp("threads", threads != 1)
+        _note_ignored_gp_minlp("threads", _cfg.threads != 1)
         _note_ignored_gp_minlp("deterministic", deterministic is not True)
         _note_ignored_gp_minlp("batch_size", batch_size != 16)
-        _note_ignored_gp_minlp("strategy", strategy != "best_first")
-        _note_ignored_gp_minlp("partitions", partitions != 0)
-        _note_ignored_gp_minlp("use_learned_relaxations", use_learned_relaxations is not False)
-        _note_ignored_gp_minlp("mccormick_bounds", mccormick_bounds != "auto")
-        _note_ignored_gp_minlp("gdp_method", gdp_method != "big-m")
+        _note_ignored_gp_minlp("strategy", _cfg.strategy != "best_first")
+        _note_ignored_gp_minlp("partitions", _cfg.partitions != 0)
+        _note_ignored_gp_minlp("use_learned_relaxations", _cfg.use_learned_relaxations is not False)
+        _note_ignored_gp_minlp("mccormick_bounds", _cfg.mccormick_bounds != "auto")
+        _note_ignored_gp_minlp("gdp_method", _cfg.gdp_method != "big-m")
         _note_ignored_gp_minlp("cutting_planes", cutting_planes is not False)
-        _note_ignored_gp_minlp("nlp_bb", nlp_bb is not None)
+        _note_ignored_gp_minlp("nlp_bb", _cfg.nlp_bb is not None)
         _note_ignored_gp_minlp("lazy_constraints", lazy_constraints is not None)
         _note_ignored_gp_minlp("incumbent_callback", incumbent_callback is not None)
         _note_ignored_gp_minlp("node_callback", node_callback is not None)
@@ -4739,7 +4775,7 @@ def solve_model(
         or node_callback is not None
         or kwargs.get("iteration_callback") is not None
     )
-    if _solver is None and not _has_bb_callbacks and not skip_convex_check:
+    if _solver is None and not _has_bb_callbacks and not _cfg.skip_convex_check:
         _rt.entered("auto_gp")
         from discopt.gp import classify_gp, solve_gp
 
@@ -4767,7 +4803,7 @@ def solve_model(
     if (
         _solver is None
         and not _has_bb_callbacks
-        and not skip_convex_check
+        and not _cfg.skip_convex_check
         and env_bool("DISCOPT_GP_MINLP", False)
     ):
         _rt.entered("auto_gp_minlp")
@@ -4802,7 +4838,7 @@ def solve_model(
     if (
         _solver is None
         and not _has_bb_callbacks
-        and not skip_convex_check
+        and not _cfg.skip_convex_check
         and env_bool("DISCOPT_SGO", False)
     ):
         _rt.entered("auto_signomial_global")
@@ -4886,7 +4922,7 @@ def solve_model(
             )
 
     # --- Deprecated compatibility route: OA is a MINLP solver strategy, not a GDP method. ---
-    if gdp_method == "oa":
+    if _cfg.gdp_method == "oa":
         _rt.entered("gdp_oa")
         import warnings
 
@@ -4947,7 +4983,7 @@ def solve_model(
         )
 
     # --- LOA decomposition: intercept before GDP reformulation ---
-    if gdp_method == "loa":
+    if _cfg.gdp_method == "loa":
         _rt.entered("gdp_loa")
         from discopt.solvers.gdpopt_loa import solve_gdpopt_loa
 
@@ -4973,7 +5009,7 @@ def solve_model(
     # --- GDP reformulation: convert indicator/disjunctive/SOS to standard MINLP ---
     from discopt._jax.gdp_reformulate import reformulate_gdp
 
-    model = reformulate_gdp(model, method=gdp_method)
+    model = reformulate_gdp(model, method=_cfg.gdp_method)
 
     # --- Entropy-family canonicalization: recover the ``entropy(x) = x*log(x)``
     # and ``centropy(x, y) = x*log(x/y)`` intrinsics from the raw products that
@@ -5600,7 +5636,7 @@ def solve_model(
             _model_repr, _presolve_stats = run_root_presolve(
                 _model_repr,
                 eliminate=True,
-                polynomial=presolve_polynomial,
+                polynomial=_cfg.presolve_polynomial,
                 fbbt=True,
                 time_limit_ms=int(_presolve_budget_s * 1000),
             )
@@ -5655,7 +5691,7 @@ def solve_model(
     # Disabled by default because it walks the Python expression DAG and
     # can be slow on very large models. Skipped once the budget is blown (#654):
     # it only tightens bounds, so declining it leaves a valid looser box.
-    if presolve and presolve_reverse_ad and not _deadline_exhausted():
+    if presolve and _cfg.presolve_reverse_ad and not _deadline_exhausted():
         try:
             from discopt._jax.presolve_pipeline import run_reverse_ad_tightening
 
@@ -5671,7 +5707,7 @@ def solve_model(
     # bound via spectral decomposition. Used only as an informational
     # diagnostic at the root; does not affect the B&B tree directly. Skipped
     # once the budget is blown (#654): purely diagnostic, safe to omit.
-    if eigenvalue_root_bound and not _deadline_exhausted():
+    if _cfg.eigenvalue_root_bound and not _deadline_exhausted():
         try:
             from discopt._jax.convexity.eigenvalue_arith import (
                 QuadraticForm,
@@ -5706,7 +5742,7 @@ def solve_model(
 
     _learned_registry = None
     _relax_mode = "standard"
-    if use_learned_relaxations:
+    if _cfg.use_learned_relaxations:
         try:
             from discopt._jax.learned_relaxations import load_pretrained_registry
 
@@ -5864,7 +5900,7 @@ def solve_model(
     _pure_continuous_convexity_known = False
     _pure_continuous_is_convex = False
     _pure_continuous_constraint_mask = None
-    if _pure_continuous and not skip_convex_check:
+    if _pure_continuous and not _cfg.skip_convex_check:
         # For QPs this must run before QP dispatch so indefinite
         # pure-continuous QPs do not use the convex QP solver.
         (
@@ -5881,7 +5917,7 @@ def solve_model(
     _root_constraint_mask = _pure_continuous_constraint_mask
 
     # --- Explicit NLP-BB override: bypass specialized solvers ---
-    if nlp_bb is True and not _pure_continuous:
+    if _cfg.nlp_bb is True and not _pure_continuous:
         # INT-1 (#413): the NLP-BB path cannot honor a callback that REJECTS an
         # integer-feasible point. It has no per-node cut-application mechanism
         # (the augmented-evaluator cut pool is spatial-B&B-only) and its primal
@@ -5911,11 +5947,11 @@ def solve_model(
             time_limit,
             gap_tolerance,
             batch_size,
-            strategy,
+            _cfg.strategy,
             max_nodes,
             t_start,
             nlp_solver,
-            skip_convex_check=skip_convex_check,
+            skip_convex_check=_cfg.skip_convex_check,
             initial_point=initial_point,
             lazy_constraints=lazy_constraints,
             incumbent_callback=incumbent_callback,
@@ -5943,18 +5979,18 @@ def solve_model(
                 "supports LP, MILP, QP, MIQP, QCP, QCQP, MIQCP, and MIQCQP models only."
             )
         if problem_class == ProblemClass.LP:
-            return _solve_lp_gurobi(model, t_start, time_limit, threads, gurobi_options)
+            return _solve_lp_gurobi(model, t_start, time_limit, _cfg.threads, gurobi_options)
         if problem_class == ProblemClass.MILP:
             return _solve_milp_gurobi(
-                model, t_start, time_limit, gap_tolerance, threads, gurobi_options
+                model, t_start, time_limit, gap_tolerance, _cfg.threads, gurobi_options
             )
         if problem_class == ProblemClass.QP:
             return _solve_qp_gurobi(
-                model, t_start, time_limit, gap_tolerance, threads, gurobi_options
+                model, t_start, time_limit, gap_tolerance, _cfg.threads, gurobi_options
             )
         if problem_class == ProblemClass.MIQP:
             return _solve_qp_gurobi(
-                model, t_start, time_limit, gap_tolerance, threads, gurobi_options
+                model, t_start, time_limit, gap_tolerance, _cfg.threads, gurobi_options
             )
         if problem_class in (
             ProblemClass.QCP,
@@ -5963,7 +5999,7 @@ def solve_model(
             ProblemClass.MIQCQP,
         ):
             return _solve_qcp_gurobi(
-                model, t_start, time_limit, gap_tolerance, threads, gurobi_options
+                model, t_start, time_limit, gap_tolerance, _cfg.threads, gurobi_options
             )
         raise NotImplementedError(
             f"solver='gurobi' supports LP, MILP, QP, MIQP, QCP, QCQP, MIQCP, "
@@ -6066,7 +6102,7 @@ def solve_model(
                 # B&B runs in Rust with dual-warm-started simplex node solves. Opt-in;
                 # falls through to the default path if unavailable.
                 if nlp_solver == "simplex":
-                    if lagrangian_bound:
+                    if _cfg.lagrangian_bound:
                         logger.warning(
                             "lagrangian_bound is ignored with nlp_solver='simplex' (the "
                             "monolithic Rust MILP engine has no per-node hook); use the "
@@ -6097,7 +6133,7 @@ def solve_model(
                     time_limit,
                     gap_tolerance,
                     batch_size,
-                    strategy,
+                    _cfg.strategy,
                     max_nodes,
                     t_start,
                     prefer_pounce=_pounce_only,
@@ -6106,8 +6142,8 @@ def solve_model(
                     # POUNCE), regardless of nlp_solver. nlp_solver governs only the
                     # NLP subproblem solver. The JAX LP-IPM node path was retired (#370).
                     node_engine="simplex",
-                    lagrangian_bound=lagrangian_bound,
-                    lagrangian_frequency=lagrangian_frequency,
+                    lagrangian_bound=_cfg.lagrangian_bound,
+                    lagrangian_frequency=_cfg.lagrangian_frequency,
                     initial_point=initial_point,
                 )
             logger.info(
@@ -6159,7 +6195,7 @@ def solve_model(
                         time_limit,
                         gap_tolerance,
                         batch_size,
-                        strategy,
+                        _cfg.strategy,
                         max_nodes,
                         t_start,
                         prefer_pounce=True,
@@ -6292,7 +6328,7 @@ def solve_model(
     if (
         _pure_continuous
         and not _pure_continuous_force_spatial
-        and (skip_convex_check or not _pure_continuous_convexity_known)
+        and (_cfg.skip_convex_check or not _pure_continuous_convexity_known)
     ):
         _rt.entered("pure_continuous_unclassified")
         _cont_result = _solve_continuous(
@@ -6346,7 +6382,7 @@ def solve_model(
     # consulting the callback — INT-1, #413). Fall through to the spatial-B&B
     # loop, which enforces both correctly, rather than silently drop the
     # rejection and accept the excluded point.
-    if nlp_bb is None and lazy_constraints is None and incumbent_callback is None:
+    if _cfg.nlp_bb is None and lazy_constraints is None and incumbent_callback is None:
         _rt.entered("nlp_bb_auto")
         if not _root_convexity_known:
             _root_convexity_known, _root_is_convex, _root_constraint_mask = (
@@ -6362,11 +6398,11 @@ def solve_model(
                 time_limit,
                 gap_tolerance,
                 batch_size,
-                strategy,
+                _cfg.strategy,
                 max_nodes,
                 t_start,
                 nlp_solver,
-                skip_convex_check=skip_convex_check,
+                skip_convex_check=_cfg.skip_convex_check,
                 initial_point=initial_point,
                 lazy_constraints=lazy_constraints,
                 incumbent_callback=incumbent_callback,
@@ -6666,7 +6702,7 @@ def solve_model(
     # so a solve requesting any of those is routed to the trusted Python engine.
     _native_result: Optional[SolveResult] = None
     if _native_kernel_feature_safe(
-        mccormick_bounds=mccormick_bounds,
+        mccormick_bounds=_cfg.mccormick_bounds,
         initial_point=initial_point,
         lazy_constraints=lazy_constraints,
         incumbent_callback=incumbent_callback,
@@ -6724,7 +6760,7 @@ def solve_model(
                     _root_lb_snapshot,
                     _root_ub_snapshot,
                     _rr_budget,
-                    psd_cuts=psd_cuts,
+                    psd_cuts=_cfg.psd_cuts,
                 )
             except Exception as _rr_exc:  # pragma: no cover - defensive
                 logger.debug(
@@ -6776,7 +6812,7 @@ def solve_model(
         ub.tolist(),
         int_offsets,
         int_sizes,
-        strategy,
+        _cfg.strategy,
     )
     tree.initialize()
     _timers.rust_time += time.perf_counter() - _timers.t_rust_start
@@ -7001,7 +7037,7 @@ def solve_model(
     _mc_con_relax_fns: list[Callable] | None = None
     _mc_con_senses = None
     _mc_negate = False
-    _mc_mode = mccormick_bounds
+    _mc_mode = _cfg.mccormick_bounds
     _mc_lp_relaxer = None  # MccormickLPRelaxer instance when _mc_mode == "lp"
     # Global root cut pool (P3): separated once at the root, then inherited at
     # every node so each node reproduces the strong root bound for the cost of a
@@ -7118,13 +7154,15 @@ def solve_model(
         # every feasible point), so this switch only ever trades bound tightness
         # for relaxation size — never correctness.
         _rlt_on: Optional[bool]
-        if rlt is True or (isinstance(rlt, str) and rlt.lower() in ("on", "true")):
+        if _cfg.rlt is True or (isinstance(_cfg.rlt, str) and _cfg.rlt.lower() in ("on", "true")):
             _rlt_on = True
-        elif rlt is False or (isinstance(rlt, str) and rlt.lower() in ("off", "false")):
+        elif _cfg.rlt is False or (
+            isinstance(_cfg.rlt, str) and _cfg.rlt.lower() in ("off", "false")
+        ):
             _rlt_on = False
         else:  # "auto" (or any unrecognized value) → let the policy decide
             _rlt_on = None
-        _eff_rlt_cuts = True if _rlt_on else rlt_cuts
+        _eff_rlt_cuts = True if _rlt_on else _cfg.rlt_cuts
         # Under "auto", additionally engage build-time level-1 RLT (root-bound
         # tightening) on small models — it certifies instances the per-node cut
         # policy alone leaves open (nvs05) at negligible LP cost, while staying off
@@ -7153,7 +7191,7 @@ def solve_model(
             _mc_lp_relaxer = MccormickLPRelaxer(
                 model,
                 superposition=(relaxation_arithmetic == "superposition"),
-                psd_cuts=psd_cuts,
+                psd_cuts=_cfg.psd_cuts,
                 rlt_cuts=_eff_rlt_cuts,
                 rlt_level1=_eff_rlt_level1,
             )
@@ -7217,7 +7255,12 @@ def solve_model(
                 # policy is skipped; ``rlt=False`` skips it and pins RLT cuts off.
                 if _rlt_on is False:
                     _mc_lp_relaxer._rlt_cuts = False
-                elif cuts == "auto" and not psd_cuts and not rlt_cuts and _rlt_on is None:
+                elif (
+                    _cfg.cuts == "auto"
+                    and not _cfg.psd_cuts
+                    and not _cfg.rlt_cuts
+                    and _rlt_on is None
+                ):
                     _apply_auto_cut_policy(model, _mc_lp_relaxer)
                 # A node is spatial-branchable if there is a finite-box continuous
                 # variable to bisect, OR an integer variable in a nonlinear term
@@ -7612,7 +7655,7 @@ def solve_model(
         try:
             _mc_obj_relax_fn = compile_objective_relaxation(
                 model,
-                partitions=partitions,
+                partitions=_cfg.partitions,
                 mode=_relax_mode,
                 learned_registry=_learned_registry,
                 arithmetic=relaxation_arithmetic,
@@ -7629,7 +7672,7 @@ def solve_model(
                             compile_constraint_relaxation(
                                 c,
                                 model,
-                                partitions=partitions,
+                                partitions=_cfg.partitions,
                                 mode=_relax_mode,
                                 learned_registry=_learned_registry,
                                 arithmetic=relaxation_arithmetic,
@@ -7831,13 +7874,13 @@ def solve_model(
         if improved:
             _heur_state["found"] += 1
 
-    if subnlp_enabled:
+    if _cfg.subnlp_enabled:
         try:
             from typing import cast
 
             from discopt.solvers.nlp_backend import Backend, get_nlp_solver
 
-            _heur.subnlp_backend_fn = get_nlp_solver(cast(Backend, subnlp_backend))
+            _heur.subnlp_backend_fn = get_nlp_solver(cast(Backend, _cfg.subnlp_backend))
         except ImportError as _e:
             logger.debug("SubNLP backend unavailable, disabling: %s", _e)
             _heur.subnlp_backend_fn = None
@@ -11215,7 +11258,7 @@ def solve_model(
         # loop already consumed the limit, so passing the full ``time_limit`` here
         # would let it overrun by a second whole budget.
         _rr = _root_relaxation_lower_bound(
-            model, _root_lb_snapshot, _root_ub_snapshot, _rr_remaining, psd_cuts=psd_cuts
+            model, _root_lb_snapshot, _root_ub_snapshot, _rr_remaining, psd_cuts=_cfg.psd_cuts
         )
         if _rr is not None and np.isfinite(_rr):
             # Negate for MAXIMIZE: a lower bound on ``-obj`` is an upper bound on
