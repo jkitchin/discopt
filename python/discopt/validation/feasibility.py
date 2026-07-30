@@ -181,7 +181,9 @@ def row_scales(
     the same way *for that row*: a scale we cannot trust must not widen a tolerance.
     """
     rhs = np.asarray(rhs, dtype=np.float64)
-    scale = np.maximum(1.0, np.abs(rhs))
+    # Explicitly typed: numpy's stubs return Any from np.maximum/np.abs, and this
+    # function's contract is an ndarray of per-row scales.
+    scale: np.ndarray = np.maximum(1.0, np.abs(rhs))
     if jac is None:
         return scale
     jac = np.asarray(jac, dtype=np.float64)
@@ -195,7 +197,8 @@ def row_scales(
     jac_scale = np.zeros(rhs.shape[0], dtype=np.float64)
     if terms.size:
         jac_scale[finite_rows] = np.max(terms[finite_rows], axis=1)
-    return np.maximum(scale, jac_scale)
+    combined: np.ndarray = np.maximum(scale, jac_scale)
+    return combined
 
 
 def _row_map(evaluator):
