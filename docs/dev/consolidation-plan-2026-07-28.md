@@ -763,7 +763,7 @@ Card 3b measured its result to be `max_iterations`-dependent.
 > makes the flag's net-positive question answerable — but not answered. See the Card
 > 3e note below for what remains.
 
-### Card 3d — Adopt the Rust presolve's model rewrites (filed by Card 2c.2) — **DEFERRED-BY-OWNER, re-sequenced next to Phase 5**
+### Card 3d — Adopt the Rust presolve's model rewrites (filed by Card 2c.2) — **NOT BUILT 2026-07-30; entry experiment says the benefit is throughput, and the bound-relevant half already exists elsewhere**
 
 **Measured, not hypothesised** (Card 2c.2, 119 instances, 8,206 per-pass deltas
 examined, `reports/card2c_presolve_rewrites.json`): `simplify`,
@@ -784,6 +784,48 @@ LOCATION").
 `DISCOPT_PRESOLVE_SUBSTITUTE` machinery as the pattern (§6a names the same
 mechanism). Regime C. **Do not** instead delete the three passes: the measurement
 says they do real work, just not work that reaches the consumer.
+
+> **Status: NOT BUILT, 2026-07-30.** Entry experiment run first per §0.3
+> (147 `.nl` files = `minlplib_nl` 66 + `minlplib` 81; 147 three-pass runs +
+> 147 full-pass runs, 0 errors; §6 entry "Card 3d entry experiment"). Three
+> measured findings, in the order that decides the card:
+>
+> 1. **The card's residual content is throughput, not bound.** Across all 147,
+>    the three indicted passes tighten **zero** bounds — Card 2c.2's headline,
+>    reproduced. Their output is 6,635 rows removed by `simplify`, 149 by
+>    `redundancy`, and 52 rows rewritten by `coefficient_strengthening`. A row
+>    that `redundancy` removes is implied and cannot tighten an LP relaxation;
+>    `simplify` moved no bound anywhere on this corpus. So ~99 % of the 8,614
+>    rewrites buy *smaller node LPs* — real, but pure wall-clock, which the
+>    2026-07-30 owner re-sequencing put off the critical path (same reasoning
+>    that moved Card 6d).
+> 2. **The one bound-relevant component already exists, in the right place, and
+>    stronger.** Coefficient strengthening (52 rows, `gbd` + `hda`) is already
+>    implemented on the Python side as `solvers/_root_presolve.py`
+>    (`DISCOPT_COEF_TIGHTEN`, parked). Its "NOTE ON LOCATION" says exactly why it
+>    lives there — "rewriting the Python model at the root is the only place the
+>    tightened coefficients actually reach the relaxation" — and records that the
+>    Rust pass is *weaker*: it reads declared bounds (so it bails on the `[0,∞)`
+>    flows) and skips negative fixed-charge binary coefficients. Adopting the
+>    Rust rewrite would import the weaker of the two.
+> 3. **The safe scoping and the useful scoping are disjoint.** The three passes
+>    run *alone* are variable-preserving on **all 147** instances, so that
+>    adoption needs no postsolve at all — but in isolation `simplify` finds only
+>    1,440 of its 6,635 rows (78 % of its effect depends on the other passes'
+>    tightenings). The full pass list *does* change the variable count
+>    (`hda` 722→719, `casctanks` 500→490, `4stufen` 149→148, `util` 145→144;
+>    never grows), so the useful version needs a postsolve chain — and one cannot
+>    be assembled from what the orchestrator records. `substitute.rs` is the
+>    **only** pass that emits an inversion payload (`SubstitutionRecord` +
+>    `block_map`); `EliminatePass`/`AggregatePass`/`FactorableElimPass` record
+>    index lists in the delta stream, which say what happened, not how to undo it.
+>
+> **Decision.** Not built, and not left half-wired (the card's own warning). To
+> reopen it, the prerequisite is a postsolve payload on every variable-changing
+> Rust pass — a multi-session change to `crates/discopt-core/src/presolve/` in its
+> own right — plus a reason to want it that is not wall-clock. Card 6a's finding
+> that the substitution machinery **is** sound removes the soundness objection to
+> reuse but not the benefit objection.
 
 ### Card 3c — Node-tightening parity across kernels — **LANDED**
 
@@ -1483,7 +1525,7 @@ feature-by-feature, graduating each expansion on the panel**, exactly as
 > **Status:** OPEN. **Depends:** Phase 0; independent of Phases 3–4; 6b after 5.4.
 > **Est:** 3+ sessions per card; each card is optional-but-valuable on its own.
 
-### Card 6a — Presolve reduction scale (G-G class)
+### Card 6a — Presolve reduction scale (G-G class) — **ROOT-CAUSED 2026-07-30; the premise was wrong, one real defect fixed, flag stays PARKED**
 
 SCIP presolves `watercontamination0202` 106,712 → 566 vars and solves in 2.56 s;
 discopt returns nothing, and reduces nothing on 64% of a 300-instance census.
@@ -1495,6 +1537,56 @@ Root-cause the 2449% incident (it is a postsolve or substitution-validity bug �
 find it, don't tune around it). Kill criterion: if reductions on this class stay
 <2× after the fix, the SCIP 189× is presolver tech discopt doesn't have — record
 it and file the specific missing pass (aggregation/stuffing) as its own card.
+
+> **Status: root-caused 2026-07-30** (§6 entry "Card 6a: the 2449 % primal gap is
+> not a postsolve bug"). `watercontamination0202` is snapshot-only, so the card was
+> worked by construction plus in-repo reproducers.
+>
+> 1. **"It is a postsolve or substitution-validity bug" — FALSIFIED.** The
+>    transform is exact on every in-repo instance it reduces (13 of 66):
+>    13,086 surviving-row comparisons, 3,642 dropped-row identity checks, 52
+>    box-soundness and 26 box-exactness checks, plus 104 objective-identity and
+>    104 Python-bridge-fidelity comparisons — **zero failures**. All four named
+>    candidate mechanisms are dead.
+> 2. **The incident is not a wrong answer.** The reported point is recomputed on
+>    the pristine model and feasibility-verified there at 1e-5 before it is
+>    returned, and the run's status was `feasible` under a time limit. A 2449 %
+>    gap on a *verified-feasible* incumbent is a primal-quality outcome, not a
+>    certificate defect. Retracted accordingly (CLAUDE.md §11).
+> 3. **What the flag actually does** (12-instance ON/OFF panel, interleaved,
+>    replicated, bit-identical within arm): it changes the problem the relaxation
+>    and the heuristics see, **large and not monotone** — `hda`'s dual bound 132×
+>    *looser*, `4stufen`'s ~5× *tighter*, `casctanks` 32 % tighter,
+>    `heatexch_gen2` gains a first incumbent where the default path has none
+>    (the `watercontamination0202` signature, reproduced in-repo), `heatexch_gen3`
+>    gains a first *bound* where the default path produces none. No bound crossed
+>    a proven optimum on any of the four instances that have one.
+>    **The cost is wall, not nodes:** on `st_e11` the flag cuts the tree from 27
+>    nodes to 5 and still takes 4–5× longer (6.7/8.2 s OFF vs 30.5/40.6 s ON), so
+>    at the panel's 30 s budget it turned `optimal` into `feasible`. At 120 s both
+>    arms certify.
+> 4. **One real defect, fixed:** the #779 postsolve guard was integrality-blind
+>    (`ModelRepr.evaluate_point` checks rows and bounds only), so a lifted point
+>    with a fractional integer was reported as `optimal`. Closed in
+>    `_presolve_substitute.integrality_violation`; regression test fails before,
+>    passes after. Not reachable through today's substitution pass — reachable
+>    through any *other* repr transform reusing the guard, which is Card 3d.
+> 5. **Flag verdict: PARKED, graduation REFUSED, with two named blockers.**
+>    (a) the 4–5× wall cost on `st_e11`, which under a tight budget *is* a
+>    certification regression — §0.1's hard Regime-C bar — and which no node-count
+>    saving compensates; (b) no predictor of *when* substitution helps the
+>    relaxation: `hda` and `4stufen` reduce comparably and move the bound in
+>    opposite directions by orders of magnitude, so the measurement does not
+>    supply one and inventing one would be a hypothesis-driven fix (CLAUDE.md §4).
+>    Not removed: it is the **only** pass in the tree that records an inversion
+>    payload, and both Card 3d and the deferred FBBT-coupled fixing loop name it
+>    as the pattern.
+> 6. **The card's own kill criterion fires.** Reductions on this class stay far
+>    below 2× on the corpus (§G-G.1's 300-instance census: nothing on 64.3 %,
+>    ≥3× on 1/300), so per the card text the SCIP 189× is presolver tech discopt
+>    does not have. The specific missing mechanism is already named in §G-G.1 —
+>    bound-driven fixing (SCIP's 78,959 `ChgBounds`), dual reductions and
+>    implied-free column elimination — and stays deferred, not built.
 
 ### Card 6b — CSE / defined-variable sharing through the stack
 
@@ -1607,9 +1699,45 @@ That reprioritizes what is left:
   correctness investigation wearing a performance label.
 - Order from here: **4c → 3a(b) → 6a → 3d** (3d last and default-OFF; it is still
   the most dangerous change in the plan), with 6b/6c/7 as capacity allows.
+
+**Close-out, 2026-07-30 (the last substantive session).** That order was worked to
+its end. **4c CLOSED**, **3a(b) CLOSED** (all three de-duplications answered NO),
+**6a ROOT-CAUSED** — the 2449 % incident is not a postsolve or substitution-validity
+bug (16,800+ executed exactness comparisons, zero failures) and is not a wrong
+answer at all; the one real defect was an integrality-blind postsolve guard, now
+fixed, and `DISCOPT_PRESOLVE_SUBSTITUTE` stays parked with a named blocker
+(`st_e11` `optimal → feasible`). **3d NOT BUILT** — its entry experiment (147
+instances) shows the deliverable is throughput, its one bound-relevant component
+already exists stronger in `_root_presolve.py`, and the postsolve chain it needs
+cannot be assembled from what the Rust orchestrator records. Both verdicts are in
+§6 with their numbers. What remains open across the whole plan is listed under
+**"Open at close-out"** at the end of this section.
 - Standing requirement, after a container rollback silently destroyed a session:
   every card asserts `HEAD == origin` **and** rebuilds/verifies the compiled `.so`
   marker before measuring. Source-file checks alone missed a stale binary once.
+
+### Open at close-out (2026-07-30) — everything the plan has not finished
+
+One line each on what it would take to close. Nothing here is blocked on a defect;
+every item is either a deliberate deferral with its measurement recorded, or work
+this environment cannot adjudicate.
+
+| # | item | state | what would close it |
+|---|---|---|---|
+| 1 | **Card 3d** — adopt the presolved repr | NOT BUILT, entry experiment recorded | A postsolve payload on every variable-changing Rust pass (`EliminatePass`, `AggregatePass`, `FactorableElimPass`), then a Regime-C panel — **and a benefit that is not wall-clock**, which the 147-instance measurement does not currently supply |
+| 2 | **Card 3e / `DISCOPT_FBBT_SEED`** | mechanism landed default-OFF, graduation refused | A corpus population where seeding the root FBBT from `ctx.bounds` is net-positive; the in-repo panel showed sound-but-not-helpful |
+| 3 | **Card 6a / `DISCOPT_PRESOLVE_SUBSTITUTE`** | sound, parked, graduation refused | A *predictor* of when substitution helps the relaxation. `hda` (132× looser) and `4stufen` (~5× tighter) reduce comparably and move oppositely, and `st_e11` regresses `optimal → feasible` |
+| 4 | **Card 6a's missing presolve mechanism** | named, not built | Bound-driven fixing (SCIP's 78,959 `ChgBounds`), dual reductions, implied-free column elimination — §G-G.1 names them; each is its own card, and §G-G.1's own census says closing the reduction-rate gap should not be expected to move the corpus geomean |
+| 5 | **Card 6b** — CSE / defined-variable sharing | not started | Its entry experiment: shared-subexpression multiplicity on the 20 largest instances (kill: <1.5× median duplication), then build in the kernel-facing path |
+| 6 | **Card 6c** — aggregation / c-MIR cuts | deliberately last | Phase 5 first (cheap nodes to multiply against — OBBT × cuts × throughput measured multiplicative), then a Rust multi-row separator with the #781 incumbent-starvation check as a gate arm |
+| 7 | **Card 6d** — process floor (~513 ms import) | off the critical path | Pure wall-clock, no certificate content. Lazy-import audit + `discopt solve` fast path, Regime N on cold-start wall |
+| 8 | **Card 5.2 / 5.3** — kernel coverage expansion | OPEN; 5.1 census landed, 5.4 partial | Per-feature sub-cards against the census ranking; the scoping note argues `infinite_aux_bounds` (9 instances) is the better next card than `term_trilinear` |
+| 9 | **Card 5.2-T** — `term_trilinear` | SCOPED, NOT STARTED (owner) | Not a new envelope family — the producer declines on mere *registration* of a trilinear product. Closing it is a producer-gate change plus a Regime-C panel |
+| 10 | **`DISCOPT_CONVEX_KERNEL`** | cert-clean and quality-clean, graduation NO | Net-positive on a population this environment does not have (Phase 5.4 verdict) — needs the heldout/local corpus |
+| 11 | **Card 4b modules 2–5** | DROPPED | Maintainability behind a state-object prerequisite; reopening means building that state object first |
+| 12 | **Phase 7** — islands, refusal tests, deferred tail | not started, unblocked, cheap | Support-tier docstrings on the six zero-inbound packages; one test per load-bearing refusal (`multistage.py:47`, `gdpopt_loa.py:628`); file the SOTA long-tail entry experiments as issues |
+| 13 | **heldout50 panel** | never run here | Local-only corpus. Every card that names it has recorded "SKIPPED — local only" |
+| 14 | **28 parked flags** | default-OFF, each with its own record | Each needs its own Regime-C graduation panel; several (this one, `DISCOPT_CUT_INHERIT`, `DISCOPT_CONVEX_KERNEL`, `DISCOPT_FBBT_SEED`) have measured refusals recorded and should not be re-proposed without new evidence |
 
 Parallelism guidance for Opus sessions: Phases 1, 2, 7 are safe concurrently
 (disjoint files). Phases 3 and 4 both edit `solver.py` — serialize them. Phase 5
@@ -3413,3 +3541,271 @@ test-only; the exit guard is provably a no-op under the panel's default settings
 invert). The corpus probe **was** re-run on the final build after the rebuild, with a
 marker assertion, and returned byte-identical counts (22,116 comparisons, 0 aborts in
 both arms).
+
+### 2026-07-30 — Card 6a: "the 2449 % primal gap is a postsolve or substitution-validity bug" — **FALSIFIED on every candidate; the incident is not a wrong answer, and the one real defect is elsewhere**
+
+**Hypothesis (the card's own, and the session brief's).** `DISCOPT_PRESOLVE_SUBSTITUTE=1`
+returned objective **3190.4506** against `=opt= 125.1956151` on
+`watercontamination0202` — a 2449 % primal gap (`sota-parity-analysis-2026-07-27.md`
+§G-G.1). A presolve that returns a grossly wrong answer is a correctness defect, so
+the mechanism is one of: postsolve not inverting every substitution; substituted
+variables not restored into the reported point; bounds on eliminated variables
+dropped; the objective evaluated on the reduced model rather than the original.
+
+**Kill criterion.** If the substitute → postsolve chain satisfies the exactness
+identities on every instance the pass reduces, all four candidates are dead and the
+incident must be explained by something other than the transform.
+
+**Why it was worked by construction.** `watercontamination0202` is snapshot-only and
+absent here, so the entry experiment tests the *identities the transform claims*
+rather than replaying the instance. Marker asserted before every measurement:
+`subtol_crossings_repaired` present in `_rust.cpython-311-x86_64-linux-gnu.so`
+(CLAUDE.md §8). Rust untouched all session, so the binary matches `8532ce2d`.
+
+**Experiment 1 — repr-level and bridge-level identities.** 66 in-repo `.nl`
+instances; 13 carry a reduction. Per instance, 8 random points inside the reduced
+box, lifted through `chain.postsolve`:
+
+| arm | what it asserts | executed |
+|---|---|---|
+| E1 | `reduced.obj(x_red) == pristine.obj(postsolve(x_red))` | **104** |
+| E2 | max constraint violation identical in both spaces | **104** |
+| E3 | a point inside the reduced box lifts inside the pristine box | **104** |
+| E4 | `model_to_repr(model_from_repr(reduced))` evaluates identically — the model actually SOLVED is the Python one, not the repr | **104** |
+| E5 | same scalar-var and row count across that bridge | **13** |
+
+**0 failures, 0 errors.**
+
+**Experiment 2 — per-row and per-variable, because a max-violation comparison can be
+masked by one dominating row** (CLAUDE.md §6: an instrument that cannot fail is not
+an instrument). Row names are `None` on `.nl` reprs, so the rows are compared
+alignment-free: the pristine residual multiset at the lifted point must equal the
+reduced residual multiset padded with exactly one zero per dropped row. Six points
+per instance, the last two deliberately placed *outside* the reduced box:
+
+| arm | what it asserts | executed |
+|---|---|---|
+| R1 | a surviving row has the same value in both spaces | **13,086** |
+| R2 | a dropped row is satisfied at the lifted point for an ARBITRARY reduced point (it is definitional, so it must hold identically, not only at feasible points) | **3,642** |
+| B1 | inside the reduced box ⟹ inside the pristine box (soundness of the transferred bound) | **52** |
+| B2 | outside the reduced box ⟹ outside the pristine box (EXACTNESS — an over-tightened transfer would cut the optimum) | **26** |
+
+**0 failures.** B1 and B2 together say the boxes correspond in both directions, so
+the reduced model is neither a relaxation nor a restriction of the original; R1 and
+R2 say the same for the rows. **All four candidate mechanisms are FALSIFIED.**
+
+**Consequence 1 — the incident is not a wrong answer, and §G-G.1's framing is
+retracted (CLAUDE.md §11).** `lift_result` recomputes the objective on the *pristine*
+repr and feasibility-verifies the lifted point there at 1e-5 before returning it, and
+the incident run's status was `feasible` under a 60 s limit. A 2449 % gap on a
+verified-feasible incumbent is a primal-quality outcome. The flag did not return a
+grossly wrong answer on `watercontamination0202`; it returned a *sound, poor* first
+incumbent where the default path returned none.
+
+**Consequence 2 — that signature reproduces in-repo.** 12-instance ON/OFF panel over
+the reducing set, one subprocess per (instance, arm), arms interleaved, 30 s budget
+(`hda` additionally at 45 s with two replicates per arm, order-balanced OFF/ON/ON/OFF).
+Every arm was **bit-identical across replicates**, so the spread on the reported
+quantity is zero and the verdict is not wall-based.
+
+| instance | sense | bound OFF | bound ON | effect of the flag |
+|---|---|---|---|---|
+| `hda` (45 s) | min | −64,473.442402437 | −8,530,983.3036501 | **132× LOOSER** |
+| `4stufen` | min | 20,282.0507 | 100,992.3292 | ~5× tighter |
+| `casctanks` | min | −149.87196 | −102.49921 | 32 % tighter |
+| `beuster` | min | 6,352.0632 | 6,431.0426 | 1.2 % tighter |
+| `bchoco06` | max | 0.99997757 | 1.0000000000 | 2.2e-5 looser |
+| `bchoco07` | max | 1.000000000000286 | 1.000000000000212 | 7e-14 tighter |
+| `bchoco08` | max | 1.000000000002788 | 1.000000000000547 | 2.2e-12 tighter |
+| `heatexch_gen1` | min | 38,183.5317460179 | 38,183.5317460091 | neutral |
+| `heatexch_gen2` | min | 555,767.79028573 | 555,767.79028575 | bound neutral — **ON gains a first incumbent, 814,343.765, where OFF has none** |
+| `heatexch_gen3` | min | **no bound at all** | 783.0180645 | **ON gains a bound where OFF produces none** |
+| `gkocis` | min | −1.9230988280923 (`optimal`) | −1.9230988280949 (`optimal`) | neutral, both certified |
+| `syn05hfsg` | max | 837.732412391107 (`optimal`) | 837.7324093630 (`optimal`) | both certified, ON's gap 6.3e-8 vs 0 |
+| `st_e11` | min | 189.31162974 **`optimal`** | 189.36307863 **`feasible`** | certification lost **at this budget** — see the retraction below |
+
+`heatexch_gen2` and `heatexch_gen3` are the `watercontamination0202` signature
+reproduced on instances that exist here: deleting rows and variables lets the primal
+heuristics and the root bound reach something the full model does not. `hda` and
+`4stufen` reduce comparably (303 and 33 eliminations) and move the bound in
+**opposite directions by orders of magnitude**, so the effect is not monotone and no
+predictor of it is available from this measurement.
+
+**Soundness across the panel.** Four of the 13 have a proven reference optimum
+(`reference_optima.oracle_table`, from `cert-optima.json`): `hda` −5964.534084,
+`gkocis` −1.923098738, `st_e11` 189.3116297, `syn05hfsg` 837.7324009. **No ON-arm
+bound crossed its optimum on any of them**, and no ON-arm incumbent beat one by more
+than the oracle's own precision (`gkocis` 3.5e-8 below, matching the OFF arm's
+4.2e-8 — an oracle-precision artifact, not the flag).
+
+**Consequence 3 — the one real defect, and it is in the guard, not the transform.**
+`ModelRepr.evaluate_point` — the whole of the #779 postsolve guard — checks rows and
+variable bounds and **nothing else**. A lifted point whose integral survivor is
+fractional passes both arms and is reported as the answer: the new regression test
+demonstrates `lift_result` returning `SolveResult(status='optimal', obj=8.0)` at
+`y = 3.5` before the fix, and `None` after. Not reachable through today's
+substitution pass (`substitute.rs` "Scope (v0)" never eliminates an integral block),
+but the guard is the last check before a point becomes the reported solution and
+Card 3d proposes to reuse it for a transform where that upstream invariant does not
+hold. Fixed in `_presolve_substitute.integrality_violation` as an O(n) numpy pass, not
+by delegating to `verify_point`, so the guard's own measured reason for using the Rust
+evaluator (0.008 s vs >119 s for the JAX path on this pass's target models) survives.
+
+**RETRACTION, same session (CLAUDE.md §11): "`st_e11` is a categorical certification
+regression" — WRONG, it is budget-sensitive, and the cost is WALL, not nodes.** The
+30 s panel row above reads as a hard regression. A clean A/B at **120 s**, run alone
+after everything else finished, two replicates per arm, order-balanced OFF/ON/ON/OFF,
+says otherwise:
+
+| instance | arm | status | objective | bound | nodes | wall |
+|---|---|---|---|---|---|---|
+| `st_e11` | OFF | `optimal` | 189.31162974131917 | 189.31162968661766 | **27** | 6.65 s / 8.18 s |
+| `st_e11` | ON | `optimal` | 189.31162991242556 | 189.31162943443508 | **5** | **30.45 s / 40.61 s** |
+| `syn05hfsg` | OFF | `optimal` | 837.7324123911069 | 837.7324123911069 | **185** | 30.30 s / 28.39 s |
+| `syn05hfsg` | ON | `optimal` | 837.7323567390654 | 837.7324093629704 | **89** | **15.94 s / 15.68 s** |
+
+Both certify in both arms given room. What the flag actually costs on `st_e11` is
+**wall**: it cuts the tree from 27 nodes to 5 and still takes **4–5× longer**, which
+is what pushed it past a 30 s budget. And even that is not monotone — on
+`syn05hfsg` the same flag halves both the nodes (185 → 89) and the wall (~29 s →
+~16 s). Every dimension of this flag's effect (bound, nodes, wall) moves in **both**
+directions by large factors.
+
+**Flag verdict: PARKED, graduation REFUSED, two blockers named.** Sound — 16,800+
+executed comparisons, zero failures, no bound above a proven optimum anywhere in the
+panel. But (a) under a *fixed* panel budget it converts `st_e11` from
+`gap_certified=True` to `False`, and a graduation panel is by construction run at a
+fixed budget, so §0.1's certification bar bites; and (b) there is **no predictor** of
+which way it will move any given instance — `hda` vs `4stufen` on the bound,
+`st_e11` vs `syn05hfsg` on the wall. `DISCOPT_CUT_INHERIT` again: sound ≠ helpful.
+**Not removed** — it is the only pass in the tree that records an inversion payload,
+and Card 3d plus the deferred FBBT-coupled fixing loop both name it as the pattern.
+Building the predictor is what would unblock graduation; inventing one from this
+measurement would be a hypothesis-driven fix (§4).
+
+**Recorded, not fixed:** `substitute.rs`'s `eliminable` predicate tests
+`!variables[b].lb.is_empty()` but line 415 indexes `variables[e].ub[0]`. Provably
+unreachable — `model_to_repr` extracts `lb` and `ub` from the same Python variable, so
+they are always the same length — and closing it would mean a Rust rebuild for a
+panic that cannot occur, so it is written down rather than patched.
+
+### 2026-07-30 — Card 3d entry experiment: "adopting the presolved repr delivers the 8,614 dropped rewrites to the relaxation compiler" — **the rewrites are real, the benefit is throughput, and the bound-relevant half already exists elsewhere. NOT BUILT**
+
+**Hypothesis (the card's, from Card 2c.2).** `simplify`, `redundancy` and
+`coefficient_strengthening` produce 8,614 non-bound rewrites that
+`propagate_bounds_to_model` cannot carry, so solving from the presolved repr with a
+postsolve chain would deliver them to the Python relaxation compiler and tighten
+what every node LP is built from.
+
+**Kill criteria, stated before the run.** (a) If the rewrites are overwhelmingly row
+*removal* with zero bound movement, the delivery buys smaller LPs, not tighter ones —
+wall-clock, which the 2026-07-30 re-sequencing put off the critical path. (b) If the
+adoption cannot be scoped variable-preserving, it needs a postsolve chain, and the
+card must show one can be built from what the orchestrator records.
+
+**Experiment.** 147 `.nl` files (`python/tests/data/minlplib_nl` 66 +
+`python/tests/data/minlplib` 81). Each run twice through `PyModelRepr.presolve`: once
+with the three indicted passes **alone**, once with the **full** list `solve_model`
+runs. 147 + 147 runs, **0 errors**. Marker asserted before measuring.
+
+*Q1 — the three passes ALONE (17 unique instances carry any rewrite):*
+
+| pass | rows removed | rows rewritten | **bounds tightened** |
+|---|---|---|---|
+| `simplify` | 1,440 | 0 | **0** |
+| `redundancy` | 149 | 0 | **0** |
+| `coefficient_strengthening` | 0 | 52 | **0** |
+
+Variable count **unchanged on all 147** — so an isolated-three adoption would need no
+postsolve at all.
+
+*Q2 — the FULL pass list:*
+
+| pass | rows removed | rows rewritten | bounds tightened |
+|---|---|---|---|
+| `simplify` | 6,635 | 0 | 0 |
+| `redundancy` | 149 | 0 | 0 |
+| `coefficient_strengthening` | 0 | 52 | 0 |
+| `factorable_elim` | 45 | 0 | 0 |
+| `aggregate` | 18 | 0 | 18 |
+| `eliminate` | 9 | 0 | 18 |
+| `probing` | 0 | 0 | 4,111 |
+| `fbbt` | 0 | 0 | 3,181 |
+| `implied_bounds` | 0 | 0 | 3,142 |
+
+Variable count changes on **4** unique instances — `hda` 722→719, `casctanks`
+500→490, `4stufen` 149→148, `util` 145→144 — and **never grows** (0 of 147).
+
+**Both kill criteria fire.**
+
+1. **Zero bounds from all three passes across 147 instances** — Card 2c.2's headline,
+   reproduced at a different scale. A row `redundancy` removes is implied and cannot
+   tighten an LP relaxation; `simplify` moved no bound anywhere. So ~99 % of the
+   rewrite volume is row removal, i.e. smaller node LPs.
+2. **The safe scoping and the useful scoping are disjoint.** Run alone the three
+   passes are variable-preserving (no postsolve needed) but `simplify` finds only
+   1,440 of its 6,635 rows — **78 % of its effect depends on the other passes'
+   tightenings**. The full list changes the variable space, so the useful version
+   needs a postsolve chain, and one cannot be assembled from what exists:
+   `substitute.rs` is the **only** pass that emits an inversion payload
+   (`SubstitutionRecord` + `block_map`), while `EliminatePass`, `AggregatePass` and
+   `FactorableElimPass` record index lists in the delta stream — what happened, not
+   how to undo it.
+
+**And the one bound-relevant component is already built, in the right place, and
+stronger.** Coefficient strengthening (52 rows, `gbd` + `hda`) exists on the Python
+side as `solvers/_root_presolve.py` (`DISCOPT_COEF_TIGHTEN`, parked). Its "NOTE ON
+LOCATION" gives the reason — "rewriting the Python model at the root is the only place
+the tightened coefficients actually reach the relaxation" — and records the Rust pass
+as *weaker*: it reads declared bounds, so it bails on the `[0,∞)` flows this family
+declares, and it skips negative fixed-charge binary coefficients. Adopting the Rust
+rewrite would import the weaker of the two.
+
+**Decision: NOT BUILT.** "The most dangerous change in the plan" is not worth a
+throughput gain on a correctness benchmark, and a partially-wired repr adoption is
+worse than none (the card's own warning). Prerequisite to reopening: a postsolve
+payload on every variable-changing Rust pass, plus a benefit that is not wall-clock.
+Card 6a's finding that the substitution machinery **is** sound removes the soundness
+objection to reusing it as the pattern, but not the benefit objection.
+
+### 2026-07-30 — the `tls2` anomaly: "the 9.3 arm may be the reproducible one, and the baseline row the stale one" — **NO. 5.3 is right, 9.3 is a sound truncated incumbent, and the row needs no re-record**
+
+**The flag.** The passing Regime-N panel moved `tls2` `nodes 421→373,
+obj 5.299999922109238→9.29999987524207` — correctly non-gating (the baseline row
+certifies at 43.8 s = 97 % of the 45 s budget, so it is marked `comparable=false`)
+but a ~76 % objective move, which the Card 4c close-out flagged rather than buried.
+The open question was whether 9.3 was a **certified** optimum, which for a minimize
+instance with a proven optimum of 5.3 would be a false optimum and a hard defect.
+
+**Experiment.** `tls2` alone, subprocess-isolated, nothing else running: 3 replicates
+at the panel's 45 s budget, then 2 at 300 s. Reference optimum **5.3, proven**
+(`docs/dev/data/cert-optima.json` via `reference_optima.oracle_table`).
+
+| budget | rep | status | objective | bound | `gap_certified` | nodes | wall |
+|---|---|---|---|---|---|---|---|
+| 45 s | 0 | `feasible` | 5.299999922109238 | 3.3746135 | **False** | 421 | 46.18 s |
+| 45 s | 1 | `feasible` | 10.299999865440752 | 2.4487126 | **False** | 353 | 48.70 s |
+| 45 s | 2 | `feasible` | 9.29999987524207 | 2.5000000 | **False** | 373 | 46.30 s |
+| 300 s | 0 | **`optimal`** | **5.299999922109238** | **5.3** | **True** | **421** | 63.06 s |
+| 300 s | 1 | **`optimal`** | **5.299999922109238** | **5.3** | **True** | **421** | 71.62 s |
+
+**Answer: 5.3 is right**, to the last digit of the proven optimum, and it is
+*deterministic* — both 300 s runs certify at the same objective, the same bound and
+the same **421** nodes. The instance simply needs ~63–72 s on this machine, which is
+1.4–1.6× the panel's 45 s budget.
+
+**The 9.3 (and 10.3) arms are NOT false optima.** Every 45 s run returns
+`status=feasible` with `gap_certified=False`: a sound, time-limited incumbent above
+the optimum, from a search that ran out of budget at a different point. Nothing
+crossed the oracle in any arm. The 45 s node counts (421 / 353 / 373) measure how far
+the search got, not a nondeterministic tree — the completed search is 421 nodes every
+time.
+
+**No re-record, and no issue.** The baseline row's *objective* is confirmed correct by
+the certifying runs; only its terminal status is a lucky machine-minute, and the panel
+already excludes it for exactly that reason ("certified at 43.8 s = 97 % of the 45 s
+budget"). The `MARGIN_FRAC` filter did its job. Rewriting the frozen artifact would
+break the 255/85 comparison history that every Regime-N run since Phase 3 shares, for
+no gain. There is no solver nondeterminism to file: this is budget starvation on an
+instance whose true cost is above the panel budget, which is what `comparable=false`
+means.

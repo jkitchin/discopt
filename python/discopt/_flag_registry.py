@@ -354,12 +354,13 @@ _ROWS: "list[FlagSpec]" = [
         None,
         "Solve from the presolved representation (substitution + postsolve chain) "
         "rather than copying bounds only. **Graduation refused, Card 6a 2026-07-30**: "
-        "the transform is exact (16,800+ executed comparisons, zero failures) but it "
-        "regresses `st_e11` from `optimal` to `feasible` — a certification regression, "
-        "which is a hard Regime-C bar — and moves the dual bound by orders of magnitude "
-        "in *both* directions (`hda` 132x looser, `4stufen` ~5x tighter). Do not "
-        "re-propose graduation without a predictor of when the substitution helps the "
-        "relaxation; the measurement does not supply one.",
+        "the transform is exact (16,800+ executed comparisons, zero failures) but every "
+        "dimension of its effect moves in BOTH directions by large factors — dual bound "
+        "`hda` 132x looser vs `4stufen` ~5x tighter; wall `st_e11` 4-5x slower (on 5 "
+        "nodes instead of 27) vs `syn05hfsg` ~2x faster. Under a fixed panel budget the "
+        "`st_e11` slowdown converts `gap_certified=True` to `False`, which is a hard "
+        "Regime-C bar. Do not re-propose graduation without a predictor of when the "
+        "substitution helps; the measurement does not supply one.",
     ),
     FlagSpec(
         "DISCOPT_COEF_TIGHTEN",
