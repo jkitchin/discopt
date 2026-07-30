@@ -1,0 +1,843 @@
+{
+  "solves_measured": 66,
+  "solve_failures": [],
+  "executed_invocations": 94,
+  "invocations_per_solve_hist": {
+    "0": 7,
+    "1": 32,
+    "2": 23,
+    "4": 4
+  },
+  "caller_sites": {
+    "__init__.py:5234": 27,
+    "__init__.py:6390": 41,
+    "__init__.py:17108": 9,
+    "__init__.py:11901": 17
+  },
+  "solves_with_multiple": [
+    "4stufen",
+    "bchoco06",
+    "bchoco07",
+    "bchoco08",
+    "beuster",
+    "casctanks",
+    "clay0303hfsg",
+    "contvar",
+    "cvxnonsep_nsig30",
+    "cvxnonsep_psig30",
+    "cvxnonsep_psig40r",
+    "fac2",
+    "flay02m",
+    "flay03m",
+    "hda",
+    "heatexch_gen1",
+    "heatexch_gen2",
+    "heatexch_gen3",
+    "m3",
+    "nvs01",
+    "nvs05",
+    "nvs06",
+    "nvs09",
+    "nvs21",
+    "st_e36",
+    "st_e38",
+    "tls2"
+  ],
+  "second_plus_redundant": 29,
+  "second_plus_load_bearing": 6,
+  "per_solve": [
+    {
+      "instance": "4stufen",
+      "invocations": [
+        {
+          "caller": "__init__.py:5234",
+          "root_changed": true,
+          "root_infeasible": false
+        },
+        {
+          "caller": "__init__.py:6390",
+          "root_changed": true,
+          "root_infeasible": false
+        }
+      ]
+    },
+    {
+      "instance": "alan",
+      "invocations": [
+        {
+          "caller": "__init__.py:17108",
+          "root_changed": true,
+          "root_infeasible": false
+        }
+      ]
+    },
+    {
+      "instance": "bchoco06",
+      "invocations": [
+        {
+          "caller": "__init__.py:5234",
+          "root_changed": true,
+          "root_infeasible": false
+        },
+        {
+          "caller": "__init__.py:6390",
+          "root_changed": false,
+          "root_infeasible": false
+        }
+      ]
+    },
+    {
+      "instance": "bchoco07",
+      "invocations": [
+        {
+          "caller": "__init__.py:5234",
+          "root_changed": true,
+          "root_infeasible": false
+        },
+        {
+          "caller": "__init__.py:6390",
+          "root_changed": false,
+          "root_infeasible": false
+        }
+      ]
+    },
+    {
+      "instance": "bchoco08",
+      "invocations": [
+        {
+          "caller": "__init__.py:5234",
+          "root_changed": true,
+          "root_infeasible": false
+        },
+        {
+          "caller": "__init__.py:6390",
+          "root_changed": false,
+          "root_infeasible": false
+        }
+      ]
+    },
+    {
+      "instance": "beuster",
+      "invocations": [
+        {
+          "caller": "__init__.py:5234",
+          "root_changed": true,
+          "root_infeasible": false
+        },
+        {
+          "caller": "__init__.py:6390",
+          "root_changed": true,
+          "root_infeasible": false
+        }
+      ]
+    },
+    {
+      "instance": "casctanks",
+      "invocations": [
+        {
+          "caller": "__init__.py:5234",
+          "root_changed": true,
+          "root_infeasible": false
+        },
+        {
+          "caller": "__init__.py:6390",
+          "root_changed": false,
+          "root_infeasible": false
+        }
+      ]
+    },
+    {
+      "instance": "chance",
+      "invocations": []
+    },
+    {
+      "instance": "clay0303hfsg",
+      "invocations": [
+        {
+          "caller": "__init__.py:11901",
+          "root_changed": true,
+          "root_infeasible": false
+        },
+        {
+          "caller": "__init__.py:6390",
+          "root_changed": true,
+          "root_infeasible": false
+        }
+      ]
+    },
+    {
+      "instance": "contvar",
+      "invocations": [
+        {
+          "caller": "__init__.py:5234",
+          "root_changed": true,
+          "root_infeasible": false
+        },
+        {
+          "caller": "__init__.py:6390",
+          "root_changed": false,
+          "root_infeasible": false
+        }
+      ]
+    },
+    {
+      "instance": "cvxnonsep_nsig30",
+      "invocations": [
+        {
+          "caller": "__init__.py:11901",
+          "root_changed": false,
+          "root_infeasible": false
+        },
+        {
+          "caller": "__init__.py:11901",
+          "root_changed": false,
+          "root_infeasible": false
+        }
+      ]
+    },
+    {
+      "instance": "cvxnonsep_psig30",
+      "invocations": [
+        {
+          "caller": "__init__.py:11901",
+          "root_changed": false,
+          "root_infeasible": false
+        },
+        {
+          "caller": "__init__.py:11901",
+          "root_changed": false,
+          "root_infeasible": false
+        }
+      ]
+    },
+    {
+      "instance": "cvxnonsep_psig40r",
+      "invocations": [
+        {
+          "caller": "__init__.py:11901",
+          "root_changed": true,
+          "root_infeasible": false
+        },
+        {
+          "caller": "__init__.py:11901",
+          "root_changed": true,
+          "root_infeasible": false
+        }
+      ]
+    },
+    {
+      "instance": "dispatch",
+      "invocations": [
+        {
+          "caller": "__init__.py:6390",
+          "root_changed": true,
+          "root_infeasible": false
+        }
+      ]
+    },
+    {
+      "instance": "ex1221",
+      "invocations": [
+        {
+          "caller": "__init__.py:6390",
+          "root_changed": true,
+          "root_infeasible": false
+        }
+      ]
+    },
+    {
+      "instance": "ex1222",
+      "invocations": [
+        {
+          "caller": "__init__.py:6390",
+          "root_changed": true,
+          "root_infeasible": false
+        }
+      ]
+    },
+    {
+      "instance": "ex1224",
+      "invocations": [
+        {
+          "caller": "__init__.py:6390",
+          "root_changed": false,
+          "root_infeasible": false
+        }
+      ]
+    },
+    {
+      "instance": "ex1225",
+      "invocations": [
+        {
+          "caller": "__init__.py:6390",
+          "root_changed": false,
+          "root_infeasible": false
+        }
+      ]
+    },
+    {
+      "instance": "ex1226",
+      "invocations": [
+        {
+          "caller": "__init__.py:6390",
+          "root_changed": true,
+          "root_infeasible": false
+        }
+      ]
+    },
+    {
+      "instance": "ex14_1_9",
+      "invocations": [
+        {
+          "caller": "__init__.py:6390",
+          "root_changed": true,
+          "root_infeasible": false
+        }
+      ]
+    },
+    {
+      "instance": "fac2",
+      "invocations": [
+        {
+          "caller": "__init__.py:5234",
+          "root_changed": true,
+          "root_infeasible": false
+        },
+        {
+          "caller": "__init__.py:11901",
+          "root_changed": false,
+          "root_infeasible": false
+        },
+        {
+          "caller": "__init__.py:5234",
+          "root_changed": true,
+          "root_infeasible": false
+        },
+        {
+          "caller": "__init__.py:6390",
+          "root_changed": false,
+          "root_infeasible": false
+        }
+      ]
+    },
+    {
+      "instance": "flay02m",
+      "invocations": [
+        {
+          "caller": "__init__.py:5234",
+          "root_changed": true,
+          "root_infeasible": false
+        },
+        {
+          "caller": "__init__.py:11901",
+          "root_changed": false,
+          "root_infeasible": false
+        },
+        {
+          "caller": "__init__.py:5234",
+          "root_changed": false,
+          "root_infeasible": false
+        },
+        {
+          "caller": "__init__.py:11901",
+          "root_changed": false,
+          "root_infeasible": false
+        }
+      ]
+    },
+    {
+      "instance": "flay03m",
+      "invocations": [
+        {
+          "caller": "__init__.py:5234",
+          "root_changed": true,
+          "root_infeasible": false
+        },
+        {
+          "caller": "__init__.py:11901",
+          "root_changed": false,
+          "root_infeasible": false
+        },
+        {
+          "caller": "__init__.py:5234",
+          "root_changed": false,
+          "root_infeasible": false
+        },
+        {
+          "caller": "__init__.py:11901",
+          "root_changed": false,
+          "root_infeasible": false
+        }
+      ]
+    },
+    {
+      "instance": "gbd",
+      "invocations": [
+        {
+          "caller": "__init__.py:17108",
+          "root_changed": true,
+          "root_infeasible": false
+        }
+      ]
+    },
+    {
+      "instance": "gkocis",
+      "invocations": [
+        {
+          "caller": "__init__.py:6390",
+          "root_changed": true,
+          "root_infeasible": false
+        }
+      ]
+    },
+    {
+      "instance": "hda",
+      "invocations": [
+        {
+          "caller": "__init__.py:5234",
+          "root_changed": true,
+          "root_infeasible": false
+        },
+        {
+          "caller": "__init__.py:6390",
+          "root_changed": false,
+          "root_infeasible": false
+        }
+      ]
+    },
+    {
+      "instance": "heatexch_gen1",
+      "invocations": [
+        {
+          "caller": "__init__.py:5234",
+          "root_changed": true,
+          "root_infeasible": false
+        },
+        {
+          "caller": "__init__.py:6390",
+          "root_changed": false,
+          "root_infeasible": false
+        }
+      ]
+    },
+    {
+      "instance": "heatexch_gen2",
+      "invocations": [
+        {
+          "caller": "__init__.py:5234",
+          "root_changed": true,
+          "root_infeasible": false
+        },
+        {
+          "caller": "__init__.py:6390",
+          "root_changed": false,
+          "root_infeasible": false
+        }
+      ]
+    },
+    {
+      "instance": "heatexch_gen3",
+      "invocations": [
+        {
+          "caller": "__init__.py:5234",
+          "root_changed": true,
+          "root_infeasible": false
+        },
+        {
+          "caller": "__init__.py:6390",
+          "root_changed": false,
+          "root_infeasible": false
+        }
+      ]
+    },
+    {
+      "instance": "m3",
+      "invocations": [
+        {
+          "caller": "__init__.py:5234",
+          "root_changed": true,
+          "root_infeasible": false
+        },
+        {
+          "caller": "__init__.py:11901",
+          "root_changed": false,
+          "root_infeasible": false
+        },
+        {
+          "caller": "__init__.py:5234",
+          "root_changed": false,
+          "root_infeasible": false
+        },
+        {
+          "caller": "__init__.py:11901",
+          "root_changed": false,
+          "root_infeasible": false
+        }
+      ]
+    },
+    {
+      "instance": "nvs01",
+      "invocations": [
+        {
+          "caller": "__init__.py:5234",
+          "root_changed": false,
+          "root_infeasible": false
+        },
+        {
+          "caller": "__init__.py:6390",
+          "root_changed": false,
+          "root_infeasible": false
+        }
+      ]
+    },
+    {
+      "instance": "nvs02",
+      "invocations": []
+    },
+    {
+      "instance": "nvs03",
+      "invocations": [
+        {
+          "caller": "__init__.py:11901",
+          "root_changed": true,
+          "root_infeasible": false
+        }
+      ]
+    },
+    {
+      "instance": "nvs04",
+      "invocations": [
+        {
+          "caller": "__init__.py:6390",
+          "root_changed": false,
+          "root_infeasible": false
+        }
+      ]
+    },
+    {
+      "instance": "nvs05",
+      "invocations": [
+        {
+          "caller": "__init__.py:5234",
+          "root_changed": true,
+          "root_infeasible": false
+        },
+        {
+          "caller": "__init__.py:6390",
+          "root_changed": true,
+          "root_infeasible": false
+        }
+      ]
+    },
+    {
+      "instance": "nvs06",
+      "invocations": [
+        {
+          "caller": "__init__.py:5234",
+          "root_changed": false,
+          "root_infeasible": false
+        },
+        {
+          "caller": "__init__.py:6390",
+          "root_changed": false,
+          "root_infeasible": false
+        }
+      ]
+    },
+    {
+      "instance": "nvs07",
+      "invocations": [
+        {
+          "caller": "__init__.py:5234",
+          "root_changed": true,
+          "root_infeasible": false
+        }
+      ]
+    },
+    {
+      "instance": "nvs08",
+      "invocations": [
+        {
+          "caller": "__init__.py:6390",
+          "root_changed": true,
+          "root_infeasible": false
+        }
+      ]
+    },
+    {
+      "instance": "nvs09",
+      "invocations": [
+        {
+          "caller": "__init__.py:5234",
+          "root_changed": false,
+          "root_infeasible": false
+        },
+        {
+          "caller": "__init__.py:6390",
+          "root_changed": false,
+          "root_infeasible": false
+        }
+      ]
+    },
+    {
+      "instance": "nvs10",
+      "invocations": []
+    },
+    {
+      "instance": "nvs11",
+      "invocations": []
+    },
+    {
+      "instance": "nvs12",
+      "invocations": []
+    },
+    {
+      "instance": "nvs13",
+      "invocations": [
+        {
+          "caller": "__init__.py:6390",
+          "root_changed": true,
+          "root_infeasible": false
+        }
+      ]
+    },
+    {
+      "instance": "nvs14",
+      "invocations": []
+    },
+    {
+      "instance": "nvs15",
+      "invocations": []
+    },
+    {
+      "instance": "nvs21",
+      "invocations": [
+        {
+          "caller": "__init__.py:5234",
+          "root_changed": false,
+          "root_infeasible": false
+        },
+        {
+          "caller": "__init__.py:6390",
+          "root_changed": false,
+          "root_infeasible": false
+        }
+      ]
+    },
+    {
+      "instance": "oaer",
+      "invocations": [
+        {
+          "caller": "__init__.py:6390",
+          "root_changed": true,
+          "root_infeasible": false
+        }
+      ]
+    },
+    {
+      "instance": "st_e11",
+      "invocations": [
+        {
+          "caller": "__init__.py:6390",
+          "root_changed": true,
+          "root_infeasible": false
+        }
+      ]
+    },
+    {
+      "instance": "st_e13",
+      "invocations": [
+        {
+          "caller": "__init__.py:6390",
+          "root_changed": true,
+          "root_infeasible": false
+        }
+      ]
+    },
+    {
+      "instance": "st_e29",
+      "invocations": [
+        {
+          "caller": "__init__.py:6390",
+          "root_changed": false,
+          "root_infeasible": false
+        }
+      ]
+    },
+    {
+      "instance": "st_e36",
+      "invocations": [
+        {
+          "caller": "__init__.py:5234",
+          "root_changed": false,
+          "root_infeasible": false
+        },
+        {
+          "caller": "__init__.py:6390",
+          "root_changed": false,
+          "root_infeasible": false
+        }
+      ]
+    },
+    {
+      "instance": "st_e38",
+      "invocations": [
+        {
+          "caller": "__init__.py:5234",
+          "root_changed": false,
+          "root_infeasible": false
+        },
+        {
+          "caller": "__init__.py:6390",
+          "root_changed": false,
+          "root_infeasible": false
+        }
+      ]
+    },
+    {
+      "instance": "st_miqp1",
+      "invocations": [
+        {
+          "caller": "__init__.py:17108",
+          "root_changed": true,
+          "root_infeasible": false
+        }
+      ]
+    },
+    {
+      "instance": "st_miqp2",
+      "invocations": [
+        {
+          "caller": "__init__.py:17108",
+          "root_changed": true,
+          "root_infeasible": false
+        }
+      ]
+    },
+    {
+      "instance": "st_miqp3",
+      "invocations": [
+        {
+          "caller": "__init__.py:17108",
+          "root_changed": true,
+          "root_infeasible": false
+        }
+      ]
+    },
+    {
+      "instance": "st_miqp4",
+      "invocations": [
+        {
+          "caller": "__init__.py:17108",
+          "root_changed": true,
+          "root_infeasible": false
+        }
+      ]
+    },
+    {
+      "instance": "st_miqp5",
+      "invocations": [
+        {
+          "caller": "__init__.py:17108",
+          "root_changed": false,
+          "root_infeasible": false
+        }
+      ]
+    },
+    {
+      "instance": "st_test1",
+      "invocations": [
+        {
+          "caller": "__init__.py:17108",
+          "root_changed": false,
+          "root_infeasible": false
+        }
+      ]
+    },
+    {
+      "instance": "st_testgr3",
+      "invocations": [
+        {
+          "caller": "__init__.py:17108",
+          "root_changed": true,
+          "root_infeasible": false
+        }
+      ]
+    },
+    {
+      "instance": "syn05hfsg",
+      "invocations": [
+        {
+          "caller": "__init__.py:6390",
+          "root_changed": true,
+          "root_infeasible": false
+        }
+      ]
+    },
+    {
+      "instance": "tanksize",
+      "invocations": [
+        {
+          "caller": "__init__.py:6390",
+          "root_changed": true,
+          "root_infeasible": false
+        }
+      ]
+    },
+    {
+      "instance": "tls2",
+      "invocations": [
+        {
+          "caller": "__init__.py:11901",
+          "root_changed": true,
+          "root_infeasible": false
+        },
+        {
+          "caller": "__init__.py:11901",
+          "root_changed": false,
+          "root_infeasible": false
+        }
+      ]
+    },
+    {
+      "instance": "tspn05",
+      "invocations": [
+        {
+          "caller": "__init__.py:6390",
+          "root_changed": false,
+          "root_infeasible": false
+        }
+      ]
+    },
+    {
+      "instance": "tspn08",
+      "invocations": [
+        {
+          "caller": "__init__.py:6390",
+          "root_changed": false,
+          "root_infeasible": false
+        }
+      ]
+    },
+    {
+      "instance": "tspn10",
+      "invocations": [
+        {
+          "caller": "__init__.py:6390",
+          "root_changed": false,
+          "root_infeasible": false
+        }
+      ]
+    },
+    {
+      "instance": "tspn12",
+      "invocations": [
+        {
+          "caller": "__init__.py:6390",
+          "root_changed": false,
+          "root_infeasible": false
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,153 @@
+discopt.__file__      = /home/user/discopt/python/discopt/__init__.py
+_root_presolve.__file__= /home/user/discopt/python/discopt/solvers/_root_presolve.py
+corpus instances: 66, budget 8.0s
+  4stufen                      invocations=2 ['__init__.py:5234', '__init__.py:6390']
+/home/user/discopt/python/discopt/debug/__init__.py:98: UserWarning: Variables with very large or infinite declared bounds: x0 (lb=0, ub=inf), x1 (lb=0, ub=inf), x2 (lb=0, ub=inf), x3 (lb=0, ub=inf).  Nonlinear tightening can adjust 4 bounds via separable_quadratic_upper_bound. NLP solvers may fail (NaN, iteration_limit) when bounds exceed ~1e15. Add tighter explicit bounds, e.g. m.continuous('x', lb=0, ub=1000).
+  return fn(*args, **kwargs)
+/home/user/discopt/python/discopt/_jax/convexity/patterns.py:318: RuntimeWarning: invalid value encountered in multiply
+  contrib = np.where(vec >= 0.0, vec * lo_box, vec * hi_box)
+  alan                         invocations=1 ['__init__.py:17108']
+  bchoco06                     invocations=2 ['__init__.py:5234', '__init__.py:6390']
+  bchoco07                     invocations=2 ['__init__.py:5234', '__init__.py:6390']
+  bchoco08                     invocations=2 ['__init__.py:5234', '__init__.py:6390']
+/home/user/discopt/python/discopt/debug/__init__.py:98: UserWarning: Variables with very large or infinite declared bounds: x102 (lb=0.0046, ub=2.3e+15).  Nonlinear tightening can adjust 2 bounds via separable_quadratic_upper_bound. NLP solvers may fail (NaN, iteration_limit) when bounds exceed ~1e15. Add tighter explicit bounds, e.g. m.continuous('x', lb=0, ub=1000).
+  return fn(*args, **kwargs)
+  beuster                      invocations=2 ['__init__.py:5234', '__init__.py:6390']
+/home/user/discopt/python/discopt/_jax/milp_relaxation.py:362: RuntimeWarning: overflow encountered in scalar divide
+  and nz.max() / nz.min() > _RELAX_EQUILIBRATE_TRIGGER
+  casctanks                    invocations=2 ['__init__.py:5234', '__init__.py:6390']
+  chance                       invocations=0 []
+/home/user/discopt/python/discopt/debug/__init__.py:98: UserWarning: Variables with very large or infinite declared bounds: x0 (lb=0, ub=inf), x1 (lb=0, ub=inf), x2 (lb=0, ub=inf), x3 (lb=0, ub=inf), x4 (lb=0, ub=inf).  Nonlinear tightening can adjust 66 bounds via separable_quadratic_upper_bound. NLP solvers may fail (NaN, iteration_limit) when bounds exceed ~1e15. Add tighter explicit bounds, e.g. m.continuous('x', lb=0, ub=1000).
+  return fn(*args, **kwargs)
+/home/user/discopt/python/discopt/solver/__init__.py:1696: RuntimeWarning: invalid value encountered in subtract
+  if np.any(np.abs(tightened_lb - lb) > 1e-12) or np.any(np.abs(tightened_ub - ub) > 1e-12):
+/home/user/discopt/python/discopt/debug/__init__.py:98: UserWarning: Variables with very large or infinite declared bounds: x0 (lb=0, ub=inf), x1 (lb=0, ub=inf), x2 (lb=0, ub=inf), x3 (lb=0, ub=inf), x4 (lb=0, ub=inf).  NLP solvers may fail (NaN, iteration_limit) when bounds exceed ~1e15. Add tighter explicit bounds, e.g. m.continuous('x', lb=0, ub=1000).
+  return fn(*args, **kwargs)
+  clay0303hfsg                 invocations=2 ['__init__.py:11901', '__init__.py:6390']
+/home/user/discopt/python/discopt/debug/__init__.py:98: UserWarning: Variables with very large or infinite declared bounds: x154 (lb=-inf, ub=7.6), x155 (lb=-inf, ub=7.6), x162 (lb=-inf, ub=8.3), x163 (lb=-inf, ub=8.3), x183 (lb=-inf, ub=1.6).  NLP solvers may fail (NaN, iteration_limit) when bounds exceed ~1e15. Add tighter explicit bounds, e.g. m.continuous('x', lb=0, ub=1000).
+  return fn(*args, **kwargs)
+  contvar                      invocations=2 ['__init__.py:5234', '__init__.py:6390']
+  cvxnonsep_nsig30             invocations=2 ['__init__.py:11901', '__init__.py:11901']
+  cvxnonsep_psig30             invocations=2 ['__init__.py:11901', '__init__.py:11901']
+/home/user/discopt/python/discopt/debug/__init__.py:98: UserWarning: Variables with very large or infinite declared bounds: x20 (lb=1e-09, ub=inf), x41 (lb=-inf, ub=inf), x42 (lb=-inf, ub=inf), x43 (lb=-inf, ub=inf), x44 (lb=-inf, ub=inf).  NLP solvers may fail (NaN, iteration_limit) when bounds exceed ~1e15. Add tighter explicit bounds, e.g. m.continuous('x', lb=0, ub=1000).
+  return fn(*args, **kwargs)
+  cvxnonsep_psig40r            invocations=2 ['__init__.py:11901', '__init__.py:11901']
+/home/user/discopt/python/discopt/debug/__init__.py:98: UserWarning: Variables with very large or infinite declared bounds: x3 (lb=-inf, ub=inf).  Nonlinear tightening can adjust 2 bounds via defined_variable_forward. NLP solvers may fail (NaN, iteration_limit) when bounds exceed ~1e15. Add tighter explicit bounds, e.g. m.continuous('x', lb=0, ub=1000).
+  return fn(*args, **kwargs)
+  dispatch                     invocations=1 ['__init__.py:6390']
+  ex1221                       invocations=1 ['__init__.py:6390']
+  ex1222                       invocations=1 ['__init__.py:6390']
+  ex1224                       invocations=1 ['__init__.py:6390']
+  ex1225                       invocations=1 ['__init__.py:6390']
+  ex1226                       invocations=1 ['__init__.py:6390']
+/home/user/discopt/python/discopt/debug/__init__.py:98: UserWarning: Variables with very large or infinite declared bounds: x1 (lb=-inf, ub=inf).  NLP solvers may fail (NaN, iteration_limit) when bounds exceed ~1e15. Add tighter explicit bounds, e.g. m.continuous('x', lb=0, ub=1000).
+  return fn(*args, **kwargs)
+  ex14_1_9                     invocations=1 ['__init__.py:6390']
+[38;2;138;109;59m INFO[0m pounce_algorithm::conv_check::opt_error: refusing a termination certificate masked by an extreme objective scale; continuing toward the true minimum (obj_scale_certificate_threshold=0 disables) [3mobj_scale[0m[2m=[0m3.214357036643473e-6 [3munscaled_kkt_error[0m[2m=[0m0.030047044851362833 [3mscaled_nlp_error[0m[2m=[0m1.6660561819037412e-10 [3mthreshold[0m[2m=[0m0.0001
+[38;2;138;109;59m INFO[0m pounce_algorithm::conv_check::opt_error: refusing a termination certificate masked by an extreme objective scale; continuing toward the true minimum (obj_scale_certificate_threshold=0 disables) [3mobj_scale[0m[2m=[0m1.1537375055407436e-5 [3munscaled_kkt_error[0m[2m=[0m2.0754343807265136e-5 [3mscaled_nlp_error[0m[2m=[0m2.498468099076945e-10 [3mthreshold[0m[2m=[0m0.0001
+[38;2;138;109;59m INFO[0m pounce_algorithm::conv_check::opt_error: refusing a termination certificate masked by an extreme objective scale; continuing toward the true minimum (obj_scale_certificate_threshold=0 disables) [3mobj_scale[0m[2m=[0m3.263085329121409e-5 [3munscaled_kkt_error[0m[2m=[0m1.802357041192299e-5 [3mscaled_nlp_error[0m[2m=[0m5.881244818953262e-10 [3mthreshold[0m[2m=[0m0.0001
+[38;2;138;109;59m INFO[0m pounce_algorithm::conv_check::opt_error: refusing a termination certificate masked by an extreme objective scale; continuing toward the true minimum (obj_scale_certificate_threshold=0 disables) [3mobj_scale[0m[2m=[0m6.280236481420175e-6 [3munscaled_kkt_error[0m[2m=[0m1.9737439023997045e-5 [3mscaled_nlp_error[0m[2m=[0m2.498576900933358e-10 [3mthreshold[0m[2m=[0m0.0001
+[38;2;138;109;59m INFO[0m pounce_algorithm::conv_check::opt_error: refusing a termination certificate masked by an extreme objective scale; continuing toward the true minimum (obj_scale_certificate_threshold=0 disables) [3mobj_scale[0m[2m=[0m4.637229533587453e-5 [3munscaled_kkt_error[0m[2m=[0m5.4509213325153735e-5 [3mscaled_nlp_error[0m[2m=[0m2.5277173388402164e-9 [3mthreshold[0m[2m=[0m0.0001
+[38;2;138;109;59m INFO[0m pounce_algorithm::conv_check::opt_error: refusing a termination certificate masked by an extreme objective scale; continuing toward the true minimum (obj_scale_certificate_threshold=0 disables) [3mobj_scale[0m[2m=[0m1.5974348724460502e-5 [3munscaled_kkt_error[0m[2m=[0m1.8722030842104937e-5 [3mscaled_nlp_error[0m[2m=[0m2.990722495018892e-10 [3mthreshold[0m[2m=[0m0.0001
+[38;2;138;109;59m INFO[0m pounce_algorithm::conv_check::opt_error: refusing a termination certificate masked by an extreme objective scale; continuing toward the true minimum (obj_scale_certificate_threshold=0 disables) [3mobj_scale[0m[2m=[0m4.637229533587453e-5 [3munscaled_kkt_error[0m[2m=[0m9.286660669738093e-5 [3mscaled_nlp_error[0m[2m=[0m4.3064377126114524e-9 [3mthreshold[0m[2m=[0m0.0001
+[38;2;138;109;59m INFO[0m pounce_algorithm::conv_check::opt_error: refusing a termination certificate masked by an extreme objective scale; continuing toward the true minimum (obj_scale_certificate_threshold=0 disables) [3mobj_scale[0m[2m=[0m4.637229533587453e-5 [3munscaled_kkt_error[0m[2m=[0m6.843064749762044e-5 [3mscaled_nlp_error[0m[2m=[0m8.333044911814689e-9 [3mthreshold[0m[2m=[0m0.0001
+[38;2;138;109;59m INFO[0m pounce_algorithm::conv_check::opt_error: refusing a termination certificate masked by an extreme objective scale; continuing toward the true minimum (obj_scale_certificate_threshold=0 disables) [3mobj_scale[0m[2m=[0m4.029983074071089e-5 [3munscaled_kkt_error[0m[2m=[0m8.844984738412402e-5 [3mscaled_nlp_error[0m[2m=[0m3.564513878621908e-9 [3mthreshold[0m[2m=[0m0.0001
+[38;2;138;109;59m INFO[0m pounce_algorithm::conv_check::opt_error: refusing a termination certificate masked by an extreme objective scale; continuing toward the true minimum (obj_scale_certificate_threshold=0 disables) [3mobj_scale[0m[2m=[0m4.029983074071089e-5 [3munscaled_kkt_error[0m[2m=[0m7.915349036630269e-5 [3mscaled_nlp_error[0m[2m=[0m3.1898722642984883e-9 [3mthreshold[0m[2m=[0m0.0001
+[38;2;138;109;59m INFO[0m pounce_algorithm::conv_check::opt_error: refusing a termination certificate masked by an extreme objective scale; continuing toward the true minimum (obj_scale_certificate_threshold=0 disables) [3mobj_scale[0m[2m=[0m3.068157675550743e-5 [3munscaled_kkt_error[0m[2m=[0m1.880112588681532e-5 [3mscaled_nlp_error[0m[2m=[0m5.768481869862819e-10 [3mthreshold[0m[2m=[0m0.0001
+[38;2;138;109;59m INFO[0m pounce_algorithm::conv_check::opt_error: refusing a termination certificate masked by an extreme objective scale; continuing toward the true minimum (obj_scale_certificate_threshold=0 disables) [3mobj_scale[0m[2m=[0m4.029983074071089e-5 [3munscaled_kkt_error[0m[2m=[0m8.346056840453442e-5 [3mscaled_nlp_error[0m[2m=[0m3.3634467802262605e-9 [3mthreshold[0m[2m=[0m0.0001
+[38;2;138;109;59m INFO[0m pounce_algorithm::conv_check::opt_error: refusing a termination certificate masked by an extreme objective scale; continuing toward the true minimum (obj_scale_certificate_threshold=0 disables) [3mobj_scale[0m[2m=[0m4.029983074071089e-5 [3munscaled_kkt_error[0m[2m=[0m7.896549348097815e-5 [3mscaled_nlp_error[0m[2m=[0m3.182296021640129e-9 [3mthreshold[0m[2m=[0m0.0001
+[38;2;138;109;59m INFO[0m pounce_algorithm::conv_check::opt_error: refusing a termination certificate masked by an extreme objective scale; continuing toward the true minimum (obj_scale_certificate_threshold=0 disables) [3mobj_scale[0m[2m=[0m4.637229533587453e-5 [3munscaled_kkt_error[0m[2m=[0m2.2564343964892958e-5 [3mscaled_nlp_error[0m[2m=[0m1.0463604224002743e-9 [3mthreshold[0m[2m=[0m0.0001
+[38;2;138;109;59m INFO[0m pounce_algorithm::conv_check::opt_error: refusing a termination certificate masked by an extreme objective scale; continuing toward the true minimum (obj_scale_certificate_threshold=0 disables) [3mobj_scale[0m[2m=[0m4.029983074071089e-5 [3munscaled_kkt_error[0m[2m=[0m8.521875188219965e-5 [3mscaled_nlp_error[0m[2m=[0m3.4343012767872834e-9 [3mthreshold[0m[2m=[0m0.0001
+[38;2;138;109;59m INFO[0m pounce_algorithm::conv_check::opt_error: refusing a termination certificate masked by an extreme objective scale; continuing toward the true minimum (obj_scale_certificate_threshold=0 disables) [3mobj_scale[0m[2m=[0m3.068173540358408e-5 [3munscaled_kkt_error[0m[2m=[0m2.4625698690396435e-5 [3mscaled_nlp_error[0m[2m=[0m7.555591713471304e-10 [3mthreshold[0m[2m=[0m0.0001
+[38;2;138;109;59m INFO[0m pounce_algorithm::conv_check::opt_error: refusing a termination certificate masked by an extreme objective scale; continuing toward the true minimum (obj_scale_certificate_threshold=0 disables) [3mobj_scale[0m[2m=[0m3.068157675550582e-5 [3munscaled_kkt_error[0m[2m=[0m1.835509578938521e-5 [3mscaled_nlp_error[0m[2m=[0m5.63163280316684e-10 [3mthreshold[0m[2m=[0m0.0001
+[38;2;138;109;59m INFO[0m pounce_algorithm::conv_check::opt_error: refusing a termination certificate masked by an extreme objective scale; continuing toward the true minimum (obj_scale_certificate_threshold=0 disables) [3mobj_scale[0m[2m=[0m3.068173540358248e-5 [3munscaled_kkt_error[0m[2m=[0m2.3026012121721107e-5 [3mscaled_nlp_error[0m[2m=[0m7.064780113183298e-10 [3mthreshold[0m[2m=[0m0.0001
+[38;2;138;109;59m INFO[0m pounce_algorithm::conv_check::opt_error: refusing a termination certificate masked by an extreme objective scale; continuing toward the true minimum (obj_scale_certificate_threshold=0 disables) [3mobj_scale[0m[2m=[0m4.637229533587453e-5 [3munscaled_kkt_error[0m[2m=[0m7.442425614432024e-5 [3mscaled_nlp_error[0m[2m=[0m3.451223586077193e-9 [3mthreshold[0m[2m=[0m0.0001
+[38;2;138;109;59m INFO[0m pounce_algorithm::conv_check::opt_error: refusing a termination certificate masked by an extreme objective scale; continuing toward the true minimum (obj_scale_certificate_threshold=0 disables) [3mobj_scale[0m[2m=[0m3.837204530169272e-5 [3munscaled_kkt_error[0m[2m=[0m6.793475228826582e-5 [3mscaled_nlp_error[0m[2m=[0m2.6067953923646096e-9 [3mthreshold[0m[2m=[0m0.0001
+[38;2;138;109;59m INFO[0m pounce_algorithm::conv_check::opt_error: refusing a termination certificate masked by an extreme objective scale; continuing toward the true minimum (obj_scale_certificate_threshold=0 disables) [3mobj_scale[0m[2m=[0m4.637229533587453e-5 [3munscaled_kkt_error[0m[2m=[0m5.4078669570355533e-5 [3mscaled_nlp_error[0m[2m=[0m2.507752036687698e-9 [3mthreshold[0m[2m=[0m0.0001
+[38;2;138;109;59m INFO[0m pounce_algorithm::conv_check::opt_error: refusing a termination certificate masked by an extreme objective scale; continuing toward the true minimum (obj_scale_certificate_threshold=0 disables) [3mobj_scale[0m[2m=[0m3.0681576755507414e-5 [3munscaled_kkt_error[0m[2m=[0m2.440882299153115e-5 [3mscaled_nlp_error[0m[2m=[0m8.333256707462934e-9 [3mthreshold[0m[2m=[0m0.0001
+[38;2;138;109;59m INFO[0m pounce_algorithm::conv_check::opt_error: refusing a termination certificate masked by an extreme objective scale; continuing toward the true minimum (obj_scale_certificate_threshold=0 disables) [3mobj_scale[0m[2m=[0m3.068157675550422e-5 [3munscaled_kkt_error[0m[2m=[0m2.1534529975922693e-5 [3mscaled_nlp_error[0m[2m=[0m6.607133343499786e-10 [3mthreshold[0m[2m=[0m0.0001
+[38;2;138;109;59m INFO[0m pounce_algorithm::conv_check::opt_error: refusing a termination certificate masked by an extreme objective scale; continuing toward the true minimum (obj_scale_certificate_threshold=0 disables) [3mobj_scale[0m[2m=[0m3.837204530169272e-5 [3munscaled_kkt_error[0m[2m=[0m7.171128495107493e-5 [3mscaled_nlp_error[0m[2m=[0m2.751708674785243e-9 [3mthreshold[0m[2m=[0m0.0001
+[38;2;138;109;59m INFO[0m pounce_algorithm::conv_check::opt_error: refusing a termination certificate masked by an extreme objective scale; continuing toward the true minimum (obj_scale_certificate_threshold=0 disables) [3mobj_scale[0m[2m=[0m3.0681576755507414e-5 [3munscaled_kkt_error[0m[2m=[0m2.2001176689267782e-5 [3mscaled_nlp_error[0m[2m=[0m6.750307913032499e-10 [3mthreshold[0m[2m=[0m0.0001
+  fac2                         invocations=4 ['__init__.py:5234', '__init__.py:11901', '__init__.py:5234', '__init__.py:6390']
+  flay02m                      invocations=4 ['__init__.py:5234', '__init__.py:11901', '__init__.py:5234', '__init__.py:11901']
+  flay03m                      invocations=4 ['__init__.py:5234', '__init__.py:11901', '__init__.py:5234', '__init__.py:11901']
+  gbd                          invocations=1 ['__init__.py:17108']
+/home/user/discopt/python/discopt/debug/__init__.py:98: UserWarning: Variables with very large or infinite declared bounds: x0 (lb=0, ub=inf), x1 (lb=0, ub=inf), x2 (lb=0, ub=inf), x3 (lb=0, ub=inf), x4 (lb=0, ub=inf).  Nonlinear tightening can adjust 7 bounds via monotone_function_equality, separable_quadratic_upper_bound, defined_variable_forward. NLP solvers may fail (NaN, iteration_limit) when bounds exceed ~1e15. Add tighter explicit bounds, e.g. m.continuous('x', lb=0, ub=1000).
+  return fn(*args, **kwargs)
+  gkocis                       invocations=1 ['__init__.py:6390']
+  hda                          invocations=2 ['__init__.py:5234', '__init__.py:6390']
+/home/user/discopt/python/discopt/debug/__init__.py:98: UserWarning: Variables with very large or infinite declared bounds: x68 (lb=0, ub=inf), x69 (lb=0, ub=inf), x70 (lb=0, ub=inf), x71 (lb=0, ub=inf), x72 (lb=0, ub=inf).  NLP solvers may fail (NaN, iteration_limit) when bounds exceed ~1e15. Add tighter explicit bounds, e.g. m.continuous('x', lb=0, ub=1000).
+  return fn(*args, **kwargs)
+  heatexch_gen1                invocations=2 ['__init__.py:5234', '__init__.py:6390']
+/home/user/discopt/python/discopt/debug/__init__.py:98: UserWarning: Variables with very large or infinite declared bounds: x89 (lb=0, ub=inf), x90 (lb=0, ub=inf), x91 (lb=0, ub=inf), x92 (lb=0, ub=inf), x93 (lb=0, ub=inf).  Nonlinear tightening can adjust 12 bounds via separable_quadratic_upper_bound. NLP solvers may fail (NaN, iteration_limit) when bounds exceed ~1e15. Add tighter explicit bounds, e.g. m.continuous('x', lb=0, ub=1000).
+  return fn(*args, **kwargs)
+  heatexch_gen2                invocations=2 ['__init__.py:5234', '__init__.py:6390']
+/home/user/discopt/python/discopt/debug/__init__.py:98: UserWarning: Variables with very large or infinite declared bounds: x365 (lb=0, ub=inf), x366 (lb=0, ub=inf), x367 (lb=0, ub=inf), x368 (lb=0, ub=inf), x369 (lb=0, ub=inf).  Nonlinear tightening can adjust 34 bounds via separable_quadratic_upper_bound. NLP solvers may fail (NaN, iteration_limit) when bounds exceed ~1e15. Add tighter explicit bounds, e.g. m.continuous('x', lb=0, ub=1000).
+  return fn(*args, **kwargs)
+  heatexch_gen3                invocations=2 ['__init__.py:5234', '__init__.py:6390']
+/home/user/discopt/python/discopt/debug/__init__.py:98: UserWarning: Variables with very large or infinite declared bounds: x6 (lb=-7, ub=inf), x7 (lb=-3, ub=inf), x8 (lb=-6.6, ub=inf), x9 (lb=-2.8, ub=inf), x10 (lb=-6.6, ub=inf).  NLP solvers may fail (NaN, iteration_limit) when bounds exceed ~1e15. Add tighter explicit bounds, e.g. m.continuous('x', lb=0, ub=1000).
+  return fn(*args, **kwargs)
+  m3                           invocations=4 ['__init__.py:5234', '__init__.py:11901', '__init__.py:5234', '__init__.py:11901']
+  nvs01                        invocations=2 ['__init__.py:5234', '__init__.py:6390']
+  nvs02                        invocations=0 []
+  nvs03                        invocations=1 ['__init__.py:11901']
+[38;2;138;109;59m INFO[0m pounce_algorithm::conv_check::opt_error: refusing a termination certificate masked by an extreme objective scale; continuing toward the true minimum (obj_scale_certificate_threshold=0 disables) [3mobj_scale[0m[2m=[0m1.968516895119089e-6 [3munscaled_kkt_error[0m[2m=[0m0.0064086553065205 [3mscaled_nlp_error[0m[2m=[0m1.2615546245880207e-8 [3mthreshold[0m[2m=[0m0.0001
+[38;2;138;109;59m INFO[0m pounce_algorithm::conv_check::opt_error: refusing a termination certificate masked by an extreme objective scale; continuing toward the true minimum (obj_scale_certificate_threshold=0 disables) [3mobj_scale[0m[2m=[0m1.5504319224258128e-5 [3munscaled_kkt_error[0m[2m=[0m9.717487845179784e-5 [3mscaled_nlp_error[0m[2m=[0m1.506630336095156e-9 [3mthreshold[0m[2m=[0m0.0001
+[38;2;138;109;59m INFO[0m pounce_algorithm::conv_check::opt_error: refusing a termination certificate masked by an extreme objective scale; continuing toward the true minimum (obj_scale_certificate_threshold=0 disables) [3mobj_scale[0m[2m=[0m5.863399825452219e-7 [3munscaled_kkt_error[0m[2m=[0m0.0001121567935978948 [3mscaled_nlp_error[0m[2m=[0m6.576201240051769e-11 [3mthreshold[0m[2m=[0m0.0001
+  nvs04                        invocations=1 ['__init__.py:6390']
+  nvs05                        invocations=2 ['__init__.py:5234', '__init__.py:6390']
+  nvs06                        invocations=2 ['__init__.py:5234', '__init__.py:6390']
+  nvs07                        invocations=1 ['__init__.py:5234']
+  nvs08                        invocations=1 ['__init__.py:6390']
+  nvs09                        invocations=2 ['__init__.py:5234', '__init__.py:6390']
+  nvs10                        invocations=0 []
+  nvs11                        invocations=0 []
+  nvs12                        invocations=0 []
+  nvs13                        invocations=1 ['__init__.py:6390']
+  nvs14                        invocations=0 []
+  nvs15                        invocations=0 []
+  nvs21                        invocations=2 ['__init__.py:5234', '__init__.py:6390']
+/home/user/discopt/python/discopt/debug/__init__.py:98: UserWarning: Variables with very large or infinite declared bounds: x0 (lb=0, ub=inf), x1 (lb=0, ub=inf), x2 (lb=0, ub=inf), x3 (lb=0, ub=inf), x4 (lb=0, ub=inf).  Nonlinear tightening can adjust 5 bounds via separable_quadratic_upper_bound, monotone_function_equality. NLP solvers may fail (NaN, iteration_limit) when bounds exceed ~1e15. Add tighter explicit bounds, e.g. m.continuous('x', lb=0, ub=1000).
+  return fn(*args, **kwargs)
+McCormick 'nlp' objective bound is not a valid dual bound for nonconvex models (issue #120); falling back to the alphaBB underestimator. Use mccormick_bounds='lp' for a valid spatial relaxation on models with continuous variables.
+  oaer                         invocations=1 ['__init__.py:6390']
+[38;2;138;109;59m INFO[0m pounce_algorithm::conv_check::opt_error: refusing a termination certificate masked by an extreme objective scale; continuing toward the true minimum (obj_scale_certificate_threshold=0 disables) [3mobj_scale[0m[2m=[0m1e-8 [3munscaled_kkt_error[0m[2m=[0m1.254430286061575e-5 [3mscaled_nlp_error[0m[2m=[0m1.2544302860615752e-13 [3mthreshold[0m[2m=[0m0.0001
+  st_e11                       invocations=1 ['__init__.py:6390']
+  st_e13                       invocations=1 ['__init__.py:6390']
+  st_e29                       invocations=1 ['__init__.py:6390']
+  st_e36                       invocations=2 ['__init__.py:5234', '__init__.py:6390']
+  st_e38                       invocations=2 ['__init__.py:5234', '__init__.py:6390']
+  st_miqp1                     invocations=1 ['__init__.py:17108']
+  st_miqp2                     invocations=1 ['__init__.py:17108']
+  st_miqp3                     invocations=1 ['__init__.py:17108']
+  st_miqp4                     invocations=1 ['__init__.py:17108']
+  st_miqp5                     invocations=1 ['__init__.py:17108']
+  st_test1                     invocations=1 ['__init__.py:17108']
+  st_testgr3                   invocations=1 ['__init__.py:17108']
+/home/user/discopt/python/discopt/debug/__init__.py:98: UserWarning: Variables with very large or infinite declared bounds: x0 (lb=0, ub=inf), x1 (lb=0, ub=inf), x2 (lb=0, ub=inf), x3 (lb=0, ub=inf), x4 (lb=0, ub=inf).  Nonlinear tightening can adjust 35 bounds via defined_variable_forward, separable_quadratic_upper_bound. NLP solvers may fail (NaN, iteration_limit) when bounds exceed ~1e15. Add tighter explicit bounds, e.g. m.continuous('x', lb=0, ub=1000).
+  return fn(*args, **kwargs)
+  syn05hfsg                    invocations=1 ['__init__.py:6390']
+/home/user/discopt/python/discopt/debug/__init__.py:98: UserWarning: Variables with very large or infinite declared bounds: x0 (lb=0, ub=inf), x1 (lb=0, ub=inf), x2 (lb=0, ub=inf), x6 (lb=0, ub=inf), x7 (lb=0, ub=inf).  Nonlinear tightening can adjust 30 bounds via defined_variable_forward, separable_quadratic_upper_bound. NLP solvers may fail (NaN, iteration_limit) when bounds exceed ~1e15. Add tighter explicit bounds, e.g. m.continuous('x', lb=0, ub=1000).
+  return fn(*args, **kwargs)
+  tanksize                     invocations=1 ['__init__.py:6390']
+/home/user/discopt/python/discopt/debug/__init__.py:98: UserWarning: Variables with very large or infinite declared bounds: x0 (lb=1, ub=inf), x1 (lb=1, ub=inf), x2 (lb=1, ub=inf), x3 (lb=1, ub=inf).  Nonlinear tightening can adjust 4 bounds via defined_variable_forward. NLP solvers may fail (NaN, iteration_limit) when bounds exceed ~1e15. Add tighter explicit bounds, e.g. m.continuous('x', lb=0, ub=1000).
+  return fn(*args, **kwargs)
+/home/user/discopt/python/discopt/debug/__init__.py:98: UserWarning: Variables with very large or infinite declared bounds: x0 (lb=1, ub=inf), x1 (lb=1, ub=inf), x2 (lb=1, ub=inf), x3 (lb=1, ub=inf).  Nonlinear tightening can adjust 8 bounds via defined_variable_forward, separable_quadratic_upper_bound. NLP solvers may fail (NaN, iteration_limit) when bounds exceed ~1e15. Add tighter explicit bounds, e.g. m.continuous('x', lb=0, ub=1000).
+  return fn(*args, **kwargs)
+  tls2                         invocations=2 ['__init__.py:11901', '__init__.py:11901']
+  tspn05                       invocations=1 ['__init__.py:6390']
+  tspn08                       invocations=1 ['__init__.py:6390']
+  tspn10                       invocations=1 ['__init__.py:6390']
+  tspn12                       invocations=1 ['__init__.py:6390']
+
+========================================================================
+SOLVES_MEASURED            66
+SOLVE_FAILURES             0
+EXECUTED_INVOCATIONS       94
+INVOCATIONS_PER_SOLVE_HIST {0: 7, 1: 32, 2: 23, 4: 4}
+CALLER_SITES               {'__init__.py:5234': 27, '__init__.py:6390': 41, '__init__.py:17108': 9, '__init__.py:11901': 17}
+SOLVES_WITH_MULTIPLE       27 ['4stufen', 'bchoco06', 'bchoco07', 'bchoco08', 'beuster', 'casctanks', 'clay0303hfsg', 'contvar', 'cvxnonsep_nsig30', 'cvxnonsep_psig30', 'cvxnonsep_psig40r', 'fac2', 'flay02m', 'flay03m', 'hda', 'heatexch_gen1', 'heatexch_gen2', 'heatexch_gen3', 'm3', 'nvs01']
+SECOND+_CALLS_REDUNDANT    29
+SECOND+_CALLS_LOAD_BEARING 6
+wrote /home/user/discopt/reports/card3a_root_fbbt_invocations.json
+H-FBBT-INV HOLDS: at least one solve invokes the root FBBT more than once.

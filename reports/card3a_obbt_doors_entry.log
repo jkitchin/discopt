@@ -1,0 +1,34 @@
+discopt.__file__ = /home/user/discopt/python/discopt/__init__.py
+obbt.__file__    = /home/user/discopt/python/discopt/_jax/obbt.py
+all three OBBT doors present on the loaded tree
+corpus instances: 12
+/home/user/discopt/discopt_benchmarks/scripts/card3a_obbt_doors_entry.py:125: RuntimeWarning: invalid value encountered in scalar subtract
+  if abs(a_ub[j] - b_ub[j]) > 1e-7:
+  4stufen                      cols=  149 disagreements=66
+/home/user/discopt/python/discopt/_jax/convexity/patterns.py:318: RuntimeWarning: invalid value encountered in multiply
+  contrib = np.where(vec >= 0.0, vec * lo_box, vec * hi_box)
+  alan                         cols=    8 disagreements=6
+  bchoco06                     cols=  118 disagreements=23
+  bchoco07                     cols=  134 disagreements=16
+  bchoco08                     cols=  168 disagreements=18
+  beuster                      cols=  157 disagreements=59
+/home/user/discopt/python/discopt/_jax/uniform_relax.py:330: RuntimeWarning: divide by zero encountered in scalar divide
+  "sqrt": (np.sqrt, lambda t: 0.5 / np.sqrt(t), _curv_const("concave"), lambda lo: lo >= 0.0),
+  casctanks                    cols=  500 disagreements=402
+  chance                       cols=    4 disagreements=4
+  clay0303hfsg                 cols=   99 disagreements=69
+/home/user/discopt/discopt_benchmarks/scripts/card3a_obbt_doors_entry.py:118: RuntimeWarning: invalid value encountered in scalar subtract
+  if abs(a_lb[j] - b_lb[j]) > 1e-7:
+  contvar                      cols=  296 disagreements=138
+  cvxnonsep_nsig30             cols=   30 disagreements=2
+  cvxnonsep_psig30             cols=   30 disagreements=0
+
+========================================================================
+INSTANCES_COMPARED        12
+ERRORS                    0
+EXECUTED_BOUND_COMPARISONS  3386
+DISAGREEMENTS             803
+  obbt_tighten_root tighter 786
+  run_obbt tighter          17
+wrote /home/user/discopt/reports/card3a_obbt_doors_entry.json
+H-OBBT FALSIFIED: run_obbt and obbt_tighten_root return different boxes on the same model and box — they are different tightenings, not two spellings of one. Both stay.

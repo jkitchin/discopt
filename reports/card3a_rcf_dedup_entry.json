@@ -1,0 +1,13 @@
+{
+  "instances_solved": 66,
+  "solve_failures": [],
+  "captured_inputs": 85,
+  "captures_by_seam": {
+    "node_dbbt": 85
+  },
+  "executed_int_col_comparisons": 291,
+  "lb_disagreements": 0,
+  "ub_disagreements": 0,
+  "cont_cols_tightened_dbbt_only": 8,
+  "examples": []
+}

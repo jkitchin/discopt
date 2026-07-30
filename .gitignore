@@ -57,6 +57,15 @@ coverage.svg
 # DISCOPT_CONVEX_KERNEL graduation decision recorded in the plan's §6.
 !/reports/phase5_convex_kernel_diff_panel_*.json
 !/reports/phase5_convex_kernel_budget_entry_*.json
+# ...and the Card 3a(b) entry-experiment artifacts, which are the whole deliverable
+# of that card: it landed ZERO production edits, so its §6 verdicts ("both stay",
+# with the disagreement counts) are only auditable if the measurements they cite
+# are in the repository.
+!/reports/card3a_*.json
+!/reports/card3a_*.log
+# ...and the Card 4c H-RHS entry experiment, cited by the §6 entry that justifies
+# refusing a non-zero `Constraint.rhs` (66 models, 3,705 executed comparisons).
+!/reports/card4c_rhs_entry.log
 
 # Generated course material (built from python/discopt/course/)
 /course/

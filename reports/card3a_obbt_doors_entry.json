@@ -1,0 +1,70 @@
+{
+  "instances_compared": 12,
+  "errors": [],
+  "executed_bound_comparisons": 3386,
+  "disagreements": 803,
+  "obbt_tighten_root_tighter": 786,
+  "run_obbt_tighter": 17,
+  "per_instance": [
+    {
+      "instance": "4stufen",
+      "cols": 149,
+      "disagreements": 66
+    },
+    {
+      "instance": "alan",
+      "cols": 8,
+      "disagreements": 6
+    },
+    {
+      "instance": "bchoco06",
+      "cols": 118,
+      "disagreements": 23
+    },
+    {
+      "instance": "bchoco07",
+      "cols": 134,
+      "disagreements": 16
+    },
+    {
+      "instance": "bchoco08",
+      "cols": 168,
+      "disagreements": 18
+    },
+    {
+      "instance": "beuster",
+      "cols": 157,
+      "disagreements": 59
+    },
+    {
+      "instance": "casctanks",
+      "cols": 500,
+      "disagreements": 402
+    },
+    {
+      "instance": "chance",
+      "cols": 4,
+      "disagreements": 4
+    },
+    {
+      "instance": "clay0303hfsg",
+      "cols": 99,
+      "disagreements": 69
+    },
+    {
+      "instance": "contvar",
+      "cols": 296,
+      "disagreements": 138
+    },
+    {
+      "instance": "cvxnonsep_nsig30",
+      "cols": 30,
+      "disagreements": 2
+    },
+    {
+      "instance": "cvxnonsep_psig30",
+      "cols": 30,
+      "disagreements": 0
+    }
+  ]
+}

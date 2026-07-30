@@ -534,7 +534,29 @@ The audit found ~30 mechanisms, 6 FBBTs, 5 reduced-cost fixers, no sequencer bey
 the Rust orchestrator, and `tighten_root_bounds_with_fbbt` invoked from 5
 uncoordinated sites.
 
-### Card 3a — `TighteningSchedule` object — **(a) LANDED, (b) DEFERRED-BY-OWNER**
+### Card 3a — `TighteningSchedule` object — **(a) LANDED; (b) RAN 2026-07-30 — all three de-duplications answered NO, no code change**
+
+> **Status: (b) COMPLETE as a measured NO (2026-07-30).** All three
+> de-duplications the card names were taken to an entry experiment on real corpus
+> instances *before* any consolidation was written (§0.3). None of the three
+> survived. That is the outcome, not a deferral: per the card's own framing and
+> Phase 2/3's standing lesson, "these duplicates keep turning out to be
+> differentiated", and forcing a merge to satisfy the card is explicitly
+> disallowed. Full write-ups in §6; summary:
+>
+> | item | hypothesis | verdict | evidence |
+> |---|---|---|---|
+> | **2. one reduced-cost fixing** | `_dbbt_from_reduced_costs` ≡ `_reduced_cost_fixing`; delete one | **BOTH STAY** | 85 real node-LP inputs, **291 executed integer-column comparisons, 0 disagreements** — but DBBT also tightens **continuous** columns (8 observed) and returns an infeasibility verdict, which RCF cannot express, so deleting it is a Regime-C bound-*loosening* (§0.2); and RCF's only consumer (`_solve_milp_bb`) is unreachable — **147 classifications, ZERO MILP** on the corpus — so the reverse swap cannot be gated. The 291/291 agreement is population-dependent: the two floor different quantities (step vs bound) and *do* differ on a fractional integer `lb` (demonstrated, 3 cases, 1 differs). |
+> | **1. one root-FBBT invocation policy** | >1 call site fires per solve, so the root FBBT runs redundantly | **REDUNDANCY IS REAL BUT NOT UNIFORM — no policy** | 66 solves, **94 executed invocations**, 0 failures. Per-solve histogram `{0:7, 1:32, 2:23, 4:4}` — **27 solves invoke it more than once**. Of the 35 second-plus calls, **29 changed nothing** *but* **6 tightened bounds**. A "run it once" policy would therefore drop 6 real tightenings — a Regime-C bound-*loosening*. The only clean win is the 29 no-op passes, which is **wall time with zero certificate content**, and this session's benchmark is for correctness. |
+> | **3. OBBT doors 3 → 1** | three doors to one room | **BOTH STAY** | 12 instances, **3,386 executed bound comparisons, 803 disagreements**: `obbt_tighten_root` tighter on 786, **`run_obbt` tighter on 17**. Neither dominates, so collapsing either into the other loses tightenings. They are different *relaxations* (model linear rows vs the McCormick LP envelope), not two spellings. `run_obbt_on_relaxation` is not even type-compatible (it takes a pre-built relaxation object, not a `Model`) and `obbt_tighten_root` already delegates to it internally, so it cannot be made private without breaking `amp.py`'s two call sites. |
+>
+> **Regime classification, per the card's requirement.** All three would have been
+> **Regime C** where they change bounds (item 2 deletes an active tightening; item
+> 3 changes which relaxation a caller gets) and Regime N only for the pure
+> re-export of an entry point. Since none was consolidated, **no Regime-C gate was
+> needed and none was claimed** — the only verification owed is that the tree is
+> unchanged, which it is: item (b) landed **zero** production edits, only the three
+> entry-experiment scripts and their reports.
 
 One module (`python/discopt/_jax/tightening_schedule.py` or promote
 `presolve_pipeline.py`) declaring the **root schedule** and the **node schedule**
@@ -932,10 +954,76 @@ one module each — **never one big-bang PR**.
 
 ### Card 4c — Three stray B&B loops onto `PyTreeManager`
 
-> **Status: TASK 2 LANDED, TASK 1 BLOCKED-BY-MEASUREMENT (2026-07-30).**
-> The vector-constraint corpus gap is **closed**. The three ports are **not**
-> done, and the entry experiments say they should not be attempted in this
-> environment — the reason is recorded in §6 (two entries) and summarised below.
+> **Status: CLOSED (2026-07-30). Task 2 LANDED; Task 1 RETIRED and REPLACED.**
+> The vector-constraint corpus gap is **closed**. The three ports are **retired**
+> — option (b) of the two exits this card offered, taken by the owner on the
+> measurement below. In their place the card ships the thing the ports were *for*:
+> a standing certificate-invariant suite over all three loops, and the
+> default-inactive audit hook that makes their pruning decisions observable.
+>
+> ### Task 1 — RETIRED (owner decision, 2026-07-30)
+>
+> **The card's premise is falsified, and that is why it closes rather than
+> waiting.** The premise was that consolidating onto one audited tree manager
+> improves auditability. The measurement (§6, two entries, 2026-07-30) says a
+> faithful port would add **five policy switches** to `PyTreeManager` — selection
+> tie-break, prune slack, branch-variable rule, split-point rule,
+> failed-relaxation handling — plus **two contract extensions**
+> (`signomial_global` branches in **log space**; its per-node OBBT *replaces* the
+> child box) that `export_batch`/`import_results` cannot express at all. That is a
+> net *increase* in the complexity of the audited component, verified by a gate
+> that cannot see the change. The premise does not survive its own consequences,
+> so option (a) — materialise a GP/signomial population large enough to gate the
+> port — is not merely blocked by this environment; it would be buying a worse
+> design with a better gate.
+>
+> The **policy characterisation table below is preserved verbatim** as the durable
+> deliverable: it is the reference anyone re-opening this question needs, and it
+> is the specification the invariant suite audits against.
+>
+> ### Task 1's replacement — what actually serves the goal
+>
+> What makes a certificate-critical pruning decision auditable is that it is
+> **observable**, not that it is centralised. Two pieces, both landed:
+>
+> - **`python/discopt/validation/fathom_audit.py`** — a default-inactive hook
+>   (`record_fathom` / `fathom_audit()`); one module-global read and an `is None`
+>   test per decision when nobody is listening. Each of the three loops now
+>   reports **every** bound-fathom decision — *both* arms, kept and fathomed — in
+>   its internal minimisation sense. Recording both arms is the point: a hook that
+>   fires only on the fathom makes `node_bound >= incumbent - slack` a tautology.
+> - **`python/tests/test_stray_bb_loop_invariants.py`** (`slow`) — the standing
+>   regression watch none of the three loops had. Flags **forced ON**
+>   (`DISCOPT_GP_MINLP`, `DISCOPT_SGO`, `lp_spatial=True`), because the entry
+>   experiments established the panel never executes two of them on defaults.
+>   Three invariants per loop, on real corpus instances:
+>   **I1** no node is fathomed while its bound beats the incumbent by more than
+>   the optimality tolerance — where the admissible slack is **re-derived by the
+>   test from the declared `gap_tolerance`**, never read off the loop's own
+>   reported slack; **I2** the reported dual bound never crosses the oracle from
+>   `discopt_benchmarks/utils/reference_optima` (`.solu` when present, else the
+>   vendored `known_optima.toml` / `cert-optima.json`, so it scores in CI);
+>   **I3** the final incumbent passes `validation/feasibility.verify_point`.
+>
+> **Measured, 7 tests, all pass:** `i1_fathom_decisions` **12,905**,
+> `i1_fathomed` **3**, `i2_bound_vs_oracle` **3**, `i3_incumbent_verified` **5**,
+> and all three loops observed (`gp_minlp` 2 runs, `signomial_global` 2,
+> `lp_spatial_bb` 1). A module-scoped finalizer fails the suite if any counter is
+> zero, so a loop that quietly stops being reachable turns this file red instead
+> of passing on nothing — the exact failure mode that killed Card 4c's own gate.
+> A planted-violation control (`test_i1_checker_rejects_a_planted_wrongful_fathom`)
+> proves the I1 assertion discriminates rather than accepting everything.
+>
+> **Finding worth recording: these loops almost never fathom by bound.** Only
+> **3** of 12,905 audited decisions were fathoms. `lp_spatial_bb` fired its
+> decision site **12,747** times on `nvs17` and fathomed **zero** times — under
+> best-first the popped node *is* the frontier minimum, so the gap test fires
+> before the bound test ever can, and that site is a safety net rather than a
+> working pruner. `gp_minlp` and `signomial_global` fathom at most once per solve
+> by construction (both `break` out of the loop on the frontier test). The
+> invariant is therefore cheap to hold and the suite's value is as a *watch* on
+> future policy edits, not as a stress test of today's code — stated plainly so
+> nobody reads "3 fathoms" as thin coverage of a hot path.
 >
 > ### What landed (Task 2 — the vector-constraint corpus gap)
 >
@@ -1017,19 +1105,28 @@ one module each — **never one big-bang PR**.
 > **log space** and lets per-node OBBT *replace* the child box, neither of which
 > `PyTreeManager`'s `export_batch`/`import_results` contract can express.
 >
-> ### What remains in Card 4c
+> ### What remains in Card 4c — **NOTHING. The card is closed.**
 >
-> Task 1 only, and it needs a decision the card cannot make for itself:
-> **(a)** materialise a GP-MINLP / signomial population large enough to gate a
-> port (the MINLPLib snapshot at `~/Dropbox/projects/discopt-minlp-benchmark/` has
-> the instances; this environment does not), then port `gp` first — it is the only
+> The decision the card could not make for itself was made by the owner on
+> 2026-07-30: **option (b), retire.** For the record, the exits as the card framed
+> them were **(a)** materialise a GP-MINLP / signomial population large enough to
+> gate a port (the MINLPLib snapshot at `~/Dropbox/projects/discopt-minlp-benchmark/`
+> has the instances; this environment does not), then port `gp` first — the only
 > loop whose divergences are all options-shaped; or **(b)** accept the finding and
-> retire the card, on the grounds that adding five policy switches to the audited
-> tree manager to absorb three callers makes the audited component *harder* to
-> audit. `lp_spatial_bb` should be skipped either way per the card's own proviso
-> if Phase 5 retires its class. `signomial_global` cannot be ported without a
-> `PyTreeManager` that supports caller-supplied split points and caller-rewritten
-> child boxes — a much larger change than this card scoped.
+> retire, on the grounds that adding five policy switches to the audited tree
+> manager to absorb three callers makes the audited component *harder* to audit.
+>
+> (b) was taken because (a) buys a better gate for a worse design: the five
+> switches and two contract extensions are a cost the port pays *whatever* gate
+> certifies it. `lp_spatial_bb` was skippable either way per the card's own
+> proviso if Phase 5 retires its class, and `signomial_global` could not be ported
+> at all without a `PyTreeManager` supporting caller-supplied split points and
+> caller-rewritten child boxes — a much larger change than this card scoped.
+>
+> **Should the question re-open**, the prerequisites are unchanged and now
+> written down: the policy table above is the specification, and
+> `test_stray_bb_loop_invariants.py` is the differential harness a port would have
+> to keep green. Re-opening needs a population, not a re-analysis.
 
 `lp_spatial_bb.py`, `gp/solve_gp_minlp`, `signomial_global` reimplement node
 selection with raw `heapq`. Port each to `PyTreeManager` (same selection policy →
@@ -1479,16 +1576,29 @@ any time after Phase 4 releases `solver.py`; it touches `crates/` only.
 
 **Re-sequencing, 2026-07-30 (owner) — the benchmark is for CORRECTNESS, not speed.**
 That reprioritizes what is left:
-- **Card 4c: Task 2 LANDED, Task 1 blocked-by-measurement (2026-07-30).** The
-  vector-constraint corpus gap is closed (7 modeling-API cases wired into the
-  verifier and Card 3c parity suites; the pre-5.5 row loop wrongly accepts 6 of
-  7, so the coverage is proven non-vacuous). The three ports were **not**
-  attempted: two entry experiments (§6) showed the Regime-N panel never invokes
-  the GP-MINLP or signomial loops on defaults (both behind default-OFF flags) and
-  that forcing the flags ON yields exactly **one** budget-independent comparable
-  (`prob03`, 5 nodes) — a gate too weak to certify a port whose loops diverge from
-  `PyTreeManager` on 5–6 policy axes each. The per-loop policy characterisation is
-  recorded on the card; the open decision is materialise-a-population vs retire.
+- **Card 4c: CLOSED (2026-07-30).** Task 2 landed (7 modeling-API vector cases
+  wired into the verifier and Card 3c parity suites; the pre-5.5 row loop wrongly
+  accepts 6 of 7, so the coverage is proven non-vacuous). **Task 1 RETIRED** —
+  owner took exit (b). Two entry experiments (§6) showed the Regime-N panel never
+  invokes the GP-MINLP or signomial loops on defaults (both behind default-OFF
+  flags) and that forcing the flags ON yields exactly **one** budget-independent
+  comparable (`prob03`, 5 nodes); worse, a faithful port would add five policy
+  switches plus two contract extensions to the *audited* component, inverting the
+  card's own premise. Replaced by what actually serves the goal:
+  `validation/fathom_audit.py` (default-inactive observability of every
+  bound-fathom decision) and `test_stray_bb_loop_invariants.py` (I1 no wrongful
+  fathom / I2 bound never crosses the oracle / I3 incumbent verifies, flags forced
+  ON, **12,905 audited decisions**). The per-loop policy characterisation is
+  preserved on the card as the specification a future port would have to meet.
+- **The `Constraint.rhs` silent wrong answer (filed by Card 4c Task 2): FIXED.**
+  Root cause `_jax/dag_compiler.compile_constraint`, which compiles `body` and
+  drops `rhs`; **26 modules** read `.body` and never `.rhs` while the verifier,
+  the exporters and the Rust `ConstraintRepr` all honour it. **The public API is
+  affected** — `m.subject_to(Constraint(w, ">=", 5.0))` solved to `w = 0`; the
+  earlier "the public path is correct" note is retracted in §6. Direction:
+  **refuse loudly** at `Model.subject_to` *and* `Model.validate` (CLAUDE.md §3),
+  because half-honouring `rhs` across 26 modules would replace a wrong-answer
+  hazard with a soundness hazard.
 - **Card 4b modules 2–5: DROPPED** (see its card) — maintainability, not
   correctness, behind a state-object prerequisite.
 - **Card 6d (process floor): OFF the critical path** — pure wall-clock, no
@@ -1507,6 +1617,300 @@ touches `crates/` + producer files — safe alongside 1/2/7, coordinate with 3c
 (whose parity test is the guard Phase 5's expansions must keep green).
 
 ## §6. Falsification log (append-only, per §0.3)
+
+### 2026-07-30 — Card 4c close-out / Card 3a(b) close-out: what was run on the final tree
+
+Tree: `6f815214` + the three commits of this session. `HEAD == origin` asserted
+before each commit. Compiled `.so` marker asserted **before every measurement**:
+`strings` on `_rust.cpython-311-x86_64-linux-gnu.so` finds `subtol_repaired` and
+`subtol_crossings_repaired`, the PyO3 strings unique to the newest Rust commit
+`8532ce2d` — so the binary matches the newest Rust sources. **Rust untouched this
+session**, therefore `cargo test -p discopt-core` was **not run** (nothing in
+`crates/` changed).
+
+| gate | result |
+|---|---|
+| `pytest python/tests -m smoke` | **PASS — 946 passed, 16 skipped, 7752 deselected, 2 xpassed** (478 s). Pre-session baseline 922 passed; the +24 is exactly `test_constraint_rhs_refusal.py`. |
+| `pytest discopt_benchmarks/tests -m smoke` | **PASS** (exit 0) |
+| `pytest -m slow test_adversarial_recent_fixes.py` | see the row appended below |
+| `pytest test_node_tightening_parity.py` (default + `-m slow`) | see below |
+| `pytest test_vector_constraint_corpus.py` | **PASS — 56 passed** (run with the verifier-scale and parity suites) |
+| `pytest test_flag_registry.py` | **PASS — 17 passed.** No flag was added this session, so `docs/reference/flags.md` needs no regeneration and the staleness test confirms it. |
+| `pytest -m slow test_stray_bb_loop_invariants.py` | **PASS — 7 tests**, 12,905 audited fathom decisions (counts on the Card 4c block) |
+| `ruff check python/` + `ruff format --check` | **PASS** on every file this session touched. Two files unrelated to this session (`test_log_square_relaxation.py`, `test_mo_augmecon2.py`) are pre-existing format drift and were left alone. |
+| Regime N `panel_baseline --check reports/panel_baseline_f154dcff.json` | **queued to run alone after the suite block**; verdict appended below when it lands. Expected 255 comparisons over 119 rows at the baseline's own 45 s budget (~36 min). |
+| heldout50 | **SKIPPED — local only.** Not available in this environment. |
+
+**Why Regime N is the right regime for everything here.** The three loop edits
+hoist an existing condition into a named local and call a default-inactive hook
+between — same boolean, same use, no math. The `rhs` refusal is unreachable from
+any producer in the corpus or the suite (66 models / 3,705 comparisons / 0
+violations; 1,947 suite constructions / 58 non-zero, all from test fixtures). Card
+3a(b) landed **zero** production edits. So no bound can move, and the panel is a
+confirmation rather than a differential.
+
+### 2026-07-30 — Card 3a(b) item 3: "OBBT entry points 3 → 1" — **FALSIFIED; both stay**
+
+**Hypothesis (H-OBBT).** `run_obbt`, `run_obbt_on_relaxation` and
+`obbt_tighten_root` are three doors to one room, so two can be made private behind
+the third.
+
+**Kill criterion.** Two doors given the same model and the same starting box
+returning different boxes.
+
+**Experiment** (`discopt_benchmarks/scripts/card3a_obbt_doors_entry.py`,
+`reports/card3a_obbt_doors_entry.json`). Only the type-compatible pair can even be
+compared: `run_obbt(model, lb, ub, …)` vs `obbt_tighten_root(model, lb, ub, …)`,
+same model, same root box, one round each, 20 s cap per door. 12 instances, **0
+errors, 3,386 executed bound comparisons.**
+
+| measure | value |
+|---|---|
+| disagreements | **803** |
+| `obbt_tighten_root` tighter | 786 |
+| **`run_obbt` tighter** | **17** |
+
+**Verdict: FALSIFIED, and in the way that matters.** `obbt_tighten_root` is tighter
+far more often — but `run_obbt` is tighter on **17** bounds, so **neither
+dominates** and collapsing either into the other *loses* tightenings (Regime C,
+bound-loosening, §0.2). They are different relaxations, not different spellings:
+`run_obbt` tightens against the model's **linear rows**, `obbt_tighten_root`
+against the **McCormick LP envelope** it builds itself. Even the return contracts
+differ (`ObbtResult(tightened_lb, tightened_ub, …)` vs
+`RootObbtResult(lb, ub, …, infeasible)`).
+
+**And the third door cannot be made private on structural grounds alone.**
+`run_obbt_on_relaxation` takes a **pre-built relaxation object**, not a `Model`, so
+it is not substitutable for either; `amp.py` calls it at two sites with a
+relaxation it already owns; and `obbt_tighten_root` **already delegates to it**
+(obbt.py:2119, :2567). Making it internal would break `amp.py` and would hide the
+helper the "single door" is itself built on.
+
+**Consequence: all three stay, documented. No code change.**
+
+### 2026-07-30 — Card 3a(b) item 1: "a single `tighten_root_bounds_with_fbbt` invocation policy" — **the redundancy is real but NOT uniform; no policy shipped**
+
+**Hypothesis (H-FBBT-INV).** More than one of the call sites fires within a single
+solve, so the root FBBT runs redundantly and an invocation policy removes real work.
+
+**Kill criterion.** If every solve invokes it at most once, the "5+ sites" are five
+*engines* each doing its own root presolve once and there is nothing to coordinate.
+
+**Experiment** (`discopt_benchmarks/scripts/card3a_root_fbbt_invocations.py`,
+`reports/card3a_root_fbbt_invocations.json`). Wrapper counts invocations per solve
+with the caller's `file:line` and each call's `root_changed`. 66 instances, **0
+solve failures, 94 executed invocations.**
+
+| measure | value |
+|---|---|
+| invocations per solve | `{0: 7, 1: 32, 2: 23, 4: 4}` |
+| solves invoking more than once | **27** |
+| caller sites reached | `solver:6390` ×41, `solver:5234` ×27, `solver:11901` ×17, `solver:17108` ×9 |
+| second-plus calls that changed **nothing** | **29** |
+| second-plus calls that **tightened** | **6** (`4stufen`, `beuster`, `clay0303hfsg`, `cvxnonsep_psig40r`, `fac2`, `nvs05`) |
+
+**Verdict: H-FBBT-INV holds — the repeats are real — but the card's remedy does
+not follow.** The second-plus calls are **not uniformly redundant**: 6 of 35 moved
+bounds (a later engine entry sees a box a prior pass had already improved, and FBBT
+is not idempotent across a changed box). A "single invocation" policy that
+suppresses repeats would therefore **drop 6 real tightenings** — a Regime-C
+bound-loosening, which §0.2 forbids and which no gate in this environment could
+excuse. The only clean saving is the 29 no-op passes: **pure wall time with zero
+certificate content**, on a session whose benchmark is explicitly for
+**correctness, not speed** (§5, 2026-07-30 re-sequencing).
+
+**Consequence: measured, characterised, not consolidated.** If this is revisited as
+a *performance* item, the shape is not "invoke once" but "skip a repeat whose input
+box is bit-identical to the previous call's" — which is bound-neutral by
+construction (Regime N) and would recover 29 of 35 repeats. Recorded as the
+follow-up shape; not built here, because it is wall-clock work outside this
+session's scope.
+
+### 2026-07-30 — Card 3a(b) item 2: "the two Python reduced-cost-fixing implementations are duplicates; delete one" — **BOTH STAY. Same on the integer columns, differentiated everywhere else, and the swap cannot be gated**
+
+**Hypothesis (H-RCF).** `_jax/node_reduce._dbbt_from_reduced_costs` and
+`solver._reduced_cost_fixing` compute the same tightening on the integer columns,
+so one can be deleted in favour of the other. (Regime C — deleting an *active*
+tightening can loosen bounds, per §0.2.)
+
+**Kill criterion.** One integer bound on which they disagree, on inputs drawn from
+real corpus node LPs.
+
+**Experiment** (`discopt_benchmarks/scripts/card3a_rcf_dedup_entry.py`,
+`reports/card3a_rcf_dedup_entry.json`). Both entry points wrapped so whichever the
+corpus reaches supplies the population; every live invocation's exact arguments
+captured and replayed through **both** implementations. 66 instances, 0 solve
+failures, `DISCOPT_PHASE2_DBBT=1`.
+
+| measure | value |
+|---|---|
+| captured real inputs | **85** (all from the node-DBBT seam) |
+| executed integer-column comparisons | **291** |
+| integer lb / ub disagreements | **0 / 0** |
+| continuous columns tightened by DBBT **only** | **8** |
+| captures from the root-RCF seam | **0** |
+
+**Verdict: H-RCF holds on the integer columns — and the deletion is still wrong,
+in both directions.**
+
+1. **Deleting `_dbbt_from_reduced_costs` loses an active tightening.** It also
+   tightens **continuous** columns (8 observed on real inputs) and returns an
+   infeasibility verdict; `_reduced_cost_fixing` iterates `int_idx` and can express
+   neither. That is a Regime-C bound-*loosening* deletion, which §0.2 forbids.
+2. **Deleting `_reduced_cost_fixing` cannot be gated here.** Its only consumer is
+   `_root_reduced_cost_fixing` inside `_solve_milp_bb`, which routes on
+   `problem_class == ProblemClass.MILP`. Measured over the whole in-repo corpus:
+   **147 executed classifications, ZERO MILP** (73 MINLP, 21 MIQCQP, 15 MIQP, 14
+   NLP, 11 MIQCP, 8 QCP, 3 QCQP, 2 QP) — hence 0 captures from that seam. A Regime-C
+   swap with no population to certify it on is exactly the unverifiable change
+   Card 4c was retired for.
+3. **The 291/291 agreement is a property of the population, not of the code.** The
+   two floor *different quantities*: `_reduced_cost_fixing` floors the **step**
+   (`lb + floor(gap/d)`), `_dbbt_from_reduced_costs` floors the resulting **bound**
+   (`floor(lb + gap/d)`), and their acceptance thresholds differ (`0.5` vs `_EPS`).
+   Demonstrated directly, 3 constructed cases, 1 differs: with a *fractional*
+   integer lower bound `lb=0.3, gap=3.5, d=1` they give `ub = 3.3` vs `ub = 3.0`
+   (DBBT tighter, and still valid for an integer column). Every captured node had
+   integral integer lower bounds, which is why the corpus never separated them.
+   Recorded so nobody reads "0 disagreements" as "provably identical".
+
+**Consequence: both stay, documented.** No code change; the card's item 2 is
+answered as a measured NO, consistent with Phase 2/3's standing lesson that these
+"duplicates" keep turning out to be differentiated.
+
+### 2026-07-30 — Card 4c Task 1: "consolidating the three loops onto `PyTreeManager` improves auditability" — **FALSIFIED (the card's own premise); port RETIRED**
+
+**Hypothesis.** Card 4c's stated value was "every certificate-critical pruning
+decision now flows through one audited tree manager". That presumes the ports make
+the audited component *easier* to audit.
+
+**Kill criterion.** If a faithful port requires adding policy switches to
+`PyTreeManager` — rather than removing divergence — the premise inverts: the
+audited component grows, and it grows to serve three callers the certifying panel
+cannot execute.
+
+**Evidence** (the two entries below, unchanged): five policy axes diverge per loop
+(selection tie-break, prune slack, branch-variable rule, split-point rule,
+failed-relaxation handling), and two are not options-shaped at all —
+`signomial_global` branches in **log space**, and its per-node OBBT *replaces* the
+child box, neither expressible in the `export_batch`/`import_results` contract. The
+gate that would certify the ports sees exactly **one** budget-independent instance
+(`prob03`, 5 nodes).
+
+**Verdict: FALSIFIED.** Five switches plus two contract extensions is a net
+increase in the complexity of the audited component, and it is a cost the port pays
+whatever gate certifies it — so exit (a) (materialise a population) buys a better
+gate for a worse design. **Owner decision: option (b), retire.** Card 4c is
+CLOSED. The per-loop policy characterisation table is preserved on the card as the
+durable deliverable.
+
+**Replacement, built and landed the same session** (the goal survives the port;
+auditability comes from *observability*, not centralisation):
+`python/discopt/validation/fathom_audit.py` (default-inactive hook, both arms of
+every bound-fathom decision recorded in internal minimisation sense) plus
+`python/tests/test_stray_bb_loop_invariants.py` (`slow`), which forces
+`DISCOPT_GP_MINLP` / `DISCOPT_SGO` / `lp_spatial=True` ON — precisely because the
+first entry below proved the panel never invokes two of them — and asserts I1
+(no wrongful fathom, admissible slack re-derived from the declared
+`gap_tolerance`, never from the loop's reported slack), I2 (dual bound never
+crosses the `reference_optima` oracle), I3 (incumbent passes `verify_point`).
+
+**Measured: 7 tests pass. 12,905 audited fathom decisions; 3 fathoms; 3 oracle
+comparisons; 5 incumbents verified; all three loops observed.** A planted-violation
+control proves I1 discriminates; a module-scoped finalizer fails the suite if any
+counter reaches zero.
+
+**Secondary finding — these loops almost never fathom by bound.** 3 of 12,905.
+`lp_spatial_bb` fired its decision site **12,747** times on `nvs17` and fathomed
+**zero** times: under best-first the popped node *is* the frontier minimum, so the
+gap test fires before the bound test can, making that site a safety net rather
+than a working pruner. `gp_minlp` and `signomial_global` fathom at most once per
+solve (both `break` on the frontier test). Recorded so "3 fathoms" is not misread
+as thin coverage of a hot path — it is complete coverage of a cold one.
+
+### 2026-07-30 — the `Constraint.rhs` silent wrong answer: "only the private-append path is affected, and the public path is correct" — **FALSIFIED; the public API is affected too**
+
+**Restatement.** The 2026-07-30 entry further down recorded, as an incidental
+Card 4c Task 2 measurement, that a hand-appended `Constraint` with a non-zero
+`rhs` is honoured by the verifier and ignored by the solver, and concluded "the
+public `subject_to` path folds the offset into the body and is correct". **That
+conclusion is wrong and is retracted here** (CLAUDE.md §11). `Constraint` is
+exported in `discopt.modeling.__all__`; `subject_to` accepted the object verbatim
+without normalising it. Measured on this tree, all three arms, one script:
+
+    m.subject_to(w >= 5.0)                       -> w = 5.0    (operators normalize)
+    m.subject_to(Constraint(w, ">=", 5.0))       -> w = -5e-09  ← PUBLIC API
+    m._constraints.append(Constraint(w,">=",5.0))-> w = -5e-09
+
+This is a **silent wrong answer through documented public API**, not a
+private-attribute footgun. It is more serious than the original write-up believed.
+
+**Root cause.** `_jax/dag_compiler.compile_constraint` / `compile_constraint_params`
+compile `constraint.body` and discard `rhs`. That is the seam, but it is not an
+isolated slip: the tree is **split** on whether `rhs` means anything.
+
+**Hypothesis (H-RHS) and kill criterion.** H-RHS: a non-zero `rhs` is unreachable
+through supported construction — every producer normalizes, exactly as
+`Constraint`'s docstring declares ("always 0.0 in normalized form"). Kill
+criterion: one constraint with `rhs != 0` reached from a supported constructor
+means refusing would break working models, and the solve path must be taught to
+honour `rhs` instead.
+
+**Experiment, two arms** (`discopt_benchmarks/scripts/card4c_rhs_entry.py`; and a
+pytest plugin wrapping `Constraint.__init__` over the whole smoke suite):
+
+- Static/corpus: **66 models loaded, 3,705 executed rhs comparisons, 0 load
+  failures, 0 violations.** A planted control arm registers its non-zero `rhs`, so
+  the probe demonstrably sees what it claims to measure; an operator arm confirms
+  the DSL normalizes.
+- Dynamic/suite: **1,947 executed `Constraint` constructions across `pytest -m
+  smoke`; 58 carried a non-zero `rhs`, and every one of the 58 originates in a
+  TEST fixture** (`vector_constraint_corpus.py`, `test_incumbent_verifier_scale.py`
+  — both deliberately built to exercise the verifier, neither of which solves).
+  **Zero production producers emit one.**
+
+**Verdict: H-RHS HOLDS.** Non-zero `rhs` is out-of-contract construction.
+
+**The deciding measurement for the direction of the fix.** Which way to go turns
+on how large the "does not honour `rhs`" surface is, so it was counted rather than
+guessed: **26 modules read `Constraint.body` and never read `.rhs`** —
+`dag_compiler`, `relaxation_compiler`, `milp_relaxation`, `mccormick_subgradient`,
+`term_classifier`, `nonlinear_bound_tightening`, `dependent_vars`,
+`implied_integer`, `differentiable`, `canonical_expr`, `sparsity`,
+`edge_concave`, `integer_ratio`, `primal_heuristics`, the four
+`_jax/convexity/*` certificate modules, `bilevel/{kkt,problem,strong_duality}`,
+`decomposition/{_linear,benders/gbd,benders/solver}`, `ro/formulations/_common`,
+`gdp_advisor`. Against them, `validation/feasibility` (`signed = body - rhs`), the
+`.nl`/LP/MPS/GAMS exporters, `problem_classifier`, `_jax/obbt`, `solvers/gurobi`
+and the Rust `ConstraintRepr` (**114 references** across the presolve crate) *do*
+honour it.
+
+**Direction chosen: refuse loudly at the model boundary** (CLAUDE.md §3). Teaching
+the solve path to honour `rhs` means correcting all 26, each of which encodes the
+`body sense 0` form *structurally* rather than arithmetically. A partial job is
+strictly worse than the status quo: today the relaxation stack is uniformly
+rhs-blind, so its McCormick envelope still relaxes the same row the verifier
+checks; half-honoured, the envelope would be built for a **different row** than the
+one being verified — a soundness hazard replacing a wrong-answer hazard. Refusing
+preserves the one invariant all 26 modules already rely on and costs the caller a
+one-line rewrite the error message spells out.
+
+**Shipped.** `modeling/core._reject_unnormalized_rhs`, raised from **both** doors:
+`Model.subject_to` (so the error lands on the offending line) and `Model.validate`
+(the collection-level enforcement — it catches direct `_constraints.append` *and*
+the internal rebuilds that propagate `c.rhs` verbatim, and `solve` always
+validates). Array `rhs` is handled with `np.any`, not `float()`, which would have
+raised a confusing `TypeError` on a vector row. Regression suite
+`python/tests/test_constraint_rhs_refusal.py` (`smoke`, 23 tests) tests **both**
+directions the finding named: the refusal fires at both doors for scalar/vector,
+named/unnamed, `<=`/`>=`/`==`; and normalized rows still solve to the right answer
+— the control that proves the guard discriminates rather than rejecting
+everything. The vacuity guard was demonstrated to fire (deselect the arms → the
+module finalizer errors).
+
+**Not a Regime-C change.** No bound moves: the refusal is unreachable from any
+producer in the corpus or the suite (measured above), so this is Regime N and the
+panel must be exactly unchanged.
 
 ### 2026-07-30 — Card 4c: "the Regime-N panel can gate the three stray-loop ports" — **FALSIFIED**
 
@@ -1580,6 +1984,15 @@ block records the full per-loop policy characterisation (the reusable half of th
 work) and the two exits available.
 
 ### 2026-07-30 — Card 4c Task 2: a hand-appended `Constraint` with non-zero `rhs` is solved as though `rhs = 0`
+
+> **PARTIALLY RETRACTED, same day — see the "the `Constraint.rhs` silent wrong
+> answer" entry above.** The claim below that "**the public path is correct**" is
+> **WRONG**: `Constraint` is exported in `discopt.modeling.__all__` and
+> `m.subject_to(Constraint(w, ">=", 5.0))` reproduces the defect exactly. This is
+> a public-API silent wrong answer, not a private-attribute footgun. The rest of
+> this entry stands. **FIXED** by a loud refusal at `Model.subject_to` and
+> `Model.validate` (CLAUDE.md §3); regression suite
+> `python/tests/test_constraint_rhs_refusal.py`.
 
 **Not a hypothesis — an incidental measurement**, recorded because it silently
 invalidates any test that both solves and verifies the same hand-built model.
