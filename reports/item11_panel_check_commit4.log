@@ -1,0 +1,153 @@
+panel_baseline --check against panel_baseline_f154dcff.json (baseline sha f154dcff, current sha 84acbb37)
+panel_baseline --check: 119 instance(s), 45s budget, DEFAULT settings, one subprocess per instance.
+1-min load at start: 0.37 (recorded, not gated).
+
+  [  1/119] 4stufen                  time_limit  nodes=       3 obj=          None bound=20712.17464917 cert=. rootgap*=         - w=  46.4    
+  [  2/119] alan                     optimal     nodes=      21 obj=2.924999998301 bound=2.924999998301 cert=Y rootgap*=  0.008876 w=   0.3 CMP
+  [  3/119] bchoco06                 time_limit  nodes=       3 obj=          None bound=0.999977572526 cert=. rootgap*=         - w=  50.5    
+  [  4/119] bchoco07                 time_limit  nodes=       7 obj=          None bound=1.000000000000 cert=. rootgap*=         - w=  48.2    
+  [  5/119] bchoco08                 time_limit  nodes=       3 obj=          None bound=1.000000000002 cert=. rootgap*=         - w=  81.5    
+  [  6/119] beuster                  time_limit  nodes=       3 obj=          None bound=6393.970508604 cert=. rootgap*=         - w=  47.4    
+  [  7/119] carton7                  time_limit  nodes=       7 obj=          None bound=          26.0 cert=. rootgap*=    0.8644 w=  66.7    
+  [  8/119] casctanks                time_limit  nodes=       7 obj=          None bound=-90.1786256909 cert=. rootgap*=         - w=  81.5    
+  [  9/119] chance                   optimal     nodes=       0 obj=29.89437815427 bound=29.89437815427 cert=Y rootgap*= 1.308e-10 w=   1.3 CMP
+  [ 10/119] clay0303hfsg             time_limit  nodes=     351 obj=          None bound=          None cert=. rootgap*=         1 w=  46.9    
+  [ 11/119] contvar                  time_limit  nodes=       3 obj=          None bound=183632.7659824 cert=. rootgap*=         - w=  52.3    
+  [ 12/119] cvxnonsep_nsig30         optimal     nodes=     165 obj=130.6287111692 bound=130.6184139248 cert=Y rootgap*=  0.001139 w=   9.9 CMP
+  [ 13/119] cvxnonsep_psig30         optimal     nodes=      89 obj=78.99885435294 bound=78.99179874365 cert=Y rootgap*=  0.003216 w=   5.6 CMP
+  [ 14/119] cvxnonsep_psig40r        optimal     nodes=      95 obj=86.54527995164 bound=86.53873600363 cert=Y rootgap*=  0.002865 w=  12.4 CMP
+  [ 15/119] dispatch                 optimal     nodes=       3 obj=3155.287926698 bound=3155.287904218 cert=Y rootgap*= 7.088e-09 w=   1.6 CMP
+  [ 16/119] ex1221                   optimal     nodes=       5 obj=7.667180068813 bound=7.667180068813 cert=Y rootgap*= 0.0002268 w=   1.8 CMP
+  [ 17/119] ex1222                   optimal     nodes=       1 obj=1.076543083332 bound=1.076543046303 cert=Y rootgap*=  3.44e-08 w=   1.2 CMP
+  [ 18/119] ex1223a                  optimal     nodes=       3 obj=4.579582406521 bound=4.579582397947 cert=Y rootgap*=         - w=   1.1 CMP
+  [ 19/119] ex1224                   optimal     nodes=       5 obj=-0.94347049428 bound=-0.94347050000 cert=Y rootgap*=   0.02576 w=   5.7 CMP
+  [ 20/119] ex1225                   optimal     nodes=       5 obj=30.99999991355 bound=30.99999991355 cert=Y rootgap*=   0.07695 w=   4.0 CMP
+  [ 21/119] ex1226                   optimal     nodes=       3 obj=-17.0000000038 bound=-17.0000000038 cert=Y rootgap*=    0.2353 w=   1.8 CMP
+  [ 22/119] ex1233                   feasible    nodes=      59 obj=205516.5211043 bound=109649.4159001 cert=. rootgap*=         - w=  47.9    
+  [ 23/119] ex1252                   feasible    nodes=      31 obj=134263.5853251 bound=9273.200004153 cert=. rootgap*=         1 w=  46.0    
+  [ 24/119] ex1252a                  feasible    nodes=      31 obj=177860.7415397 bound=14086.22175036 cert=. rootgap*=         - w=  46.0    
+  [ 25/119] ex1263                   optimal     nodes=   10005 obj=          19.6 bound=          19.6 cert=Y rootgap*=         - w=   3.5 CMP
+  [ 26/119] ex1264                   optimal     nodes=   13555 obj=           8.6 bound=           8.6 cert=Y rootgap*=         - w=   4.1 CMP
+  [ 27/119] ex1265                   optimal     nodes=    1555 obj=          10.3 bound=10.29999999999 cert=Y rootgap*=         - w=   4.1 CMP
+  [ 28/119] ex1266                   optimal     nodes=    6005 obj=          16.3 bound=          16.3 cert=Y rootgap*=         - w=   6.9 CMP
+  [ 29/119] ex14_1_9                 optimal     nodes=       3 obj=-1.97752205405 bound=-1.97752205405 cert=Y rootgap*= 1.065e+06 w=   1.3 CMP
+  [ 30/119] ex8_1_1                  optimal     nodes=       3 obj=-2.02180679682 bound=-2.02180680414 cert=Y rootgap*=    0.4054 w=   2.0 CMP
+  [ 31/119] ex8_5_4                  feasible    nodes=       1 obj=-0.00042514710 bound=          None cert=. rootgap*=         - w=   1.5    
+  [ 32/119] fac2                     optimal     nodes=      39 obj=331837497.8394 bound=331837497.5456 cert=Y rootgap*=    0.2305 w=  14.1 CMP
+  [ 33/119] flay02m                  optimal     nodes=       7 obj=37.94733186383 bound=37.94733180456 cert=Y rootgap*=    0.2546 w=   1.5 CMP
+  [ 34/119] flay03m                  optimal     nodes=     107 obj=48.98979479383 bound=48.98979470823 cert=Y rootgap*=    0.3675 w=  13.8 CMP
+  [ 35/119] fuel                     optimal     nodes=       3 obj=8566.118923054 bound=8566.118923028 cert=Y rootgap*=         - w=   4.0 CMP
+  [ 36/119] gbd                      optimal     nodes=       3 obj=2.199999982504 bound=2.199999982504 cert=Y rootgap*= 1.936e-10 w=   0.3 CMP
+  [ 37/119] gear                     optimal     nodes=      15 obj=2.860864189286 bound=       -5e-324 cert=Y rootgap*=4.941e-324 w=   1.2 CMP
+  [ 38/119] gear2                    optimal     nodes=       3 obj=1.155529714729 bound=       -5e-324 cert=Y rootgap*=         - w=   6.4 CMP
+  [ 39/119] gear3                    optimal     nodes=       3 obj=1.827380235298 bound=       -5e-324 cert=Y rootgap*=         - w=   1.6 CMP
+  [ 40/119] gear4                    optimal     nodes=       3 obj=1.643428464127 bound=1.643427471831 cert=Y rootgap*= 6.098e-07 w=   1.9 CMP
+  [ 41/119] gkocis                   optimal     nodes=       5 obj=-1.92309877987 bound=-1.92309882809 cert=Y rootgap*=     2.276 w=   2.2 CMP
+  [ 42/119] hda                      time_limit  nodes=       3 obj=          None bound=-141960.286285 cert=. rootgap*=         - w=  52.1    
+  [ 43/119] heatexch_gen1            time_limit  nodes=       7 obj=          None bound=38183.53174601 cert=. rootgap*=         - w=  46.3    
+  [ 44/119] heatexch_gen2            time_limit  nodes=       7 obj=          None bound=555767.7902857 cert=. rootgap*=         - w=  46.4    
+  [ 45/119] heatexch_gen3            child_timeout nodes=       - obj=          None bound=          None cert=. rootgap*=         - w=   -      
+  [ 46/119] kall_circles_c8a         feasible    nodes=      95 obj=2.540919099738 bound=           0.0 cert=. rootgap*=         - w=  45.8    
+  [ 47/119] m3                       optimal     nodes=      47 obj=37.79999966997 bound=37.79999951039 cert=Y rootgap*=         1 w=   8.5 CMP
+  [ 48/119] mathopt3                 optimal     nodes=       3 obj=2.617325830311 bound=    -1.14e-322 cert=Y rootgap*=1.136e-322 w=   2.0 CMP
+  [ 49/119] mathopt5_2               optimal     nodes=       3 obj=          -1.0 bound=-1.00000000000 cert=Y rootgap*= 3.109e-15 w=   0.9 CMP
+  [ 50/119] meanvar                  optimal     nodes=       0 obj=5.243399015227 bound=5.243399015227 cert=Y rootgap*=         - w=   0.3 CMP
+  [ 51/119] meanvarx                 optimal     nodes=      17 obj=14.36923135631 bound=14.36923135631 cert=Y rootgap*=         - w=   0.7 CMP
+  [ 52/119] nvs01                    optimal     nodes=       3 obj=12.46966882156 bound=12.46966882156 cert=Y rootgap*=    0.6072 w=   2.4 CMP
+  [ 53/119] nvs02                    optimal     nodes=     345 obj= 5.96418452307 bound= 5.96418452307 cert=Y rootgap*=  0.003985 w=   1.1 CMP
+  [ 54/119] nvs03                    optimal     nodes=       5 obj=          16.0 bound=15.99999972676 cert=Y rootgap*=    0.4905 w=   1.0 CMP
+  [ 55/119] nvs04                    optimal     nodes=       5 obj=0.720000000000 bound=0.719999999999 cert=Y rootgap*=      0.72 w=   1.6 CMP
+  [ 56/119] nvs05                    feasible    nodes=      99 obj=8.731956986640 bound=3.617799112754 cert=. rootgap*=    0.8876 w=  45.8    
+  [ 57/119] nvs06                    optimal     nodes=       5 obj=     1.7703125 bound=1.770312499999 cert=Y rootgap*=    0.2657 w=   2.4 CMP
+  [ 58/119] nvs07                    optimal     nodes=       5 obj=           4.0 bound=           4.0 cert=Y rootgap*=    0.2497 w=   0.7 CMP
+  [ 59/119] nvs08                    optimal     nodes=       3 obj=23.44972734713 bound=23.44972734516 cert=Y rootgap*=    0.2393 w=   2.4 CMP
+  [ 60/119] nvs09                    optimal     nodes=       5 obj=-43.1343369180 bound=-43.1343369180 cert=Y rootgap*=    0.2444 w=  10.6 CMP
+  [ 61/119] nvs10                    optimal     nodes=       5 obj=-310.799999999 bound=-310.799999999 cert=Y rootgap*=    0.2773 w=   0.8 CMP
+  [ 62/119] nvs11                    optimal     nodes=      55 obj=-431.000000000 bound=-431.000000000 cert=Y rootgap*=     5.453 w=   1.4 CMP
+  [ 63/119] nvs12                    optimal     nodes=     231 obj=-481.200000000 bound=-481.200000000 cert=Y rootgap*=     6.387 w=   2.9 CMP
+  [ 64/119] nvs13                    optimal     nodes=      17 obj=        -585.2 bound=-585.200000207 cert=Y rootgap*=  0.008835 w=   7.6 CMP
+  [ 65/119] nvs14                    optimal     nodes=     129 obj=-40358.1547692 bound=-40358.1547692 cert=Y rootgap*=  0.005889 w=   1.6 CMP
+  [ 66/119] nvs15                    optimal     nodes=       7 obj=           1.0 bound=           1.0 cert=Y rootgap*=     3.997 w=   0.3 CMP
+  [ 67/119] nvs16                    optimal     nodes=       7 obj=      0.703125 bound=0.703124989469 cert=Y rootgap*=    0.7031 w=   3.1 CMP
+  [ 68/119] nvs17                    feasible    nodes=      29 obj=-1100.40000000 bound=-1105.89000221 cert=. rootgap*=  0.004989 w=  30.1    
+  [ 69/119] nvs18                    optimal     nodes=      45 obj=        -778.4 bound=-778.400000210 cert=Y rootgap*=         - w=  27.1    
+  [ 70/119] nvs19                    feasible    nodes=       9 obj=       -1097.6 bound=-1104.24000220 cert=. rootgap*=  0.005317 w=  30.3    
+  [ 71/119] nvs20                    feasible    nodes=     135 obj=230.9221627647 bound=225.1006912433 cert=. rootgap*=         - w=  45.8    
+  [ 72/119] nvs21                    optimal     nodes=       3 obj=-5.68478262802 bound=-5.68478262802 cert=Y rootgap*= 2.797e+06 w=   7.5 CMP
+  [ 73/119] nvs22                    optimal     nodes=      35 obj=6.058219942618 bound=6.058219942618 cert=Y rootgap*=     0.734 w=  15.6 CMP
+  [ 74/119] nvs23                    feasible    nodes=       7 obj=       -1124.8 bound=-1130.70000226 cert=. rootgap*=         - w=  34.5    
+  [ 75/119] nvs24                    time_limit  nodes=    1627 obj=          None bound=-56272.4657244 cert=. rootgap*=         - w=  53.8    
+  [ 76/119] oaer                     optimal     nodes=       3 obj=-1.92309849988 bound=-1.92309860113 cert=Y rootgap*=      4.72 w=   1.9 CMP
+  [ 77/119] prob02                   optimal     nodes=     177 obj=      112235.0 bound=      112235.0 cert=Y rootgap*=         - w=   0.9 CMP
+  [ 78/119] prob03                   optimal     nodes=      11 obj=          10.0 bound=          10.0 cert=Y rootgap*=    0.3141 w=   0.7 CMP
+  [ 79/119] prob06                   optimal     nodes=       1 obj=1.177124289510 bound=1.177124289510 cert=Y rootgap*=         - w=   1.1 CMP
+  [ 80/119] prob10                   optimal     nodes=      15 obj=3.445503794823 bound=3.445503788218 cert=Y rootgap*=         - w=   1.9 CMP
+  [ 81/119] st_e01                   optimal     nodes=       1 obj=-6.66666670348 bound=-6.66666670348 cert=Y rootgap*=         - w=   0.9 CMP
+  [ 82/119] st_e02                   optimal     nodes=       3 obj=201.1593340608 bound=201.1592711189 cert=Y rootgap*=         - w=   1.1 CMP
+  [ 83/119] st_e03                   optimal     nodes=      53 obj=-1161.33661186 bound=-1161.41055391 cert=Y rootgap*=         - w=   7.3 CMP
+  [ 84/119] st_e04                   optimal     nodes=     103 obj=5194.866248123 bound=5194.866244202 cert=Y rootgap*=         - w=  10.9 CMP
+  [ 85/119] st_e05                   optimal     nodes=      67 obj=7049.249272475 bound=7049.021789525 cert=Y rootgap*=         - w=   2.7 CMP
+  [ 86/119] st_e06                   optimal     nodes=       1 obj=           0.0 bound=           0.0 cert=Y rootgap*=         - w=   1.2 CMP
+  [ 87/119] st_e07                   optimal     nodes=       1 obj=-400.000003275 bound=-400.000004057 cert=Y rootgap*=         - w=   1.2 CMP
+  [ 88/119] st_e08                   optimal     nodes=       5 obj=0.741781964044 bound=0.741781956542 cert=Y rootgap*=         - w=   1.3 CMP
+  [ 89/119] st_e09                   optimal     nodes=       7 obj=-0.49999999338 bound=-0.50000062299 cert=Y rootgap*=         - w=   1.2 CMP
+  [ 90/119] st_e11                   optimal     nodes=      27 obj=189.3116297413 bound=189.3116296866 cert=Y rootgap*=  0.006766 w=   4.7 CMP
+  [ 91/119] st_e13                   optimal     nodes=       3 obj=2.000000346335 bound=1.999999982518 cert=Y rootgap*=   0.02381 w=   1.2 CMP
+  [ 92/119] st_e15                   optimal     nodes=       5 obj=7.667180068813 bound=7.667180068813 cert=Y rootgap*=         - w=   1.6 CMP
+  [ 93/119] st_e17                   optimal     nodes=       5 obj=376.2919323272 bound=376.2873523821 cert=Y rootgap*=         - w=   5.0 CMP
+  [ 94/119] st_e18                   optimal     nodes=       3 obj=-2.82842711918 bound=-2.82842712871 cert=Y rootgap*=         - w=   1.2 CMP
+  [ 95/119] st_e27                   optimal     nodes=       3 obj=1.999999982630 bound=1.999999958156 cert=Y rootgap*=         - w=   1.7 CMP
+  [ 96/119] st_e29                   optimal     nodes=       5 obj=-0.94347049428 bound=-0.94347050000 cert=Y rootgap*=   0.02576 w=   5.3 CMP
+  [ 97/119] st_e31                   feasible    nodes=      95 obj=-2.00000002363 bound=          -3.0 cert=. rootgap*=         - w=  47.9    
+  [ 98/119] st_e35                   time_limit  nodes=       3 obj=          None bound=13756.62973951 cert=. rootgap*=         - w=  50.0    
+  [ 99/119] st_e36                   optimal     nodes=      85 obj=-245.999999999 bound=-246.000000001 cert=Y rootgap*=    0.2378 w=  10.0 CMP
+  [100/119] st_e38                   optimal     nodes=       3 obj=7197.727116826 bound=7197.727116826 cert=Y rootgap*=   0.07391 w=   1.7 CMP
+  [101/119] st_e40                   optimal     nodes=       5 obj=    30.4142135 bound=    30.4142135 cert=Y rootgap*=         - w=  12.3 CMP
+  [102/119] st_miqp1                 optimal     nodes=      15 obj=280.9999999906 bound=280.9999999906 cert=Y rootgap*=    0.1457 w=   0.3 CMP
+  [103/119] st_miqp2                 optimal     nodes=       9 obj=           2.0 bound=           2.0 cert=Y rootgap*=     3.815 w=   0.3 CMP
+  [104/119] st_miqp3                 optimal     nodes=       1 obj=          -6.0 bound=          -6.0 cert=Y rootgap*=         0 w=   0.3 CMP
+  [105/119] st_miqp4                 optimal     nodes=       3 obj=-4574.00000442 bound=-4574.00000442 cert=Y rootgap*= 0.0005466 w=   0.3 CMP
+  [106/119] st_miqp5                 optimal     nodes=       1 obj=-333.888890272 bound=-333.888890272 cert=Y rootgap*= 4.109e-09 w=   0.3 CMP
+  [107/119] st_ph10                  optimal     nodes=       1 obj=         -10.5 bound=-10.5000001427 cert=Y rootgap*= 1.359e-08 w=   0.9 CMP
+  [108/119] st_test1                 optimal     nodes=      15 obj=-1.64959944906 bound=-1.64959944906 cert=Y rootgap*=     32.01 w=   0.3 CMP
+  [109/119] st_testgr3               optimal     nodes=     549 obj=        -20.59 bound=-20.5907070979 cert=Y rootgap*=  0.006313 w=   0.6 CMP
+  [110/119] syn05hfsg                optimal     nodes=     185 obj=837.7324123911 bound=837.7324123911 cert=Y rootgap*=    0.5942 w=  18.0 CMP
+  [111/119] syn05m                   optimal     nodes=       9 obj=837.7323995316 bound=837.7324096873 cert=Y rootgap*=         - w=   2.5 CMP
+  [112/119] tanksize                 feasible    nodes=      75 obj=1.268643782454 bound=0.922074425398 cert=. rootgap*=    0.3377 w=  45.8    
+  [113/119] tls2                     optimal     nodes=     421 obj=5.299999922109 bound=           5.3 cert=Y rootgap*=    0.8645 w=  38.5    
+  [114/119] trig                     optimal     nodes=      63 obj=-3.76250149139 bound=-3.76267854772 cert=Y rootgap*=   0.06312 w=   1.4 CMP
+  [115/119] tspn05                   optimal     nodes=      51 obj=191.2552076849 bound=191.2551062252 cert=Y rootgap*=         - w=  33.5    
+  [116/119] tspn08                   feasible    nodes=       1 obj=290.5668537473 bound=          None cert=. rootgap*=         - w=  35.2    
+  [117/119] tspn10                   feasible    nodes=       1 obj=225.1260713973 bound=          None cert=. rootgap*=         - w=  23.7    
+  [118/119] tspn12                   feasible    nodes=       1 obj=262.6473952506 bound=          None cert=. rootgap*=         - w=  36.9    
+  [119/119] util                     feasible    nodes=     255 obj=1059.316020376 bound=999.5538990472 cert=. rootgap*=         - w=  46.2    
+
+==============================================================================
+instances       : 119
+statuses        : {'child_timeout': 1, 'feasible': 16, 'optimal': 88, 'time_limit': 14}
+comparable rows : 85/119 (certified terminal within 60% of budget — the Regime-N population)
+root_gap        : 99/119 populated (83%); vs reference 65/119 (55%, 67 rows have an oracle); median=0.2353
+wall            : 1999.3s total; load start 0.37 peak 2.18
+==============================================================================
+
+comparisons executed: 255 (3 per comparable row: status, node_count, certified objective) over 85 comparable of 119 baseline row(s)
+
+NON-COMPARABLE drift (14) — reported, not gating:
+  - clay0303hfsg: [non-comparable: status=time_limit is budget-dependent] nodes 191->351, obj None->None
+  - ex1233: [non-comparable: status=feasible is budget-dependent] nodes 31->59, obj 205516.5211043441->205516.5211043441
+  - heatexch_gen1: [non-comparable: status=time_limit is budget-dependent] nodes 3->7, obj None->None
+  - heatexch_gen3: [non-comparable: status=child_timeout] nodes None->None, obj None->None
+  - kall_circles_c8a: [non-comparable: status=feasible is budget-dependent] nodes 63->95, obj 2.5409191179871167->2.540919099738198
+  - nvs05: [non-comparable: status=feasible is budget-dependent] nodes 65->99, obj 8.731956986640078->8.731956986640078
+  - nvs17: [non-comparable: status=feasible is budget-dependent] nodes 19->29, obj -1100.4000000000003->-1100.4000000000003
+  - nvs18: [non-comparable: status=feasible is budget-dependent] nodes 51->45, obj -778.4->-778.4
+  - nvs19: [non-comparable: status=feasible is budget-dependent] nodes 5->9, obj -1097.6->-1097.6
+  - nvs20: [non-comparable: status=feasible is budget-dependent] nodes 73->135, obj 230.92216276477342->230.9221627647734
+  - nvs24: [non-comparable: status=time_limit is budget-dependent] nodes 1576->1627, obj None->None
+  - tanksize: [non-comparable: status=feasible is budget-dependent] nodes 67->75, obj 1.2686437852381225->1.2686437824549943
+  - tspn12: [non-comparable: status=time_limit is budget-dependent] nodes 3->1, obj None->262.6473952506025
+  - util: [non-comparable: status=feasible is budget-dependent] nodes 191->255, obj 1059.3159456295818->1059.3160203762593
+
+comparisons executed (total): 255 = 255 first-pass + 0 adjudication over 85 comparable row(s); flagged 0, adjudicated 0, transient 0
+
+PASS: no node-count or certified-objective drift.
