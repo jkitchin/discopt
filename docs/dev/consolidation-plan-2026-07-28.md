@@ -1051,6 +1051,48 @@ Regime N exact-node-count. Deliverables: `Model.solve(explain_routing=True)` (or
 > **correctness validation**, that trade does not earn a session. Re-open only as a
 > deliberately scoped state-object card, never as "finish the carve-up".
 
+> **Addendum 2026-07-30 (open-ledger item 11 — the state-object card, run).** The
+> deliberately scoped state-object card above was opened and its entry experiment
+> measured the thing this status block asserted. **"A closure of 200+ locals" is
+> not the coupling.** `solve_model` binds **851** names in its own scope, but only
+> **153** are bound in one would-be module region and read in another, and they
+> are not spread evenly — they pile up on two boundaries:
+>
+> | bound in ↓ / read in → | setup | reformulate | root | loop | results |
+> |---|---|---|---|---|---|
+> | **setup** | 42 | 4 | **10** | 3 | 1 |
+> | **reformulate** | 4 | 33 | **12** | 3 | 3 |
+> | **root** | 6 | 5 | 151 | **85** | **44** |
+> | **loop** | 1 | 0 | 13 | 287 | 24 |
+> | **results** | 0 | 0 | 6 | 5 | 44 |
+>
+> That reframes the dropped work substantially. `setup.py` and `reformulate.py`
+> are **nearly self-contained** — 14 and 18 outbound names respectively — so they
+> were never the hard part; `root`→`loop` (85) and `root`→`results` (44) are, and
+> both are boundaries of the *same* module. Two further measured properties make
+> the remaining migration provable rather than hopeful: **zero `nonlocal` writes**
+> across all 41 nested scopes (the 40 closure captures are reads only, so no
+> write-back paths have to be invented), and **no `locals()`/`globals()`/`eval`/
+> `exec` anywhere in `solve_model`** (so every reference is statically resolvable
+> and a migration can be *proved* by AST comparison rather than argued from a
+> green test run).
+>
+> **What has landed.** `python/discopt/solver/state.py` — four cohesive
+> `slots=True` dataclasses (`PhaseTimers`, `PrimalHeuristicState`,
+> `LazyStallSeparationState`, `PerNodeOBBTBudget`) carrying **21** of the 153,
+> threaded through `solve_model` with **no code moved out of the function**.
+> Cross-region names 153 → 136; `root`→`loop` 85 → 68. Both increments are
+> Regime-N clean on the hardened gate; numbers in §6.
+>
+> **What that unblocks, stated precisely so a later card does not over-claim it.**
+> The census says the carve order the card assumed (setup first) is right for the
+> wrong reason, and that `results.py` is the cheapest real module — its inbound set
+> is 44 + 24 names, of which the certificate cluster is the only hard one. It does
+> **not** yet unblock `spatial_loop.py`: 68 names still cross `root`→`loop`, and
+> until they are grouped that signature is unreviewable. Finishing the remaining
+> ~115 is mechanical (the tool and the gate both exist now) but it is bounded work,
+> not a free consequence of this card.
+
 With routing extracted, split the monolith along its existing phase banners into
 `solver/` submodules: `setup.py` (validation, classification, convexity cache),
 `reformulate.py` (the 9 reformulation stages), `root.py` (root presolve/OBBT/cuts,
@@ -1800,7 +1842,7 @@ this environment cannot adjudicate.
 | 8 | **Card 5.2 / 5.3** — kernel coverage expansion | OPEN; 5.1 census landed, 5.4 partial | Per-feature sub-cards against the census ranking; the scoping note argues `infinite_aux_bounds` (9 instances) is the better next card than `term_trilinear` |
 | 9 | **Card 5.2-T** — `term_trilinear` | SCOPED, NOT STARTED (owner) | Not a new envelope family — the producer declines on mere *registration* of a trilinear product. Closing it is a producer-gate change plus a Regime-C panel |
 | 10 | **`DISCOPT_CONVEX_KERNEL`** | cert-clean and quality-clean, graduation NO | Net-positive on a population this environment does not have (Phase 5.4 verdict) — needs the heldout/local corpus |
-| 11 | **Card 4b modules 2–5** | DROPPED | Maintainability behind a state-object prerequisite; reopening means building that state object first |
+| 11 | **Card 4b modules 2–5** → **the state-object prerequisite** | **STARTED AND PARTLY LANDED 2026-07-30; the card itself does NOT close** | The prerequisite is built and proven: `python/discopt/solver/state.py` (4 `slots=True` dataclasses), **21 of 153** cross-region locals threaded, two Regime-N-clean panel runs, an AST-proof migration tool (`thread_solve_model_state.py`) and a both-directions conformance test. Closing it means threading the remaining ~115 — chiefly the `root`→`loop` 68 — then the carve is a separate card. The census also **corrects this row's own premise**: the coupling is 153 names on two boundaries, not "200+ locals", and `setup`/`reformulate` are nearly self-contained (14 / 18 outbound) |
 | 12 | **Phase 7** — islands, refusal tests, deferred tail | not started, unblocked, cheap | Support-tier docstrings on the six zero-inbound packages; one test per load-bearing refusal (`multistage.py:47`, `gdpopt_loa.py:628`); file the SOTA long-tail entry experiments as issues |
 | 13 | **heldout50 panel** | never run here | Local-only corpus. Every card that names it has recorded "SKIPPED — local only" |
 | 14 | **28 parked flags** | default-OFF, each with its own record | Each needs its own Regime-C graduation panel; several (this one, `DISCOPT_CUT_INHERIT`, `DISCOPT_CONVEX_KERNEL`, `DISCOPT_FBBT_SEED`) have measured refusals recorded and should not be re-proposed without new evidence |
@@ -1813,6 +1855,92 @@ touches `crates/` + producer files — safe alongside 1/2/7, coordinate with 3c
 (whose parity test is the guard Phase 5's expansions must keep green).
 
 ## §6. Falsification log (append-only, per §0.3)
+
+### 2026-07-30 — Open-ledger item 11 entry experiment: "`solve_model`'s locals are a 200+ closure that cannot be separated" — **HALF FALSIFIED. The closure is real; 200+ is not the coupling, and the coupling is concentrated on two boundaries**
+
+**Hypothesis (Card 4b's own, restated as item 11's premise).** The four dropped
+modules (`setup`, `reformulate`, `root`, `spatial_loop` — and `results`) share "a
+closure of 200+ locals", so carving them is a signature-design problem that needs
+an explicit state object first.
+
+**Kill criterion, stated before the measurement.** If the mutable search state and
+the read-only configuration are entangled such that no cohesive grouping exists —
+i.e. the crossing names do not cluster, or nearly every local crosses nearly every
+boundary — then any object is a cosmetic rename, item 11 buys nothing, and it
+stops with that recorded (the honest-outcome clause).
+
+**Instrument.** `discopt_benchmarks/scripts/solve_model_locals_census.py`. It
+walks `solve_model`'s own scope (nested `def`/`lambda`/`class`/comprehension
+scopes handled as separate scopes, as Python does), classifies every binding, and
+prints an executed-classification count that must be non-zero (CLAUDE.md §6).
+Regions are anchored on **the source's own phase banners**, not line numbers, and
+the script refuses if an anchor matches zero or more than one line rather than
+guessing. Artifacts: `reports/solve_model_locals_census.json` (per-name rows) and
+`reports/solve_model_locals_census.txt` (the printed summary), both produced on
+the unmodified tree `d7b374f6`.
+
+**Result 1 — the shape of the function.** 7,622 LOC, 319 top-level statements, 51
+parameters, 41 nested scopes, one 2,495-line inline `while`. **851** names bound in
+its own scope:
+
+| class | count | definition |
+|---|---|---|
+| `CONFIG` | 205 | bound once, pre-loop, never augmented or rebound |
+| `STATE` | 404 | rebound, augmented, bound inside the loop, or `del`'d |
+| `SINGLE_USE` | 104 | bound once, read once |
+| `DEAD` | 6 | bound, never read |
+| `CALLABLE` | 132 | nested `def`/`class`/function-local `import` |
+
+**Result 2 — "200+ locals" is not the coupling; 153 is, and it is lopsided.**
+Regions named for Card 4b's five modules (`setup` 1,235 / `reformulate` 582 /
+`root` 2,685 / `loop` 2,495 / `results` 625 LOC). Bind-region → read-region:
+
+| bound in ↓ / read in → | setup | reformulate | root | loop | results |
+|---|---|---|---|---|---|
+| **setup** | 42 | 4 | 10 | 3 | 1 |
+| **reformulate** | 4 | 33 | 12 | 3 | 3 |
+| **root** | 6 | 5 | 151 | **85** | **44** |
+| **loop** | 1 | 0 | 13 | 287 | 24 |
+| **results** | 0 | 0 | 6 | 5 | 44 |
+
+Only **153** names are bound in one region and read in another. Two boundaries
+carry almost all of it — `root`→`loop` (85) and `root`→`results` (44) — and the
+two modules Card 4b listed first are nearly self-contained (`setup` has 10 + 3 + 1
+outbound; `reformulate` 12 + 3 + 3). The premise that the whole function is one
+undifferentiated closure is **wrong in the direction that matters**: it is one
+*hard* boundary, not five.
+
+**Result 3 — two properties that make the migration provable rather than hopeful.**
+
+* **Zero `nonlocal` writes** across all 41 nested scopes. The 40 closure captures
+  are **reads only**. A carve never has to invent a write-back path, and a state
+  object can be passed by reference with no aliasing subtleties.
+* **No `locals()`, `globals()`, `eval` or `exec` anywhere in `solve_model`.** Every
+  reference is statically resolvable, so a migration can be *proved* by AST
+  comparison instead of being argued from a passing test run.
+
+**Result 4 — the crossing names cluster, which is what decides the object's
+shape.** The 153 are not an arbitrary set; they fall into cohesive groups that
+traverse `root`→`loop`→`results` **together** — Rust/JAX timing accounting;
+sub-NLP and LNS heuristic budgets; lazy-constraint arming and separation counters;
+the per-node OBBT budget; the McCormick relaxation handles; and the dual-bound
+certificate flags (`_gap_certified`, `_nonrigorous_fathom`, `_taint_floor_internal`,
+`_tree_bound_poisoned`, …). This is the kill criterion coming back **negative**:
+a grouping exists, so the object is not a cosmetic rename.
+
+**Verdict.** The premise survives in substance — an explicit state object is
+genuinely the prerequisite for the carve — and is falsified in its arithmetic. The
+number to design against is **153 crossing names on two dominant boundaries**,
+grouped into roughly half a dozen clusters, not "200+ locals" spread evenly. Item
+11 proceeds, and it proceeds as *a set of small cohesive dataclasses*, which is a
+conclusion the census produced and intuition did not: before measuring, a single
+`SolveModelState` god-object was the obvious design, and the matrix says it would
+have been the wrong one.
+
+**Six dead bindings** were also found and are recorded rather than deleted (a
+deletion is Regime N but belongs in its own commit, not smuggled into a rename):
+`_`, `_frac_parts`, `_has_continuous_var`, `_lns_swap_applicable`, `_scores`,
+`inc_sol`.
 
 ### 2026-07-30 — Card 4c close-out / Card 3a(b) close-out: what was run on the final tree
 
