@@ -410,8 +410,48 @@ def _root_name(node: ast.AST) -> str | None:
     return node.id if isinstance(node, ast.Name) else None
 
 
-def _names_in(node: ast.AST) -> set[str]:
-    return {n.id for n in ast.walk(node) if isinstance(n, ast.Name)}
+def _alias_roots(expr: ast.AST | None) -> set[str]:
+    """Names whose object ``expr`` may alias *part of*.
+
+    Only alias-forming syntax propagates. ``x = obj.rows`` and ``x = obj[i]`` hand
+    out a reference into ``obj``; ``deadline = t_start + time_limit`` does not, and
+    treating it as if it did is what made a first version of this audit report
+    ``time_limit`` — a float — as mutated. An arithmetic result is a new object.
+
+    ``obj.method()`` **does** propagate: a method may hand back internal state, and
+    ``HeuristicGovernor.record``'s ``st = self._get(source)`` is exactly that. A
+    free call ``f(x)`` does not propagate — whether ``f`` mutates ``x`` is the
+    transitive channel's question, answered there by reading ``f``.
+
+    Known blind spot, stated rather than hidden: ``y = f(x); y.z = 1`` where a
+    *free* function returns an alias of ``x`` is not caught. Closing it required
+    tainting every call result, which drowned the signal (18 verdicts, most of them
+    scalars that cannot be mutated at all).
+    """
+    if expr is None:
+        return set()
+    if isinstance(expr, ast.Name):
+        return {expr.id}
+    if isinstance(expr, (ast.Attribute, ast.Subscript, ast.Starred)):
+        return _alias_roots(expr.value)
+    if isinstance(expr, (ast.Tuple, ast.List)):
+        return set().union(*(_alias_roots(e) for e in expr.elts)) if expr.elts else set()
+    if isinstance(expr, ast.IfExp):
+        return _alias_roots(expr.body) | _alias_roots(expr.orelse)
+    if isinstance(expr, ast.Call) and isinstance(expr.func, ast.Attribute):
+        return _alias_roots(expr.func.value)
+    return set()
+
+
+def _rebound_names(target: ast.AST) -> set[str]:
+    """Names this assignment target *rebinds* (so `d[k]`/`o.a` yield nothing)."""
+    if isinstance(target, ast.Name):
+        return {target.id}
+    if isinstance(target, (ast.Tuple, ast.List)):
+        return set().union(*(_rebound_names(e) for e in target.elts)) if target.elts else set()
+    if isinstance(target, ast.Starred):
+        return _rebound_names(target.value)
+    return set()
 
 
 def taint_closure(fn: ast.AST, root: str) -> set[str]:
@@ -437,23 +477,29 @@ def taint_closure(fn: ast.AST, root: str) -> set[str]:
                 if value is None:
                     continue
                 targets = node.targets if isinstance(node, ast.Assign) else [node.target]
-                if _names_in(value) & tainted:
+                if _alias_roots(value) & tainted:
                     for t in targets:
-                        for sub in ast.walk(t):
-                            if isinstance(sub, ast.Name) and sub.id not in tainted:
-                                tainted.add(sub.id)
+                        # Only a *rebinding* target receives taint. `d[k] = tainted`
+                        # and `o.a = tainted` let the tainted object escape INTO the
+                        # container; they do not make the container an alias of it,
+                        # and treating them as if they did reported `gap_tolerance`
+                        # — a float — as mutated because a callee did
+                        # `amp_kwargs["rel_gap"] = gap_tolerance`.
+                        for sub in _rebound_names(t):
+                            if sub not in tainted:
+                                tainted.add(sub)
                                 grew = True
             elif isinstance(node, (ast.For, ast.AsyncFor)):
-                if _names_in(node.iter) & tainted:
-                    for sub in ast.walk(node.target):
-                        if isinstance(sub, ast.Name) and sub.id not in tainted:
-                            tainted.add(sub.id)
+                if _alias_roots(node.iter) & tainted:
+                    for sub in _rebound_names(node.target):
+                        if sub not in tainted:
+                            tainted.add(sub)
                             grew = True
             elif isinstance(node, ast.withitem):
-                if node.optional_vars is not None and _names_in(node.context_expr) & tainted:
-                    for sub in ast.walk(node.optional_vars):
-                        if isinstance(sub, ast.Name) and sub.id not in tainted:
-                            tainted.add(sub.id)
+                if node.optional_vars is not None and _alias_roots(node.context_expr) & tainted:
+                    for sub in _rebound_names(node.optional_vars):
+                        if sub not in tainted:
+                            tainted.add(sub)
                             grew = True
         if not grew:
             break
