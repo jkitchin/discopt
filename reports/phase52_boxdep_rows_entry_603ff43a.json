@@ -1,0 +1,2125 @@
+{
+  "baseline": "reports/panel_baseline_f154dcff.json",
+  "budget": 45.0,
+  "census": "reports/phase5_kernel_coverage_census_c346fd73.json",
+  "executed": {
+    "captured": 12,
+    "crashed": 0,
+    "diagnosed": 12,
+    "instances": 12,
+    "offending_rows_found": 393,
+    "producer_calls": 12,
+    "shape_rows_compared": 3,
+    "unclaimed_rows_checked": 717
+  },
+  "git_dirty": true,
+  "git_sha": "603ff43a",
+  "instrument_marker": "phase52-boxdep-rows-entry-v1",
+  "load_peak": 0.7529296875,
+  "load_start": 0.38330078125,
+  "rows": [
+    {
+      "budget": 45.0,
+      "counts": {
+        "producer_calls": 1,
+        "shape_rows_compared": 1
+      },
+      "diagnosis": {
+        "captured": true,
+        "code": "probe_real_shape_mismatch",
+        "col_delta": 0,
+        "coverage_kinds": {
+          "power": 60,
+          "product": 280,
+          "univariate_call": 60
+        },
+        "coverage_probe": 400,
+        "coverage_real": 400,
+        "decline": "probe_real_shape_mismatch",
+        "decline_detail": "",
+        "detail": "",
+        "n_orig": 560,
+        "probe_nnz": 6936,
+        "probe_shape": [
+          2594,
+          960
+        ],
+        "real_nnz": 6710,
+        "real_shape": [
+          2578,
+          960
+        ],
+        "real_term_family_sizes": {
+          "affine_square": 0,
+          "blf": 280,
+          "composite_multivar": 0,
+          "monomial": 60,
+          "multilinear": 0,
+          "ratio": 0,
+          "trilinear": 0,
+          "univariate_atom": 60,
+          "univariate_square": 60
+        },
+        "registered_aux_columns": 400,
+        "row_delta": -16,
+        "spec_built": false,
+        "term_family_sizes": {
+          "affine_square": 0,
+          "blf": 280,
+          "composite_multivar": 0,
+          "monomial": 60,
+          "multilinear": 0,
+          "ratio": 0,
+          "trilinear": 0,
+          "univariate_atom": 60,
+          "univariate_square": 60
+        }
+      },
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "instance": "casctanks",
+      "instrument_marker": "phase52-boxdep-rows-entry-v1",
+      "n_cons": 517,
+      "n_vars": 500,
+      "phase": "diagnosed",
+      "wall_to_gate": 19.038146675000462
+    },
+    {
+      "budget": 45.0,
+      "counts": {
+        "offending_rows_found": 4,
+        "producer_calls": 1,
+        "unclaimed_rows_checked": 11
+      },
+      "diagnosis": {
+        "all_offender_aux_registered": false,
+        "any_offender_aux_unregistered": true,
+        "captured": true,
+        "claimed_aux": 1,
+        "code": "fixed_row_box_dependent",
+        "coverage_kinds": {
+          "power": 2
+        },
+        "decline": "fixed_row_box_dependent",
+        "decline_detail": "coeffs",
+        "detail": "coeffs",
+        "env_rows": 4,
+        "n_orig": 5,
+        "offender_aux_owner_hist": {
+          "unregistered_aux": 4
+        },
+        "offender_column_classes": {
+          "original": 4,
+          "unregistered_aux": 4
+        },
+        "offender_kinds": {
+          "coeffs": 4
+        },
+        "offender_sample": [
+          {
+            "aux_owners": [
+              "unregistered_aux"
+            ],
+            "kind": "coeffs",
+            "n_aux": 1,
+            "probe_coeffs": [
+              -3.089631,
+              1.0
+            ],
+            "probe_rhs": -2.089630999709932,
+            "real_coeffs": [
+              -1.947311,
+              1.0
+            ],
+            "real_rhs": -1.0505709251479671,
+            "row": 6,
+            "support": [
+              1,
+              6
+            ]
+          },
+          {
+            "aux_owners": [
+              "unregistered_aux"
+            ],
+            "kind": "coeffs",
+            "n_aux": 1,
+            "probe_coeffs": [
+              1.5,
+              -1.0
+            ],
+            "probe_rhs": 0.5,
+            "real_coeffs": [
+              1.713878,
+              -1.0
+            ],
+            "real_rhs": 0.7458234866691407,
+            "row": 7,
+            "support": [
+              1,
+              6
+            ]
+          },
+          {
+            "aux_owners": [
+              "unregistered_aux"
+            ],
+            "kind": "coeffs",
+            "n_aux": 1,
+            "probe_coeffs": [
+              3.181981,
+              -1.0
+            ],
+            "probe_rhs": 4.772970773009195,
+            "real_coeffs": [
+              1.95161,
+              -1.0
+            ],
+            "real_rhs": 1.1012239582870653,
+            "row": 8,
+            "support": [
+              1,
+              6
+            ]
+          },
+          {
+            "aux_owners": [
+              "unregistered_aux"
+            ],
+            "kind": "coeffs",
+            "n_aux": 1,
+            "probe_coeffs": [
+              4.242641,
+              -1.0
+            ],
+            "probe_rhs": 11.313708498984763,
+            "real_coeffs": [
+              2.163374,
+              -1.0
+            ],
+            "real_rhs": 1.5000000000002145,
+            "row": 9,
+            "support": [
+              1,
+              6
+            ]
+          }
+        ],
+        "offending_rows": 4,
+        "probe_nnz": 31,
+        "probe_shape": [
+          15,
+          7
+        ],
+        "real_nnz": 31,
+        "real_shape": [
+          15,
+          7
+        ],
+        "registered_aux_columns": 1,
+        "spec_built": false,
+        "term_family_sizes": {
+          "affine_square": 0,
+          "blf": 0,
+          "composite_multivar": 0,
+          "monomial": 1,
+          "multilinear": 0,
+          "ratio": 0,
+          "trilinear": 0,
+          "univariate_atom": 0,
+          "univariate_square": 1
+        },
+        "unclaimed_rows_checked": 11
+      },
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "instance": "ex1221",
+      "instrument_marker": "phase52-boxdep-rows-entry-v1",
+      "n_cons": 5,
+      "n_vars": 5,
+      "phase": "diagnosed",
+      "wall_to_gate": 0.8844238609999593
+    },
+    {
+      "budget": 45.0,
+      "counts": {
+        "offending_rows_found": 15,
+        "producer_calls": 1,
+        "unclaimed_rows_checked": 34
+      },
+      "diagnosis": {
+        "all_offender_aux_registered": false,
+        "any_offender_aux_unregistered": true,
+        "captured": true,
+        "claimed_aux": 1,
+        "code": "fixed_row_box_dependent",
+        "coverage_kinds": {
+          "product": 1
+        },
+        "decline": "fixed_row_box_dependent",
+        "decline_detail": "coeffs",
+        "detail": "coeffs",
+        "env_rows": 4,
+        "n_orig": 8,
+        "offender_aux_owner_hist": {
+          "blf,unregistered_aux": 3,
+          "unregistered_aux": 12
+        },
+        "offender_column_classes": {
+          "blf": 3,
+          "original": 12,
+          "unregistered_aux": 15
+        },
+        "offender_kinds": {
+          "coeffs": 15
+        },
+        "offender_sample": [
+          {
+            "aux_owners": [
+              "unregistered_aux"
+            ],
+            "kind": "coeffs",
+            "n_aux": 1,
+            "probe_coeffs": [
+              0.324318,
+              -1.0
+            ],
+            "probe_rhs": 0.32431835817588556,
+            "real_coeffs": [
+              0.462098,
+              -1.0
+            ],
+            "real_rhs": 0.4620981203732968,
+            "row": 0,
+            "support": [
+              0,
+              9
+            ]
+          },
+          {
+            "aux_owners": [
+              "unregistered_aux"
+            ],
+            "kind": "coeffs",
+            "n_aux": 1,
+            "probe_coeffs": [
+              -0.25,
+              1.0
+            ],
+            "probe_rhs": 0.3862943611198906,
+            "real_coeffs": [
+              -0.4,
+              1.0
+            ],
+            "real_rhs": -0.08370926812584478,
+            "row": 2,
+            "support": [
+              0,
+              9
+            ]
+          },
+          {
+            "aux_owners": [
+              "unregistered_aux"
+            ],
+            "kind": "coeffs",
+            "n_aux": 1,
+            "probe_coeffs": [
+              -0.142857,
+              1.0
+            ],
+            "probe_rhs": 0.9459101490553132,
+            "real_coeffs": [
+              -0.25,
+              1.0
+            ],
+            "real_rhs": 0.3862943611198908,
+            "row": 3,
+            "support": [
+              0,
+              9
+            ]
+          },
+          {
+            "aux_owners": [
+              "unregistered_aux"
+            ],
+            "kind": "coeffs",
+            "n_aux": 1,
+            "probe_coeffs": [
+              0.297063,
+              -1.0
+            ],
+            "probe_rhs": 0.29706307738283366,
+            "real_coeffs": [
+              0.402359,
+              -1.0
+            ],
+            "real_rhs": 0.40235947810852507,
+            "row": 4,
+            "support": [
+              1,
+              10
+            ]
+          },
+          {
+            "aux_owners": [
+              "unregistered_aux"
+            ],
+            "kind": "coeffs",
+            "n_aux": 1,
+            "probe_coeffs": [
+              -0.222222,
+              1.0
+            ],
+            "probe_rhs": 0.5040773967762742,
+            "real_coeffs": [
+              -0.333333,
+              1.0
+            ],
+            "real_rhs": 0.09861228866810978,
+            "row": 6,
+            "support": [
+              1,
+              10
+            ]
+          },
+          {
+            "aux_owners": [
+              "unregistered_aux"
+            ],
+            "kind": "coeffs",
+            "n_aux": 1,
+            "probe_coeffs": [
+              -0.125,
+              1.0
+            ],
+            "probe_rhs": 1.0794415416798357,
+            "real_coeffs": [
+              -0.2,
+              1.0
+            ],
+            "real_rhs": 0.6094379124341003,
+            "row": 7,
+            "support": [
+              1,
+              10
+            ]
+          },
+          {
+            "aux_owners": [
+              "blf",
+              "unregistered_aux"
+            ],
+            "kind": "coeffs",
+            "n_aux": 2,
+            "probe_coeffs": [
+              1.0,
+              -60.185856
+            ],
+            "probe_rhs": 1.0,
+            "real_coeffs": [
+              1.0,
+              -18.278514
+            ],
+            "real_rhs": 1.0,
+            "row": 10,
+            "support": [
+              8,
+              11
+            ]
+          },
+          {
+            "aux_owners": [
+              "blf",
+              "unregistered_aux"
+            ],
+            "kind": "coeffs",
+            "n_aux": 2,
+            "probe_coeffs": [
+              -1.0,
+              18.822847
+            ],
+            "probe_rhs": 36.42355296307096,
+            "real_coeffs": [
+              -1.0,
+              9.023198
+            ],
+            "real_rhs": 10.826022790296296,
+            "row": 12,
+            "support": [
+              8,
+              11
+            ]
+          }
+        ],
+        "offending_rows": 15,
+        "probe_nnz": 91,
+        "probe_shape": [
+          38,
+          14
+        ],
+        "real_nnz": 91,
+        "real_shape": [
+          38,
+          14
+        ],
+        "registered_aux_columns": 1,
+        "spec_built": false,
+        "term_family_sizes": {
+          "affine_square": 0,
+          "blf": 1,
+          "composite_multivar": 0,
+          "monomial": 0,
+          "multilinear": 0,
+          "ratio": 0,
+          "trilinear": 0,
+          "univariate_atom": 0,
+          "univariate_square": 0
+        },
+        "unclaimed_rows_checked": 34
+      },
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "instance": "ex1225",
+      "instrument_marker": "phase52-boxdep-rows-entry-v1",
+      "n_cons": 10,
+      "n_vars": 8,
+      "phase": "diagnosed",
+      "wall_to_gate": 0.9234044330005418
+    },
+    {
+      "budget": 45.0,
+      "counts": {
+        "offending_rows_found": 18,
+        "producer_calls": 1,
+        "unclaimed_rows_checked": 32
+      },
+      "diagnosis": {
+        "all_offender_aux_registered": false,
+        "any_offender_aux_unregistered": true,
+        "captured": true,
+        "claimed_aux": 2,
+        "code": "fixed_row_box_dependent",
+        "coverage_kinds": {
+          "power": 2,
+          "product": 1
+        },
+        "decline": "fixed_row_box_dependent",
+        "decline_detail": "coeffs",
+        "detail": "coeffs",
+        "env_rows": 8,
+        "n_orig": 5,
+        "offender_aux_owner_hist": {
+          "blf,unregistered_aux": 3,
+          "unregistered_aux": 15
+        },
+        "offender_column_classes": {
+          "blf": 3,
+          "original": 15,
+          "unregistered_aux": 18
+        },
+        "offender_kinds": {
+          "coeffs": 18
+        },
+        "offender_sample": [
+          {
+            "aux_owners": [
+              "unregistered_aux"
+            ],
+            "kind": "coeffs",
+            "n_aux": 1,
+            "probe_coeffs": [
+              0.261204,
+              -1.0
+            ],
+            "probe_rhs": -0.7387961250362585,
+            "real_coeffs": [
+              0.289898,
+              -1.0
+            ],
+            "real_rhs": -0.7101020514433645,
+            "row": 0,
+            "support": [
+              1,
+              5
+            ]
+          },
+          {
+            "aux_owners": [
+              "unregistered_aux"
+            ],
+            "kind": "coeffs",
+            "n_aux": 1,
+            "probe_coeffs": [
+              -0.235702,
+              1.0
+            ],
+            "probe_rhs": 1.0606601717798212,
+            "real_coeffs": [
+              -0.267261,
+              1.0
+            ],
+            "real_rhs": 0.9354143466934852,
+            "row": 2,
+            "support": [
+              1,
+              5
+            ]
+          },
+          {
+            "aux_owners": [
+              "unregistered_aux"
+            ],
+            "kind": "coeffs",
+            "n_aux": 1,
+            "probe_coeffs": [
+              -0.176777,
+              1.0
+            ],
+            "probe_rhs": 1.4142135623730951,
+            "real_coeffs": [
+              -0.204124,
+              1.0
+            ],
+            "real_rhs": 1.224744871391589,
+            "row": 3,
+            "support": [
+              1,
+              5
+            ]
+          },
+          {
+            "aux_owners": [
+              "unregistered_aux"
+            ],
+            "kind": "coeffs",
+            "n_aux": 1,
+            "probe_coeffs": [
+              -9.0,
+              1.0
+            ],
+            "probe_rhs": -8.0,
+            "real_coeffs": [
+              -7.0,
+              1.0
+            ],
+            "real_rhs": -6.0,
+            "row": 4,
+            "support": [
+              1,
+              6
+            ]
+          },
+          {
+            "aux_owners": [
+              "unregistered_aux"
+            ],
+            "kind": "coeffs",
+            "n_aux": 1,
+            "probe_coeffs": [
+              9.0,
+              -1.0
+            ],
+            "probe_rhs": 20.25,
+            "real_coeffs": [
+              7.0,
+              -1.0
+            ],
+            "real_rhs": 12.25,
+            "row": 6,
+            "support": [
+              1,
+              6
+            ]
+          },
+          {
+            "aux_owners": [
+              "unregistered_aux"
+            ],
+            "kind": "coeffs",
+            "n_aux": 1,
+            "probe_coeffs": [
+              16.0,
+              -1.0
+            ],
+            "probe_rhs": 64.0,
+            "real_coeffs": [
+              12.0,
+              -1.0
+            ],
+            "real_rhs": 36.0,
+            "row": 7,
+            "support": [
+              1,
+              6
+            ]
+          },
+          {
+            "aux_owners": [
+              "unregistered_aux"
+            ],
+            "kind": "coeffs",
+            "n_aux": 1,
+            "probe_coeffs": [
+              0.324318,
+              -1.0
+            ],
+            "probe_rhs": 0.32431835817588556,
+            "real_coeffs": [
+              0.358352,
+              -1.0
+            ],
+            "real_rhs": 0.35835189384561095,
+            "row": 8,
+            "support": [
+              0,
+              8
+            ]
+          },
+          {
+            "aux_owners": [
+              "unregistered_aux"
+            ],
+            "kind": "coeffs",
+            "n_aux": 1,
+            "probe_coeffs": [
+              -0.25,
+              1.0
+            ],
+            "probe_rhs": 0.3862943611198906,
+            "real_coeffs": [
+              -0.285714,
+              1.0
+            ],
+            "real_rhs": 0.25276296849536806,
+            "row": 10,
+            "support": [
+              0,
+              8
+            ]
+          }
+        ],
+        "offending_rows": 18,
+        "probe_nnz": 93,
+        "probe_shape": [
+          40,
+          13
+        ],
+        "real_nnz": 93,
+        "real_shape": [
+          40,
+          13
+        ],
+        "registered_aux_columns": 2,
+        "spec_built": false,
+        "term_family_sizes": {
+          "affine_square": 0,
+          "blf": 1,
+          "composite_multivar": 0,
+          "monomial": 1,
+          "multilinear": 0,
+          "ratio": 0,
+          "trilinear": 0,
+          "univariate_atom": 0,
+          "univariate_square": 1
+        },
+        "unclaimed_rows_checked": 32
+      },
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "instance": "ex1226",
+      "instrument_marker": "phase52-boxdep-rows-entry-v1",
+      "n_cons": 5,
+      "n_vars": 5,
+      "phase": "diagnosed",
+      "wall_to_gate": 0.8589155770023353
+    },
+    {
+      "budget": 45.0,
+      "counts": {
+        "offending_rows_found": 48,
+        "producer_calls": 1,
+        "unclaimed_rows_checked": 228
+      },
+      "diagnosis": {
+        "all_offender_aux_registered": false,
+        "any_offender_aux_unregistered": true,
+        "captured": true,
+        "claimed_aux": 44,
+        "code": "fixed_row_box_dependent",
+        "coverage_kinds": {
+          "power": 28,
+          "product": 28
+        },
+        "decline": "fixed_row_box_dependent",
+        "decline_detail": "coeffs",
+        "detail": "coeffs",
+        "env_rows": 176,
+        "n_orig": 100,
+        "offender_aux_owner_hist": {
+          "unregistered_aux": 48
+        },
+        "offender_column_classes": {
+          "original": 48,
+          "unregistered_aux": 48
+        },
+        "offender_kinds": {
+          "coeffs": 48
+        },
+        "offender_sample": [
+          {
+            "aux_owners": [
+              "unregistered_aux"
+            ],
+            "kind": "coeffs",
+            "n_aux": 1,
+            "probe_coeffs": [
+              0.04987,
+              -1.0
+            ],
+            "probe_rhs": -0.9501298737262852,
+            "real_coeffs": [
+              5e-06,
+              -1.0
+            ],
+            "real_rhs": -9.992669706367582,
+            "row": 22,
+            "support": [
+              52,
+              104
+            ]
+          },
+          {
+            "aux_owners": [
+              "unregistered_aux"
+            ],
+            "kind": "coeffs",
+            "n_aux": 1,
+            "probe_coeffs": [
+              -0.3333,
+              1.0
+            ],
+            "probe_rhs": 0.6667000000000001,
+            "real_coeffs": [
+              -0.003332,
+              1.0
+            ],
+            "real_rhs": 6.665465043243711,
+            "row": 23,
+            "support": [
+              52,
+              104
+            ]
+          },
+          {
+            "aux_owners": [
+              "unregistered_aux"
+            ],
+            "kind": "coeffs",
+            "n_aux": 1,
+            "probe_coeffs": [
+              -0.034517,
+              1.0
+            ],
+            "probe_rhs": 2.0713570619329973,
+            "real_coeffs": [
+              -3e-06,
+              1.0
+            ],
+            "real_rhs": 233.08954222480742,
+            "row": 24,
+            "support": [
+              52,
+              104
+            ]
+          },
+          {
+            "aux_owners": [
+              "unregistered_aux"
+            ],
+            "kind": "coeffs",
+            "n_aux": 1,
+            "probe_coeffs": [
+              -0.021989,
+              1.0
+            ],
+            "probe_rhs": 2.5951079648277684,
+            "real_coeffs": [
+              -2e-06,
+              1.0
+            ],
+            "real_rhs": 293.6664923159833,
+            "row": 25,
+            "support": [
+              52,
+              104
+            ]
+          },
+          {
+            "aux_owners": [
+              "unregistered_aux"
+            ],
+            "kind": "coeffs",
+            "n_aux": 1,
+            "probe_coeffs": [
+              0.04761,
+              -1.0
+            ],
+            "probe_rhs": -0.952389753639841,
+            "real_coeffs": [
+              7e-06,
+              -1.0
+            ],
+            "real_rhs": -9.990594632374567,
+            "row": 50,
+            "support": [
+              57,
+              109
+            ]
+          },
+          {
+            "aux_owners": [
+              "unregistered_aux"
+            ],
+            "kind": "coeffs",
+            "n_aux": 1,
+            "probe_coeffs": [
+              -0.3333,
+              1.0
+            ],
+            "probe_rhs": 0.6667000000000001,
+            "real_coeffs": [
+              -0.003332,
+              1.0
+            ],
+            "real_rhs": 6.665465043243711,
+            "row": 51,
+            "support": [
+              57,
+              109
+            ]
+          },
+          {
+            "aux_owners": [
+              "unregistered_aux"
+            ],
+            "kind": "coeffs",
+            "n_aux": 1,
+            "probe_coeffs": [
+              -0.032724,
+              1.0
+            ],
+            "probe_rhs": 2.1273609318959554,
+            "real_coeffs": [
+              -4e-06,
+              1.0
+            ],
+            "real_rhs": 195.67931487845834,
+            "row": 52,
+            "support": [
+              57,
+              109
+            ]
+          },
+          {
+            "aux_owners": [
+              "unregistered_aux"
+            ],
+            "kind": "coeffs",
+            "n_aux": 1,
+            "probe_coeffs": [
+              -0.020828,
+              1.0
+            ],
+            "probe_rhs": 2.6664303286440347,
+            "real_coeffs": [
+              -2e-06,
+              1.0
+            ],
+            "real_rhs": 246.53316942193504,
+            "row": 53,
+            "support": [
+              57,
+              109
+            ]
+          }
+        ],
+        "offending_rows": 48,
+        "probe_nnz": 1020,
+        "probe_shape": [
+          404,
+          156
+        ],
+        "real_nnz": 996,
+        "real_shape": [
+          404,
+          156
+        ],
+        "registered_aux_columns": 44,
+        "spec_built": false,
+        "term_family_sizes": {
+          "affine_square": 0,
+          "blf": 28,
+          "composite_multivar": 0,
+          "monomial": 16,
+          "multilinear": 0,
+          "ratio": 0,
+          "trilinear": 0,
+          "univariate_atom": 0,
+          "univariate_square": 16
+        },
+        "unclaimed_rows_checked": 228
+      },
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "instance": "ex1233",
+      "instrument_marker": "phase52-boxdep-rows-entry-v1",
+      "n_cons": 64,
+      "n_vars": 52,
+      "phase": "diagnosed",
+      "wall_to_gate": 3.301934610000899
+    },
+    {
+      "budget": 45.0,
+      "counts": {
+        "offending_rows_found": 288,
+        "producer_calls": 1,
+        "unclaimed_rows_checked": 376
+      },
+      "diagnosis": {
+        "all_offender_aux_registered": false,
+        "any_offender_aux_unregistered": true,
+        "captured": true,
+        "claimed_aux": 1,
+        "code": "fixed_row_box_dependent",
+        "coverage_kinds": {
+          "power": 72,
+          "product": 1
+        },
+        "decline": "fixed_row_box_dependent",
+        "decline_detail": "coeffs",
+        "detail": "coeffs",
+        "env_rows": 4,
+        "n_orig": 22,
+        "offender_aux_owner_hist": {
+          "unregistered_aux": 288
+        },
+        "offender_column_classes": {
+          "original": 576,
+          "unregistered_aux": 288
+        },
+        "offender_kinds": {
+          "coeffs": 238,
+          "nnz": 50
+        },
+        "offender_sample": [
+          {
+            "aux_owners": [
+              "unregistered_aux"
+            ],
+            "kind": "coeffs",
+            "n_aux": 1,
+            "probe_coeffs": [
+              2.0,
+              -2.0,
+              1.0
+            ],
+            "probe_rhs": 48.000000000000036,
+            "real_coeffs": [
+              3.5,
+              -3.5,
+              1.0
+            ],
+            "real_rhs": 24.500000000000014,
+            "row": 6,
+            "support": [
+              0,
+              2,
+              23
+            ]
+          },
+          {
+            "aux_owners": [
+              "unregistered_aux"
+            ],
+            "kind": "coeffs",
+            "n_aux": 1,
+            "probe_coeffs": [
+              -16.0,
+              16.0,
+              -1.0
+            ],
+            "probe_rhs": 64.00000000000006,
+            "real_coeffs": [
+              -14.0,
+              14.0,
+              -1.0
+            ],
+            "real_rhs": 49.00000000000003,
+            "row": 7,
+            "support": [
+              0,
+              2,
+              23
+            ]
+          },
+          {
+            "aux_owners": [
+              "unregistered_aux"
+            ],
+            "kind": "coeffs",
+            "n_aux": 1,
+            "probe_coeffs": [
+              -2.0,
+              2.0,
+              -1.0
+            ],
+            "probe_rhs": 1.0000000000000018,
+            "real_coeffs": [
+              -3.5,
+              3.5,
+              -1.0
+            ],
+            "real_rhs": 3.062500000000001,
+            "row": 8,
+            "support": [
+              0,
+              2,
+              23
+            ]
+          },
+          {
+            "aux_owners": [
+              "unregistered_aux"
+            ],
+            "kind": "coeffs",
+            "n_aux": 1,
+            "probe_coeffs": [
+              12.0,
+              -12.0,
+              -1.0
+            ],
+            "probe_rhs": 36.00000000000002,
+            "real_coeffs": [
+              7.0,
+              -7.0,
+              -1.0
+            ],
+            "real_rhs": 12.250000000000009,
+            "row": 9,
+            "support": [
+              0,
+              2,
+              23
+            ]
+          },
+          {
+            "aux_owners": [
+              "unregistered_aux"
+            ],
+            "kind": "coeffs",
+            "n_aux": 1,
+            "probe_coeffs": [
+              2.0,
+              -2.0,
+              1.0
+            ],
+            "probe_rhs": 63.00000000000006,
+            "real_coeffs": [
+              0.55,
+              -0.55,
+              1.0
+            ],
+            "real_rhs": 0.6050000000000006,
+            "row": 10,
+            "support": [
+              1,
+              3,
+              24
+            ]
+          },
+          {
+            "aux_owners": [
+              "unregistered_aux"
+            ],
+            "kind": "coeffs",
+            "n_aux": 1,
+            "probe_coeffs": [
+              -18.0,
+              18.0,
+              -1.0
+            ],
+            "probe_rhs": 81.00000000000007,
+            "real_coeffs": [
+              -2.2,
+              2.2,
+              -1.0
+            ],
+            "real_rhs": 1.210000000000001,
+            "row": 11,
+            "support": [
+              1,
+              3,
+              24
+            ]
+          },
+          {
+            "aux_owners": [
+              "unregistered_aux"
+            ],
+            "kind": "coeffs",
+            "n_aux": 1,
+            "probe_coeffs": [
+              -2.0,
+              2.0,
+              -1.0
+            ],
+            "probe_rhs": 1.0000000000000009,
+            "real_coeffs": [
+              -0.55,
+              0.55,
+              -1.0
+            ],
+            "real_rhs": 0.07562500000000004,
+            "row": 12,
+            "support": [
+              1,
+              3,
+              24
+            ]
+          },
+          {
+            "aux_owners": [
+              "unregistered_aux"
+            ],
+            "kind": "coeffs",
+            "n_aux": 1,
+            "probe_coeffs": [
+              14.0,
+              -14.0,
+              -1.0
+            ],
+            "probe_rhs": 49.000000000000036,
+            "real_coeffs": [
+              1.1,
+              -1.1,
+              -1.0
+            ],
+            "real_rhs": 0.30250000000000044,
+            "row": 13,
+            "support": [
+              1,
+              3,
+              24
+            ]
+          }
+        ],
+        "offending_rows": 288,
+        "probe_nnz": 1050,
+        "probe_shape": [
+          380,
+          95
+        ],
+        "real_nnz": 950,
+        "real_shape": [
+          380,
+          95
+        ],
+        "registered_aux_columns": 1,
+        "spec_built": false,
+        "term_family_sizes": {
+          "affine_square": 0,
+          "blf": 1,
+          "composite_multivar": 0,
+          "monomial": 0,
+          "multilinear": 0,
+          "ratio": 0,
+          "trilinear": 0,
+          "univariate_atom": 0,
+          "univariate_square": 0
+        },
+        "unclaimed_rows_checked": 376
+      },
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "instance": "kall_circles_c8a",
+      "instrument_marker": "phase52-boxdep-rows-entry-v1",
+      "n_cons": 86,
+      "n_vars": 22,
+      "phase": "diagnosed",
+      "wall_to_gate": 1.2700663289979275
+    },
+    {
+      "budget": 45.0,
+      "counts": {
+        "offending_rows_found": 4,
+        "producer_calls": 1,
+        "unclaimed_rows_checked": 4
+      },
+      "diagnosis": {
+        "all_offender_aux_registered": false,
+        "any_offender_aux_unregistered": true,
+        "captured": true,
+        "claimed_aux": 2,
+        "code": "fixed_row_box_dependent",
+        "coverage_kinds": {
+          "power": 3
+        },
+        "decline": "fixed_row_box_dependent",
+        "decline_detail": "coeffs",
+        "detail": "coeffs",
+        "env_rows": 8,
+        "n_orig": 2,
+        "offender_aux_owner_hist": {
+          "affine_square,unregistered_aux": 4
+        },
+        "offender_column_classes": {
+          "affine_square": 4,
+          "original": 4,
+          "unregistered_aux": 4
+        },
+        "offender_kinds": {
+          "coeffs": 4
+        },
+        "offender_sample": [
+          {
+            "aux_owners": [
+              "affine_square",
+              "unregistered_aux"
+            ],
+            "kind": "coeffs",
+            "n_aux": 2,
+            "probe_coeffs": [
+              50.32,
+              1.0,
+              -50.32
+            ],
+            "probe_rhs": 309.0244000000005,
+            "real_coeffs": [
+              40039.72,
+              1.0,
+              -40039.72
+            ],
+            "real_rhs": 8033585.72039999,
+            "row": 4,
+            "support": [
+              1,
+              2,
+              3
+            ]
+          },
+          {
+            "aux_owners": [
+              "affine_square",
+              "unregistered_aux"
+            ],
+            "kind": "coeffs",
+            "n_aux": 2,
+            "probe_coeffs": [
+              -112.52,
+              -1.0,
+              112.52
+            ],
+            "probe_rhs": 3221.447600000004,
+            "real_coeffs": [
+              -80479.72,
+              -1.0,
+              80479.72
+            ],
+            "real_rhs": 1619286572.6796029,
+            "row": 5,
+            "support": [
+              1,
+              2,
+              3
+            ]
+          },
+          {
+            "aux_owners": [
+              "affine_square",
+              "unregistered_aux"
+            ],
+            "kind": "coeffs",
+            "n_aux": 2,
+            "probe_coeffs": [
+              -50.32,
+              -1.0,
+              50.32
+            ],
+            "probe_rhs": 658.1856000000007,
+            "real_coeffs": [
+              -40039.72,
+              -1.0,
+              40039.72
+            ],
+            "real_rhs": 400814814.27960074,
+            "row": 6,
+            "support": [
+              1,
+              2,
+              3
+            ]
+          },
+          {
+            "aux_owners": [
+              "affine_square",
+              "unregistered_aux"
+            ],
+            "kind": "coeffs",
+            "n_aux": 2,
+            "probe_coeffs": [
+              11.88,
+              -1.0,
+              -11.88
+            ],
+            "probe_rhs": 29.343600000000027,
+            "real_coeffs": [
+              400.28,
+              -1.0,
+              -400.28
+            ],
+            "real_rhs": 39855.87960000001,
+            "row": 7,
+            "support": [
+              1,
+              2,
+              3
+            ]
+          }
+        ],
+        "offending_rows": 4,
+        "probe_nnz": 28,
+        "probe_shape": [
+          12,
+          5
+        ],
+        "real_nnz": 28,
+        "real_shape": [
+          12,
+          5
+        ],
+        "registered_aux_columns": 2,
+        "spec_built": false,
+        "term_family_sizes": {
+          "affine_square": 2,
+          "blf": 0,
+          "composite_multivar": 0,
+          "monomial": 0,
+          "multilinear": 0,
+          "ratio": 0,
+          "trilinear": 0,
+          "univariate_atom": 0,
+          "univariate_square": 0
+        },
+        "unclaimed_rows_checked": 4
+      },
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "instance": "nvs04",
+      "instrument_marker": "phase52-boxdep-rows-entry-v1",
+      "n_cons": 0,
+      "n_vars": 2,
+      "phase": "diagnosed",
+      "wall_to_gate": 1.0399122010021529
+    },
+    {
+      "budget": 45.0,
+      "counts": {
+        "offending_rows_found": 8,
+        "producer_calls": 1,
+        "unclaimed_rows_checked": 11
+      },
+      "diagnosis": {
+        "all_offender_aux_registered": false,
+        "any_offender_aux_unregistered": true,
+        "captured": true,
+        "claimed_aux": 7,
+        "code": "fixed_row_box_dependent",
+        "coverage_kinds": {
+          "power": 5,
+          "ratio": 1,
+          "univariate_call": 1
+        },
+        "decline": "fixed_row_box_dependent",
+        "decline_detail": "coeffs",
+        "detail": "coeffs",
+        "env_rows": 28,
+        "n_orig": 3,
+        "offender_aux_owner_hist": {
+          "univariate:sqrt,unregistered_aux": 4,
+          "unregistered_aux": 4
+        },
+        "offender_column_classes": {
+          "original": 4,
+          "univariate:sqrt": 4,
+          "unregistered_aux": 8
+        },
+        "offender_kinds": {
+          "coeffs": 8
+        },
+        "offender_sample": [
+          {
+            "aux_owners": [
+              "univariate:sqrt",
+              "unregistered_aux"
+            ],
+            "kind": "coeffs",
+            "n_aux": 2,
+            "probe_coeffs": [
+              0.377964,
+              1.0
+            ],
+            "probe_rhs": 1.377964473009227,
+            "real_coeffs": [
+              0.444603,
+              1.0
+            ],
+            "real_rhs": 6.358346567196982,
+            "row": 26,
+            "support": [
+              6,
+              10
+            ]
+          },
+          {
+            "aux_owners": [
+              "univariate:sqrt",
+              "unregistered_aux"
+            ],
+            "kind": "coeffs",
+            "n_aux": 2,
+            "probe_coeffs": [
+              -1.0,
+              -1.0
+            ],
+            "probe_rhs": -2.0,
+            "real_coeffs": [
+              -39.534365,
+              -1.0
+            ],
+            "real_rhs": -12.575271778156655,
+            "row": 27,
+            "support": [
+              6,
+              10
+            ]
+          },
+          {
+            "aux_owners": [
+              "univariate:sqrt",
+              "unregistered_aux"
+            ],
+            "kind": "coeffs",
+            "n_aux": 2,
+            "probe_coeffs": [
+              -0.300944,
+              -1.0
+            ],
+            "probe_rhs": -1.097167540709727,
+            "real_coeffs": [
+              -0.019558,
+              -1.0
+            ],
+            "real_rhs": -0.27969724064658424,
+            "row": 28,
+            "support": [
+              6,
+              10
+            ]
+          },
+          {
+            "aux_owners": [
+              "univariate:sqrt",
+              "unregistered_aux"
+            ],
+            "kind": "coeffs",
+            "n_aux": 2,
+            "probe_coeffs": [
+              -0.142857,
+              -1.0
+            ],
+            "probe_rhs": -0.7559289460184543,
+            "real_coeffs": [
+              -0.005,
+              -1.0
+            ],
+            "real_rhs": -0.14142135623730953,
+            "row": 29,
+            "support": [
+              6,
+              10
+            ]
+          },
+          {
+            "aux_owners": [
+              "unregistered_aux"
+            ],
+            "kind": "coeffs",
+            "n_aux": 1,
+            "probe_coeffs": [
+              0.166181,
+              1.0
+            ],
+            "probe_rhs": 1.1661807580174928,
+            "real_coeffs": [
+              308.993426,
+              1.0
+            ],
+            "real_rhs": 61798.68512110746,
+            "row": 30,
+            "support": [
+              0,
+              11
+            ]
+          },
+          {
+            "aux_owners": [
+              "unregistered_aux"
+            ],
+            "kind": "coeffs",
+            "n_aux": 1,
+            "probe_coeffs": [
+              -3.0,
+              -1.0
+            ],
+            "probe_rhs": -4.0,
+            "real_coeffs": [
+              -7328588.355667,
+              -1.0
+            ],
+            "real_rhs": -247163.47721005784,
+            "row": 31,
+            "support": [
+              0,
+              11
+            ]
+          },
+          {
+            "aux_owners": [
+              "unregistered_aux"
+            ],
+            "kind": "coeffs",
+            "n_aux": 1,
+            "probe_coeffs": [
+              -0.011719,
+              -1.0
+            ],
+            "probe_rhs": -0.0625,
+            "real_coeffs": [
+              -0.0,
+              -1.0
+            ],
+            "real_rhs": -3.998482716835929e-06,
+            "row": 32,
+            "support": [
+              0,
+              11
+            ]
+          },
+          {
+            "aux_owners": [
+              "unregistered_aux"
+            ],
+            "kind": "coeffs",
+            "n_aux": 1,
+            "probe_coeffs": [
+              -0.001249,
+              -1.0
+            ],
+            "probe_rhs": -0.011661807580174927,
+            "real_coeffs": [
+              -0.0,
+              -1.0
+            ],
+            "real_rhs": -5.000000000000008e-07,
+            "row": 33,
+            "support": [
+              0,
+              11
+            ]
+          }
+        ],
+        "offending_rows": 8,
+        "probe_nnz": 85,
+        "probe_shape": [
+          39,
+          12
+        ],
+        "real_nnz": 83,
+        "real_shape": [
+          39,
+          12
+        ],
+        "registered_aux_columns": 7,
+        "spec_built": false,
+        "term_family_sizes": {
+          "affine_square": 3,
+          "blf": 1,
+          "composite_multivar": 0,
+          "monomial": 2,
+          "multilinear": 0,
+          "ratio": 0,
+          "trilinear": 0,
+          "univariate_atom": 1,
+          "univariate_square": 2
+        },
+        "unclaimed_rows_checked": 11
+      },
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "instance": "nvs08",
+      "instrument_marker": "phase52-boxdep-rows-entry-v1",
+      "n_cons": 3,
+      "n_vars": 3,
+      "phase": "diagnosed",
+      "wall_to_gate": 0.92116804699981
+    },
+    {
+      "budget": 45.0,
+      "counts": {
+        "offending_rows_found": 4,
+        "producer_calls": 1,
+        "unclaimed_rows_checked": 10
+      },
+      "diagnosis": {
+        "all_offender_aux_registered": false,
+        "any_offender_aux_unregistered": true,
+        "captured": true,
+        "claimed_aux": 2,
+        "code": "fixed_row_box_dependent",
+        "coverage_kinds": {
+          "power": 3
+        },
+        "decline": "fixed_row_box_dependent",
+        "decline_detail": "coeffs",
+        "detail": "coeffs",
+        "env_rows": 8,
+        "n_orig": 3,
+        "offender_aux_owner_hist": {
+          "unregistered_aux": 4
+        },
+        "offender_column_classes": {
+          "original": 8,
+          "unregistered_aux": 4
+        },
+        "offender_kinds": {
+          "coeffs": 4
+        },
+        "offender_sample": [
+          {
+            "aux_owners": [
+              "unregistered_aux"
+            ],
+            "kind": "coeffs",
+            "n_aux": 1,
+            "probe_coeffs": [
+              -17.0,
+              -17.0,
+              1.0
+            ],
+            "probe_rhs": -30.0,
+            "real_coeffs": [
+              -20.214249,
+              -20.214249,
+              1.0
+            ],
+            "real_rhs": -102.15374461808958,
+            "row": 12,
+            "support": [
+              0,
+              1,
+              5
+            ]
+          },
+          {
+            "aux_owners": [
+              "unregistered_aux"
+            ],
+            "kind": "coeffs",
+            "n_aux": 1,
+            "probe_coeffs": [
+              4.0,
+              4.0,
+              -1.0
+            ],
+            "probe_rhs": 3.999999999999999,
+            "real_coeffs": [
+              20.184519,
+              20.184519,
+              -1.0
+            ],
+            "real_rhs": 101.85369917344497,
+            "row": 13,
+            "support": [
+              0,
+              1,
+              5
+            ]
+          },
+          {
+            "aux_owners": [
+              "unregistered_aux"
+            ],
+            "kind": "coeffs",
+            "n_aux": 1,
+            "probe_coeffs": [
+              17.0,
+              17.0,
+              -1.0
+            ],
+            "probe_rhs": 72.25,
+            "real_coeffs": [
+              20.214249,
+              20.214249,
+              -1.0
+            ],
+            "real_rhs": 102.15396559010203,
+            "row": 14,
+            "support": [
+              0,
+              1,
+              5
+            ]
+          },
+          {
+            "aux_owners": [
+              "unregistered_aux"
+            ],
+            "kind": "coeffs",
+            "n_aux": 1,
+            "probe_coeffs": [
+              30.0,
+              30.0,
+              -1.0
+            ],
+            "probe_rhs": 225.00000000000006,
+            "real_coeffs": [
+              20.243979,
+              20.243979,
+              -1.0
+            ],
+            "real_rhs": 102.45467395079052,
+            "row": 15,
+            "support": [
+              0,
+              1,
+              5
+            ]
+          }
+        ],
+        "offending_rows": 4,
+        "probe_nnz": 44,
+        "probe_shape": [
+          18,
+          6
+        ],
+        "real_nnz": 44,
+        "real_shape": [
+          18,
+          6
+        ],
+        "registered_aux_columns": 2,
+        "spec_built": false,
+        "term_family_sizes": {
+          "affine_square": 0,
+          "blf": 0,
+          "composite_multivar": 0,
+          "monomial": 2,
+          "multilinear": 0,
+          "ratio": 0,
+          "trilinear": 0,
+          "univariate_atom": 0,
+          "univariate_square": 2
+        },
+        "unclaimed_rows_checked": 10
+      },
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "instance": "st_e02",
+      "instrument_marker": "phase52-boxdep-rows-entry-v1",
+      "n_cons": 3,
+      "n_vars": 3,
+      "phase": "diagnosed",
+      "wall_to_gate": 0.8568786520008871
+    },
+    {
+      "budget": 45.0,
+      "counts": {
+        "producer_calls": 1,
+        "shape_rows_compared": 1
+      },
+      "diagnosis": {
+        "captured": true,
+        "code": "probe_real_shape_mismatch",
+        "col_delta": 0,
+        "coverage_kinds": {
+          "power": 3,
+          "product": 1,
+          "univariate_call": 1
+        },
+        "coverage_probe": 5,
+        "coverage_real": 5,
+        "decline": "probe_real_shape_mismatch",
+        "decline_detail": "",
+        "detail": "",
+        "n_orig": 7,
+        "probe_nnz": 62,
+        "probe_shape": [
+          29,
+          12
+        ],
+        "real_nnz": 56,
+        "real_shape": [
+          28,
+          12
+        ],
+        "real_term_family_sizes": {
+          "affine_square": 0,
+          "blf": 1,
+          "composite_multivar": 0,
+          "monomial": 0,
+          "multilinear": 0,
+          "ratio": 0,
+          "trilinear": 0,
+          "univariate_atom": 0,
+          "univariate_square": 0
+        },
+        "registered_aux_columns": 1,
+        "row_delta": -1,
+        "spec_built": false,
+        "term_family_sizes": {
+          "affine_square": 0,
+          "blf": 1,
+          "composite_multivar": 0,
+          "monomial": 0,
+          "multilinear": 0,
+          "ratio": 0,
+          "trilinear": 0,
+          "univariate_atom": 0,
+          "univariate_square": 0
+        }
+      },
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "instance": "st_e04",
+      "instrument_marker": "phase52-boxdep-rows-entry-v1",
+      "n_cons": 2,
+      "n_vars": 4,
+      "phase": "diagnosed",
+      "wall_to_gate": 0.9192426420013362
+    },
+    {
+      "budget": 45.0,
+      "counts": {
+        "offending_rows_found": 4,
+        "producer_calls": 1,
+        "unclaimed_rows_checked": 11
+      },
+      "diagnosis": {
+        "all_offender_aux_registered": false,
+        "any_offender_aux_unregistered": true,
+        "captured": true,
+        "claimed_aux": 1,
+        "code": "fixed_row_box_dependent",
+        "coverage_kinds": {
+          "power": 2
+        },
+        "decline": "fixed_row_box_dependent",
+        "decline_detail": "coeffs",
+        "detail": "coeffs",
+        "env_rows": 4,
+        "n_orig": 5,
+        "offender_aux_owner_hist": {
+          "unregistered_aux": 4
+        },
+        "offender_column_classes": {
+          "original": 4,
+          "unregistered_aux": 4
+        },
+        "offender_kinds": {
+          "coeffs": 4
+        },
+        "offender_sample": [
+          {
+            "aux_owners": [
+              "unregistered_aux"
+            ],
+            "kind": "coeffs",
+            "n_aux": 1,
+            "probe_coeffs": [
+              -3.089631,
+              1.0
+            ],
+            "probe_rhs": -2.089630999709932,
+            "real_coeffs": [
+              -1.947311,
+              1.0
+            ],
+            "real_rhs": -1.0505709251479671,
+            "row": 6,
+            "support": [
+              1,
+              6
+            ]
+          },
+          {
+            "aux_owners": [
+              "unregistered_aux"
+            ],
+            "kind": "coeffs",
+            "n_aux": 1,
+            "probe_coeffs": [
+              1.5,
+              -1.0
+            ],
+            "probe_rhs": 0.5,
+            "real_coeffs": [
+              1.713878,
+              -1.0
+            ],
+            "real_rhs": 0.7458234866691407,
+            "row": 7,
+            "support": [
+              1,
+              6
+            ]
+          },
+          {
+            "aux_owners": [
+              "unregistered_aux"
+            ],
+            "kind": "coeffs",
+            "n_aux": 1,
+            "probe_coeffs": [
+              3.181981,
+              -1.0
+            ],
+            "probe_rhs": 4.772970773009195,
+            "real_coeffs": [
+              1.95161,
+              -1.0
+            ],
+            "real_rhs": 1.1012239582870653,
+            "row": 8,
+            "support": [
+              1,
+              6
+            ]
+          },
+          {
+            "aux_owners": [
+              "unregistered_aux"
+            ],
+            "kind": "coeffs",
+            "n_aux": 1,
+            "probe_coeffs": [
+              4.242641,
+              -1.0
+            ],
+            "probe_rhs": 11.313708498984763,
+            "real_coeffs": [
+              2.163374,
+              -1.0
+            ],
+            "real_rhs": 1.5000000000002145,
+            "row": 9,
+            "support": [
+              1,
+              6
+            ]
+          }
+        ],
+        "offending_rows": 4,
+        "probe_nnz": 31,
+        "probe_shape": [
+          15,
+          7
+        ],
+        "real_nnz": 31,
+        "real_shape": [
+          15,
+          7
+        ],
+        "registered_aux_columns": 1,
+        "spec_built": false,
+        "term_family_sizes": {
+          "affine_square": 0,
+          "blf": 0,
+          "composite_multivar": 0,
+          "monomial": 1,
+          "multilinear": 0,
+          "ratio": 0,
+          "trilinear": 0,
+          "univariate_atom": 0,
+          "univariate_square": 1
+        },
+        "unclaimed_rows_checked": 11
+      },
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "instance": "st_e15",
+      "instrument_marker": "phase52-boxdep-rows-entry-v1",
+      "n_cons": 5,
+      "n_vars": 5,
+      "phase": "diagnosed",
+      "wall_to_gate": 0.8462629919995379
+    },
+    {
+      "budget": 45.0,
+      "counts": {
+        "producer_calls": 1,
+        "shape_rows_compared": 1
+      },
+      "diagnosis": {
+        "captured": true,
+        "code": "probe_real_shape_mismatch",
+        "col_delta": 0,
+        "coverage_kinds": {
+          "power": 23,
+          "product": 15
+        },
+        "coverage_probe": 38,
+        "coverage_real": 38,
+        "decline": "probe_real_shape_mismatch",
+        "decline_detail": "",
+        "detail": "",
+        "n_orig": 66,
+        "probe_nnz": 655,
+        "probe_shape": [
+          274,
+          104
+        ],
+        "real_nnz": 627,
+        "real_shape": [
+          267,
+          104
+        ],
+        "real_term_family_sizes": {
+          "affine_square": 0,
+          "blf": 15,
+          "composite_multivar": 0,
+          "monomial": 9,
+          "multilinear": 0,
+          "ratio": 0,
+          "trilinear": 0,
+          "univariate_atom": 0,
+          "univariate_square": 9
+        },
+        "registered_aux_columns": 24,
+        "row_delta": -7,
+        "spec_built": false,
+        "term_family_sizes": {
+          "affine_square": 0,
+          "blf": 15,
+          "composite_multivar": 0,
+          "monomial": 9,
+          "multilinear": 0,
+          "ratio": 0,
+          "trilinear": 0,
+          "univariate_atom": 0,
+          "univariate_square": 9
+        }
+      },
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "instance": "st_e35",
+      "instrument_marker": "phase52-boxdep-rows-entry-v1",
+      "n_cons": 39,
+      "n_vars": 32,
+      "phase": "diagnosed",
+      "wall_to_gate": 3.2403032799993525
+    }
+  ],
+  "schema": "phase52_boxdep_rows_entry/1",
+  "timestamp": "2026-07-30T17:35:41Z",
+  "total_wall_seconds": 39.50041288400098
+}

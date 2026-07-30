@@ -1,0 +1,98 @@
+[ 1/12] casctanks            phase=diagnosed              code=probe_real_shape_mismatch offenders=None unreg=None
+[ 2/12] ex1221               phase=diagnosed              code=fixed_row_box_dependent offenders=4 unreg=True
+[ 3/12] ex1225               phase=diagnosed              code=fixed_row_box_dependent offenders=15 unreg=True
+[ 4/12] ex1226               phase=diagnosed              code=fixed_row_box_dependent offenders=18 unreg=True
+[ 5/12] ex1233               phase=diagnosed              code=fixed_row_box_dependent offenders=48 unreg=True
+[ 6/12] kall_circles_c8a     phase=diagnosed              code=fixed_row_box_dependent offenders=288 unreg=True
+[ 7/12] nvs04                phase=diagnosed              code=fixed_row_box_dependent offenders=4 unreg=True
+[ 8/12] nvs08                phase=diagnosed              code=fixed_row_box_dependent offenders=8 unreg=True
+[ 9/12] st_e02               phase=diagnosed              code=fixed_row_box_dependent offenders=4 unreg=True
+[10/12] st_e04               phase=diagnosed              code=probe_real_shape_mismatch offenders=None unreg=None
+[11/12] st_e15               phase=diagnosed              code=fixed_row_box_dependent offenders=4 unreg=True
+[12/12] st_e35               phase=diagnosed              code=probe_real_shape_mismatch offenders=None unreg=None
+
+====================================================================================================
+PHASE 5.2 ENTRY EXPERIMENT — the unmaskable tail (census ranks #3 and #5)
+====================================================================================================
+tree 603ff43a-dirty  budget 45.0s  instances 12  wall 39.5s  load 0.38->0.75
+
+--- RANK #5 `fixed_row_box_dependent` — what are the offending rows? ------------------------------
+instance            kind       unclaimed  offend  env rows   aux registered?  wall(s)
+ex1221              coeffs            11       4         4        some UNREG      1.8
+ex1225              coeffs            34      15         4        some UNREG      4.3
+ex1226              coeffs            32      18         8        some UNREG      2.0
+ex1233              coeffs           228      48       176        some UNREG     47.1
+kall_circles_c8a    coeffs           376     288         4        some UNREG     46.3
+nvs04               coeffs             4       4         8        some UNREG      1.9
+nvs08               coeffs            11       8        28        some UNREG      3.4
+st_e02              coeffs            10       4         8        some UNREG      1.4
+st_e15              coeffs            11       4         4        some UNREG      1.5
+
+  offender aux-owner histogram per instance:
+    ex1221              {"unregistered_aux": 4}
+    ex1225              {"unregistered_aux": 12, "blf,unregistered_aux": 3}
+    ex1226              {"unregistered_aux": 15, "blf,unregistered_aux": 3}
+    ex1233              {"unregistered_aux": 48}
+    kall_circles_c8a    {"unregistered_aux": 288}
+    nvs04               {"affine_square,unregistered_aux": 4}
+    nvs08               {"univariate:sqrt,unregistered_aux": 4, "unregistered_aux": 4}
+    st_e02              {"unregistered_aux": 4}
+    st_e15              {"unregistered_aux": 4}
+
+--- RANK #3 `probe_real_shape_mismatch` — where do the shapes diverge? ---------------------------
+instance                     probe A          real A   drow   dcol  wall(s)
+casctanks                [2594, 960]     [2578, 960]    -16      0     92.5
+st_e04                      [29, 12]        [28, 12]     -1      0     12.7
+st_e35                    [274, 104]      [267, 104]     -7      0     53.7
+
+    casctanks probe families: {"blf": 280, "monomial": 60, "univariate_square": 60, "affine_square": 0, "univariate_atom": 60, "trilinear": 0, "multilinear": 0, "ratio": 0, "composite_multivar": 0}
+    casctanks real  families: {"blf": 280, "monomial": 60, "univariate_square": 60, "affine_square": 0, "univariate_atom": 60, "trilinear": 0, "multilinear": 0, "ratio": 0, "composite_multivar": 0}
+    st_e04 probe families: {"blf": 1, "monomial": 0, "univariate_square": 0, "affine_square": 0, "univariate_atom": 0, "trilinear": 0, "multilinear": 0, "ratio": 0, "composite_multivar": 0}
+    st_e04 real  families: {"blf": 1, "monomial": 0, "univariate_square": 0, "affine_square": 0, "univariate_atom": 0, "trilinear": 0, "multilinear": 0, "ratio": 0, "composite_multivar": 0}
+    st_e35 probe families: {"blf": 15, "monomial": 9, "univariate_square": 9, "affine_square": 0, "univariate_atom": 0, "trilinear": 0, "multilinear": 0, "ratio": 0, "composite_multivar": 0}
+    st_e35 real  families: {"blf": 15, "monomial": 9, "univariate_square": 9, "affine_square": 0, "univariate_atom": 0, "trilinear": 0, "multilinear": 0, "ratio": 0, "composite_multivar": 0}
+
+--- RELAXATION KINDS APPLIED vs STRUCTURAL FAMILIES REGISTERED ----------------------------------
+  (a kind present here with no matching registered family is a lift whose
+   box-dependent rows exist but whose column the producer cannot see)
+    casctanks           kinds={"product": 280, "power": 60, "univariate_call": 60}
+                        registered={"blf": 280, "monomial": 60, "univariate_square": 60, "univariate_atom": 60}
+    ex1221              kinds={"power": 2}
+                        registered={"monomial": 1, "univariate_square": 1}
+    ex1225              kinds={"product": 1}
+                        registered={"blf": 1}
+    ex1226              kinds={"power": 2, "product": 1}
+                        registered={"blf": 1, "monomial": 1, "univariate_square": 1}
+    ex1233              kinds={"power": 28, "product": 28}
+                        registered={"blf": 28, "monomial": 16, "univariate_square": 16}
+    kall_circles_c8a    kinds={"product": 1, "power": 72}
+                        registered={"blf": 1}
+    nvs04               kinds={"power": 3}
+                        registered={"affine_square": 2}
+    nvs08               kinds={"power": 5, "univariate_call": 1, "ratio": 1}
+                        registered={"blf": 1, "monomial": 2, "univariate_square": 2, "affine_square": 3, "univariate_atom": 1}
+    st_e02              kinds={"power": 3}
+                        registered={"monomial": 2, "univariate_square": 2}
+    st_e04              kinds={"power": 3, "product": 1, "univariate_call": 1}
+                        registered={"blf": 1}
+    st_e15              kinds={"power": 2}
+                        registered={"monomial": 1, "univariate_square": 1}
+    st_e35              kinds={"power": 23, "product": 15}
+                        registered={"blf": 15, "monomial": 9, "univariate_square": 9}
+
+--- EXECUTED PROBES ----------------------------------------------------------------------------
+  captured                        12
+  crashed                         0
+  diagnosed                       12
+  instances                       12
+  offending_rows_found            393
+  producer_calls                  12
+  shape_rows_compared             3
+  unclaimed_rows_checked          717
+
+--- VERDICT vs the pre-stated kill criterion -----------------------------------------------------
+  E8.3: KILL if >= 6 of 12 have offending rows over UNREGISTERED aux columns.  measured 9  -> KILLED
+     all-registered: none
+     some-unregistered: ex1221, ex1225, ex1226, ex1233, kall_circles_c8a, nvs04, nvs08, st_e02, st_e15
+
+artifact: reports/phase52_boxdep_rows_entry_603ff43a.json

@@ -1430,6 +1430,109 @@ tree manager. If Phase 5 retires `lp_spatial_bb`'s class first, skip its port.
 > on ambiguity, as `_select` does — leaving the unmatched rows as fixed rows rather
 > than claiming them. Regime C, 7 instances, `45.0 s / 2.3 %`.
 
+### Phase 5.2 — the census re-read by ladder position (open-ledger item 8) — **MEASURED; NOTHING BUILT, AND THAT IS THE RESULT**
+
+> **Status:** three entry experiments run 2026-07-30, **all three killed**. **Regime:**
+> none — no solver code changed, so neither N nor C applies and **no flag was
+> registered and no default moved**. **Depends:** Phase 5.1 (the census). **Est:** done
+> as scoped; what remains is a different card, named below.
+>
+> #### What item 8 asked, and what the corpus answered
+>
+> The ledger's item-8 row and this phase's own scoping note both argued census rank #2
+> (`infinite_aux_bounds`, 9 instances, **379.6 s / 19.7 %**) was the better next card
+> than rank #1, *because* rank #1's headline had been measured to be inflated by
+> decline-ladder masking. **The same masking applies to rank #2, and harder.**
+>
+> | experiment | hypothesis | kill criterion | measured | verdict |
+> |---|---|---|---|---|
+> | **E8.1** framing | ≥ 6 of 9 reach row-claiming with the gate bypassed | ≤ 4 | **1 of 9** | KILLED |
+> | **E8.2** repairability | infinities repairable by FBBT on the relaxation's own rows | ≥ 5 of 9 survive | **9 of 9 survive**; 0 of 229 infinite columns finitized | KILLED |
+> | **E8.3** re-pick (ranks #3+#5) | offending rows belong to *registered* lifts → producer claiming-predicate fix | ≥ 6 of 12 over unregistered aux | **9 of 9** rank-#5 instances | KILLED |
+>
+> Executed counts, artifacts and the full mechanism are in §6 (three entries dated
+> 2026-07-30). Headlines:
+>
+> * **Rank #2 is worth 0.0 %, not 19.7 %.** The one instance that reaches row-claiming
+>   with the gate bypassed (`carton7`) is the gate being *right*: 24 infinite original
+>   columns, an unbounded presolved root box, and a bypassed spec carrying 24 infinite
+>   entries in `global_lo`/`global_hi` — an unbounded node LP whose safe-bound
+>   evaluation is invalid. The other 8 decline immediately on another missing feature.
+> * The code name is a misnomer hiding **two disjoint classes, neither producer-side**:
+>   **6 of 9** have an unbounded *presolved root box* on original columns (a McCormick
+>   envelope over an unbounded box does not exist — this is the presolve
+>   propagation-quality lever `issue-764-scip-comparison.md` names), and **3 of 9**
+>   carry free aux columns from atoms the relaxer refused to envelope, 13/17, 16/20 and
+>   3/6 of which appear in **no relaxation row at all**, so FBBT has nothing to
+>   propagate through by construction.
+> * **Ranks #3 and #5 — the re-pick — are relaxer-side.** Every rank-#5 instance's
+>   box-dependent rows sit on aux columns registered in **no** structural map: the
+>   `power` kind whose lift lands in none of `monomial_map` /
+>   `univariate_square_map` / `affine_square_map`, plus factorable-intermediate partial
+>   products. On 6 of 9 the arithmetic is exact — offending rows = 4 × (unregistered
+>   `power` lifts); `kall_circles_c8a` is 72 lifts × 4 = **288 rows**. Rank #3 is the
+>   same root seen from the other side: identical family counts and coverage kinds
+>   across both builds, with the real build emitting strictly *fewer* rows
+>   (`casctanks` −16, `st_e35` −7, `st_e04` −1, columns unchanged).
+>
+> #### The reading protocol this phase now binds (the transferable result)
+>
+> The producer's decline ladder is **ordered**, so an attributed wall is an upper bound
+> exactly to the extent the code is tested early — a static property readable off
+> `spatial_producer.build_spatial_kernel_spec` without running anything. Ranks **#3**
+> and **#5** are the producer's *last two* tests, so every instance in them has already
+> passed every other decline test and their wall is recoverable **by construction**.
+>
+> | rank | code | ladder pos | inst | attributed | **recoverable** |
+> |---|---|---|---|---|---|
+> | #3 | `probe_real_shape_mismatch` | 15 (unmaskable) | 3 | 158.9 s / 8.2 % | **158.9 s / 8.2 %** |
+> | #1 | `term_trilinear` | 8 | 17 | 437.6 s / 22.7 % | 118.5 s / 6.2 % |
+> | #5 | `fixed_row_box_dependent` | 16 (unmaskable) | 9 | 109.7 s / 5.7 % | **109.7 s / 5.7 %** |
+> | #2 | `infinite_aux_bounds` | 7 | 9 | 379.6 s / 19.7 % | **0.0 s / 0.0 %** |
+>
+> Two of the top five have now been re-measured and both collapsed. The two rows that
+> were never inflated were ranked third and fifth. **Staff the census by ladder
+> position, not by attributed wall.**
+>
+> #### What the next card is (named so it is not re-derived)
+>
+> Not a producer change. Give the unregistered lifts a structural registration in
+> `uniform_relax` — the non-monomial/non-square `power` family and the McCormick fold's
+> factorable-intermediate partial products — so the producer's map-driven claiming can
+> see their columns, plus `EnvTerm` support in the Rust kernel for any family it does
+> not already implement, then make the box-conditional row emission (rank #3)
+> unconditional or claimable. Regime C, 12 instances, **268.6 s / 13.9 %** — the
+> largest genuinely-recoverable block in the census. It is a **relaxer + kernel** card,
+> materially larger than a producer-gate change, and it is *not* what item 8 scoped;
+> E8.3's pre-stated kill criterion said item 8 stops at the measurement, and it does.
+>
+> The only remaining producer-side entry in the top five is **Card 5.2-T** (rank #1,
+> 7 instances / 6.2 %), below — owner-scoped, ledger row 9.
+>
+> #### Verification run on the final tree (2026-07-30)
+>
+> No solver code changed this session — the diff is two probe scripts, their artifacts
+> and this document — so the Regime-N question is whether the tree still behaves as
+> item 11 left it, not whether a change is bound-neutral.
+>
+> | suite | result |
+> |---|---|
+> | `pytest -m smoke` (python/tests) | see the item-8 close-out §6 entry |
+> | `pytest -m smoke` (discopt_benchmarks/tests) | ditto |
+> | adversarial (`test_adversarial_recent_fixes.py -m slow`) | ditto |
+> | node-tightening parity (smoke + slow) | ditto — **no newly-served class, so nothing was added to it**; Card 2b's 147/83/44 asymmetry is unchanged |
+> | vector corpus / routing / tightening schedule / solver state / flag registry | ditto |
+> | `ruff check` + `ruff format --check` + `mypy` (2.1.0) | ditto |
+> | `cargo test -p discopt-core` | **not run — no Rust touched** |
+> | Regime-N `panel_baseline.py --check` | ditto |
+> | `heldout50` / MINLPLib snapshot | **SKIPPED — local only** |
+>
+> **Parity-guard note.** `python/tests/test_node_tightening_parity.py` is the standing
+> guard that coverage expansion cannot silently weaken node tightening. This session
+> expanded coverage by **zero** classes, so there is no new class to cover and the file
+> is untouched (its `pytest.mark.xdist_group` pin intact). Whichever session takes the
+> relaxer-side card above owes it the new `power`-family arm.
+
 ### Card 5.2-T — `term_trilinear` scoping (census rank #1) — **SCOPED, NOT STARTED**
 
 > **Status:** scoping only, per the owner's instruction not to implement. Two
@@ -1839,7 +1942,7 @@ this environment cannot adjudicate.
 | 5 | **Card 6b** — CSE / defined-variable sharing | not started | Its entry experiment: shared-subexpression multiplicity on the 20 largest instances (kill: <1.5× median duplication), then build in the kernel-facing path |
 | 6 | **Card 6c** — aggregation / c-MIR cuts | deliberately last | Phase 5 first (cheap nodes to multiply against — OBBT × cuts × throughput measured multiplicative), then a Rust multi-row separator with the #781 incumbent-starvation check as a gate arm |
 | 7 | **Card 6d** — process floor (~513 ms import) | off the critical path | Pure wall-clock, no certificate content. Lazy-import audit + `discopt solve` fast path, Regime N on cold-start wall |
-| 8 | **Card 5.2 / 5.3** — kernel coverage expansion | OPEN; 5.1 census landed, 5.4 partial | Per-feature sub-cards against the census ranking; the scoping note argues `infinite_aux_bounds` (9 instances) is the better next card than `term_trilinear` |
+| 8 | **Card 5.2 / 5.3** — kernel coverage expansion | **MEASURED 2026-07-30, NOTHING BUILT — and that is the result.** The card as scoped (`infinite_aux_bounds`) is **dead**; this row's own premise was wrong | Three entry experiments, three kills (§6, and the Phase 5.2 block). Rank #2's recoverable wall is **0.0 %, not 19.7 %** — 6 of 9 have an unbounded *presolved root box* (presolve propagation, not the kernel), 3 of 9 have free aux columns from atoms the relaxer refused to envelope. The re-pick (ranks #3+#5, **268.6 s / 13.9 %**, unmaskable by ladder position) is **relaxer-side**: unregistered `power` lifts + factorable-intermediate partial products, plus box-conditional row emission. Closing it means structural registration in `uniform_relax` + `EnvTerm` support, Regime C — a materially larger card than item 8 scoped, named in full in the Phase 5.2 block. **Binding protocol added: staff the census by LADDER POSITION, not by attributed wall** |
 | 9 | **Card 5.2-T** — `term_trilinear` | SCOPED, NOT STARTED (owner) | Not a new envelope family — the producer declines on mere *registration* of a trilinear product. Closing it is a producer-gate change plus a Regime-C panel |
 | 10 | **`DISCOPT_CONVEX_KERNEL`** | cert-clean and quality-clean, graduation NO | Net-positive on a population this environment does not have (Phase 5.4 verdict) — needs the heldout/local corpus |
 | 11 | **Card 4b modules 2–5** → **the state-object prerequisite** | **STARTED AND PARTLY LANDED 2026-07-30; the card itself does NOT close** | The prerequisite is built and proven: `python/discopt/solver/state.py` (4 `slots=True` dataclasses), **21 of 153** cross-region locals threaded, two Regime-N-clean panel runs, an AST-proof migration tool (`thread_solve_model_state.py`) and a both-directions conformance test. Closing it means threading the remaining ~115 — chiefly the `root`→`loop` 68 — then the carve is a separate card. The census also **corrects this row's own premise**: the coupling is 153 names on two boundaries, not "200+ locals", and `setup`/`reformulate` are nearly self-contained (14 / 18 outbound) |
@@ -1977,6 +2080,108 @@ box-dependent, `DISCOPT_TRILINEAR_RLT` defaults ON … those must be excluded fr
 producer's build the same way `skip_separable_floor` and `skip_convex_lift` already
 are"). Whether that prediction is the actual cause on ranks #3/#5 is the next entry
 experiment, recorded below.
+
+### 2026-07-30 — Open-ledger item 8 re-pick / Phase 5.2 entry experiment: "the unmaskable tail (ranks #3 + #5) is a producer *claiming-predicate* fix" — **FALSIFIED. The rows belong to lifts the relaxer registers in no map at all; the fix is relaxer-side, not producer-side**
+
+The re-pick from the ranking above. Ranks #3 (`probe_real_shape_mismatch`, 3 instances,
+158.9 s) and #5 (`fixed_row_box_dependent`, 9 instances, 109.7 s) are the producer's
+last two tests, so their 268.6 s / 13.9 % is recoverable wall by construction. Both are
+the same shaped failure: the producer identifies structure on a probe box and validates
+it against the real box, and every row it did not claim as a term envelope must be
+box-independent.
+
+**E8.3.** Hypothesis: the offending rows are envelope rows of terms the relaxer *does*
+register, which the producer failed to *claim* because of its support/row-count
+predicate — so the fix is a claiming-predicate change inside the producer. Kill: ≥ 6 of
+12 have offending rows over aux columns registered in **no** map. **Measured: 9 of
+9 rank-#5 instances — every single one. KILLED.**
+
+Probe: `discopt_benchmarks/scripts/phase52_boxdep_rows_entry.py`; artifact
+`reports/phase52_boxdep_rows_entry_603ff43a.json`. The producer's own state is read,
+never re-implemented: `_decline` is wrapped so that on the decline of interest it
+captures the **caller frame's locals** (`env_rows`, both builds, the claim
+bookkeeping) — re-deriving row ownership in the probe would measure the probe.
+Executed: **12 instances diagnosed, 0 crashed, 12 producer calls, 12 frames captured,
+717 unclaimed rows checked, 393 offending rows found, 3 shape comparisons.** Load
+0.20 → 0.95.
+
+**Rank #5 — the offending rows, and what owns them.** The producer returns on the
+*first* offender; the probe walks every unclaimed row so the class is characterized:
+
+| instance | unclaimed rows | offending | aux owners of the offenders |
+|---|---|---|---|
+| `ex1221` | 11 | 4 | `unregistered_aux` |
+| `ex1225` | 34 | 15 | `unregistered_aux` ×12, `blf,unregistered_aux` ×3 |
+| `ex1226` | 32 | 18 | `unregistered_aux` ×15, `blf,unregistered_aux` ×3 |
+| `ex1233` | 228 | 48 | `unregistered_aux` |
+| `kall_circles_c8a` | 376 | 288 | `unregistered_aux` |
+| `nvs04` | 4 | 4 | `affine_square,unregistered_aux` |
+| `nvs08` | 11 | 8 | `univariate:sqrt,unregistered_aux` ×4, `unregistered_aux` ×4 |
+| `st_e02` | 10 | 4 | `unregistered_aux` |
+| `st_e15` | 11 | 4 | `unregistered_aux` |
+
+**The mechanism, named.** Cross-tabulating the relaxer's own `coverage` (which
+relaxation *kind* it applied to each node) against the structural maps the producer
+reads localizes it exactly: it is the **`power` kind whose lift lands in none of
+`monomial_map` / `univariate_square_map` / `affine_square_map`**, plus
+factorable-intermediate partial products from the McCormick fold. On **6 of 9** the
+arithmetic is exact — offending rows = **4 × (unregistered `power` lifts)**:
+
+| instance | `power` kinds applied | registered non-BLF aux | unregistered | 4× | offenders |
+|---|---|---|---|---|---|
+| `kall_circles_c8a` | 72 | 0 | 72 | 288 | **288** |
+| `ex1233` | 28 | 16 | 12 | 48 | **48** |
+| `ex1221` / `st_e15` | 2 | 1 | 1 | 4 | **4** |
+| `nvs04` | 3 | 2 | 1 | 4 | **4** |
+| `st_e02` | 3 | 2 | 1 | 4 | **4** |
+
+The other three (`ex1225` 15, `ex1226` 18, `nvs08` 8) carry additional offenders over
+factorable-intermediate columns — `ex1225` applies **no** `power` kind at all and still
+has 15, so partial-product intermediates are a second, independent unregistered
+population.
+
+**Rank #3 is the same root cause seen from the other side.** All three instances have
+**identical** term-family counts and coverage kinds across the two builds, and the real
+build has strictly *fewer* rows — `casctanks` 2594 → 2578 (−16), `st_e35` 274 → 267
+(−7), `st_e04` 29 → 28 (−1), with the column count unchanged in every case. So no lift
+appeared or vanished; an **envelope row emission is conditional on the box** (a
+degenerate or coincident row dropped at the real box). That is relaxer-side too.
+
+**Verdict.** Closing ranks #3 and #5 means giving those lifts a structural registration
+(and, where the family is not already an `EnvTerm`, kernel support) inside
+`uniform_relax` — a relaxer + kernel change. The pre-stated kill criterion said item 8
+stops with the measurement rather than starting that card, and it does. Nothing was
+built; no flag was registered; no default changed.
+
+### 2026-07-30 — Open-ledger item 8 close-out: what was run, and what item 8 leaves open
+
+Recorded per §0.6. Tree: `4f3cd17d` (item 11's close-out) + this session's commits.
+`HEAD == origin` asserted before every commit.
+
+**Three entry experiments, three kills, zero solver-code changes.** The session
+produced no behavior change, so there is **no Regime C panel and no graduation** — per
+§0.3 a card that cannot survive its entry experiment does not proceed to a build, and
+per the item-8 brief a graduation shipped default-ON without a clean panel is the worst
+possible outcome. What the corpus now says, in one table:
+
+| census rank | code | inst | attributed | **measured recoverable** | owner of the fix |
+|---|---|---|---|---|---|
+| #1 | `term_trilinear` | 17 | 437.6 s / 22.7 % | 118.5 s / 6.2 % | producer gate (Card 5.2-T, ledger row 9) |
+| #2 | `infinite_aux_bounds` | 9 | 379.6 s / 19.7 % | **0.0 s / 0.0 %** | presolve propagation (6/9) + relaxer (3/9) — **not the kernel** |
+| #3 | `probe_real_shape_mismatch` | 3 | 158.9 s / 8.2 % | 158.9 s / 8.2 % | **relaxer** (box-conditional row emission) |
+| #4 | `probe_objective_bound_invalid` | 4 | 155.3 s / 8.1 % | not measured this session | G-F bound strength |
+| #5 | `fixed_row_box_dependent` | 9 | 109.7 s / 5.7 % | 109.7 s / 5.7 % | **relaxer** (unregistered `power` lifts + partial products) |
+
+**The single most useful thing this session establishes:** the census ranking is a
+ranking of *first decline codes*, and its rows must be read by **ladder position**
+before they are staffed. Two of the top five have now been re-measured and both
+collapsed (#1 to 27 % of its headline, #2 to zero). The two rows that were **never**
+inflated — #3 and #5, the producer's last two tests — were ranked third and fifth and
+are now the largest genuinely-recoverable entries. Nothing in the census file needs
+correcting; the reading protocol does, and it is written down here.
+
+**Suites run on the final tree** — see the verification block appended to the Phase 5.2
+card below.
 
 ### 2026-07-30 — Open-ledger item 11 close-out: what was run on the final tree
 
