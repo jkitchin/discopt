@@ -14,18 +14,26 @@ so that the later carve is mechanical rather than a signature-design problem.
 already existed with exactly these lifetimes; threading them is Regime N
 (``node_count`` and certified ``objective`` exactly unchanged).
 
-**Naming rule, deliberately mechanical.** A field's name is the original local's
-name with leading underscores stripped, so every migration site is a one-token
-edit that ``grep`` can audit:
+**Naming rule.** A field's name is the original local's name with leading
+underscores stripped, minus the holder's own subject prefix where the holder
+already carries it. A holder that covers two subjects keeps the distinguishing
+prefix on its fields:
 
-===========================  ==================================
-local in ``solve_model``     field
-===========================  ==================================
-``rust_time``                ``_timers.rust_time``
-``t_rust_start``             ``_timers.t_rust_start``
-``_subnlp_calls``            ``_heur.subnlp_calls``
-``_lns_lb_calls``            ``_heur.lns_lb_calls``
-===========================  ==================================
+============================  ==================================
+local in ``solve_model``      field
+============================  ==================================
+``rust_time``                 ``_timers.rust_time``
+``_lazy_probe_spent``         ``_lazy.probe_spent``
+``_pn_obbt_spent``            ``_pn_obbt.spent``
+``_subnlp_calls``             ``_heur.subnlp_calls``  (``_heur`` also carries LNS)
+``_lns_lb_calls``             ``_heur.lns_lb_calls``
+============================  ==================================
+
+The authoritative mapping is the ``MIGRATED`` table in
+``python/tests/test_solver_state.py``; the tests enforce it in **both**
+directions, so a field with no table entry and a table entry with no field both
+fail. That is deliberately stricter than a naming convention, because a
+convention is exactly the thing a later edit stops honouring silently.
 
 **Why several small classes and not one.** The census's bind-region → read-region
 matrix is not a single blob: the crossing names fall into cohesive clusters
@@ -46,6 +54,8 @@ from dataclasses import dataclass
 from typing import Any
 
 __all__ = [
+    "LazyStallSeparationState",
+    "PerNodeOBBTBudget",
     "PhaseTimers",
     "PrimalHeuristicState",
 ]
@@ -110,3 +120,58 @@ class PrimalHeuristicState:
     #: Consecutive one-hot swap searches that failed to improve; the improver
     #: self-disables past a small threshold.
     lns_swap_misses: int = 0
+
+
+@dataclass(slots=True)
+class LazyStallSeparationState:
+    """Stall-driven re-separation state for the lazy-constraint cut pool.
+
+    Under active pool inheritance the driver watches the global lower bound: when
+    it stops improving for ``_LAZY_RESEP_STALL_WINDOW`` solves the layer moves from
+    ``idle`` to ``probing`` (re-separating cuts that inheritance would otherwise
+    have suppressed), and once ``_LAZY_RESEP_PROBE_BUDGET`` is spent it goes
+    ``muted``. That is a three-state machine plus two counters and a reference
+    bound, and it was six loose locals: a reader had to reconstruct the machine
+    from assignments scattered across the loop.
+
+    ``resep_fires`` is the one field with a lifetime past the loop — it is
+    reported as ``pool/stall_reseparations`` when the result is built.
+    """
+
+    #: Global lower bound at the last genuine improvement, or ``None`` before the
+    #: first finite bound is seen.
+    glb_ref: float | None = None
+    #: Whether an in-tree bound improvement has armed stall detection at all.
+    armed: bool = False
+    #: Node-solves since the last bound improvement, against the stall window.
+    stagnant_solves: int = 0
+    #: Node-solves spent probing, against the probe budget.
+    probe_spent: int = 0
+    #: ``"idle"`` | ``"probing"`` | ``"muted"`` — the machine's current state.
+    mode: str = "idle"
+    #: Node-solves during which probing actually fired; reported on the result.
+    resep_fires: int = 0
+
+
+@dataclass(slots=True)
+class PerNodeOBBTBudget:
+    """Engagement gate and effort budget for per-node OBBT (Lever A).
+
+    ``enabled``/``budget_total``/``topk`` are decided once in the ``root`` region
+    and never rebound; ``spent`` accumulates inside the loop and is reported in
+    ``results`` as the ``obbt`` reduction timer. The constant three are grouped
+    with the accumulator deliberately: the loop reads all four at the single gate
+    that decides whether a node gets OBBT
+    (``enabled and spent < budget_total``), and a carve that passed only the
+    mutable one would split that gate across two argument sources — exactly the
+    kind of split that makes a boundary hard to review.
+    """
+
+    #: Whether per-node OBBT is engaged for this solve at all.
+    enabled: bool = False
+    #: Wall-clock budget for the whole solve's per-node OBBT.
+    budget_total: float = 0.0
+    #: Candidate cap per pass, or ``None`` for "no cap".
+    topk: int | None = None
+    #: Budget already consumed; compared against ``budget_total`` at the gate.
+    spent: float = 0.0

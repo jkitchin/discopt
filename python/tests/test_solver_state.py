@@ -27,30 +27,61 @@ from pathlib import Path
 
 import discopt.solver as S
 import pytest
-from discopt.solver.state import PhaseTimers, PrimalHeuristicState
+from discopt.solver.state import (
+    LazyStallSeparationState,
+    PerNodeOBBTBudget,
+    PhaseTimers,
+    PrimalHeuristicState,
+)
 
 pytestmark = pytest.mark.smoke
 
 SOLVER_SOURCE = Path(S.__file__)
 
-#: Every local that has been migrated onto a state object, mapped to the holder
-#: it now lives on. Extend this table when a further group is threaded; the tests
-#: below then enforce the new entries automatically.
-MIGRATED: dict[str, str] = {
-    "rust_time": "_timers",
-    "jax_time": "_timers",
-    "t_rust_start": "_timers",
-    "t_jax_start": "_timers",
-    "_subnlp_backend_fn": "_heur",
-    "_subnlp_calls": "_heur",
-    "_subnlp_feasible": "_heur",
-    "_subnlp_incumbent_updates": "_heur",
-    "_lns_lb_calls": "_heur",
-    "_lns_dive_calls": "_heur",
-    "_lns_swap_misses": "_heur",
+#: Every local that has been migrated off ``solve_model``'s closure, mapped to
+#: ``(holder local, field name)``. This is the authoritative mapping, not a
+#: convention: the tests below enforce it in **both** directions, so a field with
+#: no entry here and an entry here with no field both fail. A naming convention
+#: would not — a convention is exactly the thing a later edit stops honouring
+#: silently. Extend the table when a further group is threaded.
+MIGRATED: dict[str, tuple[str, str]] = {
+    # PhaseTimers — the Rust/JAX wall-clock split
+    "rust_time": ("_timers", "rust_time"),
+    "jax_time": ("_timers", "jax_time"),
+    "t_rust_start": ("_timers", "t_rust_start"),
+    "t_jax_start": ("_timers", "t_jax_start"),
+    # PrimalHeuristicState — sub-NLP and LNS budgets (two subjects, so the
+    # distinguishing prefix stays on the field names)
+    "_subnlp_backend_fn": ("_heur", "subnlp_backend_fn"),
+    "_subnlp_calls": ("_heur", "subnlp_calls"),
+    "_subnlp_feasible": ("_heur", "subnlp_feasible"),
+    "_subnlp_incumbent_updates": ("_heur", "subnlp_incumbent_updates"),
+    "_lns_lb_calls": ("_heur", "lns_lb_calls"),
+    "_lns_dive_calls": ("_heur", "lns_dive_calls"),
+    "_lns_swap_misses": ("_heur", "lns_swap_misses"),
+    # LazyStallSeparationState — the C-42 re-separation state machine
+    "_lazy_glb_ref": ("_lazy", "glb_ref"),
+    "_lazy_armed": ("_lazy", "armed"),
+    "_lazy_stagnant_solves": ("_lazy", "stagnant_solves"),
+    "_lazy_probe_spent": ("_lazy", "probe_spent"),
+    "_lazy_mode": ("_lazy", "mode"),
+    "_lazy_resep_fires": ("_lazy", "resep_fires"),
+    # PerNodeOBBTBudget — the Lever A engagement gate and effort budget
+    "_per_node_obbt_enabled": ("_pn_obbt", "enabled"),
+    "_pn_obbt_budget_total": ("_pn_obbt", "budget_total"),
+    "_pn_obbt_topk": ("_pn_obbt", "topk"),
+    "_pn_obbt_spent": ("_pn_obbt", "spent"),
 }
 
-STATE_CLASSES = (PhaseTimers, PrimalHeuristicState)
+#: Holder local -> the dataclass it holds.
+HOLDER_CLASS: dict[str, type] = {
+    "_timers": PhaseTimers,
+    "_heur": PrimalHeuristicState,
+    "_lazy": LazyStallSeparationState,
+    "_pn_obbt": PerNodeOBBTBudget,
+}
+
+STATE_CLASSES = tuple(HOLDER_CLASS.values())
 
 
 def _solve_model_ast() -> ast.FunctionDef:
@@ -92,11 +123,11 @@ def test_migrated_locals_are_no_longer_bound_in_solve_model() -> None:
     """
     bound = _own_scope_bindings(_solve_model_ast())
     checked = 0
-    for local in MIGRATED:
+    for local, (holder, fieldname) in MIGRATED.items():
         checked += 1
         assert local not in bound, (
             f"{local!r} is bound as a bare local in solve_model again; it was "
-            f"migrated onto {MIGRATED[local]!r} by consolidation-plan item 11"
+            f"migrated onto {holder}.{fieldname} by consolidation-plan item 11"
         )
     assert checked == len(MIGRATED)
 
@@ -105,8 +136,8 @@ def test_solve_model_binds_every_state_holder() -> None:
     """Each holder must actually be constructed — an unbound holder is a NameError
     waiting on a rarely-taken branch, not a refactor."""
     bound = _own_scope_bindings(_solve_model_ast())
-    holders = sorted(set(MIGRATED.values()))
-    assert holders, "the migration table is empty"
+    holders = sorted({holder for holder, _ in MIGRATED.values()})
+    assert holders == sorted(HOLDER_CLASS), "the table and HOLDER_CLASS disagree"
     for holder in holders:
         assert holder in bound, f"solve_model never binds the state holder {holder!r}"
 
@@ -142,34 +173,29 @@ def test_every_state_field_is_documented() -> None:
                 f"{cls.__name__}.{f.name} is missing its `#:` field comment"
             )
             checked += 1
-    assert checked >= 11, f"only {checked} fields checked; the probe under-fired"
+    assert checked >= 21, f"only {checked} fields checked; the probe under-fired"
 
 
 def test_migration_table_matches_the_state_classes() -> None:
-    """The table above and the dataclasses must not drift apart.
+    """The table and the dataclasses must not drift apart, in either direction.
 
-    Every migrated local maps to a field named by stripping its leading
-    underscores — the deliberately mechanical rule from ``solver/state.py`` — so a
-    table entry with no matching field means the migration is half-applied.
+    A table entry with no matching field means the migration is half-applied; a
+    field no entry claims means a state object grew a member nobody migrated onto
+    it, which is how a state object quietly becomes a junk drawer.
     """
-    fields_by_holder = {
-        "_timers": {f.name for f in dataclasses.fields(PhaseTimers)},
-        "_heur": {f.name for f in dataclasses.fields(PrimalHeuristicState)},
-    }
-    assert set(fields_by_holder) == set(MIGRATED.values())
     checked = 0
-    for local, holder in MIGRATED.items():
-        expected = local.lstrip("_")
-        assert expected in fields_by_holder[holder], (
-            f"{local!r} should map to {holder}.{expected}, which does not exist"
-        )
+    for local, (holder, fieldname) in MIGRATED.items():
+        names = {f.name for f in dataclasses.fields(HOLDER_CLASS[holder])}
+        assert fieldname in names, f"{local!r} claims {holder}.{fieldname}, which does not exist"
         checked += 1
     assert checked == len(MIGRATED)
-    # every field is accounted for by the table, in both directions
-    covered = {local.lstrip("_") for local in MIGRATED}
-    for holder, names in fields_by_holder.items():
-        assert names <= covered, (
-            f"{holder} has fields no migration-table entry claims: {names - covered}"
+
+    for holder, cls in HOLDER_CLASS.items():
+        claimed = {f for h, f in MIGRATED.values() if h == holder}
+        actual = {f.name for f in dataclasses.fields(cls)}
+        assert actual == claimed, (
+            f"{cls.__name__} fields {actual - claimed} are claimed by no migration "
+            f"table entry (and {claimed - actual} are claimed but absent)"
         )
 
 
@@ -178,4 +204,4 @@ def test_executed_assertion_count_is_nonzero() -> None:
     fn = _solve_model_ast()
     bound = _own_scope_bindings(fn)
     assert len(bound) > 200, f"only {len(bound)} bindings found; the AST walk under-fired"
-    assert len(MIGRATED) >= 11
+    assert len(MIGRATED) >= 21

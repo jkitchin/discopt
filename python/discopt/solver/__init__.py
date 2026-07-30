@@ -64,7 +64,12 @@ from discopt.solver.native_kernel import (
     _native_spatial_kernel_enabled as _native_spatial_kernel_enabled,
 )
 from discopt.solver.native_kernel import _try_native_spatial_kernel as _try_native_spatial_kernel
-from discopt.solver.state import PhaseTimers, PrimalHeuristicState
+from discopt.solver.state import (
+    LazyStallSeparationState,
+    PerNodeOBBTBudget,
+    PhaseTimers,
+    PrimalHeuristicState,
+)
 from discopt.solver_tuning import current as _tuning
 from discopt.solver_tuning import reset_current as _reset_tuning
 from discopt.solver_tuning import set_current as _set_tuning
@@ -8018,8 +8023,13 @@ def solve_model(
     _pn_obbt_degated = (
         _pn_obbt_structural and n_vars > _PER_NODE_OBBT_MAX_VARS and _obbt_topk_enabled()
     )
-    _per_node_obbt_enabled = _pn_obbt_small or _pn_obbt_degated
-    _pn_obbt_topk = _PER_NODE_OBBT_TOPK if _pn_obbt_degated else None
+    # Consolidation-plan item 11: the engagement gate reads all four of these
+    # together (``enabled and spent < budget_total``, with ``topk`` as the pass
+    # cap), so they travel as one object rather than three constants and an
+    # accumulator threaded separately across the root -> loop boundary.
+    _pn_obbt = PerNodeOBBTBudget()
+    _pn_obbt.enabled = _pn_obbt_small or _pn_obbt_degated
+    _pn_obbt.topk = _PER_NODE_OBBT_TOPK if _pn_obbt_degated else None
     # Card 2a: the #208 aux cascade is OFF at the per-node site, EXPLICITLY and by
     # measurement. Two independent reasons, either of which is sufficient:
     #   * The #208 graduation measured a ROOT-ONLY cascade and said so ("it runs
@@ -8035,17 +8045,17 @@ def solve_model(
     # instances for one gain (st_e04 103 -> 97 nodes, confirmed by pinning this
     # site off in an interleaved A/B) and no other change on the certifying
     # population, against the quality regression recorded at the root site above.
-    _pn_obbt_spent = 0.0
-    _pn_obbt_budget_total = time_limit * _PER_NODE_OBBT_BUDGET_FRAC
-    if _per_node_obbt_enabled:
+    _pn_obbt.spent = 0.0
+    _pn_obbt.budget_total = time_limit * _PER_NODE_OBBT_BUDGET_FRAC
+    if _pn_obbt.enabled:
         from discopt._jax.obbt import obbt_tighten_root
 
         logger.debug(
             "per-node OBBT enabled (n_vars=%d, dependent=%d, budget=%.1fs, top_k=%s)",
             n_vars,
             len(_dependent_var_names),
-            _pn_obbt_budget_total,
-            _pn_obbt_topk,
+            _pn_obbt.budget_total,
+            _pn_obbt.topk,
         )
 
     # --- Per-node cheap reduced-cost DBBT (Phase 2, #764; flag default OFF) ---
@@ -8230,12 +8240,17 @@ def solve_model(
 
     # Lazy re-separation governor state (C-42 Part 2; see the module-level
     # ``_LAZY_RESEP_*`` constants). Touched only under active pool inheritance.
-    _lazy_glb_ref: Optional[float] = None
-    _lazy_armed = False
-    _lazy_stagnant_solves = 0
-    _lazy_probe_spent = 0
-    _lazy_mode = "idle"
-    _lazy_resep_fires = 0
+    # Consolidation-plan item 11: this is a three-state machine, and as six loose
+    # locals a reader had to reconstruct it from assignments scattered across the
+    # loop. The fields are still (re)initialised here so the migration stays a
+    # rename.
+    _lazy = LazyStallSeparationState()
+    _lazy.glb_ref = None
+    _lazy.armed = False
+    _lazy.stagnant_solves = 0
+    _lazy.probe_spent = 0
+    _lazy.mode = "idle"
+    _lazy.resep_fires = 0
 
     # Set when the interactive debugger's `quit` breaks the search loop: a
     # user-interrupted exit proves nothing, so the status decision below must
@@ -8306,10 +8321,10 @@ def solve_model(
             except Exception:  # pragma: no cover - defensive
                 _glb_now = -np.inf
             if np.isfinite(_glb_now) and (
-                _lazy_glb_ref is None
-                or _glb_now > _lazy_glb_ref + _LAZY_RESEP_GLB_EPS * max(1.0, abs(_lazy_glb_ref))
+                _lazy.glb_ref is None
+                or _glb_now > _lazy.glb_ref + _LAZY_RESEP_GLB_EPS * max(1.0, abs(_lazy.glb_ref))
             ):
-                if _lazy_glb_ref is not None:
+                if _lazy.glb_ref is not None:
                     # A genuine in-tree improvement (not the first finite
                     # reference) ARMS the governor: a stall is only a
                     # meaningful signal once the bound has demonstrably been
@@ -8319,25 +8334,25 @@ def solve_model(
                     # is measured bound-inert), where a probe only burns the
                     # most expensive separation wall in the corpus; the
                     # stride net remains the unconditional prober there.
-                    _lazy_armed = True
-                _lazy_glb_ref = _glb_now
-                _lazy_stagnant_solves = 0
-                _lazy_probe_spent = 0
-                if _lazy_mode != "probing":
-                    _lazy_mode = "idle"
+                    _lazy.armed = True
+                _lazy.glb_ref = _glb_now
+                _lazy.stagnant_solves = 0
+                _lazy.probe_spent = 0
+                if _lazy.mode != "probing":
+                    _lazy.mode = "idle"
             if (
-                _lazy_mode == "idle"
-                and _lazy_armed
-                and _lazy_stagnant_solves >= _LAZY_RESEP_STALL_WINDOW
+                _lazy.mode == "idle"
+                and _lazy.armed
+                and _lazy.stagnant_solves >= _LAZY_RESEP_STALL_WINDOW
             ):
-                _lazy_mode = "probing"
-            elif _lazy_mode == "probing" and _lazy_probe_spent >= _LAZY_RESEP_PROBE_BUDGET:
-                _lazy_mode = "muted"
-            _lazy_probing = _lazy_mode == "probing"
-            _lazy_stagnant_solves += n_batch
+                _lazy.mode = "probing"
+            elif _lazy.mode == "probing" and _lazy.probe_spent >= _LAZY_RESEP_PROBE_BUDGET:
+                _lazy.mode = "muted"
+            _lazy_probing = _lazy.mode == "probing"
+            _lazy.stagnant_solves += n_batch
             if _lazy_probing:
-                _lazy_probe_spent += n_batch
-                _lazy_resep_fires += n_batch
+                _lazy.probe_spent += n_batch
+                _lazy.resep_fires += n_batch
 
         # Interactive debugger: nodes selected — boxes/ids now available.
         if _debug.fire(
@@ -8486,7 +8501,7 @@ def solve_model(
         # the relaxation, which is what lets a node fathom once its independent
         # drivers are branched (welded-beam / nvs05). Gated + budgeted at setup;
         # here we additionally stop as soon as the cumulative budget is spent.
-        if _per_node_obbt_enabled and _pn_obbt_spent < _pn_obbt_budget_total:
+        if _pn_obbt.enabled and _pn_obbt.spent < _pn_obbt.budget_total:
             _pn_inc = tree.incumbent()
             _pn_cutoff = (
                 float(_pn_inc[1])
@@ -8509,7 +8524,7 @@ def solve_model(
                     break
                 if node_infeasible_mask[i]:
                     continue
-                if _pn_obbt_spent >= _pn_obbt_budget_total:
+                if _pn_obbt.spent >= _pn_obbt.budget_total:
                     break
                 _t_pn = time.perf_counter()
                 if time_limit - (_t_pn - t_start) < _DEADLINE_NODE_FLOOR_S:
@@ -8524,14 +8539,14 @@ def solve_model(
                         deadline=_t_pn + _PER_NODE_OBBT_PER_NODE_S,
                         time_limit_per_lp=_PER_NODE_OBBT_PER_LP_S,
                         prefer_pounce=nlp_solver == "pounce",
-                        top_k=_pn_obbt_topk,
+                        top_k=_pn_obbt.topk,
                         cascade_aux=False,  # Card 2a: see the per-node setup above
                     )
                 except Exception as _pn_exc:  # pragma: no cover - defensive
                     logger.debug("per-node OBBT failed: %s", _pn_exc)
                     _pn_res = None
                 finally:
-                    _pn_obbt_spent += time.perf_counter() - _t_pn
+                    _pn_obbt.spent += time.perf_counter() - _t_pn
                 if _pn_res is None:
                     continue
                 if _pn_res.infeasible:
@@ -11307,7 +11322,7 @@ def solve_model(
     # accumulated in ``_pn_obbt_spent``; FBBT in ``_reduce_timers``; the
     # separation families on the relaxer instance. Only non-zero families are
     # surfaced; an all-zero result reports None.
-    _reduce_timers["obbt"] = _pn_obbt_spent
+    _reduce_timers["obbt"] = _pn_obbt.spent
     _solver_stats: dict[str, float] = {
         f"reduce/{_rfam}": float(_rt) for _rfam, _rt in _reduce_timers.items() if _rt > 0.0
     }
@@ -11343,8 +11358,8 @@ def solve_model(
                 _solver_stats[f"pool/{_pfam}"] = float(_pcount)
     # C-42 Part 2: node solves the global-bound-stall governor re-separated
     # (driver-side; the relaxer's ``lazy_reseparations`` counts the stride net).
-    if _lazy_resep_fires > 0:
-        _solver_stats["pool/stall_reseparations"] = float(_lazy_resep_fires)
+    if _lazy.resep_fires > 0:
+        _solver_stats["pool/stall_reseparations"] = float(_lazy.resep_fires)
 
     return SolveResult(
         status=status,
