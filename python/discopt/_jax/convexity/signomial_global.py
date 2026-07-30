@@ -108,6 +108,7 @@ from discopt._jax.convexity.signomial import (
     is_signomial,
 )
 from discopt.modeling.core import Model, SolveResult, VarType
+from discopt.validation.fathom_audit import record_fathom
 
 # Absolute floor on a sub-box width (in log units) below which we stop splitting
 # a dimension — protects against infinite subdivision on a degenerate axis.
@@ -1332,7 +1333,21 @@ def solve_signomial_global(
     while heap:
         lb, _, alb, aub, ustar, pstate = heapq.heappop(heap)
         pshrank, pobbt_w, pinc = pstate
-        if gap_ok(lb):
+        _fathom = gap_ok(lb)
+        record_fathom(
+            "signomial_global",
+            "frontier",
+            node_bound=lb,
+            incumbent=incumbent,
+            fathomed=_fathom,
+            slack=(
+                gap_tolerance * max(1.0, abs(incumbent)) + gap_tolerance
+                if math.isfinite(incumbent)
+                else 0.0
+            ),
+            nodes=nodes,
+        )
+        if _fathom:
             # Heap is a min-heap: this is the smallest open bound and it already
             # closes the gap, so every remaining node does too. All become
             # fathomed leaves; the frontier min is this bound.

@@ -65,6 +65,7 @@ from typing import NamedTuple, Optional
 import numpy as np
 
 from discopt.modeling.core import Model, ObjectiveSense, VarType
+from discopt.validation.fathom_audit import record_fathom
 
 logger = logging.getLogger(__name__)
 
@@ -987,7 +988,18 @@ def solve_lp_spatial_bb(
             glb = min(glb, heap[0][0])
         for _p in plunge:
             glb = min(glb, _p[0])
-        if bound >= inc_val - 1e-9 * (1 + abs(inc_val)):
+        _slack = 1e-9 * (1 + abs(inc_val))
+        _fathom = bound >= inc_val - _slack
+        record_fathom(
+            "lp_spatial_bb",
+            "node_bound",
+            node_bound=bound,
+            incumbent=inc_val,
+            fathomed=_fathom,
+            slack=_slack,
+            nodes=nodes,
+        )
+        if _fathom:
             continue
         if inc_x is not None and abs(inc_val - glb) <= gap_tolerance * (1 + abs(inc_val)):
             status = "optimal"

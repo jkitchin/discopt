@@ -64,6 +64,7 @@ from discopt.modeling.core import (
     UnaryOp,
     VarType,
 )
+from discopt.validation.fathom_audit import record_fathom
 
 _TOL = 1e-12
 
@@ -1003,9 +1004,21 @@ def solve_gp_minlp(
         # tolerance of it, no live node can improve the incumbent enough to
         # matter → the whole frontier is fathomed. Push the node back first so
         # its bound still counts toward the reported global bound.
-        if best_obj is not None and priority >= best_internal - fathom_slack():
-            heapq.heappush(heap, (priority, tiebreak, xl, xu))
-            break
+        if best_obj is not None:
+            _slack = fathom_slack()
+            _fathom = priority >= best_internal - _slack
+            record_fathom(
+                "gp_minlp",
+                "frontier",
+                node_bound=priority,
+                incumbent=best_internal,
+                fathomed=_fathom,
+                slack=_slack,
+                node_count=node_count,
+            )
+            if _fathom:
+                heapq.heappush(heap, (priority, tiebreak, xl, xu))
+                break
 
         node_count += 1
         node_kwargs = dict(solve_kwargs)
@@ -1026,8 +1039,20 @@ def solve_gp_minlp(
             continue
 
         internal = to_internal(obj)
-        if best_obj is not None and internal >= best_internal - fathom_slack():
-            continue  # node cannot improve the incumbent beyond tolerance
+        if best_obj is not None:
+            _slack = fathom_slack()
+            _fathom = internal >= best_internal - _slack
+            record_fathom(
+                "gp_minlp",
+                "node_bound",
+                node_bound=internal,
+                incumbent=best_internal,
+                fathomed=_fathom,
+                slack=_slack,
+                node_count=node_count,
+            )
+            if _fathom:
+                continue  # node cannot improve the incumbent beyond tolerance
 
         frac_off = _most_fractional_offset(x_flat, integer_offsets, integrality_tol)
         if frac_off is None:
