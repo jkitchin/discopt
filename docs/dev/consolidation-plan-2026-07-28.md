@@ -642,15 +642,104 @@ Card 3b measured its result to be `max_iterations`-dependent.
 > declaration and (b) the only end-to-end datum pointing the wrong way. Per §0.3 the
 > entry experiment is what decides whether to build further, and it said stop.
 >
-> **What remains, stated so the next session does not re-derive it.** Root-cause the
-> `casctanks` `Infeasible` **before** any graduation attempt: is `ctx.bounds` an
-> invalid seed for `ctx.model` at that point (an orchestrator bookkeeping bug — the
-> serious reading), or is the composed box genuinely empty to within `FEAS_TOL` (an
-> FBBT interval-arithmetic/tolerance question on one instance)? The distinguishing
-> experiment is to run the seeded kernel from the *unseeded* orchestrator's own final
-> box, which the orchestrator has already certified. Only if that clears should the
-> §5 panel be spent. `casctanks` is also census rank #3 (`probe_real_shape_mismatch`),
-> so it is an instance this plan is going to keep meeting.
+> **What remains — UPDATED 2026-07-29, the blocker is gone.** The `casctanks`
+> `Infeasible` is root-caused and fixed; see **Card 3e-RC** above. It was neither
+> hypothesis: not an invalid seed (the distinguishing experiment cleared), and not a
+> genuinely empty box (the crossing was **1.1e-16**, against `FEAS_TOL` 1e-6). It was
+> the *emptiness test* — a zero-tolerance `is_empty()` in `orchestrator::any_empty`,
+> which also fired on `util` (6.8e-13) and, with **no flag set**, on `heatexch_gen3`
+> (8.5e-14). With that fixed, the seeded arm terminates `Infeasible` on **0 of 119**
+> instances and the containment invariant holds corpus-wide.
+>
+> So the soundness signal that stopped this card is **cleared**, and the only open
+> question is the one the card never got to: **net-positive**. The evidence still
+> points the wrong way and is unchanged by the fix — `util` spent 159 → **217 nodes**
+> for an identical bound and objective, i.e. the tightening reorders branching without
+> improving the relaxation, and `st_e03`/`hda` were byte-identical. That is why the
+> §5 differential panel is *now permissible* but still not obviously worth 3 hours:
+> the entry data predicts `net-positive: FAIL`. A session picking this up should
+> re-run `card3e_fbbt_seed_entry.py` (its containment assertion now passes) and then
+> decide whether to spend the panel on a mechanism whose only end-to-end datum is
+> negative. `casctanks` is also census rank #3 (`probe_real_shape_mismatch`), so it is
+> an instance this plan is going to keep meeting.
+
+### Card 3e-RC — the emptiness test, not the seed: a live false-fathom on the default path — **LANDED**
+
+> **Status:** LANDED 2026-07-29. Card 3e's soundness signal is root-caused, and the
+> root cause is **neither** of the two hypotheses the card named. It is a defect in
+> shipped code that has nothing to do with `DISCOPT_FBBT_SEED`, fires with **no flag
+> set**, and is acted on as a node fathom. Full transcript: the §6 entry of the same
+> date. Probe: `discopt_benchmarks/scripts/card3e_infeasible_root_cause.py`,
+> artifact `reports/card3e_infeasible_root_cause_ed2da7bd.json`.
+>
+> **Both hypotheses falsified.** (a) `ctx.bounds` is *not* an invalid seed: the
+> distinguishing experiment — the production FBBT kernel run from the **unseeded**
+> orchestrator's own certified final box, on its own final model — clears on 118 of
+> 119 instances, and the one exception is the same defect, not a seed problem. (b) The
+> composed box is *not* genuinely empty to within `FEAS_TOL`: measured corpus-wide,
+> **0 instances** have a bound crossing above `FEAS_TOL` (1e-6), while the crossings
+> that trigger the abort are **1.1e-16 to 8.5e-14** — seven to ten orders of magnitude
+> below tolerance.
+>
+> **The actual defect.** `orchestrator::any_empty` and `bnb::in_tree_presolve` tested
+> emptiness with `Interval::is_empty()` — strict `lo > hi`, **zero tolerance** — while
+> `fbbt.rs`, `fbbt_fp.rs` and `probing.rs` all gate on `is_empty_beyond(FEAS_TOL)`,
+> whose own doc-comment says the strict form "mistakes that numerical noise for
+> infeasibility". The two outliers were the two that **act** on the verdict: the
+> orchestrator aborts the whole presolve sweep, and the in-tree kernel sets
+> `infeasible`, which the B&B loop treats as a *rigorous fathom* and prunes the
+> node's entire subtree (`solver/__init__.py:8457` and `:12254`).
+>
+> **It fires on the default path.** `heatexch_gen3` terminates root presolve
+> `Infeasible` with **`DISCOPT_FBBT_SEED` unset**, on a crossing of **8.53e-14**
+> (`[226.7, 226.6999999999999]`), and the in-tree kernel declares that instance's own
+> certified root box empty by the same amount. `casctanks` (1.1e-16) and `util`
+> (6.8e-13) do it under the flag. Every abort the strict test produced corpus-wide was
+> spurious.
+>
+> **`util` was invisible to Card 3e's own probe** — it terminated `Infeasible` at
+> iteration 7 and the containment-only check still scored it as a *net tightening*
+> (+76 bounds), so the entry experiment reported 1 affected instance where there were
+> 3. This is why the root cause was chased on the corpus rather than on `casctanks`.
+>
+> **The fix, and why it is not a weakened validation (§0.4).** Two paired changes at
+> both sites: declare infeasibility only via `any_empty_beyond(bounds, FEAS_TOL)`, and
+> repair sub-tolerance crossings with `repair_subtol_crossings` to
+> `[min(lo,hi), max(lo,hi)]` — the smallest interval containing both endpoints, so
+> whichever derivation was sound keeps its endpoint and no feasible point is cut. The
+> repair is the necessary second half: declining to *declare* emptiness is not enough
+> if an inverted interval is still handed to an LP column bound. Loosening a fathom is
+> the **sound** direction (the node is explored, not discarded); the unsound direction
+> would be to prune more. Both new counters (`subtol_crossings_repaired`,
+> `subtol_repaired`) are surfaced through PyO3 so a rising count is visible rather
+> than silently absorbed.
+>
+> **Guard against over-permissiveness.** Two of the four new Rust tests assert that a
+> crossing *beyond* `FEAS_TOL` still terminates `Infeasible` / still fathoms. Without
+> them the fix would be exactly the tolerance-tweak §0.4 forbids.
+>
+> **A third site, found by the new test rather than by the corpus.** The probing
+> branch of `in_tree_presolve` gates its own infeasibility call on `opts.tol`, so it
+> can leave `new_lb > new_ub` by up to `opts.tol` *without* setting `infeasible` — the
+> same inverted-box hole on the `DISCOPT_NODE_PROBING` (default-OFF) branch. Closed
+> with a repair on the box that actually exits the function, plus
+> `probing_branch_cannot_return_an_inverted_box`. With probing OFF the exit repair is
+> provably a no-op — FBBT runs on the patched model whose declared box *is* the node
+> box, so its result is contained in it, and `max(node_lo, iv.lo) <= min(node_hi,
+> iv.hi)` holds whenever both are non-inverted, which the two earlier repairs
+> guarantee. That is why the Regime N panel below, which started before this hunk
+> landed, still measures the shipped default path.
+>
+> **Verified.** The corpus probe re-run on the fixed tree, identical population (119
+> of 119, 22,116 executed bound comparisons): OFF `Infeasible` **1 → 0**, ON
+> `Infeasible` **2 → 0**, instances with a noise crossing reaching the caller
+> **3 → 0**, instances with a genuine crossing **0 → 0** (the guard did not become
+> permissive), E1 **1 → 0**. `cargo test -p discopt-core` **548 passed** (+6).
+>
+> **Card 3e itself is unchanged by this: `DISCOPT_FBBT_SEED` stays default-OFF.** The
+> containment violation that stopped it was a symptom of *this* defect, so removing it
+> makes the flag's net-positive question answerable — but not answered. See the Card
+> 3e note below for what remains.
 
 ### Card 3d — Adopt the Rust presolve's model rewrites (filed by Card 2c.2) — **DEFERRED-BY-OWNER, re-sequenced next to Phase 5**
 
@@ -877,12 +966,12 @@ tree manager. If Phase 5 retires `lp_spatial_bb`'s class first, skip its port.
 >
 > | # | decline code | inst | wall (s) | % | notes |
 > |---|---|---|---|---|---|
-> | 1 | `term_trilinear` | 17 | 437.6 | 22.7 % | nvs*/bchoco*/st_e3*/ex1252* — needs a trilinear `EnvTerm` in Rust |
+> | 1 | `term_trilinear` | 17 | 437.6 | 22.7 % | ~~needs a trilinear `EnvTerm` in Rust~~ **FALSIFIED 2026-07-29 (Card 5.2-T):** the base envelope is already a nested McCormick *bilinear* chain the kernel expresses; and only **7 of 17** would reach row-claiming, so the recoverable wall is **118.5 s / 6.2 %** |
 > | 2 | `infinite_aux_bounds` | 9 | 379.6 | 19.7 % | 4stufen, beuster, carton7, contvar, ex14_1_9, gear4, hda, heatexch_gen1/2 |
 > | 3 | `probe_real_shape_mismatch` | 3 | 158.9 | 8.2 % | casctanks, st_e04, st_e35 |
 > | 4 | `probe_objective_bound_invalid` | 4 | 155.3 | 8.1 % | the whole `tspn*` family — the G-F `no_bound` class |
 > | 5 | `fixed_row_box_dependent:coeffs` | 9 | 109.7 | 5.7 % | an unmodelled box-dependent envelope family; the guard is working, the coverage is missing |
-> | 6 | `blf_row_count` (5 or 6) | 7 | 45.0 | 2.3 % | #861 over-claiming; the Python incremental engine already solves this **numerically** (`incremental_mccormick._select`) and the producer only declines |
+> | 6 | `blf_row_count` (5 or 6) | 7 | 45.0 | 2.3 % | #861 over-claiming. ~~the Python incremental engine already solves this numerically (`incremental_mccormick._select`)~~ **FALSIFIED 2026-07-29:** `_select` covers bilinear/monomial/affine_square only and never sees `bilinear_linform_specs` — a build, not a port |
 > | 7 | `term_ratio` | 3 | 9.6 | 0.5 % | gear, gear2, gear3 |
 > | 8 | `term_univariate:{log,exp,cos,sin}` | 6 | 11.4 | 0.6 % | one atom each |
 >
@@ -946,17 +1035,95 @@ tree manager. If Phase 5 retires `lp_spatial_bb`'s class first, skip its port.
 > convex family plus `watercontamination0202`, on a machine with the snapshot, with
 > `clay0303hfsg` resolving stably.
 >
-> ### What 5.2 should take next
+> ### What 5.2 should take next — **REWRITTEN 2026-07-29; both prior claims measured false**
 >
-> Not `term_trilinear` first despite its rank: it is a new Rust envelope family
-> (patcher + differential fixtures + parity extension). The cheap, general,
-> already-solved-elsewhere row is **#6, `blf_row_count`** — the producer declines
-> models whose lifted model constraints share a term's support, while
-> `IncrementalMcCormickLP._select` identifies exactly the same envelope rows
-> *numerically* on the probe box and has done since #861. Porting that matcher is
-> a Python change worth 7 instances, and it is the prerequisite shape for every
-> later family. `term_trilinear` is the right *second* card, and it is where the
-> wall is.
+> The two sentences this block used to contain were entry-experimented and **both
+> failed**. They are kept below, struck, because §0.3 says a falsification is recorded
+> where the claim lived, not only in §6.
+>
+> ~~"`IncrementalMcCormickLP._select` identifies exactly the same envelope rows…
+> porting that matcher is a Python change worth 7 instances."~~ **FALSIFIED.**
+> `_select` has exactly **3** call sites — `bilinear`, `monomial`, `affine_square`.
+> The class `blf_row_count` declines on is `rel.bilinear_linform_specs` (a product of
+> two *affine forms*), and `incremental_mccormick.py` **never references that field**;
+> it is consumed by `spatial_producer.py` alone. There is no matcher to port. Probe:
+> `discopt_benchmarks/scripts/phase52_blf_select_entry.py`, artifact
+> `reports/phase52_blf_select_entry_ed2da7bd.json`, 55 BLF terms examined across the 7
+> declining instances plus `tanksize` as a served control (19/19 terms at exactly 4
+> rows — the producer's predicate is right about the instance it serves).
+>
+> ~~"`term_trilinear` … needs a trilinear `EnvTerm` in Rust … it is where the wall
+> is."~~ **FALSIFIED on both halves** — see the Card 5.2-T scoping card below. The
+> base relaxation of a trilinear product is already a nested McCormick *bilinear*
+> chain the kernel can express, and the recoverable wall is **118.5 s / 6.2 %**, not
+> 437.6 s / 22.7 %.
+>
+> **What is actually true, and what the next session should do.** `blf_row_count` is
+> still the right *shape* of card, and the direction is viable — the measurement shows
+> the extra candidate rows are exactly what a matcher needs them to be, namely
+> box-**independent**: aux bound rows (`{w: ±1} <= 0` on `st_e40`, `syn05hfsg`) and
+> lifted model constraints (`600·x₀ − 50·x₁ − w <= −5000` on `st_e11`; `2x₀ + 2x₁ +
+> 4w <= 3` on `st_e09`). But it is a **build**, not a port, and it has a prerequisite
+> the old framing hid: a `_select`-style match needs the closed-form expected rows,
+> which for `w = A·B` are McCormick rows in the *form enclosures* `(aL, aH, bL, bH)`
+> — and `bilinear_linform_specs` does **not** record them. `_emit_mccormick` receives
+> them as `ba`/`bb` from `ctx.bounds(node)` (an `evaluate_interval` on the original
+> DAG, *not* a LinForm interval over column bounds, so they cannot be recomputed
+> faithfully from the spec). So the card is: (1) extend the spec tuple to carry the two
+> enclosures, (2) add a BLF expected-row generator mirroring `_emit_mccormick`'s four
+> rows, (3) match numerically and require exactly one hit per expected row — declining
+> on ambiguity, as `_select` does — leaving the unmatched rows as fixed rows rather
+> than claiming them. Regime C, 7 instances, `45.0 s / 2.3 %`.
+
+### Card 5.2-T — `term_trilinear` scoping (census rank #1) — **SCOPED, NOT STARTED**
+
+> **Status:** scoping only, per the owner's instruction not to implement. Two
+> load-bearing measurements, both cheap, both contradicting the census's framing of
+> this row.
+>
+> **1. It is not a new Rust envelope family.** `uniform_relax._fold_product` relaxes
+> `x_i·x_j·x_k` as a **nested chain of McCormick bilinear lifts** — `t = x_i·x_j` then
+> `w = t·x_k`, two `_emit_mccormick` calls, hence two `bilinear_linform_specs` entries.
+> `trilinear_map[(i,j,k)] = w` is registered *in addition*, purely so the separators
+> (trilinear RLT, Meyer-Floudas/Rikun hull, `multilinear_separation.py`) can attach
+> tighter cuts on top. So the producer's `if rel.trilinear_map: return
+> _decline("term_trilinear")` rejects the whole model on the mere **registration** of a
+> trilinear product, not on the presence of rows the kernel cannot regenerate — the
+> `BlfTerm` family it already implements covers the base envelope.
+>
+> Residual, and this is the real work: **4–13 rows per instance** touch the trilinear
+> aux column and are claimed by no BLF / monomial / affine-square term (measured:
+> `st_e03` 6, `ex1224` 4, `nvs01` 6, `mathopt3` 6, `nvs22` 8, `bchoco06` 13, `nvs09`
+> 0). Those are lifted model constraints (box-independent — they pass through as fixed
+> rows, fine) mixed with **trilinear RLT rows**, which are box-**dependent** and
+> `DISCOPT_TRILINEAR_RLT` defaults **ON**. Those must be excluded from the producer's
+> build the same way `skip_separable_floor` and `skip_convex_lift` already are —
+> options that exist in `_build` for precisely this reason. Dropping them loosens the
+> relaxation (valid, weaker); claiming them would be unsound.
+>
+> **2. The prize is 6.2 %, not 22.7 %.** The producer's decline ladder is ordered, and
+> `term_trilinear` is tested **before** `term_multilinear` / `term_ratio` /
+> `term_univariate` / `infinite_aux_bounds`, so it *masks* whatever else each model
+> would decline on. Re-running the ladder with the trilinear test removed, over all 17
+> instances: only **7 reach row-claiming** (`ex1252`, `ex1252a`, `nvs01`, `nvs06`,
+> `nvs21`, `st_e03`, `st_e38`). The other 10 decline immediately on a different missing
+> feature — **6** `infinite_aux_bounds` (`bchoco06/07/08`, `mathopt3`, `nvs05`,
+> `nvs22`), **3** `term_univariate` (`ex1224`/`st_e29` log, `st_e36` exp), **1**
+> `term_multilinear` (`nvs09`). Baseline wall of the reachable 7 is **118.5 s of
+> 1,926.0 s = 6.2 %** (and `ex1252`/`ex1252a` are 92.0 s of that 118.5 s, both sitting
+> at the 45 s budget ceiling). The census's 437.6 s / 22.7 % is correct as an
+> attribution of the *first* decline code — reproduced exactly — but it is an **upper
+> bound**, not recoverable wall.
+>
+> **Verdict, one sentence:** this is "wire up what exists" (a Python producer change:
+> drop the blanket `trilinear_map` decline, add a `skip_trilinear_rlt`-style build
+> option, let the nested `BlfTerm`s be claimed) rather than a new Rust envelope family
+> — **one to two sessions** including the Regime C panel and the Card 3c parity
+> extension, for **7 instances / 6.2 % of corpus wall**, which after this re-measure
+> makes it comparable to rather than dominant over rank #2 `infinite_aux_bounds` (9
+> instances, 19.7 %, and the blocker for 6 of the trilinear 17 as well) — so
+> `infinite_aux_bounds` is arguably the better next card, and this scoping does not
+> claim otherwise.
 
 The review's central finding: the 50–500× per-node interpreter cost is the dominant
 wall-clock gap, the machinery to fix it (native spatial kernel, `spatial_propagate`)
@@ -1686,6 +1853,13 @@ parametrization should be drawn from the served list, or its arm stays vacuous.
 | `never_reached` | 37 | 197.2 | 10.2 % | 2 |
 | `driver` | 1 | 2.3 | 0.1 % | 0 |
 
+**Read this ranking as an upper bound per row, not as recoverable wall.** The producer's
+decline ladder is ordered, so each code's wall includes instances that would decline on
+a *later* code the moment that one is served. Re-measured for rank #1 on 2026-07-29
+(Card 5.2-T): only **7 of 17** `term_trilinear` instances would reach row-claiming —
+**118.5 s / 6.2 %**, not 437.6 s / 22.7 %. No row below was re-measured; assume the
+same caveat applies to all of them.
+
 | # | producer decline code | inst | wall (s) | % |
 |---|---|---|---|---|
 | 1 | `term_trilinear` | 17 | 437.6 | 22.7 % |
@@ -2253,3 +2427,340 @@ afterwards. No verdict on this tree is wall-based — Regime N gates on node-cou
 certified-objective equality, the sweeps gate on verdict flips and bound counts — so
 contention can only move a row out of the comparable population, and it did not: the
 same 85 comparable rows and 255 comparisons as every prior run.
+
+### 2026-07-29 — Card 3e-RC: "`casctanks`'s seeded `Infeasible` is either an invalid seed (a) or a genuinely empty box (b)" — **BOTH FALSIFIED; it is the emptiness test, and it fires with no flag set**
+
+`discopt_benchmarks/scripts/card3e_infeasible_root_cause.py`, all **119** in-repo
+instances, both arms, one subprocess per instance, 11.25 s presolve budget (identical
+to the Card 3e entry probe, so the OFF arms are directly comparable). Artifact
+`reports/card3e_infeasible_root_cause_ed2da7bd.json`. **22,116 executed bound
+comparisons**, 119 of 119 comparable. **Artifact caveat:** the pre- and post-fix runs
+share a git SHA (the fix was uncommitted while measuring), so the `.json` holds the
+**post-fix** run only; the pre-fix transcript is preserved verbatim as
+`reports/card3e_rootcause_sweep.log` and the post-fix one as
+`reports/card3e_rootcause_sweep_postfix.log`, both committed alongside it. Marker asserted before any measurement: the
+**compiled** `PyModelRepr.presolve` must accept `fbbt_seed_from_ctx` — not the Python
+signature, which is what the original Card 3e probe checked. That distinction was not
+academic: this session's container came up with a `.so` from 07:44 against sources
+restored at 23:13, and a signature-only marker passes on that stale binary.
+
+**Pre-fix verdict.**
+
+```
+## VERDICT
+  EXECUTED BOUND COMPARISONS : 22116
+  comparable instances       : 119 of 119
+  wall 204.2s   load 0.35 -> 1.24
+  OFF terminated Infeasible  : 1  ['heatexch_gen3']
+  ON  terminated Infeasible  : 2  ['casctanks', 'util']
+  --- crossing census, split at FEAS_TOL ---
+  OFF instances w/ NOISE crossings (0 < lo-hi <= 1e-6) : 1
+      heatexch_gen3            n=3 worst=8.526513e-14 var4 [226.7, 226.6999999999999]
+  OFF instances w/ GENUINE crossings (lo-hi > 1e-6)    : 0
+  ON  instances w/ NOISE crossings                     : 2
+      casctanks                n=1 worst=1.110223e-16 var179 [0.75, 0.7499999999999999] last_pass=implied_bounds@it1
+      util                     n=2 worst=6.821210e-13 var103 [1726.551859626083, 1726.5518596260822] last_pass=implied_bounds@it6
+  ON  instances w/ GENUINE crossings                   : 0
+  --- E1: FBBT kernel from the UNSEEDED arm's own certified final box ---
+  E1 declared the certified box EMPTY on : 1 instance(s)
+      heatexch_gen3            worst_cross=8.526513e-14 noise=3 genuine=0
+  E1 declared the DECLARED box empty on  : 0 instance(s) (control)
+```
+
+**Hypothesis (a) — `ctx.bounds` is an invalid seed for `ctx.model` — FALSIFIED.** E1
+is the distinguishing experiment the Card 3e block specified: the production FBBT
+kernel (`in_tree_presolve`, which takes an explicit `(node_lb, node_ub)` box and
+patches the model with it, so it *is* "the kernel from a supplied box") run from the
+**unseeded** orchestrator's own final box on its own final model. It clears on 118 of
+119. There is no indexing or renumbering fault: `casctanks` has 490 scalar blocks, one
+per column, and the E1 control from the declared box also clears on all 119.
+
+**Hypothesis (b) — the composed box is genuinely empty to within `FEAS_TOL` —
+FALSIFIED.** **0 instances** have a crossing above `FEAS_TOL` (1e-6), in either arm.
+The three that abort cross by **1.1e-16, 6.8e-13 and 8.5e-14** — the last ulp.
+
+**What it actually is.** The *emptiness test*. `orchestrator::any_empty` used
+`bounds.iter().any(|b| b.is_empty())` (strict `lo > hi`, zero tolerance) and
+`bnb::in_tree_presolve` used the same, while `fbbt.rs` (3 sites), `fbbt_fp.rs` (2, one
+carrying the comment "gate this one on FEAS_TOL to avoid a false 'infeasible'") and
+`probing.rs` all gate on `is_empty_beyond(FEAS_TOL)`. The two zero-tolerance outliers
+were precisely the two whose verdict is *acted on*: the orchestrator aborts the sweep,
+and `in_tree_presolve` sets `infeasible`, which the B&B loop treats as a **rigorous
+fathom** and prunes the subtree (`solver/__init__.py:8457`, `:12254`;
+`tightening.py:218`). Mechanism on `casctanks`, traced pass by pass: at iteration 0 the
+seeded FBBT derived `ub = 0.7499999999999999` for var 179 where the unseeded arm
+derived `0.75`; at iteration 1 `implied_bounds` — a different kernel, different
+arithmetic, same quantity — derived `lb = 0.75`; `lo > hi` by one ulp; abort.
+
+**This is a live defect on the default path, and that is the finding that outranks the
+flag.** `heatexch_gen3` aborts root presolve with `DISCOPT_FBBT_SEED` **unset**, and
+the in-tree kernel calls that instance's own certified root box empty by 8.5e-14. The
+root-presolve consequence is contained today (the solver ignores `terminated_by`, and
+`propagate_bounds_to_model` reads the repr's declared bounds rather than `ctx.bounds`),
+but the in-tree consequence is not contained: it is a false fathom, i.e. a false bound.
+
+**`util` was below Card 3e's own reporting threshold.** It terminates `Infeasible` at
+iteration 7, and the entry probe's containment-only check still scored it a net
+tightening (+76 bounds), so the original measurement reported 1 affected instance where
+there are 3. Recorded per §6/§11: the earlier statement "the containment violation
+fails on `casctanks`" was true but incomplete, and "1 instance loosened" is retracted
+in favour of **3 instances abort, 1 of them with no flag set**.
+
+**Fix and its guard.** `repair_subtol_crossings(bounds, FEAS_TOL)` +
+`any_empty_beyond(bounds, FEAS_TOL)` in `fbbt.rs`, applied at both sites; the repair
+snaps a sub-tolerance crossing to `[min(lo,hi), max(lo,hi)]`, the smallest interval
+containing both endpoints, so no feasible point either derivation admitted is cut and
+no inverted interval reaches an LP column bound. In `in_tree_presolve` the *incoming*
+node box is sanitized before anything reads it — the first version repaired only the
+FBBT output and still returned an inverted box, because `new_lb`/`new_ub` start as
+copies of the input and the flooring loop only tightens; the new test caught that.
+Four Rust tests, two of which are the anti-permissiveness guard (§0.4): a crossing
+beyond `FEAS_TOL` must still abort / still fathom. Verified fail-before-pass-after by
+reverting the behaviour with the tests in place —
+`subtol_crossing_is_repaired_not_declared_infeasible` fails with "a
+1.1102230246251565e-16 crossing is rounding noise, not an infeasibility" on the old
+code and passes on the new; `crossing_beyond_feas_tol_is_still_infeasible` passes both
+ways, which is what makes it a control rather than a ratchet.
+
+**Post-fix, same probe, same population.**
+
+```
+  EXECUTED BOUND COMPARISONS : 22116        comparable: 119 of 119
+  wall 224.5s   load 0.61 -> 1.12
+  OFF terminated Infeasible  : 0  []        (was 1: heatexch_gen3)
+  ON  terminated Infeasible  : 0  []        (was 2: casctanks, util)
+  OFF/ON instances w/ NOISE crossings   : 0 / 0   (was 1 / 2)
+  OFF/ON instances w/ GENUINE crossings : 0 / 0   (was 0 / 0 — guard unchanged)
+  E1 declared the certified box EMPTY on : 0     (was 1)
+```
+
+A note on the instrument, because it is the reason this was found: the probe reports
+the **magnitude** of every crossing split at `FEAS_TOL`, not a boolean. A probe that
+only reported "empty / not empty" would have reproduced Card 3e's dead end exactly.
+
+### 2026-07-29 — Phase 5.2: "`IncrementalMcCormickLP._select` already solves `blf_row_count`; porting it is a Python change worth 7 instances" — **FALSIFIED; no matcher exists to port**
+
+`discopt_benchmarks/scripts/phase52_blf_select_entry.py`, artifact
+`reports/phase52_blf_select_entry_ed2da7bd.json`. **65 executed assertions**, **55 BLF
+terms** examined across the 7 `blf_row_count` instances (`st_e01`, `st_e05`, `st_e08`,
+`st_e09`, `st_e11`, `st_e40`, `syn05hfsg`) plus `tanksize` as a served control.
+
+```
+  `_select` call sites            : 3
+  `_select` classes               : ['affine_square', 'bilinear', 'monomial']
+  BLF class covered by `_select`  : False
+  spec records form bounds ba/bb  : False
+  BLF terms examined              : 55
+  BLF terms claiming != 4 rows    : 11
+  CLAIM FALSIFIED
+```
+
+The claim is wrong on the **identity of the class**. `_select` has three call sites —
+`bilin_rows`, `mono_rows`, `affsq_rows`. `blf_row_count` declines on
+`rel.bilinear_linform_specs`, the product of two *affine forms*, and
+`incremental_mccormick.py` never references that field: it is consumed by
+`spatial_producer.py` alone. `_select` solves the analogous problem for three *other*
+families; there is nothing to port. Per §0.3 the card stops here rather than starting
+an envelope build on a false premise.
+
+**Retracted predicate in this probe (CLAUDE.md §11).** Its first version OR-ed a
+case-insensitive `"linform"` substring over the whole module into the verdict and
+printed **"CLAIM HOLDS"**. The module's single hit is the word `LinForm` inside a
+docstring about `_emit_1d` on an affine base — unrelated. The verdict was wrong, was
+retracted before being carried anywhere, and the predicate now rests solely on
+`"bilinear_linform_specs" in src`; the loose count is kept as a recorded field that no
+verdict reads. Recorded because a probe that confidently prints the opposite of what
+its own data says is the §6 failure mode, and this one did it to me.
+
+**What the measurement does establish, which is why the direction survives.** The
+control is clean — `tanksize`, the instance #764 validated the BLF path on, has
+**19/19** terms claiming exactly 4 rows, so the producer's `!= 4` predicate is right
+about what it serves. And the 11 declining terms' extra candidates are exactly what a
+matcher needs them to be, box-**independent**: aux bound rows (`{w: +1} <= 0` and
+`{w: -1} <= 0` on `st_e40`; `{42: 1.0} <= 0` on `syn05hfsg`) and lifted model
+constraints (`600·x₀ − 50·x₁ − w <= −5000` plus its negation on `st_e11`; `2x₀ + 2x₁ +
+4w <= 3` on `st_e09`). So the card is a **build**, not a port, with one prerequisite
+the old framing hid: the expected closed-form rows need the form enclosures
+`(aL, aH, bL, bH)`, `bilinear_linform_specs` does not record them, and they cannot be
+recomputed from the spec because `_emit_mccormick` takes them from `ctx.bounds(node)`
+(an `evaluate_interval` on the original DAG, not a LinForm interval over column
+bounds). Full card shape in the Phase 5 "What 5.2 should take next" block.
+
+### 2026-07-29 — Card 5.2-T scoping: "`term_trilinear` needs a trilinear `EnvTerm` in Rust, and it is where the wall is (17 instances, 22.7 %)" — **FALSIFIED on both halves**
+
+Scoping only (implementation explicitly out of scope this session). Two measurements.
+
+**(1) Not a new Rust envelope family.** `uniform_relax._fold_product` relaxes
+`x_i·x_j·x_k` as a **nested McCormick bilinear chain** — `t = x_i·x_j`, then `w = t·x_k`
+— two `_emit_mccormick` calls, hence two `bilinear_linform_specs` entries, a family the
+kernel's `BlfTerm` already implements. `trilinear_map` is registered *additionally*, so
+the separators (trilinear RLT, Meyer-Floudas/Rikun, `multilinear_separation.py`) can
+attach tighter cuts. The producer's `if rel.trilinear_map: return
+_decline("term_trilinear")` therefore rejects on the mere **registration**, not on
+inexpressible rows. Residual work, measured: 4–13 rows per instance touch the trilinear
+aux and are claimed by no BLF/monomial/affine-square term (`st_e03` 6, `ex1224` 4,
+`nvs01` 6, `mathopt3` 6, `nvs22` 8, `bchoco06` 13, `nvs09` 0) — lifted model
+constraints (box-independent, pass through) mixed with **trilinear RLT rows**, which
+are box-dependent and default ON (`DISCOPT_TRILINEAR_RLT`). Those need the treatment
+`skip_separable_floor` / `skip_convex_lift` already get in the producer's `_build`.
+`multilinear_separation.py` is **not** reachable from the kernel producer — it is a
+per-node Python separator requiring LP solves, and the kernel runs the node entirely in
+Rust; `DISCOPT_TRILINEAR` likewise selects among `relaxation_compiler.py` strategies,
+while the producer builds from `uniform_relax`.
+
+**(2) The prize is 6.2 %, not 22.7 %.** The producer's decline ladder is ordered and
+`term_trilinear` is tested **before** `infinite_aux_bounds` / `term_multilinear` /
+`term_ratio` / `term_univariate`, so it *masks* the other reasons. Re-running the ladder
+with the trilinear test removed, over all **17** instances (17 classified, executed
+count printed):
+
+| next decline reason | n | instances |
+|---|---|---|
+| **NONE — would reach row-claiming** | **7** | `ex1252`, `ex1252a`, `nvs01`, `nvs06`, `nvs21`, `st_e03`, `st_e38` |
+| `infinite_aux_bounds` (census rank #2) | 6 | `bchoco06/07/08`, `mathopt3`, `nvs05`, `nvs22` |
+| `term_univariate:log` / `:exp` (rank #8) | 3 | `ex1224`, `st_e29` / `st_e36` |
+| `term_multilinear` | 1 | `nvs09` |
+
+Baseline wall of the reachable 7 is **118.5 s of 1,926.0 s = 6.2 %**, of which
+`ex1252` + `ex1252a` are **92.0 s** (both at the 45 s ceiling, i.e. unsolved). The
+census's 437.6 s / 22.7 % **reproduced exactly** from
+`reports/panel_baseline_f154dcff.json`, so it is a correct attribution of the *first*
+decline code — but it is an upper bound, not recoverable wall. Every ranked row in the
+Phase 5.1 census carries this same caveat and none of them said so; that is the
+transferable lesson.
+
+**Verdict:** "wire up what exists" — a Python producer change (drop the blanket
+`trilinear_map` decline, add a `skip_trilinear_rlt`-style build option, let the nested
+`BlfTerm`s be claimed) — **one to two sessions** including the Regime C panel and the
+Card 3c parity extension, for 7 instances / 6.2 %. That makes it comparable to rather
+than dominant over rank #2 `infinite_aux_bounds` (9 instances, 19.7 %, and the blocker
+for 6 of these 17 as well), so `infinite_aux_bounds` is arguably the better next card.
+
+### 2026-07-29 — Card 3e re-measured on the fixed tree: the containment violation is gone, the net-positive question is not
+
+`card3e_fbbt_seed_entry.py` re-run unchanged on the Card 3e-RC tree, all **119**
+instances, **11,058 executed bound comparisons**, 119 of 119 comparable, wall 227.5 s.
+Artifact `reports/card3e_fbbt_seed_entry_ed2da7bd.json` (supersedes the `be705694`
+artifact for the containment question only; console transcript
+`reports/card3e_entry_postfix.log`).
+
+```
+  instances tightened by seed: 8
+      util +76   casctanks +8   hda +4   4stufen +2
+      beuster +2   st_e03 +2   st_e11 +1   st_e17 +1
+  TOTAL bounds tightened     : 96
+  budget-dependent rows (arms stopped differently): 5
+  SOUNDNESS: instances loosened : 0
+```
+
+**`SOUNDNESS: instances loosened : 0`** — was 1 (`casctanks`, 5 bounds). The
+containment invariant now holds corpus-wide, which is exactly what the Card 3e block
+said had to happen before the §5 panel could be spent. The probe no longer exits
+non-zero.
+
+**Two of the old numbers are retracted as artifacts of the defect (§11).** The totals
+moved 129 → **96** bounds on 9 → **8** instances, and both deltas are attributable
+rather than mysterious:
+
+- `heatexch_gen3 +28` **disappears entirely**. Pre-fix its *unseeded* arm aborted
+  `Infeasible` at an 8.5e-14 crossing, so the OFF box it was compared against was
+  artificially loose and the seeded arm "beat" it by 28 bounds. With OFF running its
+  full sweep the gain is zero. That +28 was never a tightening; it was the defect
+  measured from the other side.
+- `casctanks` moves +5 → **+8** and `hda` +12 → +4: both arms now run more sweeps, so
+  the fixpoints compared are different (and closer) fixpoints.
+
+**Graduation: still NO, and now for one reason instead of two.** The soundness blocker
+is gone; the net-positive question is untouched and its only end-to-end evidence still
+points the wrong way — `util` 159 → **217 nodes** at an identical bound and objective,
+`st_e03`/`hda` byte-identical. The §5 differential panel is therefore **permissible**
+for the first time, and was **not run this session**: it is a ~3 h spend (cf. the
+Phase 5.4 panel's 10,734 s) that the entry data predicts will return
+`net-positive: FAIL`, and it would have displaced the Regime N verification of the
+Card 3e-RC fix, which is the change that actually ships. Stated plainly so the next
+session does not re-derive it: **run the panel if you want the negative on record;
+nothing in the evidence suggests it will graduate.**
+
+### 2026-07-30 — Card 3e-RC close-out: what was run on the final tree
+
+Recorded per §0.6, and following the house rule Phase 3's close-out established: a
+partially-verified tree described as verified is the same defect as an instrument that
+measures nothing.
+
+**Regime N.** `panel_baseline.py --check reports/panel_baseline_f154dcff.json`, with
+the Rust `.so` rebuilt by `maturin build --release`.
+
+```
+instances       : 119
+statuses        : {'child_timeout': 1, 'feasible': 18, 'optimal': 88, 'time_limit': 12}
+comparable rows : 85/119 (certified terminal within 60% of budget — the Regime-N population)
+wall            : 1956.6s total; load start 0.78 peak 3.29
+
+comparisons executed: 255 (node_count 85, certified objective 85, status 85)
+                      over 85 comparable of 119 baseline row(s)
+PASS: no node-count or certified-objective drift.
+```
+
+**Identical population and comparison count to every prior run** (255 / 85 — Phase 5,
+the Card 3e close-out, and Card 4a all report the same). 20 non-comparable rows
+reported and not gating, all budget-dependent — the same character as Phase 5 (18),
+Phase 3 (19) and Card 4a (17).
+
+**The honest limit of that PASS, stated because it matters here more than usual.** All
+three instances this fix actually changes are **outside** the Regime-N comparable
+population, and were before the change: `heatexch_gen3` is `child_timeout`,
+`casctanks` and `util` are budget-dependent (`time_limit` / `feasible`). So the panel
+confirms the fix disturbed nothing on the 85 rows it can adjudicate — which is the
+question Regime N exists to answer — but it is **not** the evidence that the fix works.
+That evidence is the corpus probe (22,116 executed comparisons, 3 → 0 spurious aborts)
+and the six Rust tests, two of them anti-permissiveness controls.
+
+**Suites** (final tree, final `.so`).
+
+| suite | result |
+|---|---|
+| `pytest -m smoke python/tests` | **882 passed**, 16 skipped, 2 xpassed, 379.8 s |
+| `pytest -m smoke discopt_benchmarks/tests` | **51 passed**, 1 skipped, 22.7 s |
+| `pytest -m slow python/tests/test_adversarial_recent_fixes.py` | **10 passed**, 187.4 s |
+| `pytest python/tests/test_node_tightening_parity.py -m slow` | **12 passed**, 1 deselected, 68.5 s |
+| `pytest python/tests/test_incumbent_verifier_scale.py` | **15 passed**, 1 deselected |
+| `pytest python/tests/test_flag_registry.py` | **17 passed** |
+| `cargo test -p discopt-core` | **548 passed**, 0 failed (Rust was touched); +6 vs 542 |
+| `ruff check` / `ruff format --check` on every changed file | clean |
+| `cargo fmt` on the changed crates | clean (the pre-existing `delta.rs` deviation left untouched, as in the Card 3e close-out) |
+
+Smoke stayed at **882** — this change adds no Python tests, and the count matching the
+previous close-out exactly is the intended signal.
+
+The parity suite is the guard that Card 2b's measured Jacobian/nonlinear asymmetry has
+not regressed (it asserts a ceiling on the pooled Python-only-inference node rate plus
+non-vacuity counters, and that the native arm served > 0). It passes unchanged at 12,
+and nothing new is served this session, so no parity extension was required.
+
+**No new flag.** This is a soundness fix removing a false fathom; gating it default-OFF
+would ship the defect. Precedent: Phase 5.5's incumbent-verifier fix landed the same
+way. `_flag_registry.py` and `docs/reference/flags.md` are therefore untouched, and
+`test_flag_registry.py` passes unchanged.
+
+**heldout50 / MINLPLib snapshot: SKIPPED — local only.** Card 3e's §5 differential
+panel: **not run** — see the Card 3e re-measurement entry; its soundness blocker is now
+cleared, but the spend was judged against evidence predicting `net-positive: FAIL`.
+
+**Disclosed measurement condition (CLAUDE.md §9).** The Regime-N check ran concurrently
+with the benchmarks-smoke / flag-registry / parity / adversarial suites (load start
+0.78, peak 3.29); `python/tests` smoke and the final corpus probe ran afterwards
+(load 1.02 → 3.98). No verdict reported here is wall-based — Regime N gates on
+node-count and certified-objective equality, the corpus probe on abort counts and
+crossing magnitudes — so contention can only move a row out of the comparable
+population, and it did not: the same 85 comparable rows and 255 comparisons as every
+prior run.
+
+**One sequencing caveat, disclosed rather than smoothed over.** The probing-branch exit
+guard and the `repair_subtol_crossings_contract` unit test landed *after* the Regime-N
+panel started, so the panel measured the build without them. The unit test is
+test-only; the exit guard is provably a no-op under the panel's default settings
+(`DISCOPT_NODE_PROBING` is OFF, and with probing off the returned box is
+`max(node_lo, iv.lo)` / `min(node_hi, iv.hi)` where `iv ⊆ node box`, so it cannot
+invert). The corpus probe **was** re-run on the final build after the rebuild, with a
+marker assertion, and returned byte-identical counts (22,116 comparisons, 0 aborts in
+both arms).

@@ -1,0 +1,2398 @@
+{
+  "executed_bound_comparisons": 11058,
+  "total_tightened": 96,
+  "instances_helped": [
+    "4stufen",
+    "beuster",
+    "casctanks",
+    "hda",
+    "st_e03",
+    "st_e11",
+    "st_e17",
+    "util"
+  ],
+  "instances_loosened": [],
+  "wall": 227.5483158279999,
+  "rows": [
+    {
+      "instance": "4stufen",
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "marker_ok": true,
+      "off": {
+        "wall": 4.4419140970003355,
+        "iterations": 16,
+        "terminated_by": "IterationCap"
+      },
+      "on": {
+        "wall": 3.75334692899969,
+        "iterations": 16,
+        "terminated_by": "IterationCap"
+      },
+      "terminated_differs": false,
+      "comparable": true,
+      "n_bounds": 296,
+      "tightened": 2,
+      "loosened": 0
+    },
+    {
+      "instance": "alan",
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "marker_ok": true,
+      "off": {
+        "wall": 0.0024445009998999012,
+        "iterations": 16,
+        "terminated_by": "IterationCap"
+      },
+      "on": {
+        "wall": 0.0020564319997902203,
+        "iterations": 16,
+        "terminated_by": "IterationCap"
+      },
+      "terminated_differs": false,
+      "comparable": true,
+      "n_bounds": 16,
+      "tightened": 0,
+      "loosened": 0
+    },
+    {
+      "instance": "bchoco06",
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "marker_ok": true,
+      "off": {
+        "wall": 1.016241261000232,
+        "iterations": 16,
+        "terminated_by": "IterationCap"
+      },
+      "on": {
+        "wall": 0.9442713089997596,
+        "iterations": 16,
+        "terminated_by": "IterationCap"
+      },
+      "terminated_differs": false,
+      "comparable": true,
+      "n_bounds": 236,
+      "tightened": 0,
+      "loosened": 0
+    },
+    {
+      "instance": "bchoco07",
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "marker_ok": true,
+      "off": {
+        "wall": 1.6482466259999455,
+        "iterations": 16,
+        "terminated_by": "IterationCap"
+      },
+      "on": {
+        "wall": 1.5152124189999086,
+        "iterations": 16,
+        "terminated_by": "IterationCap"
+      },
+      "terminated_differs": false,
+      "comparable": true,
+      "n_bounds": 268,
+      "tightened": 0,
+      "loosened": 0
+    },
+    {
+      "instance": "bchoco08",
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "marker_ok": true,
+      "off": {
+        "wall": 4.071122454000033,
+        "iterations": 16,
+        "terminated_by": "IterationCap"
+      },
+      "on": {
+        "wall": 3.6285740350003834,
+        "iterations": 16,
+        "terminated_by": "IterationCap"
+      },
+      "terminated_differs": false,
+      "comparable": true,
+      "n_bounds": 336,
+      "tightened": 0,
+      "loosened": 0
+    },
+    {
+      "instance": "beuster",
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "marker_ok": true,
+      "off": {
+        "wall": 6.543029928999658,
+        "iterations": 16,
+        "terminated_by": "IterationCap"
+      },
+      "on": {
+        "wall": 4.9048303469999155,
+        "iterations": 16,
+        "terminated_by": "IterationCap"
+      },
+      "terminated_differs": false,
+      "comparable": true,
+      "n_bounds": 314,
+      "tightened": 2,
+      "loosened": 0
+    },
+    {
+      "instance": "carton7",
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "marker_ok": true,
+      "off": {
+        "wall": 11.251409949999925,
+        "iterations": 4,
+        "terminated_by": "TimeBudget"
+      },
+      "on": {
+        "wall": 11.250779039999998,
+        "iterations": 4,
+        "terminated_by": "TimeBudget"
+      },
+      "terminated_differs": false,
+      "comparable": true,
+      "n_bounds": 656,
+      "tightened": 0,
+      "loosened": 0
+    },
+    {
+      "instance": "casctanks",
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "marker_ok": true,
+      "off": {
+        "wall": 5.084302548999858,
+        "iterations": 16,
+        "terminated_by": "IterationCap"
+      },
+      "on": {
+        "wall": 2.6926793309999084,
+        "iterations": 16,
+        "terminated_by": "IterationCap"
+      },
+      "terminated_differs": false,
+      "comparable": true,
+      "n_bounds": 980,
+      "tightened": 8,
+      "loosened": 0
+    },
+    {
+      "instance": "chance",
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "marker_ok": true,
+      "off": {
+        "wall": 0.0002552050000304007,
+        "iterations": 2,
+        "terminated_by": "NoProgress"
+      },
+      "on": {
+        "wall": 0.00028277499995965627,
+        "iterations": 3,
+        "terminated_by": "NoProgress"
+      },
+      "terminated_differs": false,
+      "comparable": true,
+      "n_bounds": 8,
+      "tightened": 0,
+      "loosened": 0
+    },
+    {
+      "instance": "clay0303hfsg",
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "marker_ok": true,
+      "off": {
+        "wall": 2.082352236999668,
+        "iterations": 16,
+        "terminated_by": "IterationCap"
+      },
+      "on": {
+        "wall": 2.0702432260000023,
+        "iterations": 16,
+        "terminated_by": "IterationCap"
+      },
+      "terminated_differs": false,
+      "comparable": true,
+      "n_bounds": 198,
+      "tightened": 0,
+      "loosened": 0
+    },
+    {
+      "instance": "contvar",
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "marker_ok": true,
+      "off": {
+        "wall": 11.252747274000285,
+        "iterations": 5,
+        "terminated_by": "TimeBudget"
+      },
+      "on": {
+        "wall": 11.250634170000012,
+        "iterations": 5,
+        "terminated_by": "TimeBudget"
+      },
+      "terminated_differs": false,
+      "comparable": true,
+      "n_bounds": 592,
+      "tightened": 0,
+      "loosened": 0
+    },
+    {
+      "instance": "cvxnonsep_nsig30",
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "marker_ok": true,
+      "off": {
+        "wall": 0.0003250630002185062,
+        "iterations": 1,
+        "terminated_by": "NoProgress"
+      },
+      "on": {
+        "wall": 0.0003536580002219125,
+        "iterations": 1,
+        "terminated_by": "NoProgress"
+      },
+      "terminated_differs": false,
+      "comparable": true,
+      "n_bounds": 60,
+      "tightened": 0,
+      "loosened": 0
+    },
+    {
+      "instance": "cvxnonsep_psig30",
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "marker_ok": true,
+      "off": {
+        "wall": 0.00018215999989479315,
+        "iterations": 1,
+        "terminated_by": "NoProgress"
+      },
+      "on": {
+        "wall": 0.0001457849998587335,
+        "iterations": 1,
+        "terminated_by": "NoProgress"
+      },
+      "terminated_differs": false,
+      "comparable": true,
+      "n_bounds": 60,
+      "tightened": 0,
+      "loosened": 0
+    },
+    {
+      "instance": "cvxnonsep_psig40r",
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "marker_ok": true,
+      "off": {
+        "wall": 0.007128299999749288,
+        "iterations": 2,
+        "terminated_by": "NoProgress"
+      },
+      "on": {
+        "wall": 0.007200560000001133,
+        "iterations": 2,
+        "terminated_by": "NoProgress"
+      },
+      "terminated_differs": false,
+      "comparable": true,
+      "n_bounds": 164,
+      "tightened": 0,
+      "loosened": 0
+    },
+    {
+      "instance": "dispatch",
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "marker_ok": true,
+      "off": {
+        "wall": 0.0005185569998502615,
+        "iterations": 2,
+        "terminated_by": "NoProgress"
+      },
+      "on": {
+        "wall": 0.0021113019997756055,
+        "iterations": 10,
+        "terminated_by": "NoProgress"
+      },
+      "terminated_differs": false,
+      "comparable": true,
+      "n_bounds": 8,
+      "tightened": 0,
+      "loosened": 0
+    },
+    {
+      "instance": "ex1221",
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "marker_ok": true,
+      "off": {
+        "wall": 0.0027529799999683746,
+        "iterations": 16,
+        "terminated_by": "IterationCap"
+      },
+      "on": {
+        "wall": 0.0014071929999772692,
+        "iterations": 16,
+        "terminated_by": "IterationCap"
+      },
+      "terminated_differs": false,
+      "comparable": true,
+      "n_bounds": 10,
+      "tightened": 0,
+      "loosened": 0
+    },
+    {
+      "instance": "ex1222",
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "marker_ok": true,
+      "off": {
+        "wall": 0.0023151140003392356,
+        "iterations": 16,
+        "terminated_by": "IterationCap"
+      },
+      "on": {
+        "wall": 0.0008601569998063496,
+        "iterations": 16,
+        "terminated_by": "IterationCap"
+      },
+      "terminated_differs": false,
+      "comparable": true,
+      "n_bounds": 6,
+      "tightened": 0,
+      "loosened": 0
+    },
+    {
+      "instance": "ex1223a",
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "marker_ok": true,
+      "off": {
+        "wall": 0.002650020000146469,
+        "iterations": 16,
+        "terminated_by": "IterationCap"
+      },
+      "on": {
+        "wall": 0.0024173930000870314,
+        "iterations": 16,
+        "terminated_by": "IterationCap"
+      },
+      "terminated_differs": false,
+      "comparable": true,
+      "n_bounds": 14,
+      "tightened": 0,
+      "loosened": 0
+    },
+    {
+      "instance": "ex1224",
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "marker_ok": true,
+      "off": {
+        "wall": 0.005618350000077044,
+        "iterations": 16,
+        "terminated_by": "IterationCap"
+      },
+      "on": {
+        "wall": 0.0055304659999819705,
+        "iterations": 16,
+        "terminated_by": "IterationCap"
+      },
+      "terminated_differs": false,
+      "comparable": true,
+      "n_bounds": 22,
+      "tightened": 0,
+      "loosened": 0
+    },
+    {
+      "instance": "ex1225",
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "marker_ok": true,
+      "off": {
+        "wall": 0.0054258119998849,
+        "iterations": 16,
+        "terminated_by": "IterationCap"
+      },
+      "on": {
+        "wall": 0.004867537999871274,
+        "iterations": 16,
+        "terminated_by": "IterationCap"
+      },
+      "terminated_differs": false,
+      "comparable": true,
+      "n_bounds": 16,
+      "tightened": 0,
+      "loosened": 0
+    },
+    {
+      "instance": "ex1226",
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "marker_ok": true,
+      "off": {
+        "wall": 0.00292385100010506,
+        "iterations": 16,
+        "terminated_by": "IterationCap"
+      },
+      "on": {
+        "wall": 0.002443637999931525,
+        "iterations": 16,
+        "terminated_by": "IterationCap"
+      },
+      "terminated_differs": false,
+      "comparable": true,
+      "n_bounds": 10,
+      "tightened": 0,
+      "loosened": 0
+    },
+    {
+      "instance": "ex1233",
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "marker_ok": true,
+      "off": {
+        "wall": 0.306033768999896,
+        "iterations": 16,
+        "terminated_by": "IterationCap"
+      },
+      "on": {
+        "wall": 0.3086318859996027,
+        "iterations": 16,
+        "terminated_by": "IterationCap"
+      },
+      "terminated_differs": false,
+      "comparable": true,
+      "n_bounds": 104,
+      "tightened": 0,
+      "loosened": 0
+    },
+    {
+      "instance": "ex1252",
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "marker_ok": true,
+      "off": {
+        "wall": 0.22263607300010335,
+        "iterations": 16,
+        "terminated_by": "IterationCap"
+      },
+      "on": {
+        "wall": 0.1888523200000236,
+        "iterations": 16,
+        "terminated_by": "IterationCap"
+      },
+      "terminated_differs": false,
+      "comparable": true,
+      "n_bounds": 78,
+      "tightened": 0,
+      "loosened": 0
+    },
+    {
+      "instance": "ex1252a",
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "marker_ok": true,
+      "off": {
+        "wall": 0.00394899599996279,
+        "iterations": 2,
+        "terminated_by": "NoProgress"
+      },
+      "on": {
+        "wall": 0.006433904000004986,
+        "iterations": 9,
+        "terminated_by": "NoProgress"
+      },
+      "terminated_differs": false,
+      "comparable": true,
+      "n_bounds": 48,
+      "tightened": 0,
+      "loosened": 0
+    },
+    {
+      "instance": "ex1263",
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "marker_ok": true,
+      "off": {
+        "wall": 1.203287771000305,
+        "iterations": 16,
+        "terminated_by": "IterationCap"
+      },
+      "on": {
+        "wall": 1.1402508729997862,
+        "iterations": 16,
+        "terminated_by": "IterationCap"
+      },
+      "terminated_differs": false,
+      "comparable": true,
+      "n_bounds": 184,
+      "tightened": 0,
+      "loosened": 0
+    },
+    {
+      "instance": "ex1264",
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "marker_ok": true,
+      "off": {
+        "wall": 1.010869630000343,
+        "iterations": 16,
+        "terminated_by": "IterationCap"
+      },
+      "on": {
+        "wall": 1.023880303000169,
+        "iterations": 16,
+        "terminated_by": "IterationCap"
+      },
+      "terminated_differs": false,
+      "comparable": true,
+      "n_bounds": 176,
+      "tightened": 0,
+      "loosened": 0
+    },
+    {
+      "instance": "ex1265",
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "marker_ok": true,
+      "off": {
+        "wall": 2.9041627209999206,
+        "iterations": 16,
+        "terminated_by": "IterationCap"
+      },
+      "on": {
+        "wall": 2.9262859539999226,
+        "iterations": 16,
+        "terminated_by": "IterationCap"
+      },
+      "terminated_differs": false,
+      "comparable": true,
+      "n_bounds": 260,
+      "tightened": 0,
+      "loosened": 0
+    },
+    {
+      "instance": "ex1266",
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "marker_ok": true,
+      "off": {
+        "wall": 6.513781321999886,
+        "iterations": 16,
+        "terminated_by": "IterationCap"
+      },
+      "on": {
+        "wall": 6.5563045499998225,
+        "iterations": 16,
+        "terminated_by": "IterationCap"
+      },
+      "terminated_differs": false,
+      "comparable": true,
+      "n_bounds": 360,
+      "tightened": 0,
+      "loosened": 0
+    },
+    {
+      "instance": "ex14_1_9",
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "marker_ok": true,
+      "off": {
+        "wall": 0.00013303700006872532,
+        "iterations": 2,
+        "terminated_by": "NoProgress"
+      },
+      "on": {
+        "wall": 7.772900016789208e-05,
+        "iterations": 2,
+        "terminated_by": "NoProgress"
+      },
+      "terminated_differs": false,
+      "comparable": true,
+      "n_bounds": 4,
+      "tightened": 0,
+      "loosened": 0
+    },
+    {
+      "instance": "ex8_1_1",
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "marker_ok": true,
+      "off": {
+        "wall": 8.674699984112522e-05,
+        "iterations": 1,
+        "terminated_by": "NoProgress"
+      },
+      "on": {
+        "wall": 5.230200031292043e-05,
+        "iterations": 1,
+        "terminated_by": "NoProgress"
+      },
+      "terminated_differs": false,
+      "comparable": true,
+      "n_bounds": 4,
+      "tightened": 0,
+      "loosened": 0
+    },
+    {
+      "instance": "ex8_5_4",
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "marker_ok": true,
+      "off": {
+        "wall": 0.00018153400014853105,
+        "iterations": 1,
+        "terminated_by": "NoProgress"
+      },
+      "on": {
+        "wall": 0.00012423399994077045,
+        "iterations": 1,
+        "terminated_by": "NoProgress"
+      },
+      "terminated_differs": false,
+      "comparable": true,
+      "n_bounds": 10,
+      "tightened": 0,
+      "loosened": 0
+    },
+    {
+      "instance": "fac2",
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "marker_ok": true,
+      "off": {
+        "wall": 0.16170532600017395,
+        "iterations": 16,
+        "terminated_by": "IterationCap"
+      },
+      "on": {
+        "wall": 0.15419127099994512,
+        "iterations": 16,
+        "terminated_by": "IterationCap"
+      },
+      "terminated_differs": false,
+      "comparable": true,
+      "n_bounds": 132,
+      "tightened": 0,
+      "loosened": 0
+    },
+    {
+      "instance": "flay02m",
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "marker_ok": true,
+      "off": {
+        "wall": 0.005818508000174916,
+        "iterations": 16,
+        "terminated_by": "IterationCap"
+      },
+      "on": {
+        "wall": 0.006576689000212355,
+        "iterations": 16,
+        "terminated_by": "IterationCap"
+      },
+      "terminated_differs": false,
+      "comparable": true,
+      "n_bounds": 28,
+      "tightened": 0,
+      "loosened": 0
+    },
+    {
+      "instance": "flay03m",
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "marker_ok": true,
+      "off": {
+        "wall": 0.032928729000104795,
+        "iterations": 16,
+        "terminated_by": "IterationCap"
+      },
+      "on": {
+        "wall": 0.032581347999894206,
+        "iterations": 16,
+        "terminated_by": "IterationCap"
+      },
+      "terminated_differs": false,
+      "comparable": true,
+      "n_bounds": 52,
+      "tightened": 0,
+      "loosened": 0
+    },
+    {
+      "instance": "fuel",
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "marker_ok": true,
+      "off": {
+        "wall": 0.009626906999983476,
+        "iterations": 16,
+        "terminated_by": "IterationCap"
+      },
+      "on": {
+        "wall": 0.007449302000168245,
+        "iterations": 16,
+        "terminated_by": "IterationCap"
+      },
+      "terminated_differs": false,
+      "comparable": true,
+      "n_bounds": 30,
+      "tightened": 0,
+      "loosened": 0
+    },
+    {
+      "instance": "gbd",
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "marker_ok": true,
+      "off": {
+        "wall": 0.0012577040001815476,
+        "iterations": 16,
+        "terminated_by": "IterationCap"
+      },
+      "on": {
+        "wall": 0.0011352930000612105,
+        "iterations": 16,
+        "terminated_by": "IterationCap"
+      },
+      "terminated_differs": false,
+      "comparable": true,
+      "n_bounds": 8,
+      "tightened": 0,
+      "loosened": 0
+    },
+    {
+      "instance": "gear",
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "marker_ok": true,
+      "off": {
+        "wall": 0.00013325700001587393,
+        "iterations": 1,
+        "terminated_by": "NoProgress"
+      },
+      "on": {
+        "wall": 4.59070001852524e-05,
+        "iterations": 1,
+        "terminated_by": "NoProgress"
+      },
+      "terminated_differs": false,
+      "comparable": true,
+      "n_bounds": 8,
+      "tightened": 0,
+      "loosened": 0
+    },
+    {
+      "instance": "gear2",
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "marker_ok": true,
+      "off": {
+        "wall": 0.01315250300012849,
+        "iterations": 16,
+        "terminated_by": "IterationCap"
+      },
+      "on": {
+        "wall": 0.012826569000026211,
+        "iterations": 16,
+        "terminated_by": "IterationCap"
+      },
+      "terminated_differs": false,
+      "comparable": true,
+      "n_bounds": 56,
+      "tightened": 0,
+      "loosened": 0
+    },
+    {
+      "instance": "gear3",
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "marker_ok": true,
+      "off": {
+        "wall": 0.00016738299973440007,
+        "iterations": 1,
+        "terminated_by": "NoProgress"
+      },
+      "on": {
+        "wall": 8.028699994611088e-05,
+        "iterations": 1,
+        "terminated_by": "NoProgress"
+      },
+      "terminated_differs": false,
+      "comparable": true,
+      "n_bounds": 16,
+      "tightened": 0,
+      "loosened": 0
+    },
+    {
+      "instance": "gear4",
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "marker_ok": true,
+      "off": {
+        "wall": 0.0001114309998229146,
+        "iterations": 1,
+        "terminated_by": "NoProgress"
+      },
+      "on": {
+        "wall": 6.320700003925595e-05,
+        "iterations": 1,
+        "terminated_by": "NoProgress"
+      },
+      "terminated_differs": false,
+      "comparable": true,
+      "n_bounds": 12,
+      "tightened": 0,
+      "loosened": 0
+    },
+    {
+      "instance": "gkocis",
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "marker_ok": true,
+      "off": {
+        "wall": 0.0036937489999218087,
+        "iterations": 16,
+        "terminated_by": "IterationCap"
+      },
+      "on": {
+        "wall": 0.003562194000096497,
+        "iterations": 16,
+        "terminated_by": "IterationCap"
+      },
+      "terminated_differs": false,
+      "comparable": true,
+      "n_bounds": 22,
+      "tightened": 0,
+      "loosened": 0
+    },
+    {
+      "instance": "hda",
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "marker_ok": true,
+      "off": {
+        "wall": 11.251255691000097,
+        "iterations": 3,
+        "terminated_by": "TimeBudget"
+      },
+      "on": {
+        "wall": 11.25199555800009,
+        "iterations": 3,
+        "terminated_by": "TimeBudget"
+      },
+      "terminated_differs": false,
+      "comparable": true,
+      "n_bounds": 1438,
+      "tightened": 4,
+      "loosened": 0
+    },
+    {
+      "instance": "heatexch_gen1",
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "marker_ok": true,
+      "off": {
+        "wall": 0.8382857090000471,
+        "iterations": 16,
+        "terminated_by": "IterationCap"
+      },
+      "on": {
+        "wall": 0.8255866360000255,
+        "iterations": 16,
+        "terminated_by": "IterationCap"
+      },
+      "terminated_differs": false,
+      "comparable": true,
+      "n_bounds": 224,
+      "tightened": 0,
+      "loosened": 0
+    },
+    {
+      "instance": "heatexch_gen2",
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "marker_ok": true,
+      "off": {
+        "wall": 2.177459081000052,
+        "iterations": 16,
+        "terminated_by": "IterationCap"
+      },
+      "on": {
+        "wall": 2.1307502539998495,
+        "iterations": 16,
+        "terminated_by": "IterationCap"
+      },
+      "terminated_differs": false,
+      "comparable": true,
+      "n_bounds": 296,
+      "tightened": 0,
+      "loosened": 0
+    },
+    {
+      "instance": "heatexch_gen3",
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "marker_ok": true,
+      "off": {
+        "wall": 11.2516394700001,
+        "iterations": 2,
+        "terminated_by": "TimeBudget"
+      },
+      "on": {
+        "wall": 11.252105766000113,
+        "iterations": 2,
+        "terminated_by": "TimeBudget"
+      },
+      "terminated_differs": false,
+      "comparable": true,
+      "n_bounds": 1160,
+      "tightened": 0,
+      "loosened": 0
+    },
+    {
+      "instance": "kall_circles_c8a",
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "marker_ok": true,
+      "off": {
+        "wall": 0.03007990800006155,
+        "iterations": 16,
+        "terminated_by": "IterationCap"
+      },
+      "on": {
+        "wall": 0.023101164999843604,
+        "iterations": 16,
+        "terminated_by": "IterationCap"
+      },
+      "terminated_differs": false,
+      "comparable": true,
+      "n_bounds": 44,
+      "tightened": 0,
+      "loosened": 0
+    },
+    {
+      "instance": "m3",
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "marker_ok": true,
+      "off": {
+        "wall": 0.0035802659999717434,
+        "iterations": 2,
+        "terminated_by": "NoProgress"
+      },
+      "on": {
+        "wall": 0.003333278000354767,
+        "iterations": 2,
+        "terminated_by": "NoProgress"
+      },
+      "terminated_differs": false,
+      "comparable": true,
+      "n_bounds": 52,
+      "tightened": 0,
+      "loosened": 0
+    },
+    {
+      "instance": "mathopt3",
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "marker_ok": true,
+      "off": {
+        "wall": 0.00018745400029729353,
+        "iterations": 1,
+        "terminated_by": "NoProgress"
+      },
+      "on": {
+        "wall": 0.0001318989998253528,
+        "iterations": 1,
+        "terminated_by": "NoProgress"
+      },
+      "terminated_differs": false,
+      "comparable": true,
+      "n_bounds": 12,
+      "tightened": 0,
+      "loosened": 0
+    },
+    {
+      "instance": "mathopt5_2",
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "marker_ok": true,
+      "off": {
+        "wall": 7.480499971279642e-05,
+        "iterations": 1,
+        "terminated_by": "NoProgress"
+      },
+      "on": {
+        "wall": 3.9353999909508275e-05,
+        "iterations": 1,
+        "terminated_by": "NoProgress"
+      },
+      "terminated_differs": false,
+      "comparable": true,
+      "n_bounds": 2,
+      "tightened": 0,
+      "loosened": 0
+    },
+    {
+      "instance": "meanvar",
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "marker_ok": true,
+      "off": {
+        "wall": 0.00036661799958892516,
+        "iterations": 2,
+        "terminated_by": "NoProgress"
+      },
+      "on": {
+        "wall": 0.0006002999998599989,
+        "iterations": 5,
+        "terminated_by": "NoProgress"
+      },
+      "terminated_differs": false,
+      "comparable": true,
+      "n_bounds": 16,
+      "tightened": 0,
+      "loosened": 0
+    },
+    {
+      "instance": "meanvarx",
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "marker_ok": true,
+      "off": {
+        "wall": 0.1867859240001053,
+        "iterations": 16,
+        "terminated_by": "IterationCap"
+      },
+      "on": {
+        "wall": 0.18503928899963284,
+        "iterations": 16,
+        "terminated_by": "IterationCap"
+      },
+      "terminated_differs": false,
+      "comparable": true,
+      "n_bounds": 70,
+      "tightened": 0,
+      "loosened": 0
+    },
+    {
+      "instance": "nvs01",
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "marker_ok": true,
+      "off": {
+        "wall": 0.0005838489996676799,
+        "iterations": 16,
+        "terminated_by": "IterationCap"
+      },
+      "on": {
+        "wall": 0.0005136860004313348,
+        "iterations": 16,
+        "terminated_by": "IterationCap"
+      },
+      "terminated_differs": false,
+      "comparable": true,
+      "n_bounds": 6,
+      "tightened": 0,
+      "loosened": 0
+    },
+    {
+      "instance": "nvs02",
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "marker_ok": true,
+      "off": {
+        "wall": 0.0003088889998252853,
+        "iterations": 2,
+        "terminated_by": "NoProgress"
+      },
+      "on": {
+        "wall": 0.0002435600003991567,
+        "iterations": 2,
+        "terminated_by": "NoProgress"
+      },
+      "terminated_differs": false,
+      "comparable": true,
+      "n_bounds": 16,
+      "tightened": 0,
+      "loosened": 0
+    },
+    {
+      "instance": "nvs03",
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "marker_ok": true,
+      "off": {
+        "wall": 0.00018242299984194688,
+        "iterations": 2,
+        "terminated_by": "NoProgress"
+      },
+      "on": {
+        "wall": 7.883999978730571e-05,
+        "iterations": 2,
+        "terminated_by": "NoProgress"
+      },
+      "terminated_differs": false,
+      "comparable": true,
+      "n_bounds": 4,
+      "tightened": 0,
+      "loosened": 0
+    },
+    {
+      "instance": "nvs04",
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "marker_ok": true,
+      "off": {
+        "wall": 0.0001453270001547935,
+        "iterations": 1,
+        "terminated_by": "NoProgress"
+      },
+      "on": {
+        "wall": 4.62169996353623e-05,
+        "iterations": 1,
+        "terminated_by": "NoProgress"
+      },
+      "terminated_differs": false,
+      "comparable": true,
+      "n_bounds": 4,
+      "tightened": 0,
+      "loosened": 0
+    },
+    {
+      "instance": "nvs05",
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "marker_ok": true,
+      "off": {
+        "wall": 0.0034867260001192335,
+        "iterations": 16,
+        "terminated_by": "IterationCap"
+      },
+      "on": {
+        "wall": 0.0022285520003606507,
+        "iterations": 16,
+        "terminated_by": "IterationCap"
+      },
+      "terminated_differs": false,
+      "comparable": true,
+      "n_bounds": 16,
+      "tightened": 0,
+      "loosened": 0
+    },
+    {
+      "instance": "nvs06",
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "marker_ok": true,
+      "off": {
+        "wall": 9.155299994745292e-05,
+        "iterations": 1,
+        "terminated_by": "NoProgress"
+      },
+      "on": {
+        "wall": 4.6009000016056234e-05,
+        "iterations": 1,
+        "terminated_by": "NoProgress"
+      },
+      "terminated_differs": false,
+      "comparable": true,
+      "n_bounds": 4,
+      "tightened": 0,
+      "loosened": 0
+    },
+    {
+      "instance": "nvs07",
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "marker_ok": true,
+      "off": {
+        "wall": 0.0001955570000973239,
+        "iterations": 2,
+        "terminated_by": "NoProgress"
+      },
+      "on": {
+        "wall": 9.568000041326741e-05,
+        "iterations": 2,
+        "terminated_by": "NoProgress"
+      },
+      "terminated_differs": false,
+      "comparable": true,
+      "n_bounds": 6,
+      "tightened": 0,
+      "loosened": 0
+    },
+    {
+      "instance": "nvs08",
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "marker_ok": true,
+      "off": {
+        "wall": 0.00015242800009218627,
+        "iterations": 2,
+        "terminated_by": "NoProgress"
+      },
+      "on": {
+        "wall": 0.002183154999784165,
+        "iterations": 16,
+        "terminated_by": "IterationCap"
+      },
+      "terminated_differs": true,
+      "comparable": true,
+      "n_bounds": 6,
+      "tightened": 0,
+      "loosened": 0
+    },
+    {
+      "instance": "nvs09",
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "marker_ok": true,
+      "off": {
+        "wall": 0.00024875500002963236,
+        "iterations": 1,
+        "terminated_by": "NoProgress"
+      },
+      "on": {
+        "wall": 7.909899977676105e-05,
+        "iterations": 1,
+        "terminated_by": "NoProgress"
+      },
+      "terminated_differs": false,
+      "comparable": true,
+      "n_bounds": 20,
+      "tightened": 0,
+      "loosened": 0
+    },
+    {
+      "instance": "nvs10",
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "marker_ok": true,
+      "off": {
+        "wall": 0.00015233000021908083,
+        "iterations": 2,
+        "terminated_by": "NoProgress"
+      },
+      "on": {
+        "wall": 9.529899989502155e-05,
+        "iterations": 2,
+        "terminated_by": "NoProgress"
+      },
+      "terminated_differs": false,
+      "comparable": true,
+      "n_bounds": 4,
+      "tightened": 0,
+      "loosened": 0
+    },
+    {
+      "instance": "nvs11",
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "marker_ok": true,
+      "off": {
+        "wall": 0.00028123999982199166,
+        "iterations": 2,
+        "terminated_by": "NoProgress"
+      },
+      "on": {
+        "wall": 0.00018144299974665046,
+        "iterations": 2,
+        "terminated_by": "NoProgress"
+      },
+      "terminated_differs": false,
+      "comparable": true,
+      "n_bounds": 6,
+      "tightened": 0,
+      "loosened": 0
+    },
+    {
+      "instance": "nvs12",
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "marker_ok": true,
+      "off": {
+        "wall": 0.0005146509997757676,
+        "iterations": 2,
+        "terminated_by": "NoProgress"
+      },
+      "on": {
+        "wall": 0.0003775640002459113,
+        "iterations": 2,
+        "terminated_by": "NoProgress"
+      },
+      "terminated_differs": false,
+      "comparable": true,
+      "n_bounds": 8,
+      "tightened": 0,
+      "loosened": 0
+    },
+    {
+      "instance": "nvs13",
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "marker_ok": true,
+      "off": {
+        "wall": 0.0008017179998205393,
+        "iterations": 2,
+        "terminated_by": "NoProgress"
+      },
+      "on": {
+        "wall": 0.000528898999618832,
+        "iterations": 2,
+        "terminated_by": "NoProgress"
+      },
+      "terminated_differs": false,
+      "comparable": true,
+      "n_bounds": 10,
+      "tightened": 0,
+      "loosened": 0
+    },
+    {
+      "instance": "nvs14",
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "marker_ok": true,
+      "off": {
+        "wall": 0.00035144699995726114,
+        "iterations": 2,
+        "terminated_by": "NoProgress"
+      },
+      "on": {
+        "wall": 0.0002386109999861219,
+        "iterations": 2,
+        "terminated_by": "NoProgress"
+      },
+      "terminated_differs": false,
+      "comparable": true,
+      "n_bounds": 16,
+      "tightened": 0,
+      "loosened": 0
+    },
+    {
+      "instance": "nvs15",
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "marker_ok": true,
+      "off": {
+        "wall": 0.00022377000004780712,
+        "iterations": 2,
+        "terminated_by": "NoProgress"
+      },
+      "on": {
+        "wall": 7.508099997721729e-05,
+        "iterations": 2,
+        "terminated_by": "NoProgress"
+      },
+      "terminated_differs": false,
+      "comparable": true,
+      "n_bounds": 6,
+      "tightened": 0,
+      "loosened": 0
+    },
+    {
+      "instance": "nvs16",
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "marker_ok": true,
+      "off": {
+        "wall": 0.00015835200019864715,
+        "iterations": 1,
+        "terminated_by": "NoProgress"
+      },
+      "on": {
+        "wall": 4.356099998403806e-05,
+        "iterations": 1,
+        "terminated_by": "NoProgress"
+      },
+      "terminated_differs": false,
+      "comparable": true,
+      "n_bounds": 4,
+      "tightened": 0,
+      "loosened": 0
+    },
+    {
+      "instance": "nvs17",
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "marker_ok": true,
+      "off": {
+        "wall": 0.0008389059998989978,
+        "iterations": 1,
+        "terminated_by": "NoProgress"
+      },
+      "on": {
+        "wall": 0.0007509340002798126,
+        "iterations": 1,
+        "terminated_by": "NoProgress"
+      },
+      "terminated_differs": false,
+      "comparable": true,
+      "n_bounds": 14,
+      "tightened": 0,
+      "loosened": 0
+    },
+    {
+      "instance": "nvs18",
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "marker_ok": true,
+      "off": {
+        "wall": 0.001149526000062906,
+        "iterations": 2,
+        "terminated_by": "NoProgress"
+      },
+      "on": {
+        "wall": 0.000993842000298173,
+        "iterations": 2,
+        "terminated_by": "NoProgress"
+      },
+      "terminated_differs": false,
+      "comparable": true,
+      "n_bounds": 12,
+      "tightened": 0,
+      "loosened": 0
+    },
+    {
+      "instance": "nvs19",
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "marker_ok": true,
+      "off": {
+        "wall": 0.001185431000067183,
+        "iterations": 1,
+        "terminated_by": "NoProgress"
+      },
+      "on": {
+        "wall": 0.0010130830000889546,
+        "iterations": 1,
+        "terminated_by": "NoProgress"
+      },
+      "terminated_differs": false,
+      "comparable": true,
+      "n_bounds": 16,
+      "tightened": 0,
+      "loosened": 0
+    },
+    {
+      "instance": "nvs20",
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "marker_ok": true,
+      "off": {
+        "wall": 0.0008819340000627562,
+        "iterations": 2,
+        "terminated_by": "NoProgress"
+      },
+      "on": {
+        "wall": 0.0011644639998849016,
+        "iterations": 3,
+        "terminated_by": "NoProgress"
+      },
+      "terminated_differs": false,
+      "comparable": true,
+      "n_bounds": 32,
+      "tightened": 0,
+      "loosened": 0
+    },
+    {
+      "instance": "nvs21",
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "marker_ok": true,
+      "off": {
+        "wall": 0.00016643500021018554,
+        "iterations": 1,
+        "terminated_by": "NoProgress"
+      },
+      "on": {
+        "wall": 9.386800002175733e-05,
+        "iterations": 1,
+        "terminated_by": "NoProgress"
+      },
+      "terminated_differs": false,
+      "comparable": true,
+      "n_bounds": 6,
+      "tightened": 0,
+      "loosened": 0
+    },
+    {
+      "instance": "nvs22",
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "marker_ok": true,
+      "off": {
+        "wall": 0.0003435599996919336,
+        "iterations": 2,
+        "terminated_by": "NoProgress"
+      },
+      "on": {
+        "wall": 0.00024753600018811994,
+        "iterations": 2,
+        "terminated_by": "NoProgress"
+      },
+      "terminated_differs": false,
+      "comparable": true,
+      "n_bounds": 16,
+      "tightened": 0,
+      "loosened": 0
+    },
+    {
+      "instance": "nvs23",
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "marker_ok": true,
+      "off": {
+        "wall": 0.0015267389999280567,
+        "iterations": 1,
+        "terminated_by": "NoProgress"
+      },
+      "on": {
+        "wall": 0.00146478999977262,
+        "iterations": 1,
+        "terminated_by": "NoProgress"
+      },
+      "terminated_differs": false,
+      "comparable": true,
+      "n_bounds": 18,
+      "tightened": 0,
+      "loosened": 0
+    },
+    {
+      "instance": "nvs24",
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "marker_ok": true,
+      "off": {
+        "wall": 0.0019761759999710193,
+        "iterations": 1,
+        "terminated_by": "NoProgress"
+      },
+      "on": {
+        "wall": 0.0019589180001275963,
+        "iterations": 1,
+        "terminated_by": "NoProgress"
+      },
+      "terminated_differs": false,
+      "comparable": true,
+      "n_bounds": 20,
+      "tightened": 0,
+      "loosened": 0
+    },
+    {
+      "instance": "oaer",
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "marker_ok": true,
+      "off": {
+        "wall": 0.004894595999758167,
+        "iterations": 16,
+        "terminated_by": "IterationCap"
+      },
+      "on": {
+        "wall": 0.0032540889997108025,
+        "iterations": 16,
+        "terminated_by": "IterationCap"
+      },
+      "terminated_differs": false,
+      "comparable": true,
+      "n_bounds": 18,
+      "tightened": 0,
+      "loosened": 0
+    },
+    {
+      "instance": "prob02",
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "marker_ok": true,
+      "off": {
+        "wall": 0.0003239789998588094,
+        "iterations": 2,
+        "terminated_by": "NoProgress"
+      },
+      "on": {
+        "wall": 0.00016864700000951416,
+        "iterations": 2,
+        "terminated_by": "NoProgress"
+      },
+      "terminated_differs": false,
+      "comparable": true,
+      "n_bounds": 12,
+      "tightened": 0,
+      "loosened": 0
+    },
+    {
+      "instance": "prob03",
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "marker_ok": true,
+      "off": {
+        "wall": 8.865699965099338e-05,
+        "iterations": 1,
+        "terminated_by": "NoProgress"
+      },
+      "on": {
+        "wall": 4.4241000068723224e-05,
+        "iterations": 1,
+        "terminated_by": "NoProgress"
+      },
+      "terminated_differs": false,
+      "comparable": true,
+      "n_bounds": 4,
+      "tightened": 0,
+      "loosened": 0
+    },
+    {
+      "instance": "prob06",
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "marker_ok": true,
+      "off": {
+        "wall": 0.00011928799995075678,
+        "iterations": 1,
+        "terminated_by": "NoProgress"
+      },
+      "on": {
+        "wall": 7.121699991330388e-05,
+        "iterations": 1,
+        "terminated_by": "NoProgress"
+      },
+      "terminated_differs": false,
+      "comparable": true,
+      "n_bounds": 4,
+      "tightened": 0,
+      "loosened": 0
+    },
+    {
+      "instance": "prob10",
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "marker_ok": true,
+      "off": {
+        "wall": 0.00026197600027444423,
+        "iterations": 2,
+        "terminated_by": "NoProgress"
+      },
+      "on": {
+        "wall": 8.237800011556828e-05,
+        "iterations": 2,
+        "terminated_by": "NoProgress"
+      },
+      "terminated_differs": false,
+      "comparable": true,
+      "n_bounds": 4,
+      "tightened": 0,
+      "loosened": 0
+    },
+    {
+      "instance": "st_e01",
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "marker_ok": true,
+      "off": {
+        "wall": 0.00011016999997082166,
+        "iterations": 1,
+        "terminated_by": "NoProgress"
+      },
+      "on": {
+        "wall": 5.817400005980744e-05,
+        "iterations": 1,
+        "terminated_by": "NoProgress"
+      },
+      "terminated_differs": false,
+      "comparable": true,
+      "n_bounds": 4,
+      "tightened": 0,
+      "loosened": 0
+    },
+    {
+      "instance": "st_e02",
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "marker_ok": true,
+      "off": {
+        "wall": 0.00018739600000117207,
+        "iterations": 2,
+        "terminated_by": "NoProgress"
+      },
+      "on": {
+        "wall": 0.00016859400011526304,
+        "iterations": 2,
+        "terminated_by": "NoProgress"
+      },
+      "terminated_differs": false,
+      "comparable": true,
+      "n_bounds": 6,
+      "tightened": 0,
+      "loosened": 0
+    },
+    {
+      "instance": "st_e03",
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "marker_ok": true,
+      "off": {
+        "wall": 0.000692756999796984,
+        "iterations": 2,
+        "terminated_by": "NoProgress"
+      },
+      "on": {
+        "wall": 0.0031047010002112074,
+        "iterations": 16,
+        "terminated_by": "IterationCap"
+      },
+      "terminated_differs": true,
+      "comparable": true,
+      "n_bounds": 20,
+      "tightened": 2,
+      "loosened": 0
+    },
+    {
+      "instance": "st_e04",
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "marker_ok": true,
+      "off": {
+        "wall": 0.00020439899981283816,
+        "iterations": 2,
+        "terminated_by": "NoProgress"
+      },
+      "on": {
+        "wall": 0.00010393399998065433,
+        "iterations": 2,
+        "terminated_by": "NoProgress"
+      },
+      "terminated_differs": false,
+      "comparable": true,
+      "n_bounds": 8,
+      "tightened": 0,
+      "loosened": 0
+    },
+    {
+      "instance": "st_e05",
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "marker_ok": true,
+      "off": {
+        "wall": 0.0002054120000138937,
+        "iterations": 2,
+        "terminated_by": "NoProgress"
+      },
+      "on": {
+        "wall": 0.00020205400005579577,
+        "iterations": 3,
+        "terminated_by": "NoProgress"
+      },
+      "terminated_differs": false,
+      "comparable": true,
+      "n_bounds": 10,
+      "tightened": 0,
+      "loosened": 0
+    },
+    {
+      "instance": "st_e06",
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "marker_ok": true,
+      "off": {
+        "wall": 0.00022901200009073364,
+        "iterations": 1,
+        "terminated_by": "NoProgress"
+      },
+      "on": {
+        "wall": 7.510599971283227e-05,
+        "iterations": 1,
+        "terminated_by": "NoProgress"
+      },
+      "terminated_differs": false,
+      "comparable": true,
+      "n_bounds": 6,
+      "tightened": 0,
+      "loosened": 0
+    },
+    {
+      "instance": "st_e07",
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "marker_ok": true,
+      "off": {
+        "wall": 0.00033805100019890233,
+        "iterations": 2,
+        "terminated_by": "NoProgress"
+      },
+      "on": {
+        "wall": 0.0002630630001476675,
+        "iterations": 2,
+        "terminated_by": "NoProgress"
+      },
+      "terminated_differs": false,
+      "comparable": true,
+      "n_bounds": 20,
+      "tightened": 0,
+      "loosened": 0
+    },
+    {
+      "instance": "st_e08",
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "marker_ok": true,
+      "off": {
+        "wall": 0.00011075500015067519,
+        "iterations": 1,
+        "terminated_by": "NoProgress"
+      },
+      "on": {
+        "wall": 6.0847999975521816e-05,
+        "iterations": 1,
+        "terminated_by": "NoProgress"
+      },
+      "terminated_differs": false,
+      "comparable": true,
+      "n_bounds": 4,
+      "tightened": 0,
+      "loosened": 0
+    },
+    {
+      "instance": "st_e09",
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "marker_ok": true,
+      "off": {
+        "wall": 0.00014016800014360342,
+        "iterations": 1,
+        "terminated_by": "NoProgress"
+      },
+      "on": {
+        "wall": 5.493499975273153e-05,
+        "iterations": 1,
+        "terminated_by": "NoProgress"
+      },
+      "terminated_differs": false,
+      "comparable": true,
+      "n_bounds": 4,
+      "tightened": 0,
+      "loosened": 0
+    },
+    {
+      "instance": "st_e11",
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "marker_ok": true,
+      "off": {
+        "wall": 0.00019006499996976345,
+        "iterations": 2,
+        "terminated_by": "NoProgress"
+      },
+      "on": {
+        "wall": 0.0007418260001941235,
+        "iterations": 16,
+        "terminated_by": "IterationCap"
+      },
+      "terminated_differs": true,
+      "comparable": true,
+      "n_bounds": 6,
+      "tightened": 1,
+      "loosened": 0
+    },
+    {
+      "instance": "st_e13",
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "marker_ok": true,
+      "off": {
+        "wall": 0.0006992879998506396,
+        "iterations": 16,
+        "terminated_by": "IterationCap"
+      },
+      "on": {
+        "wall": 0.0004294049999771232,
+        "iterations": 16,
+        "terminated_by": "IterationCap"
+      },
+      "terminated_differs": false,
+      "comparable": true,
+      "n_bounds": 4,
+      "tightened": 0,
+      "loosened": 0
+    },
+    {
+      "instance": "st_e15",
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "marker_ok": true,
+      "off": {
+        "wall": 0.0015192830001069524,
+        "iterations": 16,
+        "terminated_by": "IterationCap"
+      },
+      "on": {
+        "wall": 0.0011435460000939202,
+        "iterations": 16,
+        "terminated_by": "IterationCap"
+      },
+      "terminated_differs": false,
+      "comparable": true,
+      "n_bounds": 10,
+      "tightened": 0,
+      "loosened": 0
+    },
+    {
+      "instance": "st_e17",
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "marker_ok": true,
+      "off": {
+        "wall": 0.0001463839998905314,
+        "iterations": 2,
+        "terminated_by": "NoProgress"
+      },
+      "on": {
+        "wall": 0.0004660479999074596,
+        "iterations": 16,
+        "terminated_by": "IterationCap"
+      },
+      "terminated_differs": true,
+      "comparable": true,
+      "n_bounds": 4,
+      "tightened": 1,
+      "loosened": 0
+    },
+    {
+      "instance": "st_e18",
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "marker_ok": true,
+      "off": {
+        "wall": 0.00011982500018348219,
+        "iterations": 1,
+        "terminated_by": "NoProgress"
+      },
+      "on": {
+        "wall": 8.240399984060787e-05,
+        "iterations": 1,
+        "terminated_by": "NoProgress"
+      },
+      "terminated_differs": false,
+      "comparable": true,
+      "n_bounds": 4,
+      "tightened": 0,
+      "loosened": 0
+    },
+    {
+      "instance": "st_e27",
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "marker_ok": true,
+      "off": {
+        "wall": 0.0020111280000492116,
+        "iterations": 16,
+        "terminated_by": "IterationCap"
+      },
+      "on": {
+        "wall": 0.0011719070002982335,
+        "iterations": 16,
+        "terminated_by": "IterationCap"
+      },
+      "terminated_differs": false,
+      "comparable": true,
+      "n_bounds": 8,
+      "tightened": 0,
+      "loosened": 0
+    },
+    {
+      "instance": "st_e29",
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "marker_ok": true,
+      "off": {
+        "wall": 0.005893171000025177,
+        "iterations": 16,
+        "terminated_by": "IterationCap"
+      },
+      "on": {
+        "wall": 0.005506488000264653,
+        "iterations": 16,
+        "terminated_by": "IterationCap"
+      },
+      "terminated_differs": false,
+      "comparable": true,
+      "n_bounds": 22,
+      "tightened": 0,
+      "loosened": 0
+    },
+    {
+      "instance": "st_e31",
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "marker_ok": true,
+      "off": {
+        "wall": 1.5083110110003872,
+        "iterations": 16,
+        "terminated_by": "IterationCap"
+      },
+      "on": {
+        "wall": 1.5600198460001593,
+        "iterations": 16,
+        "terminated_by": "IterationCap"
+      },
+      "terminated_differs": false,
+      "comparable": true,
+      "n_bounds": 224,
+      "tightened": 0,
+      "loosened": 0
+    },
+    {
+      "instance": "st_e35",
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "marker_ok": true,
+      "off": {
+        "wall": 0.0939197430002423,
+        "iterations": 16,
+        "terminated_by": "IterationCap"
+      },
+      "on": {
+        "wall": 0.09223315899998852,
+        "iterations": 16,
+        "terminated_by": "IterationCap"
+      },
+      "terminated_differs": false,
+      "comparable": true,
+      "n_bounds": 64,
+      "tightened": 0,
+      "loosened": 0
+    },
+    {
+      "instance": "st_e36",
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "marker_ok": true,
+      "off": {
+        "wall": 0.0011620840000432509,
+        "iterations": 2,
+        "terminated_by": "NoProgress"
+      },
+      "on": {
+        "wall": 0.0010117940000782255,
+        "iterations": 2,
+        "terminated_by": "NoProgress"
+      },
+      "terminated_differs": false,
+      "comparable": true,
+      "n_bounds": 4,
+      "tightened": 0,
+      "loosened": 0
+    },
+    {
+      "instance": "st_e38",
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "marker_ok": true,
+      "off": {
+        "wall": 0.00022902899991095182,
+        "iterations": 2,
+        "terminated_by": "NoProgress"
+      },
+      "on": {
+        "wall": 0.0008540300000277057,
+        "iterations": 16,
+        "terminated_by": "IterationCap"
+      },
+      "terminated_differs": true,
+      "comparable": true,
+      "n_bounds": 8,
+      "tightened": 0,
+      "loosened": 0
+    },
+    {
+      "instance": "st_e40",
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "marker_ok": true,
+      "off": {
+        "wall": 0.000798206000126811,
+        "iterations": 2,
+        "terminated_by": "NoProgress"
+      },
+      "on": {
+        "wall": 0.0006250709998312232,
+        "iterations": 2,
+        "terminated_by": "NoProgress"
+      },
+      "terminated_differs": false,
+      "comparable": true,
+      "n_bounds": 8,
+      "tightened": 0,
+      "loosened": 0
+    },
+    {
+      "instance": "st_miqp1",
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "marker_ok": true,
+      "off": {
+        "wall": 0.0002535159997023584,
+        "iterations": 2,
+        "terminated_by": "NoProgress"
+      },
+      "on": {
+        "wall": 0.0001566209998600243,
+        "iterations": 2,
+        "terminated_by": "NoProgress"
+      },
+      "terminated_differs": false,
+      "comparable": true,
+      "n_bounds": 10,
+      "tightened": 0,
+      "loosened": 0
+    },
+    {
+      "instance": "st_miqp2",
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "marker_ok": true,
+      "off": {
+        "wall": 0.0009884500000225671,
+        "iterations": 16,
+        "terminated_by": "IterationCap"
+      },
+      "on": {
+        "wall": 0.0008735659998819756,
+        "iterations": 16,
+        "terminated_by": "IterationCap"
+      },
+      "terminated_differs": false,
+      "comparable": true,
+      "n_bounds": 8,
+      "tightened": 0,
+      "loosened": 0
+    },
+    {
+      "instance": "st_miqp3",
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "marker_ok": true,
+      "off": {
+        "wall": 0.00032346999978472013,
+        "iterations": 2,
+        "terminated_by": "NoProgress"
+      },
+      "on": {
+        "wall": 0.00010401000008641859,
+        "iterations": 2,
+        "terminated_by": "NoProgress"
+      },
+      "terminated_differs": false,
+      "comparable": true,
+      "n_bounds": 4,
+      "tightened": 0,
+      "loosened": 0
+    },
+    {
+      "instance": "st_miqp4",
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "marker_ok": true,
+      "off": {
+        "wall": 0.0015948369996294787,
+        "iterations": 16,
+        "terminated_by": "IterationCap"
+      },
+      "on": {
+        "wall": 0.001262266000139789,
+        "iterations": 16,
+        "terminated_by": "IterationCap"
+      },
+      "terminated_differs": false,
+      "comparable": true,
+      "n_bounds": 12,
+      "tightened": 0,
+      "loosened": 0
+    },
+    {
+      "instance": "st_miqp5",
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "marker_ok": true,
+      "off": {
+        "wall": 0.0019967920002272876,
+        "iterations": 5,
+        "terminated_by": "NoProgress"
+      },
+      "on": {
+        "wall": 0.0011607359997469757,
+        "iterations": 4,
+        "terminated_by": "NoProgress"
+      },
+      "terminated_differs": false,
+      "comparable": true,
+      "n_bounds": 14,
+      "tightened": 0,
+      "loosened": 0
+    },
+    {
+      "instance": "st_ph10",
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "marker_ok": true,
+      "off": {
+        "wall": 0.000847874000101001,
+        "iterations": 16,
+        "terminated_by": "IterationCap"
+      },
+      "on": {
+        "wall": 0.0004893889999948442,
+        "iterations": 16,
+        "terminated_by": "IterationCap"
+      },
+      "terminated_differs": false,
+      "comparable": true,
+      "n_bounds": 4,
+      "tightened": 0,
+      "loosened": 0
+    },
+    {
+      "instance": "st_test1",
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "marker_ok": true,
+      "off": {
+        "wall": 0.00012900499996248982,
+        "iterations": 1,
+        "terminated_by": "NoProgress"
+      },
+      "on": {
+        "wall": 7.29000003047986e-05,
+        "iterations": 1,
+        "terminated_by": "NoProgress"
+      },
+      "terminated_differs": false,
+      "comparable": true,
+      "n_bounds": 10,
+      "tightened": 0,
+      "loosened": 0
+    },
+    {
+      "instance": "st_testgr3",
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "marker_ok": true,
+      "off": {
+        "wall": 0.0010885900001085247,
+        "iterations": 2,
+        "terminated_by": "NoProgress"
+      },
+      "on": {
+        "wall": 0.0009664740000516758,
+        "iterations": 2,
+        "terminated_by": "NoProgress"
+      },
+      "terminated_differs": false,
+      "comparable": true,
+      "n_bounds": 40,
+      "tightened": 0,
+      "loosened": 0
+    },
+    {
+      "instance": "syn05hfsg",
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "marker_ok": true,
+      "off": {
+        "wall": 0.04914651100034462,
+        "iterations": 16,
+        "terminated_by": "IterationCap"
+      },
+      "on": {
+        "wall": 0.043818291000206955,
+        "iterations": 16,
+        "terminated_by": "IterationCap"
+      },
+      "terminated_differs": false,
+      "comparable": true,
+      "n_bounds": 84,
+      "tightened": 0,
+      "loosened": 0
+    },
+    {
+      "instance": "syn05m",
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "marker_ok": true,
+      "off": {
+        "wall": 0.022522963999563217,
+        "iterations": 16,
+        "terminated_by": "IterationCap"
+      },
+      "on": {
+        "wall": 0.019377708999854804,
+        "iterations": 16,
+        "terminated_by": "IterationCap"
+      },
+      "terminated_differs": false,
+      "comparable": true,
+      "n_bounds": 40,
+      "tightened": 0,
+      "loosened": 0
+    },
+    {
+      "instance": "tanksize",
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "marker_ok": true,
+      "off": {
+        "wall": 0.05884237300006134,
+        "iterations": 16,
+        "terminated_by": "IterationCap"
+      },
+      "on": {
+        "wall": 0.04513293399986651,
+        "iterations": 16,
+        "terminated_by": "IterationCap"
+      },
+      "terminated_differs": false,
+      "comparable": true,
+      "n_bounds": 94,
+      "tightened": 0,
+      "loosened": 0
+    },
+    {
+      "instance": "tls2",
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "marker_ok": true,
+      "off": {
+        "wall": 0.1602848070001528,
+        "iterations": 16,
+        "terminated_by": "IterationCap"
+      },
+      "on": {
+        "wall": 0.1622645580000608,
+        "iterations": 16,
+        "terminated_by": "IterationCap"
+      },
+      "terminated_differs": false,
+      "comparable": true,
+      "n_bounds": 74,
+      "tightened": 0,
+      "loosened": 0
+    },
+    {
+      "instance": "trig",
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "marker_ok": true,
+      "off": {
+        "wall": 9.854300014922046e-05,
+        "iterations": 1,
+        "terminated_by": "NoProgress"
+      },
+      "on": {
+        "wall": 5.3331000344769564e-05,
+        "iterations": 1,
+        "terminated_by": "NoProgress"
+      },
+      "terminated_differs": false,
+      "comparable": true,
+      "n_bounds": 2,
+      "tightened": 0,
+      "loosened": 0
+    },
+    {
+      "instance": "tspn05",
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "marker_ok": true,
+      "off": {
+        "wall": 0.0007663940000384173,
+        "iterations": 2,
+        "terminated_by": "NoProgress"
+      },
+      "on": {
+        "wall": 0.002109301000018604,
+        "iterations": 8,
+        "terminated_by": "NoProgress"
+      },
+      "terminated_differs": false,
+      "comparable": true,
+      "n_bounds": 40,
+      "tightened": 0,
+      "loosened": 0
+    },
+    {
+      "instance": "tspn08",
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "marker_ok": true,
+      "off": {
+        "wall": 0.002479307999692537,
+        "iterations": 2,
+        "terminated_by": "NoProgress"
+      },
+      "on": {
+        "wall": 0.0027232800002821023,
+        "iterations": 3,
+        "terminated_by": "NoProgress"
+      },
+      "terminated_differs": false,
+      "comparable": true,
+      "n_bounds": 88,
+      "tightened": 0,
+      "loosened": 0
+    },
+    {
+      "instance": "tspn10",
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "marker_ok": true,
+      "off": {
+        "wall": 0.003962313000101858,
+        "iterations": 2,
+        "terminated_by": "NoProgress"
+      },
+      "on": {
+        "wall": 0.007592607999868051,
+        "iterations": 4,
+        "terminated_by": "NoProgress"
+      },
+      "terminated_differs": false,
+      "comparable": true,
+      "n_bounds": 130,
+      "tightened": 0,
+      "loosened": 0
+    },
+    {
+      "instance": "tspn12",
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "marker_ok": true,
+      "off": {
+        "wall": 0.0038929160000407137,
+        "iterations": 2,
+        "terminated_by": "NoProgress"
+      },
+      "on": {
+        "wall": 0.016955663999851822,
+        "iterations": 9,
+        "terminated_by": "NoProgress"
+      },
+      "terminated_differs": false,
+      "comparable": true,
+      "n_bounds": 180,
+      "tightened": 0,
+      "loosened": 0
+    },
+    {
+      "instance": "util",
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "marker_ok": true,
+      "off": {
+        "wall": 5.0646439850002025,
+        "iterations": 16,
+        "terminated_by": "IterationCap"
+      },
+      "on": {
+        "wall": 5.187093073000142,
+        "iterations": 16,
+        "terminated_by": "IterationCap"
+      },
+      "terminated_differs": false,
+      "comparable": true,
+      "n_bounds": 288,
+      "tightened": 76,
+      "loosened": 0
+    }
+  ]
+}

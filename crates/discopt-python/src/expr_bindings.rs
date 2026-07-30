@@ -606,8 +606,11 @@ impl PyModelRepr {
     /// Returns a dict with keys:
     /// - `lb`, `ub`: numpy arrays of post-tightening per-variable bounds.
     /// - `bounds_tightened`: int — number of half-bounds that tightened.
-    /// - `infeasible`: bool — `True` if the kernel detected emptiness.
+    /// - `infeasible`: bool — `True` if the kernel detected emptiness *beyond*
+    ///   `FEAS_TOL`. A sub-tolerance crossing is rounding noise, is repaired, and
+    ///   does NOT set this flag: callers fathom the node on it.
     /// - `ran`: bool — `True` if the schedule actually fired at this depth.
+    /// - `subtol_repaired`: int — sub-`FEAS_TOL` crossings repaired at this node.
     #[pyo3(signature = (
         node_lb,
         node_ub,
@@ -667,6 +670,11 @@ impl PyModelRepr {
         out.set_item("bounds_tightened", delta.bounds_tightened)?;
         out.set_item("infeasible", delta.infeasible)?;
         out.set_item("ran", delta.ran)?;
+        // Sub-`FEAS_TOL` bound crossings repaired at this node. Non-zero means the
+        // kernel (or its incoming box) produced a formally-empty interval that was
+        // floating-point noise; before the repair existed the same event set
+        // `infeasible` and the B&B loop fathomed the node's whole subtree.
+        out.set_item("subtol_repaired", delta.subtol_repaired)?;
         Ok(out.into_any().unbind())
     }
 
@@ -782,6 +790,12 @@ impl PyModelRepr {
         let stats = PyDict::new(py);
         stats.set_item("terminated_by", format!("{:?}", result.terminated_by))?;
         stats.set_item("iterations", result.iterations)?;
+        // Sub-`FEAS_TOL` bound crossings repaired during the run. A strict `lo > hi`
+        // test used to abort the whole presolve as `Infeasible` on these.
+        stats.set_item(
+            "subtol_crossings_repaired",
+            result.subtol_crossings_repaired,
+        )?;
         let lbs: Vec<f64> = result.bounds.iter().map(|b| b.lo).collect();
         let ubs: Vec<f64> = result.bounds.iter().map(|b| b.hi).collect();
         let lb_arr = numpy::PyArray1::from_vec(py, lbs);

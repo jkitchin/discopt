@@ -1135,6 +1135,56 @@ pub(crate) fn seed_block_interval(v: &crate::expr::VarInfo) -> Interval {
     Interval::new(lo, hi)
 }
 
+/// Repair sub-tolerance bound crossings in place, returning how many were repaired.
+///
+/// A crossing is *sub-tolerance* when `0 < lo - hi <= tol`: the interval is
+/// formally empty but only by an amount no consumer treats as a real violation.
+/// Such a crossing is manufactured by ordinary floating-point rounding whenever two
+/// kernels derive the same quantity by different arithmetic — measured on the
+/// 119-instance in-repo corpus, `implied_bounds` deriving `lo = 0.75` for a variable
+/// whose upper bound FBBT had derived as `0.7499999999999999` (`casctanks`, crossing
+/// `1.1e-16`), and `heatexch_gen3`'s `[226.7, 226.6999999999999]` (`8.5e-14`) — the
+/// latter on the **default** path. Every crossing observed corpus-wide was at that
+/// scale; none exceeded `1e-13`, against a [`FEAS_TOL`] of `1e-6`.
+///
+/// The repair is the smallest interval containing both endpoints,
+/// `[min(lo,hi), max(lo,hi)]`. That is the only choice that cannot cut a feasible
+/// point: whichever of the two derivations was the sound one, its endpoint is
+/// retained. The result satisfies `lo <= hi`, so no inverted box can reach a
+/// downstream consumer (an LP column bound, the relaxation compiler) — which is the
+/// second half of the defect: declining to *declare* infeasibility is not enough if
+/// the inverted interval is still handed on.
+///
+/// Crossings **larger** than `tol` are left untouched, so a genuine infeasibility is
+/// still detected. Callers pair this with [`any_empty_beyond`].
+pub fn repair_subtol_crossings(bounds: &mut [Interval], tol: f64) -> usize {
+    let mut repaired = 0usize;
+    for b in bounds.iter_mut() {
+        let cross = b.lo - b.hi;
+        if cross > 0.0 && cross <= tol {
+            let (lo, hi) = (b.lo.min(b.hi), b.lo.max(b.hi));
+            b.lo = lo;
+            b.hi = hi;
+            repaired += 1;
+        }
+    }
+    repaired
+}
+
+/// Whether any interval is empty by more than `tol` — a *genuine* infeasibility.
+///
+/// This is the emptiness test an infeasibility *decision* must use.
+/// `bounds.iter().any(|b| b.is_empty())` — strict `lo > hi`, zero tolerance — turns
+/// a one-ulp rounding artifact into an `Infeasible` verdict; see
+/// [`Interval::is_empty_beyond`] and [`repair_subtol_crossings`]. `fbbt`, `fbbt_fp`
+/// and `probing` have always gated on [`FEAS_TOL`]; the presolve orchestrator and
+/// the in-tree kernel were the two outliers, and both acted on the verdict — the
+/// orchestrator by aborting the whole presolve sweep, the in-tree kernel by
+/// reporting `infeasible`, which the B&B loop fathoms the node on.
+pub fn any_empty_beyond(bounds: &[Interval], tol: f64) -> bool {
+    bounds.iter().any(|b| b.is_empty_beyond(tol))
+}
+
 /// Run FBBT to fixed-point on a model with an optional incumbent cutoff.
 ///
 /// When `incumbent_bound` is `Some(bound)`, an additional synthetic constraint
@@ -2804,6 +2854,44 @@ mod tests {
             }],
             n_vars: size,
         }
+    }
+
+    #[test]
+    fn repair_subtol_crossings_contract() {
+        // The direct contract of the helper both call sites depend on (Card 3e-RC).
+        let mut b = vec![
+            Interval::new(0.75, 0.7499999999999999), // measured casctanks: 1.1e-16
+            Interval::new(226.7, 226.6999999999999), // measured heatexch_gen3: 8.5e-14
+            Interval::new(0.0, 1.0),                 // valid — untouched
+            Interval::new(5.0, 4.0),                 // 1.0 >> FEAS_TOL — untouched
+            Interval::new(f64::NEG_INFINITY, f64::INFINITY), // entire — untouched
+            Interval::empty(),                       // +inf/-inf sentinel — untouched
+        ];
+        let n = repair_subtol_crossings(&mut b, FEAS_TOL);
+        assert_eq!(n, 2, "exactly the two sub-tolerance crossings");
+
+        // Repaired to [min, max] — both endpoints retained, so nothing is cut.
+        assert_eq!(b[0].lo, 0.7499999999999999);
+        assert_eq!(b[0].hi, 0.75);
+        assert_eq!(b[1].lo, 226.6999999999999);
+        assert_eq!(b[1].hi, 226.7);
+        assert!(!b[0].is_empty() && !b[1].is_empty());
+
+        // Untouched, and still recognised as genuinely empty where they were.
+        assert_eq!((b[2].lo, b[2].hi), (0.0, 1.0));
+        assert_eq!((b[3].lo, b[3].hi), (5.0, 4.0));
+        assert!(
+            b[3].is_empty_beyond(FEAS_TOL),
+            "a 1.0 crossing must survive"
+        );
+        assert!(
+            b[5].is_empty_beyond(FEAS_TOL),
+            "the empty sentinel must survive"
+        );
+
+        // And the paired predicate agrees: after repair, only the genuine ones remain.
+        assert!(any_empty_beyond(&b, FEAS_TOL));
+        assert!(!any_empty_beyond(&b[..3], FEAS_TOL));
     }
 
     #[test]

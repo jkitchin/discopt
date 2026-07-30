@@ -6,7 +6,11 @@
 //!
 //! Termination conditions, in order of priority:
 //!
-//! 1. A pass detected infeasibility (any bound's `is_empty()`).
+//! 1. A pass detected infeasibility — some bound is empty by more than
+//!    `FEAS_TOL` (`Interval::is_empty_beyond`). A *sub*-tolerance crossing is
+//!    rounding noise, is repaired in place by `repair_subtol_crossings`, and does
+//!    NOT stop the loop; a strict `lo > hi` test here aborted the sweep on 3 of 119
+//!    corpus instances, every one of them spuriously.
 //! 2. The configured time budget was exhausted.
 //! 3. The configured work-unit budget was exhausted.
 //! 4. `max_iterations` sweeps completed.
@@ -22,6 +26,7 @@
 use std::time::Instant;
 
 use super::delta::{PresolveDelta, TerminationReason};
+use super::fbbt::{any_empty_beyond, repair_subtol_crossings, FEAS_TOL};
 use super::pass::{PassCategory, PresolveContext, PresolvePass};
 
 /// Tunables for one orchestrator run.
@@ -64,6 +69,13 @@ pub struct PresolveResult {
     pub iterations: u32,
     /// Why the loop stopped.
     pub terminated_by: TerminationReason,
+    /// How many sub-`FEAS_TOL` bound crossings were repaired during the run.
+    ///
+    /// Non-zero means some pass produced a formally-empty interval that was pure
+    /// floating-point noise. Before this counter existed the same event aborted the
+    /// whole presolve as `Infeasible`; it is surfaced rather than silently absorbed
+    /// so a *rising* count is visible as the numerical smell it is.
+    pub subtol_crossings_repaired: usize,
 }
 
 /// Run the fixed-point loop on `model` with the given options.
@@ -80,6 +92,7 @@ pub fn run(model: crate::expr::ModelRepr, mut opts: OrchestratorOptions) -> Pres
     let mut deltas: Vec<PresolveDelta> = Vec::new();
     let mut terminated_by = TerminationReason::IterationCap;
     let mut last_iter: u32 = 0;
+    let mut subtol_crossings_repaired: usize = 0;
 
     'outer: for sweep in 0..opts.max_iterations {
         ctx.iter = sweep;
@@ -106,7 +119,19 @@ pub fn run(model: crate::expr::ModelRepr, mut opts: OrchestratorOptions) -> Pres
                 ctx.resync_bounds_after_rewrite();
             }
 
-            if any_empty(&ctx.bounds) {
+            // A bound crossing below `FEAS_TOL` is floating-point noise, not an
+            // infeasibility: two kernels deriving the same quantity by different
+            // arithmetic disagree in the last ulp. Repair it (so no inverted
+            // interval reaches a consumer) and keep going; declare `Infeasible`
+            // only on a crossing that exceeds the feasibility tolerance, which is
+            // what `fbbt`, `fbbt_fp` and `probing` have always done. Measured on the
+            // 119-instance corpus: the strict `lo > hi` test aborted the sweep on 3
+            // instances — `heatexch_gen3` at 8.5e-14 with **no flag set**,
+            // `casctanks` at 1.1e-16 and `util` at 6.8e-13 under
+            // `DISCOPT_FBBT_SEED` — and on 0 instances with a crossing above
+            // `FEAS_TOL`. So every abort it produced corpus-wide was spurious.
+            subtol_crossings_repaired += repair_subtol_crossings(&mut ctx.bounds, FEAS_TOL);
+            if any_empty_beyond(&ctx.bounds, FEAS_TOL) {
                 deltas.push(delta);
                 terminated_by = TerminationReason::Infeasible;
                 break 'outer;
@@ -152,11 +177,8 @@ pub fn run(model: crate::expr::ModelRepr, mut opts: OrchestratorOptions) -> Pres
         deltas,
         iterations: last_iter,
         terminated_by,
+        subtol_crossings_repaired,
     }
-}
-
-fn any_empty(bounds: &[super::fbbt::Interval]) -> bool {
-    bounds.iter().any(|b| b.is_empty())
 }
 
 #[cfg(test)]
@@ -475,5 +497,112 @@ mod tests {
                 );
             }
         }
+    }
+
+    // ── Sub-FEAS_TOL bound crossings must NOT abort the presolve ──────────
+    //
+    // Root-caused from Card 3e (consolidation plan §6, 2026-07-29). The
+    // orchestrator's emptiness test was `bounds.iter().any(|b| b.is_empty())` —
+    // strict `lo > hi`, zero tolerance — while `fbbt`, `fbbt_fp` and `probing` all
+    // gate on `is_empty_beyond(FEAS_TOL)`. Measured over the 119-instance in-repo
+    // corpus, that strict test aborted the sweep on 3 instances and *every* abort
+    // was floating-point noise: `heatexch_gen3` `[226.7, 226.6999999999999]`
+    // (8.5e-14, on the DEFAULT path), `casctanks` `[0.75, 0.7499999999999999]`
+    // (1.1e-16) and `util` (6.8e-13) under `DISCOPT_FBBT_SEED`. No instance
+    // produced a crossing above `FEAS_TOL`.
+    //
+    // These two tests FAIL on the pre-fix orchestrator (`Infeasible`, and an
+    // inverted interval returned to the caller) and pass after it.
+
+    /// A pass that stamps the literal interval `[lo, hi]` onto variable 0, once.
+    ///
+    /// Literal endpoints, not arithmetic: the first version of this test built the
+    /// crossing as `hi + 1.11e-16`, which rounds straight back to `hi` (the ulp of
+    /// 1.0 is 2.22e-16), so it stamped a VALID interval and the probe measured
+    /// nothing while looking like a test. CLAUDE.md §6, applied to a unit test.
+    struct CrossingPass {
+        lo: f64,
+        hi: f64,
+        fired: bool,
+    }
+
+    impl PresolvePass for CrossingPass {
+        fn name(&self) -> &'static str {
+            "always_progress"
+        }
+        fn category(&self) -> PassCategory {
+            PassCategory::BoundsOnly
+        }
+        fn run(&mut self, ctx: &mut PresolveContext) -> PresolveDelta {
+            let mut delta = PresolveDelta::empty("always_progress", ctx.iter);
+            if !self.fired {
+                self.fired = true;
+                ctx.bounds[0] = super::super::fbbt::Interval::new(self.lo, self.hi);
+                delta.bounds_tightened = 1;
+            }
+            delta
+        }
+    }
+
+    #[test]
+    fn subtol_crossing_is_repaired_not_declared_infeasible() {
+        // The measured `casctanks` interval, verbatim: `implied_bounds` derived
+        // lo = 0.75 for a variable whose ub FBBT had derived as 0.7499999999999999.
+        // Crossing 1.11e-16 — one ulp, and 1e10x below FEAS_TOL.
+        let lo = 0.75_f64;
+        let hi = 0.7499999999999999_f64;
+        assert!(lo > hi, "fixture must actually cross: {lo} vs {hi}");
+        assert!(lo - hi <= FEAS_TOL, "fixture must be SUB-tolerance");
+
+        let model = trivial_model(); // x in [-1, 1]
+        let opts = OrchestratorOptions::with_passes(vec![Box::new(CrossingPass {
+            lo,
+            hi,
+            fired: false,
+        })]);
+        let result = run(model, opts);
+
+        assert_ne!(
+            result.terminated_by,
+            TerminationReason::Infeasible,
+            "a {:e} crossing is rounding noise, not an infeasibility",
+            lo - hi
+        );
+        assert_eq!(
+            result.subtol_crossings_repaired, 1,
+            "the repair must be counted, not silently absorbed"
+        );
+        // The second half of the defect: no INVERTED interval may reach a consumer.
+        let b = result.bounds[0];
+        assert!(
+            b.lo <= b.hi,
+            "returned interval is inverted: [{}, {}]",
+            b.lo,
+            b.hi
+        );
+        // The repair is the smallest interval containing BOTH endpoints, so whichever
+        // derivation was the sound one, its endpoint survives — it cannot cut a
+        // feasible point.
+        assert_eq!(b.lo, hi, "lo must become min(lo,hi)");
+        assert_eq!(b.hi, lo, "hi must become max(lo,hi)");
+    }
+
+    #[test]
+    fn crossing_beyond_feas_tol_is_still_infeasible() {
+        // The guard must not become permissive: a real empty box is still detected.
+        // Without this, the fix above would be a weakened validation (CLAUDE.md §1).
+        let model = trivial_model();
+        let opts = OrchestratorOptions::with_passes(vec![Box::new(CrossingPass {
+            lo: 0.5,
+            hi: 0.4, // crossing 0.1 >> FEAS_TOL (1e-6)
+            fired: false,
+        })]);
+        let result = run(model, opts);
+        assert_eq!(
+            result.terminated_by,
+            TerminationReason::Infeasible,
+            "a 0.1 crossing is a genuine infeasibility and must still stop the loop"
+        );
+        assert_eq!(result.subtol_crossings_repaired, 0);
     }
 }

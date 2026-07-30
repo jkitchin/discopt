@@ -1,0 +1,139 @@
+instances: 119
+load at start: (0.79833984375, 0.77783203125, 0.5048828125)
+[1/119] 4stufen                  comparable=True tightened=2 loosened=0 
+[2/119] alan                     comparable=True tightened=0 loosened=0 
+[3/119] bchoco06                 comparable=True tightened=0 loosened=0 
+[4/119] bchoco07                 comparable=True tightened=0 loosened=0 
+[5/119] bchoco08                 comparable=True tightened=0 loosened=0 
+[6/119] beuster                  comparable=True tightened=2 loosened=0 
+[7/119] carton7                  comparable=True tightened=0 loosened=0 
+[8/119] casctanks                comparable=True tightened=8 loosened=0 
+[9/119] chance                   comparable=True tightened=0 loosened=0 
+[10/119] clay0303hfsg             comparable=True tightened=0 loosened=0 
+[11/119] contvar                  comparable=True tightened=0 loosened=0 
+[12/119] cvxnonsep_nsig30         comparable=True tightened=0 loosened=0 
+[13/119] cvxnonsep_psig30         comparable=True tightened=0 loosened=0 
+[14/119] cvxnonsep_psig40r        comparable=True tightened=0 loosened=0 
+[15/119] dispatch                 comparable=True tightened=0 loosened=0 
+[16/119] ex1221                   comparable=True tightened=0 loosened=0 
+[17/119] ex1222                   comparable=True tightened=0 loosened=0 
+[18/119] ex1223a                  comparable=True tightened=0 loosened=0 
+[19/119] ex1224                   comparable=True tightened=0 loosened=0 
+[20/119] ex1225                   comparable=True tightened=0 loosened=0 
+[21/119] ex1226                   comparable=True tightened=0 loosened=0 
+[22/119] ex1233                   comparable=True tightened=0 loosened=0 
+[23/119] ex1252                   comparable=True tightened=0 loosened=0 
+[24/119] ex1252a                  comparable=True tightened=0 loosened=0 
+[25/119] ex1263                   comparable=True tightened=0 loosened=0 
+[26/119] ex1264                   comparable=True tightened=0 loosened=0 
+[27/119] ex1265                   comparable=True tightened=0 loosened=0 
+[28/119] ex1266                   comparable=True tightened=0 loosened=0 
+[29/119] ex14_1_9                 comparable=True tightened=0 loosened=0 
+[30/119] ex8_1_1                  comparable=True tightened=0 loosened=0 
+[31/119] ex8_5_4                  comparable=True tightened=0 loosened=0 
+[32/119] fac2                     comparable=True tightened=0 loosened=0 
+[33/119] flay02m                  comparable=True tightened=0 loosened=0 
+[34/119] flay03m                  comparable=True tightened=0 loosened=0 
+[35/119] fuel                     comparable=True tightened=0 loosened=0 
+[36/119] gbd                      comparable=True tightened=0 loosened=0 
+[37/119] gear                     comparable=True tightened=0 loosened=0 
+[38/119] gear2                    comparable=True tightened=0 loosened=0 
+[39/119] gear3                    comparable=True tightened=0 loosened=0 
+[40/119] gear4                    comparable=True tightened=0 loosened=0 
+[41/119] gkocis                   comparable=True tightened=0 loosened=0 
+[42/119] hda                      comparable=True tightened=4 loosened=0 
+[43/119] heatexch_gen1            comparable=True tightened=0 loosened=0 
+[44/119] heatexch_gen2            comparable=True tightened=0 loosened=0 
+[45/119] heatexch_gen3            comparable=True tightened=0 loosened=0 
+[46/119] kall_circles_c8a         comparable=True tightened=0 loosened=0 
+[47/119] m3                       comparable=True tightened=0 loosened=0 
+[48/119] mathopt3                 comparable=True tightened=0 loosened=0 
+[49/119] mathopt5_2               comparable=True tightened=0 loosened=0 
+[50/119] meanvar                  comparable=True tightened=0 loosened=0 
+[51/119] meanvarx                 comparable=True tightened=0 loosened=0 
+[52/119] nvs01                    comparable=True tightened=0 loosened=0 
+[53/119] nvs02                    comparable=True tightened=0 loosened=0 
+[54/119] nvs03                    comparable=True tightened=0 loosened=0 
+[55/119] nvs04                    comparable=True tightened=0 loosened=0 
+[56/119] nvs05                    comparable=True tightened=0 loosened=0 
+[57/119] nvs06                    comparable=True tightened=0 loosened=0 
+[58/119] nvs07                    comparable=True tightened=0 loosened=0 
+[59/119] nvs08                    comparable=True tightened=0 loosened=0 
+[60/119] nvs09                    comparable=True tightened=0 loosened=0 
+[61/119] nvs10                    comparable=True tightened=0 loosened=0 
+[62/119] nvs11                    comparable=True tightened=0 loosened=0 
+[63/119] nvs12                    comparable=True tightened=0 loosened=0 
+[64/119] nvs13                    comparable=True tightened=0 loosened=0 
+[65/119] nvs14                    comparable=True tightened=0 loosened=0 
+[66/119] nvs15                    comparable=True tightened=0 loosened=0 
+[67/119] nvs16                    comparable=True tightened=0 loosened=0 
+[68/119] nvs17                    comparable=True tightened=0 loosened=0 
+[69/119] nvs18                    comparable=True tightened=0 loosened=0 
+[70/119] nvs19                    comparable=True tightened=0 loosened=0 
+[71/119] nvs20                    comparable=True tightened=0 loosened=0 
+[72/119] nvs21                    comparable=True tightened=0 loosened=0 
+[73/119] nvs22                    comparable=True tightened=0 loosened=0 
+[74/119] nvs23                    comparable=True tightened=0 loosened=0 
+[75/119] nvs24                    comparable=True tightened=0 loosened=0 
+[76/119] oaer                     comparable=True tightened=0 loosened=0 
+[77/119] prob02                   comparable=True tightened=0 loosened=0 
+[78/119] prob03                   comparable=True tightened=0 loosened=0 
+[79/119] prob06                   comparable=True tightened=0 loosened=0 
+[80/119] prob10                   comparable=True tightened=0 loosened=0 
+[81/119] st_e01                   comparable=True tightened=0 loosened=0 
+[82/119] st_e02                   comparable=True tightened=0 loosened=0 
+[83/119] st_e03                   comparable=True tightened=2 loosened=0 
+[84/119] st_e04                   comparable=True tightened=0 loosened=0 
+[85/119] st_e05                   comparable=True tightened=0 loosened=0 
+[86/119] st_e06                   comparable=True tightened=0 loosened=0 
+[87/119] st_e07                   comparable=True tightened=0 loosened=0 
+[88/119] st_e08                   comparable=True tightened=0 loosened=0 
+[89/119] st_e09                   comparable=True tightened=0 loosened=0 
+[90/119] st_e11                   comparable=True tightened=1 loosened=0 
+[91/119] st_e13                   comparable=True tightened=0 loosened=0 
+[92/119] st_e15                   comparable=True tightened=0 loosened=0 
+[93/119] st_e17                   comparable=True tightened=1 loosened=0 
+[94/119] st_e18                   comparable=True tightened=0 loosened=0 
+[95/119] st_e27                   comparable=True tightened=0 loosened=0 
+[96/119] st_e29                   comparable=True tightened=0 loosened=0 
+[97/119] st_e31                   comparable=True tightened=0 loosened=0 
+[98/119] st_e35                   comparable=True tightened=0 loosened=0 
+[99/119] st_e36                   comparable=True tightened=0 loosened=0 
+[100/119] st_e38                   comparable=True tightened=0 loosened=0 
+[101/119] st_e40                   comparable=True tightened=0 loosened=0 
+[102/119] st_miqp1                 comparable=True tightened=0 loosened=0 
+[103/119] st_miqp2                 comparable=True tightened=0 loosened=0 
+[104/119] st_miqp3                 comparable=True tightened=0 loosened=0 
+[105/119] st_miqp4                 comparable=True tightened=0 loosened=0 
+[106/119] st_miqp5                 comparable=True tightened=0 loosened=0 
+[107/119] st_ph10                  comparable=True tightened=0 loosened=0 
+[108/119] st_test1                 comparable=True tightened=0 loosened=0 
+[109/119] st_testgr3               comparable=True tightened=0 loosened=0 
+[110/119] syn05hfsg                comparable=True tightened=0 loosened=0 
+[111/119] syn05m                   comparable=True tightened=0 loosened=0 
+[112/119] tanksize                 comparable=True tightened=0 loosened=0 
+[113/119] tls2                     comparable=True tightened=0 loosened=0 
+[114/119] trig                     comparable=True tightened=0 loosened=0 
+[115/119] tspn05                   comparable=True tightened=0 loosened=0 
+[116/119] tspn08                   comparable=True tightened=0 loosened=0 
+[117/119] tspn10                   comparable=True tightened=0 loosened=0 
+[118/119] tspn12                   comparable=True tightened=0 loosened=0 
+[119/119] util                     comparable=True tightened=76 loosened=0 
+
+## VERDICT
+  EXECUTED BOUND COMPARISONS : 11058
+  comparable instances       : 119 of 119
+  instances tightened by seed: 8
+      util                     +76 bounds
+      casctanks                +8 bounds
+      hda                      +4 bounds
+      4stufen                  +2 bounds
+      beuster                  +2 bounds
+      st_e03                   +2 bounds
+      st_e11                   +1 bounds
+      st_e17                   +1 bounds
+  TOTAL bounds tightened     : 96
+  budget-dependent rows (arms stopped differently): 5 -> ['nvs08', 'st_e03', 'st_e11', 'st_e17', 'st_e38']
+  SOUNDNESS: instances loosened : 0
+  wall 227.5s  load at end (2.42236328125, 1.6748046875, 0.935546875)
+  artifact: /home/user/discopt/reports/card3e_fbbt_seed_entry_ed2da7bd.json
