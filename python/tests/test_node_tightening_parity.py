@@ -353,6 +353,15 @@ def _capture_model(model_factory, budget: float) -> tuple[_Ledger, object]:
 
 
 # Module-level totals so the final check can prove the file measured something.
+#
+# Pinned to one xdist worker for the same reason as test_routing.py: the final guard
+# asserts `spatial_instances > 0 AND nlp_bb_instances > 0`, and different tests in
+# this file supply those. Under `-n <workers> --dist loadgroup` each worker has its
+# own module globals, so a split would fail the guard on scheduling rather than on
+# parity. This file escaped that only because its heavy arms are `slow`-marked and
+# the parallel CI job deselects them — a property of the marker set, not a guarantee.
+pytestmark = pytest.mark.xdist_group("node_tightening_parity")
+
 TOTALS = {
     "instances": 0,
     "decided_nodes": 0,

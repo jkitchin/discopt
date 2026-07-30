@@ -32,6 +32,15 @@ from pathlib import Path
 import pytest
 from discopt import routing as rt
 
+# The vacuity guard at the end of this file asserts on counters the other tests in
+# it raise, so every test here must land on the SAME xdist worker. CI's PR-fast job
+# runs `-n <workers> --dist loadgroup`, where each worker is its own process with
+# its own module globals — without this mark the guard sees a partial count and
+# fails with "the order probe never ran", which is a statement about the scheduler,
+# not about the routing table. `loadgroup` exists for exactly this; the workflow
+# comment already cites it for xdist-incompatible fixtures. Harmless without xdist.
+pytestmark = pytest.mark.xdist_group("routing_conformance")
+
 EXECUTED: dict[str, int] = {"order": 0, "marker": 0, "handler": 0, "guard": 0, "recorder": 0}
 
 # The routes whose fall-through exists purely because the specialized engine

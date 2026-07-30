@@ -44,6 +44,14 @@ from discopt.solvers._convex_kernel import _incumbent_is_feasible  # noqa: E402
 from discopt.validation.feasibility import verify_point  # noqa: E402
 from vector_constraint_corpus import vector_constraint_cases  # noqa: E402
 
+# Pinned to one xdist worker. The guard below re-derives the corpus claim itself, so
+# the *substantive* assertion is scheduler-independent — but it also asserts that
+# THIS worker did real work (`rows_examined > 0` etc.), and under
+# `-n <workers> --dist loadgroup` the guard can land on a worker where none of this
+# file's other tests ran, zeroing those counters. Caught only by running this file
+# together with other files: alone, the scheduler happened to co-locate them.
+pytestmark = pytest.mark.xdist_group("vector_constraint_corpus")
+
 CASES = vector_constraint_cases()
 
 #: Module totals, asserted non-zero at the end of the file. A suite that compared

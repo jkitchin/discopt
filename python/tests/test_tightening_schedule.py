@@ -26,6 +26,13 @@ import pytest
 from discopt._jax import tightening_schedule as ts
 
 # Number of order/containment assertions actually executed across this module.
+# Same reason as test_routing.py: the vacuity guard below asserts on counters the
+# other tests in this file raise, so they must share one xdist worker. CI's PR-fast
+# job runs `-n <workers> --dist loadgroup` and each worker has its own module
+# globals; without this the guard fails with "only 1 of 4 schedules order-checked",
+# which measures the scheduler, not the schedule. Harmless without xdist installed.
+pytestmark = pytest.mark.xdist_group("tightening_schedule_conformance")
+
 EXECUTED: dict[str, int] = {"order": 0, "anchor": 0, "recorder": 0}
 
 
