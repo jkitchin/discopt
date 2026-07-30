@@ -1632,11 +1632,13 @@ session**, therefore `cargo test -p discopt-core` was **not run** (nothing in
 |---|---|
 | `pytest python/tests -m smoke` | **PASS — 946 passed, 16 skipped, 7752 deselected, 2 xpassed** (478 s). Pre-session baseline 922 passed; the +24 is exactly `test_constraint_rhs_refusal.py`. |
 | `pytest discopt_benchmarks/tests -m smoke` | **PASS** (exit 0) |
-| `pytest -m slow test_adversarial_recent_fixes.py` | see the row appended below |
-| `pytest test_node_tightening_parity.py` (default + `-m slow`) | see below |
-| `pytest test_vector_constraint_corpus.py` | **PASS — 56 passed** (run with the verifier-scale and parity suites) |
+| `pytest -m slow test_adversarial_recent_fixes.py` | **PASS — 10 passed** (222 s) |
+| `pytest test_node_tightening_parity.py` | **PASS — 4 passed, 12 deselected** |
+| `pytest -m slow test_node_tightening_parity.py` | **PASS — 12 passed, 4 deselected** (77 s) — Card 3c's guard, including the vector arm |
+| `pytest test_vector_constraint_corpus.py` | **PASS — 37 passed** |
 | `pytest test_flag_registry.py` | **PASS — 17 passed.** No flag was added this session, so `docs/reference/flags.md` needs no regeneration and the staleness test confirms it. |
-| `pytest -m slow test_stray_bb_loop_invariants.py` | **PASS — 7 tests**, 12,905 audited fathom decisions (counts on the Card 4c block) |
+| `pytest -m slow test_stray_bb_loop_invariants.py` | **PASS — 7 passed** (148 s). Final-tree counts: `i1_fathom_decisions` **13,758**, `i1_fathomed` 3, `i2_bound_vs_oracle` 3, `i3_incumbent_verified` 5, all three loops observed. (The decision count is budget-dependent through `nvs17`, which is time-limited: an earlier run on the same tree recorded 12,905 with 12,747 from that instance. The *invariant* verdict is not budget-dependent; only how many decisions get audited is.) |
+| `pytest test_constraint_rhs_refusal.py` | **PASS — 24 passed**; executed counts `refused_subject_to` 10, `refused_validate` 7, `refused_solve` 2, `normalized_solved` 4, `public_api_reachable` 1 |
 | `ruff check python/` + `ruff format --check` | **PASS** on every file this session touched. Two files unrelated to this session (`test_log_square_relaxation.py`, `test_mo_augmecon2.py`) are pre-existing format drift and were left alone. |
 | Regime N `panel_baseline --check reports/panel_baseline_f154dcff.json` | **queued to run alone after the suite block**; verdict appended below when it lands. Expected 255 comparisons over 119 rows at the baseline's own 45 s budget (~36 min). |
 | heldout50 | **SKIPPED — local only.** Not available in this environment. |
