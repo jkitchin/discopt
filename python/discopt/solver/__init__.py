@@ -64,6 +64,7 @@ from discopt.solver.native_kernel import (
     _native_spatial_kernel_enabled as _native_spatial_kernel_enabled,
 )
 from discopt.solver.native_kernel import _try_native_spatial_kernel as _try_native_spatial_kernel
+from discopt.solver.state import PhaseTimers, PrimalHeuristicState
 from discopt.solver_tuning import current as _tuning
 from discopt.solver_tuning import reset_current as _reset_tuning
 from discopt.solver_tuning import set_current as _set_tuning
@@ -5724,8 +5725,13 @@ def solve_model(
     # so every ``now - t_start > time_limit`` deadline check and the reported
     # wall time account for the preprocessing already spent.
     t_start = _solve_t0
-    rust_time = 0.0
-    jax_time = 0.0
+    # Consolidation-plan item 11: the Rust/JAX wall-clock split used to be four
+    # loose locals crossing the root -> loop -> results boundaries. The fields are
+    # still (re)initialised at their original sites so the migration stays a
+    # rename; the object exists so a later carve can pass one named argument.
+    _timers = PhaseTimers()
+    _timers.rust_time = 0.0
+    _timers.jax_time = 0.0
 
     # --- AD-only user functions (dm.custom) ---
     # A CustomCall wraps an opaque JAX-traceable callable. discopt can autodiff it (so
@@ -6371,7 +6377,7 @@ def solve_model(
     n_vars, lb, ub, int_offsets, int_sizes = _extract_variable_info(model)
 
     # --- Root presolve: FBBT + integer-bound rounding before tree creation ---
-    t_rust_start = time.perf_counter()
+    _timers.t_rust_start = time.perf_counter()
     from discopt.solvers._root_presolve import tighten_root_bounds_with_fbbt
 
     # Cap the FBBT call at whatever wall time is actually left (#863). This is the
@@ -6396,11 +6402,11 @@ def solve_model(
         model_repr=_model_repr,
         time_limit_ms=_fbbt_budget_ms,
     )
-    rust_time += time.perf_counter() - t_rust_start
+    _timers.rust_time += time.perf_counter() - _timers.t_rust_start
     _ts.record(
         "root_fbbt",
         infeasible=bool(root_infeasible),
-        wall_s=time.perf_counter() - t_rust_start,
+        wall_s=time.perf_counter() - _timers.t_rust_start,
     )
     if root_infeasible:
         _rt.entered("root_fbbt_infeasible")
@@ -6413,9 +6419,9 @@ def solve_model(
             x=None,
             wall_time=wall_time,
             node_count=0,
-            rust_time=rust_time,
-            jax_time=jax_time,
-            python_time=wall_time - rust_time - jax_time,
+            rust_time=_timers.rust_time,
+            jax_time=_timers.jax_time,
+            python_time=wall_time - _timers.rust_time - _timers.jax_time,
         )
 
     # --- Python nonlinear forward-substitution FBBT (on top of the Rust FBBT) ---
@@ -6481,9 +6487,9 @@ def solve_model(
             x=None,
             wall_time=wall_time,
             node_count=0,
-            rust_time=rust_time,
-            jax_time=jax_time,
-            python_time=wall_time - rust_time - jax_time,
+            rust_time=_timers.rust_time,
+            jax_time=_timers.jax_time,
+            python_time=wall_time - _timers.rust_time - _timers.jax_time,
         )
 
     # --- Root OBBT over the McCormick relaxation (range reduction) ---
@@ -6613,9 +6619,9 @@ def solve_model(
                     x=None,
                     wall_time=wall_time,
                     node_count=0,
-                    rust_time=rust_time,
-                    jax_time=jax_time,
-                    python_time=wall_time - rust_time - jax_time,
+                    rust_time=_timers.rust_time,
+                    jax_time=_timers.jax_time,
+                    python_time=wall_time - _timers.rust_time - _timers.jax_time,
                 )
             _ts.record(
                 "root_obbt",
@@ -6671,8 +6677,8 @@ def solve_model(
             max_nodes,
             time_limit,
             t_start,
-            rust_time,
-            jax_time,
+            _timers.rust_time,
+            _timers.jax_time,
         )
     if _native_result is not None:
         _rt.entered("native_spatial_kernel")
@@ -6752,13 +6758,13 @@ def solve_model(
             x=None,
             wall_time=wall_time,
             node_count=0,
-            rust_time=rust_time,
-            jax_time=jax_time,
-            python_time=wall_time - rust_time - jax_time,
+            rust_time=_timers.rust_time,
+            jax_time=_timers.jax_time,
+            python_time=wall_time - _timers.rust_time - _timers.jax_time,
         )
 
     # --- Create PyTreeManager (Rust) ---
-    t_rust_start = time.perf_counter()
+    _timers.t_rust_start = time.perf_counter()
     tree = PyTreeManager(
         n_vars,
         lb.tolist(),
@@ -6768,12 +6774,12 @@ def solve_model(
         strategy,
     )
     tree.initialize()
-    rust_time += time.perf_counter() - t_rust_start
+    _timers.rust_time += time.perf_counter() - _timers.t_rust_start
 
     # --- Compile NLP evaluator ---
-    t_jax_start = time.perf_counter()
+    _timers.t_jax_start = time.perf_counter()
     evaluator = _make_evaluator(model)
-    jax_time += time.perf_counter() - t_jax_start
+    _timers.jax_time += time.perf_counter() - _timers.t_jax_start
 
     # --- Infer constraint bounds ---
     cl_list, cu_list = _infer_constraint_bounds(model, evaluator)
@@ -7723,10 +7729,15 @@ def solve_model(
         model._gams_initial_values = _captured_gams_initial_values
 
     # --- SubNLP primal heuristic state ---
-    _subnlp_backend_fn = None
-    _subnlp_calls = 0
-    _subnlp_feasible = 0
-    _subnlp_incumbent_updates = 0
+    # Consolidation-plan item 11: the sub-NLP and LNS call counters share one
+    # lifetime (born here in the root region, mutated only in the spatial loop,
+    # the sub-NLP three read once more when the result is built), so they are one
+    # object rather than seven locals threaded implicitly through the closure.
+    _heur = PrimalHeuristicState()
+    _heur.subnlp_backend_fn = None
+    _heur.subnlp_calls = 0
+    _heur.subnlp_feasible = 0
+    _heur.subnlp_incumbent_updates = 0
     # Best incumbent value the integer-neighbourhood box search has already been
     # run from. The box search re-enumerates the integer lattice around the
     # incumbent, so it is only worth re-running when the incumbent itself moved
@@ -7737,15 +7748,15 @@ def solve_model(
     # Counts of LNS improver calls, used to escalate the local-branching radius
     # k across calls and to throttle node-diving. The whole layer is disabled
     # when ``_lns_enabled`` is False (the recursion guard for sub-MIP re-solves).
-    _lns_lb_calls = 0
-    _lns_dive_calls = 0
+    _heur.lns_lb_calls = 0
+    _heur.lns_dive_calls = 0
     _lns_k_schedule = (2, 5, 10)
     # One-hot swap search throttle (issue #280): the assignment-structured swap
     # improver self-gates to no-op on models without one-hot rows, but where it DOES
     # apply we still cap wasted effort — disable it after a few consecutive misses
     # (the incumbent is then either optimal or beyond the swap neighbourhood), and
     # skip it entirely once a run reports the model carries no one-hot structure.
-    _lns_swap_misses = 0
+    _heur.lns_swap_misses = 0
     _lns_swap_applicable = True
     _lns_has_integers = bool(int_sizes) and int(np.sum(int_sizes)) > 0
     # Best incumbent value the cutoff-tightening phases (C/C3) have already acted
@@ -7821,10 +7832,10 @@ def solve_model(
 
             from discopt.solvers.nlp_backend import Backend, get_nlp_solver
 
-            _subnlp_backend_fn = get_nlp_solver(cast(Backend, subnlp_backend))
+            _heur.subnlp_backend_fn = get_nlp_solver(cast(Backend, subnlp_backend))
         except ImportError as _e:
             logger.debug("SubNLP backend unavailable, disabling: %s", _e)
-            _subnlp_backend_fn = None
+            _heur.subnlp_backend_fn = None
 
     # --- B&B loop ---
     # McCormick NLP is expensive (one IPM per node). Run it every N iterations
@@ -8252,9 +8263,9 @@ def solve_model(
         opts["max_wall_time"] = max(remaining, _DEADLINE_NODE_FLOOR_S)
 
         # Export batch from Rust tree
-        t_rust_start = time.perf_counter()
+        _timers.t_rust_start = time.perf_counter()
         batch_lb, batch_ub, batch_ids, batch_psols = tree.export_batch(batch_size)
-        rust_time += time.perf_counter() - t_rust_start
+        _timers.rust_time += time.perf_counter() - _timers.t_rust_start
 
         n_batch = len(batch_ids)
         if n_batch == 0:
@@ -8532,7 +8543,7 @@ def solve_model(
                     batch_ub[i] = np.asarray(_pn_res.ub, dtype=np.float64).tolist()
 
         # Solve NLP relaxation for each node in the batch
-        t_jax_start = time.perf_counter()
+        _timers.t_jax_start = time.perf_counter()
 
         # Use augmented evaluator with cuts if available
         _active_evaluator = evaluator
@@ -9277,7 +9288,7 @@ def solve_model(
                             )
                         _adaptive_nlp_state["eff_stride"] = _new_stride
                         _adaptive_nlp_state["no_improve"] = 0
-        jax_time += time.perf_counter() - t_jax_start
+        _timers.jax_time += time.perf_counter() - _timers.t_jax_start
 
         # C-1 (path-agnostic, covers convex + nonconvex, batch + serial): any node
         # entering the tree with the failure sentinel but WITHOUT a rigorous
@@ -9773,9 +9784,9 @@ def solve_model(
         # path above declines it). Runs at root and on a schedule after,
         # capped per solve. Skipped for convex models (no benefit).
         if (
-            _subnlp_backend_fn is not None
+            _heur.subnlp_backend_fn is not None
             and not _model_is_convex
-            and _subnlp_calls < subnlp_max_calls
+            and _heur.subnlp_calls < subnlp_max_calls
             and (iteration == 0 or iteration % max(1, subnlp_frequency) == 0)
             and not _root_optimum_proven()
             # F4: the SubNLP heuristic launches one or more full NLP solves that
@@ -9794,18 +9805,18 @@ def solve_model(
             # feasibility and inject_incumbent enforces strict improvement.
             if (
                 iteration == 0
-                and _subnlp_calls < subnlp_max_calls
+                and _heur.subnlp_calls < subnlp_max_calls
                 and _root_heur_nlp_entry_ok(evaluator)
             ):
                 _gseed = _gams_initial_seed(model, lb, ub)
                 if _gseed is not None:
-                    _subnlp_calls += 1
+                    _heur.subnlp_calls += 1
                     _t_sn_g = time.perf_counter()
                     try:
                         _sn = _subnlp(
                             model,
                             _gseed,
-                            backend=_subnlp_backend_fn,
+                            backend=_heur.subnlp_backend_fn,
                             nlp_options=subnlp_options,
                             evaluator=evaluator,
                             # Single root attempt (no loop): give it a fair budget
@@ -9819,10 +9830,10 @@ def solve_model(
                     _observe_heur_nlp(time.perf_counter() - _t_sn_g)
                     if _sn is not None:
                         _x_sn, _obj_sn = _sn
-                        _subnlp_feasible += 1
+                        _heur.subnlp_feasible += 1
                         if np.isfinite(_obj_sn) and _obj_sn < _SENTINEL_THRESHOLD:
                             _inject_incumbent(_x_sn.copy(), float(_obj_sn))
-                            _subnlp_incumbent_updates += 1
+                            _heur.subnlp_incumbent_updates += 1
                             logger.info("SubNLP incumbent (gams seed): obj=%.6g", _obj_sn)
 
             _cands_sn = [
@@ -9841,13 +9852,13 @@ def solve_model(
                 _lb_c = np.clip(lb, -_SPC, _SPC)
                 _ub_c = np.clip(ub, -_SPC, _SPC)
                 _x_seed = 0.5 * (_lb_c + _ub_c)
-                _subnlp_calls += 1
+                _heur.subnlp_calls += 1
                 _t_sn_mid = time.perf_counter()
                 try:
                     _sn = _subnlp(
                         model,
                         _x_seed,
-                        backend=_subnlp_backend_fn,
+                        backend=_heur.subnlp_backend_fn,
                         nlp_options=subnlp_options,
                         evaluator=evaluator,
                         # Single root fallback attempt (no loop): give it a fair
@@ -9861,17 +9872,17 @@ def solve_model(
                 _observe_heur_nlp(time.perf_counter() - _t_sn_mid)
                 if _sn is not None:
                     _x_sn, _obj_sn = _sn
-                    _subnlp_feasible += 1
+                    _heur.subnlp_feasible += 1
                     if np.isfinite(_obj_sn) and _obj_sn < _SENTINEL_THRESHOLD:
                         _inject_incumbent(_x_sn.copy(), float(_obj_sn))
-                        _subnlp_incumbent_updates += 1
+                        _heur.subnlp_incumbent_updates += 1
                         logger.info("SubNLP incumbent (seed): obj=%.6g", _obj_sn)
             else:
                 _try_idxs = (
                     [i for i, _ in _cands_sn] if iteration == 0 else [i for i, _ in _cands_sn[:1]]
                 )
                 for _loop_idx, _i in enumerate(_try_idxs):
-                    if _subnlp_calls >= subnlp_max_calls:
+                    if _heur.subnlp_calls >= subnlp_max_calls:
                         break
                     # The root tries every relaxation candidate to cover all
                     # disjuncts; once one has certified the optimum (incumbent ==
@@ -9891,7 +9902,7 @@ def solve_model(
                     _sn_remaining = _deadline - time.perf_counter()
                     if not _root_heur_nlp_entry_ok(evaluator):
                         break
-                    _subnlp_calls += 1
+                    _heur.subnlp_calls += 1
                     # The first candidate gets a full (un-clamped) budget so one
                     # NLP solve can actually converge to a feasible incumbent even
                     # if the deadline just passed; later candidates are clamped to
@@ -9906,7 +9917,7 @@ def solve_model(
                         _sn = _subnlp(
                             model,
                             result_sols[_i],
-                            backend=_subnlp_backend_fn,
+                            backend=_heur.subnlp_backend_fn,
                             nlp_options=subnlp_options,
                             evaluator=evaluator,
                             time_budget=_sn_budget,
@@ -9918,10 +9929,10 @@ def solve_model(
                     if _sn is None:
                         continue
                     _x_sn, _obj_sn = _sn
-                    _subnlp_feasible += 1
+                    _heur.subnlp_feasible += 1
                     if np.isfinite(_obj_sn) and _obj_sn < _SENTINEL_THRESHOLD:
                         _inject_incumbent(_x_sn.copy(), float(_obj_sn))
-                        _subnlp_incumbent_updates += 1
+                        _heur.subnlp_incumbent_updates += 1
                         logger.info("SubNLP incumbent: obj=%.6g (iter=%d)", _obj_sn, iteration)
 
         # --- Root binary-seed enumeration (deterministic disjunct cover) ---
@@ -9934,9 +9945,9 @@ def solve_model(
         # platform FP. Bounded to 2**max_binaries solves; skipped above the cap.
         if (
             iteration == 0
-            and _subnlp_backend_fn is not None
+            and _heur.subnlp_backend_fn is not None
             and not _model_is_convex
-            and _subnlp_calls < subnlp_max_calls
+            and _heur.subnlp_calls < subnlp_max_calls
             and not _root_optimum_proven()
             and _improver_allowed(_HEUR_COST["enumerate"])
             # G2 governor: gate the enumeration only in its improver role (an
@@ -9975,19 +9986,19 @@ def solve_model(
                 _enum_results = enumerate_binary_seeds_subnlp(
                     model,
                     _enum_seed,
-                    backend=_subnlp_backend_fn,
+                    backend=_heur.subnlp_backend_fn,
                     nlp_options=subnlp_options,
                     evaluator=evaluator,
                 )
             except Exception as _e:
                 logger.debug("enumerate_binary_seeds_subnlp raised: %s", _e)
                 _enum_results = []
-            _subnlp_calls += len(_enum_results)
+            _heur.subnlp_calls += len(_enum_results)
             for _x_en, _obj_en in _enum_results:
-                _subnlp_feasible += 1
+                _heur.subnlp_feasible += 1
                 if np.isfinite(_obj_en) and _obj_en < _SENTINEL_THRESHOLD:
                     _inject_incumbent(_x_en.copy(), float(_obj_en))
-                    _subnlp_incumbent_updates += 1
+                    _heur.subnlp_incumbent_updates += 1
                     logger.info("SubNLP enum incumbent: obj=%.6g", _obj_en)
             if _enum_had_inc:
                 _enum_inc1 = tree.incumbent()
@@ -10010,7 +10021,11 @@ def solve_model(
         # NOT the subnlp iteration schedule, which can skip the window in which the
         # improving incumbent first appears and was leaving the better assignment on
         # the table on small instances that finish before the next scheduled tick).
-        if _subnlp_backend_fn is not None and not _model_is_convex and not _root_optimum_proven():
+        if (
+            _heur.subnlp_backend_fn is not None
+            and not _model_is_convex
+            and not _root_optimum_proven()
+        ):
             # NOT budget-gated: like the lattice search above, the integer box
             # search is a light improver discopt leans on where the relaxation
             # drops the cross-terms that would otherwise bound the search
@@ -10032,7 +10047,7 @@ def solve_model(
                     _bx = integer_box_search(
                         model,
                         _inc_box[0],
-                        backend=_subnlp_backend_fn,
+                        backend=_heur.subnlp_backend_fn,
                         nlp_options=subnlp_options,
                         evaluator=evaluator,
                         time_budget=_box_budget,
@@ -10042,7 +10057,7 @@ def solve_model(
                     _bx = None
                 if _bx is not None and np.isfinite(_bx[1]) and _bx[1] < _inc_box[1] - 1e-9:
                     _inject_incumbent(_bx[0].copy(), float(_bx[1]))
-                    _subnlp_incumbent_updates += 1
+                    _heur.subnlp_incumbent_updates += 1
                     _last_box_inc_obj = float(_bx[1])
                     logger.info("Box-search incumbent: obj=%.6g (iter=%d)", _bx[1], iteration)
 
@@ -10065,7 +10080,7 @@ def solve_model(
         # and injected only on strict improvement; the dual bound is untouched.
         if (
             _lns_enabled
-            and _subnlp_backend_fn is not None
+            and _heur.subnlp_backend_fn is not None
             and not _model_is_convex
             and _lns_has_integers
             and iteration > 0
@@ -10109,7 +10124,7 @@ def solve_model(
                     and iteration % max(1, subnlp_frequency) == 0
                     and _root_heur_nlp_entry_ok(evaluator)
                 ):
-                    _lns_dive_calls += 1
+                    _heur.lns_dive_calls += 1
                     try:
                         from discopt._jax.primal_heuristics import fractional_diving
 
@@ -10184,7 +10199,7 @@ def solve_model(
                 if (
                     _lns_have_inc
                     and _lns_gap_open
-                    and _lns_swap_misses < 3
+                    and _heur.lns_swap_misses < 3
                     and (_deadline - time.perf_counter()) > _DEADLINE_NODE_FLOOR_S
                 ):
                     _swap_improved = False
@@ -10210,7 +10225,7 @@ def solve_model(
                                 logger.info("LNS one-hot swap incumbent: obj=%.6g", _obj_sw)
                     except Exception as _e:
                         logger.debug("LNS one-hot swap failed: %s", _e)
-                    _lns_swap_misses = 0 if _swap_improved else _lns_swap_misses + 1
+                    _heur.lns_swap_misses = 0 if _swap_improved else _heur.lns_swap_misses + 1
 
                 # (3) Local branching (improve). Scalable Hamming-ball sub-MIP
                 # around the incumbent, escalating k across calls. Bounded by a
@@ -10223,8 +10238,8 @@ def solve_model(
                     and _improver_allowed(_HEUR_COST["lbranch"])
                     and _heuristic_governor.allowed("lbranch", gap_open=_lns_gap_open)
                 ):
-                    _lb_k = _lns_k_schedule[min(_lns_lb_calls, len(_lns_k_schedule) - 1)]
-                    _lns_lb_calls += 1
+                    _lb_k = _lns_k_schedule[min(_heur.lns_lb_calls, len(_lns_k_schedule) - 1)]
+                    _heur.lns_lb_calls += 1
                     _lb_slice = min(2.0, max(0.5, _deadline - time.perf_counter() - 0.2))
                     _lb_obj0 = float(_lns_inc[1])
                     _lb_improved = False
@@ -10374,7 +10389,7 @@ def solve_model(
         # inequalities, so the contraction removes no feasible point better than the
         # incumbent. Skipped for any node already fathomed this round.
         if _phase2_dbbt_enabled and _nr_pending:
-            t_rust_start = time.perf_counter()
+            _timers.t_rust_start = time.perf_counter()
             for _bi, (_nlb, _nub) in _nr_pending.items():
                 if node_infeasible_mask[_bi] or result_lbs[_bi] >= _SENTINEL_THRESHOLD:
                     continue
@@ -10386,13 +10401,13 @@ def solve_model(
                     )
                 except Exception as _sb_exc:  # pragma: no cover - defensive
                     logger.debug("set_node_bounds failed at node %d: %s", _bi, _sb_exc)
-            rust_time += time.perf_counter() - t_rust_start
+            _timers.rust_time += time.perf_counter() - _timers.t_rust_start
 
         # Import results back to Rust tree
-        t_rust_start = time.perf_counter()
+        _timers.t_rust_start = time.perf_counter()
         tree.import_results(result_ids, result_lbs, result_sols, result_feas)
         tree.process_evaluated()
-        rust_time += time.perf_counter() - t_rust_start
+        _timers.rust_time += time.perf_counter() - _timers.t_rust_start
 
         # Interactive debugger: prune/branch/fathom applied by the tree.
         if _debug.fire(
@@ -10729,7 +10744,7 @@ def solve_model(
 
     # --- Build result ---
     wall_time = time.perf_counter() - t_start
-    python_time = wall_time - rust_time - jax_time
+    python_time = wall_time - _timers.rust_time - _timers.jax_time
 
     stats = tree.stats()
     incumbent = tree.incumbent()
@@ -11339,17 +11354,17 @@ def solve_model(
         x=x_dict,
         wall_time=wall_time,
         node_count=stats["total_nodes"],
-        rust_time=rust_time,
-        jax_time=jax_time,
+        rust_time=_timers.rust_time,
+        jax_time=_timers.jax_time,
         python_time=python_time,
         root_bound=root_bound_val,
         root_gap=root_gap_val,
         root_time=_root_time,
         solver_stats=_solver_stats or None,
         gap_certified=_gap_certified,
-        subnlp_calls=_subnlp_calls,
-        subnlp_feasible=_subnlp_feasible,
-        subnlp_incumbent_updates=_subnlp_incumbent_updates,
+        subnlp_calls=_heur.subnlp_calls,
+        subnlp_feasible=_heur.subnlp_feasible,
+        subnlp_incumbent_updates=_heur.subnlp_incumbent_updates,
     )
 
 
