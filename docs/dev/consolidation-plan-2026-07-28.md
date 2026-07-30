@@ -1640,8 +1640,17 @@ session**, therefore `cargo test -p discopt-core` was **not run** (nothing in
 | `pytest -m slow test_stray_bb_loop_invariants.py` | **PASS — 7 passed** (148 s). Final-tree counts: `i1_fathom_decisions` **13,758**, `i1_fathomed` 3, `i2_bound_vs_oracle` 3, `i3_incumbent_verified` 5, all three loops observed. (The decision count is budget-dependent through `nvs17`, which is time-limited: an earlier run on the same tree recorded 12,905 with 12,747 from that instance. The *invariant* verdict is not budget-dependent; only how many decisions get audited is.) |
 | `pytest test_constraint_rhs_refusal.py` | **PASS — 24 passed**; executed counts `refused_subject_to` 10, `refused_validate` 7, `refused_solve` 2, `normalized_solved` 4, `public_api_reachable` 1 |
 | `ruff check python/` + `ruff format --check` | **PASS** on every file this session touched. Two files unrelated to this session (`test_log_square_relaxation.py`, `test_mo_augmecon2.py`) are pre-existing format drift and were left alone. |
-| Regime N `panel_baseline --check reports/panel_baseline_f154dcff.json` | **queued to run alone after the suite block**; verdict appended below when it lands. Expected 255 comparisons over 119 rows at the baseline's own 45 s budget (~36 min). |
+| Regime N `panel_baseline --check reports/panel_baseline_f154dcff.json` | **PASS — `comparisons executed: 255` (node_count 85, certified objective 85, status 85) over 85 comparable of 119 baseline rows; "PASS: no node-count or certified-objective drift", `PANEL_EXIT=0`.** Ran alone after the suite block, as queued. Same 255/85 population as every prior run (Phase 3, Phase 5, Card 3e, Card 4a). Verdict recorded by the orchestrator after the implementing session ended; log `scratchpad/v_panel.log`. |
 | heldout50 | **SKIPPED — local only.** Not available in this environment. |
+
+**One non-comparable row worth a look, flagged rather than buried.** In the passing
+panel, `tls2` moved `nodes 421→373, obj 5.299999922109238→9.29999987524207`. It is
+correctly excluded from gating — it certifies at 43.8 s = 97 % of the 45 s budget, so
+it is inherently irreproducible — but a ~76 % objective move is large enough that
+"non-comparable" should not be read as "fine". Nothing this session touches explains
+it, and the same row has been non-comparable in every prior panel. **Follow-up:** re-run
+`tls2` alone at a 300 s budget against its reference optimum to establish which value is
+right; if the 9.3 arm is the reproducible one, the baseline row is the stale one.
 
 **Why Regime N is the right regime for everything here.** The three loop edits
 hoist an existing condition into a named local and call a default-inactive hook
