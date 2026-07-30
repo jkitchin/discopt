@@ -66,10 +66,12 @@ from discopt.solver.native_kernel import (
 from discopt.solver.native_kernel import _try_native_spatial_kernel as _try_native_spatial_kernel
 from discopt.solver.state import (
     LazyStallSeparationState,
+    McCormickRelaxationState,
     PerNodeOBBTBudget,
     PhaseTimers,
     PrimalHeuristicState,
     RootConfig,
+    RootCutPoolState,
 )
 from discopt.solver_tuning import current as _tuning
 from discopt.solver_tuning import reset_current as _reset_tuning
@@ -517,7 +519,7 @@ def _root_lp_probe_tight_enabled() -> bool:
     FBBT/OBBT-tightened root box. On a model with unbounded declared bounds (the
     process-synthesis ``*hfsg`` family, issue #282, has continuous variables
     declared ``[0, inf]``; also ``casctanks``) the LP is unbounded/None over that raw
-    box, so the relaxer is discarded (``_mc_mode = "none"``) and the whole spatial
+    box, so the relaxer is discarded (``_mc.mode = "none"``) and the whole spatial
     search falls back to a far looser alphaBB/interval/NLP root bound — even though
     the SAME relaxer produces a valid, much tighter bound on the tightened box the
     solver has already computed (measured: syn30hfsg root excess +955% -> +571%,
@@ -4128,14 +4130,15 @@ def solve_model(
     # module constants — means they can be set after ``import discopt`` and can
     # differ per Model/per solve, while ``DISCOPT_ROOT_CUT_ROUNDS`` /
     # ``DISCOPT_ROOT_CUT_MAX`` remain as deprecated process-wide defaults.
-    _root_cut_rounds = (
+    _cuts = RootCutPoolState()
+    _cuts.root_rounds = (
         _ROOT_CUT_POOL_ROUNDS_ENV if root_cut_rounds is None else int(root_cut_rounds)
     )
-    _root_cut_max = _ROOT_CUT_POOL_MAX_ENV if root_cut_max is None else int(root_cut_max)
-    if _root_cut_rounds < 0:
-        raise ValueError(f"root_cut_rounds must be >= 0, got {_root_cut_rounds}")
-    if _root_cut_max < 1:
-        raise ValueError(f"root_cut_max must be >= 1, got {_root_cut_max}")
+    _cuts.root_max = _ROOT_CUT_POOL_MAX_ENV if root_cut_max is None else int(root_cut_max)
+    if _cuts.root_rounds < 0:
+        raise ValueError(f"root_cut_rounds must be >= 0, got {_cuts.root_rounds}")
+    if _cuts.root_max < 1:
+        raise ValueError(f"root_cut_max must be >= 1, got {_cuts.root_max}")
 
     # --- Presolve substitution entry (#844, P2(a′), opt-in) ---------------
     # Solve a REDUCED model in which every variable determined by a linear
@@ -6986,7 +6989,7 @@ def solve_model(
     _root_rigorously_infeasible = False
 
     # Sense-derived negation flag for the internal (minimization) B&B. Unlike
-    # ``_mc_negate`` below — which is only assigned correctly inside the
+    # ``_mc.negate`` below — which is only assigned correctly inside the
     # McCormick "nlp"/"midpoint" setup — this is valid in every relaxation
     # mode, so the interval bound stays sound for maximization models too.
     from discopt.modeling.core import ObjectiveSense as _ObjectiveSense
@@ -7009,7 +7012,7 @@ def solve_model(
     # Lever 3 (issue #194): the alpha estimate (jax.hessian over a sample grid)
     # is a ~2s one-time root cost. It is only needed when alphaBB is the bound
     # source — i.e. when the McCormick LP relaxer is NOT active. So we DEFER it
-    # here and compute it just below, gated on ``_mc_lp_relaxer is None`` (set by
+    # here and compute it just below, gated on ``_mc.lp_relaxer is None`` (set by
     # the relaxer block). When the LP relaxer supplies every node's valid dual
     # bound, alphaBB would only ever be a fallback on nodes the LP relaxer
     # declines; on the corpus that never changes the certified result (A/B: 0
@@ -7032,34 +7035,38 @@ def solve_model(
         logger.debug("convex-objective node bound enabled (n_vars=%d)", n_vars)
 
     # --- McCormick relaxation bounds ---
-    _mc_obj_eval = None  # BatchRelaxationEvaluator for the McCormick "nlp" bound
-    _mc_obj_relax_fn = None  # raw relaxation fn for NLP bounds
-    _mc_con_relax_fns: list[Callable] | None = None
-    _mc_con_senses = None
-    _mc_negate = False
-    _mc_mode = _cfg.mccormick_bounds
-    _mc_lp_relaxer = None  # MccormickLPRelaxer instance when _mc_mode == "lp"
+    # The explicit re-initialisation below is deliberate, not redundant: it keeps
+    # ``solve_model``'s starting state independent of ``McCormickRelaxationState``'s
+    # field defaults, so editing a default cannot silently change solver behaviour.
+    _mc = McCormickRelaxationState()
+    _mc.obj_eval = None  # BatchRelaxationEvaluator for the McCormick "nlp" bound
+    _mc.obj_relax_fn = None  # raw relaxation fn for NLP bounds
+    _mc.con_relax_fns = None
+    _mc.con_senses = None
+    _mc.negate = False
+    _mc.mode = _cfg.mccormick_bounds
+    _mc.lp_relaxer = None  # MccormickLPRelaxer instance when _mc.mode == "lp"
     # Global root cut pool (P3): separated once at the root, then inherited at
     # every node so each node reproduces the strong root bound for the cost of a
     # warm LP solve instead of re-separating the PSD/RLT cuts from scratch. Stays
     # None unless the relaxer carries PSD cuts (the nvs* / box-QP regime).
-    _root_cut_pool = None
+    _cuts.root_pool = None
     # CUT-INHERIT-GRAD diagnostic: the fraction of the ONE root pool separation
     # solve's wall spent in the square+PSD point-separation loops. Surfaced in
     # ``solver_stats`` for observability; NOT the gate predicate (the entry
     # experiment showed it does not separate win-from-neutral — the pool-fires
     # signal does). ``None`` when no pool is separated.
-    _root_sqpsd_frac: Optional[float] = None
+    _cuts.root_sqpsd_frac = None
     # Root-cut-pool inheritance (THRU-4, ``DISCOPT_CUT_INHERIT`` /
     # ``SolverTuning.cut_inherit``, **opt-in, default force-off**,
     # CUT-INHERIT-GRAD). Tri-state resolution:
-    #   * ``_cut_inherit_mode is True``  — force ON  (env ``=1`` / ``cut_inherit=True``)
-    #   * ``_cut_inherit_mode is False`` — force OFF (env unset/``=0`` / ``cut_inherit=False``)
+    #   * ``_cuts.inherit_mode is True``  — force ON  (env ``=1`` / ``cut_inherit=True``)
+    #   * ``_cuts.inherit_mode is False`` — force OFF (env unset/``=0`` / ``cut_inherit=False``)
     #     — the SHIPPED DEFAULT: byte-identical to pre-THRU-4 behaviour.
-    #   * ``_cut_inherit_mode is None``  — STRUCTURE-GATED opt-in (env ``=gated`` /
+    #   * ``_cuts.inherit_mode is None``  — STRUCTURE-GATED opt-in (env ``=gated`` /
     #     ``cut_inherit=None``): the pool is captured optimistically at the root and
     #     inheritance engages iff a non-empty pool actually populates
-    #     (``_root_cut_pool is not None``). Validated broadly beneficial where it
+    #     (``_cuts.root_pool is not None``). Validated broadly beneficial where it
     #     fires, but NOT the default — a flag-path false-optimal on the MINLP
     #     cold-path class (nvs22) blocks the flip (CLAUDE.md §1; see
     #     ``docs/dev/cut-inherit-grad-2026-07-08.md``).
@@ -7071,11 +7078,11 @@ def solve_model(
     # replaced by the inherited pool. Root behaviour is unchanged. When the model
     # carries no liftable square/PSD structure the pool stays empty and the gated
     # path is byte-identical to force-OFF.
-    _cut_inherit_mode = _tuning().cut_inherit
+    _cuts.inherit_mode = _tuning().cut_inherit
     # "Not forced off" — the condition under which the root pool is captured and
     # (given a populated pool) inheritance is allowed to engage. Forced-ON and
     # structure-gated both capture; only an explicit ``=0`` suppresses it.
-    _cut_inherit_enabled = _cut_inherit_mode is not False
+    _cuts.inherit_enabled = _cuts.inherit_mode is not False
     # The dual bound the root cut-pool relaxation proves over the whole feasible
     # region (a valid global lower bound for a MINIMIZE). The pool is separated for
     # its CUT ROWS, but the strengthened relaxation also yields a far tighter root
@@ -7084,7 +7091,7 @@ def solve_model(
     # discarding it. ``None`` when no pool is separated.
     _root_pool_bound = None
 
-    if _mc_mode == "auto":
+    if _mc.mode == "auto":
         # The McCormick "nlp" objective bound is a *valid* dual bound only when
         # the objective relaxation is a convex underestimator. The bound solver
         # evaluates the compiled relaxation at x_cv == x_cc (see
@@ -7132,11 +7139,11 @@ def solve_model(
         # "nlp" objective bound (issue #120: a local NLP solve of a nonconvex
         # surface can certify a value ABOVE the true optimum).
         if not _model_is_convex and model._objective is not None:
-            _mc_mode = "lp"
+            _mc.mode = "lp"
         else:
-            _mc_mode = "none"
+            _mc.mode = "none"
 
-    if _mc_mode == "lp" and model._objective is not None:
+    if _mc.mode == "lp" and model._objective is not None:
         from discopt._jax.mccormick_lp import MccormickLPRelaxer
 
         # Resolve the high-level ``rlt`` switch into the two concrete RLT levers:
@@ -7188,7 +7195,7 @@ def solve_model(
         # certified (the worst failure class, issue #185), so it falls back to the
         # NLP/alphaBB path below.
         try:
-            _mc_lp_relaxer = MccormickLPRelaxer(
+            _mc.lp_relaxer = MccormickLPRelaxer(
                 model,
                 superposition=(relaxation_arithmetic == "superposition"),
                 psd_cuts=_cfg.psd_cuts,
@@ -7197,10 +7204,10 @@ def solve_model(
             )
         except Exception as e:
             logger.warning("McCormick LP relaxer setup failed: %s", e)
-            _mc_lp_relaxer = None
-            _mc_mode = "none"
+            _mc.lp_relaxer = None
+            _mc.mode = "none"
         else:
-            if not _mc_lp_relaxer.has_relaxable_nonlinearity:
+            if not _mc.lp_relaxer.has_relaxable_nonlinearity:
                 # No nonlinear term the LP relaxer can bound (products,
                 # monomials, or fractional powers) → standard LP relaxation
                 # = the model itself for linear parts. Drop back to NLP.
@@ -7210,8 +7217,8 @@ def solve_model(
                 # bound. For a pure-discrete model fall to the sound alphaBB
                 # "none" instead — the nonconvex "nlp" objective bound is not
                 # valid there (issue #120).
-                _mc_lp_relaxer = None
-                _mc_mode = "none" if _pure_discrete else "nlp"
+                _mc.lp_relaxer = None
+                _mc.mode = "none" if _pure_discrete else "nlp"
             else:
                 # Integer-ratio partition bound (issue #309; flag-gated,
                 # default OFF). When the PRE-reform model carries an eligible
@@ -7235,7 +7242,7 @@ def solve_model(
                         _ir_model = _prereform_model if _prereform_model is not None else model
                         _ir_specs = detect_integer_ratio_specs(_ir_model)
                         if _ir_specs:
-                            _mc_lp_relaxer.set_integer_ratio_partitioner(
+                            _mc.lp_relaxer.set_integer_ratio_partitioner(
                                 IntegerRatioPartitioner(_ir_model, _ir_specs)
                             )
                             logger.info(
@@ -7254,14 +7261,14 @@ def solve_model(
                 # entirely. ``rlt=True`` already forced rlt_cuts on above, so the
                 # policy is skipped; ``rlt=False`` skips it and pins RLT cuts off.
                 if _rlt_on is False:
-                    _mc_lp_relaxer._rlt_cuts = False
+                    _mc.lp_relaxer._rlt_cuts = False
                 elif (
                     _cfg.cuts == "auto"
                     and not _cfg.psd_cuts
                     and not _cfg.rlt_cuts
                     and _rlt_on is None
                 ):
-                    _apply_auto_cut_policy(model, _mc_lp_relaxer)
+                    _apply_auto_cut_policy(model, _mc.lp_relaxer)
                 # A node is spatial-branchable if there is a finite-box continuous
                 # variable to bisect, OR an integer variable in a nonlinear term
                 # whose domain can be partitioned (issue #194). Register those
@@ -7270,7 +7277,7 @@ def solve_model(
                 _int_cols = {
                     j for off, sz in zip(int_offsets, int_sizes) for j in range(off, off + int(sz))
                 }
-                _nl_int_cols = sorted(_int_cols & set(_mc_lp_relaxer.nonlinear_columns))
+                _nl_int_cols = sorted(_int_cols & set(_mc.lp_relaxer.nonlinear_columns))
                 _has_branchable = _origin_has_finite_continuous_var or bool(_nl_int_cols)
                 if not _has_branchable:
                     logger.info(
@@ -7279,8 +7286,8 @@ def solve_model(
                         "integer); falling back to %s relaxation.",
                         "alphaBB" if _pure_discrete else "NLP",
                     )
-                    _mc_lp_relaxer = None
-                    _mc_mode = "none" if _pure_discrete else "nlp"
+                    _mc.lp_relaxer = None
+                    _mc.mode = "none" if _pure_discrete else "nlp"
                 else:
                     if _nl_int_cols:
                         tree.set_spatial_integer_cols(np.asarray(_nl_int_cols, dtype=np.int64))
@@ -7391,7 +7398,7 @@ def solve_model(
                         # declared bounds (e.g. syn30hfsg's x0..x4 = [0, inf], or
                         # tanksize's bilinear tank-sizing vars) that LP is
                         # unbounded/None over the raw box — a box NO node ever solves
-                        # — so the relaxer was wrongly discarded (``_mc_mode =
+                        # — so the relaxer was wrongly discarded (``_mc.mode =
                         # "none"``) and the whole spatial search fell back to a far
                         # looser alphaBB/interval/NLP root bound, even though the SAME
                         # relaxer yields a valid, much tighter bound on the
@@ -7438,7 +7445,7 @@ def solve_model(
                                 max(time_limit * 0.1, 2.0),
                                 max(_probe_remaining, _DEADLINE_NODE_FLOOR_S),
                             )
-                            _probe = _mc_lp_relaxer.solve_at_node(
+                            _probe = _mc.lp_relaxer.solve_at_node(
                                 _probe_lb, _probe_ub, time_limit=_probe_budget
                             )
                     except Exception as e:  # pragma: no cover - defensive
@@ -7448,8 +7455,8 @@ def solve_model(
                         _probe.status == "infeasible" or _probe.lower_bound is not None
                     )
                     if not _probe_useful:
-                        _mc_lp_relaxer = None
-                        _mc_mode = "none"
+                        _mc.lp_relaxer = None
+                        _mc.mode = "none"
                     elif _deadline_exhausted():
                         # Budget already blown (#654): skip the one-time root cut
                         # pool separation. Its only value is a stronger per-node
@@ -7460,7 +7467,7 @@ def solve_model(
                         # the relaxer/bound are unchanged — only the inherited-pool
                         # speedup is forgone.
                         pass
-                    elif _root_cut_rounds > 0 and getattr(_mc_lp_relaxer, "_psd_cuts", False):
+                    elif _cuts.root_rounds > 0 and getattr(_mc.lp_relaxer, "_psd_cuts", False):
                         # Root cut pool (P3, opt-in): the relaxer carries PSD cuts, so
                         # separate a strong pool ONCE at the root box (many
                         # rounds, near the Shor SDP bound) and capture its rows.
@@ -7477,12 +7484,12 @@ def solve_model(
                                 max(time_limit * 0.25, 5.0),
                                 max(_root_remaining, _DEADLINE_NODE_FLOOR_S),
                             )
-                            _pool_res = _mc_lp_relaxer.solve_at_node(
+                            _pool_res = _mc.lp_relaxer.solve_at_node(
                                 _probe_lb,
                                 _probe_ub,
                                 time_limit=_pool_budget,
                                 out_cuts=_pool_chunks,
-                                psd_max_rounds=_root_cut_rounds,
+                                psd_max_rounds=_cuts.root_rounds,
                             )
                             if _pool_chunks and _pool_chunks[0] is not None:
                                 # solve_at_node captures each separated chunk as a
@@ -7493,14 +7500,14 @@ def solve_model(
                                 # identities. inherited_cuts takes the same form.
                                 _A_pool, _b_pool, _idents_pool = _pool_chunks[0]
                                 _n_pool = _A_pool.shape[0]
-                                if _n_pool > _root_cut_max:
+                                if _n_pool > _cuts.root_max:
                                     # Keep the last (most-recently separated, i.e.
                                     # deepest-round) rows; they target the tightest
                                     # residual violation. Capping bounds per-node LP
                                     # size so inheritance stays cheap.
-                                    _A_pool = _A_pool[-_root_cut_max:]
-                                    _b_pool = _b_pool[-_root_cut_max:]
-                                _root_cut_pool = (_A_pool, _b_pool, _idents_pool)
+                                    _A_pool = _A_pool[-_cuts.root_max :]
+                                    _b_pool = _b_pool[-_cuts.root_max :]
+                                _cuts.root_pool = (_A_pool, _b_pool, _idents_pool)
                                 # Keep the strengthened root bound: it is a valid
                                 # global lower bound (the pool relaxation holds over
                                 # the whole feasible region) and is far tighter than
@@ -7517,15 +7524,15 @@ def solve_model(
                                     "%d rounds), root bound %s — inherited at every node",
                                     _A_pool.shape[0],
                                     _n_pool,
-                                    _root_cut_rounds,
+                                    _cuts.root_rounds,
                                     f"{_pool_res.lower_bound:.4g}"
                                     if _pool_res is not None and _pool_res.lower_bound is not None
                                     else "n/a",
                                 )
                         except Exception as _pool_exc:  # pragma: no cover - defensive
                             logger.debug("root cut pool separation skipped: %s", _pool_exc)
-                            _root_cut_pool = None
-                    elif getattr(_mc_lp_relaxer, "_inc", None) is not None or _cut_inherit_enabled:
+                            _cuts.root_pool = None
+                    elif getattr(_mc.lp_relaxer, "_inc", None) is not None or _cuts.inherit_enabled:
                         # Root cut pool for the GENERAL spatial path (cert:T1.3).
                         # When the incremental engine is active but PSD cuts are
                         # off, the fast path (which skips per-node separation) would
@@ -7539,7 +7546,7 @@ def solve_model(
                         # every sub-box, so an inherited row never removes a
                         # feasible point.
                         #
-                        # THRU-4/CUT-INHERIT-GRAD (``_cut_inherit_enabled``):
+                        # THRU-4/CUT-INHERIT-GRAD (``_cuts.inherit_enabled``):
                         # additionally capture this pool
                         # when the incremental engine is unavailable — cold-path
                         # nodes are exactly where the per-node square/PSD point
@@ -7565,35 +7572,37 @@ def solve_model(
                             # quadratic slice (loops fire but are not the bottleneck,
                             # THRU-4-graduate wall ratio 1.004x). Keys on measured cost
                             # only — never on instance name/shape (CLAUDE.md §2).
-                            _sep_before = dict(getattr(_mc_lp_relaxer, "_sep_timers", {}))
+                            _sep_before = dict(getattr(_mc.lp_relaxer, "_sep_timers", {}))
                             _sqpsd_before = _sep_before.get("univariate_square", 0.0) + (
                                 _sep_before.get("psd", 0.0)
                             )
                             _pool_solve_t0 = time.perf_counter()
-                            _pool_res = _mc_lp_relaxer.solve_at_node(
+                            _pool_res = _mc.lp_relaxer.solve_at_node(
                                 _probe_lb,
                                 _probe_ub,
                                 time_limit=_pool_budget,
                                 out_cuts=_pool_chunks,
                             )
                             _pool_solve_wall = time.perf_counter() - _pool_solve_t0
-                            _sep_after = getattr(_mc_lp_relaxer, "_sep_timers", {})
+                            _sep_after = getattr(_mc.lp_relaxer, "_sep_timers", {})
                             _sqpsd_root_wall = (
                                 _sep_after.get("univariate_square", 0.0)
                                 + _sep_after.get("psd", 0.0)
                                 - _sqpsd_before
                             )
                             if _pool_solve_wall > 1e-9:
-                                _root_sqpsd_frac = max(0.0, _sqpsd_root_wall / _pool_solve_wall)
+                                _cuts.root_sqpsd_frac = max(
+                                    0.0, _sqpsd_root_wall / _pool_solve_wall
+                                )
                             else:
-                                _root_sqpsd_frac = 0.0
+                                _cuts.root_sqpsd_frac = 0.0
                             if _pool_chunks and _pool_chunks[0] is not None:
                                 _A_pool, _b_pool, _idents_pool = _pool_chunks[0]
                                 _n_pool = _A_pool.shape[0]
-                                if _n_pool > _root_cut_max:
-                                    _A_pool = _A_pool[-_root_cut_max:]
-                                    _b_pool = _b_pool[-_root_cut_max:]
-                                _root_cut_pool = (_A_pool, _b_pool, _idents_pool)
+                                if _n_pool > _cuts.root_max:
+                                    _A_pool = _A_pool[-_cuts.root_max :]
+                                    _b_pool = _b_pool[-_cuts.root_max :]
+                                _cuts.root_pool = (_A_pool, _b_pool, _idents_pool)
                                 if (
                                     _pool_res is not None
                                     and _pool_res.lower_bound is not None
@@ -7608,7 +7617,7 @@ def solve_model(
                                 )
                         except Exception as _pool_exc:  # pragma: no cover - defensive
                             logger.debug("general root cut pool skipped: %s", _pool_exc)
-                            _root_cut_pool = None
+                            _cuts.root_pool = None
 
     # AlphaBB alpha estimate (lever 3, issue #194), deferred from above: compute
     # it only when the LP relaxer is NOT the bound source. When the LP relaxer is
@@ -7616,7 +7625,7 @@ def solve_model(
     # (and the per-node alphaBB it enables) is skipped. (The former
     # ``DISCOPT_ALPHABB_WITH_LP`` force-on flag was deprecated/removed in #581 —
     # net-negative and redundant while the LP relaxer supplies every node bound.)
-    if _alphabb_eligible and _mc_lp_relaxer is None and model._objective is not None:
+    if _alphabb_eligible and _mc.lp_relaxer is None and model._objective is not None:
         # C-17: the node bound is derived from ``rigorous_alpha`` (sound interval
         # Hessian) per node box, NOT a sampled root alpha. We only need the
         # internally-minimized objective EXPRESSION here; the per-node alpha is
@@ -7635,16 +7644,16 @@ def solve_model(
     # nonconvex models above; this also catches an explicit
     # mccormick_bounds="nlp" and the lp→nlp fallbacks (e.g. pure-integer
     # nonconvex models). Fall back to the rigorous alphaBB underestimator.
-    if _mc_mode == "nlp" and not _model_is_convex:
+    if _mc.mode == "nlp" and not _model_is_convex:
         logger.warning(
             "McCormick 'nlp' objective bound is not a valid dual bound for "
             "nonconvex models (issue #120); falling back to the alphaBB "
             "underestimator. Use mccormick_bounds='lp' for a valid spatial "
             "relaxation on models with continuous variables."
         )
-        _mc_mode = "none"
+        _mc.mode = "none"
 
-    if _mc_mode == "nlp" and model._objective is not None:
+    if _mc.mode == "nlp" and model._objective is not None:
         from discopt._jax.batch_evaluator import BatchRelaxationEvaluator
         from discopt._jax.relaxation_compiler import (
             compile_constraint_relaxation,
@@ -7653,22 +7662,22 @@ def solve_model(
         from discopt.modeling.core import ObjectiveSense
 
         try:
-            _mc_obj_relax_fn = compile_objective_relaxation(
+            _mc.obj_relax_fn = compile_objective_relaxation(
                 model,
                 partitions=_cfg.partitions,
                 mode=_relax_mode,
                 learned_registry=_learned_registry,
                 arithmetic=relaxation_arithmetic,
             )
-            _mc_obj_eval = BatchRelaxationEvaluator(_mc_obj_relax_fn, n_vars)
-            _mc_negate = model._objective.sense == ObjectiveSense.MAXIMIZE
+            _mc.obj_eval = BatchRelaxationEvaluator(_mc.obj_relax_fn, n_vars)
+            _mc.negate = model._objective.sense == ObjectiveSense.MAXIMIZE
 
-            if _mc_mode == "nlp" and model._constraints:
-                _mc_con_relax_fns = []
-                _mc_con_senses = []
+            if _mc.mode == "nlp" and model._constraints:
+                _mc.con_relax_fns = []
+                _mc.con_senses = []
                 for c in model._constraints:
                     if isinstance(c, Constraint):
-                        _mc_con_relax_fns.append(
+                        _mc.con_relax_fns.append(
                             compile_constraint_relaxation(
                                 c,
                                 model,
@@ -7678,11 +7687,11 @@ def solve_model(
                                 arithmetic=relaxation_arithmetic,
                             )
                         )
-                        _mc_con_senses.append(c.sense)
+                        _mc.con_senses.append(c.sense)
         except Exception as e:
             logger.warning("McCormick relaxation setup failed: %s", e)
-            _mc_obj_eval = None
-            _mc_obj_relax_fn = None
+            _mc.obj_eval = None
+            _mc.obj_relax_fn = None
 
     # --- Warm-start: inject user-provided initial solution as incumbent ---
     if initial_point is not None:
@@ -7726,8 +7735,8 @@ def solve_model(
     # completed point and ``inject_incumbent`` enforces strict improvement — a
     # bad witness costs a few bounded NLP solves, never validity.
     _ir_partitioner = (
-        getattr(_mc_lp_relaxer, "_integer_ratio_partitioner", None)
-        if _mc_lp_relaxer is not None
+        getattr(_mc.lp_relaxer, "_integer_ratio_partitioner", None)
+        if _mc.lp_relaxer is not None
         else None
     )
     # Measured interaction (this container, gear4): the injected incumbent only
@@ -7888,7 +7897,7 @@ def solve_model(
     # --- B&B loop ---
     # McCormick NLP is expensive (one IPM per node). Run it every N iterations
     # and use cheap midpoint bounds in between. Period=1 means every iteration.
-    _mc_nlp_period = 5  # run McCormick NLP every 5th iteration
+    _mc.nlp_period = 5  # run McCormick NLP every 5th iteration
     iteration = 0
     _deadline = t_start + time_limit
 
@@ -8054,7 +8063,7 @@ def solve_model(
     # certifies the welded-beam (nvs05) class; together they do (~23 nodes).
     # A cumulative time budget caps total cost so a deep tree can never let
     # per-node OBBT dominate wall clock.
-    _pn_obbt_structural = _mc_lp_relaxer is not None and bool(_dependent_var_names)
+    _pn_obbt_structural = _mc.lp_relaxer is not None and bool(_dependent_var_names)
     _pn_obbt_small = _pn_obbt_structural and n_vars <= _PER_NODE_OBBT_MAX_VARS
     # T2.5 de-gate: with the scored top-k flag on, the same structural class runs
     # per-node OBBT above the size cap too — but only on the top-k
@@ -8111,7 +8120,7 @@ def solve_model(
     # path did not produce, so it no-op'd on the non-composite-lift class (the #685
     # net-negative); #764 step 1 added cold-path marginals, so the reduction now
     # actually fires here.
-    _phase2_dbbt_enabled = _tuning().phase2_dbbt and _mc_lp_relaxer is not None
+    _phase2_dbbt_enabled = _tuning().phase2_dbbt and _mc.lp_relaxer is not None
     _node_reduce_fn: Any = None
     if _phase2_dbbt_enabled:
         try:
@@ -8358,7 +8367,7 @@ def solve_model(
         # pool inheritance: the default path reads no extra state and is
         # byte-identical.
         _lazy_probing = False
-        if _cut_inherit_enabled and _root_cut_pool is not None:
+        if _cuts.inherit_enabled and _cuts.root_pool is not None:
             try:
                 _glb_now = float(tree.stats()["global_lower_bound"])
             except Exception:  # pragma: no cover - defensive
@@ -8700,7 +8709,7 @@ def solve_model(
             # Cheap, always-valid interval-arithmetic bound. Runs every
             # iteration so nonconvex nodes never sit at -inf between the
             # periodic McCormick-NLP solves (which only fire every
-            # _mc_nlp_period iterations). max() of valid bounds stays valid,
+            # _mc.nlp_period iterations). max() of valid bounds stays valid,
             # so this only ever tightens the global lower bound — enabling
             # certified "optimal" status without weakening soundness.
             if not _model_is_convex and model._objective is not None:
@@ -8721,7 +8730,7 @@ def solve_model(
                             if np.isfinite(pr_lb):
                                 result_lbs[i] = max(result_lbs[i], pr_lb)
             # Tighten lower bounds with McCormick relaxation
-            if _mc_obj_eval is not None:
+            if _mc.obj_eval is not None:
                 try:
                     import jax.numpy as jnp
 
@@ -8732,22 +8741,22 @@ def solve_model(
                     # valid lower bound on the box minimum — correctness issue C-18;
                     # "nlp" is now the only McCormick objective-bound mode here.)
                     _use_mc_nlp = (
-                        _mc_mode == "nlp"
-                        and _mc_obj_relax_fn is not None
-                        and (iteration == 0 or iteration % _mc_nlp_period == 0)
+                        _mc.mode == "nlp"
+                        and _mc.obj_relax_fn is not None
+                        and (iteration == 0 or iteration % _mc.nlp_period == 0)
                     )
                     if _use_mc_nlp:
                         from discopt._jax.mccormick_nlp import solve_mccormick_batch
 
-                        assert _mc_obj_relax_fn is not None
+                        assert _mc.obj_relax_fn is not None
                         mc_lbs = np.asarray(
                             solve_mccormick_batch(
-                                _mc_obj_relax_fn,
-                                _mc_con_relax_fns,
-                                _mc_con_senses,
+                                _mc.obj_relax_fn,
+                                _mc.con_relax_fns,
+                                _mc.con_senses,
                                 lb_jax,
                                 ub_jax,
-                                negate=_mc_negate,
+                                negate=_mc.negate,
                                 deadline=t_start + time_limit,
                             )
                         )
@@ -8794,7 +8803,7 @@ def solve_model(
 
             # LP-form McCormick: lift bilinears, solve as LP via HiGHS.
             # Per-node, ~20ms for problems with tens of bilinear terms.
-            if _mc_lp_relaxer is not None:
+            if _mc.lp_relaxer is not None:
                 for i in range(n_batch):
                     if node_infeasible_mask[i]:
                         continue
@@ -8821,11 +8830,11 @@ def solve_model(
                         continue
                     nlp_failed = result_lbs[i] >= _SENTINEL_THRESHOLD
                     try:
-                        mc_res = _mc_lp_relaxer.solve_at_node(
+                        mc_res = _mc.lp_relaxer.solve_at_node(
                             np.asarray(batch_lb[i]),
                             np.asarray(batch_ub[i]),
                             time_limit=max(_node_remaining, _DEADLINE_NODE_FLOOR_S),
-                            inherited_cuts=_root_cut_pool,
+                            inherited_cuts=_cuts.root_pool,
                             separate=True,
                             want_marginals=_phase2_dbbt_enabled,
                             # THRU-4: with the root pool inherited, skip the per-node
@@ -8833,8 +8842,8 @@ def solve_model(
                             # families are box-independent and already in the pool)
                             # — unless the global-stall governor is probing (C-42).
                             skip_pool_separators=(
-                                _cut_inherit_enabled
-                                and _root_cut_pool is not None
+                                _cuts.inherit_enabled
+                                and _cuts.root_pool is not None
                                 and not _lazy_probing
                             ),
                         )
@@ -8918,7 +8927,7 @@ def solve_model(
             # restores the per-node NLP. Convex / no-LP-relaxer paths are
             # unaffected (the NLP bound matters there, so it runs every node).
             _nlp_stride = _tuning().node_nlp_stride
-            _gate_node_nlp = _mc_lp_relaxer is not None and not _model_is_convex and _nlp_stride > 1
+            _gate_node_nlp = _mc.lp_relaxer is not None and not _model_is_convex and _nlp_stride > 1
 
             # TX1: effective stride. When adaptive back-off is ON and we are in the
             # throttle-safe gated regime, use the (persisted, back-off-grown)
@@ -8970,7 +8979,7 @@ def solve_model(
                 # LP relaxer's bound + primal below.
                 _node_nlp_due = (not _gate_node_nlp) or (int(batch_ids[i]) % _eff_nlp_stride == 0)
                 nlp_result = None
-                if iteration == 0 and _mc_lp_relaxer is None:
+                if iteration == 0 and _mc.lp_relaxer is None:
                     # The root multistart NLP is the only bound source we have.
                     # When the LP relaxer is active, skip it: the LP block below
                     # supplies the bound + primal and SubNLP turns that into
@@ -9053,14 +9062,14 @@ def solve_model(
                         except (ValueError, ArithmeticError, RuntimeError) as e:
                             logger.debug("alphaBB bound failed: %s", e)
                     # McCormick relaxation bound
-                    if _mc_obj_relax_fn is not None:
+                    if _mc.obj_relax_fn is not None:
                         try:
                             import jax.numpy as jnp
 
                             lb_j = jnp.array(node_lb, dtype=jnp.float64)
                             ub_j = jnp.array(node_ub, dtype=jnp.float64)
-                            _use_mc_nlp_serial = _mc_mode == "nlp" and (
-                                iteration == 0 or iteration % _mc_nlp_period == 0
+                            _use_mc_nlp_serial = _mc.mode == "nlp" and (
+                                iteration == 0 or iteration % _mc.nlp_period == 0
                             )
                             if _use_mc_nlp_serial:
                                 from discopt._jax.mccormick_nlp import (
@@ -9068,12 +9077,12 @@ def solve_model(
                                 )
 
                                 mc_lb = solve_mccormick_relaxation_nlp(
-                                    _mc_obj_relax_fn,
-                                    _mc_con_relax_fns,
-                                    _mc_con_senses,
+                                    _mc.obj_relax_fn,
+                                    _mc.con_relax_fns,
+                                    _mc.con_senses,
                                     lb_j,
                                     ub_j,
-                                    negate=_mc_negate,
+                                    negate=_mc.negate,
                                     deadline=t_start + time_limit,
                                 )
                             else:
@@ -9175,13 +9184,13 @@ def solve_model(
                 # and a feasible LP point usable for spatial branching even
                 # when the NLP was skipped (root) or returned infeasible /
                 # iteration_limit (any node).
-                if _mc_lp_relaxer is not None and not _reduced_done_serial:
+                if _mc.lp_relaxer is not None and not _reduced_done_serial:
                     try:
-                        mc_lp_res = _mc_lp_relaxer.solve_at_node(
+                        mc_lp_res = _mc.lp_relaxer.solve_at_node(
                             node_lb,
                             node_ub,
                             time_limit=max(_deadline - time.perf_counter(), _DEADLINE_NODE_FLOOR_S),
-                            inherited_cuts=_root_cut_pool,
+                            inherited_cuts=_cuts.root_pool,
                             separate=True,
                             want_marginals=_phase2_dbbt_enabled,
                             # THRU-4: with the root pool inherited, skip the per-node
@@ -9189,8 +9198,8 @@ def solve_model(
                             # families are box-independent and already in the pool)
                             # — unless the global-stall governor is probing (C-42).
                             skip_pool_separators=(
-                                _cut_inherit_enabled
-                                and _root_cut_pool is not None
+                                _cuts.inherit_enabled
+                                and _cuts.root_pool is not None
                                 and not _lazy_probing
                             ),
                         )
@@ -9635,7 +9644,7 @@ def solve_model(
                 # enforces strict improvement), so a worse seed can never regress
                 # the reported solution.
                 if (
-                    _mc_lp_relaxer is not None
+                    _mc.lp_relaxer is not None
                     and not _model_is_convex
                     and _root_heur_nlp_entry_ok(_active_evaluator)
                 ):
@@ -9795,7 +9804,7 @@ def solve_model(
             # bound and certificate math are untouched.
             if (
                 _tuning().continuous_multistart
-                and _mc_lp_relaxer is not None
+                and _mc.lp_relaxer is not None
                 and not _model_is_convex
                 and not _lns_has_integers
                 and not _root_optimum_proven()
@@ -10688,7 +10697,7 @@ def solve_model(
         if (
             iteration == 0
             and _tuning().root_fixpoint
-            and _mc_lp_relaxer is not None
+            and _mc.lp_relaxer is not None
             and model._objective is not None
         ):
             try:
@@ -10761,13 +10770,13 @@ def solve_model(
                         # future strength A/B; the default flagged path skips it and
                         # keeps the still-valid pool.
                         if (
-                            getattr(_mc_lp_relaxer, "_inc", None) is not None
+                            getattr(_mc.lp_relaxer, "_inc", None) is not None
                             and env_bool("DISCOPT_ROOT_FIXPOINT_REPOOL", False)
                             and _remaining_budget() > _DEADLINE_NODE_FLOOR_S
                         ):
                             try:
                                 _rf_chunks: list = []
-                                _mc_lp_relaxer.solve_at_node(
+                                _mc.lp_relaxer.solve_at_node(
                                     np.asarray(lb, dtype=np.float64),
                                     np.asarray(ub, dtype=np.float64),
                                     time_limit=max(_remaining_budget(), _DEADLINE_NODE_FLOOR_S),
@@ -10776,10 +10785,10 @@ def solve_model(
                                 if _rf_chunks and _rf_chunks[0] is not None:
                                     _A_rf, _b_rf, _idents_rf = _rf_chunks[0]
                                     if _A_rf is not None and _A_rf.shape[0] > 0:
-                                        if _A_rf.shape[0] > _root_cut_max:
-                                            _A_rf = _A_rf[-_root_cut_max:]
-                                            _b_rf = _b_rf[-_root_cut_max:]
-                                        _root_cut_pool = (_A_rf, _b_rf, _idents_rf)
+                                        if _A_rf.shape[0] > _cuts.root_max:
+                                            _A_rf = _A_rf[-_cuts.root_max :]
+                                            _b_rf = _b_rf[-_cuts.root_max :]
+                                        _cuts.root_pool = (_A_rf, _b_rf, _idents_rf)
                             except Exception as _rf_pool_exc:  # pragma: no cover
                                 logger.debug(
                                     "root-fixpoint cut-pool refresh skipped: %s",
@@ -11369,19 +11378,19 @@ def solve_model(
     _solver_stats: dict[str, float] = {
         f"reduce/{_rfam}": float(_rt) for _rfam, _rt in _reduce_timers.items() if _rt > 0.0
     }
-    if _mc_lp_relaxer is not None and getattr(_mc_lp_relaxer, "_sep_timers", None):
-        for _sfam, _stime in _mc_lp_relaxer._sep_timers.items():
+    if _mc.lp_relaxer is not None and getattr(_mc.lp_relaxer, "_sep_timers", None):
+        for _sfam, _stime in _mc.lp_relaxer._sep_timers.items():
             if _stime > 0.0:
                 _solver_stats[f"separate/{_sfam}"] = float(_stime)
     # Root-cut-pool inheritance counters (THRU-4). Surfaced whenever a pool was
     # built or inherited so both the fire-proof (pool populates + inherits) and
     # the skip lever are observable on the final result.
-    if _root_cut_pool is not None:
-        _solver_stats["pool/size"] = float(_root_cut_pool[0].shape[0])
+    if _cuts.root_pool is not None:
+        _solver_stats["pool/size"] = float(_cuts.root_pool[0].shape[0])
     # CUT-INHERIT-GRAD: surface the structure predicate's root feature so the
     # gate decision is verifiable from the outside (entry experiment + fire-proof).
-    if _root_sqpsd_frac is not None:
-        _solver_stats["pool/root_sqpsd_frac"] = float(_root_sqpsd_frac)
+    if _cuts.root_sqpsd_frac is not None:
+        _solver_stats["pool/root_sqpsd_frac"] = float(_cuts.root_sqpsd_frac)
     # CUT-INHERIT-GRAD gate decision (verifiable firing). ``mode``: 1 force-on,
     # 0 force-off (env unset/``=0`` — the shipped default), -1 structure-gated
     # opt-in (``=gated``/``cut_inherit=None``). ``gate_decision``: 1 iff
@@ -11389,14 +11398,14 @@ def solve_model(
     # separated — the pool-fires predicate); the feature it keys on is the pool
     # size, surfaced as ``pool/size`` above.
     _gate_mode_code = (
-        1.0 if _cut_inherit_mode is True else (0.0 if _cut_inherit_mode is False else -1.0)
+        1.0 if _cuts.inherit_mode is True else (0.0 if _cuts.inherit_mode is False else -1.0)
     )
     _solver_stats["pool/gate_mode"] = _gate_mode_code
     _solver_stats["pool/gate_decision"] = (
-        1.0 if (_cut_inherit_enabled and _root_cut_pool is not None) else 0.0
+        1.0 if (_cuts.inherit_enabled and _cuts.root_pool is not None) else 0.0
     )
-    if _mc_lp_relaxer is not None and getattr(_mc_lp_relaxer, "_pool_stats", None):
-        for _pfam, _pcount in _mc_lp_relaxer._pool_stats.items():
+    if _mc.lp_relaxer is not None and getattr(_mc.lp_relaxer, "_pool_stats", None):
+        for _pfam, _pcount in _mc.lp_relaxer._pool_stats.items():
             if _pcount > 0:
                 _solver_stats[f"pool/{_pfam}"] = float(_pcount)
     # C-42 Part 2: node solves the global-bound-stall governor re-separated

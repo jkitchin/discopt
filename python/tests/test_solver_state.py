@@ -29,10 +29,12 @@ import discopt.solver as S
 import pytest
 from discopt.solver.state import (
     LazyStallSeparationState,
+    McCormickRelaxationState,
     PerNodeOBBTBudget,
     PhaseTimers,
     PrimalHeuristicState,
     RootConfig,
+    RootCutPoolState,
 )
 
 pytestmark = pytest.mark.smoke
@@ -98,6 +100,25 @@ MIGRATED: dict[str, tuple[str, str]] = {
     "presolve_reverse_ad": ("_cfg", "presolve_reverse_ad"),
     "subnlp_backend": ("_cfg", "subnlp_backend"),
     "subnlp_enabled": ("_cfg", "subnlp_enabled"),
+    # McCormickRelaxationState — which relaxation the solve settled on. Unlike
+    # `_cfg` these are genuinely renegotiated (8 rebinds of `_mc_mode` alone), and
+    # the renegotiation is a *bound-validity* decision, so the holder is mutable.
+    "_mc_mode": ("_mc", "mode"),
+    "_mc_lp_relaxer": ("_mc", "lp_relaxer"),
+    "_mc_obj_eval": ("_mc", "obj_eval"),
+    "_mc_obj_relax_fn": ("_mc", "obj_relax_fn"),
+    "_mc_negate": ("_mc", "negate"),
+    "_mc_con_relax_fns": ("_mc", "con_relax_fns"),
+    "_mc_con_senses": ("_mc", "con_senses"),
+    "_mc_nlp_period": ("_mc", "nlp_period"),
+    # RootCutPoolState — the root cut pool, its sizing levers and the inheritance
+    # switch. `root_max`/`root_rounds` are the resolved twins RootConfig excluded.
+    "_root_cut_pool": ("_cuts", "root_pool"),
+    "_root_sqpsd_frac": ("_cuts", "root_sqpsd_frac"),
+    "_cut_inherit_mode": ("_cuts", "inherit_mode"),
+    "_cut_inherit_enabled": ("_cuts", "inherit_enabled"),
+    "_root_cut_max": ("_cuts", "root_max"),
+    "_root_cut_rounds": ("_cuts", "root_rounds"),
 }
 
 #: The subset of :data:`MIGRATED` sourced from ``solve_model`` parameters rather
@@ -116,6 +137,18 @@ SHADOW_PAIR_EXCLUSIONS: dict[str, str] = {
     "solver": "_solver",
 }
 
+#: Holders that must stay **mutable**.  ``RootConfig`` is the only frozen one, and
+#: that asymmetry is the whole design: ``frozen=True`` blocks field rebinding and
+#: nothing else, so it is a true guarantee only for a holder whose every field is a
+#: scalar.  ``_mc`` carries a live ``MccormickLPRelaxer`` and ``_cuts`` a live numpy
+#: cut pool; freezing either would advertise immutability the object does not have,
+#: which is the 2026-07-30 design review's failure mode.  Both are also genuinely
+#: rebound (``_mc_mode`` 8 times, ``_root_cut_pool`` 6), so a freeze would not even
+#: type-check as a description of the code.
+MUTABLE_HOLDERS: frozenset[str] = frozenset(
+    {"_timers", "_heur", "_lazy", "_pn_obbt", "_mc", "_cuts"}
+)
+
 #: Holder local -> the dataclass it holds.
 HOLDER_CLASS: dict[str, type] = {
     "_timers": PhaseTimers,
@@ -123,6 +156,8 @@ HOLDER_CLASS: dict[str, type] = {
     "_lazy": LazyStallSeparationState,
     "_pn_obbt": PerNodeOBBTBudget,
     "_cfg": RootConfig,
+    "_mc": McCormickRelaxationState,
+    "_cuts": RootCutPoolState,
 }
 
 #: Constructor arguments for holders whose fields have no defaults.  ``RootConfig``
@@ -249,7 +284,7 @@ def test_every_state_field_is_documented() -> None:
                 f"{cls.__name__}.{f.name} is missing its `#:` field comment"
             )
             checked += 1
-    assert checked >= 21, f"only {checked} fields checked; the probe under-fired"
+    assert checked >= 35, f"only {checked} fields checked; the probe under-fired"
 
 
 def test_migration_table_matches_the_state_classes() -> None:
@@ -342,6 +377,61 @@ def test_root_config_admits_no_shadow_pair() -> None:
     assert checked == len(SHADOW_PAIR_EXCLUSIONS)
 
 
+def test_excluded_shadow_pairs_relocate_their_resolved_twin() -> None:
+    """Excluding the raw parameter must be a *relocation*, not a hole.
+
+    ``test_root_config_admits_no_shadow_pair`` keeps ``root_cut_max`` out of the
+    frozen holder. That is only half the argument: if the resolved twin
+    ``_root_cut_max`` were then threaded onto ``_cfg`` too, or onto nothing at all,
+    the exclusion would have bought nothing. So each resolved twin that *is*
+    migrated must land on a holder other than ``_cfg`` — which is what makes the
+    raw/resolved distinction visible in the type rather than in a comment.
+    """
+    checked = 0
+    relocated = 0
+    for raw, resolved in SHADOW_PAIR_EXCLUSIONS.items():
+        checked += 1
+        if resolved not in MIGRATED:
+            continue  # not threaded yet; the exclusion still holds
+        holder, _ = MIGRATED[resolved]
+        assert holder != "_cfg", (
+            f"{resolved!r} (the resolved twin of the excluded parameter {raw!r}) was "
+            "threaded onto the frozen config holder, re-creating the shadow pair"
+        )
+        assert holder in MUTABLE_HOLDERS
+        relocated += 1
+    assert checked == len(SHADOW_PAIR_EXCLUSIONS)
+    assert relocated >= 2, f"only {relocated} resolved twins relocated; the probe under-fired"
+
+
+def test_root_config_is_the_only_frozen_holder() -> None:
+    """Freezing a holder that carries a live object is a false guarantee.
+
+    ``_mc`` holds a ``MccormickLPRelaxer`` and ``_cuts`` a numpy cut pool; a
+    ``frozen=True`` on either would advertise an immutability that ``frozen`` does
+    not provide (it blocks field *rebinding* only), which is the exact trap the
+    2026-07-30 design review caught this plan walking into with the live B&B
+    ``tree``. This test is the guard against a later "tidy-up" that freezes them
+    all for symmetry.
+    """
+    checked = 0
+    for holder, cls in HOLDER_CLASS.items():
+        frozen = cls.__dataclass_params__.frozen  # type: ignore[attr-defined]
+        if holder in MUTABLE_HOLDERS:
+            assert not frozen, (
+                f"{cls.__name__} ({holder}) is frozen, but it carries values "
+                "`frozen=` cannot protect and fields solve_model rebinds"
+            )
+        else:
+            assert frozen, f"{cls.__name__} ({holder}) is expected to be frozen"
+        checked += 1
+    assert checked == len(HOLDER_CLASS) >= 7
+    assert set(MUTABLE_HOLDERS) | {"_cfg"} == set(HOLDER_CLASS), (
+        "MUTABLE_HOLDERS and HOLDER_CLASS disagree about which holders exist"
+    )
+    print(f"executed frozen/mutable assertions: {checked}")
+
+
 def test_root_config_is_frozen_and_holds_only_immutable_values() -> None:
     """The freeze must be a true guarantee, not a decorative one.
 
@@ -374,4 +464,4 @@ def test_executed_assertion_count_is_nonzero() -> None:
     fn = _solve_model_ast()
     bound = _own_scope_bindings(fn)
     assert len(bound) > 200, f"only {len(bound)} bindings found; the AST walk under-fired"
-    assert len(MIGRATED) >= 40
+    assert len(MIGRATED) >= 54

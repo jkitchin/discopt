@@ -26,6 +26,24 @@ file: with no collision, a *missed* site raises ``NameError`` at runtime, which 
 loud; with a collision it would silently read the module global instead, which is
 the CLAUDE.md §7 failure mode.
 
+.. rubric:: Annotated assignments
+
+``x: T = v`` and ``x.f = v`` are *different AST shapes*, not the same shape with a
+different target: ``ast.AnnAssign`` carries ``simple=1`` only when its target is a
+bare ``Name``, and re-annotating a non-``self`` attribute (``_mc.f: T = v``) is an
+error under mypy even though CPython accepts it.  So a naive rename of an
+``AnnAssign`` target either fails this tool's own AST proof (``simple`` differs) or
+passes it and fails type-checking.  Both were observed: the first refusal was
+``_mc_con_relax_fns: list[Callable] | None = None``.
+
+The tool therefore **lowers** an annotated assignment whose target is being
+migrated into a plain ``Assign``, dropping the annotation — which is the correct
+place for it to go, because the migrated field carries its own annotation on the
+dataclass.  Every dropped annotation is printed so it can be transferred, and the
+lowering is proved by the same AST comparison as everything else (the reference
+transformer performs the identical lowering).  A bare declaration with no value
+(``x: T``) is refused rather than lowered: dropping it would delete a statement.
+
 Usage::
 
     python -u discopt_benchmarks/scripts/thread_solve_model_state.py \
@@ -127,6 +145,49 @@ class _Substituter(ast.NodeTransformer):
         self.mapping = mapping
         self.sites = sites
         self.applied = 0
+        self.lowered = 0
+
+    def visit_AnnAssign(self, node: ast.AnnAssign) -> ast.AST:
+        """Lower ``x: T = v`` to ``holder.f = v`` when ``x`` is being migrated.
+
+        Renaming the target in place is not an option: ``AnnAssign.simple`` is 1
+        only for a bare ``Name`` target, so the shape itself changes, and mypy
+        rejects an annotation on a non-``self`` attribute. The annotation's
+        information is not lost — it lives on the dataclass field instead.
+        """
+        tgt = node.target
+        if (
+            isinstance(tgt, ast.Name)
+            and tgt.id in self.mapping
+            and (tgt.lineno, tgt.col_offset) in self.sites
+        ):
+            if node.value is None:
+                raise SystemExit(
+                    f"REFUSING: {tgt.id} at line {tgt.lineno} is a bare annotation with no "
+                    "value; lowering it would delete a statement. Give it a value by hand first."
+                )
+            self.applied += 1
+            self.lowered += 1
+            return ast.copy_location(
+                ast.Assign(
+                    targets=[
+                        ast.copy_location(
+                            ast.Attribute(
+                                value=ast.copy_location(
+                                    ast.Name(id=self.holder, ctx=ast.Load()), tgt
+                                ),
+                                attr=self.mapping[tgt.id],
+                                ctx=ast.Store(),
+                            ),
+                            tgt,
+                        )
+                    ],
+                    value=self.visit(node.value),
+                    type_comment=None,
+                ),
+                node,
+            )
+        return self.generic_visit(node)
 
     def visit_Name(self, node: ast.Name) -> ast.AST:
         if node.id in self.mapping and (node.lineno, node.col_offset) in self.sites:
@@ -169,34 +230,89 @@ def rewrite(source: Path, holder: str, mapping: dict[str, str], apply: bool) -> 
             "rewrite site would silently read the global instead of raising NameError"
         )
 
+    # The holder name must be free: if ``solve_model`` already uses it for
+    # anything else, every rewritten site would silently read that other object
+    # instead of the state holder — a wrong answer with no NameError to catch it.
+    holder_uses = [n.lineno for n in ast.walk(fn) if isinstance(n, ast.Name) and n.id == holder]
+    if holder_uses:
+        raise SystemExit(
+            f"REFUSING: {holder!r} is already referenced inside {FUNCTION_NAME} at lines "
+            f"{sorted(set(holder_uses))[:10]}; pick a free name"
+        )
+
     sites = _target_sites(fn, set(mapping))
     if not sites:
         raise SystemExit(
             f"REFUSING: no sites found for {sorted(mapping)} — the probe fired on nothing"
         )
 
+    site_positions = {(s.lineno, s.col_offset) for s in sites}
+
+    # ---- annotated assignments are LOWERED, not renamed (see module docstring) #
+    ann_lowerings: dict[tuple[int, int], ast.AnnAssign] = {}
+    dropped_annotations: list[str] = []
+    for node in ast.walk(fn):
+        if not (isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name)):
+            continue
+        tgt = node.target
+        pos = (tgt.lineno, tgt.col_offset)
+        if tgt.id not in mapping or pos not in site_positions:
+            continue
+        if node.value is None:
+            raise SystemExit(
+                f"REFUSING: {tgt.id} at line {tgt.lineno} is a bare annotation with no value; "
+                "lowering it would delete a statement. Give it a value by hand first."
+            )
+        if not (tgt.lineno == node.value.lineno == node.lineno):
+            raise SystemExit(
+                f"REFUSING: the annotated assignment to {tgt.id} at line {tgt.lineno} spans "
+                "lines; lower it by hand."
+            )
+        ann_lowerings[pos] = node
+        dropped_annotations.append(
+            f"  line {tgt.lineno}: {tgt.id}: {ast.unparse(node.annotation)}"
+            f"  ->  {holder}.{mapping[tgt.id]}  (annotation now lives on the dataclass field)"
+        )
+
     # ---- textual edit, right-to-left so earlier offsets stay valid ---------- #
     lines = text.splitlines(keepends=True)
-    by_line: dict[int, list[ast.Name]] = {}
-    for s in sites:
-        by_line.setdefault(s.lineno, []).append(s)
-    for lineno, nodes in by_line.items():
+    # per source line: (start_col, end_col, original name, replacement)
+    edits: dict[int, list[tuple[int, int, str, str]]] = {}
+    for node in sites:
+        if node.end_lineno != node.lineno:
+            raise SystemExit(f"multi-line Name at {node.lineno}; refusing")
+        ann = ann_lowerings.get((node.lineno, node.col_offset))
+        if ann is not None and ann.target is node:
+            # `x: T = v`  ->  `holder.f = v`: replace everything up to the value.
+            assert ann.value is not None
+            span_end = ann.value.col_offset
+            repl = f"{holder}.{mapping[node.id]} = "
+        else:
+            span_end = node.end_col_offset or node.col_offset
+            repl = f"{holder}.{mapping[node.id]}"
+        edits.setdefault(node.lineno, []).append((node.col_offset, span_end, node.id, repl))
+
+    for lineno, spans in edits.items():
         line = lines[lineno - 1]
-        for node in sorted(nodes, key=lambda n: -n.col_offset):
-            start, end = node.col_offset, node.end_col_offset
-            if node.end_lineno != node.lineno:
-                raise SystemExit(f"multi-line Name at {lineno}; refusing")
-            if line[start:end] != node.id:
+        ordered = sorted(spans, key=lambda s: -s[0])
+        for (start, _, _, _), (_, prev_end, _, _) in zip(ordered, ordered[1:], strict=False):
+            if prev_end > start:
                 raise SystemExit(
-                    f"REFUSING: line {lineno} cols {start}:{end} is {line[start:end]!r}, "
-                    f"expected {node.id!r} — AST offsets do not match the text"
+                    f"REFUSING: overlapping rewrite spans on line {lineno} — one target name "
+                    "sits inside another target's span (e.g. inside an annotation)"
                 )
-            line = line[:start] + f"{holder}.{mapping[node.id]}" + line[end:]
+        for start, span_end, name, repl in ordered:
+            if line[start : start + len(name)] != name:
+                raise SystemExit(
+                    f"REFUSING: line {lineno} col {start} is "
+                    f"{line[start : start + len(name)]!r}, expected {name!r} — "
+                    "AST offsets do not match the text"
+                )
+            line = line[:start] + repl + line[span_end:]
         lines[lineno - 1] = line
     new_text = "".join(lines)
 
     # ---- proof: the textual edit == the intended AST substitution ----------- #
-    site_positions = {(s.lineno, s.col_offset) for s in sites}
     ref_tree = ast.parse(text)
     ref_fn = [
         n
@@ -237,9 +353,19 @@ def rewrite(source: Path, holder: str, mapping: dict[str, str], apply: bool) -> 
     print(f"names             : {len(mapping)} -> {sorted(mapping)}")
     print(f"sites rewritten   : {len(sites)}")
     print(f"substitutions     : {sub.applied} (AST reference implementation)")
+    print(f"AnnAssign lowered : {sub.lowered}")
+    if dropped_annotations:
+        print("annotations DROPPED (transfer them to the dataclass field):")
+        for note in dropped_annotations:
+            print(note)
     print(f"sibling defs proved AST-identical: {unchanged}")
     if sub.applied != len(sites):
         raise SystemExit("REFUSING: reference substitution count != textual site count")
+    if sub.lowered != len(ann_lowerings):
+        raise SystemExit(
+            f"REFUSING: reference lowered {sub.lowered} annotated assignments but the textual "
+            f"pass found {len(ann_lowerings)}"
+        )
 
     if apply:
         source.write_text(new_text)

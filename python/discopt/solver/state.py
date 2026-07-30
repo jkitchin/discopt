@@ -55,10 +55,12 @@ from typing import Any
 
 __all__ = [
     "LazyStallSeparationState",
+    "McCormickRelaxationState",
     "PerNodeOBBTBudget",
     "PhaseTimers",
     "PrimalHeuristicState",
     "RootConfig",
+    "RootCutPoolState",
 ]
 
 
@@ -276,3 +278,121 @@ class PerNodeOBBTBudget:
     topk: int | None = None
     #: Budget already consumed; compared against ``budget_total`` at the gate.
     spent: float = 0.0
+
+
+@dataclass(slots=True)
+class McCormickRelaxationState:
+    """Which McCormick relaxation the solve settled on, and the objects it needs.
+
+    .. rubric:: Why this is a *mutable* holder
+
+    Every other name in this module's frozen holder is decided once. These are
+    not. ``mode`` starts as the user's ``mccormick_bounds`` request and is then
+    **renegotiated eight times** as the root region learns what the model can
+    actually support: ``"auto"`` resolves to ``"lp"`` or ``"none"``; an LP relaxer
+    that fails to build, or builds and then proves unusable, demotes ``"lp"`` to
+    ``"none"``/``"nlp"``; and the ``"nlp"`` bound is withdrawn outright for a
+    nonconvex model because it is not a valid dual bound there (issue #120). The
+    census measured 8 rebinds of ``_mc_mode`` and 6 of ``_mc_lp_relaxer``. A
+    ``frozen=True`` holder would have been a lie, and — worse than a lie — the
+    2026-07-30 design review's exact failure mode, since ``frozen`` blocks only
+    rebinding and these carry a *bound-validity* decision.
+
+    .. rubric:: Why they belong together
+
+    The fields are not merely co-located: they are read at a single gate. The
+    spatial loop asks ``mode == "nlp" and iteration % nlp_period == 0`` before it
+    will spend an IPM on the relaxation, and then uses ``obj_eval``/``negate`` to
+    interpret the answer and ``con_relax_fns``/``con_senses`` to screen the
+    constraints. Splitting them across two argument sources would put the mode
+    that decides *whether* a bound is valid in a different place from the objects
+    that compute it.
+
+    ``lp_relaxer`` is the highest-load crosser in the group (34 reads) and the
+    single object the ``root``→``loop`` boundary is built around: the root
+    separates its cut pool, and every node solves against it.
+    """
+
+    #: ``"auto"`` | ``"lp"`` | ``"nlp"`` | ``"none"`` — the relaxation family in
+    #: force. Renegotiated during the root region; ``"none"`` means the spatial
+    #: McCormick path is off and the node bound comes from elsewhere.
+    mode: str = "auto"
+    #: ``MccormickLPRelaxer`` instance when :attr:`mode` is ``"lp"``, else ``None``.
+    lp_relaxer: Any | None = None
+    #: ``BatchRelaxationEvaluator`` over the objective relaxation, for the ``"nlp"``
+    #: bound; ``None`` when that bound is not in force or its setup failed.
+    obj_eval: Any | None = None
+    #: The raw compiled objective relaxation :attr:`obj_eval` wraps.
+    obj_relax_fn: Callable[..., Any] | None = None
+    #: Whether the objective was a MAXIMIZE and the relaxation's value must be
+    #: negated to read as a minimization lower bound.
+    negate: bool = False
+    #: Per-constraint compiled relaxations for the ``"nlp"`` path, positionally
+    #: aligned with :attr:`con_senses`; ``None`` when no constraints were compiled.
+    con_relax_fns: list[Callable] | None = None
+    #: The sense of each entry in :attr:`con_relax_fns`, in the same order.
+    con_senses: list[Any] | None = None
+    #: Run the (expensive, one IPM per node) McCormick NLP bound every Nth loop
+    #: iteration; cheap midpoint bounds are used in between.
+    nlp_period: int = 5
+
+
+@dataclass(slots=True)
+class RootCutPoolState:
+    """The root cut pool, the levers that size it, and the inheritance switch.
+
+    Under root-cut-pool inheritance (THRU-4 / CUT-INHERIT-GRAD) the root separates
+    a PSD/RLT pool once and every node then reproduces the strong root bound for
+    the cost of a warm LP solve instead of re-running the point-separation loops.
+    That mechanism reads all of these at once, which is why they are one holder:
+    the loop's gate is ``inherit_enabled and root_pool is not None``, and a carve
+    that passed the switch from one argument source and the pool from another
+    would split a single predicate in two.
+
+    .. rubric:: This is the "later holder" ``RootConfig`` deferred to
+
+    :class:`RootConfig` deliberately excludes the raw ``root_cut_max`` and
+    ``root_cut_rounds`` parameters because each has a *resolved* twin computed in
+    the setup region (kwarg beats the ``DISCOPT_ROOT_CUT_*`` env default), and
+    carrying both would be a shadow pair that drifts. :attr:`root_max` and
+    :attr:`root_rounds` are those resolved twins, and this is where they live.
+    ``test_root_config_admits_no_shadow_pair`` keeps the raw ones out of the
+    frozen holder; the resolved ones being *here* is what makes that exclusion a
+    relocation rather than a hole.
+
+    .. rubric:: Mutable, and for two different reasons
+
+    :attr:`root_pool` and :attr:`root_sqpsd_frac` are genuine search state — the
+    pool is captured at the root, dropped again when it turns out empty or
+    unusable, and re-captured by the root-fixpoint refresh inside the loop (3 and
+    6 rebinds respectively). :attr:`inherit_mode`, :attr:`inherit_enabled`,
+    :attr:`root_max` and :attr:`root_rounds` are decided once, but they are
+    grouped with the mutable pair rather than frozen alongside them, because a
+    *config* holder carrying a live numpy cut pool is precisely the false
+    guarantee :class:`RootConfig`'s docstring exists to prevent.
+    """
+
+    #: ``(A, b, idents)`` of the separated root cut pool, or ``None`` when no pool
+    #: was captured (the model carries no liftable square/PSD structure, the
+    #: separation failed, or inheritance is forced off).
+    root_pool: Any | None = None
+    #: Fraction of the ONE root pool separation solve's wall spent in the
+    #: square+PSD point-separation loops. Reported as ``pool/root_sqpsd_frac`` for
+    #: observability; explicitly NOT a gate predicate — the CUT-INHERIT-GRAD entry
+    #: experiment showed it does not separate win from neutral. ``None`` when no
+    #: pool is separated.
+    root_sqpsd_frac: float | None = None
+    #: Tri-state inheritance resolution from ``SolverTuning.cut_inherit`` /
+    #: ``DISCOPT_CUT_INHERIT``: ``True`` forces ON, ``False`` (the shipped default)
+    #: forces OFF, ``None`` is the structure-gated opt-in.
+    inherit_mode: bool | None = None
+    #: "Not forced off" — ``inherit_mode is not False``. The condition under which
+    #: the root pool is captured at all; inheritance then engages only if a
+    #: non-empty pool actually populates.
+    inherit_enabled: bool = False
+    #: Resolved cap on pool rows (kwarg ``root_cut_max`` beating
+    #: ``DISCOPT_ROOT_CUT_MAX``); the pool keeps its last ``root_max`` rows.
+    root_max: int = 0
+    #: Resolved PSD separation round budget (kwarg ``root_cut_rounds`` beating
+    #: ``DISCOPT_ROOT_CUT_ROUNDS``); ``0`` disables root PSD separation.
+    root_rounds: int = 0
