@@ -1,0 +1,74 @@
+[ 1/9] 4stufen              phase=diagnosed              next=blf_row_count spec=False fbbt_aux_finite=False
+[ 2/9] beuster              phase=diagnosed              next=term_trilinear spec=False fbbt_aux_finite=False
+[ 3/9] carton7              phase=diagnosed              next=None spec=True fbbt_aux_finite=True
+[ 4/9] contvar              phase=diagnosed              next=term_trilinear spec=False fbbt_aux_finite=False
+[ 5/9] ex14_1_9             phase=diagnosed              next=fixed_row_box_dependent spec=False fbbt_aux_finite=True
+[ 6/9] gear4                phase=diagnosed              next=term_ratio spec=False fbbt_aux_finite=True
+[ 7/9] hda                  phase=diagnosed              next=term_ratio spec=False fbbt_aux_finite=False
+[ 8/9] heatexch_gen1        phase=diagnosed              next=term_univariate spec=False fbbt_aux_finite=False
+[ 9/9] heatexch_gen2        phase=diagnosed              next=term_univariate spec=False fbbt_aux_finite=False
+
+====================================================================================================
+PHASE 5.2 ENTRY EXPERIMENT — census rank #2 `infinite_aux_bounds`
+====================================================================================================
+tree 4f3cd17d-dirty  budget 45.0s  instances 9  wall 96.0s  load 0.60->1.57
+
+--- E8.1 FRAMING: bypass the gate, where does the ladder stop next? ------------------------------
+instance          reproduced            next decline                    spec?    wall(s)
+4stufen           infinite_aux_bounds   blf_row_count:0                 no          47.2
+beuster           infinite_aux_bounds   term_trilinear                  no          50.2
+carton7           infinite_aux_bounds   NONE (spec built)               yes         78.0
+contvar           infinite_aux_bounds   term_trilinear                  no          51.1
+ex14_1_9          infinite_aux_bounds   fixed_row_box_dependent:coeffs  no           1.4
+gear4             infinite_aux_bounds   term_ratio                      no           2.0
+hda               infinite_aux_bounds   term_ratio                      no          56.6
+heatexch_gen1     infinite_aux_bounds   term_univariate:log             no          46.8
+heatexch_gen2     infinite_aux_bounds   term_univariate:log             no          46.3
+
+  reach row-claiming with the gate bypassed: 1 / 9  (carton7)
+  wall of the reachable set: 78.0s of 1926.0s corpus = 4.1%   (whole group 379.6s = 19.7%)
+
+--- E8.2 REPAIRABILITY: FBBT on the relaxation's own rows ----------------------------------------
+instance            cols  inf cols  orig/aux  no-row  cost  box inf  after FBBT  gate ok
+4stufen              230        17      0/17      13     0        0          17    False
+beuster              282        20      0/20      16     0        0          20    False
+carton7              528        24      24/0       0    24       24          24    False
+contvar             1095        64      8/56      38     0        8          64    False
+ex14_1_9               5         1       1/0       0     1        1           1    False
+gear4                 16         2       2/0       0     2        2           2    False
+hda                 1131         6       0/6       3     0        0           6    False
+heatexch_gen1        220        40     16/24      16     4       16          40    False
+heatexch_gen2        339        55     20/35      25     5       20          55    False
+
+  gate would pass after FBBT repair: 0 / 9  (none)
+  ('box inf' = infinite entries in the PRESOLVED ROOT BOX handed to the producer — an original variable the solver could not bound; no relaxation-side repair reaches it)
+
+--- OWNERS OF THE INFINITE COLUMNS --------------------------------------------------------------
+  4stufen           {"blf": 7, "unclaimed_intermediate": 10}
+  beuster           {"blf": 8, "unclaimed_intermediate": 12}
+  carton7           {"original": 24}
+  contvar           {"original": 8, "unclaimed_intermediate": 28, "blf": 28}
+  ex14_1_9          {"original": 1}
+  gear4             {"original": 2}
+  hda               {"unclaimed_intermediate": 6}
+  heatexch_gen1     {"original": 16, "blf": 12, "unclaimed_intermediate": 12}
+  heatexch_gen2     {"original": 20, "unclaimed_intermediate": 20, "blf": 15}
+
+--- EXECUTED PROBES ----------------------------------------------------------------------------
+  bypass_calls                    9
+  columns_examined                3846
+  crashed                         0
+  diagnosed                       9
+  fbbt_row_scans                  115766
+  fbbt_tightenings                855
+  infinite_columns_examined       229
+  instances                       9
+  relaxations_built               9
+  reproduce_calls                 9
+
+--- VERDICT vs the pre-stated kill criteria ------------------------------------------------------
+  E8.1 hypothesis: >=6 of 9 reach row-claiming.  measured 1  -> KILLED
+  E8.2 hypothesis: infinities repairable by FBBT on the relaxation's own rows; KILL if >=5 of 9 survive.  survived 9  -> KILLED
+  JOINT (the only set a producer-side card could actually serve): 0  (none)
+
+artifact: reports/phase52_infinite_aux_entry_4f3cd17d.json

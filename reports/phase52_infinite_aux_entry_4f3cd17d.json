@@ -1,0 +1,3615 @@
+{
+  "baseline": "reports/panel_baseline_f154dcff.json",
+  "budget": 45.0,
+  "census": "reports/phase5_kernel_coverage_census_c346fd73.json",
+  "executed": {
+    "bypass_calls": 9,
+    "columns_examined": 3846,
+    "crashed": 0,
+    "diagnosed": 9,
+    "fbbt_row_scans": 115766,
+    "fbbt_tightenings": 855,
+    "infinite_columns_examined": 229,
+    "instances": 9,
+    "relaxations_built": 9,
+    "reproduce_calls": 9
+  },
+  "git_dirty": true,
+  "git_sha": "4f3cd17d",
+  "instrument_marker": "phase52-infinite-aux-entry-v1",
+  "load_peak": 1.56884765625,
+  "load_start": 0.59716796875,
+  "rows": [
+    {
+      "budget": 45.0,
+      "counts": {
+        "bypass_calls": 1,
+        "columns_examined": 230,
+        "fbbt_row_scans": 864,
+        "fbbt_tightenings": 17,
+        "infinite_columns_examined": 17,
+        "relaxations_built": 1,
+        "reproduce_calls": 1
+      },
+      "diagnosis": {
+        "bypass_next_decline": "blf_row_count",
+        "bypass_next_detail": "0",
+        "bypass_reasons": {
+          "blf_row_count:0": 1
+        },
+        "bypass_spec_built": false,
+        "decline_reproduced": "infinite_aux_bounds",
+        "fbbt": {
+          "all_finite": false,
+          "aux_all_finite": false,
+          "aux_infinite_cols_after": 17,
+          "empty": false,
+          "gate_would_pass": false,
+          "infinite_cols_after": 17,
+          "infinite_entries_after": 34,
+          "rounds": 2,
+          "row_scans": 864,
+          "tightenings": 17
+        },
+        "fbbt_survivor_detail": [
+          {
+            "col": 166,
+            "kind": "aux",
+            "obj_coeff": 0.0,
+            "owner": "blf",
+            "row_nnz": 2
+          },
+          {
+            "col": 167,
+            "kind": "aux",
+            "obj_coeff": 0.0,
+            "owner": "unclaimed_intermediate",
+            "row_nnz": 0
+          },
+          {
+            "col": 168,
+            "kind": "aux",
+            "obj_coeff": 0.0,
+            "owner": "blf",
+            "row_nnz": 0
+          },
+          {
+            "col": 169,
+            "kind": "aux",
+            "obj_coeff": 0.0,
+            "owner": "unclaimed_intermediate",
+            "row_nnz": 0
+          },
+          {
+            "col": 170,
+            "kind": "aux",
+            "obj_coeff": 0.0,
+            "owner": "unclaimed_intermediate",
+            "row_nnz": 0
+          },
+          {
+            "col": 171,
+            "kind": "aux",
+            "obj_coeff": 0.0,
+            "owner": "blf",
+            "row_nnz": 2
+          },
+          {
+            "col": 172,
+            "kind": "aux",
+            "obj_coeff": 0.0,
+            "owner": "unclaimed_intermediate",
+            "row_nnz": 0
+          },
+          {
+            "col": 173,
+            "kind": "aux",
+            "obj_coeff": 0.0,
+            "owner": "blf",
+            "row_nnz": 0
+          },
+          {
+            "col": 174,
+            "kind": "aux",
+            "obj_coeff": 0.0,
+            "owner": "unclaimed_intermediate",
+            "row_nnz": 0
+          },
+          {
+            "col": 175,
+            "kind": "aux",
+            "obj_coeff": 0.0,
+            "owner": "unclaimed_intermediate",
+            "row_nnz": 0
+          },
+          {
+            "col": 176,
+            "kind": "aux",
+            "obj_coeff": 0.0,
+            "owner": "blf",
+            "row_nnz": 2
+          },
+          {
+            "col": 177,
+            "kind": "aux",
+            "obj_coeff": 0.0,
+            "owner": "unclaimed_intermediate",
+            "row_nnz": 0
+          },
+          {
+            "col": 178,
+            "kind": "aux",
+            "obj_coeff": 0.0,
+            "owner": "blf",
+            "row_nnz": 0
+          },
+          {
+            "col": 179,
+            "kind": "aux",
+            "obj_coeff": 0.0,
+            "owner": "unclaimed_intermediate",
+            "row_nnz": 0
+          },
+          {
+            "col": 180,
+            "kind": "aux",
+            "obj_coeff": 0.0,
+            "owner": "unclaimed_intermediate",
+            "row_nnz": 0
+          },
+          {
+            "col": 181,
+            "kind": "aux",
+            "obj_coeff": 0.0,
+            "owner": "blf",
+            "row_nnz": 2
+          },
+          {
+            "col": 185,
+            "kind": "aux",
+            "obj_coeff": 0.0,
+            "owner": "unclaimed_intermediate",
+            "row_nnz": 0
+          }
+        ],
+        "infinite_col_detail": [
+          {
+            "col": 166,
+            "hi": null,
+            "kind": "aux",
+            "lo": null,
+            "obj_coeff": 0.0,
+            "owner": "blf",
+            "row_nnz": 2
+          },
+          {
+            "col": 167,
+            "hi": null,
+            "kind": "aux",
+            "lo": null,
+            "obj_coeff": 0.0,
+            "owner": "unclaimed_intermediate",
+            "row_nnz": 0
+          },
+          {
+            "col": 168,
+            "hi": null,
+            "kind": "aux",
+            "lo": null,
+            "obj_coeff": 0.0,
+            "owner": "blf",
+            "row_nnz": 0
+          },
+          {
+            "col": 169,
+            "hi": null,
+            "kind": "aux",
+            "lo": null,
+            "obj_coeff": 0.0,
+            "owner": "unclaimed_intermediate",
+            "row_nnz": 0
+          },
+          {
+            "col": 170,
+            "hi": null,
+            "kind": "aux",
+            "lo": null,
+            "obj_coeff": 0.0,
+            "owner": "unclaimed_intermediate",
+            "row_nnz": 0
+          },
+          {
+            "col": 171,
+            "hi": null,
+            "kind": "aux",
+            "lo": null,
+            "obj_coeff": 0.0,
+            "owner": "blf",
+            "row_nnz": 2
+          },
+          {
+            "col": 172,
+            "hi": null,
+            "kind": "aux",
+            "lo": null,
+            "obj_coeff": 0.0,
+            "owner": "unclaimed_intermediate",
+            "row_nnz": 0
+          },
+          {
+            "col": 173,
+            "hi": null,
+            "kind": "aux",
+            "lo": null,
+            "obj_coeff": 0.0,
+            "owner": "blf",
+            "row_nnz": 0
+          },
+          {
+            "col": 174,
+            "hi": null,
+            "kind": "aux",
+            "lo": null,
+            "obj_coeff": 0.0,
+            "owner": "unclaimed_intermediate",
+            "row_nnz": 0
+          },
+          {
+            "col": 175,
+            "hi": null,
+            "kind": "aux",
+            "lo": null,
+            "obj_coeff": 0.0,
+            "owner": "unclaimed_intermediate",
+            "row_nnz": 0
+          },
+          {
+            "col": 176,
+            "hi": null,
+            "kind": "aux",
+            "lo": null,
+            "obj_coeff": 0.0,
+            "owner": "blf",
+            "row_nnz": 2
+          },
+          {
+            "col": 177,
+            "hi": null,
+            "kind": "aux",
+            "lo": null,
+            "obj_coeff": 0.0,
+            "owner": "unclaimed_intermediate",
+            "row_nnz": 0
+          },
+          {
+            "col": 178,
+            "hi": null,
+            "kind": "aux",
+            "lo": null,
+            "obj_coeff": 0.0,
+            "owner": "blf",
+            "row_nnz": 0
+          },
+          {
+            "col": 179,
+            "hi": null,
+            "kind": "aux",
+            "lo": null,
+            "obj_coeff": 0.0,
+            "owner": "unclaimed_intermediate",
+            "row_nnz": 0
+          },
+          {
+            "col": 180,
+            "hi": null,
+            "kind": "aux",
+            "lo": null,
+            "obj_coeff": 0.0,
+            "owner": "unclaimed_intermediate",
+            "row_nnz": 0
+          },
+          {
+            "col": 181,
+            "hi": null,
+            "kind": "aux",
+            "lo": null,
+            "obj_coeff": 0.0,
+            "owner": "blf",
+            "row_nnz": 2
+          },
+          {
+            "col": 185,
+            "hi": null,
+            "kind": "aux",
+            "lo": null,
+            "obj_coeff": 0.0,
+            "owner": "unclaimed_intermediate",
+            "row_nnz": 0
+          }
+        ],
+        "infinite_cols": 17,
+        "infinite_cols_aux": 17,
+        "infinite_cols_by_owner": {
+          "blf": 7,
+          "unclaimed_intermediate": 10
+        },
+        "infinite_cols_in_no_row": 13,
+        "infinite_cols_original": 0,
+        "infinite_cols_with_obj_cost": 0,
+        "infinite_entries": 34,
+        "n_aux": 73,
+        "n_cols": 230,
+        "n_orig": 157,
+        "n_rows": 432,
+        "presolved_box_infinite_cols": 0,
+        "spec_without_bypass": false
+      },
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "instance": "4stufen",
+      "instrument_marker": "phase52-infinite-aux-entry-v1",
+      "n_cons": 98,
+      "n_vars": 149,
+      "phase": "diagnosed",
+      "producer_np_isinf_call_sites": 1,
+      "wall_to_gate": 11.00695513699975
+    },
+    {
+      "budget": 45.0,
+      "counts": {
+        "bypass_calls": 1,
+        "columns_examined": 282,
+        "fbbt_row_scans": 1234,
+        "fbbt_tightenings": 18,
+        "infinite_columns_examined": 20,
+        "relaxations_built": 1,
+        "reproduce_calls": 1
+      },
+      "diagnosis": {
+        "bypass_next_decline": "term_trilinear",
+        "bypass_next_detail": "",
+        "bypass_reasons": {
+          "term_trilinear": 1
+        },
+        "bypass_spec_built": false,
+        "decline_reproduced": "infinite_aux_bounds",
+        "fbbt": {
+          "all_finite": false,
+          "aux_all_finite": false,
+          "aux_infinite_cols_after": 20,
+          "empty": false,
+          "gate_would_pass": false,
+          "infinite_cols_after": 20,
+          "infinite_entries_after": 40,
+          "rounds": 2,
+          "row_scans": 1234,
+          "tightenings": 18
+        },
+        "fbbt_survivor_detail": [
+          {
+            "col": 214,
+            "kind": "aux",
+            "obj_coeff": 0.0,
+            "owner": "blf",
+            "row_nnz": 2
+          },
+          {
+            "col": 215,
+            "kind": "aux",
+            "obj_coeff": 0.0,
+            "owner": "unclaimed_intermediate",
+            "row_nnz": 0
+          },
+          {
+            "col": 216,
+            "kind": "aux",
+            "obj_coeff": 0.0,
+            "owner": "blf",
+            "row_nnz": 0
+          },
+          {
+            "col": 217,
+            "kind": "aux",
+            "obj_coeff": 0.0,
+            "owner": "unclaimed_intermediate",
+            "row_nnz": 0
+          },
+          {
+            "col": 218,
+            "kind": "aux",
+            "obj_coeff": 0.0,
+            "owner": "unclaimed_intermediate",
+            "row_nnz": 0
+          },
+          {
+            "col": 219,
+            "kind": "aux",
+            "obj_coeff": 0.0,
+            "owner": "blf",
+            "row_nnz": 2
+          },
+          {
+            "col": 220,
+            "kind": "aux",
+            "obj_coeff": 0.0,
+            "owner": "unclaimed_intermediate",
+            "row_nnz": 0
+          },
+          {
+            "col": 221,
+            "kind": "aux",
+            "obj_coeff": 0.0,
+            "owner": "blf",
+            "row_nnz": 0
+          },
+          {
+            "col": 222,
+            "kind": "aux",
+            "obj_coeff": 0.0,
+            "owner": "unclaimed_intermediate",
+            "row_nnz": 0
+          },
+          {
+            "col": 223,
+            "kind": "aux",
+            "obj_coeff": 0.0,
+            "owner": "unclaimed_intermediate",
+            "row_nnz": 0
+          },
+          {
+            "col": 224,
+            "kind": "aux",
+            "obj_coeff": 0.0,
+            "owner": "blf",
+            "row_nnz": 2
+          },
+          {
+            "col": 225,
+            "kind": "aux",
+            "obj_coeff": 0.0,
+            "owner": "unclaimed_intermediate",
+            "row_nnz": 0
+          },
+          {
+            "col": 226,
+            "kind": "aux",
+            "obj_coeff": 0.0,
+            "owner": "blf",
+            "row_nnz": 0
+          },
+          {
+            "col": 227,
+            "kind": "aux",
+            "obj_coeff": 0.0,
+            "owner": "unclaimed_intermediate",
+            "row_nnz": 0
+          },
+          {
+            "col": 228,
+            "kind": "aux",
+            "obj_coeff": 0.0,
+            "owner": "unclaimed_intermediate",
+            "row_nnz": 0
+          },
+          {
+            "col": 229,
+            "kind": "aux",
+            "obj_coeff": 0.0,
+            "owner": "blf",
+            "row_nnz": 2
+          },
+          {
+            "col": 230,
+            "kind": "aux",
+            "obj_coeff": 0.0,
+            "owner": "unclaimed_intermediate",
+            "row_nnz": 0
+          },
+          {
+            "col": 231,
+            "kind": "aux",
+            "obj_coeff": 0.0,
+            "owner": "blf",
+            "row_nnz": 0
+          },
+          {
+            "col": 232,
+            "kind": "aux",
+            "obj_coeff": 0.0,
+            "owner": "unclaimed_intermediate",
+            "row_nnz": 0
+          },
+          {
+            "col": 233,
+            "kind": "aux",
+            "obj_coeff": 0.0,
+            "owner": "unclaimed_intermediate",
+            "row_nnz": 0
+          }
+        ],
+        "infinite_col_detail": [
+          {
+            "col": 214,
+            "hi": null,
+            "kind": "aux",
+            "lo": null,
+            "obj_coeff": 0.0,
+            "owner": "blf",
+            "row_nnz": 2
+          },
+          {
+            "col": 215,
+            "hi": null,
+            "kind": "aux",
+            "lo": null,
+            "obj_coeff": 0.0,
+            "owner": "unclaimed_intermediate",
+            "row_nnz": 0
+          },
+          {
+            "col": 216,
+            "hi": null,
+            "kind": "aux",
+            "lo": null,
+            "obj_coeff": 0.0,
+            "owner": "blf",
+            "row_nnz": 0
+          },
+          {
+            "col": 217,
+            "hi": null,
+            "kind": "aux",
+            "lo": null,
+            "obj_coeff": 0.0,
+            "owner": "unclaimed_intermediate",
+            "row_nnz": 0
+          },
+          {
+            "col": 218,
+            "hi": null,
+            "kind": "aux",
+            "lo": null,
+            "obj_coeff": 0.0,
+            "owner": "unclaimed_intermediate",
+            "row_nnz": 0
+          },
+          {
+            "col": 219,
+            "hi": null,
+            "kind": "aux",
+            "lo": null,
+            "obj_coeff": 0.0,
+            "owner": "blf",
+            "row_nnz": 2
+          },
+          {
+            "col": 220,
+            "hi": null,
+            "kind": "aux",
+            "lo": null,
+            "obj_coeff": 0.0,
+            "owner": "unclaimed_intermediate",
+            "row_nnz": 0
+          },
+          {
+            "col": 221,
+            "hi": null,
+            "kind": "aux",
+            "lo": null,
+            "obj_coeff": 0.0,
+            "owner": "blf",
+            "row_nnz": 0
+          },
+          {
+            "col": 222,
+            "hi": null,
+            "kind": "aux",
+            "lo": null,
+            "obj_coeff": 0.0,
+            "owner": "unclaimed_intermediate",
+            "row_nnz": 0
+          },
+          {
+            "col": 223,
+            "hi": null,
+            "kind": "aux",
+            "lo": null,
+            "obj_coeff": 0.0,
+            "owner": "unclaimed_intermediate",
+            "row_nnz": 0
+          },
+          {
+            "col": 224,
+            "hi": null,
+            "kind": "aux",
+            "lo": null,
+            "obj_coeff": 0.0,
+            "owner": "blf",
+            "row_nnz": 2
+          },
+          {
+            "col": 225,
+            "hi": null,
+            "kind": "aux",
+            "lo": null,
+            "obj_coeff": 0.0,
+            "owner": "unclaimed_intermediate",
+            "row_nnz": 0
+          },
+          {
+            "col": 226,
+            "hi": null,
+            "kind": "aux",
+            "lo": null,
+            "obj_coeff": 0.0,
+            "owner": "blf",
+            "row_nnz": 0
+          },
+          {
+            "col": 227,
+            "hi": null,
+            "kind": "aux",
+            "lo": null,
+            "obj_coeff": 0.0,
+            "owner": "unclaimed_intermediate",
+            "row_nnz": 0
+          },
+          {
+            "col": 228,
+            "hi": null,
+            "kind": "aux",
+            "lo": null,
+            "obj_coeff": 0.0,
+            "owner": "unclaimed_intermediate",
+            "row_nnz": 0
+          },
+          {
+            "col": 229,
+            "hi": null,
+            "kind": "aux",
+            "lo": null,
+            "obj_coeff": 0.0,
+            "owner": "blf",
+            "row_nnz": 2
+          },
+          {
+            "col": 230,
+            "hi": null,
+            "kind": "aux",
+            "lo": null,
+            "obj_coeff": 0.0,
+            "owner": "unclaimed_intermediate",
+            "row_nnz": 0
+          },
+          {
+            "col": 231,
+            "hi": null,
+            "kind": "aux",
+            "lo": null,
+            "obj_coeff": 0.0,
+            "owner": "blf",
+            "row_nnz": 0
+          },
+          {
+            "col": 232,
+            "hi": null,
+            "kind": "aux",
+            "lo": null,
+            "obj_coeff": 0.0,
+            "owner": "unclaimed_intermediate",
+            "row_nnz": 0
+          },
+          {
+            "col": 233,
+            "hi": null,
+            "kind": "aux",
+            "lo": null,
+            "obj_coeff": 0.0,
+            "owner": "unclaimed_intermediate",
+            "row_nnz": 0
+          }
+        ],
+        "infinite_cols": 20,
+        "infinite_cols_aux": 20,
+        "infinite_cols_by_owner": {
+          "blf": 8,
+          "unclaimed_intermediate": 12
+        },
+        "infinite_cols_in_no_row": 16,
+        "infinite_cols_original": 0,
+        "infinite_cols_with_obj_cost": 0,
+        "infinite_entries": 40,
+        "n_aux": 117,
+        "n_cols": 282,
+        "n_orig": 165,
+        "n_rows": 617,
+        "presolved_box_infinite_cols": 0,
+        "spec_without_bypass": false
+      },
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "instance": "beuster",
+      "instrument_marker": "phase52-infinite-aux-entry-v1",
+      "n_cons": 114,
+      "n_vars": 157,
+      "phase": "diagnosed",
+      "producer_np_isinf_call_sites": 1,
+      "wall_to_gate": 14.918833386996994
+    },
+    {
+      "budget": 45.0,
+      "counts": {
+        "bypass_calls": 1,
+        "columns_examined": 528,
+        "fbbt_row_scans": 3038,
+        "fbbt_tightenings": 19,
+        "infinite_columns_examined": 24,
+        "relaxations_built": 1,
+        "reproduce_calls": 1
+      },
+      "diagnosis": {
+        "bypass_next_decline": null,
+        "bypass_next_detail": "",
+        "bypass_reasons": {},
+        "bypass_spec_built": true,
+        "bypass_spec_infinite_entries": 24,
+        "bypass_spec_terms": 200,
+        "decline_reproduced": "infinite_aux_bounds",
+        "fbbt": {
+          "all_finite": false,
+          "aux_all_finite": true,
+          "aux_infinite_cols_after": 0,
+          "empty": false,
+          "gate_would_pass": false,
+          "infinite_cols_after": 24,
+          "infinite_entries_after": 24,
+          "rounds": 2,
+          "row_scans": 3038,
+          "tightenings": 19
+        },
+        "fbbt_survivor_detail": [
+          {
+            "col": 208,
+            "kind": "original",
+            "obj_coeff": 1.0,
+            "owner": "original",
+            "row_nnz": 1
+          },
+          {
+            "col": 209,
+            "kind": "original",
+            "obj_coeff": 1.0,
+            "owner": "original",
+            "row_nnz": 1
+          },
+          {
+            "col": 210,
+            "kind": "original",
+            "obj_coeff": 1.0,
+            "owner": "original",
+            "row_nnz": 1
+          },
+          {
+            "col": 211,
+            "kind": "original",
+            "obj_coeff": 1.0,
+            "owner": "original",
+            "row_nnz": 1
+          },
+          {
+            "col": 212,
+            "kind": "original",
+            "obj_coeff": 1.0,
+            "owner": "original",
+            "row_nnz": 1
+          },
+          {
+            "col": 213,
+            "kind": "original",
+            "obj_coeff": 1.0,
+            "owner": "original",
+            "row_nnz": 1
+          },
+          {
+            "col": 214,
+            "kind": "original",
+            "obj_coeff": 1.0,
+            "owner": "original",
+            "row_nnz": 1
+          },
+          {
+            "col": 215,
+            "kind": "original",
+            "obj_coeff": 1.0,
+            "owner": "original",
+            "row_nnz": 1
+          },
+          {
+            "col": 216,
+            "kind": "original",
+            "obj_coeff": 1.0,
+            "owner": "original",
+            "row_nnz": 1
+          },
+          {
+            "col": 217,
+            "kind": "original",
+            "obj_coeff": 1.0,
+            "owner": "original",
+            "row_nnz": 1
+          },
+          {
+            "col": 218,
+            "kind": "original",
+            "obj_coeff": 1.0,
+            "owner": "original",
+            "row_nnz": 1
+          },
+          {
+            "col": 219,
+            "kind": "original",
+            "obj_coeff": 1.0,
+            "owner": "original",
+            "row_nnz": 1
+          },
+          {
+            "col": 220,
+            "kind": "original",
+            "obj_coeff": 1.0,
+            "owner": "original",
+            "row_nnz": 1
+          },
+          {
+            "col": 221,
+            "kind": "original",
+            "obj_coeff": 1.0,
+            "owner": "original",
+            "row_nnz": 1
+          },
+          {
+            "col": 222,
+            "kind": "original",
+            "obj_coeff": 1.0,
+            "owner": "original",
+            "row_nnz": 1
+          },
+          {
+            "col": 223,
+            "kind": "original",
+            "obj_coeff": 1.0,
+            "owner": "original",
+            "row_nnz": 1
+          },
+          {
+            "col": 224,
+            "kind": "original",
+            "obj_coeff": 1.0,
+            "owner": "original",
+            "row_nnz": 1
+          },
+          {
+            "col": 225,
+            "kind": "original",
+            "obj_coeff": 1.0,
+            "owner": "original",
+            "row_nnz": 1
+          },
+          {
+            "col": 226,
+            "kind": "original",
+            "obj_coeff": 1.0,
+            "owner": "original",
+            "row_nnz": 1
+          },
+          {
+            "col": 227,
+            "kind": "original",
+            "obj_coeff": 1.0,
+            "owner": "original",
+            "row_nnz": 1
+          },
+          {
+            "col": 228,
+            "kind": "original",
+            "obj_coeff": 1.0,
+            "owner": "original",
+            "row_nnz": 1
+          },
+          {
+            "col": 229,
+            "kind": "original",
+            "obj_coeff": 1.0,
+            "owner": "original",
+            "row_nnz": 1
+          },
+          {
+            "col": 230,
+            "kind": "original",
+            "obj_coeff": 1.0,
+            "owner": "original",
+            "row_nnz": 1
+          },
+          {
+            "col": 231,
+            "kind": "original",
+            "obj_coeff": 1.0,
+            "owner": "original",
+            "row_nnz": 1
+          }
+        ],
+        "infinite_col_detail": [
+          {
+            "col": 208,
+            "hi": null,
+            "kind": "original",
+            "lo": 0.0,
+            "obj_coeff": 1.0,
+            "owner": "unclaimed_intermediate",
+            "row_nnz": 1
+          },
+          {
+            "col": 209,
+            "hi": null,
+            "kind": "original",
+            "lo": 0.0,
+            "obj_coeff": 1.0,
+            "owner": "unclaimed_intermediate",
+            "row_nnz": 1
+          },
+          {
+            "col": 210,
+            "hi": null,
+            "kind": "original",
+            "lo": 0.0,
+            "obj_coeff": 1.0,
+            "owner": "unclaimed_intermediate",
+            "row_nnz": 1
+          },
+          {
+            "col": 211,
+            "hi": null,
+            "kind": "original",
+            "lo": 0.0,
+            "obj_coeff": 1.0,
+            "owner": "unclaimed_intermediate",
+            "row_nnz": 1
+          },
+          {
+            "col": 212,
+            "hi": null,
+            "kind": "original",
+            "lo": 0.0,
+            "obj_coeff": 1.0,
+            "owner": "unclaimed_intermediate",
+            "row_nnz": 1
+          },
+          {
+            "col": 213,
+            "hi": null,
+            "kind": "original",
+            "lo": 0.0,
+            "obj_coeff": 1.0,
+            "owner": "unclaimed_intermediate",
+            "row_nnz": 1
+          },
+          {
+            "col": 214,
+            "hi": null,
+            "kind": "original",
+            "lo": 0.0,
+            "obj_coeff": 1.0,
+            "owner": "unclaimed_intermediate",
+            "row_nnz": 1
+          },
+          {
+            "col": 215,
+            "hi": null,
+            "kind": "original",
+            "lo": 0.0,
+            "obj_coeff": 1.0,
+            "owner": "unclaimed_intermediate",
+            "row_nnz": 1
+          },
+          {
+            "col": 216,
+            "hi": null,
+            "kind": "original",
+            "lo": 0.0,
+            "obj_coeff": 1.0,
+            "owner": "unclaimed_intermediate",
+            "row_nnz": 1
+          },
+          {
+            "col": 217,
+            "hi": null,
+            "kind": "original",
+            "lo": 0.0,
+            "obj_coeff": 1.0,
+            "owner": "unclaimed_intermediate",
+            "row_nnz": 1
+          },
+          {
+            "col": 218,
+            "hi": null,
+            "kind": "original",
+            "lo": 0.0,
+            "obj_coeff": 1.0,
+            "owner": "unclaimed_intermediate",
+            "row_nnz": 1
+          },
+          {
+            "col": 219,
+            "hi": null,
+            "kind": "original",
+            "lo": 0.0,
+            "obj_coeff": 1.0,
+            "owner": "unclaimed_intermediate",
+            "row_nnz": 1
+          },
+          {
+            "col": 220,
+            "hi": null,
+            "kind": "original",
+            "lo": 0.0,
+            "obj_coeff": 1.0,
+            "owner": "unclaimed_intermediate",
+            "row_nnz": 1
+          },
+          {
+            "col": 221,
+            "hi": null,
+            "kind": "original",
+            "lo": 0.0,
+            "obj_coeff": 1.0,
+            "owner": "unclaimed_intermediate",
+            "row_nnz": 1
+          },
+          {
+            "col": 222,
+            "hi": null,
+            "kind": "original",
+            "lo": 0.0,
+            "obj_coeff": 1.0,
+            "owner": "unclaimed_intermediate",
+            "row_nnz": 1
+          },
+          {
+            "col": 223,
+            "hi": null,
+            "kind": "original",
+            "lo": 0.0,
+            "obj_coeff": 1.0,
+            "owner": "unclaimed_intermediate",
+            "row_nnz": 1
+          },
+          {
+            "col": 224,
+            "hi": null,
+            "kind": "original",
+            "lo": 0.0,
+            "obj_coeff": 1.0,
+            "owner": "unclaimed_intermediate",
+            "row_nnz": 1
+          },
+          {
+            "col": 225,
+            "hi": null,
+            "kind": "original",
+            "lo": 0.0,
+            "obj_coeff": 1.0,
+            "owner": "unclaimed_intermediate",
+            "row_nnz": 1
+          },
+          {
+            "col": 226,
+            "hi": null,
+            "kind": "original",
+            "lo": 0.0,
+            "obj_coeff": 1.0,
+            "owner": "unclaimed_intermediate",
+            "row_nnz": 1
+          },
+          {
+            "col": 227,
+            "hi": null,
+            "kind": "original",
+            "lo": 0.0,
+            "obj_coeff": 1.0,
+            "owner": "unclaimed_intermediate",
+            "row_nnz": 1
+          },
+          {
+            "col": 228,
+            "hi": null,
+            "kind": "original",
+            "lo": 0.0,
+            "obj_coeff": 1.0,
+            "owner": "unclaimed_intermediate",
+            "row_nnz": 1
+          },
+          {
+            "col": 229,
+            "hi": null,
+            "kind": "original",
+            "lo": 0.0,
+            "obj_coeff": 1.0,
+            "owner": "unclaimed_intermediate",
+            "row_nnz": 1
+          },
+          {
+            "col": 230,
+            "hi": null,
+            "kind": "original",
+            "lo": 0.0,
+            "obj_coeff": 1.0,
+            "owner": "unclaimed_intermediate",
+            "row_nnz": 1
+          },
+          {
+            "col": 231,
+            "hi": null,
+            "kind": "original",
+            "lo": 0.0,
+            "obj_coeff": 1.0,
+            "owner": "unclaimed_intermediate",
+            "row_nnz": 1
+          }
+        ],
+        "infinite_cols": 24,
+        "infinite_cols_aux": 0,
+        "infinite_cols_by_owner": {
+          "original": 24
+        },
+        "infinite_cols_in_no_row": 0,
+        "infinite_cols_original": 24,
+        "infinite_cols_with_obj_cost": 24,
+        "infinite_entries": 24,
+        "n_aux": 200,
+        "n_cols": 528,
+        "n_orig": 328,
+        "n_rows": 1519,
+        "presolved_box_infinite_cols": 24,
+        "spec_without_bypass": false
+      },
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "instance": "carton7",
+      "instrument_marker": "phase52-infinite-aux-entry-v1",
+      "n_cons": 687,
+      "n_vars": 328,
+      "phase": "diagnosed",
+      "producer_np_isinf_call_sites": 1,
+      "wall_to_gate": 15.28243903099792
+    },
+    {
+      "budget": 45.0,
+      "counts": {
+        "bypass_calls": 1,
+        "columns_examined": 1095,
+        "fbbt_row_scans": 19260,
+        "fbbt_tightenings": 260,
+        "infinite_columns_examined": 64,
+        "relaxations_built": 1,
+        "reproduce_calls": 1
+      },
+      "diagnosis": {
+        "bypass_next_decline": "term_trilinear",
+        "bypass_next_detail": "",
+        "bypass_reasons": {
+          "term_trilinear": 1
+        },
+        "bypass_spec_built": false,
+        "decline_reproduced": "infinite_aux_bounds",
+        "fbbt": {
+          "all_finite": false,
+          "aux_all_finite": false,
+          "aux_infinite_cols_after": 56,
+          "empty": false,
+          "gate_would_pass": false,
+          "infinite_cols_after": 64,
+          "infinite_entries_after": 108,
+          "rounds": 6,
+          "row_scans": 19260,
+          "tightenings": 260
+        },
+        "fbbt_survivor_detail": [
+          {
+            "col": 154,
+            "kind": "original",
+            "obj_coeff": 0.0,
+            "owner": "original",
+            "row_nnz": 1
+          },
+          {
+            "col": 155,
+            "kind": "original",
+            "obj_coeff": 0.0,
+            "owner": "original",
+            "row_nnz": 1
+          },
+          {
+            "col": 162,
+            "kind": "original",
+            "obj_coeff": 0.0,
+            "owner": "original",
+            "row_nnz": 1
+          },
+          {
+            "col": 163,
+            "kind": "original",
+            "obj_coeff": 0.0,
+            "owner": "original",
+            "row_nnz": 1
+          },
+          {
+            "col": 183,
+            "kind": "original",
+            "obj_coeff": 0.0,
+            "owner": "original",
+            "row_nnz": 1
+          },
+          {
+            "col": 184,
+            "kind": "original",
+            "obj_coeff": 0.0,
+            "owner": "original",
+            "row_nnz": 1
+          },
+          {
+            "col": 189,
+            "kind": "original",
+            "obj_coeff": 0.0,
+            "owner": "original",
+            "row_nnz": 1
+          },
+          {
+            "col": 190,
+            "kind": "original",
+            "obj_coeff": 0.0,
+            "owner": "original",
+            "row_nnz": 1
+          },
+          {
+            "col": 408,
+            "kind": "aux",
+            "obj_coeff": 0.0,
+            "owner": "unclaimed_intermediate",
+            "row_nnz": 4
+          },
+          {
+            "col": 449,
+            "kind": "aux",
+            "obj_coeff": 0.0,
+            "owner": "unclaimed_intermediate",
+            "row_nnz": 4
+          },
+          {
+            "col": 644,
+            "kind": "aux",
+            "obj_coeff": 0.0,
+            "owner": "unclaimed_intermediate",
+            "row_nnz": 2
+          },
+          {
+            "col": 696,
+            "kind": "aux",
+            "obj_coeff": 0.0,
+            "owner": "unclaimed_intermediate",
+            "row_nnz": 2
+          },
+          {
+            "col": 719,
+            "kind": "aux",
+            "obj_coeff": 0.0,
+            "owner": "unclaimed_intermediate",
+            "row_nnz": 2
+          },
+          {
+            "col": 747,
+            "kind": "aux",
+            "obj_coeff": 0.0,
+            "owner": "unclaimed_intermediate",
+            "row_nnz": 2
+          },
+          {
+            "col": 757,
+            "kind": "aux",
+            "obj_coeff": 0.0,
+            "owner": "unclaimed_intermediate",
+            "row_nnz": 2
+          },
+          {
+            "col": 758,
+            "kind": "aux",
+            "obj_coeff": 0.0,
+            "owner": "blf",
+            "row_nnz": 0
+          },
+          {
+            "col": 761,
+            "kind": "aux",
+            "obj_coeff": 0.0,
+            "owner": "blf",
+            "row_nnz": 0
+          },
+          {
+            "col": 762,
+            "kind": "aux",
+            "obj_coeff": 0.0,
+            "owner": "unclaimed_intermediate",
+            "row_nnz": 0
+          },
+          {
+            "col": 763,
+            "kind": "aux",
+            "obj_coeff": 0.0,
+            "owner": "blf",
+            "row_nnz": 0
+          },
+          {
+            "col": 769,
+            "kind": "aux",
+            "obj_coeff": 0.0,
+            "owner": "blf",
+            "row_nnz": 0
+          },
+          {
+            "col": 770,
+            "kind": "aux",
+            "obj_coeff": 0.0,
+            "owner": "blf",
+            "row_nnz": 0
+          },
+          {
+            "col": 771,
+            "kind": "aux",
+            "obj_coeff": 0.0,
+            "owner": "blf",
+            "row_nnz": 0
+          },
+          {
+            "col": 772,
+            "kind": "aux",
+            "obj_coeff": 0.0,
+            "owner": "blf",
+            "row_nnz": 0
+          },
+          {
+            "col": 773,
+            "kind": "aux",
+            "obj_coeff": 0.0,
+            "owner": "blf",
+            "row_nnz": 0
+          },
+          {
+            "col": 774,
+            "kind": "aux",
+            "obj_coeff": 0.0,
+            "owner": "unclaimed_intermediate",
+            "row_nnz": 2
+          },
+          {
+            "col": 796,
+            "kind": "aux",
+            "obj_coeff": 0.0,
+            "owner": "unclaimed_intermediate",
+            "row_nnz": 2
+          },
+          {
+            "col": 809,
+            "kind": "aux",
+            "obj_coeff": 0.0,
+            "owner": "unclaimed_intermediate",
+            "row_nnz": 2
+          },
+          {
+            "col": 810,
+            "kind": "aux",
+            "obj_coeff": 0.0,
+            "owner": "blf",
+            "row_nnz": 0
+          },
+          {
+            "col": 813,
+            "kind": "aux",
+            "obj_coeff": 0.0,
+            "owner": "blf",
+            "row_nnz": 0
+          },
+          {
+            "col": 814,
+            "kind": "aux",
+            "obj_coeff": 0.0,
+            "owner": "unclaimed_intermediate",
+            "row_nnz": 0
+          },
+          {
+            "col": 815,
+            "kind": "aux",
+            "obj_coeff": 0.0,
+            "owner": "blf",
+            "row_nnz": 0
+          },
+          {
+            "col": 821,
+            "kind": "aux",
+            "obj_coeff": 0.0,
+            "owner": "blf",
+            "row_nnz": 0
+          },
+          {
+            "col": 822,
+            "kind": "aux",
+            "obj_coeff": 0.0,
+            "owner": "blf",
+            "row_nnz": 0
+          },
+          {
+            "col": 823,
+            "kind": "aux",
+            "obj_coeff": 0.0,
+            "owner": "blf",
+            "row_nnz": 0
+          },
+          {
+            "col": 824,
+            "kind": "aux",
+            "obj_coeff": 0.0,
+            "owner": "blf",
+            "row_nnz": 0
+          },
+          {
+            "col": 825,
+            "kind": "aux",
+            "obj_coeff": 0.0,
+            "owner": "blf",
+            "row_nnz": 0
+          },
+          {
+            "col": 826,
+            "kind": "aux",
+            "obj_coeff": 0.0,
+            "owner": "unclaimed_intermediate",
+            "row_nnz": 2
+          },
+          {
+            "col": 848,
+            "kind": "aux",
+            "obj_coeff": 0.0,
+            "owner": "unclaimed_intermediate",
+            "row_nnz": 2
+          },
+          {
+            "col": 901,
+            "kind": "aux",
+            "obj_coeff": 0.0,
+            "owner": "unclaimed_intermediate",
+            "row_nnz": 2
+          },
+          {
+            "col": 923,
+            "kind": "aux",
+            "obj_coeff": 0.0,
+            "owner": "unclaimed_intermediate",
+            "row_nnz": 2
+          }
+        ],
+        "infinite_col_detail": [
+          {
+            "col": 154,
+            "hi": 7.586415720228146,
+            "kind": "original",
+            "lo": null,
+            "obj_coeff": 0.0,
+            "owner": "unclaimed_intermediate",
+            "row_nnz": 1
+          },
+          {
+            "col": 155,
+            "hi": 7.586415720228146,
+            "kind": "original",
+            "lo": null,
+            "obj_coeff": 0.0,
+            "owner": "unclaimed_intermediate",
+            "row_nnz": 1
+          },
+          {
+            "col": 162,
+            "hi": 8.278050588562515,
+            "kind": "original",
+            "lo": null,
+            "obj_coeff": 0.0,
+            "owner": "unclaimed_intermediate",
+            "row_nnz": 1
+          },
+          {
+            "col": 163,
+            "hi": 8.278050588562515,
+            "kind": "original",
+            "lo": null,
+            "obj_coeff": 0.0,
+            "owner": "unclaimed_intermediate",
+            "row_nnz": 1
+          },
+          {
+            "col": 183,
+            "hi": 1.6094379124341,
+            "kind": "original",
+            "lo": null,
+            "obj_coeff": 0.0,
+            "owner": "unclaimed_intermediate",
+            "row_nnz": 1
+          },
+          {
+            "col": 184,
+            "hi": 1.6094379124341,
+            "kind": "original",
+            "lo": null,
+            "obj_coeff": 0.0,
+            "owner": "unclaimed_intermediate",
+            "row_nnz": 1
+          },
+          {
+            "col": 189,
+            "hi": 1.6094379124341,
+            "kind": "original",
+            "lo": null,
+            "obj_coeff": 0.0,
+            "owner": "unclaimed_intermediate",
+            "row_nnz": 1
+          },
+          {
+            "col": 190,
+            "hi": 1.6094379124341,
+            "kind": "original",
+            "lo": null,
+            "obj_coeff": 0.0,
+            "owner": "unclaimed_intermediate",
+            "row_nnz": 1
+          },
+          {
+            "col": 408,
+            "hi": 7.783083655608741,
+            "kind": "aux",
+            "lo": null,
+            "obj_coeff": 0.0,
+            "owner": "unclaimed_intermediate",
+            "row_nnz": 4
+          },
+          {
+            "col": 449,
+            "hi": 6.559747711551022,
+            "kind": "aux",
+            "lo": null,
+            "obj_coeff": 0.0,
+            "owner": "unclaimed_intermediate",
+            "row_nnz": 4
+          },
+          {
+            "col": 644,
+            "hi": 6.332736867526143,
+            "kind": "aux",
+            "lo": null,
+            "obj_coeff": 0.0,
+            "owner": "unclaimed_intermediate",
+            "row_nnz": 2
+          },
+          {
+            "col": 696,
+            "hi": 14.466241118590613,
+            "kind": "aux",
+            "lo": null,
+            "obj_coeff": 0.0,
+            "owner": "unclaimed_intermediate",
+            "row_nnz": 2
+          },
+          {
+            "col": 719,
+            "hi": 8.201079188251722,
+            "kind": "aux",
+            "lo": null,
+            "obj_coeff": 0.0,
+            "owner": "unclaimed_intermediate",
+            "row_nnz": 2
+          },
+          {
+            "col": 747,
+            "hi": 9.07059197950923,
+            "kind": "aux",
+            "lo": null,
+            "obj_coeff": 0.0,
+            "owner": "unclaimed_intermediate",
+            "row_nnz": 2
+          },
+          {
+            "col": 757,
+            "hi": null,
+            "kind": "aux",
+            "lo": null,
+            "obj_coeff": 0.0,
+            "owner": "unclaimed_intermediate",
+            "row_nnz": 2
+          },
+          {
+            "col": 758,
+            "hi": null,
+            "kind": "aux",
+            "lo": null,
+            "obj_coeff": 0.0,
+            "owner": "blf",
+            "row_nnz": 0
+          },
+          {
+            "col": 761,
+            "hi": null,
+            "kind": "aux",
+            "lo": null,
+            "obj_coeff": 0.0,
+            "owner": "blf",
+            "row_nnz": 0
+          },
+          {
+            "col": 762,
+            "hi": null,
+            "kind": "aux",
+            "lo": null,
+            "obj_coeff": 0.0,
+            "owner": "unclaimed_intermediate",
+            "row_nnz": 0
+          },
+          {
+            "col": 763,
+            "hi": null,
+            "kind": "aux",
+            "lo": null,
+            "obj_coeff": 0.0,
+            "owner": "blf",
+            "row_nnz": 0
+          },
+          {
+            "col": 769,
+            "hi": null,
+            "kind": "aux",
+            "lo": null,
+            "obj_coeff": 0.0,
+            "owner": "blf",
+            "row_nnz": 0
+          },
+          {
+            "col": 770,
+            "hi": null,
+            "kind": "aux",
+            "lo": null,
+            "obj_coeff": 0.0,
+            "owner": "blf",
+            "row_nnz": 0
+          },
+          {
+            "col": 771,
+            "hi": null,
+            "kind": "aux",
+            "lo": null,
+            "obj_coeff": 0.0,
+            "owner": "blf",
+            "row_nnz": 0
+          },
+          {
+            "col": 772,
+            "hi": null,
+            "kind": "aux",
+            "lo": null,
+            "obj_coeff": 0.0,
+            "owner": "blf",
+            "row_nnz": 0
+          },
+          {
+            "col": 773,
+            "hi": null,
+            "kind": "aux",
+            "lo": null,
+            "obj_coeff": 0.0,
+            "owner": "blf",
+            "row_nnz": 0
+          },
+          {
+            "col": 774,
+            "hi": 7.598945282361834,
+            "kind": "aux",
+            "lo": null,
+            "obj_coeff": 0.0,
+            "owner": "unclaimed_intermediate",
+            "row_nnz": 2
+          },
+          {
+            "col": 796,
+            "hi": 12.362960588724867,
+            "kind": "aux",
+            "lo": null,
+            "obj_coeff": 0.0,
+            "owner": "unclaimed_intermediate",
+            "row_nnz": 2
+          },
+          {
+            "col": 809,
+            "hi": null,
+            "kind": "aux",
+            "lo": null,
+            "obj_coeff": 0.0,
+            "owner": "unclaimed_intermediate",
+            "row_nnz": 2
+          },
+          {
+            "col": 810,
+            "hi": null,
+            "kind": "aux",
+            "lo": null,
+            "obj_coeff": 0.0,
+            "owner": "blf",
+            "row_nnz": 0
+          },
+          {
+            "col": 813,
+            "hi": null,
+            "kind": "aux",
+            "lo": null,
+            "obj_coeff": 0.0,
+            "owner": "blf",
+            "row_nnz": 0
+          },
+          {
+            "col": 814,
+            "hi": null,
+            "kind": "aux",
+            "lo": null,
+            "obj_coeff": 0.0,
+            "owner": "unclaimed_intermediate",
+            "row_nnz": 0
+          },
+          {
+            "col": 815,
+            "hi": null,
+            "kind": "aux",
+            "lo": null,
+            "obj_coeff": 0.0,
+            "owner": "blf",
+            "row_nnz": 0
+          },
+          {
+            "col": 821,
+            "hi": null,
+            "kind": "aux",
+            "lo": null,
+            "obj_coeff": 0.0,
+            "owner": "blf",
+            "row_nnz": 0
+          },
+          {
+            "col": 822,
+            "hi": null,
+            "kind": "aux",
+            "lo": null,
+            "obj_coeff": 0.0,
+            "owner": "blf",
+            "row_nnz": 0
+          },
+          {
+            "col": 823,
+            "hi": null,
+            "kind": "aux",
+            "lo": null,
+            "obj_coeff": 0.0,
+            "owner": "blf",
+            "row_nnz": 0
+          },
+          {
+            "col": 824,
+            "hi": null,
+            "kind": "aux",
+            "lo": null,
+            "obj_coeff": 0.0,
+            "owner": "blf",
+            "row_nnz": 0
+          },
+          {
+            "col": 825,
+            "hi": null,
+            "kind": "aux",
+            "lo": null,
+            "obj_coeff": 0.0,
+            "owner": "blf",
+            "row_nnz": 0
+          },
+          {
+            "col": 826,
+            "hi": 7.824972318542938,
+            "kind": "aux",
+            "lo": null,
+            "obj_coeff": 0.0,
+            "owner": "unclaimed_intermediate",
+            "row_nnz": 2
+          },
+          {
+            "col": 848,
+            "hi": 10.264838003441342,
+            "kind": "aux",
+            "lo": null,
+            "obj_coeff": 0.0,
+            "owner": "unclaimed_intermediate",
+            "row_nnz": 2
+          },
+          {
+            "col": 901,
+            "hi": 14.95760681009123,
+            "kind": "aux",
+            "lo": null,
+            "obj_coeff": 0.0,
+            "owner": "unclaimed_intermediate",
+            "row_nnz": 2
+          },
+          {
+            "col": 923,
+            "hi": 8.705064138653876,
+            "kind": "aux",
+            "lo": null,
+            "obj_coeff": 0.0,
+            "owner": "unclaimed_intermediate",
+            "row_nnz": 2
+          }
+        ],
+        "infinite_cols": 64,
+        "infinite_cols_aux": 56,
+        "infinite_cols_by_owner": {
+          "blf": 28,
+          "original": 8,
+          "unclaimed_intermediate": 28
+        },
+        "infinite_cols_in_no_row": 38,
+        "infinite_cols_original": 8,
+        "infinite_cols_with_obj_cost": 0,
+        "infinite_entries": 108,
+        "n_aux": 791,
+        "n_cols": 1095,
+        "n_orig": 304,
+        "n_rows": 3210,
+        "presolved_box_infinite_cols": 8,
+        "spec_without_bypass": false
+      },
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "instance": "contvar",
+      "instrument_marker": "phase52-infinite-aux-entry-v1",
+      "n_cons": 284,
+      "n_vars": 296,
+      "phase": "diagnosed",
+      "producer_np_isinf_call_sites": 1,
+      "wall_to_gate": 14.598026261999621
+    },
+    {
+      "budget": 45.0,
+      "counts": {
+        "bypass_calls": 1,
+        "columns_examined": 5,
+        "fbbt_row_scans": 14,
+        "fbbt_tightenings": 0,
+        "infinite_columns_examined": 1,
+        "relaxations_built": 1,
+        "reproduce_calls": 1
+      },
+      "diagnosis": {
+        "bypass_next_decline": "fixed_row_box_dependent",
+        "bypass_next_detail": "coeffs",
+        "bypass_reasons": {
+          "fixed_row_box_dependent:coeffs": 1
+        },
+        "bypass_spec_built": false,
+        "decline_reproduced": "infinite_aux_bounds",
+        "fbbt": {
+          "all_finite": false,
+          "aux_all_finite": true,
+          "aux_infinite_cols_after": 0,
+          "empty": false,
+          "gate_would_pass": false,
+          "infinite_cols_after": 1,
+          "infinite_entries_after": 1,
+          "rounds": 1,
+          "row_scans": 14,
+          "tightenings": 0
+        },
+        "fbbt_survivor_detail": [
+          {
+            "col": 1,
+            "kind": "original",
+            "obj_coeff": 1.0,
+            "owner": "original",
+            "row_nnz": 2
+          }
+        ],
+        "infinite_col_detail": [
+          {
+            "col": 1,
+            "hi": null,
+            "kind": "original",
+            "lo": -1065012.6005339455,
+            "obj_coeff": 1.0,
+            "owner": "unclaimed_intermediate",
+            "row_nnz": 2
+          }
+        ],
+        "infinite_cols": 1,
+        "infinite_cols_aux": 0,
+        "infinite_cols_by_owner": {
+          "original": 1
+        },
+        "infinite_cols_in_no_row": 0,
+        "infinite_cols_original": 1,
+        "infinite_cols_with_obj_cost": 1,
+        "infinite_entries": 1,
+        "n_aux": 3,
+        "n_cols": 5,
+        "n_orig": 2,
+        "n_rows": 14,
+        "presolved_box_infinite_cols": 1,
+        "spec_without_bypass": false
+      },
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "instance": "ex14_1_9",
+      "instrument_marker": "phase52-infinite-aux-entry-v1",
+      "n_cons": 2,
+      "n_vars": 2,
+      "phase": "diagnosed",
+      "producer_np_isinf_call_sites": 1,
+      "wall_to_gate": 0.8694007420017442
+    },
+    {
+      "budget": 45.0,
+      "counts": {
+        "bypass_calls": 1,
+        "columns_examined": 16,
+        "fbbt_row_scans": 44,
+        "fbbt_tightenings": 0,
+        "infinite_columns_examined": 2,
+        "relaxations_built": 1,
+        "reproduce_calls": 1
+      },
+      "diagnosis": {
+        "bypass_next_decline": "term_ratio",
+        "bypass_next_detail": "",
+        "bypass_reasons": {
+          "term_ratio": 1
+        },
+        "bypass_spec_built": false,
+        "decline_reproduced": "infinite_aux_bounds",
+        "fbbt": {
+          "all_finite": false,
+          "aux_all_finite": true,
+          "aux_infinite_cols_after": 0,
+          "empty": false,
+          "gate_would_pass": false,
+          "infinite_cols_after": 2,
+          "infinite_entries_after": 2,
+          "rounds": 1,
+          "row_scans": 44,
+          "tightenings": 0
+        },
+        "fbbt_survivor_detail": [
+          {
+            "col": 4,
+            "kind": "original",
+            "obj_coeff": 1.0,
+            "owner": "original",
+            "row_nnz": 2
+          },
+          {
+            "col": 5,
+            "kind": "original",
+            "obj_coeff": 1.0,
+            "owner": "original",
+            "row_nnz": 2
+          }
+        ],
+        "infinite_col_detail": [
+          {
+            "col": 4,
+            "hi": null,
+            "kind": "original",
+            "lo": 0.0,
+            "obj_coeff": 1.0,
+            "owner": "unclaimed_intermediate",
+            "row_nnz": 2
+          },
+          {
+            "col": 5,
+            "hi": null,
+            "kind": "original",
+            "lo": 0.0,
+            "obj_coeff": 1.0,
+            "owner": "unclaimed_intermediate",
+            "row_nnz": 2
+          }
+        ],
+        "infinite_cols": 2,
+        "infinite_cols_aux": 0,
+        "infinite_cols_by_owner": {
+          "original": 2
+        },
+        "infinite_cols_in_no_row": 0,
+        "infinite_cols_original": 2,
+        "infinite_cols_with_obj_cost": 2,
+        "infinite_entries": 2,
+        "n_aux": 10,
+        "n_cols": 16,
+        "n_orig": 6,
+        "n_rows": 44,
+        "presolved_box_infinite_cols": 2,
+        "spec_without_bypass": false
+      },
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "instance": "gear4",
+      "instrument_marker": "phase52-infinite-aux-entry-v1",
+      "n_cons": 1,
+      "n_vars": 6,
+      "phase": "diagnosed",
+      "producer_np_isinf_call_sites": 1,
+      "wall_to_gate": 0.8744587809997029
+    },
+    {
+      "budget": 45.0,
+      "counts": {
+        "bypass_calls": 1,
+        "columns_examined": 1131,
+        "fbbt_row_scans": 88800,
+        "fbbt_tightenings": 528,
+        "infinite_columns_examined": 6,
+        "relaxations_built": 1,
+        "reproduce_calls": 1
+      },
+      "diagnosis": {
+        "bypass_next_decline": "term_ratio",
+        "bypass_next_detail": "",
+        "bypass_reasons": {
+          "term_ratio": 1
+        },
+        "bypass_spec_built": false,
+        "decline_reproduced": "infinite_aux_bounds",
+        "fbbt": {
+          "all_finite": false,
+          "aux_all_finite": false,
+          "aux_infinite_cols_after": 6,
+          "empty": false,
+          "gate_would_pass": false,
+          "infinite_cols_after": 6,
+          "infinite_entries_after": 12,
+          "rounds": 30,
+          "row_scans": 88800,
+          "tightenings": 528
+        },
+        "fbbt_survivor_detail": [
+          {
+            "col": 723,
+            "kind": "aux",
+            "obj_coeff": 0.0,
+            "owner": "unclaimed_intermediate",
+            "row_nnz": 2
+          },
+          {
+            "col": 724,
+            "kind": "aux",
+            "obj_coeff": 0.0,
+            "owner": "unclaimed_intermediate",
+            "row_nnz": 0
+          },
+          {
+            "col": 725,
+            "kind": "aux",
+            "obj_coeff": 0.0,
+            "owner": "unclaimed_intermediate",
+            "row_nnz": 2
+          },
+          {
+            "col": 726,
+            "kind": "aux",
+            "obj_coeff": 0.0,
+            "owner": "unclaimed_intermediate",
+            "row_nnz": 0
+          },
+          {
+            "col": 727,
+            "kind": "aux",
+            "obj_coeff": 0.0,
+            "owner": "unclaimed_intermediate",
+            "row_nnz": 2
+          },
+          {
+            "col": 728,
+            "kind": "aux",
+            "obj_coeff": 0.0,
+            "owner": "unclaimed_intermediate",
+            "row_nnz": 0
+          }
+        ],
+        "infinite_col_detail": [
+          {
+            "col": 723,
+            "hi": null,
+            "kind": "aux",
+            "lo": null,
+            "obj_coeff": 0.0,
+            "owner": "unclaimed_intermediate",
+            "row_nnz": 2
+          },
+          {
+            "col": 724,
+            "hi": null,
+            "kind": "aux",
+            "lo": null,
+            "obj_coeff": 0.0,
+            "owner": "unclaimed_intermediate",
+            "row_nnz": 0
+          },
+          {
+            "col": 725,
+            "hi": null,
+            "kind": "aux",
+            "lo": null,
+            "obj_coeff": 0.0,
+            "owner": "unclaimed_intermediate",
+            "row_nnz": 2
+          },
+          {
+            "col": 726,
+            "hi": null,
+            "kind": "aux",
+            "lo": null,
+            "obj_coeff": 0.0,
+            "owner": "unclaimed_intermediate",
+            "row_nnz": 0
+          },
+          {
+            "col": 727,
+            "hi": null,
+            "kind": "aux",
+            "lo": null,
+            "obj_coeff": 0.0,
+            "owner": "unclaimed_intermediate",
+            "row_nnz": 2
+          },
+          {
+            "col": 728,
+            "hi": null,
+            "kind": "aux",
+            "lo": null,
+            "obj_coeff": 0.0,
+            "owner": "unclaimed_intermediate",
+            "row_nnz": 0
+          }
+        ],
+        "infinite_cols": 6,
+        "infinite_cols_aux": 6,
+        "infinite_cols_by_owner": {
+          "unclaimed_intermediate": 6
+        },
+        "infinite_cols_in_no_row": 3,
+        "infinite_cols_original": 0,
+        "infinite_cols_with_obj_cost": 0,
+        "infinite_entries": 12,
+        "n_aux": 409,
+        "n_cols": 1131,
+        "n_orig": 722,
+        "n_rows": 2960,
+        "presolved_box_infinite_cols": 0,
+        "spec_without_bypass": false
+      },
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "instance": "hda",
+      "instrument_marker": "phase52-infinite-aux-entry-v1",
+      "n_cons": 718,
+      "n_vars": 722,
+      "phase": "diagnosed",
+      "producer_np_isinf_call_sites": 1,
+      "wall_to_gate": 24.182042290001846
+    },
+    {
+      "budget": 45.0,
+      "counts": {
+        "bypass_calls": 1,
+        "columns_examined": 220,
+        "fbbt_row_scans": 968,
+        "fbbt_tightenings": 1,
+        "infinite_columns_examined": 40,
+        "relaxations_built": 1,
+        "reproduce_calls": 1
+      },
+      "diagnosis": {
+        "bypass_next_decline": "term_univariate",
+        "bypass_next_detail": "log",
+        "bypass_reasons": {
+          "term_univariate:log": 1
+        },
+        "bypass_spec_built": false,
+        "decline_reproduced": "infinite_aux_bounds",
+        "fbbt": {
+          "all_finite": false,
+          "aux_all_finite": false,
+          "aux_infinite_cols_after": 24,
+          "empty": false,
+          "gate_would_pass": false,
+          "infinite_cols_after": 40,
+          "infinite_entries_after": 64,
+          "rounds": 2,
+          "row_scans": 968,
+          "tightenings": 1
+        },
+        "fbbt_survivor_detail": [
+          {
+            "col": 68,
+            "kind": "original",
+            "obj_coeff": 0.0,
+            "owner": "original",
+            "row_nnz": 2
+          },
+          {
+            "col": 69,
+            "kind": "original",
+            "obj_coeff": 0.0,
+            "owner": "original",
+            "row_nnz": 2
+          },
+          {
+            "col": 70,
+            "kind": "original",
+            "obj_coeff": 0.0,
+            "owner": "original",
+            "row_nnz": 2
+          },
+          {
+            "col": 71,
+            "kind": "original",
+            "obj_coeff": 0.0,
+            "owner": "original",
+            "row_nnz": 2
+          },
+          {
+            "col": 72,
+            "kind": "original",
+            "obj_coeff": 0.0,
+            "owner": "original",
+            "row_nnz": 2
+          },
+          {
+            "col": 73,
+            "kind": "original",
+            "obj_coeff": 0.0,
+            "owner": "original",
+            "row_nnz": 2
+          },
+          {
+            "col": 74,
+            "kind": "original",
+            "obj_coeff": 0.0,
+            "owner": "original",
+            "row_nnz": 2
+          },
+          {
+            "col": 75,
+            "kind": "original",
+            "obj_coeff": 0.0,
+            "owner": "original",
+            "row_nnz": 2
+          },
+          {
+            "col": 76,
+            "kind": "original",
+            "obj_coeff": 0.0,
+            "owner": "original",
+            "row_nnz": 2
+          },
+          {
+            "col": 77,
+            "kind": "original",
+            "obj_coeff": 0.0,
+            "owner": "original",
+            "row_nnz": 2
+          },
+          {
+            "col": 78,
+            "kind": "original",
+            "obj_coeff": 0.0,
+            "owner": "original",
+            "row_nnz": 2
+          },
+          {
+            "col": 79,
+            "kind": "original",
+            "obj_coeff": 0.0,
+            "owner": "original",
+            "row_nnz": 2
+          },
+          {
+            "col": 86,
+            "kind": "original",
+            "obj_coeff": 150.0,
+            "owner": "original",
+            "row_nnz": 0
+          },
+          {
+            "col": 89,
+            "kind": "original",
+            "obj_coeff": 150.0,
+            "owner": "original",
+            "row_nnz": 0
+          },
+          {
+            "col": 92,
+            "kind": "original",
+            "obj_coeff": 150.0,
+            "owner": "original",
+            "row_nnz": 0
+          },
+          {
+            "col": 95,
+            "kind": "original",
+            "obj_coeff": 150.0,
+            "owner": "original",
+            "row_nnz": 0
+          },
+          {
+            "col": 144,
+            "kind": "aux",
+            "obj_coeff": 0.0,
+            "owner": "blf",
+            "row_nnz": 2
+          },
+          {
+            "col": 148,
+            "kind": "aux",
+            "obj_coeff": 0.0,
+            "owner": "unclaimed_intermediate",
+            "row_nnz": 0
+          },
+          {
+            "col": 149,
+            "kind": "aux",
+            "obj_coeff": 0.0,
+            "owner": "blf",
+            "row_nnz": 2
+          },
+          {
+            "col": 153,
+            "kind": "aux",
+            "obj_coeff": 0.0,
+            "owner": "unclaimed_intermediate",
+            "row_nnz": 0
+          },
+          {
+            "col": 154,
+            "kind": "aux",
+            "obj_coeff": 0.0,
+            "owner": "blf",
+            "row_nnz": 2
+          },
+          {
+            "col": 158,
+            "kind": "aux",
+            "obj_coeff": 0.0,
+            "owner": "unclaimed_intermediate",
+            "row_nnz": 0
+          },
+          {
+            "col": 159,
+            "kind": "aux",
+            "obj_coeff": 0.0,
+            "owner": "blf",
+            "row_nnz": 2
+          },
+          {
+            "col": 163,
+            "kind": "aux",
+            "obj_coeff": 0.0,
+            "owner": "unclaimed_intermediate",
+            "row_nnz": 0
+          },
+          {
+            "col": 164,
+            "kind": "aux",
+            "obj_coeff": 0.0,
+            "owner": "blf",
+            "row_nnz": 2
+          },
+          {
+            "col": 168,
+            "kind": "aux",
+            "obj_coeff": 0.0,
+            "owner": "unclaimed_intermediate",
+            "row_nnz": 0
+          },
+          {
+            "col": 169,
+            "kind": "aux",
+            "obj_coeff": 0.0,
+            "owner": "blf",
+            "row_nnz": 2
+          },
+          {
+            "col": 173,
+            "kind": "aux",
+            "obj_coeff": 0.0,
+            "owner": "unclaimed_intermediate",
+            "row_nnz": 0
+          },
+          {
+            "col": 174,
+            "kind": "aux",
+            "obj_coeff": 0.0,
+            "owner": "blf",
+            "row_nnz": 2
+          },
+          {
+            "col": 178,
+            "kind": "aux",
+            "obj_coeff": 0.0,
+            "owner": "unclaimed_intermediate",
+            "row_nnz": 0
+          },
+          {
+            "col": 179,
+            "kind": "aux",
+            "obj_coeff": 0.0,
+            "owner": "blf",
+            "row_nnz": 2
+          },
+          {
+            "col": 183,
+            "kind": "aux",
+            "obj_coeff": 0.0,
+            "owner": "unclaimed_intermediate",
+            "row_nnz": 0
+          },
+          {
+            "col": 200,
+            "kind": "aux",
+            "obj_coeff": 0.0,
+            "owner": "blf",
+            "row_nnz": 2
+          },
+          {
+            "col": 202,
+            "kind": "aux",
+            "obj_coeff": 0.0,
+            "owner": "unclaimed_intermediate",
+            "row_nnz": 0
+          },
+          {
+            "col": 203,
+            "kind": "aux",
+            "obj_coeff": 0.0,
+            "owner": "blf",
+            "row_nnz": 2
+          },
+          {
+            "col": 205,
+            "kind": "aux",
+            "obj_coeff": 0.0,
+            "owner": "unclaimed_intermediate",
+            "row_nnz": 0
+          },
+          {
+            "col": 206,
+            "kind": "aux",
+            "obj_coeff": 0.0,
+            "owner": "blf",
+            "row_nnz": 2
+          },
+          {
+            "col": 208,
+            "kind": "aux",
+            "obj_coeff": 0.0,
+            "owner": "unclaimed_intermediate",
+            "row_nnz": 0
+          },
+          {
+            "col": 209,
+            "kind": "aux",
+            "obj_coeff": 0.0,
+            "owner": "blf",
+            "row_nnz": 2
+          },
+          {
+            "col": 211,
+            "kind": "aux",
+            "obj_coeff": 0.0,
+            "owner": "unclaimed_intermediate",
+            "row_nnz": 0
+          }
+        ],
+        "infinite_col_detail": [
+          {
+            "col": 68,
+            "hi": null,
+            "kind": "original",
+            "lo": 0.0,
+            "obj_coeff": 0.0,
+            "owner": "unclaimed_intermediate",
+            "row_nnz": 2
+          },
+          {
+            "col": 69,
+            "hi": null,
+            "kind": "original",
+            "lo": 0.0,
+            "obj_coeff": 0.0,
+            "owner": "unclaimed_intermediate",
+            "row_nnz": 2
+          },
+          {
+            "col": 70,
+            "hi": null,
+            "kind": "original",
+            "lo": 0.0,
+            "obj_coeff": 0.0,
+            "owner": "unclaimed_intermediate",
+            "row_nnz": 2
+          },
+          {
+            "col": 71,
+            "hi": null,
+            "kind": "original",
+            "lo": 0.0,
+            "obj_coeff": 0.0,
+            "owner": "unclaimed_intermediate",
+            "row_nnz": 2
+          },
+          {
+            "col": 72,
+            "hi": null,
+            "kind": "original",
+            "lo": 0.0,
+            "obj_coeff": 0.0,
+            "owner": "unclaimed_intermediate",
+            "row_nnz": 2
+          },
+          {
+            "col": 73,
+            "hi": null,
+            "kind": "original",
+            "lo": 0.0,
+            "obj_coeff": 0.0,
+            "owner": "unclaimed_intermediate",
+            "row_nnz": 2
+          },
+          {
+            "col": 74,
+            "hi": null,
+            "kind": "original",
+            "lo": 0.0,
+            "obj_coeff": 0.0,
+            "owner": "unclaimed_intermediate",
+            "row_nnz": 2
+          },
+          {
+            "col": 75,
+            "hi": null,
+            "kind": "original",
+            "lo": 0.0,
+            "obj_coeff": 0.0,
+            "owner": "unclaimed_intermediate",
+            "row_nnz": 2
+          },
+          {
+            "col": 76,
+            "hi": null,
+            "kind": "original",
+            "lo": 0.0,
+            "obj_coeff": 0.0,
+            "owner": "unclaimed_intermediate",
+            "row_nnz": 2
+          },
+          {
+            "col": 77,
+            "hi": null,
+            "kind": "original",
+            "lo": 0.0,
+            "obj_coeff": 0.0,
+            "owner": "unclaimed_intermediate",
+            "row_nnz": 2
+          },
+          {
+            "col": 78,
+            "hi": null,
+            "kind": "original",
+            "lo": 0.0,
+            "obj_coeff": 0.0,
+            "owner": "unclaimed_intermediate",
+            "row_nnz": 2
+          },
+          {
+            "col": 79,
+            "hi": null,
+            "kind": "original",
+            "lo": 0.0,
+            "obj_coeff": 0.0,
+            "owner": "unclaimed_intermediate",
+            "row_nnz": 2
+          },
+          {
+            "col": 86,
+            "hi": null,
+            "kind": "original",
+            "lo": 0.0,
+            "obj_coeff": 150.0,
+            "owner": "unclaimed_intermediate",
+            "row_nnz": 0
+          },
+          {
+            "col": 89,
+            "hi": null,
+            "kind": "original",
+            "lo": 0.0,
+            "obj_coeff": 150.0,
+            "owner": "unclaimed_intermediate",
+            "row_nnz": 0
+          },
+          {
+            "col": 92,
+            "hi": null,
+            "kind": "original",
+            "lo": 0.0,
+            "obj_coeff": 150.0,
+            "owner": "unclaimed_intermediate",
+            "row_nnz": 0
+          },
+          {
+            "col": 95,
+            "hi": null,
+            "kind": "original",
+            "lo": 0.0,
+            "obj_coeff": 150.0,
+            "owner": "unclaimed_intermediate",
+            "row_nnz": 0
+          },
+          {
+            "col": 144,
+            "hi": null,
+            "kind": "aux",
+            "lo": null,
+            "obj_coeff": 0.0,
+            "owner": "blf",
+            "row_nnz": 2
+          },
+          {
+            "col": 148,
+            "hi": null,
+            "kind": "aux",
+            "lo": null,
+            "obj_coeff": 0.0,
+            "owner": "unclaimed_intermediate",
+            "row_nnz": 0
+          },
+          {
+            "col": 149,
+            "hi": null,
+            "kind": "aux",
+            "lo": null,
+            "obj_coeff": 0.0,
+            "owner": "blf",
+            "row_nnz": 2
+          },
+          {
+            "col": 153,
+            "hi": null,
+            "kind": "aux",
+            "lo": null,
+            "obj_coeff": 0.0,
+            "owner": "unclaimed_intermediate",
+            "row_nnz": 0
+          },
+          {
+            "col": 154,
+            "hi": null,
+            "kind": "aux",
+            "lo": null,
+            "obj_coeff": 0.0,
+            "owner": "blf",
+            "row_nnz": 2
+          },
+          {
+            "col": 158,
+            "hi": null,
+            "kind": "aux",
+            "lo": null,
+            "obj_coeff": 0.0,
+            "owner": "unclaimed_intermediate",
+            "row_nnz": 0
+          },
+          {
+            "col": 159,
+            "hi": null,
+            "kind": "aux",
+            "lo": null,
+            "obj_coeff": 0.0,
+            "owner": "blf",
+            "row_nnz": 2
+          },
+          {
+            "col": 163,
+            "hi": null,
+            "kind": "aux",
+            "lo": null,
+            "obj_coeff": 0.0,
+            "owner": "unclaimed_intermediate",
+            "row_nnz": 0
+          },
+          {
+            "col": 164,
+            "hi": null,
+            "kind": "aux",
+            "lo": null,
+            "obj_coeff": 0.0,
+            "owner": "blf",
+            "row_nnz": 2
+          },
+          {
+            "col": 168,
+            "hi": null,
+            "kind": "aux",
+            "lo": null,
+            "obj_coeff": 0.0,
+            "owner": "unclaimed_intermediate",
+            "row_nnz": 0
+          },
+          {
+            "col": 169,
+            "hi": null,
+            "kind": "aux",
+            "lo": null,
+            "obj_coeff": 0.0,
+            "owner": "blf",
+            "row_nnz": 2
+          },
+          {
+            "col": 173,
+            "hi": null,
+            "kind": "aux",
+            "lo": null,
+            "obj_coeff": 0.0,
+            "owner": "unclaimed_intermediate",
+            "row_nnz": 0
+          },
+          {
+            "col": 174,
+            "hi": null,
+            "kind": "aux",
+            "lo": null,
+            "obj_coeff": 0.0,
+            "owner": "blf",
+            "row_nnz": 2
+          },
+          {
+            "col": 178,
+            "hi": null,
+            "kind": "aux",
+            "lo": null,
+            "obj_coeff": 0.0,
+            "owner": "unclaimed_intermediate",
+            "row_nnz": 0
+          },
+          {
+            "col": 179,
+            "hi": null,
+            "kind": "aux",
+            "lo": null,
+            "obj_coeff": 0.0,
+            "owner": "blf",
+            "row_nnz": 2
+          },
+          {
+            "col": 183,
+            "hi": null,
+            "kind": "aux",
+            "lo": null,
+            "obj_coeff": 0.0,
+            "owner": "unclaimed_intermediate",
+            "row_nnz": 0
+          },
+          {
+            "col": 200,
+            "hi": null,
+            "kind": "aux",
+            "lo": null,
+            "obj_coeff": 0.0,
+            "owner": "blf",
+            "row_nnz": 2
+          },
+          {
+            "col": 202,
+            "hi": null,
+            "kind": "aux",
+            "lo": null,
+            "obj_coeff": 0.0,
+            "owner": "unclaimed_intermediate",
+            "row_nnz": 0
+          },
+          {
+            "col": 203,
+            "hi": null,
+            "kind": "aux",
+            "lo": null,
+            "obj_coeff": 0.0,
+            "owner": "blf",
+            "row_nnz": 2
+          },
+          {
+            "col": 205,
+            "hi": null,
+            "kind": "aux",
+            "lo": null,
+            "obj_coeff": 0.0,
+            "owner": "unclaimed_intermediate",
+            "row_nnz": 0
+          },
+          {
+            "col": 206,
+            "hi": null,
+            "kind": "aux",
+            "lo": null,
+            "obj_coeff": 0.0,
+            "owner": "blf",
+            "row_nnz": 2
+          },
+          {
+            "col": 208,
+            "hi": null,
+            "kind": "aux",
+            "lo": null,
+            "obj_coeff": 0.0,
+            "owner": "unclaimed_intermediate",
+            "row_nnz": 0
+          },
+          {
+            "col": 209,
+            "hi": null,
+            "kind": "aux",
+            "lo": null,
+            "obj_coeff": 0.0,
+            "owner": "blf",
+            "row_nnz": 2
+          },
+          {
+            "col": 211,
+            "hi": null,
+            "kind": "aux",
+            "lo": null,
+            "obj_coeff": 0.0,
+            "owner": "unclaimed_intermediate",
+            "row_nnz": 0
+          }
+        ],
+        "infinite_cols": 40,
+        "infinite_cols_aux": 24,
+        "infinite_cols_by_owner": {
+          "blf": 12,
+          "original": 16,
+          "unclaimed_intermediate": 12
+        },
+        "infinite_cols_in_no_row": 16,
+        "infinite_cols_original": 16,
+        "infinite_cols_with_obj_cost": 4,
+        "infinite_entries": 64,
+        "n_aux": 108,
+        "n_cols": 220,
+        "n_orig": 112,
+        "n_rows": 484,
+        "presolved_box_infinite_cols": 16,
+        "spec_without_bypass": false
+      },
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "instance": "heatexch_gen1",
+      "instrument_marker": "phase52-infinite-aux-entry-v1",
+      "n_cons": 120,
+      "n_vars": 112,
+      "phase": "diagnosed",
+      "producer_np_isinf_call_sites": 1,
+      "wall_to_gate": 2.0480730070012214
+    },
+    {
+      "budget": 45.0,
+      "counts": {
+        "bypass_calls": 1,
+        "columns_examined": 339,
+        "fbbt_row_scans": 1544,
+        "fbbt_tightenings": 12,
+        "infinite_columns_examined": 55,
+        "relaxations_built": 1,
+        "reproduce_calls": 1
+      },
+      "diagnosis": {
+        "bypass_next_decline": "term_univariate",
+        "bypass_next_detail": "log",
+        "bypass_reasons": {
+          "term_univariate:log": 1
+        },
+        "bypass_spec_built": false,
+        "decline_reproduced": "infinite_aux_bounds",
+        "fbbt": {
+          "all_finite": false,
+          "aux_all_finite": false,
+          "aux_infinite_cols_after": 35,
+          "empty": false,
+          "gate_would_pass": false,
+          "infinite_cols_after": 55,
+          "infinite_entries_after": 85,
+          "rounds": 2,
+          "row_scans": 1544,
+          "tightenings": 12
+        },
+        "fbbt_survivor_detail": [
+          {
+            "col": 89,
+            "kind": "original",
+            "obj_coeff": 0.0,
+            "owner": "original",
+            "row_nnz": 2
+          },
+          {
+            "col": 90,
+            "kind": "original",
+            "obj_coeff": 0.0,
+            "owner": "original",
+            "row_nnz": 2
+          },
+          {
+            "col": 91,
+            "kind": "original",
+            "obj_coeff": 0.0,
+            "owner": "original",
+            "row_nnz": 2
+          },
+          {
+            "col": 92,
+            "kind": "original",
+            "obj_coeff": 0.0,
+            "owner": "original",
+            "row_nnz": 2
+          },
+          {
+            "col": 93,
+            "kind": "original",
+            "obj_coeff": 0.0,
+            "owner": "original",
+            "row_nnz": 2
+          },
+          {
+            "col": 94,
+            "kind": "original",
+            "obj_coeff": 0.0,
+            "owner": "original",
+            "row_nnz": 2
+          },
+          {
+            "col": 95,
+            "kind": "original",
+            "obj_coeff": 0.0,
+            "owner": "original",
+            "row_nnz": 2
+          },
+          {
+            "col": 96,
+            "kind": "original",
+            "obj_coeff": 0.0,
+            "owner": "original",
+            "row_nnz": 2
+          },
+          {
+            "col": 97,
+            "kind": "original",
+            "obj_coeff": 0.0,
+            "owner": "original",
+            "row_nnz": 2
+          },
+          {
+            "col": 98,
+            "kind": "original",
+            "obj_coeff": 0.0,
+            "owner": "original",
+            "row_nnz": 2
+          },
+          {
+            "col": 99,
+            "kind": "original",
+            "obj_coeff": 0.0,
+            "owner": "original",
+            "row_nnz": 2
+          },
+          {
+            "col": 100,
+            "kind": "original",
+            "obj_coeff": 0.0,
+            "owner": "original",
+            "row_nnz": 2
+          },
+          {
+            "col": 101,
+            "kind": "original",
+            "obj_coeff": 0.0,
+            "owner": "original",
+            "row_nnz": 2
+          },
+          {
+            "col": 103,
+            "kind": "original",
+            "obj_coeff": 0.0,
+            "owner": "original",
+            "row_nnz": 2
+          },
+          {
+            "col": 104,
+            "kind": "original",
+            "obj_coeff": 0.0,
+            "owner": "original",
+            "row_nnz": 2
+          },
+          {
+            "col": 107,
+            "kind": "original",
+            "obj_coeff": 0.0,
+            "owner": "original",
+            "row_nnz": 0
+          },
+          {
+            "col": 110,
+            "kind": "original",
+            "obj_coeff": 0.0,
+            "owner": "original",
+            "row_nnz": 0
+          },
+          {
+            "col": 113,
+            "kind": "original",
+            "obj_coeff": 0.0,
+            "owner": "original",
+            "row_nnz": 0
+          },
+          {
+            "col": 116,
+            "kind": "original",
+            "obj_coeff": 0.0,
+            "owner": "original",
+            "row_nnz": 0
+          },
+          {
+            "col": 119,
+            "kind": "original",
+            "obj_coeff": 0.0,
+            "owner": "original",
+            "row_nnz": 0
+          },
+          {
+            "col": 180,
+            "kind": "aux",
+            "obj_coeff": 1200.0,
+            "owner": "unclaimed_intermediate",
+            "row_nnz": 0
+          },
+          {
+            "col": 181,
+            "kind": "aux",
+            "obj_coeff": 1200.0,
+            "owner": "unclaimed_intermediate",
+            "row_nnz": 0
+          },
+          {
+            "col": 182,
+            "kind": "aux",
+            "obj_coeff": 1200.0,
+            "owner": "unclaimed_intermediate",
+            "row_nnz": 0
+          },
+          {
+            "col": 183,
+            "kind": "aux",
+            "obj_coeff": 1200.0,
+            "owner": "unclaimed_intermediate",
+            "row_nnz": 0
+          },
+          {
+            "col": 184,
+            "kind": "aux",
+            "obj_coeff": 1200.0,
+            "owner": "unclaimed_intermediate",
+            "row_nnz": 0
+          },
+          {
+            "col": 241,
+            "kind": "aux",
+            "obj_coeff": 0.0,
+            "owner": "blf",
+            "row_nnz": 2
+          },
+          {
+            "col": 245,
+            "kind": "aux",
+            "obj_coeff": 0.0,
+            "owner": "unclaimed_intermediate",
+            "row_nnz": 0
+          },
+          {
+            "col": 246,
+            "kind": "aux",
+            "obj_coeff": 0.0,
+            "owner": "blf",
+            "row_nnz": 2
+          },
+          {
+            "col": 250,
+            "kind": "aux",
+            "obj_coeff": 0.0,
+            "owner": "unclaimed_intermediate",
+            "row_nnz": 0
+          },
+          {
+            "col": 251,
+            "kind": "aux",
+            "obj_coeff": 0.0,
+            "owner": "blf",
+            "row_nnz": 2
+          },
+          {
+            "col": 255,
+            "kind": "aux",
+            "obj_coeff": 0.0,
+            "owner": "unclaimed_intermediate",
+            "row_nnz": 0
+          },
+          {
+            "col": 256,
+            "kind": "aux",
+            "obj_coeff": 0.0,
+            "owner": "blf",
+            "row_nnz": 2
+          },
+          {
+            "col": 260,
+            "kind": "aux",
+            "obj_coeff": 0.0,
+            "owner": "unclaimed_intermediate",
+            "row_nnz": 0
+          },
+          {
+            "col": 261,
+            "kind": "aux",
+            "obj_coeff": 0.0,
+            "owner": "blf",
+            "row_nnz": 2
+          },
+          {
+            "col": 265,
+            "kind": "aux",
+            "obj_coeff": 0.0,
+            "owner": "unclaimed_intermediate",
+            "row_nnz": 0
+          },
+          {
+            "col": 266,
+            "kind": "aux",
+            "obj_coeff": 0.0,
+            "owner": "blf",
+            "row_nnz": 2
+          },
+          {
+            "col": 270,
+            "kind": "aux",
+            "obj_coeff": 0.0,
+            "owner": "unclaimed_intermediate",
+            "row_nnz": 0
+          },
+          {
+            "col": 271,
+            "kind": "aux",
+            "obj_coeff": 0.0,
+            "owner": "blf",
+            "row_nnz": 2
+          },
+          {
+            "col": 275,
+            "kind": "aux",
+            "obj_coeff": 0.0,
+            "owner": "unclaimed_intermediate",
+            "row_nnz": 0
+          },
+          {
+            "col": 276,
+            "kind": "aux",
+            "obj_coeff": 0.0,
+            "owner": "blf",
+            "row_nnz": 2
+          }
+        ],
+        "infinite_col_detail": [
+          {
+            "col": 89,
+            "hi": null,
+            "kind": "original",
+            "lo": 0.0,
+            "obj_coeff": 0.0,
+            "owner": "unclaimed_intermediate",
+            "row_nnz": 2
+          },
+          {
+            "col": 90,
+            "hi": null,
+            "kind": "original",
+            "lo": 0.0,
+            "obj_coeff": 0.0,
+            "owner": "unclaimed_intermediate",
+            "row_nnz": 2
+          },
+          {
+            "col": 91,
+            "hi": null,
+            "kind": "original",
+            "lo": 0.0,
+            "obj_coeff": 0.0,
+            "owner": "unclaimed_intermediate",
+            "row_nnz": 2
+          },
+          {
+            "col": 92,
+            "hi": null,
+            "kind": "original",
+            "lo": 0.0,
+            "obj_coeff": 0.0,
+            "owner": "unclaimed_intermediate",
+            "row_nnz": 2
+          },
+          {
+            "col": 93,
+            "hi": null,
+            "kind": "original",
+            "lo": 0.0,
+            "obj_coeff": 0.0,
+            "owner": "unclaimed_intermediate",
+            "row_nnz": 2
+          },
+          {
+            "col": 94,
+            "hi": null,
+            "kind": "original",
+            "lo": 0.0,
+            "obj_coeff": 0.0,
+            "owner": "unclaimed_intermediate",
+            "row_nnz": 2
+          },
+          {
+            "col": 95,
+            "hi": null,
+            "kind": "original",
+            "lo": 0.0,
+            "obj_coeff": 0.0,
+            "owner": "unclaimed_intermediate",
+            "row_nnz": 2
+          },
+          {
+            "col": 96,
+            "hi": null,
+            "kind": "original",
+            "lo": 0.0,
+            "obj_coeff": 0.0,
+            "owner": "unclaimed_intermediate",
+            "row_nnz": 2
+          },
+          {
+            "col": 97,
+            "hi": null,
+            "kind": "original",
+            "lo": 0.0,
+            "obj_coeff": 0.0,
+            "owner": "unclaimed_intermediate",
+            "row_nnz": 2
+          },
+          {
+            "col": 98,
+            "hi": null,
+            "kind": "original",
+            "lo": 0.0,
+            "obj_coeff": 0.0,
+            "owner": "unclaimed_intermediate",
+            "row_nnz": 2
+          },
+          {
+            "col": 99,
+            "hi": null,
+            "kind": "original",
+            "lo": 0.0,
+            "obj_coeff": 0.0,
+            "owner": "unclaimed_intermediate",
+            "row_nnz": 2
+          },
+          {
+            "col": 100,
+            "hi": null,
+            "kind": "original",
+            "lo": 0.0,
+            "obj_coeff": 0.0,
+            "owner": "unclaimed_intermediate",
+            "row_nnz": 2
+          },
+          {
+            "col": 101,
+            "hi": null,
+            "kind": "original",
+            "lo": 0.0,
+            "obj_coeff": 0.0,
+            "owner": "unclaimed_intermediate",
+            "row_nnz": 2
+          },
+          {
+            "col": 103,
+            "hi": null,
+            "kind": "original",
+            "lo": 0.0,
+            "obj_coeff": 0.0,
+            "owner": "unclaimed_intermediate",
+            "row_nnz": 2
+          },
+          {
+            "col": 104,
+            "hi": null,
+            "kind": "original",
+            "lo": 0.0,
+            "obj_coeff": 0.0,
+            "owner": "unclaimed_intermediate",
+            "row_nnz": 2
+          },
+          {
+            "col": 107,
+            "hi": null,
+            "kind": "original",
+            "lo": 0.0,
+            "obj_coeff": 0.0,
+            "owner": "unclaimed_intermediate",
+            "row_nnz": 0
+          },
+          {
+            "col": 110,
+            "hi": null,
+            "kind": "original",
+            "lo": 0.0,
+            "obj_coeff": 0.0,
+            "owner": "unclaimed_intermediate",
+            "row_nnz": 0
+          },
+          {
+            "col": 113,
+            "hi": null,
+            "kind": "original",
+            "lo": 0.0,
+            "obj_coeff": 0.0,
+            "owner": "unclaimed_intermediate",
+            "row_nnz": 0
+          },
+          {
+            "col": 116,
+            "hi": null,
+            "kind": "original",
+            "lo": 0.0,
+            "obj_coeff": 0.0,
+            "owner": "unclaimed_intermediate",
+            "row_nnz": 0
+          },
+          {
+            "col": 119,
+            "hi": null,
+            "kind": "original",
+            "lo": 0.0,
+            "obj_coeff": 0.0,
+            "owner": "unclaimed_intermediate",
+            "row_nnz": 0
+          },
+          {
+            "col": 180,
+            "hi": null,
+            "kind": "aux",
+            "lo": 0.06309573444801925,
+            "obj_coeff": 1200.0,
+            "owner": "unclaimed_intermediate",
+            "row_nnz": 0
+          },
+          {
+            "col": 181,
+            "hi": null,
+            "kind": "aux",
+            "lo": 0.06309573444801925,
+            "obj_coeff": 1200.0,
+            "owner": "unclaimed_intermediate",
+            "row_nnz": 0
+          },
+          {
+            "col": 182,
+            "hi": null,
+            "kind": "aux",
+            "lo": 0.06309573444801925,
+            "obj_coeff": 1200.0,
+            "owner": "unclaimed_intermediate",
+            "row_nnz": 0
+          },
+          {
+            "col": 183,
+            "hi": null,
+            "kind": "aux",
+            "lo": 0.06309573444801925,
+            "obj_coeff": 1200.0,
+            "owner": "unclaimed_intermediate",
+            "row_nnz": 0
+          },
+          {
+            "col": 184,
+            "hi": null,
+            "kind": "aux",
+            "lo": 0.06309573444801925,
+            "obj_coeff": 1200.0,
+            "owner": "unclaimed_intermediate",
+            "row_nnz": 0
+          },
+          {
+            "col": 241,
+            "hi": null,
+            "kind": "aux",
+            "lo": null,
+            "obj_coeff": 0.0,
+            "owner": "blf",
+            "row_nnz": 2
+          },
+          {
+            "col": 245,
+            "hi": null,
+            "kind": "aux",
+            "lo": null,
+            "obj_coeff": 0.0,
+            "owner": "unclaimed_intermediate",
+            "row_nnz": 0
+          },
+          {
+            "col": 246,
+            "hi": null,
+            "kind": "aux",
+            "lo": null,
+            "obj_coeff": 0.0,
+            "owner": "blf",
+            "row_nnz": 2
+          },
+          {
+            "col": 250,
+            "hi": null,
+            "kind": "aux",
+            "lo": null,
+            "obj_coeff": 0.0,
+            "owner": "unclaimed_intermediate",
+            "row_nnz": 0
+          },
+          {
+            "col": 251,
+            "hi": null,
+            "kind": "aux",
+            "lo": null,
+            "obj_coeff": 0.0,
+            "owner": "blf",
+            "row_nnz": 2
+          },
+          {
+            "col": 255,
+            "hi": null,
+            "kind": "aux",
+            "lo": null,
+            "obj_coeff": 0.0,
+            "owner": "unclaimed_intermediate",
+            "row_nnz": 0
+          },
+          {
+            "col": 256,
+            "hi": null,
+            "kind": "aux",
+            "lo": null,
+            "obj_coeff": 0.0,
+            "owner": "blf",
+            "row_nnz": 2
+          },
+          {
+            "col": 260,
+            "hi": null,
+            "kind": "aux",
+            "lo": null,
+            "obj_coeff": 0.0,
+            "owner": "unclaimed_intermediate",
+            "row_nnz": 0
+          },
+          {
+            "col": 261,
+            "hi": null,
+            "kind": "aux",
+            "lo": null,
+            "obj_coeff": 0.0,
+            "owner": "blf",
+            "row_nnz": 2
+          },
+          {
+            "col": 265,
+            "hi": null,
+            "kind": "aux",
+            "lo": null,
+            "obj_coeff": 0.0,
+            "owner": "unclaimed_intermediate",
+            "row_nnz": 0
+          },
+          {
+            "col": 266,
+            "hi": null,
+            "kind": "aux",
+            "lo": null,
+            "obj_coeff": 0.0,
+            "owner": "blf",
+            "row_nnz": 2
+          },
+          {
+            "col": 270,
+            "hi": null,
+            "kind": "aux",
+            "lo": null,
+            "obj_coeff": 0.0,
+            "owner": "unclaimed_intermediate",
+            "row_nnz": 0
+          },
+          {
+            "col": 271,
+            "hi": null,
+            "kind": "aux",
+            "lo": null,
+            "obj_coeff": 0.0,
+            "owner": "blf",
+            "row_nnz": 2
+          },
+          {
+            "col": 275,
+            "hi": null,
+            "kind": "aux",
+            "lo": null,
+            "obj_coeff": 0.0,
+            "owner": "unclaimed_intermediate",
+            "row_nnz": 0
+          },
+          {
+            "col": 276,
+            "hi": null,
+            "kind": "aux",
+            "lo": null,
+            "obj_coeff": 0.0,
+            "owner": "blf",
+            "row_nnz": 2
+          }
+        ],
+        "infinite_cols": 55,
+        "infinite_cols_aux": 35,
+        "infinite_cols_by_owner": {
+          "blf": 15,
+          "original": 20,
+          "unclaimed_intermediate": 20
+        },
+        "infinite_cols_in_no_row": 25,
+        "infinite_cols_original": 20,
+        "infinite_cols_with_obj_cost": 5,
+        "infinite_entries": 85,
+        "n_aux": 159,
+        "n_cols": 339,
+        "n_orig": 180,
+        "n_rows": 772,
+        "presolved_box_infinite_cols": 20,
+        "spec_without_bypass": false
+      },
+      "discopt_file": "/home/user/discopt/python/discopt/__init__.py",
+      "instance": "heatexch_gen2",
+      "instrument_marker": "phase52-infinite-aux-entry-v1",
+      "n_cons": 166,
+      "n_vars": 148,
+      "phase": "diagnosed",
+      "producer_np_isinf_call_sites": 1,
+      "wall_to_gate": 3.8245684610010358
+    }
+  ],
+  "schema": "phase52_infinite_aux_entry/1",
+  "timestamp": "2026-07-30T17:30:13Z",
+  "total_wall_seconds": 95.99290429800021
+}

@@ -1856,6 +1856,128 @@ touches `crates/` + producer files — safe alongside 1/2/7, coordinate with 3c
 
 ## §6. Falsification log (append-only, per §0.3)
 
+### 2026-07-30 — Open-ledger item 8 / Phase 5.2 entry experiment: "`infinite_aux_bounds` (census rank #2, 9 instances, 19.7 % of wall) is the better next kernel-coverage card than `term_trilinear`" — **FALSIFIED. Recoverable wall is 0.0 %, not 19.7 %, and the decline is not producer-side at all**
+
+The ledger's item-8 row and the Phase 5 scoping note both argue rank #2 is the better
+next card *because* rank #1's headline was measured to be inflated by decline-ladder
+masking. **The same masking applies to rank #2, and harder.** Two pre-stated
+hypotheses, both killed.
+
+Probe: `discopt_benchmarks/scripts/phase52_infinite_aux_entry.py`; artifact
+`reports/phase52_infinite_aux_entry_4f3cd17d.json`. Method mirrors the 5.1 census —
+one subprocess per instance, `DISCOPT_NATIVE_SPATIAL_KERNEL=1`, the producer **tapped
+at its real call site** (the presolved root box, not declared bounds). The child does
+not wrap the diagnosis in `try` (§7); it asserts `discopt.__file__`, `producer_stats`,
+and that `spatial_producer` contains **exactly one** `np.isinf(` call site before
+installing the bypass shim arm E8.1 depends on (§8). Executed: **9 instances
+diagnosed, 0 crashed, 9 reproduce calls, 9 bypass calls, 9 relaxations built, 3,846
+columns examined, 229 infinite columns examined, 115,766 FBBT row scans, 856 FBBT
+tightenings.** Load 0.35 → 1.29 on 4 cores.
+
+**E8.1 — framing.** Hypothesis: with the `infinite_aux_bounds` gate bypassed, **≥ 6 of
+9** reach row-claiming. Kill: ≤ 4. **Measured: 1 of 9.**
+
+| instance | next decline with the gate bypassed | baseline wall |
+|---|---|---|
+| `carton7` | **NONE — spec built** | 78.0 s |
+| `4stufen` | `blf_row_count:0` | 47.2 s |
+| `beuster` | `term_trilinear` | 50.2 s |
+| `contvar` | `term_trilinear` | 51.1 s |
+| `ex14_1_9` | `fixed_row_box_dependent:coeffs` | 1.4 s |
+| `gear4` | `term_ratio` | 2.0 s |
+| `hda` | `term_ratio` | 56.6 s |
+| `heatexch_gen1` | `term_univariate:log` | 46.8 s |
+| `heatexch_gen2` | `term_univariate:log` | 46.3 s |
+
+And the one that reaches row-claiming **is the gate being right, not the gate being
+wrong**: `carton7`'s 24 infinite columns are all *original* columns, its presolved root
+box carries 24 infinite entries, and the bypassed spec's `global_lo`/`global_hi` carry
+**24 infinite entries** — an unbounded node LP whose safe-bound evaluation is invalid.
+So the producer-side recoverable wall at rank #2 is **0.0 s / 0.0 %**, against an
+attributed **379.6 s / 19.7 %**.
+
+**E8.2 — repairability.** Hypothesis: the infinities are a forward-interval-propagation
+artifact, repairable by FBBT over the relaxation's **own rows** at the root box (sound:
+a bound implied by `A_ub x <= b_ub` cuts no LP-feasible point, and McCormick
+relaxations are nested under box inclusion so a root-derived aux bound stays valid at
+every child). Kill: ≥ 5 of 9 survive. **Measured: 9 of 9 survive — FBBT to fixpoint
+finitized ZERO of the 229 infinite columns**, despite applying 856 tightenings
+elsewhere.
+
+| instance | cols | inf cols | orig/aux | in no row | presolved-box inf | inf after FBBT |
+|---|---|---|---|---|---|---|
+| `4stufen` | 230 | 17 | 0/17 | 13 | 0 | 17 |
+| `beuster` | 282 | 20 | 0/20 | 16 | 0 | 20 |
+| `carton7` | 528 | 24 | 24/0 | 0 | 24 | 24 |
+| `contvar` | 1095 | 64 | 8/56 | 38 | 8 | 64 |
+| `ex14_1_9` | 5 | 1 | 1/0 | 0 | 1 | 1 |
+| `gear4` | 16 | 2 | 2/0 | 0 | 2 | 2 |
+| `hda` | 1131 | 6 | 0/6 | 3 | 0 | 6 |
+| `heatexch_gen1` | 220 | 40 | 16/24 | 16 | 16 | 40 |
+| `heatexch_gen2` | 339 | 55 | 20/35 | 25 | 20 | 55 |
+
+**Why it cannot be repaired, and this is the transferable finding: the code name is a
+misnomer, and it hides two disjoint classes, neither of them producer-side.**
+
+1. **6 of 9 — the *presolved root box itself* is unbounded** (`carton7` 24,
+   `heatexch_gen2` 20, `heatexch_gen1` 16, `contvar` 8, `gear4` 2, `ex14_1_9` 1
+   infinite entries on **original** columns). The solver's own FBBT/OBBT could not
+   bound those variables. No relaxation-side or producer-side change reaches this:
+   a McCormick envelope over an unbounded box does not exist. This is the
+   propagation-quality lever `docs/dev/issue-764-scip-comparison.md` names, and it
+   lives in presolve, not in the kernel producer.
+2. **3 of 9 (`4stufen`, `beuster`, `hda`) — free aux columns from atoms the relaxer
+   *refused to envelope***. 13 of `4stufen`'s 17, 16 of `beuster`'s 20 and 3 of
+   `hda`'s 6 infinite columns have `row_nnz == 0` — they appear in **no relaxation row
+   at all**. That is `uniform_relax`'s documented behaviour ("when a nonlinear atom
+   cannot be enveloped … its aux column is a free interval-floor column"), so FBBT has
+   nothing to propagate through **by construction**, and the kernel has no envelope
+   rows to regenerate. The producer is not being conservative; there is no relaxation
+   to port.
+
+**Verdict:** item 8's card, as scoped, is dead. The correct sequencing statement — and
+the reason the census ranking must not be read off the first decline code — is below.
+
+### 2026-07-30 — Open-ledger item 8: the census ranking re-derived by ladder position — **the unmaskable tail is ranks #3 and #5, not #1 or #2**
+
+Filed by the entry experiment above, because two of the census's top five have now been
+measured to be masked and the plan has twice been surprised by it.
+
+The producer's decline ladder is **ordered**, so an attributed wall is an upper bound
+*exactly to the extent the code is tested early*. That is a static property of
+`spatial_producer.build_spatial_kernel_spec` and it can be read off the source without
+running anything:
+
+| ladder position | code | maskable by an earlier code? |
+|---|---|---|
+| 4 | `probe_objective_bound_invalid` (rank #4, `tspn*`) | **yes** (everything below it) |
+| 7 | `infinite_aux_bounds` (rank #2) | **yes** |
+| 8–12 | `term_trilinear` (#1) / `term_multilinear` / `term_ratio` (#7) / `term_univariate` (#8) | **yes** |
+| 13 | `blf_row_count` (#6) | **yes** |
+| 15 | `probe_real_shape_mismatch` (rank #3) | **NO** |
+| 16 | `fixed_row_box_dependent` (rank #5) | **NO** |
+
+Ranks #3 and #5 sit at the *bottom* of the ladder: every instance in them has already
+passed **every other** decline test, so their attributed wall is recoverable wall by
+construction — no re-measurement needed to establish it, unlike #1 and #2.
+
+| code | inst | attributed | measured recoverable | source |
+|---|---|---|---|---|
+| `probe_real_shape_mismatch` (#3) | 3 | 158.9 s / 8.2 % | **158.9 s / 8.2 %** | unmaskable by ladder position |
+| `term_trilinear` (#1) | 17 | 437.6 s / 22.7 % | 118.5 s / 6.2 % | Card 5.2-T |
+| `fixed_row_box_dependent:coeffs` (#5) | 9 | 109.7 s / 5.7 % | **109.7 s / 5.7 %** | unmaskable by ladder position |
+| `infinite_aux_bounds` (#2) | 9 | 379.6 s / 19.7 % | **0.0 s / 0.0 %** | the entry experiment above |
+
+So the next card is **rank #3 + rank #5 — 12 instances, 268.6 s, 13.9 % of corpus
+wall** — and they are worth taking together because both are *the same shaped failure*:
+the producer's probe-vs-real row comparison finds a row it did not claim as an envelope
+whose **shape** (rank #3) or **coefficients** (rank #5) move with the box. Card 5.2-T
+independently predicted this mechanism for the trilinear residual ("trilinear RLT rows,
+box-dependent, `DISCOPT_TRILINEAR_RLT` defaults ON … those must be excluded from the
+producer's build the same way `skip_separable_floor` and `skip_convex_lift` already
+are"). Whether that prediction is the actual cause on ranks #3/#5 is the next entry
+experiment, recorded below.
+
 ### 2026-07-30 — Open-ledger item 11 close-out: what was run on the final tree
 
 Recorded per §0.6. Tree: `d7b374f6` (item 15's close-out) + this session's
