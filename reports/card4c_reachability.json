@@ -1,0 +1,19 @@
+{
+  "instances_examined": 119,
+  "classification_calls": 357,
+  "load_errors": 0,
+  "gp_minlp_accepts": [
+    "cvxnonsep_nsig30",
+    "cvxnonsep_psig30",
+    "prob03"
+  ],
+  "signomial_global_accepts": [
+    "cvxnonsep_nsig30",
+    "prob02",
+    "prob03",
+    "prob06",
+    "st_e38"
+  ],
+  "gp_accepts": [],
+  "classifier_errors": []
+}

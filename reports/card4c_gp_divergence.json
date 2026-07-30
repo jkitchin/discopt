@@ -1,0 +1,77 @@
+{
+  "instances": [
+    "cvxnonsep_nsig30",
+    "cvxnonsep_psig30",
+    "prob03"
+  ],
+  "time_limit": 60.0,
+  "results": [
+    {
+      "instance": "cvxnonsep_nsig30",
+      "arm": "baseline",
+      "status": "time_limit",
+      "objective": null,
+      "bound": 130.61409718655312,
+      "node_count": 69,
+      "gap_certified": false,
+      "wall": 60.634
+    },
+    {
+      "instance": "cvxnonsep_psig30",
+      "arm": "baseline",
+      "status": "time_limit",
+      "objective": null,
+      "bound": 78.99725672258528,
+      "node_count": 78,
+      "gap_certified": false,
+      "wall": 60.181
+    },
+    {
+      "instance": "prob03",
+      "arm": "baseline",
+      "status": "optimal",
+      "objective": 9.999999905003833,
+      "bound": 9.999999905003833,
+      "node_count": 5,
+      "gap_certified": true,
+      "wall": 0.992
+    },
+    {
+      "instance": "cvxnonsep_nsig30",
+      "arm": "tm_exact_prune",
+      "status": "time_limit",
+      "objective": null,
+      "bound": 130.6212658216026,
+      "node_count": 93,
+      "gap_certified": false,
+      "wall": 60.2
+    },
+    {
+      "instance": "cvxnonsep_psig30",
+      "arm": "tm_exact_prune",
+      "status": "optimal",
+      "objective": 78.9988543184716,
+      "bound": 78.9988543184716,
+      "node_count": 85,
+      "gap_certified": true,
+      "wall": 59.431
+    },
+    {
+      "instance": "prob03",
+      "arm": "tm_exact_prune",
+      "status": "optimal",
+      "objective": 9.999999905003833,
+      "bound": 9.999999905003833,
+      "node_count": 5,
+      "gap_certified": true,
+      "wall": 0.677
+    }
+  ],
+  "executed_comparisons": 6,
+  "drift": [
+    "cvxnonsep_nsig30/tm_exact_prune: node_count 69 -> 93",
+    "cvxnonsep_psig30/tm_exact_prune: node_count 78 -> 85",
+    "cvxnonsep_psig30/tm_exact_prune: objective None -> 78.9988543184716"
+  ],
+  "errors": []
+}

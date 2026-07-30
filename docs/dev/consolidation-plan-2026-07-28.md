@@ -932,19 +932,104 @@ one module each — **never one big-bang PR**.
 
 ### Card 4c — Three stray B&B loops onto `PyTreeManager`
 
-> **Status: NEXT (owner, 2026-07-30).** Promoted from "lowest priority" — that
-> ranking assumed a performance goal. Under a **correctness** goal this is the
-> highest-value consolidation left: three independent reimplementations of node
-> selection and pruning are three independent places a certificate invariant can
-> be wrong, and only one of them is audited.
+> **Status: TASK 2 LANDED, TASK 1 BLOCKED-BY-MEASUREMENT (2026-07-30).**
+> The vector-constraint corpus gap is **closed**. The three ports are **not**
+> done, and the entry experiments say they should not be attempted in this
+> environment — the reason is recorded in §6 (two entries) and summarised below.
 >
-> **Carries the vector-constraint corpus gap.** Phase 5.5 fixed incumbent verifiers
-> that were *accepting infeasible points* through row misalignment on vector
-> constraints — but every row in the in-repo `.nl` corpus is scalar, so the
-> 119-instance sweep cannot exercise that class and the fix rests on unit tests
-> alone. A correctness benchmark over this corpus is blind to it. Add
-> vector-constraint instances (built via the modeling API, not `from_nl`) to the
-> corpus used by the parity and verifier suites.
+> ### What landed (Task 2 — the vector-constraint corpus gap)
+>
+> `python/tests/vector_constraint_corpus.py` (7 cases, modeling-API built) and
+> `python/tests/test_vector_constraint_corpus.py` (37 tests, all `smoke`), plus a
+> vector arm in `test_node_tightening_parity.py` (Card 3c's guard) fed by
+> `solvable_vector_cases()`.
+>
+> Cases carry mixed senses (`<=`/`>=`/`==`), non-zero `Constraint.rhs`, a
+> multi-row equality, an integer vector, and a branching model, each with a known
+> feasible and a known **infeasible** point. Every infeasible point is asserted
+> in-bounds and integral first, so the constraint-row check is the *only* thing
+> that can reject it — a mis-indexing verifier cannot be rescued by its bounds
+> check.
+>
+> **Non-vacuity, per CLAUDE.md §6.** `_pre55_verify` transcribes the row loop
+> verbatim from `030b44f4~1` (per-*object* index, `rhs` ignored, self-referential
+> tolerance). Measured: it **wrongly ACCEPTS 6 of 7** infeasible points; the
+> shipped verifiers reject 7 of 7 across all three entry points; and the scalar
+> control is rejected by both, proving the discriminator measures alignment rather
+> than failing everything. Parity arm: 2 solvable cases, **18 executed containment
+> checks** on I2 (`vec_branching` captures 137 boxes). The arm's vacuity guard is
+> not decorative — it *fired twice* during development, before a branching case
+> existed.
+>
+> **Incidental finding (own issue, not fixed here).** A `Constraint` appended
+> directly to `model._constraints` with a **non-zero `rhs` is honoured by the NLP
+> evaluator and every verifier but IGNORED by the solver**: measured,
+> `Constraint(w, ">=", 5.0)` appended by hand solves to `w = 0`, while
+> `m.subject_to(w >= 5.0)` (which folds the offset into the body) solves to
+> `w = 5`. The public path is correct; the private-append path — which
+> `test_incumbent_verifier_scale.py` already uses, harmlessly, since it never
+> solves — silently yields a model the solver and the verifier disagree about.
+> `solvable_vector_cases()` filters those cases out of the solving suites
+> *structurally* rather than by convention, and the parity arm re-asserts the
+> all-zero-`rhs` property before solving.
+>
+> ### Why Task 1 (the three ports) did not proceed
+>
+> Two entry experiments, run before any port was written (§0.3), both landed
+> against it:
+>
+> 1. **The Regime-N panel cannot see these loops.** `panel_baseline.py` sets no
+>    `DISCOPT_*` flag, and `routing.py` gates `solve_gp_minlp` behind
+>    `DISCOPT_GP_MINLP` and `solve_signomial_global` behind `DISCOPT_SGO`, both
+>    **default-OFF**. A `--check` PASS after porting them would be the "0
+>    violations = pass" failure §6 exists to stop. (`lp_spatial_bb` *is*
+>    default-reachable, but only as `modeling/core.py`'s no-incumbent fallback.)
+> 2. **Forcing the flags ON does not rescue the gate.** Over all 119 corpus
+>    instances (357 executed classifications, 0 errors) `classify_gp_minlp`
+>    accepts **3** and `classify_signomial_global` accepts **5**. Of the 3 GP
+>    instances exactly **one** (`prob03`, 5 nodes) is a budget-independent
+>    Regime-N comparable; the other two time out. A port gated on a single 5-node
+>    tree cannot distinguish a tie-break change, a pseudocost change or a
+>    fathom-slack change — measured: the exact-pruning arm left `prob03` at 5
+>    nodes while moving both time-limited instances.
+>
+> Against that, the ports are **not** mechanical. `PyTreeManager` *owns* branching
+> (variable **and** split point) and pruning; each loop diverges on several axes at
+> once, enumerated below with file:line. Making any port bound-neutral means adding
+> those policies as options to the one audited tree manager — i.e. paying
+> complexity in the audited component, verified by a panel that cannot see the
+> change. That trade fails §0.4's spirit and the card's own rationale, so **no loop
+> was ported and no drift was accepted**, per the standing instruction to treat an
+> unverifiable port as a finding.
+>
+> ### The characterised policies (the deliverable that does carry forward)
+>
+> | axis | `PyTreeManager` | `gp/solve_gp_minlp` | `signomial_global` | `lp_spatial_bb` |
+> |---|---|---|---|---|
+> | selection | `BestFirst`, tie → **deeper**, then lower `NodeId` (`pool.rs:50-64`) | best-first, tie → insertion **FIFO** (`gp/__init__.py:1000`) | best-first, insertion FIFO (`signomial_global.py:1333`) | best-first **plus a LIFO plunge stack** with depth cap + gap gate (`lp_spatial_bb.py:927-957`) |
+> | prune | `node_lb >= incumbent`, **exact** (`tree_manager.rs:459`) | `>= incumbent - fathom_slack()` (`:1004`, `:1029`) | `gap_ok()` relative slack (`:1320`) | `>= inc_val - 1e-9*(1+|inc|)` (`:986`) |
+> | branch var | pseudocost/reliability, **default ON**, no Python setter (`:560-574`) | most-fractional (`_most_fractional_offset`) | integer-first, else max-width or **DC secant-gap score** (`:1377-1385`) | own pseudocost `_branch_var`, else `_worst_product_var` |
+> | split point | `floor(val)` / `floor+1` (`branching.rs:299-317`) | `floor(v)` / `ceil(v)`, **empty child suppressed** (`:1053-1058`) | **log-space** `log(fl)` / `log(fl+1)`; continuous at midpoint *or* clipped `ustar[j]` | integer `floor((lb+ub)/2)`/`mid+1`; continuous shared midpoint |
+> | failed relaxation | floored at parent bound, then **branched** (`:382-420`) | **abandoned** immediately into `abandoned_bound` (`:1017-1026`) | `min_fathomed` frontier accounting | `unresolved_lb` floor |
+> | per-node box rewrite | none | none | **OBBT rewrites the child box** (`eval_constrained`) | basis/cut inheritance |
+>
+> Two of these are not options-shaped at all: `signomial_global` branches in
+> **log space** and lets per-node OBBT *replace* the child box, neither of which
+> `PyTreeManager`'s `export_batch`/`import_results` contract can express.
+>
+> ### What remains in Card 4c
+>
+> Task 1 only, and it needs a decision the card cannot make for itself:
+> **(a)** materialise a GP-MINLP / signomial population large enough to gate a
+> port (the MINLPLib snapshot at `~/Dropbox/projects/discopt-minlp-benchmark/` has
+> the instances; this environment does not), then port `gp` first — it is the only
+> loop whose divergences are all options-shaped; or **(b)** accept the finding and
+> retire the card, on the grounds that adding five policy switches to the audited
+> tree manager to absorb three callers makes the audited component *harder* to
+> audit. `lp_spatial_bb` should be skipped either way per the card's own proviso
+> if Phase 5 retires its class. `signomial_global` cannot be ported without a
+> `PyTreeManager` that supports caller-supplied split points and caller-rewritten
+> child boxes — a much larger change than this card scoped.
 
 `lp_spatial_bb.py`, `gp/solve_gp_minlp`, `signomial_global` reimplement node
 selection with raw `heapq`. Port each to `PyTreeManager` (same selection policy →
@@ -1394,9 +1479,16 @@ any time after Phase 4 releases `solver.py`; it touches `crates/` only.
 
 **Re-sequencing, 2026-07-30 (owner) — the benchmark is for CORRECTNESS, not speed.**
 That reprioritizes what is left:
-- **Card 4c is NEXT**, promoted from lowest priority (one audited tree manager for
-  every certificate-critical pruning decision), carrying the vector-constraint
-  corpus gap.
+- **Card 4c: Task 2 LANDED, Task 1 blocked-by-measurement (2026-07-30).** The
+  vector-constraint corpus gap is closed (7 modeling-API cases wired into the
+  verifier and Card 3c parity suites; the pre-5.5 row loop wrongly accepts 6 of
+  7, so the coverage is proven non-vacuous). The three ports were **not**
+  attempted: two entry experiments (§6) showed the Regime-N panel never invokes
+  the GP-MINLP or signomial loops on defaults (both behind default-OFF flags) and
+  that forcing the flags ON yields exactly **one** budget-independent comparable
+  (`prob03`, 5 nodes) — a gate too weak to certify a port whose loops diverge from
+  `PyTreeManager` on 5–6 policy axes each. The per-loop policy characterisation is
+  recorded on the card; the open decision is materialise-a-population vs retire.
 - **Card 4b modules 2–5: DROPPED** (see its card) — maintainability, not
   correctness, behind a state-object prerequisite.
 - **Card 6d (process floor): OFF the critical path** — pure wall-clock, no
@@ -1415,6 +1507,99 @@ touches `crates/` + producer files — safe alongside 1/2/7, coordinate with 3c
 (whose parity test is the guard Phase 5's expansions must keep green).
 
 ## §6. Falsification log (append-only, per §0.3)
+
+### 2026-07-30 — Card 4c: "the Regime-N panel can gate the three stray-loop ports" — **FALSIFIED**
+
+**Hypothesis.** Card 4c's per-loop gate is `panel_baseline.py --check` with exact
+node/objective match. That presumes the 119-instance panel actually *invokes*
+`lp_spatial_bb.solve_lp_spatial_bb`, `gp.solve_gp_minlp` and
+`signomial_global.solve_signomial_global`.
+
+**Kill criterion.** Any loop the panel cannot reach makes its own Regime-N PASS
+vacuous (CLAUDE.md §6: a checker that compares nothing reads exactly like a pass),
+and the port must be verified another way or not attempted.
+
+**Experiment** (`discopt_benchmarks/scripts/card4c_reachability.py`,
+`reports/card4c_reachability.json`). Static: `panel_baseline.py:202` states
+"NOTHING here sets a `DISCOPT_*` flag", and `routing.py:218-245` gates
+`auto_gp_minlp` behind `env_bool("DISCOPT_GP_MINLP", False)` and
+`auto_signomial_global` behind `env_bool("DISCOPT_SGO", False)` — both
+**default-OFF**, both short-circuited *before* their classifier runs. Dynamic: all
+119 corpus instances loaded and classified, **357 executed classifications, 0 load
+errors, 0 classifier errors**.
+
+- `classify_gp_minlp` accepts **3**: `cvxnonsep_nsig30`, `cvxnonsep_psig30`, `prob03`.
+- `classify_signomial_global` accepts **5**: `cvxnonsep_nsig30`, `prob02`, `prob03`,
+  `prob06`, `st_e38`.
+- `classify_gp` accepts **0** (context: the pure-GP route never fires on this corpus).
+
+**Verdict: FALSIFIED.** On defaults the panel invokes neither the GP-MINLP nor the
+signomial loop at all, so a post-port `--check` PASS would be evidence of nothing.
+`lp_spatial_bb` is the exception — it is default-reachable, but only through
+`modeling/core.py:4293`'s no-incumbent fallback (`_fb_reserve > 1.0 and
+result.objective is None`), i.e. on the handful of instances the primary path
+leaves without an incumbent. **Consequence:** the ports were not attempted; see
+the next entry for why forcing the flags ON does not rescue the gate either.
+
+### 2026-07-30 — Card 4c: "the GP loop's divergences from `PyTreeManager` are immaterial, so its port is bound-neutral" — **NOT ESTABLISHED (population too small)**
+
+**Hypothesis.** `gp/solve_gp_minlp` is the most tractable of the three loops (pure
+integer best-first, no spatial branching, no per-node OBBT), so its port should be
+bound-neutral with `PyTreeManager`'s stock policy.
+
+**Kill criterion.** Any single policy divergence that moves `node_count` or the
+certified objective on a budget-independent corpus instance proves the port needs a
+matching `PyTreeManager` option and cannot be silently normalised (§0.1).
+
+**Experiment** (`discopt_benchmarks/scripts/card4c_gp_divergence.py`,
+`reports/card4c_gp_divergence.json`). `DISCOPT_GP_MINLP=1`, 60 s, the 3 instances
+the previous entry identified. Baseline vs one divergence applied alone —
+`PyTreeManager`'s **exact** prune (`node_lb >= incumbent`, `tree_manager.rs:459`)
+in place of the loop's `>= incumbent - fathom_slack()` (`gp/__init__.py:1004`).
+**6 executed comparisons, 0 errors.**
+
+| instance | baseline | exact-prune arm | comparable? |
+|---|---|---|---|
+| `prob03` | optimal, **5 nodes**, obj 9.999999905 cert | optimal, **5 nodes**, same obj | **yes** (budget-independent) |
+| `cvxnonsep_nsig30` | time_limit, 69 nodes, no incumbent | time_limit, 93 nodes | no |
+| `cvxnonsep_psig30` | time_limit, 78 nodes, no incumbent | optimal, 85 nodes, obj 78.9989 | no |
+
+**Verdict: the hypothesis is neither confirmed nor killed, and that is the
+finding.** The divergence moved both time-limited instances, but those are
+budget-dependent by construction and cannot fail a Regime-N gate; the *only*
+budget-independent GP comparable in the entire corpus is `prob03`, a **5-node**
+tree, and it was neutral. A 5-node tree cannot discriminate a best-first tie-break
+(`PyTreeManager` prefers **deeper** on a bound tie, `pool.rs:57-60`; the loop is
+insertion-FIFO), pseudocost-vs-most-fractional branching, empty-child suppression,
+or failed-relaxation handling. **The gate, not the port, is what is missing.**
+
+**Consequence.** No loop was ported. Porting behind a gate this weak would be
+exactly the "measurement that never happened and reported success anyway" the
+Measurement & instrumentation discipline section was written for. Card 4c's status
+block records the full per-loop policy characterisation (the reusable half of the
+work) and the two exits available.
+
+### 2026-07-30 — Card 4c Task 2: a hand-appended `Constraint` with non-zero `rhs` is solved as though `rhs = 0`
+
+**Not a hypothesis — an incidental measurement**, recorded because it silently
+invalidates any test that both solves and verifies the same hand-built model.
+
+`model._constraints.append(Constraint(body, sense, rhs))` is the pattern
+`test_incumbent_verifier_scale.py` already uses. The NLP evaluator and therefore
+`validation/feasibility.verify_point` honour `rhs`; the **solver does not**.
+Measured on this tree:
+
+    Constraint(w, ">=", 5.0) appended by hand  -> solve() returns w = 0
+    m.subject_to(w >= 5.0)                     -> solve() returns w = 5
+
+The public `subject_to` path folds the offset into the body and is correct. The
+existing verifier tests are unaffected (they never solve). Card 4c Task 2's parity
+arm *does* solve, so `vector_constraint_corpus.solvable_vector_cases()` filters
+non-zero-`rhs` cases out structurally and the parity arm re-asserts the all-zero
+property before solving. **This wants its own issue**: either the private-append
+path should be honoured by the solver too, or appending a `Constraint` with a
+non-zero `rhs` should refuse loudly rather than silently drop it (§0.4 / CLAUDE.md
+§3 — a silent approximation is the failure mode).
 
 ### 2026-07-29 — Card 2a: "the graduated cascade should be on at all six sites" — **FALSIFIED**
 

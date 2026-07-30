@@ -107,6 +107,24 @@ _PYTHON_ONLY_NODE_RATE_CEILING = 0.60
 #: by tens of points), so the ceiling is applied only to the pooled rate.
 _MIN_NODES_FOR_RATE = 10
 
+#: Card 4c Task 2 — budget for the vector-constraint arm. These models are tiny;
+#: the point is that the tightening stacks see a MULTI-ROW constraint at all, which
+#: the ``.nl`` corpus above can never supply.
+_VECTOR_BUDGET_S = 5.0
+
+
+def _vector_cases():
+    """The vector-constraint cases this file may ``solve()``.
+
+    Not the whole corpus: a hand-appended ``Constraint`` with a non-zero ``rhs`` is
+    honoured by the verifier but ignored by the solver, so those cases are
+    verification-only and ``solvable_vector_cases`` filters them out structurally
+    (see its docstring).
+    """
+    from vector_constraint_corpus import solvable_vector_cases
+
+    return solvable_vector_cases()
+
 
 def _instance_path(stem: str) -> Path:
     for d in _CORPUS_DIRS:
@@ -183,13 +201,32 @@ class _Ledger:
         self.nlp_bb_loop = False
         self.eval_model = None
         self.witness_skipped = 0
+        # Card 4c Task 2: (B0, P) pairs from the PYTHON stack, recorded on every
+        # call rather than only on nodes the Rust in-tree kernel also decided.
+        # Purely additive — no assertion above reads it — and it is what lets the
+        # vector-constraint arm check I2 on models small enough that
+        # `in_tree_presolve` never fires.
+        self.py_captured: list[tuple] = []
 
 
 def _capture(instance: str, budget: float) -> tuple[_Ledger, object]:
-    """Solve ``instance`` with both node-tightening entry points instrumented."""
+    """Solve ``instance`` from the ``.nl`` corpus with both stacks instrumented."""
+    from discopt.modeling.core import from_nl
+
+    return _capture_model(lambda: from_nl(str(_instance_path(instance))), budget)
+
+
+def _capture_model(model_factory, budget: float) -> tuple[_Ledger, object]:
+    """Solve ``model_factory()`` with both node-tightening entry points instrumented.
+
+    Split out of :func:`_capture` (Card 4c Task 2) so the same instrumentation can
+    observe models built through the **modeling API**. The ``.nl`` corpus emits only
+    scalar rows, so until this split the parity sweep could not present a
+    multi-row (vector) constraint to either tightening stack — the class Phase 5.5
+    found verifiers silently mis-indexing.
+    """
     import discopt.solver as _solver
     from discopt._rust import PyModelRepr
-    from discopt.modeling.core import from_nl
 
     led = _Ledger()
     box_of: dict[bytes, tuple] = {}
@@ -225,6 +262,7 @@ def _capture(instance: str, budget: float) -> tuple[_Ledger, object]:
             )
         if led.eval_model is None:
             led.eval_model = getattr(evaluator, "_model", None)
+        led.py_captured.append((b0_lb, b0_ub, p_lb.copy(), p_ub.copy()))
         box_of[_key(t_lb, t_ub)] = (b0_lb, b0_ub)
         return t_lb, t_ub, inf
 
@@ -304,7 +342,7 @@ def _capture(instance: str, budget: float) -> tuple[_Ledger, object]:
     _solver._tighten_node_bounds_with_status = py_wrap
     PyModelRepr.in_tree_presolve = itp_wrap
     try:
-        model = from_nl(str(_instance_path(instance)))
+        model = model_factory()
         result = model.solve(time_limit=budget)
     finally:
         _solver._tighten_node_bounds_with_status = orig_py
@@ -328,6 +366,9 @@ TOTALS = {
     "native_calls": 0,
     "native_served": 0,
     "native_checks": 0,
+    # Card 4c Task 2 — the vector-constraint arm.
+    "vector_instances": 0,
+    "vector_soundness_checks": 0,
 }
 
 
@@ -572,6 +613,106 @@ def test_parity_probe_actually_decided_nodes():
         f"{TOTALS['native_calls']} producer calls. Per the Phase 5.1 census "
         "(20/119 served) at least the _NATIVE_SERVED instances must engage it; "
         "zero means kernel coverage regressed and this arm is now vacuous."
+    )
+
+
+@pytest.mark.smoke
+@pytest.mark.parametrize("case", _vector_cases(), ids=lambda c: c.name)
+def test_vector_constraint_node_tightening_keeps_the_feasible_point(case):
+    """Card 4c Task 2 — I2 (the soundness floor) on a VECTOR-constraint model.
+
+    Every row in the ``.nl`` corpus is scalar, so ``PARITY_INSTANCES`` above can
+    never present a multi-row constraint to either tightening stack. That is the
+    same blind spot Phase 5.5 found in the incumbent verifiers, where a
+    per-constraint-object row index silently skipped rows 1..n-1 of a vector
+    constraint and **accepted an infeasible point**. Node tightening indexes rows
+    too, and nothing in this file was watching it do so on that class.
+
+    The invariant asserted is I2, the one that must never be relaxed: a box that
+    contains a known-feasible point must still contain it after tightening, on
+    every stack. Here the witness is not a solve incumbent (which may not exist on
+    a tiny model) but the corpus's *declared* feasible point — a stronger witness,
+    because it is known independently of the search.
+    """
+    # A solved case must have every `rhs` at zero: a hand-appended Constraint with
+    # a non-zero rhs is honoured by the verifier but IGNORED by the solver, so the
+    # two would be looking at different models and the invariant would be void.
+    _probe = case.build()
+    for _c in _probe._constraints:
+        assert float(getattr(_c, "rhs", 0.0)) == 0.0, (
+            f"{case.name}: constraint {getattr(_c, 'name', '?')!r} has rhs="
+            f"{_c.rhs}. A solved corpus case must fold its offset into the body — "
+            "see vector_constraint_corpus._branching."
+        )
+
+    led, _result = _capture_model(case.build, _VECTOR_BUDGET_S)
+
+    TOTALS["vector_instances"] += 1
+    TOTALS["contraction_checks"] += led.contraction_checks
+
+    assert not led.contraction_violations, (
+        f"{case.name}: I1 — a tightening stack GREW the box: "
+        + "; ".join(led.contraction_violations[:3])
+    )
+
+    # The Rust in-tree kernel decides nodes only on models large enough to branch;
+    # the Python Jacobian+structural pass runs from the root. Use whichever
+    # captured a box, preferring the two-stack record when it exists.
+    if led.captured:
+        captured = led.captured
+    elif led.py_captured:
+        captured = [(b0l, b0u, pl, pu, pl, pu) for (b0l, b0u, pl, pu) in led.py_captured]
+    else:
+        print(f"[parity-vector] {case.name}: 0 tightening calls (solved before any node)")
+        return
+
+    n_flat = int(captured[0][0].size)
+    x = np.asarray(case.feasible, dtype=np.float64)
+    if x.size > n_flat:
+        pytest.skip(f"{case.name}: witness longer than the flat box ({x.size} > {n_flat})")
+    xv = np.zeros(n_flat, dtype=np.float64)
+    xv[: x.size] = x
+    mask = np.zeros(n_flat, dtype=bool)
+    mask[: x.size] = True
+
+    checks = 0
+    violations: list[str] = []
+    for b0_lb, b0_ub, s_lb, s_ub, k_lb, k_ub in captured:
+        if b0_lb.size != n_flat or not _contains(b0_lb, b0_ub, xv, mask):
+            continue  # the witness is not in this node's subtree
+        for label, (lo, hi) in (
+            ("shipped", (s_lb, s_ub)),
+            ("kernel-alone", (k_lb, k_ub)),
+        ):
+            checks += 1
+            if not _contains(lo, hi, xv, mask):
+                violations.append(f"{label} stack dropped the known-feasible point")
+    TOTALS["vector_soundness_checks"] += checks
+    TOTALS["soundness_checks"] += checks
+    print(
+        f"[parity-vector] {case.name}: {len(captured)} captured boxes, {checks} containment checks"
+    )
+    assert not violations, f"{case.name}: I2 SOUNDNESS FLOOR BREACHED — {violations[:3]}"
+
+
+@pytest.mark.smoke
+def test_vector_constraint_arm_is_not_vacuous():
+    """The vector arm must have actually reached the tightening stacks.
+
+    An arm that decided zero nodes on every case proves nothing and would read as
+    a pass (CLAUDE.md §6). Ordered after the parametrized cases by name.
+    """
+    print(
+        f"[parity-vector] totals: instances={TOTALS['vector_instances']}, "
+        f"containment checks={TOTALS['vector_soundness_checks']}"
+    )
+    assert TOTALS["vector_instances"] == len(_vector_cases()), (
+        "the vector cases did not all run; totals are not interpretable"
+    )
+    assert TOTALS["vector_soundness_checks"] > 0, (
+        "the vector-constraint parity arm performed ZERO containment checks — no "
+        "vector model reached a node-tightening stack, so this arm is vacuous. "
+        "Add a case that branches, or the class is unguarded again."
     )
 
 
