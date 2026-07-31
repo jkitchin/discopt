@@ -635,11 +635,24 @@ def _native_spatial_kernel_enabled() -> bool:
     tracked in #902. The cost of that conservatism is explicit: ``tanksize`` and
     ``nvs17`` both go ``optimal`` -> ``feasible`` at a 60 s budget with the kernel off.
 
-    ``DISCOPT_NATIVE_SPATIAL_KERNEL=1`` opts back in. Still open on the kernel itself
-    (measured, not yet root-caused): it abandons ~1/3 of its wall budget — nvs19/nvs24
-    exit at ~39 s of a 60 s limit — and its accounting fields are wrong on this path
-    (``rust_time`` reads ~1e-4 s for a ~7 s Rust tree, ``jax_time`` 0.0), so do not
-    build gates on them."""
+    ``DISCOPT_NATIVE_SPATIAL_KERNEL=1`` opts back in.
+
+    *The two loose ends #902 recorded here as open are now closed.* The accounting
+    fields were genuinely broken on this path — ``rust_time`` read ~1e-4 s for a ~7 s
+    Rust tree and ``jax_time`` 0.0 — and :func:`_try_native_spatial_kernel` now charges
+    the producer build, the seed phase and the Rust tree to their buckets. And the
+    "kernel abandons ~1/3 of its wall budget (nvs19/nvs24 exit at ~39 s of a 60 s
+    limit)" symptom is **not a kernel defect at all**; that attribution is retracted
+    (CLAUDE.md §11). ``Model.solve`` deducts ``_fb_reserve = 0.35 * time_limit`` up
+    front for the #844 LP-spatial no-incumbent fallback on every in-scope model, and
+    spends it only when the primary returns no incumbent — so an in-scope solve that
+    *does* find one stops at 0.65 × the stated budget. Measured: ``_is_in_scope`` is
+    True for nvs17/19/24 (primary budget 39.0 s of 60) and False for ``tanksize``,
+    which is exactly the one of the four that runs the full 60 s; and nvs24 OFF, the
+    one in-scope run finding no incumbent, is the only one that runs past 60 s (71.7 s
+    = 39 s primary + the 21 s reserve). It applies identically with this flag OFF.
+    Tracked as #917, since the fix is a change to the default budget policy for every
+    solve and needs its own panel."""
     return os.environ.get("DISCOPT_NATIVE_SPATIAL_KERNEL", "0").strip().lower() not in (
         "0",
         "false",
@@ -1035,10 +1048,20 @@ def _try_native_spatial_kernel(
     and the native tree against the outer ``Model.solve(time_limit=...)`` deadline."""
     if not _native_spatial_kernel_enabled():
         return None
+    # #902 finding 3: this path used to hand ``SolveResult`` the caller's
+    # ``rust_time``/``jax_time`` counters UNCHANGED, so a solve that spent ~7 s inside
+    # the Rust tree reported ``rust_time`` ~1e-4 s and ``jax_time`` 0.0 (measured on
+    # nvs19) and ``python_time`` — the residual — absorbed the whole solve. The three
+    # fields together said "pure Python" about a solve that was almost entirely Rust.
+    # These two accumulators charge the kernel's own work to the right buckets: the
+    # producer build and the NLP seed phase are JAX, the tree is Rust.
+    _native_jax_s = 0.0
+    _native_rust_s = 0.0
     try:
         from discopt import _rust
         from discopt._jax.spatial_producer import build_spatial_kernel_spec
 
+        _t_phase = time.perf_counter()
         spec = build_spatial_kernel_spec(
             model,
             bounds=(
@@ -1046,6 +1069,7 @@ def _try_native_spatial_kernel(
                 np.asarray(ub, dtype=np.float64)[:n_vars],
             ),
         )
+        _native_jax_s += time.perf_counter() - _t_phase
         if spec is None:
             return None  # model outside the covered subset -> Python path
         meta = {k: spec.pop(k) for k in list(spec) if k.startswith("meta_")}
@@ -1060,6 +1084,7 @@ def _try_native_spatial_kernel(
         # ``except`` below would swallow, silently disabling the kernel outright).
         _outer_budget = float(time_limit)
         outer_deadline = t_start + _outer_budget if math.isfinite(_outer_budget) else None
+        _t_phase = time.perf_counter()
         initial_incumbent, seed_point = _native_kernel_seed(
             model,
             np.asarray(lb, dtype=np.float64)[:n_vars],
@@ -1069,6 +1094,10 @@ def _try_native_spatial_kernel(
             n_orig,
             outer_deadline,
         )
+        # The seed is an NLP relaxation solve plus one sub-NLP per enumerated integer
+        # assignment plus a verification of each candidate — all through the JAX
+        # evaluator, and on nvs19 it was the single largest cost in the solve.
+        _native_jax_s += time.perf_counter() - _t_phase
 
         remaining = (
             None if outer_deadline is None else max(0.0, outer_deadline - time.perf_counter())
@@ -1080,7 +1109,9 @@ def _try_native_spatial_kernel(
         )
         if initial_incumbent is not None:
             solve_kwargs["initial_incumbent"] = float(initial_incumbent)
+        _t_phase = time.perf_counter()
         res = _rust.solve_spatial_tree_py(**spec, **solve_kwargs)
+        _native_rust_s += time.perf_counter() - _t_phase
         res.update(meta)
     except Exception as exc:  # pragma: no cover - defensive
         logger.debug("native spatial kernel skipped: %s", exc)
@@ -1133,7 +1164,9 @@ def _try_native_spatial_kernel(
     # #788: a time-limited exit may carry no primal at all; there is nothing to
     # verify then, and the bound-only result below is reported without one.
     if x_flat is not None:
+        _t_phase = time.perf_counter()
         _ok, _model_obj = _native_kernel_verify_point(model, x_flat[:n_orig])
+        _native_jax_s += time.perf_counter() - _t_phase
         if not _ok:
             logger.debug(
                 "native spatial kernel: final incumbent failed original-model "
@@ -1156,12 +1189,21 @@ def _try_native_spatial_kernel(
     x_dict = _unpack_solution(model, x_flat) if x_flat is not None else None
     wall_time = time.perf_counter() - t_start
     gap_val = abs(obj_val - bound_val) / (abs(obj_val) + 1e-10) if obj_val is not None else None
+    # #902: the caller's counters carry the pre-handoff work (presolve); the kernel's
+    # own phases are added here so ``python_time`` — the residual — means what it says.
+    # Reported, never gated on: nothing in the solver branches on these fields.
+    rust_total = rust_time + _native_rust_s
+    jax_total = jax_time + _native_jax_s
     logger.info(
-        "native spatial kernel (#764) exited %s: obj=%s bound=%.6g nodes=%d",
+        "native spatial kernel (#764) exited %s: obj=%s bound=%.6g nodes=%d "
+        "(rust %.2fs, jax %.2fs of %.2fs wall)",
         native_status,
         obj_val,
         bound_val,
         int(res["node_count"]),
+        _native_rust_s,
+        _native_jax_s,
+        wall_time,
     )
     return SolveResult(
         status=native_status,
@@ -1171,9 +1213,9 @@ def _try_native_spatial_kernel(
         x=x_dict,
         wall_time=wall_time,
         node_count=int(res["node_count"]),
-        rust_time=rust_time,
-        jax_time=jax_time,
-        python_time=wall_time - rust_time - jax_time,
+        rust_time=rust_total,
+        jax_time=jax_total,
+        python_time=wall_time - rust_total - jax_total,
         gap_certified=math.isfinite(bound_val),
     )
 
