@@ -1377,3 +1377,61 @@ Stage-1 validation patch (route `diving` through a per-model evaluator cache):
 > the in-progress convex **LP-OA branch-and-cut kernel (#799/#804)**, not per-node
 > Python-overhead trimming. Root-OBBT budgeting (ex14_2_7 class) is a separate
 > bound-CHANGING candidate (needs the §5 panel).
+
+## 13. #917 budget policy: the #844 reserve is forfeited, and the bound merge that would spend it is dead (falsified 2026-07-31)
+
+> **The defect.** `Model.solve` deducts `0.35 * time_limit` from the caller's budget
+> for every model the #844 no-incumbent fallback *could* serve, and spends it in one
+> case only — the primary returned nothing. A primary that *does* find an incumbent
+> and then hits its reduced deadline forfeits the slice: nobody spends it, and the
+> caller gets `time_limit` at 65% of the limit they stated.
+>
+> **Entry measurement** (19 in-scope instances across both in-repo corpora, 60 s
+> budget, isolated subprocesses; `scratchpad/issue917_entry_panel_T60.json`): 15
+> certify inside the reduced 39 s budget, **1** (nvs24) is the no-incumbent case the
+> reserve exists for, and **3** (nvs17/nvs19/nvs23) stop at ~39 s holding an
+> incumbent with 21 s discarded. `nvs18` certifies at **38.9 s** of the 39 s primary
+> budget — 0.1 s of margin — so the reserve is a latent *certification* regression on
+> the family, not only lost wall.
+>
+> **Falsified: candidate 1, "spend the residual on the fallback and keep the tighter
+> dual bound."** Issue #917 proposed it with an explicit kill criterion ("if the
+> merged bound is no tighter on a corpus panel, this buys nothing"). The criterion is
+> met on every instance of the class — the fallback's bound is 5-50x *looser*:
+>
+> | instance | primary bound (39 s) | reserve bound (21 s) | tighter? |
+> |---|---|---|---|
+> | nvs17 | -1105.89 | -5838.02 | no |
+> | nvs19 | -1104.24 | -16377.19 | no |
+> | nvs23 | -1130.70 | -57328.53 | no |
+>
+> Its primal is worse too on every one (-1068.8 vs -1100.4, -931.2 vs -1097.6, none
+> vs -1124.8). This is the documented ~250x root looseness of the McCormick
+> relaxation on this family (`docs/dev/lp-node-primal-quality.md`), so the merge was
+> **recorded and not shipped**. The budget belongs to the primary.
+>
+> **Shipped instead: candidate 2, the incumbent-conditional budget extension**
+> (`_extend_budget_for_incumbent`, `DISCOPT_LP_SPATIAL_RESERVE_EXTENSION`, default ON
+> after its panel). The search reclaims the reserve at its reduced deadline and only
+> while it already holds an incumbent — the one state in which the #844 fallback
+> provably has nothing to contribute — so #844 keeps its exact budgets and ordering,
+> and a path with no reclaim point (the #764 native kernel is one uninterruptible
+> Rust call) simply keeps today's reduced budget rather than silently losing the
+> fallback's reserve. Panel: 133 cells over a uniform budget grid,
+> `cert_regressions=0 lost_incumbents=0 unsound=0`; nvs18@45 s goes uncertified 0/3 →
+> **certified 3/3** and nvs18@30 s closes 92% of its dual gap (-783.8528 → -778.8359
+> against an incumbent of -778.4), both with zero spread over 3 reps.
+>
+> **Standing negative result.** On nvs17/nvs19/nvs23 the reclaimed time is
+> **neutral**: nvs17 at 60 s goes from 27 to 7391 nodes and the dual bound does not
+> move a digit. That is the NLP-per-node bound freeze on dense integer-bilinear
+> models — the pathology the `lp_spatial=True` engine exists for — and no budget
+> policy can fix it. Anyone measuring a bound improvement on that family from *more
+> time* is measuring noise.
+>
+> **Method note (cost me a wrong conclusion once).** A wall-limited search is **not**
+> node-reproducible: nvs13 at a 6 s budget gives 454 vs 475 nodes, different bounds,
+> on two runs of the identical build. Single-run OFF/ON diffs on time-limited cells
+> are noise — the first 1-rep panel flagged four "looser bound" cells, and every one
+> was a cell where the extension never fired, i.e. two runs of identical code. Score
+> only cells where the mechanism fired, and repeat them.

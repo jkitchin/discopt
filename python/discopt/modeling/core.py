@@ -204,6 +204,105 @@ def _lp_spatial_mixed_fallback_enabled() -> bool:
     )
 
 
+def _lp_spatial_reserve_extension_enabled() -> bool:
+    """#917: let the primary reclaim the #844 reserve once it holds an incumbent.
+
+    The reserve above is deducted from the caller's ``time_limit`` for *every* model
+    the fallback could serve, and spent only when the primary returns nothing. A
+    primary that finds an incumbent and then hits its reduced deadline forfeits the
+    slice outright — nobody spends it, and the caller is told ``time_limit`` at 65%
+    of the limit they stated.
+
+    **Entry measurement** (in-repo corpus, 19 in-scope instances, 60 s budget, each
+    in an isolated subprocess; ``scratchpad/issue917_entry_panel_T60.json``):
+
+    ===============  ===  =======================================================
+    class            n    what happens
+    ===============  ===  =======================================================
+    certified        15   primary certifies inside 39 s; reserve never taken
+    reserve-spent     1   nvs24: no incumbent — the #844 case, reserve is spent
+    **forfeited**     3   nvs17/nvs19/nvs23: incumbent at ~39 s, 21 s discarded
+    ===============  ===  =======================================================
+
+    ``nvs18`` certifies at **38.9 s** of the 39 s primary budget — 0.1 s of margin —
+    so the reserve is a latent certification regression on this whole family, not
+    only a wall-clock waste.
+
+    **Why the extension and not a bound merge.** The issue's other candidate was to
+    spend the residual on the fallback anyway and keep the tighter of the two dual
+    bounds. Its stated kill criterion — "if the merged bound is no tighter on a
+    corpus panel, this buys nothing" — is met, on every instance of the class:
+
+    ==========  =================  ================  =========
+    instance    primary bound      reserve bound     tighter?
+    ==========  =================  ================  =========
+    nvs17       -1105.89           -5838.02          no
+    nvs19       -1104.24           -16377.19         no
+    nvs23       -1130.70           -57328.53         no
+    ==========  =================  ================  =========
+
+    The reserve's primal is worse too on every one (-1068.8 vs -1100.4, -931.2 vs
+    -1097.6, none vs -1124.8). That is the documented ~250x root looseness of the
+    McCormick relaxation on this family (see ``_lp_spatial_fallback_enabled`` and
+    ``docs/dev/lp-node-primal-quality.md``), so the merge is dead on arrival and the
+    budget belongs to the primary. Candidate 1 is recorded as falsified, not shipped.
+
+    **Graduation panel** — every in-scope instance in both in-repo corpora across a
+    uniform budget grid (6/9/13/20/30/45/60 s), OFF and ON run back-to-back per cell
+    in isolated subprocesses. 133 cells; the extension fired in 15.
+    ``discopt_benchmarks/scripts/issue917_reserve_extension_panel.py``, results in
+    ``discopt_benchmarks/results/issue917_reserve_extension_panel.json``.
+
+    *Cert-clean*: ``cert_regressions=0  lost_incumbents=0  unsound=0
+    false_primals=0`` — no bound above a reference optimum, none above its own
+    incumbent.
+
+    *Net-positive*: confirmed on a 3-rep re-run of the cells where the extension
+    fires (``…_reps.json``; a wall-limited search is not node-reproducible, so single
+    runs cannot separate signal from noise — nvs13 at 6 s gives 454 vs 475 nodes on
+    two runs of the identical build):
+
+    ==========  ====  ===========================  ===========================
+    cell        ext   OFF (3 reps)                 ON (3 reps)
+    ==========  ====  ===========================  ===========================
+    nvs18@45 s  15.7  uncertified 0/3, bd -781.87  **certified 3/3**, bd -778.4
+    nvs18@30 s  10.5  bound -783.8528 (sd 0)       **bound -778.8359** (sd 0)
+    nvs13@9 s    3.2  uncertified 0/3, bd -588.96  certified 1/3
+    ==========  ====  ===========================  ===========================
+
+    nvs18@30 s is the clean bound result: the dual gap to the incumbent (-778.4)
+    falls from 5.45 to 0.44, a 92% reduction, reproducibly and with zero spread.
+    nvs13@9 s is intermittent because its certification time straddles that budget —
+    it is never *worse* than OFF, just not always better.
+
+    On nvs17/nvs19/nvs23 the extension is **neutral**: it buys thousands of extra
+    nodes (nvs17 at 60 s: 27 -> 7391) and the dual bound does not move a digit. That
+    is the known freeze of the NLP-per-node path on dense integer-bilinear models
+    (the pathology the ``lp_spatial=True`` engine was built for), not something this
+    change can address — but neutral there and positive elsewhere still clears the
+    bar, and the caller gets the budget they asked for either way.
+
+    **Honest cost.** At small budgets the ON arm's wall runs past the stated limit by
+    the post-loop tail that was always there (nvs13 at 9 s: 9.5-10.6 s). OFF hides the
+    same tail by stopping the search at 65%; it is not new overshoot, it is the same
+    overshoot measured against the full limit. Instances that overrun grossly today
+    (nvs24: 58.8 s against a 9 s budget) do so identically in both arms — a separate
+    #654-class defect.
+
+    **Default ON** after that panel; opt out with
+    ``DISCOPT_LP_SPATIAL_RESERVE_EXTENSION=0``.
+    """
+    import os as _os
+
+    return _os.environ.get("DISCOPT_LP_SPATIAL_RESERVE_EXTENSION", "1") not in (
+        "0",
+        "",
+        "false",
+        "False",
+        "off",
+    )
+
+
 if TYPE_CHECKING:
     from discopt.modeling.indexed import IndexedParam, IndexedVar
     from discopt.modeling.sets import _SetBase
@@ -4283,11 +4382,25 @@ class Model:
                 _fb_reserve = 0.0
         _primary_tl = time_limit - _fb_reserve
 
+        # #917: the reserve above is deducted from every in-scope solve and spent by
+        # only the no-incumbent minority, so a primary that finds an incumbent and
+        # then hits its reduced deadline forfeits 35% of the caller's budget — nobody
+        # spends it. Hand that slice to the primary as an *extension it may take only
+        # while holding an incumbent*: the fallback serves exclusively the
+        # no-incumbent case, so the state that triggers the extension is precisely the
+        # state in which the fallback has nothing to contribute, and the #844 path is
+        # preserved unchanged (same 65% primary budget, same 35% fallback budget, same
+        # order). See ``_lp_spatial_reserve_extension_enabled`` for the measurement.
+        _fb_extension = (
+            _fb_reserve if (_fb_reserve > 0.0 and _lp_spatial_reserve_extension_enabled()) else 0.0
+        )
+
         try:
             with deadline_scope(_primary_tl):
                 result = solve_model(
                     self,
                     time_limit=_primary_tl,
+                    incumbent_time_extension=_fb_extension,
                     gap_tolerance=gap_tolerance,
                     threads=threads,
                     deterministic=deterministic,
@@ -4349,6 +4462,16 @@ class Model:
         # Soundness: only ever fills in a MISSING incumbent, and the engine verifies
         # every point it accepts against a ground-truth evaluator, so it cannot weaken
         # or replace an existing certificate.
+        #
+        # #917 leaves this branch's budget at the full reserve rather than clamping it
+        # to the time actually left. The extension can only fire while the primary
+        # holds an incumbent, so a solve that took it never reaches here — the clamp
+        # would guard nothing, and it measurably HARMED the default path: sizing the
+        # fallback from elapsed wall makes it depend on the primary's run-to-run
+        # overshoot, and on nvs13 at a 6 s budget that flipped the reserve across the
+        # 1.0 s floor between two runs of the same configuration (incumbent -580.4 in
+        # one, none in the other). The #844 fallback keeps the budget it was
+        # panelled at.
         if _fb_reserve > 1.0 and result.objective is None:
             try:
                 from discopt._jax.lp_spatial_bb import solve_lp_spatial_bb
