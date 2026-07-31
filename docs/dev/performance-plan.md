@@ -1435,3 +1435,62 @@ Stage-1 validation patch (route `diving` through a per-model evaluator cache):
 > are noise — the first 1-rep panel flagged four "looser bound" cells, and every one
 > was a cell where the extension never fired, i.e. two runs of identical code. Score
 > only cells where the mechanism fired, and repeat them.
+
+## 14. #917 follow-up: the warm pure-LP node path drops its caller's deadline (mechanism built, panel FAILED 2026-07-31)
+
+> **The defect.** `MilpRelaxationModel.solve` takes a `time_limit`, and its DEFAULT
+> `backend="simplex"` pure-LP fast path dropped it: `_solve_lp_warm` /
+> `_solve_lp_warm_equilibrated` / `solve_lp_warm_std` took no deadline and
+> `lp_bindings.rs` hardcoded `SimplexOptions { deadline: None }` — while the MILP
+> route (`solve_milp_csc_py(time_limit_s=…)`) wired it up and the dual/primal pivot
+> loops already poll it every 256 pivots. ~13 call sites in `_jax/mccormick_lp.py`
+> plus `lp_spatial_bb.py` and `integer_ratio.py` compute a per-LP budget and pass it
+> here, so the drop was general.
+>
+> **Evidence** (`scratchpad/nvs24_arm.py`, `scratchpad/nvs24_profile_evidence.txt`).
+> nvs24 at a 3.9 s budget: ~53 s (13.5x), reproducibly, of which
+> `separate/univariate_square` is 47.9 s — ONE call,
+> `solve(time_limit=0.202)` → `_solve_lp_warm` → 47.03 s, a single `DualPivotLoop`
+> **59 494 degenerate dual pivots** deep with `DualBlandActivations=0`. Hard cliff:
+> m=1324 rows solves in 1.1 s, m=1334 takes 45 s.
+>
+> **Built:** `time_limit_s` on `solve_lp_warm_csc_py` → `SimplexOptions.deadline`,
+> threaded back up through `solve_lp_warm_std` → `_solve_lp_warm` →
+> `MilpRelaxationModel.solve`, which now spends ONE shared budget across its warm /
+> equilibrated / cold attempts instead of handing each a fresh copy. Behind
+> `DISCOPT_LP_WARM_DEADLINE`.
+>
+> **Panel FAILED → stays OFF** (66 in-repo instances, 15 s budget, OFF/ON interleaved).
+> *Cert-clean*: **no** — 1 certification regression (cvxnonsep_psig40r) and 2 bounds
+> lost outright (bchoco08 1.0 → None, contvar 171244.81 → None), 2 looser vs 3 tighter.
+> *Net-positive*: **no** — total overrun 79.2 s → 85.2 s (flat; the OFF arm alone
+> ranged 78–176 s across runs, so this metric is noisy).
+>
+> **The blocker is precise.** Honouring the deadline costs a *bound*, not just time.
+> `_time_limit_result` does return a sound Neumaier–Shcherbina floor when the yielded
+> simplex leaves a usable dual, but it never reaches the reported bound: the consumer
+> in `_jax/mccormick_lp.py:758,903` adopts a node bound only from a
+> `status == "optimal"` result. Teaching it to accept a rigorous safe bound from a
+> non-optimal node would change the verdict — sound by weak duality, but it touches
+> the bound-adoption logic certification rests on, so: own change, own panel.
+>
+> **Two falsifications of my own work, recorded per §11.**
+>
+> 1. *The recovery cascade.* The first cut had no timeout guard, so a deadline exit
+>    fell into the equilibrated retry and then the ~170x-slower cold `solve_milp`.
+>    That **doubled** the corpus overrun the change exists to remove (175.6 s →
+>    310.3 s), all of it from one instance: heatexch_gen3 25.7 s → **254.5 s**
+>    (1.7x → 17.0x). With the guard, 30.7 s. A deadline is not a numerical failure and
+>    must not trigger the recovery meant for ill-conditioning.
+> 2. *The scoring hole.* The panel first compared bound quality only where BOTH arms
+>    were finite, so `1.0 → None` read as clean and it printed CERT_CLEAN=True twice
+>    before the hole was found. `lost_bound`/`gained_bound` exist because of that. An
+>    instrument that cannot see the most severe outcome in its own domain is worse
+>    than no instrument.
+>
+> **Standing conclusion.** The overrun is real and the plumbing to fix it now exists
+> and is tested; what blocks it is that the solver has no way to bank a dual bound
+> from an LP it cut short. Fix that first, then re-run this panel.
+>
+> **Separate, still open:** the dual-simplex degeneracy stall itself — 59 494
+> degenerate pivots with Bland's rule never activating.
