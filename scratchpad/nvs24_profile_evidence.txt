@@ -1,0 +1,49 @@
+#917 follow-up / nvs24 budget overrun -- DISCOPT_PROFILE=1 evidence.
+
+Command:
+  DISCOPT_PROFILE=1 python -c '<solve_model(nvs24, time_limit=3.9)>'
+Run wall: 53.6 s against a 3.9 s budget (13.7x); solver_stats
+separate/univariate_square = 47.88 s.
+
+The single profile block below is that 47 s: ONE DualPivotLoop of 46.35 s with
+59,494 degenerate dual pivots and Bland's rule never activated. The warm pure-LP
+path runs it with SimplexOptions.deadline = None (lp_bindings.rs), so the
+time_limit=0.202 its caller passed is dropped.
+
+Extracted from the full stderr dump (~100 KB of per-call blocks, not kept).
+Reproduce with: python scratchpad/nvs24_arm.py plain 3.9
+
+--- MILP phase profile (count, total ms) ---
+  PriceBtran          2203 calls     112.28 ms
+  PriceSweep          2203 calls      59.23 ms
+  AlphaFtran          2201 calls     149.28 ms
+  FtUpdate            2154 calls     300.15 ms
+  Refactorize           44 calls     643.89 ms
+  DualPrepare            1 calls      14.68 ms
+  DualRecompute          1 calls       0.66 ms
+  DualPivotLoop          1 calls   46354.03 ms
+--- simplex pivot categorization ---
+  Phase1Pivots              224
+  Phase2Pivots             1977
+  DegeneratePivots          475
+  BoundFlips                 47
+  BlandActivations            0
+  Refactorizations           44
+  RefinedRecoveryAttemptsPrimal          0
+  RefinedRecoveryRescuesPrimal          0
+  RefinedRecoveryAttemptsDual          0
+  RefinedRecoveryRescuesDual          0
+  DualDegeneratePivots      59494
+  DualBlandActivations          0
+  ExpandMinSteps            820
+  DualWarmSolves              1
+  DualColdFallbacks           1
+  DualStallTrips              1
+  RefacFtFail                 1
+  RefacCap                   43
+  RefacWorkGate               0
+  RefacFtGrowth               0
+  RefacFtTinyPivot            0
+  RefacFtSingular             0
+  LpDenseRetries              0
+  LpDenseRetryRescues          0
