@@ -25,7 +25,9 @@
 //! `depth_stride = 0` disables the pass.
 
 use crate::expr::ModelRepr;
-use crate::presolve::fbbt::{fbbt_with_cutoff, Interval};
+use crate::presolve::fbbt::{
+    any_empty_beyond, fbbt_with_cutoff, repair_subtol_crossings, Interval, FEAS_TOL,
+};
 use crate::presolve::probing::probe_node_bounds;
 
 /// Options controlling persistent in-tree bound tightening.
@@ -70,6 +72,11 @@ pub struct InTreeDelta {
     pub bounds_tightened: u32,
     /// True if the kernel detected infeasibility (empty interval).
     pub infeasible: bool,
+    /// How many sub-`FEAS_TOL` bound crossings were repaired (#907).
+    ///
+    /// Surfaced rather than absorbed: a rising count is a numerical smell, and
+    /// before #907 each of these events could have fathomed a live node.
+    pub subtol_repaired: usize,
     /// True iff the schedule actually ran the pass at this node.
     pub ran: bool,
 }
@@ -99,27 +106,49 @@ pub fn run_in_tree_presolve(
             ub: node_ub.to_vec(),
             bounds_tightened: 0,
             infeasible: false,
+            subtol_repaired: 0,
             ran: false,
         };
     }
+
+    // #907. Sanitize the INCOMING node box before anything reads it. A caller
+    // upstream (or an earlier `in_tree_presolve` on a parent node) may hand us a
+    // box already inverted by rounding noise; patching that straight onto
+    // `VarInfo` would seed FBBT from an inverted domain and manufacture the very
+    // emptiness we are trying not to over-read.
+    let mut node_box: Vec<Interval> = (0..node_lb.len())
+        .map(|i| Interval::new(node_lb[i], node_ub[i]))
+        .collect();
+    let mut subtol_repaired = repair_subtol_crossings(&mut node_box, FEAS_TOL);
 
     // Patch the model's variable bounds with the node-local bounds.
     // We clone only the lightweight `variables` Vec, not the arena.
     let mut patched = model.clone();
     for (i, vinfo) in patched.variables.iter_mut().enumerate() {
         if !vinfo.lb.is_empty() {
-            vinfo.lb[0] = node_lb[i];
+            vinfo.lb[0] = node_box[i].lo;
         }
         if !vinfo.ub.is_empty() {
-            vinfo.ub[0] = node_ub[i];
+            vinfo.ub[0] = node_box[i].hi;
         }
     }
 
-    let bounds: Vec<Interval> = fbbt_with_cutoff(&patched, opts.max_iter, opts.tol, incumbent);
-    let mut infeasible = bounds.iter().any(|iv| iv.is_empty());
+    // #907. `infeasible` is consumed by the B&B loop as a RIGOROUS FATHOM — the
+    // subtree is pruned outright — so it must never be set by floating-point
+    // noise. Repair sub-`FEAS_TOL` crossings, then conclude infeasibility only
+    // beyond the tolerance, exactly as `fbbt`, `fbbt_fp` and `probing` do.
+    //
+    // Loosening a fathom is the SOUND direction: the node is explored rather
+    // than discarded. Genuine detections are unaffected — corpus instrumentation
+    // found every real fathom carried either the `[inf, -inf]` empty sentinel or
+    // a crossing of exactly 1.0 (binary domain wipeout), 6+ orders above
+    // `FEAS_TOL`.
+    let mut bounds: Vec<Interval> = fbbt_with_cutoff(&patched, opts.max_iter, opts.tol, incumbent);
+    subtol_repaired += repair_subtol_crossings(&mut bounds, FEAS_TOL);
+    let mut infeasible = any_empty_beyond(&bounds, FEAS_TOL);
 
-    let mut new_lb = node_lb.to_vec();
-    let mut new_ub = node_ub.to_vec();
+    let mut new_lb: Vec<f64> = node_box.iter().map(|b| b.lo).collect();
+    let mut new_ub: Vec<f64> = node_box.iter().map(|b| b.hi).collect();
     let mut tightened = 0u32;
     if !infeasible {
         for i in 0..bounds.len() {
@@ -174,11 +203,34 @@ pub fn run_in_tree_presolve(
         }
     }
 
+    // #907. Final sanitation at the single exit. The probing branch above gates
+    // its own emptiness test on `opts.tol` (a different, smaller tolerance), so it
+    // can fold back a box that is inverted by a sub-`FEAS_TOL` amount WITHOUT
+    // setting `infeasible`. Returning that inverted box would push `lo > hi` onto
+    // an LP column bound downstream, reproducing the false infeasibility one layer
+    // down — declining to *declare* emptiness is not enough on its own.
+    let mut out: Vec<Interval> = (0..new_lb.len())
+        .map(|i| Interval::new(new_lb[i], new_ub[i]))
+        .collect();
+    subtol_repaired += repair_subtol_crossings(&mut out, FEAS_TOL);
+    if !infeasible && any_empty_beyond(&out, FEAS_TOL) {
+        infeasible = true;
+    }
+    for (i, b) in out.iter().enumerate() {
+        new_lb[i] = b.lo;
+        new_ub[i] = b.hi;
+    }
+    debug_assert!(
+        infeasible || new_lb.iter().zip(&new_ub).all(|(l, u)| l <= u),
+        "#907: in_tree_presolve returned an inverted box without declaring infeasible"
+    );
+
     InTreeDelta {
         lb: new_lb,
         ub: new_ub,
         bounds_tightened: tightened,
         infeasible,
+        subtol_repaired,
         ran: true,
     }
 }
@@ -435,5 +487,103 @@ mod tests {
         assert!(delta.ran);
         assert!(!delta.infeasible);
         assert!((delta.ub[1] - 2.0).abs() <= 1e-6);
+    }
+
+    // ── #907: a sub-FEAS_TOL crossing must not FATHOM a node ─────────────
+    //
+    // `InTreeDelta::infeasible` is consumed by the B&B loop as a *rigorous
+    // fathom*: the subtree is pruned outright. Setting it from a crossing of
+    // 8.5e-14 discards a region that may contain feasible points, violating the
+    // zero-slack `incorrect_count <= 0` gate with no flag set.
+
+    /// A node box inverted by rounding noise must be explored, not fathomed,
+    /// and must not be returned inverted.
+    #[test]
+    fn subtol_inverted_node_box_is_not_fathomed() {
+        let model = x_plus_y_le_5();
+        let opts = InTreePresolveOptions {
+            depth_stride: 1,
+            max_iter: 16,
+            tol: 1e-9,
+            probing: false,
+            probe_max_vars: 0,
+        };
+        // x fixed at 2.5 by two derivations disagreeing in the last ulps.
+        let lo = [2.5, 0.0];
+        let hi = [2.5 - 1e-14, 10.0];
+        let d = run_in_tree_presolve(&model, &lo, &hi, 0, None, &opts);
+
+        assert!(d.ran);
+        assert!(
+            !d.infeasible,
+            "a 1e-14 crossing fathomed a live node — #907 regressed"
+        );
+        assert_eq!(d.subtol_repaired, 1);
+        // The returned box must be well-formed: an inverted interval reaching an
+        // LP column bound reproduces the false infeasibility one layer down.
+        for i in 0..d.lb.len() {
+            assert!(
+                d.lb[i] <= d.ub[i],
+                "returned an inverted box at var{i}: [{}, {}]",
+                d.lb[i],
+                d.ub[i]
+            );
+        }
+        // Repair widens to contain both endpoints, so the feasible point x=2.5
+        // survives.
+        assert!(d.lb[0] <= 2.5 && 2.5 <= d.ub[0]);
+    }
+
+    /// ANTI-PERMISSIVENESS CONTROL: a genuinely empty node box must STILL
+    /// fathom. Without this the change is a tolerance-tweak, not a fix.
+    #[test]
+    fn genuine_empty_node_box_still_fathoms() {
+        let model = x_plus_y_le_5();
+        let opts = InTreePresolveOptions {
+            depth_stride: 1,
+            max_iter: 16,
+            tol: 1e-9,
+            probing: false,
+            probe_max_vars: 0,
+        };
+        // x >= 10 AND y >= 10 with x + y <= 5 — infeasible by 15, not by noise.
+        let d = run_in_tree_presolve(&model, &[10.0, 10.0], &[10.0, 10.0], 0, None, &opts);
+        assert!(d.ran);
+        assert!(d.infeasible, "a genuine infeasibility stopped fathoming");
+        assert_eq!(d.subtol_repaired, 0);
+    }
+
+    /// The repair must never cut a point the caller's box contained: sweep a
+    /// feasible point through many noise-inverted boxes and assert containment
+    /// survives. Prints nothing, but the assertion count is the point (§6).
+    #[test]
+    fn repair_never_cuts_a_contained_feasible_point() {
+        let model = x_plus_y_le_5();
+        let opts = InTreePresolveOptions {
+            depth_stride: 1,
+            max_iter: 16,
+            tol: 1e-9,
+            probing: false,
+            probe_max_vars: 0,
+        };
+        let mut checked = 0usize;
+        for k in 0..40 {
+            let v = 0.1 * k as f64; // feasible x value in [0, 3.9]
+            for eps in [1e-16, 1e-14, 1e-12, 1e-9, 1e-7] {
+                let d = run_in_tree_presolve(&model, &[v, 0.0], &[v - eps, 10.0], 0, None, &opts);
+                assert!(!d.infeasible, "fathomed a live node at eps={eps}");
+                assert!(
+                    d.lb[0] <= v && v <= d.ub[0],
+                    "repair cut x={v} at eps={eps}: [{}, {}]",
+                    d.lb[0],
+                    d.ub[0]
+                );
+                checked += 1;
+            }
+        }
+        assert_eq!(
+            checked, 200,
+            "probe did not execute the comparisons it claims"
+        );
     }
 }

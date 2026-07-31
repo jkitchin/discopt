@@ -606,6 +606,7 @@ impl PyModelRepr {
     /// Returns a dict with keys:
     /// - `lb`, `ub`: numpy arrays of post-tightening per-variable bounds.
     /// - `bounds_tightened`: int — number of half-bounds that tightened.
+    /// - `subtol_repaired`: int — sub-`FEAS_TOL` bound crossings repaired (#907).
     /// - `infeasible`: bool — `True` if the kernel detected emptiness.
     /// - `ran`: bool — `True` if the schedule actually fired at this depth.
     #[pyo3(signature = (
@@ -666,6 +667,9 @@ impl PyModelRepr {
         )?;
         out.set_item("bounds_tightened", delta.bounds_tightened)?;
         out.set_item("infeasible", delta.infeasible)?;
+        // #907: surfaced, not absorbed — a rising count is a numerical smell,
+        // and each of these events could previously have fathomed a live node.
+        out.set_item("subtol_repaired", delta.subtol_repaired)?;
         out.set_item("ran", delta.ran)?;
         Ok(out.into_any().unbind())
     }
@@ -824,6 +828,10 @@ impl PyModelRepr {
         // Build stats dict.
         let stats = PyDict::new(py);
         stats.set_item("terminated_by", format!("{:?}", result.terminated_by))?;
+        stats.set_item(
+            "subtol_crossings_repaired",
+            result.subtol_crossings_repaired,
+        )?;
         stats.set_item("iterations", result.iterations)?;
         let lbs: Vec<f64> = result.bounds.iter().map(|b| b.lo).collect();
         let ubs: Vec<f64> = result.bounds.iter().map(|b| b.hi).collect();

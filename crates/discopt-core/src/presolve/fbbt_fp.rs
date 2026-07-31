@@ -455,7 +455,7 @@ mod tests {
         let mut bounds = vec![Interval::new(0.5, 10.0)];
         let stats = fbbt_fixed_point(&model, &mut bounds, FbbtFpOptions::default());
         assert!(stats.infeasible);
-        assert!(bounds[0].is_empty());
+        assert!(bounds[0].is_formally_inverted());
     }
 
     // cert:C-20 regression: the watch-list engine declared infeasibility with a
@@ -490,7 +490,7 @@ mod tests {
         // Main engine tolerates it (bounds not collapsed to empty).
         let main_bounds = crate::presolve::fbbt::fbbt(&eps_residual_equality_model(eps), 100, 1e-9);
         assert!(
-            !main_bounds.iter().any(|b| b.is_empty()),
+            !main_bounds.iter().any(|b| b.is_formally_inverted()),
             "main engine (reference) should treat the eps residual as feasible"
         );
 
@@ -506,7 +506,7 @@ mod tests {
             !stats.infeasible,
             "C-20: eps-residual equality falsely reported infeasible by the watch-list engine"
         );
-        assert!(!bounds.iter().any(|b| b.is_empty()));
+        assert!(!bounds.iter().any(|b| b.is_formally_inverted()));
     }
 
     #[test]

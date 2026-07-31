@@ -67,22 +67,44 @@ impl Interval {
         self.hi - self.lo
     }
 
-    /// Whether the interval is empty (lo > hi).
-    pub fn is_empty(&self) -> bool {
+    /// Whether the interval is *formally* inverted (`lo > hi`), with **zero**
+    /// tolerance.
+    ///
+    /// This is a syntactic predicate, **not** a feasibility verdict. Do not use
+    /// it to conclude that a constraint, a node, or a presolve sweep is
+    /// infeasible — use [`is_empty_beyond`] for that. It is deliberately *not*
+    /// named `is_empty` (#907): under that name it read as a legitimate
+    /// emptiness test and was used to fathom B&B nodes and abort presolve
+    /// sweeps, so a crossing of 8.5e-14 discarded a live region.
+    ///
+    /// Legitimate uses are guards where either answer is sound — early-returning
+    /// an already-degenerate interval unchanged, or filtering it out of a
+    /// candidate list.
+    pub fn is_formally_inverted(&self) -> bool {
         self.lo > self.hi
     }
 
     /// Whether the interval is empty by more than a feasibility tolerance,
     /// i.e. `lo - hi > tol`.
     ///
-    /// Use this (not [`is_empty`]) when deciding that a *constraint* is
-    /// genuinely infeasible. Approximate reformulations — notably the GDP
-    /// hull perspective form `y * f(v / y)` with a clamp `y + eps` — leave
-    /// eps-scale (~1e-8) residuals at integer faces. A strict `lo > hi`
-    /// check mistakes that numerical noise for infeasibility and can fix a
-    /// disjunction's selector incorrectly, producing an unsound bound. A
-    /// tolerance-aware check declares infeasibility only when the violation
-    /// exceeds the feasibility tolerance.
+    /// **This is the only predicate that may be used to conclude
+    /// infeasibility.** Approximate reformulations — notably the GDP hull
+    /// perspective form `y * f(v / y)` with a clamp `y + eps` — leave eps-scale
+    /// (~1e-8) residuals at integer faces. A strict `lo > hi` check mistakes
+    /// that numerical noise for infeasibility and can fix a disjunction's
+    /// selector incorrectly, producing an unsound bound. A tolerance-aware check
+    /// declares infeasibility only when the violation exceeds the feasibility
+    /// tolerance.
+    ///
+    /// The threshold is measured, not assumed. Instrumenting both acting sites
+    /// over the in-repo corpus (10,105 predicate evaluations, #907 experiment A)
+    /// found the crossing-magnitude distribution degenerate at two points:
+    /// rounding noise at 1e-14 absolute / 1e-16 relative, and genuine
+    /// infeasibility at exactly 1.0 (binary domain wipeout, `[1.0, 0.0]`) plus
+    /// the explicit `[inf, -inf]` sentinel of [`Interval::empty`]. `FEAS_TOL`
+    /// sits ~7 orders above the largest noise crossing and ~6 orders below the
+    /// smallest genuine one, and nothing was observed in between. Note the
+    /// genuine population is unsampled in `(FEAS_TOL, 1.0)`.
     pub fn is_empty_beyond(&self, tol: f64) -> bool {
         self.lo - self.hi > tol
     }
@@ -90,6 +112,35 @@ impl Interval {
     /// Whether `x` is contained in the interval.
     pub fn contains(&self, x: f64) -> bool {
         x >= self.lo && x <= self.hi
+    }
+
+    /// Repair a sub-tolerance inversion in place, returning `true` if it did.
+    ///
+    /// A crossing of `lo - hi` in `(0, tol]` is two derivations of the same
+    /// quantity disagreeing in their last ulps, not an infeasibility. Widen to
+    /// `[min(lo, hi), max(lo, hi)]` — the smallest interval containing **both**
+    /// endpoints, so whichever derivation was the sound one keeps its endpoint
+    /// and no feasible point is cut.
+    ///
+    /// Widening (not snapping to a midpoint) is the whole point: a midpoint
+    /// collapse is *tighter* than at least one sound endpoint and could cut the
+    /// optimum. A crossing beyond `tol`, and the explicit `[inf, -inf]` empty
+    /// sentinel, are left untouched — they are real verdicts.
+    ///
+    /// Repairing is the necessary second half of the #907 fix. Declining to
+    /// *declare* emptiness is not enough if an inverted interval still escapes
+    /// to a consumer: `lo > hi` on an LP column bound reproduces the same false
+    /// infeasibility one layer down.
+    pub fn repair_if_subtol_inverted(&mut self, tol: f64) -> bool {
+        let cross = self.lo - self.hi;
+        if cross > 0.0 && cross <= tol {
+            let (lo, hi) = (self.lo.min(self.hi), self.lo.max(self.hi));
+            self.lo = lo;
+            self.hi = hi;
+            true
+        } else {
+            false
+        }
     }
 
     /// Intersect two intervals.
@@ -139,6 +190,28 @@ pub fn interval_mul(a: &Interval, b: &Interval) -> Interval {
     let p3 = prod(a.hi, b.lo);
     let p4 = prod(a.hi, b.hi);
     Interval::new(p1.min(p2).min(p3).min(p4), p1.max(p2).max(p3).max(p4))
+}
+
+/// Whether any interval in `bounds` is empty by more than `tol`.
+///
+/// The single sanctioned way for a caller to conclude "this box is infeasible".
+/// See [`Interval::is_empty_beyond`] for why the strict `lo > hi` form is not.
+pub fn any_empty_beyond(bounds: &[Interval], tol: f64) -> bool {
+    bounds.iter().any(|b| b.is_empty_beyond(tol))
+}
+
+/// Repair every sub-`tol` inversion in `bounds` in place; returns how many.
+///
+/// Pair this with [`any_empty_beyond`] at any site that acts on an emptiness
+/// verdict: repair first so no inverted interval escapes to a consumer, then
+/// test. A non-zero return is a numerical smell worth surfacing — it means some
+/// pass produced a formally-empty interval that was pure floating-point noise —
+/// so callers thread the count out rather than absorbing it silently.
+pub fn repair_subtol_crossings(bounds: &mut [Interval], tol: f64) -> usize {
+    bounds
+        .iter_mut()
+        .map(|b| usize::from(b.repair_if_subtol_inverted(tol)))
+        .sum()
 }
 
 /// `[a,b] / [c,d]` with division-by-zero handling.
@@ -192,8 +265,12 @@ pub fn interval_pow(base: &Interval, exp: &Interval) -> Interval {
         }
     }
     // General case: base must be non-negative for real-valued power.
+    // Formal inversion (#907): this clamps the base to its non-negative part and
+    // asks whether anything survived. Returning `entire()` is the maximally
+    // conservative answer, so either verdict is sound; no infeasibility is
+    // concluded.
     let b = Interval::new(base.lo.max(0.0), base.hi.max(0.0));
-    if b.is_empty() || b.hi < 0.0 {
+    if b.is_formally_inverted() || b.hi < 0.0 {
         return Interval::entire();
     }
     let vals = [
@@ -593,8 +670,14 @@ pub fn backward_propagate(
     var_bounds: &mut [Interval],
 ) {
     // Intersect the output bound with the forward-propagated bound.
+    //
+    // Formal inversion is the right test here (#907): bailing out declines to
+    // *tighten*, which is the conservative direction — it can only leave the box
+    // looser, never cut a feasible point. It is also the guard that stops a
+    // noise-inverted interval being written into `var_bounds` and surfacing as a
+    // spurious emptiness verdict upstream. No infeasibility is concluded.
     let tightened = output_bound.intersect(&node_bounds[id.0]);
-    if tightened.is_empty() {
+    if tightened.is_formally_inverted() {
         return;
     }
 
@@ -1075,7 +1158,10 @@ pub(crate) const INTEGRALITY_SNAP_TOL: f64 = FEAS_TOL;
 /// unchanged; a value squeezed to neither 0 nor 1 (for a binary) yields an
 /// empty interval — a genuine integer infeasibility the caller detects.
 pub(crate) fn snap_integral_interval(iv: Interval) -> Interval {
-    if iv.is_empty() {
+    // Formal inversion (#907): an already-degenerate interval is returned
+    // unchanged rather than fed to `ceil`/`floor`. Pass-through concludes
+    // nothing; the caller still applies its own tolerance-aware verdict.
+    if iv.is_formally_inverted() {
         return iv;
     }
     Interval::new(
@@ -1633,7 +1719,7 @@ mod tests {
     #[test]
     fn test_interval_empty() {
         let a = Interval::empty();
-        assert!(a.is_empty());
+        assert!(a.is_formally_inverted());
         assert!(!a.contains(0.0));
     }
 
@@ -1667,7 +1753,7 @@ mod tests {
         let a = Interval::new(1.0, 3.0);
         let b = Interval::new(5.0, 7.0);
         let r = a.intersect(&b);
-        assert!(r.is_empty());
+        assert!(r.is_formally_inverted());
     }
 
     // -- Forward propagation tests --
@@ -2204,7 +2290,10 @@ mod tests {
         let model = make_linear_model();
         let bounds = fbbt_with_cutoff(&model, 10, 1e-8, Some(-1.0));
         for b in &bounds {
-            assert!(b.is_empty(), "Expected infeasible (empty bounds)");
+            assert!(
+                b.is_formally_inverted(),
+                "Expected infeasible (empty bounds)"
+            );
         }
     }
 
@@ -2413,16 +2502,86 @@ mod tests {
         // An eps-scale inverted interval is empty in the strict sense but
         // feasible within tolerance — it must not be treated as infeasible.
         let eps = Interval::new(1.0, 1.0 - 1e-9);
-        assert!(eps.is_empty());
+        assert!(eps.is_formally_inverted());
         assert!(!eps.is_empty_beyond(FEAS_TOL));
 
         // A genuinely inverted interval is empty beyond tolerance.
         let real = Interval::new(1.0, 0.9);
-        assert!(real.is_empty());
+        assert!(real.is_formally_inverted());
         assert!(real.is_empty_beyond(FEAS_TOL));
 
         // The canonical empty interval is empty beyond any finite tolerance.
         assert!(Interval::empty().is_empty_beyond(FEAS_TOL));
+    }
+
+    // -- sub-tolerance crossing repair (issue #907) --
+
+    #[test]
+    fn test_repair_widens_subtol_crossing_without_cutting_either_endpoint() {
+        // The exact crossing measured on `heatexch_gen3` var4 on the default
+        // path: two derivations of the same fixed value disagreeing by 8.5e-14.
+        let mut iv = Interval::new(226.7, 226.699_999_999_999_9);
+        assert!(iv.is_formally_inverted());
+        assert!(iv.repair_if_subtol_inverted(FEAS_TOL));
+
+        // Repair must WIDEN to contain both endpoints. A midpoint collapse
+        // would be tighter than one sound endpoint and could cut the optimum.
+        assert!(!iv.is_formally_inverted());
+        assert!(iv.contains(226.7), "repair cut the upper derivation");
+        assert!(
+            iv.contains(226.699_999_999_999_9),
+            "repair cut the lower one"
+        );
+        assert_eq!(iv.lo, 226.699_999_999_999_9);
+        assert_eq!(iv.hi, 226.7);
+    }
+
+    /// ANTI-PERMISSIVENESS CONTROL. Repair must not launder a real infeasibility
+    /// into a feasible box. Without this the fix would be the tolerance-tweak
+    /// CLAUDE.md §3 forbids rather than a correctness fix.
+    #[test]
+    fn test_repair_leaves_genuine_and_sentinel_emptiness_alone() {
+        // A crossing beyond FEAS_TOL is a real verdict — untouched.
+        let mut real = Interval::new(1.0, 0.9);
+        assert!(!real.repair_if_subtol_inverted(FEAS_TOL));
+        assert!(real.is_empty_beyond(FEAS_TOL));
+
+        // The exact genuine population observed at the in-tree site: a binary
+        // whose domain was wiped out, `[1.0, 0.0]`, crossing exactly 1.0.
+        let mut binary = Interval::new(1.0, 0.0);
+        assert!(!binary.repair_if_subtol_inverted(FEAS_TOL));
+        assert!(binary.is_empty_beyond(FEAS_TOL));
+
+        // The explicit `[inf, -inf]` sentinel survives any finite tolerance.
+        let mut sentinel = Interval::empty();
+        assert!(!sentinel.repair_if_subtol_inverted(FEAS_TOL));
+        assert!(sentinel.is_empty_beyond(FEAS_TOL));
+
+        // A well-formed interval is not disturbed.
+        let mut ok = Interval::new(0.0, 1.0);
+        assert!(!ok.repair_if_subtol_inverted(FEAS_TOL));
+        assert_eq!((ok.lo, ok.hi), (0.0, 1.0));
+    }
+
+    #[test]
+    fn test_slice_helpers_count_and_verdict() {
+        let mut bounds = vec![
+            Interval::new(0.0, 1.0),                     // fine
+            Interval::new(226.7, 226.699_999_999_999_9), // noise
+            Interval::new(5.0, 5.0 - 1e-12),             // noise
+        ];
+        // Verdict BEFORE repair: no genuine emptiness present.
+        assert!(!any_empty_beyond(&bounds, FEAS_TOL));
+        assert_eq!(repair_subtol_crossings(&mut bounds, FEAS_TOL), 2);
+        assert!(bounds.iter().all(|b| !b.is_formally_inverted()));
+        // Idempotent: a second pass repairs nothing.
+        assert_eq!(repair_subtol_crossings(&mut bounds, FEAS_TOL), 0);
+
+        // ANTI-PERMISSIVENESS: a genuine crossing still reports empty, and
+        // repair declines to touch it.
+        bounds.push(Interval::new(1.0, 0.0));
+        assert_eq!(repair_subtol_crossings(&mut bounds, FEAS_TOL), 0);
+        assert!(any_empty_beyond(&bounds, FEAS_TOL));
     }
 
     /// Build a one-variable model `x` fixed to `[0, 0]` with a single `x >= rhs`
@@ -2482,7 +2641,7 @@ mod tests {
         let model = make_eps_violated_model(0.5);
         let bounds = fbbt(&model, 5, 1e-8);
         assert!(
-            bounds.iter().all(|b| b.is_empty()),
+            bounds.iter().all(|b| b.is_formally_inverted()),
             "a violation beyond the feasibility tolerance must be infeasible"
         );
     }
@@ -2551,7 +2710,7 @@ mod tests {
         // Then b ≥ x/10 ≥ 0.3, and since b ∈ {0,1}, b must be 1.
         let model = make_indicator_model(3.0, 10.0, 10.0);
         let bounds = fbbt(&model, 8, 1e-9);
-        assert!(!bounds.iter().any(|b| b.is_empty()));
+        assert!(!bounds.iter().any(|b| b.is_formally_inverted()));
         assert!(
             (bounds[1].lo - 1.0).abs() < 1e-9 && (bounds[1].hi - 1.0).abs() < 1e-9,
             "binary should be inferred = 1, got {:?}",
@@ -2567,7 +2726,7 @@ mod tests {
         model.variables[1].lb = vec![0.0];
         model.variables[1].ub = vec![0.0]; // b = 0
         let bounds = fbbt(&model, 8, 1e-9);
-        assert!(!bounds.iter().any(|b| b.is_empty()));
+        assert!(!bounds.iter().any(|b| b.is_formally_inverted()));
         assert!(
             bounds[0].hi <= 1e-6,
             "deactivated guard should force x ≤ 0, got {:?}",
@@ -2596,7 +2755,7 @@ mod tests {
         };
         let bounds = fbbt(&model, 8, 1e-9);
         assert!(
-            bounds.iter().any(|b| b.is_empty()),
+            bounds.iter().any(|b| b.is_formally_inverted()),
             "a binary squeezed to neither 0 nor 1 must be infeasible, got {:?}",
             bounds
         );
@@ -2647,7 +2806,7 @@ mod tests {
         // would wrongly eliminate the b = 0 disjunct and yield an unsound bound.
         let model = make_indicator_model(0.0, 0.0, 1e-9);
         let bounds = fbbt(&model, 8, 1e-9);
-        assert!(!bounds.iter().any(|b| b.is_empty()));
+        assert!(!bounds.iter().any(|b| b.is_formally_inverted()));
         assert!(
             bounds[1].lo <= 1e-9 && bounds[1].hi >= 1.0 - 1e-9,
             "eps residual must leave the binary free, got {:?}",
@@ -2768,7 +2927,7 @@ mod tests {
         // C-31 FIXED: a feasible model must NOT be reported infeasible.
         // "FBBT never reports feasible as infeasible."
         assert!(
-            !bounds.iter().any(|b| b.is_empty()),
+            !bounds.iter().any(|b| b.is_formally_inverted()),
             "C-31: feasible model x=[5, 0..3] must not be declared infeasible, \
              got {:?}",
             bounds
