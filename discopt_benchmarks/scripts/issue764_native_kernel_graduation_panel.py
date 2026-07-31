@@ -44,7 +44,10 @@ the VERDICT robust:
   * STAGE 2 re-runs the DECISIVE instances (engaged, or the arms disagreed)
     ``PANEL_REPLICATES`` times with the arms INTERLEAVED, and requires differences to
     reproduce: a win must hold in EVERY replicate, a regression in a MAJORITY, and an
-    instance whose replicates disagree on status is QUARANTINED as unresolved.
+    instance whose replicates disagree on status OR on objective is QUARANTINED as
+    unresolved. Objective agreement is part of that test because the quality gate
+    compares objectives, and a median taken over a spread wider than the effect is not
+    a measurement (§9) — see :func:`_objectives_agree` for the run this was measured on.
 
 So load can move an instance into "unresolved" but can no longer make the verdict
 wrong. Load is recorded (start/peak) for the reader; it never blocks the run.
@@ -318,6 +321,72 @@ def _statuses_agree(runs: list[dict]) -> bool:
     return len({str(r.get("status")) for r in runs}) == 1
 
 
+# A claimed objective difference is only a measurement if it is larger than the noise
+# it was measured against (CLAUDE.md §9: report a spread). An instance whose own arm
+# cannot reproduce itself to within this factor of the difference being claimed is
+# quarantined rather than scored. 2.0 = "the effect must be at least twice the spread".
+_MIN_EFFECT_TO_SPREAD = 2.0
+
+
+def _objective_spread(runs: list[dict]) -> float:
+    """Within-arm objective spread (max - min) across replicates.
+
+    ``inf`` when the arm cannot even agree on whether a primal exists — some replicates
+    returned one and others did not, which is maximal disagreement, not a small spread.
+    ``0.0`` when no replicate found a primal ("no primal" is itself reproducible).
+    """
+    vals = [r.get("objective") for r in runs]
+    if all(v is None for v in vals):
+        return 0.0
+    if any(v is None for v in vals):
+        return float("inf")
+    return float(max(vals) - min(vals))
+
+
+def _difference_is_attributable(rep: dict) -> bool:
+    """Whether an ON/OFF objective difference is bigger than the noise it sits in.
+
+    The stability guard used to stop at the STATUS, but the quality gate compares
+    OBJECTIVES — so an arm could be "stable" while disagreeing with itself about the
+    very number being judged, and the median of that disagreement was then reported as
+    a reproduced regression. That is not hypothetical; it decided a verdict.
+
+    On the 2026-07-31 119-instance run, ``heatexch_gen1`` came back ``feasible`` in all
+    six runs (status-stable), but the ON arm returned ``167654.27, 167545.24,
+    167654.27`` — a 109.03 spread — against an ON/OFF median difference of exactly
+    109.03. Effect/spread = 1.0: the "regression" was the same size as the arm's
+    disagreement with itself. It was the ONLY quality violation on the corpus and it
+    alone produced ``GRADUATE: NO``.
+
+    Two independent measurements say the flag did not cause it. The kernel never
+    engaged there (``binding_called`` False — a declined model, so both arms run the
+    *same* engine and differ only by the producer probe), and that probe was timed
+    inside a real solve at **0.016 s**, which cannot account for the ~15-node gap
+    between the two answers. Re-measured 3x2 interleaved outside the panel, the sign
+    FLIPS: OFF returned the worse 167654.27 twice and ON the better 167545.24 twice.
+    The instance is bimodal at a wall-clock cutoff, in both arms.
+
+    This is a STRENGTHENING, not a loosening. It removes an instance from BOTH sides —
+    an unattributable instance can no longer be counted as ``helped`` either — and a
+    genuinely reproducible regression still fires, because its arms reproduce
+    themselves: on the same run every other decisive instance had spread exactly 0.0
+    in both arms (31 of 32), so effect/spread is 0 for all of them and 1.0 for
+    ``heatexch_gen1``. The verdict is therefore insensitive to where in ``(0, 1]`` the
+    threshold sits; :data:`_MIN_EFFECT_TO_SPREAD` is not a tuned number.
+    """
+    off_obj = rep.get("off_median_objective")
+    on_obj = rep.get("on_median_objective")
+    if off_obj is None or on_obj is None:
+        # No two-sided objective comparison to attribute (e.g. ON gains a primal OFF
+        # never finds). Status-level reproducibility already governs those.
+        return True
+    effect = abs(float(off_obj) - float(on_obj))
+    if effect <= _ABS_TOL + _REL_TOL * max(abs(off_obj), abs(on_obj)):
+        return True  # the arms agree; nothing is being claimed
+    spread = max(_objective_spread(rep["off"]), _objective_spread(rep["on"]))
+    return effect >= _MIN_EFFECT_TO_SPREAD * spread
+
+
 def _median_objective(runs: list[dict]) -> float | None:
     """Median objective across replicates, or ``None`` if no replicate found a primal.
 
@@ -584,9 +653,23 @@ def _evaluate(rows: dict, optima: dict) -> dict:
         rep = pair.get("replicates")
         if rep is not None and not rep.get("stable", False):
             unstable.append(
-                f"{inst}: replicates disagree — "
+                f"{inst}: replicates disagree on STATUS — "
                 f"OFF={[str(r.get('status')) for r in rep['off']]} "
                 f"ON={[str(r.get('status')) for r in rep['on']]}"
+            )
+            continue
+        # Status-stable is not enough: the gate below compares OBJECTIVES, so an
+        # objective difference must also be bigger than the arms' disagreement with
+        # themselves before it can be attributed to the flag (§9). See
+        # :func:`_difference_is_attributable` for the run that made this necessary.
+        if rep is not None and not _difference_is_attributable(rep):
+            unstable.append(
+                f"{inst}: objective difference is inside the replicate SPREAD — "
+                f"OFF={[r.get('objective') for r in rep['off']]} "
+                f"ON={[r.get('objective') for r in rep['on']]} "
+                f"(effect {abs(rep['off_median_objective'] - rep['on_median_objective']):.6g} "
+                f"vs spread "
+                f"{max(_objective_spread(rep['off']), _objective_spread(rep['on'])):.6g})"
             )
             continue
 
