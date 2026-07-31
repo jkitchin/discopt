@@ -67,7 +67,12 @@ def to_nl(
     str or None
         The .nl text if *path* is ``None``, otherwise ``None``.
     """
-    model.validate()
+    # ``for_solve=False``: this writer *honours* ``Constraint.rhs`` — it folds the
+    # body constant into the r-section row bound — so a row the solve path refuses
+    # as unrepresentable (#909) is still exported faithfully here. Refusing it
+    # would block a correct export over a defect that only affects solving.
+    # Measured: ``Constraint(w, ">=", 5.0)`` emits ``r`` entry ``2 5.0``.
+    model.validate(for_solve=False)
     writer = _NLWriter(model)
     text = writer.write()
     if path is not None:
