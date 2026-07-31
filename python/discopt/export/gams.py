@@ -51,7 +51,14 @@ def to_gams(
     str or None
         The GAMS source if *path* is ``None``, otherwise ``None``.
     """
-    model.validate()
+    # ``for_solve=False``: like the ``.nl`` writer, this one *honours*
+    # ``Constraint.rhs`` — it emits it verbatim as the equation's right-hand side
+    # (``{body} =g= {c.rhs};``) — so a row the solve path refuses as
+    # unrepresentable (#909) still exports faithfully. Measured:
+    # ``Constraint(w, ">=", 5.0)`` emits ``c1.. w =g= 5.0;``.
+    # NOTE: the LP and MPS writers deliberately do *not* do this — see the comment
+    # on their ``model.validate()`` calls.
+    model.validate(for_solve=False)
     writer = _GamsWriter(model, model_type)
     text = writer.write()
     if path is not None:

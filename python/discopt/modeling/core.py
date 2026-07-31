@@ -1649,7 +1649,11 @@ class Constraint:
     sense : str
         One of ``"<="``, ``">="``, ``"=="``.
     rhs : float
-        Right-hand side value (always 0.0 in normalized form).
+        Right-hand side value (always 0.0 in normalized form). This is an
+        *enforced* contract, not just a convention: the solve path reads only
+        ``body``, so a non-zero ``rhs`` is refused by both ``subject_to`` and
+        ``Model.validate`` rather than silently ignored (#909). Build rows with
+        the comparison operators, which fold the offset into ``body`` for you.
     name : str or None
         Optional name for debugging and explanation.
     """
@@ -1677,6 +1681,71 @@ class Constraint:
             "almost always a mistake. Add it with m.subject_to(...); to test an "
             "expression's identity use 'is' or a set/dict keyed by the object."
         )
+
+
+def _reject_unnormalized_rhs(constraint: "Constraint", *, where: str, index: int = -1) -> None:
+    """Refuse a constraint whose ``rhs`` the solve path cannot represent.
+
+    :class:`Constraint` documents ``rhs`` as *always 0.0 in normalized form*, and
+    the comparison operators that build every constraint in the supported DSL fold
+    the offset into ``body``. Most of the tree honours that invariant by simply not
+    looking at ``rhs``: **26 modules read ``Constraint.body`` and never read
+    ``.rhs``**, among them the whole relaxation stack (``_jax/dag_compiler``,
+    ``relaxation_compiler``, ``milp_relaxation``, ``mccormick_subgradient``,
+    ``term_classifier``, ``nonlinear_bound_tightening``, ``dependent_vars``,
+    ``implied_integer``, the convexity certificate, ``bilevel/kkt``, Benders, RO).
+
+    A handful of *other* consumers do honour it — ``validation/feasibility``
+    (``signed = body - rhs``), the ``.nl`` and GAMS exporters,
+    ``problem_classifier``, ``_jax/obbt``, and the Rust ``ConstraintRepr`` (114
+    references across the presolve crate). (Issue #909 also listed the LP and MPS
+    exporters here; **measured, that is false** — both rebuild the row's
+    right-hand side from the *body* alone and silently drop a non-zero ``rhs``, so
+    they are corrupters, not honourers, and they keep this refusal. See the
+    comments on their ``model.validate()`` calls.) That split is the defect: a row
+    carrying a non-zero ``rhs`` is
+    *solved* as ``body sense 0`` but *verified* as ``body - rhs sense 0``, so the
+    solver returns a point the verifier considers feasible and the user considers
+    wrong. Measured on this tree: ``Constraint(w, ">=", 5.0)`` solves to ``w = 0``
+    while ``w >= 5.0`` solves to ``w = 5`` — a silent wrong answer, reachable
+    through the public API (``Constraint`` is in ``discopt.modeling.__all__``).
+
+    **Why refuse rather than teach the solve path to honour ``rhs``.** Threading it
+    through would mean correcting all 26 modules, each of which encodes the ``body
+    sense 0`` form structurally rather than arithmetically. A partial job is
+    strictly worse than the status quo: today the relaxation stack is uniformly
+    rhs-blind, so its McCormick envelope still relaxes the same row the verifier
+    checks; half-honoured, the envelope would be built for a *different* row than
+    the one being verified — a soundness hazard in place of a wrong-answer hazard.
+    Refusing keeps one invariant that all 26 modules already rely on, and it costs
+    the caller one obvious rewrite. CLAUDE.md §3: refuse loudly rather than ship a
+    silent approximation.
+
+    Raised from both doors — :meth:`Model.subject_to` (so the error lands on the
+    offending line) and :meth:`Model.validate` (so a direct
+    ``model._constraints.append`` cannot slip past; ``solve`` always validates).
+    """
+    rhs = getattr(constraint, "rhs", 0.0)
+    if rhs is None:
+        return
+    rhs_arr = np.asarray(rhs, dtype=np.float64)
+    if not np.any(rhs_arr != 0.0):
+        return
+    shown = float(rhs_arr.ravel()[0]) if rhs_arr.size else 0.0
+    label = getattr(constraint, "name", None)
+    if label is None:
+        label = f"_constraints[{index}]" if index >= 0 else "<unnamed>"
+    sense = getattr(constraint, "sense", "?")
+    raise ValueError(
+        f"Constraint '{label}' has a non-zero rhs ({rhs!r}), which the solve path "
+        f"cannot represent: Constraint is stored in normalized form 'body {sense} 0' "
+        f"and the relaxation/branching stack reads only 'body'. Solving it would "
+        f"silently ignore the rhs and return a point the feasibility verifier — "
+        f"which does honour rhs — reports as feasible. Build the row with the "
+        f"comparison operators, which normalize for you (e.g. 'body {sense} "
+        f"{shown!r}'), or subtract the offset yourself: "
+        f"Constraint(body - rhs, '{sense}', 0.0). Reached via {where}."
+    )
 
 
 @dataclass
@@ -2892,6 +2961,7 @@ class Model:
         ...              name="adjacent_limits")
         """
         if isinstance(constraint, Constraint):
+            _reject_unnormalized_rhs(constraint, where="subject_to")
             # M5: never let ``subject_to`` corrupt an earlier row or clobber a
             # name the caller set. The corruption case is *re-adding the same
             # object* (or one already carrying a different name): stamping
@@ -2936,6 +3006,7 @@ class Model:
                     f"Expected Constraint (from <=, >=, == on expressions), "
                     f"got {type(c)} at position {k}."
                 )
+            _reject_unnormalized_rhs(c, where="subject_to", index=k)
             # Copy-on-name here too (M5): never mutate the caller's list elements.
             self._constraints.append(_dc_replace(c, name=f"{name}_{k}" if name else None))
 
@@ -4556,9 +4627,22 @@ class Model:
                 f"'{self_name}'."
             )
 
-    def validate(self):
+    def validate(self, *, for_solve: bool = True):
         """
         Validate model consistency.
+
+        Parameters
+        ----------
+        for_solve
+            Also enforce the checks that only the *solve* path needs — currently
+            the normalized-``rhs`` rejection (see :func:`_reject_unnormalized_rhs`).
+            Consumers that represent a row faithfully rather than solving it pass
+            ``False``: the ``.nl`` writer honours ``Constraint.rhs`` (it folds the
+            body constant into the r-section row bound) and so does the GAMS writer
+            (it emits ``rhs`` verbatim), so a model they can export correctly must
+            not be refused just because the solver could not solve it. The LP and
+            MPS writers do **not** honour it — measured — and so keep the default.
+            Default ``True``, so ``solve`` and direct calls are unchanged.
 
         Raises
         ------
@@ -4588,7 +4672,14 @@ class Model:
         # ``constraint_duals`` for same-named indexed rows — is tracked as a
         # follow-up (#413, M5). Unnamed constraints (``name is None``) are exempt.
         con_names: set = set()
-        for c in self._constraints:
+        for ci, c in enumerate(self._constraints):
+            # A row the solve path cannot represent must never reach it. This is
+            # the collection-level enforcement of ``Constraint``'s normalized form:
+            # ``subject_to`` catches the public door, but constraints also arrive by
+            # direct ``_constraints.append`` and by internal rebuilds that propagate
+            # ``c.rhs`` verbatim, and ``solve`` always comes through here.
+            if for_solve and isinstance(c, Constraint):
+                _reject_unnormalized_rhs(c, where="Model.validate", index=ci)
             cname = getattr(c, "name", None)
             if cname is None:
                 continue

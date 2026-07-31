@@ -47,6 +47,13 @@ def to_lp(model: Model, path: str | Path | None = None) -> str | None:
     ValueError
         If the model contains nonlinear (non-quadratic) expressions.
     """
+    # Default ``for_solve=True`` is deliberate: unlike the ``.nl`` and GAMS
+    # writers, this one does *not* honour ``Constraint.rhs``. The row's right-hand
+    # side below is ``-const``, recovered from the *body* alone, so a non-zero
+    # ``rhs`` is silently dropped. Measured (#909): ``Constraint(w, ">=", 5.0)``
+    # emitted ``c0: w >= 0`` — a silently wrong model. Keeping the refusal turns
+    # that into a loud error; do not relax it without teaching the row builder
+    # below to fold ``con.rhs`` in.
     model.validate()
     flat_vars = flatten_variables(model)
     var_names = [name for name, _, _, _, _ in flat_vars]

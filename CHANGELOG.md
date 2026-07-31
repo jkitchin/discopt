@@ -120,6 +120,46 @@ The release procedure that produces these entries is documented in
 
 ### Fixed
 
+- **A non-zero `Constraint.rhs` was a silent wrong answer through the public API**
+  (`fix(correctness)`, #909). `Constraint` is exported in
+  `discopt.modeling.__all__`, and `m.subject_to(Constraint(w, ">=", 5.0))` solved
+  to `w = 0` while the equivalent `m.subject_to(w >= 5.0)` solved to `w = 5`. The
+  cause is a split in the tree over what an unnormalized row means: **26 modules
+  read `Constraint.body` and never read `.rhs`** — the entire relaxation/branching
+  stack, whose seam is `_jax/dag_compiler.compile_constraint` — while
+  `validation/feasibility` computes `signed = body - rhs`. The row was therefore
+  *solved* as `body sense 0` but *verified* as `body - rhs sense 0`, so the solver
+  returned a point its own verifier called feasible and the user called wrong.
+
+  The fix **refuses loudly** rather than teaching the solve path to honour `rhs`
+  (CLAUDE.md §3). Threading it through would mean correcting all 26 modules, each
+  of which encodes the `body sense 0` form structurally rather than
+  arithmetically, and a partial job is strictly *worse* than the status quo: today
+  the relaxation stack is uniformly rhs-blind, so its McCormick envelope relaxes
+  the same row the verifier checks; half-honoured, the envelope would be built for
+  a *different* row than the one verified — a soundness hazard replacing a
+  wrong-answer hazard. The refusal fires at `subject_to` (both the scalar and the
+  list arm, so the error lands on the offending line) and at `Model.validate` (so
+  a direct `_constraints.append` cannot slip past, since `solve` always
+  validates), and the message names both rewrites. Array `rhs` is tested with
+  `np.any`, not `float()`, which would raise a confusing `TypeError` on a vector
+  row.
+
+  Entry experiment (CLAUDE.md §4) established that refusing breaks nothing:
+  **66 models / 3,705 executed rhs comparisons / 0 violations**, with a planted
+  control arm proving the probe can see a non-zero `rhs`; a dynamic arm over the
+  suite found 58 non-zero constructions, **all from test fixtures — zero
+  production producers**.
+
+  `Model.validate` gains `for_solve=True`. Writers that represent a row faithfully
+  rather than solving it pass `False`: **`.nl`** (folds the constant into the
+  r-section bound) and **GAMS** (emits `rhs` verbatim) export such a row correctly
+  and must not be refused. **`.lp` and `.mps` keep the refusal** — and this
+  corrects issue #909's own text, which listed them as honouring `rhs`: measured,
+  both rebuild the right-hand side from the *body* alone, so `Constraint(w, ">=",
+  5.0)` emitted `c0: w >= 0` (LP) and an empty `RHS` section (MPS). For those two
+  the refusal converts a silently wrong export into a loud error.
+
 - **The convex kernel's `clay0303hfsg` "false optimum" was a false CERTIFICATE, not
   an invalid relaxation** (`fix(correctness)`, #879). #879 recorded three
   mutually-inconsistent `optimal` results on `clay0303hfsg` (28351.42 / 36397.83 /
