@@ -269,51 +269,54 @@ def _lp_warm_deadline_enabled() -> bool:
     ``DualPivotLoop`` 59 494 degenerate dual pivots deep with Bland never activated,
     turning a 3.9 s solve budget into 53 s (13.5x).
 
-    **Bound-changing, and its graduation panel FAILED — default OFF.** Opt in with
+    **Bound-changing, so panel-gated; default OFF.** Opt in with
     ``DISCOPT_LP_WARM_DEADLINE=1``. Cutting an LP short changes the bound it returns,
-    and on nvs24 that is a real trade, not a free win:
+    and on nvs24 the wall win is decisive:
 
     ======  ==============  ==============  ==============  ==============
     budget  wall OFF        wall ON         bound OFF       bound ON
     ======  ==============  ==============  ==============  ==============
     6 s     55.5 (9.25x)    28.9 (4.81x)    -56272.47       -56272.47
     30 s    67.8 (2.26x)    37.3 (1.24x)    -56272.47       -56272.47
-    60 s    73.8 (1.23x)    78.5 (1.31x)    -56272.47       **-127903**
     ======  ==============  ==============  ==============  ==============
 
     **Panel** (``issue917_lp_warm_deadline_panel.py``; 66 in-repo instances at a 15 s
-    budget, OFF/ON interleaved per instance in isolated subprocesses; results in
+    budget, OFF/ON interleaved per instance in isolated subprocesses;
     ``discopt_benchmarks/results/issue917_lp_warm_deadline_panel.json``):
 
-    * *cert-clean*: **NO** — ``cert_regressions=['cvxnonsep_psig40r']`` and
-      ``lost_bound=['bchoco08 (1.0 -> None)', 'contvar (171244.81 -> None)']``, plus
-      2 looser bounds against 3 tighter. Nothing unsound, no lost incumbent.
-    * *net-positive*: **NO** — total overrun 79.2 s -> 85.2 s, i.e. flat, and the
-      metric is noisy enough that the OFF arm alone ranged 78-176 s across runs.
+    * *cert-clean*: **YES** — ``cert_regressions=0  lost_incumbents=0  lost_bound=0
+      unsound=0  false_primals=0``. Bounds 3 tighter / 2 looser (contvar 171244.81 ->
+      98924.53 and flay03m 46.51 -> 41.95 are the looser two; both sound).
+    * *net-positive*: **not demonstrated** — total overrun 82.1 s -> 70.9 s (-14%),
+      which sits inside the metric's own noise: three runs of the OFF arm alone gave
+      82.1 / 79.2 / 175.6 s. Cells over budget went 15 -> 18.
 
-    So the mechanism is built, sound and measured, and it stays OFF: the
-    ``DISCOPT_CUT_INHERIT`` rule (CLAUDE.md §5) — sound is not the same as helpful.
+    So it stays OFF: cert-clean is necessary, not sufficient (CLAUDE.md §5 bar 2, the
+    ``DISCOPT_CUT_INHERIT`` rule). What would settle it is a load-gated, multi-rep
+    panel over the instances where the deadline actually binds — on the corpus average
+    the effect is diluted by the ~50 instances that finish far inside 15 s and are
+    bit-identical either way.
 
-    **The specific blocker.** Honouring the deadline costs a *bound*, not just time.
-    :meth:`_time_limit_result` does return a sound Neumaier-Shcherbina floor when the
-    yielded simplex leaves a usable dual (see :meth:`_stash_deadline_bound`), but that
-    floor never reaches the reported bound: the consumer in ``_jax/mccormick_lp.py``
-    (lines 758 / 903) adopts a node bound only from a ``status == "optimal"`` result,
-    so a yielded LP contributes nothing however sound its floor. Making that
-    consumer accept a rigorous safe bound from a non-optimal node is what would change
-    the verdict — sound by weak duality, but it touches the bound-adoption logic
-    certification rests on, so it is its own change with its own panel.
+    **What it took to become cert-clean** — the first two cuts were NOT, and both
+    failures are worth keeping (CLAUDE.md §11):
 
-    **Two self-inflicted results worth keeping** (CLAUDE.md §11):
-
-    1. The first cut had no ``_timed_out`` guard, so a deadline exit fell into the
-       equilibrated retry and then the ~170x-slower cold ``solve_milp`` — the recovery
-       cascade meant for ill-conditioning. That *doubled* the corpus overrun the change
-       exists to remove (175.6 s -> 310.3 s), and every second came from one instance:
-       heatexch_gen3 at 25.7 s -> 254.5 s (1.7x -> 17.0x). With the guard it is 30.7 s.
-    2. The first cut of the panel scored bound quality only where BOTH arms were
-       finite, so it read ``1.0 -> None`` as clean and reported CERT_CLEAN=True twice.
-       ``lost_bound``/``gained_bound`` now exist because of that.
+    1. *The recovery cascade.* Without a ``_timed_out`` guard a deadline exit fell
+       into the equilibrated retry and then the ~170x-slower cold ``solve_milp`` — the
+       recovery meant for ill-conditioning. That *doubled* the corpus overrun the
+       change exists to remove (175.6 s -> 310.3 s), all from one instance:
+       heatexch_gen3 25.7 s -> **254.5 s** (1.7x -> 17.0x). With the guard, 30.7 s.
+    2. *Honouring the deadline cost a BOUND.* bchoco08 went 1.0 -> ``None`` and
+       contvar 171244.81 -> ``None`` — trading a budget overrun for a lost
+       certificate, the wrong trade (CLAUDE.md §1). Three links had to change:
+       :meth:`_stash_deadline_bound` banks the floor, ``mccormick_lp`` adopts it from
+       a non-optimal node, and — the actual blocker — the Rust primal simplex now
+       exports its ``y = B⁻ᵀc_B`` dual candidate on ``IterLimit`` instead of an empty
+       vector, so there is a dual to build the floor from at all. Before that the
+       Python plumbing was banking nothing: measured, ``solve_lp_warm_csc_py`` with
+       ``time_limit_s=0.0`` returned ``dual=[]``.
+    3. *And the panel could not see (2).* It compared bound quality only where BOTH
+       arms were finite, so ``1.0 -> None`` scored as clean and it reported
+       CERT_CLEAN=True twice. ``lost_bound``/``gained_bound`` exist because of that.
     """
     import os as _os
 

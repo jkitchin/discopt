@@ -60,12 +60,13 @@ def _small_lp():
 
 
 def test_flag_defaults_off(warm_dl):
-    """Bound-changing, and its graduation panel FAILED, so it ships OFF.
+    """Bound-changing, so panel-gated; ships OFF until net-positive is demonstrated.
 
-    66 in-repo instances at a 15 s budget, OFF/ON interleaved: NOT cert-clean
-    (``cert_regressions=['cvxnonsep_psig40r']``, ``lost_bound=['bchoco08 1.0 -> None',
-    'contvar 171244.81 -> None']``) and not net-positive (overrun 79.2 s -> 85.2 s,
-    flat). Sound is not the same as helpful — the ``DISCOPT_CUT_INHERIT`` rule."""
+    66 in-repo instances at a 15 s budget, OFF/ON interleaved: cert-clean
+    (``cert_regressions=0  lost_incumbents=0  lost_bound=0  unsound=0``; bounds 3
+    tighter / 2 looser), but the wall benefit — total overrun 82.1 s -> 70.9 s — sits
+    inside the metric's own noise (three OFF-arm runs gave 82.1 / 79.2 / 175.6 s).
+    Cert-clean is necessary, not sufficient: the ``DISCOPT_CUT_INHERIT`` rule."""
     warm_dl(None)
     assert _lp_warm_deadline_enabled() is False
 
@@ -265,3 +266,40 @@ def test_timed_out_solve_without_a_floor_reports_no_bound(warm_dl, monkeypatch):
     res = _relaxation().solve(time_limit=0.0, backend="simplex")
     assert res.status == "time_limit"
     assert res.bound is None
+
+
+def test_iter_limit_exports_a_dual_candidate():
+    """The Rust blocker: a deadline exit must still hand back a dual candidate.
+
+    ``primal.rs`` exported ``y = B⁻ᵀc_B`` on a ``Numerical`` exit but kept an EMPTY
+    dual on ``IterLimit``, so an LP cut short by its caller's budget returned nothing
+    at all — no optimum AND no floor — and every Python-side attempt to bank a bound
+    from it was banking an empty vector. Measured before the fix:
+    ``solve_lp_warm_csc_py(..., time_limit_s=0.0)`` returned ``dual=[]``.
+
+    A Neumaier-Shcherbina bound is valid for ANY multiplier vector by weak duality, so
+    exporting a mid-solve candidate can only produce a looser floor, never an unsound
+    one.
+    """
+    import discopt._rust as _rust
+
+    c, A, b, bounds = _small_lp()
+    a_std = sp.hstack([sp.csc_matrix(A), sp.identity(1, format="csc")], format="csc").tocsc()
+    args = (
+        np.ascontiguousarray(np.concatenate([c, [0.0]])),
+        1,
+        3,
+        np.ascontiguousarray(a_std.indptr, dtype=np.int64),
+        np.ascontiguousarray(a_std.indices, dtype=np.int64),
+        np.ascontiguousarray(a_std.data, dtype=np.float64),
+        np.ascontiguousarray(b),
+        np.ascontiguousarray(np.array([lo for lo, _ in bounds] + [0.0])),
+        np.ascontiguousarray(np.array([hi for _, hi in bounds] + [1e20])),
+        None,
+        None,
+    )
+    status, _x, _obj, _iters, _cs, _bv, dual, _ray = _rust.solve_lp_warm_csc_py(
+        *args, time_limit_s=0.0
+    )
+    assert status == "iter_limit", f"expected a limit exit, got {status}"
+    assert np.size(dual) == 1, "a yielded LP must still export its dual candidate"

@@ -1494,3 +1494,41 @@ Stage-1 validation patch (route `diving` through a per-model evaluator cache):
 >
 > **Separate, still open:** the dual-simplex degeneracy stall itself — 59 494
 > degenerate pivots with Bland's rule never activating.
+
+### 14a. Update: the blocker is cleared — the panel is now cert-clean (2026-07-31)
+
+> §14 closed with "the solver has no way to bank a dual bound from an LP it cut
+> short". That is now fixed, and the fix was **not** where the Python-side reasoning
+> put it. Three links had to change, and only the third mattered:
+>
+> 1. `MilpRelaxationModel._stash_deadline_bound` banks the NS floor of a yielded LP
+>    (ungated — #517's flag guards a *numerically broken* dual, a different concern).
+> 2. `_jax/mccormick_lp.py` adopts a finite bound from a `status == "time_limit"`
+>    node result, the same shape as the existing #517 branch beside it.
+> 3. **The actual blocker, in Rust.** `primal.rs` exported its `y = B⁻ᵀc_B` dual
+>    candidate on a `Numerical` exit but kept an EMPTY dual on `IterLimit`, on the
+>    stated grounds that there is "no usable factorization to btran against". That is
+>    true of the `failed()` path but not of an iteration/deadline exit, which stops a
+>    healthy solve early with its factorization intact. Measured directly:
+>    `solve_lp_warm_csc_py(..., time_limit_s=0.0)` returned `dual=[]`, so steps 1-2
+>    were banking nothing and both showed no effect at all when tested.
+>
+> With the dual exported (`is_ok()` guard retained), the two lost bounds return:
+> bchoco08 `None` -> 1.0000000000006 and contvar `None` -> 98924.53 (looser than the
+> OFF arm's 171244.81, but finite and sound). Panel: **CERT_CLEAN=True** —
+> `cert_regressions=0  lost_incumbents=0  lost_bound=0  unsound=0`, bounds 3 tighter /
+> 2 looser.
+>
+> **Still not graduated.** Net-positive is not demonstrated: total overrun 82.1 s ->
+> 70.9 s (-14%) sits inside the metric's own noise — three runs of the OFF arm alone
+> gave 82.1 / 79.2 / 175.6 s — and cells over budget went 15 -> 18. The corpus average
+> is diluted by the ~50 instances that finish far inside 15 s and are bit-identical
+> either way. What would settle it: a load-gated, multi-rep panel over the instances
+> where the deadline actually binds.
+>
+> **Method note.** The Rust change touches an exit path on the DEFAULT route, so it
+> was checked for bound-neutrality independently: 13 certifying instances byte-identical
+> in node_count/objective/bound/status/gap_certified with the flag OFF
+> (`scratchpad/issue917_neutrality.py`), plus `cargo test -p discopt-core` 575 passed.
+> The new dual is consumed only behind flags (`_certify` reads `safe_bound` only from
+> an `optimal` result), which is why the default path does not move.
