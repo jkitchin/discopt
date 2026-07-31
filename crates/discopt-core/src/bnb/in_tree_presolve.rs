@@ -196,9 +196,13 @@ pub fn run_in_tree_presolve(
                     new_ub[i] = iv.hi;
                     tightened += 1;
                 }
-                if new_lb[i] > new_ub[i] + opts.tol {
-                    infeasible = true;
-                }
+                // #907. NO infeasibility verdict here. This loop used to test
+                // `new_lb[i] > new_ub[i] + opts.tol`, but `opts.tol` is the FBBT
+                // *convergence* tolerance — independently settable and smaller
+                // than `FEAS_TOL` in practice — so a crossing in
+                // `(opts.tol, FEAS_TOL]` set the rigorous-fathom flag on exactly
+                // the noise this fix exists to tolerate. The single exit below
+                // repairs and then decides, at `FEAS_TOL`, for every path.
             }
         }
     }
@@ -584,6 +588,69 @@ mod tests {
         assert_eq!(
             checked, 200,
             "probe did not execute the comparisons it claims"
+        );
+    }
+
+    /// #907, probing path enabled: a node box inverted by sub-`FEAS_TOL` noise
+    /// must not be fathomed, and must not come back inverted or with the point
+    /// cut. Runs with `opts.tol` two orders BELOW `FEAS_TOL` so the two
+    /// tolerances are distinguishable.
+    ///
+    /// SCOPE, stated honestly: this covers the incoming-box sanitation on the
+    /// probing path (it fails on pre-#907 `main`). It does NOT isolate the
+    /// fold-back verdict that used to read `new_lb[i] > new_ub[i] + opts.tol` —
+    /// reverting that one line alone leaves this test green, because reaching it
+    /// requires `probe_node_bounds` to itself return an interval inverted by
+    /// `(opts.tol, FEAS_TOL]`, which no toy model here produces. That line is
+    /// changed on consistency grounds — `opts.tol` is a convergence tolerance and
+    /// must not gate an infeasibility verdict — and is UNCOVERED by a
+    /// fail-before test.
+    #[test]
+    fn probing_path_does_not_fathom_subtol_inverted_box() {
+        let model = x_plus_y_le_5();
+        let opts = InTreePresolveOptions {
+            depth_stride: 1,
+            max_iter: 16,
+            tol: 1e-8, // << FEAS_TOL (1e-6): the window the old test fathomed in
+            probing: true,
+            probe_max_vars: 8,
+        };
+        let mut checked = 0usize;
+        for eps in [1e-7, 5e-7, 9e-7] {
+            // Crossing strictly inside (opts.tol, FEAS_TOL] — noise, not a proof.
+            let d = run_in_tree_presolve(&model, &[2.5, 0.0], &[2.5 - eps, 10.0], 0, None, &opts);
+            assert!(d.ran);
+            assert!(
+                !d.infeasible,
+                "probing path fathomed a live node at a {eps:e} crossing (< FEAS_TOL)"
+            );
+            assert!(d.lb[0] <= d.ub[0], "probing path returned an inverted box");
+            assert!(d.lb[0] <= 2.5 && 2.5 <= d.ub[0], "probing path cut x=2.5");
+            checked += 1;
+        }
+        assert_eq!(
+            checked, 3,
+            "probe did not execute the comparisons it claims"
+        );
+    }
+
+    /// ANTI-PERMISSIVENESS CONTROL for the probing path: a genuine infeasibility
+    /// must still fathom with probing on and a small `opts.tol`.
+    #[test]
+    fn probing_path_still_fathoms_genuine_infeasibility() {
+        let model = x_plus_y_le_5();
+        let opts = InTreePresolveOptions {
+            depth_stride: 1,
+            max_iter: 16,
+            tol: 1e-8,
+            probing: true,
+            probe_max_vars: 8,
+        };
+        let d = run_in_tree_presolve(&model, &[10.0, 10.0], &[10.0, 10.0], 0, None, &opts);
+        assert!(d.ran);
+        assert!(
+            d.infeasible,
+            "probing path stopped fathoming a real infeasibility"
         );
     }
 }
