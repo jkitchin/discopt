@@ -1205,6 +1205,37 @@ class NLPEvaluator:
         """Total number of constraints."""
         return self._n_constraints
 
+    def constraint_row_map(self) -> list[tuple[int, int, "Constraint"]]:
+        """The authoritative row→``Constraint`` map: ``(start, stop, constraint)``
+        per source constraint, where ``evaluate_constraints(x)[start:stop]`` are
+        exactly that constraint's flat rows.
+
+        This exists because the mapping is genuinely non-trivial in two ways that
+        callers repeatedly got wrong (#908):
+
+        1. A constraint body may be **array-valued** — ``x <= 1`` on a 3-vector is
+           ONE :class:`Constraint` object and THREE rows. Walking
+           ``model._constraints`` with one index per object desynchronises from
+           the row stream on the first vector constraint and every check after it
+           reads the wrong row. Measured: that made both incumbent verifiers
+           vouch for a point violating a row by 5.0.
+        2. The row set is ``model._constraints`` **plus**
+           ``model._builder_linear_constraints()`` (#840). A caller reading only
+           ``_constraints`` both misses the builder rows entirely and mis-indexes
+           the ones it does read.
+
+        Consume this rather than re-deriving the correspondence: it is built from
+        the same ``_source_constraints`` / ``_constraint_flat_sizes`` the compiled
+        concatenation uses, so the two cannot drift.
+        """
+        out: list[tuple[int, int, Constraint]] = []
+        start = 0
+        for con, size in zip(self._source_constraints, self._constraint_flat_sizes):
+            stop = start + int(size)
+            out.append((start, stop, con))
+            start = stop
+        return out
+
     @property
     def variable_bounds(self) -> tuple[np.ndarray, np.ndarray]:
         """Returns (lb, ub) arrays of shape (n,) for all variables."""

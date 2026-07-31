@@ -743,94 +743,24 @@ def _native_kernel_verify_point(model, x_flat):
     point's TRUE objective in model units, or ``(False, None)``.
 
     Soundness (#764 Task 1): this gates whether a value may seed the native kernel's
-    incumbent cutoff. An unverified seed would poison every downstream certificate, so
-    the contract is strict — it returns ``True`` ONLY when the model evaluator
-    successfully evaluated every constraint AND the objective and every residual is
-    within the repo tolerances (bounds/constraints abs=1e-6 + rel=1e-4, integrality
-    1e-5). Any evaluator failure, shape mismatch, or non-finite value yields
-    ``(False, None)`` — never an optimistic pass. The objective returned is recomputed
-    from the original variables (independent of the kernel's McCormick aux columns), so
-    it is the genuinely-attained value, not an optimistic relaxation reading."""
-    from discopt.modeling.core import Constraint, ObjectiveSense, VarType
+    incumbent cutoff. An unverified seed would poison every downstream certificate.
 
-    abs_tol, rel_tol, int_tol = 1e-6, 1e-4, 1e-5
-    x_flat = np.asarray(x_flat, dtype=np.float64)
-    if not np.all(np.isfinite(x_flat)):
+    #908: the row walk this used to carry advanced one index per ``Constraint`` object
+    while the evaluator emits one row per FLAT element, so any vector constraint
+    desynchronised the two streams and the check read the wrong row — measured wrongly
+    accepting 4 of 5 constructed-infeasible points, including one violating a row by
+    5.0. It also never examined builder-resident linear rows and ignored
+    ``Constraint.rhs``. The logic now lives in ONE place,
+    :func:`discopt.validation.feasibility.verify_point`, which enumerates rows from the
+    evaluator's own row map so the misalignment class is structurally impossible.
+    """
+    from discopt.validation.feasibility import verify_point
+
+    res = verify_point(model, x_flat, with_objective=True)
+    if not res.ok:
+        logger.debug("native seed verification declined: %s", res.reason)
         return False, None
-
-    # Variable bounds + integrality against the ORIGINAL declared model. Bounds use the
-    # repo's COMBINED tolerance (abs=1e-6 + rel=1e-4 * |bound|): a local NLP returns a
-    # bound-active variable a few ULPs off its bound, and on a large-magnitude bound
-    # (tanksize x41 lb=536) a 4e-6 absolute slack is 8e-9 relative — inside the regime
-    # the whole solver (and its trusted incumbents) operate in. This is the same
-    # abs+rel tolerance the constraint residual check below uses.
-    off = 0
-    for v in model._variables:
-        size = int(getattr(v, "size", 1))
-        vals = x_flat[off : off + size]
-        if vals.shape[0] != size:
-            return False, None
-        lb_flat = np.asarray(v.lb, dtype=np.float64).flatten()
-        ub_flat = np.asarray(v.ub, dtype=np.float64).flatten()
-        lb_tol = abs_tol + rel_tol * np.abs(lb_flat)
-        ub_tol = abs_tol + rel_tol * np.abs(ub_flat)
-        if np.any(vals < lb_flat - lb_tol) or np.any(vals > ub_flat + ub_tol):
-            return False, None
-        if v.var_type in (VarType.INTEGER, VarType.BINARY):
-            if np.any(np.abs(vals - np.round(vals)) > int_tol):
-                return False, None
-        off += size
-
-    try:
-        # ``cached_evaluator``, not ``NLPEvaluator(model)``: this is called once per
-        # seed candidate (and once more on the final incumbent), and constructing an
-        # evaluator re-traces and re-compiles the model's JAX constraint/objective/
-        # Jacobian callables every time. Profiling #902 measured 697 traces / 8.5 s
-        # inside a 12 s seed phase on nvs19 — the same defect ``cached_evaluator`` was
-        # introduced to fix for the diving heuristic. The cache is keyed on the model's
-        # structural fingerprint and reads bounds/parameters live, so a cached
-        # evaluator computes byte-identical residuals: this changes only the cost of
-        # the verification, never its verdict.
-        from discopt._jax.nlp_evaluator import cached_evaluator
-
-        evaluator = cached_evaluator(model)
-        if evaluator.n_constraints > 0:
-            cons = np.asarray(evaluator.evaluate_constraints(x_flat), dtype=np.float64)
-            idx = 0
-            for c in model._constraints:
-                if not isinstance(c, Constraint):
-                    continue
-                if idx >= cons.shape[0]:
-                    return False, None  # evaluator produced fewer rows than constraints
-                val = float(cons[idx])
-                if not math.isfinite(val):
-                    return False, None
-                tol = abs_tol + rel_tol * abs(val)
-                if c.sense == "<=":
-                    if val > tol:
-                        return False, None
-                elif c.sense == ">=":
-                    if val < -tol:
-                        return False, None
-                elif c.sense == "==":
-                    if abs(val) > tol:
-                        return False, None
-                else:
-                    return False, None  # unknown sense -> refuse to vouch for the point
-                idx += 1
-        obj_min = float(evaluator.evaluate_objective(x_flat))
-    except Exception as exc:  # evaluator could not vouch -> NOT verified
-        logger.debug("native seed verification skipped (evaluator error): %s", exc)
-        return False, None
-    if not math.isfinite(obj_min):
-        return False, None
-    # ``evaluate_objective`` negates the body for a MAXIMIZE model (it minimizes the
-    # negation); undo that so the returned value is the objective in model units.
-    if model._objective.sense == ObjectiveSense.MAXIMIZE:
-        model_obj = -obj_min
-    else:
-        model_obj = obj_min
-    return True, float(model_obj)
+    return True, res.objective
 
 
 # Cap on the number of FREE integers (span > 0.5 in the presolved box) the seed
