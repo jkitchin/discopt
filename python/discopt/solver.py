@@ -494,12 +494,19 @@ def _obbt_iterate_root_enabled() -> bool:
 
 
 def _native_spatial_kernel_enabled() -> bool:
-    """Whether the #764 native Rust spatial-B&B kernel is engaged (**default OFF**;
-    ``DISCOPT_NATIVE_SPATIAL_KERNEL=1`` opts in). Bound-changing / experimental — the
-    whole per-node loop moves into ``discopt-core`` (envelope patch + warm OBBT sweep
-    + safe-bound pruning + spatial branch). The producer declines any model it cannot
-    reproduce bound-neutrally, and the driver falls back to the Python path on decline,
-    so ON never changes a certified answer, only which engine computes it.
+    """Whether the #764 native Rust spatial-B&B kernel is engaged (**default ON** since
+    2026-07-31; ``DISCOPT_NATIVE_SPATIAL_KERNEL=0`` opts out and restores the Python
+    path unchanged). Bound-changing — the whole per-node loop moves into
+    ``discopt-core`` (envelope patch + warm OBBT sweep + safe-bound pruning + spatial
+    branch). The producer declines any model it cannot reproduce bound-neutrally, and
+    the driver falls back to the Python path on decline, so ON never changes a certified
+    answer, only which engine computes it.
+
+    The current state is the "RE-GRADUATED 2026-07-31" note near the end of this
+    docstring. Everything between here and there is the historical record of two
+    earlier decisions — a 2026-07-19 "stays OFF" and a 2026-07-27 graduation that was
+    later withdrawn — kept because the reasoning matters, but NEITHER states the
+    current default. Read them as history.
 
     Graduation status (#764, panel 2026-07-19,
     ``discopt_benchmarks/results/issue764_native_kernel_graduation_panel_20260719T155819Z.json``):
@@ -624,16 +631,38 @@ def _native_spatial_kernel_enabled() -> bool:
     busy machine (verified end-to-end at load 2.2 rising to 5.9: 4/4 decisive instances
     STABLE, 0 quarantined).
 
-    *Why still OFF.* Re-measured post-fix on nvs17/19/24 + tanksize the panel returns
-    ``GRADUATE: YES`` — nvs17 goes ``feasible`` -> ``optimal``, nvs24 gains a primal OFF
-    never finds, nvs19 beats OFF (-1098.2 vs -1097.6). But that is a 4-instance probe,
-    and §5 requires a corpus-wide differential panel. Since the only panel this flag
-    ever passed was blind on all three counts above, **no valid graduation panel has
-    ever been run for it** — the 2026-07-27 graduation was not validly earned
-    independently of the seed defect. So the default returns to OFF until a clean
-    119-instance replicated run passes, which is the re-graduation gate
-    tracked in #902. The cost of that conservatism is explicit: ``tanksize`` and
-    ``nvs17`` both go ``optimal`` -> ``feasible`` at a 60 s budget with the kernel off.
+    **RE-GRADUATED default-ON 2026-07-31 (#902), on the first VALID panel this flag has
+    ever had.** The 2026-07-27 graduation was not validly earned — the only panel it
+    passed was blind on all three counts above — so the default went back to OFF
+    pending a corpus-wide replicated run per §5. That run has now happened, twice,
+    over the full 119-instance union at a 60 s budget with the decisive instances
+    replicated 3x and the arms interleaved:
+
+    * ``…_20260731T202847Z``: cert-clean PASS (0 violations, 100/119 oracle-checked),
+      engaged 20, helped 3, non-engaged wall Δ median −0.004 s — but ``GRADUATE: NO``
+      on a single quality violation.
+    * ``…_20260731T232844Z``: the same bars, ``GRADUATE: YES``, 0 quarantined.
+
+    The difference between them is not the kernel; it is the instrument. The lone
+    violation was ``heatexch_gen1``, whose ON arm returned 167654.27 / 167545.24 /
+    167654.27 — a spread of 109.031 against an ON/OFF median difference of 109.031.
+    The panel compared medians and never computed a spread (CLAUDE.md §9). The kernel
+    never engaged on that instance, its producer probe was timed inside a real solve at
+    0.016 s, and a 3x2 interleaved re-measurement outside the panel flipped the sign.
+    The panel now requires a claimed difference to exceed the within-arm spread before
+    attributing it to the flag; on the same run 31 of 32 decisive instances had spread
+    exactly 0.0 in both arms, so nothing else moved. On the confirming run
+    ``heatexch_gen1`` was not even decisive — both arms returned the same objective.
+
+    What the flag buys, measured: ``nvs17`` and ``tanksize`` go ``feasible`` ->
+    ``optimal`` (tanksize 60.3 s -> 17.3 s), ``st_e31`` ``feasible`` -> ``optimal``
+    (60.7 s -> 2.1 s), ``nvs24`` gains a primal (−1031.8) OFF never finds, and
+    ``nvs19`` beats OFF (−1098.2 vs −1097.6). It costs nothing measurable on the 99
+    instances it declines (median wall Δ −0.002 s). Both 2026-07-19 blockers are gone:
+    ``pytest -m smoke`` is green with the kernel on (904 passed, identical to off) now
+    that #789 routes feature-using solves to the Python engine, and the #788/#795 wall
+    budget removed the runaway (``contvar``: ON >200 s then, 61.4 s against OFF's
+    62.0 s now).
 
     ``DISCOPT_NATIVE_SPATIAL_KERNEL=1`` opts back in.
 
@@ -653,7 +682,7 @@ def _native_spatial_kernel_enabled() -> bool:
     = 39 s primary + the 21 s reserve). It applies identically with this flag OFF.
     Tracked as #917, since the fix is a change to the default budget policy for every
     solve and needs its own panel."""
-    return os.environ.get("DISCOPT_NATIVE_SPATIAL_KERNEL", "0").strip().lower() not in (
+    return os.environ.get("DISCOPT_NATIVE_SPATIAL_KERNEL", "1").strip().lower() not in (
         "0",
         "false",
         "no",
