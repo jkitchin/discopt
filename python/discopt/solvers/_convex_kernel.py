@@ -777,22 +777,19 @@ def _unflatten(model, inc_x):
 
 
 def _incumbent_is_feasible(model, x_flat, tol: float = 1e-5) -> bool:
-    """#779: evaluate the PRISTINE model's constraints at `x_flat`; True iff feasible."""
-    import numpy as np
+    """#779: evaluate the PRISTINE model's constraints at `x_flat`; True iff feasible.
 
-    from discopt._jax.nlp_evaluator import NLPEvaluator
+    #908: this used to ``zip(g, model._constraints)`` — pairing per-ROW evaluator
+    values against per-CONSTRAINT-OBJECT entries. On any vector constraint the two
+    desynchronise (and ``zip`` silently truncates to the shorter), so it vouched for
+    points violating a row outright; it also checked neither variable bounds nor
+    integrality. It now delegates to the single verifier, which enumerates rows from
+    the evaluator's own row map.
 
-    try:
-        ev = NLPEvaluator(model)
-        g = np.asarray(ev.evaluate_constraints(x_flat), float)
-    except Exception:
-        return False
-    for gi, con in zip(g, model._constraints):
-        s = con.sense if isinstance(con.sense, str) else con.sense.value
-        if s == "<=" and gi > tol:
-            return False
-        if s == ">=" and gi < -tol:
-            return False
-        if s not in ("<=", ">=") and abs(gi) > tol:
-            return False
-    return True
+    ``tol`` is accepted for call-compatibility and ignored: the verifier keys its
+    tolerance on each row's own scale rather than on a flat constant, which is what
+    fixes the scale-blindness in both directions.
+    """
+    from discopt.validation.feasibility import verify_point
+
+    return bool(verify_point(model, x_flat).ok)
