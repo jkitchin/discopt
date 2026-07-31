@@ -156,3 +156,57 @@ def test_solve_path_flag_agrees_with_the_default_path():
     flat = [float(np.asarray(sub.x[f"x{i}"]).reshape(-1)[0]) for i in range(5)]
     _, con_viol, bnd_viol = rep.evaluate_point(flat)
     assert max(con_viol, bnd_viol) < 1e-6
+
+
+@pytest.mark.smoke
+def test_postsolve_guard_rejects_a_lifted_point_with_a_fractional_integer():
+    """Issue #910: the #779 guard was integrality-blind.
+
+    A lifted point whose *integral* survivor is fractional satisfies every row
+    and every variable bound of the pristine model, so both of the guard's
+    pre-#910 arms pass and the point is returned as
+    ``SolveResult(status='optimal')``. This test pins the fails-before evidence
+    (the Rust evaluator reports zero violation on exactly that point) and the
+    fix (``lift_result`` discards it).
+    """
+    from discopt.modeling.core import SolveResult, model_from_repr
+    from discopt.solvers._presolve_substitute import integrality_violation, lift_result
+
+    m = dm.Model("intguard")
+    m.continuous("x", lb=-100, ub=100)
+    m.integer("y", lb=0, ub=10)
+    xs, ys = m._variables
+    m.subject_to(xs - 2 * ys == 1)
+    m.minimize(xs)
+
+    pristine = _repr_of(m)
+    reduced_repr, chain = pristine.substitute(4)
+    assert chain.variables_eliminated == 1, "x must be the eliminated block"
+    reduced_model = model_from_repr(reduced_repr, "intguard_substituted")
+    assert [v.name for v in reduced_model._variables] == ["y"]
+
+    # y = 3.5 lifts to x = 2*3.5 + 1 = 8.0. Both coordinates are inside their
+    # pristine bounds and the only row was the (dropped) definition, so the Rust
+    # evaluator reports zero constraint and zero bound violation: the guard's two
+    # pre-#910 arms both PASS on a point that is not integer-feasible.
+    x_full = np.asarray(chain.postsolve([3.5]), dtype=float)
+    assert x_full == pytest.approx([8.0, 3.5])
+    _, con_viol, bnd_viol = pristine.evaluate_point(list(x_full))
+    assert max(con_viol, bnd_viol) <= 1e-12, "fails-before evidence: the old guard sees nothing"
+
+    # The new arm sees it, and names the variable and the deviation.
+    bad = integrality_violation(m, x_full)
+    assert bad is not None and bad[0] == "y"
+    assert bad[1] == pytest.approx(0.5)
+
+    result = SolveResult(status="optimal", objective=8.0, x={"y": np.asarray(3.5)})
+    assert lift_result(m, reduced_model, chain, pristine, result) is None, (
+        "a lifted point with a fractional integer must be discarded, not reported"
+    )
+
+    # And the guard does not fire on a genuinely integral point.
+    ok = SolveResult(status="optimal", objective=7.0, x={"y": np.asarray(3.0)})
+    lifted = lift_result(m, reduced_model, chain, pristine, ok)
+    assert lifted is not None
+    assert lifted.objective == pytest.approx(7.0)
+    assert integrality_violation(m, np.asarray([7.0, 3.0])) is None
