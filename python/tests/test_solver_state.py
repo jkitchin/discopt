@@ -28,6 +28,7 @@ from pathlib import Path
 import discopt.solver as S
 import pytest
 from discopt.solver.state import (
+    DualBoundCertificateState,
     LazyStallSeparationState,
     McCormickRelaxationState,
     PerNodeOBBTBudget,
@@ -119,7 +120,32 @@ MIGRATED: dict[str, tuple[str, str]] = {
     "_cut_inherit_enabled": ("_cuts", "inherit_enabled"),
     "_root_cut_max": ("_cuts", "root_max"),
     "_root_cut_rounds": ("_cuts", "root_rounds"),
+    # DualBoundCertificateState — the group that decides whether the reported bound
+    # may be called *proven*. Threaded in its own commit behind its own Regime-N
+    # panel: a mistake here is a soundness bug, not a refactor bug.
+    "_gap_certified": ("_cert", "gap_certified"),
+    "_nonrigorous_fathom": ("_cert", "nonrigorous_fathom"),
+    "_taint_floor_internal": ("_cert", "taint_floor_internal"),
+    "_tree_bound_poisoned": ("_cert", "tree_bound_poisoned"),
+    "_convex_bound_untrusted": ("_cert", "convex_bound_untrusted"),
+    "_root_rigorously_infeasible": ("_cert", "root_rigorously_infeasible"),
+    "_root_glb_internal": ("_cert", "root_glb_internal"),
+    "_root_pool_bound": ("_cert", "root_pool_bound"),
 }
+
+#: The certificate conjunction the SPATIAL-CERT terminal block evaluates at a
+#: single ``if``. Threading *some* of these while leaving others loose is what
+#: would genuinely split a soundness decision across two sources of truth, so the
+#: group is enforced as all-or-nothing rather than left to review.
+CERTIFICATE_CONJUNCTION: frozenset[str] = frozenset(
+    {
+        "_gap_certified",
+        "_nonrigorous_fathom",
+        "_tree_bound_poisoned",
+        "_convex_bound_untrusted",
+        "_taint_floor_internal",
+    }
+)
 
 #: The subset of :data:`MIGRATED` sourced from ``solve_model`` parameters rather
 #: than from locals it computes.  Kept separate because their invariant is the
@@ -146,7 +172,7 @@ SHADOW_PAIR_EXCLUSIONS: dict[str, str] = {
 #: rebound (``_mc_mode`` 8 times, ``_root_cut_pool`` 6), so a freeze would not even
 #: type-check as a description of the code.
 MUTABLE_HOLDERS: frozenset[str] = frozenset(
-    {"_timers", "_heur", "_lazy", "_pn_obbt", "_mc", "_cuts"}
+    {"_timers", "_heur", "_lazy", "_pn_obbt", "_mc", "_cuts", "_cert"}
 )
 
 #: Holder local -> the dataclass it holds.
@@ -158,6 +184,7 @@ HOLDER_CLASS: dict[str, type] = {
     "_cfg": RootConfig,
     "_mc": McCormickRelaxationState,
     "_cuts": RootCutPoolState,
+    "_cert": DualBoundCertificateState,
 }
 
 #: Constructor arguments for holders whose fields have no defaults.  ``RootConfig``
@@ -284,7 +311,7 @@ def test_every_state_field_is_documented() -> None:
                 f"{cls.__name__}.{f.name} is missing its `#:` field comment"
             )
             checked += 1
-    assert checked >= 35, f"only {checked} fields checked; the probe under-fired"
+    assert checked >= 43, f"only {checked} fields checked; the probe under-fired"
 
 
 def test_migration_table_matches_the_state_classes() -> None:
@@ -425,7 +452,7 @@ def test_root_config_is_the_only_frozen_holder() -> None:
         else:
             assert frozen, f"{cls.__name__} ({holder}) is expected to be frozen"
         checked += 1
-    assert checked == len(HOLDER_CLASS) >= 7
+    assert checked == len(HOLDER_CLASS) >= 8
     assert set(MUTABLE_HOLDERS) | {"_cfg"} == set(HOLDER_CLASS), (
         "MUTABLE_HOLDERS and HOLDER_CLASS disagree about which holders exist"
     )
@@ -464,4 +491,96 @@ def test_executed_assertion_count_is_nonzero() -> None:
     fn = _solve_model_ast()
     bound = _own_scope_bindings(fn)
     assert len(bound) > 200, f"only {len(bound)} bindings found; the AST walk under-fired"
-    assert len(MIGRATED) >= 54
+    assert len(MIGRATED) >= 62
+
+
+def test_certificate_conjunction_is_threaded_all_or_nothing() -> None:
+    """The SPATIAL-CERT predicate must read one object, not a mixture.
+
+    Certification is re-earned after a non-rigorous fathom only when
+    ``not gap_certified and nonrigorous_fathom and not tree_bound_poisoned and not
+    convex_bound_untrusted`` and the floor-inclusive bound ``min(frontier,
+    taint_floor_internal)`` closes the gap. Threading *some* of those while leaving
+    others as bare locals is the failure the honest-outcome clause warned about —
+    a soundness decision split across two sources of truth. So the group is
+    enforced together: either every member is migrated onto the same holder, or
+    none is.
+    """
+    migrated = {n for n in CERTIFICATE_CONJUNCTION if n in MIGRATED}
+    assert migrated in (set(), set(CERTIFICATE_CONJUNCTION)), (
+        f"the certificate conjunction is half-threaded: {sorted(migrated)} migrated, "
+        f"{sorted(set(CERTIFICATE_CONJUNCTION) - migrated)} still bare locals"
+    )
+    if not migrated:
+        pytest.skip("certificate cluster not threaded on this tree")
+    holders = {MIGRATED[n][0] for n in CERTIFICATE_CONJUNCTION}
+    assert holders == {"_cert"}, f"the conjunction is spread across holders {sorted(holders)}"
+    assert len(CERTIFICATE_CONJUNCTION) == 5
+    print(f"executed conjunction assertions: {len(CERTIFICATE_CONJUNCTION)}")
+
+
+def test_gap_certified_leaves_solve_model_only_through_the_holder() -> None:
+    """No ``gap_certified=`` argument may read a stale bare local.
+
+    A first draft of this test asserted there is exactly **one**
+    ``SolveResult(gap_certified=…)`` in ``solve_model``. The measurement says
+    **three**, and the measurement wins: two are early returns that fire *before*
+    the certificate holder is constructed — the pure-LP shortcut
+    (``gap_certified=_lps.status == "optimal"``) and a root-only exit
+    (``gap_certified=True``). Neither can read ``_cert`` and neither participates
+    in the spatial certificate machinery, so demanding one site would have been a
+    demand for a code change with no soundness content.
+
+    The invariant that *does* hold, and is what matters: every site at or after the
+    ``_cert`` construction goes through the holder, and **no** site anywhere passes
+    a bare migrated local. That is what would break if a later edit reintroduced a
+    loose ``_gap_certified`` alongside ``_cert.gap_certified``.
+    """
+    fn = _solve_model_ast()
+    construction_line = None
+    for node in fn.body:
+        if (
+            isinstance(node, ast.Assign)
+            and isinstance(node.targets[0], ast.Name)
+            and node.targets[0].id == "_cert"
+        ):
+            construction_line = node.lineno
+            break
+    assert construction_line is not None, "solve_model never constructs _cert"
+
+    found: list[tuple[int, ast.expr]] = []
+    stack: list[ast.AST] = list(fn.body)
+    while stack:
+        node = stack.pop()
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)):
+            continue
+        if isinstance(node, ast.Call):
+            for kw in node.keywords:
+                if kw.arg == "gap_certified":
+                    found.append((kw.value.lineno, kw.value))
+        stack.extend(ast.iter_child_nodes(node))
+    assert found, "no gap_certified= keyword found at all; the probe fired on nothing"
+
+    checked = 0
+    through_holder = 0
+    for lineno, value in found:
+        # (a) never a bare migrated local, anywhere.
+        for sub in ast.walk(value):
+            if isinstance(sub, ast.Name):
+                assert sub.id not in MIGRATED, (
+                    f"gap_certified= at line {lineno} reads the bare migrated local "
+                    f"{sub.id!r}; it must go through its holder"
+                )
+        checked += 1
+        # (b) at or after the construction, it must be the holder's field.
+        if lineno >= construction_line:
+            assert isinstance(value, ast.Attribute), (
+                f"gap_certified= at line {lineno} is {ast.unparse(value)}, not _cert.gap_certified"
+            )
+            assert isinstance(value.value, ast.Name) and value.value.id == "_cert"
+            assert value.attr == "gap_certified"
+            through_holder += 1
+    assert through_holder >= 1, (
+        "no gap_certified= site reads the holder; the certificate never leaves through _cert"
+    )
+    print(f"executed result-boundary assertions: {checked} sites, {through_holder} via _cert")

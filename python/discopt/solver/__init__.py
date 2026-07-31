@@ -65,6 +65,7 @@ from discopt.solver.native_kernel import (
 )
 from discopt.solver.native_kernel import _try_native_spatial_kernel as _try_native_spatial_kernel
 from discopt.solver.state import (
+    DualBoundCertificateState,
     LazyStallSeparationState,
     McCormickRelaxationState,
     PerNodeOBBTBudget,
@@ -2118,7 +2119,7 @@ def _nonrigorous_sentinel_fathom(node_lower_bound: float, node_infeasible: bool)
     constraints, neither of which rules out a better point in the subtree. The
     Rust tree still mechanically cuts that subtree by bound (``1e30 >=``
     incumbent, ``tree_manager.rs``), so the *gap* it reports is not certified.
-    When this returns True the caller must set ``_gap_certified = False`` — the
+    When this returns True the caller must set ``_cert.gap_certified = False`` — the
     bare frontier gap can no longer certify: the fathom itself proves nothing
     about the removed subtree.
 
@@ -2213,7 +2214,7 @@ def _invoke_pre_import_callbacks(
     FEASIBLE, so it is a *non-rigorous* fathom (issue #748): the removed region
     is not proven to contain no acceptable point — the callback merely excluded
     the specific integer point found. The caller must therefore flag
-    ``_nonrigorous_fathom`` so a tree that later exhausts with no accepted
+    ``_cert.nonrigorous_fathom`` so a tree that later exhausts with no accepted
     incumbent reports ``unknown`` (feasibility undetermined) rather than falsely
     certifying ``infeasible``. Without this, a pure-MILP whose LP-relaxation root
     is already integer-optimal but callback-rejected (nothing left to branch)
@@ -6901,7 +6902,14 @@ def solve_model(
     # be the global optimum of the continuous subproblem.
     if not _model_is_convex:
         tree.set_nonconvex(True)
-    _gap_certified = True
+    # Dual-bound certificate state (consolidation plan, item 11). Eight names that
+    # together decide whether this solve's bound may be reported as *proven*. As
+    # loose locals a one-letter typo in any of the 13 stores to ``gap_certified``
+    # bound a NEW local and left the real flag True — a silent false ``optimal``;
+    # on a ``slots=True`` holder the same typo raises. See
+    # ``DualBoundCertificateState`` for why the group is exactly these eight.
+    _cert = DualBoundCertificateState()
+    _cert.gap_certified = True
 
     # --- #740: single funnel for every non-batch incumbent injection ---
     # All warm-start / heuristic / completeness-guard injections on this
@@ -6911,7 +6919,7 @@ def solve_model(
     # a side channel injecting directly would bypass the user's
     # ``lazy_constraints`` / ``incumbent_callback`` contract and could report a
     # vetoed / cut-off point as the final ``optimal`` incumbent. Reads
-    # ``_gap_certified`` at call time so the surfaced ``best_bound`` honors the
+    # ``_cert.gap_certified`` at call time so the surfaced ``best_bound`` honors the
     # A1 taint gate exactly like the batch path.
     def _inject_incumbent(x_cand, obj_cand):
         if (lazy_constraints is not None or incumbent_callback is not None) and (
@@ -6926,7 +6934,7 @@ def solve_model(
                 lazy_constraints=lazy_constraints,
                 incumbent_callback=incumbent_callback,
                 _cut_pool=_cut_pool,
-                tree_bound_valid=_gap_certified,
+                tree_bound_valid=_cert.gap_certified,
             )
         ):
             return False
@@ -6944,24 +6952,24 @@ def solve_model(
     # the unproven subtree was removed from it), and NOT nothing (discarding the
     # whole tree bound under-reports: nvs05 reported 1.348 where the search had
     # proven 4.87 — DECOMP-1 §3, "decertify-and-discard").
-    #   _taint_floor_internal: running min (internal minimization sense) of the
+    #   taint_floor_internal: running min (internal minimization sense) of the
     #     pop-time bounds of every node fathomed without a rigorous proof. +inf
     #     while no such node exists. A -inf floor (root fathomed non-rigorously,
     #     or a node never bounded) makes the recovery below discard the tree
     #     bound — exactly the pre-fix conservative behavior.
-    #   _tree_bound_poisoned: True when a possibly-INVALID bound value entered
+    #   tree_bound_poisoned: True when a possibly-INVALID bound value entered
     #     the tree itself (convex batch node whose non-KKT objective was kept as
     #     its bound, roadmap P0.3). Then no frontier arithmetic is trustworthy
     #     and the tree bound is discarded wholesale, as before.
-    _taint_floor_internal = np.inf
-    _tree_bound_poisoned = False
-    #   _convex_bound_untrusted: True when a convex node's NLP objective was not
+    _cert.taint_floor_internal = np.inf
+    _cert.tree_bound_poisoned = False
+    #   convex_bound_untrusted: True when a convex node's NLP objective was not
     #     a trusted (KKT) lower bound (C-13 serial / P0.3 batch). The node's own
     #     bound was abstained or poisoned, but — unlike a sentinel fathom — there
     #     is no pop-time floor re-representing what the certification would rest
     #     on, so the SPATIAL-CERT terminal accounting below must never re-earn
     #     certification over this cause.
-    _convex_bound_untrusted = False
+    _cert.convex_bound_untrusted = False
 
     # --- Soundness (C-1): distinguish a PROVEN-infeasible fathom from a merely
     # non-rigorous one, exactly as ``_solve_nlp_bb`` does with
@@ -6976,7 +6984,7 @@ def solve_model(
     # "infeasible" would be a false certificate (the worst-class error). Set by a
     # single authoritative per-batch sweep below (any sentinel-without-proof node)
     # and consumed in the finalize else-branch.
-    _nonrigorous_fathom = False
+    _cert.nonrigorous_fathom = False
     # #467 sub-bug #3: set True when the ROOT batch (iteration 0 — the whole
     # feasible region) is rigorously proven infeasible (every root node carries a
     # ``node_infeasible_mask`` empty-box / empty-relaxation certificate — the same
@@ -6986,7 +6994,7 @@ def solve_model(
     # discards such an incumbent (unless it is itself rigorously feasible, which
     # would mean the root proof over-tightened — then the incumbent stands and no
     # false ``infeasible`` is emitted).
-    _root_rigorously_infeasible = False
+    _cert.root_rigorously_infeasible = False
 
     # Sense-derived negation flag for the internal (minimization) B&B. Unlike
     # ``_mc.negate`` below — which is only assigned correctly inside the
@@ -7089,7 +7097,7 @@ def solve_model(
     # bound than the cut-less tree path (nvs19: -1156 vs the McCormick -88237);
     # captured here so the final bound / certification can use it instead of
     # discarding it. ``None`` when no pool is separated.
-    _root_pool_bound = None
+    _cert.root_pool_bound = None
 
     if _mc.mode == "auto":
         # The McCormick "nlp" objective bound is a *valid* dual bound only when
@@ -7518,7 +7526,7 @@ def solve_model(
                                     and _pool_res.lower_bound is not None
                                     and np.isfinite(_pool_res.lower_bound)
                                 ):
-                                    _root_pool_bound = float(_pool_res.lower_bound)
+                                    _cert.root_pool_bound = float(_pool_res.lower_bound)
                                 logger.info(
                                     "Root PSD cut pool: %d cuts (of %d separated, "
                                     "%d rounds), root bound %s — inherited at every node",
@@ -7608,7 +7616,7 @@ def solve_model(
                                     and _pool_res.lower_bound is not None
                                     and np.isfinite(_pool_res.lower_bound)
                                 ):
-                                    _root_pool_bound = float(_pool_res.lower_bound)
+                                    _cert.root_pool_bound = float(_pool_res.lower_bound)
                                 logger.info(
                                     "Root cut pool (general spatial): %d cuts (of %d "
                                     "separated), inherited at every fast-path node",
@@ -8026,7 +8034,7 @@ def solve_model(
     # iteration 0), before any branching lifts the frontier. ``root_gap`` is
     # derived from these at result-build time against the final incumbent.
     _root_time: Optional[float] = None
-    _root_glb_internal: Optional[float] = None
+    _cert.root_glb_internal = None
 
     # Per-node reduction timers (cert:T0.3). Accumulated across the spatial B&B
     # loop and surfaced on SolveResult.solver_stats. Pure instrumentation.
@@ -8647,9 +8655,9 @@ def solve_model(
             # itself is no longer trustworthy — poison the tree bound (full
             # discard at result build; the taint-floor recovery must not apply).
             if _model_is_convex and not bool(np.all(_batch_trusted)):
-                _gap_certified = False
-                _tree_bound_poisoned = True
-                _convex_bound_untrusted = True
+                _cert.gap_certified = False
+                _cert.tree_bound_poisoned = True
+                _cert.convex_bound_untrusted = True
             # Constraint feasibility post-check for batch IPM results.
             # When the IPM solution violates constraints (e.g. due to hitting
             # the iteration limit), mark the node as infeasible (SENTINEL).
@@ -8911,7 +8919,7 @@ def solve_model(
                         # was locally infeasible. Decertify the gap so the
                         # result downgrades to "feasible" instead of claiming
                         # a certified optimum.
-                        _gap_certified = False
+                        _cert.gap_certified = False
         else:
             result_ids = np.empty(n_batch, dtype=np.int64)
             result_lbs = np.empty(n_batch, dtype=np.float64)
@@ -9303,7 +9311,7 @@ def solve_model(
                     elif not np.isfinite(result_lbs[i]):
                         result_lbs[i] = _INFEASIBILITY_SENTINEL
                     elif _nonrigorous_sentinel_fathom(result_lbs[i], node_infeasible_mask[i]):
-                        _gap_certified = False
+                        _cert.gap_certified = False
 
                 # C-13: convex node whose NLP objective was NOT a valid lower bound
                 # (non-KKT ITERATION_LIMIT, unrescued by the polish-retry).  The
@@ -9317,8 +9325,8 @@ def solve_model(
                 # conservative guard the batch path applies via _batch_trusted
                 # (roadmap P0.3) and that _solve_nlp_bb applies on ITERATION_LIMIT.
                 if _model_is_convex and not node_infeasible_mask[i] and not _serial_nlp_trusted:
-                    _gap_certified = False
-                    _convex_bound_untrusted = True
+                    _cert.gap_certified = False
+                    _cert.convex_bound_untrusted = True
 
             # TX1: adaptive back-off update. Only when the strided node-NLP fired
             # this batch (gated regime): if it did NOT improve the incumbent for
@@ -9371,7 +9379,7 @@ def solve_model(
         # B2-FIX (task #89): every such node also contributes its POP-TIME lower
         # bound (still stored in the Rust pool — import_results has not run yet
         # for this batch, so ``node_lower_bounds`` returns the bound the node was
-        # popped with, proved at its parent) to ``_taint_floor_internal``. That
+        # popped with, proved at its parent) to ``_cert.taint_floor_internal``. That
         # floor keeps the unproven subtree represented in the reported global
         # dual bound after the sentinel import removes it from the frontier,
         # instead of discarding the entire tree bound (DECOMP-1
@@ -9391,13 +9399,15 @@ def solve_model(
                     _ubc = np.clip(np.asarray(batch_ub[i], dtype=np.float64), -_SPC, _SPC)
                     result_sols[i] = 0.5 * (_lbc + _ubc)
                     continue
-                _nonrigorous_fathom = True
+                _cert.nonrigorous_fathom = True
                 if _taint_pop_lbs is None:
                     _taint_pop_lbs = np.asarray(
                         tree.node_lower_bounds(np.asarray(result_ids, dtype=np.int64)),
                         dtype=np.float64,
                     )
-                _taint_floor_internal = min(_taint_floor_internal, float(_taint_pop_lbs[i]))
+                _cert.taint_floor_internal = min(
+                    _cert.taint_floor_internal, float(_taint_pop_lbs[i])
+                )
                 logger.debug(
                     "Non-rigorous sentinel fathom at node %d (iteration %d): "
                     "pop-time bound %.6g kept as a floor of the reported global bound",
@@ -9421,15 +9431,15 @@ def solve_model(
         # certify it ``optimal`` (ex7_3_6: FBBT proves the root empty by ~2e-6 > the
         # 1e-6 FBBT tolerance, yet a pump point at ~1.2e-4 residual was certified).
         # Gated on iteration 0 and n_batch >= 1 so it reflects the root, not a deep
-        # subtree; ``_nonrigorous_fathom`` guarantees only rigorous certificates are
+        # subtree; ``_cert.nonrigorous_fathom`` guarantees only rigorous certificates are
         # trusted for the eventual ``infeasible`` verdict.
         if (
             iteration == 0
             and n_batch >= 1
             and bool(np.all(node_infeasible_mask[:n_batch]))
-            and not _nonrigorous_fathom
+            and not _cert.nonrigorous_fathom
         ):
-            _root_rigorously_infeasible = True
+            _cert.root_rigorously_infeasible = True
 
         # --- Objective-gating priority branching (issue #184) ---
         # The global dual bound is the minimum over the open frontier, so it stays
@@ -10365,7 +10375,7 @@ def solve_model(
                 lazy_constraints=lazy_constraints,
                 incumbent_callback=incumbent_callback,
                 _cut_pool=_cut_pool,
-                tree_bound_valid=_gap_certified,
+                tree_bound_valid=_cert.gap_certified,
             )
             # #748: a callback rejection sentinels a FEASIBLE node without proving
             # its region empty of acceptable points — a non-rigorous fathom. It is
@@ -10376,11 +10386,11 @@ def solve_model(
             # non-rigorous exhaustion to "unknown" (feasibility undetermined)
             # instead (the tight-integer-root pure-MILP case where the callback
             # rejects the LP-optimal root and nothing remains to branch). It does
-            # NOT touch _taint_floor_internal, so a solve that DOES find an
+            # NOT touch _cert.taint_floor_internal, so a solve that DOES find an
             # accepted incumbent and closes its frontier gap still certifies as
             # before — only the no-incumbent false-infeasible is corrected.
             if _n_cb_rejected:
-                _nonrigorous_fathom = True
+                _cert.nonrigorous_fathom = True
 
         # Convex-objective node bound (applied at the single point every node's
         # bound funnels through, so it covers all upstream paths). When the
@@ -10658,7 +10668,7 @@ def solve_model(
                     model._objective is not None and model._objective.sense == _ObjSense.MAXIMIZE
                 )
                 _cb_bound = _certified_callback_bound(
-                    stats_snap.get("global_lower_bound"), _gap_certified, _cb_is_max
+                    stats_snap.get("global_lower_bound"), _cert.gap_certified, _cb_is_max
                 )
                 ctx = CallbackContext(
                     node_count=stats_snap["total_nodes"],
@@ -10683,7 +10693,7 @@ def solve_model(
             _root_time = time.perf_counter() - t_start
             _root_glb_snap = tree.stats().get("global_lower_bound")
             if _root_glb_snap is not None and np.isfinite(_root_glb_snap):
-                _root_glb_internal = float(_root_glb_snap)
+                _cert.root_glb_internal = float(_root_glb_snap)
 
         # --- Root branch-and-reduce fixpoint (cert:T2.3, flag default OFF) ---
         # At the END of iteration 0 the root heuristics have run, so an incumbent
@@ -10719,8 +10729,8 @@ def solve_model(
                 # nodes). When there is no incumbent yet OR no root bound, run it
                 # (the structural/finitizing value can still help).
                 _rf_gap_ok = True
-                if _rf_cutoff is not None and _root_glb_internal is not None:
-                    _rf_lo = float(_root_glb_internal)
+                if _rf_cutoff is not None and _cert.root_glb_internal is not None:
+                    _rf_lo = float(_cert.root_glb_internal)
                     if np.isfinite(_rf_lo):
                         _rf_rel_gap = abs(_rf_cutoff - _rf_lo) / (1.0 + abs(_rf_cutoff))
                         _rf_gap_ok = _rf_rel_gap > _ROOT_FIXPOINT_MIN_GAP
@@ -10849,7 +10859,7 @@ def solve_model(
     # rigorously feasible, the root proof must have over-tightened: keep the
     # incumbent and NEVER report ``infeasible`` (guards the worst-class error, a
     # false infeasible on a truly-feasible model).
-    if incumbent is not None and _root_rigorously_infeasible:
+    if incumbent is not None and _cert.root_rigorously_infeasible:
         # Verify against the ORIGINAL (pre-reform) constraints. The factorable
         # reform rewrites the model in terms of lifted aux variables; an incumbent
         # can satisfy every reformed constraint (the aux defining equalities plus
@@ -10994,14 +11004,14 @@ def solve_model(
         # require it (not the bare `is_finished()`) whenever the bound is unresolved.
         _bound_unresolved = bool(tree.stats().get("bound_unresolved", False))
         if _bound_unresolved:
-            _gap_certified = False
+            _cert.gap_certified = False
 
         # SPATIAL-CERT (gap-closing plan P0; MILP-driver parity with #604): a
         # non-rigorous sentinel fathom decertifies the gap mid-loop (issue #27a,
         # sites above), but the removed subtree is not unaccounted — its POP-TIME
         # lower bound (proved at an ancestor's rigorous relaxation solve; a bound
         # over a fixed box stays valid forever) is accumulated in
-        # ``_taint_floor_internal`` by the authoritative C-1 sweep (#603). The
+        # ``_cert.taint_floor_internal`` by the authoritative C-1 sweep (#603). The
         # rigorous global dual bound of such a tree is therefore
         #     min(surviving-frontier bound, taint floor)
         # — every term of which is a *proved* bound. When that floor-inclusive
@@ -11020,8 +11030,8 @@ def solve_model(
         #
         # Certification is re-earned here ONLY when:
         #   * the sole decertification cause was sentinel fathoms — an untrusted
-        #     bound VALUE in the tree (``_tree_bound_poisoned``), an untrusted
-        #     convex node bound (``_convex_bound_untrusted``), or an unresolved
+        #     bound VALUE in the tree (``_cert.tree_bound_poisoned``), an untrusted
+        #     convex node bound (``_cert.convex_bound_untrusted``), or an unresolved
         #     -inf pin (``_bound_unresolved``) can never re-earn: those leave no
         #     rigorous per-removal floor to account with;
         #   * the floor-inclusive bound is finite and non-sentinel (a -inf floor
@@ -11035,10 +11045,10 @@ def solve_model(
         # late re-certification block: a taint-recovered bound on a solve whose
         # floor-inclusive gap did NOT close still never upgrades to "optimal".
         if (
-            not _gap_certified
-            and _nonrigorous_fathom
-            and not _tree_bound_poisoned
-            and not _convex_bound_untrusted
+            not _cert.gap_certified
+            and _cert.nonrigorous_fathom
+            and not _cert.tree_bound_poisoned
+            and not _cert.convex_bound_untrusted
             and not _bound_unresolved
         ):
             _glb_int = stats.get("global_lower_bound")
@@ -11049,19 +11059,19 @@ def solve_model(
                 and _inc_int is not None
                 and np.isfinite(_inc_int)
             ):
-                _rig_int = min(float(_glb_int), _taint_floor_internal)
+                _rig_int = min(float(_glb_int), _cert.taint_floor_internal)
                 if (
                     np.isfinite(_rig_int)
                     and abs(_rig_int) < _SENTINEL_THRESHOLD
                     and _gap_values_converged(float(_inc_int), _rig_int, gap_tolerance)
                 ):
-                    _gap_certified = True
+                    _cert.gap_certified = True
                     _taint_rig_bound_internal = _rig_int
 
         search_closed = _gap_converged(tree, gap_tolerance) or (
             tree.is_finished() and not _bound_unresolved
         )
-        if search_closed and _gap_certified:
+        if search_closed and _cert.gap_certified:
             status = "optimal"
         else:
             status = "feasible"
@@ -11074,11 +11084,11 @@ def solve_model(
             # incumbent there is no gap to certify, and a leftover tree bound
             # describes an unexplored search, not a proven optimum — a certified
             # exit here would claim optimality with no solution at all.
-            _gap_certified = False
+            _cert.gap_certified = False
         elif wall_time >= time_limit:
             status = "time_limit"
-            _gap_certified = False
-        elif _nonrigorous_fathom:
+            _cert.gap_certified = False
+        elif _cert.nonrigorous_fathom:
             # C-1: the tree exhausted with no incumbent, but at least one node was
             # fathomed on a NON-rigorous failure (its local NLP failed / diverged /
             # returned a constraint-violating iterate and it was sentinelled with no
@@ -11090,19 +11100,19 @@ def solve_model(
             # "unknown" instead, exactly as the _solve_nlp_bb path does with
             # _unconverged_fathom. Conservative by design: soundness over capability.
             status = "unknown"
-            _gap_certified = False
+            _cert.gap_certified = False
         elif _debug_quit:
             # Interactive debugger `quit`: the user interrupted the search, so
             # the tree is NOT exhausted and neither infeasibility nor optimality
             # was proven (a false "infeasible" here is the worst-class error).
             # Report "unknown", uncertified.
             status = "unknown"
-            _gap_certified = False
+            _cert.gap_certified = False
         else:
             # Tree exhausted with no feasible node and every fathom was a valid
             # certificate (empty McCormick/LP relaxation over a finite box or
             # SolveStatus.INFEASIBLE): infeasibility *is* a certified conclusion, so
-            # leave _gap_certified untouched.
+            # leave _cert.gap_certified untouched.
             status = "infeasible"
 
     # Interactive debugger: terminal checkpoint. Fired after the status
@@ -11157,16 +11167,16 @@ def solve_model(
     # Separate the two things the validity flag conflates: (1) the tree bound is
     # *untainted* — no node was fathomed without a soundness proof, so the frontier
     # minimum is a valid global dual bound — vs (2) the gap is *closed* (optimality).
-    # ``_gap_certified`` here still reflects (1); the feasible-reset below clears it
+    # ``_cert.gap_certified`` here still reflects (1); the feasible-reset below clears it
     # for (2). A budget/node-limited feasible exit does not close the gap, but its
     # untainted tree bound is still the best rigorous dual bound we have and must NOT
     # be dropped to None (which forced the far weaker root-relaxation fallback, #138).
-    _tree_bound_valid = _gap_certified
+    _tree_bound_valid = _cert.gap_certified
     if status == "feasible":
-        _gap_certified = False
+        _cert.gap_certified = False
 
     _bound_from_taint_recovery = False
-    if not _gap_certified:
+    if not _cert.gap_certified:
         gap_val = None
         # Keep the untainted tree bound on a feasible exit; recompute its gap. Only
         # a tainted or non-finite tree bound is discarded (then the root fallback
@@ -11179,10 +11189,10 @@ def solve_model(
             bound_val = None
             # B2-FIX (task #89): decertify-and-discard repair. The tree bound was
             # decertified, but unless a possibly-invalid bound VALUE entered the
-            # tree (``_tree_bound_poisoned``), every number in the frontier is
+            # tree (``_cert.tree_bound_poisoned``), every number in the frontier is
             # still a rigorous per-subtree bound — the only unsound step was
             # *removing* sentinel-fathomed nodes without proof. Those subtrees
-            # are re-represented by ``_taint_floor_internal`` (the min of their
+            # are re-represented by ``_cert.taint_floor_internal`` (the min of their
             # pop-time bounds, each proved at the node's parent), so
             #   min(frontier bound, taint floor)
             # is a rigorous global dual bound: the frontier term covers every
@@ -11191,7 +11201,7 @@ def solve_model(
             # proofs stand). Report it instead of discarding the search's proof
             # wholesale (DECOMP-1: nvs05 reported 1.348 where the tree had
             # proved ~4.87). Stays UNCERTIFIED: the gap is recomputed for
-            # honesty but ``_gap_certified`` remains False and the
+            # honesty but ``_cert.gap_certified`` remains False and the
             # re-certification block below is gated off for this bound — a
             # tainted tree never upgrades to "optimal" via its own recovered
             # bound (issue #27a's contract), only via an independently rigorous
@@ -11203,8 +11213,8 @@ def solve_model(
             # no floor entry, so the floor alone would over-report. -inf is then
             # the honest frontier value and the recovery must stand down.
             _glb_int = stats["global_lower_bound"]
-            if not _tree_bound_poisoned and _glb_int is not None and np.isfinite(_glb_int):
-                _rig_int = min(_taint_floor_internal, float(_glb_int))
+            if not _cert.tree_bound_poisoned and _glb_int is not None and np.isfinite(_glb_int):
+                _rig_int = min(_cert.taint_floor_internal, float(_glb_int))
                 if np.isfinite(_rig_int) and abs(_rig_int) < _SENTINEL_THRESHOLD:
                     bound_val = (
                         -_rig_int if model._objective.sense == ObjectiveSense.MAXIMIZE else _rig_int
@@ -11222,12 +11232,12 @@ def solve_model(
     # fallback recomputes from scratch — it is both stronger and free. If it meets
     # the incumbent, the re-certification below upgrades the exit to "optimal".
     if (
-        _root_pool_bound is not None
-        and np.isfinite(_root_pool_bound)
+        _cert.root_pool_bound is not None
+        and np.isfinite(_cert.root_pool_bound)
         and model._objective.sense == ObjectiveSense.MINIMIZE
-        and (bound_val is None or not np.isfinite(bound_val) or _root_pool_bound > bound_val)
+        and (bound_val is None or not np.isfinite(bound_val) or _cert.root_pool_bound > bound_val)
     ):
-        bound_val = _root_pool_bound
+        bound_val = _cert.root_pool_bound
         # The pool bound is rigorous independently of the tree's taint, so it
         # may re-certify below exactly as before (B2-FIX gate does not apply).
         _bound_from_taint_recovery = False
@@ -11317,7 +11327,7 @@ def solve_model(
         # bounds (root pool / root relaxation) still re-certify as before.
         and not _bound_from_taint_recovery
     ):
-        _gap_certified = True
+        _cert.gap_certified = True
         status = "optimal"
 
     # SOUNDNESS INVARIANT (bound <= incumbent). A valid dual bound never crosses a
@@ -11357,14 +11367,14 @@ def solve_model(
     # the final incumbent, using the same floored abs/rel convention as ``gap``.
     root_bound_val: Optional[float] = None
     root_gap_val: Optional[float] = None
-    _root_internal = _root_glb_internal
+    _root_internal = _cert.root_glb_internal
     if (
-        _root_pool_bound is not None
-        and np.isfinite(_root_pool_bound)
+        _cert.root_pool_bound is not None
+        and np.isfinite(_cert.root_pool_bound)
         and model._objective.sense == ObjectiveSense.MINIMIZE
-        and (_root_internal is None or _root_pool_bound > _root_internal)
+        and (_root_internal is None or _cert.root_pool_bound > _root_internal)
     ):
-        _root_internal = _root_pool_bound
+        _root_internal = _cert.root_pool_bound
     if _root_internal is not None and np.isfinite(_root_internal):
         root_bound_val = -_root_internal if _is_max else _root_internal
         if obj_val is not None and np.isfinite(obj_val):
@@ -11428,7 +11438,7 @@ def solve_model(
         root_gap=root_gap_val,
         root_time=_root_time,
         solver_stats=_solver_stats or None,
-        gap_certified=_gap_certified,
+        gap_certified=_cert.gap_certified,
         subnlp_calls=_heur.subnlp_calls,
         subnlp_feasible=_heur.subnlp_feasible,
         subnlp_incumbent_updates=_heur.subnlp_incumbent_updates,
@@ -13046,7 +13056,7 @@ def _solve_nlp_bb(
         else:
             # Tree exhausted with no feasible node and every fathom was a valid
             # certificate (FBBT-empty box or SolveStatus.INFEASIBLE): infeasibility
-            # *is* a certified conclusion, so leave _gap_certified untouched.
+            # *is* a certified conclusion, so leave _cert.gap_certified untouched.
             status = "infeasible"
 
     # Interactive debugger: terminal checkpoint. Fired after the status
@@ -17058,7 +17068,7 @@ def _solve_milp_bb(
             _gap_certified = False
         else:
             # Tree exhausted with no feasible node: infeasibility *is* a certified
-            # conclusion, so leave _gap_certified untouched.
+            # conclusion, so leave _cert.gap_certified untouched.
             status = "infeasible"
 
     # Interactive debugger: terminal checkpoint. Fired after the status
@@ -17560,7 +17570,7 @@ def _solve_miqp_bb(
             _gap_certified = False
         else:
             # Tree exhausted with no feasible node: infeasibility *is* a certified
-            # conclusion, so leave _gap_certified untouched.
+            # conclusion, so leave _cert.gap_certified untouched.
             status = "infeasible"
 
     # Interactive debugger: terminal checkpoint. Fired after the status

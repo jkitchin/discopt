@@ -54,6 +54,7 @@ from dataclasses import dataclass
 from typing import Any
 
 __all__ = [
+    "DualBoundCertificateState",
     "LazyStallSeparationState",
     "McCormickRelaxationState",
     "PerNodeOBBTBudget",
@@ -396,3 +397,100 @@ class RootCutPoolState:
     #: Resolved PSD separation round budget (kwarg ``root_cut_rounds`` beating
     #: ``DISCOPT_ROOT_CUT_ROUNDS``); ``0`` disables root PSD separation.
     root_rounds: int = 0
+
+
+@dataclass(slots=True)
+class DualBoundCertificateState:
+    """Whether the reported dual bound may be called *proven*, and what it rests on.
+
+    .. rubric:: This holder is the one where a mistake is a wrong answer
+
+    Every other class in this module carries accounting or configuration; a bug in
+    them costs performance or a mislabelled statistic. These eight decide whether
+    ``SolveResult.gap_certified`` is ``True`` and whether a status reads
+    ``"optimal"``, ``"infeasible"`` or ``"unknown"``. A solver's product is its
+    certificate (CLAUDE.md §1), so this group is threaded in its own commit behind
+    its own Regime-N panel, sharing neither with anything else.
+
+    .. rubric:: Why the group is exactly these eight, and why they are one object
+
+    They are not merely co-located: the SPATIAL-CERT terminal block evaluates them
+    as a **single conjunction**. Certification is re-earned after a non-rigorous
+    fathom only when ``not gap_certified and nonrigorous_fathom and not
+    tree_bound_poisoned and not convex_bound_untrusted`` and the floor-inclusive
+    bound ``min(frontier, taint_floor_internal)`` closes the gap. Four flags and a
+    floor, read at one ``if``. Leaving some of them loose locals while threading
+    the rest is what would genuinely split the decision; carrying all of them
+    together does not.
+
+    The three bound values keep company with the flags for the same reason:
+    :attr:`root_pool_bound` and :attr:`root_glb_internal` are the *independently
+    rigorous* bounds the terminal block is allowed to re-certify from (a bound
+    recovered from a tainted tree is reported but may never upgrade the exit —
+    issue #27a's contract), and :attr:`root_rigorously_infeasible` is what lets a
+    within-tolerance primal-heuristic point be discarded instead of certified.
+
+    .. rubric:: ``slots=True`` earns its keep here specifically
+
+    As loose locals, ``_gap_certifed = False`` (one letter short) binds a *new*
+    local and leaves the real flag ``True`` — a silent false ``optimal``, in a
+    function with 13 separate stores to this flag across three regions. On a
+    ``slots=True`` dataclass the same typo raises ``AttributeError``. That is the
+    concrete soundness argument for the migration, not a style preference.
+
+    .. rubric:: Deliberately NOT frozen
+
+    ``gap_certified`` is rebound 13 times; ``freeze`` would be false on its face.
+    ``test_root_config_is_the_only_frozen_holder`` pins the asymmetry.
+
+    .. rubric:: What stays a loose local, and why that is not a split
+
+    ``_bound_unresolved``, ``_taint_rig_bound_internal``, ``_tree_bound_valid`` and
+    ``_glb_int`` participate in the same terminal decision but are bound **and**
+    read entirely inside the ``results`` region (census: ``crosses_regions =
+    False``). The census's criterion for this migration is *crossing* a would-be
+    module boundary; a name that never crosses one is not part of the implicit
+    closure a carve has to turn into a parameter list, so threading it would add
+    an indirection and buy nothing. They are distinct facts read by one predicate,
+    not a second copy of a fact this holder owns.
+    """
+
+    #: Whether the search's gap may be reported as *proven*. Starts ``True`` and is
+    #: cleared by every soundness event (sentinel fathom, untrusted convex node
+    #: bound, unresolved ``-inf`` pin, resource-limited exit); re-earned only by the
+    #: SPATIAL-CERT block or by an independently rigorous bound meeting the
+    #: incumbent. Surfaced as ``SolveResult.gap_certified``.
+    gap_certified: bool = True
+    #: True once any node was fathomed WITHOUT an infeasibility proof (its local NLP
+    #: merely failed). Such a fathom does not prove its subtree empty, so a tree
+    #: that later exhausts with no incumbent must report ``"unknown"``, never
+    #: ``"infeasible"`` — a false infeasible is the worst-class error.
+    nonrigorous_fathom: bool = False
+    #: Running minimum, in the internal minimization sense, of the pop-time lower
+    #: bounds of every non-rigorously fathomed node. ``+inf`` while none exists.
+    #: Each term was proved at the node's parent over a fixed box, so
+    #: ``min(frontier, taint_floor_internal)`` is a rigorous global dual bound for a
+    #: tainted tree — the B2-FIX repair for "decertify-and-discard".
+    taint_floor_internal: float = float("inf")
+    #: True when a possibly-INVALID bound VALUE entered the tree itself (a convex
+    #: batch node whose non-KKT objective was kept as its bound). Then no frontier
+    #: arithmetic is trustworthy and the tree bound is discarded wholesale — the
+    #: taint-floor recovery must NOT apply.
+    tree_bound_poisoned: bool = False
+    #: True when a convex node's NLP objective was not a trusted (KKT) lower bound.
+    #: Unlike a sentinel fathom this leaves no pop-time floor to account with, so
+    #: the terminal block must never re-earn certification over this cause.
+    convex_bound_untrusted: bool = False
+    #: True when the ROOT batch — the whole feasible region — was rigorously proven
+    #: infeasible. A soft incumbent accepted only within tolerance then lies inside
+    #: a region the search proved empty and must not be certified ``"optimal"``.
+    root_rigorously_infeasible: bool = False
+    #: Snapshot of the tree's global lower bound in internal (minimization) sense,
+    #: taken at the root; reported as ``SolveResult.root_bound`` and used as the
+    #: root-fixpoint reduce cutoff. ``None`` before the snapshot is taken.
+    root_glb_internal: float | None = None
+    #: The dual bound the root cut-pool relaxation proves over the WHOLE feasible
+    #: region — rigorous independently of the tree's taint, so it may re-certify a
+    #: feasible exit where a taint-recovered bound may not. ``None`` when no pool
+    #: was separated.
+    root_pool_bound: float | None = None
