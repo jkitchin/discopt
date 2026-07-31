@@ -6,7 +6,11 @@
 //!
 //! Termination conditions, in order of priority:
 //!
-//! 1. A pass detected infeasibility (any bound's `is_empty()`).
+//! 1. A pass detected infeasibility — some bound is empty by more than
+//!    `FEAS_TOL` (`Interval::is_empty_beyond`). A *sub*-tolerance crossing is
+//!    rounding noise, is repaired in place, and does NOT stop the loop; the
+//!    strict `lo > hi` test that used to be here aborted the sweep spuriously
+//!    on the default path (#907).
 //! 2. The configured time budget was exhausted.
 //! 3. The configured work-unit budget was exhausted.
 //! 4. `max_iterations` sweeps completed.
@@ -22,6 +26,7 @@
 use std::time::Instant;
 
 use super::delta::{PresolveDelta, TerminationReason};
+use super::fbbt::{any_empty_beyond, repair_subtol_crossings, FEAS_TOL};
 use super::pass::{PassCategory, PresolveContext, PresolvePass};
 
 /// Tunables for one orchestrator run.
@@ -64,6 +69,13 @@ pub struct PresolveResult {
     pub iterations: u32,
     /// Why the loop stopped.
     pub terminated_by: TerminationReason,
+    /// How many sub-`FEAS_TOL` bound crossings were repaired during the run.
+    ///
+    /// Non-zero means some pass produced a formally-inverted interval that was
+    /// pure floating-point noise. Before #907 the same event aborted the whole
+    /// presolve as `Infeasible`; it is surfaced rather than silently absorbed so
+    /// that a *rising* count is visible as the numerical smell it is.
+    pub subtol_crossings_repaired: usize,
 }
 
 /// Run the fixed-point loop on `model` with the given options.
@@ -80,6 +92,7 @@ pub fn run(model: crate::expr::ModelRepr, mut opts: OrchestratorOptions) -> Pres
     let mut deltas: Vec<PresolveDelta> = Vec::new();
     let mut terminated_by = TerminationReason::IterationCap;
     let mut last_iter: u32 = 0;
+    let mut subtol_crossings_repaired: usize = 0;
 
     'outer: for sweep in 0..opts.max_iterations {
         ctx.iter = sweep;
@@ -106,7 +119,21 @@ pub fn run(model: crate::expr::ModelRepr, mut opts: OrchestratorOptions) -> Pres
                 ctx.resync_bounds_after_rewrite();
             }
 
-            if any_empty(&ctx.bounds) {
+            // #907. A bound crossing below `FEAS_TOL` is floating-point noise,
+            // not an infeasibility: two derivations of the same quantity
+            // disagreeing in their last ulps. Repair it — so no inverted
+            // interval escapes to a consumer — and keep going. Declare
+            // `Infeasible` only on a crossing that exceeds the feasibility
+            // tolerance, which is what `fbbt`, `fbbt_fp` and `probing` have
+            // always done.
+            //
+            // Measured on the in-repo corpus: the strict `lo > hi` test that
+            // used to be here aborted the sweep on `heatexch_gen3` at 8.5e-14
+            // with NO flag set, killing its presolve after 1 sweep instead of
+            // 16 — and it fired on zero instances with a crossing above
+            // `FEAS_TOL`. Every abort it produced corpus-wide was spurious.
+            subtol_crossings_repaired += repair_subtol_crossings(&mut ctx.bounds, FEAS_TOL);
+            if any_empty_beyond(&ctx.bounds, FEAS_TOL) {
                 deltas.push(delta);
                 terminated_by = TerminationReason::Infeasible;
                 break 'outer;
@@ -152,11 +179,8 @@ pub fn run(model: crate::expr::ModelRepr, mut opts: OrchestratorOptions) -> Pres
         deltas,
         iterations: last_iter,
         terminated_by,
+        subtol_crossings_repaired,
     }
-}
-
-fn any_empty(bounds: &[super::fbbt::Interval]) -> bool {
-    bounds.iter().any(|b| b.is_empty())
 }
 
 #[cfg(test)]
@@ -189,6 +213,69 @@ mod tests {
             }],
             n_vars: 1,
         }
+    }
+
+    // ── #907: a sub-FEAS_TOL crossing must not abort the presolve sweep ──
+    //
+    // The orchestrator's emptiness test used to be a strict `lo > hi`, while
+    // `fbbt`, `fbbt_fp` and `probing` all gate on `is_empty_beyond(FEAS_TOL)`.
+    // Measured on the in-repo corpus, that strict test aborted the sweep on
+    // `heatexch_gen3` at 8.5e-14 on the DEFAULT path — killing its presolve
+    // after 1 sweep instead of 16 — and fired on zero instances with a crossing
+    // above FEAS_TOL. Every abort it produced corpus-wide was spurious.
+
+    /// A pass that stamps a fixed interval onto variable 0, once.
+    struct StampPass {
+        iv: super::super::fbbt::Interval,
+        done: bool,
+    }
+
+    impl PresolvePass for StampPass {
+        fn name(&self) -> &'static str {
+            "stamp"
+        }
+        fn category(&self) -> PassCategory {
+            PassCategory::BoundsOnly
+        }
+        fn run(&mut self, ctx: &mut PresolveContext) -> PresolveDelta {
+            let mut d = PresolveDelta::empty(self.name(), ctx.iter);
+            if !self.done {
+                ctx.bounds[0] = self.iv;
+                self.done = true;
+                d.bounds_tightened = 1;
+            }
+            d
+        }
+    }
+
+    #[test]
+    fn subtol_crossing_does_not_abort_sweep_and_box_is_repaired() {
+        // The exact `heatexch_gen3` var4 crossing, on the default path.
+        let iv = super::super::fbbt::Interval::new(226.7, 226.699_999_999_999_9);
+        let opts = OrchestratorOptions::with_passes(vec![Box::new(StampPass { iv, done: false })]);
+        let result = run(trivial_model(), opts);
+
+        assert_ne!(
+            result.terminated_by,
+            TerminationReason::Infeasible,
+            "a 8.5e-14 crossing aborted the presolve — #907 regressed"
+        );
+        assert_eq!(result.subtol_crossings_repaired, 1);
+        // The returned box must not be inverted: declining to DECLARE emptiness
+        // is not enough if an inverted interval still reaches a consumer.
+        assert!(!result.bounds[0].is_formally_inverted());
+        assert!(result.bounds[0].contains(226.7));
+        assert!(result.bounds[0].contains(226.699_999_999_999_9));
+    }
+
+    /// ANTI-PERMISSIVENESS CONTROL: a crossing beyond FEAS_TOL must still abort.
+    #[test]
+    fn genuine_crossing_still_aborts_sweep() {
+        let iv = super::super::fbbt::Interval::new(1.0, 0.0); // crossing 1.0
+        let opts = OrchestratorOptions::with_passes(vec![Box::new(StampPass { iv, done: false })]);
+        let result = run(trivial_model(), opts);
+        assert_eq!(result.terminated_by, TerminationReason::Infeasible);
+        assert_eq!(result.subtol_crossings_repaired, 0);
     }
 
     #[test]

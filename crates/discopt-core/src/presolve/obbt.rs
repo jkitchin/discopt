@@ -238,7 +238,10 @@ pub fn obbt_candidates(var_bounds: &[Interval], min_width: f64) -> Vec<usize> {
         .iter()
         .enumerate()
         .filter(|(_, b)| {
-            !b.is_empty() && b.width() > min_width && b.lo.is_finite() && b.hi.is_finite()
+            !b.is_formally_inverted()
+                && b.width() > min_width
+                && b.lo.is_finite()
+                && b.hi.is_finite()
         })
         .map(|(i, _)| i)
         .collect()

@@ -154,6 +154,10 @@ def run_root_presolve(
         "iterations": raw["iterations"],
         "terminated_by": raw["terminated_by"],
         "deltas": list(raw["deltas"]),
+        # #907: sub-FEAS_TOL bound crossings repaired rather than mistaken for
+        # infeasibility. Surfaced, not absorbed — a rising count is a numerical
+        # smell, and before #907 each such event aborted the whole presolve.
+        "subtol_crossings_repaired": raw.get("subtol_crossings_repaired", 0),
     }
 
     # Synthesize legacy per-pass dicts from the delta log for backward
