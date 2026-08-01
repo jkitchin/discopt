@@ -382,11 +382,52 @@ every test and panel still passed. That is rule 6's failure mode aimed at a
 budget instead of an assertion, and it is strictly worse than the
 nondeterminism it was meant to fix.
 
-The whole wave was reverted. It is recorded here rather than deleted because
-the design is right and the obstacle is specific and fixable: the clock must
-count Rust-side node and presolve work before it can price a second. Until
-then, those gates stay wall-clock and stay enumerated in
-`python/tests/test_912_wall_budget_inventory.py`, which fails on any new one.
+The whole wave was reverted.
+
+### Attempt 2: the obstacle is pricing, not coverage — and it is fundamental
+
+The obvious diagnosis of attempt 1 was *coverage*: the clock could not see the
+Rust B&B, so instrument more. Profiling `fac2` (`cProfile`, 15 s solve) says
+otherwise about where the time is:
+
+| cost | tottime |
+|---|---|
+| `Problem.solve` (POUNCE NLP, 80 calls) | 6.94 s (14.04 s cumulative) |
+| `pounce.solve_problem_batch` (6 calls) | 6.28 s |
+| module import (`_imp.create_dynamic`) | 3.57 s |
+| `_fused_fc_array` (16 117 calls) | 1.58 s |
+
+Not Rust at all: **NLP solves**, at a boundary Python owns. Attempt 1 had
+charged them at one call site inside `subnlp` and therefore saw 5 of the 80.
+Charging at the *backend* boundary instead (`nlp_pounce.solve_nlp`,
+`nlp_native`) plus the OBBT simplex path and the convexity visit counter lifted
+the count to 85 — and the coverage ratio only from 0.13 to **0.19 geomean**
+(0.08-0.62 over 7 instances). `fac2`: 1.59 deterministic seconds against 20 s.
+
+The arithmetic says why, and it is not fixable by more instrumentation. The
+profile puts `fac2`'s NLP solves at ~86 ms each; `NOMINAL_SECONDS[NLP_SOLVE]` is
+15 ms, the geomean of a distribution measured in §2 as spanning **1.9-104 ms**.
+A fixed price per operation cannot track wall time when the per-operation cost
+varies 55x across instances — with *perfect* coverage the ratio would still be
+instance-dependent by roughly that factor.
+
+So the conclusion generalises past the clock: **a seconds-valued budget cannot
+be re-denominated in deterministic units without being re-tuned**, because the
+conversion factor is a property of the instance. There is no substitution that
+preserves a tuned constant. Every remaining gate has to be re-expressed in the
+unit natural to it — OBBT in variables or LP solves, nonlinear tightening in
+rows or passes, root cuts and PSD separation in rounds, convexity in DAG visits
+— and each re-tuned against measured consumption and validated, exactly as §4b
+did for the four primal heuristics. That is 20 calibrations, and the
+bound-changing ones (OBBT, NBT, root cuts, PSD, convexity) each need a
+differential-bound panel.
+
+Both attempts are recorded rather than deleted because the negative result is
+the useful part: it converts "convert the other 78 sites" from a mechanical
+substitution into a scoped, per-gate programme, and it rules out the shortcut
+that looks obvious from the issue text. The gates stay wall-clock and stay
+enumerated in `python/tests/test_912_wall_budget_inventory.py`, which fails on
+any new one.
 
 ## 10. Wave 2: the rest of the primal-heuristic layer
 

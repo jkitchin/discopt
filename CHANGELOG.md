@@ -47,14 +47,21 @@ The release procedure that produces these entries is documented in
 
   A **global deterministic work clock** for the remaining ~20 wall budgets
   (OBBT, nonlinear bound tightening, root cuts, PSD separation, convexity
-  classification, …) was built and then **falsified**: instrumented over the
-  Python-side primitives it advances at 0.01-0.65x wall (fac2: 0.09 deterministic
-  seconds against 15 s of real work) because Rust B&B nodes, presolve and JIT are
-  invisible to it, so re-denominating those budgets in it would have silently
-  stopped them firing. Reverted; the measurement and the prerequisite (Rust-side
-  work accounting) are recorded in the calibration doc §9. Those gates are now
-  enumerated and ratcheted by `python/tests/test_912_wall_budget_inventory.py`,
-  which fails on any new unrecorded one.
+  classification, …) was built twice and **falsified twice**, and the second
+  result is the load-bearing one. Charging the four primitives at their proper
+  boundaries — the NLP *backend* rather than one call site, which profiling fac2
+  showed was seeing 5 of its 80 solves — lifted coverage only from 0.13 to 0.19
+  of wall (fac2: 1.59 deterministic seconds against 20 s). The arithmetic says
+  why: fac2's NLP solves cost ~86 ms each against a 15 ms nominal price, drawn
+  from a 1.9-104 ms distribution, so **no fixed pricing can track wall time when
+  the per-operation cost varies 55x across instances** — even with perfect
+  coverage. A seconds-valued budget therefore cannot be re-denominated in
+  deterministic units without being re-tuned, and each remaining gate needs its
+  own natural unit, its own calibration and (for the bound-changing ones) its own
+  differential-bound panel. Both attempts reverted; measurements in the
+  calibration doc §9. The gates are enumerated and ratcheted by
+  `python/tests/test_912_wall_budget_inventory.py`, which fails on any new
+  unrecorded one.
 
   Measured on the in-repo corpus (`item912_clock_determinism_probe.py`): under
   the old gate 7 of the 22 ILS-firing instances had their extent cut by the clock
