@@ -987,8 +987,9 @@ class TestLocalBranchingBudget:
         assert calls["n"] >= 2
 
     def test_truncation_dispatches_bounded_submip(self, monkeypatch):
-        """When the enumeration cannot fit the budget but >= 2.5s remain, the
-        unexplored neighbourhood goes to the bounded sub-MIP."""
+        """When a radius round cannot fit the remaining sub-NLP budget, the
+        unexplored neighbourhood goes to the bounded sub-MIP (#912: the budget is
+        a deterministic solve count, not a predicted wall time)."""
         m = dm.Model("lb24")
         b = m.binary("b", shape=(24,))
         m.minimize(dm.sum(b))
@@ -1002,17 +1003,23 @@ class TestLocalBranchingBudget:
 
         monkeypatch.setattr(ph, "_local_branching_submip", fake_submip)
 
-        def slow_backend(evaluator, x0, options=None):
-            time.sleep(0.6)  # inflate the measured per-sub-NLP mean
+        def failing_backend(evaluator, x0, options=None):
+            # No point found. Truncation is triggered by the round's sub-NLP
+            # COUNT exceeding the remaining budget — since #912 it is no longer
+            # triggered by a measured per-sub-NLP wall mean, i.e. by how fast
+            # this machine happens to be.
             raise RuntimeError("no point")
 
         out = ph.local_branching(
             m,
             np.ones(24),
             k=2,
-            backend=slow_backend,
+            backend=failing_backend,
             submip_time_limit=8.0,
             max_binaries=30,  # force the enumeration branch (not the >12 dispatch)
+            # C(24,1)=24 fits the budget; C(24,2)=276 cannot, so radius 2 is
+            # handed to the bounded sub-MIP.
+            solve_budget=51,
         )
         assert submip_calls["n"] == 1
         assert out is not None

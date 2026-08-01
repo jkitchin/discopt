@@ -321,7 +321,7 @@ def feasibility_pump(
                     v.ub = fixed.copy()
                 offset += sz
             try:
-                nlp_result = backend(evaluator, x0, options=opts)
+                    nlp_result = backend(evaluator, x0, options=opts)
             except BaseException as exc:
                 # Some NLP backends (pounce via PyO3) raise PanicException, which
                 # is not a subclass of Exception; treat any failure as this round
@@ -1018,6 +1018,8 @@ def integer_box_search(
     integer_tol: float = 1e-5,
     feas_tol: float = 1e-6,
     time_budget: float = 4.0,
+    solve_budget: Optional[int] = None,
+    deadline: Optional[float] = None,
 ) -> Optional[tuple[np.ndarray, float]]:
     """Objective-improving integer *box* search around an incumbent.
 
@@ -1042,9 +1044,20 @@ def integer_box_search(
     further by each variable's own ``[lb, ub]``), every returned point is
     subnlp-verified feasible, and the caller injects it only on strict
     improvement — so the dual bound and certification are untouched.
+
+    **Determinism (issue #912).** Which cells get enumerated is bounded by
+    ``solve_budget`` (one sub-NLP per cell), not by a wall clock, so the search
+    stops at the same cell on every machine. ``deadline`` is the caller's
+    ``time_limit`` backstop. ``solve_budget=0`` restores the legacy
+    ``time_budget`` wall gate.
     """
     import time
 
+    # As in ``one_hot_swap_search``: a non-positive ``time_budget`` is the caller
+    # saying there is no budget at all, and #912's deterministic cell budget must
+    # not override that.
+    if float(time_budget) <= 0.0:
+        return None
     int_mask = _get_integer_mask(model)
     int_idx = np.where(int_mask)[0]
     n_int = int(int_idx.size)
@@ -1098,10 +1111,23 @@ def integer_box_search(
         key=lambda c: (cheby(c), sum(abs(c[k] - center_key[k]) for k in range(n_int))),
     )
 
-    deadline = time.perf_counter() + max(0.0, time_budget)
+    # #912: the enumeration's extent is a deterministic sub-NLP count, not a wall
+    # budget. One solve per cell and the cell list is already capped by
+    # ``max_combos``, so this only ever trims a large box — but it trims it at the
+    # same cell on every machine. ``deadline`` (the caller's ``time_limit``) stays
+    # as a backstop. Both budgets off => the legacy ``time_budget`` wall gate.
+    if solve_budget is None:
+        from discopt import solver_tuning as _st
+
+        solve_budget = max(1, round(_BOX_BUDGET_RATIO * _st.current().ils_solve_budget))
+    if int(solve_budget) > 0:
+        budget = WorkBudget({NLP_SOLVE: int(solve_budget)}, deadline=deadline)
+    else:
+        _wall = time.perf_counter() + max(0.0, time_budget)
+        budget = WorkBudget(None, deadline=_wall if deadline is None else min(_wall, deadline))
     best: Optional[tuple[np.ndarray, float]] = None
     for combo in combos:
-        if time.perf_counter() >= deadline:
+        if budget.exhausted():
             break
         if combo == center_key:
             continue  # the incumbent's own cell — nothing to improve on
@@ -1116,6 +1142,7 @@ def integer_box_search(
         seed = seed_src.copy()
         for k, j in enumerate(int_idx):
             seed[j] = float(combo[k])
+        budget.charge(NLP_SOLVE)
         found = subnlp(
             model,
             seed,
@@ -1674,11 +1701,24 @@ def _local_branching_submip(
     return cand
 
 
-# Fallback estimate (seconds) for one enumeration sub-NLP before any round has
-# been measured. The profiled sub-NLP mean on the 12-binary flay/fac class is
-# ~14 ms (bottleneck-profile-2026-07-05 §1.1); 15 ms is the conservative prior
-# used to predict a round's cost when no measurement exists yet.
-_LB_SUBNLP_PRIOR_S = 0.015
+# #912: each converted primal heuristic gets a share of the root ILS budget in
+# proportion to the wall slice it used to be given, so the deterministic budgets
+# preserve the *relative* effort the tuned wall budgets encoded. ILS had 5 s,
+# ``integer_box_search`` 4 s, ``local_branching`` a 2 s sub-MIP slice, and
+# ``one_hot_swap_search`` 1 s. Handing all four the ILS number instead was
+# measured (interleaved, 3 rounds/arm) at 1.38x wall on syn05hfsg and 1.18x on
+# fac2 for identical node counts — sound but harmful, which under CLAUDE.md §5
+# does not ship.
+_BOX_BUDGET_RATIO = 0.8  # 4 s / 5 s
+_LB_BUDGET_RATIO = 0.4  # 2 s / 5 s
+_SWAP_BUDGET_RATIO = 0.2  # 1 s / 5 s
+
+# (#912 removed ``_LB_SUBNLP_PRIOR_S``, the ~15 ms prior for one enumeration
+# sub-NLP. It existed only to convert a round's *solve count* into a predicted
+# wall time so the round could be compared against a remaining wall budget. Local
+# branching now compares the solve count against a remaining *solve* budget, so
+# there is nothing left to convert and no measured mean to drift with the
+# machine. Deleted rather than left dangling — CLAUDE.md §3, no dead constants.)
 
 # Minimum remaining budget (seconds) before it is worth dispatching the truncated
 # neighbourhood to the bounded sub-MIP. A nested ``solve_model`` re-pays a fixed
@@ -1702,6 +1742,7 @@ def local_branching(
     submip_time_limit: float = 2.0,
     submip_max_nodes: int = 1000,
     submip_gap_tolerance: float = 1e-4,
+    solve_budget: Optional[int] = None,
     deadline: Optional[float] = None,
     node_bound: Optional[float] = None,
     incumbent_obj: Optional[float] = None,
@@ -1805,10 +1846,25 @@ def local_branching(
     k = max(1, min(k, len(binary_idx)))
 
     best: Optional[tuple[np.ndarray, float]] = None
-    # Rolling mean sub-NLP wall used to predict the next round's cost. Seeded with
-    # the profiled prior; refined from every measured sub-NLP.
-    mean_subnlp_s = _LB_SUBNLP_PRIOR_S
-    n_measured = 0
+    # #912: the enumeration's extent is a deterministic sub-NLP count.
+    #
+    # This is the site where the wall clock did the most damage. The round-cost
+    # prediction used to be ``C(n, r) x mean_subnlp_s`` against ``deadline - now``
+    # — a *measured* mean wall time against a *measured* remaining wall — so which
+    # radius the enumeration reached, and therefore which neighbourhood was
+    # searched by brute force versus handed to the sub-MIP, was decided by how
+    # fast the machine happened to be running at that moment. The same quantity
+    # in solve counts (``C(n, r)`` against the remaining sub-NLP budget) answers
+    # the same question — "can I afford this round?" — as a function of the model
+    # alone. ``deadline`` stays as the ``time_limit`` backstop.
+    if solve_budget is None:
+        from discopt import solver_tuning as _st
+
+        solve_budget = max(1, round(_LB_BUDGET_RATIO * _st.current().ils_solve_budget))
+    if int(solve_budget) > 0:
+        budget = WorkBudget({NLP_SOLVE: int(solve_budget)}, deadline=effective_deadline)
+    else:
+        budget = WorkBudget(None, deadline=effective_deadline)
     # Highest radius whose full enumeration we could afford. If the budget runs
     # out mid-schedule we hand the *unexplored* radii to the bounded sub-MIP so
     # the neighbourhood is still searched, just not by brute force.
@@ -1816,24 +1872,22 @@ def local_branching(
 
     # Enumerate flip sets of size 0..k (size 0 re-evaluates the incumbent itself).
     for radius in range(k + 1):
-        # (2) Predict this round's cost and stop enumerating if it cannot fit the
-        # remaining budget. C(n, 0)=1 (re-evaluate incumbent) is always cheap and
-        # always worth doing; larger radii are gated.
-        remaining = effective_deadline - time.perf_counter()
-        if remaining <= 0.0:
+        # (2) Cost this round in sub-NLP solves and stop enumerating if it cannot
+        # fit the remaining budget. C(n, 0)=1 (re-evaluate incumbent) is always
+        # cheap and always worth doing; larger radii are gated.
+        if budget.exhausted():
             truncated_at = radius
             break
         round_calls = math.comb(len(binary_idx), radius)
-        predicted = round_calls * mean_subnlp_s
-        if radius >= 1 and predicted > remaining:
+        affordable = budget.remaining(NLP_SOLVE)
+        if radius >= 1 and affordable is not None and round_calls > affordable:
             # Cannot afford the full round; hand the rest to the bounded sub-MIP.
             truncated_at = radius
             break
 
         for flip in itertools.combinations(binary_idx, radius):
-            # (1) Poll the deadline before every sub-NLP (they are ~14 ms, so
-            # per-iteration polling is free). Never start one past the budget.
-            if time.perf_counter() >= effective_deadline:
+            # (1) Poll the budget before every sub-NLP. Never start one past it.
+            if budget.exhausted():
                 truncated_at = radius
                 break
             seed = x_inc.copy()
@@ -1841,7 +1895,7 @@ def local_branching(
                 seed[i] = incumbent_bits[i]
             for i in flip:
                 seed[i] = 1.0 - incumbent_bits[i]
-            _t0 = time.perf_counter()
+            budget.charge(NLP_SOLVE)
             found = subnlp(
                 model,
                 seed,
@@ -1851,9 +1905,6 @@ def local_branching(
                 integer_tol=integer_tol,
                 feas_tol=feas_tol,
             )
-            # Refine the rolling mean from the measured sub-NLP wall.
-            n_measured += 1
-            mean_subnlp_s += (time.perf_counter() - _t0 - mean_subnlp_s) / n_measured
             if found is not None and (best is None or found[1] < best[1]):
                 best = found
         else:
@@ -1955,6 +2006,7 @@ def one_hot_swap_search(
     max_restarts: int = 30,
     max_passes: int = 40,
     time_budget: float = 1.0,
+    eval_budget: Optional[int] = None,
     deadline: Optional[float] = None,
     seed: int = 0,
 ) -> Optional[tuple[np.ndarray, float]]:
@@ -1984,6 +2036,12 @@ def one_hot_swap_search(
     only a re-verified, strictly-improving incumbent is proposed; the dual bound
     and certificate are never touched). Returns ``(x, obj)`` or ``None``.
     """
+    # A non-positive ``time_budget`` is the caller saying "there is no budget at
+    # all", not "use the default": honour it in both arms. #912 replaced the wall
+    # gate with an evaluation count, which would otherwise have quietly turned
+    # ``time_budget=0`` into a full-effort search.
+    if float(time_budget) <= 0.0:
+        return None
     int_mask = _get_integer_mask(model)
     if not np.any(int_mask):
         return None
@@ -2016,17 +2074,31 @@ def one_hot_swap_search(
             x[int(group_arr[gi, int(assign[gi])])] = 1.0
         return x
 
+    # #912: this descent is pure objective evaluation (no sub-solve), so its
+    # extent is an evaluation count. A wall budget here made the swap sequence —
+    # and therefore the incumbent — a function of machine speed. ``deadline`` (the
+    # caller's ``time_limit``) remains as the backstop; ``eval_budget=0`` restores
+    # the legacy ``time_budget`` wall gate.
+    if eval_budget is None:
+        from discopt import solver_tuning as _st
+
+        eval_budget = max(1, round(_SWAP_BUDGET_RATIO * _st.current().ils_eval_budget))
+    if int(eval_budget) > 0:
+        budget = WorkBudget({EVAL: int(eval_budget)}, deadline=deadline)
+    else:
+        t_end = time.perf_counter() + max(0.0, float(time_budget))
+        if deadline is not None and np.isfinite(deadline):
+            t_end = min(t_end, float(deadline))
+        budget = WorkBudget(None, deadline=t_end)
+
     def _obj(assign: np.ndarray) -> float:
+        budget.charge(EVAL)
         return float(evaluator.evaluate_objective(_reconstruct(assign)))
 
     inc_obj = _obj(assign0)  # incumbent's own objective on the reconstructed point
 
-    t_end = time.perf_counter() + max(0.0, float(time_budget))
-    if deadline is not None and np.isfinite(deadline):
-        t_end = min(t_end, float(deadline))
-
     def _expired() -> bool:
-        return time.perf_counter() >= t_end
+        return budget.exhausted()
 
     def _descend(assign: np.ndarray) -> tuple[np.ndarray, float]:
         """First-improving swap descent to a local minimum (budget-bounded)."""

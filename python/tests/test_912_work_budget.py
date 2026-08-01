@@ -231,8 +231,11 @@ def test_legacy_wall_gate_is_the_mechanism_the_fix_removes():
     extent is decided by the clock, so a scaled (slower) machine stops the search
     earlier — the property #912 measured on gear2."""
     model = _ils_instance()
-    _, fast = _run_ils(model, eval_budget=0, solve_budget=0, alpha=1.0, time_budget=0.35)
-    _, slow = _run_ils(model, eval_budget=0, solve_budget=0, alpha=50.0, time_budget=0.35)
+    # The control's budget must comfortably cover this instance's search (measured
+    # ~0.4 s) even on a loaded machine, or both arms get cut and the comparison
+    # says nothing; the slow arm's scaling must cut it beyond any doubt.
+    _, fast = _run_ils(model, eval_budget=0, solve_budget=0, alpha=1.0, time_budget=5.0)
+    _, slow = _run_ils(model, eval_budget=0, solve_budget=0, alpha=500.0, time_budget=5.0)
     assert not fast.limits and not slow.limits, "legacy arm must be unlimited"
     assert slow.stopped_on == "deadline", (
         "the legacy arm is supposed to be cut by the clock; "

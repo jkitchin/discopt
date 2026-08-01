@@ -86,7 +86,6 @@ EVAL = "eval"
 #: (1.9-104 ms measured).
 NLP_SOLVE = "nlp_solve"
 
-
 class WorkBudget:
     """A deterministic per-kind work counter, backstopped by a wall deadline.
 
@@ -141,6 +140,17 @@ class WorkBudget:
     def spent(self, kind: str) -> int:
         """Operations of ``kind`` charged so far."""
         return self.used.get(kind, 0)
+
+    def remaining(self, kind: str) -> Optional[int]:
+        """Operations of ``kind`` still affordable, or ``None`` when unlimited.
+
+        This is the deterministic replacement for "how much time do I have
+        left?", which callers used to answer by subtracting two clock reads and
+        dividing by a *measured* mean cost — making the decision they based on it
+        (e.g. local branching's enumeration radius) a function of machine speed.
+        """
+        limit = self.limits.get(kind)
+        return None if limit is None else max(0, limit - self.used.get(kind, 0))
 
     @property
     def stopped_on(self) -> Optional[str]:

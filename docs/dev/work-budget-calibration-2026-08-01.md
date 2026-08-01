@@ -342,3 +342,99 @@ Stated plainly, because the issue asked for it:
   on seven other instances of the same class; the specific 3-vs-91-node cliff is
   taken from the issue, not re-measured here.
 
+## 9. Falsified: one global deterministic clock for every wall gate
+
+The obvious way to close the rest of #912 in one move is a process-wide
+*deterministic clock* — SCIP's "deterministic time". Count the primitives
+(constraint/objective evaluations, NLP solves, LP relaxation solves, expression
+visits), price them at measured nominal seconds, and expose
+``work_clock.now()`` as a drop-in for ``time.perf_counter()``. Every gate then
+keeps its shape and its tuned constant, and ~20 conversions become one-line
+substitutions instead of ~20 re-calibrations.
+
+It was built: clock, per-thread accounting, instrumentation on all four
+primitives, and conversion of the convexity classifier, OBBT (root and
+per-node), nonlinear bound tightening, root cuts, the Lagrangian node bounder,
+the disjunctive configuration bound, the root fixpoint, the signomial B&B, the
+integer-ratio dive, the native-seed heuristic and the PSD cut gate.
+
+**Then it was measured, and the measurement killed it.** Deterministic seconds
+against real seconds, five instances, ``time_limit=20``:
+
+| instance | wall (s) | deterministic (s) | ratio | counts |
+|---|---|---|---|---|
+| nvs21 | 10.38 | 1.25 | 0.12 | 29 423 eval, 208 lp, 53 nlp, 133 visit |
+| ex1224 | 3.81 | 2.32 | 0.61 | 8 596 eval, 181 lp, 130 nlp |
+| st_e29 | 3.57 | 2.32 | 0.65 | 8 596 eval, 181 lp, 130 nlp |
+| syn05hfsg | 20.18 | 2.85 | 0.14 | 29 274 eval, 428 lp, 130 nlp |
+| fac2 | 15.01 | **0.09** | **0.01** | 8 646 eval, 5 nlp, 0 lp |
+
+A budget written as "5 seconds" would have become 5 deterministic seconds —
+between 1.5x and **100x** more real work, varying by instance. `fac2` is the
+clean refutation: 15 s of real solving registers as 0.09 s of countable work,
+because the dominant cost is the Rust B&B tree, presolve and JIT compilation,
+none of which the Python-side clock can see.
+
+The consequence is not "slightly mis-tuned". It is that budgets which exist
+precisely to stop pathological phases — #875's 27 s nonlinear-tightening pass,
+#863's `watercontamination0202` — would have **silently stopped firing**, while
+every test and panel still passed. That is rule 6's failure mode aimed at a
+budget instead of an assertion, and it is strictly worse than the
+nondeterminism it was meant to fix.
+
+The whole wave was reverted. It is recorded here rather than deleted because
+the design is right and the obstacle is specific and fixable: the clock must
+count Rust-side node and presolve work before it can price a second. Until
+then, those gates stay wall-clock and stay enumerated in
+`python/tests/test_912_wall_budget_inventory.py`, which fails on any new one.
+
+## 10. Wave 2: the rest of the primal-heuristic layer
+
+`integer_box_search`, `one_hot_swap_search` and `local_branching` are the other
+three extent gates in the converted layer, and the last of them is the purest
+form of the bug in the whole repo: it predicted a round's cost as
+``C(n, r) x measured_mean_subnlp_seconds`` and compared it against
+``deadline - now``, so the enumeration radius — and hence which neighbourhood
+was searched by brute force versus handed to the sub-MIP — was a ratio of two
+machine measurements. All three now count operations.
+
+Cert-clean, ON vs OFF at `time_limit=60`, same 22 instances: **21 of 22 identical
+on all four fields**; the single difference is `nvs05`, which exhausts the 60 s
+limit on both arms (155 vs 99 nodes, bound 4.0992 vs 3.8054 — looser, not
+unsound) and is out of scope by the panel's own starvation rule.
+
+### The first wave-2 sizing was harmful, and the sequential panel hid it
+
+The first attempt handed all three searches the *ILS* budget. The sequential
+panel reported total wall 203.2 s → 257.8 s (+27 %), which by rule 9 is not a
+timing claim at all: the two arms ran hours apart. Interleaved, 3 rounds per arm:
+
+| instance | OFF | ON | ratio | nodes |
+|---|---|---|---|---|
+| syn05hfsg | 23.46 s (sd 0.52) | 32.32 s (sd 0.23) | **1.38** | 185 = 185 |
+| fac2 | 18.11 s (sd 1.08) | 21.31 s (sd 0.45) | **1.18** | 39 = 39 |
+| tspn05 | 47.14 s (sd 1.02) | 46.00 s (sd 0.39) | 0.98 | 51 = 51 |
+| nvs21 | 10.52 s (sd 0.62) | 10.32 s (sd 1.37) | 0.98 | 3 = 3 |
+
+Two real slowdowns, two neutral — and `tspn05`'s +13.3 s in the sequential panel
+was drift, not effect. Sound but harmful is the `DISCOPT_CUT_INHERIT` verdict
+(CLAUDE.md §5), so that sizing did not ship.
+
+The cause is a sizing error, not the mechanism: the legacy wall slices were ILS
+5 s, box 4 s, local branching 2 s, swap 1 s, and giving all four the ILS number
+silently multiplied three of them. Each now takes its own share of the ILS
+budget (`_BOX_BUDGET_RATIO` 0.8, `_LB_BUDGET_RATIO` 0.4, `_SWAP_BUDGET_RATIO`
+0.2), preserving the relative effort the tuned wall budgets encoded.
+Re-measured interleaved, same protocol:
+
+| instance | OFF | ON | ratio (was) |
+|---|---|---|---|
+| syn05hfsg | 22.44 s (sd 0.94) | 29.34 s (sd 1.05) | 1.31 (1.38) |
+| fac2 | 17.14 s (sd 0.44) | 19.36 s (sd 0.17) | 1.13 (1.18) |
+
+Node counts identical throughout. The residual is **wave 1**, not wave 2: these
+two instances are exactly the ones whose ILS the clock used to cut short, so they
+are where a deterministic budget spends more (syn05hfsg's ILS 5.02 → 9.51 s).
+That trade was measured corpus-wide at +1.6 % total and accepted in §7; wave 2
+adds ~6 % and ~5 % on these two worst cases and nothing measurable elsewhere.
+

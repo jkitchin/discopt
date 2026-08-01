@@ -35,6 +35,27 @@ The release procedure that produces these entries is documented in
   `WorkBudget.stopped_on` records whether a search was decided by work
   (reproducible) or by the clock (not).
 
+  The other three extent gates in that layer follow the same conversion:
+  `integer_box_search` (cell enumeration), `one_hot_swap_search` (swap descent)
+  and `local_branching` — the last being the purest form of the bug in the repo,
+  since it predicted a round's cost as `C(n, r) x measured_mean_subnlp_seconds`
+  against `deadline - now`, making the enumeration radius a ratio of two machine
+  measurements. Each takes a share of the ILS budget matching the wall slice it
+  used to get (0.8 / 0.2 / 0.4); handing all four the ILS number was measured
+  interleaved at 1.38x wall on syn05hfsg and 1.18x on fac2 for identical node
+  counts, and did not ship.
+
+  A **global deterministic work clock** for the remaining ~20 wall budgets
+  (OBBT, nonlinear bound tightening, root cuts, PSD separation, convexity
+  classification, …) was built and then **falsified**: instrumented over the
+  Python-side primitives it advances at 0.01-0.65x wall (fac2: 0.09 deterministic
+  seconds against 15 s of real work) because Rust B&B nodes, presolve and JIT are
+  invisible to it, so re-denominating those budgets in it would have silently
+  stopped them firing. Reverted; the measurement and the prerequisite (Rust-side
+  work accounting) are recorded in the calibration doc §9. Those gates are now
+  enumerated and ratcheted by `python/tests/test_912_wall_budget_inventory.py`,
+  which fails on any new unrecorded one.
+
   Measured on the in-repo corpus (`item912_clock_determinism_probe.py`): under
   the old gate 7 of the 22 ILS-firing instances had their extent cut by the clock
   (nvs09, ex1224, st_e29, ex1225, tspn05, syn05hfsg, fac2) — the gear2 mechanism,

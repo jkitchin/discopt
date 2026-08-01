@@ -4995,7 +4995,6 @@ def solve_model(
     # preprocessing, and ``_remaining_budget()`` lets each preprocessing phase
     # clamp its own internal budget to the time actually left.
     _solve_t0 = time.perf_counter()
-
     def _remaining_budget() -> float:
         return max(0.0, float(time_limit) - (time.perf_counter() - _solve_t0))
 
@@ -10732,7 +10731,12 @@ def solve_model(
                         backend=_subnlp_backend_fn,
                         nlp_options=subnlp_options,
                         evaluator=evaluator,
+                        # #912: the cell enumeration is bounded by a deterministic
+                        # sub-NLP count; ``time_budget`` is only read on the
+                        # legacy (``ils_solve_budget=0``) path, and the solve
+                        # deadline is the time_limit backstop.
                         time_budget=_box_budget,
+                        deadline=_deadline,
                     )
                 except Exception as _e:
                     logger.debug("integer_box_search raised: %s", _e)
