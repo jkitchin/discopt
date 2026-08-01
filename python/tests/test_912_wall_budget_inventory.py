@@ -30,10 +30,31 @@ Categories:
     deterministic budget disabled.
 ``residual``
     A genuine component-local budget that still decides *how much* work runs and
-    is **not** yet converted. Each is a known #912 residual: converting it needs
-    a deterministic work metric appropriate to that layer and, for the
-    bound-changing ones (OBBT, NBT, root cuts, PSD separation, convexity
-    classification), its own differential-bound panel.
+    is **not** converted. This is a **decision, not a backlog** — #912 was closed
+    as not-planned for these, on the evidence below. Converting one needs a
+    deterministic work metric natural to that layer, re-tuned against measured
+    consumption, plus (for the bound-changing ones — OBBT, NBT, root cuts, PSD
+    separation, convexity classification) its own differential-bound panel.
+
+Why the residuals were left, and when to revisit
+------------------------------------------------
+
+Two measurements decided it. First, after the primal-heuristic layer was
+converted the corpus-wide clock-scale panel returned **18 in-scope comparisons,
+0 mismatches** at 1x vs 2x, and across the whole investigation *every* extent
+gate ever observed cutting a search short was the root ILS. No residual gate was
+ever caught moving a tree. Second, the cheap way to convert them all at once
+does not exist (§9 of the calibration doc): per-operation cost varies 55x across
+instances, so a seconds-valued budget cannot be re-denominated in deterministic
+units without being re-tuned, one gate at a time.
+
+The honest limit on that first measurement: these budgets bind mainly on *large*
+models, and the in-repo corpus is 66 small ones. A `watercontamination0202`-scale
+instance is where a root pass actually reaches a 30 s budget. So "no residual
+gate was seen moving a tree" is bounded by corpus coverage, not proven in
+general — **that is the trigger to revisit**. If a large-instance panel ever
+shows one of these gates moving a tree while the solve is comfortably inside its
+`time_limit`, convert that gate and lower the count below.
 
 Why the residuals were not simply switched to one global deterministic clock:
 that design was built and **falsified** — see the calibration doc §9. A work
@@ -354,5 +375,7 @@ def test_residual_count_is_visible():
     assert len(residual) == 20, (
         f"the #912 residual inventory changed ({len(residual)} entries, expected 20). "
         "If you converted one, drop it from KNOWN and lower this number; if you added "
-        "one, convert it instead.\n" + "\n".join(f"  {p}: {s}" for p, s in residual)
+        "one, convert it instead. This count is a deliberate resting point, not a "
+        "backlog — see the module docstring for the evidence and the condition that "
+        "would justify shrinking it.\n" + "\n".join(f"  {p}: {s}" for p, s in residual)
     )

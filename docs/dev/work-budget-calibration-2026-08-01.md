@@ -479,3 +479,36 @@ are where a deterministic budget spends more (syn05hfsg's ILS 5.02 → 9.51 s).
 That trade was measured corpus-wide at +1.6 % total and accepted in §7; wave 2
 adds ~6 % and ~5 % on these two worst cases and nothing measurable elsewhere.
 
+## 11. Disposition
+
+#912 is closed **not planned** for the 20 residual gates. The converted work —
+the root integer local search and its three siblings in the primal-heuristic
+layer — landed and is validated in §6, §7 and §10.
+
+The case for stopping is measured, not budgetary:
+
+* after the conversion, the corpus-wide clock-scale panel is **18 in-scope
+  comparisons, 0 mismatches**, and across the whole investigation every extent
+  gate ever caught cutting a search short was the root ILS. No residual gate was
+  observed moving a tree;
+* the cheap bulk conversion does not exist (§9): per-operation cost varies 55x
+  across instances, so each residual needs its own unit, its own re-tuning and —
+  for the five bound-changing ones — its own differential-bound panel. Twenty
+  times the §4b exercise, whose first sizing attempt was itself rejected as
+  sound-but-harmful;
+* the two costs that *were* measured for converting gates (nvs09's 5 -> 29 node
+  regression under a mis-priced budget, syn05hfsg's 1.38x wall under a mis-sized
+  one) show the downside of doing this without per-gate care is real.
+
+**The condition to revisit, stated plainly.** The first bullet is bounded by
+corpus coverage. These budgets bind mainly on large models — a root pass reaching
+a 30 s budget is the `watercontamination0202` shape (#863, #875), and the in-repo
+corpus is 66 small instances. "No residual gate was seen moving a tree" is
+therefore not proof that none does. Reopen if a large-instance clock-scale panel
+shows any of them moving a tree while the solve is comfortably inside its
+`time_limit`, or if a consumer needs bit-reproducibility as a guarantee rather
+than as a property that currently holds on the tested corpus.
+
+`python/tests/test_912_wall_budget_inventory.py` is the standing guard: the 20
+residuals are enumerated and pinned, a new unrecorded wall gate fails, and the
+converted layer is asserted to stay converted.

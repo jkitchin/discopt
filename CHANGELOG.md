@@ -63,6 +63,13 @@ The release procedure that produces these entries is documented in
   `python/tests/test_912_wall_budget_inventory.py`, which fails on any new
   unrecorded one.
 
+  #912 is closed **not planned** for those 20: after the conversion the
+  clock-scale panel is 18 in-scope comparisons with 0 mismatches, and no residual
+  gate was ever observed moving a tree. That evidence is bounded by corpus
+  coverage — these budgets bind mainly on large models and the in-repo corpus is
+  66 small ones — so the trigger to revisit is a large-instance panel showing one
+  of them move a tree inside its `time_limit`. See the calibration doc §11.
+
   Measured on the in-repo corpus (`item912_clock_determinism_probe.py`): under
   the old gate 7 of the 22 ILS-firing instances had their extent cut by the clock
   (nvs09, ex1224, st_e29, ex1225, tspn05, syn05hfsg, fac2) — the gear2 mechanism,
