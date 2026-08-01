@@ -445,23 +445,36 @@ def _attach_untrusted_leaf_duals(cert: dict, nodes: list[dict]) -> None:
     model = cert["model"]
     child_ids = {n["parent"] for n in nodes if n["parent"] is not None}
     n_untrusted = 0
+    leaf_min = None  # the bound the checker will derive (untrusted where present)
     for n in nodes:
         if n["id"] in child_ids or n.get("infeasible"):
             continue
         lo = [as_fraction(v) for v in n["lb"]]
         hi = [as_fraction(v) for v in n["ub"]]
+        leaf_bound = None
         try:
             lp = build_leaf_lp(model, lo, hi)
+            res = leaf_dual(lp)
         except NotQuadratic:
-            continue
-        res = leaf_dual(lp)
-        if res is None:
-            continue
-        bound, y = res
-        n["untrusted_bound"] = [bound.numerator, bound.denominator]
-        n["untrusted_dual"] = [[yi.numerator, yi.denominator] for yi in y]
-        n_untrusted += 1
+            res = None
+        if res is not None:
+            bound, y = res
+            n["untrusted_bound"] = [bound.numerator, bound.denominator]
+            n["untrusted_dual"] = [[yi.numerator, yi.denominator] for yi in y]
+            n_untrusted += 1
+            leaf_bound = bound
+        else:
+            leaf_bound = as_fraction(n.get("local_lower_bound"))  # stays trusted
+        if leaf_bound is not None:
+            leaf_min = leaf_bound if leaf_min is None else min(leaf_min, leaf_bound)
     cert["tree"]["untrusted_leaves"] = n_untrusted
+    # The certified dual bound in untrusted mode is the bound the checker itself can
+    # re-derive (clean-McCormick where re-derived, else the recorded leaf bound),
+    # which may be looser than the solver's cut-tightened bound. Setting it here
+    # keeps ``dualBound <= min leaf bound`` consistent by construction; the gap may
+    # then be reported open where McCormick alone does not close it.
+    if leaf_min is not None:
+        cert["dualBound"] = [leaf_min.numerator, leaf_min.denominator]
 
 
 def write_certificate(cert: dict, path: Union[str, Path]) -> None:

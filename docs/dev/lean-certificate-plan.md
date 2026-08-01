@@ -366,9 +366,12 @@ the rigorous nonconvex-continuous path, with per-leaf LP-dual capture) **and the
 NLP-BB loop** (`_solve_nlp_bb`, tree only — its node bound is the NLP objective,
 a valid lower bound only for convex MINLPs, so `build_bnb_certificate` requires
 `gap_certified`; nonconvex NLP-BB nodes carry `-inf`, which the checker rejects). A
-real convex integer MINLP (`nvs03`) certifies via this path. The pure-integer MILP
-driver and decomposition paths are not yet wired (they return no `bnb_tree`, so the
-emitter refuses and the CLI falls back to Tier-1/2) — a follow-on.
+real convex integer MINLP (`nvs03`) certifies via this path (both trusted and
+untrusted). **Not yet wired:** the specialized **QP/MIQP** solver (the classifier
+routes pure-quadratic models there, so they build no recorded tree — a synthetic
+`min x·y` no longer records; the checkable e2e uses `nvs03`), the pure-integer MILP
+driver, and decomposition paths. On those the emitter refuses `bnb` and the CLI
+falls back to Tier-1/2 — follow-ons.
 
 **Untrusted per-leaf re-derivation (built, `untrusted=True`).** For the **quadratic
 fragment** (linear + bilinear + square bodies), `build_bnb_certificate(model, result,
