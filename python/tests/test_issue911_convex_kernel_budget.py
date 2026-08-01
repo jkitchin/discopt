@@ -49,7 +49,20 @@ def _box_model():
     return m
 
 
-def _patched_solve(monkeypatch, *, kernel_on: bool, attempt_s: float):
+def _reserve_model():
+    """A model the #844 LP-spatial fallback is IN SCOPE for (pure-integer, minimize,
+    with an integer product), so ``Model.solve`` carves out its 35% reserve. #911
+    changed that reserve from 35% of the stated limit to 35% of what remains after
+    the kernel attempt; this model is how that path gets exercised."""
+    m = dm.Model()
+    x = m.integer("x", lb=0, ub=5)
+    y = m.integer("y", lb=0, ub=5)
+    m.constraint(dm.RangeSet(1), lambda _i: x * y >= 4.0, name="prod", fast=False)
+    m.minimize(x + y)
+    return m
+
+
+def _patched_solve(monkeypatch, *, kernel_on: bool, attempt_s: float, model_fn=None):
     """Solve ``_box_model()`` with a declining attempt of ``attempt_s`` seconds and
     return ``(time_limit the default path was handed, number of attempts made)``."""
     monkeypatch.setenv("DISCOPT_CONVEX_KERNEL", "1" if kernel_on else "0")
@@ -78,7 +91,7 @@ def _patched_solve(monkeypatch, *, kernel_on: bool, attempt_s: float):
 
     monkeypatch.setattr(_solver, "solve_model", _fake_solve_model)
 
-    _box_model().solve(time_limit=_TIME_LIMIT)
+    (model_fn or _box_model)().solve(time_limit=_TIME_LIMIT)
 
     # CLAUDE.md §6: a probe that never fired must not read as a pass.
     assert calls["solve_model"] == 1, "the default path was never reached"
@@ -113,6 +126,26 @@ def test_flag_off_deducts_exactly_zero(monkeypatch):
     assert _ck.last_attempt_seconds() == 0.0, (
         f"flag-off attempt clock is not literally 0.0: {_ck.last_attempt_seconds()!r}"
     )
+
+
+def test_flag_off_is_exact_on_the_fallback_reserve_path_too(monkeypatch):
+    """The #844 reserve now takes 35% of the REMAINING budget, not of the stated
+    limit. With the flag off the remainder IS the stated limit, so the primary budget
+    must come out bit-identical to the pre-#911 ``time_limit - 0.35*time_limit``."""
+    from discopt._jax.lp_spatial_bb import _is_in_scope
+    from discopt.modeling.core import _lp_spatial_fallback_enabled
+
+    # Non-vacuity: if the reserve is not actually carved out here, this test would
+    # silently be re-checking the box-only path (CLAUDE.md §6).
+    if not _lp_spatial_fallback_enabled() or not _is_in_scope(_reserve_model()):
+        pytest.skip("the #844 reserve does not apply to this model -- nothing to pin")
+
+    forwarded, attempts = _patched_solve(
+        monkeypatch, kernel_on=False, attempt_s=0.0, model_fn=_reserve_model
+    )
+    assert attempts == 0
+    expected = _TIME_LIMIT - 0.35 * _TIME_LIMIT
+    assert forwarded == expected, f"reserve arithmetic drifted: {forwarded!r} != {expected!r}"
 
 
 def test_attempt_clock_is_zero_before_any_attempt():
