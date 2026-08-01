@@ -10349,7 +10349,13 @@ def solve_model(
                             result_sols[best_root_idx],
                             backend=_resolve_heuristic_backend(nlp_solver),
                             evaluator=evaluator,
+                            # #912: the extent is a deterministic work budget
+                            # (resolved from SolverTuning.ils_work_budget), not a
+                            # wall clock. ``time_budget`` is only consulted on the
+                            # ``DISCOPT_ILS_WORK_BUDGET=0`` legacy path; the solve
+                            # deadline rides along purely as a time_limit backstop.
                             time_budget=min(5.0, 0.15 * max(1.0, time_limit)),
+                            deadline=_deadline,
                         )
                         if ils is not None:
                             _x_ils, _obj_ils = ils
@@ -10726,7 +10732,12 @@ def solve_model(
                         backend=_subnlp_backend_fn,
                         nlp_options=subnlp_options,
                         evaluator=evaluator,
+                        # #912: the cell enumeration is bounded by a deterministic
+                        # sub-NLP count; ``time_budget`` is only read on the
+                        # legacy (``ils_solve_budget=0``) path, and the solve
+                        # deadline is the time_limit backstop.
                         time_budget=_box_budget,
+                        deadline=_deadline,
                     )
                 except Exception as _e:
                     logger.debug("integer_box_search raised: %s", _e)

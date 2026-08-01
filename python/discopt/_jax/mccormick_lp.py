@@ -2351,8 +2351,11 @@ class MccormickLPRelaxer:
             _gate_tau = _tun.psd_cost_gate_tau
             _psd_t0 = time.perf_counter()
             _base_solve_wall: Optional[float] = None
+            _psd_stop = "max_rounds"
+            _psd_rounds = 0
             for _round in range(max_rounds):
                 if deadline is not None and time.perf_counter() >= deadline:
+                    _psd_stop = "deadline"
                     break
                 if (
                     _gate
@@ -2360,6 +2363,13 @@ class MccormickLPRelaxer:
                     and (time.perf_counter() - _psd_t0) > _gate_budget * _base_solve_wall
                 ):
                     # Per-node PSD wall budget spent — stop feeding the search.
+                    # #912 instrumentation: this criterion compares one measured
+                    # wall against another, so which round it fires on is a
+                    # function of machine speed — and unlike the primal
+                    # heuristics this loop moves the node's DUAL BOUND. The log
+                    # line records whether a node was decided by it or by the
+                    # deterministic diminishing-returns test.
+                    _psd_stop = "wall_gate"
                     break
                 if self._binary_cols_cache is None:
                     from discopt._jax.model_utils import binary_flat_cols
@@ -2372,7 +2382,9 @@ class MccormickLPRelaxer:
                     binary_vars=self._binary_cols_cache,
                 )
                 if not cuts:
+                    _psd_stop = "no_cuts"
                     break
+                _psd_rounds += 1
                 _lb_before = res.objective if _gate else None
                 # ``coeffs . z >= rhs``  ->  ``(-coeffs) . z <= -rhs`` for A_ub<=b_ub.
                 _append([-c.coeffs for c in cuts], [-c.rhs for c in cuts])
@@ -2386,13 +2398,16 @@ class MccormickLPRelaxer:
                 if _gate and _base_solve_wall is None:
                     _base_solve_wall = max(time.perf_counter() - _solve_t0, 1e-4)
                 if new_res.status != "optimal" or new_res.objective is None:
+                    _psd_stop = "lp_status"
                     break
                 res = new_res
                 if _gate and _lb_before is not None:
                     _delta = new_res.objective - _lb_before
                     if _delta <= _gate_tau * (1.0 + abs(_lb_before)):
                         # Diminishing returns — abandon the remaining PSD rounds.
+                        _psd_stop = "tau"
                         break
+            logger.debug("psd_cut_loop: rounds=%d stopped_on=%s", _psd_rounds, _psd_stop)
             return res
         except Exception:
             return res
