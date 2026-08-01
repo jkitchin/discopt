@@ -485,6 +485,15 @@ pub fn solve_convex_tree_py<'py>(
     };
     let opts = SimplexOptions {
         expel_zero_artificials: true,
+        // #911: the tree's deadline also bounds a SINGLE LP solve. Without this the
+        // kernel could only stop BETWEEN re-solves, so its overshoot was one whole
+        // LP -- measured on `clay0304hfsg`, +7.8 s against a 30 s limit even after
+        // the node loop learned to poll. `SimplexOptions::deadline` is polled every
+        // few hundred pivots and bails as `IterLimit`, which every caller here
+        // already treats soundly: the node returns a non-pruning sentinel, the
+        // subtree is marked an uncertified drop, and optimality can no longer be
+        // claimed for that run -- so this can only weaken a bound, never fake one.
+        deadline: config.deadline,
         ..Default::default()
     };
     let res = spec.solve_tree(&config, &opts);
