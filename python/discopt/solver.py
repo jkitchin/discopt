@@ -1050,6 +1050,7 @@ def _try_native_spatial_kernel(
     t_start,
     rust_time,
     jax_time,
+    incumbent_time_extension: float = 0.0,
 ):
     """Issue #764: if the native Rust spatial kernel is enabled and the model is in
     its covered subset — scalar variables; bilinear / monomial / affine-square / sqrt
@@ -1136,6 +1137,16 @@ def _try_native_spatial_kernel(
             gap_tol=float(gap_tolerance),
             time_limit_s=remaining,
         )
+        # #917: hand the kernel the caller's withheld #844 reserve so it can reclaim
+        # the slice at its own deadline — but only while it already holds an incumbent,
+        # the one state in which that fallback has nothing to contribute. The kernel is
+        # a single uninterruptible call that never enters the Python node loops where
+        # ``_extend_budget_for_incumbent`` lives, so without this a kernel-routed solve
+        # forfeits the reserve outright: nvs17 at a 60 s budget stopped at 39.4 s with
+        # its bound 4.4% short of its own incumbent, and giving the slice back closes
+        # it (-1149.20 -> -1100.40).
+        if incumbent_time_extension > 0.0:
+            solve_kwargs["incumbent_time_extension_s"] = float(incumbent_time_extension)
         if initial_incumbent is not None:
             solve_kwargs["initial_incumbent"] = float(initial_incumbent)
         _t_phase = time.perf_counter()
@@ -1193,6 +1204,12 @@ def _try_native_spatial_kernel(
     # #788: a time-limited exit may carry no primal at all; there is nothing to
     # verify then, and the bound-only result below is reported without one.
     if x_flat is not None:
+        # ``x_flat`` is only ever set non-None alongside a real ``obj_val``: every
+        # branch above that produces a point also leaves the objective set, and the
+        # two branches that clear the objective clear the point with it. Stated for
+        # the type checker (and the next reader), not as a runtime condition — the
+        # ``abs(obj_val)`` below would raise if it were ever violated.
+        assert obj_val is not None
         _t_phase = time.perf_counter()
         _ok, _model_obj = _native_kernel_verify_point(model, x_flat[:n_orig])
         _native_jax_s += time.perf_counter() - _t_phase
@@ -1234,6 +1251,13 @@ def _try_native_spatial_kernel(
         _native_jax_s,
         wall_time,
     )
+    # #917: surface the reserve the kernel actually reclaimed, matching the key the
+    # Python node loops use. Without this the graduation panel is BLIND on this path —
+    # it counted 0 firings on a run where the A/B showed the mechanism plainly working
+    # (nvs17 39.4 s -> 49.9 s, bound -1140.85 -> -1100.40). A probe that cannot see
+    # its own mechanism fire cannot score it (CLAUDE.md §6).
+    _ext_s = float(res.get("incumbent_extension_s") or 0.0)
+    _native_stats = {"budget/incumbent_extension_s": _ext_s} if _ext_s > 0.0 else None
     return SolveResult(
         status=native_status,
         objective=obj_val,
@@ -1246,6 +1270,7 @@ def _try_native_spatial_kernel(
         jax_time=jax_total,
         python_time=wall_time - rust_total - jax_total,
         gap_certified=math.isfinite(bound_val),
+        solver_stats=_native_stats,
     )
 
 
@@ -3450,6 +3475,69 @@ def _relative_gap_from_objective_bound(
 _DEFAULT_ABS_GAP_TOL = 1e-6
 
 
+def _tree_has_incumbent(tree) -> bool:
+    """True iff the B&B tree currently holds a finite, non-sentinel incumbent.
+
+    The tree reports ``incumbent_value = +inf`` (or a sentinel-magnitude value)
+    while no primal has been accepted, so a bare ``is not None`` would read every
+    empty tree as "has one".
+    """
+    value = tree.stats().get("incumbent_value")
+    if value is None:
+        return False
+    value = float(value)
+    return bool(np.isfinite(value)) and abs(value) < _SENTINEL_THRESHOLD
+
+
+def _extend_budget_for_incumbent(
+    model,
+    tree,
+    *,
+    time_limit: float,
+    extension_s: float,
+    elapsed: float,
+    t_start: float,
+) -> Optional[float]:
+    """#917: reclaim a caller-withheld slice of the wall budget, once, at the base
+    deadline — and only when this search already holds an incumbent.
+
+    ``Model.solve`` deducts a 35% reserve from the caller's ``time_limit`` for every
+    model the #844 no-incumbent fallback *could* serve, and spends it only when the
+    primary returns nothing. A primary that finds an incumbent and then hits its
+    reduced deadline therefore forfeits that 35% outright: measured on the in-repo
+    corpus at a 60 s budget, nvs17/nvs19/nvs23 all stop at ~39 s holding an incumbent
+    with a ~0.5% open gap, and nvs18 *certifies* with 0.1 s of margin — the reserve is
+    a latent certification regression on the whole family.
+
+    Reclaiming it here rather than shrinking the reserve up front is what keeps #844
+    intact: the fallback exists exclusively for the no-incumbent case, so the state
+    that triggers this extension is precisely the state in which the fallback provably
+    has nothing to contribute. A path that never calls this (``extension_s`` left at
+    its 0.0 default) keeps the pre-#917 behaviour exactly. That is also the fail-safe
+    for a path with no reclaim point of its own: the #764 native spatial kernel is one
+    uninterruptible Rust call handed ``time_limit`` up front, so a solve routed there
+    simply keeps the reduced budget it has today rather than silently losing the #844
+    fallback's reserve.
+
+    Returns the extended time limit, or ``None`` to decline (the caller stops).
+    """
+    if extension_s <= 0.0 or not _tree_has_incumbent(tree):
+        return None
+    extended = float(time_limit) + float(extension_s)
+    # Keep the other two budget clocks in lockstep, or the extension buys wall time
+    # the search cannot use. ``model._solve_deadline`` gates the incremental
+    # relaxation build and every "may I start this phase" check (#654); the
+    # process-global deadline is what the JAX-compiled LP/NLP loops poll (#80).
+    # Left stale, both read as already expired for the whole extension — the exact
+    # failure mode that made the #844 fallback silently degrade to its cold path.
+    model._solve_deadline = float(t_start) + extended
+    from discopt._jax.deadline import get_deadline, set_deadline
+
+    if get_deadline() is not None:
+        set_deadline(extended - float(elapsed))
+    return extended
+
+
 def _gap_converged(tree, gap_tolerance: float, abs_gap_tol: float = _DEFAULT_ABS_GAP_TOL) -> bool:
     """B&B gap convergence with decoupled absolute and relative tolerances.
 
@@ -4521,6 +4609,11 @@ def solve_model(
     root_cut_max: Optional[int] = None,
     _lns_enabled: bool = True,
     rens: bool = True,
+    # #917: extra wall-clock seconds this solve may take *only if* it holds an
+    # incumbent when ``time_limit`` expires. Set by ``Model.solve`` to the #844
+    # fallback reserve it withheld, so a primary that found a primal reclaims the
+    # slice the fallback would never have used. 0.0 = pre-#917 behaviour.
+    incumbent_time_extension: float = 0.0,
     **kwargs,
 ) -> SolveResult:
     """
@@ -6597,6 +6690,7 @@ def solve_model(
             in_tree_presolve_repr=_model_repr,
             rens_enabled=rens,
             _lns_enabled=_lns_enabled,
+            incumbent_time_extension=incumbent_time_extension,
         )
 
     # --- Problem classification: dispatch LP/QP to specialized solvers ---
@@ -6778,6 +6872,7 @@ def solve_model(
                     lagrangian_bound=lagrangian_bound,
                     lagrangian_frequency=lagrangian_frequency,
                     initial_point=initial_point,
+                    incumbent_time_extension=incumbent_time_extension,
                 )
             logger.info(
                 "MILP with a lazy_constraints/incumbent_callback — routing to spatial "
@@ -6827,6 +6922,7 @@ def solve_model(
                         max_nodes,
                         t_start,
                         prefer_pounce=True,
+                        incumbent_time_extension=incumbent_time_extension,
                     )
                 logger.info(
                     "Convex MIQP with a lazy_constraints/incumbent_callback — routing "
@@ -7029,6 +7125,7 @@ def solve_model(
                 rens_enabled=rens,
                 _lns_enabled=_lns_enabled,
                 precomputed_is_convex=_root_is_convex,
+                incumbent_time_extension=incumbent_time_extension,
             )
 
     # --- Extract variable info ---
@@ -7267,6 +7364,7 @@ def solve_model(
             t_start,
             rust_time,
             jax_time,
+            incumbent_time_extension=incumbent_time_extension,
         )
     if _native_result is not None:
         return _native_result
@@ -8812,9 +8910,27 @@ def solve_model(
     # user-interrupted exit proves nothing, so the status decision below must
     # not fall through to a certified "infeasible"/"optimal".
     _debug_quit = False
+    # #917: seconds of wall budget the caller withheld for a downstream
+    # no-incumbent fallback and this search may reclaim once it holds an
+    # incumbent. 0.0 (the default) reproduces the pre-#917 deadline exactly.
+    _incumbent_extension_s = max(0.0, float(incumbent_time_extension))
+    _incumbent_extension_taken = 0.0
     while True:
         elapsed = time.perf_counter() - t_start
         if elapsed >= time_limit:
+            if _incumbent_extension_taken == 0.0:
+                _extended = _extend_budget_for_incumbent(
+                    model,
+                    tree,
+                    time_limit=time_limit,
+                    extension_s=_incumbent_extension_s,
+                    elapsed=elapsed,
+                    t_start=t_start,
+                )
+                if _extended is not None:
+                    time_limit = _extended
+                    _incumbent_extension_taken = _incumbent_extension_s
+                    continue
             break
 
         # Interactive debugger: top-of-iteration checkpoint (no-op when detached).
@@ -11890,6 +12006,13 @@ def solve_model(
     if _lazy_resep_fires > 0:
         _solver_stats["pool/stall_reseparations"] = float(_lazy_resep_fires)
 
+    # #917: seconds of the caller's withheld fallback reserve this search
+    # actually reclaimed (see ``_extend_budget_for_incumbent``). Surfaced only
+    # when non-zero, so "the extension fired" is directly observable rather
+    # than inferred from a wall-clock reading.
+    if _incumbent_extension_taken > 0.0:
+        _solver_stats["budget/incumbent_extension_s"] = float(_incumbent_extension_taken)
+
     return SolveResult(
         status=status,
         objective=obj_val,
@@ -12401,6 +12524,9 @@ def _solve_nlp_bb(
     rens_enabled: bool = True,
     _lns_enabled: bool = True,
     precomputed_is_convex: Optional[bool] = None,
+    # #917: extra wall-clock seconds this search may take once it holds an
+    # incumbent; see ``_extend_budget_for_incumbent``. 0.0 = pre-#917 behaviour.
+    incumbent_time_extension: float = 0.0,
 ) -> SolveResult:
     """Solve a MINLP via nonlinear Branch & Bound (NLP-BB).
 
@@ -12709,9 +12835,27 @@ def _solve_nlp_bb(
     # user-interrupted exit proves nothing, so the status decision below must
     # not fall through to a certified "infeasible"/"optimal".
     _debug_quit = False
+    # #917: seconds of wall budget the caller withheld for a downstream
+    # no-incumbent fallback and this search may reclaim once it holds an
+    # incumbent. 0.0 (the default) reproduces the pre-#917 deadline exactly.
+    _incumbent_extension_s = max(0.0, float(incumbent_time_extension))
+    _incumbent_extension_taken = 0.0
     while True:
         elapsed = time.perf_counter() - t_start
         if elapsed >= time_limit:
+            if _incumbent_extension_taken == 0.0:
+                _extended = _extend_budget_for_incumbent(
+                    model,
+                    tree,
+                    time_limit=time_limit,
+                    extension_s=_incumbent_extension_s,
+                    elapsed=elapsed,
+                    t_start=t_start,
+                )
+                if _extended is not None:
+                    time_limit = _extended
+                    _incumbent_extension_taken = _incumbent_extension_s
+                    continue
             break
 
         # Interactive debugger: top-of-iteration checkpoint (no-op when detached).
@@ -13615,6 +13759,15 @@ def _solve_nlp_bb(
         if obj_val is not None and np.isfinite(obj_val) and root_bound_val is not None:
             root_gap_val = abs(obj_val - root_bound_val) / max(1.0, abs(obj_val))
 
+    # #917: surface the reclaimed reserve here too, so "the extension fired" is
+    # observable on every path that implements it rather than only the two that
+    # already build a stats dict.
+    _ext_stats = (
+        {"budget/incumbent_extension_s": float(_incumbent_extension_taken)}
+        if _incumbent_extension_taken > 0.0
+        else None
+    )
+
     return SolveResult(
         status=status,
         objective=obj_val,
@@ -13634,6 +13787,7 @@ def _solve_nlp_bb(
         constraint_duals=constraint_duals,
         bound_duals_lower=bound_duals_lower,
         bound_duals_upper=bound_duals_upper,
+        solver_stats=_ext_stats,
     )
 
 
@@ -17002,6 +17156,9 @@ def _solve_milp_bb(
     lagrangian_bound: bool = False,
     lagrangian_frequency: int = 1,
     initial_point: Optional[np.ndarray] = None,
+    # #917: extra wall-clock seconds this search may take once it holds an
+    # incumbent; see ``_extend_budget_for_incumbent``. 0.0 = pre-#917 behaviour.
+    incumbent_time_extension: float = 0.0,
 ) -> SolveResult:
     """Solve a MILP via B&B with LP relaxation solves at each node.
 
@@ -17297,9 +17454,27 @@ def _solve_milp_bb(
     # user-interrupted exit proves nothing, so the status decision below must
     # not fall through to a certified "infeasible"/"optimal".
     _debug_quit = False
+    # #917: seconds of wall budget the caller withheld for a downstream
+    # no-incumbent fallback and this search may reclaim once it holds an
+    # incumbent. 0.0 (the default) reproduces the pre-#917 deadline exactly.
+    _incumbent_extension_s = max(0.0, float(incumbent_time_extension))
+    _incumbent_extension_taken = 0.0
     while True:
         elapsed = time.perf_counter() - t_start
         if elapsed >= time_limit:
+            if _incumbent_extension_taken == 0.0:
+                _extended = _extend_budget_for_incumbent(
+                    model,
+                    tree,
+                    time_limit=time_limit,
+                    extension_s=_incumbent_extension_s,
+                    elapsed=elapsed,
+                    t_start=t_start,
+                )
+                if _extended is not None:
+                    time_limit = _extended
+                    _incumbent_extension_taken = _incumbent_extension_s
+                    continue
             break
 
         # Interactive debugger: top-of-iteration checkpoint (no-op when detached).
@@ -17601,6 +17776,13 @@ def _solve_milp_bb(
         f"cuts/{_src}": float(_cnt) for _src, _cnt in _cut_by_source.items() if _cnt > 0
     }
 
+    # #917: seconds of the caller's withheld fallback reserve this search
+    # actually reclaimed (see ``_extend_budget_for_incumbent``). Surfaced only
+    # when non-zero, so "the extension fired" is directly observable rather
+    # than inferred from a wall-clock reading.
+    if _incumbent_extension_taken > 0.0:
+        _milp_solver_stats["budget/incumbent_extension_s"] = float(_incumbent_extension_taken)
+
     return SolveResult(
         status=status,
         objective=obj_val,
@@ -17632,6 +17814,9 @@ def _solve_miqp_bb(
     max_nodes: int,
     t_start: float,
     prefer_pounce: bool = False,
+    # #917: extra wall-clock seconds this search may take once it holds an
+    # incumbent; see ``_extend_budget_for_incumbent``. 0.0 = pre-#917 behaviour.
+    incumbent_time_extension: float = 0.0,
 ) -> SolveResult:
     """Solve a MIQP via B&B with QP relaxation solves at each node.
 
@@ -17809,9 +17994,27 @@ def _solve_miqp_bb(
     # user-interrupted exit proves nothing, so the status decision below must
     # not fall through to a certified "infeasible"/"optimal".
     _debug_quit = False
+    # #917: seconds of wall budget the caller withheld for a downstream
+    # no-incumbent fallback and this search may reclaim once it holds an
+    # incumbent. 0.0 (the default) reproduces the pre-#917 deadline exactly.
+    _incumbent_extension_s = max(0.0, float(incumbent_time_extension))
+    _incumbent_extension_taken = 0.0
     while True:
         elapsed = time.perf_counter() - t_start
         if elapsed >= time_limit:
+            if _incumbent_extension_taken == 0.0:
+                _extended = _extend_budget_for_incumbent(
+                    model,
+                    tree,
+                    time_limit=time_limit,
+                    extension_s=_incumbent_extension_s,
+                    elapsed=elapsed,
+                    t_start=t_start,
+                )
+                if _extended is not None:
+                    time_limit = _extended
+                    _incumbent_extension_taken = _incumbent_extension_s
+                    continue
             break
 
         # Interactive debugger: top-of-iteration checkpoint (no-op when detached).
@@ -18104,6 +18307,15 @@ def _solve_miqp_bb(
         if obj_val is not None and np.isfinite(obj_val):
             root_gap_val = abs(obj_val - root_bound_val) / max(1.0, abs(obj_val))
 
+    # #917: surface the reclaimed reserve here too, so "the extension fired" is
+    # observable on every path that implements it rather than only the two that
+    # already build a stats dict.
+    _ext_stats = (
+        {"budget/incumbent_extension_s": float(_incumbent_extension_taken)}
+        if _incumbent_extension_taken > 0.0
+        else None
+    )
+
     return SolveResult(
         status=status,
         objective=obj_val,
@@ -18122,4 +18334,5 @@ def _solve_miqp_bb(
         bound_duals_lower=bound_duals_lower,
         bound_duals_upper=bound_duals_upper,
         gap_certified=_gap_certified,
+        solver_stats=_ext_stats,
     )

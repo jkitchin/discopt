@@ -1622,6 +1622,24 @@ class MccormickLPRelaxer:
             floor = getattr(milp, "_objective_floor", None)
             if res.status == "unbounded" and floor is not None and np.isfinite(floor):
                 return MccormickLPResult(status="optimal", lower_bound=float(floor))
+            # A node LP that YIELDED on the caller's deadline (#917 follow-up) still
+            # leaves a rigorous Neumaier–Shcherbina floor whenever its dual is usable
+            # (``MilpRelaxationModel._time_limit_result``). ``g(y)`` is a valid lower
+            # bound for ANY multiplier vector by weak duality, so stopping the simplex
+            # early can only LOOSEN it — it can never lift it above this node's true
+            # optimum. Adopt it instead of discarding the node's bound outright.
+            #
+            # Deliberately NOT gated on #517's flag below. That flag guards using a
+            # *numerically broken* solve's dual, where the concern is a drifted basis;
+            # this is a deliberate, caller-requested early exit of a healthy solve. And
+            # the alternative is measurably worse: without this, honouring the deadline
+            # COST a bound outright — bchoco08 1.0 -> None and contvar 171244.81 ->
+            # None on the 15 s panel — trading a budget overrun for a lost certificate,
+            # which is the wrong trade (CLAUDE.md §1). Reachable only with
+            # ``DISCOPT_LP_WARM_DEADLINE`` on: nothing else produces a ``time_limit``
+            # node result, so the default path is untouched.
+            if res.status == "time_limit" and res.bound is not None and np.isfinite(res.bound):
+                return MccormickLPResult(status="optimal", lower_bound=float(res.bound))
             # #517 (flag-gated): the node LP broke down numerically but the in-house
             # simplex's own dual yielded a rigorous Neumaier–Shcherbina safe lower
             # bound (``milp.solve`` attached it to ``res.bound``). It is valid for ANY

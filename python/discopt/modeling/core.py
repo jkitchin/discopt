@@ -204,6 +204,133 @@ def _lp_spatial_mixed_fallback_enabled() -> bool:
     )
 
 
+def _lp_spatial_reserve_extension_enabled() -> bool:
+    """#917: let the primary reclaim the #844 reserve once it holds an incumbent.
+
+    The reserve above is deducted from the caller's ``time_limit`` for *every* model
+    the fallback could serve, and spent only when the primary returns nothing. A
+    primary that finds an incumbent and then hits its reduced deadline forfeits the
+    slice outright — nobody spends it, and the caller is told ``time_limit`` at 65%
+    of the limit they stated.
+
+    **Entry measurement** (in-repo corpus, 19 in-scope instances, 60 s budget, each
+    in an isolated subprocess; ``scratchpad/issue917_entry_panel_T60.json``):
+
+    ===============  ===  =======================================================
+    class            n    what happens
+    ===============  ===  =======================================================
+    certified        15   primary certifies inside 39 s; reserve never taken
+    reserve-spent     1   nvs24: no incumbent — the #844 case, reserve is spent
+    **forfeited**     3   nvs17/nvs19/nvs23: incumbent at ~39 s, 21 s discarded
+    ===============  ===  =======================================================
+
+    ``nvs18`` certifies at **38.9 s** of the 39 s primary budget — 0.1 s of margin —
+    so the reserve is a latent certification regression on this whole family, not
+    only a wall-clock waste.
+
+    **Why the extension and not a bound merge.** The issue's other candidate was to
+    spend the residual on the fallback anyway and keep the tighter of the two dual
+    bounds. Its stated kill criterion — "if the merged bound is no tighter on a
+    corpus panel, this buys nothing" — is met, on every instance of the class:
+
+    ==========  =================  ================  =========
+    instance    primary bound      reserve bound     tighter?
+    ==========  =================  ================  =========
+    nvs17       -1105.89           -5838.02          no
+    nvs19       -1104.24           -16377.19         no
+    nvs23       -1130.70           -57328.53         no
+    ==========  =================  ================  =========
+
+    The reserve's primal is worse too on every one (-1068.8 vs -1100.4, -931.2 vs
+    -1097.6, none vs -1124.8). That is the documented ~250x root looseness of the
+    McCormick relaxation on this family (see ``_lp_spatial_fallback_enabled`` and
+    ``docs/dev/lp-node-primal-quality.md``), so the merge is dead on arrival and the
+    budget belongs to the primary. Candidate 1 is recorded as falsified, not shipped.
+
+    **Graduation panel** — every in-scope instance in both in-repo corpora across a
+    uniform budget grid (6/9/13/20/30/45/60 s), OFF and ON run back-to-back per cell
+    in isolated subprocesses. 133 cells; the extension fired in 15.
+    ``discopt_benchmarks/scripts/issue917_reserve_extension_panel.py``, results in
+    ``discopt_benchmarks/results/issue917_reserve_extension_panel.json``.
+
+    *Cert-clean*: ``cert_regressions=0  lost_incumbents=0  unsound=0
+    false_primals=0``. *Net-positive* (3-rep re-run of the cells where it fires):
+    nvs18@45 s uncertified 0/3 -> **certified 3/3**; nvs18@30 s closed 92% of its dual
+    gap (-783.8528 -> -778.8359 against an incumbent of -778.4), zero spread; nvs13@9 s
+    certified 1/3. That panel graduated the flag default-ON.
+
+    **RETRACTED 2026-08-01 — back to default OFF.** That graduation is void on the
+    current tree, and the reason is not a flaw in the measurement but a change beneath
+    it: #919 re-graduated the **#764 native spatial kernel to default-ON**, and the
+    kernel now certifies exactly the instances the case rested on, long before the
+    reduced budget can bind:
+
+    ==========  =========================  =============================
+    cell        pre-#919 (the case)        post-#919 (both arms)
+    ==========  =========================  =============================
+    nvs18@45 s  uncertified 0/3 -> 3/3     certifies in **5.4 s**
+    nvs18@30 s  bound -783.85 -> -778.84   certifies in **5.2 s**
+    nvs13@9 s   certified 1/3              certifies in **2.4 s**
+    ==========  =========================  =============================
+
+    Re-running the identical panel on the new base: **133 cells, the extension fired
+    0 times** (``…_panel_postkernel.json``). It is inert, so ON vs OFF is a no-op — and
+    a bound-changing flag with no measurable benefit defaults OFF (CLAUDE.md §5 bar 2).
+
+    **Then the kernel was given its own reclaim point, and it re-graduated.** The gap
+    above was that the kernel is one uninterruptible Rust call that never enters the
+    Python node loops where ``_extend_budget_for_incumbent`` lives, so a kernel-routed
+    solve forfeited the reserve outright — nvs17 at a 60 s budget spent 39.4 s in both
+    arms, the 0.65xT signature exactly. ``SpatialTreeConfig.incumbent_time_extension``
+    now mirrors that guard inside ``discopt-core``: the spatial tree pushes its own
+    deadline out ONCE, and only while it already holds an incumbent.
+
+    **Graduation panel, post-#919** (the same 133 cells — 19 in-scope instances across
+    a 6/9/13/20/30/45/60 s grid, OFF/ON interleaved per cell in isolated subprocesses;
+    ``…_panel_kernel.json``). The extension fired in **27** cells, and this time the
+    probe could see it: the kernel now reports the reclaimed seconds through
+    ``solver_stats``, without which the panel scored 0 firings on a run where the
+    mechanism was demonstrably working.
+
+    *Cert-clean*: ``cert_regressions=0  lost_incumbents=0  lost_bound=0  looser_bound=0
+    worse_objective=0  unsound=0  false_primals=0``; no ON-arm bound above a reference
+    optimum.
+
+    *Net-positive*: **every one of the 27 firing cells improves the bound**, and six
+    produce a bound where OFF had none at all (nvs19@6 s, nvs23@9/13 s, nvs24@9/13/20 s
+    — scored as certification gains). Representative magnitudes:
+
+    ==========  =====================  =====================
+    cell        bound OFF              bound ON
+    ==========  =====================  =====================
+    nvs17@60 s  -1136.00               **-1100.40** (onto its incumbent)
+    nvs19@60 s  -3838.44               **-2289.47** (40% tighter)
+    nvs23@60 s  -23757.40              **-19262.40** (19% tighter)
+    nvs24@60 s  -138238.27             **-111833.39** (19% tighter)
+    nvs24@20 s  none                   **-174436.22**
+    ==========  =====================  =====================
+
+    Budget utilisation across the panel rises 0.176 -> 0.241: the caller's stated limit
+    is actually spent rather than abandoned at 65%.
+
+    **Honest cost.** Six cells overshoot where OFF did not, all at the two smallest
+    budgets and all small (6.4 s of 6 s, 9.5 s of 9 s — 6-8%). That is the post-loop
+    tail that always existed, now measured against the full limit instead of 0.65xT.
+
+    **Default ON** after that panel; opt out with
+    ``DISCOPT_LP_SPATIAL_RESERVE_EXTENSION=0``.
+    """
+    import os as _os
+
+    return _os.environ.get("DISCOPT_LP_SPATIAL_RESERVE_EXTENSION", "1") not in (
+        "0",
+        "",
+        "false",
+        "False",
+        "off",
+    )
+
+
 if TYPE_CHECKING:
     from discopt.modeling.indexed import IndexedParam, IndexedVar
     from discopt.modeling.sets import _SetBase
@@ -4283,11 +4410,25 @@ class Model:
                 _fb_reserve = 0.0
         _primary_tl = time_limit - _fb_reserve
 
+        # #917: the reserve above is deducted from every in-scope solve and spent by
+        # only the no-incumbent minority, so a primary that finds an incumbent and
+        # then hits its reduced deadline forfeits 35% of the caller's budget — nobody
+        # spends it. Hand that slice to the primary as an *extension it may take only
+        # while holding an incumbent*: the fallback serves exclusively the
+        # no-incumbent case, so the state that triggers the extension is precisely the
+        # state in which the fallback has nothing to contribute, and the #844 path is
+        # preserved unchanged (same 65% primary budget, same 35% fallback budget, same
+        # order). See ``_lp_spatial_reserve_extension_enabled`` for the measurement.
+        _fb_extension = (
+            _fb_reserve if (_fb_reserve > 0.0 and _lp_spatial_reserve_extension_enabled()) else 0.0
+        )
+
         try:
             with deadline_scope(_primary_tl):
                 result = solve_model(
                     self,
                     time_limit=_primary_tl,
+                    incumbent_time_extension=_fb_extension,
                     gap_tolerance=gap_tolerance,
                     threads=threads,
                     deterministic=deterministic,
@@ -4349,6 +4490,16 @@ class Model:
         # Soundness: only ever fills in a MISSING incumbent, and the engine verifies
         # every point it accepts against a ground-truth evaluator, so it cannot weaken
         # or replace an existing certificate.
+        #
+        # #917 leaves this branch's budget at the full reserve rather than clamping it
+        # to the time actually left. The extension can only fire while the primary
+        # holds an incumbent, so a solve that took it never reaches here — the clamp
+        # would guard nothing, and it measurably HARMED the default path: sizing the
+        # fallback from elapsed wall makes it depend on the primary's run-to-run
+        # overshoot, and on nvs13 at a 6 s budget that flipped the reserve across the
+        # 1.0 s floor between two runs of the same configuration (incumbent -580.4 in
+        # one, none in the other). The #844 fallback keeps the budget it was
+        # panelled at.
         if _fb_reserve > 1.0 and result.objective is None:
             try:
                 from discopt._jax.lp_spatial_bb import solve_lp_spatial_bb

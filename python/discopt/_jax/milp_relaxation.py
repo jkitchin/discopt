@@ -23,6 +23,7 @@ from __future__ import annotations
 import itertools
 import logging
 import math
+import time
 from dataclasses import dataclass
 from typing import Callable, Optional, Union
 
@@ -251,6 +252,83 @@ class MilpRelaxationResult:
     reduced_costs: Optional[np.ndarray] = None
 
 
+def _lp_warm_deadline_enabled() -> bool:
+    """Honour the caller's ``time_limit`` on the warm pure-LP node path.
+
+    **The defect it fixes.** ``MilpRelaxationModel.solve`` takes a ``time_limit``,
+    but its default ``backend="simplex"`` pure-LP fast path dropped it on the floor:
+    ``_solve_lp_warm`` / ``_solve_lp_warm_equilibrated`` / ``solve_lp_warm_std`` took
+    no deadline, and ``lp_bindings.rs`` hardcoded ``SimplexOptions { deadline: None }``
+    — while the MILP route (``solve_milp_csc_py(time_limit_s=…)``) wired it up and the
+    dual/primal pivot loops already poll it every 256 pivots. ~13 call sites in
+    ``_jax/mccormick_lp.py`` plus ``lp_spatial_bb.py`` and ``integer_ratio.py`` compute
+    a per-LP budget and pass it here, so the drop was general.
+
+    Measured on nvs24 (``scratchpad/nvs24_arm.py``, ``nvs24_profile_evidence.txt``):
+    ``solve(time_limit=0.202)`` -> ``_solve_lp_warm`` -> **47.03 s**, one
+    ``DualPivotLoop`` 59 494 degenerate dual pivots deep with Bland never activated,
+    turning a 3.9 s solve budget into 53 s (13.5x).
+
+    **Bound-changing, so panel-gated; default OFF.** Opt in with
+    ``DISCOPT_LP_WARM_DEADLINE=1``. Cutting an LP short changes the bound it returns,
+    and on nvs24 the wall win is decisive:
+
+    ======  ==============  ==============  ==============  ==============
+    budget  wall OFF        wall ON         bound OFF       bound ON
+    ======  ==============  ==============  ==============  ==============
+    6 s     55.5 (9.25x)    28.9 (4.81x)    -56272.47       -56272.47
+    30 s    67.8 (2.26x)    37.3 (1.24x)    -56272.47       -56272.47
+    ======  ==============  ==============  ==============  ==============
+
+    **Panel** (``issue917_lp_warm_deadline_panel.py``; 66 in-repo instances at a 15 s
+    budget, OFF/ON interleaved per instance in isolated subprocesses;
+    ``discopt_benchmarks/results/issue917_lp_warm_deadline_panel.json``):
+
+    * *cert-clean*: **YES** — ``cert_regressions=0  lost_incumbents=0  lost_bound=0
+      unsound=0  false_primals=0``. Bounds 3 tighter / 2 looser (contvar 171244.81 ->
+      98924.53 and flay03m 46.51 -> 41.95 are the looser two; both sound).
+    * *net-positive*: **not demonstrated** — total overrun 82.1 s -> 70.9 s (-14%),
+      which sits inside the metric's own noise: three runs of the OFF arm alone gave
+      82.1 / 79.2 / 175.6 s. Cells over budget went 15 -> 18.
+
+    So it stays OFF: cert-clean is necessary, not sufficient (CLAUDE.md §5 bar 2, the
+    ``DISCOPT_CUT_INHERIT`` rule). What would settle it is a load-gated, multi-rep
+    panel over the instances where the deadline actually binds — on the corpus average
+    the effect is diluted by the ~50 instances that finish far inside 15 s and are
+    bit-identical either way.
+
+    **What it took to become cert-clean** — the first two cuts were NOT, and both
+    failures are worth keeping (CLAUDE.md §11):
+
+    1. *The recovery cascade.* Without a ``_timed_out`` guard a deadline exit fell
+       into the equilibrated retry and then the ~170x-slower cold ``solve_milp`` — the
+       recovery meant for ill-conditioning. That *doubled* the corpus overrun the
+       change exists to remove (175.6 s -> 310.3 s), all from one instance:
+       heatexch_gen3 25.7 s -> **254.5 s** (1.7x -> 17.0x). With the guard, 30.7 s.
+    2. *Honouring the deadline cost a BOUND.* bchoco08 went 1.0 -> ``None`` and
+       contvar 171244.81 -> ``None`` — trading a budget overrun for a lost
+       certificate, the wrong trade (CLAUDE.md §1). Three links had to change:
+       :meth:`_stash_deadline_bound` banks the floor, ``mccormick_lp`` adopts it from
+       a non-optimal node, and — the actual blocker — the Rust primal simplex now
+       exports its ``y = B⁻ᵀc_B`` dual candidate on ``IterLimit`` instead of an empty
+       vector, so there is a dual to build the floor from at all. Before that the
+       Python plumbing was banking nothing: measured, ``solve_lp_warm_csc_py`` with
+       ``time_limit_s=0.0`` returned ``dual=[]``.
+    3. *And the panel could not see (2).* It compared bound quality only where BOTH
+       arms were finite, so ``1.0 -> None`` scored as clean and it reported
+       CERT_CLEAN=True twice. ``lost_bound``/``gained_bound`` exist because of that.
+    """
+    import os as _os
+
+    return _os.environ.get("DISCOPT_LP_WARM_DEADLINE", "0") not in (
+        "0",
+        "",
+        "false",
+        "False",
+        "off",
+    )
+
+
 class MilpRelaxationModel:
     """Wrapper around a MILP that exposes a .solve() method.
 
@@ -309,6 +387,44 @@ class MilpRelaxationModel:
         # paths stash it here and it is attached below only if nothing else produced
         # a bound (the hda-class no-bound nodes).
         self._pending_numerical_bound: Optional[float] = None
+        # Neumaier-Shcherbina floor recovered from an LP that YIELDED on the shared
+        # deadline, kept separately from the #517 numerical-failure stash above so
+        # this path cannot change #517's behaviour. Consumed only by
+        # ``_time_limit_result``, i.e. only when the budget is genuinely spent.
+        self._pending_deadline_bound: Optional[float] = None
+
+        # ONE absolute budget for this call, shared by every attempt below
+        # (``_lp_warm_deadline_enabled``). ``time_limit`` is a duration and this
+        # method may try up to three solves — warm, equilibrated, then the
+        # generic/cold path — so handing each a fresh copy of the caller's duration
+        # would silently triple it; spending a single deadline keeps the sum inside
+        # what the caller asked for.
+        #
+        # With the flag OFF this reproduces the historical behaviour exactly: the
+        # warm attempts get no limit at all and the cold path gets a fresh copy of
+        # the caller's duration.
+        _budget_t0 = time.perf_counter()
+        _warm_deadline = _lp_warm_deadline_enabled()
+
+        def _remaining() -> Optional[float]:
+            if time_limit is None:
+                return None
+            if not _warm_deadline:
+                # Pre-flag behaviour: each attempt gets the full duration afresh.
+                return float(time_limit)
+            return max(0.0, float(time_limit) - (time.perf_counter() - _budget_t0))
+
+        def _warm_budget() -> Optional[float]:
+            return _remaining() if _warm_deadline else None
+
+        def _timed_out() -> bool:
+            """The shared budget is spent (only reachable with the flag on)."""
+            if not _warm_deadline or time_limit is None:
+                return False
+            left = _remaining()
+            # ``_remaining`` is Optional only because ``time_limit`` may be None, which
+            # the guard above has already excluded; bind it so the comparison is typed.
+            return left is not None and left <= 0.0
 
         # Warm-startable pure-LP fast path: the spatial cut-separation loop
         # re-solves the SAME structural columns with only rows (cuts) appended, so
@@ -323,7 +439,7 @@ class MilpRelaxationModel:
             and self._A_ub is not None
             and _tuning().lp_warmstart
         ):
-            warm = self._solve_lp_warm(want_marginals=want_marginals)
+            warm = self._solve_lp_warm(want_marginals=want_marginals, time_limit=_warm_budget())
             # A warm-start ``infeasible`` on an ill-conditioned LP can be a
             # numerical false-negative; fall through to the equilibrated re-verify
             # below rather than trust it (a false-infeasible would unsoundly prune
@@ -337,9 +453,34 @@ class MilpRelaxationModel:
             # optimum (verified equal to the old cold ``solve_milp`` path) at warm
             # speed. This replaces the 170x-slower cold MILP-B&B fallthrough that
             # used to handle these ill-conditioned relaxation solves (nvs21).
-            equil = self._solve_lp_warm_equilibrated()
+            # A deadline exit is NOT a numerical failure and must not trigger the
+            # recovery cascade below. The equilibrated retry and the cold
+            # ``solve_milp`` fallthrough exist for ill-conditioning — the cold one is
+            # ~170x slower (see ``_solve_lp_warm_equilibrated``) — and re-running the
+            # same LP on a budget that is already spent can only overshoot further.
+            # The warm attempt is handed the WHOLE remaining budget, so its yielding
+            # means the budget is gone; stop here and report the limit.
+            #
+            # Measured: without this guard the first cut of this change doubled the
+            # corpus overrun it was meant to remove (175.6 s -> 310.3 s over 66
+            # instances at a 15 s budget), and every second of that came from ONE
+            # instance — heatexch_gen3 at 25.7 s -> 254.5 s (1.7x -> 17.0x), each
+            # timed-out node LP cascading into the cold path. Every other instance
+            # improved or was neutral.
+            if _timed_out():
+                return self._time_limit_result()
+            equil = self._solve_lp_warm_equilibrated(time_limit=_warm_budget())
             if equil is not None and equil.status in ("optimal", "infeasible", "unbounded"):
                 return equil
+            if _timed_out():
+                return self._time_limit_result()
+
+        # Same rule at the last seam: the generic/cold path is the most expensive of
+        # the three, so entering it on a spent budget is the worst possible use of an
+        # overrun. (Unreachable unless the warm path declined for a NON-deadline
+        # reason and the budget expired meanwhile.)
+        if _timed_out():
+            return self._time_limit_result()
 
         # backend="auto": HiGHS if present, else POUNCE. backend="simplex" routes
         # to the warm-started-simplex B&B (falls back to auto if unavailable).
@@ -372,7 +513,10 @@ class MilpRelaxationModel:
             b_ub=b_s,
             bounds=bounds_s,
             integrality=self._integrality,
-            time_limit=time_limit,
+            # What is LEFT of the caller's budget, not a fresh copy of it: the warm
+            # and equilibrated attempts above may already have spent some of it.
+            # (Flag OFF: a fresh copy, as before.)
+            time_limit=_remaining(),
             gap_tolerance=gap_tolerance,
         )
 
@@ -494,7 +638,54 @@ class MilpRelaxationModel:
             status=status_str, objective=obj, bound=bound, x=result.x, safe_bound=safe_bound
         )
 
-    def _solve_lp_warm(self, *, want_marginals: bool = False) -> Optional["MilpRelaxationResult"]:
+    def _stash_deadline_bound(self, cert) -> None:
+        """Record the NS safe bound of an LP that yielded, for the deadline path.
+
+        Deliberately NOT gated on ``node_numerical_dual_bound`` (#517). That flag
+        guards using a *numerically broken* solve's dual as a last-resort floor; this
+        stash is consumed only by :meth:`_time_limit_result`, i.e. only when the LP
+        was cut short by a deadline the caller set. The soundness argument is the
+        stronger one and is unconditional: ``g(y)`` is a valid lower bound for ANY
+        multiplier vector by weak duality, so stopping the simplex early can only
+        make the recovered floor looser — never lift it above the true optimum.
+
+        Without this, honouring the deadline COSTS a bound outright: measured at a
+        15 s budget, bchoco08 went from ``bound=1.0`` to ``bound=None`` and contvar
+        from 171244.81 to ``None`` — trading a budget overrun for a lost certificate,
+        which is the wrong trade (CLAUDE.md §1).
+        """
+        if cert is None or getattr(cert, "safe_bound", None) is None:
+            return
+        if not self._objective_bound_valid:
+            return
+        sb = float(cert.safe_bound) + self._obj_offset
+        if not math.isfinite(sb):
+            return
+        prev = self._pending_deadline_bound
+        self._pending_deadline_bound = sb if prev is None else max(prev, sb)
+
+    def _time_limit_result(self) -> "MilpRelaxationResult":
+        """The result of a solve whose shared budget ran out inside the warm path.
+
+        Carries no incumbent and no LP optimum — the LP never finished, so claiming
+        either would be a fabricated bound. It DOES surface the #517 stashed
+        Neumaier-Shcherbina floor when one was recovered (flag-gated, same rule as
+        the generic path below): that bound comes from the engine's own dual and is
+        valid for any multiplier vector by weak duality, so a yielded LP cannot make
+        it unsound — a shorter solve only loosens it.
+        """
+        bound = self._pending_deadline_bound
+        if bound is None and (
+            _tuning().node_numerical_dual_bound and self._pending_numerical_bound is not None
+        ):
+            bound = self._pending_numerical_bound
+        return MilpRelaxationResult(
+            status="time_limit", objective=None, bound=bound, x=None, safe_bound=bound
+        )
+
+    def _solve_lp_warm(
+        self, *, want_marginals: bool = False, time_limit: Optional[float] = None
+    ) -> Optional["MilpRelaxationResult"]:
         """Pure-LP warm-started re-solve via the Rust dual simplex.
 
         Reuses the cached optimal basis from the previous ``.solve()`` when the
@@ -530,7 +721,13 @@ class MilpRelaxationModel:
 
         try:
             result, out_basis, cert = solve_lp_warm_std(
-                self._c, self._A_ub, self._b_ub, self._bounds, in_basis=in_basis, return_cert=True
+                self._c,
+                self._A_ub,
+                self._b_ub,
+                self._bounds,
+                in_basis=in_basis,
+                return_cert=True,
+                time_limit=time_limit,
             )
         except Exception:  # pragma: no cover - defensive; fall back to generic path
             return None
@@ -538,6 +735,7 @@ class MilpRelaxationModel:
             # iter_limit / numerical: let the generic path (with its HiGHS option)
             # handle it; drop the stale basis so the next round cold-starts.
             self._stash_numerical_bound(cert)  # #517 last-resort floor (flag-gated)
+            self._stash_deadline_bound(cert)
             self._warm_basis = None
             return None
         if out_basis is not None:
@@ -604,7 +802,9 @@ class MilpRelaxationModel:
             reduced_costs=reduced_costs,
         )
 
-    def _solve_lp_warm_equilibrated(self) -> Optional["MilpRelaxationResult"]:
+    def _solve_lp_warm_equilibrated(
+        self, *, time_limit: Optional[float] = None
+    ) -> Optional["MilpRelaxationResult"]:
         """Warm-simplex re-solve on the *equilibrated* LP.
 
         The bare warm simplex (:meth:`_solve_lp_warm`) returns ``None`` /
@@ -632,12 +832,19 @@ class MilpRelaxationModel:
                 self._c, self._A_ub, self._b_ub, self._bounds, None
             )
             result, _, cert = solve_lp_warm_std(
-                c_s, sp.csr_matrix(A_s), b_s, bounds_s, in_basis=None, return_cert=True
+                c_s,
+                sp.csr_matrix(A_s),
+                b_s,
+                bounds_s,
+                in_basis=None,
+                return_cert=True,
+                time_limit=time_limit,
             )
         except Exception:  # pragma: no cover - defensive
             return None
         if result is None:
             self._stash_numerical_bound(cert)  # #517 last-resort floor (flag-gated)
+            self._stash_deadline_bound(cert)
             return None
         status_map = {
             SolveStatus.OPTIMAL: "optimal",

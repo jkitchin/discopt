@@ -1828,9 +1828,20 @@ impl<'a> Simplex<'a> {
             // the caller verifies (a Neumaier–Shcherbina safe bound is valid for ANY
             // `y`, so a drifted-basis dual only loosens it, never lifts it above the
             // optimum) — it lets the hda-class no-bound nodes still contribute a sound
-            // lower bound. `IterLimit` and the `failed()` path keep the empty dual
-            // (no usable factorization to btran against).
-            LpStatus::Numerical => {
+            // lower bound.
+            //
+            // `IterLimit` exports it for the same reason and by the same argument.
+            // This arm used to be `Numerical`-only, on the stated grounds that there
+            // is "no usable factorization to btran against" — true of the `failed()`
+            // path, but NOT of an iteration/deadline exit, which stops a perfectly
+            // healthy solve early and leaves its factorization intact (the `is_ok()`
+            // guard below still covers the case where it does not). Keeping the dual
+            // empty there was load-bearing in the wrong direction: with the #917
+            // per-LP deadline it meant an LP cut short by its caller's budget returned
+            // NOTHING — no optimum and no floor — so honouring the budget cost a bound
+            // outright (bchoco08 1.0 -> None, contvar 171244.81 -> None). The `failed()`
+            // path still keeps the empty dual.
+            LpStatus::Numerical | LpStatus::IterLimit => {
                 let mut y: Vec<f64> = self
                     .basis
                     .iter()

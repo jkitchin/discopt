@@ -18,6 +18,7 @@ can fall back.
 from __future__ import annotations
 
 import logging
+import time
 from typing import NamedTuple, Optional, Union, cast
 
 import numpy as np
@@ -388,6 +389,8 @@ def _refined_safe_bound_regularized(
     ub_std: np.ndarray,
     m: int,
     n: int,
+    *,
+    time_limit: Optional[float] = None,
 ) -> Optional[float]:
     """#671 tight dual bound for a numerically-failed node LP, in-house only.
 
@@ -407,11 +410,29 @@ def _refined_safe_bound_regularized(
     lb_c = np.ascontiguousarray(lb_std)
     ub_c = np.ascontiguousarray(ub_std)
     best: Optional[float] = None
+    # ``time_limit`` is the budget of the ONE node LP this sweep is recovering a bound
+    # for, so spend it across the whole sweep rather than handing each of the seven
+    # perturbations a fresh copy (which would multiply the caller's budget by 7).
+    _deadline = None if time_limit is None else time.perf_counter() + max(0.0, time_limit)
     for tau in _REFINE_TAUS:
+        _remaining = None if _deadline is None else max(0.0, _deadline - time.perf_counter())
+        if _remaining == 0.0:
+            break
         b_reg = np.ascontiguousarray(b_vec + tau)
         try:
             _status, _x, _obj, _iters, _cs, _bv, dual, _ray = solve_lp_warm_csc_py(
-                c_c, m, n + m, indptr, indices, data, b_reg, lb_c, ub_c, None, None
+                c_c,
+                m,
+                n + m,
+                indptr,
+                indices,
+                data,
+                b_reg,
+                lb_c,
+                ub_c,
+                None,
+                None,
+                time_limit_s=_remaining,
             )
         except Exception as exc:  # noqa: BLE001 - the next perturbation is tried instead
             logger.debug(
@@ -629,6 +650,7 @@ def solve_lp_warm_std(
     in_basis: Optional[tuple[np.ndarray, np.ndarray]] = None,
     *,
     return_cert: bool = False,
+    time_limit: Optional[float] = None,
 ):
     """Warm-startable **pure-LP** solve of ``min c^T x s.t. A_ub x <= b_ub, bounds``.
 
@@ -644,6 +666,16 @@ def solve_lp_warm_std(
     caller can fall back to a cold/HiGHS path. Soundness: the dual simplex
     converges to the LP optimum exactly as a cold solve (a bad basis is ignored
     inside Rust), so the returned objective/bound is unchanged — only the speed is.
+
+    ``time_limit`` bounds this one LP in wall-clock seconds (``None`` = unbounded,
+    the historical behaviour). It reaches ``SimplexOptions::deadline``, which the
+    dual and primal pivot loops poll, so a stalling LP yields a limit exit instead of
+    running past a budget its caller already computed. Without it every per-node LP
+    budget on this path was silently dropped: on nvs24 one node LP ran **47 s**
+    against the 0.2 s its caller passed (59 494 degenerate dual pivots, Bland never
+    activated), turning a 3.9 s solve budget into 53 s. Soundness is untouched — a
+    deadline exit returns ``None`` (an ``iter_limit``-class result) exactly as a
+    pivot-cap exit does, never a bound.
 
     When ``return_cert`` is set, returns ``(result, out_basis, cert)`` with a
     :class:`LpWarmCert` built from the simplex's own duals / Farkas ray: a
@@ -706,6 +738,7 @@ def solve_lp_warm_std(
         np.ascontiguousarray(ub_std),
         cs0,
         bv0,
+        time_limit_s=time_limit,
     )
 
     def _result_basis_cert():
@@ -771,7 +804,15 @@ def solve_lp_warm_std(
 
         if _tuning_current().lp_iterative_refinement:
             refined = _refined_safe_bound_regularized(
-                solve_lp_warm_csc_py, c_std, a_std, b_vec, lb_std, ub_std, m, n
+                solve_lp_warm_csc_py,
+                c_std,
+                a_std,
+                b_vec,
+                lb_std,
+                ub_std,
+                m,
+                n,
+                time_limit=time_limit,
             )
             if refined is not None and (safe is None or refined > safe):
                 safe = refined

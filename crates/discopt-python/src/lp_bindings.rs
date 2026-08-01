@@ -31,6 +31,34 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 
+/// Turn an optional per-solve wall-clock budget (seconds from now) into the absolute
+/// [`SimplexOptions::deadline`] the simplex loops poll.
+///
+/// `None` and `+inf` both mean "no limit" — `+inf` is the natural way for a caller
+/// with an uncapped budget to spell it, and rejecting it would push a `ValueError`
+/// into a defensive `except` and silently disable the caller's fast path. `Some(0.0)`
+/// is an already-elapsed deadline, i.e. "my budget is spent, return immediately",
+/// which is exactly what a caller whose outer deadline has passed means. Mirrors the
+/// validation in `spatial_bindings.rs`.
+fn parse_deadline(time_limit_s: Option<f64>) -> PyResult<Option<std::time::Instant>> {
+    match time_limit_s {
+        None => Ok(None),
+        Some(seconds) if seconds == f64::INFINITY => Ok(None),
+        Some(seconds) if seconds.is_nan() || seconds < 0.0 => Err(PyValueError::new_err(
+            "time_limit_s must be non-negative and not NaN (use None or +inf for no limit)",
+        )),
+        Some(seconds) => {
+            let duration = std::time::Duration::try_from_secs_f64(seconds)
+                .map_err(|_| PyValueError::new_err("time_limit_s is too large"))?;
+            Ok(Some(
+                std::time::Instant::now()
+                    .checked_add(duration)
+                    .ok_or_else(|| PyValueError::new_err("time_limit_s is too large"))?,
+            ))
+        }
+    }
+}
+
 /// Push an interior LP optimum `x` to a vertex of the optimal face.
 ///
 /// `a` is the C-contiguous `m × n` equality-constraint matrix; `c`, `lb`, `ub`
@@ -483,9 +511,22 @@ pub fn solve_lp_warm_py<'py>(
 /// + slacks, matching the CSC). Returns the same
 /// `(status, x, obj, iters, col_status, basic_vars, dual, ray)` 8-tuple as
 /// [`solve_lp_warm_py`], with the certificates mapped back from any equilibration.
+///
+/// `time_limit_s` is an optional wall-clock budget for this one LP, in seconds:
+/// `None` (the default) means no limit, and the simplex runs to convergence. It maps
+/// straight onto [`SimplexOptions::deadline`], which the dual pivot loop polls every
+/// 256 pivots and the primal likewise, so a stalling LP yields instead of running
+/// unbounded. Note this is `Option`-typed on purpose and does NOT share
+/// [`solve_milp_csc_py`]'s convention, where a bare `0.0` spells "no limit": here
+/// `Some(0.0)` is an already-elapsed deadline that returns immediately, which is
+/// what a caller with a spent budget means. Without this parameter every caller that
+/// computed a per-LP budget had it silently dropped — on nvs24 one node LP ran 47 s
+/// against the 0.2 s its caller passed, 59 494 degenerate dual pivots deep, turning
+/// a 3.9 s solve budget into 53 s.
 #[pyfunction]
 #[pyo3(signature = (c, m, n, col_ptr, row_idx, vals, b, lb, ub,
-                    start_col_status=None, start_basic_vars=None, tol=1e-9, max_iter=100_000))]
+                    start_col_status=None, start_basic_vars=None, tol=1e-9, max_iter=100_000,
+                    time_limit_s=None))]
 #[allow(clippy::too_many_arguments)]
 pub fn solve_lp_warm_csc_py<'py>(
     py: Python<'py>,
@@ -502,6 +543,7 @@ pub fn solve_lp_warm_csc_py<'py>(
     start_basic_vars: Option<PyReadonlyArray1<'py, i64>>,
     tol: f64,
     max_iter: usize,
+    time_limit_s: Option<f64>,
 ) -> PyResult<(
     String,
     Bound<'py, PyArray1<f64>>,
@@ -524,7 +566,7 @@ pub fn solve_lp_warm_csc_py<'py>(
     let opts = SimplexOptions {
         tol,
         max_iter,
-        deadline: None,
+        deadline: parse_deadline(time_limit_s)?,
         // F2: warm dual-simplex stall guard on by default (size-derived cap →
         // cold fallback on trip; bound-neutral). Cold-only entry points ignore it.
         warm_stall_guard: true,

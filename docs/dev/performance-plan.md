@@ -1377,3 +1377,238 @@ Stage-1 validation patch (route `diving` through a per-model evaluator cache):
 > the in-progress convex **LP-OA branch-and-cut kernel (#799/#804)**, not per-node
 > Python-overhead trimming. Root-OBBT budgeting (ex14_2_7 class) is a separate
 > bound-CHANGING candidate (needs the §5 panel).
+
+## 13. #917 budget policy: the #844 reserve is forfeited, and the bound merge that would spend it is dead (falsified 2026-07-31)
+
+> **The defect.** `Model.solve` deducts `0.35 * time_limit` from the caller's budget
+> for every model the #844 no-incumbent fallback *could* serve, and spends it in one
+> case only — the primary returned nothing. A primary that *does* find an incumbent
+> and then hits its reduced deadline forfeits the slice: nobody spends it, and the
+> caller gets `time_limit` at 65% of the limit they stated.
+>
+> **Entry measurement** (19 in-scope instances across both in-repo corpora, 60 s
+> budget, isolated subprocesses; `scratchpad/issue917_entry_panel_T60.json`): 15
+> certify inside the reduced 39 s budget, **1** (nvs24) is the no-incumbent case the
+> reserve exists for, and **3** (nvs17/nvs19/nvs23) stop at ~39 s holding an
+> incumbent with 21 s discarded. `nvs18` certifies at **38.9 s** of the 39 s primary
+> budget — 0.1 s of margin — so the reserve is a latent *certification* regression on
+> the family, not only lost wall.
+>
+> **Falsified: candidate 1, "spend the residual on the fallback and keep the tighter
+> dual bound."** Issue #917 proposed it with an explicit kill criterion ("if the
+> merged bound is no tighter on a corpus panel, this buys nothing"). The criterion is
+> met on every instance of the class — the fallback's bound is 5-50x *looser*:
+>
+> | instance | primary bound (39 s) | reserve bound (21 s) | tighter? |
+> |---|---|---|---|
+> | nvs17 | -1105.89 | -5838.02 | no |
+> | nvs19 | -1104.24 | -16377.19 | no |
+> | nvs23 | -1130.70 | -57328.53 | no |
+>
+> Its primal is worse too on every one (-1068.8 vs -1100.4, -931.2 vs -1097.6, none
+> vs -1124.8). This is the documented ~250x root looseness of the McCormick
+> relaxation on this family (`docs/dev/lp-node-primal-quality.md`), so the merge was
+> **recorded and not shipped**. The budget belongs to the primary.
+>
+> **Shipped instead: candidate 2, the incumbent-conditional budget extension**
+> (`_extend_budget_for_incumbent`, `DISCOPT_LP_SPATIAL_RESERVE_EXTENSION`, default ON
+> after its panel). The search reclaims the reserve at its reduced deadline and only
+> while it already holds an incumbent — the one state in which the #844 fallback
+> provably has nothing to contribute — so #844 keeps its exact budgets and ordering,
+> and a path with no reclaim point (the #764 native kernel is one uninterruptible
+> Rust call) simply keeps today's reduced budget rather than silently losing the
+> fallback's reserve. Panel: 133 cells over a uniform budget grid,
+> `cert_regressions=0 lost_incumbents=0 unsound=0`; nvs18@45 s goes uncertified 0/3 →
+> **certified 3/3** and nvs18@30 s closes 92% of its dual gap (-783.8528 → -778.8359
+> against an incumbent of -778.4), both with zero spread over 3 reps.
+>
+> **Standing negative result.** On nvs17/nvs19/nvs23 the reclaimed time is
+> **neutral**: nvs17 at 60 s goes from 27 to 7391 nodes and the dual bound does not
+> move a digit. That is the NLP-per-node bound freeze on dense integer-bilinear
+> models — the pathology the `lp_spatial=True` engine exists for — and no budget
+> policy can fix it. Anyone measuring a bound improvement on that family from *more
+> time* is measuring noise.
+>
+> **Method note (cost me a wrong conclusion once).** A wall-limited search is **not**
+> node-reproducible: nvs13 at a 6 s budget gives 454 vs 475 nodes, different bounds,
+> on two runs of the identical build. Single-run OFF/ON diffs on time-limited cells
+> are noise — the first 1-rep panel flagged four "looser bound" cells, and every one
+> was a cell where the extension never fired, i.e. two runs of identical code. Score
+> only cells where the mechanism fired, and repeat them.
+
+## 14. #917 follow-up: the warm pure-LP node path drops its caller's deadline (mechanism built, panel FAILED 2026-07-31)
+
+> **The defect.** `MilpRelaxationModel.solve` takes a `time_limit`, and its DEFAULT
+> `backend="simplex"` pure-LP fast path dropped it: `_solve_lp_warm` /
+> `_solve_lp_warm_equilibrated` / `solve_lp_warm_std` took no deadline and
+> `lp_bindings.rs` hardcoded `SimplexOptions { deadline: None }` — while the MILP
+> route (`solve_milp_csc_py(time_limit_s=…)`) wired it up and the dual/primal pivot
+> loops already poll it every 256 pivots. ~13 call sites in `_jax/mccormick_lp.py`
+> plus `lp_spatial_bb.py` and `integer_ratio.py` compute a per-LP budget and pass it
+> here, so the drop was general.
+>
+> **Evidence** (`scratchpad/nvs24_arm.py`, `scratchpad/nvs24_profile_evidence.txt`).
+> nvs24 at a 3.9 s budget: ~53 s (13.5x), reproducibly, of which
+> `separate/univariate_square` is 47.9 s — ONE call,
+> `solve(time_limit=0.202)` → `_solve_lp_warm` → 47.03 s, a single `DualPivotLoop`
+> **59 494 degenerate dual pivots** deep with `DualBlandActivations=0`. Hard cliff:
+> m=1324 rows solves in 1.1 s, m=1334 takes 45 s.
+>
+> **Built:** `time_limit_s` on `solve_lp_warm_csc_py` → `SimplexOptions.deadline`,
+> threaded back up through `solve_lp_warm_std` → `_solve_lp_warm` →
+> `MilpRelaxationModel.solve`, which now spends ONE shared budget across its warm /
+> equilibrated / cold attempts instead of handing each a fresh copy. Behind
+> `DISCOPT_LP_WARM_DEADLINE`.
+>
+> **Panel FAILED → stays OFF** (66 in-repo instances, 15 s budget, OFF/ON interleaved).
+> *Cert-clean*: **no** — 1 certification regression (cvxnonsep_psig40r) and 2 bounds
+> lost outright (bchoco08 1.0 → None, contvar 171244.81 → None), 2 looser vs 3 tighter.
+> *Net-positive*: **no** — total overrun 79.2 s → 85.2 s (flat; the OFF arm alone
+> ranged 78–176 s across runs, so this metric is noisy).
+>
+> **The blocker is precise.** Honouring the deadline costs a *bound*, not just time.
+> `_time_limit_result` does return a sound Neumaier–Shcherbina floor when the yielded
+> simplex leaves a usable dual, but it never reaches the reported bound: the consumer
+> in `_jax/mccormick_lp.py:758,903` adopts a node bound only from a
+> `status == "optimal"` result. Teaching it to accept a rigorous safe bound from a
+> non-optimal node would change the verdict — sound by weak duality, but it touches
+> the bound-adoption logic certification rests on, so: own change, own panel.
+>
+> **Two falsifications of my own work, recorded per §11.**
+>
+> 1. *The recovery cascade.* The first cut had no timeout guard, so a deadline exit
+>    fell into the equilibrated retry and then the ~170x-slower cold `solve_milp`.
+>    That **doubled** the corpus overrun the change exists to remove (175.6 s →
+>    310.3 s), all of it from one instance: heatexch_gen3 25.7 s → **254.5 s**
+>    (1.7x → 17.0x). With the guard, 30.7 s. A deadline is not a numerical failure and
+>    must not trigger the recovery meant for ill-conditioning.
+> 2. *The scoring hole.* The panel first compared bound quality only where BOTH arms
+>    were finite, so `1.0 → None` read as clean and it printed CERT_CLEAN=True twice
+>    before the hole was found. `lost_bound`/`gained_bound` exist because of that. An
+>    instrument that cannot see the most severe outcome in its own domain is worse
+>    than no instrument.
+>
+> **Standing conclusion.** The overrun is real and the plumbing to fix it now exists
+> and is tested; what blocks it is that the solver has no way to bank a dual bound
+> from an LP it cut short. Fix that first, then re-run this panel.
+>
+> **Separate, still open:** the dual-simplex degeneracy stall itself — 59 494
+> degenerate pivots with Bland's rule never activating.
+
+### 14a. Update: the blocker is cleared — the panel is now cert-clean (2026-07-31)
+
+> §14 closed with "the solver has no way to bank a dual bound from an LP it cut
+> short". That is now fixed, and the fix was **not** where the Python-side reasoning
+> put it. Three links had to change, and only the third mattered:
+>
+> 1. `MilpRelaxationModel._stash_deadline_bound` banks the NS floor of a yielded LP
+>    (ungated — #517's flag guards a *numerically broken* dual, a different concern).
+> 2. `_jax/mccormick_lp.py` adopts a finite bound from a `status == "time_limit"`
+>    node result, the same shape as the existing #517 branch beside it.
+> 3. **The actual blocker, in Rust.** `primal.rs` exported its `y = B⁻ᵀc_B` dual
+>    candidate on a `Numerical` exit but kept an EMPTY dual on `IterLimit`, on the
+>    stated grounds that there is "no usable factorization to btran against". That is
+>    true of the `failed()` path but not of an iteration/deadline exit, which stops a
+>    healthy solve early with its factorization intact. Measured directly:
+>    `solve_lp_warm_csc_py(..., time_limit_s=0.0)` returned `dual=[]`, so steps 1-2
+>    were banking nothing and both showed no effect at all when tested.
+>
+> With the dual exported (`is_ok()` guard retained), the two lost bounds return:
+> bchoco08 `None` -> 1.0000000000006 and contvar `None` -> 98924.53 (looser than the
+> OFF arm's 171244.81, but finite and sound). Panel: **CERT_CLEAN=True** —
+> `cert_regressions=0  lost_incumbents=0  lost_bound=0  unsound=0`, bounds 3 tighter /
+> 2 looser.
+>
+> **Still not graduated.** Net-positive is not demonstrated: total overrun 82.1 s ->
+> 70.9 s (-14%) sits inside the metric's own noise — three runs of the OFF arm alone
+> gave 82.1 / 79.2 / 175.6 s — and cells over budget went 15 -> 18. The corpus average
+> is diluted by the ~50 instances that finish far inside 15 s and are bit-identical
+> either way. What would settle it: a load-gated, multi-rep panel over the instances
+> where the deadline actually binds.
+>
+> **Method note.** The Rust change touches an exit path on the DEFAULT route, so it
+> was checked for bound-neutrality independently: 13 certifying instances byte-identical
+> in node_count/objective/bound/status/gap_certified with the flag OFF
+> (`scratchpad/issue917_neutrality.py`), plus `cargo test -p discopt-core` 575 passed.
+> The new dual is consumed only behind flags (`_certify` reads `safe_bound` only from
+> an `optimal` result), which is why the default path does not move.
+
+### 13a. Retraction: #917's reserve-extension graduation is void after #919 (2026-08-01)
+
+> §13 graduated `DISCOPT_LP_SPATIAL_RESERVE_EXTENSION` default-ON on a 133-cell panel
+> whose net-positive case was three cells: nvs18@45 s (uncertified 0/3 → **certified
+> 3/3**), nvs18@30 s (92% of its dual gap closed, zero spread over 3 reps) and
+> nvs13@9 s. **That case no longer exists**, and the cause is not a flaw in the
+> measurement but a change underneath it: #919 re-graduated the #764 native spatial
+> kernel to default-ON, and the kernel certifies all three instances in 2.4–5.4 s —
+> long before the reduced budget can bind.
+>
+> | cell | pre-#919 (the case) | post-#919 (both arms) |
+> |---|---|---|
+> | nvs18@45 s | uncertified 0/3 → certified 3/3 | certifies in 5.4 s |
+> | nvs18@30 s | bound −783.85 → −778.84 | certifies in 5.2 s |
+> | nvs13@9 s | certified 1/3 | certifies in 2.4 s |
+>
+> Re-running the identical panel on the new base: **133 cells, extension fired 0
+> times** (`issue917_reserve_extension_panel_postkernel.json`). The flag is inert, so
+> ON vs OFF is a no-op — and a bound-changing flag with no measurable benefit defaults
+> OFF (§5 bar 2). Flipped back, graduation retracted in the flag docstring.
+>
+> **The defect is not fixed — it moved.** The native kernel is one uninterruptible
+> Rust call that never enters the Python node loops where
+> `_extend_budget_for_incumbent` lives, so a kernel-routed solve still forfeits the
+> reserve. Measured on the new base, nvs17 at a 60 s budget spends **39.4 s in both
+> arms** — the 0.65×T signature exactly, extension never firing. Independently
+> corroborated: 8 of the 19 in-scope instances route to the kernel.
+>
+> **What closing it requires.** The budget decision has to be made up front *inside*
+> the kernel — pass the reserve into the Rust spatial driver and have it extend its own
+> deadline once when it holds an incumbent, mirroring `_extend_budget_for_incumbent` in
+> the Python loops. Issue #917 anticipated exactly this for this path. Until then the
+> flag can only act on models the kernel declines.
+>
+> **Standing lesson (§11).** A graduation panel certifies a flag *against the tree it
+> ran on*. This one was invalidated four days later by an unrelated default flip in
+> another PR, with no code change to the flag itself. When a panel's net-positive case
+> narrows to a handful of instances, it is worth asking which *other* default decides
+> whether those instances even reach the mechanism.
+
+### 13b. Re-graduation: the kernel-side reclaim point passes on a far broader panel (2026-08-01)
+
+> §13a retracted the reserve extension because #919 moved the affected instances onto
+> the native spatial kernel, where the Python-side guard cannot reach — leaving the
+> defect intact (nvs17: 39.4 s of a 60 s budget in both arms) and the flag inert
+> (133 cells, 0 firings). The kernel now has its own reclaim point:
+> `SpatialTreeConfig.incumbent_time_extension` pushes the tree's deadline out once, and
+> only while `incumbent.is_some()`.
+>
+> **Entry experiment first, with a kill criterion**: is the forfeited 35% worth
+> anything on this path? Tested without writing code, by disabling the reserve so the
+> primary got the full budget. It survived easily — nvs17 −1149.20 → −1100.40,
+> nvs19 −4017.37 → −2303.40, nvs23 −23735.23 → −18951.65.
+>
+> **Panel** (same 133 cells, OFF/ON interleaved). Extension fired in **27**.
+> *Cert-clean*: `cert_regressions=0 lost_incumbents=0 lost_bound=0 looser_bound=0
+> worse_objective=0 unsound=0`; no ON-arm bound above a reference optimum.
+> *Net-positive*: **all 27 firing cells improve the bound**, six from no bound at all.
+>
+> | cell | OFF | ON |
+> |---|---|---|
+> | nvs17@60 s | −1136.00 | **−1100.40** (onto its incumbent) |
+> | nvs19@60 s | −3838.44 | **−2289.47** (40% tighter) |
+> | nvs23@60 s | −23757.40 | **−19262.40** (19% tighter) |
+> | nvs24@60 s | −138238.27 | **−111833.39** (19% tighter) |
+> | nvs24@20 s | none | **−174436.22** |
+>
+> Budget utilisation 0.176 → 0.241. Cost: six overshoots OFF did not have, all at the
+> two smallest budgets and all 6–8% (the post-loop tail, now measured against the full
+> limit instead of 0.65×T). **Flag graduated default-ON**, `=0` opt-out retained.
+>
+> **Instrument note (§6), the second such this session.** The first run of this panel
+> reported `extension_fired: 0` while the A/B plainly showed the mechanism working:
+> `budget/incumbent_extension_s` was set only in the Python loops, so the panel was
+> blind on exactly the path being added. That run was killed rather than interpreted,
+> and `SpatialTreeResult.incumbent_extension_s` now carries the reclaimed seconds
+> through to `solver_stats`. Separately, this panel's scorer gained the
+> `lost_bound`/`gained_bound` check that the sibling lp-warm-deadline panel needed —
+> a finite bound going to `None` was invisible to it too. Both panels now score it.
