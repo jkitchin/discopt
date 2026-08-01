@@ -86,6 +86,7 @@ EVAL = "eval"
 #: (1.9-104 ms measured).
 NLP_SOLVE = "nlp_solve"
 
+
 class WorkBudget:
     """A deterministic per-kind work counter, backstopped by a wall deadline.
 

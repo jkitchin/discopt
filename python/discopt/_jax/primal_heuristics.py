@@ -321,7 +321,7 @@ def feasibility_pump(
                     v.ub = fixed.copy()
                 offset += sz
             try:
-                    nlp_result = backend(evaluator, x0, options=opts)
+                nlp_result = backend(evaluator, x0, options=opts)
             except BaseException as exc:
                 # Some NLP backends (pounce via PyO3) raise PanicException, which
                 # is not a subclass of Exception; treat any failure as this round

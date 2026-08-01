@@ -4995,6 +4995,7 @@ def solve_model(
     # preprocessing, and ``_remaining_budget()`` lets each preprocessing phase
     # clamp its own internal budget to the time actually left.
     _solve_t0 = time.perf_counter()
+
     def _remaining_budget() -> float:
         return max(0.0, float(time_limit) - (time.perf_counter() - _solve_t0))
 
