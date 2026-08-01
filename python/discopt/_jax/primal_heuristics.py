@@ -18,6 +18,7 @@ from typing import Callable, Optional
 import numpy as np
 
 from discopt._jax.nlp_evaluator import NLPEvaluator, cached_evaluator
+from discopt._work_budget import EVAL, NLP_SOLVE, WorkBudget
 from discopt.modeling.core import Model, VarType
 
 # #843: the QUBO/Ising local-search primal moved to ``discopt.qubo_primal`` when
@@ -650,6 +651,9 @@ def integer_local_search(
     max_steps: int = 60,
     pair_cap: int = 40,
     time_budget: float = 3.0,
+    eval_budget: Optional[int] = None,
+    solve_budget: Optional[int] = None,
+    deadline: Optional[float] = None,
     feas_tol: float = 1e-6,
     seed: int = 0,
 ) -> Optional[tuple[np.ndarray, float]]:
@@ -671,9 +675,25 @@ def integer_local_search(
     Sound by construction: only points that pass subnlp's integer- and
     constraint-feasibility checks are returned, so the caller may inject them as
     incumbents without affecting any dual bound or certification. The cost is
-    bounded by ``time_budget`` (wall-clock), ``max_restarts`` and ``max_steps``;
-    2-opt is skipped when the integer count exceeds ``pair_cap`` to avoid the
-    O(n^2) neighbourhood blowing up on large models.
+    bounded by ``eval_budget``/``solve_budget`` (deterministic operation counts),
+    ``max_restarts`` and ``max_steps``; 2-opt is skipped when the integer count
+    exceeds ``pair_cap`` to avoid the O(n^2) neighbourhood blowing up on large
+    models.
+
+    **Determinism (issue #912).** How far this search gets used to be decided by
+    a wall clock (``time_budget``), which made the incumbent it returns — and
+    therefore the whole B&B tree below it — a function of machine speed: the
+    descent routinely never converges, so on the measured cliff case ``gear2``
+    closed in 3 nodes with a 5 s budget and 91 nodes with 3 s. The extent is now
+    counted in deterministic operations (:mod:`discopt._work_budget`): whichever
+    of the evaluation cap and the sub-NLP-solve cap is reached first ends the
+    search. The two are counted separately because they differ in cost by four
+    orders of magnitude and by a 27x-varying ratio, so no single currency prices
+    both (see the module docstring). ``deadline`` remains a *backstop* for the
+    caller's ``time_limit`` — it decides when to stop, never how much work to do.
+    Setting both budgets to 0 (``DISCOPT_ILS_EVAL_BUDGET=0
+    DISCOPT_ILS_SOLVE_BUDGET=0``) restores the legacy wall-clock gate on
+    ``time_budget``.
 
     Args:
         model: The optimization model.
@@ -685,8 +705,16 @@ def integer_local_search(
         max_restarts: Number of perturbation restarts.
         max_steps: Max descent steps per restart.
         pair_cap: Max integer count for which 2-opt is enabled.
-        time_budget: Wall-clock budget in seconds (the whole call returns early
-            once exceeded).
+        time_budget: Legacy wall-clock budget in seconds. Used **only** when both
+            deterministic budgets are disabled (set to 0).
+        eval_budget: Max constraint/objective evaluations for the whole call.
+            ``None`` resolves it from ``SolverTuning.ils_eval_budget``.
+        solve_budget: Max continuous-repair sub-NLP solves for the whole call.
+            ``None`` resolves it from ``SolverTuning.ils_solve_budget``.
+        deadline: Absolute ``time.perf_counter()`` timestamp of the caller's
+            overall solve deadline. A backstop only — it stops the search when
+            the user's ``time_limit`` is up, and never decides how much work a
+            within-limit search does.
         feas_tol: Constraint feasibility tolerance.
         seed: RNG seed for reproducible perturbations.
 
@@ -732,11 +760,36 @@ def integer_local_search(
     eff_restarts = min(max_restarts, max(3, 3 * n_int))
     eff_steps = min(max_steps, max(8, 4 * n_int))
 
+    # Deterministic extent gate (issue #912). ``budget`` counts the model-level
+    # operations this search issues; the caller's solve deadline rides along as
+    # a backstop so the heuristic still honours ``time_limit``. With
+    # both budgets 0 the old wall-clock extent gate is restored: an unlimited
+    # counter gated on ``time_budget`` exactly as before, with one deliberate
+    # difference — a caller-supplied solve deadline still applies (as the
+    # earlier of the two), so the escape hatch cannot overrun ``time_limit`` the
+    # way the pre-#912 path could. It is the *extent* gate that is restored, not
+    # the overrun.
+    if eval_budget is None or solve_budget is None:
+        from discopt import solver_tuning as _st
+
+        _tuning = _st.current()
+        if eval_budget is None:
+            eval_budget = _tuning.ils_eval_budget
+        if solve_budget is None:
+            solve_budget = _tuning.ils_solve_budget
+    if int(eval_budget) > 0 or int(solve_budget) > 0:
+        budget = WorkBudget(
+            {EVAL: int(eval_budget), NLP_SOLVE: int(solve_budget)}, deadline=deadline
+        )
+    else:
+        _wall = time.perf_counter() + max(0.0, time_budget)
+        budget = WorkBudget(None, deadline=_wall if deadline is None else min(_wall, deadline))
+
     def violation(x: np.ndarray) -> float:
+        budget.charge(EVAL)
         g = np.asarray(evaluator.evaluate_constraints(x))
         return float(np.sum(np.maximum(0.0, cl - g)) + np.sum(np.maximum(0.0, g - cu)))
 
-    deadline = time.perf_counter() + max(0.0, time_budget)
     has_continuous = bool(np.any(~int_mask))
 
     def _objective_improve(x_feas: np.ndarray, obj_feas: float) -> tuple[np.ndarray, float]:
@@ -765,11 +818,11 @@ def integer_local_search(
         _solve_cap = _ils_cap_mult * max(1, n_int) if _ils_cap_mult > 0 else None
         _solves_used = 0
         improved = True
-        while improved and time.perf_counter() < deadline:
+        while improved and not budget.exhausted():
             improved = False
             for j in int_idx:
                 for d in (-1.0, 1.0, -2.0, 2.0):
-                    if time.perf_counter() >= deadline:
+                    if budget.exhausted():
                         break
                     if _solve_cap is not None and _solves_used >= _solve_cap:
                         return best_x, best_obj
@@ -780,6 +833,7 @@ def integer_local_search(
                     xt[j] = nv
                     if has_continuous:
                         _solves_used += 1
+                        budget.charge(NLP_SOLVE)
                         cand = subnlp(
                             model,
                             xt,
@@ -794,6 +848,7 @@ def integer_local_search(
                     else:
                         if violation(xt) > feas_tol:
                             continue
+                        budget.charge(EVAL)
                         cx, cobj = xt, float(evaluator.evaluate_objective(xt))
                     if cobj < best_obj - 1e-9:
                         best_x, best_obj = cx.copy(), cobj
@@ -828,6 +883,7 @@ def integer_local_search(
         relax_opts = dict(nlp_options) if nlp_options else {}
         relax_opts.setdefault("print_level", 0)
         relax_opts.setdefault("max_iter", _HEURISTIC_NLP_MAX_ITER)
+        budget.charge(NLP_SOLVE)
         relax_res = backend(evaluator, mid, options=relax_opts)
         if relax_res is not None and relax_res.x is not None:
             seeds.append(_round_clip(np.asarray(relax_res.x)))
@@ -840,7 +896,7 @@ def integer_local_search(
     n_seeds = len(seeds)
 
     for restart in range(max(eff_restarts, n_seeds)):
-        if time.perf_counter() >= deadline:
+        if budget.exhausted():
             break
         # Try each seed clean first (descent alone often suffices), then spend
         # remaining restarts perturbing — from a feasible base once one is found,
@@ -868,7 +924,7 @@ def integer_local_search(
 
         cur = violation(xc)
         for _ in range(eff_steps):
-            if cur <= feas_tol or time.perf_counter() >= deadline:
+            if cur <= feas_tol or budget.exhausted():
                 break
             best_v = cur
             best_move: Optional[tuple[tuple[int, float], ...]] = None
@@ -884,7 +940,7 @@ def integer_local_search(
                     if v < best_v - 1e-9:
                         best_v, best_move = v, ((j, nv),)
             # 2-opt fallback only when 1-opt cannot improve (bilinear coupling).
-            if best_move is None and use_2opt and time.perf_counter() < deadline:
+            if best_move is None and use_2opt and not budget.exhausted():
                 for a in range(n_int):
                     ja = int_idx[a]
                     for b in range(a + 1, n_int):
@@ -913,6 +969,7 @@ def integer_local_search(
         # assignment and verify TRUE feasibility. subnlp only returns feasible,
         # integer-consistent points, so anything it gives back is a valid
         # incumbent candidate.
+        budget.charge(NLP_SOLVE)
         repaired = subnlp(
             model,
             xc,
@@ -933,6 +990,18 @@ def integer_local_search(
             # Once feasible, later perturbed restarts dive from this point's
             # neighbourhood (see the restart-base selection above) to improve it.
 
+    # Rule 6/#912: report what actually decided the extent of this search.
+    # ``stopped_on="deadline"`` means the machine's speed cut it short, so the
+    # incumbent it returns (and the tree below it) is NOT reproducible; the
+    # determinism panel reads this line.
+    logger.debug(
+        "integer_local_search: evals=%d solves=%d limits=%s stopped_on=%s seeds=%d",
+        budget.spent(EVAL),
+        budget.spent(NLP_SOLVE),
+        budget.limits,
+        budget.stopped_on,
+        n_seeds,
+    )
     return best
 
 

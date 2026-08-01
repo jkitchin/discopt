@@ -10349,7 +10349,13 @@ def solve_model(
                             result_sols[best_root_idx],
                             backend=_resolve_heuristic_backend(nlp_solver),
                             evaluator=evaluator,
+                            # #912: the extent is a deterministic work budget
+                            # (resolved from SolverTuning.ils_work_budget), not a
+                            # wall clock. ``time_budget`` is only consulted on the
+                            # ``DISCOPT_ILS_WORK_BUDGET=0`` legacy path; the solve
+                            # deadline rides along purely as a time_limit backstop.
                             time_budget=min(5.0, 0.15 * max(1.0, time_limit)),
+                            deadline=_deadline,
                         )
                         if ils is not None:
                             _x_ils, _obj_ils = ils

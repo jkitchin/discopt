@@ -72,6 +72,34 @@ def _env_float(name: str, default: float) -> float:
     return default if raw is None else float(raw)
 
 
+#: Default deterministic operation caps for the root integer local search
+#: (#912). Both are sized from the measured per-operation costs and the measured
+#: consumption of the legacy wall-clock gate over the in-repo MINLPLib corpus;
+#: see ``docs/dev/work-budget-calibration-2026-08-01.md`` for the tables.
+#:
+#: Measured over the 22 ILS-firing in-repo instances, legacy arm at
+#: ``time_limit=60`` (so the full 5 s legacy budget): a search that converged on
+#: its own used at most **796 evaluations and 217 sub-NLP solves**, while the
+#: slowest instance the clock actually cut managed only **13.3 solves/s**
+#: (syn05hfsg).
+#:
+#: Those two facts do not both fit. "Never cut a search the clock let finish"
+#: wants ≥ 217 solves; "never exceed the legacy 5 s envelope" wants ≤ 67 on the
+#: slowest instance. The gap is not a modelling failure — it *is* the bug: the
+#: old gate handed ex1224 217 solves and syn05hfsg 67 in the same five seconds,
+#: purely because their sub-NLPs differ 5x in cost. Any deterministic budget
+#: must land somewhere between, and this one lands in the middle: 128 solves is
+#: ~59 % of the largest natural extent and ~2x the slowest instance's legacy
+#: allowance (≈9.6 s there, against a 5 s legacy ceiling).
+#:
+#: The evaluation cap is not contested — 20 000 is 25x the largest natural
+#: consumption, so it only ever stops a genuinely runaway descent.
+#: ``docs/dev/work-budget-calibration-2026-08-01.md`` records the A/B that
+#: validated the choice.
+_ILS_EVAL_BUDGET_DEFAULT = 20_000
+_ILS_SOLVE_BUDGET_DEFAULT = 128
+
+
 @dataclass(frozen=True)
 class SolverTuning:
     """Advanced relaxation / branch-and-bound tuning for :meth:`Model.solve`.
@@ -746,6 +774,55 @@ class SolverTuning:
     this descent only ever *weakens* the incumbent it might find (every point is
     sub-NLP-verified and re-verified by ``inject_incumbent``); it never touches the
     dual bound or the certificate (heuristic-policy regime, CLAUDE.md §5)."""
+
+    ils_eval_budget: int = field(
+        default_factory=lambda: _env_int("DISCOPT_ILS_EVAL_BUDGET", _ILS_EVAL_BUDGET_DEFAULT)
+    )
+    """Evaluation cap for the root ``integer_local_search``
+    (``DISCOPT_ILS_EVAL_BUDGET``, **default ON**; issue #912).
+
+    The root integer local search used to bound its own extent with a wall clock
+    (``time_budget=min(5.0, 0.15 * time_limit)``). Its descent routinely never
+    converges, so *how far it gets* — and therefore the incumbent it hands the
+    tree — was a function of machine speed: #912 measured ``gear2`` closing in 3
+    nodes at a 5 s budget and 91 nodes at 3 s, with the default sitting exactly
+    on that cliff, and reproduced the flip by scaling the process clock. A
+    search whose result depends on how fast the box is cannot sit on the
+    certificate path, and it silently invalidates every "node counts unchanged"
+    verdict this repo relies on (CLAUDE.md §5, bound-neutral regime).
+
+    The search now counts *operations* instead (:mod:`discopt._work_budget`) and
+    stops at the same point on every machine. This field caps the cheap kind:
+    constraint/objective evaluations, 0.7-2.7 us each as measured. The solve
+    deadline is still passed down as a backstop so ``time_limit`` is honoured;
+    it decides *when to stop*, never *how much work to do*.
+
+    Set this **and** ``ils_solve_budget`` to 0 to restore the legacy wall-clock
+    gate — the debugging escape hatch, not a dead flag. Sound either way: ILS is
+    a pure incumbent finder (every point is sub-NLP-verified and re-verified by
+    ``inject_incumbent``), so changing its extent can only change *which*
+    feasible point it finds, never the dual bound or the certificate."""
+
+    ils_solve_budget: int = field(
+        default_factory=lambda: _env_int("DISCOPT_ILS_SOLVE_BUDGET", _ILS_SOLVE_BUDGET_DEFAULT)
+    )
+    """Sub-NLP-solve cap for the root ``integer_local_search``
+    (``DISCOPT_ILS_SOLVE_BUDGET``, **default ON**; issue #912).
+
+    The companion to :attr:`ils_eval_budget`, capping the expensive kind:
+    continuous-repair NLP solves, 1.9-104 ms each as measured. Whichever cap is
+    reached first ends the search.
+
+    They are separate on purpose, and the separation is a measurement, not a
+    preference. Converting both to one currency at their geomean cost ratio
+    (12 364) was tried first and produced a real regression: ``nvs09``'s
+    evaluation-dominated search was starved (5 -> 29 nodes) at a budget that
+    already gave the solve-dominated ``syn05hfsg`` three times its legacy wall
+    time. The ratio varies 27x across the corpus, so one number cannot price
+    both. Full data in ``docs/dev/work-budget-calibration-2026-08-01.md``.
+
+    Distinct from :attr:`ils_solve_cap`, which limits sub-NLPs *per objective
+    descent* keyed on the integer dimension; this one bounds the whole call."""
 
     disjunctive_config_bound: bool = field(
         default_factory=lambda: _env_flag("DISCOPT_DISJUNCTIVE_CONFIG_BOUND", default=False)

@@ -12,6 +12,40 @@ The release procedure that produces these entries is documented in
 
 ### Added
 
+- **Deterministic work budgets for the root primal heuristics** (`fix`, #912).
+  The search tree was a function of *machine speed*: the root
+  `integer_local_search` bounded its own extent with a wall clock
+  (`time_budget = min(5.0, 0.15·time_limit)`), its descent routinely never
+  converges, so the incumbent it handed the tree — and therefore `node_count` —
+  depended on how fast the box was. #912 measured `gear2` closing in 3 nodes at a
+  5 s budget and 91 at 3 s, with the default sitting exactly on that cliff. This
+  invalidates the repo's bound-neutral verification regime at the root: "node
+  counts exactly unchanged" is only meaningful for a function of the input.
+
+  New `discopt._work_budget.WorkBudget` counts *operations* instead of seconds,
+  per kind: constraint/objective evaluations and continuous-repair sub-NLP
+  solves, each with its own cap (`SolverTuning.ils_eval_budget` /
+  `ils_solve_budget`, `DISCOPT_ILS_EVAL_BUDGET` / `DISCOPT_ILS_SOLVE_BUDGET`,
+  defaults 20 000 / 128; both `0` restores the legacy wall gate). Two counters
+  rather than one converted currency because the conversion was tried first and
+  measurably failed — a sub-NLP costs 2 933-77 964 evaluations depending on the
+  instance, and at the geomean `nvs09` regressed 5 -> 29 nodes while `syn05hfsg`
+  got 3x its legacy wall time. The clock stays only as a **backstop**: the
+  caller's solve deadline is passed down so `time_limit` is still honoured, and
+  `WorkBudget.stopped_on` records whether a search was decided by work
+  (reproducible) or by the clock (not).
+
+  Measured on the in-repo corpus (`item912_clock_determinism_probe.py`): under
+  the old gate 7 of the 22 ILS-firing instances had their extent cut by the clock
+  (nvs09, ex1224, st_e29, ex1225, tspn05, syn05hfsg, fac2) — the gear2 mechanism,
+  in-repo — and two returned different node counts across two identical sweeps on
+  the same machine. With the fix, clock-scale panel at `time_limit=60`:
+  **18 in-scope comparisons, 0 mismatches** at 1x vs 2x (the 4 out-of-scope rows
+  are whole-solve budget starvation, reported with their numbers). Flag ON vs OFF:
+  **88 field comparisons over 22 instances, 0 differences** in status, node count,
+  objective and bound, at +1.6 % total wall. See
+  `docs/dev/work-budget-calibration-2026-08-01.md`.
+
 - **Perspective terms in the convex-kernel producer** (`feat`, #865, inside the
   default-off `DISCOPT_CONVEX_KERNEL` path). Hull-reformulated (`*hfsg`) models
   write their disjunctive nonlinearities as the perspective `s·f(a/s)` with the
