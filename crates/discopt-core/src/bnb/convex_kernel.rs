@@ -421,7 +421,23 @@ impl ConvexKernelSpec {
         max_oa_rounds: usize,
         opts: &SimplexOptions,
     ) -> ConvexNodeResult {
-        self.solve_node_cut(lo, hi, oa_tol, max_oa_rounds, 0, opts)
+        self.solve_node_cut_until(lo, hi, oa_tol, max_oa_rounds, 0, opts, None)
+    }
+
+    /// [`solve_node`](Self::solve_node) bounded by a wall-clock `deadline`. See
+    /// [`solve_node_cut_until`](Self::solve_node_cut_until) for why stopping early is
+    /// a refusal rather than an approximation.
+    #[allow(clippy::too_many_arguments)]
+    pub fn solve_node_until(
+        &self,
+        lo: &[f64],
+        hi: &[f64],
+        oa_tol: f64,
+        max_oa_rounds: usize,
+        opts: &SimplexOptions,
+        deadline: Option<std::time::Instant>,
+    ) -> ConvexNodeResult {
+        self.solve_node_cut_until(lo, hi, oa_tol, max_oa_rounds, 0, opts, deadline)
     }
 
     /// K2: the LP-OA node relaxation WITH in-tree integrality separation. Runs
@@ -440,6 +456,39 @@ impl ConvexKernelSpec {
         max_oa_rounds: usize,
         max_sep_rounds: usize,
         opts: &SimplexOptions,
+    ) -> ConvexNodeResult {
+        self.solve_node_cut_until(lo, hi, oa_tol, max_oa_rounds, max_sep_rounds, opts, None)
+    }
+
+    /// [`solve_node_cut`](Self::solve_node_cut) bounded by a wall-clock `deadline`.
+    ///
+    /// A node's OA/separation loop can run up to
+    /// `max_oa_rounds·(max_sep_rounds+1)+…` LP re-solves, and until #911 the tree
+    /// polled its deadline only BETWEEN nodes — so one slow node overran the whole
+    /// budget with nothing to stop it. Measured on `clay0304hfsg`, `solve_convex_tree`
+    /// handed `time_limit_s = 30` ran **236.24 s** over 93 nodes (7.9x its limit).
+    /// Passing the tree's deadline down lets the loop stop between re-solves.
+    ///
+    /// Stopping here is a REFUSAL, not an approximation — the same argument that
+    /// makes [`appended_row_cap`] sound. The node LP is a relaxation for ANY subset
+    /// of tangents and cuts, so a deadline-stopped node returns a valid, merely
+    /// weaker dual bound; and a vertex reached without OA convergence still violates
+    /// a nonlinear row, so `is_integer_feasible` cannot mistake it for an incumbent.
+    /// A weaker node bound can only make the tree's gap check harder to satisfy, so
+    /// this can never manufacture a certificate that was not already earned.
+    ///
+    /// The check sits after at least one completed re-solve, so the returned bound is
+    /// always a real LP bound rather than the trivial sentinel.
+    #[allow(clippy::too_many_arguments)]
+    pub fn solve_node_cut_until(
+        &self,
+        lo: &[f64],
+        hi: &[f64],
+        oa_tol: f64,
+        max_oa_rounds: usize,
+        max_sep_rounds: usize,
+        opts: &SimplexOptions,
+        deadline: Option<std::time::Instant>,
     ) -> ConvexNodeResult {
         debug_assert_eq!(lo.len(), self.n);
         debug_assert_eq!(hi.len(), self.n);
@@ -484,6 +533,12 @@ impl ConvexKernelSpec {
         let append_cap = appended_row_cap(self.n);
 
         for _ in 0..iter_cap {
+            // Out of time: keep the bound the last re-solve certified and stop. Gated
+            // on a completed round so `last_bound` is a real LP bound, never the
+            // trivial sentinel.
+            if oa_rounds > 0 && deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+                break;
+            }
             oa_rounds += 1;
             let (sp, m, n_total, b, l, u) = assemble(self.n, lo, hi, &rows);
             let mut c = vec![0.0f64; n_total];
@@ -1290,6 +1345,7 @@ impl ConvexKernelSpec {
                     config.max_oa_rounds,
                     config.max_sep_rounds,
                     opts,
+                    config.deadline,
                 ) {
                     Some((res, _pivots, _new_tan)) => {
                         w.age_and_gc(opts.tol.max(1e-7), NATIVELP_POOL_CAP, NATIVELP_MAX_AGE);
@@ -1300,17 +1356,27 @@ impl ConvexKernelSpec {
                         // infeasible" from "numerically failed", so this subtree is
                         // not certified as explored -- unless the cut-free retry
                         // below resolves it (#871).
-                        self.solve_node(&lo, &hi, config.oa_tol, config.max_oa_rounds, opts)
+                        self.solve_node_until(
+                            &lo,
+                            &hi,
+                            config.oa_tol,
+                            config.max_oa_rounds,
+                            opts,
+                            config.deadline,
+                        )
                     }
                 }
             } else {
-                self.solve_node_cut(
+                // #911: the node loop gets the tree's deadline, so a single slow node
+                // can no longer overrun the whole budget between two deadline polls.
+                self.solve_node_cut_until(
                     &lo,
                     &hi,
                     config.oa_tol,
                     config.max_oa_rounds,
                     config.max_sep_rounds,
                     opts,
+                    config.deadline,
                 )
             };
             // #871: a node that breaks down numerically has proven nothing, so
@@ -1353,7 +1419,14 @@ impl ConvexKernelSpec {
             let r = if matches!(r.status, LpStatus::Optimal | LpStatus::Infeasible) {
                 r
             } else {
-                self.solve_node(&lo, &hi, config.oa_tol, config.max_oa_rounds, opts)
+                self.solve_node_until(
+                    &lo,
+                    &hi,
+                    config.oa_tol,
+                    config.max_oa_rounds,
+                    opts,
+                    config.deadline,
+                )
             };
             if r.status != LpStatus::Optimal {
                 // A PROVEN-infeasible node is a legitimate fathom — its subtree is
@@ -1758,6 +1831,7 @@ impl W0WarmLp {
         max_oa_rounds: usize,
         max_sep_rounds: usize,
         opts: &SimplexOptions,
+        deadline: Option<std::time::Instant>,
     ) -> Option<(ConvexNodeResult, usize, usize)> {
         let mut pivots = 0usize;
         let mut new_tangents = 0usize;
@@ -1772,6 +1846,12 @@ impl W0WarmLp {
         let mut restore: Option<(usize, Basis)> = None;
         let iter_cap = max_oa_rounds.max(1) * (max_sep_rounds + 1) + max_sep_rounds + 4;
         for _ in 0..iter_cap {
+            // #911: same deadline stop as `solve_node_cut_until`, for the same reason
+            // and with the same soundness argument (a stopped node returns a weaker
+            // but valid bound). Only after a completed round.
+            if oa_rounds > 0 && deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+                break;
+            }
             oa_rounds += 1;
             if self.dirty {
                 self.rebuild_sp();
@@ -2033,8 +2113,18 @@ impl ConvexKernelSpec {
                 .len()
                 .saturating_sub(self.le_rows.len() + self.eq_rows.len());
             let t1 = std::time::Instant::now();
-            let warm_res =
-                warm.solve_node(self, &lo, &hi, config.oa_tol, config.max_oa_rounds, 0, opts);
+            // No deadline: this is the W2 A/B probe, which times cold vs warm on the
+            // same box and must not have one arm cut short by a clock.
+            let warm_res = warm.solve_node(
+                self,
+                &lo,
+                &hi,
+                config.oa_tol,
+                config.max_oa_rounds,
+                0,
+                opts,
+                None,
+            );
             let warm_us = t1.elapsed().as_secs_f64() * 1e6;
             // Tangent aging + GC (bounds the pool for many-nl-row instances).
             warm.age_and_gc(opts.tol.max(1e-7), gc_pool_cap, gc_max_age);
@@ -2292,6 +2382,99 @@ mod tests {
             truth
         );
         assert!(r.oa_rounds > 1, "OA should take several rounds");
+    }
+
+    /// #911: a node's OA loop honours a wall-clock deadline, and stopping early is a
+    /// REFUSAL (weaker but valid bound), never a tightening.
+    ///
+    /// Same `max t s.t. exp(t) ≤ 5` model, which needs several OA rounds. With a
+    /// deadline already in the past the loop stops after one completed re-solve; the
+    /// bound it returns must still be a valid UPPER bound on the max (≥ truth) and
+    /// must be no TIGHTER than the converged one.
+    #[test]
+    fn node_oa_loop_stops_at_a_deadline_without_tightening_the_bound() {
+        let spec = ConvexKernelSpec {
+            n: 1,
+            c: vec![1.0],
+            sense_max: true,
+            integrality: vec![false],
+            lb: vec![0.0],
+            ub: vec![10.0],
+            le_rows: vec![],
+            eq_rows: vec![],
+            nl_rows: vec![ConvexRow {
+                lin: Affine::default(),
+                terms: vec![CompositeTerm {
+                    coeff: 1.0,
+                    func: ConvexFunc::Exp,
+                    arg: Affine {
+                        cols: vec![0],
+                        coeffs: vec![1.0],
+                        cst: 0.0,
+                    },
+                    scale: None,
+                }],
+                rhs: 5.0,
+            }],
+        };
+        let converged = spec.solve_node(&[0.0], &[10.0], 1e-9, 60, &opts());
+        assert_eq!(converged.status, LpStatus::Optimal);
+
+        let past = std::time::Instant::now() - std::time::Duration::from_secs(1);
+        let stopped = spec.solve_node_until(&[0.0], &[10.0], 1e-9, 60, &opts(), Some(past));
+        assert_eq!(stopped.status, LpStatus::Optimal);
+
+        // The probe must not pass vacuously: the converged solve really did take more
+        // rounds than the stopped one, so the deadline really did cut it short.
+        assert_eq!(stopped.oa_rounds, 1, "expected exactly one completed round");
+        assert!(
+            converged.oa_rounds > stopped.oa_rounds,
+            "deadline changed nothing: converged {} vs stopped {} rounds",
+            converged.oa_rounds,
+            stopped.oa_rounds
+        );
+        // Sound: still a valid upper bound on the max, and never tighter than the
+        // converged bound.
+        let truth = 5.0_f64.ln();
+        assert!(
+            stopped.bound >= truth - 1e-6,
+            "stopped bound {} below truth {truth}",
+            stopped.bound
+        );
+        assert!(
+            stopped.bound >= converged.bound - 1e-9,
+            "stopped bound {} TIGHTER than converged {}",
+            stopped.bound,
+            converged.bound
+        );
+    }
+
+    /// #911: `deadline: None` is the pre-existing path, bit-identical. This is the
+    /// bound-neutrality half of the change (CLAUDE.md §5, Regime N).
+    #[test]
+    fn no_deadline_is_bit_identical_to_the_uninstrumented_node() {
+        let spec = ConvexKernelSpec {
+            n: 2,
+            c: vec![1.0, 1.0],
+            sense_max: true,
+            integrality: vec![true, true],
+            lb: vec![0.0, 0.0],
+            ub: vec![1.0, 1.0],
+            le_rows: vec![LinRow {
+                cols: vec![0, 1],
+                coeffs: vec![1.0, 1.0],
+                rhs: 1.5,
+            }],
+            eq_rows: vec![],
+            nl_rows: vec![],
+        };
+        let a = spec.solve_node_cut(&[0.0, 0.0], &[1.0, 1.0], 1e-9, 10, 8, &opts());
+        let b = spec.solve_node_cut_until(&[0.0, 0.0], &[1.0, 1.0], 1e-9, 10, 8, &opts(), None);
+        assert_eq!(a.status, b.status);
+        assert_eq!(a.bound.to_bits(), b.bound.to_bits(), "bound drifted");
+        assert_eq!(a.raw_bound.to_bits(), b.raw_bound.to_bits());
+        assert_eq!(a.oa_rounds, b.oa_rounds);
+        assert_eq!(a.n_tangents, b.n_tangents);
     }
 
     /// K2: in-node separation tightens the LP bound toward the integer hull

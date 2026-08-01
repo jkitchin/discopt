@@ -85,6 +85,8 @@ value in ``python/tests/data/known_optima.toml``.
 from __future__ import annotations
 
 import os
+import threading
+import time
 from typing import TYPE_CHECKING, Optional
 
 if TYPE_CHECKING:
@@ -687,6 +689,35 @@ def solve_convex_tree(spec: dict, *, time_limit_s: Optional[float] = None, **cfg
     return result
 
 
+# Wall spent on the LAST convex-kernel attempt on this thread, whether or not the
+# attempt was adopted (#911). ``Model.solve`` deducts it from the budget it hands the
+# default path, so a DECLINED attempt can no longer make a ``time_limit=T`` solve run
+# for ~2T. Thread-local because ``Model.solve`` may run concurrently on several
+# threads and a process-global counter would let one solve deduct another's attempt.
+class _AttemptClock(threading.local):
+    def __init__(self) -> None:
+        self.seconds = 0.0
+
+
+_ATTEMPT = _AttemptClock()
+
+
+def last_attempt_seconds() -> float:
+    """Wall of the last convex-kernel attempt on this thread, in seconds.
+
+    **Exactly 0.0 when the flag is off**, which is load-bearing rather than cosmetic:
+    ``Model.solve`` subtracts this from the budget it passes to ``solve_model``, so a
+    nonzero reading on the default path would perturb every deadline-sensitive
+    decision in the solver. :func:`try_convex_solve` therefore resets it to 0.0 on
+    entry and starts the clock only *after* the flag check, so a flag-off solve
+    subtracts a literal zero and stays bit-identical.
+
+    A thread that has never run an attempt reads 0.0: ``threading.local`` re-runs a
+    subclass's ``__init__`` the first time the object is touched on each thread.
+    """
+    return float(_ATTEMPT.seconds)
+
+
 def try_convex_solve(
     model, *, time_limit: float = 3600.0, gap_tolerance: float = 1e-4
 ) -> Optional[SolveResult]:
@@ -698,19 +729,66 @@ def try_convex_solve(
     the incumbent is verified feasible against the pristine model (#779). Everything
     else — flag off, non-convex, not-certified-within-budget, no incumbent, or an
     unverifiable incumbent — returns ``None`` so the caller keeps the (always-correct)
-    default path with its full time budget. This bounds the kernel's cost on large
-    instances it cannot finish (tracked separately for SCIP-parity) and never
-    reports an unsound or uncertified result. Proven-infeasible roots are surfaced.
+    default path. Proven-infeasible roots are surfaced. Never reports an unsound or
+    uncertified result.
+
+    **Budget accounting (#911).** The attempt is bounded, but until this was fixed it
+    was *additive*: ``Model.solve`` afterwards called ``solve_model`` with the
+    caller's FULL ``time_limit``, so an eligible-but-uncertifiable model paid the
+    attempt on top of its whole default budget. Measured OFF-vs-ON, interleaved, 2
+    replicates (``issue911_convex_kernel_budget_entry.py``), medians:
+
+    ==================  ======  ==========  ==========  =========
+    instance            budget  OFF wall    ON before   ON after
+    ==================  ======  ==========  ==========  =========
+    clay0304hfsg          10 s   10.55 s     22.01 s     12.94 s
+    clay0305hfsg          10 s   11.89 s     23.88 s     12.89 s
+    clay0305hfsg          30 s   31.35 s     63.33 s     33.19 s
+    clay0304hfsg          30 s   31.13 s    269.17 s     37.06 s
+    ==================  ======  ==========  ==========  =========
+
+    :func:`last_attempt_seconds` publishes the attempt wall and ``Model.solve``
+    subtracts it. The spec build is inside the clock deliberately: it is the
+    convexity classification, and on the instances this hazard bites it is itself
+    ~1 s of wall. The ``clay0304hfsg`` 30 s cell needed a second fix as well — the
+    native tree polled its own deadline only *between* nodes (see
+    ``ConvexKernelSpec::solve_node_cut_until``); deduction alone would have moved it
+    from 269 s to ~237 s, still 7.9x the stated limit.
+
+    Every instance the kernel *certifies* is bit-unchanged by this: same objective and
+    same node count on all four certifying cells of the panel.
+
+    **Why the attempt is NOT capped to a fraction of the budget** (the first design,
+    falsified before it was built): the kernel needs the large majority of a tight
+    budget on exactly the instances where it wins. Measured here, ``clay0303hfsg``
+    certifies in ~8 s and turns a 10 s OFF-arm ``time_limit`` (no incumbent) into a
+    certified optimum; any fractional cap below ~0.8 of the budget gives that back.
+    The fraction was dropped rather than shipped as a dead knob.
     """
+    _ATTEMPT.seconds = 0.0
+    if not convex_kernel_enabled():
+        return None
+    # Clock starts HERE, after the flag check, so a flag-off solve reads exactly 0.0
+    # (see ``last_attempt_seconds``). The ``finally`` covers EVERY exit — including
+    # the decline paths below and an exception mid-attempt, which still consumed
+    # wall the caller has to pay for.
+    _attempt_t0 = time.perf_counter()
+    try:
+        return _attempt_convex_solve(model, time_limit=time_limit, gap_tolerance=gap_tolerance)
+    finally:
+        _ATTEMPT.seconds = time.perf_counter() - _attempt_t0
+
+
+def _attempt_convex_solve(
+    model, *, time_limit: float, gap_tolerance: float
+) -> Optional[SolveResult]:
+    """The attempt itself; :func:`try_convex_solve` wraps it to clock every exit."""
     import os
-    import time
 
     import numpy as np
 
     from discopt.modeling.core import SolveResult
 
-    if not convex_kernel_enabled():
-        return None
     spec = build_convex_spec(model)
     if spec is None:
         return None
@@ -731,8 +809,8 @@ def try_convex_solve(
     if r["status"] == "infeasible":
         return SolveResult(status="infeasible", bound=r["bound"], wall_time=wall, nlp_bb=False)
     # Use the kernel result ONLY when it CERTIFIED optimality within budget; any
-    # limit / feasible-only / no-incumbent outcome defers to the default path,
-    # which then gets the caller's full time budget.
+    # limit / feasible-only / no-incumbent outcome defers to the default path, which
+    # then gets the caller's budget MINUS what this attempt just spent (#911).
     if r["status"] != "optimal" or incumbent is None or inc_x.size == 0:
         return None
     status = "optimal"

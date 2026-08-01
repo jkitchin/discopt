@@ -4289,11 +4289,37 @@ class Model:
         # model (#779); it returns None — falling through to the default path
         # below, untouched — for the flag-off case, any non-convex model, or an
         # unverifiable incumbent. Wrapped so a kernel error can never break solve.
+        #
+        # #911: a DECLINED attempt is no longer free. ``_ck_elapsed`` is the wall the
+        # attempt actually spent (spec build and the #779 feasibility verification
+        # included) and it is deducted from the budget handed to the default path
+        # below, so ``solve(time_limit=T)`` can no longer run for ~2T because a
+        # convex-eligible model failed to certify. Measured before the fix (medians,
+        # interleaved arms, 2 replicates): ``clay0304hfsg`` at a 10 s budget ran
+        # 22.01 s against an OFF arm of 10.55 s, and at a 30 s budget 269.17 s
+        # against 31.13 s. After: 12.94 s and 37.06 s.
+        #
+        # ``last_attempt_seconds()`` is EXACTLY 0.0 whenever DISCOPT_CONVEX_KERNEL is
+        # off (it is reset on entry and the clock starts after the flag check), so the
+        # default path subtracts a literal zero and every deadline below is unchanged.
+        _ck_elapsed = 0.0
         if not skip_convex_check:
+            _ck_res = None
             try:
-                from discopt.solvers._convex_kernel import try_convex_solve
+                from discopt.solvers._convex_kernel import (
+                    last_attempt_seconds,
+                    try_convex_solve,
+                )
 
-                _ck_res = try_convex_solve(self, time_limit=time_limit, gap_tolerance=gap_tolerance)
+                try:
+                    _ck_res = try_convex_solve(
+                        self, time_limit=time_limit, gap_tolerance=gap_tolerance
+                    )
+                finally:
+                    # In the ``finally`` so an attempt that raised part-way through
+                    # still has its consumed wall deducted -- the caller paid for it
+                    # either way.
+                    _ck_elapsed = last_attempt_seconds()
             except Exception:
                 _ck_res = None
             if _ck_res is not None:
@@ -4375,6 +4401,14 @@ class Model:
         # 0.3 s of a 40 s budget -- so they finish long before the reduced primary
         # budget binds, while the instances this targets (tln4/tln5) burn 100% of the
         # budget and still return nothing. Out-of-scope models keep the full budget.
+        #
+        # #911: everything from here on splits what is LEFT of the caller's budget
+        # after the convex-kernel attempt, not the budget as stated. The reserve is a
+        # fraction of the remainder for the same reason the primary is: 35% of a
+        # budget that has already been spent is not available to reserve. Flag-off
+        # gives ``_ck_elapsed == 0.0`` exactly, so ``_remaining_tl is time_limit``
+        # numerically and both figures below are unchanged.
+        _remaining_tl = max(0.0, time_limit - _ck_elapsed)
         _fb_reserve = 0.0
         if (
             _lp_spatial_fallback_enabled()
@@ -4397,7 +4431,7 @@ class Model:
                 # separate, panel-gated decision — hence the flag rather than the
                 # engine's own (already widened) gate.
                 if _is_in_scope(self, mixed=_lp_spatial_mixed_fallback_enabled()):
-                    _fb_reserve = 0.35 * time_limit
+                    _fb_reserve = 0.35 * _remaining_tl
                     # NOTE: scope is checked here, but whether the engine can actually
                     # build its incremental structure is only known once it runs (see
                     # ``require_incremental`` below). A model that is in scope yet
@@ -4408,7 +4442,11 @@ class Model:
                     # large factorable models, so the cheaper mistake is this one.
             except Exception:
                 _fb_reserve = 0.0
-        _primary_tl = time_limit - _fb_reserve
+        # ``max(0.0, ...)``: an attempt that consumed the whole budget leaves nothing,
+        # and ``solve_model`` handles a spent budget through its existing deadline
+        # short-circuit (a rigorous root-relaxation bound, never a certified claim)
+        # rather than by running an unbounded search.
+        _primary_tl = max(0.0, _remaining_tl - _fb_reserve)
 
         # #917: the reserve above is deducted from every in-scope solve and spent by
         # only the no-incumbent minority, so a primary that finds an incumbent and
