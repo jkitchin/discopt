@@ -419,7 +419,12 @@ class MilpRelaxationModel:
 
         def _timed_out() -> bool:
             """The shared budget is spent (only reachable with the flag on)."""
-            return _warm_deadline and time_limit is not None and _remaining() <= 0.0
+            if not _warm_deadline or time_limit is None:
+                return False
+            left = _remaining()
+            # ``_remaining`` is Optional only because ``time_limit`` may be None, which
+            # the guard above has already excluded; bind it so the comparison is typed.
+            return left is not None and left <= 0.0
 
         # Warm-startable pure-LP fast path: the spatial cut-separation loop
         # re-solves the SAME structural columns with only rows (cuts) appended, so
