@@ -23,7 +23,7 @@ use crate::bnb::spatial_propagate::propagate_spec_fixpoint;
 use crate::lp::simplex::{LpStatus, SimplexOptions};
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 /// An open B&B node in the best-bound frontier: its box and the inherited lower
 /// bound `pb` (the parent's rigorous bound, a valid lower bound for this region).
@@ -113,6 +113,23 @@ pub struct SpatialTreeConfig {
     /// improved. Soundness requires the value to genuinely be attained by a
     /// feasible point.
     pub initial_incumbent: Option<f64>,
+    /// Extra wall-clock time this search may take when [`Self::deadline`] expires —
+    /// but ONLY if it already holds an incumbent (#917).
+    ///
+    /// `Model.solve` withholds 35% of the caller's `time_limit` as a reserve for the
+    /// #844 no-incumbent fallback and spends it only when the primary returns
+    /// nothing, so a primary that finds an incumbent and then hits its reduced
+    /// deadline forfeits that slice outright — nobody spends it. Reclaiming it here is
+    /// safe by construction: the fallback exists exclusively for the no-incumbent
+    /// case, so the state that unlocks this extension is precisely the state in which
+    /// the fallback provably has nothing to contribute.
+    ///
+    /// Taken at most once. `None` (the default) reproduces the pre-#917 deadline
+    /// exactly. Measured on the in-repo corpus at a 60 s budget, giving the reserve
+    /// back is worth a lot on this path: nvs17's bound goes -1149.20 -> -1100.40
+    /// (closing onto its own incumbent), nvs19 -4017.37 -> -2303.40, nvs23
+    /// -23735.23 -> -18951.65.
+    pub incumbent_time_extension: Option<Duration>,
 }
 
 impl Default for SpatialTreeConfig {
@@ -128,6 +145,7 @@ impl Default for SpatialTreeConfig {
             run_propagation: true,
             propagation_rounds: 15,
             initial_incumbent: None,
+            incumbent_time_extension: None,
         }
     }
 }
@@ -153,6 +171,11 @@ pub struct SpatialTreeResult {
     /// subtree of them freezes the frontier — the diagnostic for a bound plateau
     /// caused by certification failure rather than relaxation looseness.
     pub n_uncertified: usize,
+    /// #917: seconds of the caller's withheld reserve this search actually reclaimed
+    /// (0.0 when it never did). Reported so "the extension fired" is directly
+    /// observable instead of inferred from a wall-clock reading — a panel that can
+    /// only guess whether the mechanism ran cannot score it (CLAUDE.md §6).
+    pub incumbent_extension_s: f64,
 }
 
 /// True value of a lifted term at the point `x` (structural columns), for the
@@ -233,6 +256,11 @@ pub fn solve_spatial_tree(
     // the caller holds it); it prunes and cutoff-propagates like any incumbent.
     let mut incumbent: Option<f64> = config.initial_incumbent;
     let mut incumbent_x: Vec<f64> = Vec::new();
+    // #917: the live deadline, which the incumbent-conditional extension below may
+    // push out ONCE. Kept local because `config` is `Copy` and shared.
+    let mut deadline = config.deadline;
+    let mut extension_taken = false;
+    let mut extension_s = 0.0f64;
     let mut node_count = 0usize;
     let mut n_lp_solves = 0usize;
     let mut n_uncertified = 0usize;
@@ -252,10 +280,26 @@ pub fn solve_spatial_tree(
         hi,
     }) = heap.pop()
     {
-        if config
-            .deadline
-            .is_some_and(|deadline| Instant::now() >= deadline)
+        if deadline.is_some_and(|d| Instant::now() >= d) && !extension_taken && incumbent.is_some()
         {
+            // #917: reclaim the caller's withheld #844 reserve, once, and only while
+            // this search already holds an incumbent — the one state in which that
+            // fallback provably has nothing to contribute. Purely additive: with no
+            // extension configured, or with no incumbent, the exit below is the
+            // pre-#917 one.
+            //
+            // This is the kernel's own reclaim point. The Python node loops have one
+            // (`_extend_budget_for_incumbent`) but this kernel is a single
+            // uninterruptible call that never enters them, so before this a
+            // kernel-routed solve forfeited the reserve outright: nvs17 at a 60 s
+            // budget stopped at 39.4 s with its bound 4.4% short of its own incumbent.
+            if let (Some(d), Some(ext)) = (deadline, config.incumbent_time_extension) {
+                deadline = Some(d + ext);
+                extension_taken = true;
+                extension_s = ext.as_secs_f64();
+            }
+        }
+        if deadline.is_some_and(|d| Instant::now() >= d) {
             // Global bound = min(closed regions, open frontier, this unprocessed
             // node). Every term is rigorous for its region, so the partial result
             // remains an honest certificate even though the gap is still open.
@@ -269,6 +313,7 @@ pub fn solve_spatial_tree(
                 node_count,
                 n_lp_solves,
                 n_uncertified,
+                incumbent_extension_s: extension_s,
             };
         }
         // Fathom by the parent bound if the incumbent already dominates it. The
@@ -293,6 +338,7 @@ pub fn solve_spatial_tree(
                 node_count,
                 n_lp_solves,
                 n_uncertified,
+                incumbent_extension_s: extension_s,
             };
         }
         node_count += 1;
@@ -524,6 +570,7 @@ pub fn solve_spatial_tree(
                 node_count,
                 n_lp_solves,
                 n_uncertified,
+                incumbent_extension_s: extension_s,
             }
         }
         None => SpatialTreeResult {
@@ -534,6 +581,7 @@ pub fn solve_spatial_tree(
             node_count,
             n_lp_solves,
             n_uncertified,
+            incumbent_extension_s: extension_s,
         },
     }
 }
@@ -690,6 +738,80 @@ mod tests {
         assert_eq!(res.status, TreeStatus::TimeLimit);
         assert_eq!(res.node_count, 0);
         assert_eq!(res.incumbent, Some(2.0));
+        assert_eq!(res.bound, f64::NEG_INFINITY);
+    }
+
+    // ---- #917: incumbent-conditional budget extension ----------------------
+
+    #[test]
+    fn extension_is_taken_only_with_an_incumbent_in_hand() {
+        // Same already-expired deadline as above, but the caller withheld a reserve
+        // it is willing to hand back. An incumbent IS held, so the search reclaims it
+        // and actually runs instead of exiting at node 0.
+        let spec = xy_min_spec();
+        let cfg = SpatialTreeConfig {
+            deadline: Some(Instant::now()),
+            initial_incumbent: Some(2.0),
+            incumbent_time_extension: Some(Duration::from_secs(30)),
+            ..SpatialTreeConfig::default()
+        };
+        let res = solve_spatial_tree(&spec, &cfg, &SimplexOptions::default());
+        assert!(
+            res.node_count > 0,
+            "the extension must let the search proceed, got node_count=0"
+        );
+        assert!(
+            res.bound > f64::NEG_INFINITY,
+            "a running search must produce a bound"
+        );
+    }
+
+    #[test]
+    fn extension_is_declined_without_an_incumbent() {
+        // The whole safety argument: with no incumbent the search must stop at its
+        // reduced deadline, because that is exactly when the caller's #844
+        // no-incumbent fallback needs the reserve it withheld.
+        let spec = xy_min_spec();
+        let cfg = SpatialTreeConfig {
+            deadline: Some(Instant::now()),
+            initial_incumbent: None,
+            incumbent_time_extension: Some(Duration::from_secs(30)),
+            ..SpatialTreeConfig::default()
+        };
+        let res = solve_spatial_tree(&spec, &cfg, &SimplexOptions::default());
+        assert_eq!(res.status, TreeStatus::TimeLimit);
+        assert_eq!(res.node_count, 0, "no incumbent means no extension");
+    }
+
+    #[test]
+    fn extension_is_taken_at_most_once() {
+        // A zero-length extension with an incumbent: the guard fires once, the
+        // deadline does not move, and the very next check exits. If the "once" latch
+        // were missing this would spin forever rather than return.
+        let spec = xy_min_spec();
+        let cfg = SpatialTreeConfig {
+            deadline: Some(Instant::now()),
+            initial_incumbent: Some(2.0),
+            incumbent_time_extension: Some(Duration::from_secs(0)),
+            ..SpatialTreeConfig::default()
+        };
+        let res = solve_spatial_tree(&spec, &cfg, &SimplexOptions::default());
+        assert_eq!(res.status, TreeStatus::TimeLimit);
+    }
+
+    #[test]
+    fn no_extension_configured_is_the_pre_917_deadline() {
+        // The default must be bit-identical to the old behaviour.
+        let spec = xy_min_spec();
+        let cfg = SpatialTreeConfig {
+            deadline: Some(Instant::now()),
+            initial_incumbent: Some(2.0),
+            incumbent_time_extension: None,
+            ..SpatialTreeConfig::default()
+        };
+        let res = solve_spatial_tree(&spec, &cfg, &SimplexOptions::default());
+        assert_eq!(res.status, TreeStatus::TimeLimit);
+        assert_eq!(res.node_count, 0);
         assert_eq!(res.bound, f64::NEG_INFINITY);
     }
 }

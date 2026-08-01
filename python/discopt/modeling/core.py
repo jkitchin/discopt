@@ -277,15 +277,29 @@ def _lp_spatial_reserve_extension_enabled() -> bool:
     0 times** (``…_panel_postkernel.json``). It is inert, so ON vs OFF is a no-op — and
     a bound-changing flag with no measurable benefit defaults OFF (CLAUDE.md §5 bar 2).
 
-    **The defect it was built for is NOT fixed — it moved.** The kernel is one
-    uninterruptible Rust call that never enters the Python node loops where
-    ``_extend_budget_for_incumbent`` lives, so a kernel-routed solve still forfeits the
-    reserve. Measured on the new base, nvs17 at a 60 s budget: **39.4 s in both arms**,
-    the 0.65xT signature exactly, extension never firing. Closing it there means making
-    the budget decision up front inside the kernel — passing the reserve into the Rust
-    spatial driver so it extends its own deadline once it holds an incumbent, which is
-    what issue #917 anticipated for this path. Until then this flag can only act on the
-    models the kernel declines.
+    **Then the kernel was given its own reclaim point.** The gap above was that the
+    kernel is one uninterruptible Rust call that never enters the Python node loops
+    where ``_extend_budget_for_incumbent`` lives, so a kernel-routed solve forfeited
+    the reserve outright — nvs17 at a 60 s budget spent 39.4 s in both arms, the 0.65xT
+    signature exactly. ``SpatialTreeConfig.incumbent_time_extension`` now mirrors that
+    Python guard inside ``discopt-core``: the spatial tree pushes its own deadline out
+    ONCE, and only while it already holds an incumbent. Measured A/B at a 60 s budget:
+
+    ==========  ==========================  ==========================
+    instance    OFF (stops at 39 s)         ON
+    ==========  ==========================  ==========================
+    nvs17       bound -1140.85              **-1100.4000000000015**, done in 46-50 s
+    nvs19       -3756.60                    **-2278.48** (39% tighter)
+    nvs23       -23791.40                   **-19130.12** (20% tighter)
+    ==========  ==========================  ==========================
+
+    nvs17's bound closes onto its own incumbent (-1100.4000000000003). Those match the
+    entry experiment, which predicted -1100.40 / -2303.40 / -18951.65 by simply not
+    taking the reserve — so the extension recovers essentially all of the available
+    benefit while leaving the #844 fallback intact.
+
+    **Still default OFF**: the corpus graduation panel for the kernel-side mechanism
+    has not been scored yet. The A/B above is three instances, not a panel.
     """
     import os as _os
 

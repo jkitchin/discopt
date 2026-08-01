@@ -1050,6 +1050,7 @@ def _try_native_spatial_kernel(
     t_start,
     rust_time,
     jax_time,
+    incumbent_time_extension: float = 0.0,
 ):
     """Issue #764: if the native Rust spatial kernel is enabled and the model is in
     its covered subset — scalar variables; bilinear / monomial / affine-square / sqrt
@@ -1136,6 +1137,16 @@ def _try_native_spatial_kernel(
             gap_tol=float(gap_tolerance),
             time_limit_s=remaining,
         )
+        # #917: hand the kernel the caller's withheld #844 reserve so it can reclaim
+        # the slice at its own deadline — but only while it already holds an incumbent,
+        # the one state in which that fallback has nothing to contribute. The kernel is
+        # a single uninterruptible call that never enters the Python node loops where
+        # ``_extend_budget_for_incumbent`` lives, so without this a kernel-routed solve
+        # forfeits the reserve outright: nvs17 at a 60 s budget stopped at 39.4 s with
+        # its bound 4.4% short of its own incumbent, and giving the slice back closes
+        # it (-1149.20 -> -1100.40).
+        if incumbent_time_extension > 0.0:
+            solve_kwargs["incumbent_time_extension_s"] = float(incumbent_time_extension)
         if initial_incumbent is not None:
             solve_kwargs["initial_incumbent"] = float(initial_incumbent)
         _t_phase = time.perf_counter()
@@ -1234,6 +1245,13 @@ def _try_native_spatial_kernel(
         _native_jax_s,
         wall_time,
     )
+    # #917: surface the reserve the kernel actually reclaimed, matching the key the
+    # Python node loops use. Without this the graduation panel is BLIND on this path —
+    # it counted 0 firings on a run where the A/B showed the mechanism plainly working
+    # (nvs17 39.4 s -> 49.9 s, bound -1140.85 -> -1100.40). A probe that cannot see
+    # its own mechanism fire cannot score it (CLAUDE.md §6).
+    _ext_s = float(res.get("incumbent_extension_s") or 0.0)
+    _native_stats = {"budget/incumbent_extension_s": _ext_s} if _ext_s > 0.0 else None
     return SolveResult(
         status=native_status,
         objective=obj_val,
@@ -1246,6 +1264,7 @@ def _try_native_spatial_kernel(
         jax_time=jax_total,
         python_time=wall_time - rust_total - jax_total,
         gap_certified=math.isfinite(bound_val),
+        solver_stats=_native_stats,
     )
 
 
@@ -7339,6 +7358,7 @@ def solve_model(
             t_start,
             rust_time,
             jax_time,
+            incumbent_time_extension=incumbent_time_extension,
         )
     if _native_result is not None:
         return _native_result
