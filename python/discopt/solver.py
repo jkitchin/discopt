@@ -1204,6 +1204,12 @@ def _try_native_spatial_kernel(
     # #788: a time-limited exit may carry no primal at all; there is nothing to
     # verify then, and the bound-only result below is reported without one.
     if x_flat is not None:
+        # ``x_flat`` is only ever set non-None alongside a real ``obj_val``: every
+        # branch above that produces a point also leaves the objective set, and the
+        # two branches that clear the objective clear the point with it. Stated for
+        # the type checker (and the next reader), not as a runtime condition — the
+        # ``abs(obj_val)`` below would raise if it were ever violated.
+        assert obj_val is not None
         _t_phase = time.perf_counter()
         _ok, _model_obj = _native_kernel_verify_point(model, x_flat[:n_orig])
         _native_jax_s += time.perf_counter() - _t_phase
