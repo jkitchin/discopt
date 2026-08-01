@@ -69,21 +69,21 @@ def ext(monkeypatch):
 # ── the flag ────────────────────────────────────────────────────────────────
 
 
-def test_flag_defaults_off(ext):
-    """Graduated default-ON on its panel, then RETRACTED to OFF on 2026-08-01.
+def test_flag_defaults_on(ext):
+    """Graduated, retracted, then RE-graduated — default ON.
 
-    The graduation rested on nvs18@45 s (uncertified 0/3 -> certified 3/3), nvs18@30 s
-    (92% of its dual gap closed) and nvs13@9 s. #919 then re-graduated the #764 native
-    spatial kernel default-ON, and the kernel certifies all three in 2.4-5.4 s — long
-    before the reduced budget binds. Re-running the identical panel on that base:
-    133 cells, the extension fired **0 times**. Inert, so it defaults OFF; a
-    bound-changing flag with no measurable benefit does not ship on.
+    The first panel's net-positive case was three cells, and #919 (native spatial
+    kernel default-ON) voided it: the kernel certified all three in 2.4-5.4 s, so the
+    extension never fired and a re-run showed 0 firings in 133 cells. The kernel then
+    got its own reclaim point (``SpatialTreeConfig.incumbent_time_extension``), and the
+    same 133-cell panel re-run passes both bars far more broadly: 27 firings,
+    ``cert_regressions=0 lost_incumbents=0 lost_bound=0 looser_bound=0 unsound=0``, and
+    **all 27 firing cells improve the bound** — six from no bound at all. nvs17@60 s
+    closes onto its own incumbent; nvs19/nvs23/nvs24 at 60 s tighten 19-40%.
 
-    The underlying defect is unfixed, not gone: a kernel-routed solve never enters the
-    Python node loops this extension lives in, and nvs17 at 60 s still spends 39.4 s in
-    both arms — the 0.65xT signature."""
+    ``=0`` remains the opt-out."""
     ext(None)
-    assert _lp_spatial_reserve_extension_enabled() is False
+    assert _lp_spatial_reserve_extension_enabled() is True
 
 
 @pytest.mark.parametrize(

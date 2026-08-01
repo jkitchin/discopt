@@ -156,6 +156,7 @@ def main() -> int:
     lost_incumbents, gained_incumbents = [], []
     better_obj, worse_obj = [], []
     tighter_bound, looser_bound = [], []
+    lost_bound, gained_bound = [], []
     unsound, verification_failed = [], []
     overshoot_new = []
     extension_fired = 0
@@ -188,6 +189,14 @@ def main() -> int:
             worse_obj.append(tag)
 
         ob, nb = off["bound"], on["bound"]
+        # A finite bound going to None is the most severe bound outcome there is, and
+        # comparing only cells where BOTH arms are finite silently skips it. The sibling
+        # lp-warm-deadline panel scored two real regressions (bchoco08 1.0 -> None,
+        # contvar 171244.81 -> None) as clean before this check existed.
+        if ob is not None and nb is None:
+            lost_bound.append(f"{tag} ({ob} -> None)")
+        if ob is None and nb is not None:
+            gained_bound.append(f"{tag} (None -> {nb})")
         if ob is not None and nb is not None:
             if (nb < ob - TOL) if sense == "max" else (nb > ob + TOL):
                 tighter_bound.append(tag)
@@ -227,6 +236,8 @@ def main() -> int:
         "worse_objective": worse_obj,
         "tighter_bound": tighter_bound,
         "looser_bound": looser_bound,
+        "gained_bound": gained_bound,
+        "lost_bound": lost_bound,
         "unsound": unsound,
         "incumbent_verification_failed": verification_failed,
         "new_overshoots": overshoot_new,
@@ -238,7 +249,9 @@ def main() -> int:
     print()
     for k, v in summary.items():
         print(f"{k}: {v}")
-    cert_clean = not (cert_regressions or lost_incumbents or unsound or verification_failed)
+    cert_clean = not (
+        cert_regressions or lost_incumbents or unsound or verification_failed or lost_bound
+    )
     net_positive = bool(cert_gains or gained_incumbents or better_obj or tighter_bound)
     print(f"\nCERT_CLEAN={cert_clean}  NET_POSITIVE={net_positive}")
     print(f"COMPARISONS_EXECUTED={compared}")

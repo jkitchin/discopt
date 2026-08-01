@@ -1572,3 +1572,43 @@ Stage-1 validation patch (route `diving` through a per-model evaluator cache):
 > another PR, with no code change to the flag itself. When a panel's net-positive case
 > narrows to a handful of instances, it is worth asking which *other* default decides
 > whether those instances even reach the mechanism.
+
+### 13b. Re-graduation: the kernel-side reclaim point passes on a far broader panel (2026-08-01)
+
+> §13a retracted the reserve extension because #919 moved the affected instances onto
+> the native spatial kernel, where the Python-side guard cannot reach — leaving the
+> defect intact (nvs17: 39.4 s of a 60 s budget in both arms) and the flag inert
+> (133 cells, 0 firings). The kernel now has its own reclaim point:
+> `SpatialTreeConfig.incumbent_time_extension` pushes the tree's deadline out once, and
+> only while `incumbent.is_some()`.
+>
+> **Entry experiment first, with a kill criterion**: is the forfeited 35% worth
+> anything on this path? Tested without writing code, by disabling the reserve so the
+> primary got the full budget. It survived easily — nvs17 −1149.20 → −1100.40,
+> nvs19 −4017.37 → −2303.40, nvs23 −23735.23 → −18951.65.
+>
+> **Panel** (same 133 cells, OFF/ON interleaved). Extension fired in **27**.
+> *Cert-clean*: `cert_regressions=0 lost_incumbents=0 lost_bound=0 looser_bound=0
+> worse_objective=0 unsound=0`; no ON-arm bound above a reference optimum.
+> *Net-positive*: **all 27 firing cells improve the bound**, six from no bound at all.
+>
+> | cell | OFF | ON |
+> |---|---|---|
+> | nvs17@60 s | −1136.00 | **−1100.40** (onto its incumbent) |
+> | nvs19@60 s | −3838.44 | **−2289.47** (40% tighter) |
+> | nvs23@60 s | −23757.40 | **−19262.40** (19% tighter) |
+> | nvs24@60 s | −138238.27 | **−111833.39** (19% tighter) |
+> | nvs24@20 s | none | **−174436.22** |
+>
+> Budget utilisation 0.176 → 0.241. Cost: six overshoots OFF did not have, all at the
+> two smallest budgets and all 6–8% (the post-loop tail, now measured against the full
+> limit instead of 0.65×T). **Flag graduated default-ON**, `=0` opt-out retained.
+>
+> **Instrument note (§6), the second such this session.** The first run of this panel
+> reported `extension_fired: 0` while the A/B plainly showed the mechanism working:
+> `budget/incumbent_extension_s` was set only in the Python loops, so the panel was
+> blind on exactly the path being added. That run was killed rather than interpreted,
+> and `SpatialTreeResult.incumbent_extension_s` now carries the reclaimed seconds
+> through to `solver_stats`. Separately, this panel's scorer gained the
+> `lost_bound`/`gained_bound` check that the sibling lp-warm-deadline panel needed —
+> a finite bound going to `None` was invisible to it too. Both panels now score it.

@@ -277,33 +277,52 @@ def _lp_spatial_reserve_extension_enabled() -> bool:
     0 times** (``…_panel_postkernel.json``). It is inert, so ON vs OFF is a no-op — and
     a bound-changing flag with no measurable benefit defaults OFF (CLAUDE.md §5 bar 2).
 
-    **Then the kernel was given its own reclaim point.** The gap above was that the
-    kernel is one uninterruptible Rust call that never enters the Python node loops
-    where ``_extend_budget_for_incumbent`` lives, so a kernel-routed solve forfeited
-    the reserve outright — nvs17 at a 60 s budget spent 39.4 s in both arms, the 0.65xT
-    signature exactly. ``SpatialTreeConfig.incumbent_time_extension`` now mirrors that
-    Python guard inside ``discopt-core``: the spatial tree pushes its own deadline out
-    ONCE, and only while it already holds an incumbent. Measured A/B at a 60 s budget:
+    **Then the kernel was given its own reclaim point, and it re-graduated.** The gap
+    above was that the kernel is one uninterruptible Rust call that never enters the
+    Python node loops where ``_extend_budget_for_incumbent`` lives, so a kernel-routed
+    solve forfeited the reserve outright — nvs17 at a 60 s budget spent 39.4 s in both
+    arms, the 0.65xT signature exactly. ``SpatialTreeConfig.incumbent_time_extension``
+    now mirrors that guard inside ``discopt-core``: the spatial tree pushes its own
+    deadline out ONCE, and only while it already holds an incumbent.
 
-    ==========  ==========================  ==========================
-    instance    OFF (stops at 39 s)         ON
-    ==========  ==========================  ==========================
-    nvs17       bound -1140.85              **-1100.4000000000015**, done in 46-50 s
-    nvs19       -3756.60                    **-2278.48** (39% tighter)
-    nvs23       -23791.40                   **-19130.12** (20% tighter)
-    ==========  ==========================  ==========================
+    **Graduation panel, post-#919** (the same 133 cells — 19 in-scope instances across
+    a 6/9/13/20/30/45/60 s grid, OFF/ON interleaved per cell in isolated subprocesses;
+    ``…_panel_kernel.json``). The extension fired in **27** cells, and this time the
+    probe could see it: the kernel now reports the reclaimed seconds through
+    ``solver_stats``, without which the panel scored 0 firings on a run where the
+    mechanism was demonstrably working.
 
-    nvs17's bound closes onto its own incumbent (-1100.4000000000003). Those match the
-    entry experiment, which predicted -1100.40 / -2303.40 / -18951.65 by simply not
-    taking the reserve — so the extension recovers essentially all of the available
-    benefit while leaving the #844 fallback intact.
+    *Cert-clean*: ``cert_regressions=0  lost_incumbents=0  lost_bound=0  looser_bound=0
+    worse_objective=0  unsound=0  false_primals=0``; no ON-arm bound above a reference
+    optimum.
 
-    **Still default OFF**: the corpus graduation panel for the kernel-side mechanism
-    has not been scored yet. The A/B above is three instances, not a panel.
+    *Net-positive*: **every one of the 27 firing cells improves the bound**, and six
+    produce a bound where OFF had none at all (nvs19@6 s, nvs23@9/13 s, nvs24@9/13/20 s
+    — scored as certification gains). Representative magnitudes:
+
+    ==========  =====================  =====================
+    cell        bound OFF              bound ON
+    ==========  =====================  =====================
+    nvs17@60 s  -1136.00               **-1100.40** (onto its incumbent)
+    nvs19@60 s  -3838.44               **-2289.47** (40% tighter)
+    nvs23@60 s  -23757.40              **-19262.40** (19% tighter)
+    nvs24@60 s  -138238.27             **-111833.39** (19% tighter)
+    nvs24@20 s  none                   **-174436.22**
+    ==========  =====================  =====================
+
+    Budget utilisation across the panel rises 0.176 -> 0.241: the caller's stated limit
+    is actually spent rather than abandoned at 65%.
+
+    **Honest cost.** Six cells overshoot where OFF did not, all at the two smallest
+    budgets and all small (6.4 s of 6 s, 9.5 s of 9 s — 6-8%). That is the post-loop
+    tail that always existed, now measured against the full limit instead of 0.65xT.
+
+    **Default ON** after that panel; opt out with
+    ``DISCOPT_LP_SPATIAL_RESERVE_EXTENSION=0``.
     """
     import os as _os
 
-    return _os.environ.get("DISCOPT_LP_SPATIAL_RESERVE_EXTENSION", "0") not in (
+    return _os.environ.get("DISCOPT_LP_SPATIAL_RESERVE_EXTENSION", "1") not in (
         "0",
         "",
         "false",
