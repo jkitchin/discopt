@@ -377,3 +377,149 @@ def test_blocking_load_gate_is_gone():
     assert not hasattr(m, "_await_quiet_machine")
     assert not hasattr(m, "_LOAD_GATE_MAX")
     assert hasattr(m, "_REPLICATES")
+
+
+# ---------------------------------------------------------------------------
+# Spread-vs-effect attribution (#902, third round)
+#
+# Measured on the 2026-07-31 119-instance run. ``heatexch_gen1`` was the ONLY
+# quality violation on the whole corpus and it alone produced GRADUATE: NO. Its ON
+# arm returned 167654.27 / 167545.24 / 167654.27 -- a 109.03 spread -- against an
+# ON/OFF median difference of exactly 109.03. Status-stable in both arms, so the
+# existing quarantine never fired, and the median of that disagreement was reported
+# as "reproduced over 3 replicates".
+#
+# It was not the flag: the kernel never engaged there (binding_called False), the
+# producer probe was timed inside a real solve at 0.016 s, and a 3x2 interleaved
+# re-measurement outside the panel FLIPPED the sign (OFF worse twice). A median
+# without a spread is not a measurement (CLAUDE.md section 9).
+# ---------------------------------------------------------------------------
+
+
+def _heatexch_shape(off_objs, on_objs, m):
+    """The measured shape: both arms ``feasible``, kernel declined, minimize."""
+    pair = _pair(
+        {"status": "feasible", "objective": off_objs[0], "bound": None, "sense": "min"},
+        {
+            "status": "feasible",
+            "objective": on_objs[0],
+            "bound": None,
+            "sense": "min",
+            "engaged": False,
+        },
+    )
+    return _with_replicates(
+        pair,
+        _runs(["feasible"] * len(off_objs), off_objs, False),
+        _runs(["feasible"] * len(on_objs), on_objs, False),
+        m,
+    )
+
+
+def test_difference_inside_the_replicate_spread_is_quarantined():
+    """The exact measured heatexch_gen1 numbers: effect == spread, so unattributable."""
+    m = _load()
+    pair = _heatexch_shape(
+        [167545.24112846807] * 3,
+        [167654.27179214396, 167545.24112846807, 167654.27179214396],
+        m,
+    )
+    v = m._evaluate({"heatexch_gen1": pair}, {})
+    assert v["quality_clean"] is True, (
+        "a difference the arm cannot reproduce against itself must not fire the gate"
+    )
+    assert any("heatexch_gen1" in u for u in v["unstable"]), "it must be REPORTED, not dropped"
+    assert any("SPREAD" in u for u in v["unstable"]), "the reason must name the spread"
+
+
+def test_the_same_difference_fires_when_the_arms_reproduce_themselves():
+    """Control, and the reason this is a strengthening rather than a loosening: the
+    SAME 109-unit regression, with each arm reproducing itself, still fires."""
+    m = _load()
+    pair = _heatexch_shape(
+        [167545.24112846807] * 3,
+        [167654.27179214396] * 3,
+        m,
+    )
+    v = m._evaluate({"heatexch_gen1": pair}, {})
+    assert v["quality_clean"] is False, "a reproducible regression must still fire"
+    assert v["unstable"] == []
+
+
+def test_a_large_effect_survives_a_small_spread():
+    """A 71%-off regression is not quarantined because its arm wobbles by 1%. The
+    rule is signal-vs-noise, not exact reproducibility."""
+    m = _load()
+    pair = _with_replicates(
+        _nvs19_regression(),
+        _runs(["feasible"] * 3, [-1097.6] * 3, False),
+        _runs(["time_limit"] * 3, [-315.0, -312.0, -315.0], True),
+        m,
+    )
+    v = m._evaluate({"nvs19": pair}, {"nvs19": -1098.4})
+    assert v["unstable"] == [], "spread 3.0 against effect 782.6 is attributable"
+    assert v["quality_clean"] is False
+
+
+def test_an_unattributable_instance_cannot_be_counted_as_helped_either():
+    """Symmetry: quarantine removes an instance from BOTH sides of the verdict."""
+    m = _load()
+    pair = _pair(
+        {"status": "feasible", "objective": 100.0, "bound": None, "sense": "min"},
+        {"status": "optimal", "objective": 90.0, "bound": 90.0, "sense": "min", "engaged": True},
+    )
+    # ON reaches optimal every time, but its objective swings by as much as the
+    # claimed improvement, so the improvement is not attributable.
+    pair = _with_replicates(
+        pair,
+        _runs(["feasible"] * 3, [100.0] * 3, False),
+        _runs(["optimal"] * 3, [90.0, 100.0, 90.0], True),
+        m,
+    )
+    v = m._evaluate({"x": pair}, {})
+    assert "x" not in v["helped"], "an unattributable win must not carry net-positive"
+    assert v["net_positive"] is False
+
+
+def test_gaining_a_primal_is_never_quarantined_as_unattributable():
+    """When OFF finds no incumbent at all there is no two-sided objective difference
+    to attribute -- nvs24's real shape -- and it must still count."""
+    m = _load()
+    pair = _pair(
+        {"status": "time_limit", "objective": None, "bound": None, "sense": "min"},
+        {
+            "status": "optimal",
+            "objective": -1031.8,
+            "bound": -1031.8,
+            "sense": "min",
+            "engaged": True,
+            "incumbent_feasible": True,
+            "verified_obj": -1031.8,
+        },
+    )
+    pair = _with_replicates(
+        pair,
+        _runs(["time_limit"] * 3, [None] * 3, False),
+        _runs(["optimal"] * 3, [-1031.8] * 3, True),
+        m,
+    )
+    v = m._evaluate({"nvs24": pair}, {"nvs24": -1033.2})
+    assert v["unstable"] == []
+    assert "nvs24" in v["helped"]
+
+
+def test_objective_spread_units():
+    m = _load()
+    assert m._objective_spread(_runs(["a"] * 3, [1.0, 3.0, 2.0], True)) == 2.0
+    # No replicate found a primal: "no primal" is itself reproducible.
+    assert m._objective_spread(_runs(["a"] * 3, [None] * 3, True)) == 0.0
+    # Some found one and others did not: maximal disagreement, not a small spread.
+    assert m._objective_spread(_runs(["a"] * 3, [1.0, None, 1.0], True)) == float("inf")
+
+
+def test_spread_threshold_is_not_a_tuned_number():
+    """The 2026-07-31 verdict does not depend on where in (0, 1] the threshold sits:
+    the decisive instance sat at effect/spread = 1.0 and every other decisive instance
+    at 0.0 (spread exactly zero in both arms)."""
+    m = _load()
+    assert 1.0 < m._MIN_EFFECT_TO_SPREAD <= 4.0

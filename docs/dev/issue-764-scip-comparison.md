@@ -315,3 +315,81 @@ Python-engine smoke tests to the engine they validate) so default-ON does not si
 disable callbacks/heuristics/pools. Until then the flag stays opt-in
 (`DISCOPT_NATIVE_SPATIAL_KERNEL=1`) — which already certifies tanksize, the issue's
 definition of done.
+
+## RE-GRADUATION (2026-07-31) — default-ON, on the first valid panel this flag has had
+
+The 2026-07-19 decision above ("KEEP OPT-IN") and the 2026-07-27 graduation that
+followed it are both superseded. The 2026-07-27 graduation was **not validly earned**:
+the panel that produced it was blind on three independent counts (it enumerated only
+`minlplib_nl`, so it never saw nvs17/19/24; every certification check required a side to
+be `optimal`, so nothing fired when neither run certified; and it had no defence against
+machine load). It shipped a seed defect that returned incumbents ~71% from the reference
+optimum on the nvs family — #902, root-caused and fixed in #904.
+
+Both blockers listed in the 2026-07-19 section are now **resolved**, and the resolutions
+are measured, not argued:
+
+1. **Blast radius on the smoke gate — RESOLVED.** The 2026-07-19 measurement was "with
+   the flag forced ON, 20 of the `-m smoke` tests fail (807 pass)". Re-measured on
+   today's tree: **904 passed, 1 skipped, 2 xpassed — identical to the flag off.** #789's
+   `_native_kernel_feature_safe` routes any solve requesting callbacks, lazy
+   constraints, warm start, a non-default McCormick mode, a solution pool or explicit
+   tuning to the Python engine, so a default-ON no longer disables validated behaviour.
+   No test was edited to achieve this.
+2. **Runaway — RESOLVED** by #788/#795. The 2026-07-19 evidence was `contvar`:
+   OFF 65 s → ON >200 s. Today, same instance, same 60 s budget: **OFF 62.0 s → ON
+   61.4 s**.
+
+### The panel
+
+`discopt_benchmarks/scripts/issue764_native_kernel_graduation_panel.py` over the
+**119-instance union** of both in-repo corpora (neither is a superset of the other), 60 s
+budget, one subprocess per (instance, flag), decisive instances replicated 3× with the
+arms interleaved. Run twice:
+
+| artifact | cert-clean | quality-clean | net-positive | verdict |
+|---|---|---|---|---|
+| `..._20260731T202847Z` | PASS (0 violations, 100/119 oracle-checked) | **FAIL (1)** | engaged 20, helped 3, Δ −0.004 s | **NO** |
+| `..._20260731T232844Z` | PASS (0 violations, 100/119 oracle-checked) | PASS | engaged 20, helped 3, Δ −0.002 s | **YES** |
+
+**The difference between the two runs is the instrument, not the kernel.** The lone
+quality violation was `heatexch_gen1`, whose ON arm returned 167654.27 / 167545.24 /
+167654.27 — a spread of 109.031 — against an ON/OFF median difference of 109.031.
+Effect/spread = 1.0. The panel took medians and never computed a spread, which is
+CLAUDE.md §9 applied to the panel itself. Three independent measurements say the flag did
+not cause it: the kernel **never engaged** there (`binding_called` False, so both arms run
+the same engine), its producer probe was timed inside a real solve at **0.016 s** (which
+cannot account for the 107 → 89 node gap between the two answers), and a 3×2 interleaved
+re-measurement outside the panel **flipped the sign** — OFF returned the worse value twice.
+On the confirming run the instance was not even decisive: both arms returned 167545.24.
+
+The panel now requires a claimed objective difference to exceed the within-arm spread by
+2× before attributing it to the flag, and quarantines it as unresolved otherwise. That is
+a strengthening — it removes an instance from *both* sides, and a reproducible regression
+still fires — and it is not a tuned threshold: on the first run **31 of 32 decisive
+instances had spread exactly 0.0 in both arms**, so effect/spread is 0 for every one of
+them and 1.0 for `heatexch_gen1`. Any threshold in (0, 1] gives the same verdict.
+
+Both runs recorded a peak 1-min load above 128 (an unrelated build in another session on
+the same workstation). Zero instances were quarantined for replicate disagreement in
+either run, which is the replication design doing its job — the load moved wall times but
+not the statuses or objectives the verdict is computed from.
+
+### What the flag buys, measured
+
+| instance | OFF | ON |
+|---|---|---|
+| `tanksize` | `feasible`, 60.3 s | **`optimal`**, 17.3 s |
+| `nvs17` | `feasible`, 39.4 s | **`optimal`**, 16.6 s |
+| `st_e31` | `feasible`, 60.7 s | **`optimal`**, 2.1 s |
+| `nvs24` | `time_limit`, **no primal** | `time_limit`, primal −1031.8 (ref −1033.2) |
+| `nvs19` | `feasible`, −1097.6 | `time_limit`, **−1098.2** (ref −1098.4) |
+
+It engages on 20 of 119 and costs nothing measurable on the 99 it declines (median
+non-engaged wall Δ −0.002 s). Every engaged ON-optimal incumbent was independently
+feasibility-verified against the original model, and no ON dual bound passed a reference
+optimum.
+
+**Default: ON** (`DISCOPT_NATIVE_SPATIAL_KERNEL=0` opts out; the Python path is
+unchanged and remains the fallback for every declined model). The nightly panel remains
+the ongoing regression watch.
