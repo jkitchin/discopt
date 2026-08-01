@@ -69,12 +69,21 @@ def ext(monkeypatch):
 # ── the flag ────────────────────────────────────────────────────────────────
 
 
-def test_flag_defaults_on(ext):
-    """Default ON after the graduation panel (133 cells, cert_regressions=0,
-    lost_incumbents=0, unsound=0; nvs18@45 s goes uncertified 0/3 -> certified 3/3 and
-    nvs18@30 s closes 92% of its dual gap). ``=0`` remains the opt-out — CLAUDE.md §5."""
+def test_flag_defaults_off(ext):
+    """Graduated default-ON on its panel, then RETRACTED to OFF on 2026-08-01.
+
+    The graduation rested on nvs18@45 s (uncertified 0/3 -> certified 3/3), nvs18@30 s
+    (92% of its dual gap closed) and nvs13@9 s. #919 then re-graduated the #764 native
+    spatial kernel default-ON, and the kernel certifies all three in 2.4-5.4 s — long
+    before the reduced budget binds. Re-running the identical panel on that base:
+    133 cells, the extension fired **0 times**. Inert, so it defaults OFF; a
+    bound-changing flag with no measurable benefit does not ship on.
+
+    The underlying defect is unfixed, not gone: a kernel-routed solve never enters the
+    Python node loops this extension lives in, and nvs17 at 60 s still spends 39.4 s in
+    both arms — the 0.65xT signature."""
     ext(None)
-    assert _lp_spatial_reserve_extension_enabled() is True
+    assert _lp_spatial_reserve_extension_enabled() is False
 
 
 @pytest.mark.parametrize(

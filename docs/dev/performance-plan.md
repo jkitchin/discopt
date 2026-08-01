@@ -1532,3 +1532,43 @@ Stage-1 validation patch (route `diving` through a per-model evaluator cache):
 > (`scratchpad/issue917_neutrality.py`), plus `cargo test -p discopt-core` 575 passed.
 > The new dual is consumed only behind flags (`_certify` reads `safe_bound` only from
 > an `optimal` result), which is why the default path does not move.
+
+### 13a. Retraction: #917's reserve-extension graduation is void after #919 (2026-08-01)
+
+> §13 graduated `DISCOPT_LP_SPATIAL_RESERVE_EXTENSION` default-ON on a 133-cell panel
+> whose net-positive case was three cells: nvs18@45 s (uncertified 0/3 → **certified
+> 3/3**), nvs18@30 s (92% of its dual gap closed, zero spread over 3 reps) and
+> nvs13@9 s. **That case no longer exists**, and the cause is not a flaw in the
+> measurement but a change underneath it: #919 re-graduated the #764 native spatial
+> kernel to default-ON, and the kernel certifies all three instances in 2.4–5.4 s —
+> long before the reduced budget can bind.
+>
+> | cell | pre-#919 (the case) | post-#919 (both arms) |
+> |---|---|---|
+> | nvs18@45 s | uncertified 0/3 → certified 3/3 | certifies in 5.4 s |
+> | nvs18@30 s | bound −783.85 → −778.84 | certifies in 5.2 s |
+> | nvs13@9 s | certified 1/3 | certifies in 2.4 s |
+>
+> Re-running the identical panel on the new base: **133 cells, extension fired 0
+> times** (`issue917_reserve_extension_panel_postkernel.json`). The flag is inert, so
+> ON vs OFF is a no-op — and a bound-changing flag with no measurable benefit defaults
+> OFF (§5 bar 2). Flipped back, graduation retracted in the flag docstring.
+>
+> **The defect is not fixed — it moved.** The native kernel is one uninterruptible
+> Rust call that never enters the Python node loops where
+> `_extend_budget_for_incumbent` lives, so a kernel-routed solve still forfeits the
+> reserve. Measured on the new base, nvs17 at a 60 s budget spends **39.4 s in both
+> arms** — the 0.65×T signature exactly, extension never firing. Independently
+> corroborated: 8 of the 19 in-scope instances route to the kernel.
+>
+> **What closing it requires.** The budget decision has to be made up front *inside*
+> the kernel — pass the reserve into the Rust spatial driver and have it extend its own
+> deadline once when it holds an incumbent, mirroring `_extend_budget_for_incumbent` in
+> the Python loops. Issue #917 anticipated exactly this for this path. Until then the
+> flag can only act on models the kernel declines.
+>
+> **Standing lesson (§11).** A graduation panel certifies a flag *against the tree it
+> ran on*. This one was invalidated four days later by an unrelated default flip in
+> another PR, with no code change to the flag itself. When a panel's net-positive case
+> narrows to a handful of instances, it is worth asking which *other* default decides
+> whether those instances even reach the mechanism.

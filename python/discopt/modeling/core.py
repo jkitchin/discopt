@@ -254,47 +254,42 @@ def _lp_spatial_reserve_extension_enabled() -> bool:
     ``discopt_benchmarks/results/issue917_reserve_extension_panel.json``.
 
     *Cert-clean*: ``cert_regressions=0  lost_incumbents=0  unsound=0
-    false_primals=0`` — no bound above a reference optimum, none above its own
-    incumbent.
+    false_primals=0``. *Net-positive* (3-rep re-run of the cells where it fires):
+    nvs18@45 s uncertified 0/3 -> **certified 3/3**; nvs18@30 s closed 92% of its dual
+    gap (-783.8528 -> -778.8359 against an incumbent of -778.4), zero spread; nvs13@9 s
+    certified 1/3. That panel graduated the flag default-ON.
 
-    *Net-positive*: confirmed on a 3-rep re-run of the cells where the extension
-    fires (``…_reps.json``; a wall-limited search is not node-reproducible, so single
-    runs cannot separate signal from noise — nvs13 at 6 s gives 454 vs 475 nodes on
-    two runs of the identical build):
+    **RETRACTED 2026-08-01 — back to default OFF.** That graduation is void on the
+    current tree, and the reason is not a flaw in the measurement but a change beneath
+    it: #919 re-graduated the **#764 native spatial kernel to default-ON**, and the
+    kernel now certifies exactly the instances the case rested on, long before the
+    reduced budget can bind:
 
-    ==========  ====  ===========================  ===========================
-    cell        ext   OFF (3 reps)                 ON (3 reps)
-    ==========  ====  ===========================  ===========================
-    nvs18@45 s  15.7  uncertified 0/3, bd -781.87  **certified 3/3**, bd -778.4
-    nvs18@30 s  10.5  bound -783.8528 (sd 0)       **bound -778.8359** (sd 0)
-    nvs13@9 s    3.2  uncertified 0/3, bd -588.96  certified 1/3
-    ==========  ====  ===========================  ===========================
+    ==========  =========================  =============================
+    cell        pre-#919 (the case)        post-#919 (both arms)
+    ==========  =========================  =============================
+    nvs18@45 s  uncertified 0/3 -> 3/3     certifies in **5.4 s**
+    nvs18@30 s  bound -783.85 -> -778.84   certifies in **5.2 s**
+    nvs13@9 s   certified 1/3              certifies in **2.4 s**
+    ==========  =========================  =============================
 
-    nvs18@30 s is the clean bound result: the dual gap to the incumbent (-778.4)
-    falls from 5.45 to 0.44, a 92% reduction, reproducibly and with zero spread.
-    nvs13@9 s is intermittent because its certification time straddles that budget —
-    it is never *worse* than OFF, just not always better.
+    Re-running the identical panel on the new base: **133 cells, the extension fired
+    0 times** (``…_panel_postkernel.json``). It is inert, so ON vs OFF is a no-op — and
+    a bound-changing flag with no measurable benefit defaults OFF (CLAUDE.md §5 bar 2).
 
-    On nvs17/nvs19/nvs23 the extension is **neutral**: it buys thousands of extra
-    nodes (nvs17 at 60 s: 27 -> 7391) and the dual bound does not move a digit. That
-    is the known freeze of the NLP-per-node path on dense integer-bilinear models
-    (the pathology the ``lp_spatial=True`` engine was built for), not something this
-    change can address — but neutral there and positive elsewhere still clears the
-    bar, and the caller gets the budget they asked for either way.
-
-    **Honest cost.** At small budgets the ON arm's wall runs past the stated limit by
-    the post-loop tail that was always there (nvs13 at 9 s: 9.5-10.6 s). OFF hides the
-    same tail by stopping the search at 65%; it is not new overshoot, it is the same
-    overshoot measured against the full limit. Instances that overrun grossly today
-    (nvs24: 58.8 s against a 9 s budget) do so identically in both arms — a separate
-    #654-class defect.
-
-    **Default ON** after that panel; opt out with
-    ``DISCOPT_LP_SPATIAL_RESERVE_EXTENSION=0``.
+    **The defect it was built for is NOT fixed — it moved.** The kernel is one
+    uninterruptible Rust call that never enters the Python node loops where
+    ``_extend_budget_for_incumbent`` lives, so a kernel-routed solve still forfeits the
+    reserve. Measured on the new base, nvs17 at a 60 s budget: **39.4 s in both arms**,
+    the 0.65xT signature exactly, extension never firing. Closing it there means making
+    the budget decision up front inside the kernel — passing the reserve into the Rust
+    spatial driver so it extends its own deadline once it holds an incumbent, which is
+    what issue #917 anticipated for this path. Until then this flag can only act on the
+    models the kernel declines.
     """
     import os as _os
 
-    return _os.environ.get("DISCOPT_LP_SPATIAL_RESERVE_EXTENSION", "1") not in (
+    return _os.environ.get("DISCOPT_LP_SPATIAL_RESERVE_EXTENSION", "0") not in (
         "0",
         "",
         "false",
