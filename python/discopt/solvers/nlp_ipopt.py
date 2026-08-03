@@ -53,6 +53,32 @@ _IPOPT_STATUS_MAP: dict[int, SolveStatus] = {
 }
 
 
+def _charge_evaluator(method):
+    """Charge a derivative callback's time to the evaluator's layer.
+
+    This adapter is the *only* path from the NLP subsolver (POUNCE or cyipopt,
+    both native) back into the Python evaluator, so it is the correct seam for
+    attribution. Without it, the callbacks run inside ``charge("pounce")`` and
+    POUNCE's bucket absorbs the derivative cost — the same kind of cross-layer
+    inflation the layer profile exists to expose.
+
+    The bucket is ``jax`` because today's evaluator is JAX-backed. When a
+    tape-backed evaluator lands (it is native Rust), its callbacks should charge
+    ``rust`` instead, and the layer profile will show the shift directly — which
+    is the measurement that justifies that change.
+    """
+    import functools
+
+    from discopt import _timing
+
+    @functools.wraps(method)
+    def wrapper(self, *args, **kwargs):
+        with _timing.charge("jax"):
+            return method(self, *args, **kwargs)
+
+    return wrapper
+
+
 class _IpoptCallbacks:
     """Adapter mapping NLPEvaluator methods to cyipopt.Problem callbacks."""
 
@@ -64,15 +90,19 @@ class _IpoptCallbacks:
             hasattr(evaluator, "has_sparse_structure") and evaluator.has_sparse_structure()
         )
 
+    @_charge_evaluator
     def objective(self, x: np.ndarray) -> float:
         return self._ev.evaluate_objective(x)
 
+    @_charge_evaluator
     def gradient(self, x: np.ndarray) -> np.ndarray:
         return self._ev.evaluate_gradient(x)
 
+    @_charge_evaluator
     def constraints(self, x: np.ndarray) -> np.ndarray:
         return self._ev.evaluate_constraints(x)
 
+    @_charge_evaluator
     def jacobian(self, x: np.ndarray) -> np.ndarray:
         if self._use_sparse:
             return self._ev.evaluate_jacobian_values(x)
@@ -80,6 +110,7 @@ class _IpoptCallbacks:
         jac = self._ev.evaluate_jacobian(x)
         return jac.flatten()
 
+    @_charge_evaluator
     def jacobianstructure(self) -> tuple[np.ndarray, np.ndarray]:
         if self._use_sparse:
             return self._ev.jacobian_structure()
@@ -87,6 +118,7 @@ class _IpoptCallbacks:
         rows, cols = np.meshgrid(np.arange(self._m), np.arange(self._n), indexing="ij")
         return (rows.flatten(), cols.flatten())
 
+    @_charge_evaluator
     def hessian(self, x: np.ndarray, lagrange: np.ndarray, obj_factor: float) -> np.ndarray:
         if self._use_sparse:
             return self._ev.evaluate_hessian_values(x, obj_factor, lagrange)
@@ -100,6 +132,7 @@ class _IpoptCallbacks:
         rows, cols = self.hessianstructure()
         return h[rows, cols]
 
+    @_charge_evaluator
     def hessianstructure(self) -> tuple[np.ndarray, np.ndarray]:
         if self._use_sparse:
             return self._ev.hessian_structure()

@@ -1986,11 +1986,20 @@ class SolveResult:
     mip_count : int
         Number of MIP/MILP solves performed by the algorithm, when tracked.
     rust_time : float
-        Time spent in the Rust backend (B&B tree management).
-    jax_time : float
-        Time spent in JAX (NLP evaluations, autodiff).
+        Time spent in native Rust — the discopt core (B&B tree, simplex, presolve)
+        **and** POUNCE. Together with ``python_time`` this partitions ``wall_time``.
     python_time : float
-        Time spent in Python orchestration.
+        Time spent in interpreted Python, including time inside the JAX library.
+        Together with ``rust_time`` this partitions ``wall_time``.
+    jax_time : float
+        Time inside the JAX evaluator. **A SUBSET of** ``python_time``, not a peer
+        of it: measured, ~96% of JAX time on the solve path is interpreted-Python
+        dispatch/tracing rather than native XLA (heatexch_gen3: 13.34 s Python vs
+        0.56 s XLA). Treating this as disjoint from ``python_time`` — as the
+        pre-#921 accounting did — makes the split irreconcilable.
+    pounce_time : float
+        Time inside POUNCE (NLP/LP/QP subsolves). **A SUBSET of** ``rust_time``;
+        POUNCE is Rust.
     root_bound : float or None
         Strongest rigorous dual bound proved at the root box, in the reported
         objective sense. None if no root relaxation was built.
@@ -2030,10 +2039,24 @@ class SolveResult:
     node_count: int = 0
     mip_count: int = 0
 
-    # Layer profiling
+    # Layer profiling.
+    #
+    # ``rust_time`` and ``python_time`` are DISJOINT and partition ``wall_time``:
+    # native Rust (discopt core + POUNCE) versus interpreted Python.
+    #
+    # ``jax_time`` and ``pounce_time`` are diagnostic SUBSETS, not peers:
+    #     jax_time    <= python_time     (JAX is ~96% interpreted Python)
+    #     pounce_time <= rust_time       (POUNCE is Rust)
+    #
+    # The old model made ``jax_time`` a peer of ``python_time`` and derived
+    # ``python_time = wall - rust - jax``. Because JAX time is overwhelmingly
+    # Python time, that double-subtracted and the three fields never reconciled:
+    # measured on tspn08, ``jax_time`` read 18.82 s where cProfile found 0.78 s of
+    # JAX frames and 11.69 s of POUNCE — a bucket that had no home.
     rust_time: float = 0.0
-    jax_time: float = 0.0
     python_time: float = 0.0
+    jax_time: float = 0.0
+    pounce_time: float = 0.0
 
     # Root-node certification instrumentation (Phase 0 / cert:T0.1). These
     # describe the state of the search at the moment the root node is fathomed

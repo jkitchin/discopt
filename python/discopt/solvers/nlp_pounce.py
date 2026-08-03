@@ -16,6 +16,7 @@ from typing import Optional, Sequence
 
 import numpy as np
 
+from discopt import _timing
 from discopt._jax.nlp_evaluator import NLPEvaluator
 from discopt.modeling.core import Model
 from discopt.solvers import NLPResult, SolveStatus
@@ -145,7 +146,8 @@ def solve_nlp(
             _logger.debug("pounce has no set_ordering; ignoring passthrough")
 
     t0 = time.perf_counter()
-    x, info = problem.solve(x0.astype(np.float64))
+    with _timing.charge("pounce"):
+        x, info = problem.solve(x0.astype(np.float64))
     wall_time = time.perf_counter() - t0
 
     status_code = info.get("status", -100)

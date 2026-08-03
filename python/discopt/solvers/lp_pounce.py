@@ -21,6 +21,7 @@ from typing import Any, List, Optional, Tuple, Union, cast
 import numpy as np
 import scipy.sparse as sp
 
+from discopt import _timing
 from discopt.solvers import InfeasibilityCertificate, LPResult, SolveStatus
 
 try:
@@ -354,7 +355,8 @@ def solve_lp_kkt(
         except (TypeError, ValueError, RuntimeError):
             pass
 
-    x, info = problem.solve(x0)
+    with _timing.charge("pounce"):
+        x, info = problem.solve(x0)
     # The differentiable LP layer linearizes the KKT system at this point, so a
     # non-converged solve (anything but Solve_Succeeded / Solved_To_Acceptable)
     # would yield silently wrong gradients. Fail loudly instead.
@@ -448,7 +450,8 @@ def _solve_core(
             pass
 
     t0 = time.perf_counter()
-    x, info = problem.solve(x0)
+    with _timing.charge("pounce"):
+        x, info = problem.solve(x0)
     wall_time = time.perf_counter() - t0
 
     status = _LP_STATUS_MAP.get(info.get("status", -100), SolveStatus.ERROR)

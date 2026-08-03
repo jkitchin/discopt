@@ -381,6 +381,9 @@ def solve_with_native_kernel(model, bounds: Optional[tuple] = None, **config):
     from discopt import _rust
 
     meta = {k: spec.pop(k) for k in list(spec) if k.startswith("meta_")}
-    res = _rust.solve_spatial_tree_py(**spec, **config)
+    from discopt import _timing
+
+    with _timing.charge("rust"):
+        res = _rust.solve_spatial_tree_py(**spec, **config)
     res.update(meta)
     return res

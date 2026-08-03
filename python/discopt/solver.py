@@ -23,6 +23,7 @@ import numpy as np
 # does not pull in JAX. The JAX-dependent helpers (NLPEvaluator, alphaBB,
 # nonlinear bound tightening) are imported lazily at their nonlinear-path call
 # sites, so a pure LP/MILP/MIQP solve never pays JAX/XLA cold-start.
+from discopt import _timing
 from discopt._jax.model_utils import flat_variable_bounds
 from discopt._jax.problem_classifier import dense_A as _dense_A
 from discopt._jax.problem_classifier import dense_Q as _dense_Q
@@ -1150,7 +1151,8 @@ def _try_native_spatial_kernel(
         if initial_incumbent is not None:
             solve_kwargs["initial_incumbent"] = float(initial_incumbent)
         _t_phase = time.perf_counter()
-        res = _rust.solve_spatial_tree_py(**spec, **solve_kwargs)
+        with _timing.charge("rust"):
+            res = _rust.solve_spatial_tree_py(**spec, **solve_kwargs)
         _native_rust_s += time.perf_counter() - _t_phase
         res.update(meta)
     except Exception as exc:  # pragma: no cover - defensive
@@ -4713,6 +4715,47 @@ def solve_model_accepted_kwargs() -> frozenset[str]:
     return frozenset(named | _BACKEND_PASSTHROUGH_KWARGS)
 
 
+def _stamp_layer_timing(fn: _F) -> _F:
+    """Stamp the layer profile onto whatever ``SolveResult`` the solve produced.
+
+    ``solve_model`` builds a ``SolveResult`` at ~18 sites across the class-dispatch
+    paths. Threading counters through all of them is what produced the pre-#921
+    accounting bugs — several sites simply forwarded stale totals, and one phase
+    timer spanned ~745 lines and charged the Rust simplex to JAX. Stamping once,
+    here, means every path is attributed by construction and a new return site
+    cannot silently regress the profile.
+
+    The buckets come from :mod:`discopt._timing`, which measures at FFI
+    boundaries. ``rust`` and ``python`` partition the wall; ``pounce`` and ``jax``
+    are subsets of those two respectively (see ``SolveResult``).
+    """
+
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        before = _timing.snapshot()
+        started = time.perf_counter()
+        result = fn(*args, **kwargs)
+        elapsed = time.perf_counter() - started
+        # ``stream=True`` yields an iterator of SolveUpdate, not a SolveResult;
+        # leave anything that is not a SolveResult untouched rather than guessing.
+        if not isinstance(result, SolveResult):
+            return result
+        spent = _timing.since(before)
+        wall = result.wall_time if result.wall_time else elapsed
+        result.pounce_time = spent["pounce"]
+        result.jax_time = spent["jax"]
+        # POUNCE is Rust: it belongs inside rust_time, not beside it.
+        result.rust_time = spent["rust"] + spent["pounce"]
+        # Everything that is not native Rust is interpreted Python. Clamped at 0
+        # so an over-measured boundary shows as python_time == 0 rather than a
+        # negative number that reads like a live counter.
+        result.python_time = max(0.0, wall - result.rust_time)
+        return result
+
+    return cast(_F, wrapper)
+
+
+@_stamp_layer_timing
 @_scoped_deep_recursion
 @_scoped_tuning
 @_debug_outermost_solve
@@ -14397,12 +14440,13 @@ def _solve_batch_pounce(
     trusted = np.ones(n_batch, dtype=bool)
 
     try:
-        results = pounce.solve_nlp_batch(
-            problems,
-            x0s=x0s,
-            options=batch_opts,
-            share_structure=True,
-        )
+        with _timing.charge("pounce"):
+            results = pounce.solve_nlp_batch(
+                problems,
+                x0s=x0s,
+                options=batch_opts,
+                share_structure=True,
+            )
     except Exception as e:
         # Whole-batch failure: fall back to per-node serial solves so one bad
         # instance can't sink the iteration (single warm start per node).
