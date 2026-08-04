@@ -23,6 +23,88 @@ CLAUDE.md §5 differential panel is the remaining gate before either default
 flips. That panel must run to optimality or a node limit, **not** a time limit:
 measured, the JAX arm alone moved 381 → 395 nodes between two identical runs.
 
+## § CLAUDE.md §5 differential panel — RUN, both bars PASS
+
+Flags OFF vs ON over the 66-instance in-repo corpus, `max_nodes=2000`
+(a 120 s wall guard only), each arm in its own subprocess.
+
+**Why a node limit.** Verified first: at a fixed node budget the same instance
+returns **319 nodes on three consecutive runs**, where under a time limit the
+JAX arm alone moved **381 → 395** between two identical runs. Time-limited rows
+are excluded from the comparison and counted, never averaged in.
+
+**Independent verification means the *other* engine.** Each arm's incumbent is
+re-checked with the opposite backend's evaluator (103 verifications), so a bug
+shared with the engine that produced it cannot vouch for itself.
+
+### Bar 1 — cert-clean: **PASS**
+
+| check | result |
+|---|---|
+| unsound bound / status | **0** |
+| bound past a proven optimum | **0** |
+| false optimum (incumbent better than `=opt=`) | **0** |
+| claimed solution on a known-infeasible instance | **0** |
+| certification regressions (`gap_certified` lost) | **0** |
+| infeasible incumbents (103 cross-engine checks) | **0** |
+| crashes / timeouts | **0** |
+| objective drift on instances **both arms solved** | **0** |
+
+*Oracle bug found in my own probe first:* the initial version read only `=best=`
+(605 entries) and silently dropped `=opt=` (**980**), which is both the strongest
+reference and the only one that can detect a *false optimum*. Corrected to 1,585
+usable entries, 63/66 corpus coverage.
+
+*Two flags re-adjudicated, not waived.* `contvar` and `heatexch_gen1` tripped a
+drift check that ignored status. Both are `feasible/feasible` — neither arm
+proved optimality — so that check was comparing **search progress**, not
+correctness. The tape had explored 10× and 3× the nodes and consequently
+**matched MINLPLib's best-known solution** (heatexch_gen1: 154895.93293 vs the
+reference 154895.933) where the JAX arm sat 4.2 % and 19.3 % above it. The rule
+now scopes to terminal-status instances; soundness there is covered by the
+oracle checks, which are clean.
+
+### Bar 2 — net-positive: **PASS**
+
+**Node count is neutral, and that is the right outcome.** Over the 46 instances
+where both arms proved optimality: **44 identical**, 1 better, 1 worse
+(+3.8 % total). The tape is an engine swap, not a bound-tightening feature — a
+node-neutral result means it reproduces the search rather than perturbing it.
+
+**The benefit is wall, measured to §9** — load gate, interleaved A/B, spread —
+on 10 instances where both arms prove optimality in the **same number of nodes**,
+so the work is identical and the difference is per-node cost:
+
+| instance | jax (s) | tape (s) | speedup |
+|---|---|---|---|
+| tspn05 | 10.40 ± 0.09 | 3.37 ± 0.02 | **3.08×** |
+| nvs13 | 0.87 ± 0.02 | 0.36 ± 0.01 | 2.39× |
+| nvs09 | 2.01 ± 0.07 | 0.96 ± 0.02 | 2.10× |
+| cvxnonsep_nsig30 | 2.76 ± 0.02 | 1.45 ± 0.02 | 1.91× |
+| cvxnonsep_psig40r | 3.57 ± 0.08 | 1.90 ± 0.03 | 1.88× |
+| ex1224 | 1.43 ± 0.01 | 0.83 ± 0.01 | 1.72× |
+| flay03m / fac2 / syn05hfsg | 4.32 / 4.29 / 6.70 | 3.06 / 3.07 / 4.78 | ~1.40× |
+| st_e36 | 3.85 ± 0.11 | 2.87 ± 0.03 | 1.34× |
+| **total** | **40.2** | **22.6** | **−43.7 %** |
+
+**10 faster, 0 slower**, median **1.80×**. Load average 4.67 before, 6.44 after;
+standard deviations are 1–3 % of the means, an order below the effect. This is
+the predicted result: the plan measured ~96 % of "JAX time" on this path as
+interpreted Python dispatch, not XLA, so removing it buys throughput.
+
+Corroborating, from the panel's wall-bound rows: at equal wall the tape explores
+1.2–2.3× the nodes (4stufen 63→127, bchoco08 3→7, bchoco07 7→15).
+
+### Not yet clean
+
+**3 of 66 instances still import JAX on the tape arm** — `ex14_1_9`, `oaer`,
+`tspn08` — via `solver.py:1821` → `_jax/alphabb.py:34`. That is the plan's
+**Job 3** (αBB node dual bounds), a different job from the two this PR replaces.
+Five others (`dispatch`, `nvs13`, `st_e13`, `st_testgr3`, `tanksize`) were real
+leaks and are fixed (`17b7c08d`): `validation/feasibility.py:254` and
+`_jax/lp_spatial_bb.py:466` took the evaluator directly. The panel found those;
+reading the code did not.
+
 **Nothing blocks Stage 2/3.**
 
 > ### ⚑ RETRACTION 2026-08-04 — the deep-sharing blocker was a stale build
