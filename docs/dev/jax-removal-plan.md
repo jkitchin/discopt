@@ -12,14 +12,38 @@ PR #922; `main` is untouched until the whole thing verifies end to end.
 | 3 — NLP derivatives → translator | not started; §5 panel required |
 | 4 — enforcement (`sys.modules` assert) | not started |
 
-**Blocking Stage 2/3:** a deeply shared expression chain
-(`node = node*node + node`) does not terminate at depth 10, where the DAG holds
-only ~20 distinct nodes. The translator memoises on `id(expr)`, so the
-duplication is downstream — most likely `NlExpr` not sharing on repeated
-references, expanding the DAG into a tree. Pinned as a strict, non-running
-`xfail` in `python/tests/test_75_nl_expr_compiler.py`. The 40-instance corpus
-differential passed, so ordinary sharing depths are fine; it is the pathological
-case that breaks.
+**Nothing blocks Stage 2/3.**
+
+> ### ⚑ RETRACTION 2026-08-04 — the deep-sharing blocker was a stale build
+>
+> An earlier revision of this document, the `1917a17b` commit message, and a
+> strict non-running `xfail` all recorded a blocker: a deeply shared chain
+> (`node = node*node + node`) failing to terminate at depth 10, where the DAG
+> holds ~20 distinct nodes. **That measurement was against a stale locally-built
+> `pounce` extension** — the installed `_pounce.abi3.so` predated pounce #470 and
+> did not export `NlExpr` at all, which also meant
+> `python/tests/test_75_nl_expr_compiler.py` was skipping in its entirety behind
+> `pytest.importorskip("pounce")` locally. (CI installs pounce from git `main`, so
+> it *was* running there.)
+>
+> Re-measured after `make python-ext` against pounce `main` (`fa81f9d8`, PR #474,
+> "stop copying operands" — operators now reference operands through a `Cse` node):
+>
+> | depth | distinct DAG nodes | tree nodes | lower | eval+grad |
+> |---|---|---|---|---|
+> | 25 | 50 | 3.4e7 | <0.001 s | <0.001 s |
+> | 30 | 60 | **1.07e9** | 0.126 s | <0.001 s |
+>
+> At depth 30 the value matches the scalar recurrence `n←n²+n` **exactly** (rel
+> 0.0) and the gradient to **2.60e-16**. The `xfail` is replaced by an executing
+> test, `test_deeply_shared_chain_stays_linear_in_distinct_nodes`. Verified
+> discriminating: with the translator's `id(expr)` memo disabled, the same chain
+> does not return in 120 s.
+>
+> **Lesson, and it is the third naming/staleness miss in this work:** rebuild the
+> native extension and assert the marker symbol before measuring against it
+> (CLAUDE.md §8). `importorskip` on a stale optional dependency turns a whole test
+> file into a silent no-op that reads as a pass (§6).
 
 This document is the measured record as well as the plan: every number in it was
 produced in-repo, and the superseded sections are kept deliberately so a

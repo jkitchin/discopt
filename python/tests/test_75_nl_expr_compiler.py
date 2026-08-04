@@ -22,6 +22,8 @@ relative value drift 2.51e-16 and gradient drift 6.64e-15, with zero unsupported
 nodes encountered.
 """
 
+import time
+
 import discopt.modeling as dm
 import numpy as np
 import pytest
@@ -101,10 +103,10 @@ def test_matches_jax_value_and_gradient(name):
 def test_shared_subexpression_lowers_once_and_matches_jax():
     """A node reachable by several parents lowers once and stays numerically right.
 
-    Deliberately SHALLOW. A deep shared chain (``node = node*node + node``, 10+
-    rounds) does not terminate today — see ``test_deep_sharing_blowup`` — and the
-    cause is downstream of this module, so pinning depth here would test POUNCE's
-    tape construction rather than this translator's memoisation.
+    Deliberately SHALLOW, so the comparison against JAX is available: this is the
+    agreement check. Depth is pinned separately by
+    ``test_deeply_shared_chain_stays_linear_in_distinct_nodes``, which goes past
+    where JAX can be traced at all and so checks against a scalar recurrence.
     """
     m, x, y = _model()
     shared = x * y + 1.0
@@ -122,23 +124,54 @@ def test_shared_subexpression_lowers_once_and_matches_jax():
     )
 
 
-@pytest.mark.xfail(
-    reason=(
-        "OPEN (#75): a deeply shared chain blows up during lowering. Measured: "
-        "`node = node*node + node` fails to terminate at depth 10, where the DAG "
-        "has only ~20 distinct nodes. This translator memoises on id(expr), so the "
-        "duplication is downstream -- most likely NlExpr does not share on repeated "
-        "references, expanding the DAG into a tree. Must be resolved before the "
-        "tape carries Stage 2/3 traffic: real corpus models DO share heavily "
-        "(dag_compiler carries the same fix for issue #383)."
-    ),
-    strict=True,
-    run=False,  # would hang the suite
-)
 @pytest.mark.unit
-def test_deep_sharing_blowup():
-    """Placeholder pinning a known, unresolved limitation. Not executed."""
-    raise AssertionError("not run; see xfail reason")
+def test_deeply_shared_chain_stays_linear_in_distinct_nodes():
+    """A deep chain of shared nodes must lower to a DAG, never to a tree.
+
+    ``node = node*node + node`` repeated D times holds only ``2D`` distinct nodes
+    but ``2**D`` *tree* nodes. At D=30 that is 1.07e9 — unbuildable — so the fact
+    that this returns at all is the proof of sharing, on both sides of the
+    boundary: this module memoises on ``id(expr)``, and POUNCE's operators
+    reference their operands through a ``Cse`` node rather than copying them.
+
+    This was an open blocker when the translator landed (``1917a17b``), pinned as
+    a non-running ``xfail``: lowering failed to terminate by depth 10. The cause
+    was downstream and is fixed by pounce PR #474 ("stop copying operands"); the
+    measurement above was taken against a stale locally-built extension. Verified
+    here rather than deleted, because Stage 2/3 traffic depends on it — real
+    corpus models share heavily (``dag_compiler`` carries the same fix, #383).
+
+    Truth comes from the scalar recurrence, not from JAX: JAX hits its own
+    tracing recursion limit long before this depth, which is the whole point.
+    """
+    depth = 30
+    m = Model()
+    x = m.continuous("x", lb=-1.0, ub=1.0)
+    node = x
+    for _ in range(depth):
+        node = node * node + node
+
+    started = time.perf_counter()
+    tape = compile_to_nl_expr(node, m)
+    x0 = -0.1
+    value = tape.eval([x0])
+    grad = float(np.asarray(tape.gradient([x0]), dtype=float)[0])
+    elapsed = time.perf_counter() - started
+
+    # n_{k+1} = n_k^2 + n_k, so d_{k+1} = (2 n_k + 1) d_k. x0 = -0.1 keeps both
+    # bounded: a value like 1.001 overflows to inf by depth 11 and a gradient
+    # underflows to exactly 0.0, either of which would pass vacuously.
+    n, d = x0, 1.0
+    for _ in range(depth):
+        d = (2.0 * n + 1.0) * d
+        n = n * n + n
+    assert abs(n) > 1e-3 and abs(d) > 1e-3, "recurrence degenerated; the check would be vacuous"
+
+    assert abs(value - n) / max(1.0, abs(n)) <= 1e-12, f"value {value} vs {n}"
+    assert abs(grad - d) / abs(d) <= 1e-12, f"gradient {grad} vs {d}"
+    # Not a performance claim — a non-termination guard, three orders above the
+    # ~0.13 s measured, so it cannot fail on a loaded machine (CLAUDE.md §9).
+    assert elapsed < 60.0, f"lowering a {depth}-deep shared chain took {elapsed:.1f}s"
 
 
 @pytest.mark.unit
