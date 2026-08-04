@@ -824,6 +824,36 @@ class _Builder:
         cache[nid] = v
         return v
 
+    @staticmethod
+    def _analytic_probe_point(variables) -> "np.ndarray":
+        """A finite point inside the declared box, for the analytic-atom probe.
+
+        ``0.5 * (lb + ub)`` — the obvious choice, and the one used before #75 — is
+        ``+inf`` for a half-open box and ``NaN`` for a free variable. Every atom on
+        such a model then probed non-finite and was rejected as "uncovered",
+        regardless of whether the interval-AD table supported it. Measured on
+        ``dispatch`` (``x3`` free) that silently cost the whole model its analytic
+        separation gradients.
+
+        Half-open boxes step one unit in from the finite side; a fully free
+        variable probes at the origin. The point is only used to decide whether an
+        atom is *supported*, never to build a cut, so any interior point does.
+        """
+        pts = []
+        for v in variables:
+            lo = float(np.ravel(v.lb)[0])
+            hi = float(np.ravel(v.ub)[0])
+            lo_f, hi_f = np.isfinite(lo), np.isfinite(hi)
+            if lo_f and hi_f:
+                pts.append(0.5 * (lo + hi))
+            elif lo_f:
+                pts.append(lo + 1.0)
+            elif hi_f:
+                pts.append(hi - 1.0)
+            else:
+                pts.append(0.0)
+        return np.array(pts, dtype=np.float64)
+
     def _compiled_analytic(self, node: CNode):
         """F2′ spike: ``(value_fn, grad_fn)`` computed analytically over the engine's
         own factorable IR via forward-mode interval AD at a *point* box, with NO JAX.
@@ -856,10 +886,7 @@ class _Builder:
             # Probe once at the box midpoint so an uncovered atom (unbounded/NaN
             # gradient) is caught HERE and we fall back to JAX, rather than silently
             # emitting no cut deep in the tree.
-            probe = _np.array(
-                [0.5 * (float(_np.ravel(v.lb)[0]) + float(_np.ravel(v.ub)[0])) for v in variables],
-                dtype=_np.float64,
-            )
+            probe = self._analytic_probe_point(variables)
 
             def _box_at(xv):
                 xa = _np.asarray(xv, dtype=_np.float64).ravel()
@@ -875,9 +902,30 @@ class _Builder:
                 g = _np.asarray(ad.grad.lo, dtype=_np.float64).ravel()
                 return val, g
 
-            pv, pg = _eval(probe)
-            if not (_np.isfinite(pv) and pg.size == n_flat and _np.all(_np.isfinite(pg))):
-                return None  # atom not covered → JAX fallback
+            # Reject an atom the interval-AD table does not COVER; do not reject a
+            # covered atom merely because this one probe point is out of its domain.
+            #
+            # The two look alike at a glance — both give a non-finite probe value —
+            # but they are different failures and only the first is ours. An
+            # abstention (`interval_ad._unbounded`) densifies to the exact signature
+            # ``value = (-inf, +inf)``; a covered atom evaluated on a *point* box
+            # yields a degenerate interval, NaN at worst (``log`` of a box that
+            # straddles zero, measured on gkocis/oaer). Rejecting the second case
+            # sent covered atoms to JAX for no reason.
+            #
+            # Accepting it is sound: the consumer already drops any cut whose value
+            # or gradient is non-finite (``mccormick_lp._separate_convex``, "a
+            # missing cut is always safe"), so a bad point costs a cut, never
+            # correctness. The uncovered-atom guard itself is unchanged.
+            ad_probe = interval_hessian(expr, model, _box_at(probe))
+            lo0 = float(_np.asarray(ad_probe.value.lo).ravel()[0])
+            hi0 = float(_np.asarray(ad_probe.value.hi).ravel()[0])
+            if _np.isneginf(lo0) and _np.isposinf(hi0):
+                return None  # atom not covered by interval_ad → JAX fallback
+
+            pg = _np.asarray(ad_probe.grad.lo, dtype=_np.float64).ravel()
+            if pg.size != n_flat:
+                return None  # gradient shape disagrees with the flat layout
 
             # One shared eval per (value_fn, grad_fn) pair: _separate_convex calls
             # value_fn(xv) then grad_fn(xv) with the SAME xv each round. Key the
