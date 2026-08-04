@@ -8,6 +8,7 @@ and all standard math functions.
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import numpy as np
@@ -27,6 +28,37 @@ from discopt.modeling.core import (
     Variable,
     VarType,
 )
+
+
+def _starting_level(lb: float, ub: float) -> float:
+    """A strictly-interior starting level for a GAMS variable.
+
+    GAMS defaults every level to 0 and evaluates the model AT that point during
+    generation, so a model containing ``log(x)`` or ``a / x`` aborts before the
+    solver ever runs:
+
+        **** Exec Error at line 121: division by zero (0)
+        **** Exec Error at line 122: log: FUNC DOMAIN: x < 0
+        **** SOLVE ... ABORTED, EXECERROR = 5
+
+    Measured on MINLPLib's ``4stufen`` (log of a ratio of differences), where the
+    exported model was syntactically valid and still unusable. ``domlim`` does
+    not help: these fire during model generation, not solver iterations.
+    MINLPLib's own ``.gms`` files ship starting levels for the same reason, so
+    emitting them is the faithful choice, not a thumb on the scale.
+
+    Mirrors the interior-point rule used for the analytic separation probe:
+    midpoint of a finite box, one unit in from a half-open side, origin when
+    fully free.
+    """
+    lo_f, hi_f = lb > -1e18, ub < 1e18
+    if lo_f and hi_f:
+        return 0.5 * (lb + ub)
+    if lo_f:
+        return lb + 1.0
+    if hi_f:
+        return ub - 1.0
+    return 0.0
 
 
 def to_gams(
@@ -178,6 +210,9 @@ class _GamsWriter:
                     lines.append(f"{var.name}.lo = {lb_val};")
                 if ub_val < 1e18:
                     lines.append(f"{var.name}.up = {ub_val};")
+                lvl = _starting_level(lb_val, ub_val)
+                if lvl != 0.0:
+                    lines.append(f"{var.name}.l = {lvl};")
             else:
                 # X-2 (#413) / EX-4: an array-variable block is NOT a scalar.
                 # The previous code only emitted a bound when it was UNIFORM
@@ -361,6 +396,29 @@ class _GamsWriter:
         return name.replace(" ", "_").replace("-", "_").replace("[", "_").replace("]", "")
 
     @staticmethod
+    def _sanitize_model_name(name: str | None) -> str:
+        """A legal GAMS identifier for the ``Model``/``Solve`` statements.
+
+        GAMS identifiers must start with a letter and may contain only letters,
+        digits and underscores. The model name was previously emitted verbatim,
+        so any model whose name starts with a digit produced GAMS that does not
+        compile:
+
+            Model 4stufen / all /;
+            ****        $2
+            ****   2  Identifier expected
+
+        Hit on MINLPLib's ``4stufen`` (1 of 66 in the in-repo corpus, 1 of 1610 in
+        the full snapshot) while benchmarking discopt against GAMS subsolvers.
+        The ``.gms`` was written successfully and only failed downstream, which is
+        the bad way to fail -- an export is meant to be usable.
+        """
+        base = re.sub(r"[^A-Za-z0-9_]", "_", (name or "").strip()) or "discopt_model"
+        if not base[0].isalpha():
+            base = f"m_{base}"
+        return base
+
+    @staticmethod
     def _fmt_num(value: float) -> str:
         if value == int(value) and abs(value) < 1e15:
             return str(int(value))
@@ -380,8 +438,9 @@ class _GamsWriter:
             )
         sense = "minimizing" if is_min else "maximizing"
 
-        lines.append(f"Model {self.model.name} / all /;")
-        lines.append(f"Solve {self.model.name} using {mtype} {sense} obj_var;")
+        mname = self._sanitize_model_name(self.model.name)
+        lines.append(f"Model {mname} / all /;")
+        lines.append(f"Solve {mname} using {mtype} {sense} obj_var;")
 
     def _detect_model_type(self) -> str:
         """Auto-detect GAMS model type from variable types and expression structure."""
