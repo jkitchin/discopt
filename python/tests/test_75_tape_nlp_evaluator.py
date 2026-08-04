@@ -299,15 +299,28 @@ def test_custom_call_model_falls_back_to_jax():
 
 
 @pytest.mark.unit
-def test_backend_is_off_by_default(monkeypatch):
-    """Landing this module must not change any default solve."""
-    monkeypatch.delenv("DISCOPT_NLP_EVAL", raising=False)
-    assert tape_backend_requested() is False
+def test_backend_is_on_by_default_with_a_working_opt_out(monkeypatch):
+    """Default ON since the §5 panel; ``DISCOPT_NLP_EVAL=jax`` still opts out.
 
+    Was ``test_backend_is_off_by_default``. The premise changed deliberately —
+    the panel passed both bars (cert-clean on every check; wall 10 faster / 0
+    slower, median 1.80×, with node counts 44-of-46 identical) — so §5's
+    graduation rule flips the default and keeps the opt-out and legacy path
+    intact. This asserts BOTH halves; a default flip that quietly broke the
+    escape hatch would make the legacy path unreachable.
+    """
     m, _x, _y = _xy_model()
     sentinel = object()
-    assert build_evaluator(m, lambda: sentinel) is sentinel, "tape must not be used unopted"
 
+    monkeypatch.delenv("DISCOPT_NLP_EVAL", raising=False)
+    assert tape_backend_requested() is True
+    assert isinstance(build_evaluator(m, lambda: sentinel), TapeNLPEvaluator)
+
+    monkeypatch.setenv("DISCOPT_NLP_EVAL", "jax")
+    assert tape_backend_requested() is False
+    assert build_evaluator(m, lambda: sentinel) is sentinel, "opt-out must reach the JAX path"
+
+    # An unrecognised value must not silently disable the graduated default.
     monkeypatch.setenv("DISCOPT_NLP_EVAL", "tape")
     assert tape_backend_requested() is True
     assert isinstance(build_evaluator(m, lambda: sentinel), TapeNLPEvaluator)
