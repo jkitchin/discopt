@@ -75,8 +75,11 @@ def _emfl_shaped_model(n_cone: int, n_new: int = 9, seed: int = 0) -> dm.Model:
         px, py = p[r % n_new]
         m.subject_to(u - px + float(rng.uniform(-10, 10)) == 0)
         m.subject_to(v - py + float(rng.uniform(-10, 10)) == 0)
-    # Balanced-tree sum: a left-nested chain of ~1000 additions trips the
-    # dag_compiler recursion limit noted at the end of #923 (a separate defect).
+    # Balanced-tree sum: a left-nested chain of ~1000 additions used to trip the
+    # dag_compiler recursion limit noted at the end of #923 (a separate defect,
+    # fixed under #925). Kept as-is so this test keeps measuring the Hessian,
+    # not the compiler; the depth itself is covered by
+    # test_925_dag_compiler_deep_chain.py.
     terms: list = list(d)
     while len(terms) > 1:
         terms = [
