@@ -10,13 +10,19 @@ PR #922; `main` is untouched until the whole thing verifies end to end.
 | 1 — DAG → `NlExpr` tape translator | **done, not wired in** — `1917a17b`, probe hardening `360a1e69`, three wrong lowerings fixed `08e1e0a1` |
 | 2 — separation tangents → translator | **built, default OFF** — `77dc8db2` (`DISCOPT_SEPGRAD=tape`); §5 panel required |
 | 3 — NLP derivatives → translator | **evaluator built, default OFF** — `ce212d67`. Remaining: wire into the `cached_evaluator` call sites, then the §5 panel |
-| 4 — enforcement (`sys.modules` assert) | **done** — `77dc8db2`. `Model.solve()` completes with `jax` never in `sys.modules`, asserted over 4 nonlinear classes in `test_75_jax_free_solve_path.py` |
+| 4 — enforcement (`sys.modules` assert) | **done** — `77dc8db2`, `db40debf`. **66/66 corpus instances** solve with `jax` never in `sys.modules`; asserted over 4 nonlinear classes plus the 5 extracted helper modules |
 
-**THE GOAL IS MET, behind flags.** With `DISCOPT_NLP_EVAL=tape` and
-`DISCOPT_SEPGRAD=tape`, a nonlinear `Model.solve()` returns `optimal` with `jax`
-never entering `sys.modules` — verified on exp/log NLP, binary MINLP,
-integer+trig MINLP and bilinear QCQP, each in a clean subprocess, with a control
-arm asserting the JAX path *does* import jax so the check cannot pass vacuously.
+**THE GOAL IS MET, behind flags, on the whole corpus.** With
+`DISCOPT_NLP_EVAL=tape` and `DISCOPT_SEPGRAD=tape`, **66 of 66** in-repo corpus
+instances solve with `jax` never entering `sys.modules` (0 crashes), as do
+hand-built exp/log NLP, binary MINLP, integer+trig MINLP and bilinear QCQP
+models — each in a clean subprocess, with a control arm asserting the JAX path
+*does* import jax so the check cannot pass vacuously.
+
+**The §5 panel passed both bars** (see below): cert-clean on every check, and
+net-positive on wall — 10 faster / 0 slower, median **1.80×**, total −43.7% —
+with node counts neutral (44 of 46 identical), which for an engine swap is the
+right outcome.
 
 Both flags are **default OFF** and both stages are **bound-CHANGING**; the
 CLAUDE.md §5 differential panel is the remaining gate before either default
@@ -95,15 +101,34 @@ interpreted Python dispatch, not XLA, so removing it buys throughput.
 Corroborating, from the panel's wall-bound rows: at equal wall the tape explores
 1.2–2.3× the nodes (4stufen 63→127, bchoco08 3→7, bchoco07 7→15).
 
-### Not yet clean
+### The leaks the panel found — all closed
 
-**3 of 66 instances still import JAX on the tape arm** — `ex14_1_9`, `oaer`,
-`tspn08` — via `solver.py:1821` → `_jax/alphabb.py:34`. That is the plan's
-**Job 3** (αBB node dual bounds), a different job from the two this PR replaces.
-Five others (`dispatch`, `nvs13`, `st_e13`, `st_testgr3`, `tanksize`) were real
-leaks and are fixed (`17b7c08d`): `validation/feasibility.py:254` and
-`_jax/lp_spatial_bb.py:466` took the evaluator directly. The panel found those;
-reading the code did not.
+The panel's per-instance jax check found **8 of 66** instances still importing
+JAX on the tape arm. None was a tape fallback; the tape built fine on all 8.
+All were import sites, and **every one was found by a corpus sweep rather than
+by reading the code**:
+
+| site | instances | fix |
+|---|---|---|
+| `validation/feasibility.py:254` | dispatch, nvs13, st_e13, st_testgr3, tanksize | dispatcher (`17b7c08d`) |
+| `_jax/lp_spatial_bb.py:466` | (same) | dispatcher (`17b7c08d`) |
+| `solver.py:1821` → `_jax/alphabb.py:34` | ex14_1_9, oaer, tspn08 | split out (`db40debf`) |
+
+`rigorous_alpha` is the third case of one pattern: **JAX-free code living in a
+JAX-importing module**, where the import is the entire cost. It needs only
+`interval_ad`'s interval Hessian and numpy. The other two were
+`estimate_dense_obj_hessian_compile_s` (pure arithmetic, cost **210 jax
+modules**) and `evaluator_fingerprint`.
+
+**Measured after: 66/66 corpus instances solve with `jax` never entering
+`sys.modules`, 0 crashes.** The JAX-free claim is now unconditional on this
+corpus rather than holding for 4 hand-picked models.
+
+Pinned rather than re-fixed a fourth time:
+`test_jax_free_helper_modules_do_not_import_jax` asserts in a subprocess that all
+five extracted helpers — `_alphabb_rigorous`, `_hessian_cost_model`,
+`_evaluator_cache`, `_nl_expr_compiler`, `_tape_nlp_evaluator` — import without
+loading JAX.
 
 **Nothing blocks Stage 2/3.**
 
