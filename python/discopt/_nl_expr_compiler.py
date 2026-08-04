@@ -10,10 +10,26 @@ expression at a point — and POUNCE's Rust AD tape provides exactly that:
   ``g``, ``J``, and the Lagrangian Hessian.
 
 Previously those were headed for two *different* replacement backends. They no
-longer need to be: ``pounce.NlExpr`` covers all 30 operators in discopt's DAG (20
-natively, 10 by the decompositions below) where the in-tree interval-AD engine
+longer need to be: ``pounce.NlExpr`` covers discopt's *scalar* DAG operators — 20
+natively and 9 by the exact rewrites below — where the in-tree interval-AD engine
 covers 6, and it agrees with analytic truth exactly on expressions the interval
 engine cannot evaluate at all (``tanh``, ``erf``).
+
+The **array reductions** are the exception and are refused, not approximated:
+``prod`` (``jnp.prod`` of one array argument), ``norm1``/``norm2``/``norminf``,
+``SumExpression``, ``IndexExpression`` and ``MatMulExpression``. A tape node is a
+scalar; there is no array to reduce. An earlier revision lowered ``prod`` as a
+variadic ``*`` chain, which silently computed a different function.
+
+*Coverage claims here must be checked against operators, not instances.* ``.nl``
+has no opcode for ``sigmoid``/``softplus``/``entropy``/``centropy``/``signpower``,
+so a MINLPLib corpus sweep — measured across 316 instances — exercises exactly six
+of these (``log``, ``sqrt``, ``exp``, ``abs``, ``sin``, ``cos``) and can never
+reach the rest. Three defects lived in the unreached rewrites: ``entropy`` had an
+inverted sign, ``_sign`` passed ``compare``'s arguments in the wrong order, and
+``prod`` was the wrong function entirely. See
+``python/tests/test_75_nl_expr_compiler.py`` for the per-operator differential
+that catches this class.
 
 Why not ``.nl`` as the intermediate? Because it is lossy in the wrong direction:
 discopt's ``.nl`` writer refuses ``atan2``, ``min``, ``max``, ``erf`` and ``sign``
@@ -180,10 +196,15 @@ def _abs(E: Any, a: Any) -> Any:
 
 
 def _sign(E: Any, a: Any) -> Any:
-    """``sign(a)`` via nested selects; zero maps to 0.0 as in ``jnp.sign``."""
+    """``sign(a)`` via nested selects; zero maps to 0.0 as in ``jnp.sign``.
+
+    ``compare`` takes the operator FIRST (``compare(op, lhs, rhs)``). Passing it
+    last raises ``TypeError``, not ``UnsupportedForTape``, so it escapes
+    ``try_compile``'s fallback and crashes the caller.
+    """
     zero = E.const_(0.0)
-    pos = E.compare(a, ">", zero)
-    neg = E.compare(a, "<", zero)
+    pos = E.compare(">", a, zero)
+    neg = E.compare("<", a, zero)
     return E.select(pos, E.const_(1.0), E.select(neg, E.const_(-1.0), zero))
 
 
@@ -243,11 +264,17 @@ def _lower_function(expr: FunctionCall, E: Any, args: list) -> Any:
         _require(args, 1, name)
         return E.log(E.const_(1.0) + E.exp(arg0()))
     if name == "entropy":
-        # -x*log(x)
+        # x*log(x) -- discopt's DAG semantics, NOT the information-theory
+        # convention -x*log(x). The authority is `_jax/dag_compiler.py`, which
+        # this must reproduce bit-for-bit: `lambda x: x * jnp.log(jnp.maximum(x,
+        # 1e-300))`. Getting the sign from the name instead of the reference
+        # cost a silent factor of -1 (reldiff 2.0) that no corpus instance could
+        # have caught -- `.nl` has no entropy opcode, so 316 MINLPLib instances
+        # exercise this line zero times.
         _require(args, 1, name)
-        return -(arg0() * E.log(arg0()))
+        return arg0() * E.log(arg0())
     if name == "centropy":
-        # x*log(x/y)
+        # x*log(x/y), matching dag_compiler's GAMS centropy.
         _require(args, 2, name)
         return args[0] * E.log(args[0] / args[1])
     if name == "signpower":
@@ -255,12 +282,17 @@ def _lower_function(expr: FunctionCall, E: Any, args: list) -> Any:
         _require(args, 2, name)
         return _sign(E, args[0]) * (_abs(E, args[0]) ** args[1])
     if name == "prod":
-        if not args:
-            return E.const_(1.0)
-        acc = args[0]
-        for nxt in args[1:]:
-            acc = acc * nxt
-        return acc
+        # NOT a variadic multiply. `dag_compiler` compiles prod as
+        # `jnp.prod(arg)` -- ONE argument, which is an ARRAY, reduced to a
+        # scalar. Lowering it as a `*` chain over `args` silently computed a
+        # different function (measured: reldiff 0.90 on value, 1.70 on
+        # gradient). The scalar tape has no array to reduce, so refuse, exactly
+        # as SumExpression does. `norm1`/`norm2`/`norminf` are array reductions
+        # too and fall through to the same refusal below.
+        raise UnsupportedForTape(
+            "prod is an array reduction (jnp.prod of one array argument); "
+            "the scalar tape path has no array to reduce"
+        )
 
     raise UnsupportedForTape(f"function {name!r}")
 

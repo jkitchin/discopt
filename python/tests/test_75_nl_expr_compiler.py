@@ -23,12 +23,14 @@ nodes encountered.
 """
 
 import time
+from pathlib import Path
 
 import discopt.modeling as dm
 import numpy as np
 import pytest
 from discopt import Model
 from discopt._nl_expr_compiler import UnsupportedForTape, compile_to_nl_expr, try_compile
+from discopt.modeling.core import Constant, FunctionCall
 
 pytest.importorskip("pounce")
 
@@ -50,7 +52,17 @@ def _jax_pair(expr, model):
     return f, jax.grad(lambda xv: jnp.reshape(f(xv), ()))
 
 
-# Expression classes spanning the operator table, including every rewrite.
+# Expression classes spanning the operator table.
+#
+# The REWRITE_CASES half is load-bearing and cannot be replaced by a corpus run.
+# Measured over 316 MINLPLib instances, a `.nl` corpus exercises exactly six
+# operators — log, sqrt, exp, abs, sin, cos — because `.nl` has no opcode for
+# sigmoid/softplus/entropy/centropy/signpower at all. Those reach the DAG only
+# through the modeling API and `factorable_reform`. Three defects lived in that
+# blind spot: entropy's sign was inverted, `_sign` passed `compare`'s arguments
+# in the wrong order (a TypeError, which escapes `try_compile`'s fallback), and
+# `prod` was lowered as a variadic `*` chain when it is a one-argument array
+# reduction. `test_every_rewrite_is_covered` keeps this list honest.
 CASES = {
     "poly": lambda x, y: x * x * y + 3.0 * x - y / 2.0,
     "exp_log": lambda x, y: dm.exp(x) + dm.log(y),
@@ -59,12 +71,27 @@ CASES = {
     "hyperbolic": lambda x, y: dm.tanh(x) + dm.sinh(y) + dm.cosh(x),
     "inverse_trig": lambda x, y: dm.atan(x) + dm.asin(y / 3.0),
     "erf": lambda x, y: dm.erf(x) * y,
-    "abs_rewrite": lambda x, y: abs(x - y) + x,
     "log10": lambda x, y: dm.log10(x) + y,
     "min_max": lambda x, y: dm.maximum(x, y) + dm.minimum(x, y),
     "division_chain": lambda x, y: (x + y) / (x * y + 1.0),
     "shared_subexpr": lambda x, y: (lambda t: t * t + dm.exp(t))(x * y),
 }
+
+# One entry per operator lowered by rewrite rather than by a native tape opcode.
+# Keyed by the DAG's `func_name` so the completeness check below can compare
+# against the compiler's own table.
+REWRITE_CASES = {
+    "abs": lambda x, y: abs(x - y) + x,
+    "sign": lambda x, y: dm.sign(x - y) + y,
+    "log1p": lambda x, y: dm.log1p(x) + y,
+    "log2": lambda x, y: dm.log2(x) + y,
+    "sigmoid": lambda x, y: dm.sigmoid(x) + y,
+    "softplus": lambda x, y: dm.softplus(x) + y,
+    "entropy": lambda x, y: FunctionCall("entropy", x) + y,
+    "centropy": lambda x, y: FunctionCall("centropy", x, y),
+    "signpower": lambda x, y: FunctionCall("signpower", x, Constant(3.0)) + y,
+}
+CASES.update(REWRITE_CASES)
 
 
 @pytest.mark.unit
@@ -172,6 +199,63 @@ def test_deeply_shared_chain_stays_linear_in_distinct_nodes():
     # Not a performance claim — a non-termination guard, three orders above the
     # ~0.13 s measured, so it cannot fail on a loaded machine (CLAUDE.md §9).
     assert elapsed < 60.0, f"lowering a {depth}-deep shared chain took {elapsed:.1f}s"
+
+
+@pytest.mark.unit
+def test_every_rewrite_is_covered():
+    """Every operator lowered by rewrite must have a differential case.
+
+    The rewrites are hand-written and are where the bugs were; the corpus cannot
+    reach them (``.nl`` has no opcode for most). Without this guard, adding an
+    11th rewrite silently ships untested — which is exactly how ``entropy``,
+    ``sign`` and ``prod`` shipped wrong. Reads the compiler's source rather than
+    a hand-copied list, so the two cannot drift apart.
+    """
+    import re
+
+    from discopt import _nl_expr_compiler as mod
+
+    src = Path(mod.__file__).read_text()
+    body = src[src.index("def _lower_function") :]
+    named = set(re.findall(r'name == "([a-z0-9_]+)"', body))
+    # Refusals are not rewrites: they raise instead of lowering.
+    refused = {"prod"}
+    rewrites = named - refused
+
+    assert rewrites, "found no rewrite branches; the regex no longer matches the source"
+    missing = rewrites - set(REWRITE_CASES)
+    assert not missing, f"rewrites with no differential case: {sorted(missing)}"
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("func_name", ["prod", "norm1", "norm2", "norminf"])
+def test_array_reductions_are_refused_not_approximated(func_name):
+    """An array reduction has no scalar tape lowering and must say so.
+
+    ``prod`` is ``jnp.prod`` of ONE array argument, not a variadic multiply.
+    Lowering it as a ``*`` chain computed a different function and agreed with
+    nothing (measured: reldiff 0.90 on value, 1.70 on gradient) while reporting
+    success. A missing tape is recoverable; a wrong one is not.
+    """
+    m, x, y = _model()
+    expr = FunctionCall(func_name, x, y)
+    with pytest.raises(UnsupportedForTape):
+        compile_to_nl_expr(expr, m)
+    assert try_compile(expr, m) is None
+
+
+@pytest.mark.unit
+def test_entropy_matches_the_dag_compiler_sign():
+    """``entropy`` is ``x*log(x)`` in discopt's DAG, not ``-x*log(x)``.
+
+    Pinned separately from the parametrized differential because the failure is a
+    clean factor of -1: it passes every structural check, raises nothing, and is
+    invisible to any corpus sweep. The authority is ``_jax/dag_compiler.py``.
+    """
+    m, x, _y = _model()
+    tape = compile_to_nl_expr(FunctionCall("entropy", x), m)
+    for x0 in (0.4, 1.0, 2.0):
+        assert tape.eval([x0, 1.0]) == pytest.approx(x0 * np.log(x0), rel=1e-14)
 
 
 @pytest.mark.unit
