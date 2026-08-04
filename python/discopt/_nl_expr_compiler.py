@@ -72,6 +72,22 @@ class UnsupportedForTape(Exception):
     """
 
 
+def _scalar(value: Any, what: str) -> float:
+    """``float(value)``, but raising :class:`UnsupportedForTape` on an array.
+
+    ``float()`` on a multi-element array raises ``TypeError``, which is NOT
+    caught by :func:`try_compile` and so escapes the fallback and crashes the
+    caller. Array-valued constants and parameters are a representability limit
+    of a scalar tape, not a bug, and must report as one.
+    """
+    import numpy as _np
+
+    arr = _np.asarray(value)
+    if arr.size != 1:
+        raise UnsupportedForTape(f"array-valued {what} (size {arr.size}); the tape path is scalar")
+    return float(arr.reshape(()))
+
+
 def _compute_var_offset(var: Variable, model: Model) -> int:
     """Start of ``var`` in the flat ``x`` vector.
 
@@ -118,7 +134,7 @@ def _lower_uncached(expr: Expression, model: Model, E: Any, memo: dict[int, Any]
         return _lower(child, model, E, memo)
 
     if isinstance(expr, Constant):
-        return E.const_(float(expr.value))
+        return E.const_(_scalar(expr.value, "Constant"))
 
     if isinstance(expr, Variable):
         if expr.size != 1:
@@ -130,8 +146,11 @@ def _lower_uncached(expr: Expression, model: Model, E: Any, memo: dict[int, Any]
     if isinstance(expr, Parameter):
         # Parameters are constants at compile time, matching the legacy
         # `compile_expression` behaviour (the params-as-runtime-args variant has
-        # no tape analogue -- a tape is built for fixed structure).
-        return E.const_(float(expr.value))
+        # no tape analogue -- a tape is built for fixed structure). Because the
+        # value is BAKED IN, a caller holding a tape across a `Parameter.value`
+        # re-bind gets stale derivatives; `_tape_nlp_evaluator` rebuilds on
+        # change, and `evaluator_fingerprint` deliberately does NOT cover this.
+        return E.const_(_scalar(expr.value, "Parameter"))
 
     if isinstance(expr, BinaryOp):
         left, right, op = rec(expr.left), rec(expr.right), expr.op
