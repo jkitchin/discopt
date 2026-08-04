@@ -27,10 +27,12 @@ import pytest
 
 pytest.importorskip("pounce")
 
-# Both backends must be on: Stage 3 removed the NLP-derivative trigger
-# (nlp_evaluator.py:22) and Stage 2 removed the separation-tangent one
-# (uniform_relax.py:813). Either alone leaves the other importing JAX.
-TAPE_ENV = {"DISCOPT_NLP_EVAL": "tape", "DISCOPT_SEPGRAD": "tape"}
+# Both backends are DEFAULT ON since the §5 panel, so the tape arm sets nothing:
+# these tests must exercise what a user actually gets. Stage 3 removed the
+# NLP-derivative trigger (nlp_evaluator.py:22) and Stage 2 the separation-tangent
+# one (uniform_relax.py:813); either alone leaves the other importing JAX.
+TAPE_ENV: dict = {}
+JAX_ENV = {"DISCOPT_NLP_EVAL": "jax", "DISCOPT_SEPGRAD": "jax"}
 
 MODELS = {
     # (builder body, expected status) spanning the nonlinear ProblemClass values.
@@ -122,7 +124,7 @@ def test_tape_backend_agrees_with_jax_on_the_objective(name):
     Not a bound-neutrality proof — the tape is bound-CHANGING and the §5 panel is
     the real gate — but a wrong objective here would make that panel pointless.
     """
-    jax_res = _run(MODELS[name], {"DISCOPT_NLP_EVAL": "jax", "DISCOPT_SEPGRAD": "jax"})
+    jax_res = _run(MODELS[name], JAX_ENV)
     tape_res = _run(MODELS[name], TAPE_ENV)
 
     assert jax_res["STATUS"] == tape_res["STATUS"], (
@@ -174,14 +176,35 @@ def test_jax_free_helper_modules_do_not_import_jax(module, symbol):
 
 
 @pytest.mark.slow
+@pytest.mark.parametrize(
+    "env,label",
+    [
+        (JAX_ENV, "both opt-outs"),
+        ({"DISCOPT_NLP_EVAL": "jax"}, "NLP opt-out only"),
+        ({"DISCOPT_SEPGRAD": "jax"}, "sepgrad opt-out only"),
+    ],
+)
+def test_opt_outs_still_reach_the_legacy_jax_path(env, label):
+    """§5 graduation keeps the opt-out and the legacy path intact.
+
+    Each opt-out must still route to JAX — otherwise the escape hatch is
+    decorative. Asserting jax IS imported also proves these solves do real
+    nonlinear work, so the JAX-free assertions above cannot be passing because
+    nothing ran (CLAUDE.md §6).
+    """
+    res = _run(MODELS["nlp_exp_log"], env)
+    assert int(res["JAXMODS"]) > 0, f"{label}: opt-out did not reach the JAX path"
+
+
+@pytest.mark.slow
 def test_jax_arm_of_the_same_check_does_import_jax():
-    """The control: without the flags, JAX *is* imported.
+    """The control: with the opt-outs, JAX *is* imported.
 
     Without this, a bug that silently stopped the solve from doing any nonlinear
     work would make every assertion above pass for the wrong reason (CLAUDE.md §6
     — prove the probe fires).
     """
-    res = _run(MODELS["nlp_exp_log"], {"DISCOPT_NLP_EVAL": "jax", "DISCOPT_SEPGRAD": "jax"})
+    res = _run(MODELS["nlp_exp_log"], JAX_ENV)
     assert int(res["JAXMODS"]) > 0, (
         "the JAX arm imported no jax modules; this check cannot distinguish "
         "'tape works' from 'nothing ran'"

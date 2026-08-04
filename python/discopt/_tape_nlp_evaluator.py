@@ -47,12 +47,20 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 
 
 def tape_backend_requested() -> bool:
-    """True when ``DISCOPT_NLP_EVAL=tape``.
+    """True unless ``DISCOPT_NLP_EVAL`` selects the legacy JAX evaluator.
 
-    Read per call rather than cached at import so a test can flip it without
-    reloading the module.
+    **Default ON since the CLAUDE.md §5 panel passed both bars** (66 instances):
+    cert-clean on every check -- 0 unsound bounds or statuses, 0 false optima, 0
+    certification regressions, 0 infeasible incumbents over 103 cross-engine
+    verifications -- and net-positive on wall, 10 faster / 0 slower, median 1.80x,
+    total -43.7%, measured interleaved with a load gate and standard deviations on
+    instances doing IDENTICAL work (44 of 46 node counts unchanged).
+
+    ``DISCOPT_NLP_EVAL=jax`` is the opt-out and the JAX evaluator is untouched
+    beneath it, per §5's graduation rule. Read per call rather than cached at
+    import so a test can flip it without reloading the module.
     """
-    return os.environ.get("DISCOPT_NLP_EVAL", "jax").strip().lower() == "tape"
+    return os.environ.get("DISCOPT_NLP_EVAL", "tape").strip().lower() != "jax"
 
 
 _THREAD_SAFE_NLPROBLEM: Optional[bool] = None

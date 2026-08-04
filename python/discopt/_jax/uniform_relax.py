@@ -802,7 +802,9 @@ class _Builder:
             return v
         import os
 
-        if os.environ.get("DISCOPT_SEPGRAD") == "tape":
+        # Default ON since the §5 panel (see `_compiled_tape`); `DISCOPT_SEPGRAD=jax`
+        # is the opt-out and the JAX arm below is kept intact beneath it.
+        if os.environ.get("DISCOPT_SEPGRAD", "tape").strip().lower() != "jax":
             v = self._compiled_tape(node)
             if v is not None:
                 cache[nid] = v
