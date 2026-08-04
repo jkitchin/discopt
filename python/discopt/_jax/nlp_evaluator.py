@@ -44,6 +44,51 @@ logger = logging.getLogger(__name__)
 # option anyway, so sparse is strictly safer.
 _DENSE_JACOBIAN_COMPILE_LIMIT = 1_000_000
 
+# --- Dense Lagrangian-Hessian AD-mode gate (#923) --------------------------------
+# The dense Lagrangian Hessian is built by nesting two AD passes. The two nestings
+# have very different *memory* profiles, and the difference is what made #923 a
+# correctness bug rather than a performance one:
+#
+#   forward-over-forward  ``jacfwd(jacfwd(L))``  peak = 2 * n^2 * m * 8 bytes
+#   forward-over-reverse  ``jacfwd(grad(L))``    peak ~ 2 * n   * m * 8 bytes
+#
+# ``L`` is a scalar, so the inner forward pass has to carry one tangent per input
+# through *every* intermediate; the constraint vector (length ``m``) therefore
+# becomes an ``(n, n, m)`` array under the two nested vmaps. The closed form above
+# is measured, not estimated: on the emfl-shaped replica XLA's RESOURCE_EXHAUSTED
+# request matched ``2 * n^2 * m * 8`` to the byte at n=1068 (19,162,483,200) and
+# n=1368 (40,422,758,400).
+#
+# At MINLPLib emfl scale that is 66 GB for emfl050_3_3 (n=1611, m=1593) and 413 GB
+# for emfl100_3_3 (n=2961, m=2943) — which is exactly why the first is correct and
+# the second is not. Whether the over-large buffer surfaces as a clean
+# RESOURCE_EXHAUSTED (Linux, measured here) or as a silently under-populated
+# allocation that reads back as zeros (the #923 report) is platform allocator
+# behavior; either way the forward-over-forward nesting is not a viable way to
+# build this matrix once ``n^2 * m`` is large.
+#
+# Above this peak-byte budget the dense Hessian is therefore built forward-over-
+# reverse. Both nestings compute the same matrix — AD mode never changes a value —
+# so this is bound-neutral by construction and verified as such by
+# ``python/tests/test_923_dense_lagrangian_hessian.py``.
+#
+# The budget is a resource bound, not a tuned constant: 1 GiB is small enough that
+# no supported machine can be driven into swap by this buffer, and large enough
+# that every model on which the forward-over-forward compile advantage was measured
+# (du-opt n=21, fac2 n=66, tls2 n=37 — see the ``lagrangian`` comment below) keeps
+# it unchanged.
+_DENSE_HESSIAN_FWD_OVER_FWD_PEAK_BYTES = 1 << 30
+
+
+def _dense_hessian_fwd_over_fwd_peak_bytes(n_vars: int, n_constraints: int) -> int:
+    """Peak intermediate bytes of ``jacfwd(jacfwd(L))`` for the dense Hessian.
+
+    ``2 * n^2 * m * 8``, with ``m`` floored at 1 so an unconstrained model is
+    still charged for the ``(n, n)`` objective tangents. See the module comment
+    above for the measurement this closed form comes from.
+    """
+    return 2 * n_vars * n_vars * max(int(n_constraints), 1) * 8
+
 
 # --- First-time Lagrangian-Hessian XLA compile-cost model (F4) ------------------
 # The first evaluate_hessian_values call forces an uninterruptible first-time XLA
@@ -238,13 +283,50 @@ def cached_evaluator(model: Model) -> "NLPEvaluator":
     return ev
 
 
+def _lagrangian_gradient(evaluator, x: np.ndarray, obj_factor: float, lam: np.ndarray):
+    """``obj_factor * grad f(x) + J(x)^T lam``, from FIRST derivatives only.
+
+    Deliberately independent of both Hessian code paths: it uses the objective
+    gradient and the sparse Jacobian values, so finite-differencing it gives a
+    Hessian-vector product that can arbitrate between them (#923).
+    """
+    g = float(obj_factor) * np.asarray(evaluator.evaluate_gradient(x), dtype=np.float64)
+    if evaluator.n_constraints > 0:
+        rows, cols = evaluator.jacobian_structure()
+        vals = np.asarray(evaluator.evaluate_jacobian_values(x), dtype=np.float64)
+        np.add.at(g, np.asarray(cols), vals * np.asarray(lam, dtype=np.float64)[np.asarray(rows)])
+    return g
+
+
+def _coo_lower_matvec(rows, cols, vals, v, n: int) -> np.ndarray:
+    """``H @ v`` for a symmetric H stored as its lower triangle in COO."""
+    out = np.zeros(n, dtype=np.float64)
+    rows = np.asarray(rows)
+    cols = np.asarray(cols)
+    vals = np.asarray(vals, dtype=np.float64)
+    np.add.at(out, rows, vals * v[cols])
+    off = rows != cols
+    np.add.at(out, cols[off], vals[off] * v[rows[off]])
+    return out
+
+
 def validate_sparse_values(evaluator, x: np.ndarray, atol: float = 1e-8) -> bool:
-    """Check that sparse COO values agree with dense evaluation.
+    """Cross-check the sparse COO values against the dense evaluation.
 
-    Computes both dense and sparse Jacobian/Hessian at x and verifies that
-    the sparse values match the dense values at the declared positions.
+    Computes both dense and sparse Jacobian/Hessian at x and verifies that they
+    agree at the declared positions.
 
-    Returns True if validation passes, False otherwise.
+    Neither side is the oracle. This function used to *assume* the dense
+    Lagrangian Hessian was ground truth and report the sparse values as the
+    failing side; on emfl100_3_3 that was exactly backwards — the dense path
+    returned an all-zero matrix while the sparse values were correct (#923). So
+    on a Hessian disagreement an independent arbiter runs: a central finite
+    difference of the Lagrangian gradient (built from first derivatives only, via
+    :func:`_lagrangian_gradient`, so it shares no code with either Hessian path)
+    gives ``H @ v`` for a random direction ``v``, and the log records which side
+    it agrees with.
+
+    Returns True if the two representations agree, False otherwise.
     """
     import logging
 
@@ -263,16 +345,41 @@ def validate_sparse_values(evaluator, x: np.ndarray, atol: float = 1e-8) -> bool
             ok = False
 
     # Validate Hessian
+    n = evaluator.n_variables
     m = evaluator.n_constraints
+    obj_factor = 1.0
     lam = np.ones(m, dtype=np.float64)
-    hess_dense = evaluator.evaluate_lagrangian_hessian(x, 1.0, lam)
+    hess_dense = np.asarray(evaluator.evaluate_lagrangian_hessian(x, obj_factor, lam))
     rows, cols = evaluator.hessian_structure()
-    sparse_vals = evaluator.evaluate_hessian_values(x, 1.0, lam)
+    sparse_vals = np.asarray(evaluator.evaluate_hessian_values(x, obj_factor, lam))
     dense_at_pos = hess_dense[rows, cols]
     if not np.allclose(sparse_vals, dense_at_pos, atol=atol):
         max_err = float(np.max(np.abs(sparse_vals - dense_at_pos)))
-        logger.warning("Sparse Hessian validation failed (max err=%.2e)", max_err)
+        logger.warning(
+            "Dense/sparse Lagrangian Hessian disagree (max err=%.2e); arbitrating", max_err
+        )
         ok = False
+        # Neutral arbiter: finite-difference the Lagrangian gradient along v.
+        x64 = np.asarray(x, dtype=np.float64)
+        v = np.random.default_rng(0).standard_normal(n)
+        v /= np.linalg.norm(v) or 1.0
+        h = 1e-6
+        fd_hv = (
+            _lagrangian_gradient(evaluator, x64 + h * v, obj_factor, lam)
+            - _lagrangian_gradient(evaluator, x64 - h * v, obj_factor, lam)
+        ) / (2.0 * h)
+        scale = max(float(np.linalg.norm(fd_hv)), 1.0)
+        dense_err = float(np.linalg.norm(hess_dense @ v - fd_hv)) / scale
+        sparse_err = (
+            float(np.linalg.norm(_coo_lower_matvec(rows, cols, sparse_vals, v, n) - fd_hv)) / scale
+        )
+        logger.warning(
+            "Hessian arbitration (finite-difference of the Lagrangian gradient): "
+            "dense rel err=%.2e, sparse rel err=%.2e -> %s side disagrees with the arbiter",
+            dense_err,
+            sparse_err,
+            "dense" if dense_err > sparse_err else "sparse",
+        )
 
     return ok
 
@@ -450,6 +557,9 @@ class NLPEvaluator:
             def lagrangian_hess(x, obj_factor, lam, params):
                 return obj_factor * gn_obj_hess_fn(x, params) + constraint_hessian(x, lam, params)
 
+            # ``jax.hessian`` is forward-over-reverse, so the constraint term here
+            # never builds the ``(n, n, m)`` intermediate that #923 is about.
+            self._dense_hessian_mode = "gauss_newton"
             self._lagrangian_hess_fn_jit = jax.jit(lagrangian_hess)
             # The compressed-HVP Hessian path assumes the exact Lagrangian; it
             # is not wired for the Gauss-Newton approximation, so disable it.
@@ -462,21 +572,48 @@ class NLPEvaluator:
                     L = L + jnp.dot(lam, cons_fn_jit(x, params))
                 return L
 
-            # Dense Lagrangian Hessian via FORWARD-over-FORWARD AD. ``jax.hessian``
-            # is ``jacfwd(jacrev(...))``; its inner reverse pass hits the same
-            # super-linear XLA transpose codegen documented for the constraint
-            # Jacobian above — on a large lifted DAG (e.g. MINLPLib's du-opt, 21
-            # vars but a heavy constraint graph) that single compile runs ~12s,
-            # and because it is an uninterruptible C call it blows straight past
-            # the solver's per-node time budget. ``jacfwd(jacfwd(...))`` produces
-            # the identical matrix (AD mode never changes the value) and compiles
-            # it in ~half the time. This dense form is only taken when the sparse
-            # colored-HVP path declines (small ``n``, or a dense Hessian), so the
-            # O(n^2)-vs-O(n) forward-mode runtime constant is immaterial while the
-            # compile robustness is what matters.
-            self._lagrangian_hess_fn_jit = jax.jit(
-                jax.jacfwd(jax.jacfwd(lagrangian, argnums=0), argnums=0)
-            )
+            # Dense Lagrangian Hessian. Two AD nestings are available and they
+            # trade compile cost against memory:
+            #
+            # FORWARD-over-FORWARD ``jacfwd(jacfwd(L))`` — the default for models
+            # small enough to afford it. ``jax.hessian`` is ``jacfwd(jacrev(...))``;
+            # its inner reverse pass hits the same super-linear XLA transpose
+            # codegen documented for the constraint Jacobian above — on a large
+            # lifted DAG (e.g. MINLPLib's du-opt, 21 vars but a heavy constraint
+            # graph) that single compile runs ~12s, and because it is an
+            # uninterruptible C call it blows straight past the solver's per-node
+            # time budget. ``jacfwd(jacfwd(...))`` produces the identical matrix
+            # (AD mode never changes the value) and compiles it in ~half the time.
+            #
+            # FORWARD-over-REVERSE ``jacfwd(grad(L))`` — used once the
+            # forward-over-forward *intermediates* stop fitting in memory. Because
+            # ``L`` is a scalar, the inner forward pass carries one tangent per
+            # input through every intermediate, so the length-``m`` constraint
+            # vector becomes an ``(n, n, m)`` buffer: peak ``2 * n^2 * m * 8``
+            # bytes, i.e. 413 GB on emfl100_3_3. That over-large allocation is
+            # #923 — it read back as an all-zero Hessian with no error raised.
+            # The reverse inner pass produces the gradient in one sweep, so the
+            # same buffer is only ``(n, m)``: peak ``~2 * n * m * 8`` bytes.
+            #
+            # The gate is on the measured peak, not on ``n`` alone, and both
+            # branches return the same matrix. ``_lagrangian_grad`` below already
+            # builds (and the sparse colored-HVP path already compiles) the exact
+            # same reverse-mode Lagrangian gradient graph, so the large-model
+            # branch introduces no reverse-mode transposition that this evaluator
+            # was not already going to compile.
+            if (
+                _dense_hessian_fwd_over_fwd_peak_bytes(self._n_variables, self._n_constraints)
+                > _DENSE_HESSIAN_FWD_OVER_FWD_PEAK_BYTES
+            ):
+                self._dense_hessian_mode = "fwd_over_rev"
+                self._lagrangian_hess_fn_jit = jax.jit(
+                    jax.jacfwd(jax.grad(lagrangian, argnums=0), argnums=0)
+                )
+            else:
+                self._dense_hessian_mode = "fwd_over_fwd"
+                self._lagrangian_hess_fn_jit = jax.jit(
+                    jax.jacfwd(jax.jacfwd(lagrangian, argnums=0), argnums=0)
+                )
 
             # Matrix-free Lagrangian Hessian-vector product (forward-over-reverse).
             # Used by the compressed sparse-Hessian path to recover the block-
