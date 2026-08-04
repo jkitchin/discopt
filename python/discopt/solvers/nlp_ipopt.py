@@ -13,13 +13,17 @@ Maps NLPEvaluator callbacks to cyipopt.Problem interface:
 from __future__ import annotations
 
 import time
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 import numpy as np
 
-from discopt._jax.nlp_evaluator import NLPEvaluator
 from discopt.modeling.core import Constraint, Model
 from discopt.solvers import NLPResult, SolveStatus
+
+if TYPE_CHECKING:  # pragma: no cover - typing only
+    # #75: module-scope import pulled jax onto every solve via nlp_pounce ->
+    # nlp_backend. Annotation-only at runtime.
+    from discopt._jax.nlp_evaluator import NLPEvaluator
 
 # Ipopt status code mapping
 # See: https://coin-or.github.io/Ipopt/IpReturnCodes_8inc.html
@@ -302,7 +306,9 @@ def solve_nlp_from_model(
     Returns:
         NLPResult with solution.
     """
-    evaluator = NLPEvaluator(model)
+    from discopt._tape_nlp_evaluator import make_evaluator
+
+    evaluator = make_evaluator(model)
 
     if x0 is None:
         lb, ub = evaluator.variable_bounds

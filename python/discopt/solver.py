@@ -905,10 +905,11 @@ def _native_kernel_seed_candidates(model, lb, ub, n_orig, deadline):
     backend = None
     xr = None
     try:
-        from discopt._jax.nlp_evaluator import NLPEvaluator
         from discopt.solvers.nlp_backend import get_nlp_solver
 
-        ev = NLPEvaluator(model)
+        # Via the dispatcher (#75): a direct NLPEvaluator(...) both bypasses the
+        # selected backend and imports jax unconditionally.
+        ev = _make_evaluator(model)
         backend = get_nlp_solver("auto")
         r = backend(
             ev,
@@ -1667,7 +1668,7 @@ def _evaluator_fingerprint(model: Model) -> tuple:
     Thin alias for the canonical :func:`nlp_evaluator.evaluator_fingerprint`; kept
     here for the existing importers (e.g. ``solvers.nlp_native``).
     """
-    from discopt._jax.nlp_evaluator import evaluator_fingerprint
+    from discopt._evaluator_cache import evaluator_fingerprint
 
     return evaluator_fingerprint(model)
 
@@ -1989,7 +1990,7 @@ def _objective_is_convex_quadratic(
         # count is a model-wide upper bound on the objective's quadratic nnz —
         # conservative, so over-estimating only abstains (sound).
         if remaining_budget is not None:
-            from discopt._jax.nlp_evaluator import estimate_dense_obj_hessian_compile_s
+            from discopt._hessian_cost_model import estimate_dense_obj_hessian_compile_s
 
             _obj_quad_nnz = len(t.bilinear) + sum(1 for _, deg in _monos if int(deg) == 2)
             _compile_est = estimate_dense_obj_hessian_compile_s(_obj_quad_nnz)
@@ -17751,11 +17752,11 @@ def _solve_milp_bb(
     # general MILP whose model-space point is shorter than ``n_vars`` is skipped.
     if initial_point is not None:
         try:
-            from discopt._jax.nlp_evaluator import cached_evaluator
             from discopt._jax.primal_heuristics import (
                 _check_constraint_feasibility as _ip_cc,
             )
 
+            cached_evaluator = _make_evaluator  # #75: honour the selected backend
             _ip_x = np.asarray(initial_point, dtype=np.float64)
             _ip_int_ok = all(
                 not np.any(np.abs(_ip_x[o : o + s] - np.round(_ip_x[o : o + s])) > 1e-5)

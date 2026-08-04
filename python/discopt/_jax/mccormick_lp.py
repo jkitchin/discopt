@@ -1996,8 +1996,18 @@ class MccormickLPRelaxer:
         if res is None or res.status != "optimal" or res.x is None:
             return res
         try:
-            import jax.numpy as jnp
             import scipy.sparse as sp
+
+            # #75 Stage 2: import jax ONLY to marshal an argument for JAX-backed
+            # tangent callables. Tape-backed ones take plain numpy and mark
+            # themselves ``numpy_native``, so a fully tape-backed model must not
+            # pay a jax import here -- this function was the last thing pulling
+            # JAX onto an otherwise JAX-free separation path.
+            _jnp = None
+            if any(not getattr(r.value_fn, "numpy_native", False) for r in specs):
+                import jax.numpy as _jnp_mod
+
+                _jnp = _jnp_mod
 
             n_total = len(milp._c)
             n_orig = self._n_orig
@@ -2019,7 +2029,11 @@ class MccormickLPRelaxer:
                 if deadline is not None and time.perf_counter() >= deadline:
                     break
                 x = np.asarray(res.x, dtype=np.float64)
-                xv = jnp.asarray(x[:n_orig], dtype=jnp.float64)
+                xv = (
+                    np.asarray(x[:n_orig], dtype=np.float64)
+                    if _jnp is None
+                    else _jnp.asarray(x[:n_orig], dtype=_jnp.float64)
+                )
                 rows: list[np.ndarray] = []
                 rhs: list[float] = []
                 for r in specs:
@@ -2028,7 +2042,8 @@ class MccormickLPRelaxer:
                         continue
                     d = float(x[aux])
                     try:
-                        gval = float(jnp.reshape(r.value_fn(xv), ()))
+                        _raw = r.value_fn(xv)
+                        gval = float(_raw if _jnp is None else _jnp.reshape(_raw, ()))
                         grad = np.asarray(r.grad_fn(xv), dtype=np.float64).ravel()
                     except Exception as exc:  # noqa: BLE001 - a missing cut is always safe
                         logger.debug("OA cut evaluation skipped: %s: %s", type(exc).__name__, exc)

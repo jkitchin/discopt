@@ -12,14 +12,20 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import Optional, Sequence
+from typing import TYPE_CHECKING, Optional, Sequence
 
 import numpy as np
 
 from discopt import _timing
-from discopt._jax.nlp_evaluator import NLPEvaluator
 from discopt.modeling.core import Model
 from discopt.solvers import NLPResult, SolveStatus
+
+if TYPE_CHECKING:  # pragma: no cover - typing only
+    # #75: importing this at module scope pulls jax on every solve, because
+    # ``nlp_backend`` imports this module to probe for POUNCE. It is only ever
+    # used as an annotation here (this module has ``from __future__ import
+    # annotations``), so it costs nothing at runtime.
+    from discopt._jax.nlp_evaluator import NLPEvaluator
 from discopt.solvers.nlp_ipopt import (
     _IPOPT_STATUS_MAP,
     _infer_constraint_bounds,
@@ -215,7 +221,9 @@ def solve_nlp_from_model(
     Returns:
         NLPResult with solution.
     """
-    evaluator = NLPEvaluator(model)
+    from discopt._tape_nlp_evaluator import make_evaluator
+
+    evaluator = make_evaluator(model)
 
     if x0 is None:
         lb, ub = evaluator.variable_bounds

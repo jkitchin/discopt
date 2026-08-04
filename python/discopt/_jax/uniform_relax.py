@@ -802,6 +802,14 @@ class _Builder:
             return v
         import os
 
+        if os.environ.get("DISCOPT_SEPGRAD") == "tape":
+            v = self._compiled_tape(node)
+            if v is not None:
+                cache[nid] = v
+                return v
+            # fall through to JAX: an unlowerable node must lose its tape, never
+            # its separation.
+
         if os.environ.get("DISCOPT_ANALYTIC_SEPGRAD") == "1":
             v = self._compiled_analytic(node)
             if v is not None:
@@ -823,6 +831,50 @@ class _Builder:
             v = None
         cache[nid] = v
         return v
+
+    def _compiled_tape(self, node: CNode):
+        """``(value_fn, grad_fn)`` for the Kelley separation tangent, from the
+        POUNCE Rust AD tape — no JAX (issue #75, Stage 2).
+
+        The cut ``d >= g(x0) + grad g(x0)·(x - x0)`` needs exactly ``g(x0)`` and
+        ``grad g(x0)``, which is precisely what a tape supplies. Returns ``None``
+        when the node has no tape lowering, so the caller keeps the JAX path.
+
+        Why this and not ``_compiled_analytic``: the interval-AD engine covers 6
+        of ~30 DAG operators; the tape covers all the scalar ones. Measured on the
+        real call site over 734 lift-node compiles across the corpus — 100%
+        coverage, 2202 points compared, max rel drift 2.08e-16 on value and
+        1.90e-16 on gradient, versus the analytic path's 8.53e-14.
+
+        **Bound-CHANGING, and deliberately gated.** Nonzero drift is enough:
+        ``jax.jit`` was rejected on this exact path at ~7e-15 (see the
+        ``_TracedEvalFn`` docstring) because the Kelley loop is path-dependent, so
+        a different last ulp can change the cut sequence and hence the bound. The
+        tape is ~40x tighter than that threshold but not bit-identical, so it
+        stays behind ``DISCOPT_SEPGRAD=tape`` until the CLAUDE.md §5 panel.
+
+        Unlike ``NlProblem``, ``NlExpr`` is not an ``unsendable`` pyclass, so one
+        expression is safely shared across the solver's worker threads — verified,
+        not assumed (``NlProblem``'s thread affinity produced a false ``infeasible``
+        in Stage 3).
+        """
+        from discopt._nl_expr_compiler import try_compile
+
+        expr = try_compile(self._expr(node), self.model)
+        if expr is None:
+            return None
+
+        def value_fn(x, _e=expr):
+            return _e.eval([float(t) for t in np.asarray(x).ravel()])
+
+        def grad_fn(x, _e=expr):
+            return np.asarray(_e.gradient([float(t) for t in np.asarray(x).ravel()]), dtype=float)
+
+        # Marks these as accepting/returning plain numpy, so ``_separate_convex``
+        # can skip importing ``jax.numpy`` purely to marshal an argument.
+        value_fn.numpy_native = True  # type: ignore[attr-defined]
+        grad_fn.numpy_native = True  # type: ignore[attr-defined]
+        return (value_fn, grad_fn)
 
     @staticmethod
     def _analytic_probe_point(variables) -> "np.ndarray":

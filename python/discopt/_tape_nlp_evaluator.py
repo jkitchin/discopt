@@ -384,6 +384,24 @@ def _build_or_sentinel(model: "Model") -> Any:
     return _UNREPRESENTABLE if ev is None else ev
 
 
+def make_evaluator(model: "Model") -> Any:
+    """The cached evaluator for ``model`` under the selected backend.
+
+    THE canonical entry point. The ``cached_evaluator`` import is inside the
+    fallback on purpose: ``_jax/nlp_evaluator`` imports jax at module scope, so
+    importing it eagerly puts JAX in ``sys.modules`` on every nonlinear solve and
+    defeats the tape backend entirely (#75). Callers must not reach past this to
+    ``cached_evaluator`` — that is what kept JAX on the path after Stage 3.
+    """
+
+    def _jax_evaluator() -> Any:
+        from discopt._jax.nlp_evaluator import cached_evaluator
+
+        return cached_evaluator(model)
+
+    return build_evaluator(model, _jax_evaluator)
+
+
 def build_evaluator(model: "Model", jax_factory: Any) -> Any:
     """The tape evaluator when opted in and representable, else ``jax_factory()``.
 

@@ -13,12 +13,18 @@ import logging
 import math
 import time
 from dataclasses import dataclass, field
-from typing import Callable, Optional
+from typing import TYPE_CHECKING, Callable, Optional
 
 import numpy as np
 
-from discopt._jax.nlp_evaluator import NLPEvaluator, cached_evaluator
+from discopt._tape_nlp_evaluator import make_evaluator as cached_evaluator
 from discopt._work_budget import EVAL, NLP_SOLVE, WorkBudget
+
+if TYPE_CHECKING:  # pragma: no cover - typing only
+    # #75: annotation only. ``cached_evaluator`` above is now the backend
+    # dispatcher, which keeps the jax import inside its fallback -- importing
+    # ``_jax.nlp_evaluator`` here put JAX on every solve regardless of backend.
+    from discopt._jax.nlp_evaluator import NLPEvaluator
 from discopt.modeling.core import Model, VarType
 
 # #843: the QUBO/Ising local-search primal moved to ``discopt.qubo_primal`` when
