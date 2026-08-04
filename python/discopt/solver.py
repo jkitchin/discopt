@@ -4742,14 +4742,28 @@ def _stamp_layer_timing(fn: _F) -> _F:
             return result
         spent = _timing.since(before)
         wall = result.wall_time if result.wall_time else elapsed
-        result.pounce_time = spent["pounce"]
-        result.jax_time = spent["jax"]
-        # POUNCE is Rust: it belongs inside rust_time, not beside it.
-        result.rust_time = spent["rust"] + spent["pounce"]
-        # Everything that is not native Rust is interpreted Python. Clamped at 0
-        # so an over-measured boundary shows as python_time == 0 rather than a
-        # negative number that reads like a live counter.
-        result.python_time = max(0.0, wall - result.rust_time)
+
+        # Clamp the measured native time to the wall it was measured inside.
+        #
+        # Not defensive padding — it closes a real intermittent hole. ``wall`` is
+        # ``result.wall_time``, which an inner path sets, while the boundary
+        # counters accumulate across everything this call did. ``Model.solve`` can
+        # run ``solve_model`` more than once (the #844 no-incumbent fallback), so
+        # the counters can legitimately exceed the wall the *returned* result
+        # reports. Without the clamp, ``python_time`` floors at 0 while
+        # ``rust_time`` keeps the overflow and the partition invariant breaks —
+        # observed as a ~1-in-N flake in ``test_buckets_partition_the_wall``.
+        #
+        # Clamping keeps rust + python == wall exactly. It can under-report Rust
+        # on a multi-solve call, which is the right way to be wrong here: a bucket
+        # that quietly exceeds its own wall is the class of nonsense this whole
+        # change exists to remove.
+        native = min(spent["rust"] + spent["pounce"], wall)
+        result.rust_time = native
+        result.pounce_time = min(spent["pounce"], native)
+        # Everything that is not native Rust is interpreted Python.
+        result.python_time = max(0.0, wall - native)
+        result.jax_time = min(spent["jax"], result.python_time)
         return result
 
     return cast(_F, wrapper)
