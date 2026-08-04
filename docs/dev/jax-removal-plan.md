@@ -8,9 +8,20 @@ PR #922; `main` is untouched until the whole thing verifies end to end.
 |---|---|
 | 0 — layer-time attribution | **done** — `c3a3d648`, `7fc69f7f` |
 | 1 — DAG → `NlExpr` tape translator | **done, not wired in** — `1917a17b`, probe hardening `360a1e69`, three wrong lowerings fixed `08e1e0a1` |
-| 2 — separation tangents → translator | not started; §5 panel required |
+| 2 — separation tangents → translator | **built, default OFF** — `77dc8db2` (`DISCOPT_SEPGRAD=tape`); §5 panel required |
 | 3 — NLP derivatives → translator | **evaluator built, default OFF** — `ce212d67`. Remaining: wire into the `cached_evaluator` call sites, then the §5 panel |
-| 4 — enforcement (`sys.modules` assert) | partial — asserted for the evaluator's full derivative set (`ce212d67`); not yet for a whole `Model.solve()` |
+| 4 — enforcement (`sys.modules` assert) | **done** — `77dc8db2`. `Model.solve()` completes with `jax` never in `sys.modules`, asserted over 4 nonlinear classes in `test_75_jax_free_solve_path.py` |
+
+**THE GOAL IS MET, behind flags.** With `DISCOPT_NLP_EVAL=tape` and
+`DISCOPT_SEPGRAD=tape`, a nonlinear `Model.solve()` returns `optimal` with `jax`
+never entering `sys.modules` — verified on exp/log NLP, binary MINLP,
+integer+trig MINLP and bilinear QCQP, each in a clean subprocess, with a control
+arm asserting the JAX path *does* import jax so the check cannot pass vacuously.
+
+Both flags are **default OFF** and both stages are **bound-CHANGING**; the
+CLAUDE.md §5 differential panel is the remaining gate before either default
+flips. That panel must run to optimality or a node limit, **not** a time limit:
+measured, the JAX arm alone moved 381 → 395 nodes between two identical runs.
 
 **Nothing blocks Stage 2/3.**
 
@@ -761,6 +772,48 @@ Reuse the harness in `scratchpad/stage1_entry.py`.
 **Bound impact:** none — nothing is wired in yet.
 
 ## Stage 2 — route separation tangents through the translator (was Stage 1)
+
+**Status: built, default OFF** (`77dc8db2`, `DISCOPT_SEPGRAD=tape`).
+
+### Entry experiment (§4) — measured on the real call site
+
+Hooked `_Builder._compiled` during real corpus solves rather than a synthetic
+proxy (the #727 RLT lesson: synthetic root-gain 0.68, real gain 0.0):
+
+| | |
+|---|---|
+| lift-node compiles | **2170** |
+| tape coverage | **100.00%** (0 refusals) |
+| points compared | **6510** |
+| max rel \|Δvalue\| | **2.080e-16** |
+| max rel \|Δgrad\| | **1.951e-16** |
+
+For scale: `interval_ad` covers 6 of ~30 operators and drifts 8.53e-14, and
+`jax.jit` was *rejected* on this exact path at ~7e-15 (`uniform_relax.py:441`).
+The tape is ~40× tighter than that threshold — but not bit-identical, so it is
+bound-changing and stays gated.
+
+### The four extra JAX triggers the acceptance test found
+
+Routing `_compiled` was not sufficient, and none of these were visible by
+reading the separation code:
+
+* `solvers/nlp_pounce.py`, `solvers/nlp_ipopt.py`, `_jax/primal_heuristics.py`
+  imported `NLPEvaluator` at **module scope**. `nlp_backend` imports
+  `nlp_pounce` to probe for POUNCE, so this pulled JAX on every solve regardless
+  of backend. All annotation-only → `TYPE_CHECKING`.
+* `solver._objective_is_convex_quadratic` imported
+  `estimate_dense_obj_hessian_compile_s` from the evaluator module. It is **pure
+  arithmetic** and never touches JAX, yet the import dragged **210 jax modules**
+  onto an otherwise JAX-free bilinear QCQP. Moved to `discopt/_hessian_cost_model`.
+* two direct `NLPEvaluator` / `cached_evaluator` constructions in `solver.py`
+  bypassed the backend choice entirely.
+
+**Lesson: a "JAX-free path" claim has to be asserted on `sys.modules` after a
+real solve.** Reading the code found the separation call; it did not find a cost
+estimate, three type annotations, or two stragglers.
+
+### Original plan text follows
 
 Replace the `jax.grad` arm of `_Builder._compiled` (`_jax/uniform_relax.py:813-820`)
 with the translator, delete `_TracedEvalFn` (`:423-475`), and swap the `jnp`
