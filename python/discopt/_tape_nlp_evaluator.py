@@ -34,6 +34,7 @@ stays intact underneath.
 
 from __future__ import annotations
 
+import logging
 import os
 import threading
 from typing import TYPE_CHECKING, Any, Optional
@@ -44,6 +45,55 @@ from discopt._nl_expr_compiler import UnsupportedForTape, compile_to_nl_expr
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from discopt.modeling.core import Constraint, Model
+
+logger = logging.getLogger(__name__)
+
+
+_POUNCE_USABLE: Optional[bool] = None
+
+
+def pounce_usable() -> bool:
+    """Is a POUNCE new enough to carry the tape actually installed?
+
+    Checks the SURFACE, not just importability. Two failure modes, both hit for
+    real:
+
+    * **pounce absent.** ``pyproject`` requires ``pounce-solver>=0.9``, but a
+      minimal install need not have it -- CI's AMP-coverage job installs jax,
+      numpy, scipy and highspy and nothing else. Before this guard, flipping the
+      default ON turned that environment from working into a hard
+      ``ModuleNotFoundError`` on every solve.
+    * **pounce too old.** A build predating pounce #470 exports no ``NlExpr`` at
+      all. Importing succeeds and the attribute access is what explodes, deep in
+      a solve. (That exact stale build also silently disabled a whole test file
+      behind ``pytest.importorskip`` earlier in this work.)
+
+    Neither is a bug to hide, so this is not exception-swallowing: it is an
+    availability decision made once, logged once, and used only to choose a
+    backend. Numerical failures are never routed through here.
+    """
+    global _POUNCE_USABLE
+    if _POUNCE_USABLE is not None:
+        return _POUNCE_USABLE
+    try:
+        import pounce
+    except ImportError:
+        _POUNCE_USABLE = False
+        logger.info(
+            "POUNCE is not installed; the tape NLP evaluator is unavailable and "
+            "the JAX evaluator will be used (install `pounce-solver`)."
+        )
+        return _POUNCE_USABLE
+    missing = [n for n in ("NlExpr", "build_nl_problem") if not hasattr(pounce, n)]
+    _POUNCE_USABLE = not missing
+    if missing:
+        logger.warning(
+            "POUNCE is installed but lacks %s, so the tape NLP evaluator is "
+            "unavailable and the JAX evaluator will be used. This build predates "
+            "pounce #470; rebuild the extension to enable the tape backend.",
+            ", ".join(missing),
+        )
+    return _POUNCE_USABLE
 
 
 def tape_backend_requested() -> bool:
@@ -60,7 +110,9 @@ def tape_backend_requested() -> bool:
     beneath it, per §5's graduation rule. Read per call rather than cached at
     import so a test can flip it without reloading the module.
     """
-    return os.environ.get("DISCOPT_NLP_EVAL", "tape").strip().lower() != "jax"
+    if os.environ.get("DISCOPT_NLP_EVAL", "tape").strip().lower() == "jax":
+        return False
+    return pounce_usable()
 
 
 _THREAD_SAFE_NLPROBLEM: Optional[bool] = None

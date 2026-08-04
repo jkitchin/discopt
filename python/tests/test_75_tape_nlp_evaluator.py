@@ -19,6 +19,7 @@ Entry experiment recorded when this landed: 66 in-repo corpus instances, 5 point
 each, max rel drift f 5.48e-16, grad 3.77e-16, g 4.55e-13, J 3.06e-15, H 7.82e-13.
 """
 
+import sys
 from pathlib import Path
 
 import numpy as np
@@ -267,6 +268,81 @@ def test_per_thread_fallback_is_exercised_and_agrees(monkeypatch):
     for i, got in sorted(seen.items()):
         assert not isinstance(got, str), f"fallback thread {i} raised: {got}"
         assert got == pytest.approx(want_f, rel=1e-15)
+
+
+@pytest.mark.unit
+def test_solve_degrades_to_jax_when_pounce_is_missing():
+    """A missing or too-old POUNCE must fall back, not crash.
+
+    ``pyproject`` requires ``pounce-solver>=0.9``, but a minimal install need not
+    have it — CI's AMP-coverage lane installed jax/numpy/scipy/highspy and
+    nothing else. That was invisible while the tape backend was opt-in and became
+    a hard ``ModuleNotFoundError`` on every solve the moment it graduated to
+    default-ON, because ``try_build`` catches only ``UnsupportedForTape``.
+
+    Runs in a SUBPROCESS with the import blocked, since ``pounce`` is already
+    imported in this process and cannot be un-imported.
+    """
+    import subprocess
+    import sys
+
+    script = """
+import sys, builtins
+_real = builtins.__import__
+
+
+def block(name, *a, **k):
+    if name == "pounce" or name.startswith("pounce."):
+        raise ModuleNotFoundError("No module named 'pounce'")
+    return _real(name, *a, **k)
+
+
+builtins.__import__ = block
+
+from discopt import Model
+import discopt.modeling as dm
+
+m = Model()
+x = m.continuous("x", lb=0.2, ub=4.0)
+y = m.continuous("y", lb=0.2, ub=4.0)
+m.subject_to(dm.exp(x) + y * y <= 20.0)
+m.subject_to(x * y >= 1.0)
+m.minimize(x * x + y + dm.log(x))
+r = m.solve()
+assert str(r.status) == "optimal", r.status
+assert "jax" in sys.modules, "should have fallen back to the JAX evaluator"
+print("FALLBACK-OK")
+"""
+    out = subprocess.run(
+        [sys.executable, "-c", script], capture_output=True, text=True, timeout=600
+    )
+    assert out.returncode == 0, f"solve crashed without pounce\n{out.stderr[-2500:]}"
+    assert "FALLBACK-OK" in out.stdout
+
+
+@pytest.mark.unit
+def test_pounce_usable_reports_false_on_a_build_without_nlexpr(monkeypatch):
+    """A POUNCE too old to have ``NlExpr`` must also be refused.
+
+    Importability is not the contract — a build predating pounce #470 imports
+    fine and explodes on attribute access deep inside a solve. That exact stale
+    build silently disabled a whole test file behind ``importorskip`` earlier in
+    this work, so the probe checks the surface it needs.
+    """
+    import types
+
+    import discopt._tape_nlp_evaluator as T
+
+    monkeypatch.setattr(T, "_POUNCE_USABLE", None)
+    fake = types.ModuleType("pounce")  # no NlExpr, no build_nl_problem
+    monkeypatch.setitem(sys.modules, "pounce", fake)
+    assert T.pounce_usable() is False
+    assert T.tape_backend_requested() is False
+
+    monkeypatch.setattr(T, "_POUNCE_USABLE", None)
+    fake.NlExpr = object()
+    fake.build_nl_problem = lambda *a, **k: None
+    assert T.pounce_usable() is True
 
 
 @pytest.mark.unit
