@@ -7,10 +7,10 @@ PR #922; `main` is untouched until the whole thing verifies end to end.
 | stage | state |
 |---|---|
 | 0 — layer-time attribution | **done** — `c3a3d648`, `7fc69f7f` |
-| 1 — DAG → `NlExpr` tape translator | **done, not wired in** — `1917a17b` (+ probe hardening `360a1e69`) |
+| 1 — DAG → `NlExpr` tape translator | **done, not wired in** — `1917a17b`, probe hardening `360a1e69`, three wrong lowerings fixed `08e1e0a1` |
 | 2 — separation tangents → translator | not started; §5 panel required |
-| 3 — NLP derivatives → translator | not started; §5 panel required |
-| 4 — enforcement (`sys.modules` assert) | not started |
+| 3 — NLP derivatives → translator | **evaluator built, default OFF** — `ce212d67`. Remaining: wire into the `cached_evaluator` call sites, then the §5 panel |
+| 4 — enforcement (`sys.modules` assert) | partial — asserted for the evaluator's full derivative set (`ce212d67`); not yet for a whole `Model.solve()` |
 
 **Nothing blocks Stage 2/3.**
 
