@@ -773,6 +773,74 @@ guarded by `test_convex_claimer` (`mccormick_lp.py:1181-1187`, −204 → −350
 
 ## Stage 3 — route NLP derivatives through the translator (was Stage 2)
 
+**Status: evaluator built, default OFF** (`ce212d67`). `_tape_nlp_evaluator.py`
+implements the protocol from the tape; `DISCOPT_NLP_EVAL=tape` opts in.
+Remaining for this stage: wire `build_evaluator` into the `cached_evaluator`
+call sites, then the §5 panel.
+
+### Measured record
+
+**Entry experiment (§4), run before implementation.** Tape vs the JAX evaluator,
+66 in-repo corpus instances, 5 points each, 1573 comparisons:
+
+| quantity | comparisons | max rel diff | Step 2.2 bar |
+|---|---|---|---|
+| `f` | 330 | 5.48e-16 | — |
+| `∇f` | 330 | 3.77e-16 | ≤1e-10 ✅ |
+| `g` | 297 | 4.55e-13 | — |
+| `J` | 298 | 3.06e-15 | ≤1e-10 ✅ |
+| `∇²L` | 318 | 7.82e-13 | ≤1e-8 ✅ |
+
+Zero coverage gaps, zero unexpected errors.
+
+> #### ⚑ FALSIFIED — "verified on 40 corpus instances" was not evidence
+>
+> Stage 1 shipped claiming all 30 operators on the strength of a corpus
+> differential. **A `.nl` corpus exercises six operators.** Census over 316
+> MINLPLib instances (66 in-repo + 250 from the benchmark snapshot):
+> `log, sqrt, exp, abs, sin, cos` — nothing else, ever. `.nl` has no opcode for
+> `sigmoid`/`softplus`/`entropy`/`centropy`/`signpower`; they reach the DAG only
+> through the modeling API and `factorable_reform`. **Nine of the ten rewrites
+> had zero coverage**, and three were wrong (`08e1e0a1`):
+>
+> * `entropy` returned `-x·log(x)`; discopt's semantics is `x·log(x)`. A clean
+>   factor of −1 — raises nothing, passes every structural check.
+> * `_sign` called `compare(a, ">", b)`; the operator comes **first**. Raises
+>   `TypeError`, which escapes `try_compile`'s fallback and crashes the caller.
+> * `prod` was lowered as a variadic `*` chain. It is `jnp.prod(arr)` — one
+>   **array** argument. Agreed with nothing (reldiff 0.90/1.70) while reporting
+>   success. Now refused, with `norm1`/`norm2`/`norminf`.
+>
+> **Lesson: coverage claims must be counted in operators, not instances.** Corpus
+> breadth is the wrong axis for an operator table; a 5-second per-operator
+> differential found all three, and 316 instances over ~2.5 h found none.
+> `test_every_rewrite_is_covered` now reads the compiler's source so the list
+> cannot drift.
+
+**Found in passing, filed as #923 (not caused by this work):** the *dense*
+`evaluate_lagrangian_hessian` silently returns an **all-zero** matrix on
+`emfl100_3_3` (n=2961). Finite differences (−2.00007), the JAX *sparse* path
+(−2.0) and the tape (−2.0) all agree against it. Not a size threshold — a
+synthetic sweep is correct to n=3000. `nlp_evaluator.py:268` compounds it by
+using the dense Hessian as ground truth to validate the sparse values, which is
+backwards here. Also observed: `dag_compiler` hits Python's recursion limit on a
+plain `sum(xs)` objective at n≈300 (it skipped three `edgecross10-*` instances).
+
+### Design notes that are load-bearing
+
+* **The parameter hazard.** `evaluator_fingerprint` deliberately excludes
+  `Parameter.value` because JAX reads it live; the tape bakes it in. A tape
+  cached under that fingerprint serves stale derivatives with no error. The
+  evaluator snapshots and rebuilds on change.
+* **Two Hessian conventions.** `evaluate_lagrangian_hessian` is FULL dense (n,n);
+  `hessian_structure`/`evaluate_hessian_values` are LOWER-TRIANGLE COO.
+* **Consumed surface is wider than the protocol.** Call sites also read `_model`,
+  `_obj_fn`, `_cons_fn`, `_source_constraints`, `_constraint_flat_sizes` and
+  `_structural_linear_mask_cache`, so "same protocol, no call-site changes" is
+  optimistic.
+
+### Original plan text follows
+
 Replace `_jax/nlp_evaluator.py` — the single trigger that imports JAX on *every*
 nonlinear solve (`:22`, measured across 27 instances). Same protocol, so
 `solvers/nlp_pounce.py:19`, `solvers/oa.py:1562-1564` and `solvers/amp.py:1026`
