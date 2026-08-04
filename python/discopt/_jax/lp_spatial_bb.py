@@ -463,10 +463,12 @@ def solve_lp_spatial_bb(
     # If we cannot build a verifier we cannot safely accept any incumbent, so bail to
     # the sound default path (return None) rather than risk an unverified certificate.
     try:
-        from discopt._jax.nlp_evaluator import NLPEvaluator
+        from discopt._tape_nlp_evaluator import make_evaluator
         from discopt.solver import _check_constraint_feasibility, _infer_constraint_bounds
 
-        _ev = NLPEvaluator(model)
+        # #75: dispatcher, not a direct NLPEvaluator -- this incumbent verifier
+        # runs on the spatial B&B path and imported JAX unconditionally.
+        _ev = make_evaluator(model)
         _cl, _cu = _infer_constraint_bounds(model, _ev)
     except Exception:
         return None

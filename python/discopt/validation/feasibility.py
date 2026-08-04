@@ -168,9 +168,12 @@ def _row_scales(evaluator, x_flat: np.ndarray, rows: np.ndarray) -> Optional[np.
 def check_constraints(model, x_flat: np.ndarray, evaluator=None) -> VerifyResult:
     """Every constraint row, enumerated from the evaluator's own row map."""
     if evaluator is None:
-        from discopt._jax.nlp_evaluator import cached_evaluator
+        # #75: via the dispatcher, so the selected backend is honoured and the
+        # jax import stays inside its fallback. A direct `cached_evaluator`
+        # import here put JAX on every solve that validates a point.
+        from discopt._tape_nlp_evaluator import make_evaluator
 
-        evaluator = cached_evaluator(model)
+        evaluator = make_evaluator(model)
 
     if evaluator.n_constraints <= 0:
         return VerifyResult(True)
@@ -251,9 +254,12 @@ def verify_point(
         return res
 
     try:
-        from discopt._jax.nlp_evaluator import cached_evaluator
+        # #75: via the dispatcher, so the selected backend is honoured and the
+        # jax import stays inside its fallback. A direct `cached_evaluator`
+        # import here put JAX on every solve that validates a point.
+        from discopt._tape_nlp_evaluator import make_evaluator
 
-        evaluator = cached_evaluator(model)
+        evaluator = make_evaluator(model)
         res = check_constraints(model, x_flat, evaluator=evaluator)
         if not res.ok:
             return res
