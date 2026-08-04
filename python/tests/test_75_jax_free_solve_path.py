@@ -135,6 +135,44 @@ def test_tape_backend_agrees_with_jax_on_the_objective(name):
     assert abs(jo - to) / max(1.0, abs(jo)) <= 1e-6, f"{name}: objective {jo} (jax) vs {to} (tape)"
 
 
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "module,symbol",
+    [
+        # Each of these is JAX-FREE code that used to live in a JAX-importing
+        # module, so merely importing the symbol pulled the whole stack onto an
+        # otherwise JAX-free solve. Each was found by a corpus sweep, never by
+        # reading the code, and each is one `import` away from coming back.
+        ("discopt._alphabb_rigorous", "rigorous_alpha"),
+        ("discopt._hessian_cost_model", "estimate_dense_obj_hessian_compile_s"),
+        ("discopt._evaluator_cache", "evaluator_fingerprint"),
+        ("discopt._nl_expr_compiler", "compile_to_nl_expr"),
+        ("discopt._tape_nlp_evaluator", "TapeNLPEvaluator"),
+    ],
+)
+def test_jax_free_helper_modules_do_not_import_jax(module, symbol):
+    """These modules must stay importable without loading JAX.
+
+    Subprocess, because the suite has already imported JAX by this point and an
+    in-process check could only ever report "already loaded".
+    """
+    import subprocess
+    import sys
+
+    src = (
+        f"import sys; from {module} import {symbol}; "
+        f"assert '{symbol}' in dir(); "
+        "leaked = sorted(k for k in sys.modules if k == 'jax' or k.startswith('jax.')); "
+        "print('LEAKED' + str(len(leaked))); "
+        "assert not leaked, leaked[:6]"
+    )
+    out = subprocess.run([sys.executable, "-c", src], capture_output=True, text=True, timeout=300)
+    assert out.returncode == 0, (
+        f"{module}.{symbol} imports JAX\nstdout={out.stdout}\nstderr={out.stderr[-1500:]}"
+    )
+    assert "LEAKED0" in out.stdout
+
+
 @pytest.mark.slow
 def test_jax_arm_of_the_same_check_does_import_jax():
     """The control: without the flags, JAX *is* imported.

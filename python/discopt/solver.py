@@ -1832,7 +1832,7 @@ def _compute_alphabb_bound(evaluator, model, alphabb_expr, node_lb, node_ub):
     # convexity, so we ABSTAIN rather than emit a guessed (possibly invalid)
     # bound. Building the enclosure over the node box (not the root box) also
     # tightens alpha as B&B subdivides.
-    from discopt._jax.alphabb import rigorous_alpha
+    from discopt._alphabb_rigorous import rigorous_alpha
 
     try:
         box = _alphabb_node_box(model, node_lb, node_ub)
