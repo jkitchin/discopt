@@ -221,6 +221,55 @@ def test_evaluator_is_usable_from_multiple_threads():
 
 
 @pytest.mark.unit
+def test_per_thread_fallback_is_exercised_and_agrees(monkeypatch):
+    """The OLD-pounce path must keep working, and must be tested on new pounce.
+
+    pounce #477/#478 made ``NlProblem`` sendable, so on a current build the
+    evaluator shares one problem and the per-thread fallback never runs. That is
+    precisely when a fallback rots: it is retained for users on
+    ``pounce-solver>=0.9`` builds predating the fix, where using it wrongly costs
+    a false ``infeasible``. Forcing the capability probe to ``False`` keeps it
+    covered, and asserts the two paths agree rather than merely both running.
+    """
+    import threading
+
+    import discopt._tape_nlp_evaluator as T
+
+    m, _x, _y = _xy_model()
+    pt = np.array([0.7, 1.3])
+
+    shared = TapeNLPEvaluator(m)
+    assert shared._shared_problem is not None, "probe should report thread-safe here"
+    want_f = shared.evaluate_objective(pt)
+    want_g = np.asarray(shared.evaluate_gradient(pt), dtype=float)
+
+    monkeypatch.setattr(T, "_nlproblem_is_thread_safe", lambda: False)
+    fallback = TapeNLPEvaluator(m)
+    assert fallback._shared_problem is None, "fallback path was not taken"
+
+    assert fallback.evaluate_objective(pt) == pytest.approx(want_f, rel=1e-15)
+    np.testing.assert_allclose(fallback.evaluate_gradient(pt), want_g, rtol=1e-15)
+
+    seen: dict[int, object] = {}
+
+    def worker(i):
+        try:
+            seen[i] = fallback.evaluate_objective(pt)
+        except BaseException as exc:  # noqa: BLE001 - PanicException is not an Exception
+            seen[i] = f"{type(exc).__name__}: {exc}"
+
+    threads = [threading.Thread(target=worker, args=(i,)) for i in range(3)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert len(seen) == 3
+    for i, got in sorted(seen.items()):
+        assert not isinstance(got, str), f"fallback thread {i} raised: {got}"
+        assert got == pytest.approx(want_f, rel=1e-15)
+
+
+@pytest.mark.unit
 def test_gauss_newton_is_refused_not_approximated():
     """``2 J^T J`` is a different matrix from the exact Hessian; never silently swap."""
     m, _x, _y = _xy_model()
