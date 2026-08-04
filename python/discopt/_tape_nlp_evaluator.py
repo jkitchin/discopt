@@ -35,6 +35,7 @@ stays intact underneath.
 from __future__ import annotations
 
 import os
+import threading
 from typing import TYPE_CHECKING, Any, Optional
 
 import numpy as np
@@ -121,6 +122,23 @@ class TapeNLPEvaluator:
         )
 
     def _build(self) -> None:
+        """(Re)build this thread's tape and drop every other thread's.
+
+        THREAD AFFINITY, and it is load-bearing. ``pounce.NlProblem`` is a
+        ``#[pyclass(unsendable)]``: touching one from a thread other than the one
+        that created it raises a Rust ``PanicException``. That is not a normal
+        error — ``PanicException`` derives directly from ``BaseException``, so it
+        slips past every ``except Exception`` in the solver, and the measured
+        result was a **false `infeasible`** on clay0303hfsg (JAX arm: `feasible`,
+        obj 26669.1). A wrong certificate is the one outcome that is never
+        acceptable (CLAUDE.md §1), so the tape is built per thread rather than
+        shared. A build is milliseconds; a JAX trace is seconds, which is why the
+        JAX evaluator cannot afford the same trick and does not need it.
+
+        The underlying ``NlTnlp`` IS ``Send`` — pounce keeps the pyclass
+        unsendable as a conservative default — so this is a workaround for a
+        policy, not a physical limit, and can be dropped if that changes.
+        """
         model = self._model
         objective = model._objective
         assert objective is not None  # refused in __init__
@@ -139,15 +157,41 @@ class TapeNLPEvaluator:
         self._n_constraints = len(cons)
 
         lb, ub = self.variable_bounds
-        self._problem = self._pounce.build_nl_problem(
-            self._n_variables,
-            obj,
-            constraints=cons or None,
-            x_l=[float(v) for v in lb],
-            x_u=[float(v) for v in ub],
-        )
+        self._lo = [float(v) for v in lb]
+        self._hi = [float(v) for v in ub]
+        self._obj_expr = obj
+        self._con_exprs = cons
+        # Per-thread NlProblem, in thread-LOCAL storage rather than a plain dict
+        # keyed by thread id. The difference matters: an unsendable pyclass also
+        # refuses to be DROPPED on a foreign thread, and a dict outliving its
+        # threads hands every entry to whichever thread happens to run the GC ->
+        # "unsendable, but is being dropped on another thread" at teardown.
+        # CPython clears a threading.local on the owning thread as it exits, so
+        # each tape is both built and dropped where it belongs.
+        # `_generation` invalidates every thread's copy on a rebuild without
+        # needing to enumerate them (threading.local cannot be iterated).
+        self._local = threading.local()
+        self._generation = getattr(self, "_generation", 0) + 1
         self._jac_struct: Optional[tuple[np.ndarray, np.ndarray]] = None
         self._hess_struct: Optional[tuple[np.ndarray, np.ndarray]] = None
+
+    def _problem_for_this_thread(self) -> Any:
+        cached = getattr(self._local, "entry", None)
+        if cached is not None and cached[0] == self._generation:
+            return cached[1]
+        prob = self._pounce.build_nl_problem(
+            self._n_variables,
+            self._obj_expr,
+            constraints=self._con_exprs or None,
+            x_l=self._lo,
+            x_u=self._hi,
+        )
+        self._local.entry = (self._generation, prob)
+        return prob
+
+    @property
+    def _problem(self) -> Any:
+        return self._problem_for_this_thread()
 
     def _ensure_fresh(self) -> None:
         """Rebuild if a ``Parameter.value`` moved since the tape was built."""
@@ -315,6 +359,31 @@ def try_build(model: "Model") -> Optional[TapeNLPEvaluator]:
         return None
 
 
+def cached_tape_evaluator(model: "Model") -> Optional[TapeNLPEvaluator]:
+    """Per-model LRU-cached tape evaluator, or ``None`` if unrepresentable.
+
+    Shares :mod:`discopt._evaluator_cache` with the JAX backend so the two agree
+    on what "still valid" means, on its own cache attribute so a backend switch
+    cannot hand one backend's evaluator to the other.
+
+    A ``None`` result is cached too, as a sentinel: representability is a pure
+    function of the structural fingerprint, so re-attempting the build at every
+    B&B node would re-walk the whole DAG only to fail again.
+    """
+    from discopt._evaluator_cache import cached_by_fingerprint
+
+    built = cached_by_fingerprint(model, "_tape_evaluator_cache", _build_or_sentinel)
+    return None if built is _UNREPRESENTABLE else built
+
+
+_UNREPRESENTABLE = object()
+
+
+def _build_or_sentinel(model: "Model") -> Any:
+    ev = try_build(model)
+    return _UNREPRESENTABLE if ev is None else ev
+
+
 def build_evaluator(model: "Model", jax_factory: Any) -> Any:
     """The tape evaluator when opted in and representable, else ``jax_factory()``.
 
@@ -323,7 +392,7 @@ def build_evaluator(model: "Model", jax_factory: Any) -> Any:
     tape is used, which is what keeps JAX out of ``sys.modules`` on the tape path.
     """
     if tape_backend_requested():
-        ev = try_build(model)
+        ev = cached_tape_evaluator(model)
         if ev is not None:
             return ev
     return jax_factory()

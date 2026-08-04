@@ -23,6 +23,13 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
+from discopt._evaluator_cache import (
+    EVALUATOR_CACHE_MAXSIZE,
+    cached_by_fingerprint,
+)
+from discopt._evaluator_cache import (
+    evaluator_fingerprint as evaluator_fingerprint,  # re-export: callers import it here
+)
 from discopt._jax.dag_compiler import (
     _build_param_index,
     compile_constraint_params,
@@ -200,45 +207,13 @@ def estimate_dense_obj_hessian_compile_s(obj_quad_nnz: int) -> float:
     return _HESSIAN_COMPILE_DENSE_S * ratio * ratio
 
 
-def evaluator_fingerprint(model: Model) -> tuple:
-    """Structural fingerprint of a model for evaluator-cache validity.
-
-    Captures the object identity of the objective, constraints, variables, and
-    parameters, plus the Gauss-Newton flag — but NOT mutable variable bounds or
-    ``Parameter.value`` (the evaluator reads those live on each call). Two models
-    with the same fingerprint can therefore share one compiled ``NLPEvaluator``
-    across bound changes (every B&B node) and parameter re-binds.
-    """
-    _blocks = getattr(model, "_builder_linear_blocks", None) or ()
-    return (
-        id(model._objective),
-        tuple(id(c) for c in model._constraints),
-        # #840: the fast-path builder rows are part of the evaluator's constraint set, so
-        # they must be in the fingerprint — else a model that gains a fast family (or has
-        # its builder rows materialized into ``_constraints``) would reuse a stale
-        # evaluator built without them. Keyed on each block's matrix identity + row count
-        # + sense, which changes when a block is added or the blocks are cleared on
-        # materialization.
-        tuple((id(A), int(A.shape[0]), sense) for A, _x, sense, _b, _name in _blocks),
-        tuple(id(v) for v in model._variables),
-        tuple(id(p) for p in model._parameters),
-        bool(getattr(model, "_gauss_newton_hessian", False)),
-    )
-
-
-# Number of distinct-fingerprint evaluators kept per model. A single slot was
-# enough for the plain B&B loop (one structural fingerprint for the whole solve),
-# but the primal heuristics *temporarily* add a structural row (the RENS /
-# local-branching sub-solves append a Hamming-distance / restriction constraint,
-# solve, then remove it) and then re-solve the *base* model. That oscillation —
-# base → base+cut → base → base+cut' → … — thrashes a one-slot cache: every return
-# to the base model evicts and rebuilds the base evaluator (measured on
-# clay0303hfsg: the base evaluator rebuilt 3× per solve, #723). A small LRU keyed
-# on :func:`evaluator_fingerprint` keeps the base entry resident across the
-# interleaved sub-solve fingerprints so it is built once, while each genuinely
-# different sub-solve model still gets its own (correct) evaluator. Bounded so a
-# long run of ever-distinct sub-solve cuts cannot grow the cache without limit.
-_EVALUATOR_CACHE_MAXSIZE = 8
+# Fingerprinting and the LRU live in the JAX-FREE ``discopt._evaluator_cache``,
+# re-exported here because callers import them from this module. They had to move:
+# the tape backend (#75) must choose a backend *before* any JAX import, so the
+# cache-validity rule cannot live in a module that imports jax at scope. Sharing
+# one implementation keeps the two backends' notions of "still valid" from
+# drifting -- see that module on why ``Parameter.value`` is deliberately excluded.
+_EVALUATOR_CACHE_MAXSIZE = EVALUATOR_CACHE_MAXSIZE
 
 
 def cached_evaluator(model: Model) -> "NLPEvaluator":
@@ -264,22 +239,11 @@ def cached_evaluator(model: Model) -> "NLPEvaluator":
     evaluator the one-slot cache would have built, so this is bound-neutral: it
     only avoids rebuilding evaluators that were previously discarded.
     """
-    from collections import OrderedDict
-
-    fp = evaluator_fingerprint(model)
-    cache: "OrderedDict[tuple, NLPEvaluator] | None" = getattr(model, "_nlp_evaluator_cache", None)
-    if cache is None:
-        cache = OrderedDict()
-        model._nlp_evaluator_cache = cache  # type: ignore[attr-defined]
-    ev = cache.get(fp)
-    if ev is not None:
-        cache.move_to_end(fp)  # mark most-recently-used
-        return ev
-    ev = NLPEvaluator(model, gauss_newton=bool(getattr(model, "_gauss_newton_hessian", False)))
-    cache[fp] = ev
-    cache.move_to_end(fp)
-    while len(cache) > _EVALUATOR_CACHE_MAXSIZE:
-        cache.popitem(last=False)  # evict least-recently-used
+    ev: NLPEvaluator = cached_by_fingerprint(
+        model,
+        "_nlp_evaluator_cache",
+        lambda m: NLPEvaluator(m, gauss_newton=bool(getattr(m, "_gauss_newton_hessian", False))),
+    )
     return ev
 
 

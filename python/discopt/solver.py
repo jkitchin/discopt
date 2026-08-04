@@ -1673,15 +1673,28 @@ def _evaluator_fingerprint(model: Model) -> tuple:
 
 
 def _make_evaluator(model: Model):
-    """Create or reuse a cached NLPEvaluator for the model.
+    """Create or reuse a cached NLP evaluator for the model.
 
-    Delegates to the canonical :func:`nlp_evaluator.cached_evaluator` so the B&B
-    loop, the primal heuristics, and the POUNCE node solves all share one cache
-    (and one set of compiled callables) instead of each rebuilding the evaluator.
+    The single funnel for the B&B loop, the primal heuristics, and the POUNCE
+    node solves, so they share one cache (and one set of compiled callables)
+    instead of each rebuilding the evaluator.
+
+    Under ``DISCOPT_NLP_EVAL=tape`` (#75) this returns the JAX-free tape-backed
+    evaluator when the model is representable, and the JAX one otherwise. The
+    ``cached_evaluator`` import is INSIDE the fallback lambda on purpose: it
+    imports jax at module scope, so importing it eagerly here would put JAX in
+    ``sys.modules`` on every nonlinear solve and defeat the entire point of the
+    tape backend. Default is unchanged — anything other than ``tape`` takes the
+    JAX path, and the tape is bound-CHANGING until the §5 panel says otherwise.
     """
-    from discopt._jax.nlp_evaluator import cached_evaluator
+    from discopt._tape_nlp_evaluator import build_evaluator
 
-    return cached_evaluator(model)
+    def _jax_evaluator():
+        from discopt._jax.nlp_evaluator import cached_evaluator
+
+        return cached_evaluator(model)
+
+    return build_evaluator(model, _jax_evaluator)
 
 
 def _estimate_alpha_fd(evaluator, lb, ub, n_samples=30):
@@ -7001,10 +7014,12 @@ def solve_model(
     # re-verified downstream before injection, so bound/certificate are untouched.
     if _trivial_primal_enabled() and initial_point is None:
         try:
-            from discopt._jax.nlp_evaluator import cached_evaluator
             from discopt._jax.primal_heuristics import _check_constraint_feasibility as _tp_cc
 
-            _tp_ev = cached_evaluator(model)
+            # Via the dispatcher so the tape backend is honoured (#75); the jax
+            # import lives in the fallback. ``primal_heuristics`` above is a
+            # separate, still-JAX dependency of this block — see the module note.
+            _tp_ev = _make_evaluator(model)
             _tp_lb, _tp_ub = (np.asarray(b, dtype=np.float64) for b in _tp_ev.variable_bounds)
             _tp_lo = np.clip(_tp_lb, -_SPC, _SPC)
             _tp_hi = np.clip(_tp_ub, -_SPC, _SPC)

@@ -4402,10 +4402,20 @@ class Model:
             if self._num_builder_constraint_rows() > 0:
                 self._materialize_builder_linear_rows()
             try:
-                from discopt._jax.nlp_evaluator import cached_evaluator
+                # Routed through the backend dispatcher, not straight to
+                # ``cached_evaluator``: that import pulls jax at module scope, so
+                # calling it here imported JAX on every nonlinear solve even when
+                # the tape backend was selected (#75). The jax import stays inside
+                # the fallback so it happens only when the tape is not used.
+                from discopt._tape_nlp_evaluator import build_evaluator
+
+                def _jax_evaluator():
+                    from discopt._jax.nlp_evaluator import cached_evaluator
+
+                    return cached_evaluator(self)
 
                 _verify_snap = (
-                    cached_evaluator(self),
+                    build_evaluator(self, _jax_evaluator),
                     [v.name for v in self._variables],
                 )
             except Exception as _snap_exc:  # pragma: no cover - defensive

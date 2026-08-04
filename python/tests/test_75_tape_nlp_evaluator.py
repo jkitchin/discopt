@@ -171,6 +171,56 @@ def test_parameter_rebind_rebuilds_the_tape():
 
 
 @pytest.mark.unit
+def test_evaluator_is_usable_from_multiple_threads():
+    """A shared tape across threads produced a FALSE `infeasible`. Never again.
+
+    ``pounce.NlProblem`` is ``#[pyclass(unsendable)]``: touching one from a
+    thread other than its creator raises a Rust ``PanicException``, which derives
+    directly from ``BaseException`` and so slips past every ``except Exception``
+    in the solver. Measured on clay0303hfsg before the fix: the JAX arm returned
+    `feasible` (obj 26669.1) and the tape arm returned **`infeasible`** — a wrong
+    certificate, the one outcome that is never acceptable (CLAUDE.md §1).
+
+    The evaluator now keeps one tape per thread. This asserts every thread gets
+    the SAME values, not merely that nothing raised: a per-thread tape built from
+    the wrong expression would also "work".
+    """
+    import threading
+
+    m, _x, _y = _xy_model()
+    ev = TapeNLPEvaluator(m)
+    pt = np.array([0.7, 1.3])
+    want_f = ev.evaluate_objective(pt)
+    want_g = np.asarray(ev.evaluate_gradient(pt), dtype=float)
+
+    results: dict[int, object] = {}
+
+    def worker(i):
+        try:
+            results[i] = (
+                ev.evaluate_objective(pt),
+                np.asarray(ev.evaluate_gradient(pt), dtype=float),
+                ev.evaluate_lagrangian_hessian(pt, 1.0, np.zeros(ev.n_constraints)),
+            )
+        except BaseException as exc:  # noqa: BLE001 - PanicException is not an Exception
+            results[i] = f"{type(exc).__name__}: {exc}"
+
+    threads = [threading.Thread(target=worker, args=(i,)) for i in range(4)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert len(results) == 4, "a worker died without recording anything"
+    for i, got in sorted(results.items()):
+        assert not isinstance(got, str), f"thread {i} raised: {got}"
+        f_i, g_i, h_i = got
+        assert f_i == pytest.approx(want_f, rel=1e-15), f"thread {i} objective differs"
+        np.testing.assert_allclose(g_i, want_g, rtol=1e-15)
+        assert np.all(np.isfinite(h_i))
+
+
+@pytest.mark.unit
 def test_gauss_newton_is_refused_not_approximated():
     """``2 J^T J`` is a different matrix from the exact Hessian; never silently swap."""
     m, _x, _y = _xy_model()
