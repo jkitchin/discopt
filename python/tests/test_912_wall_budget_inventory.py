@@ -113,10 +113,21 @@ KNOWN: tuple[tuple[str, str, str], ...] = (
         "deadline = (time.perf_counter() + budget) if budget else None",
         "residual",
     ),
+    # The #138 root-relaxation fallback's rule-2 stop. This was ``residual`` and is
+    # now ``contract``, because the thing it spends changed: the fallback used to
+    # receive a fresh ``_ROOT_FALLBACK_FLOOR_S`` grant handed out *past* an already
+    # spent deadline, so the gate genuinely decided how much EXTRA work ran beyond
+    # the caller's budget. It is now ``_ROOT_FALLBACK_RESERVE_S``, withheld from the
+    # search up front and spent inside ``time_limit``, so the gate answers "have I
+    # used up my slice of the caller's budget?" — the ``contract`` role by the
+    # definition above. The arithmetic moved into the ``_fb_left()`` helper, which is
+    # why the recorded line text changed with it: the grant is now materialised once
+    # as an absolute deadline, which ``_fb_left()``/``_fb_stop`` and the two
+    # relaxation build deadlines all read instead of each recomputing it.
     (
         "solver.py",
-        "return bool(have) and (time.perf_counter() - _fb_t0) >= max(0.0, float(time_limit))",
-        "residual",
+        "_fb_deadline = time.perf_counter() + max(0.0, float(time_limit))",
+        "contract",
     ),
     (
         "solver.py",
@@ -372,8 +383,12 @@ def test_residual_count_is_visible():
     """Publish the residual count so shrinking it is a visible, reviewable act
     rather than a silent one."""
     residual = sorted(k for k, c in _CATEGORY.items() if c == "residual")
-    assert len(residual) == 20, (
-        f"the #912 residual inventory changed ({len(residual)} entries, expected 20). "
+    # 20 -> 19: the #138 fallback's rule-2 stop was reclassified ``residual`` ->
+    # ``contract`` when its grant became a pre-deadline reserve rather than a
+    # post-deadline hand-out. Not a conversion to a deterministic budget — a change
+    # in what the gate spends. See the comment on its KNOWN entry.
+    assert len(residual) == 19, (
+        f"the #912 residual inventory changed ({len(residual)} entries, expected 19). "
         "If you converted one, drop it from KNOWN and lower this number; if you added "
         "one, convert it instead. This count is a deliberate resting point, not a "
         "backlog — see the module docstring for the evidence and the condition that "

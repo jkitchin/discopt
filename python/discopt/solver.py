@@ -4123,11 +4123,18 @@ def _root_relaxation_lower_bound(
     # (fewer cuts), never falsifies one, so ``incorrect_count`` is unaffected.
     # Corpus-measured bound-neutral: no in-repo instance both spends the whole
     # grant before a checkpoint and has a candidate in hand, so no bound changes.
-    _fb_t0 = time.perf_counter()
+    # The fallback's own grant as an ABSOLUTE deadline, and the single source of
+    # truth for it: rule 2 (``_fb_stop``), the separated-relaxation clamp
+    # (``_fb_left``) and the relaxation build deadlines below all read this one
+    # value, which the three of them used to recompute independently. Kept in the
+    # ``<clock>() + <budget>`` form on purpose — that is one of the two
+    # constructions ``test_912_wall_budget_inventory.py`` scans for, so this gate
+    # stays visible to that ratchet instead of hiding inside a helper.
+    _fb_deadline = time.perf_counter() + max(0.0, float(time_limit))
 
     def _fb_left() -> float:
         """Seconds remaining of the fallback's OWN grant (rule 2's anchor)."""
-        return max(0.0, float(time_limit) - (time.perf_counter() - _fb_t0))
+        return max(0.0, _fb_deadline - time.perf_counter())
 
     def _fb_stop(have: "list[float]") -> bool:
         """True when this phase should decline to *start* another optional
@@ -4173,10 +4180,10 @@ def _root_relaxation_lower_bound(
     _base_deadline_on = getattr(_tuning(), "root_build_deadline", False)
     _build_deadline: Optional[float] = None
     if getattr(_tuning(), "anytime_root_build", False) or _base_deadline_on:
-        _build_deadline = _fb_t0 + max(0.0, float(time_limit))
+        _build_deadline = _fb_deadline
     _base_build_deadline: Optional[float] = None
     if _base_deadline_on:
-        _base_build_deadline = _fb_t0 + max(0.0, float(time_limit))
+        _base_build_deadline = _fb_deadline
 
     try:
         terms = classify_nonlinear_terms(model)
