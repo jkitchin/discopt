@@ -1,0 +1,1056 @@
+[
+ {
+  "rep": 0,
+  "instance": "4stufen",
+  "base": {
+   "status": "time_limit",
+   "nodes": 3,
+   "sense": "min",
+   "obj": null,
+   "bound": 20712.174649175664,
+   "cert": false,
+   "wall": 8.202693541999906
+  },
+  "off": {
+   "status": "time_limit",
+   "nodes": 3,
+   "sense": "min",
+   "obj": null,
+   "bound": 20712.174649175664,
+   "cert": false,
+   "wall": 8.20955437500379
+  },
+  "on": {
+   "status": "time_limit",
+   "nodes": 3,
+   "sense": "min",
+   "obj": null,
+   "bound": 20712.174649175664,
+   "cert": false,
+   "wall": 8.124641582995537
+  }
+ },
+ {
+  "rep": 0,
+  "instance": "bchoco06",
+  "base": {
+   "status": "time_limit",
+   "nodes": 3,
+   "sense": "max",
+   "obj": null,
+   "bound": 1.0000000762648291,
+   "cert": false,
+   "wall": 8.259234333003405
+  },
+  "off": {
+   "status": "time_limit",
+   "nodes": 3,
+   "sense": "max",
+   "obj": null,
+   "bound": 1.0000000000001252,
+   "cert": false,
+   "wall": 9.984108999997261
+  },
+  "on": {
+   "status": "time_limit",
+   "nodes": 3,
+   "sense": "max",
+   "obj": null,
+   "bound": 1.0000000000126652,
+   "cert": false,
+   "wall": 9.52252033399418
+  }
+ },
+ {
+  "rep": 0,
+  "instance": "bchoco07",
+  "base": {
+   "status": "time_limit",
+   "nodes": 3,
+   "sense": "max",
+   "obj": null,
+   "bound": 0.9999909483405423,
+   "cert": false,
+   "wall": 9.433966833006707
+  },
+  "off": {
+   "status": "time_limit",
+   "nodes": 3,
+   "sense": "max",
+   "obj": null,
+   "bound": 0.9999909483405423,
+   "cert": false,
+   "wall": 9.771181834003073
+  },
+  "on": {
+   "status": "time_limit",
+   "nodes": 3,
+   "sense": "max",
+   "obj": null,
+   "bound": 0.9999909483405423,
+   "cert": false,
+   "wall": 9.551711916996283
+  }
+ },
+ {
+  "rep": 0,
+  "instance": "bchoco08",
+  "base": {
+   "status": "time_limit",
+   "nodes": 1,
+   "sense": "max",
+   "obj": null,
+   "bound": 1.0000000000038425,
+   "cert": false,
+   "wall": 7.853201167003135
+  },
+  "off": {
+   "status": "time_limit",
+   "nodes": 7,
+   "sense": "max",
+   "obj": null,
+   "bound": 1.0000000000038425,
+   "cert": false,
+   "wall": 8.299702082993463
+  },
+  "on": {
+   "status": "time_limit",
+   "nodes": 7,
+   "sense": "max",
+   "obj": null,
+   "bound": 1.0000000000038425,
+   "cert": false,
+   "wall": 8.299257791004493
+  }
+ },
+ {
+  "rep": 0,
+  "instance": "beuster",
+  "base": {
+   "status": "time_limit",
+   "nodes": 3,
+   "sense": "min",
+   "obj": null,
+   "bound": 6352.998345044135,
+   "cert": false,
+   "wall": 8.13907766599732
+  },
+  "off": {
+   "status": "time_limit",
+   "nodes": 3,
+   "sense": "min",
+   "obj": null,
+   "bound": 6352.998345044135,
+   "cert": false,
+   "wall": 8.130210625007749
+  },
+  "on": {
+   "status": "time_limit",
+   "nodes": 3,
+   "sense": "min",
+   "obj": null,
+   "bound": 6352.998345044135,
+   "cert": false,
+   "wall": 8.153391625004588
+  }
+ },
+ {
+  "rep": 0,
+  "instance": "casctanks",
+  "base": {
+   "status": "time_limit",
+   "nodes": 3,
+   "sense": "min",
+   "obj": null,
+   "bound": -90.1786232975983,
+   "cert": false,
+   "wall": 8.142417666997062
+  },
+  "off": {
+   "status": "time_limit",
+   "nodes": 3,
+   "sense": "min",
+   "obj": null,
+   "bound": -90.1786232975983,
+   "cert": false,
+   "wall": 8.391633332998026
+  },
+  "on": {
+   "status": "time_limit",
+   "nodes": 3,
+   "sense": "min",
+   "obj": null,
+   "bound": -90.1786232975983,
+   "cert": false,
+   "wall": 8.149923125005444
+  }
+ },
+ {
+  "rep": 0,
+  "instance": "clay0303hfsg",
+  "base": {
+   "status": "time_limit",
+   "nodes": 95,
+   "sense": "min",
+   "obj": null,
+   "bound": null,
+   "cert": false,
+   "wall": 8.353073709004093
+  },
+  "off": {
+   "status": "time_limit",
+   "nodes": 95,
+   "sense": "min",
+   "obj": null,
+   "bound": null,
+   "cert": false,
+   "wall": 8.404971708005178
+  },
+  "on": {
+   "status": "time_limit",
+   "nodes": 95,
+   "sense": "min",
+   "obj": null,
+   "bound": null,
+   "cert": false,
+   "wall": 8.43085137498565
+  }
+ },
+ {
+  "rep": 0,
+  "instance": "contvar",
+  "base": {
+   "status": "time_limit",
+   "nodes": 1,
+   "sense": "min",
+   "obj": null,
+   "bound": 171244.81148782672,
+   "cert": false,
+   "wall": 11.019874458012055
+  },
+  "off": {
+   "status": "time_limit",
+   "nodes": 1,
+   "sense": "min",
+   "obj": null,
+   "bound": 171244.81148782672,
+   "cert": false,
+   "wall": 11.02696695800114
+  },
+  "on": {
+   "status": "time_limit",
+   "nodes": 1,
+   "sense": "min",
+   "obj": null,
+   "bound": 171244.81148782672,
+   "cert": false,
+   "wall": 8.170437374996254
+  }
+ },
+ {
+  "rep": 0,
+  "instance": "hda",
+  "base": {
+   "status": "time_limit",
+   "nodes": 1,
+   "sense": "min",
+   "obj": null,
+   "bound": -141697.43348991545,
+   "cert": false,
+   "wall": 9.135560959010036
+  },
+  "off": {
+   "status": "time_limit",
+   "nodes": 1,
+   "sense": "min",
+   "obj": null,
+   "bound": -64473.442402437024,
+   "cert": false,
+   "wall": 8.156700332998298
+  },
+  "on": {
+   "status": "time_limit",
+   "nodes": 1,
+   "sense": "min",
+   "obj": null,
+   "bound": -64473.442402437024,
+   "cert": false,
+   "wall": 8.136354792004568
+  }
+ },
+ {
+  "rep": 0,
+  "instance": "heatexch_gen1",
+  "base": {
+   "status": "feasible",
+   "nodes": 3,
+   "sense": "min",
+   "obj": 197729.43238892494,
+   "bound": 38183.5317460179,
+   "cert": false,
+   "wall": 8.363202291991911
+  },
+  "off": {
+   "status": "feasible",
+   "nodes": 3,
+   "sense": "min",
+   "obj": 154895.93294118613,
+   "bound": 38183.5317460179,
+   "cert": false,
+   "wall": 8.253975041996455
+  },
+  "on": {
+   "status": "feasible",
+   "nodes": 3,
+   "sense": "min",
+   "obj": 154895.93294118613,
+   "bound": 38183.5317460179,
+   "cert": false,
+   "wall": 8.3419765419967
+  }
+ },
+ {
+  "rep": 0,
+  "instance": "heatexch_gen2",
+  "base": {
+   "status": "feasible",
+   "nodes": 3,
+   "sense": "min",
+   "obj": 824551.3265717716,
+   "bound": 555767.7902857198,
+   "cert": false,
+   "wall": 8.516549874999328
+  },
+  "off": {
+   "status": "feasible",
+   "nodes": 3,
+   "sense": "min",
+   "obj": 824551.3265717716,
+   "bound": 555767.7902857271,
+   "cert": false,
+   "wall": 8.314519709005253
+  },
+  "on": {
+   "status": "feasible",
+   "nodes": 3,
+   "sense": "min",
+   "obj": 824551.3265768271,
+   "bound": 555767.7902857198,
+   "cert": false,
+   "wall": 8.317358207990765
+  }
+ },
+ {
+  "rep": 0,
+  "instance": "heatexch_gen3",
+  "base": {
+   "status": "time_limit",
+   "nodes": 7,
+   "sense": "min",
+   "obj": null,
+   "bound": 783.0180646606207,
+   "cert": false,
+   "wall": 8.728181165992282
+  },
+  "off": {
+   "status": "time_limit",
+   "nodes": 7,
+   "sense": "min",
+   "obj": null,
+   "bound": 783.0180646606207,
+   "cert": false,
+   "wall": 8.712710166000761
+  },
+  "on": {
+   "status": "time_limit",
+   "nodes": 7,
+   "sense": "min",
+   "obj": null,
+   "bound": 783.0180646606207,
+   "cert": false,
+   "wall": 8.728597166002146
+  }
+ },
+ {
+  "rep": 0,
+  "instance": "nvs05",
+  "base": {
+   "status": "feasible",
+   "nodes": 49,
+   "sense": "min",
+   "obj": 8.731956986640078,
+   "bound": 3.5424874432304425,
+   "cert": false,
+   "wall": 8.196507500004373
+  },
+  "off": {
+   "status": "feasible",
+   "nodes": 49,
+   "sense": "min",
+   "obj": 8.731956986640078,
+   "bound": 3.5424874432304425,
+   "cert": false,
+   "wall": 8.180334999997285
+  },
+  "on": {
+   "status": "feasible",
+   "nodes": 49,
+   "sense": "min",
+   "obj": 8.731956986640078,
+   "bound": 3.5424874432304425,
+   "cert": false,
+   "wall": 8.18612937501166
+  }
+ },
+ {
+  "rep": 0,
+  "instance": "tls2",
+  "base": {
+   "status": "time_limit",
+   "nodes": 3,
+   "sense": "min",
+   "obj": null,
+   "bound": null,
+   "cert": false,
+   "wall": 17.488069500002894
+  },
+  "off": {
+   "status": "time_limit",
+   "nodes": 3,
+   "sense": "min",
+   "obj": null,
+   "bound": null,
+   "cert": false,
+   "wall": 18.170186582996394
+  },
+  "on": {
+   "status": "time_limit",
+   "nodes": 3,
+   "sense": "min",
+   "obj": null,
+   "bound": null,
+   "cert": false,
+   "wall": 16.750274791993434
+  }
+ },
+ {
+  "rep": 0,
+  "instance": "tspn08",
+  "base": {
+   "status": "feasible",
+   "nodes": 1,
+   "sense": "min",
+   "obj": 290.5668537473512,
+   "bound": null,
+   "cert": false,
+   "wall": 6.836715083001764
+  },
+  "off": {
+   "status": "feasible",
+   "nodes": 1,
+   "sense": "min",
+   "obj": 290.5668537473512,
+   "bound": null,
+   "cert": false,
+   "wall": 6.592266749998089
+  },
+  "on": {
+   "status": "feasible",
+   "nodes": 1,
+   "sense": "min",
+   "obj": 290.5668537473512,
+   "bound": null,
+   "cert": false,
+   "wall": 7.020870834006928
+  }
+ },
+ {
+  "rep": 0,
+  "instance": "tspn10",
+  "base": {
+   "status": "feasible",
+   "nodes": 1,
+   "sense": "min",
+   "obj": 225.12607139732685,
+   "bound": null,
+   "cert": false,
+   "wall": 3.1848519170016516
+  },
+  "off": {
+   "status": "feasible",
+   "nodes": 1,
+   "sense": "min",
+   "obj": 225.12607139732685,
+   "bound": null,
+   "cert": false,
+   "wall": 3.186001916998066
+  },
+  "on": {
+   "status": "feasible",
+   "nodes": 1,
+   "sense": "min",
+   "obj": 225.12607139732685,
+   "bound": null,
+   "cert": false,
+   "wall": 3.1514745830063475
+  }
+ },
+ {
+  "rep": 0,
+  "instance": "tspn12",
+  "base": {
+   "status": "feasible",
+   "nodes": 1,
+   "sense": "min",
+   "obj": 262.64739525060173,
+   "bound": null,
+   "cert": false,
+   "wall": 3.0263057090051007
+  },
+  "off": {
+   "status": "feasible",
+   "nodes": 1,
+   "sense": "min",
+   "obj": 262.64739525060173,
+   "bound": null,
+   "cert": false,
+   "wall": 2.845933499993407
+  },
+  "on": {
+   "status": "feasible",
+   "nodes": 1,
+   "sense": "min",
+   "obj": 262.64739525060173,
+   "bound": null,
+   "cert": false,
+   "wall": 2.9120836250076536
+  }
+ },
+ {
+  "rep": 1,
+  "instance": "4stufen",
+  "base": {
+   "status": "time_limit",
+   "nodes": 3,
+   "sense": "min",
+   "obj": null,
+   "bound": 20712.174649175664,
+   "cert": false,
+   "wall": 8.203802165997331
+  },
+  "off": {
+   "status": "time_limit",
+   "nodes": 3,
+   "sense": "min",
+   "obj": null,
+   "bound": 20712.174649175664,
+   "cert": false,
+   "wall": 8.147527958004503
+  },
+  "on": {
+   "status": "time_limit",
+   "nodes": 3,
+   "sense": "min",
+   "obj": null,
+   "bound": 20712.174649175664,
+   "cert": false,
+   "wall": 8.213044208998326
+  }
+ },
+ {
+  "rep": 1,
+  "instance": "bchoco06",
+  "base": {
+   "status": "time_limit",
+   "nodes": 3,
+   "sense": "max",
+   "obj": null,
+   "bound": 1.0000000762648291,
+   "cert": false,
+   "wall": 8.166659624999738
+  },
+  "off": {
+   "status": "time_limit",
+   "nodes": 3,
+   "sense": "max",
+   "obj": null,
+   "bound": 1.0000000000001252,
+   "cert": false,
+   "wall": 8.380767333001131
+  },
+  "on": {
+   "status": "time_limit",
+   "nodes": 3,
+   "sense": "max",
+   "obj": null,
+   "bound": 1.0000000000001252,
+   "cert": false,
+   "wall": 8.44416033300513
+  }
+ },
+ {
+  "rep": 1,
+  "instance": "bchoco07",
+  "base": {
+   "status": "time_limit",
+   "nodes": 3,
+   "sense": "max",
+   "obj": null,
+   "bound": 0.9999909483405423,
+   "cert": false,
+   "wall": 9.578221167001175
+  },
+  "off": {
+   "status": "time_limit",
+   "nodes": 3,
+   "sense": "max",
+   "obj": null,
+   "bound": 0.9999909483405423,
+   "cert": false,
+   "wall": 10.469057041002088
+  },
+  "on": {
+   "status": "time_limit",
+   "nodes": 3,
+   "sense": "max",
+   "obj": null,
+   "bound": 0.9999909483405423,
+   "cert": false,
+   "wall": 10.27414716698695
+  }
+ },
+ {
+  "rep": 1,
+  "instance": "bchoco08",
+  "base": {
+   "status": "time_limit",
+   "nodes": 1,
+   "sense": "max",
+   "obj": null,
+   "bound": 1.0000000000038425,
+   "cert": false,
+   "wall": 7.954079707997153
+  },
+  "off": {
+   "status": "time_limit",
+   "nodes": 1,
+   "sense": "max",
+   "obj": null,
+   "bound": 1.0000000000038425,
+   "cert": false,
+   "wall": 7.978399582993006
+  },
+  "on": {
+   "status": "time_limit",
+   "nodes": 1,
+   "sense": "max",
+   "obj": null,
+   "bound": 1.0000000000038425,
+   "cert": false,
+   "wall": 7.919722999999067
+  }
+ },
+ {
+  "rep": 1,
+  "instance": "beuster",
+  "base": {
+   "status": "time_limit",
+   "nodes": 3,
+   "sense": "min",
+   "obj": null,
+   "bound": 6352.998345044135,
+   "cert": false,
+   "wall": 8.151508582988754
+  },
+  "off": {
+   "status": "time_limit",
+   "nodes": 3,
+   "sense": "min",
+   "obj": null,
+   "bound": 6352.998345044135,
+   "cert": false,
+   "wall": 8.143357000008109
+  },
+  "on": {
+   "status": "time_limit",
+   "nodes": 3,
+   "sense": "min",
+   "obj": null,
+   "bound": 6352.998345044135,
+   "cert": false,
+   "wall": 8.158665915994789
+  }
+ },
+ {
+  "rep": 1,
+  "instance": "casctanks",
+  "base": {
+   "status": "time_limit",
+   "nodes": 7,
+   "sense": "min",
+   "obj": null,
+   "bound": -90.1786232975983,
+   "cert": false,
+   "wall": 8.478783500002464
+  },
+  "off": {
+   "status": "time_limit",
+   "nodes": 7,
+   "sense": "min",
+   "obj": null,
+   "bound": -90.1786232975983,
+   "cert": false,
+   "wall": 8.512656000006245
+  },
+  "on": {
+   "status": "time_limit",
+   "nodes": 3,
+   "sense": "min",
+   "obj": null,
+   "bound": -90.1786232975983,
+   "cert": false,
+   "wall": 8.230373042009887
+  }
+ },
+ {
+  "rep": 1,
+  "instance": "clay0303hfsg",
+  "base": {
+   "status": "time_limit",
+   "nodes": 95,
+   "sense": "min",
+   "obj": null,
+   "bound": null,
+   "cert": false,
+   "wall": 8.3753166670067
+  },
+  "off": {
+   "status": "time_limit",
+   "nodes": 95,
+   "sense": "min",
+   "obj": null,
+   "bound": null,
+   "cert": false,
+   "wall": 8.536226084004738
+  },
+  "on": {
+   "status": "time_limit",
+   "nodes": 95,
+   "sense": "min",
+   "obj": null,
+   "bound": null,
+   "cert": false,
+   "wall": 8.27682158400421
+  }
+ },
+ {
+  "rep": 1,
+  "instance": "contvar",
+  "base": {
+   "status": "time_limit",
+   "nodes": 1,
+   "sense": "min",
+   "obj": null,
+   "bound": 98924.53008627544,
+   "cert": false,
+   "wall": 9.521205416996963
+  },
+  "off": {
+   "status": "time_limit",
+   "nodes": 1,
+   "sense": "min",
+   "obj": null,
+   "bound": 171244.81148782672,
+   "cert": false,
+   "wall": 11.108374249990447
+  },
+  "on": {
+   "status": "time_limit",
+   "nodes": 1,
+   "sense": "min",
+   "obj": null,
+   "bound": 171244.81148782672,
+   "cert": false,
+   "wall": 8.181373832994723
+  }
+ },
+ {
+  "rep": 1,
+  "instance": "hda",
+  "base": {
+   "status": "time_limit",
+   "nodes": 1,
+   "sense": "min",
+   "obj": null,
+   "bound": -141697.43348991545,
+   "cert": false,
+   "wall": 8.170762667010422
+  },
+  "off": {
+   "status": "time_limit",
+   "nodes": 1,
+   "sense": "min",
+   "obj": null,
+   "bound": -64473.442402437024,
+   "cert": false,
+   "wall": 8.197352165996563
+  },
+  "on": {
+   "status": "time_limit",
+   "nodes": 1,
+   "sense": "min",
+   "obj": null,
+   "bound": -64473.442402437024,
+   "cert": false,
+   "wall": 8.150742832993274
+  }
+ },
+ {
+  "rep": 1,
+  "instance": "heatexch_gen1",
+  "base": {
+   "status": "feasible",
+   "nodes": 3,
+   "sense": "min",
+   "obj": 154895.93294118613,
+   "bound": 38183.5317460179,
+   "cert": false,
+   "wall": 8.253112292004516
+  },
+  "off": {
+   "status": "feasible",
+   "nodes": 3,
+   "sense": "min",
+   "obj": 154895.93294118613,
+   "bound": 38183.5317460179,
+   "cert": false,
+   "wall": 8.226857000001473
+  },
+  "on": {
+   "status": "feasible",
+   "nodes": 3,
+   "sense": "min",
+   "obj": 154895.93294118613,
+   "bound": 38183.5317460179,
+   "cert": false,
+   "wall": 8.247320624999702
+  }
+ },
+ {
+  "rep": 1,
+  "instance": "heatexch_gen2",
+  "base": {
+   "status": "feasible",
+   "nodes": 3,
+   "sense": "min",
+   "obj": 824551.3265768271,
+   "bound": 555767.7902857198,
+   "cert": false,
+   "wall": 8.310295791001408
+  },
+  "off": {
+   "status": "feasible",
+   "nodes": 3,
+   "sense": "min",
+   "obj": 824551.3265717716,
+   "bound": 555767.7902857271,
+   "cert": false,
+   "wall": 8.307403958009672
+  },
+  "on": {
+   "status": "feasible",
+   "nodes": 3,
+   "sense": "min",
+   "obj": 824551.3265717716,
+   "bound": 555767.7902857198,
+   "cert": false,
+   "wall": 8.557508041005349
+  }
+ },
+ {
+  "rep": 1,
+  "instance": "heatexch_gen3",
+  "base": {
+   "status": "time_limit",
+   "nodes": 7,
+   "sense": "min",
+   "obj": null,
+   "bound": 783.0180646606207,
+   "cert": false,
+   "wall": 8.69771504199889
+  },
+  "off": {
+   "status": "time_limit",
+   "nodes": 7,
+   "sense": "min",
+   "obj": null,
+   "bound": 783.0180646606207,
+   "cert": false,
+   "wall": 8.740091084007872
+  },
+  "on": {
+   "status": "time_limit",
+   "nodes": 7,
+   "sense": "min",
+   "obj": null,
+   "bound": 783.0180646606207,
+   "cert": false,
+   "wall": 8.711327832992538
+  }
+ },
+ {
+  "rep": 1,
+  "instance": "nvs05",
+  "base": {
+   "status": "feasible",
+   "nodes": 49,
+   "sense": "min",
+   "obj": 8.731956986640078,
+   "bound": 3.5424874432304425,
+   "cert": false,
+   "wall": 8.222787749997224
+  },
+  "off": {
+   "status": "feasible",
+   "nodes": 49,
+   "sense": "min",
+   "obj": 8.731956986640078,
+   "bound": 3.5424874432304425,
+   "cert": false,
+   "wall": 8.15537912498985
+  },
+  "on": {
+   "status": "feasible",
+   "nodes": 49,
+   "sense": "min",
+   "obj": 8.731956986640078,
+   "bound": 3.5424874432304425,
+   "cert": false,
+   "wall": 8.166266957996413
+  }
+ },
+ {
+  "rep": 1,
+  "instance": "tls2",
+  "base": {
+   "status": "time_limit",
+   "nodes": 3,
+   "sense": "min",
+   "obj": null,
+   "bound": null,
+   "cert": false,
+   "wall": 15.628961916998378
+  },
+  "off": {
+   "status": "time_limit",
+   "nodes": 3,
+   "sense": "min",
+   "obj": null,
+   "bound": null,
+   "cert": false,
+   "wall": 16.57019450000371
+  },
+  "on": {
+   "status": "time_limit",
+   "nodes": 3,
+   "sense": "min",
+   "obj": null,
+   "bound": null,
+   "cert": false,
+   "wall": 16.449520458001643
+  }
+ },
+ {
+  "rep": 1,
+  "instance": "tspn08",
+  "base": {
+   "status": "feasible",
+   "nodes": 1,
+   "sense": "min",
+   "obj": 290.5668537473512,
+   "bound": null,
+   "cert": false,
+   "wall": 6.626368708995869
+  },
+  "off": {
+   "status": "feasible",
+   "nodes": 1,
+   "sense": "min",
+   "obj": 290.5668537473512,
+   "bound": null,
+   "cert": false,
+   "wall": 7.074170584004605
+  },
+  "on": {
+   "status": "feasible",
+   "nodes": 1,
+   "sense": "min",
+   "obj": 290.5668537473512,
+   "bound": null,
+   "cert": false,
+   "wall": 7.160409041985986
+  }
+ },
+ {
+  "rep": 1,
+  "instance": "tspn10",
+  "base": {
+   "status": "feasible",
+   "nodes": 1,
+   "sense": "min",
+   "obj": 225.12607139732685,
+   "bound": null,
+   "cert": false,
+   "wall": 4.082485375009128
+  },
+  "off": {
+   "status": "feasible",
+   "nodes": 1,
+   "sense": "min",
+   "obj": 225.12607139732685,
+   "bound": null,
+   "cert": false,
+   "wall": 3.8418628340004943
+  },
+  "on": {
+   "status": "feasible",
+   "nodes": 1,
+   "sense": "min",
+   "obj": 225.12607139732685,
+   "bound": null,
+   "cert": false,
+   "wall": 3.971718290995341
+  }
+ },
+ {
+  "rep": 1,
+  "instance": "tspn12",
+  "base": {
+   "status": "feasible",
+   "nodes": 1,
+   "sense": "min",
+   "obj": 262.64739525060173,
+   "bound": null,
+   "cert": false,
+   "wall": 3.447655833006138
+  },
+  "off": {
+   "status": "feasible",
+   "nodes": 1,
+   "sense": "min",
+   "obj": 262.64739525060173,
+   "bound": null,
+   "cert": false,
+   "wall": 3.5115423340030247
+  },
+  "on": {
+   "status": "feasible",
+   "nodes": 1,
+   "sense": "min",
+   "obj": 262.64739525060173,
+   "bound": null,
+   "cert": false,
+   "wall": 3.651437292006449
+  }
+ }
+]

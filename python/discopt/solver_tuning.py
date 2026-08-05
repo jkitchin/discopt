@@ -577,7 +577,33 @@ class SolverTuning:
 
     Independent of #930's other half (re-admitting the probe bound as a ``max``
     candidate), which is unconditional because it can only *tighten* the reported
-    bound and costs no wall time."""
+    bound and costs no wall time.
+
+    **Panel verdict: stays OFF.** Sec.5 bar 1 PASSES, bar 2 does not clear the
+    ``DISCOPT_CUT_INHERIT`` precedent (sound but not broadly helpful). Three-arm
+    differential over the 17 non-closing in-repo instances at ``time_limit=8``,
+    2 reps, arms interleaved per instance and marker-asserted on both trees
+    (``discopt_benchmarks/scripts/issue930_root_probe_bound_panel.py``, raw
+    results in ``discopt_benchmarks/results/issue930/``):
+
+    * bar 1 cert-clean — over 24 flag ON/OFF bound pairs: 0 lost, 0 looser,
+      0 tighter, 0 ``gap_certified True->False``, 0 bound past an ``=opt=``
+      oracle or across its own incumbent (18 invariant + 12 oracle checks). The
+      flag did not move a single dual bound. Five closing instances were
+      node-identical and objective-identical across all three arms, confirming
+      both halves are inert where neither code path is reached.
+    * bar 2 net-positive — NOT met. Paired wall ``on - off`` is -0.230 s per run
+      (sd 0.734, n=34, total -7.82 s), but 2.89 s of that is ``contvar`` alone
+      (11.07 s -> 8.18 s, i.e. 38 % overrun -> 2 %) and 0.77 s is ``tls2``;
+      across the other 15 instances it is ~0.06 s/run, with ``tspn08`` 0.26 s
+      worse. Concentrated, not broad. The panel also ran without a load gate
+      (a system indexer held >100 % CPU), which widens the wall spread but not
+      the bound result, and the bound result is the one this verdict rests on.
+
+    What would settle it: a load-gated panel at several time limits over a corpus
+    where the fallback duplicates the probe more often than 2-of-17. Until then
+    the duplicate solve is a known, measured, opt-in cost rather than a silent
+    default change."""
 
     rlt1_root_bound: bool = field(
         default_factory=lambda: _env_flag("DISCOPT_RLT1_ROOT_BOUND", default=False)
