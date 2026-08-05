@@ -1,0 +1,218 @@
+# adv930: 200 instances w/ =opt= oracle, TL=8.0s, 3 workers
+[  1/200] pooling_adhya4tp         min       n_adm=0 bound=-877.6457863083638 opt=-877.6457399
+[  2/200] trig                     min       n_adm=0 bound=-3.762678547723759 opt=-3.762500358
+[  3/200] st_e41                   min       n_adm=0 bound=635.8533023572927 opt=641.8235623
+[  4/200] fo8_ar5_1                min       n_adm=0 bound=None opt=22.38189652
+[  5/200] pooling_adhya3tp         min       n_adm=0 bound=-561.0446997948463 opt=-561.0446875
+[  6/200] sfacloc2_4_80            min ADMIT n_adm=1 bound=0.0 opt=9.953071413
+[  7/200] pooling_haverly1pq       min       n_adm=0 bound=-400.0000001448012 opt=-400.0
+[  8/200] graphpart_2g-0099-9211   min       n_adm=0 bound=-5674020.0 opt=-5070020.0
+[  9/200] batchs121208m            min       n_adm=0 bound=None opt=1241125.514
+[ 10/200] watercontamination0202r  min       n_adm=0 bound=97.90443677018436 opt=97.90445517
+[ 11/200] ex5_3_2                  min       n_adm=0 bound=1.8641091125303197 opt=1.864159459
+[ 12/200] p_ball_20b_5p_2d_m       min       n_adm=0 bound=None opt=2.437175093
+[ 13/200] hybriddynamic_var        min       n_adm=0 bound=1.5363220091987557 opt=1.536415162
+[ 14/200] edgecross10-050          min       n_adm=0 bound=112.0 opt=276.0
+[ 15/200] smallinvDAXr1b050-055    min       n_adm=0 bound=9.796350942856312 opt=9.797143454
+[ 16/200] sssd15-04                min       n_adm=0 bound=222.11278751565754 opt=205054.4585
+[ 17/200] kall_congruentcircles_c71 min       n_adm=0 bound=0.0 opt=1.502212856
+[ 18/200] portfol_robust100_09     min       n_adm=0 bound=None opt=-0.1050046074
+[ 19/200] csched1a                 min       n_adm=0 bound=-30660.547932556103 opt=-30430.17682
+[ 20/200] syn10m02hfsg             max ADMIT n_adm=1 bound=5307.363881388942 opt=2310.300691
+[ 21/200] st_bpv2                  min       n_adm=0 bound=-8.000000067985395 opt=-8.0
+[ 22/200] cvxnonsep_nsig40r        min ADMIT n_adm=1 bound=129.23841014478066 opt=133.9613305
+[ 23/200] st_glmp_fp1              min       n_adm=0 bound=9.999999915011479 opt=10.0
+[ 24/200] st_miqp5                 min       n_adm=0 bound=-333.8888902488093 opt=-333.8888889
+[ 25/200] cvxnonsep_pcon40r        min ADMIT n_adm=1 bound=-100.850000000002 opt=-46.59916883
+[ 26/200] toroidal2g20_5555        max       n_adm=0 bound=30594659.0 opt=24838942.0
+[ 27/200] cvxnonsep_psig30r        min       n_adm=0 bound=78.99194783812449 opt=78.99885434
+[ 28/200] gastrans582_warm15       min       n_adm=0 bound=None opt=0.0
+[ 29/200] pooling_adhya2tp         min       n_adm=0 bound=-549.8030510926887 opt=-549.8030502
+[ 30/200] st_testgr1               min       n_adm=0 bound=-12.811600000000002 opt=-12.8116
+[ 31/200] autocorr_bern30-08       min       n_adm=0 bound=-19926.0 opt=-2952.0
+[ 32/200] graphpart_3pm-0333-0333  min       n_adm=0 bound=-36.0 opt=-26.0
+[ 33/200] syn30m03hfsg             max ADMIT n_adm=1 bound=3330.003539572305 opt=654.1541816
+[ 34/200] chimera_k64ising-01      WORKER-ERROR
+[ 35/200] gear                     min       n_adm=0 bound=-5e-324 opt=0.0
+[ 36/200] arki0020                 WORKER-ERROR
+[ 37/200] ex1223                   min       n_adm=0 bound=4.5795824063796475 opt=4.579582402
+[ 38/200] st_fp7b                  min       n_adm=0 bound=-634.7506160333093 opt=-634.7506124
+[ 39/200] ex8_2_4b                 min       n_adm=0 bound=-1200.8106270630585 opt=-1197.131899
+[ 40/200] gastrans582_mild10       min       n_adm=0 bound=None opt=0.0
+[ 41/200] st_test1                 min       n_adm=0 bound=-1.6495994490692313e-08 opt=0.0
+[ 42/200] prob06                   min       n_adm=0 bound=1.177122069585283 opt=1.177124344
+[ 43/200] st_ph15                  min       n_adm=0 bound=-392.70370559071716 opt=-392.7037037
+[ 44/200] nvs01                    min       n_adm=0 bound=12.46966882156821 opt=12.46966882
+[ 45/200] smallinvDAXr1b020-022    min       n_adm=0 bound=None opt=1.571527982
+[ 46/200] st_glmp_kk90             min       n_adm=0 bound=2.9999999550125755 opt=3.0
+[ 47/200] graphpart_3pm-0344-0344  min       n_adm=0 bound=-72.00000000000001 opt=-48.0
+[ 48/200] sfacloc2_2_90            min ADMIT n_adm=1 bound=0.36040549526529625 opt=18.59410919
+[ 49/200] slay10m                  min       n_adm=0 bound=None opt=129579.8838
+[ 50/200] cvxnonsep_psig40r        min       n_adm=0 bound=86.53873600363832 opt=86.5451047
+[ 51/200] syn30hfsg                max ADMIT n_adm=1 bound=922.9130525072675 opt=138.1596024
+[ 52/200] crudeoil_lee3_06         max       n_adm=0 bound=None opt=85.44891308
+[ 53/200] squfl030-100             min       n_adm=0 bound=None opt=363.0938483
+[ 54/200] sporttournament26        max       n_adm=0 bound=422.0 opt=334.0
+[ 55/200] sssd20-04persp           min       n_adm=0 bound=-9.44e-322 opt=347691.4105
+[ 56/200] nvs14                    min       n_adm=0 bound=-40358.154769299996 opt=-40358.15477
+[ 57/200] graphpart_2pm-0077-0777  min       n_adm=0 bound=-48.0 opt=-40.0
+[ 58/200] parallel                 min ADMIT n_adm=1 bound=-1041931.9785770477 opt=924.2955507
+[ 59/200] gasprod_sarawak01        min       n_adm=0 bound=-32445.4049091856 opt=-32445.40491
+[ 60/200] du-opt5                  min       n_adm=0 bound=8.073653811639815 opt=8.07365758
+[ 61/200] syn30m02hfsg             max ADMIT n_adm=1 bound=2261.652623376636 opt=399.6831436
+[ 62/200] pooling_bental5stp       min       n_adm=0 bound=-3500.0 opt=-3500.0
+[ 63/200] st_m2                    min       n_adm=0 bound=-864288.3286268266 opt=-856648.8187
+[ 64/200] crudeoil_lee4_10         max       n_adm=0 bound=None opt=132.5476009
+[ 65/200] crudeoil_lee1_08         max       n_adm=0 bound=None opt=79.75
+[ 66/200] syn20m04hfsg             max ADMIT n_adm=1 bound=10433.013297016461 opt=3532.743934
+[ 67/200] batch0812                min       n_adm=0 bound=None opt=2687026.784
+[ 68/200] cvxnonsep_normcon40      min       n_adm=0 bound=-32.630717486814156 opt=-32.62966972
+[ 69/200] st_e15                   min       n_adm=0 bound=7.667180068813077 opt=7.667180069
+[ 70/200] graphpart_2pm-0044-0044  min       n_adm=0 bound=-13.0 opt=-13.0
+[ 71/200] p_ball_10b_5p_2d_m       min       n_adm=0 bound=3.195464957946709e-07 opt=18.71857799
+[ 72/200] ex7_2_4                  min       n_adm=0 bound=2.2817260246737217 opt=3.918010226
+[ 73/200] rsyn0815m02m             max       n_adm=0 bound=None opt=1774.397335
+[ 74/200] st_e14                   min       n_adm=0 bound=4.5795824063796475 opt=4.579582402
+[ 75/200] crudeoil_lee2_10         WORKER-ERROR
+[ 76/200] crudeoil_lee3_08         max       n_adm=0 bound=None opt=85.44891308
+[ 77/200] st_e32                   min       n_adm=0 bound=-8.265458259977075 opt=-1.430407283
+[ 78/200] st_qpk2                  min       n_adm=0 bound=-12.250000000000004 opt=-12.25
+[ 79/200] supplychainp1_030510     min       n_adm=0 bound=None opt=860440.9195
+[ 80/200] sssd15-04persp           min       n_adm=0 bound=-7.46e-322 opt=205054.4585
+[ 81/200] slay04h                  min       n_adm=0 bound=9859.659676473413 opt=9859.659708
+[ 82/200] pooling_foulds4stp       min       n_adm=0 bound=None opt=-8.0
+[ 83/200] st_e35                   min ADMIT n_adm=1 bound=13756.629739487023 opt=64868.07684
+[ 84/200] ex4_1_5                  min       n_adm=0 bound=None opt=0.0
+[ 85/200] st_rv9                   min       n_adm=0 bound=-120.15310851660382 opt=-120.1531085
+[ 86/200] qspp_0_10_0_1_10_1       WORKER-ERROR
+[ 87/200] gbd                      min       n_adm=0 bound=2.199999982504936 opt=2.2
+[ 88/200] gastrans582_cool12_95    min       n_adm=0 bound=None opt=0.0
+[ 89/200] smallinvDAXr4b050-055    min       n_adm=0 bound=9.79635094285725 opt=9.797143454
+[ 90/200] syn05m04m                max       n_adm=0 bound=6120.24487931612 opt=5510.387345
+[ 91/200] flay02m                  min       n_adm=0 bound=37.94733180456953 opt=37.94733192
+[ 92/200] toroidal3g7_6666         max       n_adm=0 bound=45201062.0 opt=33611981.0
+[ 93/200] fo9_ar25_1               min       n_adm=0 bound=None opt=32.18643105
+[ 94/200] slay05h                  min       n_adm=0 bound=22573.410090019694 opt=22664.67865
+[ 95/200] filter                   min       n_adm=0 bound=8685.277034428807 opt=8685.277077
+[ 96/200] tls2                     min       n_adm=0 bound=None opt=5.3
+[ 97/200] st_e22                   min       n_adm=0 bound=-85.00000013498837 opt=-85.0
+[ 98/200] cvxnonsep_psig40         min       n_adm=0 bound=85.49214442539518 opt=85.49576764
+[ 99/200] rsyn0840m03m             max       n_adm=0 bound=None opt=2742.645652
+[100/200] graphpart_2g-0066-0066   min       n_adm=0 bound=-2865560.0 opt=-2865560.0
+[101/200] cvxnonsep_normcon30      min       n_adm=0 bound=-34.244163789163245 opt=-34.24396574
+[102/200] ex1265a                  min       n_adm=0 bound=10.3 opt=10.3
+[103/200] cvxnonsep_psig20         min       n_adm=0 bound=93.80231252712849 opt=93.81138788
+[104/200] o8_ar4_1                 min       n_adm=0 bound=None opt=243.0707486
+[105/200] mathopt3                 min       n_adm=0 bound=-1.14e-322 opt=0.0
+[106/200] gastrans582_cold13_95    min       n_adm=0 bound=None opt=0.0
+[107/200] edgecross14-058          min ADMIT n_adm=1 bound=63.999999999999986 opt=353.0
+[108/200] routingdelay_bigm        min       n_adm=0 bound=None opt=146.62557
+[109/200] ex14_2_2                 min       n_adm=0 bound=0.0 opt=0.0
+[110/200] ex4                      min       n_adm=0 bound=-8.06419480689735 opt=-8.064136165
+[111/200] ex9_1_5                  min       n_adm=0 bound=-1.0000000899763701 opt=-1.0
+[112/200] gabriel04                max       n_adm=0 bound=None opt=9.2266
+[113/200] waste                    min       n_adm=0 bound=None opt=598.9191764
+[114/200] ex14_1_7                 min       n_adm=0 bound=-341.2845075135812 opt=0.0
+[115/200] genpooling_lee2          min       n_adm=0 bound=None opt=-3849.265424
+[116/200] chimera_mis-01           WORKER-ERROR
+[117/200] edgecross10-090          min       n_adm=0 bound=1335.9999999999916 opt=1387.0
+[118/200] st_e16                   min       n_adm=0 bound=10949.04900285145 opt=12292.46728
+[119/200] carton7                  min ADMIT n_adm=1 bound=25.99999999999995 opt=191.7295481
+[120/200] ex2_1_5                  min       n_adm=0 bound=-268.0146372149871 opt=-268.0146315
+[121/200] oil2                     min       n_adm=0 bound=-0.7984424845155457 opt=-0.7332600119
+[122/200] st_ph12                  min       n_adm=0 bound=-22.625 opt=-22.625
+[123/200] nvs02                    min       n_adm=0 bound=5.96418452307 opt=5.964184523
+[124/200] st_ph11                  min       n_adm=0 bound=-11.28125 opt=-11.28125
+[125/200] portfol_card             min       n_adm=0 bound=0.03221766376117274 opt=0.0322176618
+[126/200] product2                 min       n_adm=0 bound=None opt=-2102.38931
+[127/200] syn05m03m                max       n_adm=0 bound=4027.3718328944424 opt=4027.371755
+[128/200] unitcommit1              min       n_adm=0 bound=None opt=578176.639
+[129/200] st_test5                 min       n_adm=0 bound=-110.00000001495425 opt=-110.0
+[130/200] arki0005                 WORKER-ERROR
+[131/200] ex5_2_2_case1            min       n_adm=0 bound=-400.00000412823294 opt=-400.0
+[132/200] st_iqpbk2                min       n_adm=0 bound=-1195.2256731107047 opt=-1195.22565
+[133/200] korcns                   min       n_adm=0 bound=0.0 opt=0.0
+[134/200] watertreatnd_conc        min       n_adm=0 bound=288791.3274706621 opt=348336.7614
+[135/200] sssd16-07persp           min       n_adm=0 bound=-1.38e-321 opt=417188.8105
+[136/200] st_test4                 min       n_adm=0 bound=-7.0 opt=-7.0
+[137/200] ravempb                  min       n_adm=0 bound=269590.21313642926 opt=269590.2193
+[138/200] qspp_0_12_0_1_10_1       min       n_adm=0 bound=None opt=959.0
+[139/200] color_lab3_3x0           min       n_adm=0 bound=-4.501954364861548e-15 opt=79.93
+[140/200] cvxnonsep_normcon40r     min       n_adm=0 bound=-32.630717054059765 opt=-32.62966972
+[141/200] crudeoil_lee1_07         max       n_adm=0 bound=None opt=79.75
+[142/200] kall_diffcircles_10      min       n_adm=0 bound=-7.873446170180643e-12 opt=11.93549511
+[143/200] slay10h                  min       n_adm=0 bound=None opt=129579.8838
+[144/200] rsyn0810m02m             max       n_adm=0 bound=None opt=1741.386855
+[145/200] ex2_1_1                  min       n_adm=0 bound=-17.0 opt=-17.0
+[146/200] flay05h                  min       n_adm=0 bound=None opt=64.49806199
+[147/200] squfl025-025             min       n_adm=0 bound=None opt=168.8072718
+[148/200] syn05m03hfsg             max       n_adm=0 bound=5828.421744131965 opt=4027.371755
+[149/200] tltr                     min       n_adm=0 bound=48.06666666666666 opt=48.06666667
+[150/200] m6                       min       n_adm=0 bound=None opt=82.25687691
+[151/200] ex14_1_3                 min       n_adm=0 bound=1.6132928326584306e-16 opt=-0.0
+[152/200] rsyn0810m03m             WORKER-ERROR
+[153/200] pooling_sppa9pq          WORKER-ERROR
+[154/200] risk2bpb                 min       n_adm=0 bound=-56.45458079778082 opt=-55.8761394
+[155/200] ex14_1_9                 min       n_adm=0 bound=-1.9775220540513224e-16 opt=-0.0
+[156/200] syn10m04m                max       n_adm=0 bound=8746.274621752162 opt=4557.062338
+[157/200] st_qpc-m4                min       n_adm=0 bound=-9.74936374106791e-07 opt=0.0
+[158/200] p_ball_40b_5p_3d_m       min       n_adm=0 bound=None opt=9.777176542
+[159/200] m3                       min       n_adm=0 bound=37.79999951039202 opt=37.8
+[160/200] nvs17                    min       n_adm=0 bound=-1344.4000000000008 opt=-1100.4
+[161/200] edgecross10-080          min ADMIT n_adm=1 bound=813.0000000000001 opt=1037.0
+[162/200] sfacloc2_4_90            min ADMIT n_adm=1 bound=0.0 opt=13.41150335
+[163/200] ball_mk2_10              min       n_adm=0 bound=-0.0 opt=0.0
+[164/200] nvs13                    min       n_adm=0 bound=-585.2 opt=-585.2
+[165/200] ex3pb                    min       n_adm=0 bound=68.00972178650457 opt=68.00974405
+[166/200] sporttournament24        max       n_adm=0 bound=354.0 opt=282.0
+[167/200] nvs08                    min       n_adm=0 bound=23.44972734516655 opt=23.44972735
+[168/200] crudeoil_lee2_06         max       n_adm=0 bound=None opt=101.1745663
+[169/200] sssd08-04persp           min       n_adm=0 bound=-4.7e-322 opt=182022.5703
+[170/200] autocorr_bern40-05       min       n_adm=0 bound=-5572.0 opt=-936.0
+[171/200] gastrans582_mild11_95    min       n_adm=0 bound=None opt=0.0
+[172/200] st_ph2                   min       n_adm=0 bound=-1028.117283950617 opt=-1028.117284
+[173/200] rsyn0820m03hfsg          max ADMIT n_adm=1 bound=7922.1153942030405 opt=2028.811941
+[174/200] st_e31                   min       n_adm=0 bound=-2.0000000237499864 opt=-2.0
+[175/200] jit1                     min       n_adm=0 bound=173982.6100321047 opt=173983.33
+[176/200] edgecross20-040          min       n_adm=0 bound=1.0000000000000058 opt=57.0
+[177/200] tln7                     min       n_adm=0 bound=2.59424714434015 opt=15.0
+[178/200] batchs151208m            min       n_adm=0 bound=None opt=1543472.398
+[179/200] rsyn0820m03m             max       n_adm=0 bound=None opt=2028.811941
+[180/200] meanvarx                 min       n_adm=0 bound=14.369231426202006 opt=14.36923211
+[181/200] rsyn0815hfsg             max ADMIT n_adm=1 bound=2645.3722998694006 opt=1269.925649
+[182/200] squfl020-150             min       n_adm=0 bound=None opt=557.84865
+[183/200] chance                   min       n_adm=0 bound=29.894378154271102 opt=29.89437816
+[184/200] rbrock                   min       n_adm=0 bound=-2.2495560969559847e-11 opt=0.0
+[185/200] rsyn0830m03m             max       n_adm=0 bound=None opt=1543.059322
+[186/200] smallinvDAXr3b200-220    min       n_adm=0 bound=156.60104364398754 opt=156.6042679
+[187/200] procsel                  min       n_adm=0 bound=-1.9230988290505513 opt=-1.923098738
+[188/200] sporttournament06        max       n_adm=0 bound=12.0 opt=12.0
+[189/200] squfl025-040             min       n_adm=0 bound=None opt=197.3338812
+[190/200] st_rv8                   min       n_adm=0 bound=-132.6617018553076 opt=-132.661629
+[191/200] launch                   min       n_adm=0 bound=None opt=2257.797558
+[192/200] mathopt2                 min       n_adm=0 bound=-1.5e-323 opt=0.0
+[193/200] st_e40                   min       n_adm=0 bound=30.4142135 opt=30.4142135
+[194/200] crudeoil_lee1_06         max       n_adm=0 bound=None opt=79.75
+[195/200] gastrans582_warm31_95    min       n_adm=0 bound=None opt=0.0
+[196/200] o7_ar4_1                 min       n_adm=0 bound=None opt=131.6531381
+[197/200] graphpart_3pm-0334-0334  min       n_adm=0 bound=-52.49999999999999 opt=-36.0
+[198/200] gastrans582_freezing30_95 min       n_adm=0 bound=None opt=0.0
+[199/200] crudeoil_pooling_dt3     min       n_adm=0 bound=None opt=284781.25
+[200/200] pedigree_ex485_2         WORKER-ERROR
+
+# instances solved      : 191 (9 worker errors, of which 8 wall-cap overruns)
+# ADMITTED bounds checked: 17
+# REPORTED bounds checked: 140
+# INVALID ADMITTED       : 0
+# INVALID REPORTED       : 0
+# worker errors (9), first 10:
+    chimera_k64ising-01: WALL-CAP: exceeded 90.0s at time_limit=8.0s
+    arki0020: WALL-CAP: exceeded 90.0s at time_limit=8.0s
+    crudeoil_lee2_10: WALL-CAP: exceeded 90.0s at time_limit=8.0s
+    qspp_0_10_0_1_10_1: WALL-CAP: exceeded 90.0s at time_limit=8.0s
+    chimera_mis-01: WALL-CAP: exceeded 90.0s at time_limit=8.0s
+    arki0005: WALL-CAP: exceeded 90.0s at time_limit=8.0s
+    rsyn0810m03m:   return fn(*args, **kwargs)
+    pooling_sppa9pq: WALL-CAP: exceeded 90.0s at time_limit=8.0s
+    pedigree_ex485_2: WALL-CAP: exceeded 90.0s at time_limit=8.0s
+# PASS: every admitted and reported bound is oracle-valid

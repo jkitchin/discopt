@@ -4066,6 +4066,21 @@ def _admissible_probe_bound(
 ) -> Optional[float]:
     """The #930 root-LP-probe bound, but only when it is a valid GLOBAL bound.
 
+    STOPGAP — the real fix is #933. This function exists only because the bound
+    floats free of the node it was proved on. Seeding the root LP bound into node
+    0's ``local_lower_bound`` instead would propagate it to the whole tree for the
+    whole run (``tree_manager.rs:403`` floors every import at the inherited parent
+    bound; every child-creation site in ``branching.rs`` copies ``inherited_lb``),
+    making the dual bound anytime and monotone by construction — and letting this
+    function be **deleted** rather than hardened. Its box-equality gate, the
+    min-space/max-space conversion at the consumption site, and the ``1e20``
+    sentinel check below are all surfaces that only exist because of that. Note
+    also that this recovery lives in ``solve_model`` alone: ``_solve_nlp_bb``,
+    ``_solve_milp_bb``, ``_solve_miqp_bb`` and ``_try_native_spatial_kernel`` each
+    re-derive the reported bound with no fallback at all, which is why 27% of a
+    200-instance MINLPLib sweep reports no dual bound. See #933 for the
+    measurements.
+
     ``solve_model``'s root LP probe solves the McCormick relaxation over a box and
     then, historically, used the answer only as a keep/discard boolean for the
     relaxer — discarding a rigorous bound that cost real time (3.4 s on ``hda``).

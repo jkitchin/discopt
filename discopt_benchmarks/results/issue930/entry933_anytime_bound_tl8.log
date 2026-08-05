@@ -1,0 +1,18 @@
+# entry930: 12 instances, TL=8.0s
+fo8_ar5_1                  solve_model _rr block NOT REACHED; paths=['_solve_nlp_bb'] final=None
+batchs121208m              solve_model _rr block NOT REACHED; paths=['_solve_nlp_bb'] final=None
+portfol_robust100_09       solve_model _rr block NOT REACHED; paths=['_try_native_spatial_kernel'] final=None
+gastrans582_warm15         solve_model _rr block NOT REACHED; paths=['_try_native_spatial_kernel'] final=None
+smallinvDAXr1b020-022      solve_model _rr block NOT REACHED; paths=['_solve_nlp_bb', '_solve_nlp_bb'] final=None
+slay10m                    solve_model _rr block NOT REACHED; paths=None final=None
+crudeoil_lee3_06           solve_model _rr block NOT REACHED; paths=['_try_native_spatial_kernel'] final=None
+squfl030-100               solve_model _rr block NOT REACHED; paths=None final=None
+batch0812                  solve_model _rr block NOT REACHED; paths=['_solve_nlp_bb'] final=None
+rsyn0815m02m               solve_model _rr block NOT REACHED; paths=['_solve_nlp_bb'] final=None
+hda                        glb=-inf valid=False rr_left=0.23726454099232797 final=-64473.442402437024  ROOT NEVER SEEDED (-inf)
+contvar                    glb=-inf valid=False rr_left=1.4550661249959376 final=171244.81148782672  ROOT NEVER SEEDED (-inf)
+
+# diagnosed discards      : 2
+#   root never seeded (-inf): 2
+#   finite but tainted      : 0   <-- kills the hypothesis
+# _rr block not reached   : 10  (instrument silent -- NOT a pass)
