@@ -4059,12 +4059,64 @@ def _apply_auto_cut_policy(model: "Model", relaxer) -> None:
         logger.debug("auto cut policy skipped: %s", exc)
 
 
+def _admissible_probe_bound(
+    probe: "Optional[tuple[float, np.ndarray, np.ndarray]]",
+    root_lb: np.ndarray,
+    root_ub: np.ndarray,
+) -> Optional[float]:
+    """The #930 root-LP-probe bound, but only when it is a valid GLOBAL bound.
+
+    ``solve_model``'s root LP probe solves the McCormick relaxation over a box and
+    then, historically, used the answer only as a keep/discard boolean for the
+    relaxer — discarding a rigorous bound that cost real time (3.4 s on ``hda``).
+    The consequence was visible at the top level: at ``time_limit=10`` ``hda``
+    proved -64473.44 and *reported* -141697.43, because a starved root-relaxation
+    fallback recomputed a weaker bound and replaced the better one.
+
+    The single condition under which re-admitting that value is sound is **exact
+    box equality**, and it lives here so that every consumer shares one gate.
+
+    Why equality and not containment: the probe's box is the FBBT/OBBT-*tightened*
+    root box whenever ``DISCOPT_ROOT_LP_PROBE_TIGHT`` is on (its default), while
+    the fallback's is the snapshot taken before the search. A bound proved over a
+    box that is a strict SUBSET of the root box need not bound the global optimum
+    at all — surfacing one would be a false certificate, the worst class of error.
+    Measured over 10 in-repo instances, 8 produced both boxes: 5 equal (``hda``,
+    ``casctanks``, ``contvar``, ``heatexch_gen1``, ``nvs05``) and 3 not even
+    comparable (``4stufen``, ``beuster``, ``bchoco06``) — so "probe ⊆ root" is not
+    the test either, and a subset check would have admitted nothing extra anyway.
+
+    On equality the value is the identical quantity ``_root_relaxation_lower_bound``
+    computes, over the identical box, from the identical relaxer, so it introduces
+    no new soundness surface. Callers must still merge it with ``max`` (a MINIMIZE
+    wants the larger lower bound): the probe bound is frequently *weaker* than what
+    the search proved — ``nvs05`` probe 0.615 against a reported 3.542 — and must
+    never replace a tighter one.
+    """
+    if probe is None:
+        return None
+    value, probe_lb, probe_ub = probe
+    if not np.isfinite(value):
+        return None
+    if probe_lb.shape != root_lb.shape or probe_ub.shape != root_ub.shape:
+        return None
+    if not (np.array_equal(probe_lb, root_lb) and np.array_equal(probe_ub, root_ub)):
+        logger.debug(
+            "#930: root-probe bound %s declined — its box differs from the root box, "
+            "so it is not a valid global bound",
+            value,
+        )
+        return None
+    return float(value)
+
+
 def _root_relaxation_lower_bound(
     model: "Model",
     root_lb: np.ndarray,
     root_ub: np.ndarray,
     time_limit: float,
     psd_cuts: bool = False,
+    probe: "Optional[tuple[float, np.ndarray, np.ndarray]]" = None,
 ) -> Optional[float]:
     """Solve the root MILP relaxation once and return its LP value as a rigorous
     global lower bound, or ``None`` if unavailable.
@@ -4202,6 +4254,26 @@ def _root_relaxation_lower_bound(
         # independently valid lower bound on the internally minimized objective,
         # so ``max`` at the bottom keeps the tightest and any prefix is sound.
         _have: list[float] = []
+
+        # #930, flag-gated half (``DISCOPT_ROOT_PROBE_SEEDS_FALLBACK``, default off).
+        # The two rules below that read ``_have`` — rule 1 of ``_fb_stop`` and the
+        # ``_sep_budget`` clamp — both ask "is a valid bound already in hand?". On the
+        # spatial path the honest answer is usually yes before we even start: the root
+        # LP probe proved one inside the budget. Seeding it here is what lets the
+        # fallback stop re-deriving what the solver already knows (hda: a 2.72 s
+        # ``solve_at_node`` returning the probe's value to all 17 digits).
+        #
+        # Default off because it is bound-CHANGING, not merely faster: with ``_have``
+        # non-empty, rule 2 may decline the separated phase, and a starved probe's
+        # bound can be looser than that phase would prove (``solve_at_node`` reports a
+        # weak NS floor under ``status="optimal"``). Sound either way — the seeded
+        # value is a valid lower bound over this exact box and reaches the caller
+        # through the same ``max`` — so this trades bound quality for punctuality
+        # exactly where rule 2 already does, never correctness.
+        if getattr(_tuning(), "root_probe_seeds_fallback", False):
+            _seed = _admissible_probe_bound(probe, root_lb, root_ub)
+            if _seed is not None:
+                _have.append(_seed)
 
         # PSD (moment) cuts strengthen the McCormick relaxation toward the SDP
         # bound on nonconvex QCQP. `sanitize_*` only drops rows, so the column
@@ -4388,6 +4460,28 @@ def _root_relaxation_lower_bound(
             for b in (plain_bound, sep_bound, psd_bound, rlt_bound, rlt_lag_bound, shor_bound)
             if b is not None
         ]
+        # #930: the root LP probe in ``solve_model`` already solved this exact
+        # relaxation and threw the answer away — it consumed the result only as a
+        # keep/discard boolean for the relaxer. Re-admit it as one more candidate
+        # here, where ``max`` makes a weaker one harmless and a stronger one a free
+        # win, so a starved fallback can no longer REPLACE a better bound the solver
+        # already proved (hda at a 10 s limit reported -141697 having proved -64473).
+        #
+        # The gate is exact box equality, and it is checked HERE rather than at the
+        # call sites so no caller can hand in a bound from a different box. That
+        # matters: the probe box is the FBBT/OBBT-tightened one under
+        # ``DISCOPT_ROOT_LP_PROBE_TIGHT`` (default ON), and a bound over a box that
+        # is a strict SUBSET of the root box need not bound the global optimum at
+        # all — reporting one would be a false certificate. Measured over 10 in-repo
+        # instances, 8 produced both boxes: 5 equal (hda, casctanks, contvar,
+        # heatexch_gen1, nvs05) and 3 NOT EVEN COMPARABLE (4stufen, beuster,
+        # bchoco06), which is why "probe ⊆ root" is not the test. On equality the
+        # probe bound is the identical quantity this function computes, over the
+        # identical box, from the identical relaxer — so it is exactly as sound as
+        # the bound already shipped, with no new soundness surface.
+        _probe_ok = _admissible_probe_bound(probe, root_lb, root_ub)
+        if _probe_ok is not None:
+            candidates.append(_probe_ok)
         if candidates:
             return max(candidates)
     except Exception as exc:  # pragma: no cover - defensive
@@ -7380,6 +7474,11 @@ def solve_model(
     _root_lb_snapshot = np.asarray(lb, dtype=np.float64).copy()
     _root_ub_snapshot = np.asarray(ub, dtype=np.float64).copy()
 
+    # #930: ``(bound, lb_box, ub_box)`` proved by the root LP probe further down, or
+    # ``None`` when that probe did not run or returned nothing finite. Carried to the
+    # root-relaxation fallback, which decides whether it is admissible.
+    _root_probe_bound: "Optional[tuple[float, np.ndarray, np.ndarray]]" = None
+
     # --- #764: native Rust spatial-B&B kernel (default OFF, DISCOPT_NATIVE_SPATIAL_KERNEL) ---
     # Hand off here — after root FBBT + non-cutoff root OBBT have finished, so [lb, ub]
     # is the finite root box the McCormick relaxation needs (tanksize's raw box is
@@ -8136,6 +8235,25 @@ def solve_model(
                             _probe = _mc_lp_relaxer.solve_at_node(
                                 _probe_lb, _probe_ub, time_limit=_probe_budget
                             )
+                            # #930: bank the probe's proved bound WITH the box it was
+                            # proved over. This solve costs real time (3.4 s on hda)
+                            # and its result was previously consumed only as the
+                            # keep/discard boolean below. The box travels with the
+                            # value because it is the soundness gate — see
+                            # ``_root_relaxation_lower_bound``, which is where the
+                            # comparison happens and where a mismatched box is
+                            # refused. Recording it here is inert on its own: nothing
+                            # reports this value unless that gate passes.
+                            if (
+                                _probe is not None
+                                and _probe.lower_bound is not None
+                                and np.isfinite(_probe.lower_bound)
+                            ):
+                                _root_probe_bound = (
+                                    float(_probe.lower_bound),
+                                    np.asarray(_probe_lb, dtype=np.float64).copy(),
+                                    np.asarray(_probe_ub, dtype=np.float64).copy(),
+                                )
                     except Exception as e:  # pragma: no cover - defensive
                         logger.debug("McCormick LP root probe failed: %s", e)
                         _probe = None
@@ -11966,11 +12084,27 @@ def solve_model(
     # work alone outran the limit — the honest answer is the weaker bound the search
     # already has (possibly none), not a fresh grant of time the caller did not give.
     _rr_remaining = time_limit - (time.perf_counter() - t_start)
-    if _rr_needed and _rr_remaining > 0.0:
+    # #930: the root LP probe's banked bound is admissible whether or not there is
+    # time left to run the fallback, because it was already paid for inside the
+    # budget. When the remainder is <= 0 — the mandatory root work outran the limit,
+    # the case where the solver used to report the weakest bound it had, or none —
+    # this is the whole recovery, and it costs zero additional wall time.
+    # ``_admissible_probe_bound`` applies the same box-equality gate the fallback
+    # applies, so the two paths cannot disagree about what is sound.
+    if _rr_needed:
         _is_maximize = model._objective.sense == ObjectiveSense.MAXIMIZE
-        _rr = _root_relaxation_lower_bound(
-            model, _root_lb_snapshot, _root_ub_snapshot, _rr_remaining, psd_cuts=psd_cuts
-        )
+        _rr = None
+        if _rr_remaining > 0.0:
+            _rr = _root_relaxation_lower_bound(
+                model,
+                _root_lb_snapshot,
+                _root_ub_snapshot,
+                _rr_remaining,
+                psd_cuts=psd_cuts,
+                probe=_root_probe_bound,
+            )
+        else:
+            _rr = _admissible_probe_bound(_root_probe_bound, _root_lb_snapshot, _root_ub_snapshot)
         if _rr is not None and np.isfinite(_rr):
             # Negate for MAXIMIZE: a lower bound on ``-obj`` is an upper bound on
             # ``obj``. The relaxation is a valid outer approximation either way, so

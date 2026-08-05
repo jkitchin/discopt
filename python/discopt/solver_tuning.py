@@ -539,6 +539,46 @@ class SolverTuning:
     everything else bound-neutral. A/B root values re-confirmed load-independent
     (``results/issue282/root_lp_probe_ab_reconfirm_*.json``)."""
 
+    root_probe_seeds_fallback: bool = field(
+        default_factory=lambda: _env_flag("DISCOPT_ROOT_PROBE_SEEDS_FALLBACK", default=False)
+    )
+    """Let the root LP probe's already-proved bound count as "a bound in hand" for the
+    #138 fallback's own checkpoint rules (``DISCOPT_ROOT_PROBE_SEEDS_FALLBACK``,
+    default off; §5 bound-changing). Issue #930.
+
+    ``_root_relaxation_lower_bound`` accumulates candidates in ``_have`` and consults
+    it in two places that already exist: rule 1 of ``_fb_stop`` (never decline an
+    optional tightening phase while NO valid bound is in hand) and the ``_sep_budget``
+    clamp (once a bound has landed, the separated solve must fit in what is genuinely
+    left of the grant). Both rules ask "do we already have a bound?" — and on the
+    spatial path the answer is often *yes* before the fallback starts, because the
+    root LP probe in ``solve_model`` proved one. ``_have`` just never learned it.
+
+    This flag seeds ``_have`` with the probe bound when — and only when — it passes
+    ``_admissible_probe_bound``'s exact box-equality gate, i.e. it is the identical
+    quantity over the identical box. Measured on ``hda`` at a 10 s limit: the fallback
+    re-ran ``solve_at_node`` over the same root box for 2.72 s and returned
+    ``-64473.442402437024``, the same value to all 17 digits the probe had proved
+    3 s earlier — pure duplicate work, and the whole of the fallback's 4.06 s against
+    a 1.69 s grant.
+
+    NOT bound-neutral, which is why it is flagged rather than unconditional. Seeding
+    ``_have`` lets rule 2 decline the separated phase once the grant is spent, and the
+    probe bound is not always as tight as that phase would prove: ``solve_at_node``
+    relabels *unbounded*, *time_limit* and *numerical* outcomes as
+    ``status="optimal"`` carrying a weak Neumaier-Shcherbina floor
+    (``mccormick_lp.py`` lines 1624/1642/1654), so a starved probe can report a valid
+    but much looser bound than a full separated solve would. ``status`` therefore
+    cannot be used as evidence of convergence, and the trade — punctuality for
+    possible bound quality — is exactly the one rule 2 already makes; this flag only
+    widens what rule 2 counts as "in hand". Never unsound: every seeded value is a
+    valid lower bound over the root box, and it reaches the caller through the same
+    ``max``.
+
+    Independent of #930's other half (re-admitting the probe bound as a ``max``
+    candidate), which is unconditional because it can only *tighten* the reported
+    bound and costs no wall time."""
+
     rlt1_root_bound: bool = field(
         default_factory=lambda: _env_flag("DISCOPT_RLT1_ROOT_BOUND", default=False)
     )
