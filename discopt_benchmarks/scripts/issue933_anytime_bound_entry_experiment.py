@@ -95,7 +95,19 @@ S._admissible_probe_bound = ap
 # all -- they exit through _solve_nlp_bb / _solve_milp_bb / the native spatial
 # kernel, each of which has its own `bound_val = stats["global_lower_bound"]`.
 # Hook all of them so "which path" is DATA, not an unlabelled blank.
-for _fn in ("_solve_nlp_bb", "_solve_milp_bb", "_try_native_spatial_kernel"):
+#
+# The first version of this hook list omitted `_solve_miqp_bb`, which made
+# slay10m/squfl030-100 come back `paths=None` and get written up as "a fifth
+# path I have not identified". They are `_solve_miqp_bb`; an unhooked path is
+# indistinguishable from an unknown one, which is the same Sec.6 failure one
+# level up. The list must enumerate EVERY function that reads
+# stats["global_lower_bound"] -- keep it in sync with that grep.
+for _fn in (
+    "_solve_nlp_bb",
+    "_solve_milp_bb",
+    "_solve_miqp_bb",
+    "_try_native_spatial_kernel",
+):
     _real = getattr(S, _fn)
     def _mk(real, tag):
         def wrapper(*a, **k):
