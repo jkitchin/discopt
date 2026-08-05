@@ -46,12 +46,21 @@ _SLACK_FRAC = 0.10
 #
 # ``hda`` at a 10 s limit is bimodal (5 reps, load-gated, ``scratchpad/hda10.py``):
 # 10.60 / 10.78 / 12.79 / 13.03 / 12.94 s — mean 12.03 s, sd 1.23, against 12.50 s
-# allowed. The two fast reps report the weak dual bound -141697, the three slow
-# ones the full -64473, and that is the whole story: the #138 fallback's optional
-# separated-relaxation phase is what overruns. When the fallback's grant is already
-# spent by the time a first bound is in hand, ``_fb_stop`` returns the weak bound
-# and the solve lands at ~10.7 s; when the grant still has room the phase starts,
-# and ``solve_at_node`` then *ignores the budget it was handed* for a further ~4 s.
+# allowed. The #138 fallback's optional separated-relaxation phase is what overruns:
+# when the fallback's grant is already spent by the time a first bound is in hand,
+# ``_fb_stop`` declines the phase and the solve lands at ~10.7 s; when the grant
+# still has room the phase starts, and ``solve_at_node`` then *ignores the budget it
+# was handed* for a further ~4 s.
+#
+# The BOUND half of that bimodality is gone as of #930 and this comment no longer
+# claims it. It used to read "the two fast reps report the weak dual bound -141697,
+# the three slow ones the full -64473" — true when written, because the reported
+# bound was whatever the fallback managed. #930 re-admits the bound the root LP
+# probe already proved, so -64473 is now reported in every rep at this limit and the
+# remaining bimodality is purely in wall time. That is also why the #928 measurement
+# recorded below ("it buys punctuality by losing the bound") no longer describes a
+# live trade-off at THIS limit — but the flag's corpus-wide sign-flipping deltas,
+# the independently sufficient reason it stays off, are unaffected.
 #
 # That drop is issue #928 (``_lp_warm_deadline_enabled`` in
 # ``_jax/milp_relaxation.py``): the warm pure-LP fast path discards the caller's
