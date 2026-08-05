@@ -392,12 +392,24 @@ def test_ep5_traced_eval_fn_byte_identical_and_lazy():
 
 
 @pytest.mark.unit
-def test_ep5_lift_never_separated_leaves_grad_untraced():
+def test_ep5_lift_never_separated_leaves_grad_untraced(monkeypatch):
     """EP5 lazy: a composite lift whose spec is never separated pays nothing — its
     value/grad wrappers are never traced — and the emitted relaxation (hence its
     root LP bound) is unaffected, because those fns are consumed ONLY by
     ``_separate_convex``. Solving the root relaxation LP without the separation
-    loop must leave both wrappers untraced and yield a sound bound."""
+    loop must leave both wrappers untraced and yield a sound bound.
+
+    Pinned under ``DISCOPT_SEPGRAD=jax``, deliberately. "Untraced" is a property
+    of the JAX arm — ``_TracedEvalFn`` defers the trace to first call — and that
+    arm is still live as the documented opt-out, so the laziness it guards still
+    needs a test. The tape arm (default since #75) has no trace to defer: it
+    builds the ``NlExpr`` eagerly in ``_compiled_tape`` and evaluates directly.
+    The backend-agnostic half of EP5 — never-separated fns are never *invoked*,
+    and the bound is unaffected — is pinned for both arms in the companion test
+    below, so flipping the default cost this file no coverage.
+    """
+    monkeypatch.setenv("DISCOPT_SEPGRAD", "jax")
+
     from discopt._jax.model_utils import flat_variable_bounds
     from discopt._jax.uniform_relax import _TracedEvalFn, build_uniform_relaxation
 
@@ -426,6 +438,101 @@ def test_ep5_lift_never_separated_leaves_grad_untraced():
     for spec in specs:
         assert spec.value_fn._jaxpr is None
         assert spec.grad_fn._jaxpr is None
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("sepgrad", ["tape", "jax"])
+def test_ep5_never_separated_lift_is_never_invoked_on_either_backend(monkeypatch, sepgrad):
+    """The backend-agnostic half of EP5, pinned on both #75 arms.
+
+    ``value_fn``/``grad_fn`` are consumed ONLY by ``_separate_convex``. So on any
+    backend, building the relaxation and solving the root LP without separation
+    must invoke neither — and must produce the same sound bound either way. This
+    is the invariant that survives the tape default; "untraced" does not, because
+    the tape has no deferred trace to inspect.
+    """
+    monkeypatch.setenv("DISCOPT_SEPGRAD", sepgrad)
+
+    from discopt._jax.model_utils import flat_variable_bounds
+    from discopt._jax.uniform_relax import build_uniform_relaxation
+
+    m = Model()
+    x = m.continuous("x", lb=0.5, ub=2.5)
+    y = m.continuous("y", lb=0.5, ub=2.0)
+    m.minimize(dm.sqrt(x**2 + y**2))
+    lb, ub = flat_variable_bounds(m)
+    rel = build_uniform_relaxation(m, box=(lb.copy(), ub.copy()))
+
+    specs = rel.composite_multivar_specs
+    assert specs, f"expected a composite lift on the {sepgrad} arm — nothing to assert about"
+
+    calls = {"n": 0}
+    for spec in specs:
+        for attr in ("value_fn", "grad_fn"):
+            fn = getattr(spec, attr)
+
+            def counting(*a, _f=fn, **kw):
+                calls["n"] += 1
+                return _f(*a, **kw)
+
+            # ``object.__setattr__``: the spec is a frozen dataclass.
+            object.__setattr__(spec, attr, counting)
+
+    res = rel.model.solve(backend="simplex")
+    assert res.status == "optimal"
+    assert calls["n"] == 0, (
+        f"{calls['n']} separation-fn calls on the {sepgrad} arm with no separation "
+        "loop running — a never-separated lift is being paid for"
+    )
+
+    assert res.objective is not None
+
+
+@pytest.mark.unit
+def test_ep5_never_separated_lift_bound_is_backend_identical(monkeypatch):
+    """Both #75 separation-gradient arms must emit the SAME relaxation for a lift
+    that is never separated — a lowering the tape silently declined would show up
+    here as a differing root bound rather than as a quiet pass.
+
+    Both arms are built inside one test on purpose: accumulating them across
+    parametrized runs in a module global makes the comparison vanish whenever a
+    ``-k`` filter selects only one arm, which is a §6 silent no-op.
+    """
+    from discopt._jax.model_utils import flat_variable_bounds
+    from discopt._jax.uniform_relax import _TracedEvalFn, build_uniform_relaxation
+    from discopt._tape_nlp_evaluator import pounce_usable
+
+    if not pounce_usable():
+        pytest.skip("POUNCE unusable: both arms would be JAX, so this would compare JAX to itself")
+
+    bounds = {}
+    kinds = {}
+    for arm in ("tape", "jax"):
+        monkeypatch.setenv("DISCOPT_SEPGRAD", arm)
+        m = Model()
+        x = m.continuous("x", lb=0.5, ub=2.5)
+        y = m.continuous("y", lb=0.5, ub=2.0)
+        m.minimize(dm.sqrt(x**2 + y**2))
+        lb, ub = flat_variable_bounds(m)
+        rel = build_uniform_relaxation(m, box=(lb.copy(), ub.copy()))
+        specs = rel.composite_multivar_specs
+        assert specs, f"no composite lift on the {arm} arm"
+        kinds[arm] = {isinstance(s.value_fn, _TracedEvalFn) for s in specs}
+        res = rel.model.solve(backend="simplex")
+        assert res.status == "optimal", (arm, res.status)
+        bounds[arm] = float(res.objective)
+
+    assert len(bounds) == 2, bounds
+    # §6 control: the arms must have taken DIFFERENT paths. Without this the whole
+    # comparison passes vacuously whenever the tape quietly declines the lowering.
+    assert kinds["jax"] == {True}, f"the jax arm did not build _TracedEvalFn wrappers: {kinds}"
+    assert kinds["tape"] == {False}, (
+        f"the tape arm fell back to JAX, so this compared JAX against itself: {kinds}"
+    )
+    assert bounds["tape"] == pytest.approx(bounds["jax"], rel=1e-9), bounds
+    # Sound against the true minimum of sqrt(x^2+y^2) on the box, at (0.5, 0.5).
+    true_opt = (0.5**2 + 0.5**2) ** 0.5
+    assert bounds["tape"] <= true_opt + 1e-9, (bounds, true_opt)
 
 
 @pytest.mark.unit

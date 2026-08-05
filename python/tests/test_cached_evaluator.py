@@ -11,6 +11,15 @@ those callers reuse it. This pins:
   * a structural change invalidates it (cache miss),
   * a bound change does *not* invalidate it (the B&B common case),
   * ``solver._make_evaluator`` shares the very same cache.
+
+#75 note: since the tape backend graduated to default ON there are **two**
+evaluator caches, one per backend, and ``_make_evaluator`` is the funnel that
+picks between them. The sharing invariant is therefore "the funnel and the
+production alias agree, on whichever backend is active" — comparing the funnel
+against the *JAX* entry point directly, as this file used to, asserts that the
+default is JAX rather than that the cache is shared. That older form failed the
+moment the default flipped, which is the test doing its job; the invariant it
+was built for is re-expressed below over both backends rather than dropped.
 """
 
 from __future__ import annotations
@@ -61,13 +70,56 @@ def test_structural_change_invalidates():
     assert ev2 is not ev1, "a structural change must rebuild the evaluator"
 
 
-def test_make_evaluator_shares_the_cache():
-    import discopt.solver as S
+def test_make_evaluator_shares_the_cache(monkeypatch):
+    """The funnel and the heuristics' entry point must land on ONE object, on
+    **every** backend — that is the property that stops the diving heuristic from
+    rebuilding an evaluator ~110×/solve, and it has to survive the #75 default.
 
+    Checked on both arms, and the JAX arm is what keeps the opt-out honest: with
+    ``DISCOPT_NLP_EVAL=jax`` the funnel must reach the very ``cached_evaluator``
+    this module imports.
+    """
+    import discopt.solver as S
+    from discopt._tape_nlp_evaluator import make_evaluator
+
+    checks = 0
+
+    # Arm 1 — the shipped default (tape when representable). ``primal_heuristics``
+    # imports ``make_evaluator`` under the name ``cached_evaluator``, so this is
+    # literally the B&B-vs-heuristic comparison the docstring is about.
     m = _model()
-    ev_main = S._make_evaluator(m)
-    ev_heur = cached_evaluator(m)
-    assert ev_main is ev_heur, "_make_evaluator and cached_evaluator must share one cache"
+    assert S._make_evaluator(m) is make_evaluator(m), (
+        "the funnel and the heuristics' alias disagree on the default backend — "
+        "the two callers are building separate evaluators again"
+    )
+    checks += 1
+
+    # The alias really is the funnel, not a second import of the JAX entry point.
+    import discopt._jax.primal_heuristics as ph
+
+    assert ph.cached_evaluator is make_evaluator, (
+        "primal_heuristics no longer routes through the #75 funnel; it would pin "
+        "one backend while the solver used the other"
+    )
+    checks += 1
+
+    # Arm 2 — the documented opt-out. A fresh model, because the caches are keyed
+    # by structural fingerprint and are per-backend.
+    monkeypatch.setenv("DISCOPT_NLP_EVAL", "jax")
+    m_jax = _model()
+    ev_main = S._make_evaluator(m_jax)
+    assert ev_main is cached_evaluator(m_jax), (
+        "under DISCOPT_NLP_EVAL=jax the funnel must reach the JAX cache itself"
+    )
+    checks += 1
+    # ...and it must actually BE the JAX evaluator, so this arm cannot pass by
+    # the tape quietly answering both calls (CLAUDE.md §6: prove the probe fired).
+    from discopt._jax.nlp_evaluator import NLPEvaluator
+
+    assert isinstance(ev_main, NLPEvaluator), type(ev_main)
+    checks += 1
+
+    assert checks == 4, checks
 
 
 def test_lru_keeps_base_evaluator_across_transient_row():
