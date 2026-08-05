@@ -586,24 +586,34 @@ class SolverTuning:
     (``discopt_benchmarks/scripts/issue930_root_probe_bound_panel.py``, raw
     results in ``discopt_benchmarks/results/issue930/``):
 
-    * bar 1 cert-clean — over 24 flag ON/OFF bound pairs: 0 lost, 0 looser,
+    * bar 1 cert-clean — over 22 flag ON/OFF bound pairs: 0 lost, 0 looser,
       0 tighter, 0 ``gap_certified True->False``, 0 bound past an ``=opt=``
-      oracle or across its own incumbent (18 invariant + 12 oracle checks). The
+      oracle or across its own incumbent (6 invariant + 11 oracle checks). The
       flag did not move a single dual bound. Five closing instances were
       node-identical and objective-identical across all three arms, confirming
       both halves are inert where neither code path is reached.
-    * bar 2 net-positive — NOT met. Paired wall ``on - off`` is -0.230 s per run
-      (sd 0.734, n=34, total -7.82 s), but 2.89 s of that is ``contvar`` alone
-      (11.07 s -> 8.18 s, i.e. 38 % overrun -> 2 %) and 0.77 s is ``tls2``;
-      across the other 15 instances it is ~0.06 s/run, with ``tspn08`` 0.26 s
-      worse. Concentrated, not broad. The panel also ran without a load gate
-      (a system indexer held >100 % CPU), which widens the wall spread but not
-      the bound result, and the bound result is the one this verdict rests on.
+    * bar 2 net-positive — NOT met, and not merely unproven: paired wall
+      ``on - off`` is **+0.048 s per run** (sd 0.369, n=34, total +1.62 s). The
+      flag is fractionally *worse*, not better. The duplicate solve it removes
+      is real (2.72 s on ``hda`` at a 10 s limit, above), but on this corpus the
+      saving does not survive into wall time.
+
+    RETRACTION (CLAUDE.md Sec.11). An earlier run of this same panel reported
+    ``on - off`` = -0.230 s/run (sd 0.734, total -7.82 s), of which 2.89 s was
+    attributed to ``contvar`` and 0.77 s to ``tls2``. That measurement is
+    withdrawn on two counts. It was taken against a baseline on the #75
+    JAX-removal branch rather than ``main``, so it did not measure the change
+    being shipped; and the ``contvar`` component was an artifact — that
+    instance's *baseline* is bimodal (11.23 s vs 8.53 s across two reps of the
+    main-based panel), so the "saving" was baseline spread read as a flag
+    effect. The verdict it supported (stays OFF) is unchanged and now rests on
+    a stronger footing: the flag shows no benefit at all, rather than a
+    benefit concentrated in 2 of 17 instances.
 
     What would settle it: a load-gated panel at several time limits over a corpus
-    where the fallback duplicates the probe more often than 2-of-17. Until then
-    the duplicate solve is a known, measured, opt-in cost rather than a silent
-    default change."""
+    where the fallback duplicates the probe more often than it does here. Until
+    then the duplicate solve is a known, measured, opt-in cost rather than a
+    silent default change."""
 
     rlt1_root_bound: bool = field(
         default_factory=lambda: _env_flag("DISCOPT_RLT1_ROOT_BOUND", default=False)

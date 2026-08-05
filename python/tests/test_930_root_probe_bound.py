@@ -148,17 +148,26 @@ def test_fallback_merges_the_probe_bound_by_max_and_only_on_box_equality():
 # measured -141697 in 2/5 reps under one load and -64473 in 3/3 under another. A
 # test pinned to 10 s would pass on the pre-fix tree most of the time and so prove
 # nothing. At 8 s the budget is gone by the time the probe finishes, the pre-fix
-# fallback is skipped entirely for want of remaining time, and the defect is
-# unconditional (interleaved A/B, marker-asserted on both trees):
+# fallback is skipped entirely for want of remaining time, and the defect shows
+# up in every rep. Interleaved A/B at 8 s against ``main`` (cc9b1062), marker
+# asserted present/absent on each tree, 3 reps per arm:
 #
-#     limit  pre-fix bound          post-fix bound         pre / post wall
-#     6 s    None, -141697          -141697, -141697       10.61,6.74 / 6.49,6.11
-#     8 s    None, None             -64473.44, -64473.44   11.08,11.42 / 10.48,10.10
+#     arm       reported bound                      wall (mean, sd)
+#     main      -141697.43,  None,  -141697.43      8.89 s, sd 0.54
+#     this fix  -64473.44 x 3                       9.51 s, sd 0.01
 #
-# So at 8 s the solver had PROVED -64473.44 inside the budget and then reported no
-# dual bound whatsoever — the #138 goal ("never report bound=None") violated by the
-# very path that exists to uphold it. Recovering it costs no wall time; it is
-# already paid for.
+# Two distinct failures in three baseline reps: one where the bound is 2.2x looser
+# than one already proved, and one where the solver had PROVED -64473.44 inside the
+# budget and then reported no dual bound whatsoever — the #138 goal ("never report
+# bound=None") violated by the very path that exists to uphold it. The fix makes
+# the report deterministic at the proved value. Recovering it costs no wall time;
+# it is already paid for. (The +0.63 s paired difference is the baseline's own
+# bimodality: its two fast reps are the degenerate ones. The same panel shows the
+# fix's arm at sd 0.01 against the baseline's 0.54.)
+#
+# An earlier version of this comment tabulated 6 s and 8 s figures measured against
+# a baseline on the #75 JAX-removal branch rather than main; those are withdrawn
+# and replaced by the table above (CLAUDE.md §11).
 _TL_S = 8.0
 
 

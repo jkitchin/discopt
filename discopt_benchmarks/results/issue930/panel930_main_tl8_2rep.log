@@ -1,0 +1,59 @@
+# panel930: 17 non-closing + 5 closing, TL=8.0s, 2 rep(s), arms=('base', 'off', 'on')
+[r0  1/17] 4stufen          min base=20712.174649175664 off=20712.174649175664 on=20712.174649175664 | wall  8.49/ 8.39/ 8.57  base->off:= off->on:=
+[r0  2/17] bchoco06         max base=1.0000000000010898 off=1.0000000000001252 on=1.0000000000001252 | wall  8.62/ 8.61/ 8.62  base->off:= off->on:=
+[r0  3/17] bchoco07         max base=0.9999909483405423 off=0.9999909483405423 on=0.9999909483405423 | wall  9.04/ 8.97/ 9.14  base->off:= off->on:=
+[r0  4/17] bchoco08         max base=1.0000000000038425 off=1.0000000000038425 on=1.0000000000038425 | wall  8.32/ 8.71/ 8.41  base->off:= off->on:=
+[r0  5/17] beuster          min base=6352.998345044135 off=6352.998345044135 on=6352.998345044135 | wall  8.59/ 8.77/ 8.80  base->off:= off->on:=
+[r0  6/17] casctanks        min base=-90.1786232975983 off=-90.1786232975983 on=-90.1786232975983 | wall 13.37/13.90/13.65  base->off:= off->on:=
+[r0  7/17] clay0303hfsg     min base=None off=None on=None | wall  8.51/ 8.42/ 8.42  base->off:= off->on:=
+[r0  8/17] contvar          min base=171244.81148782672 off=171244.81148782672 on=171244.81148782672 | wall 11.23/ 8.38/ 8.41  base->off:= off->on:=
+[r0  9/17] hda              min base=None off=-64473.442402437024 on=-64473.442402437024 | wall  8.50/ 8.58/ 9.48  base->off:gained off->on:=
+[r0 10/17] heatexch_gen1    min base=43312.4999999841 off=43312.4999999841 on=43312.4999999841 | wall  8.70/ 8.73/ 8.81  base->off:= off->on:=
+[r0 11/17] heatexch_gen2    min base=555767.7902857198 off=555767.7902857271 on=555767.7902857271 | wall  8.42/ 8.45/ 8.42  base->off:= off->on:=
+[r0 12/17] heatexch_gen3    min base=None off=None on=None | wall 10.99/10.50/10.52  base->off:= off->on:=
+[r0 13/17] nvs05            min base=3.5424874432304425 off=3.5424874432304425 on=3.5424874432304425 | wall  8.31/ 8.31/ 8.43  base->off:= off->on:=
+[r0 14/17] tls2             min base=None off=None on=None | wall 19.44/19.55/20.50  base->off:= off->on:=
+[r0 15/17] tspn08           min base=None off=None on=None | wall  6.88/ 6.39/ 6.28  base->off:= off->on:=
+[r0 16/17] tspn10           min base=None off=None on=None | wall  8.52/ 8.55/ 8.58  base->off:= off->on:=
+[r0 17/17] tspn12           min base=None off=None on=None | wall  4.44/ 4.85/ 4.58  base->off:= off->on:=
+[r1  1/17] 4stufen          min base=20712.174649175664 off=20712.174649175664 on=20712.174649175664 | wall  8.54/ 8.52/ 8.52  base->off:= off->on:=
+[r1  2/17] bchoco06         max base=1.0000000000010898 off=1.0000000000001252 on=1.0000000000126652 | wall  8.94/ 8.62/ 8.65  base->off:= off->on:=
+[r1  3/17] bchoco07         max base=0.9999909483405423 off=0.9999909483405423 on=0.9999909483405423 | wall  9.20/ 9.21/ 8.76  base->off:= off->on:=
+[r1  4/17] bchoco08         max base=1.0000000000038425 off=1.0000000000038425 on=1.0000000000038425 | wall  8.53/ 8.37/ 8.36  base->off:= off->on:=
+[r1  5/17] beuster          min base=6352.998345044135 off=6352.998345044135 on=6352.998345044135 | wall  8.57/ 8.57/ 8.57  base->off:= off->on:=
+[r1  6/17] casctanks        min base=-90.1786232975983 off=-90.1786232975983 on=-90.1786232975983 | wall 13.56/12.15/13.44  base->off:= off->on:=
+[r1  7/17] clay0303hfsg     min base=None off=None on=None | wall  8.38/ 8.57/ 8.40  base->off:= off->on:=
+[r1  8/17] contvar          min base=98924.53008645558 off=171244.81148782672 on=171244.81148782672 | wall  8.53/11.23/10.91  base->off:tighter off->on:=
+[r1  9/17] hda              min base=-141697.43348991545 off=-64473.442402437024 on=-64473.442402437024 | wall  9.53/ 8.74/ 8.56  base->off:tighter off->on:=
+[r1 10/17] heatexch_gen1    min base=43312.4999999841 off=43312.4999999841 on=43312.4999999841 | wall  8.87/ 8.75/ 8.84  base->off:= off->on:=
+[r1 11/17] heatexch_gen2    min base=555767.7902857198 off=555767.7902857271 on=555767.7902857271 | wall  8.45/ 8.43/ 8.43  base->off:= off->on:=
+[r1 12/17] heatexch_gen3    min base=None off=None on=None | wall 10.49/11.14/10.51  base->off:= off->on:=
+[r1 13/17] nvs05            min base=3.5424874432304425 off=3.5424874432304425 on=3.5424874432304425 | wall  8.30/ 8.30/ 8.29  base->off:= off->on:=
+[r1 14/17] tls2             min base=None off=None on=None | wall 20.84/19.76/19.89  base->off:= off->on:=
+[r1 15/17] tspn08           min base=None off=None on=None | wall  6.25/ 6.65/ 6.66  base->off:= off->on:=
+[r1 16/17] tspn10           min base=None off=None on=None | wall  8.52/ 8.53/ 8.55  base->off:= off->on:=
+[r1 17/17] tspn12           min base=None off=None on=None | wall  4.80/ 4.50/ 4.75  base->off:= off->on:=
+
+# closers (arms must be inert: identical nodes and objective)
+  ex1221           nodes={'base': 5, 'off': 5, 'on': 5} obj={'base': 7.667180068813135, 'off': 7.667180068813135, 'on': 7.667180068813135} OK
+  ex1224           nodes={'base': 5, 'off': 5, 'on': 5} obj={'base': -0.9434704942820806, 'off': -0.9434704942820806, 'on': -0.9434704942820806} OK
+  ex14_1_9         nodes={'base': 3, 'off': 3, 'on': 3} obj={'base': -1.9775220540513224e-16, 'off': -1.9775220540513224e-16, 'on': -1.9775220540513224e-16} OK
+  nvs11            nodes={'base': 55, 'off': 55, 'on': 55} obj={'base': -431.0000000000085, 'off': -431.0000000000085, 'on': -431.0000000000085} OK
+  st_miqp1         nodes={'base': 15, 'off': 15, 'on': 15} obj={'base': 280.9999999906497, 'off': 280.9999999906497, 'on': 280.9999999906497} OK
+
+# base->off  LOST=0 []
+# base->off  gained=1 ['hda (None -> -64473.4)']
+# base->off  looser=0 []
+# base->off  tighter=2 ['contvar (98924.5 -> 171245)', 'hda (-141697 -> -64473.4)']
+# base->off  cert_regressions=0 []
+# off->on    LOST=0 []
+# off->on    gained=0 []
+# off->on    looser=0 []
+# off->on    tighter=0 []
+# off->on    cert_regressions=0 []
+# UNSOUND        : 0 []
+# CLOSER DRIFT   : 0 []
+# wall base : n=34 total= 320.68s mean= 9.43s sd= 3.25
+# wall off  : n=34 total= 318.11s mean= 9.36s sd= 3.13
+# wall on   : n=34 total= 319.73s mean= 9.40s sd= 3.26
+# EXECUTED ASSERTION COUNTS: {'invariant': 6, 'oracle': 11, 'pair_base_off': 21, 'pair_off_on': 22, 'closer_cmp': 5}

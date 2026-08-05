@@ -4,8 +4,11 @@
     off     #930 with DISCOPT_ROOT_PROBE_SEEDS_FALLBACK unset  (unconditional half)
     on      #930 with DISCOPT_ROOT_PROBE_SEEDS_FALLBACK=1      (flagged half)
 
-The recorded run used 861200e7 as the baseline; see
-``discopt_benchmarks/results/issue930/``.
+The recorded run used ``main`` at cc9b1062 as the baseline; see
+``discopt_benchmarks/results/issue930/panel930_main_tl8_2rep.{json,log}``.
+An earlier run of this panel used a baseline on the #75 JAX-removal branch
+instead, which is not the change being shipped; its numbers are withdrawn and
+are not vendored here (see the retraction in ``SolverTuning``).
 
 Two separate questions, deliberately not conflated:
 
