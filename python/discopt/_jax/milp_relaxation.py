@@ -255,6 +255,11 @@ class MilpRelaxationResult:
 def _lp_warm_deadline_enabled() -> bool:
     """Honour the caller's ``time_limit`` on the warm pure-LP node path.
 
+    Tracking issue: **#928**. (This helper's panel script and companion test are
+    named ``issue917_*`` / ``test_917_*`` for historical reasons only — #917 is a
+    different, closed issue about the #844 LP-spatial reserve. Do not follow that
+    number.)
+
     **The defect it fixes.** ``MilpRelaxationModel.solve`` takes a ``time_limit``,
     but its default ``backend="simplex"`` pure-LP fast path dropped it on the floor:
     ``_solve_lp_warm`` / ``_solve_lp_warm_equilibrated`` / ``solve_lp_warm_std`` took
@@ -292,10 +297,54 @@ def _lp_warm_deadline_enabled() -> bool:
       82.1 / 79.2 / 175.6 s. Cells over budget went 15 -> 18.
 
     So it stays OFF: cert-clean is necessary, not sufficient (CLAUDE.md §5 bar 2, the
-    ``DISCOPT_CUT_INHERIT`` rule). What would settle it is a load-gated, multi-rep
-    panel over the instances where the deadline actually binds — on the corpus average
-    the effect is diluted by the ~50 instances that finish far inside 15 s and are
-    bit-identical either way.
+    ``DISCOPT_CUT_INHERIT`` rule).
+
+    **The settling experiment has now been run, and it does not graduate the flag.**
+    The paragraph here used to say what would settle it: *a load-gated, multi-rep panel
+    over the instances where the deadline actually binds* — the corpus average being
+    diluted by the ~50 instances that finish far inside the budget and are bit-identical
+    either way. That panel is ``issue917_lp_warm_deadline_panel.py --instances`` over the
+    17 non-closing in-repo instances, 3 reps at a 20 s budget, load-gated per CLAUDE.md §9
+    (``scratchpad/issue917_bind.log``):
+
+    ====  ============  ===========  ==========  =========
+    rep   overrun OFF   overrun ON   cells OFF   cells ON
+    ====  ============  ===========  ==========  =========
+    1     30.9 s        27.7 s       7           5
+    2     21.3 s        27.9 s       5           6
+    3     29.6 s        35.3 s       7           5
+    ====  ============  ===========  ==========  =========
+
+    All three reps ``CERT_CLEAN=True`` (0 unsound / 0 lost_bound / 0 cert_regressions /
+    0 lost_incumbents), so bar 1 holds on the binding subset too. Bar 2 does not: the
+    paired ON-OFF deltas are -3.2 / +6.6 / +5.7 s — they *flip sign*, mean +3.0 s with
+    sd 5.3 s, and the OFF arm alone spans 21.3-30.9 s. Concentrating the panel on the
+    subset where the deadline binds did not resolve the effect out of the noise; if
+    anything it leans the wrong way. **The flag stays OFF, and this is now a measured
+    negative rather than an open question.**
+
+    Two by-products of that run are worth keeping. First, ``nvs05`` and
+    ``clay0303hfsg`` reported ``tighter_bound``/``looser_bound`` in *opposite
+    directions between reps at identical flag state* — their bounds are
+    timing-nondeterministic, so a single-rep bound delta on either is not evidence of
+    anything. Second, on ``hda`` at ``time_limit=10`` (5 reps per arm,
+    ``scratchpad/hda10.py``) the flag buys wall consistency at the price of the bound:
+
+    ==============  ==================  ================================
+    WARM_DEADLINE   wall                dual bound
+    ==============  ==================  ================================
+    0 (default)     12.03 s ± 1.23      -64473 in 3/5 reps, -141697 in 2
+    1               11.14 s ± 0.04      -141697 in 5/5 reps
+    ==============  ==================  ================================
+
+    The OFF arm is bimodal because the #138 fallback's separated-relaxation phase is
+    what overruns: when its grant is already spent by the time a first bound is in
+    hand, ``_fb_stop`` returns the weak bound at ~10.7 s; when the grant still has room
+    the phase starts and then ignores the budget passed to it — *this* drop — for a
+    full ~4 s, reaching the full bound at ~12.9 s. Turning the flag on clamps that
+    phase, which is why the wall tightens to ±0.04 s and why the bound is the weak one
+    every time. Trading a rigorous bound for punctuality is the wrong trade under
+    CLAUDE.md §1, which is the second, independent reason the flag is not the fix here.
 
     **What it took to become cert-clean** — the first two cuts were NOT, and both
     failures are worth keeping (CLAUDE.md §11):

@@ -1472,15 +1472,29 @@ _CONVEX_OBJ_PSD_TOL = 1e-6
 _LAZY_RESEP_STALL_WINDOW = 24
 _LAZY_RESEP_PROBE_BUDGET = 8
 _LAZY_RESEP_GLB_EPS = 1e-9
-# Floor on the time budget handed to the end-of-solve root-relaxation fallback
-# bound (issue #138). On a hard nonconvex minimize the B&B loop can consume the
-# entire `time_limit` and exit uncertified, leaving no time for the rigorous
-# root MILP-relaxation bound — so a sound dual bound is dropped to None. This
-# floor lets the fallback still run a small, bounded solve so an uncertified exit
-# reports a finite *sound* bound instead of None. It is paid only when the search
-# produced no usable bound at all (never on a clean/certified solve), and the
-# fallback's own internal budget (~10% of this) keeps the overrun small.
-_ROOT_FALLBACK_FLOOR_S = 3.0
+# Wall-clock slice WITHHELD FROM the search and spent, inside ``time_limit``, on
+# the rigorous root MILP-relaxation fallback bound (issue #138) whenever the tree
+# holds no finite global bound of its own.
+#
+# This used to be the opposite: a post-deadline *grant*. On a hard nonconvex
+# minimize the search consumed the whole limit and exited with no bound, and the
+# fallback was then handed 3.0 s of fresh budget past an already-spent deadline —
+# so ``solve(time_limit=T)`` returned at ``T + 3`` or worse. Measured on ``hda``:
+# the fallback was entered 1.95 s past a 5 s deadline and ran a further 4.25 s
+# (wall 11.75 s), and at a 60 s limit it was entered at 60.16 s and ran 4.04 s
+# against its 3.0 s grant. The claim the old comment made — "the fallback's own
+# internal budget keeps the overrun small" — was false by 32-35% at the grant it
+# was describing, and the whole grant sat outside the contract regardless.
+#
+# Withholding the same slice up front costs the search nothing it was using: the
+# reserve is only held while the tree's global lower bound is non-finite, which
+# is exactly the state in which the fallback is the sole bound producer, and it
+# is released the moment the tree has a bound of its own (an instance that
+# produces a bound sees a byte-identical deadline). The fallback is anytime with
+# respect to its grant — measured on ``hda``: 0.25 s -> -141697 (valid, weak),
+# 2 s -> -64473 (the full bound) — so a smaller pre-deadline slice buys a weaker
+# but still rigorous bound rather than no bound at all.
+_ROOT_FALLBACK_RESERVE_S = 3.0
 # Multistart runs 3 starts per nonconvex node (warm/midpoint/random) and keeps
 # the best — better incumbents on nonconvex models, but ~3x the node-solve cost.
 # Off by default; flip to opt in (or pass multistart=True to _solve_batch_pounce).
@@ -4109,13 +4123,24 @@ def _root_relaxation_lower_bound(
     # (fewer cuts), never falsifies one, so ``incorrect_count`` is unaffected.
     # Corpus-measured bound-neutral: no in-repo instance both spends the whole
     # grant before a checkpoint and has a candidate in hand, so no bound changes.
-    _fb_t0 = time.perf_counter()
+    # The fallback's own grant as an ABSOLUTE deadline, and the single source of
+    # truth for it: rule 2 (``_fb_stop``), the separated-relaxation clamp
+    # (``_fb_left``) and the relaxation build deadlines below all read this one
+    # value, which the three of them used to recompute independently. Kept in the
+    # ``<clock>() + <budget>`` form on purpose — that is one of the two
+    # constructions ``test_912_wall_budget_inventory.py`` scans for, so this gate
+    # stays visible to that ratchet instead of hiding inside a helper.
+    _fb_deadline = time.perf_counter() + max(0.0, float(time_limit))
+
+    def _fb_left() -> float:
+        """Seconds remaining of the fallback's OWN grant (rule 2's anchor)."""
+        return max(0.0, _fb_deadline - time.perf_counter())
 
     def _fb_stop(have: "list[float]") -> bool:
         """True when this phase should decline to *start* another optional
         tightening: the fallback's own grant is spent AND a valid bound is
         already in hand (rules 1 and 2 above)."""
-        return bool(have) and (time.perf_counter() - _fb_t0) >= max(0.0, float(time_limit))
+        return bool(have) and _fb_left() <= 0.0
 
     # Issue #694 anytime build (opt-in, ``DISCOPT_ANYTIME_ROOT_BUILD``, default off).
     # When on, the SEPARATED relaxation build (``sep`` below) stops adding constraint
@@ -4155,10 +4180,10 @@ def _root_relaxation_lower_bound(
     _base_deadline_on = getattr(_tuning(), "root_build_deadline", False)
     _build_deadline: Optional[float] = None
     if getattr(_tuning(), "anytime_root_build", False) or _base_deadline_on:
-        _build_deadline = _fb_t0 + max(0.0, float(time_limit))
+        _build_deadline = _fb_deadline
     _base_build_deadline: Optional[float] = None
     if _base_deadline_on:
-        _base_build_deadline = _fb_t0 + max(0.0, float(time_limit))
+        _base_build_deadline = _fb_deadline
 
     try:
         terms = classify_nonlinear_terms(model)
@@ -4336,8 +4361,20 @@ def _root_relaxation_lower_bound(
             try:
                 from discopt._jax.mccormick_lp import MccormickLPRelaxer
 
+                # Rule 1 vs rule 2, applied to the SOLVE budget and not just to
+                # whether the phase starts. With no candidate in hand this is the
+                # sole bound producer and keeps the full slice. Once ``plain`` (or a
+                # strengthened candidate) has landed it is optional tightening, and
+                # it must fit in what is genuinely LEFT of the grant — a phase that
+                # merely starts before the checkpoint could otherwise run arbitrarily
+                # past it (measured on hda at a 2.0s grant: this solve started at
+                # 1.62s and ran 2.19s, so the fallback took 4.05s, 2.0x its grant).
+                # A solve stopped on its own deadline still reports the sound
+                # Neumaier-Shcherbina floor via ``_time_limit_result``, so the clamp
+                # weakens the candidate at worst — it never invalidates one.
+                _sep_budget = min(budget, _fb_left()) if _have else budget
                 node_res = MccormickLPRelaxer(model).solve_at_node(
-                    root_lb, root_ub, time_limit=budget, build_deadline=_build_deadline
+                    root_lb, root_ub, time_limit=_sep_budget, build_deadline=_build_deadline
                 )
                 if node_res.lower_bound is not None and np.isfinite(node_res.lower_bound):
                     sep_bound = float(node_res.lower_bound)
@@ -5014,6 +5051,16 @@ def solve_model(
         box or fewer cuts — never makes it unsound.
         """
         return _remaining_budget() <= floor
+
+    # Slice held back from the search for the root-relaxation fallback so that
+    # bound recovery happens INSIDE ``time_limit`` (see ``_ROOT_FALLBACK_RESERVE_S``).
+    # Capped at a fraction of the limit so a short budget is not dominated by the
+    # reserve, and zero for a non-finite limit (nothing to honor).
+    _rr_reserve_s = (
+        min(_ROOT_FALLBACK_RESERVE_S, 0.30 * float(time_limit))
+        if math.isfinite(float(time_limit))
+        else 0.0
+    )
 
     # Reset the per-solve convexity-classification memo (a previous solve, or an
     # IIS feasibility probe, may have cached a verdict for a different constraint
@@ -7385,31 +7432,43 @@ def solve_model(
     # completion (never truncated mid-flight, so casctanks-class keeps its dual
     # bound), the reported status is ``time_limit`` (never a certified/optimal
     # claim), and skipping the search only ever *weakens* a still-valid bound —
-    # never falsifies it. When budget remains, ``_deadline_exhausted()`` is False and
-    # this is byte-identical to the pre-fix path (the search runs as before).
-    if _deadline_exhausted():
+    # never falsifies it. When budget remains, this is byte-identical to the pre-fix
+    # path (the search runs as before).
+    #
+    # The trigger is the fallback RESERVE, not a bare floor: once the remaining
+    # budget is down to the slice the fallback needs, starting a search that cannot
+    # finish would spend the reserve and leave the fallback to run past the deadline
+    # (the old post-deadline grant). Handing the remainder to the fallback here keeps
+    # the whole solve inside ``time_limit``. Measured on ``hda`` at a 5 s limit: the
+    # mandatory root work (2.0 s Rust presolve + 1.3 s convexity classification +
+    # ~3.4 s root McCormick LP) alone exceeds the budget, so this is the arm that
+    # runs, and it returns a valid (weaker) bound on time instead of the full bound
+    # 6.75 s late.
+    if _deadline_exhausted(_rr_reserve_s):
         from discopt.modeling.core import ObjectiveSense as _ObjSenseSC
 
         _rr_bound: Optional[float] = None
         if model._objective is not None:
             _is_maximize = model._objective.sense == _ObjSenseSC.MAXIMIZE
-            # Same bounded budget the post-search fallback grants once the limit is
-            # spent: the ``_ROOT_FALLBACK_FLOOR_S`` floor recovers a bound instead of
-            # None while keeping the overrun to a single bounded op.
-            _rr_budget = max(_remaining_budget(), _ROOT_FALLBACK_FLOOR_S)
-            try:
-                _rr_val = _root_relaxation_lower_bound(
-                    model,
-                    _root_lb_snapshot,
-                    _root_ub_snapshot,
-                    _rr_budget,
-                    psd_cuts=psd_cuts,
-                )
-            except Exception as _rr_exc:  # pragma: no cover - defensive
-                logger.debug(
-                    "root-relaxation fallback (deadline short-circuit) failed: %s", _rr_exc
-                )
-                _rr_val = None
+            # Whatever is genuinely left, and no more. A zero/negative remainder
+            # means the budget is gone; the fallback then returns nothing rather
+            # than manufacturing time it was not given.
+            _rr_budget = _remaining_budget()
+            _rr_val = None
+            if _rr_budget > 0.0:
+                try:
+                    _rr_val = _root_relaxation_lower_bound(
+                        model,
+                        _root_lb_snapshot,
+                        _root_ub_snapshot,
+                        _rr_budget,
+                        psd_cuts=psd_cuts,
+                    )
+                except Exception as _rr_exc:  # pragma: no cover - defensive
+                    logger.debug(
+                        "root-relaxation fallback (deadline short-circuit) failed: %s", _rr_exc
+                    )
+                    _rr_val = None
             if _rr_val is not None and np.isfinite(_rr_val):
                 # A lower bound on the internally minimized objective: for a MINIMIZE
                 # it is the dual lower bound directly; for a MAXIMIZE the builder
@@ -8915,8 +8974,46 @@ def solve_model(
     # incumbent. 0.0 (the default) reproduces the pre-#917 deadline exactly.
     _incumbent_extension_s = max(0.0, float(incumbent_time_extension))
     _incumbent_extension_taken = 0.0
+    # ``_ROOT_FALLBACK_RESERVE_S``: once released, the search owns the whole limit
+    # and the deadline below is exactly the pre-reserve one. The release is a latch
+    # (a finite tree bound never becomes non-finite) and it is only evaluated in the
+    # last ``_rr_reserve_s`` seconds of the budget, so a solve that finishes earlier
+    # -- or one with no finite limit -- never reads ``tree.stats()`` for it at all.
+    _rr_reserve_released = _rr_reserve_s <= 0.0
+    # Set when the loop is cut short to hand the reserve to the fallback. The
+    # search is then INTERRUPTED, not exhausted, and the status decision must say
+    # so — a break with ``wall_time < time_limit`` and an unfinished tree otherwise
+    # falls through to the certified ``"infeasible"`` branch, i.e. a feasible model
+    # declared infeasible (measured: hda at a 10 s limit and casctanks at 5 s both
+    # reported ``infeasible`` on the first cut of this change).
+    _rr_reserve_yield = False
     while True:
         elapsed = time.perf_counter() - t_start
+        if not _rr_reserve_released and elapsed >= time_limit - _rr_reserve_s:
+            try:
+                _rr_glb = float(tree.stats()["global_lower_bound"])
+            except Exception:  # pragma: no cover - defensive
+                _rr_glb = -np.inf
+            if np.isfinite(_rr_glb) or tree.is_finished():
+                # Either the tree has a dual bound of its own (the fallback will not
+                # run) or it is exhausted and the natural ``n_batch == 0`` exit below
+                # owns the termination — including a legitimately certified
+                # ``infeasible``, which yielding here would downgrade. The reserve is
+                # the search's in both cases.
+                _rr_reserve_released = True
+            else:
+                # Bound-less at the reserve boundary with an open frontier: the
+                # root-relaxation fallback is the only remaining bound producer and
+                # it must run INSIDE ``time_limit``. Stop the search and leave it the
+                # slice. Stopping early only ever weakens a still-valid bound (fewer
+                # nodes proved), never falsifies one.
+                logger.debug(
+                    "search yielding %.2fs to the root-relaxation fallback "
+                    "(tree bound still non-finite at the reserve boundary)",
+                    _rr_reserve_s,
+                )
+                _rr_reserve_yield = True
+                break
         if elapsed >= time_limit:
             if _incumbent_extension_taken == 0.0:
                 _extended = _extend_budget_for_incumbent(
@@ -11662,8 +11759,8 @@ def solve_model(
                     _gap_certified = True
                     _taint_rig_bound_internal = _rig_int
 
-        search_closed = _gap_converged(tree, gap_tolerance) or (
-            tree.is_finished() and not _bound_unresolved
+        search_closed = not _rr_reserve_yield and (
+            _gap_converged(tree, gap_tolerance) or (tree.is_finished() and not _bound_unresolved)
         )
         if search_closed and _gap_certified:
             status = "optimal"
@@ -11679,7 +11776,12 @@ def solve_model(
             # describes an unexplored search, not a proven optimum — a certified
             # exit here would claim optimality with no solution at all.
             _gap_certified = False
-        elif wall_time >= time_limit:
+        elif wall_time >= time_limit or _rr_reserve_yield:
+            # ``_rr_reserve_yield``: the search was cut short *by the time budget*
+            # (the tail of it was reassigned to the root-relaxation fallback), so
+            # the tree is NOT exhausted and neither infeasibility nor optimality was
+            # proven. "time_limit" is the honest reason; falling through to the
+            # ``infeasible`` branch below would be a false certificate.
             status = "time_limit"
             _gap_certified = False
         elif _nonrigorous_fathom:
@@ -11857,19 +11959,15 @@ def solve_model(
     # the taint floor (tanksize: floor 0.847 vs root relaxation 0.868). Run it in
     # that case too and keep the tighter of the two rigorous bounds.
     _rr_needed = bound_val is None or not np.isfinite(bound_val) or _bound_from_taint_recovery
+    # Whatever is genuinely left of ``time_limit``, and no more. The search loop
+    # above withholds ``_ROOT_FALLBACK_RESERVE_S`` precisely when it is bound-less,
+    # so in the case this fallback exists to serve the remainder is positive and the
+    # bound is recovered INSIDE the contract. When it is not — the mandatory root
+    # work alone outran the limit — the honest answer is the weaker bound the search
+    # already has (possibly none), not a fresh grant of time the caller did not give.
     _rr_remaining = time_limit - (time.perf_counter() - t_start)
-    if _rr_needed and _rr_remaining <= 0.0:
-        # B&B consumed the whole limit and surfaced no bound. Spend a small bounded
-        # slice on the rigorous root-relaxation fallback anyway so an uncertified
-        # exit reports a sound dual bound instead of None (issue #138). Only ever
-        # reached when the search produced nothing usable; the floor's own ~10%
-        # internal budget keeps the wall-time overrun small.
-        _rr_remaining = _ROOT_FALLBACK_FLOOR_S
     if _rr_needed and _rr_remaining > 0.0:
         _is_maximize = model._objective.sense == ObjectiveSense.MAXIMIZE
-        # Budget the fallback to the time actually left: it runs *after* the B&B
-        # loop already consumed the limit, so passing the full ``time_limit`` here
-        # would let it overrun by a second whole budget.
         _rr = _root_relaxation_lower_bound(
             model, _root_lb_snapshot, _root_ub_snapshot, _rr_remaining, psd_cuts=psd_cuts
         )
