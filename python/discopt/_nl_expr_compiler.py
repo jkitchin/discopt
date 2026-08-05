@@ -214,6 +214,57 @@ def _abs(E: Any, a: Any) -> Any:
     return E.max(a, -a)
 
 
+#: Argument floor for ``entropy``/``centropy``, matching `_jax/dag_compiler.py`
+#: (``jnp.maximum(x, 1e-300)``). It regularizes the ``x -> 0+`` limit: the true
+#: derivative of ``x*log(x)`` at 0 is ``-inf``, and both backends deliberately
+#: report a large finite number instead so a solver evaluating a box pinned at
+#: ``[0, 0]`` does not propagate a non-finite into a bound.
+_XLOG_FLOOR = 1e-300
+
+
+def _log1p(E: Any, a: Any) -> Any:
+    """``log1p(a)`` accurately for small ``|a|``; the tape has no ``log1p`` opcode.
+
+    ``log(1 + a)`` loses every significant digit once ``a`` falls below the
+    rounding gap of 1.0: measured, ``a = 1e-17`` returns exactly ``0.0`` where
+    ``jnp.log1p`` returns ``1e-17``. This is Kahan's compensated form — with
+    ``u = 1 + a`` computed in floating point, ``log(u) / (u - 1)`` is the
+    correction factor for the representation error in ``u``, and it is accurate
+    precisely where the naive form is not.
+
+    ``select`` is a data-flow node: BOTH arms are evaluated and both contribute
+    partials to the reverse sweep, so it is not enough for the selected arm to be
+    finite — each arm must be fed an argument inside its own safe range. Two
+    guards, both load-bearing, both from a measurement:
+
+    * ``d_safe`` is never zero, so the correction never forms ``0/0``.
+    * the Kahan arm sees ``a_small``, clamped to ``[-0.5, 0.5]``. Applying the
+      correction at large ``a`` overflows in the *derivative*, not the value: the
+      quotient rule squares ``d``, and at ``a = 1e300`` that term is ``1e600 ->
+      inf``, which silently drops the second term and returned a gradient of
+      6.918e-298 against a true ``1e-300``. Bounding the arm's argument bounds
+      ``d <= 1.5``, so ``d**2`` cannot overflow.
+
+    Outside the small range the naive ``log(1 + a)`` is already accurate, and it
+    is likewise fed a constant when it is not the selected arm.
+    """
+    one = E.const_(1.0)
+    small = E.compare("<", _abs(E, a), E.const_(0.5))
+
+    a_small = E.select(small, a, E.const_(0.0))
+    u = one + a_small
+    at_one = E.compare("==", u, one)
+    d_safe = E.select(at_one, one, u - one)
+    # `u == 1` means `a` vanished entirely in the addition, so `log(u)` is 0 and
+    # the correction would return 0 rather than `a`. That arm returns `a_small`
+    # unchanged -- which IS log1p to full precision once `a` is below the
+    # rounding gap of 1.0.
+    kahan = E.select(at_one, a_small, a_small * E.log(u) / d_safe)
+
+    naive = E.log(E.select(small, E.const_(2.0), one + a))
+    return E.select(small, kahan, naive)
+
+
 def _sign(E: Any, a: Any) -> Any:
     """``sign(a)`` via nested selects; zero maps to 0.0 as in ``jnp.sign``.
 
@@ -272,16 +323,34 @@ def _lower_function(expr: FunctionCall, E: Any, args: list) -> Any:
         return _sign(E, arg0())
     if name == "log1p":
         _require(args, 1, name)
-        return E.log(E.const_(1.0) + arg0())
+        return _log1p(E, arg0())
     if name == "log2":
         _require(args, 1, name)
         return E.log(arg0()) * E.const_(1.0 / math.log(2.0))
     if name == "sigmoid":
+        # Deliberately left as the naive form. It cannot overflow to a non-finite:
+        # as `a -> -inf`, `exp(-a) -> +inf` and `1/(1+inf) -> 0`, which is the
+        # correct limit, and the reverse sweep returns 0 rather than `inf/inf`
+        # (measured over -1e300..1e300: zero non-finite values, zero non-finite
+        # gradients). It is also *more* accurate than the authority in the upper
+        # tail -- at `a = 40` the tape's derivative is 4.248e-18 where
+        # `jax.nn.sigmoid` underflows to 0.0. Rewriting it to
+        # `0.5*(1 + tanh(a/2))` would trade that away for catastrophic
+        # cancellation (`tanh(-20)` rounds to exactly -1.0, giving 0.0 for a
+        # value whose true magnitude is 4e-18). Do not "harden" this one.
         _require(args, 1, name)
         return E.const_(1.0) / (E.const_(1.0) + E.exp(-arg0()))
     if name == "softplus":
+        # `log(1 + exp(a))` OVERFLOWS: `exp(710)` is `inf`, so softplus(745)
+        # returned `inf` where the true value is 745 (measured: 2 non-finite
+        # values over the sampled domain). The shifted form never exponentiates
+        # a positive argument, so `exp` is confined to (0, 1] and cannot
+        # overflow. It also recovers the lower tail exactly -- at `a = -300`
+        # this returns 5.148e-131, matching `jnp.logaddexp`, where the naive
+        # form collapsed to 0.0.
         _require(args, 1, name)
-        return E.log(E.const_(1.0) + E.exp(arg0()))
+        a = arg0()
+        return E.max(a, E.const_(0.0)) + _log1p(E, E.exp(-_abs(E, a)))
     if name == "entropy":
         # x*log(x) -- discopt's DAG semantics, NOT the information-theory
         # convention -x*log(x). The authority is `_jax/dag_compiler.py`, which
@@ -290,12 +359,23 @@ def _lower_function(expr: FunctionCall, E: Any, args: list) -> Any:
         # cost a silent factor of -1 (reldiff 2.0) that no corpus instance could
         # have caught -- `.nl` has no entropy opcode, so 316 MINLPLib instances
         # exercise this line zero times.
+        #
+        # The floor is part of the semantics, not a nicety. Without it, `x = 0`
+        # gives `0 * log(0) = 0 * -inf = nan` for the value and `-inf` for the
+        # derivative, where the authority returns -0.0 and -690.78. That point is
+        # REACHABLE: `factorable_reform._try_entropy` refuses only `lo < 0.0`, so
+        # a box whose lower bound is exactly 0 is admitted by design. The comment
+        # above already named `jnp.maximum(x, 1e-300)` as the authority; the sign
+        # was carried across in `08e1e0a1` and the clamp was not.
         _require(args, 1, name)
-        return arg0() * E.log(arg0())
+        return arg0() * E.log(E.max(arg0(), E.const_(_XLOG_FLOOR)))
     if name == "centropy":
-        # x*log(x/y), matching dag_compiler's GAMS centropy.
+        # x*log(x/y), matching dag_compiler's GAMS centropy -- including the same
+        # floor on the NUMERATOR only (`x * log(max(x, 1e-300) / y)`). Same
+        # defect and same fix as entropy above: measured 3 non-finite values and
+        # 4 non-finite gradients over the sampled domain before the clamp.
         _require(args, 2, name)
-        return args[0] * E.log(args[0] / args[1])
+        return args[0] * E.log(E.max(args[0], E.const_(_XLOG_FLOOR)) / args[1])
     if name == "signpower":
         # sign(x) * |x|**p -- the standard smooth-away-from-zero signed power.
         _require(args, 2, name)

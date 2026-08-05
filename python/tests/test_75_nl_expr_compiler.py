@@ -22,6 +22,7 @@ relative value drift 2.51e-16 and gradient drift 6.64e-15, with zero unsupported
 nodes encountered.
 """
 
+import math
 import time
 from pathlib import Path
 
@@ -29,6 +30,7 @@ import discopt.modeling as dm
 import numpy as np
 import pytest
 from discopt import Model
+from discopt._jax.dag_compiler import compile_expression
 from discopt._nl_expr_compiler import UnsupportedForTape, compile_to_nl_expr, try_compile
 from discopt.modeling.core import Constant, FunctionCall
 
@@ -302,3 +304,151 @@ def test_flat_index_order_matches_the_jax_path():
     tape = compile_to_nl_expr(expr, m)
     grad = np.asarray(tape.gradient([0.5, 0.5, 0.5]), dtype=float)
     np.testing.assert_allclose(grad, [2.0, 30.0, 400.0], rtol=0, atol=1e-12)
+
+
+# --------------------------------------------------------------------------------
+# Numerical hardening of the rewrites
+#
+# The rewrites were verified for correct CALCULUS but never for numerical
+# stability: `test_matches_jax_value_and_gradient` samples `uniform(0.35, 2.4)`,
+# mid-domain, where every naive form agrees with its stabilized JAX counterpart to
+# ~1e-16. A tail sweep found four defects that a mid-domain sample cannot see:
+#
+#   softplus  log(1+exp(a))  -> `exp(710)` is inf, so softplus(745) returned inf
+#   log1p     log(1+a)       -> a=1e-17 returned 0.0 (every digit lost)
+#   entropy   a*log(a)       -> a=0 returned nan, gradient -inf
+#   centropy  a*log(a/b)     -> same, 3 non-finite values / 4 non-finite gradients
+#
+# The entropy/centropy points are REACHABLE: `factorable_reform._try_entropy`
+# refuses only `lo < 0.0`, so a box with lower bound exactly 0 is admitted.
+# --------------------------------------------------------------------------------
+
+# Points that are extreme but strictly inside each operator's mathematical domain,
+# so a non-finite result means an implementation defect and never a domain error.
+_TAIL_POINTS = {
+    "log1p": [-0.9, -1e-17, 0.0, 1e-17, 1e-13, 1e-8, 1.0, 700.0, 1e300],
+    "sigmoid": [-1e300, -745.0, -300.0, -40.0, 0.0, 40.0, 300.0, 745.0, 1e300],
+    "softplus": [-1e300, -745.0, -300.0, 0.0, 300.0, 710.0, 745.0, 1e300],
+    "entropy": [0.0, 1e-300, 1e-30, 1e-5, 0.5, 1e300],
+    "log2": [1e-300, 1e-8, 1.0, 1e300],
+    "abs": [-1e300, -1.0, 0.0, 1.0, 1e300],
+    "sign": [-1e300, -1.0, 0.0, 1.0, 1e300],
+}
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("name", sorted(_TAIL_POINTS))
+def test_rewrite_is_finite_wherever_the_authority_is(name):
+    """No rewrite may return nan/inf at a point where `dag_compiler` is finite.
+
+    This is the property the mid-domain test cannot reach. It is asserted only
+    where JAX itself is finite, so a genuine domain edge (`log2(0)`) is not
+    scored as a tape defect.
+    """
+    import jax
+    import jax.numpy as jnp
+
+    m = Model()
+    x = m.continuous("x", lb=-1e309, ub=1e309)
+    expr = {
+        "log1p": lambda v: dm.log1p(v),
+        "sigmoid": lambda v: dm.sigmoid(v),
+        "softplus": lambda v: dm.softplus(v),
+        "entropy": lambda v: FunctionCall("entropy", v),
+        "log2": lambda v: dm.log2(v),
+        "abs": lambda v: abs(v),
+        "sign": lambda v: dm.sign(v),
+    }[name](x)
+
+    tape = compile_to_nl_expr(expr, m)
+    jf = compile_expression(expr, m)
+    jg = jax.grad(lambda xv: jnp.reshape(jf(xv), ()))
+
+    checked = 0
+    for p in _TAIL_POINTS[name]:
+        pt = np.array([float(p)])
+        jv = float(np.asarray(jf(pt)))
+        jgv = float(np.asarray(jg(pt))[0])
+        if not (np.isfinite(jv) and np.isfinite(jgv)):
+            continue  # the authority is non-finite here; nothing to require
+        tv = float(tape.eval([float(p)]))
+        tgv = float(np.asarray(tape.gradient([float(p)]), dtype=float)[0])
+        assert np.isfinite(tv), f"{name}: value {tv} at x={p} where jax gives {jv}"
+        assert np.isfinite(tgv), f"{name}: gradient {tgv} at x={p} where jax gives {jgv}"
+        checked += 2
+
+    # §6: an operator whose every point was skipped would pass vacuously.
+    assert checked >= 6, f"only {checked} finiteness checks ran for {name}"
+
+
+@pytest.mark.unit
+def test_softplus_does_not_overflow_in_the_upper_tail():
+    """`log(1 + exp(a))` overflows for a >~ 710; the shifted form never
+    exponentiates a positive argument. softplus(a) -> a for large a."""
+    m = Model()
+    x = m.continuous("x", lb=-1e309, ub=1e309)
+    tape = compile_to_nl_expr(dm.softplus(x), m)
+
+    for a in (710.0, 745.0, 1e6, 1e300):
+        v = float(tape.eval([a]))
+        assert np.isfinite(v), f"softplus({a}) = {v} (the naive form overflows here)"
+        assert abs(v - a) <= 1e-9 * abs(a), f"softplus({a}) = {v}, expected ~{a}"
+
+    # ...and the lower tail is not sacrificed to get it: softplus(-300) is
+    # exp(-300), which `log(1 + exp(a))` collapsed to 0.0.
+    assert abs(float(tape.eval([-300.0])) - math.exp(-300.0)) <= 1e-12 * math.exp(-300.0)
+
+
+@pytest.mark.unit
+def test_log1p_keeps_full_precision_for_tiny_arguments():
+    """`log(1 + a)` loses every significant digit once `a` is below the rounding
+    gap of 1.0; log1p(1e-17) must be 1e-17, not 0.0."""
+    m = Model()
+    x = m.continuous("x", lb=-1e309, ub=1e309)
+    tape = compile_to_nl_expr(dm.log1p(x), m)
+
+    for a in (1e-17, 1e-13, 1e-8, -1e-17):
+        v = float(tape.eval([a]))
+        assert abs(v - math.log1p(a)) <= 1e-15 * abs(math.log1p(a)), f"log1p({a}) = {v}"
+
+    # The large-argument arm must stay correct too -- bounding the Kahan arm was
+    # required because the quotient rule squares the denominator, and at a=1e300
+    # that overflowed and returned a gradient of 6.918e-298 against a true 1e-300.
+    g = float(np.asarray(tape.gradient([1e300]), dtype=float)[0])
+    assert abs(g - 1e-300) <= 1e-310, f"log1p'(1e300) = {g}, expected 1e-300"
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("floored", ["entropy", "centropy"])
+def test_xlogx_family_is_regularized_at_zero_like_the_authority(floored):
+    """`x*log(x)` at x=0 is `0 * -inf = nan`, and its gradient is -inf.
+
+    `dag_compiler` floors the log argument at 1e-300 precisely to keep both
+    finite, and the tape must reproduce that: the point is reachable because
+    `factorable_reform._try_entropy` admits a box whose lower bound is exactly 0.
+    The value is the x->0+ limit (-0.0) and the gradient the floored stand-in.
+    """
+    import jax
+    import jax.numpy as jnp
+
+    m = Model()
+    x = m.continuous("x", lb=-1e309, ub=1e309)
+    if floored == "entropy":
+        expr, pt = FunctionCall("entropy", x), [0.0]
+    else:
+        y = m.continuous("y", lb=-1e309, ub=1e309)
+        expr, pt = FunctionCall("centropy", x, y), [0.0, 2.0]
+
+    tape = compile_to_nl_expr(expr, m)
+    jf = compile_expression(expr, m)
+    jg = jax.grad(lambda xv: jnp.reshape(jf(xv), ()))
+
+    tv = float(tape.eval(pt))
+    tg = np.asarray(tape.gradient(pt), dtype=float)
+    jv = float(np.asarray(jf(np.array(pt))))
+    jgv = np.asarray(jg(np.array(pt)), dtype=float)
+
+    assert np.isfinite(tv), f"{floored} value at x=0 is {tv} (nan means the floor is missing)"
+    assert np.all(np.isfinite(tg)), f"{floored} gradient at x=0 is {tg}"
+    assert abs(tv - jv) <= 1e-12, f"{floored} value {tv} vs authority {jv}"
+    np.testing.assert_allclose(tg, jgv, rtol=1e-12, atol=0)
