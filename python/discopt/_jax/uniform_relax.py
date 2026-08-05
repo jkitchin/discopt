@@ -858,7 +858,8 @@ class _Builder:
         ``_TracedEvalFn`` docstring) because the Kelley loop is path-dependent, so
         a different last ulp can change the cut sequence and hence the bound. The
         tape is ~40x tighter than that threshold but not bit-identical, so it
-        stays behind ``DISCOPT_SEPGRAD=tape`` until the CLAUDE.md §5 panel.
+        stayed flag-gated until the CLAUDE.md §5 panel passed both bars. Default
+        ON since ``a2fb90d2``; ``DISCOPT_SEPGRAD=jax`` is the opt-out.
 
         Unlike ``NlProblem``, ``NlExpr`` is not an ``unsendable`` pyclass, so one
         expression is safely shared across the solver's worker threads — verified,

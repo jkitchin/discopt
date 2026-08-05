@@ -8,8 +8,8 @@ PR #922; `main` is untouched until the whole thing verifies end to end.
 |---|---|
 | 0 — layer-time attribution | **done** — `c3a3d648`, `7fc69f7f` |
 | 1 — DAG → `NlExpr` tape translator | **done, not wired in** — `1917a17b`, probe hardening `360a1e69`, three wrong lowerings fixed `08e1e0a1` |
-| 2 — separation tangents → translator | **built, default OFF** — `77dc8db2` (`DISCOPT_SEPGRAD=tape`); §5 panel required |
-| 3 — NLP derivatives → translator | **evaluator built, default OFF** — `ce212d67`. Remaining: wire into the `cached_evaluator` call sites, then the §5 panel |
+| 2 — separation tangents → translator | **done, default ON** — built `77dc8db2`, graduated `a2fb90d2`; opt out with `DISCOPT_SEPGRAD=jax` |
+| 3 — NLP derivatives → translator | **done, default ON** — evaluator `ce212d67`, graduated `a2fb90d2`, rewrites hardened `1c54b726`; opt out with `DISCOPT_NLP_EVAL=jax` |
 | 4 — enforcement (`sys.modules` assert) | **done** — `77dc8db2`, `db40debf`. **66/66 corpus instances** solve with `jax` never in `sys.modules`; asserted over 4 nonlinear classes plus the 5 extracted helper modules |
 
 **THE GOAL IS MET, behind flags, on the whole corpus.** With
@@ -24,9 +24,11 @@ net-positive on wall — 10 faster / 0 slower, median **1.80×**, total −43.7%
 with node counts neutral (44 of 46 identical), which for an engine swap is the
 right outcome.
 
-Both flags are **default OFF** and both stages are **bound-CHANGING**; the
-CLAUDE.md §5 differential panel is the remaining gate before either default
-flips. That panel must run to optimality or a node limit, **not** a time limit:
+Both stages are **bound-CHANGING**, so the CLAUDE.md §5 differential panel was
+the gate before either default flipped. It **passed both bars**, and both flags
+graduated to **default ON** in `a2fb90d2`, keeping the `=jax` opt-out and the
+legacy path intact per §5. That panel must run to optimality or a node limit,
+**not** a time limit:
 measured, the JAX arm alone moved 381 → 395 nodes between two identical runs.
 
 ## § CLAUDE.md §5 differential panel — RUN, both bars PASS
@@ -880,7 +882,8 @@ Reuse the harness in `scratchpad/stage1_entry.py`.
 
 ## Stage 2 — route separation tangents through the translator (was Stage 1)
 
-**Status: built, default OFF** (`77dc8db2`, `DISCOPT_SEPGRAD=tape`).
+**Status: done, default ON** — built `77dc8db2`, graduated `a2fb90d2` after the
+§5 panel. Opt out with `DISCOPT_SEPGRAD=jax`.
 
 ### Entry experiment (§4) — measured on the real call site
 
@@ -933,10 +936,10 @@ guarded by `test_convex_claimer` (`mccormick_lp.py:1181-1187`, −204 → −350
 
 ## Stage 3 — route NLP derivatives through the translator (was Stage 2)
 
-**Status: evaluator built, default OFF** (`ce212d67`). `_tape_nlp_evaluator.py`
-implements the protocol from the tape; `DISCOPT_NLP_EVAL=tape` opts in.
-Remaining for this stage: wire `build_evaluator` into the `cached_evaluator`
-call sites, then the §5 panel.
+**Status: done, default ON** — evaluator `ce212d67`, wired into the
+`cached_evaluator` call sites, graduated `a2fb90d2` after the §5 panel, rewrites
+hardened `1c54b726`. `_tape_nlp_evaluator.py` implements the protocol from the
+tape; `DISCOPT_NLP_EVAL=jax` opts back out.
 
 ### Measured record
 
@@ -985,6 +988,57 @@ synthetic sweep is correct to n=3000. `nlp_evaluator.py:268` compounds it by
 using the dense Hessian as ground truth to validate the sparse values, which is
 backwards here. Also observed: `dag_compiler` hits Python's recursion limit on a
 plain `sum(xs)` objective at n≈300 (it skipped three `edgecross10-*` instances).
+
+### Tail hardening of the rewrites (2026-08-05, `1c54b726`)
+
+The Stage 3 entry experiment above sampled *mid-domain* points and reported ≤1e-12
+everywhere. That was true and also not the whole picture: the rewrites are lowered
+against numerically-stable JAX primitives (`jnp.log1p`, `jnp.logaddexp`,
+`jnp.maximum`), and a naive algebraic equivalent only diverges in the tails, which
+mid-domain sampling cannot see. Probing the overflow and boundary regions
+deliberately (`discopt_benchmarks/scripts/issue75_rewrite_hardening_probe.py`,
+566 comparisons) found four real defects. Before/after, same points, same probe,
+with an §8 load gate asserting the baseline really was the pre-fix compiler:
+
+| operator | non-finite `f` | non-finite `∇` | worst rel drift |
+|---|---|---|---|
+| `log1p` | 0 → 0 | 0 → 0 | **1.000e+00 → 2.220e-16** |
+| `softplus` | **2 → 0** | 0 → 0 | **1.000e+00 → 3.037e-16** |
+| `entropy` | **1 → 0** | **1 → 0** | 6.123e-02 → 7.243e-04 (tie, below) |
+| `centropy` | **3 → 0** | **4 → 1** | 7.442e-04 (tie, below) |
+| `exp`/`log`/`sqrt` (controls) | 0 | 0 | 1.634e-16 / 0 / 0, bit-identical |
+
+Totals: **non-finite values 6 → 0, non-finite gradients 5 → 1.** A drift of 1.0
+means the two backends' answers shared no significant digits — `softplus(745)`
+returned `inf` (true value 745) because `exp(710)` overflows, and `log1p(-1e-17)`
+returned `0.0` because `1 + a` rounds to 1.
+
+**Bound impact: NONE, proven not assumed.** All 66 corpus `.nl` files were parsed
+and their DAGs walked: only `{neg: 4182, log: 266, sqrt: 229, exp: 169}` appear,
+zero touched operators. Because `factorable_reform` *synthesizes* entropy from
+`x·log(x)` patterns and the corpus has 266 `log` nodes, `canonicalize_entropy` was
+then run over all 66 — zero entropy/centropy nodes produced. The §5 panel result
+above stands unchanged.
+
+#### The residual drift is a subgradient tie, not error
+
+`x·log(max(x, 1e-300))` is **not differentiable at exactly `x = 1e-300`**, where
+the `max` switches branches. JAX's `maximum` splits a tie 0.5/0.5; pounce's `max`
+takes one branch. So the gap should be exactly 0.5 — and is: `-689.775527898214`
+vs `-690.275527898214`, and `0.5 / 690.2755 = 7.243e-4`, precisely the number in
+the table. Away from the tie the gap is exactly 0. Both are valid subgradients.
+Checking this *arithmetically* is the point; "that number looks small" would have
+accepted a real defect of the same magnitude.
+
+Three further operators the probe flags are also not defects, each established
+pointwise rather than argued: `sigmoid` at x=40 (tape `4.248e-18` vs JAX `0.0` —
+the **tape** is the accurate one, JAX underflows), and `abs`/`sign` at `1e-320`
+(subnormal handling; XLA flushes, pounce does not). Do not "fix" these toward JAX.
+
+One real residual survives and is deliberately left alone —
+`centropy(1e300, 1e300)` → `[1, nan]` from `y**2` overflowing. Rationale and the
+warning against the tempting wrong fix are recorded at the lowering site in
+`_nl_expr_compiler.py`.
 
 ### Design notes that are load-bearing
 

@@ -452,3 +452,45 @@ def test_xlogx_family_is_regularized_at_zero_like_the_authority(floored):
     assert np.all(np.isfinite(tg)), f"{floored} gradient at x=0 is {tg}"
     assert abs(tv - jv) <= 1e-12, f"{floored} value {tv} vs authority {jv}"
     np.testing.assert_allclose(tg, jgv, rtol=1e-12, atol=0)
+
+
+@pytest.mark.unit
+def test_xlogx_residual_drift_is_a_subgradient_tie_not_error():
+    """The one place entropy/centropy still disagree with JAX is `x == 1e-300`.
+
+    That is exactly where `max(x, 1e-300)` switches branches, so the function is
+    NOT differentiable there: `jnp.maximum` splits the tie 0.5/0.5 while pounce's
+    `max` takes one branch. Both are valid subgradients, and the gap is therefore
+    exactly 0.5 -- which is what makes the residual 7.24e-4 relative against
+    log(1e-300) = -690.78, rather than a defect of that size.
+
+    Pinned as arithmetic, not as a tolerance: a real error of this magnitude would
+    slip through `assert drift < 1e-3`, and drift anywhere OFF the tie point would
+    mean the floor moved or a branch was rewritten.
+    """
+    import jax
+    import jax.numpy as jnp
+
+    m = Model()
+    x = m.continuous("x", lb=-1e309, ub=1e309)
+    tape = compile_to_nl_expr(FunctionCall("entropy", x), m)
+    jg = jax.grad(lambda v: (v[0] * jnp.log(jnp.maximum(v[0], 1e-300))).sum())
+
+    checked = 0
+    for p, expected_gap in ((1e-300, 0.5), (1e-320, 0.0), (1e-299, 0.0), (1e-8, 0.0)):
+        tg = float(np.asarray(tape.gradient([p]), dtype=float)[0])
+        jgv = float(np.asarray(jg(np.array([p])))[0])
+        assert abs((tg - jgv) - expected_gap) <= 1e-9, (
+            f"entropy'({p}): tape {tg} - jax {jgv} = {tg - jgv}, expected {expected_gap}"
+        )
+        checked += 1
+
+    # 1e-320 is a subnormal STRICTLY below the floor, so max() is not at a tie
+    # there and both backends take the constant branch -- gap 0, not 0.5.
+    #
+    # That point, not the tie itself, is what gives this test teeth: measured
+    # against the pre-floor compiler, 1e-300 still produced a gap of exactly 0.5
+    # (unfloored `log(x)+1` happens to sit 0.5 from the split subgradient) and
+    # would have PASSED, while 1e-320 failed by 45.05. A tie-break assertion at
+    # the tie point alone would have been decorative.
+    assert checked == 4, f"only {checked} tie-break points asserted"

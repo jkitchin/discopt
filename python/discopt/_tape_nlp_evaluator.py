@@ -6,11 +6,12 @@ jax import is always ``nlp_evaluator.py:22``. This module supplies the same
 quantities (``f``, ``grad f``, ``g``, ``J``, and the Lagrangian Hessian, dense and
 sparse) from a tape built by :mod:`discopt._nl_expr_compiler`, with no JAX at all.
 
-**Gated, default OFF.** ``DISCOPT_NLP_EVAL=tape`` opts in; anything else keeps the
-JAX evaluator. Routing derivatives through a different AD engine is
-bound-CHANGING under CLAUDE.md §5 — the B&B is path-dependent, so even last-digit
-differences can move the cut sequence — and graduating the default requires the
-differential panel, not this module landing.
+**Default ON** since ``a2fb90d2``; ``DISCOPT_NLP_EVAL=jax`` is the opt-out and the
+JAX evaluator is untouched beneath it. Routing derivatives through a different AD
+engine is bound-CHANGING under CLAUDE.md §5 — the B&B is path-dependent, so even
+last-digit differences can move the cut sequence — so the default flipped only
+after the differential panel passed both bars; see :func:`tape_backend_requested`
+for the numbers.
 
 Entry experiment before any of this was written (CLAUDE.md §4), tape vs the JAX
 evaluator over 66 in-repo corpus instances at 5 points each:

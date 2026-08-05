@@ -373,7 +373,18 @@ def _lower_function(expr: FunctionCall, E: Any, args: list) -> Any:
         # x*log(x/y), matching dag_compiler's GAMS centropy -- including the same
         # floor on the NUMERATOR only (`x * log(max(x, 1e-300) / y)`). Same
         # defect and same fix as entropy above: measured 3 non-finite values and
-        # 4 non-finite gradients over the sampled domain before the clamp.
+        # 4 non-finite gradients over the sampled domain before the clamp; 0 and
+        # 1 after it.
+        #
+        # KNOWN RESIDUAL, deliberately not fixed. The surviving non-finite
+        # gradient is `centropy(1e300, 1e300)` -> `[1, nan]` where the authority
+        # gives `[1, -0.0]` (the true value is -1, so neither is right). Cause is
+        # the quotient rule squaring the denominator: `y**2 = 1e600` overflows,
+        # the same trap that forced the argument clamp in `_log1p`. Do NOT
+        # "fix" it by rewriting to `log(max(x, floor)) - log(y)`: that removes
+        # the overflow but introduces catastrophic cancellation whenever
+        # `x ~= y`, trading a loss no real model can reach (it needs
+        # `|y| > 1.3e154`) for one they hit routinely.
         _require(args, 2, name)
         return args[0] * E.log(E.max(args[0], E.const_(_XLOG_FLOOR)) / args[1])
     if name == "signpower":

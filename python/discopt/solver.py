@@ -1680,8 +1680,9 @@ def _make_evaluator(model: Model):
     node solves, so they share one cache (and one set of compiled callables)
     instead of each rebuilding the evaluator.
 
-    Under ``DISCOPT_NLP_EVAL=tape`` (#75) this returns the JAX-free tape-backed
-    evaluator when the model is representable, and the JAX one otherwise. The
+    By default (#75, graduated in ``a2fb90d2``) this returns the JAX-free
+    tape-backed evaluator when the model is representable, and the JAX one
+    otherwise; ``DISCOPT_NLP_EVAL=jax`` forces the JAX evaluator. The
     ``cached_evaluator`` import is INSIDE the fallback lambda on purpose: it
     imports jax at module scope, so importing it eagerly here would put JAX in
     ``sys.modules`` on every nonlinear solve and defeat the entire point of the
