@@ -4098,6 +4098,21 @@ def _admissible_probe_bound(
     value, probe_lb, probe_ub = probe
     if not np.isfinite(value):
         return None
+    # ``np.isfinite`` is NOT enough: discopt's effective infinity is the *sentinel*
+    # 1e20, not ``float('inf')``, and ``np.isfinite(1e20)`` is True. Surfacing a
+    # sentinel-magnitude value as a lower bound would assert "the optimum is at
+    # least 1e20" — a false certificate, and the exact confusion behind #15, where
+    # the simplex's mishandling of 1e20-magnitude bounds produced a bogus "optimal"
+    # above the true optimum and certified a suboptimal incumbent. 1e19 is the
+    # threshold already used for this in ``solve_model`` (``_INF``), deliberately
+    # just below 1e20 so a value merely *approaching* the cap is refused too.
+    if abs(float(value)) >= 1e19:
+        logger.debug(
+            "#930: root-probe bound %s declined — magnitude reaches the "
+            "effective-infinity sentinel, so it is not a real bound",
+            value,
+        )
+        return None
     if probe_lb.shape != root_lb.shape or probe_ub.shape != root_ub.shape:
         return None
     if not (np.array_equal(probe_lb, root_lb) and np.array_equal(probe_ub, root_ub)):
