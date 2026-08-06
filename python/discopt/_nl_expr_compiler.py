@@ -221,6 +221,13 @@ def _abs(E: Any, a: Any) -> Any:
 #: ``[0, 0]`` does not propagate a non-finite into a bound.
 _XLOG_FLOOR = 1e-300
 
+#: Below this ``|a|``, ``log1p`` uses a truncated series rather than Kahan's
+#: compensated form. At the crossover the series' truncation error is ``a**5/5``
+#: -- 2e-21 absolute against a value of 1e-4, i.e. ~2e-17 relative, under one ulp
+#: -- while Kahan's derivative distortion is still shrinking, so neither side of
+#: the switch is the weak one.
+_LOG1P_TAYLOR = 1e-4
+
 
 def _log1p(E: Any, a: Any) -> Any:
     """``log1p(a)`` accurately for small ``|a|``; the tape has no ``log1p`` opcode.
@@ -262,7 +269,26 @@ def _log1p(E: Any, a: Any) -> Any:
     kahan = E.select(at_one, a_small, a_small * E.log(u) / d_safe)
 
     naive = E.log(E.select(small, E.const_(2.0), one + a))
-    return E.select(small, kahan, naive)
+    kahan_or_naive = E.select(small, kahan, naive)
+
+    # Below `_LOG1P_TAYLOR`, a truncated series -- NOT the Kahan form. Kahan
+    # corrects the VALUE; it does not correct the derivatives AD then takes of
+    # it, because `u - 1` differs from `a` in floating point and double
+    # differentiation amplifies that gap. Measured against the analytic
+    # `-1/(1+a)**2`, the arms above give a second derivative of exactly 0.0 at
+    # a=1e-17 (the `at_one` arm is LINEAR, so it has no curvature at all) and
+    # -1.0039 at a=1e-13, against a true -1. The series is accurate in all three
+    # orders at once: its second derivative is `-1 + 2a - 3a**2`, which is the
+    # expansion of the true one.
+    #
+    # `a_tiny` is clamped for the usual reason -- both arms of a `select`
+    # evaluate, and `a**4` at a=1e300 is `inf`, which would poison the sweep.
+    a_tiny = E.select(E.compare("<", _abs(E, a), E.const_(_LOG1P_TAYLOR)), a, E.const_(0.0))
+    taylor = a_tiny * (
+        one
+        - a_tiny * (E.const_(1.0 / 2.0) - a_tiny * (E.const_(1.0 / 3.0) - a_tiny / E.const_(4.0)))
+    )
+    return E.select(E.compare("<", _abs(E, a), E.const_(_LOG1P_TAYLOR)), taylor, kahan_or_naive)
 
 
 def _sign(E: Any, a: Any) -> Any:
@@ -328,18 +354,39 @@ def _lower_function(expr: FunctionCall, E: Any, args: list) -> Any:
         _require(args, 1, name)
         return E.log(arg0()) * E.const_(1.0 / math.log(2.0))
     if name == "sigmoid":
-        # Deliberately left as the naive form. It cannot overflow to a non-finite:
-        # as `a -> -inf`, `exp(-a) -> +inf` and `1/(1+inf) -> 0`, which is the
-        # correct limit, and the reverse sweep returns 0 rather than `inf/inf`
-        # (measured over -1e300..1e300: zero non-finite values, zero non-finite
-        # gradients). It is also *more* accurate than the authority in the upper
-        # tail -- at `a = 40` the tape's derivative is 4.248e-18 where
-        # `jax.nn.sigmoid` underflows to 0.0. Rewriting it to
-        # `0.5*(1 + tanh(a/2))` would trade that away for catastrophic
-        # cancellation (`tanh(-20)` rounds to exactly -1.0, giving 0.0 for a
-        # value whose true magnitude is 4e-18). Do not "harden" this one.
+        # Branch-stable form. `t = exp(-|a|)` is in (0, 1] for EVERY input, so
+        # neither arm can overflow, and each arm is the algebraically exact
+        # sigmoid on its own side:
+        #
+        #     a >= 0:  1/(1+exp(-a))  = 1/(1+t)
+        #     a <  0:  exp(a)/(1+exp(a)) = t/(1+t)
+        #
+        # The `|a|` kink at 0 cancels rather than leaking into the derivative:
+        # each arm pairs with the matching sign of `dt/da`, both arms give 1/2
+        # and 1/4 there, so the result is smooth across the switch.
+        #
+        # The naive `1/(1+exp(-a))` this replaces was NOT safe, though its first
+        # two orders looked it. A prior version of this comment claimed "measured
+        # over -1e300..1e300: zero non-finite values, zero non-finite gradients"
+        # and concluded "do not harden this one". That measurement was real but
+        # only covered orders 0 and 1. At order 2 the left tail is where it dies:
+        # `exp(745)` overflows, the quotient rule then forms `inf/inf`, and the
+        # LAGRANGIAN HESSIAN -- which the NLP subsolve actually consumes --
+        # came back `nan` at a=-745 and SIGN-FLIPPED at a=-300 (-5.148e-131
+        # against a true +5.148e-131). `dm.sigmoid` is the SIGMOID activation in
+        # all four `nn/formulations/`, so that is a live user path.
+        #
+        # The upper-tail accuracy that motivated keeping the naive form IS
+        # preserved: at a=40 this still gives 4.248e-18 for the derivative where
+        # `jax.nn.sigmoid` underflows to 0.0, because arm 1 is `1/(1+t)` with the
+        # same `t`. Rewriting instead to `0.5*(1 + tanh(a/2))` would still be
+        # wrong -- `tanh(-20)` rounds to exactly -1.0, giving 0.0 for a value
+        # whose true magnitude is 4e-18.
         _require(args, 1, name)
-        return E.const_(1.0) / (E.const_(1.0) + E.exp(-arg0()))
+        a = arg0()
+        one = E.const_(1.0)
+        t = E.exp(-_abs(E, a))
+        return E.select(E.compare(">=", a, E.const_(0.0)), one / (one + t), t / (one + t))
     if name == "softplus":
         # `log(1 + exp(a))` OVERFLOWS: `exp(710)` is `inf`, so softplus(745)
         # returned `inf` where the true value is 745 (measured: 2 non-finite

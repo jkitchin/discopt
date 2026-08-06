@@ -1014,8 +1014,14 @@ returned `inf` (true value 745) because `exp(710)` overflows, and `log1p(-1e-17)
 returned `0.0` because `1 + a` rounds to 1.
 
 **Bound impact: NONE, proven not assumed.** All 66 corpus `.nl` files were parsed
-and their DAGs walked: only `{neg: 4182, log: 266, sqrt: 229, exp: 169}` appear,
-zero touched operators. Because `factorable_reform` *synthesizes* entropy from
+and their DAGs walked: only `{neg, log, sqrt, exp}` appear, zero touched
+operators. Counted with node-identity dedup per instance (objective plus all
+constraint bodies, each DAG node once) the census is
+`{neg: 2739, log: 256, sqrt: 227, exp: 134}`; an earlier run of this count without
+the dedup reported higher totals for the same four operators, so treat the
+*operator set* as the claim and the multiplicities as convention-dependent. The
+set is what matters here and it is stable. Because `factorable_reform`
+*synthesizes* entropy from
 `x·log(x)` patterns and the corpus has 266 `log` nodes, `canonicalize_entropy` was
 then run over all 66 — zero entropy/centropy nodes produced. The §5 panel result
 above stands unchanged.
@@ -1030,15 +1036,57 @@ the table. Away from the tie the gap is exactly 0. Both are valid subgradients.
 Checking this *arithmetically* is the point; "that number looks small" would have
 accepted a real defect of the same magnitude.
 
-Three further operators the probe flags are also not defects, each established
-pointwise rather than argued: `sigmoid` at x=40 (tape `4.248e-18` vs JAX `0.0` —
-the **tape** is the accurate one, JAX underflows), and `abs`/`sign` at `1e-320`
-(subnormal handling; XLA flushes, pounce does not). Do not "fix" these toward JAX.
+Three further operators the probe flags are also not defects **at orders 0 and
+1**, each established pointwise rather than argued: `sigmoid` at x=40 (tape
+`4.248e-18` vs JAX `0.0` — the **tape** is the accurate one, JAX underflows), and
+`abs`/`sign` at `1e-320` (subnormal handling; XLA flushes, pounce does not). Do
+not "fix" these toward JAX.
 
 One real residual survives and is deliberately left alone —
 `centropy(1e300, 1e300)` → `[1, nan]` from `y**2` overflowing. Rationale and the
 warning against the tempting wrong fix are recorded at the lowering site in
 `_nl_expr_compiler.py`.
+
+### ⚑ RETRACTED — "sigmoid is fine, do not harden it" (2026-08-05, `aafaed0b`)
+
+The paragraph above, and the code comment it came from, concluded that `sigmoid`
+should keep its naive `1/(1+exp(-a))` lowering. That conclusion was **wrong**, and
+the measurement behind it was sound but incomplete: it covered **only orders 0 and
+1**. The whole hardening pass — probe, tests, and the table above — compared
+values and gradients, and never compared the **Lagrangian Hessian**, which is what
+`nlp_ipopt` and the NLP subsolve actually consume.
+
+An adversarial second-order sweep (64 Hessian comparisons across 11 operators)
+found two defects that are invisible at orders 0 and 1:
+
+| operator | point | tape (order 2) | analytic truth | cause |
+|---|---|---|---|---|
+| `sigmoid` | a = −745 | `nan` | `4.941e-324` | `exp(745)` → `inf`, quotient rule forms `inf/inf` |
+| `sigmoid` | a = −300 | `−5.148e-131` | `+5.148e-131` | **sign-flipped curvature** |
+| `log1p` | a = 1e-17 | `0.0` | `−1.0` | the `u == 1` arm is LINEAR — no curvature at all |
+| `log1p` | a = 1e-13 | `−1.0039` | `−1.0` | `u − 1 ≠ a` in FP; double differentiation amplifies it |
+
+Both are fixed. `sigmoid` is now the branch-stable `t = exp(-|a|)` form, whose
+arms are `1/(1+t)` and `t/(1+t)` — `t ∈ (0,1]` for every input, so neither arm can
+overflow, and the upper-tail accuracy that motivated the original decision is
+preserved. `log1p` gains a truncated-series branch below `|a| < 1e-4`, which is
+accurate in all three orders at once where Kahan's form corrects only the value.
+After the fix, all 17 second-derivative checks match analytic truth, and the tape
+is *more* accurate than JAX at −745, +40 and +300, where JAX underflows to 0.
+
+**Severity: this was a live user path, not a corner.** `dm.sigmoid` is the
+`Activation.SIGMOID` implementation in all four `nn/formulations/`, so any
+NN-embedded model with a saturated sigmoid unit fed the NLP subsolve a `nan` or
+sign-flipped curvature. The corpus is still unaffected (it contains only
+`{neg, log, sqrt, exp}`), so the §5 panel result stands.
+
+**Lesson, and it generalizes past this branch: a derivative-backend swap must be
+verified at every derivative order the consumer uses.** Orders 0 and 1 agreeing to
+one ulp says nothing about order 2 — `log1p`'s exact-branch is a perfect first-order
+answer with zero curvature, and `sigmoid`'s left tail is finite at both lower
+orders and `nan` at the second. An end-to-end solve on a sigmoid network driven to
+`-745` now agrees bit-for-bit between the arms (objective drift 0.000e+00), with
+the tape arm never importing jax and the control arm asserted to do so.
 
 ### Design notes that are load-bearing
 

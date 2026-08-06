@@ -19,9 +19,11 @@ Entry experiment recorded when this landed: 66 in-repo corpus instances, 5 point
 each, max rel drift f 5.48e-16, grad 3.77e-16, g 4.55e-13, J 3.06e-15, H 7.82e-13.
 """
 
+import math
 import sys
 from pathlib import Path
 
+import discopt.modeling as dm
 import numpy as np
 import pytest
 from discopt import Model
@@ -141,6 +143,79 @@ def _xy_model():
     m.subject_to(x * y >= 0.5)
     m.minimize(x * y + x * x)
     return m, x, y
+
+
+def _curvature(build, pt):
+    """d2/dx2 of a 1-var objective, through the evaluator the solver calls."""
+    m = Model()
+    x = m.continuous("x", lb=-1e309, ub=1e309)
+    m.minimize(build(x))
+    m.subject_to(x <= 1e309)
+    tape = TapeNLPEvaluator(m)
+    h = tape.evaluate_lagrangian_hessian(np.array([pt]), 1.0, np.zeros(tape.n_constraints))
+    return float(np.asarray(h)[0, 0])
+
+
+def _sigmoid_at_minus_abs(a):
+    """``sigmoid(-|a|)`` without cancellation -- it never rounds to 1.0.
+
+    Writing the reference as ``s = sigmoid(a); s*(1-s)`` silently underflows for
+    ``a >~ 37``: ``s`` becomes exactly 1.0, ``1-s`` is 0, and the reference then
+    claims 0 for a true 4.248e-18 -- which reads as a defect in whatever it is
+    checking. An earlier revision of this probe did exactly that and reported
+    three false failures.
+    """
+    t = math.exp(-abs(a))
+    return t / (1.0 + t)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "name,build,pt,exact",
+    [
+        # log1p'' = -1/(1+a)^2. The `u == 1` arm of the Kahan form is LINEAR, so
+        # it has no curvature: before the series branch this returned exactly 0.0
+        # at 1e-17 and -1.0039 at 1e-13, against a true -1.
+        ("log1p@1e-17", dm.log1p, 1e-17, -1.0),
+        ("log1p@-1e-17", dm.log1p, -1e-17, -1.0),
+        ("log1p@1e-13", dm.log1p, 1e-13, -1.0),
+        ("log1p@0.5", dm.log1p, 0.5, -1.0 / 2.25),
+        # sigmoid'' = s(1-s)(1-2s), odd in a. The naive `1/(1+exp(-a))` overflows
+        # in the LEFT tail at second order -- `exp(745)` is inf, the quotient rule
+        # forms inf/inf -- giving nan at -745 and a SIGN-FLIPPED -5.148e-131 at
+        # -300. Orders 0 and 1 were finite there, which is why it went unnoticed.
+        ("sigmoid@-745", dm.sigmoid, -745.0, None),
+        ("sigmoid@-300", dm.sigmoid, -300.0, None),
+        ("sigmoid@300", dm.sigmoid, 300.0, None),
+        ("sigmoid@0", dm.sigmoid, 0.0, 0.0),
+        # softplus'' = s(1-s); already correct, pinned so the log1p rewrite it
+        # depends on cannot regress it.
+        ("softplus@40", dm.softplus, 40.0, None),
+        ("softplus@-40", dm.softplus, -40.0, None),
+    ],
+)
+def test_second_derivatives_match_analytic_truth_in_the_tails(name, build, pt, exact):
+    """The NLP subsolve consumes the LAGRANGIAN HESSIAN, not just f and grad f.
+
+    The 1c54b726 hardening verified orders 0 and 1 only, and two rewrites were
+    wrong at order 2 while looking clean at orders 0 and 1. `dm.sigmoid` is the
+    SIGMOID activation in all four `nn/formulations/`, so this is a live path.
+
+    Truth here is ANALYTIC, not JAX: at these points JAX itself underflows (it
+    returns 0.0 for sigmoid''(300) where the true value is -5.148e-131), so
+    asserting against JAX would pin the wrong answer.
+    """
+    if exact is None:
+        s = _sigmoid_at_minus_abs(pt)
+        if build is dm.softplus:
+            exact = s * (1.0 - s)
+        else:
+            mag = s * (1.0 - s) * (1.0 - 2.0 * s)
+            exact = mag if pt <= 0 else -mag
+
+    got = _curvature(build, pt)
+    assert math.isfinite(got), f"{name}: curvature is {got}"
+    assert got == pytest.approx(exact, rel=1e-6, abs=1e-330), f"{name}: {got} vs exact {exact}"
 
 
 @pytest.mark.unit
