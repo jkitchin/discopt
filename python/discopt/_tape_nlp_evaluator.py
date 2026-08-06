@@ -425,6 +425,21 @@ class TapeNLPEvaluator:
             r, c = self._problem.hessian_structure()
             rows = np.asarray(r, dtype=np.int64)
             cols = np.asarray(c, dtype=np.int64)
+            # Two things downstream ASSUME this triangle and would fail silently
+            # without it, so check it rather than trust it: `_widen_for_gauss_newton`
+            # builds its union with `if a >= b`, and `evaluate_lagrangian_hessian`
+            # mirrors with `lower + tril(lower, -1).T`. An upper-triangle entry
+            # would make GN double-count every off-diagonal (the value would be
+            # added at both (i,j) and (j,i)) and leave the dense Hessian
+            # asymmetric -- a wrong curvature with no symptom, which is the
+            # failure mode that reads as a pass.
+            if rows.size and not bool(np.all(rows >= cols)):
+                bad = np.flatnonzero(rows < cols)[:5]
+                raise AssertionError(
+                    "pounce returned a non-lower-triangular Hessian structure; the "
+                    "Gauss-Newton union and the dense mirror both depend on it. "
+                    f"First offending entries: {[(int(rows[k]), int(cols[k])) for k in bad]}"
+                )
             if self._residual_exprs is not None:
                 rows, cols = self._widen_for_gauss_newton(rows, cols)
             self._hess_struct = (rows, cols)

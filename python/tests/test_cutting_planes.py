@@ -993,16 +993,19 @@ class TestAugmentedEvaluator:
         assert new_bounds[1] == (-1e20, 0.0)
         assert new_bounds[2] == (-1e20, 0.0)
 
-    def test_augmented_jax_constraint_fn(self):
+    def test_augmented_constraint_fn(self):
         from discopt.solver import _AugmentedEvaluator
 
         evaluator, pool = self._make_evaluator_and_pool()
         aug = _AugmentedEvaluator(evaluator, pool)
         cons_fn = aug._cons_fn
         assert cons_fn is not None
-        x_jax = jnp.array([2.0, 1.0])
-        result = cons_fn(x_jax)
+        # Accepts a JAX array (a JAX evaluator's own _cons_fn returns one) but
+        # must produce numpy: this wrapper is built on a live solve path that may
+        # be tape-backed and JAX-free. See test_75_jax_free_solve_path.
+        result = cons_fn(jnp.array([2.0, 1.0]))
         assert result.shape == (3,)
+        assert isinstance(result, np.ndarray), f"augmented _cons_fn returned {type(result)}"
 
     def test_empty_pool_passthrough(self):
         from discopt.solver import _AugmentedEvaluator

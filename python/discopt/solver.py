@@ -1601,47 +1601,46 @@ class _AugmentedEvaluator:
         cut_bounds = [(-1e20, 0.0)] * self._n_cuts
         return list(original_bounds) + cut_bounds
 
-    def get_augmented_jax_bounds(self, g_l_jax, g_u_jax):
-        """Return JAX constraint bound arrays extended with cut bounds."""
-        import jax.numpy as jnp
-
-        if self._n_cuts == 0:
-            return g_l_jax, g_u_jax
-        cut_gl = jnp.full(self._n_cuts, -1e20, dtype=jnp.float64)
-        cut_gu = jnp.zeros(self._n_cuts, dtype=jnp.float64)
-        if g_l_jax is not None:
-            new_gl = jnp.concatenate([g_l_jax, cut_gl])
-            new_gu = jnp.concatenate([g_u_jax, cut_gu])
-        else:
-            new_gl = cut_gl
-            new_gu = cut_gu
-        return new_gl, new_gu
-
     @property
     def _obj_fn(self):
         return self._ev._obj_fn
 
     @property
     def _cons_fn(self):
+        """Augmented constraint callable, built with numpy rather than ``jnp``.
+
+        This wrapper is constructed on a live solve path (the cut-augmented node
+        NLP below) and may wrap a *tape* evaluator, which is JAX-free. The
+        previous implementation did ``import jax.numpy`` unconditionally here, so
+        merely *reading* this property pulled in 210 JAX modules and returned a
+        ``jaxlib`` array on an otherwise JAX-free solve. Nothing in-tree reads it
+        today, which is the only reason #75's acceptance test never caught it --
+        and "no consumer today" is one attribute access away from being false.
+
+        numpy is the correct module regardless: every consumer of an
+        ``_AugmentedEvaluator`` drives it through the ``evaluate_*`` methods with
+        concrete arrays, and the cut rows are dense float64 either way. A JAX
+        evaluator's own ``_cons_fn`` still returns a JAX array, and
+        ``np.concatenate`` accepts one -- this composes with both backends
+        without importing either.
+        """
         if self._n_cuts == 0:
             return self._ev._cons_fn
 
-        import jax.numpy as jnp
-
         orig_cons_fn = self._ev._cons_fn
-        A_jax = jnp.array(self._A, dtype=jnp.float64)
-        b_jax = jnp.array(self._b, dtype=jnp.float64)
+        A = np.asarray(self._A, dtype=np.float64)
+        b = np.asarray(self._b, dtype=np.float64)
 
         if orig_cons_fn is not None:
 
             def augmented_con(x):
-                orig = orig_cons_fn(x)
-                cut_vals = A_jax @ x - b_jax
-                return jnp.concatenate([orig, cut_vals])
+                orig = np.asarray(orig_cons_fn(x), dtype=np.float64)
+                cut_vals = A @ np.asarray(x, dtype=np.float64) - b
+                return np.concatenate([orig, cut_vals])
         else:
 
             def augmented_con(x):
-                return A_jax @ x - b_jax
+                return A @ np.asarray(x, dtype=np.float64) - b
 
         return augmented_con
 

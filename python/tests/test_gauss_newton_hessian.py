@@ -369,3 +369,87 @@ def test_solve_gauss_newton_matches_full_nonlinear_ls():
         assert r.status == "optimal"
         sols[gn] = (r.value(p), r.value(q))
     assert np.allclose(sols[False], sols[True], atol=1e-3)
+
+
+# ─────────────────────────────────────────────────────────────
+# Independent-oracle checks (added by the #75 review sweep)
+#
+# Everything above compares GN against the *exact* Hessian or against the other
+# backend. Both are discopt code. These two compare against an oracle written
+# outside the system -- a hand-derived Jacobian in numpy -- so a shared mistake
+# in the two backends cannot make them pass.
+# ─────────────────────────────────────────────────────────────
+
+_TS = np.array([0.0, 0.4, 0.9, 1.5, 2.2, 3.0])
+_YS = np.array([2.9, 2.1, 1.5, 1.0, 0.75, 0.62])
+
+
+def _exp_fit_model(gauss_newton=True):
+    """min Σ (a·e^(−b·t) + c − y)², written with builtin sum()."""
+    m = Model("expfit")
+    a = m.continuous("a", lb=0.1, ub=10.0)
+    b = m.continuous("b", lb=0.05, ub=5.0)
+    c = m.continuous("c", lb=-5.0, ub=5.0)
+    m.minimize(sum((a * dm.exp(-b * t) + c - y) ** 2 for t, y in zip(_TS, _YS)))
+    m._gauss_newton_hessian = gauss_newton
+    return m
+
+
+def _analytic_jacobian(x):
+    """∂r/∂(a,b,c) for r_i = a·e^(−b·t_i) + c − y_i, derived by hand."""
+    a, b, _c = x
+    e = np.exp(-b * _TS)
+    return np.column_stack([e, -a * _TS * e, np.ones_like(_TS)])
+
+
+@pytest.mark.parametrize("backend", ["jax", "tape"])
+def test_gauss_newton_matches_a_hand_derived_jacobian(backend):
+    """GN objective Hessian must equal 2·JᵀJ for a J computed outside discopt.
+
+    This is also the variable-ORDER test on the tape arm: ∂r/∂a, ∂r/∂b and ∂r/∂c
+    differ by orders of magnitude here, so a column permutation between the main
+    tape and the auxiliary residual tape could not pass.
+    """
+    if backend == "tape":
+        pounce = pytest.importorskip("pounce")
+        assert pounce is not None
+        from discopt._tape_nlp_evaluator import TapeNLPEvaluator
+
+        ev = TapeNLPEvaluator(_exp_fit_model())
+    else:
+        ev = NLPEvaluator(_exp_fit_model(), gauss_newton=True)
+    assert ev.is_gauss_newton, f"{backend}: GN did not activate on a sum-of-squares objective"
+
+    rng = np.random.default_rng(0)
+    checked = 0
+    for _ in range(5):
+        x = np.array([rng.uniform(0.5, 4.0), rng.uniform(0.1, 2.0), rng.uniform(-2.0, 2.0)])
+        got = np.asarray(ev.evaluate_lagrangian_hessian(x, 1.0, np.zeros(0)))
+        J = _analytic_jacobian(x)
+        np.testing.assert_allclose(got, 2.0 * (J.T @ J), rtol=1e-7, atol=1e-7)
+        checked += 1
+    assert checked == 5, "the oracle comparison did not run"
+
+
+def test_tape_hessian_structure_is_lower_triangular():
+    """`hessian_structure` must stay lower-triangular on every objective shape.
+
+    `_widen_for_gauss_newton` unions with `if a >= b` and
+    `evaluate_lagrangian_hessian` mirrors with `lower + tril(lower, -1).T`. An
+    upper-triangle entry would double-count every off-diagonal GN value and leave
+    the dense Hessian asymmetric -- silently. The evaluator now raises on it;
+    this pins that the ordinary shapes do not trip it.
+    """
+    pytest.importorskip("pounce")
+    from discopt._tape_nlp_evaluator import TapeNLPEvaluator
+
+    checked = 0
+    for gn in (True, False):
+        ev = TapeNLPEvaluator(_exp_fit_model(gauss_newton=gn))
+        rows, cols = ev.hessian_structure()
+        assert rows.size, "empty structure would make this vacuous"
+        assert np.all(rows >= cols), f"upper-triangle entries: {rows[rows < cols]}"
+        H = np.asarray(ev.evaluate_lagrangian_hessian(np.array([2.0, 0.7, 0.3]), 1.0, np.zeros(0)))
+        np.testing.assert_allclose(H, H.T, rtol=0, atol=1e-12)
+        checked += 1
+    assert checked == 2

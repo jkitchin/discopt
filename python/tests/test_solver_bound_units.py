@@ -78,10 +78,11 @@ def test_augmented_evaluator_appends_normalized_cuts():
     assert len(bounds) == 3
     assert bounds[-1] == (-1e20, 0.0)
 
-    import jax.numpy as jnp
+    # `get_augmented_jax_bounds` used to be asserted here. It was deleted: it had
+    # no consumer anywhere in the package, and it built JAX arrays inside a
+    # wrapper that is constructed on a live (possibly tape-backed, JAX-free)
+    # solve path. `get_augmented_constraint_bounds` above is the live equivalent.
 
-    gl, gu = aug.get_augmented_jax_bounds(jnp.array([0.0]), jnp.array([np.inf]))
-    assert gl.shape == (3,) and float(gu[-1]) == 0.0
     # Lagrangian Hessian ignores the (linear) cut rows.
     lam = np.array([0.3, 0.1, 0.2])
     h = aug.evaluate_lagrangian_hessian(x, 1.0, lam)
@@ -98,8 +99,7 @@ def test_augmented_evaluator_with_empty_pool_is_passthrough():
     np.testing.assert_allclose(
         np.asarray(aug.evaluate_constraints(x)), np.asarray(ev.evaluate_constraints(x))
     )
-    gl, gu = aug.get_augmented_jax_bounds(None, None)
-    assert gl is None and gu is None
+    assert aug.get_augmented_constraint_bounds(None) is None
 
 
 def test_compute_interval_bound_soundness():

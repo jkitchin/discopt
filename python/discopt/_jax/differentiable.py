@@ -382,8 +382,10 @@ def differentiable_solve(
         model: A Model with objective, constraints, and parameters.
         ipopt_options: Deprecated alias for solver_options. Options dict passed
             to the NLP solver.
-        nlp_solver: NLP backend to use: ``"ipm"`` (default, pure-JAX) or
-            ``"ipopt"`` (cyipopt).
+        nlp_solver: NLP backend to use: ``"pounce"`` (default, the pure-Rust
+            interior-point solver) or ``"ipopt"`` (cyipopt). ``"ipm"`` is a
+            back-compat alias for ``"pounce"`` -- it named the pure-JAX IPM that
+            #75 removed from the solve path, and is NOT a JAX backend today.
         solver_options: Options dict passed to the NLP solver.
 
     Returns:

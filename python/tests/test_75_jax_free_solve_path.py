@@ -34,6 +34,51 @@ pytest.importorskip("pounce")
 TAPE_ENV: dict = {}
 JAX_ENV = {"DISCOPT_NLP_EVAL": "jax", "DISCOPT_SEPGRAD": "jax"}
 
+# The plan asks for "a set spanning all 10 ProblemClass values". The original
+# four covered NLP/MINLP/QCQP only; a review sweep found the other six pass too,
+# so the gap was coverage, not behavior. They are cheap (each is one subprocess
+# solve) and they are what stops a leak reappearing on, say, the MILP-only path.
+LINEAR_AND_QUADRATIC = {
+    "lp": """
+        x = m.continuous("x", lb=0, ub=10)
+        y = m.continuous("y", lb=0, ub=10)
+        m.subject_to(x + 2 * y <= 8)
+        m.subject_to(3 * x + y <= 9)
+        m.minimize(-x - y)
+    """,
+    "qp": """
+        x = m.continuous("x", lb=-5, ub=5)
+        y = m.continuous("y", lb=-5, ub=5)
+        m.subject_to(x + y >= 1)
+        m.minimize(x * x + 2 * y * y + x * y - x)
+    """,
+    "qcp": """
+        x = m.continuous("x", lb=-5, ub=5)
+        y = m.continuous("y", lb=-5, ub=5)
+        m.subject_to(x * x + y * y <= 4.0)
+        m.minimize(-x - y)
+    """,
+    "milp": """
+        a = m.integer("a", lb=0, ub=10)
+        b = m.integer("b", lb=0, ub=10)
+        m.subject_to(a + 2 * b <= 7)
+        m.subject_to(3 * a + b <= 9)
+        m.minimize(-5 * a - 4 * b)
+    """,
+    "miqp": """
+        x = m.continuous("x", lb=-5, ub=5)
+        k = m.integer("k", lb=-3, ub=3)
+        m.subject_to(x + k >= 1)
+        m.minimize(x * x + 2.0 * k * k - 3 * x)
+    """,
+    "miqcp": """
+        x = m.continuous("x", lb=-5, ub=5)
+        k = m.integer("k", lb=0, ub=4)
+        m.subject_to(x * x + k <= 9.0)
+        m.minimize(-x - 2.0 * k)
+    """,
+}
+
 MODELS = {
     # (builder body, expected status) spanning the nonlinear ProblemClass values.
     "nlp_exp_log": """
@@ -67,6 +112,8 @@ MODELS = {
         m.minimize(x * x + y * y + z * z - x * y)
     """,
 }
+
+MODELS.update(LINEAR_AND_QUADRATIC)
 
 SCRIPT = """\
 import sys
@@ -194,6 +241,58 @@ def test_opt_outs_still_reach_the_legacy_jax_path(env, label):
     """
     res = _run(MODELS["nlp_exp_log"], env)
     assert int(res["JAXMODS"]) > 0, f"{label}: opt-out did not reach the JAX path"
+
+
+@pytest.mark.unit
+def test_cut_augmented_wrapper_over_a_tape_stays_jax_free():
+    """`_AugmentedEvaluator` must not import JAX when it wraps a tape evaluator.
+
+    Found by review, not by the tests above, and they *structurally* could not
+    have found it: this wrapper is built on a live solve path (the cut-augmented
+    node NLP, `solver.py`) but its `_cons_fn` has no in-tree consumer, so no
+    end-to-end solve ever reads it. It used to `import jax.numpy` unconditionally
+    -- measured at 210 JAX modules and a `jaxlib` return value on an otherwise
+    JAX-free solve. "No consumer today" is one attribute access away from false,
+    so the property is pinned directly rather than through `solve()`.
+    """
+    src = textwrap.dedent("""
+        import sys
+        import numpy as np
+        from discopt import Model
+        import discopt.modeling as dm
+        from discopt import solver as S
+        from discopt._jax.cutting_planes import CutPool, LinearCut
+        from discopt._tape_nlp_evaluator import try_build
+
+        m = Model()
+        x = m.continuous("x", lb=0.1, ub=5.0)
+        y = m.continuous("y", lb=0.1, ub=5.0)
+        m.subject_to(x * y <= 12.0)
+        m.minimize(x * x - 2.0 * y)
+        tape = try_build(m)
+        assert tape is not None, "fixture must lower to a tape or this proves nothing"
+
+        pool = CutPool(max_cuts=10)
+        pool.add(LinearCut(coeffs=np.array([1.0, 1.0]), rhs=9.0, sense="<="))
+        aug = S._AugmentedEvaluator(tape, pool)
+
+        fn = aug._cons_fn                      # the property that used to leak
+        got = fn(np.array([1.0, 2.0]))
+        base = np.asarray(tape.evaluate_constraints(np.array([1.0, 2.0])))
+        assert got.shape[0] == base.shape[0] + 1, (got.shape, base.shape)
+        assert np.allclose(got[:-1], base), (got, base)
+        assert np.isclose(got[-1], 1.0 + 2.0 - 9.0), got[-1]
+        assert isinstance(got, np.ndarray), type(got)
+
+        leaked = sorted(k for k in sys.modules if k == "jax" or k.startswith("jax."))
+        print("JAXMODS:" + str(len(leaked)))
+        print("LEAKED:" + ",".join(leaked[:8]))
+    """)
+    out = subprocess.run([sys.executable, "-c", src], capture_output=True, text=True, timeout=300)
+    assert out.returncode == 0, f"probe failed\nstdout={out.stdout}\nstderr={out.stderr[-2000:]}"
+    assert "JAXMODS:0" in out.stdout, (
+        f"the cut-augmented wrapper imported JAX over a tape evaluator: {out.stdout}"
+    )
 
 
 @pytest.mark.slow
