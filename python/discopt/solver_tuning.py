@@ -539,6 +539,82 @@ class SolverTuning:
     everything else bound-neutral. A/B root values re-confirmed load-independent
     (``results/issue282/root_lp_probe_ab_reconfirm_*.json``)."""
 
+    root_probe_seeds_fallback: bool = field(
+        default_factory=lambda: _env_flag("DISCOPT_ROOT_PROBE_SEEDS_FALLBACK", default=False)
+    )
+    """Let the root LP probe's already-proved bound count as "a bound in hand" for the
+    #138 fallback's own checkpoint rules (``DISCOPT_ROOT_PROBE_SEEDS_FALLBACK``,
+    default off; §5 bound-changing). Issue #930.
+
+    ``_root_relaxation_lower_bound`` accumulates candidates in ``_have`` and consults
+    it in two places that already exist: rule 1 of ``_fb_stop`` (never decline an
+    optional tightening phase while NO valid bound is in hand) and the ``_sep_budget``
+    clamp (once a bound has landed, the separated solve must fit in what is genuinely
+    left of the grant). Both rules ask "do we already have a bound?" — and on the
+    spatial path the answer is often *yes* before the fallback starts, because the
+    root LP probe in ``solve_model`` proved one. ``_have`` just never learned it.
+
+    This flag seeds ``_have`` with the probe bound when — and only when — it passes
+    ``_admissible_probe_bound``'s exact box-equality gate, i.e. it is the identical
+    quantity over the identical box. Measured on ``hda`` at a 10 s limit: the fallback
+    re-ran ``solve_at_node`` over the same root box for 2.72 s and returned
+    ``-64473.442402437024``, the same value to all 17 digits the probe had proved
+    3 s earlier — pure duplicate work, and the whole of the fallback's 4.06 s against
+    a 1.69 s grant.
+
+    NOT bound-neutral, which is why it is flagged rather than unconditional. Seeding
+    ``_have`` lets rule 2 decline the separated phase once the grant is spent, and the
+    probe bound is not always as tight as that phase would prove: ``solve_at_node``
+    relabels *unbounded*, *time_limit* and *numerical* outcomes as
+    ``status="optimal"`` carrying a weak Neumaier-Shcherbina floor
+    (``mccormick_lp.py`` lines 1624/1642/1654), so a starved probe can report a valid
+    but much looser bound than a full separated solve would. ``status`` therefore
+    cannot be used as evidence of convergence, and the trade — punctuality for
+    possible bound quality — is exactly the one rule 2 already makes; this flag only
+    widens what rule 2 counts as "in hand". Never unsound: every seeded value is a
+    valid lower bound over the root box, and it reaches the caller through the same
+    ``max``.
+
+    Independent of #930's other half (re-admitting the probe bound as a ``max``
+    candidate), which is unconditional because it can only *tighten* the reported
+    bound and costs no wall time.
+
+    **Panel verdict: stays OFF.** Sec.5 bar 1 PASSES, bar 2 does not clear the
+    ``DISCOPT_CUT_INHERIT`` precedent (sound but not broadly helpful). Three-arm
+    differential over the 17 non-closing in-repo instances at ``time_limit=8``,
+    2 reps, arms interleaved per instance and marker-asserted on both trees
+    (``discopt_benchmarks/scripts/issue930_root_probe_bound_panel.py``, raw
+    results in ``discopt_benchmarks/results/issue930/``):
+
+    * bar 1 cert-clean — over 22 flag ON/OFF bound pairs: 0 lost, 0 looser,
+      0 tighter, 0 ``gap_certified True->False``, 0 bound past an ``=opt=``
+      oracle or across its own incumbent (6 invariant + 11 oracle checks). The
+      flag did not move a single dual bound. Five closing instances were
+      node-identical and objective-identical across all three arms, confirming
+      both halves are inert where neither code path is reached.
+    * bar 2 net-positive — NOT met, and not merely unproven: paired wall
+      ``on - off`` is **+0.048 s per run** (sd 0.369, n=34, total +1.62 s). The
+      flag is fractionally *worse*, not better. The duplicate solve it removes
+      is real (2.72 s on ``hda`` at a 10 s limit, above), but on this corpus the
+      saving does not survive into wall time.
+
+    RETRACTION (CLAUDE.md Sec.11). An earlier run of this same panel reported
+    ``on - off`` = -0.230 s/run (sd 0.734, total -7.82 s), of which 2.89 s was
+    attributed to ``contvar`` and 0.77 s to ``tls2``. That measurement is
+    withdrawn on two counts. It was taken against a baseline on the #75
+    JAX-removal branch rather than ``main``, so it did not measure the change
+    being shipped; and the ``contvar`` component was an artifact — that
+    instance's *baseline* is bimodal (11.23 s vs 8.53 s across two reps of the
+    main-based panel), so the "saving" was baseline spread read as a flag
+    effect. The verdict it supported (stays OFF) is unchanged and now rests on
+    a stronger footing: the flag shows no benefit at all, rather than a
+    benefit concentrated in 2 of 17 instances.
+
+    What would settle it: a load-gated panel at several time limits over a corpus
+    where the fallback duplicates the probe more often than it does here. Until
+    then the duplicate solve is a known, measured, opt-in cost rather than a
+    silent default change."""
+
     rlt1_root_bound: bool = field(
         default_factory=lambda: _env_flag("DISCOPT_RLT1_ROOT_BOUND", default=False)
     )
