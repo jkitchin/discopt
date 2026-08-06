@@ -10,6 +10,7 @@ are declined so MIQPs stay on the self-hosted B&B path.
 
 from __future__ import annotations
 
+import importlib
 import time
 
 import numpy as np
@@ -141,12 +142,43 @@ class TestQPBackendSeam:
 
     def test_pounce_no_result_logs_tracking_marker(self, monkeypatch, caplog):
         """When POUNCE yields no usable result, the HiGHS-free path logs the
-        'qp-pounce-no-result' marker (issue #359 no-rescue tracking) before
-        dropping to the JAX last resort."""
+        'qp-pounce-no-result' marker (issue #359 no-rescue tracking)."""
         monkeypatch.setattr(S, "_solve_qp_pounce", lambda *a, **k: None)
         with caplog.at_level("WARNING", logger="discopt.solver"):
             S._solve_qp(_build_qp(), time.perf_counter())
         assert any("qp-pounce-no-result" in r.message for r in caplog.records)
+
+    def test_pounce_no_result_refuses_rather_than_certifying(self, monkeypatch):
+        """A POUNCE non-result must produce ``status="error"`` with no objective,
+        bound, or gap — never a certificate from a second, unguarded engine.
+
+        This is the regression test for removing ``_solve_qp_jax`` (#75). The
+        only way to reach this branch is for ``_solve_qp_matrix`` to have
+        *rejected* POUNCE's point (see the two guard tests above), so it is
+        precisely the state in which an answer is least trustworthy. The removed
+        JAX QP IPM rescue re-solved the same QP and, whenever its own internal
+        convergence flag came back clean, returned ``status="optimal"`` with
+        ``bound=obj_val``, ``gap=0`` and ``convex_fast_path=True`` — checking
+        neither feasibility nor KKT stationarity.
+
+        Measured against the baseline (``origin/main`` @ d3c3a44e): this test
+        fails there on the ``status`` assertion, which reports
+        ``"iteration_limit"`` — the rescue ran on this particular QP and did not
+        converge, and still returned its unconverged iterate as the result
+        rather than an error. The sibling marker test above passes in *both*
+        states, which is why it does not stand in for this one.
+        """
+        monkeypatch.setattr(S, "_solve_qp_pounce", lambda *a, **k: None)
+        res = S._solve_qp(_build_qp(), time.perf_counter())
+        assert res.status == "error"
+        assert res.objective is None
+        assert res.bound is None
+        assert res.gap is None
+        assert not res.gap_certified
+        # The JAX rescue no longer exists to be reached, on any import path.
+        assert not hasattr(S, "_solve_qp_jax")
+        with pytest.raises(ModuleNotFoundError):
+            importlib.import_module("discopt._jax.qp_ipm")
 
     def test_convergence_guard_accepts_converged_optimal(self):
         """A small KKT residual (normal converged POUNCE solve) passes the guard

@@ -92,7 +92,7 @@ result = m.solve(time_limit=60)   # multi-start happens transparently
 ## When to Defer
 
 - **"MINLP solve not converging"** → `minlp-solver-expert`.
-- **"NLP subproblem fails / restoration"** → `ipopt-expert` / `jax-ipm-expert`.
+- **"NLP subproblem fails / restoration"** → `ipopt-expert`.
 - **"Cutting planes to tighten the relaxation"** → `convex-relaxation-expert`.
 - **"OBBT / FBBT bound tightening"** → `presolve-expert`.
 - **"SCIP's LNS implementations" / "HiGHS feasibility pump internals"** → `scip-expert` / `highs-expert`.

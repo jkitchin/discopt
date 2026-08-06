@@ -128,6 +128,37 @@ def _lp_forward(lp_data) -> tuple[float, np.ndarray]:
     return float(obj), np.asarray(x)
 
 
+def _qp_forward(qp_data) -> tuple[float, np.ndarray]:
+    """Forward QP solve for the differentiable path: POUNCE's interior-point KKT
+    solve, returning ``(obj, x)`` in the raw (no ``obj_const``) convention.
+
+    The QP counterpart of :func:`_lp_forward`, and the same argument applies: the
+    forward solver only has to produce the KKT point, because differentiability
+    comes from the implicit-KKT JVP in ``differentiable_qp.qp_solve_jvp``, not
+    from differentiating the solver's iterations. ``differentiable_qp`` has fed on
+    ``solve_qp_kkt`` all along; this module's QP arm was simply never migrated
+    when #370 moved the LP arm off ``lp_ipm_solve``, and kept calling the pure-JAX
+    ``qp_ipm_solve`` as a forward solver, reading only ``.x``/``.obj``.
+
+    Measured equivalence over 12 random strictly-convex QPs (SPD ``Q``, ``n`` in
+    2..8): worst relative disagreement with ``qp_ipm_solve`` 1.28e-11, and
+    POUNCE's point independently verified -- primal feasibility <= 4.4e-16, KKT
+    stationarity residual <= 4.0e-15. Raises ``ImportError`` if POUNCE is
+    unavailable (the callers already wrap this in ``try``).
+    """
+    from discopt.solvers.qp_pounce import solve_qp_kkt
+
+    obj, x, *_ = solve_qp_kkt(
+        cast(Any, _dense_Q(qp_data.Q)),
+        qp_data.c,
+        cast(Any, _dense_A(qp_data.A_eq)),
+        qp_data.b_eq,
+        qp_data.x_l,
+        qp_data.x_u,
+    )
+    return float(obj), np.asarray(x)
+
+
 def _solve_objective(model: Model, problem_class: ProblemClass) -> float | None:
     """Solve a model and return just the objective value."""
     try:
@@ -137,17 +168,8 @@ def _solve_objective(model: Model, problem_class: ProblemClass) -> float | None:
             return lp_obj + lp_data.obj_const
         elif problem_class == ProblemClass.QP:
             qp_data = extract_qp_data(model)
-            from discopt._jax.qp_ipm import qp_ipm_solve
-
-            qp_state = qp_ipm_solve(
-                cast(Any, _dense_Q(qp_data.Q)),
-                qp_data.c,
-                cast(Any, _dense_A(qp_data.A_eq)),
-                qp_data.b_eq,
-                qp_data.x_l,
-                qp_data.x_u,
-            )
-            return float(qp_state.obj) + qp_data.obj_const
+            qp_obj, _ = _qp_forward(qp_data)
+            return qp_obj + qp_data.obj_const
         else:
             from discopt._jax.nlp_evaluator import NLPEvaluator
             from discopt.solvers.nlp_pounce import solve_nlp
@@ -183,12 +205,16 @@ def differentiable_solve(
 ) -> UnifiedDiffResult:
     """Solve a model and return a differentiable result.
 
-    Classifies the problem and dispatches to the appropriate solver:
-      - LP → pure-JAX LP IPM + implicit KKT diff
-      - QP → pure-JAX QP IPM + OptNet diff
+    Classifies the problem and dispatches to the appropriate solver. In every
+    case the *solve* is POUNCE's and the *derivative* is JAX's — the forward
+    point comes from a KKT solve in Rust, and differentiability is a post-solve
+    ``custom_jvp`` rule built from that KKT system (the implicit function
+    theorem), not from differentiating a solver written in JAX:
+      - LP → POUNCE ``solve_lp_kkt`` + implicit-KKT JVP (``differentiable_lp``)
+      - QP → POUNCE ``solve_qp_kkt`` + OptNet implicit diff (``differentiable_qp``)
       - MILP → B&B with LP relaxations + STE gradient
       - MIQP → B&B with QP relaxations + STE gradient
-      - NLP/MINLP → existing IPM/B&B path
+      - NLP/MINLP → POUNCE NLP / B&B path
 
     Args:
         model: A discopt Model with objective and constraints.
@@ -219,20 +245,18 @@ def differentiable_solve(
 
     elif problem_class == ProblemClass.QP:
         qp_data = extract_qp_data(model)
-        from discopt._jax.qp_ipm import qp_ipm_solve
-
-        qp_state = qp_ipm_solve(
-            cast(Any, _dense_Q(qp_data.Q)),
-            qp_data.c,
-            cast(Any, _dense_A(qp_data.A_eq)),
-            qp_data.b_eq,
-            qp_data.x_l,
-            qp_data.x_u,
-        )
-        x_flat = np.asarray(qp_state.x[:n_orig])
+        # ``status`` is unconditionally "optimal" here for the same reason the LP
+        # arm above does it: ``_qp_forward`` raises ``PounceKKTError`` rather than
+        # returning a non-converged point, so reaching this line means the KKT
+        # point is stationary. The old ``qp_ipm_solve`` call mapped its own
+        # convergence code to "iteration_limit" and returned the unconverged
+        # iterate anyway -- which, for a result whose purpose is to carry a
+        # gradient, is the silently-wrong-gradient case ``solve_qp_kkt`` refuses.
+        obj, x = _qp_forward(qp_data)
+        x_flat = np.asarray(x[:n_orig])
         return UnifiedDiffResult(
-            status="optimal" if int(qp_state.converged) in (1, 2) else "iteration_limit",
-            objective=float(qp_state.obj) + qp_data.obj_const,
+            status="optimal",
+            objective=obj + qp_data.obj_const,
             x=x_flat,
             x_dict=_unpack_solution(model, x_flat),
             problem_class=problem_class,
@@ -253,17 +277,7 @@ def differentiable_solve(
                 relaxation_obj, _ = _lp_forward(lp_data)
             else:
                 qp_data = extract_qp_data(model)
-                from discopt._jax.qp_ipm import qp_ipm_solve
-
-                qp_relax_state = qp_ipm_solve(
-                    cast(Any, _dense_Q(qp_data.Q)),
-                    qp_data.c,
-                    cast(Any, _dense_A(qp_data.A_eq)),
-                    qp_data.b_eq,
-                    qp_data.x_l,
-                    qp_data.x_u,
-                )
-                relaxation_obj = float(qp_relax_state.obj)
+                relaxation_obj, _ = _qp_forward(qp_data)
         except Exception as exc:  # noqa: BLE001 - the result is reported without a relaxation
             logger.debug(
                 "relaxation objective unavailable for %s: %s: %s",

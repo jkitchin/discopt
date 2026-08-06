@@ -119,7 +119,7 @@ Two in-house engines, one dispatch seam:
 | Engine | Role |
 |---|---|
 | **POUNCE** (Rust) | The workhorse. All production LP/QP/NLP relaxation solves, single and CPU-batch. The only third-party-visible numerical solver. |
-| **JAX LP/QP IPM** (`_jax/lp_ipm.py`, `_jax/qp_ipm.py`) | The differentiable LP/QP path only: custom_jvp / KKT implicit differentiation (T22/T23), and vmap-compatible evaluation kept alive for opportunistic GPU use (§4). Not a packaging dependency — it ships with discopt. The general **NLP** JAX IPM (`_jax/ipm.py`) has been deleted (see the header note and §12); NLP relaxations run on POUNCE. |
+| **JAX** (`_jax/differentiable_lp.py`, `differentiable_qp.py`, `pounce_layer.py`) | Differentiation only — no solving. The forward solve for the differentiable LP/QP path is POUNCE's KKT solve (`solve_lp_kkt` / `solve_qp_kkt`); JAX supplies the `custom_jvp` implicit-KKT derivative rule (T22/T23) on top of it. Every pure-JAX IPM kernel is now deleted: `_jax/ipm.py` and `lp_ipm.py` (#370), `qp_ipm.py` (#75). |
 
 The existing seam `python/discopt/solvers/nlp_backend.py` extends to cover
 LP and QP dispatch, so no call site knows which engine is in use.
@@ -626,7 +626,8 @@ shared seam and falls back to whichever backend is importable.
     taking the standard-form LP as zero-copy numpy (C-contiguous `A`). The
     Python B&B can now call the Rust crossover and consume the basis.
     `test_rust_crossover.py` drives the real pipeline (`extract_lp_data` →
-    `lp_ipm_solve` interior optimum → Rust crossover → basis): objective and
+    interior optimum → Rust crossover → basis; the forward solve was
+    `lp_ipm_solve` when this landed and is POUNCE's `solve_lp_kkt` since #370): objective and
     feasibility preserved and lands on a vertex; matches the numpy reference's
     *properties* (both reach a valid vertex, tie-breaking aside); the recovered
     basis is valid (reconstructs the vertex); and it reproduces HiGHS's
@@ -976,12 +977,17 @@ test suite were repointed off the JAX IPM (and off cyipopt) onto POUNCE.
 solves each McCormick relaxation through POUNCE (`_solve_relaxation_with_pounce`),
 so the NLP interior-point stack has no remaining consumer. JAX remains the
 indispensable **autodiff substrate** (model Hessians/Jacobians/∂p, McCormick
-envelopes, the custom_vjp adjoint solves), and the **LP/QP** IPM kernels
-(`_jax/lp_ipm.py`, `_jax/qp_ipm.py`) survive solely to provide the differentiable
-LP/QP relaxation-gradient path (`differentiable_solve.py`) — they are no longer a
-production node-solve engine. (Earlier drafts of this section claimed the
-`ipm_solve` core was kept to fuse the McCormick-NLP relaxation on GPU/vmap; that
-was superseded when the relaxation moved to POUNCE.)
+envelopes, the custom_vjp adjoint solves) — but it no longer *solves* anything.
+The **LP/QP** IPM kernels are gone too: `_jax/lp_ipm.py` with #370, `_jax/qp_ipm.py`
+with #75. The differentiable LP/QP path (`differentiable_solve.py`) now takes its
+forward point from POUNCE (`solve_lp_kkt` / `solve_qp_kkt`) and gets its gradient
+from the `custom_jvp` implicit-KKT rule, which is where differentiability always
+actually came from — differentiating a solution map needs the KKT system at the
+solution and a linear solve, not a solver written in JAX. (Earlier drafts of this
+section claimed the `ipm_solve` core was kept to fuse the McCormick-NLP relaxation
+on GPU/vmap; that was superseded when the relaxation moved to POUNCE. Later drafts
+claimed the LP/QP kernels survive for the differentiable path; that was superseded
+by #370 and #75.)
 
 ## 13. All-Rust spatial-B&B relaxation (in progress)
 
