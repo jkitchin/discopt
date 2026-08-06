@@ -46,10 +46,10 @@ plugin: `discopt-doe-install-skill`.)
 
 ### Agents (`~/.claude/agents/`)
 
-18 domain-expert subagents covering modeling and the solver stack:
+17 domain-expert subagents covering modeling and the solver stack:
 `amp-expert`, `benchmarking-expert`, `convex-relaxation-expert`,
 `convexity-detection-expert`, `differentiability-expert`, `estimation-expert`, `heuristics-expert`,
-`highs-expert`, `ipopt-expert`, `jax-ipm-expert`,
+`highs-expert`, `ipopt-expert`,
 `llm-feature-expert`, `minlp-solver-expert`,
 `modeling-expert`, `multiobjective-expert`, `nn-embedding-expert`,
 `presolve-expert`, `robust-opt-expert`, `scip-expert`.

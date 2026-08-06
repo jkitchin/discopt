@@ -15327,48 +15327,57 @@ def _declared_box_relaxed_to_ipm_inf(bounds) -> bool:
 
 
 def _solve_qp(model: Model, t_start: float, prefer_pounce: bool = False) -> SolveResult:
-    """Solve a QP with discopt's own engines — POUNCE, then the JAX QP IPM.
+    """Solve a QP with POUNCE, or report an error. There is no second engine.
 
     HiGHS-free by design (issue #359 / pure-Rust goal): a continuous QP is solved
-    by POUNCE (the pure-Rust Ipopt port), and a POUNCE failure or a non-converged
-    solve degrades to discopt's JAX QP interior-point method — never to HiGHS. The
-    POUNCE engine handles pure-continuous QPs only; MIQPs return ``None`` from it
-    and route to the self-hosted B&B path. ``prefer_pounce`` is retained for
-    call-site compatibility but no longer selects between backends (there is only
-    one default backend now).
+    by POUNCE (the pure-Rust Ipopt port), never by HiGHS. The POUNCE engine
+    handles pure-continuous QPs only; MIQPs return ``None`` from it and route to
+    the self-hosted B&B path. ``prefer_pounce`` is retained for call-site
+    compatibility but no longer selects between backends (there is only one
+    backend).
 
     Soundness: QP duals/reduced costs are reported, never consumed for bound
     tightening (OBBT/DBBT read the LP oracles), so the only hazard is a drifted
     objective on an unconverged solve (#145). ``_solve_qp_matrix`` guards it — the
     returned point is re-checked for primal feasibility and for a stationary KKT
-    residual, degrading to the next engine (the JAX IPM) on failure.
+    residual, and a point failing either check is refused.
 
-    No-rescue tracking: with HiGHS gone the JAX IPM is a weak last resort (it can
-    return ``iteration_limit`` even on easy QPs). A POUNCE non-result is therefore
-    logged at WARNING with the marker ``qp-pounce-no-result`` so we can measure how
-    often the HiGHS-free path has no working engine and decide later whether a
-    pure-Rust drift-rescue is warranted (issue #359).
+    Why the JAX QP IPM rescue was removed rather than ported: it did not degrade
+    gracefully, it degraded *past the guard*. ``_solve_qp_matrix`` rejects a POUNCE
+    point that fails feasibility or KKT stationarity; ``_solve_qp_jax`` then
+    re-solved the same QP and reported ``status="optimal"`` with ``bound=obj_val``,
+    ``gap=0`` and ``convex_fast_path=True`` on nothing but its own internal
+    convergence flag — no feasibility check, no stationarity check. So the one
+    situation that could reach it was exactly the situation where a verified
+    engine's answer had just been thrown out, and it answered with an unverified
+    certificate. Under the §1 rule that the solver's product is its certificate,
+    that is worse than having no rescue at all.
+
+    The independence argument for keeping a second implementation does not survive
+    either: ``pounce-solver`` is a hard dependency (``pyproject.toml`` core
+    ``dependencies``, not an extra), so the "POUNCE is not installed" arm was
+    unreachable in any supported install.
+
+    A POUNCE non-result is still logged at WARNING with the marker
+    ``qp-pounce-no-result`` (issue #359) — now as the error explanation rather than
+    as fallback telemetry.
     """
     del prefer_pounce  # no HiGHS fallback to order against; kept for signature compat
     result = _solve_qp_pounce(model, t_start)
     if result is not None:
         return result
-    from discopt.solvers.qp_pounce import POUNCE_AVAILABLE
-
-    if POUNCE_AVAILABLE:
-        logger.warning(
-            "HiGHS-free QP [qp-pounce-no-result]: POUNCE was available but returned "
-            "no usable result (solve failure or feasibility/convergence guard "
-            "rejection); falling back to the JAX QP IPM last resort, which has no "
-            "robust rescue. Track how often this fires (issue #359)."
-        )
-    else:
-        logger.warning(
-            "HiGHS-free QP [qp-pounce-unavailable]: pounce-solver is not installed, "
-            "so the QP path has no primary engine and will use the JAX QP IPM last "
-            "resort. Install pounce-solver for a working QP solver."
-        )
-    return _solve_qp_jax(model, t_start)
+    logger.error(
+        "HiGHS-free QP [qp-pounce-no-result]: POUNCE returned no usable result "
+        "(solve failure, or the feasibility/KKT-stationarity guard rejected its "
+        "point). Reporting an error rather than an unverified answer: the removed "
+        "JAX QP IPM rescue issued status='optimal' with a bound and a zero gap "
+        "without checking either condition (issue #359)."
+    )
+    return SolveResult(
+        status="error",
+        wall_time=time.perf_counter() - t_start,
+        node_count=0,
+    )
 
 
 def _solve_qp_pounce(
@@ -15945,60 +15954,6 @@ def _solve_milp_gurobi(
             node_count=result.node_count,
         )
     return SolveResult(status="error", wall_time=wall_time, node_count=result.node_count)
-
-
-def _solve_qp_jax(model: Model, t_start: float) -> SolveResult:
-    """Solve a QP using the pure-JAX QP IPM."""
-    from discopt._jax.problem_classifier import extract_qp_data
-    from discopt._jax.qp_ipm import qp_ipm_solve
-
-    t_jax_start = time.perf_counter()
-    qp_data = extract_qp_data(model)
-    state = qp_ipm_solve(
-        cast(Any, _dense_Q(qp_data.Q)),
-        qp_data.c,
-        cast(Any, _dense_A(qp_data.A_eq)),
-        qp_data.b_eq,
-        qp_data.x_l,
-        qp_data.x_u,
-    )
-    jax_time = time.perf_counter() - t_jax_start
-    wall_time = time.perf_counter() - t_start
-
-    from discopt.modeling.core import ObjectiveSense
-
-    n_orig = sum(v.size for v in model._variables)
-    x_flat = np.asarray(state.x[:n_orig])
-    obj_val = float(state.obj) + qp_data.obj_const
-
-    # Negate objective back for maximization (QP solver always minimizes)
-    assert model._objective is not None
-    if model._objective.sense == ObjectiveSense.MAXIMIZE:
-        obj_val = -obj_val
-
-    conv = int(state.converged)
-    if conv in (1, 2):
-        status = "optimal"
-    elif conv == 3:
-        status = "iteration_limit"
-    else:
-        status = "error"
-
-    sr = SolveResult(
-        status=status,
-        objective=obj_val,
-        bound=obj_val if status == "optimal" else None,
-        gap=_optimal_relative_gap(obj_val) if status == "optimal" else None,
-        x=_unpack_solution(model, x_flat),
-        wall_time=wall_time,
-        node_count=0,
-        rust_time=0.0,
-        jax_time=jax_time,
-        python_time=wall_time - jax_time,
-    )
-    # QP dispatch only reaches this function for detected convex QPs.
-    sr.convex_fast_path = True
-    return sr
 
 
 def _pounce_recover_node_bound(

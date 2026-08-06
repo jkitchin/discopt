@@ -111,7 +111,7 @@ Mirrors the Python API's `SolveResult` but adds benchmark metadata: `instance_na
 
 ## When to Defer
 
-- **"Why did a specific solve fail (algorithmic diagnosis)"** → `minlp-solver-expert`, `ipopt-expert`, `jax-ipm-expert` as appropriate.
+- **"Why did a specific solve fail (algorithmic diagnosis)"** → `minlp-solver-expert` or `ipopt-expert` as appropriate.
 - **"Relaxation gap too loose"** → `convex-relaxation-expert`.
 - **"Correctness failure: which part of the code is wrong"** → `minlp-solver-expert` for paths, `convex-relaxation-expert` for bounds, `presolve-expert` for bound tightening.
 - **"Adversary / fuzz-style test generation"** → the `/adversary` slash command + `adversary-agent` in the agents registry.

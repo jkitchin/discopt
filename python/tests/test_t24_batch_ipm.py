@@ -251,7 +251,7 @@ class TestBatchMILPViaLP:
 class TestBatchMIQPViaQP:
     """Verify MIQP problems solved correctly through the QP relaxation path."""
 
-    def test_batch_miqp_via_qp_ipm(self) -> None:
+    def test_batch_miqp(self) -> None:
         """Simple MIQP: min (x-2.3)^2 + (y-1.7)^2, x,y integer in [0,5].
 
         Optimal integers: x=2, y=2. obj=(0.3)^2+(0.3)^2=0.18.

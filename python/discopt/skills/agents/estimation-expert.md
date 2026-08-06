@@ -92,4 +92,4 @@ Each response key must exist in `ExperimentModel.responses`. Extra keys raise `V
 - **Ranking which parameters to estimate, Yao ranking, subset selection** → `estimability-expert`.
 - **Comparing rival models by AIC/BIC/LRT/Vuong** → `model-discrimination-expert` (post-estimation selection).
 - **Designing the NEXT experiment to tighten CIs** → `doe-expert`.
-- **Underlying NLP issues (restoration failures, warm start)** → `ipopt-expert` / `jax-ipm-expert`.
+- **Underlying NLP issues (restoration failures, warm start)** → `ipopt-expert`.

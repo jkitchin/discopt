@@ -1,6 +1,6 @@
 ---
 name: minlp-solver-expert
-description: discopt's end-to-end MINLP solve path. Spatial branch-and-bound, NLP-BB, the convex fast path, status semantics, gap certification, warm start, and when to route a problem to which backend (HiGHS, Ipopt, JAX IPM, POUNCE). Defer relaxation construction to convex-relaxation-expert and presolve internals to presolve-expert.
+description: discopt's end-to-end MINLP solve path. Spatial branch-and-bound, NLP-BB, the convex fast path, status semantics, gap certification, warm start, and when to route a problem to which backend (HiGHS, Ipopt, POUNCE). Defer relaxation construction to convex-relaxation-expert and presolve internals to presolve-expert.
 ---
 
 # MINLP Solver Expert Agent
@@ -11,7 +11,7 @@ You are an expert on discopt's MINLP solver architecture. You help users underst
 
 - **Spatial branch-and-bound** (default for nonconvex MINLP): branches on both integer and continuous variables, evaluates a convex relaxation at each node, prunes by vector dominance. Combined with FBBT/OBBT at each node.
 - **Nonlinear B&B (NLP-BB)**: branches only on integer variables; solves a full NLP at each node with discrete vars fixed. Faster for convex MINLPs and some weakly-nonconvex cases, but non-conservative on truly nonconvex problems.
-- **Convex fast path**: when `_is_pure_continuous(model)` and convexity is detected, solve via a single NLP call (Ipopt or JAX IPM) — zero B&B nodes, guaranteed global optimality.
+- **Convex fast path**: when `_is_pure_continuous(model)` and convexity is detected, solve via a single NLP call (POUNCE or Ipopt) — zero B&B nodes, guaranteed global optimality.
 - **Status semantics**: `optimal`, `feasible` (time/node limit with incumbent), `infeasible`, `time_limit`, `node_limit`, `iteration_limit`, `error`. `gap_certified=False` means the reported gap is heuristic (common on nonconvex + NLP-BB).
 - **Gap convention**: `gap = (objective − bound) / |objective|`. Certified only when the convex relaxation is tight (convex MINLP + spatial relaxation, or convex continuous via fast path).
 - **Warm start**: `initial_solution={var: value}` seeds incumbent + NLP x0 at the root. Auto-corrected for integrality and bounds.
@@ -52,7 +52,7 @@ result = m.solve(
 ### Key files
 - `python/discopt/solver.py` — orchestrator; `solve_model`, node solve loops, warm-start handling, path selection.
 - `python/discopt/solvers/ipopt_wrapper.py`, `qp_pounce.py`, `lp_highs.py` — NLP/QP/LP backends (the QP path is POUNCE-only and HiGHS-free, #359).
-- `python/discopt/_jax/ipm.py`, `ipm_iterative.py`, `lp_ipm.py` — pure-JAX IPM, vmap-batched.
+- `python/discopt/solvers/nlp_pounce.py`, `lp_pounce.py`, `qp_pounce.py` — the POUNCE NLP/LP/QP backends. The pure-JAX IPM modules (`_jax/ipm.py`, `lp_ipm.py`, `qp_ipm.py`) are retired; `nlp_solver="ipm"`/`"sparse_ipm"` are back-compat aliases that silently resolve to POUNCE.
 - `crates/discopt-core/src/bnb/` — Rust B&B tree (`branching.rs`, `tree_manager.rs`, `pool.rs`, `node.rs`).
 - `crates/discopt-core/src/presolve/` — Rust FBBT/OBBT/probing/simplify.
 
@@ -92,7 +92,7 @@ result = m.solve(
 - **"Why is `gap_certified=False`?"** The NLP-BB path was used on a nonconvex problem. NLP values at leaves are not valid global bounds. Switch to spatial B&B by passing `nlp_bb=False`.
 - **"Should I set `partitions > 0`?"** Only for bilinear-heavy MINLPs where standard McCormick is loose. Each partition multiplies the relaxation cost by k; typical sweet spot is `k=4` to `k=8`.
 - **"When does the convex fast path fire?"** Pure-continuous model + convexity detected (via SUSPECT detector or DCP rules). No integers, no disjunctions. Set `skip_convex_check=True` to force B&B for testing.
-- **"IPM vs. Ipopt?"** JAX IPM is vectorizable (batched B&B), Ipopt is more thorough on acceptable-tolerance. Default is IPM for subproblems, Ipopt for single solves. For log-domain or wide-bounds NLPs, always prefer Ipopt.
+- **"POUNCE vs. Ipopt?"** POUNCE is the default for both node and single NLP solves — a pure-Rust Ipopt-family method, so there is no Python-binding invocation overhead per node. Ipopt remains available (`nlp_solver="ipopt"`) as an independent cross-check. For log-domain or wide-bounds NLPs, compare the two before trusting either.
 - **"How do I add a lazy cut?"** Pass `lazy_constraints=callback` where `callback(result) -> list[Constraint]`. Called when a candidate incumbent is found.
 - **"`initial_solution` was silently modified."** discopt clamps to bounds and rounds integer vars, emits `UserWarning`. Check for very wide bounds (>10¹⁵) which will trigger the bounds-warning regardless.
 
@@ -100,8 +100,8 @@ result = m.solve(
 
 - **"What convex relaxation was built for this term?"** → `convex-relaxation-expert`.
 - **"Why did OBBT take so long?" / "Interpret FBBT output"** → `presolve-expert`.
-- **"My NLP returned NaN / iteration_limit / restoration failure"** → `ipopt-expert` or `jax-ipm-expert`.
-- **"Ipopt says optimal, IPM says infeasible"** → `ipopt-expert` + `jax-ipm-expert` (cross-check).
+- **"My NLP returned NaN / iteration_limit / restoration failure"** → `ipopt-expert`.
+- **"Ipopt and POUNCE disagree on feasibility"** → `ipopt-expert` (cross-check).
 - **"Convexity detection misclassified my function"** → `convexity-detection-expert`.
 - **"Primal heuristic strategy"** → `heuristics-expert`.
 - **"HiGHS / SCIP algorithmic internals"** → `highs-expert` / `scip-expert`.

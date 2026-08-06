@@ -16,7 +16,7 @@ import numpy as np
 
 if TYPE_CHECKING:
     # Annotation-only: ``LPData``/``QPData`` are typed as jnp arrays to match the
-    # JAX IPM consumers (``qp_ipm_solve`` etc.); at runtime they hold numpy from
+    # JAX differentiation consumers (``differentiable_qp`` etc.); at runtime they hold numpy from
     # the JAX-free extractors. ``from __future__ import annotations`` keeps these
     # strings, so no JAX import happens at module load.
     import jax.numpy as jnp
@@ -166,9 +166,10 @@ def dense_Q(Q) -> np.ndarray:
     objective touches 101 — cannot hold a dense ``(n, n)`` ``Q``; that is 91 GB).
 
     Returns numpy, which is what these fields actually hold at runtime (the module
-    header notes ``QPData`` is *annotated* for the JAX IPM consumers but populated
-    by the JAX-free extractors). The four call sites that feed ``qp_ipm_solve``
-    cast at the boundary rather than have this function lie about its type.
+    header notes ``QPData`` is *annotated* for the JAX differentiation consumers but
+    populated by the JAX-free extractors). The call sites that feed POUNCE's
+    ``solve_qp_kkt`` cast at the boundary rather than have this function lie about
+    its type.
 
     Every consumer must go through this rather than calling ``np.asarray`` on ``Q``
     directly. ``np.asarray`` on a scipy sparse matrix does **not** raise — it
@@ -213,8 +214,9 @@ def dense_A(A) -> np.ndarray:
 
     Returns numpy, which is what these fields actually hold at runtime (the module
     header notes the data classes are *annotated* for the JAX consumers but
-    populated by the JAX-free extractors); the sites that feed ``qp_ipm_solve``
-    cast at that boundary rather than have this function lie about its type.
+    populated by the JAX-free extractors); the sites that feed POUNCE's
+    ``solve_qp_kkt`` cast at that boundary rather than have this function lie
+    about its type.
     """
     try:
         import scipy.sparse as _sp
@@ -262,8 +264,9 @@ def _get_variable_bounds(model: Model):
     """Extract flat lower and upper bounds from model variables.
 
     Returns numpy arrays to avoid JAX device-transfer overhead during
-    extraction.  The caller (``qp_ipm_solve`` etc.) converts to
-    jnp.array at solve time.
+    extraction.  POUNCE's ``solve_lp_kkt``/``solve_qp_kkt`` consume numpy
+    directly; only the ``custom_jvp`` differentiation wrappers convert to
+    ``jnp.array``, and only for the tangent solve.
     """
     lb_parts = []
     ub_parts = []

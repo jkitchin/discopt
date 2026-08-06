@@ -120,5 +120,5 @@ installed separately by `discopt-dev`, not bundled with the package.)
 
 - **"Ordinary modeling question"** → `modeling-expert`.
 - **"Why did the solve fail / status semantics"** → `minlp-solver-expert`.
-- **"NLP backend failures"** → `ipopt-expert` / `jax-ipm-expert`.
+- **"NLP backend failures"** → `ipopt-expert`.
 - **"Claude Code slash commands (mechanics, not authoring)"** → user runs `discopt install-skills`.

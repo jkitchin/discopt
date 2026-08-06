@@ -53,29 +53,9 @@ class TestControlsCertify:
 # ---------------------------------------------------------------------------
 # Force a non-KKT (code-3) relaxation: gap must not be certified
 # ---------------------------------------------------------------------------
-class _Code3State:
-    """Stand-in IPM state: real (feasible) obj/x, but flagged max-iter."""
-
-    def __init__(self, state):
-        self.converged = np.full_like(np.asarray(state.converged), 3)
-        self.obj = np.asarray(state.obj)
-        self.x = np.asarray(state.x)
-
-
-def _force_code3(monkeypatch, module, name):
-    """Wrap one IPM entry point to relabel every result max-iter (non-KKT).
-
-    Note: only one path (serial or batch) is patched per test, to a config
-    that uses it, because mixing a relabeled root with the other path is a
-    mock artifact (the stand-in state perturbs the mixed serial/batch search,
-    not the decertification under test).
-    """
-    orig = getattr(module, name)
-
-    def wrapper(*a, **k):
-        return _Code3State(orig(*a, **k))
-
-    monkeypatch.setattr(module, name, wrapper)
+# ``_Code3State``/``_force_code3`` were removed with ``_jax/qp_ipm.py``: they
+# relabelled a JAX IPM state as max-iter, and both remaining users now patch the
+# live POUNCE node path (``_pounce_qp_relaxation_nodes``) instead.
 
 
 class TestNonKKTRecoveredByPounce:
@@ -88,13 +68,33 @@ class TestNonKKTRecoveredByPounce:
     The MIQP case still exercises the QP node path."""
 
     def test_miqp_batch_non_kkt_recovered(self, monkeypatch):
+        # Patches the live POUNCE node path, mirroring the decertify test below.
+        #
+        # This test used to `_force_code3` on `discopt._jax.qp_ipm.qp_ipm_solve_batch`
+        # and was VACUOUS: MIQP node relaxations moved to POUNCE, so nothing called
+        # that entry point. Measured before the fix -- wrapping it with a counter and
+        # running this exact solve gave 0 invocations, and the solve returned
+        # `optimal` on its own. It asserted the recovery path worked while never
+        # reaching it. The JAX QP IPM has since been deleted outright.
+        #
+        # The real scenario: nodes come back non-clean (untrusted), and
+        # `_pounce_recover_node_bound` -- left live here, unlike in the decertify
+        # test -- re-solves them into KKT-valid bounds, so the gap still certifies.
         import pytest as _pytest
 
         _pytest.importorskip("pounce")
-        import discopt._jax.qp_ipm as qp_ipm
 
-        _force_code3(monkeypatch, qp_ipm, "qp_ipm_solve_batch")
+        _real_nodes = S._pounce_qp_relaxation_nodes
+        seen = {"n": 0}
+
+        def _untrusted(*a, **k):
+            clean, infeasible, obj_vals, x_vals = _real_nodes(*a, **k)
+            seen["n"] += 1
+            return np.zeros_like(clean), infeasible, obj_vals, x_vals
+
+        monkeypatch.setattr(S, "_pounce_qp_relaxation_nodes", _untrusted)
         r = _miqp().solve(time_limit=60, batch_size=8)
+        assert seen["n"] > 0, "the patched POUNCE node path was never called"
         assert r.status == "optimal"
         assert r.gap_certified is True
         assert abs(r.objective - 0.18) < 1e-3

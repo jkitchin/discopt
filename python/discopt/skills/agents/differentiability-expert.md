@@ -100,7 +100,6 @@ The custom VJP is defined via `_make_jax_differentiable_solve` so `jax.grad` / `
 ## When to Defer
 
 - **"Compute the envelope-theorem gradient of a DoE objective"** → `doe-expert` (uses this machinery internally).
-- **"JAX IPM internals"** → `jax-ipm-expert`.
 - **"Restoration-phase issues prevent convergence to the KKT point"** → `ipopt-expert`.
 - **"Add a new parametric reformulation"** → `modeling-expert`.
-- **"Differentiable LP solver internals"** → `highs-expert` (if via HiGHS) or `jax-ipm-expert` (if via JAX IPM).
+- **"Differentiable LP/QP solver internals"** → the forward solve is POUNCE's KKT solve (`solvers/lp_pounce.py`, `solvers/qp_pounce.py`); the derivative is the `custom_jvp` implicit-KKT rule in `_jax/differentiable_lp.py` / `_jax/differentiable_qp.py`.
