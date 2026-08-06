@@ -27,7 +27,6 @@ import discopt.modeling as dm
 import numpy as np
 import pytest
 from discopt import Model
-from discopt._nl_expr_compiler import UnsupportedForTape
 from discopt._tape_nlp_evaluator import (
     TapeNLPEvaluator,
     build_evaluator,
@@ -443,14 +442,165 @@ def test_pounce_usable_reports_false_on_a_build_without_nlexpr(monkeypatch):
     assert T.pounce_usable() is True
 
 
-@pytest.mark.unit
-def test_gauss_newton_is_refused_not_approximated():
-    """``2 J^T J`` is a different matrix from the exact Hessian; never silently swap."""
-    m, _x, _y = _xy_model()
+# ── Gauss-Newton on the tape (was blocker #3 in docs/dev/jax-removal-plan.md) ──
+#
+# This used to be a loud refusal: `2 JᵀJ` is a different matrix from the exact
+# Hessian, and swapping one for the other silently is a wrong derivative. The
+# refusal was correct but incomplete — pounce has no "residual" concept, but its
+# sparse *constraint* Jacobian is the same object under another name, so taping
+# r(x) as the constraint rows of an auxiliary NlProblem yields ∂r/∂x directly.
+# These tests are what makes the swap safe rather than silent.
+
+
+def _gn_ls_model(with_constraint: bool = False):
+    """Nonlinear least squares: shared parameters, so ``JᵀJ`` is genuinely dense."""
+    m = Model()
+    a = m.continuous("a", lb=-5, ub=5)
+    b = m.continuous("b", lb=-5, ub=5)
+    c = m.continuous("c", lb=-5, ub=5)
+    ts = [0.1, 0.5, 1.0, 1.7, 2.4]
+    ys = [1.2, 1.9, 2.3, 2.1, 1.5]
+    # NOT builtin sum(): it seeds with int 0, and that leading `0 +` makes
+    # extract_residuals decline, which would silently test the exact path here.
+    expr = (a * dm.exp(-b * ts[0]) + c - ys[0]) ** 2
+    for t, y in zip(ts[1:], ys[1:]):
+        expr = expr + (a * dm.exp(-b * t) + c - y) ** 2
+    m.minimize(expr)
+    if with_constraint:
+        m.subject_to(a * b + c**2 <= 4.0)
     m._gauss_newton_hessian = True
-    with pytest.raises(UnsupportedForTape, match="Gauss-Newton"):
-        TapeNLPEvaluator(m)
-    assert try_build(m) is None
+    return m
+
+
+@pytest.mark.unit
+def test_gauss_newton_is_supported_not_refused():
+    """Regression: the tape used to raise ``UnsupportedForTape`` and degrade to JAX."""
+    m = _gn_ls_model()
+    tape = TapeNLPEvaluator(m)
+    assert tape.is_gauss_newton is True
+    assert try_build(m) is not None
+
+
+@pytest.mark.unit
+def test_gauss_newton_objective_hessian_matches_jax():
+    """``2 JᵀJ`` from the aux tape vs the JAX arm — the entry experiment, pinned."""
+    from discopt._jax.nlp_evaluator import NLPEvaluator
+
+    m = _gn_ls_model()
+    tape = TapeNLPEvaluator(m)
+    jax_ev = NLPEvaluator(m, gauss_newton=True)
+    assert jax_ev.is_gauss_newton is True
+
+    rng = np.random.default_rng(11)
+    checked = 0
+    for _ in range(5):
+        pt = rng.uniform(-1.5, 1.5, tape.n_variables)
+        lam = np.zeros(tape.n_constraints)
+        H_tape = tape.evaluate_lagrangian_hessian(pt, 1.0, lam)
+        H_jax = np.asarray(jax_ev.evaluate_lagrangian_hessian(pt, 1.0, lam))
+        np.testing.assert_allclose(H_tape, H_jax, rtol=1e-9, atol=1e-9)
+        checked += 1
+    assert checked == 5, "probe must have compared something (CLAUDE.md §6)"
+
+
+@pytest.mark.unit
+def test_gauss_newton_keeps_exact_constraint_curvature():
+    """Only the OBJECTIVE term is approximated; ``Σ λᵢ ∇²gᵢ`` stays exact."""
+    from discopt._jax.nlp_evaluator import NLPEvaluator
+
+    m = _gn_ls_model(with_constraint=True)
+    tape = TapeNLPEvaluator(m)
+    jax_ev = NLPEvaluator(m, gauss_newton=True)
+    assert tape.n_constraints == 1
+
+    rng = np.random.default_rng(12)
+    pt = rng.uniform(-1.0, 1.0, tape.n_variables)
+    lam = np.array([0.85])
+
+    # obj_factor=0 isolates the constraint block, which must be EXACT.
+    H_tape = tape.evaluate_lagrangian_hessian(pt, 0.0, lam)
+    H_jax = np.asarray(jax_ev.evaluate_lagrangian_hessian(pt, 0.0, lam))
+    np.testing.assert_allclose(H_tape, H_jax, rtol=1e-9, atol=1e-9)
+    assert np.abs(H_tape).max() > 1e-9, "constraint curvature must be nonzero here"
+
+    # And with both terms present.
+    np.testing.assert_allclose(
+        tape.evaluate_lagrangian_hessian(pt, 1.0, lam),
+        np.asarray(jax_ev.evaluate_lagrangian_hessian(pt, 1.0, lam)),
+        rtol=1e-9,
+        atol=1e-9,
+    )
+
+
+@pytest.mark.unit
+def test_gauss_newton_declared_structure_loses_no_value():
+    """The silent-drop guard: every GN nonzero must land inside the DECLARED COO.
+
+    ``hessian_structure`` is declared once. ``2 JᵀJ`` fills wherever two residuals
+    share a variable, so a value outside the declared pattern is dropped with no
+    error — a wrong Hessian that reads as a pass. Reconstructing the dense matrix
+    from the COO and comparing against the dense path is what catches that.
+    """
+    m = _gn_ls_model(with_constraint=True)
+    tape = TapeNLPEvaluator(m)
+    rng = np.random.default_rng(13)
+    pt = rng.uniform(-1.0, 1.0, tape.n_variables)
+    lam = np.array([0.4])
+
+    rows, cols = tape.hessian_structure()
+    assert np.all(np.asarray(rows) >= np.asarray(cols)), "structure must be lower triangle"
+    vals = tape.evaluate_hessian_values(pt, 1.0, lam)
+    assert len(vals) == len(rows)
+
+    dense = tape.evaluate_lagrangian_hessian(pt, 1.0, lam)
+    n = tape.n_variables
+    rebuilt = np.zeros((n, n))
+    np.add.at(rebuilt, (np.asarray(rows), np.asarray(cols)), vals)
+    rebuilt = rebuilt + np.tril(rebuilt, -1).T
+    np.testing.assert_allclose(rebuilt, dense, rtol=0, atol=0)
+    # Nothing was dropped: the dense GN Hessian is not all-zero off the diagonal.
+    assert np.abs(dense - np.diag(np.diag(dense))).max() > 1e-9
+
+
+@pytest.mark.unit
+def test_gauss_newton_hessian_is_psd_and_differs_from_exact():
+    """``2 JᵀJ`` is PSD by construction, and away from a zero residual it is a
+    genuinely different matrix — so the approximation is really being applied."""
+    m = _gn_ls_model()
+    gn = TapeNLPEvaluator(m)
+
+    exact_model = _gn_ls_model()
+    exact_model._gauss_newton_hessian = False
+    exact = TapeNLPEvaluator(exact_model)
+    assert exact.is_gauss_newton is False
+
+    pt = np.array([1.0, 0.3, 0.5])
+    lam = np.zeros(gn.n_constraints)
+    H_gn = gn.evaluate_lagrangian_hessian(pt, 1.0, lam)
+    H_ex = exact.evaluate_lagrangian_hessian(pt, 1.0, lam)
+    assert np.min(np.linalg.eigvalsh(H_gn)) >= -1e-9
+    assert np.abs(H_gn - H_ex).max() > 1e-6
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("reason", ["maximize", "not_sum_of_squares"])
+def test_gauss_newton_declines_to_exact_hessian(reason):
+    """When GN does not apply the tape uses the EXACT Hessian, matching the JAX
+    arm's rules — so ``DISCOPT_NLP_EVAL`` cannot change which models get it."""
+    from discopt._jax.nlp_evaluator import NLPEvaluator
+
+    m = Model()
+    x = m.continuous("x", lb=-2, ub=2)
+    y = m.continuous("y", lb=-2, ub=2)
+    if reason == "maximize":
+        m.maximize((x - 1) ** 2 + (y - 2) ** 2)
+    else:
+        m.minimize(dm.exp(x) + y**2)
+    m._gauss_newton_hessian = True
+
+    tape = TapeNLPEvaluator(m)
+    assert tape.is_gauss_newton is False
+    assert NLPEvaluator(m, gauss_newton=True).is_gauss_newton is False
 
 
 @pytest.mark.unit

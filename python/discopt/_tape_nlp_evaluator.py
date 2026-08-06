@@ -20,17 +20,25 @@ evaluator over 66 in-repo corpus instances at 5 points each:
 
 against Step 2.2's bars of 1e-10 on grad/J and 1e-8 on the Hessian.
 
-Two things this refuses rather than approximates, both because the alternative is
-a silently wrong derivative:
+One thing this refuses rather than approximates, because the alternative is a
+silently wrong derivative:
 
 * **Array-valued constraint bodies.** A tape node is a scalar. ``DAEBuilder``
   collocation emits one array-valued body per block, which has no scalar
   lowering.
-* **Gauss-Newton mode.** ``H_obj ~ 2 J^T J`` over residuals has no tape analogue;
-  the tape computes the exact Hessian, which is a different matrix.
 
-Callers use :func:`try_build`, which returns ``None`` for both, so the JAX path
+Callers use :func:`try_build`, which returns ``None`` for it, so the JAX path
 stays intact underneath.
+
+**Gauss-Newton** (``H_obj ~ 2 JᵀJ``) *is* supported, and used to be a second
+refusal here. pounce has no "residual" concept, but it has a sparse *constraint*
+Jacobian, which is the same object under a different name: tape the residual
+vector ``r(x)`` as the constraint rows of an auxiliary ``NlProblem`` and read its
+``R x n`` Jacobian. Entry experiment (CLAUDE.md §4) over three least-squares
+shapes -- dense, separable, and shared/private mixed with a constraint present --
+put ``2 JᵀJ`` from that aux tape at **0.00e+00** relative error against the JAX
+``_build_gauss_newton_obj_hessian``. So this needed no pounce-repo work, only the
+observation that residuals and constraints tape identically.
 """
 
 from __future__ import annotations
@@ -183,12 +191,7 @@ class TapeNLPEvaluator:
 
         if model._objective is None:
             raise ValueError("Model has no objective set.")
-        if bool(getattr(model, "_gauss_newton_hessian", False)):
-            raise UnsupportedForTape(
-                "Gauss-Newton objective Hessian has no tape analogue; the tape "
-                "computes the exact Hessian, which is a different matrix"
-            )
-
+        self._gauss_newton_requested = bool(getattr(model, "_gauss_newton_hessian", False))
         self._model = model
         self._pounce = pounce
         self._negate = model._objective.sense == ObjectiveSense.MAXIMIZE
@@ -264,6 +267,7 @@ class TapeNLPEvaluator:
         self._hi = [float(v) for v in ub]
         self._obj_expr = obj
         self._con_exprs = cons
+        self._residual_exprs = self._build_residual_exprs()
         self._shared_problem = self._new_problem() if _nlproblem_is_thread_safe() else None
         # Only used on the per-thread fallback. thread-LOCAL storage rather than a
         # dict keyed by thread id: an unsendable pyclass also refuses to be
@@ -276,26 +280,87 @@ class TapeNLPEvaluator:
         self._generation = getattr(self, "_generation", 0) + 1
         self._jac_struct: Optional[tuple[np.ndarray, np.ndarray]] = None
         self._hess_struct: Optional[tuple[np.ndarray, np.ndarray]] = None
+        self._gn_base_map: Optional[np.ndarray] = None
+
+    def _build_residual_exprs(self) -> Optional[list]:
+        """Residual tapes ``r_i`` for Gauss-Newton, or ``None`` to use the exact Hessian.
+
+        Mirrors ``NLPEvaluator._build_gauss_newton_obj_hessian``'s applicability
+        rules exactly, so that flipping ``DISCOPT_NLP_EVAL`` cannot change whether
+        a model gets the approximation: GN is off for a MAXIMIZE objective, and
+        off when the objective is not a recognized non-negative-weighted sum of
+        squares. Both decline to the exact Hessian, which is the conservative
+        direction -- exact curvature is always a valid answer, an unwarranted
+        ``2 JᵀJ`` is not.
+        """
+        if not self._gauss_newton_requested:
+            return None
+        if self._negate:
+            logger.info(
+                "gauss_newton ignored: objective is maximized (not a minimized "
+                "sum of squares); using the exact tape Hessian."
+            )
+            return None
+
+        from discopt._jax.least_squares import extract_residuals
+
+        objective = self._model._objective
+        assert objective is not None  # refused in __init__
+        residuals = extract_residuals(objective.expression)
+        if not residuals:
+            logger.info(
+                "gauss_newton requested but the objective is not a recognized "
+                "sum of squares; using the exact tape Hessian."
+            )
+            return None
+        # Every residual is a subexpression of an objective that already lowered,
+        # so this cannot introduce a new UnsupportedForTape -- and if it somehow
+        # does, it must propagate to `try_build` and degrade to JAX, not be caught.
+        return [compile_to_nl_expr(r, self._model) for r in residuals]
 
     def _new_problem(self) -> Any:
-        return self._pounce.build_nl_problem(
+        """``(main, residual_or_None)``. The pair is built and cached together so
+        the per-thread fallback below cannot hand one thread's aux tape to another.
+        """
+        main = self._pounce.build_nl_problem(
             self._n_variables,
             self._obj_expr,
             constraints=self._con_exprs or None,
             x_l=self._lo,
             x_u=self._hi,
         )
+        residual = None
+        if self._residual_exprs is not None:
+            # Objective is a literal 0: this tape exists only for its Jacobian
+            # ∂r/∂x. pounce accepts a constant objective (verified in the entry
+            # experiment -- it was kill criterion K1).
+            residual = self._pounce.build_nl_problem(
+                self._n_variables,
+                self._pounce.NlExpr.const_(0.0),
+                constraints=self._residual_exprs,
+                x_l=self._lo,
+                x_u=self._hi,
+            )
+        return (main, residual)
 
     @property
-    def _problem(self) -> Any:
+    def _problem_pair(self) -> Any:
         if self._shared_problem is not None:
             return self._shared_problem
         cached = getattr(self._local, "entry", None)
         if cached is not None and cached[0] == self._generation:
             return cached[1]
-        prob = self._new_problem()
-        self._local.entry = (self._generation, prob)
-        return prob
+        pair = self._new_problem()
+        self._local.entry = (self._generation, pair)
+        return pair
+
+    @property
+    def _problem(self) -> Any:
+        return self._problem_pair[0]
+
+    @property
+    def _residual_problem(self) -> Any:
+        return self._problem_pair[1]
 
     def _ensure_fresh(self) -> None:
         """Rebuild if a ``Parameter.value`` moved since the tape was built."""
@@ -315,8 +380,8 @@ class TapeNLPEvaluator:
 
     @property
     def is_gauss_newton(self) -> bool:
-        # Refused in __init__; a tape is always the exact Hessian.
-        return False
+        """True when the objective Hessian uses the Gauss-Newton approximation."""
+        return self._residual_exprs is not None
 
     @property
     def variable_bounds(self) -> tuple[np.ndarray, np.ndarray]:
@@ -346,11 +411,61 @@ class TapeNLPEvaluator:
         self._ensure_fresh()
         if self._hess_struct is None:
             r, c = self._problem.hessian_structure()
-            self._hess_struct = (
-                np.asarray(r, dtype=np.int64),
-                np.asarray(c, dtype=np.int64),
-            )
+            rows = np.asarray(r, dtype=np.int64)
+            cols = np.asarray(c, dtype=np.int64)
+            if self._residual_exprs is not None:
+                rows, cols = self._widen_for_gauss_newton(rows, cols)
+            self._hess_struct = (rows, cols)
         return self._hess_struct
+
+    def _widen_for_gauss_newton(
+        self, rows: np.ndarray, cols: np.ndarray
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Union the exact-Hessian pattern with ``2 JᵀJ``'s, and index one into the other.
+
+        ``2 JᵀJ`` fills wherever two residuals share a variable, and the declared
+        structure is fixed once. In the entry experiment the GN pattern was a
+        subset of the exact pattern on all three shapes -- which is what the math
+        predicts, since ∇²(Σrᵢ²) = 2JᵀJ + 2Σrᵢ∇²rᵢ and pounce's pattern is
+        symbolic. But "predicted subset" is not "checked subset", and a value
+        outside the declared structure is dropped *silently*, which is exactly the
+        failure mode that reads as a pass. So take the union unconditionally: the
+        cost is a few structural zeros, and the alternative risks a wrong Hessian
+        with no symptom.
+        """
+        base = list(zip(rows.tolist(), cols.tolist()))
+        pattern = set(base)
+
+        jr, jc = self._residual_problem.jacobian_structure()
+        cols_by_residual: dict[int, list[int]] = {}
+        for i, j in zip(np.asarray(jr).tolist(), np.asarray(jc).tolist()):
+            cols_by_residual.setdefault(i, []).append(j)
+        for touched in cols_by_residual.values():
+            for a in touched:
+                for b in touched:
+                    if a >= b:
+                        pattern.add((a, b))
+
+        union = sorted(pattern)
+        slot = {rc: k for k, rc in enumerate(union)}
+        # Duplicates in `base` (pounce may emit an entry twice, summed) map to the
+        # same slot; `np.add.at` accumulates them, so this stays faithful.
+        self._gn_base_map = np.array([slot[rc] for rc in base], dtype=np.int64)
+        return (
+            np.array([rc[0] for rc in union], dtype=np.int64),
+            np.array([rc[1] for rc in union], dtype=np.int64),
+        )
+
+    def _gauss_newton_obj_hessian(self, x: np.ndarray) -> np.ndarray:
+        """Dense ``(n, n)`` GN objective Hessian ``2 JᵀJ``, ``J = ∂r/∂x``."""
+        prob = self._residual_problem
+        rows, cols = prob.jacobian_structure()
+        vals = np.asarray(prob.jacobian(self._x(x)), dtype=np.float64)
+        assert self._residual_exprs is not None  # guarded by every caller
+        jac = np.zeros((len(self._residual_exprs), self._n_variables), dtype=np.float64)
+        np.add.at(jac, (np.asarray(rows), np.asarray(cols)), vals)
+        gn: np.ndarray = 2.0 * (jac.T @ jac)
+        return gn
 
     def has_sparse_structure(self) -> bool:
         """Always: the tape reports exact sparsity with no probing step."""
@@ -408,12 +523,30 @@ class TapeNLPEvaluator:
         """Lower-triangle Lagrangian Hessian values, aligned to ``hessian_structure``."""
         self._ensure_fresh()
         lam = np.asarray(lambda_, dtype=float).ravel()
-        return np.asarray(
-            self._problem.hessian(
-                self._x(x), lam=[float(v) for v in lam], obj_factor=float(obj_factor)
-            ),
+        lam_list = [float(v) for v in lam]
+        if self._residual_exprs is None:
+            return np.asarray(
+                self._problem.hessian(self._x(x), lam=lam_list, obj_factor=float(obj_factor)),
+                dtype=np.float64,
+            )
+
+        # Gauss-Newton: obj_factor * 2JᵀJ + Σ λᵢ ∇²gᵢ. `obj_factor=0.0` isolates
+        # the constraint term, which keeps its EXACT curvature -- only the
+        # objective's second-derivative graph is replaced. Same split as the JAX
+        # arm's `lagrangian_hess`.
+        rows, cols = self.hessian_structure()  # also populates `_gn_base_map`
+        base = np.asarray(
+            self._problem.hessian(self._x(x), lam=lam_list, obj_factor=0.0),
             dtype=np.float64,
         )
+        assert self._gn_base_map is not None  # set by hessian_structure above
+        out = np.zeros(rows.shape[0], dtype=np.float64)
+        np.add.at(out, self._gn_base_map, base)
+        factor = float(obj_factor)
+        if factor != 0.0:
+            gn = self._gauss_newton_obj_hessian(x)
+            out += factor * gn[rows, cols]
+        return out
 
     def evaluate_lagrangian_hessian(
         self, x: np.ndarray, obj_factor: float, lambda_: np.ndarray
@@ -462,8 +595,8 @@ def try_build(model: "Model") -> Optional[TapeNLPEvaluator]:
     """Build a tape evaluator, or ``None`` when the model is unrepresentable.
 
     ``None`` means *representability* only — an array-valued body, an operator
-    with no tape lowering, ``dm.custom``, or Gauss-Newton mode. It never means a
-    numerical failure, so a caller cannot confuse "no tape" with "bad point".
+    with no tape lowering, or ``dm.custom``. It never means a numerical failure,
+    so a caller cannot confuse "no tape" with "bad point".
     """
     try:
         return TapeNLPEvaluator(model)

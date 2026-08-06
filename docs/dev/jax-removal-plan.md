@@ -469,14 +469,39 @@ check fires loudly.
 
 ### Hard blockers — no in-tree replacement (decide before Stage 2)
 
+**All four are now resolved.** Two were dissolved by scope decisions and two were
+built; #2 and #3 were additionally found to have been *mis-stated* when written —
+recorded below rather than quietly edited, per CLAUDE.md §11.
+
 1. ~~**`dm.custom` / CustomCall**~~ — **resolved by the scope decision above.**
    Out of scope; keeps JAX as a documented opt-in.
-2. **`erf`** — no pounce TapeOp, no `.nl` opcode. Needs a new TapeOp
-   (erf′ = 2/√π·e^{−x²}) or a loud refusal.
-3. **Gauss-Newton residual Hessian** (`nlp_evaluator.py:655-670`, opt-in) — pounce
-   has no residual concept; buildable as a second tape, nothing exists today.
-4. **Job 4's QP rescue** — exists *because* pounce failed, so pounce cannot replace
-   it.
+2. ~~**`erf`**~~ — **the premise was false when written, and is verifiably false
+   now.** `erf` *is* a native pounce TapeOp: `_nl_expr_compiler.py:429` carries it
+   in the `native_unary` set and lowers it as `E.erf(x)`, on pounce 0.9.0. Verified
+   numerically, not by reading: gradient agrees with the analytic
+   erf′ = 2/√π·e^{−x²} to <1e-9 and the Hessian agrees with JAX to <1e-7, over 18
+   executed assertions. No new TapeOp and no refusal was needed. (The `.nl`
+   *writer* does refuse `erf` — see the S0 note below — which is a fact about `.nl`
+   as an intermediate, not about the tape; conflating the two is what produced this
+   blocker.)
+3. ~~**Gauss-Newton residual Hessian**~~ — **misclassified as upstream work; it was
+   in-tree, and is now built.** pounce has no "residual" concept, but it has a
+   sparse *constraint* Jacobian, which is the same object under a different name:
+   tape the residual vector `r(x)` as the constraint rows of an auxiliary
+   `NlProblem` and read its `R × n` Jacobian. Entry experiment (§4) over three
+   least-squares shapes — dense, separable, and shared/private mixed with a
+   constraint present — put `2 JᵀJ` from that aux tape at **0.00e+00** relative
+   error against the JAX `_build_gauss_newton_obj_hessian`. Implemented in
+   `_tape_nlp_evaluator.py`; the constraint block keeps its exact curvature
+   (`obj_factor=0.0` isolates it), and `hessian_structure()` declares the **union**
+   of the exact and `JᵀJ` patterns rather than assuming the predicted subset —
+   a GN value landing outside the declared COO would be dropped silently.
+4. ~~**Job 4's QP rescue**~~ — **removed, not replaced.** The premise ("pounce
+   failed") was backwards: the rescue ran only when the feasibility/KKT-stationarity
+   guard had just *rejected* pounce's point, and it then issued `status="optimal"`
+   with a bound and `gap=0` on its own convergence flag alone. `_jax/qp_ipm.py`
+   (661 lines, the last pure-JAX solver in the tree) is deleted and `_solve_qp` now
+   refuses loudly.
 
 ### Stage 2 requires POUNCE-REPO work first (new S0)
 

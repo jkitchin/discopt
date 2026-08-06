@@ -4208,9 +4208,12 @@ class Model:
             If True and the objective is a non-negative-weighted sum of squares
             (e.g. ``dm.sum((C @ S - D) ** 2)`` or an explicit
             ``Σ (resid_i) ** 2``), use the Gauss-Newton objective Hessian
-            ``2 Jᵀ J`` of the residuals instead of the dense ``jax.hessian``.
-            This sidesteps the super-linear second-derivative XLA compile that
-            can dominate least-squares solves (issue #98). The Gauss-Newton
+            ``2 Jᵀ J`` of the residuals instead of the exact second derivative.
+            This sidesteps the super-linear second-derivative compile that can
+            dominate least-squares solves (issue #98). Supported on both NLP
+            evaluator backends: the JAX arm differentiates a residual function,
+            the default tape arm reads ``∂r/∂x`` from an auxiliary POUNCE tape
+            whose constraint rows are the residuals. The Gauss-Newton
             Hessian is always PSD and exact at a zero-residual solution, but
             drops the ``Σ rᵢ ∇²rᵢ`` curvature term, so it changes the Newton
             step (iteration path) without changing the KKT point converged to.
