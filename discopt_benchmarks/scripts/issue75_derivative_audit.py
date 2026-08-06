@@ -251,25 +251,24 @@ ORDERS = ["value", "grad", "hess"]
 # This is an allowlist, not a tolerance relaxation: anything NOT listed fails the
 # run, and a listed entry that has silently started passing is also reported so
 # the list cannot go stale.
-KNOWN_TAPE_RESIDUALS = {
-    ("entropy", (1e-299,), "hess"): (
-        "log's second derivative forms -1/m**2; m**2 underflows to 0 for "
-        "m < ~1.5e-154, so the finite 1/x cancellation can never happen. JAX gives "
-        "-inf at the same point and is wrong on a strictly LARGER window "
-        "(9 points vs the tape's 6), so this is pre-existing, not a regression."
-    ),
-    ("centropy", (1e-320, 1.0), "hess"): (
-        "Same squared-denominator underflow, reached through the y partial. JAX "
-        "returns all-nan here; the tape at least gets h[0][0] right."
-    ),
-    ("centropy", (1e300, 1e300), "grad"): (
-        "Documented in _nl_expr_compiler: quotient rule squares y, and y**2 = 1e600 "
-        "overflows. Deliberately not fixed -- the alternative rewrite trades an "
-        "unreachable loss (needs |y| > 1.3e154) for catastrophic cancellation "
-        "whenever x ~= y, which real models hit routinely."
-    ),
-    ("centropy", (1e300, 1e300), "hess"): ("Same y**2 = 1e600 overflow as the gradient above."),
-}
+#
+# EMPTY, and that is the point: every entry this list once held has been fixed at
+# the root rather than tolerated. All four were one defect class -- a derivative
+# rule that materializes a SQUARED quantity, so an intermediate leaves binary64
+# range while the answer it is computing sits comfortably inside it:
+#
+#   entropy  hess @ 1e-299        log'' = -1/m**2 = -1e598, while (x log x)'' =
+#                                 1/x = 1e299 is an ordinary number
+#   centropy grad/hess @ 1e300    quotient rule forms y**2 = 1e600, while
+#                                 -x/y**2 = -1e-300 is representable
+#   centropy hess @ 1e-320        clamped branch logged floor/y, so log'' formed
+#                                 -1/q**2 with q = 1e-300
+#
+# Fixed by pounce #489 (Kahan quotient rule; fused xlogx/centropy opcodes whose
+# rules never square anything) and by folding log(floor) to a constant in
+# `_nl_expr_compiler`. Keep this dict empty: a new entry needs the evidence that
+# the residual is not the branch's own doing, and "hard to fix" is not that.
+KNOWN_TAPE_RESIDUALS: dict = {}
 
 
 def make_evaluator(backend, n, build):

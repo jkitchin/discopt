@@ -430,7 +430,15 @@ class TapeNLPEvaluator:
         vals = self.evaluate_hessian_values(x, obj_factor, lambda_)
         lower = np.zeros((n, n), dtype=np.float64)
         np.add.at(lower, (rows, cols), vals)
-        full: np.ndarray = lower + lower.T - np.diag(np.diag(lower))
+        # Mirror the STRICTLY lower triangle and leave the diagonal alone, rather
+        # than `lower + lower.T - diag(diag(lower))`. Identical for every finite
+        # Hessian (verified elementwise), but the add-then-subtract form computes
+        # `d + d - d` on the diagonal, and for an infinite `d` that is
+        # `-inf + -inf - -inf = nan`: a correctly-signed infinity, which is the
+        # best a double can do when the true curvature overflows, turned into a
+        # nan that has lost even the sign. Reachable from ordinary operators --
+        # `log''(1e-300) = -1e600` and `sqrt''(1e-300) = -2.5e449` both overflow.
+        full: np.ndarray = lower + np.tril(lower, -1).T
         return full
 
     def evaluate_hessian(self, x: np.ndarray) -> np.ndarray:

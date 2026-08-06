@@ -494,3 +494,74 @@ def test_xlogx_residual_drift_is_a_subgradient_tie_not_error():
     # would have PASSED, while 1e-320 failed by 45.05. A tie-break assertion at
     # the tie point alone would have been decorative.
     assert checked == 4, f"only {checked} tie-break points asserted"
+
+
+def _dense_hessian(tape, n, pt):
+    """Full dense objective Hessian of a compiled ``NlExpr``.
+
+    ``NlExpr`` exposes only ``eval``/``gradient``; second order needs a built
+    problem. Mirrors the strictly-lower triangle rather than
+    ``h + h.T - diag(diag(h))``, because these points are chosen to sit where an
+    infinity is the correct answer and the add-then-subtract form would turn one
+    into a nan (the same defect fixed in ``_tape_nlp_evaluator``).
+    """
+    import pounce
+
+    prob = pounce.build_nl_problem(n, tape, constraints=None)
+    rows, cols = prob.hessian_structure()
+    vals = np.asarray(prob.hessian(list(pt)), dtype=float)
+    lower = np.zeros((n, n), dtype=float)
+    np.add.at(lower, (np.asarray(rows), np.asarray(cols)), vals)
+    return lower + np.tril(lower, -1).T
+
+
+@pytest.mark.unit
+def test_xlogx_family_reaches_derivatives_the_chain_rule_cannot():
+    """entropy/centropy lower onto pounce's FUSED opcodes, not onto `x*log(x)`.
+
+    Every point here is one where the ANSWER is an ordinary double but some
+    intermediate of the decomposed form is not -- a structural limit of the chain
+    rule, not a sloppy rule, so no amount of care in the product/log/quotient
+    rules reaches them. All three failed before pounce #489 and the folded
+    `log(floor)` constant; they are the residuals
+    `issue75_derivative_audit.py` used to carry on its allowlist.
+
+    Each assertion states the intermediate that overflows, so a future rewrite
+    that reintroduces one fails here with the reason attached.
+    """
+    checked = 0
+
+    # 1. (x log x)'' = 1/x. Finite for every positive x down to 1e-308, but any
+    #    decomposition goes through log''(x) = -1/x**2 = -1e598 at this point.
+    m = Model()
+    x = m.continuous("x", lb=-1e309, ub=1e309)
+    h = _dense_hessian(compile_to_nl_expr(FunctionCall("entropy", x), m), 1, [1e-299])
+    assert h[0][0] == pytest.approx(1e299, rel=1e-12), (
+        f"entropy''(1e-299) = {h[0][0]}, want 1e299 -- decomposed via log'' = -1/x**2"
+    )
+    checked += 1
+
+    # 2. d/dy [x log(x/y)] = -x/y = -1 at x = y = 1e300. The quotient rule's
+    #    y**2 is 1e600, so the unfused form returned nan for this and for the
+    #    whole second-order block.
+    m = Model()
+    x = m.continuous("x", lb=-1e309, ub=1e309)
+    y = m.continuous("y", lb=-1e309, ub=1e309)
+    ce = compile_to_nl_expr(FunctionCall("centropy", x, y), m)
+    g = np.asarray(ce.gradient([1e300, 1e300]), dtype=float)
+    np.testing.assert_allclose(g, [1.0, -1.0], rtol=1e-12, atol=0)
+    h = _dense_hessian(ce, 2, [1e300, 1e300])
+    np.testing.assert_allclose(h, [[1e-300, -1e-300], [-1e-300, 1e-300]], rtol=1e-12, atol=0)
+    checked += 2
+
+    # 3. Below the floor the clamped branch is x*(log(floor) - log(y)). Written
+    #    as log(floor/y) instead, log'' forms -1/q**2 with q = 1e-300, so the
+    #    y-block came back [[0, -inf], [-inf, nan]] where every entry of the
+    #    truth is representable (1e-320 is subnormal but exact here).
+    h = _dense_hessian(ce, 2, [1e-320, 1.0])
+    assert h[0][0] == 0.0, f"centropy d2/dx2 below the floor is {h[0][0]}, want 0 (clamped)"
+    assert h[0][1] == -1.0 and h[1][0] == -1.0, f"centropy d2/dxdy = {h[0][1]}, want -1/y = -1"
+    assert h[1][1] == 1e-320, f"centropy d2/dy2 = {h[1][1]}, want x/y**2 = 1e-320"
+    checked += 3
+
+    assert checked == 6, f"only {checked} derivative comparisons executed"

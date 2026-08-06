@@ -221,6 +221,76 @@ def _abs(E: Any, a: Any) -> Any:
 #: ``[0, 0]`` does not propagate a non-finite into a bound.
 _XLOG_FLOOR = 1e-300
 
+#: ``log(_XLOG_FLOOR)``, folded in Python rather than emitted as ``log(const)``.
+#:
+#: Not cosmetic. Below the floor the clamped branch is ``x * log(floor/y)``, and
+#: routing that through a tape ``Log`` node makes its second derivative
+#: ``-1/q**2`` with ``q = floor/y = 1e-300``, i.e. ``-1e600`` -- inf. Measured at
+#: ``(x, y) = (1e-320, 1.0)``: the ``log(const/y)`` form returns
+#: ``[[0, -inf], [-inf, nan]]`` where the truth ``[[0, -1], [-1, 1e-320]]`` is
+#: entirely representable. Emitting the constant and subtracting ``log(y)``
+#: returns exactly that truth. Same structural trap as the fused opcodes solve --
+#: a composite in range built from an intermediate that is not.
+_LOG_XLOG_FLOOR = math.log(_XLOG_FLOOR)
+
+
+def _clamped_xlog(E: Any, x: Any, fused: Any, log_of_floor: Any) -> Any:
+    """``entropy``/``centropy`` on the fused opcode, keeping the ``_XLOG_FLOOR`` clamp.
+
+    The two lowerings differ only in which fused opcode carries the unclamped
+    branch and what the log factor is once the argument is clamped, so both go
+    through here. ``fused`` receives the (clamped) first argument; the authority
+    for ``x < floor`` is ``x * log_of_floor`` -- ``x`` times a constant-in-``x``
+    factor, NOT the fused op evaluated at the floor.
+
+    That distinction is why this is a ``select`` and not just ``fused(max(x,
+    floor))``. Below the floor the authority stays LINEAR in ``x`` with slope
+    ``log(1e-300) = -690.78``, while ``xlogx(max(x, floor))`` would be constant
+    with slope ``0``. The regularized-but-large derivative is the whole point of
+    the clamp -- ``factorable_reform._try_entropy`` refuses only ``lo < 0.0``, so
+    a box pinned at ``[0, 0]`` is admitted by design -- and reporting ``0`` there
+    would tell the NLP that moving ``x`` off zero does not change the entropy,
+    which is false.
+
+    ``max(x, floor)`` still guards the fused argument. The tape's forward sweep
+    evaluates EVERY slot, so at ``x < 0`` the inactive branch would otherwise
+    compute ``xlogx(-1) = nan``; pounce's
+    ``cond_does_not_leak_a_non_finite_from_its_inactive_branch`` measures that all
+    three sweeps (``gradient_seed``, ``hessian_accumulate``,
+    ``hessian_directional``) route around it, and the ``max`` means this lowering
+    does not have to rely on that invariant to stay finite by construction.
+
+    Cost: the ``select`` makes the node opaque to pounce's FBBT translator, which
+    emits ``Opaque`` for ``Expr::Cond``. Nothing is actually lost -- ``E.max``
+    lowers to ``Expr::MaxList``, which was ALREADY ``Opaque``, so the previous
+    ``x * log(max(x, floor))`` had an opaque interior too and could not tighten
+    through the log either way.
+    """
+    floor = E.const_(_XLOG_FLOOR)
+    return E.select(E.compare("<", x, floor), x * log_of_floor, fused(E.max(x, floor)))
+
+
+def _require_fused_xlog(E: Any, name: str) -> None:
+    """Refuse ``entropy``/``centropy`` on a POUNCE predating the fused opcodes.
+
+    ``pounce_usable()`` gates on ``NlExpr`` existing at all (pounce #470); these
+    two opcodes landed later (pounce #489), so a build in between imports fine and
+    then raises ``AttributeError`` deep inside a compile. Raise the
+    ``UnsupportedForTape`` the caller already handles, which degrades this one
+    model to the JAX evaluator rather than failing the solve.
+
+    Deliberately NOT a fallback to the old ``x * log(x)`` lowering: that lowering
+    is the defect this replaces, and quietly routing back to it would turn a stale
+    extension into wrong derivatives instead of a visible capability miss.
+    """
+    missing = [n for n in ("xlogx", "centropy") if not hasattr(E, n)]
+    if missing:
+        raise UnsupportedForTape(
+            f"{name} needs the fused NlExpr.{'/'.join(missing)} opcode(s) from "
+            "pounce #489; rebuild the pounce extension to use the tape here"
+        )
+
+
 #: Below this ``|a|``, ``log1p`` uses a truncated series rather than Kahan's
 #: compensated form. Both the term count and the crossover are set by the SECOND
 #: derivative, which is the binding constraint here -- the value and gradient are
@@ -440,8 +510,19 @@ def _lower_function(expr: FunctionCall, E: Any, args: list) -> Any:
         # a box whose lower bound is exactly 0 is admitted by design. The comment
         # above already named `jnp.maximum(x, 1e-300)` as the authority; the sign
         # was carried across in `08e1e0a1` and the clamp was not.
+        #
+        # Lowered onto the FUSED `xlogx` opcode (pounce #489), not onto
+        # `x * log(x)`. This is a correctness requirement, not a speed one:
+        # `(x log x)'' = 1/x` is finite for every positive x down to 1e-308 --
+        # at x = 1e-299 it is 1e299, an ordinary number -- but every chain-rule
+        # decomposition routes through `log''(x) = -1/x**2 = -1e598`, past
+        # `f64::MAX`. A composite in range built from a factor out of range is
+        # unreachable however carefully the product and log rules are written;
+        # only an opcode that never forms `1/x**2` gets there. Measured: the
+        # fused second derivative returns 1e299 where `x * log(x)` returns inf.
         _require(args, 1, name)
-        return arg0() * E.log(E.max(arg0(), E.const_(_XLOG_FLOOR)))
+        _require_fused_xlog(E, name)
+        return _clamped_xlog(E, arg0(), lambda a: E.xlogx(a), E.const_(_LOG_XLOG_FLOOR))
     if name == "centropy":
         # x*log(x/y), matching dag_compiler's GAMS centropy -- including the same
         # floor on the NUMERATOR only (`x * log(max(x, 1e-300) / y)`). Same
@@ -449,17 +530,30 @@ def _lower_function(expr: FunctionCall, E: Any, args: list) -> Any:
         # 4 non-finite gradients over the sampled domain before the clamp; 0 and
         # 1 after it.
         #
-        # KNOWN RESIDUAL, deliberately not fixed. The surviving non-finite
-        # gradient is `centropy(1e300, 1e300)` -> `[1, nan]` where the authority
-        # gives `[1, -0.0]` (the true value is -1, so neither is right). Cause is
-        # the quotient rule squaring the denominator: `y**2 = 1e600` overflows,
-        # the same trap that forced the argument clamp in `_log1p`. Do NOT
-        # "fix" it by rewriting to `log(max(x, floor)) - log(y)`: that removes
-        # the overflow but introduces catastrophic cancellation whenever
-        # `x ~= y`, trading a loss no real model can reach (it needs
-        # `|y| > 1.3e154`) for one they hit routinely.
+        # Lowered onto the FUSED `centropy` opcode for entropy's reason
+        # (`d2/dx2` is `1/x`, unreachable through `log''`) plus one of its own:
+        # `d2/dy2` is `x/y**2`, and the quotient rule materializes `y**2`, which
+        # overflows for `|y| > 1.3e154` while `x/y**2` itself stays in range.
+        # That was the KNOWN RESIDUAL this comment used to record: the gradient
+        # of `centropy(1e300, 1e300)` came back `[1, nan]` because `y**2` is
+        # 1e600. The fused rule computes `q = x/y` once and expresses every
+        # second-order term as a division by `y`, never by `y**2`.
+        #
+        # The old note here warned against "fixing" it as
+        # `log(max(x, floor)) - log(y)`, because that trades an overflow no real
+        # model reaches for catastrophic cancellation at `x ~= y`, which models
+        # hit routinely. That warning is now DISCHARGED rather than ignored: the
+        # opcode's `ln_ratio` picks among three regimes -- `ln_1p((x-y)/y)` near
+        # `x = y` (Sterbenz makes `x - y` exact for `y/2 <= x <= 2y`), `q.ln()`
+        # for finite positive q, and the difference form only when the ratio
+        # itself leaves f64 range. Measured at `x = 1e10 + 1, y = 1e10`: naive
+        # error 8.27e-8, fused error exactly 0.
         _require(args, 2, name)
-        return args[0] * E.log(E.max(args[0], E.const_(_XLOG_FLOOR)) / args[1])
+        _require_fused_xlog(E, name)
+        y = args[1]
+        return _clamped_xlog(
+            E, args[0], lambda a: E.centropy(a, y), E.const_(_LOG_XLOG_FLOOR) - E.log(y)
+        )
     if name == "signpower":
         # sign(x) * |x|**p -- the standard smooth-away-from-zero signed power.
         _require(args, 2, name)
