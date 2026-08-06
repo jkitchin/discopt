@@ -1136,6 +1136,24 @@ instance. Recorded as a known residual in the audit's allowlist, which fails on 
 defect *not* listed and also reports listed entries that have started passing, so
 it cannot go stale.
 
+> **UPDATE (2026-08-06): the "both backends" half of this is retracted for the
+> tape — all four residuals are FIXED, and the allowlist is now empty.** The
+> paragraph above accepted the class as unfixable ("the finite `1/x` cancellation
+> can never happen"), which was true only of the *decomposition*: `(x log x)'' =
+> 1/x` is finite for every positive `x` down to `1e-308`, and it is the chain rule
+> — not binary64 — that cannot reach it, since every route through `log''` forms
+> `-1/x²`. The fix was new opcodes, not a better rule: pounce #489 added fused
+> `xlogx`/`centropy` whose second-order terms never square anything, plus a Kahan
+> quotient rule `(ȧ - q·ḃ)/b` that divides by `b` twice instead of squaring it.
+> discopt lowers `entropy`/`centropy` onto them, and folds `log(floor)` to a
+> constant so the clamped branch stops logging `floor/y` (a fourth instance of the
+> same class, found only after the first three were gone: `log''` there forms
+> `-1/q²` with `q = 1e-300`). The audit now reports **0 tape defects over 300
+> comparisons**, worst entropy/centropy Hessian error `4.44e-17`/`1.24e-16` against
+> `inf` before. JAX still fails all 14 of its points and is unchanged, so the
+> "tape is strictly the better arm" conclusion stands — it is just now a much
+> larger margin than "6 wrong points vs 9".
+
 **Severity: this was a live user path, not a corner.** `dm.sigmoid` is the
 `Activation.SIGMOID` implementation in all four `nn/formulations/`, so any
 NN-embedded model with a saturated sigmoid unit fed the NLP subsolve a `nan` or

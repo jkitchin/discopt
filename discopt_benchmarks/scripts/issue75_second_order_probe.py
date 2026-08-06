@@ -155,8 +155,10 @@ JAX_IS_THE_WRONG_ARM = {
     "sigmoid": "JAX's sigmoid''(40) is 0.0; truth is -4.248e-18 and the tape gives it.",
     "softplus": "JAX's softplus''(40) is 0.0; truth is 4.248e-18 and the tape gives it.",
     "centropy": (
-        "the y**2 = 1e600 overflow at (1e300, 1e300), documented as a known "
-        "residual in _nl_expr_compiler; JAX is wrong there too."
+        "JAX's centropy Hessian at (1e300, 1e300) is nan from the y**2 = 1e600 "
+        "overflow; truth is [[1e-300, -1e-300], [-1e-300, 1e-300]] and the tape "
+        "gives it, since pounce #489 fused the op and never forms y**2. The tape "
+        "shared this defect until then -- it was the audit's last known residual."
     ),
 }
 
