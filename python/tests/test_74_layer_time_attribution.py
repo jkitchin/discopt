@@ -184,3 +184,94 @@ def test_pure_milp_reports_no_jax_time():
         f"(wall={out['WALL']}) — the layer profile is attributing time to a "
         f"library that was never loaded"
     )
+
+
+# The MILP above never reaches an NLP subsolve, so it cannot see the derivative
+# callbacks — which is exactly where the bucket was hardcoded. A *nonlinear*
+# model is required to exercise `_IpoptCallbacks`.
+_NO_JAX_NLP_PROBE = textwrap.dedent(
+    """
+    import sys
+    from discopt import Model
+
+    m = Model()
+    x = m.continuous("x", lb=0.1, ub=4.0)
+    y = m.continuous("y", lb=0.1, ub=4.0)
+    z = m.integer("z", lb=0, ub=3)
+    m.subject_to(x * y >= 1.0)
+    m.minimize(x + y + z)
+    r = m.solve(time_limit=60.0)
+
+    # §6: prove the probe fired rather than reporting a vacuous pass.
+    assert r.status == "optimal", r.status
+    print("JAX_IMPORTED", "jax" in sys.modules)
+    print("JAX_TIME", r.jax_time)
+    print("RUST_TIME", r.rust_time)
+    print("POUNCE_TIME", r.pounce_time)
+    print("WALL", r.wall_time)
+    """
+)
+
+
+@pytest.mark.smoke
+def test_tape_backed_nlp_callbacks_are_not_charged_to_jax():
+    """Derivative callbacks bill the evaluator's OWN layer, not a fixed one.
+
+    ``_charge_evaluator`` hardcoded ``charge("jax")`` on the premise that "today's
+    evaluator is JAX-backed"; #75's tape evaluator made that false. Because
+    ``charge`` records *self* time the error was two-sided — the callback's
+    milliseconds were invented as ``jax_time`` **and** subtracted from the
+    enclosing ``pounce`` region, so both halves of the rust/python partition were
+    wrong on the measurement that judges the JAX removal itself.
+
+    Measured on this exact model before the fix: ``jax_time = 0.00217 s`` with
+    ``"jax" not in sys.modules``; after, ``0.0``, with ``rust_time - pounce_time``
+    picking up the same 0.00215 s. Asserted as an exact zero rather than a
+    threshold, so competing load cannot make it pass spuriously (§9).
+    """
+    proc = subprocess.run(
+        [sys.executable, "-c", _NO_JAX_NLP_PROBE], capture_output=True, text=True, timeout=300
+    )
+    assert proc.returncode == 0, f"probe failed:\n{proc.stderr[-2000:]}"
+
+    out = dict(line.split(maxsplit=1) for line in proc.stdout.splitlines() if " " in line)
+    assert out["JAX_IMPORTED"] == "False", (
+        "this fixture no longer reaches a JAX-free NLP solve, so it can no longer "
+        "detect a mis-bucketed callback"
+    )
+    # The callbacks must have run: an NLP subsolve on this model is what makes
+    # the test meaningful, and POUNCE time is the evidence it happened.
+    assert float(out["POUNCE_TIME"]) > 0.0, (
+        "no POUNCE time recorded — no NLP subsolve ran, so the derivative "
+        "callbacks were never exercised and this test proves nothing"
+    )
+    assert float(out["JAX_TIME"]) == 0.0, (
+        f"jax_time={out['JAX_TIME']} on a JAX-free tape solve (wall={out['WALL']}): "
+        f"the derivative callbacks are still being charged to a library that was "
+        f"never loaded"
+    )
+    # Native time includes the tape callbacks, which are Rust but not the IPM.
+    assert float(out["RUST_TIME"]) >= float(out["POUNCE_TIME"]), (
+        "pounce is a subset of rust; the callback bucket broke the containment"
+    )
+
+
+def test_evaluators_declare_their_timing_layer():
+    """Both in-tree evaluators must declare a bucket, and it must be a real one.
+
+    A typo'd or missing ``timing_bucket`` degrades silently: ``_IpoptCallbacks``
+    falls back to charging nothing and the enclosing solver region absorbs the
+    callbacks — the pre-#74 inflation, reintroduced quietly.
+    """
+    from discopt._jax.nlp_evaluator import NLPEvaluator
+    from discopt._tape_nlp_evaluator import TapeNLPEvaluator
+
+    checked = 0
+    for cls, expected in ((NLPEvaluator, "jax"), (TapeNLPEvaluator, "rust")):
+        assert getattr(cls, "timing_bucket", None) == expected, (
+            f"{cls.__name__}.timing_bucket is {getattr(cls, 'timing_bucket', None)!r}, "
+            f"expected {expected!r}"
+        )
+        assert expected in _timing.BUCKETS, f"{expected!r} is not a real bucket"
+        checked += 1
+    assert checked == 2, "both evaluators must be checked"

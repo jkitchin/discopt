@@ -1562,6 +1562,18 @@ class _AugmentedEvaluator:
         return self._ev.n_variables
 
     @property
+    def timing_bucket(self):
+        """Forward the wrapped evaluator's layer (issue #74).
+
+        This class enumerates its members explicitly rather than delegating via
+        ``__getattr__`` (unlike ``_BoundOverrideEvaluator``), so an attribute
+        added to the evaluators does NOT reach ``_charge_evaluator`` through it.
+        Without this property a cut-augmented node NLP would fall to the
+        "undeclared" arm and lose its callbacks from the profile.
+        """
+        return self._ev.timing_bucket
+
+    @property
     def variable_bounds(self):
         return self._ev.variable_bounds
 

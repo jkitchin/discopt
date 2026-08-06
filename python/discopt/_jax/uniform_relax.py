@@ -45,6 +45,7 @@ and is reported ``loose-but-sound`` — never unsound, never a fallback.
 from __future__ import annotations
 
 import dataclasses
+import logging
 import math
 import os
 import time
@@ -71,6 +72,12 @@ from discopt._jax.milp_relaxation import (
 )
 from discopt._jax.model_utils import flat_variable_bounds
 from discopt.modeling.core import Model, ObjectiveSense, UnaryOp
+
+logger = logging.getLogger(__name__)
+
+#: Warn once per process that `DISCOPT_ANALYTIC_SEPGRAD=1` is preempting the
+#: graduated tape default, not once per node (`_compiled` runs per B&B node).
+_analytic_sepgrad_preempt_warned = False
 
 __all__ = [
     "LinForm",
@@ -802,6 +809,34 @@ class _Builder:
             return v
         import os
 
+        # An EXPLICITLY set opt-in flag is honoured before a default. This block
+        # used to sit *below* the tape arm, which made `DISCOPT_ANALYTIC_SEPGRAD=1`
+        # a dead flag on every default install once the tape graduated to ON: the
+        # tape answered every node, the analytic path was never constructed, and
+        # nothing said so. That is the swallowed-option failure mode -- a flag the
+        # user set, honoured nowhere, with no log and no error.
+        #
+        # Ordering the explicit flag first changes nothing for a default install
+        # (the flag is default-OFF), and a node the analytic path declines still
+        # falls through to the tape below and then to JAX, so the graduated
+        # default keeps every node the analytic table cannot cover.
+        if os.environ.get("DISCOPT_ANALYTIC_SEPGRAD") == "1":
+            global _analytic_sepgrad_preempt_warned
+            if not _analytic_sepgrad_preempt_warned:
+                _analytic_sepgrad_preempt_warned = True
+                logger.warning(
+                    "DISCOPT_ANALYTIC_SEPGRAD=1: the analytic separation gradients "
+                    "preempt the default tape path for every node they support "
+                    "[analytic-sepgrad-preempts-tape]. Unset it to restore the "
+                    "graduated default."
+                )
+            v = self._compiled_analytic(node)
+            if v is not None:
+                cache[nid] = v
+                return v
+            # fall through on any construction failure (soundness: a missing
+            # analytic atom must not silently drop separation).
+
         # Default ON since the §5 panel (see `_compiled_tape`); `DISCOPT_SEPGRAD=jax`
         # is the opt-out and the JAX arm below is kept intact beneath it.
         # `pounce_usable` also covers POUNCE being absent or too old, which would
@@ -816,14 +851,6 @@ class _Builder:
                 return v
             # fall through to JAX: an unlowerable node must lose its tape, never
             # its separation.
-
-        if os.environ.get("DISCOPT_ANALYTIC_SEPGRAD") == "1":
-            v = self._compiled_analytic(node)
-            if v is not None:
-                cache[nid] = v
-                return v
-            # fall through to the JAX path on any construction failure (soundness:
-            # a missing analytic atom must not silently drop separation).
 
         import jax
         import jax.numpy as jnp

@@ -90,6 +90,23 @@ def test_augmented_evaluator_appends_normalized_cuts():
     np.testing.assert_allclose(np.asarray(h), np.asarray(h_ref))
 
 
+def test_augmented_evaluator_forwards_the_timing_layer():
+    """The cut proxy must forward ``timing_bucket`` (issue #74).
+
+    ``_AugmentedEvaluator`` enumerates its members explicitly instead of
+    delegating through ``__getattr__``, so an attribute added to the evaluators
+    does not reach ``_charge_evaluator`` through it. Without the forward, a
+    cut-augmented node NLP silently drops its derivative callbacks from the layer
+    profile — no error, just a wrong number.
+    """
+    m = _constrained_model()
+    ev = NLPEvaluator(m)
+    pool = CutPool()
+    pool.add(LinearCut(coeffs=np.array([1.0, 1.0]), rhs=3.0, sense="<="))
+    for proxy in (_AugmentedEvaluator(ev, pool), _AugmentedEvaluator(ev, CutPool())):
+        assert proxy.timing_bucket == ev.timing_bucket == "jax"
+
+
 def test_augmented_evaluator_with_empty_pool_is_passthrough():
     m = _constrained_model()
     ev = NLPEvaluator(m)

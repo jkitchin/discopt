@@ -184,6 +184,16 @@ class TapeNLPEvaluator:
     * a MAXIMIZE objective is negated, so every caller minimizes.
     """
 
+    #: Layer bucket for :mod:`discopt._timing` (issue #74). A derivative callback
+    #: on this evaluator spends its time inside POUNCE's Rust tape evaluation, so
+    #: it belongs to ``rust`` -- not ``jax``, which is a subset of *Python* time
+    #: and would report a library this evaluator never loads. It is deliberately
+    #: ``rust`` rather than ``pounce``: ``pounce`` is the enclosing IPM's own
+    #: bucket, and charging it here would net out against that frame's self time
+    #: (``charge`` records self time), leaving the evaluator invisible in the
+    #: profile. ``rust`` keeps it native *and* distinguishable from the solver.
+    timing_bucket = "rust"
+
     def __init__(self, model: "Model") -> None:
         import pounce
 

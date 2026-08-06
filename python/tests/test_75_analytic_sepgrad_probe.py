@@ -131,16 +131,43 @@ def test_analytic_sepgrad_solves_a_lifted_model(monkeypatch):
     """End-to-end: with the analytic path on, a composite-lift model still solves.
 
     ``DISCOPT_ANALYTIC_SEPGRAD`` is default-OFF, so this is the only coverage that
-    exercises the analytic separation gradients through a real solve.
+    exercises the analytic separation gradients through a real solve — and it now
+    *proves* it did (CLAUDE.md §6) instead of asserting only that some model
+    solved. Two independent reasons the earlier version was vacuous, both
+    measured: its model (``exp(x) + log(y) <= 12``, ``x*y >= 1``) never reached
+    ``_compiled`` at all (0 calls, so nothing lifted), and even on a model that
+    does lift, the dispatcher tested the graduated tape default *before* this
+    flag, so ``_compiled_analytic`` was called 0 times with the flag set. The
+    test passed identically with ``_compiled_analytic`` deleted.
     """
     monkeypatch.setenv("DISCOPT_ANALYTIC_SEPGRAD", "1")
+
+    from discopt._jax import uniform_relax as ur
+
+    calls = {"n": 0}
+    _orig = ur._Builder._compiled_analytic
+
+    def _counting(self, node, *args, **kwargs):
+        calls["n"] += 1
+        return _orig(self, node, *args, **kwargs)
+
+    monkeypatch.setattr(ur._Builder, "_compiled_analytic", _counting)
+
+    # Composite lifts (a nonlinear operand inside a nonlinear atom) are what
+    # produce separation nodes; a bare `exp(x)` of a bare variable does not.
     m = Model()
     x = m.continuous("x", lb=0.5, ub=3.0)
     y = m.continuous("y", lb=0.5, ub=3.0)
-    m.subject_to(dm.exp(x) + dm.log(y) <= 12.0)
-    m.subject_to(x * y >= 1.0)
-    m.minimize(x + y)
+    z = m.continuous("z", lb=1.0, ub=4.0)
+    m.subject_to(dm.exp(x + y) + z * z <= 60.0)
+    m.subject_to((x + y) ** 2 / z >= 0.5)
+    m.minimize(x + y + z)
     result = m.solve(time_limit=30.0)
+
+    assert calls["n"] > 0, (
+        "the analytic separation path was never constructed: this test does not "
+        "exercise what its name and docstring claim (executed calls = 0)"
+    )
 
     assert result.status in ("optimal", "feasible"), result.status
     assert result.objective is not None

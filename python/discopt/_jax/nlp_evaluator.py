@@ -280,6 +280,14 @@ class NLPEvaluator:
         jac = evaluator.evaluate_jacobian(x)
     """
 
+    #: Layer bucket for :mod:`discopt._timing` (issue #74). ~96 % of this
+    #: evaluator's cost is interpreted Python (tracing, ``core.bind``, primitive
+    #: dispatch), so ``jax`` -- a subset of Python time -- is the honest bucket.
+    #: See :class:`discopt._tape_nlp_evaluator.TapeNLPEvaluator` for the native
+    #: counterpart; ``_charge_evaluator`` reads this attribute rather than
+    #: assuming a backend.
+    timing_bucket = "jax"
+
     def __init__(self, model: Model, gauss_newton: bool = False) -> None:
         """
         Compile model expressions into JIT-compiled evaluation functions.
