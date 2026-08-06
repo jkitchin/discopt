@@ -18,6 +18,20 @@ Design notes:
     the documented authority the tape must reproduce. Where JAX is ALSO
     non-finite that is reported separately rather than scored as a tape defect.
   * No try/except around the evaluations (§7).
+
+SUPERSEDED FOR CORRECTNESS VERDICTS -- read this before believing a DEFECT row.
+
+    This probe's criterion is "the tape agrees with JAX". That was right while JAX
+    was the more accurate arm. It is no longer sufficient: the tape now BEATS JAX
+    in the exponential tails, so a disagreement can mean the tape is correct and
+    JAX is not. Measured against a 600-digit analytic oracle, JAX's `sigmoid'(40)`
+    returns 0.0 where the truth is 4.248e-18 -- and this probe scores the tape's
+    correct answer as `sigmoid ... 1.000e+00 <== DEFECT`.
+
+    Rows flagged here are therefore DIFFERENCES, not verdicts. For an actual
+    correctness judgement use `issue75_derivative_audit.py`, which scores both
+    backends against truth over orders 0, 1 and 2. The known-inverted rows are
+    listed in JAX_IS_THE_WRONG_ARM below and printed as such.
 """
 
 import os
@@ -155,16 +169,41 @@ hdr = (
     f"{'operator':10s} {'pts':>4s} {'nonfin f':>9s} {'nonfin g':>9s} "
     f"{'jax n/f':>8s} {'worst rel':>11s}  worst@"
 )
+# Operators whose "worst rel" row is driven by a point where the TAPE is right and
+# JAX is wrong, established against the 600-digit oracle in
+# `issue75_derivative_audit.py`. Labelling these DEFECT inverts the verdict.
+JAX_IS_THE_WRONG_ARM = {
+    "sigmoid": (
+        "worst@40.0 is JAX returning 0.0 for sigmoid'(40); truth is 4.248e-18 and "
+        "the tape gives it. JAX's s*(1-s) underflows once s rounds to exactly 1.0."
+    ),
+}
+
 print(hdr)
 print("-" * len(hdr))
-defects = 0
+diffs = 0
+inverted = 0
 for name, n, bv, bg, jb, w, wa in rows:
-    flag = "  <== DEFECT" if (bv or bg or w > 1e-12) else ""
-    defects += bool(bv or bg or w > 1e-12)
+    differs = bool(bv or bg or w > 1e-12)
+    tape_is_right = name in JAX_IS_THE_WRONG_ARM and not (bv or bg)
+    if differs and tape_is_right:
+        flag = "  <== tape MORE accurate than jax"
+        inverted += 1
+    elif differs:
+        flag = "  <== DIFFERS from jax"
+        diffs += 1
+    else:
+        flag = ""
     print(f"{name:10s} {n:4d} {bv:9d} {bg:9d} {jb:8d} {w:11.3e}  {wa}{flag}")
 
+for name, why in JAX_IS_THE_WRONG_ARM.items():
+    print(f"\n  {name}: {why}")
+
 print(f"\ncomparisons executed: {compared}")
-print(f"operators with a defect: {defects}")
+print(f"operators differing from jax (verdict needs the audit): {diffs}")
+print(f"operators where the tape is the accurate arm: {inverted}")
+print("For a correctness verdict run issue75_derivative_audit.py -- this probe")
+print("measures agreement with JAX, which is no longer the same question.")
 if compared == 0:
     print("PROBE ASSERTED NOTHING", file=sys.stderr)
     sys.exit(1)

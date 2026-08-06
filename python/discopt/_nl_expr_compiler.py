@@ -222,11 +222,30 @@ def _abs(E: Any, a: Any) -> Any:
 _XLOG_FLOOR = 1e-300
 
 #: Below this ``|a|``, ``log1p`` uses a truncated series rather than Kahan's
-#: compensated form. At the crossover the series' truncation error is ``a**5/5``
-#: -- 2e-21 absolute against a value of 1e-4, i.e. ~2e-17 relative, under one ulp
-#: -- while Kahan's derivative distortion is still shrinking, so neither side of
-#: the switch is the weak one.
-_LOG1P_TAYLOR = 1e-4
+#: compensated form. Both the term count and the crossover are set by the SECOND
+#: derivative, which is the binding constraint here -- the value and gradient are
+#: at one ulp across this whole region either way.
+#:
+#: The series runs to ``a**5/5``, not ``a**4/4``. Truncating at ``a**4`` leaves a
+#: second derivative of ``-1 + 2a - 3a**2`` against a true expansion
+#: ``-1 + 2a - 3a**2 + 4a**3 - ...``, an error of ``~4a**3``; the extra term moves
+#: the leading error to ``~5a**4``. Measured at a=5e-5: 5.00e-13 before, 7.61e-19
+#: after.
+#:
+#: The crossover is 5e-4 by MEASUREMENT, not algebra. Kahan's second-derivative
+#: error decays like ``eps/a`` (its ``u - 1`` differs from ``a`` by a rounding gap
+#: that double differentiation amplifies) while the series' grows like ``5a**4``,
+#: so the worst case over the line is minimized where they cross. Scanning
+#: candidate crossovers over a 69-point grid spanning 1e-17..1, worst-case
+#: relative Hessian error was:
+#:
+#:     1e-4 -> 1.092e-11   2e-4 -> 4.552e-13   5e-4 -> 2.281e-13
+#:     1e-3 -> 5.001e-13   2e-3 -> 5.007e-11
+#:
+#: with value/gradient flat at 1.336e-16 / 2.979e-16 for every candidate up to
+#: 1e-3 and degrading at 2e-3 (3.002e-15 / 1.773e-14) -- so 5e-4 is the minimax
+#: point and the scan would have shown a bad trade if one existed.
+_LOG1P_TAYLOR = 5e-4
 
 
 def _log1p(E: Any, a: Any) -> Any:
@@ -278,15 +297,22 @@ def _log1p(E: Any, a: Any) -> Any:
     # `-1/(1+a)**2`, the arms above give a second derivative of exactly 0.0 at
     # a=1e-17 (the `at_one` arm is LINEAR, so it has no curvature at all) and
     # -1.0039 at a=1e-13, against a true -1. The series is accurate in all three
-    # orders at once: its second derivative is `-1 + 2a - 3a**2`, which is the
-    # expansion of the true one.
+    # orders at once: its second derivative is `-1 + 2a - 3a**2 + 4a**3`, which
+    # is the leading expansion of the true `-1/(1+a)**2`. See `_LOG1P_TAYLOR` for
+    # why it runs to `a**5/5` -- the SECOND derivative sets the term count, not
+    # the value.
     #
     # `a_tiny` is clamped for the usual reason -- both arms of a `select`
     # evaluate, and `a**4` at a=1e300 is `inf`, which would poison the sweep.
     a_tiny = E.select(E.compare("<", _abs(E, a), E.const_(_LOG1P_TAYLOR)), a, E.const_(0.0))
     taylor = a_tiny * (
         one
-        - a_tiny * (E.const_(1.0 / 2.0) - a_tiny * (E.const_(1.0 / 3.0) - a_tiny / E.const_(4.0)))
+        - a_tiny
+        * (
+            E.const_(1.0 / 2.0)
+            - a_tiny
+            * (E.const_(1.0 / 3.0) - a_tiny * (E.const_(1.0 / 4.0) - a_tiny / E.const_(5.0)))
+        )
     )
     return E.select(E.compare("<", _abs(E, a), E.const_(_LOG1P_TAYLOR)), taylor, kahan_or_naive)
 

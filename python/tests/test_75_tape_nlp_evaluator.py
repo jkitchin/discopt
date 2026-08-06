@@ -219,6 +219,29 @@ def test_second_derivatives_match_analytic_truth_in_the_tails(name, build, pt, e
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize("a", [1e-4, 2e-4, 4.9e-4, 5e-4, 5.1e-4, 1e-3, 1.778e-3, 1e-2])
+def test_log1p_curvature_across_the_taylor_crossover(a):
+    """``_LOG1P_TAYLOR`` is a MEASURED minimax point; pin it so it stays one.
+
+    log1p's curvature error peaks at the crossover from both sides: the series'
+    truncation error grows like ``5a**4`` and Kahan's derivative distortion decays
+    like ``eps/a`` (its ``u - 1`` differs from ``a`` by a rounding gap that double
+    differentiation amplifies). The worst case over the whole line therefore sits
+    wherever the two curves cross, and moving the constant moves the peak.
+
+    The tolerance is deliberately 1e-13, NOT the 1e-6 used for the tail cases. At
+    the previous 1e-4 crossover the measured worst-case relative error was
+    1.092e-11, so a 1e-6 assertion would have passed pre-fix and been decorative.
+    1e-13 fails on that value while leaving ~3 orders of headroom over the
+    4.608e-16 measured now.
+    """
+    exact = -1.0 / (1.0 + a) ** 2
+    got = _curvature(dm.log1p, a)
+    assert math.isfinite(got), f"log1p'' at {a} is {got}"
+    assert got == pytest.approx(exact, rel=1e-13), f"log1p'' at {a}: {got} vs {exact}"
+
+
+@pytest.mark.unit
 def test_parameter_rebind_rebuilds_the_tape():
     """The tape bakes ``Parameter.value`` in; JAX reads it live.
 

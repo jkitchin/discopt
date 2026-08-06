@@ -15,6 +15,18 @@ Criterion: a TAPE defect is a point where JAX is finite and the tape is not, or
 where both are finite and they disagree beyond FP noise. Where JAX is also
 non-finite that is reported separately -- not scored against the tape.
 
+SUPERSEDED FOR CORRECTNESS VERDICTS -- read this before believing a DEFECT row.
+
+    "Disagrees with JAX" was a sound proxy for "wrong" only while JAX was the more
+    accurate arm. After the sigmoid rewrite the tape is MORE accurate than JAX in
+    the exponential tails, so this probe's `sigmoid`/`softplus` rows at 40.0 now
+    flag the tape for being correct: measured against a 600-digit analytic oracle,
+    JAX's `sigmoid''(40)` is 0.0 where the truth is -4.248e-18, and the tape
+    returns the truth.
+
+    Rows here are DIFFERENCES. For a verdict use `issue75_derivative_audit.py`,
+    which scores both backends against truth across orders 0, 1 and 2.
+
 No try/except (§7). Executed-comparison counter, non-zero exit at zero (§6).
 """
 
@@ -136,17 +148,43 @@ hdr = (
     f"{'operator':10s} {'pts':>4s} {'TAPE-ONLY nonfin':>17s} "
     f"{'jax nonfin too':>15s} {'worst rel':>11s}  at"
 )
+# Points where the TAPE is right and JAX is wrong, established against the
+# 600-digit oracle in `issue75_derivative_audit.py`. Scoring these as tape defects
+# inverts the verdict, so they are labelled for what they are.
+JAX_IS_THE_WRONG_ARM = {
+    "sigmoid": "JAX's sigmoid''(40) is 0.0; truth is -4.248e-18 and the tape gives it.",
+    "softplus": "JAX's softplus''(40) is 0.0; truth is 4.248e-18 and the tape gives it.",
+    "centropy": (
+        "the y**2 = 1e600 overflow at (1e300, 1e300), documented as a known "
+        "residual in _nl_expr_compiler; JAX is wrong there too."
+    ),
+}
+
 print("\n" + hdr)
 print("-" * len(hdr))
-defects = 0
+differs = 0
+inverted = 0
 for name, n, tob, bb, w, wa in rows:
-    flag = "  <== DEFECT" if (tob or w > 1e-10) else ""
-    defects += bool(tob or w > 1e-10)
+    d = bool(tob or w > 1e-10)
+    if d and name in JAX_IS_THE_WRONG_ARM and not tob:
+        flag = "  <== tape MORE accurate than jax"
+        inverted += 1
+    elif d:
+        flag = "  <== DIFFERS from jax"
+        differs += 1
+    else:
+        flag = ""
     print(f"{name:10s} {n:4d} {tob:17d} {bb:15d} {w:11.3e}  {wa}{flag}")
 
+for name, why in JAX_IS_THE_WRONG_ARM.items():
+    print(f"\n  {name}: {why}")
+
 print(f"\nhessian comparisons executed: {compared}")
-print(f"operators with a hessian defect: {defects}")
+print(f"operators differing from jax (verdict needs the audit): {differs}")
+print(f"operators where the tape is the accurate arm: {inverted}")
+print("For a correctness verdict run issue75_derivative_audit.py.")
 if compared == 0:
     print("PROBE ASSERTED NOTHING", file=sys.stderr)
     sys.exit(1)
-sys.exit(2 if defects else 0)
+# Only a TAPE-ONLY non-finite is unambiguously bad without consulting the oracle.
+sys.exit(2 if any(r[2] for r in rows) else 0)

@@ -1069,10 +1069,72 @@ found two defects that are invisible at orders 0 and 1:
 Both are fixed. `sigmoid` is now the branch-stable `t = exp(-|a|)` form, whose
 arms are `1/(1+t)` and `t/(1+t)` — `t ∈ (0,1]` for every input, so neither arm can
 overflow, and the upper-tail accuracy that motivated the original decision is
-preserved. `log1p` gains a truncated-series branch below `|a| < 1e-4`, which is
+preserved. `log1p` gains a truncated-series branch below `|a| < 5e-4`, which is
 accurate in all three orders at once where Kahan's form corrects only the value.
 After the fix, all 17 second-derivative checks match analytic truth, and the tape
 is *more* accurate than JAX at −745, +40 and +300, where JAX underflows to 0.
+
+### Full three-order audit against an independent oracle (2026-08-05)
+
+The verification above was re-done from scratch with a **600-digit mpmath oracle**
+using analytic closed forms, scoring *both* backends on equal terms across orders
+0, 1 and 2 — 300 comparisons over 12 operators
+(`discopt_benchmarks/scripts/issue75_derivative_audit.py`). Worst relative error,
+kink points excluded:
+
+| operator | tape val | tape grad | tape hess | jax val | jax grad | jax hess |
+|---|---|---|---|---|---|---|
+| `log1p` | 1.1e-16 | 1.6e-16 | **4.6e-16** | 9.4e-17 | 1.4e-16 | 2.7e-16 |
+| `sigmoid` | 6.2e-17 | 1.3e-16 | 2.9e-16 | 1.6e-16 | **1.0** | **1.0** |
+| `softplus` | 9.7e-17 | 1.4e-16 | 1.3e-16 | 8.0e-17 | 1.7e-16 | **1.0** |
+| `log2`, `signpower`, `abs`, `sign`, `exp`, `log`, `sqrt` | ≤1e-16 | ≤1e-16 | ≤2.4e-16 | same | same | same |
+
+Three things came out of it, and two of them changed code.
+
+**1. `log1p`'s Hessian was 1.09e-11, five orders worse than JAX.** Not a defect by
+any solver tolerance, but a located and removable one. Cause was *two* things, and
+the first hypothesis was only half right. Extending the series from `a⁴/4` to
+`a⁵/5` fixed the interior (a=5e-5: 5.00e-13 → 7.61e-19) but left the peak at
+`a = 1e-4` untouched — because `|a| < 1e-4` is false *at* 1e-4, so that point takes
+the Kahan arm. **The stated kill criterion fired**: truncation was not the cause
+*there*. Kahan's second-derivative error decays like `eps/a` while the series' grows
+like `5a⁴`, so the worst case sits where they cross. A 5-candidate scan over a
+69-point grid, all three orders, put the minimax at **5e-4**:
+
+| crossover | worst val | worst grad | worst hess |
+|---|---|---|---|
+| 1e-4 | 1.336e-16 | 2.979e-16 | 1.092e-11 |
+| 2e-4 | 1.336e-16 | 2.979e-16 | 4.552e-13 |
+| **5e-4** | 1.336e-16 | 2.979e-16 | **2.281e-13** |
+| 1e-3 | 1.336e-16 | 2.979e-16 | 5.001e-13 |
+| 2e-3 | 3.002e-15 | 1.773e-14 | 5.007e-11 |
+
+The 2e-3 row is the evidence the scan could detect a bad trade. Result: 1.092e-11
+→ 4.608e-16, parity with JAX. Pinned by
+`test_log1p_curvature_across_the_taylor_crossover` at `rel=1e-13` — deliberately
+not the 1e-6 used elsewhere, since 1e-6 would have passed pre-fix and been
+decorative. Verified to fail 2/8 pre-fix.
+
+**2. The older probes now report inverted verdicts, and were fixed.**
+`issue75_rewrite_hardening_probe` and `issue75_second_order_probe` both score
+*tape vs JAX*. That was correct while JAX was the more accurate arm; it stopped
+being correct the moment the tape overtook it. JAX's `sigmoid'(40)` returns `0.0`
+against a true `4.248e-18`, so the probes were flagging the tape's **correct**
+answer as a defect — an instrument lying in the flattering direction, which is the
+harder kind to notice. Both now label such rows "tape MORE accurate than jax" with
+the evidence, and defer correctness verdicts to the oracle-based audit.
+
+**3. `entropy`/`centropy` second derivatives are wrong on `(1e-300, 1e-154]` in
+BOTH backends — pre-existing, not this branch's doing.** `log`'s second derivative
+forms `-1/m²`, and `m²` underflows to 0 for `m < ~1.5e-154`, so the finite `1/x`
+cancellation can never happen. The tape is wrong at 6 probed points, JAX at 9 (JAX
+is also wrong *below* the floor at 1e-320/1e-310 and at 1e-154, where the tape is
+right), so the tape is strictly the better arm on this window. JAX is untouched by
+this branch, which is what establishes pre-existence. This is the same
+squared-denominator class already documented for `log1p` and `centropy` — the third
+instance. Recorded as a known residual in the audit's allowlist, which fails on any
+defect *not* listed and also reports listed entries that have started passing, so
+it cannot go stale.
 
 **Severity: this was a live user path, not a corner.** `dm.sigmoid` is the
 `Activation.SIGMOID` implementation in all four `nn/formulations/`, so any
