@@ -766,3 +766,51 @@ class TestGamsParseWarnings:
         with w.catch_warnings():
             w.simplefilter("error")
             parse_gams(src)
+
+
+@pytest.mark.unit
+def test_model_name_starting_with_a_digit_is_a_legal_gams_identifier():
+    """GAMS identifiers must start with a letter; the model name was emitted raw.
+
+    MINLPLib's ``4stufen`` exported a syntactically INVALID file — written
+    successfully, failing only downstream in GAMS::
+
+        Model 4stufen / all /;
+        ****        $2
+        ****   2  Identifier expected
+
+    An export that writes an unusable file is the bad way to fail. Found while
+    benchmarking discopt against GAMS subsolvers.
+    """
+    from discopt.export import to_gams
+
+    m = dm.Model(name="4stufen")
+    x = m.continuous("x", lb=1.0, ub=3.0)
+    m.minimize(x * x)
+    src = to_gams(m)
+
+    assert "Model 4stufen" not in src
+    assert "Model m_4stufen / all /;" in src
+    assert "Solve m_4stufen using" in src
+
+
+@pytest.mark.unit
+def test_export_seeds_strictly_interior_starting_levels():
+    """GAMS evaluates the model AT the default level of 0 during generation.
+
+    A model with ``log(x)`` or ``a / x`` therefore aborts before the solver runs
+    (``EXECERROR``), which ``domlim`` does not help because it happens at
+    generation, not in solver iterations. MINLPLib's own ``.gms`` files ship
+    starting levels for exactly this reason.
+    """
+    from discopt.export import to_gams
+
+    m = dm.Model(name="seeded")
+    x = m.continuous("x", lb=2.0, ub=4.0)  # finite box -> midpoint 3
+    y = m.continuous("y", lb=5.0, ub=1e20)  # half-open -> one unit in
+    m.subject_to(x + y >= 1.0)
+    m.minimize(x + y)
+    src = to_gams(m)
+
+    assert "x.l = 3.0;" in src
+    assert "y.l = 6.0;" in src
