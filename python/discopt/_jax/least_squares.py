@@ -145,8 +145,12 @@ def extract_residuals(expr: Expression) -> list[Expression] | None:
 
     Returns a list of residual expressions ``[r_0, r_1, ...]`` (each possibly
     array-valued — ravel and concatenate to form the residual vector) such that
-    ``expr == Σ_k ravel(r_k)²``, or ``None`` if ``expr`` is not a recognized
-    non-negative-weighted sum of squares.
+    ``expr == Σ_k ravel(r_k)² + c`` for some constant ``c``, or ``None`` if
+    ``expr`` is not a recognized non-negative-weighted sum of squares.
+
+    The ``+ c`` is why the contract is stated that way rather than as plain
+    equality: constant terms are dropped, which is exact for the only thing the
+    result is used for (the Hessian ``2 JᵀJ``), since ``∇²(f + c) = ∇²f``.
 
     Recognized forms (composable through ``+`` and indexed ``Σ`` sums):
 
@@ -155,7 +159,23 @@ def extract_residuals(expr: Expression) -> list[Expression] | None:
     * ``c * <square>`` with scalar ``c ≥ 0`` → residual ``√c · base``
     * ``<square> / c`` with scalar ``c > 0`` → residual ``√(1/c) · base``
     * ``sum(<elementwise square array>)``    → raveled residuals
+    * a ``Constant`` additive term              → no residuals (zero curvature)
     """
+    # A constant term contributes NO residual and no curvature: ∇²(f + c) = ∇²f
+    # exactly, for a constant of any value or shape, so Gauss-Newton is as valid
+    # for `Σrᵢ² + c` as for `Σrᵢ²`. This is not a widening of what gets approximated
+    # — it is what makes the ordinary Python spelling work at all. Builtin ``sum()``
+    # seeds its accumulator with int ``0``, so `sum(r**2 for ...)` builds
+    # `0 + r₀² + r₁² + …`; without this arm that leading zero made the whole
+    # objective unrecognized, and the single most natural way to write a
+    # least-squares objective silently fell back to the exact Hessian.
+    #
+    # Returning `[]` rather than a zero residual keeps `J` free of empty rows. A
+    # *bare* constant objective therefore yields `[]`, which both callers treat as
+    # "declined" — correct, since a constant's exact Hessian is 0 and already free.
+    if isinstance(expr, Constant):
+        return []
+
     # Additive split: Σ of sums of squares is a sum of squares.
     if isinstance(expr, BinaryOp) and expr.op == "+":
         left = extract_residuals(expr.left)

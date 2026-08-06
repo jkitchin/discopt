@@ -192,6 +192,9 @@ class TapeNLPEvaluator:
         if model._objective is None:
             raise ValueError("Model has no objective set.")
         self._gauss_newton_requested = bool(getattr(model, "_gauss_newton_hessian", False))
+        # `_build` re-runs whenever a `Parameter.value` moves, which in a fitting
+        # loop is every iteration; warn once per evaluator, not once per rebuild.
+        self._gn_decline_logged = False
         self._model = model
         self._pounce = pounce
         self._negate = model._objective.sense == ObjectiveSense.MAXIMIZE
@@ -291,12 +294,13 @@ class TapeNLPEvaluator:
         off when the objective is not a recognized non-negative-weighted sum of
         squares. Both decline to the exact Hessian, which is the conservative
         direction -- exact curvature is always a valid answer, an unwarranted
-        ``2 JᵀJ`` is not.
+        ``2 JᵀJ`` is not. Both also warn rather than log at INFO, for the reason
+        given at the JAX arm: the caller set an option that then did nothing.
         """
         if not self._gauss_newton_requested:
             return None
         if self._negate:
-            logger.info(
+            self._warn_gn_declined(
                 "gauss_newton ignored: objective is maximized (not a minimized "
                 "sum of squares); using the exact tape Hessian."
             )
@@ -308,15 +312,23 @@ class TapeNLPEvaluator:
         assert objective is not None  # refused in __init__
         residuals = extract_residuals(objective.expression)
         if not residuals:
-            logger.info(
+            self._warn_gn_declined(
                 "gauss_newton requested but the objective is not a recognized "
-                "sum of squares; using the exact tape Hessian."
+                "non-negative-weighted sum of squares, so the exact tape Hessian "
+                "is used instead. Recognized forms are `r**2`, `r*r`, `c*<square>` "
+                "with c >= 0, `<square>/c` with c > 0, and sums of those."
             )
             return None
         # Every residual is a subexpression of an objective that already lowered,
         # so this cannot introduce a new UnsupportedForTape -- and if it somehow
         # does, it must propagate to `try_build` and degrade to JAX, not be caught.
         return [compile_to_nl_expr(r, self._model) for r in residuals]
+
+    def _warn_gn_declined(self, message: str) -> None:
+        if self._gn_decline_logged:
+            return
+        self._gn_decline_logged = True
+        logger.warning(message)
 
     def _new_problem(self) -> Any:
         """``(main, residual_or_None)``. The pair is built and cached together so

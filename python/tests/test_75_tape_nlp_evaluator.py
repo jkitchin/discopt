@@ -19,6 +19,7 @@ Entry experiment recorded when this landed: 66 in-repo corpus instances, 5 point
 each, max rel drift f 5.48e-16, grad 3.77e-16, g 4.55e-13, J 3.06e-15, H 7.82e-13.
 """
 
+import logging
 import math
 import sys
 from pathlib import Path
@@ -460,12 +461,11 @@ def _gn_ls_model(with_constraint: bool = False):
     c = m.continuous("c", lb=-5, ub=5)
     ts = [0.1, 0.5, 1.0, 1.7, 2.4]
     ys = [1.2, 1.9, 2.3, 2.1, 1.5]
-    # NOT builtin sum(): it seeds with int 0, and that leading `0 +` makes
-    # extract_residuals decline, which would silently test the exact path here.
-    expr = (a * dm.exp(-b * ts[0]) + c - ys[0]) ** 2
-    for t, y in zip(ts[1:], ys[1:]):
-        expr = expr + (a * dm.exp(-b * t) + c - y) ** 2
-    m.minimize(expr)
+    # Builtin sum() deliberately: it seeds with int 0, so this is the `0 + r₀² + …`
+    # form that used to make extract_residuals decline and silently test the exact
+    # path here. Now recognized (a constant term has zero curvature), and the
+    # is_gauss_newton assertions below are what keep that honest.
+    m.minimize(sum((a * dm.exp(-b * t) + c - y) ** 2 for t, y in zip(ts, ys)))
     if with_constraint:
         m.subject_to(a * b + c**2 <= 4.0)
     m._gauss_newton_hessian = True
@@ -601,6 +601,32 @@ def test_gauss_newton_declines_to_exact_hessian(reason):
     tape = TapeNLPEvaluator(m)
     assert tape.is_gauss_newton is False
     assert NLPEvaluator(m, gauss_newton=True).is_gauss_newton is False
+
+
+@pytest.mark.unit
+def test_gauss_newton_decline_warns_once_not_per_rebuild(caplog):
+    """Audible, but not once per B&B node.
+
+    Declining must WARN — the caller set ``gauss_newton=True`` and it did nothing,
+    which at INFO is invisible. But ``_build`` re-runs whenever a ``Parameter``
+    moves, which in a fitting loop is every iteration, so the warning is guarded
+    to once per evaluator.
+    """
+    m = Model()
+    x = m.continuous("x", lb=-2, ub=2)
+    y = m.continuous("y", lb=-2, ub=2)
+    m.minimize(dm.exp(x) + y**2)  # not a sum of squares
+    m._gauss_newton_hessian = True
+
+    with caplog.at_level(logging.WARNING, logger="discopt._tape_nlp_evaluator"):
+        tape = TapeNLPEvaluator(m)
+        assert tape.is_gauss_newton is False
+        tape._build()  # simulate the parameter-moved rebuild
+        tape._build()
+
+    hits = [r for r in caplog.records if "gauss_newton" in r.message]
+    assert len(hits) == 1, f"expected exactly one warning, got {[r.message for r in hits]}"
+    assert hits[0].levelno >= logging.WARNING
 
 
 @pytest.mark.unit

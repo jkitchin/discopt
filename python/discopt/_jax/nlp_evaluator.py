@@ -647,8 +647,15 @@ class NLPEvaluator:
 
         logger = logging.getLogger("discopt.nlp")
 
+        # WARNING, not INFO, on both arms: the caller passed `gauss_newton=True`
+        # explicitly, so a decline means an option they set had no effect, and at
+        # INFO that is invisible under the default logging config. Falling back to
+        # the exact Hessian is always numerically correct, so this is not an error
+        # — but it is the difference between a 1000x compile and not, and a silent
+        # "your flag did nothing" is exactly the swallowed-option failure the
+        # solve() option validator already refuses to allow.
         if self._negate:
-            logger.info(
+            logger.warning(
                 "gauss_newton ignored: objective is maximized (not a minimized "
                 "sum of squares); using exact dense Hessian."
             )
@@ -659,9 +666,11 @@ class NLPEvaluator:
         assert model._objective is not None  # guaranteed by __init__
         residual_exprs = extract_residuals(model._objective.expression)
         if not residual_exprs:
-            logger.info(
+            logger.warning(
                 "gauss_newton requested but the objective is not a recognized "
-                "sum of squares; using exact dense Hessian."
+                "non-negative-weighted sum of squares, so the exact dense Hessian "
+                "is used instead. Recognized forms are `r**2`, `r*r`, `c*<square>` "
+                "with c >= 0, `<square>/c` with c > 0, and sums of those."
             )
             return None
 

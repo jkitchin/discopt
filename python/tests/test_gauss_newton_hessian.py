@@ -10,6 +10,7 @@ evaluator falls back to the dense Hessian whenever GN does not apply.
 
 from __future__ import annotations
 
+import logging
 import os
 
 os.environ.setdefault("JAX_PLATFORMS", "cpu")
@@ -20,7 +21,7 @@ import numpy as np
 import pytest
 from discopt._jax.least_squares import extract_residuals
 from discopt._jax.nlp_evaluator import NLPEvaluator
-from discopt.modeling.core import Model
+from discopt.modeling.core import Constant, Model
 
 # ─────────────────────────────────────────────────────────────
 # Residual extraction (sum-of-squares detection)
@@ -126,6 +127,82 @@ def test_extract_rejects_non_sum_of_squares(make_expr):
     m = Model("d")
     x = m.continuous("x", shape=(2,))
     assert extract_residuals(make_expr(x)) is None
+
+
+# ─────────────────────────────────────────────────────────────
+# Constant additive terms (the builtin ``sum()`` trap)
+# ─────────────────────────────────────────────────────────────
+
+
+def test_extract_survives_builtin_sum():
+    """``sum(r**2 for ...)`` is THE natural spelling and it must be recognized.
+
+    Builtin ``sum()`` seeds its accumulator with int ``0``, so this builds
+    ``0 + r₀² + r₁² + r₂²``. That leading zero used to make the whole objective
+    unrecognized, silently disabling Gauss-Newton on both backends with only an
+    INFO log — the flag was set, accepted, and did nothing.
+    """
+    m = Model("d")
+    x = m.continuous("x", shape=(3,))
+    residuals = extract_residuals(sum((x[i] - float(i)) ** 2 for i in range(3)))
+    assert residuals is not None
+    assert len(residuals) == 3
+
+
+def test_extract_ignores_constant_terms():
+    """``∇²(f + c) = ∇²f``, so a constant term of any sign contributes nothing."""
+    m = Model("d")
+    x = m.continuous("x", shape=(2,))
+    for offset in (0.0, 7.5, -3.25):
+        residuals = extract_residuals(x[0] ** 2 + x[1] ** 2 + offset)
+        assert residuals is not None, f"offset {offset} rejected"
+        assert len(residuals) == 2
+
+
+def test_constant_offset_does_not_change_the_hessian():
+    """The dropped constant must be genuinely curvature-free, not assumed so."""
+    m1 = Model("plain")
+    a = m1.continuous("a", shape=(2,), lb=-3, ub=3)
+    m1.minimize((a[0] - 1.0) ** 2 + (a[1] + 2.0) ** 2)
+
+    m2 = Model("offset")
+    b = m2.continuous("b", shape=(2,), lb=-3, ub=3)
+    m2.minimize(sum((b[i] - c) ** 2 for i, c in enumerate((1.0, -2.0))) + 12.0)
+
+    ev1 = NLPEvaluator(m1, gauss_newton=True)
+    ev2 = NLPEvaluator(m2, gauss_newton=True)
+    assert ev1.is_gauss_newton and ev2.is_gauss_newton
+    pt = np.array([0.3, -0.7])
+    lam = np.zeros(0)
+    np.testing.assert_allclose(
+        ev1.evaluate_lagrangian_hessian(pt, 1.0, lam),
+        ev2.evaluate_lagrangian_hessian(pt, 1.0, lam),
+        rtol=0,
+        atol=1e-12,
+    )
+    # ...and the objective still differs by exactly the dropped constant.
+    assert ev2.evaluate_objective(pt) - ev1.evaluate_objective(pt) == pytest.approx(12.0)
+
+
+def test_bare_constant_objective_declines():
+    """``[]`` is falsy, so a constant objective uses the exact Hessian (which is 0)."""
+    m = Model("c")
+    m.continuous("x", lb=-1, ub=1)
+    m.minimize(Constant(4.0))
+    assert extract_residuals(Constant(4.0)) == []
+    assert NLPEvaluator(m, gauss_newton=True).is_gauss_newton is False
+
+
+def test_declining_gauss_newton_warns_not_whispers(caplog):
+    """An explicitly-set option that does nothing must be audible."""
+    m = Model("nl")
+    x = m.continuous("x", shape=(2,), lb=-2, ub=2)
+    m.minimize(dm.exp(x[0]) + x[1] ** 2)
+    with caplog.at_level(logging.WARNING, logger="discopt.nlp"):
+        assert NLPEvaluator(m, gauss_newton=True).is_gauss_newton is False
+    assert any(
+        r.levelno >= logging.WARNING and "gauss_newton" in r.message for r in caplog.records
+    ), f"expected a WARNING, got {[(r.levelname, r.message) for r in caplog.records]}"
 
 
 # ─────────────────────────────────────────────────────────────
