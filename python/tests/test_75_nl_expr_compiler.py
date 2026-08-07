@@ -31,7 +31,12 @@ import numpy as np
 import pytest
 from discopt import Model
 from discopt._jax.dag_compiler import compile_expression
-from discopt._nl_expr_compiler import UnsupportedForTape, compile_to_nl_expr, try_compile
+from discopt._nl_expr_compiler import (
+    UnsupportedForTape,
+    compile_to_nl_array,
+    compile_to_nl_expr,
+    try_compile,
+)
 from discopt.modeling.core import Constant, FunctionCall, IndexExpression
 
 pytest.importorskip("pounce")
@@ -671,38 +676,90 @@ def test_static_index_resolves_the_c_order_slot():
     assert checked == 7, f"only {checked} slot resolutions executed"
 
 
-# Every form that does NOT name one scalar slot. Each must refuse, which degrades
-# to the JAX evaluator — i.e. to the previous behaviour. Constructed directly
-# where `Expression.__getitem__`'s own guard would reject the form first.
-NON_STATIC_INDEX = {
+# Index forms that name MANY slots rather than one. `_static_scalar_slot` declines
+# every one of them — it is a fast path, not a gate — and the general array
+# lowering then resolves them with numpy's own basic-indexing rules, which are the
+# rules `jnp` applies to the same index on the JAX path.
+ARRAY_INDEX = {
     "slice": lambda v, w: v[1:],
     "partial_2d": lambda v, w: IndexExpression(w, 0),
     "slice_2d": lambda v, w: IndexExpression(w, (slice(None), 1)),
     "non_variable_base": lambda v, w: (v + v)[0],
-    "boolean": lambda v, w: v[True],
+    "ellipsis": lambda v, w: IndexExpression(v, Ellipsis),
+    "strided": lambda v, w: IndexExpression(v, slice(None, None, 2)),
+    "negative_slice": lambda v, w: IndexExpression(v, slice(-3, -1)),
+    # numpy and jnp agree that a bare `True` inserts an axis rather than
+    # selecting element 1 — which is exactly why `_static_scalar_slot` refuses
+    # to read it as an integer index.
+    "boolean": lambda v, w: IndexExpression(v, True),
+}
+
+# Forms that must STILL refuse. Each would have to be *resolved*, and resolving it
+# would either disagree with `jnp` or has no meaning at all.
+REFUSED_INDEX = {
     "out_of_range": lambda v, w: IndexExpression(v, 9),
     "negative_out_of_range": lambda v, w: IndexExpression(v, -9),
-    "ellipsis": lambda v, w: IndexExpression(v, Ellipsis),
     "float_index": lambda v, w: IndexExpression(v, 1.0),
     "too_many_indices": lambda v, w: IndexExpression(v, (0, 0)),
 }
 
 
+def _index_model():
+    m = Model()
+    v = m.continuous("v", shape=(4,), lb=0.3, ub=2.0)
+    w = m.continuous("w", shape=(2, 3), lb=0.3, ub=2.0)
+    return m, v, w
+
+
 @pytest.mark.unit
-@pytest.mark.parametrize("name", sorted(NON_STATIC_INDEX))
-def test_non_scalar_index_forms_are_still_refused(name):
+@pytest.mark.parametrize("name", sorted(ARRAY_INDEX))
+def test_array_index_forms_lower_and_match_jax(name):
+    """The array lowering resolves these, and resolves them to the SAME slots as JAX.
+
+    Asserting only that they lower would pass on a lowering that picked the wrong
+    elements, so this reads the resolved slots straight off the gradients: for a
+    pure index expression each row of the Jacobian is a unit vector, and comparing
+    it against the JAX arm's Jacobian pins both the slot set and its order.
+    """
+    jnp = pytest.importorskip("jax.numpy")
+    import jax
+    from discopt._jax.dag_compiler import compile_expression
+
+    m, v, w = _index_model()
+    expr = ARRAY_INDEX[name](v, w)
+
+    tape = compile_to_nl_array(expr, m)
+    jfn = compile_expression(expr, m)
+    n = sum(var.size for var in m._variables)
+    x = np.linspace(0.4, 1.9, n)
+
+    jax_value = np.asarray(jfn(jnp.asarray(x))).reshape(-1)
+    tape_value = np.array([e.eval(list(x)) for e in tape.reshape(-1)])
+    assert tape_value.shape == jax_value.shape, (
+        f"{name}: tape produced {tape_value.shape} rows, JAX produced {jax_value.shape}"
+    )
+    np.testing.assert_allclose(tape_value, jax_value, rtol=0, atol=0)
+
+    jax_jac = np.asarray(jax.jacobian(lambda z: jnp.reshape(jfn(z), (-1,)))(jnp.asarray(x)))
+    tape_jac = np.array([np.asarray(e.gradient(list(x)), dtype=float) for e in tape.reshape(-1)])
+    np.testing.assert_array_equal(
+        tape_jac, jax_jac, err_msg=f"{name}: tape indexed different slots than JAX"
+    )
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("name", sorted(REFUSED_INDEX))
+def test_unresolvable_index_forms_are_still_refused(name):
     """Refusing is the sound direction: the caller degrades to JAX unchanged.
 
     `out_of_range` is here on purpose rather than as an error: numpy raises where
     `jnp` silently CLAMPS, so resolving it would let the tape disagree with the
     path it replaces. Refusing hands the case back to JAX with its own semantics.
     """
-    m = Model()
-    v = m.continuous("v", shape=(4,), lb=0.3, ub=2.0)
-    w = m.continuous("w", shape=(2, 3), lb=0.3, ub=2.0)
-    expr = NON_STATIC_INDEX[name](v, w)
-    with pytest.raises(UnsupportedForTape, match="static scalar slot"):
-        compile_to_nl_expr(expr, m)
+    m, v, w = _index_model()
+    expr = REFUSED_INDEX[name](v, w)
+    with pytest.raises(UnsupportedForTape, match="not statically resolvable"):
+        compile_to_nl_array(expr, m)
 
 
 @pytest.mark.unit
@@ -724,16 +781,23 @@ def test_shaped_variable_model_builds_a_tape_evaluator():
 
 
 @pytest.mark.unit
-def test_vectorized_collocation_bodies_still_refuse():
-    """Guard the retraction: this change does NOT take DAE collocation off JAX.
+def test_vectorized_collocation_bodies_now_lower_to_rows():
+    """The retraction this file used to guard, retracted (CLAUDE.md §11).
 
-    `dae/collocation.py` emits ONE vector-valued constraint per state, built as a
-    `MatMulExpression` against the collocation matrix with slice indexing — not
-    scalar `x[i, k]`. An earlier reading of this gap claimed the opposite. If a
-    future array lowering makes these representable, this test should be updated
-    deliberately, not silently.
+    An earlier revision asserted the opposite — that `dae/collocation.py`'s
+    vector-valued bodies must refuse — and said in as many words that a future
+    array lowering should update it *deliberately*. This is that update.
+
+    Each collocation block is ONE `Constraint` and MANY rows: a
+    `MatMulExpression` against the collocation matrix with slice indexing. What
+    is asserted here is the property the row count alone would not catch — that
+    the tape's rows are the JAX arm's rows, in the same order, so the two
+    backends' duals and feasibility reports refer to the same constraints.
     """
     pytest.importorskip("discopt.dae")
+    jnp = pytest.importorskip("jax.numpy")
+
+    from discopt._jax.dag_compiler import compile_expression
     from discopt.dae import ContinuousSet, DAEBuilder
 
     m = Model("second_order_decay")
@@ -743,11 +807,19 @@ def test_vectorized_collocation_bodies_still_refuse():
     dae.discretize()
 
     assert m._constraints, "collocation emitted no Constraint objects to check"
-    refused = 0
+    n = sum(v.size for v in m._variables)
+    x = np.linspace(0.2, 1.4, n)
+
+    rows_checked = 0
     for con in m._constraints:
-        with pytest.raises(UnsupportedForTape):
-            compile_to_nl_expr(con.body, m)
-        refused += 1
-    assert refused == len(m._constraints) and refused >= 2, (
-        f"only {refused} collocation bodies checked"
-    )
+        tape_rows = compile_to_nl_array(con.body, m).reshape(-1)
+        jax_rows = np.asarray(jnp.reshape(compile_expression(con.body, m)(jnp.asarray(x)), (-1,)))
+        assert tape_rows.size == jax_rows.size, (
+            f"tape produced {tape_rows.size} rows for a body JAX flattens to {jax_rows.size}"
+        )
+        np.testing.assert_allclose(
+            [e.eval(list(x)) for e in tape_rows], jax_rows, rtol=1e-13, atol=1e-13
+        )
+        rows_checked += tape_rows.size
+
+    assert rows_checked >= 12, f"only {rows_checked} collocation rows compared"

@@ -20,15 +20,18 @@ evaluator over 66 in-repo corpus instances at 5 points each:
 
 against Step 2.2's bars of 1e-10 on grad/J and 1e-8 on the Hessian.
 
-One thing this refuses rather than approximates, because the alternative is a
-silently wrong derivative:
+**Array-valued constraint bodies** — one ``Constraint`` and many rows, which is
+what ``DAEBuilder`` collocation emits per block — are lowered, not refused:
+:func:`~discopt._nl_expr_compiler.compile_to_nl_array` returns one tape node per
+element and ``_build`` fans them into rows in ``reshape(-1)`` (C) order, the same
+order the JAX evaluator concatenates. ``constraint_row_map`` is therefore *not*
+the identity, and callers must consume it rather than assume one row per
+constraint (#908).
 
-* **Array-valued constraint bodies.** A tape node is a scalar. ``DAEBuilder``
-  collocation emits one array-valued body per block, which has no scalar
-  lowering.
-
-Callers use :func:`try_build`, which returns ``None`` for it, so the JAX path
-stays intact underneath.
+What remains unrepresentable — an opaque ``dm.custom`` body, a matrix norm, an
+operator with no tape opcode — still raises ``UnsupportedForTape``. Callers use
+:func:`try_build`, which returns ``None`` for those, so the JAX path stays intact
+underneath.
 
 **Gauss-Newton** (``H_obj ~ 2 JᵀJ``) *is* supported, and used to be a second
 refusal here. pounce has no "residual" concept, but it has a sparse *constraint*
@@ -50,7 +53,11 @@ from typing import TYPE_CHECKING, Any, Optional
 
 import numpy as np
 
-from discopt._nl_expr_compiler import UnsupportedForTape, compile_to_nl_expr
+from discopt._nl_expr_compiler import (
+    UnsupportedForTape,
+    compile_to_nl_array,
+    compile_to_nl_expr,
+)
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from discopt.modeling.core import Constraint, Model
@@ -265,14 +272,20 @@ class TapeNLPEvaluator:
         if self._negate:
             obj = -obj
 
-        cons = [compile_to_nl_expr(c.body, model) for c in self._source_constraints]
-
-        # Every body that lowered is scalar by construction: the compiler refuses
-        # array variables and every array reduction. So each source constraint is
-        # exactly one row, and the row map is the identity -- unlike the JAX path,
-        # which must call `jax.eval_shape` because an array body is one Constraint
-        # and many rows.
-        self._constraint_flat_sizes = np.ones(len(cons), dtype=np.intp)
+        # A body may be ARRAY-valued -- `x <= 1` on a 3-vector is ONE Constraint
+        # and THREE rows -- so fan each one out. `reshape(-1)` is C order, which is
+        # exactly what the JAX evaluator concatenates
+        # (`jnp.reshape(fn(x, params), (-1,))`), so row k here is row k there and
+        # the two backends' duals, row maps and feasibility reports line up. An
+        # earlier revision could assert one row per constraint because the
+        # compiler refused every array form; it no longer does.
+        cons: list[Any] = []
+        sizes: list[int] = []
+        for c in self._source_constraints:
+            rows = compile_to_nl_array(c.body, model).reshape(-1)
+            sizes.append(int(rows.size))
+            cons.extend(rows.tolist())
+        self._constraint_flat_sizes = np.asarray(sizes, dtype=np.intp)
         self._n_constraints = len(cons)
 
         lb, ub = self.variable_bounds
@@ -416,7 +429,20 @@ class TapeNLPEvaluator:
         return np.concatenate(lbs), np.concatenate(ubs)
 
     def constraint_row_map(self) -> list[tuple[int, int, "Constraint"]]:
-        return [(i, i + 1, c) for i, c in enumerate(self._source_constraints)]
+        """``(start, stop, constraint)`` per source constraint; see the JAX arm's
+        docstring for why callers must consume this rather than re-derive it.
+
+        Built from the same ``_source_constraints`` / ``_constraint_flat_sizes``
+        the tape row list is built from, so the two cannot drift. NOT the identity
+        map: an array-valued body is one ``Constraint`` and many rows.
+        """
+        out: list[tuple[int, int, Constraint]] = []
+        start = 0
+        for con, size in zip(self._source_constraints, self._constraint_flat_sizes):
+            stop = start + int(size)
+            out.append((start, stop, con))
+            start = stop
+        return out
 
     def jacobian_structure(self) -> tuple[np.ndarray, np.ndarray]:
         self._ensure_fresh()
