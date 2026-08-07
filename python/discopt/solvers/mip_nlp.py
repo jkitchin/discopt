@@ -286,6 +286,13 @@ def _try_direct_lp(
             time_limit,
             prefer_pounce=nlp_solver == "pounce",
         )
+    if isinstance(result, solver_module._DeferredUnbounded):
+        # An UNBOUNDED the #850 guard would rather see confirmed by an engine that
+        # honors the declared box. On this path the caller pinned the backend, so
+        # there is no other engine to defer to — take the verdict rather than drop
+        # it (#937). ``_solve_lp`` resolves its own deferrals, so only the forced
+        # ``backend="pounce"`` branch can reach here.
+        result = result.result
     if result is None:
         return None, _direct_attempt(
             problem_class=problem_class,

@@ -14919,10 +14919,50 @@ def _solve_lp(
     engines = [_solve_lp_simplex, _solve_lp_pounce]
     if prefer_pounce:
         engines.reverse()
+    deferred: _DeferredUnbounded | None = None
     for engine in engines:
         result = engine(model, t_start, time_limit)
+        if isinstance(result, _DeferredUnbounded):
+            # An UNBOUNDED the #850 guard declined to certify because this engine
+            # relaxed a declared bound in [1e15, 1e20) to its own infinity. Keep
+            # looking for an engine that honors the declared box, but hold on to
+            # the verdict (see below).
+            deferred = deferred or result
+            continue
         if result is not None:
             return result
+
+    if deferred is not None:
+        # No engine produced a certificate against the declared box, so the
+        # deferral has nowhere left to defer to.
+        #
+        # The held verdict is NOT promoted to the answer (#937). A bound in
+        # [1e15, 1e20) is finite as posed, so the honest reading of the deferral is
+        # "an engine that could not see this bound called the problem unbounded" —
+        # on `min -x` over the default box the truth is `optimal` at the corner
+        # (the certificate #850 decided is sound), and returning `unbounded` there
+        # would be a FALSE certificate on a bounded problem. CLAUDE.md §1 admits no
+        # trade of a possibly-false certificate for a better-looking status, so the
+        # status stays `error` — not a certificate, an honest "no engine could
+        # decide this".
+        #
+        # What #937 legitimately asks for is that the failure stop being
+        # *undiagnosable*, and that is fixed here: the warning names the engine,
+        # the exact cause, and the remedy, instead of a bare `error` that says
+        # nothing. (In practice the deferral is now almost always resolved by the
+        # simplex, which certifies this band since the audit fix.)
+        msg = (
+            f"{deferred.engine} reported UNBOUNDED, but it relaxed a declared finite "
+            f"bound in [1e15, 1e20) to its own infinity, so that verdict may describe "
+            f"a larger box than the one declared; no engine honoring the declared box "
+            f"could certify the LP. Reporting 'error' rather than an unverified "
+            f"'unbounded' — over a finite box the true answer may well be 'optimal' at "
+            f"the corner. Tighten the bounds below 1e15 to get a decisive certificate."
+        )
+        import warnings
+
+        logger.warning(msg)
+        warnings.warn(msg, RuntimeWarning, stacklevel=2)
 
     # Single robust engine (issue #364): no JAX LP-IPM fallback. Both the simplex
     # and POUNCE (if installed) returned None — a binding that is unavailable or a
@@ -14939,11 +14979,36 @@ def _solve_lp(
     )
 
 
+class _DeferredUnbounded:
+    """An ``UNBOUNDED`` verdict the #850 guard declined to certify *for now*.
+
+    The guard fires when the reporting engine relaxed a declared finite bound in
+    ``[1e15, 1e20)`` to its own infinity, so the verdict may describe a larger box
+    than the one declared.
+
+    Carrying the verdict (rather than the bare ``None`` the guard used to return)
+    exists for **diagnosis, not certification**. It lets ``_solve_lp`` tell
+    "an engine declined to certify, and here is exactly why" apart from "an engine
+    failed", so the no-certificate outcome is reported with an actionable message
+    instead of an undiagnosable ``error`` (#937). The verdict itself is never
+    promoted to the answer: over a finite ``[1e15, 1e20)`` box an ``unbounded``
+    claim can be false — ``min -x`` on the default box is ``optimal`` at the corner
+    — and CLAUDE.md §1 forbids trading a possibly-false certificate for a
+    better-looking status.
+    """
+
+    __slots__ = ("result", "engine")
+
+    def __init__(self, result: SolveResult, engine: str) -> None:
+        self.result = result
+        self.engine = engine
+
+
 def _solve_lp_simplex(
     model: Model,
     t_start: float,
     time_limit: float | None = None,
-) -> SolveResult | None:
+) -> "SolveResult | _DeferredUnbounded | None":
     """Solve an LP using the pure-Rust warm-started simplex. Returns None when
     the simplex binding is unavailable or fails, so the caller can fall back to
     another engine."""
@@ -14952,6 +15017,9 @@ def _solve_lp_simplex(
 
     if not SIMPLEX_AVAILABLE:
         return None
+    # relaxes_huge_bounds stays False: the simplex's infinity threshold is 1e20,
+    # so it honors a declared bound in [1e15, 1e20) as finite and its UNBOUNDED is
+    # a statement about the box as declared.
     return _solve_lp_matrix(model, t_start, time_limit, _simplex_solve_lp, "simplex")
 
 
@@ -14959,7 +15027,7 @@ def _solve_lp_pounce(
     model: Model,
     t_start: float,
     time_limit: float | None = None,
-) -> SolveResult | None:
+) -> "SolveResult | _DeferredUnbounded | None":
     """Solve an LP using POUNCE (pure-Rust IPM). Returns None when POUNCE is
     unavailable or fails, so the caller can fall back to another engine."""
     import functools
@@ -14972,7 +15040,11 @@ def _solve_lp_pounce(
     # Request an infeasibility certificate so an infeasible model-level LP
     # surfaces *why* via SolveResult.infeasibility_certificate (roadmap P0.2).
     solve_fn = functools.partial(_pounce_solve_lp, certificate=True)
-    return _solve_lp_matrix(model, t_start, time_limit, solve_fn, "POUNCE")
+    # The IPM is the one backend that relaxes a declared [1e15, 1e20) bound to its
+    # own infinity, so its UNBOUNDED is the verdict the #850 guard defers on.
+    return _solve_lp_matrix(
+        model, t_start, time_limit, solve_fn, "POUNCE", relaxes_huge_bounds=True
+    )
 
 
 def _solve_lp_gurobi(
@@ -14995,9 +15067,14 @@ def _solve_lp_gurobi(
         solve_fn,
         "Gurobi",
         strict=True,
+        # Gurobi's infinity is 1e30, so it honors a declared [1e15, 1e20) bound as
+        # finite — the #850 deferral never applies and no _DeferredUnbounded can
+        # come back here.
+        relaxes_huge_bounds=False,
     )
     if result is None:  # pragma: no cover - strict mode raises before this
         raise RuntimeError("Gurobi LP solve failed without returning a result.")
+    assert isinstance(result, SolveResult)
     return result
 
 
@@ -15008,11 +15085,22 @@ def _solve_lp_matrix(
     solve_lp_fn,
     engine: str,
     strict: bool = False,
-) -> SolveResult | None:
+    relaxes_huge_bounds: bool = False,
+) -> "SolveResult | _DeferredUnbounded | None":
     """Solve a pure LP through a matrix-form ``solve_lp`` backend.
 
     ``solve_lp_fn`` must follow the shared LP contract (lp_simplex / lp_pounce):
     same signature, same ``LPResult`` with HiGHS-convention duals.
+
+    ``relaxes_huge_bounds`` declares that this backend does **not** honor a
+    declared finite bound in ``[1e15, 1e20)`` as finite — it relaxes it to its own
+    infinity — so an ``UNBOUNDED`` verdict from it on such a box may be an artifact
+    of the relaxation rather than a property of the problem as posed. Only the
+    interior-point engine does this (``lp_pounce._FINITE_BOUND_THRESHOLD = 1e15``);
+    see the ``SolveStatus.UNBOUNDED`` branch below. Leave it ``False`` for a
+    backend that honors the declared box (the exact simplex, whose infinity
+    threshold is ``1e20``; Gurobi, whose infinity is ``1e30``) — discarding *its*
+    verdict would throw away a certificate about the box actually declared.
     """
     from discopt._jax.problem_classifier import extract_lp_data
     from discopt.modeling.core import ObjectiveSense
@@ -15111,12 +15199,27 @@ def _solve_lp_matrix(
         # 1e20, honors such a bound as finite and returns OPTIMAL at the corner —
         # the sound certificate (e.g. the default continuous box ±9.999e19, which
         # is deliberately just below 1e20). When any declared bound was relaxed
-        # this way, decline to certify UNBOUNDED and fall through (return None) so
-        # the caller tries the exact simplex, yielding a certificate consistent
-        # with the declared box across every backend. A genuinely unbounded
-        # direction survives: the simplex sees any true ±inf (|b| ≥ 1e20) bound
-        # and reports UNBOUNDED itself.
-        if _declared_box_relaxed_to_ipm_inf(bounds):
+        # this way, decline to certify UNBOUNDED and defer so the caller prefers
+        # the exact simplex, yielding a certificate consistent with the declared
+        # box across every backend. A genuinely unbounded direction survives: the
+        # simplex sees any true ±inf (|b| ≥ 1e20) bound and reports UNBOUNDED
+        # itself.
+        #
+        # Two things bound the deferral (#937):
+        #
+        #   * It applies only to a backend that actually relaxes the box
+        #     (``relaxes_huge_bounds``). Applied engine-agnostically it also
+        #     discarded the *simplex's own* UNBOUNDED — a verdict about the
+        #     declared box, reached with the box honored — whenever some unrelated
+        #     variable happened to carry a bound in the window.
+        #   * The verdict is DEFERRED, not destroyed. Returning a bare ``None``
+        #     made a correct UNBOUNDED indistinguishable from "this engine
+        #     failed", so when no other engine could certify either, ``_solve_lp``
+        #     reported an undiagnosed ``error`` — strictly the worst of the three
+        #     outcomes. ``_DeferredUnbounded`` lets the caller prefer a real
+        #     certificate when one exists and fall back on this verdict when none
+        #     does.
+        if relaxes_huge_bounds and _declared_box_relaxed_to_ipm_inf(bounds):
             logger.debug(
                 "%s reported UNBOUNDED but a declared finite bound (|b| in "
                 "[1e15, 1e20)) was relaxed to the IPM infinity; deferring to the "
@@ -15124,7 +15227,7 @@ def _solve_lp_matrix(
                 "(#850).",
                 engine,
             )
-            return None
+            return _DeferredUnbounded(SolveResult(status="unbounded", wall_time=wall_time), engine)
         return SolveResult(status="unbounded", wall_time=wall_time)
     if result.status == SolveStatus.TIME_LIMIT:
         return SolveResult(status="time_limit", wall_time=wall_time)

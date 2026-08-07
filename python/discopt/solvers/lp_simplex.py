@@ -46,6 +46,36 @@ except ImportError:
 _BOUND_SNAP_TOL = 1e-3
 
 
+# Keywords of the shared matrix-LP contract (:mod:`lp_pounce`, :mod:`gurobi`) that
+# this backend has no use for and legitimately ignores: an IPM warm-start point, an
+# engine-specific options dict, a Farkas-certificate request (the simplex always
+# reports its own status), a thread count (the solve is single-threaded). They are
+# accepted so a caller can hand the same kwargs to any backend through
+# :func:`discopt.solvers.lp_backend.get_lp_solver`.
+_IGNORED_LP_KWARGS = frozenset({"x0", "options", "certificate", "threads"})
+
+
+def _reject_unknown_kwargs(kwargs: dict[str, Any]) -> None:
+    """Raise on a keyword this backend neither honors nor knowingly ignores.
+
+    ``solve_lp`` takes ``**_kwargs`` only for cross-backend signature
+    compatibility, and a bare catch-all is a silent-wrong-answer seam: a caller
+    passing ``lb=``/``ub=`` arrays (the spelling several other discopt LP helpers
+    use) had them swallowed and got the *default* ``[0, 1e20]`` box back, with an
+    ``OPTIMAL`` status over a box it never asked for (issue #937, side finding).
+    ``Model.solve`` rejects unknown options loudly for exactly this reason; so does
+    this. The known-inert contract keywords in :data:`_IGNORED_LP_KWARGS` still
+    pass through silently.
+    """
+    unknown = sorted(set(kwargs) - _IGNORED_LP_KWARGS)
+    if unknown:
+        raise TypeError(
+            f"lp_simplex.solve_lp() got unexpected keyword argument(s): "
+            f"{', '.join(unknown)}. The variable box is set through `bounds=` "
+            f"(a list of (lo, hi) pairs), not `lb=`/`ub=`."
+        )
+
+
 def _dense_rows(A: Optional[Union[np.ndarray, sp.spmatrix]], n: int) -> np.ndarray:
     """Dense ``(m, n)`` view of a constraint block, or an empty ``(0, n)``."""
     if A is None:
@@ -107,7 +137,13 @@ def solve_lp(
     wrong bound). This lets a caller bound the rare cold-stall on a wide,
     ill-conditioned LP (the F3 multilinear vertex-hull LP: ``2^n`` λ columns)
     without waiting for the 100 000-pivot default.
+
+    The variable box comes **only** from ``bounds``. An unrecognized keyword
+    raises :class:`TypeError` rather than being swallowed by ``**_kwargs`` — see
+    :func:`_reject_unknown_kwargs`.
     """
+    _reject_unknown_kwargs(_kwargs)
+
     from discopt._rust import solve_lp_warm_csc_py
 
     c_arr = np.asarray(c, dtype=np.float64).ravel()

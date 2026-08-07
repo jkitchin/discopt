@@ -150,14 +150,81 @@ def _stub_exact(c, A_ub=None, b_ub=None, A_eq=None, b_eq=None, bounds=None, **kw
 def test_obs1_unbounded_with_relaxed_bound_degrades():
     """Obs 1: an engine that reports UNBOUNDED on the default continuous box (a
     bound it silently relaxed to ∞) must not be certified — ``_solve_lp_matrix``
-    returns None so the caller falls through to the exact simplex."""
+    declines so the caller falls through to the exact simplex.
+
+    The stub stands in for POUNCE, so it must declare POUNCE's defining property:
+    ``relaxes_huge_bounds=True``. That flag is what scopes the guard to engines
+    that actually relax the box (#937) — without it the guard also discarded the
+    *simplex's* UNBOUNDED, a verdict reached with the declared box honored.
+
+    The decline is signalled by ``_DeferredUnbounded`` rather than the bare
+    ``None`` it used to return. That is a strictly narrower channel, not a weaker
+    one: ``None`` was indistinguishable from "this engine failed", so a simplex
+    failure downgraded the whole solve to an undiagnosable ``error``. The #850
+    property — *do not certify this verdict, prefer an engine that honors the box*
+    — is unchanged, and is pinned end-to-end by
+    ``test_obs1_deferred_unbounded_is_never_promoted_to_the_answer`` below.
+    """
     m = dm.Model("u")
     x = m.continuous("x", lb=0)  # default ub = 9.999e19
     m.minimize(-x)
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        res = S._solve_lp_matrix(m, time.perf_counter(), None, _stub_unbounded, "STUB-IPM")
-    assert res is None
+        res = S._solve_lp_matrix(
+            m, time.perf_counter(), None, _stub_unbounded, "STUB-IPM", relaxes_huge_bounds=True
+        )
+    assert isinstance(res, S._DeferredUnbounded), (
+        f"a relaxed-box UNBOUNDED must be declined, not certified; got {res!r}"
+    )
+    assert res.result.status == "unbounded" and res.engine == "STUB-IPM"
+
+
+def test_obs1_verdict_from_a_box_honoring_engine_is_not_deferred():
+    """The mirror of Obs 1 (#937): the guard must only fire for an engine that
+    *relaxes* the box. The exact simplex reads a bound in ``[1e15, 1e20)`` as
+    finite, so its UNBOUNDED is a statement about the box as declared and must be
+    passed straight through — discarding it threw away a real certificate."""
+    m = dm.Model("u3")
+    x = m.continuous("x", lb=0)  # default ub = 9.999e19, inside the window
+    m.minimize(-x)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        res = S._solve_lp_matrix(
+            m, time.perf_counter(), None, _stub_unbounded, "STUB-SIMPLEX"
+        )  # relaxes_huge_bounds defaults to False
+    assert res is not None and not isinstance(res, S._DeferredUnbounded)
+    assert res.status == "unbounded"
+
+
+def test_obs1_deferred_unbounded_is_never_promoted_to_the_answer(monkeypatch):
+    """The #850 property at the ``_solve_lp`` level: when the deferral has nowhere
+    left to defer to, the declined verdict is still NOT the answer.
+
+    Over a finite ``[1e15, 1e20)`` box an ``unbounded`` claim can be false — on
+    ``min -x`` over the default box the truth is ``optimal`` at the corner, which
+    is exactly the certificate #850 decided is sound — so promoting the held
+    verdict would emit a false certificate on a bounded problem. The solve reports
+    ``error`` (not a certificate) plus a diagnostic naming the cause, which is what
+    #937 asks for: no longer *undiagnosable*, without inventing an answer.
+    """
+    m = dm.Model("u4")
+    x = m.continuous("x", lb=0)  # default ub = 9.999e19
+    m.minimize(-x)
+
+    def _deferring(model, t_start, time_limit=None):
+        return S._DeferredUnbounded(S.SolveResult(status="unbounded", wall_time=0.0), "STUB-IPM")
+
+    def _failing(model, t_start, time_limit=None):
+        return None
+
+    monkeypatch.setattr(S, "_solve_lp_pounce", _deferring)
+    monkeypatch.setattr(S, "_solve_lp_simplex", _failing)
+
+    with pytest.warns(RuntimeWarning, match=r"relaxed a declared finite bound"):
+        res = S._solve_lp(m, t_start=time.perf_counter())
+    assert res.status == "error", (
+        f"a declined UNBOUNDED must not become the certificate; got {res.status}"
+    )
 
 
 def test_obs1_genuine_unbounded_still_reported():
