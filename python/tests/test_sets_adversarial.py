@@ -27,6 +27,21 @@ class TestSumProdOverIndexedContainer:
         assert r.objective == pytest.approx(3.0, abs=1e-5)
 
     def test_sum_indexed_var_equals_sum_flat(self):
+        # Both formulations must reach the same optimum: three variables at
+        # lb=1, so the true value is exactly 3.0. Checked against that ground
+        # truth rather than only against each other — a cross-model comparison
+        # alone passes just as happily when BOTH are wrong in the same way.
+        #
+        # Tolerance is discopt's absolute constraint/objective tolerance (1e-6),
+        # not a tighter number: these are interior-point solves, so the last
+        # digits are convergence noise and the two models need not tread
+        # identical floating-point paths. The bug this class guards is summing
+        # the index KEYS (10+20+30 = 60) instead of the variables (3.0) — a
+        # factor of 20, which any tolerance here catches. The previous 1e-9
+        # cross-model bound was 1000x tighter than the solver's own contract and
+        # broke on #940, where POUNCE stopped relaxing bounds and the flat model
+        # became STRICTLY MORE accurate than before (-2.25e-8 super-optimal ->
+        # +7.5e-9 on the feasible side) while the indexed model was unchanged.
         m = dm.Model()
         s = m.set("S", [10, 20, 30])
         y = m.continuous("y", lb=1, ub=5, over=s)
@@ -36,7 +51,10 @@ class TestSumProdOverIndexedContainer:
         s2 = m2.set("S", [10, 20, 30])
         y2 = m2.continuous("y", lb=1, ub=5, over=s2)
         m2.minimize(dm.sum(y2.flat))
-        assert r0.objective == pytest.approx(m2.solve().objective, abs=1e-9)
+        r2 = m2.solve()
+        assert r0.objective == pytest.approx(3.0, abs=1e-6)
+        assert r2.objective == pytest.approx(3.0, abs=1e-6)
+        assert r0.objective == pytest.approx(r2.objective, abs=1e-6)
 
     def test_prod_indexed_var(self):
         m = dm.Model()

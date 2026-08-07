@@ -15525,14 +15525,26 @@ def _matrix_solution_feasible(x, A_ub, b_ub, A_eq, b_eq, bounds, tol=1e-6, rtol=
     row terms is forgiven; a gross mislabel (the ~7.5 HiGHS case) is still caught.
     A bound row ``lo <= x_i <= hi`` has term scale ``|x_i|`` (unit coefficient).
 
-    #940 correction: that ``1e-4`` was described here as POUNCE's *fixed* floor.
-    Measurement falsifies "fixed" — ``constr_viol_tol`` is settable and honored,
-    and the POUNCE LP/QP backends now request ``1e-9``
-    (:data:`discopt.solvers.lp_pounce._CONSTR_VIOL_TOL`) so their own convergence
-    criterion implies this test. Before that, the guard rejected 50% of POUNCE LP
-    solves — every correct one of them — because the two tolerances were three
-    orders apart. Nothing about THIS check changed: it is the arbiter, and a
-    point that fails it is still rejected however it was produced.
+    #940 correction: that ``1e-4`` was described here as POUNCE's *fixed*
+    ``constr_viol_tol`` floor. Measurement falsifies "fixed" — it is settable, and
+    on the published wheel it is honored, so the POUNCE backends request
+    ``1e-8`` (:data:`discopt.solvers.lp_pounce._CONSTR_VIOL_TOL`), two orders
+    under this test's ``1e-6``.
+
+    But that tolerance was never the whole story, and on current POUNCE it is not
+    even the operative half. The setting that actually put returned points on the
+    infeasible side of a row is Ipopt's ``bound_relax_factor`` (default 1e-8),
+    which relaxes bounds — including the slack bounds standing in for inequality
+    rows — by ``1e-8*(1 + |bound|)``. The engine then converges honestly, but to a
+    RELAXED box, so the violation grows with the data (~4.4e-6 at ``|b| ~ 440``,
+    ~4.4e-4 at ``|b| ~ 44000``) and no convergence tolerance can remove it.
+    :data:`discopt.solvers.lp_pounce._BOUND_RELAX_FACTOR` pins it to 0; that is the
+    line that makes this guard stop firing on correct solves. See
+    ``lp_pounce._CONSTR_VIOL_TOL`` for the per-build measurements — which of the
+    two mechanisms dominates depends on the POUNCE build, so both are set.
+
+    Nothing about THIS check changed: it is the arbiter, and a point that fails it
+    is still rejected however it was produced.
     """
     x = np.asarray(x, dtype=np.float64)
     if not np.all(np.isfinite(x)):

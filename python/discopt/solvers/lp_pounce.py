@@ -149,9 +149,9 @@ def _certify_unbounded_ray(
 
     Rather than drop the verdict (which would cost the Benders dual seam its
     feasibility-cut signal, where an unbounded dual is the normal case), settle it
-    exactly. ``solve_lp``'s elastic Phase-1 has already established feasibility on
-    this path, and a feasible LP is unbounded **iff** its recession cone contains
-    a direction of strictly negative cost. That cone is described by the same data:
+    with the recession cone: a **feasible** LP is unbounded **iff** its recession
+    cone contains a direction of strictly negative cost. That cone is described by
+    the same data:
 
         min  c'd   s.t.   (A d)_i <= 0 where cu_i is finite,
                           (A d)_i >= 0 where cl_i is finite,
@@ -164,6 +164,16 @@ def _certify_unbounded_ray(
     ray and ``x + t·d`` stays feasible for every ``t >= 0``, certifying
     unboundedness; anything else means the exit was numerical and the caller
     should degrade to the exact simplex.
+
+    On the feasibility hypothesis of that "iff": ``solve_lp``'s elastic Phase-1
+    establishes it on the paths where Phase-1 actually runs — ``m > 0`` and the
+    Phase-1 solve itself returning slacks. It is *not* established when there are
+    no constraint rows at all, or when that solve fails and returns ``None``
+    (``qp_pounce.solve_qp`` has the identical structure). That gap costs nothing,
+    because this test is one-directional: it can only ever WITHDRAW an ``UNBOUNDED``
+    verdict, never add one. An infeasible LP that happens to own a recession ray
+    keeps whatever verdict it already had, so an unestablished premise costs a
+    certificate, never soundness.
 
     ``Q`` extends this to a convex QP: along ``d`` the objective is
     ``½t²·d'Qd + t·(c'd + x'Qd)``, so it can only fall without bound when
